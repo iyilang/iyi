@@ -88,7 +88,7 @@ shape.
 > is a library and the rules are the language, so a program can keep one and
 > change the other: `--crystal` builds against Crystal's standard library, and
 > there `require` reaches the ecosystem while every rule stays where it was.
-> "No standard library worth the name" is still true of iyi's own 28,663 lines
+> "No standard library worth the name" is still true of iyi's own 28,716 lines
 > and no longer true of what a program can have. Part V item 12a is the
 > measurement, nine shards wide.
 
@@ -270,8 +270,8 @@ of binary. It is not made the default on that trade, and the middle needs the
 initialisers to run *later* rather than not at all, which is the `dlsym` table
 above, and a larger piece of work than the number it wins.
 
-**3. A deliberately tiny prelude, written in iyi. Done: 28,663 lines,
-primitives included, of which the library is 4,650.** Not a standard library:
+**3. A deliberately tiny prelude, written in iyi. Done: 28,716 lines,
+primitives included, of which the library is 4,683.** Not a standard library:
 integers, booleans, a string, one sequence, one dictionary, one range, `puts`,
 and an `enum`'s surface — the member's name, an order, the members, and the
 bits of a `@[Flags]` one. **Its scope is set by what the
@@ -301,11 +301,11 @@ the scheduler and the kernel thread (III.4, `concurrency.iyi` and
 seed under `-Diyi_chaos`, `chaos.iyi` and `chaos_points.iyi`, III.4.17),
 the shortest-round-trip float text (`float.iyi`) - and they
 are most of its lines. So the figure held to the ceiling is the library:
-**4,650 lines** of the 21,556, measured by `bench/doc_numbers.py` as
+**4,683 lines** of the 21,556, measured by `bench/doc_numbers.py` as
 everything under `src/iyi/` except those three and except every platform's
-floor of 2,255 lines — the arms behind `flag?(:win32)`, `flag?(:linux)`,
+floor of 2,271 lines — the arms behind `flag?(:win32)`, `flag?(:linux)`,
 `flag?(:darwin)` and `flag?(:wasm32)`, which the paragraph on the breach
-below settles and explains. Opening `src/iyi/` counts 6,905 with the floor
+below settles and explains. Opening `src/iyi/` counts 6,954 with the floor
 still in it, and the whole-prelude figure is stated beside both because a
 reader sees the whole file, and a "tiny prelude" claim that hid 9,000 lines
 of runtime would be a claim about the wrong number.
@@ -426,7 +426,7 @@ where most of the 1,040 lines are.
 by hand.** Counting the lines inside a macro conditional whose condition
 names an OS, architecture or ABI flag — every arm of it, `else` included,
 since an `else` under `flag?(:linux)` is what the other platforms take and
-exists for the same reason — the platform floor measures **2,255 lines**
+exists for the same reason — the platform floor measures **2,271 lines**
 today (1,871 of the 4,803 that day), and Windows is the largest arm of it
 by a wide margin, which is what a platform whose every path, console byte
 and integer division needs its own answer costs.
@@ -472,8 +472,20 @@ on the two collections every program has, and an import in front of
 `Array#[](range)` is a tax on every program for a ceiling's sake. The rule
 itself is unchanged and is checked as it was: the next method that enters
 the library moves something out first, `bench/doc_numbers.py` fails past
-4,650, and the ceiling no longer claims to be 0.1.0's core, only to be the
+the ceiling, and the ceiling no longer claims to be 0.1.0's core, only to be the
 number that stops the prelude from drifting.
+
+**And again, by the owner's decision, to 4,683.** Unsafe code (III.13)
+put 33 lines into the library: the mark above nine of its files, the
+promises two of its defs carry (`Array.unsafe_build`,
+`Array#unsafe_set_size`), and the two calls that read and build bytes
+without raw memory, `String#byte_at` and `String.new(Array(UInt8), start,
+count)`, through which sixteen std modules, ten bench exercises and the
+gates' programs need no mark. Moving the calls behind an import would tax
+the safe way to read a byte and leave `to_unsafe` the one that needs
+none, the reverse of what III.13 asks, and a mark is a file saying what it
+is rather than a method a program calls. The owner chose the number, as
+measured with III.13 in: 4,683.
 
 What the rule does *not* forgive: a `pub def` a program calls is API and
 counts wherever it is written, macro arm or not — the exclusion is for the
@@ -2999,13 +3011,14 @@ parallel task runs, and a def the proof cannot place runs anywhere.
 
 **The escape hatch.** A case genuinely beyond the proof says
 `@[UnsafeReach("why")]`, taken on trust as the mark used to be. It is
-allowed in the prelude and runtime (`src/iyi`, the directory that holds
-`prelude.iyi`, and not std beneath it) **or** in a file that already uses
-`Pointer` - names it, or takes an address with `pointerof` - either one
-being enough: a file that already handles raw memory is already outside
-what the compiler proves, and says so. Anywhere else it is refused,
-pointing at `@[SafeReach]` and at the `Share` types; one state may not
-carry both marks.
+allowed in a module marked `@[Unsafe("why")]` (III.13) - the prelude's
+own files included, which carry the mark like every other module - and
+nowhere else: a module that already handles raw memory is already
+outside what the compiler proves, and says so above its header. The
+typed check of III.13 refuses it anywhere else, pointing at
+`@[SafeReach]` and at the `Share` types; one state may not carry both
+marks. A type's `@[Share]` and `@[Share(owns: true)]`, the same kind of
+claim, are kept for such a module too.
 
 **Where the repository stands.** No `SafeReach` is in `src/iyi` or
 `src/std`, so no `UnsafeReach` is either. `samples/iyi/cores.iyi`'s
@@ -3015,22 +3028,23 @@ is `bench/parallel_exercise.sh`'s `Database`, which now builds its rows in
 pairs in `KEPT = Mutex.new { [] of Pair }`, `Share` by (a).
 `bench/arena_exercise.iyi`'s `Thinned.@@kept` and
 `bench/thread_exercise.iyi`'s `Ledgers.@@all`, whose threads write
-reserved slots one at a time, are `@[UnsafeReach]` in files that use
-`Pointer`. Held by `spec/compiler/semantic/iyi_spec.cr` (eighteen shapes
+reserved slots one at a time, are `@[UnsafeReach]` in modules marked
+`@[Unsafe]`. Held by `spec/compiler/semantic/iyi_spec.cr` (eighteen shapes
 under "a SafeReach claim": a write through a call, the field and block it
 names, a class variable through its getter, a local alias; (a) accepted;
 (b) accepted, and refused for a second lock, an unlocked read and a lock
 whose receiver is not a constant or class variable; (c) accepted, and
 refused for a write after the start, with a def that starts a task as the
 start, for a write in a proc kept to run later, and for a proc answering
-the state; `UnsafeReach` refused without `Pointer` and trusted with it;
+the state; `UnsafeReach` refused in a module not marked `@[Unsafe]` and
+trusted in one;
 both marks refused; the prelude bracket taken in the prelude alone) and by
 `bench/safe_reach.sh`, in CI's Linux job: the issue's unguarded write
 refused, which the compiler before this checked clean; (a), (b) and (c)
 each accepted beside broken copies refused - a counter class for (a), a
 write and a read outside the lock for (b), a write after the start and a
-copy kept at module init for (c); `UnsafeReach` accepted beside `Pointer`
-and refused without it.
+copy kept at module init for (c); `UnsafeReach` accepted in a module
+marked `@[Unsafe]` and refused without the mark.
 
 **What it costs.** The proof runs only when a program has a `SafeReach`
 on state whose type is not `Share` by what it declares. It reads every
@@ -3645,8 +3659,8 @@ the door it has: the block `IyiThread.start` runs may capture only
 `Atomic(T)`, immutable values, state kept behind a `Mutex(T)`, a
 `Channel(T)` of `Share` values since III.4.13 made channels cross
 threads, and memory
-a program reaches through `Pointer` and keeps straight itself, `Pointer` being what the marker
-refuses by name. A thread is not offered as a spelling for
+a module marked `@[Unsafe]` reaches through `Pointer` and keeps straight
+itself (III.13), `Pointer` being what the marker refuses by name. A thread is not offered as a spelling for
 concurrency; `group` is. It is offered because the collector's parallel
 stages (GC_DESIGN.md 7 and 8) and a scheduler with M threads need one -
 III.4.13's pool is threads of exactly this kind -
@@ -8908,6 +8922,162 @@ capability system. When the wasm32 arm grows real IO it will grow it
 through WASI's preopens, and this section is where that negotiation gets
 designed before it gets built.
 
+### III.13 Unsafe code: **BUILT — a module that handles raw memory says so with `@[Unsafe("why")]` above its header, and the typed check refuses every unchecked operation anywhere else; held by `bench/unsafe.sh`**
+
+Before this, nothing decided who could use `Pointer`. A string's
+`to_unsafe`, `String.new(n) { |buffer| }`, `Array.unsafe_build`, a
+public `unsafe_fetch`, `Slice.new` over a pointer, `uninitialized`, a
+cast through `pointerof`, a `lib` or a top-level `fun`, `asm`,
+`@[Primitive]` and a type's `@[Share]` were all accepted in any `.iyi`
+file, and none of them had to spell `Pointer`: four tasks wrote one
+`Share` string through `name.to_unsafe[i] = ...` and the program printed
+`AAAA…`, `AAAA…` and `DDDD…` on three runs, `Slice.new("hello".to_unsafe,
+1_000_000)[999_999]` died of a memory fault behind a bounds-checked `[]`,
+and the fault message said that outside `Pointer` an iyi program cannot
+reach memory it does not own. That sentence was false.
+
+**The rule.** An operation the compiler does not check is *unsafe*:
+
+- a value whose type is or holds a `Pointer` - a variable, a parameter, a
+  block parameter, a call's answer, a cast, `pointerof`, a field - however
+  the type was reached: an alias, a generic argument, a tuple, a union, a
+  proc's parameters;
+- `uninitialized`;
+- a `lib` (its `fun`s, structs and unions), a top-level `fun`, an
+  `@[Extern]` struct, and every call into C;
+- `asm` and `@[Primitive]`;
+- a call to a def whose caller keeps a promise, written
+  `@[Unsafe(call: "index is in 0...size")]` on the def, or on the
+  abstract def it implements (`Indexable#unsafe_fetch` and
+  `IndexableMutable#unsafe_put` carry one, so `Slice`'s, `Deque`'s and
+  `StaticArray`'s inherit it; so do `Array.unsafe_build`,
+  `Array#unsafe_set_size` and `ReferenceStorage.unsafe_construct`);
+- the trust marks: `@[UnsafeReach]` (III.4.4) and a type's `@[Share]` or
+  `@[Share(owns: true)]`.
+
+Each is allowed in a module whose first statement is
+`@[Unsafe("why")]` - above its `module` header, or first in a file
+without one - and refused in every other `.iyi` file, at its first such
+operation, with the count of the others and the mark as the edit:
+
+    `name.to_unsafe` answers `Pointer(UInt8)`, raw memory the compiler
+    does not check, and `h1b.iyi` is not marked unsafe. Read a byte with
+    `byte_at(i)`, see the bytes with `Bytes.of(text)`, or, if this module
+    handles raw memory, say why above its first statement:
+    `@[Unsafe("...")]` (SPEC.md III.13)
+
+The reason is required: a mark without one is refused. A positional
+reason always means the module and `call:` always means the def, so
+`@[Unsafe("why")]` anywhere but first in its file is refused, as is a
+`call:` on a type. Holding a value of a type that keeps a `Pointer` in a
+field (`Slice`, `Array`, `Deque`) is not unsafe; only the `Pointer`
+type itself is, and only its own module touches the field.
+
+**Checked on types, after typing.** The check walks every typed def the
+program reaches, once each, after the main pass and before the cleanup,
+so `iyi check`, `iyi build` and the language server meet the same
+answer. An operation is charged to the module whose source contains it:
+a generic body instantiated in an importer is still its own module's, so
+`Deque(Int32)#push` reaching `Deque`'s buffer needs `std/deque`'s mark,
+not the importer's. The one exception runs the other way: a def typed
+with a `Pointer` its caller chose - a generic instantiated with one, a
+parameter written without a type or as one of the def's free variables -
+is the caller's raw memory, and the caller's module is the one refused.
+A parameter whose written type is a `Pointer` however it is spelled,
+`UInt8*` or an alias of one, is its own module's. What the compiler
+writes for the person - an array literal's `unsafe_build`, a slice
+literal's `pointerof`, a definition-site probe's `uninitialized` - is
+followed for the defs it calls and refused nothing. The whole check is
+off under `--crystal` and in `.cr` files, whose language has no such
+rule.
+
+**One rule for every module.** The prelude's files carry the mark like
+any other: `src/iyi`'s 13 marked files, each with its reason, and
+7 that need none. `@[UnsafeReach]` is kept for a marked module
+(III.4.4), which replaces the syntactic `PointerFiles` rule - a file was
+allowed the mark if it spelled `Pointer` - with a typed one.
+
+**What a module reads bytes with when it does not handle raw memory.**
+`String#byte_at(i)`, checked, a negative index counting from the end;
+`Bytes.of(text)`, a read-only view of a string's bytes, no copy;
+`String.new(bytes)` from a `Bytes` or from an `Array(UInt8)` (with a
+checked start and count); `IyiIO#write(Bytes)` and `IyiSocket#read(Bytes)`
+/ `#write(Bytes)`. With these, 16 std modules whose raw memory was
+reading a string's bytes or building one from bytes (asn1, autocert,
+capsule, hpack, hpke, idna, ini, levenshtein, option_parser, p384, rsa,
+symbol, tuple, uuid, x509) or one C call (number's `copysign`, now a
+multiplication by zero) are safe instead of marked.
+
+**A mark nothing needs** is a warning, with the line's removal as its
+edit - `` `x` is marked @[Unsafe] and does nothing unsafe: remove the
+mark, so the compiler checks this module`` - raised only when the
+compile typed every def the module declares, since a def nothing typed
+may be the one that needs it. `--error-on-warnings` makes it fail.
+
+**Tools.** `iyi fix` takes the mark from the refusal: it inserts
+`@[Unsafe("...")]` above the header with a reason the compiler writes
+from what it saw (`reads a String's memory through `to_unsafe`, line 3`),
+one module per round; the reason is a starting point for a person to
+rewrite. The language server shows the refusal, offers the same edit as
+a quick fix, shows the reason on a hover over the mark and the promise
+on a hover over a call to a `call:` def. `iyi migrate` writes the mark
+into a migrated module whose Crystal source spells an unsafe operation
+(its rule 8), naming the first.
+
+**The artifact.** `.iyimod`'s header carries the reason (format 62),
+`mod dump` prints it as `unsafe`, and a consumer reads it: a generic
+body that travels is typed again in the consumer at the producer's
+locations, and what the producer's mark allowed there it allows there.
+
+**Unsafe code is taken at its word.** Placement (III.4.15) and SafeReach
+(III.4.4) trust what a marked module says: a marked module that writes a
+`Share` value in place, or carries a value that is not `Share` into
+another unit, breaks those proofs, and keeping them is the module's
+obligation. A plain spawn whose block reaches the program's own unsafe
+module still runs in parallel when it is otherwise proven, and
+`--explain-spawn` and the editor's hint say it reaches unsafe code.
+
+**The fault message is true.** A program that dies of a memory fault is
+told that outside a module marked `@[Unsafe]` an iyi program cannot
+reach memory it does not own, and which of its own modules - std's and
+the runtime's aside - are marked: the compiler writes the list into the
+binary (`Crystal::IYI_UNSAFE_MODULES`), and the Windows handler prints
+it in pieces, allocating nothing.
+
+**Where the repository stands.** `src/std` has 83 marked modules of
+121, every reason read and rewritten by hand from `iyi fix`'s starting
+point; four of them (box, deque, static_array, weak_ref) are marked by
+hand outright, since only a program that instantiates their generic
+bodies types them and `iyi fix src/std` cannot see them. bench has
+85 marked programs of 175, and none of `samples/iyi`'s 28 programs
+needs one. The specs' snippets whose stand-in for the prelude or std (a
+`@[Primitive]`, a `lib`, a `Pointer` field, a `@[Share]` type,
+`uninitialized` storage) sits in the compiled module are marked as the
+files they stand in for, and the programs the gates write either carry a
+mark saying what they do with raw memory or read their bytes with
+`byte_at` and `String.new(Array(UInt8))`.
+
+**What it costs.** The check is one walk of the typed defs after the main
+pass, timed by `IYI_PROF=1` as `main: unsafe check`, against the whole
+`iyi check` (median of five runs): `samples/iyi/hello.iyi` 14 ms of 285,
+`bench/std_fuzz_exercise.iyi` 239 ms of 2,238 and
+`bench/std_tls_exercise.iyi` 576 ms of 2,231 on Linux (12 vCPU, shared);
+17 of 342, 300 of 2,945 and 744 of 2,896 on Windows 11, 12 logical
+processors (the user's machine). That is 5% of a small program's check
+and 10 to 26% of a large one's, TLS the most. A build pays the same walk
+beside code generation, which it does not touch, and the binary carries
+only the list of the program's own marked modules the fault message
+prints.
+
+**Granularity, said plainly.** The unit is the file: one `to_unsafe`
+makes a whole module unchecked. The answers are the unneeded-mark
+warning, which keeps the set honest, and splitting raw code into a small
+module of its own, the way Rust crates isolate theirs. Counted at
+2f070a01e by reading the sources, blocks (`unsafe { }`) would have
+wrapped 2,338 runs of lines in src/std, 900 in src/iyi and 607 in bench,
+and a mark per declaration 1,535, 469 and 258 defs, against 83, 13 and
+85 module marks.
+
 ---
 
 ## Part IV: `.iyimod`, the module artifact
@@ -13085,7 +13255,7 @@ Named honestly, so nobody mistakes this draft for complete.
     shards exist and none of them is written to iyi's rules, so "run them
     directly" is not a compatibility problem, it is the four rules: `require`
     against R-1, inference against R-2, monkey patching against R-3, and
-    Crystal's 8,161-line standard library against iyi's own 28,663-line prelude.
+    Crystal's 8,161-line standard library against iyi's own 28,716-line prelude.
 
     What is measurable is narrower and better than that framing suggests, and
     it was measured on **Kemal 1.12.0**, which compiles under this compiler

@@ -104,6 +104,7 @@
 # (self-extracting) are read only if their offsets count from the start
 # of the file.
 
+@[Unsafe("headers are read through raw byte pointers into the archive's bytes")]
 module std/zip
 
 import std/compress::{Deflate, Deflater, Inflater, Envelope}

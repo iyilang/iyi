@@ -301,17 +301,25 @@ module Iyi
     # had their own copy - and past a byte order mark, which the lexer
     # skips and every copy read as part of the line: a file a Windows
     # editor saved with one ran as a script whose imports could not be
-    # found, and `iyi doc` said it declared no module.
+    # found, and `iyi doc` said it declared no module. A module's
+    # `@[Unsafe("why")]` stands above its header (SPEC.md III.13), so that
+    # line is read past as a comment is.
     def self.module_header_of(text : String) : String?
       text.lchop('\uFEFF').each_line do |line|
         line = line.strip
-        next if line.empty? || line.starts_with?('#')
+        next if line.empty? || line.starts_with?('#') || unsafe_mark_line?(line)
         return nil unless line.starts_with?("module ")
         module_path = line.lchop("module ").strip
         return nil if module_path.empty? || module_path.includes?(' ')
         return module_path
       end
       nil
+    end
+
+    # Whether *line*, stripped, is a module's `@[Unsafe("why")]` mark: one
+    # line, the spelling without the `call:` a def's contract takes.
+    def self.unsafe_mark_line?(line : String) : Bool
+      (line == "@[Unsafe]" || line.starts_with?("@[Unsafe(")) && !line.includes?("call:")
     end
 
     # The root the entry's header names, or nil: `module calc/parser` in
@@ -774,6 +782,9 @@ module Iyi
           module_extends_self: true,
           reopened: reopened,
           package_name: program.iyi_module_packages[module_name]? || "",
+          # The module's `@[Unsafe("why")]`, so its travelling bodies are
+          # allowed in a consumer what they were here (SPEC.md III.13).
+          unsafe: program.iyi_unsafe_files[filename]? || "",
         )
 
         # What each of its functions reaches of module state, for the walk

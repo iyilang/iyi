@@ -9,6 +9,7 @@
 #
 # Every method in `src/std/indexable.iyi` is exercised here.
 
+@[Unsafe("its own Indexable type implements unsafe_fetch and unsafe_put over an array, the promise the module under test relies on")]
 module bench/std_indexable_exercise
 
 import std/indexable::{Indexable, IndexableMutable}

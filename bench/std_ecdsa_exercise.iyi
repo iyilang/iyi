@@ -20,6 +20,7 @@
 #   roots DIR     each certificate's own signature checked with its own
 #                 key, where both are ECDSA: `name true|false|skip`.
 
+@[Unsafe("its hex and byte helpers read strings' bytes through to_unsafe and copy bytes into String.new's buffer, the way std/ecdsa reads its input")]
 import std/ecdsa::{EcdsaPublicKey, EcdsaCurve, EcdsaHash, EcdsaError}
 import std/asn1::{Der, DerValue, Asn1Error}
 import std/dir::{Dir}

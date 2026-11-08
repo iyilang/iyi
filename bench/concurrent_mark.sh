@@ -144,6 +144,7 @@ grep -E '^(stray|small|moves|pause|large|wake|share):' answers.txt | sed 's/^/  
 # second stops measured 13 to 45.
 step "the machine alone: a thread per core reading the clock, no collector"
 cat > machine.iyi <<'IYI'
+@[Unsafe("each thread writes its longest clock gap into its own word of a page mapped with __iyi_mmap, so no allocation or collector touches the measurement")]
 class Gaps
   @@page : UInt64 = 0_u64
 
@@ -271,6 +272,7 @@ echo "  beside $beside threads computing, held to four times the time with no he
 # leaves or died of a memory fault. Ten runs, each its own chance.
 step "buffers grown by realloc beside the mark keep what they hold, ten runs"
 cat > realloced.iyi <<'IYI'
+@[Unsafe("the program grows buffers of objects with Pointer#malloc and realloc while the mark runs, the memory the collector must keep")]
 module realloced
 
 class Leaf
@@ -344,6 +346,7 @@ echo "  ten runs of three hundred realloc'd buffers, every leaf intact"
 # it near certain.
 step "small chunks freed in bursts across the pauses keep what was kept, ten runs"
 cat > freed.iyi <<'IYI'
+@[Unsafe("the program allocates raw chunks with Pointer#malloc and frees them with GC.free across the collector's pauses, then reads them back to see none was reused")]
 module freed
 
 import std/gc::{GC}

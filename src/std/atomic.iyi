@@ -33,6 +33,7 @@
 # no `Atomic(Bool)` and no flag type here; the prelude refuses the
 # instantiation, and a flag is a `UInt8` word with `swap`.
 
+@[Unsafe("atomic loads, stores, swaps and fences are compiler primitives that act on memory directly")]
 module std/atomic
 
 # The one instruction the prelude's `IyiAtomic` does not declare: a

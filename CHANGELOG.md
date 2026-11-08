@@ -371,6 +371,55 @@
   The padding is 1.5% of `samples/iyi/cores.iyi`'s text on Linux,
   1480302 bytes to 1502862, and 1.1% of its binary on Windows, 1871360
   to 1891840.
+- **A module that handles raw memory says so: `@[Unsafe("why")]`
+  (SPEC.md III.13).** Any `.iyi` file could reach memory the compiler
+  does not check, without spelling `Pointer`: four tasks writing one
+  `Share` string through `name.to_unsafe[i] = ...` printed `AAAA…`,
+  `AAAA…` and `DDDD…` on three runs, and `Slice.new("hello".to_unsafe,
+  1_000_000)[999_999]` died of a memory fault behind a bounds-checked
+  `[]`, while the fault message said that outside `Pointer` a program
+  cannot reach memory it does not own. Now a module whose first
+  statement is `@[Unsafe("why")]` may use what the compiler does not
+  check - a value whose type is or holds a `Pointer` however it was
+  reached (`to_unsafe`, the buffer of `String.new(n) { |buffer| }`, a
+  parameter, a cast, `pointerof`), `uninitialized`, a `lib` or top-level
+  `fun`, `@[Extern]`, `asm`, `@[Primitive]`, a call to a def whose
+  caller keeps a promise (`@[Unsafe(call: "index is in 0...size")]`, as
+  `unsafe_fetch`, `unsafe_put` and `Array.unsafe_build` carry), and the
+  trust marks `@[Share]` and `@[UnsafeReach]` - and every other module
+  is refused at its first such operation, with the count of the others
+  and the mark as the edit. The check reads types after typing, so `iyi
+  check`, `iyi build` and the editor agree. The reason is required, and
+  a mark nothing needs is a warning (`--error-on-warnings` fails it)
+  unless a macro conditional may hide what another target needs.
+  `String#byte_at(i)`, `Bytes.of(text)` and `String.new(Array(UInt8))`
+  read and build bytes without raw memory. `iyi fix` inserts the mark
+  with a reason for a person to rewrite, the language server offers it
+  as a quick fix and shows it on hover, `iyi migrate` writes it into a
+  migrated module whose Crystal source handles raw memory, `.iyimod`
+  (v62) carries it, and the fault message names the program's own
+  marked modules. **A program that compiled may be refused:** mark the
+  module with what it does with raw memory, or read its bytes with
+  `byte_at` and `Bytes.of`; 0.20.1 refuses the mark above a `module`
+  header, so code that carries one needs 0.21.0. In this repository the
+  prelude marks 13 of its 20 files, std 83 of its 121 modules (sixteen
+  that only read or built bytes, or made one C call, need none now), and
+  bench 85 of its 175 programs, every reason written by hand; no sample
+  needs one. The 33 library lines this adds - nine marks, two promises,
+  `byte_at` and `String.new(Array(UInt8), start, count)` - raised the
+  library's ceiling, by the owner's decision, from 4,650 to 4,683 (SPEC.md
+  I.4). Outside it, iyi-web (fourteen library modules), iyi-db (its
+  `@[Share]` and `@[Share(owns: true)]` types and an `uninitialized`),
+  iyi-pg (four modules marked, the rest moved to the safe calls),
+  iyi-metric (one) and iyiturkiye, which builds on the first three, need
+  marks or the safe calls before they build on 0.21.0. The check costs,
+  as `IYI_PROF=1`'s `main: unsafe check` against the whole `iyi check`
+  (median of five), 14 ms of 285 for `samples/iyi/hello.iyi`, 239 of
+  2,238 for `bench/std_fuzz_exercise.iyi` and 576 of 2,231 for
+  `bench/std_tls_exercise.iyi` on Linux (12 vCPU, shared), and 17 of
+  342, 300 of 2,945 and 744 of 2,896 on Windows 11, 12 logical
+  processors (the user's machine): 5% of a small program's check, 10 to
+  26% of a large one's.
 
 ### Gates
 
@@ -609,6 +658,16 @@
   user's machine). test_verb.sh refuses a `--chaos=` seed that is not
   decimal digits below 2^64, which `to_u64?` alone would have read from
   `+7` and ` 7`, and a `--chaos-runs` below 1.
+- **std_term_exercise.sh reads darwin's own `stty -g`.** The gate
+  compares `stty -g` before and after each block, and read it as GNU's
+  colon-separated hex; darwin's stty writes `gfmt1:cflag=4b00:...:lflag=5cb:...`,
+  so on a Mac whose PATH has no coreutils `gnubin` in front - CI's
+  darwin job puts it there - the plain build failed with
+  `int('lflag=200005cb', 16)` and the copy that never restores the mode
+  failed for that reason instead of its own. Measured on macOS 26.6,
+  Apple M2 Pro, 10 cores (the user's machine): base ffca07d96 and
+  h/unsafe failed the same way with darwin's stty and passed with GNU's;
+  the gate now masks the kernel's `PENDIN` bit in both formats.
 
 ### Added
 
@@ -27551,7 +27610,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 28,663-line library and nothing else. Every other
+  written against iyi's own 28,716-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

@@ -55,6 +55,7 @@
 # 1 ms, or been woken 4 times to find it taken again, is handed it by the
 # next release, as Go's `sync.Mutex` does in its starvation mode.
 
+@[Unsafe("a mutex is trusted to cross tasks under @[Share] because it guards its value with its own lock")]
 module std/mutex
 
 @[Share(owns: true)]

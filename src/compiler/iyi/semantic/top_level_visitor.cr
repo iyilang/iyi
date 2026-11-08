@@ -237,6 +237,11 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
         # synchronised type that owns its contents: shareable whatever its
         # arguments are, its blocks checked at every call instead.
         type.iyi_share_trusted = true
+        # A claim, so it is kept for a module that says it handles what the
+        # compiler does not check (SPEC.md III.13).
+        @program.iyi_unsafe_site(ann, "@[Share] on `#{type}` is a claim the compiler takes on trust",
+          "make its fields Share (`Atomic`, `Mutex`, `List`) and `#{type}` is Share without it (SPEC.md III.4.4), ",
+          "trusts @[Share] on `#{type}`")
         unless ann.args.empty?
           ann.raise "Share annotation can't have positional arguments, only named arguments: 'owns'"
         end
@@ -252,12 +257,19 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
         end
       end
 
+      if annotation_type == @program.unsafe_annotation
+        ann.raise "@[Unsafe(call: \"...\")] is the promise a def's caller keeps, and `#{type}` is a type: " \
+                  "write it on the def, or mark the module with `@[Unsafe(\"why\")]` above its header (SPEC.md III.13)"
+      end
+
       if node.struct? && type.is_a?(NonGenericClassType)
         case annotation_type
         when @program.extern_annotation
           unless type.is_a?(NonGenericClassType)
             node.raise "can only use Extern annotation with non-generic structs"
           end
+          @program.iyi_unsafe_site(ann, "@[Extern] makes `#{type}` a C struct the compiler does not check", "",
+            "declares the C struct `#{type}`")
 
           unless ann.args.empty?
             ann.raise "Extern annotation can't have positional arguments, only named arguments: 'union'"
@@ -2121,6 +2133,8 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
     primitive.location = node.location
 
     node.body = primitive
+    @program.iyi_unsafe_site(ann, "@[Primitive] makes `#{node.name}` the compiler's own code, which nothing checks", "",
+      "declares the primitive `#{node.name}`")
   end
 
   def visit(node : Include)

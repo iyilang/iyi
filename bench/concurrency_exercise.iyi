@@ -18,6 +18,7 @@
 # string and kept it in a recorded run on macos-15, where 2 of 720 runs
 # failed 16e's rendezvous check.
 
+@[Unsafe("makes pipes through pipe or Windows named pipes in a lib, and moves bytes through raw Pointer.malloc buffers and to_unsafe")]
 import std/gc::{GC}
 
 def fail(message : String) : Nil

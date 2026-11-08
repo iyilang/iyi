@@ -78,6 +78,7 @@
 # table (21 patterns) routed 200,000 requests in 165 ms, under a
 # microsecond each.
 
+@[Unsafe("patterns and paths are parsed by walking the bytes of their strings through a raw pointer")]
 module std/router
 
 import std/http::{HTTP, Request, Response}

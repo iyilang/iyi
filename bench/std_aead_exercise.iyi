@@ -3,6 +3,7 @@
 # Run via:
 #     ./bin/iyi run bench/std_aead_exercise.iyi
 
+@[Unsafe("its hex and byte helpers read strings' bytes through to_unsafe and copy bytes into String.new's buffer, the way std/aead reads its input")]
 module bench/std_aead_exercise
 
 import std/aead::{AES, AesGcm, ChaCha20, Poly1305, ChaCha20Poly1305, AeadError}

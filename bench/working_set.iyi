@@ -29,6 +29,7 @@
 # the runtime with the ceiling removed, which goes past the bound in all
 # three.
 
+@[Unsafe("on Windows and darwin the peak resident set is read through a C call, K32GetProcessMemoryInfo or getrusage, that fills Pointer#malloc memory")]
 module bench/working_set
 
 {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}

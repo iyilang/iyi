@@ -4,6 +4,7 @@
 # `@c`, in that order, in `Program#initialize` — because codegen lays out
 # string literals before any prelude is read. So this file reopens a type that
 # already has its shape and only says what can be done with it.
+@[Unsafe("a string's bytes are laid out and read by hand, as the compiler lays out a literal")]
 class String
   # The two `Int32`s in front of the bytes: the byte count and the character
   # count. The type id is not in the object: it is the high half of the
@@ -80,6 +81,28 @@ class String
 
   def bytesize : Int32
     @bytesize
+  end
+
+  # The byte at *index*, checked: a negative index counts from the end, as
+  # an array's does, and one out of range raises. What a module reads a
+  # string's bytes with when it does not handle raw memory, where
+  # `to_unsafe[i]` reads past the end without a word (SPEC.md III.13).
+  def byte_at(index : Int32) : UInt8
+    asked = index
+    index = @bytesize + index if index < 0
+    raise "index #{asked} out of range for #{@bytesize} bytes" if index < 0 || index >= @bytesize
+    to_unsafe[index]
+  end
+
+  # A string holding a copy of *count* of *bytes* from *start*, as they
+  # are, the range checked: what a module turns bytes it collected into
+  # text with, where `String.new(n) { |buffer| ... }` hands it a `Pointer`
+  # (SPEC.md III.13).
+  def self.new(bytes : Array(UInt8), start : Int32 = 0, count : Int32 = bytes.size - start) : String
+    raise "#{count} bytes from #{start} out of range for #{bytes.size}" if start < 0 || count < 0 || start + count > bytes.size
+    String.new(count) do |buffer|
+      buffer.copy_from(bytes.to_unsafe + start.to_i64, count)
+    end
   end
 
   # A zero `@length` on a non-empty string is "not counted yet", which is

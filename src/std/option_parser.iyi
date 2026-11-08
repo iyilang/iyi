@@ -183,7 +183,7 @@ pub class OptionParser
   # and one character, and cutting it at two bytes handed `invalid_option`
   # half of an `é`.
   private def char_end(s : String, at : Int32) : Int32
-    b = s.to_unsafe[at]
+    b = s.byte_at(at)
     width = b < 0xC0_u8 ? 1 : (b < 0xE0_u8 ? 2 : (b < 0xF0_u8 ? 3 : 4))
     e = at + width
     e > s.bytesize ? s.bytesize : e

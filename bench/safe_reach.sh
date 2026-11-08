@@ -42,11 +42,11 @@
 #      reached only through a block of the importer's, which std's proc
 #      calls are taken to run: accepted. Its broken copy, the block in the
 #      writer's module: refused, naming the module's `LOCK` as the start.
-#   5. `@[UnsafeReach]`, the claim nothing checks, in a file that uses
-#      `Pointer`: accepted for the program step 1 refuses. Its broken copy,
-#      the same program without a `Pointer`: refused, since the unsafe
-#      spelling is kept for the prelude and for files already outside
-#      what the compiler proves.
+#   5. `@[UnsafeReach]`, the claim nothing checks, in a module marked
+#      `@[Unsafe("why")]` (SPEC.md III.13): accepted for the program step 1
+#      refuses. Its broken copy, the same module without the mark, still
+#      reading through a `Pointer`: refused, since the unsafe spelling is
+#      kept for modules that say they are outside what the compiler proves.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -530,18 +530,18 @@ IYI
   'after the statement at dep/table.iyi:19:1 may start the first parallel task') || exit 1
 
 # ── 5. UnsafeReach, where it is allowed ───────────────────────────────────
-step "@[UnsafeReach] is kept for a file that uses Pointer"
-derive unguarded unsafe '
-/^module unguarded$/ { print "module unsafe"; next }
+step "@[UnsafeReach] is kept for a module marked @[Unsafe]"
+derive unguarded marked '
+/^module unguarded$/ { print "@[Unsafe(\"hands a raw byte to its caller\")]"; print "module marked"; next }
 /^@\[SafeReach/ { print "@[UnsafeReach(\"one task asks at a time\")]"; next }
 { print }
 END { print "puts Pointer(UInt8).malloc(1_u64).address > 0_u64" }'
-accepted unsafe
-derive unsafe unsafe_plain '
-/^module unsafe$/ { print "module unsafe_plain"; next }
-/Pointer/ { next }
+accepted marked
+derive marked unsafe_plain '
+/^module marked$/ { print "module unsafe_plain"; next }
+/^@\[Unsafe\(/ { next }
 { print }'
-refused unsafe_plain '@[UnsafeReach] on `DATABASE` is not allowed here' \
-  'kept for the prelude and runtime (src/iyi) and for a file that already uses `Pointer`'
+refused unsafe_plain '@[UnsafeReach] on `DATABASE` is the claim the compiler takes on trust' \
+  '`unsafe_plain` is not marked unsafe'
 
 echo "every SafeReach claim was proven or refused as it should be"

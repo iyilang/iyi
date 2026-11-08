@@ -12,6 +12,7 @@
 # other half of that conversation. Without one, a scratch directory is
 # used for the file and extraction checks and removed after.
 
+@[Unsafe("its test helpers read and write archives' bytes through strings' buffers, to check std/zip byte for byte")]
 module bench/std_zip_exercise
 
 import std/zip::{ZipReader, ZipWriter, ZipEntry, ZipEntryReader, ZipError, ZipMethod}

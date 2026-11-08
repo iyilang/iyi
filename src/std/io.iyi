@@ -31,6 +31,7 @@
 # a closed stream, writing a reader, reading a writer, malformed UTF-8 in
 # `read_char`, and a decode that runs out of bytes.
 
+@[Unsafe("streams read and write bytes through raw pointers: the buffers they allocate and grow, the caller's buffers, and the bytes of the strings they pass around")]
 module std/io
 
 class ::IyiIO

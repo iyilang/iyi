@@ -33,6 +33,7 @@
 # printed. bench/parallel_exercise.sh runs it, and broken copies, each
 # caught by the step that names it.
 
+@[Unsafe("copies bytes between slices through their to_unsafe pointers in a loop the preemption check must reach")]
 module bench/parallel_preempt_lib
 
 import std/slice::{Slice}

@@ -141,9 +141,10 @@ fi
 
 echo
 echo "== what capsule refuses"
-refuses() { # refuses <label> <name> <phrase> <code>
-  local label="$1" name="$2" phrase="$3" code="$4"
+refuses() { # refuses <label> <name> <phrase> <code> [<@[Unsafe] mark, for code that handles raw memory>]
+  local label="$1" name="$2" phrase="$3" code="$4" mark="${5:-}"
   cat <<IYI > "$WORK/$name.iyi"
+$mark
 module main
 
 import std/slice::{Bytes}
@@ -188,7 +189,8 @@ refuses "server-initiated stream id" datagram_sid_server "http datagram stream i
 refuses "truncated capsule on empty buffer" capsule_trunc "truncated capsule: buffer empty or offset beyond end" 'Capsule.decode(Bytes.new(0))'
 refuses "capsule truncated before length" capsule_len_trunc "truncated capsule: buffer ends before capsule length" 'b = Bytes.new(1); b[0] = 0x00_u8; Capsule.decode(b)'
 refuses "capsule length overrunning buffer" capsule_overrun "capsule length overruns buffer" 'b = Bytes.new(3); b[0] = 0x00_u8; b[1] = 0x10_u8; b[2] = 0xAA_u8; Capsule.decode(b)'
-refuses "varint truncated at the end of a 2^31 - 1 byte buffer" varint_edge_trunc "varint truncated: 2-byte varint requires 2 bytes, but only 1 available" 't = Bytes.new(8); t[7] = 0x40_u8; b = Bytes.new(Pointer(UInt8).new(t.to_unsafe.address &- 2147483639_u64), 2147483647); VarInt.decode(b, 2147483646)'
+refuses "varint truncated at the end of a 2^31 - 1 byte buffer" varint_edge_trunc "varint truncated: 2-byte varint requires 2 bytes, but only 1 available" 't = Bytes.new(8); t[7] = 0x40_u8; b = Bytes.new(Pointer(UInt8).new(t.to_unsafe.address &- 2147483639_u64), 2147483647); VarInt.decode(b, 2147483646)' \
+  '@[Unsafe("the buffer is a 2^31 - 1 byte Bytes laid over 8 real bytes through a Pointer, so only its last byte is ever read")]'
 
 echo
 if [ "$status" -eq 0 ]; then

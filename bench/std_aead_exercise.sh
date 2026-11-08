@@ -144,6 +144,7 @@ if [ -z "$PY" ] || ! "$PY" -c 'from cryptography.hazmat.primitives.ciphers.aead 
   echo "  python's cryptography package is not installed here, so std/aead goes uncompared with it"
 else
   cat >"$WORK/oracle.iyi" <<'IYI'
+@[Unsafe("the oracle decodes and encodes hex fields by reading each string's bytes through to_unsafe and writing String.new's buffer")]
 module oracle
 
 import std/aead::{AES, AesGcm, ChaCha20, Poly1305, ChaCha20Poly1305, AeadError}
@@ -392,6 +393,7 @@ echo "== what sealing takes"
 # code's. 16 MiB sealed, the best of three, --release, against Python's
 # cryptography (OpenSSL, AES-NI where the processor has it) when it is here.
 cat >"$WORK/speed.iyi" <<'IYI'
+@[Unsafe("the 16 MiB message is filled byte by byte through String.new's buffer pointer")]
 module speed
 
 import std/aead::{AesGcm, ChaCha20Poly1305}
@@ -451,6 +453,7 @@ fi
 echo
 echo "== what aead refuses"
 cat >"$WORK/refuse.iyi" <<'IYI'
+@[Unsafe("the refusals hand raw buffers to the ciphers: a zero block written through String.new's pointer, and to_unsafe pointers with a negative count")]
 module refuse
 
 import std/aead::{AES, AesGcm, ChaCha20, Poly1305, ChaCha20Poly1305}

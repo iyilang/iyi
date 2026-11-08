@@ -10,6 +10,7 @@
 # 4. closed peer detection (read returns empty string on EOF)
 # 5. refused connection when target port has no listener
 
+@[Unsafe("sets SO_LINGER through setsockopt in a lib, pins threads and makes pipes through Windows calls, and keeps flags in raw Pointer.malloc words")]
 import std/socket::{IyiSocket, SocketError, IPv6Address}
 import std/env::{ENV}
 import std/gc::{GC}

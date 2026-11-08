@@ -1456,10 +1456,14 @@ module Iyi
       # written where the state is. It quiets the warning that walk gives
       # (SPEC.md III.4.4), never the refusal of a block that names it itself.
       types["SafeReach"] = @safe_reach_annotation = AnnotationType.new self, self, "SafeReach"
-      # iyi: `@[UnsafeReach("why")]` is the old, unchecked claim, kept for
-      # the prelude and runtime and for a file that already uses `Pointer`:
-      # what `ReachProof` cannot prove there is said to be unsafe by name.
+      # iyi: `@[UnsafeReach("why")]` is the unchecked claim, kept for a module
+      # marked `@[Unsafe]` (SPEC.md III.4.4, III.13): what `ReachProof` cannot
+      # prove there is said to be unsafe by name.
       types["UnsafeReach"] = @unsafe_reach_annotation = AnnotationType.new self, self, "UnsafeReach"
+      # iyi: `@[Unsafe("why")]` first in a file marks the module as one that
+      # handles raw memory, and `@[Unsafe(call: "what")]` on a def is the
+      # promise its caller keeps (SPEC.md III.13, `UnsafeCheck`).
+      types["Unsafe"] = @unsafe_annotation = AnnotationType.new self, self, "Unsafe"
 
       # iyi: the marker that makes a union member an error member (SPEC.md
       # III.1.1). Created here rather than declared in the prelude because the
@@ -1574,6 +1578,13 @@ module Iyi
         MD
       define_crystal_string_constant "TARGET_TRIPLE", codegen_target.to_s, <<-MD
         The LLVM target triple of the target system (the machine that the compiler builds for).
+        MD
+      # iyi: the program's own modules marked `@[Unsafe]`, which the runtime's
+      # memory-fault message names (SPEC.md III.13). Filled in once the unsafe
+      # check has read the program (`UnsafeCheck#run`).
+      @iyi_unsafe_modules_literal = literal = StringLiteral.new("").tap(&.set_type(string))
+      define_crystal_constant "IYI_UNSAFE_MODULES", literal, <<-MD
+        The modules of this program, std's and the runtime's aside, marked `@[Unsafe]`.
         MD
     end
 
@@ -1811,7 +1822,7 @@ module Iyi
                      always_inline_annotation naked_annotation returns_twice_annotation
                      raises_annotation primitive_annotation call_convention_annotation
                      flags_annotation link_annotation extern_annotation deprecated_annotation experimental_annotation
-                     share_annotation no_preempt_annotation safe_reach_annotation unsafe_reach_annotation error_trait) %}
+                     share_annotation no_preempt_annotation safe_reach_annotation unsafe_reach_annotation unsafe_annotation error_trait) %}
       def {{name.id}}
         @{{name.id}}.not_nil!
       end

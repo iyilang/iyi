@@ -2635,6 +2635,68 @@ def main():
          "only one unit's tasks reach" in unit_doc and "runs in the `Unit`" in spawn_doc,
          f"Unit: {unit_doc[:80]!r}; spawn(in:): {spawn_doc[:80]!r}")
 
+    # 23x. Unsafe code (SPEC.md III.13) in the editor: a module that reads
+    #      through `to_unsafe` unmarked is refused, with the mark as a quick
+    #      fix; the fix applied checks clean; a hover over the mark shows
+    #      its reason; and the hint after a plain spawn whose block reaches
+    #      the module says so. None of the four had a step, and the merge
+    #      with the units' hints rewrote the line the hint is built on.
+    raw_text = ("module rawmod\n"
+                "\n"
+                "def first(text : String) : UInt8\n"
+                "  text.to_unsafe[0]\n"
+                "end\n"
+                "\n"
+                "group do |g|\n"
+                "  g.spawn { first(\"hi\").to_i32 }\n"
+                "end\n")
+    raw_path = os.path.join(work, "rawmod.iyi")
+    with open(raw_path, "w", encoding="utf-8") as f:
+        f.write(raw_text)
+    raw_uri = file_uri(raw_path)
+    c.send("textDocument/didOpen", {"textDocument": {
+        "uri": raw_uri, "languageId": "iyi", "version": 1, "text": raw_text}}, wait=False)
+    raw_diags = c.diagnostics(raw_uri)["diagnostics"]
+    refused = next((d for d in raw_diags if "is not marked unsafe" in d["message"]), None)
+    reply = c.send("textDocument/codeAction",
+                   {"textDocument": {"uri": raw_uri},
+                    "range": refused["range"] if refused else
+                    {"start": {"line": 3, "character": 0}, "end": {"line": 3, "character": 0}},
+                    "context": {"diagnostics": raw_diags}})
+    mark_fix = next((a for a in (reply["result"] or []) if a["title"].startswith("Insert `@[Unsafe(")), None)
+    marked = ""
+    if mark_fix:
+        lines = raw_text.split("\n")
+        for edits in mark_fix["edit"]["changes"].values():
+            for e in edits:
+                l = e["range"]["start"]["line"]
+                s = e["range"]["start"]["character"]
+                t = e["range"]["end"]["character"]
+                lines[l] = lines[l][:s] + e["newText"] + lines[l][t:]
+        marked = "\n".join(lines)
+    c.send("textDocument/didChange",
+           {"textDocument": {"uri": raw_uri, "version": 2},
+            "contentChanges": [{"text": marked or raw_text}]}, wait=False)
+    marked_clean = c.diagnostics(raw_uri)["diagnostics"] == []
+    reply = c.send("textDocument/hover",
+                   {"textDocument": {"uri": raw_uri},
+                    "position": {"line": 0, "character": 3}})
+    mark_doc = (reply["result"] or {}).get("contents", {}).get("value", "")
+    spawn_line = next((i for i, row in enumerate(marked.split("\n")) if "g.spawn" in row), 8)
+    reply = c.send("textDocument/inlayHint",
+                   {"textDocument": {"uri": raw_uri},
+                    "range": {"start": {"line": 0, "character": 0},
+                              "end": {"line": spawn_line + 2, "character": 0}}})
+    raw_hint = next((h for h in (reply["result"] or []) if h["position"]["line"] == spawn_line
+                     and h["label"].startswith("in a unit of its own")), None)
+    step("23x", "unsafe code: refused unmarked with the mark as a quick fix, its reason on hover, a spawn reaching it hinted",
+         refused is not None and mark_fix is not None and marked.startswith("@[Unsafe(\"") and marked_clean and
+         "**Unsafe module:**" in mark_doc and "`to_unsafe`" in mark_doc and
+         raw_hint is not None and raw_hint["label"] == "in a unit of its own, reaching unsafe code" and
+         "spawn reaches unsafe code in rawmod" in raw_hint.get("tooltip", ""),
+         f"refused: {refused is not None}; fix: {mark_fix and mark_fix['title'][:60]!r}; clean: {marked_clean}; "
+         f"hover: {mark_doc[:50]!r}; hint: {raw_hint and raw_hint['label']!r}")
+
     # 24. typeDefinition: from the local to where String is declared.
     reply = c.send("textDocument/typeDefinition",
                    {"textDocument": {"uri": app_uri},

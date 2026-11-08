@@ -1143,9 +1143,10 @@ caught tokenless 'unit: a task of the same unit ran' unit --workers=1
 step "failure proof: the prelude's library compiled as the runtime's holds its worker through a sort, a copy, a growth and a join"
 # `array.iyi`, `hash.iyi` and `string.iyi` written into prelude.iyi where it
 # requires them, so the compiler takes their defs for the runtime's, which
-# never check. A plain build, whose copy is a loop of bytes and long enough
-# to tell.
-broken libruntime '/^require "\.\/(array|hash|string)"$/ { name = $2; gsub(/"|\.\//, "", name); file = "'"$REPO"'/src/iyi/" name ".iyi"; while ((getline line < file) > 0) print line; close(file); next } { print }' prelude.iyi parallel_preempt_lib
+# never check. Their own `@[Unsafe]` marks are left out: prelude.iyi's, at
+# its top, covers what they handle. A plain build, whose copy is a loop of
+# bytes and long enough to tell.
+broken libruntime '/^require "\.\/(array|hash|string)"$/ { name = $2; gsub(/"|\.\//, "", name); file = "'"$REPO"'/src/iyi/" name ".iyi"; while ((getline line < file) > 0) if (line !~ /^@\[Unsafe\(/) print line; close(file); next } { print }' prelude.iyi parallel_preempt_lib
 for proof in sort copy rehash join; do
   caught libruntime "$proof: a short task waited" "$proof" --workers=1
 done

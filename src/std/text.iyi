@@ -53,6 +53,7 @@
 # `import std/text` in a `--crystal` program is refused rather than replacing
 # the library's methods under the whole program (SPEC.md III.6).
 
+@[Unsafe("stripping and squeezing use a lookup mask in a buffer it allocates and indexes itself")]
 module std/text
 
 struct ::Char

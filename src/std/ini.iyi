@@ -26,6 +26,8 @@
 
 module std/ini
 
+import std/slice::{Bytes}
+
 pub struct INI
   # Past a byte order mark, which Windows PowerShell 5.1's `Set-Content
   # -Encoding UTF8` and older Notepad write: it panicked "expected
@@ -47,7 +49,7 @@ pub struct INI
 
     lines.each do |line|
       lineno += 1
-      raw = line.to_unsafe
+      raw = Bytes.of(line)
       len = line.bytesize
       len -= 1 if len > 0 && raw[len - 1] == 13_u8 # a CRLF file's '\r'
 
@@ -112,7 +114,7 @@ pub struct INI
   # The 1-based character column of byte *index* in *line*: every byte
   # that is not a UTF-8 continuation byte begins a character.
   private def self.column(line : String, index : Int32) : Int32
-    raw = line.to_unsafe
+    raw = Bytes.of(line)
     count = 0
     i = 0
     while i < index

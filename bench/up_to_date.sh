@@ -302,6 +302,7 @@ if [ "$have_ar" = yes ]; then
   mkdir -p lib
   library 41
   cat > linked.iyi <<'EOF'
+@[Unsafe("the program calls a C function from the library the gate builds, through a lib binding")]
 module linked
 
 @[Link("uptodate")]

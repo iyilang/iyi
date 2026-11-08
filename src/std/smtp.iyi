@@ -64,6 +64,7 @@
 # bench/std_smtp_exercise.sh holds it to a server written in Python for
 # the purpose, over plain TCP, STARTTLS and TLS.
 
+@[Unsafe("commands and replies are checked by walking the bytes of their strings through a raw pointer")]
 module std/smtp
 
 import std/socket::{IyiSocket, SocketError}

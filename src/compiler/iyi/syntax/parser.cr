@@ -276,6 +276,18 @@ module Iyi
         else                  [nodes] of ASTNode
         end
 
+      # iyi: `@[Unsafe("why")]` as the file's first statement marks the module
+      # as one that handles raw memory (SPEC.md III.13). It stands above the
+      # header, so the header rules below read the file after it, and it
+      # stays first in the tree, outside the module the header makes, where
+      # the semantic pass records it for the file.
+      mark = nil
+      if iyi? && (first = expressions.first?) && first.is_a?(Annotation) && Parser.iyi_unsafe_file_mark?(first)
+        first.iyi_file_mark = true
+        mark = first
+        expressions = expressions[1..]
+      end
+
       # iyi: one file, one module (R-1, IV.6). A second header was accepted and
       # quietly wrong: the file emitted a single artifact under the first
       # module's name carrying *both* modules' exports, so the second module's
@@ -320,7 +332,7 @@ module Iyi
       scoped = iyi_scope_imported_names(expressions)
       unless scoped.same?(expressions)
         expressions = scoped
-        nodes = Expressions.from(expressions)
+        nodes = Expressions.from(mark ? [mark] of ASTNode + expressions : expressions)
       end
 
       header = expressions.first?
@@ -386,7 +398,15 @@ module Iyi
       # header, found its target.
       module_def.end_location = rest.reverse_each.compact_map(&.end_location).first? || header.end_location
 
-      Expressions.from([header] of ASTNode + directives + [module_def] of ASTNode)
+      Expressions.from((mark ? [mark] of ASTNode : [] of ASTNode) + [header] of ASTNode + directives + [module_def] of ASTNode)
+    end
+
+    # Whether *mark*, first in its file, is the module's unsafe mark:
+    # `@[Unsafe]` with no `call:`, which is the spelling a def's caller
+    # contract takes (SPEC.md III.13).
+    def self.iyi_unsafe_file_mark?(mark : Annotation) : Bool
+      return false unless mark.path.single?("Unsafe")
+      !mark.named_args.try(&.any? { |arg| arg.name == "call" })
     end
 
     # iyi: `import x::{a, b}` and `import x::*` load the module and bring

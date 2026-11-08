@@ -37,6 +37,7 @@
 # `sample(n)` in std/indexable make the same choices for a `Deque` or a
 # `Slice`.
 
+@[Unsafe("random bytes are written straight into the caller's buffer, and the system's entropy read through raw calls")]
 module std/random
 
 import std/int

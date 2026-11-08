@@ -565,13 +565,13 @@ class Iyi::Command
     Iyi.sweep_run_leftovers
     output_filename = Iyi.temp_executable(config.output_filename)
 
-    config.compile output_filename
+    result = config.compile output_filename
 
     unless config.compiler.no_codegen?
       report_warnings
       exit 1 if warnings_fail_on_exit?
 
-      execute output_filename, config.arguments, config.compiler
+      execute output_filename, config.arguments, config.compiler, unsafe_modules: result.program.iyi_unsafe_modules_listed
     end
   end
 
@@ -594,21 +594,23 @@ class Iyi::Command
   # iyi: what a program's death says, when the kernel ended it rather than
   # the program exiting. `Process::Status#description` speaks in the
   # kernel's terms - "Process terminated because of an invalid memory
-  # access" - and for an iyi program, which outside `Pointer` cannot reach
-  # memory it does not own, that sends a reader hunting for a null
-  # dereference in a language whose nil is a type. The stack running out
-  # is the program's own panic now (`IyiStackGuard`, on the targets with a
-  # runtime), so a fault that reaches here is a `Pointer` the program
-  # wrote, a stack on a target with no guard, or ours. Every other signal
-  # is named, because "an unhandled signal" is a sentence with the fact
-  # left out.
-  def self.death_sentence(status : Process::Status) : String
+  # access" - and for an iyi program, which outside a module marked
+  # `@[Unsafe]` cannot reach memory it does not own (SPEC.md III.13), that
+  # sends a reader hunting for a null dereference in a language whose nil
+  # is a type. The stack running out is the program's own panic now
+  # (`IyiStackGuard`, on the targets with a runtime), so a fault that
+  # reaches here is one of the program's unsafe modules - *unsafe_modules*,
+  # std's and the runtime's aside, when the driver built it - a stack on a
+  # target with no guard, or ours. Every other signal is named, because
+  # "an unhandled signal" is a sentence with the fact left out.
+  def self.death_sentence(status : Process::Status, unsafe_modules : String = "") : String
     case status.exit_reason
     when .bad_memory_access?, .access_violation?
-      "the program died of a memory fault. Outside `Pointer`, an iyi program cannot reach memory " \
-      "it does not own: if the program uses `Pointer`, that is the place to look, and on a target " \
-      "without iyi's runtime it can also be the stack running out. If neither, it is a bug in " \
-      "#{program_name}'s own runtime, and ours to fix: https://github.com/iyilang/iyi/issues"
+      where = unsafe_modules.empty? ? "this program marks none of its own" : "this program's own are #{unsafe_modules}, and that is the place to look"
+      "the program died of a memory fault. Outside a module marked `@[Unsafe]`, an iyi program cannot reach " \
+      "memory it does not own: #{where}; on a target without iyi's runtime it can also be the stack " \
+      "running out. If neither, it is a bug in #{program_name}'s own runtime or std, and ours to fix: " \
+      "https://github.com/iyilang/iyi/issues"
     when .unknown?
       # The code is the one fact left, and without it an intermittent
       # Windows exit crash could not be told from another: a stack cookie
@@ -638,7 +640,7 @@ class Iyi::Command
     {% end %}
   end
 
-  private def execute(output_filename, run_args, compiler, *, error_on_exit = false)
+  private def execute(output_filename, run_args, compiler, *, error_on_exit = false, unsafe_modules = "")
     time = @time && !@progress_tracker.stats?
     status, elapsed_time = @progress_tracker.stage("Execute") do
       elapsed = Time.measure do
@@ -711,7 +713,7 @@ class Iyi::Command
       # program carries Crystal's runtime, which catches the fault itself
       # and exits saying so; only a program under iyi's library dies here.
       if compiler.prelude == "iyi/prelude"
-        STDERR.puts "#{Command.program_name}: #{Command.death_sentence(status)}"
+        STDERR.puts "#{Command.program_name}: #{Command.death_sentence(status, unsafe_modules)}"
       else
         STDERR.puts status.description
       end

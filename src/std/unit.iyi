@@ -62,6 +62,7 @@
 # struct - an `Int32`, a `Tuple` - is handed as a copy, so own a class
 # that holds it when tasks must change it.
 
+@[Unsafe("a Unit is trusted to cross tasks under @[Share(owns: true)] because only its unit's tasks reach the value, one at a time")]
 module std/unit
 
 # A value that only one unit's tasks reach, one task at a time: the block

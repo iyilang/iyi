@@ -616,6 +616,7 @@ esac
 echo
 echo "== the stack the loader left under main is zeroed"
 cat > "$WORK/loader.iyi" <<'IYI'
+@[Unsafe("the program reads an uninitialized top-level array through pointerof to see the words the loader left under main")]
 @[NoInline]
 def loader_words(words : Pointer(UInt64), count : Int32) : Int32
   found = 0
@@ -699,6 +700,7 @@ fi
 echo
 echo "== a word that only looks like a pointer keeps 64 MB, and each fix takes it back"
 cat > "$WORK/retention.iyi" <<'IYI'
+@[Unsafe("the program keeps a 64 MB string's address from to_unsafe as an integer and reads uninitialized frames through pointerof, the stray words a conservative scan mistakes for pointers")]
 import std/static_array
 import std/gc::{GC}
 

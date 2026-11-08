@@ -47,6 +47,7 @@
 # encoded or normalized, it panics with the byte offset ("invalid UTF-8 at
 # byte 3"); an unpaired surrogate in UTF-16 is `nil` from `decode_utf16?` and
 # a panic from `decode_utf16`.
+@[Unsafe("tables and text are read byte by byte through raw pointers, for speed")]
 module std/unicode
 
 import std/int

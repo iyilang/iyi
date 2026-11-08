@@ -389,6 +389,7 @@
 # what it stands on, with what it found and fixed; it is not that audit
 # either.
 
+@[Unsafe("records and handshakes are parsed and built through raw byte pointers into their buffers, and server identities and frozen server configs are trusted as Share across threads")]
 module std/tls
 
 import std/socket::{IyiSocket, SocketError}

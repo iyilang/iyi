@@ -18,6 +18,7 @@
 #   cost     what a key pair, an encapsulation and a decapsulation take,
 #            and decapsulation of good ciphertexts beside tampered ones.
 
+@[Unsafe("its hex and byte helpers read strings' bytes through to_unsafe and copy bytes into String.new's buffer, the way std/mlkem reads its input")]
 module bench/std_mlkem_exercise
 
 import std/mlkem::{MlKem768, MlKem768PrivateKey, MlKemError}

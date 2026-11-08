@@ -60,13 +60,7 @@ def write_pattern(path : String, size : Int32, seed : Int32) : Nil
     done = 0
     while done < size
       n = size - done < piece ? size - done : piece
-      text = String.new(n) do |p|
-        i = 0
-        while i < n
-          p[i] = (((done + i) * 7 + seed) % 251).to_u8
-          i = i + 1
-        end
-      end
+      text = String.new(Array(UInt8).new(n) { |i| (((done + i) * 7 + seed) % 251).to_u8 })
       io.write(text)
       done = done + n
     end

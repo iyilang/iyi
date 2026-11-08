@@ -22,6 +22,7 @@
 # queue is one thread's, which is precisely the state this measurement
 # exists to price.
 
+@[Unsafe("it starts threads with its own clone system call, declared as a C function, and counts in raw atomic words")]
 {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) %}
   def fail(message : String) : Nil
     puts "FAIL: #{message}"

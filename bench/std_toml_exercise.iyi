@@ -12,6 +12,7 @@
 # Run via:
 #     ./bin/iyi run bench/std_toml_exercise.iyi
 
+@[Unsafe("its test helpers walk documents' bytes through to_unsafe, to build the inputs std/toml reads")]
 module bench/std_toml_exercise
 
 import std/toml::{TOML, Any, TOMLError, TOMLDateTime, toml_serializable}

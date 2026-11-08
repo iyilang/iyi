@@ -305,9 +305,9 @@ echo "== the prelude's own String at its edges, which is a panic with a name"
 # which names the machine's adder rather than the string that does not fit.
 # Driven here rather than asserted in the exercise: a panicking program has
 # no next line to check.
-panics_with() { # panics_with <label> <name> <phrase> <expression>
-  local label="$1" name="$2" phrase="$3" expression="$4"
-  printf 'module main\n\nputs (%s).to_s\n' "$expression" > "$WORK/$name.iyi"
+panics_with() { # panics_with <label> <name> <phrase> <expression> [<@[Unsafe] mark, for an expression that handles raw memory>]
+  local label="$1" name="$2" phrase="$3" expression="$4" mark="${5:-}"
+  printf '%s\nmodule main\n\nputs (%s).to_s\n' "$mark" "$expression" > "$WORK/$name.iyi"
   if ! "$IYI" build -o "$WORK/$name" "$WORK/$name.iyi" > "$WORK/$name.build" 2>&1; then
     echo "  $label: the program did not build"
     sed -n '1,10p' "$WORK/$name.build"
@@ -347,7 +347,8 @@ panics_with "an index past the end" index_past \
 # to that limit and refuses past it with the sentence `*` has.
 panics_with "a build that does not fit" build_overflow \
   "past the 2147483647 bytes a string holds" \
-  'String.build { |io| io << "ab"; io.write("x".to_unsafe, 2147483647) }'
+  'String.build { |io| io << "ab"; io.write("x".to_unsafe, 2147483647) }' \
+  '@[Unsafe("the program hands the builder a one-byte string through to_unsafe with a count past what a string holds")]'
 printf 'module main\n\nbig = ("a" * 1025) * 1047553\nio = String::Builder.new\nio << big << "b"\nputs io.bytesize\n' > "$WORK/build_gib.iyi"
 if "$IYI" build -o "$WORK/build_gib" "$WORK/build_gib.iyi" > "$WORK/build_gib.build" 2>&1; then
   gib="$("$WORK/build_gib" 2>&1 | sed -n '1p')"

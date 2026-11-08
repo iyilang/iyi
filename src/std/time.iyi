@@ -37,6 +37,7 @@
 #     Windows machine's local zone is its rule from the system, its zones
 #     named by their offsets (`+03`), and `Location.load` reads `$ZONEINFO`.
 
+@[Unsafe("times and zone files are parsed by walking their bytes through a raw pointer")]
 module std/time
 
 import std/traits::{Comparable}

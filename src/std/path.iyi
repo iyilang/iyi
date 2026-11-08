@@ -32,6 +32,7 @@
 # `HOME`, or from `USERPROFILE` on Windows, which is where that platform
 # keeps it.
 
+@[Unsafe("paths are split and rewritten by walking the bytes of their strings through a raw pointer")]
 module std/path
 
 import std/traits::{Comparable}

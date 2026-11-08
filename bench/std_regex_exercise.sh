@@ -618,7 +618,7 @@ def share(k : Int32) : UInt64
       said = answer(text_for(i))
       j = 0
       while j < said.bytesize
-        h = (h ^ said.to_unsafe[j].to_u64) &* 1099511628211_u64
+        h = (h ^ said.byte_at(j).to_u64) &* 1099511628211_u64
         j = j + 1
       end
       i = i + WORKERS

@@ -974,7 +974,7 @@ struct AutocertPem
   end
 
   def self.pem(label : String, der : Array(UInt8)) : String
-    body = Base64.encode(String.new(der.size) { |buf| buf.copy_from(der.to_unsafe, der.size) })
+    body = Base64.encode(String.new(der))
     lines = [] of String
     at = 0
     while at < body.bytesize

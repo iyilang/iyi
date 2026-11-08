@@ -4427,6 +4427,12 @@ describe "Semantic: iyi" do
 
       STUB
 
+    # A snippet whose stand-in for the prelude (a `@[Primitive]` call, a
+    # `Pointer` field, a type marked `@[Share]`) sits in `x.iyi` is marked
+    # as the prelude's files are (SPEC.md III.13); without the mark it is
+    # refused for that before the Share check is reached.
+    unsafe = %(@[Unsafe("stands in for the prelude's raw code the Share check trusts")]\n)
+
     it "lets a block capture integers, strings and immutable structs" do
       assert_type(stub + <<-CODE, filename: "x.iyi") { nil_type }
         struct Point
@@ -4541,7 +4547,7 @@ describe "Semantic: iyi" do
     end
 
     it "refuses a captured value whose field a method takes the address of" do
-      assert_error(stub + <<-CODE, "captures `counter : Counter`, which is not Share: Counter's field @n is given out by `pointerof` in `slot` (SPEC.md III.4.4)", filename: "x.iyi")
+      assert_error(unsafe + stub + <<-CODE, "captures `counter : Counter`, which is not Share: Counter's field @n is given out by `pointerof` in `slot` (SPEC.md III.4.4)", filename: "x.iyi")
         class Counter
           def initialize(@n : Int32)
           end
@@ -4560,7 +4566,7 @@ describe "Semantic: iyi" do
     end
 
     it "refuses a captured value through a field that is not shareable" do
-      assert_error(stub + <<-CODE, "captures `bag : Bag`, which is not Share: Bag's field @items : Pointer(Int32) is not shareable: Pointer(Int32) is raw memory", filename: "x.iyi")
+      assert_error(unsafe + stub + <<-CODE, "captures `bag : Bag`, which is not Share: Bag's field @items : Pointer(Int32) is not shareable: Pointer(Int32) is raw memory", filename: "x.iyi")
         class Bag
           def initialize(@items : Pointer(Int32))
           end
@@ -4580,7 +4586,7 @@ describe "Semantic: iyi" do
     end
 
     it "refuses a captured value through a field two levels down" do
-      assert_error(stub + <<-CODE, "captures `shelf : Shelf`, which is not Share: Shelf's field @bag : Bag is not shareable: Bag's field @items : Pointer(Int32) is not shareable", filename: "x.iyi")
+      assert_error(unsafe + stub + <<-CODE, "captures `shelf : Shelf`, which is not Share: Shelf's field @bag : Bag is not shareable: Bag's field @items : Pointer(Int32) is not shareable", filename: "x.iyi")
         class Bag
           def initialize(@items : Pointer(Int32))
           end
@@ -4657,7 +4663,7 @@ describe "Semantic: iyi" do
       OWNING
 
     it "lets a thread capture an owning type of a value that is not Share" do
-      assert_type(stub + owning + <<-CODE, filename: "x.iyi") { int32 }
+      assert_type(unsafe + stub + owning + <<-CODE, filename: "x.iyi") { int32 }
         guard = Guard.new { Bag.new }
         step = 2
         IyiThread.start do
@@ -4669,7 +4675,7 @@ describe "Semantic: iyi" do
     end
 
     it "refuses a block behind the lock that captures a value that is not Share" do
-      assert_error(stub + owning + <<-CODE, "the block Guard#lock runs behind the Guard's lock captures `other : Bag`, which is not Share: Bag's field @n is assigned in `add`; whatever the block can reach, the value behind the lock can reach", filename: "x.iyi")
+      assert_error(unsafe + stub + owning + <<-CODE, "the block Guard#lock runs behind the Guard's lock captures `other : Bag`, which is not Share: Bag's field @n is assigned in `add`; whatever the block can reach, the value behind the lock can reach", filename: "x.iyi")
         guard = Guard.new { Bag.new }
         other = Bag.new
         guard.lock { |bag| other.add(bag.n) }
@@ -4677,21 +4683,21 @@ describe "Semantic: iyi" do
     end
 
     it "refuses an answer that is not Share leaving the lock" do
-      assert_error(stub + owning + <<-CODE, "Guard#get answers `Bag`, which is not Share: Bag's field @n is assigned in `add`; what a block behind the Guard's lock answers leaves the lock", filename: "x.iyi")
+      assert_error(unsafe + stub + owning + <<-CODE, "Guard#get answers `Bag`, which is not Share: Bag's field @n is assigned in `add`; what a block behind the Guard's lock answers leaves the lock", filename: "x.iyi")
         guard = Guard.new { Bag.new }
         guard.get { |bag| bag }
         CODE
     end
 
     it "refuses a constructor's block that hands in a value something else holds" do
-      assert_error(stub + owning + <<-CODE, "the block Guard.new makes the Guard's value in captures `other : Bag`, which is not Share", filename: "x.iyi")
+      assert_error(unsafe + stub + owning + <<-CODE, "the block Guard.new makes the Guard's value in captures `other : Bag`, which is not Share", filename: "x.iyi")
         other = Bag.new
         Guard.new { other }
         CODE
     end
 
     it "refuses a constant that is not Share named behind the lock" do
-      assert_error(stub + owning + <<-CODE, "the block Guard#lock runs behind the Guard's lock names the constant `KEPT : Bag`, which is not Share", filename: "x.iyi")
+      assert_error(unsafe + stub + owning + <<-CODE, "the block Guard#lock runs behind the Guard's lock names the constant `KEPT : Bag`, which is not Share", filename: "x.iyi")
         KEPT = Bag.new
         guard = Guard.new { 1 }
         guard.lock { |n| KEPT.add(n) }
@@ -4707,7 +4713,7 @@ describe "Semantic: iyi" do
     end
 
     it "trusts a type marked @[Share] whatever its fields do" do
-      assert_type(stub + <<-CODE, filename: "x.iyi") { nil_type }
+      assert_type(unsafe + stub + <<-CODE, filename: "x.iyi") { nil_type }
         @[Share]
         class Box
           def initialize
@@ -4728,7 +4734,7 @@ describe "Semantic: iyi" do
     end
 
     it "trusts a generic marked @[Share] only when its arguments are" do
-      assert_error(stub + <<-CODE, "captures `cell : Cell(Pointer(Int32))`, which is not Share: Cell(Pointer(Int32))'s T is Pointer(Int32): Pointer(Int32) is raw memory", filename: "x.iyi")
+      assert_error(unsafe + stub + <<-CODE, "captures `cell : Cell(Pointer(Int32))`, which is not Share: Cell(Pointer(Int32))'s T is Pointer(Int32): Pointer(Int32) is raw memory", filename: "x.iyi")
         @[Share]
         class Cell(T)
           def initialize(@value : T)
@@ -4942,7 +4948,7 @@ describe "Semantic: iyi" do
     # the two verbs and two placements it replaced are compile errors naming
     # the new spelling.
     describe "the one spawn verb" do
-      verb_stub = <<-STUB
+      verb_stub = unsafe + <<-STUB
         struct Proc
           @[Primitive(:proc_call)]
           @[Raises]
@@ -5578,7 +5584,7 @@ describe "Semantic: iyi" do
       end
 
       it "does not warn for Share constants: an owning type, a trusted one, one whose fields nothing assigns" do
-        infos = reach_warnings.call(owning + reach_stub + <<-CODE)
+        infos = reach_warnings.call(unsafe + owning + reach_stub + <<-CODE)
           @[Share]
           class Cell
             def initialize
@@ -6029,7 +6035,7 @@ describe "Semantic: iyi" do
         end
 
         it "is accepted when every write and every later read is behind one lock (b)" do
-          infos = reach_warnings.call(owning + reach_stub + ledger + <<-CODE)
+          infos = reach_warnings.call(unsafe + owning + reach_stub + ledger + <<-CODE)
             GUARD = Guard.new { Bag.new }
 
             @[SafeReach("every write and every read is behind GUARD")]
@@ -6054,7 +6060,7 @@ describe "Semantic: iyi" do
         end
 
         it "is refused when a write is behind a second lock (b)" do
-          assert_error(owning + reach_stub + ledger + <<-CODE, "is behind `OTHER`'s lock, and `QUIET.add` at x.iyi:", filename: "x.iyi")
+          assert_error(unsafe + owning + reach_stub + ledger + <<-CODE, "is behind `OTHER`'s lock, and `QUIET.add` at x.iyi:", filename: "x.iyi")
             GUARD = Guard.new { Bag.new }
             OTHER = Guard.new { Bag.new }
 
@@ -6075,7 +6081,7 @@ describe "Semantic: iyi" do
         end
 
         it "is refused when a read beside the locked writes takes no lock (b)" do
-          assert_error(owning + reach_stub + ledger + <<-CODE, "@[SafeReach] on `QUIET` is refused: `QUIET.add` at x.iyi:", filename: "x.iyi")
+          assert_error(unsafe + owning + reach_stub + ledger + <<-CODE, "@[SafeReach] on `QUIET` is refused: `QUIET.add` at x.iyi:", filename: "x.iyi")
             GUARD = Guard.new { Bag.new }
 
             @[SafeReach("every write is behind GUARD")]
@@ -6099,7 +6105,7 @@ describe "Semantic: iyi" do
         end
 
         it "is refused when the lock's receiver is not a constant or a class variable (b)" do
-          assert_error(owning + reach_stub + ledger + <<-CODE, "behind `guard`'s lock, which the compiler cannot name", filename: "x.iyi")
+          assert_error(unsafe + owning + reach_stub + ledger + <<-CODE, "behind `guard`'s lock, which the compiler cannot name", filename: "x.iyi")
             @[SafeReach("every write is behind a lock")]
             QUIET = Ledger.new
 
@@ -6183,7 +6189,7 @@ describe "Semantic: iyi" do
         end
 
         it "is refused when a write at startup sits in a proc kept to run later (c)" do
-          assert_error(owning + reach_stub + ledger + <<-CODE, "a proc, which may run whenever it is called", filename: "x.iyi")
+          assert_error(unsafe + owning + reach_stub + ledger + <<-CODE, "a proc, which may run whenever it is called", filename: "x.iyi")
             @[SafeReach("filled at startup, then only read")]
             QUIET = Ledger.new
 
@@ -6203,7 +6209,7 @@ describe "Semantic: iyi" do
         end
 
         it "is refused when a proc answers the state and its caller writes it" do
-          assert_error(owning + reach_stub + ledger + <<-CODE, "answers it from a proc the proof does not follow", filename: "x.iyi")
+          assert_error(unsafe + owning + reach_stub + ledger + <<-CODE, "answers it from a proc the proof does not follow", filename: "x.iyi")
             @[SafeReach("filled at startup, then only read")]
             QUIET = Ledger.new
 
@@ -6222,15 +6228,15 @@ describe "Semantic: iyi" do
             CODE
         end
 
-        it "refuses @[UnsafeReach] in a file that does not use Pointer" do
-          assert_error(reach_stub + <<-CODE, "@[UnsafeReach] on `QUIET` is not allowed here", filename: "x.iyi")
+        it "refuses @[UnsafeReach] in a module not marked @[Unsafe]" do
+          assert_error(reach_stub + <<-CODE, "@[UnsafeReach] on `QUIET` is the claim the compiler takes on trust, and `x.iyi` is not marked unsafe", filename: "x.iyi")
             @[UnsafeReach("one task asks at a time")]
             QUIET = Database.new
             CODE
         end
 
-        it "takes @[UnsafeReach] on trust in a file that uses Pointer" do
-          infos = reach_warnings.call(reach_stub + <<-CODE)
+        it "takes @[UnsafeReach] on trust in a module marked @[Unsafe]" do
+          infos = reach_warnings.call(%(@[Unsafe("hands out raw bytes")]\n) + reach_stub + <<-CODE)
             @[UnsafeReach("one task asks at a time")]
             QUIET = Database.new
 
@@ -6252,7 +6258,7 @@ describe "Semantic: iyi" do
         end
 
         it "refuses both marks on one state" do
-          assert_error(reach_stub + <<-CODE, "is marked both @[SafeReach] and @[UnsafeReach]", filename: "x.iyi")
+          assert_error(%(@[Unsafe("trusts its registry")]\n) + reach_stub + <<-CODE, "is marked both @[SafeReach] and @[UnsafeReach]", filename: "x.iyi")
             class Registry
               @[SafeReach("one")]
               @@db = Database.new
@@ -6399,6 +6405,78 @@ describe "Semantic: iyi" do
         x = 3_i64
         y = 4_u64
         same(x, y)
+        CODE
+    end
+  end
+
+  # SPEC.md III.13: an operation the compiler does not check is allowed in
+  # a module whose first statement is `@[Unsafe("why")]`, and refused in
+  # every other `.iyi` file. bench/unsafe.sh holds each way out against the
+  # real prelude; these are the shapes a snippet can write without one.
+  describe "unsafe code (SPEC.md III.13)" do
+    it "refuses `uninitialized` in a module not marked @[Unsafe]" do
+      assert_error(<<-CODE, "`uninitialized Int32` is a value nothing has written, and a reference read from it points anywhere, and `x.iyi` is not marked unsafe", filename: "x.iyi")
+        x = uninitialized Int32
+        x
+        CODE
+    end
+
+    it "accepts `uninitialized` in a module marked @[Unsafe]" do
+      semantic(<<-CODE, filename: "x.iyi")
+        @[Unsafe("reads a word before it is written, on purpose")]
+        x = uninitialized Int32
+        x
+        CODE
+    end
+
+    it "leaves a file of the other language alone" do
+      semantic(<<-CODE, filename: "x.cr")
+        x = uninitialized Int32
+        x
+        CODE
+    end
+
+    it "refuses `asm`, a `lib` and a `fun` in a module not marked @[Unsafe]" do
+      assert_error(<<-CODE, "`asm` is machine code the compiler does not check", filename: "x.iyi")
+        def f : Int32
+          asm("nop")
+          1
+        end
+        f
+        CODE
+      assert_error(<<-CODE, "`lib LibZ` declares C functions the compiler does not check", filename: "x.iyi")
+        lib LibZ
+          fun z(n : Int32) : Int32
+        end
+        1
+        CODE
+      assert_error(<<-CODE, "`fun cb` is a C function the compiler does not check", filename: "x.iyi")
+        fun cb(a : Int32) : Int32
+          a
+        end
+        1
+        CODE
+    end
+
+    it "refuses a call to a def whose caller keeps a promise, and accepts it marked" do
+      code = <<-CODE
+        @[Unsafe(call: "n is below ten")]
+        def small(n : Int32) : Int32
+          n
+        end
+        small(3)
+        CODE
+      assert_error(code, "promises \"n is below ten\", and its caller keeps that promise, and `x.iyi` is not marked unsafe", filename: "x.iyi")
+      semantic(%(@[Unsafe("calls `small` with 3")]\n) + code, filename: "x.iyi")
+    end
+
+    it "refuses a mark without a reason, and a contract on a type" do
+      assert_error(%(@[Unsafe]\n1), "a module's @[Unsafe] says why the module handles raw memory, as one string", filename: "x.iyi")
+      assert_error(<<-CODE, "is the promise a def's caller keeps, and `Foo` is a type", filename: "x.iyi")
+        1
+        @[Unsafe(call: "x")]
+        class Foo
+        end
         CODE
     end
   end

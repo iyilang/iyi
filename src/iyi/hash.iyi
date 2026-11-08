@@ -14,6 +14,7 @@
 # Hashing is `key.hash`, defined per type in this prelude, and not iyi's
 # `Hashable` trait: that lives in `src/std`, the opt-in library, and a
 # prelude that depended on it would have the dependency backwards.
+@[Unsafe("a table's keys, values and index live in buffers it allocates, probes and grows itself")]
 class Hash(K, V)
   @keys : Pointer(K)
   @values : Pointer(V)

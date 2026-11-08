@@ -105,6 +105,7 @@
 # protocol one rule at a time, and to Let's Encrypt's Pebble for whole
 # orders by all three challenges where Go is there to build it.
 
+@[Unsafe("its parsers walk the bytes of the text they read straight through the string's buffer, for speed")]
 module std/acme
 
 import std/x509::{X509, X509Error, X509Extension, Certificate, SigningKey}

@@ -31,6 +31,14 @@
 #   7. **`!` is III.1.7a's.** `x.not_nil!` becomes `(x || raise …)`, and
 #      any other `foo!` its non-bang spelling, each site named in a note
 #      because the copy and the mutation are not the same program.
+#   8. **A module that handles raw memory says so.** A module whose
+#      source spells an operation the compiler does not check -
+#      `Pointer`, `T*`, `pointerof`, `to_unsafe`, `uninitialized`, a
+#      `lib` or `fun`, `asm`, the `unsafe_*` calls whose caller keeps a
+#      promise, `@[Primitive]`, `@[Extern]`, `@[Link]`, a type's
+#      `@[Share]`, `@[UnsafeReach]` - is written with `@[Unsafe("why")]`
+#      above its header (SPEC.md III.13), the reason naming the first one.
+#      Harmless under `--crystal`; what the compile needs afterwards.
 #
 # Everything else stays as written — `getter`, `include` into a type,
 # `rescue`, macros, an untyped `def` nobody exports — because the
@@ -606,6 +614,11 @@ class Iyi::Command
       end
 
       written[module_path] = String.build do |io|
+        if (use = members.each.compact_map { |member| MigrateUnit.unsafe_use(member.body).try { |what| {what, member.relative} } }.first?)
+          what, relative = use
+          io << "@[Unsafe(\"" << UnsafeCheck.reason_text("migrated from Crystal that uses #{what} (#{relative})") << "\")]\n"
+          notes.add "unsafe", "#{module_path}: #{what} in #{relative}"
+        end
         io << "module " << module_path << "\n\n"
         shard_requires.each { |name| io << "require \"" << name << "\"\n" }
         # A shard's top-level code runs once, in whichever module the
@@ -943,6 +956,7 @@ class Iyi::Command
       "unexported" => "declarations no other module names, left unexported",
       "embed"      => "templates embedded at compile time, named from the project root",
       "vendored"   => "what is not this tree's to migrate, and what is",
+      "unsafe"     => "modules written marked @[Unsafe], their source handling raw memory (SPEC.md III.13)",
     }
 
     def print(verbose : Bool) : Nil
@@ -1265,6 +1279,67 @@ class Iyi::Command
 
     def initialize(@source, @relative, @namespace, @path, @exports, @includes,
                    @lines, @wrappers, @shard_requires, @sidecar)
+    end
+
+    # Rule 8: the first operation in *lines* that only a module marked
+    # `@[Unsafe]` may write (SPEC.md III.13), read off the text with its
+    # strings and comments taken out. Spelled as the mark's reason names it.
+    UNSAFE_WORDS = %w(Pointer pointerof to_unsafe uninitialized asm unsafe_fetch unsafe_put unsafe_build unsafe_set_size unsafe_construct)
+    UNSAFE_MARKS = %w(@[Primitive @[Extern @[Link @[Share @[UnsafeReach)
+
+    def self.unsafe_use(lines : Array(String)) : String?
+      lines.each do |line|
+        code = code_of(line)
+        stripped = code.lstrip
+        return "`lib`" if stripped.starts_with?("lib ")
+        return "`fun`" if stripped.starts_with?("fun ")
+        UNSAFE_MARKS.each { |mark| return "`#{mark}]`" if stripped.starts_with?(mark) }
+        chars = code.chars
+        from = nil
+        (chars.size + 1).times do |index|
+          char = chars[index]?
+          if char && (char.ascii_alphanumeric? || char == '_')
+            from ||= index
+            next
+          end
+          next unless start = from
+          from = nil
+          # An instance variable is a name, whatever it is called.
+          next if start > 0 && chars[start - 1] == '@'
+          word = chars[start...index].join
+          return "`#{word}`" if UNSAFE_WORDS.includes?(word)
+          # `UInt8*` and `Void*`: a pointer type written the C way.
+          if char == '*' && word[0].ascii_uppercase? && (chars[index + 1]? || ' ').in?(')', ',', ' ', '?', '|', ']', '\r')
+            return "`#{word}*`"
+          end
+        end
+      end
+      nil
+    end
+
+    # *line* without its comment and with its string and character
+    # literals emptied: the code a word is looked for in.
+    private def self.code_of(line : String) : String
+      String.build do |io|
+        quote = nil
+        escaped = false
+        line.each_char do |char|
+          if quote
+            if escaped
+              escaped = false
+            elsif char == '\\'
+              escaped = true
+            elsif char == quote
+              quote = nil
+              io << char
+            end
+            next
+          end
+          break if char == '#'
+          quote = char if char.in?('"', '\'')
+          io << char
+        end
+      end
     end
 
     # Every root namespace a file declares unqualified: the tree's own. Reads

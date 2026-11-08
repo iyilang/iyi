@@ -9,6 +9,7 @@
 # stops at the text "stop". With `connect PORT [ROOTS]` it is the client
 # the script's Python server talks to, over `wss://` with roots.
 
+@[Unsafe("it builds and reads frames through strings' buffers, as std/websocket writes them, to check the bytes on the wire")]
 module bench/std_websocket_exercise
 
 import std/websocket::{WebSocket, WebSocketError, Message, PerMessageDeflate}

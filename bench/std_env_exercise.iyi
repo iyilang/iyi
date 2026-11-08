@@ -3,6 +3,7 @@
 # Run via:
 #     ./bin/iyi run bench/std_env_exercise.iyi
 
+@[Unsafe("it builds a C environment block (an array of UInt8* entries) by hand, to check what std/env reads from one")]
 module bench/std_env_exercise
 
 import std/env::{ENV}

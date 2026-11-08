@@ -22,6 +22,7 @@
 # bench program, and bench/std_http_exercise.sh with its broken copies
 # of std/http, and of what std/http takes from std/tls.
 
+@[Unsafe("it builds DNS answers for the HTTPS records through strings' buffers, the bytes std/http's client parses")]
 module bench/std_http_https_records
 
 import std/http::{HTTPClient, HTTPError, Response}

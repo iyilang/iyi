@@ -89,17 +89,17 @@ when "cooked"
   say "LINE #{STDIN.read_line(chomp: true).inspect}"
   say "READY cooked"
   got = STDIN.read_bytes(1)
-  say "BYTE #{got.bytesize > 0 ? got.to_unsafe[0] : -1}"
+  say "BYTE #{got.bytesize > 0 ? got.byte_at(0) : -1}"
   exit 0
 when "raw"
   answer = Term.raw(STDIN) do
     say "READY raw"
     first = STDIN.read_bytes(1)
-    say "BYTE #{first.to_unsafe[0]}"
+    say "BYTE #{first.byte_at(0)}"
     second = STDIN.read_bytes(1)
-    say "BYTE #{second.to_unsafe[0]}"
+    say "BYTE #{second.byte_at(0)}"
     third = STDIN.read_bytes(1)
-    say "BYTE #{third.to_unsafe[0]}"
+    say "BYTE #{third.byte_at(0)}"
     "kept"
   end
   if answer.is_a?(TermError)

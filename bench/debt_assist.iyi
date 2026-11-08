@@ -22,6 +22,7 @@
 # bench/collect_trigger.sh runs it, and a copy of the runtime with the
 # assist removed, which it catches.
 
+@[Unsafe("allocates raw blocks through Pointer.malloc so every thread runs past the budget and owes the collector a sweep")]
 module bench/debt_assist
 
 {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}

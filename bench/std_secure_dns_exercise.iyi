@@ -14,6 +14,7 @@
 # artifacts, and compares what the two print - so nothing printed before
 # the stop names a port or a time.
 
+@[Unsafe("it copies a DNS query's bytes into String.new's buffer through to_unsafe, to encode it as DNS over HTTPS sends it")]
 module bench/std_secure_dns_exercise
 
 import std/dns::{DnsError, DnsMessage, DnsName, DnsRecord, SvcbAnswer}

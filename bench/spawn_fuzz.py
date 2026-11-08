@@ -349,6 +349,10 @@ def module_text(mod, rng):
                 out += ["group do |g|", f"  g.spawn {{ read{cell.k}; nil }}", "end"]
                 started = True
             out.append(f"bump{cell.k}")
+    if mod.uses_pointer:
+        # The mark takes the blank line under the header, so every line
+        # below keeps the number the oracle reads refusals and spawns at.
+        out[0:2] = ['@[Unsafe("the module allocates through Pointer#malloc beside its UnsafeReach claim, the trust that claim stands on")]', out[0]]
     return "\n".join(out) + "\n"
 
 
@@ -545,6 +549,12 @@ def notes_of(log, root):
     for line in log.splitlines():
         m = NOTE.match(line)
         if not m:
+            continue
+        # A parallel spawn that reaches a module marked @[Unsafe] is noted a
+        # second time at the same place, "spawn reaches unsafe code in ...":
+        # a word about trust, not a placement, and keyed by place it would
+        # take the placement's slot.
+        if m["rest"].startswith("reaches unsafe code"):
             continue
         path = os.path.relpath(m["file"], root) if os.path.isabs(m["file"]) else m["file"]
         path = re.sub(r"^\.\./(src|prod)/", "", path.replace("\\", "/"))

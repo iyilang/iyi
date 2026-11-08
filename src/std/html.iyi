@@ -11,6 +11,7 @@
 # coverage for standard web documents and prose while remaining within the SPEC III
 # footprint floor.
 
+@[Unsafe("escaping and unescaping walk the bytes of the text through a raw pointer, for speed")]
 module std/html
 
 import std/text

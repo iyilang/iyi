@@ -73,8 +73,10 @@ module Iyi::Lsp
     # own `version` field. See `publish_diagnostics`.
     @versions = {} of String => Int64
     # The last published diagnostics, kept for codeAction to read back:
-    # {line0, start_ch, end_ch, message, suggestion} per document.
-    @published = {} of String => Array({Int32, Int32, Int32, String, String?})
+    # {line0, start_ch, end_ch, message, suggestion, edit} per document,
+    # where *edit* is the {line0, start_ch, end_ch} the suggestion replaces
+    # when that is not the diagnostic's own range (`Diag#edit_at`).
+    @published = {} of String => Array({Int32, Int32, Int32, String, String?, {Int32, Int32, Int32}?})
     @roots = [] of String
     @running = true
     # Set by `shutdown`. After it, the protocol says every request but
@@ -827,7 +829,13 @@ module Iyi::Lsp
         {diag.line - 1, start_ch, end_ch, diag}
       end
 
-      @published[uri] = rows.map { |(line0, start_ch, end_ch, diag)| {line0, start_ch, end_ch, diag.message, diag.suggestion} }
+      @published[uri] = rows.map do |(line0, start_ch, end_ch, diag)|
+        edit = diag.edit_at.try do |(edit_line, edit_column, edit_size)|
+          edit_text = lines[edit_line - 1]? || ""
+          {edit_line - 1, Lsp.character_of(edit_text, edit_column), Lsp.character_of(edit_text, edit_column + edit_size)}
+        end
+        {line0, start_ch, end_ch, diag.message, diag.suggestion, edit}
+      end
       rows
     end
 
@@ -1281,6 +1289,15 @@ module Iyi::Lsp
       word = word_at(line_text, column)
       parts = [] of String
 
+      # A module's `@[Unsafe("why")]`: what the mark lets the module do, and
+      # the reason its author gave (SPEC.md III.13). Read off the text, as
+      # the mark is the file's first statement and needs no compile.
+      if reason = Lsp.unsafe_mark_reason(text, line0)
+        parts << "**Unsafe module:** #{reason}\n\nEvery operation the compiler does not check - a `Pointer`, " \
+                 "`uninitialized`, a `lib` or `fun`, `asm`, a call whose caller keeps a promise, the trust marks - " \
+                 "is allowed here, and the module keeps what the compiler would have checked (SPEC.md III.13)"
+      end
+
       result = @analysis.context_at(path, text, overrides_for(path), line0 + 1, column)
       if (contexts = result.try(&.contexts)) && !contexts.empty?
         # The name under the cursor first; a call expression the visitor
@@ -1322,6 +1339,11 @@ module Iyi::Lsp
           parts << doc unless doc.empty?
         end
       end
+      # A def whose caller keeps a promise, its own or the abstract def's it
+      # implements: the call is unsafe code (SPEC.md III.13).
+      impls.try(&.contracts).try &.each do |contract|
+        parts << "**Unsafe to call:** its caller keeps \"#{contract}\", which the compiler does not check (SPEC.md III.13)"
+      end
 
       # A type's name - `Shape` in `impl Shape for Square` - is no variable
       # and no call, and answered null: its declaration line and doc comment
@@ -1357,7 +1379,8 @@ module Iyi::Lsp
     # The `#` lines immediately above a definition — the doc comment,
     # rendered as the markdown it already is. Annotations between the
     # comment and the definition (`@[Share(owns: true)]` above
-    # `std/unit`'s `Unit`) are stepped over, as the doc generator does.
+    # `std/unit`'s `Unit`, a caller contract `@[Unsafe(call: "...")]`,
+    # SPEC.md III.13) are stepped over, as the doc generator does.
     private def doc_above(filename : String, line : Int32) : String
       text = document_text(filename) || (File.file?(filename) ? File.read(filename) : "")
       lines = text.lines
@@ -2881,11 +2904,11 @@ module Iyi::Lsp
       # before a 3 s pause and nothing after it. Compiled here instead,
       # which is the verdict that is on screen.
       diagnostic_rows(uri) if action_wanted?(only, "quickfix") && !@published.has_key?(uri)
-      actions = (@published[uri]? || [] of {Int32, Int32, Int32, String, String?}).compact_map do |(line0, start_ch, end_ch, message, suggestion)|
+      actions = (@published[uri]? || [] of {Int32, Int32, Int32, String, String?, {Int32, Int32, Int32}?}).compact_map do |(line0, start_ch, end_ch, message, suggestion, edit)|
         next unless action_wanted?(only, "quickfix")
         next unless line0 >= from && line0 <= to && end_ch > start_ch
         next unless suggestion
-        {line0, start_ch, end_ch, message, suggestion}
+        {line0, start_ch, end_ch, message, suggestion, edit}
       end
 
       organize =
@@ -2894,9 +2917,10 @@ module Iyi::Lsp
         end
       respond(id) do |json|
         json.array do
-          actions.each do |(line0, start_ch, end_ch, message, suggestion)|
+          actions.each do |(line0, start_ch, end_ch, message, suggestion, edit)|
+            edit_line0, edit_start, edit_end = edit || {line0, start_ch, end_ch}
             json.object do
-              json.field "title", "Change to '#{suggestion}'"
+              json.field "title", edit ? "Insert `#{suggestion.lines.first?}`" : "Change to '#{suggestion}'"
               json.field "kind", "quickfix"
               json.field "diagnostics" do
                 json.array do
@@ -2915,7 +2939,7 @@ module Iyi::Lsp
                       json.field uri do
                         json.array do
                           json.object do
-                            json.field "range" { range(json, line0, start_ch, line0, end_ch) }
+                            json.field "range" { range(json, edit_line0, edit_start, edit_line0, edit_end) }
                             json.field "newText", suggestion
                           end
                         end

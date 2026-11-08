@@ -11,6 +11,7 @@
 # `client PORT SCENARIO [ROOTS]` is the other end of
 # bench/std_smtp_exercise.sh's Python server.
 
+@[Unsafe("its test helper walks a reply's bytes through to_unsafe, to check what std/smtp writes byte for byte")]
 module std_smtp_exercise
 
 import std/smtp::{SmtpClient, SmtpError, SmtpSecurity, SmtpAuth, SmtpReply}

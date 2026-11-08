@@ -20,6 +20,7 @@
 # With no arguments it runs two workers briefly, checks every answer and
 # prints a fixed line.
 
+@[Unsafe("on Windows the peak working set is read through K32GetProcessMemoryInfo, a C call that fills counters in Pointer#malloc memory")]
 module bench/release_pages
 
 import std/http::{Request, Response, Server}

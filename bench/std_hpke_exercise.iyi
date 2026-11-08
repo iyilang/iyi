@@ -23,6 +23,7 @@
 #            CIPHERTEXTS and PLAINTEXTS are joined the same way;
 #   cost     what single-shot and in-context seal and open of 1 KiB take.
 
+@[Unsafe("its hex and byte helpers read strings' bytes through to_unsafe and copy bytes into String.new's buffer, the way std/hpke reads its input")]
 module bench/std_hpke_exercise
 
 import std/int

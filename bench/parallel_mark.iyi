@@ -13,6 +13,7 @@
 # bench/parallel_mark.sh drives it and proves the sharing check fails when
 # the marker stops donating its stack's bottom.
 
+@[Unsafe("reads the process clock by a raw syscall into uninitialized words, or through clock_gettime_nsec_np or GetProcessTimes in C, and counts through a raw atomic word")]
 {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
   def fail(message : String) : Nil
     print "FAIL: #{message}\n"

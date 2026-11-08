@@ -39,6 +39,7 @@
 #
 # Pure computation: no platform, no clock, no randomness.
 
+@[Unsafe("encoding and decoding read the input's bytes through a raw pointer, for speed")]
 module std/base32
 
 # What `decode` answers for a text that is not base32.

@@ -116,6 +116,7 @@ fi
 #
 # Everything is hex; an empty message is "-".
 cat >"$WORK/oracle.iyi" <<'IYI'
+@[Unsafe("the oracle decodes and encodes hex by reading the strings' bytes through to_unsafe and writing String.new's buffer")]
 module oracle
 
 import std/curve25519::{X25519, Ed25519, CurveError}

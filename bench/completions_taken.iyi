@@ -26,6 +26,7 @@
 # a broken copy of the runtime each: a port whose packets only the thread
 # their task parked on takes, and a pool that leaves the boost on.
 
+@[Unsafe("on Windows it asks whether the process's priority boost is off through GetProcessPriorityBoost, a C call answering through pointerof")]
 module bench/completions_taken
 
 import std/socket::{IyiSocket, SocketError}

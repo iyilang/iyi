@@ -32,6 +32,7 @@
 # bench/alloc_cache.sh runs it plain and optimised and runs broken copies
 # of the runtime to prove each check can fail.
 
+@[Unsafe("the ledgers of dead and born objects are pages from __iyi_mmap written as raw words, so recording them allocates nothing the collector sees")]
 {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
   def fail(message : String) : Nil
     print "FAIL: #{message}\n"

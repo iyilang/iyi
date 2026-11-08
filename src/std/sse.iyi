@@ -80,6 +80,7 @@
 # and CORS, which are a browser's, and a client that reconnects with
 # backoff.
 
+@[Unsafe("the event parser walks the bytes of the stream through a raw pointer")]
 module std/sse
 
 import std/http::{HTTP, Response, BodyWriter, HTTPError}

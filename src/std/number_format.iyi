@@ -37,6 +37,7 @@
 # What each refuses, by panic: a group under 1, negative decimal places,
 # a precision under 1 significant digit or under 0 places.
 
+@[Unsafe("digits are printed from the raw buffer the prelude's float printer fills")]
 module std/number_format
 
 import std/int

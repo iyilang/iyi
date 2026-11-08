@@ -176,9 +176,16 @@ def kernel_free(attrs):
 
 
 def stty_kernel_free(text):
-    # `stty -g` is iflag:oflag:cflag:lflag:... in hex on both platforms.
+    # GNU `stty -g` is iflag:oflag:cflag:lflag:... in hex; the BSD stty
+    # darwin ships writes gfmt1:cflag=...:iflag=...:lflag=...:..., which
+    # this read as GNU's until a Mac whose PATH had no coreutils gnubin in
+    # front (CI puts it there) failed with `int('lflag=200005cb', 16)`.
     fields = text.split(":")
-    if len(fields) > 3 and KERNEL_LFLAG:
+    if not KERNEL_LFLAG:
+        return text
+    if fields[0] == "gfmt1":
+        fields = [f"lflag={int(f[6:], 16) & ~KERNEL_LFLAG:x}" if f.startswith("lflag=") else f for f in fields]
+    elif len(fields) > 3:
         fields[3] = format(int(fields[3], 16) & ~KERNEL_LFLAG, "x")
     return ":".join(fields)
 

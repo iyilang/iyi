@@ -298,6 +298,14 @@ ALLOWED_LINES: list[tuple[str, str]] = [
     (r"crystal-release|src/compiler/crystal\.cr|clean_cache crystal", "the compatibility binary's build"),
     (r"names crystal in the same banner|program_name = \"crystal\"", "the spec that pins the compatibility name"),
     (r"from-crystal|reads CRYSTAL_PATH when IYI_PATH", "the spec that pins the Crystal env-var fallback"),
+    # SPEC.md III.13. The list of a program's own marked modules is a constant
+    # the compiler defines in the `Crystal` module a compiled program reads,
+    # beside `Crystal::VERSION`; `iyi migrate`'s reason says what the module
+    # was migrated from; and `bench/unsafe.sh`'s last step holds that the
+    # check leaves `--crystal` and `.cr` programs alone, reading a test word.
+    (r"Crystal::IYI_UNSAFE_MODULES", "the Crystal module a compiled program reads"),
+    (r"migrated from Crystal that uses", "what a migrated module's reason says it came from"),
+    (r'Crystal is unaffected|"crystal"\.to_unsafe', "bench/unsafe.sh's step on the other language"),
     # Backticks required. A bare `CRYSTAL_DAEMON` matched the Makefile's
     # `CRYSTAL_DAEMON_BIN`, which the cutover had renamed to `IYI_DAEMON_BIN`,
     # and so hid a real break: upstream's new `check_daemon_matches` expanded

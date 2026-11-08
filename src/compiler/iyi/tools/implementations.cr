@@ -9,6 +9,10 @@ module Iyi
     property status : String
     property message : String
     property implementations : Array(ImplementationTrace)?
+    # The promise each target makes its caller keep (`@[Unsafe(call:
+    # "...")]`, SPEC.md III.13), which the language server's hover shows.
+    @[JSON::Field(ignore: true)]
+    property contracts = [] of String
 
     def initialize(@status, @message)
     end
@@ -89,12 +93,15 @@ module Iyi
     include TypedDefProcessor
 
     getter locations : Array(Location)
+    getter contracts = [] of String
+    @program : Program?
 
     def initialize(@target_location : Location)
       @locations = [] of Location
     end
 
     def process(result : Compiler::Result)
+      @program = result.program
       process_result result
 
       result.node.accept(self)
@@ -104,6 +111,7 @@ module Iyi
       else
         res = ImplementationResult.new("ok", "#{@locations.size} implementation#{@locations.size > 1 ? "s" : ""} found")
         res.implementations = @locations.map { |loc| ImplementationTrace.build(loc) }
+        res.contracts = @contracts.uniq
         res
       end
     end
@@ -114,6 +122,7 @@ module Iyi
       if target_defs = node.target_defs
         target_defs.each do |target_def|
           @locations << (target_def.location || Location.new(nil, 0, 0))
+          @program.try { |program| UnsafeCheck.contract_of(program, target_def).try { |contract| @contracts << contract } }
         end
       end
       false

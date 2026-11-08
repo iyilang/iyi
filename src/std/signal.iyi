@@ -42,6 +42,7 @@
 # a write that answers EPIPE - and `Signal.reset` gives it its default
 # back. A `wait` or `each` that names it afterwards takes it again.
 
+@[Unsafe("signals are caught, waited for and reset through the platform's raw calls")]
 module std/signal
 
 {% unless (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}

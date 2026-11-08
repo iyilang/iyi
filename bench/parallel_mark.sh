@@ -166,6 +166,7 @@ prove_fails "a round whose close leaves its permits open is refused" \
 # program collects 200 times back to back with a 2 MiB block live, so
 # every mark asks for helpers and is over before a helper's wait is.
 cat > late.iyi <<'IYI'
+@[Unsafe("the program keeps a 2 MiB block from Pointer#malloc live as an address, so every mark has a large object to scan")]
 class Held
   @@block : UInt64 = 0_u64
 

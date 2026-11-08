@@ -85,6 +85,7 @@
 # a public key or signature that is malformed, of the wrong size or
 # non-canonical makes `verify` answer false.
 
+@[Unsafe("keys, points and signatures are read through raw byte pointers by the field arithmetic, for speed")]
 module std/curve25519
 
 import std/int

@@ -1,6 +1,7 @@
 # Interned strings: the same bytes become the same String object.
 #
 
+@[Unsafe("strings are interned in a table it allocates and indexes itself, by hashing and comparing bytes read through raw pointers")]
 module std/string_pool
 
 import std/slice::{Bytes}

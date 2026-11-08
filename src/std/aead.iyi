@@ -77,6 +77,7 @@
 # In the --release assembly both `open`s compare the 16 tag bytes as one
 # vector (`pcmpeqb`) and branch once, on the verdict.
 
+@[Unsafe("the ciphers read their keys and messages through raw byte pointers, a block at a time, for speed")]
 module std/aead
 
 import std/int

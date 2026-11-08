@@ -335,11 +335,31 @@ module Iyi
         # `check` and `test` of it said "can't find module
         # 'applications_dir/util'" where the long spelling printed 42.
         long = Iyi.long_path(File.expand_path(path))
-        return nil unless Iyi.path_key(::Path[long].to_posix.to_s).ends_with?(Iyi.path_key(suffix))
+        unless Iyi.path_key(::Path[long].to_posix.to_s).ends_with?(Iyi.path_key(suffix))
+          return nil unless header_spelling_same_file?(long, suffix)
+        end
         path = long
       end
       root = path[0, path.size - suffix.size]
       root.empty? ? "/" : root
+    end
+
+    # Whether *path*, which ends in *suffix* only when case is folded, is the
+    # file its root joined to *suffix* opens - on a Mac, asked of the volume.
+    # APFS folds case by default but can be formatted not to, so the string
+    # cannot say: `iyi run HDR/APP/MAIN.IYI` of a stored `hdr/app/main.iyi`
+    # found no root, and its `import app/util` was "can't find module
+    # 'app/util'" (macOS 26.6, Apple M2 Pro, the user's machine) where
+    # Windows, whose `path_key` folds case, printed 42. Linux volumes are
+    # left to the string.
+    private def self.header_spelling_same_file?(path : String, suffix : String) : Bool
+      {% if flag?(:darwin) %}
+        return false unless path.size >= suffix.size
+        return false unless path[-suffix.size..].compare(suffix, case_insensitive: true) == 0
+        Iyi.same_file?(path[0, path.size - suffix.size] + suffix, path)
+      {% else %}
+        false
+      {% end %}
     end
 
     # The directory a build of *path* is answered from: the root its header

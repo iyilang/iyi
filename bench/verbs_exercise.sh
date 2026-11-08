@@ -633,14 +633,25 @@ fi
 mkdir -p "$WORK/runcache"
 : > "$WORK/runcache/iyi-run-main-99999.tmp.exe"
 : > "$WORK/runcache/iyi-run-main-99998.tmp.exe"
-touch -d '2 hours ago' "$WORK/runcache/iyi-run-main-99999.tmp.exe"
-IYI_CACHE_DIR="$WORK/runcache" "$IYI" run twin_b/main.iyi > sweep.out 2>&1
-if [ -e "$WORK/runcache/iyi-run-main-99999.tmp.exe" ]; then
-  echo "  a runner's leftover from two hours ago is still in the cache"; status=1
-elif [ ! -e "$WORK/runcache/iyi-run-main-99998.tmp.exe" ]; then
-  echo "  a runner's leftover from just now was taken"; status=1
+# Two hours back in POSIX's own terms: `touch -d '2 hours ago'` is GNU's,
+# and BSD touch refused it, so on a Mac the leftover stayed fresh and this
+# read "still in the cache" of a runner that was right. The stamp is the
+# clock two hours west of UTC, set as UTC; `find -mmin` then holds that the
+# file is between one and three hours old, so a stamp that did not take
+# says so instead of passing or failing for the wrong reason.
+stale_stamp=$(TZ=UTC2 date +%Y%m%d%H%M.%S)
+TZ=UTC0 touch -t "$stale_stamp" "$WORK/runcache/iyi-run-main-99999.tmp.exe"
+if [ -z "$(find "$WORK/runcache/iyi-run-main-99999.tmp.exe" -mmin +60 -mmin -180)" ]; then
+  echo "  a leftover could not be dated two hours back (touch -t $stale_stamp)"; status=1
 else
-  echo "  an old runner's leftover is taken, a fresh one kept"
+  IYI_CACHE_DIR="$WORK/runcache" "$IYI" run twin_b/main.iyi > sweep.out 2>&1
+  if [ -e "$WORK/runcache/iyi-run-main-99999.tmp.exe" ]; then
+    echo "  a runner's leftover from two hours ago is still in the cache"; status=1
+  elif [ ! -e "$WORK/runcache/iyi-run-main-99998.tmp.exe" ]; then
+    echo "  a runner's leftover from just now was taken"; status=1
+  else
+    echo "  an old runner's leftover is taken, a fresh one kept"
+  fi
 fi
 # A path in another case, where the file system says it is the same
 # file. The root a header names was found by comparing strings, so `iyi

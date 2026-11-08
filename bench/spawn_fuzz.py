@@ -550,6 +550,12 @@ def notes_of(log, root):
         m = NOTE.match(line)
         if not m:
             continue
+        # A parallel spawn that reaches a module marked @[Unsafe] is noted a
+        # second time at the same place, "spawn reaches unsafe code in ...":
+        # a word about trust, not a placement, and keyed by place it would
+        # take the placement's slot.
+        if m["rest"].startswith("reaches unsafe code"):
+            continue
         path = os.path.relpath(m["file"], root) if os.path.isabs(m["file"]) else m["file"]
         path = re.sub(r"^\.\./(src|prod)/", "", path.replace("\\", "/"))
         placed[(path, int(m["line"]), int(m["col"]))] = m["rest"]

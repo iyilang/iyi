@@ -11,6 +11,7 @@
 # in its spawner's unit, which is the program before 0.21.0. Best of five
 # rounds, printed with the answer, which is the same at every count.
 
+@[Unsafe("holds `Pointer(UInt8)` in `bytes`, line 24")]
 module bench/spawn_fanout
 
 import std/int

@@ -28,6 +28,7 @@
 # Run via:
 #     ./bin/iyi run bench/std_time_exercise.iyi
 
+@[Unsafe("it builds zone files byte for byte through String.new's buffer and reads names' bytes through to_unsafe, the input std/time parses")]
 module bench/std_time_exercise
 
 import std/format::{printf}

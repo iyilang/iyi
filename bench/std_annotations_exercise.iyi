@@ -3,6 +3,7 @@
 # Run via:
 #     ./bin/iyi run bench/std_annotations_exercise.iyi
 
+@[Unsafe("it declares a C library, LibCInterop, to read its @[Link] annotation back and call strlen through it")]
 module bench/std_annotations_exercise
 
 def assert_true(cond : Bool, msg : String) : Nil

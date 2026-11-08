@@ -10,6 +10,7 @@
 #    the collection, before its memory is reused.
 # 7. Objects held by locals alone survive, in plain and optimised builds.
 
+@[Unsafe("it keeps allocations' addresses in a raw buffer of words from IyiHeap.alloc_atomic, which the collector does not scan")]
 import std/weak_ref::{WeakRef}
 
 def count(value : UInt64) : String

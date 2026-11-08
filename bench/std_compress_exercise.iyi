@@ -11,6 +11,7 @@
 # written beside them for zlib to read; `bench/std_compress_exercise.sh`
 # is the other half of that conversation.
 
+@[Unsafe("its reference bit reader and test streams walk the input's bytes through raw pointers, to check std/compress's deflate, zlib and gzip against them")]
 module bench/std_compress_exercise
 
 import std/compress::{Deflate, Zlib, Gzip, Inflater, Deflater, Envelope, CompressError}

@@ -31,6 +31,7 @@
 # performance counter. Whichever it is, the answer is nanoseconds; what it
 # costs is two allocations of sixteen bytes, once per call, which a
 # per-allocation measurement can afford at the ends of a run.
+@[Unsafe("declares the C library `LibC`, line 34")]
 {% if flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64)) %}
   def monotonic_ns : UInt64
     stamp = Pointer(UInt64).malloc(2_u64)

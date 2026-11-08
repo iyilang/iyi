@@ -26,6 +26,7 @@
 #                   http-01, dns-01 and tls-alpn-01, the chains checked by
 #                   std/x509 against Pebble's root and written to OUT.
 
+@[Unsafe("its byte helpers read strings' bytes through to_unsafe and copy them into String.new's buffer, to hand std/acme and std/x509 the DER they read")]
 import std/acme::{AcmeClient, AcmeJws, AcmeError, AcmeHttp01, AcmeTlsAlpn01, AcmeOrder, AcmeAuthorization, AcmeChallenge}
 import std/x509::{X509, X509Error, SigningKey, Certificate}
 import std/rsa::{RsaPublicKey, RsaPrivateKey, RsaHash}

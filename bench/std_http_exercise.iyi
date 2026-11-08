@@ -3,6 +3,7 @@
 # Run via:
 #     ./bin/iyi run bench/std_http_exercise.iyi
 
+@[Unsafe("it reads a request's bytes through to_unsafe and takes listeners' file descriptors with to_unsafe, to drive std/http's server over raw sockets")]
 module bench/std_http_exercise
 
 def assert_true(cond : Bool, msg : String) : Nil

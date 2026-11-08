@@ -10,6 +10,7 @@
 # 4. closed peer detection (read returns empty string on EOF)
 # 5. refused connection when target port has no listener
 
+@[Unsafe("declares the C library `LibReset`, line 257")]
 import std/socket::{IyiSocket, SocketError, IPv6Address}
 import std/env::{ENV}
 import std/gc::{GC}

@@ -13,6 +13,7 @@
 # mapping look held. Built only with `-Dgc_iyi`: the default allocator has
 # no free for this to probe.
 
+@[Unsafe("holds `Pointer(UInt8)` in `large`, line 17")]
 big = 2097153
 large = Pointer(UInt8).malloc(big.to_u64)
 large[0] = 7_u8

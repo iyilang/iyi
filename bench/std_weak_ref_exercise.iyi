@@ -17,6 +17,7 @@
 #
 #     ./bin/iyi run bench/std_weak_ref_exercise.iyi
 
+@[Unsafe("its threads count in a page mapped with __iyi_mmap, read and written through raw pointers the collector does not move")]
 module bench/std_weak_ref_exercise
 
 import std/weak_ref::{WeakRef}

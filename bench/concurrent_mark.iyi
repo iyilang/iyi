@@ -35,6 +35,7 @@
 # bench/concurrent_mark.sh drives it and proves the check fails when the
 # barrier shades nothing.
 
+@[Unsafe("keeps `Pointer(UInt8)` in `@bytes`, line 38")]
 {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
   def fail(message : String) : Nil
     print "FAIL: #{message}\n"

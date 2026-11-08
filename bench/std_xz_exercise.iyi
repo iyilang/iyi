@@ -14,6 +14,7 @@
 # and 64 MiB is streamed in bounded memory;
 # `bench/std_xz_exercise.sh` is the other half of that conversation.
 
+@[Unsafe("its reference stream and test inputs walk bytes through raw pointers, to check std/xz's decoder against them")]
 module bench/std_xz_exercise
 
 import std/xz::{Xz, XzReader, XzFormat, XzError}

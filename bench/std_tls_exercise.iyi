@@ -37,6 +37,7 @@
 #                       what was agreed, then close_notify;
 #   config CHAIN KEY    TlsServerConfig.from_pem's answer.
 
+@[Unsafe("its hex and byte helpers read strings' bytes through to_unsafe and copy bytes into String.new's buffer, the way std/tls reads its input")]
 import std/tls::{TlsClient, TlsConfig, TlsEarlyData, TlsEchConfig, TlsEchKey, TlsError, TlsHeldTicket, TlsIdentity, TlsKeySchedule, TlsMadeUnder, TlsRecordCipher, TlsReplayGuard, TlsServer, TlsServerConfig, TlsSession, TlsTicket, TlsTicketKeys, TlsVersion}
 import std/x509::{Certificate}
 import std/time::{Time}

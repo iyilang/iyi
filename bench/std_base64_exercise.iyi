@@ -3,6 +3,7 @@
 # Run via:
 #     ./bin/iyi run bench/std_base64_exercise.iyi
 
+@[Unsafe("its byte helper reads a string's bytes through to_unsafe, to compare std/base64's output byte for byte")]
 module bench/std_base64_exercise
 
 def assert_true(cond : Bool, msg : String) : Nil

@@ -7,6 +7,7 @@
 # Python and curl to read, `corpus FILE` reads the generated corpus and
 # prints what it parsed, `client BASE` reads a Python server's streams.
 
+@[Unsafe("its test helpers walk events' bytes through to_unsafe, to check what std/sse writes byte for byte")]
 module bench/std_sse_exercise
 
 def assert_true(cond : Bool, msg : String) : Nil

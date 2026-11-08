@@ -3,6 +3,7 @@
 # Run via:
 #     ./bin/iyi run bench/std_reference_storage_exercise.iyi
 
+@[Unsafe("it exercises ReferenceStorage: an object built in uninitialized stack storage with unsafe_construct")]
 module bench/std_reference_storage_exercise
 
 def assert_true(cond : Bool, msg : String) : Nil

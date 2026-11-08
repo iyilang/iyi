@@ -26,6 +26,7 @@
 #                    checked (a machine's speed is not a property of the
 #                    module).
 
+@[Unsafe("its hex and byte helpers read strings' bytes through to_unsafe and copy bytes into String.new's buffer, the way std/p384 reads its input")]
 import std/p384::{P384PrivateKey}
 import std/ecdsa::{EcdsaHash, EcdsaError, EcdsaPublicKey}
 import std/file::{File}

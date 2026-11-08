@@ -17,6 +17,7 @@
 # removes the thread-root walk from a copy of the prelude to prove the
 # live-list check fails by name.
 
+@[Unsafe("its threads count in a page mapped with __iyi_mmap, read and written as atomics through raw pointers")]
 {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
   def fail(message : String) : Nil
     print "FAIL: #{message}\n"

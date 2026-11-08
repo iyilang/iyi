@@ -13,6 +13,7 @@
 # conversation. Without one, a scratch directory is used for the
 # extraction checks and removed after.
 
+@[Unsafe("its byte sink takes the pointer and count std/tar writes with, and it reads and patches headers' checksums through strings' buffers")]
 module bench/std_tar_exercise
 
 import std/tar::{TarReader, TarWriter, TarEntry, TarError, TarType, TarFormat}

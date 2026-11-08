@@ -17,6 +17,7 @@
 # pages are the live set plus a budget is the design; the gap this
 # probe names is that garbage and the edges runs lose to it.
 
+@[Unsafe("casts to `Pointer(Void)`, line 20")]
 {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || flag?(:darwin)) %}
   def count(value : UInt64) : String
     value.to_i64.to_s

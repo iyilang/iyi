@@ -1,5 +1,6 @@
 # Isolated test of @[ThreadLocal] on Windows x86_64 without fibers or groups.
 
+@[Unsafe("it reads the Windows TEB's TLS slot with asm into an uninitialized word and prints through __iyi_write, below the runtime")]
 class TlsHolder
   @[ThreadLocal]
   @@value : Int64 = 42_i64

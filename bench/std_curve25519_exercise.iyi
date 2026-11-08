@@ -3,6 +3,7 @@
 # Run via:
 #     ./bin/iyi run bench/std_curve25519_exercise.iyi
 
+@[Unsafe("its hex and byte helpers read strings' bytes through to_unsafe and copy bytes into String.new's buffer, the way std/curve25519 reads its input")]
 module bench/std_curve25519_exercise
 
 import std/curve25519::{X25519, Ed25519, CurveError}

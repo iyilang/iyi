@@ -35,6 +35,7 @@
 # std has no cycle counter, and a nanosecond clock read around operations
 # of microseconds is fine enough. `bench/ct_timing.sh` drives it.
 
+@[Unsafe("reads a String's memory through `to_unsafe`, line 167")]
 import std/big::{BigInt}
 import std/rsa::{RsaPrivateKey, RsaHash}
 import std/p256::{P256PrivateKey}

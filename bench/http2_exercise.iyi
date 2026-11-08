@@ -31,6 +31,7 @@
 # a client still sending to read the whole answer; `close-client` times
 # `HTTPClient#close` against a server that waits before it closes.
 
+@[Unsafe("holds `Pointer(UInt8)` in `b`, line 58")]
 module bench/http2_exercise
 
 import std/http::{HTTP, HTTPClient, Response, Request, Server, HTTPError, Upgraded}

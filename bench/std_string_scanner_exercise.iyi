@@ -108,7 +108,7 @@ def hex(text : String) : String
   String.build do |io|
     i = 0
     while i < text.bytesize
-      io << text.to_unsafe[i].to_i32.to_s(16).rjust(2, '0')
+      io << text.byte_at(i).to_i32.to_s(16).rjust(2, '0')
       i = i + 1
     end
   end
@@ -363,7 +363,7 @@ s = StringScanner.new("これは文字列である")
 assert_str "これは", s.peek(3), "peek is characters"
 assert_str "これは文字列", s.peek(6), "peek six characters"
 assert_true panic_of { StringScanner.new("é").offset = 1 }.includes?("string_scanner: offset 1 is inside a character"), "an offset inside a character panics"
-bad = String.new(4) { |p| p[0] = 0x80_u8; p[1] = 0xC3_u8; p[2] = 0x28_u8; p[3] = 0xE2_u8 }
+bad = String.new([0x80_u8, 0xC3_u8, 0x28_u8, 0xE2_u8])
 t = StringScanner.new(bad)
 t.offset = 1
 t.offset = 2
@@ -371,7 +371,7 @@ t.offset = 3
 t.offset = 1
 assert_true t.peek(2) == bad[1, 2], "a lead without its continuation is one character"
 assert_int 1, t.skip(1), "and is one byte long"
-cut = String.new(2) { |p| p[0] = 0xE2_u8; p[1] = 0x82_u8 }
+cut = String.new([0xE2_u8, 0x82_u8])
 c = StringScanner.new(cut)
 c.offset = 1
 assert_int 1, c.offset, "a continuation after a cut-short lead begins a character"

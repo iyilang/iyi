@@ -403,12 +403,12 @@ puts "    the char family: strip, search, delete, squeeze, count, tr and center 
 # after it: C3 41 was the one character U+00C1, a quote after a C3 was
 # swallowed, E2 82 was `size` 1 and two characters, and 80 61 62 split in
 # two lost its `a`.
-lead_a = String.new(2) { |b| b[0] = 0xC3_u8; b[1] = 0x41_u8 }
-quoted = String.new(5) { |b| b[0] = 0x61_u8; b[1] = 0xC3_u8; b[2] = 0x22_u8; b[3] = 0x62_u8; b[4] = 0x22_u8 }
-cut = String.new(2) { |b| b[0] = 0xE2_u8; b[1] = 0x82_u8 }
-stray = String.new(3) { |b| b[0] = 0x80_u8; b[1] = 0x61_u8; b[2] = 0x62_u8 }
-past = String.new(4) { |b| b[0] = 0xF4_u8; b[1] = 0x90_u8; b[2] = 0x80_u8; b[3] = 0x80_u8 }
-overlong = String.new(5) { |b| b[0] = 0xC0_u8; b[1] = 0x80_u8; b[2] = 0xED_u8; b[3] = 0xA0_u8; b[4] = 0x80_u8 }
+lead_a = String.new([0xC3_u8, 0x41_u8])
+quoted = String.new([0x61_u8, 0xC3_u8, 0x22_u8, 0x62_u8, 0x22_u8])
+cut = String.new([0xE2_u8, 0x82_u8])
+stray = String.new([0x80_u8, 0x61_u8, 0x62_u8])
+past = String.new([0xF4_u8, 0x90_u8, 0x80_u8, 0x80_u8])
+overlong = String.new([0xC0_u8, 0x80_u8, 0xED_u8, 0xA0_u8, 0x80_u8])
 raise "utf8: a lead byte without its continuation is one U+FFFD" unless lead_a.chars == ['\uFFFD', 'A'] && lead_a.size == 2
 raise "utf8: a quote after a lead byte is a quote" unless quoted.chars == ['a', '\uFFFD', '"', 'b', '"'] && quoted.size == 5
 raise "utf8: size counts what each_char yields" unless cut.size == 2 && cut.chars == ['\uFFFD', '\uFFFD'] && stray.size == 3 && stray.chars == ['\uFFFD', 'a', 'b']
@@ -425,7 +425,7 @@ puts "    a byte that begins no character is one U+FFFD in size, chars, delete, 
 # one holding that very byte; `tr` with two ASCII sets kept such a byte
 # where any other set writes U+FFFD; and a `tr` run across the surrogates
 # wrote one as three bytes that read back as three U+FFFD.
-trail = String.new(3) { |b| b[0] = 0xC3_u8; b[1] = 0xA9_u8; b[2] = 0xA9_u8 }
+trail = String.new([0xC3_u8, 0xA9_u8, 0xA9_u8])
 raise "utf8: reverse by each_char's characters" unless overlong.reverse.bytes == [0x80_u8, 0xA0_u8, 0xED_u8, 0x80_u8, 0xC0_u8] && trail.reverse.bytes == [0xA9_u8, 0xC3_u8, 0xA9_u8]
 raise "utf8: chop by each_char's characters" unless trail.chop == "é" && cut.chop.bytes == [0xE2_u8]
 raise "utf8: a set names a byte that begins no character" unless lead_a.lstrip(lead_a) == "" && stray.lstrip(stray) == "" && "\uFFFDa".lstrip(lead_a) == "a"
@@ -456,7 +456,7 @@ puts "    a built string counts its characters when asked, once"
 # matches it at the start: `"abc".gsub("", "-")` answered `"abc"`.
 raise "string: gsub empty at every character" unless "abc".gsub("", "-") == "-a-b-c-" && "".gsub("", "-") == "-" && "é".gsub("", "-") == "-é-"
 raise "string: gsub empty block" unless "ab".gsub("") { |m| "<#{m}>" } == "<>a<>b<>"
-unpaired = String.new(2) { |b| b[0] = 0xC3_u8; b[1] = 0x41_u8 }
+unpaired = String.new([0xC3_u8, 0x41_u8])
 raise "string: gsub empty keeps a byte that begins no character" unless unpaired.gsub("", "-").bytes == [0x2D_u8, 0xC3_u8, 0x2D_u8, 0x41_u8, 0x2D_u8]
 puts "    gsub with an empty search writes the replacement before every character and at the end"
 

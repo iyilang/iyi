@@ -12,6 +12,7 @@
 # compared, the corrupt ones refused, and this module's frames written
 # beside them for Python to read.
 
+@[Unsafe("its reference stream and test inputs walk bytes through raw pointers, to check std/zstd's decoder against them")]
 module bench/std_zstd_exercise
 
 import std/zstd::{Zstd, ZstdReader, ZstdError}

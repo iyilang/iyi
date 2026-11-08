@@ -36,7 +36,7 @@
 # worker to the tasks behind it. bench/parallel_exercise.sh runs this and
 # broken copies of the runtime, each caught by the check that names it.
 
-@[Unsafe("writes `asm`, line 43")]
+@[Unsafe("reads the thread pointer through asm, fills an uninitialized stack pad through pointerof, and Lent trusts @[Share] to carry a socket between workers")]
 module bench/parallel_migrate
 
 import std/socket::{IyiSocket, SocketError}

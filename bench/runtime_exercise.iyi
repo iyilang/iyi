@@ -19,7 +19,7 @@
 # 16. Dynamic group keeping general form.
 # 17. A task and a proc capturing a `case` branch's `it` at the branch's type.
 
-@[Unsafe("reads `uninitialized UInt64`, line 23")]
+@[Unsafe("reads the thread block through asm into an uninitialized word, makes pipes through pipe or Windows named pipes in a lib, and moves bytes through raw buffers")]
 def read_teb_tls_slot : UInt64
   slot = uninitialized UInt64
   {% if flag?(:win32) && flag?(:x86_64) %}

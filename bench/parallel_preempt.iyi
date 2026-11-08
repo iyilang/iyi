@@ -55,7 +55,7 @@
 # bench/parallel_exercise.sh runs it, and broken copies of the runtime,
 # each caught by the step that names it.
 
-@[Unsafe("calls `unsafe_fetch`, whose caller keeps `index is in 0...size`, line 64")]
+@[Unsafe("the loops read arrays through unsafe_fetch, each index kept in 0...size by the loop that makes it")]
 module bench/parallel_preempt
 
 import std/int

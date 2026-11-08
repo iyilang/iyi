@@ -16,7 +16,7 @@
 # Not under `samples/`: the sample count is a gated number and samples are
 # explanations, not torture tests.
 
-@[Unsafe("handles `Pointer(Void)` through `__iyi_mmap`, line 19")]
+@[Unsafe("hides Pointer.malloc addresses in globals, stack slots by pointerof and registers by asm, keeps its ledgers in __iyi_mmap pages, and parses maps text through to_unsafe")]
 {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || flag?(:darwin) || (flag?(:win32) && flag?(:x86_64))) %}
   # The allocation-pressure trigger is off for this exercise: it
   # choreographs colours and free lists across explicit collections,

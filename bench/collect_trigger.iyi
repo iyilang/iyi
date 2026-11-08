@@ -19,7 +19,7 @@
 # Not under `samples/`: the sample count is a gated number, and samples are
 # explanations rather than torture tests.
 
-@[Unsafe("holds `Pointer(UInt8)` in `block`, line 22")]
+@[Unsafe("allocates raw blocks and node chains through Pointer.malloc to drive the trigger, and writes an unrooted message through to_unsafe")]
 {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || flag?(:darwin) || (flag?(:win32) && flag?(:x86_64))) %}
   def count(value : UInt64) : String
     value.to_i64.to_s

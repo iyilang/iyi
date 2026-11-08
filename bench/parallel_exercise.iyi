@@ -28,7 +28,7 @@
 # one worker and at several and holds the ratio to a floor, and runs
 # broken copies of the runtime to prove each step above can fail.
 
-@[Unsafe("handles `Pointer(UInt8)` through `malloc`, line 31")]
+@[Unsafe("allocates raw blocks through Pointer.malloc in tasks, and Turns trusts @[Share] to hand its word's pointerof address to park_on and wake_on")]
 {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
   def fail(message : String) : Nil
     print "FAIL: #{message}\n"

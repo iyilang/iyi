@@ -45,6 +45,7 @@ pub trait Indexable
   type Elem
 
   abstract def size : Int32
+
   @[Unsafe(call: "index is in 0...size")]
   abstract def unsafe_fetch(index : Int32) : Elem
 

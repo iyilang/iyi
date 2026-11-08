@@ -366,7 +366,11 @@ crosses threads is what `Share` lets a thread's block capture -
 `Atomic(T)`, a `Mutex(T)`, immutable values, and since SPEC.md III.4.13
 a `Channel(T)` of `Share` values. III.4.13's pool is threads of this
 kind: the workers parallel tasks run on are `IyiThread`s the runtime
-starts, so the stop below takes them as it takes any thread.
+starts, so the stop below takes them as it takes any thread. A Linux
+program that calls C itself gets `pthread_create` on the same mapping
+instead, and `pthread_join`, because C on a raw clone runs without
+libc's thread state (SPEC.md III.4.11, issue #158); the thread names its
+own tid and links its own line, darwin's order.
 
 A collection takes the runtime lock first, so no thread it stops can
 be holding it; then signals every other registered thread and waits

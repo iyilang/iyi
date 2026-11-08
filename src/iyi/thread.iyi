@@ -26,6 +26,16 @@
 # which stops it. The pool parallel tasks run on (III.4.13) is threads of
 # this kind, started by the runtime.
 #
+# **A Linux program that calls C gets libc's threads.** Its main thread is
+# libc's, set up by `__libc_start_main`; a raw `clone` with a TLS block made
+# from the executable's PT_TLS has none of libc's thread state, and C that
+# reaches for it ran on nothing there: `pthread_self` answered 0, `strerror`
+# faulted, and `errno` was written below the block (issue #158). So when the
+# compiler finds a C call outside the prelude (`program_calls_c?`), a thread
+# is `pthread_create` on the same mapping, guard page and size the clone
+# would have used, and `pthread_join`; a program that calls none keeps the
+# clone and the floor's zero names.
+#
 # **The stop, and what is not stopped.** A collection takes the runtime
 # lock, signals every other registered thread, and waits for each to count
 # itself in; the handler copies the interrupted registers from the ucontext
@@ -83,6 +93,7 @@
   #      reads it from the other side: a suspended thread cannot answer
   #      "am I inside the allocator?" for itself, and that answer decides
   #      whether the stop may take it where it stands
+  # +80  the pthread_t, on Linux when libc made the thread; 0 for a clone
   # +128 the spill: 32 words for whatever registers the stop captured
   IYI_TL_HANDLE  =   0_u64
   IYI_TL_NEXT    =   8_u64
@@ -93,6 +104,7 @@
   IYI_TL_PC      =  48_u64
   IYI_TL_OBJECT  =  56_u64
   IYI_TL_CACHE   =  72_u64
+  IYI_TL_PTHREAD =  80_u64
   IYI_TL_SPILL   = 128_u64
   IYI_TL_SPILL_END = 384_u64
 
@@ -299,6 +311,17 @@
       end
     end
 
+    # libc's thread, for a program that calls C (`program_calls_c?`): the
+    # only C names this file has on Linux, and in a program that calls none
+    # the branch that names them is never compiled.
+    lib LibC
+      fun pthread_attr_init(attributes : Void*) : Int32
+      fun pthread_attr_setstack(attributes : Void*, stack : Void*, size : UInt64) : Int32
+      fun pthread_attr_destroy(attributes : Void*) : Int32
+      fun pthread_create(thread : UInt64*, attributes : Void*, start : Void*, argument : Void*) : Int32
+      fun pthread_join(thread : Void*, value : Void*) : Int32
+    end
+
     # The two-instruction sigreturn x86_64's handler returns through.
     {% if flag?(:x86_64) %}
       @[NoInline]
@@ -404,6 +427,13 @@
 
     def proc : Proc(Nil)
       @proc
+    end
+
+    # Whether code outside the prelude calls C (`Program#iyi_calls_c?`),
+    # answered once the whole program is typed. An `if` on it compiles
+    # only the branch taken, so the other names nothing.
+    @[Primitive(:iyi_calls_c)]
+    def self.program_calls_c? : Bool
     end
 
     # ── Entry points, as procs ──────────────────────────────────────────
@@ -518,24 +548,24 @@
     end
 
     # Link a line for the stops, and count it, under the lock: a stop
-    # takes the same lock before it walks. The count is the list's and no
-    # more, on every platform: a darwin child links and counts its own
-    # line (`run`), and `start` counted it before. A thread `start` had
-    # counted and that had yet to link was one a stop's early return
-    # counted and its walk never found: a collection in that instant got
-    # past the return, cleared the counts the last release's threads
-    # leave by, signalled nobody, and so released nobody and left the
-    # last release's debt standing - and the next stop waited for those
-    # threads to count themselves out of a count it had just seen
-    # cleared, for good. bench/std_gc_exercise.iyi's main thread
-    # allocates as soon as it has started three threads, and on macOS
-    # 26.6, an M2 Pro with 10 cores, its plain build hung so in 3 runs
-    # of 276, and a copy that wrote the stop's counts out once it had
-    # waited 5 s in 3 runs of 302: each time the stop before was the main
-    # thread's, finding no line but its own, and the hung one waited for
-    # the 3 the release before it had owed (the soak of mt/next at
-    # ad0712a65). 7j of bench/thread_exercise.sh makes that instant at
-    # will.
+    # takes the same lock before it walks. The count is the list's and
+    # no more, on every platform: a darwin child, and a Linux one libc
+    # made, links and counts its own line (`run`), and `start` counted
+    # it before. A thread `start` had counted and that had yet to link
+    # was one a stop's early return counted and its walk never found: a
+    # collection in that instant got past the return, cleared the counts
+    # the last release's threads leave by, signalled nobody, and so
+    # released nobody and left the last release's debt standing - and
+    # the next stop waited for those threads to count themselves out of
+    # a count it had just seen cleared, for good.
+    # bench/std_gc_exercise.iyi's main thread allocates as soon as it
+    # has started three threads, and on macOS 26.6, an M2 Pro with 10
+    # cores, its plain build hung so in 3 runs of 276, and a copy that
+    # wrote the stop's counts out once it had waited 5 s in 3 runs of
+    # 302: each time the stop before was the main thread's, finding no
+    # line but its own, and the hung one waited for the 3 the release
+    # before it had owed (the soak of mt/next at ad0712a65). 7j of
+    # bench/thread_exercise.sh makes that instant at will.
     def self.link(line : UInt64) : Nil
       IyiRuntimeLock.lock
       IyiHeap.write64(line + IYI_TL_NEXT, @@lines)
@@ -622,16 +652,28 @@
         __iyi_conc_syscall3(IYI_SYS_MPROTECT, stack.to_i64, 4096_i64, 0_i64)
         IyiHeap.write64(line + IYI_TL_LOW, stack)
         IyiHeap.write64(line + IYI_TL_TOP, stack + IYI_THREAD_STACK)
-        # Linked before the clone, under the lock the clone is made under:
-        # a stop cannot begin between the two, and the tid is in the line
-        # before the lock is released.
-        IyiRuntimeLock.lock
-        IyiHeap.write64(line + IYI_TL_NEXT, @@lines)
-        @@lines = line
-        @@count = @@count + 1_i64
-        result = __iyi_thread_clone(stack + IYI_THREAD_STACK, thread_entry, line, line + IYI_TL_HANDLE, IyiTlsImage.make)
-        IyiRuntimeLock.unlock
-        raise "clone failed: #{result}" if result < 0
+        if program_calls_c?
+          # libc's thread (issue #158), darwin's order: linked and counted
+          # by the thread once it has named its tid (`run`, `link`), so no
+          # stop signals it before. Made under the lock, so the pthread_t
+          # `join` reads is in the line before the thread's own link, which
+          # waits on this lock, lets its body begin.
+          IyiRuntimeLock.lock
+          result = start_by_libc(stack, thread_entry, line, line + IYI_TL_PTHREAD)
+          IyiRuntimeLock.unlock
+          raise "pthread_create failed: #{result}" if result != 0
+        else
+          # Linked before the clone, under the lock the clone is made under:
+          # a stop cannot begin between the two, and the tid is in the line
+          # before the lock is released.
+          IyiRuntimeLock.lock
+          IyiHeap.write64(line + IYI_TL_NEXT, @@lines)
+          @@lines = line
+          @@count = @@count + 1_i64
+          result = __iyi_thread_clone(stack + IYI_THREAD_STACK, thread_entry, line, line + IYI_TL_HANDLE, IyiTlsImage.make)
+          IyiRuntimeLock.unlock
+          raise "clone failed: #{result}" if result < 0
+        end
       {% elsif flag?(:darwin) %}
         # Linked and counted by the thread itself, once `@@line` is
         # written (`run`), so no stop signals it before. Created under the
@@ -674,10 +716,18 @@
         stack = __iyi_mmap(IYI_THREAD_STACK).address
         __iyi_madvise_nohuge(stack, IYI_THREAD_STACK)
         __iyi_conc_syscall3(IYI_SYS_MPROTECT, stack.to_i64, 4096_i64, 0_i64)
-        # The tid word is the stack's guard-side scratch: nobody joins.
-        scratch = __iyi_mmap(4096_u64).address
-        result = __iyi_thread_clone(stack + IYI_THREAD_STACK, entry, argument, scratch, IyiTlsImage.make)
-        raise "clone failed: #{result}" if result < 0
+        if program_calls_c?
+          # libc's thread for the same reason a program's is (`start`): C a
+          # signal handler runs here needs libc's thread state too.
+          handle = 0_u64
+          result = start_by_libc(stack, entry, argument, pointerof(handle).address)
+          raise "pthread_create failed: #{result}" if result != 0
+        else
+          # The tid word is the stack's guard-side scratch: nobody joins.
+          scratch = __iyi_mmap(4096_u64).address
+          result = __iyi_thread_clone(stack + IYI_THREAD_STACK, entry, argument, scratch, IyiTlsImage.make)
+          raise "clone failed: #{result}" if result < 0
+        end
       {% elsif flag?(:darwin) %}
         handle = uninitialized UInt64
         result = LibC.pthread_create(pointerof(handle), Pointer(Void).new(0_u64), Pointer(Void).new(entry), Pointer(Void).new(argument))
@@ -696,6 +746,26 @@
         LibC.SetThreadPriorityBoost(h, 1_i32)
       {% end %}
     end
+
+    {% if flag?(:linux) %}
+      # `pthread_create` on a mapping this file made: the clone's size and
+      # guard page, with libc's thread control block and static TLS carved
+      # from the top, as glibc and musl both do with a stack they are given.
+      # The attributes are opaque, 56 bytes on glibc's x86_64 and 64 on
+      # aarch64, so 64.
+      def self.start_by_libc(stack : UInt64, entry : UInt64, argument : UInt64, handle : UInt64) : Int32
+        storage = uninitialized UInt64[8]
+        attributes = pointerof(storage).as(Void*)
+        result = LibC.pthread_attr_init(attributes)
+        return result if result != 0
+        result = LibC.pthread_attr_setstack(attributes, Pointer(Void).new(stack), IYI_THREAD_STACK)
+        if result == 0
+          result = LibC.pthread_create(Pointer(UInt64).new(handle), attributes, Pointer(Void).new(entry), Pointer(Void).new(argument))
+        end
+        LibC.pthread_attr_destroy(attributes)
+        result
+      end
+    {% end %}
 
     # The child's whole life: name its line, find its body on the rooted
     # list, run it, leave the stop's list, and return into the exit the
@@ -718,6 +788,12 @@
       # `run`'s own frame whole.
       {% if flag?(:darwin) %}
         IyiHeap.write64(line + IYI_TL_TOP, IyiRoots.discover_stack_base)
+      {% elsif flag?(:linux) %}
+        # A thread libc made writes the tid the stop's `tgkill` names, which
+        # a clone's kernel wrote for it (CLONE_PARENT_SETTID).
+        if program_calls_c?
+          IyiHeap.write64(line + IYI_TL_HANDLE, __iyi_conc_syscall3(IYI_SYS_GETTID, 0_i64, 0_i64, 0_i64).to_u64)
+        end
       {% end %}
       @@line = line
       # darwin makes a thread's thread-locals at its first touch of one:
@@ -735,6 +811,8 @@
       # from the heap or holds a pointer into it.
       {% if flag?(:darwin) %}
         link(line)
+      {% elsif flag?(:linux) %}
+        link(line) if program_calls_c?
       {% end %}
       # An alternate signal stack is a thread's own, so a stack overflow on
       # this thread has somewhere to say so (`IyiStackGuard`).
@@ -830,8 +908,14 @@
         IyiScheduler.park_on(pointerof(@ended), 0_u64, false)
       end
       {% if flag?(:linux) %}
-        while (tid = IyiThread.word(line + IYI_TL_HANDLE).value.get) != 0_u64
-          __iyi_conc_syscall6(IYI_SYS_FUTEX, (line + IYI_TL_HANDLE).to_i64, IYI_FUTEX_WAIT, tid.to_i64, 0_i64, 0_i64, 0_i64)
+        if IyiThread.program_calls_c?
+          handle = Pointer(Void).new(IyiHeap.read64(line + IYI_TL_PTHREAD))
+          result = LibC.pthread_join(handle, Pointer(Void).new(0_u64))
+          raise "pthread_join failed: #{result}" if result != 0
+        else
+          while (tid = IyiThread.word(line + IYI_TL_HANDLE).value.get) != 0_u64
+            __iyi_conc_syscall6(IYI_SYS_FUTEX, (line + IYI_TL_HANDLE).to_i64, IYI_FUTEX_WAIT, tid.to_i64, 0_i64, 0_i64, 0_i64)
+          end
         end
       {% elsif flag?(:darwin) %}
         handle = Pointer(Void).new(IyiHeap.read64(line + IYI_TL_HANDLE))

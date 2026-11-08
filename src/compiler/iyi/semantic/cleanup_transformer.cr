@@ -610,6 +610,18 @@ module Iyi
         return expanded.transform self
       end
 
+      # iyi: `IyiThread.program_calls_c?`, answered here and not in codegen.
+      # Cleanup runs after the main pass has typed every call, so the answer
+      # is final, and an `if` on a literal compiles one branch: a program
+      # that calls no C never names the thread start's libc branch, and one
+      # that does never names the raw `clone` (`Program#iyi_calls_c?`).
+      if (target_defs = node.target_defs) && target_defs.size == 1 &&
+         (primitive = target_defs.first.body).is_a?(Primitive) && primitive.name == "iyi_calls_c"
+        answer = BoolLiteral.new(@program.iyi_runs_c?).at(node)
+        answer.set_type(@program.bool)
+        return answer
+      end
+
       # Need to transform these manually because node.block doesn't
       # need to be transformed if it has a fun_literal
       # ~~~

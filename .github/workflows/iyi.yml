@@ -40,7 +40,29 @@ name: iyi
 # aarch64 under qemu: one that hangs used to hold a runner for a working day
 # and report nothing. The number is the job's own worst honest case, not a
 # guess at its average.
-on: [push, pull_request]
+#
+# Which jobs run is decided by `plan` (scripts/ci_plan.py, whose header says
+# it in full). A pull request runs the fast tier - the Linux build and what
+# answers within the compiler specs' twenty-odd minutes - narrowed further
+# when it touches only docs or only bench files. A push to master or to
+# mt/next, the branch a release is integrated on before it reaches master,
+# a `v*` tag, the nightly schedule and a manual dispatch run every job. A
+# push to any other branch runs nothing: open a pull request, or dispatch
+# the workflow on the branch for the full set.
+#
+# The free plan runs twenty jobs at once, five of them on macOS, and the
+# full set was thirty-nine jobs and about twenty runner-hours a run (runs of
+# 2026-11-04 to 11-07). Every pull request paid that, a README edit as much
+# as a compiler change, and two at once queued behind each other for hours.
+on:
+  push:
+    branches: [master, mt/next]
+    tags: ["v*", "editor-v*"]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # 02:17 UTC: off the hour, when every other scheduled workflow starts.
+    - cron: "17 2 * * *"
 
 # Git refuses a checkout that another user owns, and in a container job the
 # workspace is not the container user's: `actions/checkout` marks it safe in
@@ -71,7 +93,70 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 jobs:
+  # Which jobs this run answers for: scripts/ci_plan.py. Every other job
+  # needs it and runs when its id is in the list; `result` reads them all.
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    name: "Which jobs this run answers for"
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      jobs: ${{ steps.plan.outputs.jobs }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - id: plan
+        name: Plan
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci_plan.py
+
+  # The gates that read only the tree, in a job of their own so that a
+  # change to the docs answers in seconds and every tier runs them.
+  docs:
+    needs: plan
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'docs') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    name: "The name, and the numbers the docs state"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # iyi is a permanent fork, so Crystal's name standing in for iyi's is a
+      # defect and not a detail. Both layers: a tree that should have been
+      # renamed, and a name left inside a file that was otherwise cut over.
+      # Every allowed occurrence carries its reason in the script. Python,
+      # because the first draft was `grep -P` and the grep a script resolves
+      # has no `-P`, so every allowlist test errored and the gate failed open.
+      - name: iyi owns its name
+        run: python3 bench/identity_floor.py
+
+      # The docs quote sizes as facts a reader can check. Three times a number
+      # has gone stale unnoticed, the last one repeated in eleven places, so it
+      # is measured here rather than trusted.
+      - name: The numbers the docs state
+        run: python3 bench/doc_numbers.py --list
+
+      # And the numbers the docs quote from an instrument rather than from the
+      # tree. A shared runner cannot re-measure a second or a megabyte — the
+      # scripts that produce them refuse an unoptimised compiler, and the same
+      # binary has read 0.048 s and 0.109 s minutes apart on one machine — so
+      # this checks the half that does not move: that the rows, columns, sizes
+      # and parameters a sentence quotes are ones its instrument still
+      # produces. It found a table whose columns named a flag the script had
+      # stopped passing, which is a measurement no reader could repeat.
+      - name: The numbers the docs quote from a measurement
+        run: python3 bench/measured_numbers.py
+
   build:
+    needs: plan
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'build') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     container:
@@ -99,7 +184,8 @@ jobs:
           retention-days: 1
 
   iyi:
-    needs: build
+    needs: [plan, build]
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'iyi') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     container:
@@ -168,7 +254,8 @@ jobs:
           make -o .build/crystal cli_spec
 
   compiler-specs:
-    needs: build
+    needs: [plan, build]
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'compiler-specs') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     container:
@@ -190,7 +277,8 @@ jobs:
         run: make -o .build/crystal compiler_spec
 
   stdlib-specs:
-    needs: build
+    needs: [plan, build]
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'stdlib-specs') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     container:
@@ -253,7 +341,8 @@ jobs:
   # would end in about 41, inside the limit, and forty-five still ends a
   # hang.
   lsp-positions:
-    needs: build
+    needs: [plan, build]
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'lsp-positions') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     strategy:
@@ -281,7 +370,8 @@ jobs:
         run: python3 bench/lsp_positions.py 200 --shard ${{ matrix.shard }}/4
 
   samples:
-    needs: build
+    needs: [plan, build]
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'samples') }}
     runs-on: ubuntu-24.04
     # Measured: 43 and 44 minutes on master's runs of 2026-09-29, 38 and a
     # cancellation at 45 on the next branch's - a budget the job had grown
@@ -946,41 +1036,6 @@ jobs:
       - name: The mark beside the program
         run: bash bench/concurrent_mark.sh
 
-      # iyi is a permanent fork, so Crystal's name standing in for iyi's is a
-      # defect and not a detail. Both layers: a tree that should have been
-      # renamed, and a name left inside a file that was otherwise cut over.
-      # Every allowed occurrence carries its reason in the script.
-      - name: iyi owns its name
-        run: |
-          # The crystal docker image is a compiler toolchain, not a Python one.
-          # This gate is Python because the first draft was `grep -P` and the
-          # grep a script resolves has no `-P`, so every allowlist test errored
-          # and the gate failed open. Installing Python here is cheaper than
-          # rewriting the matching in a language whose regex we would then have
-          # to re-prove.
-          if ! command -v python3 >/dev/null; then
-            apt-get update -qq && apt-get install -y -qq python3
-          fi
-          python3 bench/identity_floor.py
-
-      # The docs quote sizes as facts a reader can check. Three times a number
-      # has gone stale unnoticed, the last one repeated in eleven places, so it
-      # is measured here rather than trusted. Python is already installed by the
-      # step above.
-      - name: The numbers the docs state
-        run: python3 bench/doc_numbers.py --list
-
-      # And the numbers the docs quote from an instrument rather than from the
-      # tree. A shared runner cannot re-measure a second or a megabyte — the
-      # scripts that produce them refuse an unoptimised compiler, and the same
-      # binary has read 0.048 s and 0.109 s minutes apart on one machine — so
-      # this checks the half that does not move: that the rows, columns, sizes
-      # and parameters a sentence quotes are ones its instrument still
-      # produces. It found a table whose columns named a flag the script had
-      # stopped passing, which is a measurement no reader could repeat.
-      - name: The numbers the docs quote from a measurement
-        run: python3 bench/measured_numbers.py
-
   # Ninety minutes: it took 50 and 52 on master, 59 on integration/0.20
   # with its new modules, and was cut off at sixty there (job
   # 119218729131). It had grown to 75 to 77 of the ninety (jobs
@@ -988,7 +1043,8 @@ jobs:
   # them in "and on the platforms this runner is not", which is the
   # std-platforms job below now.
   std:
-    needs: build
+    needs: [plan, build]
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'std') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     container:
@@ -1025,7 +1081,8 @@ jobs:
   # (the four jobs named above it). Sixty minutes, over half again the
   # longest of those with this job's own build.
   std-platforms:
-    needs: build
+    needs: [plan, build]
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'std-platforms') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     container:
@@ -1064,7 +1121,8 @@ jobs:
   # on darwin and 2,936 on Windows, where it held 4,641, 4,509 and 4,019.
   # The limits stay until a run dealt so has been measured.
   std-siblings:
-    needs: build
+    needs: [plan, build]
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'std-siblings') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     container:
@@ -1123,7 +1181,8 @@ jobs:
         run: bash bench/tls_speed.sh
 
   targets:
-    needs: build
+    needs: [plan, build]
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'targets') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     container:
@@ -1215,7 +1274,8 @@ jobs:
   # running the program means running it somewhere else: the object is produced
   # here, under the compiler's own image, and linked and run there.
   cross-objects:
-    needs: build
+    needs: [plan, build]
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'cross-objects') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     container:
@@ -1357,7 +1417,8 @@ jobs:
           path: cross/
 
   cross-run:
-    needs: cross-objects
+    needs: [plan, cross-objects]
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'cross-run') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     name: "An iyi program, run on musl and on aarch64"
@@ -1466,6 +1527,8 @@ jobs:
   # directory (BSD cp's trailing-slash reading of `src/*/`) and only
   # unpacking it somewhere else could have caught that.
   darwin:
+    needs: plan
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'darwin') }}
     # macos-15, pinned. GitHub retires macos-14 on 2026-11-02, and its
     # scheduled brownouts cancelled every darwin job of two master runs
     # before then (job 124229745795). The numbers that name macos-14 in
@@ -1823,6 +1886,8 @@ jobs:
   # shard has a hundred and five: on integration/0.19 shard 4 was cut off
   # at seventy-five, std/http alone 27 minutes of it and std/big 14.
   darwin-std-siblings:
+    needs: plan
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'darwin-std-siblings') }}
     runs-on: macos-15
     env:
       MACOSX_DEPLOYMENT_TARGET: "14.4"
@@ -1890,6 +1955,8 @@ jobs:
   # seventh macOS job would wait for a runner - in run 42327393858 shard 2
   # above started at 02:40:54, three seconds after shard 1 ended.
   darwin-std:
+    needs: plan
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'darwin-std') }}
     runs-on: macos-15
     env:
       MACOSX_DEPLOYMENT_TARGET: "14.4"
@@ -1932,7 +1999,8 @@ jobs:
   # million self-checks, no wrong output and no crash — and the watch is a
   # gate now: a wrong output or a crash fails the build by its tally.
   windows-probe:
-    needs: cross-objects
+    needs: [plan, cross-objects]
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'windows-probe') }}
     runs-on: windows-2022
     timeout-minutes: 30
     name: "What a Windows binary does, twenty times"
@@ -1995,7 +2063,8 @@ jobs:
 
   # The GC Stage 10 Windows collector exercise on a real windows-2022 runner.
   windows-collector:
-    needs: cross-objects
+    needs: [plan, cross-objects]
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'windows-collector') }}
     runs-on: windows-2022
     timeout-minutes: 30
     name: "The collector on Windows x86_64"
@@ -2037,7 +2106,8 @@ jobs:
 
   # The concurrency runtime exercise on a real windows-2022 runner.
   windows-runtime:
-    needs: cross-objects
+    needs: [plan, cross-objects]
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'windows-runtime') }}
     runs-on: windows-2022
     timeout-minutes: 30
     name: "The concurrency runtime on Windows x86_64"
@@ -2103,14 +2173,17 @@ jobs:
   # Windows package, whose `lib` carries `LLVM-C.dll` and the
   # `llvm_VERSION` beside it — this fork needs no `llvm-config` on the
   # msvc path and the package ships none.
-  # Two and a half hours: it took 64 to 88 minutes in green runs, the
-  # release build at its end the longest step, and was cut off at ninety
-  # inside that build (job 118116750685 on lsp/shutdown). v0.20.1's green
-  # job took 116 minutes, 12 of them the zip's build (job 126378458286);
-  # with `bench/release_cores.sh` among the editor's surfaces, 6 minutes
-  # more, two mt/next runs reached the zip at 117 minutes and were cut
-  # off at 120 inside it (jobs 126476749691, 126525853590).
+  #
+  # It ran every Windows gate in one job, one after another, and at a median
+  # of 105 minutes it was the run's critical path: everything else had
+  # finished and the run still waited on it. The gates that do not feed the
+  # zip are now `windows-native-gates` and `windows-native-surfaces`, beside
+  # it, each building the compiler for itself (2.5 minutes of 30 to 36).
+  # Seventy-five minutes each: the steps left here took 33 in run
+  # 42144468184, the release build at its end 9 of them.
   windows-native:
+    needs: plan
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'windows-native') }}
     runs-on: windows-2025
     timeout-minutes: 150
     name: "iyi, built and run on Windows"
@@ -2220,68 +2293,6 @@ jobs:
             exit 1
           }
 
-      # Every exercise under bench/, run by the compiler built above. The
-      # exclusions are named one by one, because a list nobody has to
-      # justify is how a target quietly stops being tested:
-      #
-      #   std_http_server    a server, which waits for the client its own
-      #                      gate supplies; a bare run has nobody to talk
-      #                      to and would sit there until the job's timeout
-      #   arena_large_probe  its pass *is* the memory fault, which
-      #                      bench/arena_exercise.sh asserts and a tally
-      #                      cannot
-      #   wasm32_exercise    a wasm32 program
-      #   std_debug_cross    its pass is a panic, whose trace cross-run
-      #                      reads on aarch64 and musl; Windows' own trace
-      #                      is bench/panics.sh's
-      #
-      # The sockets came off this list when `std/socket` and `std/udp` got
-      # their Winsock arms, and `std_file_exercise` came off it when the
-      # exercise learned to ask Windows whether it may make a symbolic link
-      # and to say what it skipped when the answer is no. `IYI_FILE_SANDBOX`
-      # is what keeps that exercise out of `/tmp`, which is not a directory
-      # here.
-      - name: Every exercise the runtime can hold
-        shell: pwsh
-        run: |
-          # stdin_park.iyi reads the pipe bench/concurrency_exercise.sh feeds
-          # it - a line two seconds in - and an empty stdin is its failure.
-          $skip = @(
-            "std_http_server.iyi", "arena_large_probe.iyi", "wasm32_exercise.iyi",
-            "stdin_park.iyi", "std_debug_cross.iyi"
-          )
-          $env:TEST_SANDBOX = Join-Path $env:RUNNER_TEMP "sandbox"
-          $env:IYI_FILE_SANDBOX = Join-Path $env:RUNNER_TEMP "filesandbox"
-          New-Item -ItemType Directory -Force -Path $env:TEST_SANDBOX | Out-Null
-          New-Item -ItemType Directory -Force -Path $env:IYI_FILE_SANDBOX | Out-Null
-          $iyi = "$pwd\.build\iyi.exe"
-          $failed = @()
-          $ran = 0
-          foreach ($program in Get-ChildItem bench\*.iyi | Sort-Object Name) {
-            if ($skip -contains $program.Name) { continue }
-            $ran = $ran + 1
-            # bench/std_path_exercise.sh pins these for the expand checks.
-            if ($program.Name -eq "std_path_exercise.iyi") {
-              $env:HOME = "/home/gate"; $env:PWD = "/pwd/gate"
-            }
-            "" | & $iyi run $program.FullName > "$env:RUNNER_TEMP\$($program.BaseName).out" 2>&1
-            if ($LASTEXITCODE -ne 0) {
-              $failed += $program.Name
-              Write-Host "== $($program.Name) failed with $LASTEXITCODE"
-              Get-Content "$env:RUNNER_TEMP\$($program.BaseName).out" | Select-Object -Last 15
-            } else {
-              Write-Host "ok   $($program.Name)"
-            }
-            if ($program.Name -eq "std_path_exercise.iyi") {
-              Remove-Item Env:\HOME, Env:\PWD -ErrorAction SilentlyContinue
-            }
-          }
-          Write-Host "$ran exercises run on Windows, $($failed.Count) failed"
-          if ($failed.Count -gt 0) {
-            Write-Host "failed: $($failed -join ', ')"
-            exit 1
-          }
-
       # The sentence a stack overflow prints is Windows' own: POSIX gets it
       # from `IyiStackGuard` on an alternate signal stack, which is compiled
       # out here, and Windows gets it from the vectored handler in
@@ -2332,83 +2343,6 @@ jobs:
       - name: A project, from nothing, on Windows
         shell: bash
         run: bash bench/init_project.sh
-
-      # The language server, on the platform whose file URIs are not the
-      # path with a scheme in front: an editor sends
-      # `file:///c%3A/Users/x/a.iyi`, and chopping the scheme off left
-      # `/c:/Users/x/a.iyi`, a path with a root it does not have. Every
-      # buffer the server opened on Windows was read from a file it could
-      # not find, and nothing here had ever asked. The exe rather than
-      # `bin/iyi`, which is a shell script, and its path spelled the way
-      # the Windows python the runner carries can start it. And the
-      # session's workers: killed mid-compile, retired, and started again
-      # from a binary that has been renamed away - which is what a rebuild
-      # does, and what killed the proxy here with a stack overflow in the
-      # first exception it built afterwards.
-      - name: The language server holds its session, on Windows
-        shell: bash
-        run: |
-          IYI="$(cygpath -m "$PWD")/.build/iyi.exe" python bench/lsp_session.py
-          IYI="$(cygpath -m "$PWD")/.build/iyi.exe" python bench/lsp_artifacts.py
-          IYI="$(cygpath -m "$PWD")/.build/iyi.exe" python bench/lsp_memory.py
-
-      # Four gates that carry Windows code — `cygpath`, the `;` separator,
-      # the read-only directory Windows has no `chmod` for — and had never
-      # run on Windows, so the code they carry for it was written blind.
-      # What the verbs refuse, what the test verb answers, what a package
-      # resolves to through `iyi.mod` and `iyi.sum`, and what `migrate`
-      # writes: each is path-shaped work, and this is the platform whose
-      # paths are the reason to ask. And the collector's reuse check
-      # optimised: the exercise loop above runs `iyi run`, and the double
-      # hand-out it catches showed in `--release` builds. And the
-      # concurrency runtime's own gate, whose release arm is the one that
-      # keeps a double in xmm6-xmm15 across a fiber switch, and whose
-      # proof takes the switch's restore of them out. And Crystal's library
-      # bound as boundaries: `JSON`, `INI` and `XML` read Windows'
-      # file-private `ConsoleUtils` in object code that travels, which the
-      # consumer could not name and so never emitted. And SafeReach's
-      # proof, whose refusals spelled the places they name in full on
-      # Windows while the header beside them spelled them relative.
-      - name: The gates that carry Windows code, on Windows
-        shell: bash
-        run: |
-          bash bench/verbs_exercise.sh
-          bash bench/test_verb.sh
-          bash bench/packages_resolve.sh
-          bash bench/packages_get.sh
-          bash bench/migrate_gate.sh
-          bash bench/reuse_integrity.sh
-          bash bench/concurrency_exercise.sh
-          bash bench/parallel_exercise.sh
-          bash bench/spawn_eligible.sh
-          bash bench/safe_reach.sh
-          bash bench/unsafe.sh
-          bash bench/chaos_exercise.sh
-          bash bench/library_boundaries.sh
-          bash bench/up_to_date.sh
-
-      # And the rest of what an editor and an agent are handed. Every
-      # sample again from its modules' artifacts alone (R-1), the agent
-      # loop and its MCP server, every cursor position in the repository's
-      # own `.iyi` files, and every semantic token's boundary — the four
-      # surfaces whose answers are paths and positions, which is what the
-      # last three Windows fixes to the language server were about.
-      #
-      # The sweep at stride 600, not Linux's 200: at 200 it took 36 of this
-      # job's 90 minutes, and what Windows adds to a cursor question is the
-      # transport and the path under it, which every module still gets
-      # asked about. Unbuffered, so a gate that stops says where it was.
-      - name: The editor and agent surfaces, on Windows
-        shell: bash
-        env:
-          PYTHONUNBUFFERED: "1"
-        run: |
-          export IYI="$(cygpath -m "$PWD")/.build/iyi.exe"
-          bash bench/samples_roundtrip.sh
-          bash bench/release_cores.sh
-          python bench/agent_loop.py
-          python bench/lsp_token_boundaries.py
-          python bench/lsp_positions.py 600
 
       # The package a Windows person downloads, built and judged by the run
       # that builds the compiler. Kept inside this job rather than given its
@@ -2575,27 +2509,241 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # The standard library's gates and the collector's, on Windows, in a job
-  # of their own: `bench/std_exercise.sh` runs every module's exercise from
-  # source and from its artifacts, each with its oracle and its failure
-  # proofs, and took 34 minutes on a Windows machine - more than the job
-  # above has left. The same build, then the gates. They ran on Linux and
-  # darwin only, and on Windows seven of them failed: python oracles that
-  # wrote CRLF, proofs that edited another platform's arm, a floor read
-  # with tools this platform does not have, and the collector's own
-  # exercises refusing a platform whose collector they had never been
-  # asked about.
-  # Two and a half hours: it took 56, 74 and 89 minutes on master and
-  # integration/0.20, and was cut off at ninety on a branch (job
-  # 119640679755) while its socket exercise was still going. It had grown
-  # to 75 minutes on a fast runner and 127 on a slow one (jobs
-  # 127915909866, 128265739456), 1,595 and 2,794 s of them in "and on the
-  # platforms this runner is not", which is the windows-std-platforms job
-  # below now: what is left took 49 and 80 minutes in those two jobs.
+  # The runtime's exercises and the gates that carry Windows code, out of
+  # `windows-native` so that they run beside it: 10, 4 and 20 minutes of
+  # that job's 105 in run 42144468184. The same setup as `windows-native`.
+  windows-native-gates:
+    needs: plan
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'windows-native-gates') }}
+    runs-on: windows-2025
+    timeout-minutes: 75
+    name: "The runtime's exercises and the gates that carry Windows code, on Windows"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: 1.21.0
+
+      - name: What this machine has
+        shell: pwsh
+        run: |
+          if (-not (Get-Command make -ErrorAction SilentlyContinue)) {
+            choco install make --no-progress -y
+          }
+          $lib = (crystal env CRYSTAL_LIBRARY_PATH).Trim()
+          if (-not (Test-Path "$lib\llvm_VERSION")) {
+            Write-Host "no llvm_VERSION beside the Crystal package's libraries, at $lib"
+            exit 1
+          }
+          $llvm = (Get-Content "$lib\llvm_VERSION")[0].Trim()
+          Write-Host "bootstrap libraries: $lib"
+          Write-Host "llvm: $llvm"
+          "CRYSTAL_LIBRARY_PATH=$lib" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "LLVM_VERSION=$llvm" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      - name: Build the fork's compiler, then `iyi`
+        shell: cmd
+        run: |
+          make -f Makefile.win crystal || exit /b 1
+          make -f Makefile.win iyi
+
+      # Every exercise under bench/, run by the compiler built above. The
+      # exclusions are named one by one, because a list nobody has to
+      # justify is how a target quietly stops being tested:
+      #
+      #   std_http_server    a server, which waits for the client its own
+      #                      gate supplies; a bare run has nobody to talk
+      #                      to and would sit there until the job's timeout
+      #   arena_large_probe  its pass *is* the memory fault, which
+      #                      bench/arena_exercise.sh asserts and a tally
+      #                      cannot
+      #   wasm32_exercise    a wasm32 program
+      #   std_debug_cross    its pass is a panic, whose trace cross-run
+      #                      reads on aarch64 and musl; Windows' own trace
+      #                      is bench/panics.sh's
+      #
+      # The sockets came off this list when `std/socket` and `std/udp` got
+      # their Winsock arms, and `std_file_exercise` came off it when the
+      # exercise learned to ask Windows whether it may make a symbolic link
+      # and to say what it skipped when the answer is no. `IYI_FILE_SANDBOX`
+      # is what keeps that exercise out of `/tmp`, which is not a directory
+      # here.
+      - name: Every exercise the runtime can hold
+        shell: pwsh
+        run: |
+          # stdin_park.iyi reads the pipe bench/concurrency_exercise.sh feeds
+          # it - a line two seconds in - and an empty stdin is its failure.
+          $skip = @(
+            "std_http_server.iyi", "arena_large_probe.iyi", "wasm32_exercise.iyi",
+            "stdin_park.iyi", "std_debug_cross.iyi"
+          )
+          $env:TEST_SANDBOX = Join-Path $env:RUNNER_TEMP "sandbox"
+          $env:IYI_FILE_SANDBOX = Join-Path $env:RUNNER_TEMP "filesandbox"
+          New-Item -ItemType Directory -Force -Path $env:TEST_SANDBOX | Out-Null
+          New-Item -ItemType Directory -Force -Path $env:IYI_FILE_SANDBOX | Out-Null
+          $iyi = "$pwd\.build\iyi.exe"
+          $failed = @()
+          $ran = 0
+          foreach ($program in Get-ChildItem bench\*.iyi | Sort-Object Name) {
+            if ($skip -contains $program.Name) { continue }
+            $ran = $ran + 1
+            # bench/std_path_exercise.sh pins these for the expand checks.
+            if ($program.Name -eq "std_path_exercise.iyi") {
+              $env:HOME = "/home/gate"; $env:PWD = "/pwd/gate"
+            }
+            "" | & $iyi run $program.FullName > "$env:RUNNER_TEMP\$($program.BaseName).out" 2>&1
+            if ($LASTEXITCODE -ne 0) {
+              $failed += $program.Name
+              Write-Host "== $($program.Name) failed with $LASTEXITCODE"
+              Get-Content "$env:RUNNER_TEMP\$($program.BaseName).out" | Select-Object -Last 15
+            } else {
+              Write-Host "ok   $($program.Name)"
+            }
+            if ($program.Name -eq "std_path_exercise.iyi") {
+              Remove-Item Env:\HOME, Env:\PWD -ErrorAction SilentlyContinue
+            }
+          }
+          Write-Host "$ran exercises run on Windows, $($failed.Count) failed"
+          if ($failed.Count -gt 0) {
+            Write-Host "failed: $($failed -join ', ')"
+            exit 1
+          }
+
+      # The language server, on the platform whose file URIs are not the
+      # path with a scheme in front: an editor sends
+      # `file:///c%3A/Users/x/a.iyi`, and chopping the scheme off left
+      # `/c:/Users/x/a.iyi`, a path with a root it does not have. Every
+      # buffer the server opened on Windows was read from a file it could
+      # not find, and nothing here had ever asked. The exe rather than
+      # `bin/iyi`, which is a shell script, and its path spelled the way
+      # the Windows python the runner carries can start it. And the
+      # session's workers: killed mid-compile, retired, and started again
+      # from a binary that has been renamed away - which is what a rebuild
+      # does, and what killed the proxy here with a stack overflow in the
+      # first exception it built afterwards.
+      - name: The language server holds its session, on Windows
+        shell: bash
+        run: |
+          IYI="$(cygpath -m "$PWD")/.build/iyi.exe" python bench/lsp_session.py
+          IYI="$(cygpath -m "$PWD")/.build/iyi.exe" python bench/lsp_artifacts.py
+          IYI="$(cygpath -m "$PWD")/.build/iyi.exe" python bench/lsp_memory.py
+
+      # Four gates that carry Windows code — `cygpath`, the `;` separator,
+      # the read-only directory Windows has no `chmod` for — and had never
+      # run on Windows, so the code they carry for it was written blind.
+      # What the verbs refuse, what the test verb answers, what a package
+      # resolves to through `iyi.mod` and `iyi.sum`, and what `migrate`
+      # writes: each is path-shaped work, and this is the platform whose
+      # paths are the reason to ask. And the collector's reuse check
+      # optimised: the exercise loop above runs `iyi run`, and the double
+      # hand-out it catches showed in `--release` builds. And the
+      # concurrency runtime's own gate, whose release arm is the one that
+      # keeps a double in xmm6-xmm15 across a fiber switch, and whose
+      # proof takes the switch's restore of them out. And Crystal's library
+      # bound as boundaries: `JSON`, `INI` and `XML` read Windows'
+      # file-private `ConsoleUtils` in object code that travels, which the
+      # consumer could not name and so never emitted. And SafeReach's
+      # proof, whose refusals spelled the places they name in full on
+      # Windows while the header beside them spelled them relative.
+      - name: The gates that carry Windows code, on Windows
+        shell: bash
+        run: |
+          bash bench/verbs_exercise.sh
+          bash bench/test_verb.sh
+          bash bench/packages_resolve.sh
+          bash bench/packages_get.sh
+          bash bench/migrate_gate.sh
+          bash bench/reuse_integrity.sh
+          bash bench/concurrency_exercise.sh
+          bash bench/parallel_exercise.sh
+          bash bench/spawn_eligible.sh
+          bash bench/safe_reach.sh
+          bash bench/unsafe.sh
+          bash bench/chaos_exercise.sh
+          bash bench/library_boundaries.sh
+          bash bench/up_to_date.sh
+
+  # The editor and agent surfaces, out of `windows-native` for the same
+  # reason: 28 of its 105 minutes in run 42144468184, the longest step.
+  windows-native-surfaces:
+    needs: plan
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'windows-native-surfaces') }}
+    runs-on: windows-2025
+    timeout-minutes: 75
+    name: "The editor and agent surfaces, on Windows"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: 1.21.0
+
+      - name: What this machine has
+        shell: pwsh
+        run: |
+          if (-not (Get-Command make -ErrorAction SilentlyContinue)) {
+            choco install make --no-progress -y
+          }
+          $lib = (crystal env CRYSTAL_LIBRARY_PATH).Trim()
+          if (-not (Test-Path "$lib\llvm_VERSION")) {
+            Write-Host "no llvm_VERSION beside the Crystal package's libraries, at $lib"
+            exit 1
+          }
+          $llvm = (Get-Content "$lib\llvm_VERSION")[0].Trim()
+          Write-Host "bootstrap libraries: $lib"
+          Write-Host "llvm: $llvm"
+          "CRYSTAL_LIBRARY_PATH=$lib" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "LLVM_VERSION=$llvm" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      - name: Build the fork's compiler, then `iyi`
+        shell: cmd
+        run: |
+          make -f Makefile.win crystal || exit /b 1
+          make -f Makefile.win iyi
+
+      # And the rest of what an editor and an agent are handed. Every
+      # sample again from its modules' artifacts alone (R-1), the agent
+      # loop and its MCP server, every cursor position in the repository's
+      # own `.iyi` files, and every semantic token's boundary — the four
+      # surfaces whose answers are paths and positions, which is what the
+      # last three Windows fixes to the language server were about.
+      #
+      # The sweep at stride 600, not Linux's 200: at 200 it took 36 of this
+      # job's 90 minutes, and what Windows adds to a cursor question is the
+      # transport and the path under it, which every module still gets
+      # asked about. Unbuffered, so a gate that stops says where it was.
+      - name: The editor and agent surfaces, on Windows
+        shell: bash
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: |
+          export IYI="$(cygpath -m "$PWD")/.build/iyi.exe"
+          bash bench/samples_roundtrip.sh
+          bash bench/release_cores.sh
+          python bench/agent_loop.py
+          python bench/lsp_token_boundaries.py
+          python bench/lsp_positions.py 600
+
+  # The foundation runs on its own Windows runner. The collector and socket
+  # gates run in windows-gates alongside this job; module exercises remain
+  # in windows-std-siblings, and every exercise read for other platforms is
+  # windows-std-platforms. Keep the existing timeout until the new schedule
+  # has been measured across completed runs.
   windows-std:
+    needs: plan
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'windows-std') }}
     runs-on: windows-2025
     timeout-minutes: 150
-    name: "The standard library and the collector, gated on Windows"
+    name: "The standard library foundation, gated on Windows"
     steps:
       - uses: actions/checkout@v7
         with:
@@ -2624,34 +2772,6 @@ jobs:
           make -f Makefile.win crystal || exit /b 1
           make -f Makefile.win iyi
 
-      # And the parallel mark and the mark beside the program: Windows'
-      # helpers park on a kernel32 semaphore between collections, and the
-      # second stop is a helper's, suspending every registered thread.
-      # Each gate under a bound of its own (bench/bounded_gate.sh): job
-      # 120284584748 sat in bench/sweep_exercise.sh from its first line to
-      # the job's cancel at 150 minutes, and its log could not say what
-      # was still running. Fifteen minutes is over three times the longest
-      # gate's 4 min 33 s in master's green job 120284541992; a gate past
-      # it is ended with its processes and their threads printed, and the
-      # gates after it still run. bench/thread_exercise.sh runs as two
-      # halves under a bound each: whole, it grew to 802 s (job
-      # 128265739456) and was ended at the bound (job 128494833123), 388
-      # and 454 s of it the plain build's ten more runs.
-      - name: The collector's gates, on Windows
-        shell: bash
-        run: |
-          failed=""
-          for gate in bench/arena_exercise.sh bench/root_exercise.sh \
-                      bench/mark_exercise.sh bench/sweep_exercise.sh \
-                      bench/collect_trigger.sh \
-                      "bench/thread_exercise.sh but-again" \
-                      "bench/thread_exercise.sh again" \
-                      bench/parallel_mark.sh bench/concurrent_mark.sh; do
-            # Unquoted: a half's name is the script and its argument.
-            bash bench/bounded_gate.sh 15 $gate || failed="$failed $gate"
-          done
-          [ -z "$failed" ] || { echo "failed:$failed"; exit 1; }
-
       # The foundation's own sections; the modules' exercises are the
       # windows-std-siblings shards below, and every exercise read for
       # other platforms is the windows-std-platforms job.
@@ -2663,13 +2783,6 @@ jobs:
           STD_PLATFORMS: "0"
         run: bash bench/std_exercise.sh
 
-      # The socket gate, which the sweep above does not reach (its name is
-      # older than the `std_` prefix): Winsock's arm - AcceptEx, ConnectEx,
-      # a posted send - for both address families.
-      - name: Sockets, on Windows
-        shell: bash
-        run: bash bench/socket_exercise.sh
-
   # Every std exercise read from its own artifacts for darwin, Windows,
   # aarch64 and musl (bench/std_platforms.sh), by the Windows compiler,
   # beside the job above: in it the section took 1,595 s on a fast runner
@@ -2677,6 +2790,8 @@ jobs:
   # build 111 and 180. Ninety minutes, under twice the slow one's 50.
   # On windows-2025, where those were measured.
   windows-std-platforms:
+    needs: plan
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'windows-std-platforms') }}
     runs-on: windows-2025
     timeout-minutes: 90
     name: "Every std exercise from its artifacts, for the platforms this runner is not, on Windows"
@@ -2752,6 +2867,8 @@ jobs:
   # - the runner's agent among them (bench/end_process.sh, which the stops
   # go through now).
   windows-std-siblings:
+    needs: plan
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'windows-std-siblings') }}
     runs-on: windows-2022
     timeout-minutes: 120
     strategy:
@@ -2818,9 +2935,11 @@ jobs:
   # not start there ran `bin/iyi`, a shell script, or named a module by
   # its Windows path, and take the exe and a `/` now.
   windows-gates:
+    needs: plan
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'windows-gates') }}
     runs-on: windows-2025
     timeout-minutes: 90
-    name: "The language's gates, on Windows"
+    name: "The language and collector gates, on Windows"
     steps:
       - uses: actions/checkout@v7
         with:
@@ -2844,6 +2963,7 @@ jobs:
           "LLVM_VERSION=$llvm" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
 
       - name: Build the fork's compiler, then `iyi`
+        id: compiler
         shell: cmd
         run: |
           make -f Makefile.win crystal || exit /b 1
@@ -2977,6 +3097,42 @@ jobs:
           bash bench/kemal_serves.sh
           bash bench/shard_serves.sh
           bash bench/sqlite3_queries.sh
+      # And the parallel mark and the mark beside the program: Windows'
+      # helpers park on a kernel32 semaphore between collections, and the
+      # second stop is a helper's, suspending every registered thread.
+      # Each gate under a bound of its own (bench/bounded_gate.sh): job
+      # 120284584748 sat in bench/sweep_exercise.sh from its first line to
+      # the job's cancel at 150 minutes, and its log could not say what
+      # was still running. Fifteen minutes is over three times the longest
+      # gate's 4 min 33 s in master's green job 120284541992; a gate past
+      # it is ended with its processes and their threads printed, and the
+      # gates after it still run. bench/thread_exercise.sh runs as two
+      # halves under a bound each: whole, it grew to 802 s (job
+      # 128265739456) and was ended at the bound (job 128494833123), 388
+      # and 454 s of it the plain build's ten more runs.
+      - name: The collector's gates, on Windows
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
+        shell: bash
+        run: |
+          failed=""
+          for gate in bench/arena_exercise.sh bench/root_exercise.sh \
+                      bench/mark_exercise.sh bench/sweep_exercise.sh \
+                      bench/collect_trigger.sh \
+                      "bench/thread_exercise.sh but-again" \
+                      "bench/thread_exercise.sh again" \
+                      bench/parallel_mark.sh bench/concurrent_mark.sh; do
+            # Unquoted: a half's name is the script and its argument.
+            bash bench/bounded_gate.sh 15 $gate || failed="$failed $gate"
+          done
+          [ -z "$failed" ] || { echo "failed:$failed"; exit 1; }
+
+      # The socket gate, which the sweep above does not reach (its name is
+      # older than the `std_` prefix): Winsock's arm - AcceptEx, ConnectEx,
+      # a posted send - for both address families.
+      - name: Sockets, on Windows
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
+        shell: bash
+        run: bash bench/socket_exercise.sh
 
   # wasm32-wasi, run rather than type-checked. The module imports four
   # `wasi_snapshot_preview1` functions and nothing else, and what makes it a
@@ -2997,6 +3153,8 @@ jobs:
   # it was `Iyi::Loader`. A job of its own because a codegen example is a
   # program built and run, and there are fourteen thousand.
   windows-compiler-specs:
+    needs: plan
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'windows-compiler-specs') }}
     runs-on: windows-2025
     timeout-minutes: 180
     name: "Crystal's compiler specs, on Windows"
@@ -3035,7 +3193,8 @@ jobs:
         run: make -f Makefile.win compiler_spec
 
   wasi-run:
-    needs: [cross-objects, binary]
+    needs: [plan, cross-objects, binary]
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'wasi-run') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     name: "An iyi program, run on wasm32-wasi"
@@ -3136,7 +3295,8 @@ jobs:
   # cross-compile, link with wasi-sdk's clang, run under wasmtime, and the
   # three proofs — happens here. Two seconds of work, wall clock aside.
   wasm32-collector:
-    needs: binary
+    needs: [plan, binary]
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'wasm32-collector') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     name: "The collector on wasm32-wasi"
@@ -3192,6 +3352,8 @@ jobs:
   # static Linux release, the one that image unpacks into `/usr`, and the
   # fork's compiler is built from it here before `iyi` is.
   binary:
+    needs: plan
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'binary') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     container:
@@ -3381,7 +3543,8 @@ jobs:
   # links through `cc`, so a machine that cannot compile C cannot finish
   # an iyi build. Everything else comes out of the tarball.
   clean-room:
-    needs: binary
+    needs: [plan, binary]
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'clean-room') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     name: "The tarball, on a machine with nothing on it"
@@ -3475,9 +3638,10 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [binary, darwin, darwin-std, darwin-std-siblings, clean-room, iyi, compiler-specs, stdlib-specs,
             samples, lsp-positions, std, std-siblings, std-platforms, targets, cross-objects, cross-run,
-            wasi-run, windows-probe, windows-collector, windows-runtime, windows-native, windows-std,
+            wasi-run, windows-probe, windows-collector, windows-runtime, windows-native,
+            windows-native-gates, windows-native-surfaces, windows-std,
             windows-std-siblings, windows-std-platforms, windows-gates, windows-compiler-specs,
-            wasm32-collector]
+            wasm32-collector, docs]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -3516,7 +3680,7 @@ jobs:
             dist/*.tar.gz dist/*.zip dist/SHA256SUMS
 
   # The editor client is the only artifact here that is published somewhere
-  # else, so it is proven the same way as the rest: every push packages it,
+  # else, so it is proven the same way as the rest: every run packages it,
   # which is the one check that the manifest parses, the files it names
   # exist, and a `.vsix` comes out. It needs no compiler — the extension is
   # thirty lines that spawn `iyi lsp` — so it does not wait on `build`.
@@ -3534,6 +3698,8 @@ jobs:
   # start with `v` either, or the `release` job above would take a client
   # tag for a compiler one and cut a GitHub release from it.
   vscode:
+    needs: plan
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'vscode') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     name: "The VS Code client packages, and a tag publishes it"
@@ -3593,3 +3759,30 @@ jobs:
           name: iyi-vscode
           path: editors/vscode/*.vsix
           retention-days: 7
+
+  # One check for the master ruleset to require: every job this
+  # run selected passed. A job the plan left out is skipped, and passes; a
+  # failed or cancelled one does not. `scripts/ci_plan.py` refuses a
+  # workflow whose jobs this list does not name.
+  result:
+    needs: [plan, docs, build, iyi, compiler-specs, stdlib-specs, lsp-positions, samples, std,
+            std-platforms, std-siblings, targets, cross-objects, cross-run, darwin,
+            darwin-std-siblings, darwin-std, windows-probe, windows-collector, windows-runtime,
+            windows-native, windows-native-gates, windows-native-surfaces, windows-std,
+            windows-std-platforms, windows-std-siblings, windows-gates, windows-compiler-specs,
+            wasi-run, wasm32-collector, binary, clean-room, vscode]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    name: "Every selected job passed"
+    steps:
+      - name: Every selected job passed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          printf '%s' "$RESULTS" | python3 -c '
+          import json, sys
+          failed = [name for name, job in json.load(sys.stdin).items()
+                    if job["result"] in ("failure", "cancelled")]
+          print("failed or cancelled: " + ", ".join(failed) if failed else "every selected job passed")
+          sys.exit(1 if failed else 0)'

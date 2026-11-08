@@ -427,6 +427,19 @@
 
 ### Gates
 
+- **A pull request runs the fast part of CI; master, mt/next and the
+  nightly run the whole of it.** Every pull request ran all 39 jobs,
+  about twenty runner-hours, a README edit as much as a compiler change,
+  on a plan that runs twenty jobs at once: a run took 93 to 192 minutes,
+  and one job of #118's waited 112 for a runner. `scripts/ci_plan.py` now
+  picks the jobs: a pull request runs the Linux build, the specs, the rules
+  gate, the cross-compiled Windows binaries and the docs gates; only docs
+  runs the docs gates alone, and only `bench/` the jobs that name the
+  changed files. A push to a branch other than master and mt/next, the
+  integration branch, runs nothing, and a manual dispatch runs everything. `iyi, built and run on Windows`, the
+  critical path at a median of 105 minutes, is three jobs that run beside
+  each other, and `result` is one check that every selected job passed.
+
 - **`bench/thread_exercise.sh` runs on Windows in two halves, each under
   a bound of its own.** On windows-2025's four cores the whole took 802 s
   of its 900 s bound (CI job 128265739456), and the next run was ended at
@@ -676,6 +689,15 @@
 
 ### Added
 
+- **`iyi init` with no module path names the project after its directory
+  (#156).** `mkdir my-project && cd my-project && iyi init` writes `module
+  my-project` and `my_project.iyi`, and says which name it took and that a
+  project others will import wants its whole path. The name is held to the
+  checks a typed one is and never rewritten: `MyProject` or `my project` is
+  refused, and nothing is written. `iyi init .` stays refused - the first
+  argument is a module path, not a directory - and now says that `iyi init`
+  with no arguments is the form that means this directory.
+
 - **`Unit(T)` in `std/unit`: a value only one unit's tasks reach (SPEC.md
   III.4.18).** `Unit.new { {} of String => Int32 }` makes a `Unit` owning
   what the block answers, and `g.spawn(in: u) { |hits| ... }` starts a task
@@ -881,6 +903,35 @@
   chan_scaling's instructions are the same.
 
 ### Fixed
+
+- **On Linux, C called from a parallel task or an `IyiThread` runs on a
+  thread libc made** (#158). The pool's threads were a raw `clone` with
+  a TLS block made from the executable's PT_TLS and none of libc's
+  thread state, so a `lib` function that reached for it answered wrong
+  or faulted: `pthread_self` answered 0, `strerror` died of SIGSEGV, and
+  `errno` was written below the block. A program whose code outside the
+  prelude calls a C function, or that imports an artifact whose code
+  does, now starts its threads and the collector's mark helpers with
+  `pthread_create` on the same 1 MiB mapping and guard page, and joins
+  with `pthread_join`; the compiler answers `IyiThread.program_calls_c?`
+  once the whole program is typed, so a program that calls no C still
+  starts them with `clone` and names nothing on the link line. A program
+  that binds C with `lib LibC` on Linux can no longer bind
+  `pthread_create`, `pthread_join` or the three `pthread_attr_` calls
+  with signatures other than the runtime's, as on darwin.
+
+- **A module consumed from its `.iyimod` keeps the definition witnesses its
+  producer typed against (#118).** Definition typing gives a trait a witness
+  type in the build that typed a def restricted to it, and that witness is
+  among the trait's implementers. A consumer without the module's source had
+  no witness: object code that matched a union containing it, such as
+  `is_a?(Value)` on a `Value | Bool` field, was refused with "this build
+  cannot name it". Artifacts now record the witnesses of the traits their
+  module declares, and the consumer restores them before typing its own
+  bodies, so it numbers and lays out the trait as the producer did.
+  Artifacts emitted by earlier compilers do not carry that record: rebuild
+  them with `--emit-iyimod`. The prelude analysed ahead by the build daemon
+  does not restore witnesses yet.
 
 - **The language server's hover shows the doc comment of a declaration
   written under an annotation.** It read the `#` lines straight above the
@@ -27615,7 +27666,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 28,716-line library and nothing else. Every other
+  written against iyi's own 28,800-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

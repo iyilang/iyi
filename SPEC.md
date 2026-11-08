@@ -63,8 +63,8 @@ own reference accepts.
 | warm full build, `hello` / 6,900-line pair | 0.07 s / 0.24 s, against `go build`'s 0.08 s / 0.09 s |
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
-| iyi's own prelude | 28,716 lines, of which 4,683 are the library held to the 4,683 ceiling (6,954 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 137,506 lines, none of it written in iyi |
+| iyi's own prelude | 28,800 lines, of which 4,683 are the library held to the 4,683 ceiling (6,954 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
+| compiler | 137,692 lines, none of it written in iyi |
 | artifact format | `.iyimod` v62, checksum per section |
 | samples | 28 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -88,7 +88,7 @@ shape.
 > is a library and the rules are the language, so a program can keep one and
 > change the other: `--crystal` builds against Crystal's standard library, and
 > there `require` reaches the ecosystem while every rule stays where it was.
-> "No standard library worth the name" is still true of iyi's own 28,716 lines
+> "No standard library worth the name" is still true of iyi's own 28,800 lines
 > and no longer true of what a program can have. Part V item 12a is the
 > measurement, nine shards wide.
 
@@ -270,7 +270,7 @@ of binary. It is not made the default on that trade, and the middle needs the
 initialisers to run *later* rather than not at all, which is the `dlsym` table
 above, and a larger piece of work than the number it wins.
 
-**3. A deliberately tiny prelude, written in iyi. Done: 28,716 lines,
+**3. A deliberately tiny prelude, written in iyi. Done: 28,800 lines,
 primitives included, of which the library is 4,683.** Not a standard library:
 integers, booleans, a string, one sequence, one dictionary, one range, `puts`,
 and an `enum`'s surface — the member's name, an order, the members, and the
@@ -1042,9 +1042,9 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 137,506 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 28,716-line own prelude + 126,520 in std |
-| Specs | 21,146 lines | 16,818 for iyi |
+| Compiler | 24,984 lines, **written in Crystal** | 137,692 lines, Crystal, forked |
+| Library | 8,161 lines (3,551 of it core) | 28,800-line own prelude + 126,520 in std |
+| Specs | 21,146 lines | 16,992 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
 | Own status line | *"pre-alpha: we are still designing the language"* | design largely settled, 0.2.0 released, a language written in it |
@@ -3650,6 +3650,21 @@ scheduler state and a heap cache on first touch — III.4's scheduler and
 the collector's allocator were cut over to per-thread state in the two
 entries before this one — so it spawns fibers of its own and allocates
 without a lock.
+
+**A Linux program that calls C gets libc's threads instead.** Its main
+thread is libc's, started by `__libc_start_main`, and a raw `clone` has
+none of libc's thread state: from a parallel task `pthread_self`
+answered 0, `strerror` faulted, and `errno` was written below the TLS
+block (issue #158). Which calls survived was luck, not a rule a program
+could keep. So the compiler answers `IyiThread.program_calls_c?` once
+the whole program is typed — true when code outside the prelude calls a
+`lib` fun that is neither an LLVM intrinsic nor a variable, or an
+imported artifact's code does — and an `if` on that literal compiles one
+branch. True, a thread and a mark helper are `pthread_create` on the
+same mapping, guard page and size, and `join` is `pthread_join`; false,
+they are the clone, and the program names nothing more than before. A
+program that already names libc pays up to five names more for its
+threads to be libc's; one that names none keeps the floor.
 
 **It is not a task, and saying so is the design.** No group owns it and
 nothing cancels it. A value handed from one thread to another is a data
@@ -8380,7 +8395,7 @@ From Crystal's own *Required libraries* page, plus every `@[Link]` in this tree.
 | compiler-rt builtins | 128-bit divide, float conversion, overflow-checked multiply | no | **already owned**: `src/crystal/compiler_rt/` ports them to Crystal. Keep porting |
 | libunwind / libgcc | exception backtraces | no | own the walk. III.1 is what makes this cheap: errors are union members, so only a panic unwinds |
 | libevent | event loop | no | **never adopt it.** Crystal already wrote native backends and libevent is its default only on OpenBSD, NetBSD, Dragonfly and Solaris |
-| pthread | threads | no | kernel calls directly, as Go does: `IyiThread` (III.4.11) is `clone` on Linux and `CreateThread` on Windows; darwin's is `pthread_create`, in libSystem |
+| pthread | threads | no | kernel calls directly, as Go does: `IyiThread` (III.4.11) is `clone` on Linux and `CreateThread` on Windows; darwin's is `pthread_create`, in libSystem, and so is a Linux program's that calls C itself, whose threads libc must know |
 | libdl | `dlopen` | no | do not offer dynamic loading |
 | libm | `sqrt`, `pow` | no | LLVM intrinsics where they exist, iyi where they do not |
 | libiconv | encoding conversion | no | never. UTF-8 only, which is Go's answer and already iyi's. The compiler dropped it too (`-Dwithout_iconv`) |
@@ -13256,7 +13271,7 @@ Named honestly, so nobody mistakes this draft for complete.
     shards exist and none of them is written to iyi's rules, so "run them
     directly" is not a compatibility problem, it is the four rules: `require`
     against R-1, inference against R-2, monkey patching against R-3, and
-    Crystal's 8,161-line standard library against iyi's own 28,716-line prelude.
+    Crystal's 8,161-line standard library against iyi's own 28,800-line prelude.
 
     What is measurable is narrower and better than that framing suggests, and
     it was measured on **Kemal 1.12.0**, which compiles under this compiler

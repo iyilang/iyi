@@ -583,6 +583,53 @@ module Iyi
     # path beside `spawn`'s, for a call the cleanup may never point at it.
     property? iyi_pool_reached : Bool = false
 
+    # iyi: whether code written outside the prelude calls a C function — a
+    # `lib` fun that is neither an LLVM intrinsic nor a variable. Set where
+    # such a call is typed (`Call#recalculate_lib_call`).
+    #
+    # It decides how a Linux thread is made (`IyiThread.program_calls_c?`).
+    # The main thread is libc's, started by `__libc_start_main`; a raw
+    # `clone` gets a TLS block made from the executable's PT_TLS and no
+    # thread control block, so C that reaches its own thread state there —
+    # `pthread_self` answered 0, `strerror` faulted, `errno` was written
+    # outside the block (issue #158) — runs on nothing. A program that calls
+    # C has libc's thread names already; one that does not keeps the floor.
+    property? iyi_calls_c = false
+
+    # Whether the program runs C: its own calls, or a `lib` an imported
+    # artifact's object code calls into, which this build never typed.
+    def iyi_runs_c? : Bool
+      @iyi_calls_c || iyi_artifact_calls_c?(@types)
+    end
+
+    private def iyi_artifact_calls_c?(types) : Bool
+      return false if iyi_artifact_libs.empty? || types.nil?
+      types.each_value.any? { |type| iyi_artifact_lib_calls_c?(type) || iyi_artifact_calls_c?(type.types?) }
+    end
+
+    private def iyi_artifact_lib_calls_c?(type : Type) : Bool
+      return false unless type.is_a?(LibType) && iyi_artifact_libs.includes?(type.to_s)
+      defs = type.defs
+      return false unless defs
+      defs.each_value.any? { |overloads| overloads.any? { |item| iyi_c_function?(item.def) } }
+    end
+
+    # A `lib` fun whose machine code is C's: not a variable, and not an LLVM
+    # intrinsic, which is an instruction rather than a call.
+    def iyi_c_function?(target : Def) : Bool
+      target.is_a?(External) && !target.external_var? && !target.real_name.starts_with?("llvm.")
+    end
+
+    # Whether *location* is in one of the prelude's own files, following a
+    # macro expansion back to its source.
+    def iyi_prelude_location?(location : Location?) : Bool
+      return false unless dir = @iyi_prelude_dir
+      prefix = "#{::Path[dir].to_posix}/"
+      !!location.try(&.expanded_location).try(&.read_from.as?(String)).try do |filename|
+        ::Path[filename].to_posix.to_s.starts_with?(prefix)
+      end
+    end
+
     # iyi: the global of the pool's preemption word, `IyiWorkers::preempt`,
     # once codegen has marked a loop's back-edge for the check
     # (`CodeGenVisitor#iyi_back_edge`); nil in a program with no pool. The
@@ -669,12 +716,12 @@ module Iyi
     # iyi: the witness types an imported artifact's object code refers to a
     # type id of and this build does not have, by name.
     #
-    # Definition-site typing (R-2c) gives a trait a witness type in the build
-    # that typed a def restricted to it, and the witness implements the trait,
-    # so every dispatch over the trait that build compiled tests for it. No
-    # value ever has that type - its probe sits under `if false` - so the
-    # consumer defines the id as one no type has rather than refusing the
-    # module over a type that exists only to be typed against.
+    # Definition-site typing (R-2c) adds witnesses to a trait's implementers,
+    # which can change both dispatch and trait-valued field/call layouts.
+    # Consumers restore supported witnesses as real types before typing their
+    # own bodies, preserving the producer's representation. These names are
+    # the fallback for witnesses that cannot be restored: codegen defines an
+    # unmatchable id for them. Compound matches must resolve to real types.
     getter iyi_artifact_phantom_types = Set(String).new
 
     # iyi: one name an imported artifact's object code refers to, waiting for
@@ -1012,7 +1059,7 @@ module Iyi
     # scope of the question: a type id is resolved from a definition in *this
     # program*, not from whatever had been read by the time one artifact was
     # opened. See `IyiArtifactRef`.
-    def resolve_iyi_artifact_refs : Nil
+    def resolve_iyi_artifact_refs(defer_witness_matches : Bool = false) : Nil
       refs = @iyi_artifact_refs
       return if refs.empty?
       @iyi_artifact_refs = [] of IyiArtifactRef
@@ -1051,6 +1098,13 @@ module Iyi
         # `iyi_artifact_phantom_types`.
         if !ref.match && ref.name.starts_with?(DefinitionTyping::WITNESS_PREFIX)
           iyi_artifact_phantom_types << ref.name
+        elsif ref.match && defer_witness_matches && ref.name.includes?(DefinitionTyping::WITNESS_PREFIX)
+          # A carried match can name a witness as a member of a union or a
+          # generic argument. Its declaration is restored by definition typing
+          # after the ordinary imported declarations have been processed.
+          # Keep the full reference, then resolve it strictly after restoration;
+          # treating the union as a phantom would lose its real runtime members.
+          @iyi_artifact_refs << ref
         elsif ref.match
           ref.node.raise <<-MESSAGE
             "#{ref.module_name}" matches against `#{ref.name}`, and this build cannot name it

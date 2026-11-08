@@ -63,9 +63,9 @@ own reference accepts.
 | warm full build, `hello` / 6,900-line pair | 0.07 s / 0.24 s, against `go build`'s 0.08 s / 0.09 s |
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
-| iyi's own prelude | 28,663 lines, of which 4,650 are the library held to the 4,650 ceiling (6,905 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 136,515 lines, none of it written in iyi |
-| artifact format | `.iyimod` v61, checksum per section |
+| iyi's own prelude | 28,716 lines, of which 4,683 are the library held to the 4,683 ceiling (6,954 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
+| compiler | 137,463 lines, none of it written in iyi |
+| artifact format | `.iyimod` v62, checksum per section |
 | samples | 28 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
 
@@ -88,7 +88,7 @@ shape.
 > is a library and the rules are the language, so a program can keep one and
 > change the other: `--crystal` builds against Crystal's standard library, and
 > there `require` reaches the ecosystem while every rule stays where it was.
-> "No standard library worth the name" is still true of iyi's own 28,663 lines
+> "No standard library worth the name" is still true of iyi's own 28,716 lines
 > and no longer true of what a program can have. Part V item 12a is the
 > measurement, nine shards wide.
 
@@ -270,8 +270,8 @@ of binary. It is not made the default on that trade, and the middle needs the
 initialisers to run *later* rather than not at all, which is the `dlsym` table
 above, and a larger piece of work than the number it wins.
 
-**3. A deliberately tiny prelude, written in iyi. Done: 28,663 lines,
-primitives included, of which the library is 4,650.** Not a standard library:
+**3. A deliberately tiny prelude, written in iyi. Done: 28,716 lines,
+primitives included, of which the library is 4,683.** Not a standard library:
 integers, booleans, a string, one sequence, one dictionary, one range, `puts`,
 and an `enum`'s surface — the member's name, an order, the members, and the
 bits of a `@[Flags]` one. **Its scope is set by what the
@@ -301,11 +301,11 @@ the scheduler and the kernel thread (III.4, `concurrency.iyi` and
 seed under `-Diyi_chaos`, `chaos.iyi` and `chaos_points.iyi`, III.4.17),
 the shortest-round-trip float text (`float.iyi`) - and they
 are most of its lines. So the figure held to the ceiling is the library:
-**4,650 lines** of the 21,556, measured by `bench/doc_numbers.py` as
+**4,683 lines** of the 21,556, measured by `bench/doc_numbers.py` as
 everything under `src/iyi/` except those three and except every platform's
-floor of 2,255 lines — the arms behind `flag?(:win32)`, `flag?(:linux)`,
+floor of 2,271 lines — the arms behind `flag?(:win32)`, `flag?(:linux)`,
 `flag?(:darwin)` and `flag?(:wasm32)`, which the paragraph on the breach
-below settles and explains. Opening `src/iyi/` counts 6,905 with the floor
+below settles and explains. Opening `src/iyi/` counts 6,954 with the floor
 still in it, and the whole-prelude figure is stated beside both because a
 reader sees the whole file, and a "tiny prelude" claim that hid 9,000 lines
 of runtime would be a claim about the wrong number.
@@ -426,7 +426,7 @@ where most of the 1,040 lines are.
 by hand.** Counting the lines inside a macro conditional whose condition
 names an OS, architecture or ABI flag — every arm of it, `else` included,
 since an `else` under `flag?(:linux)` is what the other platforms take and
-exists for the same reason — the platform floor measures **2,255 lines**
+exists for the same reason — the platform floor measures **2,271 lines**
 today (1,871 of the 4,803 that day), and Windows is the largest arm of it
 by a wide margin, which is what a platform whose every path, console byte
 and integer division needs its own answer costs.
@@ -472,8 +472,20 @@ on the two collections every program has, and an import in front of
 `Array#[](range)` is a tax on every program for a ceiling's sake. The rule
 itself is unchanged and is checked as it was: the next method that enters
 the library moves something out first, `bench/doc_numbers.py` fails past
-4,650, and the ceiling no longer claims to be 0.1.0's core, only to be the
+the ceiling, and the ceiling no longer claims to be 0.1.0's core, only to be the
 number that stops the prelude from drifting.
+
+**And again, by the owner's decision, to 4,683.** Unsafe code (III.13)
+put 33 lines into the library: the mark above nine of its files, the
+promises two of its defs carry (`Array.unsafe_build`,
+`Array#unsafe_set_size`), and the two calls that read and build bytes
+without raw memory, `String#byte_at` and `String.new(Array(UInt8), start,
+count)`, through which sixteen std modules, ten bench exercises and the
+gates' programs need no mark. Moving the calls behind an import would tax
+the safe way to read a byte and leave `to_unsafe` the one that needs
+none, the reverse of what III.13 asks, and a mark is a file saying what it
+is rather than a method a program calls. The owner chose the number, as
+measured with III.13 in: 4,683.
 
 What the rule does *not* forgive: a `pub def` a program calls is API and
 counts wherever it is written, macro arm or not — the exclusion is for the
@@ -1030,9 +1042,9 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 136,515 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 28,663-line own prelude + 126,423 in std |
-| Specs | 21,146 lines | 16,735 for iyi |
+| Compiler | 24,984 lines, **written in Crystal** | 137,463 lines, Crystal, forked |
+| Library | 8,161 lines (3,551 of it core) | 28,716-line own prelude + 126,520 in std |
+| Specs | 21,146 lines | 16,818 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
 | Own status line | *"pre-alpha: we are still designing the language"* | design largely settled, 0.2.0 released, a language written in it |
@@ -8980,8 +8992,8 @@ off under `--crystal` and in `.cr` files, whose language has no such
 rule.
 
 **One rule for every module.** The prelude's files carry the mark like
-any other: `src/iyi`'s ⟨N_IYI⟩ marked files, each with its reason, and
-⟨N_IYI_SAFE⟩ that need none. `@[UnsafeReach]` is kept for a marked module
+any other: `src/iyi`'s 13 marked files, each with its reason, and
+7 that need none. `@[UnsafeReach]` is kept for a marked module
 (III.4.4), which replaces the syntactic `PointerFiles` rule - a file was
 allowed the mark if it spelled `Pointer` - with a typed one.
 
@@ -8990,8 +9002,11 @@ allowed the mark if it spelled `Pointer` - with a typed one.
 `Bytes.of(text)`, a read-only view of a string's bytes, no copy;
 `String.new(bytes)` from a `Bytes` or from an `Array(UInt8)` (with a
 checked start and count); `IyiIO#write(Bytes)` and `IyiSocket#read(Bytes)`
-/ `#write(Bytes)`. With these, ⟨N_STD_SAFE⟩ std modules that needed one
-to three unsafe lines are safe instead of marked.
+/ `#write(Bytes)`. With these, 16 std modules whose raw memory was
+reading a string's bytes or building one from bytes (asn1, autocert,
+capsule, hpack, hpke, idna, ini, levenshtein, option_parser, p384, rsa,
+symbol, tuple, uuid, x509) or one C call (number's `copysign`, now a
+multiplication by zero) are safe instead of marked.
 
 **A mark nothing needs** is a warning, with the line's removal as its
 edit - `` `x` is marked @[Unsafe] and does nothing unsafe: remove the
@@ -9029,9 +9044,30 @@ the runtime's aside - are marked: the compiler writes the list into the
 binary (`Crystal::IYI_UNSAFE_MODULES`), and the Windows handler prints
 it in pieces, allocating nothing.
 
-**Where the repository stands.** ⟨STANDS⟩
+**Where the repository stands.** `src/std` has 83 marked modules of
+121, every reason read and rewritten by hand from `iyi fix`'s starting
+point; four of them (box, deque, static_array, weak_ref) are marked by
+hand outright, since only a program that instantiates their generic
+bodies types them and `iyi fix src/std` cannot see them. bench has
+85 marked programs of 175, and none of `samples/iyi`'s 28 programs
+needs one. The specs' snippets whose stand-in for the prelude or std (a
+`@[Primitive]`, a `lib`, a `Pointer` field, a `@[Share]` type,
+`uninitialized` storage) sits in the compiled module are marked as the
+files they stand in for, and the programs the gates write either carry a
+mark saying what they do with raw memory or read their bytes with
+`byte_at` and `String.new(Array(UInt8))`.
 
-**What it costs.** ⟨COSTS⟩
+**What it costs.** The check is one walk of the typed defs after the main
+pass, timed by `IYI_PROF=1` as `main: unsafe check`, against the whole
+`iyi check` (median of five runs): `samples/iyi/hello.iyi` 14 ms of 285,
+`bench/std_fuzz_exercise.iyi` 239 ms of 2,238 and
+`bench/std_tls_exercise.iyi` 576 ms of 2,231 on Linux (12 vCPU, shared);
+17 of 342, 300 of 2,945 and 744 of 2,896 on Windows 11, 12 logical
+processors (the user's machine). That is 5% of a small program's check
+and 10 to 26% of a large one's, TLS the most. A build pays the same walk
+beside code generation, which it does not touch, and the binary carries
+only the list of the program's own marked modules the fault message
+prints.
 
 **Granularity, said plainly.** The unit is the file: one `to_unsafe`
 makes a whole module unchecked. The answers are the unneeded-mark
@@ -9039,8 +9075,8 @@ warning, which keeps the set honest, and splitting raw code into a small
 module of its own, the way Rust crates isolate theirs. Counted at
 2f070a01e by reading the sources, blocks (`unsafe { }`) would have
 wrapped 2,338 runs of lines in src/std, 900 in src/iyi and 607 in bench,
-and a mark per declaration 1,535, 469 and 258 defs, against ⟨N_MARKS⟩
-module marks.
+and a mark per declaration 1,535, 469 and 258 defs, against 83, 13 and
+85 module marks.
 
 ---
 
@@ -13219,7 +13255,7 @@ Named honestly, so nobody mistakes this draft for complete.
     shards exist and none of them is written to iyi's rules, so "run them
     directly" is not a compatibility problem, it is the four rules: `require`
     against R-1, inference against R-2, monkey patching against R-3, and
-    Crystal's 8,161-line standard library against iyi's own 28,663-line prelude.
+    Crystal's 8,161-line standard library against iyi's own 28,716-line prelude.
 
     What is measurable is narrower and better than that framing suggests, and
     it was measured on **Kemal 1.12.0**, which compiles under this compiler

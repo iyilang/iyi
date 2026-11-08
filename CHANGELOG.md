@@ -658,6 +658,7 @@
   user's machine). test_verb.sh refuses a `--chaos=` seed that is not
   decimal digits below 2^64, which `to_u64?` alone would have read from
   `+7` and ` 7`, and a `--chaos-runs` below 1.
+
 - **std_term_exercise.sh reads darwin's own `stty -g`.** The gate
   compares `stty -g` before and after each block, and read it as GNU's
   colon-separated hex; darwin's stty writes `gfmt1:cflag=4b00:...:lflag=5cb:...`,

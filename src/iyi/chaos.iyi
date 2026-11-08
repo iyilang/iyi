@@ -75,6 +75,7 @@
 # set as well prints, as the program ends, the seed, the strategy and the
 # schedule's hash - a fold of every choice made - which is how
 # bench/chaos_exercise.sh shows two runs of one seed took one schedule.
+@[Unsafe("the chaos scheduler reads the runtime's thread words and writes its trace through raw memory")]
 {% if flag?(:gc_none) || flag?(:gc_boehm) %}
   {% raise "-Diyi_chaos needs the default runtime: its scheduler is the one a chaos build drives, and -Dgc_none and -Dgc_boehm have no pool to simulate (SPEC.md III.4.17)" %}
 {% end %}

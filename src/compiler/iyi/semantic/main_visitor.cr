@@ -10,6 +10,11 @@ module Iyi
       Prof.span("  main: missing types") { node.accept missing_types }
       program.process_finished_hooks(missing_types) if process_finished_hooks
 
+      # iyi: unsafe code is code in a module that says so (SPEC.md III.13),
+      # read off the typed program before the cleanup inlines what the
+      # compiler wrote into what the person did.
+      Prof.span("  main: unsafe check") { UnsafeCheck.run(self, node) } if process_finished_hooks
+
       node = Prof.span("  main: cleanup") { cleanup node } if cleanup
 
       if process_finished_hooks
@@ -1900,6 +1905,7 @@ module Iyi
       expanded.accept self
       node.bind_to expanded
       node.expanded = expanded
+      node.iyi_compiler_expansion = true
 
       true
     end

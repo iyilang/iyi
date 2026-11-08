@@ -16,6 +16,7 @@
 # `primitives.iyi` under it is the list of machine operations iyi admits —
 # arithmetic, conversions, comparisons and `Pointer`. It is iyi's own rather
 # than Crystal's, and the reason is measured there.
+@[Unsafe("the runtime: the heap and its collector, signals, and the platform's entry points")]
 require "./primitives"
 
 require "./macros"
@@ -11605,8 +11606,24 @@ end
           __iyi_win_fault_exit
         end
       {% end %}
-      message = "iyi: the program died of a memory fault. Outside `Pointer`, an iyi program cannot reach memory it does not own: if the program uses `Pointer`, that is the place to look. If it does not, it is a bug in iyi's own runtime, and ours to fix: https://github.com/iyilang/iyi/issues\n"
-      LibC.WriteFile(handle, message.to_unsafe.as(Void*), message.bytesize, pointerof(written), nil)
+      # In pieces, since a handler for a fault allocates nothing: the
+      # program's own modules marked `@[Unsafe]` (SPEC.md III.13), which
+      # the compiler wrote into the binary, are where to look.
+      unsafe = Crystal::IYI_UNSAFE_MODULES
+      head = "iyi: the program died of a memory fault. Outside a module marked `@[Unsafe]`, an iyi program cannot reach memory it does not own: "
+      LibC.WriteFile(handle, head.to_unsafe.as(Void*), head.bytesize, pointerof(written), nil)
+      if unsafe.empty?
+        none = "this program marks none of its own"
+        LibC.WriteFile(handle, none.to_unsafe.as(Void*), none.bytesize, pointerof(written), nil)
+      else
+        own = "this program's own are "
+        LibC.WriteFile(handle, own.to_unsafe.as(Void*), own.bytesize, pointerof(written), nil)
+        LibC.WriteFile(handle, unsafe.to_unsafe.as(Void*), unsafe.bytesize, pointerof(written), nil)
+        look = ", and that is the place to look"
+        LibC.WriteFile(handle, look.to_unsafe.as(Void*), look.bytesize, pointerof(written), nil)
+      end
+      tail = ". Otherwise it is a bug in iyi's own runtime or std, and ours to fix: https://github.com/iyilang/iyi/issues\n"
+      LibC.WriteFile(handle, tail.to_unsafe.as(Void*), tail.bytesize, pointerof(written), nil)
       __iyi_win_fault_exit
     end
     # EXCEPTION_CONTINUE_SEARCH: not one of ours, so whatever Windows would

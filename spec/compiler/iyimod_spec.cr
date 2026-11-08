@@ -2144,6 +2144,7 @@ describe Iyi::IyiMod do
     with_tempdir("iyimod_lib_and_macro") do
       Dir.mkdir_p "boot"
       File.write "boot/plat.iyi", <<-IYI
+        @[Unsafe("declares the platform's C library")]
         module boot/plat
 
         lib LibPlat
@@ -2839,6 +2840,7 @@ describe Iyi::IyiMod do
     with_tempdir("iyimod_primitive") do
       Dir.mkdir_p "boot"
       File.write "boot/f32.iyi", <<-IYI
+        @[Unsafe("declares a float operator as a compiler primitive")]
         module boot/f32
 
         struct ::Float32
@@ -3644,6 +3646,7 @@ describe Iyi::IyiMod do
   it "carries what an annotation decides, on a type and on a def" do
     with_tempdir("iyimod_primitive_annotation") do
       File.write "main.iyi", <<-IYI
+        @[Unsafe("builds a Point in ReferenceStorage it allocates uninitialized")]
         module main
 
         import std/reference_storage::{ReferenceStorage}
@@ -3696,6 +3699,7 @@ describe Iyi::IyiMod do
     with_tempdir("iyimod_own_lib") do
       Dir.mkdir_p "boot"
       File.write "boot/clock.iyi", <<-IYI
+        @[Unsafe("declares the C clock library")]
         module boot/clock
 
         lib LibC
@@ -4967,6 +4971,7 @@ describe Iyi::IyiMod do
     with_tempdir("iyimod_share_owns") do
       Dir.mkdir_p "std"
       File.write "std/guard.iyi", <<-IYI
+        @[Unsafe("a guard is trusted to cross threads under @[Share(owns: true)] because only its locked blocks reach the value")]
         module std/guard
 
         pub class Counter

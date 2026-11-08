@@ -442,9 +442,18 @@ jobs:
       # naming the write - one from two parallel tasks, one beside a lock,
       # one after the first task starts - and a Share type, writes behind
       # one lock and writes before the first task are each accepted; an
-      # `@[UnsafeReach]` outside a file that uses Pointer is refused.
+      # `@[UnsafeReach]` outside a module marked @[Unsafe] is refused.
       - name: SafeReach is proven, not trusted (III.4.4)
         run: bash bench/safe_reach.sh
+
+      # III.13: every way out of the checked language - a Pointer however
+      # it is reached, uninitialized, lib, fun, asm, @[Primitive],
+      # @[Extern], a caller contract, @[Share] and @[UnsafeReach] - refused
+      # unmarked and accepted marked; the safe byte APIs unmarked; the
+      # unneeded mark warned of; iyi fix's mark; the artifact's mark; the
+      # fault message naming the module; --crystal untouched.
+      - name: Unsafe code is code in a module that says so (III.13)
+        run: bash bench/unsafe.sh
 
       # III.4.15: generated programs of two and three levels of modules,
       # each built from source and from its dependencies' artifacts; the
@@ -1557,6 +1566,9 @@ jobs:
       - name: Where a plain spawn runs (III.4.15)
         run: bash bench/spawn_eligible.sh
 
+      - name: Unsafe code is code in a module that says so (III.13)
+        run: bash bench/unsafe.sh
+
       - name: The chaos scheduler in iyi test (III.4.17)
         run: bash bench/chaos_exercise.sh
 
@@ -2361,6 +2373,7 @@ jobs:
           bash bench/parallel_exercise.sh
           bash bench/spawn_eligible.sh
           bash bench/safe_reach.sh
+          bash bench/unsafe.sh
           bash bench/chaos_exercise.sh
           bash bench/library_boundaries.sh
           bash bench/up_to_date.sh

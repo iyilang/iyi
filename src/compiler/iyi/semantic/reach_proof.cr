@@ -248,11 +248,11 @@ module Iyi
     end
 
     def run : Nil
-      check_unsafe_places
       robust = @program.iyi_reach_robust
       @program.iyi_reach_claims.each do |claim|
-        # An `UnsafeReach` is the author's word, and holds wherever the
-        # module is imported as it does here.
+        # An `UnsafeReach` is the author's word, kept for a module marked
+        # `@[Unsafe]` (`UnsafeCheck`), and holds wherever the module is
+        # imported as it does here.
         if claim.unsafe?
           robust << claim.state.object_id
           next
@@ -327,49 +327,6 @@ module Iyi
         end
       end
       true
-    end
-
-    # --- where UnsafeReach may be written --------------------------------
-
-    # `@[UnsafeReach]` is the claim nothing checks, so it is kept where
-    # nothing is checked already: the prelude and runtime (`src/iyi`), and
-    # a file that uses `Pointer`, whose raw memory no proof covers either.
-    private def check_unsafe_places : Nil
-      unsafe = @program.iyi_reach_claims.select(&.unsafe?)
-      return if unsafe.empty?
-      pointer_files = PointerFiles.new
-      @root.accept pointer_files
-      unsafe.each do |claim|
-        file = claim.annotation.location.try(&.original_filename)
-        next if file && (prelude_file?(file) || pointer_files.files.includes?(file))
-        claim.annotation.raise "@[UnsafeReach] on `#{claim.label}` is not allowed here: it is the claim the compiler takes on trust, and it is kept for the prelude and runtime (src/iyi) and for a file that already uses `Pointer`. Say @[SafeReach(\"...\")], which the compiler proves, or make the state Share - a `Mutex`, an `Atomic`, a `List` (SPEC.md III.4.4)"
-      end
-    end
-
-    # The files that name `Pointer` or take an address with `pointerof`,
-    # read off the program as written (def bodies are still in the tree).
-    class PointerFiles < Visitor
-      getter files = Set(String).new
-
-      def visit(node : Path) : Bool
-        note(node) if node.names.size == 1 && node.names.first == "Pointer"
-        false
-      end
-
-      def visit(node : PointerOf) : Bool
-        note(node)
-        true
-      end
-
-      def visit(node : ASTNode) : Bool
-        true
-      end
-
-      private def note(node : ASTNode) : Nil
-        if file = node.location.try(&.original_filename)
-          @files << file
-        end
-      end
     end
 
     # Whether *file* is the prelude's own: in the directory that holds

@@ -57,6 +57,9 @@ module Iyi::Lsp
     @program : Program?
     @in_def : Def?
     @spawns = {} of {Int32, Int32} => String?
+    # The unsafe modules a parallel spawn's block reaches, by the same key
+    # (`Program#iyi_spawn_unsafe`, SPEC.md III.13).
+    @spawn_unsafe = {} of {Int32, Int32} => String
 
     def process(result : Compiler::Result) : Array(Hint)
       @program = result.program
@@ -65,8 +68,10 @@ module Iyi::Lsp
       @in_def = nil
       result.node.accept self
       @spawns.each do |(line, column), reason|
-        label = reason ? "in its spawner's unit: #{InlayVisitor.spawn_clause(reason)}" : "in a unit of its own"
-        tooltip = reason ? "#{reason}\n\n#{UNIT_DEFINITION}" : "#{PARALLEL_TOOLTIP}\n\n#{UNIT_DEFINITION}"
+        unsafe = @spawn_unsafe[{line, column}]? unless reason
+        label = reason ? "in its spawner's unit: #{InlayVisitor.spawn_clause(reason)}" : unsafe ? "in a unit of its own, reaching unsafe code" : "in a unit of its own"
+        reaches = unsafe.try { |modules| "#{UnsafeCheck.spawn_reaches(modules)}\n\n" }
+        tooltip = reason ? "#{reason}\n\n#{UNIT_DEFINITION}" : "#{PARALLEL_TOOLTIP}\n\n#{reaches}#{UNIT_DEFINITION}"
         @hints << Hint.new(line, column, label, KIND_NOTE, tooltip)
       end
       hints.sort_by! { |hint| {hint.line, hint.column} }
@@ -165,6 +170,9 @@ module Iyi::Lsp
       key = {location.line_number, location.column_number + "spawn".size}
       return if @spawns[key]?
       @spawns[key] = program.cleanup_transformer.spawn_reason_for(node, @in_def)
+      if unsafe = program.iyi_spawn_unsafe[(location.expanded_location || location).to_s]?
+        @spawn_unsafe[key] = unsafe
+      end
     end
 
     def visit(node)

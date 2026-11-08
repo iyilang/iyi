@@ -60,6 +60,7 @@
 # pointer and one under `-Dgc_boehm` would be a thread Boehm never heard
 # of, so neither has one, and `IyiThread` is not a name there.
 
+@[Unsafe("kernel threads are started, stopped and parked through raw system calls")]
 {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
   # One line per thread, mapped, never heap: a signal handler and a
   # collector both read it, and neither may find it moved or freed.

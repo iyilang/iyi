@@ -90,7 +90,13 @@ module Iyi::IyiMod
   # `*Derived^Base#hi` where a v60 artifact defines `*Derived@Base#hi`, so
   # a consumer would ask for names a v60 artifact does not have and learn
   # it from the linker. A v60 artifact is refused and rebuilt.
-  FORMAT_VERSION = 61_u32
+  # v62: the header carries the module's `@[Unsafe("why")]` reason, or
+  # nothing (`Artifact#unsafe`), because a generic body that travels is
+  # typed again in the consumer at the producer's locations, and what the
+  # producer's mark allowed there the consumer has to allow (SPEC.md
+  # III.13). A v61 artifact is refused and rebuilt rather than read as a
+  # module that handles no raw memory.
+  FORMAT_VERSION = 62_u32
 
   FORMAT = IO::ByteFormat::LittleEndian
 
@@ -1519,6 +1525,12 @@ module Iyi::IyiMod
     # which the object code's symbols already spell.
     property package_name : String
 
+    # The reason of the module's `@[Unsafe("why")]`, or empty when it is not
+    # marked (SPEC.md III.13). A consumer reads it so the module's travelling
+    # bodies, typed again there, are allowed what they were here, and a tool
+    # lists a program's unsafe modules from its artifacts alone.
+    property unsafe : String
+
     # Whether this artifact's root is a *class* rather than a module.
     #
     # It decides one thing and it is structural: a module's declarations are
@@ -1611,7 +1623,7 @@ module Iyi::IyiMod
                    @reopened = [] of TypeDecl, @libs = [] of String,
                    @layouts = [] of {String, TypeLayout},
                    @inputs = [] of String, @symbol_literals = [] of String,
-                   @declarations_only = false, @package_name = "",
+                   @declarations_only = false, @package_name = "", @unsafe = "",
                    @body_positions = {} of String => Array(SourcePosition),
                    @initialiser_positions = [] of SourcePosition)
     end
@@ -2013,7 +2025,7 @@ module Iyi::IyiMod
         header[:class_root], header[:filled], header[:module_extends_self],
         regexes, class_vars, match_types, symbols,
         top_level, top_level_funs, reopened, libs, layouts, inputs, symbol_literals,
-        declarations_only: header[:declarations_only], package_name: header[:package_name],
+        declarations_only: header[:declarations_only], package_name: header[:package_name], unsafe: header[:unsafe],
         body_positions: positions[:bodies], initialiser_positions: positions[:initialiser])
       artifact.spawns = spawns
       artifact.reaches = reaches
@@ -2082,6 +2094,7 @@ module Iyi::IyiMod
     end
 
     io.puts "library       #{artifact.crystal_library ? "Crystal's standard library (--crystal)" : "iyi's prelude"}"
+    io.puts "unsafe        #{artifact.unsafe}" unless artifact.unsafe.empty?
     io.puts "extend self   #{artifact.module_extends_self}" if artifact.module_extends_self
 
     unless artifact.requires.empty?
@@ -3562,6 +3575,7 @@ module Iyi::IyiMod
     io.write_byte(artifact.module_extends_self ? 1_u8 : 0_u8)
     io.write_byte(artifact.declarations_only ? 1_u8 : 0_u8)
     write_string io, artifact.package_name
+    write_string io, artifact.unsafe
     io.to_slice
   end
 
@@ -3581,12 +3595,14 @@ module Iyi::IyiMod
     # Last, and read the way the flag bytes above are: a header that ends
     # before it - a hand-written one - names no package.
     package_name = io.pos < io.size ? read_string(io) : ""
+    # And after it the module's `@[Unsafe]` reason, empty when not marked.
+    unsafe = io.pos < io.size ? read_string(io) : ""
     {module_name: module_name, source_path: source_path,
      compiler_version: compiler_version, target_triple: target_triple, flags: flags,
      has_initialiser: has_initialiser, crystal_library: crystal_library,
      class_root: class_root, filled: filled,
      module_extends_self: module_extends_self, declarations_only: declarations_only,
-     package_name: package_name}
+     package_name: package_name, unsafe: unsafe}
   end
 
   private def self.encode_requires(artifact : Artifact) : Bytes

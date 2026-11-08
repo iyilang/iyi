@@ -979,6 +979,11 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     # III.4.15, `ShareReach#remote_of`).
     @program.iyi_record_artifact_reaches(artifact_path, artifact)
 
+    # And whether the module is marked `@[Unsafe]` (SPEC.md III.13): its
+    # travelling bodies are typed again here, at its source's locations,
+    # and what its mark allowed there it allows here.
+    @program.iyi_mark_unsafe_artifact(artifact.source_path, artifact.unsafe)
+
     # With the places the travelling bodies and the initialiser were written,
     # so their nodes are located in the module's source and not in this
     # rendering of it (`IyiMod::SourcePosition`): a macro's
@@ -1879,6 +1884,13 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
   end
 
   def visit(node : Annotation)
+    # iyi: a module's `@[Unsafe("why")]` belongs to its file, not to the
+    # declaration after it (SPEC.md III.13).
+    if node.iyi_file_mark?
+      @program.iyi_mark_unsafe_file(node)
+      return false
+    end
+    @program.iyi_check_unsafe_contract(node) if node.path.single?("Unsafe")
     annotations = @annotations ||= [] of Annotation
     annotations << node
     false

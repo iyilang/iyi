@@ -85,6 +85,9 @@ class Iyi::Program
     iyi_settle_claimed_spawns unless iyi_claimed_spawns.empty?
     # And every spawn is classified (III.4.15): `--explain-spawn`'s notes.
     iyi_note_spawns
+    # And beside a parallel one, the unsafe modules its block reaches
+    # (III.13), which the placement takes at their word.
+    iyi_note_unsafe_spawns
 
     @progress_tracker.stage("Semantic (recursive struct check)") do
       Prof.span("recursive struct check") { RecursiveStructChecker.new(self).run }

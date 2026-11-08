@@ -32,7 +32,10 @@ module Iyi::Lsp
     message : String,
     spec : Array(String)?,
     related : Array({String, Int32, Int32, String}),
-    suggestion : String? = nil
+    suggestion : String? = nil,
+    # Where the suggestion goes when that is not the diagnostic's own span
+    # (`TypeException#edit_at`): {line, column, size} in the same file.
+    edit_at : {Int32, Int32, Int32}? = nil
 
   class Analysis
     # The last result that type-checked, per *open* document. Hover and
@@ -911,7 +914,8 @@ module Iyi::Lsp
         size = spanned[3]
       end
 
-      Diag.new(anchor[1], anchor[2], size, message, Iyi.iyi_spec_references(message), related, anchor[5])
+      edit_at = ex.as?(TypeException).try(&.edit_at) if anchor[5]
+      Diag.new(anchor[1], anchor[2], size, message, Iyi.iyi_spec_references(message), related, anchor[5], edit_at)
     end
   end
 
@@ -1066,6 +1070,19 @@ module Iyi::Lsp
     (room - inner).times { lines << "" }
     lines.concat good_lines[good_lines.size - suffix, suffix]
     lines.join('\n')
+  end
+
+  # The reason of the module mark `@[Unsafe("why")]` when it is line
+  # *line0* (0-indexed) and the file's first statement, or nil (SPEC.md
+  # III.13): what the hover on it shows.
+  def self.unsafe_mark_reason(text : String, line0 : Int32) : String?
+    text.lchop('\uFEFF').each_line.with_index do |line, index|
+      stripped = line.strip
+      next if stripped.empty? || stripped.starts_with?('#')
+      return nil unless index == line0 && Compiler.unsafe_mark_line?(stripped)
+      return stripped.match(/\A@\[Unsafe\("(.*)"\)\]\z/).try(&.[1])
+    end
+    nil
   end
 
   # ── The location treaty: iyi columns ↔ LSP characters ─────────────────

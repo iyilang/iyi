@@ -950,6 +950,12 @@ module Iyi
     # References and every other "who calls this" answer skip them: a
     # person is never asking about the compiler's own probe.
     property? iyi_synthetic = false
+    # iyi: true on a call whose `expanded` is the compiler's own lowering
+    # rather than a macro's - the slice literal, which takes the address of
+    # the constant holding its elements. The unsafe check (SPEC.md III.13)
+    # reads what the person wrote, so it follows the calls of such an
+    # expansion and refuses nothing in it.
+    property? iyi_compiler_expansion = false
     @name_size = -1
     property doc : String?
     property visibility = Visibility::Public
@@ -3597,6 +3603,11 @@ module Iyi
     property args : Array(ASTNode)
     property named_args : Array(NamedArgument)?
     property doc : String?
+    # iyi: true on `@[Unsafe("why")]` when it is its file's first statement,
+    # the mark that says the module handles raw memory (SPEC.md III.13).
+    # The parser sets it, and only there is the mark a mark: elsewhere a
+    # positional `@[Unsafe]` is refused.
+    property? iyi_file_mark = false
 
     def initialize(@path, @args = [] of ASTNode, @named_args = nil)
     end

@@ -826,6 +826,7 @@
   declaration are now stepped over. `bench/lsp_session.py` step 23u, the
   hover on `Unit`, failed on Linux with `Unit`'s doc comment in place and
   holds with the fix.
+
 - **On a Mac, a path typed in another case is the file it names, and its
   header's imports resolve.** `iyi run HDR/APP/MAIN.IYI` of a stored
   `hdr/app/main.iyi` was refused as a file that "ends in `.IYI`", because

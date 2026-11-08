@@ -281,11 +281,22 @@ module Iyi
       # header, so the header rules below read the file after it, and it
       # stays first in the tree, outside the module the header makes, where
       # the semantic pass records it for the file.
+      #
+      # The doc comment above the mark is the next statement's, as one above
+      # any other annotation is: the mark belongs to the file and takes no
+      # doc of its own. `src/iyi/string.iyi`'s comment sits above the mark
+      # above `class String`, and `iyi doc String` and `mcp doc String`
+      # began at `class String` with nothing above it (bench/agent_loop.py
+      # step 72, windows-native in CI run 42472342266).
       mark = nil
       if iyi? && (first = expressions.first?) && first.is_a?(Annotation) && Parser.iyi_unsafe_file_mark?(first)
         first.iyi_file_mark = true
         mark = first
         expressions = expressions[1..]
+        if (doc = mark.doc) && (documented = expressions.first?)
+          documented = documented.exp if documented.is_a?(VisibilityModifier)
+          documented.doc ||= doc
+        end
       end
 
       # iyi: one file, one module (R-1, IV.6). A second header was accepted and

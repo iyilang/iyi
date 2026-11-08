@@ -576,15 +576,25 @@
     # Every worker started first: the pool starts a worker only while none
     # is idle (SPEC.md III.4.15, part 6), so a task a worker that returns
     # at once can leave all but two unstarted, and this step then read "2
-    # of 12 workers waiting". Each task spins until all have arrived, up to
-    # two seconds, so each lands on a thread of its own.
+    # of 12 workers waiting". Each task spins, up to two seconds, until all
+    # have arrived and the pool has launched every worker. All arrived is
+    # not enough: the pool starts its workers one at a time, each started by
+    # the last to find a task (`IyiWorkers.grow`), and a task spinning past
+    # its quantum gives its worker to one still queued, so the twelve can
+    # all arrive time-sliced on fewer threads and end before the pool has
+    # grown. On Windows 11 with 12 logical processors (the user's machine)
+    # this step read "11 of 12 workers waiting" (and down to 7) in 13 of 60
+    # runs of the plain build, where the twelve arrived within 10 to 25 ms
+    # on 7 to 11 launched workers; a start there takes about a millisecond,
+    # a quantum is 5 to 10 ms. On Linux (12 vCPU) the step alone started
+    # all twelve in each of 500 runs, in 1.5 ms (median).
     Busy.arrived.value.set(0_u64)
     group do |g|
       cores.to_i32.times do
         g.spawn(unit: :new) do
           Busy.arrived.value.add(1_u64)
           until_ns = IyiMark.now_ns + 2000000000_u64
-          while Busy.arrived.value.get < cores && IyiMark.now_ns < until_ns
+          while (Busy.arrived.value.get < cores || IyiWorkers.launched < cores.to_i32) && IyiMark.now_ns < until_ns
             IyiThread.spin_pause
           end
           0

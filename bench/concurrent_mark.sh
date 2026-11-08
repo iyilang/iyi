@@ -4,7 +4,7 @@
 #
 #     bash bench/concurrent_mark.sh
 #
-# Twenty-three steps, fifteen of them failure proofs:
+# Twenty-five steps, sixteen of them failure proofs:
 #   1. The program holds, release: twenty-four rounds or more each move a
 #      payload out of an unmarked chain into an already-marked holder, at
 #      least one of them under a running mark, and every payload is intact
@@ -80,18 +80,25 @@
 #  18. Failure proof: `free` outside the allocator's bracket; a pause
 #      among the frees puts the lists it dropped back on the cache, and
 #      step 5's program exits 1 within ten runs.
-#  19. Failure proof, on Windows: the helpers given back the boost a
+#  19. The program on a copy of the runtime whose every worker's thread
+#      waits 50 ms before its first look, on three cores or more: the
+#      idle pool step still fills the pool, its tasks spinning until the
+#      pool has launched every worker.
+#  20. Failure proof: that step's tasks spinning only until all have
+#      arrived, on the same copy; they arrive time-sliced on the first
+#      workers, the pool stops growing, and the idle pool check exits 1.
+#  21. Failure proof, on Windows: the helpers given back the boost a
 #      satisfied wait brings, and the wake check - more than three of the
 #      program's wakes past a millisecond - exits 1, run held to two
 #      processors beside a spinning process, where the shipped build
 #      holds.
-#  20. Failure proof, on Windows: the cap on the helpers beside a busy
+#  22. Failure proof, on Windows: the cap on the helpers beside a busy
 #      program removed, and the share check exits 1.
-#  21. Failure proof, on Windows: the pool's waiting workers counted as
+#  23. Failure proof, on Windows: the pool's waiting workers counted as
 #      threads of the program's, and the idle pool check exits 1.
-#  22. Failure proof, on Windows: every worker of a started pool counted
+#  24. Failure proof, on Windows: every worker of a started pool counted
 #      free, running or not, and the busy pool check exits 1.
-#  23. Failure proof, on Windows: the first collection's wait for every
+#  25. Failure proof, on Windows: the first collection's wait for every
 #      helper to reach its park put back, and the crowded check fires.
 set -u
 
@@ -877,6 +884,59 @@ for try in 1 2 3 4 5 6 7 8 9 10; do
 done
 [ -n "$caught" ] || { echo "ten runs of the free outside its bracket kept every chunk:"; tail -3 unbracketed.txt; exit 1; }
 echo "  exits 1 within ten runs: a kept chunk lost, or a memory fault"
+fi
+
+# The idle pool's step fills the pool before it asks anything of it, and
+# the pool grows one worker at a time, each started by the last to find a
+# task (`IyiWorkers.grow`). On Windows 11 with 12 logical processors (the
+# user's machine) a start took about a millisecond, and the twelve spinning
+# tasks could all arrive time-sliced on fewer threads, each preempted in
+# its 5 to 10 ms quantum, and end with 7 to 11 workers launched: "11 of 12
+# workers waiting" in 13 of 60 runs. Held open here: a copy of the runtime
+# in which every worker's thread waits 50 ms before its first look, so the
+# pool takes 50 ms a worker to fill and the tasks have all arrived on the
+# first long before. The step holds on that copy - its tasks spin until the
+# pool has launched every worker - and the step as it was, its tasks
+# spinning only until all have arrived, exits 1 on it. The program runs
+# that step on three cores or more, which step 1's answers say.
+if ! grep -q '^idle pool: with' answers.txt; then
+  echo "  the idle pool step needs three cores, and step 1 did not run it here: its late-start proofs are unmeasured"
+else
+step "the idle pool fills on a runtime whose workers each start 50 ms late"
+mkdir -p latestart/iyi
+cp "$REPO"/src/iyi/*.iyi latestart/iyi/
+awk '/^  def self\.work : Nil$/ { print; getline; print
+    print "      late = __iyi_monotonic_ns + 50000000_i64"
+    print "      while __iyi_monotonic_ns < late"
+    print "        IyiThread.spin_pause"
+    print "      end"
+    found = 1; next }
+  { print } END { if (!found) exit 3 }' \
+  "$REPO/src/iyi/concurrency.iyi" > latestart/iyi/concurrency.iyi || { echo "the worker's start this step delays is not in the runtime any more"; exit 1; }
+if ! IYI_PATH="$WORK/latestart${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/concurrent_mark.iyi" -o latestart-run > build-latestart.log 2>&1; then
+  cat build-latestart.log; exit 1
+fi
+timeout -k 5 300 ./latestart-run > latestart.txt 2>&1
+code=$?
+if [ "$code" -ne 0 ] || ! grep -q "^idle pool: with" latestart.txt; then
+  echo "the idle pool step did not hold on the late-start runtime (exit $code):"; tail -3 latestart.txt; exit 1
+fi
+echo "  $(grep -m1 '^idle pool: with' latestart.txt)"
+
+step "failure proof: an idle pool step whose tasks wait only for each other is caught on that runtime"
+awk '$0 == "          while (Busy.arrived.value.get < cores || IyiWorkers.launched < cores.to_i32) && IyiMark.now_ns < until_ns" {
+    print "          while Busy.arrived.value.get < cores && IyiMark.now_ns < until_ns"; found = 1; next }
+  { print } END { if (!found) exit 3 }' \
+  "$REPO/bench/concurrent_mark.iyi" > arrived_only.iyi || { echo "the wait this proof shortens is not in bench/concurrent_mark.iyi any more"; exit 1; }
+if ! IYI_PATH="$WORK/latestart${PSEP}$REPO/src" "$IYI" build --release arrived_only.iyi -o arrived-only > build-arrived.log 2>&1; then
+  cat build-arrived.log; exit 1
+fi
+timeout -k 5 300 ./arrived-only > arrived.txt 2>&1
+code=$?
+if [ "$code" -ne 1 ] || ! grep -q "^FAIL: idle pool:" arrived.txt; then
+  echo "the idle pool check did not fire (exit $code):"; tail -3 arrived.txt; exit 1
+fi
+printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: idle pool:' arrived.txt)"
 fi
 
 if [ "$PSEP" = ":" ]; then

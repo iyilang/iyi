@@ -428,6 +428,22 @@
 
 ### Gates
 
+- **concurrent_mark's idle pool is full before it is asked anything, on
+  twelve Windows processors too.** The step spawned a spinning task per
+  core and let each go once all had arrived; the pool starts its workers
+  one at a time, and on Windows 11 with 12 logical processors (the user's
+  machine) the twelve arrived time-sliced on 7 to 11 workers within 10 to
+  25 ms, each preempted in its quantum, so the step read "11 of 12 workers
+  waiting" (down to 7) in 13 of 60 runs of the plain build - once in the
+  windows-native-gates runtime-exercise step of the pre-release soak at
+  6c8e14725. CI's four-core runners never showed it, nor Linux (12 vCPU,
+  every one of 500 runs of the step alone launched twelve, in 1.5 ms).
+  The tasks now spin until the pool has launched every worker too, and
+  `bench/concurrent_mark.sh` proves it on a copy of the runtime whose
+  workers each start 50 ms late: the step holds there ("12 of them pool
+  workers waiting" on Linux), and the step as it was is caught ("3 of 12
+  workers waiting").
+
 - **A pull request runs the fast part of CI; master, mt/next and the
   nightly run the whole of it.** Every pull request ran all 39 jobs,
   about twenty runner-hours, a README edit as much as a compiler change,

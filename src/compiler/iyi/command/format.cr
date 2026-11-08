@@ -185,7 +185,7 @@ class Iyi::Command
     private def format_file_or_directory(filename, excludes : Array(String)?)
       if File.file?(filename)
         # A name the caller typed is read as the one stored: a walk's names
-        # already are, and on Windows `MAIN.IYI` typed for a stored
+        # already are, and on Windows or a Mac `MAIN.IYI` typed for a stored
         # `main.iyi` is that iyi file (`Lexer.stored_name`), not a
         # `Lexer.iyi_miscased?` one.
         format_file(excludes ? filename : Lexer.stored_name(filename)) unless excludes && excluded?(filename, excludes)

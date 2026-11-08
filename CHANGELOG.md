@@ -826,6 +826,26 @@
   declaration are now stepped over. `bench/lsp_session.py` step 23u, the
   hover on `Unit`, failed on Linux with `Unit`'s doc comment in place and
   holds with the fix.
+- **On a Mac, a path typed in another case is the file it names, and its
+  header's imports resolve.** `iyi run HDR/APP/MAIN.IYI` of a stored
+  `hdr/app/main.iyi` was refused as a file that "ends in `.IYI`", because
+  the stored name was looked up on Windows alone; with it looked up, the
+  root the header names was still found by comparing strings, and
+  `import app/util` was "can't find module 'app/util'". Both are now asked
+  of the volume, per path - a sibling is the stored name, and a root the
+  header's, only when the file system opens the same file under both -
+  since APFS folds case by default but can be formatted not to. Linux
+  volumes are left to the string, and Windows answers as before.
+  `bench/verbs_exercise.sh` never ran on darwin and failed there in three
+  places, the third its own `touch -d '2 hours ago'`, which BSD touch
+  refuses; it now dates the leftover with POSIX `touch -t` and checks the
+  stamp took (`find -mmin`), and it runs in the darwin CI job. The gate
+  exits 0 in 49 s on macOS 26.6, Apple M2 Pro, 10 cores (the user's
+  machine), where the old Windows-only lookup exits 1 in 49 s at both
+  `MAIN.IYI` and `BANG.IYI`, and the lookup without the header-root probe
+  exits 1 in 50 s at `MAIN.IYI`; it exits 0 in 132 s on Windows 11, 12
+  logical processors (the user's machine, Crystal 1.21.0, LLVM 20.1.7,
+  pinned to four), and exits 0 on Linux (12 vCPU).
 
 - **`GC.collect` clears the dead stack from its caller's frame, so what
   a returned helper built is freed whatever the frames' layout.** A

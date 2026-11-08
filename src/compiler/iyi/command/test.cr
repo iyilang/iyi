@@ -133,7 +133,7 @@ class Iyi::Command
         # one test (`Lexer.iyi_miscased?`).
         Dir.glob(Iyi.glob_root(path).join("**", "*_test.[iI][yY][iI]")) { |file| files << file }
       elsif File.file?(path)
-        # As stored: `X_TEST.IYI` typed on Windows for `x_test.iyi` is it.
+        # As stored: `X_TEST.IYI` typed on Windows or a Mac for `x_test.iyi` is it.
         files << Lexer.stored_name(path)
       else
         abort! "no such file or directory: #{path}", :USAGE_ERROR

@@ -428,6 +428,20 @@
 
 ### Gates
 
+- **parallel_mark's late-helper proof is ordered, not timed.** Its copy of
+  the runtime made helpers late by timing - 200 us between a helper's
+  wake and its take, 50 us after the collector opened a mark's permits -
+  and left the rest to the scheduler, so the broken copy, permits opened
+  before the counts are reset, once ran all 200 collections to the end
+  on a 4-vCPU CI runner (run 42519177002) where it should hang. The copy
+  now orders it: a woken helper waits for its round to close and the
+  next to open before it takes a permit, and the collector waits for
+  every helper to take one and finish its drain, or 10 ms. On Linux (12
+  vCPU) every helper was late in 197 or 198 of the 199 marks with
+  helpers; the broken copy hung 20 runs of 20 pinned to 4 CPUs and 20 of
+  20 unpinned, and the shipped runtime ended 20 of 20 each way, in about
+  2 s a run.
+
 - **concurrent_mark's idle pool is full before it is asked anything, on
   twelve Windows processors too.** The step spawned a spinning task per
   core and let each go once all had arrived; the pool starts its workers

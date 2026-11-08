@@ -39,9 +39,10 @@ what the two programs print.
 A pull request runs the fast part of it, about half an hour, and less when it
 touches only docs or only `bench/`; `scripts/ci_plan.py` says which jobs and
 why. The whole of it, the samples round trip and every Windows and darwin job
-included, runs in the merge queue, on every push to master, and nightly. A
-push to any other branch runs nothing: open a pull request, or run the
-workflow on the branch from the Actions tab for the whole of it.
+included, runs on every push to master and nightly, so a failure only it can
+see shows after the merge. Before merging a risky change, run the workflow on
+its branch from the Actions tab for the whole of it. A push to any other
+branch runs nothing.
 
 ## What this repository expects of a change
 

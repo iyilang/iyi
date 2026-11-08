@@ -18,7 +18,8 @@
 #   2. What a module reads bytes with when it does not handle raw memory -
 #      `String#byte_at`, `Bytes.of`, `String.new(Bytes)`,
 #      `String.new(Array(UInt8))`, `IyiIO#write(Bytes)` - and the literals
-#      the compiler expands through a buffer are accepted unmarked.
+#      the compiler expands through a buffer are accepted unmarked, as is a
+#      def over a trait typed through the witness the compiler writes.
 #   3. A mark without a reason is refused; a mark nothing needs is warned
 #      of, and fails under `--error-on-warnings`. Its broken copy, the same
 #      mark on a module that uses `to_unsafe`, is neither, and nor is a
@@ -286,6 +287,24 @@ h = {"a" => 1}
 puts "#{a.size} #{h.size} #{[a, [4]].flatten.size}"
 IYI
 accepted literals --error-on-warnings
+# A def over a trait nothing implements yet is typed where it is written
+# through a witness whose requirements the compiler wrote with
+# `uninitialized` bodies; the module was refused for them. Its broken copy
+# writes the same `uninitialized` in the person's own def.
+cat > witness.iyi <<'IYI'
+trait Shape
+  abstract def area : Int32
+end
+
+def area_of(x : Shape) : Int32
+  x.area + 1
+end
+
+puts 1
+IYI
+accepted witness --error-on-warnings
+awk '{ if ($0 == "  x.area + 1") { print "  y = uninitialized Int32"; print "  x.area + y" } else print }' witness.iyi > witness_broken.iyi
+refused witness_broken '`uninitialized Int32` is a value nothing has written'
 
 # ── 3. The mark itself ───────────────────────────────────────────────────
 step "a mark says why, and a mark nothing needs is warned of"

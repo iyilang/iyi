@@ -343,7 +343,12 @@ module Iyi
         @walked_defs << {file, location.line_number, location.column_number}
       end
       exempt, borrowed = @exempt, @borrowed
-      @exempt = 0
+      # A definition-site probe's witness (`DefinitionTyping`) implements a
+      # trait's requirements with `uninitialized` bodies the compiler wrote,
+      # so they are followed and refused nothing, like the probe that calls
+      # them: `def area_of(x : Shape) : Int32` over a trait nothing
+      # implemented yet was refused for the witness's `uninitialized Int32`.
+      @exempt = target.owner?.try(&.to_s.starts_with?(DefinitionTyping::WITNESS_PREFIX)) ? 1 : 0
       @borrowed = borrowed?(target)
       begin
         target.accept_children self

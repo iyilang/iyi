@@ -46,6 +46,10 @@ PSEP=":"
 
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    # A native compiler reads no /c/... path: the search path the
+    # artifact step builds from REPO named the prelude where it could not
+    # find it (tssh, Windows 11, at 046858b9b).
+    REPO="$(cygpath -m "$REPO")"
     WORK="$(cygpath -m "$WORK")"
     PSEP=";"
     ;;

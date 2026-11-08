@@ -2656,7 +2656,7 @@ hook, and the prelude's own definition of it is untouched. Compile-time
 `responds_to?` works unchanged, which the error message is entitled to claim
 because it is tested.
 
-### III.4 Concurrency: **BUILT on Linux, darwin arm64 and Windows x86-64 in III.4.8's order — scheduler, cancellable primitives, `group`, `Channel` (rendezvous), `select`, the typed group (III.4.9), `Atomic(T)` (III.4.10), a kernel thread the collector stops (III.4.11), `Share` gating its block (III.4.4), tasks across cores (III.4.13); data parallelism as a library PROPOSED (III.4.14); a plain `spawn` in parallel where it is proven safe PROPOSED (III.4.15); one spawn verb, and a spawn kept in its unit said where the author looks BUILT (III.4.16); ordering races found by seed, `iyi test --chaos`, BUILT (III.4.17); units named, `unit: :same`, `unit: :new` and `Unit(T)`, BUILT (III.4.18)**
+### III.4 Concurrency: **BUILT on Linux, darwin arm64 and Windows x86-64 in III.4.8's order — scheduler, cancellable primitives, `group`, `Channel` (rendezvous), `select`, the typed group (III.4.9), `Atomic(T)` (III.4.10), a kernel thread the collector stops (III.4.11), `Share` gating its block (III.4.4), tasks across cores (III.4.13); data parallelism as a library, `std/parallel`, BUILT (III.4.14); a plain `spawn` in parallel where it is proven safe BUILT (III.4.15); one spawn verb, and a spawn kept in its unit said where the author looks BUILT (III.4.16); ordering races found by seed, `iyi test --chaos`, BUILT (III.4.17); units named, `unit: :same`, `unit: :new` and `Unit(T)`, BUILT (III.4.18)**
 
 This is the section where the design either beats Go or does not, so it is worth
 being blunt about where Go actually loses. Not goroutines: they are cheap, the
@@ -4872,7 +4872,7 @@ with whatever else runs, and wrk takes cores the twelve-worker rows want.
 check, and holds the sentence above (connections, cost, workers, runs) to
 the script's constants and the stored hash's cost to the script's.
 
-#### III.4.14 Data parallelism as a library: **PROPOSED — `each_parallel`, `map_parallel`, `sum_parallel` and `reduce_parallel` in `std/parallel`, over `Share` elements; built as proposed on branch `mt/datapar`, gated and measured below**
+#### III.4.14 Data parallelism as a library: **BUILT — `each_parallel`, `map_parallel`, `sum_parallel` and `reduce_parallel` in `std/parallel`, on a `List`, an `Array` and an integer range, over `Share` elements, gated by `bench/std_parallel_exercise.sh` and measured below; not built, and listed under Open: a cutoff for small inputs, `Slice`, `Deque`, `Hash` and `Set`, a one-worker path without the proc call, an `Array` read without its copy, and a parallel `select`, `find`, `any?` or `min_by`**
 
 PARALLEL_PLAN.md's third layer. Most of the speed a program gets from more
 cores is in a loop, not in a `spawn`, and III.4.13 left the loop to the
@@ -5116,7 +5116,8 @@ task found (`starts no element past a failure it knows of`), and that leave
   chunks today; which deserve a name is a question of use.
 - *Plain `spawn` in a chunk.* A task a chunk's block spawns joins that
   chunk's unit and runs one at a time with it, as in any parallel task.
-#### III.4.15 Where a plain `spawn` runs: **PROPOSED for 0.21.0 — in parallel where the compiler can prove it safe, in its spawner's unit otherwise; built on `mt/spawn`**
+
+#### III.4.15 Where a plain `spawn` runs: **BUILT — in parallel where the compiler can prove it safe, in its spawner's unit otherwise; `--explain-spawn` and the language server's inlay hint say which, `IYI_WORKERS=1` keeps every spawn on one thread, and the pool starts at the first eligible spawn with one worker and grows to the work; gated by `bench/spawn_eligible.sh` and `bench/spawn_fuzz.sh`**
 
 III.4.13 part 2 kept `g.spawn` where it was - a task of its spawner's
 unit, interleaving at parks - and turned down a spawn the compiler makes
@@ -5124,11 +5125,11 @@ parallel "whenever its captures happen to be `Share`", because the check
 stops at the block's own text: module state a method the block calls
 touches is warned about, not refused, and such a spawn would race that
 state with nothing but a warning saying so. This section takes that
-alternative up again with the objection answered, as the direction for
-0.21.0: a plain `spawn` runs in parallel across the pool wherever the
-compiler can prove that safe, and stays in its unit otherwise. Nothing that
-compiles today may stop compiling, and nothing a program could rely on
-about memory may change.
+alternative up again with the objection answered, and 0.21.0 builds it:
+a plain `spawn` runs in parallel across the pool wherever the compiler
+can prove that safe, and stays in its unit otherwise. Nothing that
+compiled before stops compiling for it, and nothing a program could rely
+on about memory changes.
 
 **1. The rule.** A `g.spawn { }` call is *eligible* when
 
@@ -5345,7 +5346,7 @@ runs interleaved: one spawn that prints a line took 0.44 ms a process with
 the spawn kept in its unit, and with it eligible 0.45 ms on one worker, 0.89 on two,
 1.10 on four and 2.46 on twelve with the pool started whole; grown to the
 work, 0.68 ms on two, four or twelve - one worker and the monitor. A program
-that allocates paid more: the collector's budget is floored at
+that allocates paid more: the collector's budget was floored at
 `MIN_BUDGET`, 4 MiB, for every thread (`IyiMark.next_budget`). One eligible
 spawn of nothing, then the main thread building 200 lists of 20,000 short
 strings, peaked at 82 MB resident on twelve workers in each of three runs
@@ -5353,7 +5354,8 @@ with the pool started whole, and at 17 to 28 MB grown to the work, against
 11 to 13 MB with `IYI_WORKERS=1`. Part 9's fan-out took the same time
 either way, the best of two runs of best of five: 95 and 96 ms on one
 worker, 48 and 48 on two, 24 and 24 on four, 13 and 13 on eight, 10 and 10
-on twelve.
+on twelve. The floor now counts only the threads that filled an
+allocation slice since the last collection (part 10).
 `bench/spawn_eligible.sh` holds it on a pool of four: one spawn starts one
 worker, also when it lands, every time, between the worker's first empty
 look and its idle count; 200 spawns made and joined one at a time start at
@@ -5537,9 +5539,15 @@ no spawn of the server's moved, which these three rounds do not explain.
   `spawn(unit: :same)` where the order is the step's subject; none of those
   assumptions was in std.
 - The pool grows to the work (part 6), built here.
-- Left: the budget floor counting only threads that allocated since the
-  last collection, so that idle workers cost no heap. This goes to the
-  working-set work.
+- The budget floor counts only the threads that filled an allocation
+  slice since the last collection, so idle workers cost no heap
+  (`IyiMark.allocating_threads`, CHANGELOG.md Unreleased, "Idle threads
+  no longer raise the collection budget's floor"): a pool of twelve with
+  one parallel task and the main thread churning collected on a 52 MB
+  budget and peaked at 95 MB resident, and now runs on 8 MB and peaks at
+  18 MB, in 0.15 s against 0.17 (a shared 12-vCPU Linux machine, 3 runs
+  each). `bench/collect_trigger.sh` holds it with a copy that counts
+  every registered thread. Nothing in this section is left unbuilt.
 
 #### III.4.16 One spawn verb, and no silent cliff: **BUILT — `g.spawn { }`, `g.spawn(unit: :new) { }` and `g.spawn(unit: :same) { }`; a spawn kept in its unit is noted by `iyi check`, named down to the field and module that kept it, and a rebuild that moves one says so**
 

@@ -19,9 +19,10 @@
   array or a field, answered from a proc - is refused wherever it is
   kept. A program that compiled may now be refused: the ways out are a
   `Share` type (`Mutex`, `Atomic`, `List`), moving the writes before the
-  first spawn, one `Mutex` around every write and read, or, in src/iyi or
-  in a file that already uses `Pointer`, the new `@[UnsafeReach("why")]`,
-  taken on trust. In this repository `bench/reuse_integrity.iyi` keeps its
+  first spawn, one `Mutex` around every write and read, or, in a module
+  marked `@[Unsafe("why")]` (SPEC.md III.13), the new
+  `@[UnsafeReach("why")]`, taken on trust. In this repository
+  `bench/reuse_integrity.iyi` keeps its
   pairs in a `Mutex`, `bench/parallel_exercise.sh`'s `Database` builds its
   rows in `initialize` and is only read, and `bench/arena_exercise.iyi`
   and `bench/thread_exercise.iyi` say `@[UnsafeReach]` beside their
@@ -129,7 +130,7 @@
   a started pool free, and each is caught.
 
 - **A plain `spawn` runs in parallel where the compiler can prove it
-  safe (SPEC.md III.4.15, proposed).** A `g.spawn { }` whose block
+  safe (SPEC.md III.4.15).** A `g.spawn { }` whose block
   passes every check `spawn(unit: :new)`'s does, and whose walk of the
   module state it reaches through calls finds nothing that is not
   `Share` other than state marked `@[SafeReach]`, is a parallel task of
@@ -725,8 +726,8 @@
   built by Crystal 1.21.0, in one run, 5618 against 6359 plain and 4369
   against 3948 with `--release`.
 
-- **Data parallelism as a library: `std/parallel` (SPEC.md III.4.14,
-  PROPOSED).** `each_parallel`, `map_parallel`, `sum_parallel` and
+- **Data parallelism as a library: `std/parallel` (SPEC.md
+  III.4.14).** `each_parallel`, `map_parallel`, `sum_parallel` and
   `reduce_parallel` on a `List`, an `Array` and an `Int32` or `Int64`
   range cut the elements into chunks, eight a worker unless `grain:`
   names a chunk's size, and as many parallel tasks as there are workers

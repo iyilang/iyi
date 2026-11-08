@@ -650,7 +650,10 @@ module Iyi
 
     # A marked module that did nothing unsafe in this compile is warned of,
     # when the compile typed every def it declares: a def nothing typed may
-    # be the one that needs the mark.
+    # be the one that needs the mark. A module with a macro conditional is
+    # not warned of, since `{% if flag?(:darwin) %}` hides from one target
+    # the code another's compile needs the mark for (std/system_roots,
+    # whose C calls are darwin's and Windows', was told on Linux to drop it).
     private def warn_unneeded : Nil
       return unless @program.warnings.level.all?
       candidates = @program.iyi_unsafe_marks.keys.reject { |file| @program.iyi_unsafe_used.includes?(file) }
@@ -668,7 +671,8 @@ module Iyi
         next unless location
         label = UnsafeCheck.module_label_of(@program, file)
         text = source_of(file)
-        line_size = text.try(&.lines[location.line_number - 1]?).try(&.size) || 0
+        next if text.nil? || text.includes?("{%")
+        line_size = text.lines[location.line_number - 1]?.try(&.size) || 0
         report = TypeException.new("`#{label}` is marked @[Unsafe] and does nothing unsafe: remove the mark, so the " \
                                    "compiler checks this module (SPEC.md III.13)",
           location.line_number, location.column_number, file, line_size - location.column_number + 2)

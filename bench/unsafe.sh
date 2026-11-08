@@ -21,7 +21,9 @@
 #      the compiler expands through a buffer are accepted unmarked.
 #   3. A mark without a reason is refused; a mark nothing needs is warned
 #      of, and fails under `--error-on-warnings`. Its broken copy, the same
-#      mark on a module that uses `to_unsafe`, is neither.
+#      mark on a module that uses `to_unsafe`, is neither, and nor is a
+#      module whose unsafe code sits behind another target's
+#      `{% if flag?(...) %}`.
 #   4. `iyi fix` writes the mark, with the reason the compiler saw, into
 #      the h1b program step 1 refuses, and the result checks clean.
 #   5. A module marked `@[Unsafe]` built as a `.iyimod` keeps its mark:
@@ -302,6 +304,17 @@ fi
 echo "  refused:  unneeded.iyi under --error-on-warnings"
 # Its broken copy: the same mark on a module that needs it, which no warning names.
 accepted h1b_marked --error-on-warnings
+# A module whose unsafe code is another target's, behind a macro
+# conditional, is not told to drop the mark this target's compile did not
+# see used (std/system_roots on Linux was); unneeded.iyi is its broken copy.
+cat > other_target.iyi <<'IYI'
+@[Unsafe("asks the platform's C library on a target this is not")]
+{% if flag?(:iyi_no_such_target) %}
+  x = uninitialized Int32
+{% end %}
+puts 1
+IYI
+accepted other_target --error-on-warnings
 
 # ── 4. iyi fix writes the mark ───────────────────────────────────────────
 step "iyi fix inserts the mark with the reason the compiler saw"

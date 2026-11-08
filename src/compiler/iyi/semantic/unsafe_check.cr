@@ -74,10 +74,17 @@ module Iyi
 
     # Whether *file* is a module marked unsafe that is not std's or the
     # prelude's: one the program's author, or a dependency's, vouches for.
+    # Both sides are read as posix paths, as `iyi_written_in_prelude?`
+    # reads them: on Windows the file and the prelude's directory are
+    # spelled with `\` and `File::SEPARATOR` is `/`, so nothing was std's,
+    # and a spawn reaching `Atomic` was said to reach unsafe code in
+    # `src\iyi\atomic.iyi` (bench/spawn_eligible.sh's -f json step, nine
+    # notes for seven, on tssh at 046858b9b).
     def iyi_own_unsafe_file?(file : String) : Bool
       return false unless @iyi_unsafe_files.has_key?(file)
-      std_root = iyi_prelude_dir.try { |dir| File.dirname(dir) }
-      !(std_root && File.expand_path(file).starts_with?(std_root + File::SEPARATOR))
+      return true unless dir = iyi_prelude_dir
+      std_root = "#{::Path[File.dirname(dir)].to_posix}/"
+      !::Path[File.expand_path(file)].to_posix.to_s.starts_with?(std_root)
     end
 
     # The non-std unsafe modules each plain spawn's block reaches, by the

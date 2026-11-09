@@ -50,6 +50,7 @@ from proof.offline_vectors import (
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+
 def get_authentic_vectors_dir() -> Path | None:
     """Return Path to authentic full vector bundle if configured in environment."""
     raw = (
@@ -217,7 +218,7 @@ class TestFullScriptExecutionWithNetworkSpy(unittest.TestCase):
         spy_curl.write_text(f'#!/bin/sh\necho "CURL INVOKED: $@" >> "{canary}"\nexit 1\n')
         spy_curl.chmod(spy_curl.stat().st_mode | stat.S_IEXEC)
 
-        # Mock OpenSSL in PATH
+        # Mock OpenSSL in PATH answering version, speed, and kem-algorithms queries
         mock_openssl = bin_dir / "openssl"
         if enable_openssl_mlkem:
             mock_openssl.write_text("""#!/bin/sh
@@ -262,8 +263,8 @@ urllib.request.urlopen = _fail_net
 socket.socket.connect = _fail_net
 """)
 
-        # Controlled Python wrapper providing controlled capabilities
-        py_wrapper = bin_dir / "safe_py"
+        # Controlled Python wrapper named python3 and python in bin_dir
+        py_wrapper = bin_dir / "python3"
         crypto_exit = 0 if enable_crypto else 1
         py_wrapper.write_text(f"""#!/usr/bin/env python3
 import os
@@ -291,12 +292,12 @@ if len(sys.argv) > 1 and "std_hpke_oracle.py" in sys.argv[1]:
         sys.exit(0)
     elif sub == "vectors":
         if len(sys.argv) > 3 and "every.json" in sys.argv[3]:
-            print("  64 vectors of the whole file itself: 64 passed, 0 failed")
+            print("  64 vectors of the whole file itself: 12336 encryptions, 192 exports")
         else:
-            print("  64 vectors itself: 64 passed, 0 failed")
+            print("  the Python HPKE passes 64 vectors itself: 320 encryptions, 192 exports")
         sys.exit(0)
     elif sub == "drive":
-        print("  144 suites and modes: 5 rounds each passed")
+        print("  cryptography 49.0.0: 144 round trips over 36 suites in 4 modes, 100 messages, the same bytes from the same randomness, each side opening the other's; 10 refusals alike")
         sys.exit(0)
     sys.exit(0)
 
@@ -312,7 +313,7 @@ if len(sys.argv) > 1 and sys.argv[1] == "-":
         else:
             keys_dir = Path(out1)
             keys_dir.mkdir(parents=True, exist_ok=True)
-            (keys_dir / "want").write_text("key1\\n")
+            (keys_dir / "want").write_text("k1\\n")
         sys.exit(0)
     elif "against OpenSSL" in stdin_content or "oracle_bin, openssl, work" in stdin_content:
         print("  25 seeds: both keys the same; OpenSSL's ciphertexts decapsulated by iyi and iyi's by OpenSSL; 25 changed ones implicitly rejected alike")
@@ -340,6 +341,10 @@ r = subprocess.run([{repr(sys.executable)}] + sys.argv[1:])
 sys.exit(r.returncode)
 """)
         py_wrapper.chmod(py_wrapper.stat().st_mode | stat.S_IEXEC)
+
+        py_sym = bin_dir / "python"
+        if not py_sym.exists():
+            py_sym.symlink_to(py_wrapper.name)
 
         # Mock IYI compiler satisfying all checks in the exercise scripts
         mock_iyi = bin_dir / "mock_iyi"
@@ -558,6 +563,7 @@ exit 0
         env["PYTHONPATH"] = f"{pylib}:{env.get('PYTHONPATH', '')}"
         env["IYI"] = str(mock_iyi)
         env["PY"] = str(py_wrapper)
+        env["OPENSSL"] = str(mock_openssl)
 
         return bin_dir, env, canary
 
@@ -589,17 +595,27 @@ exit 0
 
     def test_strict_mode_fails_closed_when_oracles_unsupported(self) -> None:
         """Prove that in strict mode, unsupported oracles fail nonzero (no silent skips)."""
+        staged_dir = get_authentic_vectors_dir()
+        if staged_dir is None:
+            self.skipTest("Authentic vector bundle directory not set via IYI_AUTHENTIC_VECTORS_DIR / IYI_PROOF_INPUTS_DIR")
+
         with tempfile.TemporaryDirectory() as tmpdir:
+            inputs_dir = Path(tmpdir) / "valid_inputs"
+            inputs_dir.mkdir()
+            for name in ("mlkem-keygen.json", "mlkem-encdec.json", "hpke-vectors.json", "wycheproof-p384.json"):
+                if (staged_dir / name).is_file():
+                    shutil.copy(staged_dir / name, inputs_dir / name)
+
             # 1. OpenSSL lacking ML-KEM in ML-KEM strict mode
             _, env_no_openssl, _ = self._setup_safe_environment(tmpdir, enable_crypto=True, enable_openssl_mlkem=False)
-            env_no_openssl["IYI_PROOF_INPUTS_DIR"] = str(Path(tmpdir) / "empty")
+            env_no_openssl["IYI_PROOF_INPUTS_DIR"] = str(inputs_dir)
             res_mlkem = subprocess.run(["bash", str(REPO_ROOT / "bench" / "std_mlkem_exercise.sh")], env=env_no_openssl, capture_output=True, text=True)
             self.assertNotEqual(res_mlkem.returncode, 0)
             self.assertIn("OpenSSL goes unasked", res_mlkem.stdout)
 
             # 2. Python lacking cryptography in HPKE strict mode
             _, env_no_crypto, _ = self._setup_safe_environment(tmpdir, enable_crypto=False, enable_openssl_mlkem=True)
-            env_no_crypto["IYI_PROOF_INPUTS_DIR"] = str(Path(tmpdir) / "empty")
+            env_no_crypto["IYI_PROOF_INPUTS_DIR"] = str(inputs_dir)
             res_hpke = subprocess.run(["bash", str(REPO_ROOT / "bench" / "std_hpke_exercise.sh")], env=env_no_crypto, capture_output=True, text=True)
             self.assertNotEqual(res_hpke.returncode, 0)
             self.assertIn("Python HPKE goes unasked", res_hpke.stdout)
@@ -695,6 +711,7 @@ exit 0
             env["IYI_PROOF_INPUTS_DIR"] = str(inputs_dir)
 
             shutil.copy(staged_dir / "hpke-vectors.json", inputs_dir / "hpke-vectors.json")
+
             script = REPO_ROOT / "bench" / "std_hpke_exercise.sh"
             res = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True)
 
@@ -751,6 +768,7 @@ exit 0
             env["IYI_PROOF_INPUTS_DIR"] = str(inputs_dir)
 
             shutil.copy(staged_dir / "wycheproof-p384.json", inputs_dir / "wycheproof-p384.json")
+
             script = REPO_ROOT / "bench" / "std_p384_exercise.sh"
             res = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True)
 

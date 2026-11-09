@@ -28,13 +28,15 @@ esac
 # the patches and oracles below are written in python, and windows answers
 # `python3` with a store stub that prints and exits rather than running it, so
 # the interpreter is measured here instead of assumed.
-PY=""
-for candidate in python3 python; do
-  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys' >/dev/null 2>&1; then
-    PY="$candidate"
-    break
-  fi
-done
+PY="${PY:-}"
+if [ -z "$PY" ]; then
+  for candidate in python3 python; do
+    if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys' >/dev/null 2>&1; then
+      PY="$candidate"
+      break
+    fi
+  done
+fi
 
 IYI="${IYI:-$REPO/bin/iyi}"
 WORK="$(mktemp -d)"

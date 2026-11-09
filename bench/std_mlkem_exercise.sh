@@ -27,13 +27,15 @@ esac
 # the patches and oracles below are written in python, and windows answers
 # `python3` with a store stub that prints and exits rather than running it, so
 # the interpreter is measured here instead of assumed.
-PY=""
-for candidate in python3 python; do
-  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys' >/dev/null 2>&1; then
-    PY="$candidate"
-    break
-  fi
-done
+PY="${PY:-}"
+if [ -z "$PY" ]; then
+  for candidate in python3 python; do
+    if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys' >/dev/null 2>&1; then
+      PY="$candidate"
+      break
+    fi
+  done
+fi
 
 IYI="${IYI:-$REPO/bin/iyi}"
 WORK="$(mktemp -d)"
@@ -212,13 +214,16 @@ echo "== against OpenSSL, both ways"
 # own 2,400-byte decapsulation key (PKCS #8, the expandedKey form): the
 # implicit rejection's key must be the same at both ends. Then a key that
 # fails each check of FIPS 203 section 7, refused by both.
-OPENSSL=openssl
-for candidate in /opt/homebrew/opt/openssl@3/bin/openssl /usr/local/opt/openssl@3/bin/openssl; do
-  if [ -x "$candidate" ]; then
-    OPENSSL="$candidate"
-    break
-  fi
-done
+OPENSSL="${OPENSSL:-}"
+if [ -z "$OPENSSL" ]; then
+  OPENSSL=openssl
+  for candidate in /opt/homebrew/opt/openssl@3/bin/openssl /usr/local/opt/openssl@3/bin/openssl; do
+    if [ -x "$candidate" ]; then
+      OPENSSL="$candidate"
+      break
+    fi
+  done
+fi
 if [ -z "$PY" ] || ! command -v "$OPENSSL" >/dev/null 2>&1; then
   echo "  no openssl and python here, so OpenSSL goes unasked"
   if [ "${IYI_PROOF_INPUTS_DIR+set}" = "set" ]; then status=1; fi
@@ -306,6 +311,8 @@ for n in range(25):
         fail(f"seed {n}: a ciphertext changed at byte {at} decapsulated to the real secret")
 if unexpanded:
     print(f"  {unexpanded} of OpenSSL's keys were written as the seed alone, so their decapsulation keys went uncompared")
+    if os.environ.get("IYI_PROOF_INPUTS_DIR") is not None:
+        fail(f"{unexpanded} of OpenSSL's keys were written as the seed alone")
 print("  25 seeds: both keys the same; OpenSSL's ciphertexts decapsulated by iyi and iyi's by OpenSSL; 25 changed ones implicitly rejected alike")
 # Section 7.2: the first coefficient of t set to q. Section 7.3: one bit
 # of the stored H(ek) flipped.

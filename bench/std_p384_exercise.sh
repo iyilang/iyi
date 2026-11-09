@@ -34,13 +34,15 @@ esac
 # The oracles below are written in python, and windows answers `python3`
 # with a store stub that prints and exits rather than running it, so the
 # interpreter is measured here instead of assumed.
-PY=""
-for candidate in python3 python; do
-  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys' >/dev/null 2>&1; then
-    PY="$candidate"
-    break
-  fi
-done
+PY="${PY:-}"
+if [ -z "$PY" ]; then
+  for candidate in python3 python; do
+    if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys' >/dev/null 2>&1; then
+      PY="$candidate"
+      break
+    fi
+  done
+fi
 
 IYI="${IYI:-$REPO/bin/iyi}"
 WORK="$(mktemp -d)"
@@ -498,6 +500,7 @@ if command -v openssl >/dev/null 2>&1 && openssl speed -seconds 1 ecdhp384 ecdsa
   echo "  ($(openssl version))"
 else
   echo "  no openssl here with speed for P-384, so nothing to set these beside"
+  if [ "${IYI_PROOF_INPUTS_DIR+set}" = "set" ]; then status=1; fi
 fi
 # openssl speed has no keygen line: Python's cryptography makes a key on
 # OpenSSL's own code, so its median stands in, Python's call included.
@@ -515,6 +518,7 @@ then
   cat "$WORK/keygen.out"
 else
   echo "  no python cryptography here, so OpenSSL's keygen goes untimed"
+  if [ "${IYI_PROOF_INPUTS_DIR+set}" = "set" ]; then status=1; fi
 fi
 
 echo

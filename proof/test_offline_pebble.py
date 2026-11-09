@@ -185,7 +185,7 @@ class TestOfflinePebbleContract(unittest.TestCase):
             env["GO"] = str(go_bin)
             env["WORK"] = str(work_dir)
             env["IYI_PROOF_INPUTS_DIR"] = str(inputs_dir)
-
+            env["GOPRIVATE"] = "polluted_parent_goprivate"
             res = run_helper(env)
             self.assertEqual(res.returncode, 0, f"helper failed:\n{res.stderr}\n{res.stdout}")
             self.assertTrue(log_file.exists(), f"fake go was not called: {res.stdout}\n{res.stderr}")
@@ -204,7 +204,7 @@ class TestOfflinePebbleContract(unittest.TestCase):
             self.assertEqual(rec["env"]["GONOPROXY"], "none")
             self.assertEqual(rec["env"]["GOSUMDB"], "off")
             self.assertEqual(rec["env"]["GONOSUMDB"], "*")
-            self.assertIsNone(rec["env"]["GOPRIVATE"], "GOPRIVATE must not be set")
+            self.assertIsNone(rec["env"]["GOPRIVATE"], "env -u GOPRIVATE must strip ambient GOPRIVATE from child")
 
             # Owned locations under WORK
             self.assertEqual(rec["env"]["GOMODCACHE"], str(work_dir / "gomodcache"))
@@ -514,21 +514,22 @@ echo "FINAL_STATUS=$status"
             for d in (work_bin, work_mod, work_cache):
                 d.mkdir(parents=True)
 
-            # Test 1: With GONOPROXY=none, GOSUMDB=off, GOTOOLCHAIN=local, no GOPRIVATE:
-            # Actual Go downloads from file:// mirror and builds successfully offline.
+            # Test 1: With GONOPROXY=none, GOSUMDB=off, GOTOOLCHAIN=local, and env -u GOPRIVATE:
+            # Actual Go downloads from file:// mirror and builds successfully offline even if
+            # ambient environment was polluted with GOPRIVATE.
             env = os.environ.copy()
             env["GOTOOLCHAIN"] = "local"
             env["GOPROXY"] = f"file://{mirror}"
             env["GONOPROXY"] = "none"
             env["GOSUMDB"] = "off"
             env["GONOSUMDB"] = "*"
-            env.pop("GOPRIVATE", None)
+            env["GOPRIVATE"] = "polluted_parent_goprivate"
             env["GOMODCACHE"] = str(work_mod)
             env["GOCACHE"] = str(work_cache)
             env["GOBIN"] = str(work_bin)
 
             res = subprocess.run(
-                [real_go, "install", "example.com/tinyoffline/cmd/tinypkg@v1.0.0"],
+                ["env", "-u", "GOPRIVATE", real_go, "install", "example.com/tinyoffline/cmd/tinypkg@v1.0.0"],
                 env=env,
                 capture_output=True,
                 text=True,

@@ -55,7 +55,7 @@ acquire_pebble() {
     # Contract: trusted orchestrator independently verifies complete Go mirror
     # artifact manifest/digest before launch; do not claim Go's disabled
     # checksum service (GOSUMDB=off) proves it.
-    if ! GOBIN="$GOBIN" GOMODCACHE="$GOMODCACHE" GOCACHE="$GOCACHE" \
+    if ! env -u GOPRIVATE GOBIN="$GOBIN" GOMODCACHE="$GOMODCACHE" GOCACHE="$GOCACHE" \
         GOTOOLCHAIN=local GOPROXY="$proxy_url" GONOPROXY=none GOSUMDB=off GONOSUMDB="*" \
         "$GO" install github.com/letsencrypt/pebble/v2/cmd/pebble@v2.10.1 \
           github.com/letsencrypt/pebble/v2/cmd/pebble-challtestsrv@v2.10.1 >"$WORK/go-install.log" 2>&1; then

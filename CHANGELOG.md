@@ -15,11 +15,11 @@
 
 ### Gates
 
-- **The Windows foundation's artifact sweeps run in four shards.** One Windows
-  job builds the compiler and publishes it with a manifest. The foundation core
-  and four artifact shards verify that compiler, and `windows-std` passes only
-  when every part succeeded and every shard's receipt accounts for its units
-  exactly once. The checks, their inventory and their verdicts are unchanged.
+- **The Windows foundation's artifact sweeps run in two shards.** One shard
+  runs the foundation core and half the artifact sweeps, and the other runs the
+  remaining half, each building its own compiler. `windows-std` passes only
+  when both shards pass. The checks, their inventory and their verdicts are
+  unchanged.
 
 - **A pull request runs the fast part of CI; master and the nightly run
   the whole of it.** Every pull request ran all 39 jobs,

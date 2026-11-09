@@ -401,7 +401,7 @@ if [ -n "${IYI_PROOF_INPUTS_DIR:-}" ]; then
     echo "  FAIL: python is required to process IYI_PROOF_INPUTS_DIR vectors"
     status=1
   elif ! "$PY" "$REPO/proof/offline_vectors.py" wycheproof "$WORK/wycheproof.txt"; then
-    echo "  FAIL: Wycheproof vector file check or parsing failed"
+    echo "  FAIL IYI_PROOF_INPUTS_DIR: missing or corrupt wycheproof-p384.json"
     status=1
   elif "$WORK/p384-release" wycheproof "$WORK/wycheproof.txt" >"$WORK/wycheproof.out" 2>&1; then
     sed 's/^/  /' "$WORK/wycheproof.out"

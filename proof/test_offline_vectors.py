@@ -4,14 +4,14 @@ proof/test_offline_vectors.py: Focused behavior tests for offline vector intake.
 
 Tests the production helper (proof/offline_vectors.py) directly and exercises
 full script entry (bench/std_*_exercise.sh) with safe fake compilers and network
-spies to verify:
+spies (both curl binary spy and Python urllib/socket spy) to verify:
   1. IYI_PROOF_INPUTS_DIR path validation (relative paths and missing dirs fail nonzero).
-  2. Missing vector files fail nonzero with zero network access and no fallback.
+  2. Missing vector files fail nonzero with exact diagnostics and zero network access.
   3. Corrupt vector files (SHA-256 digest mismatch) fail nonzero with zero network access.
   4. Wycheproof test case count strictly enforces all 790 unique test cases.
   5. CLI entry points return nonzero exit status on validation failure.
   6. Actual exercise scripts exit nonzero when inputs are missing/corrupt under IYI_PROOF_INPUTS_DIR.
-  7. No network (curl/urllib) is attempted when IYI_PROOF_INPUTS_DIR is set.
+  7. No network (curl/urllib/socket) is attempted when IYI_PROOF_INPUTS_DIR is set.
 """
 
 from __future__ import annotations
@@ -54,22 +54,23 @@ class TestOfflineVectorsHelper(unittest.TestCase):
         self.assertEqual(WYCHEPROOF_CASE_COUNT, 790)
 
     def test_inputs_dir_validation(self) -> None:
-        # Unset
         old_env = os.environ.get("IYI_PROOF_INPUTS_DIR")
         try:
             os.environ.pop("IYI_PROOF_INPUTS_DIR", None)
             with self.assertRaises(OfflineVectorsError):
                 get_proof_inputs_dir()
 
-            # Relative path
+            # Relative path must be rejected
             os.environ["IYI_PROOF_INPUTS_DIR"] = "relative/path"
-            with self.assertRaises(OfflineVectorsError):
+            with self.assertRaises(OfflineVectorsError) as ctx:
                 get_proof_inputs_dir()
+            self.assertIn("must be an absolute path", str(ctx.exception))
 
-            # Nonexistent directory
+            # Nonexistent directory must be rejected
             os.environ["IYI_PROOF_INPUTS_DIR"] = "/nonexistent/absolute/path/12345"
-            with self.assertRaises(OfflineVectorsError):
+            with self.assertRaises(OfflineVectorsError) as ctx:
                 get_proof_inputs_dir()
+            self.assertIn("does not exist", str(ctx.exception))
         finally:
             if old_env is not None:
                 os.environ["IYI_PROOF_INPUTS_DIR"] = old_env
@@ -94,12 +95,10 @@ class TestOfflineVectorsHelper(unittest.TestCase):
             tdir = Path(tmpdir)
             out_file = tdir / "out.json"
 
-            # Missing files
             with self.assertRaises(OfflineVectorsError) as ctx:
                 process_mlkem_vectors(tdir, out_file)
             self.assertIn("Missing required vector file", str(ctx.exception))
 
-            # Corrupt keygen
             keygen = tdir / "mlkem-keygen.json"
             encdec = tdir / "mlkem-encdec.json"
             keygen.write_bytes(b"bad-keygen")
@@ -128,12 +127,10 @@ class TestOfflineVectorsHelper(unittest.TestCase):
             tdir = Path(tmpdir)
             out_file = tdir / "wycheproof.txt"
 
-            # Missing
             with self.assertRaises(OfflineVectorsError) as ctx:
                 process_wycheproof_vectors(tdir, out_file)
             self.assertIn("Missing required vector file", str(ctx.exception))
 
-            # Corrupt sha256
             wp = tdir / "wycheproof-p384.json"
             wp.write_bytes(b'{"testGroups": []}')
             with self.assertRaises(OfflineVectorsError) as ctx:
@@ -143,7 +140,6 @@ class TestOfflineVectorsHelper(unittest.TestCase):
     def test_cli_exit_status_on_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             cli_py = REPO_ROOT / "proof" / "offline_vectors.py"
-            # Missing inputs directory
             res = subprocess.run(
                 [sys.executable, str(cli_py), "mlkem", f"{tmpdir}/out.json", "--inputs-dir", f"{tmpdir}/absent"],
                 capture_output=True,
@@ -152,7 +148,6 @@ class TestOfflineVectorsHelper(unittest.TestCase):
             self.assertNotEqual(res.returncode, 0)
             self.assertIn("FAIL IYI_PROOF_INPUTS_DIR", res.stderr)
 
-            # Corrupt file via CLI
             inputs_dir = Path(tmpdir) / "inputs"
             inputs_dir.mkdir()
             (inputs_dir / "mlkem-keygen.json").write_bytes(b"corrupt")
@@ -170,18 +165,33 @@ class TestFullScriptExecutionWithNetworkSpy(unittest.TestCase):
     """Full script execution tests with safe mock compilers and network spies."""
 
     def _setup_safe_environment(self, tmpdir: str) -> tuple[Path, dict[str, str], Path]:
-        """Create mock compiler and spy curl, returning bin_dir, env, and canary_path."""
+        """Create mock compiler and spy curl + urllib, returning bin_dir, env, and canary_path."""
         bin_dir = Path(tmpdir) / "bin"
         bin_dir.mkdir(parents=True, exist_ok=True)
 
         canary = Path(tmpdir) / "network_attempted.canary"
 
-        # Spy curl records network call and fails
+        # Spy curl binary records network call
         spy_curl = bin_dir / "curl"
-        spy_curl.write_text(f'#!/bin/sh\necho "CURL INVOKED" >> "{canary}"\nexit 1\n')
+        spy_curl.write_text(f'#!/bin/sh\necho "CURL INVOKED: $@" >> "{canary}"\nexit 1\n')
         spy_curl.chmod(spy_curl.stat().st_mode | stat.S_IEXEC)
 
-        # Mock IYI compiler that produces working executables for tests
+        # Python sitecustomize spy catching urllib and socket connects
+        pylib = Path(tmpdir) / "pylib"
+        pylib.mkdir(parents=True, exist_ok=True)
+        (pylib / "sitecustomize.py").write_text(f"""
+import os, urllib.request, socket
+canary_file = {repr(str(canary))}
+def _fail_net(*args, **kwargs):
+    with open(canary_file, "a") as f:
+        f.write(f"NETWORK CONTACT ATTEMPTED: {{args}}\\n")
+    raise RuntimeError("Network attempted in offline mode")
+
+urllib.request.urlopen = _fail_net
+socket.socket.connect = _fail_net
+""")
+
+        # Mock IYI compiler emitting all expected section headers
         mock_iyi = bin_dir / "mock_iyi"
         mock_iyi_script = """#!/bin/sh
 cmd="$1"
@@ -207,7 +217,39 @@ if [ "$sub" = "data" ]; then
 elif [ "$sub" = "wycheproof" ]; then
     echo "  790 valid as Wycheproof's shared value, 0 invalid refused, 0 acceptable, 0 wrong"
     exit 0
+elif [ "$sub" = "oracle" ]; then
+    exit 0
+elif [ "$sub" = "cost" ] || [ "$sub" = "time" ]; then
+    echo "  timing: 100 us"
+    exit 0
 fi
+
+echo "== acvp keyGen (ml-kem-768)"
+echo "== acvp encapsulation (ml-kem-768)"
+echo "== acvp decapsulation (ml-kem-768)"
+echo "== acvp decapsulation key check (ml-kem-768)"
+echo "== acvp encapsulation key check (ml-kem-768)"
+echo "== embedded acvp cases (ml-kem-768)"
+echo "== round trips and the implicit rejection"
+echo "== refusals"
+echo "== sizes and code points"
+echo "== rfc 9180 vectors (rfc9180_vectors.json)"
+echo "== embedded rfc 9180 vectors"
+echo "== known answers for p-384 and hkdf-sha384"
+echo "== round trips in every suite and mode"
+echo "== x25519 points of small order refused"
+echo "== encapsulations and keys refused"
+echo "== failed opens"
+echo "== the nonce limit"
+echo "== RFC 6979's P-384 key and signatures (appendix A.2.6)"
+echo "== the keys at the ends of the range"
+echo "== every hash, checked by std/ecdsa"
+echo "== digests signed as they are (sign_digest)"
+echo "== what is not a private key"
+echo "== Diffie-Hellman (ECDH): NIST's CAVP vectors"
+echo "== points that are not P-384's"
+echo "  keyGen"
+echo "  vector"
 echo "ALL CHECKS PASSED"
 exit 0
 BIN
@@ -228,6 +270,7 @@ exit 0
 
         env = os.environ.copy()
         env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
+        env["PYTHONPATH"] = f"{pylib}:{env.get('PYTHONPATH', '')}"
         env["IYI"] = str(mock_iyi)
         env["PY"] = sys.executable
 
@@ -245,6 +288,7 @@ exit 0
 
             self.assertNotEqual(res.returncode, 0, "Script must exit nonzero when offline inputs are missing")
             self.assertIn("FAIL IYI_PROOF_INPUTS_DIR", res.stdout + res.stderr)
+            self.assertIn("mlkem-keygen.json", res.stdout + res.stderr)
             self.assertFalse(canary.exists(), "Network must never be contacted when IYI_PROOF_INPUTS_DIR is set")
 
     def test_full_hpke_exercise_script_fails_nonzero_on_missing_inputs(self) -> None:
@@ -259,6 +303,7 @@ exit 0
 
             self.assertNotEqual(res.returncode, 0, "Script must exit nonzero when offline inputs are missing")
             self.assertIn("FAIL IYI_PROOF_INPUTS_DIR", res.stdout + res.stderr)
+            self.assertIn("hpke-vectors.json", res.stdout + res.stderr)
             self.assertFalse(canary.exists(), "Network must never be contacted when IYI_PROOF_INPUTS_DIR is set")
 
     def test_full_p384_exercise_script_fails_nonzero_on_missing_inputs(self) -> None:
@@ -272,7 +317,8 @@ exit 0
             res = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True)
 
             self.assertNotEqual(res.returncode, 0, "Script must exit nonzero when offline inputs are missing")
-            self.assertIn("FAIL", res.stdout + res.stderr)
+            self.assertIn("FAIL IYI_PROOF_INPUTS_DIR", res.stdout + res.stderr)
+            self.assertIn("wycheproof-p384.json", res.stdout + res.stderr)
             self.assertFalse(canary.exists(), "Network must never be contacted when IYI_PROOF_INPUTS_DIR is set")
 
 

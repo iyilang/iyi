@@ -50,13 +50,17 @@ from proof.offline_vectors import (
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# Staged authentic full inputs directory provided by orchestrator
-STAGED_INPUTS_DIR = Path(
-    os.environ.get(
-        "IYI_STAGE_INPUTS_DIR",
-        "/private/var/folders/cx/smp6389s35gds6b_bfywv_8h0000gn/T/iyi-stage-qualification-oqgry_3_",
+def get_authentic_vectors_dir() -> Path | None:
+    """Return Path to authentic full vector bundle if configured in environment."""
+    raw = (
+        os.environ.get("IYI_AUTHENTIC_VECTORS_DIR")
+        or os.environ.get("IYI_STAGE_INPUTS_DIR")
+        or os.environ.get("IYI_PROOF_INPUTS_DIR")
     )
-)
+    if not raw:
+        return None
+    p = Path(raw)
+    return p if p.is_dir() else None
 
 
 class TestOfflineVectorsHelper(unittest.TestCase):
@@ -620,8 +624,9 @@ exit 0
 
     def test_full_mlkem_exercise_script_succeeds_on_authentic_inputs(self) -> None:
         """Control baseline: verify ML-KEM script succeeds end-to-end with exit 0 on authentic inputs."""
-        if not (STAGED_INPUTS_DIR / "mlkem-keygen.json").is_file() or not (STAGED_INPUTS_DIR / "mlkem-encdec.json").is_file():
-            self.skipTest(f"Authentic ML-KEM vector bundle not found in {STAGED_INPUTS_DIR}")
+        staged_dir = get_authentic_vectors_dir()
+        if staged_dir is None or not (staged_dir / "mlkem-keygen.json").is_file() or not (staged_dir / "mlkem-encdec.json").is_file():
+            self.skipTest("Authentic ML-KEM vector bundle not found via IYI_AUTHENTIC_VECTORS_DIR / IYI_PROOF_INPUTS_DIR")
 
         with tempfile.TemporaryDirectory() as tmpdir:
             _, env, canary = self._setup_safe_environment(tmpdir)
@@ -629,8 +634,8 @@ exit 0
             inputs_dir.mkdir()
             env["IYI_PROOF_INPUTS_DIR"] = str(inputs_dir)
 
-            shutil.copy(STAGED_INPUTS_DIR / "mlkem-keygen.json", inputs_dir / "mlkem-keygen.json")
-            shutil.copy(STAGED_INPUTS_DIR / "mlkem-encdec.json", inputs_dir / "mlkem-encdec.json")
+            shutil.copy(staged_dir / "mlkem-keygen.json", inputs_dir / "mlkem-keygen.json")
+            shutil.copy(staged_dir / "mlkem-encdec.json", inputs_dir / "mlkem-encdec.json")
 
             script = REPO_ROOT / "bench" / "std_mlkem_exercise.sh"
             res = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True)
@@ -679,8 +684,9 @@ exit 0
 
     def test_full_hpke_exercise_script_succeeds_on_authentic_inputs(self) -> None:
         """Control baseline: verify HPKE script succeeds end-to-end with exit 0 on authentic inputs."""
-        if not (STAGED_INPUTS_DIR / "hpke-vectors.json").is_file():
-            self.skipTest(f"Authentic HPKE vector bundle not found in {STAGED_INPUTS_DIR}")
+        staged_dir = get_authentic_vectors_dir()
+        if staged_dir is None or not (staged_dir / "hpke-vectors.json").is_file():
+            self.skipTest("Authentic HPKE vector bundle not found via IYI_AUTHENTIC_VECTORS_DIR / IYI_PROOF_INPUTS_DIR")
 
         with tempfile.TemporaryDirectory() as tmpdir:
             _, env, canary = self._setup_safe_environment(tmpdir)
@@ -688,8 +694,7 @@ exit 0
             inputs_dir.mkdir()
             env["IYI_PROOF_INPUTS_DIR"] = str(inputs_dir)
 
-            shutil.copy(STAGED_INPUTS_DIR / "hpke-vectors.json", inputs_dir / "hpke-vectors.json")
-
+            shutil.copy(staged_dir / "hpke-vectors.json", inputs_dir / "hpke-vectors.json")
             script = REPO_ROOT / "bench" / "std_hpke_exercise.sh"
             res = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True)
 
@@ -735,8 +740,9 @@ exit 0
 
     def test_full_p384_exercise_script_succeeds_on_authentic_inputs(self) -> None:
         """Control baseline: verify P-384 script succeeds end-to-end with exit 0 on authentic inputs."""
-        if not (STAGED_INPUTS_DIR / "wycheproof-p384.json").is_file():
-            self.skipTest(f"Authentic Wycheproof vector bundle not found in {STAGED_INPUTS_DIR}")
+        staged_dir = get_authentic_vectors_dir()
+        if staged_dir is None or not (staged_dir / "wycheproof-p384.json").is_file():
+            self.skipTest("Authentic Wycheproof vector bundle not found via IYI_AUTHENTIC_VECTORS_DIR / IYI_PROOF_INPUTS_DIR")
 
         with tempfile.TemporaryDirectory() as tmpdir:
             _, env, canary = self._setup_safe_environment(tmpdir)
@@ -744,8 +750,7 @@ exit 0
             inputs_dir.mkdir()
             env["IYI_PROOF_INPUTS_DIR"] = str(inputs_dir)
 
-            shutil.copy(STAGED_INPUTS_DIR / "wycheproof-p384.json", inputs_dir / "wycheproof-p384.json")
-
+            shutil.copy(staged_dir / "wycheproof-p384.json", inputs_dir / "wycheproof-p384.json")
             script = REPO_ROOT / "bench" / "std_p384_exercise.sh"
             res = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True)
 

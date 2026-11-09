@@ -256,12 +256,17 @@ def test_darwin_backward_compatibility():
     ret, rule, _ = capture_violation(compare_same_opt, d1, d2)
     assert ret == 0, f"Darwin equivalence failed: {rule}"
 
-    # Trailing ~iyi stripped and ~proc\d* normalized
-    sym_a = b"0   a.out                               0x0000000100003f50 ~proc123~iyi@src/std/big.iyi:10 + 16\n"
+    # ~proc\d* normalized and std path rewritten to std/X
+    sym_a = b"0   a.out                               0x0000000100003f50 ~proc123@src/std/big.iyi:10 + 16\n"
     sym_b = b"0   a.out                               0x0000000100009999 ~proc456@mods/std/big.iyimod:10 + 32\n"
     ret, rule, _ = capture_violation(compare_same_opt, [sym_a], [sym_b])
-    assert ret == 0, f"Darwin canonical_function failed: {rule}"
+    assert ret == 0, f"Darwin proc/std canonicalization failed: {rule}"
 
+    # Trailing ~iyi stripped from symbol without @FILE:LINE
+    sym_c = b"0   a.out                               0x0000000100003f50 run_loop~iyi + 16\n"
+    sym_d = b"0   a.out                               0x0000000100009999 run_loop + 32\n"
+    ret, rule, _ = capture_violation(compare_same_opt, [sym_c], [sym_d])
+    assert ret == 0, f"Darwin trailing ~iyi canonicalization failed: {rule}"
     # Darwin mutations fail with their expected rules
     mut_idx = generate_mutant("index", d1)
     ret, rule, _ = capture_violation(compare_same_opt, d1, mut_idx)

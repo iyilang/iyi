@@ -1049,9 +1049,9 @@ print('git-diff-check PASSED: all cached hits and misses respected git diff.')
 # 8. test-comparator-negatives: proves negative and discrimination rules for CI consumers
 test_comparator_negatives() {
   echo "== Running CI evidence comparator negative and discrimination fixtures =="
+  "$PY" "$REPO/bench/test_frames_equivalent.py"
   "$PY" -c "
 import os, sys, json, tempfile, subprocess, shutil
-
 repo = sys.argv[1]
 stale_ci = os.path.join(repo, 'bench/stale_ci.sh')
 

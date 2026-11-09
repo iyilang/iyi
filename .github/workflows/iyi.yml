@@ -955,6 +955,9 @@ jobs:
       - name: The test verb tells its four verdicts apart
         run: bash bench/test_verb.sh
 
+      - name: Offline Pebble module mirror and dependency gate
+        run: bash bench/test_offline_pebble.sh
+
       # SPEC.md III.8 #2: the language server. One scripted session is a
       # person's first five minutes plus the agent's first question, and
       # every capability the release claims is a step: diagnostics with
@@ -1874,6 +1877,9 @@ jobs:
       - name: The test verb (III.8)
         run: bash bench/test_verb.sh
 
+      - name: Offline Pebble module mirror and dependency gate
+        run: bash bench/test_offline_pebble.sh
+
       # The same protocol edges on BSD sockets, where a peer that hangs
       # up mid-frame surfaces differently from Linux and the EPIPE path
       # that used to exit the daemon 0 is exactly the same code.
@@ -2729,6 +2735,7 @@ jobs:
         run: |
           bash bench/verbs_exercise.sh
           bash bench/test_verb.sh
+          bash bench/test_offline_pebble.sh
           bash bench/packages_resolve.sh
           bash bench/packages_get.sh
           bash bench/migrate_gate.sh

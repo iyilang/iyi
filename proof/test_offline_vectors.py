@@ -204,6 +204,9 @@ class TestOfflineVectorsHelper(unittest.TestCase):
 
     def test_clean_env_wrapper_execution(self) -> None:
         """Verify bench/test_offline_vectors.sh executes cleanly without PYTHONPATH from any working directory."""
+        if os.environ.get("IYI_TEST_OFFLINE_VECTORS_INNER") == "1":
+            return
+
         wrapper = REPO_ROOT / "bench" / "test_offline_vectors.sh"
         self.assertTrue(wrapper.is_file())
 
@@ -211,15 +214,23 @@ class TestOfflineVectorsHelper(unittest.TestCase):
             clean_env = {
                 k: v
                 for k, v in os.environ.items()
-                if k not in ("PYTHONPATH", "IYI_PROOF_INPUTS_DIR", "IYI_AUTHENTIC_VECTORS_DIR", "IYI_STAGE_INPUTS_DIR", "IYI_PROOF_STRICT", "IYI_STRICT_PROOF")
+                if k not in (
+                    "PYTHONPATH",
+                    "IYI_PROOF_INPUTS_DIR",
+                    "IYI_AUTHENTIC_VECTORS_DIR",
+                    "IYI_STAGE_INPUTS_DIR",
+                    "IYI_PROOF_STRICT",
+                    "IYI_STRICT_PROOF",
+                )
             }
+            clean_env["IYI_TEST_OFFLINE_VECTORS_INNER"] = "1"
             res = subprocess.run(
-                ["bash", str(wrapper)],
+                ["bash", str(wrapper), "proof.test_offline_vectors.TestOfflineVectorsHelper.test_pinned_constants"],
                 cwd=tmpdir,
                 env=clean_env,
                 capture_output=True,
                 text=True,
-                timeout=60,
+                timeout=30,
             )
             self.assertEqual(res.returncode, 0, f"Wrapper failed in clean environment:\n{res.stdout}\n{res.stderr}")
             self.assertIn("OK", res.stderr + res.stdout)

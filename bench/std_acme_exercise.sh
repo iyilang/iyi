@@ -86,6 +86,7 @@ build_and_run() {
   return 0
 }
 
+if [ "${PEBBLE_ONLY:-}" != "1" ]; then
 echo "== the std/acme exercise, plain build"
 build_and_run "plain" acme-plain
 if ! grep -q "ALL CHECKS PASSED" "$WORK/acme-plain.out" 2>/dev/null; then
@@ -257,6 +258,7 @@ PY
     status=1
   fi
 fi
+fi
 
 echo
 echo "== whole orders against Let's Encrypt's Pebble"
@@ -304,7 +306,7 @@ else
       # artifact manifest/digest before launch; do not claim Go's disabled
       # checksum service (GOSUMDB=off) proves it.
       if ! GOBIN="$GOBIN" GOMODCACHE="$GOMODCACHE" GOCACHE="$GOCACHE" \
-          GOTOOLCHAIN=local GOPROXY="$proxy_url" GOSUMDB=off GONOSUMDB="*" GOPRIVATE="*" \
+          GOTOOLCHAIN=local GOPROXY="$proxy_url" GONOPROXY=none GOSUMDB=off GONOSUMDB="*" \
           "$GO" install github.com/letsencrypt/pebble/v2/cmd/pebble@v2.10.1 \
             github.com/letsencrypt/pebble/v2/cmd/pebble-challtestsrv@v2.10.1 >"$WORK/go-install.log" 2>&1; then
         echo "  FAIL: Pebble v2.10.1 could not be installed from offline mirror: $(tail -1 "$WORK/go-install.log")" >&2
@@ -462,6 +464,7 @@ PY
   fi
 fi
 
+if [ "${PEBBLE_ONLY:-}" != "1" ]; then
 echo
 echo "== doc, format, other platforms and artifacts"
 if "$IYI" doc "$REPO/src/std/acme.iyi" >"$WORK/doc.txt" 2>&1 && grep -q "wait_authorization" "$WORK/doc.txt"; then
@@ -582,9 +585,14 @@ prove_broken acme "an http:// account Location taken" "an http:// account Locati
 prove_broken acme "an http:// order Location taken" "an http:// order Location is refused by name" \
   '    refused = AcmeClient.https(url, "newOrder'"'"'s Location")' '    refused = nil'
 
+fi
 echo
 if [ "$status" -eq 0 ]; then
-  echo "the std/acme exercise holds ($mutations breaks caught)"
+  if [ "${PEBBLE_ONLY:-}" = "1" ]; then
+    echo "the std/acme pebble exercise holds"
+  else
+    echo "the std/acme exercise holds ($mutations breaks caught)"
+  fi
 else
   echo "the std/acme exercise did not hold"
 fi

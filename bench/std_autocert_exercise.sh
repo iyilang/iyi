@@ -104,6 +104,7 @@ run_own() {
   "$WORK/$name" "$2" >"$3" 2>&1
 }
 
+if [ "${PEBBLE_ONLY:-}" != "1" ]; then
 echo "== the std/autocert exercise, plain build"
 if build autocert-plain; then
   run_own autocert-plain "$WORK/local-cache" "$WORK/plain.out"
@@ -153,6 +154,7 @@ if [ -z "$ORACLE" ]; then
   echo "  no python with ssl and cryptography here, so no handshake is made"
 elif ! "$PY" "$CLIENT" alpn "$WORK/autocert-release" "$WORK/alpn"; then
   status=1
+fi
 fi
 
 echo
@@ -204,7 +206,7 @@ else
       # artifact manifest/digest before launch; do not claim Go's disabled
       # checksum service (GOSUMDB=off) proves it.
       if ! GOBIN="$GOBIN" GOMODCACHE="$GOMODCACHE" GOCACHE="$GOCACHE" \
-          GOTOOLCHAIN=local GOPROXY="$proxy_url" GOSUMDB=off GONOSUMDB="*" GOPRIVATE="*" \
+          GOTOOLCHAIN=local GOPROXY="$proxy_url" GONOPROXY=none GOSUMDB=off GONOSUMDB="*" \
           "$GO" install github.com/letsencrypt/pebble/v2/cmd/pebble@v2.10.1 \
             github.com/letsencrypt/pebble/v2/cmd/pebble-challtestsrv@v2.10.1 >"$WORK/go-install.log" 2>&1; then
         echo "  FAIL: Pebble v2.10.1 could not be installed from offline mirror: $(tail -1 "$WORK/go-install.log")" >&2
@@ -325,6 +327,7 @@ PY
   fi
 fi
 
+if [ "${PEBBLE_ONLY:-}" != "1" ]; then
 echo
 echo "== doc, format, other platforms and artifacts"
 if "$IYI" doc "$REPO/src/std/autocert.iyi" >"$WORK/doc.txt" 2>&1 && grep -q "identity_for" "$WORK/doc.txt"; then
@@ -491,13 +494,18 @@ prove_broken tls "a frozen config's identity source not asked" "on four workers,
   '    if shared = @shared_source' '    if shared = nil.as(SharedProc({String?, Array(String)?, Int32?}, TlsIdentity | TlsError | Nil)?)'
 prove_broken tls "std/tls's identity source not told the time left" "without run, a handshake waiting for an order ends by its" local \
   '    return nil if @deadline_ns == 0_i64' '    return nil'
+fi
 
 echo
 if [ "$status" -eq 0 ]; then
-  if [ "$caught" -eq "$mutations" ]; then
-    echo "the std/autocert exercise holds ($caught breaks caught)"
+  if [ "${PEBBLE_ONLY:-}" = "1" ]; then
+    echo "the std/autocert pebble exercise holds"
   else
-    echo "the std/autocert exercise holds ($caught of $mutations breaks caught, the rest unmeasured here as said above)"
+    if [ "$caught" -eq "$mutations" ]; then
+      echo "the std/autocert exercise holds ($caught breaks caught)"
+    else
+      echo "the std/autocert exercise holds ($caught of $mutations breaks caught, the rest unmeasured here as said above)"
+    fi
   fi
 else
   echo "the std/autocert exercise did not hold"

@@ -3,8 +3,11 @@
 Compare two test outputs for semantic backtrace equivalence.
 
 Usage:
-    python3 bench/frames_equivalent.py [--across-optimisation] OUT_A OUT_B
+    python3 bench/frames_equivalent.py [--across-optimisation] [--require-frames] OUT_A OUT_B
     python3 bench/frames_equivalent.py --mutant KIND OUT
+
+Tested by:
+    python3 bench/test_frames_equivalent.py
 
 Exit codes:
     0: Equivalent
@@ -17,7 +20,8 @@ import re
 import sys
 
 FRAME_RE = re.compile(rb'^(\d+) +(\S+) +0x[0-9a-fA-F]{16} (.*) \+ \d+$')
-
+DARWIN_FRAME_RE = FRAME_RE
+LINUX_FRAME_RE = re.compile(rb'^(\d+) +(\S+) at (.+):(\d+):(\d+)$')
 
 def canonical_function(sym: bytes) -> bytes:
     # 1. strip one trailing ~iyi
@@ -34,12 +38,45 @@ def canonical_function(sym: bytes) -> bytes:
         sym = head + sep + tail
     return sym
 
+def canonical_file(path: bytes) -> bytes:
+    # Rewrite …/src/std/X.iyi and …/mods/std/X.iyimod to std/X
+    path = re.sub(rb'^(?:.*?[/\\])?src/std/(.+?)\.iyi$', rb'std/\1', path)
+    path = re.sub(rb'^(?:.*?[/\\])?mods/std/(.+?)\.iyimod$', rb'std/\1', path)
+    return path
+
+
+def parse_frame(line: bytes):
+    s = line.rstrip(b'\r\n')
+    m_darwin = FRAME_RE.match(s)
+    if m_darwin:
+        return (
+            'darwin',
+            m_darwin.group(1),
+            m_darwin.group(2),
+            canonical_function(m_darwin.group(3)),
+        )
+    m_linux = LINUX_FRAME_RE.match(s)
+    if m_linux:
+        return (
+            'linux',
+            m_linux.group(1),
+            canonical_function(m_linux.group(2)),
+            canonical_file(m_linux.group(3)),
+            m_linux.group(4),
+            m_linux.group(5),
+        )
+    return None
+
+
+def is_frame(line: bytes) -> bool:
+    return parse_frame(line) is not None
+
 
 def report_violation(line_no: int, rule: str, left: bytes, right: bytes):
     sys.stdout.write(f"line {line_no}: rule {rule}\n  left:  {repr(left)}\n  right: {repr(right)}\n")
 
 
-def compare_same_opt(lines1: list[bytes], lines2: list[bytes]) -> int:
+def compare_same_opt(lines1: list[bytes], lines2: list[bytes], require_frames: bool = False) -> int:
     # Equal line count
     if len(lines1) != len(lines2):
         min_len = min(len(lines1), len(lines2))
@@ -49,40 +86,64 @@ def compare_same_opt(lines1: list[bytes], lines2: list[bytes]) -> int:
         report_violation(line_no, 'line_count', left, right)
         return 1
 
+    frames_found = 0
     for idx, (l1, l2) in enumerate(zip(lines1, lines2)):
         line_no = idx + 1
-        m1 = FRAME_RE.match(l1.rstrip(b'\r\n'))
-        m2 = FRAME_RE.match(l2.rstrip(b'\r\n'))
+        f1 = parse_frame(l1)
+        f2 = parse_frame(l2)
 
         # Frame lines at the same positions
-        if bool(m1) != bool(m2):
+        if bool(f1) != bool(f2):
             report_violation(line_no, 'position', l1, l2)
             return 1
 
         # Non-frame lines byte-equal
-        if not m1:
+        if not f1:
             if l1 != l2:
                 report_violation(line_no, 'text', l1, l2)
                 return 1
         else:
-            # Frames must have equal index, image (group 2) and canonical function
-            idx1, img1, fn1 = m1.group(1), m1.group(2), canonical_function(m1.group(3))
-            idx2, img2, fn2 = m2.group(1), m2.group(2), canonical_function(m2.group(3))
+            frames_found += 1
+            kind1, kind2 = f1[0], f2[0]
+            if kind1 != kind2:
+                report_violation(line_no, 'position', l1, l2)
+                return 1
 
-            if idx1 != idx2:
-                report_violation(line_no, 'index', l1, l2)
-                return 1
-            if img1 != img2:
-                report_violation(line_no, 'image', l1, l2)
-                return 1
-            if fn1 != fn2:
-                report_violation(line_no, 'function', l1, l2)
-                return 1
+            if kind1 == 'darwin':
+                _, idx1, img1, fn1 = f1
+                _, idx2, img2, fn2 = f2
+
+                if idx1 != idx2:
+                    report_violation(line_no, 'index', l1, l2)
+                    return 1
+                if img1 != img2:
+                    report_violation(line_no, 'image', l1, l2)
+                    return 1
+                if fn1 != fn2:
+                    report_violation(line_no, 'function', l1, l2)
+                    return 1
+            elif kind1 == 'linux':
+                _, idx1, fn1, file1, line1, col1 = f1
+                _, idx2, fn2, file2, line2, col2 = f2
+
+                if idx1 != idx2:
+                    report_violation(line_no, 'index', l1, l2)
+                    return 1
+                if fn1 != fn2:
+                    report_violation(line_no, 'function', l1, l2)
+                    return 1
+                if (file1, line1, col1) != (file2, line2, col2):
+                    report_violation(line_no, 'location', l1, l2)
+                    return 1
+
+    if require_frames and frames_found == 0:
+        report_violation(1, 'zero_frames', lines1[0] if lines1 else b'', lines2[0] if lines2 else b'')
+        return 1
 
     return 0
 
 
-def compare_across_opt(lines1: list[bytes], lines2: list[bytes]) -> int:
+def compare_across_opt(lines1: list[bytes], lines2: list[bytes], require_frames: bool = False) -> int:
     def chunk_items(lines):
         items = []
         i = 0
@@ -90,10 +151,9 @@ def compare_across_opt(lines1: list[bytes], lines2: list[bytes]) -> int:
         while i < n:
             line_no = i + 1
             line = lines[i]
-            m = FRAME_RE.match(line.rstrip(b'\r\n'))
-            if m:
+            if is_frame(line):
                 frames = []
-                while i < n and FRAME_RE.match(lines[i].rstrip(b'\r\n')):
+                while i < n and is_frame(lines[i]):
                     frames.append(lines[i])
                     i += 1
                 items.append(('frame', line_no, frames))
@@ -106,6 +166,7 @@ def compare_across_opt(lines1: list[bytes], lines2: list[bytes]) -> int:
     items2 = chunk_items(lines2)
 
     min_len = min(len(items1), len(items2))
+    total_frames = 0
     for i in range(min_len):
         k1, lno1, val1 = items1[i]
         k2, lno2, val2 = items2[i]
@@ -126,6 +187,7 @@ def compare_across_opt(lines1: list[bytes], lines2: list[bytes]) -> int:
                 right = val2[0] if val2 else b''
                 report_violation(lno1, 'empty_frames', left, right)
                 return 1
+            total_frames += len(val1)
 
     if len(items1) != len(items2):
         if len(items1) > len(items2):
@@ -139,6 +201,10 @@ def compare_across_opt(lines1: list[bytes], lines2: list[bytes]) -> int:
         report_violation(lno, 'item_count', left, right)
         return 1
 
+    if require_frames and total_frames == 0:
+        report_violation(1, 'zero_frames', lines1[0] if lines1 else b'', lines2[0] if lines2 else b'')
+        return 1
+
     return 0
 
 
@@ -146,13 +212,13 @@ def generate_mutant(kind: str, lines: list[bytes]) -> list[bytes]:
     mutated = list(lines)
     if kind == "text":
         for i, line in enumerate(mutated):
-            if not FRAME_RE.match(line.rstrip(b'\r\n')):
+            if not is_frame(line):
                 mutated[i] = b"MUTANT " + line
                 return mutated
         raise ValueError("no text line to mutate")
-    elif kind == "drop":
+    elif kind in ("drop", "count"):
         for i, line in enumerate(mutated):
-            if FRAME_RE.match(line.rstrip(b'\r\n')):
+            if is_frame(line):
                 del mutated[i]
                 return mutated
         if mutated:
@@ -161,27 +227,50 @@ def generate_mutant(kind: str, lines: list[bytes]) -> list[bytes]:
         raise ValueError("no line to drop")
     elif kind == "swap":
         for i in range(len(mutated) - 1):
-            if FRAME_RE.match(mutated[i].rstrip(b'\r\n')) and FRAME_RE.match(mutated[i + 1].rstrip(b'\r\n')):
+            if is_frame(mutated[i]) and is_frame(mutated[i + 1]):
                 mutated[i], mutated[i + 1] = mutated[i + 1], mutated[i]
                 return mutated
         if len(mutated) >= 2:
             mutated[0], mutated[1] = mutated[1], mutated[0]
             return mutated
         raise ValueError("not enough lines to swap")
+    elif kind == "position":
+        for i in range(len(mutated) - 1):
+            f1 = is_frame(mutated[i])
+            f2 = is_frame(mutated[i + 1])
+            if f1 != f2:
+                mutated[i], mutated[i + 1] = mutated[i + 1], mutated[i]
+                return mutated
+        if mutated:
+            if is_frame(mutated[0]):
+                mutated.insert(0, b"nonframe text line\n")
+            else:
+                mutated.insert(0, b"0   frame_fn at /path/probe.iyi:1:1\n")
+            return mutated
+        raise ValueError("no line to mutate for position")
     elif kind == "function":
         for i, line in enumerate(mutated):
-            m = FRAME_RE.match(line.rstrip(b'\r\n'))
-            if m:
-                fn = m.group(3)
+            s = line.rstrip(b'\r\n')
+            m_d = FRAME_RE.match(s)
+            m_l = LINUX_FRAME_RE.match(s)
+            if m_d:
+                fn = m_d.group(3)
+                new_fn = b"mutant_" + fn
+                mutated[i] = line.replace(fn, new_fn, 1)
+                return mutated
+            elif m_l:
+                fn = m_l.group(2)
                 new_fn = b"mutant_" + fn
                 mutated[i] = line.replace(fn, new_fn, 1)
                 return mutated
         raise ValueError("no frame line for function mutant")
     elif kind == "index":
         for i, line in enumerate(mutated):
-            m = FRAME_RE.match(line.rstrip(b'\r\n'))
-            if m:
-                idx = m.group(1)
+            s = line.rstrip(b'\r\n')
+            m_d = FRAME_RE.match(s)
+            m_l = LINUX_FRAME_RE.match(s)
+            if m_d or m_l:
+                idx = (m_d or m_l).group(1)
                 new_idx = str(int(idx) + 99).encode()
                 mutated[i] = re.sub(rb'^\d+', new_idx, line, count=1)
                 return mutated
@@ -195,12 +284,20 @@ def generate_mutant(kind: str, lines: list[bytes]) -> list[bytes]:
                 mutated[i] = line.replace(img, new_img, 1)
                 return mutated
         raise ValueError("no frame line for image mutant")
-    elif kind == "line":
-        # change a proc's :LINE
+    elif kind in ("location", "line"):
         for i, line in enumerate(mutated):
-            m = FRAME_RE.match(line.rstrip(b'\r\n'))
-            if m:
-                fn = m.group(3)
+            s = line.rstrip(b'\r\n')
+            m_l = LINUX_FRAME_RE.match(s)
+            if m_l:
+                old_line = m_l.group(4)
+                new_line = str(int(old_line) + 12345).encode()
+                old_loc = m_l.group(3) + b':' + old_line + b':' + m_l.group(5)
+                new_loc = m_l.group(3) + b':' + new_line + b':' + m_l.group(5)
+                mutated[i] = line.replace(old_loc, new_loc, 1)
+                return mutated
+            m_d = FRAME_RE.match(s)
+            if m_d:
+                fn = m_d.group(3)
                 sub_m = re.search(rb'(@.*?):(\d+)', fn)
                 if sub_m:
                     old_num = sub_m.group(2)
@@ -208,18 +305,40 @@ def generate_mutant(kind: str, lines: list[bytes]) -> list[bytes]:
                     new_fn = fn[:sub_m.start(2)] + new_num + fn[sub_m.end(2):]
                     mutated[i] = line.replace(fn, new_fn, 1)
                     return mutated
-        raise ValueError("no frame line with :LINE for line mutant")
+        raise ValueError("no frame line with location/line for mutant")
+    elif kind == "column":
+        for i, line in enumerate(mutated):
+            s = line.rstrip(b'\r\n')
+            m_l = LINUX_FRAME_RE.match(s)
+            if m_l:
+                old_col = m_l.group(5)
+                new_col = str(int(old_col) + 54321).encode()
+                old_loc = m_l.group(3) + b':' + m_l.group(4) + b':' + old_col
+                new_loc = m_l.group(3) + b':' + m_l.group(4) + b':' + new_col
+                mutated[i] = line.replace(old_loc, new_loc, 1)
+                return mutated
+        raise ValueError("no frame line with column for mutant")
+    elif kind == "file":
+        for i, line in enumerate(mutated):
+            s = line.rstrip(b'\r\n')
+            m_l = LINUX_FRAME_RE.match(s)
+            if m_l:
+                old_file = m_l.group(3)
+                new_file = old_file + b'_mutant'
+                old_loc = old_file + b':' + m_l.group(4) + b':' + m_l.group(5)
+                new_loc = new_file + b':' + m_l.group(4) + b':' + m_l.group(5)
+                mutated[i] = line.replace(old_loc, new_loc, 1)
+                return mutated
+        raise ValueError("no frame line with file for mutant")
     elif kind == "module":
         # change std/X to std/Y
         for i, line in enumerate(mutated):
-            m = FRAME_RE.match(line.rstrip(b'\r\n'))
-            if m:
-                fn = m.group(3)
-                if b'std/' in fn:
-                    new_fn = re.sub(rb'std/([a-zA-Z0-9_]+)', rb'std/mutant_mod', fn, count=1)
-                    if new_fn != fn:
-                        mutated[i] = line.replace(fn, new_fn, 1)
-                        return mutated
+            s = line.rstrip(b'\r\n')
+            if b'std/' in line:
+                new_line = re.sub(rb'std/([a-zA-Z0-9_]+)', rb'std/mutant_mod', line, count=1)
+                if new_line != line:
+                    mutated[i] = new_line
+                    return mutated
         raise ValueError("no frame line with std/ for module mutant")
     else:
         raise ValueError(f"unknown mutant kind: {kind}")
@@ -228,8 +347,12 @@ def generate_mutant(kind: str, lines: list[bytes]) -> list[bytes]:
 def main():
     args = sys.argv[1:]
     if not args:
-        sys.stderr.write("Usage: frames_equivalent.py [--across-optimisation] OUT_A OUT_B\n       frames_equivalent.py --mutant KIND OUT\n")
+        sys.stderr.write("Usage: frames_equivalent.py [--across-optimisation] [--require-frames] OUT_A OUT_B\n       frames_equivalent.py --mutant KIND OUT\n")
         sys.exit(2)
+
+    if args[0] in ("--test", "--selftest"):
+        from test_frames_equivalent import run_all_tests
+        sys.exit(run_all_tests())
 
     if args[0] == "--mutant":
         if len(args) != 3:
@@ -252,10 +375,13 @@ def main():
         sys.exit(0)
 
     across_opt = False
+    require_frames = False
     files = []
     for arg in args:
         if arg in ("--across-optimisation", "--across-optimization"):
             across_opt = True
+        elif arg in ("--require-frames", "--require-named-frames", "--named-frame-proof"):
+            require_frames = True
         elif arg.startswith("-"):
             sys.stderr.write(f"Unknown option: {arg}\n")
             sys.exit(2)
@@ -275,12 +401,11 @@ def main():
         sys.exit(2)
 
     if across_opt:
-        ret = compare_across_opt(lines1, lines2)
+        ret = compare_across_opt(lines1, lines2, require_frames=require_frames)
     else:
-        ret = compare_same_opt(lines1, lines2)
+        ret = compare_same_opt(lines1, lines2, require_frames=require_frames)
 
     sys.exit(ret)
-
 
 if __name__ == "__main__":
     main()

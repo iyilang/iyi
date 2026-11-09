@@ -13,6 +13,15 @@ WORK="$(mktemp -d)"
 unset http_proxy https_proxy ftp_proxy all_proxy HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY
 export no_proxy="127.0.0.1,localhost,::1"
 export NO_PROXY="127.0.0.1,localhost,::1"
+# Verify launch boundary sanitization: ambient proxy vars are cleared and loopback is exempted
+if [ -n "${http_proxy:-}" ] || [ -n "${HTTP_PROXY:-}" ] || [ -n "${all_proxy:-}" ] || [ -n "${ALL_PROXY:-}" ]; then
+  echo "  FAIL: script entry failed to strip ambient proxy variables"
+  exit 1
+fi
+if [ "${no_proxy:-}" != "127.0.0.1,localhost,::1" ] || [ "${NO_PROXY:-}" != "127.0.0.1,localhost,::1" ]; then
+  echo "  FAIL: script entry failed to set loopback no_proxy exemption"
+  exit 1
+fi
 
 # Every process under this gate - its servers, the broken copies' rounds
 # and their clients, python, node - ends with it, at its end and at a
@@ -2642,11 +2651,37 @@ print(format(h, 'x'))") x="
   [ "$got" = "hello, compressible world. hello, compressible world. " ] || { echo "  FAIL: gzip: '$got'"; ok=0; }
   got="$(curl -sS --noproxy '*' --http2-prior-knowledge -w '<%{num_connects}>' "$base/echo?a" "$base/echo?b" "$base/echo?c" | grep -o '<[0-9]*>' | tr -d '\n')"
   [ "$got" = "<1><0><0>" ] || { echo "  FAIL: three requests took connections '$got'"; ok=0; }
-  # Behavior test: prove that ambient proxy variables cannot redirect loopback requests
-  polluted_got="$(http_proxy="http://127.0.0.1.polluted.invalid:9999" ALL_PROXY="socks5://127.0.0.1.polluted.invalid:9999" curl -sS --noproxy '*' --http2-prior-knowledge -H 'X-Test: curl' "$base/echo?x=proxy_isolation")"
-  if [ "$polluted_got" != "GET /echo x=proxy_isolation HTTP/2 host=127.0.0.1:$H2PORT length=0 fnv=cbf29ce484222325 x=curl" ]; then
-    echo "  FAIL: curl routed to ambient proxy instead of owned loopback target"
-    ok=0
+  # Behavior test: prove that --noproxy '*' protects curl even when no_proxy/NO_PROXY exemptions are neutralized,
+  # using an owned loopback proxy trap that records any diverted connection.
+  if [ -n "$PY" ]; then
+    cat >"$WORK/proxy_trap.py" <<'PY'
+import socket, sys
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+s.listen(1)
+print(s.getsockname()[1], flush=True)
+s.settimeout(2)
+try:
+    conn, _ = s.accept()
+    conn.close()
+    sys.exit(42)
+except (socket.timeout, TimeoutError):
+    sys.exit(0)
+PY
+    "$PY" "$WORK/proxy_trap.py" > "$WORK/proxy_trap.out" 2>&1 &
+    trap_pid=$!
+    trap_port=$(await_port "$WORK/proxy_trap.out" "$trap_pid")
+    polluted_got="$(no_proxy="" NO_PROXY="" http_proxy="http://127.0.0.1:$trap_port" ALL_PROXY="http://127.0.0.1:$trap_port" curl -sS --noproxy '*' --http2-prior-knowledge -H 'X-Test: curl' "$base/echo?x=proxy_isolation")"
+    wait "$trap_pid"
+    trap_status=$?
+    if [ "$polluted_got" != "GET /echo x=proxy_isolation HTTP/2 host=127.0.0.1:$H2PORT length=0 fnv=cbf29ce484222325 x=curl" ]; then
+      echo "  FAIL: curl failed to receive response directly from owned loopback target"
+      ok=0
+    fi
+    if [ "$trap_status" -ne 0 ]; then
+      echo "  FAIL: curl routed to loopback proxy trap despite --noproxy '*'"
+      ok=0
+    fi
   fi
   [ "$ok" -eq 1 ] && echo "  GET, a 300 KB PUT, HEAD, gzip, and three requests over one connection, as curl (nghttp2) sends and reads them" || status=1
   h2_stop

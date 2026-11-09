@@ -619,6 +619,7 @@ print('S3g check gate: ALL ACCEPTANCE TESTS PASSED')
 
 run_rg8() {
   echo "== Running RG8: normalized IR versus CallPathFp mutations =="
+  "$PY" "$REPO/bench/stale_mutate.py" --selftest --compiler "$IYI" --repo "$REPO"
   "$PY" "$REPO/bench/stale_rg8.py" --repo "$REPO" --compiler "$IYI" --work "$WORK/rg8"
 
   echo "  proving the def-body encoder field is load-bearing..."

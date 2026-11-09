@@ -278,24 +278,198 @@ def generate_mutations_for_source(
 
     # Special: link_annotation
     if should_generate("link_annotation"):
-        has_unsafe = any("@[Unsafe(" in line for line in lines[:3])
-        prefix = "" if has_unsafe else '@[Unsafe("link annotation mutation fixture")]\n'
-        mut_src = prefix + after_module(
-            "@[Link(\"m\")]\nlib LibMutMath; fun cos(x : Float64) : Float64; end\n"
-        ) + "\nputs LibMutMath.cos(0.0)\n"
+        first_stmt_idx = next(
+            (idx for idx, line in enumerate(lines) if line.strip() and not line.lstrip().startswith("#")),
+            None,
+        )
+        has_unsafe = first_stmt_idx is not None and lines[first_stmt_idx].lstrip().startswith("@[Unsafe")
+
+        decl = "@[Link(\"m\")]\nlib LibMutMath; fun cos(x : Float64) : Float64; end\n"
+        call = "\nputs LibMutMath.cos(0.0)\n"
+
+        if has_unsafe:
+            if module_end > 0:
+                mut_src = "".join(lines[:module_end]) + decl + "".join(lines[module_end:]) + call
+            else:
+                # Headerless file with existing @[Unsafe]: insert decl after @[Unsafe] annotation
+                unsafe_end = (first_stmt_idx or 0) + 1
+                while unsafe_end < len(lines) and "]" not in lines[unsafe_end - 1]:
+                    unsafe_end += 1
+                mut_src = "".join(lines[:unsafe_end]) + decl + "".join(lines[unsafe_end:]) + call
+        else:
+            insert_idx = first_stmt_idx if first_stmt_idx is not None else 0
+            mut_lines = list(lines)
+            mut_lines.insert(insert_idx, '@[Unsafe("link annotation mutation fixture")]\n')
+            mod_end = next(
+                (i + 1 for i, l in enumerate(mut_lines) if l.lstrip().startswith("module ")),
+                0,
+            )
+            split_at = mod_end if mod_end > 0 else (insert_idx + 1)
+            mut_src = "".join(mut_lines[:split_at]) + decl + "".join(mut_lines[split_at:]) + call
         mutations.append(Mutation("link_annotation", "link annotation mutation changing LinkFp", mut_src, in_reach=True, special="link_annotation"))
     return mutations
 
 
+def selftest(compiler: str | None = None, repo: str | None = None) -> None:
+    """Targeted regression tests for link_annotation mutation Unsafe handling."""
+    import subprocess
+    import tempfile
+
+    repo_dir = repo or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    compiler_bin = compiler if compiler and os.path.isfile(compiler) and os.access(compiler, os.X_OK) else None
+
+    def check_syntax(src_code: str, label: str) -> None:
+        if not compiler_bin:
+            return
+        with tempfile.NamedTemporaryFile("w", suffix=".iyi", delete=False) as tf:
+            tf.write(src_code)
+            tpath = tf.name
+        try:
+            env = os.environ.copy()
+            env["IYI_PATH"] = f"{repo_dir}/src{os.pathsep}{repo_dir}/samples/iyi"
+            env["IYI_LIBRARY_PATH"] = f"{repo_dir}/lib"
+            res = subprocess.run([compiler_bin, "check", tpath], capture_output=True, text=True, env=env)
+            assert res.returncode == 0, f"{label}: compiler rejected generated source:\n{res.stderr}"
+        finally:
+            os.remove(tpath)
+
+    def check_negative(src_code: str, expected_err: str, label: str) -> None:
+        if not compiler_bin:
+            return
+        with tempfile.NamedTemporaryFile("w", suffix=".iyi", delete=False) as tf:
+            tf.write(src_code)
+            tpath = tf.name
+        try:
+            env = os.environ.copy()
+            env["IYI_PATH"] = f"{repo_dir}/src{os.pathsep}{repo_dir}/samples/iyi"
+            env["IYI_LIBRARY_PATH"] = f"{repo_dir}/lib"
+            res = subprocess.run([compiler_bin, "check", tpath], capture_output=True, text=True, env=env)
+            assert res.returncode != 0, f"{label}: expected compiler rejection, but succeeded"
+            assert expected_err in res.stderr, f"{label}: expected '{expected_err}' in stderr, got:\n{res.stderr}"
+        finally:
+            os.remove(tpath)
+
+    # 1. Positive test: leading comments & existing @[Unsafe]
+    src_with_unsafe = (
+        "# Exercises something\n"
+        "#\n"
+        "# Run via: ./bin/iyi run test.iyi\n"
+        "\n"
+        '@[Unsafe("existing test reason")]\n'
+        "module test/has_unsafe\n"
+        "\n"
+        "puts 1\n"
+    )
+    with tempfile.NamedTemporaryFile("w", suffix=".iyi", delete=False) as f:
+        f.write(src_with_unsafe)
+        path1 = f.name
+    try:
+        muts1 = generate_mutations_for_source(path1, [], kinds={"link_annotation"})
+        assert len(muts1) == 1, f"Expected 1 mutation, got {len(muts1)}"
+        m1 = muts1[0]
+        assert '@[Unsafe("existing test reason")]' in m1.mutated_source
+        assert m1.mutated_source.count("@[Unsafe") == 1, (
+            f"Expected exactly 1 @[Unsafe, got {m1.mutated_source.count('@[Unsafe')}"
+        )
+        assert "lib LibMutMath" in m1.mutated_source
+        check_syntax(m1.mutated_source, "Positive 1 (preserved Unsafe)")
+    finally:
+        os.remove(path1)
+
+    # 2. Positive test: leading comments & NO @[Unsafe]
+    src_no_unsafe = (
+        "# Header comment A\n"
+        "# Header comment B\n"
+        "\n"
+        "# Header comment C\n"
+        "\n"
+        "module test/no_unsafe\n"
+        "\n"
+        "puts 2\n"
+    )
+    with tempfile.NamedTemporaryFile("w", suffix=".iyi", delete=False) as f:
+        f.write(src_no_unsafe)
+        path2 = f.name
+    try:
+        muts2 = generate_mutations_for_source(path2, [], kinds={"link_annotation"})
+        assert len(muts2) == 1, f"Expected 1 mutation, got {len(muts2)}"
+        m2 = muts2[0]
+        assert '@[Unsafe("link annotation mutation fixture")]' in m2.mutated_source
+        assert m2.mutated_source.count("@[Unsafe") == 1, (
+            f"Expected exactly 1 @[Unsafe, got {m2.mutated_source.count('@[Unsafe')}"
+        )
+        unsafe_pos = m2.mutated_source.find("@[Unsafe")
+        module_pos = m2.mutated_source.find("module test/no_unsafe")
+        assert 0 <= unsafe_pos < module_pos, "Expected @[Unsafe] before module header"
+        assert "lib LibMutMath" in m2.mutated_source
+        check_syntax(m2.mutated_source, "Positive 2 (inserted Unsafe)")
+    finally:
+        os.remove(path2)
+
+    # 3. Targeted check on std_aead_exercise.iyi if present
+    aead_path = os.path.join(repo_dir, "bench", "std_aead_exercise.iyi")
+    if os.path.exists(aead_path):
+        muts3 = generate_mutations_for_source(aead_path, [], kinds={"link_annotation"})
+        assert len(muts3) == 1
+        m3 = muts3[0]
+        assert m3.mutated_source.count("@[Unsafe") == 1, (
+            f"std_aead_exercise.iyi must have exactly 1 @[Unsafe, got {m3.mutated_source.count('@[Unsafe')}"
+        )
+        assert "lib LibMutMath" in m3.mutated_source
+        check_syntax(m3.mutated_source, "Positive 3 (std_aead_exercise.iyi)")
+
+    # 4. Targeted check on real headerless fixtures with existing @[Unsafe]
+    for fname in ("std_asn1_exercise.iyi", "std_acme_exercise.iyi"):
+        fpath = os.path.join(repo_dir, "bench", fname)
+        if os.path.exists(fpath):
+            muts_h = generate_mutations_for_source(fpath, [], kinds={"link_annotation"})
+            assert len(muts_h) == 1, f"Expected 1 mutation for {fname}, got {len(muts_h)}"
+            mh = muts_h[0]
+            assert mh.mutated_source.count("@[Unsafe") == 1, (
+                f"{fname} must have exactly 1 @[Unsafe, got {mh.mutated_source.count('@[Unsafe')}"
+            )
+            assert "lib LibMutMath" in mh.mutated_source
+            check_syntax(mh.mutated_source, f"Positive headerless ({fname})")
+
+    # 5. Negative controls: compiler rejects unannotated lib and duplicate @[Unsafe]
+    if compiler_bin:
+        check_negative(
+            "# Leading comment\nmodule test/bad_lib\n@[Link(\"m\")]\nlib LibMutMath; fun cos(x : Float64) : Float64; end\nputs LibMutMath.cos(0.0)\n",
+            "is not marked unsafe",
+            "Negative 1 (unannotated lib)",
+        )
+        check_negative(
+            '@[Unsafe("first")]\n@[Unsafe("second")]\nmodule test/bad_dup\nputs 1\n',
+            "the `module` header comes first in a file",
+            "Negative 2 (duplicate Unsafe before module)",
+        )
+        check_negative(
+            '@[Unsafe("first")]\n@[Unsafe("second")]\nputs 1\n',
+            "@[Unsafe(\"why\")] marks a module and is the first statement of its file",
+            "Negative 3 (duplicate Unsafe headerless)",
+        )
+    print("stale_mutate selftest: all regression checks PASSED" + (" (with compiler check)" if compiler_bin else ""))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Stale mutation generator (RG8)")
-    parser.add_argument("source", help="Source .iyi file to mutate")
+    parser.add_argument("source", nargs="?", help="Source .iyi file to mutate")
     parser.add_argument("--elements", help="Path to --stale-dump-elements JSONL file")
     parser.add_argument("--kind", help="Generate only this mutation kind")
     parser.add_argument("--seed", type=int, default=42, help="Deterministic random seed")
     parser.add_argument("--json", action="store_true", help="Output JSON list of mutations")
+    parser.add_argument("--selftest", action="store_true", help="Run targeted regression tests for mutation generation")
+    parser.add_argument("--compiler", help="Path to compiler binary for syntax verification")
+    parser.add_argument("--repo", help="Path to repo root")
 
     args = parser.parse_args()
+
+    if args.selftest:
+        selftest(compiler=args.compiler, repo=args.repo)
+        return
+
+    if not args.source:
+        parser.error("the following arguments are required: source")
 
     elements = []
     if args.elements and os.path.exists(args.elements):

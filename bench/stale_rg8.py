@@ -19,7 +19,7 @@ from pathlib import Path
 # bench/stale_mutate.py, imported rather than run, so this names them for
 # bench/gates_reachable.py.
 from stale_ir_normalize import normalize_ir
-from stale_mutate import Mutation, generate_mutations_for_source
+from stale_mutate import Mutation, generate_mutations_for_source, selftest as stale_mutate_selftest
 
 
 @dataclass
@@ -216,6 +216,7 @@ def main() -> None:
 
     os.makedirs(args.work, exist_ok=True)
     repo = os.path.abspath(args.repo)
+    stale_mutate_selftest(compiler=os.path.abspath(args.compiler), repo=repo)
     c2 = [
         os.path.join(repo, "samples/iyi", name)
         for name in ("hello.iyi", "calc.iyi", "collections.iyi", "format.iyi", "shapes.iyi")

@@ -1129,6 +1129,7 @@ echo "$out" | tr '\\' '/' | grep -q "^iyi: panic: Cast from Foo to Bar failed, a
 step "module-typed value cast failure panics with exact message and site"
 
 cat > "$work/closure_to_c.iyi" <<'EOF'
+@[Unsafe("declares a C callback API to exercise the runtime rejection of captured closures")]
 lib LibC
   fun atexit(cb : -> Void) : Int32
 end

@@ -96,11 +96,13 @@ class TestOfflineVectorsHelper(unittest.TestCase):
                 get_proof_inputs_dir()
             self.assertIn("must be an absolute path", str(ctx.exception))
 
-            # Nonexistent directory
-            os.environ["IYI_PROOF_INPUTS_DIR"] = "/nonexistent/absolute/path/12345"
-            with self.assertRaises(OfflineVectorsError) as ctx:
-                get_proof_inputs_dir()
-            self.assertIn("does not exist", str(ctx.exception))
+            # Nonexistent directory derived from native temporary directory
+            with tempfile.TemporaryDirectory() as tmp_nonexistent:
+                nonexistent = Path(tmp_nonexistent) / "nonexistent_inputs_dir"
+                os.environ["IYI_PROOF_INPUTS_DIR"] = str(nonexistent)
+                with self.assertRaises(OfflineVectorsError) as ctx:
+                    get_proof_inputs_dir()
+                self.assertIn("does not exist", str(ctx.exception))
         finally:
             if old_env is not None:
                 os.environ["IYI_PROOF_INPUTS_DIR"] = old_env
@@ -179,7 +181,7 @@ class TestOfflineVectorsHelper(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             cli_py = REPO_ROOT / "proof" / "offline_vectors.py"
             res = subprocess.run(
-                [sys.executable, str(cli_py), "mlkem", f"{tmpdir}/out.json", "--inputs-dir", f"{tmpdir}/absent"],
+                [sys.executable, str(cli_py), "mlkem", str(Path(tmpdir) / "out.json"), "--inputs-dir", str(Path(tmpdir) / "absent")],
                 capture_output=True,
                 text=True,
                 timeout=15,
@@ -192,7 +194,7 @@ class TestOfflineVectorsHelper(unittest.TestCase):
             (inputs_dir / "mlkem-keygen.json").write_bytes(b"corrupt")
             (inputs_dir / "mlkem-encdec.json").write_bytes(b"corrupt")
             res = subprocess.run(
-                [sys.executable, str(cli_py), "mlkem", f"{tmpdir}/out.json", "--inputs-dir", str(inputs_dir)],
+                [sys.executable, str(cli_py), "mlkem", str(Path(tmpdir) / "out.json"), "--inputs-dir", str(inputs_dir)],
                 capture_output=True,
                 text=True,
                 timeout=15,
@@ -514,6 +516,8 @@ echo "ALL CHECKS PASSED"
 exit 0
 BIN
     chmod +x "$out"
+    cp "$out" "$out.exe" 2>/dev/null || true
+    chmod +x "$out.exe" 2>/dev/null || true
     exit 0
 elif [ "$cmd" = "run" ]; then
     target="$1"
@@ -588,8 +592,8 @@ exit 0
         mock_iyi.chmod(mock_iyi.stat().st_mode | stat.S_IEXEC)
 
         env = os.environ.copy()
-        env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
-        env["PYTHONPATH"] = f"{pylib}:{env.get('PYTHONPATH', '')}"
+        env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
+        env["PYTHONPATH"] = f"{pylib}{os.pathsep}{env.get('PYTHONPATH', '')}"
         env["IYI"] = str(mock_iyi)
         env["PY"] = str(py_wrapper)
         env["OPENSSL"] = str(mock_openssl)

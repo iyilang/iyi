@@ -279,6 +279,7 @@ class TestOfflinePebbleContract(unittest.TestCase):
             version_records = [r for r in records if r["argv"] and r["argv"][0] == "version"]
             self.assertEqual(len(version_records), 1)
             vrec = version_records[0]
+            self.assertEqual(len(vrec["argv"]), 3)
             self.assertEqual(vrec["argv"][0], "version")
             self.assertEqual(vrec["argv"][1], "-m")
             self.assertEqual(os.path.normpath(vrec["argv"][2]), os.path.normpath(work_dir / "gobin" / "pebble"))

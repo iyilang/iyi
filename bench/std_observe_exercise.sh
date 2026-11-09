@@ -49,6 +49,14 @@ u32_le_hex() {
   local val=$1
   printf '%02x%02x%02x%02x' $(( val & 0xff )) $(( (val >> 8) & 0xff )) $(( (val >> 16) & 0xff )) $(( (val >> 24) & 0xff ))
 }
+PY=""
+for candidate in python3 python; do
+  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys' >/dev/null 2>&1; then
+    PY="$candidate"
+    break
+  fi
+done
+
 
 echo "== plain build and run"
 "$IYI" build -o "$WORK/exercise" "$REPO/bench/std_observe_exercise.iyi"
@@ -113,6 +121,114 @@ if [ "$TAIL_HEX" != "$EXPECTED_TAIL" ]; then
   exit 1
 fi
 echo "  END(0) verified"
+
+echo "== direct cwd observation gives exactly one CWD record"
+CWD_SRC="$WORK/direct_cwd.iyi"
+cat << 'EOF' > "$CWD_SRC"
+module test/direct_cwd
+import std/observe
+
+Std::Observe.cwd("/test/dir")
+EOF
+
+CWD_TRACE="$WORK/cwd_trace.bin"
+rm -f "$CWD_TRACE"
+IYI_OBSERVE="$CWD_TRACE" "$IYI" run -Diyi_observe "$CWD_SRC"
+
+if [ ! -f "$CWD_TRACE" ]; then
+  echo "FAIL: direct cwd trace was not created"
+  exit 1
+fi
+
+CWD_TAIL="$(tail -c 17 "$CWD_TRACE" | od -An -v -tx1 | tr -d ' \n')"
+if [ "$CWD_TAIL" != "0d0000007f000000000000000000000000" ]; then
+  echo "FAIL: expected END(0) at end of direct cwd trace, got $CWD_TAIL"
+  exit 1
+fi
+
+if [ -n "$PY" ]; then
+  "$PY" -c '
+import struct, sys
+with open(sys.argv[1], "rb") as f:
+    data = f.read()
+pos = 0
+kinds = []
+while pos < len(data):
+    if pos + 4 > len(data):
+        sys.exit(f"FAIL: truncated header at {pos}")
+    payload_len, = struct.unpack_from("<I", data, pos)
+    pos += 4
+    if pos + payload_len > len(data):
+        sys.exit(f"FAIL: truncated payload at {pos}")
+    kinds.append(data[pos])
+    pos += payload_len
+cwd_count = kinds.count(0x05)
+if cwd_count != 1:
+    sys.exit(f"FAIL: expected exactly 1 CWD record (0x05), got {cwd_count} (kinds: {[hex(k) for k in kinds]})")
+if kinds != [0x05, 0x7F]:
+    sys.exit(f"FAIL: expected records [0x05, 0x7f], got {[hex(k) for k in kinds]}")
+' "$CWD_TRACE"
+fi
+echo "  direct cwd observation wrote exactly one CWD record and END(0)"
+
+echo "== relative file observation does not mark recording failed or omit END"
+REL_SRC="$WORK/rel_file.iyi"
+cat << 'EOF' > "$REL_SRC"
+module test/rel_file
+import std/observe
+
+# Direct relative file observation exercises lookup_path and current_cwd
+# without triggering recursive cwd observation or @@failed.
+Std::Observe.file(1_u8, "relative_exercise_target.txt")
+EOF
+
+REL_TRACE="$WORK/rel_trace.bin"
+rm -f "$REL_TRACE"
+IYI_OBSERVE="$REL_TRACE" "$IYI" run -Diyi_observe "$REL_SRC"
+
+if [ ! -f "$REL_TRACE" ]; then
+  echo "FAIL: relative file trace was not created"
+  exit 1
+fi
+
+REL_TAIL="$(tail -c 17 "$REL_TRACE" | od -An -v -tx1 | tr -d ' \n')"
+if [ "$REL_TAIL" != "0d0000007f000000000000000000000000" ]; then
+  echo "FAIL: expected END(0) at end of relative file trace (recording failed or omitted END), got $REL_TAIL"
+  exit 1
+fi
+
+REL_HEX="$(od -An -v -tx1 "$REL_TRACE" | tr -d ' \n')"
+case "$REL_HEX" in
+  *72656c61746976655f65786572636973655f7461726765742e747874*) ;;
+  *)
+    echo "FAIL: expected relative file target in trace, got $REL_HEX"
+    exit 1
+    ;;
+esac
+
+if [ -n "$PY" ]; then
+  "$PY" -c '
+import struct, sys
+with open(sys.argv[1], "rb") as f:
+    data = f.read()
+pos = 0
+kinds = []
+while pos < len(data):
+    if pos + 4 > len(data):
+        sys.exit(f"FAIL: truncated header at {pos}")
+    payload_len, = struct.unpack_from("<I", data, pos)
+    pos += 4
+    if pos + payload_len > len(data):
+        sys.exit(f"FAIL: truncated payload at {pos}")
+    kinds.append(data[pos])
+    pos += payload_len
+if 0x05 in kinds:
+    sys.exit("FAIL: unexpected CWD record (0x05) emitted during relative file observation")
+if kinds != [0x01, 0x7F]:
+    sys.exit(f"FAIL: expected records [0x01, 0x7f], got {[hex(k) for k in kinds]}")
+' "$REL_TRACE"
+fi
+echo "  relative file observation wrote valid record and END(0)"
 
 echo "== panic writes END(1)"
 # A panic leaves through __iyi_exit(1), so the trace ends with END(1); only a

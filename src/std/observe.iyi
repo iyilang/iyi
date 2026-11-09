@@ -1056,6 +1056,33 @@ private def unset_env(name : String) : Nil
     LibObserveC.unsetenv(name.to_unsafe)
   {% end %}
 end
+{% if flag?(:linux) %}
+  @[Effect(:observation_channel)]
+  private def linux_raw_getcwd(size : UInt64) : String?
+    buf = Pointer(UInt8).malloc(size)
+    res = uninitialized Int64
+    {% if flag?(:x86_64) %}
+      asm("syscall" : "={rax}"(res)
+                    : "{rax}"(79_i64), "{rdi}"(buf), "{rsi}"(size)
+                    : "rcx", "r11", "memory"
+                    : "volatile")
+    {% else %}
+      asm("svc #0" : "={x0}"(res)
+                   : "{x8}"(17_i64), "{x0}"(buf), "{x1}"(size)
+                   : "memory"
+                   : "volatile")
+    {% end %}
+    if res > 1_i64
+      len = (res - 1_i64).to_i32
+      String.new(len) { |target| target.copy_from(buf, len) }
+    elsif res == 1_i64
+      ""
+    else
+      nil
+    end
+  end
+{% end %}
+
 
 @[Effect(:observation_channel)]
 private def current_cwd : String
@@ -1068,7 +1095,7 @@ private def current_cwd : String
       ""
     end
   {% elsif flag?(:linux) %}
-    Program.cwd || ""
+    linux_raw_getcwd(4096_u64) || linux_raw_getcwd(98304_u64) || ""
   {% elsif flag?(:darwin) %}
     buf = Pointer(UInt8).malloc(1024_u64)
     res = LibObserveC.getcwd(buf, 1024_u64)

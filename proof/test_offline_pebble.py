@@ -323,9 +323,6 @@ class TestOfflinePebbleContract(unittest.TestCase):
             work = tmp / "work"
             work.mkdir()
 
-            c_dir = tmp / "C:" / "inputs"
-            c_dir.mkdir(parents=True)
-
             # Mock uname that returns Linux
             mock_uname = bin_dir / "uname"
             mock_uname.write_text("#!/bin/sh\necho Linux\n")

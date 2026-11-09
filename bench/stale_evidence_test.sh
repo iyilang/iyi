@@ -279,18 +279,27 @@ assert os.path.isfile(os.path.join(item, 'error_leg.error'))
 #   * runner process exit is verified as -signal.SIGKILL
 #   * child actually terminates upon pipe EOF (no unowned orphans)
 #   * unrelated background sentinel process remains alive and untouched throughout
-sentinel_proc = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
-assert sentinel_proc.poll() is None, 'sentinel must be alive before test'
+sentinel_proc = None
+runner_proc = None
+control_r = None
+control_w = None
+child_pid = None
+birth_verified = False
+sentinel_token = f"birth_token_{time.time_ns()}"
 
-control_r, control_w = os.pipe()
-sigkill_dir = safe_item_dir(stage, 'samples/iyi/sigkill_test.iyi')
-sigkill_out = os.path.join(sigkill_dir, 'kill_leg.stdout')
-child_pid_file = os.path.join(work, 'sigkill_child.pid')
+try:
+    sentinel_proc = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
+    assert sentinel_proc.poll() is None, 'sentinel must be alive before test'
 
-child_code = f"""
+    control_r, control_w = os.pipe()
+    sigkill_dir = safe_item_dir(stage, 'samples/iyi/sigkill_test.iyi')
+    sigkill_out = os.path.join(sigkill_dir, 'kill_leg.stdout')
+    child_pid_file = os.path.join(work, 'sigkill_child.pid')
+
+    child_code = f"""
 import sys, os
 with open({child_pid_file!r}, 'w') as f:
-    f.write(str(os.getpid()) + '\\n')
+    f.write(f"{{os.getpid()}}:{sentinel_token!r}\\n")
     f.flush()
 sys.stdout.write('streamed chunk before runner death' + chr(10))
 sys.stdout.flush()
@@ -299,73 +308,112 @@ try:
 except Exception:
     pass
 """
-runner_code = f"""
+    runner_code = f"""
 import sys, os
 sys.path.insert(0, os.path.join({repo!r}, 'bench'))
 from stale_evidence import execute_cmd
 execute_cmd([sys.executable, '-c', {child_code!r}], item_dir={sigkill_dir!r}, leg='kill_leg', pass_fds=({control_r},))
 """
-runner_py = os.path.join(work, 'runner_sigkill.py')
-with open(runner_py, 'w') as f:
-    f.write(runner_code)
+    runner_py = os.path.join(work, 'runner_sigkill.py')
+    with open(runner_py, 'w') as f:
+        f.write(runner_code)
 
-runner_proc = subprocess.Popen([sys.executable, runner_py], pass_fds=(control_r,))
+    runner_proc = subprocess.Popen([sys.executable, runner_py], pass_fds=(control_r,))
 
-# Wait for child PID and chunk on disk
-for _ in range(50):
-    if os.path.exists(child_pid_file) and os.path.exists(sigkill_out) and os.path.getsize(sigkill_out) > 0:
-        break
-    time.sleep(0.05)
-
-assert os.path.exists(child_pid_file), 'child PID file must exist'
-child_pid = int(open(child_pid_file).read().strip())
-assert child_pid > 0
-
-# 1. Assert child is alive before killing runner
-os.kill(child_pid, 0)
-# 2. Assert runner is alive before killing runner
-assert runner_proc.poll() is None
-
-assert os.path.exists(sigkill_out), 'output file must exist while runner is running'
-bytes_before_kill = open(sigkill_out, 'rb').read()
-assert bytes_before_kill == b'streamed chunk before runner death\n', f'got {bytes_before_kill!r}'
-
-# 3. Kill runner with SIGKILL while child is emitting/blocked
-os.kill(runner_proc.pid, signal.SIGKILL)
-runner_ret = runner_proc.wait()
-# 4. Assert runner died by -signal.SIGKILL
-assert runner_ret == -signal.SIGKILL, f'expected runner to die by -SIGKILL, got {runner_ret}'
-
-# 5. Assert child is STILL ALIVE after runner died (held by control pipe)
-os.kill(child_pid, 0)
-
-# Verify bytes already existed on disk and survived runner death
-bytes_after_kill = open(sigkill_out, 'rb').read()
-assert bytes_after_kill == b'streamed chunk before runner death\n', f'got {bytes_after_kill!r}'
-
-# 6. Close all write ends to control pipe to trigger EOF in child
-os.close(control_w)
-os.close(control_r)
-
-# 7. Prove child exited without lingering (raises ProcessLookupError)
-child_dead = False
-for _ in range(40):
-    try:
-        os.kill(child_pid, 0)
+    # Wait for child PID with birth token and chunk on disk
+    for _ in range(50):
+        if os.path.exists(child_pid_file) and os.path.exists(sigkill_out) and os.path.getsize(sigkill_out) > 0:
+            break
         time.sleep(0.05)
-    except ProcessLookupError:
-        child_dead = True
-        break
-assert child_dead, f'child PID {child_pid} failed to exit after pipe EOF'
 
-# 8. Prove unrelated sentinel was completely untouched
-assert sentinel_proc.poll() is None, 'sentinel process must still be alive!'
-try:
-    os.kill(sentinel_proc.pid, 0)
-except ProcessLookupError:
-    assert False, 'sentinel PID was killed!'
-sentinel_proc.kill()
-sentinel_proc.wait()
+    assert os.path.exists(child_pid_file), 'child PID file must exist'
+    pid_line = open(child_pid_file).read().strip()
+    pid_str, tok_str = pid_line.split(':', 1)
+    child_pid = int(pid_str)
+    assert tok_str == repr(sentinel_token), 'birth token mismatch'
+    assert child_pid > 0 and child_pid != os.getpid() and child_pid != runner_proc.pid
+    birth_verified = True
+
+    # 1. Assert child is alive before killing runner
+    os.kill(child_pid, 0)
+    # 2. Assert runner is alive before killing runner
+    assert runner_proc.poll() is None
+
+    assert os.path.exists(sigkill_out), 'output file must exist while runner is running'
+    bytes_before_kill = open(sigkill_out, 'rb').read()
+    assert bytes_before_kill == b'streamed chunk before runner death\n', f'got {bytes_before_kill!r}'
+
+    # 3. Kill runner with SIGKILL while child is emitting/blocked
+    os.kill(runner_proc.pid, signal.SIGKILL)
+    runner_ret = runner_proc.wait()
+    # 4. Assert runner died by -signal.SIGKILL
+    assert runner_ret == -signal.SIGKILL, f'expected runner to die by -SIGKILL, got {runner_ret}'
+
+    # 5. Assert child is STILL ALIVE after runner died (held by control pipe)
+    os.kill(child_pid, 0)
+
+    # Verify bytes already existed on disk and survived runner death
+    bytes_after_kill = open(sigkill_out, 'rb').read()
+    assert bytes_after_kill == b'streamed chunk before runner death\n', f'got {bytes_after_kill!r}'
+
+    # 6. Close all write ends to control pipe to trigger EOF in child
+    os.close(control_w)
+    control_w = None
+    os.close(control_r)
+    control_r = None
+
+    # 7. Prove child exited without lingering (raises ProcessLookupError)
+    child_dead = False
+    for _ in range(40):
+        try:
+            os.kill(child_pid, 0)
+            time.sleep(0.05)
+        except ProcessLookupError:
+            child_dead = True
+            break
+    assert child_dead, f'child PID {child_pid} failed to exit after pipe EOF'
+
+    # 8. Prove unrelated sentinel was completely untouched
+    assert sentinel_proc.poll() is None, 'sentinel process must still be alive!'
+    try:
+        os.kill(sentinel_proc.pid, 0)
+    except ProcessLookupError:
+        assert False, 'sentinel PID was killed!'
+finally:
+    if control_w is not None:
+        try:
+            os.close(control_w)
+        except Exception:
+            pass
+    if control_r is not None:
+        try:
+            os.close(control_r)
+        except Exception:
+            pass
+    if runner_proc is not None and runner_proc.poll() is None:
+        try:
+            runner_proc.kill()
+            runner_proc.wait()
+        except Exception:
+            pass
+    if sentinel_proc is not None:
+        try:
+            sentinel_proc.kill()
+            sentinel_proc.wait()
+        except Exception:
+            pass
+    if birth_verified and child_pid is not None:
+        for _ in range(20):
+            try:
+                os.kill(child_pid, 0)
+                time.sleep(0.05)
+            except ProcessLookupError:
+                break
+        else:
+            try:
+                os.kill(child_pid, signal.SIGKILL)
+            except Exception:
+                pass
 PYEOF
 
 # --------------------------------------------------------------------------

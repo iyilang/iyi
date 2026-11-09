@@ -33,6 +33,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 from proof.offline_vectors import (
     HPKE_VECTORS_SHA256,
     MLKEM_ENCDEC_SHA256,
@@ -47,9 +51,6 @@ from proof.offline_vectors import (
     process_wycheproof_vectors,
     verify_file_digest,
 )
-
-REPO_ROOT = Path(__file__).resolve().parent.parent
-
 
 def get_authentic_vectors_dir() -> Path | None:
     """Return Path to authentic full vector bundle if configured in environment."""
@@ -198,6 +199,28 @@ class TestOfflineVectorsHelper(unittest.TestCase):
             )
             self.assertNotEqual(res.returncode, 0)
             self.assertIn("sha256", res.stderr)
+
+    def test_clean_env_wrapper_execution(self) -> None:
+        """Verify bench/test_offline_vectors.sh executes cleanly without PYTHONPATH from any working directory."""
+        wrapper = REPO_ROOT / "bench" / "test_offline_vectors.sh"
+        self.assertTrue(wrapper.is_file())
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            clean_env = {
+                k: v
+                for k, v in os.environ.items()
+                if k not in ("PYTHONPATH", "IYI_PROOF_INPUTS_DIR", "IYI_AUTHENTIC_VECTORS_DIR", "IYI_STAGE_INPUTS_DIR", "IYI_PROOF_STRICT", "IYI_STRICT_PROOF")
+            }
+            res = subprocess.run(
+                ["bash", str(wrapper)],
+                cwd=tmpdir,
+                env=clean_env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            self.assertEqual(res.returncode, 0, f"Wrapper failed in clean environment:\n{res.stdout}\n{res.stderr}")
+            self.assertIn("OK", res.stderr + res.stdout)
 
 
 class TestFullScriptExecutionWithNetworkSpy(unittest.TestCase):

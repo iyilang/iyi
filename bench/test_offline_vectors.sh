@@ -6,6 +6,11 @@
 set -eu
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    REPO="$(cygpath -m "$REPO")"
+    ;;
+esac
 PY=""
 for candidate in python3 python; do
   if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys' >/dev/null 2>&1; then
@@ -19,4 +24,4 @@ if [ -z "$PY" ]; then
   exit 1
 fi
 
-exec "$PY" "$REPO/proof/test_offline_vectors.py" "$@"
+(cd "$REPO" && exec "$PY" -B -m unittest proof.test_offline_vectors -v "$@")

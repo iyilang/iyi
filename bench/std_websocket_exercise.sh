@@ -24,8 +24,9 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 IYI="${IYI:-$REPO/bin/iyi}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
-# Clear ambient WS_URL to isolate fixture execution from external callers.
+# Clear ambient WS_URL and NODE_EXTRA_CA_CERTS to isolate fixture execution from external callers.
 unset WS_URL
+unset NODE_EXTRA_CA_CERTS
 
 # A native compiler cannot resolve this shell's own path mapping: a search
 # path built from the shell's `pwd` finds no prelude at all, and a scratch
@@ -341,8 +342,9 @@ elif ! command -v node >/dev/null 2>&1 || [ "$(node -e 'process.stdout.write(typ
 elif ! cat >"$WORK/ws-node.js" <<'JS'
 const port = process.env.PORT;
 // Derive URL strictly from owned fixture endpoint; reject ambient redirection.
-// wss://localhost under TLS, its root given by NODE_EXTRA_CA_CERTS.
-const expectedUrl = process.env.NODE_EXTRA_CA_CERTS
+// Mode is selected explicitly via fixture argument or WS_MODE variable, never ambient certs.
+const isTls = process.argv[2] === "tls" || process.env.WS_MODE === "tls";
+const expectedUrl = isTls
   ? `wss://localhost:${port}/chat`
   : `ws://127.0.0.1:${port}/chat`;
 const targetUrl = process.env.WS_URL || expectedUrl;
@@ -379,10 +381,10 @@ JS
 then
   echo "  the Node client could not be written"
   status=1
-elif ! PORT="$port" WS_URL="ws://127.0.0.1:$port/chat" timeout 60 node "$WORK/ws-node.js"; then
+elif ! PORT="$port" WS_MODE=plain NODE_EXTRA_CA_CERTS="" WS_URL="ws://127.0.0.1:$port/chat" timeout 60 node "$WORK/ws-node.js" plain; then
   echo "  Node's client and the server disagree"
   status=1
-elif WS_URL="ws://127.0.0.1.ambient.invalid:9999/chat" PORT="$port" timeout 10 node "$WORK/ws-node.js" >"$WORK/ws-node-ambient.out" 2>&1; then
+elif WS_URL="ws://127.0.0.1.ambient.invalid:9999/chat" PORT="$port" WS_MODE=plain NODE_EXTRA_CA_CERTS="" timeout 10 node "$WORK/ws-node.js" plain >"$WORK/ws-node-ambient.out" 2>&1; then
   echo "  Node's client accepted ambient WS_URL mismatch"
   status=1
 elif ! grep -q "FAIL: WS_URL does not match owned fixture endpoint" "$WORK/ws-node-ambient.out"; then
@@ -967,7 +969,7 @@ PY
       status=1
     fi
     if [ -s "$WORK/ws-node.js" ]; then
-      if ! PORT="$wport" WS_URL="wss://localhost:$wport/chat" NODE_EXTRA_CA_CERTS="$WORK/wss/roots.pem" timeout 60 node "$WORK/ws-node.js"; then
+      if ! PORT="$wport" WS_MODE=tls WS_URL="wss://localhost:$wport/chat" NODE_EXTRA_CA_CERTS="$WORK/wss/roots.pem" timeout 60 node "$WORK/ws-node.js" tls; then
         echo "  Node's client and the server disagree over wss://"
         status=1
       fi

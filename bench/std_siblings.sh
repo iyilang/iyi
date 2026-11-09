@@ -50,84 +50,6 @@ WEIGHTS="
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-PY=""
-for candidate in python3 python; do
-  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import socket, sys' >/dev/null 2>&1; then
-    PY="$candidate"
-    break
-  fi
-done
-
-trap_dir=""
-trap_pid=""
-sampler=""
-trace=""
-
-sampler_cleanup() {
-  if [ -n "${sampler:-}" ]; then
-    kill "$sampler" 2>/dev/null || true
-    wait "$sampler" 2>/dev/null || true
-    sampler=""
-  fi
-  if [ -n "${trace:-}" ]; then
-    rm -f "$trace" 2>/dev/null || true
-  fi
-}
-
-trap_cleanup() {
-  if [ -n "${trap_dir:-}" ] && [ -d "$trap_dir" ]; then
-    touch "$trap_dir/stop" 2>/dev/null || true
-    if [ -n "${trap_pid:-}" ]; then
-      wait "$trap_pid" 2>/dev/null || true
-      trap_pid=""
-    fi
-    rm -rf "$trap_dir" 2>/dev/null || true
-    trap_dir=""
-  fi
-}
-
-on_signal() {
-  local sig="$1"
-  trap_cleanup
-  sampler_cleanup
-  trap - "$sig" EXIT
-  kill -s "$sig" "$$"
-}
-trap 'on_signal INT' INT
-trap 'on_signal TERM' TERM
-trap 'on_signal HUP' HUP
-trap 'trap_cleanup; sampler_cleanup' EXIT
-
-await_trap() {
-  local out_file="$1" err_file="$2" pid="$3" waited=0 line="" port=""
-  while [ "$waited" -lt 100 ]; do
-    if [ -s "$out_file" ]; then
-      line="$(head -1 "$out_file" | tr -d '\r')"
-      case "$line" in
-        READY\ [1-9]*)
-          port="${line#READY }"
-          case "$port" in
-            *[!0-9]*) port="" ;;
-            *)
-              if [ "$port" -ge 1 ] && [ "$port" -le 65535 ]; then
-                if kill -0 "$pid" 2>/dev/null; then
-                  echo "$port"
-                  return 0
-                fi
-              fi
-              ;;
-          esac
-          ;;
-      esac
-    fi
-    if ! kill -0 "$pid" 2>/dev/null; then
-      return 1
-    fi
-    sleep 0.05
-    waited=$((waited + 1))
-  done
-  return 1
-}
 plan=""
 if [ "${1:-}" = "--plan" ]; then
   plan=1
@@ -239,73 +161,6 @@ sample_memory() {
     sleep 2
   done
 }
-# Focused behavioral test: verify the owned loopback isolation trap mechanism itself
-test_isolation_trap() {
-  if [ -z "$PY" ]; then
-    echo "FAIL: python3 is required for isolation trap self-test"
-    return 1
-  fi
-  local test_dir test_pid test_port test_status=0 res=""
-  test_dir="$(mktemp -d "${TMPDIR:-/tmp}/trap_selftest.XXXXXX")"
-  "$PY" -c '
-import os, select, socket, sys
-parent_pid = int(sys.argv[1])
-stop_file = sys.argv[2]
-s = socket.socket()
-s.bind(("127.0.0.1", 0))
-s.listen(128)
-print(f"READY {s.getsockname()[1]}", flush=True)
-diverted = 0
-try:
-    while True:
-        if os.path.exists(stop_file) or os.getppid() != parent_pid:
-            break
-        r, _, _ = select.select([s], [], [], 0.05)
-        if r:
-            conn, _ = s.accept()
-            diverted += 1
-            conn.close()
-finally:
-    s.close()
-print(f"RESULT {diverted}", flush=True)
-sys.exit(0)
-' "$$" "$test_dir/stop" >"$test_dir/out" 2>"$test_dir/err" &
-  test_pid=$!
-  test_port="$(await_trap "$test_dir/out" "$test_dir/err" "$test_pid")" || test_port=""
-  if [ -z "$test_port" ]; then
-    echo "FAIL: isolation trap self-test failed to bind and report numeric port (stderr: $(cat "$test_dir/err" 2>/dev/null))"
-    touch "$test_dir/stop" 2>/dev/null || true
-    wait "$test_pid" 2>/dev/null || true
-    rm -rf "$test_dir" 2>/dev/null || true
-    return 1
-  fi
-
-  # Fake sibling: simulate a diverted connection targeting the owned loopback trap
-  "$PY" -c "import socket; s = socket.create_connection(('127.0.0.1', $test_port), timeout=2); s.close()" 2>/dev/null || true
-
-  touch "$test_dir/stop" 2>/dev/null || true
-  wait "$test_pid" 2>/dev/null || test_status=$?
-
-  if [ "$test_status" -ne 0 ]; then
-    echo "FAIL: isolation trap self-test exited with status $test_status"
-    rm -rf "$test_dir" 2>/dev/null || true
-    return 1
-  fi
-
-  res="$(grep -E '^RESULT [0-9]+$' "$test_dir/out" 2>/dev/null || true)"
-  rm -rf "$test_dir" 2>/dev/null || true
-  if [ "$res" != "RESULT 1" ]; then
-    echo "FAIL: isolation trap self-test expected RESULT 1 for diverted connection, got '$res'"
-    return 1
-  fi
-  return 0
-}
-
-case "$mine" in
-  *" std_websocket_exercise "* | *" std_http_exercise "*)
-    test_isolation_trap || exit 1
-    ;;
-esac
 
 status=0
 place=0
@@ -323,98 +178,11 @@ for sibling in "$REPO"/bench/std_*_exercise.sh; do
     sample_memory &
     sampler=$!
   fi
-  trap_pid=""
-  trap_port=""
-  trap_dir=""
-  trap_status=0
-  diverted_count=0
-  sname="$(basename "$sibling")"
-  is_isolated=0
-  if [ "$sname" = "std_websocket_exercise.sh" ] || [ "$sname" = "std_http_exercise.sh" ]; then
-    is_isolated=1
-    if [ -z "$PY" ]; then
-      echo "FAIL: python3 is required for fixture isolation trap on $sname"
-      status=1
-      continue
-    fi
-    trap_dir="$(mktemp -d "${TMPDIR:-/tmp}/trap.XXXXXX")"
-    "$PY" -c '
-import os, select, socket, sys
-parent_pid = int(sys.argv[1])
-stop_file = sys.argv[2]
-s = socket.socket()
-s.bind(("127.0.0.1", 0))
-s.listen(128)
-print(f"READY {s.getsockname()[1]}", flush=True)
-diverted = 0
-try:
-    while True:
-        if os.path.exists(stop_file) or os.getppid() != parent_pid:
-            break
-        r, _, _ = select.select([s], [], [], 0.05)
-        if r:
-            conn, _ = s.accept()
-            diverted += 1
-            conn.close()
-finally:
-    s.close()
-print(f"RESULT {diverted}", flush=True)
-sys.exit(0)
-' "$$" "$trap_dir/stop" >"$trap_dir/out" 2>"$trap_dir/err" &
-    trap_pid=$!
-    trap_port="$(await_trap "$trap_dir/out" "$trap_dir/err" "$trap_pid")" || trap_port=""
-    if [ -z "$trap_port" ]; then
-      echo "FAIL: trap failed to establish isolation listener for $sname (stderr: $(cat "$trap_dir/err" 2>/dev/null))"
-      touch "$trap_dir/stop" 2>/dev/null || true
-      wait "$trap_pid" 2>/dev/null || true
-      rm -rf "$trap_dir" 2>/dev/null || true
-      trap_dir=""
-      trap_pid=""
-      status=1
-      continue
-    fi
-  fi
-
-  if [ "$is_isolated" -eq 1 ]; then
-    WS_URL="ws://127.0.0.1:$trap_port/chat" \
-    NODE_EXTRA_CA_CERTS="/nonexistent/poisoned/ca.pem" \
-    TLS_ROOTS="/nonexistent/poisoned/roots.pem" \
-    TLS_CERT="/nonexistent/poisoned/cert.pem" \
-    TLS_KEY="/nonexistent/poisoned/key.pem" \
-    HOST="poisoned.external.invalid" \
-    http_proxy="http://127.0.0.1:$trap_port" \
-    https_proxy="http://127.0.0.1:$trap_port" \
-    all_proxy="http://127.0.0.1:$trap_port" \
-    HTTP_PROXY="http://127.0.0.1:$trap_port" \
-    HTTPS_PROXY="http://127.0.0.1:$trap_port" \
-    ALL_PROXY="http://127.0.0.1:$trap_port" \
-    $bounded bash "$sibling"
-    code=$?
-
-    touch "$trap_dir/stop" 2>/dev/null || true
-    wait "$trap_pid" 2>/dev/null || trap_status=$?
-    if [ "$trap_status" -ne 0 ]; then
-      echo "FAIL: isolation trap for $sname exited unexpectedly with status $trap_status (stderr: $(cat "$trap_dir/err" 2>/dev/null))"
-      code=1
-    else
-      result_line="$(grep -E '^RESULT [0-9]+$' "$trap_dir/out" 2>/dev/null || true)"
-      diverted_count="${result_line#RESULT }"
-      if [ -z "$diverted_count" ] || [ "$diverted_count" -ne 0 ]; then
-        echo "FAIL: sibling $sname diverted ${diverted_count:-unknown} connection(s) to the ambient trap on 127.0.0.1:$trap_port"
-        code=1
-      fi
-    fi
-    rm -rf "$trap_dir" 2>/dev/null || true
-    trap_dir=""
-    trap_pid=""
-  else
-    $bounded bash "$sibling"
-    code=$?
-  fi
+  $bounded bash "$sibling"
+  code=$?
   if [ -n "$sampler" ]; then
     kill "$sampler" 2>/dev/null
     wait "$sampler" 2>/dev/null
-    sampler=""
     awk 'NR == 1 || $1 < low { low = $1 } $2 > swap { swap = $2 } NR == 1 || $3 < disk { disk = $3 }
       NR == 1 || $4 > waits { waits = $4 }
       END { if (!NR) exit

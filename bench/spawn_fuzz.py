@@ -784,7 +784,15 @@ def main():
             print(f"==> {rel}\n{text}")
         print(meta)
         return 0
-    work = tempfile.mkdtemp(prefix="spawn_fuzz.")
+    # Resolved: the compiler prints a note at its file's real path, and
+    # notes_of keys it relative to the seed's directory. Reached through a
+    # symlink - darwin's /tmp is /private/tmp, its $TMPDIR is under
+    # /private/var - every key read "../../private/tmp/.../s<seed>/art/
+    # app.iyi", the two builds' keys never met, and each parallel spawn was
+    # UNMATCHED: 2,291 in seeds 6400-6899 on macOS 26.6, Apple M2 Pro (the
+    # user's machine, TMPDIR=/tmp/hs4r), 22 in seeds 6893-6895 on Linux
+    # with TMPDIR through a symlink, none with it resolved.
+    work = os.path.realpath(tempfile.mkdtemp(prefix="spawn_fuzz."))
     started = time.time()
     totals = {}
     kinds = {}

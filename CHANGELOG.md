@@ -444,6 +444,21 @@
   workers waiting" on Linux), and the step as it was is caught ("3 of 12
   workers waiting").
 
+- **spawn_fuzz matches the two builds' notes on macOS too.** The fuzzer
+  keyed each spawn note by its path relative to the seed's directory,
+  which it left as `tempfile` named it; the compiler prints a note at the
+  file's real path, and darwin's /tmp and `$TMPDIR` are reached through
+  /private, so every key read "../../private/tmp/..." and each parallel
+  spawn was UNMATCHED: 2,291 findings in seeds 6400-6899 in the
+  pre-release soak at 1ad0cae3f on macOS 26.6, Apple M2 Pro (the user's
+  machine), and 22 in seeds 6893-6895 on Linux with `TMPDIR` through a
+  symlink, none with it resolved. CI runs the gate on Linux alone, where
+  /tmp is real, so it never showed. The work directory is now resolved,
+  and `bench/spawn_fuzz.sh` proves it: seed 1 is clean with `TMPDIR`
+  through a symlink, and a copy of the fuzzer that leaves it unresolved
+  is caught (Linux, 12 vCPU: the gate held in 168 s, 167 s with its own
+  `TMPDIR` through a symlink).
+
 - **A pull request runs the fast part of CI; master, mt/next and the
   nightly run the whole of it.** Every pull request ran all 39 jobs,
   about twenty runner-hours, a README edit as much as a compiler change,

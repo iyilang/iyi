@@ -83,10 +83,15 @@ if [ "${IYI_PROOF_INPUTS_DIR+set}" = "set" ]; then
     exit 1
   fi
   case "$IYI_PROOF_INPUTS_DIR" in
-    /*) ;;
+    /* | [a-zA-Z]:/* | [a-zA-Z]:\\* | \\\\*) ;;
     *)
       echo "FAIL: IYI_PROOF_INPUTS_DIR must be an absolute path: $IYI_PROOF_INPUTS_DIR" >&2
       exit 1
+      ;;
+  esac
+  case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN* | Windows_NT)
+      command -v cygpath >/dev/null 2>&1 && IYI_PROOF_INPUTS_DIR="$(cygpath -m "$IYI_PROOF_INPUTS_DIR")"
       ;;
   esac
   if [ ! -d "$IYI_PROOF_INPUTS_DIR" ]; then

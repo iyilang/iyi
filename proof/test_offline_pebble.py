@@ -263,6 +263,78 @@ class TestOfflinePebbleContract(unittest.TestCase):
             self.assertEqual(res.returncode, 1)
             self.assertIn("FAIL: IYI_PROOF_INPUTS_DIR must be an absolute path: relative/path", res.stderr)
             self.assertFalse(log_file.exists())
+    def test_windows_and_unix_absolute_paths_accepted(self):
+        """Cross-platform check: absolute paths (Unix /, Windows C:/, C:\\, UNC \\\\) accepted; relative rejected."""
+        valid_paths = [
+            "/tmp/inputs",
+            "C:/inputs",
+            "c:/inputs",
+            r"C:\inputs",
+            r"c:\inputs",
+            r"\\server\share\inputs",
+        ]
+        invalid_paths = [
+            "relative/path",
+            "inputs",
+            ".",
+            "..",
+            "C:relative",
+        ]
+
+        for p in valid_paths:
+            cmd = f"""\
+case '{p}' in
+  /* | [a-zA-Z]:/* | [a-zA-Z]:\\\\* | \\\\*)
+    echo VALID
+    ;;
+  *)
+    echo INVALID
+    ;;
+esac
+"""
+            res = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
+            self.assertEqual(res.stdout.strip(), "VALID", f"Expected {p} to be recognized as absolute")
+
+        for p in invalid_paths:
+            cmd = f"""\
+case '{p}' in
+  /* | [a-zA-Z]:/* | [a-zA-Z]:\\* | \\\\*)
+    echo VALID
+    ;;
+  *)
+    echo INVALID
+    ;;
+esac
+"""
+            res = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
+            self.assertEqual(res.stdout.strip(), "INVALID", f"Expected {p} to be recognized as relative/invalid")
+
+    def test_real_scripts_reject_relative_inputs_dir(self):
+        """Real scripts reject relative IYI_PROOF_INPUTS_DIR immediately with exit 1."""
+        env = os.environ.copy()
+        env["IYI_PROOF_INPUTS_DIR"] = "relative/inputs/dir"
+
+        res_acme = subprocess.run(["bash", str(ACME_SCRIPT)], env=env, capture_output=True, text=True)
+        self.assertEqual(res_acme.returncode, 1)
+        self.assertIn("FAIL: IYI_PROOF_INPUTS_DIR must be an absolute path: relative/inputs/dir", res_acme.stderr)
+
+        res_autocert = subprocess.run(["bash", str(AUTOCERT_SCRIPT)], env=env, capture_output=True, text=True)
+        self.assertEqual(res_autocert.returncode, 1)
+        self.assertIn("FAIL: IYI_PROOF_INPUTS_DIR must be an absolute path: relative/inputs/dir", res_autocert.stderr)
+
+    def test_real_scripts_reject_missing_inputs_dir(self):
+        """Real scripts reject nonexistent IYI_PROOF_INPUTS_DIR immediately with exit 1."""
+        env = os.environ.copy()
+        env["IYI_PROOF_INPUTS_DIR"] = "/nonexistent/abs/path/for/inputs"
+
+        res_acme = subprocess.run(["bash", str(ACME_SCRIPT)], env=env, capture_output=True, text=True)
+        self.assertEqual(res_acme.returncode, 1)
+        self.assertIn("FAIL: IYI_PROOF_INPUTS_DIR directory not found: /nonexistent/abs/path/for/inputs", res_acme.stderr)
+
+        res_autocert = subprocess.run(["bash", str(AUTOCERT_SCRIPT)], env=env, capture_output=True, text=True)
+        self.assertEqual(res_autocert.returncode, 1)
+        self.assertIn("FAIL: IYI_PROOF_INPUTS_DIR directory not found: /nonexistent/abs/path/for/inputs", res_autocert.stderr)
+
 
     def test_helper_absent_mirror_directory_fails_nonzero(self):
         """When IYI_PROOF_INPUTS_DIR has no go-proxy/ dir, helper exits 1."""
@@ -398,13 +470,14 @@ class TestOfflinePebbleContract(unittest.TestCase):
             res_no_go = run_helper(env_no_go)
             self.assertEqual(res_no_go.returncode, 2)
 
-            # Case B: Failed install returns 3
+            # Case B: Failed install returns 3 (even with polluted ambient GOPRIVATE)
             go_bin = create_fake_go(bin_dir, log_file, fail_install=True, fail_install_msg="network down")
             env_fail = os.environ.copy()
             env_fail.pop("IYI_PROOF_INPUTS_DIR", None)
             env_fail["PATH"] = f"{bin_dir}:{env_fail.get('PATH', '')}"
             env_fail["GO"] = str(go_bin)
             env_fail["WORK"] = str(work_dir)
+            env_fail["GOPRIVATE"] = "polluted.company.internal/*"
             res_fail = run_helper(env_fail)
             self.assertEqual(res_fail.returncode, 3)
 
@@ -419,6 +492,7 @@ class TestOfflinePebbleContract(unittest.TestCase):
             self.assertIsNone(install_rec["env"]["GOTOOLCHAIN"])
             self.assertIsNone(install_rec["env"]["GOSUMDB"])
             self.assertIsNone(install_rec["env"]["GONOPROXY"])
+            self.assertEqual(install_rec["env"]["GOPRIVATE"], "polluted.company.internal/*")
 
     def test_script_boundary_no_skips_in_proof_mode(self):
         """In std_acme_exercise.sh and std_autocert_exercise.sh, sourcing helper on failure sets status=1 with no skip string."""

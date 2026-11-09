@@ -101,7 +101,7 @@ except ValueError as e:
 valid_dir = os.path.join(work, 'valid_empty')
 os.makedirs(valid_dir, exist_ok=True)
 os.environ['TEST_VAR'] = valid_dir
-assert validate_evidence_root('TEST_VAR') == os.path.abspath(valid_dir)
+assert validate_evidence_root('TEST_VAR') == os.path.realpath(valid_dir)
 PYEOF
 
 # Bash entry path validation

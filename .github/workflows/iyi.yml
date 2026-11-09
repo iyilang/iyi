@@ -275,11 +275,11 @@ jobs:
       # The receipt digest and the RG8 oracle each answer to an outside
       # reference: std/digest's SHA-256 to Python's hashlib, the IR
       # normalizer to three cases it must tell apart.
-      - name: Stale receipt digest and RG8 oracle self-tests
+      - name: Stale receipt digest, RG8 oracle, and evidence self-tests
         run: |
           bash bench/stale_sha256.sh
           bash bench/stale_ir_normalize_selftest.sh
-
+          bash bench/stale_evidence_test.sh
       - name: Build the receipt producer compiler
         run: make -o .build/crystal iyi
 

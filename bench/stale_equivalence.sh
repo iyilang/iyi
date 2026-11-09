@@ -34,10 +34,12 @@ if [ -n "${IYI_PROOF_EVIDENCE_DIR:-}" ]; then
     /*) ;;
     *) echo "IYI_PROOF_EVIDENCE_DIR must be an absolute path: $IYI_PROOF_EVIDENCE_DIR" >&2; exit 1 ;;
   esac
-  if [ ! -d "$IYI_PROOF_EVIDENCE_DIR" ]; then
+  _PHYSICAL_DIR="$(cd -P "$IYI_PROOF_EVIDENCE_DIR" 2>/dev/null && pwd -P || true)"
+  if [ -z "$_PHYSICAL_DIR" ] || [ ! -d "$_PHYSICAL_DIR" ]; then
     echo "IYI_PROOF_EVIDENCE_DIR must be an existing directory: $IYI_PROOF_EVIDENCE_DIR" >&2
     exit 1
   fi
+  export IYI_PROOF_EVIDENCE_DIR="$_PHYSICAL_DIR"
   _EVID_UID=""
   if stat -f %u "$IYI_PROOF_EVIDENCE_DIR" >/dev/null 2>&1; then
     _EVID_UID="$(stat -f %u "$IYI_PROOF_EVIDENCE_DIR")"

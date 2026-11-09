@@ -81,12 +81,6 @@ import std/slice::{Slice, Bytes}
       __glibc_reserved2 : Int64
     end
 
-    fun unsetenv(name : UInt8*) : Int32
-    fun getenv(name : UInt8*) : UInt8*
-    fun getcwd(buf : UInt8*, size : UInt64) : UInt8*
-    fun gethostname(name : UInt8*, len : UInt64) : Int32
-    fun stat(path : UInt8*, buf : StatLinux*) : Int32
-    fun realpath(path : UInt8*, resolved : UInt8*) : UInt8*
   end
 {% elsif flag?(:win32) %}
   # The two Win32 calls the prelude has no wrapper for. The directory and the
@@ -1019,7 +1013,9 @@ end
 private def get_env(name : String) : String?
   {% if flag?(:win32) %}
     __iyi_win_env_get(name.to_unsafe, name.bytesize)
-  {% elsif flag?(:darwin) || flag?(:linux) %}
+  {% elsif flag?(:linux) %}
+    Program.env(name)
+  {% elsif flag?(:darwin) %}
     ptr = LibObserveC.getenv(name.to_unsafe)
     if ptr.address != 0_u64
       c_str(ptr)
@@ -1036,7 +1032,27 @@ private def unset_env(name : String) : Nil
   {% if flag?(:win32) %}
     __iyi_win_env_unset(name.to_unsafe, name.bytesize)
     nil
-  {% elsif flag?(:darwin) || flag?(:linux) %}
+  {% elsif flag?(:linux) %}
+    ptr = __iyi_environ
+    return if ptr.address == 0_u64
+    k_len = name.bytesize
+    k_ptr = name.to_unsafe
+    index = 0
+    kept = 0
+    while (entry = ptr[index]).address != 0_u64
+      offset = 0
+      while offset < k_len && entry[offset] == k_ptr[offset]
+        offset = offset + 1
+      end
+      unless offset == k_len && entry[k_len] == 61_u8
+        ptr[kept] = entry
+        kept = kept + 1
+      end
+      index = index + 1
+    end
+    ptr[kept] = Pointer(UInt8).new(0_u64)
+    nil
+  {% elsif flag?(:darwin) %}
     LibObserveC.unsetenv(name.to_unsafe)
   {% end %}
 end
@@ -1051,7 +1067,9 @@ private def current_cwd : String
     else
       ""
     end
-  {% elsif flag?(:darwin) || flag?(:linux) %}
+  {% elsif flag?(:linux) %}
+    Program.cwd || ""
+  {% elsif flag?(:darwin) %}
     buf = Pointer(UInt8).malloc(1024_u64)
     res = LibObserveC.getcwd(buf, 1024_u64)
     if res.address != 0_u64
@@ -1074,7 +1092,20 @@ pub def current_host : String
     else
       "localhost"
     end
-  {% elsif flag?(:darwin) || flag?(:linux) %}
+  {% elsif flag?(:linux) %}
+    buffer = Pointer(UInt8).malloc(390_u64)
+    got = uninitialized Int64
+    {% if flag?(:x86_64) %}
+      asm("syscall" : "={rax}"(got) : "{rax}"(63_i64), "{rdi}"(buffer) : "rcx", "r11", "memory" : "volatile")
+    {% else %}
+      asm("svc #0" : "={x0}"(got) : "{x8}"(160_i64), "{x0}"(buffer) : "memory" : "volatile")
+    {% end %}
+    if got == 0_i64
+      c_str(buffer + 65_i64)
+    else
+      "localhost"
+    end
+  {% elsif flag?(:darwin) %}
     buf = Pointer(UInt8).malloc(256_u64)
     if LibObserveC.gethostname(buf, 256_u64) == 0
       c_str(buf)
@@ -1130,9 +1161,74 @@ private def lookup_path(path : String) : String
   {% end %}
 end
 
+{% if flag?(:linux) %}
+  @[Effect(:observation_channel)]
+  private def linux_real_path(path : String, resolved : UInt8*) : Pointer(UInt8)
+    return Pointer(UInt8).new(0_u64) if path.bytesize == 0
+    text = path.starts_with?("/") ? path : current_cwd + "/" + path
+    hops = 0
+    done = ""
+    rest = text
+    while rest.bytesize > 0
+      i = 0
+      while i < rest.bytesize && rest.to_unsafe[i] == 47_u8
+        i = i + 1
+      end
+      rest = rest[i, rest.bytesize - i]
+      break if rest.bytesize == 0
+      j = 0
+      while j < rest.bytesize && rest.to_unsafe[j] != 47_u8
+        j = j + 1
+      end
+      part = rest[0, j]
+      rest = rest[j, rest.bytesize - j]
+      next if part == "."
+      if part == ".."
+        k = done.bytesize
+        while k > 0 && done.to_unsafe[k - 1] != 47_u8
+          k = k - 1
+        end
+        done = k > 0 ? done[0, k - 1] : ""
+        next
+      end
+      candidate = done + "/" + part
+      buf = Pointer(UInt8).malloc(4096_u64)
+      n = uninitialized Int64
+      {% if flag?(:x86_64) %}
+        asm("syscall" : "={rax}"(n) : "{rax}"(267_i64), "{rdi}"(-100_i64), "{rsi}"(candidate.to_unsafe), "{rdx}"(buf), "{r10}"(4095_i64) : "rcx", "r11", "memory" : "volatile")
+      {% else %}
+        asm("svc #0" : "={x0}"(n) : "{x8}"(78_i64), "{x0}"(-100_i64), "{x1}"(candidate.to_unsafe), "{x2}"(buf), "{x3}"(4095_i64) : "memory" : "volatile")
+      {% end %}
+      if n > 0_i64
+        hops = hops + 1
+        return Pointer(UInt8).new(0_u64) if hops > 40
+        target = String.new(n.to_i) { |t| t.copy_from(buf, n.to_i) }
+        rest = target + (rest.bytesize > 0 ? "/" + rest : "")
+        done = "" if target.to_unsafe[0] == 47_u8
+        next
+      end
+      st = uninitialized LibObserveC::StatLinux
+      ret = uninitialized Int64
+      {% if flag?(:x86_64) %}
+        asm("syscall" : "={rax}"(ret) : "{rax}"(262_i64), "{rdi}"(-100_i64), "{rsi}"(candidate.to_unsafe), "{rdx}"(pointerof(st)), "{r10}"(0x100_i64) : "rcx", "r11", "memory" : "volatile")
+      {% else %}
+        asm("svc #0" : "={x0}"(ret) : "{x8}"(79_i64), "{x0}"(-100_i64), "{x1}"(candidate.to_unsafe), "{x2}"(pointerof(st)), "{x3}"(0x100_i64) : "memory" : "volatile")
+      {% end %}
+      return Pointer(UInt8).new(0_u64) if ret != 0_i64
+      return Pointer(UInt8).new(0_u64) if rest.bytesize > 0 && (st.st_mode.to_i64 & 0o170000_i64) != 0o040000_i64
+      done = candidate
+    end
+    done = "/" if done.bytesize == 0
+    return Pointer(UInt8).new(0_u64) if done.bytesize >= 4096
+    resolved.copy_from(done.to_unsafe, done.bytesize)
+    resolved[done.bytesize] = 0_u8
+    resolved
+  end
+{% end %}
+
 @[Effect(:observation_channel)]
 pub def safe_real_path(path : String) : String
-  {% if flag?(:darwin) || flag?(:linux) %}
+  {% if flag?(:darwin) %}
     buf = Pointer(UInt8).malloc(4096_u64)
     res = LibObserveC.realpath(path.to_unsafe, buf)
     if res.address != 0_u64
@@ -1146,6 +1242,22 @@ pub def safe_real_path(path : String) : String
         # `dirname_of` answers the current directory for a name with no
         # separator (and for the empty path), and that is no prefix of
         # `path`: the whole of `path` is then the name under it.
+        fname = path.starts_with?(dir) ? path[dir.bytesize, path.bytesize - dir.bytesize] : path
+        candidate = (base_dir.ends_with?("/") && fname.starts_with?("/")) ? (base_dir + fname[1, fname.bytesize - 1]) : ((base_dir.ends_with?("/") || fname.starts_with?("/")) ? (base_dir + fname) : (base_dir + "/" + fname))
+        return normalize_path(candidate)
+      end
+    end
+  {% elsif flag?(:linux) %}
+    buf = Pointer(UInt8).malloc(4096_u64)
+    res = linux_real_path(path, buf)
+    if res.address != 0_u64
+      return c_str(res)
+    end
+    dir = dirname_of(path)
+    if dir != path
+      res_dir = linux_real_path(dir, buf)
+      if res_dir.address != 0_u64
+        base_dir = c_str(res_dir)
         fname = path.starts_with?(dir) ? path[dir.bytesize, path.bytesize - dir.bytesize] : path
         candidate = (base_dir.ends_with?("/") && fname.starts_with?("/")) ? (base_dir + fname[1, fname.bytesize - 1]) : ((base_dir.ends_with?("/") || fname.starts_with?("/")) ? (base_dir + fname) : (base_dir + "/" + fname))
         return normalize_path(candidate)
@@ -1226,9 +1338,15 @@ pub def safe_real_path_relative_to(path : String, base_dir : String) : String
   base = base_dir.empty? ? current_cwd : base_dir
   candidate = ends_with_separator?(base) ? (base + path) : (base + "/" + path)
 
-  {% if flag?(:darwin) || flag?(:linux) %}
+  {% if flag?(:darwin) %}
     buf = Pointer(UInt8).malloc(4096_u64)
     res = LibObserveC.realpath(candidate.to_unsafe, buf)
+    if res.address != 0_u64
+      return c_str(res)
+    end
+  {% elsif flag?(:linux) %}
+    buf = Pointer(UInt8).malloc(4096_u64)
+    res = linux_real_path(candidate, buf)
     if res.address != 0_u64
       return c_str(res)
     end
@@ -1387,7 +1505,13 @@ private def stat_path(real : String) : {UInt8, UInt8, UInt64, Int64}
     end
   {% elsif flag?(:linux) %}
     st = uninitialized LibObserveC::StatLinux
-    if LibObserveC.stat(real.to_unsafe, pointerof(st)) == 0
+    ret = uninitialized Int64
+    {% if flag?(:x86_64) %}
+      asm("syscall" : "={rax}"(ret) : "{rax}"(262_i64), "{rdi}"(-100_i64), "{rsi}"(real.to_unsafe), "{rdx}"(pointerof(st)), "{r10}"(0_i64) : "rcx", "r11", "memory" : "volatile")
+    {% else %}
+      asm("svc #0" : "={x0}"(ret) : "{x8}"(79_i64), "{x0}"(-100_i64), "{x1}"(real.to_unsafe), "{x2}"(pointerof(st)), "{x3}"(0_i64) : "memory" : "volatile")
+    {% end %}
+    if ret == 0_i64
       mode = st.st_mode.to_i64
       ftype = mode_to_ftype(mode)
       size = st.st_size.to_u64

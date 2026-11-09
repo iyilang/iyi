@@ -254,13 +254,9 @@ ALLOWED_SYMBOLS_DARWIN="$ALLOWED_SYMBOLS_DARWIN shutdown"
 # it no longer needed. LLVM offers the call on Apple targets only, so
 # Linux and Windows keep the loop.
 ALLOWED_SYMBOLS_DARWIN="$ALLOWED_SYMBOLS_DARWIN memset_pattern16"
-# `getcwd` and `realpath` are `std/observe`'s, the test recorder behind
-# `iyi test --cached`: the directory a recorded read was relative to, and the
-# real path a recorded path resolves to. Only a `-Diyi_observe` build reaches
-# them, a build that is run and never shipped; `bench/std_observe_exercise.iyi`
-# calls them directly, which is how they arrive here. Darwin already allows
-# both. A shipped program's floor is unchanged.
-ALLOWED_SYMBOLS_LINUX="$FLOOR_BASE_LINUX environ getcwd realpath"
+# `std/observe` records cwd, env, and resolved paths using Linux syscalls
+# directly, matching the floor's zero-dependency rule for std modules.
+ALLOWED_SYMBOLS_LINUX="$FLOOR_BASE_LINUX environ"
 
 # What a program may link. The platform libc only.
 ALLOWED_LIBS_PROGRAM="$FLOOR_LIBS_PROGRAM"

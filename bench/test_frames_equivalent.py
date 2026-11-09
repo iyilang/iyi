@@ -273,17 +273,18 @@ def test_darwin_backward_compatibility():
     ret, rule, _ = capture_violation(compare_same_opt, d1, d2)
     assert ret == 0, f"Darwin equivalence failed: {rule}"
 
-    # ~proc\d* normalized and std path rewritten to std/X
+    # Legacy paths may correspond, but distinct ordinals do not.
     sym_a = b"0   a.out                               0x0000000100003f50 ~proc123@src/std/big.iyi:10 + 16\n"
-    sym_b = b"0   a.out                               0x0000000100009999 ~proc456@mods/std/big.iyimod:10 + 32\n"
+    sym_b = b"0   a.out                               0x0000000100009999 ~proc123@mods/std/big.iyimod:10 + 32\n"
     ret, rule, _ = capture_violation(compare_same_opt, [sym_a], [sym_b])
     assert ret == 0, f"Darwin proc/std canonicalization failed: {rule}"
+    ret, rule, _ = capture_violation(compare_same_opt, [sym_a], [sym_b.replace(b'proc123', b'proc456')])
+    assert ret == 1 and rule == "function", "legacy proc ordinal was discarded"
 
-    # Trailing ~iyi stripped from symbol without @FILE:LINE
     sym_c = b"0   a.out                               0x0000000100003f50 run_loop~iyi + 16\n"
     sym_d = b"0   a.out                               0x0000000100009999 run_loop + 32\n"
     ret, rule, _ = capture_violation(compare_same_opt, [sym_c], [sym_d])
-    assert ret == 0, f"Darwin trailing ~iyi canonicalization failed: {rule}"
+    assert ret == 1 and rule == "function", "function suffix was discarded"
     # Darwin mutations fail with their expected rules
     mut_idx = generate_mutant("index", d1)
     ret, rule, _ = capture_violation(compare_same_opt, d1, mut_idx)
@@ -389,6 +390,85 @@ def test_module_mutant_restricts_to_recognized_frame():
     assert ret == 1, "Darwin module mutant did not fail"
     assert rule == "function", f"expected 'function', got {rule!r}"
 
+def test_captured_darwin_proc_and_collisions():
+    source = b'4   std_http_exercise                   0x0000000105d32a54 ~procProc(Int32)^/Users/runner/work/iyi/iyi/.build/../src/std/http.iyi:1832 + 80\n'
+    artifact = b'4   std_http_exercise                   0x00000001047074a4 ~procProc(Int32)^mods/std/http.iyimod:1832 + 80\n'
+    ret, rule, _ = capture_violation(compare_same_opt, [source], [artifact], require_frames=True)
+    assert ret == 0, f"captured HTTP frames differed: {rule}"
+
+    colon_source = source.replace(b'/Users/runner/work/iyi/iyi/.build/..', b'/tmp/build:debug')
+    ret, rule, _ = capture_violation(compare_same_opt, [colon_source], [artifact])
+    assert ret == 0, f"colon in source path prevented equivalence: {rule}"
+    for old, new in [(b'http.iyimod', b'debug.iyimod'),
+                     (b':1832', b':1833'),
+                     (b'Proc(Int32)', b'Proc(Int64)')]:
+        ret, _, _ = capture_violation(compare_same_opt, [colon_source], [artifact.replace(old, new, 1)])
+        assert ret == 1, f"colon path masked {old!r} mismatch"
+    colon_mutant = generate_mutant("location", [colon_source])
+    assert b'/tmp/build:debug/' in colon_mutant[0] and b':14177 +' in colon_mutant[0]
+    ret, _, _ = capture_violation(compare_same_opt, [colon_source], colon_mutant)
+    assert ret == 1, "colon path location mutant survived"
+
+    colon_escaped = colon_source.replace(b'http.iyi', b'http%5E.iyi')
+    artifact_escaped = artifact.replace(b'http.iyimod', b'http%5E.iyimod')
+    ret, _, _ = capture_violation(compare_same_opt, [colon_escaped], [artifact_escaped])
+    assert ret == 0, "escaped caret with colon path did not survive aliasing"
+    ret, _, _ = capture_violation(compare_same_opt, [colon_escaped], [artifact_escaped.replace(b'%5E', b'^')])
+    assert ret == 1, "escaped caret collided with a literal caret"
+
+    for old, new in [
+        (b'http.iyimod', b'debug.iyimod'),
+        (b':1832', b':1833'),
+        (b'Proc(Int32)', b'Proc(Int64)'),
+        (b'~procProc', b'~proc2Proc'),
+        (b'~procProc', b'~funProc'),
+        (b'std_http_exercise', b'other_image'),
+        (b'4   ', b'5   '),
+        (b'mods/std/http.iyimod', b'std/http'),
+        (b'mods/std/http.iyimod', b'mods/std/../std/http.iyimod'),
+    ]:
+        changed = artifact.replace(old, new, 1)
+        assert changed != artifact
+        ret, _, _ = capture_violation(compare_same_opt, [source], [changed])
+        assert ret == 1, f"masked difference {old!r} -> {new!r}"
+
+    parallel_source = b'2   std_parallel_exercise               0x00000001030158e0 ~proc3Proc(Array(Tuple(Int64, Array(Int32))))^/Users/runner/work/iyi/iyi/.build/../src/std/parallel.iyi:215 + 396\n'
+    parallel_artifact = b'2   std_parallel_exercise               0x0000000102f63c64 ~proc2Proc(Array(Tuple(Int64, Array(Int32))))^mods/std/parallel.iyimod:215 + 444\n'
+    ret, rule, _ = capture_violation(compare_same_opt, [parallel_source], [parallel_artifact])
+    assert ret == 1 and rule == "function", "unverified parallel ordinal alias accepted"
+    ret, _, _ = capture_violation(compare_same_opt, [parallel_source], [parallel_artifact.replace(b'~proc2', b'~proc3')])
+    assert ret == 0, "nested type path alias failed"
+
+    escaped_source = source.replace(b'Proc(Int32)', b'Proc(NamedTuple("a%5Eb%40c%25": Array(Int32)))').replace(b'http.iyi', b'http%5E%40%25.iyi')
+    escaped_artifact = artifact.replace(b'Proc(Int32)', b'Proc(NamedTuple("a%5Eb%40c%25": Array(Int32)))').replace(b'http.iyimod', b'http%5E%40%25.iyimod')
+    ret, _, _ = capture_violation(compare_same_opt, [escaped_source], [escaped_artifact])
+    assert ret == 0, "escaped type or module did not survive aliasing"
+    for old, new in [(b'%5E', b'^'), (b'%40', b'@'), (b'%25', b'%2525')]:
+        ret, _, _ = capture_violation(compare_same_opt, [escaped_source], [escaped_artifact.replace(old, new, 1)])
+        assert ret == 1, f"escaped bytes {old!r} were collapsed"
+
+    for bad in [
+        artifact.replace(b'Proc(Int32)', b'Proc(Int32'),
+        artifact.replace(b'Proc(Int32)^', b'Proc(Int32)junk^'),
+        artifact.replace(b'Proc(Int32)^', b'Proc(Int32)^extra^'),
+        artifact.replace(b':1832', b':1832extra'),
+    ]:
+        ret, _, _ = capture_violation(compare_same_opt, [source], [bad])
+        assert ret == 1, "malformed proc grammar accepted"
+
+    other = b'5   std_http_exercise                   0x0000000105d32a54 another + 80\n'
+    original = [b'panic\n', source, other]
+    for changed in ([b'changed\n', artifact, other], [b'panic\n', other, artifact],
+                    [b'panic\n', artifact], [b'panic\n', artifact, other, other]):
+        ret, _, _ = capture_violation(compare_same_opt, original, changed)
+        assert ret == 1, "text, order, or count difference was masked"
+    for kind in ("location", "line", "module", "function", "index", "image"):
+        mutant = generate_mutant(kind, original)
+        assert mutant[0] == original[0], f"{kind} mutant touched nonframe text"
+        ret, _, _ = capture_violation(compare_same_opt, original, mutant)
+        assert ret == 1, f"{kind} mutant survived"
+
+
 def run_all_tests() -> int:
     tests = [
         ("test_captured_linux_equivalence", test_captured_linux_equivalence),
@@ -399,6 +479,7 @@ def run_all_tests() -> int:
         ("test_approved_std_canonicalization", test_approved_std_canonicalization),
         ("test_unknown_addresses_not_normalized", test_unknown_addresses_not_normalized),
         ("test_darwin_backward_compatibility", test_darwin_backward_compatibility),
+        ("test_captured_darwin_proc_and_collisions", test_captured_darwin_proc_and_collisions),
         ("test_cross_format_mismatch", test_cross_format_mismatch),
     ]
     failed = 0

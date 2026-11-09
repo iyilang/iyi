@@ -38,7 +38,53 @@ case "$(uname -s)" in
     ;;
 esac
 
-trap 'rm -rf "$WORK"' EXIT
+EVIDENCE=""
+if [ "$(uname -s)" = "Darwin" ] && [ -z "${IYI_STD_EVIDENCE_DIR:-}" ]; then
+  echo "  FAIL: Darwin requires IYI_STD_EVIDENCE_DIR" >&2
+  rm -rf "$WORK"
+  exit 1
+fi
+if [ -n "${IYI_STD_EVIDENCE_DIR:-}" ]; then
+  if ! mkdir -p "$IYI_STD_EVIDENCE_DIR" ||
+     ! EVIDENCE="$(mktemp -d "$IYI_STD_EVIDENCE_DIR/std-exercise.XXXXXX")"; then
+    echo "  FAIL: cannot create owned evidence directory" >&2
+    rm -rf "$WORK"
+    exit 1
+  fi
+fi
+
+cleanup() {
+  local result=$? case_dir evidence_dir file retention_failed=0
+  trap - EXIT
+  if [ -n "$EVIDENCE" ]; then
+    for case_dir in "$WORK"/r1/*; do
+      [ -d "$case_dir" ] || continue
+      evidence_dir="$EVIDENCE/$(basename "$case_dir")"
+      if ! mkdir -p "$evidence_dir"; then
+        echo "  FAIL: cannot create evidence directory $evidence_dir" >&2
+        result=1
+        retention_failed=1
+        continue
+      fi
+      for file in "$case_dir"/*.log "$case_dir"/*.out "$case_dir"/*.stdout \
+                  "$case_dir"/*.stderr "$case_dir"/*.json "$case_dir"/*.symbols "$case_dir"/*.captured; do
+        [ -f "$file" ] || continue
+        if ! cp "$file" "$evidence_dir/"; then
+          echo "  FAIL: cannot retain $file" >&2
+          result=1
+          retention_failed=1
+        fi
+      done
+    done
+  fi
+  if [ "$retention_failed" -eq 0 ]; then
+    rm -rf "$WORK"
+  else
+    echo "  FAIL: unretained evidence remains in $WORK" >&2
+  fi
+  exit "$result"
+}
+trap cleanup EXIT
 
 status=0
 PY=""
@@ -48,6 +94,68 @@ for candidate in python3 python; do
     break
   fi
 done
+if [ "$(uname -s)" = "Darwin" ] && [ -z "$PY" ]; then
+  echo "  FAIL: Python is required for Darwin evidence capture" >&2
+  exit 1
+fi
+
+# Keep the combined stream used by the comparator and both original streams.
+# Record pipe reads in arrival order without re-running a nondeterministic case.
+run_captured() {
+  local prefix="$1"
+  shift
+  "$PY" - "$prefix" "$@" <<'PY'
+import selectors
+import subprocess
+import sys
+
+prefix, command = sys.argv[1], sys.argv[2:]
+with open(prefix + ".out", "wb") as combined, \
+     open(prefix + ".stdout", "wb") as stdout, \
+     open(prefix + ".stderr", "wb") as stderr:
+    proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    selector = selectors.DefaultSelector()
+    selector.register(proc.stdout, selectors.EVENT_READ, stdout)
+    selector.register(proc.stderr, selectors.EVENT_READ, stderr)
+    while selector.get_map():
+        for key, _ in selector.select():
+            data = key.fileobj.read1(65536)
+            if data:
+                key.data.write(data)
+                combined.write(data)
+            else:
+                selector.unregister(key.fileobj)
+                key.fileobj.close()
+    result = proc.wait()
+with open(prefix + ".captured", "w") as marker:
+    marker.write(str(result) + "\n")
+sys.exit(result if result >= 0 else 128 - result)
+PY
+}
+
+compare_artifact_pair() {
+  local dir="$1" executable="$2"
+  shift 2
+  if [ "$(uname -s)" != "Darwin" ]; then
+    cmp -s "$dir/source.out" "$dir/artifact.out"
+    return $?
+  fi
+  if [ -z "$PY" ] || [ ! -s "$dir/source.json" ] || [ ! -s "$dir/artifact.json" ]; then
+    echo "missing Python or frame provenance manifest" > "$dir/frames.out"
+    return 1
+  fi
+  if ! nm -a "$dir/s/$executable" > "$dir/source.symbols" 2> "$dir/source.symbols.stderr" ||
+     ! nm -a "$dir/a/$executable" > "$dir/artifact.symbols" 2> "$dir/artifact.symbols.stderr" ||
+     [ ! -s "$dir/source.symbols" ] || [ ! -s "$dir/artifact.symbols" ]; then
+    echo "cannot capture executable symbols" > "$dir/frames.out"
+    return 1
+  fi
+  "$PY" "$REPO/bench/frames_equivalent.py" \
+    --strict-provenance --source-manifest "$dir/source.json" \
+    --artifact-manifest "$dir/artifact.json" \
+    --source-executable "$dir/s/$executable" --artifact-executable "$dir/a/$executable" \
+    "$@" "$dir/source.out" "$dir/artifact.out" > "$dir/frames.out" 2>&1
+}
 
 run_case() {
   local label="$1" name="$2"
@@ -487,35 +595,64 @@ for source in "$REPO"/bench/std_*_exercise.iyi; do
   name="$(basename "$source" .iyi)"
   work="$WORK/r1/$name"
   mkdir -p "$work/mods" "$work/s" "$work/a"
-  if ! (cd "$work" && "$IYI" build --emit-iyimod mods -o "s/$name" "$source") \
-       > "$work/emit.log" 2>&1; then
+  manifest_args=()
+  [ "$(uname -s)" = "Darwin" ] && manifest_args=(--emit-frame-provenance "$work/source.json")
+  if [ "$(uname -s)" = "Darwin" ]; then
+    (cd "$work" && run_captured "$work/emit" "$IYI" build --emit-iyimod mods "${manifest_args[@]}" -o "s/$name" "$source")
+  else
+    (cd "$work" && "$IYI" build --emit-iyimod mods -o "s/$name" "$source") > "$work/emit.out" 2>&1
+  fi
+  if [ "$?" -ne 0 ]; then
     unconsumable="$unconsumable $name"
-    why="$(grep -m1 -E 'Error|BUG' "$work/emit.log" | cut -c1-140)"
-    # A failure with no Error line was seen twice, under a loaded machine,
-    # and its log was gone with the work directory: name its last lines.
-    [ -n "$why" ] || why="no Error line; it ended: $(tail -3 "$work/emit.log" | tr '\n' ' ' | cut -c1-200)"
+    why="$(grep -m1 -E 'Error|BUG' "$work/emit.out" | cut -c1-140)"
+    [ -n "$why" ] || why="no Error line; it ended: $(tail -3 "$work/emit.out" | tr '\n' ' ' | cut -c1-200)"
     echo "  $name: cannot write its artifacts: $why"
     continue
   fi
-  (cd "$work" && "$IYI" build --use-iyimod mods -o "a/$name" "$source") \
-    > "$work/use.log" 2>&1
+  if [ "$(uname -s)" = "Darwin" ]; then
+    if [ ! -s "$work/source.json" ] || ! nm -a "$work/s/$name" > "$work/source.symbols" 2> "$work/source.symbols.stderr" || [ ! -s "$work/source.symbols" ]; then
+      unconsumable="$unconsumable $name"
+      echo "  $name: missing source manifest or symbols"
+      continue
+    fi
+    (cd "$work" && run_captured "$work/use" "$IYI" build --use-iyimod mods --emit-frame-provenance "$work/artifact.json" -o "a/$name" "$source")
+  else
+    (cd "$work" && "$IYI" build --use-iyimod mods -o "a/$name" "$source") > "$work/use.out" 2>&1
+  fi
   use_status=$?
   if [ "$use_status" -ne 0 ]; then
     unconsumable="$unconsumable $name"
-    # A failure with no such line printed the name and nothing after it:
-    # std_compress_exercise did, once, and the next runs consumed it
-    # cleanly. The status and the log's last line say what it was.
-    said="$(grep -m1 -E 'Error|BUG|undefined' "$work/use.log")"
-    [ -n "$said" ] || said="exits $use_status: $(tail -n 1 "$work/use.log")"
+    said="$(grep -m1 -E 'Error|BUG|undefined' "$work/use.out")"
+    [ -n "$said" ] || said="exits $use_status: $(tail -n 1 "$work/use.out")"
     echo "  $name: $(printf '%s' "$said" | cut -c1-140)"
     continue
   fi
+  if [ "$(uname -s)" = "Darwin" ] &&
+     { [ ! -s "$work/artifact.json" ] || ! nm -a "$work/a/$name" > "$work/artifact.symbols" 2> "$work/artifact.symbols.stderr" || [ ! -s "$work/artifact.symbols" ]; }; then
+    unconsumable="$unconsumable $name"
+    echo "  $name: missing artifact manifest or symbols"
+    continue
+  fi
   rm -rf "$work/sandbox" && mkdir -p "$work/sandbox"
-  IYI_FILE_SANDBOX="$work/sandbox" "$work/s/$name" > "$work/source.out" 2>&1
+  if [ "$(uname -s)" = "Darwin" ]; then
+    IYI_FILE_SANDBOX="$work/sandbox" run_captured "$work/source" "$work/s/$name"
+  else
+    IYI_FILE_SANDBOX="$work/sandbox" "$work/s/$name" > "$work/source.out" 2>&1
+  fi
   source_status=$?
   rm -rf "$work/sandbox" && mkdir -p "$work/sandbox"
-  IYI_FILE_SANDBOX="$work/sandbox" "$work/a/$name" > "$work/artifact.out" 2>&1
+  if [ "$(uname -s)" = "Darwin" ]; then
+    IYI_FILE_SANDBOX="$work/sandbox" run_captured "$work/artifact" "$work/a/$name"
+  else
+    IYI_FILE_SANDBOX="$work/sandbox" "$work/a/$name" > "$work/artifact.out" 2>&1
+  fi
   artifact_status=$?
+  if [ "$(uname -s)" = "Darwin" ] &&
+     { [ ! -f "$work/source.captured" ] || [ ! -f "$work/artifact.captured" ]; }; then
+    unconsumable="$unconsumable $name"
+    echo "  $name: output capture failed"
+    continue
+  fi
   if [ "$source_status" -ne "$artifact_status" ]; then
     unconsumable="$unconsumable $name"
     echo "  $name: exits $artifact_status from its artifacts and $source_status from source"
@@ -550,12 +687,12 @@ for source in "$REPO"/bench/std_*_exercise.iyi; do
       ;;
   esac
   passed=0
-  if cmp -s "$work/source.out" "$work/artifact.out"; then
+  frame_args=()
+  case "$name" in
+    std_http_exercise | std_parallel_exercise) frame_args=(--require-frames) ;;
+  esac
+  if compare_artifact_pair "$work" "$name" "${frame_args[@]}"; then
     passed=1
-  elif [ "$(uname -s)" = "Darwin" ] && [ -n "$PY" ]; then
-    if "$PY" "$REPO/bench/frames_equivalent.py" "$work/source.out" "$work/artifact.out" > "$work/frames.out" 2>&1; then
-      passed=1
-    fi
   fi
   if [ "$passed" -eq 0 ]; then
     unconsumable="$unconsumable $name"
@@ -607,19 +744,31 @@ echo "== a panic std raises names no site from its artifact either"
 site="$WORK/r1/panic_site"
 mkdir -p "$site/mods" "$site/s" "$site/a"
 printf 'import std/deque::{Deque}\n\nDeque(Int32).new.pop\n' > "$site/pop.iyi"
-if (cd "$site" && "$IYI" build --emit-iyimod mods -o s/pop pop.iyi \
-      && "$IYI" build --use-iyimod mods -o a/pop pop.iyi) > "$site/build.log" 2>&1; then
-  "$site/s/pop" > "$site/source.out" 2>&1
-  "$site/a/pop" > "$site/artifact.out" 2>&1
-  # The full stream is compared for semantic frame equivalence on Darwin;
-  # and the panic must still name no call site from artifacts.
+site_build=0
+if [ "$(uname -s)" = "Darwin" ]; then
+  if (cd "$site" && run_captured "$site/emit" "$IYI" build --emit-iyimod mods --emit-frame-provenance "$site/source.json" -o s/pop pop.iyi) &&
+     [ -s "$site/source.json" ] &&
+     nm -a "$site/s/pop" > "$site/source.symbols" 2> "$site/source.symbols.stderr" &&
+     [ -s "$site/source.symbols" ] &&
+     (cd "$site" && run_captured "$site/use" "$IYI" build --use-iyimod mods --emit-frame-provenance "$site/artifact.json" -o a/pop pop.iyi); then
+    site_build=1
+  fi
+elif (cd "$site" && "$IYI" build --emit-iyimod mods -o s/pop pop.iyi \
+       && "$IYI" build --use-iyimod mods -o a/pop pop.iyi) > "$site/build.log" 2>&1; then
+  site_build=1
+fi
+if [ "$site_build" -eq 1 ]; then
+  if [ "$(uname -s)" = "Darwin" ]; then
+    run_captured "$site/source" "$site/s/pop"
+    run_captured "$site/artifact" "$site/a/pop"
+  else
+    "$site/s/pop" > "$site/source.out" 2>&1
+    "$site/a/pop" > "$site/artifact.out" 2>&1
+  fi
   passed=0
-  if cmp -s "$site/source.out" "$site/artifact.out"; then
+  if { [ "$(uname -s)" != "Darwin" ] || { [ -f "$site/source.captured" ] && [ -f "$site/artifact.captured" ]; }; } &&
+     compare_artifact_pair "$site" pop; then
     passed=1
-  elif [ "$(uname -s)" = "Darwin" ] && [ -n "$PY" ]; then
-    if "$PY" "$REPO/bench/frames_equivalent.py" "$site/source.out" "$site/artifact.out" > "$site/frames.out" 2>&1; then
-      passed=1
-    fi
   fi
   if [ "$passed" -eq 0 ] || grep -q '^  at ' "$site/artifact.out"; then
     echo "  FAIL: from artifacts the panic reads"
@@ -633,7 +782,7 @@ if (cd "$site" && "$IYI" build --emit-iyimod mods -o s/pop pop.iyi \
     echo "  both print: $(head -1 "$site/artifact.out")"
   fi
 else
-  echo "  FAIL: did not build: $(grep -m1 -E 'Error|BUG' "$site/build.log" | cut -c1-140)"
+  echo "  FAIL: panic-site builds did not complete (see retained build output)"
   status=1
 fi
 

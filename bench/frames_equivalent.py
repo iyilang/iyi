@@ -23,25 +23,71 @@ FRAME_RE = re.compile(rb'^(\d+) +(\S+) +0x[0-9a-fA-F]{16} (.*) \+ \d+$')
 DARWIN_FRAME_RE = FRAME_RE
 LINUX_FRAME_RE = re.compile(rb'^(\d+) +(\S+) at (.+):(\d+):(\d+)$')
 
+def proc_location(sym: bytes):
+    """Return the path and line spans of a current proc linkage name."""
+    start = re.match(rb'^~proc\d*Proc\(', sym)
+    if not start:
+        return None
+    depth = 1
+    quote = None
+    escaped = False
+    for i in range(start.end(), len(sym)):
+        c = sym[i]
+        if c == ord('^'):
+            return None
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif c == ord('\\'):
+                escaped = True
+            elif c == quote:
+                quote = None
+        elif c in (ord('"'), ord("'")):
+            quote = c
+        elif c == ord('('):
+            depth += 1
+        elif c == ord(')'):
+            depth -= 1
+            if depth == 0:
+                if sym[i + 1:i + 2] != b'^':
+                    return None
+                location = re.fullmatch(rb'([^^]+):(\d+)', sym[i + 2:])
+                if not location:
+                    return None
+                path_start = i + 2
+                return (path_start, path_start + len(location.group(1)),
+                        path_start + location.start(2), path_start + location.end(2))
+    return None
+
+
 def canonical_function(sym: bytes) -> bytes:
-    # 1. strip one trailing ~iyi
-    if sym.endswith(b'~iyi'):
-        sym = sym[:-4]
-    # 2. for a symbol starting ~proc, drop the digits after ~proc
-    if sym.startswith(b'~proc'):
-        sym = re.sub(rb'^~proc\d*', b'~proc', sym)
-    # 3. in the @FILE:LINE tail (split at the last @), rewrite …/src/std/X.iyi and mods/std/X.iyimod to std/X
-    if b'@' in sym:
-        head, sep, tail = sym.rpartition(b'@')
-        tail = re.sub(rb'^(?:.*?[/\\])?src/std/(.+?)\.iyi(?=:\d+|$)', rb'std/\1', tail)
-        tail = re.sub(rb'^(?:.*?[/\\])?mods/std/(.+?)\.iyimod(?=:\d+|$)', rb'std/\1', tail)
-        sym = head + sep + tail
+    location = proc_location(sym)
+    if location:
+        start, end, _, _ = location
+        path = sym[start:end]
+        canonical = canonical_file(path)
+        if canonical != path:
+            # NUL cannot occur in a linkage name and prevents a literal path
+            # already named std/X from colliding with this equivalence class.
+            return sym[:start] + b'\0' + canonical + sym[end:]
+        return sym
+    # Older proc symbols use @ as their location separator.
+    legacy = re.fullmatch(rb'(~proc\d*@)([^@:]+):(\d+)', sym)
+    if legacy:
+        path = legacy.group(2)
+        canonical = canonical_file(path)
+        if canonical != path:
+            return legacy.group(1) + b'\0' + canonical + b':' + legacy.group(3)
     return sym
 
 def canonical_file(path: bytes) -> bytes:
-    # Rewrite …/src/std/X.iyi and …/mods/std/X.iyimod to std/X
-    path = re.sub(rb'^(?:.*?[/\\])?src/std/(.+?)\.iyi$', rb'std/\1', path)
-    path = re.sub(rb'^(?:.*?[/\\])?mods/std/(.+?)\.iyimod$', rb'std/\1', path)
+    # Only paths beneath the std tree correspond; reject traversal and empty
+    # components rather than equating a different file with a std module.
+    match = re.fullmatch(rb'(?:.*?[/\\])?(?:src/std/(.+)\.iyi|mods/std/(.+)\.iyimod)', path)
+    if match:
+        module = match.group(1) or match.group(2)
+        if all(part not in (b'', b'.', b'..') for part in re.split(rb'[/\\]', module)):
+            return b'std/' + module
     return path
 
 
@@ -356,11 +402,13 @@ def generate_mutant(kind: str, lines: list[bytes]) -> list[bytes]:
             m_d = FRAME_RE.match(s)
             if m_d:
                 fn = m_d.group(3)
-                sub_m = re.search(rb'(@.*?):(\d+)', fn)
-                if sub_m:
-                    old_num = sub_m.group(2)
+                loc = proc_location(fn)
+                sub_m = re.fullmatch(rb'~proc\d*@[^@:]+:(\d+)', fn) if not loc else None
+                if loc or sub_m:
+                    start, end = (loc[2], loc[3]) if loc else sub_m.span(1)
+                    old_num = fn[start:end]
                     new_num = str(int(old_num) + 12345).encode()
-                    new_fn = fn[:sub_m.start(2)] + new_num + fn[sub_m.end(2):]
+                    new_fn = fn[:start] + new_num + fn[end:]
                     mutated[i] = line.replace(fn, new_fn, 1)
                     return mutated
         raise ValueError("no frame line with location/line for mutant")

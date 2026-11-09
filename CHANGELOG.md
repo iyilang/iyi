@@ -979,6 +979,12 @@
   them with `--emit-iyimod`. The prelude analysed ahead by the build daemon
   does not restore witnesses yet.
 
+- **Two pointers compare equal when they hold the same address (#165).**
+  `Pointer` had no `==`, so `Object#==` answered false for `p == p`, for
+  two `Void*` of one address and for two null pointers, and a pointer key
+  was never found in a `Hash`. Held by
+  `spec/compiler/codegen/iyi_case_equality_spec.cr`.
+
 - **The language server's hover shows the doc comment of a declaration
   written under an annotation.** It read the `#` lines straight above the
   declaration and stopped at an `@[...]` line, so a documented type or

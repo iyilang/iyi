@@ -167,6 +167,12 @@ struct Pointer(T)
   def address : UInt64
   end
 
+  # The same address, whatever is stored there. Without it `Object#==`
+  # answered false for `p == p`, and a pointer key was never found.
+  def ==(other : self) : Bool
+    address == other.address
+  end
+
   @[Primitive(:pointer_realloc)]
   def realloc(size : UInt64) : self
   end

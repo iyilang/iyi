@@ -71,6 +71,13 @@ def parse_frame(line: bytes):
 def is_frame(line: bytes) -> bool:
     return parse_frame(line) is not None
 
+def is_named_function(fn: bytes) -> bool:
+    if fn.startswith(b'[0x') and fn.endswith(b']'):
+        return False
+    if fn == b'0x0' or (fn.startswith(b'0x') and all(c in b'0123456789abcdefABCDEFx' for c in fn)):
+        return False
+    return True
+
 
 def report_violation(line_no: int, rule: str, left: bytes, right: bytes):
     sys.stdout.write(f"line {line_no}: rule {rule}\n  left:  {repr(left)}\n  right: {repr(right)}\n")
@@ -86,7 +93,7 @@ def compare_same_opt(lines1: list[bytes], lines2: list[bytes], require_frames: b
         report_violation(line_no, 'line_count', left, right)
         return 1
 
-    frames_found = 0
+    named_frames_found = 0
     for idx, (l1, l2) in enumerate(zip(lines1, lines2)):
         line_no = idx + 1
         f1 = parse_frame(l1)
@@ -103,7 +110,6 @@ def compare_same_opt(lines1: list[bytes], lines2: list[bytes], require_frames: b
                 report_violation(line_no, 'text', l1, l2)
                 return 1
         else:
-            frames_found += 1
             kind1, kind2 = f1[0], f2[0]
             if kind1 != kind2:
                 report_violation(line_no, 'position', l1, l2)
@@ -122,6 +128,8 @@ def compare_same_opt(lines1: list[bytes], lines2: list[bytes], require_frames: b
                 if fn1 != fn2:
                     report_violation(line_no, 'function', l1, l2)
                     return 1
+                if is_named_function(fn1):
+                    named_frames_found += 1
             elif kind1 == 'linux':
                 _, idx1, fn1, file1, line1, col1 = f1
                 _, idx2, fn2, file2, line2, col2 = f2
@@ -135,8 +143,10 @@ def compare_same_opt(lines1: list[bytes], lines2: list[bytes], require_frames: b
                 if (file1, line1, col1) != (file2, line2, col2):
                     report_violation(line_no, 'location', l1, l2)
                     return 1
+                if is_named_function(fn1):
+                    named_frames_found += 1
 
-    if require_frames and frames_found == 0:
+    if require_frames and named_frames_found == 0:
         report_violation(1, 'zero_frames', lines1[0] if lines1 else b'', lines2[0] if lines2 else b'')
         return 1
 
@@ -151,12 +161,18 @@ def compare_across_opt(lines1: list[bytes], lines2: list[bytes], require_frames:
         while i < n:
             line_no = i + 1
             line = lines[i]
-            if is_frame(line):
+            f = parse_frame(line)
+            if f:
+                kind = f[0]
                 frames = []
-                while i < n and is_frame(lines[i]):
-                    frames.append(lines[i])
-                    i += 1
-                items.append(('frame', line_no, frames))
+                while i < n:
+                    cur_f = parse_frame(lines[i])
+                    if cur_f and cur_f[0] == kind:
+                        frames.append((lines[i], cur_f))
+                        i += 1
+                    else:
+                        break
+                items.append((kind, line_no, frames))
             else:
                 items.append(('text', line_no, line))
                 i += 1
@@ -166,14 +182,14 @@ def compare_across_opt(lines1: list[bytes], lines2: list[bytes], require_frames:
     items2 = chunk_items(lines2)
 
     min_len = min(len(items1), len(items2))
-    total_frames = 0
+    named_frames_found = 0
     for i in range(min_len):
         k1, lno1, val1 = items1[i]
         k2, lno2, val2 = items2[i]
 
         if k1 != k2:
-            left = val1 if k1 == 'text' else val1[0]
-            right = val2 if k2 == 'text' else val2[0]
+            left = val1 if k1 == 'text' else val1[0][0]
+            right = val2 if k2 == 'text' else val2[0][0]
             report_violation(lno1, 'position', left, right)
             return 1
 
@@ -181,27 +197,58 @@ def compare_across_opt(lines1: list[bytes], lines2: list[bytes], require_frames:
             if val1 != val2:
                 report_violation(lno1, 'text', val1, val2)
                 return 1
-        else:
+        elif k1 == 'darwin':
+            # Darwin legacy across-optimization semantics:
+            # inlining changes frame counts and offsets; verify non-empty chunk
             if len(val1) == 0 or len(val2) == 0:
-                left = val1[0] if val1 else b''
-                right = val2[0] if val2 else b''
+                left = val1[0][0] if val1 else b''
+                right = val2[0][0] if val2 else b''
                 report_violation(lno1, 'empty_frames', left, right)
                 return 1
-            total_frames += len(val1)
+            for _, f in val1:
+                if is_named_function(f[3]):
+                    named_frames_found += 1
+        elif k1 == 'linux':
+            # Strict Linux across-optimization semantics:
+            # preserve count, index, function, file, line, column, order
+            if len(val1) != len(val2):
+                min_flen = min(len(val1), len(val2))
+                err_lno = lno1 + min_flen
+                left = val1[min_flen][0] if len(val1) > min_flen else b''
+                right = val2[min_flen][0] if len(val2) > min_flen else b''
+                report_violation(err_lno, 'line_count', left, right)
+                return 1
+
+            for f_idx, ((raw1, f1), (raw2, f2)) in enumerate(zip(val1, val2)):
+                frame_lno = lno1 + f_idx
+                _, idx1, fn1, file1, line1, col1 = f1
+                _, idx2, fn2, file2, line2, col2 = f2
+
+                if idx1 != idx2:
+                    report_violation(frame_lno, 'index', raw1, raw2)
+                    return 1
+                if fn1 != fn2:
+                    report_violation(frame_lno, 'function', raw1, raw2)
+                    return 1
+                if (file1, line1, col1) != (file2, line2, col2):
+                    report_violation(frame_lno, 'location', raw1, raw2)
+                    return 1
+                if is_named_function(fn1):
+                    named_frames_found += 1
 
     if len(items1) != len(items2):
         if len(items1) > len(items2):
             k, lno, val = items1[min_len]
-            left = val if k == 'text' else val[0]
+            left = val if k == 'text' else val[0][0]
             right = b''
         else:
             k, lno, val = items2[min_len]
             left = b''
-            right = val if k == 'text' else val[0]
+            right = val if k == 'text' else val[0][0]
         report_violation(lno, 'item_count', left, right)
         return 1
 
-    if require_frames and total_frames == 0:
+    if require_frames and named_frames_found == 0:
         report_violation(1, 'zero_frames', lines1[0] if lines1 else b'', lines2[0] if lines2 else b'')
         return 1
 
@@ -331,14 +378,31 @@ def generate_mutant(kind: str, lines: list[bytes]) -> list[bytes]:
                 return mutated
         raise ValueError("no frame line with file for mutant")
     elif kind == "module":
-        # change std/X to std/Y
+        # change std/X to std/Y in a recognized frame
         for i, line in enumerate(mutated):
             s = line.rstrip(b'\r\n')
-            if b'std/' in line:
-                new_line = re.sub(rb'std/([a-zA-Z0-9_]+)', rb'std/mutant_mod', line, count=1)
-                if new_line != line:
-                    mutated[i] = new_line
-                    return mutated
+            m_d = FRAME_RE.match(s)
+            if m_d:
+                fn = m_d.group(3)
+                if b'std/' in fn:
+                    new_fn = re.sub(rb'std/([a-zA-Z0-9_]+)', rb'std/mutant_mod', fn, count=1)
+                    if new_fn != fn:
+                        mutated[i] = line.replace(fn, new_fn, 1)
+                        return mutated
+            m_l = LINUX_FRAME_RE.match(s)
+            if m_l:
+                file_part = m_l.group(3)
+                if b'std/' in file_part:
+                    new_file = re.sub(rb'std/([a-zA-Z0-9_]+)', rb'std/mutant_mod', file_part, count=1)
+                    if new_file != file_part:
+                        mutated[i] = line.replace(file_part, new_file, 1)
+                        return mutated
+                fn_part = m_l.group(2)
+                if b'std/' in fn_part:
+                    new_fn = re.sub(rb'std/([a-zA-Z0-9_]+)', rb'std/mutant_mod', fn_part, count=1)
+                    if new_fn != fn_part:
+                        mutated[i] = line.replace(fn_part, new_fn, 1)
+                        return mutated
         raise ValueError("no frame line with std/ for module mutant")
     else:
         raise ValueError(f"unknown mutant kind: {kind}")

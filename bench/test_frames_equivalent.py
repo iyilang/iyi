@@ -186,6 +186,23 @@ def test_explicit_named_frame_proof_rejects_zero_frames():
     assert ret == 1, "empty output unexpectedly passed under require_frames=True"
     assert rule == "zero_frames", f"expected rule 'zero_frames', got {rule!r}"
 
+    # Address-only frame [0x...] without a named function
+    addr_only_frames = [
+        b"iyi: panic: test\n",
+        b"0   [0x7f0001] at /path/test.iyi:1:2\n",
+    ]
+    ret, rule, _ = capture_violation(compare_same_opt, addr_only_frames, addr_only_frames, require_frames=False)
+    assert ret == 0, f"identical address-only frames failed under require_frames=False: {rule}"
+
+    # Under require_frames=True, address-only frames MUST be rejected as zero named frames
+    ret, rule, _ = capture_violation(compare_same_opt, addr_only_frames, addr_only_frames, require_frames=True)
+    assert ret == 1, "address-only frame unexpectedly passed under require_frames=True"
+    assert rule == "zero_frames", f"expected rule 'zero_frames', got {rule!r}"
+
+    # Across-opt with address-only frames under require_frames=True MUST also be rejected
+    ret, rule, _ = capture_violation(compare_across_opt, addr_only_frames, addr_only_frames, require_frames=True)
+    assert ret == 1, "address-only frame unexpectedly passed across-opt under require_frames=True"
+    assert rule == "zero_frames", f"expected rule 'zero_frames', got {rule!r}"
 
 def test_approved_std_canonicalization():
     # Source vs modular artifact in std/
@@ -289,17 +306,79 @@ def test_cross_format_mismatch():
     assert rule == "position", f"expected 'position', got {rule!r}"
 
 
+def test_strict_linux_across_opt():
+    lines_n = CAPTURED_NORMAL.splitlines(keepends=True)
+
+    # 1. Synthetic replacement with wrong frame count / contents
+    synthetic_wrong = [
+        b"iyi: panic: frame qualification\n",
+        b"  at /__w/_temp/frame-probe/probe.iyi:5\n",
+        b"99   wrong at /wrong.iyi:99:99\n",
+    ]
+    ret, rule, _ = capture_violation(compare_across_opt, lines_n, synthetic_wrong)
+    assert ret == 1, "across_opt accepted wrong Linux frame chunk length/contents"
+    assert rule == "line_count", f"expected 'line_count', got {rule!r}"
+
+    # 2. Mutating index in real captured Linux frames must fail across_opt
+    mut_idx = generate_mutant("index", lines_n)
+    ret, rule, _ = capture_violation(compare_across_opt, lines_n, mut_idx)
+    assert ret == 1, "across_opt accepted index mutation"
+    assert rule == "index", f"expected 'index', got {rule!r}"
+
+    # 3. Mutating function in real captured Linux frames must fail across_opt
+    mut_fn = generate_mutant("function", lines_n)
+    ret, rule, _ = capture_violation(compare_across_opt, lines_n, mut_fn)
+    assert ret == 1, "across_opt accepted function mutation"
+    assert rule == "function", f"expected 'function', got {rule!r}"
+
+    # 4. Mutating location in real captured Linux frames must fail across_opt
+    mut_loc = generate_mutant("location", lines_n)
+    ret, rule, _ = capture_violation(compare_across_opt, lines_n, mut_loc)
+    assert ret == 1, "across_opt accepted location mutation"
+    assert rule == "location", f"expected 'location', got {rule!r}"
+
+
+def test_module_mutant_restricts_to_recognized_frame():
+    # Preceding nonframe diagnostic holding std/ path
+    lines_with_diag = [
+        b"compiling src/std/debug.iyi\n",
+        b"0   proc_work at /home/runner/work/iyi/iyi/src/std/debug.iyi:100:15\n",
+    ]
+    mut = generate_mutant("module", lines_with_diag)
+    # The nonframe diagnostic must remain completely untouched
+    assert mut[0] == lines_with_diag[0], f"nonframe line was incorrectly mutated: {mut[0]!r}"
+    # The frame line must be mutated
+    assert mut[1] != lines_with_diag[1], "frame line was not mutated"
+    assert b"std/mutant_mod" in mut[1], f"expected std/mutant_mod in frame line: {mut[1]!r}"
+    # Comparison must fail via location rule on the frame, NOT text on nonframe line
+    ret, rule, _ = capture_violation(compare_same_opt, lines_with_diag, mut)
+    assert ret == 1, "module mutant comparison did not fail"
+    assert rule == "location", f"expected 'location', got {rule!r}"
+
+    # Darwin module mutant also leaves preceding nonframe text untouched
+    darwin_with_diag = [
+        b"loading src/std/big.iyi\n",
+        b"0   a.out                               0x0000000100003f50 ~proc@src/std/big.iyi:10 + 16\n",
+    ]
+    darwin_mut = generate_mutant("module", darwin_with_diag)
+    assert darwin_mut[0] == darwin_with_diag[0], f"Darwin nonframe line was mutated: {darwin_mut[0]!r}"
+    assert darwin_mut[1] != darwin_with_diag[1], "Darwin frame line was not mutated"
+    ret, rule, _ = capture_violation(compare_same_opt, darwin_with_diag, darwin_mut)
+    assert ret == 1, "Darwin module mutant did not fail"
+    assert rule == "function", f"expected 'function', got {rule!r}"
+
 def run_all_tests() -> int:
     tests = [
         ("test_captured_linux_equivalence", test_captured_linux_equivalence),
         ("test_discriminating_mutations_linux", test_discriminating_mutations_linux),
         ("test_explicit_named_frame_proof_rejects_zero_frames", test_explicit_named_frame_proof_rejects_zero_frames),
+        ("test_strict_linux_across_opt", test_strict_linux_across_opt),
+        ("test_module_mutant_restricts_to_recognized_frame", test_module_mutant_restricts_to_recognized_frame),
         ("test_approved_std_canonicalization", test_approved_std_canonicalization),
         ("test_unknown_addresses_not_normalized", test_unknown_addresses_not_normalized),
         ("test_darwin_backward_compatibility", test_darwin_backward_compatibility),
         ("test_cross_format_mismatch", test_cross_format_mismatch),
     ]
-
     failed = 0
     for name, test in tests:
         try:

@@ -86,7 +86,6 @@ build_and_run() {
   return 0
 }
 
-if [ "${PEBBLE_ONLY:-}" != "1" ]; then
 echo "== the std/acme exercise, plain build"
 build_and_run "plain" acme-plain
 if ! grep -q "ALL CHECKS PASSED" "$WORK/acme-plain.out" 2>/dev/null; then
@@ -258,7 +257,6 @@ PY
     status=1
   fi
 fi
-fi
 
 echo
 echo "== whole orders against Let's Encrypt's Pebble"
@@ -274,87 +272,23 @@ echo "== whole orders against Let's Encrypt's Pebble"
 # ten tries again a request fails only if eleven refusals come in a row
 # (0.3^11, about 2e-6 a request).
 GO="${GO:-go}"
-if [ -z "$PY" ] || ! command -v "$GO" >/dev/null 2>&1; then
+if [ -z "$PY" ]; then
   if [ -n "${IYI_PROOF_INPUTS_DIR:-}" ]; then
-    echo "  FAIL: IYI_PROOF_INPUTS_DIR requires Go and Python, but one or both are missing" >&2
+    echo "  FAIL: IYI_PROOF_INPUTS_DIR requires Python to drive Pebble" >&2
     status=1
   else
     echo "  no Go here (or no python to drive it), so Pebble is not built and the orders go unplaced"
   fi
 else
-  GOBIN="$WORK/gobin"
-  mkdir -p "$GOBIN"
-  install_ok=""
-  if [ -n "${IYI_PROOF_INPUTS_DIR:-}" ]; then
-    proxy_dir="$IYI_PROOF_INPUTS_DIR/go-proxy"
-    if [ ! -d "$proxy_dir" ]; then
-      echo "  FAIL: IYI_PROOF_INPUTS_DIR Go module mirror 'go-proxy/' missing: $proxy_dir" >&2
-      status=1
-    else
-      GOMODCACHE="$WORK/gomodcache"
-      GOCACHE="$WORK/gocache"
-      mkdir -p "$GOMODCACHE" "$GOCACHE"
-      proxy_path="$proxy_dir"
-      case "$(uname -s)" in
-        MINGW* | MSYS* | CYGWIN* | Windows_NT) proxy_path="$(cygpath -m "$proxy_path")" ;;
-      esac
-      case "$proxy_path" in
-        /*) proxy_url="file://$proxy_path" ;;
-        *) proxy_url="file:///$proxy_path" ;;
-      esac
-      # Contract: trusted orchestrator independently verifies complete Go mirror
-      # artifact manifest/digest before launch; do not claim Go's disabled
-      # checksum service (GOSUMDB=off) proves it.
-      if ! GOBIN="$GOBIN" GOMODCACHE="$GOMODCACHE" GOCACHE="$GOCACHE" \
-          GOTOOLCHAIN=local GOPROXY="$proxy_url" GONOPROXY=none GOSUMDB=off GONOSUMDB="*" \
-          "$GO" install github.com/letsencrypt/pebble/v2/cmd/pebble@v2.10.1 \
-            github.com/letsencrypt/pebble/v2/cmd/pebble-challtestsrv@v2.10.1 >"$WORK/go-install.log" 2>&1; then
-        echo "  FAIL: Pebble v2.10.1 could not be installed from offline mirror: $(tail -1 "$WORK/go-install.log")" >&2
-        status=1
-      else
-        binary="$GOBIN/pebble"
-        [ -f "$binary.exe" ] && binary="$binary.exe"
-        challtest="$GOBIN/pebble-challtestsrv"
-        [ -f "$challtest.exe" ] && challtest="$challtest.exe"
-        if [ ! -x "$binary" ] || [ ! -x "$challtest" ]; then
-          echo "  FAIL: Pebble v2.10.1 binaries missing or not executable in $GOBIN" >&2
-          status=1
-        fi
-        version="$("$GO" version -m "$binary" 2>/dev/null | awk '$1 == "mod" && $2 == "github.com/letsencrypt/pebble/v2" { print $3 }')"
-        if [ "$version" != "v2.10.1" ]; then
-          echo "  FAIL: Pebble binary module version '$version' != expected 'v2.10.1'" >&2
-          status=1
-        fi
-        certs="$GOMODCACHE/github.com/letsencrypt/pebble/v2@$version/test/certs"
-        case "$(uname -s)" in
-          MINGW* | MSYS* | CYGWIN* | Windows_NT) certs="$(cygpath -m "$certs")" ;;
-        esac
-        if [ ! -d "$certs" ] || [ ! -f "$certs/localhost/cert.pem" ] || [ ! -f "$certs/localhost/key.pem" ] || [ ! -f "$certs/pebble.minica.pem" ]; then
-          echo "  FAIL: required Pebble test certs missing in $certs" >&2
-          status=1
-        else
-          install_ok=yes
-        fi
-      fi
-    fi
-  else
-    if ! GOBIN="$GOBIN" "$GO" install github.com/letsencrypt/pebble/v2/cmd/pebble@latest \
-        github.com/letsencrypt/pebble/v2/cmd/pebble-challtestsrv@latest >"$WORK/go-install.log" 2>&1; then
-      echo "  Pebble could not be fetched or built here (no network?), so the orders go unplaced: $(tail -1 "$WORK/go-install.log")"
-    else
-      # `go version -m` reads the binary by its file's name, which on
-      # Windows ends in .exe; bash runs it by either.
-      binary="$GOBIN/pebble"
-      [ -f "$binary.exe" ] && binary="$binary.exe"
-      version="$("$GO" version -m "$binary" 2>/dev/null | awk '$1 == "mod" && $2 == "github.com/letsencrypt/pebble/v2" { print $3 }')"
-      certs="$("$GO" env GOMODCACHE)/github.com/letsencrypt/pebble/v2@$version/test/certs"
-      case "$(uname -s)" in
-        MINGW* | MSYS* | CYGWIN* | Windows_NT) certs="$(cygpath -m "$certs")" ;;
-      esac
-      install_ok=yes
-    fi
-  fi
-  if [ -n "$install_ok" ]; then
+  acquire_res=0
+  . "$REPO/bench/pebble_acquire.sh" || acquire_res=$?
+  if [ "$acquire_res" -eq 1 ]; then
+    status=1
+  elif [ "$acquire_res" -eq 2 ]; then
+    echo "  no Go here (or no python to drive it), so Pebble is not built and the orders go unplaced"
+  elif [ "$acquire_res" -eq 3 ]; then
+    echo "  Pebble could not be fetched or built here (no network?), so the orders go unplaced: $(tail -1 "$WORK/go-install.log")"
+  elif [ "$acquire_res" -eq 0 ]; then
     mkdir -p "$WORK/pebble"
     # drawn twice; Pebble's config and the exercise's arguments from them.
     if ! "$PY" - "$WORK/pebble" "$certs" <<'PY'
@@ -464,7 +398,6 @@ PY
   fi
 fi
 
-if [ "${PEBBLE_ONLY:-}" != "1" ]; then
 echo
 echo "== doc, format, other platforms and artifacts"
 if "$IYI" doc "$REPO/src/std/acme.iyi" >"$WORK/doc.txt" 2>&1 && grep -q "wait_authorization" "$WORK/doc.txt"; then
@@ -585,14 +518,9 @@ prove_broken acme "an http:// account Location taken" "an http:// account Locati
 prove_broken acme "an http:// order Location taken" "an http:// order Location is refused by name" \
   '    refused = AcmeClient.https(url, "newOrder'"'"'s Location")' '    refused = nil'
 
-fi
 echo
 if [ "$status" -eq 0 ]; then
-  if [ "${PEBBLE_ONLY:-}" = "1" ]; then
-    echo "the std/acme pebble exercise holds"
-  else
-    echo "the std/acme exercise holds ($mutations breaks caught)"
-  fi
+  echo "the std/acme exercise holds ($mutations breaks caught)"
 else
   echo "the std/acme exercise did not hold"
 fi

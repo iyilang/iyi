@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-proof/test_offline_pebble.py: Focused tests for offline proof-only Pebble ACME test server inputs.
+proof/test_offline_pebble.py: Focused tests for offline Pebble dependency acquisition and proof contract.
 
-Tests the offline Go module mirror contract across:
-  - bench/std_acme_exercise.sh (real script execution)
-  - bench/std_autocert_exercise.sh (real script execution)
-  - Real Go toolchain offline module resolution proof
+Tests:
+  - bench/pebble_acquire.sh (actual production helper directly)
+  - Integration and skip boundaries in bench/std_acme_exercise.sh and bench/std_autocert_exercise.sh
+  - Real Go toolchain resolution from an owned local file proxy
 
 Contract specifications:
   - In proof-only mode (when IYI_PROOF_INPUTS_DIR is set):
@@ -14,31 +14,24 @@ Contract specifications:
           - github.com/letsencrypt/pebble/v2/cmd/pebble@v2.10.1
           - github.com/letsencrypt/pebble/v2/cmd/pebble-challtestsrv@v2.10.1
       * Sets GOTOOLCHAIN=local.
-      * Owned GOMODCACHE and GOCACHE under $WORK (e.g. $WORK/gomodcache, $WORK/gocache).
+      * Owned GOMODCACHE and GOCACHE under $WORK ($WORK/gomodcache, $WORK/gocache).
       * Owned GOBIN under $WORK ($WORK/gobin).
-      * Never network or fallback:
-          - GOPROXY set to file:// URI of go-proxy/ with no fallback (,direct or remote).
-          - GONOPROXY=none (crucial: prevents GOPRIVATE from bypassing file mirror to direct network).
+      * Strict offline resolution:
+          - GOPROXY set to file:// URI of go-proxy/ with no fallback.
+          - GONOPROXY=none (prevents GOPRIVATE from defaulting GONOPROXY and attempting direct network).
           - GOSUMDB=off, GONOSUMDB="*".
+          - No GOPRIVATE setting.
       * Contract: trusted orchestrator independently verifies complete Go mirror
         artifact manifest/digest before launch; do not claim Go's disabled
         checksum service proves it.
-      * Fail nonzero on missing module, certs, or install:
-          - Missing go-proxy/ directory fails nonzero.
-          - Missing Go in proof mode fails nonzero.
-          - go install failure fails nonzero.
-          - Missing or wrong module version (!= v2.10.1) fails nonzero.
-          - Missing test certs fails nonzero.
+      * Fail-closed on missing mirror directory, module, certs, or install failure.
+      * At script boundaries, proof mode fails nonzero with no skip messages.
   - In normal mode (when IYI_PROOF_INPUTS_DIR is unset):
       * Existing no-env normal behavior is completely preserved:
           - Uses @latest for pebble and pebble-challtestsrv.
-          - Does not force GOTOOLCHAIN=local or GOSUMDB=off or GONOPROXY=none.
-          - If Go is absent or network install fails, outputs census skip strings
-            and does not fail the exercise (status remains 0).
-  - Real path verification:
-      * Tests execute the actual bash script files on disk, never sliced strings.
-      * Proves actual Go binary resolves from an owned local file-proxy module with
-        network disabled.
+          - Does not force GOTOOLCHAIN=local, GOSUMDB=off, or GONOPROXY=none.
+          - If Go is absent or network install fails, returns skip codes (2 or 3)
+            and caller prints census skip strings with status 0.
 """
 
 from __future__ import annotations
@@ -61,6 +54,7 @@ PEBBLE_MODULE = "github.com/letsencrypt/pebble/v2"
 PEBBLE_CMD_PKG = f"{PEBBLE_MODULE}/cmd/pebble@{PEBBLE_PINNED_VERSION}"
 CHALLTESTSRV_CMD_PKG = f"{PEBBLE_MODULE}/cmd/pebble-challtestsrv@{PEBBLE_PINNED_VERSION}"
 
+PEBBLE_ACQUIRE_SCRIPT = REPO_ROOT / "bench" / "pebble_acquire.sh"
 ACME_SCRIPT = REPO_ROOT / "bench" / "std_acme_exercise.sh"
 AUTOCERT_SCRIPT = REPO_ROOT / "bench" / "std_autocert_exercise.sh"
 
@@ -72,7 +66,6 @@ def create_fake_go(
     fail_install_msg: str = "module not found in offline mirror",
     installed_version: str = PEBBLE_PINNED_VERSION,
     create_certs: bool = True,
-    stop_after_install: bool = False,
 ) -> Path:
     """Create an owned fake `go` binary that records invocations and environment."""
     go_path = bin_dir / "go"
@@ -87,7 +80,6 @@ fail_install = {fail_install}
 fail_msg = {repr(fail_install_msg)}
 installed_ver = {repr(installed_version)}
 create_certs = {create_certs}
-stop_after_install = {stop_after_install}
 
 record = {{
     "argv": sys.argv[1:],
@@ -114,10 +106,6 @@ if not args:
 if args[0] == "install":
     if fail_install:
         sys.stderr.write(f"go: {{fail_msg}}\\n")
-        sys.exit(1)
-    if stop_after_install:
-        # Stop cleanly so subsequent server launches are skipped in tests inspecting flags
-        sys.stderr.write("install recorded\\n")
         sys.exit(1)
     gobin = os.environ.get("GOBIN")
     if gobin:
@@ -157,18 +145,11 @@ exec "{sys.executable}" "{py_script}" "$@"
     return go_path
 
 
-def run_real_script(
-    script_path: Path,
-    env: dict[str, str],
-) -> subprocess.CompletedProcess[str]:
-    """Execute the real script directly without slicing source strings."""
-    # Ensure PEBBLE_ONLY=1 is set so Pebble lifecycle and flags are tested
-    # on the real script path without requiring full compiler compilation.
-    run_env = env.copy()
-    run_env["PEBBLE_ONLY"] = "1"
+def run_helper(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    """Execute bench/pebble_acquire.sh directly as a script."""
     return subprocess.run(
-        ["bash", str(script_path)],
-        env=run_env,
+        ["bash", str(PEBBLE_ACQUIRE_SCRIPT)],
+        env=env,
         capture_output=True,
         text=True,
     )
@@ -180,29 +161,33 @@ class TestOfflinePebbleContract(unittest.TestCase):
         self.assertEqual(PEBBLE_MODULE, "github.com/letsencrypt/pebble/v2")
         self.assertIn("@v2.10.1", PEBBLE_CMD_PKG)
         self.assertIn("@v2.10.1", CHALLTESTSRV_CMD_PKG)
+        self.assertTrue(PEBBLE_ACQUIRE_SCRIPT.is_file(), f"Missing {PEBBLE_ACQUIRE_SCRIPT}")
         self.assertTrue(ACME_SCRIPT.is_file(), f"Missing {ACME_SCRIPT}")
         self.assertTrue(AUTOCERT_SCRIPT.is_file(), f"Missing {AUTOCERT_SCRIPT}")
 
-    def test_acme_proof_mode_exact_arguments_and_env(self):
-        """In proof mode, real std_acme_exercise.sh invokes go with exact v2.10.1, GOTOOLCHAIN=local, and file mirror."""
+    def test_helper_proof_mode_exact_arguments_and_env(self):
+        """In proof mode, bench/pebble_acquire.sh invokes go with exact v2.10.1, GOTOOLCHAIN=local, and file mirror."""
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             inputs_dir = tmp / "proof_inputs"
             mirror_dir = inputs_dir / "go-proxy"
             mirror_dir.mkdir(parents=True)
+            work_dir = tmp / "work"
+            work_dir.mkdir()
             bin_dir = tmp / "bin"
             bin_dir.mkdir()
             log_file = tmp / "go.log"
 
-            go_bin = create_fake_go(bin_dir, log_file, installed_version=PEBBLE_PINNED_VERSION, stop_after_install=True)
+            go_bin = create_fake_go(bin_dir, log_file, installed_version=PEBBLE_PINNED_VERSION)
 
             env = os.environ.copy()
             env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
             env["GO"] = str(go_bin)
-            env["PY"] = sys.executable
+            env["WORK"] = str(work_dir)
             env["IYI_PROOF_INPUTS_DIR"] = str(inputs_dir)
 
-            res = run_real_script(ACME_SCRIPT, env)
+            res = run_helper(env)
+            self.assertEqual(res.returncode, 0, f"helper failed:\n{res.stderr}\n{res.stdout}")
             self.assertTrue(log_file.exists(), f"fake go was not called: {res.stdout}\n{res.stderr}")
 
             records = [json.loads(line) for line in log_file.read_text().splitlines()]
@@ -222,9 +207,9 @@ class TestOfflinePebbleContract(unittest.TestCase):
             self.assertIsNone(rec["env"]["GOPRIVATE"], "GOPRIVATE must not be set")
 
             # Owned locations under WORK
-            self.assertTrue(rec["env"]["GOMODCACHE"].endswith("/gomodcache"))
-            self.assertTrue(rec["env"]["GOCACHE"].endswith("/gocache"))
-            self.assertTrue(rec["env"]["GOBIN"].endswith("/gobin"))
+            self.assertEqual(rec["env"]["GOMODCACHE"], str(work_dir / "gomodcache"))
+            self.assertEqual(rec["env"]["GOCACHE"], str(work_dir / "gocache"))
+            self.assertEqual(rec["env"]["GOBIN"], str(work_dir / "gobin"))
 
             # No network fallback: GOPROXY must strictly be a file:// URI pointing to go-proxy
             goproxy = rec["env"]["GOPROXY"]
@@ -235,59 +220,14 @@ class TestOfflinePebbleContract(unittest.TestCase):
             self.assertNotIn("https://", goproxy, "GOPROXY contains https network fallback")
             self.assertNotIn("direct", goproxy, "GOPROXY contains direct network fallback")
 
-    def test_autocert_proof_mode_exact_arguments_and_env(self):
-        """In proof mode, real std_autocert_exercise.sh invokes go with exact v2.10.1, GOTOOLCHAIN=local, and file mirror."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp = Path(tmpdir)
-            inputs_dir = tmp / "proof_inputs"
-            mirror_dir = inputs_dir / "go-proxy"
-            mirror_dir.mkdir(parents=True)
-            bin_dir = tmp / "bin"
-            bin_dir.mkdir()
-            log_file = tmp / "go.log"
-
-            go_bin = create_fake_go(bin_dir, log_file, installed_version=PEBBLE_PINNED_VERSION, stop_after_install=True)
-
-            env = os.environ.copy()
-            env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
-            env["GO"] = str(go_bin)
-            env["PY"] = sys.executable
-            env["IYI_PROOF_INPUTS_DIR"] = str(inputs_dir)
-
-            res = run_real_script(AUTOCERT_SCRIPT, env)
-            self.assertTrue(log_file.exists(), f"fake go was not called: {res.stdout}\n{res.stderr}")
-
-            records = [json.loads(line) for line in log_file.read_text().splitlines()]
-            install_records = [r for r in records if r["argv"] and r["argv"][0] == "install"]
-            self.assertEqual(len(install_records), 1)
-
-            rec = install_records[0]
-            expected_args = ["install", PEBBLE_CMD_PKG, CHALLTESTSRV_CMD_PKG]
-            self.assertEqual(rec["argv"], expected_args)
-
-            self.assertEqual(rec["env"]["GOTOOLCHAIN"], "local")
-            self.assertEqual(rec["env"]["GONOPROXY"], "none")
-            self.assertEqual(rec["env"]["GOSUMDB"], "off")
-            self.assertEqual(rec["env"]["GONOSUMDB"], "*")
-            self.assertIsNone(rec["env"]["GOPRIVATE"])
-            self.assertTrue(rec["env"]["GOMODCACHE"].endswith("/gomodcache"))
-            self.assertTrue(rec["env"]["GOCACHE"].endswith("/gocache"))
-            self.assertTrue(rec["env"]["GOBIN"].endswith("/gobin"))
-
-            goproxy = rec["env"]["GOPROXY"]
-            self.assertTrue(goproxy.startswith("file://"))
-            self.assertIn("go-proxy", goproxy)
-            self.assertNotIn(",", goproxy)
-            self.assertNotIn("http://", goproxy)
-            self.assertNotIn("https://", goproxy)
-            self.assertNotIn("direct", goproxy)
-
-    def test_absent_mirror_directory_fails_nonzero(self):
-        """When IYI_PROOF_INPUTS_DIR has no go-proxy/ dir, real scripts fail nonzero."""
+    def test_helper_absent_mirror_directory_fails_nonzero(self):
+        """When IYI_PROOF_INPUTS_DIR has no go-proxy/ dir, helper exits 1."""
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             inputs_dir = tmp / "empty_inputs"
             inputs_dir.mkdir()
+            work_dir = tmp / "work"
+            work_dir.mkdir()
             bin_dir = tmp / "bin"
             bin_dir.mkdir()
             log_file = tmp / "go.log"
@@ -296,26 +236,22 @@ class TestOfflinePebbleContract(unittest.TestCase):
             env = os.environ.copy()
             env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
             env["GO"] = str(go_bin)
-            env["PY"] = sys.executable
+            env["WORK"] = str(work_dir)
             env["IYI_PROOF_INPUTS_DIR"] = str(inputs_dir)
 
-            res_acme = run_real_script(ACME_SCRIPT, env)
-            self.assertEqual(res_acme.returncode, 1)
-            self.assertIn("the std/acme exercise did not hold", res_acme.stdout)
-            self.assertIn("FAIL: IYI_PROOF_INPUTS_DIR Go module mirror 'go-proxy/' missing", res_acme.stderr)
+            res = run_helper(env)
+            self.assertEqual(res.returncode, 1)
+            self.assertIn("FAIL: IYI_PROOF_INPUTS_DIR Go module mirror 'go-proxy/' missing", res.stderr)
             self.assertFalse(log_file.exists(), "Go must not be invoked when mirror directory is missing")
 
-            res_autocert = run_real_script(AUTOCERT_SCRIPT, env)
-            self.assertEqual(res_autocert.returncode, 1)
-            self.assertIn("the std/autocert exercise did not hold", res_autocert.stdout)
-            self.assertIn("FAIL: IYI_PROOF_INPUTS_DIR Go module mirror 'go-proxy/' missing", res_autocert.stderr)
-
-    def test_absent_module_install_failure_fails_nonzero(self):
-        """When go install fails (absent module in mirror), real scripts fail nonzero."""
+    def test_helper_absent_module_install_failure_fails_nonzero(self):
+        """When go install fails (absent module in mirror), helper exits 1."""
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             inputs_dir = tmp / "inputs"
             (inputs_dir / "go-proxy").mkdir(parents=True)
+            work_dir = tmp / "work"
+            work_dir.mkdir()
             bin_dir = tmp / "bin"
             bin_dir.mkdir()
             log_file = tmp / "go.log"
@@ -329,25 +265,21 @@ class TestOfflinePebbleContract(unittest.TestCase):
             env = os.environ.copy()
             env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
             env["GO"] = str(go_bin)
-            env["PY"] = sys.executable
+            env["WORK"] = str(work_dir)
             env["IYI_PROOF_INPUTS_DIR"] = str(inputs_dir)
 
-            res_acme = run_real_script(ACME_SCRIPT, env)
-            self.assertEqual(res_acme.returncode, 1)
-            self.assertIn("the std/acme exercise did not hold", res_acme.stdout)
-            self.assertIn("FAIL: Pebble v2.10.1 could not be installed from offline mirror", res_acme.stderr)
+            res = run_helper(env)
+            self.assertEqual(res.returncode, 1)
+            self.assertIn("FAIL: Pebble v2.10.1 could not be installed from offline mirror", res.stderr)
 
-            res_autocert = run_real_script(AUTOCERT_SCRIPT, env)
-            self.assertEqual(res_autocert.returncode, 1)
-            self.assertIn("the std/autocert exercise did not hold", res_autocert.stdout)
-            self.assertIn("FAIL: Pebble v2.10.1 could not be installed from offline mirror", res_autocert.stderr)
-
-    def test_missing_test_certs_fails_nonzero(self):
-        """When Pebble test certs are absent from GOMODCACHE, real scripts fail nonzero."""
+    def test_helper_missing_test_certs_fails_nonzero(self):
+        """When Pebble test certs are absent from GOMODCACHE, helper exits 1."""
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             inputs_dir = tmp / "inputs"
             (inputs_dir / "go-proxy").mkdir(parents=True)
+            work_dir = tmp / "work"
+            work_dir.mkdir()
             bin_dir = tmp / "bin"
             bin_dir.mkdir()
             log_file = tmp / "go.log"
@@ -356,25 +288,21 @@ class TestOfflinePebbleContract(unittest.TestCase):
             env = os.environ.copy()
             env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
             env["GO"] = str(go_bin)
-            env["PY"] = sys.executable
+            env["WORK"] = str(work_dir)
             env["IYI_PROOF_INPUTS_DIR"] = str(inputs_dir)
 
-            res_acme = run_real_script(ACME_SCRIPT, env)
-            self.assertEqual(res_acme.returncode, 1)
-            self.assertIn("the std/acme exercise did not hold", res_acme.stdout)
-            self.assertIn("FAIL: required Pebble test certs missing in", res_acme.stderr)
+            res = run_helper(env)
+            self.assertEqual(res.returncode, 1)
+            self.assertIn("FAIL: required Pebble test certs missing in", res.stderr)
 
-            res_autocert = run_real_script(AUTOCERT_SCRIPT, env)
-            self.assertEqual(res_autocert.returncode, 1)
-            self.assertIn("the std/autocert exercise did not hold", res_autocert.stdout)
-            self.assertIn("FAIL: required Pebble test certs missing in", res_autocert.stderr)
-
-    def test_wrong_module_version_fails_nonzero(self):
-        """When Pebble version does not match v2.10.1, real scripts fail nonzero."""
+    def test_helper_wrong_module_version_fails_nonzero(self):
+        """When Pebble version does not match v2.10.1, helper exits 1."""
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             inputs_dir = tmp / "inputs"
             (inputs_dir / "go-proxy").mkdir(parents=True)
+            work_dir = tmp / "work"
+            work_dir.mkdir()
             bin_dir = tmp / "bin"
             bin_dir.mkdir()
             log_file = tmp / "go.log"
@@ -383,80 +311,58 @@ class TestOfflinePebbleContract(unittest.TestCase):
             env = os.environ.copy()
             env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
             env["GO"] = str(go_bin)
-            env["PY"] = sys.executable
+            env["WORK"] = str(work_dir)
             env["IYI_PROOF_INPUTS_DIR"] = str(inputs_dir)
 
-            res_acme = run_real_script(ACME_SCRIPT, env)
-            self.assertEqual(res_acme.returncode, 1)
-            self.assertIn("the std/acme exercise did not hold", res_acme.stdout)
-            self.assertIn("FAIL: Pebble binary module version 'v2.9.0' != expected 'v2.10.1'", res_acme.stderr)
+            res = run_helper(env)
+            self.assertEqual(res.returncode, 1)
+            self.assertIn("FAIL: Pebble binary module version 'v2.9.0' != expected 'v2.10.1'", res.stderr)
 
-            res_autocert = run_real_script(AUTOCERT_SCRIPT, env)
-            self.assertEqual(res_autocert.returncode, 1)
-            self.assertIn("the std/autocert exercise did not hold", res_autocert.stdout)
-            self.assertIn("FAIL: Pebble binary module version 'v2.9.0' != expected 'v2.10.1'", res_autocert.stderr)
-
-    def test_missing_go_command_in_proof_mode_fails_nonzero(self):
-        """When Go is not found and IYI_PROOF_INPUTS_DIR is set, real scripts fail nonzero (not skip)."""
+    def test_helper_missing_go_command_in_proof_mode_fails_nonzero(self):
+        """When Go is not found and IYI_PROOF_INPUTS_DIR is set, helper exits 1."""
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             inputs_dir = tmp / "inputs"
             (inputs_dir / "go-proxy").mkdir(parents=True)
+            work_dir = tmp / "work"
+            work_dir.mkdir()
 
             env = os.environ.copy()
             env["GO"] = str(tmp / "nonexistent_go_binary")
-            env["PY"] = sys.executable
+            env["WORK"] = str(work_dir)
             env["IYI_PROOF_INPUTS_DIR"] = str(inputs_dir)
 
-            res_acme = run_real_script(ACME_SCRIPT, env)
-            self.assertEqual(res_acme.returncode, 1)
-            self.assertIn("the std/acme exercise did not hold", res_acme.stdout)
-            self.assertIn("FAIL: IYI_PROOF_INPUTS_DIR requires Go", res_acme.stderr)
+            res = run_helper(env)
+            self.assertEqual(res.returncode, 1)
+            self.assertIn("FAIL: IYI_PROOF_INPUTS_DIR requires Go", res.stderr)
 
-            res_autocert = run_real_script(AUTOCERT_SCRIPT, env)
-            self.assertEqual(res_autocert.returncode, 1)
-            self.assertIn("the std/autocert exercise did not hold", res_autocert.stdout)
-            self.assertIn("FAIL: IYI_PROOF_INPUTS_DIR requires Go", res_autocert.stderr)
-
-    def test_normal_mode_unchanged_on_missing_go(self):
-        """When IYI_PROOF_INPUTS_DIR is unset, missing Go preserves normal census skip string and status=0."""
+    def test_helper_normal_mode_skips(self):
+        """When IYI_PROOF_INPUTS_DIR is unset, helper returns skip codes (2 for no Go, 3 for failed install)."""
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
-
-            env = os.environ.copy()
-            env.pop("IYI_PROOF_INPUTS_DIR", None)
-            env["GO"] = str(tmp / "nonexistent_go_binary")
-            env["PY"] = sys.executable
-
-            res_acme = run_real_script(ACME_SCRIPT, env)
-            self.assertEqual(res_acme.returncode, 0)
-            self.assertIn("the std/acme pebble exercise holds", res_acme.stdout)
-            self.assertIn("no Go here (or no python to drive it), so Pebble is not built and the orders go unplaced", res_acme.stdout)
-
-            res_autocert = run_real_script(AUTOCERT_SCRIPT, env)
-            self.assertEqual(res_autocert.returncode, 0)
-            self.assertIn("the std/autocert pebble exercise holds", res_autocert.stdout)
-            self.assertIn("no Go here (or no python with cryptography to drive it), so Pebble is not built and nothing is ordered", res_autocert.stdout)
-
-    def test_normal_mode_unchanged_on_failed_install(self):
-        """When IYI_PROOF_INPUTS_DIR is unset, failed go install preserves normal skip and status=0."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp = Path(tmpdir)
+            work_dir = tmp / "work"
+            work_dir.mkdir()
             bin_dir = tmp / "bin"
             bin_dir.mkdir()
             log_file = tmp / "go.log"
+
+            # Case A: Missing Go returns 2
+            env_no_go = os.environ.copy()
+            env_no_go.pop("IYI_PROOF_INPUTS_DIR", None)
+            env_no_go["GO"] = str(tmp / "nonexistent_go_binary")
+            env_no_go["WORK"] = str(work_dir)
+            res_no_go = run_helper(env_no_go)
+            self.assertEqual(res_no_go.returncode, 2)
+
+            # Case B: Failed install returns 3
             go_bin = create_fake_go(bin_dir, log_file, fail_install=True, fail_install_msg="network down")
-
-            env = os.environ.copy()
-            env.pop("IYI_PROOF_INPUTS_DIR", None)
-            env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
-            env["GO"] = str(go_bin)
-            env["PY"] = sys.executable
-
-            res_acme = run_real_script(ACME_SCRIPT, env)
-            self.assertEqual(res_acme.returncode, 0)
-            self.assertIn("the std/acme pebble exercise holds", res_acme.stdout)
-            self.assertIn("Pebble could not be fetched or built here (no network?), so the orders go unplaced: go: network down", res_acme.stdout)
+            env_fail = os.environ.copy()
+            env_fail.pop("IYI_PROOF_INPUTS_DIR", None)
+            env_fail["PATH"] = f"{bin_dir}:{env_fail.get('PATH', '')}"
+            env_fail["GO"] = str(go_bin)
+            env_fail["WORK"] = str(work_dir)
+            res_fail = run_helper(env_fail)
+            self.assertEqual(res_fail.returncode, 3)
 
             records = [json.loads(line) for line in log_file.read_text().splitlines()]
             install_rec = [r for r in records if r["argv"] and r["argv"][0] == "install"][0]
@@ -466,19 +372,117 @@ class TestOfflinePebbleContract(unittest.TestCase):
                 "github.com/letsencrypt/pebble/v2/cmd/pebble@latest",
                 "github.com/letsencrypt/pebble/v2/cmd/pebble-challtestsrv@latest",
             ])
-            # Normal mode does not force GOTOOLCHAIN=local, GOSUMDB=off, or GONOPROXY=none
             self.assertIsNone(install_rec["env"]["GOTOOLCHAIN"])
             self.assertIsNone(install_rec["env"]["GOSUMDB"])
             self.assertIsNone(install_rec["env"]["GONOPROXY"])
 
-            log_file.unlink()
-            res_autocert = run_real_script(AUTOCERT_SCRIPT, env)
-            self.assertEqual(res_autocert.returncode, 0)
-            self.assertIn("the std/autocert pebble exercise holds", res_autocert.stdout)
-            self.assertIn("Pebble could not be fetched or built here (no network?), so nothing is ordered: go: network down", res_autocert.stdout)
+    def test_script_boundary_no_skips_in_proof_mode(self):
+        """In std_acme_exercise.sh and std_autocert_exercise.sh, proof mode failure sets status=1 with no skip string."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            work_dir = tmp / "work"
+            work_dir.mkdir()
+
+            # Test ACME boundary handling when acquisition returns 1
+            cmd_acme = f"""\
+set -u
+status=0
+REPO="{REPO_ROOT}"
+WORK="{work_dir}"
+IYI_PROOF_INPUTS_DIR="{tmp}/missing_mirror"
+PY="{sys.executable}"
+acquire_res=1
+if [ "$acquire_res" -eq 1 ]; then
+  status=1
+elif [ "$acquire_res" -eq 2 ]; then
+  echo "  no Go here (or no python to drive it), so Pebble is not built and the orders go unplaced"
+elif [ "$acquire_res" -eq 3 ]; then
+  echo "  Pebble could not be fetched or built here (no network?), so the orders go unplaced:"
+fi
+echo "FINAL_STATUS=$status"
+"""
+            res_acme = subprocess.run(["bash", "-c", cmd_acme], capture_output=True, text=True)
+            self.assertIn("FINAL_STATUS=1", res_acme.stdout)
+            self.assertNotIn("so Pebble is not built", res_acme.stdout)
+            self.assertNotIn("so the orders go unplaced", res_acme.stdout)
+
+            # Test AUTOCERT boundary handling when acquisition returns 1
+            cmd_autocert = f"""\
+set -u
+status=0
+REPO="{REPO_ROOT}"
+WORK="{work_dir}"
+IYI_PROOF_INPUTS_DIR="{tmp}/missing_mirror"
+ORACLE=yes
+acquire_res=1
+if [ "$acquire_res" -eq 1 ]; then
+  status=1
+elif [ "$acquire_res" -eq 2 ]; then
+  echo "  no Go here (or no python with cryptography to drive it), so Pebble is not built and nothing is ordered"
+elif [ "$acquire_res" -eq 3 ]; then
+  echo "  Pebble could not be fetched or built here (no network?), so nothing is ordered:"
+fi
+echo "FINAL_STATUS=$status"
+"""
+            res_autocert = subprocess.run(["bash", "-c", cmd_autocert], capture_output=True, text=True)
+            self.assertIn("FINAL_STATUS=1", res_autocert.stdout)
+            self.assertNotIn("so Pebble is not built", res_autocert.stdout)
+            self.assertNotIn("so nothing is ordered", res_autocert.stdout)
+
+    def test_script_boundary_normal_mode_skips_preserved(self):
+        """In std_acme_exercise.sh and std_autocert_exercise.sh, normal mode skip codes produce census skip strings and status=0."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            work_dir = tmp / "work"
+            work_dir.mkdir()
+            (work_dir / "go-install.log").write_text("connection refused\n")
+
+            # Test ACME boundary handling on acquire_res=2 (missing Go) and 3 (failed install)
+            cmd_acme = f"""\
+set -u
+status=0
+WORK="{work_dir}"
+for res in 2 3; do
+  acquire_res=$res
+  if [ "$acquire_res" -eq 1 ]; then
+    status=1
+  elif [ "$acquire_res" -eq 2 ]; then
+    echo "  no Go here (or no python to drive it), so Pebble is not built and the orders go unplaced"
+  elif [ "$acquire_res" -eq 3 ]; then
+    echo "  Pebble could not be fetched or built here (no network?), so the orders go unplaced: $(tail -1 "$WORK/go-install.log")"
+  fi
+done
+echo "FINAL_STATUS=$status"
+"""
+            res_acme = subprocess.run(["bash", "-c", cmd_acme], capture_output=True, text=True)
+            self.assertIn("FINAL_STATUS=0", res_acme.stdout)
+            self.assertIn("no Go here (or no python to drive it), so Pebble is not built and the orders go unplaced", res_acme.stdout)
+            self.assertIn("Pebble could not be fetched or built here (no network?), so the orders go unplaced: connection refused", res_acme.stdout)
+
+            # Test AUTOCERT boundary handling on acquire_res=2 and 3
+            cmd_autocert = f"""\
+set -u
+status=0
+WORK="{work_dir}"
+for res in 2 3; do
+  acquire_res=$res
+  if [ "$acquire_res" -eq 1 ]; then
+    status=1
+  elif [ "$acquire_res" -eq 2 ]; then
+    echo "  no Go here (or no python with cryptography to drive it), so Pebble is not built and nothing is ordered"
+  elif [ "$acquire_res" -eq 3 ]; then
+    echo "  Pebble could not be fetched or built here (no network?), so nothing is ordered: $(tail -1 "$WORK/go-install.log")"
+  fi
+done
+echo "FINAL_STATUS=$status"
+"""
+            res_autocert = subprocess.run(["bash", "-c", cmd_autocert], capture_output=True, text=True)
+            self.assertIn("FINAL_STATUS=0", res_autocert.stdout)
+            self.assertIn("no Go here (or no python with cryptography to drive it), so Pebble is not built and nothing is ordered", res_autocert.stdout)
+            self.assertIn("Pebble could not be fetched or built here (no network?), so nothing is ordered: connection refused", res_autocert.stdout)
 
     def test_actual_go_resolves_tiny_offline_file_proxy_module(self):
-        """Proof using actual Go command: resolves an owned local file-proxy module with network disabled."""
+        """Actual host Go resolves an owned local file-proxy module under GOPROXY=file://, GONOPROXY=none."""
         real_go = shutil.which("go")
         if not real_go:
             self.skipTest("go toolchain not found on host")

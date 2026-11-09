@@ -1087,12 +1087,21 @@ end
 @[Effect(:observation_channel)]
 private def current_cwd : String
   {% if flag?(:win32) %}
-    buf = Pointer(UInt8).malloc(4096_u64)
-    len = __iyi_getcwd(buf, 4096_u64)
-    if len > 0
-      c_str(buf)
-    else
+    wide = Pointer(UInt16).malloc(4096_u64)
+    chars = LibC.GetCurrentDirectoryW(4096, wide)
+    if chars > 4096
+      wide = Pointer(UInt16).malloc(chars.to_u64)
+      chars = LibC.GetCurrentDirectoryW(chars, wide)
+    end
+    if chars <= 0
       ""
+    else
+      size = __iyi_utf8_size_from_wide(wide)
+      if size <= 1
+        ""
+      else
+        String.new(size - 1) { |t| __iyi_utf8_bytes_from_wide(wide, t, size) }
+      end
     end
   {% elsif flag?(:linux) %}
     linux_raw_getcwd(4096_u64) || linux_raw_getcwd(98304_u64) || ""

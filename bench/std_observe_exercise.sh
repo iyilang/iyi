@@ -184,8 +184,14 @@ EOF
 
 REL_TRACE="$WORK/rel_trace.bin"
 rm -f "$REL_TRACE"
-IYI_OBSERVE="$REL_TRACE" "$IYI" run -Diyi_observe "$REL_SRC"
+REL_DIR="$WORK/rel_cwd"
+mkdir -p "$REL_DIR"
+REL_TARGET="$REL_DIR/relative_exercise_target.txt"
+rm -f "$REL_TARGET" "relative_exercise_target.txt"
 
+(cd "$REL_DIR" && TMPDIR="$SCRATCH_REAL" IYI_OBSERVE="$REL_TRACE" "$IYI" run -Diyi_observe "$REL_SRC")
+
+rm -f "$REL_TARGET" "relative_exercise_target.txt"
 if [ ! -f "$REL_TRACE" ]; then
   echo "FAIL: relative file trace was not created"
   exit 1

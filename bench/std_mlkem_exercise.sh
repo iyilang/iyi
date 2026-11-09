@@ -225,6 +225,7 @@ if [ -z "$PY" ] || ! command -v "$OPENSSL" >/dev/null 2>&1; then
 elif ! "$OPENSSL" list -kem-algorithms 2>/dev/null | grep -q 'ML-KEM-768'; then
   echo "  $("$OPENSSL" version 2>&1 | head -1) has no ML-KEM-768 (OpenSSL has it from 3.5), so OpenSSL goes unasked"
   if [ "${IYI_PROOF_INPUTS_DIR+set}" = "set" ]; then status=1; fi
+else
   echo "  $("$OPENSSL" version)"
   if ! "$PY" - "$ORACLE" "$OPENSSL" "$WORK" <<'PY'; then
 import os, subprocess, sys

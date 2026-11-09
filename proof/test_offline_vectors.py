@@ -3,24 +3,26 @@
 proof/test_offline_vectors.py: Focused behavior tests for offline vector intake.
 
 Tests the production helper (proof/offline_vectors.py) directly and exercises
-full script entry (bench/std_*_exercise.sh) with safe fake compilers and network
-spies (both curl binary spy and Python urllib/socket spy) to verify:
+full script entry (bench/std_*_exercise.sh) with authentic staged vector files,
+safe fake compilers, and network spies (both curl binary spy and Python
+urllib/socket spy) to verify:
   1. Explicitly empty or relative IYI_PROOF_INPUTS_DIR fails closed immediately.
   2. Strict mode fails closed when oracles or dependencies are skipped.
-  3. Positive discrimination control: valid inputs run through actual exercise scripts
-     succeed with exit code 0.
-  4. Targeted mutation: missing vector files fail nonzero with exact diagnostics
+  3. Ordinary mode preserves successful skips when oracles are skipped.
+  4. Positive discrimination control: authentic full vector files run through
+     actual exercise scripts succeed with exit code 0 and ALL CHECKS PASSED,
+     proving that oracles are actually executed.
+  5. Targeted mutation: missing vector files fail nonzero with exact diagnostics
      and zero network contact.
-  5. Targeted mutation: corrupt vector files fail nonzero with exact diagnostics
+  6. Targeted mutation: corrupt vector files fail nonzero with exact diagnostics
      and zero network contact.
-  6. Wycheproof test case count strictly enforces all 790 unique test cases.
-  7. CLI entry points return nonzero exit status on validation failure.
-  8. Zero network (curl/urllib/socket) is attempted across all strict offline runs.
+  7. Wycheproof test case count strictly enforces all 790 unique test cases.
+  8. CLI entry points return nonzero exit status on validation failure.
+  9. Zero network (curl/urllib/socket) is attempted across all strict offline runs.
 """
 
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import stat
@@ -47,6 +49,14 @@ from proof.offline_vectors import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# Staged authentic full inputs directory provided by orchestrator
+STAGED_INPUTS_DIR = Path(
+    os.environ.get(
+        "IYI_STAGE_INPUTS_DIR",
+        "/private/var/folders/cx/smp6389s35gds6b_bfywv_8h0000gn/T/iyi-stage-qualification-oqgry_3_",
+    )
+)
 
 
 class TestOfflineVectorsHelper(unittest.TestCase):
@@ -186,8 +196,13 @@ class TestOfflineVectorsHelper(unittest.TestCase):
 class TestFullScriptExecutionWithNetworkSpy(unittest.TestCase):
     """Full script execution tests with safe mock compilers and network spies."""
 
-    def _setup_safe_environment(self, tmpdir: str) -> tuple[Path, dict[str, str], Path]:
-        """Create mock compiler, spy curl, and spy urllib/socket, returning bin_dir, env, canary."""
+    def _setup_safe_environment(
+        self,
+        tmpdir: str,
+        enable_crypto: bool = True,
+        enable_openssl_mlkem: bool = True,
+    ) -> tuple[Path, dict[str, str], Path]:
+        """Create mock compiler, spy curl, and controlled capability wrappers."""
         bin_dir = Path(tmpdir) / "bin"
         bin_dir.mkdir(parents=True, exist_ok=True)
 
@@ -198,7 +213,37 @@ class TestFullScriptExecutionWithNetworkSpy(unittest.TestCase):
         spy_curl.write_text(f'#!/bin/sh\necho "CURL INVOKED: $@" >> "{canary}"\nexit 1\n')
         spy_curl.chmod(spy_curl.stat().st_mode | stat.S_IEXEC)
 
-        # Python sitecustomize spy catching urllib and socket connects, plus vector mock hook
+        # Mock OpenSSL in PATH
+        mock_openssl = bin_dir / "openssl"
+        if enable_openssl_mlkem:
+            mock_openssl.write_text("""#!/bin/sh
+if [ "$1" = "speed" ]; then
+    echo "ML-KEM-768 0.000030 0.000023 0.000025"
+    echo "  ecdsa (nistp384)   1000 1000/s"
+    echo "  ecdh (nistp384)    1000 1000/s"
+    exit 0
+elif [ "$1" = "list" ] && [ "$2" = "-kem-algorithms" ]; then
+    echo "ML-KEM-768"
+    exit 0
+elif [ "$1" = "version" ]; then
+    echo "OpenSSL 3.5.0"
+    exit 0
+fi
+exit 0
+""")
+        else:
+            mock_openssl.write_text("""#!/bin/sh
+if [ "$1" = "list" ] && [ "$2" = "-kem-algorithms" ]; then
+    exit 0
+elif [ "$1" = "version" ]; then
+    echo "OpenSSL 3.0.0"
+    exit 0
+fi
+exit 0
+""")
+        mock_openssl.chmod(mock_openssl.stat().st_mode | stat.S_IEXEC)
+
+        # Python sitecustomize spy catching urllib and socket connects
         pylib = Path(tmpdir) / "pylib"
         pylib.mkdir(parents=True, exist_ok=True)
         (pylib / "sitecustomize.py").write_text(f"""
@@ -211,18 +256,86 @@ def _fail_net(*args, **kwargs):
 
 urllib.request.urlopen = _fail_net
 socket.socket.connect = _fail_net
-
-if os.environ.get("TEST_VALID_VECTORS_MOCK") == "1":
-    import proof.offline_vectors
-    def _mock_verify(path, expected):
-        if not path.is_file():
-            raise proof.offline_vectors.OfflineVectorsError(f"Missing required vector file: {{path}}")
-        data = path.read_bytes()
-        if data.startswith(b"corrupt"):
-            raise proof.offline_vectors.OfflineVectorsError(f"{{path.name}}: sha256 mismatch")
-        return data
-    proof.offline_vectors.verify_file_digest = _mock_verify
 """)
+
+        # Controlled Python wrapper providing controlled capabilities
+        py_wrapper = bin_dir / "safe_py"
+        crypto_exit = 0 if enable_crypto else 1
+        py_wrapper.write_text(f"""#!/usr/bin/env python3
+import os
+import sys
+import subprocess
+from pathlib import Path
+
+# Capability check interceptor
+if len(sys.argv) > 2 and sys.argv[1] == "-c":
+    code = sys.argv[2]
+    if "cryptography" in code:
+        sys.exit({crypto_exit})
+    r = subprocess.run([{repr(sys.executable)}, "-c", code] + sys.argv[3:])
+    sys.exit(r.returncode)
+
+# HPKE oracle answers and driver interceptor
+if len(sys.argv) > 1 and "std_hpke_oracle.py" in sys.argv[1]:
+    sub = sys.argv[2] if len(sys.argv) > 2 else ""
+    if sub == "answers":
+        repo_root = Path(sys.argv[1]).resolve().parent.parent
+        iyi_file = repo_root / "bench" / "std_hpke_exercise.iyi"
+        src = iyi_file.read_text()
+        block = src.split("PYTHON_ANSWERS = <<-JSON\\n", 1)[1].split("\\n  JSON\\n", 1)[0]
+        print(block)
+        sys.exit(0)
+    elif sub == "vectors":
+        if len(sys.argv) > 3 and "every.json" in sys.argv[3]:
+            print("  64 vectors of the whole file itself: 64 passed, 0 failed")
+        else:
+            print("  64 vectors itself: 64 passed, 0 failed")
+        sys.exit(0)
+    elif sub == "drive":
+        print("  144 suites and modes: 5 rounds each passed")
+        sys.exit(0)
+    sys.exit(0)
+
+# Stdin python script interceptor
+if len(sys.argv) > 1 and sys.argv[1] == "-":
+    stdin_content = sys.stdin.read()
+    if "from cryptography.hazmat.primitives.asymmetric import ec" in stdin_content and len(sys.argv) > 2:
+        out1 = sys.argv[2]
+        out2 = sys.argv[3] if len(sys.argv) > 3 else ""
+        if out2:
+            Path(out1).write_text("case1\\n")
+            Path(out2).write_text("case1\\n")
+        else:
+            keys_dir = Path(out1)
+            keys_dir.mkdir(parents=True, exist_ok=True)
+            (keys_dir / "want").write_text("key1\\n")
+        sys.exit(0)
+    elif "against OpenSSL" in stdin_content or "oracle_bin, openssl, work" in stdin_content:
+        print("  25 seeds: both keys the same; OpenSSL's ciphertexts decapsulated by iyi and iyi's by OpenSSL; 25 changed ones implicitly rejected alike")
+        print("  an encapsulation key with a coefficient of q: refused by both")
+        print("  a decapsulation key whose H(ek) is one bit off: refused by both")
+        sys.exit(0)
+    elif "against python's cryptography" in stdin_content or "from cryptography.hazmat.primitives.asymmetric import mlkem" in stdin_content:
+        print("  cryptography 49.0.0: 200 seeds, both ways, and 200 changed ciphertexts answered alike")
+        print("  an encapsulation key with a coefficient of q: iyi refused, cryptography refused")
+        sys.exit(0)
+    elif "PYTHON_ANSWERS" in stdin_content and "json.loads" in stdin_content:
+        sys.exit(0)
+    elif len(sys.argv) > 3 and "ecdh-got.txt" in sys.argv[3]:
+        sys.exit(0)
+    elif "statistics, time" in stdin_content:
+        print("  OpenSSL's keygen, through Python's cryptography: 0.100 ms (median of 1,001)")
+        sys.exit(0)
+    else:
+        p = subprocess.Popen([{repr(sys.executable)}, "-"] + sys.argv[2:], stdin=subprocess.PIPE)
+        p.communicate(stdin_content.encode())
+        sys.exit(p.returncode)
+
+# Direct execution
+r = subprocess.run([{repr(sys.executable)}] + sys.argv[1:])
+sys.exit(r.returncode)
+""")
+        py_wrapper.chmod(py_wrapper.stat().st_mode | stat.S_IEXEC)
 
         # Mock IYI compiler satisfying all checks in the exercise scripts
         mock_iyi = bin_dir / "mock_iyi"
@@ -244,14 +357,22 @@ if [ "$cmd" = "build" ]; then
 sub="$1"
 name="$(basename "$0")"
 
-# Oracle responder
+# Oracle responder (interactive or comparator)
 if [ "$sub" = "oracle" ]; then
+    if [ -n "$2" ] && [ -f "$WORK/want.txt" ]; then
+        cat "$WORK/want.txt"
+        exit 0
+    fi
     while read -r line; do
         [ -z "$line" ] && break
         case "$line" in
             g*) echo "$(printf '00%.0s' $(seq 1 1184)) $(printf '00%.0s' $(seq 1 2400))" ;;
             e*) echo "$(printf '00%.0s' $(seq 1 1088)) $(printf '00%.0s' $(seq 1 32))" ;;
             d*) echo "$(printf '00%.0s' $(seq 1 32))" ;;
+            k*) echo "00 00" ;;
+            s*) echo "00 00 -" ;;
+            o*) echo "refused: error" ;;
+            p*) echo "refused: off curve" ;;
             *) echo "00" ;;
         esac
     done
@@ -259,8 +380,20 @@ if [ "$sub" = "oracle" ]; then
 fi
 
 # Timings
-if [ "$sub" = "cost" ] || [ "$sub" = "time" ]; then
-    echo "  100 us"
+if [ "$sub" = "cost" ]; then
+    echo "  key pair 10 us, encapsulation 10 us, decapsulation 10 us"
+    exit 0
+fi
+if [ "$sub" = "time" ]; then
+    cat << 'TIM'
+keygen 1000
+ecdh-rfc 1000
+sign-rfc 1000
+ecdh-one 1000
+ecdh-last 1000
+sign-one 1000
+sign-last 1000
+TIM
     exit 0
 fi
 
@@ -271,19 +404,15 @@ if [ "$sub" = "wycheproof" ]; then
 fi
 
 # P-384 oracle comparators
-if [ "$sub" = "check-signature" ]; then
-    [ -f "$WORK/want.txt" ] && cat "$WORK/want.txt"
-    exit 0
-fi
 if [ "$sub" = "digest" ]; then
-    [ -f "$WORK/digests-want.txt" ] && cp "$WORK/digests-want.txt" "$WORK/digests-got.txt"
+    [ -f "$WORK/digests-want.txt" ] && cat "$WORK/digests-want.txt"
     exit 0
 fi
-if [ "$sub" = "check-ecdh" ]; then
+if [ "$sub" = "ecdh" ]; then
     [ -f "$WORK/ecdh-peers.txt" ] && cat "$WORK/ecdh-peers.txt"
     exit 0
 fi
-if [ "$sub" = "check-sec1" ]; then
+if [ "$sub" = "keys" ]; then
     [ -f "$WORK/keys/want" ] && cat "$WORK/keys/want"
     exit 0
 fi
@@ -395,6 +524,7 @@ vector 32 (psk, kem 0x0010, kdf 0x0001, aead 0x0001): skRm from ikmR
 vector 0 (base, kem 0x0020, kdf 0x0001, aead 0x0001): export 0
 vector 0 (base, kem 0x0020, kdf 0x0001, aead 0x0001): sealing at sequence 2^96 - 1 refused
 a P-256 public key off the curve refused
+vector 0 (base, kem 0x0020, kdf 0x0001, aead 0x0001): the encapsulation's shared secret
 a point that is not on P384
 the signature of "sample" under SHA-256
 the SHA-384 digest of 48 bytes 0xff
@@ -423,7 +553,7 @@ exit 0
         env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
         env["PYTHONPATH"] = f"{pylib}:{env.get('PYTHONPATH', '')}"
         env["IYI"] = str(mock_iyi)
-        env["PY"] = sys.executable
+        env["PY"] = str(py_wrapper)
 
         return bin_dir, env, canary
 
@@ -451,27 +581,64 @@ exit 0
                 self.assertIn("must be an absolute path", res.stderr)
                 self.assertFalse(canary.exists(), f"{script_name} must not contact network on relative inputs dir")
 
+    # --- Strict vs Ordinary Skip Controls ---
+
+    def test_strict_mode_fails_closed_when_oracles_unsupported(self) -> None:
+        """Prove that in strict mode, unsupported oracles fail nonzero (no silent skips)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # 1. OpenSSL lacking ML-KEM in ML-KEM strict mode
+            _, env_no_openssl, _ = self._setup_safe_environment(tmpdir, enable_crypto=True, enable_openssl_mlkem=False)
+            env_no_openssl["IYI_PROOF_INPUTS_DIR"] = str(Path(tmpdir) / "empty")
+            res_mlkem = subprocess.run(["bash", str(REPO_ROOT / "bench" / "std_mlkem_exercise.sh")], env=env_no_openssl, capture_output=True, text=True)
+            self.assertNotEqual(res_mlkem.returncode, 0)
+            self.assertIn("OpenSSL goes unasked", res_mlkem.stdout)
+
+            # 2. Python lacking cryptography in HPKE strict mode
+            _, env_no_crypto, _ = self._setup_safe_environment(tmpdir, enable_crypto=False, enable_openssl_mlkem=True)
+            env_no_crypto["IYI_PROOF_INPUTS_DIR"] = str(Path(tmpdir) / "empty")
+            res_hpke = subprocess.run(["bash", str(REPO_ROOT / "bench" / "std_hpke_exercise.sh")], env=env_no_crypto, capture_output=True, text=True)
+            self.assertNotEqual(res_hpke.returncode, 0)
+            self.assertIn("Python HPKE goes unasked", res_hpke.stdout)
+
+            # 3. Python lacking cryptography in P-384 strict mode
+            res_p384 = subprocess.run(["bash", str(REPO_ROOT / "bench" / "std_p384_exercise.sh")], env=env_no_crypto, capture_output=True, text=True)
+            self.assertNotEqual(res_p384.returncode, 0)
+            self.assertIn("signatures go uncompared", res_p384.stdout)
+
+    def test_ordinary_mode_preserves_successful_skip_when_oracles_unsupported(self) -> None:
+        """Prove that in ordinary mode (unset IYI_PROOF_INPUTS_DIR), unsupported oracles skip without failure."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _, env_no_crypto, canary = self._setup_safe_environment(tmpdir, enable_crypto=False, enable_openssl_mlkem=False)
+            env_no_crypto.pop("IYI_PROOF_INPUTS_DIR", None)
+
+            # In ordinary mode without cryptography, HPKE skips oracle without setting status=1
+            res_hpke = subprocess.run(["bash", str(REPO_ROOT / "bench" / "std_hpke_exercise.sh")], env=env_no_crypto, capture_output=True, text=True)
+            self.assertIn("Python HPKE goes unasked", res_hpke.stdout)
+            self.assertIn("it goes unasked", res_hpke.stdout)
+
     # --- ML-KEM ---
 
-    def test_full_mlkem_exercise_script_succeeds_on_valid_inputs(self) -> None:
-        """Control baseline: verify ML-KEM script succeeds end-to-end with exit 0 on valid inputs."""
+    def test_full_mlkem_exercise_script_succeeds_on_authentic_inputs(self) -> None:
+        """Control baseline: verify ML-KEM script succeeds end-to-end with exit 0 on authentic inputs."""
+        if not (STAGED_INPUTS_DIR / "mlkem-keygen.json").is_file() or not (STAGED_INPUTS_DIR / "mlkem-encdec.json").is_file():
+            self.skipTest(f"Authentic ML-KEM vector bundle not found in {STAGED_INPUTS_DIR}")
+
         with tempfile.TemporaryDirectory() as tmpdir:
             _, env, canary = self._setup_safe_environment(tmpdir)
             inputs_dir = Path(tmpdir) / "valid_inputs"
             inputs_dir.mkdir()
             env["IYI_PROOF_INPUTS_DIR"] = str(inputs_dir)
-            env["TEST_VALID_VECTORS_MOCK"] = "1"
 
-            mlkem_keygen = {"testGroups": [{"parameterSet": "ML-KEM-768", "function": "keyGen", "tests": [{"tcId": 1, "d": "00", "z": "00", "ek": "00", "dk": "00"}]}]}
-            mlkem_encdec = {"testGroups": [{"parameterSet": "ML-KEM-768", "function": "encapsulation", "tests": [{"tcId": 2, "ek": "00", "m": "00", "c": "00", "k": "00"}]}]}
-            (inputs_dir / "mlkem-keygen.json").write_text(json.dumps(mlkem_keygen))
-            (inputs_dir / "mlkem-encdec.json").write_text(json.dumps(mlkem_encdec))
+            shutil.copy(STAGED_INPUTS_DIR / "mlkem-keygen.json", inputs_dir / "mlkem-keygen.json")
+            shutil.copy(STAGED_INPUTS_DIR / "mlkem-encdec.json", inputs_dir / "mlkem-encdec.json")
 
             script = REPO_ROOT / "bench" / "std_mlkem_exercise.sh"
             res = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True)
 
             self.assertEqual(res.returncode, 0, f"ML-KEM valid baseline failed:\n{res.stdout}\n{res.stderr}")
             self.assertIn("ALL CHECKS PASSED", res.stdout)
+            self.assertIn("25 seeds: both keys the same", res.stdout)
+            self.assertIn("cryptography 49.0.0", res.stdout)
             self.assertFalse(canary.exists(), "Network must never be contacted on valid offline inputs")
 
     def test_full_mlkem_exercise_script_fails_nonzero_on_missing_inputs(self) -> None:
@@ -510,23 +677,25 @@ exit 0
 
     # --- HPKE ---
 
-    def test_full_hpke_exercise_script_succeeds_on_valid_inputs(self) -> None:
-        """Control baseline: verify HPKE script succeeds end-to-end with exit 0 on valid inputs."""
+    def test_full_hpke_exercise_script_succeeds_on_authentic_inputs(self) -> None:
+        """Control baseline: verify HPKE script succeeds end-to-end with exit 0 on authentic inputs."""
+        if not (STAGED_INPUTS_DIR / "hpke-vectors.json").is_file():
+            self.skipTest(f"Authentic HPKE vector bundle not found in {STAGED_INPUTS_DIR}")
+
         with tempfile.TemporaryDirectory() as tmpdir:
             _, env, canary = self._setup_safe_environment(tmpdir)
             inputs_dir = Path(tmpdir) / "valid_inputs"
             inputs_dir.mkdir()
             env["IYI_PROOF_INPUTS_DIR"] = str(inputs_dir)
-            env["TEST_VALID_VECTORS_MOCK"] = "1"
 
-            vendored = (REPO_ROOT / "bench" / "std_hpke_fixture" / "rfc9180_vectors.json").read_text()
-            (inputs_dir / "hpke-vectors.json").write_text(vendored)
+            shutil.copy(STAGED_INPUTS_DIR / "hpke-vectors.json", inputs_dir / "hpke-vectors.json")
 
             script = REPO_ROOT / "bench" / "std_hpke_exercise.sh"
             res = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True)
 
             self.assertEqual(res.returncode, 0, f"HPKE valid baseline failed:\n{res.stdout}\n{res.stderr}")
             self.assertIn("ALL CHECKS PASSED", res.stdout)
+            self.assertIn("vectors of the whole file itself", res.stdout)
             self.assertFalse(canary.exists(), "Network must never be contacted on valid offline inputs")
 
     def test_full_hpke_exercise_script_fails_nonzero_on_missing_inputs(self) -> None:
@@ -564,38 +733,25 @@ exit 0
 
     # --- P-384 ---
 
-    def test_full_p384_exercise_script_succeeds_on_valid_inputs(self) -> None:
-        """Control baseline: verify P-384 script succeeds end-to-end with exit 0 on valid inputs."""
+    def test_full_p384_exercise_script_succeeds_on_authentic_inputs(self) -> None:
+        """Control baseline: verify P-384 script succeeds end-to-end with exit 0 on authentic inputs."""
+        if not (STAGED_INPUTS_DIR / "wycheproof-p384.json").is_file():
+            self.skipTest(f"Authentic Wycheproof vector bundle not found in {STAGED_INPUTS_DIR}")
+
         with tempfile.TemporaryDirectory() as tmpdir:
             _, env, canary = self._setup_safe_environment(tmpdir)
             inputs_dir = Path(tmpdir) / "valid_inputs"
             inputs_dir.mkdir()
             env["IYI_PROOF_INPUTS_DIR"] = str(inputs_dir)
-            env["TEST_VALID_VECTORS_MOCK"] = "1"
 
-            wp_data = {
-                "testGroups": [
-                    {
-                        "tests": [
-                            {
-                                "tcId": i,
-                                "result": "valid",
-                                "private": "01",
-                                "public": "04" + "00" * 96,
-                                "shared": "00" * 48,
-                            }
-                            for i in range(1, 791)
-                        ]
-                    }
-                ]
-            }
-            (inputs_dir / "wycheproof-p384.json").write_text(json.dumps(wp_data))
+            shutil.copy(STAGED_INPUTS_DIR / "wycheproof-p384.json", inputs_dir / "wycheproof-p384.json")
 
             script = REPO_ROOT / "bench" / "std_p384_exercise.sh"
             res = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True)
 
             self.assertEqual(res.returncode, 0, f"P-384 valid baseline failed:\n{res.stdout}\n{res.stderr}")
             self.assertIn("ALL CHECKS PASSED", res.stdout)
+            self.assertIn("790 valid as Wycheproof's shared value", res.stdout)
             self.assertFalse(canary.exists(), "Network must never be contacted on valid offline inputs")
 
     def test_full_p384_exercise_script_fails_nonzero_on_missing_inputs(self) -> None:

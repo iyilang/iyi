@@ -57,10 +57,42 @@ cleanup() {
     kill "$pid" >/dev/null 2>&1
     wait "$pid" >/dev/null 2>&1
   done
+  chmod -R u+w "$WORK" >/dev/null 2>&1 || true
   rm -rf "$WORK"
 }
 trap cleanup EXIT
 
+if [ "${IYI_PROOF_INPUTS_DIR+set}" = "set" ]; then
+  if [ -z "$IYI_PROOF_INPUTS_DIR" ]; then
+    echo "FAIL: IYI_PROOF_INPUTS_DIR must not be empty" >&2
+    exit 1
+  fi
+  case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN* | Windows_NT)
+      case "$IYI_PROOF_INPUTS_DIR" in
+        /* | [a-zA-Z]:/* | [a-zA-Z]:\\* | \\\\*) ;;
+        *)
+          echo "FAIL: IYI_PROOF_INPUTS_DIR must be an absolute path: $IYI_PROOF_INPUTS_DIR" >&2
+          exit 1
+          ;;
+      esac
+      command -v cygpath >/dev/null 2>&1 && IYI_PROOF_INPUTS_DIR="$(cygpath -m "$IYI_PROOF_INPUTS_DIR")"
+      ;;
+    *)
+      case "$IYI_PROOF_INPUTS_DIR" in
+        /*) ;;
+        *)
+          echo "FAIL: IYI_PROOF_INPUTS_DIR must be an absolute path: $IYI_PROOF_INPUTS_DIR" >&2
+          exit 1
+          ;;
+      esac
+      ;;
+  esac
+  if [ ! -d "$IYI_PROOF_INPUTS_DIR" ]; then
+    echo "FAIL: IYI_PROOF_INPUTS_DIR directory not found: $IYI_PROOF_INPUTS_DIR" >&2
+    exit 1
+  fi
+fi
 status=0
 export IYI_PATH="$REPO/src${PSEP}$REPO/samples/iyi"
 
@@ -271,26 +303,24 @@ echo "== whole orders against Let's Encrypt's Pebble"
 # ten tries again a request fails only if eleven refusals come in a row
 # (0.3^11, about 2e-6 a request).
 GO="${GO:-go}"
-if [ -z "$PY" ] || ! command -v "$GO" >/dev/null 2>&1; then
-  echo "  no Go here (or no python to drive it), so Pebble is not built and the orders go unplaced"
-else
-  GOBIN="$WORK/gobin"
-  mkdir -p "$GOBIN"
-  if ! GOBIN="$GOBIN" "$GO" install github.com/letsencrypt/pebble/v2/cmd/pebble@latest \
-      github.com/letsencrypt/pebble/v2/cmd/pebble-challtestsrv@latest >"$WORK/go-install.log" 2>&1; then
-    echo "  Pebble could not be fetched or built here (no network?), so the orders go unplaced: $(tail -1 "$WORK/go-install.log")"
+if [ -z "$PY" ]; then
+  if [ "${IYI_PROOF_INPUTS_DIR+set}" = "set" ]; then
+    echo "  FAIL: IYI_PROOF_INPUTS_DIR requires Python to drive Pebble" >&2
+    status=1
   else
-    # `go version -m` reads the binary by its file's name, which on
-    # Windows ends in .exe; bash runs it by either.
-    binary="$GOBIN/pebble"
-    [ -f "$binary.exe" ] && binary="$binary.exe"
-    version="$("$GO" version -m "$binary" 2>/dev/null | awk '$1 == "mod" && $2 == "github.com/letsencrypt/pebble/v2" { print $3 }')"
-    certs="$("$GO" env GOMODCACHE)/github.com/letsencrypt/pebble/v2@$version/test/certs"
-    case "$(uname -s)" in
-      MINGW* | MSYS* | CYGWIN* | Windows_NT) certs="$(cygpath -m "$certs")" ;;
-    esac
+    echo "  no Go here (or no python to drive it), so Pebble is not built and the orders go unplaced"
+  fi
+else
+  acquire_res=0
+  . "$REPO/bench/pebble_acquire.sh" || acquire_res=$?
+  if [ "$acquire_res" -eq 1 ]; then
+    status=1
+  elif [ "$acquire_res" -eq 2 ]; then
+    echo "  no Go here (or no python to drive it), so Pebble is not built and the orders go unplaced"
+  elif [ "$acquire_res" -eq 3 ]; then
+    echo "  Pebble could not be fetched or built here (no network?), so the orders go unplaced: $(tail -1 "$WORK/go-install.log")"
+  elif [ "$acquire_res" -eq 0 ]; then
     mkdir -p "$WORK/pebble"
-    # Six free ports, each held open until all six are drawn so none is
     # drawn twice; Pebble's config and the exercise's arguments from them.
     if ! "$PY" - "$WORK/pebble" "$certs" <<'PY'
 import json, socket, sys
@@ -363,7 +393,12 @@ PY
           tail -5 "$WORK/pebble/pebble.log" | sed 's/^/    pebble: /'
           status=1
         elif ! command -v openssl >/dev/null 2>&1; then
-          echo "  no openssl here, so the chains go unverified by it"
+          if [ "${IYI_PROOF_INPUTS_DIR+set}" = "set" ]; then
+            echo "  FAIL: openssl required to verify certificate chains in proof mode" >&2
+            status=1
+          else
+            echo "  no openssl here, so the chains go unverified by it"
+          fi
         else
           verified=0
           for chain in "$WORK"/pebble/out/*.iyi-acme.example.pem; do

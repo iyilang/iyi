@@ -72,10 +72,42 @@ cleanup() {
     kill "$pid" >/dev/null 2>&1
     wait "$pid" >/dev/null 2>&1
   done
+  chmod -R u+w "$WORK" >/dev/null 2>&1 || true
   rm -rf "$WORK"
 }
 trap cleanup EXIT
 
+if [ "${IYI_PROOF_INPUTS_DIR+set}" = "set" ]; then
+  if [ -z "$IYI_PROOF_INPUTS_DIR" ]; then
+    echo "FAIL: IYI_PROOF_INPUTS_DIR must not be empty" >&2
+    exit 1
+  fi
+  case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN* | Windows_NT)
+      case "$IYI_PROOF_INPUTS_DIR" in
+        /* | [a-zA-Z]:/* | [a-zA-Z]:\\* | \\\\*) ;;
+        *)
+          echo "FAIL: IYI_PROOF_INPUTS_DIR must be an absolute path: $IYI_PROOF_INPUTS_DIR" >&2
+          exit 1
+          ;;
+      esac
+      command -v cygpath >/dev/null 2>&1 && IYI_PROOF_INPUTS_DIR="$(cygpath -m "$IYI_PROOF_INPUTS_DIR")"
+      ;;
+    *)
+      case "$IYI_PROOF_INPUTS_DIR" in
+        /*) ;;
+        *)
+          echo "FAIL: IYI_PROOF_INPUTS_DIR must be an absolute path: $IYI_PROOF_INPUTS_DIR" >&2
+          exit 1
+          ;;
+      esac
+      ;;
+  esac
+  if [ ! -d "$IYI_PROOF_INPUTS_DIR" ]; then
+    echo "FAIL: IYI_PROOF_INPUTS_DIR directory not found: $IYI_PROOF_INPUTS_DIR" >&2
+    exit 1
+  fi
+fi
 status=0
 export IYI_PATH="$REPO/src${PSEP}$REPO/samples/iyi"
 
@@ -171,22 +203,23 @@ echo "== certificates from Let's Encrypt's Pebble"
 # the badNonce retries.
 GO="${GO:-go}"
 PEBBLE=""
-if [ -z "$ORACLE" ] || ! command -v "$GO" >/dev/null 2>&1; then
-  echo "  no Go here (or no python with cryptography to drive it), so Pebble is not built and nothing is ordered"
-else
-  GOBIN="$WORK/gobin"
-  mkdir -p "$GOBIN"
-  if ! GOBIN="$GOBIN" "$GO" install github.com/letsencrypt/pebble/v2/cmd/pebble@latest \
-      github.com/letsencrypt/pebble/v2/cmd/pebble-challtestsrv@latest >"$WORK/go-install.log" 2>&1; then
-    echo "  Pebble could not be fetched or built here (no network?), so nothing is ordered: $(tail -1 "$WORK/go-install.log")"
+if [ -z "$ORACLE" ]; then
+  if [ "${IYI_PROOF_INPUTS_DIR+set}" = "set" ]; then
+    echo "  FAIL: IYI_PROOF_INPUTS_DIR requires Python cryptography to drive Pebble" >&2
+    status=1
   else
-    binary="$GOBIN/pebble"
-    [ -f "$binary.exe" ] && binary="$binary.exe"
-    version="$("$GO" version -m "$binary" 2>/dev/null | awk '$1 == "mod" && $2 == "github.com/letsencrypt/pebble/v2" { print $3 }')"
-    certs="$("$GO" env GOMODCACHE)/github.com/letsencrypt/pebble/v2@$version/test/certs"
-    case "$(uname -s)" in
-      MINGW* | MSYS* | CYGWIN* | Windows_NT) certs="$(cygpath -m "$certs")" ;;
-    esac
+    echo "  no Go here (or no python with cryptography to drive it), so Pebble is not built and nothing is ordered"
+  fi
+else
+  acquire_res=0
+  . "$REPO/bench/pebble_acquire.sh" || acquire_res=$?
+  if [ "$acquire_res" -eq 1 ]; then
+    status=1
+  elif [ "$acquire_res" -eq 2 ]; then
+    echo "  no Go here (or no python with cryptography to drive it), so Pebble is not built and nothing is ordered"
+  elif [ "$acquire_res" -eq 3 ]; then
+    echo "  Pebble could not be fetched or built here (no network?), so nothing is ordered: $(tail -1 "$WORK/go-install.log")"
+  elif [ "$acquire_res" -eq 0 ]; then
     mkdir -p "$WORK/pebble"
     # Seven free ports, each held open until all are drawn so none is
     # drawn twice; the Pebbles' configs and the client's setup from them.
@@ -336,7 +369,12 @@ prove_broken() {
     local | cache | alpn) ;;
     *)
       if [ -z "$PEBBLE" ]; then
-        echo "  $label: unmeasured here, as its check orders from Pebble and Pebble is not running"
+        if [ "${IYI_PROOF_INPUTS_DIR+set}" = "set" ]; then
+          echo "  FAIL: $label cannot be verified because Pebble is not running in proof mode" >&2
+          status=1
+        else
+          echo "  $label: unmeasured here, as its check orders from Pebble and Pebble is not running"
+        fi
         return
       fi
       ;;

@@ -181,6 +181,7 @@ class TestOfflineVectorsHelper(unittest.TestCase):
                 [sys.executable, str(cli_py), "mlkem", f"{tmpdir}/out.json", "--inputs-dir", f"{tmpdir}/absent"],
                 capture_output=True,
                 text=True,
+                timeout=15,
             )
             self.assertNotEqual(res.returncode, 0)
             self.assertIn("FAIL IYI_PROOF_INPUTS_DIR", res.stderr)
@@ -193,6 +194,7 @@ class TestOfflineVectorsHelper(unittest.TestCase):
                 [sys.executable, str(cli_py), "mlkem", f"{tmpdir}/out.json", "--inputs-dir", str(inputs_dir)],
                 capture_output=True,
                 text=True,
+                timeout=15,
             )
             self.assertNotEqual(res.returncode, 0)
             self.assertIn("sha256", res.stderr)
@@ -266,7 +268,7 @@ socket.socket.connect = _fail_net
         # Controlled Python wrapper named python3 and python in bin_dir
         py_wrapper = bin_dir / "python3"
         crypto_exit = 0 if enable_crypto else 1
-        py_wrapper.write_text(f"""#!/usr/bin/env python3
+        py_wrapper.write_text(f"""#!{sys.executable}
 import os
 import sys
 import subprocess
@@ -577,7 +579,7 @@ exit 0
 
             for script_name in ("std_mlkem_exercise.sh", "std_hpke_exercise.sh", "std_p384_exercise.sh"):
                 script = REPO_ROOT / "bench" / script_name
-                res = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True)
+                res = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True, timeout=30)
                 self.assertNotEqual(res.returncode, 0, f"{script_name} must fail nonzero on empty inputs dir")
                 self.assertIn("FAIL: IYI_PROOF_INPUTS_DIR must not be empty", res.stderr)
                 self.assertFalse(canary.exists(), f"{script_name} must not contact network on empty inputs dir")
@@ -589,7 +591,7 @@ exit 0
 
             for script_name in ("std_mlkem_exercise.sh", "std_hpke_exercise.sh", "std_p384_exercise.sh"):
                 script = REPO_ROOT / "bench" / script_name
-                res = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True)
+                res = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True, timeout=30)
                 self.assertNotEqual(res.returncode, 0, f"{script_name} must fail nonzero on relative inputs dir")
                 self.assertIn("must be an absolute path", res.stderr)
                 self.assertFalse(canary.exists(), f"{script_name} must not contact network on relative inputs dir")
@@ -612,19 +614,19 @@ exit 0
             # 1. OpenSSL lacking ML-KEM in ML-KEM strict mode
             _, env_no_openssl, _ = self._setup_safe_environment(tmpdir, enable_crypto=True, enable_openssl_mlkem=False)
             env_no_openssl["IYI_PROOF_INPUTS_DIR"] = str(inputs_dir)
-            res_mlkem = subprocess.run(["bash", str(REPO_ROOT / "bench" / "std_mlkem_exercise.sh")], env=env_no_openssl, capture_output=True, text=True)
+            res_mlkem = subprocess.run(["bash", str(REPO_ROOT / "bench" / "std_mlkem_exercise.sh")], env=env_no_openssl, capture_output=True, text=True, timeout=30)
             self.assertNotEqual(res_mlkem.returncode, 0)
             self.assertIn("OpenSSL goes unasked", res_mlkem.stdout)
 
             # 2. Python lacking cryptography in HPKE strict mode
             _, env_no_crypto, _ = self._setup_safe_environment(tmpdir, enable_crypto=False, enable_openssl_mlkem=True)
             env_no_crypto["IYI_PROOF_INPUTS_DIR"] = str(inputs_dir)
-            res_hpke = subprocess.run(["bash", str(REPO_ROOT / "bench" / "std_hpke_exercise.sh")], env=env_no_crypto, capture_output=True, text=True)
+            res_hpke = subprocess.run(["bash", str(REPO_ROOT / "bench" / "std_hpke_exercise.sh")], env=env_no_crypto, capture_output=True, text=True, timeout=30)
             self.assertNotEqual(res_hpke.returncode, 0)
             self.assertIn("Python HPKE goes unasked", res_hpke.stdout)
 
             # 3. Python lacking cryptography in P-384 strict mode
-            res_p384 = subprocess.run(["bash", str(REPO_ROOT / "bench" / "std_p384_exercise.sh")], env=env_no_crypto, capture_output=True, text=True)
+            res_p384 = subprocess.run(["bash", str(REPO_ROOT / "bench" / "std_p384_exercise.sh")], env=env_no_crypto, capture_output=True, text=True, timeout=30)
             self.assertNotEqual(res_p384.returncode, 0)
             self.assertIn("signatures go uncompared", res_p384.stdout)
 
@@ -635,16 +637,16 @@ exit 0
             env_no_crypto.pop("IYI_PROOF_INPUTS_DIR", None)
 
             # In ordinary mode without cryptography, scripts skip oracles without setting status=1
-            res_hpke = subprocess.run(["bash", str(REPO_ROOT / "bench" / "std_hpke_exercise.sh")], env=env_no_crypto, capture_output=True, text=True)
+            res_hpke = subprocess.run(["bash", str(REPO_ROOT / "bench" / "std_hpke_exercise.sh")], env=env_no_crypto, capture_output=True, text=True, timeout=30)
             self.assertEqual(res_hpke.returncode, 0, "Ordinary mode HPKE must exit 0 when oracles are skipped")
             self.assertIn("Python HPKE goes unasked", res_hpke.stdout)
             self.assertIn("it goes unasked", res_hpke.stdout)
 
-            res_mlkem = subprocess.run(["bash", str(REPO_ROOT / "bench" / "std_mlkem_exercise.sh")], env=env_no_crypto, capture_output=True, text=True)
+            res_mlkem = subprocess.run(["bash", str(REPO_ROOT / "bench" / "std_mlkem_exercise.sh")], env=env_no_crypto, capture_output=True, text=True, timeout=30)
             self.assertEqual(res_mlkem.returncode, 0, "Ordinary mode ML-KEM must exit 0 when oracles are skipped")
             self.assertIn("OpenSSL goes unasked", res_mlkem.stdout)
 
-            res_p384 = subprocess.run(["bash", str(REPO_ROOT / "bench" / "std_p384_exercise.sh")], env=env_no_crypto, capture_output=True, text=True)
+            res_p384 = subprocess.run(["bash", str(REPO_ROOT / "bench" / "std_p384_exercise.sh")], env=env_no_crypto, capture_output=True, text=True, timeout=30)
             self.assertEqual(res_p384.returncode, 0, "Ordinary mode P-384 must exit 0 when oracles are skipped")
             self.assertIn("signatures go uncompared", res_p384.stdout)
     # --- ML-KEM ---
@@ -665,7 +667,7 @@ exit 0
             shutil.copy(staged_dir / "mlkem-encdec.json", inputs_dir / "mlkem-encdec.json")
 
             script = REPO_ROOT / "bench" / "std_mlkem_exercise.sh"
-            res = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True)
+            res = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True, timeout=30)
 
             self.assertEqual(res.returncode, 0, f"ML-KEM valid baseline failed:\n{res.stdout}\n{res.stderr}")
             self.assertIn("ALL CHECKS PASSED", res.stdout)
@@ -682,7 +684,7 @@ exit 0
             env["IYI_PROOF_INPUTS_DIR"] = str(empty_inputs)
 
             script = REPO_ROOT / "bench" / "std_mlkem_exercise.sh"
-            res = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True)
+            res = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True, timeout=30)
 
             self.assertNotEqual(res.returncode, 0, "Script must exit nonzero when offline inputs are missing")
             self.assertIn("FAIL IYI_PROOF_INPUTS_DIR", res.stdout + res.stderr)
@@ -700,7 +702,7 @@ exit 0
             (corrupt_inputs / "mlkem-encdec.json").write_bytes(b"corrupt")
 
             script = REPO_ROOT / "bench" / "std_mlkem_exercise.sh"
-            res = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True)
+            res = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True, timeout=30)
 
             self.assertNotEqual(res.returncode, 0, "Script must exit nonzero when offline inputs are corrupt")
             self.assertIn("FAIL IYI_PROOF_INPUTS_DIR", res.stdout + res.stderr)
@@ -724,7 +726,7 @@ exit 0
             shutil.copy(staged_dir / "hpke-vectors.json", inputs_dir / "hpke-vectors.json")
 
             script = REPO_ROOT / "bench" / "std_hpke_exercise.sh"
-            res = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True)
+            res = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True, timeout=30)
 
             self.assertEqual(res.returncode, 0, f"HPKE valid baseline failed:\n{res.stdout}\n{res.stderr}")
             self.assertIn("ALL CHECKS PASSED", res.stdout)
@@ -740,7 +742,7 @@ exit 0
             env["IYI_PROOF_INPUTS_DIR"] = str(empty_inputs)
 
             script = REPO_ROOT / "bench" / "std_hpke_exercise.sh"
-            res = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True)
+            res = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True, timeout=30)
 
             self.assertNotEqual(res.returncode, 0, "Script must exit nonzero when offline inputs are missing")
             self.assertIn("FAIL IYI_PROOF_INPUTS_DIR", res.stdout + res.stderr)
@@ -757,7 +759,7 @@ exit 0
             (corrupt_inputs / "hpke-vectors.json").write_bytes(b"corrupt")
 
             script = REPO_ROOT / "bench" / "std_hpke_exercise.sh"
-            res = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True)
+            res = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True, timeout=30)
 
             self.assertNotEqual(res.returncode, 0, "Script must exit nonzero when offline inputs are corrupt")
             self.assertIn("FAIL IYI_PROOF_INPUTS_DIR", res.stdout + res.stderr)
@@ -781,7 +783,7 @@ exit 0
             shutil.copy(staged_dir / "wycheproof-p384.json", inputs_dir / "wycheproof-p384.json")
 
             script = REPO_ROOT / "bench" / "std_p384_exercise.sh"
-            res = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True)
+            res = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True, timeout=30)
 
             self.assertEqual(res.returncode, 0, f"P-384 valid baseline failed:\n{res.stdout}\n{res.stderr}")
             self.assertIn("ALL CHECKS PASSED", res.stdout)
@@ -797,7 +799,7 @@ exit 0
             env["IYI_PROOF_INPUTS_DIR"] = str(empty_inputs)
 
             script = REPO_ROOT / "bench" / "std_p384_exercise.sh"
-            res = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True)
+            res = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True, timeout=30)
 
             self.assertNotEqual(res.returncode, 0, "Script must exit nonzero when offline inputs are missing")
             self.assertIn("FAIL IYI_PROOF_INPUTS_DIR", res.stdout + res.stderr)
@@ -814,7 +816,7 @@ exit 0
             (corrupt_inputs / "wycheproof-p384.json").write_bytes(b"corrupt")
 
             script = REPO_ROOT / "bench" / "std_p384_exercise.sh"
-            res = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True)
+            res = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True, timeout=30)
 
             self.assertNotEqual(res.returncode, 0, "Script must exit nonzero when offline inputs are corrupt")
             self.assertIn("FAIL IYI_PROOF_INPUTS_DIR", res.stdout + res.stderr)

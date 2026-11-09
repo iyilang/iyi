@@ -789,10 +789,12 @@ for check in missing_start dup_start missing_while dup_while missing_idle dup_id
     missing_idle)  awk '/^  (@\[Effect\(:scheduler\)\];[[:space:]]*)?def self[.]work : Nil$/ { inw=1 } inw && /IyiScheduler\.idle_worker\(st\)/ { inw=0; next } 1' "$REPO/src/iyi/concurrency.iyi" > "disposable-$check.iyi" ;;
     dup_idle)      awk '/^  (@\[Effect\(:scheduler\)\];[[:space:]]*)?def self[.]work : Nil$/ { inw=1 } inw && /IyiScheduler\.idle_worker\(st\)/ { inw=0; print; print; next } 1' "$REPO/src/iyi/concurrency.iyi" > "disposable-$check.iyi" ;;
   esac
-  if awk "$awk_widen" "disposable-$check.iyi" > /dev/null 2>&1; then
-    echo "disposable check $check unexpectedly succeeded"; rm -f "disposable-$check.iyi"; exit 1
-  fi
+  code=0
+  awk "$awk_widen" "disposable-$check.iyi" > /dev/null 2>&1 || code=$?
   rm -f "disposable-$check.iyi"
+  if [ "$code" -ne 3 ]; then
+    echo "disposable check $check failed: expected exit 3, got $code"; exit 1
+  fi
 done
 
 mkdir -p widened/iyi
@@ -829,10 +831,12 @@ for check in missing_release dup_release; do
     missing_release) awk '/^  (@\[Effect\(:scheduler\)\];[[:space:]]*)?def self[.]work : Nil$/ { inw=1 } inw && /^        else$/ { ine=1 } ine && /IyiScheduler\.release_unit\(st\)/ { ine=0; next } 1' widened/iyi/concurrency.iyi > "disposable-$check.iyi" ;;
     dup_release)     awk '/^  (@\[Effect\(:scheduler\)\];[[:space:]]*)?def self[.]work : Nil$/ { inw=1 } inw && /^        else$/ { ine=1 } ine && /IyiScheduler\.release_unit\(st\)/ { ine=0; print; print; next } 1' widened/iyi/concurrency.iyi > "disposable-$check.iyi" ;;
   esac
-  if awk "$awk_early" "disposable-$check.iyi" > /dev/null 2>&1; then
-    echo "disposable check $check unexpectedly succeeded"; rm -f "disposable-$check.iyi"; exit 1
-  fi
+  code=0
+  awk "$awk_early" "disposable-$check.iyi" > /dev/null 2>&1 || code=$?
   rm -f "disposable-$check.iyi"
+  if [ "$code" -ne 3 ]; then
+    echo "disposable check $check failed: expected exit 3, got $code"; exit 1
+  fi
 done
 
 mkdir -p early/iyi

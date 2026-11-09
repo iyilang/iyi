@@ -693,8 +693,9 @@ exit 0
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
-            work = tmp / "work"
-            work.mkdir()
+            c_dir = tmp / "C:" / "inputs"
+            c_dir.mkdir(parents=True)
+            self.assertTrue(c_dir.is_dir())
 
             env = os.environ.copy()
             env["IYI_PROOF_INPUTS_DIR"] = "C:/inputs"

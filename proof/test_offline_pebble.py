@@ -17,10 +17,10 @@ Contract specifications:
       * Owned GOMODCACHE and GOCACHE under $WORK ($WORK/gomodcache, $WORK/gocache).
       * Owned GOBIN under $WORK ($WORK/gobin).
       * Strict offline resolution:
-          - GOPROXY set to file:// URI of go-proxy/ with no fallback.
+          - GOPROXY set to file:/// URI of go-proxy/ with no fallback.
           - GONOPROXY=none (prevents GOPRIVATE from defaulting GONOPROXY and attempting direct network).
           - GOSUMDB=off, GONOSUMDB="*".
-          - No GOPRIVATE setting.
+          - No GOPRIVATE setting (stripped via env -u GOPRIVATE).
       * Contract: trusted orchestrator independently verifies complete Go mirror
         artifact manifest/digest before launch; do not claim Go's disabled
         checksum service proves it.
@@ -57,6 +57,60 @@ CHALLTESTSRV_CMD_PKG = f"{PEBBLE_MODULE}/cmd/pebble-challtestsrv@{PEBBLE_PINNED_
 PEBBLE_ACQUIRE_SCRIPT = REPO_ROOT / "bench" / "pebble_acquire.sh"
 ACME_SCRIPT = REPO_ROOT / "bench" / "std_acme_exercise.sh"
 AUTOCERT_SCRIPT = REPO_ROOT / "bench" / "std_autocert_exercise.sh"
+
+
+def is_wsl_stub(path: str) -> bool:
+    low = path.lower()
+    return "system32" in low and "bash" in low
+
+
+def get_bash_bin() -> str:
+    """Resolve the real Git Bash binary, never the Windows System32 WSL stub."""
+    for var in ("BASH_BIN", "BASH_EXECUTABLE"):
+        cand = os.environ.get(var)
+        if cand and os.path.exists(cand) and not is_wsl_stub(cand):
+            return cand
+
+    cand = os.environ.get("BASH")
+    if cand and os.path.exists(cand) and not is_wsl_stub(cand):
+        return cand
+
+    if sys.platform == "win32" or os.name == "nt":
+        for cand in (
+            r"C:\Program Files\Git\bin\bash.exe",
+            r"C:\Program Files\Git\usr\bin\bash.exe",
+            r"C:\Program Files (x86)\Git\bin\bash.exe",
+            os.path.expandvars(r"%ProgramFiles%\Git\bin\bash.exe"),
+            os.path.expandvars(r"%LOCALAPPDATA%\Programs\Git\bin\bash.exe"),
+        ):
+            if os.path.isfile(cand):
+                return cand
+
+        which_bash = shutil.which("bash")
+        if which_bash and not is_wsl_stub(which_bash):
+            return which_bash
+
+        path_dirs = os.environ.get("PATH", "").split(os.pathsep)
+        for p in path_dirs:
+            if "git" in p.lower():
+                cand = os.path.join(p, "bash.exe")
+                if os.path.isfile(cand):
+                    return cand
+
+    which_bash = shutil.which("bash")
+    if which_bash and not is_wsl_stub(which_bash):
+        return which_bash
+
+    return "/bin/bash"
+
+
+def to_file_url(path: Path | str) -> str:
+    """Format an RFC 8089 file URL suitable for Go's GOPROXY on Unix and Windows."""
+    p = str(path).replace("\\", "/")
+    if p.startswith("/"):
+        return f"file://{p}"
+    else:
+        return f"file:///{p}"
 
 
 def create_fake_go(
@@ -148,7 +202,7 @@ exec "{sys.executable}" "{py_script}" "$@"
 def run_helper(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
     """Execute bench/pebble_acquire.sh directly as a script."""
     return subprocess.run(
-        ["bash", str(PEBBLE_ACQUIRE_SCRIPT)],
+        [get_bash_bin(), str(PEBBLE_ACQUIRE_SCRIPT)],
         env=env,
         capture_output=True,
         text=True,
@@ -186,6 +240,7 @@ class TestOfflinePebbleContract(unittest.TestCase):
             env["WORK"] = str(work_dir)
             env["IYI_PROOF_INPUTS_DIR"] = str(inputs_dir)
             env["GOPRIVATE"] = "polluted_parent_goprivate"
+
             res = run_helper(env)
             self.assertEqual(res.returncode, 0, f"helper failed:\n{res.stderr}\n{res.stdout}")
             self.assertTrue(log_file.exists(), f"fake go was not called: {res.stdout}\n{res.stderr}")
@@ -199,7 +254,7 @@ class TestOfflinePebbleContract(unittest.TestCase):
             expected_args = ["install", PEBBLE_CMD_PKG, CHALLTESTSRV_CMD_PKG]
             self.assertEqual(rec["argv"], expected_args)
 
-            # Exact environment variables
+            # Exact environment variables on install
             self.assertEqual(rec["env"]["GOTOOLCHAIN"], "local")
             self.assertEqual(rec["env"]["GONOPROXY"], "none")
             self.assertEqual(rec["env"]["GOSUMDB"], "off")
@@ -213,12 +268,24 @@ class TestOfflinePebbleContract(unittest.TestCase):
 
             # No network fallback: GOPROXY must strictly be a file:// URI pointing to go-proxy
             goproxy = rec["env"]["GOPROXY"]
-            self.assertTrue(goproxy.startswith("file://"), f"GOPROXY is not file:// URI: {goproxy}")
+            self.assertEqual(goproxy, to_file_url(mirror_dir))
             self.assertIn("go-proxy", goproxy)
             self.assertNotIn(",", goproxy, "GOPROXY contains fallback list")
             self.assertNotIn("http://", goproxy, "GOPROXY contains http network fallback")
             self.assertNotIn("https://", goproxy, "GOPROXY contains https network fallback")
             self.assertNotIn("direct", goproxy, "GOPROXY contains direct network fallback")
+
+            # Metadata command (version -m) must also be constrained by proof environment
+            version_records = [r for r in records if r["argv"] and r["argv"][0] == "version"]
+            self.assertEqual(len(version_records), 1)
+            vrec = version_records[0]
+            self.assertEqual(vrec["argv"], ["version", "-m", str(work_dir / "gobin" / "pebble")])
+            self.assertEqual(vrec["env"]["GOTOOLCHAIN"], "local")
+            self.assertEqual(vrec["env"]["GONOPROXY"], "none")
+            self.assertEqual(vrec["env"]["GOSUMDB"], "off")
+            self.assertEqual(vrec["env"]["GONOSUMDB"], "*")
+            self.assertIsNone(vrec["env"]["GOPRIVATE"])
+            self.assertEqual(vrec["env"]["GOPROXY"], to_file_url(mirror_dir))
 
     def test_helper_empty_present_inputs_dir_fails_nonzero(self):
         """When IYI_PROOF_INPUTS_DIR is explicitly set but empty, helper fails closed (exit 1)."""
@@ -263,9 +330,10 @@ class TestOfflinePebbleContract(unittest.TestCase):
             self.assertEqual(res.returncode, 1)
             self.assertIn("FAIL: IYI_PROOF_INPUTS_DIR must be an absolute path: relative/path", res.stderr)
             self.assertFalse(log_file.exists())
+
     def test_unix_rejects_c_drive_relative_directory(self):
         """On Unix, C:/inputs is relative and must be rejected even if a local directory exists."""
-        uname_s = subprocess.run(["uname", "-s"], capture_output=True, text=True).stdout.strip()
+        uname_s = subprocess.run([get_bash_bin(), "-c", "uname -s"], capture_output=True, text=True).stdout.strip()
         if any(uname_s.startswith(prefix) for prefix in ("MINGW", "MSYS", "CYGWIN", "Windows_NT")):
             self.skipTest("Unix-specific relative C: directory test skipped on Windows")
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -277,14 +345,19 @@ class TestOfflinePebbleContract(unittest.TestCase):
 
             work = tmp / "work"
             work.mkdir()
+            bin_dir = tmp / "bin"
+            bin_dir.mkdir()
+            fake_go = create_fake_go(bin_dir, tmp / "go.log")
 
             env = os.environ.copy()
+            env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
+            env["GO"] = str(fake_go)
             env["IYI_PROOF_INPUTS_DIR"] = "C:/inputs"
             env["WORK"] = str(work)
 
             # Test helper
             res_helper = subprocess.run(
-                ["bash", str(PEBBLE_ACQUIRE_SCRIPT)],
+                [get_bash_bin(), str(PEBBLE_ACQUIRE_SCRIPT)],
                 cwd=str(tmp),
                 env=env,
                 capture_output=True,
@@ -295,7 +368,7 @@ class TestOfflinePebbleContract(unittest.TestCase):
 
             # Test real ACME script
             res_acme = subprocess.run(
-                ["bash", str(ACME_SCRIPT)],
+                [get_bash_bin(), str(ACME_SCRIPT)],
                 cwd=str(tmp),
                 env=env,
                 capture_output=True,
@@ -306,7 +379,7 @@ class TestOfflinePebbleContract(unittest.TestCase):
 
             # Test real AUTOCERT script
             res_autocert = subprocess.run(
-                ["bash", str(AUTOCERT_SCRIPT)],
+                [get_bash_bin(), str(AUTOCERT_SCRIPT)],
                 cwd=str(tmp),
                 env=env,
                 capture_output=True,
@@ -314,14 +387,16 @@ class TestOfflinePebbleContract(unittest.TestCase):
             )
             self.assertEqual(res_autocert.returncode, 1)
             self.assertIn("FAIL: IYI_PROOF_INPUTS_DIR must be an absolute path: C:/inputs", res_autocert.stderr)
+
     def test_unix_mode_simulated_rejects_c_drive(self):
-        """Simulate Unix platform (Linux): verifies C:/inputs is rejected even if directory exists."""
+        """Simulate Unix platform (Linux): verifies C:/inputs is rejected."""
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             bin_dir = tmp / "bin"
             bin_dir.mkdir()
             work = tmp / "work"
             work.mkdir()
+            fake_go = create_fake_go(bin_dir, tmp / "go.log")
 
             # Mock uname that returns Linux
             mock_uname = bin_dir / "uname"
@@ -330,11 +405,12 @@ class TestOfflinePebbleContract(unittest.TestCase):
 
             env = os.environ.copy()
             env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
+            env["GO"] = str(fake_go)
             env["WORK"] = str(work)
             env["IYI_PROOF_INPUTS_DIR"] = "C:/inputs"
 
             res = subprocess.run(
-                ["bash", str(PEBBLE_ACQUIRE_SCRIPT)],
+                [get_bash_bin(), str(PEBBLE_ACQUIRE_SCRIPT)],
                 cwd=str(tmp),
                 env=env,
                 capture_output=True,
@@ -342,7 +418,6 @@ class TestOfflinePebbleContract(unittest.TestCase):
             )
             self.assertEqual(res.returncode, 1)
             self.assertIn("FAIL: IYI_PROOF_INPUTS_DIR must be an absolute path: C:/inputs", res.stderr)
-
 
     def test_windows_platform_simulated_normalization(self):
         """Simulate Windows platform (MINGW): verifies drive syntax is accepted and cygpath -m invoked."""
@@ -352,6 +427,7 @@ class TestOfflinePebbleContract(unittest.TestCase):
             bin_dir.mkdir()
             work = tmp / "work"
             work.mkdir()
+            fake_go = create_fake_go(bin_dir, tmp / "go.log")
 
             # Mock uname that returns MINGW64_NT-10.0
             mock_uname = bin_dir / "uname"
@@ -367,12 +443,13 @@ class TestOfflinePebbleContract(unittest.TestCase):
 
             env = os.environ.copy()
             env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
+            env["GO"] = str(fake_go)
             env["WORK"] = str(work)
             env["IYI_PROOF_INPUTS_DIR"] = r"C:\inputs"
 
             # Execute helper with simulated Windows tools
             res = subprocess.run(
-                ["bash", str(PEBBLE_ACQUIRE_SCRIPT)],
+                [get_bash_bin(), str(PEBBLE_ACQUIRE_SCRIPT)],
                 env=env,
                 capture_output=True,
                 text=True,
@@ -387,11 +464,11 @@ class TestOfflinePebbleContract(unittest.TestCase):
         env = os.environ.copy()
         env["IYI_PROOF_INPUTS_DIR"] = "relative/inputs/dir"
 
-        res_acme = subprocess.run(["bash", str(ACME_SCRIPT)], env=env, capture_output=True, text=True)
+        res_acme = subprocess.run([get_bash_bin(), str(ACME_SCRIPT)], env=env, capture_output=True, text=True)
         self.assertEqual(res_acme.returncode, 1)
         self.assertIn("FAIL: IYI_PROOF_INPUTS_DIR must be an absolute path: relative/inputs/dir", res_acme.stderr)
 
-        res_autocert = subprocess.run(["bash", str(AUTOCERT_SCRIPT)], env=env, capture_output=True, text=True)
+        res_autocert = subprocess.run([get_bash_bin(), str(AUTOCERT_SCRIPT)], env=env, capture_output=True, text=True)
         self.assertEqual(res_autocert.returncode, 1)
         self.assertIn("FAIL: IYI_PROOF_INPUTS_DIR must be an absolute path: relative/inputs/dir", res_autocert.stderr)
 
@@ -400,14 +477,13 @@ class TestOfflinePebbleContract(unittest.TestCase):
         env = os.environ.copy()
         env["IYI_PROOF_INPUTS_DIR"] = "/nonexistent/abs/path/for/inputs"
 
-        res_acme = subprocess.run(["bash", str(ACME_SCRIPT)], env=env, capture_output=True, text=True)
+        res_acme = subprocess.run([get_bash_bin(), str(ACME_SCRIPT)], env=env, capture_output=True, text=True)
         self.assertEqual(res_acme.returncode, 1)
         self.assertIn("FAIL: IYI_PROOF_INPUTS_DIR directory not found: /nonexistent/abs/path/for/inputs", res_acme.stderr)
 
-        res_autocert = subprocess.run(["bash", str(AUTOCERT_SCRIPT)], env=env, capture_output=True, text=True)
+        res_autocert = subprocess.run([get_bash_bin(), str(AUTOCERT_SCRIPT)], env=env, capture_output=True, text=True)
         self.assertEqual(res_autocert.returncode, 1)
         self.assertIn("FAIL: IYI_PROOF_INPUTS_DIR directory not found: /nonexistent/abs/path/for/inputs", res_autocert.stderr)
-
 
     def test_helper_absent_mirror_directory_fails_nonzero(self):
         """When IYI_PROOF_INPUTS_DIR has no go-proxy/ dir, helper exits 1."""
@@ -601,7 +677,7 @@ elif [ "$acquire_res" -eq 0 ]; then
 fi
 echo "FINAL_STATUS=$status"
 """
-            res_acme = subprocess.run(["bash", "-c", cmd_acme], capture_output=True, text=True)
+            res_acme = subprocess.run([get_bash_bin(), "-c", cmd_acme], capture_output=True, text=True)
             self.assertEqual(res_acme.returncode, 0)
             self.assertIn("FINAL_STATUS=1", res_acme.stdout)
             self.assertNotIn("UNEXPECTED_ACQUIRE_SUCCESS", res_acme.stdout)
@@ -631,7 +707,7 @@ elif [ "$acquire_res" -eq 0 ]; then
 fi
 echo "FINAL_STATUS=$status"
 """
-            res_autocert = subprocess.run(["bash", "-c", cmd_autocert], capture_output=True, text=True)
+            res_autocert = subprocess.run([get_bash_bin(), "-c", cmd_autocert], capture_output=True, text=True)
             self.assertEqual(res_autocert.returncode, 0)
             self.assertIn("FINAL_STATUS=1", res_autocert.stdout)
             self.assertNotIn("UNEXPECTED_ACQUIRE_SUCCESS", res_autocert.stdout)
@@ -669,7 +745,7 @@ elif [ "$acquire_res" -eq 3 ]; then
 fi
 echo "FINAL_STATUS=$status"
 """
-            res_no_go = subprocess.run(["bash", "-c", cmd_acme_no_go], capture_output=True, text=True)
+            res_no_go = subprocess.run([get_bash_bin(), "-c", cmd_acme_no_go], capture_output=True, text=True)
             self.assertIn("FINAL_STATUS=0", res_no_go.stdout)
             self.assertIn("no Go here (or no python to drive it), so Pebble is not built and the orders go unplaced", res_no_go.stdout)
 
@@ -693,7 +769,7 @@ elif [ "$acquire_res" -eq 3 ]; then
 fi
 echo "FINAL_STATUS=$status"
 """
-            res_fail = subprocess.run(["bash", "-c", cmd_acme_fail], capture_output=True, text=True)
+            res_fail = subprocess.run([get_bash_bin(), "-c", cmd_acme_fail], capture_output=True, text=True)
             self.assertIn("FINAL_STATUS=0", res_fail.stdout)
             self.assertIn("Pebble could not be fetched or built here (no network?), so the orders go unplaced: go: network down", res_fail.stdout)
 
@@ -733,20 +809,21 @@ elif [ "$acquire_res" -eq 0 ]; then
 fi
 echo "FINAL_STATUS=$status"
 """
-            res = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
+            res = subprocess.run([get_bash_bin(), "-c", cmd], capture_output=True, text=True)
             self.assertEqual(res.returncode, 0)
             self.assertIn("FINAL_STATUS=0", res.stdout)
             self.assertIn("ACQUIRED_OK certs=", res.stdout)
+
     def test_script_boundary_empty_present_fails_closed(self):
         """When IYI_PROOF_INPUTS_DIR is set but empty, full scripts reject immediately with exit 1."""
         env = os.environ.copy()
         env["IYI_PROOF_INPUTS_DIR"] = ""
 
-        res_acme = subprocess.run(["bash", str(ACME_SCRIPT)], env=env, capture_output=True, text=True)
+        res_acme = subprocess.run([get_bash_bin(), str(ACME_SCRIPT)], env=env, capture_output=True, text=True)
         self.assertEqual(res_acme.returncode, 1)
         self.assertIn("FAIL: IYI_PROOF_INPUTS_DIR must not be empty", res_acme.stderr)
 
-        res_autocert = subprocess.run(["bash", str(AUTOCERT_SCRIPT)], env=env, capture_output=True, text=True)
+        res_autocert = subprocess.run([get_bash_bin(), str(AUTOCERT_SCRIPT)], env=env, capture_output=True, text=True)
         self.assertEqual(res_autocert.returncode, 1)
         self.assertIn("FAIL: IYI_PROOF_INPUTS_DIR must not be empty", res_autocert.stderr)
 
@@ -776,7 +853,7 @@ if [ -z "$PY" ]; then
 fi
 echo "FINAL_STATUS=$status"
 """
-            res_acme = subprocess.run(["bash", "-c", cmd_acme], capture_output=True, text=True)
+            res_acme = subprocess.run([get_bash_bin(), "-c", cmd_acme], capture_output=True, text=True)
             self.assertIn("FINAL_STATUS=1", res_acme.stdout)
             self.assertIn("FAIL: IYI_PROOF_INPUTS_DIR requires Python to drive Pebble", res_acme.stderr)
             self.assertNotIn("so Pebble is not built", res_acme.stdout)
@@ -819,7 +896,7 @@ echo "FINAL_STATUS=$status"
             # ambient environment was polluted with GOPRIVATE.
             env = os.environ.copy()
             env["GOTOOLCHAIN"] = "local"
-            env["GOPROXY"] = f"file://{mirror}"
+            env["GOPROXY"] = to_file_url(mirror)
             env["GONOPROXY"] = "none"
             env["GOSUMDB"] = "off"
             env["GONOSUMDB"] = "*"
@@ -853,7 +930,7 @@ echo "FINAL_STATUS=$status"
 
             env_file_missing = os.environ.copy()
             env_file_missing["GOTOOLCHAIN"] = "local"
-            env_file_missing["GOPROXY"] = f"file://{tmp}/nonexistent_mirror_path"
+            env_file_missing["GOPROXY"] = to_file_url(tmp / "nonexistent_mirror_path")
             env_file_missing["GONOPROXY"] = "none"
             env_file_missing["GOSUMDB"] = "off"
             env_file_missing["GONOSUMDB"] = "*"
@@ -919,6 +996,7 @@ echo "FINAL_STATUS=$status"
             finally:
                 owned_server.shutdown()
                 owned_server.server_close()
+
 
 if __name__ == "__main__":
     unittest.main()

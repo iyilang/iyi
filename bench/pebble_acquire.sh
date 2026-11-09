@@ -21,15 +21,6 @@ acquire_pebble() {
     return 1
   fi
 
-  if ! command -v "$GO" >/dev/null 2>&1; then
-    if [ "${IYI_PROOF_INPUTS_DIR+set}" = "set" ]; then
-      echo "  FAIL: IYI_PROOF_INPUTS_DIR requires Go, but '$GO' was not found" >&2
-      return 1
-    else
-      return 2
-    fi
-  fi
-
   GOBIN="$WORK/gobin"
   mkdir -p "$GOBIN"
 
@@ -66,6 +57,10 @@ acquire_pebble() {
     proxy_dir="$IYI_PROOF_INPUTS_DIR/go-proxy"
     if [ ! -d "$proxy_dir" ]; then
       echo "  FAIL: IYI_PROOF_INPUTS_DIR Go module mirror 'go-proxy/' missing: $proxy_dir" >&2
+      return 1
+    fi
+    if ! command -v "$GO" >/dev/null 2>&1; then
+      echo "  FAIL: IYI_PROOF_INPUTS_DIR requires Go, but '$GO' was not found" >&2
       return 1
     fi
 
@@ -117,6 +112,9 @@ acquire_pebble() {
     fi
     return 0
   else
+    if ! command -v "$GO" >/dev/null 2>&1; then
+      return 2
+    fi
     if ! GOBIN="$GOBIN" "$GO" install github.com/letsencrypt/pebble/v2/cmd/pebble@latest \
         github.com/letsencrypt/pebble/v2/cmd/pebble-challtestsrv@latest >"$WORK/go-install.log" 2>&1; then
       return 3

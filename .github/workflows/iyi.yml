@@ -1225,6 +1225,11 @@ jobs:
         env:
           STD_SIBLINGS: "0"
         run: bash bench/std_exercise.sh
+      # Fixture isolation under ambient environment pollution: proves
+      # std_websocket_exercise.sh and std_http_exercise.sh hold when launched
+      # with ambient proxy, WebSocket, and TLS contamination.
+      - name: Fixture isolation under ambient environment pollution
+        run: bash bench/fixture_isolation_test.sh
       # crystal-metric's port: twenty-six benchmarks that check their own
       # answers against the Crystal program's, over one program that uses
       # the library together; four broken modules prove it can fail.

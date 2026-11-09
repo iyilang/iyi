@@ -1,6 +1,350 @@
 # Changelog
 
-## Unreleased
+## 0.21.0 — 2026-11-09
+
+**A spawn has one verb and names its unit, and a plain `spawn` runs in
+parallel where the compiler can prove it safe.** `g.spawn { }`,
+`g.spawn(unit: :new) { }` and `g.spawn(unit: :same) { }` replace
+`spawn_parallel`, `spawn_serial`, `serial:` and `parallel:`, and a
+*unit*, a set of tasks of which at most one runs at a time, is defined
+with a `Unit(T)` value in std/unit to hold what only one unit reaches
+(SPEC.md III.4.16, III.4.18). A plain `spawn` whose block passes every
+check `unit: :new` does is a parallel task of its own unit; any other
+stays where it was (III.4.15). `std/parallel` cuts a `List`, an `Array`
+or a range into chunks across the workers (III.4.14), and `iyi test
+--chaos` runs each test under seeds that draw every scheduling choice, to
+find a test that passes only because its tasks ran in one order
+(III.4.17). A module that handles raw memory says so with
+`@[Unsafe("why")]`, and `String#byte_at`, `Bytes.of` and
+`String.new(Array(UInt8))` read and build bytes without it (III.13).
+`@[SafeReach]` is proven, not trusted. In the runtime each channel has a
+lock of its own, a `std/mutex` lock and its release are two locked
+instructions and a starving waiter is handed the lock, the pool starts
+one worker and grows to the work, a collection has a ceiling, and a size
+class the program stopped allocating in gives its memory back. A build
+compiles its units on threads of their own and a `--release` build
+optimises on every core. On a Mac a path typed in another case is the
+file it names, and two pointers compare equal when they hold the same
+address (#165).
+
+**What a user must change.** `spawn_parallel`, `spawn_serial`, `serial:`
+and `parallel:` are compile errors naming the new spelling, and `iyi fix`
+rewrites them. A module that compiled may be refused until it carries
+`@[Unsafe("why")]` or moves to the safe byte calls, and a library it
+uses needs a release that carries its own marks; 0.20.1 refuses the mark,
+so code that carries one needs 0.21.0.
+
+### Breaking
+
+- **One spawn verb: `g.spawn { }`, `g.spawn(unit: :new) { }` and
+  `g.spawn(unit: :same) { }` (SPEC.md III.4.16, III.4.18).**
+  `spawn_parallel` and `spawn_serial` are gone. A call to either is a
+  compile error naming the new spelling - "`spawn_parallel` is gone: one
+  verb starts a task now. Write `g.spawn(unit: :new) { }`" - and carries
+  it as an edit, so `iyi fix` rewrites `g.spawn_parallel do` and
+  `g.spawn_serial do` where the call has a block and no parentheses.
+  `unit: :new` is held to everything `spawn_parallel` was, with the same
+  refusals, now worded `the block spawn(unit: :new) runs in a unit of its
+  own, on another thread`. The argument takes the literal `:same` or
+  `:new`: another symbol, a value only known at run time, `unit: :new`
+  under `-Dgc_none` or `-Dgc_boehm`, and two placements at once are
+  refused. The typed group takes each spelling. The repository's 173 call
+  sites were moved, std's included; std/http's connections and
+  std/parallel's chunks run as before. The rename leaves the runtime's
+  paths as they were, and `bench/web_cores.py`'s server says so: on macOS
+  26.6, Apple M2 Pro, 10 cores (the user's machine), 10 workers, best of 3
+  interleaved 5 s rounds, `check_version` answered 104,591 req/s before
+  and 104,868 after, `order` 103,420 and 103,597; on Windows 11, 12
+  logical processors (the user's machine), 12 workers, 6 interleaved 8 s
+  rounds, the medians were 129,533 and 131,692 req/s for `check_version`
+  and 135,045 and 136,016 for `order`, within the rounds' own spread
+  (124,921 to 145,595).
+
+- **A spawn names its unit: `g.spawn(unit: :same)` and
+  `g.spawn(unit: :new)` replace `serial: true` and `parallel: true`
+  (SPEC.md III.4.18).** Breaking for builds of `mt/next` only: 0.20.1 had
+  neither spelling. A *unit* is now defined - a set of tasks of which at
+  most one runs at any instant and which switch only where one parks: the
+  main thread or an `IyiThread` with its tasks, a `unit: :new` task with
+  the tasks it starts, or a `Unit` value - and the spellings name it.
+  There is no alias: `serial:` and `parallel:` are each one compile error
+  naming the new spelling, "`serial:` is gone: a spawn names its unit
+  now. Write `g.spawn(unit: :same) { }`, which keeps the task in its
+  spawner's unit whatever it captures; `g.spawn { }` lets the compiler
+  place it (SPEC.md III.4.16, III.4.18)", carrying the edit when the
+  argument is the literal `true`, so `iyi fix` rewrites the call. A
+  program that only asks for `:same` starts no pool. Every in-repo
+  caller moved: bench, the specs, the samples, std, README and
+  PARALLEL_PLAN.md.
+
+- **A module that handles raw memory says so: `@[Unsafe("why")]`
+  (SPEC.md III.13).** Any `.iyi` file could reach memory the compiler
+  does not check, without spelling `Pointer`: four tasks writing one
+  `Share` string through `name.to_unsafe[i] = ...` printed `AAAA…`,
+  `AAAA…` and `DDDD…` on three runs, and `Slice.new("hello".to_unsafe,
+  1_000_000)[999_999]` died of a memory fault behind a bounds-checked
+  `[]`, while the fault message said that outside `Pointer` a program
+  cannot reach memory it does not own. Now a module whose first
+  statement is `@[Unsafe("why")]` may use what the compiler does not
+  check - a value whose type is or holds a `Pointer` however it was
+  reached (`to_unsafe`, the buffer of `String.new(n) { |buffer| }`, a
+  parameter, a cast, `pointerof`), `uninitialized`, a `lib` or top-level
+  `fun`, `@[Extern]`, `asm`, `@[Primitive]`, a call to a def whose
+  caller keeps a promise (`@[Unsafe(call: "index is in 0...size")]`, as
+  `unsafe_fetch`, `unsafe_put` and `Array.unsafe_build` carry), and the
+  trust marks `@[Share]` and `@[UnsafeReach]` - and every other module
+  is refused at its first such operation, with the count of the others
+  and the mark as the edit. The check reads types after typing, so `iyi
+  check`, `iyi build` and the editor agree. The reason is required, and
+  a mark nothing needs is a warning (`--error-on-warnings` fails it)
+  unless a macro conditional may hide what another target needs.
+  `String#byte_at(i)`, `Bytes.of(text)` and `String.new(Array(UInt8))`
+  read and build bytes without raw memory. `iyi fix` inserts the mark
+  with a reason for a person to rewrite, the language server offers it
+  as a quick fix and shows it on hover, `iyi migrate` writes it into a
+  migrated module whose Crystal source handles raw memory, `.iyimod`
+  (v62) carries it, and the fault message names the program's own
+  marked modules. **A program that compiled may be refused:** mark the
+  module with what it does with raw memory, or read its bytes with
+  `byte_at` and `Bytes.of`; 0.20.1 refuses the mark above a `module`
+  header, so code that carries one needs 0.21.0. In this repository the
+  prelude marks 13 of its 20 files, std 83 of its 121 modules (sixteen
+  that only read or built bytes, or made one C call, need none now), and
+  bench 85 of its 175 programs, every reason written by hand; no sample
+  needs one. The 33 library lines this adds - nine marks, two promises,
+  `byte_at` and `String.new(Array(UInt8), start, count)` - raised the
+  library's ceiling, by the owner's decision, from 4,650 to 4,683 (SPEC.md
+  I.4). Outside it, iyi-web (fourteen library modules), iyi-db (its
+  `@[Share]` and `@[Share(owns: true)]` types and an `uninitialized`),
+  iyi-pg (four modules marked, the rest moved to the safe calls),
+  iyi-metric (one), jwt (`jwt/base64url` marked, `jwt/keys` moved to
+  `byte_at`) and iyiturkiye (three Crystal-format parsers marked, two
+  controllers moved to the safe calls, and releases of iyi-web, iyi-pg,
+  iyi-db and jwt that carry theirs) need marks or the safe calls before
+  they build on 0.21.0. The check costs,
+  as `IYI_PROF=1`'s `main: unsafe check` against the whole `iyi check`
+  (median of five), 14 ms of 285 for `samples/iyi/hello.iyi`, 239 of
+  2,238 for `bench/std_fuzz_exercise.iyi` and 576 of 2,231 for
+  `bench/std_tls_exercise.iyi` on Linux (12 vCPU, shared), 17 of 342,
+  300 of 2,945 and 744 of 2,896 on Windows 11, 12 logical processors
+  (the user's machine), and 12 of 243, 202 of 1,863 and 491 of 1,870 on
+  macOS 26.6, an M2 Pro with 10 cores (the user's machine): 5% of a small
+  program's check, 10 to 26% of a large one's.
+
+### Added
+
+- **`iyi init` with no module path names the project after its directory
+  (#156).** `mkdir my-project && cd my-project && iyi init` writes `module
+  my-project` and `my_project.iyi`, and says which name it took and that a
+  project others will import wants its whole path. The name is held to the
+  checks a typed one is and never rewritten: `MyProject` or `my project` is
+  refused, and nothing is written. `iyi init .` stays refused - the first
+  argument is a module path, not a directory - and now says that `iyi init`
+  with no arguments is the form that means this directory.
+
+- **`Unit(T)` in `std/unit`: a value only one unit's tasks reach (SPEC.md
+  III.4.18).** `Unit.new { {} of String => Int32 }` makes a `Unit` owning
+  what the block answers, and `g.spawn(in: u) { |hits| ... }` starts a task
+  of `g` in `u`'s unit, handed the value: never at the same instant as
+  another of `u`'s tasks, interleaving with them where one parks, as
+  Swift's actors do, so a value read before a park may have changed after
+  it. The compiler holds the block to `Share` captures (``the block
+  spawn(in: counts) runs in another unit captures `log : Array(Int32)`,
+  which is not Share: ...``) and its answer to `Share` (``spawn(in:
+  counts) answers `Hash(String, Int32)`, which is not Share: ...``), and
+  refuses `in:` with `unit:`; so `Unit(T)` is `Share` for any `T`, as
+  `Mutex(T)` is. A task that panics answers `Panicked` and does not
+  poison the `Unit`. On more than one worker its tasks run on the pool;
+  on one worker, on the main thread, whichever thread spawned them, so
+  one worker stays one thread. There is no `Unit.current`. Ten thousand
+  tasks given to one `Unit` from the main thread, against ten thousand
+  `spawn(unit: :new)` tasks, on four workers (`bench/std_unit_exercise.sh`
+  counts both and bounds neither), took per task: on Linux (12 vCPUs,
+  shared), in five runs, 5133 to 6686 ns against 3904 to 6889 plain and
+  3376 to 4442 against 2249 to 4142 with `--release`; on macOS 26.6,
+  Apple M2 Pro, 10 cores (the user's machine), in four runs, 3011 to 4140
+  against 2483 to 2707 plain and 5224 to 6630 against 1124 to 1231 with
+  `--release`, where a `Unit`'s tasks cost four to six times a unit of
+  their own; on Windows 11, 12 logical processors (the user's machine),
+  built by Crystal 1.21.0, in one run, 5618 against 6359 plain and 4369
+  against 3948 with `--release`.
+
+- **Data parallelism as a library: `std/parallel` (SPEC.md
+  III.4.14).** `each_parallel`, `map_parallel`, `sum_parallel` and
+  `reduce_parallel` on a `List`, an `Array` and an `Int32` or `Int64`
+  range cut the elements into chunks, eight a worker unless `grain:`
+  names a chunk's size, and as many parallel tasks as there are workers
+  take chunks from one count. `map_parallel` answers what `map` does, in
+  order; `each_parallel` answers the error of the lowest failing index
+  and starts nothing past a failure it knows of; a panic in a chunk
+  reaches the caller, and a cancelled caller is stopped without a partial
+  answer. The block and the elements must be `Share`: a def says its
+  elements cross with `@[Share(elements: "...")]`, refused at the call -
+  ``Array#map_parallel hands its block `Counter` on other threads, ...``
+  - and a refused capture names the one-thread twin (`map`) as the other
+  way out. An `Array` is copied into a `List` first, since a task of the
+  caller's unit may write it while the caller waits. With one worker, one
+  chunk, `-Dgc_none` or `-Dgc_boehm` the chunks run on the caller. On
+  macOS 26.6, an M2 Pro with 10 cores (the user's machine), ten workers
+  ran two CPU-bound sums, SHA-256 of 20,000 strings and a string
+  transform 6.4 to 7.4 times faster than one thread; on Windows 11 with
+  12 logical processors (the user's machine), twelve workers ran the
+  sums and SHA-256 6.4 to 7.9 times faster, and the transform, which
+  allocates, 3.8 times. `bench/std_parallel_exercise.sh` holds it, with
+  five broken copies caught by name.
+
+- **A `std/mutex` lock and its release are two locked instructions, from
+  seven.** The holder's task and thread were four sequentially consistent
+  stores, an `xchg` each on x86_64, and neither orders anything: one
+  tells a task whether it holds the lock already, the other is a hint
+  for spinning. They are relaxed, through `IyiAtomic` inside std/mutex,
+  and `Atomic` keeps its one ordering. Every release also counted itself
+  a change for `wait_for`, a `lock xadd`; a waiter now counts itself as
+  waiting before its own release, with the lock held, so a release that
+  reads no waiter under the lock skips the count and the wake, and the
+  window a waiter counted after its release left - a release reading 0
+  first, the waiter parking on a count it never moved - is closed (the
+  proof is beside `release`). `bench/chan_scaling.iyi`'s `mutexes`, a
+  mutex to each pair of tasks, median of 5 interleaved on Linux x86_64
+  (12 vCPU, shared): 25.8 million updates a second with one pair, 37.6
+  with the stores relaxed, 43.3 with the count skipped too; twelve pairs
+  73.6, 106.6 and 111.9; `mutex`, twelve tasks on one, 21.6, 32.0 and
+  40.1. With the entry below as well, median of 5: on Windows 11, 12
+  logical processors (the user's machine), one pair 22.4 to 37.6 million
+  and twelve tasks on one 21.3 to 34.8; on macOS 26.6, an M2 Pro with 10
+  cores (the user's machine), one pair 36.4 and 35.3, where the stores
+  were `stlr` either way, and four pairs 36.2 to 45.9.
+  `bench/std_mutex_exercise.sh` proves a waiter counted after its
+  release hangs the exercise.
+
+- **A `std/mutex` waiter that starves is handed the lock.** A task that
+  let the lock go and took it straight back, running while the waiter it
+  woke was still waking, kept it for as long as it went on: beside a
+  holder taking it back after every 20 us hold, a waiter waited 611 ms,
+  all 30,000 holds, on Linux x86_64 (12 vCPU, shared), and 3.0 s beside
+  100 us holds. A waiter that has waited 1 ms, or been woken 4 times to
+  find the lock taken again, now starves, and the next release hands it
+  the lock rather than letting it go, Go's `sync.Mutex` starvation mode;
+  until a waiter starves the lock goes to whoever takes it first. The
+  same waiter has it in 7.3 and 7.1 ms, two wakes each queued behind the
+  running holder until the monitor preempts it, and in 0.14 and 0.50 ms
+  with the pool calling an idle worker for a hand-off from a running
+  task. On macOS 26.6, an M2 Pro with 10 cores (the user's machine), 41.9
+  ms and 3.0 s before, median of 5, and 1.6 ms after; on Windows 11, 12
+  logical processors (the user's machine), 181 ms and 3.0 s before, 4.6
+  and 9.1 ms after, 0.20 and 0.54 ms with the hand-off call.
+  `bench/std_mutex_exercise.sh` has the step, a waiter beside 1 ms holds
+  (599 ms before), with a broken copy each for a waiter that never
+  starves and a release that frees the lock where it hands it over.
+  `bench/chan_scaling.iyi`'s `held`, two tasks taking turns on each of W
+  mutexes with 20 us holds, against its Go twin on `sync.Mutex`, `over_ns`
+  before, after and Go's, median of 7 interleaved on Linux: 281/263/110
+  at one pair, 307/287/151 at two, 356/301/189 at four, 454/566/239 at
+  eight. The park, the wake and the switch, `over_ns` less the new
+  `floor_ns` (the same updates with nothing waiting), are -2 to 41 ns
+  after against Go's -34 to 17; the rest is the hold's clock, a
+  clock_gettime syscall where Go reads the vDSO. On the M2, median of 5,
+  after against Go: 59/55 at one pair, 61/95 at two, 136/392 at four,
+  231/507 at eight. On the Windows machine, median of 7, `over_ns`
+  before and after: 194/149 at one pair, 206/157 at two, 258/213 at four,
+  303/318 at eight; the park, the wake and the switch 16, -69, 30 and 30
+  ns after, Go's -22, -3, 277 and 216. Go's monotonic clock moved too
+  coarsely there for the hold - 1.84 ms an update - and its twin spins a
+  count measured at start instead.
+
+- **A `--release` build optimises on every core.** It still generates one
+  LLVM module, so LLVM sees the whole program, and then cuts it into
+  partitions of about 20,000 instructions, each optimised and compiled on
+  a thread of its own (`ReleasePartition`). A partition gets its own copy
+  of the functions its code calls and of the constants it reads, as LLVM's
+  ThinLTO imports them, done through the C API because that is all
+  Windows' `LLVM-C.dll` exports: a local copy of a local function of up to
+  100 instructions, an `available_externally` one of up to 300 of any
+  other, such as `__iyi_new`, there only to be inlined, and none of what
+  LLVM may not inline. A local function that one function alone calls
+  goes with that function, to its partition and into every copy of it,
+  since one module inlines it whatever its size, and what LLVM must
+  inline (`alwaysinline`, such as the collector's `IyiMark.barrier_word`)
+  is copied whatever its size. A copy the inliner turns down is compiled
+  anyway, so the limits are what the build costs: `samples/iyi/cores.iyi`
+  (std/http and TLS), cold, took 22.45 s of processor in 22.45 s as one
+  module against 35.78 s in 7.87 s cut on a shared 12-vCPU Linux VM,
+  20.75 s in 22.24 s against 34.72 s in 7.94 s on macOS 26.6, Apple M2
+  Pro, 10 cores (the user's machine), and 29.83 s in 30.65 s against
+  50.37 s in 12.14 s on Windows 11, 12 logical processors (the user's
+  machine). On the M2 Pro the programs it builds ran within 1.2% of the
+  one-module build, best of 45 interleaved runs: bcrypt, SHA-256,
+  ChaCha20-Poly1305 and `bench/runtime.py`'s four from 0.98x to 1.00x,
+  and JSON 1.012x, where the one-module binary against itself ran 1.001x.
+  **Windows keeps one module by default**: there the seven ran from 0.98x
+  to 1.01x, but JSON 1.015x, and 1.033x as the median of three bests of
+  15, where the one-module binary against itself ran 0.995x and 1.002x.
+  `IYI_RELEASE_PARTITIONS=0` cuts it there too.
+
+  What the cut still costs JSON is what ThinLTO's costs: a local function
+  reached from another partition is promoted, 86 of them in JSON's, and
+  loses what one module proves of it, such as `Int64#to_s`'s base being
+  10 to 16, and the chance to be dropped once inlined; and a copy with one
+  call in its partition is inlined where one module, seeing every caller,
+  keeps it whole. Copying locals only `available_externally` ran JSON
+  1.029x on the M2 Pro. Attributes inferred over the whole module before
+  the cut (`function-attrs`) took it to 1.009x, but ChaCha20-Poly1305 from
+  0.98x to 1.04x and JSON on Windows to 1.07x; constants propagated over
+  it first (`mem2reg`, `ipsccp`) left JSON where it was and cost
+  ChaCha20-Poly1305 5%.
+
+  Two causes of the Windows numbers are found. LLVM 23, which Windows
+  builds with, added a value kind before `Instruction`, so every
+  instruction read as an unnamed kind and the cut took every local
+  function for reached from elsewhere and made it external: 819 functions
+  in the hash benchmark's binary against 254 for one module, and the hash
+  at 1.07x. `LLVM::Value::Kind` has the kind now, and the binary has 317.
+  The arithmetic benchmark's 1.43x was where its loop landed: the same
+  instructions, at offset 16 of a 64-byte line in the cut build and 32 in
+  the one module. The loop alone, at each offset, ran 0.32 s from offset 0
+  to 12, 0.43 s from 13 to 16 and 0.30 s from 17 on, the same on Windows
+  and on Linux; which offset a build draws moves with any change before
+  the loop, and LLVM's branch alignment (`-x86-align-branch`) left the
+  cut build's at 1.43x. Innermost loops now start on a 32-byte boundary
+  on x86, so that loop lands at 0 or 32. The cut is a function of the
+  program, so the objects are the same on one thread and on twelve.
+  `IYI_RELEASE_PARTITIONS=1` keeps the one module, and
+  `IYI_RELEASE_IMPORT` and `IYI_RELEASE_INLINE` set the two limits.
+  `bench/release_cores.sh` holds the cores, the output, the objects and
+  the inlining across the cut, each against a broken copy, and the
+  `available_externally` copies against a build with none. On `mt/next`,
+  `bench/concurrent_mark.sh`'s copy whose barrier shades nothing passed
+  when cut, 8 runs of 8 on Linux: the loop that reads the payload's
+  colour held it where the second stop's conservative scan found it. That
+  read is in a frame of its own now, as the move was, and the cut copy
+  lost round 0's payload in 5 runs of 5.
+
+- **`iyi test --chaos[=SEED] [--chaos-runs N]` finds a test that passes
+  only because its tasks ran in one order (SPEC.md III.4.17).** The
+  compiler rules out memory races; this is for the ordering races left.
+  Each test is built with `-Diyi_chaos` and run once per seed, 100 seeds
+  from a drawn one unless told, with one worker. Every scheduling choice
+  is drawn from the seed: which task runs next, a preemption at any
+  `Atomic` verb, channel operation, `select`, spawn, `value` or loop
+  back-edge, the order a wake readies a word's waiters, and which ready
+  `select` arm goes first. Half the seeds walk at random, and half use PCT
+  priorities for depth. A parallel task runs as a unit of its own, so the
+  orders two cores could produce are met, and tasks of one unit still
+  meet only at parks. A failure prints its seed and `reproduce: iyi test
+  --chaos=SEED file`, which runs the same schedule again; `--json`
+  carries `chaos_seed`. On Linux (12 vCPUs, shared), a check-then-act on
+  an `Atomic` and a missing join each passed 1,000 of 1,000 plain runs
+  on the 12-worker pool. They were caught under 63 and 57 of seeds 1 to
+  1,000 - the random walk caught the first, PCT the second. A seed is
+  the same schedule on every target. Seeds 6 and 42 caught the two bugs
+  with the same schedule hashes on Linux, on macOS 26.6 (Apple M2 Pro,
+  10 cores, the user's machine) and on Windows 11 (12 logical
+  processors, the user's machine). With more than one worker the threads
+  are real and a seed names no schedule, which the report says. A build
+  without the flag is unchanged. On Linux, release `web_cores` and
+  `chan_scaling` have the same IR, but for line numbers. On all three
+  machines their sections are the same size as before, and on macOS
+  chan_scaling's instructions are the same.
 
 ### Changed
 
@@ -172,30 +516,6 @@
   run before the first step that starts the pool, and the run asks for its
   two workers before anything does.
 
-- **One spawn verb: `g.spawn { }`, `g.spawn(unit: :new) { }` and
-  `g.spawn(unit: :same) { }` (SPEC.md III.4.16, III.4.18).**
-  `spawn_parallel` and `spawn_serial` are gone. A call to either is a
-  compile error naming the new spelling - "`spawn_parallel` is gone: one
-  verb starts a task now. Write `g.spawn(unit: :new) { }`" - and carries
-  it as an edit, so `iyi fix` rewrites `g.spawn_parallel do` and
-  `g.spawn_serial do` where the call has a block and no parentheses.
-  `unit: :new` is held to everything `spawn_parallel` was, with the same
-  refusals, now worded `the block spawn(unit: :new) runs in a unit of its
-  own, on another thread`. The argument takes the literal `:same` or
-  `:new`: another symbol, a value only known at run time, `unit: :new`
-  under `-Dgc_none` or `-Dgc_boehm`, and two placements at once are
-  refused. The typed group takes each spelling. The repository's 173 call
-  sites were moved, std's included; std/http's connections and
-  std/parallel's chunks run as before. The rename leaves the runtime's
-  paths as they were, and `bench/web_cores.py`'s server says so: on macOS
-  26.6, Apple M2 Pro, 10 cores (the user's machine), 10 workers, best of 3
-  interleaved 5 s rounds, `check_version` answered 104,591 req/s before
-  and 104,868 after, `order` 103,420 and 103,597; on Windows 11, 12
-  logical processors (the user's machine), 12 workers, 6 interleaved 8 s
-  rounds, the medians were 129,533 and 131,692 req/s for `check_version`
-  and 135,045 and 136,016 for `order`, within the rounds' own spread
-  (124,921 to 145,595).
-
 - **A spawn kept in its unit is said where the author looks (SPEC.md
   III.4.16).** `iyi check` notes, unasked, each `g.spawn` the compiler
   kept in its spawner's unit in a file under the project's root, with
@@ -216,23 +536,6 @@
   line, with a broken copy of the runtime or of the compiler
   (`IYI_SPAWN_BROKEN`) caught for each; `bench/lsp_session.py` step 23s
   holds the hints.
-
-- **A spawn names its unit: `g.spawn(unit: :same)` and
-  `g.spawn(unit: :new)` replace `serial: true` and `parallel: true`
-  (SPEC.md III.4.18).** Breaking for builds of `mt/next` only: 0.20.1 had
-  neither spelling. A *unit* is now defined - a set of tasks of which at
-  most one runs at any instant and which switch only where one parks: the
-  main thread or an `IyiThread` with its tasks, a `unit: :new` task with
-  the tasks it starts, or a `Unit` value - and the spellings name it.
-  There is no alias: `serial:` and `parallel:` are each one compile error
-  naming the new spelling, "`serial:` is gone: a spawn names its unit
-  now. Write `g.spawn(unit: :same) { }`, which keeps the task in its
-  spawner's unit whatever it captures; `g.spawn { }` lets the compiler
-  place it (SPEC.md III.4.16, III.4.18)", carrying the edit when the
-  argument is the literal `true`, so `iyi fix` rewrites the call. A
-  program that only asks for `:same` starts no pool. Every in-repo
-  caller moved: bench, the specs, the samples, std, README and
-  PARALLEL_PLAN.md.
 
 - **The spawn notes say what a unit makes safe.** A spawn kept in its
   spawner's unit because its block shares a cell - a captured local it
@@ -372,60 +675,6 @@
   The padding is 1.5% of `samples/iyi/cores.iyi`'s text on Linux,
   1480302 bytes to 1502862, and 1.1% of its binary on Windows, 1871360
   to 1891840.
-- **A module that handles raw memory says so: `@[Unsafe("why")]`
-  (SPEC.md III.13).** Any `.iyi` file could reach memory the compiler
-  does not check, without spelling `Pointer`: four tasks writing one
-  `Share` string through `name.to_unsafe[i] = ...` printed `AAAA…`,
-  `AAAA…` and `DDDD…` on three runs, and `Slice.new("hello".to_unsafe,
-  1_000_000)[999_999]` died of a memory fault behind a bounds-checked
-  `[]`, while the fault message said that outside `Pointer` a program
-  cannot reach memory it does not own. Now a module whose first
-  statement is `@[Unsafe("why")]` may use what the compiler does not
-  check - a value whose type is or holds a `Pointer` however it was
-  reached (`to_unsafe`, the buffer of `String.new(n) { |buffer| }`, a
-  parameter, a cast, `pointerof`), `uninitialized`, a `lib` or top-level
-  `fun`, `@[Extern]`, `asm`, `@[Primitive]`, a call to a def whose
-  caller keeps a promise (`@[Unsafe(call: "index is in 0...size")]`, as
-  `unsafe_fetch`, `unsafe_put` and `Array.unsafe_build` carry), and the
-  trust marks `@[Share]` and `@[UnsafeReach]` - and every other module
-  is refused at its first such operation, with the count of the others
-  and the mark as the edit. The check reads types after typing, so `iyi
-  check`, `iyi build` and the editor agree. The reason is required, and
-  a mark nothing needs is a warning (`--error-on-warnings` fails it)
-  unless a macro conditional may hide what another target needs.
-  `String#byte_at(i)`, `Bytes.of(text)` and `String.new(Array(UInt8))`
-  read and build bytes without raw memory. `iyi fix` inserts the mark
-  with a reason for a person to rewrite, the language server offers it
-  as a quick fix and shows it on hover, `iyi migrate` writes it into a
-  migrated module whose Crystal source handles raw memory, `.iyimod`
-  (v62) carries it, and the fault message names the program's own
-  marked modules. **A program that compiled may be refused:** mark the
-  module with what it does with raw memory, or read its bytes with
-  `byte_at` and `Bytes.of`; 0.20.1 refuses the mark above a `module`
-  header, so code that carries one needs 0.21.0. In this repository the
-  prelude marks 13 of its 20 files, std 83 of its 121 modules (sixteen
-  that only read or built bytes, or made one C call, need none now), and
-  bench 85 of its 175 programs, every reason written by hand; no sample
-  needs one. The 33 library lines this adds - nine marks, two promises,
-  `byte_at` and `String.new(Array(UInt8), start, count)` - raised the
-  library's ceiling, by the owner's decision, from 4,650 to 4,683 (SPEC.md
-  I.4). Outside it, iyi-web (fourteen library modules), iyi-db (its
-  `@[Share]` and `@[Share(owns: true)]` types and an `uninitialized`),
-  iyi-pg (four modules marked, the rest moved to the safe calls),
-  iyi-metric (one), jwt (`jwt/base64url` marked, `jwt/keys` moved to
-  `byte_at`) and iyiturkiye (three Crystal-format parsers marked, two
-  controllers moved to the safe calls, and releases of iyi-web, iyi-pg,
-  iyi-db and jwt that carry theirs) need marks or the safe calls before
-  they build on 0.21.0. The check costs,
-  as `IYI_PROF=1`'s `main: unsafe check` against the whole `iyi check`
-  (median of five), 14 ms of 285 for `samples/iyi/hello.iyi`, 239 of
-  2,238 for `bench/std_fuzz_exercise.iyi` and 576 of 2,231 for
-  `bench/std_tls_exercise.iyi` on Linux (12 vCPU, shared), 17 of 342,
-  300 of 2,945 and 744 of 2,896 on Windows 11, 12 logical processors
-  (the user's machine), and 12 of 243, 202 of 1,863 and 491 of 1,870 on
-  macOS 26.6, an M2 Pro with 10 cores (the user's machine): 5% of a small
-  program's check, 10 to 26% of a large one's.
-
 ### Gates
 
 - **parallel_mark's late-helper proof is ordered, not timed.** Its copy of
@@ -732,221 +981,6 @@
   Apple M2 Pro, 10 cores (the user's machine): base ffca07d96 and
   h/unsafe failed the same way with darwin's stty and passed with GNU's;
   the gate now masks the kernel's `PENDIN` bit in both formats.
-
-### Added
-
-- **`iyi init` with no module path names the project after its directory
-  (#156).** `mkdir my-project && cd my-project && iyi init` writes `module
-  my-project` and `my_project.iyi`, and says which name it took and that a
-  project others will import wants its whole path. The name is held to the
-  checks a typed one is and never rewritten: `MyProject` or `my project` is
-  refused, and nothing is written. `iyi init .` stays refused - the first
-  argument is a module path, not a directory - and now says that `iyi init`
-  with no arguments is the form that means this directory.
-
-- **`Unit(T)` in `std/unit`: a value only one unit's tasks reach (SPEC.md
-  III.4.18).** `Unit.new { {} of String => Int32 }` makes a `Unit` owning
-  what the block answers, and `g.spawn(in: u) { |hits| ... }` starts a task
-  of `g` in `u`'s unit, handed the value: never at the same instant as
-  another of `u`'s tasks, interleaving with them where one parks, as
-  Swift's actors do, so a value read before a park may have changed after
-  it. The compiler holds the block to `Share` captures (``the block
-  spawn(in: counts) runs in another unit captures `log : Array(Int32)`,
-  which is not Share: ...``) and its answer to `Share` (``spawn(in:
-  counts) answers `Hash(String, Int32)`, which is not Share: ...``), and
-  refuses `in:` with `unit:`; so `Unit(T)` is `Share` for any `T`, as
-  `Mutex(T)` is. A task that panics answers `Panicked` and does not
-  poison the `Unit`. On more than one worker its tasks run on the pool;
-  on one worker, on the main thread, whichever thread spawned them, so
-  one worker stays one thread. There is no `Unit.current`. Ten thousand
-  tasks given to one `Unit` from the main thread, against ten thousand
-  `spawn(unit: :new)` tasks, on four workers (`bench/std_unit_exercise.sh`
-  counts both and bounds neither), took per task: on Linux (12 vCPUs,
-  shared), in five runs, 5133 to 6686 ns against 3904 to 6889 plain and
-  3376 to 4442 against 2249 to 4142 with `--release`; on macOS 26.6,
-  Apple M2 Pro, 10 cores (the user's machine), in four runs, 3011 to 4140
-  against 2483 to 2707 plain and 5224 to 6630 against 1124 to 1231 with
-  `--release`, where a `Unit`'s tasks cost four to six times a unit of
-  their own; on Windows 11, 12 logical processors (the user's machine),
-  built by Crystal 1.21.0, in one run, 5618 against 6359 plain and 4369
-  against 3948 with `--release`.
-
-- **Data parallelism as a library: `std/parallel` (SPEC.md
-  III.4.14).** `each_parallel`, `map_parallel`, `sum_parallel` and
-  `reduce_parallel` on a `List`, an `Array` and an `Int32` or `Int64`
-  range cut the elements into chunks, eight a worker unless `grain:`
-  names a chunk's size, and as many parallel tasks as there are workers
-  take chunks from one count. `map_parallel` answers what `map` does, in
-  order; `each_parallel` answers the error of the lowest failing index
-  and starts nothing past a failure it knows of; a panic in a chunk
-  reaches the caller, and a cancelled caller is stopped without a partial
-  answer. The block and the elements must be `Share`: a def says its
-  elements cross with `@[Share(elements: "...")]`, refused at the call -
-  ``Array#map_parallel hands its block `Counter` on other threads, ...``
-  - and a refused capture names the one-thread twin (`map`) as the other
-  way out. An `Array` is copied into a `List` first, since a task of the
-  caller's unit may write it while the caller waits. With one worker, one
-  chunk, `-Dgc_none` or `-Dgc_boehm` the chunks run on the caller. On
-  macOS 26.6, an M2 Pro with 10 cores (the user's machine), ten workers
-  ran two CPU-bound sums, SHA-256 of 20,000 strings and a string
-  transform 6.4 to 7.4 times faster than one thread; on Windows 11 with
-  12 logical processors (the user's machine), twelve workers ran the
-  sums and SHA-256 6.4 to 7.9 times faster, and the transform, which
-  allocates, 3.8 times. `bench/std_parallel_exercise.sh` holds it, with
-  five broken copies caught by name.
-
-- **A `std/mutex` lock and its release are two locked instructions, from
-  seven.** The holder's task and thread were four sequentially consistent
-  stores, an `xchg` each on x86_64, and neither orders anything: one
-  tells a task whether it holds the lock already, the other is a hint
-  for spinning. They are relaxed, through `IyiAtomic` inside std/mutex,
-  and `Atomic` keeps its one ordering. Every release also counted itself
-  a change for `wait_for`, a `lock xadd`; a waiter now counts itself as
-  waiting before its own release, with the lock held, so a release that
-  reads no waiter under the lock skips the count and the wake, and the
-  window a waiter counted after its release left - a release reading 0
-  first, the waiter parking on a count it never moved - is closed (the
-  proof is beside `release`). `bench/chan_scaling.iyi`'s `mutexes`, a
-  mutex to each pair of tasks, median of 5 interleaved on Linux x86_64
-  (12 vCPU, shared): 25.8 million updates a second with one pair, 37.6
-  with the stores relaxed, 43.3 with the count skipped too; twelve pairs
-  73.6, 106.6 and 111.9; `mutex`, twelve tasks on one, 21.6, 32.0 and
-  40.1. With the entry below as well, median of 5: on Windows 11, 12
-  logical processors (the user's machine), one pair 22.4 to 37.6 million
-  and twelve tasks on one 21.3 to 34.8; on macOS 26.6, an M2 Pro with 10
-  cores (the user's machine), one pair 36.4 and 35.3, where the stores
-  were `stlr` either way, and four pairs 36.2 to 45.9.
-  `bench/std_mutex_exercise.sh` proves a waiter counted after its
-  release hangs the exercise.
-
-- **A `std/mutex` waiter that starves is handed the lock.** A task that
-  let the lock go and took it straight back, running while the waiter it
-  woke was still waking, kept it for as long as it went on: beside a
-  holder taking it back after every 20 us hold, a waiter waited 611 ms,
-  all 30,000 holds, on Linux x86_64 (12 vCPU, shared), and 3.0 s beside
-  100 us holds. A waiter that has waited 1 ms, or been woken 4 times to
-  find the lock taken again, now starves, and the next release hands it
-  the lock rather than letting it go, Go's `sync.Mutex` starvation mode;
-  until a waiter starves the lock goes to whoever takes it first. The
-  same waiter has it in 7.3 and 7.1 ms, two wakes each queued behind the
-  running holder until the monitor preempts it, and in 0.14 and 0.50 ms
-  with the pool calling an idle worker for a hand-off from a running
-  task. On macOS 26.6, an M2 Pro with 10 cores (the user's machine), 41.9
-  ms and 3.0 s before, median of 5, and 1.6 ms after; on Windows 11, 12
-  logical processors (the user's machine), 181 ms and 3.0 s before, 4.6
-  and 9.1 ms after, 0.20 and 0.54 ms with the hand-off call.
-  `bench/std_mutex_exercise.sh` has the step, a waiter beside 1 ms holds
-  (599 ms before), with a broken copy each for a waiter that never
-  starves and a release that frees the lock where it hands it over.
-  `bench/chan_scaling.iyi`'s `held`, two tasks taking turns on each of W
-  mutexes with 20 us holds, against its Go twin on `sync.Mutex`, `over_ns`
-  before, after and Go's, median of 7 interleaved on Linux: 281/263/110
-  at one pair, 307/287/151 at two, 356/301/189 at four, 454/566/239 at
-  eight. The park, the wake and the switch, `over_ns` less the new
-  `floor_ns` (the same updates with nothing waiting), are -2 to 41 ns
-  after against Go's -34 to 17; the rest is the hold's clock, a
-  clock_gettime syscall where Go reads the vDSO. On the M2, median of 5,
-  after against Go: 59/55 at one pair, 61/95 at two, 136/392 at four,
-  231/507 at eight. On the Windows machine, median of 7, `over_ns`
-  before and after: 194/149 at one pair, 206/157 at two, 258/213 at four,
-  303/318 at eight; the park, the wake and the switch 16, -69, 30 and 30
-  ns after, Go's -22, -3, 277 and 216. Go's monotonic clock moved too
-  coarsely there for the hold - 1.84 ms an update - and its twin spins a
-  count measured at start instead.
-
-- **A `--release` build optimises on every core.** It still generates one
-  LLVM module, so LLVM sees the whole program, and then cuts it into
-  partitions of about 20,000 instructions, each optimised and compiled on
-  a thread of its own (`ReleasePartition`). A partition gets its own copy
-  of the functions its code calls and of the constants it reads, as LLVM's
-  ThinLTO imports them, done through the C API because that is all
-  Windows' `LLVM-C.dll` exports: a local copy of a local function of up to
-  100 instructions, an `available_externally` one of up to 300 of any
-  other, such as `__iyi_new`, there only to be inlined, and none of what
-  LLVM may not inline. A local function that one function alone calls
-  goes with that function, to its partition and into every copy of it,
-  since one module inlines it whatever its size, and what LLVM must
-  inline (`alwaysinline`, such as the collector's `IyiMark.barrier_word`)
-  is copied whatever its size. A copy the inliner turns down is compiled
-  anyway, so the limits are what the build costs: `samples/iyi/cores.iyi`
-  (std/http and TLS), cold, took 22.45 s of processor in 22.45 s as one
-  module against 35.78 s in 7.87 s cut on a shared 12-vCPU Linux VM,
-  20.75 s in 22.24 s against 34.72 s in 7.94 s on macOS 26.6, Apple M2
-  Pro, 10 cores (the user's machine), and 29.83 s in 30.65 s against
-  50.37 s in 12.14 s on Windows 11, 12 logical processors (the user's
-  machine). On the M2 Pro the programs it builds ran within 1.2% of the
-  one-module build, best of 45 interleaved runs: bcrypt, SHA-256,
-  ChaCha20-Poly1305 and `bench/runtime.py`'s four from 0.98x to 1.00x,
-  and JSON 1.012x, where the one-module binary against itself ran 1.001x.
-  **Windows keeps one module by default**: there the seven ran from 0.98x
-  to 1.01x, but JSON 1.015x, and 1.033x as the median of three bests of
-  15, where the one-module binary against itself ran 0.995x and 1.002x.
-  `IYI_RELEASE_PARTITIONS=0` cuts it there too.
-
-  What the cut still costs JSON is what ThinLTO's costs: a local function
-  reached from another partition is promoted, 86 of them in JSON's, and
-  loses what one module proves of it, such as `Int64#to_s`'s base being
-  10 to 16, and the chance to be dropped once inlined; and a copy with one
-  call in its partition is inlined where one module, seeing every caller,
-  keeps it whole. Copying locals only `available_externally` ran JSON
-  1.029x on the M2 Pro. Attributes inferred over the whole module before
-  the cut (`function-attrs`) took it to 1.009x, but ChaCha20-Poly1305 from
-  0.98x to 1.04x and JSON on Windows to 1.07x; constants propagated over
-  it first (`mem2reg`, `ipsccp`) left JSON where it was and cost
-  ChaCha20-Poly1305 5%.
-
-  Two causes of the Windows numbers are found. LLVM 23, which Windows
-  builds with, added a value kind before `Instruction`, so every
-  instruction read as an unnamed kind and the cut took every local
-  function for reached from elsewhere and made it external: 819 functions
-  in the hash benchmark's binary against 254 for one module, and the hash
-  at 1.07x. `LLVM::Value::Kind` has the kind now, and the binary has 317.
-  The arithmetic benchmark's 1.43x was where its loop landed: the same
-  instructions, at offset 16 of a 64-byte line in the cut build and 32 in
-  the one module. The loop alone, at each offset, ran 0.32 s from offset 0
-  to 12, 0.43 s from 13 to 16 and 0.30 s from 17 on, the same on Windows
-  and on Linux; which offset a build draws moves with any change before
-  the loop, and LLVM's branch alignment (`-x86-align-branch`) left the
-  cut build's at 1.43x. Innermost loops now start on a 32-byte boundary
-  on x86, so that loop lands at 0 or 32. The cut is a function of the
-  program, so the objects are the same on one thread and on twelve.
-  `IYI_RELEASE_PARTITIONS=1` keeps the one module, and
-  `IYI_RELEASE_IMPORT` and `IYI_RELEASE_INLINE` set the two limits.
-  `bench/release_cores.sh` holds the cores, the output, the objects and
-  the inlining across the cut, each against a broken copy, and the
-  `available_externally` copies against a build with none. On `mt/next`,
-  `bench/concurrent_mark.sh`'s copy whose barrier shades nothing passed
-  when cut, 8 runs of 8 on Linux: the loop that reads the payload's
-  colour held it where the second stop's conservative scan found it. That
-  read is in a frame of its own now, as the move was, and the cut copy
-  lost round 0's payload in 5 runs of 5.
-
-- **`iyi test --chaos[=SEED] [--chaos-runs N]` finds a test that passes
-  only because its tasks ran in one order (SPEC.md III.4.17).** The
-  compiler rules out memory races; this is for the ordering races left.
-  Each test is built with `-Diyi_chaos` and run once per seed, 100 seeds
-  from a drawn one unless told, with one worker. Every scheduling choice
-  is drawn from the seed: which task runs next, a preemption at any
-  `Atomic` verb, channel operation, `select`, spawn, `value` or loop
-  back-edge, the order a wake readies a word's waiters, and which ready
-  `select` arm goes first. Half the seeds walk at random, and half use PCT
-  priorities for depth. A parallel task runs as a unit of its own, so the
-  orders two cores could produce are met, and tasks of one unit still
-  meet only at parks. A failure prints its seed and `reproduce: iyi test
-  --chaos=SEED file`, which runs the same schedule again; `--json`
-  carries `chaos_seed`. On Linux (12 vCPUs, shared), a check-then-act on
-  an `Atomic` and a missing join each passed 1,000 of 1,000 plain runs
-  on the 12-worker pool. They were caught under 63 and 57 of seeds 1 to
-  1,000 - the random walk caught the first, PCT the second. A seed is
-  the same schedule on every target. Seeds 6 and 42 caught the two bugs
-  with the same schedule hashes on Linux, on macOS 26.6 (Apple M2 Pro,
-  10 cores, the user's machine) and on Windows 11 (12 logical
-  processors, the user's machine). With more than one worker the threads
-  are real and a seed names no schedule, which the report says. A build
-  without the flag is unchanged. On Linux, release `web_cores` and
-  `chan_scaling` have the same IR, but for line numbers. On all three
-  machines their sections are the same size as before, and on macOS
-  chan_scaling's instructions are the same.
 
 ### Fixed
 

@@ -1,6 +1,6 @@
 # Installing iyi
 
-The released version is 0.20.1, and a build from current source reports the
+The released version is 0.21.0, and a build from current source reports the
 same. [README.md](README.md#install) has the two-line install; this file is
 what those lines check, how to do the same by hand, and what a compiler and a
 program built by it depend on.
@@ -16,10 +16,10 @@ curl -fsSL https://raw.githubusercontent.com/iyilang/iyi/master/install.sh | sh
 tarball for your machine, linux-x86_64 or darwin-arm64, and refuses anything
 else. It checks the tarball against the release's `SHA256SUMS` and unpacks
 nothing on a mismatch. `IYI_PREFIX` moves the destination and
-`IYI_VERSION=0.20.1` pins a release. By hand it is the same two lines:
+`IYI_VERSION=0.21.0` pins a release. By hand it is the same two lines:
 
 ```sh
-tar -xzf iyi-0.20.1-linux-x86_64.tar.gz -C ~/.local
+tar -xzf iyi-0.21.0-linux-x86_64.tar.gz -C ~/.local
 ~/.local/bin/iyi run ~/.local/share/iyi/samples/hello.iyi
 ```
 
@@ -46,7 +46,7 @@ irm https://raw.githubusercontent.com/iyilang/iyi/master/install.ps1 | iex
 & "$env:LOCALAPPDATA\Programs\iyi\bin\iyi.exe" run "$env:LOCALAPPDATA\Programs\iyi\share\iyi\samples\hello.iyi"
 ```
 
-The release also carries `iyi-0.20.1-windows-x86_64.zip`, and
+The release also carries `iyi-0.21.0-windows-x86_64.zip`, and
 [`install.ps1`](install.ps1) installs it the way `install.sh` installs the
 tarball: checksums first, `IYI_PREFIX` and `IYI_VERSION` honoured, default
 prefix `%LOCALAPPDATA%\Programs\iyi`, `<prefix>\bin` added to the user's
@@ -54,7 +54,7 @@ prefix `%LOCALAPPDATA%\Programs\iyi`, `<prefix>\bin` added to the user's
 `powershell -ExecutionPolicy Bypass -File install.ps1`. By hand:
 
 ```powershell
-Expand-Archive iyi-0.20.1-windows-x86_64.zip -DestinationPath "$env:LOCALAPPDATA\Programs\iyi"
+Expand-Archive iyi-0.21.0-windows-x86_64.zip -DestinationPath "$env:LOCALAPPDATA\Programs\iyi"
 & "$env:LOCALAPPDATA\Programs\iyi\bin\iyi.exe" run "$env:LOCALAPPDATA\Programs\iyi\share\iyi\samples\hello.iyi"
 ```
 

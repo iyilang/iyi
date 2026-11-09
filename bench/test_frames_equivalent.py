@@ -297,6 +297,28 @@ def test_darwin_backward_compatibility():
     ret, rule, _ = capture_violation(compare_same_opt, d1, mut_fn)
     assert ret == 1 and rule == "function", f"Darwin function mutant: {rule}"
 
+    # Darwin across-opt named vs address-only 0x0 (real prelude.iyi:10397 shape)
+    darwin_named = [b"0   a.out                               0x0000000100003f50 main + 16\n"]
+    darwin_addr_only = [b"0   ???                                 0x0000000100009999 0x0 + 32\n"]
+
+    # Default relaxed across-opt preserves Darwin equivalence across inlined/unnamed frames
+    ret, rule, _ = capture_violation(compare_across_opt, darwin_named, darwin_addr_only, require_frames=False)
+    assert ret == 0, f"Darwin across-opt default relaxed mode failed on named vs 0x0: {rule}"
+    ret, rule, _ = capture_violation(compare_across_opt, darwin_addr_only, darwin_named, require_frames=False)
+    assert ret == 0, f"Darwin across-opt default relaxed mode failed on reversed 0x0 vs named: {rule}"
+
+    # Under require_frames=True, both same-order and reversed MUST reject with zero_frames
+    ret, rule, _ = capture_violation(compare_across_opt, darwin_named, darwin_addr_only, require_frames=True)
+    assert ret == 1, "Darwin across-opt named vs 0x0 unexpectedly passed with require_frames=True"
+    assert rule == "zero_frames", f"expected 'zero_frames', got {rule!r}"
+
+    ret, rule, _ = capture_violation(compare_across_opt, darwin_addr_only, darwin_named, require_frames=True)
+    assert ret == 1, "Darwin across-opt reversed 0x0 vs named unexpectedly passed with require_frames=True"
+    assert rule == "zero_frames", f"expected 'zero_frames', got {rule!r}"
+
+    ret, rule, _ = capture_violation(compare_across_opt, darwin_addr_only, darwin_addr_only, require_frames=True)
+    assert ret == 1, "Darwin across-opt both 0x0 unexpectedly passed with require_frames=True"
+    assert rule == "zero_frames", f"expected 'zero_frames', got {rule!r}"
 
 def test_cross_format_mismatch():
     darwin_line = b"0   a.out                               0x0000000100003f50 main + 16\n"

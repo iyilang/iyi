@@ -93,7 +93,8 @@ def compare_same_opt(lines1: list[bytes], lines2: list[bytes], require_frames: b
         report_violation(line_no, 'line_count', left, right)
         return 1
 
-    named_frames_found = 0
+    named_frames_found_1 = 0
+    named_frames_found_2 = 0
     for idx, (l1, l2) in enumerate(zip(lines1, lines2)):
         line_no = idx + 1
         f1 = parse_frame(l1)
@@ -129,7 +130,9 @@ def compare_same_opt(lines1: list[bytes], lines2: list[bytes], require_frames: b
                     report_violation(line_no, 'function', l1, l2)
                     return 1
                 if is_named_function(fn1):
-                    named_frames_found += 1
+                    named_frames_found_1 += 1
+                if is_named_function(fn2):
+                    named_frames_found_2 += 1
             elif kind1 == 'linux':
                 _, idx1, fn1, file1, line1, col1 = f1
                 _, idx2, fn2, file2, line2, col2 = f2
@@ -144,9 +147,11 @@ def compare_same_opt(lines1: list[bytes], lines2: list[bytes], require_frames: b
                     report_violation(line_no, 'location', l1, l2)
                     return 1
                 if is_named_function(fn1):
-                    named_frames_found += 1
+                    named_frames_found_1 += 1
+                if is_named_function(fn2):
+                    named_frames_found_2 += 1
 
-    if require_frames and named_frames_found == 0:
+    if require_frames and (named_frames_found_1 == 0 or named_frames_found_2 == 0):
         report_violation(1, 'zero_frames', lines1[0] if lines1 else b'', lines2[0] if lines2 else b'')
         return 1
 
@@ -182,7 +187,8 @@ def compare_across_opt(lines1: list[bytes], lines2: list[bytes], require_frames:
     items2 = chunk_items(lines2)
 
     min_len = min(len(items1), len(items2))
-    named_frames_found = 0
+    named_frames_found_1 = 0
+    named_frames_found_2 = 0
     for i in range(min_len):
         k1, lno1, val1 = items1[i]
         k2, lno2, val2 = items2[i]
@@ -207,7 +213,10 @@ def compare_across_opt(lines1: list[bytes], lines2: list[bytes], require_frames:
                 return 1
             for _, f in val1:
                 if is_named_function(f[3]):
-                    named_frames_found += 1
+                    named_frames_found_1 += 1
+            for _, f in val2:
+                if is_named_function(f[3]):
+                    named_frames_found_2 += 1
         elif k1 == 'linux':
             # Strict Linux across-optimization semantics:
             # preserve count, index, function, file, line, column, order
@@ -234,7 +243,9 @@ def compare_across_opt(lines1: list[bytes], lines2: list[bytes], require_frames:
                     report_violation(frame_lno, 'location', raw1, raw2)
                     return 1
                 if is_named_function(fn1):
-                    named_frames_found += 1
+                    named_frames_found_1 += 1
+                if is_named_function(fn2):
+                    named_frames_found_2 += 1
 
     if len(items1) != len(items2):
         if len(items1) > len(items2):
@@ -248,7 +259,7 @@ def compare_across_opt(lines1: list[bytes], lines2: list[bytes], require_frames:
         report_violation(lno, 'item_count', left, right)
         return 1
 
-    if require_frames and named_frames_found == 0:
+    if require_frames and (named_frames_found_1 == 0 or named_frames_found_2 == 0):
         report_violation(1, 'zero_frames', lines1[0] if lines1 else b'', lines2[0] if lines2 else b'')
         return 1
 

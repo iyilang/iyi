@@ -5,17 +5,19 @@ proof/test_offline_vectors.py: Focused behavior tests for offline vector intake.
 Tests the production helper (proof/offline_vectors.py) directly and exercises
 full script entry (bench/std_*_exercise.sh) with safe fake compilers and network
 spies (both curl binary spy and Python urllib/socket spy) to verify:
-  1. IYI_PROOF_INPUTS_DIR path validation (relative paths and missing dirs fail nonzero).
-  2. Missing vector files fail nonzero with exact diagnostics and zero network access.
-  3. Corrupt vector files (SHA-256 digest mismatch) fail nonzero with zero network access.
-  4. Wycheproof test case count strictly enforces all 790 unique test cases.
-  5. CLI entry points return nonzero exit status on validation failure.
-  6. Actual exercise scripts exit nonzero when inputs are missing/corrupt under IYI_PROOF_INPUTS_DIR.
-  7. No network (curl/urllib/socket) is attempted when IYI_PROOF_INPUTS_DIR is set.
+  1. Explicitly empty or relative IYI_PROOF_INPUTS_DIR fails closed immediately.
+  2. Strict mode fails closed when oracles or dependencies are skipped.
+  3. Missing vector files fail nonzero with exact diagnostics and zero network access.
+  4. Corrupt vector files (SHA-256 digest mismatch) fail nonzero with zero network access.
+  5. Wycheproof test case count strictly enforces all 790 unique test cases.
+  6. CLI entry points return nonzero exit status on validation failure.
+  7. Successful control baseline: when inputs and compilers are valid, scripts succeed (exit 0).
+  8. Zero network (curl/urllib/socket) is attempted across all strict offline runs.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import stat
@@ -24,6 +26,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from proof.offline_vectors import (
     HPKE_VECTORS_SHA256,
@@ -56,17 +59,25 @@ class TestOfflineVectorsHelper(unittest.TestCase):
     def test_inputs_dir_validation(self) -> None:
         old_env = os.environ.get("IYI_PROOF_INPUTS_DIR")
         try:
+            # Unset
             os.environ.pop("IYI_PROOF_INPUTS_DIR", None)
-            with self.assertRaises(OfflineVectorsError):
+            with self.assertRaises(OfflineVectorsError) as ctx:
                 get_proof_inputs_dir()
+            self.assertIn("not set", str(ctx.exception))
 
-            # Relative path must be rejected
+            # Explicitly empty
+            os.environ["IYI_PROOF_INPUTS_DIR"] = ""
+            with self.assertRaises(OfflineVectorsError) as ctx:
+                get_proof_inputs_dir()
+            self.assertIn("not set", str(ctx.exception))
+
+            # Relative path
             os.environ["IYI_PROOF_INPUTS_DIR"] = "relative/path"
             with self.assertRaises(OfflineVectorsError) as ctx:
                 get_proof_inputs_dir()
             self.assertIn("must be an absolute path", str(ctx.exception))
 
-            # Nonexistent directory must be rejected
+            # Nonexistent directory
             os.environ["IYI_PROOF_INPUTS_DIR"] = "/nonexistent/absolute/path/12345"
             with self.assertRaises(OfflineVectorsError) as ctx:
                 get_proof_inputs_dir()
@@ -127,15 +138,23 @@ class TestOfflineVectorsHelper(unittest.TestCase):
             tdir = Path(tmpdir)
             out_file = tdir / "wycheproof.txt"
 
+            # Missing
             with self.assertRaises(OfflineVectorsError) as ctx:
                 process_wycheproof_vectors(tdir, out_file)
             self.assertIn("Missing required vector file", str(ctx.exception))
 
+            # Corrupt sha256
             wp = tdir / "wycheproof-p384.json"
             wp.write_bytes(b'{"testGroups": []}')
             with self.assertRaises(OfflineVectorsError) as ctx:
                 process_wycheproof_vectors(tdir, out_file)
             self.assertIn("sha256", str(ctx.exception))
+
+            # Count != 790 enforcement
+            with patch("proof.offline_vectors.verify_file_digest", return_value=b'{"testGroups": [{"tests": [{"tcId": 1, "private": "1", "result": "valid"}]}]}'):
+                with self.assertRaises(OfflineVectorsError) as ctx:
+                    process_wycheproof_vectors(tdir, out_file)
+                self.assertIn("Expected exactly 790 unique tcIds", str(ctx.exception))
 
     def test_cli_exit_status_on_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -165,7 +184,7 @@ class TestFullScriptExecutionWithNetworkSpy(unittest.TestCase):
     """Full script execution tests with safe mock compilers and network spies."""
 
     def _setup_safe_environment(self, tmpdir: str) -> tuple[Path, dict[str, str], Path]:
-        """Create mock compiler and spy curl + urllib, returning bin_dir, env, and canary_path."""
+        """Create mock compiler, spy curl, and spy urllib/socket, returning bin_dir, env, canary."""
         bin_dir = Path(tmpdir) / "bin"
         bin_dir.mkdir(parents=True, exist_ok=True)
 
@@ -191,7 +210,7 @@ urllib.request.urlopen = _fail_net
 socket.socket.connect = _fail_net
 """)
 
-        # Mock IYI compiler emitting all expected section headers
+        # Mock IYI compiler satisfying all checks in the exercise scripts
         mock_iyi = bin_dir / "mock_iyi"
         mock_iyi_script = """#!/bin/sh
 cmd="$1"
@@ -209,21 +228,70 @@ if [ "$cmd" = "build" ]; then
     cat << 'BIN' > "$out"
 #!/bin/sh
 sub="$1"
-shift
-if [ "$sub" = "data" ]; then
-    echo "  10 cases"
-    echo "  ALL CHECKS PASSED"
-    exit 0
-elif [ "$sub" = "wycheproof" ]; then
-    echo "  790 valid as Wycheproof's shared value, 0 invalid refused, 0 acceptable, 0 wrong"
-    exit 0
-elif [ "$sub" = "oracle" ]; then
-    exit 0
-elif [ "$sub" = "cost" ] || [ "$sub" = "time" ]; then
-    echo "  timing: 100 us"
+name="$(basename "$0")"
+
+# Oracle responder
+if [ "$sub" = "oracle" ]; then
+    while read -r line; do
+        [ -z "$line" ] && break
+        case "$line" in
+            g*) echo "$(printf '00%.0s' $(seq 1 1184)) $(printf '00%.0s' $(seq 1 2400))" ;;
+            e*) echo "$(printf '00%.0s' $(seq 1 1088)) $(printf '00%.0s' $(seq 1 32))" ;;
+            d*) echo "$(printf '00%.0s' $(seq 1 32))" ;;
+            *) echo "00" ;;
+        esac
+    done
     exit 0
 fi
 
+# Timings
+if [ "$sub" = "cost" ] || [ "$sub" = "time" ]; then
+    echo "  100 us"
+    exit 0
+fi
+
+# Wycheproof consumer
+if [ "$sub" = "wycheproof" ]; then
+    echo "790 valid as Wycheproof's shared value, 0 invalid refused, 0 acceptable (0 taken, 0 refused), 0 wrong"
+    exit 0
+fi
+
+# P-384 oracle comparators
+if [ "$sub" = "digest" ]; then
+    [ -f "$WORK/digests-want.txt" ] && cp "$WORK/digests-want.txt" "$WORK/digests-got.txt"
+    exit 0
+fi
+
+# No-arg release calls
+if [ $# -eq 0 ]; then
+    case "$name" in
+        mlkem*)
+            echo "== embedded acvp cases (ml-kem-768)"
+            echo "  cases: 5"
+            echo "ALL CHECKS PASSED"
+            exit 0
+            ;;
+        hpke*)
+            echo "== embedded rfc 9180 vectors"
+            echo "  vector: 5"
+            echo "ALL CHECKS PASSED"
+            exit 0
+            ;;
+        p384*)
+            echo "== RFC 6979's P-384 key and signatures (appendix A.2.6)"
+            echo "== the keys at the ends of the range"
+            echo "== every hash, checked by std/ecdsa"
+            echo "== digests signed as they are (sign_digest)"
+            echo "== what is not a private key"
+            echo "== Diffie-Hellman (ECDH): NIST's CAVP vectors"
+            echo "== points that are not P-384's"
+            echo "ALL CHECKS PASSED"
+            exit 0
+            ;;
+    esac
+fi
+
+# Standard data run
 echo "== acvp keyGen (ml-kem-768)"
 echo "== acvp encapsulation (ml-kem-768)"
 echo "== acvp decapsulation (ml-kem-768)"
@@ -248,15 +316,72 @@ echo "== digests signed as they are (sign_digest)"
 echo "== what is not a private key"
 echo "== Diffie-Hellman (ECDH): NIST's CAVP vectors"
 echo "== points that are not P-384's"
-echo "  keyGen"
-echo "  vector"
+echo "  100 cases"
 echo "ALL CHECKS PASSED"
 exit 0
 BIN
     chmod +x "$out"
     exit 0
 elif [ "$cmd" = "run" ]; then
-    exit 0
+    target="$1"
+    shift
+    # Refusals test
+    if echo "$target" | grep -q "refuse"; then
+        case "$*" in
+            *short-seed*) echo "ML-KEM-768: a seed is 64 bytes (d, then z), not 63" >&2; exit 1 ;;
+            *long-seed*) echo "ML-KEM-768: a seed is 64 bytes (d, then z), not 96" >&2; exit 1 ;;
+            *short-m*) echo "ML-KEM-768: the randomness of an encapsulation is 32 bytes, not 31" >&2; exit 1 ;;
+            *short-ikm*) echo "HPKE: a DHKEM(P-384, HKDF-SHA384) key's input keying material is at least 48 bytes, not 47" >&2; exit 1 ;;
+            *short-randomness*) echo "HPKE: a DHKEM(X25519, HKDF-SHA256) key's input keying material is at least 32 bytes, not 31" >&2; exit 1 ;;
+            *short-psk*) echo "HPKE: a psk is at least 32 bytes (section 5.1.2), not 31" >&2; exit 1 ;;
+            *psk-without-id*) echo "HPKE: a psk needs its psk_id, and a psk_id its psk (section 5.1)" >&2; exit 1 ;;
+            *id-without-psk*) echo "HPKE: a psk needs its psk_id, and a psk_id its psk (section 5.1)" >&2; exit 1 ;;
+            *empty-psk-id*) echo "HPKE: a psk_id is not empty: the empty one means no psk (section 5.1)" >&2; exit 1 ;;
+            *long-export*) echo "HPKE: an export is 0 to 8160 bytes under HKDF-SHA256, not 8161" >&2; exit 1 ;;
+            *export-only-seal*) echo "HPKE: an export-only context seals nothing" >&2; exit 1 ;;
+            *export-only-open*) echo "HPKE: an export-only context opens nothing" >&2; exit 1 ;;
+            *other-kem*) echo "HPKE: the recipient's public key is a DHKEM(P-256, HKDF-SHA256) key, not DHKEM(X25519, HKDF-SHA256)" >&2; exit 1 ;;
+            *backwards*) echo "HPKE: a context's sequence goes forward only: it is at 5, not back to 4" >&2; exit 1 ;;
+            *past-the-end*) echo "HPKE: a context's sequence ends at 2^96 - 1, not 79228162514264337593543950336" >&2; exit 1 ;;
+        esac
+        exit 1
+    fi
+    # Mutation tests
+    cat << 'MUTE' >&2
+acvp keyGen 26: the encapsulation key
+acvp encapsulation 26: the ciphertext
+acvp decapsulation 88 (modified ciphertext): the shared secret
+acvp encapsulationKeyCheck 137 (noisy linear system values too large): refused
+a coefficient of q refused by the modulus check
+acvp decapsulationKeyCheck 128 (modified H): refused
+a decapsulation key whose s is spelled with a coefficient past q is read as the canonical one
+vector 0 (base, kem 0x0020, kdf 0x0001, aead 0x0001): skRm from ikmR
+vector 4 (base, kem 0x0020, kdf 0x0001, aead 0x0002): encryption 0
+vector 0 (base, kem 0x0020, kdf 0x0001, aead 0x0001): encryption 0
+vector 0 (base, kem 0x0020, kdf 0x0001, aead 0x0001): encryption 1
+vector 0 (base, kem 0x0020, kdf 0x0001, aead 0x0001): encryption 1 opened
+a failed open leaves the sequence at 0
+vector 1 (psk, kem 0x0020, kdf 0x0001, aead 0x0001): encryption 0
+an X25519 encapsulation of small order (u = 00000000...) refused
+vector 2 (auth, kem 0x0020, kdf 0x0001, aead 0x0001): the encapsulation's shared secret
+vector 2 (auth, kem 0x0020, kdf 0x0001, aead 0x0001): the decapsulated shared secret
+vector 32 (psk, kem 0x0010, kdf 0x0001, aead 0x0001): skRm from ikmR
+vector 0 (base, kem 0x0020, kdf 0x0001, aead 0x0001): export 0
+vector 0 (base, kem 0x0020, kdf 0x0001, aead 0x0001): sealing at sequence 2^96 - 1 refused
+a P-256 public key off the curve refused
+a point that is not on P384
+the signature of "sample" under SHA-256
+the SHA-384 digest of 48 bytes 0xff
+d = 2^384 - 1: accepted
+an ECPrivateKey carrying another public key: accepted
+an ECPrivateKey naming prime256v1: accepted
+a point off the curve: accepted
+(0, 0): accepted
+(0, 0) refused: ecdsa: the shared point is the point at infinity
+a point whose x is p: accepted
+NIST's CDH vector 0: ZIUT
+MUTE
+    exit 1
 elif [ "$cmd" = "doc" ]; then
     echo "decapsulate advance_to"
     exit 0
@@ -275,6 +400,30 @@ exit 0
         env["PY"] = sys.executable
 
         return bin_dir, env, canary
+
+    def test_explicitly_empty_inputs_dir_fails_closed_without_network(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _, env, canary = self._setup_safe_environment(tmpdir)
+            env["IYI_PROOF_INPUTS_DIR"] = ""
+
+            for script_name in ("std_mlkem_exercise.sh", "std_hpke_exercise.sh", "std_p384_exercise.sh"):
+                script = REPO_ROOT / "bench" / script_name
+                res = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True)
+                self.assertNotEqual(res.returncode, 0, f"{script_name} must fail nonzero on empty inputs dir")
+                self.assertIn("FAIL: IYI_PROOF_INPUTS_DIR must not be empty", res.stderr)
+                self.assertFalse(canary.exists(), f"{script_name} must not contact network on empty inputs dir")
+
+    def test_relative_inputs_dir_fails_closed_without_network(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _, env, canary = self._setup_safe_environment(tmpdir)
+            env["IYI_PROOF_INPUTS_DIR"] = "relative/path"
+
+            for script_name in ("std_mlkem_exercise.sh", "std_hpke_exercise.sh", "std_p384_exercise.sh"):
+                script = REPO_ROOT / "bench" / script_name
+                res = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True)
+                self.assertNotEqual(res.returncode, 0, f"{script_name} must fail nonzero on relative inputs dir")
+                self.assertIn("must be an absolute path", res.stderr)
+                self.assertFalse(canary.exists(), f"{script_name} must not contact network on relative inputs dir")
 
     def test_full_mlkem_exercise_script_fails_nonzero_on_missing_inputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

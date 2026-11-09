@@ -56,6 +56,24 @@ status=0
 export IYI_PATH="$REPO/src${PSEP}$REPO/samples/iyi"
 VECTORS="$REPO/bench/std_hpke_fixture/rfc9180_vectors.json"
 
+if [ "${IYI_PROOF_INPUTS_DIR+set}" = "set" ]; then
+  if [ -z "$IYI_PROOF_INPUTS_DIR" ]; then
+    echo "FAIL: IYI_PROOF_INPUTS_DIR must not be empty" >&2
+    exit 1
+  fi
+  case "$IYI_PROOF_INPUTS_DIR" in
+    /* | [A-Za-z]:[/\\]*) ;;
+    *)
+      echo "FAIL: IYI_PROOF_INPUTS_DIR must be an absolute path: $IYI_PROOF_INPUTS_DIR" >&2
+      exit 1
+      ;;
+  esac
+  if [ ! -d "$IYI_PROOF_INPUTS_DIR" ]; then
+    echo "FAIL: IYI_PROOF_INPUTS_DIR is not a directory: $IYI_PROOF_INPUTS_DIR" >&2
+    exit 1
+  fi
+fi
+
 build_and_run() {
   local label="$1" name="$2"
   shift 2
@@ -155,12 +173,12 @@ echo "== every vector of the CFRG's test-vectors.json, every encryption"
 # encryption left out, which the exercise checks one by one. Offline, or
 # without curl or python, the vendored subset above is what was checked.
 FETCHED=0
-if [ -n "${IYI_PROOF_INPUTS_DIR:-}" ]; then
+if [ "${IYI_PROOF_INPUTS_DIR+set}" = "set" ]; then
   if [ -z "$PY" ]; then
-    echo "  FAIL: python is required to process IYI_PROOF_INPUTS_DIR vectors"
+    echo "  FAIL: python is required to process IYI_PROOF_INPUTS_DIR vectors" >&2
     status=1
   elif ! "$PY" "$REPO/proof/offline_vectors.py" hpke "$WORK/every.json" --subset-out "$WORK/subset.json" --vendored "$VECTORS"; then
-    echo "  FAIL IYI_PROOF_INPUTS_DIR: vector verification or extraction failed"
+    echo "  FAIL IYI_PROOF_INPUTS_DIR: missing or corrupt HPKE vectors" >&2
     status=1
   elif "$WORK/hpke-release" "data" "$WORK/every.json" >"$WORK/every.out" 2>&1; then
     FETCHED=1
@@ -203,6 +221,7 @@ if [ -n "$PY" ] && "$PY" -c 'from cryptography.hazmat.primitives.asymmetric impo
 fi
 if [ "$HAVE_CRYPTOGRAPHY" -eq 0 ]; then
   echo "  no python with cryptography here, so the Python HPKE goes unasked"
+  if [ "${IYI_PROOF_INPUTS_DIR+set}" = "set" ]; then status=1; fi
 else
   "$PY" "$REPO/bench/std_hpke_oracle.py" vectors "$VECTORS" || status=1
   if [ "$FETCHED" -eq 1 ]; then
@@ -232,6 +251,7 @@ if [ "$HAVE_CRYPTOGRAPHY" -eq 1 ]; then
   "$PY" "$REPO/bench/std_hpke_oracle.py" drive "$WORK/hpke-release" 5 || status=1
 else
   echo "  no python with cryptography here, so it goes unasked"
+  if [ "${IYI_PROOF_INPUTS_DIR+set}" = "set" ]; then status=1; fi
 fi
 
 echo

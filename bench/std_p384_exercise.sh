@@ -56,6 +56,24 @@ trap 'rm -rf "$WORK"' EXIT
 status=0
 export IYI_PATH="$REPO/src${PSEP}$REPO/samples/iyi"
 
+if [ "${IYI_PROOF_INPUTS_DIR+set}" = "set" ]; then
+  if [ -z "$IYI_PROOF_INPUTS_DIR" ]; then
+    echo "FAIL: IYI_PROOF_INPUTS_DIR must not be empty" >&2
+    exit 1
+  fi
+  case "$IYI_PROOF_INPUTS_DIR" in
+    /* | [A-Za-z]:[/\\]*) ;;
+    *)
+      echo "FAIL: IYI_PROOF_INPUTS_DIR must be an absolute path: $IYI_PROOF_INPUTS_DIR" >&2
+      exit 1
+      ;;
+  esac
+  if [ ! -d "$IYI_PROOF_INPUTS_DIR" ]; then
+    echo "FAIL: IYI_PROOF_INPUTS_DIR is not a directory: $IYI_PROOF_INPUTS_DIR" >&2
+    exit 1
+  fi
+fi
+
 # Python's cryptography with deterministic ECDSA (OpenSSL 3.2 and later
 # underneath) is the oracle where it is installed; without it the
 # comparisons say so and the rest still runs.
@@ -135,6 +153,7 @@ echo "== 1,500 keys and signatures against Python's cryptography, byte for byte"
 # exercise wrote under the key it wrote.
 if [ "$HAVE_ORACLE" -ne 1 ]; then
   echo "  no python cryptography with deterministic ECDSA here, so the signatures go uncompared"
+  if [ "${IYI_PROOF_INPUTS_DIR+set}" = "set" ]; then status=1; fi
 else
   "$PY" - "$WORK/cases.txt" "$WORK/want.txt" <<'PY'
 import os, random, sys
@@ -199,6 +218,7 @@ echo "== 300 digests signed as they are, against Python's Prehashed"
 # digests of the wrong size, which must be refused.
 if [ "$HAVE_ORACLE" -ne 1 ]; then
   echo "  no python cryptography with deterministic ECDSA here, so the digests go unsigned"
+  if [ "${IYI_PROOF_INPUTS_DIR+set}" = "set" ]; then status=1; fi
 else
   "$PY" - "$WORK/digests.txt" "$WORK/digests-want.txt" <<'PY'
 import os, random, sys
@@ -250,6 +270,7 @@ echo "== 500 shared secrets against Python's cryptography, both ways"
 # byte 0x00 - which the exercise must refuse, as Python refuses them.
 if [ "$HAVE_ECDH" -ne 1 ]; then
   echo "  no python cryptography here, so the shared secrets go uncompared"
+  if [ "${IYI_PROOF_INPUTS_DIR+set}" = "set" ]; then status=1; fi
 else
   "$PY" - "$WORK/ecdh.txt" "$WORK/ecdh-peers.txt" <<'PY'
 import os, random, sys
@@ -336,6 +357,7 @@ echo "== private keys as OpenSSL writes them"
 # SEC 1 version 2, 47 bytes.
 if [ -z "$PY" ] || ! "$PY" -c 'from cryptography.hazmat.primitives.asymmetric import ec, ed25519' >/dev/null 2>&1; then
   echo "  no python cryptography here, so OpenSSL's encodings go unread"
+  if [ "${IYI_PROOF_INPUTS_DIR+set}" = "set" ]; then status=1; fi
 else
   mkdir -p "$WORK/keys"
   "$PY" - "$WORK/keys" <<'PY'
@@ -396,7 +418,7 @@ echo "== Wycheproof's ECDH vectors for secp384r1 (ecpoint encoding)"
 # 48 bytes - and taken to 48 here. Every `valid` case must give `shared`,
 # every `invalid` one must be refused; the `acceptable` ones (a compressed
 # point, which this module does not take) are reported.
-if [ -n "${IYI_PROOF_INPUTS_DIR:-}" ]; then
+if [ "${IYI_PROOF_INPUTS_DIR+set}" = "set" ]; then
   if [ -z "$PY" ]; then
     echo "  FAIL: python is required to process IYI_PROOF_INPUTS_DIR vectors"
     status=1

@@ -55,6 +55,24 @@ status=0
 export IYI_PATH="$REPO/src${PSEP}$REPO/samples/iyi"
 VECTORS="$REPO/bench/std_mlkem_fixture/acvp_ml_kem_768.json"
 
+if [ "${IYI_PROOF_INPUTS_DIR+set}" = "set" ]; then
+  if [ -z "$IYI_PROOF_INPUTS_DIR" ]; then
+    echo "FAIL: IYI_PROOF_INPUTS_DIR must not be empty" >&2
+    exit 1
+  fi
+  case "$IYI_PROOF_INPUTS_DIR" in
+    /* | [A-Za-z]:[/\\]*) ;;
+    *)
+      echo "FAIL: IYI_PROOF_INPUTS_DIR must be an absolute path: $IYI_PROOF_INPUTS_DIR" >&2
+      exit 1
+      ;;
+  esac
+  if [ ! -d "$IYI_PROOF_INPUTS_DIR" ]; then
+    echo "FAIL: IYI_PROOF_INPUTS_DIR is not a directory: $IYI_PROOF_INPUTS_DIR" >&2
+    exit 1
+  fi
+fi
+
 build_and_run() {
   local label="$1" name="$2"
   shift 2
@@ -146,12 +164,12 @@ print("  " + ", ".join(f"{len(v)} {k}" for k, v in out.items()))
 PY
 }
 
-if [ -n "${IYI_PROOF_INPUTS_DIR:-}" ]; then
+if [ "${IYI_PROOF_INPUTS_DIR+set}" = "set" ]; then
   if [ -z "$PY" ]; then
-    echo "  FAIL: python is required to process IYI_PROOF_INPUTS_DIR vectors"
+    echo "  FAIL: python is required to process IYI_PROOF_INPUTS_DIR vectors" >&2
     status=1
   elif ! "$PY" "$REPO/proof/offline_vectors.py" mlkem "$WORK/acvp-all.json"; then
-    echo "  FAIL IYI_PROOF_INPUTS_DIR: vector verification or extraction failed"
+    echo "  FAIL IYI_PROOF_INPUTS_DIR: missing or corrupt ML-KEM vectors" >&2
     status=1
   elif "$WORK/mlkem-release" "data" "$WORK/acvp-all.json" >"$WORK/acvp-all.out" 2>&1; then
     grep '^  [0-9]' "$WORK/acvp-all.out" | sed 's/^  /  checked: /'
@@ -203,9 +221,10 @@ for candidate in /opt/homebrew/opt/openssl@3/bin/openssl /usr/local/opt/openssl@
 done
 if [ -z "$PY" ] || ! command -v "$OPENSSL" >/dev/null 2>&1; then
   echo "  no openssl and python here, so OpenSSL goes unasked"
+  if [ "${IYI_PROOF_INPUTS_DIR+set}" = "set" ]; then status=1; fi
 elif ! "$OPENSSL" list -kem-algorithms 2>/dev/null | grep -q 'ML-KEM-768'; then
   echo "  $("$OPENSSL" version 2>&1 | head -1) has no ML-KEM-768 (OpenSSL has it from 3.5), so OpenSSL goes unasked"
-else
+  if [ "${IYI_PROOF_INPUTS_DIR+set}" = "set" ]; then status=1; fi
   echo "  $("$OPENSSL" version)"
   if ! "$PY" - "$ORACLE" "$OPENSSL" "$WORK" <<'PY'; then
 import os, subprocess, sys
@@ -329,6 +348,7 @@ if [ -n "$PY" ] && "$PY" -c 'from cryptography.hazmat.primitives.asymmetric impo
 fi
 if [ "$HAVE_MLKEM" -eq 0 ]; then
   echo "  no python cryptography with ML-KEM here ($([ -n "$PY" ] && "$PY" -c 'import cryptography; print("cryptography " + cryptography.__version__)' 2>/dev/null || echo "none")), so it goes unasked"
+  if [ "${IYI_PROOF_INPUTS_DIR+set}" = "set" ]; then status=1; fi
 elif ! "$PY" - "$ORACLE" <<'PY'; then
 import os, subprocess, sys
 import cryptography

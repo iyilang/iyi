@@ -2360,6 +2360,9 @@ case "$COMMAND" in
   test-master-path)
     test_master_path "$@"
     ;;
+  test-offline-pebble)
+    bash "$REPO/bench/test_offline_pebble.sh" "$@"
+    ;;
   help|--help|-h)
     echo "Usage: $0 <command> [options]"
     echo "Commands:"
@@ -2373,6 +2376,7 @@ case "$COMMAND" in
     echo "  rg9                         Run RG9 deterministic CallPathFp check"
     echo "  master-self-check           Import master snapshot and verify against git diff"
     echo "  test-master-path            Verify master snapshot export, API fetch, and self-check"
+    echo "  test-offline-pebble         Verify offline Pebble dependency acquisition gate"
     ;;
   *)
     echo "Unknown command: $COMMAND" >&2

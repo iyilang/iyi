@@ -187,11 +187,11 @@ rm -f "$REL_TRACE"
 REL_DIR="$WORK/rel_cwd"
 mkdir -p "$REL_DIR"
 REL_TARGET="$REL_DIR/relative_exercise_target.txt"
-rm -f "$REL_TARGET" "relative_exercise_target.txt"
+rm -f "$REL_TARGET"
 
 (cd "$REL_DIR" && TMPDIR="$SCRATCH_REAL" IYI_OBSERVE="$REL_TRACE" "$IYI" run -Diyi_observe "$REL_SRC")
 
-rm -f "$REL_TARGET" "relative_exercise_target.txt"
+rm -f "$REL_TARGET"
 if [ ! -f "$REL_TRACE" ]; then
   echo "FAIL: relative file trace was not created"
   exit 1

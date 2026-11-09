@@ -263,51 +263,92 @@ class TestOfflinePebbleContract(unittest.TestCase):
             self.assertEqual(res.returncode, 1)
             self.assertIn("FAIL: IYI_PROOF_INPUTS_DIR must be an absolute path: relative/path", res.stderr)
             self.assertFalse(log_file.exists())
-    def test_windows_and_unix_absolute_paths_accepted(self):
-        """Cross-platform check: absolute paths (Unix /, Windows C:/, C:\\, UNC \\\\) accepted; relative rejected."""
-        valid_paths = [
-            "/tmp/inputs",
-            "C:/inputs",
-            "c:/inputs",
-            r"C:\inputs",
-            r"c:\inputs",
-            r"\\server\share\inputs",
-        ]
-        invalid_paths = [
-            "relative/path",
-            "inputs",
-            ".",
-            "..",
-            "C:relative",
-        ]
+    def test_unix_rejects_c_drive_relative_directory(self):
+        """On Unix, C:/inputs is relative and must be rejected even if a local directory exists."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            # Create a real local directory named C:/inputs
+            c_dir = tmp / "C:" / "inputs"
+            c_dir.mkdir(parents=True)
+            self.assertTrue(c_dir.is_dir())
 
-        for p in valid_paths:
-            cmd = f"""\
-case '{p}' in
-  /* | [a-zA-Z]:/* | [a-zA-Z]:\\\\* | \\\\*)
-    echo VALID
-    ;;
-  *)
-    echo INVALID
-    ;;
-esac
-"""
-            res = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
-            self.assertEqual(res.stdout.strip(), "VALID", f"Expected {p} to be recognized as absolute")
+            work = tmp / "work"
+            work.mkdir()
 
-        for p in invalid_paths:
-            cmd = f"""\
-case '{p}' in
-  /* | [a-zA-Z]:/* | [a-zA-Z]:\\* | \\\\*)
-    echo VALID
-    ;;
-  *)
-    echo INVALID
-    ;;
-esac
-"""
-            res = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
-            self.assertEqual(res.stdout.strip(), "INVALID", f"Expected {p} to be recognized as relative/invalid")
+            env = os.environ.copy()
+            env["IYI_PROOF_INPUTS_DIR"] = "C:/inputs"
+            env["WORK"] = str(work)
+
+            # Test helper
+            res_helper = subprocess.run(
+                ["bash", str(PEBBLE_ACQUIRE_SCRIPT)],
+                cwd=str(tmp),
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(res_helper.returncode, 1)
+            self.assertIn("FAIL: IYI_PROOF_INPUTS_DIR must be an absolute path: C:/inputs", res_helper.stderr)
+
+            # Test real ACME script
+            res_acme = subprocess.run(
+                ["bash", str(ACME_SCRIPT)],
+                cwd=str(tmp),
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(res_acme.returncode, 1)
+            self.assertIn("FAIL: IYI_PROOF_INPUTS_DIR must be an absolute path: C:/inputs", res_acme.stderr)
+
+            # Test real AUTOCERT script
+            res_autocert = subprocess.run(
+                ["bash", str(AUTOCERT_SCRIPT)],
+                cwd=str(tmp),
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(res_autocert.returncode, 1)
+            self.assertIn("FAIL: IYI_PROOF_INPUTS_DIR must be an absolute path: C:/inputs", res_autocert.stderr)
+
+    def test_windows_platform_simulated_normalization(self):
+        """Simulate Windows platform (MINGW): verifies drive syntax is accepted and cygpath -m invoked."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            bin_dir = tmp / "bin"
+            bin_dir.mkdir()
+            work = tmp / "work"
+            work.mkdir()
+
+            # Mock uname that returns MINGW64_NT-10.0
+            mock_uname = bin_dir / "uname"
+            mock_uname.write_text("#!/bin/sh\necho MINGW64_NT-10.0\n")
+            mock_uname.chmod(0o755)
+
+            # Mock cygpath that normalizes C:\\ to converted directory
+            target_dir = tmp / "converted_inputs"
+            target_dir.mkdir()
+            mock_cygpath = bin_dir / "cygpath"
+            mock_cygpath.write_text(f"#!/bin/sh\necho '{target_dir}'\n")
+            mock_cygpath.chmod(0o755)
+
+            env = os.environ.copy()
+            env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
+            env["WORK"] = str(work)
+            env["IYI_PROOF_INPUTS_DIR"] = r"C:\inputs"
+
+            # Execute helper with simulated Windows tools
+            res = subprocess.run(
+                ["bash", str(PEBBLE_ACQUIRE_SCRIPT)],
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            # Succeeded past absolute path check, invoked cygpath -m, and checked converted dir for go-proxy
+            self.assertNotIn("must be an absolute path", res.stderr)
+            self.assertIn("Go module mirror 'go-proxy/' missing", res.stderr)
+            # Actual Windows native execution remains unverified on Darwin host
 
     def test_real_scripts_reject_relative_inputs_dir(self):
         """Real scripts reject relative IYI_PROOF_INPUTS_DIR immediately with exit 1."""

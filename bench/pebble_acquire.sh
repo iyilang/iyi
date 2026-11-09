@@ -38,16 +38,25 @@ acquire_pebble() {
       echo "  FAIL: IYI_PROOF_INPUTS_DIR must not be empty" >&2
       return 1
     fi
-    case "$IYI_PROOF_INPUTS_DIR" in
-      /* | [a-zA-Z]:/* | [a-zA-Z]:\\* | \\\\*) ;;
-      *)
-        echo "  FAIL: IYI_PROOF_INPUTS_DIR must be an absolute path: $IYI_PROOF_INPUTS_DIR" >&2
-        return 1
-        ;;
-    esac
     case "$(uname -s)" in
       MINGW* | MSYS* | CYGWIN* | Windows_NT)
+        case "$IYI_PROOF_INPUTS_DIR" in
+          /* | [a-zA-Z]:/* | [a-zA-Z]:\\* | \\\\*) ;;
+          *)
+            echo "  FAIL: IYI_PROOF_INPUTS_DIR must be an absolute path: $IYI_PROOF_INPUTS_DIR" >&2
+            return 1
+            ;;
+        esac
         command -v cygpath >/dev/null 2>&1 && IYI_PROOF_INPUTS_DIR="$(cygpath -m "$IYI_PROOF_INPUTS_DIR")"
+        ;;
+      *)
+        case "$IYI_PROOF_INPUTS_DIR" in
+          /*) ;;
+          *)
+            echo "  FAIL: IYI_PROOF_INPUTS_DIR must be an absolute path: $IYI_PROOF_INPUTS_DIR" >&2
+            return 1
+            ;;
+        esac
         ;;
     esac
     if [ ! -d "$IYI_PROOF_INPUTS_DIR" ]; then

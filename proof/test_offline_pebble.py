@@ -262,9 +262,9 @@ class TestOfflinePebbleContract(unittest.TestCase):
             self.assertIsNone(rec["env"]["GOPRIVATE"], "env -u GOPRIVATE must strip ambient GOPRIVATE from child")
 
             # Owned locations under WORK
-            self.assertEqual(rec["env"]["GOMODCACHE"], str(work_dir / "gomodcache"))
-            self.assertEqual(rec["env"]["GOCACHE"], str(work_dir / "gocache"))
-            self.assertEqual(rec["env"]["GOBIN"], str(work_dir / "gobin"))
+            self.assertEqual(os.path.normpath(rec["env"]["GOMODCACHE"]), os.path.normpath(work_dir / "gomodcache"))
+            self.assertEqual(os.path.normpath(rec["env"]["GOCACHE"]), os.path.normpath(work_dir / "gocache"))
+            self.assertEqual(os.path.normpath(rec["env"]["GOBIN"]), os.path.normpath(work_dir / "gobin"))
 
             # No network fallback: GOPROXY must strictly be a file:// URI pointing to go-proxy
             goproxy = rec["env"]["GOPROXY"]
@@ -279,7 +279,9 @@ class TestOfflinePebbleContract(unittest.TestCase):
             version_records = [r for r in records if r["argv"] and r["argv"][0] == "version"]
             self.assertEqual(len(version_records), 1)
             vrec = version_records[0]
-            self.assertEqual(vrec["argv"], ["version", "-m", str(work_dir / "gobin" / "pebble")])
+            self.assertEqual(vrec["argv"][0], "version")
+            self.assertEqual(vrec["argv"][1], "-m")
+            self.assertEqual(os.path.normpath(vrec["argv"][2]), os.path.normpath(work_dir / "gobin" / "pebble"))
             self.assertEqual(vrec["env"]["GOTOOLCHAIN"], "local")
             self.assertEqual(vrec["env"]["GONOPROXY"], "none")
             self.assertEqual(vrec["env"]["GOSUMDB"], "off")
@@ -479,11 +481,13 @@ class TestOfflinePebbleContract(unittest.TestCase):
 
         res_acme = subprocess.run([get_bash_bin(), str(ACME_SCRIPT)], env=env, capture_output=True, text=True)
         self.assertEqual(res_acme.returncode, 1)
-        self.assertIn("FAIL: IYI_PROOF_INPUTS_DIR directory not found: /nonexistent/abs/path/for/inputs", res_acme.stderr)
+        self.assertIn("FAIL: IYI_PROOF_INPUTS_DIR directory not found:", res_acme.stderr)
+        self.assertIn("nonexistent/abs/path/for/inputs", res_acme.stderr)
 
         res_autocert = subprocess.run([get_bash_bin(), str(AUTOCERT_SCRIPT)], env=env, capture_output=True, text=True)
         self.assertEqual(res_autocert.returncode, 1)
-        self.assertIn("FAIL: IYI_PROOF_INPUTS_DIR directory not found: /nonexistent/abs/path/for/inputs", res_autocert.stderr)
+        self.assertIn("FAIL: IYI_PROOF_INPUTS_DIR directory not found:", res_autocert.stderr)
+        self.assertIn("nonexistent/abs/path/for/inputs", res_autocert.stderr)
 
     def test_helper_absent_mirror_directory_fails_nonzero(self):
         """When IYI_PROOF_INPUTS_DIR has no go-proxy/ dir, helper exits 1."""
@@ -914,6 +918,8 @@ echo "FINAL_STATUS=$status"
             self.assertEqual(res.returncode, 0, f"actual go install failed:\n{res.stderr}\n{res.stdout}")
 
             bin_file = work_bin / "tinypkg"
+            if not bin_file.is_file() and (work_bin / "tinypkg.exe").is_file():
+                bin_file = work_bin / "tinypkg.exe"
             self.assertTrue(bin_file.is_file(), "binary was not installed into owned GOBIN")
 
             run_res = subprocess.run([str(bin_file)], capture_output=True, text=True)
@@ -946,7 +952,10 @@ echo "FINAL_STATUS=$status"
                 timeout=5,
             )
             self.assertNotEqual(res_file_missing.returncode, 0, "Missing file mirror must fail")
-            self.assertFalse((work2_bin / "tinypkg").exists(), "Binary must not be built from nonexistent file mirror")
+            self.assertFalse(
+                (work2_bin / "tinypkg").exists() or (work2_bin / "tinypkg.exe").exists(),
+                "Binary must not be built from nonexistent file mirror",
+            )
 
             # Test 3: Negative control with owned loopback server dynamically bound to port 0
             # (kernel-allocated port owned by this test, no hardcoded ports) deterministically rejecting requests.
@@ -992,7 +1001,10 @@ echo "FINAL_STATUS=$status"
                     timeout=5,
                 )
                 self.assertNotEqual(res_loopback.returncode, 0, "Owned loopback reject expected to fail")
-                self.assertFalse((work3_bin / "tinypkg").exists(), "Binary must not be built on rejected proxy")
+                self.assertFalse(
+                    (work3_bin / "tinypkg").exists() or (work3_bin / "tinypkg.exe").exists(),
+                    "Binary must not be built on rejected proxy",
+                )
             finally:
                 owned_server.shutdown()
                 owned_server.server_close()

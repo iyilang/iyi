@@ -26,10 +26,10 @@ Integration contract (Path B):
   - Helper never signals arbitrary or recycled numeric PGIDs; on timeout it signals only the direct unreaped child PID via proc.kill().
   - Pipe readers tee raw bytes incrementally to exclusive on-disk files while streaming to memory, flushing and fsyncing each chunk immediately so partial output survives runner death before cleanup.
   - Fail-closed guarantees:
-      * Any pump I/O failure (write, flush, or fsync) forces non-zero returncode (1) and records IO_ERROR.
+      * Any pump I/O failure (write, flush, or fsync) raises CaptureError, recording IO_ERROR, and causing gate failure rather than program exclusion.
       * Any timeout forces non-zero returncode and records TIMEOUT with explicit .timeout flag file.
-      * Any unclosed descendant writers past the command's allocated deadline force non-zero returncode (1) and record UNRESOLVED_WRITERS with explicit .unresolved flag file (marked on timeout and normal exit alike).
-      * Normal writers are never truncated at arbitrary cutoffs; draining runs until stream EOF budgeted against the command's total allocated timeout.
+      * Any unclosed descendant writers past the command's allocated deadline raise CaptureError and record UNRESOLVED_WRITERS with explicit .unresolved flag file (marked on timeout and normal exit alike).
+      * Recomputes remaining monotonic deadline before each wait and join, avoiding deadline reuse.
   - Explicit unproven boundary: whole-stage process group ownership, guardian parent-death watchdog, and stage cancellation are owned by the outer hosted orchestrator and remain unproven locally until verified in that environment.
 """
 
@@ -39,6 +39,10 @@ import threading
 import time
 
 _mkdir_lock = threading.Lock()
+
+
+class CaptureError(RuntimeError):
+    """Raised when evidence persistence fails (I/O error, fsync failure, or unresolved writers)."""
 
 
 def validate_evidence_root(env_var: str = "IYI_PROOF_EVIDENCE_DIR") -> str | None:
@@ -149,6 +153,7 @@ def execute_cmd(
     timeout: float | None = None,
     item_dir: str | None = None,
     leg: str | None = None,
+    pass_fds: tuple[int, ...] = (),
 ) -> ProcessOutput:
     """Run command, preserving raw streams and status in item_dir incrementally."""
     if not item_dir or not leg:
@@ -159,6 +164,7 @@ def execute_cmd(
             capture_output=True,
             text=False,
             timeout=timeout,
+            pass_fds=pass_fds,
         )
         return ProcessOutput(proc.returncode, proc.stdout, proc.stderr)
 
@@ -190,7 +196,13 @@ def execute_cmd(
     unresolved = False
     proc = None
     launch_err = None
-    deadline = (time.time() + timeout) if timeout else None
+
+    deadline = (time.monotonic() + timeout) if timeout is not None else None
+
+    def remaining_deadline():
+        if deadline is None:
+            return None
+        return max(0.0, deadline - time.monotonic())
 
     try:
         # Path B: Direct child; stdin=None inherits stdin identically to standard subprocess.run
@@ -201,6 +213,7 @@ def execute_cmd(
             stdin=None,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            pass_fds=pass_fds,
         )
 
         t_out = threading.Thread(
@@ -213,7 +226,7 @@ def execute_cmd(
         t_err.start()
 
         try:
-            proc.wait(timeout=timeout)
+            proc.wait(timeout=remaining_deadline())
         except subprocess.TimeoutExpired as exc:
             timed_out = True
             # Race-free: signals direct live unreaped child PID
@@ -235,10 +248,11 @@ def execute_cmd(
                 unresolved = True
             raise exc
         else:
-            # Drain streams without arbitrary truncation, budgeted against total command deadline
-            rem = max(0.0, deadline - time.time()) if deadline else 30.0
-            t_out.join(timeout=rem)
-            t_err.join(timeout=rem)
+            # Recompute remaining monotonic deadline before EACH join
+            rem_out = remaining_deadline()
+            t_out.join(timeout=rem_out)
+            rem_err = remaining_deadline()
+            t_err.join(timeout=rem_err)
             if t_out.is_alive() or t_err.is_alive():
                 unresolved = True
     except (OSError, ValueError) as err:
@@ -251,7 +265,7 @@ def execute_cmd(
 
         pump_errors = error_box_out + error_box_err
 
-        # Sidecar flag files:
+        # Sidecar flag files
         if timed_out:
             with open(timeout_path, "x", encoding="utf-8") as f:
                 f.write(f"timeout after {timeout}s\n")
@@ -262,25 +276,26 @@ def execute_cmd(
             with open(unresolved_path, "x", encoding="utf-8") as f:
                 f.write("streams unclosed at deadline; unresolved ownership for hosted supervisor\n")
 
-        # Determine exit_str, status_str, and rc (fail-closed priority)
+        # Handle pump I/O failures (fail closed, raising CaptureError)
         if pump_errors:
             io_err = pump_errors[0]
-            exit_str = "IO_ERROR"
-            status_str = f"IO_ERROR:{io_err}"
             with open(error_path, "x", encoding="utf-8") as f:
                 f.write(f"IO_ERROR: {io_err}\n")
-            rc = 1
-        elif launch_err is not None:
-            exit_str = "LAUNCH_ERROR"
-            status_str = f"LAUNCH_ERROR:{launch_err}"
-            with open(error_path, "x", encoding="utf-8") as f:
-                f.write(f"{launch_err}\n")
-            rc = 1
-        elif unresolved and not timed_out and not cancelled:
-            exit_str = "UNRESOLVED_WRITERS"
-            status_str = "UNRESOLVED_WRITERS"
-            rc = 1
-        elif timed_out:
+            with open(status_path, "x", encoding="utf-8") as f:
+                f.write(f"IO_ERROR:{io_err}\n")
+            with open(exit_path, "x", encoding="utf-8") as f:
+                f.write("IO_ERROR\n")
+            raise CaptureError(f"Evidence I/O error on leg {leg}: {io_err}")
+
+        # Handle unresolved writers on normal exit (fail closed, raising CaptureError)
+        if unresolved and not timed_out and not cancelled:
+            with open(status_path, "x", encoding="utf-8") as f:
+                f.write("UNRESOLVED_WRITERS\n")
+            with open(exit_path, "x", encoding="utf-8") as f:
+                f.write("UNRESOLVED_WRITERS\n")
+            raise CaptureError(f"Evidence stream unclosed on leg {leg} past deadline")
+
+        if timed_out:
             exit_str = "TIMEOUT"
             status_str = (
                 f"UNRESOLVED_WRITERS:TIMEOUT:{timeout}"
@@ -295,6 +310,12 @@ def execute_cmd(
                 if unresolved
                 else "CANCELLED"
             )
+            rc = 1
+        elif launch_err is not None:
+            exit_str = "LAUNCH_ERROR"
+            status_str = f"LAUNCH_ERROR:{launch_err}"
+            with open(error_path, "x", encoding="utf-8") as f:
+                f.write(f"{launch_err}\n")
             rc = 1
         elif proc is not None and proc.returncode is not None:
             if proc.returncode < 0:

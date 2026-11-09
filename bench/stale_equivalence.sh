@@ -63,7 +63,7 @@ import concurrent.futures, glob, os, re, subprocess, sys
 repo, iyi, work = sys.argv[1:]
 sys.path.insert(0, os.path.join(repo, 'bench'))
 from frames_equivalent import FRAME_RE, canonical_function
-from stale_evidence import validate_evidence_root, safe_stage_dir, safe_item_dir, execute_cmd
+from stale_evidence import validate_evidence_root, safe_stage_dir, safe_item_dir, execute_cmd, CaptureError
 
 
 evidence_root = validate_evidence_root('IYI_PROOF_EVIDENCE_DIR')
@@ -173,6 +173,8 @@ def check(item):
                            item_dir=item_dir, leg='normal_build')
     except subprocess.TimeoutExpired:
         return 'excluded', name, 'normal build exceeded %ss ceiling' % timeout
+    except CaptureError as err:
+        return 'fail', name, f'evidence capture failure: {err}'
     if normal_build.returncode:
         return 'excluded', name, 'normal build failed: ' + normal_build.stderr.decode(errors='replace')[:100]
 
@@ -181,6 +183,8 @@ def check(item):
         second = run([normal], timeout=timeout, item_dir=item_dir, leg='normal_2')
     except subprocess.TimeoutExpired:
         return 'excluded', name, 'normal run exceeded %ss ceiling' % timeout
+    except CaptureError as err:
+        return 'fail', name, f'evidence capture failure: {err}'
     if first.returncode != second.returncode:
         failed = first if first.returncode else second
         return 'excluded', name, 'normal runs disagree on exit (%d != %d): %s' % (first.returncode, second.returncode, last_line(failed))
@@ -196,6 +200,8 @@ def check(item):
                              item_dir=item_dir, leg='observed_build')
     except subprocess.TimeoutExpired:
         return 'fail', name, 'observed build exceeded %ss ceiling' % timeout
+    except CaptureError as err:
+        return 'fail', name, f'evidence capture failure: {err}'
     if observed_build.returncode:
         return 'fail', name, 'observed build failed: ' + observed_build.stderr.decode(errors='replace')[:100]
 
@@ -205,6 +211,8 @@ def check(item):
                            item_dir=item_dir, leg='observed_run')
     except subprocess.TimeoutExpired:
         return 'fail', name, 'observed run exceeded %ss ceiling' % timeout
+    except CaptureError as err:
+        return 'fail', name, f'evidence capture failure: {err}'
     if first.returncode != observed_run.returncode:
         return 'fail', name, 'exit %d != observed %d: %s' % (first.returncode, observed_run.returncode, last_line(observed_run if observed_run.returncode else first))
     stdout_ok, stdout_reason = matches_outside_mask(first.stdout, observed_run.stdout, stdout_mask)
@@ -251,7 +259,7 @@ import concurrent.futures, glob, os, re, subprocess, sys
 repo, iyi, work = sys.argv[1:]
 sys.path.insert(0, os.path.join(repo, 'bench'))
 from frames_equivalent import FRAME_RE, canonical_function
-from stale_evidence import validate_evidence_root, safe_stage_dir, safe_item_dir, execute_cmd
+from stale_evidence import validate_evidence_root, safe_stage_dir, safe_item_dir, execute_cmd, CaptureError
 
 
 evidence_root = validate_evidence_root('IYI_PROOF_EVIDENCE_DIR')
@@ -349,6 +357,8 @@ def check_rg2a(item):
                            item_dir=item_dir, leg='normal_build')
     except subprocess.TimeoutExpired:
         return 'excluded', name, 'normal build exceeded %ss ceiling' % timeout
+    except CaptureError as err:
+        return 'fail', name, f'evidence capture failure: {err}'
     if normal_build.returncode:
         return 'excluded', name, 'normal build failed: ' + normal_build.stderr.decode(errors='replace')[:100]
 
@@ -358,6 +368,8 @@ def check_rg2a(item):
         second = run([normal], timeout=timeout, item_dir=item_dir, leg='normal_2')
     except subprocess.TimeoutExpired:
         return 'excluded', name, 'normal run exceeded %ss ceiling' % timeout
+    except CaptureError as err:
+        return 'fail', name, f'evidence capture failure: {err}'
 
     if first.returncode != second.returncode:
         failed = first if first.returncode else second
@@ -375,6 +387,8 @@ def check_rg2a(item):
         empty_run = run([normal, empty_dir], timeout=timeout, item_dir=item_dir, leg='empty_run')
     except subprocess.TimeoutExpired:
         return 'fail', name, 'empty dir run exceeded %ss ceiling' % timeout
+    except CaptureError as err:
+        return 'fail', name, f'evidence capture failure: {err}'
 
     # Programs excluded after calibration must still match on exit status
     if empty_run.returncode != first.returncode:
@@ -814,7 +828,7 @@ import concurrent.futures, json, os, subprocess, sys
 repo, iyi, work = sys.argv[1:]
 sys.path.insert(0, os.path.join(repo, 'bench'))
 from frames_equivalent import compare_same_opt
-from stale_evidence import validate_evidence_root, safe_stage_dir, safe_item_dir, execute_cmd
+from stale_evidence import validate_evidence_root, safe_stage_dir, safe_item_dir, execute_cmd, CaptureError
 
 
 evidence_root = validate_evidence_root('IYI_PROOF_EVIDENCE_DIR')
@@ -885,7 +899,7 @@ rg2r_root = os.path.join(work, 'rg2r')
 os.makedirs(rg2r_root, exist_ok=True)
 timeout = 120
 
-def check_probe(item):
+def _check_probe_inner(item):
     name, code = item
     item_dir = safe_item_dir(stage_dir, name)
     directory = os.path.join(rg2r_root, name)
@@ -1045,6 +1059,11 @@ def check_probe(item):
         return name, f'RG9 reach.mismatch non-empty: m1={m1}, m2={m2}, m3={m3}'
 
     return name, None
+def check_probe(item):
+    try:
+        return _check_probe_inner(item)
+    except CaptureError as err:
+        return item[0], f'evidence capture failure: {err}'
 
 with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
     results = list(executor.map(check_probe, probes.items()))

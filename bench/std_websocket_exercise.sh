@@ -24,6 +24,8 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 IYI="${IYI:-$REPO/bin/iyi}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
+# Clear ambient WS_URL to isolate fixture execution from external callers.
+unset WS_URL
 
 # A native compiler cannot resolve this shell's own path mapping: a search
 # path built from the shell's `pwd` finds no prelude at all, and a scratch
@@ -338,8 +340,17 @@ elif ! command -v node >/dev/null 2>&1 || [ "$(node -e 'process.stdout.write(typ
   echo "  skipped: no node with a WebSocket client (Node 22 and later have one)"
 elif ! cat >"$WORK/ws-node.js" <<'JS'
 const port = process.env.PORT;
+// Derive URL strictly from owned fixture endpoint; reject ambient redirection.
 // wss://localhost under TLS, its root given by NODE_EXTRA_CA_CERTS.
-const ws = new WebSocket(process.env.WS_URL || `ws://127.0.0.1:${port}/chat`, ["superchat", "chat"]);
+const expectedUrl = process.env.NODE_EXTRA_CA_CERTS
+  ? `wss://localhost:${port}/chat`
+  : `ws://127.0.0.1:${port}/chat`;
+const targetUrl = process.env.WS_URL || expectedUrl;
+if (targetUrl !== expectedUrl) {
+  console.log("  FAIL: WS_URL does not match owned fixture endpoint:", targetUrl);
+  process.exit(1);
+}
+const ws = new WebSocket(targetUrl, ["superchat", "chat"]);
 ws.binaryType = "arraybuffer";
 const sent = new Uint8Array(100000).map((_, i) => (i * 7 + 3) & 255);
 const got = [];
@@ -368,8 +379,14 @@ JS
 then
   echo "  the Node client could not be written"
   status=1
-elif ! PORT="$port" timeout 60 node "$WORK/ws-node.js"; then
+elif ! PORT="$port" WS_URL="ws://127.0.0.1:$port/chat" timeout 60 node "$WORK/ws-node.js"; then
   echo "  Node's client and the server disagree"
+  status=1
+elif WS_URL="ws://127.0.0.1.ambient.invalid:9999/chat" PORT="$port" timeout 10 node "$WORK/ws-node.js" >"$WORK/ws-node-ambient.out" 2>&1; then
+  echo "  Node's client accepted ambient WS_URL mismatch"
+  status=1
+elif ! grep -q "FAIL: WS_URL does not match owned fixture endpoint" "$WORK/ws-node-ambient.out"; then
+  echo "  Node's client rejected ambient WS_URL with unexpected error"
   status=1
 fi
 

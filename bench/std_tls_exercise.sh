@@ -2508,7 +2508,11 @@ echo "== a stop ends the server and no other process"
 # records its parent's pid as such a stranger does, so a stop that leaves a
 # Python program's child running is one that cannot reach a stranger; bash's
 # `kill`, the stop it replaced, is seen taking the child with it.
-if [ "$windows" = yes ] && [ -n "$PY" ]; then
+if [ "$PSEP" != ';' ]; then
+  echo "  not Windows: the stop there is a signal to the one process, and this is unmeasured"
+elif [ -z "$PY" ]; then
+  echo "  no python3 on this machine: the stop on Windows is unmeasured"
+else
   # spared <stop>: <stop> ends a Python program whose child names it as its
   # parent; true when the program has gone and the child is still running.
   spared() {
@@ -2551,8 +2555,6 @@ time.sleep(60)
   else
     echo "  bash's own kill, the stop it replaced, is caught taking the program's child with it"
   fi
-else
-  echo "  not Windows, or no python3: the stop there is a signal to the one process, and this is unmeasured"
 fi
 
 echo

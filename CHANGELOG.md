@@ -19,7 +19,8 @@
   runs the foundation core and half the artifact sweeps, and the other runs the
   remaining half, each building its own compiler. `windows-std` passes only
   when both shards pass. The checks, their inventory and their verdicts are
-  unchanged.
+  unchanged; a change to the extracted `bench/std_artifacts.sh` helper maps to
+  all three platform foundation consumers in CI planning.
 
 - **A pull request runs the fast part of CI; master and the nightly run
   the whole of it.** Every pull request ran all 39 jobs,

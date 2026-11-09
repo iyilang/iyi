@@ -151,6 +151,11 @@ jobs:
       - name: The numbers the docs quote from a measurement
         run: python3 bench/measured_numbers.py
 
+      # The planner selects the right jobs for every tier, and a helper-only
+      # change reaches all three platform consumers.
+      - name: The planner's job selection regressions
+        run: python3 scripts/ci_plan.py --check
+
   build:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'build') }}
@@ -1002,7 +1007,8 @@ jobs:
       - run: chmod +x .build/crystal
       - name: Build iyi binary
         run: make -o .build/crystal iyi
-      # The foundation's own sections; the modules' exercises are the
+      # The foundation's own sections (consuming bench/std_artifacts.sh
+      # via bench/std_exercise.sh); the modules' exercises are the
       # std-siblings shards below, side by side.
       - name: The standard library foundation
         env:
@@ -1863,6 +1869,7 @@ jobs:
       - name: Build `iyi`
         run: make iyi LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config"
       - name: The native standard library's foundation
+        # Consumes bench/std_artifacts.sh via bench/std_exercise.sh.
         env:
           STD_SIBLINGS: "0"
         run: bash bench/std_exercise.sh

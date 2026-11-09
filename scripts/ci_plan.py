@@ -115,9 +115,30 @@ def is_doc(path):
     return path.endswith(".md") or path.startswith(("doc/", "editors/"))
 
 
+# Shared bench helpers and the scripts that consume them. When a helper changes,
+# jobs naming either the helper or any script that consumes it are selected.
+BENCH_CONSUMERS = {
+    "bench/std_artifacts.sh": {"bench/std_exercise.sh"},
+}
+
+
+def expand_bench_consumers(path):
+    """Expand a bench helper to itself and all scripts that consume it."""
+    paths = {path}
+    pending = [path]
+    while pending:
+        current = pending.pop()
+        for consumer in BENCH_CONSUMERS.get(current, ()):
+            if consumer not in paths:
+                paths.add(consumer)
+                pending.append(consumer)
+    return paths
+
+
 def naming_jobs(jobs, path):
-    """The jobs whose steps name `path`, with either slash."""
-    spellings = {path, path.replace("/", "\\")}
+    """The jobs whose steps name `path` or any script that consumes it, with either slash."""
+    paths = expand_bench_consumers(path)
+    spellings = {p for item in paths for p in (item, item.replace("/", "\\"))}
     return {name for name, job in jobs.items()
             if name not in NOT_PLANNED and any(s in job["text"] for s in spellings)}
 
@@ -163,14 +184,43 @@ def plan(jobs, event, ref, files):
     return close_over_needs(jobs, selected), "the fast tier, and the jobs that name a changed bench file"
 
 
+def check_plan(jobs):
+    """Behavior-level regression checks for job selection."""
+    # 1. Helper-only file: bench/std_artifacts.sh must select all three platform
+    # consumers (Linux std, darwin-std, windows-std) plus build and docs, and
+    # no unrelated jobs.
+    selected, reason = plan(jobs, "pull_request", "refs/heads/test", ["bench/std_artifacts.sh"])
+    required_foundation = {"std", "darwin-std", "windows-std"}
+    if not required_foundation.issubset(selected):
+        missing = required_foundation - selected
+        sys.exit(f"ci_plan regression: helper-only change omitted required consumers: {', '.join(sorted(missing))}")
+    expected_helper = {"docs", "build", "std", "darwin-std", "windows-std"}
+    if selected != expected_helper:
+        unexpected = selected - expected_helper
+        sys.exit(f"ci_plan regression: helper-only change selected unexpected jobs: {', '.join(sorted(unexpected))}")
+    if reason != "only bench files changed, each named by a job":
+        sys.exit(f"ci_plan regression: helper-only change unexpected reason: {reason}")
+
+    # 2. Docs-only file: README.md must select only docs.
+    selected_docs, reason_docs = plan(jobs, "pull_request", "refs/heads/test", ["README.md"])
+    if selected_docs != {"docs"}:
+        sys.exit(f"ci_plan regression: docs-only change selected non-docs jobs: {selected_docs}")
+    if reason_docs != "only docs changed":
+        sys.exit(f"ci_plan regression: docs-only change unexpected reason: {reason_docs}")
+
+    # 3. Unrelated bench file: does not select foundation jobs.
+    selected_bench, _ = plan(jobs, "pull_request", "refs/heads/test", ["bench/format_exercise.sh"])
+    if "darwin-std" in selected_bench or "windows-std" in selected_bench or "std" in selected_bench:
+        sys.exit(f"ci_plan regression: format_exercise selected foundation jobs: {selected_bench}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--event", default=os.environ.get("GITHUB_EVENT_NAME"))
     parser.add_argument("--ref", default=os.environ.get("GITHUB_REF", ""))
     parser.add_argument("--files", nargs="*", help="the changed files, instead of asking the API")
+    parser.add_argument("--check", action="store_true", help="run behavior regression checks and exit")
     args = parser.parse_args()
-    if not args.event:
-        sys.exit("ci_plan: no event: pass --event or run under GitHub Actions")
 
     jobs = parse_jobs(WORKFLOW.read_text(encoding="utf-8"))
     missing = [name for name in FAST if name not in jobs]
@@ -181,6 +231,14 @@ def main():
     unread = sorted(set(jobs) - NOT_PLANNED - set(jobs["result"]["needs"]))
     if unread:
         sys.exit(f"ci_plan: `result` does not need {', '.join(unread)}")
+
+    check_plan(jobs)
+    if args.check:
+        print("ci_plan: all behavior regression checks passed")
+        return
+
+    if not args.event:
+        sys.exit("ci_plan: no event: pass --event or run under GitHub Actions")
 
     files = args.files
     if files is None and args.event == "pull_request":

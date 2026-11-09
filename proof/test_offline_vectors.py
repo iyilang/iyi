@@ -254,7 +254,7 @@ class TestFullScriptExecutionWithNetworkSpy(unittest.TestCase):
 
         # Spy curl binary records network call
         spy_curl = bin_dir / "curl"
-        spy_curl.write_text(f'#!/bin/sh\necho "CURL INVOKED: $@" >> "{canary}"\nexit 1\n')
+        spy_curl.write_bytes(f'#!/bin/sh\necho "CURL INVOKED: $@" >> "{canary}"\nexit 1\n'.encode("utf-8"))
         spy_curl.chmod(spy_curl.stat().st_mode | stat.S_IEXEC)
 
         # Mock OpenSSL in PATH answering version, speed, and kem-algorithms queries
@@ -272,7 +272,7 @@ class TestFullScriptExecutionWithNetworkSpy(unittest.TestCase):
             kem_output = ""
             version_output = "OpenSSL 3.0.0"
 
-        mock_openssl.write_text(f"""#!/bin/sh
+        openssl_script = f"""#!/bin/sh
 if [ "$1" = "speed" ]; then
     echo "{speed_output}"
     exit 0
@@ -284,14 +284,14 @@ elif [ "$1" = "version" ]; then
     exit 0
 fi
 exit 0
-""")
+"""
+        mock_openssl.write_bytes(openssl_script.encode("utf-8"))
         mock_openssl.chmod(mock_openssl.stat().st_mode | stat.S_IEXEC)
 
         # Python sitecustomize spy catching urllib and socket connects
         pylib = Path(tmpdir) / "pylib"
         pylib.mkdir(parents=True, exist_ok=True)
-        (pylib / "sitecustomize.py").write_text(f"""
-import os, urllib.request, socket
+        sitecustomize_script = f"""import os, urllib.request, socket
 canary_file = {repr(str(canary))}
 def _fail_net(*args, **kwargs):
     with open(canary_file, "a") as f:
@@ -300,13 +300,14 @@ def _fail_net(*args, **kwargs):
 
 urllib.request.urlopen = _fail_net
 socket.socket.connect = _fail_net
-""")
+"""
+        (pylib / "sitecustomize.py").write_bytes(sitecustomize_script.encode("utf-8"))
 
         # Controlled Python wrapper named python3 and python in bin_dir
         py_wrapper = bin_dir / "python3"
         crypto_exit = 0 if enable_crypto else 1
-        py_wrapper.write_text(f"""#!{sys.executable}
-import os
+        py_exec = sys.executable.replace(os.sep, "/")
+        py_wrapper_script = f"""#!{py_exec}
 import sys
 import subprocess
 from pathlib import Path
@@ -378,7 +379,8 @@ if len(sys.argv) > 1 and sys.argv[1] == "-":
 # Direct execution
 r = subprocess.run([{repr(sys.executable)}] + sys.argv[1:])
 sys.exit(r.returncode)
-""")
+"""
+        py_wrapper.write_bytes(py_wrapper_script.encode("utf-8"))
         py_wrapper.chmod(py_wrapper.stat().st_mode | stat.S_IEXEC)
 
         py_sym = bin_dir / "python"
@@ -599,7 +601,7 @@ elif [ "$cmd" = "fmt" ]; then
 fi
 exit 0
 """
-        mock_iyi.write_text(mock_iyi_script)
+        mock_iyi.write_bytes(mock_iyi_script.encode("utf-8"))
         mock_iyi.chmod(mock_iyi.stat().st_mode | stat.S_IEXEC)
 
         env = os.environ.copy()

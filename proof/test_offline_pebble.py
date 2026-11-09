@@ -265,6 +265,9 @@ class TestOfflinePebbleContract(unittest.TestCase):
             self.assertFalse(log_file.exists())
     def test_unix_rejects_c_drive_relative_directory(self):
         """On Unix, C:/inputs is relative and must be rejected even if a local directory exists."""
+        uname_s = subprocess.run(["uname", "-s"], capture_output=True, text=True).stdout.strip()
+        if any(uname_s.startswith(prefix) for prefix in ("MINGW", "MSYS", "CYGWIN", "Windows_NT")):
+            self.skipTest("Unix-specific relative C: directory test skipped on Windows")
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             # Create a real local directory named C:/inputs
@@ -311,6 +314,38 @@ class TestOfflinePebbleContract(unittest.TestCase):
             )
             self.assertEqual(res_autocert.returncode, 1)
             self.assertIn("FAIL: IYI_PROOF_INPUTS_DIR must be an absolute path: C:/inputs", res_autocert.stderr)
+    def test_unix_mode_simulated_rejects_c_drive(self):
+        """Simulate Unix platform (Linux): verifies C:/inputs is rejected even if directory exists."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            bin_dir = tmp / "bin"
+            bin_dir.mkdir()
+            work = tmp / "work"
+            work.mkdir()
+
+            c_dir = tmp / "C:" / "inputs"
+            c_dir.mkdir(parents=True)
+
+            # Mock uname that returns Linux
+            mock_uname = bin_dir / "uname"
+            mock_uname.write_text("#!/bin/sh\necho Linux\n")
+            mock_uname.chmod(0o755)
+
+            env = os.environ.copy()
+            env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
+            env["WORK"] = str(work)
+            env["IYI_PROOF_INPUTS_DIR"] = "C:/inputs"
+
+            res = subprocess.run(
+                ["bash", str(PEBBLE_ACQUIRE_SCRIPT)],
+                cwd=str(tmp),
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(res.returncode, 1)
+            self.assertIn("FAIL: IYI_PROOF_INPUTS_DIR must be an absolute path: C:/inputs", res.stderr)
+
 
     def test_windows_platform_simulated_normalization(self):
         """Simulate Windows platform (MINGW): verifies drive syntax is accepted and cygpath -m invoked."""

@@ -607,12 +607,15 @@ else
   exit 1
 fi
 
-echo "== concurrent recorder: pool variant (8 g.spawn(unit: :new) tasks)"
+echo "== concurrent recorder: explicit worker-count observation followed by pooled recording"
 POOL_SRC="$WORK/pool_race.iyi"
 cat << 'EOF' > "$POOL_SRC"
 module test/pool_race
 import std/observe
 
+raise "pool already started before recorder fixture" if IyiWorkers.started?
+IyiWorkers.count
+completed = Channel(Int32).new(8)
 group do |g|
   8.times do |t|
     g.spawn(unit: :new) do
@@ -630,75 +633,166 @@ group do |g|
           Std::Observe.not_reusable(34_u8, "pool_site_#{t}")
         end
       end
+      Std::Observe.file_write(1_u8, "/iyi-recorder-pool/AFTER_TAINT/#{t}")
+      Std::Observe.file(1_u8, "/iyi-recorder-pool/AFTER_TAINT_READ/#{t}")
+      Std::Observe.env_write("IYI_POOL_AFTER_TAINT_WRITE_#{t}")
+      Std::Observe.env_get("IYI_POOL_AFTER_TAINT_READ_#{t}", "v")
+      completed.send(t)
     end
   end
 end
+raise "pool did not start" unless IyiWorkers.started?
+
+seen = Array(Bool).new(8, false)
+8.times do
+  index = completed.receive
+  raise "pool completion channel closed" unless index.is_a?(Int32)
+  raise "invalid pool completion index #{index}" if index < 0 || index >= 8
+  raise "duplicate pool completion index #{index}" if seen[index]
+  seen[index] = true
+end
+puts "8 distinct pool tasks completed"
 EOF
 
 cat << 'EOF' > "$WORK/validate_pool_trace.py"
 import struct, sys
 
-trace_file = sys.argv[1]
-with open(trace_file, "rb") as f:
-    data = f.read()
 
-pos = 0
-records = []
-while pos < len(data):
-    if pos + 4 > len(data):
-        sys.exit("FAIL: incomplete length header")
-    payload_len, = struct.unpack_from("<I", data, pos)
-    pos += 4
-    if pos + payload_len > len(data):
-        sys.exit("FAIL: incomplete payload")
-    payload = data[pos : pos + payload_len]
-    pos += payload_len
-    rec_type = payload[0]
-    task_id, = struct.unpack_from("<Q", payload, 1)
-    body = payload[9:]
-    records.append((rec_type, task_id, body))
+def validate(data, resolver_site):
+    pos = 0
+    records = []
+    while pos < len(data):
+        if pos + 4 > len(data):
+            raise ValueError("incomplete length header")
+        payload_len, = struct.unpack_from("<I", data, pos)
+        pos += 4
+        if payload_len < 9 or pos + payload_len > len(data):
+            raise ValueError("invalid or incomplete payload")
+        payload = data[pos : pos + payload_len]
+        pos += payload_len
+        records.append((payload[0], payload[9:]))
 
-if not records or records[-1][0] != 0x7F:
-    sys.exit("FAIL: expected END(0) last")
-end_status, = struct.unpack_from("<i", records[-1][2], 0)
-if end_status != 0:
-    sys.exit("FAIL: expected END status 0")
+    if not records or records[0][0] != 0x08 or not records[0][1] or records[0][1][0] != 0x24:
+        raise ValueError("expected first record to be process taint 0x24")
+    if records[-1] != (0x7f, struct.pack("<i", 0)):
+        raise ValueError("expected terminal END(0)")
 
-first_rec = records[0]
-if first_rec[0] != 0x08:
-    sys.exit("FAIL: expected first record to be taint 0x08, got 0x%02x" % first_rec[0])
-first_kind = first_rec[2][0]
-if first_kind != 0x24:
-    sys.exit("FAIL: expected first record to be process taint 0x24, got 0x%02x" % first_kind)
-first_site_len, = struct.unpack_from("<I", first_rec[2], 1)
-first_site = first_rec[2][5 : 5 + first_site_len].decode("utf-8", "replace")
-if "concurrency.iyi" not in first_site:
-    sys.exit("FAIL: expected concurrency.iyi in first taint site, got '%s'" % first_site)
+    taints = []
+    for rec_type, body in records[:-1]:
+        if rec_type != 0x08:
+            raise ValueError("unexpected non-taint record 0x%02x" % rec_type)
+        if len(body) < 5:
+            raise ValueError("incomplete taint")
+        site_len, = struct.unpack_from("<I", body, 1)
+        if len(body) != 5 + site_len:
+            raise ValueError("invalid taint site length")
+        kind = body[0]
+        if kind == 0x24 and body[5:] != resolver_site.encode():
+            raise ValueError("process taint site is not resolver: %r" % body[5:])
+        taints.append(kind)
+    if len(taints) != 3 or sorted(taints) != [0x21, 0x22, 0x24]:
+        raise ValueError("expected exactly one each of taints 0x24, 0x21, 0x22, got %s" % taints)
 
-type_counts = {}
-taint_kinds = []
 
-for rec_type, task_id, body in records[:-1]:
-    type_counts[rec_type] = type_counts.get(rec_type, 0) + 1
-    if rec_type == 0x08:
-        kind_code = body[0]
-        taint_kinds.append(kind_code)
+def record(kind, body):
+    payload = bytes([kind]) + bytes(8) + body
+    return struct.pack("<I", len(payload)) + payload
 
-for t in range(1, 8):
-    if type_counts.get(t, 0) != 0:
-        sys.exit("FAIL: expected 0 non-taint records of type 0x%02x, got %d" % (t, type_counts.get(t, 0)))
 
-if taint_kinds.count(0x21) != 1 or taint_kinds.count(0x22) != 1 or taint_kinds.count(0x24) != 1 or len(taint_kinds) != 3:
-    sys.exit("FAIL: expected taints [0x24, 0x21, 0x22], got %s" % taint_kinds)
+def taint(kind, site):
+    site = site.encode()
+    return record(0x08, bytes([kind]) + struct.pack("<I", len(site)) + site)
 
-print("OK: pool variant trace valid")
+
+def controls(site):
+    process = taint(0x24, site)
+    entropy = taint(0x21, "pool_site_0")
+    timer = taint(0x22, "pool_site_1")
+    end = record(0x7f, struct.pack("<i", 0))
+    write = record(0x07, b"post-taint write")
+    env_get = record(0x03, b"post-taint env get")
+    env_write = record(0x04, b"post-taint env write")
+    valid = process + entropy + timer + end
+    validate(valid, site)
+    cases = [
+        ("preamble WRITE", write + valid, "expected first record"),
+        ("missing process taint", entropy + timer + end, "expected first record"),
+        ("duplicate process taint", process + process + entropy + timer + end, "expected exactly one each"),
+        ("post-taint WRITE", process + write + entropy + timer + end, "unexpected non-taint"),
+        ("post-taint ENV get", process + env_get + entropy + timer + end, "unexpected non-taint"),
+        ("post-taint ENV write", process + env_write + entropy + timer + end, "unexpected non-taint"),
+        ("duplicate taint", process + entropy + entropy + timer + end, "expected exactly one each"),
+        ("missing END", process + entropy + timer, "expected terminal END"),
+        ("trailing record after END", valid + write, "expected terminal END"),
+        ("trailing bytes after END", valid + b"x", "incomplete length header"),
+        ("wrong resolver site", taint(0x24, "toolchain:iyi/concurrency.iyi:1") + entropy + timer + end, "process taint site"),
+    ]
+    for name, candidate, expected in cases:
+        try:
+            validate(candidate, site)
+        except ValueError as exc:
+            if expected not in str(exc):
+                raise ValueError("%s rejected for wrong reason: %s" % (name, exc))
+        else:
+            raise ValueError("%s unexpectedly accepted" % name)
+    print("OK: pool validator rejection controls")
+
+
+try:
+    resolver_file = sys.argv[2]
+    with open(resolver_file, encoding="utf-8") as f:
+        lines = f.readlines()
+    matches = [i for i, line in enumerate(lines, 1)
+               if "@[Effect(:process)]; def self.resolved : Int32" in line]
+    if len(matches) != 1:
+        raise ValueError("expected one process-annotated worker resolver")
+    site = "toolchain:iyi/concurrency.iyi:%d" % matches[0]
+    if sys.argv[1] == "--controls":
+        controls(site)
+    else:
+        with open(sys.argv[1], "rb") as f:
+            validate(f.read(), site)
+        print("OK: pool variant trace valid")
+except (ValueError, OSError, struct.error) as exc:
+    sys.exit("FAIL: %s" % exc)
 EOF
 
+POOL_RESOLVER="$REPO/src/iyi/concurrency.iyi"
+"$PY" "$WORK/validate_pool_trace.py" --controls "$POOL_RESOLVER"
 POOL_TRACE="$WORK/pool_trace.bin"
 rm -f "$POOL_TRACE"
-IYI_OBSERVE="$POOL_TRACE" "$IYI" run -Diyi_observe "$POOL_SRC"
-"$PY" "$WORK/validate_pool_trace.py" "$POOL_TRACE"
-echo "  pool variant verified: finished without deadlock/hang, exact counts written"
+IYI_WORKERS=4 IYI_OBSERVE="$POOL_TRACE" "$IYI" run -Diyi_observe "$POOL_SRC"
+"$PY" "$WORK/validate_pool_trace.py" "$POOL_TRACE" "$POOL_RESOLVER"
+echo "  pool variant verified: eight distinct completions and strict process-first trace"
+
+echo "== pool recorder mutation proof: resolver process annotation is load bearing"
+MUT_POOL_DIR="$WORK/mut_pool"
+mkdir -p "$MUT_POOL_DIR/src"
+cp -R "$REPO/src/iyi" "$REPO/src/std" "$MUT_POOL_DIR/src/"
+"$PY" - "$MUT_POOL_DIR/src/iyi/concurrency.iyi" << 'EOF'
+import sys
+path = sys.argv[1]
+with open(path, encoding="utf-8") as f:
+    source = f.read()
+before = "@[Effect(:process)]; def self.resolved : Int32"
+after = "def self.resolved : Int32"
+if source.count(before) != 1:
+    sys.exit("FAIL: expected one process annotation on worker resolver")
+with open(path, "w", encoding="utf-8") as f:
+    f.write(source.replace(before, after, 1))
+EOF
+MUT_POOL_TRACE="$WORK/mut_pool_trace.bin"
+IYI_WORKERS=4 IYI_PATH="$MUT_POOL_DIR/src${PSEP}$REPO/samples/iyi" IYI_OBSERVE="$MUT_POOL_TRACE" "$IYI" run -Diyi_observe "$POOL_SRC"
+if "$PY" "$WORK/validate_pool_trace.py" "$MUT_POOL_TRACE" "$POOL_RESOLVER" >"$WORK/mut_pool.out" 2>&1; then
+  echo "FAIL: removing resolver process annotation did not invalidate the pool trace" >&2
+  exit 1
+fi
+if ! grep -q "expected first record to be process taint 0x24" "$WORK/mut_pool.out"; then
+  cat "$WORK/mut_pool.out" >&2
+  echo "FAIL: resolver mutation failed for a reason other than the first-record assertion" >&2
+  exit 1
+fi
+echo "  removing the resolver process annotation is caught by the first-record assertion"
 
 echo "== concurrent recorder: END race (host late + main returns after 200)"
 END_RACE_SRC="$WORK/end_race.iyi"

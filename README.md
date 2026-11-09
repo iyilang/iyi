@@ -317,9 +317,11 @@ iyi run kemal.iyi   # hello from kemal
 
 `iyi init MODULE [DIR]` writes `iyi.mod`, naming the module by the path other
 projects would import it by (`example.com/me/kemal`, or a bare `kemal`), and
-`kemal.iyi`, the root module that path promises. It never writes over a file
-that is there. A test is a `*_test.iyi` beside it, a program that passes by
-exiting 0, run by `iyi test`.
+`kemal.iyi`, the root module that path promises. With no MODULE the current
+directory's name is the module: `iyi init` in `my-project` writes `module
+my-project` and `my_project.iyi`. It never writes over a file that is there.
+A test is a `*_test.iyi` beside it, a program that passes by exiting 0, run by
+`iyi test`.
 
 A dependency is one line in `iyi.mod`, `require example.com/someone/lib
 v1.2.0`, and `iyi get example.com/someone/lib` writes it: the latest release

@@ -115,9 +115,20 @@ say "a name that is a prelude type is refused, naming the type" \
 "$IYI" init class klass > klass.txt 2>&1
 say "and so is one that is the prelude's metaclass" \
   "$([ $? -ne 0 ] && grep -q "Class is already the prelude's metaclass" klass.txt && [ ! -e klass ]; echo $?)"
-"$IYI" init > none.txt 2>&1
-say "no module path is a usage error that shows the form" \
-  "$([ $? -ne 0 ] && grep -q 'example.com/me/hello' none.txt; echo $?)"
+# No module path is the current directory's name (#156), held to the same
+# checks as a typed one: `my-project` is `module my-project` and
+# my_project.iyi, said before it is written, and a name that is not a module
+# path is refused rather than lower-cased. `.` is a directory, not a name,
+# and its refusal points at the form that means "this directory".
+mkdir -p my-project && (cd my-project && "$IYI" init) > inferred.txt 2>&1
+say "no module path is the directory's name, and init says so" \
+  "$([ $? -eq 0 ] && grep -q '^module my-project$' my-project/iyi.mod && grep -q '^module my_project$' my-project/my_project.iyi && grep -q 'using my-project, this directory' inferred.txt; echo $?)"
+mkdir -p MyProject && (cd MyProject && "$IYI" init) > upper.txt 2>&1
+say "a directory name that is not a module path is refused, and nothing written" \
+  "$([ $? -ne 0 ] && grep -q "this directory's name, 'MyProject', is not one" upper.txt && grep -q 'example.com/me/hello' upper.txt && [ -z "$(ls MyProject)" ]; echo $?)"
+mkdir -p dot && (cd dot && "$IYI" init .) > dot.txt 2>&1
+say "init . is refused, pointing at init with no arguments" \
+  "$([ $? -ne 0 ] && grep -q 'with no arguments' dot.txt && [ -z "$(ls dot)" ]; echo $?)"
 "$IYI" init --help > help.txt 2>&1
 say "--help is init's own usage" "$(head -1 help.txt | grep -q '^Usage: .* init MODULE'; echo $?)"
 # The top-level help describes the verb too, and it kept describing the

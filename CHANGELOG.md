@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Added
+
+- **`iyi init` with no module path names the project after its directory
+  (#156).** `mkdir my-project && cd my-project && iyi init` writes `module
+  my-project` and `my_project.iyi`, and says which name it took and that a
+  project others will import wants its whole path. The name is held to the
+  checks a typed one is and never rewritten: `MyProject` or `my project` is
+  refused, and nothing is written. `iyi init .` stays refused - the first
+  argument is a module path, not a directory - and now says that `iyi init`
+  with no arguments is the form that means this directory.
+
 ### Gates
 
 - **A pull request runs the fast part of CI; master and the nightly run

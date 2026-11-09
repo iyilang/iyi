@@ -58,12 +58,38 @@ for candidate in python3 python; do
   fi
 done
 
-await_port() {
-  local file="$1" pid="$2" waited=0
+trap_dir=""
+trap_pid=""
+cleanup_all() {
+  local exit_code=$?
+  if [ -n "${trap_dir:-}" ] && [ -d "$trap_dir" ]; then
+    touch "$trap_dir/stop" 2>/dev/null || true
+    if [ -n "${trap_pid:-}" ]; then
+      wait "$trap_pid" 2>/dev/null || true
+    fi
+    rm -rf "$trap_dir" 2>/dev/null || true
+  fi
+  if [ -n "${trace:-}" ]; then
+    rm -f "$trace" 2>/dev/null || true
+  fi
+  exit "$exit_code"
+}
+trap cleanup_all EXIT INT TERM HUP
+
+await_trap() {
+  local out_file="$1" err_file="$2" pid="$3" waited=0 line="" port=""
   while [ "$waited" -lt 100 ]; do
-    if [ -s "$file" ]; then
-      head -1 "$file" | tr -d '\r'
-      return 0
+    if [ -s "$out_file" ]; then
+      line="$(head -1 "$out_file" | tr -d '\r')"
+      case "$line" in
+        READY\ [1-9][0-9]*)
+          port="${line#READY }"
+          if kill -0 "$pid" 2>/dev/null; then
+            echo "$port"
+            return 0
+          fi
+          ;;
+      esac
     fi
     if ! kill -0 "$pid" 2>/dev/null; then
       return 1
@@ -203,28 +229,60 @@ for sibling in "$REPO"/bench/std_*_exercise.sh; do
   fi
   trap_pid=""
   trap_port=""
-  trap_out=""
+  trap_dir=""
+  trap_status=0
+  diverted_count=0
   sname="$(basename "$sibling")"
-  if [ -n "$PY" ] && { [ "$sname" = "std_websocket_exercise.sh" ] || [ "$sname" = "std_http_exercise.sh" ]; }; then
-    trap_out="$(mktemp -t trap.XXXXXX)"
+  is_isolated=0
+  if [ "$sname" = "std_websocket_exercise.sh" ] || [ "$sname" = "std_http_exercise.sh" ]; then
+    is_isolated=1
+    if [ -z "$PY" ]; then
+      echo "FAIL: python3 is required for fixture isolation trap on $sname"
+      status=1
+      continue
+    fi
+    trap_dir="$(mktemp -d "${TMPDIR:-/tmp}/trap.XXXXXX")"
     "$PY" -c '
-import socket, sys
+import os, select, socket, sys
+parent_pid = int(sys.argv[1])
+stop_file = sys.argv[2]
 s = socket.socket()
 s.bind(("127.0.0.1", 0))
-s.listen(10)
-print(s.getsockname()[1], flush=True)
-s.settimeout(3600)
+s.listen(128)
+print(f"READY {s.getsockname()[1]}", flush=True)
+diverted = 0
 try:
-    conn, _ = s.accept()
-    conn.close()
-    sys.exit(42)
-except Exception:
-    sys.exit(0)
-' >"$trap_out" 2>&1 &
+    while True:
+        if os.path.exists(stop_file) or os.getppid() != parent_pid:
+            break
+        r, _, _ = select.select([s], [], [], 0.05)
+        if r:
+            try:
+                conn, _ = s.accept()
+                diverted += 1
+                conn.close()
+            except Exception:
+                pass
+finally:
+    s.close()
+print(f"RESULT {diverted}", flush=True)
+sys.exit(0)
+' "$$" "$trap_dir/stop" >"$trap_dir/out" 2>"$trap_dir/err" &
     trap_pid=$!
-    trap_port=$(await_port "$trap_out" "$trap_pid")
+    trap_port="$(await_trap "$trap_dir/out" "$trap_dir/err" "$trap_pid")" || trap_port=""
+    if [ -z "$trap_port" ]; then
+      echo "FAIL: trap failed to establish isolation listener for $sname (stderr: $(cat "$trap_dir/err" 2>/dev/null))"
+      touch "$trap_dir/stop" 2>/dev/null || true
+      wait "$trap_pid" 2>/dev/null || true
+      rm -rf "$trap_dir" 2>/dev/null || true
+      trap_dir=""
+      trap_pid=""
+      status=1
+      continue
+    fi
   fi
-  if [ -n "$trap_port" ]; then
+
+  if [ "$is_isolated" -eq 1 ]; then
     WS_URL="ws://127.0.0.1:$trap_port/chat" \
     NODE_EXTRA_CA_CERTS="/nonexistent/poisoned/ca.pem" \
     TLS_ROOTS="/nonexistent/poisoned/roots.pem" \
@@ -239,18 +297,26 @@ except Exception:
     ALL_PROXY="http://127.0.0.1:$trap_port" \
     $bounded bash "$sibling"
     code=$?
+
+    touch "$trap_dir/stop" 2>/dev/null || true
+    wait "$trap_pid" 2>/dev/null || trap_status=$?
+    if [ "$trap_status" -ne 0 ]; then
+      echo "FAIL: isolation trap for $sname exited unexpectedly with status $trap_status (stderr: $(cat "$trap_dir/err" 2>/dev/null))"
+      code=1
+    else
+      result_line="$(grep -E '^RESULT [0-9]+$' "$trap_dir/out" 2>/dev/null || true)"
+      diverted_count="${result_line#RESULT }"
+      if [ -z "$diverted_count" ] || [ "$diverted_count" -ne 0 ]; then
+        echo "FAIL: sibling $sname diverted ${diverted_count:-unknown} connection(s) to the ambient trap on 127.0.0.1:$trap_port"
+        code=1
+      fi
+    fi
+    rm -rf "$trap_dir" 2>/dev/null || true
+    trap_dir=""
+    trap_pid=""
   else
     $bounded bash "$sibling"
     code=$?
-  fi
-  if [ -n "$trap_pid" ]; then
-    kill "$trap_pid" 2>/dev/null || true
-    wait "$trap_pid" 2>/dev/null || trap_status=$?
-    rm -f "$trap_out"
-    if [ "${trap_status:-0}" -eq 42 ]; then
-      echo "FAIL: sibling $(basename "$sibling") diverted traffic to the ambient trap on 127.0.0.1:$trap_port"
-      code=1
-    fi
   fi
   if [ -n "$sampler" ]; then
     kill "$sampler" 2>/dev/null

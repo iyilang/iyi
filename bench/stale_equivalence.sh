@@ -53,143 +53,16 @@ if [ -n "${IYI_PROOF_EVIDENCE_DIR:-}" ]; then
     exit 1
   fi
 fi
-
-EVIDENCE_HELPERS_PY='
-import threading, shutil
-
-_mkdir_lock = threading.Lock()
-
-def validate_evidence_root(env_var="IYI_PROOF_EVIDENCE_DIR"):
-    val = os.environ.get(env_var)
-    if not val:
-        return None
-    if not os.path.isabs(val):
-        raise ValueError("%s must be an absolute path: %r" % (env_var, val))
-    if not os.path.exists(val):
-        raise ValueError("%s does not exist: %r" % (env_var, val))
-    if not os.path.isdir(val):
-        raise ValueError("%s is not a directory: %r" % (env_var, val))
-    if hasattr(os, "getuid"):
-        st = os.stat(val)
-        if st.st_uid != os.getuid():
-            raise ValueError("%s must be owned by current user (%d), found %d: %r" % (env_var, os.getuid(), st.st_uid, val))
-    return os.path.abspath(val)
-
-def safe_stage_dir(evidence_root, stage_name):
-    if not evidence_root:
-        return None
-    stage_dir = os.path.abspath(os.path.join(evidence_root, stage_name))
-    evidence_root_abs = os.path.abspath(evidence_root)
-    if os.path.commonpath([evidence_root_abs, stage_dir]) != evidence_root_abs:
-        raise ValueError("Stage directory escapes evidence root: %r" % stage_name)
-    if os.path.exists(stage_dir):
-        raise FileExistsError("Stage directory already exists (overwrites forbidden): %r" % stage_dir)
-    os.makedirs(stage_dir, exist_ok=False)
-    return stage_dir
-
-def safe_item_dir(stage_dir, item_name):
-    if not stage_dir:
-        return None
-    if not item_name or "\0" in item_name:
-        raise ValueError("Invalid selector/probe name: %r" % item_name)
-    norm = os.path.normpath(item_name)
-    if os.path.isabs(norm) or norm.startswith("..") or norm == ".":
-        raise ValueError("Path traversal detected in selector/probe: %r" % item_name)
-    item_dir = os.path.abspath(os.path.join(stage_dir, norm))
-    stage_dir_abs = os.path.abspath(stage_dir)
-    if os.path.commonpath([stage_dir_abs, item_dir]) != stage_dir_abs or item_dir == stage_dir_abs:
-        raise ValueError("Selector/probe escapes stage directory: %r" % item_name)
-    with _mkdir_lock:
-        if os.path.exists(item_dir):
-            raise FileExistsError("Evidence directory already exists for %r: %r" % (item_name, item_dir))
-        os.makedirs(item_dir, exist_ok=False)
-    return item_dir
-
-class ProcessOutput:
-    def __init__(self, returncode, stdout, stderr):
-        self.returncode = returncode
-        self.stdout = stdout
-        self.stderr = stderr
-
-def execute_cmd(argv, *, env=None, cwd=None, timeout, item_dir=None, leg=None, aliases=None):
-    if not item_dir or not leg:
-        proc = subprocess.run(argv, env=env, cwd=cwd, capture_output=True, text=False, timeout=timeout)
-        return ProcessOutput(proc.returncode, proc.stdout, proc.stderr)
-
-    stdout_path = os.path.join(item_dir, "%s.stdout" % leg)
-    stderr_path = os.path.join(item_dir, "%s.stderr" % leg)
-    exit_path = os.path.join(item_dir, "%s.exit" % leg)
-
-    for p in [stdout_path, stderr_path, exit_path]:
-        if os.path.exists(p):
-            raise FileExistsError("Evidence file already exists (overwrites forbidden): %r" % p)
-
-    stdout_f = open(stdout_path, "xb")
-    stderr_f = open(stderr_path, "xb")
-    timed_out = False
-    proc = None
-    try:
-        proc = subprocess.Popen(
-            argv,
-            env=env,
-            cwd=cwd,
-            stdin=subprocess.DEVNULL,
-            stdout=stdout_f,
-            stderr=stderr_f,
-        )
-        try:
-            proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired as exc:
-            timed_out = True
-            proc.kill()
-            proc.wait()
-            raise exc
-    finally:
-        stdout_f.flush()
-        stderr_f.flush()
-        stdout_f.close()
-        stderr_f.close()
-
-        if timed_out:
-            exit_code = 124
-        elif proc is not None and proc.returncode is not None:
-            exit_code = proc.returncode
-        else:
-            exit_code = 1
-
-        with open(exit_path, "x", encoding="utf-8") as f:
-            f.write("%d\n" % exit_code)
-
-        if aliases:
-            for alias in aliases:
-                a_out = os.path.join(item_dir, "%s.stdout" % alias)
-                a_err = os.path.join(item_dir, "%s.stderr" % alias)
-                a_exit = os.path.join(item_dir, "%s.exit" % alias)
-                if not os.path.exists(a_out):
-                    shutil.copyfile(stdout_path, a_out)
-                if not os.path.exists(a_err):
-                    shutil.copyfile(stderr_path, a_err)
-                if not os.path.exists(a_exit):
-                    shutil.copyfile(exit_path, a_exit)
-
-    with open(stdout_path, "rb") as f:
-        out_bytes = f.read()
-    with open(stderr_path, "rb") as f:
-        err_bytes = f.read()
-
-    return ProcessOutput(exit_code, out_bytes, err_bytes)
-'
-
 run_rg2() {
   echo "== Running RG2: equivalence under observation (-Diyi_observe with IYI_OBSERVE) =="
   "$PY" -c "
-$EVIDENCE_HELPERS_PY
-
 import concurrent.futures, glob, os, re, subprocess, sys
 
 repo, iyi, work = sys.argv[1:]
 sys.path.insert(0, os.path.join(repo, 'bench'))
 from frames_equivalent import FRAME_RE, canonical_function
+from stale_evidence import validate_evidence_root, safe_stage_dir, safe_item_dir, execute_cmd
+
 
 evidence_root = validate_evidence_root('IYI_PROOF_EVIDENCE_DIR')
 stage_dir = safe_stage_dir(evidence_root, 'rg2')
@@ -198,6 +71,13 @@ samples = sorted(glob.glob(os.path.join(repo, 'samples/iyi/*.iyi')))
 bench = sorted(glob.glob(os.path.join(repo, 'bench/std_*_exercise.iyi')))
 programs = samples + bench
 
+# RG2 must not hide time, address, schedule, or scratch output behind a
+# hand-maintained exclusion list. Every program gets two normal executions
+# first. Their differing lines are the only values this run is allowed to
+# mask when comparing the observed execution.
+#
+# Normal runs have a 60 s ceiling. The corpus exercises that deliberately do
+# compression, fuzzing, or large parsing get 180 s, rather than being dropped.
 DEFAULT_TIMEOUT = 60
 HEAVY_TIMEOUT = 300
 HEAVY = {
@@ -215,8 +95,8 @@ HEAVY = {
 def timeout_for(name):
     return HEAVY_TIMEOUT if name in HEAVY else DEFAULT_TIMEOUT
 
-def run(argv, *, env=None, cwd=None, timeout, item_dir=None, leg=None, aliases=None):
-    return execute_cmd(argv, env=env, cwd=cwd, timeout=timeout, item_dir=item_dir, leg=leg, aliases=aliases)
+def run(argv, *, env=None, cwd=None, timeout, item_dir=None, leg=None):
+    return execute_cmd(argv, env=env, cwd=cwd, timeout=timeout, item_dir=item_dir, leg=leg)
 
 def last_line(result):
     tail = result.stderr.strip().splitlines()[-1:] or result.stdout.strip().splitlines()[-1:]
@@ -295,8 +175,8 @@ def check(item):
         return 'excluded', name, 'normal build failed: ' + normal_build.stderr.decode(errors='replace')[:100]
 
     try:
-        first = run([normal], timeout=timeout, item_dir=item_dir, leg='normal_1', aliases=['first'])
-        second = run([normal], timeout=timeout, item_dir=item_dir, leg='normal_2', aliases=['second'])
+        first = run([normal], timeout=timeout, item_dir=item_dir, leg='normal_1')
+        second = run([normal], timeout=timeout, item_dir=item_dir, leg='normal_2')
     except subprocess.TimeoutExpired:
         return 'excluded', name, 'normal run exceeded %ss ceiling' % timeout
     if first.returncode != second.returncode:
@@ -364,13 +244,13 @@ print('RG2 PASSED: observed builds match normal runs outside each program’s ca
 run_rg2a() {
   echo "== Running RG2a: equivalence with empty directory argument =="
   "$PY" -c "
-$EVIDENCE_HELPERS_PY
-
 import concurrent.futures, glob, os, re, subprocess, sys
 
 repo, iyi, work = sys.argv[1:]
 sys.path.insert(0, os.path.join(repo, 'bench'))
 from frames_equivalent import FRAME_RE, canonical_function
+from stale_evidence import validate_evidence_root, safe_stage_dir, safe_item_dir, execute_cmd
+
 
 evidence_root = validate_evidence_root('IYI_PROOF_EVIDENCE_DIR')
 stage_dir = safe_stage_dir(evidence_root, 'rg2a')
@@ -396,8 +276,8 @@ HEAVY = {
 def timeout_for(name):
     return HEAVY_TIMEOUT if name in HEAVY else DEFAULT_TIMEOUT
 
-def run(argv, *, env=None, cwd=None, timeout, item_dir=None, leg=None, aliases=None):
-    return execute_cmd(argv, env=env, cwd=cwd, timeout=timeout, item_dir=item_dir, leg=leg, aliases=aliases)
+def run(argv, *, env=None, cwd=None, timeout, item_dir=None, leg=None):
+    return execute_cmd(argv, env=env, cwd=cwd, timeout=timeout, item_dir=item_dir, leg=leg)
 
 def last_line(result):
     tail = result.stderr.strip().splitlines()[-1:] or result.stdout.strip().splitlines()[-1:]
@@ -472,8 +352,8 @@ def check_rg2a(item):
 
     # Calibration: two normal no-argument runs
     try:
-        first = run([normal], timeout=timeout, item_dir=item_dir, leg='normal_1', aliases=['first'])
-        second = run([normal], timeout=timeout, item_dir=item_dir, leg='normal_2', aliases=['second'])
+        first = run([normal], timeout=timeout, item_dir=item_dir, leg='normal_1')
+        second = run([normal], timeout=timeout, item_dir=item_dir, leg='normal_2')
     except subprocess.TimeoutExpired:
         return 'excluded', name, 'normal run exceeded %ss ceiling' % timeout
 
@@ -490,8 +370,7 @@ def check_rg2a(item):
 
     # Run once more with argv = [a fresh empty directory]
     try:
-        empty_run = run([normal, empty_dir], timeout=timeout,
-                        item_dir=item_dir, leg='empty_run', aliases=['empty_dir_run'])
+        empty_run = run([normal, empty_dir], timeout=timeout, item_dir=item_dir, leg='empty_run')
     except subprocess.TimeoutExpired:
         return 'fail', name, 'empty dir run exceeded %ss ceiling' % timeout
 
@@ -928,19 +807,19 @@ print('RG5 trace half PASSED: each wrapped observer call is load-bearing')
 run_rg2r() {
   echo "== Running RG2r: observed artifact round-trip probe equivalence =="
   "$PY" -c "
-$EVIDENCE_HELPERS_PY
-
 import concurrent.futures, json, os, subprocess, sys
 
 repo, iyi, work = sys.argv[1:]
 sys.path.insert(0, os.path.join(repo, 'bench'))
 from frames_equivalent import compare_same_opt
+from stale_evidence import validate_evidence_root, safe_stage_dir, safe_item_dir, execute_cmd
+
 
 evidence_root = validate_evidence_root('IYI_PROOF_EVIDENCE_DIR')
 stage_dir = safe_stage_dir(evidence_root, 'rg2r')
 
-def run(argv, *, env=None, cwd=None, timeout, item_dir=None, leg=None, aliases=None):
-    return execute_cmd(argv, env=env, cwd=cwd, timeout=timeout, item_dir=item_dir, leg=leg, aliases=aliases)
+def run(argv, *, env=None, cwd=None, timeout, item_dir=None, leg=None):
+    return execute_cmd(argv, env=env, cwd=cwd, timeout=timeout, item_dir=item_dir, leg=leg)
 
 probes = {
     'dir_probe': '''import std/dir::{Dir}
@@ -1087,12 +966,11 @@ def check_probe(item):
     trace_a = os.path.join(item_dir, 'trace_a.bin') if item_dir else os.path.join(directory, 'trace_a.bin')
 
     try:
-        run_n = run([normal_bin], cwd=directory, timeout=timeout,
-                    item_dir=item_dir, leg='run_n', aliases=['normal_run'])
+        run_n = run([normal_bin], cwd=directory, timeout=timeout, item_dir=item_dir, leg='run_n')
         run_o = run([observed_bin], cwd=directory, env=dict(os.environ, IYI_OBSERVE=trace_o),
-                    timeout=timeout, item_dir=item_dir, leg='run_o', aliases=['observed_run'])
+                    timeout=timeout, item_dir=item_dir, leg='run_o')
         run_a = run([artifact_bin], cwd=directory, env=dict(os.environ, IYI_OBSERVE=trace_a),
-                    timeout=timeout, item_dir=item_dir, leg='run_a', aliases=['artifact_run'])
+                    timeout=timeout, item_dir=item_dir, leg='run_a')
     except subprocess.TimeoutExpired:
         return name, 'probe run timed out'
 

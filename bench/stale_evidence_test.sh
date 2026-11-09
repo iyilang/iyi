@@ -202,7 +202,7 @@ PYEOF
 # --------------------------------------------------------------------------
 step 5 "status distinguishes numeric exit 124, timeout with explicit flag, signal, and launch error"
 "$PYTHON" - "$REPO" "$WORK" <<'PYEOF'
-import os, sys, subprocess, signal
+import os, sys, subprocess, signal, time
 repo, work = sys.argv[1:3]
 sys.path.insert(0, os.path.join(repo, 'bench'))
 from stale_evidence import safe_stage_dir, safe_item_dir, execute_cmd
@@ -262,6 +262,42 @@ except FileNotFoundError:
 assert open(os.path.join(item, 'error_leg.exit')).read() == 'LAUNCH_ERROR\n'
 assert 'LAUNCH_ERROR' in open(os.path.join(item, 'error_leg.status')).read()
 assert os.path.isfile(os.path.join(item, 'error_leg.error'))
+# Case E: Runner killed by SIGKILL while child is emitting; bytes on disk must already exist before runner death
+sigkill_dir = safe_item_dir(stage, 'samples/iyi/sigkill_test.iyi')
+sigkill_out = os.path.join(sigkill_dir, 'kill_leg.stdout')
+runner_py = os.path.join(work, 'runner_sigkill.py')
+with open(runner_py, 'w') as f:
+    f.write(f'''
+import sys, os, time
+sys.path.insert(0, os.path.join('{repo}', 'bench'))
+from stale_evidence import execute_cmd
+
+child_code = """
+import sys, time
+sys.stdout.write("streamed chunk before runner death" + chr(10))
+sys.stdout.flush()
+time.sleep(10)
+"""
+execute_cmd([sys.executable, "-c", child_code], item_dir=sys.argv[1], leg="kill_leg")
+''')
+
+runner_proc = subprocess.Popen([sys.executable, runner_py, sigkill_dir])
+for _ in range(50):
+    if os.path.exists(sigkill_out) and os.path.getsize(sigkill_out) > 0:
+        break
+    time.sleep(0.05)
+
+assert os.path.exists(sigkill_out), 'output file must exist while runner is running'
+bytes_before_kill = open(sigkill_out, 'rb').read()
+assert bytes_before_kill == b'streamed chunk before runner death\n', f'got {bytes_before_kill!r}'
+
+# Kill runner with SIGKILL while child is emitting/sleeping
+os.kill(runner_proc.pid, signal.SIGKILL)
+runner_proc.wait()
+
+# Verify bytes already existed on disk and survived runner death
+bytes_after_kill = open(sigkill_out, 'rb').read()
+assert bytes_after_kill == b'streamed chunk before runner death\n', f'got {bytes_after_kill!r}'
 PYEOF
 
 # --------------------------------------------------------------------------

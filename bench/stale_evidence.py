@@ -11,25 +11,33 @@ Path layout:
   rg2r/<probe>/
 
 Files per leg:
-  <leg>.stdout: raw unnormalized stdout bytes
-  <leg>.stderr: raw unnormalized stderr bytes
+  <leg>.stdout: raw unnormalized stdout bytes (streamed incrementally and flushed)
+  <leg>.stderr: raw unnormalized stderr bytes (streamed incrementally and flushed)
   <leg>.exit: numeric exit code, or "TIMEOUT", or "-<sig>", or "LAUNCH_ERROR", or "CANCELLED"
   <leg>.status: "EXIT:<rc>", "TIMEOUT:<timeout>", "SIGNAL:<sig>", "LAUNCH_ERROR:<err>", "CANCELLED"
   <leg>.timeout: explicit flag file present only when command timed out
   <leg>.signal: flag file present only when terminated by signal
   <leg>.error: error description file present only on launch error
   <leg>.cancelled: flag file present only when gate or command was cancelled
+  <leg>.unresolved: flag file present only when detached descendants hold pipes after timeout
 
-Process-group and descendant management:
+Process-group, descendant management, and streaming:
   Subprocesses are launched with start_new_session=True to establish a private
   process group. Stdin is inherited by default matching standard subprocess.run.
-  Streams are drained to EOF across process descendants using communicate().
+  Pipe readers tee raw bytes incrementally to exclusive on-disk files while streaming
+  to memory, flushing and syncing each chunk immediately so partial output survives
+  runner SIGKILL or controller crashes before cleanup.
+  Streams are drained to EOF across descendants with bounded timeouts (avoiding
+  unbounded hangs when detached descendants hold pipes).
   On timeout or gate cancellation (SIGINT/SIGTERM), SIGTERM is signaled to the
   entire owned process group via os.killpg, followed by SIGKILL after a grace period,
   and the process group leader is reaped.
-  Explicit host boundary limitation: descendants that decouple themselves by calling
-  setsid() into a new session cannot be reached by process-group signaling and
-  require container, cgroup, or PID-namespace containment by the hosted orchestrator.
+  Explicit host boundary limitation: process-group signaling reaches only descendants
+  within the child session. Descendants that decouple themselves by calling setsid()
+  or double-forking into a new session cannot be contained by process-group signaling
+  and require container, cgroup, or PID-namespace containment by the hosted orchestrator.
+  When detached descendants hold open pipes beyond bounded drain timeouts, an explicit
+  <leg>.unresolved flag is published for hosted supervisor tracking.
 """
 
 import os
@@ -166,6 +174,25 @@ class ProcessOutput:
         self.stderr = stderr
 
 
+def _pump_pipe(stream, file_handle, memory_buffer: bytearray) -> None:
+    """Stream chunks from pipe to file handle (immediately flushed/synced) and memory buffer."""
+    fd = stream.fileno()
+    try:
+        while True:
+            chunk = os.read(fd, 4096)
+            if not chunk:
+                break
+            file_handle.write(chunk)
+            file_handle.flush()
+            try:
+                os.fsync(file_handle.fileno())
+            except (OSError, ValueError):
+                pass
+            memory_buffer.extend(chunk)
+    except (OSError, ValueError):
+        pass
+
+
 def execute_cmd(
     argv: list[str],
     *,
@@ -175,7 +202,7 @@ def execute_cmd(
     item_dir: str | None = None,
     leg: str | None = None,
 ) -> ProcessOutput:
-    """Run command, preserving raw streams and status in item_dir when provided."""
+    """Run command, preserving raw streams and status in item_dir incrementally."""
     if not item_dir or not leg:
         proc = subprocess.run(
             argv,
@@ -195,18 +222,24 @@ def execute_cmd(
     signal_path = os.path.join(item_dir, f"{leg}.signal")
     error_path = os.path.join(item_dir, f"{leg}.error")
     cancelled_path = os.path.join(item_dir, f"{leg}.cancelled")
+    unresolved_path = os.path.join(item_dir, f"{leg}.unresolved")
 
     # Overwrite protection
     for p in [stdout_path, stderr_path, exit_path, status_path]:
         if os.path.exists(p):
             raise FileExistsError(f"Evidence file already exists (overwrites forbidden): {p!r}")
 
+    # Open evidence files immediately so partial bytes are written incrementally
+    stdout_f = open(stdout_path, "xb")
+    stderr_f = open(stderr_path, "xb")
+
+    raw_out = bytearray()
+    raw_err = bytearray()
     timed_out = False
     cancelled = False
+    unresolved = False
     proc = None
     launch_err = None
-    raw_out = b""
-    raw_err = b""
 
     try:
         # Note: stdin=None inherits stdin identically to default subprocess.run
@@ -221,25 +254,41 @@ def execute_cmd(
         )
         with _active_processes_lock:
             _active_processes.add(proc)
+
+        t_out = threading.Thread(
+            target=_pump_pipe, args=(proc.stdout, stdout_f, raw_out), daemon=True
+        )
+        t_err = threading.Thread(
+            target=_pump_pipe, args=(proc.stderr, stderr_f, raw_err), daemon=True
+        )
+        t_out.start()
+        t_err.start()
+
         try:
-            # communicate drains inherited streams to EOF across process descendants
-            raw_out, raw_err = proc.communicate(timeout=timeout)
+            proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired as exc:
             timed_out = True
             _kill_group(proc.pid)
-            try:
-                raw_out, raw_err = proc.communicate(timeout=0.5)
-            except subprocess.TimeoutExpired:
-                pass
+            proc.wait()
+            t_out.join(timeout=0.5)
+            t_err.join(timeout=0.5)
             raise exc
         except (KeyboardInterrupt, SystemExit) as exc:
             cancelled = True
             _kill_group(proc.pid)
-            try:
-                raw_out, raw_err = proc.communicate(timeout=0.5)
-            except Exception:
-                pass
+            proc.wait()
+            t_out.join(timeout=0.5)
+            t_err.join(timeout=0.5)
             raise exc
+        else:
+            # Drain streams from descendants up to bounded DRAIN_TIMEOUT (2.0s)
+            t_out.join(timeout=2.0)
+            t_err.join(timeout=2.0)
+            if t_out.is_alive() or t_err.is_alive():
+                unresolved = True
+                _kill_group(proc.pid)
+                t_out.join(timeout=0.5)
+                t_err.join(timeout=0.5)
     except (OSError, ValueError) as err:
         if not timed_out and not cancelled:
             launch_err = err
@@ -249,11 +298,8 @@ def execute_cmd(
             with _active_processes_lock:
                 _active_processes.discard(proc)
 
-        # Write raw unnormalized stdout and stderr bytes
-        with open(stdout_path, "xb") as f:
-            f.write(raw_out)
-        with open(stderr_path, "xb") as f:
-            f.write(raw_err)
+        stdout_f.close()
+        stderr_f.close()
 
         # Distinguish launch error, signal, timeout, cancellation, and actual numeric exit
         if timed_out:
@@ -285,10 +331,15 @@ def execute_cmd(
             exit_str = "1"
             status_str = "EXIT:1"
 
+        if unresolved:
+            status_str = f"UNRESOLVED_WRITERS:{status_str}"
+            with open(unresolved_path, "x", encoding="utf-8") as f:
+                f.write("detached descendant holds pipe; unresolved ownership for hosted supervisor\n")
+
         with open(exit_path, "x", encoding="utf-8") as f:
             f.write(f"{exit_str}\n")
         with open(status_path, "x", encoding="utf-8") as f:
             f.write(f"{status_str}\n")
 
     rc = proc.returncode if (proc and proc.returncode is not None) else (124 if timed_out else 1)
-    return ProcessOutput(rc, raw_out, raw_err)
+    return ProcessOutput(rc, bytes(raw_out), bytes(raw_err))

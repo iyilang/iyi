@@ -377,110 +377,175 @@ class TestOfflinePebbleContract(unittest.TestCase):
             self.assertIsNone(install_rec["env"]["GONOPROXY"])
 
     def test_script_boundary_no_skips_in_proof_mode(self):
-        """In std_acme_exercise.sh and std_autocert_exercise.sh, proof mode failure sets status=1 with no skip string."""
+        """In std_acme_exercise.sh and std_autocert_exercise.sh, sourcing helper on failure sets status=1 with no skip string."""
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             work_dir = tmp / "work"
             work_dir.mkdir()
+            bin_dir = tmp / "bin"
+            bin_dir.mkdir()
+            log_file = tmp / "go.log"
+            go_bin = create_fake_go(bin_dir, log_file)
 
-            # Test ACME boundary handling when acquisition returns 1
+            # Test ACME real sourced helper boundary when acquisition fails (missing mirror directory)
             cmd_acme = f"""\
 set -u
 status=0
 REPO="{REPO_ROOT}"
 WORK="{work_dir}"
+GO="{go_bin}"
 IYI_PROOF_INPUTS_DIR="{tmp}/missing_mirror"
 PY="{sys.executable}"
-acquire_res=1
+
+acquire_res=0
+. "$REPO/bench/pebble_acquire.sh" || acquire_res=$?
 if [ "$acquire_res" -eq 1 ]; then
   status=1
 elif [ "$acquire_res" -eq 2 ]; then
   echo "  no Go here (or no python to drive it), so Pebble is not built and the orders go unplaced"
 elif [ "$acquire_res" -eq 3 ]; then
   echo "  Pebble could not be fetched or built here (no network?), so the orders go unplaced:"
+elif [ "$acquire_res" -eq 0 ]; then
+  echo "UNEXPECTED_ACQUIRE_SUCCESS"
 fi
 echo "FINAL_STATUS=$status"
 """
             res_acme = subprocess.run(["bash", "-c", cmd_acme], capture_output=True, text=True)
+            self.assertEqual(res_acme.returncode, 0)
             self.assertIn("FINAL_STATUS=1", res_acme.stdout)
+            self.assertNotIn("UNEXPECTED_ACQUIRE_SUCCESS", res_acme.stdout)
             self.assertNotIn("so Pebble is not built", res_acme.stdout)
             self.assertNotIn("so the orders go unplaced", res_acme.stdout)
 
-            # Test AUTOCERT boundary handling when acquisition returns 1
+            # Test AUTOCERT real sourced helper boundary when acquisition fails (missing mirror directory)
             cmd_autocert = f"""\
 set -u
 status=0
 REPO="{REPO_ROOT}"
 WORK="{work_dir}"
+GO="{go_bin}"
 IYI_PROOF_INPUTS_DIR="{tmp}/missing_mirror"
 ORACLE=yes
-acquire_res=1
+
+acquire_res=0
+. "$REPO/bench/pebble_acquire.sh" || acquire_res=$?
 if [ "$acquire_res" -eq 1 ]; then
   status=1
 elif [ "$acquire_res" -eq 2 ]; then
   echo "  no Go here (or no python with cryptography to drive it), so Pebble is not built and nothing is ordered"
 elif [ "$acquire_res" -eq 3 ]; then
   echo "  Pebble could not be fetched or built here (no network?), so nothing is ordered:"
+elif [ "$acquire_res" -eq 0 ]; then
+  echo "UNEXPECTED_ACQUIRE_SUCCESS"
 fi
 echo "FINAL_STATUS=$status"
 """
             res_autocert = subprocess.run(["bash", "-c", cmd_autocert], capture_output=True, text=True)
+            self.assertEqual(res_autocert.returncode, 0)
             self.assertIn("FINAL_STATUS=1", res_autocert.stdout)
+            self.assertNotIn("UNEXPECTED_ACQUIRE_SUCCESS", res_autocert.stdout)
             self.assertNotIn("so Pebble is not built", res_autocert.stdout)
             self.assertNotIn("so nothing is ordered", res_autocert.stdout)
 
     def test_script_boundary_normal_mode_skips_preserved(self):
-        """In std_acme_exercise.sh and std_autocert_exercise.sh, normal mode skip codes produce census skip strings and status=0."""
+        """In std_acme_exercise.sh and std_autocert_exercise.sh, sourcing helper on normal skip produces census skip strings and status=0."""
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             work_dir = tmp / "work"
             work_dir.mkdir()
-            (work_dir / "go-install.log").write_text("connection refused\n")
+            bin_dir = tmp / "bin"
+            bin_dir.mkdir()
+            log_file = tmp / "go.log"
+            go_bin = create_fake_go(bin_dir, log_file, fail_install=True, fail_install_msg="network down")
 
-            # Test ACME boundary handling on acquire_res=2 (missing Go) and 3 (failed install)
-            cmd_acme = f"""\
+            # Case A: Missing Go in normal mode
+            cmd_acme_no_go = f"""\
 set -u
 status=0
+REPO="{REPO_ROOT}"
 WORK="{work_dir}"
-for res in 2 3; do
-  acquire_res=$res
-  if [ "$acquire_res" -eq 1 ]; then
-    status=1
-  elif [ "$acquire_res" -eq 2 ]; then
-    echo "  no Go here (or no python to drive it), so Pebble is not built and the orders go unplaced"
-  elif [ "$acquire_res" -eq 3 ]; then
-    echo "  Pebble could not be fetched or built here (no network?), so the orders go unplaced: $(tail -1 "$WORK/go-install.log")"
-  fi
-done
+GO="{tmp}/nonexistent_go"
+PY="{sys.executable}"
+
+acquire_res=0
+. "$REPO/bench/pebble_acquire.sh" || acquire_res=$?
+if [ "$acquire_res" -eq 1 ]; then
+  status=1
+elif [ "$acquire_res" -eq 2 ]; then
+  echo "  no Go here (or no python to drive it), so Pebble is not built and the orders go unplaced"
+elif [ "$acquire_res" -eq 3 ]; then
+  echo "  Pebble could not be fetched or built here (no network?), so the orders go unplaced: $(tail -1 "$WORK/go-install.log")"
+fi
 echo "FINAL_STATUS=$status"
 """
-            res_acme = subprocess.run(["bash", "-c", cmd_acme], capture_output=True, text=True)
-            self.assertIn("FINAL_STATUS=0", res_acme.stdout)
-            self.assertIn("no Go here (or no python to drive it), so Pebble is not built and the orders go unplaced", res_acme.stdout)
-            self.assertIn("Pebble could not be fetched or built here (no network?), so the orders go unplaced: connection refused", res_acme.stdout)
+            res_no_go = subprocess.run(["bash", "-c", cmd_acme_no_go], capture_output=True, text=True)
+            self.assertIn("FINAL_STATUS=0", res_no_go.stdout)
+            self.assertIn("no Go here (or no python to drive it), so Pebble is not built and the orders go unplaced", res_no_go.stdout)
 
-            # Test AUTOCERT boundary handling on acquire_res=2 and 3
-            cmd_autocert = f"""\
+            # Case B: Failed install in normal mode
+            cmd_acme_fail = f"""\
 set -u
 status=0
+REPO="{REPO_ROOT}"
 WORK="{work_dir}"
-for res in 2 3; do
-  acquire_res=$res
-  if [ "$acquire_res" -eq 1 ]; then
-    status=1
-  elif [ "$acquire_res" -eq 2 ]; then
-    echo "  no Go here (or no python with cryptography to drive it), so Pebble is not built and nothing is ordered"
-  elif [ "$acquire_res" -eq 3 ]; then
-    echo "  Pebble could not be fetched or built here (no network?), so nothing is ordered: $(tail -1 "$WORK/go-install.log")"
-  fi
-done
+GO="{go_bin}"
+PY="{sys.executable}"
+
+acquire_res=0
+. "$REPO/bench/pebble_acquire.sh" || acquire_res=$?
+if [ "$acquire_res" -eq 1 ]; then
+  status=1
+elif [ "$acquire_res" -eq 2 ]; then
+  echo "  no Go here (or no python to drive it), so Pebble is not built and the orders go unplaced"
+elif [ "$acquire_res" -eq 3 ]; then
+  echo "  Pebble could not be fetched or built here (no network?), so the orders go unplaced: $(tail -1 "$WORK/go-install.log")"
+fi
 echo "FINAL_STATUS=$status"
 """
-            res_autocert = subprocess.run(["bash", "-c", cmd_autocert], capture_output=True, text=True)
-            self.assertIn("FINAL_STATUS=0", res_autocert.stdout)
-            self.assertIn("no Go here (or no python with cryptography to drive it), so Pebble is not built and nothing is ordered", res_autocert.stdout)
-            self.assertIn("Pebble could not be fetched or built here (no network?), so nothing is ordered: connection refused", res_autocert.stdout)
+            res_fail = subprocess.run(["bash", "-c", cmd_acme_fail], capture_output=True, text=True)
+            self.assertIn("FINAL_STATUS=0", res_fail.stdout)
+            self.assertIn("Pebble could not be fetched or built here (no network?), so the orders go unplaced: go: network down", res_fail.stdout)
 
+    def test_script_boundary_proof_mode_success_returns_zero(self):
+        """In std_acme_exercise.sh and std_autocert_exercise.sh, sourcing helper on valid inputs sets acquire_res=0 and status=0."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            inputs_dir = tmp / "proof_inputs"
+            mirror_dir = inputs_dir / "go-proxy"
+            mirror_dir.mkdir(parents=True)
+            work_dir = tmp / "work"
+            work_dir.mkdir()
+            bin_dir = tmp / "bin"
+            bin_dir.mkdir()
+            log_file = tmp / "go.log"
+            go_bin = create_fake_go(bin_dir, log_file, installed_version=PEBBLE_PINNED_VERSION)
+
+            cmd = f"""\
+set -u
+status=0
+REPO="{REPO_ROOT}"
+WORK="{work_dir}"
+GO="{go_bin}"
+IYI_PROOF_INPUTS_DIR="{inputs_dir}"
+PY="{sys.executable}"
+
+acquire_res=0
+. "$REPO/bench/pebble_acquire.sh" || acquire_res=$?
+if [ "$acquire_res" -eq 1 ]; then
+  status=1
+elif [ "$acquire_res" -eq 2 ]; then
+  echo "  no Go here (or no python to drive it), so Pebble is not built and the orders go unplaced"
+elif [ "$acquire_res" -eq 3 ]; then
+  echo "  Pebble could not be fetched or built here (no network?), so the orders go unplaced:"
+elif [ "$acquire_res" -eq 0 ]; then
+  echo "ACQUIRED_OK certs=$certs"
+fi
+echo "FINAL_STATUS=$status"
+"""
+            res = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
+            self.assertEqual(res.returncode, 0)
+            self.assertIn("FINAL_STATUS=0", res.stdout)
+            self.assertIn("ACQUIRED_OK certs=", res.stdout)
     def test_actual_go_resolves_tiny_offline_file_proxy_module(self):
         """Actual host Go resolves an owned local file-proxy module under GOPROXY=file://, GONOPROXY=none."""
         real_go = shutil.which("go")
@@ -542,23 +607,35 @@ echo "FINAL_STATUS=$status"
             run_res = subprocess.run([str(bin_file)], capture_output=True, text=True)
             self.assertEqual(run_res.stdout.strip(), "TINY_OFFLINE_PROVED")
 
-            # Test 2: Prove that setting GOPRIVATE=* without GONOPROXY=none WOULD attempt network:
-            # GONOPROXY defaults to GOPRIVATE, bypassing GOPROXY and failing with direct network lookup.
-            env_bad = env.copy()
-            env_bad["GOPRIVATE"] = "*"
-            env_bad.pop("GONOPROXY", None)
+            # Test 2: Negative control with owned loopback control and bounded timeout (no public network dependency):
+            # Pointing GOPROXY to an unserved local loopback address fails immediately without cache reuse.
+            work2 = tmp / "work2"
+            work2_mod = work2 / "gomodcache"
+            work2_cache = work2 / "gocache"
+            work2_bin = work2 / "gobin"
+            for d in (work2_bin, work2_mod, work2_cache):
+                d.mkdir(parents=True)
 
-            res_bad = subprocess.run(
-                [real_go, "install", "example.com/tinyoffline/cmd/tinypkg@v1.0.0"],
-                env=env_bad,
+            env_negative = os.environ.copy()
+            env_negative["GOTOOLCHAIN"] = "local"
+            # Unused local loopback port
+            env_negative["GOPROXY"] = "http://127.0.0.1:59187"
+            env_negative["GONOPROXY"] = "none"
+            env_negative["GOSUMDB"] = "off"
+            env_negative["GONOSUMDB"] = "*"
+            env_negative["GOMODCACHE"] = str(work2_mod)
+            env_negative["GOCACHE"] = str(work2_cache)
+            env_negative["GOBIN"] = str(work2_bin)
+
+            res_negative = subprocess.run(
+                ["env", "-u", "GOPRIVATE", real_go, "install", "example.com/tinyoffline/cmd/tinypkg@v1.0.0"],
+                env=env_negative,
                 capture_output=True,
                 text=True,
+                timeout=5,
             )
-            self.assertNotEqual(res_bad.returncode, 0, "GOPRIVATE=* without GONOPROXY=none unexpectedly succeeded")
-            self.assertTrue(
-                "unrecognized import path" in res_bad.stderr or "reading https://" in res_bad.stderr,
-                f"Expected network lookup failure with GOPRIVATE=*, got: {res_bad.stderr}",
-            )
+            self.assertNotEqual(res_negative.returncode, 0, "Loopback connection failure expected")
+            self.assertFalse((work2_bin / "tinypkg").exists(), "Binary must not be built on failed proxy connection")
 
 
 if __name__ == "__main__":

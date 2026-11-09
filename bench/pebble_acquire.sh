@@ -72,7 +72,7 @@ acquire_pebble() {
       return 1
     fi
 
-    version="$("$GO" version -m "$binary" 2>/dev/null | awk '$1 == "mod" && $2 == "github.com/letsencrypt/pebble/v2" { print $3 }')"
+    version="$(env -u GOPRIVATE GOTOOLCHAIN=local GOPROXY="$proxy_url" GONOPROXY=none GOSUMDB=off GONOSUMDB="*" "$GO" version -m "$binary" 2>/dev/null | awk '$1 == "mod" && $2 == "github.com/letsencrypt/pebble/v2" { print $3 }')"
     if [ "$version" != "v2.10.1" ]; then
       echo "  FAIL: Pebble binary module version '$version' != expected 'v2.10.1'" >&2
       return 1
@@ -104,9 +104,10 @@ acquire_pebble() {
   fi
 }
 
-acquire_pebble
-_acquire_status=$?
-
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
-  exit $_acquire_status
+  acquire_pebble
+  exit $?
+else
+  acquire_pebble
+  return $?
 fi

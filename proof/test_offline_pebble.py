@@ -607,8 +607,8 @@ echo "FINAL_STATUS=$status"
             run_res = subprocess.run([str(bin_file)], capture_output=True, text=True)
             self.assertEqual(run_res.stdout.strip(), "TINY_OFFLINE_PROVED")
 
-            # Test 2: Negative control with owned loopback control and bounded timeout (no public network dependency):
-            # Pointing GOPROXY to an unserved local loopback address fails immediately without cache reuse.
+            # Test 2: Negative control avoiding network: pointing GOPROXY to an owned nonexistent file mirror path
+            # fails deterministically with zero network requests.
             work2 = tmp / "work2"
             work2_mod = work2 / "gomodcache"
             work2_cache = work2 / "gocache"
@@ -616,27 +616,74 @@ echo "FINAL_STATUS=$status"
             for d in (work2_bin, work2_mod, work2_cache):
                 d.mkdir(parents=True)
 
-            env_negative = os.environ.copy()
-            env_negative["GOTOOLCHAIN"] = "local"
-            # Unused local loopback port
-            env_negative["GOPROXY"] = "http://127.0.0.1:59187"
-            env_negative["GONOPROXY"] = "none"
-            env_negative["GOSUMDB"] = "off"
-            env_negative["GONOSUMDB"] = "*"
-            env_negative["GOMODCACHE"] = str(work2_mod)
-            env_negative["GOCACHE"] = str(work2_cache)
-            env_negative["GOBIN"] = str(work2_bin)
+            env_file_missing = os.environ.copy()
+            env_file_missing["GOTOOLCHAIN"] = "local"
+            env_file_missing["GOPROXY"] = f"file://{tmp}/nonexistent_mirror_path"
+            env_file_missing["GONOPROXY"] = "none"
+            env_file_missing["GOSUMDB"] = "off"
+            env_file_missing["GONOSUMDB"] = "*"
+            env_file_missing["GOMODCACHE"] = str(work2_mod)
+            env_file_missing["GOCACHE"] = str(work2_cache)
+            env_file_missing["GOBIN"] = str(work2_bin)
 
-            res_negative = subprocess.run(
+            res_file_missing = subprocess.run(
                 ["env", "-u", "GOPRIVATE", real_go, "install", "example.com/tinyoffline/cmd/tinypkg@v1.0.0"],
-                env=env_negative,
+                env=env_file_missing,
                 capture_output=True,
                 text=True,
                 timeout=5,
             )
-            self.assertNotEqual(res_negative.returncode, 0, "Loopback connection failure expected")
-            self.assertFalse((work2_bin / "tinypkg").exists(), "Binary must not be built on failed proxy connection")
+            self.assertNotEqual(res_file_missing.returncode, 0, "Missing file mirror must fail")
+            self.assertFalse((work2_bin / "tinypkg").exists(), "Binary must not be built from nonexistent file mirror")
 
+            # Test 3: Negative control with owned loopback server dynamically bound to port 0
+            # (kernel-allocated port owned by this test, no hardcoded ports) deterministically rejecting requests.
+            work3 = tmp / "work3"
+            work3_mod = work3 / "gomodcache"
+            work3_cache = work3 / "gocache"
+            work3_bin = work3 / "gobin"
+            for d in (work3_bin, work3_mod, work3_cache):
+                d.mkdir(parents=True)
+
+            import http.server, threading
+
+            class RejectHandler(http.server.BaseHTTPRequestHandler):
+                def do_GET(self):
+                    self.send_response(503)
+                    self.end_headers()
+                    self.wfile.write(b"owned loopback reject\n")
+
+                def log_message(self, format, *args):
+                    pass
+
+            owned_server = http.server.HTTPServer(("127.0.0.1", 0), RejectHandler)
+            owned_port = owned_server.server_address[1]
+            server_thread = threading.Thread(target=owned_server.serve_forever, daemon=True)
+            server_thread.start()
+
+            try:
+                env_loopback = os.environ.copy()
+                env_loopback["GOTOOLCHAIN"] = "local"
+                env_loopback["GOPROXY"] = f"http://127.0.0.1:{owned_port}"
+                env_loopback["GONOPROXY"] = "none"
+                env_loopback["GOSUMDB"] = "off"
+                env_loopback["GONOSUMDB"] = "*"
+                env_loopback["GOMODCACHE"] = str(work3_mod)
+                env_loopback["GOCACHE"] = str(work3_cache)
+                env_loopback["GOBIN"] = str(work3_bin)
+
+                res_loopback = subprocess.run(
+                    ["env", "-u", "GOPRIVATE", real_go, "install", "example.com/tinyoffline/cmd/tinypkg@v1.0.0"],
+                    env=env_loopback,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                self.assertNotEqual(res_loopback.returncode, 0, "Owned loopback reject expected to fail")
+                self.assertFalse((work3_bin / "tinypkg").exists(), "Binary must not be built on rejected proxy")
+            finally:
+                owned_server.shutdown()
+                owned_server.server_close()
 
 if __name__ == "__main__":
     unittest.main()

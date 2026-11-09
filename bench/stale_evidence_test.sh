@@ -402,18 +402,6 @@ finally:
             sentinel_proc.wait()
         except Exception:
             pass
-    if birth_verified and child_pid is not None:
-        for _ in range(20):
-            try:
-                os.kill(child_pid, 0)
-                time.sleep(0.05)
-            except ProcessLookupError:
-                break
-        else:
-            try:
-                os.kill(child_pid, signal.SIGKILL)
-            except Exception:
-                pass
 PYEOF
 
 # --------------------------------------------------------------------------
@@ -421,7 +409,7 @@ PYEOF
 # --------------------------------------------------------------------------
 step 6 "fail-closed controls: pump error and unresolved writers force failure"
 "$PYTHON" - "$REPO" "$WORK" <<'PYEOF'
-import os, sys, subprocess, tempfile
+import os, sys, subprocess, tempfile, time
 repo, work = sys.argv[1:3]
 sys.path.insert(0, os.path.join(repo, 'bench'))
 from stale_evidence import safe_stage_dir, safe_item_dir, execute_cmd, CaptureError
@@ -450,23 +438,81 @@ assert open(os.path.join(item_io, 'fail_io.exit')).read() == 'IO_ERROR\n'
 assert 'IO_ERROR' in open(os.path.join(item_io, 'fail_io.status')).read()
 assert os.path.isfile(os.path.join(item_io, 'fail_io.error'))
 
-# 2. Unresolved writers past command deadline raise CaptureError
+# 2. Unresolved writers past command deadline raise CaptureError (proven child exit via control pipe)
 item_unres = safe_item_dir(stage, 'samples/iyi/unres.iyi')
-bg_code = """
-import subprocess, sys, time
-subprocess.Popen([sys.executable, "-c", "import time; time.sleep(10)"], stdout=sys.stdout)
+unres_r, unres_w = os.pipe()
+gc_pid_file = os.path.join(work, 'gc_pid.txt')
+try:
+    bg_code = f"""
+import subprocess, sys, os
+p = subprocess.Popen([sys.executable, "-c", f"import sys, os; open('{gc_pid_file}', 'w').write(str(os.getpid())); os.read({unres_r}, 1)"], stdout=sys.stdout, pass_fds=({unres_r},))
 sys.exit(0)
 """
-try:
-    execute_cmd([sys.executable, '-c', bg_code],
-                timeout=0.3, item_dir=item_unres, leg='unres_leg')
-    assert False, 'expected CaptureError on unresolved writers'
-except CaptureError as e:
-    assert 'unclosed' in str(e).lower()
+    try:
+        execute_cmd([sys.executable, '-c', bg_code],
+                    timeout=0.3, item_dir=item_unres, leg='unres_leg', pass_fds=(unres_r,))
+        assert False, 'expected CaptureError on unresolved writers'
+    except CaptureError as e:
+        assert 'unclosed' in str(e).lower()
+finally:
+    os.close(unres_w)
+    os.close(unres_r)
 
 assert open(os.path.join(item_unres, 'unres_leg.exit')).read() == 'UNRESOLVED_WRITERS\n'
 assert open(os.path.join(item_unres, 'unres_leg.status')).read() == 'UNRESOLVED_WRITERS\n'
 assert os.path.isfile(os.path.join(item_unres, 'unres_leg.unresolved'))
+
+# Prove grandchild exited upon pipe EOF (no orphans)
+assert os.path.isfile(gc_pid_file)
+gc_pid = int(open(gc_pid_file).read().strip())
+for _ in range(40):
+    try:
+        os.kill(gc_pid, 0)
+        time.sleep(0.05)
+    except ProcessLookupError:
+        break
+else:
+    assert False, 'grandchild failed to terminate on pipe EOF'
+
+# 3. Timeout with unresolved writers raises CaptureError (not TimeoutExpired)
+item_timeout_unres = safe_item_dir(stage, 'samples/iyi/timeout_unres.iyi')
+to_r, to_w = os.pipe()
+to_pid_file = os.path.join(work, 'to_pid.txt')
+try:
+    timeout_unres_code = f"""
+import subprocess, sys, os, time
+p = subprocess.Popen([sys.executable, "-c", f"import sys, os; open('{to_pid_file}', 'w').write(str(os.getpid())); os.read({to_r}, 1)"], stdout=sys.stdout, pass_fds=({to_r},))
+time.sleep(10)
+"""
+    try:
+        execute_cmd([sys.executable, '-c', timeout_unres_code],
+                    timeout=0.3, item_dir=item_timeout_unres, leg='to_unres_leg', pass_fds=(to_r,))
+        assert False, 'expected CaptureError on timeout with unresolved writers'
+    except CaptureError as e:
+        assert 'unclosed' in str(e).lower()
+    except subprocess.TimeoutExpired:
+        assert False, 'TimeoutExpired must not mask unresolved capture failure'
+finally:
+    os.close(to_w)
+    os.close(to_r)
+
+assert os.path.isfile(os.path.join(item_timeout_unres, 'to_unres_leg.timeout'))
+assert os.path.isfile(os.path.join(item_timeout_unres, 'to_unres_leg.unresolved'))
+assert open(os.path.join(item_timeout_unres, 'to_unres_leg.exit')).read() == 'UNRESOLVED_WRITERS\n'
+status_str = open(os.path.join(item_timeout_unres, 'to_unres_leg.status')).read()
+assert 'UNRESOLVED_WRITERS:TIMEOUT' in status_str
+
+# Prove timeout child terminated upon pipe EOF
+assert os.path.isfile(to_pid_file)
+to_gc_pid = int(open(to_pid_file).read().strip())
+for _ in range(40):
+    try:
+        os.kill(to_gc_pid, 0)
+        time.sleep(0.05)
+    except ProcessLookupError:
+        break
+else:
+    assert False, 'timeout grandchild failed to terminate on pipe EOF'
 PYEOF
 
 # --------------------------------------------------------------------------

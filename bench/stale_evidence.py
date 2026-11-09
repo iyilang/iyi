@@ -287,14 +287,18 @@ def execute_cmd(
                 f.write("IO_ERROR\n")
             raise CaptureError(f"Evidence I/O error on leg {leg}: {io_err}")
 
-        # Handle unresolved writers on normal exit (fail closed, raising CaptureError)
-        if unresolved and not timed_out and not cancelled:
+        # Handle unresolved writers (fail closed, raising CaptureError even if timed out)
+        if unresolved and not cancelled:
+            exit_str = "UNRESOLVED_WRITERS"
+            status_str = f"UNRESOLVED_WRITERS:TIMEOUT:{timeout}" if timed_out else "UNRESOLVED_WRITERS"
             with open(status_path, "x", encoding="utf-8") as f:
-                f.write("UNRESOLVED_WRITERS\n")
+                f.write(f"{status_str}\n")
             with open(exit_path, "x", encoding="utf-8") as f:
-                f.write("UNRESOLVED_WRITERS\n")
-            raise CaptureError(f"Evidence stream unclosed on leg {leg} past deadline")
-
+                f.write(f"{exit_str}\n")
+            raise CaptureError(
+                f"Evidence stream unclosed on leg {leg} past deadline"
+                + (f" (timeout after {timeout}s)" if timed_out else "")
+            )
         if timed_out:
             exit_str = "TIMEOUT"
             status_str = (

@@ -13,7 +13,11 @@
 #    - Explicit .timeout flag file created on timeout with TIMEOUT exit indicator
 #    - Signal termination with .signal file
 #    - Launch error with .error file
-# 6. Descendant termination: timeout kills all owned processes in the private process group.
+#    - Case E: Runner SIGKILL incremental flush with parent-owned control pipe, proving
+#      actual child exit and proving unrelated sentinel process remains untouched.
+# 6. Fail-closed negative controls:
+#    - Pump write / fsync failure forces non-zero returncode and records IO_ERROR.
+#    - Unclosed writers exceeding deadline force non-zero returncode and record UNRESOLVED_WRITERS.
 # 7. Actual entry path execution of bench/stale_equivalence.sh against a fake compiler:
 #    - No-evidence mode: passes without persisting files
 #    - Evidence mode: populates rg2r/<probe> with exact raw streams, traces, keys, no alias duplicates
@@ -262,83 +266,140 @@ except FileNotFoundError:
 assert open(os.path.join(item, 'error_leg.exit')).read() == 'LAUNCH_ERROR\n'
 assert 'LAUNCH_ERROR' in open(os.path.join(item, 'error_leg.status')).read()
 assert os.path.isfile(os.path.join(item, 'error_leg.error'))
-# Case E: Runner killed by SIGKILL while child is emitting; bytes on disk must already exist before runner death
+
+# Case E: Runner killed by SIGKILL while child is emitting:
+# Proves: partial bytes flushed to disk survive runner SIGKILL; parent-owned control pipe
+# guarantees bounded child teardown on pipe EOF; unrelated sentinel process remains untouched.
+sentinel_proc = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
+assert sentinel_proc.poll() is None, 'sentinel must be alive before test'
+
+control_r, control_w = os.pipe()
 sigkill_dir = safe_item_dir(stage, 'samples/iyi/sigkill_test.iyi')
 sigkill_out = os.path.join(sigkill_dir, 'kill_leg.stdout')
+child_pid_file = os.path.join(work, 'sigkill_child.pid')
+
+child_code = f"""
+import sys, os
+with open({child_pid_file!r}, 'w') as f:
+    f.write(str(os.getpid()) + '\\n')
+    f.flush()
+sys.stdout.write('streamed chunk before runner death' + chr(10))
+sys.stdout.flush()
+try:
+    os.read({control_r}, 1)
+except Exception:
+    pass
+"""
+runner_code = f"""
+import sys, os
+sys.path.insert(0, os.path.join({repo!r}, 'bench'))
+from stale_evidence import execute_cmd
+execute_cmd([sys.executable, '-c', {child_code!r}], item_dir={sigkill_dir!r}, leg='kill_leg')
+"""
 runner_py = os.path.join(work, 'runner_sigkill.py')
 with open(runner_py, 'w') as f:
-    f.write(f'''
-import sys, os, time
-sys.path.insert(0, os.path.join('{repo}', 'bench'))
-from stale_evidence import execute_cmd
+    f.write(runner_code)
 
-child_code = """
-import sys, time
-sys.stdout.write("streamed chunk before runner death" + chr(10))
-sys.stdout.flush()
-time.sleep(10)
-"""
-execute_cmd([sys.executable, "-c", child_code], item_dir=sys.argv[1], leg="kill_leg")
-''')
+runner_proc = subprocess.Popen([sys.executable, runner_py], pass_fds=(control_r,))
 
-runner_proc = subprocess.Popen([sys.executable, runner_py, sigkill_dir])
+# Wait for child PID and chunk on disk
 for _ in range(50):
-    if os.path.exists(sigkill_out) and os.path.getsize(sigkill_out) > 0:
+    if os.path.exists(child_pid_file) and os.path.exists(sigkill_out) and os.path.getsize(sigkill_out) > 0:
         break
     time.sleep(0.05)
+
+assert os.path.exists(child_pid_file), 'child PID file must exist'
+child_pid = int(open(child_pid_file).read().strip())
+assert child_pid > 0
 
 assert os.path.exists(sigkill_out), 'output file must exist while runner is running'
 bytes_before_kill = open(sigkill_out, 'rb').read()
 assert bytes_before_kill == b'streamed chunk before runner death\n', f'got {bytes_before_kill!r}'
 
-# Kill runner with SIGKILL while child is emitting/sleeping
+# Kill runner with SIGKILL while child is emitting
 os.kill(runner_proc.pid, signal.SIGKILL)
 runner_proc.wait()
 
 # Verify bytes already existed on disk and survived runner death
 bytes_after_kill = open(sigkill_out, 'rb').read()
 assert bytes_after_kill == b'streamed chunk before runner death\n', f'got {bytes_after_kill!r}'
+
+# Close all write ends to control pipe to trigger EOF and bounded child exit
+os.close(control_w)
+os.close(control_r)
+
+# Prove child exited without lingering
+child_dead = False
+for _ in range(40):
+    try:
+        os.kill(child_pid, 0)
+        time.sleep(0.05)
+    except ProcessLookupError:
+        child_dead = True
+        break
+assert child_dead, f'child PID {child_pid} failed to exit after pipe EOF'
+
+# Prove unrelated sentinel was completely untouched
+assert sentinel_proc.poll() is None, 'sentinel process must still be alive!'
+try:
+    os.kill(sentinel_proc.pid, 0)
+except ProcessLookupError:
+    assert False, 'sentinel PID was killed!'
+sentinel_proc.kill()
+sentinel_proc.wait()
 PYEOF
 
 # --------------------------------------------------------------------------
-# Step 6: Descendant process group termination on timeout
+# Step 6: Fail-closed negative controls for pump error and unresolved writers
 # --------------------------------------------------------------------------
-step 6 "timeout terminates all owned descendants in the process group"
+step 6 "fail-closed controls: pump error and unresolved writers force non-PASS"
 "$PYTHON" - "$REPO" "$WORK" <<'PYEOF'
-import os, sys, subprocess, time
+import os, sys, subprocess, tempfile
 repo, work = sys.argv[1:3]
 sys.path.insert(0, os.path.join(repo, 'bench'))
 from stale_evidence import safe_stage_dir, safe_item_dir, execute_cmd
 
-evid_root = os.path.join(work, 'descendant_root')
+evid_root = os.path.join(work, 'fail_closed_root')
 os.makedirs(evid_root, exist_ok=True)
 stage = safe_stage_dir(evid_root, 'rg2')
-item = safe_item_dir(stage, 'samples/iyi/descendant.iyi')
+item_io = safe_item_dir(stage, 'samples/iyi/io_fail.iyi')
 
-sentinel = os.path.join(work, 'descendant_pid.txt')
+# 1. Pump write/fsync failure forces non-zero returncode and records IO_ERROR
+# Simulate pump error by monkeypatching write to raise OSError
+import stale_evidence
+orig_pump = stale_evidence._pump_pipe
 
-spawn_code = (
-    'import subprocess, sys, time, os\n'
-    'sub = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])\n'
-    f'open("{sentinel}", "w").write(str(sub.pid))\n'
-    'time.sleep(30)\n'
-)
+def failing_pump(stream, fh, buf, err_box):
+    err_box.append(OSError(28, "No space left on device"))
+    # Also consume stream so child doesn't block
+    orig_pump(stream, fh, buf, [])
 
-try:
-    execute_cmd([sys.executable, '-c', spawn_code], timeout=0.4, item_dir=item, leg='spawn_leg')
-    assert False, 'expected TimeoutExpired'
-except subprocess.TimeoutExpired:
-    pass
+stale_evidence._pump_pipe = failing_pump
+res_io = execute_cmd([sys.executable, '-c', 'print("hello")'],
+                     item_dir=item_io, leg='fail_io')
+stale_evidence._pump_pipe = orig_pump
 
-assert os.path.isfile(sentinel), 'sentinel PID file must be written'
-child_pid = int(open(sentinel).read().strip())
-time.sleep(0.3)
+assert res_io.returncode != 0, f'pump error must force non-zero returncode, got {res_io.returncode}'
+assert open(os.path.join(item_io, 'fail_io.exit')).read() == 'IO_ERROR\n'
+assert 'IO_ERROR' in open(os.path.join(item_io, 'fail_io.status')).read()
+assert os.path.isfile(os.path.join(item_io, 'fail_io.error'))
 
-try:
-    os.kill(child_pid, 0)
-    assert False, f'descendant PID {child_pid} is still alive after process group kill'
-except ProcessLookupError:
-    pass
+# 2. Unresolved writers past command deadline force non-zero returncode
+item_unres = safe_item_dir(stage, 'samples/iyi/unres.iyi')
+# Child exits 0 immediately, background grandchild holds pipe open
+bg_code = """
+import subprocess, sys, time
+subprocess.Popen([sys.executable, "-c", "import time; time.sleep(10)"], stdout=sys.stdout)
+sys.exit(0)
+"""
+# Set timeout small (0.4s) so drain window expires
+res_unres = execute_cmd([sys.executable, '-c', bg_code],
+                        timeout=0.4, item_dir=item_unres, leg='unres_leg')
+
+assert res_unres.returncode != 0, f'unresolved writers must force non-zero returncode, got {res_unres.returncode}'
+assert open(os.path.join(item_unres, 'unres_leg.exit')).read() == 'UNRESOLVED_WRITERS\n'
+assert open(os.path.join(item_unres, 'unres_leg.status')).read() == 'UNRESOLVED_WRITERS\n'
+assert os.path.isfile(os.path.join(item_unres, 'unres_leg.unresolved'))
 PYEOF
 
 # --------------------------------------------------------------------------

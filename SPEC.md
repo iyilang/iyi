@@ -63,7 +63,7 @@ own reference accepts.
 | warm full build, `hello` / 6,900-line pair | 0.07 s / 0.24 s, against `go build`'s 0.08 s / 0.09 s |
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
-| iyi's own prelude | 28,800 lines, of which 4,683 are the library held to the 4,683 ceiling (6,954 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
+| iyi's own prelude | 28,806 lines, of which 4,689 are the library held to the 4,689 ceiling (6,960 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
 | compiler | 137,692 lines, none of it written in iyi |
 | artifact format | `.iyimod` v62, checksum per section |
 | samples | 28 programs, of which 12 rebuild from artifacts with their modules' source deleted |
@@ -88,7 +88,7 @@ shape.
 > is a library and the rules are the language, so a program can keep one and
 > change the other: `--crystal` builds against Crystal's standard library, and
 > there `require` reaches the ecosystem while every rule stays where it was.
-> "No standard library worth the name" is still true of iyi's own 28,800 lines
+> "No standard library worth the name" is still true of iyi's own 28,806 lines
 > and no longer true of what a program can have. Part V item 12a is the
 > measurement, nine shards wide.
 
@@ -270,8 +270,8 @@ of binary. It is not made the default on that trade, and the middle needs the
 initialisers to run *later* rather than not at all, which is the `dlsym` table
 above, and a larger piece of work than the number it wins.
 
-**3. A deliberately tiny prelude, written in iyi. Done: 28,800 lines,
-primitives included, of which the library is 4,683.** Not a standard library:
+**3. A deliberately tiny prelude, written in iyi. Done: 28,806 lines,
+primitives included, of which the library is 4,689.** Not a standard library:
 integers, booleans, a string, one sequence, one dictionary, one range, `puts`,
 and an `enum`'s surface — the member's name, an order, the members, and the
 bits of a `@[Flags]` one. **Its scope is set by what the
@@ -301,11 +301,11 @@ the scheduler and the kernel thread (III.4, `concurrency.iyi` and
 seed under `-Diyi_chaos`, `chaos.iyi` and `chaos_points.iyi`, III.4.17),
 the shortest-round-trip float text (`float.iyi`) - and they
 are most of its lines. So the figure held to the ceiling is the library:
-**4,683 lines** of the 21,556, measured by `bench/doc_numbers.py` as
+**4,689 lines** of the 21,556, measured by `bench/doc_numbers.py` as
 everything under `src/iyi/` except those three and except every platform's
 floor of 2,271 lines — the arms behind `flag?(:win32)`, `flag?(:linux)`,
 `flag?(:darwin)` and `flag?(:wasm32)`, which the paragraph on the breach
-below settles and explains. Opening `src/iyi/` counts 6,954 with the floor
+below settles and explains. Opening `src/iyi/` counts 6,960 with the floor
 still in it, and the whole-prelude figure is stated beside both because a
 reader sees the whole file, and a "tiny prelude" claim that hid 9,000 lines
 of runtime would be a claim about the wrong number.
@@ -486,6 +486,14 @@ the safe way to read a byte and leave `to_unsafe` the one that needs
 none, the reverse of what III.13 asks, and a mark is a file saying what it
 is rather than a method a program calls. The owner chose the number, as
 measured with III.13 in: 4,683.
+
+**And once more, by the owner's decision, to 4,689.** `Pointer#==` (#165)
+is six lines: without it `Object#==` answered false for `p == p`, for two
+null pointers and for two `Void*` of one address, and a pointer key was
+never found in a `Hash`. It is the counterpart of #128's `Class#==`, which
+the library already carries, and an import in front of comparing two
+pointers would leave the comparison silently wrong for every program that
+forgot it. The owner chose the number, as measured with it in: 4,689.
 
 What the rule does *not* forgive: a `pub def` a program calls is API and
 counts wherever it is written, macro arm or not — the exclusion is for the
@@ -1043,7 +1051,7 @@ Checking it moved two things and left the shape alone.
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
 | Compiler | 24,984 lines, **written in Crystal** | 137,692 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 28,800-line own prelude + 126,520 in std |
+| Library | 8,161 lines (3,551 of it core) | 28,806-line own prelude + 126,520 in std |
 | Specs | 21,146 lines | 16,992 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
@@ -13279,7 +13287,7 @@ Named honestly, so nobody mistakes this draft for complete.
     shards exist and none of them is written to iyi's rules, so "run them
     directly" is not a compatibility problem, it is the four rules: `require`
     against R-1, inference against R-2, monkey patching against R-3, and
-    Crystal's 8,161-line standard library against iyi's own 28,800-line prelude.
+    Crystal's 8,161-line standard library against iyi's own 28,806-line prelude.
 
     What is measurable is narrower and better than that framing suggests, and
     it was measured on **Kemal 1.12.0**, which compiles under this compiler

@@ -112,6 +112,7 @@ describe "Codegen: iyi case equality" do
   it "compares pointers by the address they hold" do
     with_tempdir("iyi-pointer-equality") do
       run_iyi("pointers", <<-'IYI').should eq("true\nfalse\ntrue\ntrue\ntrue\ntrue\n")
+        @[Unsafe("takes pointers to two locals and builds a null pointer from a raw address")]
         x = 1
         y = 2
         a = pointerof(x)

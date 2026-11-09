@@ -162,13 +162,15 @@ def measured() -> dict[str, int]:
 # import. The owner raised it again, to 4,683, for SPEC.md III.13's 33 lines:
 # the mark above nine of the library's files, two `call:` promises, and
 # `String#byte_at` and `String.new(Array(UInt8), start, count)`, the safe byte
-# calls that let modules drop their marks. A check rather than a habit since
+# calls that let modules drop their marks. And to 4,689, for the six lines of
+# `Pointer#==` (#165), which compares two pointers by the address they hold,
+# the counterpart of #128's class `==`. A check rather than a habit since
 # the night Windows' floor walked 508 lines over it and nothing failed.
-CEILING = 4_683
+CEILING = 4_689
 
 
 def prelude_library_lines() -> int:
-    """The figure SPEC.md holds to the 4,683-line ceiling: the library
+    """The figure SPEC.md holds to the 4,689-line ceiling: the library
     without any platform's floor.
 
     Everything under `src/iyi/` except two things. First, what Crystal's

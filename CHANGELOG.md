@@ -983,7 +983,9 @@
   `Pointer` had no `==`, so `Object#==` answered false for `p == p`, for
   two `Void*` of one address and for two null pointers, and a pointer key
   was never found in a `Hash`. Held by
-  `spec/compiler/codegen/iyi_case_equality_spec.cr`.
+  `spec/compiler/codegen/iyi_case_equality_spec.cr`. Its six lines raised
+  the library's ceiling, by the owner's decision, from 4,683 to 4,689
+  (SPEC.md I.4), as #128's class `==` is already in the library.
 
 - **The language server's hover shows the doc comment of a declaration
   written under an annotation.** It read the `#` lines straight above the
@@ -27718,7 +27720,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 28,800-line library and nothing else. Every other
+  written against iyi's own 28,806-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

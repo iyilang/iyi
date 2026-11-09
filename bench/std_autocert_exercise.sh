@@ -72,6 +72,7 @@ cleanup() {
     kill "$pid" >/dev/null 2>&1
     wait "$pid" >/dev/null 2>&1
   done
+  chmod -R u+w "$WORK" >/dev/null 2>&1 || true
   rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -172,21 +173,84 @@ echo "== certificates from Let's Encrypt's Pebble"
 GO="${GO:-go}"
 PEBBLE=""
 if [ -z "$ORACLE" ] || ! command -v "$GO" >/dev/null 2>&1; then
-  echo "  no Go here (or no python with cryptography to drive it), so Pebble is not built and nothing is ordered"
+  if [ -n "${IYI_PROOF_INPUTS_DIR:-}" ]; then
+    echo "  FAIL: IYI_PROOF_INPUTS_DIR requires Go and Python cryptography, but one or both are missing" >&2
+    status=1
+  else
+    echo "  no Go here (or no python with cryptography to drive it), so Pebble is not built and nothing is ordered"
+  fi
 else
   GOBIN="$WORK/gobin"
   mkdir -p "$GOBIN"
-  if ! GOBIN="$GOBIN" "$GO" install github.com/letsencrypt/pebble/v2/cmd/pebble@latest \
-      github.com/letsencrypt/pebble/v2/cmd/pebble-challtestsrv@latest >"$WORK/go-install.log" 2>&1; then
-    echo "  Pebble could not be fetched or built here (no network?), so nothing is ordered: $(tail -1 "$WORK/go-install.log")"
+  install_ok=""
+  if [ -n "${IYI_PROOF_INPUTS_DIR:-}" ]; then
+    proxy_dir="$IYI_PROOF_INPUTS_DIR/go-proxy"
+    if [ ! -d "$proxy_dir" ]; then
+      echo "  FAIL: IYI_PROOF_INPUTS_DIR Go module mirror 'go-proxy/' missing: $proxy_dir" >&2
+      status=1
+    else
+      GOMODCACHE="$WORK/gomodcache"
+      GOCACHE="$WORK/gocache"
+      mkdir -p "$GOMODCACHE" "$GOCACHE"
+      proxy_path="$proxy_dir"
+      case "$(uname -s)" in
+        MINGW* | MSYS* | CYGWIN* | Windows_NT) proxy_path="$(cygpath -m "$proxy_path")" ;;
+      esac
+      case "$proxy_path" in
+        /*) proxy_url="file://$proxy_path" ;;
+        *) proxy_url="file:///$proxy_path" ;;
+      esac
+      # Contract: trusted orchestrator independently verifies complete Go mirror
+      # artifact manifest/digest before launch; do not claim Go's disabled
+      # checksum service (GOSUMDB=off) proves it.
+      if ! GOBIN="$GOBIN" GOMODCACHE="$GOMODCACHE" GOCACHE="$GOCACHE" \
+          GOTOOLCHAIN=local GOPROXY="$proxy_url" GOSUMDB=off GONOSUMDB="*" GOPRIVATE="*" \
+          "$GO" install github.com/letsencrypt/pebble/v2/cmd/pebble@v2.10.1 \
+            github.com/letsencrypt/pebble/v2/cmd/pebble-challtestsrv@v2.10.1 >"$WORK/go-install.log" 2>&1; then
+        echo "  FAIL: Pebble v2.10.1 could not be installed from offline mirror: $(tail -1 "$WORK/go-install.log")" >&2
+        status=1
+      else
+        binary="$GOBIN/pebble"
+        [ -f "$binary.exe" ] && binary="$binary.exe"
+        challtest="$GOBIN/pebble-challtestsrv"
+        [ -f "$challtest.exe" ] && challtest="$challtest.exe"
+        if [ ! -x "$binary" ] || [ ! -x "$challtest" ]; then
+          echo "  FAIL: Pebble v2.10.1 binaries missing or not executable in $GOBIN" >&2
+          status=1
+        fi
+        version="$("$GO" version -m "$binary" 2>/dev/null | awk '$1 == "mod" && $2 == "github.com/letsencrypt/pebble/v2" { print $3 }')"
+        if [ "$version" != "v2.10.1" ]; then
+          echo "  FAIL: Pebble binary module version '$version' != expected 'v2.10.1'" >&2
+          status=1
+        fi
+        certs="$GOMODCACHE/github.com/letsencrypt/pebble/v2@$version/test/certs"
+        case "$(uname -s)" in
+          MINGW* | MSYS* | CYGWIN* | Windows_NT) certs="$(cygpath -m "$certs")" ;;
+        esac
+        if [ ! -d "$certs" ] || [ ! -f "$certs/localhost/cert.pem" ] || [ ! -f "$certs/localhost/key.pem" ] || [ ! -f "$certs/pebble.minica.pem" ]; then
+          echo "  FAIL: required Pebble test certs missing in $certs" >&2
+          status=1
+        else
+          install_ok=yes
+        fi
+      fi
+    fi
   else
-    binary="$GOBIN/pebble"
-    [ -f "$binary.exe" ] && binary="$binary.exe"
-    version="$("$GO" version -m "$binary" 2>/dev/null | awk '$1 == "mod" && $2 == "github.com/letsencrypt/pebble/v2" { print $3 }')"
-    certs="$("$GO" env GOMODCACHE)/github.com/letsencrypt/pebble/v2@$version/test/certs"
-    case "$(uname -s)" in
-      MINGW* | MSYS* | CYGWIN* | Windows_NT) certs="$(cygpath -m "$certs")" ;;
-    esac
+    if ! GOBIN="$GOBIN" "$GO" install github.com/letsencrypt/pebble/v2/cmd/pebble@latest \
+        github.com/letsencrypt/pebble/v2/cmd/pebble-challtestsrv@latest >"$WORK/go-install.log" 2>&1; then
+      echo "  Pebble could not be fetched or built here (no network?), so nothing is ordered: $(tail -1 "$WORK/go-install.log")"
+    else
+      binary="$GOBIN/pebble"
+      [ -f "$binary.exe" ] && binary="$binary.exe"
+      version="$("$GO" version -m "$binary" 2>/dev/null | awk '$1 == "mod" && $2 == "github.com/letsencrypt/pebble/v2" { print $3 }')"
+      certs="$("$GO" env GOMODCACHE)/github.com/letsencrypt/pebble/v2@$version/test/certs"
+      case "$(uname -s)" in
+        MINGW* | MSYS* | CYGWIN* | Windows_NT) certs="$(cygpath -m "$certs")" ;;
+      esac
+      install_ok=yes
+    fi
+  fi
+  if [ -n "$install_ok" ]; then
     mkdir -p "$WORK/pebble"
     # Seven free ports, each held open until all are drawn so none is
     # drawn twice; the Pebbles' configs and the client's setup from them.
@@ -336,7 +400,12 @@ prove_broken() {
     local | cache | alpn) ;;
     *)
       if [ -z "$PEBBLE" ]; then
-        echo "  $label: unmeasured here, as its check orders from Pebble and Pebble is not running"
+        if [ -n "${IYI_PROOF_INPUTS_DIR:-}" ]; then
+          echo "  FAIL: $label cannot be verified because Pebble is not running in proof mode" >&2
+          status=1
+        else
+          echo "  $label: unmeasured here, as its check orders from Pebble and Pebble is not running"
+        fi
         return
       fi
       ;;

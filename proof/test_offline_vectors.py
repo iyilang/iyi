@@ -208,6 +208,7 @@ class TestFullScriptExecutionWithNetworkSpy(unittest.TestCase):
         tmpdir: str,
         enable_crypto: bool = True,
         enable_openssl_mlkem: bool = True,
+        openssl_shape: str = "valid",
     ) -> tuple[Path, dict[str, str], Path]:
         """Create mock compiler, spy curl, and controlled capability wrappers."""
         bin_dir = Path(tmpdir) / "bin"
@@ -222,28 +223,28 @@ class TestFullScriptExecutionWithNetworkSpy(unittest.TestCase):
 
         # Mock OpenSSL in PATH answering version, speed, and kem-algorithms queries
         mock_openssl = bin_dir / "openssl"
-        if enable_openssl_mlkem:
-            mock_openssl.write_text("""#!/bin/sh
+        if openssl_shape == "valid":
+            speed_output = "ML-KEM-768 0.000030 0.000023 0.000025\\n  ecdsa (nistp384)   1000 1000/s\\n  ecdh (nistp384)    1000 1000/s" if enable_openssl_mlkem else "  ecdsa (nistp384)   1000 1000/s\\n  ecdh (nistp384)    1000 1000/s"
+            kem_output = "ML-KEM-768" if enable_openssl_mlkem else ""
+            version_output = "OpenSSL 3.5.0"
+        elif openssl_shape == "malformed":
+            speed_output = "unrecognized openssl speed format output without nistp384 tokens"
+            kem_output = "ML-KEM-768" if enable_openssl_mlkem else ""
+            version_output = "OpenSSL 3.5.0"
+        else:
+            speed_output = ""
+            kem_output = ""
+            version_output = "OpenSSL 3.0.0"
+
+        mock_openssl.write_text(f"""#!/bin/sh
 if [ "$1" = "speed" ]; then
-    echo "ML-KEM-768 0.000030 0.000023 0.000025"
-    echo "  ecdsa (nistp384)   1000 1000/s"
-    echo "  ecdh (nistp384)    1000 1000/s"
+    echo "{speed_output}"
     exit 0
 elif [ "$1" = "list" ] && [ "$2" = "-kem-algorithms" ]; then
-    echo "ML-KEM-768"
+    echo "{kem_output}"
     exit 0
 elif [ "$1" = "version" ]; then
-    echo "OpenSSL 3.5.0"
-    exit 0
-fi
-exit 0
-""")
-        else:
-            mock_openssl.write_text("""#!/bin/sh
-if [ "$1" = "list" ] && [ "$2" = "-kem-algorithms" ]; then
-    exit 0
-elif [ "$1" = "version" ]; then
-    echo "OpenSSL 3.0.0"
+    echo "{version_output}"
     exit 0
 fi
 exit 0
@@ -596,14 +597,43 @@ exit 0
                 self.assertIn("must be an absolute path", res.stderr)
                 self.assertFalse(canary.exists(), f"{script_name} must not contact network on relative inputs dir")
 
+    def test_unix_rejects_c_drive_relative_directory(self) -> None:
+        """On Unix, C:/inputs is relative and must be rejected even if a local directory exists."""
+        uname_s = subprocess.run(["uname", "-s"], capture_output=True, text=True).stdout.strip()
+        if any(uname_s.startswith(prefix) for prefix in ("MINGW", "MSYS", "CYGWIN", "Windows_NT")):
+            self.skipTest("Unix-specific relative C: directory test skipped on Windows")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            c_dir = tmp / "C:" / "inputs"
+            c_dir.mkdir(parents=True)
+            self.assertTrue(c_dir.is_dir())
+
+            env = os.environ.copy()
+            env["IYI_PROOF_INPUTS_DIR"] = "C:/inputs"
+
+            for script_name in ("std_mlkem_exercise.sh", "std_hpke_exercise.sh", "std_p384_exercise.sh"):
+                script = REPO_ROOT / "bench" / script_name
+                res = subprocess.run(
+                    ["bash", str(script)],
+                    cwd=str(tmp),
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                self.assertEqual(res.returncode, 1, f"{script_name} must reject relative C:/inputs on Unix")
+                self.assertIn("FAIL: IYI_PROOF_INPUTS_DIR must be an absolute path: C:/inputs", res.stderr)
+
     # --- Strict vs Ordinary Skip Controls ---
 
     def test_strict_mode_fails_closed_when_oracles_unsupported(self) -> None:
         """Prove that in strict mode, unsupported oracles fail nonzero (no silent skips)."""
         staged_dir = get_authentic_vectors_dir()
         if staged_dir is None:
+            if os.environ.get("IYI_PROOF_STRICT") == "1" or os.environ.get("IYI_STRICT_PROOF") == "1":
+                self.fail("Authentic vector bundle required in strict qualification")
             self.skipTest("Authentic vector bundle directory not set via IYI_AUTHENTIC_VECTORS_DIR / IYI_PROOF_INPUTS_DIR")
-
         with tempfile.TemporaryDirectory() as tmpdir:
             inputs_dir = Path(tmpdir) / "valid_inputs"
             inputs_dir.mkdir()
@@ -630,6 +660,13 @@ exit 0
             self.assertNotEqual(res_p384.returncode, 0)
             self.assertIn("signatures go uncompared", res_p384.stdout)
 
+            # 4. OpenSSL speed malformed output in P-384 strict mode
+            _, env_malformed_openssl, _ = self._setup_safe_environment(tmpdir, enable_crypto=True, openssl_shape="malformed")
+            env_malformed_openssl["IYI_PROOF_INPUTS_DIR"] = str(inputs_dir)
+            res_p384_malformed = subprocess.run(["bash", str(REPO_ROOT / "bench" / "std_p384_exercise.sh")], env=env_malformed_openssl, capture_output=True, text=True, timeout=30)
+            self.assertNotEqual(res_p384_malformed.returncode, 0)
+            self.assertIn("openssl speed answered in a shape this does not read", res_p384_malformed.stdout)
+
     def test_ordinary_mode_preserves_successful_skip_when_oracles_unsupported(self) -> None:
         """Prove that in ordinary mode (unset IYI_PROOF_INPUTS_DIR), unsupported oracles skip without failure."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -649,14 +686,22 @@ exit 0
             res_p384 = subprocess.run(["bash", str(REPO_ROOT / "bench" / "std_p384_exercise.sh")], env=env_no_crypto, capture_output=True, text=True, timeout=30)
             self.assertEqual(res_p384.returncode, 0, "Ordinary mode P-384 must exit 0 when oracles are skipped")
             self.assertIn("signatures go uncompared", res_p384.stdout)
+
+            # 4. Ordinary mode with malformed openssl speed preserves success (exit 0)
+            _, env_malformed_ordinary, _ = self._setup_safe_environment(tmpdir, enable_crypto=True, openssl_shape="malformed")
+            env_malformed_ordinary.pop("IYI_PROOF_INPUTS_DIR", None)
+            res_p384_malformed = subprocess.run(["bash", str(REPO_ROOT / "bench" / "std_p384_exercise.sh")], env=env_malformed_ordinary, capture_output=True, text=True, timeout=30)
+            self.assertEqual(res_p384_malformed.returncode, 0, "Ordinary mode P-384 must exit 0 on malformed openssl speed shape")
+            self.assertIn("openssl speed answered in a shape this does not read", res_p384_malformed.stdout)
     # --- ML-KEM ---
 
     def test_full_mlkem_exercise_script_succeeds_on_authentic_inputs(self) -> None:
         """Control baseline: verify ML-KEM script succeeds end-to-end with exit 0 on authentic inputs."""
         staged_dir = get_authentic_vectors_dir()
         if staged_dir is None or not (staged_dir / "mlkem-keygen.json").is_file() or not (staged_dir / "mlkem-encdec.json").is_file():
+            if os.environ.get("IYI_PROOF_STRICT") == "1" or os.environ.get("IYI_STRICT_PROOF") == "1":
+                self.fail("Authentic ML-KEM vector bundle required in strict qualification")
             self.skipTest("Authentic ML-KEM vector bundle not found via IYI_AUTHENTIC_VECTORS_DIR / IYI_PROOF_INPUTS_DIR")
-
         with tempfile.TemporaryDirectory() as tmpdir:
             _, env, canary = self._setup_safe_environment(tmpdir)
             inputs_dir = Path(tmpdir) / "valid_inputs"
@@ -715,6 +760,8 @@ exit 0
         """Control baseline: verify HPKE script succeeds end-to-end with exit 0 on authentic inputs."""
         staged_dir = get_authentic_vectors_dir()
         if staged_dir is None or not (staged_dir / "hpke-vectors.json").is_file():
+            if os.environ.get("IYI_PROOF_STRICT") == "1" or os.environ.get("IYI_STRICT_PROOF") == "1":
+                self.fail("Authentic HPKE vector bundle required in strict qualification")
             self.skipTest("Authentic HPKE vector bundle not found via IYI_AUTHENTIC_VECTORS_DIR / IYI_PROOF_INPUTS_DIR")
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -772,8 +819,9 @@ exit 0
         """Control baseline: verify P-384 script succeeds end-to-end with exit 0 on authentic inputs."""
         staged_dir = get_authentic_vectors_dir()
         if staged_dir is None or not (staged_dir / "wycheproof-p384.json").is_file():
+            if os.environ.get("IYI_PROOF_STRICT") == "1" or os.environ.get("IYI_STRICT_PROOF") == "1":
+                self.fail("Authentic Wycheproof vector bundle required in strict qualification")
             self.skipTest("Authentic Wycheproof vector bundle not found via IYI_AUTHENTIC_VECTORS_DIR / IYI_PROOF_INPUTS_DIR")
-
         with tempfile.TemporaryDirectory() as tmpdir:
             _, env, canary = self._setup_safe_environment(tmpdir)
             inputs_dir = Path(tmpdir) / "valid_inputs"

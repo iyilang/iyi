@@ -63,11 +63,25 @@ if [ "${IYI_PROOF_INPUTS_DIR+set}" = "set" ]; then
     echo "FAIL: IYI_PROOF_INPUTS_DIR must not be empty" >&2
     exit 1
   fi
-  case "$IYI_PROOF_INPUTS_DIR" in
-    /* | [A-Za-z]:[/\\]*) ;;
+  case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN* | Windows_NT)
+      case "$IYI_PROOF_INPUTS_DIR" in
+        /* | [a-zA-Z]:/* | [a-zA-Z]:\\* | \\\\*) ;;
+        *)
+          echo "FAIL: IYI_PROOF_INPUTS_DIR must be an absolute path: $IYI_PROOF_INPUTS_DIR" >&2
+          exit 1
+          ;;
+      esac
+      command -v cygpath >/dev/null 2>&1 && IYI_PROOF_INPUTS_DIR="$(cygpath -m "$IYI_PROOF_INPUTS_DIR")"
+      ;;
     *)
-      echo "FAIL: IYI_PROOF_INPUTS_DIR must be an absolute path: $IYI_PROOF_INPUTS_DIR" >&2
-      exit 1
+      case "$IYI_PROOF_INPUTS_DIR" in
+        /*) ;;
+        *)
+          echo "FAIL: IYI_PROOF_INPUTS_DIR must be an absolute path: $IYI_PROOF_INPUTS_DIR" >&2
+          exit 1
+          ;;
+      esac
       ;;
   esac
   if [ ! -d "$IYI_PROOF_INPUTS_DIR" ]; then
@@ -489,15 +503,18 @@ else
   tail -n 3 "$WORK/time.out" | sed 's/^/    /'
   status=1
 fi
-if command -v openssl >/dev/null 2>&1 && openssl speed -seconds 1 ecdhp384 ecdsap384 >"$WORK/speed.out" 2>/dev/null; then
-  awk '
+OPENSSL="${OPENSSL:-openssl}"
+if command -v "$OPENSSL" >/dev/null 2>&1 && "$OPENSSL" speed -seconds 1 ecdhp384 ecdsap384 >"$WORK/speed.out" 2>/dev/null; then
+  if ! awk '
     /ecdsa \(nistp384\)/ { sign = $(NF - 1) }
     /ecdh \(nistp384\)/ { ecdh = $NF }
     END {
-      if (sign == "" || ecdh == "") { print "  openssl speed answered in a shape this does not read"; exit }
+      if (sign == "" || ecdh == "") { print "  openssl speed answered in a shape this does not read"; exit 2 }
       printf "  OpenSSL (openssl speed -seconds 1): ECDH %.3f ms (%s/s), sign %.3f ms (%s/s)\n", 1000 / ecdh, ecdh, 1000 / sign, sign
-    }' "$WORK/speed.out"
-  echo "  ($(openssl version))"
+    }' "$WORK/speed.out"; then
+    if [ "${IYI_PROOF_INPUTS_DIR+set}" = "set" ]; then status=1; fi
+  fi
+  echo "  ($("$OPENSSL" version))"
 else
   echo "  no openssl here with speed for P-384, so nothing to set these beside"
   if [ "${IYI_PROOF_INPUTS_DIR+set}" = "set" ]; then status=1; fi

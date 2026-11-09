@@ -2360,6 +2360,9 @@ case "$COMMAND" in
   test-master-path)
     test_master_path "$@"
     ;;
+  test-offline-vectors)
+    bash "$REPO/bench/test_offline_vectors.sh" "$@"
+    ;;
   help|--help|-h)
     echo "Usage: $0 <command> [options]"
     echo "Commands:"
@@ -2373,6 +2376,7 @@ case "$COMMAND" in
     echo "  rg9                         Run RG9 deterministic CallPathFp check"
     echo "  master-self-check           Import master snapshot and verify against git diff"
     echo "  test-master-path            Verify master snapshot export, API fetch, and self-check"
+    echo "  test-offline-vectors        Verify offline vector intake gate and controls"
     ;;
   *)
     echo "Unknown command: $COMMAND" >&2

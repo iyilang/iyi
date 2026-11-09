@@ -27,6 +27,9 @@
 #      hold for every importer (`robust`, seed 66), and a module's own
 #      spawn compiled into its artifact in parallel on a claim its
 #      producer alone proved (`claimed`, seed 109).
+#   3. The work directory reached through a symlink, as darwin's always
+#      is: seed 1 clean, and a copy of the fuzzer that keys notes by the
+#      unresolved directory caught (every parallel spawn UNMATCHED).
 #
 # Seeds and minutes are `SPAWN_FUZZ_SEEDS` and `SPAWN_FUZZ_MINUTES`.
 # 1,330 seeds were run by hand on Linux across the generator's versions,
@@ -68,5 +71,27 @@ proof callbacks 10 "a walk that stops at std"
 proof headers 1 "a function read from an artifact taken to reach nothing"
 proof robust 66 "an artifact that takes every proven claim to hold for every importer"
 proof claimed 109 "a module's own spawn compiled in parallel on a claim its producer alone proved"
+
+# The work directory reached through a symlink, as darwin's /tmp and
+# $TMPDIR always are (/private/...): seed 1 is clean there, and a copy of
+# spawn_fuzz.py that keys notes by the unresolved directory - each parallel
+# spawn's key "../../private/..." on one side, so UNMATCHED - is caught.
+echo "== the work directory through a symlink"
+mkdir real && ln -s real link
+if [ -L link ]; then
+  if ! TMPDIR="$WORK/link" "${FUZZ[@]}" 1 > link.log 2>&1; then
+    echo "seed 1 is not clean with TMPDIR through a symlink:"; cat link.log; exit 1
+  fi
+  sed 's/os\.path\.realpath(tempfile\.mkdtemp(prefix="spawn_fuzz\."))/tempfile.mkdtemp(prefix="spawn_fuzz.")/' "$REPO/bench/spawn_fuzz.py" > unresolved.py
+  if cmp -s unresolved.py "$REPO/bench/spawn_fuzz.py"; then
+    echo "the broken copy (the work directory unresolved) could not be made"; exit 1
+  fi
+  if ! TMPDIR="$WORK/link" python3 unresolved.py --iyi "$IYI" 1 --expect UNMATCHED > unresolved.log 2>&1; then
+    echo "the broken copy (the work directory unresolved) was not caught:"; cat unresolved.log; exit 1
+  fi
+  echo "  seed 1 clean; the unresolved copy caught: $(grep -m1 ': UNMATCHED: ' unresolved.log | sed 's/^[^:]*: UNMATCHED: //' | cut -c1-160)"
+else
+  echo "  no symlinks on this machine: skipped"
+fi
 
 echo "== spawn placement from artifacts: never more parallel than from source"

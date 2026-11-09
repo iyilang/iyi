@@ -1,6 +1,7 @@
 # Files: `read`/`write` whole, `open` as an `IyiIO`. Paths get the NUL
 # the kernel wants; errors panic with the path.
 
+@[Unsafe("a path goes to the platform as a C string, and a file's bytes through its descriptor")]
 class File
   # Crystal's mode strings: "r", "w", "a", each with a "+" that adds the
   # other direction, and a "b" anywhere after the letter that changes

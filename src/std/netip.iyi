@@ -89,6 +89,7 @@
 # count that is neither 4 nor 16, a subnet length shorter than the prefix
 # or a supernet length longer.
 
+@[Unsafe("addresses and prefixes are parsed by walking the bytes of the text through a raw pointer")]
 module std/netip
 
 import std/int

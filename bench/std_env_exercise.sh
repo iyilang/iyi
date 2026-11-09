@@ -269,8 +269,8 @@ refuses "absent key via []" absent_key "Missing ENV key: _IYI_ENV_EXERCISE_ABSEN
 refuses "fetch absent key without default" fetch_absent "Missing ENV key: _IYI_ENV_EXERCISE_FETCH_REFUSE" 'ENV.fetch("_IYI_ENV_EXERCISE_FETCH_REFUSE")'
 refuses "empty ENV key" empty_key "ENV key is empty" 'ENV[""] = "x"'
 refuses "ENV key containing =" eq_key "ENV key contains '='" 'ENV["_IYI_ENV_EXERCISE_EQ=X"] = "x"'
-refuses "NUL in ENV key" nul_key "ENV key contains a null byte" 'nul = String.new(1) { |p| p[0] = 0_u8 }; ENV["K#{nul}V"] = "x"'
-refuses "NUL in ENV value" nul_val "ENV value contains a null byte" 'nul = String.new(1) { |p| p[0] = 0_u8 }; ENV["_IYI_ENV_EXERCISE_NULVAL"] = "A#{nul}B"'
+refuses "NUL in ENV key" nul_key "ENV key contains a null byte" 'nul = String.new([0_u8]); ENV["K#{nul}V"] = "x"'
+refuses "NUL in ENV value" nul_val "ENV value contains a null byte" 'nul = String.new([0_u8]); ENV["_IYI_ENV_EXERCISE_NULVAL"] = "A#{nul}B"'
 
 echo
 if [ "$status" -eq 0 ]; then

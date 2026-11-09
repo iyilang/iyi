@@ -618,7 +618,7 @@ def share(k : Int32) : UInt64
       said = answer(text_for(i))
       j = 0
       while j < said.bytesize
-        h = (h ^ said.to_unsafe[j].to_u64) &* 1099511628211_u64
+        h = (h ^ said.byte_at(j).to_u64) &* 1099511628211_u64
         j = j + 1
       end
       i = i + WORKERS
@@ -638,7 +638,7 @@ wrong = 0
 group do |g|
   handles = [] of IyiTask(UInt64)
   WORKERS.times do |k|
-    handles << g.spawn_parallel { share(k) }
+    handles << g.spawn(unit: :new) { share(k) }
   end
   k = 0
   while k < WORKERS

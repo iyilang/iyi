@@ -8,6 +8,7 @@
 # `Bytes` is an alias for `Slice(UInt8)`, the currency of IO, sockets, and
 # binary protocols.
 
+@[Unsafe("a slice is a raw pointer and a length into a buffer it allocates or borrows, indexed directly")]
 module std/slice
 
 import std/enumerable::{Enumerable}
@@ -86,6 +87,15 @@ pub struct Slice(T)
   # Returns an empty slice of size 0.
   def self.empty : self
     new(Pointer(T).new(0_u64), 0, read_only: false)
+  end
+
+  # *text*'s bytes, read-only, without a copy: `Bytes.of("GET")`. A string
+  # is never written once it is made (it is `Share` by that), so the view is
+  # read-only, and it is what a module that does not handle raw memory reads
+  # a string's bytes through, where `Bytes.new(text.to_unsafe, ...)` needs
+  # the module marked `@[Unsafe]` (SPEC.md III.13).
+  def self.of(text : String) : Slice(UInt8)
+    Slice(UInt8).new(text.to_unsafe, text.bytesize, read_only: true)
   end
 
   # Raw pointer to the underlying buffer.
@@ -513,4 +523,22 @@ end
 
 impl Iterator for SliceIterator(T) forall T
   type Elem = T
+end
+
+class ::String
+  # A string holding a copy of *bytes*, as they are: what a module turns
+  # bytes it read into text with, where `String.new(n) { |buffer| ... }`
+  # hands it a `Pointer` (SPEC.md III.13).
+  def self.new(bytes : Std::Slice::Slice(UInt8)) : String
+    String.new(bytes.size) do |buffer|
+      buffer.copy_from(bytes.to_unsafe, bytes.size)
+    end
+  end
+end
+
+class ::IyiIO
+  # Writes *bytes*, all of them.
+  def write(bytes : Std::Slice::Slice(UInt8)) : Nil
+    write(bytes.to_unsafe, bytes.size)
+  end
 end

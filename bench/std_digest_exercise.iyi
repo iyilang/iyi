@@ -3,6 +3,7 @@
 # Run via:
 #     ./bin/iyi run bench/std_digest_exercise.iyi
 
+@[Unsafe("it feeds the digests and checksums raw pointer and length ranges of a string's bytes, the update(Pointer, Int32) API under test")]
 module bench/std_digest_exercise
 
 def assert_true(cond : Bool, msg : String) : Nil

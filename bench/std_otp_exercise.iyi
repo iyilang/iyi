@@ -17,7 +17,7 @@ def assert_str(expected : String, actual : String, msg : String) : Nil
 end
 
 def bytes(text : String) : Array(UInt8)
-  Array(UInt8).new(text.bytesize) { |i| text.to_unsafe[i] }
+  Array(UInt8).new(text.bytesize) { |i| text.byte_at(i) }
 end
 
 # What a parse answered, as one string: the URI written again with the

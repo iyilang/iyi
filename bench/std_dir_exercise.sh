@@ -201,7 +201,14 @@ echo "== proving the other glob and walk checks can fail"
 # dir_broken <label> <name> <old> <new> <phrase>: the exercise built against
 # a copy with one change, under a clock - a freed directory buffer is a
 # walk that never ends - and it must fail at the check that names it, or,
-# for the walk, not finish.
+# for the walk, not finish. A copy that passes is run again, three runs in
+# all, and passes the proof only if it passes every one: the freed buffer
+# is caught only when the collector frees it and an allocation after takes
+# its memory, and a word on the stack that still reads as its address keeps
+# it. On the Linux 12 vCPU box (agent HSoak3, 2026-11-05, h/soak at
+# b37370737) the Linux copy below passed 1 run in 40 (hung 34, caught 5),
+# and so passed the proof once in a sibling shard; three runs leave about
+# one in 64,000.
 dir_broken() {
   if [ -z "$PY" ]; then
     echo "  $1: no python3 on this machine, so the proof is unmeasured"
@@ -225,10 +232,14 @@ PY
     status=1
     return
   fi
-  timeout 120 "$WORK/$2/program" >"$WORK/$2/out" 2>&1
-  local code=$?
+  local code=0 runs=0
+  while [ "$runs" -lt 3 ] && [ "$code" -eq 0 ]; do
+    timeout 120 "$WORK/$2/program" >"$WORK/$2/out" 2>&1
+    code=$?
+    runs=$((runs + 1))
+  done
   if [ "$code" -eq 0 ]; then
-    echo "  $1: the exercise PASSED on a broken module"
+    echo "  $1: the exercise PASSED on a broken module, $runs runs of $runs"
     status=1
   elif [ "$code" -eq 124 ] || grep -q "$5" "$WORK/$2/out"; then
     echo "  $1: caught"

@@ -83,6 +83,7 @@
 # XPath's `id()` reads): `to_xml` writes no DOCTYPE, and entity references
 # come out as the text they stood for.
 
+@[Unsafe("the parser and its name checks walk the bytes of the text through a raw pointer")]
 module std/xml
 
 pub enum NodeType

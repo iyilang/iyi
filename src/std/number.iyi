@@ -119,7 +119,9 @@ struct ::Float64
     if digits < 0
       scale = 10.0 ** (0 - digits)
       if scale * 0.0 != 0.0 && self * 0.0 == 0.0
-        whole = LibIyiRounding.copysign(0.0, self)
+        # A finite number times zero is a zero with the number's sign, which
+        # is the prelude's `copysign(0.0, self)` without calling into C.
+        whole = self * 0.0
         return whole if mode == Std::Number::RoundingMode::ToZero || self == 0.0
         return mode == Std::Number::RoundingMode::ToPositive && self > 0.0 ? 1.0 / 0.0 : (mode == Std::Number::RoundingMode::ToNegative && self < 0.0 ? -1.0 / 0.0 : whole)
       end

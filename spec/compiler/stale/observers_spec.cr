@@ -325,6 +325,7 @@ describe "Iyi::Semantic::Observers (Slice S5b)" do
     end
     it "treats File.lseek, File.two_links?, and Dir#rewind/close as frame-only" do
       result = semantic(<<-CODE, flags: "iyi_observe", filename: runtime_file)
+        @[Unsafe("file operations handle pointers")]
         class File
           @[Effect(:stdio)]
           def self.lseek(fd : Int64, offset : Int64, whence : Int32) : Int64

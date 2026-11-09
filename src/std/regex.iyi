@@ -43,6 +43,7 @@
 # program. There is no `$~`: a match is a value `match` answers, never a
 # variable a call sets behind the program's back.
 
+@[Unsafe("the matcher indexes its byte tables and the subject string through raw pointers, for speed")]
 module std/regex
 
 import std/unicode::{Unicode}

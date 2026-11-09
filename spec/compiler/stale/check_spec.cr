@@ -258,6 +258,7 @@ describe "Iyi::Stale S3g: Check, MachineKey, KeyFile, Accept/Block" do
       program.color = false
       program.iyi_prelude_dir = File.join(Dir.current, "src", "iyi")
       parser = program.new_parser(<<-CODE)
+        @[Unsafe("unclassified runtime fixture")]
         lib LibSysUnclassified
           fun getpid : Int32
         end
@@ -401,6 +402,7 @@ describe "Iyi::Stale S3g: Check, MachineKey, KeyFile, Accept/Block" do
         compiler.stale_key = key_path
 
         code = <<-IYI
+        @[Unsafe("intentional missing symbol for link failure test")]
         lib MissingLib
           fun missing_symbol_12345 : Void
         end

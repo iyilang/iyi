@@ -28,6 +28,7 @@
 # index past the end (`index 5 out of range for 3 elements`), a negative
 # count (`negative count: -1`), a negative size or capacity.
 
+@[Unsafe("the ring buffer is a Pointer(T) it allocates, grows, wraps and indexes itself")]
 module std/deque
 
 import std/indexable::{Indexable, IndexableMutable}

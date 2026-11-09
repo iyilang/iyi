@@ -26,6 +26,7 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO/bench/end_process.sh"
 
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT) PSEP=';' ;;
@@ -54,7 +55,7 @@ esac
 PIDS=""
 cleanup() {
   for pid in $PIDS; do
-    kill "$pid" >/dev/null 2>&1
+    end_process "$pid"
     wait "$pid" >/dev/null 2>&1
   done
   chmod -R u+w "$WORK" >/dev/null 2>&1 || true
@@ -284,7 +285,7 @@ PY
     fi
   else
     echo "  FAIL: the handshake under acme-tls/1; the server said: $(tr -d '\r' <"$WORK/alpn-serve.out" | tail -1)"
-    kill "$serve_pid" >/dev/null 2>&1
+    end_process "$serve_pid"
     status=1
   fi
 fi

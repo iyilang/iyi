@@ -62,6 +62,7 @@
 
 module std/idna
 
+import std/slice::{Bytes}
 import std/unicode::{Unicode}
 
 # What `Punycode.decode` answers for input that is not Punycode.
@@ -188,7 +189,7 @@ pub struct Punycode
   # is none. Digits are read in either case; basic code points are kept
   # in the case they were written.
   def self.decode(text : String) : String | PunycodeError
-    bytes = text.to_unsafe
+    bytes = Bytes.of(text)
     size = text.bytesize
     last = -1
     i = 0
@@ -394,7 +395,7 @@ pub struct IDNA
   end
 
   private def self.ascii?(text : String) : Bool
-    bytes = text.to_unsafe
+    bytes = Bytes.of(text)
     i = 0
     while i < text.bytesize
       return false if bytes[i] >= 128_u8
@@ -473,7 +474,7 @@ pub struct IDNA
         return long if long
         return {lower, decoded}
       end
-      bytes = lower.to_unsafe
+      bytes = Bytes.of(lower)
       j = 0
       while j < lower.bytesize
         b = bytes[j]

@@ -9,6 +9,7 @@
 # needs, and a final group of one character (`"Q"`, which cannot encode a
 # byte) are each refused.
 
+@[Unsafe("encoding and decoding read the input's bytes through a raw pointer, for speed")]
 module std/base64
 
 # A data character's value, by byte; -1 for everything else, which the

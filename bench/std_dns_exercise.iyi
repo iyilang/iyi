@@ -17,6 +17,7 @@
 # DIR` is the name server bench/std_dns_exercise.sh holds the records to
 # BIND's tools through (`serve_zone`).
 
+@[Unsafe("it builds and reads DNS packets through a string's buffer, as the resolver in std/socket sends and receives them")]
 module bench/std_dns_exercise
 
 import std/dns::{DnsError, DnsMessage, DnsName, DnsRecord, HostsFile, ResolvConf, SvcbAnswer, SvcbRecord}

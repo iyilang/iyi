@@ -15,6 +15,7 @@
 #     installs one beside the resolver. A stripped program prints its
 #     frames as addresses.
 
+@[Unsafe("a trace is written to standard error by a raw system call on the string's bytes")]
 module std/debug
 
 {% if flag?(:darwin) %}

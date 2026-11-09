@@ -52,6 +52,7 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO/bench/end_process.sh"
 # The compiler, overridable: `bin/iyi` is a POSIX shell wrapper, and on
 # Windows the caller is the only one who knows where the real binary is.
 IYI="${IYI:-$REPO/bin/iyi}"
@@ -442,7 +443,7 @@ refuses "bytes that are not text" "not a valid iyi source file" -- "$IYI" run bi
 # invalid memory access" about a language with no null to dereference.
 printf 'module deep\n\ndef down(n : Int32) : Int32\n  down(n + 1) + 1\nend\n\nputs down(0)\n' > deep.iyi
 refuses "a program that ran out of stack" "stack overflow" -- "$IYI" run deep.iyi
-printf 'module wild\n\np = Pointer(Int32).new(16_u64)\nputs p.value\n' > wild.iyi
+printf '@[Unsafe("the program reads through a pointer to address 16 on purpose, the kill iyi run must explain")]\nmodule wild\n\np = Pointer(Int32).new(16_u64)\nputs p.value\n' > wild.iyi
 refuses "a program the kernel killed" "died of a memory fault" -- "$IYI" run wild.iyi
 # A generic struct holding a trait it implements, `Box(Show)` beside `impl
 # Show for Box(T) forall T`: the recursive-struct check never met
@@ -619,7 +620,7 @@ refuses "two traits' defaults answering one method" "and impl Column for User an
 # "Missing hash key: Wt (KeyError)" and a stack trace. A trait's
 # `initialize` is a default method like any other now, and an implementer
 # is made with it.
-printf 'pub trait Wt\n  def initialize(x : Int32)\n  end\nend\n\nstruct B\n  getter v : Int32 = 3\nend\n\nimpl Wt for B\nend\n\nlib LibQ\n  struct CS\n    a : Int32\n  end\nend\n\npub trait Tq\nend\n\nimpl Tq for LibQ::CS\n  def initialize\n  end\nend\n\nputs B.new(1).v\nputs LibQ::CS.new.a\n' > traitinit.iyi
+printf '@[Unsafe("an impl gives an initialize to a struct declared inside a lib, the C layout the check once crashed on")]\npub trait Wt\n  def initialize(x : Int32)\n  end\nend\n\nstruct B\n  getter v : Int32 = 3\nend\n\nimpl Wt for B\nend\n\nlib LibQ\n  struct CS\n    a : Int32\n  end\nend\n\npub trait Tq\nend\n\nimpl Tq for LibQ::CS\n  def initialize\n  end\nend\n\nputs B.new(1).v\nputs LibQ::CS.new.a\n' > traitinit.iyi
 if "$IYI" run traitinit.iyi > traitinit.out 2>&1 && [ "$(tr -d '\r' < traitinit.out)" = "$(printf '3\n0')" ]; then
   echo "  an initialize in a trait and in an impl for a lib struct makes the value"
 else
@@ -632,14 +633,25 @@ fi
 mkdir -p "$WORK/runcache"
 : > "$WORK/runcache/iyi-run-main-99999.tmp.exe"
 : > "$WORK/runcache/iyi-run-main-99998.tmp.exe"
-touch -d '2 hours ago' "$WORK/runcache/iyi-run-main-99999.tmp.exe"
-IYI_CACHE_DIR="$WORK/runcache" "$IYI" run twin_b/main.iyi > sweep.out 2>&1
-if [ -e "$WORK/runcache/iyi-run-main-99999.tmp.exe" ]; then
-  echo "  a runner's leftover from two hours ago is still in the cache"; status=1
-elif [ ! -e "$WORK/runcache/iyi-run-main-99998.tmp.exe" ]; then
-  echo "  a runner's leftover from just now was taken"; status=1
+# Two hours back in POSIX's own terms: `touch -d '2 hours ago'` is GNU's,
+# and BSD touch refused it, so on a Mac the leftover stayed fresh and this
+# read "still in the cache" of a runner that was right. The stamp is the
+# clock two hours west of UTC, set as UTC; `find -mmin` then holds that the
+# file is between one and three hours old, so a stamp that did not take
+# says so instead of passing or failing for the wrong reason.
+stale_stamp=$(TZ=UTC2 date +%Y%m%d%H%M.%S)
+TZ=UTC0 touch -t "$stale_stamp" "$WORK/runcache/iyi-run-main-99999.tmp.exe"
+if [ -z "$(find "$WORK/runcache/iyi-run-main-99999.tmp.exe" -mmin +60 -mmin -180)" ]; then
+  echo "  a leftover could not be dated two hours back (touch -t $stale_stamp)"; status=1
 else
-  echo "  an old runner's leftover is taken, a fresh one kept"
+  IYI_CACHE_DIR="$WORK/runcache" "$IYI" run twin_b/main.iyi > sweep.out 2>&1
+  if [ -e "$WORK/runcache/iyi-run-main-99999.tmp.exe" ]; then
+    echo "  a runner's leftover from two hours ago is still in the cache"; status=1
+  elif [ ! -e "$WORK/runcache/iyi-run-main-99998.tmp.exe" ]; then
+    echo "  a runner's leftover from just now was taken"; status=1
+  else
+    echo "  an old runner's leftover is taken, a fresh one kept"
+  fi
 fi
 # A path in another case, where the file system says it is the same
 # file. The root a header names was found by comparing strings, so `iyi
@@ -1099,7 +1111,7 @@ case "$(uname -s)" in
       else
         echo "  a program rebuilt while it runs: build $rebuilt, it said '$said'"; sed -n '1,3p' busy.log; status=1
       fi
-      kill "$running" 2>/dev/null; wait "$running" 2>/dev/null
+      end_process "$running"; wait "$running" 2>/dev/null
     else
       echo "  the busy program did not build:"; sed -n '1,3p' busy.log; status=1
     fi
@@ -1245,6 +1257,22 @@ elif ! (cd "$WORK/mig" && "$IYI" fix .) 2>&1 | grep -q "3 files: 0 rewritten, ev
   status=1
 else
   echo "  fix over a directory: every using rewritten in one run, and the second run changes nothing"
+fi
+# The summary counts every file the run rewrote, whatever the edit: it
+# counted the `using` rewrites alone, and a directory moved off
+# `spawn_parallel` - 0.21.0's migration, iyi-db's two files - said
+# "0 rewritten" under the lines that rewrote them.
+mkdir -p "$WORK/migspawn"
+printf 'group do |g|\n  g.spawn_parallel do\n    1\n  end\nend\nputs "ran"\n' > "$WORK/migspawn/main.iyi"
+printf 'puts "clean"\n' > "$WORK/migspawn/other.iyi"
+if ! (cd "$WORK/migspawn" && "$IYI" fix .) > "$WORK/migspawn.txt" 2>&1 ||
+   ! grep -q "2 files: 1 rewritten, every one clean" "$WORK/migspawn.txt" ||
+   [ "$("$IYI" run "$WORK/migspawn/main.iyi" 2>&1)" != "ran" ]; then
+  echo "  fix over a directory: a did-you-mean edit was not counted as a rewrite"
+  sed 's/^/    /' "$WORK/migspawn.txt"
+  status=1
+else
+  echo "  fix over a directory: a file rewritten by a did-you-mean edit is counted"
 fi
 # A `using` folded into its import in a CRLF file left two blank lines
 # where the LF file is left one - only `\n` was a blank line's ending - and

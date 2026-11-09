@@ -141,6 +141,17 @@ def measured() -> dict[str, int]:
         "spec_iyi": iyi_spec_lines(),
         "targets": targets(),
         "iyimod_format": iyimod_format(),
+        # SPEC.md III.13's account of the marks: marked files, and the files
+        # beside them, in each tree it names. std is counted with its
+        # subdirectories (`std/eiy/process`), as `import std/...` resolves them.
+        "unsafe_iyi": unsafe_marked(sorted((REPO / "src/iyi").glob("*.iyi"))),
+        "safe_iyi": len(sorted((REPO / "src/iyi").glob("*.iyi")))
+        - unsafe_marked(sorted((REPO / "src/iyi").glob("*.iyi"))),
+        "unsafe_std": unsafe_marked(sorted((REPO / "src/std").rglob("*.iyi"))),
+        "files_std": len(sorted((REPO / "src/std").rglob("*.iyi"))),
+        "unsafe_bench": unsafe_marked(sorted((REPO / "bench").glob("*.iyi"))),
+        "files_bench": len(sorted((REPO / "bench").glob("*.iyi"))),
+        "unsafe_samples": unsafe_marked(sorted((REPO / "samples/iyi").glob("*.iyi"))),
     }
 
 
@@ -148,13 +159,18 @@ def measured() -> dict[str, int]:
 # language's 0.1.0 core library - 3,551 lines of core files plus 183 of fibers
 # over pthreads - until the 0.18 collections and assertions took the library
 # past it and the owner raised it to 4,650 rather than move them behind an
-# import. A check rather than a habit since the night Windows' floor walked
-# 508 lines over it and nothing failed.
-CEILING = 4_650
+# import. The owner raised it again, to 4,683, for SPEC.md III.13's 33 lines:
+# the mark above nine of the library's files, two `call:` promises, and
+# `String#byte_at` and `String.new(Array(UInt8), start, count)`, the safe byte
+# calls that let modules drop their marks. And to 4,689, for the six lines of
+# `Pointer#==` (#165), which compares two pointers by the address they hold,
+# the counterpart of #128's class `==`. A check rather than a habit since
+# the night Windows' floor walked 508 lines over it and nothing failed.
+CEILING = 4_689
 
 
 def prelude_library_lines() -> int:
-    """The figure SPEC.md holds to the 4,650-line ceiling: the library
+    """The figure SPEC.md holds to the 4,689-line ceiling: the library
     without any platform's floor.
 
     Everything under `src/iyi/` except two things. First, what Crystal's
@@ -162,11 +178,14 @@ def prelude_library_lines() -> int:
     (Boehm's libgc; the block between two marks in prelude.iyi), the
     scheduler and kernel thread (pthreads and libevent, beyond the 183 lines
     the ceiling already carries for fibers), and the float printer and parser
-    (libc's printf and strtod). Second, every platform's floor
-    (`platform_floor_lines`), which is the rule SPEC.md I.4 settled after
-    Windows: 0.1.0's own floor was libc and was not in its 3,734 either, so
-    counting iyi's kernel32, syscall and libSystem arms compared a library
-    that carries its floor against one that did not.
+    (libc's printf and strtod). The chaos scheduler, which drives that
+    scheduler from a seed under `-Diyi_chaos` (`chaos.iyi`, and its points
+    in `Atomic`'s verbs, `chaos_points.iyi`; SPEC.md III.4.17), is the
+    scheduler's too, and only `iyi test --chaos` builds it. Second, every
+    platform's floor (`platform_floor_lines`), which is the rule SPEC.md I.4
+    settled after Windows: 0.1.0's own floor was libc and was not in its
+    3,734 either, so counting iyi's kernel32, syscall and libSystem arms
+    compared a library that carries its floor against one that did not.
 
     `library_with_floor` is the same walk without that second exclusion, and
     is stated beside this everywhere this is, because a reader opening
@@ -179,7 +198,7 @@ def library_with_floor_lines() -> int:
     """The library with every platform's floor still in it: the number a
     reader counts by opening the files. See `prelude_library_lines`."""
     files = sorted((REPO / "src/iyi").glob("*.iyi"))
-    outside = {"concurrency.iyi", "thread.iyi", "float.iyi"}
+    outside = {"concurrency.iyi", "thread.iyi", "float.iyi", "chaos.iyi", "chaos_points.iyi"}
     total = 0
     for path in files:
         lines = path.read_text().splitlines()
@@ -225,7 +244,7 @@ def platform_floor_lines(only: str | None = None) -> int:
     *only* narrows it to the arms naming one flag, for the breakdown.
     """
     files = sorted((REPO / "src/iyi").glob("*.iyi"))
-    outside = {"concurrency.iyi", "thread.iyi", "float.iyi"}
+    outside = {"concurrency.iyi", "thread.iyi", "float.iyi", "chaos.iyi", "chaos_points.iyi"}
     total = 0
     for path in files:
         if path.name in outside:
@@ -274,6 +293,23 @@ def samples_roundtrip() -> int:
             "not checking anything"
         )
     return len(m.group(1).split())
+
+
+# A module's mark (SPEC.md III.13): `@[Unsafe("why")]` at the start of a
+# line. The positional reason is the module's alone - the compiler refuses
+# it anywhere but first in its file - and a def's promise is spelled
+# `@[Unsafe(call: ...)]`, which this does not match.
+UNSAFE_MARK = re.compile(r'^@\[Unsafe\("', re.M)
+
+
+def unsafe_marked(paths) -> int:
+    """How many of the files carry III.13's module mark.
+
+    SPEC.md III.13 says where the repository stands in marked files per
+    directory, and those counts move whenever a module turns safe or starts
+    handling raw memory, so they are measured here like the line counts.
+    """
+    return sum(1 for p in paths if UNSAFE_MARK.search(p.read_text()))
 
 
 def targets() -> int:
@@ -391,13 +427,29 @@ CLAIMS: list[tuple[str, str, str, int]] = [
     # And the other half of that row, which is a count of the roundtrip's list
     # rather than of the directory, and had drifted the same way.
     ("samples_roundtrip", r"of which ([\d,]+) rebuild from artifacts", "SPEC.md", 1),
+    # SPEC.md III.13's marks. A module turning safe, or starting to handle
+    # raw memory, moves these, and the sentences say where the tree stands.
+    ("unsafe_iyi", r"`src/iyi`'s ([\d,]+) marked files", "SPEC.md", 1),
+    ("safe_iyi", r"each with its reason, and\s+([\d,]+) that need none", "SPEC.md", 1),
+    ("unsafe_std", r"`src/std` has ([\d,]+) marked modules", "SPEC.md", 1),
+    ("files_std", r"marked modules of\s+([\d,]+),", "SPEC.md", 1),
+    ("unsafe_bench", r"bench has\s+([\d,]+) marked programs", "SPEC.md", 1),
+    ("files_bench", r"marked programs of ([\d,]+),", "SPEC.md", 1),
+    ("unsafe_samples", r"and (none) of `samples/iyi`'s", "SPEC.md", 1),
+    ("samples", r"of `samples/iyi`'s ([\d,]+) programs", "SPEC.md", 1),
+    # The blocks-and-declarations comparison, against the marks it names in
+    # the same order: src/std, src/iyi, bench.
+    ("unsafe_std", r"against ([\d,]+), [\d,]+ and\s+[\d,]+ module marks", "SPEC.md", 1),
+    ("unsafe_iyi", r"against [\d,]+, ([\d,]+) and\s+[\d,]+ module marks", "SPEC.md", 1),
+    ("unsafe_bench", r"against [\d,]+, [\d,]+ and\s+([\d,]+) module marks", "SPEC.md", 1),
 ]
 
 # The prose spells small numbers as words and should keep doing so, so the
 # check reads words as well as digits rather than pushing digits into a
 # sentence to suit itself.
 WORDS = {
-    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+    # "none" is how SPEC.md III.13 says samples carry no mark.
+    "none": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
     "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
     "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16,
     "seventeen": 17, "eighteen": 18, "nineteen": 19, "twenty": 20,

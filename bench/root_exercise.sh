@@ -198,8 +198,9 @@ echo "== the same program with optimisation on"
 # register check names its own premises and fails when one is gone, so this
 # run is not a formality: it is the one that would catch the ordering that
 # lets the optimiser reuse the register before the scan reaches it. The
-# dead-helper check is asserted only here, where `IyiMark.collect` is
-# inlined into the program's frame and zeroes everything under it.
+# dead-helper check is asserted only here (and only on Windows), where
+# `IyiMark.collect`, always inlined, clears the dead stack from the
+# program's frame and the collection's frames are all built under it.
 build_and_run "release" roots-release --release
 if [ "$EXERCISED" = no ]; then
   echo "  nothing was exercised here, so the optimised run is unmeasured too"
@@ -281,6 +282,13 @@ echo "== what root discovery asks the machine for"
 # `memset`, so a call resolves to the program's own. The stale names (`malloc`,
 # `memset`, `realloc`, the file calls) are gone from the list, because an
 # entry nothing uses is a check without teeth.
+#
+# darwin adds `close`, which is not root discovery's: the pool's growth
+# brings it to every program there (`bench/thread_floor.sh` says by which
+# chain), and macOS 26.6 (Apple M2 Pro, 10 cores, the user's machine)
+# printed it here. This program's one task is `spawn(unit: :same)` (the fiber
+# root step says why), so it starts no pool and Linux reads no
+# `IYI_WORKERS`: no `environ`.
 case "$(uname -s)" in
   Linux)
     allowed_symbols="$FLOOR_BASE_LINUX __data_start _end"
@@ -301,7 +309,7 @@ case "$(uname -s)" in
     windows_floor=yes
     ;;
   *)
-    allowed_symbols="$FLOOR_BASE_DARWIN"
+    allowed_symbols="$FLOOR_BASE_DARWIN close"
     ;;
 esac
 allowed_libs="$FLOOR_LIBS_PROGRAM"
@@ -409,14 +417,15 @@ done
 
 echo
 echo "== the checks fail when the mechanism is removed"
-# Two mechanisms, each removed from a copy of the prelude that is then built
+# Each mechanism below is removed from a copy of the prelude that is then built
 # against through IYI_PATH. Nothing in the tree is modified. Each build must
 # produce a program that fails, and fails at the check that names the removed
 # mechanism, because a check that passes either way measures nothing.
 prove_fails() {
-  # $1 label, $2 directory name, $3 expected phrase, rest: the awk program
-  local label="$1" dir="$2" phrase="$3"
-  shift 3
+  # $1 label, $2 directory name, $3 expected phrase, $4 the awk program
+  # (which may exit non-zero to say it found nothing to change), rest: build flags
+  local label="$1" dir="$2" phrase="$3" program="$4"
+  shift 4
   if [ "$EXERCISED" = no ]; then
     echo "  $label: the exercise has nothing to run here, so this proof is unmeasured"
     unmeasured=$((unmeasured + 1))
@@ -424,8 +433,12 @@ prove_fails() {
   fi
   mkdir -p "$WORK/$dir/iyi"
   cp "$REPO"/src/iyi/*.iyi "$WORK/$dir/iyi/"
-  awk "$1" "$REPO/src/iyi/prelude.iyi" > "$WORK/$dir/iyi/prelude.iyi"
-  if ! IYI_PATH="$WORK/$dir${PSEP}$REPO/src" "$IYI" build \
+  if ! awk "$program" "$REPO/src/iyi/prelude.iyi" > "$WORK/$dir/iyi/prelude.iyi"; then
+    echo "  $label: the copy's awk found nothing in the prelude to take out"
+    status=1
+    return
+  fi
+  if ! IYI_PATH="$WORK/$dir${PSEP}$REPO/src" "$IYI" build "$@" \
        -o "$WORK/$dir/program" "$REPO/bench/root_exercise.iyi" \
        >"$WORK/$dir/build.log" 2>&1; then
     echo "  $label: the patched prelude did not build"
@@ -482,6 +495,38 @@ prove_fails "the stack named, not held" named_stack "maps parser: the mapping ho
   { sub(/if probe != 0_u64$/, "if false"); print }
 '
 
+# The dead stack under a collection, not cleared at all, and cleared from
+# the collection's own frame rather than its caller's - `IyiMark.collect`'s
+# body out of line with the clear inside it, as it was when the stopper's
+# two thread-locals (df97721d4) grew that frame from 64 to 160 bytes and
+# laid its lowest word, which nothing writes, on a word still holding the
+# helper's array (CI jobs 128176433783 and 128229123908). The program
+# fills the kilobyte under its own frame with the helper's address first,
+# so either copy keeps the 32 MB whatever word the frames' layout leaves
+# unwritten: 20 runs of 20 each, built by LLVM 20.1.7 and by 23.1.1
+# (Windows 11, 12 logical processors, the user's machine). The check is
+# asserted in the optimised build on Windows only (bench/root_exercise.iyi
+# says why), so the copies are run there.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    prove_fails "no dead-stack clear" dead_noclear "bytes the helper built were still marked" '
+      /^        IyiRoots\.clear_dead_stack$/ { found = found + 1; next }
+                                             { print }
+      END                                    { if (found != 1) exit 3 }
+    ' --release
+    prove_fails "the dead stack cleared under the collection, not its caller" dead_inframe "bytes the helper built were still marked" '
+      /^        IyiRoots\.clear_dead_stack$/    { found = found + 1; next }
+                                                { print }
+      /^      def self\.collect_cleared : Nil$/ { print "        IyiRoots.clear_dead_stack"; found = found + 1 }
+      END                                       { if (found != 2) exit 3 }
+    ' --release
+    ;;
+  *)
+    echo "  the dead stack's two copies: the check is asserted in the optimised build on Windows only, so unmeasured on $(uname -s)"
+    unmeasured=$((unmeasured + 1))
+    ;;
+esac
+
 # The main stack's top, found after the program has spawned thousands of
 # tasks: two mappings each, a stack and its guard, before the first
 # collection asks where the main stack ends. Linux reads that out of
@@ -490,6 +535,13 @@ prove_fails "the stack named, not held" named_stack "maps parser: the mapping ho
 # its first collection died there with "no [stack] line" (now "no mapping
 # ... holds the program's arguments": the line is found by the argv it
 # holds).
+#
+# The tasks are `spawn(unit: :same)`, as a program on one worker spawns them. A
+# plain spawn is parallel by default, and the pool it starts registers the
+# main thread, whose line reads the stack's end then (thread.iyi), before
+# the first task's stack is mapped: the one-buffer copy below found the
+# stack with 3,000 tasks parked and 6,242 lines in the maps file, and
+# proved nothing.
 echo
 echo "== the main stack is found past thousands of task stacks"
 cat > "$WORK/tasks.iyi" <<'IYI'
@@ -498,7 +550,7 @@ parked = Channel(Int32).new
 seen = 0
 group do |g|
   3000.times do
-    g.spawn do
+    g.spawn(unit: :same) do
       case parked.receive
       in Int32         then it
       in ChannelClosed then 0
@@ -506,7 +558,7 @@ group do |g|
       end
     end
   end
-  g.spawn do
+  g.spawn(unit: :same) do
     IyiMark.collect
     seen = 1
     parked.close
@@ -564,6 +616,7 @@ esac
 echo
 echo "== the stack the loader left under main is zeroed"
 cat > "$WORK/loader.iyi" <<'IYI'
+@[Unsafe("the program reads an uninitialized top-level array through pointerof to see the words the loader left under main")]
 @[NoInline]
 def loader_words(words : Pointer(UInt64), count : Int32) : Int32
   found = 0
@@ -611,6 +664,172 @@ else
     echo "  failure proof: without the clear the array still read zero, so this proves nothing"
     sed 's/^/    /' "$WORK/loader-noclear.out" | tail -3; status=1
   fi
+fi
+
+# The two retentions a conservative stack scan cannot avoid by itself, and
+# the targeted fixes iyi has for each (GC_DESIGN.md, "Precise Stack Roots:
+# Measured, and Not Taken"). In both, a 64 MB string nobody keeps any more
+# is kept by a word that only looks like a pointer into it.
+#
+# * The loader's junk: a frame laid over the stack an earlier one left,
+#   with a slot it never writes, holds that frame's word. Here the earlier
+#   frame is the program's own (`play_loader`), so the word is an address
+#   in the string every run; on macos-15 it was dyld's under `main`. The
+#   fix is `__iyi_enter`'s: zero the stack under a frame before the frame
+#   is laid over it, done here by the top level, 16 KiB under its own
+#   stack pointer.
+# * The clock: an integer the program does keep, live in a frame across
+#   the collection, whose value falls inside the string (an integer at
+#   0x49f9af3be did, on macos-15, in bench/concurrency_exercise.iyi). The
+#   fix is that exercise's: a step that reads the clock runs in a `def` of
+#   its own, so the number goes with that frame before anything collects.
+#   Asserted in the optimised build: the debug build's frames keep a slot
+#   of the `def`'s too, and kept the string in 5 runs of 5 on both
+#   machines below.
+#
+# Each fix is asserted (the string is freed), and each case without its
+# fix is the broken copy, which must keep the string: that is the scan
+# being conservative, and it is the outcome precise stack maps would
+# change, at which point the broken copy's assertion turns into the
+# check. Measured 5 runs of 5 for each build on Linux x86_64 (12 vCPU,
+# shared) and on macOS 26.6, Apple M2 Pro, 10 cores (the user's
+# machine): 64,050,705 bytes kept without the fix every time, 50,696 to
+# 50,712 with it. Elsewhere, where the stack clear's reach and a frame's
+# layout were not measured (Windows' `__chkstk` and committed limit,
+# aarch64 Linux under emulation), the step says so instead.
+echo
+echo "== a word that only looks like a pointer keeps 64 MB, and each fix takes it back"
+cat > "$WORK/retention.iyi" <<'IYI'
+@[Unsafe("the program keeps a 64 MB string's address from to_unsafe as an integer and reads uninitialized frames through pointerof, the stray words a conservative scan mistakes for pointers")]
+import std/static_array
+import std/gc::{GC}
+
+# An address inside a 64 MB string nobody keeps, as an integer.
+@[NoInline]
+def dropped_string_word : UInt64
+  s = "r" * 64000000
+  s.to_unsafe.address &+ 32000000_u64
+end
+
+@[NoInline]
+def kept_now : UInt64
+  GC.collect
+  GC.stats.bytes_kept_by_last_sweep
+end
+
+@[NoInline]
+def nonzero(words : Pointer(UInt64), count : Int32) : Int32
+  found = 0
+  index = 0
+  while index < count
+    found = found + 1 if words[index] != 0_u64
+    index = index + 1
+  end
+  found
+end
+
+@[NoInline]
+def use_word(word : UInt64) : Int32
+  word == 0_u64 ? 1 : 0
+end
+
+# The loader's part: a frame that leaves its words on the stack and returns.
+@[NoInline]
+def play_loader : Int32
+  words = uninitialized UInt64[512]
+  word = dropped_string_word
+  index = 0
+  while index < 512
+    words[index] = word
+    index = index + 1
+  end
+  nonzero(pointerof(words).as(Pointer(UInt64)), 512)
+end
+
+# The program's: a frame laid over them, with a slot it never writes, live
+# across the collection.
+@[NoInline]
+def run_over_it : UInt64
+  untouched = uninitialized UInt64[512]
+  kept = kept_now
+  left = nonzero(pointerof(untouched).as(Pointer(UInt64)), 512)
+  puts "words left in the slot: #{left}"
+  kept
+end
+
+@[NoInline]
+def reading_in_a_def : Int32
+  reading = dropped_string_word
+  use_word(reading)
+end
+
+kept = 0_u64
+{% if flag?(:case_clock) %}
+  {% if flag?(:case_fixed) %}
+    reading_in_a_def
+    kept = kept_now
+  {% else %}
+    reading = dropped_string_word
+    kept = kept_now
+    use_word(reading)
+  {% end %}
+{% else %}
+  play_loader
+  {% if flag?(:case_fixed) %}
+    high = uninitialized UInt64
+    {% if flag?(:x86_64) %}
+      asm("movq %rsp, $0" : "=r"(high) :: : "volatile")
+    {% else %}
+      asm("mov $0, sp" : "=r"(high) :: : "volatile")
+    {% end %}
+    low = high - 16384_u64
+    while low < high
+      Pointer(UInt64).new(low).value = 0_u64
+      low = low + 8_u64
+    end
+  {% end %}
+  kept = run_over_it
+{% end %}
+puts "kept: #{kept} bytes"
+__iyi_exit(kept < 16777216_u64 ? 0 : 1)
+IYI
+retention_run() { # retention_run <label> [build flags]
+  local label="$1"
+  shift
+  if ! "$IYI" build "$@" -o "$WORK/retention-$label" "$WORK/retention.iyi" > "$WORK/retention-$label.log" 2>&1; then
+    echo "  $label: build failed"; sed -n '1,12p' "$WORK/retention-$label.log"; status=1; return 2
+  fi
+  "$WORK/retention-$label" > "$WORK/retention-$label.out" 2>&1
+}
+case "$(uname -s)/$(uname -m)" in
+  Linux/x86_64 | Darwin/arm64) RETENTION_MEASURED=yes ;;
+  *) RETENTION_MEASURED=no ;;
+esac
+if [ "$EXERCISED" = no ]; then
+  echo "  the collector's allocator is not the default here, so nothing is kept or freed to check"
+  unmeasured=$((unmeasured + 1))
+elif [ "$RETENTION_MEASURED" = no ]; then
+  echo "  measured on Linux x86_64 and darwin arm64 only, so unmeasured on $(uname -s)/$(uname -m)"
+  unmeasured=$((unmeasured + 1))
+else
+  for case_ in "loader plain" "loader release" "clock release"; do
+    set -- $case_
+    name="$1" flags=""
+    [ "$2" = release ] && flags="--release"
+    if retention_run "$name-$2-fixed" $flags "-Dcase_$name" -Dcase_fixed &&
+       grep -q '^kept: ' "$WORK/retention-$name-$2-fixed.out"; then
+      echo "  $name, $2, with the fix: $(grep '^kept: ' "$WORK/retention-$name-$2-fixed.out")"
+    else
+      echo "  $name, $2, with the fix: FAIL:"; sed 's/^/    /' "$WORK/retention-$name-$2-fixed.out" | tail -3; status=1
+    fi
+    retention_run "$name-$2-held" $flags "-Dcase_$name"
+    if [ $? -eq 1 ] && grep -q '^kept: [0-9]\{8,\} bytes' "$WORK/retention-$name-$2-held.out"; then
+      echo "  failure proof: without it the conservative scan exits 1 at \"$(grep '^kept: ' "$WORK/retention-$name-$2-held.out")\""
+    else
+      echo "  failure proof: without the fix the string was freed anyway, so this proves nothing"
+      sed 's/^/    /' "$WORK/retention-$name-$2-held.out" | tail -3; status=1
+    fi
+  done
 fi
 
 echo

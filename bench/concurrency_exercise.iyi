@@ -18,6 +18,7 @@
 # string and kept it in a recorded run on macos-15, where 2 of 720 runs
 # failed 16e's rendezvous check.
 
+@[Unsafe("makes pipes through pipe or Windows named pipes in a lib, and moves bytes through raw Pointer.malloc buffers and to_unsafe")]
 import std/gc::{GC}
 
 def fail(message : String) : Nil
@@ -131,7 +132,10 @@ sleepers_wake_in_order
 # trips with 2,000 idle readers parked may take at most three times what
 # they take alone. Linux's poller only: Windows finds a completion by its
 # OVERLAPPED, and darwin's default of 256 descriptors does not hold the
-# crowd.
+# crowd. The crowd is `spawn(unit: :same)`: the round trips run on this
+# thread's poller, and capturing only a descriptor, the crowd's readers
+# parked on the workers' instead, where a poller that walked every waiter
+# for each event passed.
 {% if flag?(:linux) %}
   def round_trips(idle : Int32, rounds : Int32) : Int64
     crowd = [] of Pointer(Int32)
@@ -142,7 +146,7 @@ sleepers_wake_in_order
     group do |g|
       crowd.each do |pipe|
         fd = pipe[0]
-        g.spawn do
+        g.spawn(unit: :same) do
           buffer = Pointer(UInt8).malloc(1_u64)
           iyi_read(fd, buffer.as(Void*), 1_u64)
           0
@@ -793,8 +797,11 @@ puts "a parked receiver completed a rendezvous send"
 #
 # The def is load-bearing: a `while` body is one scope, so a closure made
 # in it would capture one shared variable; a parameter is a fresh binding.
+# The senders park in the order spawned, which is what FIFO is checked
+# against: `spawn(unit: :same)`, since three blocks capturing only the channel
+# would otherwise run on three workers and race to park (SPEC.md III.4.15).
 def spawn_send(g : IyiGroup, fifo : Channel(Int32), n : Int32) : Nil
-  g.spawn do
+  g.spawn(unit: :same) do
     fifo.send(n)
     0
   end
@@ -854,6 +861,9 @@ puts "a cancelled rendezvous send died undelivered"
 # receiver cancelled before it ran answered `Cancelled` and left the 5.
 # The sender writes the value into the receiver's node now, so the wake
 # is the delivery, and the sender the select did not take stays parked.
+# The senders are `spawn(unit: :same)`: the second's send must be the one the
+# select takes, so they run in their unit in the order spawned, where
+# capturing only a channel would run each on a worker of its own.
 rv_first = Channel(Int32).new
 rv_second = Channel(Int32).new
 rv_log = ""
@@ -878,11 +888,11 @@ group do |g|
     end
     0
   end
-  g.spawn do
+  g.spawn(unit: :same) do
     rv_second.send(2)
     0
   end
-  g.spawn do
+  g.spawn(unit: :same) do
     rv_first.send(1)
     0
   end
@@ -1025,7 +1035,9 @@ def select_timeouts : Nil
   # A select whose deadline passes while a sender wakes it, before it runs,
   # is woken by both: the clock is read before the run queue every 256th
   # park, and it queued the fiber a second time - "a done fiber was
-  # scheduled", which the .sh looks for in this program's output.
+  # scheduled", which the .sh looks for in this program's output. The
+  # sender is `spawn(unit: :same)`: its spin holds the select's thread past the
+  # deadline only from inside the select's unit.
   racing = Channel(Int32).new(1)
   raced = 0
   timed = 0
@@ -1042,7 +1054,7 @@ def select_timeouts : Nil
         end
         0
       end
-      g.spawn do
+      g.spawn(unit: :same) do
         until_ns = __iyi_monotonic_ns + 1500000_i64
         while __iyi_monotonic_ns < until_ns
         end
@@ -1168,6 +1180,11 @@ cancelled_select_beats
 # Threadring and a collection every few hundred thousand messages. A
 # fiber keeps its receive node, a channel its send node, and the buffer is
 # a ring.
+#
+# The tasks are `spawn(unit: :same)`: the step counts what a park costs tasks
+# taking turns on one thread. Capturing only channels, they ran on the
+# pool (SPEC.md III.4.15), and there a runtime that took a send node from
+# the heap for every park passed the step.
 {% unless flag?(:gc_none) || flag?(:gc_boehm) %}
   def ring_bytes(tasks : Int32, passes : Int32) : UInt64
     chans = Array.new(tasks) { Channel(Int32).new }
@@ -1193,7 +1210,7 @@ cancelled_select_beats
   end
 
   def spawn_ring_member(g : IyiGroup, mine : Channel(Int32), after : Channel(Int32), done : Channel(Int32)) : Nil
-    g.spawn do
+    g.spawn(unit: :same) do
       while true
         case v = mine.receive
         in Int32
@@ -1218,11 +1235,11 @@ cancelled_select_beats
     GC.disable
     before = GC.stats.bytes_since_collection
     group do |g|
-      g.spawn do
+      g.spawn(unit: :same) do
         rounds.times { ping.receive; pong.send(1) }
         0
       end
-      g.spawn do
+      g.spawn(unit: :same) do
         rounds.times { ping.send(1); pong.receive }
         0
       end
@@ -1251,7 +1268,9 @@ cancelled_select_beats
 # queue, the node's sender is woken but has not run: it still has to read
 # whether its value was delivered. A sender that parks in between must get
 # a node of its own, or it rewrites the receipt and the first sender reads
-# its delivered value as refused.
+# its delivered value as refused. The receivers are `spawn(unit: :same)`: the
+# first sender is woken and has not run only while it waits its turn in
+# their unit, where on a worker of its own it would run at once.
 receipt = Channel(Int32).new
 first_answer = "unset"
 group do |g|
@@ -1264,7 +1283,7 @@ group do |g|
     fail("receipt: the first sender's delivered value read as #{first_answer}") unless first_answer == "delivered"
     0
   end
-  g.spawn do
+  g.spawn(unit: :same) do
     sleep(10)
     got = receipt.receive
     fail("receipt: received #{got.inspect}, not 1") unless got == 1
@@ -1272,7 +1291,7 @@ group do |g|
     receipt.send(2)
     0
   end
-  g.spawn do
+  g.spawn(unit: :same) do
     sleep(40)
     got = receipt.receive
     fail("receipt: received #{got.inspect}, not 2") unless got == 2
@@ -1758,7 +1777,8 @@ group do |g|
     busy_ping.close
     0
   end
-  g.spawn do
+  # `spawn(unit: :same)`: the ping-pong is one thread's, beside the sleeper.
+  g.spawn(unit: :same) do
     while true
       v = busy_ping.receive
       break unless v.is_a?(Int32)

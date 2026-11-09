@@ -30,7 +30,9 @@ if [ "$#" -lt 2 ]; then
 fi
 minutes="$1"
 shift
-gate="$1"
+# The gate's name is its arguments too: one script run in halves, each
+# under a bound of its own, is two gates.
+gate="$*"
 
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT) windows=1 ;;
@@ -159,12 +161,13 @@ end_all() {
   local list p
   list="$(descendants "$pid")"
   for p in $list; do
-    if [ "$windows" -eq 1 ]; then
-      taskkill //F //T //PID "$(cat "/proc/$p/winpid" 2>/dev/null)" > /dev/null 2>&1
-    fi
-    kill -KILL "$p" 2>/dev/null
+    end_process "$p" KILL
   done
 }
+
+# What the gate left running is ended by end_process: on Windows, bash's
+# own `kill` ends a native program's stranger with it.
+. "$(dirname "$0")/end_process.sh"
 
 deadline=$((started + minutes * 60))
 while kill -0 "$pid" 2>/dev/null; do

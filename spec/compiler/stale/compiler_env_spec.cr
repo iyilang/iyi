@@ -48,6 +48,14 @@ describe "Iyi::Stale S3c: env-only recorder, CompilerEnvFp" do
         Iyi::Stale::CompilerEnv.value_class?(var).should be_true
       end
     end
+
+    it "classifies release partitioning codegen variables as value class" do
+      Iyi::BuildInputs::CODEGEN_ONLY_ENV.each do |var|
+        Iyi::Stale::CompilerEnv.variable_class(var).should eq(Iyi::Stale::CompilerEnv::VariableClass::Value), "expected #{var} to be value class"
+        Iyi::Stale::CompilerEnv.value_class?(var).should be_true
+        Iyi::Stale::CompilerEnv.display_class?(var).should be_false
+      end
+    end
   end
 
   describe "Iyi::Stale::CompilerEnv.fp" do
@@ -146,6 +154,12 @@ describe "Iyi::Stale S3c: env-only recorder, CompilerEnvFp" do
     it "makes file, directory, link, and run-declared hooks no-ops" do
       inputs = Iyi::BuildInputs.new(nil, env_only: true)
       inputs.env_only?.should be_true
+      Iyi::BuildInputs::CODEGEN_ONLY_ENV.each do |var|
+        inputs.env.has_key?(var).should be_true
+      end
+      Iyi::BuildInputs::LINK_ONLY_ENV.each do |var|
+        inputs.env.has_key?(var).should be_true
+      end
 
       inputs.looked_at("/some/file.txt")
       inputs.files.should be_empty

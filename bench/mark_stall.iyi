@@ -46,6 +46,7 @@
 # bench/concurrent_mark.sh runs it at twelve workers, and broken copies of
 # the runtime it catches.
 
+@[Unsafe("reads the mark pool's state words through IyiMark.pool_word to see whether a mark has stalled")]
 module bench/mark_stall
 
 import std/socket::{IyiSocket, SocketError}
@@ -342,11 +343,11 @@ import std/socket::{IyiSocket, SocketError}
       near_family = near_families[c]
       far_fd = far_fds[c]
       far_family = far_families[c]
-      g.spawn_parallel do
+      g.spawn(unit: :new) do
         client(near_fd, near_family, c, until_ns, requests, bytes, hold)
         0
       end
-      g.spawn_parallel do
+      g.spawn(unit: :new) do
         echo(far_fd, far_family)
         0
       end

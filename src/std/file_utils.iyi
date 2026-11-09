@@ -100,6 +100,7 @@
 # Left out: preserving owners and times (`cp -p`), following links
 # within a tree (`cp -L`), and a guard against removing `/`.
 
+@[Unsafe("files are opened, copied and compared through the platform's raw calls with C path strings")]
 module std/file_utils
 
 import std/path::{Path}

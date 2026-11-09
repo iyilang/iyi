@@ -107,4 +107,22 @@ describe "Codegen: iyi case equality" do
         IYI
     end
   end
+
+  # `Object#==` answered false for any pointer, itself included.
+  it "compares pointers by the address they hold" do
+    with_tempdir("iyi-pointer-equality") do
+      run_iyi("pointers", <<-'IYI').should eq("true\nfalse\ntrue\ntrue\ntrue\ntrue\n")
+        @[Unsafe("takes pointers to two locals and builds a null pointer from a raw address")]
+        x = 1
+        y = 2
+        a = pointerof(x)
+        puts a == pointerof(x)
+        puts a == pointerof(y)
+        puts a.as(Void*) == pointerof(x).as(Void*)
+        puts Pointer(Void).new(0_u64) == Pointer(Void).new(0_u64)
+        puts a != pointerof(y)
+        puts({a => 1}[pointerof(x)]? == 1)
+        IYI
+    end
+  end
 end

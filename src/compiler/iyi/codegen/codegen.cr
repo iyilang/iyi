@@ -392,6 +392,12 @@ module Iyi
       alloca_vars @program.vars, @program
 
       emit_vars_debug_info(@program.vars) if @debug.variables?
+
+      # iyi: in a chaos build the program's top-level code checks at its
+      # loops' back-edges as a def's code does (SPEC.md III.4.17): the main
+      # thread is never a pool worker, so nothing preempts it elsewhere, but
+      # the chaos scheduler runs every task on it and preempts there.
+      @context.iyi_preempt = iyi_chaos? && iyi_preempt_on?
     end
 
     getter llvm_context
@@ -789,7 +795,14 @@ module Iyi
         # Always run verifications so we can catch bugs earlier and more often.
         # We can probably remove this, or only enable this when compiling in
         # release mode, once we reach 1.0.
-        mod.verify
+        #
+        # iyi: one module is verified here; a unit per type is verified by
+        # `CompilationUnit#prepare`, on the codegen threads. Each unit's
+        # module has a context of its own (`type_module`), so nothing stops
+        # them being verified at once, and here they were 64 ms of one core
+        # out of `Codegen (crystal)`'s 0.31 s for samples/iyi/cores.iyi
+        # (Linux, 12 vCPU, `IYI_PROF=1`, release compiler).
+        mod.verify if @single_module
       end
 
       if type_info_path = ENV["IYI_DUMP_TYPE_INFO"]?.presence
@@ -1049,7 +1062,7 @@ module Iyi
       # A proc literal is otherwise emitted into `_main`, and the unit that
       # creates one refers to it from there — which is fine for a program and
       # not for an artifact: the router's unit called
-      # `~procProc(Context, String)@kemal/router.iyi:211` and the producing
+      # `~procProc(Context, String)^kemal/router.iyi:211` and the producing
       # build had left the definition in a module nothing carries. Nor could
       # the consumer make its own, because the name has the file and line it
       # was written on in it and the consumer reads declarations under another
@@ -1090,7 +1103,16 @@ module Iyi
         # object code names its procs after the source, and a body compiled
         # here is not that code.
         filename = location.read_from.as(String)
-        fun_literal_name = Iyi.safe_mangling(@program, "~proc#{type}@#{Iyi.relative_filename(filename)}:#{location.line_number}")
+        # Joined with `SYMBOL_JOIN`, and the type and the path written as text
+        # a person chose: a quoted `NamedTuple` key in the type, a package's
+        # `@v1.0.0` directory in the path (`Iyi.symbol_text`).
+        fun_literal_name = Iyi.safe_mangling(@program, String.build do |str|
+          str << "~proc"
+          Iyi.symbol_text(str, type.to_s)
+          str << SYMBOL_JOIN
+          Iyi.symbol_text(str, Iyi.relative_filename(filename))
+          str << ':' << location.line_number
+        end)
       else
         proc_name = false
         fun_literal_name = "~fun_literal"
@@ -2427,6 +2449,7 @@ module Iyi
       # and the link ended on an undefined symbol.
       old_iyi_closure_host = @iyi_closure_host
       @iyi_closure_host = nil
+      old_iyi_preempt = context.iyi_preempt?
 
       clear_current_debug_location if @debug.line_numbers?
 
@@ -2447,6 +2470,7 @@ module Iyi
       @iyi_closure_host = old_iyi_closure_host
       context.fun = old_fun
       context.fun_type = old_fun_type
+      context.iyi_preempt = old_iyi_preempt
       set_current_debug_location old_debug_location if @debug.line_numbers?
 
       block_value
@@ -2465,6 +2489,10 @@ module Iyi
       context.fun = func.func
       context.fun_type = type
       context.fun.linkage = LLVM::Linkage::Internal if iyi_internalise?
+      # A chaos build's top-level code checks (`initialize`); what is
+      # defined here is the compiler's own - an initializer, a `~match` -
+      # which may run inside the runtime, and never checks there.
+      context.iyi_preempt = false if iyi_chaos?
       if needs_alloca
         new_entry_block
         yield func.func
@@ -2980,12 +3008,13 @@ module Iyi
 
     # iyi: whether this program's loops check for preemption at their
     # back-edges (SPEC.md III.4.13, part 9): a program with a worker pool,
-    # which is a program that reached `IyiWorkers.start` - every
-    # `spawn_parallel` does. The flag is only ever raised on a pool worker,
-    # so a program without one would pay for checks that never fire, and
-    # carries none. A build writing artifacts carries none either: the
-    # object code it writes is linked into programs that may have no pool,
-    # and a check calls the pool's slow half by name.
+    # which is a program whose kept code calls `IyiWorkers.start` - every
+    # `spawn(unit: :new)` does, and every `spawn` the compiler found eligible
+    # (III.4.15; `Program#iyi_pool_reached?`). The flag is only ever raised
+    # on a pool worker, so a program without one would pay for checks that
+    # never fire, and carries none. A build writing artifacts carries none
+    # either: the object code it writes is linked into programs that may
+    # have no pool, and a check calls the pool's slow half by name.
     def iyi_preempt_on? : Bool
       on = @iyi_preempt_on
       return on unless on.nil?
@@ -2994,12 +3023,30 @@ module Iyi
 
     private def iyi_preempt_wanted? : Bool
       return false unless @program.iyi_prelude? && @program.iyi_exported_owners.empty?
-      workers = @program.types["IyiWorkers"]?
-      return false unless workers
-      meta = workers.metaclass
-      return false unless meta.is_a?(DefInstanceContainer)
-      return false unless meta.def_instances.each_value.any? { |a_def| a_def.name == "start" }
+      return false unless @program.iyi_pool_reached? || iyi_chaos?
       !iyi_preempt_word.nil?
+    end
+
+    # iyi: a build for the chaos scheduler (`-Diyi_chaos`, SPEC.md
+    # III.4.17), which `iyi test --chaos` makes. Its loops check at their
+    # back-edges whether or not a pool is reached, since the scheduler
+    # preempts at them on the program's one thread; and the runtime's code
+    # is told from the program's whether or not they do, since a chaos
+    # point is dropped from the runtime's copy of a library def (`visit(Call)`).
+    def iyi_chaos? : Bool
+      on = @iyi_chaos
+      return on unless on.nil?
+      @iyi_chaos = @program.has_flag?("iyi_chaos")
+    end
+
+    @iyi_chaos : Bool?
+
+    # iyi: whether *target_def* is `IyiChaos.at_atomic`, the point an
+    # `Atomic` verb makes under `-Diyi_chaos` (`visit(Call)`).
+    def iyi_chaos_atomic_point?(target_def : Def) : Bool
+      return false unless target_def.name == "at_atomic"
+      owner = target_def.owner
+      owner.metaclass? && owner.instance_type.to_s == "IyiChaos"
     end
 
     # The worker's preemption word, `IyiWorkers.@@preempt`: a thread-local
@@ -3033,7 +3080,7 @@ module Iyi
     # runtime, with a worker's structures half changed or a reference to
     # one worker's state held across a move to another. The prelude's
     # other files are a library, and check as a program's own code does.
-    IYI_RUNTIME_FILES = {"prelude.iyi", "concurrency.iyi", "thread.iyi"}
+    IYI_RUNTIME_FILES = {"prelude.iyi", "concurrency.iyi", "thread.iyi", "chaos.iyi"}
 
     @iyi_runtime_files = {} of String => Bool
 

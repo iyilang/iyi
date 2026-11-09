@@ -24,6 +24,7 @@
 # Run via:
 #     ./bin/iyi run bench/std_io_exercise.iyi
 
+@[Unsafe("it exercises std/io's pointer and count API: reads into and writes from raw buffers it allocates, hexed through to_unsafe")]
 module bench/std_io_exercise
 
 import std/io::{Memory, Sized, Delimited, MultiWriter, Hexdump, ByteFormat}

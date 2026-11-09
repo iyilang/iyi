@@ -57,6 +57,7 @@ module Iyi::Stale
       @unimported : Array(String) = [] of String,
       store : Store? = nil,
       target : String? = nil,
+      @chaos : Bool = false,
     )
       @store = store || Store.new
       @target = target || Config.host_target.to_s
@@ -70,6 +71,10 @@ module Iyi::Stale
     end
 
     def run_internal : Nil
+      if @chaos
+        abort! "cannot combine --chaos with stale runner", :USAGE_ERROR
+      end
+
       # Validate export index constraints early
       unless @export_indices.empty?
         unless @fresh

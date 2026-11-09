@@ -1,0 +1,61 @@
+# A fan-out written with plain `spawn`, timed: SPEC.md III.4.15.
+#
+#   ./bin/iyi build --release bench/spawn_fanout.iyi -o fanout
+#   IYI_WORKERS=1 ./fanout && IYI_WORKERS=8 ./fanout
+#
+# 32 MiB of text hashed in 64 chunks, one `g.spawn` a chunk, each chunk
+# hashed four times with FNV-1a under four seeds, and the chunks' hashes
+# folded in order. Every block captures the text, a `String`, the chunk's
+# size and the seed table, all `Share`, so the compiler runs each spawn
+# as a parallel task (`--explain-spawn` says so); on one worker it stays
+# in its spawner's unit, which is the program before 0.21.0. Best of five
+# rounds, printed with the answer, which is the same at every count.
+
+@[Unsafe("each task hashes its chunk by reading the text's bytes through to_unsafe")]
+module bench/spawn_fanout
+
+import std/int
+import std/list::{List}
+
+CHUNKS = 64
+ROUNDS =  5
+SEEDS  = List.new([14695981039346656037_u64, 1469598103934665603_u64, 7809847782465536322_u64, 9650029242287828579_u64])
+
+def fnv(text : String, from : Int32, to : Int32, seed : UInt64) : UInt64
+  bytes = text.to_unsafe
+  hash = seed
+  i = from
+  while i < to
+    hash = (hash ^ bytes[i].to_u64) &* 1099511628211_u64
+    i = i + 1
+  end
+  hash
+end
+
+text = "the quick brown fox jumps over the lazy dog, " * 745654
+per = text.bytesize // CHUNKS
+best = 9223372036854775807_i64
+answer = 0_u64
+ROUNDS.times do
+  started = __iyi_monotonic_ns
+  folded = 0_u64
+  group do |g|
+    tasks = (0...CHUNKS).map do |chunk|
+      g.spawn do
+        mixed = 0_u64
+        SEEDS.each { |seed| mixed = mixed ^ fnv(text, chunk * per, (chunk + 1) * per, seed) }
+        mixed
+      end
+    end
+    tasks.each do |task|
+      case got = task.value
+      in UInt64   then folded = (folded &* 31_u64) ^ got
+      in Panicked then raise "a chunk panicked"
+      end
+    end
+  end
+  took = __iyi_monotonic_ns - started
+  best = took if took < best
+  answer = folded
+end
+puts "fanout: #{text.bytesize // 1048576} MiB in #{CHUNKS} spawns on #{IyiWorkers.count} workers: best of #{ROUNDS} #{best // 1000000} ms, answer #{answer}"

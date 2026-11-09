@@ -7,6 +7,7 @@
 # A buffer, a size and a capacity. Growth doubles, which is the only policy
 # that keeps a run of `<<` linear, and there is no shrinking; `shift` steps
 # the buffer forward, so the capacity is what is left past it.
+@[Unsafe("an array's elements live in a buffer it allocates, grows and indexes itself")]
 class Array(T)
   @size : Int32
   @capacity : Int32
@@ -70,6 +71,7 @@ class Array(T)
   # An array of *capacity* elements that are not written yet. The literal
   # expander fills them through `to_unsafe` immediately afterwards, which is
   # why this is allowed to hand out a size it has not stored anything at.
+  @[Unsafe(call: "every element below the capacity is written before it is read")]
   def self.unsafe_build(capacity : Int32) : Array(T)
     array = Array(T).new(capacity)
     array.unsafe_set_size(capacity)
@@ -77,6 +79,7 @@ class Array(T)
   end
 
   # :nodoc:
+  @[Unsafe(call: "every element below the new size is written before it is read, and the size is within the capacity")]
   def unsafe_set_size(size : Int32) : Nil
     @size = size
   end

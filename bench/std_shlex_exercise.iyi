@@ -8,6 +8,7 @@
 # wrote there with Python's `shlex`, answers every line of it, and writes
 # its own `join` of each argument list beside it for `/bin/sh` to read.
 
+@[Unsafe("its test helpers read strings' bytes through to_unsafe, to print what std/shlex answers byte for byte")]
 module bench/std_shlex_exercise
 
 import std/shlex::{Shlex, ShlexError}

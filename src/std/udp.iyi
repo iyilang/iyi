@@ -21,6 +21,7 @@
 # There are no kernel timeouts and no non-blocking flag: a wait that must
 # end is `poll_read(ms)` followed by `receive_from?`.
 
+@[Unsafe("datagrams are sent and received through the platform's raw calls, from and into byte buffers it allocates or the caller hands it")]
 module std/udp
 
 pub import std/slice

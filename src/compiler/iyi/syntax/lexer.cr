@@ -201,19 +201,31 @@ module Iyi
     # `main.iyi` got iyi's prelude and the other language's lexer. The
     # stored name is the file's on every system: typed in any case it is
     # read as what it is, and a file stored as `UP.IYI` is refused as one.
+    #
+    # darwin's default volume (APFS, and HFS+ before it) folds case too, and
+    # this was Windows-only, so on a Mac the same `run` was refused as a
+    # file "ends in `.IYI`" - unseen because CI never ran
+    # `bench/verbs_exercise.sh` there. An APFS volume can be formatted
+    # case-sensitive, and a Windows directory marked so, which is why no
+    # system is assumed to fold: a sibling is the stored name only if the
+    # file system opens the same file under both, asked per path. Linux
+    # volumes are left to the string they were typed as.
     def self.stored_name(path : String) : String
-      {% if flag?(:win32) %}
+      {% if flag?(:win32) || flag?(:darwin) %}
         base = File.basename(path)
+        directory = File.dirname(path)
         children =
           begin
-            Dir.children(File.dirname(path))
+            Dir.children(directory)
           rescue File::Error
             return path
           end
         return path if children.includes?(base)
-        if stored = children.find { |child| child.compare(base, case_insensitive: true) == 0 }
-          return path.rchop(base) + stored
+        stored = children.find do |child|
+          child.compare(base, case_insensitive: true) == 0 &&
+            (File.same?(path, File.join(directory, child), follow_symlinks: true) rescue false)
         end
+        return path.rchop(base) + stored if stored
       {% end %}
       path
     end

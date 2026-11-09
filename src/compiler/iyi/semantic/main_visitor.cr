@@ -3,14 +3,19 @@ require "./semantic_visitor"
 module Iyi
   class Program
     def visit_main(node, visitor : MainVisitor = MainVisitor.new(self), process_finished_hooks = false, cleanup = true)
-      node.accept visitor
+      Prof.span("  main: typing") { node.accept visitor }
       program.process_finished_hooks(visitor) if process_finished_hooks
 
       missing_types = FixMissingTypes.new(self)
-      node.accept missing_types
+      Prof.span("  main: missing types") { node.accept missing_types }
       program.process_finished_hooks(missing_types) if process_finished_hooks
 
-      node = cleanup node if cleanup
+      # iyi: unsafe code is code in a module that says so (SPEC.md III.13),
+      # read off the typed program before the cleanup inlines what the
+      # compiler wrote into what the person did.
+      Prof.span("  main: unsafe check") { UnsafeCheck.run(self, node) } if process_finished_hooks
+
+      node = Prof.span("  main: cleanup") { cleanup node } if cleanup
 
       if process_finished_hooks
         finished_hooks.map! do |hook|
@@ -476,7 +481,7 @@ module Iyi
         class_var = lookup_class_var(var)
         var.var = class_var
         class_var.thread_local = true if thread_local
-        class_var.iyi_safe_reach = safe_reach if safe_reach
+        iyi_mark_class_var_reach(class_var, safe_reach)
 
         node.type = @program.nil
       when Path
@@ -560,7 +565,7 @@ module Iyi
 
         class_var = visit_class_var var
         class_var.thread_local = true if thread_local
-        class_var.iyi_safe_reach = safe_reach if safe_reach
+        iyi_mark_class_var_reach(class_var, safe_reach)
       else
         raise "Bug: unexpected var type: #{var.class}"
       end
@@ -700,7 +705,7 @@ module Iyi
 
       var = visit_class_var node
       var.thread_local = true if thread_local
-      var.iyi_safe_reach = safe_reach if safe_reach
+      iyi_mark_class_var_reach(var, safe_reach)
 
       false
     end
@@ -1102,7 +1107,7 @@ module Iyi
         var = lookup_class_var(target)
         target.var = var
         var.thread_local = true if thread_local
-        var.iyi_safe_reach = safe_reach if safe_reach
+        iyi_mark_class_var_reach(var, safe_reach)
         return
       end
 
@@ -1111,7 +1116,7 @@ module Iyi
       var = lookup_class_var(target)
       target.var = var
       var.thread_local = true if thread_local
-      var.iyi_safe_reach = safe_reach if safe_reach
+      iyi_mark_class_var_reach(var, safe_reach)
       # iyi: a write after the initializer, for the thread gate.
       var.iyi_written ||= {node.as(ASTNode), @typed_def}
 
@@ -1906,6 +1911,7 @@ module Iyi
       expanded.accept self
       node.bind_to expanded
       node.expanded = expanded
+      node.iyi_compiler_expansion = true
 
       true
     end

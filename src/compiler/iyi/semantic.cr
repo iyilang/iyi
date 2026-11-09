@@ -80,6 +80,21 @@ class Iyi::Program
     # they reach is warned about once, with how many blocks reach it
     # (SPEC.md III.4.4).
     @cleanup_transformer.try &.report_share_reach
+    # And every `@[SafeReach]` is proven, or refused naming the write that
+    # breaks it (`ReachProof`, SPEC.md III.4.4): the whole typed program is
+    # final only once the cleanup has met every def.
+    if cleanup && !iyi_reach_claims.empty?
+      @progress_tracker.stage("Semantic (reach proof)") { ReachProof.run(self, result) }
+    end
+    # A spawn of a module this build writes an artifact for, placed in
+    # parallel on a claim that holds only for this program, goes back to
+    # its unit (III.4.15).
+    iyi_settle_claimed_spawns unless iyi_claimed_spawns.empty?
+    # And every spawn is classified (III.4.15): `--explain-spawn`'s notes.
+    iyi_note_spawns
+    # And beside a parallel one, the unsafe modules its block reaches
+    # (III.13), which the placement takes at their word.
+    iyi_note_unsafe_spawns
 
     @progress_tracker.stage("Semantic (recursive struct check)") do
       Prof.span("recursive struct check") { RecursiveStructChecker.new(self).run }
@@ -121,7 +136,15 @@ class Iyi::Program
       # use a new MainVisitor which will have no vars.
       visitor.vars = main_visitor.vars.dup unless main_visitor.vars.empty?
 
-      Prof.span("top level: node.accept") { node.accept visitor }
+      # The files this walk will read are parsed ahead of it, on threads of
+      # their own, for as long as the walk runs (`ParseAhead`).
+      @parse_ahead = ParseAhead.start(self, node, parse_ahead_threads)
+      begin
+        Prof.span("top level: node.accept") { node.accept visitor }
+      ensure
+        @parse_ahead.try &.stop
+        @parse_ahead = nil
+      end
       Prof.span("top level: finished hooks") { visitor.process_finished_hooks }
       visitor.new_expansions
     end

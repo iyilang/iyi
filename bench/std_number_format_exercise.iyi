@@ -9,6 +9,7 @@
 # bench/std_number_format_exercise.sh recomputes in exact decimal
 # arithmetic.
 
+@[Unsafe("it turns 64-bit patterns into the Float64s they spell through a pointer, to format every kind of double")]
 module bench/std_number_format_exercise
 
 import std/number_format::{BinaryPrefixFormat}

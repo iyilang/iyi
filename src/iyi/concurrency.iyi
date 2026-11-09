@@ -4,15 +4,17 @@
 # that concurrency rather than sequence is the poller — a fiber that would
 # block parks itself and the scheduler runs another, so two tasks' waits
 # overlap on one thread. What makes it parallelism is the pool (III.4.13):
-# `spawn_parallel` hands a task to worker threads, each a scheduler of its
-# own, and a parallel task that parks may resume on whichever worker is
-# free, the tasks it spawned with it (`IyiUnit`).
+# `spawn(unit: :new)` hands a task to worker threads, each a scheduler of
+# its own, and a task that parks may resume on whichever worker is free,
+# the tasks it spawned with it: a unit (`IyiUnit`, SPEC.md III.4.18).
 #
 # The public surface, and it is deliberately all of it:
 #
 #   group do |g|              # III.4.1: concurrency is introduced by a scope
-#     t = g.spawn { work() }  # a task on this thread; no bare spawn exists
-#     u = g.spawn_parallel { crunch() }  # a task on a worker: III.4.13
+#     t = g.spawn { work() }  # placed by the compiler: III.4.15; no bare spawn exists
+#     u = g.spawn(unit: :new) { crunch() }  # a unit of its own, on a worker: III.4.13
+#     v = g.spawn(unit: :same) { step() }   # in its spawner's unit: III.4.18
+#     w = g.spawn(in: counts) { |c| c.size } # in a `Unit` (std/unit): III.4.18
 #   end                       # the block cannot be left until every task is done
 #   t.value                   # joins, then answers what the block returned
 #   sleep(ms)                 # Nil | Cancelled
@@ -33,9 +35,10 @@
 # free. Where no answer can carry `Cancelled`, the task stops instead and
 # its defers run (`IyiScheduler.stop_current`).
 #
-# `Share` (III.4.4) gates the block `spawn_parallel` runs, as it gates the
-# block a thread runs; `spawn`'s block shares its thread with its spawner
-# and is not gated (III.4.5). Panics at task boundaries (III.1.4) live at
+# `Share` (III.4.4) gates the block `spawn(unit: :new)` runs, as it gates
+# the block a thread runs; a plain `spawn`'s block runs on the pool only
+# where it would pass the same gate (III.4.15), and shares its spawner's
+# unit otherwise (III.4.5, III.4.18). Panics at task boundaries (III.1.4) live at
 # the bottom of the scheduler: a panicking task drains its defers, tells
 # its group, and dies alone, on whichever thread it ran.
 #
@@ -60,6 +63,7 @@
 # very stack pointer being saved; `@[NoInline]` because an optimised build
 # otherwise inlines the body and the push/ret discipline corrupts the
 # caller — measured, not feared: the release build faulted until it said so.
+@[Unsafe("the scheduler: fiber stacks, context switches and the runtime's C entry points")]
 @[NoInline]
 @[Naked]
 fun __iyi_ctx_swap(current : Pointer(UInt64), target : Pointer(UInt64)) : Nil
@@ -344,14 +348,11 @@ end
   {% elsif flag?(:darwin) %}
     LibC.clock_gettime_nsec_np(4).to_i64
   {% else %}
-    # The timespec in this frame: a heap block here was an allocation
+    # Through the vDSO (`IyiClock`), with the syscall behind it. The
+    # timespec is in that frame: a heap block here was an allocation
     # every time anything read the clock, the scheduler's sleep queue
     # included.
-    spec = uninitialized UInt64[2]
-    words = pointerof(spec).as(Pointer(UInt64))
-    result = __iyi_conc_syscall3(IYI_SYS_CLOCK_GETTIME, 1_i64, words.address.to_i64, 0_i64)
-    raise "clock_gettime failed" if result < 0
-    words[0].to_i64 * 1000000000_i64 + words[1].to_i64
+    IyiClock.monotonic_ns.to_i64
   {% end %}
 end
 
@@ -445,15 +446,17 @@ class IyiFiber
   # task not started yet, which is waiting in the pool. A fiber of no
   # unit never changes it.
   property home : IyiSchedulerState?
-  # Spawned by `spawn_parallel`: started by whichever worker is free.
+  # Spawned on the pool, by `spawn(unit: :new)`, an eligible `spawn` or
+  # `spawn(in:)`: started by whichever worker is free.
   property parallel : Bool
-  # The parallel task this fiber belongs to, itself or the one whose
-  # block spawned it (`IyiUnit`); nil for a fiber that never moves.
+  # The unit this fiber belongs to on the pool (SPEC.md III.4.18): a
+  # parallel task's, its own or the one whose block spawned it, or a
+  # `Unit`'s (std/unit); nil for a fiber that never moves.
   property unit : IyiUnit?
   # Woken onto its home only: a `select` with a timeout arm is in its
   # home's sleep heap while a channel may wake it from any thread, and it
-  # must leave that heap on the thread that owns it. Under the scheduler's
-  # lock, as the select that sets it is.
+  # must leave that heap on the thread that owns it. Set under the locks
+  # of the select's channels, which every waker there reads it under.
   property homebound : Bool
   {% if flag?(:iyi_observe) %} property observe_depth : Int32 = 0 {% end %}
   # A cancel from another thread, waiting in its home's list until that
@@ -480,6 +483,14 @@ class IyiFiber
   # its own id here is never reading an old value: the cancel's question
   # of where a moving fiber waits (`IyiScheduler.cancel`).
   @listed_on : Atomic(UInt64)
+  # The park a waker may end: its nonce while the fiber is parked on a
+  # channel or a word (`IyiScheduler.park`), 0 once a waker has claimed
+  # the wake. Each channel has a lock of its own, and a `select` is in the
+  # queues of several, so two wakers holding two different locks may find
+  # the same park current at once - a send on one arm, a send on another,
+  # a cancel, a timeout - and only the one whose exchange takes the nonce
+  # back to 0 wakes it; the others read it stale (`claim`).
+  @wake_word : Atomic(UInt64)
 
   # The saved stack pointer, meaningful only while suspended.
   @sp : UInt64
@@ -574,6 +585,14 @@ class IyiFiber
   # allocations in crystal-metric's Threadring. Reused only once no
   # queue holds it.
   property spare_waiter : IyiWaiter?
+  {% if flag?(:iyi_chaos) %}
+    # The unit the chaos scheduler counts this fiber in, and whether it
+    # was preempted at a point holding that unit (SPEC.md III.4.17).
+    @chaos_unit : IyiChaosUnit? = nil
+    @chaos_held : Bool = false
+    property chaos_unit : IyiChaosUnit?
+    property chaos_held : Bool
+  {% end %}
 
   # 256 KiB of stack and one guard page under it, so running off the end
   # is a fault at a page rather than a quiet corruption of a neighbour's
@@ -631,6 +650,7 @@ class IyiFiber
     @preempted = false
     @on_cpu = Atomic(UInt64).new(0_u64)
     @listed_on = Atomic(UInt64).new(0_u64)
+    @wake_word = Atomic(UInt64).new(0_u64)
     @sp = 0_u64
     @proc = nil
     @next_run = nil
@@ -702,6 +722,32 @@ class IyiFiber
 
   def listed_on : UInt64
     @listed_on.get
+  end
+
+  # Parked for wake *nonce*: by an exchange, so the `cancelled` its
+  # suspend reads after cannot be answered from before it, and a cancel
+  # either claims this park or is seen by it (`IyiScheduler.suspend`).
+  def wait_for_wake(nonce : UInt64) : Nil
+    @wake_word.swap(nonce)
+  end
+
+  # Whether park *nonce* is still the one this fiber waits in, unclaimed.
+  def waits_for?(nonce : UInt64) : Bool
+    @wake_word.get == nonce
+  end
+
+  # The wake of park *nonce* taken: true for the one waker that takes it.
+  def claim(nonce : UInt64) : Bool
+    @wake_word.compare_and_set(nonce, 0_u64)[1]
+  end
+
+  # The wake of whatever park this fiber is in, for a waker that names no
+  # park - a cancel, a timeout, the deadlock's report: false when it is in
+  # none, or another waker took it first. The read is a read-modify-write,
+  # ordered after the canceller's write of `cancelled`.
+  def claim_any : Bool
+    nonce = @wake_word.add(0_u64)
+    nonce != 0_u64 && claim(nonce)
   end
 
   # The running program's own context: no stack to build, the kernel gave
@@ -892,17 +938,20 @@ class IyiFiber
   end
 end
 
-# A parallel task and every task `spawn` started inside it, at any depth
-# (SPEC.md III.4.13). Those tasks may share the parallel task's
-# non-`Share` locals, as any task and its spawner may, so no two of them
-# may run at the same instant - and each of them parks on one worker and
-# may resume on another. What keeps them apart is this token: a worker
-# holds it from its switch to one of them until it switches to a fiber
-# of another unit or to none, and a fiber whose unit another worker holds
-# waits on the unit's list until that worker lets go, then goes to the
-# run queue of the worker that let go. Taking and giving are an exchange
-# and a store; the list is behind the scheduler's lock, and only a unit
-# with two of its fibers runnable on two workers at once ever uses it.
+# A unit on the pool (SPEC.md III.4.18): a parallel task and every task
+# `spawn` started inside it, at any depth (III.4.13), or every task a
+# `Unit` (std/unit, `IyiGroup::Unit`) was given and the tasks they started,
+# for as long as the `Unit` lives. Those tasks may share non-`Share`
+# values - the parallel task's locals, the `Unit`'s value - as any task
+# and its spawner may, so no two of them may run at the same instant -
+# and each of them parks on one worker and may resume on another. What
+# keeps them apart is this token: a worker holds it from its switch to
+# one of them until it switches to a fiber of another unit or to none,
+# and a fiber whose unit another worker holds waits on the unit's list
+# until that worker lets go, then goes to the run queue of the worker
+# that let go. Taking and giving are an exchange and a store; the list
+# is behind the scheduler's lock, and only a unit with two of its fibers
+# runnable on two workers at once ever uses it.
 class IyiUnit
   # The id of the worker's state holding it, 0 when none does, or
   # `YIELDED` while a fiber of it that gave its worker up at a loop's
@@ -1003,10 +1052,16 @@ class IyiWaiter
     @slot
   end
 
-  # Still the park it was made for: the fiber is channel-parked and has
-  # not parked anywhere newer.
+  # Still the park it was made for: the fiber is parked, has not parked
+  # anywhere newer, and no waker has taken the wake yet.
   def current? : Bool
-    @fiber.state == IyiFiberState::WaitingCh && @fiber.park_nonce == @nonce
+    @fiber.waits_for?(@nonce)
+  end
+
+  # The wake taken for this node's park: true for the one waker that
+  # takes it, which alone readies the fiber (`IyiFiber#claim`).
+  def claim : Bool
+    @fiber.claim(@nonce)
   end
 end
 
@@ -1056,7 +1111,11 @@ class IyiSendNode(T)
   end
 
   def current? : Bool
-    @fiber.state == IyiFiberState::WaitingCh && @fiber.park_nonce == @nonce
+    @fiber.waits_for?(@nonce)
+  end
+
+  def claim : Bool
+    @fiber.claim(@nonce)
   end
 
   # The box is emptied as it is read: the channel keeps this node to park
@@ -1178,6 +1237,13 @@ class IyiSchedulerState
   # Rung by a worker with a fiber for another to run, and looking for it
   # (`IyiWorkers.wake_one`), under the scheduler's lock.
   property spinning : Bool
+  # The worker's hand-offs (`IyiWorkers.push_runnable`): the last fiber
+  # one called an idle worker for, by address; how many more hand-offs
+  # call nobody; and the length of that run, doubled each time the worker
+  # took the fiber it called for itself. The owner's alone.
+  property handoff_last : UInt64
+  property handoff_skip : UInt64
+  property handoff_backoff : UInt64
   # Descriptors another thread closed while a fiber of this one may wait
   # on them, behind the scheduler's lock (`IyiScheduler.wake_closed`).
   property closed_fds : Array(Int32)?
@@ -1186,10 +1252,16 @@ class IyiSchedulerState
   # on Windows an auto-reset event this thread's idle wait names beside
   # the process's completion port (`IyiScheduler.ring`).
   property wake_fd : Int64
-  # Windows: the word that locks this thread's io list and sleep heap,
-  # which another thread that takes one of its fibers' completions off
-  # the process's one port reaches into (`IyiScheduler.lists_lock`).
+  # The word that locks this thread's io list, its descriptors' slots and
+  # its sleep heap, which another thread reaches into: on Windows one
+  # that takes one of its fibers' completions off the process's one port,
+  # and elsewhere a worker taking what waits in the poller of a worker
+  # held by one task (`IyiScheduler.lists_lock`).
   @lists : Atomic(UInt64)
+  # Linux and darwin: the pool's monitor found news in this worker's
+  # poller, which it had not looked at for `POLL_IO_NS` while it ran, and
+  # called an idle worker to take it (`IyiWorkers.take_held_io`).
+  @held_io : Atomic(UInt64)
   # Windows: this thread waited on the port in its last idle wait
   # (`IyiScheduler.take_seat`), or was rung to (`call_sitter`); one that
   # leaves its idle wait to run something calls another to the port.
@@ -1202,9 +1274,10 @@ class IyiSchedulerState
   # The thread's own fiber, the one with no task above it: a deadlock is
   # reported on its stack, whichever fiber's park found it.
   property root : IyiFiber?
-  # Parks counted, and when the poller was last asked without waiting, so
-  # it is asked even while the run queue never empties
-  # (`IyiScheduler.reschedule`).
+  # Parks counted, and when the poller was last asked, so it is asked even
+  # while the run queue never empties (`IyiScheduler.reschedule`), and so
+  # the pool's monitor knows a running worker that has not asked it for a
+  # while (`IyiWorkers.held_io?`).
   property parks : UInt64
   property polled_at : Int64
   # Preemption at loop back-edges (SPEC.md III.4.13, part 9). `switches`
@@ -1259,6 +1332,9 @@ class IyiSchedulerState
     @watch_seen = 0_u64
     @watch_ticks = 0_u64
     @looks = 0_u64
+    @handoff_last = 0_u64
+    @handoff_skip = 0_u64
+    @handoff_backoff = 0_u64
     @io_slots = nil
     @mail = Atomic(UInt64).new(0_u64)
     @idle = false
@@ -1271,6 +1347,7 @@ class IyiSchedulerState
     @spinning = false
     @wake_fd = 0_i64
     @lists = Atomic(UInt64).new(0_u64)
+    @held_io = Atomic(UInt64).new(0_u64)
     @held_seat = false
     @seat_duty = false
     @stdin_posted = false
@@ -1285,6 +1362,18 @@ class IyiSchedulerState
 
   def free_lists : Nil
     @lists.set(0_u64)
+  end
+
+  # The monitor's mark that this worker's poller holds news it has not
+  # taken (`IyiWorkers.held_io?`): true for the look that set it.
+  def mark_held_io : Bool
+    @held_io.get == 0_u64 && @held_io.compare_and_set(0_u64, 1_u64)[1]
+  end
+
+  # The mark taken back by the worker that will take the news: true for
+  # the one that took it.
+  def take_held_io : Bool
+    @held_io.get != 0_u64 && @held_io.compare_and_set(1_u64, 0_u64)[1]
   end
 
   # Whether another thread has handed this one a fiber or a cancel: one
@@ -1349,19 +1438,18 @@ class IyiSchedulerState
   end
 end
 
-# The scheduler's lock (SPEC.md III.4.13): channels, groups, the joiner
-# chains, every thread's inbox and the pool's queues are behind it once a
-# second scheduler thread exists, and before that it is a load and a
-# branch. One lock for all of them, not one per channel: `select` parks
-# on several channels at once and a cancel walks groups whose tasks are on
-# several threads, and one lock has no order to get wrong. A holder never
-# parks a fiber or waits on anything with it held - every park lets go of
-# it before `reschedule` - so what it covers is a few pointer moves.
+# The scheduler's lock (SPEC.md III.4.13): groups, the joiner chains,
+# every thread's inbox and the pool's queues are behind it once a second
+# scheduler thread exists, and before that it is a load and a branch. A
+# holder never parks a fiber or waits on anything with it held - every
+# park lets go of it before `reschedule` - so what it covers is a few
+# pointer moves. Channels and the words `park_on` waits on were behind it
+# too, and are behind locks of their own now (`IyiChanLock`).
 #
 # Not the runtime lock (prelude.iyi), which a collection takes before it
 # stops anything: a collection takes no scheduler lock, so a thread
 # stopped holding this one stops nothing. The order, where both are taken,
-# is this one first.
+# is this one first, and a channel's lock before either.
 class IyiSchedLock
   @@word : UInt64 = 0_u64
   # The state of the thread holding it, so a panic raised inside a
@@ -1373,48 +1461,233 @@ class IyiSchedLock
     Pointer(Atomic(UInt64)).new(pointerof(@@word).address)
   end
 
-  # Read before the exchange, as the runtime lock is, so a spinner does
-  # not take the line for writing on every turn; past 128 turns it gives
-  # its core away, since a holder preempted with the lock is what it waits
-  # for then.
-  @[Effect(:scheduler)]; def self.lock : Nil
+  # The spin a channel's lock spins (`IyiChanLock.acquire`).
+  @[Effect(:scheduler)]
+  def self.lock : Nil
     return unless IyiScheduler.shared?
-    word = self.word
-    spins = 0
-    while true
-      if word.value.get == 0_u64 && word.value.compare_and_set(0_u64, 1_u64)[1]
-        @@holder = IyiScheduler.state_id
-        return
-      end
-      spins = spins &+ 1
-      {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
-        IyiThread.yield_cpu if spins & 127 == 0
-      {% end %}
-      {% if flag?(:x86_64) %}
-        asm("pause" :::: "volatile")
-      {% else %}
-        asm("yield" :::: "volatile")
-      {% end %}
-    end
+    IyiChanLock.acquire(word)
+    @@holder = IyiScheduler.state_id
   end
 
+  # The lock's byte alone, as `IyiChanLock.unlock` lets it go: the word's
+  # second byte is the one spinner's mark, which this must not clear.
   def self.unlock : Nil
     return unless IyiScheduler.shared?
     @@holder = 0_u64
-    word.value.set(0_u64)
+    IyiAtomic.store(word.as(Pointer(UInt8)), 0_u8, :sequentially_consistent, false)
   end
 
   # Whether this thread holds it.
   def self.held_here? : Bool
     return false unless IyiScheduler.shared?
     id = IyiScheduler.state_id
-    id != 0_u64 && word.value.get == 1_u64 && @@holder == id
+    id != 0_u64 && word.value.get & IyiChanLock::HELD != 0_u64 && @@holder == id
   end
 
   # Let go, when this thread holds it: a panic on its way to the task's
   # boundary, which takes the lock itself.
   def self.release_held : Nil
     unlock if held_here?
+  end
+end
+
+# A channel's lock, and each of the lists `park_on` waits in (SPEC.md
+# III.4.13): a word, taken only once a second scheduler thread exists. A
+# channel's queues, its buffer and the nodes parked in them change only
+# under it; what crosses to the scheduler from there - a woken fiber into
+# another thread's inbox, or the pool's shared queue - takes the
+# scheduler's lock inside it, never the other way round. `select` takes
+# the locks of every channel it names, in the order of their addresses,
+# so two selects over the same channels cannot each hold one the other
+# waits for; a plain send or receive holds one lock and waits for none.
+# A fiber parked in several queues at once is woken once, by whichever
+# waker claims its park (`IyiFiber#claim`).
+#
+# It was one lock, the scheduler's, for every channel: a select had no
+# order to get wrong, and the work was a few pointer moves. Measured by
+# bench/chan_scaling.iyi on Linux x86_64, 12 vCPU (shared, load 0.9),
+# release: twelve pairs of tasks, each ping-ponging on two channels of
+# its own, made 1.49 million messages a second where one pair alone made
+# 12.7 million, and 127 of the 144 task stacks gdb sampled were in that
+# lock, spinning or yielding.
+class IyiChanLock
+  # The word's first byte is the lock, and its second marks the one
+  # waiter that spins on it; every other waiter at a channel's lock looks
+  # only every `CHANNEL_WAIT` pauses, Go's spinbit mutex (go1.24,
+  # `lock_spinbit.go`) without its sleep. Every waiter spun on the word,
+  # a pause a look, and a channel many producers sent into was a line
+  # every one of their cores read between each of the holder's writes:
+  # its receiver, the one task all of them waited on, spent 150 of its
+  # 166 samples in this spin on macOS 26.6, M2 Pro, 10 cores (the user's
+  # machine; `sample`, 8 producers). The lock is taken by whoever finds
+  # it free - the spinner, a waiter back from its wait, or a newcomer - so
+  # a thread that lets it go and takes it again, as a receiver draining a
+  # buffer does, keeps its line.
+  #
+  # Read before the exchange, as the runtime lock is, so a spinner does
+  # not take the line for writing on every turn; past
+  # `IyiThread::YIELD_AFTER` turns the spinner gives its core away every
+  # 128th, since a holder preempted with the lock is what it waits for
+  # then, and every other waiter every 8th of its longer turns. The
+  # scheduler's lock spins here too.
+  HELD     =                0x1_u64
+  SPINNER  =              0x100_u64
+  UNMARKED = 0xFFFFFFFFFFFFFEFF_u64
+  # The pauses between a waiter's looks at a channel's lock when another
+  # spins (`Channel#lock`, `lock_all`). An x86-64 `pause` is 19 ns on the
+  # Linux machine (x86_64, 12 vCPU, shared) and 19 to 20 on the Windows
+  # one; the M2's `yield` is under a nanosecond, so an arm64 waiter waits
+  # in `isb`s, 11 to 16 ns each there. In `yield`s its 2,048 were a
+  # look every microsecond, and four producers made 9.6 million values a
+  # second against 30.3 in `isb`s; 1,024 `isb`s made 26.4 and 512 22.8.
+  # The scheduler's lock and `park_on`'s lists take *wait* 1, every
+  # waiter spinning as before: a wait of 2,048 at every lock cut Windows'
+  # twelve-task `mutex` from 26.7 to 17.9 million updates a second, and
+  # the long wait at the scheduler's lock as well lowered fan-in on the
+  # Windows machine and the M2.
+  #
+  # bench/chan_scaling.iyi's `fanin`, W producers into one channel of 128,
+  # millions of values a second at W = 2/4/8/12 (10 on the M2), before
+  # this, with it, and Go's twin (go 1.25), best of interleaved runs:
+  #
+  #   Linux x86_64, 12 vCPU, shared,    22.7/16.1/9.0/9.4, 58.2/39.9/25.3/30.2,
+  #     of 9                            Go 36.4/30.3/23.4/26.0
+  #   Windows 11, 12 logical processors 14.7/18.4/10.7/6.6, 43.4/34.7/27.0/28.5,
+  #     (the user's machine), of 7      Go 17.5/15.7/14.7/12.9
+  #   macOS 26.6, M2 Pro, 10 cores      19.8/4.1/4.5/4.3, 53.5/30.4/19.7/18.6,
+  #     (the user's machine), of 7      Go 20.5/13.8/9.1/8.1
+  CHANNEL_WAIT = {% if flag?(:x86_64) %}512{% else %}2048{% end %}
+
+  @[Effect(:scheduler)]
+  def self.acquire(word : Pointer(Atomic(UInt64)), wait : Int32 = 1) : Nil
+    seen = word.value.get
+    return if seen & HELD == 0_u64 && word.value.compare_and_set(seen, seen | HELD)[1]
+    contend(word, wait)
+  end
+
+  @[Effect(:scheduler)]
+  private def self.contend(word : Pointer(Atomic(UInt64)), wait : Int32) : Nil
+    turns = 0
+    spinner = false
+    while true
+      seen = word.value.get
+      if seen & HELD == 0_u64
+        # The spinner takes its mark down with the lock.
+        taken = spinner ? (seen | HELD) & UNMARKED : seen | HELD
+        return if word.value.compare_and_set(seen, taken)[1]
+        next
+      end
+      if wait > 1 && !spinner && seen & SPINNER == 0_u64
+        spinner = word.value.compare_and_set(seen, seen | SPINNER)[1]
+      end
+      turns = turns &+ 1
+      pauses = 1
+      if spinner || wait == 1
+        {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+          IyiThread.yield_cpu if turns & 127 == 0 && turns >= IyiThread::YIELD_AFTER
+        {% end %}
+      else
+        {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+          IyiThread.yield_cpu if turns & 7 == 0
+        {% end %}
+        pauses = wait
+      end
+      while pauses > 0
+        {% if flag?(:x86_64) %}
+          asm("pause" :::: "volatile")
+        {% else %}
+          if spinner || wait == 1
+            asm("yield" :::: "volatile")
+          else
+            asm("isb" :::: "volatile")
+          end
+        {% end %}
+        pauses = pauses &- 1
+      end
+    end
+  end
+
+  @[Effect(:scheduler)]
+  def self.lock(word : Pointer(Atomic(UInt64)), wait : Int32 = 1) : Nil
+    acquire(word, wait) if IyiScheduler.shared?
+  end
+
+  # A release store, not the sequentially consistent one an `Atomic`'s
+  # `set` is: on x86_64 that is an exchange, a full barrier, which a
+  # lock's release does not need - what the holder wrote is ordered
+  # before the store either way, and the next holder's exchange orders
+  # it after. Twice a message, it was what made one pair on one worker
+  # slower than under the scheduler's lock: bench/chan_scaling.iyi
+  # `1 400000 pingpong`, best of 6 interleaved on Linux x86_64 (12 vCPU,
+  # shared), made 13.6 million messages a second with the exchange,
+  # 15.5 million with this, and 14.9 million on the scheduler's lock.
+  # On aarch64 the two are the same `stlr`.
+  @[Effect(:scheduler)]
+  def self.unlock(word : Pointer(Atomic(UInt64))) : Nil
+    release(word) if IyiScheduler.shared?
+  end
+
+  # The lock's byte alone: the spinner's mark beside it stays.
+  private def self.release(word : Pointer(Atomic(UInt64))) : Nil
+    IyiAtomic.store(word.as(Pointer(UInt8)), 0_u8, :release, false)
+  end
+
+  # The lock word of each of a select's arms, in the arms' order, on the
+  # caller's stack (`Channel.select`).
+  def self.words(actions : U) forall U
+    {% begin %}
+      words = uninitialized UInt64[{{ U.size }}]
+      at = pointerof(words).as(Pointer(UInt64))
+      {% for i in 0...U.size %}
+        at[{{ i }}] = actions[{{ i }}].lock_address
+      {% end %}
+      words
+    {% end %}
+  end
+
+  # The lock words a select names, by address: sorted in place, 0 (a
+  # timeout arm's) and repeats (two arms on one channel) left out, and the
+  # count kept answered. A select has a handful of arms, so an insertion.
+  def self.order(words : Pointer(UInt64), count : Int32) : Int32
+    kept = 0
+    index = 0
+    while index < count
+      word = words[index]
+      index = index + 1
+      next if word == 0_u64
+      at = kept
+      while at > 0 && words[at - 1] > word
+        at = at - 1
+      end
+      next if at > 0 && words[at - 1] == word
+      move = kept
+      while move > at
+        words[move] = words[move - 1]
+        move = move - 1
+      end
+      words[at] = word
+      kept = kept + 1
+    end
+    kept
+  end
+
+  # Every word *order* kept, lowest address first.
+  def self.lock_all(words : Pointer(UInt64), count : Int32) : Nil
+    return unless IyiScheduler.shared?
+    index = 0
+    while index < count
+      acquire(Pointer(Atomic(UInt64)).new(words[index]), CHANNEL_WAIT)
+      index = index + 1
+    end
+  end
+
+  def self.unlock_all(words : Pointer(UInt64), count : Int32) : Nil
+    return unless IyiScheduler.shared?
+    index = 0
+    while index < count
+      release(Pointer(Atomic(UInt64)).new(words[index]))
+      index = index + 1
+    end
   end
 end
 
@@ -1449,6 +1722,20 @@ class IyiScheduler
     @@shared
   end
 
+  # Scheduler threads waiting in their poller with nothing to run - pool
+  # workers (`idle_worker`) and threads outside the pool (`wait_shared`)
+  # alike - behind the scheduler's lock, as each thread's `idle` is. A
+  # thread so counted holds no core, which is what the mark beside the
+  # program reads to size its helpers on Windows (`IyiMark.start_concurrent`).
+  @@waiting : Int64 = 0_i64
+
+  # The count, read without the lock: the mark reads it with every other
+  # thread stopped.
+  def self.waiting_threads : UInt64
+    waiting = @@waiting
+    waiting > 0_i64 ? waiting.to_u64 : 0_u64
+  end
+
   # This thread's state, by its object id, or 0 before it has one; read
   # without making it, for the lock's own bookkeeping.
   def self.state_id : UInt64
@@ -1460,12 +1747,28 @@ class IyiScheduler
   # exists: the starter's own state made first, so a deadlock walk never
   # takes a thread that has not touched the scheduler for one that is
   # idle, and the new thread counted as coming until it has its own.
+  # The lists `park_on` waits in are made here too, before the second
+  # thread exists, so every other thread finds them made.
   def self.expect_thread : Nil
-    state
+    here = state
+    # The first thread started is started from the program's first: the
+    # main thread's state, which a `Unit` held to one worker runs its
+    # tasks on (`main_state`).
+    @@main_state = here unless @@shared
     @@shared = true
+    make_lot
     IyiSchedLock.lock
     @@coming = @@coming + 1_i64
     IyiSchedLock.unlock
+  end
+
+  @@main_state : IyiSchedulerState?
+
+  # The main thread's state: this thread's while no other has started.
+  def self.main_state : IyiSchedulerState
+    main = @@main_state
+    return main if main.is_a?(IyiSchedulerState)
+    state
   end
 
   # The new thread's first act: its state, made, and its count as coming
@@ -1793,13 +2096,41 @@ class IyiScheduler
 
   # A channel park: the nonce that distinguishes this suspension from
   # every earlier one, so a queue node a cancellation left behind is
-  # skipped by arithmetic rather than unlinked by hand. `select` parks
-  # once and stamps every arm's node with the one nonce.
+  # skipped by arithmetic rather than unlinked by hand. The nonce is the
+  # fiber's wake word from here until a waker claims it.
   def self.park(fiber : IyiFiber) : UInt64
+    nonce = parking(fiber)
+    fiber.wait_for_wake(nonce)
+    nonce
+  end
+
+  # The nonce alone, its wake word not set yet: `select` stamps every
+  # arm's node with it and sets the word once every arm has parked, since
+  # a cancel claims a park by its word alone, under no channel's lock,
+  # and one that came between the word and the timeout arm's `homebound`
+  # would ready the select onto another worker while it put itself in
+  # this thread's sleep heap.
+  def self.parking(fiber : IyiFiber) : UInt64
     nonce = fiber.park_nonce + 1
     fiber.park_nonce = nonce
     fiber.state = IyiFiberState::WaitingCh
     nonce
+  end
+
+  # The park *nonce* waited out, its lock let go: `reschedule`, unless the
+  # fiber was cancelled and takes the wake itself. Its park was looked at
+  # under a channel's lock and a cancel is made under the scheduler's, so
+  # a cancel that came after the look and before the wake word was set
+  # found nothing to claim (`IyiFiber#claim_any`); the word is set by an
+  # exchange and the flag read after it, so this sees that cancel. A
+  # cancel that claimed the wake has readied the fiber, and the
+  # `reschedule` takes that.
+  def self.suspend(fiber : IyiFiber, nonce : UInt64) : Nil
+    if fiber.cancelled && fiber.claim(nonce)
+      fiber.state = IyiFiberState::Running
+      return
+    end
+    reschedule
   end
 
   # Zero the value *slot* holds, once a channel has handed it out, so the
@@ -1859,9 +2190,10 @@ class IyiScheduler
   # it goes to the pool's shared queue and an idle worker is called. Any
   # other fiber goes back to its home: into its run queue there, or from
   # another thread into its inbox, and that thread is rung if it waits in
-  # its poller. Under the scheduler's lock, which every peer wait is
-  # behind.
-  def self.ready(fiber : IyiFiber) : Nil
+  # its poller. *held* says the caller holds the scheduler's lock; a
+  # channel's waker does not, and the lock is taken here only for an
+  # inbox or the shared queue.
+  def self.ready(fiber : IyiFiber, held : Bool = true) : Nil
     home = fiber.home
     if !@@shared || !home.is_a?(IyiSchedulerState)
       enqueue(fiber)
@@ -1873,7 +2205,9 @@ class IyiScheduler
         if me.worker
           enqueue(fiber)
         else
+          IyiSchedLock.lock unless held
           IyiWorkers.push_shared(fiber)
+          IyiSchedLock.unlock unless held
         end
         return
       end
@@ -1882,7 +2216,9 @@ class IyiScheduler
       enqueue(fiber)
       return
     end
+    IyiSchedLock.lock unless held
     send_home(home, fiber)
+    IyiSchedLock.unlock unless held
   end
 
   # *fiber*, runnable, into the inbox of *home*, another thread, which is
@@ -2010,7 +2346,7 @@ class IyiScheduler
     closed = st.closed_fds
     if closed.is_a?(Array(Int32))
       st.closed_fds = nil
-      closed.each { |fd| wake_io(fd, 5) }
+      closed.each { |fd| wake_io(st, fd, 5) }
     end
     {% if flag?(:win32) %}
       if st.stdin_posted
@@ -2054,6 +2390,7 @@ class IyiScheduler
       deadlock_found
       return
     end
+    @@waiting = @@waiting + 1_i64
     IyiSchedLock.unlock
     wait_for_events(true)
   end
@@ -2066,6 +2403,23 @@ class IyiScheduler
   # push, and this one reads the queues after its count, so one of the
   # two sees the other (`IyiWorkers.wake_one`). A deadlock it finds is
   # rung to a thread outside the pool to name.
+  #
+  # A worker out looking gives its token back here, after its count and
+  # before that last look, as Go's `findRunnable` drops `nmspinning` only
+  # after `pidleput` and then looks again. A push puts its task down
+  # before it reads the count and the token, and calls nobody when it
+  # finds the token taken, so whoever holds the token must look after
+  # it: a worker before its look finds the task and calls the next
+  # (`IyiWorkers.stop_spinning`), and one between an empty look and its
+  # count still holds the token, gives it back only after the count, and
+  # finds the task in the look after that. And a push that finds none
+  # idle and the token free starts a worker (`IyiWorkers.grow`), so none
+  # may stand between its empty look and its count with the token given
+  # back: given back first, the one spawn of `bench/spawn_eligible.sh`'s
+  # `grows`, landing there on a darwin CI runner (run 42187717533),
+  # started a second worker for its one task. A worker whose last look
+  # finds work takes a token again (`IyiWorkers.spin_again`), so that its
+  # find calls the next: the pushes that saw it holding one called nobody.
   def self.idle_worker(st : IyiSchedulerState) : Nil
     {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
       ensure_doorbell(st)
@@ -2079,11 +2433,16 @@ class IyiScheduler
         quiet = quiet && st.stdin_waiter.is_a?(Nil)
       {% end %}
       st.idle = true
+      st.handoff_skip = 0_u64
+      st.handoff_backoff = 0_u64
       st.quiet = quiet
       IyiWorkers.count_idle(1_i64)
+      looking = st.spinning
+      IyiWorkers.stop_spinning(st, false)
       if IyiWorkers.work_waiting?
         st.idle = false
         IyiWorkers.count_idle(-1_i64)
+        IyiWorkers.spin_again(st) if looking
         IyiSchedLock.unlock
         return
       end
@@ -2093,6 +2452,7 @@ class IyiScheduler
         {% end %}
         ring_reporter
       end
+      @@waiting = @@waiting + 1_i64
       IyiSchedLock.unlock
       wait_for_events(true)
     {% end %}
@@ -2106,6 +2466,7 @@ class IyiScheduler
   # elsewhere once it has taken its events.
   def self.end_idle(st : IyiSchedulerState) : Nil
     IyiSchedLock.lock
+    @@waiting = @@waiting - 1_i64 if st.idle
     st.idle = false
     st.notified = false
     nudge = false
@@ -2125,7 +2486,10 @@ class IyiScheduler
   # and no mail, and nothing on its way. Lock held. On Windows a thread's
   # lists are looked at as well as what it said when it went idle: another
   # thread may have taken its last io waiter's completion since
-  # (`complete_packet`).
+  # (`complete_packet`). Elsewhere what it said is read alone, since its
+  # wait takes its own news while it is still idle (`wait_for_events`);
+  # a worker that empties an idle one's lists from its poller rings it,
+  # to say again (`take_held`).
   #
   # That reading needs an idle thread to take nothing itself, and on
   # Windows its wait marks it busy before it does (`end_idle`): what it
@@ -2253,7 +2617,11 @@ class IyiScheduler
     end
     while true
       take_mail(st) if st.mail?
-      fiber = dequeue(st)
+      {% if flag?(:iyi_chaos) %}
+        fiber = IyiChaos.pick(st)
+      {% else %}
+        fiber = dequeue(st)
+      {% end %}
       if fiber.is_a?(IyiFiber)
         {% if flag?(:win32) %}
           left_idle(st)
@@ -2273,14 +2641,16 @@ class IyiScheduler
   # its mail, then the fibers only it may run (`homebound`), then its own
   # ring, then the queues behind the lock - fibers a thread outside the
   # pool woke, the unstarted tasks its own tasks spawned, the pool's
-  # injection queue - then on Windows the process's port, then half of
-  # another worker's ring, then another worker's unstarted task - then a
-  # task preempted at a loop's back-edge (`IyiWorkers.preempted`), last,
-  # since it has had a quantum and every other one is waiting for its
-  # first; every `PREEMPTED_TURN`th look takes one first, so a stream of
-  # short tasks cannot keep it waiting for ever, Go's `schedtick % 61` for
-  # its global queue. A fiber of a unit another worker holds is left on
-  # that unit's list (`take_unit`) and the look goes on.
+  # injection queue - then on Windows the process's port, and elsewhere
+  # the news the pool's monitor found in a running worker's poller
+  # (`IyiWorkers.take_held_io`), then half of another worker's ring, then
+  # another worker's unstarted task - then a task preempted at a loop's
+  # back-edge (`IyiWorkers.preempted`), last, since it has had a quantum
+  # and every other one is waiting for its first; every
+  # `PREEMPTED_TURN`th look takes one first, so a stream of short tasks
+  # cannot keep it waiting for ever, Go's `schedtick % 61` for its global
+  # queue. A fiber of a unit another worker holds is left on that unit's
+  # list (`take_unit`) and the look goes on.
   PREEMPTED_TURN = 61_u64
 
   def self.worker_next(st : IyiSchedulerState) : IyiFiber?
@@ -2295,6 +2665,11 @@ class IyiScheduler
         fiber = IyiWorkers.take_queued(st) unless fiber.is_a?(IyiFiber)
         {% if flag?(:win32) %}
           if !fiber.is_a?(IyiFiber) && take_port(st)
+            fiber = dequeue(st)
+            fiber = IyiWorkers.pop(st) unless fiber.is_a?(IyiFiber)
+          end
+        {% else %}
+          if !fiber.is_a?(IyiFiber) && IyiWorkers.take_held_io(st)
             fiber = dequeue(st)
             fiber = IyiWorkers.pop(st) unless fiber.is_a?(IyiFiber)
           end
@@ -2476,7 +2851,7 @@ class IyiScheduler
         spins = 0
         while fiber.on_cpu?
           spins = spins &+ 1
-          IyiThread.yield_cpu if spins & 127 == 0
+          IyiThread.yield_cpu if spins & 127 == 0 && spins >= IyiThread::YIELD_AFTER
           IyiThread.spin_pause
         end
         fiber.on_cpu = true
@@ -2930,13 +3305,27 @@ class IyiScheduler
   # closed under a waiter here (`wake_closed`) may be this very number
   # again by now, opened since, and the old waiter has to leave its slot
   # before a new one takes it, or the new one is refused as a second.
-  @[Effect(:scheduler)]; def self.wait_posix(fd : Int32, direction : Int32, ms : Int32) : Nil | Cancelled
+  #
+  # The check, the poller's change, the list, the deadline and the
+  # listing are one step under this thread's lists lock, which a worker
+  # taking this one's news holds to take the waiter off them all
+  # (`take_held`): a change made outside it could narrow the fd's
+  # registration to the other direction after that worker's change
+  # widened it, or the other way round.
+  @[Effect(:scheduler)]
+  def self.wait_posix(fd : Int32, direction : Int32, ms : Int32) : Nil | Cancelled
     fiber = current
     return Cancelled.new if fiber.cancelled
     st = state
     take_mail(st) if st.mail?
-    others = io_interest(fd)
-    raise "two fibers #{direction == 1 ? "reading" : "writing"} one fd" if others & direction != 0
+    poller = pollfd
+    io_room(st, fd)
+    lists_lock(st)
+    others = io_interest(st, fd)
+    if others & direction != 0
+      lists_unlock(st)
+      raise "two fibers #{direction == 1 ? "reading" : "writing"} one fd"
+    end
 
     {% if flag?(:darwin) %}
       # EV_ADD on the direction's own filter, keyed by the fd itself:
@@ -2947,36 +3336,61 @@ class IyiScheduler
       # epoll's -EPERM below: ready now instead of dying, or a program
       # whose stdin is `< /dev/null` panics on its first wait.
       change = __iyi_kevent_change(fd, direction == 1 ? 0x1FFFF_u64 : 0x1FFFE_u64)
-      added = LibC.kevent(pollfd.to_i32, pointerof(change).as(Void*), 1,
+      added = LibC.kevent(poller.to_i32, pointerof(change).as(Void*), 1,
         Pointer(Void).new(0_u64), 0, Pointer(Void).new(0_u64)).to_i64
-      return nil if added < 0 && LibC.error_location.value == 22
-      raise "kevent add failed" if added < 0
+      if added < 0
+        lists_unlock(st)
+        return nil if LibC.error_location.value == 22
+        raise "kevent add failed"
+      end
     {% else %}
       # EPOLL_CTL_ADD (1) for the fd's first waiter, EPOLL_CTL_MOD (3) to
       # add a direction to one already there; the data is the fd itself.
-      event = Pointer(UInt8).malloc(16_u64)
-      event.as(Pointer(UInt64)).value = (others | direction).to_u64
-      Pointer(UInt64).new(event.address + IYI_POLL_DATA_OFFSET).value = fd.to_u64
-      added = __iyi_conc_syscall6(IYI_SYS_EPOLL_CTL, pollfd, others == 0 ? 1_i64 : 3_i64, fd.to_i64, event.address.to_i64, 0_i64, 0_i64)
+      added = io_control(poller, others == 0 ? 1_i64 : 3_i64, fd, others | direction)
       # -EPERM is epoll saying the fd is a regular file. A file never
       # blocks, which is exactly "ready now": answer it instead of dying,
       # or a program whose stdin is `< file` panics on its first wait.
-      return nil if added == -1_i64
-      raise "epoll_ctl add failed" if added < 0
+      if added < 0
+        lists_unlock(st)
+        return nil if added == -1_i64
+        raise "epoll_ctl add failed"
+      end
     {% end %}
 
     fiber.wait_fd = fd
     fiber.wait_dir = direction
     fiber.state = IyiFiberState::WaitingIo
-    io_link(fiber)
+    io_link(st, fiber)
     arm_deadline(fiber, ms)
     # Said like a sleep's, so a cancel from another thread finds the
-    # poller this waiter is in (`cancel_moving`).
-    listed(fiber)
+    # poller this waiter is in (`cancel_moving`); the cancel's flag is
+    # read after the lock, as `listed` reads it.
+    fiber.waiting_out = false
+    moving = @@shared && fiber.unit.is_a?(IyiUnit)
+    fiber.list_on(st.object_id) if moving
+    lists_unlock(st)
+    cancel_wait(fiber) if moving && fiber.cancelled
     reschedule
     return Cancelled.new if fiber.cancelled
     nil
   end
+
+  {% unless flag?(:win32) %}
+    # One `epoll_ctl` *op* on *fd* in *poller*, for the directions *mask*
+    # (EPOLLIN 1, EPOLLOUT 4) with the fd itself as the data, answering
+    # the raw call's result. The event is in this frame: it was a 16-byte
+    # heap block at every io wait and every narrowing, and a lists lock
+    # is held around both.
+    @[Effect(:scheduler)]
+    def self.io_control(poller : Int64, op : Int64, fd : Int32, mask : Int32) : Int64
+      event = uninitialized UInt64[2]
+      words = pointerof(event).as(Pointer(UInt64))
+      words[0] = mask.to_u64
+      words[1] = 0_u64
+      Pointer(UInt64).new(words.address + IYI_POLL_DATA_OFFSET).value = fd.to_u64
+      __iyi_conc_syscall6(IYI_SYS_EPOLL_CTL, poller, op, fd.to_i64, words.address.to_i64, 0_i64, 0_i64)
+    end
+  {% end %}
 
   # An io wait's deadline, *ms* milliseconds from now, or none for -1. The
   # fiber goes into the sleep list beside the io list; `timed_out` starts
@@ -3008,71 +3422,89 @@ class IyiScheduler
     heap_remove(st, fiber)
   end
 
-  # The directions fibers are waiting in on *fd*, as epoll bits: its two
-  # slots, where it had been a walk of every fiber waiting on any fd.
-  def self.io_interest(fd : Int32) : Int32
-    (io_slot(fd, 1).is_a?(IyiFiber) ? 1 : 0) | (io_slot(fd, 4).is_a?(IyiFiber) ? 4 : 0)
+  # The directions fibers are waiting in on *fd* in *st*'s poller, as
+  # epoll bits: its two slots, where it had been a walk of every fiber
+  # waiting on any fd. *st*'s lists lock held, as for everything below
+  # that reads or changes its io list and slots: a worker taking a held
+  # worker's news changes them from another thread (`take_held`).
+  def self.io_interest(st : IyiSchedulerState, fd : Int32) : Int32
+    (io_slot(st, fd, 1).is_a?(IyiFiber) ? 1 : 0) | (io_slot(st, fd, 4).is_a?(IyiFiber) ? 4 : 0)
   end
 
   # The fiber waiting on *fd* in *direction* (1 to read, 4 to write).
-  def self.io_slot(fd : Int32, direction : Int32) : IyiFiber?
-    slots = state.io_slots
+  def self.io_slot(st : IyiSchedulerState, fd : Int32, direction : Int32) : IyiFiber?
+    slots = st.io_slots
     return nil if slots.is_a?(Nil)
     index = fd * 2 + (direction == 1 ? 0 : 1)
     index < slots.size ? slots[index] : nil
   end
 
-  # Onto the io list and into its fd's slot. The list is what says that
-  # anything waits on io at all; the slots are how an event, a second
-  # waiter's check and a cancellation find a waiter. Each of those walked
-  # the list, so every read on a server paid for every connection parked
-  # beside it: a round trip over a pipe took 41 us with 4,000 idle
-  # readers parked, against 2 us with none.
-  def self.io_link(fiber : IyiFiber) : Nil
-    st = state
+  # Onto the io list and into its fd's slot, which `io_room` made. The
+  # list is what says that anything waits on io at all; the slots are how
+  # an event, a second waiter's check and a cancellation find a waiter.
+  # Each of those walked the list, so every read on a server paid for
+  # every connection parked beside it: a round trip over a pipe took 41
+  # us with 4,000 idle readers parked, against 2 us with none.
+  def self.io_link(st : IyiSchedulerState, fiber : IyiFiber) : Nil
     head = st.io_head
     fiber.next_io = head
     fiber.prev_io = nil
     head.prev_io = fiber if head.is_a?(IyiFiber)
     st.io_head = fiber
-    slots = st.io_slots
-    if slots.is_a?(Nil)
-      slots = [] of IyiFiber?
-      st.io_slots = slots
-    end
     index = fiber.wait_fd * 2 + (fiber.wait_dir == 1 ? 0 : 1)
-    while slots.size <= index
-      slots << nil
-    end
-    slots[index] = fiber
+    slots = st.io_slots
+    slots[index] = fiber if slots.is_a?(Array(IyiFiber?))
     io_owner(index, st.object_id) if @@shared
   end
 
-  # Off the io list and out of its slot; false when it was on neither.
-  def self.io_unlink(fiber : IyiFiber) : Bool
-    st = state
+  # Room for *fd*'s two slots in *st*'s, made by its own thread before it
+  # takes its lists lock to wait: a bigger array is allocated out here
+  # and copied and swapped in under the lock, where another worker may be
+  # reading the slots (`take_held`) and nothing allocates. The owners'
+  # table's chunk for *fd* is mapped here too, for the same reason.
+  def self.io_room(st : IyiSchedulerState, fd : Int32) : Nil
+    need = fd * 2 + 2
+    io_owner_room(fd * 2) if @@shared
+    slots = st.io_slots
+    size = slots.is_a?(Array(IyiFiber?)) ? slots.size : 0
+    return if size >= need
+    grown = Array(IyiFiber?).new(need > size * 2 ? need : size * 2, nil)
+    lists_lock(st)
+    if slots.is_a?(Array(IyiFiber?))
+      index = 0
+      while index < size
+        grown[index] = slots[index]
+        index = index + 1
+      end
+    end
+    st.io_slots = grown
+    lists_unlock(st)
+  end
+
+  # Off *st*'s io list and out of its slot; false when it was on neither.
+  # A fiber is on the list exactly while its slot holds it, and the slot
+  # is what is asked: a cancel posted to a thread the fiber has left may
+  # come while it waits on another's list, whose links its `prev_io` and
+  # `next_io` are.
+  def self.io_unlink(st : IyiSchedulerState, fiber : IyiFiber) : Bool
+    slots = st.io_slots
+    return false unless slots.is_a?(Array(IyiFiber?))
+    index = fiber.wait_fd * 2 + (fiber.wait_dir == 1 ? 0 : 1)
+    return false unless index >= 0 && index < slots.size
+    held = slots[index]
+    return false unless held.is_a?(IyiFiber) && held.object_id == fiber.object_id
+    slots[index] = nil
+    io_owner_clear(index, st.object_id) if @@shared
     before = fiber.prev_io
     after = fiber.next_io
-    head = st.io_head
     if before.is_a?(IyiFiber)
       before.next_io = after
-    elsif head.is_a?(IyiFiber) && head.object_id == fiber.object_id
-      st.io_head = after
     else
-      return false
+      st.io_head = after
     end
     after.prev_io = before if after.is_a?(IyiFiber)
     fiber.next_io = nil
     fiber.prev_io = nil
-    slots = st.io_slots
-    index = fiber.wait_fd * 2 + (fiber.wait_dir == 1 ? 0 : 1)
-    if slots.is_a?(Array(IyiFiber?)) && index >= 0 && index < slots.size
-      held = slots[index]
-      if held.is_a?(IyiFiber) && held.object_id == fiber.object_id
-        slots[index] = nil
-        io_owner_clear(index, st.object_id) if @@shared
-      end
-    end
     true
   end
 
@@ -3092,6 +3524,11 @@ class IyiScheduler
     chunk = io_chunk(pointerof(@@io_owners), index, id != 0_u64)
     return if chunk == 0_u64
     Pointer(UInt64).new(chunk &+ (index.to_u64 % IO_CHUNK) &* 8_u64).value = id
+  end
+
+  # The chunk for slot *index*, mapped now if it is not (`io_room`).
+  def self.io_owner_room(index : Int32) : Nil
+    io_chunk(pointerof(@@io_owners), index, true)
   end
 
   def self.io_owner_of(index : Int32) : UInt64
@@ -3231,9 +3668,11 @@ class IyiScheduler
   # says it holds the fiber (`IyiFiber#listed_on`), read after the flag
   # by a read-modify-write: a fiber parking there says so the same way
   # before it reads the flag (`listed`), so either this sees the thread
-  # or that park sees the flag and ends itself. Lock held.
+  # or that park sees the flag and ends itself. A channel park is ended
+  # by claiming its wake (`IyiFiber#claim_any`), and one that is not set
+  # yet sees the flag as it suspends. Lock held.
   def self.cancel_moving(fiber : IyiFiber) : Nil
-    if fiber.state == IyiFiberState::WaitingCh
+    if fiber.claim_any
       ready(fiber)
       return
     end
@@ -3276,8 +3715,8 @@ class IyiScheduler
   #
   # A futex for fibers, which is what std/mutex and a thread's join wait
   # with: `park_on` parks the calling task while *word* still holds
-  # *seen*, looked at under the scheduler's lock, and `wake_on` readies up
-  # to *count* tasks parked on that word, from any thread. A word changed
+  # *seen*, looked at under its list's lock, and `wake_on` readies up to
+  # *count* tasks parked on that word, from any thread. A word changed
   # and then woken is never missed: the change comes before the wake's
   # lock, and the look is under it. The parked task is a peer wait like a
   # channel's - its thread runs other tasks meanwhile, a worker steals,
@@ -3286,28 +3725,29 @@ class IyiScheduler
   # is over, as a channel's is. A park that is not *cancellable* - a
   # thread's join, which has no `Cancelled` to answer - is woken by a
   # cancel like any and answers nil; its caller looks at the word again.
-  LOT = 64
+  #
+  # Each list has a lock of its own (`IyiChanLock`), on a cache line of
+  # its own, where every list was behind the scheduler's lock: two
+  # mutexes on two cores contended for it whenever either parked.
+  LOT        = 64
+  LOT_STRIDE =  8
   @@lot_heads : Array(IyiWaiter?)?
   @@lot_tails : Array(IyiWaiter?)?
+  @@lot_locks : Pointer(UInt64) = Pointer(UInt64).new(0_u64)
 
   def self.park_on(word : Pointer(Atomic(UInt64)), seen : UInt64, cancellable : Bool = true) : Nil | Cancelled
     fiber = current
-    IyiSchedLock.lock
-    if cancellable && fiber.cancelled
-      IyiSchedLock.unlock
-      return Cancelled.new
-    end
-    if word.value.get != seen
-      IyiSchedLock.unlock
-      return nil
-    end
+    return Cancelled.new if cancellable && fiber.cancelled
+    make_lot
     heads = @@lot_heads
     tails = @@lot_tails
-    unless heads.is_a?(Array(IyiWaiter?)) && tails.is_a?(Array(IyiWaiter?))
-      heads = Array(IyiWaiter?).new(LOT, nil)
-      tails = Array(IyiWaiter?).new(LOT, nil)
-      @@lot_heads = heads
-      @@lot_tails = tails
+    return nil unless heads.is_a?(Array(IyiWaiter?)) && tails.is_a?(Array(IyiWaiter?))
+    bucket = lot_bucket(word.address)
+    lock = lot_lock(bucket)
+    IyiChanLock.lock(lock)
+    if word.value.get != seen
+      IyiChanLock.unlock(lock)
+      return nil
     end
     nonce = park(fiber)
     waiter = fiber.spare_waiter
@@ -3317,7 +3757,6 @@ class IyiScheduler
       waiter = IyiWaiter.new(fiber, nonce, word.address)
       fiber.spare_waiter = waiter
     end
-    bucket = lot_bucket(word.address)
     waiter.linked = true
     tail = tails[bucket]
     waiter.prev_node = tail
@@ -3327,42 +3766,81 @@ class IyiScheduler
       heads[bucket] = waiter
     end
     tails[bucket] = waiter
-    IyiSchedLock.unlock
-    reschedule
-    IyiSchedLock.lock
+    IyiChanLock.unlock(lock)
+    if cancellable
+      suspend(fiber, nonce)
+    else
+      reschedule
+    end
+    IyiChanLock.lock(lock)
     lot_unlink(heads, tails, bucket, waiter)
-    IyiSchedLock.unlock
+    IyiChanLock.unlock(lock)
     return Cancelled.new if cancellable && fiber.cancelled
     nil
   end
 
-  # The lists are read under the lock: read before it, a first `park_on`
-  # that had looked at the word and not yet made them left this wake
-  # nothing to walk, and parked for good.
+  # The lists exist once a second thread does (`expect_thread`); with one
+  # thread and none made, nothing has parked. The fibers whose wakes are
+  # claimed are chained through their run links, which a parked fiber
+  # does not use, and readied once the list's lock is let go, as a
+  # channel's are (`Channel#take_woken`).
   def self.wake_on(word : Pointer(Atomic(UInt64)), count : Int32) : Nil
-    IyiSchedLock.lock
+    {% if flag?(:iyi_chaos) %}
+      return chaos_wake_on(word, count) if IyiChaos.chooses_wakes?
+    {% end %}
     heads = @@lot_heads
     tails = @@lot_tails
-    unless heads.is_a?(Array(IyiWaiter?)) && tails.is_a?(Array(IyiWaiter?))
-      IyiSchedLock.unlock
-      return
-    end
+    return unless heads.is_a?(Array(IyiWaiter?)) && tails.is_a?(Array(IyiWaiter?))
     bucket = lot_bucket(word.address)
+    lock = lot_lock(bucket)
+    IyiChanLock.lock(lock)
     woken = 0
+    chain : IyiFiber? = nil
+    last : IyiFiber? = nil
     node = heads[bucket]
     while node.is_a?(IyiWaiter) && woken < count
       following = node.next_node
       if node.slot == word.address
         lot_unlink(heads, tails, bucket, node)
-        if node.current?
-          node.handed = true
-          ready(node.fiber)
+        if node.claim
+          fiber = node.fiber
+          fiber.next_run = nil
+          if last.is_a?(IyiFiber)
+            last.next_run = fiber
+          else
+            chain = fiber
+          end
+          last = fiber
           woken = woken + 1
         end
       end
       node = following
     end
-    IyiSchedLock.unlock
+    IyiChanLock.unlock(lock)
+    while chain.is_a?(IyiFiber)
+      following = chain.next_run
+      ready(chain, false)
+      chain = following
+    end
+  end
+
+  # Made by the first park on a program's one thread, or before the
+  # second thread starts (`expect_thread`): never by two threads at once.
+  private def self.make_lot : Nil
+    return if @@lot_heads.is_a?(Array(IyiWaiter?))
+    locks = Pointer(UInt64).malloc((LOT * LOT_STRIDE).to_u64)
+    index = 0
+    while index < LOT * LOT_STRIDE
+      locks[index] = 0_u64
+      index = index + 1
+    end
+    @@lot_locks = locks
+    @@lot_tails = Array(IyiWaiter?).new(LOT, nil)
+    @@lot_heads = Array(IyiWaiter?).new(LOT, nil)
+  end
+
+  private def self.lot_lock(bucket : Int32) : Pointer(Atomic(UInt64))
+    Pointer(Atomic(UInt64)).new((@@lot_locks + bucket * LOT_STRIDE).address)
   end
 
   private def self.lot_bucket(address : UInt64) : Int32
@@ -3410,7 +3888,7 @@ class IyiScheduler
         cancel_moving(fiber)
       elsif home.object_id == state.object_id
         cancel_wait(fiber)
-      elsif fiber.state == IyiFiberState::WaitingCh
+      elsif fiber.claim_any
         ready(fiber)
       elsif fiber.state != IyiFiberState::Joining
         post_cancel(home, fiber)
@@ -3488,14 +3966,20 @@ class IyiScheduler
           enqueue(fiber)
         end
       {% else %}
-        io_remove(fiber)
-        enqueue(fiber)
+        # Taken only while it is still on this thread's list, under the
+        # lock a worker taking this thread's news holds (`take_held`):
+        # taken by both, it would be queued twice.
+        st = state
+        lists_lock(st)
+        taken = io_remove(st, fiber)
+        lists_unlock(st)
+        enqueue(fiber) if taken
       {% end %}
     elsif fiber.state == IyiFiberState::WaitingCh
-      # The channel's node is left where it is: waking bumps nothing here,
-      # because the enqueue below changes the state the node's `current?`
-      # reads, and every wake skips a node that is no longer current.
-      enqueue(fiber)
+      # The channel's node is left where it is: the claim below takes the
+      # wake its `current?` reads, and every wake skips a node that is no
+      # longer current.
+      enqueue(fiber) if fiber.claim_any
     end
   end
 
@@ -3524,7 +4008,13 @@ class IyiScheduler
       deadlock
     end
     root.deadlocked = true
-    enqueue(root) unless root.state == IyiFiberState::Runnable
+    # Parked on a channel or a word, its wake is claimed, so no later
+    # waker readies it a second time.
+    if root.state == IyiFiberState::WaitingCh
+      enqueue(root) if root.claim_any
+    elsif root.state != IyiFiberState::Runnable
+      enqueue(root)
+    end
     IyiSchedLock.unlock
   end
 
@@ -3682,88 +4172,229 @@ class IyiScheduler
       raise "epoll_pwait failed" if count < 0 && count != -4_i64
     {% end %}
 
+    {% unless flag?(:win32) %}
+      st.polled_at = __iyi_monotonic_ns
+    {% end %}
+
     index = 0_i64
     # Out here for the reason `ready` is below.
-    doorbell = state.wake_fd
+    doorbell = st.wake_fd
     while index < count
       entry = events_buffer + (index * IYI_POLL_EVENT_BYTES).to_u64
       fd = Pointer(UInt64).new(entry + IYI_POLL_DATA_OFFSET).value.to_i64
       # Declared out here: a local born inside the `{% if %}` dies at its
       # `{% end %}`.
-      ready = 0
-      {% if flag?(:darwin) %}
-        # A kevent is one filter's news: EVFILT_READ (0xFFFF as the low
-        # half of the word at +8) for the reader, the doorbell's
-        # EVFILT_USER, which needs nothing more (EV_CLEAR re-arms it), and
-        # anything else here the writer's EVFILT_WRITE.
-        filter = Pointer(UInt64).new(entry + 8_u64).value & 0xFFFF_u64
-        if filter == IYI_WAKE_FILTER
-          index = index + 1
-          next
-        end
-        ready = filter == 0xFFFF_u64 ? 1 : 4
-      {% elsif flag?(:win32) %}
-      {% else %}
+      ready = event_ready(entry)
+      {% if !flag?(:darwin) && !flag?(:win32) %}
         # The doorbell's eventfd, read back to zero; what it rang for is
         # the mail the scheduler's loop takes.
         if doorbell != 0_i64 && fd == doorbell
           drained = 0_u64
           __iyi_read(fd, pointerof(drained).as(Void*), 8_u64)
-          index = index + 1
-          next
+          ready = 0
         end
-        # The event's mask is its first four bytes: IN (1) for the reader,
-        # OUT (4) for the writer, and ERR (8) or HUP (0x10) for both, whose
-        # next call finds out what happened.
-        mask = Pointer(UInt64).new(entry).value & 0xFFFFFFFF_u64
-        ready = ready | 1 if mask & 0x19_u64 != 0_u64
-        ready = ready | 4 if mask & 0x1C_u64 != 0_u64
       {% end %}
-      wake_io(fd.to_i32, ready)
+      wake_io(st, fd.to_i32, ready) if ready != 0
       index = index + 1
     end
 
     wake_expired_sleepers
     {% unless flag?(:win32) %}
-      # A thread's lists are its own here, and a deadlock's walk reads
-      # only what an idle thread said when it went idle.
+      # Busy only once its news and its expired sleepers are in its own
+      # run queue: a deadlock's walk here reads what an idle thread said
+      # when it went idle (`all_quiet?`), and one that takes anything
+      # had a waiter or a sleeper then. Marked busy first, as on Windows,
+      # 32 tasks each making 100 queries in turn on 12 workers, the
+      # database's process on all 12 vCPUs of a Linux machine, went from
+      # a request p99 of 58 to 65 ms, with 0 to 2 queries over 20 ms in
+      # 8 s, to 69 to 83 ms and 38 to 91 queries (five runs each,
+      # interleaved); taking the monitor's call to `take_held` away,
+      # alone or with the lists lock or the poll's time, left it as slow.
       end_idle(st) if blocking && @@shared
     {% end %}
   end
 
-  # A thread's io list and sleep heap, locked (SPEC.md III.4.13, part 5).
-  # On Windows any thread may take a completion off the process's port,
-  # and with it the fiber off the io list and out of the sleep heap of the
-  # thread it parked on (`complete_packet`); every change to those two,
-  # by their own thread or another, is made holding this. Nothing is
-  # taken while it is held, so it nests inside the scheduler's lock and
-  # the runtime's in any order; past 128 turns a spinner gives its core
-  # away, as the scheduler's lock's does. Elsewhere a thread's lists are
-  # its own and this is nothing.
-  def self.lists_lock(st : IyiSchedulerState) : Nil
-    {% if flag?(:win32) %}
-      return unless @@shared
-      spins = 0
-      while true
-        return if st.take_lists
-        spins = spins &+ 1
-        {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
-          IyiThread.yield_cpu if spins & 127 == 0
-        {% end %}
-        {% if flag?(:x86_64) %}
-          asm("pause" :::: "volatile")
-        {% else %}
-          asm("yield" :::: "volatile")
-        {% end %}
-      end
+  # What the poller's event at *entry* says is ready, as `wake_io` takes
+  # it: 1 for the reader, 4 for the writer, and both for an error or a
+  # hang-up, whose next call finds out what happened. A kevent is one
+  # filter's news: EVFILT_READ (0xFFFF as the low half of the word at
+  # +8) for the reader, the doorbell's EVFILT_USER, which needs nothing
+  # more (EV_CLEAR re-arms it) and answers 0, and anything else here the
+  # writer's EVFILT_WRITE. An epoll event's mask is its first four bytes:
+  # IN (1), OUT (4), ERR (8) and HUP (0x10); Linux's doorbell is told by
+  # its fd, which the caller knows.
+  def self.event_ready(entry : UInt64) : Int32
+    {% if flag?(:darwin) %}
+      filter = Pointer(UInt64).new(entry + 8_u64).value & 0xFFFF_u64
+      return 0 if filter == IYI_WAKE_FILTER
+      filter == 0xFFFF_u64 ? 1 : 4
+    {% elsif flag?(:win32) %}
+      0
+    {% else %}
+      mask = Pointer(UInt64).new(entry).value & 0xFFFFFFFF_u64
+      ready = 0
+      ready = ready | 1 if mask & 0x19_u64 != 0_u64
+      ready = ready | 4 if mask & 0x1C_u64 != 0_u64
+      ready
     {% end %}
   end
 
+  {% unless flag?(:win32) %}
+    # This worker takes the news in the poller of *other*, a worker the
+    # pool's monitor saw run without looking at it for `POLL_IO_NS`
+    # (`IyiWorkers.held_io?`): a task holding it in code no back-edge
+    # check is in, or a thread the kernel left in its ready queue, would
+    # otherwise keep a connection's answer until it came back - 98 ms
+    # beside a 100 ms `@[NoPreempt]` hold, three workers idle
+    # (bench/parallel_migrate.iyi's heldio step). Go's netpoller is the
+    # process's and any thread polls it; here each worker keeps its own,
+    # and the one that looks into another's holds that worker's lists
+    # lock from its poll until the last waiter it found is off them, so
+    # an event it reads cannot be stale against a waiter that worker
+    # parked meanwhile. The waiters are woken after the lock is let go -
+    # one that may move into this worker's ring, any other home
+    # (`wake_completed`). Level-triggered news stays for whoever polls
+    # next; the doorbell is left as it was: an eventfd is not read here,
+    # and a kevent's `EVFILT_USER`, which this poll takes off the kqueue,
+    # is rung again. A worker that went idle meanwhile said then that it
+    # had waiters, and a deadlock's walk reads only what it said
+    # (`all_quiet?`): with its lists emptied here it is rung, to look and
+    # say again (`idle_worker`). True when a waiter was taken.
+    @[Effect(:scheduler)]
+    def self.take_held(other : IyiSchedulerState) : Bool
+      poller = other.pollfd
+      return false if poller <= 0_i64
+      buffer = events_buffer
+      taken : IyiFiber? = nil
+      rung = false
+      count = 0_i64
+      lists_lock(other)
+      {% if flag?(:darwin) %}
+        spec = uninitialized UInt64[2]
+        zero = pointerof(spec).as(Pointer(UInt64))
+        zero[0] = 0_u64
+        zero[1] = 0_u64
+        count = LibC.kevent(poller.to_i32, Pointer(Void).new(0_u64), 0,
+          Pointer(Void).new(buffer), EVENTS.to_i32, zero.as(Void*)).to_i64
+      {% else %}
+        count = __iyi_conc_syscall6(IYI_SYS_EPOLL_PWAIT, poller, buffer.to_i64, EVENTS, 0_i64, 0_i64, 8_i64)
+      {% end %}
+      index = 0_i64
+      while index < count
+        entry = buffer + (index * IYI_POLL_EVENT_BYTES).to_u64
+        fd = Pointer(UInt64).new(entry + IYI_POLL_DATA_OFFSET).value.to_i64
+        ready = event_ready(entry)
+        {% if flag?(:darwin) %}
+          rung = true if ready == 0
+        {% else %}
+          ready = 0 if fd == other.wake_fd
+        {% end %}
+        if ready & 1 != 0
+          fiber = io_take(other, fd.to_i32, 1)
+          if fiber.is_a?(IyiFiber)
+            fiber.next_run = taken
+            taken = fiber
+          end
+        end
+        if ready & 4 != 0
+          fiber = io_take(other, fd.to_i32, 4)
+          if fiber.is_a?(IyiFiber)
+            fiber.next_run = taken
+            taken = fiber
+          end
+        end
+        index = index + 1
+      end
+      emptied = other.io_head.is_a?(Nil) && other.sleep_head.is_a?(Nil)
+      lists_unlock(other)
+      {% if flag?(:darwin) %}
+        retrigger(other) if rung
+      {% end %}
+      found = !taken.is_a?(Nil)
+      while taken.is_a?(IyiFiber)
+        following = taken.next_run
+        taken.next_run = nil
+        wake_completed(taken)
+        taken = following
+      end
+      if found && emptied
+        # Under the lock it went idle under: either it saw its lists
+        # emptied when it said, or it is idle here and rung.
+        IyiSchedLock.lock
+        ring(other) unless other.quiet
+        IyiSchedLock.unlock
+      end
+      found
+    end
+  {% end %}
+
+  {% if flag?(:darwin) %}
+    # *st*'s doorbell rung again, after a poll from another thread took
+    # its `EVFILT_USER` off its kqueue (`take_held`, `IyiWorkers.held_io?`):
+    # what it rang for is mail its own thread takes.
+    @[Effect(:scheduler)]
+    def self.retrigger(st : IyiSchedulerState) : Nil
+      change = __iyi_kevent_change(IYI_WAKE_IDENT, IYI_WAKE_TRIGGER)
+      LibC.kevent(st.pollfd.to_i32, pointerof(change).as(Void*), 1,
+        Pointer(Void).new(0_u64), 0, Pointer(Void).new(0_u64))
+    end
+  {% end %}
+
+  # A thread's io list, its descriptors' slots and its sleep heap, locked
+  # (SPEC.md III.4.13, part 5). On Windows any thread may take a
+  # completion off the process's port, and with it the fiber off the io
+  # list and out of the sleep heap of the thread it parked on
+  # (`complete_packet`); elsewhere a worker may take what waits in the
+  # poller of a worker held by one task, and the waiters with it
+  # (`take_held`). Every change to those, by their own thread or another,
+  # is made holding this. Its holder takes no other lock - but the
+  # runtime's, when its first waiter on a descriptor past 8,192 more maps
+  # a chunk of the owners' table (`io_owner`), which nothing holding the
+  # runtime's lock waits here for - so it nests inside the scheduler's
+  # lock and the runtime's in any order; past 128 turns a spinner gives
+  # its core away, as the scheduler's lock's does. With one scheduler
+  # thread it is nothing.
+  @[Effect(:scheduler)]
+  def self.lists_lock(st : IyiSchedulerState) : Nil
+    return unless @@shared
+    spins = 0
+    while true
+      return if st.take_lists
+      spins = spins &+ 1
+      {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+        IyiThread.yield_cpu if spins & 127 == 0
+      {% end %}
+      {% if flag?(:x86_64) %}
+        asm("pause" :::: "volatile")
+      {% else %}
+        asm("yield" :::: "volatile")
+      {% end %}
+    end
+  end
+
+  @[Effect(:scheduler)]
   def self.lists_unlock(st : IyiSchedulerState) : Nil
-    {% if flag?(:win32) %}
-      return unless @@shared
-      st.free_lists
+    return unless @@shared
+    st.free_lists
+  end
+
+  # A fiber this thread took off another thread's io list - its packet
+  # off the port on Windows (`complete_packet`), its news out of a held
+  # worker's poller elsewhere (`take_held`) - made runnable from here.
+  def self.wake_completed(fiber : IyiFiber) : Nil
+    unless @@shared
+      enqueue(fiber)
+      return
+    end
+    {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+      if state.worker && fiber.unit.is_a?(IyiUnit) && !fiber.homebound
+        enqueue(fiber)
+        return
+      end
     {% end %}
+    IyiSchedLock.lock
+    ready(fiber)
+    IyiSchedLock.unlock
   end
 
   # Fibers parked on io lists, every thread's together: on Windows what
@@ -3889,23 +4520,6 @@ class IyiScheduler
       found
     end
 
-    # A fiber whose packet this thread took, made runnable from here.
-    def self.wake_completed(fiber : IyiFiber) : Nil
-      unless @@shared
-        enqueue(fiber)
-        return
-      end
-      {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
-        if state.worker && fiber.unit.is_a?(IyiUnit) && !fiber.homebound
-          enqueue(fiber)
-          return
-        end
-      {% end %}
-      IyiSchedLock.lock
-      ready(fiber)
-      IyiSchedLock.unlock
-    end
-
     # The seat: the one thread with nothing to run that waits on the port,
     # by its state's id, 0 while none does. A pool worker, once the pool
     # has started, and before it any scheduler thread: a thread outside
@@ -3999,15 +4613,16 @@ class IyiScheduler
     end
   {% end %}
 
-  def self.wake_io(fd : Int32, ready : Int32) : Nil
-    if ready & 1 != 0
-      reader = io_take(fd, 1)
-      enqueue(reader) if reader.is_a?(IyiFiber)
-    end
-    if ready & 4 != 0
-      writer = io_take(fd, 4)
-      enqueue(writer) if writer.is_a?(IyiFiber)
-    end
+  # The waiters on *fd* that *ready* names (1 the reader, 4 the writer),
+  # taken out of the poller of *st*, this thread's, under its lists lock
+  # and woken into this thread's queues.
+  def self.wake_io(st : IyiSchedulerState, fd : Int32, ready : Int32) : Nil
+    lists_lock(st)
+    reader = ready & 1 != 0 ? io_take(st, fd, 1) : nil
+    writer = ready & 4 != 0 ? io_take(st, fd, 4) : nil
+    lists_unlock(st)
+    enqueue(reader) if reader.is_a?(IyiFiber)
+    enqueue(writer) if writer.is_a?(IyiFiber)
   end
 
   # A descriptor being closed under a parked waiter: the kernel drops a
@@ -4022,7 +4637,7 @@ class IyiScheduler
   def self.wake_closed(fd : Int32) : Nil
     {% if flag?(:win32) %}
     {% else %}
-      wake_io(fd, 5)
+      wake_io(state, fd, 5)
       return unless @@shared
       me = state.object_id
       reader = io_owner_of(fd * 2)
@@ -4088,21 +4703,22 @@ class IyiScheduler
           end
           next
         {% else %}
-          io_remove(head)
+          # Still on the io list: a worker that takes it from there takes
+          # it out of this heap under the same lock (`take_held`).
+          io_remove(st, head)
         {% end %}
       end
       lists_unlock(st)
       # A select with a timeout arm is in this heap and a channel's queues
-      # at once, and either can wake it: one already woken is not queued
-      # twice. Its `unpark` takes it out of here when it runs. A channel's
-      # wake may come from another thread, under the scheduler's lock, so
-      # the look and the enqueue are under it too.
-      if @@shared
-        IyiSchedLock.lock
-        enqueue(head) unless head.state == IyiFiberState::Runnable
-        IyiSchedLock.unlock
-      else
-        enqueue(head) unless head.state == IyiFiberState::Runnable
+      # at once, and either can wake it: a channel's from any thread, under
+      # that channel's lock, so the deadline wakes it only by claiming the
+      # wake, which one of the two takes (`IyiFiber#claim`). Its `unpark`
+      # takes it out of here when it runs. A sleeper or an io wait is this
+      # thread's alone to wake.
+      if head.state == IyiFiberState::Sleeping || head.state == IyiFiberState::WaitingIo
+        enqueue(head)
+      elsif head.claim_any
+        enqueue(head)
       end
     end
   end
@@ -4303,46 +4919,54 @@ class IyiScheduler
     end
   {% end %}
 
-  # The fiber waiting on *fd* in *direction*, off the list and the poller.
-  def self.io_take(fd : Int32, direction : Int32) : IyiFiber?
-    waiter = io_slot(fd, direction)
+  # The fiber waiting on *fd* in *direction* in *st*'s poller, off its
+  # lists and the poller. *st*'s lists lock held.
+  def self.io_take(st : IyiSchedulerState, fd : Int32, direction : Int32) : IyiFiber?
+    waiter = io_slot(st, fd, direction)
     return nil unless waiter.is_a?(IyiFiber)
-    io_remove(waiter)
+    io_remove(st, waiter)
     waiter
   end
 
-  # *fiber* off the io list, whichever fd and direction it waits on: a
+  # *fiber* off *st*'s io list, whichever fd and direction it waits on: a
   # cancelled waiter is that fiber, and not whoever else waits on its fd.
-  # Windows' io list is posted operations, taken off by their OVERLAPPED
-  # (`io_take_overlapped`), and nothing is in the registry this reads.
-  def self.io_remove(fiber : IyiFiber) : Nil
-    {% unless flag?(:win32) %}
-      io_forget(fiber) if io_unlink(fiber)
+  # Out of *st*'s sleep heap and its listing there too (`IyiFiber#list_on`),
+  # whichever thread takes it. True when it was on the list. *st*'s lists
+  # lock held. Windows' io list is posted operations, taken off by their
+  # OVERLAPPED (`io_take_overlapped`), and nothing is in the registry
+  # this reads.
+  def self.io_remove(st : IyiSchedulerState, fiber : IyiFiber) : Bool
+    {% if flag?(:win32) %}
+      false
+    {% else %}
+      return false unless io_unlink(st, fiber)
+      io_forget(st, fiber)
+      fiber.unlist(st.object_id)
+      true
     {% end %}
   end
 
   # Deregistered on every exit from the io list - wake and cancel both -
   # so a level-triggered fd cannot wake a fiber that no longer exists to
-  # want it; the caller has taken *fiber* off the list already. On darwin
-  # the fiber's own filter goes (EV_DELETE's packed word; a fd already
-  # gone is kevent's problem and not ours). On Linux the registration is
-  # the fd's, so it is narrowed to what the other direction's waiter
-  # still wants (EPOLL_CTL_MOD, 3), or removed when nobody does (DEL, 2).
-  @[Effect(:scheduler)]; def self.io_forget(fiber : IyiFiber) : Nil
-    untime(fiber)
+  # want it; the caller has taken *fiber* off *st*'s list already, and
+  # holds its lists lock. On darwin the fiber's own filter goes
+  # (EV_DELETE's packed word; a fd already gone is kevent's problem and
+  # not ours). On Linux the registration is the fd's, so it is narrowed
+  # to what the other direction's waiter still wants (EPOLL_CTL_MOD, 3),
+  # or removed when nobody does (DEL, 2).
+  @[Effect(:scheduler)]
+  def self.io_forget(st : IyiSchedulerState, fiber : IyiFiber) : Nil
+    untime_in(st, fiber)
     {% if flag?(:darwin) %}
       change = __iyi_kevent_change(fiber.wait_fd, fiber.wait_dir == 1 ? 0x2FFFF_u64 : 0x2FFFE_u64)
-      LibC.kevent(pollfd.to_i32, pointerof(change).as(Void*), 1,
+      LibC.kevent(st.pollfd.to_i32, pointerof(change).as(Void*), 1,
         Pointer(Void).new(0_u64), 0, Pointer(Void).new(0_u64))
     {% else %}
-      remaining = io_interest(fiber.wait_fd)
+      remaining = io_interest(st, fiber.wait_fd)
       if remaining == 0
-        __iyi_conc_syscall6(IYI_SYS_EPOLL_CTL, pollfd, 2_i64, fiber.wait_fd.to_i64, 0_i64, 0_i64, 0_i64)
+        __iyi_conc_syscall6(IYI_SYS_EPOLL_CTL, st.pollfd, 2_i64, fiber.wait_fd.to_i64, 0_i64, 0_i64, 0_i64)
       else
-        event = Pointer(UInt8).malloc(16_u64)
-        event.as(Pointer(UInt64)).value = remaining.to_u64
-        Pointer(UInt64).new(event.address + IYI_POLL_DATA_OFFSET).value = fiber.wait_fd.to_u64
-        __iyi_conc_syscall6(IYI_SYS_EPOLL_CTL, pollfd, 3_i64, fiber.wait_fd.to_i64, event.address.to_i64, 0_i64, 0_i64)
+        io_control(st.pollfd, 3_i64, fiber.wait_fd, remaining)
       end
     {% end %}
     fiber.next_io = nil
@@ -4526,11 +5150,13 @@ end
 # ── The pool — III.4.13 ────────────────────────────────────────────────
 #
 # The worker threads parallel tasks run on: `IyiThread`s of the runtime's
-# own, each a scheduler like any thread's, started at the first
-# `spawn_parallel` - a program without one has no pool. A parallel task
-# waits here until a worker starts it: in the queue of the worker whose
-# task spawned it, or in the injection queue when a thread outside the
-# pool did, and a worker with nothing of its own steals from another's.
+# own, each a scheduler like any thread's. The first starts at the first
+# parallel task - a program without one has no pool - and each other only
+# when a task is waiting and no worker is idle to take it (`grow`). A
+# parallel task waits here until a worker starts it: in the queue of the
+# worker whose task spawned it, or in the injection queue when a thread
+# outside the pool did, and a worker with nothing of its own steals from
+# another's.
 #
 # Once started, a parallel task and the tasks `spawn` starts inside it
 # (its unit, `IyiUnit`) run wherever a worker is free. A runnable one is
@@ -4547,12 +5173,24 @@ end
 # A worker with more runnable fibers than it can run calls one idle
 # worker to come and steal (`wake_one`), and only one at a time is out
 # looking: one that finds work calls the next, so a burst brings the
-# pool in one by one and a lone wake brings nobody, Go's `wakep`.
+# pool in one by one, Go's `wakep`. A lone fiber the worker woke on its
+# way to its next one brings nobody; one a running task handed over -
+# a send, a lock let go - does, since that task may compute on
+# (`handed_on?`).
 class IyiWorkers
-  # `count=`'s answer, 0 when the program did not ask; the number started,
+  # `count=`'s answer, 0 when the program did not ask; the pool's size,
   # 0 before the pool is.
   @@asked : Int32 = 0
   @@started : Int32 = 0
+  # `resolved`'s answer as `parallel?` last read it, 0 before it has.
+  @@wanted : Int32 = 0
+  # Worker threads started so far, at most `@@started` (`grow`); 1 when
+  # one was wanted where none could be started, on a thread holding a
+  # lock `IyiThread.start` takes or on the monitor's (`pay`); and how many
+  # times that happened.
+  @@launched : Int64 = 0_i64
+  @@owed : Int64 = 0_i64
+  @@owes : UInt64 = 0_u64
   @@inject_head : IyiFiber?
   @@inject_tail : IyiFiber?
   # Started fibers that may move, runnable and in no worker's ring: woken
@@ -4622,6 +5260,8 @@ class IyiWorkers
   @@monitor_handle : UInt64 = 0_u64
   @@monitor_timer : UInt64 = 0_u64
   @@looks : UInt64 = 0_u64
+  # Workers marked with news in their pollers (`held_io?`), not yet taken.
+  @@held_io : Int64 = 0_i64
 
   def self.word(variable : Pointer(Int64)) : Pointer(Atomic(Int64))
     Pointer(Atomic(Int64)).new(variable.address)
@@ -4641,9 +5281,10 @@ class IyiWorkers
     raise "IyiWorkers.count: a pool has at least one worker, not #{workers}" if workers < 1
     started = @@started
     if started > 0 && workers != started
-      raise "IyiWorkers.count: the pool started with #{started} workers, and it does not grow or shrink once it has"
+      raise "IyiWorkers.count: the pool started with a size of #{started} workers, and its size does not change once it has"
     end
     @@asked = workers
+    @@wanted = 0
     workers
   end
 
@@ -4658,6 +5299,30 @@ class IyiWorkers
   # Whether the pool has started (`start`).
   def self.started? : Bool
     @@started > 0
+  end
+
+  # The worker threads started so far: one at the pool's start, and more
+  # only while none is idle (`grow`), up to `count`.
+  def self.launched : Int32
+    word(pointerof(@@launched)).value.get.to_i32
+  end
+
+  # Whether an eligible `spawn` (SPEC.md III.4.15) goes to the pool: a
+  # pool of more than one worker, started or still to start. One worker
+  # keeps such a spawn in its spawner's unit and the pool unstarted, so
+  # `IYI_WORKERS=1` is a program on one thread. The count the pool would
+  # start with is kept once read, since before the pool starts it is an
+  # environment lookup, and a program held to one worker asks it at every
+  # spawn; `count=` forgets it.
+  def self.parallel? : Bool
+    started = @@started
+    return started > 1 if started > 0
+    wanted = @@wanted
+    if wanted == 0
+      wanted = resolved
+      @@wanted = wanted
+    end
+    wanted > 1
   end
 
   # The worker whose state's id is *id*, or nil: the pool's list read
@@ -4692,9 +5357,11 @@ class IyiWorkers
     {% end %}
   end
 
-  # The workers, started once, on the thread of the first parallel spawn.
+  # The pool, started once, on the thread of the first parallel spawn,
+  # with one worker: the rest start as the work asks for them (`grow`).
   # Each worker is an `IyiThread`, which is what makes the collector stop
   # and scan it as it stops and scans any thread (III.4.11).
+  @[Effect(:scheduler)]
   def self.start : Nil
     return if @@started > 0
     {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
@@ -4707,6 +5374,12 @@ class IyiWorkers
       @@started = workers
       @@workers = Array(IyiSchedulerState).new(workers)
       @@listed = Pointer(UInt64).malloc(workers.to_u64)
+      # The first worker comes up looking, as every worker `grow` starts
+      # does: the pushes behind the first start no other until it finds
+      # a task and calls for the next (`stop_spinning`), or has counted
+      # itself idle (`IyiScheduler.idle_worker`).
+      word(pointerof(@@launched)).value.set(1_i64)
+      word(pointerof(@@spinning)).value.add(1_i64)
       IyiSchedLock.unlock
       claim_preempt_slot
       {% if flag?(:win32) %}
@@ -4728,11 +5401,7 @@ class IyiWorkers
         # kernel left waiting would have held.
         LibC.SetProcessPriorityBoost(LibC.GetCurrentProcess, 1_i32)
       {% end %}
-      index = 0
-      while index < workers
-        IyiThread.start { IyiWorkers.work }
-        index = index + 1
-      end
+      IyiThread.start { IyiWorkers.work }
       start_monitor
     {% end %}
   end
@@ -4759,6 +5428,10 @@ class IyiWorkers
       {% end %}
       IyiSchedLock.lock
       st.worker = true
+      # Started holding the one token of a worker out looking (`start`,
+      # `grow`), which it gives back when a look finds a task, or once it
+      # has counted itself idle (`IyiScheduler.idle_worker`).
+      st.spinning = true
       listed = @@workers
       listed << st if listed.is_a?(Array(IyiSchedulerState))
       slot = word(pointerof(@@listed_count)).value.get
@@ -4766,6 +5439,7 @@ class IyiWorkers
       word(pointerof(@@listed_count)).value.add(1_i64)
       IyiSchedLock.unlock
       while true
+        pay
         fiber = IyiScheduler.worker_next(st)
         if fiber.is_a?(IyiFiber)
           stop_spinning(st, true)
@@ -4775,7 +5449,6 @@ class IyiWorkers
           root.state = IyiFiberState::Pooled
           IyiScheduler.switch_to(fiber)
         else
-          stop_spinning(st, false)
           IyiScheduler.release_unit(st)
           IyiScheduler.idle_worker(st)
         end
@@ -4787,7 +5460,8 @@ class IyiWorkers
 
   # A parallel task, made `Runnable`, into the spawning worker's own queue
   # or, from a thread outside the pool, the injection queue; and one idle
-  # worker rung to come and take it. Lock held.
+  # worker rung to come and take it, or with none to ring, one more
+  # started (`grow`). Lock held.
   def self.push(fiber : IyiFiber) : Nil
     fiber.state = IyiFiberState::Runnable
     fiber.next_run = nil
@@ -4823,6 +5497,7 @@ class IyiWorkers
       end
       index = index + 1
     end
+    grow
   end
 
   # The next fiber for worker *st* from the queues behind the lock, or
@@ -4946,7 +5621,25 @@ class IyiWorkers
 
   # Onto the owner's ring; a full ring sends half of itself and this one
   # to the shared queue. A ring holding more than the fiber the worker
-  # runs next calls one idle worker to steal (`wake_one`).
+  # runs next calls one idle worker to steal (`wake_one`), and so does a
+  # fiber handed over by a task that runs on (`handed_on?`) - unless the
+  # worker's last such calls were wasted. A call is wasted when the
+  # worker takes the fiber it called for itself (`pop`): its task parked
+  # first, as a ping-pong's does a few hundred ns after its send, and the
+  # idle worker woke for nothing. Each wasted call doubles the run of
+  # hand-offs after it that call nobody, up to 4,095, and a worker that
+  # goes idle starts again at none.
+  #
+  # Calling on every hand-off cost a channel ping-pong between two
+  # parallel tasks (12 workers, release, best of 5 of 200,000 round
+  # trips) 323 to 338 ns a round trip against 137 to 139 on macOS 26.6,
+  # an M2 Pro with 10 cores, and 339 to 340 against 136 to 156 on Windows
+  # 11, 12 logical processors; with the run capped at 255 and `steal`'s
+  # wait, 179 to 181 and 200 to 213; at 4,095 with the wait, 144 to 146
+  # and 150 to 157, the bookkeeping alone 139 to 142 and 147 to 151. Four
+  # pairs at once on the M2: 3,809 to 3,833 ns before, 5,493 to 5,504
+  # calling every time, 3,927 to 4,035 at 4,095. A first hand-off always
+  # calls.
   def self.push_runnable(st : IyiSchedulerState, fiber : IyiFiber) : Nil
     while true
       head = st.ring_head
@@ -4958,7 +5651,40 @@ class IyiWorkers
       end
       break if spill(st, fiber, head)
     end
-    wake_one if st.ring_size > 1_u64
+    if st.ring_size > 1_u64
+      wake_one
+    elsif handed_on?(st, fiber)
+      skip = st.handoff_skip
+      if skip > 0_u64
+        st.handoff_skip = skip &- 1_u64
+      else
+        st.handoff_last = fiber.object_id
+        wake_one
+      end
+    end
+  end
+
+  # Whether *fiber*, pushed onto worker *st*'s ring, was woken by a task
+  # that is still running there - a channel's send, a lock's release, a
+  # `wake_on` - and is of another unit, which could run beside it: the
+  # worker comes back for it only when that task parks, and a task that
+  # computes on holds it until then, Go's `ready` calling `wakep`. A
+  # fiber the worker woke on its way to run the next one - from its
+  # poller, its sleepers or a unit let go, with the parking fiber or the
+  # worker's own on its stack - is the next it runs, and needs nobody.
+  # Measured with bench/parallel_migrate.iyi's handoff step (Linux, 12
+  # vCPUs, release, 4 workers): a task woken onto a worker held 50 ms by
+  # a `@[NoPreempt]` loop started 50.0 ms after its send in all 20 wakes
+  # of two runs, with three workers idle the whole time.
+  private def self.handed_on?(st : IyiSchedulerState, fiber : IyiFiber) : Bool
+    running = st.current
+    return false unless running.is_a?(IyiFiber)
+    return false unless running.state == IyiFiberState::Running
+    root = st.root
+    return false if root.is_a?(IyiFiber) && root.object_id == running.object_id
+    held = running.unit
+    woken = fiber.unit
+    !(held.is_a?(IyiUnit) && woken.is_a?(IyiUnit) && held.object_id == woken.object_id)
   end
 
   # Half the ring, oldest first, and *fiber* after them into the shared
@@ -4980,7 +5706,8 @@ class IyiWorkers
     true
   end
 
-  # The owner's oldest.
+  # The owner's oldest. The fiber it last called an idle worker for, taken
+  # here, was a wasted call (`push_runnable`).
   def self.pop(st : IyiSchedulerState) : IyiFiber?
     return nil if st.ring.address == 0_u64
     while true
@@ -4988,7 +5715,16 @@ class IyiWorkers
       tail = st.ring_tail
       return nil if head == tail
       address = st.slot(head)
-      return fiber_at(address) if st.take_ring_head(head, head &+ 1_u64)
+      if st.take_ring_head(head, head &+ 1_u64)
+        if address == st.handoff_last
+          st.handoff_last = 0_u64
+          run = st.handoff_backoff
+          run = run >= 2047_u64 ? 4095_u64 : run &* 2_u64 &+ 1_u64
+          st.handoff_backoff = run
+          st.handoff_skip = run
+        end
+        return fiber_at(address)
+      end
     end
   end
 
@@ -4996,14 +5732,32 @@ class IyiWorkers
   # empty: each other worker asked once, from the one after the last
   # asked. The oldest it took is answered to run now and the rest are in
   # its ring. Without the lock.
+  #
+  # A lone fiber in the ring of a worker that is running is waited on for
+  # up to 3 us first, Go's `runqgrab` sparing a running P's `runnext`: it
+  # is most often a hand-off whose waker parks a moment later, and its
+  # worker takes it then, warm. Without the wait a channel ping-pong
+  # between two parallel tasks lost its fiber to the woken idle worker
+  # 2,429 to 3,059 times in a run of 1,000,000 round trips (Linux, 12
+  # vCPUs, release), and 41 to 144 times with it.
   def self.steal(st : IyiSchedulerState) : IyiFiber?
     count = word(pointerof(@@listed_count)).value.get
     return nil if count < 2_i64
     start = (@@turn.to_i64 &+ 1_i64) % count
+    {% if flag?(:iyi_chaos) %}
+      drawn = IyiChaos.steal_start(count)
+      start = drawn if drawn >= 0_i64
+    {% end %}
     index = 0_i64
     while index < count
       victim = listed_at((start &+ index) % count)
       if victim.object_id != st.object_id && victim.ring_size > 0_u64
+        if victim.ring_size == 1_u64 && !victim.idle
+          until_ns = __iyi_monotonic_ns + 3_000_i64
+          while victim.ring_size == 1_u64 && __iyi_monotonic_ns < until_ns
+            IyiThread.spin_pause
+          end
+        end
         fiber = grab(victim, st)
         if fiber.is_a?(IyiFiber)
           Pointer(Atomic(UInt64)).new(pointerof(@@grabs).address).value.add(1_u64)
@@ -5044,11 +5798,15 @@ class IyiWorkers
   end
 
   # Something runnable or waiting to start that this worker could take:
-  # the queues behind the lock, or another worker's ring. Without the
-  # lock, as a look before sleeping.
+  # the queues behind the lock, another worker's ring, or elsewhere than
+  # Windows the news the monitor found in a running worker's poller
+  # (`take_held_io`). Without the lock, as a look before sleeping.
   def self.work_waiting? : Bool
     return true if word(pointerof(@@queued)).value.get > 0_i64
     return true if word(pointerof(@@preempted)).value.get > 0_i64
+    {% unless flag?(:win32) %}
+      return true if word(pointerof(@@held_io)).value.get > 0_i64
+    {% end %}
     count = word(pointerof(@@listed_count)).value.get
     index = 0_i64
     while index < count
@@ -5065,11 +5823,15 @@ class IyiWorkers
   end
 
   # One idle worker rung to come and steal, unless one is already out
-  # looking or none is idle: the spinner that finds work calls the next
+  # looking; with none idle, or every idle one already rung, one more
+  # started (`grow`). The spinner that finds work calls the next
   # (`stop_spinning`), and one that finds none goes back to sleep. Takes
   # the lock unless this thread holds it.
   def self.wake_one : Nil
-    return if word(pointerof(@@idle)).value.get <= 0_i64
+    if word(pointerof(@@idle)).value.get <= 0_i64
+      grow
+      return
+    end
     return unless word(pointerof(@@spinning)).value.compare_and_set(0_i64, 1_i64)[1]
     held = IyiSchedLock.held_here?
     IyiSchedLock.lock unless held
@@ -5092,6 +5854,65 @@ class IyiWorkers
     end
     word(pointerof(@@spinning)).value.sub(1_i64) unless rung
     IyiSchedLock.unlock unless held
+    # Every idle worker already rung, each for a fiber of its own: one
+    # more is started, as where none is idle.
+    grow unless rung
+  end
+
+  # One more worker, called for where none is idle: the pool starts with
+  # one (`start`) and grows towards `count` only while every worker it has
+  # is busy, as Go starts an M from `wakep` when no idle one is parked.
+  # One at a time: the new worker holds the token of the one worker out
+  # looking until its look finds a task or it has counted itself idle, so
+  # a burst of pushes starts one, and that one, finding a task, calls for
+  # the next (`stop_spinning`).
+  #
+  # `IyiThread.start` takes the scheduler's lock and the runtime's, and
+  # allocates, so a thread holding either, or the monitor's, which is no
+  # program thread, owes the start instead (`@@owed`), and the next worker
+  # to look, task to give its worker up at a back-edge, or parallel spawn
+  # to let go of the lock pays it (`pay`). The runtime's lock says only
+  # that some thread holds it, so it is waited for a moment first: the
+  # starter of the worker calling here holds it through its clone
+  # (`IyiThread.start`) while the new worker is already looking.
+  def self.grow : Nil
+    return if word(pointerof(@@launched)).value.get >= @@started.to_i64
+    return unless word(pointerof(@@spinning)).value.compare_and_set(0_i64, 1_i64)[1]
+    if IyiSchedLock.held_here? || IyiScheduler.state_id == 0_u64 || !runtime_lock_free?
+      word(pointerof(@@spinning)).value.sub(1_i64)
+      word(pointerof(@@owed)).value.set(1_i64)
+      Pointer(Atomic(UInt64)).new(pointerof(@@owes).address).value.add(1_u64)
+      return
+    end
+    word(pointerof(@@launched)).value.add(1_i64)
+    IyiThread.start { IyiWorkers.work }
+  end
+
+  # Whether the runtime's lock is free, waited for up to 100 us: another
+  # thread lets it go in that, and one this thread holds is never let go
+  # here, so the start is owed then.
+  private def self.runtime_lock_free? : Bool
+    return true unless IyiRuntimeLock.held?
+    until_ns = __iyi_monotonic_ns + 100_000_i64
+    while IyiRuntimeLock.held?
+      return false if __iyi_monotonic_ns >= until_ns
+      IyiThread.spin_pause
+    end
+    true
+  end
+
+  # Starts `grow` owed rather than made, in all: what the exercise names
+  # when the pool did not grow.
+  def self.owes : UInt64
+    Pointer(Atomic(UInt64)).new(pointerof(@@owes).address).value.get
+  end
+
+  # A start `grow` owed, called for again: an idle worker rung if one has
+  # come since, or the worker started. Without a lock.
+  def self.pay : Nil
+    return if word(pointerof(@@owed)).value.get == 0_i64
+    return unless word(pointerof(@@owed)).value.compare_and_set(1_i64, 0_i64)[1]
+    wake_one
   end
 
   # A worker rung to look has looked: it is out of the count, and one
@@ -5101,6 +5922,14 @@ class IyiWorkers
     st.spinning = false
     word(pointerof(@@spinning)).value.sub(1_i64)
     wake_one if found && work_waiting?
+  end
+
+  # A worker that gave its token back as it went idle, and found work on
+  # the look after (`IyiScheduler.idle_worker`), out looking again, as Go's
+  # `becomeSpinning` after `findRunnable`'s second look. Lock held.
+  def self.spin_again(st : IyiSchedulerState) : Nil
+    st.spinning = true
+    word(pointerof(@@spinning)).value.add(1_i64)
   end
 
   # ── Preemption at loop back-edges (SPEC.md III.4.13, part 9) ─────────
@@ -5151,6 +5980,7 @@ class IyiWorkers
   # the slot on every thread, and one at 64 or past it is in the
   # expansion table, not the TEB, so it is given back and the word stays
   # at `ArbitraryUserPointer`. Nothing elsewhere.
+  @[Effect(:scheduler)]
   def self.claim_preempt_slot : Nil
     {% if flag?(:win32) && flag?(:x86_64) %}
       index = LibC.TlsAlloc
@@ -5179,6 +6009,9 @@ class IyiWorkers
   # worker up, as a thread the kernel preempts holding one does: a task
   # waiting for it parks on the lock's word rather than spin (std/mutex).
   def self.preempted : Nil
+    {% if flag?(:iyi_chaos) %}
+      return if IyiChaos.back_edge
+    {% end %}
     {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
       {% if flag?(:win32) && flag?(:x86_64) && !flag?(:preempt_check_accessor) %}
         st = IyiScheduler.state
@@ -5213,8 +6046,13 @@ class IyiWorkers
       end
       # What the poll woke is in this worker's ring: an idle worker is
       # called for it, even for one fiber, which `push_runnable` leaves
-      # for the worker itself to run next.
+      # for the worker itself to run next. A worker start owed while every
+      # worker was busy is paid here (`grow`).
       wake_one if st.ring_size > 0_u64
+      pay
+      {% if flag?(:iyi_chaos) %}
+        return give_up(st, fiber) if !fiber.homebound && IyiChaos.forced_turn?
+      {% end %}
       give_up(st, fiber) if turn_wanted?(st, fiber)
     {% end %}
   end
@@ -5351,9 +6189,19 @@ class IyiWorkers
   end
 
   # One look at every worker, raising the word of each that one task has
-  # held for the quantum; whether any worker was running.
+  # held for the quantum; whether any worker was running. A worker held so
+  # with fibers in its ring calls an idle worker to steal them, since its
+  # task may be in code no back-edge check is in - the runtime's own, the
+  # collector's, a `@[NoPreempt]` def - or its thread may be one the
+  # kernel left in the ready queue, and nothing else calls anybody for a
+  # lone fiber pushed on the way to the next one, or for a hand-off a
+  # worker's back-off left uncalled (`push_runnable`). So does a running
+  # worker with news in a poller it has not looked at (`held_io?`). The
+  # monitor holds no scheduler state of its own; the call takes the
+  # scheduler's lock and rings, which allocates nothing.
   private def self.look : Bool
     busy = false
+    stuck = false
     count = word(pointerof(@@listed_count)).value.get
     index = 0_i64
     while index < count
@@ -5362,6 +6210,9 @@ class IyiWorkers
         st.watch_ticks = 0_u64
       else
         busy = true
+        {% unless flag?(:win32) %}
+          stuck = true if held_io?(st)
+        {% end %}
         seen = st.switches
         if seen != st.watch_seen
           st.watch_seen = seen
@@ -5372,25 +6223,109 @@ class IyiWorkers
             ticks = 0_u64
             address = st.preempt_word
             Pointer(Atomic(UInt64)).new(address).value.set(1_u64) if address != 0_u64
+            stuck = true if st.ring_size > 0_u64
           end
           st.watch_ticks = ticks
         end
       end
       index = index &+ 1_i64
     end
+    wake_one if stuck
     busy || work_waiting?
   end
+
+  {% unless flag?(:win32) %}
+    # Whether running worker *st* holds news an idle worker should take:
+    # there is an idle worker, *st* has io waiters and has not looked at
+    # its poller for `POLL_IO_NS`, and a look without waiting finds news
+    # there (`peek`). Marked and counted for the worker that comes
+    # (`take_held_io`), which takes it out of *st*'s poller. Any running
+    # worker, not only one held a quantum: one that runs short tasks
+    # looks at its poller every `POLL_EVERY` parks, and a thread the
+    # kernel has left in its ready queue switches nothing meanwhile either
+    # way.
+    @[Effect(:scheduler)]
+    private def self.held_io?(st : IyiSchedulerState) : Bool
+      return false if word(pointerof(@@idle)).value.get <= 0_i64
+      return false if st.io_head.is_a?(Nil) || st.pollfd <= 0_i64
+      return false if __iyi_monotonic_ns - st.polled_at < IyiScheduler::POLL_IO_NS
+      return false unless peek(st)
+      word(pointerof(@@held_io)).value.add(1_i64) if st.mark_held_io
+      true
+    end
+
+    # Whether *st*'s poller holds news besides its doorbell, asked without
+    # waiting into the monitor's page past what its own wait uses: up to
+    # `PEEK` events at +256, and darwin's zero timeout at +128. It takes
+    # nothing: level-triggered news stays for whoever polls next, an
+    # eventfd is not read, and darwin's doorbell, an `EV_CLEAR` event this
+    # look takes off the kqueue, is rung again.
+    PEEK = 4
+
+    @[Effect(:scheduler)]
+    private def self.peek(st : IyiSchedulerState) : Bool
+      page = @@monitor_page
+      buffer = page &+ 256_u64
+      count = 0_i64
+      {% if flag?(:darwin) %}
+        Pointer(UInt64).new(page &+ 128_u64).value = 0_u64
+        Pointer(UInt64).new(page &+ 136_u64).value = 0_u64
+        count = LibC.kevent(st.pollfd.to_i32, Pointer(Void).new(0_u64), 0,
+          Pointer(Void).new(buffer), PEEK, Pointer(Void).new(page &+ 128_u64)).to_i64
+      {% else %}
+        count = __iyi_conc_syscall6(IYI_SYS_EPOLL_PWAIT, st.pollfd, buffer.to_i64, PEEK.to_i64, 0_i64, 0_i64, 8_i64)
+      {% end %}
+      news = false
+      rung = false
+      index = 0_i64
+      while index < count
+        entry = buffer &+ (index * IYI_POLL_EVENT_BYTES).to_u64
+        ready = IyiScheduler.event_ready(entry)
+        {% if flag?(:darwin) %}
+          rung = true if ready == 0
+        {% else %}
+          ready = 0 if Pointer(UInt64).new(entry + IYI_POLL_DATA_OFFSET).value.to_i64 == st.wake_fd
+        {% end %}
+        news = true if ready != 0
+        index = index &+ 1_i64
+      end
+      {% if flag?(:darwin) %}
+        IyiScheduler.retrigger(st) if rung
+      {% end %}
+      news
+    end
+
+    # The news the monitor found in running workers' pollers (`held_io?`),
+    # taken by worker *me* (`IyiScheduler.take_held`), its own included:
+    # true when a waiter came of it, into *me*'s queues.
+    @[Effect(:scheduler)]
+    def self.take_held_io(me : IyiSchedulerState) : Bool
+      return false if word(pointerof(@@held_io)).value.get <= 0_i64
+      took = false
+      count = word(pointerof(@@listed_count)).value.get
+      index = 0_i64
+      while index < count
+        other = listed_at(index)
+        if other.take_held_io
+          word(pointerof(@@held_io)).value.sub(1_i64)
+          took = true if IyiScheduler.take_held(other)
+        end
+        index = index &+ 1_i64
+      end
+      took
+    end
+  {% end %}
 
   # Every worker idle and nothing waiting: the monitor says it is parked,
   # under the lock a worker leaving its wait takes, and waits until that
   # worker takes the word back (`take_monitor_wake`). Not before every
-  # worker has come up: one that finds a task the moment it starts never
-  # waits, so never leaves a wait to wake the monitor - the unit step's
-  # task was never preempted that way, on a pool of one.
+  # worker started has come up: one that finds a task the moment it
+  # starts never waits, so never leaves a wait to wake the monitor - the
+  # unit step's task was never preempted that way, on a pool of one.
   private def self.park_monitor : Nil
     IyiSchedLock.lock
     count = word(pointerof(@@listed_count)).value.get
-    quiet = count == @@started.to_i64 && !work_waiting?
+    quiet = count == word(pointerof(@@launched)).value.get && !work_waiting?
     index = 0_i64
     while quiet && index < count
       quiet = false unless listed_at(index).idle
@@ -5727,9 +6662,27 @@ end
 # what is left on the list when a panic arrives is exactly what did not
 # get to clean up.
 def __iyi_defer_push(cleanup : Proc(Nil)) : Nil
+  __iyi_defer_push_node(IyiDeferNode.new(cleanup))
+end
+
+# A node its caller made once and registers each time it needs the
+# cleanup, never twice at once: std/mutex's release, where a `defer` was
+# two allocations, the node and its block's closure, around every block
+# a Mutex runs (`Mutex#register_release`). Its link is written only when
+# it changes and taken down when it is popped, so the tasks taking turns
+# at a lock, with nothing registered below it, read the node and never
+# write it: written each time, it was one more line passed between their
+# cores with the lock's own. A panic's drain leaves the link, which the
+# next push puts right.
+def __iyi_defer_push_node(node : IyiDeferNode) : Nil
   fiber = IyiScheduler.current
-  node = IyiDeferNode.new(cleanup)
-  node.next_node = fiber.defers
+  below = fiber.defers
+  linked = node.next_node
+  if below.is_a?(IyiDeferNode)
+    node.next_node = below unless linked.is_a?(IyiDeferNode) && linked.object_id == below.object_id
+  elsif linked.is_a?(IyiDeferNode)
+    node.next_node = nil
+  end
   fiber.defers = node
 end
 
@@ -5737,7 +6690,9 @@ def __iyi_defer_pop_run : Nil
   fiber = IyiScheduler.current
   node = fiber.defers
   return unless node.is_a?(IyiDeferNode)
-  fiber.defers = node.next_node
+  below = node.next_node
+  fiber.defers = below
+  node.next_node = nil if below.is_a?(IyiDeferNode)
   node.run
 end
 
@@ -5748,6 +6703,9 @@ end
 # output was empty all three ways. A failed write here is a panic like any
 # other write's. The targets without tasks define it beside their `exit`.
 def __iyi_flush_std : Nil
+  {% if flag?(:iyi_chaos) %}
+    IyiChaos.report
+  {% end %}
   STDOUT.flush
   STDERR.flush
 end
@@ -5863,6 +6821,9 @@ class IyiTask(T)
   end
 
   def value : T | Panicked
+    {% if flag?(:iyi_chaos) %}
+      IyiChaos.point
+    {% end %}
     IyiScheduler.join(@fiber)
     # III.1.4, literal: reading the panicked task's value *catches* the
     # panic — it arrives as the error value it became at the boundary,
@@ -5874,6 +6835,59 @@ class IyiTask(T)
     end
     return Panicked.new("a task stopped by its cancellation has no value") if @box.empty?
     @box.first
+  end
+end
+
+class IyiGroup
+  # :nodoc: — what std/unit's `Unit(T)` is (SPEC.md III.4.18): a value, and
+  # the unit that alone reaches it. `g.spawn(in: u)` runs its block in that
+  # unit with the value (`IyiGroup#spawn(*, in)`), and nothing else is ever
+  # handed the value - `iyi_value` is protected, so only `IyiGroup` reads
+  # it - which is what lets std/unit declare `Unit(T)` `Share` for any `T`,
+  # as `Mutex(T)` is.
+  class Unit(T)
+    @value : T
+    @unit : IyiUnit
+    # Where its tasks run, settled at its first and kept for its life:
+    # `UNPLACED`, `POOL`, or `MAIN` - one worker, the main thread. Settled
+    # once because a pool sized after it (`IyiWorkers.count=`) would
+    # otherwise run its later tasks on workers beside its earlier ones on
+    # the main thread.
+    @placed : Atomic(UInt64)
+    {% if flag?(:iyi_chaos) %}
+      # Its tasks' chaos unit, made at its first task (`IyiChaos.adopt_into`).
+      @iyi_chaos_unit : IyiChaosUnit? = nil
+      property iyi_chaos_unit : IyiChaosUnit?
+    {% end %}
+
+    UNPLACED = 0_u64
+    POOL     = 1_u64
+    MAIN     = 2_u64
+
+    protected def initialize(@value : T)
+      @unit = IyiUnit.new
+      @placed = Atomic(UInt64).new(UNPLACED)
+    end
+
+    protected def iyi_value : T
+      @value
+    end
+
+    protected def iyi_unit : IyiUnit
+      @unit
+    end
+
+    # Whether its tasks run on the pool: on a pool of more than one worker,
+    # as an eligible spawn does (`IyiWorkers.parallel?`), asked at its first
+    # task; the first of two threads to ask settles it for both.
+    protected def iyi_on_pool? : Bool
+      placed = @placed.get
+      if placed == UNPLACED
+        wanted = IyiWorkers.parallel? ? POOL : MAIN
+        placed = @placed.compare_and_set(UNPLACED, wanted)[1] ? wanted : @placed.get
+      end
+      placed == POOL
+    end
   end
 end
 
@@ -5916,17 +6930,100 @@ class IyiGroup
   # group acts on (III.4.3): the first cancels the siblings, and the task
   # it is told on is `first_failure`, which the typed group answers. A
   # task a cancelled one starts, or one a cancelled group starts, is
-  # cancelled from its first wait on. It never runs at the same instant as
-  # its spawner: on a thread outside the pool it runs on that thread for
-  # its whole life, and inside a parallel task it joins that task's unit
-  # (`IyiUnit`), whose fibers may each resume on another worker but never
-  # two at once.
+  # cancelled from its first wait on.
+  #
+  # One verb, four placements (SPEC.md III.4.16, III.4.18). Written
+  # plain, where it runs is the compiler's decision, per call (III.4.15):
+  # a block every capture of which is `Share`, and that reaches no module
+  # state that is not, may run on another core, and the compiler points
+  # such a call at `spawn_pooled`; every other call runs this body, and
+  # the task stays in its spawner's unit, as `spawn(unit: :same)`'s does.
+  # `unit: :new` asks for a unit of its own and `unit: :same` for the
+  # spawner's; each is written as that literal and nothing else
+  # (`CleanupTransformer#check_spawn_placement`). `in: u` runs the task in
+  # the `Unit` *u* (std/unit).
   def spawn(&block : -> T) : IyiTask(T) forall T
+    {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+      # Never taken. The line is here so that `spawn_pooled` is typed for
+      # every `T` this def is, which is what lets the compiler point an
+      # eligible call at it after typing (`CleanupTransformer#
+      # classify_spawn`); a branch on `false` is dropped before codegen.
+      return spawn_pooled(&block) if false
+    {% end %}
+    in_unit(&block)
+  end
+
+  # `g.spawn(unit: :same) { }` and `g.spawn(unit: :new) { }`.
+  #
+  # `:same`: a task that stays in its spawner's unit whatever its block
+  # captures (SPEC.md III.4.18). It never runs at the same instant as its
+  # spawner or as any other task of the unit, and it does not run until
+  # its spawner parks, as every `spawn` did before 0.21.0 (III.4.15, part
+  # 5). On a thread outside the pool it runs on that thread for its whole
+  # life; inside a task on the pool it joins that task's unit
+  # (`IyiUnit`), whose fibers may each resume on another worker but never
+  # two at once. This body is that.
+  #
+  # `:new`: a task in a unit of its own, which may run on another core
+  # (III.4.13): `spawn_new`, which the compiler points the call at once it
+  # has read the literal (`CleanupTransformer#classify_spawn`), as it
+  # points an eligible plain call at `spawn_pooled`. The line below is
+  # never taken and is there so that `spawn_new` is typed for every `T`;
+  # a branch on `false` is dropped before codegen, so a program that only
+  # ever asks for `:same` starts no pool. What the compiler asks of the
+  # block is what it asks of a thread's (III.4.4): its captures must be
+  # `Share`, and module state a call reaches is warned about.
+  def spawn(*, unit : Symbol, &block : -> T) : IyiTask(T) forall T
+    {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+      return spawn_new(&block) if false
+    {% end %}
+    in_unit(&block)
+  end
+
+  # `g.spawn(in: u) { |value| }`: a task of this group - joined, cancelled
+  # and failed as any of its tasks - that runs in the `Unit` *u* (std/unit,
+  # SPEC.md III.4.18), one at a time with *u*'s other tasks and switching
+  # among them only where one parks, and is handed the value *u* owns.
+  # The compiler holds the block to what a thread's is (its captures are
+  # `Share`) and its answer to what `Mutex#get`'s is (`Share`, since it
+  # leaves the unit while the unit lives on).
+  def spawn(*, in owner : Unit(S), &block : S -> T) : IyiTask(T) forall S, T
+    value = owner.iyi_value
+    # Named outside the `{% if %}`: a block parameter read only inside one
+    # is not captured.
+    work = -> { block.call(value) }
+    {% if flag?(:gc_none) || flag?(:gc_boehm) %}
+      # One thread: every task is a unit-mate of every other already.
+      in_unit(&work)
+    {% else %}
+      if owner.iyi_on_pool?
+        pooled(owner.iyi_unit, &work)
+      else
+        on_main(owner, &work)
+      end
+    {% end %}
+  end
+
+  # Both placements at once, which the compiler refuses at the call
+  # (`CleanupTransformer#check_spawn_placement`); declared so that the
+  # refusal names the two arguments rather than listing overloads.
+  def spawn(*, in owner : Unit(S), unit : Symbol, &block : S -> T) : IyiTask(T) forall S, T
+    value = owner.iyi_value
+    in_unit { block.call(value) }
+  end
+
+  # The starts take the block as `spawn` does, `-> T`: a `Proc(T)`
+  # parameter binds no `T` for a block that never returns, and
+  # `g.spawn(unit: :new) { raise "boom" }` stopped compiling.
+  private def in_unit(&block : -> T) : IyiTask(T) forall T
     raise "a task spawned on a group whose block has ended: no scope is left to join it" if @ended
     IyiScheduler.make_stacks_with { |fresh| fresh.prepare_stack } unless IyiScheduler.makes_stacks?
     fiber = IyiFiber.new
     fiber.home = IyiScheduler.state
     fiber.unit = IyiScheduler.current.unit
+    {% if flag?(:iyi_chaos) %}
+      IyiChaos.adopt(fiber)
+    {% end %}
     task = IyiTask(T).new(fiber)
     runner = self
     install(fiber) do
@@ -5940,21 +7037,48 @@ class IyiGroup
   end
 
   {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
-    # Start a task that may run on another core (SPEC.md III.4.13): it
-    # waits in the pool until a worker is free, and from then on runs on
-    # whichever worker is free whenever it is runnable, with the tasks it
-    # spawns (`IyiUnit`). Everything else is `spawn`'s - the scope, the
-    # cancel, the failure policy, the answer through `value`. What differs
-    # is what the compiler asks of the block: it may capture only `Share`
-    # values, as the block a thread runs may (III.4.4,
-    # `CleanupTransformer#check_share_boundary`).
-    def spawn_parallel(&block : -> T) : IyiTask(T) forall T
+    # :nodoc: — a `spawn` the compiler found eligible (SPEC.md III.4.15):
+    # a parallel task of its own unit, on a pool of more than one worker.
+    # On one worker, `IYI_WORKERS=1` or `IyiWorkers.count = 1`, it stays in
+    # its spawner's unit, so a program held to one worker runs its spawns
+    # on one thread, as before. Private: nothing but the compiler, which
+    # has checked the block, may call it.
+    private def spawn_pooled(&block : -> T) : IyiTask(T) forall T
+      {% if flag?(:iyi_chaos) %}
+        return IyiChaos.parallel_task(in_unit(&block)) if IyiChaos.simulated?
+      {% end %}
+      return in_unit(&block) unless IyiWorkers.parallel?
+      on_pool(&block)
+    end
+
+    # :nodoc: — `g.spawn(unit: :new) { }`, which the compiler points here
+    # (`spawn(*, unit)`): a task in a unit of its own that may run on
+    # another core (SPEC.md III.4.13, III.4.18). It waits in the pool until
+    # a worker is free, and from then on runs on whichever worker is free
+    # whenever it is runnable, with the tasks it spawns (`IyiUnit`).
+    # Everything else is `spawn`'s - the scope, the cancel, the failure
+    # policy, the answer through `value`. Named `spawn_` so that the proof
+    # of `@[SafeReach]`, which runs after the call is pointed here, counts
+    # its block as a parallel start (`ReachProof#parallel_start?`).
+    private def spawn_new(&block : -> T) : IyiTask(T) forall T
+      on_pool(&block)
+    end
+
+    private def on_pool(&block : -> T) : IyiTask(T) forall T
+      {% if flag?(:iyi_chaos) %}
+        return IyiChaos.parallel_task(in_unit(&block)) if IyiChaos.simulated?
+      {% end %}
+      pooled(IyiUnit.new, &block)
+    end
+
+    # A task of *unit* on the pool: a new unit's first, or a `Unit`'s.
+    private def pooled(unit : IyiUnit, &block : -> T) : IyiTask(T) forall T
       raise "a task spawned on a group whose block has ended: no scope is left to join it" if @ended
       IyiScheduler.make_stacks_with { |fresh| fresh.prepare_stack } unless IyiScheduler.makes_stacks?
       IyiWorkers.start
       fiber = IyiFiber.new
       fiber.parallel = true
-      fiber.unit = IyiUnit.new
+      fiber.unit = unit
       task = IyiTask(T).new(fiber)
       runner = self
       install(fiber) do
@@ -5966,11 +7090,40 @@ class IyiGroup
       IyiSchedLock.lock
       IyiWorkers.push(fiber)
       IyiSchedLock.unlock
+      # A worker the push found none idle for, started now the lock is let
+      # go (`IyiWorkers.grow`).
+      IyiWorkers.pay
       task
     end
-  {% else %}
-    def spawn_parallel(&block : -> T) : IyiTask(T) forall T
-      \{% raise "spawn_parallel needs threads, and a build under -Dgc_none or -Dgc_boehm has none: a thread would race the bump pointer, or be one Boehm never heard of (SPEC.md III.4.13)" %}
+
+    # A task of a `Unit` held to one worker (`Unit#iyi_on_pool?`):
+    # on the main thread, whichever thread spawns it, so that one worker is
+    # one thread for a `Unit` too (SPEC.md III.4.15 part 6, III.4.18), and
+    # an `IyiThread` and the main thread never run two of its tasks at
+    # once. It never moves, and takes turns with the main thread's other
+    # tasks at parks. Under the chaos scheduler it takes turns as the
+    # `Unit`'s own chaos unit, as a parallel task does as its own.
+    private def on_main(owner : Unit(S), &block : -> T) : IyiTask(T) forall S, T
+      raise "a task spawned on a group whose block has ended: no scope is left to join it" if @ended
+      IyiScheduler.make_stacks_with { |fresh| fresh.prepare_stack } unless IyiScheduler.makes_stacks?
+      fiber = IyiFiber.new
+      fiber.home = IyiScheduler.main_state
+      {% if flag?(:iyi_chaos) %}
+        IyiChaos.adopt_into(fiber, owner)
+      {% end %}
+      task = IyiTask(T).new(fiber)
+      runner = self
+      install(fiber) do
+        value = block.call
+        task.finish(value)
+        runner.finished(fiber, value.is_a?(::Error))
+      end
+      adopt(fiber)
+      IyiScheduler.ready(fiber, false)
+      {% if flag?(:iyi_chaos) %}
+        IyiChaos.point
+      {% end %}
+      task
     end
   {% end %}
 
@@ -6146,6 +7299,14 @@ def group(& : IyiGroup -> U) : U forall U
   answer
 end
 
+# What a channel's half answers when it could not act without parking
+# (`Channel#take_held`, `#put_held`), and a timeout arm whose time has
+# not come: never a channel's value, since no channel carries it.
+struct IyiMissed
+  def initialize
+  end
+end
+
 # ── Channel — III.4.6 ──────────────────────────────────────────────────
 #
 # `Channel(T).new` is a rendezvous, as Crystal's is: a send completes when
@@ -6160,11 +7321,14 @@ end
 # trusted whenever `T` is - III.4.6's "`Channel(T)` carries over, with
 # `T : Share`" - so a parallel task and a thread may capture one whose
 # values are themselves safe on two threads, and every operation below
-# is behind the scheduler's lock, which a park lets go of before it
-# switches. A wake of a fiber on another thread goes through its inbox
+# is behind the channel's own lock (`IyiChanLock`), which a park lets go
+# of before it switches. A woken fiber's park is claimed first
+# (`IyiWaiter#claim`), since a select parked here may be woken by another
+# channel's waker at the same moment, and a node whose claim fails is
+# stale. A wake of a fiber on another thread goes through its inbox
 # (`IyiScheduler.ready`). `select` is answered by this protocol — a node
-# per arm, one nonce, losers stale by arithmetic until the woken select
-# takes them out — at the bottom of the class.
+# per arm, one nonce, losers stale once one wake is claimed, until the
+# woken select takes them out — at the bottom of the class.
 @[Share]
 class Channel(T)
   # The values in hand, a ring: `@count` of them from `@first`. An array
@@ -6184,6 +7348,19 @@ class Channel(T)
   @send_tail : IyiSendNode(T)?
   # The send node the last parked sender used (`park_send_node`).
   @spare_send : IyiSendNode(T)?
+  # The channel's lock (`IyiChanLock`): 0 free, 1 held.
+  @guard : Atomic(UInt64)
+  # The fiber an operation claimed and has yet to ready: it is readied
+  # once the lock is let go (`take_woken`), so the lock is not held over
+  # the scheduler's queues - another worker's ring, the shared queue and
+  # the scheduler's lock, an idle worker's doorbell. An operation wakes
+  # one fiber at most; `close` wakes each as it claims it. With this and
+  # the lock's release store (`IyiChanLock.unlock`), bench/chan_scaling.iyi
+  # at 200000 rounds, best of 5 interleaved on Linux x86_64 (12 vCPU,
+  # shared), went from the wake made under the lock to: twelve producers
+  # into one channel 7.5 to 17.9 million values a second, four 16.1 to
+  # 32.1, one 51.5 to 72.1; twelve ping-pong pairs 38.4 to 44.4 million.
+  @woken : IyiFiber?
 
   def initialize
     initialize(0)
@@ -6202,18 +7379,52 @@ class Channel(T)
     @send_head = nil
     @send_tail = nil
     @spare_send = nil
+    @guard = Atomic(UInt64).new(0_u64)
+    @woken = nil
+  end
+
+  # :nodoc: - the lock's word, by address: what `select` orders its
+  # channels' locks by.
+  def lock_address : UInt64
+    pointerof(@guard).address
+  end
+
+  private def lock : Nil
+    IyiChanLock.lock(pointerof(@guard), IyiChanLock::CHANNEL_WAIT)
+  end
+
+  private def unlock : Nil
+    IyiChanLock.unlock(pointerof(@guard))
+  end
+
+  # :nodoc: - the lock held: the fiber the last operation claimed, taken
+  # out to be readied once the lock is let go (`wake`).
+  def take_woken : IyiFiber?
+    woken = @woken
+    @woken = nil
+    woken
+  end
+
+  # :nodoc: - what `take_woken` answered, readied with no lock held.
+  def self.wake(woken : IyiFiber?) : Nil
+    IyiScheduler.ready(woken, false) if woken.is_a?(IyiFiber)
   end
 
   def send(value : T) : Nil | ChannelClosed | Cancelled
+    {% if flag?(:iyi_chaos) %}
+      IyiChaos.point
+    {% end %}
     fiber = IyiScheduler.current
-    IyiSchedLock.lock
+    lock
     if fiber.cancelled
-      IyiSchedLock.unlock
+      unlock
       return Cancelled.new
     end
-    if send_ready_held?
-      answer = put_held(value)
-      IyiSchedLock.unlock
+    answer = put_held(value)
+    unless answer.is_a?(IyiMissed)
+      woken = take_woken
+      unlock
+      Channel.wake(woken)
       return answer
     end
 
@@ -6223,10 +7434,11 @@ class Channel(T)
     # cancelled park's or a closed channel's, and its node leaves the
     # queue here and lets go of the value, so a cancelled one leaves
     # nothing behind.
-    node = park_send_node(fiber, IyiScheduler.park(fiber), value)
-    IyiSchedLock.unlock
-    IyiScheduler.reschedule
-    IyiSchedLock.lock
+    nonce = IyiScheduler.park(fiber)
+    node = park_send_node(fiber, nonce, value)
+    unlock
+    IyiScheduler.suspend(fiber, nonce)
+    lock
     delivered = node.delivered?
     node.read = true
     unless delivered
@@ -6234,7 +7446,7 @@ class Channel(T)
       node.forget
     end
     cancelled = fiber.cancelled
-    IyiSchedLock.unlock
+    unlock
     return nil if delivered
     return Cancelled.new if cancelled
     ChannelClosed.new
@@ -6247,25 +7459,31 @@ class Channel(T)
   # A woken park that was handed nothing takes its node out of the queue,
   # so a cancelled one leaves nothing behind.
   def receive : T | ChannelClosed | Cancelled
+    {% if flag?(:iyi_chaos) %}
+      IyiChaos.point
+    {% end %}
     fiber = IyiScheduler.current
-    IyiSchedLock.lock
+    lock
     while true
       if fiber.cancelled
-        IyiSchedLock.unlock
+        unlock
         return Cancelled.new
       end
-      if receive_ready_held?
-        answer = take_held
-        IyiSchedLock.unlock
+      answer = take_held
+      unless answer.is_a?(IyiMissed)
+        woken = take_woken
+        unlock
+        Channel.wake(woken)
         return answer
       end
       got = uninitialized T
-      waiter = park_receive_node(fiber, IyiScheduler.park(fiber), pointerof(got).address)
-      IyiSchedLock.unlock
-      IyiScheduler.reschedule
-      IyiSchedLock.lock
+      nonce = IyiScheduler.park(fiber)
+      waiter = park_receive_node(fiber, nonce, pointerof(got).address)
+      unlock
+      IyiScheduler.suspend(fiber, nonce)
+      lock
       if waiter.handed
-        IyiSchedLock.unlock
+        unlock
         return got
       end
       unlink_receiver(waiter)
@@ -6276,16 +7494,20 @@ class Channel(T)
   # side — a receiver finds the buffer, then `ChannelClosed`; a sender
   # finds its box still full.
   def close : Nil
-    IyiSchedLock.lock
+    {% if flag?(:iyi_chaos) %}
+      IyiChaos.point
+    {% end %}
+    lock
     @closed = true
     while wake_receiver
+      Channel.wake(take_woken)
     end
     while true
       node = take_sender
       break unless node.is_a?(IyiSendNode(T))
-      IyiScheduler.ready(node.fiber)
+      IyiScheduler.ready(node.fiber, false)
     end
-    IyiSchedLock.unlock
+    unlock
   end
 
   def closed? : Bool
@@ -6294,10 +7516,12 @@ class Channel(T)
 
   # ── The halves `select` shares with the calls above ────────────────
   #
-  # `*_held` assume the scheduler's lock: `ready?` promises the `_now`
-  # half will not park, and with the lock held from the look to the act
-  # the promise cannot be broken in the gap, by a fiber on this thread or
-  # on any other. `send`, `receive` and `select` call these.
+  # `*_held` assume the channel's lock: each looks and acts in one step,
+  # and answers `IyiMissed` when there was nothing to do without parking.
+  # A look and a later act were two steps when one lock held every
+  # channel; with a lock each, a parked sender found by the look may be a
+  # select another channel wakes before the act, so the act is the look.
+  # `send`, `receive` and `select` call these.
   #
   # The public spellings take the lock themselves. They were these same
   # halves, public because `select`'s arms call them, and the library
@@ -6312,16 +7536,16 @@ class Channel(T)
   # `now` step hammers both from every worker, and a copy without the
   # lock is caught there.
 
+  # Whether a receive would not park now: an answer that may be old by
+  # the time it is read.
   def receive_ready? : Bool
-    IyiSchedLock.lock
-    ready = receive_ready_held?
-    IyiSchedLock.unlock
+    {% if flag?(:iyi_chaos) %}
+      IyiChaos.point
+    {% end %}
+    lock
+    ready = @closed || @count > 0 || sender_waiting?
+    unlock
     ready
-  end
-
-  # :nodoc: - the scheduler's lock held.
-  def receive_ready_held? : Bool
-    @closed || @count > 0 || sender_waiting?
   end
 
   # The next value without waiting: the buffer, then a parked sender's
@@ -6329,17 +7553,21 @@ class Channel(T)
   # to take, and asking is a bug the call panics over; `select` with an
   # `else` arm is the receive that may find nothing.
   def take_now : T | ChannelClosed
-    IyiSchedLock.lock
-    ready = receive_ready_held?
-    answer = ready ? take_held : ChannelClosed.new
-    IyiSchedLock.unlock
-    raise "take_now on an empty open channel" unless ready
+    {% if flag?(:iyi_chaos) %}
+      IyiChaos.point
+    {% end %}
+    lock
+    answer = take_held
+    woken = take_woken
+    unlock
+    Channel.wake(woken)
+    raise "take_now on an empty open channel" if answer.is_a?(IyiMissed)
     answer
   end
 
-  # :nodoc: - the scheduler's lock held, and `receive_ready_held?` true:
-  # the buffer, then a parked sender's box, then the refusal.
-  def take_held : T | ChannelClosed
+  # :nodoc: - the channel's lock held: the buffer, then a parked sender's
+  # box, then the refusal, or `IyiMissed` when a receive would park.
+  def take_held : T | ChannelClosed | IyiMissed
     if @count > 0
       value = shift_item
       # The buffer has room now; the oldest parked sender's value moves
@@ -6347,32 +7575,30 @@ class Channel(T)
       refill = take_sender
       if refill.is_a?(IyiSendNode(T))
         push_item(refill.take)
-        IyiScheduler.ready(refill.fiber)
+        @woken = refill.fiber
       end
       return value
     end
-    unless @closed
-      node = take_sender
-      if node.is_a?(IyiSendNode(T))
-        value = node.take
-        IyiScheduler.ready(node.fiber)
-        return value
-      end
-    end
     return ChannelClosed.new if @closed
-    raise "take_now on an empty open channel"
+    node = take_sender
+    if node.is_a?(IyiSendNode(T))
+      value = node.take
+      @woken = node.fiber
+      return value
+    end
+    IyiMissed.new
   end
 
+  # Whether a send would not park now: an answer that may be old by the
+  # time it is read.
   def send_ready? : Bool
-    IyiSchedLock.lock
-    ready = send_ready_held?
-    IyiSchedLock.unlock
+    {% if flag?(:iyi_chaos) %}
+      IyiChaos.point
+    {% end %}
+    lock
+    ready = @closed || @count < @capacity || receiver_waiting?
+    unlock
     ready
-  end
-
-  # :nodoc: - the scheduler's lock held.
-  def send_ready_held? : Bool
-    @closed || @count < @capacity || receiver_waiting?
   end
 
   # The value sent without waiting: to a parked receiver, or into the
@@ -6380,23 +7606,27 @@ class Channel(T)
   # room, and asking is a bug the call panics over; `select` with an
   # `else` arm is the send that may not happen.
   def put_now(value : T) : Nil | ChannelClosed
-    IyiSchedLock.lock
-    ready = send_ready_held?
-    answer = ready ? put_held(value) : nil
-    IyiSchedLock.unlock
-    raise "put_now on a full channel" unless ready
+    {% if flag?(:iyi_chaos) %}
+      IyiChaos.point
+    {% end %}
+    lock
+    answer = put_held(value)
+    woken = take_woken
+    unlock
+    Channel.wake(woken)
+    raise "put_now on a full channel" if answer.is_a?(IyiMissed)
     answer
   end
 
-  # :nodoc: - the scheduler's lock held, and `send_ready_held?` true. A
-  # rendezvous puts the value in the parked receiver's own slot (`hand`).
-  # It went into the buffer, and the send answered delivered on the word
-  # of the wake: a select woken that way took another arm ready by then, a
-  # receiver cancelled before it ran answered `Cancelled`, and either way
-  # the value stayed in a channel of no capacity after its sender left. A
-  # buffered send completes when the buffer takes it, so there the woken
-  # receiver finds it in the buffer.
-  def put_held(value : T) : Nil | ChannelClosed
+  # :nodoc: - the channel's lock held; `IyiMissed` when a send would
+  # park. A rendezvous puts the value in the parked receiver's own slot
+  # (`hand`). It went into the buffer, and the send answered delivered on
+  # the word of the wake: a select woken that way took another arm ready
+  # by then, a receiver cancelled before it ran answered `Cancelled`, and
+  # either way the value stayed in a channel of no capacity after its
+  # sender left. A buffered send completes when the buffer takes it, so
+  # there the woken receiver finds it in the buffer.
+  def put_held(value : T) : Nil | ChannelClosed | IyiMissed
     return ChannelClosed.new if @closed
     return nil if @capacity == 0 && hand(value)
     if wake_receiver
@@ -6407,7 +7637,7 @@ class Channel(T)
       push_item(value)
       return nil
     end
-    raise "put_now on a full channel"
+    IyiMissed.new
   end
 
   def receive_select_action : IyiReceiveSelect(T)
@@ -6455,7 +7685,7 @@ class Channel(T)
   # call parks with a fresh nonce of its own. *slot* is where a rendezvous
   # sender puts its value (`IyiWaiter#slot`). These and the two unlinks
   # below are public for the arms' sake and change the queues, so like
-  # the `*_held` halves they are called with the scheduler's lock held.
+  # the `*_held` halves they are called with the channel's lock held.
   def park_receive_node(fiber : IyiFiber, nonce : UInt64, slot : UInt64) : IyiWaiter
     waiter = fiber.spare_waiter
     if waiter.is_a?(IyiWaiter) && !waiter.linked
@@ -6565,16 +7795,18 @@ class Channel(T)
     node.linked = false
   end
 
-  # True when a parked receiver was woken; stale nodes — parks their
-  # fiber already left — are consumed and skipped, so a real waiter
-  # behind one is never starved by a leftover in front of it.
+  # True when a parked receiver's wake was claimed, to be readied once the
+  # lock is let go (`@woken`); stale nodes — parks their fiber already
+  # left, or whose wake another channel's waker or a cancel claimed first
+  # — are consumed and skipped, so a real waiter behind one is never
+  # starved by a leftover in front of it.
   private def wake_receiver : Bool
     while true
       head = @recv_head
       return false unless head.is_a?(IyiWaiter)
       unlink_receiver(head)
-      next unless head.current?
-      IyiScheduler.ready(head.fiber)
+      next unless head.claim
+      @woken = head.fiber
       return true
     end
   end
@@ -6582,30 +7814,31 @@ class Channel(T)
   # `wake_receiver` for a rendezvous, with the value written into the
   # receiver's slot before its fiber runs: the wake is the delivery, so
   # the select that parked the node takes this arm, and a cancellation
-  # that comes after the wake cannot strand the value. The node is
-  # current, so the slot's owner is suspended in the park that made it.
+  # that comes after the wake cannot strand the value. The wake is
+  # claimed first, so the slot's owner is suspended in the park that made
+  # it, and stays there until it is readied.
   private def hand(value : T) : Bool
     while true
       head = @recv_head
       return false unless head.is_a?(IyiWaiter)
       unlink_receiver(head)
-      next unless head.current?
+      next unless head.claim
       Pointer(T).new(head.slot).value = value
       head.handed = true
-      IyiScheduler.ready(head.fiber)
+      @woken = head.fiber
       return true
     end
   end
 
-  # The oldest parked sender still standing, not yet woken: the caller
-  # takes the value first and wakes the fiber after, so the box is the
-  # delivery receipt by the time its owner runs.
+  # The oldest parked sender still standing, its wake claimed and not yet
+  # readied: the caller takes the value first and wakes the fiber after,
+  # so the box is the delivery receipt by the time its owner runs.
   private def take_sender : IyiSendNode(T)?
     while true
       head = @send_head
       return nil unless head.is_a?(IyiSendNode(T))
       unlink_sender(head)
-      next unless head.current?
+      next unless head.claim
       return head
     end
   end
@@ -6622,22 +7855,48 @@ class Channel(T)
   # -1 for none, and a cancelled task's `Cancelled` goes to it, as that
   # arm's own primitive would have answered it.
   #
-  # Every look and every act is under the scheduler's lock, one lock for
-  # every channel an arm names, so no arm's channel changes between the
-  # look that found it ready and the act; the park lets go of it.
+  # Every look and every act is under the locks of every channel an arm
+  # names, taken in the order of their addresses (`IyiChanLock.order`),
+  # so no arm's channel changes between the look and the act, nor while
+  # the arms park; the park lets go of them all.
   def self.select(actions : U, bound : Int32) forall U
+    {% if flag?(:iyi_chaos) %}
+      IyiChaos.point
+    {% end %}
     fiber = IyiScheduler.current
-    IyiSchedLock.lock
+    locks = IyiChanLock.words(actions)
+    words = pointerof(locks).as(Pointer(UInt64))
+    held = IyiChanLock.order(words, {{ U.size }})
+    IyiChanLock.lock_all(words, held)
     while true
       if fiber.cancelled
-        IyiSchedLock.unlock
+        IyiChanLock.unlock_all(words, held)
         return cancelled_answer(bound)
       end
+      {% if flag?(:iyi_chaos) %}
+        # The chaos scheduler's arm tried first (SPEC.md III.4.17); the
+        # rest in order below, where this one, missed, misses again.
+        chaos_arm = IyiChaos.arm({{ U.size }})
+        {% for i in 0...U.size %}
+          if chaos_arm == {{ i }}
+            happened{{ i }} = !actions[{{ i }}].refused?
+            answer{{ i }} = actions[{{ i }}].execute
+            unless answer{{ i }}.is_a?(IyiMissed)
+              woken = actions[{{ i }}].take_woken
+              IyiChanLock.unlock_all(words, held)
+              Channel.wake(woken)
+              return { {{ i }}, answer{{ i }}, happened{{ i }} }
+            end
+          end
+        {% end %}
+      {% end %}
       {% for i in 0...U.size %}
-        if actions[{{ i }}].ready?
-          happened{{ i }} = !actions[{{ i }}].refused?
-          answer{{ i }} = actions[{{ i }}].execute
-          IyiSchedLock.unlock
+        happened{{ i }} = !actions[{{ i }}].refused?
+        answer{{ i }} = actions[{{ i }}].execute
+        unless answer{{ i }}.is_a?(IyiMissed)
+          woken = actions[{{ i }}].take_woken
+          IyiChanLock.unlock_all(words, held)
+          Channel.wake(woken)
           return { {{ i }}, answer{{ i }}, happened{{ i }} }
         end
       {% end %}
@@ -6647,20 +7906,21 @@ class Channel(T)
       # checked before the next round of parks, once every arm's node has
       # left its queue: the losers' nodes are stale, and left there they
       # stayed until their channel was used again.
-      nonce = IyiScheduler.park(fiber)
+      nonce = IyiScheduler.parking(fiber)
       {% for i in 0...U.size %}
         actions[{{ i }}].park(fiber, nonce)
       {% end %}
-      IyiSchedLock.unlock
-      IyiScheduler.reschedule
-      IyiSchedLock.lock
+      fiber.wait_for_wake(nonce)
+      IyiChanLock.unlock_all(words, held)
+      IyiScheduler.suspend(fiber, nonce)
+      IyiChanLock.lock_all(words, held)
       {% for i in 0...U.size %}
         actions[{{ i }}].unpark
       {% end %}
       {% for i in 0...U.size %}
         if actions[{{ i }}].won_while_parked?
           won{{ i }} = actions[{{ i }}].won_value
-          IyiSchedLock.unlock
+          IyiChanLock.unlock_all(words, held)
           return { {{ i }}, won{{ i }}, true }
         end
       {% end %}
@@ -6670,21 +7930,44 @@ class Channel(T)
   # No arm ready answers -1, which the expansion's case meets with the
   # program's own `else`.
   def self.non_blocking_select(actions : U, bound : Int32) forall U
+    {% if flag?(:iyi_chaos) %}
+      IyiChaos.point
+    {% end %}
     fiber = IyiScheduler.current
-    IyiSchedLock.lock
+    locks = IyiChanLock.words(actions)
+    words = pointerof(locks).as(Pointer(UInt64))
+    held = IyiChanLock.order(words, {{ U.size }})
+    IyiChanLock.lock_all(words, held)
     if fiber.cancelled
-      IyiSchedLock.unlock
+      IyiChanLock.unlock_all(words, held)
       return cancelled_answer(bound)
     end
+    {% if flag?(:iyi_chaos) %}
+      chaos_arm = IyiChaos.arm({{ U.size }})
+      {% for i in 0...U.size %}
+        if chaos_arm == {{ i }}
+          happened{{ i }} = !actions[{{ i }}].refused?
+          answer{{ i }} = actions[{{ i }}].execute
+          unless answer{{ i }}.is_a?(IyiMissed)
+            woken = actions[{{ i }}].take_woken
+            IyiChanLock.unlock_all(words, held)
+            Channel.wake(woken)
+            return { {{ i }}, answer{{ i }}, happened{{ i }} }
+          end
+        end
+      {% end %}
+    {% end %}
     {% for i in 0...U.size %}
-      if actions[{{ i }}].ready?
-        happened{{ i }} = !actions[{{ i }}].refused?
-        answer{{ i }} = actions[{{ i }}].execute
-        IyiSchedLock.unlock
+      happened{{ i }} = !actions[{{ i }}].refused?
+      answer{{ i }} = actions[{{ i }}].execute
+      unless answer{{ i }}.is_a?(IyiMissed)
+        woken = actions[{{ i }}].take_woken
+        IyiChanLock.unlock_all(words, held)
+        Channel.wake(woken)
         return { {{ i }}, answer{{ i }}, happened{{ i }} }
       end
     {% end %}
-    IyiSchedLock.unlock
+    IyiChanLock.unlock_all(words, held)
     {-1, nil, false}
   end
 
@@ -6718,20 +8001,24 @@ class IyiReceiveSelect(T)
     @got = uninitialized T
   end
 
-  def ready? : Bool
-    @channel.receive_ready_held?
+  def lock_address : UInt64
+    @channel.lock_address
   end
 
   def refused? : Bool
     @channel.receive_refused?
   end
 
-  def execute : T | ChannelClosed
+  def execute : T | ChannelClosed | IyiMissed
     @channel.take_held
   end
 
   def park(fiber : IyiFiber, nonce : UInt64) : Nil
     @node = @channel.park_receive_node(fiber, nonce, pointerof(@got).address)
+  end
+
+  def take_woken : IyiFiber?
+    @channel.take_woken
   end
 
   def unpark : Nil
@@ -6761,20 +8048,24 @@ class IyiSendSelect(T)
     @node = nil
   end
 
-  def ready? : Bool
-    @channel.send_ready_held?
+  def lock_address : UInt64
+    @channel.lock_address
   end
 
   def refused? : Bool
     @channel.closed?
   end
 
-  def execute : Nil | ChannelClosed
+  def execute : Nil | ChannelClosed | IyiMissed
     @channel.put_held(@value)
   end
 
   def park(fiber : IyiFiber, nonce : UInt64) : Nil
     @node = @channel.park_send_node(fiber, nonce, @value)
+  end
+
+  def take_woken : IyiFiber?
+    @channel.take_woken
   end
 
   # A losing arm's node lets go of the value as it leaves: the channel
@@ -6812,15 +8103,17 @@ class IyiTimeoutSelect
     @fiber = nil
   end
 
-  @[Effect(:scheduler)]; def ready? : Bool
-    __iyi_monotonic_ns >= @deadline
+  # No channel, so no lock for `select` to take.
+  def lock_address : UInt64
+    0_u64
   end
 
   def refused? : Bool
     false
   end
 
-  def execute : Nil
+  def execute : Nil | IyiMissed
+    return IyiMissed.new if __iyi_monotonic_ns < @deadline
     nil
   end
 
@@ -6828,10 +8121,11 @@ class IyiTimeoutSelect
   # earlier deadline. The heap is this thread's, and the select may be
   # woken by a channel from any thread, so until it has left the heap
   # again it is woken onto this thread alone (`IyiFiber#homebound`):
-  # `unpark` runs where the fiber does. Both under the scheduler's lock,
-  # which `select` holds, and the look and the change together under the
-  # thread's lists lock, which on Windows another thread takes to take an
-  # io waiter out of the same heap (`IyiScheduler.lists_lock`).
+  # `unpark` runs where the fiber does. Both under the locks of the
+  # channels `select` names, which it holds, and the look and the change
+  # together under the thread's lists lock, which on Windows another
+  # thread takes to take an io waiter out of the same heap
+  # (`IyiScheduler.lists_lock`).
   def park(fiber : IyiFiber, nonce : UInt64) : Nil
     @fiber = fiber
     fiber.homebound = true
@@ -6847,6 +8141,10 @@ class IyiTimeoutSelect
     fiber.deadline = @deadline
     IyiScheduler.heap_insert(st, fiber)
     IyiScheduler.lists_unlock(st)
+  end
+
+  def take_woken : IyiFiber?
+    nil
   end
 
   def unpark : Nil

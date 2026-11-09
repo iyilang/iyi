@@ -105,10 +105,16 @@ class Iyi::Command
 
     analysis = Lsp::Analysis.new
     single = files.size == 1
-    clean = files.map { |file| fix_file(file, json_mode, analysis, rewrites[file]? || [] of {Int32, Int32, String, String}, single) }
+    # Each file's edits, starting with its `using` rewrite's; `fix_file`
+    # appends the did-you-mean edits it applies. The summary counts a file
+    # either rewrote: it counted the `using` rewrites alone, and a run that
+    # moved two files off `spawn_parallel` said "0 rewritten".
+    edits = files.map { |file| rewrites[file]? || [] of {Int32, Int32, String, String} }
+    clean = files.zip(edits).map { |file, applied| fix_file(file, json_mode, analysis, applied, single) }
     unless json_mode || single
       broken = clean.count(false)
-      puts "#{files.size} files: #{rewrites.size} rewritten, #{broken == 0 ? "every one clean" : "#{broken} still reporting an error"}"
+      rewritten = edits.count { |applied| !applied.empty? }
+      puts "#{files.size} files: #{rewritten} rewritten, #{broken == 0 ? "every one clean" : "#{broken} still reporting an error"}"
     end
     exit clean.all? ? 0 : 1
   end
@@ -173,7 +179,10 @@ class Iyi::Command
       # plain compile already reaches uncalled bodies — fix and check
       # cannot disagree about what clean means.
       result, diags = analysis.check(path, text, {} of String => String)
-      diag = diags.first?
+      # A refusal whose edit is placed elsewhere in this file - the unsafe
+      # mark above the header (SPEC.md III.13) - is independent of the
+      # others the compile gave and is made first.
+      diag = diags.find(&.edit_at) || diags.first?
       # A file that compiles can still carry an edit the compiler made a
       # warning rather than an error - a name that compiles in this build
       # alone (`Program#iyi_moved_package_path`). Only one written in this
@@ -192,14 +201,18 @@ class Iyi::Command
         break
       end
 
+      # Where the edit goes: the diagnostic's own span, or the place the
+      # compiler named for it - the unsafe mark goes above the header of the
+      # module whose operation was refused (SPEC.md III.13).
+      edit_line, edit_column, edit_size = diag.edit_at || {diag.line, diag.column, diag.size}
       replacement = diag.suggestion
-      unless replacement && diag.size > 0
+      unless replacement && edit_size > 0
         remaining = diag
         break
       end
 
       lines = text.split('\n')
-      line_text = lines[diag.line - 1]?
+      line_text = lines[edit_line - 1]?
       unless line_text
         remaining = diag
         break
@@ -209,8 +222,8 @@ class Iyi::Command
       # character to the left, and `-5.abss` became `-5abss`, which does not
       # parse. The mark is a character of `line_text`, so it is stepped over.
       chars = line_text.chars
-      at = diag.column - 1 + (diag.line == 1 && line_text.starts_with?('\uFEFF') ? 1 : 0)
-      from = chars[at, diag.size].join
+      at = edit_column - 1 + (edit_line == 1 && line_text.starts_with?('\uFEFF') ? 1 : 0)
+      from = chars[at, edit_size].join
       if from == replacement
         # The suggestion equals what is already written: applying it
         # would change nothing and loop forever. Report and stop.
@@ -219,10 +232,15 @@ class Iyi::Command
       end
 
       # Spliced at the same `at`, past the mark the lexer drops.
-      lines[diag.line - 1] = chars[0, at].join + replacement +
-                             ((chars[at + diag.size..]? || [] of Char).join)
+      lines[edit_line - 1] = chars[0, at].join + replacement +
+                             ((chars[at + edit_size..]? || [] of Char).join)
+      # A span past the line's last character takes its newline too: the
+      # edit removes the line, as an unneeded `@[Unsafe]` mark's does.
+      if at + edit_size > chars.size && edit_line < lines.size
+        lines[edit_line - 1] += lines.delete_at(edit_line)
+      end
       File.write(path, lines.join('\n'))
-      applied << {diag.line, diag.column, from, replacement}
+      applied << {edit_line, edit_column, from, replacement}
     end
 
     # Where the remaining error actually is, when that is another file of

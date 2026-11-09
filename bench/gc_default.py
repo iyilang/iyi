@@ -77,6 +77,8 @@ PROGRAMS = {
     "churn": """
       # 512 MiB allocated, ~64 bytes live at a time: the case the question
       # exists for. The sum is data dependence, so no pass deletes the loop.
+      # The blocks are raw memory, so the program says so (SPEC.md III.13).
+      @[Unsafe("the garbage is raw 64-byte blocks, each touched once and dropped")]
       sum = 0_u64
       i = 0
       while i < 8_000_000

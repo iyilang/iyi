@@ -80,6 +80,7 @@
 # every dispatch here goes through `Any#kind`, which is written in the
 # order that works, and nothing else in the file tests the union.
 
+@[Unsafe("output is built in a byte buffer it allocates, grows and indexes itself")]
 module std/yaml
 
 import std/text

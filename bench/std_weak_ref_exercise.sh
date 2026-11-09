@@ -121,6 +121,7 @@ echo "== the other collectors"
 # The contract under each: libgc clears through a disappearing link;
 # -Dgc_none never collects, so nothing is cleared and nothing breaks.
 cat >"$WORK/collectors.iyi" <<'IYI'
+@[Unsafe("under -Dgc_boehm the program calls libgc's GC_gcollect through a lib to collect on demand")]
 module main
 
 import std/weak_ref::{WeakRef}

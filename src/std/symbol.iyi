@@ -62,21 +62,21 @@ struct ::Symbol
       return true if string.empty?
 
       last = string.bytesize
-      last_byte = string.to_unsafe[last - 1]
+      last_byte = string.byte_at(last - 1)
       # one trailing `!` or `?` is part of the identifier, not a reason to quote
       if last_byte == 33_u8 || last_byte == 63_u8
         last = last - 1
         return true if last == 0
       end
 
-      first_byte = string.to_unsafe[0]
+      first_byte = string.byte_at(0)
       # letter or '_'
       is_start = (first_byte >= 97_u8 && first_byte <= 122_u8) || (first_byte >= 65_u8 && first_byte <= 90_u8) || first_byte == 95_u8
       return true unless is_start
 
       index = 1
       while index < last
-        byte = string.to_unsafe[index]
+        byte = string.byte_at(index)
         is_alpha = (byte >= 97_u8 && byte <= 122_u8) || (byte >= 65_u8 && byte <= 90_u8) || (byte >= 48_u8 && byte <= 57_u8) || byte == 95_u8
         return true unless is_alpha
         index = index + 1
@@ -88,13 +88,13 @@ struct ::Symbol
   def self.needs_quotes_for_named_argument?(string : String) : ::Bool
     return true if string.empty? || string == "_"
 
-    first_byte = string.to_unsafe[0]
+    first_byte = string.byte_at(0)
     # starts with digit 0..9 (48..57)
     return true if first_byte >= 48_u8 && first_byte <= 57_u8
 
     index = 0
     while index < string.bytesize
-      byte = string.to_unsafe[index]
+      byte = string.byte_at(index)
       # ascii alphanumeric or '_'
       is_alpha = (byte >= 97_u8 && byte <= 122_u8) || (byte >= 65_u8 && byte <= 90_u8) || (byte >= 48_u8 && byte <= 57_u8) || byte == 95_u8
       return true unless is_alpha
@@ -127,14 +127,14 @@ struct ::Symbol
     start = 0
     index = 0
     while index < string.bytesize
-      byte = string.to_unsafe[index]
+      byte = string.byte_at(index)
       repl = ""
       found = true
       if byte == 34_u8
         repl = "\\\""
       elsif byte == 92_u8
         repl = "\\\\"
-      elsif byte == 35_u8 && index + 1 < string.bytesize && string.to_unsafe[index + 1] == 123_u8
+      elsif byte == 35_u8 && index + 1 < string.bytesize && string.byte_at(index + 1) == 123_u8
         repl = "\\#"
       elsif byte == 7_u8
         repl = "\\a"

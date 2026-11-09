@@ -9,6 +9,7 @@
 # has a watchdog beside it, so a signal that never arrives is a failure
 # and not a hang.
 
+@[Unsafe("it sends itself signals through raw system calls, and on Windows through kernel32's console functions")]
 module bench/std_signal_exercise
 
 import std/signal::{Signal}

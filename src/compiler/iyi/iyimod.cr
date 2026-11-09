@@ -77,7 +77,26 @@ module Iyi::IyiMod
   # the artifact's own path a body's `@caller.first.filename` named
   # `mods/lib/page.iyimod`, and `Eiy.render("../views/greet.eiy")` read its
   # template from beside the artifact (#140).
-  FORMAT_VERSION = 59_u32
+  # v60: an artifact records what each of its functions reaches of module
+  # state (`Section::Reaches`), because a consumer has the declarations
+  # and not the bodies, and a `g.spawn` whose block called a v59 module's
+  # `note`, which appended to the module's `SEEN : Array(Int32)`, was
+  # placed in parallel and lost appends: 19,870 to 19,952 of 20,000 at 4
+  # workers on Linux. A v59 artifact is refused and rebuilt rather than
+  # read as reaching nothing.
+  # v61: nothing in the file's own layout changed, but the symbols its
+  # object code defines and its `Symbols` section lists are spelled without
+  # `@` (`Iyi::SYMBOL_JOIN`, `Iyi.symbol_text`): an inherited method is
+  # `*Derived^Base#hi` where a v60 artifact defines `*Derived@Base#hi`, so
+  # a consumer would ask for names a v60 artifact does not have and learn
+  # it from the linker. A v60 artifact is refused and rebuilt.
+  # v62: the header carries the module's `@[Unsafe("why")]` reason, or
+  # nothing (`Artifact#unsafe`), because a generic body that travels is
+  # typed again in the consumer at the producer's locations, and what the
+  # producer's mark allowed there the consumer has to allow (SPEC.md
+  # III.13). A v61 artifact is refused and rebuilt rather than read as a
+  # module that handles no raw memory.
+  FORMAT_VERSION = 62_u32
 
   FORMAT = IO::ByteFormat::LittleEndian
 
@@ -221,7 +240,53 @@ module Iyi::IyiMod
     # that text. See `SourcePosition`. 65, beside `Layouts`, for the reason
     # `Layouts` gives for 64.
     SourcePositions = 65
+
+    # iyi: where each `g.spawn` written in the module runs, as the build that
+    # wrote the artifact placed it (SPEC.md III.4.16). Not read to compile
+    # anything: a build that rewrites the artifact compares its own verdicts
+    # with these and prints a line for each spawn that moved, and
+    # `iyi mod dump` lists them. Outside the hashes, since no consumer's
+    # code depends on it. 66, beside `SourcePositions`, for `Layouts`'
+    # reason.
+    Spawns = 66
+
+    # iyi: the module state each of the module's functions may reach,
+    # through every call it makes, that is not safe for every thread
+    # (SPEC.md III.4.15): a constant or a class variable whose type is not
+    # Share and whose `@[SafeReach]` does not hold for every program that
+    # imports the module. A consumer has the declarations and not the
+    # bodies, and its walk from a spawn's block stopped at them: a call to
+    # a function that appended to an unguarded `Array` read as reaching
+    # nothing, and the spawn ran in parallel. Its presence is the promise:
+    # a function absent from a present section reaches nothing unsafe, and
+    # an absent section is a module whose functions reach what nobody
+    # knows, whose spawns stay in their units. In the interface hash,
+    # since a dependent's placement is decided by it. 67, beside `Spawns`.
+    Reaches = 67
   end
+
+  # One piece of module state a function of the module may reach (SPEC.md
+  # III.4.15, `Section::Reaches`). *function* is the function as a
+  # consumer's typed call names it (`ShareReach.reach_key`), *label* and
+  # *type* the state as the source spells it and its type, *kind* "the
+  # constant" or "the class variable", *use* the expression it is used in,
+  # *path* the functions between *function* and that expression, *why* the
+  # reason it is not safe for every thread, and *module_name* the module
+  # that declares it.
+  record ReachRecord, function : String, label : String, type : String, kind : String,
+    use : String, path : Array(String), why : String, module_name : String
+
+  # One `g.spawn` written in a module, and where the build placed it
+  # (SPEC.md III.4.16). *owner* is the def it is written in, as a reader
+  # names it (`App::Work.crunch`; empty at the module's top level), and
+  # *digest* its block's text, hashed: the two name the spawn across builds,
+  # where its line moves with every edit above it. *line* and *column* say
+  # where it was this time. *parallel* is whether every instantiation ran
+  # it in parallel, in a unit of its own, *asked* whether it spelled its
+  # placement (`unit: :new`, `unit: :same`, `in: u`), and *reason* why it
+  # stays in its spawner's unit (SPEC.md III.4.18), empty when it does not.
+  record SpawnRecord, owner : String, digest : String, line : Int32, column : Int32,
+    parallel : Bool, asked : Bool, reason : String
 
   # A regex literal's constant: the name its object code reads, and what a
   # consumer has to build under that name.
@@ -579,6 +644,10 @@ module Iyi::IyiMod
     # brings the types an exported signature names into existence, so changing
     # one changes what those signatures mean.
     write_strings interface, artifact.requires
+    # And what each function reaches of module state: a dependent's spawn
+    # is placed by it, so a change to it is a change to what a dependent
+    # compiled, and the dependent is built again (SPEC.md III.4.15).
+    artifact.reaches.try { |reaches| interface.write encode_reaches(reaches) }
 
     implementation = IO::Memory.new
     implementation.write encode_mono_bodies(artifact)
@@ -1357,7 +1426,7 @@ module Iyi::IyiMod
     #
     # Three rules were tried before this and each was wrong on one side.
     # Assuming the artifact has whatever its types could answer left
-    # `Kemal::FilterHandler@Reference::new` undefined; assuming the reverse made
+    # `Kemal::FilterHandler^Reference::new` undefined; assuming the reverse made
     # it a duplicate symbol; compiling a private copy in the consumer put the
     # definition where `_main` could not see it. A list is not a rule and does
     # not have a wrong side.
@@ -1456,6 +1525,12 @@ module Iyi::IyiMod
     # which the object code's symbols already spell.
     property package_name : String
 
+    # The reason of the module's `@[Unsafe("why")]`, or empty when it is not
+    # marked (SPEC.md III.13). A consumer reads it so the module's travelling
+    # bodies, typed again there, are allowed what they were here, and a tool
+    # lists a program's unsafe modules from its artifacts alone.
+    property unsafe : String
+
     # Whether this artifact's root is a *class* rather than a module.
     #
     # It decides one thing and it is structural: a module's declarations are
@@ -1524,6 +1599,15 @@ module Iyi::IyiMod
     # source hash already answers for. See `Section::Inputs`.
     property inputs : Array(String)
 
+    # Where each spawn written in the module runs (SPEC.md III.4.16). See
+    # `Section::Spawns`.
+    property spawns = [] of SpawnRecord
+
+    # What each function reaches of module state (SPEC.md III.4.15). Nil
+    # when the section is absent, which a consumer reads as "not known".
+    # See `Section::Reaches`.
+    property reaches : Array(ReachRecord)? = nil
+
     def initialize(@module_name, @source_path, @compiler_version, @target_triple,
                    @flags, @imports, @usings = [] of String, @exports = Exports.empty,
                    @object_code = [] of ObjectUnit, @has_initialiser = false,
@@ -1539,7 +1623,7 @@ module Iyi::IyiMod
                    @reopened = [] of TypeDecl, @libs = [] of String,
                    @layouts = [] of {String, TypeLayout},
                    @inputs = [] of String, @symbol_literals = [] of String,
-                   @declarations_only = false, @package_name = "",
+                   @declarations_only = false, @package_name = "", @unsafe = "",
                    @body_positions = {} of String => Array(SourcePosition),
                    @initialiser_positions = [] of SourcePosition)
     end
@@ -1577,6 +1661,18 @@ module Iyi::IyiMod
     end
 
     sections << {Section::Exports, encode_exports(artifact)}
+
+    # After the declarations, for `iyi mod dump` and the next build of this
+    # module, which compares its own verdicts with these.
+    unless artifact.spawns.empty?
+      sections << {Section::Spawns, encode_spawns(artifact.spawns)}
+    end
+
+    # Whenever it is known, empty or not: its presence is what says the
+    # module's functions reach nothing else.
+    if reaches = artifact.reaches
+      sections << {Section::Reaches, encode_reaches(reaches)}
+    end
 
     # Between the declarations and the machine code, which is where it belongs:
     # a front-end reader needs it and a linker does not.
@@ -1799,6 +1895,39 @@ module Iyi::IyiMod
                     "compiler; rebuild it with `--emit-iyimod`")
   end
 
+  # The spawns the artifact at *path* recorded (`Section::Spawns`), with the
+  # flags and target it was built for, which say whether its verdicts and a
+  # new build's are about the same program: a build under `-Dgc_none` has
+  # no threads and places every spawn in its unit. Reads the header and the
+  # one section and seeks past the rest. Nil for a file this compiler
+  # cannot read - another format, a damaged one - which the build that asks
+  # is about to replace anyway.
+  def self.read_spawns(path : String) : {Array(String), String, Array(SpawnRecord)}?
+    File.open(path, "rb") do |file|
+      table = read_table(file, path)
+      header = nil
+      spawns = [] of SpawnRecord
+      table.each do |(kind, length, sum)|
+        section = Section.from_value?(kind)
+        unless section == Section::Header || section == Section::Spawns
+          file.skip length
+          next
+        end
+        payload = Bytes.new(length)
+        file.read_fully?(payload) || return nil
+        verify(path, section, payload, sum)
+        if section == Section::Header
+          header = decode_header(payload)
+        else
+          spawns = decode_spawns(payload)
+        end
+      end
+      header ? {header[:flags], header[:target_triple], spawns} : nil
+    end
+  rescue Error | IO::Error
+    nil
+  end
+
   # Reads the artifact at *path*.
   #
   # Rejects rather than migrates: a file from another format or compiler version
@@ -1835,6 +1964,8 @@ module Iyi::IyiMod
       hashes = Hashes.empty
       layouts = [] of {String, TypeLayout}
       inputs = [] of String
+      spawns = [] of SpawnRecord
+      reaches = nil
       positions = {bodies: {} of String => Array(SourcePosition), initialiser: [] of SourcePosition}
 
       table.each do |(kind, length, sum)|
@@ -1875,6 +2006,8 @@ module Iyi::IyiMod
         when Section::Inputs          then inputs = decode_strings(payload)
         when Section::SymbolLiterals  then symbol_literals = decode_strings(payload)
         when Section::SourcePositions then positions = decode_source_positions(payload)
+        when Section::Spawns          then spawns = decode_spawns(payload)
+        when Section::Reaches         then reaches = decode_reaches(payload)
         else
           # Written by a later compiler, or a section this one does not need.
           # Skipping is the point of the table.
@@ -1885,15 +2018,18 @@ module Iyi::IyiMod
         raise Error.new("#{path} has no header section")
       end
 
-      Artifact.new(header[:module_name], header[:source_path], header[:compiler_version],
+      artifact = Artifact.new(header[:module_name], header[:source_path], header[:compiler_version],
         header[:target_triple], header[:flags], imports[:imports], imports[:usings], exports,
         object_code, header[:has_initialiser], mono_bodies, initialiser, type_ids,
         hashes, constants, macro_bodies, requires, header[:crystal_library],
         header[:class_root], header[:filled], header[:module_extends_self],
         regexes, class_vars, match_types, symbols,
         top_level, top_level_funs, reopened, libs, layouts, inputs, symbol_literals,
-        declarations_only: header[:declarations_only], package_name: header[:package_name],
+        declarations_only: header[:declarations_only], package_name: header[:package_name], unsafe: header[:unsafe],
         body_positions: positions[:bodies], initialiser_positions: positions[:initialiser])
+      artifact.spawns = spawns
+      artifact.reaches = reaches
+      artifact
     end
   rescue ex : Error
     raise ex
@@ -1958,6 +2094,7 @@ module Iyi::IyiMod
     end
 
     io.puts "library       #{artifact.crystal_library ? "Crystal's standard library (--crystal)" : "iyi's prelude"}"
+    io.puts "unsafe        #{artifact.unsafe}" unless artifact.unsafe.empty?
     io.puts "extend self   #{artifact.module_extends_self}" if artifact.module_extends_self
 
     unless artifact.requires.empty?
@@ -1993,6 +2130,37 @@ module Iyi::IyiMod
         record.assoc_types.each { |(name, answer)| io.puts "    type #{name} = #{answer}" }
         record.methods.each { |signature| io.puts "    #{render_signature(signature)}" }
       end
+    end
+
+    # Only when there are any, so a module that spawns nothing dumps as it
+    # did before the section existed.
+    unless artifact.spawns.empty?
+      io.puts "spawns"
+      artifact.spawns.each do |record|
+        where = record.owner.empty? ? "(top level)" : record.owner
+        verdict = record.parallel ? "parallel" : "in its spawner's unit: #{record.reason}"
+        io.puts "  #{where} #{record.line}:#{record.column} #{verdict}#{record.asked ? " (asked)" : ""}"
+      end
+    end
+
+    # Said either way, since an absent section and an empty one mean
+    # opposite things to a consumer (`Section::Reaches`).
+    if reaches = artifact.reaches
+      if reaches.empty?
+        io.puts "reaches       (nothing unsafe)"
+      else
+        io.puts "reaches"
+        reaches.each do |record|
+          if record.kind.empty?
+            io.puts "  #{record.function} calls into #{record.module_name}, whose artifact does not record what it reaches"
+            next
+          end
+          through = (record.path + [record.use]).map { |step| "`#{step}`" }.join(" → ")
+          io.puts "  #{record.function} reaches #{record.kind} `#{record.label} : #{record.type}` (module `#{record.module_name}`) through #{through}"
+        end
+      end
+    else
+      io.puts "reaches       (not recorded)"
     end
 
     macros = artifact.macro_bodies
@@ -2834,7 +3002,7 @@ module Iyi::IyiMod
     # Whether a body travelled is the key's question, and the reader cannot
     # ask it: `DeclarationMarker` tells a header from a body by whether there
     # is one, so `def noop : Nil` with nothing in it came back as a header and
-    # the consumer's link ended on `G(Int32)@G(T)#noop:Nil` — and on every
+    # the consumer's link ended on `G(Int32)^G(T)#noop:Nil` — and on every
     # generic struct's `initialize`, every empty trait default and every
     # empty block-taking def, each listed in `MonoBodies`.
     if body = bodies[key]?
@@ -3407,6 +3575,7 @@ module Iyi::IyiMod
     io.write_byte(artifact.module_extends_self ? 1_u8 : 0_u8)
     io.write_byte(artifact.declarations_only ? 1_u8 : 0_u8)
     write_string io, artifact.package_name
+    write_string io, artifact.unsafe
     io.to_slice
   end
 
@@ -3426,12 +3595,14 @@ module Iyi::IyiMod
     # Last, and read the way the flag bytes above are: a header that ends
     # before it - a hand-written one - names no package.
     package_name = io.pos < io.size ? read_string(io) : ""
+    # And after it the module's `@[Unsafe]` reason, empty when not marked.
+    unsafe = io.pos < io.size ? read_string(io) : ""
     {module_name: module_name, source_path: source_path,
      compiler_version: compiler_version, target_triple: target_triple, flags: flags,
      has_initialiser: has_initialiser, crystal_library: crystal_library,
      class_root: class_root, filled: filled,
      module_extends_self: module_extends_self, declarations_only: declarations_only,
-     package_name: package_name}
+     package_name: package_name, unsafe: unsafe}
   end
 
   private def self.encode_requires(artifact : Artifact) : Bytes
@@ -3504,6 +3675,63 @@ module Iyi::IyiMod
 
   private def self.decode_strings(payload : Bytes) : Array(String)
     read_strings(IO::Memory.new(payload))
+  end
+
+  private def self.encode_spawns(records : Array(SpawnRecord)) : Bytes
+    io = IO::Memory.new
+    io.write_bytes records.size.to_u32, FORMAT
+    records.each do |record|
+      write_string io, record.owner
+      write_string io, record.digest
+      io.write_bytes record.line, FORMAT
+      io.write_bytes record.column, FORMAT
+      io.write_bytes((record.parallel ? 1_u8 : 0_u8) | (record.asked ? 2_u8 : 0_u8), FORMAT)
+      write_string io, record.reason
+    end
+    io.to_slice
+  end
+
+  private def self.decode_spawns(payload : Bytes) : Array(SpawnRecord)
+    io = IO::Memory.new(payload)
+    Array(SpawnRecord).new(io.read_bytes(UInt32, FORMAT)) do
+      owner = read_string(io)
+      digest = read_string(io)
+      line = io.read_bytes(Int32, FORMAT)
+      column = io.read_bytes(Int32, FORMAT)
+      bits = io.read_bytes(UInt8, FORMAT)
+      SpawnRecord.new(owner, digest, line, column, bits & 1 != 0, bits & 2 != 0, read_string(io))
+    end
+  end
+
+  private def self.encode_reaches(records : Array(ReachRecord)) : Bytes
+    io = IO::Memory.new
+    io.write_bytes records.size.to_u32, FORMAT
+    records.each do |record|
+      write_string io, record.function
+      write_string io, record.label
+      write_string io, record.type
+      write_string io, record.kind
+      write_string io, record.use
+      write_strings io, record.path
+      write_string io, record.why
+      write_string io, record.module_name
+    end
+    io.to_slice
+  end
+
+  private def self.decode_reaches(payload : Bytes) : Array(ReachRecord)
+    io = IO::Memory.new(payload)
+    records = Array(ReachRecord).new(io.read_bytes(UInt32, FORMAT)) do
+      function = read_string(io)
+      label = read_string(io)
+      type = read_string(io)
+      kind = read_string(io)
+      use = read_string(io)
+      path = read_strings(io)
+      why = read_string(io)
+      ReachRecord.new(function, label, type, kind, use, path, why, read_string(io))
+    end
+    records
   end
 
   private def self.decode_mono_bodies(payload : Bytes) : Hash(String, String)

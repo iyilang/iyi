@@ -242,6 +242,7 @@ describe "Iyi::Stale S4a: @[Effect] annotation and closure check" do
     it "flags program asm as opaque program construct" do
       program_file = File.join(Dir.current, "src", "program_asm_test.iyi")
       result = semantic(<<-CODE, filename: program_file)
+        @[Unsafe("test writes asm")]
         def do_asm
           asm("nop")
         end
@@ -260,6 +261,7 @@ describe "Iyi::Stale S4a: @[Effect] annotation and closure check" do
     it "flags program lib call as opaque program construct" do
       program_file = File.join(Dir.current, "src", "program_lib_call_test.iyi")
       result = semantic(<<-CODE, filename: program_file)
+        @[Unsafe("test calls C getpid")]
         lib LibC
           fun getpid : Int32
         end
@@ -282,6 +284,7 @@ describe "Iyi::Stale S4a: @[Effect] annotation and closure check" do
     it "flags program lib global as opaque program construct" do
       program_file = File.join(Dir.current, "src", "program_lib_global_test.iyi")
       result = semantic(<<-CODE, filename: program_file)
+        @[Unsafe("test reads C global")]
         lib LibC
           $my_global : Int32
         end
@@ -304,6 +307,7 @@ describe "Iyi::Stale S4a: @[Effect] annotation and closure check" do
     it "flags program pointer_new primitive as opaque program construct" do
       program_file = File.join(Dir.current, "src", "program_pointer_test.iyi")
       result = semantic(<<-CODE, filename: program_file)
+        @[Unsafe("test declares Pointer primitive")]
         struct Pointer(T)
           @[Primitive(:pointer_new)]
           def self.new(address : UInt64)
@@ -402,6 +406,7 @@ describe "Iyi::Stale S4a: @[Effect] annotation and closure check" do
       program = create_test_program
       program.iyi_prelude_dir = File.join(Dir.current, "src", "iyi")
       parser = program.new_parser(<<-CODE)
+        @[Unsafe("unannotated runtime test with C fun")]
         lib LibSys
           fun getpid : Int32
         end
@@ -433,6 +438,7 @@ describe "Iyi::Stale S4a: @[Effect] annotation and closure check" do
       program = create_test_program
       program.iyi_prelude_dir = File.join(Dir.current, "src", "iyi")
       parser = program.new_parser(<<-CODE)
+        @[Unsafe("annotated runtime test with C fun")]
         lib LibSys
           fun getpid : Int32
         end
@@ -462,6 +468,7 @@ describe "Iyi::Stale S4a: @[Effect] annotation and closure check" do
       program = create_test_program
       program.iyi_prelude_dir = File.join(Dir.current, "src", "iyi")
       parser1 = program.new_parser(<<-CODE)
+        @[Unsafe("math intrinsic declarations")]
         lib LibLLVMMath
           fun sqrt = "llvm.sqrt.f64"(x : Float64) : Float64
         end

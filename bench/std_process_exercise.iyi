@@ -9,6 +9,7 @@
 # and a watchdog beside the checks turns a hang - a pipe nobody drains, a
 # wait that never ends - into a failure with a sentence.
 
+@[Unsafe("it builds a child's argument and environment block by hand for C, and on Windows its STARTUPINFO, to check std/process against them")]
 module bench/std_process_exercise
 
 import std/process::{Process, ProcessResult, ProcessError, ProcessStatus, ChildProcess, Redirect, ChildInputClosed}

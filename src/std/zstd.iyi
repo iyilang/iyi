@@ -54,6 +54,7 @@
 # decoder loads words of the stream with one unaligned little-endian
 # load, which every target iyi builds for is.
 
+@[Unsafe("the decoder's tables and window and the encoder's hash table, sequences and output live in buffers it allocates and indexes itself, with word-sized loads and stores through cast pointers, for speed")]
 module std/zstd
 
 import std/int

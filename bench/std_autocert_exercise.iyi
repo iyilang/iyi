@@ -339,6 +339,15 @@ end
 
 def serve(args : Array(String)) : Nil
   directory, minica, roots, cache_dir, tls_port, http_port, hosts, challenges, ready = args[1], args[2], args[3], args[4], args[5].to_i, args[6].to_i, args[7], args[8], args[9]
+  parallel = args.size > 10 && args[10] == "parallel"
+  # The pool's size, asked for before `listen_again`'s spawn, which the
+  # compiler places on the pool (SPEC.md III.4.15) and so starts it at
+  # `IYI_WORKERS` or the cores: `serve(workers: 4)` asked after that was
+  # refused by panic wherever that count was not four. CI's runners have
+  # four vCPUs and never saw it; the Linux 12 vCPU box did, in sibling
+  # shard 6 of 8 (agent HSoak3, 2026-11-05), and the client now runs this
+  # server under `IYI_WORKERS=2` so every machine would.
+  IyiWorkers.count = 4 if parallel
   trust = TlsConfig.new
   trust.roots = Certificate.from_pem(File.read(minica)).or_panic
   trust.alpn = ["http/1.1"]
@@ -364,7 +373,7 @@ def serve(args : Array(String)) : Nil
       Server.serve(http_listener, workers: 1) { |r| manager.answer(r) || Response.new(404, "not a challenge") }
       0
     end
-    if args.size > 10 && args[10] == "parallel"
+    if parallel
       # A worker waits for `run` this long at most: a broken copy whose
       # asks go unanswered is then caught in seconds, not minutes.
       manager.wait_ms = 20000

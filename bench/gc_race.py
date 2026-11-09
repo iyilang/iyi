@@ -47,7 +47,12 @@ IYI = pathlib.Path(os.environ.get("IYI", ROOT / "bin" / "iyi"))
 EXE = ".exe" if os.name == "nt" else ""
 RUNS = 5
 
-IYI_STATS = '''
+# Every program is this prefix and its own body, so the mark the bodies
+# need (SPEC.md III.13) is written here, first in the file: the Boehm arm
+# declares `lib LibGC`, and the two churn bodies drop raw blocks. Without
+# it binary_trees-boehm was refused for the `lib` (Windows gates job and
+# darwin's program job in CI run 42472342266).
+IYI_STATS = '''@[Unsafe("Boehm's arm reads libgc's collection count and pause total through a lib of its own, and the churn programs allocate the raw 64-byte blocks that are the garbage being raced")]
 {% if flag?(:gc_boehm) %}
   lib LibGC
     fun start_performance_measurement = GC_start_performance_measurement : Nil

@@ -26,6 +26,7 @@
 # a broken copy of the runtime each: a port whose packets only the thread
 # their task parked on takes, and a pool that leaves the boost on.
 
+@[Unsafe("on Windows it asks whether the process's priority boost is off through GetProcessPriorityBoost, a C call answering through pointerof")]
 module bench/completions_taken
 
 import std/socket::{IyiSocket, SocketError}
@@ -141,11 +142,11 @@ import std/socket::{IyiSocket, SocketError}
     marks = Marks.new
     sent_at = 0_i64
     group do |g|
-      g.spawn_parallel do
+      g.spawn(unit: :new) do
         group do |inner|
           # Onto this worker's own queue, which it takes from next once the
           # read below parks; a steal may take it first.
-          inner.spawn_parallel do
+          inner.spawn(unit: :new) do
             here = IyiScheduler.state.object_id
             marks.note_computer(here)
             if here == marks.reader
@@ -208,7 +209,7 @@ import std/socket::{IyiSocket, SocketError}
   def boost : Nil
     # The pool starts at the first parallel task.
     group do |g|
-      g.spawn_parallel { 0 }
+      g.spawn(unit: :new) { 0 }
     end
     disabled = 0
     if LibBoost.GetProcessPriorityBoost(::LibC.GetCurrentProcess, pointerof(disabled)) == 0

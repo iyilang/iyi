@@ -58,7 +58,7 @@ describe "`crystal tool bind`, end to end" do
 
           # Both ways a module can carry a function, because they mangle
           # differently. `extend self` puts `polite` on the module and `def
-          # self.` puts `brisk` on the metaclass, which has no `@`. Crystal's
+          # self.` puts `brisk` on the metaclass, which has no `^`. Crystal's
           # own library is written the second way throughout.
           def polite(name : String) : String
             "hello, " + name

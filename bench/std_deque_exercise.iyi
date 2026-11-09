@@ -10,6 +10,7 @@
 # hundred; the gate script diffs those lines against python3 driving its
 # `collections.deque` with the same choices.
 
+@[Unsafe("it reads slots past the deque's size with unsafe_fetch, to prove pop, shift and delete_at zero what they vacate")]
 module bench/std_deque_exercise
 
 import std/deque::{Deque}

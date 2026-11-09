@@ -7,6 +7,7 @@
 # Run via:
 #     ./bin/iyi run bench/std_math_exercise.iyi
 
+@[Unsafe("it reads arrays of test pairs and triples as raw UInt64 words, the bit patterns std/math is checked on")]
 module bench/std_math_exercise
 
 def assert_true(cond : Bool, msg : String) : Nil

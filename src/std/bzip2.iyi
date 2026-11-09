@@ -77,6 +77,7 @@
 # Strings are the byte type here, as everywhere in `src/std`. Left out:
 # randomised blocks (refused by name), and a streaming compressor.
 
+@[Unsafe("the CRC table and the decoder's and encoder's work areas are buffers it allocates and indexes itself, and input is read through raw pointers, for speed")]
 module std/bzip2
 
 import std/int

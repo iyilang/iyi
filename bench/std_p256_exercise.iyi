@@ -11,6 +11,7 @@
 #   keys DIR      each file named in DIR/list read as PKCS #8 (`.p8`) or
 #                 SEC 1 (`.sec1`): its public key's x and y, or why not.
 
+@[Unsafe("its hex and byte helpers read strings' bytes through to_unsafe and copy bytes into String.new's buffer, the way std/p256 reads its input")]
 import std/p256::{P256PrivateKey}
 import std/ecdsa::{EcdsaHash, EcdsaError, EcdsaPublicKey}
 import std/file::{File}

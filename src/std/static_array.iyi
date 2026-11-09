@@ -2,6 +2,7 @@
 #
 # A fixed-size array on the stack: `StaticArray(T, N)`.
 
+@[Unsafe("the elements live in the value itself, read and written through pointerof(@buffer), and new fills it from uninitialized memory")]
 module std/static_array
 
 import std/slice::{Slice}

@@ -20,6 +20,7 @@
 # With no arguments it runs two workers briefly, checks every answer and
 # prints a fixed line.
 
+@[Unsafe("on Windows the peak working set is read through K32GetProcessMemoryInfo, a C call that fills counters in Pointer#malloc memory")]
 module bench/release_pages
 
 import std/http::{Request, Response, Server}
@@ -135,7 +136,7 @@ wrong = 0_i64
 group do |g|
   handles = [] of IyiTask(Array(Int64))
   workers.times do |t|
-    handles << g.spawn_parallel { work(t.to_i64, deadline, quiet ? 2048_i64 : 0_i64) }
+    handles << g.spawn(unit: :new) { work(t.to_i64, deadline, quiet ? 2048_i64 : 0_i64) }
   end
   handles.each do |handle|
     value = handle.value

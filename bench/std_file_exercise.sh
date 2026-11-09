@@ -598,7 +598,7 @@ refuses "real_path of an empty path" realpath_empty "Cannot resolve realpath for
 # A path a NUL cuts short is refused, as std/file's own calls refuse it:
 # the prelude's handed the kernel the bytes before the NUL, and a write
 # to `victim\0.txt` wrote `victim`.
-nul_write='File.write("'"$WORK"'/victim" + String.new(1) { |b| b[0] = 0_u8 } + ".txt", "x")'
+nul_write='File.write("'"$WORK"'/victim" + String.new([0_u8]) + ".txt", "x")'
 refuses "a write to a path with a NUL in it" path_nul "path contains a NUL byte" "$nul_write"
 # A file is no directory to go through: on Linux `f/`, `f/.` and `f/..`
 # are ENOTDIR, as libc's realpath answers, where iyi's own walk answered

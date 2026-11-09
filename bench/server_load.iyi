@@ -21,6 +21,7 @@
 #      the mappings alone killed the program - `/proc/self/maps` outgrew
 #      the root walk's own reader - long before the memory did. Sequential
 #      connections must run on the same few stacks.
+@[Unsafe("on Windows it reads the address of the OVERLAPPED a connection's write hands the kernel, to check no collection freed it")]
 module server_load
 
 import std/socket::{IyiSocket, SocketError}

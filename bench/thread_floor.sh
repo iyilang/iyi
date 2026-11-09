@@ -161,9 +161,21 @@ case "$(uname -s)" in
     # kernel threads sized by `hw.ncpu`, and the concurrent mark's second
     # stop registers the main thread, installs the stop's handler and
     # signals with `pthread_kill`. The refused variants carry them for the
-    # same reason, including the Mach variant. The helpers and stopped
-    # threads park and wake on libSystem's os_sync address primitives.
-    runtime='___error __dyld_get_image_header __dyld_get_image_vmaddr_slide _backtrace _dladdr _dprintf _clock_gettime_nsec_np _exit _kevent _kqueue _mmap _munmap _os_sync_wait_on_address _os_sync_wake_by_address_all _pthread_create _pthread_get_stackaddr_np _pthread_kill _pthread_self _sigaction _sigaltstack _sysctlbyname _write'
+    # same reason - the Mach one included, whose own stop never signals -
+    # so the four sit in the runtime's list, not the probe's. So do the
+    # helpers' park and wake, `_os_sync_wait_on_address` and
+    # `_os_sync_wake_by_address_all`, which the runtime's stop and the
+    # probe's park on too (bench/dependency_floor.sh says why those two).
+    # `_pipe` and `_read` were the runtime's while a stopped thread parked
+    # in `read` on a pipe of its own, and left with that park. `_close`
+    # joined when the pool started growing to the work (SPEC.md III.4.15,
+    # part 6): a fiber made ready wakes a worker, and with none idle starts
+    # one (`IyiWorkers.wake_one`, `grow`), through `IyiThread.start`, whose
+    # finished thread closes its kqueue (`IyiScheduler.retire_thread`). The
+    # panic path makes a fiber ready, so every darwin program reaches it;
+    # this probe found the name on macOS 26.6 (Apple M2 Pro, 10 cores, the
+    # user's machine), by that chain in its IR, with no task of its own.
+    runtime='___error __dyld_get_image_header __dyld_get_image_vmaddr_slide _backtrace _dladdr _dprintf _clock_gettime_nsec_np _close _exit _kevent _kqueue _mmap _munmap _os_sync_wait_on_address _os_sync_wake_by_address_all _pthread_create _pthread_get_stackaddr_np _pthread_kill _pthread_self _sigaction _sigaltstack _sysctlbyname _thread_switch _write'
     thread='__tlv_bootstrap _pthread_join _pthread_threadid_np'
     # The refused parks: a pipe per thread, `pipe` and `read`; the lock's
     # two calls; and `sigsuspend` alone. The Mach stop swaps the stop for

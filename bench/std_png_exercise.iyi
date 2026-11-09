@@ -17,6 +17,7 @@
 # Pillow to read back, and the timings are printed (only then: two builds
 # of this program must otherwise print the same).
 
+@[Unsafe("it compares images and raw samples byte for byte through to_unsafe, and reads the encoded file's bytes the same way")]
 module bench/std_png_exercise
 
 import std/png::{Png, PngFile, PngError, PngText, Image, Layout}

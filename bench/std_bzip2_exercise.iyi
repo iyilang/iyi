@@ -13,6 +13,7 @@
 # bounded memory, and the timings are printed;
 # `bench/std_bzip2_exercise.sh` is the other half of that conversation.
 
+@[Unsafe("its reference encoder and test stream read the input's bytes through raw pointers, as std/bzip2's decoder does, to check one against the other")]
 module bench/std_bzip2_exercise
 
 import std/bzip2::{Bzip2, Bzip2Reader, Bzip2Error}

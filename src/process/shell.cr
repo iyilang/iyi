@@ -175,10 +175,21 @@ class Process
             break unless reader.has_next?
             reader.next_char
             if char == '\\' && quote != '\''
-              str << char if quote == '"'
               char = reader.current_char
               if reader.has_next?
                 reader.next_char
+                # iyi: between double quotes a backslash quotes only `$`, `` ` ``,
+                # `"`, `\` and a newline, and is itself before anything else. It
+                # was kept before all of them, so the line `cc -###` prints,
+                # `"-rpath" "\$ORIGIN/../lib"`, parsed to `\$ORIGIN/../lib`, and
+                # the compiler's own link (`iyi_link_template`) wrote that,
+                # backslash and all, as the program's RPATH: the tarball built
+                # against a shared LLVM loaded the host's libraries rather than
+                # the ones it carries (Linux, 12 vCPU, the soak's `tar` job).
+                if quote == '"'
+                  next if char == '\n'
+                  str << '\\' unless char.in?('$', '`', '"', '\\')
+                end
               else
                 break if quote == '"'
                 char = '\\'

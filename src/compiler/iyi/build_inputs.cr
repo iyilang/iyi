@@ -52,6 +52,12 @@ module Iyi
     # from a cold build and one from a warm build agree.
     LINK_ONLY_ENV = %w(IYI_LINK_DRIVER)
 
+    # The compiler's own reads that happen only during codegen (or release
+    # partitioning): a cached test or warm build does no codegen, so these
+    # are recorded whether or not codegen runs, ensuring they participate
+    # before receipt lookup.
+    CODEGEN_ONLY_ENV = %w(IYI_RELEASE_PARTITIONS IYI_RELEASE_IMPORT IYI_RELEASE_INLINE)
+
     @@current : BuildInputs?
 
     # The recorder of the build running in this process, or nil.
@@ -113,6 +119,7 @@ module Iyi
         CHILD_ENV.each { |name| @env[name] = Crystal::System::Env.get(name) }
       end
       LINK_ONLY_ENV.each { |name| @env[name] = Crystal::System::Env.get(name) }
+      CODEGEN_ONLY_ENV.each { |name| @env[name] = Crystal::System::Env.get(name) }
       cache_root.try { |root| self.cache_root = root }
     end
 

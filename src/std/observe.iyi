@@ -3,6 +3,7 @@
 # Provides runtime observation channel and event recording for
 # `iyi test --cached` and `-Diyi_observe`.
 
+@[Unsafe("observation writes run-time event buffers through raw pointers, platform libraries and system calls")]
 module std/observe
 
 import std/int

@@ -610,7 +610,7 @@ echo "$out" | grep -qE 'at.*src[/\\]iyi' && fail "a prelude panic named a librar
 # resolver, which is the next step's subject; on the Linux raw-syscall
 # runtime capture is not built yet.
 if [ "$(uname -s)" = Darwin ]; then
-  echo "$out" | grep -qE "index\.iyi|Index@Index::go|Index::go" \
+  echo "$out" | grep -qE "index\.iyi|Index::go" \
     || fail "library panic named no frame in the program: $out"
 fi
 step "a panic the library raises names no library line, prelude or std"
@@ -664,7 +664,7 @@ EOF
     [ "$code" = 1 ] || fail "the named-frames panic exited $code, wanted 1"
     echo "$out" | grep -q "^iyi: panic: named frames" || fail "no panic line: $out"
     # Each platform names a frame in the form its debug information holds:
-    # darwin's Mach-O symbol is the mangled `*Named@Named::inner<Int32>:Int32`
+    # darwin's Mach-O symbol is the mangled `*Named^Named::inner<Int32>:Int32`
     # and Windows' PDB procedure record is the display name `inner`, so the
     # pattern asks for the function's own name followed by the file and a
     # line and does not pin either spelling.
@@ -775,7 +775,10 @@ done
 # stack, the guard `mprotect`ed as `IyiFiber#map_stack` does (16 KiB of
 # it on darwin arm64, whose pages are that size) - and hands it to the
 # scheduler's pool, so the task it spawns next runs on it; the task
-# checks that it did. On Windows a fiber stack carries its own writable
+# checks that it did. The pool is the giving thread's, so the task is
+# `spawn(unit: :same)`: a plain spawn, parallel by default, ran on a worker,
+# on a stack of that worker's, on Linux and on macos-15. On Windows a
+# fiber stack carries its own writable
 # memory under the guard: the 16 KB of committed slack at
 # the bottom of the reservation, the fault handler's room
 # (`IyiFiber#map_stack`), which the kernel's growth never reaches. So
@@ -787,6 +790,7 @@ done
 # kernel answers STATUS_STACK_OVERFLOW; a frame that skipped the probes
 # would have written only committed memory and come back.
 cat > "$work/overrun.iyi" <<'EOF'
+@[Unsafe("the program writes the low byte of a 64 KiB uninitialized frame through pointerof, and maps its own fiber stack, to run past the guard page")]
 module overrun
 
 # 64 KiB of frame, written first at its lowest byte, the one farthest
@@ -845,7 +849,7 @@ end
   base = floored_stack
   IyiScheduler.give_stack(base)
   group do |g|
-    g.spawn do
+    g.spawn(unit: :same) do
       if IyiScheduler.current_stack_top != base + IyiFiber::STACK_BYTES
         puts "the task ran on a stack other than the floored one"
       else
@@ -877,6 +881,7 @@ step "a frame larger than the guard page is a stack overflow, not a write under 
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
     cat > "$work/guarantee.iyi" <<'EOF'
+@[Unsafe("a thread asks Windows for its stack guarantee by calling SetThreadStackGuarantee with a pointerof its answer")]
 module guarantee
 
 t = IyiThread.start do
@@ -904,6 +909,7 @@ EOF
     ;;
 esac
 cat > "$work/wild.iyi" <<'EOF'
+@[Unsafe("the program reads through a pointer to address 16 on purpose, the fault the guard must not call the stack's")]
 module wild
 
 p = Pointer(Int32).new(16_u64)
@@ -965,6 +971,7 @@ EOF
 
   # ── 12. a panic resolver hook formats frames when installed ────────────────
   cat > "$work/hook.iyi" <<'EOF'
+@[Unsafe("the resolver hook is handed the backtrace as a Pointer to frame addresses")]
 module hook
 
 def format_trace(frames : Pointer(Void*), count : Int32) : Nil

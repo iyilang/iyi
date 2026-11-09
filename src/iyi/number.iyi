@@ -26,6 +26,7 @@
 # (`Int8` and the rest); these five are the prelude's, and a `.iyi` file
 # may not redefine a method the prelude has (R-3), so the trait's impls
 # for them take this one.
+@[Unsafe("a number is printed straight into the buffer of the string it becomes")]
 {% begin %}
   {% for t in [{"Int32", "0"}, {"Int64", "0_i64"}, {"UInt8", "0_u8"},
                {"UInt64", "0_u64"}, {"Float64", "0.0"}] %}

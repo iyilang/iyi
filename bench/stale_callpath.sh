@@ -95,7 +95,8 @@ run_link() {
   local fixture="$WORK/quoted_ldflags.iyi"
   "$PY" -c "
 with open('$fixture', 'w') as f:
-    f.write('''@[Link(ldflags: \"-L\\'/tmp/a b\\' -lm\")]
+    f.write('''@[Unsafe(\"quoted ldflags fixture declares C math\")]
+@[Link(ldflags: \"-L\\'/tmp/a b\\' -lm\")]
 lib LibTest
   fun cos(x : Float64) : Float64
 end
@@ -151,7 +152,8 @@ os.chmod(shim_path, 0o755)
   local pkg_prog="$WORK/pkg_test.iyi"
   "$PY" -c "
 with open('$pkg_prog', 'w') as f:
-    f.write('''@[Link(\"m\")]
+    f.write('''@[Unsafe(\"pkg-config fixture declares C math\")]
+@[Link(\"m\")]
 lib LibM
   fun cos(x : Float64) : Float64
 end
@@ -273,7 +275,8 @@ else:
   local fixture="$WORK/rg4_fixture.iyi"
   "$PY" -c "
 with open('$fixture', 'w') as f:
-    f.write('''@[Link(ldflags: \"-L\\'/tmp/a b\\' -lm\")]
+    f.write('''@[Unsafe(\"RG4 fixture declares C math\")]
+@[Link(ldflags: \"-L\\'/tmp/a b\\' -lm\")]
 lib LibTest
   fun cos(x : Float64) : Float64
 end
@@ -573,7 +576,7 @@ print('  Type error: writes no OUT and exits nonzero OK')
 # 9. Link failure after check leaves phase checked with Build
 link_bad = os.path.join(work, 'link_bad.iyi')
 with open(link_bad, 'w') as f:
-    f.write('lib BadLib; fun non_existent_fn_49392 : Void; end; BadLib.non_existent_fn_49392\n')
+    f.write('@[Unsafe(\"intentional missing symbol for link failure test\")]\\nlib BadLib; fun non_existent_fn_49392 : Void; end; BadLib.non_existent_fn_49392\\n')
 key_lfail = os.path.join(work, 'link_fail.key')
 bin_lfail = os.path.join(work, 'link_fail.bin')
 if os.path.exists(key_lfail): os.remove(key_lfail)

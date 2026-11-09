@@ -149,6 +149,12 @@ LSP session):
 - `Program.args` / `Program.env` in the own prelude: a pure-iyi tool
   reads its args, its environment and the disk. On wasm32 `env` is nil
   for every name — the absence is III.12's sandbox.
+- `test --chaos[=SEED] [--chaos-runs N]` covers the bug the compiler
+  cannot rule out, a test green only because its tasks ran in one order.
+  It runs each test under N seeded schedules (100 by default), names the
+  seed that failed, and `--chaos=SEED` runs that schedule again. The seed
+  and run go into `--json` as data (SPEC.md III.4.17,
+  `bench/chaos_exercise.sh`).
 
 Free advertising, no work: `iyi mod diff --exit-code` already answers the
 agent question "did I break the API"; document it as a harness contract.

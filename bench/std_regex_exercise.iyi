@@ -3,6 +3,7 @@
 # Run via:
 #     ./bin/iyi run bench/std_regex_exercise.iyi
 
+@[Unsafe("its test helpers walk subjects' bytes through to_unsafe, to build the inputs std/regex scans")]
 module bench/std_regex_exercise
 
 def assert_true(cond : Bool, msg : String) : Nil

@@ -154,6 +154,30 @@ describe "Compiler" do
     end
   end
 
+  # iyi: a link flag reaches that link as it reaches the driver's.
+  #
+  # The template is read out of what `cc -###` prints, and `cc` prints a `$`
+  # escaped between double quotes: `"\$ORIGIN/../lib"`. The parse kept the
+  # backslash, and a program linked from the template carried
+  # `\$ORIGIN/../lib` as its RPATH, which names no directory: the Makefile's
+  # tarball, built against a shared LLVM, bundled its libraries beside the
+  # binary and the binary loaded the host's (Linux, 12 vCPU, the soak's `tar`
+  # job). The RPATH is a string in the program's dynamic section, read here
+  # out of the file with no tool's help.
+  {% if flag?(:linux) %}
+    it "gives the linker a link flag's `$ORIGIN` without the driver's escape" do
+      with_temp_executable "compiler_spec_output" do |path|
+        Iyi::Command.run ["build"].concat(program_flags_options).concat([compiler_datapath("compiler_sample"),
+                                                                         "--link-flags", %q[-Wl,-rpath,\$ORIGIN/iyi-rpath-probe], "-o", path])
+        Process.capture(path).should eq("Hello!")
+
+        binary = File.read(path)
+        at = binary.byte_index("$ORIGIN/iyi-rpath-probe").should_not be_nil
+        binary.byte_at(at - 1).should_not eq '\\'.ord
+      end
+    end
+  {% end %}
+
   # iyi: the cache cleaner asks before it deletes.
   #
   # It keeps the ten most recently modified directories in the cache and
@@ -683,8 +707,9 @@ describe "Compiler" do
           Iyi::Command.run ["build"].concat(program_flags_options)
             .concat(["floor.iyi", "-o", File.expand_path("floor")])
 
-          # The C runtime template's six, and nothing of the runtime's own:
-          # the scheduler, the poller and the switch are raw syscalls and asm.
+          # The C runtime template's six, and of the runtime's own only the
+          # environment (below): the scheduler, the poller and the switch are
+          # raw syscalls and asm.
           #
           # `abort` is the template's, not iyi's, and the way to see that is to
           # link an empty C program the same way: `int main(void){return 0;}`
@@ -695,10 +720,18 @@ describe "Compiler" do
           # is only `puts "ok"`, with no channel, group or spawn, brings it in
           # too. glibc's crt reaches it, so it belongs here with that reason
           # rather than being read as a dependency iyi took on.
+          #
+          # `environ` is the pool's: these spawns run on it (parallel by
+          # default), and the first reads its size, `IYI_WORKERS`, from the
+          # environment, the C runtime's exported global, as
+          # bench/dependency_floor.sh records it for `Program.env`. Which of
+          # `environ` and glibc's `__environ` alias a binary names is the
+          # libc's choice: CI's names the first, a newer glibc the second,
+          # read here as `_environ`.
           symbols = undefined_symbols(File.expand_path("floor"))
           template = ["ITM_deregisterTMCloneTable", "ITM_registerTMCloneTable",
                       "_cxa_finalize", "_gmon_start__", "_libc_start_main",
-                      "abort"]
+                      "abort", "environ", "_environ"]
           (symbols - template).should be_empty
         end
       end

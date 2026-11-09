@@ -1,3 +1,4 @@
+@[Unsafe("holds `Pointer(UInt8)` in `p`, line 64")]
 module metric
 
 # Port of crystal-metric's metric.cr to iyi: twenty-six benchmarks, each of

@@ -197,6 +197,33 @@ for wait in 0 -1 inf nan 1e300 9.3e14; do
 done
 grep -q 'hung' wait.txt && { echo "the refusal ran a test first:"; cat wait.txt; exit 1; }
 
+step "a chaos seed is a decimal number, and a count of runs at least one"
+# `--chaos=SEED` takes back what a failing run printed (SPEC.md III.4.17):
+# a sign, a space, a letter or a number past 2^64 - 1 is a mistyped seed,
+# refused by name rather than read as some other schedule (`to_u64?` alone
+# took `+7` and ` 7`); and zero runs would be a chaos run that ran nothing
+# and passed.
+for seed in "" -1 +7 " 7" 7x 18446744073709551616; do
+  "$IYI" test "--chaos=$seed" math_test.iyi > seed.txt 2>&1
+  [ $? -eq 1 ] && grep -q -- "--chaos= takes a seed, a decimal number below 2^64, not '$seed'" seed.txt ||
+    { echo "--chaos=$seed was taken as a seed:"; cat seed.txt; exit 1; }
+done
+for runs in 0 -3 many; do
+  "$IYI" test --chaos-runs "$runs" math_test.iyi > runs.txt 2>&1
+  [ $? -eq 1 ] && grep -q -- "--chaos-runs takes a number of runs, at least 1, not '$runs'" runs.txt ||
+    { echo "--chaos-runs $runs was taken as a count:"; cat runs.txt; exit 1; }
+done
+"$IYI" test math_test.iyi --chaos-runs > runs.txt 2>&1
+[ $? -eq 1 ] && grep -q -- "--chaos-runs takes a number of runs$" runs.txt ||
+  { echo "--chaos-runs with nothing after it was taken:"; cat runs.txt; exit 1; }
+# And a passing test under three seeds from 18446744073709551615, the last
+# a seed can be, says which it ran: the seeds wrap past it as the
+# runtime's reading of IYI_CHAOS does.
+"$IYI" test --chaos=18446744073709551615 --chaos-runs 3 math_test.iyi > chaos.txt 2>&1 ||
+  { echo "a passing test failed under --chaos:"; cat chaos.txt; exit 1; }
+grep -q '1 passed, 0 failed — chaos seeds 18446744073709551615 to 1$' chaos.txt ||
+  { echo "the chaos run did not name its seeds:"; cat chaos.txt; exit 1; }
+
 step "a test that died says what killed it"
 # An infinite recursion was "fail" with nothing under it - the one failure
 # that printed no evidence, from the verb whose contract is that a failure
@@ -212,7 +239,7 @@ grep -q 'stack overflow' deep.txt || { echo "the death is not the evidence:"; ca
 grep -q '"status":"fail"' deep.json && grep -q 'stack overflow' deep.json ||
   { echo "the data says nothing about the death:"; cat deep.json; exit 1; }
 rm deep_test.iyi
-printf 'module wild_test\n\np = Pointer(Int32).new(16_u64)\nputs p.value\n' > wild_test.iyi
+printf '@[Unsafe("the test reads through a pointer to address 16 on purpose, the kill iyi test must count as a failure")]\nmodule wild_test\n\np = Pointer(Int32).new(16_u64)\nputs p.value\n' > wild_test.iyi
 "$IYI" test wild_test.iyi > wild.txt 2>&1
 [ $? -eq 1 ] || { echo "a test the kernel killed was not a failure:"; cat wild.txt; exit 1; }
 grep -q 'memory fault' wild.txt || { echo "the kernel's kill is not the evidence:"; cat wild.txt; exit 1; }

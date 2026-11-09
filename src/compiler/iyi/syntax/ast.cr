@@ -950,6 +950,12 @@ module Iyi
     # References and every other "who calls this" answer skip them: a
     # person is never asking about the compiler's own probe.
     property? iyi_synthetic = false
+    # iyi: true on a call whose `expanded` is the compiler's own lowering
+    # rather than a macro's - the slice literal, which takes the address of
+    # the constant holding its elements. The unsafe check (SPEC.md III.13)
+    # reads what the person wrote, so it follows the calls of such an
+    # expansion and refuses nothing in it.
+    property? iyi_compiler_expansion = false
     @name_size = -1
     property doc : String?
     property visibility = Visibility::Public
@@ -1687,6 +1693,11 @@ module Iyi
     # def hands to other threads, each with the sentence that says what to
     # pass instead when a call's value is not `Share`.
     property iyi_share_crossing : Hash(String, String)? = nil
+    # iyi: `@[Share(elements: "...")]`: the values the def hands its block
+    # are read on other threads, several at once - std/parallel's
+    # `map_parallel` - so each block parameter's type must be `Share`; the
+    # sentence says what to do instead when one is not.
+    property iyi_share_elements : String? = nil
 
     def initialize(@name, @args = [] of Arg, body = nil, @receiver = nil, @block_arg = nil, @return_type = nil, @macro_def = false, @block_arity = nil, @abstract = false, @splat_index = nil, @double_splat = nil, @free_vars = nil)
       @body = Expressions.from body
@@ -1727,6 +1738,7 @@ module Iyi
       a_def.iyi_observer_wrapped = iyi_observer_wrapped?
       a_def.iyi_share_serial = iyi_share_serial
       a_def.iyi_share_crossing = iyi_share_crossing
+      a_def.iyi_share_elements = iyi_share_elements
       a_def.name_location = name_location
       a_def.visibility = visibility
       a_def.free_var_bounds = @free_var_bounds.clone
@@ -3599,6 +3611,11 @@ module Iyi
     property args : Array(ASTNode)
     property named_args : Array(NamedArgument)?
     property doc : String?
+    # iyi: true on `@[Unsafe("why")]` when it is its file's first statement,
+    # the mark that says the module handles raw memory (SPEC.md III.13).
+    # The parser sets it, and only there is the mark a mark: elsewhere a
+    # positional `@[Unsafe]` is refused.
+    property? iyi_file_mark = false
 
     def initialize(@path, @args = [] of ASTNode, @named_args = nil)
     end

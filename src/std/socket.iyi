@@ -79,6 +79,7 @@
 # here, applied to the file that broke the library ceiling with them
 # (SPEC.md III.9).
 
+@[Unsafe("sockets and addresses are made and used through the platform's raw calls and byte buffers")]
 module std/socket
 
 import std/dns::{DnsError, DnsMessage, DnsName, DnsRecord, HostsFile, ResolvConf, SvcbAnswer, SvcbRecord}
@@ -954,6 +955,14 @@ pub class IyiSocket
     end
   end
 
+  # Reads into *buffer*, as many bytes as one read gives and at most its
+  # size: the count, or why not. The checked spelling of
+  # `read(buffer.to_unsafe, buffer.size)` (SPEC.md III.13).
+  def read(buffer : Bytes) : Int32 | Cancelled | SocketError
+    raise "cannot read into a read-only Slice" if buffer.read_only?
+    read(buffer.to_unsafe, buffer.size)
+  end
+
   def recv(max_bytes : Int32 = 4096) : String | Cancelled | SocketError
     read(max_bytes)
   end
@@ -985,6 +994,12 @@ pub class IyiSocket
       written = written + n.to_i32
     end
     written
+  end
+
+  # Writes all of *bytes*: the count, or why not.
+  def write(bytes : Bytes) : Int32 | Cancelled | SocketError
+    raise "socket is closed" if @fd < 0
+    write(bytes.to_unsafe, bytes.size)
   end
 
   def send(contents : String) : Int32 | Cancelled | SocketError

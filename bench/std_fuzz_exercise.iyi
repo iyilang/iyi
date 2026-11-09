@@ -73,6 +73,7 @@
 # TBSCertificate's [1], [2] and [3] out of order or repeated (two
 # extension blocks, both read), is fixed on branch tls/audit.
 
+@[Unsafe("its hex helpers read strings' bytes through to_unsafe and build strings from a buffer, to turn fuzz cases into the bytes the parsers read")]
 import std/random::{Random}
 import std/gc::{GC}
 import std/asn1::{Der, DerValue, DerClass, Asn1Error}

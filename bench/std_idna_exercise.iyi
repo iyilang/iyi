@@ -64,7 +64,7 @@ def flags_dropped(text : String) : String
   last = -1
   i = 0
   while i < text.bytesize
-    last = i if text.to_unsafe[i] == 45_u8
+    last = i if text.byte_at(i) == 45_u8
     i = i + 1
   end
   last < 0 ? text.downcase : text[0, last + 1] + text[last + 1, text.bytesize - last - 1].downcase
@@ -197,7 +197,7 @@ refused_name "u\u0308.de", "IDNA: label \"u\u0308\" is not in NFC; its NFC form 
 refused_name "\u0301a.de", "IDNA: label \"\u0301a\" begins with the combining mark U+0301", "a leading combining mark"
 refused_name "a\u200Db.de", "IDNA: label #{"a\u200Db".inspect} holds U+200D, a joiner whose context rule needs Joining_Type and Virama, which this module does not carry; it refuses the joiners", "a joiner"
 refused_name "\u0378.com", "IDNA: label \"\u0378\" holds U+0378, which Unicode 17.0.0 has not assigned", "an unassigned code point"
-bad = String.new(3) { |b| b[0] = 97_u8; b[1] = 0xFF_u8; b[2] = 98_u8 }
+bad = String.new([97_u8, 0xFF_u8, 98_u8])
 refused_name bad, "IDNA: #{bad.inspect} is not UTF-8", "bytes that are not UTF-8"
 puts "  empty labels, hyphens, bytes, fake A-labels, what UTS #46 would map, symbols, NFC, marks, joiners"
 

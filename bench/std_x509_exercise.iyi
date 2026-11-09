@@ -19,6 +19,7 @@
 #   roots FILE    a PEM bundle, each certificate read and written out:
 #                 `index version ca pathlen keyusage eku dns self`.
 
+@[Unsafe("its hex and byte helpers read strings' bytes through to_unsafe and copy bytes into String.new's buffer, the way std/x509 reads its input, and its deep recursion keeps a kilobyte uninitialized array per frame, written through pointerof, to check verification within a small stack")]
 import std/x509::{Certificate, X509, X509Error, X509Purpose, SigningKey}
 import std/static_array
 import std/time::{Time}

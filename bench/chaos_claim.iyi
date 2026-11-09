@@ -1,0 +1,44 @@
+# A logical ordering race, for the chaos scheduler (SPEC.md III.4.17): a
+# check of an `Atomic` and an act on it, written as two operations.
+#
+#   ./bin/iyi test bench/chaos_claim.iyi                # passes, nearly always
+#   ./bin/iyi test --chaos=1 --chaos-runs 100 bench/chaos_claim.iyi
+#
+# Two tasks each make themselves the leader if nobody is. Each block
+# captures only atomics, so the compiler runs the two in parallel
+# (III.4.15), and no memory is raced: every read and write is an `Atomic`
+# verb. The bug is order - a task can read "nobody" after the other has
+# read it and before it writes - and the right spelling is one operation,
+# `leader.compare_and_set(0, 1)[1]`. On the pool the window is the few
+# nanoseconds from a load to a store, and the second task is still being
+# taken by a worker when the first is through it, so the test passes run
+# after run; under `--chaos` a seed that preempts the first task between
+# the two finds it, and that seed finds it every time it is run again.
+# bench/chaos_exercise.sh holds both, and the numbers are in SPEC.md
+# III.4.17.
+
+module bench/chaos_claim
+
+leader = Atomic(Int32).new(0)
+claims = Atomic(Int32).new(0)
+group do |g|
+  g.spawn do
+    if leader.get == 0
+      leader.set(1)
+      claims.add(1)
+    end
+    nil
+  end
+  g.spawn do
+    if leader.get == 0
+      leader.set(2)
+      claims.add(1)
+    end
+    nil
+  end
+end
+if claims.get != 1
+  print "two leaders: #{claims.get} tasks found the slot empty, and task #{leader.get} wrote last\n"
+  exit(1)
+end
+print "one leader: task #{leader.get}\n"

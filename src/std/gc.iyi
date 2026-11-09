@@ -23,6 +23,7 @@
 # sentence below, rather than answering zeros or failing on a name the
 # other heap does not have.
 
+@[Unsafe("it hands out, frees and inspects heap chunks through the collector's raw pointers")]
 module std/gc
 
 {% if flag?(:gc_none) %}
@@ -99,7 +100,15 @@ pub struct GC
     IyiHeap.free(pointer)
   end
 
-  # Runs one collection now.
+  # Runs one collection now. Always inlined, as `IyiMark.collect` is, so
+  # that the dead stack is cleared from the caller's frame. Out of line
+  # this is a frame of its own above the cleared stretch, 40 bytes nothing
+  # writes (its call's home space and an alignment word), and a dead
+  # helper's address filling the stack under the caller was freed in 20
+  # --release runs of 20 only because the collection's next frame pushes
+  # five registers over exactly those 40 bytes (LLVM 20.1.7; Windows 11,
+  # 12 logical processors, the user's machine).
+  @[AlwaysInline]
   @[Effect(:collector)]
   def self.collect : Nil
     IyiMark.collect

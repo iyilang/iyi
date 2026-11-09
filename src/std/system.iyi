@@ -56,6 +56,7 @@
 # stack's base) - and that is a panic naming what was refused, never a
 # made-up count.
 
+@[Unsafe("the host's name, processor count and page size are asked of the platform through raw calls into buffers it allocates")]
 module std/system
 
 {% unless (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || flag?(:darwin) || flag?(:win32) %}

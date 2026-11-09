@@ -5,6 +5,9 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+# Its servers and clients are ended by end_process: on Windows, bash's own
+# `kill` ends a native program's stranger with it (bench/end_process.sh).
+. "$REPO/bench/end_process.sh"
 # The gate runs the compiler the caller names; bin/iyi is a POSIX shell
 # wrapper a Windows build cannot run.
 IYI="${IYI:-$REPO/bin/iyi}"
@@ -32,8 +35,10 @@ fi
 # and a half hours later. A TERM to this shell alone ends them once the
 # command in the foreground has ended, as bash runs a trap. They are
 # found by their parents in one table of every process: /proc's ppid on
-# Windows, which is Git bash's view, with `taskkill /T` for what a native
-# program started in turn; one `ps` elsewhere. A walk that asked `pgrep`
+# Windows, which is Git bash's view, one `ps` elsewhere, and each is ended
+# by end_process. What a native program started in turn is not Git bash's
+# to see and is not reached: `taskkill /T`, which reached it, walks parent
+# pids as bash's `kill` does (bench/end_process.sh). A walk that asked `pgrep`
 # parent by parent started a process under the gate with each question,
 # found it, and never ended.
 case "$(uname -s)" in
@@ -61,14 +66,11 @@ gate_children() {
   CHILDREN="${list# $$ }"
 }
 end_children() {
-  local round p w
+  local round p
   for round in 1 2; do
     gate_children
     for p in $CHILDREN; do
-      if [ "$windows" -eq 1 ] && { read -r w < "/proc/$p/winpid"; } 2>/dev/null; then
-        taskkill //F //T //PID "$w" >/dev/null 2>&1
-      fi
-      kill -KILL "$p" 2>/dev/null
+      end_process "$p" KILL
     done
   done
 }
@@ -88,13 +90,13 @@ trap 'exit 129' HUP
 # bash and the server running, as the sibling limit had.
 stop_server() {
   local pid="$1" i
-  kill "$pid" 2>/dev/null
+  end_process "$pid"
   for i in $(seq 1 600); do
     if ! kill -0 "$pid" 2>/dev/null; then
       wait "$pid" 2>/dev/null
       return 0
     fi
-    [ $((i % 10)) -eq 0 ] && kill -9 "$pid" 2>/dev/null
+    [ $((i % 10)) -eq 0 ] && end_process "$pid" KILL
     sleep 0.1
   done
   echo "  FAIL: a server, pid $pid, outlived a minute of TERM and KILL"
@@ -254,6 +256,36 @@ refuses "a chunked body cut inside a chunk" chunk_cut "HTTP: chunked body ends i
 refuses "a status that is not a number" status_text "HTTP: not a status line" \
   'HTTP.parse_response("HTTP/1.1 OK\r\n\r\n").status'
 
+echo
+echo "== a one-thread server's connections stay in its unit"
+# `workers: 1` serves each connection with `g.spawn(unit: :same)`
+# (std/http's spawn_handler): the block holds the accepted socket, the
+# server's idle table and a handler that need not be Share, all of the one
+# thread's. A server whose block appends to an array builds; the copy whose
+# connections go to `unit: :new` is refused at compile time, naming the
+# socket the block captures, so a server that went parallel there is
+# caught before it runs rather than by a race it may not lose.
+mkdir -p "$WORK/unitnew/std"
+printf 'module main\n\nimport std/http::{Response, Server}\nimport std/socket::{IyiSocket}\n\nseen = [] of String\nlistener = IyiSocket.listen("127.0.0.1", 0)\nServer.serve(listener, workers: 1) do |req|\n  seen << req.path\n  Response.new(200, "ok")\nend\nputs seen.size\n' > "$WORK/one_thread.iyi"
+sed 's/^    g\.spawn(unit: :same) do$/    g.spawn(unit: :new) do/' "$REPO/src/std/http.iyi" > "$WORK/unitnew/std/http.iyi"
+if ! "$IYI" build -o "$WORK/one_thread" "$WORK/one_thread.iyi" > "$WORK/one_thread.build" 2>&1; then
+  echo "  a workers: 1 server whose block appends to an array did not build"
+  sed -n '1,8p' "$WORK/one_thread.build"
+  status=1
+elif cmp -s "$REPO/src/std/http.iyi" "$WORK/unitnew/std/http.iyi"; then
+  echo "  the copy that puts each connection in a unit of its own changed nothing, so it proves nothing"
+  status=1
+elif IYI_PATH="$WORK/unitnew${PSEP}$IYI_PATH" "$IYI" build -o "$WORK/one_thread_new" "$WORK/one_thread.iyi" > "$WORK/one_thread_new.build" 2>&1; then
+  echo "  the copy whose connections run in units of their own built: nothing holds spawn_handler to unit: :same"
+  status=1
+elif ! grep -q "spawn(unit: :new) runs in a unit of its own, on another thread captures .client : Std::Socket::IyiSocket., which is not Share" "$WORK/one_thread_new.build"; then
+  echo "  the copy whose connections run in units of their own was refused, but not for the socket"
+  sed -n '1,8p' "$WORK/one_thread_new.build"
+  status=1
+else
+  echo "  a workers: 1 server whose block appends to an array builds; with its connections in units of their own it is refused: the block captures \`client : Std::Socket::IyiSocket\`, which is not Share"
+fi
+
 # The first line a server printed, which is its port, once it has printed
 # it. The wait is for the process to start running: on Windows, Defender
 # checks an exe it has not seen before the exe's first launch runs, and its
@@ -303,11 +335,11 @@ if "$IYI" build -o "$WORK/server" "$REPO/bench/std_http_server.iyi" >"$WORK/serv
   if [ -z "$port" ]; then
     echo "  the server printed no port"
     sed -n '1,5p' "$WORK/server.out" | sed 's/^/    /'
-    kill "$server_pid" 2>/dev/null
+    end_process "$server_pid"
     status=1
   elif [ -z "$PY" ]; then
     echo "  skipped: no working python3, so its http.client was not run against the server"
-    kill "$server_pid" 2>/dev/null
+    end_process "$server_pid"
   elif PORT="$port" "$PY" - <<'PY'
 import http.client, os, shutil, subprocess, sys, gzip, zlib
 try:
@@ -390,7 +422,7 @@ PY
     grep -q "^stopped$" "$WORK/server.out" || { echo "  the server did not return from serve"; status=1; }
   else
     echo "  Python's client and the server disagree"
-    kill "$server_pid" 2>/dev/null
+    end_process "$server_pid"
     status=1
   fi
 else
@@ -1365,9 +1397,12 @@ PY
       return
     end
     serve_pool(listener, SharedProc(Request, Response).of(&handler), stream_bodies, compress, timeout_ms, tls, request_timeout_ms, max_connections, IyiWorkers.count)' "workers: 1, the threads that answered"
+  # `spawn(unit: :same)`, not `spawn`: the block passes every check
+  # `spawn(unit: :new)`'s does, so a plain `spawn` of it runs on the pool
+  # (SPEC.md III.4.15), and that copy answered every request on a worker.
   parallel_breaks "a connection served on the thread that accepted it" \
-    '    g.spawn_parallel do
-      client = IyiSocket.new(fd, family)' '    g.spawn do
+    '    g.spawn(unit: :new) do
+      client = IyiSocket.new(fd, family)' '    g.spawn(unit: :same) do
       client = IyiSocket.new(fd, family)' "answered on the accepting thread"
   parallel_breaks "a stop that never reaches a connection on another worker" \
     '            stop.close
@@ -1949,7 +1984,7 @@ h2_stop() {
   elif command -v curl >/dev/null 2>&1; then
     curl -s --noproxy '*' "http://127.0.0.1:$H2PORT/quit" >/dev/null 2>&1
   fi
-  ( sleep 10; kill "$H2PID" 2>/dev/null ) &
+  ( sleep 10; end_process "$H2PID" ) &
   wait "$H2PID" 2>/dev/null
 }
 

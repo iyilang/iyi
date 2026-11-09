@@ -3,6 +3,7 @@
 # Run via:
 #     ./bin/iyi run bench/std_dir_exercise.iyi
 
+@[Unsafe("its path helpers read a path's bytes through to_unsafe, and on Windows it creates a file by its wide name through CreateFileW")]
 module bench/std_dir_exercise
 
 # `Dir.glob`, matching with `File.match?`, is timed against a bound.

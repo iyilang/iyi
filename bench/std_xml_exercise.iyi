@@ -366,7 +366,7 @@ refused("<!DOCTYPE a [<!ENTITY e \"]]&#62;\">]><a>&e;</a>", "']]>' is not allowe
 refused("<a xmlns:p=\"http://www.w3.org/2000/xmlns/\"/>", "namespace prefix 'p' cannot be bound to the uri of the 'xmlns' prefix at line 1, column 4")
 refused("<a xmlns=\"http://www.w3.org/XML/1998/namespace\"/>", "the default namespace cannot be bound to the uri of the 'xml' prefix at line 1, column 4")
 refused("<a>\u{FFFE}</a>", "character U+FFFE is not an XML character at line 1, column 4")
-refused("<a>caf" + String.new(1) { |b| b[0] = 0xFF_u8 } + "</a>", "byte 0xFF is not UTF-8 at line 1, column 7")
+refused("<a>caf" + String.new([0xFF_u8]) + "</a>", "byte 0xFF is not UTF-8 at line 1, column 7")
 refused("<?xml version=\"1.0\" encoding=\"US-ASCII\"?><a>caf\u{E9}</a>", "byte 0xC3 is not US-ASCII, the declared encoding at line 1, column 48")
 refused("<?xml ?><a/>", "the XML declaration has no version at line 1, column 1")
 refused("<?xml standalone=\"yes\" version=\"1.0\"?><a/>", "'standalone' is out of place in the XML declaration: it is version, encoding, standalone, each once at line 1, column 7")

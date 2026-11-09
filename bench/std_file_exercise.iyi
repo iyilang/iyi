@@ -3,6 +3,7 @@
 # Run via:
 #     ./bin/iyi run bench/std_file_exercise.iyi
 
+@[Unsafe("on Windows it asks whether a symbolic link may be made by calling CreateSymbolicLinkW with wide paths built from to_unsafe")]
 module bench/std_file_exercise
 
 def assert_true(cond : Bool, msg : String) : Nil

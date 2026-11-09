@@ -56,6 +56,15 @@ module Iyi::PreemptChecks
   # (`-Dpreempt_anchor_entry`, `Compiler#preempt_checks`).
   class_property? anchor_at_entry = false
 
+  # What `run` names after optimisation, for *flag*: the word, the TEB
+  # slot's offset on x86-64 Windows, the accessor, and the slow path. A
+  # partitioned `--release` build (`ReleasePartition`) keeps these under
+  # their own names and visible from every partition, since a check goes
+  # into whichever partition has the loop and finds them by name.
+  def self.named(flag : String) : Array(String)
+    [flag, "#{flag}_slot", "*#{flag}", "__iyi_preempt"]
+  end
+
   # *flag* is the preemption word's global (`IyiWorkers::preempt`), and the
   # thread-local accessor is `*` and that name.
   def self.run(mod : LLVM::Module, flag : String, linux : Bool, aarch64 : Bool) : Nil

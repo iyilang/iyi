@@ -1,6 +1,7 @@
 # `std/slice` standard library exercise.
 # Tests every method and invariant of Slice(T) and Bytes.
 
+@[Unsafe("it exercises Slice over memory it allocates itself with Pointer.malloc, the pointer constructors under test")]
 module bench/std_slice_exercise
 
 import std/iterator::{Iterator}

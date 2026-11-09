@@ -27,6 +27,7 @@
 # replaces sits on the chain every noise lookup waits for: crystal-metric's
 # Noise took 1.35 times Crystal's time with it and less than Crystal's
 # with `roundsd`.
+@[Unsafe("rounding and printing call LLVM's intrinsics and C's, declared as a lib")]
 lib LibIyiRounding
   fun copysign = "llvm.copysign.f64"(x : Float64, sign : Float64) : Float64
   {% if flag?(:aarch64) %}

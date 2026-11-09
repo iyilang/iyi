@@ -96,7 +96,7 @@ pub struct P384PrivateKey
   # The key whose d is *bytes*, 48 big-endian, or why it is not one: not
   # 48 bytes, or not in [1, n - 1].
   def self.from_bytes(bytes : String | Array(UInt8)) : P384PrivateKey | EcdsaError
-    raw = bytes.is_a?(String) ? Array(UInt8).new(bytes.bytesize) { |i| bytes.to_unsafe[i] } : bytes
+    raw = bytes.is_a?(String) ? Array(UInt8).new(bytes.bytesize) { |i| bytes.byte_at(i) } : bytes
     return EcdsaError.new("a P-384 private key is 48 bytes, not #{raw.size}") unless raw.size == 48
     d = P384Num.from_bytes(raw, 0)
     unless P384Num.below?(d, P384Num.n) && !d.zero?
@@ -182,7 +182,7 @@ pub struct P384PrivateKey
   # SEQUENCE { r INTEGER, s INTEGER }, as X.509 and TLS 1.3 carry it. The
   # nonce is RFC 6979's, so the same key and message sign alike.
   def sign(hash : EcdsaHash, message : String | Array(UInt8)) : Array(UInt8)
-    bytes = message.is_a?(String) ? Array(UInt8).new(message.bytesize) { |i| message.to_unsafe[i] } : message
+    bytes = message.is_a?(String) ? Array(UInt8).new(message.bytesize) { |i| message.byte_at(i) } : message
     r, s = sign_hashed(hash, hash.digest(bytes))
     P384Der.signature(r.to_bytes, s.to_bytes)
   end

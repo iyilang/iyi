@@ -7,7 +7,8 @@
 A pull request runs the fast tier: the Linux build and the gates that answer in
 minutes, plus the Windows binaries cross-compiled from it. Everything else - the
 Windows, darwin and cursor shards, the samples round trip, the tarball - runs
-for a push to master, a tag, the nightly schedule and a manual dispatch. A pull
+for a push to master or to mt/next (the workflow's `on: push` names no other
+branch), a tag, the nightly schedule and a manual dispatch. A pull
 request does not stand in for those: a change that only the full set would
 catch shows on master after the merge, and is reverted or fixed there.
 

@@ -2,6 +2,7 @@
 #
 # Internally stored as 64-bit unsigned integers. Zero external C library dependencies.
 
+@[Unsafe("the bits live in a buffer of 64-bit words it allocates, grows and indexes itself")]
 module std/bit_array
 
 import std/slice::{Slice}

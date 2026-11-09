@@ -288,12 +288,22 @@ PY
   fi
 fi
 
-# One fiber waits at a time, on every platform: Linux and darwin refuse a
-# second reader of the pipe in the poller, and Windows refuses a second
-# park on the one overlapped slot the console handler posts to. Windows
-# let the second park write its slot over the first's, and the first never
-# woke, not even on the next Ctrl-Break. In a child of its own, because
-# the refusal is a panic and the exercise must not print one.
+# One fiber waits at a time, on every platform and whichever thread it runs
+# on: Linux and darwin refuse a second reader of the pipe in the poller,
+# and Windows refuses a second park on the one overlapped slot the console
+# handler posts to. Windows let the second park write its slot over the
+# first's, and the first never woke, not even on the next Ctrl-Break. In a
+# child of its own, because the refusal is a panic and the exercise must
+# not print one.
+#
+# The poller's rule is each thread's own, and the two plain spawns below
+# capture nothing, so they run on the pool (SPEC.md III.4.15): where they
+# landed on two workers, each parked on its own poller, neither refused,
+# and with no signal sent both waited until the limit killed them - 5 of
+# 30 runs on Linux (12 vCPUs), and this shard on CI (job 126414632680).
+# `SignalWaiter`'s own count of waits refuses the second now. The second
+# program puts the two on two threads every time, one serial on the main
+# thread and one on the pool, so the copy without that count is caught.
 echo
 echo "== two fibers waiting at once are refused"
 cat > "$WORK/waiters.iyi" <<'IYI'
@@ -308,18 +318,37 @@ group do |g|
 end
 puts "two waiters were let in"
 IYI
-if ! "$IYI" build -o "$WORK/waiters" "$WORK/waiters.iyi" >"$WORK/waiters.build.log" 2>&1; then
-  echo "  waiters: build failed"
-  tail -12 "$WORK/waiters.build.log" | sed 's/^/    /'
-  status=1
-elif timeout -k 5 30 "$WORK/waiters" >"$WORK/waiters.out" 2>&1; then
-  echo "  two waiters were let in"; status=1
-elif ! grep -q "two fibers reading one fd" "$WORK/waiters.out"; then
-  echo "  two waiters were refused, but not by name (or hung, and were killed):"
-  sed 's/^/    /' "$WORK/waiters.out"; status=1
-else
-  echo "  two waiters: exits 1 at \"$(grep -m1 'two fibers' "$WORK/waiters.out" | sed 's/^iyi: panic: //')\""
-fi
+cat > "$WORK/threads.iyi" <<'IYI'
+module main
+
+import std/signal::{Signal}
+
+group do |g|
+  g.spawn(unit: :new) { Signal.wait(Signal::INT); 0 }
+  g.spawn(unit: :same) { Signal.wait(Signal::INT); 0 }
+  0
+end
+puts "two waiters on two threads were let in"
+IYI
+# two_waiters <program> <label> <search path>: built against the path and
+# run, exits 1 at the refusal by name, or says what it did instead and
+# answers 1.
+two_waiters() {
+  local program="$1" label="$2" path="$3"
+  if ! IYI_PATH="$path" "$IYI" build -o "$WORK/$program" "$WORK/$program.iyi" >"$WORK/$program.build.log" 2>&1; then
+    echo "  $program: build failed"
+    tail -12 "$WORK/$program.build.log" | sed 's/^/    /'
+    return 1
+  elif timeout -k 5 30 "$WORK/$program" >"$WORK/$program.out" 2>&1; then
+    echo "  $label were let in"; return 1
+  elif ! grep -q "two fibers reading one fd" "$WORK/$program.out"; then
+    echo "  $label were refused, but not by name (or hung, and were killed):"
+    sed 's/^/    /' "$WORK/$program.out"; return 1
+  fi
+  echo "  $label: exits 1 at \"$(grep -m1 'two fibers' "$WORK/$program.out" | sed 's/^iyi: panic: //')\""
+}
+two_waiters waiters "two waiters" "$IYI_PATH" || status=1
+two_waiters threads "two waiters on two threads" "$IYI_PATH" || status=1
 
 echo
 echo "== proving the checks can fail when the module is broken"
@@ -370,6 +399,22 @@ else
       else
         echo "  with no handler, TERM kills the process (exit $code)"
       fi
+    fi
+    # Waits not counted across threads: the two on two threads park on
+    # two pollers, neither is refused, and the limit kills them. Windows'
+    # one overlapped slot refuses the second there without the count.
+    if ! patched uncounted '    raise "two fibers reading one fd" unless @@waiting.compare_and_set(0_u64, 1_u64)[1]' '    @@waiting.set(1_u64)'; then
+      echo "  the patch did not apply"
+      status=1
+    elif two_waiters threads "two waiters on two threads, uncounted" "$WORK/uncounted-std${PSEP}$IYI_PATH" > "$WORK/uncounted.said"; then
+      echo "  the exercise PASSED with waits not counted across threads"
+      status=1
+    elif grep -q "were refused, but not by name (or hung" "$WORK/uncounted.said"; then
+      echo "  waits not counted across threads are caught: the two on two threads hung, and were killed"
+    else
+      echo "  waits not counted across threads failed, but not where they should have:"
+      sed 's/^/  /' "$WORK/uncounted.said"
+      status=1
     fi
   else
     # A close read as INT: the waiter for TERM never wakes, the handler

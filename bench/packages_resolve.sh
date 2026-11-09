@@ -467,6 +467,12 @@ step "iyi doc prints a prelude type's surface"
 grep -q '^class String' prelude-doc.txt || { echo "the type header is missing:"; head -5 prelude-doc.txt; exit 1; }
 grep -q '  def to_i : Int32' prelude-doc.txt || { echo "a method is missing:"; cat prelude-doc.txt; exit 1; }
 grep -q '  def size : Int32' prelude-doc.txt || { echo "size is missing"; exit 1; }
+# The type's doc comment heads it, and String's sits above the file's
+# `@[Unsafe("...")]` mark, which is above `class String` (SPEC.md III.13):
+# the mark took the comment with it, and `iyi doc String` began at `class
+# String` (bench/agent_loop.py step 72, windows-native in CI run
+# 42472342266).
+head -1 prelude-doc.txt | grep -q '^# Text' || { echo "String's doc comment does not head it, past the file's unsafe mark:"; head -3 prelude-doc.txt; exit 1; }
 # A generic type's header carries its parameters once, as it is declared:
 # the list was printed after a name that already held it, `class
 # Array(T)(T)` and `tuple Tuple(*T)(T) < Value`.

@@ -30,7 +30,7 @@
 # read), and interim 1xx answers are read past.
 #
 # **The server.** `Server.serve(listener) { |request| Response }`: a
-# task per connection on the pool `spawn_parallel` starts, one worker per
+# task per connection on the pool `spawn(unit: :new)` starts, one worker per
 # core by default, its block checked by the compiler as a parallel task's
 # is; `workers: 1` serves on the calling thread alone, the block
 # unchecked. Each connection is kept alive across
@@ -145,6 +145,7 @@
 # refused by name; and a streamed answer in zstd, std/zstd's compressor
 # taking its input whole.
 
+@[Unsafe("requests and answers are read into byte buffers it allocates, grows and indexes itself")]
 module std/http
 
 import std/dns::{DnsError, DnsName, SvcbAnswer, SvcbRecord}
@@ -201,7 +202,7 @@ end
 # The listener belongs to the thread that accepts and the connection runs
 # on a pool worker, so the connection's watcher closes this on the
 # connection's own thread when the accept loop says the server stopped
-# (`Server.spawn_parallel_handler`). Nothing on another thread touches it.
+# (`Server.spawn_pooled_handler`). Nothing on another thread touches it.
 class ServeStop
   @closed : Bool = false
 
@@ -1642,7 +1643,7 @@ pub struct Server
   CAP_CHECK_MS = 250
 
   # Serve `listener` until it is closed, on *workers* threads: each
-  # connection is a task on the pool `spawn_parallel` starts (SPEC.md
+  # connection is a task on the pool `spawn(unit: :new)` starts (SPEC.md
   # III.4.13), started by whichever worker is free and served there to
   # its end, while the thread that called this accepts. The block runs on
   # the connection's worker, once per request, on several workers at
@@ -1713,7 +1714,7 @@ pub struct Server
   #
   # *workers*: the pool's size, `IyiWorkers.count` by default - `IYI_WORKERS`
   # from the environment, else the cores this process may run on. The
-  # pool is the process's one, and it does not grow or shrink once it has
+  # pool is the process's one, and its size does not change once it has
   # started, so a count other than the one it started with panics. Every
   # worker runs the block at once, so the compiler checks it where it is
   # written as it checks a parallel task's (`@[Share]`, SPEC.md III.4.4):
@@ -1813,6 +1814,12 @@ pub struct Server
   # once - "two fibers reading one fd" - and the others by none, and their
   # clients waited forever.
   #
+  # The connection runs in the accept loop's unit, spelled `unit: :same`:
+  # its block holds the server's `idle` table and the handler, which the
+  # one thread's connections share between their parks and which are not
+  # `Share`, so `unit: :new` here is refused at compile time
+  # (bench/std_http_exercise.sh keeps that copy).
+  #
   # The connection runs in a group of its own whose answer is read, so a
   # block that panics ends its own connection - its defers close it, and the
   # panic is printed where it happened - and nothing else, which is what
@@ -1820,7 +1827,7 @@ pub struct Server
   # cancelled every other connection and the accept loop and panicked "a
   # task panicked": one request whose block failed took the server down.
   private def self.spawn_handler(g : IyiGroup, client : IyiSocket, handler : Proc(Request, Response), listener : IyiSocket, idle : Hash(UInt64, Conn), stream_bodies : Bool, compress : Bool, timeout_ms : Int32, tls : TlsServerConfig | TlsFrozenServerConfig | Nil, request_timeout_ms : Int32, slots : Channel(Int32)?) : Nil
-    g.spawn do
+    g.spawn(unit: :same) do
       group do |own|
         served = own.spawn do
           handle(client, handler, listener, idle, stream_bodies, compress, timeout_ms, tls, request_timeout_ms)
@@ -1845,7 +1852,7 @@ pub struct Server
   # count in an `Atomic`, a pool or a cache behind a `Mutex`, a
   # `SharedRouter` for a `Router`, or `workers: 1`, under which any value
   # with that `call` is served on the calling thread, a `Router`
-  # included. What the check does not see is the edge `spawn_parallel`
+  # included. What the check does not see is the edge `spawn(unit: :new)`
   # has too: a method the handler calls that writes a module's state. A
   # struct handler is copied into each connection's task, and an `Atomic`
   # in it with it: what the connections share is a class, or held by
@@ -1887,7 +1894,7 @@ pub struct Server
     # `put_now` from a handler, lost its wake about once in fifty runs).
     slots = max_connections > 0 ? Channel(Int32).new(max_connections) : nil
     # Closed once the listener is: every connection's watcher wakes to it
-    # on the connection's own worker (`spawn_parallel_handler`).
+    # on the connection's own worker (`spawn_pooled_handler`).
     stopping = Channel(Int32).new(0)
     group do |g|
       pause = 5
@@ -1905,7 +1912,7 @@ pub struct Server
           pause = pause * 2 if pause < 1000
         in IyiSocket
           pause = 5
-          spawn_parallel_handler(g, client.fd, client.family, handler, stopping, stream_bodies, compress, timeout_ms, request_timeout_ms, slots, tls)
+          spawn_pooled_handler(g, client.fd, client.family, handler, stopping, stream_bodies, compress, timeout_ms, request_timeout_ms, slots, tls)
         end
       end
       stopping.close
@@ -1927,8 +1934,8 @@ pub struct Server
   # connection waiting on its client is closed (`close_for_stop`). Its
   # group is `spawn_handler`'s, so a handler that panics ends its own
   # connection alone. *tls*, the frozen config, crosses with it.
-  private def self.spawn_parallel_handler(g : IyiGroup, fd : Int32, family : Int32, handler : H, stopping : Channel(Int32), stream_bodies : Bool, compress : Bool, timeout_ms : Int32, request_timeout_ms : Int32, slots : Channel(Int32)?, tls : C) : Nil forall H, C
-    g.spawn_parallel do
+  private def self.spawn_pooled_handler(g : IyiGroup, fd : Int32, family : Int32, handler : H, stopping : Channel(Int32), stream_bodies : Bool, compress : Bool, timeout_ms : Int32, request_timeout_ms : Int32, slots : Channel(Int32)?, tls : C) : Nil forall H, C
+    g.spawn(unit: :new) do
       client = IyiSocket.new(fd, family)
       stop = ServeStop.new
       idle = {} of UInt64 => Conn

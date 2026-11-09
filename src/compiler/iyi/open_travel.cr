@@ -90,7 +90,7 @@ module Iyi::OpenTravel
     # The same walk `TypedDefProcessor` does for the tools, written out here
     # because this one has no target location to stop at: a module's method is
     # instantiated on the *including* type, so the instance that matters is
-    # never on the type that declared it — `Kemal::InitHandler@HTTP::Handler#
+    # never on the type that declared it — `Kemal::InitHandler^HTTP::Handler#
     # call_next` is `Kemal::InitHandler`'s to carry and `HTTP::Handler`'s to
     # have written.
     private def collect_types(type : Type) : Nil

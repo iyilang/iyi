@@ -47,4 +47,20 @@ describe Iyi::Stale::Runner do
       end
     end
   end
+
+  it "refuses chaos mode with stale runner" do
+    with_tempfile("runner_chaos_test") do |cache_root|
+      store = Iyi::Stale::Store.new(cache_root)
+      runner = Iyi::Stale::Runner.new(
+        files: [] of String,
+        cached: true,
+        fresh: false,
+        chaos: true,
+        store: store
+      )
+      expect_raises(Iyi::Stale::RunnerError, "cannot combine --chaos with stale runner") do
+        runner.run_internal
+      end
+    end
+  end
 end

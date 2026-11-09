@@ -139,7 +139,7 @@ def hex_of(text : String) : String
   String.build do |io|
     i = 0
     while i < text.bytesize
-      b = text.to_unsafe[i].to_i32
+      b = text.byte_at(i).to_i32
       io << digits[b >> 4]
       io << digits[b & 15]
       i = i + 1

@@ -66,6 +66,7 @@
 # the ancillary chunks (skipped, named), and writing a 1-, 2- or 4-bit
 # grayscale file.
 
+@[Unsafe("the file's bytes, an image's samples and the decoder's and encoder's rows are read and written through raw byte pointers, for speed")]
 module std/png
 
 import std/compress::{Inflater, Deflater, Envelope, CompressError}

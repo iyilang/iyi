@@ -255,7 +255,8 @@ Snapshot format:
 
 ```
 iyi test [--json] [--timeout S] [--affected FILE]... [--cached | --fresh] [--explain]
-         [--shard K/N] [--import-index NS=FILE]... [--export-index NS=FILE]... [paths]
+         [--shard K/N] [--import-index NS=FILE]... [--export-index NS=FILE]...
+         [--chaos[=SEED]] [--chaos-runs N] [paths]
 ```
 
 * **Default mode:** Unchanged. Normal builds, no recording, no new JSON fields.
@@ -269,21 +270,22 @@ iyi test [--json] [--timeout S] [--affected FILE]... [--cached | --fresh] [--exp
 * **`--export-index NS=FILE`:** May be specified multiple times to export to multiple namespaces in a single run.
 * **MCP:** `test` tool gains optional `cached` parameter (`src/compiler/iyi/command/mcp.cr:179`, `221`).
 * **Crystal mode:** `iyi test` rejects `--crystal` as a direct CLI option (`src/compiler/iyi/command/test.cr:76-80`), so Crystal mode reaches `iyi test` only through `IYI_OPTS="--crystal"` (`src/compiler/iyi/command.cr:992`, `1565`). Tests always run fresh with reason `Crystal library effects are not classified` (SPEC.md V.9 (e)).
+* **Chaos mode:** Chaos options (`--chaos`, `--chaos=SEED`, and `--chaos-runs`) cannot be combined with stale-runner options (`--cached`, `--fresh`, `--explain`, `--shard`, `--import-index`, or `--export-index`). The command rejects those combinations before execution (SPEC.md III.4.17). Chaos testing exercises scheduling permutations and runs without receipt reuse.
 * **Crystal spec aggregate:** `./bin/crystal spec` is unchanged. If ever covered, unit is whole generated program (`src/compiler/iyi/command/spec.cr:98-115`).
 
 ## 10. Proof gates
 
 | Gate | Proves | Blocks | Until green |
 |---|---|---|---|
-| RG1 | Compilers with equal build-input digests produce byte-identical test executables for corpus | Hits across commits | Executable SHA-256 stays in identity |
-| RG2 | Normal and `-Diyi_observe` builds give equal exit status, stdout and stderr outside calibrated masks, non-reusable output, and normalized backtraces | Shipping `--cached` | Shipping waits |
-| RG3 | Zero unclassified runtime sites reachable from corpus on target; report lists candidate runtime defs flagged by the §4 walk, with completeness resting on review and RG6 as the check | Enabling platform CI | Platform runs fresh |
+| RG1 | Compilers with equal build-input digests produce byte-identical test executables for corpus (integrated 144-program corpus) | Hits across commits | Executable SHA-256 stays in identity |
+| RG2 | Normal and `-Diyi_observe` builds give equal exit status, stdout and stderr outside calibrated masks, non-reusable output, and normalized backtraces across all 144 programs (28 samples + 116 std exercises), 0 excluded, zero failures | Shipping `--cached` | Shipping waits |
+| RG3 | Zero unclassified runtime sites reachable from corpus on target (144-program integrated corpus); report lists candidate runtime defs flagged by the §4 walk, with completeness resting on review and RG6 as the check | Enabling platform CI | Platform runs fresh |
 | RG4 | Links byte-identical under randomized variables outside `CHILD_ENV` | Treating `CHILD_ENV` as whole link environment | Full link environment digested |
 | RG5 | Runtime patched via `IYI_PATH` dropping each observer allows changed input to pass; gate catches it | Claiming kind is covered | Kind is not claimed |
 | RG6 | Standing shadow audit catches unannotated leaks or disagreements | Keeping consumption enabled after disagreement | Consumption disabled until fix (publishes empty snapshot) |
 | RG7 | Different `--threads` produce identical executables | Leaving `n_threads` out of behavior key | `n_threads` stays in key |
 | RG8 | Over C2, C3 and single-site mutations generated from the walk's own elements (body, callee, overload capture, instance variable and its initializer, constant, class variable initializer, annotation, macro input, position change above a reached call or failable cast): every mutation changing normalized reached IR changes `CallPathFp`; link annotation mutations change the link command line and `LinkFp`; artifact object unit mutations change linked bytes and `Build`; mutations outside the reached set (unreached def body, unrelated type, unused constant, comment above code holding no location literal) change neither; codegen emits no function the walk did not reach | Shipping `--cached` | Shipping waits |
-| RG9 | Every C2 and C3 program checked in two processes with address randomization, with and without a preanalysed prelude (`compiler.cr:605-617`), and on the `stale-fresh` runner gets one `CallPathFp` | Shipping `--cached` | Shipping waits |
+| RG9 | Every C2 and C3 program (integrated 144-program corpus) checked in two processes with address randomization, with and without a preanalysed prelude (`compiler.cr:605-617`), and on the `stale-fresh` runner gets one `CallPathFp` | Shipping `--cached` | Shipping waits |
 
 Normalized reached IR is the unoptimized IR printed under `DUMP=1` (`codegen.cr:755-779`), with debug metadata stripped, type-id constants replaced by the names they denote and range checks by the sorted names in range, symbol indices by symbol strings, proc and temporary names by first-occurrence ordinals, union cases sorted by type name, and module-level tables (simple constants, type-id globals, GC layouts, symbol table) restricted to entries the emitted functions reference.
 
@@ -363,7 +365,7 @@ Automated in `bench/stale_tests.sh` unless marked CI:
 
 ## 13. Measurements and completion
 
-Census (`bench/stale_census.sh`) per platform over C2 (`samples/iyi/*.iyi`) and C3 (`bench/std_*_exercise.iyi` standalone):
+Census (`bench/stale_census.sh`) per platform over C2 (`samples/iyi/*.iyi`, 28 programs) and C3 (`bench/std_*_exercise.iyi` standalone, 116 programs): full integrated 144-program corpus.
 * Records verdict, reusable or not, reason category and site.
 * Categories: requested effect, opaque program construct, refused build mode, runner (trace incomplete, racy run input), internal (unclassified runtime site, internal effect reported as reason, `ambiguous key`, `ambiguous test id`, `reach mismatch`, signature unstable between two checks).
 
@@ -376,7 +378,7 @@ Overhead reported as measured with no thresholds and no promised speedup:
 
 Completion requires all of:
 1. Every §12 row automated and green on every enabled platform.
-2. RG1 through RG9 each green, or claim withdrawn in SPEC.md.
+2. RG1 through RG9 each green on the integrated 144-program corpus, or claim withdrawn in SPEC.md.
 3. Census with zero runner or internal reasons, and reusable programs on every enabled platform.
 4. Consumption and audit run on master with zero disagreements since enablement.
 5. SPEC.md recording census and overhead as measured.
@@ -403,4 +405,5 @@ If the census shows almost all real tests always running, work is not marked com
 * Hits across commits wait on RG1.
 * Environment mutations (`ENV.[]=`, `ENV.delete`, `__iyi_set_environ`) over-approximate by recording `env_all`, so any change to the runner's environment reruns a test that sets a variable. `ENV.[]=` and `ENV.delete` also name the variable (`__iyi_observe_env_write`), and a later read of it is the test's own value, not an input (row 6).
 * No speedup is promised.
+* Chaos mode: chaos options cannot be combined with stale-runner options; chaos runs execute without receipt reuse.
 * Windows: no platform arm is classified, so no Windows test is reusable (RG3 holds on macOS arm64 and Linux x86_64 and aarch64 only).

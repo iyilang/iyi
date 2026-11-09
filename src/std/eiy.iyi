@@ -42,6 +42,7 @@
 # not bytes, so a column on a line with non-ASCII text is the column a
 # reader sees.
 
+@[Unsafe("the parser walks the bytes of the template through a raw pointer, for speed")]
 module std/eiy
 
 pub struct Eiy

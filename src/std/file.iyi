@@ -3,6 +3,7 @@
 # Extends the prelude's core File with File::Info, File::Type, File::Permissions,
 # path queries, permissions, timestamps, symlinks, and iteration without external C libraries.
 
+@[Unsafe("file metadata, permissions, links, temp files, seeking and locks are reached through the platform's raw calls with C path strings and struct buffers")]
 module std/file
 
 import std/path::{Path}

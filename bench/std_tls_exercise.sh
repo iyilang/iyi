@@ -46,6 +46,9 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+# What this gate started is ended by end_process: on Windows, bash's own
+# `kill` ends a native program's stranger with it (bench/end_process.sh).
+. "$REPO/bench/end_process.sh"
 
 # The search path is a list, and the byte between its entries is the
 # platform's: `;` where a drive letter already owns the colon.
@@ -85,7 +88,7 @@ esac
 CW="$WORK"
 
 SERVER_PID=""
-trap '[ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null; rm -rf "$WORK"' EXIT
+trap '[ -n "$SERVER_PID" ] && end_process "$SERVER_PID"; rm -rf "$WORK"' EXIT
 
 # Run as CI runs it, on a Windows machine (Windows 11, 12 logical
 # processors; MUT_JOBS=2, SIBLING_MINUTES=50), the shard holding this gate
@@ -102,7 +105,8 @@ trap '[ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null; rm -rf "$WORK"' EX
 # created by MSYS 15 seconds after they were started. A signal sent to a
 # program MSYS is still starting is lost: 8 TERMs of 8 and 3 KILLs of 3,
 # each 0.3 seconds into a just-written server's start; the next one, once
-# it served, ended it every time.
+# it served, ended it every time. That hang was not what lost the runners
+# ("a stop ends the server and no other process", below).
 #
 # port_written <file> <pid>: until the server <pid> has written its port to
 # <file>, it has ended, or a minute has passed. Where the server is a
@@ -119,16 +123,17 @@ port_written() {
 # stop_server <pid>: the server <pid> ends and is reaped. A TERM, then a
 # KILL every second until it has gone, so a lost signal costs a second, not
 # the gate; one still there after a minute is named, and the gate fails
-# rather than waiting on it.
+# rather than waiting on it. Each is end_process's: on Windows a server is
+# a native program, ended by taskkill on its own pid.
 stop_server() {
   local pid="$1" i
-  kill "$pid" 2>/dev/null
+  end_process "$pid"
   for i in $(seq 1 600); do
     if ! kill -0 "$pid" 2>/dev/null; then
       wait "$pid" 2>/dev/null
       return 0
     fi
-    [ $((i % 10)) -eq 0 ] && kill -9 "$pid" 2>/dev/null
+    [ $((i % 10)) -eq 0 ] && end_process "$pid" KILL
     sleep 0.1
   done
   echo "  FAIL: a server, pid $pid, outlived a minute of TERM and KILL"
@@ -874,7 +879,8 @@ PY
       sleep 0.1
     done
     if kill -0 "$checker" 2>/dev/null; then
-      kill -9 "$checker" "$(cat "$dir/py12.pid" 2>/dev/null)" 2>/dev/null
+      end_process "$(cat "$dir/py12.pid" 2>/dev/null)" KILL
+      kill -9 "$checker" 2>/dev/null
       wait "$checker" 2>/dev/null
       return 124
     fi
@@ -2183,7 +2189,7 @@ ech_reap() {
     kill -0 "$1" 2>/dev/null || break
     sleep 0.1
   done
-  kill "$1" 2>/dev/null
+  end_process "$1"
   wait "$1" 2>/dev/null
 }
 # ech_lines <file> <label> <line>...: the file is those lines, in order.
@@ -2478,6 +2484,75 @@ if stop_holds term_then_wait; then
   status=1
 else
   echo "  the stop it replaced, a TERM and a wait, is caught waiting"
+fi
+
+echo
+echo "== a stop ends the server and no other process"
+# Windows shard 1 (this gate's) lost its runner in 19 of 124 jobs from
+# 2026-10-27 to 11-06, shard 2 (std/http's) in 4 of 126, shards 3 and 4 in
+# none, and no such job ever kept a log. GitHub fails a runner it stopped
+# hearing from 45 minutes after its last word (actions/runner#4632), so
+# those runners went quiet 20 to 47 minutes into the step, 8 of the 9 that
+# kept their step times inside this gate's broken copies (as the build
+# step's time places them, against the nine green jobs' own): not a hang,
+# which the 50-minute sibling limit would have ended in a log. What the
+# broken copies do there that little else does is stop servers: 327 times
+# with bash's `kill` in one run on a Windows machine (Windows 11, 12 logical
+# processors held to 4), 269 distinct pids. On Windows that `kill` is MSYS's
+# exit_process_tree: the program and every process whose recorded parent
+# pid is the program's, found by that pid alone. A process whose parent
+# ended keeps that pid, and Windows hands it out again; when a server holds
+# the pid, its stop ends the stranger too - on a runner, the agent
+# (bench/end_process.sh).
+# end_process ends a native program with taskkill on its own pid. A child
+# records its parent's pid as such a stranger does, so a stop that leaves a
+# Python program's child running is one that cannot reach a stranger; bash's
+# `kill`, the stop it replaced, is seen taking the child with it.
+if [ "$windows" = yes ] && [ -n "$PY" ]; then
+  # spared <stop>: <stop> ends a Python program whose child names it as its
+  # parent; true when the program has gone and the child is still running.
+  spared() {
+    local holder child gone=no kept=no _
+    rm -f "$WORK/spared.pid"
+    "$PY" -c '
+import subprocess, sys, time
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+open(sys.argv[1], "w").write(str(child.pid))
+time.sleep(60)
+' "$WORK/spared.pid" >/dev/null 2>&1 &
+    holder=$!
+    for _ in $(seq 1 100); do
+      [ -s "$WORK/spared.pid" ] && break
+      sleep 0.1
+    done
+    child="$(cat "$WORK/spared.pid" 2>/dev/null)"
+    "$1" "$holder" >/dev/null 2>&1
+    kill -0 "$holder" 2>/dev/null || gone=yes
+    sleep 1
+    if [ -n "$child" ]; then
+      tasklist //FI "PID eq $child" //NH 2>/dev/null | grep -qi python && kept=yes
+      taskkill //F //PID "$child" >/dev/null 2>&1
+    fi
+    if [ "$gone" = no ]; then
+      end_process "$holder" KILL
+      wait "$holder" 2>/dev/null
+    fi
+    [ "$gone" = yes ] && [ "$kept" = yes ]
+  }
+  if spared stop_server; then
+    echo "  stop_server ends a program and leaves the process that names it as its parent"
+  else
+    echo "  FAIL: stop_server took another process with the program it stopped (or left the program)"
+    status=1
+  fi
+  if spared term_then_wait; then
+    echo "  FAIL: the check holds bash's own kill, which takes the program's child with it"
+    status=1
+  else
+    echo "  bash's own kill, the stop it replaced, is caught taking the program's child with it"
+  fi
+else
+  echo "  not Windows, or no python3: the stop there is a signal to the one process, and this is unmeasured"
 fi
 
 echo

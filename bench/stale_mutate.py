@@ -278,11 +278,12 @@ def generate_mutations_for_source(
 
     # Special: link_annotation
     if should_generate("link_annotation"):
-        mut_src = after_module(
+        has_unsafe = any("@[Unsafe(" in line for line in lines[:3])
+        prefix = "" if has_unsafe else '@[Unsafe("link annotation mutation fixture")]\n'
+        mut_src = prefix + after_module(
             "@[Link(\"m\")]\nlib LibMutMath; fun cos(x : Float64) : Float64; end\n"
         ) + "\nputs LibMutMath.cos(0.0)\n"
         mutations.append(Mutation("link_annotation", "link annotation mutation changing LinkFp", mut_src, in_reach=True, special="link_annotation"))
-
     return mutations
 
 

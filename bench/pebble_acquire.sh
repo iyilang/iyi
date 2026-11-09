@@ -22,7 +22,7 @@ acquire_pebble() {
   fi
 
   if ! command -v "$GO" >/dev/null 2>&1; then
-    if [ -n "${IYI_PROOF_INPUTS_DIR:-}" ]; then
+    if [ "${IYI_PROOF_INPUTS_DIR+set}" = "set" ]; then
       echo "  FAIL: IYI_PROOF_INPUTS_DIR requires Go, but '$GO' was not found" >&2
       return 1
     else
@@ -33,7 +33,22 @@ acquire_pebble() {
   GOBIN="$WORK/gobin"
   mkdir -p "$GOBIN"
 
-  if [ -n "${IYI_PROOF_INPUTS_DIR:-}" ]; then
+  if [ "${IYI_PROOF_INPUTS_DIR+set}" = "set" ]; then
+    if [ -z "$IYI_PROOF_INPUTS_DIR" ]; then
+      echo "  FAIL: IYI_PROOF_INPUTS_DIR must not be empty" >&2
+      return 1
+    fi
+    case "$IYI_PROOF_INPUTS_DIR" in
+      /*) ;;
+      *)
+        echo "  FAIL: IYI_PROOF_INPUTS_DIR must be an absolute path: $IYI_PROOF_INPUTS_DIR" >&2
+        return 1
+        ;;
+    esac
+    if [ ! -d "$IYI_PROOF_INPUTS_DIR" ]; then
+      echo "  FAIL: IYI_PROOF_INPUTS_DIR directory not found: $IYI_PROOF_INPUTS_DIR" >&2
+      return 1
+    fi
     proxy_dir="$IYI_PROOF_INPUTS_DIR/go-proxy"
     if [ ! -d "$proxy_dir" ]; then
       echo "  FAIL: IYI_PROOF_INPUTS_DIR Go module mirror 'go-proxy/' missing: $proxy_dir" >&2

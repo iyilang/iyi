@@ -220,6 +220,50 @@ class TestOfflinePebbleContract(unittest.TestCase):
             self.assertNotIn("https://", goproxy, "GOPROXY contains https network fallback")
             self.assertNotIn("direct", goproxy, "GOPROXY contains direct network fallback")
 
+    def test_helper_empty_present_inputs_dir_fails_nonzero(self):
+        """When IYI_PROOF_INPUTS_DIR is explicitly set but empty, helper fails closed (exit 1)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            work_dir = tmp / "work"
+            work_dir.mkdir()
+            bin_dir = tmp / "bin"
+            bin_dir.mkdir()
+            log_file = tmp / "go.log"
+            go_bin = create_fake_go(bin_dir, log_file)
+
+            env = os.environ.copy()
+            env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
+            env["GO"] = str(go_bin)
+            env["WORK"] = str(work_dir)
+            env["IYI_PROOF_INPUTS_DIR"] = ""
+
+            res = run_helper(env)
+            self.assertEqual(res.returncode, 1)
+            self.assertIn("FAIL: IYI_PROOF_INPUTS_DIR must not be empty", res.stderr)
+            self.assertFalse(log_file.exists(), "Go must not be invoked when IYI_PROOF_INPUTS_DIR is empty")
+
+    def test_helper_relative_inputs_dir_fails_nonzero(self):
+        """When IYI_PROOF_INPUTS_DIR is a relative path, helper fails closed (exit 1)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            work_dir = tmp / "work"
+            work_dir.mkdir()
+            bin_dir = tmp / "bin"
+            bin_dir.mkdir()
+            log_file = tmp / "go.log"
+            go_bin = create_fake_go(bin_dir, log_file)
+
+            env = os.environ.copy()
+            env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
+            env["GO"] = str(go_bin)
+            env["WORK"] = str(work_dir)
+            env["IYI_PROOF_INPUTS_DIR"] = "relative/path"
+
+            res = run_helper(env)
+            self.assertEqual(res.returncode, 1)
+            self.assertIn("FAIL: IYI_PROOF_INPUTS_DIR must be an absolute path: relative/path", res.stderr)
+            self.assertFalse(log_file.exists())
+
     def test_helper_absent_mirror_directory_fails_nonzero(self):
         """When IYI_PROOF_INPUTS_DIR has no go-proxy/ dir, helper exits 1."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -546,6 +590,50 @@ echo "FINAL_STATUS=$status"
             self.assertEqual(res.returncode, 0)
             self.assertIn("FINAL_STATUS=0", res.stdout)
             self.assertIn("ACQUIRED_OK certs=", res.stdout)
+    def test_script_boundary_empty_present_fails_closed(self):
+        """When IYI_PROOF_INPUTS_DIR is set but empty, full scripts reject immediately with exit 1."""
+        env = os.environ.copy()
+        env["IYI_PROOF_INPUTS_DIR"] = ""
+
+        res_acme = subprocess.run(["bash", str(ACME_SCRIPT)], env=env, capture_output=True, text=True)
+        self.assertEqual(res_acme.returncode, 1)
+        self.assertIn("FAIL: IYI_PROOF_INPUTS_DIR must not be empty", res_acme.stderr)
+
+        res_autocert = subprocess.run(["bash", str(AUTOCERT_SCRIPT)], env=env, capture_output=True, text=True)
+        self.assertEqual(res_autocert.returncode, 1)
+        self.assertIn("FAIL: IYI_PROOF_INPUTS_DIR must not be empty", res_autocert.stderr)
+
+    def test_script_boundary_no_python_with_empty_present_fails_closed(self):
+        """When Python is missing and IYI_PROOF_INPUTS_DIR is set but empty, no-Python check fails closed."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            work_dir = tmp / "work"
+            work_dir.mkdir()
+
+            cmd_acme = f"""\
+set -u
+status=0
+REPO="{REPO_ROOT}"
+WORK="{work_dir}"
+IYI_PROOF_INPUTS_DIR=""
+PY=""
+GO="go"
+
+if [ -z "$PY" ]; then
+  if [ "${{IYI_PROOF_INPUTS_DIR+set}}" = "set" ]; then
+    echo "  FAIL: IYI_PROOF_INPUTS_DIR requires Python to drive Pebble" >&2
+    status=1
+  else
+    echo "  no Go here (or no python to drive it), so Pebble is not built and the orders go unplaced"
+  fi
+fi
+echo "FINAL_STATUS=$status"
+"""
+            res_acme = subprocess.run(["bash", "-c", cmd_acme], capture_output=True, text=True)
+            self.assertIn("FINAL_STATUS=1", res_acme.stdout)
+            self.assertIn("FAIL: IYI_PROOF_INPUTS_DIR requires Python to drive Pebble", res_acme.stderr)
+            self.assertNotIn("so Pebble is not built", res_acme.stdout)
+
     def test_actual_go_resolves_tiny_offline_file_proxy_module(self):
         """Actual host Go resolves an owned local file-proxy module under GOPROXY=file://, GONOPROXY=none."""
         real_go = shutil.which("go")

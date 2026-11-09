@@ -77,6 +77,23 @@ cleanup() {
 }
 trap cleanup EXIT
 
+if [ "${IYI_PROOF_INPUTS_DIR+set}" = "set" ]; then
+  if [ -z "$IYI_PROOF_INPUTS_DIR" ]; then
+    echo "FAIL: IYI_PROOF_INPUTS_DIR must not be empty" >&2
+    exit 1
+  fi
+  case "$IYI_PROOF_INPUTS_DIR" in
+    /*) ;;
+    *)
+      echo "FAIL: IYI_PROOF_INPUTS_DIR must be an absolute path: $IYI_PROOF_INPUTS_DIR" >&2
+      exit 1
+      ;;
+  esac
+  if [ ! -d "$IYI_PROOF_INPUTS_DIR" ]; then
+    echo "FAIL: IYI_PROOF_INPUTS_DIR directory not found: $IYI_PROOF_INPUTS_DIR" >&2
+    exit 1
+  fi
+fi
 status=0
 export IYI_PATH="$REPO/src${PSEP}$REPO/samples/iyi"
 
@@ -173,7 +190,7 @@ echo "== certificates from Let's Encrypt's Pebble"
 GO="${GO:-go}"
 PEBBLE=""
 if [ -z "$ORACLE" ]; then
-  if [ -n "${IYI_PROOF_INPUTS_DIR:-}" ]; then
+  if [ "${IYI_PROOF_INPUTS_DIR+set}" = "set" ]; then
     echo "  FAIL: IYI_PROOF_INPUTS_DIR requires Python cryptography to drive Pebble" >&2
     status=1
   else
@@ -338,7 +355,7 @@ prove_broken() {
     local | cache | alpn) ;;
     *)
       if [ -z "$PEBBLE" ]; then
-        if [ -n "${IYI_PROOF_INPUTS_DIR:-}" ]; then
+        if [ "${IYI_PROOF_INPUTS_DIR+set}" = "set" ]; then
           echo "  FAIL: $label cannot be verified because Pebble is not running in proof mode" >&2
           status=1
         else

@@ -220,25 +220,24 @@ def check_pid_dead_or_zombie(pid):
         os.kill(pid, 0)
     except ProcessLookupError:
         return True
-    except PermissionError:
-        pass
+    except (PermissionError, OSError):
+        return False
     proc_status = f"/proc/{pid}/status"
-    if os.path.exists(proc_status):
+    if os.path.isfile(proc_status):
         try:
-            with open(proc_status, "r", errors="ignore") as f:
+            with open(proc_status, "r", encoding="utf-8", errors="replace") as f:
                 for line in f:
                     if line.startswith("State:"):
-                        state = line.split(":", 1)[1].strip()
-                        return state.startswith(("Z", "X"))
+                        state_val = line.split(":", 1)[1].strip()
+                        return state_val.startswith(("Z", "X"))
         except (OSError, IOError):
-            return True
+            return False
     try:
         ps_res = subprocess.run(["ps", "-o", "state=", "-p", str(pid)], capture_output=True, text=True)
         if ps_res.returncode == 0:
             st = ps_res.stdout.strip()
-            return st.startswith("Z")
-        elif ps_res.returncode != 0:
-            return True
+            if st:
+                return st.startswith(("Z", "X"))
     except Exception:
         pass
     return False
@@ -391,7 +390,10 @@ execute_cmd([sys.executable, '-c', {child_code!r}], item_dir={sigkill_dir!r}, le
     os.close(control_r)
     control_r = None
 
-    # 7. Prove child exited upon pipe EOF (kernel closes exit_w delivering EOF to exit_r)
+    # 7. Prove child exited upon pipe EOF (bounded readiness check on exit_r)
+    import select
+    rlist, _, _ = select.select([exit_r], [], [], 3.0)
+    assert rlist, 'timeout waiting for exit pipe to be readable (child did not terminate)'
     eof = os.read(exit_r, 1)
     assert eof == b'', f'expected EOF on exit_r, got {eof!r}'
     os.close(exit_r)
@@ -461,25 +463,24 @@ def check_pid_dead_or_zombie(pid):
         os.kill(pid, 0)
     except ProcessLookupError:
         return True
-    except PermissionError:
-        pass
+    except (PermissionError, OSError):
+        return False
     proc_status = f"/proc/{pid}/status"
-    if os.path.exists(proc_status):
+    if os.path.isfile(proc_status):
         try:
-            with open(proc_status, "r", errors="ignore") as f:
+            with open(proc_status, "r", encoding="utf-8", errors="replace") as f:
                 for line in f:
                     if line.startswith("State:"):
-                        state = line.split(":", 1)[1].strip()
-                        return state.startswith(("Z", "X"))
+                        state_val = line.split(":", 1)[1].strip()
+                        return state_val.startswith(("Z", "X"))
         except (OSError, IOError):
-            return True
+            return False
     try:
         ps_res = subprocess.run(["ps", "-o", "state=", "-p", str(pid)], capture_output=True, text=True)
         if ps_res.returncode == 0:
             st = ps_res.stdout.strip()
-            return st.startswith("Z")
-        elif ps_res.returncode != 0:
-            return True
+            if st:
+                return st.startswith(("Z", "X"))
     except Exception:
         pass
     return False

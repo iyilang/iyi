@@ -122,13 +122,8 @@ echo "== every ML-KEM-768 case of NIST's ACVP files"
 # rule with no case left out: 25 key pairs, 25 encapsulations and the 30
 # decapsulation and key-check cases. Offline, or without curl or python,
 # the vendored subset above is what was checked.
-ACVP="https://raw.githubusercontent.com/usnistgov/ACVP-Server/975de31eb83d87039ec88934fdc47d8c312b892d/gen-val/json-files"
-if [ -z "$PY" ] || ! command -v curl >/dev/null 2>&1; then
-  echo "  no curl or python here, so only the vendored subset was checked"
-elif ! curl -sSfL --max-time 60 -o "$WORK/keygen.json" "$ACVP/ML-KEM-keyGen-FIPS203/internalProjection.json" 2>"$WORK/curl.log" ||
-  ! curl -sSfL --max-time 60 -o "$WORK/encdec.json" "$ACVP/ML-KEM-encapDecap-FIPS203/internalProjection.json" 2>>"$WORK/curl.log"; then
-  echo "  the ACVP files could not be fetched ($(tail -1 "$WORK/curl.log")), so only the vendored subset was checked"
-elif ! "$PY" - "$WORK/keygen.json" "$WORK/encdec.json" "$WORK/acvp-all.json" <<'PY'; then
+cut_acvp() {
+  "$PY" - "$1" "$2" "$3" <<'PY'
 import hashlib, json, sys
 wanted = {sys.argv[1]: "d7a62a2c3476957f56dd8d24f9004ea6776ccfe995ffe71a65bb9506dc9c7b1b",
           sys.argv[2]: "a556952ce869bb89c3a3196a701dad89647c193a34c86eafb61a9d710d5b810f"}
@@ -149,12 +144,36 @@ with open(sys.argv[3], "w", newline="\n") as f:
     json.dump(out, f)
 print("  " + ", ".join(f"{len(v)} {k}" for k, v in out.items()))
 PY
-  status=1
-elif "$WORK/mlkem-release" "data" "$WORK/acvp-all.json" >"$WORK/acvp-all.out" 2>&1; then
-  grep '^  [0-9]' "$WORK/acvp-all.out" | sed 's/^  /  checked: /'
+}
+
+if [ -n "${IYI_PROOF_INPUTS_DIR:-}" ]; then
+  if [ -z "$PY" ]; then
+    echo "  FAIL: python is required to process IYI_PROOF_INPUTS_DIR vectors"
+    status=1
+  elif ! "$PY" "$REPO/proof/offline_vectors.py" mlkem "$WORK/acvp-all.json"; then
+    echo "  FAIL IYI_PROOF_INPUTS_DIR: vector verification or extraction failed"
+    status=1
+  elif "$WORK/mlkem-release" "data" "$WORK/acvp-all.json" >"$WORK/acvp-all.out" 2>&1; then
+    grep '^  [0-9]' "$WORK/acvp-all.out" | sed 's/^  /  checked: /'
+  else
+    tail -3 "$WORK/acvp-all.out" | sed 's/^/  /'
+    status=1
+  fi
 else
-  tail -3 "$WORK/acvp-all.out" | sed 's/^/  /'
-  status=1
+  ACVP="https://raw.githubusercontent.com/usnistgov/ACVP-Server/975de31eb83d87039ec88934fdc47d8c312b892d/gen-val/json-files"
+  if [ -z "$PY" ] || ! command -v curl >/dev/null 2>&1; then
+    echo "  no curl or python here, so only the vendored subset was checked"
+  elif ! curl -sSfL --max-time 60 -o "$WORK/keygen.json" "$ACVP/ML-KEM-keyGen-FIPS203/internalProjection.json" 2>"$WORK/curl.log" ||
+    ! curl -sSfL --max-time 60 -o "$WORK/encdec.json" "$ACVP/ML-KEM-encapDecap-FIPS203/internalProjection.json" 2>>"$WORK/curl.log"; then
+    echo "  the ACVP files could not be fetched ($(tail -1 "$WORK/curl.log")), so only the vendored subset was checked"
+  elif ! cut_acvp "$WORK/keygen.json" "$WORK/encdec.json" "$WORK/acvp-all.json"; then
+    status=1
+  elif "$WORK/mlkem-release" "data" "$WORK/acvp-all.json" >"$WORK/acvp-all.out" 2>&1; then
+    grep '^  [0-9]' "$WORK/acvp-all.out" | sed 's/^  /  checked: /'
+  else
+    tail -3 "$WORK/acvp-all.out" | sed 's/^/  /'
+    status=1
+  fi
 fi
 
 # The oracle mode answers a line for a line (see the exercise's header);

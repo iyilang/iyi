@@ -396,10 +396,25 @@ echo "== Wycheproof's ECDH vectors for secp384r1 (ecpoint encoding)"
 # 48 bytes - and taken to 48 here. Every `valid` case must give `shared`,
 # every `invalid` one must be refused; the `acceptable` ones (a compressed
 # point, which this module does not take) are reported.
-WYCHEPROOF_URL="https://raw.githubusercontent.com/C2SP/wycheproof/main/testvectors_v1/ecdh_secp384r1_ecpoint_test.json"
-if [ -z "$PY" ]; then
-  echo "  no python here to read Wycheproof's JSON, so its vectors go unrun"
-elif ! "$PY" - "$WYCHEPROOF_URL" "$WORK/wycheproof.txt" <<'PY' 2>"$WORK/wycheproof.err"
+if [ -n "${IYI_PROOF_INPUTS_DIR:-}" ]; then
+  if [ -z "$PY" ]; then
+    echo "  FAIL: python is required to process IYI_PROOF_INPUTS_DIR vectors"
+    status=1
+  elif ! "$PY" "$REPO/proof/offline_vectors.py" wycheproof "$WORK/wycheproof.txt"; then
+    echo "  FAIL: Wycheproof vector file check or parsing failed"
+    status=1
+  elif "$WORK/p384-release" wycheproof "$WORK/wycheproof.txt" >"$WORK/wycheproof.out" 2>&1; then
+    sed 's/^/  /' "$WORK/wycheproof.out"
+  else
+    echo "  FAIL: Wycheproof's vectors:"
+    sed 's/^/    /' "$WORK/wycheproof.out" | tail -n 20
+    status=1
+  fi
+else
+  WYCHEPROOF_URL="https://raw.githubusercontent.com/C2SP/wycheproof/main/testvectors_v1/ecdh_secp384r1_ecpoint_test.json"
+  if [ -z "$PY" ]; then
+    echo "  no python here to read Wycheproof's JSON, so its vectors go unrun"
+  elif ! "$PY" - "$WYCHEPROOF_URL" "$WORK/wycheproof.txt" <<'PY' 2>"$WORK/wycheproof.err"
 import json, sys, urllib.request
 with urllib.request.urlopen(sys.argv[1], timeout=30) as answer:
     data = json.load(answer)
@@ -414,15 +429,16 @@ for group in data["testGroups"]:
         lines.append(f'{test["tcId"]} {test["result"]} {private_hex} {test["public"] or "-"} {test["shared"] or "-"}')
 open(sys.argv[2], "w", newline="\n").write("\n".join(lines) + "\n")
 PY
-then
-  echo "  Wycheproof's file could not be fetched or read here ($(tail -n 1 "$WORK/wycheproof.err")), so its vectors go unrun"
-else
-  if "$WORK/p384-release" wycheproof "$WORK/wycheproof.txt" >"$WORK/wycheproof.out" 2>&1; then
-    sed 's/^/  /' "$WORK/wycheproof.out"
+  then
+    echo "  Wycheproof's file could not be fetched or read here ($(tail -n 1 "$WORK/wycheproof.err")), so its vectors go unrun"
   else
-    echo "  FAIL: Wycheproof's vectors:"
-    sed 's/^/    /' "$WORK/wycheproof.out" | tail -n 20
-    status=1
+    if "$WORK/p384-release" wycheproof "$WORK/wycheproof.txt" >"$WORK/wycheproof.out" 2>&1; then
+      sed 's/^/  /' "$WORK/wycheproof.out"
+    else
+      echo "  FAIL: Wycheproof's vectors:"
+      sed 's/^/    /' "$WORK/wycheproof.out" | tail -n 20
+      status=1
+    fi
   fi
 fi
 

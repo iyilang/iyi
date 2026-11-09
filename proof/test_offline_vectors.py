@@ -7,11 +7,14 @@ full script entry (bench/std_*_exercise.sh) with safe fake compilers and network
 spies (both curl binary spy and Python urllib/socket spy) to verify:
   1. Explicitly empty or relative IYI_PROOF_INPUTS_DIR fails closed immediately.
   2. Strict mode fails closed when oracles or dependencies are skipped.
-  3. Missing vector files fail nonzero with exact diagnostics and zero network access.
-  4. Corrupt vector files (SHA-256 digest mismatch) fail nonzero with zero network access.
-  5. Wycheproof test case count strictly enforces all 790 unique test cases.
-  6. CLI entry points return nonzero exit status on validation failure.
-  7. Successful control baseline: when inputs and compilers are valid, scripts succeed (exit 0).
+  3. Positive discrimination control: valid inputs run through actual exercise scripts
+     succeed with exit code 0.
+  4. Targeted mutation: missing vector files fail nonzero with exact diagnostics
+     and zero network contact.
+  5. Targeted mutation: corrupt vector files fail nonzero with exact diagnostics
+     and zero network contact.
+  6. Wycheproof test case count strictly enforces all 790 unique test cases.
+  7. CLI entry points return nonzero exit status on validation failure.
   8. Zero network (curl/urllib/socket) is attempted across all strict offline runs.
 """
 
@@ -195,7 +198,7 @@ class TestFullScriptExecutionWithNetworkSpy(unittest.TestCase):
         spy_curl.write_text(f'#!/bin/sh\necho "CURL INVOKED: $@" >> "{canary}"\nexit 1\n')
         spy_curl.chmod(spy_curl.stat().st_mode | stat.S_IEXEC)
 
-        # Python sitecustomize spy catching urllib and socket connects
+        # Python sitecustomize spy catching urllib and socket connects, plus vector mock hook
         pylib = Path(tmpdir) / "pylib"
         pylib.mkdir(parents=True, exist_ok=True)
         (pylib / "sitecustomize.py").write_text(f"""
@@ -208,6 +211,17 @@ def _fail_net(*args, **kwargs):
 
 urllib.request.urlopen = _fail_net
 socket.socket.connect = _fail_net
+
+if os.environ.get("TEST_VALID_VECTORS_MOCK") == "1":
+    import proof.offline_vectors
+    def _mock_verify(path, expected):
+        if not path.is_file():
+            raise proof.offline_vectors.OfflineVectorsError(f"Missing required vector file: {{path}}")
+        data = path.read_bytes()
+        if data.startswith(b"corrupt"):
+            raise proof.offline_vectors.OfflineVectorsError(f"{{path.name}}: sha256 mismatch")
+        return data
+    proof.offline_vectors.verify_file_digest = _mock_verify
 """)
 
         # Mock IYI compiler satisfying all checks in the exercise scripts
@@ -257,8 +271,20 @@ if [ "$sub" = "wycheproof" ]; then
 fi
 
 # P-384 oracle comparators
+if [ "$sub" = "check-signature" ]; then
+    [ -f "$WORK/want.txt" ] && cat "$WORK/want.txt"
+    exit 0
+fi
 if [ "$sub" = "digest" ]; then
     [ -f "$WORK/digests-want.txt" ] && cp "$WORK/digests-want.txt" "$WORK/digests-got.txt"
+    exit 0
+fi
+if [ "$sub" = "check-ecdh" ]; then
+    [ -f "$WORK/ecdh-peers.txt" ] && cat "$WORK/ecdh-peers.txt"
+    exit 0
+fi
+if [ "$sub" = "check-sec1" ]; then
+    [ -f "$WORK/keys/want" ] && cat "$WORK/keys/want"
     exit 0
 fi
 
@@ -343,8 +369,8 @@ elif [ "$cmd" = "run" ]; then
             *other-kem*) echo "HPKE: the recipient's public key is a DHKEM(P-256, HKDF-SHA256) key, not DHKEM(X25519, HKDF-SHA256)" >&2; exit 1 ;;
             *backwards*) echo "HPKE: a context's sequence goes forward only: it is at 5, not back to 4" >&2; exit 1 ;;
             *past-the-end*) echo "HPKE: a context's sequence ends at 2^96 - 1, not 79228162514264337593543950336" >&2; exit 1 ;;
+            *) echo "refused" >&2; exit 1 ;;
         esac
-        exit 1
     fi
     # Mutation tests
     cat << 'MUTE' >&2
@@ -425,7 +451,31 @@ exit 0
                 self.assertIn("must be an absolute path", res.stderr)
                 self.assertFalse(canary.exists(), f"{script_name} must not contact network on relative inputs dir")
 
+    # --- ML-KEM ---
+
+    def test_full_mlkem_exercise_script_succeeds_on_valid_inputs(self) -> None:
+        """Control baseline: verify ML-KEM script succeeds end-to-end with exit 0 on valid inputs."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _, env, canary = self._setup_safe_environment(tmpdir)
+            inputs_dir = Path(tmpdir) / "valid_inputs"
+            inputs_dir.mkdir()
+            env["IYI_PROOF_INPUTS_DIR"] = str(inputs_dir)
+            env["TEST_VALID_VECTORS_MOCK"] = "1"
+
+            mlkem_keygen = {"testGroups": [{"parameterSet": "ML-KEM-768", "function": "keyGen", "tests": [{"tcId": 1, "d": "00", "z": "00", "ek": "00", "dk": "00"}]}]}
+            mlkem_encdec = {"testGroups": [{"parameterSet": "ML-KEM-768", "function": "encapsulation", "tests": [{"tcId": 2, "ek": "00", "m": "00", "c": "00", "k": "00"}]}]}
+            (inputs_dir / "mlkem-keygen.json").write_text(json.dumps(mlkem_keygen))
+            (inputs_dir / "mlkem-encdec.json").write_text(json.dumps(mlkem_encdec))
+
+            script = REPO_ROOT / "bench" / "std_mlkem_exercise.sh"
+            res = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True)
+
+            self.assertEqual(res.returncode, 0, f"ML-KEM valid baseline failed:\n{res.stdout}\n{res.stderr}")
+            self.assertIn("ALL CHECKS PASSED", res.stdout)
+            self.assertFalse(canary.exists(), "Network must never be contacted on valid offline inputs")
+
     def test_full_mlkem_exercise_script_fails_nonzero_on_missing_inputs(self) -> None:
+        """Targeted mutation: verify missing vector files cause specific failure and exit nonzero."""
         with tempfile.TemporaryDirectory() as tmpdir:
             _, env, canary = self._setup_safe_environment(tmpdir)
             empty_inputs = Path(tmpdir) / "empty_inputs"
@@ -440,7 +490,47 @@ exit 0
             self.assertIn("mlkem-keygen.json", res.stdout + res.stderr)
             self.assertFalse(canary.exists(), "Network must never be contacted when IYI_PROOF_INPUTS_DIR is set")
 
+    def test_full_mlkem_exercise_script_fails_nonzero_on_corrupt_inputs(self) -> None:
+        """Targeted mutation: verify corrupt vector files cause specific failure and exit nonzero."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _, env, canary = self._setup_safe_environment(tmpdir)
+            corrupt_inputs = Path(tmpdir) / "corrupt_inputs"
+            corrupt_inputs.mkdir()
+            env["IYI_PROOF_INPUTS_DIR"] = str(corrupt_inputs)
+            (corrupt_inputs / "mlkem-keygen.json").write_bytes(b"corrupt")
+            (corrupt_inputs / "mlkem-encdec.json").write_bytes(b"corrupt")
+
+            script = REPO_ROOT / "bench" / "std_mlkem_exercise.sh"
+            res = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True)
+
+            self.assertNotEqual(res.returncode, 0, "Script must exit nonzero when offline inputs are corrupt")
+            self.assertIn("FAIL IYI_PROOF_INPUTS_DIR", res.stdout + res.stderr)
+            self.assertIn("sha256", res.stdout + res.stderr)
+            self.assertFalse(canary.exists(), "Network must never be contacted when IYI_PROOF_INPUTS_DIR is set")
+
+    # --- HPKE ---
+
+    def test_full_hpke_exercise_script_succeeds_on_valid_inputs(self) -> None:
+        """Control baseline: verify HPKE script succeeds end-to-end with exit 0 on valid inputs."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _, env, canary = self._setup_safe_environment(tmpdir)
+            inputs_dir = Path(tmpdir) / "valid_inputs"
+            inputs_dir.mkdir()
+            env["IYI_PROOF_INPUTS_DIR"] = str(inputs_dir)
+            env["TEST_VALID_VECTORS_MOCK"] = "1"
+
+            vendored = (REPO_ROOT / "bench" / "std_hpke_fixture" / "rfc9180_vectors.json").read_text()
+            (inputs_dir / "hpke-vectors.json").write_text(vendored)
+
+            script = REPO_ROOT / "bench" / "std_hpke_exercise.sh"
+            res = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True)
+
+            self.assertEqual(res.returncode, 0, f"HPKE valid baseline failed:\n{res.stdout}\n{res.stderr}")
+            self.assertIn("ALL CHECKS PASSED", res.stdout)
+            self.assertFalse(canary.exists(), "Network must never be contacted on valid offline inputs")
+
     def test_full_hpke_exercise_script_fails_nonzero_on_missing_inputs(self) -> None:
+        """Targeted mutation: verify missing vector files cause specific failure and exit nonzero."""
         with tempfile.TemporaryDirectory() as tmpdir:
             _, env, canary = self._setup_safe_environment(tmpdir)
             empty_inputs = Path(tmpdir) / "empty_inputs"
@@ -455,7 +545,61 @@ exit 0
             self.assertIn("hpke-vectors.json", res.stdout + res.stderr)
             self.assertFalse(canary.exists(), "Network must never be contacted when IYI_PROOF_INPUTS_DIR is set")
 
+    def test_full_hpke_exercise_script_fails_nonzero_on_corrupt_inputs(self) -> None:
+        """Targeted mutation: verify corrupt vector files cause specific failure and exit nonzero."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _, env, canary = self._setup_safe_environment(tmpdir)
+            corrupt_inputs = Path(tmpdir) / "corrupt_inputs"
+            corrupt_inputs.mkdir()
+            env["IYI_PROOF_INPUTS_DIR"] = str(corrupt_inputs)
+            (corrupt_inputs / "hpke-vectors.json").write_bytes(b"corrupt")
+
+            script = REPO_ROOT / "bench" / "std_hpke_exercise.sh"
+            res = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True)
+
+            self.assertNotEqual(res.returncode, 0, "Script must exit nonzero when offline inputs are corrupt")
+            self.assertIn("FAIL IYI_PROOF_INPUTS_DIR", res.stdout + res.stderr)
+            self.assertIn("sha256", res.stdout + res.stderr)
+            self.assertFalse(canary.exists(), "Network must never be contacted when IYI_PROOF_INPUTS_DIR is set")
+
+    # --- P-384 ---
+
+    def test_full_p384_exercise_script_succeeds_on_valid_inputs(self) -> None:
+        """Control baseline: verify P-384 script succeeds end-to-end with exit 0 on valid inputs."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _, env, canary = self._setup_safe_environment(tmpdir)
+            inputs_dir = Path(tmpdir) / "valid_inputs"
+            inputs_dir.mkdir()
+            env["IYI_PROOF_INPUTS_DIR"] = str(inputs_dir)
+            env["TEST_VALID_VECTORS_MOCK"] = "1"
+
+            wp_data = {
+                "testGroups": [
+                    {
+                        "tests": [
+                            {
+                                "tcId": i,
+                                "result": "valid",
+                                "private": "01",
+                                "public": "04" + "00" * 96,
+                                "shared": "00" * 48,
+                            }
+                            for i in range(1, 791)
+                        ]
+                    }
+                ]
+            }
+            (inputs_dir / "wycheproof-p384.json").write_text(json.dumps(wp_data))
+
+            script = REPO_ROOT / "bench" / "std_p384_exercise.sh"
+            res = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True)
+
+            self.assertEqual(res.returncode, 0, f"P-384 valid baseline failed:\n{res.stdout}\n{res.stderr}")
+            self.assertIn("ALL CHECKS PASSED", res.stdout)
+            self.assertFalse(canary.exists(), "Network must never be contacted on valid offline inputs")
+
     def test_full_p384_exercise_script_fails_nonzero_on_missing_inputs(self) -> None:
+        """Targeted mutation: verify missing vector files cause specific failure and exit nonzero."""
         with tempfile.TemporaryDirectory() as tmpdir:
             _, env, canary = self._setup_safe_environment(tmpdir)
             empty_inputs = Path(tmpdir) / "empty_inputs"
@@ -468,6 +612,23 @@ exit 0
             self.assertNotEqual(res.returncode, 0, "Script must exit nonzero when offline inputs are missing")
             self.assertIn("FAIL IYI_PROOF_INPUTS_DIR", res.stdout + res.stderr)
             self.assertIn("wycheproof-p384.json", res.stdout + res.stderr)
+            self.assertFalse(canary.exists(), "Network must never be contacted when IYI_PROOF_INPUTS_DIR is set")
+
+    def test_full_p384_exercise_script_fails_nonzero_on_corrupt_inputs(self) -> None:
+        """Targeted mutation: verify corrupt vector files cause specific failure and exit nonzero."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _, env, canary = self._setup_safe_environment(tmpdir)
+            corrupt_inputs = Path(tmpdir) / "corrupt_inputs"
+            corrupt_inputs.mkdir()
+            env["IYI_PROOF_INPUTS_DIR"] = str(corrupt_inputs)
+            (corrupt_inputs / "wycheproof-p384.json").write_bytes(b"corrupt")
+
+            script = REPO_ROOT / "bench" / "std_p384_exercise.sh"
+            res = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True)
+
+            self.assertNotEqual(res.returncode, 0, "Script must exit nonzero when offline inputs are corrupt")
+            self.assertIn("FAIL IYI_PROOF_INPUTS_DIR", res.stdout + res.stderr)
+            self.assertIn("sha256", res.stdout + res.stderr)
             self.assertFalse(canary.exists(), "Network must never be contacted when IYI_PROOF_INPUTS_DIR is set")
 
 

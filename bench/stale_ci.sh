@@ -2363,6 +2363,9 @@ case "$COMMAND" in
   test-offline-pebble)
     bash "$REPO/bench/test_offline_pebble.sh" "$@"
     ;;
+  test-offline-vectors)
+    bash "$REPO/bench/test_offline_vectors.sh" "$@"
+    ;;
   help|--help|-h)
     echo "Usage: $0 <command> [options]"
     echo "Commands:"
@@ -2377,6 +2380,7 @@ case "$COMMAND" in
     echo "  master-self-check           Import master snapshot and verify against git diff"
     echo "  test-master-path            Verify master snapshot export, API fetch, and self-check"
     echo "  test-offline-pebble         Verify offline Pebble dependency acquisition gate"
+    echo "  test-offline-vectors        Verify offline vector intake gate and controls"
     ;;
   *)
     echo "Unknown command: $COMMAND" >&2

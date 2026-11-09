@@ -34,13 +34,15 @@ esac
 # The oracles below are written in python, and windows answers `python3`
 # with a store stub that prints and exits rather than running it, so the
 # interpreter is measured here instead of assumed.
-PY=""
-for candidate in python3 python; do
-  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys' >/dev/null 2>&1; then
-    PY="$candidate"
-    break
-  fi
-done
+PY="${PY:-}"
+if [ -z "$PY" ]; then
+  for candidate in python3 python; do
+    if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys' >/dev/null 2>&1; then
+      PY="$candidate"
+      break
+    fi
+  done
+fi
 
 IYI="${IYI:-$REPO/bin/iyi}"
 WORK="$(mktemp -d)"
@@ -55,6 +57,38 @@ trap 'rm -rf "$WORK"' EXIT
 
 status=0
 export IYI_PATH="$REPO/src${PSEP}$REPO/samples/iyi"
+
+if [ "${IYI_PROOF_INPUTS_DIR+set}" = "set" ]; then
+  if [ -z "$IYI_PROOF_INPUTS_DIR" ]; then
+    echo "FAIL: IYI_PROOF_INPUTS_DIR must not be empty" >&2
+    exit 1
+  fi
+  case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN* | Windows_NT)
+      case "$IYI_PROOF_INPUTS_DIR" in
+        /* | [a-zA-Z]:/* | [a-zA-Z]:\\* | \\\\*) ;;
+        *)
+          echo "FAIL: IYI_PROOF_INPUTS_DIR must be an absolute path: $IYI_PROOF_INPUTS_DIR" >&2
+          exit 1
+          ;;
+      esac
+      command -v cygpath >/dev/null 2>&1 && IYI_PROOF_INPUTS_DIR="$(cygpath -m "$IYI_PROOF_INPUTS_DIR")"
+      ;;
+    *)
+      case "$IYI_PROOF_INPUTS_DIR" in
+        /*) ;;
+        *)
+          echo "FAIL: IYI_PROOF_INPUTS_DIR must be an absolute path: $IYI_PROOF_INPUTS_DIR" >&2
+          exit 1
+          ;;
+      esac
+      ;;
+  esac
+  if [ ! -d "$IYI_PROOF_INPUTS_DIR" ]; then
+    echo "FAIL: IYI_PROOF_INPUTS_DIR is not a directory: $IYI_PROOF_INPUTS_DIR" >&2
+    exit 1
+  fi
+fi
 
 # Python's cryptography with deterministic ECDSA (OpenSSL 3.2 and later
 # underneath) is the oracle where it is installed; without it the
@@ -135,6 +169,7 @@ echo "== 1,500 keys and signatures against Python's cryptography, byte for byte"
 # exercise wrote under the key it wrote.
 if [ "$HAVE_ORACLE" -ne 1 ]; then
   echo "  no python cryptography with deterministic ECDSA here, so the signatures go uncompared"
+  if [ "${IYI_PROOF_INPUTS_DIR+set}" = "set" ]; then status=1; fi
 else
   "$PY" - "$WORK/cases.txt" "$WORK/want.txt" <<'PY'
 import os, random, sys
@@ -199,6 +234,7 @@ echo "== 300 digests signed as they are, against Python's Prehashed"
 # digests of the wrong size, which must be refused.
 if [ "$HAVE_ORACLE" -ne 1 ]; then
   echo "  no python cryptography with deterministic ECDSA here, so the digests go unsigned"
+  if [ "${IYI_PROOF_INPUTS_DIR+set}" = "set" ]; then status=1; fi
 else
   "$PY" - "$WORK/digests.txt" "$WORK/digests-want.txt" <<'PY'
 import os, random, sys
@@ -250,6 +286,7 @@ echo "== 500 shared secrets against Python's cryptography, both ways"
 # byte 0x00 - which the exercise must refuse, as Python refuses them.
 if [ "$HAVE_ECDH" -ne 1 ]; then
   echo "  no python cryptography here, so the shared secrets go uncompared"
+  if [ "${IYI_PROOF_INPUTS_DIR+set}" = "set" ]; then status=1; fi
 else
   "$PY" - "$WORK/ecdh.txt" "$WORK/ecdh-peers.txt" <<'PY'
 import os, random, sys
@@ -336,6 +373,7 @@ echo "== private keys as OpenSSL writes them"
 # SEC 1 version 2, 47 bytes.
 if [ -z "$PY" ] || ! "$PY" -c 'from cryptography.hazmat.primitives.asymmetric import ec, ed25519' >/dev/null 2>&1; then
   echo "  no python cryptography here, so OpenSSL's encodings go unread"
+  if [ "${IYI_PROOF_INPUTS_DIR+set}" = "set" ]; then status=1; fi
 else
   mkdir -p "$WORK/keys"
   "$PY" - "$WORK/keys" <<'PY'
@@ -396,10 +434,25 @@ echo "== Wycheproof's ECDH vectors for secp384r1 (ecpoint encoding)"
 # 48 bytes - and taken to 48 here. Every `valid` case must give `shared`,
 # every `invalid` one must be refused; the `acceptable` ones (a compressed
 # point, which this module does not take) are reported.
-WYCHEPROOF_URL="https://raw.githubusercontent.com/C2SP/wycheproof/main/testvectors_v1/ecdh_secp384r1_ecpoint_test.json"
-if [ -z "$PY" ]; then
-  echo "  no python here to read Wycheproof's JSON, so its vectors go unrun"
-elif ! "$PY" - "$WYCHEPROOF_URL" "$WORK/wycheproof.txt" <<'PY' 2>"$WORK/wycheproof.err"
+if [ "${IYI_PROOF_INPUTS_DIR+set}" = "set" ]; then
+  if [ -z "$PY" ]; then
+    echo "  FAIL: python is required to process IYI_PROOF_INPUTS_DIR vectors"
+    status=1
+  elif ! "$PY" "$REPO/proof/offline_vectors.py" wycheproof "$WORK/wycheproof.txt"; then
+    echo "  FAIL IYI_PROOF_INPUTS_DIR: missing or corrupt wycheproof-p384.json"
+    status=1
+  elif "$WORK/p384-release" wycheproof "$WORK/wycheproof.txt" >"$WORK/wycheproof.out" 2>&1; then
+    sed 's/^/  /' "$WORK/wycheproof.out"
+  else
+    echo "  FAIL: Wycheproof's vectors:"
+    sed 's/^/    /' "$WORK/wycheproof.out" | tail -n 20
+    status=1
+  fi
+else
+  WYCHEPROOF_URL="https://raw.githubusercontent.com/C2SP/wycheproof/main/testvectors_v1/ecdh_secp384r1_ecpoint_test.json"
+  if [ -z "$PY" ]; then
+    echo "  no python here to read Wycheproof's JSON, so its vectors go unrun"
+  elif ! "$PY" - "$WYCHEPROOF_URL" "$WORK/wycheproof.txt" <<'PY' 2>"$WORK/wycheproof.err"
 import json, sys, urllib.request
 with urllib.request.urlopen(sys.argv[1], timeout=30) as answer:
     data = json.load(answer)
@@ -414,15 +467,16 @@ for group in data["testGroups"]:
         lines.append(f'{test["tcId"]} {test["result"]} {private_hex} {test["public"] or "-"} {test["shared"] or "-"}')
 open(sys.argv[2], "w", newline="\n").write("\n".join(lines) + "\n")
 PY
-then
-  echo "  Wycheproof's file could not be fetched or read here ($(tail -n 1 "$WORK/wycheproof.err")), so its vectors go unrun"
-else
-  if "$WORK/p384-release" wycheproof "$WORK/wycheproof.txt" >"$WORK/wycheproof.out" 2>&1; then
-    sed 's/^/  /' "$WORK/wycheproof.out"
+  then
+    echo "  Wycheproof's file could not be fetched or read here ($(tail -n 1 "$WORK/wycheproof.err")), so its vectors go unrun"
   else
-    echo "  FAIL: Wycheproof's vectors:"
-    sed 's/^/    /' "$WORK/wycheproof.out" | tail -n 20
-    status=1
+    if "$WORK/p384-release" wycheproof "$WORK/wycheproof.txt" >"$WORK/wycheproof.out" 2>&1; then
+      sed 's/^/  /' "$WORK/wycheproof.out"
+    else
+      echo "  FAIL: Wycheproof's vectors:"
+      sed 's/^/    /' "$WORK/wycheproof.out" | tail -n 20
+      status=1
+    fi
   fi
 fi
 
@@ -449,17 +503,21 @@ else
   tail -n 3 "$WORK/time.out" | sed 's/^/    /'
   status=1
 fi
-if command -v openssl >/dev/null 2>&1 && openssl speed -seconds 1 ecdhp384 ecdsap384 >"$WORK/speed.out" 2>/dev/null; then
-  awk '
+OPENSSL="${OPENSSL:-openssl}"
+if command -v "$OPENSSL" >/dev/null 2>&1 && "$OPENSSL" speed -seconds 1 ecdhp384 ecdsap384 >"$WORK/speed.out" 2>/dev/null; then
+  if ! awk '
     /ecdsa \(nistp384\)/ { sign = $(NF - 1) }
     /ecdh \(nistp384\)/ { ecdh = $NF }
     END {
-      if (sign == "" || ecdh == "") { print "  openssl speed answered in a shape this does not read"; exit }
+      if (sign == "" || ecdh == "") { print "  openssl speed answered in a shape this does not read"; exit 2 }
       printf "  OpenSSL (openssl speed -seconds 1): ECDH %.3f ms (%s/s), sign %.3f ms (%s/s)\n", 1000 / ecdh, ecdh, 1000 / sign, sign
-    }' "$WORK/speed.out"
-  echo "  ($(openssl version))"
+    }' "$WORK/speed.out"; then
+    if [ "${IYI_PROOF_INPUTS_DIR+set}" = "set" ]; then status=1; fi
+  fi
+  echo "  ($("$OPENSSL" version))"
 else
   echo "  no openssl here with speed for P-384, so nothing to set these beside"
+  if [ "${IYI_PROOF_INPUTS_DIR+set}" = "set" ]; then status=1; fi
 fi
 # openssl speed has no keygen line: Python's cryptography makes a key on
 # OpenSSL's own code, so its median stands in, Python's call included.
@@ -477,6 +535,7 @@ then
   cat "$WORK/keygen.out"
 else
   echo "  no python cryptography here, so OpenSSL's keygen goes untimed"
+  if [ "${IYI_PROOF_INPUTS_DIR+set}" = "set" ]; then status=1; fi
 fi
 
 echo

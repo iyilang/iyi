@@ -27,13 +27,15 @@ esac
 # the patches and oracles below are written in python, and windows answers
 # `python3` with a store stub that prints and exits rather than running it, so
 # the interpreter is measured here instead of assumed.
-PY=""
-for candidate in python3 python; do
-  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys' >/dev/null 2>&1; then
-    PY="$candidate"
-    break
-  fi
-done
+PY="${PY:-}"
+if [ -z "$PY" ]; then
+  for candidate in python3 python; do
+    if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys' >/dev/null 2>&1; then
+      PY="$candidate"
+      break
+    fi
+  done
+fi
 
 IYI="${IYI:-$REPO/bin/iyi}"
 WORK="$(mktemp -d)"
@@ -54,6 +56,38 @@ trap 'rm -rf "$WORK"' EXIT
 status=0
 export IYI_PATH="$REPO/src${PSEP}$REPO/samples/iyi"
 VECTORS="$REPO/bench/std_mlkem_fixture/acvp_ml_kem_768.json"
+
+if [ "${IYI_PROOF_INPUTS_DIR+set}" = "set" ]; then
+  if [ -z "$IYI_PROOF_INPUTS_DIR" ]; then
+    echo "FAIL: IYI_PROOF_INPUTS_DIR must not be empty" >&2
+    exit 1
+  fi
+  case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN* | Windows_NT)
+      case "$IYI_PROOF_INPUTS_DIR" in
+        /* | [a-zA-Z]:/* | [a-zA-Z]:\\* | \\\\*) ;;
+        *)
+          echo "FAIL: IYI_PROOF_INPUTS_DIR must be an absolute path: $IYI_PROOF_INPUTS_DIR" >&2
+          exit 1
+          ;;
+      esac
+      command -v cygpath >/dev/null 2>&1 && IYI_PROOF_INPUTS_DIR="$(cygpath -m "$IYI_PROOF_INPUTS_DIR")"
+      ;;
+    *)
+      case "$IYI_PROOF_INPUTS_DIR" in
+        /*) ;;
+        *)
+          echo "FAIL: IYI_PROOF_INPUTS_DIR must be an absolute path: $IYI_PROOF_INPUTS_DIR" >&2
+          exit 1
+          ;;
+      esac
+      ;;
+  esac
+  if [ ! -d "$IYI_PROOF_INPUTS_DIR" ]; then
+    echo "FAIL: IYI_PROOF_INPUTS_DIR is not a directory: $IYI_PROOF_INPUTS_DIR" >&2
+    exit 1
+  fi
+fi
 
 build_and_run() {
   local label="$1" name="$2"
@@ -122,13 +156,8 @@ echo "== every ML-KEM-768 case of NIST's ACVP files"
 # rule with no case left out: 25 key pairs, 25 encapsulations and the 30
 # decapsulation and key-check cases. Offline, or without curl or python,
 # the vendored subset above is what was checked.
-ACVP="https://raw.githubusercontent.com/usnistgov/ACVP-Server/975de31eb83d87039ec88934fdc47d8c312b892d/gen-val/json-files"
-if [ -z "$PY" ] || ! command -v curl >/dev/null 2>&1; then
-  echo "  no curl or python here, so only the vendored subset was checked"
-elif ! curl -sSfL --max-time 60 -o "$WORK/keygen.json" "$ACVP/ML-KEM-keyGen-FIPS203/internalProjection.json" 2>"$WORK/curl.log" ||
-  ! curl -sSfL --max-time 60 -o "$WORK/encdec.json" "$ACVP/ML-KEM-encapDecap-FIPS203/internalProjection.json" 2>>"$WORK/curl.log"; then
-  echo "  the ACVP files could not be fetched ($(tail -1 "$WORK/curl.log")), so only the vendored subset was checked"
-elif ! "$PY" - "$WORK/keygen.json" "$WORK/encdec.json" "$WORK/acvp-all.json" <<'PY'; then
+cut_acvp() {
+  "$PY" - "$1" "$2" "$3" <<'PY'
 import hashlib, json, sys
 wanted = {sys.argv[1]: "d7a62a2c3476957f56dd8d24f9004ea6776ccfe995ffe71a65bb9506dc9c7b1b",
           sys.argv[2]: "a556952ce869bb89c3a3196a701dad89647c193a34c86eafb61a9d710d5b810f"}
@@ -149,12 +178,36 @@ with open(sys.argv[3], "w", newline="\n") as f:
     json.dump(out, f)
 print("  " + ", ".join(f"{len(v)} {k}" for k, v in out.items()))
 PY
-  status=1
-elif "$WORK/mlkem-release" "data" "$WORK/acvp-all.json" >"$WORK/acvp-all.out" 2>&1; then
-  grep '^  [0-9]' "$WORK/acvp-all.out" | sed 's/^  /  checked: /'
+}
+
+if [ "${IYI_PROOF_INPUTS_DIR+set}" = "set" ]; then
+  if [ -z "$PY" ]; then
+    echo "  FAIL: python is required to process IYI_PROOF_INPUTS_DIR vectors" >&2
+    status=1
+  elif ! "$PY" "$REPO/proof/offline_vectors.py" mlkem "$WORK/acvp-all.json"; then
+    echo "  FAIL IYI_PROOF_INPUTS_DIR: missing or corrupt ML-KEM vectors" >&2
+    status=1
+  elif "$WORK/mlkem-release" "data" "$WORK/acvp-all.json" >"$WORK/acvp-all.out" 2>&1; then
+    grep '^  [0-9]' "$WORK/acvp-all.out" | sed 's/^  /  checked: /'
+  else
+    tail -3 "$WORK/acvp-all.out" | sed 's/^/  /'
+    status=1
+  fi
 else
-  tail -3 "$WORK/acvp-all.out" | sed 's/^/  /'
-  status=1
+  ACVP="https://raw.githubusercontent.com/usnistgov/ACVP-Server/975de31eb83d87039ec88934fdc47d8c312b892d/gen-val/json-files"
+  if [ -z "$PY" ] || ! command -v curl >/dev/null 2>&1; then
+    echo "  no curl or python here, so only the vendored subset was checked"
+  elif ! curl -sSfL --max-time 60 -o "$WORK/keygen.json" "$ACVP/ML-KEM-keyGen-FIPS203/internalProjection.json" 2>"$WORK/curl.log" ||
+    ! curl -sSfL --max-time 60 -o "$WORK/encdec.json" "$ACVP/ML-KEM-encapDecap-FIPS203/internalProjection.json" 2>>"$WORK/curl.log"; then
+    echo "  the ACVP files could not be fetched ($(tail -1 "$WORK/curl.log")), so only the vendored subset was checked"
+  elif ! cut_acvp "$WORK/keygen.json" "$WORK/encdec.json" "$WORK/acvp-all.json"; then
+    status=1
+  elif "$WORK/mlkem-release" "data" "$WORK/acvp-all.json" >"$WORK/acvp-all.out" 2>&1; then
+    grep '^  [0-9]' "$WORK/acvp-all.out" | sed 's/^  /  checked: /'
+  else
+    tail -3 "$WORK/acvp-all.out" | sed 's/^/  /'
+    status=1
+  fi
 fi
 
 # The oracle mode answers a line for a line (see the exercise's header);
@@ -175,17 +228,22 @@ echo "== against OpenSSL, both ways"
 # own 2,400-byte decapsulation key (PKCS #8, the expandedKey form): the
 # implicit rejection's key must be the same at both ends. Then a key that
 # fails each check of FIPS 203 section 7, refused by both.
-OPENSSL=openssl
-for candidate in /opt/homebrew/opt/openssl@3/bin/openssl /usr/local/opt/openssl@3/bin/openssl; do
-  if [ -x "$candidate" ]; then
-    OPENSSL="$candidate"
-    break
-  fi
-done
+OPENSSL="${OPENSSL:-}"
+if [ -z "$OPENSSL" ]; then
+  OPENSSL=openssl
+  for candidate in /opt/homebrew/opt/openssl@3/bin/openssl /usr/local/opt/openssl@3/bin/openssl; do
+    if [ -x "$candidate" ]; then
+      OPENSSL="$candidate"
+      break
+    fi
+  done
+fi
 if [ -z "$PY" ] || ! command -v "$OPENSSL" >/dev/null 2>&1; then
   echo "  no openssl and python here, so OpenSSL goes unasked"
+  if [ "${IYI_PROOF_INPUTS_DIR+set}" = "set" ]; then status=1; fi
 elif ! "$OPENSSL" list -kem-algorithms 2>/dev/null | grep -q 'ML-KEM-768'; then
   echo "  $("$OPENSSL" version 2>&1 | head -1) has no ML-KEM-768 (OpenSSL has it from 3.5), so OpenSSL goes unasked"
+  if [ "${IYI_PROOF_INPUTS_DIR+set}" = "set" ]; then status=1; fi
 else
   echo "  $("$OPENSSL" version)"
   if ! "$PY" - "$ORACLE" "$OPENSSL" "$WORK" <<'PY'; then
@@ -267,6 +325,8 @@ for n in range(25):
         fail(f"seed {n}: a ciphertext changed at byte {at} decapsulated to the real secret")
 if unexpanded:
     print(f"  {unexpanded} of OpenSSL's keys were written as the seed alone, so their decapsulation keys went uncompared")
+    if os.environ.get("IYI_PROOF_INPUTS_DIR") is not None:
+        fail(f"{unexpanded} of OpenSSL's keys were written as the seed alone")
 print("  25 seeds: both keys the same; OpenSSL's ciphertexts decapsulated by iyi and iyi's by OpenSSL; 25 changed ones implicitly rejected alike")
 # Section 7.2: the first coefficient of t set to q. Section 7.3: one bit
 # of the stored H(ek) flipped.
@@ -310,6 +370,7 @@ if [ -n "$PY" ] && "$PY" -c 'from cryptography.hazmat.primitives.asymmetric impo
 fi
 if [ "$HAVE_MLKEM" -eq 0 ]; then
   echo "  no python cryptography with ML-KEM here ($([ -n "$PY" ] && "$PY" -c 'import cryptography; print("cryptography " + cryptography.__version__)' 2>/dev/null || echo "none")), so it goes unasked"
+  if [ "${IYI_PROOF_INPUTS_DIR+set}" = "set" ]; then status=1; fi
 elif ! "$PY" - "$ORACLE" <<'PY'; then
 import os, subprocess, sys
 import cryptography

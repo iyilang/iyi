@@ -215,6 +215,33 @@ repo, work = sys.argv[1:3]
 sys.path.insert(0, os.path.join(repo, 'bench'))
 from stale_evidence import safe_stage_dir, safe_item_dir, execute_cmd
 
+def check_pid_dead_or_zombie(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        pass
+    proc_status = f"/proc/{pid}/status"
+    if os.path.exists(proc_status):
+        try:
+            with open(proc_status, "r", errors="ignore") as f:
+                for line in f:
+                    if line.startswith("State:"):
+                        state = line.split(":", 1)[1].strip()
+                        return state.startswith(("Z", "X"))
+        except (OSError, IOError):
+            return True
+    try:
+        ps_res = subprocess.run(["ps", "-o", "state=", "-p", str(pid)], capture_output=True, text=True)
+        if ps_res.returncode == 0:
+            st = ps_res.stdout.strip()
+            return st.startswith("Z")
+        elif ps_res.returncode != 0:
+            return True
+    except Exception:
+        pass
+    return False
 evid_root = os.path.join(work, 'status_root')
 os.makedirs(evid_root, exist_ok=True)
 stage = safe_stage_dir(evid_root, 'rg2')
@@ -275,14 +302,12 @@ assert os.path.isfile(os.path.join(item, 'error_leg.error'))
 # Proves:
 #   * partial bytes flushed to disk survive runner SIGKILL
 #   * pass_fds correctly transports control pipe through execute_cmd to child
-#   * child remains alive blocked on pipe until pipe write end closes
-#   * runner process exit is verified as -signal.SIGKILL
-#   * child actually terminates upon pipe EOF (no unowned orphans)
-#   * unrelated background sentinel process remains alive and untouched throughout
 sentinel_proc = None
 runner_proc = None
 control_r = None
 control_w = None
+exit_r = None
+exit_w = None
 child_pid = None
 birth_verified = False
 sentinel_token = f"birth_token_{time.time_ns()}"
@@ -292,6 +317,7 @@ try:
     assert sentinel_proc.poll() is None, 'sentinel must be alive before test'
 
     control_r, control_w = os.pipe()
+    exit_r, exit_w = os.pipe()
     sigkill_dir = safe_item_dir(stage, 'samples/iyi/sigkill_test.iyi')
     sigkill_out = os.path.join(sigkill_dir, 'kill_leg.stdout')
     child_pid_file = os.path.join(work, 'sigkill_child.pid')
@@ -312,13 +338,16 @@ except Exception:
 import sys, os
 sys.path.insert(0, os.path.join({repo!r}, 'bench'))
 from stale_evidence import execute_cmd
-execute_cmd([sys.executable, '-c', {child_code!r}], item_dir={sigkill_dir!r}, leg='kill_leg', pass_fds=({control_r},))
+execute_cmd([sys.executable, '-c', {child_code!r}], item_dir={sigkill_dir!r}, leg='kill_leg', pass_fds=({control_r}, {exit_w}))
 """
     runner_py = os.path.join(work, 'runner_sigkill.py')
     with open(runner_py, 'w') as f:
         f.write(runner_code)
 
-    runner_proc = subprocess.Popen([sys.executable, runner_py], pass_fds=(control_r,))
+    runner_proc = subprocess.Popen([sys.executable, runner_py], pass_fds=(control_r, exit_w))
+    # Parent closes exit_w so only child holds it
+    os.close(exit_w)
+    exit_w = None
 
     # Wait for child PID with birth token and chunk on disk
     for _ in range(50):
@@ -335,9 +364,9 @@ execute_cmd([sys.executable, '-c', {child_code!r}], item_dir={sigkill_dir!r}, le
     birth_verified = True
 
     # 1. Assert child is alive before killing runner
-    os.kill(child_pid, 0)
+    assert not check_pid_dead_or_zombie(child_pid), 'child must be alive before killing runner'
     # 2. Assert runner is alive before killing runner
-    assert runner_proc.poll() is None
+    assert runner_proc.poll() is None, 'runner must be alive'
 
     assert os.path.exists(sigkill_out), 'output file must exist while runner is running'
     bytes_before_kill = open(sigkill_out, 'rb').read()
@@ -350,7 +379,7 @@ execute_cmd([sys.executable, '-c', {child_code!r}], item_dir={sigkill_dir!r}, le
     assert runner_ret == -signal.SIGKILL, f'expected runner to die by -SIGKILL, got {runner_ret}'
 
     # 5. Assert child is STILL ALIVE after runner died (held by control pipe)
-    os.kill(child_pid, 0)
+    assert not check_pid_dead_or_zombie(child_pid), 'child must remain alive while held by pipe'
 
     # Verify bytes already existed on disk and survived runner death
     bytes_after_kill = open(sigkill_out, 'rb').read()
@@ -362,16 +391,19 @@ execute_cmd([sys.executable, '-c', {child_code!r}], item_dir={sigkill_dir!r}, le
     os.close(control_r)
     control_r = None
 
-    # 7. Prove child exited without lingering (raises ProcessLookupError)
-    child_dead = False
+    # 7. Prove child exited upon pipe EOF (kernel closes exit_w delivering EOF to exit_r)
+    eof = os.read(exit_r, 1)
+    assert eof == b'', f'expected EOF on exit_r, got {eof!r}'
+    os.close(exit_r)
+    exit_r = None
+
+    # Confirm child process is dead or zombie in process table
     for _ in range(40):
-        try:
-            os.kill(child_pid, 0)
-            time.sleep(0.05)
-        except ProcessLookupError:
-            child_dead = True
+        if check_pid_dead_or_zombie(child_pid):
             break
-    assert child_dead, f'child PID {child_pid} failed to exit after pipe EOF'
+        time.sleep(0.05)
+    else:
+        assert False, f'child PID {child_pid} failed to reach dead/zombie state after pipe EOF'
 
     # 8. Prove unrelated sentinel was completely untouched
     assert sentinel_proc.poll() is None, 'sentinel process must still be alive!'
@@ -388,6 +420,16 @@ finally:
     if control_r is not None:
         try:
             os.close(control_r)
+        except Exception:
+            pass
+    if exit_w is not None:
+        try:
+            os.close(exit_w)
+        except Exception:
+            pass
+    if exit_r is not None:
+        try:
+            os.close(exit_r)
         except Exception:
             pass
     if runner_proc is not None and runner_proc.poll() is None:
@@ -413,6 +455,34 @@ import os, sys, subprocess, tempfile, time
 repo, work = sys.argv[1:3]
 sys.path.insert(0, os.path.join(repo, 'bench'))
 from stale_evidence import safe_stage_dir, safe_item_dir, execute_cmd, CaptureError
+
+def check_pid_dead_or_zombie(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        pass
+    proc_status = f"/proc/{pid}/status"
+    if os.path.exists(proc_status):
+        try:
+            with open(proc_status, "r", errors="ignore") as f:
+                for line in f:
+                    if line.startswith("State:"):
+                        state = line.split(":", 1)[1].strip()
+                        return state.startswith(("Z", "X"))
+        except (OSError, IOError):
+            return True
+    try:
+        ps_res = subprocess.run(["ps", "-o", "state=", "-p", str(pid)], capture_output=True, text=True)
+        if ps_res.returncode == 0:
+            st = ps_res.stdout.strip()
+            return st.startswith("Z")
+        elif ps_res.returncode != 0:
+            return True
+    except Exception:
+        pass
+    return False
 
 evid_root = os.path.join(work, 'fail_closed_root')
 os.makedirs(evid_root, exist_ok=True)
@@ -466,11 +536,9 @@ assert os.path.isfile(os.path.join(item_unres, 'unres_leg.unresolved'))
 assert os.path.isfile(gc_pid_file)
 gc_pid = int(open(gc_pid_file).read().strip())
 for _ in range(40):
-    try:
-        os.kill(gc_pid, 0)
-        time.sleep(0.05)
-    except ProcessLookupError:
+    if check_pid_dead_or_zombie(gc_pid):
         break
+    time.sleep(0.05)
 else:
     assert False, 'grandchild failed to terminate on pipe EOF'
 
@@ -506,11 +574,9 @@ assert 'UNRESOLVED_WRITERS:TIMEOUT' in status_str
 assert os.path.isfile(to_pid_file)
 to_gc_pid = int(open(to_pid_file).read().strip())
 for _ in range(40):
-    try:
-        os.kill(to_gc_pid, 0)
-        time.sleep(0.05)
-    except ProcessLookupError:
+    if check_pid_dead_or_zombie(to_gc_pid):
         break
+    time.sleep(0.05)
 else:
     assert False, 'timeout grandchild failed to terminate on pipe EOF'
 PYEOF

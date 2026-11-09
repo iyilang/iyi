@@ -50,6 +50,29 @@ WEIGHTS="
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+PY=""
+for candidate in python3 python; do
+  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import socket, sys' >/dev/null 2>&1; then
+    PY="$candidate"
+    break
+  fi
+done
+
+await_port() {
+  local file="$1" pid="$2" waited=0
+  while [ "$waited" -lt 100 ]; do
+    if [ -s "$file" ]; then
+      head -1 "$file" | tr -d '\r'
+      return 0
+    fi
+    if ! kill -0 "$pid" 2>/dev/null; then
+      return 1
+    fi
+    sleep 0.05
+    waited=$((waited + 1))
+  done
+  return 1
+}
 plan=""
 if [ "${1:-}" = "--plan" ]; then
   plan=1
@@ -178,8 +201,57 @@ for sibling in "$REPO"/bench/std_*_exercise.sh; do
     sample_memory &
     sampler=$!
   fi
-  $bounded bash "$sibling"
-  code=$?
+  trap_pid=""
+  trap_port=""
+  trap_out=""
+  sname="$(basename "$sibling")"
+  if [ -n "$PY" ] && { [ "$sname" = "std_websocket_exercise.sh" ] || [ "$sname" = "std_http_exercise.sh" ]; }; then
+    trap_out="$(mktemp -t trap.XXXXXX)"
+    "$PY" -c '
+import socket, sys
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+s.listen(10)
+print(s.getsockname()[1], flush=True)
+s.settimeout(3600)
+try:
+    conn, _ = s.accept()
+    conn.close()
+    sys.exit(42)
+except Exception:
+    sys.exit(0)
+' >"$trap_out" 2>&1 &
+    trap_pid=$!
+    trap_port=$(await_port "$trap_out" "$trap_pid")
+  fi
+  if [ -n "$trap_port" ]; then
+    WS_URL="ws://127.0.0.1:$trap_port/chat" \
+    NODE_EXTRA_CA_CERTS="/nonexistent/poisoned/ca.pem" \
+    TLS_ROOTS="/nonexistent/poisoned/roots.pem" \
+    TLS_CERT="/nonexistent/poisoned/cert.pem" \
+    TLS_KEY="/nonexistent/poisoned/key.pem" \
+    HOST="poisoned.external.invalid" \
+    http_proxy="http://127.0.0.1:$trap_port" \
+    https_proxy="http://127.0.0.1:$trap_port" \
+    all_proxy="http://127.0.0.1:$trap_port" \
+    HTTP_PROXY="http://127.0.0.1:$trap_port" \
+    HTTPS_PROXY="http://127.0.0.1:$trap_port" \
+    ALL_PROXY="http://127.0.0.1:$trap_port" \
+    $bounded bash "$sibling"
+    code=$?
+  else
+    $bounded bash "$sibling"
+    code=$?
+  fi
+  if [ -n "$trap_pid" ]; then
+    kill "$trap_pid" 2>/dev/null || true
+    wait "$trap_pid" 2>/dev/null || trap_status=$?
+    rm -f "$trap_out"
+    if [ "${trap_status:-0}" -eq 42 ]; then
+      echo "FAIL: sibling $(basename "$sibling") diverted traffic to the ambient trap on 127.0.0.1:$trap_port"
+      code=1
+    fi
+  fi
   if [ -n "$sampler" ]; then
     kill "$sampler" 2>/dev/null
     wait "$sampler" 2>/dev/null

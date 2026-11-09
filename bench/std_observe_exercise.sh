@@ -607,7 +607,7 @@ else
   exit 1
 fi
 
-echo "== concurrent recorder: pool variant (8 g.spawn_parallel tasks)"
+echo "== concurrent recorder: pool variant (8 g.spawn(unit: :new) tasks)"
 POOL_SRC="$WORK/pool_race.iyi"
 cat << 'EOF' > "$POOL_SRC"
 module test/pool_race
@@ -615,7 +615,7 @@ import std/observe
 
 group do |g|
   8.times do |t|
-    g.spawn_parallel do
+    g.spawn(unit: :new) do
       2000.times do |i|
         path = "/iyi-recorder-pool/#{t}/#{i}"
         Std::Observe.file_write(1_u8, path)

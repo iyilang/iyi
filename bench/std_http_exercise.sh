@@ -3670,12 +3670,12 @@ mutation_said() { # mutation_said <n> <line>...: the n-th mutation's answer
   shift
   printf '%s\n' "$@" > "$WORK/mutres/$n"
 }
-mutate() { # mutate <label> <old> <new> [module, http.iyi by default]
+mutate() { # mutate <label> <old> <new> [module, http.iyi by default] [required failure]
   # A binary of its own each: on Windows the last one's file can still be
   # held a moment after it ended, and the next link over it failed with
   # LNK1104 - three of thirty mutations here, whichever came after.
   mutations=$((mutations + 1))
-  local label="$1" old="$2" new="$3" module="${4:-http.iyi}" n="$mutations"
+  local label="$1" old="$2" new="$3" module="${4:-http.iyi}" required="${5:-}" n="$mutations"
   local P="$WORK/patched-$n"
   if [ -z "$PY" ]; then
     mutation_said "$n" "  $label: skipped, no working python3 to make the broken copy with"
@@ -3707,7 +3707,19 @@ PY
       mutation_said "$n" "  $label: the exercise PASSED on a broken module"
       touch "$WORK/mutres/failed"
     else
-      mutation_said "$n" "  $label: caught"
+      local_code=$?
+      if [ -n "$required" ]; then
+        # A timeout or unrelated crash is not evidence that this allocation
+        # check caught the mutation. Retain the assertion and its delta.
+        if [ "$local_code" -eq 1 ] && grep -Eq "$required" "$WORK/mut-$n.out"; then
+          mutation_said "$n" "  $label: caught" "$(grep -E -m1 "$required" "$WORK/mut-$n.out")"
+        else
+          mutation_said "$n" "  $label: exited $local_code without the required assertion" "$(tail -12 "$WORK/mut-$n.out")"
+          touch "$WORK/mutres/failed"
+        fi
+      else
+        mutation_said "$n" "  $label: caught"
+      fi
     fi
     rm -rf "$P/cache"
   ) &
@@ -3754,7 +3766,7 @@ mutate "a server that keeps a chunked body so far beside it, copied per piece" '
 mutate "a server that holds a body at its declared length, not at what has arrived" '      pieces << got
     end' '      Pointer(UInt8).malloc(@declared.to_u64) if pieces.size == 1
       pieces << got
-    end'
+    end' http.iyi 'ASSERTION FAILED: short-body allocation budget: [0-9]+ bytes, under 1048576'
 mutate "a server that copies the head so far at every read" '      @searched = @stop
       return HTTPError.new("#{what} headers past #{limit} bytes", 431) if available > limit' '      @searched = @stop
       String.new(available) do |copy|

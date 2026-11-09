@@ -905,13 +905,23 @@ else
 step "the idle pool fills on a runtime whose workers each start 50 ms late"
 mkdir -p latestart/iyi
 cp "$REPO"/src/iyi/*.iyi latestart/iyi/
-awk '/^  def self\.work : Nil$/ { print; getline; print
+awk '/^  @\[Effect\(:scheduler\)\]; def self\.work : Nil$/ {
+    header_matches++
+    if (header_matches > 1) { err = 1; exit 3 }
+    print
+    if ((getline guard) <= 0 || guard !~ /^    {% if !flag\?\(:gc_none\) && !flag\?\(:gc_boehm\) %}$/) { err = 1; exit 3 }
+    guard_matches++
+    print guard
     print "      late = __iyi_monotonic_ns + 50000000_i64"
     print "      while __iyi_monotonic_ns < late"
     print "        IyiThread.spin_pause"
     print "      end"
-    found = 1; next }
-  { print } END { if (!found) exit 3 }' \
+    next
+  }
+  { print }
+  END {
+    if (err || header_matches != 1 || guard_matches != 1) exit 3
+  }' \
   "$REPO/src/iyi/concurrency.iyi" > latestart/iyi/concurrency.iyi || { echo "the worker's start this step delays is not in the runtime any more"; exit 1; }
 if ! IYI_PATH="$WORK/latestart${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/concurrent_mark.iyi" -o latestart-run > build-latestart.log 2>&1; then
   cat build-latestart.log; exit 1
@@ -1086,11 +1096,52 @@ mkdir -p ready/iyi
 cp "$REPO"/src/iyi/*.iyi ready/iyi/
 # The wait put back as it was: each helper counts itself in on a word of
 # the pool, and the helpers' start waits for the count.
-awk '/^      def self\.helper_main\(seen : UInt64\) : Nil$/ { print; main = 1; next }
-  main && /^        w = worker$/ { print; print "        pool_word(512_u64).value.add(1_u64)"; main = 0; counted = 1; next }
-  /^          @@helpers = @@helpers \+ 1_u64$/ { print; made = 1; next }
-  made && /^        end$/ { print; print "        while pool_word(512_u64).value.get < @@helpers"; print "          spin_pause"; print "        end"; made = 0; waited = 1; next }
-  { print } END { if (!counted || !waited) exit 3 }' \
+awk '/^      @\[Effect\(:collector\)\]; def self\.helper_main\(seen : UInt64\) : Nil$/ {
+    header_matches++
+    if (header_matches > 1) { err = 1; exit 3 }
+    print
+    in_helper_main = 1
+    next
+  }
+  in_helper_main {
+    if (/^        w = worker$/) {
+      init_matches++
+      if (init_matches > 1) { err = 1; exit 3 }
+      print
+      print "        pool_word(512_u64).value.add(1_u64)"
+      in_helper_main = 0
+      next
+    } else {
+      err = 1
+      exit 3
+    }
+  }
+  /^          @@helpers = @@helpers \+ 1_u64$/ {
+    start_bump_matches++
+    if (start_bump_matches > 1) { err = 1; exit 3 }
+    print
+    made = 1
+    next
+  }
+  made {
+    if (/^        end$/) {
+      start_wait_matches++
+      if (start_wait_matches > 1) { err = 1; exit 3 }
+      print
+      print "        while pool_word(512_u64).value.get < @@helpers"
+      print "          spin_pause"
+      print "        end"
+      made = 0
+      next
+    } else {
+      err = 1
+      exit 3
+    }
+  }
+  { print }
+  END {
+    if (err || header_matches != 1 || init_matches != 1 || start_bump_matches != 1 || start_wait_matches != 1) exit 3
+  }' \
   "$REPO/src/iyi/prelude.iyi" > ready/iyi/prelude.iyi || { echo "the helpers' start this proof changes is not in the prelude any more"; exit 1; }
 if ! IYI_PATH="$WORK/ready${PSEP}$REPO/src" "$IYI" build --release crowded.iyi -o crowded-ready > build-ready.log 2>&1; then
   cat build-ready.log; exit 1

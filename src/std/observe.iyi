@@ -1056,6 +1056,7 @@ private def unset_env(name : String) : Nil
     LibObserveC.unsetenv(name.to_unsafe)
   {% end %}
 end
+
 {% if flag?(:linux) %}
   @[Effect(:observation_channel)]
   private def linux_raw_getcwd(size : UInt64) : String?
@@ -1082,7 +1083,6 @@ end
     end
   end
 {% end %}
-
 
 @[Effect(:observation_channel)]
 private def current_cwd : String

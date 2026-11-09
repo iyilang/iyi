@@ -24,4 +24,8 @@ if [ -z "$PY" ]; then
   exit 1
 fi
 
-(cd "$REPO" && exec "$PY" -B -m unittest proof.test_offline_vectors -v "$@")
+if [ $# -gt 0 ]; then
+  (cd "$REPO" && exec "$PY" -B -m unittest "$@")
+else
+  (cd "$REPO" && exec "$PY" -B -m unittest proof.test_offline_vectors -v)
+fi

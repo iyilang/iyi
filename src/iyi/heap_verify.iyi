@@ -68,9 +68,13 @@ class IyiHeapVerify
   # is not trusted, the liveness it read having changed under it.
   @[ThreadLocal]
   @@epoch_seen : UInt64 = 0_u64
+  # The fiber at a stress point on this thread (`at_point`), 0 for none:
+  # a fiber, not a flag, since a point may switch and the fiber move.
+  @[ThreadLocal]
+  @@in_point : UInt64 = 0_u64
   # The allocation-site tables: a page of (arena, table) pairs, open
   # addressing by the arena's directory slot; a table holds the site of
-  # each chunk of the arena, as a 32-bit offset from the image's base.
+  # each chunk of the arena, as a word: its offset from the image's base.
   @@sites : UInt64 = 0_u64
   SITE_PAIRS = 4096_u64
 
@@ -138,11 +142,27 @@ class IyiHeapVerify
   # A local collection of the running fiber's partition at every Nth
   # chaos point (`IYI_HEAP_STRESS=N`), and the false words when asked.
   def self.at_point : Nil
+    # Once per thread at a time: the collection below reaches `Atomic`
+    # verbs of its own outside the allocator's bracket, each a point.
+    fiber = IyiScheduler.current?
+    return unless fiber.is_a?(IyiFiber)
+    me = fiber.object_id
+    return if @@in_point == me
+    @@in_point = me
+    at_point_once
+    @@in_point = 0_u64 if @@in_point == me
+  end
+
+  def self.at_point_once : Nil
     inject_here if @@false_words
     stress = @@stress
     return if stress == 0
     if stress > 1_u64
-      tick = Pointer(Atomic(UInt64)).new(pointerof(@@stress_tick).address).value.add(1_u64)
+      # Plain words, not `Atomic`: an `Atomic` verb here is a chaos point
+      # (this file is not one of the compiler's runtime files), and the
+      # point is where this was called from. A lost count is harmless.
+      tick = @@stress_tick &+ 1_u64
+      @@stress_tick = tick
       return unless tick % stress == 0
     end
     fiber = IyiScheduler.current?
@@ -187,11 +207,15 @@ class IyiHeapVerify
     address = object.address
     arena = IyiHeap.arena_of(address)
     return if arena == 0 || !IyiHeap.partition_arena?(arena)
+    # Inside the allocator's bracket, where a chaos point is none
+    # (chaos.iyi): the table's first claim is a compare-and-set.
+    IyiHeap.enter_barrier
     table = site_table(arena)
     slot = IyiHeap.chunk_index(arena, address)
     @@image = image_base if @@image == 0
     offset = site.address &- @@image
     Pointer(UInt64).new(table &+ slot &* 8_u64).value = offset
+    IyiHeap.leave_barrier
   end
 
   def self.site_of(arena : UInt64, slot : UInt64) : UInt64
@@ -254,21 +278,21 @@ class IyiHeapVerify
   # ── The check at a local collection ────────────────────────────────────
 
   # Partition *record* (`id`), its mark of *parity* done, about to be
-  # swept; *running* is the fiber collecting it on this stack, whose live
-  # part the mark read from *low* up (nil: an idle worker's takeover).
-  # Answers whether the sweep may go on: no pause came meanwhile.
-  def self.check(record : UInt64, id : UInt64, parity : UInt64, running : IyiFiber?, low : UInt64) : Bool
+  # swept; *running* is the fiber collecting it on this stack (nil: an
+  # idle worker's takeover), whose words the mark read are kept
+  # (`mark_read`). Answers whether the sweep may go on: no pause came
+  # meanwhile.
+  def self.check(record : UInt64, id : UInt64, parity : UInt64, running : IyiFiber?) : Bool
     stat(pointerof(@@checks).address)
     @@epoch_seen = IyiMark.epoch
     note_fiber_type(running)
     lost_free(record, id)
-    # Roots: the stacks the mark read.
-    if running.is_a?(IyiFiber)
-      top = running.stack_top
-      top = IyiThread.current_stack_top if top == 0
-      top = IyiRoots.stack_base if top == 0
-      scan_words(record, id, parity, false, K_STACK, running.object_id, low, top)
+    # Roots: the stacks the mark read - the running one as it read it,
+    # since the collector's own frames on it have changed since.
+    if running.is_a?(IyiFiber) && @@read_high > @@read_low
+      scan_words(record, id, parity, false, K_STACK, running.object_id, @@read, @@read &+ (@@read_high &- @@read_low))
     end
+    @@read_high = 0_u64
     unit_address = IyiHeap.read64(record &+ IyiHeap::REC_UNIT)
     if unit_address != 0
       unit = Pointer(Void).new(unit_address).as(IyiUnit)
@@ -333,8 +357,9 @@ class IyiHeapVerify
     @@fiber_type = fiber.crystal_type_id.to_u64 if @@fiber_type == 0 && fiber.is_a?(IyiFiber)
   end
 
+  # A statistic, by a plain add (see `at_point`): close, not exact.
   def self.stat(address : UInt64) : Nil
-    Pointer(Atomic(UInt64)).new(address).value.add(1_u64)
+    IyiHeap.write64(address, IyiHeap.read64(address) &+ 1_u64)
   end
 
   # Whether *head* is a free chunk of a run partition *id* owns.
@@ -743,12 +768,16 @@ class IyiHeapVerify
     elsif kind == K_STACK
       fiber = Pointer(Void).new(who).as(IyiFiber)
       running = IyiScheduler.current?
+      collecting = running.is_a?(IyiFiber) && running.object_id == who
+      # The running stack's word is read from the mark's copy.
+      where = address
+      where = @@read_low &+ (address &- @@read) if collecting && address >= @@read && address < @@read &+ (@@read_high &- @@read_low)
       say("    word at ")
-      say_hex(address)
+      say_hex(where)
       say(", ")
-      say_dec(fiber.stack_top &- address)
+      say_dec(fiber.stack_top &- where)
       say(" bytes below the stack's top; the fiber ")
-      say(running.is_a?(IyiFiber) && running.object_id == who ? "is the one collecting" : "is parked")
+      say(collecting ? "is the one collecting (the word as the mark read it)" : "is parked")
       say(", state ")
       say_dec(fiber.state.value.to_u64)
       say(fiber.on_cpu? ? ", on a cpu" : ", on no cpu")
@@ -767,6 +796,34 @@ class IyiHeapVerify
     say("\n")
     target_detail(target)
     report_end
+  end
+
+  # The running stack's words as the local mark read them, copied by the
+  # hook beside its read (`mark_read`, heap_partition.iyi): the check
+  # reads the copy, because the collector's own frames on that stack -
+  # its loops' temporaries, one past the end of a buffer it scanned - have
+  # changed since, and a word the mark never saw is no root it missed.
+  @[ThreadLocal]
+  @@read : UInt64 = 0_u64
+  @[ThreadLocal]
+  @@read_low : UInt64 = 0_u64
+  @[ThreadLocal]
+  @@read_high : UInt64 = 0_u64
+
+  READ_MAX = 1048576_u64
+
+  def self.mark_read(low : UInt64, high : UInt64) : Nil
+    @@read = __iyi_mmap(READ_MAX).address if @@read == 0
+    low = (low &+ 7_u64) & (0_u64 &- 8_u64)
+    low = high - READ_MAX if high - low > READ_MAX
+    @@read_low = low
+    @@read_high = high
+    copy = @@read
+    cursor = low
+    while cursor &+ 8_u64 <= high
+      IyiHeap.write64(copy &+ (cursor - low), IyiHeap.read64(cursor))
+      cursor = cursor &+ 8_u64
+    end
   end
 
   def self.say_object(what : String, base : UInt64, type_id : UInt64) : Nil
@@ -903,8 +960,11 @@ class IyiHeapVerify
 
   # ── The false-word injector (`IYI_HEAP_FALSE_WORDS=1`) ─────────────────
 
+  # Plain, for the reason `at_point`'s count is: the injector runs at a
+  # chaos point.
   def self.noise : UInt64
-    state = Pointer(Atomic(UInt64)).new(pointerof(@@noise).address).value.add(0x9E3779B97F4A7C15_u64) &+ 0x9E3779B97F4A7C15_u64
+    state = @@noise &+ 0x9E3779B97F4A7C15_u64
+    @@noise = state
     IyiChaosMix.mix(state)
   end
 

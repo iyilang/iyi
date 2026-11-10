@@ -264,7 +264,7 @@ class IyiChaos
     unit = fiber.chaos_unit
     return unit if unit.is_a?(IyiChaosUnit)
     root = @@root
-    root = IyiChaosUnit.new(0_u64, HIGH) unless root.is_a?(IyiChaosUnit)
+    root = IyiCross.shared { IyiChaosUnit.new(0_u64, HIGH) } unless root.is_a?(IyiChaosUnit)
     @@root = root
     fiber.chaos_unit = root
     root
@@ -283,7 +283,8 @@ class IyiChaos
   # (design section 4.5): what a pool unit's crossing would be.
   def self.parallel_task(task : IyiTask(T), pinned : Bool = false) : IyiTask(T) forall T
     @@units = @@units &+ 1_u64
-    task.fiber.chaos_unit = IyiChaosUnit.new(@@units, fresh_priority)
+    # The shared heap's, as the fibers that name it are (heap22 row 14).
+    task.fiber.chaos_unit = IyiCross.shared { IyiChaosUnit.new(@@units, fresh_priority) }
     {% if flag?(:heap_partitions) %}
       own_unit(task.fiber, task, pinned)
     {% end %}
@@ -315,7 +316,7 @@ class IyiChaos
     unit = owner.iyi_chaos_unit
     unless unit.is_a?(IyiChaosUnit)
       @@units = @@units &+ 1_u64
-      unit = IyiChaosUnit.new(@@units, fresh_priority)
+      unit = IyiCross.shared { IyiChaosUnit.new(@@units, fresh_priority) }
       owner.iyi_chaos_unit = unit
     end
     fiber.chaos_unit = unit
@@ -329,6 +330,14 @@ class IyiChaos
   # the runtime's own atomics are its locks and queues, and a switch inside
   # one would park a task holding them.
   def self.point : Nil
+    # heap22's runtime files outside the compiler's runtime list
+    # (heap_partition.iyi, heap_verify.iyi) reach `at_atomic` from inside
+    # the allocator's bracket - a publication, a local collection, a
+    # return stack: no point is a point there, as none is in the
+    # runtime's own atomics.
+    {% if flag?(:heap_partitions) %}
+      return if IyiHeap.read64(IyiHeap.cache.address &+ IyiHeap::CACHE_INSIDE) != 0_u64
+    {% end %}
     # heap22's stress and false words (heap_verify.iyi) first, on the
     # task that reached the point.
     {% if flag?(:heap_verify) && flag?(:heap_partitions) %}

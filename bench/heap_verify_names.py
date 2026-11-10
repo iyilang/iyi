@@ -108,7 +108,7 @@ class Symbols:
 
 TYPE_RE = re.compile(r"type_id=(\d+)")
 FIELD_RE = re.compile(r"^(\s*field \+)(\d+)(.*)$")
-SITE_RE = re.compile(r"allocated at: image\+0x([0-9a-f]+)")
+SITE_RE = re.compile(r"(?:allocated at: |returns to )image\+0x([0-9a-f]+)")
 WORD_RE = re.compile(r"\(image\+0x([0-9a-f]+)\)|word at image\+0x([0-9a-f]+)")
 
 

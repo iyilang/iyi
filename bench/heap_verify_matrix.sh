@@ -14,7 +14,8 @@
 # (std_mutex_exercise), unit (std_unit_exercise), channel (chan_scaling's
 # checked bare run), http (std_http_exercise), tls (std_tls_exercise), web
 # (web_cores.iyi's pool server under bench/heap_verify_web.py, over https
-# on seeds divisible by 4), crossings (heap_crossings).
+# on seeds divisible by 4), crossings (heap_crossings), reach
+# (heap_verify_reach: the trusted reach claims).
 #
 # Every run is one line of OUT/NAME/results: `seed words workers exit
 # verdict detail`. The verdicts: `pass` (exit 0 and the program's line of
@@ -49,6 +50,7 @@ source_of() {
     tls) echo bench/std_tls_exercise.iyi ;;
     web) echo bench/web_cores.iyi ;;
     crossings) echo bench/heap_crossings.iyi ;;
+    reach) echo bench/heap_verify_reach.iyi ;;
     *) echo "no program named $1" >&2; return 1 ;;
   esac
 }
@@ -60,6 +62,7 @@ success_of() {
     unit) echo "every property held" ;;
     http | tls) echo "ALL CHECKS PASSED" ;;
     crossings) echo "crossings hold" ;;
+    reach) echo "trusted claims hold" ;;
     web) echo "requests answered as the reference" ;;
     *) echo "" ;;
   esac
@@ -159,7 +162,7 @@ case "${1:-}" in
     ;;
   summary)
     shift
-    names="${*:-concurrency mutex unit channel http tls web crossings}"
+    names="${*:-concurrency mutex unit channel http tls web crossings reach}"
     for name in $names; do
       [ -f "$OUT/$name/results" ] || continue
       awk -v name="$name" '

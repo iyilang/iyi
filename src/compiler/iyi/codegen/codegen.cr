@@ -20,6 +20,18 @@ module Iyi
   WRITE_BARRIER_BEGIN_NAME = "__iyi_write_barrier_begin"
   WRITE_BARRIER_NAME       = "__iyi_write_barrier"
   MARKING_NAME             = "__iyi_marking"
+  # heap22 barrier probe (scratch, h22/barrierprobe): the publication
+  # check a runtime barrier would add at every pointer-bearing heap store,
+  # with publication stubbed. `-Dpubcheck` emits it, `-Dpubcheck_card`
+  # indexes a granule card instead of the chunk's `OWN` byte,
+  # `-Dpubcheck_flag` gates it on `__iyi_partitions`, `-Dpubcheck_invert`
+  # reads a clear bit as LOCAL, `-Dpubcheck_count` calls the counting
+  # simulation after every such store instead.
+  PUBDIR_NAME        = "__iyi_pubdir"
+  PARTITIONS_NAME    = "__iyi_partitions"
+  PUBCHECK_HIT_NAME  = "__iyi_pubcheck_hit"
+  PUBCHECK_WORDS_NAME = "__iyi_pubcheck_words"
+  PUBCOUNT_NAME      = "__iyi_pubcount"
   # iyi: the slow half of a loop's back-edge check (SPEC.md III.4.13, part
   # 9), which the prelude defines and a program with a worker pool calls
   # when the pool's monitor has flagged the worker running it.
@@ -161,6 +173,9 @@ module Iyi
       Prof.span("  codegen: visitor.accept") { visitor.accept node }
       Prof.span("  codegen: finished hooks") { visitor.process_finished_hooks }
       Prof.span("  codegen: visitor.finish") { visitor.finish }
+      if (sites_path = ENV["IYI_PUBSITES"]?) && !visitor.iyi_pub_sites.empty?
+        File.write(sites_path, visitor.iyi_pub_sites.join('\n') + "\n")
+      end
 
       visitor.modules
     end
@@ -2175,7 +2190,7 @@ module Iyi
         # Declaring them as imports made every Windows link print an
         # LNK4217 or LNK4286 for each module that read one.
         if @program.has_flag?("win32") && !@program.has_flag?("static") &&
-           name != MARKING_NAME && name != GC_LAYOUTS_NAME
+           name != MARKING_NAME && name != GC_LAYOUTS_NAME && name != PUBDIR_NAME && name != PARTITIONS_NAME
           var.dll_storage_class = LLVM::DLLStorageClass::DLLImport
         end
         var.thread_local = thread_local
@@ -3212,6 +3227,8 @@ module Iyi
         yield
         return
       end
+      pub_mode = iyi_pubcheck_mode
+      target_far = pub_mode == 1 ? iyi_pubcheck_target_far(target_pointer) : nil
       marking = load(llvm_context.int8, iyi_marking_flag)
       active = not_equal? marking, int8(0)
       begin_block, plain_block, join_block = new_blocks "barrier_begin", "barrier_plain", "barrier_join"
@@ -3232,6 +3249,137 @@ module Iyi
       call barrier_fun, [cast_to_void_pointer(target_pointer), words]
       br done_block
       position_at_end done_block
+      if pub_mode == 1 && target_far
+        iyi_pubcheck_values(target_pointer, bytes, target_far)
+      elsif pub_mode == 2
+        if count_fun = iyi_pub_fun(PUBCOUNT_NAME)
+          site = @iyi_pub_sites.size
+          @iyi_pub_sites << (context.fun.name rescue "?")
+          call count_fun, [cast_to_void_pointer(target_pointer), words, int64(site)]
+        end
+      end
+    end
+
+    # heap22 barrier probe. 0: off; 1: the inline check (`-Dpubcheck`);
+    # 2: the counting simulation (`-Dpubcheck_count`).
+    def iyi_pubcheck_mode : Int32
+      @iyi_pubcheck_mode ||= if @program.has_flag?("pubcheck_count")
+                               2
+                             elsif @program.has_flag?("pubcheck")
+                               1
+                             else
+                               0
+                             end
+    end
+
+    @iyi_pub_sites = [] of String
+    @iyi_pub_funs = {} of String => LLVMTypedFunction?
+
+    # The counting build's site table: one line per store site, in the
+    # order the sites were emitted, written where `IYI_PUBSITES` says.
+    def iyi_pub_sites : Array(String)
+      @iyi_pub_sites
+    end
+
+    def iyi_pub_fun(name : String) : LLVMTypedFunction?
+      fun_ = @iyi_pub_funs[name] ||= typed_fun?(@main_mod, name)
+      fun_ ? check_main_fun(name, fun_) : nil
+    end
+
+    # i1: the store's destination is not LOCAL, so what it stores must be
+    # checked. With `-Dpubcheck_flag` a clear `__iyi_partitions` answers
+    # false at the cost of one load and a branch.
+    def iyi_pubcheck_target_far(target_pointer) : LLVM::Value
+      address = ptr2int(target_pointer, llvm_context.int64)
+      unless @program.has_flag?("pubcheck_flag")
+        return builder.not(iyi_pub_local?(address))
+      end
+      flag = load(llvm_context.int8, declare_lib_var(PARTITIONS_NAME, @program.uint8, false))
+      on_block, off_block, join_block = new_blocks "pub_on", "pub_off", "pub_tjoin"
+      cond not_equal?(flag, int8(0)), on_block, off_block
+      position_at_end on_block
+      far = builder.not(iyi_pub_local?(address))
+      on_end = insert_block
+      br join_block
+      position_at_end off_block
+      br join_block
+      position_at_end join_block
+      table = LLVM::PhiTable.new
+      table.add on_end, far
+      table.add off_block, int1(0)
+      phi llvm_context.int1, table
+    end
+
+    # After the store, when the destination was not LOCAL: every word of
+    # the slot that is a LOCAL chunk's address goes to the stub
+    # `__iyi_pubcheck_hit`. Slots over four words go out of line.
+    def iyi_pubcheck_values(target_pointer, bytes, target_far) : Nil
+      words = ((bytes + 7_u64) // 8_u64).clamp(1_u64..)
+      check_block, done_block = new_blocks "pub_vcheck", "pub_vdone"
+      cond target_far, check_block, done_block
+      position_at_end check_block
+      if words > 4
+        if words_fun = iyi_pub_fun(PUBCHECK_WORDS_NAME)
+          call words_fun, [cast_to_void_pointer(target_pointer), int64(words)]
+        end
+      elsif hit_fun = iyi_pub_fun(PUBCHECK_HIT_NAME)
+        base = ptr2int(target_pointer, llvm_context.int64)
+        words.times do |index|
+          slot = int2ptr(builder.add(base, int64(index * 8)), llvm_context.void_pointer)
+          value = load(llvm_context.int64, slot)
+          test_block, hit_block, next_block = new_blocks "pub_vtest", "pub_vhit", "pub_vnext"
+          cond not_equal?(value, int64(0)), test_block, next_block
+          position_at_end test_block
+          cond iyi_pub_local?(value), hit_block, next_block
+          position_at_end hit_block
+          call hit_fun, [int2ptr(value, llvm_context.void_pointer)]
+          br next_block
+          position_at_end next_block
+        end
+      end
+      br done_block
+      position_at_end done_block
+    end
+
+    # i1: *address* (an i64) is in an arena chunk whose `OWN` byte says
+    # LOCAL: the directory byte, the arena's `OFF_OWN` word (1768; zero
+    # where the arena has no table, contract §3), then the chunk's byte by
+    # the grid's reciprocal - or, with `-Dpubcheck_card`, the granule's
+    # (4 KiB) by a shift.
+    def iyi_pub_local?(address) : LLVM::Value
+      i64 = llvm_context.int64
+      dir_block, head_block, index_block, no_block, join_block = new_blocks "pub_dir", "pub_head", "pub_index", "pub_no", "pub_join"
+      slot = builder.lshr(address, int64(24))
+      cond builder.icmp(LLVM::IntPredicate::ULT, slot, int64(16777216)), dir_block, no_block
+      position_at_end dir_block
+      directory = load(i64, declare_lib_var(PUBDIR_NAME, @program.uint64, false))
+      byte = load(llvm_context.int8, int2ptr(builder.add(directory, slot), llvm_context.void_pointer))
+      cond equal?(byte, int8(128)), head_block, no_block
+      position_at_end head_block
+      arena = builder.and(address, int64(0xFFFFFFFFFF000000_u64))
+      own_offset = load(i64, int2ptr(builder.add(arena, int64(1768)), llvm_context.void_pointer))
+      cond not_equal?(own_offset, int64(0)), index_block, no_block
+      position_at_end index_block
+      if @program.has_flag?("pubcheck_card")
+        index = builder.lshr(builder.sub(address, arena), int64(12))
+      else
+        grid = load(i64, int2ptr(builder.add(arena, int64(1744)), llvm_context.void_pointer))
+        first = builder.add(arena, builder.lshr(grid, int64(40)))
+        magic = builder.and(grid, int64((1_i64 << 40) - 1))
+        index = builder.lshr(builder.mul(builder.lshr(builder.sub(address, first), int64(3)), magic), int64(40))
+      end
+      own = load(llvm_context.int8, int2ptr(builder.add(builder.add(arena, own_offset), index), llvm_context.void_pointer))
+      bit = builder.and(own, int8(1))
+      local = @program.has_flag?("pubcheck_invert") ? equal?(bit, int8(0)) : not_equal?(bit, int8(0))
+      index_end = insert_block
+      br join_block
+      position_at_end no_block
+      br join_block
+      position_at_end join_block
+      table = LLVM::PhiTable.new
+      table.add index_end, local
+      table.add no_block, int1(0)
+      phi llvm_context.int1, table
     end
 
     def crystal_raise_overflow_fun

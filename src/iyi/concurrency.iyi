@@ -985,6 +985,10 @@ class IyiUnit
     @deferred_head = nil
     @deferred_tail = nil
     @heap = 0_u64
+    # heap22 barrier probe: the counting build's stand-in for a partition.
+    {% if flag?(:pubcheck_count) %}
+      @heap = IyiPubCount.next_unit
+    {% end %}
     @fibers = nil
   end
 
@@ -5441,6 +5445,11 @@ class IyiWorkers
   # and scan it as it stops and scans any thread (III.4.11).
   def self.start : Nil
     return if @@started > 0
+    # heap22 barrier probe: a pool means pool units, so the publication
+    # check gated on this byte runs from here on.
+    {% if flag?(:pubcheck_flag) %}
+      LibIyiPubCheck.__iyi_partitions = 1_u8
+    {% end %}
     {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
       workers = resolved
       IyiSchedLock.lock

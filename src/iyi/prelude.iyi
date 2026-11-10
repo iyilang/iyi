@@ -2648,6 +2648,12 @@ require "./file"
       # page's `INSIDE` from the stopper.
       def self.install(record : UInt64) : Nil
         page = record
+        # heap22 barrier probe: a unit's "record" is its serial, which
+        # names the partition the stamps record; the cache stays home.
+        {% if flag?(:pubcheck_count) %}
+          IyiPubCount.serial = record
+          page = 0_u64
+        {% end %}
         if page == 0
           page = @@home
           {% if flag?(:win32) %}
@@ -2946,9 +2952,17 @@ require "./file"
               end
             end
             leave(table)
+            {% if flag?(:pubcheck_count) %}
+              IyiPubCount.stamp(head, bytes)
+            {% end %}
             return bits & HEADED_FLAG != 0 ? head &+ HEADER : head
           end
         end
+        {% if flag?(:pubcheck_count) %}
+          base = take_slow(table, size, bytes, clear, bits, type_id)
+          IyiPubCount.stamp(base, bytes)
+          return base
+        {% end %}
         take_slow(table, size, bytes, clear, bits, type_id)
       end
 
@@ -3796,6 +3810,9 @@ require "./file"
             # the directory was 2 MB resident of every program's set.
             __iyi_madvise_nohuge(@@arena_dir, DIR_SLOTS)
           {% end %}
+          {% if flag?(:pubcheck) || flag?(:pubcheck_count) %}
+            LibIyiPubCheck.__iyi_pubdir = @@arena_dir
+          {% end %}
         end
         @@arena_dir
       end
@@ -3898,6 +3915,20 @@ require "./file"
         magic = (1_u64.unsafe_shl(MAGIC_SHIFT) + chunk.unsafe_shr(3_u64) - 1_u64).unsafe_div(chunk.unsafe_shr(3_u64))
         chunks = (MAP - HEAD).unsafe_div(chunk)
         first_offset = (META + chunks * (META_ENTRY + 1_u64) + PAGE - 1_u64) & (0_u64 &- PAGE)
+        # heap22 barrier probe: an `OWN` table in every arena, zero (a byte
+        # a chunk, or a byte a 4 KiB granule with `-Dpubcheck_card`), at
+        # the contract's `OFF_OWN` (1768); the counting build's owner
+        # words (four bytes a chunk) in the same place.
+        {% if flag?(:pubcheck_tables) || flag?(:pubcheck_count) %}
+          {% if flag?(:pubcheck_count) %}
+            own_bytes = chunks * 4_u64
+          {% elsif flag?(:pubcheck_card) %}
+            own_bytes = MAP.unsafe_shr(12_u64)
+          {% else %}
+            own_bytes = chunks
+          {% end %}
+          first_offset = (META + chunks * (META_ENTRY + 1_u64) + own_bytes + PAGE - 1_u64) & (0_u64 &- PAGE)
+        {% end %}
         first = base + first_offset
         stop = first + slab_for(chunk)
         stop = base + MAP if stop > base + MAP
@@ -3913,6 +3944,9 @@ require "./file"
         write64(base + OFF_HIGH, first)
         write64(base + OFF_BUMP_END, first + count * chunk)
         write64(base + OFF_OWNER, owner)
+        {% if flag?(:pubcheck_tables) || flag?(:pubcheck_count) %}
+          write64(base + 1768_u64, META + chunks * (META_ENTRY + 1_u64))
+        {% end %}
         lock
         # Fresh chunks are white and nobody's: swept for the current epoch
         # by construction — the epoch read under the lock, because a thread
@@ -5310,6 +5344,309 @@ require "./file"
       IyiMark.barrier(address.address, words)
       IyiHeap.leave_barrier
     end
+
+    {% if flag?(:pubcheck) %}
+      # heap22 barrier probe (scratch): the publication check's runtime
+      # half. Publication itself is a counter; `__iyi_pubcheck_words` is
+      # the out-of-line check of a slot over four words, the same test the
+      # compiler inlines (codegen.cr, `iyi_pub_local?`).
+      class IyiPubCheck
+        @@hits = 0_u64
+        @@wide = 0_u64
+
+        def self.hit : Nil
+          @@hits = @@hits &+ 1_u64
+        end
+
+        def self.wide : Nil
+          @@wide = @@wide &+ 1_u64
+        end
+
+        def self.local?(address : UInt64) : Bool
+          slot = address.unsafe_shr(24_u64)
+          return false if slot >= 16777216_u64
+          return false if IyiHeap.read8(LibIyiPubCheck.__iyi_pubdir &+ slot) != 128_u64
+          arena = address & 0xFFFFFFFFFF000000_u64
+          own = IyiHeap.read64(arena &+ 1768_u64)
+          return false if own == 0_u64
+          {% if flag?(:pubcheck_card) %}
+            index = (address &- arena).unsafe_shr(12_u64)
+          {% else %}
+            index = IyiHeap.chunk_index(arena, address)
+          {% end %}
+          bit = IyiHeap.read8(arena &+ own &+ index) & 1_u64
+          {% if flag?(:pubcheck_invert) %}
+            bit == 0_u64
+          {% else %}
+            bit != 0_u64
+          {% end %}
+        end
+
+        def self.report : Nil
+          return unless Program.env("IYI_PUBCHECK_STATS")
+          STDERR.puts "pubcheck: hits=#{@@hits} wide_slots=#{@@wide}"
+        end
+      end
+
+      fun __iyi_pubcheck_hit(value : Void*) : Nil
+        IyiPubCheck.hit
+      end
+
+      fun __iyi_pubcheck_words(slot : Void*, words : UInt64) : Nil
+        IyiPubCheck.wide
+        index = 0_u64
+        while index < words
+          word = IyiHeap.read64(slot.address &+ index &* 8_u64)
+          IyiPubCheck.hit if word != 0_u64 && IyiPubCheck.local?(word)
+          index = index &+ 1_u64
+        end
+      end
+    {% end %}
+
+    {% if flag?(:pubcheck_count) %}
+      # heap22 barrier probe (scratch): what a runtime publication barrier
+      # would publish. Every allocation is stamped with the partition the
+      # running fiber would allocate in - its unit's serial, which stands
+      # in for `IyiUnit#heap` (`IyiHeap.install`), 0 for the shared heap -
+      # in four bytes a chunk at the arena's `OFF_OWN`; bit 31 is PUB.
+      # Every pointer-bearing heap store a unit makes then calls `store`:
+      # a destination that is not LOCAL to the unit and a value that is
+      # publishes the value's LOCAL closure, walked conservatively over
+      # whole chunks (atomic chunks not opened). Large objects are not
+      # stamped and count as SHARED. Counters are per thread, summed at a
+      # dump: `IYI_PUBCOUNT_OUT` names the file, rewritten every second
+      # of stores and at exit.
+      class IyiPubCount
+        PUB   = 0x80000000_u64
+        SITES = 1048576_u64
+        STACK = 1048576_u64
+        # Slots of a thread's block, eight bytes each; slot 0 links it.
+        NAMES = ["alloc_bytes", "alloc_bytes_local", "alloc_objects", "alloc_objects_local",
+                 "stores_in_units", "stores_far", "publications", "published_objects", "published_bytes",
+                 "pub_into_shared_object", "pub_into_own_published", "pub_into_other_units", "pub_into_global", "pub_into_nonheap",
+                 "pub_bytes_shared_object", "pub_bytes_own_published", "pub_bytes_other_units", "pub_bytes_global", "pub_bytes_nonheap",
+                 "walk_overflow", "large_local_objects", "large_local_bytes"]
+
+        @[ThreadLocal]
+        @@block : UInt64 = 0_u64
+        @[ThreadLocal]
+        @@serial : UInt64 = 0_u64
+        @[ThreadLocal]
+        @@busy : UInt64 = 0_u64
+        @[ThreadLocal]
+        @@stack : UInt64 = 0_u64
+        @[ThreadLocal]
+        @@tick : UInt64 = 0_u64
+
+        @@head : UInt64 = 0_u64
+        @@units : UInt64 = 0_u64
+        @@sites : UInt64 = 0_u64
+        @@last : UInt64 = 0_u64
+
+        def self.serial=(value : UInt64) : Nil
+          @@serial = value
+        end
+
+        def self.next_unit : UInt64
+          Pointer(Atomic(UInt64)).new(pointerof(@@units).address).value.add(1_u64) &+ 1_u64
+        end
+
+        def self.block : UInt64
+          b = @@block
+          return b if b != 0_u64
+          b = __iyi_mmap(4096_u64).address
+          head = Pointer(Atomic(UInt64)).new(pointerof(@@head).address)
+          while true
+            seen = head.value.get
+            IyiHeap.write64(b, seen)
+            break if head.value.compare_and_set(seen, b)[1]
+          end
+          @@block = b
+          b
+        end
+
+        def self.bump(slot : Int32, amount : UInt64) : Nil
+          at = block &+ slot.to_u64 &* 8_u64
+          IyiHeap.write64(at, IyiHeap.read64(at) &+ amount)
+        end
+
+        def self.sites : UInt64
+          s = @@sites
+          return s if s != 0_u64
+          fresh = __iyi_mmap(SITES &* 16_u64).address
+          return fresh if Pointer(Atomic(UInt64)).new(pointerof(@@sites).address).value.compare_and_set(0_u64, fresh)[1]
+          @@sites
+        end
+
+        # The owner word of *address*'s chunk, 0 where it has none: outside
+        # the arenas, in a header, on a chunk never carved or free.
+        def self.owner_word(address : UInt64) : UInt64
+          arena = IyiHeap.arena_of(address)
+          return 0_u64 if arena == 0_u64
+          return 0_u64 if address < IyiHeap.arena_first(arena)
+          table = IyiHeap.read64(arena &+ 1768_u64)
+          return 0_u64 if table == 0_u64
+          index = IyiHeap.chunk_index(arena, address)
+          bits = IyiHeap.read8(arena &+ IyiHeap::META &+ index &* IyiHeap::META_ENTRY)
+          return 0_u64 if bits & IyiHeap::CARVED_FLAG == 0_u64 || bits & IyiHeap::FREE_FLAG != 0_u64
+          arena &+ table &+ index &* 4_u64
+        end
+
+        def self.owner(address : UInt64) : UInt64
+          at = owner_word(address)
+          at == 0_u64 ? 0_u64 : Pointer(UInt32).new(at).value.to_u64
+        end
+
+        # From `IyiHeap.take`: the chunk at *base* is the running
+        # partition's. Counted in chunk bytes, as publication is.
+        def self.stamp(base : UInt64, bytes : UInt64) : Nil
+          s = @@serial
+          arena = IyiHeap.arena_of(base)
+          size = arena != 0_u64 ? IyiHeap.read64(arena &+ IyiHeap::OFF_CHUNK) : bytes
+          bump(1, size)
+          bump(3, 1_u64)
+          if s != 0_u64
+            bump(2, size)
+            bump(4, 1_u64)
+          end
+          if arena != 0_u64
+            table = IyiHeap.read64(arena &+ 1768_u64)
+            if table != 0_u64
+              Pointer(UInt32).new(arena &+ table &+ IyiHeap.chunk_index(arena, base) &* 4_u64).value = s.to_u32
+            end
+          elsif s != 0_u64
+            bump(21, 1_u64)
+            bump(22, bytes)
+          end
+        end
+
+        def self.store(slot : UInt64, words : UInt64, site : UInt64) : Nil
+          s = @@serial
+          return if s == 0_u64 || @@busy != 0_u64
+          @@busy = 1_u64
+          bump(5, 1_u64)
+          target = owner(slot)
+          if target != s
+            bump(6, 1_u64)
+            kind = 4
+            if IyiHeap.arena_of(slot) != 0_u64
+              kind = target == 0_u64 ? 0 : (target == (s | PUB) ? 1 : 2)
+            elsif (slot >= IyiRoots.bss_low && slot < IyiRoots.bss_high) || (slot >= IyiRoots.data_low && slot < IyiRoots.data_high)
+              kind = 3
+            end
+            index = 0_u64
+            while index < words
+              word = IyiHeap.read64(slot &+ index &* 8_u64)
+              publish(word, s, kind, site) if word != 0_u64 && owner(word) == s
+              index = index &+ 1_u64
+            end
+          end
+          @@tick = @@tick &+ 1_u64
+          if @@tick & 65535_u64 == 0_u64
+            now = IyiClock.monotonic_ns
+            last = @@last
+            if now &- last > 1000000000_u64 && Pointer(Atomic(UInt64)).new(pointerof(@@last).address).value.compare_and_set(last, now)[1]
+              dump
+            end
+          end
+          @@busy = 0_u64
+        end
+
+        def self.publish(value : UInt64, s : UInt64, kind : Int32, site : UInt64) : Nil
+          stack = @@stack
+          if stack == 0_u64
+            stack = __iyi_mmap(STACK &* 8_u64).address
+            @@stack = stack
+          end
+          top = 1_u64
+          IyiHeap.write64(stack, value)
+          objects = 0_u64
+          bytes = 0_u64
+          while top > 0_u64
+            top = top &- 1_u64
+            address = IyiHeap.read64(stack &+ top &* 8_u64)
+            at = owner_word(address)
+            next if at == 0_u64 || Pointer(UInt32).new(at).value.to_u64 != s
+            Pointer(UInt32).new(at).value = (s | PUB).to_u32
+            arena = IyiHeap.arena_of(address)
+            index = IyiHeap.chunk_index(arena, address)
+            chunk = IyiHeap.read64(arena &+ IyiHeap::OFF_CHUNK)
+            head = IyiHeap.arena_first(arena) &+ index &* chunk
+            objects = objects &+ 1_u64
+            bytes = bytes &+ chunk
+            next if IyiHeap.read8(arena &+ IyiHeap::META &+ index &* IyiHeap::META_ENTRY) & IyiHeap::ATOMIC_FLAG != 0_u64
+            cursor = head
+            while cursor < head &+ chunk
+              word = IyiHeap.read64(cursor)
+              if word != 0_u64 && owner(word) == s
+                if top < STACK
+                  IyiHeap.write64(stack &+ top &* 8_u64, word)
+                  top = top &+ 1_u64
+                else
+                  bump(20, 1_u64)
+                end
+              end
+              cursor = cursor &+ 8_u64
+            end
+          end
+          return if objects == 0_u64
+          bump(7, 1_u64)
+          bump(8, objects)
+          bump(9, bytes)
+          bump(10 + kind, 1_u64)
+          bump(15 + kind, bytes)
+          table = sites
+          at = site < SITES ? site : SITES &- 1_u64
+          Pointer(Atomic(UInt64)).new(table &+ at &* 16_u64).value.add(1_u64)
+          Pointer(Atomic(UInt64)).new(table &+ at &* 16_u64 &+ 8_u64).value.add(bytes)
+        end
+
+        def self.dump : Nil
+          path = Program.env("IYI_PUBCOUNT_OUT")
+          return unless path.is_a?(String)
+          totals = Pointer(UInt64).malloc(32_u64)
+          b = @@head
+          while b != 0_u64
+            slot = 1
+            while slot < 23
+              totals[slot] = totals[slot] &+ IyiHeap.read64(b &+ slot.to_u64 &* 8_u64)
+              slot = slot + 1
+            end
+            b = IyiHeap.read64(b)
+          end
+          text = String.build do |io|
+            io << "units " << @@units << "\n"
+            slot = 1
+            while slot < 23
+              io << NAMES[slot - 1] << " " << totals[slot] << "\n"
+              slot = slot + 1
+            end
+            table = @@sites
+            if table != 0_u64
+              site = 0_u64
+              while site < SITES
+                events = IyiHeap.read64(table &+ site &* 16_u64)
+                io << "site " << site << " " << events << " " << IyiHeap.read64(table &+ site &* 16_u64 &+ 8_u64) << "\n" if events != 0_u64
+                site = site &+ 1_u64
+              end
+            end
+          end
+          {% if flag?(:darwin) %}
+            flags = 0x601
+          {% else %}
+            flags = 0x241
+          {% end %}
+          fd = LibC.open(path.to_unsafe, flags, 420)
+          return if fd < 0
+          LibC.write(fd, Pointer(Void).new(text.to_unsafe.address), text.bytesize.to_u64)
+          LibC.close(fd)
+        end
+      end
+
+      fun __iyi_pubcount(slot : Void*, words : UInt64, site : UInt64) : Nil
+        IyiPubCount.store(slot.address, words, site)
+      end
+    {% end %}
 
     class IyiMark
       WHITE = 0_u64
@@ -11917,7 +12254,22 @@ end
   end
 {% end %}
 
+# heap22 barrier probe (scratch): the arena directory's address, for the
+# inline publication check, and the byte `-Dpubcheck_flag` gates it on.
+{% if flag?(:pubcheck) || flag?(:pubcheck_count) %}
+  lib LibIyiPubCheck
+    $__iyi_pubdir : UInt64
+    $__iyi_partitions : UInt8
+  end
+{% end %}
+
 fun main(argc : Int32, argv : UInt8**) : Int32
+  # heap22 barrier probe: until the first arena maps the real directory,
+  # the check reads a zero mapping of the same size - no word is in an
+  # arena yet, and no branch is spent on a null directory.
+  {% if flag?(:pubcheck) || flag?(:pubcheck_count) %}
+    LibIyiPubCheck.__iyi_pubdir = __iyi_mmap(16777216_u64).address if LibIyiPubCheck.__iyi_pubdir == 0_u64
+  {% end %}
   # There is nothing to start under the default allocator, and nothing missing
   # either: `gc/none.cr`'s `GC.init` sets up thread suspend and resume, and
   # 0.1.0 has one thread. Only Boehm has an `init` worth calling.
@@ -11931,6 +12283,12 @@ fun main(argc : Int32, argv : UInt8**) : Int32
   # Named `test` cases keep going past a failure, so the program's own code
   # ends normally and the exit status is theirs to give (testing.iyi).
   status = IyiTestCases.verdict
+  {% if flag?(:pubcheck) %}
+    IyiPubCheck.report
+  {% end %}
+  {% if flag?(:pubcheck_count) %}
+    IyiPubCount.dump
+  {% end %}
   __iyi_flush_std
   {% if flag?(:win32) %}
     # Not back into the C runtime, whose `exit` is `ExitProcess`, for the

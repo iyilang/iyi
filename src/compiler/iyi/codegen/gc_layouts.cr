@@ -152,6 +152,19 @@ class Iyi::CodeGenVisitor
     unless @single_module
       flag.linkage = LLVM::Linkage::External
     end
+
+    # heap22 barrier probe: the arena directory's address for the inline
+    # publication check, and the "a partition exists" byte it may be
+    # gated on (codegen.cr, `iyi_pub_local?`).
+    if @program.has_flag?("pubcheck") || @program.has_flag?("pubcheck_count")
+      {% for pair in [{"PUBDIR_NAME", "int64"}, {"PARTITIONS_NAME", "int8"}] %}
+        global = @main_mod.globals[{{pair[0].id}}]? ||
+                 @main_mod.globals.add(@main_llvm_context.{{pair[1].id}}, {{pair[0].id}})
+        global.initializer = @main_llvm_context.{{pair[1].id}}.const_int(0)
+        global.dll_storage_class = LLVM::DLLStorageClass::Default
+        global.linkage = LLVM::Linkage::External unless @single_module
+      {% end %}
+    end
   end
 
   # Which classes carry their type id in the object, a word ahead of it

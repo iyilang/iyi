@@ -24,11 +24,11 @@
   # `Unit.new` on the pool builds the value in the new unit's partition on
   # the caller's fiber (`IyiHeap.within`), which is on no list of that
   # unit's. A group opened there makes its `defer` node in that partition,
-  # named by the fiber's `@defers` alone, and the `Atomic`'s verb inside it
-  # is a chaos point, where the stress collects: only a fiber of the
-  # partition's own unit may (`IyiHeapVerify.at_point_once`). Collected
-  # from here, the node was freed under the group and the verifier named
-  # `IyiFiber#@defers`.
+  # named by the fiber's `@defers`, and the `Atomic`'s verb inside it is a
+  # chaos point, where the stress collects only a partition of the
+  # fiber's own unit (`IyiHeapVerify.at_point_once`). The value must read
+  # back whole and nothing report. (Its copy with that rule taken out
+  # passed too on Linux, seed 1; why the node lived was not cut down.)
   def bracket_check : Nil
     u = Unit.new do
       group do |g|

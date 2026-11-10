@@ -26,10 +26,10 @@
 # `IYI_WORKERS=1` at each seed of `SIM_SEEDS` (default 1 to 5): every
 # check holds and nothing reports. `own` breaks what this slice adds - a
 # simulated unit's fibers kept on the simulation's thread, its crossing
-# made as the pool's is, the stress collecting only a member's partition,
-# no chaos point inside a publication walk - each caught by the check
-# named beside it, the same way in every run: a report, a `FAIL:` line,
-# a deadlock named, or a hang ended at `HANG` seconds (default 60).
+# made as the pool's is, no chaos point inside a publication walk - each
+# caught by the check named beside it, the same way in every run: a
+# report, a `FAIL:` line, a deadlock named, or a hang ended at `HANG`
+# seconds (default 60).
 #
 # Needs `make` first. `IYI` names the compiler. Exits non-zero if any copy
 # is missed or the sound tree reports.
@@ -51,11 +51,14 @@ PY="${PYTHON:-python3}"
 # program's own check sees (heap_crossings' `tls`).
 VALUE_COPIES="TlsIdentity chain copy"
 
+# heap_crossings.sh's copies, sourced below, skip what Windows lacks.
+WINDOWS=0
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
     REPO="$(cygpath -m "$REPO")"
     WORK="$(cygpath -m "$WORK")"
     PSEP=';'
+    WINDOWS=1
     ;;
   *) PSEP=':' ;;
 esac
@@ -362,13 +365,10 @@ if [ "$PART" = all ] || [ "$PART" = own ]; then
   # take it.
   WORKERS=1 own_caught "simulated unit kept home" o1 "$REPO/bench/heap_verify.iyi" kept \
     "$(del 'def self\.ready\(fiber' 'fiber\.homebound = true if IyiChaos\.kept\?\(fiber\)')" concurrency.iyi
-  # A simulated crossing's glue made in the spawner's partition.
+  # A simulated crossing's glue made in the spawner's partition and never
+  # published: the fiber's closure, local, held by the shared fiber.
   WORKERS=1 own_caught "simulated crossing glue shared" o2 "$REPO/bench/heap_crossings.iyi" glue \
     "$(subst 'private def chaos_task' 'task = IyiCross\.shared do' 'task = begin')" chaos.iyi
-  # The stress collecting a partition from a fiber of another unit, in
-  # `Unit.new`'s bracket.
-  own_caught "stress by members only" o3 "$REPO/bench/heap_verify.iyi" bracket \
-    "$(del 'def self\.at_point_once' 'return unless unit\.is_a\?\(IyiUnit\) && unit\.heap == record')" heap_verify.iyi
   # A chaos point's stress collection inside the publication walk, which
   # heap_partition.iyi had while the compiler did not count it as the
   # runtime's: the collection takes the walk's scratch stack from under

@@ -173,9 +173,7 @@ class IyiHeapVerify
     # triggers ask (`IyiHeap.at_park`, `partition_slice`): a fiber inside
     # another unit's bracket (`Unit.new` building the value in the new
     # unit's partition) is on no list the collection reads, so its fields
-    # are nobody's roots - its `@defers` node, made in the bracket, was
-    # freed under it and named by the verifier (heap_crossings, simulated,
-    # seed 5, Linux).
+    # are nobody's roots.
     unit = fiber.unit
     return unless unit.is_a?(IyiUnit) && unit.heap == record
     IyiHeap.collect_local(record)
@@ -344,18 +342,25 @@ class IyiHeapVerify
   end
 
   # After a local sweep: the free lists hold free chunks of the
-  # partition's own runs, and no weak cell names a chunk it freed.
+  # partition's own runs, each once, and no weak cell names a chunk it
+  # freed.
   def self.after_sweep(record : UInt64) : Nil
     id = IyiHeap.read64(record &+ IyiHeap::REC_ID)
     table = Pointer(UInt64).new(record)
     index = 0
     while index < IyiHeap::CLASSES
       head = table[index]
-      steps = 0_u64
-      while head != 0 && steps < 16777216_u64
-        listed_bad(id, head, "a chunk on the partition's free list") unless own_free?(id, head)
-        head = IyiHeap.read64(head + IyiHeap::OFF_LINK)
-        steps = steps + 1_u64
+      if head != 0
+        set = IyiVerifySet.new
+        steps = 0_u64
+        while head != 0 && steps < 16777216_u64
+          listed_bad(id, head, "a chunk on the partition's free list") unless own_free?(id, head)
+          listed_twice(id, head, "the partition's free list") if set.includes?(head)
+          set.add(head)
+          head = IyiHeap.read64(head + IyiHeap::OFF_LINK)
+          steps = steps + 1_u64
+        end
+        set.free
       end
       index = index + 1
     end
@@ -400,6 +405,7 @@ class IyiHeapVerify
           steps = 0_u64
           while head != 0 && steps < 16777216_u64
             listed_bad(id, head, "a chunk on the partition's free list") unless own_free?(id, head)
+            listed_twice(id, head, "the partition's free list") if set.includes?(head)
             set.add(head)
             head = IyiHeap.read64(head + IyiHeap::OFF_LINK)
             steps = steps + 1_u64
@@ -408,6 +414,7 @@ class IyiHeapVerify
           steps = 0_u64
           while head != 0 && steps < 16777216_u64
             listed_bad(id, head, "a chunk on the partition's return stack") unless own_free?(id, head)
+            listed_twice(id, head, "the partition's free list and return stack") if set.includes?(head)
             set.add(head)
             head = IyiHeap.read64(head + IyiHeap::OFF_LINK)
             steps = steps + 1_u64
@@ -443,6 +450,18 @@ class IyiHeapVerify
       end
       index = index + 1
     end
+  end
+
+  # A chunk met twice on the lists of one class: freed twice, so the next
+  # allocations hand it out twice, to two live objects.
+  def self.listed_twice(id : UInt64, head : UInt64, what : String) : Nil
+    report_begin(id)
+    say("  a chunk is twice on ")
+    say(what)
+    say(": freed twice, it is handed out twice\n  chunk ")
+    say_hex(head)
+    say("\n")
+    report_end
   end
 
   def self.listed_bad(id : UInt64, head : UInt64, what : String) : Nil

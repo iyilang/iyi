@@ -979,7 +979,9 @@ class IyiUnit
   # collection of the unit's partition alone scans for stacks.
   property fibers : IyiFiber?
 
-  def initialize
+  # *pinned*: the unit allocates in the shared heap for its whole life
+  # (a crossing the compiler could not prove, heap22's `pinned:`).
+  def initialize(pinned : Bool = false)
     @active = Atomic(UInt64).new(0_u64)
     @waiting = Atomic(UInt64).new(0_u64)
     @deferred_head = nil

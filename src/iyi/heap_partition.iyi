@@ -1414,6 +1414,7 @@ class IyiHeap
     enter_barrier
     began = IyiMark.now_ns
     swept = local_collect_in(record, running, idle)
+    {% if flag?(:heap_verify) %} IyiHeapVerify.after_sweep(record) if swept {% end %}
     took = IyiMark.now_ns - began
     leave_barrier
     if swept
@@ -1459,7 +1460,9 @@ class IyiHeap
       top = running.stack_top
       top = IyiThread.current_stack_top if top == 0
       top = IyiRoots.stack_base if top == 0
-      local_range(record, id, parity, IyiRoots.stack_pointer, top)
+      low = IyiRoots.stack_pointer
+      local_range(record, id, parity, low, top)
+      {% if flag?(:heap_verify) %} IyiHeapVerify.mark_read(low, top) {% end %}
     end
     # The unit's other fibers' stacks and every fiber's pointer fields
     # (R(u)), the registry's lock held so none leaves meanwhile; and the
@@ -1518,6 +1521,7 @@ class IyiHeap
     # one - may have begun a mark beside the program or turned the epoch:
     # nothing is swept against a collection the mark did not see whole.
     return false if IyiMark.epoch != epoch || LibIyiGCTable.__iyi_marking != 0_u8
+    {% if flag?(:heap_verify) %} return false unless IyiHeapVerify.check(record, id, parity, running) {% end %}
     write64(record &+ REC_MARKING, 0_u64)
     local_sweep(record, id, parity, idle)
   end
@@ -2030,6 +2034,7 @@ class IyiHeap
     if state.value.get & REC_DETACHED != 0
       hand_to_shared(record)
     else
+      {% if flag?(:heap_verify) %} IyiHeapVerify.check_death(record, id) {% end %}
       free_whole(record, id)
     end
     leave_barrier

@@ -1,0 +1,1199 @@
+# heap22 slice S4: the verifier (`-Dheap_verify`, design B section 7.2;
+# contract local://heap22-contract.md sections 3 and 7).
+#
+# At every local collection of a partition P(u), after its mark and
+# before its sweep, the verifier proves that nothing the program can
+# reach names a `LOCAL(u)` chunk the mark left unmarked - which the sweep
+# is about to free. It reads, for a word into such a chunk:
+#
+#   - every typed heap slot of every live chunk of every arena: the shared
+#     heap's, every partition's (published or local, its own marked ones
+#     included, so a marked chunk naming an unmarked one is a mark that
+#     stopped short), and every large object; precise by the compiler's
+#     pointer maps, word by word for untyped memory (`Pointer.malloc`'s,
+#     closures without a layout), as the global mark reads them; atomic
+#     memory is not opened. A chunk the last global mark proved dead and
+#     its sweep has not reached is no holder: the program cannot reach it.
+#   - the data segment, word by word, and this thread's thread-local block;
+#   - the stacks of the unit's fibers: the running one from the mark's
+#     frame up, the parked ones from their saved stack pointer up - the
+#     ranges the mark itself scanned, so a word there into an unmarked
+#     chunk is a root the mark missed.
+#
+# A hit is confirmed by reading the slot again after a pause (another
+# thread may be initialising the holder), then reported - the holder's
+# heap, type id, field offset and address; the target's type id, size and
+# allocation site - and the process exits. `bench/heap_verify_names.py`
+# turns ids, offsets and sites into type, field and source names, from the
+# compiler's `IYI_DUMP_TYPE_INFO` dump and the binary's symbols.
+#
+# The same scan runs at a unit's death before its `LOCAL` chunks are freed
+# (every one of them counts as unmarked then). After a local sweep the
+# partition's free lists must hold only free chunks of its own runs, and
+# no weak cell may name a chunk the sweep freed; before it, every free
+# chunk of its runs must be on its free list or its return stack.
+#
+# Beside the checks: `IYI_HEAP_STRESS` (a local collection at every chaos
+# point - chaos.iyi - and, at 1, every park), `IYI_HEAP_FALSE_WORDS` (the
+# false-word injector) and `IYI_HEAP_TRACE`.
+
+@[Unsafe("the heap verifier reads every arena, the data segment, the thread-local block and fiber stacks through raw memory, records allocation sites beside the arenas, and writes false words into fibers' dead stack space")]
+class IyiHeapVerify
+  # Holder kinds, for the report.
+  K_SHARED = 0
+  K_PUB    = 1
+  K_LOCAL  = 2
+  K_LARGE  = 3
+  K_DATA   = 4
+  K_TLS    = 5
+  K_STACK  = 6
+
+  # A slot's word must still be there this many pauses later to count.
+  CONFIRM = 4096
+
+  @@started : Bool = false
+  @@stress : UInt64 = 0_u64
+  @@stress_tick : UInt64 = 0_u64
+  @@false_words : Bool = false
+  @@trace : Bool = false
+  @@noise : UInt64 = 0x9E3779B97F4A7C15_u64
+  @@checks : UInt64 = 0_u64
+  @@death_checks : UInt64 = 0_u64
+  @@scanned : UInt64 = 0_u64
+  @@injected : UInt64 = 0_u64
+  @@reporting : UInt64 = 0_u64
+  @@fiber_type : UInt64 = 0_u64
+  @@image : UInt64 = 0_u64
+  # The epoch a check began in, on its thread: a hit found after a pause
+  # is not trusted, the liveness it read having changed under it.
+  @[ThreadLocal]
+  @@epoch_seen : UInt64 = 0_u64
+  # The fiber at a stress point on this thread (`at_point`), 0 for none:
+  # a fiber, not a flag, since a point may switch and the fiber move.
+  @[ThreadLocal]
+  @@in_point : UInt64 = 0_u64
+  # The allocation-site tables: a page of (arena, table) pairs, open
+  # addressing by the arena's directory slot; a table holds the site of
+  # each chunk of the arena, as a word: its offset from the image's base.
+  @@sites : UInt64 = 0_u64
+  SITE_PAIRS = 4096_u64
+
+  # ── Switches ───────────────────────────────────────────────────────────
+
+  # Read once, before the program's first line (`__iyi_program`).
+  def self.start : Nil
+    return if @@started
+    @@started = true
+    @@image = image_base
+    stress = Program.env("IYI_HEAP_STRESS")
+    @@stress = number(stress) if stress.is_a?(String)
+    IyiHeap.collect_every_park = true if @@stress == 1_u64
+    words = Program.env("IYI_HEAP_FALSE_WORDS")
+    @@false_words = words.is_a?(String) && words != "0" && words.bytesize > 0
+    trace = Program.env("IYI_HEAP_TRACE")
+    @@trace = trace.is_a?(String) && trace != "0" && trace.bytesize > 0
+    seed = Program.env("IYI_CHAOS")
+    @@noise = @@noise ^ number(seed) if seed.is_a?(String)
+  end
+
+  private def self.number(text : String) : UInt64
+    bytes = text.to_unsafe
+    value = 0_u64
+    index = 0
+    while index < text.bytesize
+      digit = bytes[index]
+      return value unless digit >= 48_u8 && digit <= 57_u8
+      value = value &* 10_u64 &+ (digit - 48_u8).to_u64
+      index = index + 1
+    end
+    value
+  end
+
+  def self.stress : UInt64
+    @@stress
+  end
+
+  def self.false_words? : Bool
+    @@false_words
+  end
+
+  def self.trace? : Bool
+    @@trace
+  end
+
+  def self.checks : UInt64
+    @@checks
+  end
+
+  def self.death_checks : UInt64
+    @@death_checks
+  end
+
+  def self.chunks_scanned : UInt64
+    @@scanned
+  end
+
+  def self.words_injected : UInt64
+    @@injected
+  end
+
+  # ── Stress (chaos.iyi calls it at every point) ─────────────────────────
+
+  # A local collection of the running fiber's partition at every Nth
+  # chaos point (`IYI_HEAP_STRESS=N`), and the false words when asked.
+  def self.at_point : Nil
+    # Once per thread at a time: the collection below reaches `Atomic`
+    # verbs of its own outside the allocator's bracket, each a point.
+    fiber = IyiScheduler.current?
+    return unless fiber.is_a?(IyiFiber)
+    me = fiber.object_id
+    return if @@in_point == me
+    @@in_point = me
+    at_point_once
+    @@in_point = 0_u64 if @@in_point == me
+  end
+
+  def self.at_point_once : Nil
+    inject_here if @@false_words
+    stress = @@stress
+    return if stress == 0
+    if stress > 1_u64
+      # Plain words, not `Atomic`: an `Atomic` verb here is a chaos point
+      # (this file is not one of the compiler's runtime files), and the
+      # point is where this was called from. A lost count is harmless.
+      tick = @@stress_tick &+ 1_u64
+      @@stress_tick = tick
+      return unless tick % stress == 0
+    end
+    fiber = IyiScheduler.current?
+    return unless fiber.is_a?(IyiFiber)
+    record = fiber.alloc
+    return if record == 0_u64
+    # Only a fiber of the partition's own unit, as the runtime's own
+    # triggers ask (`IyiHeap.at_park`, `partition_slice`): a fiber inside
+    # another unit's bracket (`Unit.new` building the value in the new
+    # unit's partition) is on no list the collection reads, so its fields
+    # are nobody's roots.
+    unit = fiber.unit
+    return unless unit.is_a?(IyiUnit) && unit.heap == record
+    IyiHeap.collect_local(record)
+  end
+
+  # ── Allocation sites ───────────────────────────────────────────────────
+
+  # The image's load address, which a site is kept relative to.
+  def self.image_base : UInt64
+    {% if flag?(:linux) %}
+      header = uninitialized UInt64
+      {% if flag?(:x86_64) %}
+        asm("leaq __ehdr_start(%rip), $0" : "=r"(header) ::: "volatile")
+      {% else %}
+        asm("adrp $0, __ehdr_start
+             add $0, $0, :lo12:__ehdr_start" : "=r"(header) ::: "volatile")
+      {% end %}
+      header
+    {% elsif flag?(:darwin) %}
+      LibC._dyld_get_image_header(0).address
+    {% elsif flag?(:win32) %}
+      LibC.GetModuleHandleA(nil).address
+    {% else %}
+      0_u64
+    {% end %}
+  end
+
+  # The allocator's answer, its site noted (the C-ABI entries' hook).
+  def self.sited(object : Void*, site : Void*) : Void*
+    note_site(object, site) if object.address != 0
+    object
+  end
+
+  # The call site of an allocation (`__iyi_new` and the mallocs, given
+  # their return address), kept for a chunk of a partition arena: only a
+  # partition's chunk is ever a target.
+  def self.note_site(object : Void*, site : Void*) : Nil
+    address = object.address
+    arena = IyiHeap.arena_of(address)
+    return if arena == 0 || !IyiHeap.partition_arena?(arena)
+    # Inside the allocator's bracket, where a chaos point is none
+    # (chaos.iyi): the table's first claim is a compare-and-set.
+    IyiHeap.enter_barrier
+    table = site_table(arena)
+    slot = IyiHeap.chunk_index(arena, address)
+    @@image = image_base if @@image == 0
+    offset = site.address &- @@image
+    Pointer(UInt64).new(table &+ slot &* 8_u64).value = offset
+    IyiHeap.leave_barrier
+  end
+
+  def self.site_of(arena : UInt64, slot : UInt64) : UInt64
+    pairs = @@sites
+    return 0_u64 if pairs == 0
+    table = site_lookup(pairs, arena)
+    return 0_u64 if table == 0
+    Pointer(UInt64).new(table &+ slot &* 8_u64).value
+  end
+
+  private def self.site_lookup(pairs : UInt64, arena : UInt64) : UInt64
+    index = arena.unsafe_shr(24_u64) & (SITE_PAIRS - 1_u64)
+    probes = 0_u64
+    while probes < SITE_PAIRS
+      key = IyiHeap.read64(pairs + index * 16_u64)
+      return IyiHeap.read64(pairs + index * 16_u64 + 8_u64) if key == arena
+      return 0_u64 if key == 0
+      index = (index + 1_u64) & (SITE_PAIRS - 1_u64)
+      probes = probes + 1_u64
+    end
+    0_u64
+  end
+
+  # The arena's table, mapped at its first site: a 32-bit word per chunk
+  # its grid can hold. Not heap memory; nothing collects it.
+  def self.site_table(arena : UInt64) : UInt64
+    pairs = @@sites
+    if pairs == 0
+      fresh = __iyi_mmap(SITE_PAIRS * 16_u64).address
+      word = Pointer(Atomic(UInt64)).new(pointerof(@@sites).address)
+      if word.value.compare_and_set(0_u64, fresh)[1]
+        pairs = fresh
+      else
+        __iyi_munmap(fresh, SITE_PAIRS * 16_u64)
+        pairs = word.value.get
+      end
+    end
+    index = arena.unsafe_shr(24_u64) & (SITE_PAIRS - 1_u64)
+    while true
+      key = Pointer(Atomic(UInt64)).new(pairs + index * 16_u64)
+      seen = key.value.get
+      if seen == arena
+        table = Pointer(Atomic(UInt64)).new(pairs + index * 16_u64 + 8_u64)
+        while (made = table.value.get) == 0
+          IyiMark.spin_pause
+        end
+        return made
+      end
+      if seen == 0 && key.value.compare_and_set(0_u64, arena)[1]
+        bytes = (IyiHeap::MAP // IyiHeap.arena_chunk(arena) + 1_u64) * 8_u64
+        made = __iyi_mmap((bytes + 4095_u64) & (0_u64 &- 4096_u64)).address
+        Pointer(Atomic(UInt64)).new(pairs + index * 16_u64 + 8_u64).value.set(made)
+        return made
+      end
+      index = (index + 1_u64) & (SITE_PAIRS - 1_u64)
+    end
+    0_u64
+  end
+
+  # ── The check at a local collection ────────────────────────────────────
+
+  # Partition *record* (`id`), its mark of *parity* done, about to be
+  # swept; *running* is the fiber collecting it on this stack (nil: an
+  # idle worker's takeover), whose words the mark read are kept
+  # (`mark_read`). Answers whether the sweep may go on: no pause came
+  # meanwhile.
+  def self.check(record : UInt64, id : UInt64, parity : UInt64, running : IyiFiber?) : Bool
+    stat(pointerof(@@checks).address)
+    @@epoch_seen = IyiMark.epoch
+    note_fiber_type(running)
+    lost_free(record, id)
+    # Roots: the stacks the mark read - the running one as it read it,
+    # since the collector's own frames on it have changed since.
+    if running.is_a?(IyiFiber) && @@read_high > @@read_low
+      scan_words(record, id, parity, false, K_STACK, running.object_id, @@read, @@read &+ (@@read_high &- @@read_low))
+    end
+    @@read_high = 0_u64
+    unit_address = IyiHeap.read64(record &+ IyiHeap::REC_UNIT)
+    if unit_address != 0
+      unit = Pointer(Void).new(unit_address).as(IyiUnit)
+      IyiRuntimeLock.lock
+      fiber = unit.fibers
+      while fiber.is_a?(IyiFiber)
+        note_fiber_type(fiber)
+        if !(running.is_a?(IyiFiber) && running.object_id == fiber.object_id) && fiber.state != IyiFiberState::Done && fiber.stack_top != 0 && fiber.saved_sp != 0
+          scan_words(record, id, parity, false, K_STACK, fiber.object_id, fiber.saved_sp, fiber.stack_top)
+        end
+        fiber = fiber.next_in_unit
+      end
+      IyiRuntimeLock.unlock
+    end
+    scan_everything(record, id, parity, false)
+    if @@trace
+      say("iyi: heap_verify: partition ")
+      say_dec(id)
+      say(" checked before its sweep (parity ")
+      say_dec(parity)
+      say(")\n")
+    end
+    inject_here if @@false_words
+    # The runtime lock's spin parks for a pause: one that came while the
+    # scan ran leaves the mark stale, and the collection ends unswept.
+    IyiMark.epoch == @@epoch_seen && LibIyiGCTable.__iyi_marking == 0_u8
+  end
+
+  # A unit's death, its `LOCAL` chunks about to be freed: none may be
+  # named from anywhere the program reaches.
+  def self.check_death(record : UInt64, id : UInt64) : Nil
+    stat(pointerof(@@death_checks).address)
+    @@epoch_seen = IyiMark.epoch
+    scan_everything(record, id, 0_u64, true)
+    if @@trace
+      say("iyi: heap_verify: partition ")
+      say_dec(id)
+      say(" checked at its unit's death\n")
+    end
+  end
+
+  # After a local sweep: the free lists hold free chunks of the
+  # partition's own runs, each once, and no weak cell names a chunk it
+  # freed.
+  def self.after_sweep(record : UInt64) : Nil
+    id = IyiHeap.read64(record &+ IyiHeap::REC_ID)
+    table = Pointer(UInt64).new(record)
+    index = 0
+    while index < IyiHeap::CLASSES
+      head = table[index]
+      if head != 0
+        set = IyiVerifySet.new
+        steps = 0_u64
+        while head != 0 && steps < 16777216_u64
+          listed_bad(id, head, "a chunk on the partition's free list") unless own_free?(id, head)
+          listed_twice(id, head, "the partition's free list") if set.includes?(head)
+          set.add(head)
+          head = IyiHeap.read64(head + IyiHeap::OFF_LINK)
+          steps = steps + 1_u64
+        end
+        set.free
+      end
+      index = index + 1
+    end
+    weak_cells(id)
+  end
+
+  def self.note_fiber_type(fiber : IyiFiber?) : Nil
+    @@fiber_type = fiber.crystal_type_id.to_u64 if @@fiber_type == 0 && fiber.is_a?(IyiFiber)
+  end
+
+  # A statistic, by a plain add (see `at_point`): close, not exact.
+  def self.stat(address : UInt64) : Nil
+    IyiHeap.write64(address, IyiHeap.read64(address) &+ 1_u64)
+  end
+
+  # Whether *head* is a free chunk of a run partition *id* owns.
+  def self.own_free?(id : UInt64, head : UInt64) : Bool
+    arena = IyiHeap.arena_of(head)
+    return false if arena == 0 || !IyiHeap.partition_arena?(arena)
+    first = IyiHeap.arena_first(arena)
+    return false if head < first || head >= IyiHeap.arena_high(arena)
+    slot = IyiHeap.chunk_index(arena, head)
+    return false if first &+ slot &* IyiHeap.arena_chunk(arena) != head
+    return false if IyiHeap.owner_at(arena, IyiHeap.granule_of(arena, head)) != id
+    IyiHeap.read8(arena &+ IyiHeap::META &+ slot &* IyiHeap::META_ENTRY) & IyiHeap::FREE_FLAG != 0
+  end
+
+  # Before the sweep, each class under its lock with no global slice in
+  # flight: a free chunk of the partition's runs on neither its free list
+  # nor its return stack is lost to it (the global sweep freed it and
+  # handed it to nobody).
+  def self.lost_free(record : UInt64, id : UInt64) : Nil
+    table = Pointer(UInt64).new(record)
+    index = 0
+    while index < IyiHeap::CLASSES
+      runs = record &+ (IyiHeap::FILL + index).to_u64 * 8_u64
+      if IyiHeap.read64(runs) != 0
+        IyiHeap.class_lock(index)
+        if IyiHeap.quiet_class(index, true)
+          set = IyiVerifySet.new
+          head = table[index]
+          steps = 0_u64
+          while head != 0 && steps < 16777216_u64
+            listed_bad(id, head, "a chunk on the partition's free list") unless own_free?(id, head)
+            listed_twice(id, head, "the partition's free list") if set.includes?(head)
+            set.add(head)
+            head = IyiHeap.read64(head + IyiHeap::OFF_LINK)
+            steps = steps + 1_u64
+          end
+          head = IyiHeap.read64(record &+ IyiHeap::REC_RETURN &+ index.to_u64 &* 8_u64)
+          steps = 0_u64
+          while head != 0 && steps < 16777216_u64
+            listed_bad(id, head, "a chunk on the partition's return stack") unless own_free?(id, head)
+            listed_twice(id, head, "the partition's free list and return stack") if set.includes?(head)
+            set.add(head)
+            head = IyiHeap.read64(head + IyiHeap::OFF_LINK)
+            steps = steps + 1_u64
+          end
+          run = IyiHeap.read64(runs)
+          while run != 0
+            arena = run & (0_u64 &- IyiHeap::MAP)
+            word = IyiHeap.run_word(arena, IyiHeap.granule_of(arena, run))
+            stop = run + IyiHeap.run_n(word).unsafe_shl(IyiHeap::GRANULE_SHIFT)
+            chunk = IyiHeap.arena_chunk(arena)
+            cursor = IyiHeap.first_head(arena, run)
+            while cursor < stop
+              slot = IyiHeap.chunk_index(arena, cursor)
+              bits = IyiHeap.read8(arena &+ IyiHeap::META &+ slot &* IyiHeap::META_ENTRY)
+              if bits & IyiHeap::CARVED_FLAG != 0 && bits & IyiHeap::FREE_FLAG != 0 && !set.includes?(cursor)
+                report_begin(id)
+                say("  a free chunk of the partition's runs is on neither its free list nor its return stack: lost to it\n")
+                say("  chunk ")
+                say_hex(cursor)
+                say(" of ")
+                say_dec(chunk)
+                say(" bytes\n")
+                report_end
+              end
+              cursor = cursor + chunk
+            end
+            run = word & IyiHeap::RUN_LINK
+          end
+          set.free
+          # (`quiet_class` let the lock go when it answered false.)
+          IyiHeap.class_unlock(index)
+        end
+      end
+      index = index + 1
+    end
+  end
+
+  # A chunk met twice on the lists of one class: freed twice, so the next
+  # allocations hand it out twice, to two live objects.
+  def self.listed_twice(id : UInt64, head : UInt64, what : String) : Nil
+    report_begin(id)
+    say("  a chunk is twice on ")
+    say(what)
+    say(": freed twice, it is handed out twice\n  chunk ")
+    say_hex(head)
+    say("\n")
+    report_end
+  end
+
+  def self.listed_bad(id : UInt64, head : UInt64, what : String) : Nil
+    report_begin(id)
+    say("  ")
+    say(what)
+    say(" is not a free chunk of the partition's own runs\n  chunk ")
+    say_hex(head)
+    arena = IyiHeap.arena_of(head)
+    if arena == 0
+      say(" (outside every arena)\n")
+    else
+      say(IyiHeap.partition_arena?(arena) ? " in a partition arena, owner " : " in a shared-heap arena (owner 0)")
+      if IyiHeap.partition_arena?(arena)
+        say_dec(IyiHeap.owner_in_arena(arena, head))
+      end
+      say("\n")
+    end
+    report_end
+  end
+
+  # Every weak cell: none names a chunk of partition *id*'s runs that is
+  # free - its local sweep, which freed it, clears the cells to it.
+  def self.weak_cells(id : UInt64) : Nil
+    {% if !flag?(:gc_boehm) %}
+      IyiWeak.each_cell do |cell|
+        target = IyiHeap.read64(cell)
+        if target != 0
+          arena = IyiHeap.arena_of(target)
+          if arena != 0 && IyiHeap.partition_arena?(arena) && target >= IyiHeap.arena_first(arena) && target < IyiHeap.arena_high(arena)
+            slot = IyiHeap.chunk_index(arena, target)
+            head = IyiHeap.arena_first(arena) &+ slot &* IyiHeap.arena_chunk(arena)
+            if IyiHeap.owner_at(arena, IyiHeap.granule_of(arena, head)) == id && IyiHeap.read8(arena &+ IyiHeap::META &+ slot &* IyiHeap::META_ENTRY) & IyiHeap::FREE_FLAG != 0
+              report_begin(id)
+              say("  a weak cell names a chunk the partition's local sweep freed\n  cell ")
+              say_hex(cell)
+              say(" -> chunk ")
+              say_hex(head)
+              say("\n")
+              report_end
+            end
+          end
+        end
+      end
+    {% end %}
+  end
+
+  # ── The scan ───────────────────────────────────────────────────────────
+
+  # The target of *word*: the head of the `LOCAL` chunk of partition *id*
+  # it falls in, when the mark of *parity* left it unmarked (at a death,
+  # *death*: any `LOCAL` chunk), a large object's node likewise; else 0.
+  def self.target_of(record : UInt64, id : UInt64, parity : UInt64, death : Bool, word : UInt64) : UInt64
+    return 0_u64 if word < 65536_u64
+    arena = IyiHeap.arena_of(word)
+    if arena == 0
+      return 0_u64 if IyiHeap.table_count(record &+ IyiHeap::REC_LARGE) == 0
+      node = IyiHeap.own_large_of(record, word)
+      return 0_u64 if node == 0
+      flags = IyiHeap.read64(node + 16_u64).unsafe_shr(16_u64) & 0xFF_u64
+      return 0_u64 if flags & IyiHeap::OWN_PUB != 0
+      return 0_u64 if !death && flags & IyiHeap::OWN_LMARK == parity
+      return node
+    end
+    return 0_u64 unless IyiHeap.partition_arena?(arena)
+    first = IyiHeap.arena_first(arena)
+    return 0_u64 if word < first || word >= IyiHeap.arena_high(arena)
+    slot = IyiHeap.chunk_index(arena, word)
+    head = first &+ slot &* IyiHeap.arena_chunk(arena)
+    return 0_u64 if IyiHeap.owner_at(arena, IyiHeap.granule_of(arena, head)) != id
+    bits = IyiHeap.read8(arena &+ IyiHeap::META &+ slot &* IyiHeap::META_ENTRY)
+    return 0_u64 if bits & IyiHeap::CARVED_FLAG == 0 || bits & IyiHeap::FREE_FLAG != 0
+    own = IyiHeap.read8(IyiHeap.own_address(arena, slot))
+    return 0_u64 if own & IyiHeap::OWN_PUB != 0
+    return 0_u64 if !death && own & IyiHeap::OWN_LMARK == parity
+    head
+  end
+
+  # A range of conservative words: the data segment, a thread-local block
+  # or a stack. *who* is the fiber for a stack.
+  def self.scan_words(record : UInt64, id : UInt64, parity : UInt64, death : Bool, kind : Int32, who : UInt64, low : UInt64, high : UInt64) : Nil
+    cursor = (low &+ 7_u64) & (0_u64 &- 8_u64)
+    while cursor &+ 8_u64 <= high
+      word = IyiHeap.read64(cursor)
+      target = target_of(record, id, parity, death, word)
+      if target != 0
+        hit(record, id, parity, death, kind, who, 0_u64, 0_u64, cursor, word, target)
+      end
+      cursor = cursor &+ 8_u64
+    end
+  end
+
+  # Every holder but the stacks, for partition *id*.
+  def self.scan_everything(record : UInt64, id : UInt64, parity : UInt64, death : Bool) : Nil
+    epoch_flag = IyiMark.epoch_flag
+    arena = IyiHeap.first_arena
+    while arena != 0
+      scan_arena(record, id, parity, death, arena, epoch_flag)
+      arena = IyiHeap.arena_next(arena)
+    end
+    IyiHeap.lock
+    node = IyiHeap.first_large
+    while node != 0
+      scan_large(record, id, parity, death, node, epoch_flag)
+      node = IyiHeap.large_next(node)
+    end
+    IyiHeap.unlock
+    scan_words(record, id, parity, death, K_DATA, 0_u64, IyiRoots.data_low, IyiRoots.data_high)
+    scan_words(record, id, parity, death, K_DATA, 0_u64, IyiRoots.const_low, IyiRoots.const_high)
+    {% if flag?(:win32) %}
+      scan_words(record, id, parity, death, K_DATA, 0_u64, IyiRoots.bss_low, IyiRoots.bss_high)
+    {% end %}
+    {% if flag?(:linux) %}
+      span = IyiTlsImage.verify_block
+      scan_words(record, id, parity, death, K_TLS, 0_u64, span[0], span[1]) if span[1] > span[0]
+    {% end %}
+  end
+
+  # Each live chunk of *arena* that may hold a word into the partition:
+  # carved, not free, not atomic, not dead by the last global mark and
+  # unswept, and not one of the partition's own unmarked `LOCAL` chunks
+  # (at a death: none of its `LOCAL` ones), which are what is checked for.
+  def self.scan_arena(record : UInt64, id : UInt64, parity : UInt64, death : Bool, arena : UInt64, epoch_flag : UInt64) : Nil
+    each_live_chunk(arena, epoch_flag) do |head, slot, bits, owner|
+      kind = K_SHARED
+      if owner != 0
+        own = IyiHeap.read8(IyiHeap.own_address(arena, slot))
+        if own & IyiHeap::OWN_PUB != 0
+          kind = K_PUB
+        else
+          kind = K_LOCAL
+          if owner == id
+            next if death || own & IyiHeap::OWN_LMARK != parity
+          end
+        end
+      end
+      scan_chunk(record, id, parity, death, kind, owner, arena, head, slot, bits)
+    end
+  end
+
+  # Every live chunk of *arena*, as the global sweep walks it: a partition
+  # arena's runs (a pooled one skipped), a shared arena from its grid's
+  # first head to its frontier past the uncarved region and idle pages.
+  # Yields the head, its grid index, its entry's bits and the owner of its
+  # granule (0 in a shared arena).
+  def self.each_live_chunk(arena : UInt64, epoch_flag : UInt64, &) : Nil
+    chunk = IyiHeap.arena_chunk(arena)
+    first = IyiHeap.arena_first(arena)
+    high = IyiHeap.arena_high(arena)
+    marks = IyiHeap.read64(arena + IyiHeap::OFF_MARKS)
+    if IyiHeap.partition_arena?(arena)
+      cursor = first
+      while cursor < high
+        granule = (cursor - first).unsafe_shr(IyiHeap::GRANULE_SHIFT)
+        word = IyiHeap.run_word(arena, granule)
+        n = IyiHeap.run_n(word)
+        break if n == 0
+        stop = cursor + n.unsafe_shl(IyiHeap::GRANULE_SHIFT)
+        if IyiHeap.run_state(word) != IyiHeap::RUN_POOL
+          owner = IyiHeap.owner_at(arena, granule)
+          head = IyiHeap.first_head(arena, cursor)
+          slot = (head - first).unsafe_div(chunk)
+          while head < stop
+            bits = IyiHeap.read8(arena &+ IyiHeap::META &+ slot &* IyiHeap::META_ENTRY)
+            if live_bits?(bits, IyiHeap.read8(marks &+ slot), epoch_flag)
+              yield head, slot, bits, owner
+            end
+            head = head + chunk
+            slot = slot + 1_u64
+          end
+        end
+        cursor = stop
+      end
+      return
+    end
+    region_low = IyiHeap.arena_cursor(arena)
+    region_high = IyiHeap.read64(arena + IyiHeap::OFF_BUMP_END)
+    cursor = first
+    slot = 0_u64
+    page_next = 0_u64
+    while cursor < high
+      if cursor >= region_low && cursor < region_high
+        cursor = first + (region_high - first + chunk - 1_u64).unsafe_div(chunk) * chunk
+        slot = (cursor - first).unsafe_div(chunk)
+        page_next = 0_u64
+        next
+      end
+      if cursor >= page_next
+        if IyiHeap.page_idle?(arena, cursor)
+          page_end = (cursor & (0_u64 &- IyiHeap::PAGE)) + IyiHeap::PAGE
+          while page_end < high && IyiHeap.page_idle?(arena, page_end)
+            page_end = page_end + IyiHeap::PAGE
+          end
+          cursor = first + (page_end - first + chunk - 1_u64).unsafe_div(chunk) * chunk
+          slot = (cursor - first).unsafe_div(chunk)
+          page_next = 0_u64
+          next
+        end
+        page_next = (cursor | (IyiHeap::PAGE &- 1_u64)) &+ 1_u64
+      end
+      bits = IyiHeap.read8(arena &+ IyiHeap::META &+ slot &* IyiHeap::META_ENTRY)
+      if live_bits?(bits, IyiHeap.read8(marks &+ slot), epoch_flag)
+        yield cursor, slot, bits, 0_u64
+      end
+      cursor = cursor + chunk
+      slot = slot + 1_u64
+    end
+  end
+
+  # Carved, not free, not atomic, and not white from before the last mark
+  # (dead, its sweep not come yet).
+  @[AlwaysInline]
+  def self.live_bits?(bits : UInt64, colour : UInt64, epoch_flag : UInt64) : Bool
+    return false if bits & IyiHeap::CARVED_FLAG == 0 || bits & IyiHeap::FREE_FLAG != 0 || bits & IyiHeap::ATOMIC_FLAG != 0
+    !(colour == IyiMark::WHITE && bits & IyiHeap::EPOCH_FLAG != epoch_flag)
+  end
+
+  # The type id of a live chunk's object, 0 for untyped memory.
+  def self.type_of(arena : UInt64, head : UInt64, slot : UInt64, bits : UInt64) : UInt64
+    return 0_u64 if bits & IyiHeap::UNTYPED_FLAG != 0
+    return IyiHeap.read64(head).unsafe_shr(IyiHeap::TYPE_SHIFT) if bits & IyiHeap::HEADED_FLAG != 0
+    IyiHeap.read16(arena &+ IyiHeap::META &+ slot &* IyiHeap::META_ENTRY &+ 1_u64)
+  end
+
+  # A reaped fiber of any unit: its object lives while a task names it,
+  # and its closure, defer list and groups were its unit's, which nothing
+  # runs again.
+  def self.dead_fiber?(type_id : UInt64, base : UInt64) : Bool
+    return false if type_id == 0 || type_id != @@fiber_type
+    Pointer(Void).new(base).as(IyiFiber).state == IyiFiberState::Done
+  end
+
+  def self.scan_chunk(record : UInt64, id : UInt64, parity : UInt64, death : Bool, kind : Int32, owner : UInt64, arena : UInt64, head : UInt64, slot : UInt64, bits : UInt64) : Nil
+    @@scanned = @@scanned &+ 1_u64
+    chunk = IyiHeap.arena_chunk(arena)
+    base = bits & IyiHeap::HEADED_FLAG != 0 ? head &+ IyiHeap::HEADER : head
+    size = bits & IyiHeap::HEADED_FLAG != 0 ? chunk &- IyiHeap::HEADER : chunk
+    type_id = type_of(arena, head, slot, bits)
+    return if dead_fiber?(type_id, base)
+    scan_object(record, id, parity, death, kind, owner, base, size, type_id)
+  end
+
+  def self.scan_large(record : UInt64, id : UInt64, parity : UInt64, death : Bool, node : UInt64, epoch_flag : UInt64) : Nil
+    base = node + IyiHeap::LARGE_USER
+    word = IyiHeap.read64(base - 8_u64)
+    return if word & IyiHeap::ATOMIC_FLAG != 0
+    return if word & IyiMark::COLOUR == IyiMark::WHITE && word & IyiHeap::EPOCH_FLAG != epoch_flag
+    owner = IyiHeap.read64(node + 16_u64) & 0xFFFF_u64
+    flags = IyiHeap.read64(node + 16_u64).unsafe_shr(16_u64) & 0xFF_u64
+    if owner == id && flags & IyiHeap::OWN_PUB == 0
+      return if death || flags & IyiHeap::OWN_LMARK != parity
+    end
+    type_id = word.unsafe_shr(IyiHeap::TYPE_SHIFT)
+    return if dead_fiber?(type_id, base)
+    @@scanned = @@scanned &+ 1_u64
+    scan_object(record, id, parity, death, K_LARGE, owner, base, IyiHeap.read64(node + IyiHeap::OFF_MAP) - IyiHeap::LARGE_USER, type_id)
+  end
+
+  # One object's slots, by its layout, or every word of it without one.
+  def self.scan_object(record : UInt64, id : UInt64, parity : UInt64, death : Bool, kind : Int32, owner : UInt64, base : UInt64, size : UInt64, type_id : UInt64) : Nil
+    entry = type_id == 0 ? 0_u64 : IyiMark.layout_search(type_id)
+    if entry == 0
+      cursor = base
+      limit = base &+ size
+      while cursor &+ 8_u64 <= limit
+        word = IyiHeap.read64(cursor)
+        target = target_of(record, id, parity, death, word)
+        hit(record, id, parity, death, kind, owner, base, type_id, cursor, word, target) if target != 0
+        cursor = cursor &+ 8_u64
+      end
+    else
+      table = IyiMark.layouts_table
+      offsets = table &+ 8_u64 &+ IyiHeap.read64(table) &* IyiMark::ENTRY &+ IyiHeap.read64(entry &+ 32_u64) &* 8_u64
+      remaining = IyiHeap.read64(entry &+ 24_u64)
+      k = 0_u64
+      while k < remaining
+        address = base &+ IyiHeap.read64(offsets &+ k &* 8_u64)
+        word = IyiHeap.read64(address)
+        target = target_of(record, id, parity, death, word)
+        hit(record, id, parity, death, kind, owner, base, type_id, address, word, target) if target != 0
+        k = k &+ 1_u64
+      end
+    end
+  end
+
+  # ── Reporting ──────────────────────────────────────────────────────────
+
+  # A hit, confirmed: the slot still holds the word after a pause, and
+  # the target is still what it was - another thread may have been
+  # writing the holder.
+  def self.hit(record : UInt64, id : UInt64, parity : UInt64, death : Bool, kind : Int32, who : UInt64, base : UInt64, type_id : UInt64, address : UInt64, word : UInt64, target : UInt64) : Nil
+    pause = 0
+    while pause < CONFIRM
+      IyiMark.spin_pause
+      pause = pause + 1
+    end
+    return if IyiHeap.read64(address) != word
+    return if IyiMark.epoch != @@epoch_seen || (!death && LibIyiGCTable.__iyi_marking != 0_u8)
+    return if target_of(record, id, parity, death, word) != target
+    report_begin(id)
+    say(death ? "  at its unit's death, a slot names one of its LOCAL chunks, about to be freed\n" : "  a slot names a LOCAL chunk its local mark left unmarked, about to be freed\n")
+    say("  holder: ")
+    case kind
+    when K_SHARED then say("a shared-heap chunk")
+    when K_PUB
+      say("a published chunk of partition ")
+      say_dec(who)
+    when K_LOCAL
+      say("a LOCAL chunk of partition ")
+      say_dec(who)
+      say(who == id ? " (its own, marked)" : "")
+    when K_LARGE
+      say("a large object (owner ")
+      say_dec(who)
+      say(")")
+    when K_DATA  then say("the data segment")
+    when K_TLS   then say("this thread's thread-local block")
+    else
+      say("the stack of fiber ")
+      say_hex(who)
+      say(", a root the mark read")
+    end
+    say("\n")
+    if kind <= K_LARGE
+      say_object("holder", base, type_id)
+      say("    field +")
+      say_dec(address - base)
+      say(" at ")
+      say_hex(address)
+      say("\n")
+      parents(base, type_id) if type_id == 0
+    elsif kind == K_STACK
+      fiber = Pointer(Void).new(who).as(IyiFiber)
+      running = IyiScheduler.current?
+      collecting = running.is_a?(IyiFiber) && running.object_id == who
+      # The running stack's word is read from the mark's copy.
+      where = address
+      where = @@read_low &+ (address &- @@read) if collecting && address >= @@read && address < @@read &+ (@@read_high &- @@read_low)
+      say("    word at ")
+      say_hex(where)
+      say(", ")
+      say_dec(fiber.stack_top &- where)
+      say(" bytes below the stack's top; the fiber ")
+      say(collecting ? "is the one collecting (the word as the mark read it)" : "is parked")
+      say(", state ")
+      say_dec(fiber.state.value.to_u64)
+      say(fiber.on_cpu? ? ", on a cpu" : ", on no cpu")
+      say(", saved sp ")
+      say_hex(fiber.saved_sp)
+      say("\n")
+    else
+      say("    word at ")
+      say_hex(address)
+      say(" (image+")
+      say_hex(address &- @@image)
+      say(")\n")
+    end
+    say("  target: ")
+    say_hex(word)
+    say("\n")
+    target_detail(target)
+    report_end
+  end
+
+  # The running stack's words as the local mark read them, copied by the
+  # hook beside its read (`mark_read`, heap_partition.iyi): the check
+  # reads the copy, because the collector's own frames on that stack -
+  # its loops' temporaries, one past the end of a buffer it scanned - have
+  # changed since, and a word the mark never saw is no root it missed.
+  @[ThreadLocal]
+  @@read : UInt64 = 0_u64
+  @[ThreadLocal]
+  @@read_low : UInt64 = 0_u64
+  @[ThreadLocal]
+  @@read_high : UInt64 = 0_u64
+
+  READ_MAX = 1048576_u64
+
+  def self.mark_read(low : UInt64, high : UInt64) : Nil
+    @@read = __iyi_mmap(READ_MAX).address if @@read == 0
+    low = (low &+ 7_u64) & (0_u64 &- 8_u64)
+    low = high - READ_MAX if high - low > READ_MAX
+    @@read_low = low
+    @@read_high = high
+    copy = @@read
+    cursor = low
+    while cursor &+ 8_u64 <= high
+      IyiHeap.write64(copy &+ (cursor - low), IyiHeap.read64(cursor))
+      cursor = cursor &+ 8_u64
+    end
+  end
+
+  def self.say_object(what : String, base : UInt64, type_id : UInt64) : Nil
+    say("    ")
+    say(what)
+    say(" ")
+    say_hex(base)
+    if type_id == 0
+      say(" untyped memory, ")
+    else
+      say(" type_id=")
+      say_dec(type_id)
+      say(", ")
+    end
+    say_dec(IyiHeap.size_of(base))
+    say(" bytes\n")
+  end
+
+  # The target chunk: its type, size and allocation site.
+  def self.target_detail(target : UInt64) : Nil
+    arena = IyiHeap.arena_of(target)
+    if arena == 0
+      base = target + IyiHeap::LARGE_USER
+      say_object("chunk", base, IyiHeap.read64(base - 8_u64).unsafe_shr(IyiHeap::TYPE_SHIFT))
+      say("    a large object, no site kept\n")
+      return
+    end
+    slot = IyiHeap.chunk_index(arena, target)
+    bits = IyiHeap.read8(arena &+ IyiHeap::META &+ slot &* IyiHeap::META_ENTRY)
+    base = bits & IyiHeap::HEADED_FLAG != 0 ? target &+ IyiHeap::HEADER : target
+    say_object("chunk", base, type_of(arena, target, slot, bits))
+    site = site_of(arena, slot)
+    if site == 0
+      say("    allocated at: no site kept (an allocation not through __iyi_new or the mallocs)\n")
+    else
+      say("    allocated at: image+")
+      say_hex(site)
+      say("\n")
+    end
+  end
+
+  # An untyped holder - a buffer, a closure without a layout - named by
+  # what holds it: the first few chunks with a slot naming its base.
+  def self.parents(holder : UInt64, type_id : UInt64) : Nil
+    epoch_flag = IyiMark.epoch_flag
+    found = 0
+    arena = IyiHeap.first_arena
+    while arena != 0 && found < 3
+      each_live_chunk(arena, epoch_flag) do |head, slot, bits, owner|
+        if found < 3
+          chunk = IyiHeap.arena_chunk(arena)
+          base = bits & IyiHeap::HEADED_FLAG != 0 ? head &+ IyiHeap::HEADER : head
+          cursor = base
+          limit = head &+ chunk
+          while cursor &+ 8_u64 <= limit
+            if IyiHeap.read64(cursor) == holder
+              say_object("held by", base, type_of(arena, head, slot, bits))
+              say("    field +")
+              say_dec(cursor - base)
+              say("\n")
+              found = found + 1
+              break
+            end
+            cursor = cursor &+ 8_u64
+          end
+        end
+      end
+      arena = IyiHeap.arena_next(arena)
+    end
+    cursor = IyiRoots.data_low
+    while cursor &+ 8_u64 <= IyiRoots.data_high && found < 3
+      if IyiHeap.read64(cursor) == holder
+        say("    held by the data segment word at image+")
+        say_hex(cursor &- @@image)
+        say("\n")
+        found = found + 1
+      end
+      cursor = cursor &+ 8_u64
+    end
+  end
+
+  # One report at a time, the first: the others wait for the exit.
+  def self.report_begin(id : UInt64) : Nil
+    word = Pointer(Atomic(UInt64)).new(pointerof(@@reporting).address)
+    until word.value.compare_and_set(0_u64, 1_u64)[1]
+      IyiMark.spin_pause
+    end
+    say("iyi: heap_verify: partition ")
+    say_dec(id)
+    say(", unit ")
+    record = IyiHeap.partition_at(id)
+    say_hex(record == 0 ? 0_u64 : IyiHeap.read64(record &+ IyiHeap::REC_UNIT))
+    say(", check ")
+    say_dec(@@checks)
+    say("\n")
+  end
+
+  def self.report_end : NoReturn
+    say("iyi: heap_verify: aborting\n")
+    __iyi_exit(86)
+  end
+
+  def self.say(text : String) : Nil
+    __iyi_write(2, text.to_unsafe.as(Void*), text.bytesize.to_u64)
+  end
+
+  def self.say_hex(value : UInt64) : Nil
+    buffer = uninitialized StaticArray(UInt8, 18)
+    bytes = pointerof(buffer).as(Pointer(UInt8))
+    bytes[0] = 48_u8
+    bytes[1] = 120_u8
+    index = 0
+    while index < 16
+      digit = value.unsafe_shr(((15 - index) * 4).to_u64) & 15_u64
+      bytes[index + 2] = digit < 10 ? (48_u64 + digit).to_u8 : (87_u64 + digit).to_u8
+      index = index + 1
+    end
+    __iyi_write(2, bytes.as(Void*), 18_u64)
+  end
+
+  def self.say_dec(value : UInt64) : Nil
+    buffer = uninitialized StaticArray(UInt8, 20)
+    bytes = pointerof(buffer).as(Pointer(UInt8))
+    index = 20
+    rest = value
+    while true
+      index = index - 1
+      bytes[index] = (48_u64 + rest % 10_u64).to_u8
+      rest = rest // 10_u64
+      break if rest == 0
+    end
+    __iyi_write(2, (bytes + index).as(Void*), (20 - index).to_u64)
+  end
+
+  # ── The false-word injector (`IYI_HEAP_FALSE_WORDS=1`) ─────────────────
+
+  # Plain, for the reason `at_point`'s count is: the injector runs at a
+  # chaos point.
+  def self.noise : UInt64
+    state = @@noise &+ 0x9E3779B97F4A7C15_u64
+    @@noise = state
+    IyiChaosMix.mix(state)
+  end
+
+  # A word aimed at a partition arena: a chunk's head, its object, or a
+  # word inside it, of a run owned by a partition other than the running
+  # one's when one is found in a few tries; an arbitrary heap-shaped word
+  # otherwise.
+  def self.false_word(own : UInt64) : UInt64
+    tries = 0
+    while tries < 8
+      pick = noise
+      arena = IyiHeap.first_arena
+      count = 0_u64
+      while arena != 0
+        count = count + 1_u64 if IyiHeap.partition_arena?(arena)
+        arena = IyiHeap.arena_next(arena)
+      end
+      break if count == 0
+      wanted = pick % count
+      arena = IyiHeap.first_arena
+      while arena != 0
+        if IyiHeap.partition_arena?(arena)
+          break if wanted == 0
+          wanted = wanted - 1_u64
+        end
+        arena = IyiHeap.arena_next(arena)
+      end
+      break if arena == 0
+      first = IyiHeap.arena_first(arena)
+      high = IyiHeap.arena_high(arena)
+      if high > first
+        chunk = IyiHeap.arena_chunk(arena)
+        head = first + ((noise % (high - first)) // chunk) * chunk
+        owner = IyiHeap.owner_at(arena, IyiHeap.granule_of(arena, head))
+        if owner != own || tries == 7
+          case pick.unsafe_shr(40_u64) % 3_u64
+          when 0 then return head
+          when 1 then return head + IyiHeap::HEADER
+          else        return head + ((pick.unsafe_shr(8_u64) % chunk) & (0_u64 &- 8_u64))
+          end
+        end
+      end
+      tries = tries + 1
+    end
+    0x10000_u64 &+ (noise & 0x7FFFFFFFFFF8_u64)
+  end
+
+  # Random words below the running fiber's stack pointer - space no frame
+  # holds now and the next calls will - and, on the simulated thread, below
+  # every parked fiber's saved stack pointer.
+  @[NoInline]
+  def self.inject_here : Nil
+    fiber = IyiScheduler.current?
+    return unless fiber.is_a?(IyiFiber)
+    own = fiber.alloc == 0 ? 0_u64 : IyiHeap.read64(fiber.alloc &+ IyiHeap::REC_ID)
+    sp = IyiRoots.stack_pointer
+    top = fiber.stack_top
+    # A fiber's own mapping above its guard page; a thread's stack a few
+    # pages only, written downwards so a growing stack's guard is met in
+    # order.
+    floor = top != 0 ? top - IyiFiber::STACK_BYTES + 2_u64 * IyiFiber::PAGE : sp - 8192_u64
+    fill(sp, floor, own)
+    {% if flag?(:iyi_chaos) %}
+      if IyiChaos.simulated?
+        other = IyiScheduler.first_fiber
+        while other.is_a?(IyiFiber)
+          if other.object_id != fiber.object_id && other.state != IyiFiberState::Done && other.state != IyiFiberState::Running && other.stack_top != 0 && other.saved_sp != 0
+            fill(other.saved_sp, other.stack_top - IyiFiber::STACK_BYTES + 2_u64 * IyiFiber::PAGE, own)
+          end
+          other = other.next_fiber
+        end
+      end
+    {% end %}
+  end
+
+  def self.fill(sp : UInt64, floor : UInt64, own : UInt64) : Nil
+    start = (sp - 512_u64) & (0_u64 &- 8_u64)
+    return if start <= floor
+    room = (start - floor) // 8_u64
+    count = 1_u64 + noise % 96_u64
+    count = room if count > room
+    k = 0_u64
+    while k < count
+      Pointer(UInt64).new(start - k * 8_u64).value = false_word(own)
+      k = k + 1_u64
+    end
+    stat(pointerof(@@injected).address)
+  end
+end
+
+# The verifier's own splitmix64 finaliser (chaos.iyi's is the chaos
+# scheduler's, and a build without `-Diyi_chaos` has none).
+module IyiChaosMix
+  def self.mix(word : UInt64) : UInt64
+    z = word
+    z = (z ^ z.unsafe_shr(30_u64)) &* 0xBF58476D1CE4E5B9_u64
+    z = (z ^ z.unsafe_shr(27_u64)) &* 0x94D049BB133111EB_u64
+    z ^ z.unsafe_shr(31_u64)
+  end
+end
+
+# A set of addresses for `lost_free`, on the caller's stack and in mapped
+# memory the collector never reads: open addressing, grown by doubling.
+struct IyiVerifySet
+  @table : UInt64
+  @capacity : UInt64
+  @count : UInt64
+
+  def initialize
+    @capacity = 1024_u64
+    @table = __iyi_mmap(@capacity * 8_u64).address
+    @count = 0_u64
+  end
+
+  def add(address : UInt64) : Nil
+    grow if (@count + 1_u64) * 2_u64 > @capacity
+    @count = @count + 1_u64 if IyiVerifySet.put(@table, @capacity, address)
+  end
+
+  def includes?(address : UInt64) : Bool
+    index = IyiChaosMix.mix(address) & (@capacity - 1_u64)
+    while true
+      seen = IyiHeap.read64(@table + index * 8_u64)
+      return false if seen == 0
+      return true if seen == address
+      index = (index + 1_u64) & (@capacity - 1_u64)
+    end
+    false
+  end
+
+  def free : Nil
+    __iyi_munmap(@table, @capacity * 8_u64)
+  end
+
+  def grow : Nil
+    fresh_capacity = @capacity * 2_u64
+    fresh = __iyi_mmap(fresh_capacity * 8_u64).address
+    k = 0_u64
+    while k < @capacity
+      seen = IyiHeap.read64(@table + k * 8_u64)
+      IyiVerifySet.put(fresh, fresh_capacity, seen) if seen != 0
+      k = k + 1_u64
+    end
+    __iyi_munmap(@table, @capacity * 8_u64)
+    @table = fresh
+    @capacity = fresh_capacity
+  end
+
+  # Answers whether *address* was not there and is now.
+  def self.put(table : UInt64, capacity : UInt64, address : UInt64) : Bool
+    index = IyiChaosMix.mix(address) & (capacity - 1_u64)
+    while true
+      seen = IyiHeap.read64(table + index * 8_u64)
+      if seen == 0
+        IyiHeap.write64(table + index * 8_u64, address)
+        return true
+      end
+      return false if seen == address
+      index = (index + 1_u64) & (capacity - 1_u64)
+    end
+    false
+  end
+end
+
+{% if flag?(:linux) %}
+  class IyiTlsImage
+    # This thread's thread-local block: below the thread pointer on
+    # x86_64 (variant II), above its 16-byte control block on aarch64.
+    def self.verify_block : Tuple(UInt64, UInt64)
+      read_segment
+      size = round_up(@@memsz, @@align)
+      pointer = uninitialized UInt64
+      {% if flag?(:x86_64) %}
+        asm("movq %fs:0, $0" : "=r"(pointer) ::: "volatile")
+        {pointer - size, pointer}
+      {% else %}
+        asm("mrs $0, tpidr_el0" : "=r"(pointer) ::: "volatile")
+        low = pointer + round_up(16_u64, @@align)
+        {low, low + @@memsz}
+      {% end %}
+    end
+  end
+{% end %}
+
+{% if !flag?(:gc_boehm) %}
+  class IyiWeak
+    # Every registered cell, under the table's lock (the verifier's walk).
+    def self.each_cell(&) : Nil
+      lock
+      index = 0_u64
+      while index < @@count
+        yield (@@cells + index.to_i64).value
+        index = index + 1_u64
+      end
+      unlock
+    end
+  end
+{% end %}
+
+# The return address of the allocation entry that asks (`IyiHeapVerify.
+# sited`): the program's call site.
+lib LibIyiVerify
+  fun return_address = "llvm.returnaddress"(level : Int32) : Void*
+end

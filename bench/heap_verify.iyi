@@ -1,0 +1,90 @@
+# heap22 slice S4's own checks: the stress collection and the chaos
+# simulation, each where it once went wrong. bench/heap_verify.sh builds
+# this with `-Dheap_partitions -Dheap_verify -Diyi_chaos`, runs it with
+# `IYI_HEAP_STRESS=1` threaded and simulated (`IYI_WORKERS=1`), and keeps a
+# broken copy of each mechanism, caught here.
+#
+#   ./bin/iyi build -Dheap_partitions -Dheap_verify -Diyi_chaos bench/heap_verify.iyi
+#   IYI_CHAOS=1 IYI_HEAP_STRESS=1 ./heap_verify                 # every check
+#   IYI_CHAOS=1 IYI_HEAP_STRESS=1 IYI_WORKERS=1 ./heap_verify kept
+#
+# The program sizes the pool itself (`IyiWorkers.count = 4`), so a `Unit`
+# is placed on the pool even when the chaos scheduler simulates on one
+# thread: the mix bench/heap_crossings.iyi makes, where both went wrong.
+
+{% if flag?(:heap_partitions) && flag?(:heap_verify) && flag?(:iyi_chaos) %}
+  import std/unit::{Unit}
+
+  def fail(message : String) : Nil
+    print "FAIL: #{message}\n"
+    __iyi_exit(1)
+  end
+
+  # ── A bracket's fiber is no member of the partition it builds in ──────
+  # `Unit.new` on the pool builds the value in the new unit's partition on
+  # the caller's fiber (`IyiHeap.within`), which is on no list of that
+  # unit's. A group opened there makes its `defer` node in that partition,
+  # named by the fiber's `@defers`, and the `Atomic`'s verb inside it is a
+  # chaos point, where the stress collects only a partition of the
+  # fiber's own unit (`IyiHeapVerify.at_point_once`). The value must read
+  # back whole and nothing report. (Its copy with that rule taken out
+  # passed too on Linux, seed 1; why the node lived was not cut down.)
+  def bracket_check : Nil
+    u = Unit.new do
+      group do |g|
+        turns = Atomic(Int32).new(0)
+        turns.add(1)
+        turns.add(1)
+      end
+      "bracket-" + "x" * 40
+    end
+    got = 0
+    group do |g|
+      got = g.spawn(in: u) { |value| value.bytesize }.value
+    end
+    fail("bracket: the unit's value reads #{got} bytes, not 48") unless got == 48
+  end
+
+  # ── A simulated unit's fiber stays on the simulation's thread ──────────
+  # With the pool started - a `Unit`'s task on it - the scheduler is
+  # shared. A `unit: :new` task, simulated, then joins a task of a unit of
+  # its own that sleeps first, so the join parks, and the sleeper's end
+  # wakes it (`IyiScheduler.ready`). Pushed onto the pool, the joiner was
+  # left on its unit's list by every worker, its token being the
+  # simulation's thread's, and the program hung in its outer join.
+  def kept_check : Nil
+    u = Unit.new { 41 }
+    first = 0
+    group do |g|
+      first = g.spawn(in: u) { |value| value + 1 }.value
+    end
+    fail("kept: the Unit's task answered #{first}, not 42") unless first == 42
+    got = 0
+    group do |outer|
+      got = outer.spawn(unit: :new) do
+        group do |g|
+          g.spawn(unit: :new) do
+            sleep(20)
+            0
+          end
+        end
+        42
+      end.value
+    end
+    fail("kept: the task answered #{got}, not 42") unless got == 42
+  end
+
+  IyiWorkers.count = 4
+  arguments = Program.args
+  names = arguments.empty? ? ["bracket", "kept"] : arguments
+  names.each do |name|
+    case name
+    when "bracket" then bracket_check
+    when "kept"    then kept_check
+    else                fail("no check named #{name}")
+    end
+    puts "#{name}: holds"
+  end
+{% else %}
+  puts "heap verify: built without -Dheap_partitions -Dheap_verify -Diyi_chaos, nothing to check"
+{% end %}

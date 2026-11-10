@@ -382,20 +382,13 @@ pub class Random
     shared.urlsafe_base64(n, padding)
   end
 
-  # One generator a thread, seeded the first time that thread asks. The
-  # draws write the generator's state, so one generator every thread
-  # shared raced, and its first draw from a parallel unit left a unit's
-  # object in a class variable every unit reads. It is made in the shared
-  # heap (`IyiCross.shared`): the next unit on the thread reads it too,
-  # and every later write to it is an integer.
-  @[ThreadLocal]
   @@shared : Random? = nil
 
   private def self.shared : Random
     if generator = @@shared
       return generator
     end
-    generator = IyiCross.shared { Random.new }
+    generator = Random.new
     @@shared = generator
     generator
   end

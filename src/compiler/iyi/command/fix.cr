@@ -190,8 +190,10 @@ class Iyi::Command
       end
       # Definition-site typing is the compiler's own rule now, so this
       # plain compile already reaches uncalled bodies — fix and check
-      # cannot disagree about what clean means.
-      result, diags = analysis.check(path, text, {} of String => String)
+      # cannot disagree about what clean means. With the cleanup, as a
+      # build: the reach rule's refusal is raised there (SPEC.md III.4.5),
+      # and without it a program the build refused was "already clean".
+      result, diags = analysis.check(path, text, {} of String => String, cleanup: true)
       # A refusal whose edit is placed elsewhere in this file - the unsafe
       # mark above the header (SPEC.md III.13) - is independent of the
       # others the compile gave and is made first.

@@ -11216,7 +11216,15 @@ class IyiOnce
       # A proc is its function and its closure; this one closes over
       # nothing.
       cell = {initializer.address, 0_u64}
-      pointerof(cell).as(Pointer(Proc(Nil))).value.call
+      # In the shared heap (heap22, contract amendment 6b): the first read
+      # may be a pool unit's, and the graph the initializer builds is held
+      # by a global its partition's local collection never scans, so
+      # built in the unit's partition it was nobody's to keep. An
+      # initializer run at its declaration runs on the main fiber, which
+      # allocates in the shared heap already. Nothing but the call without
+      # `-Dheap_partitions`. An initializer that panics ends its fiber
+      # still allocating in the shared heap, which is sound.
+      IyiCross.shared { pointerof(cell).as(Pointer(Proc(Nil))).value.call }
       IyiAtomic.store(flag, 1_u8, :release, false)
     end
     {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}

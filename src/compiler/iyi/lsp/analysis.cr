@@ -79,7 +79,7 @@ module Iyi::Lsp
     # pull, until its own buffer was edited: `name` renamed to `title` in
     # `geo/b.iyi` answered `[]`, and with `geo/b.iyi` written back, "can't
     # find module 'geo/b'".
-    @memo_key : {String, UInt64, UInt64}?
+    @memo_key : {String, UInt64, UInt64, Bool}?
     @memo : {Compiler::Result?, Array(Diag)}?
     @memo_disk = [] of {String, UInt64}
     # What the latest `compile` touched on disk, for `check` to keep.
@@ -87,12 +87,16 @@ module Iyi::Lsp
 
     # Compile one buffer as its own entry, front end only. Returns the
     # typed result and no diagnostics, or nil and what went wrong.
-    def check(path : String, text : String, overrides : Hash(String, String)) : {Compiler::Result?, Array(Diag)}
-      key = {path, text.hash, overrides.hash}
+    # *cleanup* runs the cleanup pass too, as a build does, for a caller
+    # that wants every error a build gives and reads no typed AST after:
+    # `iyi fix`, whose reach refusal (SPEC.md III.4.5) is raised there, and
+    # which answered "already clean" for a program the build refused.
+    def check(path : String, text : String, overrides : Hash(String, String), *, cleanup : Bool = false) : {Compiler::Result?, Array(Diag)}
+      key = {path, text.hash, overrides.hash, cleanup}
       if @memo_key == key && (hit = @memo) && @memo_disk.all? { |(file, stamp)| Analysis.disk_stamp(file) == stamp }
         return hit
       end
-      answer = compile(path, text, overrides)
+      answer = compile(path, text, overrides, cleanup)
       @memo_key = key
       @memo = answer
       @memo_disk = @touched
@@ -143,7 +147,7 @@ module Iyi::Lsp
       @aligned = @aligned_key = nil if @aligned_key.try(&.[0]) == path
     end
 
-    private def compile(path : String, text : String, overrides : Hash(String, String)) : {Compiler::Result?, Array(Diag)}
+    private def compile(path : String, text : String, overrides : Hash(String, String), cleanup : Bool = false) : {Compiler::Result?, Array(Diag)}
       # IV.6 read backwards, as a build reads it: `<root>/calc/parser.iyi`
       # resolves its `import calc/lexer` from `<root>`, and its packages
       # through `<root>/iyi.mod` (`Compiler.entry_root_of`).
@@ -158,7 +162,7 @@ module Iyi::Lsp
       compiler = Compiler.new
       compiler.prelude = "iyi/prelude"
       compiler.no_codegen = true
-      compiler.no_cleanup = true # the visitors read the typed AST after
+      compiler.no_cleanup = !cleanup # the visitors read the typed AST after
       compiler.iyi_mod_table = table
       compiler.iyi_file_overrides = overrides
       compiler.stdout = IO::Memory.new

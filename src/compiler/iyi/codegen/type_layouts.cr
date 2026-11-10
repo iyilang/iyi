@@ -69,6 +69,26 @@ module Iyi
       )
     end
 
+    # The layout of a heap22 C1 closure context (`CodeGenVisitor
+    # #iyi_c1_proc`): *struct_type*, laid out by *typer*, whose slots hold
+    # values of *slot_types* in order. No type stands behind it, so the
+    # map is built from the slots.
+    def gc_closure_layout(type_id : Int32, typer : LLVMTyper, struct_type : LLVM::Type, slot_types : Array(Type)) : IyiMod::TypeLayout
+      scan_offsets = [] of UInt64
+      slot_types.each_with_index do |slot_type, index|
+        gc_field_offsets(slot_type, typer.offset_of(struct_type, index), scan_offsets)
+      end
+      scan_offsets.sort!.uniq!
+      size = typer.size_of(struct_type)
+      IyiMod::TypeLayout.new(
+        type_id: type_id,
+        alloc_size: size.to_u32,
+        scan_cap: size.to_u32,
+        scan_offsets: scan_offsets.map(&.to_u32),
+        noscan_offsets: [] of UInt32,
+      )
+    end
+
     # The pointer words of one type's own fields, at *base* within the object
     # being mapped. *struct_type* is the type's emitted struct, whose element
     # order is `all_instance_vars` order - under iyi's layout the type id is

@@ -31,12 +31,22 @@ module Iyi
   # def the spawn is written in, as a reader names it (`App::Work.crunch`;
   # empty at a module's top level), and *digest* the block's text, hashed:
   # the spawn's name in a module's artifact (`IyiMod::SpawnRecord`).
+  # *pinned*, in a `-Dheap_partitions` build, says why the spawn's unit
+  # runs in the shared heap rather than a heap of its own: its block
+  # reaches an owning type that does not keep the lend protocol (heap22
+  # `pinned:`, SPEC.md III.4.19); nil when it does not.
   record SpawnSite, location : Location, reason : String?, std : Bool,
-    asked : Bool = false, owner : String = "", digest : String = "", into : String? = nil do
+    asked : Bool = false, owner : String = "", digest : String = "", into : String? = nil,
+    pinned : String? = nil do
     def parallel? : Bool
       reason.nil?
     end
   end
+
+  # iyi: a `Unit.new` or `SharedProc.of` the cleanup pointed at its
+  # `pinned: true` instance (heap22), with why, for the artifact's pin
+  # bits and the note.
+  record PinSite, location : Location, call : String, reason : String
 
   # iyi: a spawn the cleanup moved to the pool on the strength of a
   # `@[SafeReach]` its block reaches through a call, in a build that writes
@@ -50,6 +60,9 @@ module Iyi
     # Every spawn site the cleanup classified, in the order it met them;
     # one per instantiation of the def the call is in.
     getter iyi_spawn_sites = [] of SpawnSite
+
+    # Every `Unit.new` and `SharedProc.of` the cleanup pinned (`PinSite`).
+    getter iyi_pin_sites = [] of PinSite
 
     # The spawns placed in parallel on a claim, in a build that writes
     # artifacts (`ClaimedSpawn`).
@@ -78,7 +91,11 @@ module Iyi
         held = claimed.claims.find { |(key, _)| !@iyi_reach_robust.includes?(key) }
         next unless held
         claimed.node.target_defs = [claimed.spawn_def]
-        @iyi_spawn_sites[claimed.site] = site.copy_with(reason: held[1])
+        # A plain spawn takes nothing but its block: the `pinned: true` a
+        # pinned crossing passed `spawn_pooled` goes with it (heap22).
+        claimed.node.args.clear
+        claimed.node.named_args = nil
+        @iyi_spawn_sites[claimed.site] = site.copy_with(reason: held[1], pinned: nil)
       end
     end
 
@@ -729,6 +746,7 @@ module Iyi
           check_share_boundary(node, target_defs[0])
           original = target_defs[0]
           classify_spawn(node, original)
+          pin_constructor(node, original)
           # An eligible spawn now names `spawn_pooled`, whose body is the
           # one to transform below; one placed there on a claim may go
           # back to `spawn` once the claim is proven
@@ -888,6 +906,10 @@ module Iyi
         check_share_reach(block, a_def, thread)
       end
       check_block_captures(node, block, a_def, subject, consequence, thread, owning)
+      # The block crosses into another unit or thread: its closure gets a
+      # context of its own (heap22 C1). A block behind a lock does not
+      # cross, and may assign what it captures.
+      fun_literal.iyi_crossing = true if thread && @program.has_flag?("heap_partitions")
     end
 
     # The captures of a block crossing a boundary: each variable it closed
@@ -976,12 +998,18 @@ module Iyi
       in .placed?
         pooled = typed_beside(target_def, "spawn_pooled")
         reason = pooled ? spawn_serial_reason(node) : NO_THREADS
-        node.target_defs = [pooled] if pooled && reason.nil?
+        if pooled && reason.nil?
+          node.target_defs = [pooled]
+          # In a unit of its own: a crossing, so C1 too.
+          mark_crossing(node)
+          pinned = pin_spawn(node, target_def, "spawn_pooled")
+        end
         asked = false
       in .own_unit?
         if new_unit = typed_beside(target_def, "spawn_new")
           node.target_defs = [new_unit]
           node.named_args = nil
+          pinned = pin_spawn(node, target_def, "spawn_new")
         end
         reason = nil
         asked = true
@@ -998,7 +1026,7 @@ module Iyi
         @program.iyi_claimed_spawns << ClaimedSpawn.new(node, target_def, @program.iyi_spawn_sites.size, @spawn_claims.dup)
       end
       @program.iyi_spawn_sites << SpawnSite.new(location, reason, @program.iyi_share_reach.std_at?(location),
-        asked, spawn_owner_label, @program.iyi_rewrites_artifacts ? spawn_digest(node) : "", into)
+        asked, spawn_owner_label, @program.iyi_rewrites_artifacts ? spawn_digest(node) : "", into, pinned)
     end
 
     # The claims the spawn being classified stood on, as `ClaimedSpawn`
@@ -1164,26 +1192,35 @@ module Iyi
     # The instance of *name* - `spawn_pooled`, `spawn_new` - that a spawn
     # def's never-taken line typed beside *spawn_def*, read before the
     # cleanup drops that line, and kept per instance; nil under `-Dgc_none`
-    # and `-Dgc_boehm`, where the def has no such line.
-    private def typed_beside(spawn_def : Def, name : String) : Def?
-      @pooled_spawns.fetch(spawn_def) do
+    # and `-Dgc_boehm`, where the def has no such line. With *pinned*, the
+    # instance a `-Dheap_partitions` line typed for `name(pinned: true)`
+    # (heap22): both are read in the one walk, since the line is gone once
+    # the def's body is cleaned, and a later call may need the other.
+    private def typed_beside(spawn_def : Def, name : String, pinned : Bool = false) : Def?
+      found = @pooled_spawns.fetch(spawn_def) do
         finder = TypedBesideFinder.new(name)
         spawn_def.body.accept finder
-        @pooled_spawns[spawn_def] = finder.found
+        @pooled_spawns[spawn_def] = {finder.found, finder.found_pinned}
       end
+      pinned ? found[1] : found[0]
     end
 
     class TypedBesideFinder < Visitor
       getter found : Def?
+      getter found_pinned : Def?
 
       def initialize(@name : String)
       end
 
       def visit(node : Call) : Bool
         if node.name == @name && (targets = node.target_defs) && targets.size == 1
-          @found = targets.first
+          if node.named_args.try(&.any? { |arg| arg.name == "pinned" && arg.value.is_a?(BoolLiteral) && arg.value.as(BoolLiteral).value })
+            @found_pinned ||= targets.first if node.obj.nil?
+          elsif !node.named_args.try(&.any?(&.name.==("pinned")))
+            @found ||= targets.first
+          end
         end
-        @found.nil?
+        !done?
       end
 
       # The line sits in `{% if %}`, whose typed code is its expansion.
@@ -1193,8 +1230,166 @@ module Iyi
       end
 
       def visit(node : ASTNode) : Bool
-        @found.nil?
+        !done?
       end
+
+      private def done? : Bool
+        !@found.nil? && !@found_pinned.nil?
+      end
+    end
+
+    # heap22 C1: the block a plain spawn placed in a unit of its own runs
+    # there, so its closure gets a context of its own, as every crossing
+    # block's does (`check_share_boundary`).
+    private def mark_crossing(node : Call) : Nil
+      return unless @program.has_flag?("heap_partitions")
+      node.block.try(&.fun_literal).as?(ProcLiteral).try { |literal| literal.iyi_crossing = true }
+    end
+
+    # heap22 pin codegen (contract §5, §6): a spawn whose block reaches an
+    # owning type outside std that does not keep the lend protocol runs in
+    # the shared heap, since that type hands its units a graph no publication
+    # sees. The call is pointed at *name*'s `pinned: true` instance, typed
+    # beside *spawn_def* on a never-taken `-Dheap_partitions` line, and
+    # passes it `true`. Answers why, or nil.
+    private def pin_spawn(node : Call, spawn_def : Def, name : String) : String?
+      return nil unless @program.has_flag?("heap_partitions")
+      return nil if SPAWN_BROKEN.includes?("pin")
+      reason = pin_reason(node)
+      return nil unless reason
+      pinned = typed_beside(spawn_def, name, pinned: true)
+      return nil unless pinned
+      pass_pinned(node, pinned)
+      if location = node.name_location || node.location
+        @program.warnings.add_note(location.expanded_location || location, "this spawn runs in the shared heap because #{reason} (SPEC.md III.4.19)")
+      end
+      reason
+    end
+
+    # The same for the two std calls that start a unit's or a proc's
+    # crossing, `Unit.new { }` and `SharedProc.of { }`: their defs carry the
+    # never-taken `pinned: true` line themselves. Asked at every call, so
+    # the line is read before the def's body is cleaned.
+    private def pin_constructor(node : Call, target_def : Def) : Nil
+      return unless @program.has_flag?("heap_partitions")
+      call = CleanupTransformer.pinnable_call(target_def)
+      return unless call
+      pinned = typed_beside(target_def, target_def.name.partition(':').first, pinned: true)
+      return if SPAWN_BROKEN.includes?("pin")
+      return unless pinned && !pinned.same?(target_def)
+      reason = pin_reason(node)
+      return unless reason
+      pass_pinned(node, pinned)
+      location = node.name_location || node.location
+      return unless location
+      location = location.expanded_location || location
+      @program.iyi_pin_sites << PinSite.new(location, call, reason)
+      @program.warnings.add_note(location, "#{call} runs its block in the shared heap because #{reason} (SPEC.md III.4.19)")
+    end
+
+    # `Unit.new` or `SharedProc.of` when *target_def* is std's, else nil:
+    # the calls besides a spawn that take the compiler's `pinned:`
+    # (contract §5), and which no other module may pass it.
+    def self.pinnable_call(target_def : Def) : String?
+      owner = target_def.owner
+      return nil unless owner.metaclass?
+      type = owner.instance_type
+      type = type.generic_type.as(Type) if type.is_a?(GenericClassInstanceType)
+      name = target_def.name.partition(':').first
+      case {type.to_s, name}
+      when {"Unit", "new"}       then "Unit.new"
+      when {"SharedProc", "of"} then "SharedProc.of"
+      end
+    end
+
+    private def pass_pinned(node : Call, pinned : Def) : Nil
+      node.target_defs = [pinned]
+      value = BoolLiteral.new(true)
+      value.set_type(@program.bool)
+      node.named_args = [NamedArgument.new("pinned", value)]
+    end
+
+    # Why the crossing at *node* must run in the shared heap, or nil: the
+    # first owning type outside std without `lends:` among the types of what
+    # its block captures, the module state it names and the module state it
+    # reaches through its calls (`ShareReach`), and the types those hold.
+    # std's own owning types (`Mutex`, `Unit`, `SharedProc`) implement their
+    # crossings in the runtime and do not pin (contract §6).
+    private def pin_reason(node : Call) : String?
+      fun_literal = node.block.try(&.fun_literal)
+      return nil unless fun_literal.is_a?(ProcLiteral)
+      a_def = fun_literal.def
+      held = [] of {Type, String}
+      vars = a_def.vars
+      captures_self = false
+      ClosuredVarsCollector.collect(a_def).each do |captured|
+        case captured
+        when InstanceVar
+          captures_self = true
+        when Var
+          if captured.name == "self"
+            captures_self = true
+            next
+          end
+          meta = vars.try &.[captured.name]?
+          next unless meta && !meta.belongs_to?(a_def)
+          meta.type?.try { |type| held << {type, "it captures `#{captured.name}`"} }
+        end
+      end
+      if captures_self && (self_type = @current_def.try(&.owner)) && !self_type.is_a?(Program) && !self_type.metaclass?
+        held << {self_type, "it captures `self`"}
+      end
+      constants = NamedConstants.new
+      a_def.body.accept constants
+      constants.paths.each { |path, type| held << {type, "it names `#{path}`"} }
+      class_vars = NamedClassVars.new
+      a_def.body.accept class_vars
+      class_vars.vars.each { |class_var, var| var.type?.try { |type| held << {type, "it names `#{class_var.name}`"} } }
+      @program.iyi_share_reach.reach(a_def).each do |found|
+        named = found.named
+        held << {named.type, "it reaches `#{named.label}`"} if named.is_a?(ShareReach::Named)
+      end
+      seen = Set(Type).new
+      held.each do |type, how|
+        if owning = unlent_owning(type, seen, 0)
+          return "#{how}, which holds `#{owning}`, an owning type that does not keep the lend protocol: `@[Share(owns: true, lends: true)]` on it promises the protocol and lets the unit keep a heap of its own"
+        end
+      end
+      nil
+    end
+
+    # The first owning type without `lends:`, declared outside std, in
+    # *type* or what it holds: a union's members, a generic's arguments, a
+    # struct's or a class's fields.
+    private def unlent_owning(type : Type, seen : Set(Type), depth : Int32) : Type?
+      return nil if depth > 8 || !seen.add?(type)
+      base = type
+      base = base.base_type if base.is_a?(VirtualType)
+      generic = base.is_a?(GenericClassInstanceType) ? base.generic_type.as(Type) : base
+      if generic.iyi_share_owns? && !generic.iyi_share_lends? && !@program.iyi_share_reach.std_at?(generic.locations.try(&.first?))
+        return base
+      end
+      case base
+      when UnionType
+        base.union_types.each { |member| (found = unlent_owning(member, seen, depth + 1)) && return found }
+      when TupleInstanceType
+        base.tuple_types.each { |member| (found = unlent_owning(member, seen, depth + 1)) && return found }
+      when NamedTupleInstanceType
+        base.entries.each { |entry| (found = unlent_owning(entry.type, seen, depth + 1)) && return found }
+      end
+      if base.is_a?(GenericInstanceType)
+        base.type_vars.each_value do |var|
+          next unless var.is_a?(Var) && (held = var.type?)
+          (found = unlent_owning(held, seen, depth + 1)) && return found
+        end
+      end
+      if base.is_a?(InstanceVarContainer)
+        base.all_instance_vars.each_value do |ivar|
+          next unless held = ivar.type?
+          (found = unlent_owning(held, seen, depth + 1)) && return found
+        end
+      end
+      nil
     end
 
     # A refusal as a note's reason: the innermost exception's words, since
@@ -1896,8 +2091,9 @@ module Iyi
 
     @share_reach_gathered = {} of UInt64 => ShareReachRefusal
     # `spawn_pooled` or `spawn_new` by the spawn def instance it was typed
-    # beside (`typed_beside`); by identity, since a def's `==` compares its text.
-    @pooled_spawns = ({} of Def => Def?).compare_by_identity
+    # beside (`typed_beside`), and the `pinned: true` instance beside it;
+    # by identity, since a def's `==` compares its text.
+    @pooled_spawns = ({} of Def => {Def?, Def?}).compare_by_identity
 
     # The assignments to one variable in a body, each with the loops,
     # blocks and procs around it and whether it comes after the call that

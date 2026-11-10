@@ -4705,10 +4705,65 @@ describe "Semantic: iyi" do
     end
 
     it "refuses a Share argument it does not know" do
-      assert_error(<<-CODE, "unknown Share named argument, valid arguments are: 'owns'", filename: "x.iyi")
+      assert_error(<<-CODE, "unknown Share named argument, valid arguments are: 'owns', 'lends'", filename: "x.iyi")
         @[Share(own: true)]
         class Box
         end
+        CODE
+    end
+
+    # heap22 (SPEC.md III.4.19): `lends:` promises the lend protocol, which
+    # only an owning type has a graph to keep.
+    it "refuses lends: on a type that owns nothing" do
+      assert_error(unsafe + <<-CODE, "Share's 'lends: true' promises the lend protocol for the graph an owning type hands its units, and `Box` owns nothing", filename: "x.iyi")
+        @[Share(lends: true)]
+        class Box
+        end
+        CODE
+    end
+
+    it "takes lends: beside owns:" do
+      result = semantic(unsafe + <<-CODE, filename: "x.iyi")
+        @[Share(owns: true, lends: true)]
+        class Pool
+        end
+        CODE
+      pool = result.program.types["Pool"]
+      pool.iyi_share_owns?.should be_true
+      pool.iyi_share_lends?.should be_true
+    end
+
+    it "refuses lends: that is not true or false" do
+      assert_error(unsafe + <<-CODE, "Share's 'lends' is true or false", filename: "x.iyi")
+        @[Share(owns: true, lends: 1)]
+        class Pool
+        end
+        CODE
+    end
+
+    # heap22 contract §6: `pinned:` is the compiler's to pass; a module
+    # that passes it itself is unsafe code.
+    it "refuses a pinned: written on Unit.new outside an unsafe module" do
+      assert_error(<<-CODE, "`pinned:` on `Unit.new` runs the block's unit in the shared heap, which the compiler decides", filename: "x.iyi")
+        class Unit
+          def self.new(*, pinned : Bool = false, &block : -> Int32) : Int32
+            1
+          end
+        end
+
+        Unit.new(pinned: true) { 1 }
+        CODE
+    end
+
+    it "takes a pinned: written on SharedProc.of in an unsafe module" do
+      assert_type(unsafe + <<-CODE, filename: "x.iyi") { int32 }
+        struct SharedProc
+          def self.of(*, pinned : Bool = false, &block : -> Int32) : Int32
+            1
+          end
+        end
+
+        SharedProc.of(pinned: true) { 1 }
         CODE
     end
 

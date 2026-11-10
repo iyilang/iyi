@@ -83,9 +83,11 @@ esac
 
 echo
 echo "== each crossing's mechanism removed, caught by its check"
-# label dir check-name awk-script tree file
+# label dir check-name awk-script tree file [compiler-env]
+# The optional seventh, `NAME=value`, is set for the build: a mechanism
+# the compiler emits (S3) is removed by `IYI_SPAWN_BROKEN`, not a patch.
 prove_caught() {
-  local label="$1" dir="$2" check="$3" script="$4" tree="$5" file="$6"
+  local label="$1" dir="$2" check="$3" script="$4" tree="$5" file="$6" compiler_env="${7:-IYI_SPAWN_BROKEN=}"
   mkdir -p "$WORK/$dir/$tree"
   cp -R "$REPO/src/$tree/." "$WORK/$dir/$tree/"
   if ! awk "$script" "$REPO/src/$tree/$file" > "$WORK/$dir/$tree/$file"; then
@@ -94,7 +96,7 @@ prove_caught() {
     return
   fi
   # shellcheck disable=SC2086
-  if ! IYI_PATH="$WORK/$dir${PSEP}$REPO/src" "$IYI" build $FLAGS \
+  if ! env "$compiler_env" IYI_PATH="$WORK/$dir${PSEP}$REPO/src" "$IYI" build $FLAGS \
        -o "$WORK/$dir/program" "$REPO/bench/heap_crossings.iyi" \
        >"$WORK/$dir/build.log" 2>&1; then
     echo "  $label: the patched tree did not build"
@@ -183,8 +185,9 @@ fi
 # new unit's object.
 prove_caught "pooled glue shared" r14 glue \
   "$(subst 'private def pooled\(unit : IyiUnit' 'task = IyiCross\.shared do' 'task = begin')" iyi concurrency.iyi
-prove_caught "IyiUnit shared" r14u glue \
-  "$(subst 'private def on_pool\(pinned' 'IyiCross\.shared \{ IyiUnit\.new\(pinned: pinned\) \}' 'IyiUnit.new(pinned: pinned)')" iyi concurrency.iyi
+# The new unit's object: born in the shared heap by codegen
+# (`__iyi_new_shared`, S3), which the compiler's `new-shared` copy turns off.
+prove_caught "IyiUnit shared" r14u glue '{ print }' iyi concurrency.iyi IYI_SPAWN_BROKEN=new-shared
 # Row 16: TlsIdentity lends its chain.
 prove_caught "TlsIdentity chain copy" r16 tls \
   "$(subst 'def chain : Array\(Array\(UInt8\)\)' '@chain\.map\(&\.dup\)' '@chain')" std tls.iyi

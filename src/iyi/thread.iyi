@@ -660,7 +660,8 @@
       # runs a fiber the lock does not cover.
       IyiScheduler.expect_thread
       line = new_line
-      thread = IyiCross.shared { IyiThread.new(line, proc) }
+      # Born in the shared heap by codegen (`__iyi_new_shared`, heap22).
+      thread = IyiThread.new(line, proc)
       IyiHeap.write64(line + IYI_TL_OBJECT, thread.object_id)
       # Rooted before anything else can run: the list is a class variable.
       IyiRuntimeLock.lock

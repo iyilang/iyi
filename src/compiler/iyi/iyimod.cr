@@ -96,7 +96,19 @@ module Iyi::IyiMod
   # producer's mark allowed there the consumer has to allow (SPEC.md
   # III.13). A v61 artifact is refused and rebuilt rather than read as a
   # module that handles no raw memory.
-  FORMAT_VERSION = 62_u32
+  # v63 (heap22): object code built with `-Dheap_partitions` calls
+  # `__iyi_new_shared` for a trusted `Share` class's instance and
+  # `__iyi_publish` at a class variable's store, allocates a crossing
+  # block's closure context typed and with no link to its scope's (C1),
+  # and passes `pinned: true` to a crossing that reaches an owning type
+  # without `lends:`; a spawn record carries that pin bit, a `Unit.new` or
+  # `SharedProc.of` the build pinned is a pin record beside the spawns,
+  # and an owning type's Share marker says `lends: true`. Whether the
+  # object code was built with the flag is the header's flags, which a
+  # consumer already compares whole (IV.5): code without the publication
+  # calls is unsound in a partitioned program. A v62 artifact is refused
+  # and rebuilt.
+  FORMAT_VERSION = 63_u32
 
   FORMAT = IO::ByteFormat::LittleEndian
 
@@ -286,7 +298,12 @@ module Iyi::IyiMod
   # placement (`unit: :new`, `unit: :same`, `in: u`), and *reason* why it
   # stays in its spawner's unit (SPEC.md III.4.18), empty when it does not.
   record SpawnRecord, owner : String, digest : String, line : Int32, column : Int32,
-    parallel : Bool, asked : Bool, reason : String
+    parallel : Bool, asked : Bool, reason : String, pinned : Bool = false
+
+  # A `Unit.new` or `SharedProc.of` written in a module whose block the
+  # build ran in the shared heap (heap22 `pinned:`): *call* names which,
+  # *reason* says why. Beside the spawns in `Section::Spawns`.
+  record PinRecord, call : String, line : Int32, column : Int32, reason : String
 
   # A regex literal's constant: the name its object code reads, and what a
   # consumer has to build under that name.
@@ -1603,6 +1620,9 @@ module Iyi::IyiMod
     # `Section::Spawns`.
     property spawns = [] of SpawnRecord
 
+    # The `Unit.new` and `SharedProc.of` calls the build pinned (heap22).
+    property pins = [] of PinRecord
+
     # What each function reaches of module state (SPEC.md III.4.15). Nil
     # when the section is absent, which a consumer reads as "not known".
     # See `Section::Reaches`.
@@ -1664,8 +1684,8 @@ module Iyi::IyiMod
 
     # After the declarations, for `iyi mod dump` and the next build of this
     # module, which compares its own verdicts with these.
-    unless artifact.spawns.empty?
-      sections << {Section::Spawns, encode_spawns(artifact.spawns)}
+    unless artifact.spawns.empty? && artifact.pins.empty?
+      sections << {Section::Spawns, encode_spawns(artifact.spawns, artifact.pins)}
     end
 
     # Whenever it is known, empty or not: its presence is what says the
@@ -1965,6 +1985,7 @@ module Iyi::IyiMod
       layouts = [] of {String, TypeLayout}
       inputs = [] of String
       spawns = [] of SpawnRecord
+      pins = [] of PinRecord
       reaches = nil
       positions = {bodies: {} of String => Array(SourcePosition), initialiser: [] of SourcePosition}
 
@@ -2006,7 +2027,7 @@ module Iyi::IyiMod
         when Section::Inputs          then inputs = decode_strings(payload)
         when Section::SymbolLiterals  then symbol_literals = decode_strings(payload)
         when Section::SourcePositions then positions = decode_source_positions(payload)
-        when Section::Spawns          then spawns = decode_spawns(payload)
+        when Section::Spawns          then spawns, pins = decode_spawns_and_pins(payload)
         when Section::Reaches         then reaches = decode_reaches(payload)
         else
           # Written by a later compiler, or a section this one does not need.
@@ -2028,6 +2049,7 @@ module Iyi::IyiMod
         declarations_only: header[:declarations_only], package_name: header[:package_name], unsafe: header[:unsafe],
         body_positions: positions[:bodies], initialiser_positions: positions[:initialiser])
       artifact.spawns = spawns
+      artifact.pins = pins
       artifact.reaches = reaches
       artifact
     end
@@ -2139,7 +2161,13 @@ module Iyi::IyiMod
       artifact.spawns.each do |record|
         where = record.owner.empty? ? "(top level)" : record.owner
         verdict = record.parallel ? "parallel" : "in its spawner's unit: #{record.reason}"
-        io.puts "  #{where} #{record.line}:#{record.column} #{verdict}#{record.asked ? " (asked)" : ""}"
+        io.puts "  #{where} #{record.line}:#{record.column} #{verdict}#{record.asked ? " (asked)" : ""}#{record.pinned ? " (pinned)" : ""}"
+      end
+    end
+    unless artifact.pins.empty?
+      io.puts "pins"
+      artifact.pins.each do |record|
+        io.puts "  #{record.call} #{record.line}:#{record.column} #{record.reason}"
       end
     end
 
@@ -3677,7 +3705,7 @@ module Iyi::IyiMod
     read_strings(IO::Memory.new(payload))
   end
 
-  private def self.encode_spawns(records : Array(SpawnRecord)) : Bytes
+  private def self.encode_spawns(records : Array(SpawnRecord), pins : Array(PinRecord)) : Bytes
     io = IO::Memory.new
     io.write_bytes records.size.to_u32, FORMAT
     records.each do |record|
@@ -3685,22 +3713,40 @@ module Iyi::IyiMod
       write_string io, record.digest
       io.write_bytes record.line, FORMAT
       io.write_bytes record.column, FORMAT
-      io.write_bytes((record.parallel ? 1_u8 : 0_u8) | (record.asked ? 2_u8 : 0_u8), FORMAT)
+      io.write_bytes((record.parallel ? 1_u8 : 0_u8) | (record.asked ? 2_u8 : 0_u8) | (record.pinned ? 4_u8 : 0_u8), FORMAT)
       write_string io, record.reason
+    end
+    io.write_bytes pins.size.to_u32, FORMAT
+    pins.each do |pin|
+      write_string io, pin.call
+      io.write_bytes pin.line, FORMAT
+      io.write_bytes pin.column, FORMAT
+      write_string io, pin.reason
     end
     io.to_slice
   end
 
   private def self.decode_spawns(payload : Bytes) : Array(SpawnRecord)
+    decode_spawns_and_pins(payload)[0]
+  end
+
+  private def self.decode_spawns_and_pins(payload : Bytes) : {Array(SpawnRecord), Array(PinRecord)}
     io = IO::Memory.new(payload)
-    Array(SpawnRecord).new(io.read_bytes(UInt32, FORMAT)) do
+    spawns = Array(SpawnRecord).new(io.read_bytes(UInt32, FORMAT)) do
       owner = read_string(io)
       digest = read_string(io)
       line = io.read_bytes(Int32, FORMAT)
       column = io.read_bytes(Int32, FORMAT)
       bits = io.read_bytes(UInt8, FORMAT)
-      SpawnRecord.new(owner, digest, line, column, bits & 1 != 0, bits & 2 != 0, read_string(io))
+      SpawnRecord.new(owner, digest, line, column, bits & 1 != 0, bits & 2 != 0, read_string(io), bits & 4 != 0)
     end
+    pins = Array(PinRecord).new(io.read_bytes(UInt32, FORMAT)) do
+      call = read_string(io)
+      line = io.read_bytes(Int32, FORMAT)
+      column = io.read_bytes(Int32, FORMAT)
+      PinRecord.new(call, line, column, read_string(io))
+    end
+    {spawns, pins}
   end
 
   private def self.encode_reaches(records : Array(ReachRecord)) : Bytes

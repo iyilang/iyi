@@ -1,0 +1,252 @@
+# heap22's compiler side (S3), driven: what a `-Dheap_partitions` build
+# emits so that no pointer crosses from one unit's heap into another's
+# unpublished, one check per mechanism.
+#
+#   ./bin/iyi build -Dheap_partitions -Dheap_verify bench/heap_codegen.iyi
+#   ./heap_codegen              # every check
+#   ./heap_codegen c1           # one
+#   bash bench/heap_codegen.sh  # every check, and the compiler's broken copies
+#
+# - `c1`: a crossing block's closure is a context of its own (C1). The
+#   scope that makes the block also keeps a mutable array in its own
+#   closure; publishing the block's context must leave the array the
+#   unit's. Read before any collection: `IyiHeap.local?`.
+# - `classvar`: a unit stores a graph of its own into a Share class
+#   variable through a call; the store publishes it.
+# - `born_shared`: `Mutex`, `Channel`, `Unit`'s handle, a same-unit task's
+#   fiber and a new unit made in a unit's code are the shared heap's,
+#   through `__iyi_new_shared` (`IyiHeap.owner_of`).
+# - `pin`: a crossing that reaches an owning type that does not keep the
+#   lend protocol runs pinned, in the shared heap; one that keeps it gets
+#   its own heap.
+#
+# Without `-Dheap_partitions` every check passes: that build is the
+# flag-off control.
+
+@[Unsafe("the checks ask the runtime's partition records where a chunk lives, and stand in for a library's owning types")]
+{% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
+  import std/mutex::{Mutex}
+  import std/unit::{Unit}
+
+  def fail(message : String) : Nil
+    print "FAIL: #{message}\n"
+    __iyi_exit(1)
+  end
+
+  class Payload
+    @label : String
+    @next : Payload?
+
+    def initialize(@label : String, @next : Payload?)
+    end
+
+    def label : String
+      @label
+    end
+
+    def next_node : Payload?
+      @next
+    end
+  end
+
+  NODES = 16
+
+  def label_for(seed : Int32, index : Int32) : String
+    "c#{seed}-#{index}-" + "y" * (index % 5 + 2)
+  end
+
+  @[NoInline]
+  def build(seed : Int32) : Payload
+    node = Payload.new(label_for(seed, 0), nil)
+    index = 1
+    while index < NODES
+      node = Payload.new(label_for(seed, index), node)
+      index = index + 1
+    end
+    node
+  end
+
+  # The chain at *node* checked node by node: published or shared, none
+  # the running unit's own.
+  def published(node : Payload?, what : String) : Nil
+    {% if flag?(:heap_partitions) %}
+      index = NODES - 1
+      while node.is_a?(Payload)
+        fail("#{what}: node #{index} is still local to its unit's partition") if IyiHeap.local?(node.object_id)
+        fail("#{what}: node #{index}'s label is still local to its unit's partition") if IyiHeap.local?(node.label.object_id)
+        node = node.next_node
+        index = index - 1
+      end
+    {% end %}
+  end
+
+  def shared_made(address : UInt64, what : String) : Nil
+    {% if flag?(:heap_partitions) %}
+      fail("#{what}: made in partition #{IyiHeap.owner_of(address)}, not the shared heap") if IyiHeap.owner_of(address) != 0_u64
+    {% end %}
+  end
+
+  # The running fiber's partition record: 0 when its unit runs in the
+  # shared heap (pinned, or no partitions).
+  def heap_here : UInt64
+    {% if flag?(:heap_partitions) %}
+      IyiScheduler.current.alloc
+    {% else %}
+      0_u64
+    {% end %}
+  end
+
+  # ── C1: a crossing block's context holds its captures alone ────────────
+  @[NoInline]
+  def launch_c1(g : IyiGroup, go : Channel(Int32), seed : Int32) : Nil
+    payload = build(seed)
+    # A mutable array the scope keeps in its own closure, beside the one
+    # the crossing block captures: a sibling slot (CO 4.3 #8).
+    sibling = [Payload.new(label_for(seed, 99), nil)]
+    keep = -> { sibling << Payload.new(label_for(seed, 98), nil); sibling.size }
+    g.spawn(unit: :new) do
+      go.receive
+      payload.label.bytesize
+    end
+    keep.call
+    published(payload, "c1: the captured chain")
+    {% if flag?(:heap_partitions) %}
+      fail("c1: the scope's own array was published with the crossing block's context") unless IyiHeap.local?(sibling.object_id)
+      fail("c1: the scope's own array's element was published with the crossing block's context") unless IyiHeap.local?(sibling[0].object_id)
+    {% end %}
+  end
+
+  def c1_check : Nil
+    go = Channel(Int32).new(1)
+    group do |outer|
+      outer.spawn(unit: :new) do
+        group do |g|
+          launch_c1(g, go, 41)
+          go.send(1)
+        end
+        0
+      end
+    end
+  end
+
+  # ── A Share class variable a unit stores into ─────────────────────────
+  class Latest
+    @@payload : Payload? = nil
+
+    def self.put(payload : Payload) : Nil
+      @@payload = payload
+    end
+
+    def self.get : Payload?
+      @@payload
+    end
+  end
+
+  @[NoInline]
+  def store_latest(seed : Int32) : Nil
+    Latest.put(build(seed))
+  end
+
+  def classvar_check : Nil
+    group do |g|
+      g.spawn(unit: :new) do
+        store_latest(42)
+        published(Latest.get, "classvar: the stored chain")
+        0
+      end
+    end
+    node = Latest.get
+    fail("classvar: nothing stored") unless node.is_a?(Payload)
+  end
+
+  # ── Trusted types born in the shared heap ─────────────────────────────
+  def born_shared_check : Nil
+    group do |outer|
+      outer.spawn(unit: :new) do
+        m = Mutex.new { 1 }
+        shared_made(m.object_id, "born_shared: the Mutex")
+        ch = Channel(Int32).new(1)
+        shared_made(ch.object_id, "born_shared: the Channel")
+        u = Unit.new { 7 }
+        shared_made(u.object_id, "born_shared: the Unit's handle")
+        group do |g|
+          task = g.spawn(unit: :same) { 3 }
+          shared_made(task.fiber.object_id, "born_shared: a same-unit task's fiber")
+          task.value
+        end
+        0
+      end
+    end
+  end
+
+  # ── Owning types and `lends:` ─────────────────────────────────────────
+  # A library's owning type that does not keep the lend protocol, and one
+  # that does.
+  @[Share(owns: true)]
+  class Pool
+    def initialize
+    end
+
+    def touch : Int32
+      1
+    end
+  end
+
+  @[Share(owns: true, lends: true)]
+  class LentPool
+    def initialize
+    end
+
+    def touch : Int32
+      2
+    end
+  end
+
+  def pin_check : Nil
+    pool = Pool.new
+    lent = LentPool.new
+    group do |g|
+      pinned = g.spawn(unit: :new) do
+        pool.touch
+        heap_here
+      end
+      own = g.spawn(unit: :new) do
+        lent.touch
+        heap_here
+      end
+      {% if flag?(:heap_partitions) %}
+        fail("pin: a crossing reaching an owning type without lends: has a heap of its own (record #{pinned.value})") unless pinned.value == 0_u64
+        fail("pin: a crossing reaching only a lends: owning type runs in the shared heap") if own.value == 0_u64
+      {% else %}
+        pinned.value
+        own.value
+      {% end %}
+    end
+  end
+
+  CHECKS = ["c1", "classvar", "born_shared", "pin"]
+
+  def run(name : String) : Nil
+    case name
+    when "c1"          then c1_check
+    when "classvar"    then classvar_check
+    when "born_shared" then born_shared_check
+    when "pin"         then pin_check
+    else                    fail("no check named #{name}")
+    end
+  end
+
+  IyiWorkers.count = 4
+  arguments = Program.args
+  if arguments.empty?
+    CHECKS.each { |name| run(name) }
+    puts "heap codegen: #{CHECKS.size} mechanisms hold"
+  else
+    arguments.each do |name|
+      run(name)
+      puts "#{name}: holds"
+    end
+  end
+{% else %}
+  puts "heap codegen: no pool on this target, nothing to check"
+{% end %}

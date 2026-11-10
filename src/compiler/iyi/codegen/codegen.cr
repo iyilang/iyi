@@ -1069,9 +1069,13 @@ module Iyi
       # the same answer, and the same reason, as the callees the closure
       # already copies.
       host = @iyi_closure_host
-      the_fun = codegen_fun fun_literal_name, node.def, context.type,
-        fun_module_info: host || @main_module_info, is_fun_literal: true,
-        is_closure: is_closure, iyi_internal: !host.nil?
+      if is_closure && (c1 = iyi_c1_proc(node, fun_literal_name, host))
+        the_fun, ctx_ptr = c1
+      else
+        the_fun = codegen_fun fun_literal_name, node.def, context.type,
+          fun_module_info: host || @main_module_info, is_fun_literal: true,
+          is_closure: is_closure, iyi_internal: !host.nil?
+      end
       the_fun =
         if host
           check_mod_fun host.mod, fun_literal_name, the_fun
@@ -1081,7 +1085,9 @@ module Iyi
 
       set_current_debug_location(node) if @debug.line_numbers?
       fun_ptr = cast_to_void_pointer(the_fun.func)
-      if is_closure
+      if ctx_ptr
+        ctx_ptr = cast_to_void_pointer(ctx_ptr)
+      elsif is_closure
         ctx_ptr = cast_to_void_pointer(context.closure_ptr.not_nil!)
       else
         ctx_ptr = llvm_context.void_pointer.null
@@ -1584,6 +1590,7 @@ module Iyi
       end
 
       assign ptr, target_type, value.type, llvm_value
+      iyi_publish_class_var_store(ptr, target_type, node) if target.is_a?(ClassVar)
 
       false
     end
@@ -2763,8 +2770,9 @@ module Iyi
       else
         pointerful = type.is_a?(InstanceVarContainer) && !type.struct? &&
                      type.all_instance_vars.each_value.any? &.type.has_inner_pointers?
-        if @program.iyi_gc_arena? && (new_fun = iyi_new_fun)
-          # iyi: under the arena a class instance is `__iyi_new`'s: the
+        if @program.iyi_gc_arena? && (new_fun = iyi_born_shared?(type) ? iyi_new_shared_fun : iyi_new_fun)
+          # iyi: under the arena a class instance is `__iyi_new`'s - or,
+          # for a type heap22 has born shared, `__iyi_new_shared`'s: the
           # size, the type id, and whether the object carries the id in a
           # word ahead of it or in its arena's table - the class's
           # `:headed` byte, `gc_layouts.cr` - and whether it is atomic. The

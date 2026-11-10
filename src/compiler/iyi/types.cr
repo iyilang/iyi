@@ -40,6 +40,15 @@ module Iyi
     # travels in an artifact as the same annotation.
     property? iyi_share_owns = false
 
+    # iyi: `@[Share(owns: true, lends: true)]` (heap22, SPEC.md III.4.19):
+    # the owning type keeps the lend protocol - every method that hands its
+    # owned graph to a unit calls `IyiHeap.lend_in(graph)`, and every
+    # hand-back `IyiHeap.lend_out(graph)` - so a unit that reaches it keeps
+    # its own heap. A crossing that reaches an owning type outside std
+    # without it runs pinned, in the shared heap (`pinned: true`). Only
+    # with `owns`, and travels in an artifact on the same annotation.
+    property? iyi_share_lends = false
+
     def initialize(@program : Program)
     end
 

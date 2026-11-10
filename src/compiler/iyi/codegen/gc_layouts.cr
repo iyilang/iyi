@@ -96,6 +96,10 @@ class Iyi::CodeGenVisitor
     # this method keep the same determinism `collect_iyi_layouts` keeps for
     # the `.iyimod` section: the same program yields the same table.
     entries.sort_by! { |_, layout| layout.type_id }
+    # heap22's C1 contexts (`CodeGenVisitor#iyi_c1_proc`): typed with ids
+    # above every type's, so they sort after them.
+    layouts = entries.map { |_, layout| layout }
+    layouts.concat iyi_c1_layouts
 
     # The prelude's `IyiMark` reads the table by walking a base pointer
     # forward; it does not index by type id. So the type id in every entry
@@ -103,9 +107,9 @@ class Iyi::CodeGenVisitor
     # not agree with its sorted type ids, the search still terminates
     # without reading past the end.
     words = [] of UInt64
-    words << entries.size.to_u64
+    words << layouts.size.to_u64
     offset_words = [] of UInt64
-    entries.each do |type, layout|
+    layouts.each do |layout|
       words << layout.type_id.to_u64
       words << layout.alloc_size.to_u64
       words << layout.scan_cap.to_u64

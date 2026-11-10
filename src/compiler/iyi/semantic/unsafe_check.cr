@@ -279,6 +279,14 @@ module Iyi
           note(node, "`#{target.owner}##{target.name}` promises \"#{contract}\", and its caller keeps that promise",
             contract_hint(target), "calls `#{target.name}`, whose caller keeps `#{contract}`")
         end
+        # heap22: `pinned:` says a crossing's unit runs in the shared heap,
+        # which the compiler decides (contract §6); a module that passes it
+        # itself takes that on, so it is unsafe code (SPEC.md III.4.19).
+        if (call = CleanupTransformer.pinnable_call(target)) && node.named_args.try(&.any?(&.name.==("pinned")))
+          note(node, "`pinned:` on `#{call}` runs the block's unit in the shared heap, which the compiler decides",
+            "leave `pinned:` out: the compiler pins a crossing that reaches an owning type without `lends:` (SPEC.md III.4.19), ",
+            "passes `pinned:` to `#{call}`")
+        end
         spawn_reach(node) if CleanupTransformer.spawn_def?(target)
       end
       true

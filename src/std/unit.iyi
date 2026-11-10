@@ -85,9 +85,11 @@ pub class Unit(T) < IyiGroup::Unit(T)
       # Never taken: types the pinned instance the cleanup points a call at when its crossing must run in the shared heap (heap22 `pinned:`).
       return new(pinned: true, &block) if false
       placed = IyiWorkers.parallel? ? POOL : MAIN
-      unit = IyiCross.shared { IyiUnit.new(pinned: pinned || placed == MAIN) }
+      # The unit and the handle are born in the shared heap by codegen
+      # (`__iyi_new_shared`, heap22 rows 4, 14); the value in the unit's.
+      unit = IyiUnit.new(pinned: pinned || placed == MAIN)
       value = IyiHeap.within(unit.heap) { block.call }
-      handle = IyiCross.shared { Unit(U).build(value, unit, placed) }
+      handle = Unit(U).build(value, unit, placed)
       # The handle's value is a root of the unit's partition (R(u)).
       unit.value_slot = pointerof(handle.@value).address
       handle

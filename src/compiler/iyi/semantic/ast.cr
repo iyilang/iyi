@@ -678,6 +678,15 @@ module Iyi
     getter(:break) { Var.new("%break") }
   end
 
+  class ProcLiteral
+    # iyi: the literal is a crossing block's - a parallel unit's, a
+    # thread's, a `@[Share]` def's - in a `-Dheap_partitions` build
+    # (heap22 C1): its closure gets a typed context of its own, holding
+    # only its captures, with no link to the scope's context, so that
+    # publishing it publishes nothing else (`CodeGenVisitor#iyi_c1_context`).
+    property? iyi_crossing = false
+  end
+
   class While
     property break_vars : Array(MetaVars)?
 

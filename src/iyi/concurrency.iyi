@@ -7317,9 +7317,10 @@ class IyiGroup
   private def in_unit(&block : -> T) : IyiTask(T) forall T
     raise "a task spawned on a group whose block has ended: no scope is left to join it" if @ended
     IyiScheduler.make_stacks_with { |fresh| fresh.prepare_stack } unless IyiScheduler.makes_stacks?
-    # Fibers are the shared heap's whatever unit they run (heap22 row 14);
-    # the rest of a same-unit task stays in its unit, since nothing crosses.
-    fiber = IyiCross.shared { IyiFiber.new }
+    # Fibers are the shared heap's whatever unit they run (heap22 row 14),
+    # born there by codegen (`__iyi_new_shared`); the rest of a same-unit
+    # task stays in its unit, since nothing crosses.
+    fiber = IyiFiber.new
     fiber.home = IyiScheduler.state
     fiber.unit = IyiScheduler.current.unit
     {% if flag?(:iyi_chaos) %}
@@ -7375,7 +7376,7 @@ class IyiGroup
         return chaos_task(pinned, &block) if IyiChaos.simulated?
       {% end %}
       IyiCross.publish(block)
-      pooled(IyiCross.shared { IyiUnit.new(pinned: pinned) }, &block)
+      pooled(IyiUnit.new(pinned: pinned), &block)
     end
 
     # A task of *unit* on the pool: a new unit's first, or a `Unit`'s.
@@ -8060,7 +8061,7 @@ class Channel(T)
     if waiter.is_a?(IyiWaiter) && !waiter.linked
       waiter.renew(nonce, slot)
     else
-      waiter = IyiCross.shared { IyiWaiter.new(fiber, nonce, slot) }
+      waiter = IyiWaiter.new(fiber, nonce, slot)
       fiber.spare_waiter = waiter
     end
     waiter.linked = true
@@ -8083,7 +8084,7 @@ class Channel(T)
     if node.is_a?(IyiSendNode(T)) && node.read && !node.linked
       node.renew(fiber, nonce, value)
     else
-      node = IyiCross.shared { IyiSendNode(T).new(fiber, nonce, value) }
+      node = IyiSendNode(T).new(fiber, nonce, value)
       @spare_send = node
     end
     node.read = false

@@ -713,6 +713,14 @@
   end
 
   # ── Row 14: a crossing task's glue (task, box, install closure, unit) ──
+  # The unit *fiber* runs, the shared heap's, checked from a frame of its
+  # own, which the collection that follows finds scrubbed.
+  @[NoInline]
+  def unit_shared(fiber : IyiFiber, what : String) : Nil
+    unit = fiber.unit
+    shared_made(unit.object_id, what) if unit.is_a?(IyiUnit)
+  end
+
   def glue_check : Nil
     go = Channel(Int32).new(1)
     group do |outer|
@@ -723,7 +731,7 @@
             label_for(24, 1)
           end
           shared_made(task.object_id, "glue: the task")
-          shared_made(task.fiber.unit.object_id, "glue: the unit")
+          unit_shared(task.fiber, "glue: the unit")
           collect_here
           go.send(1)
           got = task.value

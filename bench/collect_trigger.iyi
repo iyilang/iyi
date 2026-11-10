@@ -12,6 +12,13 @@
 # that never crosses a MiB never collects at all. Every check below is that
 # sentence, measured.
 #
+# Built with `-Dheap_partitions` the shared heap's budget is twice what
+# survived outside the partitions, floored at `IyiHeap::SHARED_MIN` (8 MiB)
+# whatever the threads (heap22, design section 4.2): the budget step
+# roots 16 MiB rather than 4 to lift it off that floor, and the floor
+# step checks the floor is the same for four allocating threads as for
+# none.
+#
 # Everything here needs the collector's allocator, the default on POSIX.
 # Built with `-Dgc_none` or `-Dgc_boehm` the program says so in
 # one line and exits 0.
@@ -126,6 +133,17 @@
     Held.keep = head
   end
 
+  # Reads the spike's root back and drops it, in a frame of its own for
+  # `spike_peak`'s reason: a root read in the frame that churns next
+  # stays in a register the conservative scan finds. Answers whether
+  # the root was still there.
+  @[NoInline]
+  def drop_spike : Bool
+    held = Held.keep != 0_u64
+    Held.keep = 0_u64
+    held
+  end
+
   # Builds the spike, collects with it rooted, reads the root back and the
   # arena count, and drops the root: `[peak, arenas_released before]`.
   # Read the root back, for the reason the sweep exercise gives: a global
@@ -235,18 +253,42 @@
   # same 64 MiB again: what survived doubled into the budget, so the same
   # garbage buys fewer collections. The factor-two margin keeps the check
   # about the mechanism rather than about rounding.
-  ballast = Pointer(UInt8).malloc(4194304_u64)
-  ballast.value = 9_u8
-  IyiMark.collect
-  after_reset = IyiMark.collections
-  churn(67108864_u64)
-  IyiMark.settle
-  second_wave = IyiMark.collections - after_reset
-  if second_wave * 2_u64 >= first_wave
-    raise "budget: #{count(second_wave)} collections against a 4 MiB live set, #{count(first_wave)} against none, so the budget is not growing with what survives"
-  end
-  (ballast + 4194303_i64).value = 9_u8
-  puts "    budget: the same churn ran #{count(second_wave)} collections with 4 MiB live where it ran #{count(first_wave)} with none, budget now #{count(IyiMark.budget)} bytes"
+  {% if flag?(:heap_partitions) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
+    # Partitions (heap22, design section 4.2): the budget is twice what
+    # survived outside the partitions, floored at `IyiHeap::SHARED_MIN`
+    # (8 MiB), not at a MiB a thread. The first wave ran against that
+    # floor, and a 4 MiB live set doubles to the floor itself, so the
+    # ballast is 16 MiB: twice it is four times the floor, and the same
+    # churn has to buy at most half the collections. It is the spike's
+    # chain, rooted in the global alone and dropped after the check in a
+    # frame of its own (`drop_spike`), so the steps below run against the
+    # floor again: step 7's twenty MB of threads must cross it.
+    build_spike(1024_u64)
+    IyiMark.collect
+    after_reset = IyiMark.collections
+    churn(67108864_u64)
+    IyiMark.settle
+    second_wave = IyiMark.collections - after_reset
+    if second_wave * 2_u64 >= first_wave
+      raise "budget: #{count(second_wave)} collections against a 16 MiB live set, #{count(first_wave)} against none, so the budget is not growing with what survives"
+    end
+    grown_budget = IyiMark.budget
+    raise "budget: the ballast's root was lost" unless drop_spike
+    puts "    budget: the same churn ran #{count(second_wave)} collections with 16 MiB live where it ran #{count(first_wave)} with none, the budget #{count(grown_budget)} bytes against the shared floor's #{count(IyiHeap::SHARED_MIN)}"
+  {% else %}
+    ballast = Pointer(UInt8).malloc(4194304_u64)
+    ballast.value = 9_u8
+    IyiMark.collect
+    after_reset = IyiMark.collections
+    churn(67108864_u64)
+    IyiMark.settle
+    second_wave = IyiMark.collections - after_reset
+    if second_wave * 2_u64 >= first_wave
+      raise "budget: #{count(second_wave)} collections against a 4 MiB live set, #{count(first_wave)} against none, so the budget is not growing with what survives"
+    end
+    (ballast + 4194303_i64).value = 9_u8
+    puts "    budget: the same churn ran #{count(second_wave)} collections with 4 MiB live where it ran #{count(first_wave)} with none, budget now #{count(IyiMark.budget)} bytes"
+  {% end %}
 
   # 3b. The scheduler's own state lives through the churn, rooted by the
   # global list (1b); the thread-local names the same object after it, and
@@ -480,13 +522,35 @@
     registered = IyiThread.program_threads
     let_go.add(1_u64)
     together.each { |thread| thread.join }
-    if budget_busy < busy_floor
-      raise "floor: ten collections while four threads allocated, #{count(threads_now)} registered, left a #{count(budget_busy)}-byte budget at the most, under #{count(busy_floor)}, so the floor does not grow with the threads"
-    end
-    if budget_idle >= IyiMark::MIN_BUDGET * registered
-      raise "floor: a collection with #{count(registered)} threads registered and none of them allocating left a #{count(budget_idle)}-byte budget, so threads that allocate nothing raise the floor"
-    end
-    puts "    floor: four threads allocating, the budget #{count(budget_busy)} bytes; #{count(registered)} registered and idle, #{count(budget_idle)}"
+    {% if flag?(:heap_partitions) %}
+      # Partitions (heap22, design section 4.2): the shared floor is
+      # `IyiHeap::SHARED_MIN` whatever the threads - lock blocks allocate
+      # in the shared heap on every worker, and a floor a thread would
+      # count every one of them again. The four threads here are
+      # `IyiThread`s, which allocate in the shared heap and feed the
+      # trigger as they did, so the busy budgets stand on the floor and
+      # under three times it: four threads' floor would be four times
+      # it, and the three a 3-core machine lets churn at once three
+      # times. Idle, with a few KB live, the budget is the floor exactly.
+      if budget_busy < IyiHeap::SHARED_MIN
+        raise "floor: ten collections while four threads allocated left a #{count(budget_busy)}-byte budget at the most, under the shared floor's #{count(IyiHeap::SHARED_MIN)}"
+      end
+      if budget_busy >= IyiHeap::SHARED_MIN * 3_u64
+        raise "floor: ten collections while four threads allocated, #{count(threads_now)} registered, left a #{count(budget_busy)}-byte budget at the most, so the shared floor grows with the threads"
+      end
+      if budget_idle != IyiHeap::SHARED_MIN
+        raise "floor: a collection with #{count(registered)} threads registered, none of them allocating and a few KB live, left a #{count(budget_idle)}-byte budget, not the shared floor's #{count(IyiHeap::SHARED_MIN)}"
+      end
+      puts "    floor: four threads allocating, the budget #{count(budget_busy)} bytes at the most; #{count(registered)} registered and idle, #{count(budget_idle)}: the shared floor whatever the threads"
+    {% else %}
+      if budget_busy < busy_floor
+        raise "floor: ten collections while four threads allocated, #{count(threads_now)} registered, left a #{count(budget_busy)}-byte budget at the most, under #{count(busy_floor)}, so the floor does not grow with the threads"
+      end
+      if budget_idle >= IyiMark::MIN_BUDGET * registered
+        raise "floor: a collection with #{count(registered)} threads registered and none of them allocating left a #{count(budget_idle)}-byte budget, so threads that allocate nothing raise the floor"
+      end
+      puts "    floor: four threads allocating, the budget #{count(budget_busy)} bytes; #{count(registered)} registered and idle, #{count(budget_idle)}"
+    {% end %}
   {% end %}
 
   puts "    all trigger checks passed"

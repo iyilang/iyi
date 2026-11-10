@@ -43,8 +43,11 @@
 class IyiHeap
   # ── Granules, tables, states ──────────────────────────────────────────
 
-  # Ownership is per granule: 4 KiB in slice S1, every platform.
-  GRANULE_SHIFT = 12_u64
+  # Ownership is per granule: 1 KiB from slice S1b, every platform (4 KiB
+  # in S1). A class's first run in a partition is the least whole number
+  # of granules that holds a chunk, so an idle unit holds about 1 KiB per
+  # small class it touched (design section 5.2).
+  GRANULE_SHIFT = 10_u64
 
   # The arena header's words for partition arenas (contract section 3):
   # byte offsets from the arena's base of the owner table (16 bits per
@@ -150,6 +153,13 @@ class IyiHeap
   @@park_off : Bool = false
   @@returned : UInt64 = 0_u64
   @@large_freed : UInt64 = 0_u64
+  @@pauses : UInt64 = 0_u64
+  @@pause_ring : UInt64 = 0_u64
+
+  # The last `PAUSE_RING` local collections' durations in ns, a ring
+  # mapped at the first (S1b's pause distribution, read by
+  # bench/heap_local_cost): `local_pauses` counts every one.
+  PAUSE_RING = 65536_u64
 
   # The thread's scratch page for the local mark and the publication
   # walk: a stack of chunk bases mapped beside it, its capacity and
@@ -206,6 +216,34 @@ class IyiHeap
 
   def self.local_max_ns : UInt64
     @@local_max_ns
+  end
+
+  def self.local_pauses : UInt64
+    @@pauses
+  end
+
+  # The duration of local collection *k* (from 0), in ns, while it is one
+  # of the ring's last `PAUSE_RING`; 0 otherwise.
+  def self.local_pause(k : UInt64) : UInt64
+    ring = @@pause_ring
+    return 0_u64 if ring == 0 || k >= @@pauses || @@pauses - k > PAUSE_RING
+    read64(ring + (k & (PAUSE_RING - 1_u64)) * 8_u64)
+  end
+
+  def self.note_pause(took : UInt64) : Nil
+    ring = @@pause_ring
+    if ring == 0
+      fresh = __iyi_mmap(PAUSE_RING * 8_u64).address
+      word = Pointer(Atomic(UInt64)).new(pointerof(@@pause_ring).address)
+      if word.value.compare_and_set(0_u64, fresh)[1]
+        ring = fresh
+      else
+        __iyi_munmap(fresh, PAUSE_RING * 8_u64)
+        ring = word.value.get
+      end
+    end
+    k = Pointer(Atomic(UInt64)).new(pointerof(@@pauses).address).value.add(1_u64)
+    write64(ring + (k & (PAUSE_RING - 1_u64)) * 8_u64, took)
   end
 
   def self.local_aborts : UInt64
@@ -1265,7 +1303,7 @@ class IyiHeap
   def self.collect_local(record : UInt64) : Nil
     fiber = IyiScheduler.current
     IyiRoots.fatal("iyi: collect_local of a partition the running fiber does not allocate in\n") if record == 0 || fiber.alloc != record
-    local_collect(record, fiber, false)
+    local_collect(record, fiber, false, false)
   end
 
   # A slice's worth allocated in partition *record* (`slice_full`): its
@@ -1289,7 +1327,7 @@ class IyiHeap
     return unless fiber.is_a?(IyiFiber) && fiber.alloc == record
     unit = fiber.unit
     return unless unit.is_a?(IyiUnit) && unit.heap == record
-    local_collect(record, fiber, false)
+    local_collect(record, fiber, false, false)
   end
 
   def self.budget_of(record : UInt64) : UInt64
@@ -1310,7 +1348,7 @@ class IyiHeap
     return unless fiber.is_a?(IyiFiber) && fiber.alloc == record
     unit = fiber.unit
     return unless unit.is_a?(IyiUnit) && unit.heap == record
-    local_collect(record, fiber, false)
+    local_collect(record, fiber, false, true)
   end
 
   # The callee-saved registers into *buffer*, `IyiRoots.spill_registers`'s
@@ -1345,27 +1383,29 @@ class IyiHeap
 
   # One local collection of partition *record*, on this thread, which
   # holds its unit's token: *running* is the fiber of the unit on this
-  # stack, nil for an idle worker's takeover. None starts while a mark
-  # runs beside the program, nor on a partition a pointer answer
-  # detached: the task's box, which is the shared heap's and no root of a
-  # local mark, holds the answer from then on, so only the global
-  # collection may free what it reaches. A stop asked while it marks ends
-  # it, nothing swept, and the parity it began leaves at most retention.
-  # Answers whether it swept.
+  # stack, nil for an idle worker's takeover. *idle* (at a park, or a
+  # takeover) gives back even a class's last run when nothing on it is
+  # live. None starts while a mark runs beside the program, nor on a
+  # partition a pointer answer detached: the task's box, which is the
+  # shared heap's and no root of a local mark, holds the answer from
+  # then on, so only the global collection may free what it reaches. A
+  # stop asked while it marks ends it, nothing swept, and the parity it
+  # began leaves at most retention. Answers whether it swept.
   @[NoInline]
-  def self.local_collect(record : UInt64, running : IyiFiber?, takeover : Bool) : Bool
+  def self.local_collect(record : UInt64, running : IyiFiber?, takeover : Bool, idle : Bool) : Bool
     return false if LibIyiGCTable.__iyi_marking != 0_u8
     return false if read64(record &+ REC_STATE) & REC_DETACHED != 0
     registers = uninitialized UInt64[12]
     spill_into(pointerof(registers).address)
     enter_barrier
     began = IyiMark.now_ns
-    swept = local_collect_in(record, running)
+    swept = local_collect_in(record, running, idle)
     took = IyiMark.now_ns - began
     leave_barrier
     if swept
       stat_add(pointerof(@@local_collections).address, 1_u64)
       stat_add(pointerof(@@local_ns).address, took)
+      note_pause(took)
       seen = Pointer(Atomic(UInt64)).new(pointerof(@@local_max_ns).address)
       while (prior = seen.value.get) < took
         break if seen.value.compare_and_set(prior, took)[1]
@@ -1380,7 +1420,7 @@ class IyiHeap
     swept
   end
 
-  def self.local_collect_in(record : UInt64, running : IyiFiber?) : Bool
+  def self.local_collect_in(record : UInt64, running : IyiFiber?, idle : Bool) : Bool
     id = read64(record &+ REC_ID)
     epoch = IyiMark.epoch
     parity = read64(record &+ REC_PARITY) == 2_u64 ? 4_u64 : 2_u64
@@ -1454,7 +1494,7 @@ class IyiHeap
     # one - may have begun a mark beside the program or turned the epoch:
     # nothing is swept against a collection the mark did not see whole.
     return false if IyiMark.epoch != epoch || LibIyiGCTable.__iyi_marking != 0_u8
-    local_sweep(record, id, parity)
+    local_sweep(record, id, parity, idle)
   end
 
   def self.local_range(record : UInt64, id : UInt64, parity : UInt64, low : UInt64, high : UInt64) : Nil
@@ -1582,11 +1622,13 @@ class IyiHeap
   # lock with no global slice on its arenas: every run walked, its free
   # and its dead chunks - `LOCAL`, without this parity - its new list, its
   # published ones counted, an empty run back to the pool unless it is
-  # the class's last; the return stack dropped, its chunks being free and
-  # found by the walk. Then the large objects and the weak cells, and the
-  # accounts. A stop asked between two classes ends it: what is swept is
-  # whole, and the rest waits for the next one.
-  def self.local_sweep(record : UInt64, id : UInt64, parity : UInt64) : Bool
+  # the class's last and the unit is not *idle* (between two requests,
+  # an idle unit holds runs only where something lives); the return
+  # stack dropped, its chunks being free and found by the walk. Then the
+  # large objects and the weak cells, and the accounts. A stop asked
+  # between two classes ends it: what is swept is whole, and the rest
+  # waits for the next one.
+  def self.local_sweep(record : UInt64, id : UInt64, parity : UInt64, idle : Bool) : Bool
     table = Pointer(UInt64).new(record)
     kept_bytes = 0_u64
     freed = 0_u64
@@ -1609,8 +1651,9 @@ class IyiHeap
           following = word & RUN_LINK
           swept = sweep_run(arena, run, n, parity, list)
           live = swept[0]
-          if live == 0 && (following != 0 || previous != 0)
-            # Empty, and not the class's last: to the pool, unlinked.
+          if live == 0 && (idle || following != 0 || previous != 0)
+            # Empty, and not the class's last or the unit idle: to the
+            # pool, unlinked.
             if previous == 0
               write64(runs, following)
             else
@@ -2277,7 +2320,7 @@ class IyiHeap
     return false if found == 0
     unit = Pointer(Void).new(unit_address).as(IyiUnit)
     st.unit = unit
-    local_collect(found, nil, true)
+    local_collect(found, nil, true, true)
     Pointer(Atomic(UInt64)).new(found + REC_STATE).value.sub(REC_BUSY)
     IyiScheduler.release_unit(st)
     true

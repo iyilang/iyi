@@ -33,6 +33,9 @@
 #   allocates; the chunk still holds what the main thread wrote in it.
 # - `filter:` a unit's local collection with another unit's object
 #   address on its stack leaves that object's `OWN` byte as it was.
+# - `stale:` a dead unit's object, on a run that went to the pool whole,
+#   named by a word in a class variable: the 4 MB string it held, which
+#   the unit published, is freed by the next collections.
 # - `return:` with local collections off, a unit's garbage is freed by
 #   global collections alone and comes back to it: the runs it holds stay
 #   bounded and the return stacks hand chunks back.
@@ -43,6 +46,9 @@
 #   back whole across local collections, dropped ones are unmapped.
 # - `takeover:` units parked with debt are collected by idle workers after
 #   a global collection, their lists whole after.
+# - `construct:` a unit with no fiber and no value slot - a `Unit`'s value
+#   being built by `Unit.new` on its caller's fiber - in debt after a
+#   global collection is taken by no idle worker; the list reads whole.
 # - `inflight:` a unit that allocates past its budget without parking is
 #   collected in flight, its live list whole.
 # - `abandon:` a unit's local mark is abandoned 256 objects into its
@@ -53,6 +59,8 @@
 
 @[Unsafe("the checks read freed chunks, weak cells and large blocks through raw pointers, and hand a shared-heap address to free, to see what the partitions did with them")]
 {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
+  import std/unit::{Unit}
+
   def fail(message : String) : Nil
     print "FAIL: #{message}\n"
     __iyi_exit(1)
@@ -515,6 +523,61 @@
     Holder.kept = nil
   end
 
+  # ── stale ─────────────────────────────────────────────────────────────
+
+  # A unit's object holding a 4 MB string it published: the unit dies
+  # with nothing else published, so the object's run goes to the pool
+  # whole and the string to the shared heap. A word in a class variable
+  # then names the dead object - a stale word, as a register or a frame
+  # can leave - and a collection must free the string: the object's chunk
+  # reads free, so the word is no pointer (design section 2.3). A pooled
+  # chunk left carved kept a dead select's 64 MB string in
+  # bench/concurrency_exercise (tmac, tssh).
+  class Wrap
+    getter text : String
+
+    def initialize(@text : String)
+    end
+  end
+
+  class Stale
+    @@word = 0_u64
+
+    def self.word=(word : UInt64) : UInt64
+      @@word = word
+    end
+  end
+
+  def stale_task : Tuple(UInt64, UInt64)
+    text = "s" * 4000000
+    IyiHeap.publish(text.object_id)
+    wrap = Wrap.new(text)
+    {hide(wrap.object_id), hide(text.object_id)}
+  end
+
+  # Whether the large object at a hidden address is still mapped.
+  @[NoInline]
+  def large_alive?(hidden : UInt64) : Bool
+    IyiHeap.containing_large(Pointer(Void).new(hide(hidden))) != 0_u64
+  end
+
+  def stale_check : Nil
+    hidden = {0_u64, 0_u64}
+    group do |g|
+      handle = g.spawn(unit: :new) { stale_task }
+      value = handle.value
+      fail("stale: the unit answered #{value}") unless value.is_a?(Tuple(UInt64, UInt64))
+      hidden = value
+    end
+    settle("stale")
+    Stale.word = hide(hidden[0])
+    IyiMark.collect
+    IyiMark.collect
+    kept = large_alive?(hidden[1])
+    Stale.word = 0_u64
+    fail("stale: a word naming a dead unit's object kept the 4 MB string it held through two collections") if kept
+  end
+
   # ── free ──────────────────────────────────────────────────────────────
 
   def free_task(address : UInt64) : Int64
@@ -559,10 +622,19 @@
     group do |g|
       b = g.spawn(unit: :new) do
         mine = Node.new(31337_i64, nil)
+        record = IyiHeap.current_record
+        collections = IyiHeap.partition_collections(record)
         before = IyiHeap.own_flags(mine.object_id)
         to_a.send(mine.object_id)
         to_b.receive
         after = IyiHeap.own_flags(mine.object_id)
+        # B's own collections meanwhile - a chaos build's `IYI_HEAP_STRESS`
+        # runs one at every point - mark `mine` with B's parity: only the
+        # local-mark bits may move then, and to B's own parity.
+        if IyiHeap.partition_collections(record) != collections
+          rest = 0xFF_u64 ^ IyiHeap::OWN_LMARK
+          before = (before & rest) | IyiHeap.read64(record + IyiHeap::REC_PARITY) if after & rest == before & rest
+        end
         mine.intact?(31337_i64) ? (after == before ? 0_i64 : after.to_i64 * 1000_i64 + before.to_i64 + 1_i64) : -1_i64
       end
       a = g.spawn(unit: :new) do
@@ -759,6 +831,54 @@
     IyiHeap.collect_every_park = true
   end
 
+  # ── construct ─────────────────────────────────────────────────────────
+
+  # A `Unit`'s value under construction (`Unit.new` builds it in the
+  # unit's partition with `IyiHeap.within`): this fiber is no fiber of
+  # the unit and holds no token, and its stack is the list's only root.
+  # The debt is past a quarter of the budget and a global collection arms
+  # the takeover; idle workers are woken until one takes a unit or 300
+  # tries pass. None may take this one. Its partition dies by the hook
+  # `IyiScheduler.unregister` calls, as a `Unit`'s does once its handle
+  # is gone.
+  def construct_check : Nil
+    IyiHeap.park_collections_off = true
+    IyiHeap.collect_every_park = false
+    takeovers = IyiHeap.takeovers
+    unit = IyiHeap.shared { IyiUnit.new }
+    record = unit.heap
+    fail("construct: the unit has no partition") if record == 0_u64
+    wrong = IyiHeap.within(record) do
+      base = 9000000000_i64
+      keep = build(base, 300, 0)
+      junk : Node? = nil
+      i = 0
+      while i < 6000
+        junk = Node.new(i.to_i64, i % 50 == 0 ? nil : junk)
+        i = i + 1
+      end
+      junk = nil
+      IyiMark.collect
+      waited = 0
+      group do |g|
+        while IyiHeap.takeovers == takeovers && waited < 300
+          g.spawn(unit: :new) { 0_i64 }.value
+          sleep(1)
+          waited = waited + 1
+        end
+      end
+      broken(keep, base, 300)
+    end
+    fail("construct: an idle worker collected a unit whose value was being built, and #{wrong} nodes of it read wrong") if wrong != 0_i64
+    fail("construct: an idle worker took a unit with no fiber and no value slot") if IyiHeap.takeovers != takeovers
+    IyiRuntimeLock.lock
+    unit.heap = 0_u64
+    IyiRuntimeLock.unlock
+    IyiHeap.unit_died(record)
+    IyiHeap.park_collections_off = false
+    IyiHeap.collect_every_park = true
+  end
+
   # ── inflight ──────────────────────────────────────────────────────────
 
   def inflight_task : Int64
@@ -800,6 +920,7 @@
   # a real stop abandons local marks in any check that collects.
   abandon_check
   filter_check
+  stale_check
   free_check
   return_check
   answer_check(workers)
@@ -811,6 +932,7 @@
   weak_check
   large_check
   takeover_check(workers)
+  construct_check
   inflight_check
   settle("death")
   if quiet

@@ -718,9 +718,9 @@ class IyiHeap
   end
 
   # Every chunk of a run, free, white, local and this epoch's, linked in
-  # address order ahead of the class's list. A pool run's chunks wear
-  # whatever their last owner left - a unit freed whole stamps nothing -
-  # so every byte of each is written here.
+  # address order ahead of the class's list. A pool run's chunks are free
+  # but wear whatever else their last owner left - epochs, `OWN` bytes,
+  # links - so every byte of each is written here.
   def self.thread_run(table : Pointer(UInt64), index : Int32, arena : UInt64, run : UInt64, n : UInt64) : Nil
     chunk = read64(arena + OFF_CHUNK)
     first = arena_first(arena)
@@ -1409,8 +1409,19 @@ class IyiHeap
   def self.local_collect(record : UInt64, running : IyiFiber?, takeover : Bool, idle : Bool) : Bool
     return false if LibIyiGCTable.__iyi_marking != 0_u8
     return false if read64(record &+ REC_STATE) & REC_DETACHED != 0
+    # Zeroed first: x86-64's spill writes 6 of the 12 words (8 on
+    # Windows), and the rest held whatever an earlier frame left there,
+    # which the stack scan below read as roots - a stale word in
+    # `registers[10]` kept heap_local's poison node in 10 of 10 runs
+    # (HHeapLead3.GMark, Linux, release, with round 1's bench layout).
     registers = uninitialized UInt64[12]
-    spill_into(pointerof(registers).address)
+    words = Pointer(UInt64).new(pointerof(registers).address)
+    k = 0
+    while k < 12
+      words[k] = 0_u64
+      k = k + 1
+    end
+    spill_into(words.address)
     enter_barrier
     began = IyiMark.now_ns
     swept = local_collect_in(record, running, idle)
@@ -2060,14 +2071,19 @@ class IyiHeap
             published = published + pub_count_at(arena, granule_first + k)
             k = k + 1_u64
           end
+          # The dead unit's `LOCAL` chunks free where they lie, on a run
+          # going to the pool as on one handed to the shared heap: a
+          # pooled chunk left carved and not free is a live object to a
+          # stale word (`IyiRoots.base_of`), whose mark then reads its old
+          # fields and keeps what they name - a dead select's send action
+          # kept the 64 MB string its send never delivered (61 MiB kept,
+          # bench/concurrency_exercise on tmac and tssh, release). Design
+          # section 2.3: a stale word is rejected because the chunk is free.
+          free_locals_in(arena, run, n)
           if published == 0
-            {% if flag?(:heap_verify) %}
-              free_locals_in(arena, run, n)
-            {% end %}
             pool_run(index, arena, run, n)
             stat_add(pointerof(@@freed_whole).address, 1_u64)
           else
-            free_locals_in(arena, run, n)
             drain_run(arena, run, n)
           end
           run = following
@@ -2369,7 +2385,11 @@ class IyiHeap
   # collected on the worker's own fiber with nothing installed, and the
   # token given back, the fibers that waited for it onto this worker's
   # ring. Answers whether it collected one; disarmed once a look finds
-  # none.
+  # none. A unit with neither a fiber nor a value slot is passed over: a
+  # `Unit` whose value `Unit.new` is still building on its caller's
+  # fiber (`IyiHeap.within`), which holds no token and is no fiber of
+  # the unit - that stack, the value's only root, is no root of this
+  # collection, and the caller allocates in the record meanwhile.
   def self.take_over_idle(st : IyiSchedulerState) : Bool
     reap_dead_partitions if @@dead_queued != 0
     return false if @@takeover_armed == 0 || @@local_off || LibIyiGCTable.__iyi_marking != 0_u8
@@ -2381,7 +2401,7 @@ class IyiHeap
         address = read64(record + REC_UNIT)
         if address != 0 && read64(record + REC_DEBT) &* 4_u64 >= budget_of(record)
           unit = Pointer(Void).new(address).as(IyiUnit)
-          if unit.holder == 0_u64 && unit.take(st.object_id)
+          if (unit.fibers.is_a?(IyiFiber) || unit.value_slot != 0_u64) && unit.holder == 0_u64 && unit.take(st.object_id)
             found = record
             unit_address = address
             write64(record + REC_STATE, read64(record + REC_STATE) | REC_BUSY)

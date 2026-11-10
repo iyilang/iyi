@@ -8,8 +8,10 @@
 # as a store into the box, a partition that answer detached still
 # collected locally, a death that frees a pinned unit's partition,
 # a local mark blind to the unit's other fibers, a local sweep that
-# leaves a weak cell naming the chunk it freed, and a local mark that
-# trusts the parities a mark abandoned part way left. Last, the same
+# leaves a weak cell naming the chunk it freed, a local mark that trusts
+# the parities a mark abandoned part way left, an idle takeover of a unit
+# whose `Unit` value is still being built, and a dead unit's pooled run
+# left carved for a stale word to keep. Last, the same
 # program cross-compiled to an object for each of the nine targets the
 # README names, with the flag and without it: a hook the prelude compiles
 # on a target where heap_partition.iyi is not loaded fails there.
@@ -164,13 +166,29 @@ if [ "$PART" = all ] || [ "$PART" = broken ]; then
   prove_fails "an abandoned mark's parities trusted" noclear "abandon:" \
     '{ if ($0 ~ /^    clear_local_marks\(record\) if read64\(record &\+ REC_MARKING\) != 0_u64$/) { found = 1; next } print } END { if (!found) exit 3 }' \
     heap_partition.iyi
+
+  # An idle worker's takeover that takes a unit with no fiber and no
+  # value slot: a `Unit` whose value is still being built on its caller's
+  # fiber is collected with that stack unread.
+  prove_fails "a takeover of a unit under construction" noconstruct "construct:" \
+    '{ if (sub(/if \(unit\.fibers\.is_a\?\(IyiFiber\) \|\| unit\.value_slot != 0_u64\) && unit\.holder == 0_u64/, "if unit.holder == 0_u64")) found = 1; print } END { if (!found) exit 3 }' \
+    heap_partition.iyi
+
+  # A run of a dead unit to the pool with its `LOCAL` chunks left carved:
+  # a stale word naming one is a pointer to the global mark, which keeps
+  # what the dead chunk names.
+  prove_fails "a pooled run's dead chunks left carved" nostale "stale:" \
+    '/^          free_locals_in\(arena, run, n\)$/ { found = found + 1; next } /^            drain_run\(arena, run, n\)$/ { print "            free_locals_in(arena, run, n)"; found = found + 1 } { print } END { if (found != 2) exit 3 }' \
+    heap_partition.iyi
 fi
 
 # The nine targets, each to an object (`--cross-compile` links nothing),
-# flag on and off. x86_64-darwin and arm-linux-gnueabihf have no scheduler
-# and wasm32-wasi no threads: there heap_partition.iyi is not loaded, and
-# a prelude hook that called into it was "undefined method
-# 'partition_slice'" on x86_64-darwin with the flag.
+# flag on and off. x86_64-darwin has no scheduler and wasm32-wasi no
+# threads: there heap_partition.iyi is not loaded, and a prelude hook that
+# called into it was "undefined method 'partition_slice'" on x86_64-darwin
+# with the flag (9539ec448, Linux). arm-linux-gnueabihf has no prelude
+# branch, so an iyi program is refused there by name, flag or no flag; the
+# check is that the flag adds no other error.
 if [ "$PART" = all ] || [ "$PART" = cross ]; then
   echo
   echo "== the program cross-compiled for every target, flag on and off"
@@ -179,20 +197,37 @@ if [ "$PART" = all ] || [ "$PART" = cross ]; then
                 x86_64-w64-mingw32 x86_64-windows-msvc wasm32-wasi; do
     for flags in "" "-Dheap_partitions"; do
       out="$WORK/cross-$target${flags:+-on}"
+      label="$(printf '%-22s %s' "$target" "${flags:-(no flag)}")"
       # shellcheck disable=SC2086
-      if ! "$IYI" build --cross-compile --target "$target" $flags \
+      if "$IYI" build --cross-compile --target "$target" $flags \
            -o "$out" "$REPO/bench/heap_local.iyi" >"$out.log" 2>&1; then
-        echo "  $target ${flags:-(no flag)}: cross-compile failed"
+        built=1
+      else
+        built=0
+      fi
+      if [ "$target" = arm-linux-gnueabihf ]; then
+        if [ "$built" -eq 0 ] && [ "$(grep -c '^Error: ' "$out.log")" -eq 1 ] &&
+           grep -q "^Error: iyi: this target is not one iyi's prelude has platform bindings for" "$out.log"; then
+          echo "  $label: refused by name, and nothing else"
+        else
+          echo "  $label: not the prelude's one refusal"
+          sed -n '1,12p' "$out.log"
+          status=1
+        fi
+        continue
+      fi
+      if [ "$built" -eq 0 ]; then
+        echo "  $label: cross-compile failed"
         sed -n '1,12p' "$out.log"
         status=1
         continue
       fi
       if [ ! -f "$out.o" ] && [ ! -f "$out.obj" ] && [ ! -f "$out.wasm" ]; then
-        echo "  $target ${flags:-(no flag)}: no object was written"
+        echo "  $label: no object was written"
         status=1
         continue
       fi
-      printf '  %-22s %s: an object\n' "$target" "${flags:-(no flag)}"
+      echo "  $label: an object"
     done
   done
 fi

@@ -972,12 +972,17 @@ class IyiUnit
   property deferred_head : IyiFiber?
   property deferred_tail : IyiFiber?
   # The partition record its fibers allocate in (heap22), 0 for the shared
-  # heap - which is every unit's in this tree: nothing sets it yet.
+  # heap: a pool unit's own under `-Dheap_partitions` unless it is made
+  # pinned, and 0 again once it is pinned or dead.
   property heap : UInt64
   # Its live fibers, linked when they join the registry and unlinked when
   # they leave it (`IyiScheduler.register`), under the runtime lock: what a
   # collection of the unit's partition alone scans for stacks.
   property fibers : IyiFiber?
+  # A `Unit`'s unit: the address of the handle's value slot, which its
+  # partition's local collection roots, and while the handle lives the
+  # partition outlives the unit's fibers (heap22, std/unit). 0 otherwise.
+  property value_slot : UInt64
 
   # *pinned*: the unit allocates in the shared heap for its whole life
   # (a crossing the compiler could not prove, heap22's `pinned:`).
@@ -988,6 +993,14 @@ class IyiUnit
     @deferred_tail = nil
     @heap = 0_u64
     @fibers = nil
+    @value_slot = 0_u64
+    {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) %}
+      unless pinned
+        record = IyiHeap.partition_new
+        IyiHeap.write64(record + IyiHeap::REC_UNIT, self.object_id)
+        @heap = record
+      end
+    {% end %}
   end
 
   # Its live fibers, counted under the runtime lock.
@@ -1928,6 +1941,9 @@ class IyiScheduler
   end
 
   def self.unregister(fiber : IyiFiber) : Nil
+    {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) %}
+      dead = 0_u64
+    {% end %}
     IyiRuntimeLock.lock
     following = fiber.next_fiber
     previous = fiber.prev_fiber
@@ -1952,8 +1968,22 @@ class IyiScheduler
       after.prev_in_unit = before if after.is_a?(IyiFiber)
       fiber.next_in_unit = nil
       fiber.prev_in_unit = nil
+      # The unit's death (heap22 S1, design section 4.4): its last fiber
+      # gone and no `Unit`'s handle holding it, nothing will allocate in
+      # its partition again. The partition is taken off the unit under the
+      # lock, so an idle worker's takeover never finds it, and freed after.
+      {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) %}
+        if !unit.fibers.is_a?(IyiFiber) && unit.heap != 0_u64 && unit.value_slot == 0_u64
+          dead = unit.heap
+          unit.heap = 0_u64
+          IyiHeap.write64(dead + IyiHeap::REC_UNIT, 0_u64)
+        end
+      {% end %}
     end
     IyiRuntimeLock.unlock
+    {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) %}
+      IyiHeap.unit_died(dead) if dead != 0_u64
+    {% end %}
   end
 
   # A stack for a new fiber out of this thread's pool (0 when it is
@@ -2662,6 +2692,12 @@ class IyiScheduler
   def self.reschedule : Nil
     raise "a fiber parked holding the scheduler's lock" if IyiSchedLock.held_here?
     st = state
+    # A partitioned fiber's park is its partition's quiet point (heap22
+    # S1, design section 4.1, trigger 2): collected here, the token still
+    # held, when a quarter of its budget is owed.
+    {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) %}
+      IyiHeap.at_park(st.alloc) if st.alloc != 0_u64
+    {% end %}
     # The scheduler allocates in the shared heap (heap22): what a park
     # makes for itself is the runtime's, whichever unit parked.
     {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
@@ -5531,6 +5567,12 @@ class IyiWorkers
           IyiScheduler.switch_to(fiber)
         else
           IyiScheduler.release_unit(st)
+          # An idle worker collects a parked unit's partition that owes a
+          # quarter of its budget, after a global collection (heap22 S1,
+          # design section 4.1, trigger 3), and looks for work again.
+          {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) %}
+            next if IyiHeap.take_over_idle(st)
+          {% end %}
           IyiScheduler.idle_worker(st)
         end
       end
@@ -6919,24 +6961,64 @@ class IyiHeap
 
   # A task's answer into the slot its spawner reads (`IyiTask#finish`),
   # on the task's own stack: where a partitioned build merges or frees the
-  # dying unit's partition. Here, the store.
+  # dying unit's partition. Without partitions, the store. With them
+  # (S1), the store, and a look at the stored words: one that names a
+  # chunk of the dying fiber's own partition detaches it, and the shared
+  # heap adopts it at the unit's death instead of its runs going back
+  # whole (`IyiHeap.answered`; contract section 4, amendment 4).
   def self.answer(box : Array(T), value : T) : Nil forall T
     box << value
+    {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) %}
+      answered(box.object_id, box.to_unsafe.address + (box.size - 1).to_u64 * sizeof(T).to_u64, sizeof(T).to_u64)
+    {% end %}
   end
 
   # The lend protocol of an owning type (`@[Share(owns: true, lends:
-  # true)]`): *graph* taken by the running unit, and handed back.
+  # true)]`): *graph* taken by the running unit, and handed back - its
+  # `LOCAL` chunks published, the mutable middle of the graph walked.
   def self.lend_in(graph) : Nil
+    {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) %}
+      lend_in_address(graph.object_id)
+    {% end %}
   end
 
   def self.lend_out(graph) : Nil
+    {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) %}
+      lend_out_address(graph.object_id)
+    {% end %}
   end
 
   # The running unit made to allocate in the shared heap for the rest of
   # its life: a pointer handed where no collector looks (`Box`,
-  # `GC.malloc`, a C callback's context).
+  # `GC.malloc`, a C callback's context). Its partition becomes the
+  # shared heap's, every run at once.
   def self.pin : Nil
+    {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) %}
+      pin_running
+    {% end %}
   end
+
+  # Without partitions in the runtime, the rest of the API has nothing to
+  # do: nothing is local to a partition, published, merged or collected
+  # apart (heap_partition.iyi has the bodies).
+  {% unless flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) %}
+    def self.publish(address : UInt64) : Nil
+    end
+
+    def self.owner_of(address : UInt64) : UInt64
+      0_u64
+    end
+
+    def self.local?(address : UInt64) : Bool
+      false
+    end
+
+    def self.collect_local(record : UInt64) : Nil
+    end
+
+    def self.merge(from : UInt64, into : UInt64) : Nil
+    end
+  {% end %}
 end
 
 # ── Tasks and groups — III.4.1 ─────────────────────────────────────────

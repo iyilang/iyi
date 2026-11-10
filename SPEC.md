@@ -3037,14 +3037,17 @@ claim, are kept for such a module too.
 
 **Where the repository stands.** Until 0.22 no `SafeReach` was in
 `src/iyi` or `src/std`, and no `UnsafeReach` either, since the walk left
-them out. Walked now (III.4.5), std carries 33 `@[SafeReach]` claims, on
-tables a module builds at its initialisation and only reads (compress,
-hpack, zstd, tls, time, system_roots, base64, json, dns, mime,
-autocert), each proven by (c) in every importer, and 44
-`@[UnsafeReach]` marks on caches its `@[Unsafe]` modules build in the
-shared heap and then only read (digest, mlkem, p256, curve25519, ecdsa,
-password, unicode, mime, tls, http); the runtime carries 23, on the
-scheduler's, the threads' and the console's state (concurrency.iyi 15,
+them out. Walked now (III.4.5), std carries 80 `@[SafeReach]` claims,
+each proven by (c) in every importer: 38 on tables a module builds at its
+initialisation and only reads (compress, hpack, zstd, tls, time,
+system_roots, base64, json, dns, mime, mail, autocert), and 42 on caches
+built whole by their class variables' initializers as the module starts
+(digest, mlkem, p256, curve25519, ecdsa, password, mime, and unicode's
+30 tables). Two are `@[UnsafeReach]`: std/http's default TLS
+configuration, which `HTTP.tls_config=` replaces after publishing it,
+and std/tls's system roots, read at the first handshake that needs them
+and stored once. The runtime carries 23, on the scheduler's, the
+threads', the console's and the environment's state (concurrency.iyi 15,
 io.iyi 3, prelude.iyi 4, thread.iyi 1). `samples/iyi/cores.iyi`'s
 `GREETING` and `bench/spawn_eligible.sh`'s `LIMITS` are proven by (c), as
 is `bench/parallel_exercise.sh`'s `Database`, which now builds its rows in
@@ -3053,9 +3056,11 @@ pairs in `KEPT = Mutex.new { [] of Pair }`, `Share` by (a).
 `bench/arena_exercise.iyi`'s `Thinned.@@kept` and
 `bench/thread_exercise.iyi`'s `Ledgers.@@all`, whose threads write
 reserved slots one at a time, are `@[UnsafeReach]` in modules marked
-`@[Unsafe]`. Held by `spec/compiler/semantic/iyi_spec.cr` (nineteen shapes
-under "a SafeReach claim": a write through a call, the field and block it
-names, a class variable through its getter, a local alias; (a) accepted;
+`@[Unsafe]`. Held by `spec/compiler/semantic/iyi_spec.cr` (twenty-one
+shapes under "a SafeReach claim": a write through a call, the field and
+block it names, a class variable through its getter, a subclass's copy of
+a class variable covered by the parent's claim and refused when a parallel
+block writes it, a local alias; (a) accepted;
 (b) accepted behind a std lock, and refused behind a program's own
 owning type, for a second lock, an unlocked read and a lock whose
 receiver is not a constant or class variable; (c) accepted, and refused
@@ -3253,8 +3258,9 @@ rule is the rest of what the block can reach, and it is a refusal, where
   which with `-Dheap_partitions` may be a chunk of the first unit's own
   partition. One such variable holds a pointer in the repository,
   `IyiScheduler.@@state`, the thread's scheduler state, made at the
-  thread's first touch of the scheduler, before it runs any unit's fiber;
-  the other eleven in `src/iyi` and the seven in `bench` hold numbers.
+  thread's first touch of the scheduler, before it runs any unit's fiber,
+  and kept on the runtime's list of states as well; the other eleven in
+  `src/iyi` and the seven in `bench` hold numbers.
 - **The error** is one, raised once every block is checked, for the first
   piece of state a claim would be proven for, or the first reached:
   ``the block spawn(unit: :new) runs in a unit of its own, on another

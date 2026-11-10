@@ -3235,14 +3235,39 @@ require "./file"
         return 0_u64 if read64(arena + OFF_LISTED) == 0
         count = 0_u64
         while page <= last
-          if page_listed?(arena, arena + page * PAGE)
-            set_listed(arena, arena + page * PAGE, arena + (page + 1_u64) * PAGE, false)
-            count = count + 1_u64
-          end
+          count = count + 1_u64 if unlist_page(arena, page)
           page = page + 1_u64
         end
         Pointer(Atomic(UInt64)).new(arena + OFF_LISTED).value.sub(count) if count != 0
         count
+      end
+
+      # One page's listed bit cleared, answering whether this call is the
+      # one that cleared it. The page two adjacent slices share is in both
+      # batches' ranges, listed whole by the upper slice's run (`close_run`),
+      # and two refills adopting the two batches at once both read it
+      # listed: counted off by both, the arena's count of listed pages fell
+      # one short a time, reached zero with pages still listed, and the
+      # refill that read zero next left its batch's pages listed under the
+      # objects it handed out - pages the idle trim (`idle_batches`) and
+      # the pause (`idle_listed`) then made idle, and the carve handed out
+      # a second time. The trim stress (eight threads, six classes, 20 s
+      # with the trim run back to back) caught a 20,360-byte block holding
+      # another thread's words in 11 runs of 11 on macOS 26.6, Apple M2
+      # Pro, 10 cores (the user's machine), and in none of 9 after.
+      def self.unlist_page(arena : UInt64, page : UInt64) : Bool
+        slot = Pointer(Atomic(UInt64)).new(arena + OFF_LISTED_PAGES + page.unsafe_shr(6_u64) * 8_u64)
+        bit = 1_u64.unsafe_shl(page & 63_u64)
+        cleared = false
+        while true
+          seen = slot.value.get
+          break if seen & bit == 0_u64
+          if slot.value.compare_and_set(seen, seen & (0xFFFFFFFFFFFFFFFF_u64 - bit))[1]
+            cleared = true
+            break
+          end
+        end
+        cleared
       end
 
       # In the pause, every list dropped: what the sweep listed and no
@@ -3302,8 +3327,7 @@ require "./file"
             last = chain.unsafe_shr(RANGE_SHIFT)
             while page < last
               address = arena + page * PAGE
-              if page_listed?(arena, address)
-                set_listed(arena, address, address + PAGE, false)
+              if unlist_page(arena, page)
                 set_idle(arena, address, address + PAGE, true)
                 count = count + 1_u64
               end

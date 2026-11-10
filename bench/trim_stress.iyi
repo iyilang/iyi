@@ -1,0 +1,154 @@
+# The idle trim beside threads that allocate: `bench/sweep_exercise.sh`
+# runs it.
+#
+#   ./bin/iyi build --release bench/trim_stress.iyi && ./trim_stress 8 20
+#
+# `THREADS SECONDS` starts THREADS kernel threads that allocate in six
+# classes - 3,072, 2,560, 1,280, 896, 48 and 20,360 bytes, chunks that
+# straddle pages and slice edges, the last a page and a quarter on
+# darwin's sixteen-kilobyte pages - each keeping a ring of 4,096 blocks,
+# and one more that runs `IyiMark.trim_idle` back to back for SECONDS.
+# Every word of a block is written with the block's address, its index
+# and its thread, and read back when the block is dropped and at every
+# lap of the ring: a chunk handed to two threads at once reads as the
+# other thread's words, and one whose page the trim handed back reads as
+# the kernel's zero. Collections come from the allocation, the sweep from
+# the threads' refills and the pool's helpers, so the trim meets slices in
+# flight, batches between their taking and their adoption, and warm runs
+# being threaded and carved.
+#
+# With no arguments it runs two threads for a second and prints a fixed
+# line: Windows CI runs every bench program bare.
+
+@[Unsafe("it writes and reads raw blocks by address to check them")]
+module bench/trim_stress
+
+{% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
+  RING = 4096
+  SEED = 0x5A17C0DE00000000_u64
+
+  def size_of(pick : UInt64) : Int32
+    case pick % 6_u64
+    when 0_u64 then 3072
+    when 1_u64 then 2560
+    when 2_u64 then 1280
+    when 3_u64 then 896
+    when 4_u64 then 48
+    else            20360
+    end
+  end
+
+  def pattern(block : Pointer(UInt8), who : Int32) : UInt64
+    block.address ^ SEED ^ (who.to_u64 + 1_u64).unsafe_shl(40_u64)
+  end
+
+  def fill(block : Pointer(UInt8), size : Int32, who : Int32) : Nil
+    words = Pointer(UInt64).new(block.address)
+    base = pattern(block, who)
+    i = 0
+    while i < size // 8
+      words[i] = base ^ i.to_u64
+      i = i + 1
+    end
+  end
+
+  def check(block : Pointer(UInt8), size : Int32, who : Int32) : Nil
+    words = Pointer(UInt64).new(block.address)
+    base = pattern(block, who)
+    i = 0
+    while i < size // 8
+      if words[i] != base ^ i.to_u64
+        print "FAIL: trim stress: thread #{who}: word #{i} of a #{size}-byte block at #{block.address.to_i64.to_s(16)} reads #{words[i].to_i64.to_s(16)}\n"
+        __iyi_exit(1)
+      end
+      i = i + 1
+    end
+  end
+
+  def churn(who : Int32, seconds : Int32) : Nil
+    stop = IyiMark.now_ns + seconds.to_u64 * 1_000_000_000_u64
+    blocks = [] of Pointer(UInt8)
+    sizes = [] of Int32
+    slot = 0
+    state = (who.to_u64 + 1_u64) &* 0x9E3779B97F4A7C15_u64
+    while IyiMark.now_ns < stop
+      state = state ^ state.unsafe_shl(13_u64)
+      state = state ^ state.unsafe_shr(7_u64)
+      state = state ^ state.unsafe_shl(17_u64)
+      size = size_of(state)
+      block = Pointer(UInt8).malloc(size.to_u64)
+      fill(block, size, who)
+      if blocks.size < RING
+        blocks << block
+        sizes << size
+      else
+        check(blocks[slot], sizes[slot], who)
+        blocks[slot] = block
+        sizes[slot] = size
+      end
+      slot = slot + 1
+      if slot == RING
+        slot = 0
+        i = 0
+        while i < blocks.size
+          check(blocks[i], sizes[i], who)
+          i = i + 1
+        end
+      end
+    end
+    i = 0
+    while i < blocks.size
+      check(blocks[i], sizes[i], who)
+      i = i + 1
+    end
+  end
+
+  def trimmer(seconds : Int32) : Nil
+    stop = IyiMark.now_ns + seconds.to_u64 * 1_000_000_000_u64
+    while IyiMark.now_ns < stop
+      IyiMark.trim_idle
+    end
+  end
+
+  def start_churn(who : Int32, seconds : Int32) : IyiThread
+    IyiThread.start do
+      churn(who, seconds)
+      nil
+    end
+  end
+
+  def start_trimmer(seconds : Int32) : IyiThread
+    IyiThread.start do
+      trimmer(seconds)
+      nil
+    end
+  end
+
+  arguments = Program.args
+  quiet = arguments.empty?
+  unless quiet || arguments.size == 2
+    print "FAIL: usage: trim_stress THREADS SECONDS\n"
+    __iyi_exit(1)
+  end
+  threads = quiet ? 2 : arguments[0].to_i
+  seconds = quiet ? 1 : arguments[1].to_i
+  collections = IyiMark.collections
+  trims = IyiMark.trims
+  released = IyiHeap.pages_released
+  workers = [] of IyiThread
+  i = 0
+  while i < threads
+    workers << start_churn(i, seconds)
+    i = i + 1
+  end
+  trim_thread = start_trimmer(seconds)
+  workers.each { |w| w.join }
+  trim_thread.join
+  if quiet
+    puts "trim stress: every block read back whole"
+  else
+    puts "trim stress: #{threads} threads for #{seconds} s beside #{IyiMark.trims - trims} idle trims, #{IyiMark.collections - collections} collections and #{IyiHeap.pages_released - released} pages handed back, every block read back whole"
+  end
+{% else %}
+  puts "trim stress: no collector's allocator on this target, nothing to trim"
+{% end %}

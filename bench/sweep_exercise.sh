@@ -47,13 +47,13 @@ fi
 
 echo
 echo "== every check reported"
-for phrase in reclaimed warm survivor liveness large steady refault room threaded cut trim batches idle; do
+for phrase in reclaimed warm survivor liveness large steady refault room threaded cut trim batches edge idle; do
   grep -q "$phrase" "$WORK/sweep.out" 2>/dev/null || {
     echo "  MISSING: nothing reported for $phrase"
     status=1
   }
 done
-[ "$status" -eq 0 ] && echo "  reclaimed, warm, survivor, liveness, large, steady, refault, room, threaded, cut, trim, batches and idle all reported"
+[ "$status" -eq 0 ] && echo "  reclaimed, warm, survivor, liveness, large, steady, refault, room, threaded, cut, trim, batches, edge and idle all reported"
 
 echo
 echo "== the same program with optimisation on"
@@ -179,8 +179,12 @@ prove_fails "a pause's batch a whole arena" wholebatch "room:" \
      if (held && $0 ~ /^          batch = sweep_slice\(arena, SWEEP_SPAN\)$/) { print "          batch = sweep_slice(arena, IyiHeap::SWEEP_DONE)"; held = 0; found = 1; next }
      print } END { if (!found) exit 3 }'
 
-# A warm run threaded whole, as before: one refill takes the run.
-prove_fails "a warm run threaded whole" uncapped "threaded:" \
+# A warm run threaded whole, as before: one refill takes the run. On
+# Windows 11 (4 KB pages) the room check, which comes first, fails
+# instead: the refills of its sixteen small epochs each threaded and
+# counted a whole run, and the 896-byte class kept 116 pages warm past
+# its 64.
+prove_fails "a warm run threaded whole" uncapped "threaded:|room:" \
   '{ if (sub(/run = take_run\(arena, true, WARM_RUN\.unsafe_shr\(PAGE_SHIFT\)\)/, "run = take_run(arena, true, 0_u64)")) found = 1; print } END { if (!found) exit 3 }'
 
 # A warm run cut at the page a slab's worth on, off the chunk grid: the
@@ -200,6 +204,17 @@ prove_fails "a trimmed batch left on the centre" trimstack "batches:" \
   '{ if ($0 ~ /^              write64\(line \+ CLASS_BATCHES, following\)$/) { print "              # removed"; found = 1; next }
      if ($0 ~ /^              write64\(previous \+ BATCH_NEXT, /) { print "              # removed"; next }
      print } END { if (!found) exit 3 }'
+
+# The trim turning a batch's first page idle with the rest: the batch
+# below shares it, and taken off the centre before the trim and adopted
+# after it, that batch's last chunk lies on an idle page.
+prove_fails "the trim takes a batch's first page" trimfirst "edge:" \
+  '{ if (sub(/page = read64\(head \+ OFF_LINK\)\.unsafe_shr\(RANGE_SHIFT\) \+ 1_u64$/, "page = read64(head + OFF_LINK).unsafe_shr(RANGE_SHIFT)")) found = 1; print } END { if (!found) exit 3 }'
+
+# The trim turning a batch's last page idle with the rest: the batch
+# above shares it, and its chunks on that page lie on an idle page.
+prove_fails "the trim takes a batch's last page" trimlast "edge:" \
+  '{ if (sub(/^            while page < last$/, "            while page <= last")) found = 1; print } END { if (!found) exit 3 }'
 
 # The monitor never asking for the trim: the warm pages of an idle pool
 # stay.
@@ -252,6 +267,54 @@ case "$(uname -s)" in
     echo "  an idle bit trusted past its page: not proven here, because this platform's pages keep idle ones out of the rounding check's slices"
     ;;
 esac
+
+echo
+echo "== the idle trim beside eight threads that allocate"
+# bench/trim_stress.iyi, release: eight threads keep rings of blocks in
+# six classes, each word written with its thread's pattern and read back,
+# while a ninth runs the idle trim back to back for 20 s.
+stress_run() {
+  "$2" 8 20 >"$WORK/$1.out" 2>&1 && grep -q "every block read back whole" "$WORK/$1.out"
+}
+if ! "$IYI" build --release -o "$WORK/trim_stress" "$REPO/bench/trim_stress.iyi" >"$WORK/trim_stress.build.log" 2>&1; then
+  echo "  trim stress: build failed"; sed -n '1,12p' "$WORK/trim_stress.build.log"; status=1
+elif stress_run trim_stress "$WORK/trim_stress"; then
+  sed 's/^/  /' "$WORK/trim_stress.out"
+else
+  echo "  trim stress failed:"; tail -3 "$WORK/trim_stress.out" | sed 's/^/    /'; status=1
+fi
+
+# The listed pages counted off by every refill that read them listed, as
+# before `IyiHeap.unlist_page`: two refills adopting the batches of
+# adjacent slices both count the page the slices share, the arena's count
+# reaches zero with pages listed, and the trim and the pause make idle
+# pages under objects a cache handed out. On darwin's sixteen-kilobyte
+# pages the stress caught it in 11 runs of 11 of 20 s on macOS 26.6,
+# Apple M2 Pro, 10 cores (the user's machine).
+mkdir -p "$WORK/doublecount/iyi"
+cp -R "$REPO/src/iyi/." "$WORK/doublecount/iyi/"
+if ! awk '{ if ($0 ~ /^          count = count \+ 1_u64 if unlist_page\(arena, page\)$/) {
+         print "          if page_listed?(arena, arena + page * PAGE)"
+         print "            set_listed(arena, arena + page * PAGE, arena + (page + 1_u64) * PAGE, false)"
+         print "            count = count + 1_u64"
+         print "          end"; found = 1; next }
+       print } END { if (!found) exit 3 }' "$REPO/src/iyi/prelude.iyi" > "$WORK/doublecount/iyi/prelude.iyi"; then
+  echo "  the listed pages counted twice: the line this proof edits is not in the prelude any more"; status=1
+elif ! IYI_PATH="$WORK/doublecount:$REPO/src" "$IYI" build --release -o "$WORK/doublecount/program" "$REPO/bench/trim_stress.iyi" >"$WORK/doublecount/build.log" 2>&1; then
+  echo "  the listed pages counted twice: the patched prelude did not build"; status=1
+else
+  caught=0
+  for again in 1 2 3; do
+    stress_run doublecount "$WORK/doublecount/program" || { caught=$again; break; }
+  done
+  if [ "$caught" -ne 0 ]; then
+    echo "  the listed pages counted twice: caught on run $caught: $(grep -m1 'FAIL\|panic' "$WORK/doublecount.out" | cut -c1-160)"
+  elif [ "$(uname -s)" = Darwin ]; then
+    echo "  the listed pages counted twice: three runs passed, so the stress does not test it"; status=1
+  else
+    echo "  the listed pages counted twice: not proven here, three runs passed on this platform's pages"
+  fi
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

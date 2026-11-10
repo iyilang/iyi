@@ -28,8 +28,10 @@
 #      twice the ideal, woken from the main thread and from a worker; a
 #      task woken by a task that then computes with preemption off starts
 #      on an idle worker within 1 ms, and within 50 ms after a ping-pong
-#      left its waker's worker calling nobody, where the monitor calls; on
-#      Linux and darwin a connection's answer, sent while the worker its
+#      left its waker's worker calling nobody, where the monitor calls;
+#      readers answered together, taken by one look at a poller, start
+#      each on a worker of its own and none through a steal; on Linux
+#      and darwin a connection's answer, sent while the worker its
 #      reader parked on is held 100 ms with preemption off, is read on
 #      another worker within 20 ms; and a task joining a thread leaves its
 #      worker to its child. On Windows,
@@ -98,7 +100,8 @@
 #      closes its socket, a pool that never steals a started task, tasks
 #      woken back onto the worker they parked on as they were before tasks
 #      moved, a hand-off that calls no idle worker, a monitor that calls
-#      nobody for a held worker's ring, a monitor that calls nobody for a
+#      nobody for a held worker's ring, a look at a poller that keeps every
+#      reader it woke on its own ring, a monitor that calls nobody for a
 #      held worker's poller, and a join held in the kernel; and on Windows
 #      a port whose packets only the worker their task parked on runs, and
 #      a pool that leaves the priority boost on.
@@ -160,8 +163,8 @@ done
 # ── 2. What a move keeps, twice ───────────────────────────────────────────
 # Its balance step is timed against four workers' ideal, which a machine
 # with fewer cores than that cannot keep; there the other steps run.
-MIGRATE_STEPS="channels sockets cancel closes deep loops balance handoff backstop heldio join"
-[ "$CORES" -lt 4 ] && MIGRATE_STEPS="channels sockets cancel closes deep loops handoff backstop heldio join"
+MIGRATE_STEPS="channels sockets cancel closes deep loops balance handoff backstop drain heldio join"
+[ "$CORES" -lt 4 ] && MIGRATE_STEPS="channels sockets cancel closes deep loops handoff backstop drain heldio join"
 for build in plain release; do
   step "what a task keeps when it resumes on another worker, $build build"
   flag=""
@@ -997,6 +1000,10 @@ else
   broken nobackstop '/^    wake_one if stuck$/ { next } { print }' concurrency.iyi parallel_migrate
   caught nobackstop 'backstop: tasks woken after a ping-pong onto a worker held 100 ms' backstop
 
+  step "failure proof: a look at a poller that keeps every reader it woke on its own ring leaves them to steals"
+  broken drainkept '/^    if rest.is_a\?\(IyiFiber\) && word\(pointerof\(@@idle\)\).value.get > 0_i64$/ { print "    if false"; next } { print }' concurrency.iyi parallel_migrate
+  caught drainkept 'readers answered in one look started on' drain
+
   case "$(uname -s)" in
     MINGW* | MSYS* | CYGWIN* | Windows_NT) ;;
     *)
@@ -1121,7 +1128,7 @@ case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
     # Every task woken from a packet is woken onto the worker it parked on,
     # as a port per worker that no other worker takes from would wake it.
-    broken nocross '/^        wake_completed\(fiber\)$/ { print "        fiber.homebound = true if owner.object_id != state.object_id" } { print }' concurrency.iyi completions_taken
+    broken nocross '/def self.take_packet\(/ { inpacket = 1 } inpacket && /^        return fiber$/ { print "        fiber.homebound = true if owner.object_id != state.object_id" } /^    end$/ { inpacket = 0 } { print }' concurrency.iyi completions_taken
     caught nocross 'answer, sent while its worker computed, was read' taken --workers=12 ;;
   *)
     echo "  Windows' alone, as the port is" ;;

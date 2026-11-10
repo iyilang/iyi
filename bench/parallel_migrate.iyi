@@ -886,6 +886,275 @@ import std/socket::{IyiSocket, SocketError}
     end
   end
 
+  # ── drain ────────────────────────────────────────────────────────────
+  # Connections answered together, as a loaded server's are: one look at
+  # a poller takes every reader's news at once, and each reader then
+  # computes 50 ms with preemption off. The look keeps one reader on its
+  # own worker and hands each of the others to an idle worker of its own
+  # (`IyiWorkers.inject`), so every reader starts on a worker of its own
+  # and none through a steal from the looker's ring. Kept on that ring,
+  # they reached the idle workers one wake at a time, each worker that
+  # stole calling the next.
+  #
+  # The readers park on one worker, the others held by tasks that spin
+  # until they have - which also starts every worker the pool may grow
+  # to, so that there are idle ones to hand to: on Windows, without the
+  # holders, the pool had two workers and the look none idle. That
+  # worker is then held with preemption off while the answers are sent.
+  # One look takes them all: on Linux and darwin an idle worker the
+  # monitor calls takes them out of the held worker's poller together
+  # (`take_held`), and a round whose readers parked elsewhere proves
+  # nothing and is run again; on Windows the port's seat holder wakes at
+  # the first packet, so the answers are sent holding the scheduler's
+  # lock, which its wait takes before it drains the port (`end_idle`).
+  DRAIN_HOLD_NS  = 50_000_000_i64
+  DRAIN_ROUNDS   =               5
+  DRAIN_ATTEMPTS =              20
+
+  # What a round's tasks say, `Share` by their atomic fields: holders
+  # spinning, and whether they were let go; readers parked and started;
+  # the worker the first reader parked on, and how many parked on
+  # another; the worker the holding task ran on; and the pool's steals
+  # once every reader had started.
+  class Drain
+    @holding : Atomic(Int64)
+    @released : Atomic(Int64)
+    @arrived : Atomic(Int64)
+    @started : Atomic(Int64)
+    @parked : Atomic(UInt64)
+    @strays : Atomic(Int64)
+    @holder : Atomic(UInt64)
+    @grabs : Atomic(UInt64)
+
+    def initialize
+      @holding = Atomic(Int64).new(0_i64)
+      @released = Atomic(Int64).new(0_i64)
+      @arrived = Atomic(Int64).new(0_i64)
+      @started = Atomic(Int64).new(0_i64)
+      @parked = Atomic(UInt64).new(0_u64)
+      @strays = Atomic(Int64).new(0_i64)
+      @holder = Atomic(UInt64).new(0_u64)
+      @grabs = Atomic(UInt64).new(0_u64)
+    end
+
+    def holding : Int64
+      @holding.get
+    end
+
+    def add_holding : Nil
+      @holding.add(1_i64)
+    end
+
+    def released : Int64
+      @released.get
+    end
+
+    def release : Nil
+      @released.set(1_i64)
+    end
+
+    def arrived : Int64
+      @arrived.get
+    end
+
+    def add_arrived : Nil
+      @arrived.add(1_i64)
+    end
+
+    def started : Int64
+      @started.get
+    end
+
+    def add_started : Nil
+      @started.add(1_i64)
+    end
+
+    def parked : UInt64
+      @parked.get
+    end
+
+    def strays : Int64
+      @strays.get
+    end
+
+    def note_parked(id : UInt64) : Nil
+      return if @parked.compare_and_set(0_u64, id)[1]
+      @strays.add(1_i64) if @parked.get != id
+    end
+
+    def holder : UInt64
+      @holder.get
+    end
+
+    def note_holder(id : UInt64) : Nil
+      @holder.set(id)
+    end
+
+    def grabs : UInt64
+      @grabs.get
+    end
+
+    def note_grabs(count : UInt64) : Nil
+      @grabs.set(count)
+    end
+  end
+
+  @[NoInline]
+  @[NoPreempt]
+  def hold_released(marks : Drain) : Nil
+    while marks.released == 0_i64
+      IyiThread.spin_pause
+    end
+  end
+
+  @[NoInline]
+  @[NoPreempt]
+  def hold_started(marks : Drain, readers : Int64, ns : Int64) : Nil
+    t = __iyi_monotonic_ns
+    while marks.started < readers && __iyi_monotonic_ns - t < ns
+      IyiThread.spin_pause
+    end
+  end
+
+  # One round: how far apart the readers started, in ns, or -1 when they
+  # did not all park on the worker that then held (Linux and darwin).
+  def drain_round(listener : IyiSocket, port : Int32, readers : Int32, number : Int32) : Int64
+    workers = IyiWorkers.count
+    nears = [] of IyiSocket
+    fars = [] of IyiSocket
+    fds = Channel(Int32).new(readers)
+    readers.times do
+      near, far = pair(listener, port)
+      nears << near
+      fars << far
+      fds.send(far.fd)
+    end
+    family = fars[0].family
+    marks = Drain.new
+    starts = Channel(Int64).new(readers)
+    ons = Channel(UInt64).new(readers)
+    go = Channel(Int32).new(1)
+    grabs = 0_u64
+    sent_at = 0_i64
+    refused = 0
+    group do |g|
+      (workers - 1).times do
+        g.spawn(unit: :new) do
+          marks.add_holding
+          hold_released(marks)
+          0
+        end
+      end
+      waited = 0
+      while marks.holding < (workers - 1).to_i64
+        sleep(1)
+        waited = waited + 1
+        fail("drain: round #{number}'s #{workers - 1} holders did not start in 10000 ms") if waited > 10000
+      end
+      g.spawn(unit: :new) do
+        group do |inner|
+          readers.times do
+            inner.spawn(unit: :new) do
+              fd = fds.receive
+              fail("drain: round #{number}'s reader found no descriptor") unless fd.is_a?(Int32)
+              marks.note_parked(IyiScheduler.state.object_id)
+              marks.add_arrived
+              got = IyiSocket.new(fd, family).read(1)
+              at = __iyi_monotonic_ns
+              on = IyiScheduler.state.object_id
+              marks.add_started
+              hold_np(DRAIN_HOLD_NS)
+              fail("drain: round #{number}'s read answered #{got.inspect}") unless got == "x"
+              starts.send(at)
+              ons.send(on)
+              0
+            end
+          end
+          go.receive
+          marks.note_holder(IyiScheduler.state.object_id)
+          hold_started(marks, readers.to_i64, 300_000_000_i64)
+          marks.note_grabs(IyiWorkers.grabs)
+        end
+        0
+      end
+      waited = 0
+      while marks.arrived < readers.to_i64
+        sleep(1)
+        waited = waited + 1
+        fail("drain: round #{number}'s #{readers} readers did not start in 10000 ms") if waited > 10000
+      end
+      sleep(5)
+      go.send(1)
+      while marks.holder == 0_u64
+        sleep(1)
+      end
+      marks.release
+      sleep(20)
+      grabs = IyiWorkers.grabs
+      {% if flag?(:win32) %}
+        IyiSchedLock.lock
+        readers.times do |i|
+          wrote = nears[i].write("x")
+          refused = refused + 1 unless wrote.is_a?(Int32)
+        end
+        sent_at = __iyi_monotonic_ns
+        while __iyi_monotonic_ns - sent_at < 2_000_000_i64
+          IyiThread.spin_pause
+        end
+        IyiSchedLock.unlock
+      {% else %}
+        readers.times do |i|
+          wrote = nears[i].write("x")
+          refused = refused + 1 unless wrote.is_a?(Int32)
+        end
+        sent_at = __iyi_monotonic_ns
+      {% end %}
+    end
+    nears.each { |s| s.close }
+    fars.each { |s| s.close }
+    fail("drain: round #{number}'s writes refused #{refused} of #{readers}") if refused > 0
+    {% unless flag?(:win32) %}
+      return -1_i64 if marks.strays > 0_i64 || marks.parked != marks.holder
+    {% end %}
+    first = 0_i64
+    last = 0_i64
+    workers_seen = [] of UInt64
+    readers.times do |i|
+      at = starts.receive
+      on = ons.receive
+      fail("drain: round #{number}'s reader said nothing") unless at.is_a?(Int64) && on.is_a?(UInt64)
+      first = at if i == 0 || at < first
+      last = at if i == 0 || at > last
+      workers_seen << on unless workers_seen.includes?(on)
+    end
+    stolen = marks.grabs - grabs
+    if workers_seen.size < readers || stolen > 0_u64
+      fail("drain: #{readers} readers answered in one look started on #{workers_seen.size} workers, #{stolen} of them through a steal, #{(first - sent_at) // 1000_i64} to #{(last - sent_at) // 1000_i64} us after the answers were sent (round #{number})")
+    end
+    last - first
+  end
+
+  def drain(watch : Int32) : Nil
+    watched("drain", watch) do
+      readers = IyiWorkers.count - 1
+      listener = IyiSocket.listen("127.0.0.1", 0)
+      port = listener.local_port
+      spreads = [] of Int64
+      attempts = 0
+      while spreads.size < DRAIN_ROUNDS && attempts < DRAIN_ATTEMPTS
+        attempts = attempts + 1
+        ns = drain_round(listener, port, readers, attempts)
+        spreads << ns if ns >= 0_i64
+      end
+      listener.close
+      if spreads.size < DRAIN_ROUNDS
+        fail("drain: in #{attempts} rounds the readers parked on the holder's worker #{spreads.size} times, not #{DRAIN_ROUNDS}")
+      end
+      sorted = spreads.sorted
+      puts "drain: #{readers} readers answered in one look started on #{readers} workers, none through a steal, #{sorted.map { |w| w // 1000_i64 }} us apart (#{attempts} rounds)"
+    end
+  end
+
   # ── heldio ───────────────────────────────────────────────────────────
   # A task parks on a socket's read, and the worker it parked on starts a
   # sibling task - another unit - that holds it 100 ms with its loop
@@ -1077,7 +1346,7 @@ import std/socket::{IyiSocket, SocketError}
     end
   end
 
-  STEPS = ["channels", "sockets", "cancel", "closes", "deep", "loops", "balance", "handoff", "backstop", "heldio", "join"]
+  STEPS = ["channels", "sockets", "cancel", "closes", "deep", "loops", "balance", "handoff", "backstop", "drain", "heldio", "join"]
 
   watch = 60000
   chosen = [] of String
@@ -1102,6 +1371,7 @@ import std/socket::{IyiSocket, SocketError}
     when "balance"  then balance(watch)
     when "handoff"  then handoff(watch)
     when "backstop" then backstop(watch)
+    when "drain"    then drain(watch)
     when "heldio"   then heldio(watch)
     when "join"     then join(watch)
     end

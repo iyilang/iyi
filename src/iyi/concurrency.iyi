@@ -4111,22 +4111,32 @@ class IyiScheduler
       elsif blocking
         # The one scheduler thread, with none: the port's own wait.
         LibC.GetQueuedCompletionStatus(port, pointerof(bytes_transferred), pointerof(completion_key), pointerof(overlapped_ptr), timeout_ms)
-        complete_packet(overlapped_ptr.address, bytes_transferred.to_i64) if overlapped_ptr.address != 0_u64
+        if overlapped_ptr.address != 0_u64
+          answered = complete_packet(overlapped_ptr.address, bytes_transferred.to_i64)
+          wake_completed(answered) if answered.is_a?(IyiFiber)
+        end
       end
       LibC.CancelWaitableTimer(timer_handle) if blocking && timer > 0
 
       # What the port holds, taken: by a poll, by the one thread, and by
       # the seat's holder; a thread its doorbell woke leaves the port to
       # the holder and to the workers that look on their way
-      # (`take_port`).
+      # (`take_port`). The fibers the packets name are woken together
+      # once the port is empty (`wake_taken`).
       if !blocking || !@@shared || seated
         st.polled_at = __iyi_monotonic_ns if seated
+        taken : IyiFiber? = nil
         while true
           overlapped_ptr = Pointer(Void).new(0_u64)
           LibC.GetQueuedCompletionStatus(port, pointerof(bytes_transferred), pointerof(completion_key), pointerof(overlapped_ptr), 0_i32)
           break if overlapped_ptr.address == 0_u64
-          complete_packet(overlapped_ptr.address, bytes_transferred.to_i64)
+          fiber = complete_packet(overlapped_ptr.address, bytes_transferred.to_i64)
+          if fiber.is_a?(IyiFiber)
+            fiber.next_run = taken
+            taken = fiber
+          end
         end
+        wake_taken(taken, false)
       end
     {% elsif flag?(:darwin) %}
       # kevent's timeout is a timespec pointer and null means forever:
@@ -4163,6 +4173,9 @@ class IyiScheduler
     index = 0_i64
     # Out here for the reason `ready` is below.
     doorbell = st.wake_fd
+    # The waiters the events name, taken off the lists one event at a
+    # time and woken together once the events are read (`wake_taken`).
+    woken : IyiFiber? = nil
     while index < count
       entry = events_buffer + (index * IYI_POLL_EVENT_BYTES).to_u64
       fd = Pointer(UInt64).new(entry + IYI_POLL_DATA_OFFSET).value.to_i64
@@ -4178,9 +4191,23 @@ class IyiScheduler
           ready = 0
         end
       {% end %}
-      wake_io(st, fd.to_i32, ready) if ready != 0
+      if ready != 0
+        lists_lock(st)
+        reader = ready & 1 != 0 ? io_take(st, fd.to_i32, 1) : nil
+        writer = ready & 4 != 0 ? io_take(st, fd.to_i32, 4) : nil
+        lists_unlock(st)
+        if reader.is_a?(IyiFiber)
+          reader.next_run = woken
+          woken = reader
+        end
+        if writer.is_a?(IyiFiber)
+          writer.next_run = woken
+          woken = writer
+        end
+      end
       index = index + 1
     end
+    wake_taken(woken, true)
 
     wake_expired_sleepers
     {% unless flag?(:win32) %}
@@ -4235,15 +4262,15 @@ class IyiScheduler
     # and the one that looks into another's holds that worker's lists
     # lock from its poll until the last waiter it found is off them, so
     # an event it reads cannot be stale against a waiter that worker
-    # parked meanwhile. The waiters are woken after the lock is let go -
-    # one that may move into this worker's ring, any other home
-    # (`wake_completed`). Level-triggered news stays for whoever polls
-    # next; the doorbell is left as it was: an eventfd is not read here,
-    # and a kevent's `EVFILT_USER`, which this poll takes off the kqueue,
-    # is rung again. A worker that went idle meanwhile said then that it
-    # had waiters, and a deadlock's walk reads only what it said
-    # (`all_quiet?`): with its lists emptied here it is rung, to look and
-    # say again (`idle_worker`). True when a waiter was taken.
+    # parked meanwhile. The waiters are woken together after the lock is
+    # let go - those that may move kept here or handed to idle workers,
+    # any other home (`wake_taken`). Level-triggered news stays for
+    # whoever polls next; the doorbell is left as it was: an eventfd is
+    # not read here, and a kevent's `EVFILT_USER`, which this poll takes
+    # off the kqueue, is rung again. A worker that went idle meanwhile
+    # said then that it had waiters, and a deadlock's walk reads only what
+    # it said (`all_quiet?`): with its lists emptied here it is rung, to
+    # look and say again (`idle_worker`). True when a waiter was taken.
     def self.take_held(other : IyiSchedulerState) : Bool
       poller = other.pollfd
       return false if poller <= 0_i64
@@ -4294,12 +4321,7 @@ class IyiScheduler
         retrigger(other) if rung
       {% end %}
       found = !taken.is_a?(Nil)
-      while taken.is_a?(IyiFiber)
-        following = taken.next_run
-        taken.next_run = nil
-        wake_completed(taken)
-        taken = following
-      end
+      wake_taken(taken, false)
       if found && emptied
         # Under the lock it went idle under: either it saw its lists
         # emptied when it said, or it is idle here and rung.
@@ -4360,7 +4382,8 @@ class IyiScheduler
 
   # A fiber this thread took off another thread's io list - its packet
   # off the port on Windows (`complete_packet`), its news out of a held
-  # worker's poller elsewhere (`take_held`) - made runnable from here.
+  # worker's poller elsewhere (`take_held`) - made runnable from here
+  # alone, with nothing taken beside it (`wake_taken`).
   def self.wake_completed(fiber : IyiFiber) : Nil
     unless @@shared
       enqueue(fiber)
@@ -4375,6 +4398,48 @@ class IyiScheduler
     IyiSchedLock.lock
     ready(fiber)
     IyiSchedLock.unlock
+  end
+
+  # The fibers one look at a poller took, linked through `next_run`, the
+  # last taken first: out of this thread's own poller (*own*), or out of
+  # another thread's lists - Windows' port (`complete_packet`), a held
+  # worker's poller elsewhere (`take_held`). On a pool worker the ones
+  # that may move go to `IyiWorkers.inject` together, in the order they
+  # were taken, which keeps the first here and hands the others to idle
+  # workers; any other is woken as a fiber taken alone is, into this
+  # thread's queues from its own poller (`enqueue`) and otherwise as
+  # `wake_completed` sends it.
+  def self.wake_taken(taken : IyiFiber?, own : Bool) : Nil
+    pool = false
+    {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+      pool = @@shared && state.worker
+    {% end %}
+    moving : IyiFiber? = nil
+    others : IyiFiber? = nil
+    while taken.is_a?(IyiFiber)
+      following = taken.next_run
+      if pool && taken.unit.is_a?(IyiUnit) && !taken.homebound
+        taken.next_run = moving
+        moving = taken
+      else
+        taken.next_run = others
+        others = taken
+      end
+      taken = following
+    end
+    while others.is_a?(IyiFiber)
+      following = others.next_run
+      others.next_run = nil
+      if own
+        enqueue(others)
+      else
+        wake_completed(others)
+      end
+      others = following
+    end
+    {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+      IyiWorkers.inject(state, moving) if moving.is_a?(IyiFiber)
+    {% end %}
   end
 
   # Fibers parked on io lists, every thread's together: on Windows what
@@ -4400,10 +4465,11 @@ class IyiScheduler
     # OVERLAPPED names, the one it parked on, whichever thread took the
     # packet: it comes off that list, out of that thread's sleep heap and
     # its listing (`IyiFiber#list_on`) under that thread's lists lock, and
-    # is woken here - a fiber that may move into this worker's ring,
-    # where an idle worker may steal it, and any other sent home
-    # (`wake_completed`). Go readies a goroutine its netpoller found the
-    # same way, wherever the poll ran (`injectglist`).
+    # is answered, for the drain that took the packet to wake with the
+    # others it took (`wake_taken`) - a fiber that may move kept on this
+    # worker or handed to an idle one, and any other sent home. Go readies
+    # a goroutine its netpoller found the same way, wherever the poll ran
+    # (`injectglist`).
     #
     # A fiber on no list yet - its operation answered between the post and
     # the park, or after a cancel woke it and before the park that waits
@@ -4417,44 +4483,44 @@ class IyiScheduler
     # list until the fiber is in a queue or its thread's mail: an idle
     # thread's wait marks it busy before its drain (`end_idle`), so a
     # deadlock's walk sees the fiber, or the taker (`all_quiet?`).
-    def self.complete_packet(overlapped : UInt64, bytes : Int64) : Nil
+    def self.complete_packet(overlapped : UInt64, bytes : Int64) : IyiFiber?
       if overlapped == IyiStdinReader.overlapped_address
         IyiStdinReader.answered
-        return
+        return nil
       end
       take_packet(overlapped, bytes)
     end
 
-    # The packet's fiber woken, or its operation marked over.
-    def self.take_packet(overlapped : UInt64, bytes : Int64) : Nil
+    # The packet's fiber, taken off its list for its taker to wake, or nil
+    # with its operation marked over.
+    def self.take_packet(overlapped : UInt64, bytes : Int64) : IyiFiber?
       owner = state_named(Pointer(UInt64).new(overlapped + 32_u64).value)
-      return unless owner.is_a?(IyiSchedulerState)
+      return nil unless owner.is_a?(IyiSchedulerState)
       lists_lock(owner)
       fiber = io_take_overlapped(owner, overlapped)
       if fiber.is_a?(IyiFiber)
         fiber.io_bytes_read = bytes
         fiber.io_pending = false
         lists_unlock(owner)
-        wake_completed(fiber)
-        return
+        return fiber
       end
       lists_unlock(owner)
       posting = fiber_posting(overlapped)
-      return unless posting.is_a?(IyiFiber)
+      return nil unless posting.is_a?(IyiFiber)
       lists_lock(owner)
       fiber = io_take_overlapped(owner, overlapped)
       if fiber.is_a?(IyiFiber)
         fiber.io_bytes_read = bytes
         fiber.io_pending = false
         lists_unlock(owner)
-        wake_completed(fiber)
-        return
+        return fiber
       end
       if posting.io_pending
         posting.io_bytes_read = bytes
         posting.io_pending = false
       end
       lists_unlock(owner)
+      nil
     end
 
     # The fiber whose OVERLAPPED is at *overlapped*, from the registry, or
@@ -5633,6 +5699,61 @@ class IyiWorkers
         st.handoff_last = fiber.object_id
         wake_one
       end
+    end
+  end
+
+  # The fibers one look at a poller took for worker *st*, each free to
+  # move, linked through `next_run` in the order they were taken: Go's
+  # `injectglist` after its `netpoll`. The first goes onto this worker's
+  # ring, the next it runs; each of the others to an idle worker of its
+  # own while one is idle and not yet rung, through the shared queue,
+  # every such worker rung here at once (`ring`); the rest onto the ring,
+  # where `push_runnable` calls one to steal. Without the lock.
+  #
+  # Pushed one by one onto the ring, as they all were, they reached the
+  # other workers one call at a time: `wake_one` rings a worker only
+  # while none is out looking, and that one, its steal found, calls the
+  # next (`stop_spinning`) - on Windows the port's seat is handed on the
+  # same way (`IyiScheduler.left_idle`). Each link of that chain is a
+  # thread's wake, which waits for a core of its own on a machine whose
+  # cores are all busy.
+  def self.inject(st : IyiSchedulerState, taken : IyiFiber) : Nil
+    rest = taken.next_run
+    taken.next_run = nil
+    taken.state = IyiFiberState::Runnable
+    taken.unlist(st.object_id)
+    push_runnable(st, taken)
+    if rest.is_a?(IyiFiber) && word(pointerof(@@idle)).value.get > 0_i64
+      held = IyiSchedLock.held_here?
+      IyiSchedLock.lock unless held
+      workers = @@workers
+      if workers.is_a?(Array(IyiSchedulerState))
+        size = workers.size
+        index = 0
+        while index < size
+          fiber = rest
+          break unless fiber.is_a?(IyiFiber)
+          @@turn = @@turn + 1 >= size ? 0 : @@turn + 1
+          other = workers[@@turn]
+          if other.object_id != st.object_id && other.idle && !other.notified
+            rest = fiber.next_run
+            fiber.state = IyiFiberState::Runnable
+            fiber.unlist(st.object_id)
+            link_shared(fiber)
+            IyiScheduler.ring(other)
+          end
+          index = index + 1
+        end
+      end
+      IyiSchedLock.unlock unless held
+    end
+    while rest.is_a?(IyiFiber)
+      fiber = rest
+      rest = fiber.next_run
+      fiber.next_run = nil
+      fiber.state = IyiFiberState::Runnable
+      fiber.unlist(st.object_id)
+      push_runnable(st, fiber)
     end
   end
 

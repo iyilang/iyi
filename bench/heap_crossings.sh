@@ -18,8 +18,8 @@
 # violation). A hang is ended at 120 s and counts as caught too, and is
 # named so. Poison alone is not deterministic - a word a register or a
 # frame still holds keeps an unpublished graph alive through the
-# collection - so the checks of rows 1, 1c, 1d, 3 (ring growth), 14 and
-# 21 also ask, where the graph crossed and before any collection,
+# collection - so the checks of rows 1, 1c, 1d, 3 (ring growth), 13, 14
+# and 21 also ask, where the graph crossed and before any collection,
 # whether it is published or the shared heap's (`IyiHeap.local?`,
 # `owner_of`). Mechanisms neither can show - the reference is still
 # rooted on a stack, a second crossing publishes it again, or the answer's
@@ -33,11 +33,13 @@ IYI="${IYI:-$REPO/bin/iyi}"
 WORK="$(mktemp -d)"
 FLAGS="${FLAGS--Dheap_partitions -Dheap_verify}"
 
+WINDOWS=0
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
     REPO="$(cygpath -m "$REPO")"
     WORK="$(cygpath -m "$WORK")"
     PSEP=';'
+    WINDOWS=1
     ;;
   *) PSEP=':' ;;
 esac
@@ -168,9 +170,15 @@ prove_caught "GC.malloc pin" r9m malloc \
   "$(del 'def self\.malloc\(size : Int\)' '^    IyiCross\.pin$')" std gc.iyi
 prove_caught "ReferenceStorage pin" r9r storage \
   "$(del 'def self\.unsafe_construct' '^    IyiCross\.pin$')" std reference_storage.iyi
-# Row 13: ENV's table made in the setter's partition.
-prove_caught "ENV shared" r13 env \
-  "$(subst 'def self\.\[\]=\(key : String' 'IyiCross\.shared do' 'begin')" std env.iyi
+# Row 13: ENV's table made in the setter's partition. Not on Windows:
+# there `ENV[]=` writes to the platform (`SetEnvironmentVariableW`) and
+# iyi keeps no table of its own, so there is no bracket to remove.
+if [ "$WINDOWS" -eq 1 ]; then
+  echo "  ENV shared: skipped on Windows, ENV is written to the platform and iyi keeps no table to make shared"
+else
+  prove_caught "ENV shared" r13 env \
+    "$(subst 'def self\.\[\]=\(key : String' 'IyiCross\.shared do' 'begin')" std env.iyi
+fi
 # Row 14: a crossing task's glue made in the spawner's partition, and the
 # new unit's object.
 prove_caught "pooled glue shared" r14 glue \

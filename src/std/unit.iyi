@@ -72,15 +72,41 @@ module std/unit
 pub class Unit(T) < IyiGroup::Unit(T)
   # A `Unit` owning the value *block* makes. The block may capture only
   # `Share` values: it is the value's way in (`CleanupTransformer#check_share_boundary`).
-  def self.new(&block : -> U) : Unit(U) forall U
-    Unit(U).build(block.call)
+  #
+  # With `-Dheap_partitions` (heap22 row 4) the block's captures are
+  # published, the unit and its partition are made first, the value is
+  # made in that partition, and the handle, which any unit may hold, in
+  # the shared heap. *pinned* is the compiler's, as `spawn_new`'s is.
+  def self.new(*, pinned : Bool = false, &block : -> U) : Unit(U) forall U
+    # Named outside the `{% if %}`: a block parameter read only inside one
+    # is not captured.
+    IyiCross.publish(block)
+    {% if flag?(:heap_partitions) %}
+      placed = IyiWorkers.parallel? ? POOL : MAIN
+      unit = IyiCross.shared { IyiUnit.new(pinned: pinned || placed == MAIN) }
+      value = IyiHeap.within(unit.heap) { block.call }
+      handle = IyiCross.shared { Unit(U).build(value, unit, placed) }
+      # The handle's value is a root of the unit's partition (R(u)).
+      unit.value_slot = pointerof(handle.@value).address
+      handle
+    {% else %}
+      Unit(U).build(block.call)
+    {% end %}
   end
 
   protected def self.build(value : T) : Unit(T)
     new(value)
   end
 
+  protected def self.build(value : T, unit : IyiUnit, placed : UInt64) : Unit(T)
+    new(value, unit, placed)
+  end
+
   private def initialize(value : T)
     super(value)
+  end
+
+  private def initialize(value : T, unit : IyiUnit, placed : UInt64)
+    super(value, unit, placed)
   end
 end

@@ -33,7 +33,10 @@ pub class WeakRef(T)
     {% unless T < Reference %}
       {% raise "WeakRef(#{T}): a weak reference watches an object's lifetime, and #{T} is copied, not referred to: use a class" %}
     {% end %}
-    @cell = IyiWeak.cell(target.object_id)
+    # The cell is on the collector's table every thread's mark reads, so
+    # it is the shared heap's (heap22 row 9); a target in a unit's
+    # partition is cleared by that partition's own sweep.
+    @cell = IyiCross.shared { IyiWeak.cell(target.object_id) }
   end
 
   # The target, or nil once a collection has found nothing else holding it.

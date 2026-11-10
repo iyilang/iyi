@@ -107,6 +107,18 @@ require "./atomic"
     def self.pin : Nil
     end
   end
+
+  module IyiCross
+    def self.publish(value : T) : Nil forall T
+    end
+
+    def self.shared(&)
+      yield
+    end
+
+    def self.pin : Nil
+    end
+  end
 {% end %}
 
 # The runtime's one lock: what the heap's lists of arenas, large objects

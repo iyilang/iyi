@@ -5450,6 +5450,9 @@ class IyiWorkers
     {% if flag?(:pubcheck_flag) %}
       LibIyiPubCheck.__iyi_partitions = 1_u8
     {% end %}
+    {% if flag?(:pubcheck_fold) %}
+      LibIyiGCTable.__iyi_marking = LibIyiGCTable.__iyi_marking | 2_u8
+    {% end %}
     {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
       workers = resolved
       IyiSchedLock.lock

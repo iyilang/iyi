@@ -3228,17 +3228,64 @@ module Iyi
         return
       end
       pub_mode = iyi_pubcheck_mode
-      target_far = pub_mode == 1 ? iyi_pubcheck_target_far(target_pointer) : nil
+      # `-Dpubcheck_init`: a store into an object this function just
+      # allocated, or into `self` in an `initialize`, is not checked.
+      pub_mode = 0 if pub_mode == 1 && iyi_pub_fresh_target?(target_pointer)
+      fold = pub_mode == 1 && @program.has_flag?("pubcheck_fold")
+      target_far = pub_mode == 1 && !fold ? iyi_pubcheck_target_far(target_pointer) : nil
       marking = load(llvm_context.int8, iyi_marking_flag)
-      active = not_equal? marking, int8(0)
-      begin_block, plain_block, join_block = new_blocks "barrier_begin", "barrier_plain", "barrier_join"
-      cond active, begin_block, plain_block
-      position_at_end begin_block
-      call begin_fun
-      br join_block
-      position_at_end plain_block
-      br join_block
-      position_at_end join_block
+      if fold
+        # `-Dpubcheck_fold`: one byte, one branch for both. Bit 0 is the
+        # mark, bit 1 a partition; with both clear the store runs as
+        # today's does.
+        any = not_equal? marking, int8(0)
+        slow_block, plain_block, join_block = new_blocks "barrier_slow", "barrier_plain", "barrier_join"
+        cond any, slow_block, plain_block
+        position_at_end slow_block
+        is_mark = not_equal? builder.and(marking, int8(1)), int8(0)
+        begin_block, after_begin = new_blocks "barrier_begin", "barrier_after_begin"
+        cond is_mark, begin_block, after_begin
+        position_at_end begin_block
+        call begin_fun
+        br after_begin
+        position_at_end after_begin
+        part_block, part_skip, part_join = new_blocks "pub_part", "pub_part_skip", "pub_part_join"
+        cond not_equal?(builder.and(marking, int8(2)), int8(0)), part_block, part_skip
+        position_at_end part_block
+        far = builder.not(iyi_pub_local?(ptr2int(target_pointer, llvm_context.int64)))
+        part_end = insert_block
+        br part_join
+        position_at_end part_skip
+        br part_join
+        position_at_end part_join
+        far_table = LLVM::PhiTable.new
+        far_table.add part_end, far
+        far_table.add part_skip, int1(0)
+        slow_far = phi llvm_context.int1, far_table
+        slow_end = insert_block
+        br join_block
+        position_at_end plain_block
+        br join_block
+        position_at_end join_block
+        active_table = LLVM::PhiTable.new
+        active_table.add slow_end, is_mark
+        active_table.add plain_block, int1(0)
+        active = phi llvm_context.int1, active_table
+        target_table = LLVM::PhiTable.new
+        target_table.add slow_end, slow_far
+        target_table.add plain_block, int1(0)
+        target_far = phi llvm_context.int1, target_table
+      else
+        active = not_equal? marking, int8(0)
+        begin_block, plain_block, join_block = new_blocks "barrier_begin", "barrier_plain", "barrier_join"
+        cond active, begin_block, plain_block
+        position_at_end begin_block
+        call begin_fun
+        br join_block
+        position_at_end plain_block
+        br join_block
+        position_at_end join_block
+      end
       yield
       return if @builder.end
       bytes = @program.size_of(target_type)
@@ -3258,6 +3305,31 @@ module Iyi
           call count_fun, [cast_to_void_pointer(target_pointer), words, int64(site)]
         end
       end
+    end
+
+    # `-Dpubcheck_init`: the store's destination is an object the function
+    # just allocated (a call to the allocator under its GEPs), or `self`
+    # in an `initialize`. Optimistic: an `initialize` that hands `self`
+    # out before a store (heap22 row 19) would need that store checked.
+    def iyi_pub_fresh_target?(target_pointer) : Bool
+      return false unless @program.has_flag?("pubcheck_init")
+      value = target_pointer.to_unsafe
+      16.times do
+        if !LibLLVM.is_a_get_element_ptr_inst(value).null? || !LibLLVM.is_a_bit_cast_inst(value).null?
+          value = LibLLVM.get_operand(value, 0)
+        else
+          break
+        end
+      end
+      unless LibLLVM.is_a_call_inst(value).null?
+        callee = LibLLVM.get_called_value(value)
+        name = String.new(LibLLVM.get_value_name(callee))
+        return true if name.starts_with?("__iyi_new") || name.starts_with?("__iyi_malloc")
+      end
+      unless LibLLVM.is_a_argument(value).null?
+        return true if context.fun.name.includes?("#initialize") && LibLLVM.get_param(context.fun.to_unsafe, 0) == value
+      end
+      false
     end
 
     # heap22 barrier probe. 0: off; 1: the inline check (`-Dpubcheck`);

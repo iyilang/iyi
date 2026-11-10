@@ -2040,6 +2040,14 @@ require "./file"
       # an array of 65,536 structs with an aligned load (`movaps`) and
       # faulted.
       # `LARGE_HEAD` is the header's own distance from the node.
+      # heap22 barrier probe: with `-Dpubcheck_fold` the marking byte's bit
+      # 1 says a pool (so a partition) exists, and the collector reads bit
+      # 0 alone; elsewhere the mask is all ones and folds away.
+      {% if flag?(:pubcheck_fold) %}
+        MARK_BIT = 1_u8
+      {% else %}
+        MARK_BIT = 0xFF_u8
+      {% end %}
       HEADER = 8_u64
       OFF_MARK = 0_u64
       OFF_LINK = 0_u64
@@ -2936,7 +2944,7 @@ require "./file"
         # refill, a carve, a birth under a mark - is `take_slow`'s, out of
         # line: inlined here, those paths gave every allocation a frame of
         # six saved registers and a general clearing loop.
-        if bytes <= 128_u64 && LibIyiGCTable.__iyi_marking == 0_u8
+        if bytes <= 128_u64 && (LibIyiGCTable.__iyi_marking & MARK_BIT) == 0_u8
           index = bytes <= 16_u64 ? 0 : ((bytes &+ 7_u64).unsafe_shr(3_u64).to_i64 &- 2_i64).to_i32
           head = table[index]
           if head != 0
@@ -2973,7 +2981,7 @@ require "./file"
         # alive in its arena, by the bytes asked for - the chunk's waste
         # is a second lookup of the entry on every allocation under a
         # mark, for a budget that is a floor and a ratio.
-        IyiMark.born_during_mark(base, size) if LibIyiGCTable.__iyi_marking != 0_u8
+        IyiMark.born_during_mark(base, size) if (LibIyiGCTable.__iyi_marking & MARK_BIT) != 0_u8
         leave(table)
         base
       end
@@ -2990,7 +2998,7 @@ require "./file"
       @[NoInline]
       def self.slice_full(slice : UInt64) : Nil
         IyiMark.count_allocating
-        if LibIyiGCTable.__iyi_marking != 0_u8
+        if (LibIyiGCTable.__iyi_marking & MARK_BIT) != 0_u8
           IyiMark.assist
           IyiMark.marking_slice(slice)
         else
@@ -4054,7 +4062,7 @@ require "./file"
           # is read under the lock the mark raises and lowers it under,
           # so no mark begins or ends between the look and the unmap.
           lock
-          free_large(pointer.address - HEADER) if LibIyiGCTable.__iyi_marking == 0_u8
+          free_large(pointer.address - HEADER) if (LibIyiGCTable.__iyi_marking & MARK_BIT) == 0_u8
           unlock
         end
       end
@@ -4321,7 +4329,7 @@ require "./file"
         # buffer of references grown under a running mark keeps them. In
         # the barrier's bracket, as the compiler's is, so the barrier's
         # own look at the flag cannot go stale before it shades.
-        if LibIyiGCTable.__iyi_marking != 0_u8
+        if (LibIyiGCTable.__iyi_marking & MARK_BIT) != 0_u8
           IyiHeap.enter_barrier
           IyiMark.barrier(new_pointer.address, limit.unsafe_div(8_u64))
           IyiHeap.leave_barrier
@@ -5631,15 +5639,10 @@ require "./file"
             end
             io << "end\n"
           end
-          {% if flag?(:darwin) %}
-            flags = 0x601
-          {% else %}
-            flags = 0x241
-          {% end %}
-          fd = LibC.open(path.to_unsafe, flags, 420)
+          fd = __iyi_open_write(path.to_unsafe)
           return if fd < 0
-          LibC.write(fd, Pointer(Void).new(text.to_unsafe.address), text.bytesize.to_u64)
-          LibC.close(fd)
+          __iyi_write(fd, Pointer(Void).new(text.to_unsafe.address), text.bytesize.to_u64)
+          __iyi_close(fd)
         end
       end
 
@@ -6119,7 +6122,7 @@ require "./file"
       # list's tail that way on Windows in one run in forty; every run
       # that faulted had started a mark with a chunk gray.
       def self.barrier(address : UInt64, words : UInt64) : Nil
-        return if LibIyiGCTable.__iyi_marking == 0_u8
+        return if (LibIyiGCTable.__iyi_marking & IyiHeap::MARK_BIT) == 0_u8
         index = 0_u64
         while index < words
           barrier_word(IyiHeap.read64(address &+ index &* 8_u64))
@@ -6172,7 +6175,7 @@ require "./file"
       ASSIST_OBJECTS = 1024_u64
 
       def self.assist : Nil
-        return if LibIyiGCTable.__iyi_marking == 0_u8
+        return if (LibIyiGCTable.__iyi_marking & IyiHeap::MARK_BIT) == 0_u8
         w = worker
         active = pool_word(POOL_ACTIVE)
         active.value.add(1_u64)
@@ -8513,7 +8516,7 @@ require "./file"
             Pointer(Atomic(UInt64)).new(pointerof(@@holds_timed_out).address).value.add(1_u64)
             break
           end
-          if LibIyiGCTable.__iyi_marking != 0_u8
+          if (LibIyiGCTable.__iyi_marking & IyiHeap::MARK_BIT) != 0_u8
             if IyiHeap.read64(pool + POOL_HEAD) != 0_u64
               assist
               next
@@ -8656,7 +8659,7 @@ require "./file"
       # sweep the spans left before the cycle begins. Inside the
       # allocator's bracket, as every allocating thread's sweep is.
       def self.sweep_assist : Nil
-        while @@collecting && LibIyiGCTable.__iyi_marking == 0_u8
+        while @@collecting && (LibIyiGCTable.__iyi_marking & IyiHeap::MARK_BIT) == 0_u8
           break if IyiHeap.stop_requested?
           break if sweep_one(0_u64) != 1_u64
           Pointer(Atomic(UInt64)).new(pointerof(@@sweep_assists).address).value.add(1_u64)
@@ -9129,7 +9132,11 @@ require "./file"
           # only its barrier's.
           donate_all(w)
           @@concurrent = true
-          LibIyiGCTable.__iyi_marking = 1_u8
+          {% if flag?(:pubcheck_fold) %}
+            LibIyiGCTable.__iyi_marking = LibIyiGCTable.__iyi_marking | 1_u8
+          {% else %}
+            LibIyiGCTable.__iyi_marking = 1_u8
+          {% end %}
           # The permits last (`open_mark_permits` says why).
           open_mark_permits(helpers)
           pool_word(POOL_GENERATION).value.add(1_u64)
@@ -9267,7 +9274,11 @@ require "./file"
             remainder_round(w) if unfinished
             @@bytes_marked = @@bytes_marked + IyiHeap.read64(w + W_BYTES)
             @@last_marked = @@bytes_marked
-            LibIyiGCTable.__iyi_marking = 0_u8
+            {% if flag?(:pubcheck_fold) %}
+              LibIyiGCTable.__iyi_marking = LibIyiGCTable.__iyi_marking & 0xFE_u8
+            {% else %}
+              LibIyiGCTable.__iyi_marking = 0_u8
+            {% end %}
             mark_ends
             @@concurrent = false
             @@workers = 0_u64
@@ -9414,7 +9425,7 @@ require "./file"
         # Whether a mark is running beside the program right now: the byte
         # the barrier checks, for an exercise that wants to act under one.
         def self.marking? : Bool
-          LibIyiGCTable.__iyi_marking != 0_u8
+          (LibIyiGCTable.__iyi_marking & IyiHeap::MARK_BIT) != 0_u8
         end
 
         # Collections that ran beside the program, for the exercises.

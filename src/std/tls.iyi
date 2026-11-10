@@ -531,8 +531,8 @@ end
 pub class TlsConfig
   # The roots a server's chain must reach; the system's when nil, read
   # once for the whole process and kept, since reading them is most of a
-  # handshake's own cost. A store that cannot be read is kept as its
-  # refusal, answered to every handshake after it.
+  # handshake's own cost. A store that cannot be read is read again at the
+  # next handshake.
   getter roots : Array(Certificate)? = nil
   # Protocols offered by ALPN (RFC 7301), most wanted first: `["h2",
   # "http/1.1"]`. None offered when empty.
@@ -622,17 +622,42 @@ pub class TlsConfig
     made
   end
 
-  # The system's roots, or why they could not be read: built whole by the
-  # initializer at the first read and never written again.
-  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
-  @@system : Array(Certificate) | String = load_system
+  # The system's roots: read at the first handshake that asks, not at the
+  # program's start. An initializer runs at its module's initialisation in
+  # every program that imports std/tls, and as one it took a program
+  # importing std/http from 0.50 to 5.30 ms to print one line (median of
+  # 40, Linux). Built in the shared heap and kept once: the build that
+  # claims `SYSTEM_STATE` stores it and then marks it stored, and a reader
+  # reads the store only after it sees the mark, which the `Atomic`'s one
+  # ordering puts after the store. A handshake asking while the first
+  # build runs builds its own and keeps nothing; a load that fails keeps
+  # nothing either, so a store that could not be read (a process out of
+  # file descriptors) is read again. Every caller is answered a copy, so
+  # nothing it pushes lands in the kept list.
+  @[UnsafeReach("built whole in the shared heap by the first handshake that reads it, stored once by the build that claims SYSTEM_STATE and read only after its mark; then only read, and answered as copies")]
+  @@system : Array(Certificate)? = nil
+  SYSTEM_STATE = Atomic(Int32).new(0)
 
   def trusted_roots : Array(Certificate) | TlsError
     held = @roots
     return held if held
-    kept = @@system
-    return TlsError.new(kept) if kept.is_a?(String)
-    kept
+    system = TlsConfig.system
+    return TlsError.new(system) if system.is_a?(String)
+    system.dup
+  end
+
+  protected def self.system : Array(Certificate) | String
+    if SYSTEM_STATE.get == 2
+      if kept = @@system
+        return kept
+      end
+    end
+    built = IyiCross.shared { load_system }
+    if built.is_a?(Array(Certificate)) && SYSTEM_STATE.compare_and_set(0, 1)[1]
+      @@system = built
+      SYSTEM_STATE.set(2)
+    end
+    built
   end
 
   private def self.load_system : Array(Certificate) | String

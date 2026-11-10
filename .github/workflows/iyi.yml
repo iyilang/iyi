@@ -44,9 +44,9 @@ name: iyi
 # Which jobs run is decided by `plan` (scripts/ci_plan.py, whose header says
 # it in full). A pull request runs the fast tier - the Linux build and what
 # answers within the compiler specs' twenty-odd minutes - narrowed further
-# when it touches only docs or only bench files. A push to master or to
-# mt/next, the branch a release is integrated on before it reaches master,
-# a `v*` tag, the nightly schedule and a manual dispatch run every job. A
+# when it touches only docs or only bench files. A push to master, to
+# mt/next or to mt/next-two, the branches a release is integrated on before
+# it reaches master (mt/next-two carries 0.22.0's work), a `v*` tag, the nightly schedule and a manual dispatch run every job. A
 # push to any other branch runs nothing: open a pull request, or dispatch
 # the workflow on the branch for the full set.
 #
@@ -56,7 +56,7 @@ name: iyi
 # as a compiler change, and two at once queued behind each other for hours.
 on:
   push:
-    branches: [master, mt/next]
+    branches: [master, mt/next, mt/next-two]
     tags: ["v*", "editor-v*"]
   pull_request:
   workflow_dispatch:

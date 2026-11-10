@@ -1,0 +1,2433 @@
+# heap22 slice S1: a heap per pool unit, in the runtime
+# (`-Dheap_partitions`; local://heap22-design-partition.md, the contract
+# local://heap22-contract.md sections 2 to 4).
+#
+# A pool unit's objects live in a partition of its own: runs of chunks
+# inside *partition arenas*, which are class arenas of the shared heap
+# that no thread's cache ever carves in (`OFF_OWNER` is
+# `PARTITION_ARENA`) and that every partition of the class takes runs
+# from. A run is a range of granules (`GRANULE_SHIFT`) whose chunk heads
+# are its chunks; the arena's owner table names, per granule, the
+# partition that owns the run there (0 for the shared heap), and its run
+# table holds, at a run's first granule, the run's length, its state and
+# the link of the list it is on - its owner's per-class run list, the
+# class's pool of free runs, or none for a run handed to the shared heap
+# that drains as the global sweep frees what is in it.
+#
+# A chunk of a partition's run has an `OWN` byte beside it: published
+# (`OWN_PUB`) or local, and the parity of the last local mark that
+# reached it (`OWN_LMARK`). The unit's own thread of control - its token
+# holder - is the one writer of `OWN`, of the partition's lists and of
+# its runs while they are its own: allocation (`partition_take`),
+# publication (`publish`), the local collection (`local_collect`), and
+# the unit's death (`partition_death`). The global collector marks and
+# sweeps everything, partitions included, as it does today; on a
+# partition's run its sweep frees what the global mark proved dead onto
+# the owner's *return stack* for that class, which the owner drains at
+# its next refill, and it never writes `OWN`.
+#
+# Two sweepers on one run are kept apart by the slice claim the global
+# sweep already takes (`OFF_SWEEPING`): everything here that changes a
+# run's chunks or its owner holds the class's lock with no slice of the
+# current epoch in flight on the arena (`quiet`), and a slice is claimed
+# only under that lock. Every such step runs inside the allocator's
+# bracket (`CACHE_INSIDE`), so no stop finds a thread holding a class's
+# lock.
+#
+# This file is required only in a `-Dheap_partitions` build of the arena
+# allocator; the prelude's hooks into `take`, `free`, the sweep, the
+# scavenge and the budget are under the same flag, so a build without it
+# is S0's.
+
+@[Unsafe("a unit's partition: runs, owner tables and OWN bytes of the shared arenas, read and written through raw memory")]
+class IyiHeap
+  # ── Granules, tables, states ──────────────────────────────────────────
+
+  # Ownership is per granule: 4 KiB in slice S1, every platform.
+  GRANULE_SHIFT = 12_u64
+
+  # The arena header's words for partition arenas (contract section 3):
+  # byte offsets from the arena's base of the owner table (16 bits per
+  # granule), the `OWN` table (a byte per chunk), the run table (a word
+  # per granule) and the publication count table (16 bits per granule).
+  # A thread arena's `OFF_OWNERS` is 0, which is how a partition arena is
+  # told apart.
+  OFF_OWNERS = 1760_u64
+  OFF_OWN    = 1768_u64
+  OFF_RUNS   = 1776_u64
+  OFF_PUBS   = 1784_u64
+
+  # `OFF_OWNER` of a partition arena: no cache's address, so no thread
+  # cache claims it as its fill arena (`claimable?`) and the scavenge's
+  # `release_arena` leaves it alone.
+  PARTITION_ARENA = 1_u64
+
+  OWN_PUB   = 1_u64
+  OWN_LMARK = 6_u64
+  OWN_LENT  = 8_u64
+  OWN_SEEN  = 128_u64
+
+  # `REC_STATE` bits past `REC_LIVE` (contract section 2), and S1's own:
+  # a local collection by an idle worker in progress (`take_over_idle`).
+  REC_DETACHED = 2_u64
+  REC_PINNED   = 4_u64
+  REC_DEAD     = 8_u64
+  REC_BUSY     = 16_u64
+
+  # S1's offsets in a record, `REC_HEAP` to `PARTITION_BYTES`:
+  # the current local-mark parity (2 or 4, 0 before the first); bytes
+  # allocated since the last local collection; the budget `B_u`; the
+  # bytes the last local collection kept; three tables mapped beside the
+  # heap (lent graphs, weak cells, large objects: a word of capacity, a
+  # word of count, then the entries); local collections of this
+  # partition; bytes of runs it holds; and the return stacks, a word per
+  # class, which the global sweep pushes onto. The per-class run lists
+  # are the cache layout's fill slots (`FILL + index`): a record never
+  # carves.
+  REC_PARITY      = 1376_u64
+  REC_DEBT        = 1384_u64
+  REC_BUDGET      = 1392_u64
+  REC_LIVE_BYTES  = 1400_u64
+  REC_LEND        = 1408_u64
+  REC_WEAK        = 1416_u64
+  REC_LARGE       = 1424_u64
+  REC_COLLECTIONS = 1432_u64
+  REC_HELD        = 1440_u64
+  REC_RETURN      = 1472_u64
+
+  # A run table word, at a run's first granule: the link (48 bits), the
+  # run's length in granules (12) and its state (4).
+  RUN_LINK        = 0xFFFFFFFFFFFF_u64
+  RUN_N_SHIFT     = 48_u64
+  RUN_N_MASK      = 0xFFF_u64
+  RUN_STATE_SHIFT = 60_u64
+  RUN_OWNED       = 1_u64
+  RUN_POOL        = 2_u64
+  RUN_DRAINING    = 3_u64
+  # A class's runs double from the smallest that holds a chunk to this.
+  RUN_MAX = 65536_u64
+
+  # The budget (design section 4.1): `B_u` is twice what the partition's
+  # last local collection kept, at least `UNIT_MIN`, at most its share of
+  # the headroom `H = max(HEADROOM_MIN, 2 x every partition's live)`; the
+  # shared heap's own floor no longer multiplies by threads.
+  UNIT_MIN     = 262144_u64
+  HEADROOM_MIN = 16777216_u64
+  SHARED_MIN   = 8388608_u64
+
+  # What a freed chunk reads as in a `-Dheap_verify` build.
+  POISON = 0xDEADDEADDEADDEAD_u64
+
+  # The partition centre: a page of per-class lines, under the class's
+  # lock - the class's pool of free runs, and the partition arena whose
+  # frontier runs are carved from.
+  PC_POOL     = 0_u64
+  PC_FRONTIER = 8_u64
+  PC_LINE     = 16_u64
+
+  @@pcentre : UInt64 = 0_u64
+  @@partition_live : UInt64 = 0_u64
+  @@pins : UInt64 = 0_u64
+  @@published_objects : UInt64 = 0_u64
+  @@published_bytes : UInt64 = 0_u64
+  @@local_collections : UInt64 = 0_u64
+  @@local_ns : UInt64 = 0_u64
+  @@local_max_ns : UInt64 = 0_u64
+  @@local_aborts : UInt64 = 0_u64
+  @@local_freed : UInt64 = 0_u64
+  @@merges : UInt64 = 0_u64
+  @@freed_whole : UInt64 = 0_u64
+  @@handed_shared : UInt64 = 0_u64
+  @@runs_taken : UInt64 = 0_u64
+  @@runs_pooled : UInt64 = 0_u64
+  @@runs_drained : UInt64 = 0_u64
+  @@takeovers : UInt64 = 0_u64
+  @@detached : UInt64 = 0_u64
+  @@takeover_armed : UInt64 = 0_u64
+  @@dead_queued : UInt64 = 0_u64
+  @@collect_every_park : Bool = false
+  @@local_off : Bool = false
+  @@park_off : Bool = false
+  @@returned : UInt64 = 0_u64
+  @@large_freed : UInt64 = 0_u64
+
+  # The thread's scratch page for the local mark and the publication
+  # walk: a stack of chunk bases mapped beside it, its capacity and
+  # length, a one-entry layout cache, and a visited set for the walks
+  # through lent graphs. Not heap memory: the collector never reads it.
+  @[ThreadLocal]
+  @@scratch : UInt64 = 0_u64
+
+  SCR_STACK  = 0_u64
+  SCR_CAP    = 8_u64
+  SCR_LEN    = 16_u64
+  SCR_LTYPE  = 24_u64
+  SCR_LENTRY = 32_u64
+  SCR_SET    = 40_u64
+  SCR_SETCAP = 48_u64
+  SCR_SETN   = 56_u64
+  SCR_COUNT  = 64_u64
+
+  def self.pcentre : UInt64
+    page = @@pcentre
+    return page if page != 0
+    fresh = __iyi_mmap(DIR_LEN).address
+    word = Pointer(Atomic(UInt64)).new(pointerof(@@pcentre).address)
+    return fresh if word.value.compare_and_set(0_u64, fresh)[1]
+    __iyi_munmap(fresh, DIR_LEN)
+    word.value.get
+  end
+
+  def self.pline(index : Int32) : UInt64
+    pcentre + index.to_u64 * PC_LINE
+  end
+
+  # ── Statistics (S6 reads them) ────────────────────────────────────────
+
+  def self.pins : UInt64
+    @@pins
+  end
+
+  def self.published_objects : UInt64
+    @@published_objects
+  end
+
+  def self.published_bytes : UInt64
+    @@published_bytes
+  end
+
+  def self.local_collections : UInt64
+    @@local_collections
+  end
+
+  def self.local_ns : UInt64
+    @@local_ns
+  end
+
+  def self.local_max_ns : UInt64
+    @@local_max_ns
+  end
+
+  def self.local_aborts : UInt64
+    @@local_aborts
+  end
+
+  def self.large_freed : UInt64
+    @@large_freed
+  end
+
+  def self.local_freed : UInt64
+    @@local_freed
+  end
+
+  def self.merges : UInt64
+    @@merges
+  end
+
+  def self.freed_whole : UInt64
+    @@freed_whole
+  end
+
+  def self.handed_shared : UInt64
+    @@handed_shared
+  end
+
+  def self.runs_taken : UInt64
+    @@runs_taken
+  end
+
+  def self.runs_pooled : UInt64
+    @@runs_pooled
+  end
+
+  def self.runs_drained : UInt64
+    @@runs_drained
+  end
+
+  def self.note_drained : Nil
+    stat_add(pointerof(@@runs_drained).address, 1_u64)
+  end
+
+  def self.takeovers : UInt64
+    @@takeovers
+  end
+
+  def self.detached_partitions : UInt64
+    @@detached
+  end
+
+  def self.partition_live : UInt64
+    @@partition_live
+  end
+
+  # Chunks the global sweep returned that their owners took back.
+  def self.returned_chunks : UInt64
+    @@returned
+  end
+
+  # A test's switch: no local collection is triggered - in flight, at a
+  # park or by an idle worker - so the global collection alone reclaims
+  # partitions (bench/heap_local's return-stack check). `collect_local`
+  # still collects when asked.
+  def self.local_collections_off=(off : Bool) : Bool
+    @@local_off = off
+  end
+
+  # A test's switch: no collection at a park, the other triggers kept
+  # (bench/heap_local's idle takeover check).
+  def self.park_collections_off=(off : Bool) : Bool
+    @@park_off = off
+  end
+
+  # The `OWN` byte of the chunk holding *address* - a large object's from
+  # its node - or `0xFFFF` for an address no partition owns. A test's
+  # probe: only the owner's thread may rely on it.
+  def self.own_flags(address : UInt64) : UInt64
+    arena = arena_of(address)
+    if arena != 0
+      return 0xFFFF_u64 if owner_in_arena(arena, address) == 0
+      return read8(own_address(arena, chunk_index(arena, address)))
+    end
+    record = current_record
+    return 0xFFFF_u64 if record == 0
+    enter_barrier
+    node = own_large_of(record, address)
+    flags = node == 0 ? 0xFFFF_u64 : read64(node + 16_u64).unsafe_shr(16_u64) & 0xFF_u64
+    leave_barrier
+    flags
+  end
+
+  # Bytes of runs partition *record* holds.
+  def self.partition_held(record : UInt64) : UInt64
+    record == 0 ? 0_u64 : read64(record &+ REC_HELD)
+  end
+
+  # Local collections of partition *record*.
+  def self.partition_collections(record : UInt64) : UInt64
+    record == 0 ? 0_u64 : read64(record &+ REC_COLLECTIONS)
+  end
+
+  # A test's switch: a local collection at every park of a partitioned
+  # fiber, whatever its debt (bench/heap_local).
+  def self.collect_every_park=(on : Bool) : Bool
+    @@collect_every_park = on
+  end
+
+  def self.collect_every_park : Bool
+    @@collect_every_park
+  end
+
+  def self.stat_add(address : UInt64, amount : UInt64) : Nil
+    Pointer(Atomic(UInt64)).new(address).value.add(amount)
+  end
+
+  # ── Arena tables ──────────────────────────────────────────────────────
+
+  def self.partition_arena?(arena : UInt64) : Bool
+    read64(arena &+ OFF_OWNERS) != 0
+  end
+
+  def self.granule_bytes : UInt64
+    1_u64.unsafe_shl(GRANULE_SHIFT)
+  end
+
+  # The granule of a chunk head, from the grid's first head.
+  def self.granule_of(arena : UInt64, head : UInt64) : UInt64
+    (head &- arena_first(arena)).unsafe_shr(GRANULE_SHIFT)
+  end
+
+  def self.owner_at(arena : UInt64, granule : UInt64) : UInt64
+    read16(arena &+ read64(arena &+ OFF_OWNERS) &+ granule &* 2_u64)
+  end
+
+  def self.set_owner_at(arena : UInt64, granule : UInt64, id : UInt64) : Nil
+    write16(arena &+ read64(arena &+ OFF_OWNERS) &+ granule &* 2_u64, id)
+  end
+
+  def self.run_word(arena : UInt64, granule : UInt64) : UInt64
+    read64(arena &+ read64(arena &+ OFF_RUNS) &+ granule &* 8_u64)
+  end
+
+  def self.set_run_word(arena : UInt64, granule : UInt64, link : UInt64, n : UInt64, state : UInt64) : Nil
+    write64(arena &+ read64(arena &+ OFF_RUNS) &+ granule &* 8_u64, (link & RUN_LINK) | n.unsafe_shl(RUN_N_SHIFT) | state.unsafe_shl(RUN_STATE_SHIFT))
+  end
+
+  # The link of the run starting at *run*, its length and state kept.
+  def self.set_run_link(run : UInt64, link : UInt64) : Nil
+    arena = run & (0_u64 &- MAP)
+    slot = arena &+ read64(arena &+ OFF_RUNS) &+ granule_of(arena, run) &* 8_u64
+    write64(slot, (read64(slot) & (0_u64 &- RUN_LINK &- 1_u64)) | (link & RUN_LINK))
+  end
+
+  def self.run_n(word : UInt64) : UInt64
+    word.unsafe_shr(RUN_N_SHIFT) & RUN_N_MASK
+  end
+
+  def self.run_state(word : UInt64) : UInt64
+    word.unsafe_shr(RUN_STATE_SHIFT)
+  end
+
+  def self.pub_count_at(arena : UInt64, granule : UInt64) : UInt64
+    read16(arena &+ read64(arena &+ OFF_PUBS) &+ granule &* 2_u64)
+  end
+
+  def self.set_pub_count_at(arena : UInt64, granule : UInt64, count : UInt64) : Nil
+    write16(arena &+ read64(arena &+ OFF_PUBS) &+ granule &* 2_u64, count > 0xFFFF_u64 ? 0xFFFF_u64 : count)
+  end
+
+  def self.own_address(arena : UInt64, slot : UInt64) : UInt64
+    arena &+ read64(arena &+ OFF_OWN) &+ slot
+  end
+
+  # The first chunk head at or above *low*, on the arena's grid.
+  def self.first_head(arena : UInt64, low : UInt64) : UInt64
+    first = arena_first(arena)
+    chunk = read64(arena &+ OFF_CHUNK)
+    first &+ (low &- first &+ chunk &- 1_u64).unsafe_div(chunk) &* chunk
+  end
+
+  # The owner of the chunk holding *address* (contract section 3, as
+  # amended): the granule of the chunk's head, not of the address, since
+  # a chunk may reach into the next run's first granule. 0 for the shared
+  # heap and for an address the heap did not hand out. A large object's
+  # owner is in its node's word at 16 (bits 0-15, its `OWN` byte in bits
+  # 16-23). Takes the runtime lock for the walk of the large list: a
+  # caller in a pause, or holding the lock, asks `owner_of_held`.
+  def self.owner_of(address : UInt64) : UInt64
+    arena = arena_of(address)
+    return owner_in_arena(arena, address) if arena != 0
+    slot = address.unsafe_shr(24_u64)
+    return 0_u64 if slot < DIR_SLOTS && Pointer(UInt8).new(arena_dir + slot).value == 0_u8
+    lock
+    owner = owner_of_held(address)
+    unlock
+    owner
+  end
+
+  def self.owner_of_held(address : UInt64) : UInt64
+    arena = arena_of(address)
+    return owner_in_arena(arena, address) if arena != 0
+    node = containing_large(Pointer(Void).new(address))
+    return 0_u64 if node == 0
+    read64(node &+ 16_u64) & 0xFFFF_u64
+  end
+
+  def self.owner_in_arena(arena : UInt64, address : UInt64) : UInt64
+    owners = read64(arena &+ OFF_OWNERS)
+    return 0_u64 if owners == 0
+    first = arena_first(arena)
+    return 0_u64 if address < first || address >= read64(arena &+ OFF_HIGH)
+    head = head_of(arena, address)
+    read16(arena &+ owners &+ (head &- first).unsafe_shr(GRANULE_SHIFT) &* 2_u64)
+  end
+
+  # Whether the chunk holding *address* is `LOCAL` to some partition:
+  # owned by one and not published. Answers for the chunk's state now;
+  # only its owner's thread may rely on the answer staying true.
+  def self.local?(address : UInt64) : Bool
+    arena = arena_of(address)
+    if arena != 0
+      return false if owner_in_arena(arena, address) == 0
+      return read8(own_address(arena, chunk_index(arena, address))) & OWN_PUB == 0
+    end
+    lock
+    node = containing_large(Pointer(Void).new(address))
+    answer = node != 0 && read64(node &+ 16_u64) & 0xFFFF_u64 != 0 && read64(node &+ 16_u64).unsafe_shr(16_u64) & OWN_PUB == 0
+    unlock
+    answer
+  end
+
+  # The record of the partition the running code allocates in, 0 for the
+  # shared heap: the installed cache, when it is a record.
+  def self.current_record : UInt64
+    page = @@cache
+    return 0_u64 if page == 0 || page == @@home
+    read64(page &+ REC_ID) != 0 ? page : 0_u64
+  end
+
+  # ── Partition arenas ──────────────────────────────────────────────────
+
+  # A class arena for partitions' runs: the tables of a class arena
+  # (`map_arena`), then the `OWN` table, the owner table, the run table
+  # and the publication counts, the grid on the page after them. Nothing
+  # carved: its frontier is its grid's first head, and runs move it.
+  # Linked on the heap's list and the class's, as any arena is, so the
+  # global mark, the debt and the lazy sweep reach it; the sweep's slice
+  # of it is `IyiMark.sweep_partition_slice`. Made the class's frontier.
+  def self.map_partition_arena(index : Int32) : UInt64
+    base = map_aligned
+    {% if flag?(:linux) %}
+      # Runs of many partitions share its pages: a huge page would be two
+      # megabytes resident for a few runs.
+      __iyi_madvise_nohuge(base, MAP)
+    {% end %}
+    @@arenas_mapped = @@arenas_mapped &+ 1_u64
+    chunk = chunk_of(index)
+    magic = (1_u64.unsafe_shl(MAGIC_SHIFT) + chunk.unsafe_shr(3_u64) - 1_u64).unsafe_div(chunk.unsafe_shr(3_u64))
+    chunks = (MAP - HEAD).unsafe_div(chunk)
+    granules = MAP.unsafe_shr(GRANULE_SHIFT)
+    marks = META + chunks * META_ENTRY
+    own = marks + chunks
+    owners = (own + chunks + 7_u64) & (0_u64 &- 8_u64)
+    runs = owners + granules * 2_u64
+    pubs = runs + granules * 8_u64
+    first_offset = (pubs + granules * 2_u64 + PAGE - 1_u64) & (0_u64 &- PAGE)
+    first = base + first_offset
+    commit(base, first)
+    write64(base + OFF_MAP, MAP)
+    write64(base + OFF_CHUNK, chunk)
+    write64(base + OFF_GRID, first_offset.unsafe_shl(GRID_SHIFT) | magic)
+    write64(base + OFF_MARKS, base + marks)
+    write64(base + OFF_CURSOR, first)
+    write64(base + OFF_CURSOR_BYTE, base + META)
+    write64(base + OFF_LEFT, 0_u64)
+    write64(base + OFF_HIGH, first)
+    write64(base + OFF_BUMP_END, first)
+    write64(base + OFF_OWNER, PARTITION_ARENA)
+    write64(base + OFF_OWN, own)
+    write64(base + OFF_RUNS, runs)
+    write64(base + OFF_PUBS, pubs)
+    # The flag last of the header: a reader that finds a partition arena
+    # finds its tables named.
+    write64(base + OFF_OWNERS, owners)
+    lock
+    write64(base + OFF_EPOCH, IyiMark.epoch)
+    write64(base + OFF_SWEEP_CURSOR, SWEEP_DONE)
+    write64(base + OFF_NEXT, @@arenas)
+    @@arenas = base
+    class_lock(index)
+    write64(base + OFF_CLASS_NEXT, class_first(index))
+    write64(class_line(index) + CLASS_ARENAS, base)
+    write64(pline(index) + PC_FRONTIER, base)
+    class_unlock(index)
+    Pointer(UInt8).new(arena_dir + base.unsafe_shr(24_u64)).value = DIR_ARENA
+    unlock
+    base
+  end
+
+  # Under class *index*'s lock, held on entry and on exit: no sweep slice
+  # of this epoch walks *arena*. A slice is claimed under that lock, so
+  # none begins until it is let go. The wait is off the lock, as
+  # `free_unswept`'s is; a stop asked meanwhile is paid here when
+  # *abortable* is false, and answered false when it is true, the lock
+  # released then.
+  def self.quiet(index : Int32, arena : UInt64, abortable : Bool) : Bool
+    while read64(arena + OFF_SWEEPING) == IyiMark.epoch
+      class_unlock(index)
+      return false if abortable && stop_requested?
+      IyiMark.spin_pause
+      IyiThread.park_if_requested unless abortable
+      class_lock(index)
+    end
+    true
+  end
+
+  # Every partition arena of class *index* quiet at once, the class's lock
+  # held on entry and on exit (false, the lock released, for a stop asked
+  # when *abortable*). One pass that finds no claim, because a wait lets
+  # the lock go and a claim may have come on an arena already looked at.
+  def self.quiet_class(index : Int32, abortable : Bool) : Bool
+    while true
+      busy = 0_u64
+      arena = class_first(index)
+      while arena != 0 && busy == 0
+        busy = arena if partition_arena?(arena) && read64(arena + OFF_SWEEPING) == IyiMark.epoch
+        arena = class_next(arena)
+      end
+      return true if busy == 0
+      return false unless quiet(index, busy, abortable)
+    end
+    true
+  end
+
+  # ── Runs ──────────────────────────────────────────────────────────────
+
+  # The bytes of the next run partition *record* takes for class *index*:
+  # twice its newest run of the class, from the smallest granule-whole
+  # run that holds a chunk, to `RUN_MAX`; a chunk larger than that is a
+  # run of its own.
+  def self.run_bytes_for(record : UInt64, index : Int32) : UInt64
+    granule = granule_bytes
+    chunk = chunk_of(index)
+    least = chunk > granule ? chunk : granule
+    least = (least + granule - 1_u64) & (0_u64 &- granule)
+    newest = read64(record &+ (FILL + index).to_u64 * 8_u64)
+    want = least
+    if newest != 0
+      arena = newest & (0_u64 &- MAP)
+      had = run_n(run_word(arena, granule_of(arena, newest))).unsafe_shl(GRANULE_SHIFT)
+      want = had * 2_u64
+      want = RUN_MAX if want > RUN_MAX
+    end
+    want = least if want < least
+    (want + granule - 1_u64) & (0_u64 &- granule)
+  end
+
+  # A free run of class *index* off its pool, under the class's lock, with
+  # no slice walking its arena: its start, its run word's state still
+  # `RUN_POOL`, or 0 for an empty pool.
+  def self.take_pool_run(index : Int32) : UInt64
+    line = pline(index)
+    while true
+      run = read64(line + PC_POOL)
+      return 0_u64 if run == 0
+      arena = run & (0_u64 &- MAP)
+      quiet(index, arena, false)
+      # The wait let the lock go: the pool is read again.
+      next if read64(line + PC_POOL) != run
+      write64(line + PC_POOL, run_word(arena, granule_of(arena, run)) & RUN_LINK)
+      return run
+    end
+    0_u64
+  end
+
+  # A run of *bytes* off the class's frontier arena, under the class's
+  # lock, or 0 for none with room: its start. Its run word and its owner
+  # are the caller's to write, and the frontier (`OFF_HIGH`) is moved by
+  # `publish_high` once the run's chunks are stamped.
+  def self.take_frontier_run(index : Int32, bytes : UInt64) : UInt64
+    arena = read64(pline(index) + PC_FRONTIER)
+    return 0_u64 if arena == 0
+    high = read64(arena + OFF_HIGH)
+    first = arena_first(arena)
+    chunk = read64(arena + OFF_CHUNK)
+    stop = high + bytes
+    return 0_u64 if stop > arena + MAP
+    last = first + (stop - 1_u64 - first).unsafe_div(chunk) * chunk
+    return 0_u64 if last + chunk > arena + MAP
+    commit(high, (last + chunk + PAGE - 1_u64) & (0_u64 &- PAGE))
+    high
+  end
+
+  # Partition *record*'s list for class *index* is empty: what the global
+  # sweep returned, or a run - off the class's pool, off its frontier, or
+  # off a partition arena mapped for it - owned and threaded into the
+  # list. Answers the list's head, never 0. Inside the allocator's
+  # bracket.
+  def self.partition_take(table : Pointer(UInt64), index : Int32) : UInt64
+    record = table.address
+    head = drain_return(record, index)
+    return head if head != 0
+    reap_dead_partitions if @@dead_queued != 0
+    # The class's partition arenas owe a sweep: a slice of one of them
+    # first, whose dead may come back on this return stack, as a cache's
+    # refill sweeps before it carves.
+    if sweep_left_of(index) != 0_u64
+      head = IyiMark.partition_sweep_for(record, index)
+      return head if head != 0
+    end
+    bytes = run_bytes_for(record, index)
+    id = read64(record &+ REC_ID)
+    granule = granule_bytes
+    class_lock(index)
+    run = 0_u64
+    frontier = false
+    while run == 0
+      run = take_pool_run(index)
+      if run == 0
+        run = take_frontier_run(index, bytes)
+        frontier = run != 0
+      end
+      if run == 0
+        class_unlock(index)
+        map_partition_arena(index)
+        class_lock(index)
+      end
+    end
+    arena = run & (0_u64 &- MAP)
+    granule_first = granule_of(arena, run)
+    n = frontier ? bytes.unsafe_shr(GRANULE_SHIFT) : run_n(run_word(arena, granule_first))
+    claim_run(record, index, arena, run, n, id)
+    thread_run(table, index, arena, run, n)
+    if frontier
+      # The chunks stamped, the frontier past them: a slice that reads the
+      # new high water finds them free and this epoch's.
+      Pointer(Atomic(UInt64)).new(arena + OFF_HIGH).value.set(run + n * granule)
+    end
+    class_unlock(index)
+    write64(record &+ REC_HELD, read64(record &+ REC_HELD) + n * granule)
+    stat_add(pointerof(@@runs_taken).address, 1_u64)
+    table[index]
+  end
+
+  # A run made *record*'s, under the class's lock: its granules' owner,
+  # its publication counts zero, its word on the record's run list.
+  def self.claim_run(record : UInt64, index : Int32, arena : UInt64, run : UInt64, n : UInt64, id : UInt64) : Nil
+    granule_first = granule_of(arena, run)
+    k = 0_u64
+    while k < n
+      set_owner_at(arena, granule_first + k, id)
+      set_pub_count_at(arena, granule_first + k, 0_u64)
+      k = k + 1_u64
+    end
+    slot = record &+ (FILL + index).to_u64 * 8_u64
+    set_run_word(arena, granule_first, read64(slot), n, RUN_OWNED)
+    write64(slot, run)
+  end
+
+  # Every chunk of a run, free, white, local and this epoch's, linked in
+  # address order ahead of the class's list. A pool run's chunks wear
+  # whatever their last owner left - a unit freed whole stamps nothing -
+  # so every byte of each is written here.
+  def self.thread_run(table : Pointer(UInt64), index : Int32, arena : UInt64, run : UInt64, n : UInt64) : Nil
+    chunk = read64(arena + OFF_CHUNK)
+    first = arena_first(arena)
+    stop = run + n.unsafe_shl(GRANULE_SHIFT)
+    head = first_head(arena, run)
+    slot = (head - first).unsafe_div(chunk)
+    meta = arena + META + slot * META_ENTRY
+    mark = read64(arena + OFF_MARKS) + slot
+    own = own_address(arena, slot)
+    stamp = CARVED_FLAG | FREE_FLAG | IyiMark.epoch_flag
+    tail = table[index]
+    table[index] = head
+    while head < stop
+      following = head + chunk
+      write8(meta, stamp)
+      write8(mark, IyiMark::WHITE)
+      write8(own, 0_u64)
+      write64(head + OFF_LINK, following < stop ? following : tail)
+      write64(head + OFF_INDEX, slot)
+      {% if flag?(:heap_verify) %}
+        poison(head, chunk)
+      {% end %}
+      head = following
+      slot = slot + 1_u64
+      meta = meta + META_ENTRY
+      mark = mark + 1_u64
+      own = own + 1_u64
+    end
+  end
+
+  # A freed chunk's words past its link and index, poisoned.
+  def self.poison(head : UInt64, chunk : UInt64) : Nil
+    word = head + 16_u64
+    stop = head + chunk
+    while word + 8_u64 <= stop
+      write64(word, POISON)
+      word = word + 8_u64
+    end
+  end
+
+  # What the global sweep freed for class *index* on *record*'s runs, onto
+  # its list: each chunk's `OWN` local again. Answers the list's head.
+  def self.drain_return(record : UInt64, index : Int32) : UInt64
+    word = Pointer(Atomic(UInt64)).new(record &+ REC_RETURN &+ index.to_u64 &* 8_u64)
+    table = Pointer(UInt64).new(record)
+    return table[index] if word.value.get == 0_u64
+    chain = word.value.swap(0_u64)
+    head = table[index]
+    returned = 0_u64
+    while chain != 0
+      following = read64(chain + OFF_LINK)
+      arena = chain & (0_u64 &- MAP)
+      write8(own_address(arena, read64(chain + OFF_INDEX)), 0_u64)
+      {% if flag?(:heap_verify) %}
+        poison(chain, read64(arena + OFF_CHUNK))
+      {% end %}
+      write64(chain + OFF_LINK, head)
+      head = chain
+      chain = following
+      returned = returned + 1_u64
+    end
+    stat_add(pointerof(@@returned).address, returned)
+    table[index] = head
+    head
+  end
+
+  # A chain of chunks the global sweep freed on *record*'s runs of class
+  # *index*, linked head to tail, onto its return stack.
+  def self.push_return(record : UInt64, index : Int32, head : UInt64, tail : UInt64) : Nil
+    word = Pointer(Atomic(UInt64)).new(record &+ REC_RETURN &+ index.to_u64 &* 8_u64)
+    while true
+      seen = word.value.get
+      write64(tail + OFF_LINK, seen)
+      return if word.value.compare_and_set(seen, head)[1]
+    end
+  end
+
+  # A run onto its class's pool, under the class's lock with no slice on
+  # its arena: nobody's, its chunks whatever they were.
+  def self.pool_run(index : Int32, arena : UInt64, run : UInt64, n : UInt64) : Nil
+    granule_first = granule_of(arena, run)
+    k = 0_u64
+    while k < n
+      set_owner_at(arena, granule_first + k, 0_u64)
+      k = k + 1_u64
+    end
+    line = pline(index)
+    set_run_word(arena, granule_first, read64(line + PC_POOL), n, RUN_POOL)
+    write64(line + PC_POOL, run)
+    stat_add(pointerof(@@runs_pooled).address, 1_u64)
+  end
+
+  # A run handed to the shared heap, under the class's lock with no slice
+  # on its arena: owned by nobody, on no list, its objects the global
+  # sweep's to free, and the run the pool's once it holds none.
+  def self.drain_run(arena : UInt64, run : UInt64, n : UInt64) : Nil
+    granule_first = granule_of(arena, run)
+    k = 0_u64
+    while k < n
+      set_owner_at(arena, granule_first + k, 0_u64)
+      k = k + 1_u64
+    end
+    set_run_word(arena, granule_first, 0_u64, n, RUN_DRAINING)
+    stat_add(pointerof(@@handed_shared).address, 1_u64)
+  end
+
+  # ── Allocation hooks (prelude) ────────────────────────────────────────
+
+  # Untyped memory in the shared heap whatever is installed, cleared, the
+  # runtime's own (`IyiWeak`'s cells and table): `new_shared`'s swap of
+  # the home cache around one allocation.
+  def self.alloc_shared(size : UInt64, atomic : Bool) : Void*
+    page = @@cache
+    bits = atomic ? UNTYPED_FLAG | ATOMIC_FLAG : UNTYPED_FLAG
+    return Pointer(Void).new(take(size, true, bits, 0_u64)) if page == @@home
+    install(0_u64)
+    made = Pointer(Void).new(take(size, true, bits, 0_u64))
+    @@cache = page
+    {% if flag?(:win32) %}
+      IyiThread.publish_cache(page)
+    {% end %}
+    made
+  end
+
+  # `take_inside` for a record: its list, or a refill of it; past the top
+  # class a mapping of the partition's own.
+  def self.partition_take_inside(table : Pointer(UInt64), bytes : UInt64, clear : Bool, bits : UInt64, type_id : UInt64) : UInt64
+    headed = bits & HEADED_FLAG != 0
+    return take_large_owned(table.address, headed ? bytes - HEADER : bytes, bits) + HEADER if bytes > TOP
+    index = bytes <= 128_u64 ? (bytes <= 16_u64 ? 0 : ((bytes &+ 7_u64).unsafe_shr(3_u64).to_i64 &- 2_i64).to_i32) : class_index(bytes)
+    head = table[index]
+    head = partition_take(table, index) if head == 0
+    stamp(table, index, head, bits, type_id)
+    clear_block(head, chunk_of(index)) if clear
+    headed ? head &+ HEADER : head
+  end
+
+  # A large object of partition *record*: its node names the owner, and
+  # the record's table names the node.
+  def self.take_large_owned(record : UInt64, size : UInt64, bits : UInt64) : UInt64
+    head = take_large(size, bits)
+    node = head - LARGE_HEAD
+    write64(node + 16_u64, read64(record &+ REC_ID))
+    table_add(record &+ REC_LARGE, node)
+    head
+  end
+
+  # `free` of an arena chunk under the flag, inside the allocator's
+  # bracket: whether the chunk may go on the installed cache's list.
+  # Only the partition that owns a chunk lists it, and only on its own
+  # list - its `OWN` byte local again, and poisoned in a verifying build;
+  # a chunk of the shared heap is never listed while a partition is
+  # installed, nor a partition's or a drained run's while a thread's
+  # cache is: the global sweep frees what nobody holds.
+  def self.partition_frees?(arena : UInt64, head : UInt64, table : Pointer(UInt64)) : Bool
+    id = read64(table.address &+ REC_ID)
+    return id == 0 unless partition_arena?(arena)
+    return false if id == 0 || owner_at(arena, granule_of(arena, head)) != id
+    write8(own_address(arena, chunk_index(arena, head)), 0_u64)
+    {% if flag?(:heap_verify) %}
+      poison(head, read64(arena + OFF_CHUNK))
+    {% end %}
+    true
+  end
+
+  # A large object's `free` under the flag: only its owner frees it, the
+  # shared heap's whoever has no record installed.
+  def self.partition_free_large(node : UInt64) : Bool
+    owner = read64(node + 16_u64) & 0xFFFF_u64
+    record = current_record
+    id = record == 0 ? 0_u64 : read64(record &+ REC_ID)
+    return false if owner != id
+    table_remove(record &+ REC_LARGE, node) if record != 0
+    true
+  end
+
+  # ── Mapped tables beside a record ─────────────────────────────────────
+
+  # A table at *slot* (a record's word): a mapping of a word of capacity,
+  # a word of count, then entries. Not heap memory, so no collector frees
+  # it or reads it.
+  def self.table_add(slot : UInt64, entry : UInt64) : Nil
+    table = read64(slot)
+    if table == 0
+      table = __iyi_mmap(DIR_LEN).address
+      write64(table, DIR_LEN.unsafe_div(8_u64) - 2_u64)
+      write64(slot, table)
+    end
+    count = read64(table + 8_u64)
+    if count == read64(table)
+      bytes = (count + 2_u64) * 16_u64
+      grown = __iyi_mmap(bytes).address
+      k = 0_u64
+      while k < count
+        write64(grown + 16_u64 + k * 8_u64, read64(table + 16_u64 + k * 8_u64))
+        k = k + 1_u64
+      end
+      write64(grown, bytes.unsafe_div(8_u64) - 2_u64)
+      write64(grown + 8_u64, count)
+      __iyi_munmap(table, (read64(table) + 2_u64) * 8_u64)
+      table = grown
+      write64(slot, table)
+    end
+    write64(table + 16_u64 + count * 8_u64, entry)
+    write64(table + 8_u64, count + 1_u64)
+  end
+
+  def self.table_count(slot : UInt64) : UInt64
+    table = read64(slot)
+    table == 0 ? 0_u64 : read64(table + 8_u64)
+  end
+
+  def self.table_at(slot : UInt64, k : UInt64) : UInt64
+    read64(read64(slot) + 16_u64 + k * 8_u64)
+  end
+
+  def self.table_set(slot : UInt64, k : UInt64, entry : UInt64) : Nil
+    write64(read64(slot) + 16_u64 + k * 8_u64, entry)
+  end
+
+  def self.table_truncate(slot : UInt64, count : UInt64) : Nil
+    table = read64(slot)
+    write64(table + 8_u64, count) if table != 0
+  end
+
+  def self.table_remove(slot : UInt64, entry : UInt64) : Nil
+    count = table_count(slot)
+    k = 0_u64
+    while k < count
+      if table_at(slot, k) == entry
+        table_set(slot, k, table_at(slot, count - 1_u64))
+        table_truncate(slot, count - 1_u64)
+        return
+      end
+      k = k + 1_u64
+    end
+  end
+
+  def self.table_free(slot : UInt64) : Nil
+    table = read64(slot)
+    return if table == 0
+    __iyi_munmap(table, (read64(table) + 2_u64) * 8_u64)
+    write64(slot, 0_u64)
+  end
+
+  # ── The scratch stack ─────────────────────────────────────────────────
+
+  def self.scratch : UInt64
+    page = @@scratch
+    if page == 0
+      page = __iyi_mmap(DIR_LEN).address
+      write64(page + SCR_STACK, __iyi_mmap(65536_u64).address)
+      write64(page + SCR_CAP, 8192_u64)
+      @@scratch = page
+    end
+    page
+  end
+
+  @[AlwaysInline]
+  def self.scratch_push(s : UInt64, base : UInt64) : Nil
+    len = read64(s &+ SCR_LEN)
+    scratch_grow(s) if len == read64(s &+ SCR_CAP)
+    write64(read64(s &+ SCR_STACK) &+ len &* 8_u64, base)
+    write64(s &+ SCR_LEN, len &+ 1_u64)
+  end
+
+  @[NoInline]
+  def self.scratch_grow(s : UInt64) : Nil
+    cap = read64(s + SCR_CAP)
+    old = read64(s + SCR_STACK)
+    grown = __iyi_mmap(cap * 16_u64).address
+    k = 0_u64
+    while k < cap
+      write64(grown + k * 8_u64, read64(old + k * 8_u64))
+      k = k + 1_u64
+    end
+    __iyi_munmap(old, cap * 8_u64)
+    write64(s + SCR_STACK, grown)
+    write64(s + SCR_CAP, cap * 2_u64)
+  end
+
+  def self.scratch_pop(s : UInt64) : UInt64
+    len = read64(s &+ SCR_LEN)
+    return 0_u64 if len == 0
+    len = len &- 1_u64
+    write64(s &+ SCR_LEN, len)
+    read64(read64(s &+ SCR_STACK) &+ len &* 8_u64)
+  end
+
+  # A set of addresses for one walk, open-addressed in a mapping: true
+  # when *address* was not in it and is now.
+  def self.visit(s : UInt64, address : UInt64) : Bool
+    cap = read64(s + SCR_SETCAP)
+    if cap == 0 || read64(s + SCR_SETN) * 2_u64 >= cap
+      visit_grow(s)
+      cap = read64(s + SCR_SETCAP)
+    end
+    set = read64(s + SCR_SET)
+    probe = (address.unsafe_shr(3_u64) &* 0x9E3779B97F4A7C15_u64).unsafe_shr(20_u64) & (cap - 1_u64)
+    while true
+      seen = read64(set + probe * 8_u64)
+      return false if seen == address
+      if seen == 0
+        write64(set + probe * 8_u64, address)
+        write64(s + SCR_SETN, read64(s + SCR_SETN) + 1_u64)
+        return true
+      end
+      probe = (probe + 1_u64) & (cap - 1_u64)
+    end
+    false
+  end
+
+  def self.visit_grow(s : UInt64) : Nil
+    cap = read64(s + SCR_SETCAP)
+    old = read64(s + SCR_SET)
+    fresh_cap = cap == 0 ? 4096_u64 : cap * 2_u64
+    write64(s + SCR_SET, __iyi_mmap(fresh_cap * 8_u64).address)
+    write64(s + SCR_SETCAP, fresh_cap)
+    write64(s + SCR_SETN, 0_u64)
+    k = 0_u64
+    while k < cap
+      seen = read64(old + k * 8_u64)
+      visit(s, seen) if seen != 0
+      k = k + 1_u64
+    end
+    __iyi_munmap(old, cap * 8_u64) if cap != 0
+  end
+
+  def self.visit_reset(s : UInt64) : Nil
+    cap = read64(s + SCR_SETCAP)
+    return if cap == 0
+    __iyi_munmap(read64(s + SCR_SET), cap * 8_u64)
+    write64(s + SCR_SET, 0_u64)
+    write64(s + SCR_SETCAP, 0_u64)
+    write64(s + SCR_SETN, 0_u64)
+  end
+
+  # The layout entry for *type_id*, one entry cached on the scratch page.
+  def self.scratch_layout(s : UInt64, type_id : UInt64) : UInt64
+    return 0_u64 if type_id == 0
+    return read64(s &+ SCR_LENTRY) if type_id == read64(s &+ SCR_LTYPE)
+    entry = IyiMark.layout_search(type_id)
+    write64(s &+ SCR_LTYPE, type_id)
+    write64(s &+ SCR_LENTRY, entry)
+    entry
+  end
+
+  # Every word of the object at *base* a scan would follow - the layout's
+  # offsets for a typed object, every word of an untyped one, none of an
+  # atomic or free one - handed to *visit*, as `IyiMark.scan` reads them.
+  def self.each_field(s : UInt64, base : UInt64, & : UInt64 ->) : Nil
+    arena = arena_of(base)
+    size = 0_u64
+    entry = 0_u64
+    if arena != 0
+      slot = chunk_index(arena, base)
+      byte = arena &+ META &+ slot &* META_ENTRY
+      bits = read8(byte)
+      return if bits & FREE_FLAG != 0 || bits & ATOMIC_FLAG != 0 || bits & CARVED_FLAG == 0
+      chunk = read64(arena &+ OFF_CHUNK)
+      size = bits & HEADED_FLAG != 0 ? chunk &- HEADER : chunk
+      if bits & UNTYPED_FLAG == 0
+        type_id = bits & HEADED_FLAG != 0 ? read64(base &- 8_u64).unsafe_shr(TYPE_SHIFT) : read16(byte &+ 1_u64)
+        entry = scratch_layout(s, type_id)
+      end
+    else
+      word = read64(base &- 8_u64)
+      return if word & ATOMIC_FLAG != 0
+      size = size_of(base)
+      entry = scratch_layout(s, word.unsafe_shr(TYPE_SHIFT))
+    end
+    if entry == 0
+      cursor = base
+      limit = base &+ size
+      while cursor &+ 8_u64 <= limit
+        yield read64(cursor)
+        cursor = cursor &+ 8_u64
+      end
+    else
+      table = IyiMark.layouts_table
+      offsets = table &+ 8_u64 &+ read64(table) &* IyiMark::ENTRY &+ read64(entry &+ 32_u64) &* 8_u64
+      remaining = read64(entry &+ 24_u64)
+      k = 0_u64
+      while k < remaining
+        yield read64(base &+ read64(offsets &+ k &* 8_u64))
+        k = k &+ 1_u64
+      end
+    end
+  end
+
+  # ── Publication (contract section 4) ──────────────────────────────────
+
+  # *address*'s object made reachable from outside the running unit: if
+  # it is `LOCAL` to the installed partition, its `LOCAL` closure - the
+  # walk stops at any chunk that is not - is marked published, counted
+  # (`published_objects`, `published_bytes`) and counted towards the
+  # global trigger as shared allocation. On the shared heap, one
+  # thread-local test and back.
+  def self.publish(address : UInt64) : Nil
+    record = current_record
+    return if record == 0
+    publish_in(record, address)
+  end
+
+  # Inside the allocator's bracket: no pause comes into the walk, whose
+  # sweep of the large list could take a node off the partition's table
+  # while the walk reads it.
+  def self.publish_in(record : UInt64, address : UInt64) : Nil
+    enter_barrier
+    publish_walk(record, address)
+    leave_barrier
+  end
+
+  def self.publish_walk(record : UInt64, address : UInt64) : Nil
+    id = read64(record &+ REC_ID)
+    base = publish_one(record, id, address)
+    return if base == 0
+    s = scratch
+    entry = read64(s + SCR_LEN)
+    scratch_push(s, base)
+    objects = 1_u64
+    bytes = size_of(base)
+    while read64(s + SCR_LEN) > entry
+      object = scratch_pop(s)
+      each_field(s, object) do |word|
+        found = publish_one(record, id, word)
+        if found != 0
+          scratch_push(s, found)
+          objects = objects + 1_u64
+          bytes = bytes + size_of(found)
+        end
+      end
+    end
+    stat_add(pointerof(@@published_objects).address, objects)
+    stat_add(pointerof(@@published_bytes).address, bytes)
+    allocated_word.value.add(bytes)
+  end
+
+  # The base of *word*'s object if it is `LOCAL` to partition *id*, made
+  # published here; 0 otherwise. Under a mark beside the program, what
+  # is published is shaded as a barrier would shade it.
+  def self.publish_one(record : UInt64, id : UInt64, word : UInt64) : UInt64
+    return 0_u64 if word == 0
+    arena = arena_of(word)
+    if arena == 0
+      node = own_large_of(record, word)
+      return 0_u64 if node == 0
+      bits = read64(node + 16_u64)
+      return 0_u64 if bits.unsafe_shr(16_u64) & OWN_PUB != 0
+      write64(node + 16_u64, bits | OWN_PUB.unsafe_shl(16_u64))
+      base = node + LARGE_USER
+      shade_published(base)
+      return base
+    end
+    owners = read64(arena &+ OFF_OWNERS)
+    return 0_u64 if owners == 0
+    first = arena_first(arena)
+    return 0_u64 if word < first || word >= read64(arena &+ OFF_HIGH)
+    slot = chunk_index(arena, word)
+    head = first &+ slot &* read64(arena &+ OFF_CHUNK)
+    granule = (head &- first).unsafe_shr(GRANULE_SHIFT)
+    return 0_u64 if read16(arena &+ owners &+ granule &* 2_u64) != id
+    bits = read8(arena &+ META &+ slot &* META_ENTRY)
+    return 0_u64 if bits & CARVED_FLAG == 0 || bits & FREE_FLAG != 0
+    own = own_address(arena, slot)
+    flags = read8(own)
+    return 0_u64 if flags & OWN_PUB != 0
+    write8(own, flags | OWN_PUB)
+    set_pub_count_at(arena, granule, pub_count_at(arena, granule) + 1_u64)
+    base = bits & HEADED_FLAG != 0 ? head &+ HEADER : head
+    shade_published(base)
+    base
+  end
+
+  def self.shade_published(base : UInt64) : Nil
+    return if LibIyiGCTable.__iyi_marking == 0_u8
+    IyiMark.mutator_shade(IyiMark.worker, base)
+  end
+
+  # *value* stored into *destination* (rows 18 and 19): published when
+  # the destination is published or the shared heap's.
+  def self.publish_into(destination : UInt64, value : UInt64) : Nil
+    record = current_record
+    return if record == 0 || value == 0
+    arena = arena_of(destination)
+    if arena != 0
+      owners = read64(arena &+ OFF_OWNERS)
+      if owners != 0 && destination >= arena_first(arena) && destination < read64(arena &+ OFF_HIGH)
+        return if owner_in_arena(arena, destination) != 0 && read8(own_address(arena, chunk_index(arena, destination))) & OWN_PUB == 0
+      end
+    else
+      enter_barrier
+      node = own_large_of(record, destination)
+      local = node != 0 && read64(node + 16_u64).unsafe_shr(16_u64) & OWN_PUB == 0
+      leave_barrier
+      return if local
+    end
+    publish_in(record, value)
+  end
+
+  # The node of partition *record*'s large object holding *word*, or 0.
+  def self.own_large_of(record : UInt64, word : UInt64) : UInt64
+    slot = record &+ REC_LARGE
+    count = table_count(slot)
+    k = 0_u64
+    while k < count
+      node = table_at(slot, k)
+      return node if word >= node + LARGE_USER && word < node + read64(node + OFF_MAP)
+      k = k + 1_u64
+    end
+    0_u64
+  end
+
+  # ── Lending (contract section 4, row 15) ──────────────────────────────
+
+  def self.lend_in_address(graph : UInt64) : Nil
+    record = unit_record
+    return if record == 0
+    table_add(record &+ REC_LEND, graph)
+  end
+
+  def self.lend_out_address(graph : UInt64) : Nil
+    record = unit_record
+    return if record == 0
+    enter_barrier
+    lend_walk(record, graph, true)
+    leave_barrier
+    table_remove(record &+ REC_LEND, graph)
+  end
+
+  # The record of the running fiber's unit, whatever is installed: a lend
+  # crosses inside a `Mutex` block's shared bracket too.
+  def self.unit_record : UInt64
+    fiber = IyiScheduler.current?
+    return 0_u64 unless fiber.is_a?(IyiFiber)
+    unit = fiber.unit
+    return 0_u64 unless unit.is_a?(IyiUnit)
+    unit.heap
+  end
+
+  # A lent graph walked from *graph*: every chunk reachable from it, and
+  # each of partition *record*'s `LOCAL` chunks met on the way published
+  # with its `LOCAL` closure when *publish* (`lend_out`), or marked live
+  # and `OWN_LENT` otherwise (the local mark's roots). The walk goes on
+  # through published and shared chunks, which may be the mutable middle
+  # of the graph; atomic chunks are never opened, so a graph's strings
+  # end it, and a visited set bounds the rest.
+  def self.lend_walk(record : UInt64, graph : UInt64, publish : Bool) : Nil
+    s = scratch
+    id = read64(record &+ REC_ID)
+    parity = read64(record &+ REC_PARITY)
+    entry = read64(s + SCR_LEN)
+    visit_reset(s)
+    base = lend_base(graph)
+    return if base == 0
+    visit(s, base)
+    scratch_push(s, base)
+    while read64(s + SCR_LEN) > entry
+      object = scratch_pop(s)
+      each_field(s, object) do |word|
+        target = lend_base(word)
+        if target != 0 && visit(s, target)
+          if publish
+            publish_in(record, word)
+          else
+            local_shade_lent(record, id, parity, word)
+          end
+          scratch_push(s, target)
+        end
+      end
+    end
+    visit_reset(s)
+  end
+
+  # The object a word of a lent graph names, as the root walk's
+  # `base_of` answers; a large object's looked for under the runtime
+  # lock, since a mutator walks here and another thread may be unmapping
+  # its own large object meanwhile.
+  def self.lend_base(word : UInt64) : UInt64
+    return 0_u64 if word == 0
+    return IyiRoots.base_of(word) if arena_of(word) != 0
+    slot = word.unsafe_shr(24_u64)
+    return 0_u64 if slot < DIR_SLOTS && Pointer(UInt8).new(arena_dir + slot).value == 0_u8
+    lock
+    node = containing_large(Pointer(Void).new(word))
+    unlock
+    node == 0 ? 0_u64 : node + LARGE_USER
+  end
+
+  # ── The local collection (design section 4.1) ────────────────────────
+
+  # `IyiHeap.collect_local`: partition *record*'s collection now, on the
+  # running fiber, which must be a fiber of its unit allocating in it.
+  def self.collect_local(record : UInt64) : Nil
+    fiber = IyiScheduler.current
+    IyiRoots.fatal("iyi: collect_local of a partition the running fiber does not allocate in\n") if record == 0 || fiber.alloc != record
+    local_collect(record, fiber, false)
+  end
+
+  # A slice's worth allocated in partition *record* (`slice_full`): its
+  # debt, and its collection once the debt reaches its budget. Under a
+  # mark beside the program the slice assists, as the shared heap's do,
+  # and never holds: the ceiling is the shared heap's.
+  def self.partition_slice(record : UInt64, slice : UInt64) : Nil
+    if LibIyiGCTable.__iyi_marking != 0_u8
+      IyiMark.assist
+      return
+    end
+    debt = read64(record &+ REC_DEBT) &+ slice
+    write64(record &+ REC_DEBT, debt)
+    # A record no unit owns (a bracket's, `IyiHeap.within`) has no roots
+    # the runtime can name: the global collection alone reclaims it.
+    return if debt < budget_of(record) || @@local_off || read64(record &+ REC_UNIT) == 0
+    # Only a fiber of the record's own unit, which holds its token: a
+    # bracket on another unit's fiber (`Unit.new` building the value)
+    # leaves the collection to the unit's own.
+    fiber = IyiScheduler.current?
+    return unless fiber.is_a?(IyiFiber) && fiber.alloc == record
+    unit = fiber.unit
+    return unless unit.is_a?(IyiUnit) && unit.heap == record
+    local_collect(record, fiber, false)
+  end
+
+  def self.budget_of(record : UInt64) : UInt64
+    budget = read64(record &+ REC_BUDGET)
+    budget == 0 ? UNIT_MIN : budget
+  end
+
+  # A fiber of partition *record*'s unit parks (`IyiScheduler.reschedule`,
+  # before the shared cache goes back in): its collection, when a
+  # quarter of its budget is owed - the connection between two requests,
+  # its stack shallow and its live set small - or at every park when a
+  # test asks.
+  def self.at_park(record : UInt64) : Nil
+    return if LibIyiGCTable.__iyi_marking != 0_u8
+    return if @@local_off || @@park_off
+    return unless @@collect_every_park || read64(record &+ REC_DEBT) &* 4_u64 >= budget_of(record)
+    fiber = IyiScheduler.current?
+    return unless fiber.is_a?(IyiFiber) && fiber.alloc == record
+    unit = fiber.unit
+    return unless unit.is_a?(IyiUnit) && unit.heap == record
+    local_collect(record, fiber, false)
+  end
+
+  # The callee-saved registers into *buffer*, `IyiRoots.spill_registers`'s
+  # code with a buffer of the caller's: the local collector's frame holds
+  # it, and its stack scan reads it.
+  def self.spill_into(buffer : UInt64) : Nil
+    {% if flag?(:win32) && flag?(:x86_64) %}
+      asm("movq %rbx, 0($0)
+           movq %rbp, 8($0)
+           movq %rdi, 16($0)
+           movq %rsi, 24($0)
+           movq %r12, 32($0)
+           movq %r13, 40($0)
+           movq %r14, 48($0)
+           movq %r15, 56($0)" :: "{rcx}"(buffer) : "memory" : "volatile")
+    {% elsif flag?(:x86_64) %}
+      asm("movq %rbx, 0($0)
+           movq %rbp, 8($0)
+           movq %r12, 16($0)
+           movq %r13, 24($0)
+           movq %r14, 32($0)
+           movq %r15, 40($0)" :: "{rdi}"(buffer) : "memory" : "volatile")
+    {% else %}
+      asm("stp x19, x20, [$0, #0]
+           stp x21, x22, [$0, #16]
+           stp x23, x24, [$0, #32]
+           stp x25, x26, [$0, #48]
+           stp x27, x28, [$0, #64]
+           stp x29, x30, [$0, #80]" :: "{x0}"(buffer) : "memory" : "volatile")
+    {% end %}
+  end
+
+  # One local collection of partition *record*, on this thread, which
+  # holds its unit's token: *running* is the fiber of the unit on this
+  # stack, nil for an idle worker's takeover. None starts while a mark
+  # runs beside the program; a stop asked while it marks ends it, nothing
+  # swept, and the parity it began leaves at most retention. Answers
+  # whether it swept.
+  @[NoInline]
+  def self.local_collect(record : UInt64, running : IyiFiber?, takeover : Bool) : Bool
+    return false if LibIyiGCTable.__iyi_marking != 0_u8
+    registers = uninitialized UInt64[12]
+    spill_into(pointerof(registers).address)
+    enter_barrier
+    began = IyiMark.now_ns
+    swept = local_collect_in(record, running)
+    took = IyiMark.now_ns - began
+    leave_barrier
+    if swept
+      stat_add(pointerof(@@local_collections).address, 1_u64)
+      stat_add(pointerof(@@local_ns).address, took)
+      seen = Pointer(Atomic(UInt64)).new(pointerof(@@local_max_ns).address)
+      while (prior = seen.value.get) < took
+        break if seen.value.compare_and_set(prior, took)[1]
+      end
+      stat_add(pointerof(@@takeovers).address, 1_u64) if takeover
+    else
+      stat_add(pointerof(@@local_aborts).address, 1_u64)
+    end
+    # The register buffer read after the collection, so it is alive across
+    # it in every build: the stack scan below this frame reads it.
+    Pointer(UInt64).new(pointerof(registers).address).value
+    swept
+  end
+
+  def self.local_collect_in(record : UInt64, running : IyiFiber?) : Bool
+    id = read64(record &+ REC_ID)
+    epoch = IyiMark.epoch
+    parity = read64(record &+ REC_PARITY) == 2_u64 ? 4_u64 : 2_u64
+    write64(record &+ REC_PARITY, parity)
+    s = scratch
+    write64(s + SCR_LEN, 0_u64)
+    write64(s + SCR_COUNT, 0_u64)
+    # The running fiber's stack, from below this frame - the registers'
+    # buffer in the caller's - to its top.
+    if running.is_a?(IyiFiber)
+      # The running stack's top as the global root walk finds it: the
+      # fiber's own mapping's, or the thread's for a thread's main fiber.
+      top = running.stack_top
+      top = IyiThread.current_stack_top if top == 0
+      top = IyiRoots.stack_base if top == 0
+      local_range(record, id, parity, IyiRoots.stack_pointer, top)
+    end
+    # The unit's other fibers' stacks and every fiber's pointer fields
+    # (R(u)), the registry's lock held so none leaves meanwhile; and the
+    # `Unit`'s value.
+    unit_address = read64(record &+ REC_UNIT)
+    if unit_address != 0
+      unit = Pointer(Void).new(unit_address).as(IyiUnit)
+      IyiRuntimeLock.lock
+      fiber = unit.fibers
+      while fiber.is_a?(IyiFiber)
+        # The fiber object is held by the registry, the run queues and the
+        # unit's own list - a root even if it was made in the partition.
+        local_shade(record, id, parity, fiber.object_id)
+        each_field(s, fiber.object_id) { |word| local_shade(record, id, parity, word) }
+        if !(running.is_a?(IyiFiber) && running.object_id == fiber.object_id) && fiber.state != IyiFiberState::Done && fiber.stack_top != 0 && fiber.saved_sp != 0
+          while fiber.on_cpu?
+            IyiMark.spin_pause
+          end
+          local_range(record, id, parity, fiber.saved_sp, fiber.stack_top)
+        end
+        fiber = fiber.next_in_unit
+      end
+      IyiRuntimeLock.unlock
+      slot = unit.value_slot
+      local_shade(record, id, parity, read64(slot)) if slot != 0
+    end
+    # The registry's lock parks for a pause, whose sweep may free a large
+    # object a root queued: a collection that a pause came into ends here.
+    if IyiMark.epoch != epoch
+      write64(s + SCR_LEN, 0_u64)
+      return false
+    end
+    # The lent graphs.
+    lends = table_count(record &+ REC_LEND)
+    k = 0_u64
+    while k < lends
+      lend_walk(record, table_at(record &+ REC_LEND, k), false)
+      k = k + 1_u64
+    end
+    # Published objects of its own runs: reached from outside, perhaps,
+    # so roots, and what they point at in the partition is alive.
+    local_published_roots(record, id, parity)
+    # The mark.
+    while read64(s + SCR_LEN) != 0
+      base = scratch_pop(s)
+      each_field(s, base) { |word| local_shade(record, id, parity, word) }
+      count = read64(s + SCR_COUNT) &+ 1_u64
+      write64(s + SCR_COUNT, count)
+      if count & 255_u64 == 0 && stop_requested?
+        write64(s + SCR_LEN, 0_u64)
+        return false
+      end
+    end
+    # A pause between the roots and here - the registry's lock parks for
+    # one - may have begun a mark beside the program or turned the epoch:
+    # nothing is swept against a collection the mark did not see whole.
+    return false if IyiMark.epoch != epoch || LibIyiGCTable.__iyi_marking != 0_u8
+    local_sweep(record, id, parity)
+  end
+
+  def self.local_range(record : UInt64, id : UInt64, parity : UInt64, low : UInt64, high : UInt64) : Nil
+    cursor = (low &+ 7_u64) & (0_u64 &- 8_u64)
+    while cursor &+ 8_u64 <= high
+      local_shade(record, id, parity, read64(cursor))
+      cursor = cursor &+ 8_u64
+    end
+  end
+
+  # A word a local root or a local object holds: if it falls in a `LOCAL`
+  # chunk of partition *id* - the owner of the chunk's granule, then the
+  # chunk's entry, then its `OWN` byte - that chunk gets this
+  # collection's parity and is queued. A word into any other heap is
+  # ignored (design section 2.3): no live `LOCAL` chunk depends on one. A
+  # published chunk of the partition is a root of its own
+  # (`local_published_roots`).
+  @[AlwaysInline]
+  def self.local_shade(record : UInt64, id : UInt64, parity : UInt64, word : UInt64) : Nil
+    return if word == 0
+    arena = arena_of(word)
+    if arena == 0
+      local_shade_large(record, parity, word) if read64(record &+ REC_LARGE) != 0
+      return
+    end
+    owners = read64(arena &+ OFF_OWNERS)
+    return if owners == 0
+    grid = read64(arena &+ OFF_GRID)
+    first = arena &+ grid.unsafe_shr(GRID_SHIFT)
+    return if word < first
+    slot = ((word &- first).unsafe_shr(3_u64) &* (grid & (1_u64.unsafe_shl(GRID_SHIFT) &- 1_u64))).unsafe_shr(MAGIC_SHIFT)
+    head = first &+ slot &* read64(arena &+ OFF_CHUNK)
+    return if read16(arena &+ owners &+ (head &- first).unsafe_shr(GRANULE_SHIFT) &* 2_u64) != id
+    bits = read8(arena &+ META &+ slot &* META_ENTRY)
+    return if bits & CARVED_FLAG == 0 || bits & FREE_FLAG != 0
+    own = arena &+ read64(arena &+ OFF_OWN) &+ slot
+    flags = read8(own)
+    return if flags & OWN_PUB != 0 || flags & OWN_LMARK == parity
+    write8(own, (flags - (flags & (OWN_LMARK | OWN_LENT))) | parity)
+    scratch_push(scratch, bits & HEADED_FLAG != 0 ? head &+ HEADER : head)
+  end
+
+  # The same for a word reached through a lent graph: marked live and
+  # `OWN_LENT`.
+  def self.local_shade_lent(record : UInt64, id : UInt64, parity : UInt64, word : UInt64) : Nil
+    arena = arena_of(word)
+    if arena == 0
+      node = own_large_of(record, word)
+      return if node == 0
+      bits = read64(node + 16_u64)
+      flags = bits.unsafe_shr(16_u64) & 0xFF_u64
+      return if flags & OWN_PUB != 0
+      write64(node + 16_u64, (bits & 0xFFFF_u64) | ((flags - (flags & OWN_LMARK)) | parity | OWN_LENT).unsafe_shl(16_u64))
+      return
+    end
+    return if !partition_arena?(arena) || owner_in_arena(arena, word) != id
+    slot = chunk_index(arena, word)
+    bits = read8(arena + META + slot * META_ENTRY)
+    return if bits & CARVED_FLAG == 0 || bits & FREE_FLAG != 0
+    own = own_address(arena, slot)
+    flags = read8(own)
+    return if flags & OWN_PUB != 0
+    write8(own, (flags - (flags & OWN_LMARK)) | parity | OWN_LENT)
+  end
+
+  def self.local_shade_large(record : UInt64, parity : UInt64, word : UInt64) : Nil
+    node = own_large_of(record, word)
+    return if node == 0
+    bits = read64(node + 16_u64)
+    flags = bits.unsafe_shr(16_u64) & 0xFF_u64
+    return if flags & OWN_PUB != 0 || flags & OWN_LMARK == parity
+    write64(node + 16_u64, (bits & 0xFFFF_u64) | ((flags - (flags & OWN_LMARK)) | parity).unsafe_shl(16_u64))
+    scratch_push(scratch, node + LARGE_USER)
+  end
+
+  # Every published object on partition *record*'s runs, and of its large
+  # objects, scanned as a root: granules whose publication count is 0
+  # are passed over whole.
+  def self.local_published_roots(record : UInt64, id : UInt64, parity : UInt64) : Nil
+    s = scratch
+    index = 0
+    while index < CLASSES
+      run = read64(record &+ (FILL + index).to_u64 * 8_u64)
+      while run != 0
+        arena = run & (0_u64 &- MAP)
+        granule_first = granule_of(arena, run)
+        word = run_word(arena, granule_first)
+        n = run_n(word)
+        k = 0_u64
+        while k < n
+          if pub_count_at(arena, granule_first + k) != 0
+            low = run + k.unsafe_shl(GRANULE_SHIFT)
+            high = low + granule_bytes
+            head = first_head(arena, low)
+            chunk = read64(arena + OFF_CHUNK)
+            while head < high
+              slot = chunk_index(arena, head)
+              bits = read8(arena + META + slot * META_ENTRY)
+              if bits & CARVED_FLAG != 0 && bits & FREE_FLAG == 0 && read8(own_address(arena, slot)) & OWN_PUB != 0
+                base = bits & HEADED_FLAG != 0 ? head + HEADER : head
+                each_field(s, base) { |field| local_shade(record, id, parity, field) }
+              end
+              head = head + chunk
+            end
+          end
+          k = k + 1_u64
+        end
+        run = word & RUN_LINK
+      end
+      index = index + 1
+    end
+    slot = record &+ REC_LARGE
+    count = table_count(slot)
+    k = 0_u64
+    while k < count
+      node = table_at(slot, k)
+      if read64(node + 16_u64).unsafe_shr(16_u64) & OWN_PUB != 0
+        each_field(s, node + LARGE_USER) { |field| local_shade(record, id, parity, field) }
+      end
+      k = k + 1_u64
+    end
+  end
+
+  # The sweep of a finished local mark, class by class, each under its
+  # lock with no global slice on its arenas: every run walked, its free
+  # and its dead chunks - `LOCAL`, without this parity - its new list, its
+  # published ones counted, an empty run back to the pool unless it is
+  # the class's last; the return stack dropped, its chunks being free and
+  # found by the walk. Then the large objects and the weak cells, and the
+  # accounts. A stop asked between two classes ends it: what is swept is
+  # whole, and the rest waits for the next one.
+  def self.local_sweep(record : UInt64, id : UInt64, parity : UInt64) : Bool
+    table = Pointer(UInt64).new(record)
+    kept_bytes = 0_u64
+    freed = 0_u64
+    index = 0
+    while index < CLASSES
+      runs = record &+ (FILL + index).to_u64 * 8_u64
+      if read64(runs) != 0
+        return false if stop_requested?
+        class_lock(index)
+        return false unless quiet_class(index, true)
+        Pointer(Atomic(UInt64)).new(record &+ REC_RETURN &+ index.to_u64 &* 8_u64).value.set(0_u64)
+        list = 0_u64
+        previous = 0_u64
+        run = read64(runs)
+        while run != 0
+          arena = run & (0_u64 &- MAP)
+          granule_first = granule_of(arena, run)
+          word = run_word(arena, granule_first)
+          n = run_n(word)
+          following = word & RUN_LINK
+          swept = sweep_run(arena, run, n, parity, list)
+          live = swept[0]
+          if live == 0 && (following != 0 || previous != 0)
+            # Empty, and not the class's last: to the pool, unlinked.
+            if previous == 0
+              write64(runs, following)
+            else
+              set_run_link(previous, following)
+            end
+            pool_run(index, arena, run, n)
+            write64(record &+ REC_HELD, read64(record &+ REC_HELD) - n.unsafe_shl(GRANULE_SHIFT))
+          else
+            list = swept[1]
+            previous = run
+          end
+          kept_bytes = kept_bytes + swept[2]
+          freed = freed + swept[3]
+          run = following
+        end
+        table[index] = list
+        class_unlock(index)
+      end
+      index = index + 1
+    end
+    # The large objects: a `LOCAL` one not reached is unmapped, any weak
+    # cell to it cleared first. The table is read under the runtime lock,
+    # whose spin parks for a pause: the pause's own sweep of the large
+    # list takes what it frees off this table (`IyiMark.sweep_large`), and
+    # under a mark beside the program a large object stays mapped, as
+    # `free` leaves it, for the global sweep.
+    large = record &+ REC_LARGE
+    if table_count(large) != 0
+      lock
+      marking = LibIyiGCTable.__iyi_marking != 0_u8
+      k = 0_u64
+      while k < table_count(large)
+        node = table_at(large, k)
+        flags = read64(node + 16_u64).unsafe_shr(16_u64)
+        if !marking && flags & OWN_PUB == 0 && flags & OWN_LMARK != parity
+          clear_weak_in(record, node + LARGE_USER, node + read64(node + OFF_MAP))
+          table_set(large, k, table_at(large, table_count(large) - 1_u64))
+          table_truncate(large, table_count(large) - 1_u64)
+          free_large(node + LARGE_HEAD)
+          freed = freed + 1_u64
+          stat_add(pointerof(@@large_freed).address, 1_u64)
+        else
+          kept_bytes = kept_bytes + read64(node + OFF_MAP)
+          k = k + 1_u64
+        end
+      end
+      unlock
+    end
+    sweep_weak(record)
+    stat_add(pointerof(@@local_freed).address, freed)
+    account_live(record, kept_bytes)
+    write64(record &+ REC_DEBT, 0_u64)
+    write64(record &+ REC_COLLECTIONS, read64(record &+ REC_COLLECTIONS) + 1_u64)
+    true
+  end
+
+  # One run of a local sweep: answers its live chunks, the new list (the
+  # run's free chunks linked ahead of *list*), the bytes kept and the
+  # chunks freed. Its granules' publication counts are counted afresh.
+  def self.sweep_run(arena : UInt64, run : UInt64, n : UInt64, parity : UInt64, list : UInt64) : Tuple(UInt64, UInt64, UInt64, UInt64)
+    chunk = read64(arena + OFF_CHUNK)
+    first = arena_first(arena)
+    stop = run + n.unsafe_shl(GRANULE_SHIFT)
+    granule_first = granule_of(arena, run)
+    k = 0_u64
+    while k < n
+      set_pub_count_at(arena, granule_first + k, 0_u64)
+      k = k + 1_u64
+    end
+    head = first_head(arena, run)
+    slot = (head - first).unsafe_div(chunk)
+    meta = arena + META + slot * META_ENTRY
+    mark = read64(arena + OFF_MARKS) + slot
+    own = own_address(arena, slot)
+    live = 0_u64
+    kept = 0_u64
+    freed = 0_u64
+    while head < stop
+      bits = read8(meta)
+      if bits & CARVED_FLAG != 0
+        free = bits & FREE_FLAG != 0
+        unless free
+          flags = read8(own)
+          if flags & OWN_PUB != 0
+            granule = (head - first).unsafe_shr(GRANULE_SHIFT)
+            set_pub_count_at(arena, granule, pub_count_at(arena, granule) + 1_u64)
+            live = live + 1_u64
+            kept = kept + chunk
+          elsif flags & OWN_LMARK == parity
+            live = live + 1_u64
+            kept = kept + chunk
+          else
+            write8(meta, bits | FREE_FLAG)
+            {% if flag?(:heap_verify) %}
+              poison(head, chunk)
+            {% end %}
+            freed = freed + 1_u64
+            free = true
+          end
+        end
+        if free
+          write8(own, 0_u64) if read8(own) != 0
+          write8(mark, IyiMark::WHITE) if read8(mark) != IyiMark::WHITE
+          write64(head + OFF_LINK, list)
+          write64(head + OFF_INDEX, slot)
+          list = head
+        end
+      end
+      head = head + chunk
+      slot = slot + 1_u64
+      meta = meta + META_ENTRY
+      mark = mark + 1_u64
+      own = own + 1_u64
+    end
+    {live, list, kept, freed}
+  end
+
+  # The bytes partition *record* kept, into the sum every partition's
+  # headroom is set by, and its budget from both.
+  def self.account_live(record : UInt64, kept : UInt64) : Nil
+    before = read64(record &+ REC_LIVE_BYTES)
+    write64(record &+ REC_LIVE_BYTES, kept)
+    total = Pointer(Atomic(UInt64)).new(pointerof(@@partition_live).address)
+    if kept >= before
+      total.value.add(kept - before)
+    else
+      total.value.sub(before - kept)
+    end
+    write64(record &+ REC_BUDGET, budget_for(kept))
+  end
+
+  def self.budget_for(kept : UInt64) : UInt64
+    live = @@partition_live
+    headroom = live * 2_u64
+    headroom = HEADROOM_MIN if headroom < HEADROOM_MIN
+    active = @@records_live
+    active = 1_u64 if active == 0
+    share = headroom.unsafe_div(active)
+    want = kept * 2_u64
+    want = share if want > share
+    want < UNIT_MIN ? UNIT_MIN : want
+  end
+
+  # ── Weak cells ────────────────────────────────────────────────────────
+
+  # A weak cell to *target*, made by `IyiWeak.cell`: listed on the
+  # partition whose `LOCAL` chunk the target is, whose local sweep clears
+  # it. Only that unit's fibers can hold the target, so the caller holds
+  # its token.
+  def self.weak_registered(cell : UInt64, target : UInt64) : Nil
+    arena = arena_of(target)
+    return if arena == 0 || !partition_arena?(arena)
+    id = owner_in_arena(arena, target)
+    return if id == 0
+    return if read8(own_address(arena, chunk_index(arena, target))) & OWN_PUB != 0
+    record = partition_at(id)
+    table_add(record &+ REC_WEAK, cell)
+  end
+
+  # After a local sweep: a cell whose target's chunk the sweep freed is
+  # cleared, and leaves the list; one whose target is not the
+  # partition's any more (published - the global clear's then) leaves it.
+  def self.sweep_weak(record : UInt64) : Nil
+    slot = record &+ REC_WEAK
+    count = table_count(slot)
+    return if count == 0
+    id = read64(record &+ REC_ID)
+    kept = 0_u64
+    k = 0_u64
+    while k < count
+      cell = table_at(slot, k)
+      target = read64(cell)
+      keep = false
+      if target != 0
+        arena = arena_of(target)
+        if arena != 0 && partition_arena?(arena) && target >= arena_first(arena) && target < read64(arena + OFF_HIGH)
+          chunk_slot = chunk_index(arena, target)
+          if read8(arena + META + chunk_slot * META_ENTRY) & FREE_FLAG != 0
+            write64(cell, 0_u64)
+          elsif owner_in_arena(arena, target) == id && read8(own_address(arena, chunk_slot)) & OWN_PUB == 0
+            keep = true
+          end
+        end
+      end
+      if keep
+        table_set(slot, kept, cell)
+        kept = kept + 1_u64
+      end
+      k = k + 1_u64
+    end
+    table_truncate(slot, kept)
+  end
+
+  # Cells whose target lies in `[low, high)` cleared: a large object about
+  # to be unmapped.
+  def self.clear_weak_in(record : UInt64, low : UInt64, high : UInt64) : Nil
+    slot = record &+ REC_WEAK
+    count = table_count(slot)
+    k = 0_u64
+    while k < count
+      cell = table_at(slot, k)
+      target = read64(cell)
+      write64(cell, 0_u64) if target >= low && target < high
+      k = k + 1_u64
+    end
+  end
+
+  # In the pause, after the global clear: cells the mark left white leave
+  # every partition's list (their memory is the sweep's next), so no
+  # local sweep writes through a cell that is gone.
+  def self.prune_weak_lists : Nil
+    each_record do |record|
+      slot = record &+ REC_WEAK
+      count = table_count(slot)
+      kept = 0_u64
+      k = 0_u64
+      while k < count
+        cell = table_at(slot, k)
+        if IyiWeak.live?(cell)
+          table_set(slot, kept, cell)
+          kept = kept + 1_u64
+        end
+        k = k + 1_u64
+      end
+      table_truncate(slot, kept) if count != 0
+    end
+  end
+
+  # Every live record, by id.
+  def self.each_record(& : UInt64 ->) : Nil
+    per_slab = PARTITION_SLAB // PARTITION_BYTES
+    last = @@record_slabs * per_slab
+    id = 1_u64
+    while id <= last
+      record = partition_at(id)
+      yield record if record != 0 && read64(record + REC_STATE) & REC_LIVE != 0
+      id = id + 1_u64
+    end
+  end
+
+  # ── Answers, death, merge, pin (design sections 2.1 row 2, 4.4) ──────
+
+  # After a task's answer is stored (`IyiHeap.answer`): if any word of it
+  # names a chunk of the dying fiber's partition - `LOCAL` or published,
+  # its runs are what is freed whole - and the box is not the partition's
+  # own, the partition is detached: at the unit's death the shared heap
+  # adopts it rather than its runs going back.
+  def self.answered(box : UInt64, slot : UInt64, bytes : UInt64) : Nil
+    fiber = IyiScheduler.current?
+    return unless fiber.is_a?(IyiFiber)
+    unit = fiber.unit
+    return unless unit.is_a?(IyiUnit)
+    record = unit.heap
+    return if record == 0 || unit.value_slot != 0
+    id = read64(record &+ REC_ID)
+    box_arena = arena_of(box)
+    return if box_arena != 0 && owner_in_arena(box_arena, box) == id
+    enter_barrier
+    found = false
+    word = slot
+    while word + 8_u64 <= slot + bytes && !found
+      value = read64(word)
+      if value != 0
+        arena = arena_of(value)
+        found = arena != 0 ? owner_in_arena(arena, value) == id : own_large_of(record, value) != 0
+      end
+      word = word + 8_u64
+    end
+    leave_barrier
+    return unless found
+    state = Pointer(Atomic(UInt64)).new(record &+ REC_STATE)
+    state.value.add(REC_DETACHED) if state.value.get & REC_DETACHED == 0
+    stat_add(pointerof(@@detached).address, 1_u64)
+  end
+
+  # The hook in `IyiScheduler.unregister`: the unit's last fiber has left
+  # its list, and the unit is no `Unit`'s, so nothing will ever allocate
+  # in its partition again. Called after the registry's lock is let go.
+  def self.unit_died(record : UInt64) : Nil
+    partition_death(record)
+  end
+
+  # A unit's partition at its death (design section 4.4): its lends
+  # published and returned, its weak cells to the dead cleared, and its
+  # runs back - whole to the pool where nothing on them is published,
+  # handed to the shared heap where something is, its `LOCAL` chunks
+  # there freed in place - or, detached by a pointer answer, every run
+  # the shared heap's. Then the record.
+  def self.partition_death(record : UInt64) : Nil
+    state = Pointer(Atomic(UInt64)).new(record &+ REC_STATE)
+    while true
+      seen = state.value.get
+      if seen & REC_BUSY != 0
+        IyiMark.spin_pause
+        next
+      end
+      break if state.value.compare_and_set(seen, seen | REC_DEAD)[1]
+    end
+    id = read64(record &+ REC_ID)
+    enter_barrier
+    lends = record &+ REC_LEND
+    k = 0_u64
+    while k < table_count(lends)
+      lend_walk(record, table_at(lends, k), true)
+      k = k + 1_u64
+    end
+    if state.value.get & REC_DETACHED != 0
+      hand_to_shared(record)
+    else
+      free_whole(record, id)
+    end
+    leave_barrier
+    partition_release(record)
+  end
+
+  # Every run of *record* to the pool or the shared heap, class by class
+  # (`partition_death`); the record's lists and return stacks are dropped
+  # with it, their chunks being free on runs that are nobody's now.
+  def self.free_whole(record : UInt64, id : UInt64) : Nil
+    clear_dead_weak(record, id)
+    index = 0
+    while index < CLASSES
+      runs = record &+ (FILL + index).to_u64 * 8_u64
+      if read64(runs) != 0
+        class_lock(index)
+        quiet_class(index, false)
+        run = read64(runs)
+        while run != 0
+          arena = run & (0_u64 &- MAP)
+          granule_first = granule_of(arena, run)
+          word = run_word(arena, granule_first)
+          n = run_n(word)
+          following = word & RUN_LINK
+          published = 0_u64
+          k = 0_u64
+          while k < n
+            published = published + pub_count_at(arena, granule_first + k)
+            k = k + 1_u64
+          end
+          if published == 0
+            {% if flag?(:heap_verify) %}
+              free_locals_in(arena, run, n)
+            {% end %}
+            pool_run(index, arena, run, n)
+            stat_add(pointerof(@@freed_whole).address, 1_u64)
+          else
+            free_locals_in(arena, run, n)
+            drain_run(arena, run, n)
+          end
+          run = following
+        end
+        write64(runs, 0_u64)
+        class_unlock(index)
+      end
+      index = index + 1
+    end
+    # The large objects under the runtime lock, as the local sweep reads
+    # them: a published one, or any under a mark beside the program, the
+    # shared heap's; a `LOCAL` one unmapped.
+    large = record &+ REC_LARGE
+    if table_count(large) != 0
+      lock
+      while table_count(large) != 0
+        node = table_at(large, table_count(large) - 1_u64)
+        table_truncate(large, table_count(large) - 1_u64)
+        if read64(node + 16_u64).unsafe_shr(16_u64) & OWN_PUB != 0 || LibIyiGCTable.__iyi_marking != 0_u8
+          write64(node + 16_u64, 0_u64)
+        else
+          free_large(node + LARGE_HEAD)
+        end
+      end
+      unlock
+    end
+  end
+
+  # A dead unit's `LOCAL` chunks on one run, freed where they lie: free,
+  # white, poisoned in a verifying build. Its published ones stay for the
+  # global sweep.
+  def self.free_locals_in(arena : UInt64, run : UInt64, n : UInt64) : Nil
+    chunk = read64(arena + OFF_CHUNK)
+    first = arena_first(arena)
+    stop = run + n.unsafe_shl(GRANULE_SHIFT)
+    head = first_head(arena, run)
+    slot = (head - first).unsafe_div(chunk)
+    while head < stop
+      meta = arena + META + slot * META_ENTRY
+      bits = read8(meta)
+      if bits & CARVED_FLAG != 0 && bits & FREE_FLAG == 0 && read8(own_address(arena, slot)) & OWN_PUB == 0
+        write8(meta, bits | FREE_FLAG)
+        write8(read64(arena + OFF_MARKS) + slot, IyiMark::WHITE)
+        {% if flag?(:heap_verify) %}
+          poison(head, chunk)
+        {% end %}
+      end
+      head = head + chunk
+      slot = slot + 1_u64
+    end
+  end
+
+  # Weak cells to a dead unit's `LOCAL` chunks cleared.
+  def self.clear_dead_weak(record : UInt64, id : UInt64) : Nil
+    slot = record &+ REC_WEAK
+    count = table_count(slot)
+    k = 0_u64
+    while k < count
+      cell = table_at(slot, k)
+      target = read64(cell)
+      if target != 0
+        arena = arena_of(target)
+        if arena != 0 && owner_in_arena(arena, target) == id && read8(own_address(arena, chunk_index(arena, target))) & OWN_PUB == 0
+          write64(cell, 0_u64)
+        end
+      end
+      k = k + 1_u64
+    end
+  end
+
+  # Every run of *record* handed to the shared heap whole, nothing freed:
+  # a pointer answer's partition, or a pinned unit's. Its objects are the
+  # shared heap's from here, freed by the global sweep when unreachable.
+  def self.hand_to_shared(record : UInt64) : Nil
+    index = 0
+    while index < CLASSES
+      runs = record &+ (FILL + index).to_u64 * 8_u64
+      if read64(runs) != 0
+        class_lock(index)
+        quiet_class(index, false)
+        run = read64(runs)
+        while run != 0
+          arena = run & (0_u64 &- MAP)
+          word = run_word(arena, granule_of(arena, run))
+          drain_run(arena, run, run_n(word))
+          run = word & RUN_LINK
+        end
+        write64(runs, 0_u64)
+        class_unlock(index)
+      end
+      index = index + 1
+    end
+    large = record &+ REC_LARGE
+    k = 0_u64
+    while k < table_count(large)
+      write64(table_at(large, k) + 16_u64, 0_u64)
+      k = k + 1_u64
+    end
+    table_truncate(large, 0_u64)
+  end
+
+  # `IyiHeap.merge`: every run of partition *from* re-owned by *into* -
+  # the shared heap for 0 - in O(runs), its lists and what the global
+  # sweep returned for it carried over, then *from* freed. The caller
+  # holds *into*'s unit's token, and *from* has no fiber running.
+  def self.merge(from : UInt64, into : UInt64) : Nil
+    return if from == 0 || from == into
+    enter_barrier
+    if into == 0
+      hand_to_shared(from)
+    else
+      into_id = read64(into &+ REC_ID)
+      index = 0
+      while index < CLASSES
+        runs = from &+ (FILL + index).to_u64 * 8_u64
+        if read64(runs) != 0
+          class_lock(index)
+          quiet_class(index, false)
+          drain_return(from, index)
+          run = read64(runs)
+          into_runs = into &+ (FILL + index).to_u64 * 8_u64
+          while run != 0
+            arena = run & (0_u64 &- MAP)
+            granule_first = granule_of(arena, run)
+            word = run_word(arena, granule_first)
+            n = run_n(word)
+            k = 0_u64
+            while k < n
+              set_owner_at(arena, granule_first + k, into_id)
+              k = k + 1_u64
+            end
+            set_run_word(arena, granule_first, read64(into_runs), n, RUN_OWNED)
+            write64(into_runs, run)
+            run = word & RUN_LINK
+          end
+          write64(runs, 0_u64)
+          # The free list after *into*'s own.
+          moved = Pointer(UInt64).new(from)[index]
+          if moved != 0
+            tail = moved
+            while read64(tail + OFF_LINK) != 0
+              tail = read64(tail + OFF_LINK)
+            end
+            write64(tail + OFF_LINK, Pointer(UInt64).new(into)[index])
+            Pointer(UInt64).new(into)[index] = moved
+            Pointer(UInt64).new(from)[index] = 0_u64
+          end
+          class_unlock(index)
+        end
+        index = index + 1
+      end
+      large = from &+ REC_LARGE
+      while table_count(large) != 0
+        node = table_at(large, table_count(large) - 1_u64)
+        table_truncate(large, table_count(large) - 1_u64)
+        write64(node + 16_u64, (read64(node + 16_u64) & 0xFF0000_u64) | into_id)
+        table_add(into &+ REC_LARGE, node)
+      end
+      weak = from &+ REC_WEAK
+      k = 0_u64
+      while k < table_count(weak)
+        table_add(into &+ REC_WEAK, table_at(weak, k))
+        k = k + 1_u64
+      end
+      lends = from &+ REC_LEND
+      k = 0_u64
+      while k < table_count(lends)
+        table_add(into &+ REC_LEND, table_at(lends, k))
+        k = k + 1_u64
+      end
+      write64(into &+ REC_HELD, read64(into &+ REC_HELD) + read64(from &+ REC_HELD))
+    end
+    leave_barrier
+    stat_add(pointerof(@@merges).address, 1_u64)
+    partition_release(from)
+  end
+
+  # `IyiHeap.pin`: the running unit allocates in the shared heap from
+  # here, every fiber of it, and its partition is the shared heap's.
+  def self.pin_running : Nil
+    fiber = IyiScheduler.current?
+    return unless fiber.is_a?(IyiFiber)
+    unit = fiber.unit
+    return unless unit.is_a?(IyiUnit)
+    record = unit.heap
+    return if record == 0
+    IyiRuntimeLock.lock
+    unit.heap = 0_u64
+    write64(record &+ REC_UNIT, 0_u64)
+    other = unit.fibers
+    while other.is_a?(IyiFiber)
+      other.alloc = 0_u64 if other.alloc == record
+      other = other.next_in_unit
+    end
+    IyiRuntimeLock.unlock
+    fiber.alloc = 0_u64
+    IyiScheduler.reinstall(fiber)
+    state = Pointer(Atomic(UInt64)).new(record &+ REC_STATE)
+    state.value.add(REC_PINNED)
+    merge(record, 0_u64)
+    stat_add(pointerof(@@pins).address, 1_u64)
+  end
+
+  # A record let go: its tables unmapped, its live bytes out of the sum,
+  # off the caches list, zeroed but for its id and on the free list.
+  # Its runs are someone else's already.
+  def self.partition_release(record : UInt64) : Nil
+    IyiRoots.fatal("iyi: a partition freed while installed\n") if @@cache == record
+    table_free(record &+ REC_LEND)
+    table_free(record &+ REC_WEAK)
+    table_free(record &+ REC_LARGE)
+    live = read64(record &+ REC_LIVE_BYTES)
+    Pointer(Atomic(UInt64)).new(pointerof(@@partition_live).address).value.sub(live) if live != 0
+    id = read64(record &+ REC_ID)
+    lock
+    previous = 0_u64
+    cursor = @@caches
+    while cursor != 0 && cursor != record
+      previous = cursor
+      cursor = read64(cursor + CACHE_NEXT)
+    end
+    if cursor == record
+      if previous == 0
+        @@caches = read64(record + CACHE_NEXT)
+      else
+        write64(previous + CACHE_NEXT, read64(record + CACHE_NEXT))
+      end
+    end
+    clear = 0_u64
+    while clear < PARTITION_BYTES
+      write64(record + clear, 0_u64)
+      clear = clear + 8_u64
+    end
+    write64(record + REC_ID, id)
+    write64(record + REC_FREE, @@record_free)
+    @@record_free = record
+    @@records_live = @@records_live - 1_u64
+    unlock
+  end
+
+  # ── Units of `Unit`s whose handle died ────────────────────────────────
+
+  # In the pause, the mark complete: a record whose unit is a `Unit`'s
+  # (`value_slot`) and has no fiber dies when the mark left the handle -
+  # the chunk holding the value slot - white. Queued, dead, its unit
+  # forgotten; reaped outside the pause (`reap_dead_partitions`).
+  def self.find_dead_units : Nil
+    each_record do |record|
+      unit_address = read64(record + REC_UNIT)
+      if unit_address != 0 && read64(record + REC_STATE) & (REC_DEAD | REC_BUSY) == 0
+        unit = Pointer(Void).new(unit_address).as(IyiUnit)
+        slot = unit.value_slot
+        if slot != 0 && !unit.fibers.is_a?(IyiFiber) && !IyiWeak.live?(slot)
+          unit.heap = 0_u64
+          write64(record + REC_UNIT, 0_u64)
+          write64(record + REC_STATE, read64(record + REC_STATE) | REC_DEAD)
+          @@dead_queued = @@dead_queued + 1_u64
+        end
+      end
+    end
+    @@takeover_armed = 1_u64
+  end
+
+  # The queued deaths, by whichever thread of the pool comes by first.
+  def self.reap_dead_partitions : Nil
+    while @@dead_queued != 0
+      found = 0_u64
+      lock
+      each_record do |record|
+        if found == 0 && read64(record + REC_STATE) & REC_DEAD != 0 && read64(record + REC_STATE) & REC_BUSY == 0
+          found = record
+        end
+      end
+      if found != 0
+        write64(found + REC_STATE, read64(found + REC_STATE) | REC_BUSY)
+        @@dead_queued = @@dead_queued - 1_u64
+      else
+        @@dead_queued = 0_u64
+      end
+      unlock
+      return if found == 0
+      write64(found + REC_STATE, read64(found + REC_STATE) - REC_BUSY - REC_DEAD)
+      partition_death(found)
+    end
+  end
+
+  # ── Idle takeover (design section 4.1, trigger 3) ─────────────────────
+
+  # An idle pool worker *st*, holding no unit (`IyiWorkers.work`), after a
+  # global collection: the free token of a unit whose partition owes a
+  # quarter of its budget taken - never a `YIELDED` one - its partition
+  # collected on the worker's own fiber with nothing installed, and the
+  # token given back, the fibers that waited for it onto this worker's
+  # ring. Answers whether it collected one; disarmed once a look finds
+  # none.
+  def self.take_over_idle(st : IyiSchedulerState) : Bool
+    reap_dead_partitions if @@dead_queued != 0
+    return false if @@takeover_armed == 0 || @@local_off || LibIyiGCTable.__iyi_marking != 0_u8
+    found = 0_u64
+    unit_address = 0_u64
+    IyiRuntimeLock.lock
+    each_record do |record|
+      if found == 0 && read64(record + REC_STATE) & (REC_DEAD | REC_BUSY | REC_DETACHED) == 0
+        address = read64(record + REC_UNIT)
+        if address != 0 && read64(record + REC_DEBT) &* 4_u64 >= budget_of(record)
+          unit = Pointer(Void).new(address).as(IyiUnit)
+          if unit.holder == 0_u64 && unit.take(st.object_id)
+            found = record
+            unit_address = address
+            write64(record + REC_STATE, read64(record + REC_STATE) | REC_BUSY)
+          end
+        end
+      end
+    end
+    @@takeover_armed = 0_u64 if found == 0
+    IyiRuntimeLock.unlock
+    return false if found == 0
+    unit = Pointer(Void).new(unit_address).as(IyiUnit)
+    st.unit = unit
+    local_collect(found, nil, true)
+    Pointer(Atomic(UInt64)).new(found + REC_STATE).value.sub(REC_BUSY)
+    IyiScheduler.release_unit(st)
+    true
+  end
+end
+
+class IyiMark
+  def self.collecting? : Bool
+    @@collecting
+  end
+
+  # A slice of a partition arena (`sweep_slice`'s for one), run by run
+  # from the arena's sweep cursor: a pool run passed over; on a
+  # partition's run, a white chunk the mark found dead and older than it
+  # freed onto its owner's return stack, a marked one white again and this
+  # epoch's; on a run handed to the shared heap the same, the dead freed
+  # in place, and the run the pool's once nothing on it is allocated. A
+  # free chunk is its owner's list's or nobody's, and only whitened.
+  # Answers 0: nothing of a partition arena is the centre's.
+  def self.sweep_partition_slice(arena : UInt64, span : UInt64) : UInt64
+    chunk = IyiHeap.arena_chunk(arena)
+    first = IyiHeap.arena_first(arena)
+    cursor = IyiHeap.read64(arena + IyiHeap::OFF_SWEEP_CURSOR)
+    high = Pointer(Atomic(UInt64)).new(arena + IyiHeap::OFF_HIGH).value.get
+    if cursor >= high
+      IyiHeap.write64(arena + IyiHeap::OFF_SWEEP_CURSOR, IyiHeap::SWEEP_DONE)
+      return 0_u64
+    end
+    index = IyiHeap.class_index(chunk)
+    epoch = @@epoch_flag
+    walked = 0_u64
+    swept = 0_u64
+    freed = 0_u64
+    kept = 0_u64
+    kept_bytes = 0_u64
+    marks = IyiHeap.read64(arena + IyiHeap::OFF_MARKS)
+    while cursor < high && walked < span
+      granule = (cursor - first).unsafe_shr(IyiHeap::GRANULE_SHIFT)
+      word = IyiHeap.run_word(arena, granule)
+      n = IyiHeap.run_n(word)
+      IyiRoots.fatal("iyi: a partition arena's run table has a hole\n") if n == 0
+      state = IyiHeap.run_state(word)
+      stop = cursor + n.unsafe_shl(IyiHeap::GRANULE_SHIFT)
+      if state != IyiHeap::RUN_POOL
+        owner = IyiHeap.owner_at(arena, granule)
+        record = state == IyiHeap::RUN_OWNED ? IyiHeap.partition_at(owner) : 0_u64
+        chain = 0_u64
+        tail = 0_u64
+        allocated = 0_u64
+        head = IyiHeap.first_head(arena, cursor)
+        slot = (head - first).unsafe_div(chunk)
+        while head < stop
+          byte = arena + IyiHeap::META + slot * IyiHeap::META_ENTRY
+          bits = IyiHeap.read8(byte)
+          colour = IyiHeap.read8(marks + slot)
+          if bits & IyiHeap::CARVED_FLAG != 0
+            if bits & IyiHeap::FREE_FLAG != 0
+              IyiHeap.write8(marks + slot, WHITE) if colour != WHITE
+            elsif colour != WHITE
+              kept_bytes = kept_bytes &+ chunk
+              kept = kept &+ 1_u64
+              IyiHeap.write8(byte, (bits - (bits & IyiHeap::EPOCH_FLAG)) | epoch)
+              IyiHeap.write8(marks + slot, WHITE)
+              allocated = allocated + 1_u64
+            elsif bits & IyiHeap::EPOCH_FLAG != epoch
+              swept = swept &+ 1_u64
+              freed = freed &+ chunk
+              IyiHeap.write8(byte, bits | IyiHeap::FREE_FLAG)
+              if record != 0
+                IyiHeap.write64(head + IyiHeap::OFF_LINK, chain)
+                IyiHeap.write64(head + IyiHeap::OFF_INDEX, slot)
+                tail = head if chain == 0
+                chain = head
+              end
+            else
+              allocated = allocated + 1_u64
+            end
+          end
+          head = head + chunk
+          slot = slot + 1_u64
+        end
+        IyiHeap.push_return(record, index, chain, tail) if chain != 0
+        if state == IyiHeap::RUN_DRAINING && allocated == 0
+          IyiHeap.class_lock(index)
+          IyiHeap.pool_run(index, arena, cursor, n)
+          IyiHeap.class_unlock(index)
+          IyiHeap.note_drained
+        end
+      end
+      walked = walked + n.unsafe_shl(IyiHeap::GRANULE_SHIFT)
+      cursor = stop
+    end
+    @@swept = @@swept + swept
+    @@bytes_freed = @@bytes_freed + freed
+    @@kept = @@kept + kept
+    @@bytes_kept = @@bytes_kept + kept_bytes
+    IyiHeap.write64(arena + IyiHeap::OFF_SWEEP_CURSOR, cursor >= high ? IyiHeap::SWEEP_DONE : cursor)
+    0_u64
+  end
+
+  # What the last mark kept in partition arenas, in bytes: the arenas'
+  # live counts by their chunks. The shared heap's budget is set by what
+  # survived less this (design section 4.2).
+  def self.partition_survived : UInt64
+    total = 0_u64
+    arena = IyiHeap.first_arena
+    while arena != 0
+      total = total + IyiHeap.arena_live(arena) * IyiHeap.arena_chunk(arena) if IyiHeap.partition_arena?(arena)
+      arena = IyiHeap.arena_next(arena)
+    end
+    total
+  end
+
+  # A partition's refill of class *index* that owes sweeping (`IyiHeap.
+  # partition_take`): a slice of a partition arena of the class, claimed
+  # and let go as an allocating thread's own (`sweep_for`), and the
+  # partition's return stack read after it; until something comes back,
+  # the class has nothing left to sweep, or every arena with some is in
+  # another walker's slice, when a run is taken instead. Inside the
+  # allocator's bracket.
+  def self.partition_sweep_for(record : UInt64, index : Int32) : UInt64
+    while IyiHeap.sweep_left_of(index) != 0_u64
+      IyiHeap.class_lock(index)
+      epoch = @@epoch
+      arena = IyiHeap.class_first(index)
+      chosen = 0_u64
+      while arena != 0 && chosen == 0
+        if IyiHeap.partition_arena?(arena) && sweep_left?(arena, epoch) && IyiHeap.read64(arena + IyiHeap::OFF_SWEEPING) != epoch
+          begin_arena(arena, epoch, 1) if IyiHeap.arena_epoch(arena) != epoch
+          IyiHeap.write64(arena + IyiHeap::OFF_SWEEPING, epoch)
+          chosen = arena
+        end
+        arena = IyiHeap.class_next(arena)
+      end
+      IyiHeap.class_unlock(index)
+      return 0_u64 if chosen == 0
+      sweep_slice(chosen, SWEEP_SPAN)
+      IyiHeap.class_lock(index)
+      release_claim(chosen, epoch)
+      arena_done(chosen, epoch)
+      IyiHeap.class_unlock(index)
+      head = IyiHeap.drain_return(record, index)
+      return head if head != 0
+    end
+    0_u64
+  end
+end
+
+# heap22's publication entries, which codegen and the trusted modules
+# call at a crossing (contract section 4).
+fun __iyi_publish(value : Void*) : Nil
+  IyiHeap.publish(value.address)
+end
+
+fun __iyi_publish_into(destination : Void*, value : Void*) : Nil
+  IyiHeap.publish_into(destination.address, value.address)
+end

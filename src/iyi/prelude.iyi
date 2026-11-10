@@ -47,6 +47,12 @@ require "./atomic"
   require "./concurrency"
   # Kernel threads and the stop-the-world over them (GC_DESIGN.md Stage 4).
   require "./thread"
+  # heap22's partitions in the runtime (slice S1), in a build that asks
+  # for them; without `-Dheap_partitions` every unit allocates in the
+  # shared heap and nothing below is compiled.
+  {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) %}
+    require "./heap_partition"
+  {% end %}
   # The chaos scheduler (SPEC.md III.4.17), and its points in `Atomic`'s
   # verbs, only in a build that asks for them: `iyi test --chaos` builds
   # with `-Diyi_chaos`.
@@ -105,6 +111,25 @@ require "./atomic"
     end
 
     def self.pin : Nil
+    end
+
+    # One heap: nothing is ever local to a partition, published, merged or
+    # collected apart (heap22 slice S1's names).
+    def self.publish(address : UInt64) : Nil
+    end
+
+    def self.owner_of(address : UInt64) : UInt64
+      0_u64
+    end
+
+    def self.local?(address : UInt64) : Bool
+      false
+    end
+
+    def self.collect_local(record : UInt64) : Nil
+    end
+
+    def self.merge(from : UInt64, into : UInt64) : Nil
     end
   end
 {% end %}
@@ -2579,8 +2604,15 @@ require "./file"
 
       # *record*'s lists to the centre and the record back on the free
       # list, zeroed but for its id. No fiber may name it in `alloc`, and
-      # no thread may have it installed.
+      # no thread may have it installed. With partitions in the runtime a
+      # record's lists are its runs' and its fill slots its run lists: its
+      # runs are handed to the shared heap whole and the record let go
+      # (`IyiHeap.merge`, heap_partition.iyi).
       def self.partition_free(record : UInt64) : Nil
+        {% if flag?(:heap_partitions) %}
+          merge(record, 0_u64)
+          return
+        {% end %}
         IyiRoots.fatal("iyi: a partition freed while installed\n") if @@cache == record
         retire_lists(record)
         id = read64(record + REC_ID)
@@ -2975,6 +3007,15 @@ require "./file"
       # allocation carried in its body.
       @[NoInline]
       def self.slice_full(slice : UInt64) : Nil
+        # A partition's slice is its own debt, and its trigger its own
+        # budget: the global trigger counts the shared heap's allocation
+        # (and what is published) only (heap22, design section 4.2).
+        {% if flag?(:heap_partitions) %}
+          if read64(@@cache &+ REC_ID) != 0
+            partition_slice(@@cache, slice)
+            return
+          end
+        {% end %}
         IyiMark.count_allocating
         if LibIyiGCTable.__iyi_marking != 0_u8
           IyiMark.assist
@@ -3013,6 +3054,11 @@ require "./file"
       # when it has one. Answers the object: the chunk's head, or the word
       # after it. A large object is always headed, its bits in that word.
       def self.take_inside(table : Pointer(UInt64), bytes : UInt64, clear : Bool, bits : UInt64, type_id : UInt64) : UInt64
+        # A partition's record takes runs, never the centre's batches
+        # nor a fill arena (heap_partition.iyi).
+        {% if flag?(:heap_partitions) %}
+          return partition_take_inside(table, bytes, clear, bits, type_id) if read64(table.address &+ REC_ID) != 0
+        {% end %}
         headed = bits & HEADED_FLAG != 0
         # Past the top class: a mapping of its own, headed either way -
         # no arena, no byte, no slot - and `size_of` reads the node.
@@ -3980,6 +4026,15 @@ require "./file"
           # as an index. `bench/concurrent_mark.sh`'s bursts of frees faulted
           # or lost a chunk in 25 runs of 30.
           write64(table.address &+ CACHE_INSIDE, read64(table.address &+ CACHE_INSIDE) &+ 1_u64)
+          # The owner check (heap22): a partition lists only its own
+          # chunks, a thread's cache only the shared heap's; anything else
+          # is left to its owner's sweep or the global one.
+          {% if flag?(:heap_partitions) %}
+            unless partition_frees?(arena, head, table)
+              leave(table)
+              return
+            end
+          {% end %}
           slot = chunk_index(arena, head)
           # The last epoch's parity: the last mark kept this chunk and the
           # lazy sweep of its arena has not reached it, and a slice walking
@@ -4019,8 +4074,14 @@ require "./file"
           # one run in four of a program joining a 4 MB string. The flag
           # is read under the lock the mark raises and lowers it under,
           # so no mark begins or ends between the look and the unmap.
+          # Under partitions only the owner frees a large object, its
+          # table's entry with it (`partition_free_large`).
           lock
-          free_large(pointer.address - HEADER) if LibIyiGCTable.__iyi_marking == 0_u8
+          {% if flag?(:heap_partitions) %}
+            free_large(pointer.address - HEADER) if LibIyiGCTable.__iyi_marking == 0_u8 && partition_free_large(pointer.address - HEADER - LARGE_HEAD)
+          {% else %}
+            free_large(pointer.address - HEADER) if LibIyiGCTable.__iyi_marking == 0_u8
+          {% end %}
           unlock
         end
       end
@@ -4067,7 +4128,9 @@ require "./file"
       end
 
       # Every free list emptied, in a pause with every thread stopped: the
-      # sweep's `begin_sweep` says why.
+      # sweep's `begin_sweep` says why. A partition's lists are not: they
+      # hold its own runs' chunks, which the global sweep leaves free
+      # whatever their parity (`IyiMark.sweep_partition_slice`).
       def self.drop_free_lists : Nil
         index = 0
         while index < CLASSES
@@ -4078,6 +4141,9 @@ require "./file"
         while page != 0
           table = Pointer(UInt64).new(page)
           index = 0
+          {% if flag?(:heap_partitions) %}
+            index = CLASSES if read64(page + REC_ID) != 0
+          {% end %}
           while index < CLASSES
             table[index] = 0_u64
             index = index + 1
@@ -4168,11 +4234,20 @@ require "./file"
       # class's refill or carve, holding the arena in a local: either
       # would have stamped the class used this collection.
       def self.let_go_fill(arena : UInt64) : Nil
+        # A partition arena is no cache's fill arena, and a record's fill
+        # slots are its run lists (heap22).
+        {% if flag?(:heap_partitions) %}
+          return if partition_arena?(arena)
+        {% end %}
         index = class_index(read64(arena + OFF_CHUNK))
         page = @@caches
         while page != 0
           table = Pointer(UInt64).new(page)
-          table[FILL + index] = 0_u64 if table[FILL + index] == arena
+          {% if flag?(:heap_partitions) %}
+            table[FILL + index] = 0_u64 if table[FILL + index] == arena && read64(page + REC_ID) == 0
+          {% else %}
+            table[FILL + index] = 0_u64 if table[FILL + index] == arena
+          {% end %}
           page = read64(page + CACHE_NEXT)
         end
         write64(arena + OFF_OWNER, 0_u64)
@@ -7383,6 +7458,11 @@ require "./file"
       # before anything can stop this thread. Answers the batch of dead
       # chunks for the centre; the caller hands it over under the lock.
       def self.sweep_slice(arena : UInt64, span : UInt64) : UInt64
+        # A partition arena's slice frees onto its owners' return stacks
+        # and leaves no batch (heap_partition.iyi).
+        {% if flag?(:heap_partitions) %}
+          return sweep_partition_slice(arena, span) if IyiHeap.partition_arena?(arena)
+        {% end %}
         chunk = IyiHeap.arena_chunk(arena)
         first = IyiHeap.arena_first(arena)
         batch_head = 0_u64
@@ -7814,6 +7894,13 @@ require "./file"
         # is unreachable and still unswept, which is the one moment a weak
         # reference to it can be forgotten before its memory is reused.
         IyiWeak.clear
+        # Partitions (heap22): their weak lists lose the cells the mark
+        # left white, and a `Unit`'s partition whose handle it left white
+        # is queued to die.
+        {% if flag?(:heap_partitions) %}
+          IyiHeap.prune_weak_lists
+          IyiHeap.find_dead_units
+        {% end %}
         # Every free list dropped first - the centre's and each stopped
         # thread's cache's - which is what lets a mapping go back without
         # a walk of the lists for its chunks, and what `begin_sweep` says
@@ -7824,6 +7911,15 @@ require "./file"
         arena = IyiHeap.first_arena
         while arena != 0
           following = IyiHeap.arena_next(arena)
+          # A partition arena holds runs its partitions and its pool name:
+          # it is never let go here (heap22).
+          {% if flag?(:heap_partitions) %}
+            if IyiHeap.partition_arena?(arena)
+              previous = arena
+              arena = following
+              next
+            end
+          {% end %}
           # What the sweep listed and no cache took: idle and warm from
           # here, the lists being gone.
           IyiHeap.idle_listed(arena)
@@ -7855,6 +7951,11 @@ require "./file"
           if word & COLOUR == WHITE && word & IyiHeap::EPOCH_FLAG != @@epoch_flag
             @@bytes_freed = @@bytes_freed + IyiHeap.read64(node + IyiHeap::OFF_MAP) - IyiHeap::LARGE_USER
             @@swept = @@swept + 1_u64
+            # A partition's large object leaves its table first (heap22).
+            {% if flag?(:heap_partitions) %}
+              owner = IyiHeap.read64(node + 16_u64) & 0xFFFF_u64
+              IyiHeap.table_remove(IyiHeap.partition_at(owner) + IyiHeap::REC_LARGE, node) if owner != 0
+            {% end %}
             IyiHeap.free_large(node + IyiHeap::LARGE_HEAD)
           elsif word & COLOUR != WHITE
             @@bytes_kept = @@bytes_kept + IyiHeap.read64(node + IyiHeap::OFF_MAP) - IyiHeap::LARGE_USER
@@ -8035,6 +8136,19 @@ require "./file"
       # endpoints, 3 interleaved rounds, the epochs and debts from 2 of a
       # counting copy not committed).
       def self.next_budget(survived : UInt64) : UInt64
+        # Partitions (heap22, design section 4.2): the global trigger
+        # counts the shared heap's allocation and what is published, so
+        # its budget is set by what survived outside the partition arenas,
+        # floored at `SHARED_MIN` and no longer multiplied by allocating
+        # threads - lock blocks allocate in the shared heap on every
+        # worker, and the old floor would count every one of them again.
+        {% if flag?(:heap_partitions) %}
+          partitioned = partition_survived
+          shared = survived > partitioned ? survived - partitioned : 0_u64
+          allocating_threads
+          grown_shared = shared.unsafe_div(100_u64) * @@growth
+          return grown_shared < IyiHeap::SHARED_MIN ? IyiHeap::SHARED_MIN : grown_shared
+        {% end %}
         grown = survived.unsafe_div(100_u64) * @@growth
         floor = MIN_BUDGET
         {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
@@ -10191,13 +10305,16 @@ require "./file"
 # and *value* stored into *destination*, a `Share` object whose type's
 # mutation scan was incomplete. With every unit allocating in the shared
 # heap, no object is local to a partition, so neither has anything to do:
-# these bodies are the whole of it until a build asks for partitions
-# (`-Dheap_partitions`), whose arena branch defines its own.
-fun __iyi_publish(value : Void*) : Nil
-end
+# these bodies are the whole of it unless the build asks for partitions
+# on the arena allocator (`-Dheap_partitions`), whose own are in
+# heap_partition.iyi.
+{% unless flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
+  fun __iyi_publish(value : Void*) : Nil
+  end
 
-fun __iyi_publish_into(destination : Void*, value : Void*) : Nil
-end
+  fun __iyi_publish_into(destination : Void*, value : Void*) : Nil
+  end
+{% end %}
 
 # iyi: `memcpy` and `memmove`, where the prelude defines `memset` and for its
 # reason. Codegen copies a value larger than `LLVMTyper::INDIRECT_ABOVE`
@@ -10331,10 +10448,22 @@ end
     @@count : UInt64 = 0_u64
     @@capacity : UInt64 = 0_u64
 
+    # Under partitions (heap22) the cell and the table are the shared
+    # heap's, whatever the caller allocates in: a local sweep frees what
+    # its unit alone holds, and a cell is read by the pause's clear; and a
+    # cell whose target is a partition's `LOCAL` chunk is listed on that
+    # partition too, whose local sweep clears it when it frees the target.
     def self.cell(address : UInt64) : Pointer(UInt64)
-      cell = __iyi_malloc_atomic64(8_u64).as(Pointer(UInt64))
+      {% if flag?(:heap_partitions) && !flag?(:wasm32) %}
+        cell = IyiHeap.alloc_shared(8_u64, true).as(Pointer(UInt64))
+      {% else %}
+        cell = __iyi_malloc_atomic64(8_u64).as(Pointer(UInt64))
+      {% end %}
       cell.value = address
       register(cell.address)
+      {% if flag?(:heap_partitions) && !flag?(:wasm32) %}
+        IyiHeap.weak_registered(cell.address, address)
+      {% end %}
       cell
     end
 
@@ -10354,7 +10483,11 @@ end
         end
         wanted = @@capacity == 0_u64 ? 64_u64 : @@capacity * 2_u64
         unlock
-        fresh = __iyi_malloc_atomic64(wanted * 8_u64).as(Pointer(UInt64))
+        {% if flag?(:heap_partitions) && !flag?(:wasm32) %}
+          fresh = IyiHeap.alloc_shared(wanted * 8_u64, true).as(Pointer(UInt64))
+        {% else %}
+          fresh = __iyi_malloc_atomic64(wanted * 8_u64).as(Pointer(UInt64))
+        {% end %}
         lock
         if @@capacity < wanted
           index = 0_u64

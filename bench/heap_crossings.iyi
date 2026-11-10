@@ -283,6 +283,7 @@
     group do |g|
       task = g.spawn(in: u) { |value| build(15) }
       got = task.value
+      crossed(got.is_a?(Payload) ? got.object_id : 0_u64, "unit answer")
       g.spawn(in: u) do |value|
         collect_here
         value
@@ -308,6 +309,13 @@
     nil
   end
 
+  # The value a send left in *box*'s ring, checked where it crossed
+  # (`crossed`). No receiver waits on *box* yet, so the send stored it.
+  @[NoInline]
+  def ring_crossed(box : Channel(Payload), what : String) : Nil
+    crossed(box.@ring[box.@first].object_id, what) if box.@count > 0
+  end
+
   def channel_check(seed : Int32, by_select : Bool) : Nil
     box = Channel(Payload).new(1)
     done = Channel(Int32).new(1)
@@ -315,8 +323,10 @@
       g.spawn(unit: :new) do
         if by_select
           select_payload(box, seed)
+          ring_crossed(box, "select")
         else
           send_payload(box, seed)
+          ring_crossed(box, "channel")
         end
         collect_here
         done.send(1)
@@ -404,10 +414,31 @@
     Unit.new { build(seed) }
   end
 
+  # The value `Unit.new` made, checked where it crossed, before any
+  # collection: in the new unit's partition, or the shared heap's for a
+  # unit placed on the main thread, and in no chunk of its maker's.
+  @[NoInline]
+  def made_for(u : Unit(Payload), what : String) : Nil
+    {% if flag?(:heap_partitions) %}
+      record = IyiScheduler.current.alloc
+      return if record == 0_u64
+      maker = IyiHeap.partition_id(record)
+      node = Pointer(Void).new(u.@value.object_id).as(Payload?)
+      index = NODES - 1
+      while node.is_a?(Payload)
+        fail("#{what}: node #{index} was made in its maker's partition") if IyiHeap.owner_of(node.object_id) == maker
+        fail("#{what}: node #{index}'s label was made in its maker's partition") if IyiHeap.owner_of(node.label.object_id) == maker
+        node = node.next_node
+        index = index - 1
+      end
+    {% end %}
+  end
+
   def unit_new_check : Nil
     group do |outer|
       outer.spawn(unit: :new) do
         u = make_unit(17)
+        made_for(u, "unit new")
         collect_here
         group do |g|
           g.spawn(in: u) do |value|
@@ -448,15 +479,42 @@
     Mutex.new { [first] }
   end
 
+  # The strings in *m*, checked where they crossed, before any collection:
+  # none `LOCAL` to a partition, since a lock block's captures and
+  # `Mutex.new`'s are published, and what the block makes is the shared
+  # heap's (the lock's bracket). Deterministic where the poison is not
+  # (`crossed`): without the publish the strings are reached from the
+  # shared value only, yet a word a frame still held kept them through the
+  # collection on one machine and not another (`mutex_new` and `box`
+  # passed on Linux, `mutex_capture` on tmac and tssh).
+  @[NoInline]
+  def held_crossed(m : Mutex(Array(String)), what : String) : Nil
+    {% if flag?(:heap_partitions) %}
+      first = m.get do |held|
+        local = -1
+        held.each_with_index { |s, i| local = i if local < 0 && IyiHeap.local?(s.object_id) }
+        local
+      end
+      fail("#{what}: string #{first} is still local to its unit's partition after the crossing") unless first == -1
+    {% end %}
+  end
+
   def mutex_check(seed : Int32, how : String) : Nil
     shared = Mutex.new { [] of String }
     made = Channel(Mutex(Array(String))).new(1)
     group do |g|
       g.spawn(unit: :new) do
         case how
-        when "capture" then lock_capture(shared, seed)
-        when "bracket" then lock_bracket(shared, seed)
-        else                made.send(mutex_made(seed))
+        when "capture"
+          lock_capture(shared, seed)
+          held_crossed(shared, "mutex capture")
+        when "bracket"
+          lock_bracket(shared, seed)
+          held_crossed(shared, "mutex bracket")
+        else
+          fresh = mutex_made(seed)
+          held_crossed(fresh, "mutex new")
+          made.send(fresh)
         end
         collect_here
         0
@@ -565,13 +623,44 @@
     nil
   end
 
+  # What a pin check stashed, checked where it crossed, before any
+  # collection: the pin merged the unit's partition into the shared heap,
+  # so the stash's chunk and every node and label of the chain have no
+  # owner. Deterministic where the poison is not (`held_crossed`).
+  @[NoInline]
+  def pinned(how : String, what : String) : Nil
+    {% if flag?(:heap_partitions) %}
+      address = Stash.take
+      shared_made(address, "#{what}: the stash")
+      chain = case how
+              when "box"    then Box(Payload).unbox(Pointer(Void).new(address)).object_id
+              when "malloc" then Pointer(UInt64).new(address).value
+              else               Pointer(Void).new(address).as(Holder).payload.object_id
+              end
+      node = Pointer(Void).new(chain).as(Payload?)
+      index = NODES - 1
+      while node.is_a?(Payload)
+        shared_made(node.object_id, "#{what}: node #{index}")
+        shared_made(node.label.object_id, "#{what}: node #{index}'s label")
+        node = node.next_node
+        index = index - 1
+      end
+    {% end %}
+  end
+
   def pin_check(how : String) : Nil
     group do |g|
       g.spawn(unit: :new) do
         case how
-        when "box"     then stash_box(20)
-        when "malloc"  then stash_malloc(21)
-        else                stash_storage(22)
+        when "box"
+          stash_box(20)
+          pinned(how, "box")
+        when "malloc"
+          stash_malloc(21)
+          pinned(how, "gc malloc")
+        else
+          stash_storage(22)
+          pinned(how, "reference storage")
         end
         collect_here
         0
@@ -634,6 +723,7 @@
             label_for(24, 1)
           end
           shared_made(task.object_id, "glue: the task")
+          shared_made(task.fiber.unit.object_id, "glue: the unit")
           collect_here
           go.send(1)
           got = task.value

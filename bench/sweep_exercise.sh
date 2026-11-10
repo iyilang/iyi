@@ -274,7 +274,7 @@ echo "== the idle trim beside eight threads that allocate"
 # six classes, each word written with its thread's pattern and read back,
 # while a ninth runs the idle trim back to back for 20 s.
 stress_run() {
-  "$2" 8 20 >"$WORK/$1.out" 2>&1 && grep -q "every block read back whole" "$WORK/$1.out"
+  "$2" 8 "${3:-20}" >"$WORK/$1.out" 2>&1 && grep -q "every block read back whole" "$WORK/$1.out"
 }
 if ! "$IYI" build --release -o "$WORK/trim_stress" "$REPO/bench/trim_stress.iyi" >"$WORK/trim_stress.build.log" 2>&1; then
   echo "  trim stress: build failed"; sed -n '1,12p' "$WORK/trim_stress.build.log"; status=1
@@ -288,31 +288,79 @@ fi
 # before `IyiHeap.unlist_page`: two refills adopting the batches of
 # adjacent slices both count the page the slices share, the arena's count
 # reaches zero with pages listed, and the trim and the pause make idle
-# pages under objects a cache handed out. On darwin's sixteen-kilobyte
-# pages the stress caught it in 11 runs of 11 of 20 s on macOS 26.6,
-# Apple M2 Pro, 10 cores (the user's machine).
-mkdir -p "$WORK/doublecount/iyi"
-cp -R "$REPO/src/iyi/." "$WORK/doublecount/iyi/"
-if ! awk '{ if ($0 ~ /^          count = count \+ 1_u64 if unlist_page\(arena, page\)$/) {
-         print "          if page_listed?(arena, arena + page * PAGE)"
-         print "            set_listed(arena, arena + page * PAGE, arena + (page + 1_u64) * PAGE, false)"
-         print "            count = count + 1_u64"
-         print "          end"; found = 1; next }
-       print } END { if (!found) exit 3 }' "$REPO/src/iyi/prelude.iyi" > "$WORK/doublecount/iyi/prelude.iyi"; then
-  echo "  the listed pages counted twice: the line this proof edits is not in the prelude any more"; status=1
-elif ! IYI_PATH="$WORK/doublecount:$REPO/src" "$IYI" build --release -o "$WORK/doublecount/program" "$REPO/bench/trim_stress.iyi" >"$WORK/doublecount/build.log" 2>&1; then
-  echo "  the listed pages counted twice: the patched prelude did not build"; status=1
+# pages under objects a cache handed out. The two refills must read the
+# shared page between one's read and its clear, and that window is a few
+# instructions: on darwin's sixteen-kilobyte pages the plain stress caught
+# the old counting in 11 runs of 11 of 20 s on macOS 26.6, Apple M2 Pro, 10
+# cores (the user's machine), but on four-kilobyte pages it passed 3 runs
+# of 3 on Windows 11, 12 logical processors (the user's machine), where
+# two adoptions met in the window 0-3 times in 10 s. So both copies here
+# hold the window open: an adoption that reads a batch's first or last
+# page listed spins WIDEN_NS before it clears the bit, and counts the
+# times the clear finds another adoption got there first
+# (`IyiHeap.widen_hits`, reported by trim_stress.iyi built with
+# -Dtrim_widen). The fix, widened, must read every block back whole with
+# the window met; the old counting, widened, must fail within three runs
+# of 10 s. At 20 microseconds the old counting was caught on the first run
+# in 20 runs of 20, within 0-6 s, on Windows 11, 12 logical processors and
+# on macOS 26.6, Apple M2 Pro, 10 cores (the user's machines), and the fix
+# read every block back whole in 5 runs of 5 and 3 of 3 with the window
+# met 4,706-5,750 and 9,483-15,972 times. With a run's miss rate under
+# 3/20 (95%), three misses in a row are under 0.4%.
+WIDEN_NS=20000
+widen_prelude() {
+  mkdir -p "$WORK/$1/iyi"
+  cp -R "$REPO/src/iyi/." "$WORK/$1/iyi/"
+  awk -v mode="$1" -v widen="$WIDEN_NS" '
+    /^      @@pages_released : UInt64 = 0_u64$/ {
+      print
+      print "      @@widen_hits : UInt64 = 0_u64"
+      print "      def self.widen_hits : UInt64"
+      print "        @@widen_hits"
+      print "      end"
+      print "      def self.spin_widen : Nil"
+      print "        stop = IyiMark.now_ns + " widen "_u64"
+      print "        spun = 0_u64"
+      print "        while IyiMark.now_ns < stop"
+      print "          spun = spun + 1_u64"
+      print "        end"
+      print "      end"
+      n++; next }
+    /^      def self\.unlist_batch\(/ { batch = 1 }
+    batch && /^        while page <= last$/ { print "        low_edge = page"; print; n++; next }
+    /^          count = count \+ 1_u64 if unlist_page\(arena, page\)$/ {
+      batch = 0
+      print "          if page_listed?(arena, arena + page * PAGE)"
+      print "            spin_widen if page == low_edge || page == last"
+      print "            won = unlist_page(arena, page)"
+      print "            Pointer(Atomic(UInt64)).new(pointerof(@@widen_hits).address).value.add(1_u64) unless won"
+      print (mode == "doublecount" ? "            count = count + 1_u64" : "            count = count + 1_u64 if won")
+      print "          end"
+      n++; next }
+    { print }
+    END { if (n != 3) exit 3 }' "$REPO/src/iyi/prelude.iyi" > "$WORK/$1/iyi/prelude.iyi" &&
+    IYI_PATH="$WORK/$1:$REPO/src" "$IYI" build --release -Dtrim_widen -o "$WORK/$1/program" "$REPO/bench/trim_stress.iyi" >"$WORK/$1/build.log" 2>&1
+}
+if ! widen_prelude widened; then
+  echo "  the window held open: the lines it edits are not in the prelude any more, or the copy did not build"; status=1
+elif stress_run widened "$WORK/widened/program" 10 &&
+     hits=$(sed -n 's/.*, \([0-9]*\) edge pages read listed by two adoptions at once$/\1/p' "$WORK/widened.out") &&
+     [ -n "$hits" ] && [ "$hits" -gt 0 ]; then
+  echo "  the window held open ${WIDEN_NS} ns: every block read back whole, $hits edge pages read listed by two adoptions at once"
+else
+  echo "  the window held open: the fix failed, or the window was never met:"; tail -3 "$WORK/widened.out" | sed 's/^/    /'; status=1
+fi
+if ! widen_prelude doublecount; then
+  echo "  the listed pages counted twice: the lines it edits are not in the prelude any more, or the copy did not build"; status=1
 else
   caught=0
   for again in 1 2 3; do
-    stress_run doublecount "$WORK/doublecount/program" || { caught=$again; break; }
+    stress_run doublecount "$WORK/doublecount/program" 10 || { caught=$again; break; }
   done
   if [ "$caught" -ne 0 ]; then
-    echo "  the listed pages counted twice: caught on run $caught: $(grep -m1 'FAIL\|panic' "$WORK/doublecount.out" | cut -c1-160)"
-  elif [ "$(uname -s)" = Darwin ]; then
-    echo "  the listed pages counted twice: three runs passed, so the stress does not test it"; status=1
+    echo "  the listed pages counted twice: caught on run $caught: $(grep -m1 'FAIL\|panic' "$WORK/doublecount.out" | cut -c1-200)"
   else
-    echo "  the listed pages counted twice: not proven here, three runs passed on this platform's pages"
+    echo "  the listed pages counted twice: three runs passed, so the stress does not test it"; status=1
   fi
 fi
 

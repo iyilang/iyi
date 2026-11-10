@@ -18,7 +18,10 @@
 # being threaded and carved.
 #
 # With no arguments it runs two threads for a second and prints a fixed
-# line: Windows CI runs every bench program bare.
+# line: Windows CI runs every bench program bare. Built with -Dtrim_widen
+# against a prelude copy that holds the adoptions' edge-page window open
+# (`bench/sweep_exercise.sh`), it reports how often two adoptions met in
+# it, `IyiHeap.widen_hits`, which only that copy defines.
 
 @[Unsafe("it writes and reads raw blocks by address to check them")]
 module bench/trim_stress
@@ -52,13 +55,21 @@ module bench/trim_stress
     end
   end
 
+  def widen_note : String
+    {% if flag?(:trim_widen) %}
+      ", #{IyiHeap.widen_hits} edge pages read listed by two adoptions at once"
+    {% else %}
+      ""
+    {% end %}
+  end
+
   def check(block : Pointer(UInt8), size : Int32, who : Int32) : Nil
     words = Pointer(UInt64).new(block.address)
     base = pattern(block, who)
     i = 0
     while i < size // 8
       if words[i] != base ^ i.to_u64
-        print "FAIL: trim stress: thread #{who}: word #{i} of a #{size}-byte block at #{block.address.to_i64.to_s(16)} reads #{words[i].to_i64.to_s(16)}\n"
+        print "FAIL: trim stress: thread #{who}: word #{i} of a #{size}-byte block at #{block.address.to_i64.to_s(16)} reads #{words[i].to_i64.to_s(16)}#{widen_note}\n"
         __iyi_exit(1)
       end
       i = i + 1
@@ -147,7 +158,7 @@ module bench/trim_stress
   if quiet
     puts "trim stress: every block read back whole"
   else
-    puts "trim stress: #{threads} threads for #{seconds} s beside #{IyiMark.trims - trims} idle trims, #{IyiMark.collections - collections} collections and #{IyiHeap.pages_released - released} pages handed back, every block read back whole"
+    puts "trim stress: #{threads} threads for #{seconds} s beside #{IyiMark.trims - trims} idle trims, #{IyiMark.collections - collections} collections and #{IyiHeap.pages_released - released} pages handed back, every block read back whole#{widen_note}"
   end
 {% else %}
   puts "trim stress: no collector's allocator on this target, nothing to trim"

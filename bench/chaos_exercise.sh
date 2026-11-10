@@ -247,7 +247,7 @@ seeds "$WORK/unitsignored" unitsignored > unitsignored.txt 2>&1
 expect_caught unitsignored "FAIL: "
 
 step "broken copy: a parallel task left in its spawner's unit"
-broken leftinunit chaos.iyi '/^    task.fiber.chaos_unit = IyiChaosUnit.new\(@@units, fresh_priority\)$/ { next } { print }'
+broken leftinunit chaos.iyi '/^    task.fiber.chaos_unit = IyiCross.shared \{ IyiChaosUnit.new\(@@units, fresh_priority\) \}$/ { next } { print }'
 seeds "$WORK/leftinunit" leftinunit > leftinunit.txt 2>&1
 expect_caught leftinunit "no seed started a parallel unit before the spawner parked"
 

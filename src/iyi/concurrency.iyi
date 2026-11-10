@@ -3601,7 +3601,9 @@ class IyiScheduler
     slots = st.io_slots
     size = slots.is_a?(Array(IyiFiber?)) ? slots.size : 0
     return if size >= need
-    grown = Array(IyiFiber?).new(need > size * 2 ? need : size * 2, nil)
+    # In the shared heap: the waiting fiber may be a pool unit's, and only
+    # the scheduler state holds the array (heap22).
+    grown = IyiCross.shared { Array(IyiFiber?).new(need > size * 2 ? need : size * 2, nil) }
     lists_lock(st)
     if slots.is_a?(Array(IyiFiber?))
       index = 0
@@ -5132,7 +5134,8 @@ class IyiScheduler
     st = state
     buffer = st.events
     return buffer.address if buffer.address != 0_u64
-    buffer = Pointer(UInt8).malloc((EVENTS * IYI_POLL_EVENT_BYTES).to_u64)
+    # In the shared heap: only the scheduler state holds it (heap22).
+    buffer = IyiCross.shared { Pointer(UInt8).malloc((EVENTS * IYI_POLL_EVENT_BYTES).to_u64) }
     st.events = buffer
     buffer.address
   end

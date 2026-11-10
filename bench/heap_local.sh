@@ -9,11 +9,15 @@
 # collected locally, a death that frees a pinned unit's partition,
 # a local mark blind to the unit's other fibers, a local sweep that
 # leaves a weak cell naming the chunk it freed, and a local mark that
-# trusts the parities a mark abandoned part way left.
+# trusts the parities a mark abandoned part way left. Last, the same
+# program cross-compiled to an object for each of the nine targets the
+# README names, with the flag and without it: a hook the prelude compiles
+# on a target where heap_partition.iyi is not loaded fails there.
 #
-#   bash bench/heap_local.sh            # both halves
+#   bash bench/heap_local.sh            # all three
 #   bash bench/heap_local.sh cases      # the builds that must pass
 #   bash bench/heap_local.sh broken     # the copies that must fail
+#   bash bench/heap_local.sh cross      # the nine targets, flag on and off
 #
 # Needs `make` first. Exits non-zero if any step fails.
 
@@ -160,6 +164,37 @@ if [ "$PART" = all ] || [ "$PART" = broken ]; then
   prove_fails "an abandoned mark's parities trusted" noclear "abandon:" \
     '{ if ($0 ~ /^    clear_local_marks\(record\) if read64\(record &\+ REC_MARKING\) != 0_u64$/) { found = 1; next } print } END { if (!found) exit 3 }' \
     heap_partition.iyi
+fi
+
+# The nine targets, each to an object (`--cross-compile` links nothing),
+# flag on and off. x86_64-darwin and arm-linux-gnueabihf have no scheduler
+# and wasm32-wasi no threads: there heap_partition.iyi is not loaded, and
+# a prelude hook that called into it was "undefined method
+# 'partition_slice'" on x86_64-darwin with the flag.
+if [ "$PART" = all ] || [ "$PART" = cross ]; then
+  echo
+  echo "== the program cross-compiled for every target, flag on and off"
+  for target in x86_64-linux-gnu x86_64-linux-musl aarch64-linux-gnu \
+                arm-linux-gnueabihf x86_64-darwin aarch64-darwin \
+                x86_64-w64-mingw32 x86_64-windows-msvc wasm32-wasi; do
+    for flags in "" "-Dheap_partitions"; do
+      out="$WORK/cross-$target${flags:+-on}"
+      # shellcheck disable=SC2086
+      if ! "$IYI" build --cross-compile --target "$target" $flags \
+           -o "$out" "$REPO/bench/heap_local.iyi" >"$out.log" 2>&1; then
+        echo "  $target ${flags:-(no flag)}: cross-compile failed"
+        sed -n '1,12p' "$out.log"
+        status=1
+        continue
+      fi
+      if [ ! -f "$out.o" ] && [ ! -f "$out.obj" ] && [ ! -f "$out.wasm" ]; then
+        echo "  $target ${flags:-(no flag)}: no object was written"
+        status=1
+        continue
+      fi
+      printf '  %-22s %s: an object\n' "$target" "${flags:-(no flag)}"
+    done
+  done
 fi
 
 echo

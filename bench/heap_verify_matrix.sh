@@ -71,7 +71,7 @@ build_one() {
   dir="$OUT/$name"
   mkdir -p "$dir"
   # shellcheck disable=SC2086
-  if ! "$IYI" build $FLAGS -o "$dir/program$EXE" "$REPO/$source" >"$dir/build.log" 2>&1; then
+  if ! IYI_DUMP_TYPE_INFO="$dir/types.json" "$IYI" build $FLAGS -o "$dir/program$EXE" "$REPO/$source" >"$dir/build.log" 2>&1; then
     echo "$name: build failed"
     tail -12 "$dir/build.log"
     return 1
@@ -118,6 +118,9 @@ run_one() {
   if grep -q "^iyi: heap_verify: partition" "$dir/$tag.err"; then
     verdict=report
     detail="$(grep -A1 -m1 '^iyi: heap_verify: partition' "$dir/$tag.err" | tail -1 | sed 's/^ *//')"
+    # The report named (types, fields, data symbols, sites) beside it.
+    "$PY" "$REPO/bench/heap_verify_names.py" --types "$dir/types.json" --binary "$dir/program$EXE" \
+      "$dir/$tag.err" >"$dir/$tag.named" 2>/dev/null
   elif grep -qi "deaddeaddeaddead" "$dir/$tag.err" "$dir/$tag.out"; then
     verdict=poison
     detail="$(grep -ih -m1 deaddeaddeaddead "$dir/$tag.err" "$dir/$tag.out" | head -1 | cut -c1-160)"

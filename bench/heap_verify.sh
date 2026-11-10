@@ -166,7 +166,8 @@ caught() {
       status=1
       return
     fi
-    row="$(check_of "$dir" "run$k") | $(named "$dir" "run$k")"
+    # A fiber's stack is named by its address, which differs run to run.
+    row="$(check_of "$dir" "run$k") | $(named "$dir" "run$k" | sed -E 's/0x[0-9a-f]{8,}/0x…/g')"
     if [ -z "$first" ]; then
       first="$row"
     elif [ "$row" != "$first" ]; then

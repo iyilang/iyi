@@ -1803,19 +1803,6 @@ module Iyi
       @share_reach_gathered.clear
       states = gathered.compact_map(&.named.try(&.state))
       verdicts = ReachProof.provable(@program, root, states)
-      if dump = ENV["IYI_REACH_REPORT"]? # MEASURE-ONLY, removed before commit
-        File.open(dump, "a") do |io|
-          gathered.each do |refusal|
-            state = refusal.named.try(&.state)
-            decl = state ? declaration_of(state) : nil
-            decl = decl.try(&.expanded_location) || decl
-            verdict = state ? (verdicts[state.object_id]? ? "hand" : (fix_edit(state) ? "fix" : "noedit")) : "remote"
-            io << refusal.head.partition(" reaches ")[2].partition(" (not Share")[0] << '\t' << (decl ? "#{decl.filename}:#{decl.line_number}" : "?") << '\t'
-            io << verdict << '\t' << refusal.blocks.size << '\t' << refusal.head.partition(" reaches ")[0] << '\t' << refusal.head.partition(" through ")[2] << '\t'
-            io << (state ? verdicts[state.object_id]?.to_s.gsub('\n', ' ')[0, 600] : "") << '\n'
-          end
-        end
-      end
       chosen_at = gathered.index { |refusal| (state = refusal.named.try(&.state)) && verdicts[state.object_id]?.nil? && fix_edit(state) } || 0
       chosen = gathered[chosen_at]
       others = chosen.blocks.size - 1

@@ -756,7 +756,15 @@ module Iyi
               @reach.note_arg(Arg.new(target, param, type: member, defer: defer))
               @passes << member unless defer
             end
-          elsif member.to_s == "IyiDeferNode"
+          elsif member.to_s == "IyiDeferNode" && !@reach.prelude_at?(@home.try(&.location))
+            # A node handed on outside the runtime: `__iyi_defer_push_node`
+            # from the code that pushes it. The runtime's own handling of
+            # the list - a panic popping and running the fiber's nodes,
+            # `fiber.defers = node.next_node` - runs nodes the fiber pushed,
+            # whose push its own unit's walk already followed; read as a
+            # pass, every worker thread's block reached every node of the
+            # program through `IyiScheduler.panic_current`, and the refusal
+            # named the runtime's `IyiThread.start` rather than the unit.
             @passes << nil
           end
         end

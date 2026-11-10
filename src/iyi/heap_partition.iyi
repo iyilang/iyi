@@ -2005,7 +2005,10 @@ class IyiHeap
   # runs back - whole to the pool where nothing on them is published,
   # handed to the shared heap where something is, its `LOCAL` chunks
   # there freed in place - or, detached by a pointer answer, every run
-  # the shared heap's. Then the record.
+  # the shared heap's. Then the record. Dying, it is `REC_DEAD` and
+  # `REC_BUSY` both: busy keeps the reapers, which take a dead record
+  # that is not busy for one queued by `find_dead_units`, and the idle
+  # takeover off it.
   def self.partition_death(record : UInt64) : Nil
     state = Pointer(Atomic(UInt64)).new(record &+ REC_STATE)
     while true
@@ -2014,7 +2017,7 @@ class IyiHeap
         IyiMark.spin_pause
         next
       end
-      break if state.value.compare_and_set(seen, seen | REC_DEAD)[1]
+      break if state.value.compare_and_set(seen, seen | REC_DEAD | REC_BUSY)[1]
     end
     id = read64(record &+ REC_ID)
     enter_barrier
@@ -2332,21 +2335,25 @@ class IyiHeap
   end
 
   # The queued deaths, by whichever thread of the pool comes by first.
+  # The count is read without the lock, so two reapers may both come in
+  # for one death: under the lock it is counted again rather than taken
+  # down by one, and the second finds none and leaves.
   def self.reap_dead_partitions : Nil
     while @@dead_queued != 0
       found = 0_u64
+      queued = 0_u64
       lock
       each_record do |record|
-        if found == 0 && read64(record + REC_STATE) & REC_DEAD != 0 && read64(record + REC_STATE) & REC_BUSY == 0
-          found = record
+        if read64(record + REC_STATE) & (REC_DEAD | REC_BUSY) == REC_DEAD
+          found = record if found == 0
+          queued = queued + 1_u64
         end
       end
       if found != 0
         write64(found + REC_STATE, read64(found + REC_STATE) | REC_BUSY)
-        @@dead_queued = @@dead_queued - 1_u64
-      else
-        @@dead_queued = 0_u64
+        queued = queued - 1_u64
       end
+      @@dead_queued = queued
       unlock
       return if found == 0
       write64(found + REC_STATE, read64(found + REC_STATE) - REC_BUSY - REC_DEAD)

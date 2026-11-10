@@ -7,8 +7,9 @@
 # sweep that drops what it frees for a partition, a pointer answer left
 # as a store into the box, a partition that answer detached still
 # collected locally, a death that frees a pinned unit's partition,
-# a local mark blind to the unit's other fibers, and a local sweep that
-# leaves a weak cell naming the chunk it freed.
+# a local mark blind to the unit's other fibers, a local sweep that
+# leaves a weak cell naming the chunk it freed, and a local mark that
+# trusts the parities a mark abandoned part way left.
 #
 #   bash bench/heap_local.sh            # both halves
 #   bash bench/heap_local.sh cases      # the builds that must pass
@@ -151,6 +152,13 @@ if [ "$PART" = all ] || [ "$PART" = broken ]; then
   # freed chunk.
   prove_fails "a weak cell left on a freed target" noweak "weak:" \
     '/def self\.sweep_weak\(record : UInt64\) : Nil/ { inside = 1 } inside && /^            write64\(cell, 0_u64\)$/ { inside = 0; found = 1; next } { print } END { if (!found) exit 3 }' \
+    heap_partition.iyi
+
+  # The mark bits an abandoned local mark left trusted by the next one:
+  # a link only past the abandoned mark's reach holds is never opened,
+  # and what it holds is freed.
+  prove_fails "an abandoned mark's parities trusted" noclear "abandon:" \
+    '{ if ($0 ~ /^    clear_local_marks\(record\) if read64\(record &\+ REC_MARKING\) != 0_u64$/) { found = 1; next } print } END { if (!found) exit 3 }' \
     heap_partition.iyi
 fi
 

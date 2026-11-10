@@ -83,10 +83,11 @@ class IyiHeap
   # bytes the last local collection kept; three tables mapped beside the
   # heap (lent graphs, weak cells, large objects: a word of capacity, a
   # word of count, then the entries); local collections of this
-  # partition; bytes of runs it holds; and the return stacks, a word per
-  # class, which the global sweep pushes onto. The per-class run lists
-  # are the cache layout's fill slots (`FILL + index`): a record never
-  # carves.
+  # partition; bytes of runs it holds; 1 while a local mark is under way
+  # or was abandoned, 0 once one ended whole (`local_collect_in`); and
+  # the return stacks, a word per class, which the global sweep pushes
+  # onto. The per-class run lists are the cache layout's fill slots
+  # (`FILL + index`): a record never carves.
   REC_PARITY      = 1376_u64
   REC_DEBT        = 1384_u64
   REC_BUDGET      = 1392_u64
@@ -96,6 +97,7 @@ class IyiHeap
   REC_LARGE       = 1424_u64
   REC_COLLECTIONS = 1432_u64
   REC_HELD        = 1440_u64
+  REC_MARKING     = 1448_u64
   REC_RETURN      = 1472_u64
 
   # A run table word, at a run's first granule: the link (48 bits), the
@@ -151,6 +153,7 @@ class IyiHeap
   @@collect_every_park : Bool = false
   @@local_off : Bool = false
   @@park_off : Bool = false
+  @@abandon_next : Bool = false
   @@returned : UInt64 = 0_u64
   @@large_freed : UInt64 = 0_u64
   @@pauses : UInt64 = 0_u64
@@ -315,6 +318,17 @@ class IyiHeap
   # (bench/heap_local's idle takeover check).
   def self.park_collections_off=(off : Bool) : Bool
     @@park_off = off
+  end
+
+  # A test's switch: the next local mark is abandoned where it first
+  # looks for a stop (256 objects in), as a stop asked then abandons it
+  # (bench/heap_local's `abandon:` check). Reads true until one was.
+  def self.abandon_next_local_mark=(on : Bool) : Bool
+    @@abandon_next = on
+  end
+
+  def self.abandon_next_local_mark : Bool
+    @@abandon_next
   end
 
   # The `OWN` byte of the chunk holding *address* - a large object's from
@@ -1389,8 +1403,8 @@ class IyiHeap
   # partition a pointer answer detached: the task's box, which is the
   # shared heap's and no root of a local mark, holds the answer from
   # then on, so only the global collection may free what it reaches. A
-  # stop asked while it marks ends it, nothing swept, and the parity it
-  # began leaves at most retention. Answers whether it swept.
+  # stop asked while it marks ends it, nothing swept, and the next mark
+  # clears the parity it began first. Answers whether it swept.
   @[NoInline]
   def self.local_collect(record : UInt64, running : IyiFiber?, takeover : Bool, idle : Bool) : Bool
     return false if LibIyiGCTable.__iyi_marking != 0_u8
@@ -1423,6 +1437,15 @@ class IyiHeap
   def self.local_collect_in(record : UInt64, running : IyiFiber?, idle : Bool) : Bool
     id = read64(record &+ REC_ID)
     epoch = IyiMark.epoch
+    # Two parities take turns, so a mark trusts that what wears its own
+    # was reached by it - and a mark abandoned part way left its parity
+    # on some chunks and the last whole mark's, the next one's, on the
+    # rest: those would be taken for reached and never opened, and a
+    # chunk only they lead to freed under them (bench/thread_exercise's
+    # switching program with a collection at every park, a list lost in
+    # every run). The bits are cleared first after one.
+    clear_local_marks(record) if read64(record &+ REC_MARKING) != 0_u64
+    write64(record &+ REC_MARKING, 1_u64)
     parity = read64(record &+ REC_PARITY) == 2_u64 ? 4_u64 : 2_u64
     write64(record &+ REC_PARITY, parity)
     s = scratch
@@ -1485,7 +1508,8 @@ class IyiHeap
       each_field(s, base) { |word| local_shade(record, id, parity, word) }
       count = read64(s + SCR_COUNT) &+ 1_u64
       write64(s + SCR_COUNT, count)
-      if count & 255_u64 == 0 && stop_requested?
+      if count & 255_u64 == 0 && (stop_requested? || @@abandon_next)
+        @@abandon_next = false
         write64(s + SCR_LEN, 0_u64)
         return false
       end
@@ -1494,7 +1518,47 @@ class IyiHeap
     # one - may have begun a mark beside the program or turned the epoch:
     # nothing is swept against a collection the mark did not see whole.
     return false if IyiMark.epoch != epoch || LibIyiGCTable.__iyi_marking != 0_u8
+    write64(record &+ REC_MARKING, 0_u64)
     local_sweep(record, id, parity, idle)
+  end
+
+  # Every local mark bit of partition *record* - its runs' `OWN` bytes'
+  # and its large objects' - cleared, before a mark that follows one
+  # abandoned part way or a merge that brought another partition's
+  # chunks: the parity it then wears is nobody's yet. What is published
+  # keeps its `OWN_PUB`. Inside the allocator's bracket, so no pause's
+  # sweep of the large objects runs meanwhile.
+  def self.clear_local_marks(record : UInt64) : Nil
+    marks = OWN_LMARK | OWN_LENT
+    index = 0
+    while index < CLASSES
+      run = read64(record &+ (FILL + index).to_u64 * 8_u64)
+      while run != 0
+        arena = run & (0_u64 &- MAP)
+        word = run_word(arena, granule_of(arena, run))
+        chunk = read64(arena + OFF_CHUNK)
+        stop = run + run_n(word).unsafe_shl(GRANULE_SHIFT)
+        head = first_head(arena, run)
+        own = own_address(arena, (head - arena_first(arena)).unsafe_div(chunk))
+        while head < stop
+          flags = read8(own)
+          write8(own, flags - (flags & marks)) if flags & marks != 0
+          head = head + chunk
+          own = own + 1_u64
+        end
+        run = word & RUN_LINK
+      end
+      index = index + 1
+    end
+    slot = record &+ REC_LARGE
+    count = table_count(slot)
+    k = 0_u64
+    while k < count
+      node = table_at(slot, k)
+      bits = read64(node + 16_u64)
+      write64(node + 16_u64, bits - (bits & marks.unsafe_shl(16_u64)))
+      k = k + 1_u64
+    end
   end
 
   def self.local_range(record : UInt64, id : UInt64, parity : UInt64, low : UInt64, high : UInt64) : Nil
@@ -1941,7 +2005,10 @@ class IyiHeap
   # runs back - whole to the pool where nothing on them is published,
   # handed to the shared heap where something is, its `LOCAL` chunks
   # there freed in place - or, detached by a pointer answer, every run
-  # the shared heap's. Then the record.
+  # the shared heap's. Then the record. Dying, it is `REC_DEAD` and
+  # `REC_BUSY` both: busy keeps the reapers, which take a dead record
+  # that is not busy for one queued by `find_dead_units`, and the idle
+  # takeover off it.
   def self.partition_death(record : UInt64) : Nil
     state = Pointer(Atomic(UInt64)).new(record &+ REC_STATE)
     while true
@@ -1950,7 +2017,7 @@ class IyiHeap
         IyiMark.spin_pause
         next
       end
-      break if state.value.compare_and_set(seen, seen | REC_DEAD)[1]
+      break if state.value.compare_and_set(seen, seen | REC_DEAD | REC_BUSY)[1]
     end
     id = read64(record &+ REC_ID)
     enter_barrier
@@ -2172,6 +2239,9 @@ class IyiHeap
         k = k + 1_u64
       end
       write64(into &+ REC_HELD, read64(into &+ REC_HELD) + read64(from &+ REC_HELD))
+      # *from*'s chunks wear *from*'s parities, which mean nothing to
+      # *into*'s marks: its next one clears them first.
+      write64(into &+ REC_MARKING, 1_u64)
     end
     leave_barrier
     stat_add(pointerof(@@merges).address, 1_u64)
@@ -2265,21 +2335,25 @@ class IyiHeap
   end
 
   # The queued deaths, by whichever thread of the pool comes by first.
+  # The count is read without the lock, so two reapers may both come in
+  # for one death: under the lock it is counted again rather than taken
+  # down by one, and the second finds none and leaves.
   def self.reap_dead_partitions : Nil
     while @@dead_queued != 0
       found = 0_u64
+      queued = 0_u64
       lock
       each_record do |record|
-        if found == 0 && read64(record + REC_STATE) & REC_DEAD != 0 && read64(record + REC_STATE) & REC_BUSY == 0
-          found = record
+        if read64(record + REC_STATE) & (REC_DEAD | REC_BUSY) == REC_DEAD
+          found = record if found == 0
+          queued = queued + 1_u64
         end
       end
       if found != 0
         write64(found + REC_STATE, read64(found + REC_STATE) | REC_BUSY)
-        @@dead_queued = @@dead_queued - 1_u64
-      else
-        @@dead_queued = 0_u64
+        queued = queued - 1_u64
       end
+      @@dead_queued = queued
       unlock
       return if found == 0
       write64(found + REC_STATE, read64(found + REC_STATE) - REC_BUSY - REC_DEAD)

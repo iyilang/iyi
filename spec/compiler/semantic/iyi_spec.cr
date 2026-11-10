@@ -5989,6 +5989,52 @@ describe "Semantic: iyi" do
             CODE
         end
 
+        # A subclass holds a copy of each class variable it inherits: its
+        # own storage, set by the same initializer. The claim on the
+        # declaration covers the copy, and is proven for it on its own.
+        it "covers a subclass's copy of the class variable" do
+          semantic(reach_stub + ledger + <<-CODE, filename: "x.iyi")
+            class Registry
+              @[SafeReach("set once at startup, then only read")]
+              @@db = Ledger.new
+
+              def rows : Int32
+                @@db.rows
+              end
+            end
+
+            class Local < Registry
+            end
+
+            g = G
+            g.spawn(unit: :new) do
+              Local.new.rows
+              nil
+            end
+            CODE
+        end
+
+        it "is refused for a subclass's copy a parallel block writes" do
+          assert_error(reach_stub + ledger + <<-CODE, "@[SafeReach] on `@@db` is refused: nothing proves every thread may reach it safely. `@@db.add` in `Local#note` at x.iyi:", filename: "x.iyi")
+            class Registry
+              @[SafeReach("set once at startup, then only read")]
+              @@db = Ledger.new
+            end
+
+            class Local < Registry
+              def note : Nil
+                @@db.add
+              end
+            end
+
+            g = G
+            g.spawn(unit: :new) do
+              Local.new.note
+              nil
+            end
+            CODE
+        end
+
         it "is refused for a write through a local that holds the state" do
           assert_error(reach_stub + ledger + <<-CODE, "@[SafeReach] on `QUIET` is refused: nothing proves every thread may reach it safely. `held.add` in `note`", filename: "x.iyi")
             @[SafeReach("set once at startup, then only read")]

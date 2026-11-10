@@ -27,7 +27,28 @@ module Iyi
     end
 
     def iyi_claim_reach(claim : ReachClaim) : Nil
-      @iyi_reach_claims << claim unless iyi_reach_claim?(claim.state)
+      return if iyi_reach_claim?(claim.state)
+      @iyi_reach_claims << claim
+      state = claim.state
+      return unless state.is_a?(MetaTypeVar)
+      @iyi_class_var_copies[state]?.try &.each do |copy|
+        copy.iyi_safe_reach = claim.reason
+        iyi_claim_reach(claim.copy_with(state: copy))
+      end
+    end
+
+    # A subclass's copies of each class variable, by the variable copied,
+    # so a claim made on it after a copy was made reaches the copy too.
+    @iyi_class_var_copies = ({} of MetaTypeVar => Array(MetaTypeVar)).compare_by_identity
+
+    # *copy* is a subclass's copy of *original*: it takes *original*'s
+    # claim, now or when one is made.
+    def iyi_inherit_reach_claim(original : MetaTypeVar, copy : MetaTypeVar) : Nil
+      (@iyi_class_var_copies[original] ||= [] of MetaTypeVar) << copy
+      if claim = iyi_reach_claim?(original)
+        copy.iyi_safe_reach = claim.reason
+        iyi_claim_reach(claim.copy_with(state: copy))
+      end
     end
   end
 
@@ -326,8 +347,11 @@ module Iyi
     # module's functions from, and another program may call them from a
     # parallel task. So: every write is a statement of the module's own
     # initialiser, before any parallel task, which runs first in every
-    # program; nothing keeps a copy; no function answers the state; and a
-    # constant is not exported, so no other module's code names it.
+    # program; nothing keeps a copy; no function answers the state, save
+    # as a value nothing can write - `StaticTable.get` answers one of
+    # std/hpack's `ENTRIES`, a struct of two strings and an enum, and its
+    # claim held for no importer until this asked the answer's structure;
+    # and a constant is not exported, so no other module's code names it.
     private def robust?(claim : ReachClaim) : Bool
       state = claim.state
       key = state.object_id
@@ -340,7 +364,10 @@ module Iyi
       end
       @callables.each do |callable|
         next if callable.literal?
-        return false if callable.a_def && callable.answerer? && state_out(callable).includes?(key)
+        if (a_def = callable.a_def) && callable.answerer? && state_out(callable).includes?(key)
+          answer = a_def.type?
+          return false unless answer && deep_share?(answer)
+        end
         callable.events.each do |event|
           next if event.root.kind.slot?
           next unless states_of(event.root).includes?(key)

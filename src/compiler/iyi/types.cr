@@ -1274,6 +1274,14 @@ module Iyi
           # `class variable '@@bit_fields' of ASN1::BER is not nilable so it
           # must have an initializer`.
           var.iyi_initialiser_source = class_var.iyi_initialiser_source
+          # iyi: and the ancestor's reach claim (SPEC.md III.4.4). The copy is
+          # declared by the same line, set by the same initialiser and written
+          # by the same defs, typed again for the subclass, so the claim speaks
+          # of it as of the original; a `SafeReach` is proven for each copy on
+          # its own. Without this `SHA224 < SHA256` reached its own copy of
+          # SHA-256's round constants with no claim on it, and the reach rule
+          # refused every program hashing SHA-224 in a parallel unit.
+          program.iyi_inherit_reach_claim(class_var, var)
           var.bind_to(class_var)
           self.class_vars[name] = var
           return var

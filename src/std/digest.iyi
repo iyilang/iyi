@@ -462,7 +462,6 @@ pub class SHA256 < Digest
 
   private def compress(block : Pointer(UInt8)) : Nil
     w = @w
-    k = SHA256Rounds.k
     DigestUtil.load_u32s_be(w, block, 16)
     i = 16
     while i < 64
@@ -473,14 +472,32 @@ pub class SHA256 < Digest
       w[i] = w[i - 16] &+ s0 &+ w[i - 7] &+ s1
       i = i + 1
     end
-    a = @h[0]
-    b = @h[1]
-    c = @h[2]
-    d = @h[3]
-    e = @h[4]
-    f = @h[5]
-    g = @h[6]
-    hh = @h[7]
+    SHA256Rounds.run(@h, w)
+  end
+end
+
+# The 64 round constants of SHA-256 and SHA-224: the first 32 bits of the
+# fractional parts of the cube roots of the first 64 primes. Built whole
+# by the initializer as the module starts, and never written again. Kept
+# here rather than in `SHA256`, where `SHA224` would hold a copy of its
+# own, built again and read through a dispatch on the receiver's class;
+# and read only here, by the rounds, so that no function answers the
+# table and the claim holds in every program importing the module.
+struct SHA256Rounds
+  @[SafeReach("built whole by its initializer as the module starts, before any parallel task; then only read")]
+  @@k : Pointer(UInt32) = build
+
+  # The 64 rounds over the state *h* and the schedule *w*, added into *h*.
+  def self.run(h : Pointer(UInt32), w : Pointer(UInt32)) : Nil
+    k = @@k
+    a = h[0]
+    b = h[1]
+    c = h[2]
+    d = h[3]
+    e = h[4]
+    f = h[5]
+    g = h[6]
+    hh = h[7]
     # Eight rounds a pass, the names turned instead of the values: a round
     # changes only d and h (`DigestUtil.round256`), and after eight the
     # letters are back where they started. The loop that passed the eight
@@ -500,28 +517,14 @@ pub class SHA256 < Digest
       e, a = DigestUtil.round256(b, c, d, e, f, g, hh, a, k[t + 7] &+ w[t + 7])
       t = t + 8
     end
-    @h[0] = @h[0] &+ a
-    @h[1] = @h[1] &+ b
-    @h[2] = @h[2] &+ c
-    @h[3] = @h[3] &+ d
-    @h[4] = @h[4] &+ e
-    @h[5] = @h[5] &+ f
-    @h[6] = @h[6] &+ g
-    @h[7] = @h[7] &+ hh
-  end
-end
-
-# The 64 round constants of SHA-256 and SHA-224: the first 32 bits of the
-# fractional parts of the cube roots of the first 64 primes. Built whole
-# by the initializer, at the first read, and never written again. Kept
-# here rather than in `SHA256`, where `SHA224` would hold a class variable
-# of its own, a second state beside the first.
-struct SHA256Rounds
-  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
-  @@k : Pointer(UInt32) = build
-
-  def self.k : Pointer(UInt32)
-    @@k
+    h[0] = h[0] &+ a
+    h[1] = h[1] &+ b
+    h[2] = h[2] &+ c
+    h[3] = h[3] &+ d
+    h[4] = h[4] &+ e
+    h[5] = h[5] &+ f
+    h[6] = h[6] &+ g
+    h[7] = h[7] &+ hh
   end
 
   private def self.build : Pointer(UInt32)
@@ -610,7 +613,6 @@ pub class SHA512 < Digest
 
   private def compress(block : Pointer(UInt8)) : Nil
     w = @w
-    k = SHA512Rounds.k
     i = 0
     while i < 16
       w[i] = DigestUtil.load_u64_be(block + (i * 8).to_i64)
@@ -624,14 +626,29 @@ pub class SHA512 < Digest
       w[i] = w[i - 16] &+ s0 &+ w[i - 7] &+ s1
       i = i + 1
     end
-    a = @h[0]
-    b = @h[1]
-    c = @h[2]
-    d = @h[3]
-    e = @h[4]
-    f = @h[5]
-    g = @h[6]
-    hh = @h[7]
+    SHA512Rounds.run(@h, w)
+  end
+end
+
+# The 80 round constants of SHA-512 and SHA-384: the first 64 bits of the
+# fractional parts of the cube roots of the first 80 primes. Built whole
+# by the initializer as the module starts, and never written again; kept
+# out of `SHA512`, and read only by the rounds, as `SHA256Rounds` is.
+struct SHA512Rounds
+  @[SafeReach("built whole by its initializer as the module starts, before any parallel task; then only read")]
+  @@k : Pointer(UInt64) = build
+
+  # The 80 rounds over the state *h* and the schedule *w*, added into *h*.
+  def self.run(h : Pointer(UInt64), w : Pointer(UInt64)) : Nil
+    k = @@k
+    a = h[0]
+    b = h[1]
+    c = h[2]
+    d = h[3]
+    e = h[4]
+    f = h[5]
+    g = h[6]
+    hh = h[7]
     # Eight rounds a pass, the names turned, as SHA-256 does.
     t = 0
     while t < 80
@@ -645,27 +662,14 @@ pub class SHA512 < Digest
       e, a = DigestUtil.round512(b, c, d, e, f, g, hh, a, k[t + 7] &+ w[t + 7])
       t = t + 8
     end
-    @h[0] = @h[0] &+ a
-    @h[1] = @h[1] &+ b
-    @h[2] = @h[2] &+ c
-    @h[3] = @h[3] &+ d
-    @h[4] = @h[4] &+ e
-    @h[5] = @h[5] &+ f
-    @h[6] = @h[6] &+ g
-    @h[7] = @h[7] &+ hh
-  end
-end
-
-# The 80 round constants of SHA-512 and SHA-384: the first 64 bits of the
-# fractional parts of the cube roots of the first 80 primes. Built whole
-# by the initializer, at the first read, and never written again; kept
-# out of `SHA512` as `SHA256Rounds` is out of `SHA256`.
-struct SHA512Rounds
-  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
-  @@k : Pointer(UInt64) = build
-
-  def self.k : Pointer(UInt64)
-    @@k
+    h[0] = h[0] &+ a
+    h[1] = h[1] &+ b
+    h[2] = h[2] &+ c
+    h[3] = h[3] &+ d
+    h[4] = h[4] &+ e
+    h[5] = h[5] &+ f
+    h[6] = h[6] &+ g
+    h[7] = h[7] &+ hh
   end
 
   private def self.build : Pointer(UInt64)
@@ -724,9 +728,9 @@ end
 struct Keccak
   # The 24 iota round constants, then the 24 rho offsets of the lanes the
   # cycle visits, then the 24 lanes themselves, FIPS 202 sections 3.2.2
-  # to 3.2.5. Built whole by the initializer, at the first read, and never
-  # written again.
-  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  # to 3.2.5. Built whole by the initializer as the module starts, and
+  # never written again.
+  @[SafeReach("built whole by its initializer as the module starts, before any parallel task; then only read")]
   @@tables : Pointer(UInt64) = build_tables
 
   private def self.build_tables : Pointer(UInt64)
@@ -1088,8 +1092,8 @@ pub struct CRC32
 
   # The eight tables: the first is the byte-at-a-time table, and each
   # after it is one more byte of zeros through the one before. Built whole
-  # by the initializer, at the first read, and never written again.
-  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  # by the initializer as the module starts, and never written again.
+  @[SafeReach("built whole by its initializer as the module starts, before any parallel task; then only read")]
   @@tables : Pointer(UInt32) = build_tables
 
   private def self.build_tables : Pointer(UInt32)
@@ -1199,8 +1203,8 @@ pub struct CRC64
   end
 
   # The eight tables, built as `CRC32` builds its own: whole, by the
-  # initializer, at the first read, and never written again.
-  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  # initializer as the module starts, and never written again.
+  @[SafeReach("built whole by its initializer as the module starts, before any parallel task; then only read")]
   @@tables : Pointer(UInt64) = build_tables
 
   private def self.build_tables : Pointer(UInt64)

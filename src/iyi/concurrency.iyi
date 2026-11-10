@@ -7308,7 +7308,7 @@ class IyiGroup
     # the new unit allocates in the shared heap (heap22 `pinned:`).
     private def spawn_pooled(*, pinned : Bool = false, &block : -> T) : IyiTask(T) forall T
       {% if flag?(:iyi_chaos) %}
-        return IyiChaos.parallel_task(in_unit(&block)) if IyiChaos.simulated?
+        return IyiChaos.parallel_task(in_unit(&block), pinned) if IyiChaos.simulated?
       {% end %}
       return in_unit(&block) unless IyiWorkers.parallel?
       on_pool(pinned, &block)
@@ -7331,7 +7331,7 @@ class IyiGroup
     # the unit made in the shared heap.
     private def on_pool(pinned : Bool, &block : -> T) : IyiTask(T) forall T
       {% if flag?(:iyi_chaos) %}
-        return IyiChaos.parallel_task(in_unit(&block)) if IyiChaos.simulated?
+        return IyiChaos.parallel_task(in_unit(&block), pinned) if IyiChaos.simulated?
       {% end %}
       IyiCross.publish(block)
       pooled(IyiCross.shared { IyiUnit.new(pinned: pinned) }, &block)

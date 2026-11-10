@@ -187,9 +187,15 @@ caught() {
   esac
 }
 
+# `ONLY=r1,r3g,o2`: only the copies of those directory names.
+chosen() {
+  [ -z "${ONLY:-}" ] || [[ ",$ONLY," == *",$1,"* ]]
+}
+
 # heap_crossings.sh's interface: label dir check-name awk-script tree file.
 prove_caught() {
   local label="$1" dir="$2" check="$3" script="$4" tree="$5" file="$6"
+  chosen "$dir" || return 0
   mkdir -p "$WORK/$dir/$tree"
   cp -R "$REPO/src/$tree/." "$WORK/$dir/$tree/"
   if ! awk "$script" "$REPO/src/$tree/$file" >"$WORK/$dir/$tree/$file"; then
@@ -209,6 +215,7 @@ prove_caught() {
 # heap_local.sh's interface: label dir phrase awk-script file (src/iyi).
 prove_fails() {
   local label="$1" dir="$2" script="$4" file="$5"
+  chosen "$dir" || return 0
   mkdir -p "$WORK/$dir/iyi"
   cp -R "$REPO/src/iyi/." "$WORK/$dir/iyi/"
   if ! awk "$script" "$REPO/src/iyi/$file" >"$WORK/$dir/iyi/$file"; then
@@ -307,6 +314,7 @@ how_failed() {
 # set); caught when every run fails, the same way.
 own_caught() {
   local label="$1" dir="$2" source="$3" check="$4" script="$5" file="$6"
+  chosen "$dir" || return 0
   mkdir -p "$WORK/$dir/iyi"
   cp -R "$REPO/src/iyi/." "$WORK/$dir/iyi/"
   if ! awk "$script" "$REPO/src/iyi/$file" >"$WORK/$dir/iyi/$file"; then

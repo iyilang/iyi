@@ -491,10 +491,11 @@ class IyiHeapVerify
         target = IyiHeap.read64(cell)
         if target != 0
           arena = IyiHeap.arena_of(target)
-          if arena != 0 && IyiHeap.partition_arena?(arena) && target >= IyiHeap.arena_first(arena) && target < IyiHeap.arena_high(arena)
+          if arena != 0 && IyiHeap.partition_arena?(arena) && target >= IyiHeap.arena_first(arena)
             slot = IyiHeap.chunk_index(arena, target)
             head = IyiHeap.arena_first(arena) &+ slot &* IyiHeap.arena_chunk(arena)
-            if IyiHeap.owner_at(arena, IyiHeap.granule_of(arena, head)) == id && IyiHeap.read8(arena &+ IyiHeap::META &+ slot &* IyiHeap::META_ENTRY) & IyiHeap::FREE_FLAG != 0
+            # The chunk's head decides whether it is carved (`target_of`).
+            if head < IyiHeap.arena_high(arena) && IyiHeap.owner_at(arena, IyiHeap.granule_of(arena, head)) == id && IyiHeap.read8(arena &+ IyiHeap::META &+ slot &* IyiHeap::META_ENTRY) & IyiHeap::FREE_FLAG != 0
               report_begin(id)
               say("  a weak cell names a chunk the partition's local sweep freed\n  cell ")
               say_hex(cell)
@@ -528,9 +529,14 @@ class IyiHeapVerify
     end
     return 0_u64 unless IyiHeap.partition_arena?(arena)
     first = IyiHeap.arena_first(arena)
-    return 0_u64 if word < first || word >= IyiHeap.arena_high(arena)
+    return 0_u64 if word < first
     slot = IyiHeap.chunk_index(arena, word)
     head = first &+ slot &* IyiHeap.arena_chunk(arena)
+    # The chunk's head decides whether it is carved, not the word: a run
+    # may end on a granule line that is the carve frontier, its last chunk
+    # straddling it with a headed object's address on the line itself
+    # (HS1d: a String label left unpublished, never a target here).
+    return 0_u64 if head >= IyiHeap.arena_high(arena)
     return 0_u64 if IyiHeap.owner_at(arena, IyiHeap.granule_of(arena, head)) != id
     bits = IyiHeap.read8(arena &+ IyiHeap::META &+ slot &* IyiHeap::META_ENTRY)
     return 0_u64 if bits & IyiHeap::CARVED_FLAG == 0 || bits & IyiHeap::FREE_FLAG != 0
@@ -1195,5 +1201,11 @@ end
 # The return address of the allocation entry that asks (`IyiHeapVerify.
 # sited`): the program's call site.
 lib LibIyiVerify
-  fun return_address = "llvm.returnaddress"(level : Int32) : Void*
+  {% if compare_versions(Crystal::LLVM_VERSION, "23.0.0") >= 0 %}
+    # LLVM 23 overloads it on the pointer's address space (tssh's 23.1.1
+    # refuses the plain name; tmac's 22.1.8 and Linux's 21.1.8 want it).
+    fun return_address = "llvm.returnaddress.p0"(level : Int32) : Void*
+  {% else %}
+    fun return_address = "llvm.returnaddress"(level : Int32) : Void*
+  {% end %}
 end

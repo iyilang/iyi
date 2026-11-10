@@ -3962,15 +3962,19 @@ class IyiScheduler
   # second thread starts (`expect_thread`): never by two threads at once.
   private def self.make_lot : Nil
     return if @@lot_heads.is_a?(Array(IyiWaiter?))
-    locks = Pointer(UInt64).malloc((LOT * LOT_STRIDE).to_u64)
-    index = 0
-    while index < LOT * LOT_STRIDE
-      locks[index] = 0_u64
-      index = index + 1
+    # Made by the first park, which may be a pool unit's: in the shared
+    # heap, since only class variables hold it (heap22).
+    IyiCross.shared do
+      locks = Pointer(UInt64).malloc((LOT * LOT_STRIDE).to_u64)
+      index = 0
+      while index < LOT * LOT_STRIDE
+        locks[index] = 0_u64
+        index = index + 1
+      end
+      @@lot_locks = locks
+      @@lot_tails = Array(IyiWaiter?).new(LOT, nil)
+      @@lot_heads = Array(IyiWaiter?).new(LOT, nil)
     end
-    @@lot_locks = locks
-    @@lot_tails = Array(IyiWaiter?).new(LOT, nil)
-    @@lot_heads = Array(IyiWaiter?).new(LOT, nil)
   end
 
   private def self.lot_lock(bucket : Int32) : Pointer(Atomic(UInt64))
@@ -5504,8 +5508,12 @@ class IyiWorkers
         return
       end
       @@started = workers
-      @@workers = Array(IyiSchedulerState).new(workers)
-      @@listed = Pointer(UInt64).malloc(workers.to_u64)
+      # In the shared heap whoever starts the pool: only class variables
+      # hold these (heap22).
+      IyiCross.shared do
+        @@workers = Array(IyiSchedulerState).new(workers)
+        @@listed = Pointer(UInt64).malloc(workers.to_u64)
+      end
       # The first worker comes up looking, as every worker `grow` starts
       # does: the pushes behind the first start no other until it finds
       # a task and calls for the next (`stop_spinning`), or has counted

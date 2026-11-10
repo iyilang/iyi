@@ -46,9 +46,9 @@
 # - `inflight:` a unit that allocates past its budget without parking is
 #   collected in flight, its live list whole.
 # - `abandon:` a unit's local mark is abandoned 256 objects into its
-#   list, as a stop asked there abandons one; the list's far end is then
-#   handed a new object, and after the next collection that object reads
-#   whole (the abandoned mark's parities are not trusted).
+#   list, as a stop asked there abandons one; the list's far links are
+#   then each handed a new object, and after the next collection every
+#   one reads whole (the abandoned mark's parities are not trusted).
 # - `death:` every partition is gone once its unit has died.
 
 @[Unsafe("the checks read freed chunks, weak cells and large blocks through raw pointers, and hand a shared-heap address to free, to see what the partitions did with them")]
@@ -192,7 +192,10 @@
     end
   end
 
-  # *count* links from *base* up, newest first.
+  # *count* links from *base* up, newest first, in a frame of its own: no
+  # link's address but the head's is left in the caller's frame, where a
+  # mark would take it for a root.
+  @[NoInline]
   def links(base : Int64, count : Int32) : Chain?
     head : Chain? = nil
     i = 0
@@ -203,42 +206,44 @@
     head
   end
 
-  # The chain's last link (its first made) handed a new link, in a frame
-  # of its own: nothing but that last link holds the new one.
+  # Every link from the *skip*th on (the head is the 0th) handed a new
+  # link of its own, its id the holder's past *offset*, in a frame of its
+  # own: nothing but its holder holds each new one.
   @[NoInline]
-  def hang_on_last(head : Chain?, id : Int64) : Nil
+  def hang_on_far(head : Chain?, skip : Int32, offset : Int64) : Nil
     link = head
+    k = 0
     while link.is_a?(Chain)
-      following = link.next
-      if following.nil?
-        link.extra = Chain.new(id, nil)
-        return
-      end
-      link = following
+      link.extra = Chain.new(link.id &+ offset, nil) if k >= skip
+      link = link.next
+      k = k + 1
     end
   end
 
-  # Whether what the chain's last link holds reads whole.
-  def last_holds?(head : Chain?, id : Int64) : Bool
+  # How many of what `hang_on_far` handed out read wrong.
+  def far_wrong(head : Chain?, skip : Int32, offset : Int64) : Int64
+    wrong = 0_i64
     link = head
+    k = 0
     while link.is_a?(Chain)
-      following = link.next
-      if following.nil?
+      if k >= skip
         extra = link.extra
-        return extra.is_a?(Chain) && extra.intact?(id)
+        wrong = wrong + 1 unless extra.is_a?(Chain) && extra.intact?(link.id &+ offset)
       end
-      link = following
+      link = link.next
+      k = k + 1
     end
-    false
+    wrong
   end
 
   # A mark that ends whole leaves its parity on all 2,000 links; the next
-  # is abandoned 256 links in and leaves its own on those; then the last
-  # link is handed a new object, and the next mark wears the first one's
-  # parity again. Unless the abandoned mark's bits are cleared, that mark
-  # takes the links past 256 for already reached, never opens the last,
-  # and frees the new object. Answers 0, 1 when that object reads wrong,
-  # or a negative failure.
+  # is abandoned 256 links in and leaves its own on those; then each link
+  # from the 300th on is handed a new object, and the next mark wears the
+  # first one's parity again. Unless the abandoned mark's bits are
+  # cleared, that mark takes the links past 256 for already reached,
+  # never opens them, and frees what they hold - all 1,700 objects but
+  # any a stale word on the stack happens to name. Answers how many read
+  # wrong, or a negative failure.
   def abandon_task : Int64
     record = IyiHeap.current_record
     return -1_i64 if record == 0_u64
@@ -253,10 +258,10 @@
       tries = tries + 1
     end
     return -3_i64 if IyiHeap.abandon_next_local_mark
-    hang_on_last(head, 7100000000_i64)
+    hang_on_far(head, 300, 100000000_i64)
     scrub_stack
     return -2_i64 unless collect_now
-    last_holds?(head, 7100000000_i64) ? 0_i64 : 1_i64
+    far_wrong(head, 300, 100000000_i64)
   end
 
   def abandon_check : Nil
@@ -268,7 +273,7 @@
       fail("abandon: the unit allocates in no partition") if value == -1_i64
       fail("abandon: no local collection ran") if value == -2_i64
       fail("abandon: no local mark was abandoned") if value == -3_i64
-      fail("abandon: the object only the list's last link holds read wrong after a mark that followed an abandoned one") if value != 0_i64
+      fail("abandon: #{value} of 1700 objects held only by links past an abandoned mark's reach read wrong after the next mark") if value != 0_i64
     end
     IyiHeap.park_collections_off = false
   end

@@ -15,12 +15,17 @@
 # 2). The broken copies are the ones bench/heap_crossings.sh and
 # bench/heap_local.sh define - read from those files, so the two lists
 # stay one - built and run here against the verifier instead of their own
-# checks. A copy is caught when every run exits 86 with an `iyi:
-# heap_verify:` report whose holder `bench/heap_verify_names.py` names
-# (a type and its field, a data symbol, or a fiber's stack) and whose
-# name is the same in every run. The table of catches is printed at the
-# end. Copies whose loss no heap word can show are listed apart with what
-# catches them (`VALUE_COPIES`).
+# checks: each copy runs with `HEAP22_PRINT_ONLY=1`, so the program's own
+# failed checks print their `FAIL:` line and the run goes on, and only
+# the verifier ends it. A copy is caught when every run exits 86 with an
+# `iyi: heap_verify:` report whose holder `bench/heap_verify_names.py`
+# names (a type and its field, a data symbol, or a fiber's stack) and
+# whose name is the same in every run. The table of catches is printed at
+# the end: the copy, the verifier's check that caught it, the holder and
+# the target named, and the program's own first `FAIL:` line, printed
+# and passed over. Copies whose loss no heap word can show are listed
+# apart with what catches them (`VALUE_COPIES`). `KEEP=DIR` keeps every
+# build and run in DIR.
 #
 # `simulated` runs bench/heap_crossings.iyi and bench/heap_verify.iyi with
 # `IYI_WORKERS=1` at each seed of `SIM_SEEDS` (default 1 to 5): every
@@ -38,7 +43,8 @@ set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 IYI="${IYI:-$REPO/bin/iyi}"
-WORK="$(mktemp -d)"
+WORK="${KEEP:-$(mktemp -d)}"
+mkdir -p "$WORK"
 PART="${1:-all}"
 SEED="${SEED:-1}"
 RUNS="${RUNS:-2}"
@@ -63,7 +69,7 @@ case "$(uname -s)" in
   *) PSEP=':' ;;
 esac
 
-trap 'rm -rf "$WORK"' EXIT
+[ -n "${KEEP:-}" ] || trap 'rm -rf "$WORK"' EXIT
 
 status=0
 TABLE="$WORK/table"
@@ -84,13 +90,28 @@ build() {
 }
 
 # verified DIR TAG ARGS...: one stressed run; exit code in DIR/TAG.code.
-# `WORKERS` sets IYI_WORKERS, `LIMIT` the seconds before a hang is ended.
+# `WORKERS` sets IYI_WORKERS, `LIMIT` the seconds before a hang is ended,
+# `PRINT=1` the program's print-only checks (HEAP22_PRINT_ONLY).
 verified() {
   local dir="$1" tag="$2"
   shift 2
-  env IYI_CHAOS="$SEED" IYI_HEAP_STRESS=1 ${WORKERS:+IYI_WORKERS=$WORKERS} \
+  env IYI_CHAOS="$SEED" IYI_HEAP_STRESS=1 ${WORKERS:+IYI_WORKERS=$WORKERS} ${PRINT:+HEAP22_PRINT_ONLY=1} \
     timeout "${LIMIT:-300}" "$dir/program" "$@" >"$dir/$tag.out" 2>"$dir/$tag.err"
   echo $? >"$dir/$tag.code"
+}
+
+# The verifier's check that reported in run TAG: the line under the
+# report's `iyi: heap_verify: partition ...` header.
+check_of() {
+  awk '/^iyi: heap_verify: partition / && !/checked/ { getline; sub(/^ +/, ""); sub(/[:,]$/, ""); print; exit }' "$1/$2.err"
+}
+
+# The program's own first failed check in run TAG, printed and passed
+# over, or `-`.
+program_saw() {
+  local line
+  line="$(grep -m1 '^FAIL: ' "$1/$2.out" | sed 's/^FAIL: //')"
+  echo "${line:--}"
 }
 
 # The report's holder and target, named, as one line: `holder | target`.
@@ -122,42 +143,48 @@ named() {
     }' "$dir/$tag.named"
 }
 
-# caught LABEL DIR ARGS...: RUNS stressed runs of DIR's program, each a
-# report, the same holder named in all; a row of the table.
+# caught LABEL DIR ARGS...: RUNS stressed runs of DIR's program with the
+# program's checks print-only, each ended by a report, the same check and
+# holder named in all; a row of the table.
 caught() {
   local label="$1" dir="$2"
   shift 2
-  local k=1 first="" row
+  local k=1 first="" row check
   while [ "$k" -le "$RUNS" ]; do
-    verified "$dir" "run$k" "$@"
+    PRINT=1 verified "$dir" "run$k" "$@"
     if [ "$(cat "$dir/run$k.code")" != 86 ] || ! grep -q "^iyi: heap_verify: " "$dir/run$k.err"; then
       local how="exit $(cat "$dir/run$k.code")"
       grep -q "^FAIL: " "$dir/run$k.out" && how="$how, $(grep -m1 '^FAIL: ' "$dir/run$k.out")"
       if [[ ",$VALUE_COPIES," == *",$label,"* ]] && grep -q "^FAIL: " "$dir/run$k.out"; then
-        printf '| %s | the program'"'"'s own check: %s | value, not a heap word |\n' "$label" "$(grep -m1 '^FAIL: ' "$dir/run$k.out" | sed 's/^FAIL: //')" >>"$TABLE"
+        printf '| %s | none: a value, not a heap word | | | %s |\n' "$label" "$(program_saw "$dir" "run$k")" >>"$TABLE"
         echo "  $label: no heap word to see; the program's check: $how"
         return
       fi
       echo "  $label: run $k not caught by the verifier ($how)"
       sed -n '1,6p' "$dir/run$k.err" | sed 's/^/      /'
-      printf '| %s | **missed** (run %s: %s) | |\n' "$label" "$k" "$how" >>"$TABLE"
+      printf '| %s | **missed** (run %s: %s) | | | %s |\n' "$label" "$k" "$how" "$(program_saw "$dir" "run$k")" >>"$TABLE"
       status=1
       return
     fi
-    row="$(named "$dir" "run$k")"
+    row="$(check_of "$dir" "run$k") | $(named "$dir" "run$k")"
     if [ -z "$first" ]; then
       first="$row"
     elif [ "$row" != "$first" ]; then
-      echo "  $label: run $k named another holder: $row (run 1: $first)"
+      echo "  $label: run $k named another check or holder: $row (run 1: $first)"
     fi
     k=$((k + 1))
   done
   echo "  $label: $first"
-  printf '| %s | %s |\n' "$label" "$(echo "$first" | sed 's/ | / | /')" >>"$TABLE"
-  if ! echo "$first" | grep -q '#\|\[.*\]\|stack of fiber\|data segment'; then
-    echo "  $label: caught, but the holder is not named by type and field"
-    status=1
-  fi
+  printf '| %s | %s | %s |\n' "$label" "$first" "$(program_saw "$dir" run1)" >>"$TABLE"
+  check="$(check_of "$dir" run1)"
+  case "$check" in
+    *"slot names"*)
+      if ! echo "$first" | grep -q '#\|\[.*\]\|stack of fiber\|data segment'; then
+        echo "  $label: caught, but the holder is not named by type and field"
+        status=1
+      fi
+      ;;
+  esac
 }
 
 # heap_crossings.sh's interface: label dir check-name awk-script tree file.
@@ -299,7 +326,7 @@ own_caught() {
     row="$(LIMIT="$HANG" how_failed "$WORK/$dir/b" "run$k")"
     if [ -z "$row" ]; then
       echo "  $label: run $k passed: not caught"
-      printf '| %s | **missed** (run %s passed) | |\n' "$label" "$k" >>"$TABLE"
+      printf '| %s | **missed** (run %s passed) | | | |\n' "$label" "$k" >>"$TABLE"
       status=1
       return
     fi
@@ -312,7 +339,7 @@ own_caught() {
     k=$((k + 1))
   done
   echo "  $label ($check${WORKERS:+, IYI_WORKERS=$WORKERS}): $first"
-  printf '| %s | %s |  |\n' "$label" "$first" >>"$TABLE"
+  printf '| %s | %s | | | |\n' "$label" "$first" >>"$TABLE"
 }
 
 # One line deleted after a marker: `del MARKER LINE` as an awk program.
@@ -378,8 +405,10 @@ if [ "$PART" = all ] || [ "$PART" = own ]; then
 fi
 
 echo
-echo "| copy | holder (heap, type / field) | target @ allocation site |"
-echo "|---|---|---|"
+echo "Seed $SEED (IYI_CHAOS), IYI_HEAP_STRESS=1, $RUNS runs each; copies run with HEAP22_PRINT_ONLY=1."
+echo
+echo "| copy | caught by (the verifier's check; own copies: how the run failed) | holder (heap, type / field) | target @ allocation site | the program's own check, printed and passed over |"
+echo "|---|---|---|---|---|"
 cat "$TABLE"
 echo
 if [ "$status" -eq 0 ]; then

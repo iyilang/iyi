@@ -35,9 +35,25 @@
   import std/env::{ENV}
   import std/tls::{TlsIdentity}
 
+  # `HEAP22_PRINT_ONLY=1`: a failed check prints its `FAIL:` line and the
+  # program goes on, so that bench/heap_verify.sh can show a broken copy
+  # caught by `-Dheap_verify`'s verifier alone (the run then exits 86 at
+  # the verifier's report, or 0 when nothing but the program saw it).
+  class Checks
+    @@print_only = false
+
+    def self.print_only : Bool
+      @@print_only
+    end
+
+    def self.read_env : Nil
+      @@print_only = Program.env("HEAP22_PRINT_ONLY") == "1"
+    end
+  end
+
   def fail(message : String) : Nil
     print "FAIL: #{message}\n"
-    __iyi_exit(1)
+    __iyi_exit(1) unless Checks.print_only
   end
 
   # A chain of fresh nodes, each labelled with a string made at run time.
@@ -146,7 +162,10 @@
       before = IyiHeap.partition_collections(record)
       tries = 0
       while IyiHeap.partition_collections(record) == before
-        fail("a local collection did not run in 1000 tries") if tries == 1000
+        if tries == 1000
+          fail("a local collection did not run in 1000 tries")
+          break
+        end
         IyiHeap.collect_local(record)
         tries = tries + 1
         sleep(1) if IyiHeap.partition_collections(record) == before
@@ -464,9 +483,12 @@
     end
     if how == "new"
       m = made.receive
-      fail("mutex new: no Mutex came back") unless m.is_a?(Mutex(Array(String)))
-      first = m.get { |held| held[0] }
-      fail("mutex new: the value reads wrong") unless first.is_a?(String) && first == label_for(seed, 0)
+      if m.is_a?(Mutex(Array(String)))
+        first = m.get { |held| held[0] }
+        fail("mutex new: the value reads wrong") unless first.is_a?(String) && first == label_for(seed, 0)
+      else
+        fail("mutex new: no Mutex came back")
+      end
     else
       ok = shared.get do |held|
         good = held.size == NODES
@@ -493,8 +515,11 @@
           sleep(50)
           got = task.value
           collect_here
-          fail("panic: the task answered no panic") unless got.is_a?(Panicked)
-          fail("panic: the message reads wrong") unless got.message == label_for(18, 5) + " (heap_crossings panics here on purpose)"
+          if got.is_a?(Panicked)
+            fail("panic: the message reads wrong") unless got.message == label_for(18, 5) + " (heap_crossings panics here on purpose)"
+          else
+            fail("panic: the task answered no panic")
+          end
         end
         0
       end
@@ -524,8 +549,11 @@
       g.spawn(unit: :new) do
         done.receive
         p = procs.receive
-        fail("shared proc: none came") unless p.is_a?(SharedProc(Int32, Int32))
-        fail("shared proc: a wrong answer") unless p.call(1) == 2
+        if p.is_a?(SharedProc(Int32, Int32))
+          fail("shared proc: a wrong answer") unless p.call(1) == 2
+        else
+          fail("shared proc: none came")
+        end
         0
       end
     end
@@ -668,9 +696,12 @@
       g.spawn(unit: :new) do
         done.receive
         got = box.receive
-        fail("list: none came") unless got.is_a?(List(String))
-        fail("list: #{got.size} strings") unless got.size == NODES
-        NODES.times { |i| fail("list: string #{i} reads wrong") unless got[i] == label_for(25, i) }
+        if got.is_a?(List(String))
+          fail("list: #{got.size} strings") unless got.size == NODES
+          NODES.times { |i| fail("list: string #{i} reads wrong") unless i < got.size && got[i] == label_for(25, i) }
+        else
+          fail("list: none came")
+        end
         0
       end
     end
@@ -690,7 +721,10 @@
 
   def tls_check : Nil
     identity = TlsIdentity.from_der([hex(TLS_LEAF), hex(TLS_ROOT)], hex(TLS_SEED))
-    fail("tls: the identity did not load") unless identity.is_a?(TlsIdentity)
+    unless identity.is_a?(TlsIdentity)
+      fail("tls: the identity did not load")
+      return
+    end
     chain = identity.chain
     size = chain[0].size
     chain[0] << 0_u8
@@ -736,6 +770,7 @@
     end
   end
 
+  Checks.read_env
   IyiWorkers.count = 4
   arguments = Program.args
   if arguments.empty?

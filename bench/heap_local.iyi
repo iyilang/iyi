@@ -53,9 +53,24 @@
 
 @[Unsafe("the checks read freed chunks, weak cells and large blocks through raw pointers, and hand a shared-heap address to free, to see what the partitions did with them")]
 {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
+  # `HEAP22_PRINT_ONLY=1`: a failed check prints its `FAIL:` line and the
+  # program goes on, so that bench/heap_verify.sh can show a broken copy
+  # caught by `-Dheap_verify`'s verifier alone.
+  class Checks
+    @@print_only = false
+
+    def self.print_only : Bool
+      @@print_only
+    end
+
+    def self.read_env : Nil
+      @@print_only = Program.env("HEAP22_PRINT_ONLY") == "1"
+    end
+  end
+
   def fail(message : String) : Nil
     print "FAIL: #{message}\n"
-    __iyi_exit(1)
+    __iyi_exit(1) unless Checks.print_only
   end
 
   # An immutable node, so a list of them is `Share` and may be a task's
@@ -404,8 +419,11 @@
       end
       handles.each do |handle|
         value = handle.value
-        fail("answer: a unit answered #{value}") unless value.is_a?(Node?)
-        answers << value
+        if value.is_a?(Node?)
+          answers << value
+        else
+          fail("answer: a unit answered #{value}")
+        end
       end
     end
     settle("answer")
@@ -623,9 +641,12 @@
     group do |g|
       handle = g.spawn(unit: :new) { return_task }
       value = handle.value
-      fail("return: the unit answered #{value}") unless value.is_a?(Int64)
-      fail("return: #{-value} nodes of the kept list read wrong") if value < 0_i64 && value > -1000_i64
-      fail("return: the unit holds #{value} bytes of runs past twice what it held after three rounds") if value > 0_i64
+      if value.is_a?(Int64)
+        fail("return: #{-value} nodes of the kept list read wrong") if value < 0_i64 && value > -1000_i64
+        fail("return: the unit holds #{value} bytes of runs past twice what it held after three rounds") if value > 0_i64
+      else
+        fail("return: the unit answered #{value}")
+      end
     end
     fail("return: the global sweep handed no chunk back to a partition") if IyiHeap.returned_chunks == returned
     IyiHeap.local_collections_off = false
@@ -798,6 +819,7 @@
     IyiHeap.collect_every_park = true
   end
 
+  Checks.read_env
   arguments = Program.args
   quiet = arguments.empty?
   fail("usage: heap_local [WORKERS ROUNDS]") unless quiet || arguments.size == 2

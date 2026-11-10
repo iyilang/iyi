@@ -7164,7 +7164,7 @@ class IyiGroup
   # A `Unit` task's body, made where `spawn(in:)` says. Its answer leaves
   # the unit while the unit lives on, so it is published here, before
   # `IyiTask#finish` stores it (heap22 row 2b).
-  private def unit_work(block : S -> T, value : S) : -> T forall S, T
+  private def unit_work(block : S -> T, value : S) : Proc(T) forall S, T
     -> {
       answer = block.call(value)
       IyiCross.publish(answer)

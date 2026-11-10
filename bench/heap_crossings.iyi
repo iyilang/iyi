@@ -107,13 +107,23 @@
     words[2047]
   end
 
-  # The running unit's partition collected, as its own token holder.
+  # The running unit's partition collected, as its own token holder. A
+  # local collection steps aside while a global mark runs; it is asked
+  # again until one has run, so a check never passes on one that did not.
   @[NoInline]
   def collect_here : Nil
     scrub
     {% if flag?(:heap_partitions) %}
       record = IyiScheduler.current.alloc
-      IyiHeap.collect_local(record) if record != 0_u64
+      return if record == 0_u64
+      before = IyiHeap.partition_collections(record)
+      tries = 0
+      while IyiHeap.partition_collections(record) == before
+        fail("a local collection did not run in 1000 tries") if tries == 1000
+        IyiHeap.collect_local(record)
+        tries = tries + 1
+        sleep(1) if IyiHeap.partition_collections(record) == before
+      end
     {% end %}
   end
 

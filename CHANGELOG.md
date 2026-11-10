@@ -1,5 +1,67 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **Each size class keeps warm what it took the epoch before, and an
+  idle pool hands its warm pages back.** The sweep's warm room was a
+  budget's worth of payload, spent on whichever classes the sweep
+  reached first: issue #145's app kept 14-57 MB of warm pages idle
+  across a collection on a 40-48 MB budget. Each class now keeps as many
+  pages warm as it took whole in the last epoch: the warm pages it took
+  off its batches, the warm runs it threaded and what it carved cold
+  when those fell short. A pool whose workers have all been idle for a
+  second with no collection hands every class's warm pages back once
+  (`IyiMark.trim_idle`), so a server between bursts no longer holds the
+  last epoch's room (GC_DESIGN.md, the warm room per class).
+
+  #145's app (iyiturkiye built by 0.21.0, 11 endpoints one after
+  another on twelve workers), 6 rounds against 0.21.0 and goturkiye,
+  steady / peak / 5 s after the load:
+  - this Linux machine (12 vCPU, shared): 127 / 163 / 124 MB against 170
+    / 217 / 212 (Go 47 / 60 / 50), closing 35%, 34% and 55% of the gap
+    to Go; app CPU a request +9.9% over the six rounds, most of it one
+    round, the median round +2.7%.
+  - Windows 11, 12 logical processors (the user's machine): 123 / 158 /
+    137 MB against 166 / 228 / 225 (Go 50 / 128 / 47), closing 37%, 70%
+    and 50%; app CPU -5.9%, requests a second +9.2%, p99 -6.3%.
+  - macOS 26.6, Apple M2 Pro, 10 cores (the user's machine): 134 / 163 /
+    150 MB against 179 / 239 / 235 (Go 54 / 57 / 57), closing 36%, 41%
+    and 47%; app CPU -1.2%, requests a second +0.2%.
+
+  The collector benches, 3 interleaved rounds against 0.21.0. On Linux:
+  `bench/release_pages.iyi` 4.51-4.71M requests a second against
+  4.04-4.52M; `bench/alloc_scaling.iyi` at 8 workers 351-359 ms against
+  347-388 and peak 92-101 MB against 104-108; binary trees 0.44-0.48 s
+  against 0.43-0.47; the four JSON benches 4.45-4.93 s against
+  4.35-4.58; `bench/web_cores.iyi` on 8 workers, `order` 263-290k a
+  second against 229-274k, peak 62-63 MB against 72-79 and 38-54 MB
+  8 s after the load against 70-73. On macOS 26.6, Apple M2 Pro:
+  release_pages 3.18-3.21M against 3.16-3.19M; alloc_scaling at 8
+  workers 615-663 ms against 523-572, slower in each round; binary trees
+  1.04-1.05 s against 1.06-1.33; JSON 7.41-7.43 s against 6.82-7.60;
+  web_cores `order` 118k either way, peak 77-81 MB against 92-95 and
+  72-77 MB after the load against 93-94. On Windows 11, 12 logical
+  processors: release_pages 3.91-4.12M against 3.91-3.99M; alloc_scaling
+  at 8 workers 360-397 ms against 336-351, slower in each round, and at
+  4 workers 194-233 against 183-195; binary trees 0.53-0.61 s against
+  0.51-0.58; JSON 5.23-6.06 s against 5.33-5.50; web_cores `order`
+  110-122k against 116-125k, peak 64-66 MB against 76-79 and 40-43 MB
+  after the load against 73-77. alloc_scaling at 8 workers is slower on
+  macOS and Windows, and at 4 on Windows, and that is not explained yet.
+
+  The trim runs beside threads that allocate. Two refills adopting the
+  batches of adjacent sweep slices both counted off the page the slices
+  share; the arena's count of listed pages reached zero with pages still
+  listed, and the trim and the pause made idle pages under objects
+  already handed out. `IyiHeap.unlist_page` counts a page off only in
+  the refill that clears it. `bench/sweep_exercise.sh` runs
+  `bench/trim_stress.iyi` (eight threads in six classes, the trim back
+  to back), and its broken copies with the double-count window held open
+  20 µs: the old counting was caught on the first run in 20 of 20 on
+  Windows 11 and on macOS 26.6, and on run 1 on this Linux machine.
+
 ## 0.21.0 — 2026-11-09
 
 **A spawn has one verb and names its unit, and a plain `spawn` runs in
@@ -27754,7 +27816,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 28,806-line library and nothing else. Every other
+  written against iyi's own 29,107-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

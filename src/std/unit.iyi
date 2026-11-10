@@ -78,8 +78,10 @@ pub class Unit(T) < IyiGroup::Unit(T)
   # made in that partition, and the handle, which any unit may hold, in
   # the shared heap. *pinned* is the compiler's, as `spawn_new`'s is.
   def self.new(*, pinned : Bool = false, &block : -> U) : Unit(U) forall U
+    # Named outside the `{% if %}`: a block parameter read only inside one
+    # is not captured.
+    IyiCross.publish(block)
     {% if flag?(:heap_partitions) %}
-      IyiCross.publish(block)
       placed = IyiWorkers.parallel? ? POOL : MAIN
       unit = IyiCross.shared { IyiUnit.new(pinned: pinned || placed == MAIN) }
       value = IyiHeap.within(unit.heap) { block.call }

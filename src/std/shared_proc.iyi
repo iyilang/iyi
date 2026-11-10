@@ -56,8 +56,10 @@ pub struct SharedProc(A, R)
   # `spawn_new`'s is.
   @[Share]
   def self.of(*, pinned : Bool = false, &block : A -> R) : SharedProc(A, R)
+    # Named outside the `{% if %}`: a block parameter read only inside one
+    # is not captured.
+    IyiCross.publish(block)
     {% if flag?(:heap_partitions) %}
-      IyiCross.publish(block)
       new(block, pinned)
     {% else %}
       new(block)

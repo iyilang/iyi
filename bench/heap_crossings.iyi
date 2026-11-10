@@ -23,6 +23,7 @@
 # Without `-Dheap_partitions` nothing is collected locally and every check
 # passes: that build is the flag-off control.
 
+@[Unsafe("the checks wipe their stack with raw words, and hide addresses as integers where no local collection looks, to see what a crossing left unpublished")]
 {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
   import std/mutex::{Mutex}
   import std/unit::{Unit}
@@ -30,6 +31,7 @@
   import std/list::{List}
   import std/box::{Box}
   import std/gc::{GC}
+  import std/reference_storage::{ReferenceStorage}
   import std/env::{ENV}
   import std/tls::{TlsIdentity}
 
@@ -358,8 +360,14 @@
   # ── Row 4b: Mutex: a lock block's captures, the bracket, `new`'s captures
   @[NoInline]
   def lock_capture(m : Mutex(Array(String)), seed : Int32) : Nil
-    strings = strings_for(seed)
-    m.lock { |held| strings.each { |s| held << s } }
+    payload = build(seed)
+    m.lock do |held|
+      node = payload
+      while node.is_a?(Payload)
+        held.unshift(node.label)
+        node = node.next_node
+      end
+    end
     nil
   end
 

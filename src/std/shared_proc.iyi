@@ -34,15 +34,12 @@ pub struct SharedProc(A, R)
   {% if flag?(:heap_partitions) %}
     # The compiler could not prove the block's crossing (heap22
     # `pinned:`): a unit that calls it allocates in the shared heap.
-    @pinned : Bool
+    @pinned : Bool = false
   {% end %}
 
   # Private: a `SharedProc` made from a proc nobody checked would be the
   # hole this type closes.
   private def initialize(@proc : Proc(A, R))
-    {% if flag?(:heap_partitions) %}
-      @pinned = false
-    {% end %}
   end
 
   {% if flag?(:heap_partitions) %}

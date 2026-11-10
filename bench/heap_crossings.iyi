@@ -84,6 +84,31 @@
     fail("#{what}: the chain ended #{index + 1} nodes short") unless index == -1
   end
 
+  # The chain at *address* checked where it crossed, before any collection:
+  # every node and label published or in the shared heap, none `LOCAL` to
+  # a partition. Deterministic where the poison is not: a word a register
+  # or a frame still holds keeps an unpublished graph alive through the
+  # collection, but never makes it published.
+  def crossed(address : UInt64, what : String) : Nil
+    {% if flag?(:heap_partitions) %}
+      node = Pointer(Void).new(address).as(Payload?)
+      index = NODES - 1
+      while node.is_a?(Payload)
+        fail("#{what}: node #{index} is still local to its unit's partition after the crossing") if IyiHeap.local?(node.object_id)
+        fail("#{what}: node #{index}'s label is still local to its unit's partition after the crossing") if IyiHeap.local?(node.label.object_id)
+        node = node.next_node
+        index = index - 1
+      end
+    {% end %}
+  end
+
+  # *address* made in the shared heap: no partition owns its chunk.
+  def shared_made(address : UInt64, what : String) : Nil
+    {% if flag?(:heap_partitions) %}
+      fail("#{what}: made in partition #{IyiHeap.owner_of(address)}, not the shared heap") if IyiHeap.owner_of(address) != 0_u64
+    {% end %}
+  end
+
   def strings_for(seed : Int32) : Array(String)
     Array(String).new(NODES) { |i| label_for(seed, i) }
   end
@@ -147,11 +172,13 @@
   @[NoInline]
   def launch_spawn(g : IyiGroup, go : Channel(Int32), seed : Int32) : IyiTask(Int32)
     payload = build(seed)
-    g.spawn(unit: :new) do
+    task = g.spawn(unit: :new) do
       go.receive
       check(payload, seed, "spawn")
       0
     end
+    Stash.put(payload.object_id)
+    task
   end
 
   def spawn_check : Nil
@@ -160,6 +187,7 @@
       outer.spawn(unit: :new) do
         group do |g|
           launch_spawn(g, go, 11)
+          crossed(Stash.take, "spawn")
           collect_here
           go.send(1)
         end
@@ -172,12 +200,14 @@
   @[NoInline]
   def launch_thread(go : Channel(Int32), verdict : Channel(Int32), seed : Int32) : IyiThread
     payload = build(seed)
-    IyiThread.start do
+    thread = IyiThread.start do
       go.receive
       check(payload, seed, "thread")
       verdict.send(1)
       nil
     end
+    Stash.put(payload.object_id)
+    thread
   end
 
   def thread_check : Nil
@@ -186,6 +216,7 @@
     group do |outer|
       outer.spawn(unit: :new) do
         thread = launch_thread(go, verdict, 12)
+        crossed(Stash.take, "thread")
         collect_here
         go.send(1)
         verdict.receive
@@ -204,6 +235,7 @@
       check(payload, seed, "in")
       value
     end
+    Stash.put(payload.object_id)
     nil
   end
 
@@ -214,6 +246,7 @@
       outer.spawn(unit: :new) do
         group do |g|
           launch_in(g, u, go, 13)
+          crossed(Stash.take, "in")
           collect_here
           go.send(1)
         end
@@ -300,7 +333,8 @@
 
   # Two receivers parked on a channel of one slot, then two sends with
   # no park between: the second finds the ring full and grows it, on the
-  # sender's unit.
+  # sender's unit - unless the first receiver ran between the sends, when
+  # the round is tried again.
   @[NoInline]
   def grow_ring(box : Channel(String), seed : Int32) : Nil
     box.send(label_for(seed, 0))
@@ -308,10 +342,11 @@
     nil
   end
 
-  def ring_check : Nil
+  def ring_round : Bool
     box = Channel(String).new(1)
     done = Channel(Int32).new(2)
     got = Channel(Int32).new(2)
+    grew = Channel(Bool).new(1)
     group do |g|
       2.times do
         g.spawn(unit: :same) do
@@ -326,13 +361,22 @@
       g.spawn(unit: :new) do
         sleep(100)
         grow_ring(box, 16)
+        grown = box.@slots > 1
+        shared_made(box.@ring.address, "ring: the grown ring") if grown
         collect_here
+        grew.send(grown)
         done.send(1)
         done.send(1)
         0
       end
       fail("ring: a value read wrong") unless got.receive == 1 && got.receive == 1
     end
+    grew.receive == true
+  end
+
+  def ring_check : Nil
+    50.times { return if ring_round }
+    fail("ring: in 50 rounds the second send never found the ring full")
   end
 
   # ── Row 4: `Unit.new` routes the value into the unit's partition ───────
@@ -415,6 +459,10 @@
   end
 
   # ── Row 7: a panic's message, after the panicking unit died ────────────
+  # A run without the message's publish passes too: the `Panicked` answer
+  # detaches the partition, which is never collected locally and goes to
+  # the shared heap at the unit's death, so neither poison nor `local?`
+  # can show it (the verifier's, S4).
   def panic_check : Nil
     group do |outer|
       outer.spawn(unit: :new) do
@@ -550,6 +598,7 @@
             go.receive
             label_for(24, 1)
           end
+          shared_made(task.object_id, "glue: the task")
           collect_here
           go.send(1)
           got = task.value
@@ -563,7 +612,11 @@
   # ── Row 21: List's elements ────────────────────────────────────────────
   @[NoInline]
   def send_list(box : Channel(List(String)), seed : Int32) : Nil
-    box.send(List.new(strings_for(seed)))
+    list = List.new(strings_for(seed))
+    box.send(list)
+    {% if flag?(:heap_partitions) %}
+      NODES.times { |i| fail("list: string #{i} is still local to its unit's partition after the send") if IyiHeap.local?(list[i].object_id) }
+    {% end %}
     nil
   end
 

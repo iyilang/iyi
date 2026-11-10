@@ -16,10 +16,15 @@
 # A copy is caught when its program exits non-zero: a `FAIL: <row>` line,
 # or the crash a poisoned word makes (a signal, or Windows' access
 # violation). A hang is ended at 120 s and counts as caught too, and is
-# named so. Mechanisms no poison can show - the reference is still rooted
-# on a stack, or a second crossing publishes it again - are listed at the
-# end as the verifier's (S4, `-Dheap_verify`'s scan): no copy is built
-# for them here.
+# named so. Poison alone is not deterministic - a word a register or a
+# frame still holds keeps an unpublished graph alive through the
+# collection - so the checks of rows 1, 1c, 1d, 3 (ring growth), 14 and
+# 21 also ask, where the graph crossed and before any collection,
+# whether it is published or the shared heap's (`IyiHeap.local?`,
+# `owner_of`). Mechanisms neither can show - the reference is still
+# rooted on a stack, a second crossing publishes it again, or the answer's
+# detach covers it - are listed at the end as the verifier's (S4,
+# `-Dheap_verify`'s scan): no copy is built for them here.
 
 set -u
 
@@ -156,9 +161,6 @@ prove_caught "Mutex shared bracket" r4bs mutex_bracket \
   "$(subst 'def lock\(&block' 'IyiCross\.shared \{ block\.call\(@value\) \}' 'block.call(@value)')" std mutex.iyi
 prove_caught "Mutex.new capture publish" r4bn mutex_new \
   "$(del 'def self\.new\(&block : -> U\) : Mutex' '^    IyiCross\.publish\(block\)$')" std mutex.iyi
-# Row 7: a panic's message not published.
-prove_caught "panic publish" r7 panic \
-  "$(del 'def self\.panic_current' '^    IyiCross\.publish\(message\)$')" iyi concurrency.iyi
 # Row 9: Box, GC.malloc and ReferenceStorage pin nothing.
 prove_caught "Box pin" r9b box \
   "$(del 'def self\.box\(object : T\)' '^    IyiCross\.pin$')" std box.iyi
@@ -191,6 +193,7 @@ echo "  Mutex.new's bracket, List's copy in the shared heap: the carrying crossi
 echo "  SharedProc.of's publish: the crossing that carries the SharedProc publishes its closure again"
 echo "  a WeakRef's cell in the shared heap; Windows' process-wait words: rooted by the waiting frame"
 echo "  on_main's glue in the shared heap: a MAIN-placed Unit is made pinned, so nothing there is local"
+echo "  a panic's message published: the Panicked answer detaches the partition, never collected locally, the shared heap's at death"
 
 echo
 if [ "$status" -eq 0 ]; then

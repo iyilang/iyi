@@ -2293,6 +2293,12 @@ class IyiScheduler
     end
     me = state
     {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+      # A simulated parallel task's unit runs on the simulation's thread
+      # alone (heap22, chaos.iyi `IyiGroup#chaos_task`): woken onto its home
+      # only, as a fiber of no unit is.
+      {% if flag?(:iyi_chaos) %}
+        fiber.homebound = true if IyiChaos.kept?(fiber)
+      {% end %}
       if fiber.unit.is_a?(IyiUnit) && !fiber.homebound
         if me.worker
           enqueue(fiber)
@@ -3595,7 +3601,9 @@ class IyiScheduler
     slots = st.io_slots
     size = slots.is_a?(Array(IyiFiber?)) ? slots.size : 0
     return if size >= need
-    grown = Array(IyiFiber?).new(need > size * 2 ? need : size * 2, nil)
+    # In the shared heap: the waiting fiber may be a pool unit's, and only
+    # the scheduler state holds the array (heap22).
+    grown = IyiCross.shared { Array(IyiFiber?).new(need > size * 2 ? need : size * 2, nil) }
     lists_lock(st)
     if slots.is_a?(Array(IyiFiber?))
       index = 0
@@ -5126,7 +5134,8 @@ class IyiScheduler
     st = state
     buffer = st.events
     return buffer.address if buffer.address != 0_u64
-    buffer = Pointer(UInt8).malloc((EVENTS * IYI_POLL_EVENT_BYTES).to_u64)
+    # In the shared heap: only the scheduler state holds it (heap22).
+    buffer = IyiCross.shared { Pointer(UInt8).malloc((EVENTS * IYI_POLL_EVENT_BYTES).to_u64) }
     st.events = buffer
     buffer.address
   end
@@ -7308,7 +7317,7 @@ class IyiGroup
     # the new unit allocates in the shared heap (heap22 `pinned:`).
     private def spawn_pooled(*, pinned : Bool = false, &block : -> T) : IyiTask(T) forall T
       {% if flag?(:iyi_chaos) %}
-        return IyiChaos.parallel_task(in_unit(&block)) if IyiChaos.simulated?
+        return chaos_task(pinned, &block) if IyiChaos.simulated?
       {% end %}
       return in_unit(&block) unless IyiWorkers.parallel?
       on_pool(pinned, &block)
@@ -7331,7 +7340,7 @@ class IyiGroup
     # the unit made in the shared heap.
     private def on_pool(pinned : Bool, &block : -> T) : IyiTask(T) forall T
       {% if flag?(:iyi_chaos) %}
-        return IyiChaos.parallel_task(in_unit(&block)) if IyiChaos.simulated?
+        return chaos_task(pinned, &block) if IyiChaos.simulated?
       {% end %}
       IyiCross.publish(block)
       pooled(IyiCross.shared { IyiUnit.new(pinned: pinned) }, &block)

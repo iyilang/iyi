@@ -606,13 +606,23 @@
   # ── filter ────────────────────────────────────────────────────────────
 
   # Unit B's object's address, kept as an integer on unit A's stack across
-  # A's own collection.
+  # A's own collection: 1 once one has run. A collection steps aside while
+  # a global mark runs or when a pause comes into it, and under
+  # `IYI_HEAP_STRESS` - a collection at every chaos point, the verifier
+  # scanning every arena in each - the one try there was ran none
+  # (bench/heap_verify.sh's sound part, Linux): it is asked again, as
+  # bench/heap_crossings.iyi's `collect_here` asks.
   @[NoInline]
   def collect_holding(address : UInt64) : UInt64
     record = IyiHeap.current_record
     before = IyiHeap.partition_collections(record)
-    IyiHeap.collect_local(record)
-    IyiHeap.partition_collections(record) - before + (address & 0_u64)
+    tries = 0
+    while IyiHeap.partition_collections(record) == before && tries < 1000
+      IyiHeap.collect_local(record)
+      tries = tries + 1
+      sleep(1) if IyiHeap.partition_collections(record) == before
+    end
+    (IyiHeap.partition_collections(record) == before ? 0_u64 : 1_u64) + (address & 0_u64)
   end
 
   def filter_check : Nil

@@ -97,6 +97,61 @@ class IyiChaosUnit
   end
 end
 
+# heap22: the runtime's unit a simulated parallel task runs in
+# (`IyiGroup#chaos_task`), marked so: its token is the simulation's
+# thread's for good, and its fibers run there alone, whichever thread
+# wakes them (`IyiScheduler.ready`).
+class IyiUnit
+  @chaos_kept : Bool = false
+  property chaos_kept : Bool
+end
+
+class IyiGroup
+  # :nodoc: — a task the compiler or the program put on the pool
+  # (`spawn_pooled`, `on_pool`), simulated: kept on this thread as a unit
+  # of its own (`IyiChaos.parallel_task`). Under heap22's partitions it is
+  # a unit of the runtime's as well, with a partition of its own unless
+  # *pinned* (design section 4.5), and its crossing is made as `pooled`
+  # makes a pool unit's: the block's captures and the group published,
+  # the unit, the fiber, the task, its box and the closure the fiber runs
+  # made in the shared heap. Made by `in_unit` in the spawner's partition
+  # and published after, the glue was the spawner's, which heap_crossings'
+  # `glue` check named (simulated, Linux). Without partitions it is a task
+  # of its spawner's unit, as it was before heap22.
+  private def chaos_task(pinned : Bool, &block : -> T) : IyiTask(T) forall T
+    # Named outside the `{% if %}`: a block parameter read only inside one
+    # is not captured. A no-op without partitions (`IyiCross`).
+    IyiCross.publish(block)
+    {% if flag?(:heap_partitions) %}
+      raise "a task spawned on a group whose block has ended: no scope is left to join it" if @ended
+      IyiScheduler.make_stacks_with { |fresh| fresh.prepare_stack } unless IyiScheduler.makes_stacks?
+      IyiCross.publish(self)
+      unit = IyiCross.shared { IyiUnit.new(pinned: pinned) }
+      # Its token held by this thread for good, as the worker running a
+      # pool unit holds it: no idle worker's takeover collects its
+      # partition while the simulation runs one of its fibers. And its
+      # fibers kept here: a program that sizes the pool (`IyiWorkers.count
+      # = 4`) or starts a thread makes the scheduler shared, and `ready`
+      # would push a fiber of a unit onto the pool, whose workers find its
+      # token held and leave it on the unit's list for good -
+      # heap_crossings' `in` and `unit_new`, simulated, named a deadlock
+      # every seed (Linux).
+      unit.take(IyiScheduler.state.object_id)
+      unit.chaos_kept = true
+      task = IyiCross.shared do
+        fiber = IyiFiber.new
+        fiber.home = IyiScheduler.state
+        fiber.unit = unit
+        crossing_task(fiber, block)
+      end
+      IyiScheduler.enqueue(task.fiber)
+      IyiChaos.parallel_task(task)
+    {% else %}
+      IyiChaos.parallel_task(in_unit(&block))
+    {% end %}
+  end
+end
+
 class IyiChaos
   # `@@mode`: not read yet, off (a chaos build run without `IYI_CHAOS`),
   # the one-thread simulation, or real threads.
@@ -264,7 +319,7 @@ class IyiChaos
     unit = fiber.chaos_unit
     return unit if unit.is_a?(IyiChaosUnit)
     root = @@root
-    root = IyiChaosUnit.new(0_u64, HIGH) unless root.is_a?(IyiChaosUnit)
+    root = IyiCross.shared { IyiChaosUnit.new(0_u64, HIGH) } unless root.is_a?(IyiChaosUnit)
     @@root = root
     fiber.chaos_unit = root
     root
@@ -277,13 +332,21 @@ class IyiChaos
   end
 
   # A task the compiler or the program put on the pool, kept on this
-  # thread as a unit of its own; and a point at once, since such a task
-  # may start beside its spawner.
+  # thread as a unit of its own (`IyiGroup#chaos_task`); and a point at
+  # once, since such a task may start beside its spawner.
   def self.parallel_task(task : IyiTask(T)) : IyiTask(T) forall T
     @@units = @@units &+ 1_u64
-    task.fiber.chaos_unit = IyiChaosUnit.new(@@units, fresh_priority)
+    # The shared heap's, as the fibers that name it are (heap22 row 14).
+    task.fiber.chaos_unit = IyiCross.shared { IyiChaosUnit.new(@@units, fresh_priority) }
     point
     task
+  end
+
+  # Whether *fiber* is a fiber of a simulated parallel task's unit, which
+  # runs on the simulation's thread alone.
+  def self.kept?(fiber : IyiFiber) : Bool
+    unit = fiber.unit
+    unit.is_a?(IyiUnit) && unit.chaos_kept
   end
 
   # A task of a `Unit` (`IyiGroup#on_main`), simulated: in that `Unit`'s
@@ -294,7 +357,7 @@ class IyiChaos
     unit = owner.iyi_chaos_unit
     unless unit.is_a?(IyiChaosUnit)
       @@units = @@units &+ 1_u64
-      unit = IyiChaosUnit.new(@@units, fresh_priority)
+      unit = IyiCross.shared { IyiChaosUnit.new(@@units, fresh_priority) }
       owner.iyi_chaos_unit = unit
     end
     fiber.chaos_unit = unit
@@ -308,6 +371,11 @@ class IyiChaos
   # the runtime's own atomics are its locks and queues, and a switch inside
   # one would park a task holding them.
   def self.point : Nil
+    # heap22's stress and false words (heap_verify.iyi) first, on the
+    # task that reached the point.
+    {% if flag?(:heap_verify) && flag?(:heap_partitions) %}
+      IyiHeapVerify.at_point
+    {% end %}
     mode = @@mode
     if mode == SIMULATED
       step(false) if @@here

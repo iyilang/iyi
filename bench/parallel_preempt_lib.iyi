@@ -39,9 +39,12 @@
 # check (heap22 design, section 4.1): the join's 12,000,000-string input
 # made one such collection take the worker for about 150 ms, which the
 # short task waited out, where the global collection that stood for it
-# stopped the main thread's clock too. So the clock holds the task's local
-# collections off while it runs, and what a step times is the library's
-# checks alone, as it was.
+# stopped the main thread's clock too. So there a short task waits only
+# for preemption and for local collections: the time the runtime spent in
+# local collections (`IyiHeap.local_ns`) between the spawn and the short
+# task's start is taken off its wait. On one worker only the call's
+# partition collects then; a collection under way at the spawn is taken
+# off whole, the part before the spawn too.
 
 @[Unsafe("copies bytes between slices through their to_unsafe pointers in a loop the preemption check must reach")]
 module bench/parallel_preempt_lib
@@ -133,9 +136,6 @@ import std/password::{Bcrypt}
     end
 
     def start : Int64
-      {% if flag?(:heap_partitions) %}
-        IyiHeap.local_collections_off = true
-      {% end %}
       t = __iyi_monotonic_ns
       @started.set(t)
       t
@@ -143,9 +143,6 @@ import std/password::{Bcrypt}
 
     def stop(since : Int64) : Nil
       @took.set(elapsed_ms(since))
-      {% if flag?(:heap_partitions) %}
-        IyiHeap.local_collections_off = false
-      {% end %}
     end
 
     def started? : Bool
@@ -226,6 +223,9 @@ import std/password::{Bcrypt}
   def step(name : String, quiet : Bool) : Nil
     clock = Clock.new
     waited = Atomic(Int64).new(-1_i64)
+    {% if flag?(:heap_partitions) %}
+      collected = Atomic(Int64).new(0_i64)
+    {% end %}
     answer = Atomic(Int64).new(0_i64)
     preempts = IyiWorkers.preempts
     group do |g|
@@ -238,20 +238,41 @@ import std/password::{Bcrypt}
       end
       sleep(20)
       asked = __iyi_monotonic_ns
-      g.spawn(unit: :new) do
-        waited.set(elapsed_ms(asked))
-        0
+      {% if flag?(:heap_partitions) %}
+        local_before = IyiHeap.local_ns
+        g.spawn(unit: :new) do
+          waited.set(elapsed_ms(asked))
+          collected.set(((IyiHeap.local_ns - local_before) // 1000000_u64).to_i64)
+          0
+        end
+      {% else %}
+        g.spawn(unit: :new) do
+          waited.set(elapsed_ms(asked))
+          0
+        end
+      {% end %}
+    end
+    {% if flag?(:heap_partitions) %}
+      local_ms = collected.get
+      ms = waited.get - local_ms
+      if ms > BOUND_MS
+        fail("#{name}: a short task waited #{ms} ms beyond #{local_ms} ms of local collections behind a #{clock.took} ms call on its one worker, past #{BOUND_MS} ms")
       end
-    end
-    ms = waited.get
-    if ms > BOUND_MS
-      fail("#{name}: a short task waited #{ms} ms behind a #{clock.took} ms call on its one worker, past #{BOUND_MS} ms")
-    end
+    {% else %}
+      ms = waited.get
+      if ms > BOUND_MS
+        fail("#{name}: a short task waited #{ms} ms behind a #{clock.took} ms call on its one worker, past #{BOUND_MS} ms")
+      end
+    {% end %}
     if name == "fib" && answer.get != 102334155_i64
       fail("fib: the preempted recursion answered #{answer.get}, and 40's is 102334155")
     end
     given = IyiWorkers.preempts - preempts
-    puts "#{name}: a short task spawned 20 ms into a #{clock.took} ms call started #{ms} ms later (#{given} preemptions)" unless quiet
+    {% if flag?(:heap_partitions) %}
+      puts "#{name}: a short task spawned 20 ms into a #{clock.took} ms call started #{ms} ms later beyond #{local_ms} ms of local collections (#{given} preemptions)" unless quiet
+    {% else %}
+      puts "#{name}: a short task spawned 20 ms into a #{clock.took} ms call started #{ms} ms later (#{given} preemptions)" unless quiet
+    {% end %}
   end
 
   # ── cost ─────────────────────────────────────────────────────────────

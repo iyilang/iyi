@@ -184,7 +184,7 @@ else
     "@[Share(owns: true)]\npub struct" "pub struct" \
     "  @[Share]\n  def self.of(" "  def self.of("
   broken "a SharedProc any proc can make" new.iyi \
-    "  private def initialize(" "  def initialize("
+    "  private def initialize(@proc : Proc(A, R))\n" "  def initialize(@proc : Proc(A, R))\n"
 fi
 
 echo

@@ -132,6 +132,18 @@ require "./atomic"
     def self.merge(from : UInt64, into : UInt64) : Nil
     end
   end
+
+  module IyiCross
+    def self.publish(value : T) : Nil forall T
+    end
+
+    def self.shared(&)
+      yield
+    end
+
+    def self.pin : Nil
+    end
+  end
 {% end %}
 
 # The runtime's one lock: what the heap's lists of arenas, large objects
@@ -2609,7 +2621,7 @@ require "./file"
       # runs are handed to the shared heap whole and the record let go
       # (`IyiHeap.merge`, heap_partition.iyi).
       def self.partition_free(record : UInt64) : Nil
-        {% if flag?(:heap_partitions) %}
+        {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
           merge(record, 0_u64)
           return
         {% end %}
@@ -3010,7 +3022,7 @@ require "./file"
         # A partition's slice is its own debt, and its trigger its own
         # budget: the global trigger counts the shared heap's allocation
         # (and what is published) only (heap22, design section 4.2).
-        {% if flag?(:heap_partitions) %}
+        {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
           if read64(@@cache &+ REC_ID) != 0
             partition_slice(@@cache, slice)
             return
@@ -3056,7 +3068,7 @@ require "./file"
       def self.take_inside(table : Pointer(UInt64), bytes : UInt64, clear : Bool, bits : UInt64, type_id : UInt64) : UInt64
         # A partition's record takes runs, never the centre's batches
         # nor a fill arena (heap_partition.iyi).
-        {% if flag?(:heap_partitions) %}
+        {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
           return partition_take_inside(table, bytes, clear, bits, type_id) if read64(table.address &+ REC_ID) != 0
         {% end %}
         headed = bits & HEADED_FLAG != 0
@@ -4029,7 +4041,7 @@ require "./file"
           # The owner check (heap22): a partition lists only its own
           # chunks, a thread's cache only the shared heap's; anything else
           # is left to its owner's sweep or the global one.
-          {% if flag?(:heap_partitions) %}
+          {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
             unless partition_frees?(arena, head, table)
               leave(table)
               return
@@ -4077,7 +4089,7 @@ require "./file"
           # Under partitions only the owner frees a large object, its
           # table's entry with it (`partition_free_large`).
           lock
-          {% if flag?(:heap_partitions) %}
+          {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
             free_large(pointer.address - HEADER) if LibIyiGCTable.__iyi_marking == 0_u8 && partition_free_large(pointer.address - HEADER - LARGE_HEAD)
           {% else %}
             free_large(pointer.address - HEADER) if LibIyiGCTable.__iyi_marking == 0_u8
@@ -4141,7 +4153,7 @@ require "./file"
         while page != 0
           table = Pointer(UInt64).new(page)
           index = 0
-          {% if flag?(:heap_partitions) %}
+          {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
             index = CLASSES if read64(page + REC_ID) != 0
           {% end %}
           while index < CLASSES
@@ -4236,14 +4248,14 @@ require "./file"
       def self.let_go_fill(arena : UInt64) : Nil
         # A partition arena is no cache's fill arena, and a record's fill
         # slots are its run lists (heap22).
-        {% if flag?(:heap_partitions) %}
+        {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
           return if partition_arena?(arena)
         {% end %}
         index = class_index(read64(arena + OFF_CHUNK))
         page = @@caches
         while page != 0
           table = Pointer(UInt64).new(page)
-          {% if flag?(:heap_partitions) %}
+          {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
             table[FILL + index] = 0_u64 if table[FILL + index] == arena && read64(page + REC_ID) == 0
           {% else %}
             table[FILL + index] = 0_u64 if table[FILL + index] == arena
@@ -7460,7 +7472,7 @@ require "./file"
       def self.sweep_slice(arena : UInt64, span : UInt64) : UInt64
         # A partition arena's slice frees onto its owners' return stacks
         # and leaves no batch (heap_partition.iyi).
-        {% if flag?(:heap_partitions) %}
+        {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
           return sweep_partition_slice(arena, span) if IyiHeap.partition_arena?(arena)
         {% end %}
         chunk = IyiHeap.arena_chunk(arena)
@@ -7897,7 +7909,7 @@ require "./file"
         # Partitions (heap22): their weak lists lose the cells the mark
         # left white, and a `Unit`'s partition whose handle it left white
         # is queued to die.
-        {% if flag?(:heap_partitions) %}
+        {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
           IyiHeap.prune_weak_lists
           IyiHeap.find_dead_units
         {% end %}
@@ -7913,7 +7925,7 @@ require "./file"
           following = IyiHeap.arena_next(arena)
           # A partition arena holds runs its partitions and its pool name:
           # it is never let go here (heap22).
-          {% if flag?(:heap_partitions) %}
+          {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
             if IyiHeap.partition_arena?(arena)
               previous = arena
               arena = following
@@ -7952,7 +7964,7 @@ require "./file"
             @@bytes_freed = @@bytes_freed + IyiHeap.read64(node + IyiHeap::OFF_MAP) - IyiHeap::LARGE_USER
             @@swept = @@swept + 1_u64
             # A partition's large object leaves its table first (heap22).
-            {% if flag?(:heap_partitions) %}
+            {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
               owner = IyiHeap.read64(node + 16_u64) & 0xFFFF_u64
               IyiHeap.table_remove(IyiHeap.partition_at(owner) + IyiHeap::REC_LARGE, node) if owner != 0
             {% end %}
@@ -8142,7 +8154,7 @@ require "./file"
         # floored at `SHARED_MIN` and no longer multiplied by allocating
         # threads - lock blocks allocate in the shared heap on every
         # worker, and the old floor would count every one of them again.
-        {% if flag?(:heap_partitions) %}
+        {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
           partitioned = partition_survived
           shared = survived > partitioned ? survived - partitioned : 0_u64
           allocating_threads
@@ -10454,14 +10466,14 @@ end
     # cell whose target is a partition's `LOCAL` chunk is listed on that
     # partition too, whose local sweep clears it when it frees the target.
     def self.cell(address : UInt64) : Pointer(UInt64)
-      {% if flag?(:heap_partitions) && !flag?(:wasm32) %}
+      {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
         cell = IyiHeap.alloc_shared(8_u64, true).as(Pointer(UInt64))
       {% else %}
         cell = __iyi_malloc_atomic64(8_u64).as(Pointer(UInt64))
       {% end %}
       cell.value = address
       register(cell.address)
-      {% if flag?(:heap_partitions) && !flag?(:wasm32) %}
+      {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
         IyiHeap.weak_registered(cell.address, address)
       {% end %}
       cell
@@ -10483,7 +10495,7 @@ end
         end
         wanted = @@capacity == 0_u64 ? 64_u64 : @@capacity * 2_u64
         unlock
-        {% if flag?(:heap_partitions) && !flag?(:wasm32) %}
+        {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
           fresh = IyiHeap.alloc_shared(wanted * 8_u64, true).as(Pointer(UInt64))
         {% else %}
           fresh = __iyi_malloc_atomic64(wanted * 8_u64).as(Pointer(UInt64))

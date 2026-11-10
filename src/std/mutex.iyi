@@ -103,8 +103,15 @@ pub class Mutex(T)
 
   # The value is the block's: made here, so nothing outside holds it. The
   # constructor that takes a value is private for that reason.
+  #
+  # With `-Dheap_partitions` (heap22 row 4b) every block that reaches the
+  # value - this one, `lock`'s, `get`'s, `update`'s, `wait_for`'s - has
+  # its captures published at entry and runs allocating in the shared
+  # heap, so the value's graph holds only shared chunks and published
+  # values, whichever unit holds the lock.
   def self.new(&block : -> U) : Mutex(U) forall U
-    Mutex(U).build(block.call)
+    IyiCross.publish(block)
+    IyiCross.shared { Mutex(U).build(block.call) }
   end
 
   protected def self.build(value : T) : Mutex(T)
@@ -124,11 +131,12 @@ pub class Mutex(T)
   # Runs the block with the value, the lock held; answers nil, or
   # `Cancelled` when the task was cancelled while it waited.
   def lock(&block : T -> _) : Nil | Cancelled
+    IyiCross.publish(block)
     if refused = acquire
       return refused
     end
     register_release
-    block.call(@value)
+    IyiCross.shared { block.call(@value) }
     run_release
     nil
   end
@@ -136,11 +144,12 @@ pub class Mutex(T)
   # The block's answer, worked out with the lock held. It must be `Share`,
   # because it leaves the lock.
   def get(&block : T -> R) : R | Cancelled forall R
+    IyiCross.publish(block)
     if refused = acquire
       return refused
     end
     register_release
-    answer = block.call(@value)
+    answer = IyiCross.shared { block.call(@value) }
     run_release
     answer
   end
@@ -149,11 +158,12 @@ pub class Mutex(T)
   # number or any other value type wants, which a block cannot change in
   # place.
   def update(&block : T -> T) : Nil | Cancelled
+    IyiCross.publish(block)
     if refused = acquire
       return refused
     end
     register_release
-    @value = block.call(@value)
+    @value = IyiCross.shared { block.call(@value) }
     run_release
     nil
   end
@@ -171,6 +181,7 @@ pub class Mutex(T)
   # A wait nothing could end - one thread, and nothing else on it to run -
   # panics saying so.
   def wait_for(&block : T -> R?) : R | Cancelled forall R
+    IyiCross.publish(block)
     while true
       if refused = acquire
         return refused
@@ -191,7 +202,7 @@ pub class Mutex(T)
   # release with nobody counted skip the count (`release`).
   private def held(block : T -> R?) : R? forall R
     register_release
-    answer = block.call(@value)
+    answer = IyiCross.shared { block.call(@value) }
     @change_waiters.add(1_u64) if answer.nil?
     run_release
     answer

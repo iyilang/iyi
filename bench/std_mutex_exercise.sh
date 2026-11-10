@@ -246,14 +246,14 @@ prove_broken "a cancelled waiter whose block runs anyway" "not Cancelled" \
       return refused
     end
     register_release
-    block.call(@value)
+    IyiCross.shared { block.call(@value) }
     run_release
     nil
   end
 
   # The block'"'"'s answer' '    acquire
     register_release
-    block.call(@value)
+    IyiCross.shared { block.call(@value) }
     run_release
     nil
   end
@@ -261,12 +261,12 @@ prove_broken "a cancelled waiter whose block runs anyway" "not Cancelled" \
   # The block'"'"'s answer'
 prove_broken "a block that does not release" "already holds the lock" \
   '    register_release
-    block.call(@value)
+    IyiCross.shared { block.call(@value) }
     run_release
     nil
   end
 
-  # The block'"'"'s answer' '    block.call(@value)
+  # The block'"'"'s answer' '    IyiCross.shared { block.call(@value) }
     nil
   end
 
@@ -276,12 +276,12 @@ prove_broken "a block that does not release" "already holds the lock" \
 # first by the second lock its holder refuses.
 prove_broken "a release a panic does not run" "the panic released the lock it held" \
   '    register_release
-    block.call(@value)
+    IyiCross.shared { block.call(@value) }
     run_release
     nil
   end
 
-  # The block'"'"'s answer' '    block.call(@value)
+  # The block'"'"'s answer' '    IyiCross.shared { block.call(@value) }
     release
     nil
   end
@@ -297,10 +297,10 @@ prove_broken "a release not counted as a change" hangs \
 # once did: its own release reads nobody waiting and skips the count, and
 # the waiter spins as above.
 prove_broken "a waiter counted after its release" hangs \
-  '    answer = block.call(@value)
+  '    answer = IyiCross.shared { block.call(@value) }
     @change_waiters.add(1_u64) if answer.nil?
     run_release
-' '    answer = block.call(@value)
+' '    answer = IyiCross.shared { block.call(@value) }
     run_release
     @change_waiters.add(1_u64) if answer.nil?
 '

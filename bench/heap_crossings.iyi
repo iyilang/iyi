@@ -1,0 +1,717 @@
+# heap22's crossings, driven (design B, rows 1-4b, 7-9, 13, 14, 16, 21):
+# one check per way a reference leaves a unit, each built so that the
+# reference is reached from the other side only after the unit that made
+# it has collected its own partition.
+#
+#   ./bin/iyi build -Dheap_partitions -Dheap_verify bench/heap_crossings.iyi
+#   ./heap_crossings            # every check
+#   ./heap_crossings channel    # one
+#   bash bench/heap_crossings.sh   # every check, and the broken copies
+#
+# The shape of each check: a unit (`unit: :new`, so it has a partition)
+# makes a graph of fresh chunks and hands it over the crossing in a call
+# that returns, so nothing on its stack still names the graph. It wipes
+# the stack below it and collects its partition (`IyiHeap.collect_local`),
+# and only then lets the other side - another unit, a thread, the main
+# thread - read the graph and compare it with what it was built as. When
+# the crossing's mechanism did its work the graph is published or in the
+# shared heap and the local collection leaves it alone. When it did not,
+# the graph was the unit's own and unreached from its roots, the
+# collection freed it, and `-Dheap_verify`'s poison-on-free makes the read
+# a crash or a wrong compare, every run.
+#
+# Without `-Dheap_partitions` nothing is collected locally and every check
+# passes: that build is the flag-off control.
+
+@[Unsafe("the checks wipe their stack with raw words, and hide addresses as integers where no local collection looks, to see what a crossing left unpublished")]
+{% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
+  import std/mutex::{Mutex}
+  import std/unit::{Unit}
+  import std/shared_proc::{SharedProc}
+  import std/list::{List}
+  import std/box::{Box}
+  import std/gc::{GC}
+  import std/reference_storage::{ReferenceStorage}
+  import std/env::{ENV}
+  import std/tls::{TlsIdentity}
+
+  def fail(message : String) : Nil
+    print "FAIL: #{message}\n"
+    __iyi_exit(1)
+  end
+
+  # A chain of fresh nodes, each labelled with a string made at run time.
+  class Payload
+    @label : String
+    @next : Payload?
+
+    def initialize(@label : String, @next : Payload?)
+    end
+
+    def label : String
+      @label
+    end
+
+    def next_node : Payload?
+      @next
+    end
+  end
+
+  NODES = 48
+
+  def label_for(seed : Int32, index : Int32) : String
+    "p#{seed}-#{index}-" + "x" * (index % 7 + 3)
+  end
+
+  @[NoInline]
+  def build(seed : Int32) : Payload
+    node = Payload.new(label_for(seed, 0), nil)
+    index = 1
+    while index < NODES
+      node = Payload.new(label_for(seed, index), node)
+      index = index + 1
+    end
+    node
+  end
+
+  def check(node : Payload?, seed : Int32, what : String) : Nil
+    index = NODES - 1
+    while node.is_a?(Payload)
+      fail("#{what}: node #{index} reads #{node.label.bytesize} bytes, not #{label_for(seed, index)}") unless node.label == label_for(seed, index)
+      node = node.next_node
+      index = index - 1
+    end
+    fail("#{what}: the chain ended #{index + 1} nodes short") unless index == -1
+  end
+
+  # The chain at *address* checked where it crossed, before any collection:
+  # every node and label published or in the shared heap, none `LOCAL` to
+  # a partition. Deterministic where the poison is not: a word a register
+  # or a frame still holds keeps an unpublished graph alive through the
+  # collection, but never makes it published.
+  def crossed(address : UInt64, what : String) : Nil
+    {% if flag?(:heap_partitions) %}
+      node = Pointer(Void).new(address).as(Payload?)
+      index = NODES - 1
+      while node.is_a?(Payload)
+        fail("#{what}: node #{index} is still local to its unit's partition after the crossing") if IyiHeap.local?(node.object_id)
+        fail("#{what}: node #{index}'s label is still local to its unit's partition after the crossing") if IyiHeap.local?(node.label.object_id)
+        node = node.next_node
+        index = index - 1
+      end
+    {% end %}
+  end
+
+  # *address* made in the shared heap: no partition owns its chunk.
+  def shared_made(address : UInt64, what : String) : Nil
+    {% if flag?(:heap_partitions) %}
+      fail("#{what}: made in partition #{IyiHeap.owner_of(address)}, not the shared heap") if IyiHeap.owner_of(address) != 0_u64
+    {% end %}
+  end
+
+  def strings_for(seed : Int32) : Array(String)
+    Array(String).new(NODES) { |i| label_for(seed, i) }
+  end
+
+  def check_strings(got : Array(String), seed : Int32, what : String) : Nil
+    fail("#{what}: #{got.size} strings, not #{NODES}") unless got.size == NODES
+    got.each_with_index do |s, i|
+      fail("#{what}: string #{i} reads wrong") unless s == label_for(seed, i)
+    end
+  end
+
+  # The stack below the caller zeroed, so that no word of a frame that has
+  # returned is read as a root by the collection that follows.
+  @[NoInline]
+  def scrub : UInt64
+    room = uninitialized StaticArray(UInt64, 2048)
+    words = pointerof(room).as(Pointer(UInt64))
+    index = 0
+    while index < 2048
+      words[index] = 0_u64
+      index = index + 1
+    end
+    words[2047]
+  end
+
+  # The running unit's partition collected, as its own token holder. A
+  # local collection steps aside while a global mark runs; it is asked
+  # again until one has run, so a check never passes on one that did not.
+  @[NoInline]
+  def collect_here : Nil
+    scrub
+    {% if flag?(:heap_partitions) %}
+      record = IyiScheduler.current.alloc
+      return if record == 0_u64
+      before = IyiHeap.partition_collections(record)
+      tries = 0
+      while IyiHeap.partition_collections(record) == before
+        fail("a local collection did not run in 1000 tries") if tries == 1000
+        IyiHeap.collect_local(record)
+        tries = tries + 1
+        sleep(1) if IyiHeap.partition_collections(record) == before
+      end
+    {% end %}
+  end
+
+  # An address kept where no local collection looks: a scalar class
+  # variable, which the global collector reads conservatively.
+  class Stash
+    @@slot = 0_u64
+
+    def self.put(address : UInt64) : Nil
+      @@slot = address
+    end
+
+    def self.take : UInt64
+      @@slot
+    end
+  end
+
+  # ── Row 1: a `unit: :new` task's captures ───────────────────────────────
+  @[NoInline]
+  def launch_spawn(g : IyiGroup, go : Channel(Int32), seed : Int32) : IyiTask(Int32)
+    payload = build(seed)
+    task = g.spawn(unit: :new) do
+      go.receive
+      check(payload, seed, "spawn")
+      0
+    end
+    Stash.put(payload.object_id)
+    task
+  end
+
+  def spawn_check : Nil
+    go = Channel(Int32).new(1)
+    group do |outer|
+      outer.spawn(unit: :new) do
+        group do |g|
+          launch_spawn(g, go, 11)
+          crossed(Stash.take, "spawn")
+          collect_here
+          go.send(1)
+        end
+        0
+      end
+    end
+  end
+
+  # ── Row 1c: `IyiThread.start`'s captures ────────────────────────────────
+  @[NoInline]
+  def launch_thread(go : Channel(Int32), verdict : Channel(Int32), seed : Int32) : IyiThread
+    payload = build(seed)
+    thread = IyiThread.start do
+      go.receive
+      check(payload, seed, "thread")
+      verdict.send(1)
+      nil
+    end
+    Stash.put(payload.object_id)
+    thread
+  end
+
+  def thread_check : Nil
+    go = Channel(Int32).new(1)
+    verdict = Channel(Int32).new(1)
+    group do |outer|
+      outer.spawn(unit: :new) do
+        thread = launch_thread(go, verdict, 12)
+        crossed(Stash.take, "thread")
+        collect_here
+        go.send(1)
+        verdict.receive
+        thread.join
+        0
+      end
+    end
+  end
+
+  # ── Row 1d: `spawn(in: u)`'s captures ───────────────────────────────────
+  @[NoInline]
+  def launch_in(g : IyiGroup, u : Unit(Int32), go : Channel(Int32), seed : Int32) : Nil
+    payload = build(seed)
+    g.spawn(in: u) do |value|
+      go.receive
+      check(payload, seed, "in")
+      value
+    end
+    Stash.put(payload.object_id)
+    nil
+  end
+
+  def in_check : Nil
+    go = Channel(Int32).new(1)
+    u = Unit.new { 0 }
+    group do |outer|
+      outer.spawn(unit: :new) do
+        group do |g|
+          launch_in(g, u, go, 13)
+          crossed(Stash.take, "in")
+          collect_here
+          go.send(1)
+        end
+        0
+      end
+    end
+  end
+
+  # ── Row 2: a `unit: :new` task's answer, after its unit died ───────────
+  @[NoInline]
+  def launch_answer(g : IyiGroup, seed : Int32) : IyiTask(Payload)
+    g.spawn(unit: :new) { build(seed) }
+  end
+
+  def answer_check : Nil
+    group do |outer|
+      outer.spawn(unit: :new) do
+        group do |g|
+          task = launch_answer(g, 14)
+          # The child's fibers reaped and its partition dealt with first.
+          sleep(50)
+          got = task.value
+          collect_here
+          check(got.is_a?(Payload) ? got : nil, 14, "answer")
+        end
+        0
+      end
+    end
+  end
+
+  # ── Row 2b: a `Unit` task's answer, the unit living on ─────────────────
+  def unit_answer_check : Nil
+    u = Unit.new { 0 }
+    group do |g|
+      task = g.spawn(in: u) { |value| build(15) }
+      got = task.value
+      g.spawn(in: u) do |value|
+        collect_here
+        value
+      end.value
+      check(got.is_a?(Payload) ? got : nil, 15, "unit answer")
+    end
+  end
+
+  # ── Row 3: a channel's send, a select's send arm, the ring's growth ────
+  @[NoInline]
+  def send_payload(box : Channel(Payload), seed : Int32) : Nil
+    box.send(build(seed))
+    nil
+  end
+
+  @[NoInline]
+  def select_payload(box : Channel(Payload), seed : Int32) : Nil
+    payload = build(seed)
+    select
+    when box.send(payload)
+      nil
+    end
+    nil
+  end
+
+  def channel_check(seed : Int32, by_select : Bool) : Nil
+    box = Channel(Payload).new(1)
+    done = Channel(Int32).new(1)
+    group do |g|
+      g.spawn(unit: :new) do
+        if by_select
+          select_payload(box, seed)
+        else
+          send_payload(box, seed)
+        end
+        collect_here
+        done.send(1)
+        0
+      end
+      g.spawn(unit: :new) do
+        done.receive
+        got = box.receive
+        check(got.is_a?(Payload) ? got : nil, seed, by_select ? "select" : "channel")
+        0
+      end
+    end
+  end
+
+  # Two receivers parked on a channel of one slot, then two sends with
+  # no park between: the second finds the ring full and grows it, on the
+  # sender's unit - unless the first receiver ran between the sends, when
+  # the round is tried again.
+  @[NoInline]
+  def grow_ring(box : Channel(String), seed : Int32) : Nil
+    box.send(label_for(seed, 0))
+    box.send(label_for(seed, 1))
+    nil
+  end
+
+  def ring_round : Bool
+    box = Channel(String).new(1)
+    done = Channel(Int32).new(2)
+    got = Channel(Int32).new(2)
+    grew = Channel(Bool).new(1)
+    group do |g|
+      2.times do
+        g.spawn(unit: :same) do
+          sleep(0)
+          value = box.receive
+          done.receive
+          ok = value.is_a?(String) && (value == label_for(16, 0) || value == label_for(16, 1))
+          got.send(ok ? 1 : 0)
+          0
+        end
+      end
+      g.spawn(unit: :new) do
+        sleep(100)
+        grow_ring(box, 16)
+        grown = box.@slots > 1
+        shared_made(box.@ring.address, "ring: the grown ring") if grown
+        collect_here
+        grew.send(grown)
+        done.send(1)
+        done.send(1)
+        0
+      end
+      fail("ring: a value read wrong") unless got.receive == 1 && got.receive == 1
+    end
+    grew.receive == true
+  end
+
+  def ring_check : Nil
+    50.times { return if ring_round }
+    fail("ring: in 50 rounds the second send never found the ring full")
+  end
+
+  # ── Row 4: `Unit.new` routes the value into the unit's partition ───────
+  @[NoInline]
+  def make_unit(seed : Int32) : Unit(Payload)
+    Unit.new { build(seed) }
+  end
+
+  def unit_new_check : Nil
+    group do |outer|
+      outer.spawn(unit: :new) do
+        u = make_unit(17)
+        collect_here
+        group do |g|
+          g.spawn(in: u) do |value|
+            check(value, 17, "unit new")
+            0
+          end
+        end
+        0
+      end
+    end
+  end
+
+  # ── Row 4b: Mutex: a lock block's captures, the bracket, `new`'s captures
+  @[NoInline]
+  def lock_capture(m : Mutex(Array(String)), seed : Int32) : Nil
+    payload = build(seed)
+    m.lock do |held|
+      node = payload
+      while node.is_a?(Payload)
+        held.unshift(node.label)
+        node = node.next_node
+      end
+    end
+    nil
+  end
+
+  @[NoInline]
+  def lock_bracket(m : Mutex(Array(String)), seed : Int32) : Nil
+    m.lock do |held|
+      NODES.times { |i| held << label_for(seed, i) }
+    end
+    nil
+  end
+
+  @[NoInline]
+  def mutex_made(seed : Int32) : Mutex(Array(String))
+    first = label_for(seed, 0)
+    Mutex.new { [first] }
+  end
+
+  def mutex_check(seed : Int32, how : String) : Nil
+    shared = Mutex.new { [] of String }
+    made = Channel(Mutex(Array(String))).new(1)
+    group do |g|
+      g.spawn(unit: :new) do
+        case how
+        when "capture" then lock_capture(shared, seed)
+        when "bracket" then lock_bracket(shared, seed)
+        else                made.send(mutex_made(seed))
+        end
+        collect_here
+        0
+      end
+    end
+    if how == "new"
+      m = made.receive
+      fail("mutex new: no Mutex came back") unless m.is_a?(Mutex(Array(String)))
+      first = m.get { |held| held[0] }
+      fail("mutex new: the value reads wrong") unless first.is_a?(String) && first == label_for(seed, 0)
+    else
+      ok = shared.get do |held|
+        good = held.size == NODES
+        held.each_with_index { |s, i| good = false unless s == label_for(seed, i) }
+        good
+      end
+      fail("mutex #{how}: the value reads wrong") unless ok == true
+    end
+  end
+
+  # ── Row 7: a panic's message, after the panicking unit died ────────────
+  # A run without the message's publish passes too: the `Panicked` answer
+  # detaches the partition, which is never collected locally and goes to
+  # the shared heap at the unit's death, so neither poison nor `local?`
+  # can show it (the verifier's, S4).
+  def panic_check : Nil
+    group do |outer|
+      outer.spawn(unit: :new) do
+        group do |g|
+          task = g.spawn(unit: :new) do
+            raise label_for(18, 5) + " (heap_crossings panics here on purpose)"
+            0
+          end
+          sleep(50)
+          got = task.value
+          collect_here
+          fail("panic: the task answered no panic") unless got.is_a?(Panicked)
+          fail("panic: the message reads wrong") unless got.message == label_for(18, 5) + " (heap_crossings panics here on purpose)"
+        end
+        0
+      end
+    end
+  end
+
+  # ── Row 8: SharedProc.of's captures ────────────────────────────────────
+  @[NoInline]
+  def make_proc(seed : Int32) : SharedProc(Int32, Int32)
+    payload = build(seed)
+    SharedProc(Int32, Int32).of do |n|
+      check(payload, seed, "shared proc")
+      n + 1
+    end
+  end
+
+  def shared_proc_check : Nil
+    procs = Channel(SharedProc(Int32, Int32)).new(1)
+    done = Channel(Int32).new(1)
+    group do |g|
+      g.spawn(unit: :new) do
+        procs.send(make_proc(19))
+        collect_here
+        done.send(1)
+        0
+      end
+      g.spawn(unit: :new) do
+        done.receive
+        p = procs.receive
+        fail("shared proc: none came") unless p.is_a?(SharedProc(Int32, Int32))
+        fail("shared proc: a wrong answer") unless p.call(1) == 2
+        0
+      end
+    end
+  end
+
+  # ── Row 9: Box, GC.malloc, ReferenceStorage pin; weak cells ────────────
+  @[NoInline]
+  def stash_box(seed : Int32) : Nil
+    Stash.put(Box.box(build(seed)).address)
+    nil
+  end
+
+  @[NoInline]
+  def stash_malloc(seed : Int32) : Nil
+    raw = GC.malloc(16).as(Pointer(UInt64))
+    raw.value = build(seed).object_id
+    Stash.put(raw.address)
+    nil
+  end
+
+  class Holder
+    @payload : Payload
+
+    def initialize(@payload : Payload)
+    end
+
+    def payload : Payload
+      @payload
+    end
+  end
+
+  @[NoInline]
+  def stash_storage(seed : Int32) : Nil
+    room = Pointer(Void*).malloc(((instance_sizeof(Holder) + 7) // 8).to_u64)
+    Holder.unsafe_construct(room, build(seed))
+    Stash.put(room.address)
+    nil
+  end
+
+  def pin_check(how : String) : Nil
+    group do |g|
+      g.spawn(unit: :new) do
+        case how
+        when "box"     then stash_box(20)
+        when "malloc"  then stash_malloc(21)
+        else                stash_storage(22)
+        end
+        collect_here
+        0
+      end
+    end
+    address = Stash.take
+    case how
+    when "box"
+      check(Box(Payload).unbox(Pointer(Void).new(address)), 20, "box")
+    when "malloc"
+      check(Pointer(Void).new(Pointer(UInt64).new(address).value).as(Payload), 21, "gc malloc")
+    else
+      check(Pointer(Void).new(address).as(Holder).payload, 22, "reference storage")
+    end
+  end
+
+  # ── Row 13: ENV's table ────────────────────────────────────────────────
+  @[NoInline]
+  def set_env(seed : Int32) : Nil
+    ENV["HEAP22_CROSSING"] = label_for(seed, 9)
+    nil
+  end
+
+  def env_check : Nil
+    group do |g|
+      g.spawn(unit: :new) do
+        set_env(23)
+        collect_here
+        0
+      end
+    end
+    got = ENV["HEAP22_CROSSING"]?
+    fail("env: the variable reads wrong") unless got == label_for(23, 9)
+  end
+
+  # ── Row 14: a crossing task's glue (task, box, install closure, unit) ──
+  def glue_check : Nil
+    go = Channel(Int32).new(1)
+    group do |outer|
+      outer.spawn(unit: :new) do
+        group do |g|
+          task = g.spawn(unit: :new) do
+            go.receive
+            label_for(24, 1)
+          end
+          shared_made(task.object_id, "glue: the task")
+          collect_here
+          go.send(1)
+          got = task.value
+          fail("glue: the answer reads wrong") unless got == label_for(24, 1)
+        end
+        0
+      end
+    end
+  end
+
+  # ── Row 21: List's elements ────────────────────────────────────────────
+  @[NoInline]
+  def send_list(box : Channel(List(String)), seed : Int32) : Nil
+    list = List.new(strings_for(seed))
+    box.send(list)
+    {% if flag?(:heap_partitions) %}
+      NODES.times { |i| fail("list: string #{i} is still local to its unit's partition after the send") if IyiHeap.local?(list[i].object_id) }
+    {% end %}
+    nil
+  end
+
+  def list_check : Nil
+    box = Channel(List(String)).new(1)
+    done = Channel(Int32).new(1)
+    group do |g|
+      g.spawn(unit: :new) do
+        send_list(box, 25)
+        collect_here
+        done.send(1)
+        0
+      end
+      g.spawn(unit: :new) do
+        done.receive
+        got = box.receive
+        fail("list: none came") unless got.is_a?(List(String))
+        fail("list: #{got.size} strings") unless got.size == NODES
+        NODES.times { |i| fail("list: string #{i} reads wrong") unless got[i] == label_for(25, i) }
+        0
+      end
+    end
+  end
+
+  # ── Row 16: TlsIdentity lends no array ─────────────────────────────────
+  def hex(text : String) : Array(UInt8)
+    p = text.to_unsafe
+    Array(UInt8).new(text.bytesize // 2) do |i|
+      hi = p[i * 2].to_i32
+      lo = p[i * 2 + 1].to_i32
+      hi = hi >= 97 ? hi - 87 : hi - 48
+      lo = lo >= 97 ? lo - 87 : lo - 48
+      (hi * 16 + lo).to_u8
+    end
+  end
+
+  def tls_check : Nil
+    identity = TlsIdentity.from_der([hex(TLS_LEAF), hex(TLS_ROOT)], hex(TLS_SEED))
+    fail("tls: the identity did not load") unless identity.is_a?(TlsIdentity)
+    chain = identity.chain
+    size = chain[0].size
+    chain[0] << 0_u8
+    chain << [1_u8]
+    schemes = identity.schemes
+    schemes << 1
+    fail("tls: chain lends its array") unless identity.chain.size == 2 && identity.chain[0].size == size
+    fail("tls: schemes lends its array") unless identity.schemes.size == schemes.size - 1
+  end
+
+  TLS_ROOT = "308201183081cba003020102020101300506032b657030143112301006035504030c0946757a7a20526f6f74301e170d3235303130313030303030305a170d3435303130313030303030305a30143112301006035504030c0946757a7a20526f6f74302a300506032b65700321001494a1cac4481d11b3723830767cce21261aaca39cbd624c5b4d51b3163e8382a3423040301d0603551d0e0416041497ae92205c7302b9b25c2c7219607c7f767904fc300f0603551d130101ff040530030101ff300e0603551d0f0101ff040403020106300506032b657003410081f88cec5b495303ce00ae5a18679fc9d43fc5c2d3a86fd3ff7dd265fd1f1a20f053fe81ae0db33be74fff0cb487b516fc7e489253e914000ec818988635e607"
+  TLS_LEAF = "3082016e30820120a003020102020102300506032b657030143112301006035504030c0946757a7a20526f6f74301e170d3235303130313030303030305a170d3435303130313030303030305a30143112301006035504030c0966757a7a2e74657374302a300506032b65700321007fc71c44df1a089f4322e5a7dd03ef64fed0164490819aa2236ea7d4b552c8fba38196308193301d0603551d0e04160414d2780a2e2b99d3a1c8d027b498befbae72ebcdf2301f0603551d2304183016801497ae92205c7302b9b25c2c7219607c7f767904fc300c0603551d130101ff04023000300e0603551d0f0101ff040403020780301d0603551d250416301406082b0601050507030106082b0601050507030230140603551d11040d300b820966757a7a2e74657374300506032b6570034100b6c428830f0b30218d3fe05a43c4b2110f9797356a58d361c0ebc499910287ea3dc5ebc7260c117d8258db51ee3ed2a7c125a0f1f6cf3fb42032f4543ae65b08"
+  TLS_SEED = "3c9cb8fdef08086c92abb13f615fcbd54466dac12a3a363db6fb289ef88bc7a2"
+
+  CHECKS = ["spawn", "thread", "in", "answer", "unit_answer", "channel", "select", "ring",
+            "unit_new", "mutex_capture", "mutex_bracket", "mutex_new", "panic", "shared_proc",
+            "box", "malloc", "storage", "env", "glue", "list", "tls"]
+
+  def run(name : String) : Nil
+    case name
+    when "spawn"         then spawn_check
+    when "thread"        then thread_check
+    when "in"            then in_check
+    when "answer"        then answer_check
+    when "unit_answer"   then unit_answer_check
+    when "channel"       then channel_check(26, false)
+    when "select"        then channel_check(27, true)
+    when "ring"          then ring_check
+    when "unit_new"      then unit_new_check
+    when "mutex_capture" then mutex_check(28, "capture")
+    when "mutex_bracket" then mutex_check(29, "bracket")
+    when "mutex_new"     then mutex_check(30, "new")
+    when "panic"         then panic_check
+    when "shared_proc"   then shared_proc_check
+    when "box"           then pin_check("box")
+    when "malloc"        then pin_check("malloc")
+    when "storage"       then pin_check("storage")
+    when "env"           then env_check
+    when "glue"          then glue_check
+    when "list"          then list_check
+    when "tls"           then tls_check
+    else                      fail("no check named #{name}")
+    end
+  end
+
+  IyiWorkers.count = 4
+  arguments = Program.args
+  if arguments.empty?
+    CHECKS.each { |name| run(name) }
+    puts "heap crossings: #{CHECKS.size} crossings hold"
+  else
+    arguments.each do |name|
+      run(name)
+      puts "#{name}: holds"
+    end
+  end
+{% else %}
+  puts "heap crossings: no pool on this target, nothing to check"
+{% end %}

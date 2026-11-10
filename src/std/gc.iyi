@@ -66,8 +66,13 @@ pub struct GC
 
   # `size` zeroed bytes the collector scans for pointers. A negative size
   # is refused by name.
+  #
+  # A raw chunk is a pointer the caller may hand anywhere, so with
+  # `-Dheap_partitions` each of these pins the running unit first (heap22
+  # row 9): the chunk is the shared heap's, freed only by a global sweep.
   def self.malloc(size : Int) : Void*
     raise "negative size: #{size}" if size < 0
+    IyiCross.pin
     __iyi_malloc64(size.to_u64)
   end
 
@@ -79,6 +84,7 @@ pub struct GC
   # collection freed 2000 filled ones came back dirty, every one.
   def self.malloc_atomic(size : Int) : Void*
     raise "negative size: #{size}" if size < 0
+    IyiCross.pin
     __iyi_malloc_atomic64(size.to_u64)
   end
 
@@ -86,6 +92,7 @@ pub struct GC
   # new address, with the old bytes copied.
   def self.realloc(pointer : Void*, size : Int) : Void*
     raise "negative size: #{size}" if size < 0
+    IyiCross.pin
     __iyi_realloc64(pointer, size.to_u64)
   end
 

@@ -132,7 +132,7 @@ broken tokenless '/^        pooled\(owner\.iyi_unit, &work\)$/ { print "        
 caught tokenless 'tasks of one Unit were running at one instant' alone --workers=4
 
 step "failure proof: a Unit's tasks on the spawner's thread on a pool of one"
-broken spawnerthread '/^      fiber.home = IyiScheduler.main_state$/ { print "      fiber.home = IyiScheduler.state"; next } { print }'
+broken spawnerthread '/^        fiber.home = IyiScheduler.main_state$/ { print "        fiber.home = IyiScheduler.state"; next } { print }'
 caught spawnerthread 'ran on the spawner'"'"'s thread on a pool of one' main --workers=1
 
 # Of the compiler: `IYI_SPAWN_BROKEN` turns one check off each, and the

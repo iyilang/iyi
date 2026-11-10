@@ -81,6 +81,34 @@ require "./atomic"
   {% end %}
 {% end %}
 
+# heap22's partition API (concurrency.iyi has the runtime's): a target with
+# no scheduler has one heap and one thread, so a bracket is the block, an
+# answer is its store, and there is nothing to lend or pin.
+{% if !((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
+  class IyiHeap
+    def self.shared(&)
+      yield
+    end
+
+    def self.within(record : UInt64, &)
+      yield
+    end
+
+    def self.answer(box : Array(T), value : T) : Nil forall T
+      box << value
+    end
+
+    def self.lend_in(graph) : Nil
+    end
+
+    def self.lend_out(graph) : Nil
+    end
+
+    def self.pin : Nil
+    end
+  end
+{% end %}
+
 # The runtime's one lock: what the heap's lists of arenas, large objects
 # and caches, the scheduler's registries and the thread list are behind,
 # and what a collection takes before it stops anything, so no stopped
@@ -2349,8 +2377,18 @@ require "./file"
       CLASS_USED_NS = 32_u64
       CLASS_MAP     = 8192_u64
 
+      # The cache `take` uses: this thread's own (`@@home`), or a
+      # partition's record that the running fiber's `alloc` named at its
+      # switch, or a bracket (`IyiHeap.within`) installed. Swapped only
+      # while `CACHE_INSIDE` is 0, so the stop's handler, which reads this
+      # thread-local, and Windows' stopper, which reads the line's copy,
+      # always see the page whose `INSIDE` and `REQUEST` the thread uses.
       @[ThreadLocal]
       @@cache : UInt64 = 0_u64
+      # This thread's own cache page, the shared heap's: 0 until its first
+      # allocation maps it.
+      @[ThreadLocal]
+      @@home : UInt64 = 0_u64
       @@caches : UInt64 = 0_u64
       @@central : UInt64 = 0_u64
       @@classes : UInt64 = 0_u64
@@ -2387,6 +2425,7 @@ require "./file"
         write64(page + CACHE_NEXT, @@caches)
         @@caches = page
         unlock
+        @@home = page
         @@cache = page
         page
       end
@@ -2406,14 +2445,29 @@ require "./file"
       # allocates nothing after. A cache left behind pinned an arena per
       # class forever and cost every later sweep a walk of it.
       def self.retire_cache : Nil
-        page = @@cache
+        # A thread ends on its own fiber, outside every bracket: a
+        # partition's record still installed here would be retired as if
+        # it were the thread's.
+        IyiRoots.fatal("iyi: a thread ended with a partition's cache installed\n") if @@cache != @@home
+        page = @@home
         return if page == 0
+        retire_lists(page)
+        @@cache = 0_u64
+        @@home = 0_u64
+        __iyi_munmap(page, DIR_LEN)
+      end
+
+      # The lists of cache *page*, a thread's or a partition record's, to
+      # the centre as batches, its fill arenas let go, and the page off
+      # the caches list. Nothing allocates from the page after.
+      def self.retire_lists(page : UInt64) : Nil
         table = Pointer(UInt64).new(page)
         # The slice not yet reported is counted now, or a thread that
         # allocated less than a slice was never counted at all: ten
         # thousand threads of a thousand strings each ran no collection
         # and mapped a gigabyte. The next slice anyone fills sees it.
         allocated_word.value.add(read64(page + CACHE_SLICE))
+        write64(page + CACHE_SLICE, 0_u64)
         lock
         index = 0
         while index < CLASSES
@@ -2447,9 +2501,189 @@ require "./file"
           previous = cursor
           cursor = following
         end
+        write64(page + CACHE_NEXT, 0_u64)
         unlock
-        @@cache = 0_u64
-        __iyi_munmap(page, DIR_LEN)
+      end
+
+      # ── Partition records (heap22: one heap per pool unit) ────────────
+      #
+      # A partition is one record of `PARTITION_BYTES`: a cache page's
+      # layout in its first `CACHE_ROUND + 8` bytes, so that `take`,
+      # `refill`, the stop and the scavenge treat it as any thread's cache
+      # once it is on the caches list, and the partition's own words from
+      # `REC_ID` up. Records are carved 32 to a `PARTITION_SLAB` mapping,
+      # never unmapped, and reused through a free list; a record's id is
+      # its place among them, 1 to `PARTITIONS_MAX`, and 0 is the shared
+      # heap's. `@@record_dir` names each slab, so `partition_at` is two
+      # loads. A fiber's `alloc` is a record's address, 0 for the shared
+      # heap; nothing in this tree makes a record unless a program asks
+      # (`partition_new`), so every unit allocates in the shared heap.
+      PARTITION_BYTES = 2048_u64
+      PARTITION_SLAB  = 65536_u64
+      PARTITIONS_MAX  = 65535_u64
+      REC_ID          = 1344_u64
+      REC_STATE       = 1352_u64
+      REC_UNIT        = 1360_u64
+      REC_FREE        = 1368_u64
+      # From here to `PARTITION_BYTES`: the partition's heap state, which
+      # the prototype's slice S1 lays out.
+      REC_HEAP        = 1376_u64
+      REC_LIVE        = 1_u64
+
+      @@record_dir : UInt64 = 0_u64
+      @@record_slabs : UInt64 = 0_u64
+      @@record_free : UInt64 = 0_u64
+      @@records_live : UInt64 = 0_u64
+
+      # A zeroed record with an id of its own, on the caches list.
+      def self.partition_new : UInt64
+        per_slab = PARTITION_SLAB // PARTITION_BYTES
+        lock
+        record = @@record_free
+        if record != 0
+          @@record_free = read64(record + REC_FREE)
+          write64(record + REC_FREE, 0_u64)
+        else
+          if @@record_slabs * per_slab >= PARTITIONS_MAX
+            unlock
+            IyiRoots.fatal("iyi: more than 65,535 partitions at once\n")
+          end
+          @@record_dir = __iyi_mmap((PARTITIONS_MAX + 1_u64) // per_slab * 8_u64).address if @@record_dir == 0
+          slab = __iyi_mmap(PARTITION_SLAB).address
+          write64(@@record_dir + @@record_slabs * 8_u64, slab)
+          first = @@record_slabs * per_slab + 1_u64
+          @@record_slabs = @@record_slabs + 1_u64
+          # The slab's other records onto the free list, last first, so the
+          # next take is the next id.
+          slot = per_slab - 1_u64
+          while slot >= 1_u64
+            id = first + slot
+            if id <= PARTITIONS_MAX
+              spare = slab + slot * PARTITION_BYTES
+              write64(spare + REC_ID, id)
+              write64(spare + REC_FREE, @@record_free)
+              @@record_free = spare
+            end
+            slot = slot - 1_u64
+          end
+          record = slab
+          write64(record + REC_ID, first)
+        end
+        write64(record + REC_STATE, REC_LIVE)
+        write64(record + CACHE_NEXT, @@caches)
+        @@caches = record
+        @@records_live = @@records_live + 1_u64
+        unlock
+        record
+      end
+
+      # *record*'s lists to the centre and the record back on the free
+      # list, zeroed but for its id. No fiber may name it in `alloc`, and
+      # no thread may have it installed.
+      def self.partition_free(record : UInt64) : Nil
+        IyiRoots.fatal("iyi: a partition freed while installed\n") if @@cache == record
+        retire_lists(record)
+        id = read64(record + REC_ID)
+        clear = 0_u64
+        while clear < PARTITION_BYTES
+          write64(record + clear, 0_u64)
+          clear = clear + 8_u64
+        end
+        write64(record + REC_ID, id)
+        lock
+        write64(record + REC_FREE, @@record_free)
+        @@record_free = record
+        @@records_live = @@records_live - 1_u64
+        unlock
+      end
+
+      def self.partition_id(record : UInt64) : UInt64
+        record == 0 ? 0_u64 : read64(record + REC_ID)
+      end
+
+      # The record whose id is *id*; 0 for the shared heap's id and for an
+      # id no slab has reached yet.
+      def self.partition_at(id : UInt64) : UInt64
+        per_slab = PARTITION_SLAB // PARTITION_BYTES
+        return 0_u64 if id == 0 || id > @@record_slabs * per_slab
+        slab = read64(@@record_dir + (id - 1_u64) // per_slab * 8_u64)
+        slab + (id - 1_u64) % per_slab * PARTITION_BYTES
+      end
+
+      def self.partitions_live : UInt64
+        @@records_live
+      end
+
+      # The caches on the list the scavenge strips: every thread's, and
+      # every live partition's.
+      def self.caches_listed : UInt64
+        lock
+        count = 0_u64
+        page = @@caches
+        while page != 0
+          count = count + 1_u64
+          page = read64(page + CACHE_NEXT)
+        end
+        unlock
+        count
+      end
+
+      # Whether cache *page* is on that list.
+      def self.cache_listed?(page : UInt64) : Bool
+        lock
+        cursor = @@caches
+        while cursor != 0 && cursor != page
+          cursor = read64(cursor + CACHE_NEXT)
+        end
+        unlock
+        cursor != 0
+      end
+
+      # *record*'s cache installed on this thread, or this thread's own for
+      # 0: the one step of the switch and of the brackets
+      # (`IyiScheduler.install_alloc`). Never inside `take`: `CACHE_INSIDE`
+      # is 0 on both pages here. On Windows the line's copy follows, since
+      # the stopper reads that one, and the home cache is mapped first: a
+      # line naming 0 while a later first touch maps a page would hide that
+      # page's `INSIDE` from the stopper.
+      def self.install(record : UInt64) : Nil
+        page = record
+        if page == 0
+          page = @@home
+          {% if flag?(:win32) %}
+            page = first_touch if page == 0
+          {% end %}
+        end
+        @@cache = page
+        {% if flag?(:win32) %}
+          IyiThread.publish_cache(page)
+        {% end %}
+      end
+
+      # The page `take` would use now, 0 before the first allocation.
+      def self.installed_page : UInt64
+        @@cache
+      end
+
+      def self.home_page : UInt64
+        @@home
+      end
+
+      # A class instance in the shared heap whatever is installed:
+      # `__iyi_new_shared`, which codegen emits for trusted `Share` types.
+      # The home cache is installed around the one allocation; `take`
+      # never switches fibers, so nothing between the two swaps reads a
+      # fiber's `alloc`.
+      def self.new_shared(size : UInt64, type_id : UInt64, headed : Bool, atomic : Bool) : Void*
+        page = @@cache
+        return new_object(size, type_id, headed, atomic) if page == @@home
+        install(0_u64)
+        made = new_object(size, type_id, headed, atomic)
+        @@cache = page
+        {% if flag?(:win32) %}
+          IyiThread.publish_cache(page)
+        {% end %}
+        made
       end
 
       # The stop's view of this thread, read from a signal handler: a
@@ -4168,6 +4402,13 @@ require "./file"
     # (`IyiHeap.new_object`).
     fun __iyi_new(size : UInt64, type_id : UInt64, flags : UInt64) : Void*
       IyiHeap.new_object(size, type_id, flags & 1_u64 != 0, flags & 2_u64 != 0)
+    end
+
+    # A trusted `Share` class's instance (`@[Share]`, `owns:`), born in the
+    # shared heap whichever partition the running fiber allocates in:
+    # heap22's own entry, so that `__iyi_new` keeps no branch for it.
+    fun __iyi_new_shared(size : UInt64, type_id : UInt64, flags : UInt64) : Void*
+      IyiHeap.new_shared(size, type_id, flags & 1_u64 != 0, flags & 2_u64 != 0)
     end
 
     fun __iyi_realloc64(pointer : Void*, size : UInt64) : Void*
@@ -9905,6 +10146,10 @@ require "./file"
       fun __iyi_new(size : UInt64, type_id : UInt64, flags : UInt64) : Void*
         IyiHeap.new_object(size, type_id, flags & 1_u64 != 0, flags & 2_u64 != 0)
       end
+      # One heap here: the shared one (heap22).
+      fun __iyi_new_shared(size : UInt64, type_id : UInt64, flags : UInt64) : Void*
+        IyiHeap.new_object(size, type_id, flags & 1_u64 != 0, flags & 2_u64 != 0)
+      end
     {% end %}
     # `memset` is defined locally because codegen itself reaches for the name
     # (`pre_initialize_aggregate` and `generic_array_malloc` lower to the LLVM
@@ -9940,6 +10185,19 @@ require "./file"
              "linking something absent." %}
   {% end %}
 {% end %}
+
+# heap22's publication entries, which codegen and the trusted modules call
+# at a crossing: *value*'s graph made reachable from other units' heaps,
+# and *value* stored into *destination*, a `Share` object whose type's
+# mutation scan was incomplete. With every unit allocating in the shared
+# heap, no object is local to a partition, so neither has anything to do:
+# these bodies are the whole of it until a build asks for partitions
+# (`-Dheap_partitions`), whose arena branch defines its own.
+fun __iyi_publish(value : Void*) : Nil
+end
+
+fun __iyi_publish_into(destination : Void*, value : Void*) : Nil
+end
 
 # iyi: `memcpy` and `memmove`, where the prelude defines `memset` and for its
 # reason. Codegen copies a value larger than `LLVMTyper::INDIRECT_ABOVE`

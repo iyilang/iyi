@@ -453,6 +453,15 @@ class IyiFiber
   # parallel task's, its own or the one whose block spawned it, or a
   # `Unit`'s (std/unit); nil for a fiber that never moves.
   property unit : IyiUnit?
+  # The partition record this fiber allocates in (heap22): its unit's
+  # (`IyiUnit#heap`), or the one a bracket installed (`IyiHeap.within`,
+  # `IyiHeap.shared`); 0 for the shared heap, through the thread's own
+  # cache. The switch into the fiber installs it (`IyiScheduler.switch_to`).
+  property alloc : UInt64
+  # The links of its unit's fiber list (`IyiUnit#fibers`), under the
+  # runtime lock as the registry's are.
+  property next_in_unit : IyiFiber?
+  property prev_in_unit : IyiFiber?
   # Woken onto its home only: a `select` with a timeout arm is in its
   # home's sleep heap while a channel may wake it from any thread, and it
   # must leave that heap on the thread that owns it. Set under the locks
@@ -642,6 +651,9 @@ class IyiFiber
     @home = nil
     @parallel = false
     @unit = nil
+    @alloc = 0_u64
+    @next_in_unit = nil
+    @prev_in_unit = nil
     @homebound = false
     @next_cancel = nil
     @cancel_posted = false
@@ -959,12 +971,34 @@ class IyiUnit
   @waiting : Atomic(UInt64)
   property deferred_head : IyiFiber?
   property deferred_tail : IyiFiber?
+  # The partition record its fibers allocate in (heap22), 0 for the shared
+  # heap - which is every unit's in this tree: nothing sets it yet.
+  property heap : UInt64
+  # Its live fibers, linked when they join the registry and unlinked when
+  # they leave it (`IyiScheduler.register`), under the runtime lock: what a
+  # collection of the unit's partition alone scans for stacks.
+  property fibers : IyiFiber?
 
   def initialize
     @active = Atomic(UInt64).new(0_u64)
     @waiting = Atomic(UInt64).new(0_u64)
     @deferred_head = nil
     @deferred_tail = nil
+    @heap = 0_u64
+    @fibers = nil
+  end
+
+  # Its live fibers, counted under the runtime lock.
+  def fiber_count : Int32
+    IyiRuntimeLock.lock
+    count = 0
+    fiber = @fibers
+    while fiber.is_a?(IyiFiber)
+      count = count + 1
+      fiber = fiber.next_in_unit
+    end
+    IyiRuntimeLock.unlock
+    count
   end
 
   # No worker's id: a state's object id is an address. A fiber preempted
@@ -1233,6 +1267,11 @@ class IyiSchedulerState
   # The unit this worker holds (`IyiUnit`), while it runs a fiber of it
   # and until it switches to a fiber of another or to none.
   property unit : IyiUnit?
+  # The partition record whose cache this thread has installed (heap22,
+  # `IyiHeap.install`), 0 for its own: what the switch compares a fiber's
+  # `alloc` with, so that a switch between two fibers of the shared heap
+  # writes nothing.
+  property alloc : UInt64
   # Rung by a worker with a fiber for another to run, and looking for it
   # (`IyiWorkers.wake_one`), under the scheduler's lock.
   property spinning : Bool
@@ -1331,6 +1370,7 @@ class IyiSchedulerState
     @watch_seen = 0_u64
     @watch_ticks = 0_u64
     @looks = 0_u64
+    @alloc = 0_u64
     @handoff_last = 0_u64
     @handoff_skip = 0_u64
     @handoff_backoff = 0_u64
@@ -1842,6 +1882,15 @@ class IyiScheduler
     main
   end
 
+  # The running fiber, or nil on a thread that has never touched the
+  # scheduler - which has no fiber to switch, so whatever it allocates in
+  # is its thread's own cache.
+  def self.current? : IyiFiber?
+    state = @@state
+    return nil unless state.is_a?(IyiSchedulerState)
+    state.current
+  end
+
   # Every *live* fiber, intrusively linked, for the collector's root
   # walk (GC_DESIGN.md Stage 3). The queues cannot serve that walk: a
   # channel-parked fiber lives in the channel's own node list, which the
@@ -1855,6 +1904,8 @@ class IyiScheduler
   # Under the runtime lock, for the reason the states are.
   @@all_head : IyiFiber?
 
+  # A fiber of a unit joins the unit's list too, and its heap (heap22):
+  # its `alloc` is the unit's partition from here, for its whole life.
   def self.register(fiber : IyiFiber) : Nil
     IyiRuntimeLock.lock
     head = @@all_head
@@ -1862,6 +1913,15 @@ class IyiScheduler
     fiber.prev_fiber = nil
     head.prev_fiber = fiber if head.is_a?(IyiFiber)
     @@all_head = fiber
+    unit = fiber.unit
+    if unit.is_a?(IyiUnit)
+      first = unit.fibers
+      fiber.next_in_unit = first
+      fiber.prev_in_unit = nil
+      first.prev_in_unit = fiber if first.is_a?(IyiFiber)
+      unit.fibers = fiber
+      fiber.alloc = unit.heap
+    end
     IyiRuntimeLock.unlock
   end
 
@@ -1877,6 +1937,20 @@ class IyiScheduler
     following.prev_fiber = previous if following.is_a?(IyiFiber)
     fiber.next_fiber = nil
     fiber.prev_fiber = nil
+    unit = fiber.unit
+    if unit.is_a?(IyiUnit)
+      after = fiber.next_in_unit
+      before = fiber.prev_in_unit
+      first = unit.fibers
+      if before.is_a?(IyiFiber)
+        before.next_in_unit = after
+      elsif first.is_a?(IyiFiber) && first.object_id == fiber.object_id
+        unit.fibers = after
+      end
+      after.prev_in_unit = before if after.is_a?(IyiFiber)
+      fiber.next_in_unit = nil
+      fiber.prev_in_unit = nil
+    end
     IyiRuntimeLock.unlock
   end
 
@@ -2586,6 +2660,11 @@ class IyiScheduler
   def self.reschedule : Nil
     raise "a fiber parked holding the scheduler's lock" if IyiSchedLock.held_here?
     st = state
+    # The scheduler allocates in the shared heap (heap22): what a park
+    # makes for itself is the runtime's, whichever unit parked.
+    {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+      install_alloc(st, 0_u64) if st.alloc != 0_u64
+    {% end %}
     parks = st.parks &+ 1_u64
     st.parks = parks
     poll_now(st) if parks % POLL_EVERY == 0_u64
@@ -2745,6 +2824,23 @@ class IyiScheduler
     end
   end
 
+  {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+    # Partition *record*'s cache installed on thread *st*, 0 for the
+    # thread's own (heap22, `IyiHeap.install`), and noted on the state, so
+    # the next switch knows what is in place.
+    def self.install_alloc(st : IyiSchedulerState, record : UInt64) : Nil
+      st.alloc = record
+      IyiHeap.install(record)
+    end
+
+    # The running *fiber*'s `alloc` in place, after a bracket changed it
+    # (`IyiHeap.within`, `IyiHeap.shared`).
+    def self.reinstall(fiber : IyiFiber) : Nil
+      st = state
+      install_alloc(st, fiber.alloc) if fiber.alloc != st.alloc
+    end
+  {% end %}
+
   # The expired sleepers and, when its time has come, the poller's news,
   # without waiting; nothing at all when nobody waits on either. On
   # Windows the port is the process's, so a fiber waiting on any thread
@@ -2825,6 +2921,9 @@ class IyiScheduler
     st = state
     previous = current
     if fiber.sp_slot.address == previous.sp_slot.address
+      {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+        install_alloc(st, fiber.alloc) if fiber.alloc != st.alloc
+      {% end %}
       fiber.state = IyiFiberState::Running
       return
     end
@@ -2847,6 +2946,12 @@ class IyiScheduler
         raised = Pointer(Atomic(UInt64)).new(st.preempt_word)
         raised.value.set(0_u64) if raised.value.get != 0_u64
       end
+    {% end %}
+    # The fiber's partition installed as the last step before the switch
+    # into it (heap22): a load and a compare, and nothing written, while
+    # both fibers allocate in the shared heap.
+    {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+      install_alloc(st, fiber.alloc) if fiber.alloc != st.alloc
     {% end %}
     st.current = fiber
     __iyi_ctx_swap(previous.sp_slot, fiber.sp_slot)
@@ -6758,6 +6863,78 @@ def iyi_read(fd : Int64, buffer : Void*, count : UInt64) : Int64 | Cancelled
   {% end %}
 end
 
+# ── heap22: the partition API the trusted modules call ─────────────────
+#
+# One heap per pool unit is a prototype (branch h22/heap-partition): a
+# unit allocates in a partition of its own and an object becomes shared
+# only at a crossing the compiler names. This is the API that crossing
+# code calls. In this tree every unit allocates in the shared heap, so a
+# bracket around the shared heap is already in place, and nothing is ever
+# local to a partition to publish, lend or merge.
+#
+# The brackets restore what they saved when the block returns. A block
+# that leaves them another way - a `return`, `break` or `next` out of it,
+# or a panic, which ends the fiber - leaves the fiber's `alloc` as the
+# bracket set it: callers are the trusted modules, which do not.
+class IyiHeap
+  # The block, run with this fiber allocating in the shared heap; a park
+  # inside is safe, since the switch back installs the fiber's `alloc`.
+  def self.shared(&)
+    {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+      fiber = IyiScheduler.current?
+      return yield unless fiber.is_a?(IyiFiber)
+      saved = fiber.alloc
+      return yield if saved == 0_u64
+      fiber.alloc = 0_u64
+      IyiScheduler.reinstall(fiber)
+      answer = yield
+      fiber.alloc = saved
+      IyiScheduler.reinstall(fiber)
+      answer
+    {% else %}
+      yield
+    {% end %}
+  end
+
+  # The block, run with this fiber allocating in partition *record*
+  # (`IyiHeap.partition_new`), 0 meaning the shared heap.
+  def self.within(record : UInt64, &)
+    {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+      fiber = IyiScheduler.current
+      saved = fiber.alloc
+      fiber.alloc = record
+      IyiScheduler.reinstall(fiber)
+      answer = yield
+      fiber.alloc = saved
+      IyiScheduler.reinstall(fiber)
+      answer
+    {% else %}
+      yield
+    {% end %}
+  end
+
+  # A task's answer into the slot its spawner reads (`IyiTask#finish`),
+  # on the task's own stack: where a partitioned build merges or frees the
+  # dying unit's partition. Here, the store.
+  def self.answer(box : Array(T), value : T) : Nil forall T
+    box << value
+  end
+
+  # The lend protocol of an owning type (`@[Share(owns: true, lends:
+  # true)]`): *graph* taken by the running unit, and handed back.
+  def self.lend_in(graph) : Nil
+  end
+
+  def self.lend_out(graph) : Nil
+  end
+
+  # The running unit made to allocate in the shared heap for the rest of
+  # its life: a pointer handed where no collector looks (`Box`,
+  # `GC.malloc`, a C callback's context).
+  def self.pin : Nil
+  end
+end
+
 # ── Tasks and groups — III.4.1 ─────────────────────────────────────────
 
 # What `g.spawn` answers. `value` joins, then repeats what the task's
@@ -6778,7 +6955,7 @@ class IyiTask(T)
   end
 
   def finish(value : T) : Nil
-    @box << value
+    IyiHeap.answer(@box, value)
   end
 
   def done? : Bool

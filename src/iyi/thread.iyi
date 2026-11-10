@@ -488,6 +488,18 @@
       @@line
     end
 
+    {% if flag?(:win32) %}
+      # The cache page this thread's `take` uses now, where the stopper
+      # reads it (`suspend_others`): every swap of `IyiHeap`'s installed
+      # cache writes it here too (`IyiHeap.install`). An unregistered
+      # thread has no line and no stopper reading one; its registration
+      # writes the page installed then.
+      def self.publish_cache(page : UInt64) : Nil
+        line = @@line
+        IyiHeap.write64(line + IYI_TL_CACHE, page) if line != 0
+      end
+    {% end %}
+
     @@stops : UInt64 = 0_u64
     @@stopped : UInt64 = 0_u64
     @@stop_ns : UInt64 = 0_u64

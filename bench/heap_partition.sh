@@ -123,9 +123,20 @@ prove_fails "the unit lists nobody" nolink "fibers:" \
   concurrency.iyi
 
 # A freed record left on the caches list, its lists never handed back.
-prove_fails "a freed record stays listed" noretire "caches:" \
-  '/def self\.partition_free\(record : UInt64\)/ { inside = 1 } inside && /^        retire_lists\(record\)$/ { inside = 0; found = 1; next } { print } END { if (!found) exit 3 }' \
-  prelude.iyi
+# With partitions in the runtime (`-Dheap_partitions` in IYI_OPTS)
+# `partition_free` hands the record's runs to the shared heap and lets the
+# record go in `partition_release` (heap_partition.iyi), which takes it off
+# the list instead, so that copy leaves the record on the list there.
+case " ${IYI_OPTS:-} " in
+  *" -Dheap_partitions "*)
+    prove_fails "a freed record stays listed" noretire "caches:" \
+      '/def self\.partition_release\(record : UInt64\)/ { inside = 1 } inside && /^    if cursor == record$/ { print "    if false"; inside = 0; found = 1; next } { print } END { if (!found) exit 3 }' \
+      heap_partition.iyi ;;
+  *)
+    prove_fails "a freed record stays listed" noretire "caches:" \
+      '/def self\.partition_free\(record : UInt64\)/ { inside = 1 } inside && /^        retire_lists\(record\)$/ { inside = 0; found = 1; next } { print } END { if (!found) exit 3 }' \
+      prelude.iyi ;;
+esac
 
 echo
 if [ "$status" -eq 0 ]; then

@@ -46,9 +46,10 @@ name: iyi
 # answers within the compiler specs' twenty-odd minutes - narrowed further
 # when it touches only docs or only bench files. A push to master, to
 # mt/next or to mt/next-two, the branches a release is integrated on before
-# it reaches master (mt/next-two carries 0.22.0's work), a `v*` tag, the nightly schedule and a manual dispatch run every job. A
-# push to any other branch runs nothing: open a pull request, or dispatch
-# the workflow on the branch for the full set.
+# it reaches master (mt/next-two carries 0.22.0's work), a `v*` tag, the
+# nightly schedule and a manual dispatch run every job. A push to any other
+# branch runs nothing: open a pull request, or dispatch the workflow on the
+# branch for the full set.
 #
 # The free plan runs twenty jobs at once, five of them on macOS, and the
 # full set was thirty-nine jobs and about twenty runner-hours a run (runs of

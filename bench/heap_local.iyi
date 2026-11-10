@@ -45,6 +45,10 @@
 #   a global collection, their lists whole after.
 # - `inflight:` a unit that allocates past its budget without parking is
 #   collected in flight, its live list whole.
+# - `abandon:` a unit's local mark is abandoned 256 objects into its
+#   list, as a stop asked there abandons one; the list's far end is then
+#   handed a new object, and after the next collection that object reads
+#   whole (the abandoned mark's parities are not trusted).
 # - `death:` every partition is gone once its unit has died.
 
 @[Unsafe("the checks read freed chunks, weak cells and large blocks through raw pointers, and hand a shared-heap address to free, to see what the partitions did with them")]
@@ -166,6 +170,107 @@
   def poisoned?(address : UInt64) : Bool
     return false if address == 0_u64
     Pointer(UInt64).new(address &+ 16_u64).value == IyiHeap::POISON
+  end
+
+  # ── abandon ───────────────────────────────────────────────────────────
+
+  # A link of a chain whose `extra` can be handed an object after the
+  # chain is built (`Link` is the compiler's annotation).
+  class Chain
+    getter id : Int64
+    getter check : Int64
+    getter next : Chain?
+    property extra : Chain?
+
+    def initialize(@id : Int64, @next : Chain?)
+      @check = @id ^ 0x5A5A5A5A_i64
+      @extra = nil
+    end
+
+    def intact?(want : Int64) : Bool
+      @id == want && @check == (want ^ 0x5A5A5A5A_i64)
+    end
+  end
+
+  # *count* links from *base* up, newest first.
+  def links(base : Int64, count : Int32) : Chain?
+    head : Chain? = nil
+    i = 0
+    while i < count
+      head = Chain.new(base &+ i.to_i64, head)
+      i = i + 1
+    end
+    head
+  end
+
+  # The chain's last link (its first made) handed a new link, in a frame
+  # of its own: nothing but that last link holds the new one.
+  @[NoInline]
+  def hang_on_last(head : Chain?, id : Int64) : Nil
+    link = head
+    while link.is_a?(Chain)
+      following = link.next
+      if following.nil?
+        link.extra = Chain.new(id, nil)
+        return
+      end
+      link = following
+    end
+  end
+
+  # Whether what the chain's last link holds reads whole.
+  def last_holds?(head : Chain?, id : Int64) : Bool
+    link = head
+    while link.is_a?(Chain)
+      following = link.next
+      if following.nil?
+        extra = link.extra
+        return extra.is_a?(Chain) && extra.intact?(id)
+      end
+      link = following
+    end
+    false
+  end
+
+  # A mark that ends whole leaves its parity on all 2,000 links; the next
+  # is abandoned 256 links in and leaves its own on those; then the last
+  # link is handed a new object, and the next mark wears the first one's
+  # parity again. Unless the abandoned mark's bits are cleared, that mark
+  # takes the links past 256 for already reached, never opens the last,
+  # and frees the new object. Answers 0, 1 when that object reads wrong,
+  # or a negative failure.
+  def abandon_task : Int64
+    record = IyiHeap.current_record
+    return -1_i64 if record == 0_u64
+    head = links(7000000000_i64, 2000)
+    return -2_i64 unless collect_now
+    IyiHeap.abandon_next_local_mark = true
+    tries = 0
+    while IyiHeap.abandon_next_local_mark && tries < 100
+      scrub_stack
+      IyiHeap.collect_local(record)
+      sleep(1) if IyiHeap.abandon_next_local_mark
+      tries = tries + 1
+    end
+    return -3_i64 if IyiHeap.abandon_next_local_mark
+    hang_on_last(head, 7100000000_i64)
+    scrub_stack
+    return -2_i64 unless collect_now
+    last_holds?(head, 7100000000_i64) ? 0_i64 : 1_i64
+  end
+
+  def abandon_check : Nil
+    IyiHeap.park_collections_off = true
+    group do |g|
+      handle = g.spawn(unit: :new) { abandon_task }
+      value = handle.value
+      fail("abandon: the unit answered #{value}") unless value.is_a?(Int64)
+      fail("abandon: the unit allocates in no partition") if value == -1_i64
+      fail("abandon: no local collection ran") if value == -2_i64
+      fail("abandon: no local mark was abandoned") if value == -3_i64
+      fail("abandon: the object only the list's last link holds read wrong after a mark that followed an abandoned one") if value != 0_i64
+    end
+    IyiHeap.park_collections_off = false
   end
 
   # ── graphs ────────────────────────────────────────────────────────────
@@ -686,7 +791,9 @@
   IyiWorkers.count = workers
   IyiHeap.collect_every_park = true
   # In this order, so that each broken copy of bench/heap_local.sh meets
-  # its own check before any other could notice it.
+  # its own check before any other could notice it: `abandon` first, as
+  # a real stop abandons local marks in any check that collects.
+  abandon_check
   filter_check
   free_check
   return_check

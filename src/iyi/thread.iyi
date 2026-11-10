@@ -644,6 +644,10 @@
       start(block)
     end
 
+    # A proc, unlike a block, is not checked where it is written: its
+    # captures and the module state it reaches were never held to the
+    # rule a thread's block is (SPEC.md III.4.4, III.4.5).
+    @[Unsafe(call: "the proc's captures are Share and it reaches no module state that is not Share or claimed")]
     def self.start(proc : Proc(Nil)) : IyiThread
       # What the proc captured is read on the new thread, which allocates
       # in the shared heap (heap22 row 1c), as the thread object is made.

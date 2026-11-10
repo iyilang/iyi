@@ -82,6 +82,8 @@ pub class Unit(T) < IyiGroup::Unit(T)
     # is not captured.
     IyiCross.publish(block)
     {% if flag?(:heap_partitions) %}
+      # Never taken: types the pinned instance the cleanup points a call at when its crossing must run in the shared heap (heap22 `pinned:`).
+      return new(pinned: true, &block) if false
       placed = IyiWorkers.parallel? ? POOL : MAIN
       unit = IyiCross.shared { IyiUnit.new(pinned: pinned || placed == MAIN) }
       value = IyiHeap.within(unit.heap) { block.call }

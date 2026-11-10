@@ -57,6 +57,8 @@ pub struct SharedProc(A, R)
     # is not captured.
     IyiCross.publish(block)
     {% if flag?(:heap_partitions) %}
+      # Never taken: types the pinned instance the cleanup points a call at when its crossing must run in the shared heap (heap22 `pinned:`).
+      return of(pinned: true, &block) if false
       new(block, pinned)
     {% else %}
       new(block)

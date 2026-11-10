@@ -503,8 +503,15 @@ class IyiFiber
   # The saved stack pointer, meaningful only while suspended.
   @sp : UInt64
 
-  # The spawned body. The main fiber has none.
-  property proc : Proc(Nil)?
+  # The spawned body. The main fiber has none. Set only by the runtime's
+  # own spawns: a body set from outside would run on whatever thread takes
+  # the fiber, with captures nothing checked or published (heap22).
+  getter proc : Proc(Nil)?
+
+  @[Unsafe(call: "the proc's captures are Share and published, and it runs where the fiber's unit allows")]
+  def proc=(proc : Proc(Nil)?) : Proc(Nil)?
+    @proc = proc
+  end
 
   # Intrusive links. A fiber waits on at most one thing at a time, so one
   # link per queue kind is enough, and none of them allocate on the wait
@@ -2245,6 +2252,7 @@ class IyiScheduler
   # any other - a `homebound` one included - into the thread's own list.
   # A fiber this thread woke out of its sleep heap or io list leaves them
   # here, so it is no longer listed on this thread (`IyiFiber#unlist`).
+  @[Unsafe(call: "the fiber is the runtime's, registered with its unit, and runnable on this thread")]
   def self.enqueue(fiber : IyiFiber) : Nil
     fiber.state = IyiFiberState::Runnable
     fiber.next_run = nil
@@ -5600,6 +5608,7 @@ class IyiWorkers
   # or, from a thread outside the pool, the injection queue; and one idle
   # worker rung to come and take it, or with none to ring, one more
   # started (`grow`). Lock held.
+  @[Unsafe(call: "the fiber is the runtime's, its body's captures are Share and published, and the scheduler's lock is held")]
   def self.push(fiber : IyiFiber) : Nil
     fiber.state = IyiFiberState::Runnable
     fiber.next_run = nil
@@ -7200,6 +7209,10 @@ class IyiGroup
       # eligible call at it after typing (`CleanupTransformer#
       # classify_spawn`); a branch on `false` is dropped before codegen.
       return spawn_pooled(&block) if false
+      {% if flag?(:heap_partitions) %}
+        # Never taken: types the pinned instance the cleanup points a call at when its crossing must run in the shared heap (heap22 `pinned:`).
+        return spawn_pooled(pinned: true, &block) if false
+      {% end %}
     {% end %}
     in_unit(&block)
   end
@@ -7227,6 +7240,10 @@ class IyiGroup
   def spawn(*, unit : Symbol, &block : -> T) : IyiTask(T) forall T
     {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
       return spawn_new(&block) if false
+      {% if flag?(:heap_partitions) %}
+        # Never taken: types the pinned instance the cleanup points a call at when its crossing must run in the shared heap (heap22 `pinned:`).
+        return spawn_new(pinned: true, &block) if false
+      {% end %}
     {% end %}
     in_unit(&block)
   end

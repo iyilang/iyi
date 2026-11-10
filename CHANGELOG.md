@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+**heap22, a prototype behind `-Dheap_partitions` (kept or dropped on its
+measurements).** A pool unit allocates in a partition of its own and
+collects it alone, on its own thread, while the rest of the program runs;
+what crosses to another unit - a spawn's captures, a thread's proc, a
+channel send, an answer, a `Mutex` or `Unit` block, a `List`'s elements, a
+panic's message - is published or made in the shared heap first, and
+`Box`, `GC.malloc` and `ReferenceStorage` move the unit to the shared heap.
+`-Dheap_verify` poisons what a partition frees. Without the flag a build
+is today's, except that `TlsIdentity#chain` and `TlsServerConfig#schemes`
+answer copies. A unit's local collection abandoned by a stop no longer
+leaves mark bits the next one trusts (a live list was freed under
+heap_partitions).
+
 ## 0.21.0 — 2026-11-09
 
 **A spawn has one verb and names its unit, and a plain `spawn` runs in

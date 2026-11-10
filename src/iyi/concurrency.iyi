@@ -3955,8 +3955,8 @@ class IyiScheduler
   # second thread starts (`expect_thread`): never by two threads at once.
   private def self.make_lot : Nil
     return if @@lot_heads.is_a?(Array(IyiWaiter?))
-    # The shared heap's, whichever unit parks first (heap22: a class
-    # variable's graph is every unit's).
+    # Made by the first park, which may be a pool unit's: in the shared
+    # heap, since only class variables hold it (heap22).
     IyiCross.shared do
       locks = Pointer(UInt64).malloc((LOT * LOT_STRIDE).to_u64)
       index = 0
@@ -5493,6 +5493,8 @@ class IyiWorkers
         return
       end
       @@started = workers
+      # In the shared heap whoever starts the pool: only class variables
+      # hold these (heap22).
       IyiCross.shared do
         @@workers = Array(IyiSchedulerState).new(workers)
         @@listed = Pointer(UInt64).malloc(workers.to_u64)

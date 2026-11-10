@@ -154,6 +154,31 @@
     {% end %}
   end
 
+  # The partitions live now; none without `-Dheap_partitions`.
+  def partitions_now : UInt64
+    {% if flag?(:heap_partitions) %}
+      IyiHeap.partitions_live
+    {% else %}
+      0_u64
+    {% end %}
+  end
+
+  # The partitions live back to *before*: the units a check started have
+  # died, and under `-Dheap_verify` each death's check has scanned for any
+  # word still naming a chunk of theirs. A graph a frame's residue kept
+  # marked through the check's own collection is seen there, before the
+  # program reads it and exits: in bench/heap_verify.sh's print-only runs
+  # the program reached its end before the unit's death, and the verifier
+  # alone missed `Box pin` (Linux).
+  def settled(before : UInt64, what : String) : Nil
+    waited = 0
+    while partitions_now > before && waited < 5000
+      sleep(1)
+      waited = waited + 1
+    end
+    fail("#{what}: #{partitions_now - before} partitions still live 5 s after the check's units ended") if partitions_now > before
+  end
+
   # An address kept where no local collection looks: a scalar class
   # variable, which the global collector reads conservatively.
   class Stash
@@ -649,6 +674,7 @@
   end
 
   def pin_check(how : String) : Nil
+    before = partitions_now
     group do |g|
       g.spawn(unit: :new) do
         case how
@@ -666,6 +692,7 @@
         0
       end
     end
+    settled(before, how)
     address = Stash.take
     case how
     when "box"
@@ -723,6 +750,7 @@
 
   def glue_check : Nil
     go = Channel(Int32).new(1)
+    before = partitions_now
     group do |outer|
       outer.spawn(unit: :new) do
         group do |g|
@@ -740,6 +768,7 @@
         0
       end
     end
+    settled(before, "glue")
   end
 
   # ── Row 21: List's elements ────────────────────────────────────────────

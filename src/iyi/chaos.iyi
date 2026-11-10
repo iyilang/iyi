@@ -303,6 +303,10 @@ class IyiChaos
     IyiCross.publish(fiber.proc)
     IyiCross.publish(task)
     unit = IyiCross.shared { IyiUnit.new(pinned: pinned) }
+    # Its token held by this thread for good, as the worker running a pool
+    # unit holds it: no idle worker's takeover collects its partition
+    # while the simulation runs one of its fibers.
+    unit.take(IyiScheduler.state.object_id)
     IyiScheduler.unregister(fiber)
     fiber.unit = unit
     IyiScheduler.register(fiber)

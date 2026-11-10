@@ -10,7 +10,10 @@
 # - `records:` a partition's record (`IyiHeap.partition_new`) has an id of
 #   its own that maps back to it, a freed record is the next one handed
 #   out, ids run past one slab of 32, and no record is left live after the
-#   tasks that made them end.
+#   tasks that made them end. With partitions in the runtime each `:new`
+#   unit has a record of its own too, let go when the unit's last fiber
+#   leaves the registry (design section 4.4), which may come after its
+#   joiner has its answer: those are waited for, up to 2 s.
 # - `caches:` a live record is on the caches list the pause strips, as a
 #   thread's cache is, and a freed one is off it.
 # - `bracket:` `IyiHeap.within` installs its record's cache for the block
@@ -241,7 +244,16 @@
     end
   end
   fail("kept: #{bad} objects made inside a record read back wrong") unless bad == 0_i64
-  fail("records: #{IyiHeap.partitions_live} records live after every task freed its own") unless IyiHeap.partitions_live == 0_u64
+  {% if flag?(:heap_partitions) %}
+    waited = 0
+    while IyiHeap.partitions_live != 0_u64 && waited < 2000
+      sleep(1)
+      waited = waited + 1
+    end
+    fail("records: #{IyiHeap.partitions_live} records live 2 s after every task freed its own and every unit ended") unless IyiHeap.partitions_live == 0_u64
+  {% else %}
+    fail("records: #{IyiHeap.partitions_live} records live after every task freed its own") unless IyiHeap.partitions_live == 0_u64
+  {% end %}
   ran = IyiMark.collections - collections
   {% if flag?(:heap_partitions) %}
     fail("kept: no global collection ran while the tasks allocated in their records, though each asked for one every 65536 rounds") if ran == 0_u64

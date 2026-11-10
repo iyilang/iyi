@@ -32,6 +32,16 @@
 # With no step named every step but `cost` runs and nothing it measured is
 # printed. bench/parallel_exercise.sh runs it, and broken copies, each
 # caught by the step that names it.
+#
+# With partitions in the runtime (`-Dheap_partitions`) the call's task
+# allocates in its unit's own partition, which its worker collects on the
+# task's stack, stopping no other thread and giving the worker up at no
+# check (heap22 design, section 4.1): the join's 12,000,000-string input
+# made one such collection take the worker for about 150 ms, which the
+# short task waited out, where the global collection that stood for it
+# stopped the main thread's clock too. So the clock holds the task's local
+# collections off while it runs, and what a step times is the library's
+# checks alone, as it was.
 
 @[Unsafe("copies bytes between slices through their to_unsafe pointers in a loop the preemption check must reach")]
 module bench/parallel_preempt_lib
@@ -123,6 +133,9 @@ import std/password::{Bcrypt}
     end
 
     def start : Int64
+      {% if flag?(:heap_partitions) %}
+        IyiHeap.local_collections_off = true
+      {% end %}
       t = __iyi_monotonic_ns
       @started.set(t)
       t
@@ -130,6 +143,9 @@ import std/password::{Bcrypt}
 
     def stop(since : Int64) : Nil
       @took.set(elapsed_ms(since))
+      {% if flag?(:heap_partitions) %}
+        IyiHeap.local_collections_off = false
+      {% end %}
     end
 
     def started? : Bool

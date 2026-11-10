@@ -20,8 +20,10 @@
 #      default block, a block handed to a def that calls it, and a kept
 #      literal calling its def's block. Each is refused naming the
 #      program's state and the path to it. The state between - the table,
-#      the guard, the hash, the proc - carries a proven `@[SafeReach]`, so
-#      the state refused is the one written from the unit.
+#      the hash, the proc - carries a proven `@[SafeReach]`, and the
+#      guard an `@[UnsafeReach]` (its pushed node is a copy the proof
+#      cannot follow), so the state refused is the one written from the
+#      unit.
 #   2. std's and the prelude's state is walked: a unit that prints, reads
 #      the clock and sets an environment variable compiles, since every
 #      piece of runtime state it reaches is Share or marked. Its broken
@@ -209,7 +211,10 @@ IYI
 } > r6_handed.iyi
 refused r6_handed 'reaches `BOX : R6Handed::Box` (not Share) through `work` → '
 
-{ echo 'module r6_node'; echo; box; cat <<'IYI'
+# The guard's claim is the author's word (`@[UnsafeReach]`, in a module
+# marked `@[Unsafe]`): pushing its node keeps a copy of it on the fiber,
+# which `@[SafeReach]`'s proof refuses wherever it is kept.
+{ echo '@[Unsafe("the gate pushes a defer node by hand")]'; echo 'module r6_node'; echo; box; cat <<'IYI'
 BOX = Box.new
 
 class Guard
@@ -222,7 +227,7 @@ class Guard
   end
 end
 
-@[SafeReach("made once, then only pushed")]
+@[UnsafeReach("made once, then only pushed, by the unit that runs its node")]
 GUARD = Guard.new
 
 def work(n : Int32) : Int32

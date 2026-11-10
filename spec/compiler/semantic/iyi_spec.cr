@@ -5971,7 +5971,7 @@ describe "Semantic: iyi" do
       # handed to a spawn) and the broken copies of each rule.
       describe "through a proc call (R6)" do
         it "reads a block handed to a def that calls it as the code of the def that makes it" do
-          message = reach_error.call(proc_stub + reach_stub + <<-CODE)
+          message = reach_error.call(unsafe + proc_stub + reach_stub + <<-CODE)
             def twice(&block : -> Int64) : Int64
               block.call
               block.call
@@ -5991,7 +5991,7 @@ describe "Semantic: iyi" do
         end
 
         it "adds nothing for a def calling its own parameter, so another caller's block is not reached" do
-          infos = reach_warnings.call(proc_stub + reach_stub + <<-CODE)
+          infos = reach_warnings.call(unsafe + proc_stub + reach_stub + <<-CODE)
             def run_it(&block : -> Int64) : Int64
               block.call
             end
@@ -6012,7 +6012,7 @@ describe "Semantic: iyi" do
         end
 
         it "follows a kept literal that calls its def's block to the blocks the def is given" do
-          message = reach_error.call(proc_stub + reach_stub + <<-CODE)
+          message = reach_error.call(unsafe + proc_stub + reach_stub + <<-CODE)
             class Table
               def initialize
                 @handler = -> { 0 }
@@ -6046,7 +6046,7 @@ describe "Semantic: iyi" do
         end
 
         it "follows a proc handed on that the code did not make to every literal of its type" do
-          message = reach_error.call(proc_stub + reach_stub + <<-CODE)
+          message = reach_error.call(unsafe + proc_stub + reach_stub + <<-CODE)
             @[SafeReach("made once, then only called")]
             BODY = -> { ask(1_i64) }
 

@@ -169,6 +169,15 @@ class IyiHeapVerify
     return unless fiber.is_a?(IyiFiber)
     record = fiber.alloc
     return if record == 0_u64
+    # Only a fiber of the partition's own unit, as the runtime's own
+    # triggers ask (`IyiHeap.at_park`, `partition_slice`): a fiber inside
+    # another unit's bracket (`Unit.new` building the value in the new
+    # unit's partition) is on no list the collection reads, so its fields
+    # are nobody's roots - its `@defers` node, made in the bracket, was
+    # freed under it and named by the verifier (heap_crossings, simulated,
+    # seed 5, Linux).
+    unit = fiber.unit
+    return unless unit.is_a?(IyiUnit) && unit.heap == record
     IyiHeap.collect_local(record)
   end
 

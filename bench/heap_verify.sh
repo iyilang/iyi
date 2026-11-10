@@ -2,10 +2,12 @@
 # heap22 slice S4's gate: `-Dheap_verify` catches every broken copy of a
 # crossing or of the local collector by name, and passes the sound tree.
 #
-#   bash bench/heap_verify.sh             # all three parts
+#   bash bench/heap_verify.sh             # every part
 #   bash bench/heap_verify.sh sound       # the sound tree: no report, false words change nothing
+#   bash bench/heap_verify.sh simulated   # the sound tree on the one-thread schedule, over SIM_SEEDS
 #   bash bench/heap_verify.sh crossings   # bench/heap_crossings.sh's copies
 #   bash bench/heap_verify.sh local       # bench/heap_local.sh's copies
+#   bash bench/heap_verify.sh own         # copies of the stress and the simulation themselves
 #
 # Every build is `-Dheap_partitions -Dheap_verify -Diyi_chaos`, run with a
 # fixed chaos seed (`SEED`, default 1) and `IYI_HEAP_STRESS=1` (a local
@@ -20,6 +22,15 @@
 # end. Copies whose loss no heap word can show are listed apart with what
 # catches them (`VALUE_COPIES`).
 #
+# `simulated` runs bench/heap_crossings.iyi and bench/heap_verify.iyi with
+# `IYI_WORKERS=1` at each seed of `SIM_SEEDS` (default 1 to 5): every
+# check holds and nothing reports. `own` breaks what this slice adds - a
+# simulated unit's fibers kept on the simulation's thread, its crossing
+# made as the pool's is, the stress collecting only a member's partition,
+# no chaos point inside a publication walk - each caught by the check
+# named beside it, the same way in every run: a report, a `FAIL:` line,
+# a deadlock named, or a hang ended at `HANG` seconds (default 60).
+#
 # Needs `make` first. `IYI` names the compiler. Exits non-zero if any copy
 # is missed or the sound tree reports.
 
@@ -31,6 +42,8 @@ WORK="$(mktemp -d)"
 PART="${1:-all}"
 SEED="${SEED:-1}"
 RUNS="${RUNS:-2}"
+SIM_SEEDS="${SIM_SEEDS:-1 2 3 4 5}"
+HANG="${HANG:-60}"
 FLAGS="-Dheap_partitions -Dheap_verify -Diyi_chaos"
 PY="${PYTHON:-python3}"
 # The copies whose loss changes a value, not a heap word: a Share type's
@@ -68,11 +81,12 @@ build() {
 }
 
 # verified DIR TAG ARGS...: one stressed run; exit code in DIR/TAG.code.
+# `WORKERS` sets IYI_WORKERS, `LIMIT` the seconds before a hang is ended.
 verified() {
   local dir="$1" tag="$2"
   shift 2
-  IYI_CHAOS="$SEED" IYI_HEAP_STRESS=1 ${WORKERS:+IYI_WORKERS=$WORKERS} \
-    timeout 300 "$dir/program" "$@" >"$dir/$tag.out" 2>"$dir/$tag.err"
+  env IYI_CHAOS="$SEED" IYI_HEAP_STRESS=1 ${WORKERS:+IYI_WORKERS=$WORKERS} \
+    timeout "${LIMIT:-300}" "$dir/program" "$@" >"$dir/$tag.out" 2>"$dir/$tag.err"
   echo $? >"$dir/$tag.code"
 }
 
@@ -214,10 +228,116 @@ sound() {
   echo "  $name: no report, output identical with false words ($(wc -l <"$dir/plain.out") lines)"
 }
 
+# simulated NAME SOURCE: the sound program on the one-thread schedule at
+# every seed of SIM_SEEDS, stressed: exit 0, no report.
+simulated() {
+  local name="$1" source="$2"
+  local dir="$WORK/sound-$name"
+  if [ ! -x "$dir/program" ] && ! build "$dir" "$source"; then
+    echo "  $name: build failed"
+    sed -n '1,12p' "$dir/build.log"
+    status=1
+    return
+  fi
+  local seed
+  for seed in $SIM_SEEDS; do
+    SEED="$seed" WORKERS=1 verified "$dir" "sim$seed"
+    if [ "$(cat "$dir/sim$seed.code")" != 0 ] || grep -q "heap_verify: " "$dir/sim$seed.err"; then
+      echo "  $name (simulated, seed $seed): exit $(cat "$dir/sim$seed.code")"
+      named "$dir" "sim$seed" >/dev/null
+      sed -n '1,30p' "$dir/sim$seed.named" | sed 's/^/      /'
+      sed -n '1,10p' "$dir/sim$seed.out" | sed 's/^/      /'
+      status=1
+      return
+    fi
+  done
+  echo "  $name: simulated, seeds $SIM_SEEDS: every check holds, no report"
+}
+
+# How run TAG of DIR's program failed, as one line: the verifier's report
+# named, the program's `FAIL:` line, a deadlock named, a hang, or the exit.
+how_failed() {
+  local dir="$1" tag="$2" code
+  code="$(cat "$dir/$tag.code")"
+  if [ "$code" = 86 ] && grep -q "^iyi: heap_verify: " "$dir/$tag.err"; then
+    echo "the verifier: $(named "$dir" "$tag")"
+  elif grep -q "^FAIL: " "$dir/$tag.out"; then
+    echo "the program's check: $(grep -m1 '^FAIL: ' "$dir/$tag.out" | sed 's/^FAIL: //')"
+  elif grep -q "deadlock: every fiber is blocked" "$dir/$tag.err"; then
+    echo "a deadlock named (exit $code)"
+  elif [ "$code" = 124 ]; then
+    echo "a hang, ended at ${LIMIT:-300} s"
+  elif [ "$code" != 0 ]; then
+    echo "exit $code: $(grep -m1 . "$dir/$tag.err")"
+  fi
+}
+
+# own_caught LABEL DIR SOURCE CHECK AWK FILE: src/iyi/FILE patched by AWK,
+# SOURCE built against it and its CHECK run RUNS times (with `WORKERS` as
+# set); caught when every run fails, the same way.
+own_caught() {
+  local label="$1" dir="$2" source="$3" check="$4" script="$5" file="$6"
+  mkdir -p "$WORK/$dir/iyi"
+  cp -R "$REPO/src/iyi/." "$WORK/$dir/iyi/"
+  if ! awk "$script" "$REPO/src/iyi/$file" >"$WORK/$dir/iyi/$file"; then
+    echo "  $label: what the copy changes is not in $file any more"
+    status=1
+    return
+  fi
+  if ! build "$WORK/$dir/b" "$source" "$WORK/$dir${PSEP}$REPO/src"; then
+    echo "  $label: the patched runtime did not build"
+    sed -n '1,12p' "$WORK/$dir/b/build.log"
+    status=1
+    return
+  fi
+  local k=1 first="" row
+  while [ "$k" -le "$RUNS" ]; do
+    LIMIT="$HANG" verified "$WORK/$dir/b" "run$k" "$check"
+    row="$(LIMIT="$HANG" how_failed "$WORK/$dir/b" "run$k")"
+    if [ -z "$row" ]; then
+      echo "  $label: run $k passed: not caught"
+      printf '| %s | **missed** (run %s passed) | |\n' "$label" "$k" >>"$TABLE"
+      status=1
+      return
+    fi
+    if [ -z "$first" ]; then
+      first="$row"
+    elif [ "$row" != "$first" ]; then
+      echo "  $label: run $k failed another way: $row (run 1: $first)"
+      status=1
+    fi
+    k=$((k + 1))
+  done
+  echo "  $label ($check${WORKERS:+, IYI_WORKERS=$WORKERS}): $first"
+  printf '| %s | %s |  |\n' "$label" "$first" >>"$TABLE"
+}
+
+# One line deleted after a marker: `del MARKER LINE` as an awk program.
+del() {
+  printf '/%s/ { armed = 1 } armed && /%s/ { armed = 0; found = 1; next } { print } END { if (!found) exit 3 }' "$1" "$2"
+}
+# One line rewritten after a marker: `subst MARKER FROM TO`.
+subst() {
+  printf '/%s/ { armed = 1 } armed && sub(/%s/, "%s") { armed = 0; found = 1 } { print } END { if (!found) exit 3 }' "$1" "$2" "$3"
+}
+# A line added after the first line matching LINE past MARKER: `add
+# MARKER LINE TEXT`.
+add() {
+  printf '/%s/ { armed = 1 } { print } armed && /%s/ { print "%s"; armed = 0; found = 1 } END { if (!found) exit 3 }' "$1" "$2" "$3"
+}
+
 if [ "$PART" = all ] || [ "$PART" = sound ]; then
   echo "== the sound tree, stressed (seed $SEED): no report"
   sound crossings "$REPO/bench/heap_crossings.iyi"
   sound local "$REPO/bench/heap_local.iyi"
+  sound verify "$REPO/bench/heap_verify.iyi"
+fi
+
+if [ "$PART" = all ] || [ "$PART" = simulated ]; then
+  echo
+  echo "== the sound tree on the one-thread schedule (IYI_WORKERS=1), stressed: no report"
+  simulated crossings "$REPO/bench/heap_crossings.iyi"
+  simulated verify "$REPO/bench/heap_verify.iyi"
 fi
 
 if [ "$PART" = all ] || [ "$PART" = crossings ]; then
@@ -233,6 +353,28 @@ if [ "$PART" = all ] || [ "$PART" = local ]; then
   echo "== bench/heap_local.sh's copies, caught by the verifier"
   # shellcheck disable=SC1090
   source <(awk '/== the checks fail when a mechanism is broken/ { on = 1; next } on && /^fi$/ { exit } on { print }' "$REPO/bench/heap_local.sh")
+fi
+
+if [ "$PART" = all ] || [ "$PART" = own ]; then
+  echo
+  echo "== the stress's and the simulation's own mechanisms, broken"
+  # A simulated unit's fiber woken onto the pool, whose workers never
+  # take it.
+  WORKERS=1 own_caught "simulated unit kept home" o1 "$REPO/bench/heap_verify.iyi" kept \
+    "$(del 'def self\.ready\(fiber' 'fiber\.homebound = true if IyiChaos\.kept\?\(fiber\)')" concurrency.iyi
+  # A simulated crossing's glue made in the spawner's partition.
+  WORKERS=1 own_caught "simulated crossing glue shared" o2 "$REPO/bench/heap_crossings.iyi" glue \
+    "$(subst 'private def chaos_task' 'task = IyiCross\.shared do' 'task = begin')" chaos.iyi
+  # The stress collecting a partition from a fiber of another unit, in
+  # `Unit.new`'s bracket.
+  own_caught "stress by members only" o3 "$REPO/bench/heap_verify.iyi" bracket \
+    "$(del 'def self\.at_point_once' 'return unless unit\.is_a\?\(IyiUnit\) && unit\.heap == record')" heap_verify.iyi
+  # A chaos point's stress collection inside the publication walk, which
+  # heap_partition.iyi had while the compiler did not count it as the
+  # runtime's: the collection takes the walk's scratch stack from under
+  # it, and what was still on it is never published.
+  own_caught "no point inside a publication walk" o4 "$REPO/bench/heap_crossings.iyi" spawn \
+    "$(add 'def self\.publish_walk' 'scratch_push\(s, found\)' '          {% if flag?(:heap_verify) %} IyiHeapVerify.at_point {% end %}')" heap_partition.iyi
 fi
 
 echo

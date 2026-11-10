@@ -8,6 +8,9 @@
 # uncounted, a budget floor blind to the threads, threads allocating free
 # while a triggered collection pays its debt, threads allocating past the
 # collection's ceiling, and a descriptor every thread keeps.
+# Under `-Dheap_partitions` the budget and floor copies change the
+# partition branch of the budget, and working_set's bound gets a copy
+# with the partitions' own collection off instead of the ceiling's.
 #
 #   bash bench/collect_trigger.sh
 #
@@ -43,6 +46,19 @@ esac
 trap 'rm -rf "$WORK"' EXIT
 
 status=0
+
+# Built with `-Dheap_partitions` (the compiler reads `IYI_OPTS`) the shared
+# heap's budget is `IyiMark.next_budget`'s partition branch: twice what
+# survived outside the partitions, floored at `IyiHeap::SHARED_MIN`
+# whatever the threads (heap22, design section 4.2). The copies that
+# change the budget or its floor change that branch then.
+PARTITIONS=0
+case " ${IYI_OPTS:-} " in
+  *" -Dheap_partitions "*) PARTITIONS=1 ;;
+esac
+# The partition branch's last line, which the budget and floor copies
+# rewrite.
+SHARED_RETURN='return grown_shared < IyiHeap::SHARED_MIN \? IyiHeap::SHARED_MIN : grown_shared'
 
 run_case() {
   local label="$1" name="$2"
@@ -240,9 +256,15 @@ prove_fails "nothing triggers" notrigger "trigger:" \
   '{ sub(/IyiMark\.pressure\(slice\)/, "# removed"); print }'
 
 # The budget pinned at the floor: the live set stops mattering, and the same
-# churn buys the same collections either way.
-prove_fails "budget never grows" nogrow "budget:" \
-  '{ sub(/@@budget = next_budget\(.*\)/, "@@budget = MIN_BUDGET"); print }'
+# churn buys the same collections either way. Under partitions the floor
+# is the partition branch's, `SHARED_MIN`, and the copy pins it there.
+if [ "$PARTITIONS" -eq 1 ]; then
+  prove_fails "budget never grows" nogrow "budget:" \
+    "{ if (sub(/$SHARED_RETURN/, \"return IyiHeap::SHARED_MIN\")) found = 1; print } END { if (!found) exit 3 }"
+else
+  prove_fails "budget never grows" nogrow "budget:" \
+    '{ sub(/@@budget = next_budget\(.*\)/, "@@budget = MIN_BUDGET"); print }'
+fi
 
 # The scavenge disabled: sweeps keep reclaiming chunks, mappings never go
 # back, and the heap is high-water — the check names it.
@@ -277,15 +299,37 @@ prove_fails "scheduler state unrooted" unrooted "scheduler state:" \
 prove_fails "an ended thread's slice uncounted" noretire "threads:" \
   '{ sub(/allocated_word\.value\.add\(read64\(page \+ CACHE_SLICE\)\)/, "# removed"); print }'
 
-# The floor back at MIN_BUDGET whatever the threads: four threads
-# registered, and the budget a collection leaves is a single thread's.
-prove_fails "floor blind to the threads" nofloor "floor:" \
-  '{ sub(/floor = MIN_BUDGET \* allocating_threads/, "floor = MIN_BUDGET"); print }'
+if [ "$PARTITIONS" -eq 1 ]; then
+  # Under partitions the floor counts no thread (design section 4.2), so
+  # a floor blind to the threads is the design: the partition branch
+  # returns before the line that copy rewrites.
+  echo "  floor blind to the threads: not run under -Dheap_partitions, where the floor is SHARED_MIN whatever the threads and next_budget returns before the floor it rewrites; the shared floor's copies follow"
 
-# The floor counting every registered thread again, idle or not: the four
-# threads stop allocating, and the next budget is still five threads'.
-prove_fails "floor counts idle threads" idlefloor "floor:" \
-  '{ sub(/floor = MIN_BUDGET \* allocating_threads/, "floor = MIN_BUDGET * IyiThread.program_threads"); print }'
+  # The shared floor back at a thread's, MIN_BUDGET: a collection with a
+  # few KB live leaves half the shared floor, busy or idle.
+  prove_fails "the shared floor at a thread's" lowfloor "floor:" \
+    "{ if (sub(/$SHARED_RETURN/, \"return grown_shared < MIN_BUDGET ? MIN_BUDGET : grown_shared\")) found = 1; print } END { if (!found) exit 3 }"
+
+  # The old floor back, SHARED_MIN for every thread that filled a slice:
+  # four threads churning leave four floors.
+  prove_fails "floor counts the threads" threadfloor "floor:" \
+    "{ if (sub(/^          allocating_threads\$/, \"          threads = allocating_threads\")) found++; if (sub(/$SHARED_RETURN/, \"return grown_shared < IyiHeap::SHARED_MIN * threads ? IyiHeap::SHARED_MIN * threads : grown_shared\")) found++; print } END { if (found != 2) exit 3 }"
+
+  # The floor counting every registered thread, idle or not: the four
+  # threads stop allocating, and the next budget is still five floors.
+  prove_fails "floor counts idle threads" idlefloor "floor:" \
+    "{ if (sub(/$SHARED_RETURN/, \"return grown_shared < IyiHeap::SHARED_MIN * IyiThread.program_threads ? IyiHeap::SHARED_MIN * IyiThread.program_threads : grown_shared\")) found = 1; print } END { if (!found) exit 3 }"
+else
+  # The floor back at MIN_BUDGET whatever the threads: four threads
+  # registered, and the budget a collection leaves is a single thread's.
+  prove_fails "floor blind to the threads" nofloor "floor:" \
+    '{ sub(/floor = MIN_BUDGET \* allocating_threads/, "floor = MIN_BUDGET"); print }'
+
+  # The floor counting every registered thread again, idle or not: the four
+  # threads stop allocating, and the next budget is still five threads'.
+  prove_fails "floor counts idle threads" idlefloor "floor:" \
+    '{ sub(/floor = MIN_BUDGET \* allocating_threads/, "floor = MIN_BUDGET * IyiThread.program_threads"); print }'
+fi
 
 # The debt's assist removed: a slice that finds a collection triggered
 # runs on as it did, and four threads churning together with no helper
@@ -314,30 +358,68 @@ prove_fails "debt never assisted" noassist "debt:" \
 # 437 to 627 held to 4. Before the ceiling went in it peaked at 231 to
 # 248 in 5 runs on that Windows machine on a 52 MiB budget; the bound is
 # four of the twelve workers' 48 MiB floor.
-mkdir -p "$WORK/noceiling/iyi"
-cp -R "$REPO/src/iyi/." "$WORK/noceiling/iyi/"
-if ! awk '{ if ($0 ~ /^ *hold if total >= ceiling$/) { print "# removed"; removed++; next } print } END { if (removed != 2) exit 3 }' \
-     "$REPO/src/iyi/prelude.iyi" > "$WORK/noceiling/iyi/prelude.iyi"; then
-  echo "  the ceiling never holds: the two holds this proof removes are not in the prelude any more"; status=1
-elif ! IYI_PATH="$WORK/noceiling${PSEP}$REPO/src" "$IYI" build --release \
-       -o "$WORK/noceiling/program" "$REPO/bench/working_set.iyi" >"$WORK/noceiling/build.log" 2>&1; then
-  echo "  the ceiling never holds: the patched prelude did not build"; sed -n '1,12p' "$WORK/noceiling/build.log"; status=1
-else
-  peaks=""
-  held=""
-  for run in 1 2 3; do
-    "$WORK/noceiling/program" >"$WORK/noceiling/out" 2>&1
-    if [ $? -ne 0 ] && grep -q "^FAIL: working set: .* past four budgets" "$WORK/noceiling/out"; then
-      peaks="$peaks $(sed -n 's/^FAIL: working set: [0-9]* workers peaked at \([0-9]*\) MiB.*/\1/p' "$WORK/noceiling/out")"
-    else
-      held="$run"; break
-    fi
-  done
-  if [ -n "$held" ]; then
-    echo "  the ceiling never holds: run $held did not go past the bound, so the best of three does not test this"
-    sed -n '$p' "$WORK/noceiling/out"; status=1
+if [ "$PARTITIONS" -eq 1 ]; then
+  # Under partitions the twelve workers are pool units (`unit: :new`)
+  # allocating in partitions of their own: a partition's slice never
+  # holds (`IyiHeap.partition_slice`, the ceiling is the shared heap's)
+  # and never feeds the global trigger (design section 4.2), so the
+  # working set ran through no collection of the shared heap and the
+  # ceiling's copy cannot move it. What bounds it is each partition's
+  # own collection (design section 4.1): the copy turns every local
+  # collection off - in flight, at a park and by an idle worker - and
+  # twenty thousand rounds a worker, a tenth of the step's, are left to
+  # pile up with nothing taking any of it back: forty thousand peaked at
+  # 888 MiB through no collection on macOS 26.6, an M2 Pro with 10
+  # cores, so twenty thousand are about twice the four budgets the step
+  # holds the twelve to.
+  echo "  the ceiling never holds: not run under -Dheap_partitions, where working_set's workers allocate in their partitions, whose slices never reach the shared heap's ceiling; the partitions' own collection's copy follows"
+  mkdir -p "$WORK/nolocal/iyi"
+  cp -R "$REPO/src/iyi/." "$WORK/nolocal/iyi/"
+  if ! awk '{ if (sub(/^  @@local_off : Bool = false$/, "  @@local_off : Bool = true")) found = 1; print } END { if (!found) exit 3 }' \
+       "$REPO/src/iyi/heap_partition.iyi" > "$WORK/nolocal/iyi/heap_partition.iyi"; then
+    echo "  a partition never collects: the switch this proof turns is not in heap_partition.iyi any more"; status=1
+  elif ! IYI_PATH="$WORK/nolocal${PSEP}$REPO/src" "$IYI" build --release \
+         -o "$WORK/nolocal/program" "$REPO/bench/working_set.iyi" >"$WORK/nolocal/build.log" 2>&1; then
+    echo "  a partition never collects: the patched runtime did not build"; sed -n '1,12p' "$WORK/nolocal/build.log"; status=1
   else
-    printf '  the ceiling never holds: all three runs exit 1, peaking at%s MiB, the last at "%s"\n' "$(printf '%s' "$peaks" | sed 's/ \([0-9]*\)/ \1,/g; s/,$//')" "$(grep -m1 '^FAIL: working set:' "$WORK/noceiling/out")"
+    "$WORK/nolocal/program" 12 20000 >"$WORK/nolocal/out" 2>&1
+    exit_code=$?
+    if [ "$exit_code" -eq 0 ]; then
+      echo "  a partition never collects: the working set still stayed within the bound, so it does not test this"
+      sed -n '$p' "$WORK/nolocal/out"; status=1
+    elif ! grep -q "^FAIL: working set: .* past four budgets" "$WORK/nolocal/out"; then
+      echo "  a partition never collects: failed, but not at the expected check"
+      sed -n '$p' "$WORK/nolocal/out"; status=1
+    else
+      printf '  a partition never collects: exits %s at "%s"\n' "$exit_code" "$(grep -m1 '^FAIL: working set:' "$WORK/nolocal/out")"
+    fi
+  fi
+else
+  mkdir -p "$WORK/noceiling/iyi"
+  cp -R "$REPO/src/iyi/." "$WORK/noceiling/iyi/"
+  if ! awk '{ if ($0 ~ /^ *hold if total >= ceiling$/) { print "# removed"; removed++; next } print } END { if (removed != 2) exit 3 }' \
+       "$REPO/src/iyi/prelude.iyi" > "$WORK/noceiling/iyi/prelude.iyi"; then
+    echo "  the ceiling never holds: the two holds this proof removes are not in the prelude any more"; status=1
+  elif ! IYI_PATH="$WORK/noceiling${PSEP}$REPO/src" "$IYI" build --release \
+         -o "$WORK/noceiling/program" "$REPO/bench/working_set.iyi" >"$WORK/noceiling/build.log" 2>&1; then
+    echo "  the ceiling never holds: the patched prelude did not build"; sed -n '1,12p' "$WORK/noceiling/build.log"; status=1
+  else
+    peaks=""
+    held=""
+    for run in 1 2 3; do
+      "$WORK/noceiling/program" >"$WORK/noceiling/out" 2>&1
+      if [ $? -ne 0 ] && grep -q "^FAIL: working set: .* past four budgets" "$WORK/noceiling/out"; then
+        peaks="$peaks $(sed -n 's/^FAIL: working set: [0-9]* workers peaked at \([0-9]*\) MiB.*/\1/p' "$WORK/noceiling/out")"
+      else
+        held="$run"; break
+      fi
+    done
+    if [ -n "$held" ]; then
+      echo "  the ceiling never holds: run $held did not go past the bound, so the best of three does not test this"
+      sed -n '$p' "$WORK/noceiling/out"; status=1
+    else
+      printf '  the ceiling never holds: all three runs exit 1, peaking at%s MiB, the last at "%s"\n' "$(printf '%s' "$peaks" | sed 's/ \([0-9]*\)/ \1,/g; s/,$//')" "$(grep -m1 '^FAIL: working set:' "$WORK/noceiling/out")"
+    fi
   fi
 fi
 

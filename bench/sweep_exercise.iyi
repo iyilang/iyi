@@ -213,6 +213,78 @@
     reaching
   end
 
+  # Check 11b's work for one class: the window between a refill's taking
+  # of a batch off the centre and its `adopt_batch`, which unlists the
+  # batch's pages, replayed on this thread in that order with the idle
+  # trim inside it. Garbage over five slices, collected and swept slice
+  # by slice onto the centre (`IyiMark.sweep_one`); two batches of one
+  # arena found whose ranges share a page the sweep listed - the lower
+  # slice's last chunk reaches into it and the upper slice's run, going
+  # on from the lower's listed pages, lists it whole (`IyiMark.close_run`);
+  # one of the two taken off the centre as a refill takes it, the lower
+  # or the upper as `take_lower` says; the trim; and the taken batch
+  # adopted. Every chunk of the list the cache then holds must lie,
+  # head and tail, on no idle page. Answers the shared page's chunks
+  # on the list.
+  def trim_edge(size : UInt64, take_lower : Bool) : UInt64
+    index = IyiHeap.class_index(size)
+    chunk = IyiHeap.chunk_of(index)
+    line = IyiHeap.class_line(index)
+    burst(size, (5_u64 * IyiMark::SWEEP_SPAN).unsafe_div(size))
+    IyiMark.collect
+    while IyiMark.sweep_one(size) == 1_u64
+    end
+    lower = 0_u64
+    upper = 0_u64
+    shared = 0_u64
+    low_batch = IyiHeap.read64(line + IyiHeap::CLASS_BATCHES)
+    while low_batch != 0_u64 && lower == 0_u64
+      arena = low_batch & (0_u64 &- IyiHeap::MAP)
+      last = IyiHeap.read64(low_batch + IyiHeap::BATCH_NEXT).unsafe_shr(IyiHeap::RANGE_SHIFT)
+      high_batch = IyiHeap.read64(line + IyiHeap::CLASS_BATCHES)
+      while high_batch != 0_u64 && lower == 0_u64
+        if high_batch != low_batch && high_batch & (0_u64 &- IyiHeap::MAP) == arena &&
+           IyiHeap.read64(high_batch + IyiHeap::OFF_LINK).unsafe_shr(IyiHeap::RANGE_SHIFT) == last &&
+           IyiHeap.page_listed?(arena, arena + last * IyiHeap::PAGE)
+          lower = low_batch
+          upper = high_batch
+          shared = arena + last * IyiHeap::PAGE
+        end
+        high_batch = IyiHeap.read64(high_batch + IyiHeap::BATCH_NEXT) & IyiHeap::LOW48
+      end
+      low_batch = IyiHeap.read64(low_batch + IyiHeap::BATCH_NEXT) & IyiHeap::LOW48
+    end
+    raise "edge: no two batches of the #{count(chunk)}-byte class share a listed page, so the trim's range edges were never at stake" if lower == 0_u64
+    taken = take_lower ? lower : upper
+    previous = 0_u64
+    node = IyiHeap.read64(line + IyiHeap::CLASS_BATCHES)
+    while node != taken
+      previous = node
+      node = IyiHeap.read64(node + IyiHeap::BATCH_NEXT) & IyiHeap::LOW48
+    end
+    following = IyiHeap.read64(taken + IyiHeap::BATCH_NEXT) & IyiHeap::LOW48
+    if previous == 0_u64
+      IyiHeap.write64(line + IyiHeap::CLASS_BATCHES, following)
+    else
+      IyiHeap.write64(previous + IyiHeap::BATCH_NEXT, (IyiHeap.read64(previous + IyiHeap::BATCH_NEXT) & (0_u64 &- IyiHeap::LOW48 &- 1_u64)) | following)
+    end
+    raise "edge: the idle trim found a collection under way in a program that runs none" unless IyiMark.trim_idle
+    table = Pointer(UInt64).new(IyiHeap.cache_page)
+    IyiHeap.adopt_batch(table, index, taken)
+    on_shared = 0_u64
+    node = table[index]
+    while node != 0_u64
+      arena = IyiHeap.arena_of(node)
+      if IyiHeap.page_idle?(arena, node) || IyiHeap.page_idle?(arena, node + chunk - 1_u64)
+        raise "edge: a #{count(chunk)}-byte chunk at #{hex(node)} on the #{take_lower ? "lower" : "upper"} batch, taken off the centre before the idle trim and adopted after it, lies on an idle page; the batches shared the page at #{hex(shared)}"
+      end
+      on_shared = on_shared + 1_u64 if node + chunk > shared && node < shared + IyiHeap::PAGE
+      node = Pointer(UInt64).new(node).value
+    end
+    raise "edge: the #{take_lower ? "lower" : "upper"} batch has no chunk on the page it shares at #{hex(shared)}" if on_shared == 0_u64
+    on_shared
+  end
+
   # Garbage in a class nothing below asks for, made before the first
   # collection, for check 6c.
   def first_epoch_garbage(size : UInt64) : Nil
@@ -448,10 +520,11 @@
   # goes back cold, and the next epoch carves that rest again - a release
   # and a fault a page for nothing, which twelve workers paid on 94-98% of
   # what the sweep released (issue #150). What the carve takes back cold
-  # is kept warm the epoch after, so a churn asking twice its budget every
-  # epoch hands back a seventeenth of its excess once it has settled -
-  # under a quarter of it here, the excess every epoch without the
-  # carry-over.
+  # is counted in the class's take, and the next epoch's room holds it
+  # (`IyiMark.warm_pages`), so a churn asking twice its budget every
+  # epoch hands back almost nothing once it has settled - under a quarter
+  # of its excess here, the excess every epoch when the carve is not
+  # counted.
   request = 3000_u64
   excess_pages = IyiMark.budget.unsafe_div(IyiHeap::PAGE)
   epoch = 0
@@ -627,6 +700,17 @@
     index = index + 1_u64
   end
   puts "    batches: the idle trim took #{count(listed_before - listed_after)} of #{count(listed_before)} listed pages off the centre's batches and handed back #{count(batch_released)} pages, and 200 allocations after it landed on no idle page"
+
+  # 11b. The trim leaves a batch's first and last pages listed: the page
+  # two adjacent slices share holds chunks of both batches, and the other
+  # batch may be off the centre and not yet adopted, a refill's between
+  # its pop and `adopt_batch` - made idle then, its chunks are handed
+  # out of an idle page. Replayed in that order on this thread, with the
+  # lower batch taken, then the upper, 3072-byte chunks.
+  edge_size = 3072_u64
+  edge_lower = trim_edge(edge_size, true)
+  edge_upper = trim_edge(edge_size, false)
+  puts "    edge: a batch taken off the centre before the idle trim and adopted after it lies on no idle page, the lower of two sharing a listed page (#{count(edge_lower)} chunk on it) and the upper (#{count(edge_upper)} on it)"
 
   # 12. A program whose pool goes idle hands its warm pages back without
   # anything allocating: the pool's monitor, parked with every worker

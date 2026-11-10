@@ -7354,9 +7354,12 @@ class IyiGroup
 
     # The task, its box and the closure its fiber runs, for a task another
     # unit runs: made in the shared heap by the caller's bracket (heap22
-    # row 14), and the fiber adopted.
-    private def crossing_task(fiber : IyiFiber, block : -> T) : IyiTask(T) forall T
-      task = IyiTask(T).new(fiber)
+    # row 14), and the fiber adopted. The task's type is the block's call's:
+    # a `-> T` restriction binds nothing for a block that never returns
+    # (`Proc(NoReturn)`, a task that panics), where the spawn's own `&block
+    # : -> T` does.
+    private def crossing_task(fiber : IyiFiber, block : B) forall B
+      task = IyiTask(typeof(block.call)).new(fiber)
       runner = self
       install(fiber) do
         value = block.call

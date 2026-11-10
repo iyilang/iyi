@@ -5489,6 +5489,11 @@ class IyiWorkers
       {% end %}
       IyiThread.start { IyiWorkers.work }
       start_monitor
+      # heap22 barrier probe: the counting build's counters, written out
+      # every 200 ms while the pool lives.
+      {% if flag?(:pubcheck_count) %}
+        IyiThread.start { IyiPubCount.dumper }
+      {% end %}
     {% end %}
   end
 

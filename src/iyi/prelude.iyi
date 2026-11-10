@@ -5435,13 +5435,10 @@ require "./file"
         @@busy : UInt64 = 0_u64
         @[ThreadLocal]
         @@stack : UInt64 = 0_u64
-        @[ThreadLocal]
-        @@tick : UInt64 = 0_u64
 
         @@head : UInt64 = 0_u64
         @@units : UInt64 = 0_u64
         @@sites : UInt64 = 0_u64
-        @@last : UInt64 = 0_u64
 
         def self.serial=(value : UInt64) : Nil
           @@serial = value
@@ -5541,15 +5538,17 @@ require "./file"
               index = index &+ 1_u64
             end
           end
-          @@tick = @@tick &+ 1_u64
-          if @@tick & 65535_u64 == 0_u64
-            now = IyiClock.monotonic_ns
-            last = @@last
-            if now &- last > 1000000000_u64 && Pointer(Atomic(UInt64)).new(pointerof(@@last).address).value.compare_and_set(last, now)[1]
-              dump
-            end
-          end
           @@busy = 0_u64
+        end
+
+        # The pool's dumper thread (`IyiWorkers.start`): the counters to
+        # the file every 200 ms, so a reader that waits that long after
+        # the last request sees them all.
+        def self.dumper : Nil
+          while true
+            LibIyiPubSleep.usleep(200000_u32)
+            dump
+          end
         end
 
         def self.publish(value : UInt64, s : UInt64, kind : Int32, site : UInt64) : Nil
@@ -5630,6 +5629,7 @@ require "./file"
                 site = site &+ 1_u64
               end
             end
+            io << "end\n"
           end
           {% if flag?(:darwin) %}
             flags = 0x601
@@ -12261,6 +12261,11 @@ end
     $__iyi_pubdir : UInt64
     $__iyi_partitions : UInt8
   end
+  {% if flag?(:pubcheck_count) %}
+    lib LibIyiPubSleep
+      fun usleep(us : UInt32) : Int32
+    end
+  {% end %}
 {% end %}
 
 fun main(argc : Int32, argv : UInt8**) : Int32

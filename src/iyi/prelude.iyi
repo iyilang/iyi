@@ -2347,6 +2347,16 @@ require "./file"
       # collection (`IyiMark.class_idle?`).
       CLASS_USED    = 24_u64
       CLASS_USED_NS = 32_u64
+      # The class's warm room (`IyiMark.warm_pages`): in pages, the room
+      # this epoch's sweep keeps warm, set in the pause from the bytes the
+      # class took up past the partly live pages' chunks in the epoch
+      # before (`CLASS_TAKEN`, `IyiHeap.taken_add`), and the pages the
+      # sweep has kept against it so far (`CLASS_KEPT`). The take and the
+      # keep are counted by any thread, so atomically; the room is
+      # written only in the pause (`IyiMark.begin_sweep`).
+      CLASS_ROOM    = 40_u64
+      CLASS_TAKEN   = 48_u64
+      CLASS_KEPT    = 56_u64
       CLASS_MAP     = 8192_u64
 
       @[ThreadLocal]
@@ -2430,6 +2440,9 @@ require "./file"
           end
           table[index] = 0_u64
           table[FILL + index] = 0_u64
+          # The epoch's take, kept for the pause (`taken_of`), which reads
+          # it under the runtime lock this holds.
+          class_word(index, CLASS_TAKEN).value.add(table[TAKEN + index])
           index = index + 1
         end
         previous = 0_u64
@@ -2579,6 +2592,44 @@ require "./file"
 
       def self.warm_of(index : Int32) : UInt64
         warm_word(index).value.get
+      end
+
+      # What the class took this epoch past the chunks of the pages the
+      # sweep found partly alive, in bytes: warm pages off a batch
+      # (`unlist_batch`), warm runs threaded (`thread_warm_of`), and
+      # chunks carved from a cold run or the frontier (`carve`) - the
+      # refill asks for them in that order, so a carve is a shortfall of
+      # warm pages. Counted in the allocating thread's own cache, at
+      # `TAKEN + index`, with plain adds; the pause sums the caches, every
+      # thread stopped outside the allocator, and the class lines, where
+      # a retired cache leaves its counts (`retire_cache`), and the next
+      # epoch keeps that much warm for the class (`IyiMark.begin_sweep`).
+      # Per cache, because a carve is a page's worth of chunks and an
+      # atomic add per carve on a line every thread of the class writes
+      # was a cost every growing heap would pay.
+      TAKEN = 176
+
+      def self.taken_add(table : Pointer(UInt64), index : Int32, bytes : UInt64) : Nil
+        table[TAKEN + index] = table[TAKEN + index] &+ bytes
+      end
+
+      def self.class_word(index : Int32, offset : UInt64) : Pointer(Atomic(UInt64))
+        Pointer(Atomic(UInt64)).new(class_line(index) &+ offset)
+      end
+
+      # The epoch's take of class `index`, summed and zeroed: in the pause.
+      def self.taken_of(index : Int32) : UInt64
+        word = class_line(index) &+ CLASS_TAKEN
+        sum = read64(word)
+        write64(word, 0_u64)
+        page = @@caches
+        while page != 0
+          table = Pointer(UInt64).new(page)
+          sum = sum &+ table[TAKEN + index]
+          table[TAKEN + index] = 0_u64
+          page = read64(page + CACHE_NEXT)
+        end
+        sum
       end
 
       def self.allocated_word : Pointer(Atomic(UInt64))
@@ -2852,7 +2903,7 @@ require "./file"
           region = arena == 0 || read64(arena + OFF_LEFT) == 0 ? REGION_SLAB : read64(arena + OFF_REGION_REOPENED)
           return 0_u64 if region != REGION_SLAB
           if warm_of(index) != 0_u64
-            head = thread_warm_of(index)
+            head = thread_warm_of(table, index)
             if head != 0
               table[index] = head
               return head
@@ -2898,7 +2949,7 @@ require "./file"
             # A slice of this thread's or another's may have left warm
             # pages in reach.
             if read64(line + CLASS_BATCHES) == 0 && warm_of(index) != 0_u64
-              head = thread_warm_of(index)
+              head = thread_warm_of(table, index)
               if head != 0
                 table[index] = head
                 return head
@@ -2929,7 +2980,7 @@ require "./file"
         arena = head & (0_u64 &- MAP)
         link = read64(head + OFF_LINK)
         chain = read64(head + BATCH_NEXT)
-        unlist_batch(arena, link.unsafe_shr(RANGE_SHIFT), chain.unsafe_shr(RANGE_SHIFT))
+        taken_add(table, index, unlist_batch(arena, link.unsafe_shr(RANGE_SHIFT), chain.unsafe_shr(RANGE_SHIFT)) &* PAGE)
         write64(head + OFF_LINK, link & LOW48)
         write64(head + OFF_INDEX, chunk_index(arena, head))
         table[index] = head
@@ -2941,12 +2992,12 @@ require "./file"
       # a slice claimed beside the threading would read the run's chunks
       # as the last epoch's free ones, dead, and link them a second time.
       # Answers the list's head, 0 for none in reach.
-      def self.thread_warm_of(index : Int32) : UInt64
+      def self.thread_warm_of(table : Pointer(UInt64), index : Int32) : UInt64
         head = 0_u64
         class_lock(index)
         candidate = class_first(index)
         while candidate != 0 && head == 0
-          head = thread_warm(candidate) if read64(candidate + OFF_WARM) != 0
+          head = thread_warm(candidate, table, index) if read64(candidate + OFF_WARM) != 0
           candidate = class_next(candidate)
         end
         class_unlock(index)
@@ -3027,6 +3078,9 @@ require "./file"
         Pointer(Atomic(UInt64)).new(arena + OFF_CURSOR).value.set(following)
         write64(arena + OFF_LEFT, left &- count)
         write64(arena + OFF_HIGH, following) if following > read64(arena + OFF_HIGH)
+        # Carved from a cold run or the frontier: memory the warm pages,
+        # threaded before any carve, fell short of.
+        taken_add(table, index, count &* chunk)
         cursor
       end
 
@@ -3035,17 +3089,17 @@ require "./file"
       # A collector that frees chunks but never pages has a resident size
       # that is its high-water mark: binary trees held 6 MB live in 55 MB
       # resident. The sweep finds runs of whole dead pages (`sweep_slice`
-      # below): a budget's worth stay warm - on the sweep's batch, the
-      # allocator's fast path, their pages listed - and the rest go back
-      # to the kernel cold, idle. A pause drops every list, and what was
-      # listed and not taken becomes idle too, warm: the refill threads a
-      # warm run into the cache's list before it sweeps a slice or carves
-      # a slab (`thread_warm`), and the carve takes a cold run up as its
-      # bump region before it touches the frontier (`reopen_in`). A chunk
-      # is on an idle page when its head is: such a chunk is on no list
-      # and is no object - a cold page reads as zero, a warm one still
-      # wears the free flag the sweep set - and the mark, the sweep and
-      # the root walk all refuse it by the bit.
+      # below): each class's warm room of them stay warm - on the sweep's
+      # batch, the allocator's fast path, their pages listed - and the
+      # rest go back to the kernel cold, idle. A pause drops every list,
+      # and what was listed and not taken becomes idle too, warm: the
+      # refill threads a warm run into the cache's list before it sweeps a
+      # slice or carves a slab (`thread_warm`), and the carve takes a cold
+      # run up as its bump region before it touches the frontier
+      # (`reopen_in`). A chunk is on an idle page when its head is: such a
+      # chunk is on no list and is no object - a cold page reads as zero,
+      # a warm one still wears the free flag the sweep set - and the mark,
+      # the sweep and the root walk all refuse it by the bit.
       #
       # Idle rather than list chunks across the pause because the lists
       # do not survive one and the bits do: a budget's worth of warm
@@ -3176,8 +3230,9 @@ require "./file"
       # A batch taken by a cache, under the lock: its pages are being
       # allocated from and are nobody's whole pages any more - unlisted,
       # so the pause does not turn them idle with objects on them.
-      def self.unlist_batch(arena : UInt64, page : UInt64, last : UInt64) : Nil
-        return if read64(arena + OFF_LISTED) == 0
+      # Answers how many, which the class took (`adopt_batch`).
+      def self.unlist_batch(arena : UInt64, page : UInt64, last : UInt64) : UInt64
+        return 0_u64 if read64(arena + OFF_LISTED) == 0
         count = 0_u64
         while page <= last
           if page_listed?(arena, arena + page * PAGE)
@@ -3187,6 +3242,7 @@ require "./file"
           page = page + 1_u64
         end
         Pointer(Atomic(UInt64)).new(arena + OFF_LISTED).value.sub(count) if count != 0
+        count
       end
 
       # In the pause, every list dropped: what the sweep listed and no
@@ -3208,6 +3264,103 @@ require "./file"
         end
         write64(arena + OFF_LISTED, 0_u64)
         idle_add(arena, count, true)
+      end
+
+      # The idle trim's first step (`IyiMark.trim_idle`), under the
+      # runtime lock and the class's: the centre's batches of the class
+      # that hold listed pages dropped, and those pages idle and warm, as
+      # the pause's `idle_listed` would make them. The batch's other
+      # chunks, on pages partly alive, are free and on no list, as the
+      # pause leaves every list's, and the next epoch's sweep finds them
+      # dead and links them again.
+      # Only the pages strictly inside the batch's range: a page there,
+      # listed, has every chunk whose head is on it in this batch, and
+      # every chunk reaching into it from below too, so with the batch
+      # off the stack nothing holds them. The range's first and last
+      # pages may be the slice before's or after's as well - the last
+      # page of one slice's span is the first of the next one's, and the
+      # next slice's run, continuing this one's, lists it whole
+      # (`IyiMark.close_run`) with this batch's chunks below its cursor
+      # still on it. Made idle with the other batch on a cache's list,
+      # such a page would hand out objects the mark refuses. Those stay
+      # listed, and the next pause makes them idle with every list gone.
+      # A batch of an arena with a slice in flight is left on the stack:
+      # the slice sets idle bits of its own pages with plain stores, and a
+      # bitmap word may hold pages of both. A retired cache's list
+      # carries no range and lists no page, and stays.
+      def self.idle_batches(index : Int32) : Nil
+        line = class_line(index)
+        previous = 0_u64
+        head = read64(line + CLASS_BATCHES)
+        while head != 0
+          chain = read64(head + BATCH_NEXT)
+          following = chain & LOW48
+          arena = head & (0_u64 &- MAP)
+          count = 0_u64
+          if read64(arena + OFF_SWEEPING) == 0 && read64(arena + OFF_LISTED) != 0
+            page = read64(head + OFF_LINK).unsafe_shr(RANGE_SHIFT) + 1_u64
+            last = chain.unsafe_shr(RANGE_SHIFT)
+            while page < last
+              address = arena + page * PAGE
+              if page_listed?(arena, address)
+                set_listed(arena, address, address + PAGE, false)
+                set_idle(arena, address, address + PAGE, true)
+                count = count + 1_u64
+              end
+              page = page + 1_u64
+            end
+          end
+          if count != 0
+            if previous == 0
+              write64(line + CLASS_BATCHES, following)
+            else
+              write64(previous + BATCH_NEXT, (read64(previous + BATCH_NEXT) & (0_u64 &- LOW48 &- 1_u64)) | following)
+            end
+            Pointer(Atomic(UInt64)).new(arena + OFF_LISTED).value.sub(count)
+            idle_add(arena, count, true)
+          else
+            previous = head
+          end
+          head = following
+        end
+      end
+
+      # The idle trim's second step, under the runtime lock and the
+      # class's, the arena with no slice in flight: every run of warm idle
+      # pages cold and handed back, as `IyiMark.age_idle` hands back what
+      # is past the room - the run's first page kept when a chunk of the
+      # page before reaches into it, for the reason `age_idle` gives.
+      def self.cool_warm(arena : UInt64) : Nil
+        chunk = read64(arena + OFF_CHUNK)
+        first = arena_first(arena)
+        pages = read64(arena + OFF_MAP).unsafe_shr(PAGE_SHIFT)
+        page = 0_u64
+        while page < pages
+          slot = page.unsafe_shr(6_u64)
+          word = read64(arena + OFF_PAGES + slot * 8_u64) & (0xFFFFFFFFFFFFFFFF_u64 - read64(arena + OFF_COLD + slot * 8_u64))
+          word = word.unsafe_shr(page & 63_u64)
+          if word == 0
+            page = (slot + 1_u64) * 64_u64
+            next
+          end
+          while word & 1_u64 == 0
+            word = word.unsafe_shr(1_u64)
+            page = page + 1_u64
+          end
+          stop = page + 1_u64
+          while stop < pages && page_idle?(arena, arena + stop * PAGE) && !page_cold?(arena, arena + stop * PAGE)
+            stop = stop + 1_u64
+          end
+          low = arena + page * PAGE
+          high = arena + stop * PAGE
+          low = low + PAGE if (low - first).unsafe_mod(chunk) != 0
+          if low < high
+            set_cold(arena, low, high, true)
+            release_run(low, high - low)
+            warm_sub(arena, (high - low).unsafe_shr(PAGE_SHIFT))
+          end
+          page = stop
+        end
       end
 
       # `arena`'s own cold runs first, then its frontier's next slab, then
@@ -3321,7 +3474,13 @@ require "./file"
       # cursor and sets bits at and above it, and this clears bits below
       # the sixty-four-page word that cursor is in, so the two never
       # share a bitmap word.
-      def self.take_run(arena : UInt64, warm : Bool) : Tuple(UInt64, UInt64)
+      # `most` pages, when not 0, is as much of the run as is taken: the
+      # run is cut at the page the first chunk at or past them begins on,
+      # so every chunk whose head is in the part taken ends on or before
+      # that page, and the rest of the run, still idle, begins with it -
+      # its first page reached into from below, as any idle run's may be
+      # (`IyiMark.age_idle`), and no page past it.
+      def self.take_run(arena : UInt64, warm : Bool, most : UInt64) : Tuple(UInt64, UInt64)
         pages = read64(arena + OFF_MAP).unsafe_shr(PAGE_SHIFT)
         if read64(arena + OFF_SWEEPING) != 0
           cursor = read64(arena + OFF_SWEEP_CURSOR)
@@ -3358,6 +3517,13 @@ require "./file"
         while stop < pages && page_idle?(arena, arena + stop * PAGE) && page_cold?(arena, arena + stop * PAGE) != warm
           stop = stop + 1_u64
         end
+        if most != 0_u64 && stop - page > most
+          chunk = read64(arena + OFF_CHUNK)
+          first = arena_first(arena)
+          target = arena + (page + most) * PAGE
+          cut = (first + (target - first + chunk - 1_u64).unsafe_div(chunk) * chunk - arena).unsafe_shr(PAGE_SHIFT)
+          stop = cut if cut < stop
+        end
         low = arena + page * PAGE
         high = arena + stop * PAGE
         set_idle(arena, low, high, false)
@@ -3383,7 +3549,7 @@ require "./file"
       def self.reopen_in(arena : UInt64, owner : UInt64) : Bool
         return false unless claimable?(arena, owner)
         chunk = read64(arena + OFF_CHUNK)
-        run = take_run(arena, false)
+        run = take_run(arena, false, 0_u64)
         low = run[0]
         high = run[1]
         return false if high == 0
@@ -3414,12 +3580,20 @@ require "./file"
       # is dead (`sweep_slice`). Whose list needs no claim on the arena -
       # a list is the cache's, not the arena's - so a warm run is in
       # reach from any thread.
-      def self.thread_warm(arena : UInt64) : UInt64
+      # A slab's worth of the run at most (`WARM_RUN`): the pages a cache
+      # threads are the pages its class took this epoch (`taken_add`),
+      # and the next epoch keeps that much warm; a cache that threaded a
+      # run of hundreds of pages to allocate a few before the pause read
+      # as a class that wanted them all.
+      WARM_RUN = SLAB
+
+      def self.thread_warm(arena : UInt64, table : Pointer(UInt64), index : Int32) : UInt64
         chunk = read64(arena + OFF_CHUNK)
-        run = take_run(arena, true)
+        run = take_run(arena, true, WARM_RUN.unsafe_shr(PAGE_SHIFT))
         low = run[0]
         high = run[1]
         return 0_u64 if high == 0
+        taken_add(table, index, high - low)
         first = arena_first(arena)
         cursor = first + (low - first + chunk - 1_u64).unsafe_div(chunk) * chunk
         return 0_u64 if cursor >= high
@@ -6938,6 +7112,12 @@ require "./file"
       # whoever's claim stands on it - a claim stands for a helper waiting
       # at the runtime lock after its slice, whose batch that helper will
       # discard. Answers whether there was one.
+      # A batch a slice, as every other sweep hands them over: a batch is
+      # what one refill takes, and the warm pages listed on it are what
+      # the class is counted as taking (`IyiHeap.taken_add`). A whole
+      # arena's batch made one cache the holder of every warm page of the
+      # arena, and a class that took a few of them read as one that took
+      # them all.
       def self.sweep_one_held : Bool
         epoch = @@epoch
         arena = IyiHeap.first_arena
@@ -6947,8 +7127,10 @@ require "./file"
         return false if arena == 0
         begin_arena(arena, epoch, 0) if IyiHeap.arena_epoch(arena) != epoch
         index = IyiHeap.class_index(IyiHeap.arena_chunk(arena))
-        batch = sweep_slice(arena, IyiHeap::SWEEP_DONE)
-        IyiHeap.free_batch(index, batch) if batch != 0
+        while IyiHeap.read64(arena + IyiHeap::OFF_SWEEP_CURSOR) != IyiHeap::SWEEP_DONE
+          batch = sweep_slice(arena, SWEEP_SPAN)
+          IyiHeap.free_batch(index, batch) if batch != 0
+        end
         arena_done(arena, epoch)
         true
       end
@@ -6956,13 +7138,15 @@ require "./file"
       # The triggering thread's sweep before the stop, the runtime lock
       # held on entry and on exit and released for the walk: one arena
       # with sweeping left and no slice in flight, claimed and finished
-      # from its cursor while every other thread runs. An arena a thread
-      # is inside a slice of is left to the pause. Answers whether there
-      # was one.
+      # from its cursor while every other thread runs, its batches handed
+      # over a slice at a time, as the pause's are. An arena a thread is
+      # inside a slice of is left to the pause. Answers whether there was
+      # one.
       def self.sweep_one_before_stop : Bool
         epoch = @@epoch
         arena = claim_slice(0_u64, 0)
         return false if arena < 4_u64
+        index = IyiHeap.class_index(IyiHeap.arena_chunk(arena))
         # The walk at the thread's own priority on Windows, as before a
         # collection: it is raised only while it holds the lock
         # (`IyiMark.collect`).
@@ -6970,16 +7154,17 @@ require "./file"
         {% if flag?(:win32) && flag?(:x86_64) %}
           IyiThread.lower_stopper
         {% end %}
-        batch = sweep_slice(arena, IyiHeap::SWEEP_DONE)
+        while IyiHeap.read64(arena + IyiHeap::OFF_SWEEP_CURSOR) != IyiHeap::SWEEP_DONE
+          batch = sweep_slice(arena, SWEEP_SPAN)
+          IyiHeap.free_batch(index, batch) if batch != 0
+        end
         {% if flag?(:win32) && flag?(:x86_64) %}
           IyiThread.raise_stopper
         {% end %}
         IyiRuntimeLock.lock
-        index = IyiHeap.class_index(IyiHeap.arena_chunk(arena))
         IyiHeap.class_lock(index)
         release_claim(arena, epoch)
         arena_done(arena, epoch)
-        IyiHeap.push_batch(index, batch) if batch != 0
         IyiHeap.class_unlock(index)
         true
       end
@@ -7108,39 +7293,49 @@ require "./file"
 
       # Dead chunks go on the class's list in one batch. A run of them long
       # enough to cover whole pages, RELEASE_PAGES or more, is more than a
-      # batch's: the first budget's worth of such pages in an epoch stay
-      # warm - on the batch as they are, and listed, so that what no cache
-      # takes before the pause outlives it as idle pages
-      # (`IyiHeap.idle_listed`); the rest go cold - cut off the batch,
-      # handed back to the kernel, idle, to be carved again when the carve
-      # takes the run up as its region (`IyiHeap.reopen_in`). The run's
-      # chunks straddling its edges are the list's. Runs are found as the
-      # walk goes and closed as they end, one `madvise` per cold one. A
-      # warm run an earlier epoch left idle is met again by this epoch's
-      # walk and aged the same way: within the budget it stays, past it
-      # it goes cold - so a class the program stopped allocating keeps a
-      # budget's worth of its pages at most.
+      # batch's: the first of such pages in an epoch, up to the class's
+      # warm room (`warm_pages`), stay warm - on the batch as they are,
+      # and listed, so that what no cache takes before the pause outlives
+      # it as idle pages (`IyiHeap.idle_listed`); the rest go cold - cut
+      # off the batch, handed back to the kernel, idle, to be carved again
+      # when the carve takes the run up as its region
+      # (`IyiHeap.reopen_in`). The run's chunks straddling its edges are
+      # the list's. Runs are found as the walk goes and closed as they
+      # end, one `madvise` per cold one. A warm run an earlier epoch left
+      # idle is met again by this epoch's walk and aged the same way:
+      # within the room it stays, past it it goes cold - so a class keeps
+      # at most its room of pages warm, and a class the program stopped
+      # allocating in keeps less each epoch.
       #
       # The retention is the point. Released on sight, every page the
       # program churns through went back and came back each cycle - a
       # syscall per run and a fault per page - and a 64-byte allocation
-      # cost 220 ns where it had cost 21. What the program will allocate
-      # before the next collection is the budget, and more when a mark
-      # beside many workers lets them run past it - which the last epoch's
-      # cold reopenings measure (`warm_pages`) - and that much of the
-      # free pages is kept warm; what is free beyond it is what a smaller
-      # program would never have touched, and it goes back. Kept as list
+      # cost 220 ns where it had cost 21. What the class will take before
+      # the next collection is what it took before the last one, and that
+      # much of its free pages is kept warm; what is free beyond it is
+      # what the program will not get to, and it goes back. Kept as list
       # chunks alone, the warm pages the program had not got to were
       # dropped with the lists at the next pause, and the sweep found and
       # linked the same pages a second time while the program carved the
       # frontier or waited (GC_DESIGN.md, the footprint section).
       RELEASE_PAGES = 2_u64
-      @@kept_warm : UInt64 = 0_u64
+      # How fast a class's room falls to a smaller take: by a quarter of
+      # the difference an epoch (`begin_sweep`).
+      ROOM_FADE = 4_u64
 
       # One slice: from the arena's cursor, `span` bytes or to its high
       # water, whichever is first; the cursor written back at the end,
       # before anything can stop this thread. Answers the batch of dead
       # chunks for the centre; the caller hands it over under the lock.
+      # The span ends on a page boundary, so the slice ends at the first
+      # chunk past one and its last chunk begins on the page before: the
+      # next slice's run continues this one's from that page, listed or
+      # idle, and takes the page the boundary falls in (`close_run`).
+      # Ended `span` bytes on, a slice that ended a chunk or more into a
+      # page left that page to neither run - a partly free page in a dead
+      # stretch, one page in four of 16 KB with 2,560-byte chunks - and
+      # cut the warm pages into runs a slice long, each of which keeps
+      # its first page whatever the room (`age_idle`).
       def self.sweep_slice(arena : UInt64, span : UInt64) : UInt64
         chunk = IyiHeap.arena_chunk(arena)
         first = IyiHeap.arena_first(arena)
@@ -7153,7 +7348,10 @@ require "./file"
           return 0_u64
         end
         stop = high
-        stop = cursor + span if stop - cursor > span
+        if stop - cursor > span
+          stop = ((cursor + span - 1_u64) | (IyiHeap::PAGE - 1_u64)) + 1_u64
+          stop = high if stop > high
+        end
         @@bytes_walked = @@bytes_walked + (stop - cursor)
         # The uncarved part of the bump region, read once. The cursor
         # rises within a region, and a chunk carved past the value read
@@ -7207,7 +7405,7 @@ require "./file"
           end
           if cursor >= page_next && IyiHeap.page_idle?(arena, cursor)
             # On an idle page: past the run of them in one step, likewise,
-            # the warm ones aged against this epoch's budget on the way.
+            # the warm ones aged against this epoch's room on the way.
             if run_low != 0
               batch_head = close_run(arena, chunk, run_low, cursor, batch_head, run_batch)
               run_low = 0_u64
@@ -7303,8 +7501,8 @@ require "./file"
       # A closed run of dead chunks, `[low, high)` in chunk heads, all of
       # them linked onto the batch already as its newest prefix, above
       # `batch_before`. The whole pages inside the run, when there are
-      # enough of them: the first of them stay warm while the epoch's
-      # sweeps have kept less than a budget's worth - on the batch as they
+      # enough of them: the first of them stay warm while the class's room
+      # has pages left this epoch (`warm_pages`) - on the batch as they
       # are, and listed, so that what no cache takes before the pause
       # survives it as idle pages; the rest go cold - the batch cut back
       # to the chunk below them, and the run's chunks above them, at its
@@ -7324,10 +7522,10 @@ require "./file"
         page_high = high & (0_u64 &- IyiHeap::PAGE)
         return batch_head unless page_low < page_high && (continuing || page_high - page_low >= RELEASE_PAGES * IyiHeap::PAGE)
         pages = (page_high - page_low).unsafe_shr(IyiHeap::PAGE_SHIFT)
-        # The run's first pages warm up to the budget, the rest cold: a
-        # run is an arena at a time when the arena is all dead, and a run
-        # kept or released whole overshot the budget by the run - 13 MB
-        # warm for a 4 MB budget.
+        # The run's first pages warm up to the room, the rest cold: a run
+        # is an arena at a time when the arena is all dead, and a run kept
+        # or released whole overshot the room by the run - 13 MB warm for
+        # a 4 MB budget.
         warm = class_idle?(chunk) ? 0_u64 : warm_pages(chunk, pages)
         if continuing && warm == 0
           # The straddler into the first page is a run's the carve may
@@ -7386,73 +7584,46 @@ require "./file"
       end
 
       # How many of a run of `pages` pages of `chunk`-byte chunks stay
-      # warm: as many as the epoch's warm pages have room for under a
-      # budget's worth of payload. The budget is what the program will ask
-      # for, and a page's share of it is `PAGE * floor / chunk`, less the
-      # header, which is not what it asks for: counted at the full chunk,
-      # the warm pages of a 64-byte class held an eighth less than the
-      # epoch's demand. Past 128 bytes a class is a quarter step, and
-      # `floor` is the least a request in it asks - one byte past the
-      # class below - because a request rounds up by as much as a
-      # quarter there: BigInt's limb arrays, 40 KB asked of 48 KB
-      # chunks, needed a fifth more pages than the budget kept warm, and
-      # the rest came back each epoch by a fault a page - Pidigits' loop
-      # 680 ms, and 500 counted this way. The eight-byte steps below
-      # round by less than a header and keep the chunk.
+      # warm: as many as the class's room has left this epoch. The room is
+      # what the class took in the epoch before past the chunks of the
+      # pages the sweep found partly alive (`IyiHeap.taken_add`): the
+      # warm pages it took off its batches, the warm runs it threaded, and
+      # what it carved from cold runs and the frontier when those fell
+      # short (`begin_sweep`). That is the next epoch's demand for whole
+      # pages as the last one measured it, class by class, in pages.
       #
-      # And the budget is short whenever an epoch allocates more than it:
-      # a mark beside the program lasts as long as its helpers take, the
-      # workers allocate all the while, and what they ask past the budget
-      # was carved from the pages this sweep had just handed back - a
-      # release on the allocating thread's refill, a fault a page after
-      # it, and on Windows a decommit and a commit whose TLB flush reaches
-      # every core the workers run on (issue #150). Twelve workers on a
-      # 4 MB budget took 94-97% of the pages the sweep released back cold
-      # on Windows, and 97-98% on Linux. So the pages the carve took up
-      # cold in an epoch are added to the next one's room (`begin_sweep`),
-      # and the addition fades by a sixteenth an epoch, so a churn that
-      # slows hands its pages back again: at a steady shortfall the room
-      # settles at sixteen seventeenths of it. bench/release_pages.iyi,
-      # before and after, three interleaved rounds. On a windows-2025
-      # runner (2 cores, 4 logical processors; job 122352634501),
-      # check_version in-process for 8 s at 12 workers: 473k-514k requests
-      # a second, 151k-162k releases and 3.1-3.6 of the 32 processor
-      # seconds in them, against 720k-758k, 14k-18k and 0.5-0.8 s, the
-      # peak working set 292-427 MB against 407-719; at 4 workers 689k-831k
-      # against 594k-723k, 31k-41k releases against 20k-24k - and +7-9% in
-      # an earlier run of the same arms, so inside the runner's noise.
-      # Served to oha (32 connections, same processors, 10 s): 41k-42k a
-      # second at 12 workers against 54k-67k, 48k-50k at 4 against
-      # 67k-72k, with 23-37% fewer releases at 4 and 53-62% fewer at 12.
-      # On a 12-core Linux machine, 12 workers in-process: 1.57M-1.60M
-      # against 3.54M-3.59M, 366k-372k releases against 70k-74k, peak RSS
-      # 157-203 MB against 367-434; 4 workers 1.91M-1.92M against
-      # 1.94M-1.96M, 25-26 MB against 26-30; over HTTP to wrk at 12
-      # workers 215k against 220k.
-      @@warm_extra : UInt64 = 0_u64
-      @@reopened_cold : UInt64 = 0_u64
-
-      # The carry-over as it stands, for the exercises and the benches.
-      def self.warm_extra : UInt64
-        @@warm_extra
-      end
-
+      # It was a budget's worth of payload, every class's runs counted
+      # against it in the order the sweep met them, plus #150's carry-over
+      # of the pages the carve took back cold. The budget is what an epoch
+      # allocates, but most of an epoch is served by the chunks of the
+      # pages the sweep found partly alive, which keep no page warm, and
+      # the room went to whichever classes the sweep reached first: issue
+      # #145's app kept 14-57 MB of warm pages idle across a collection on
+      # a 40-48 MB budget (GC_DESIGN.md, the warm room).
+      #
+      # The take covers what the budget missed. A mark beside many
+      # workers lets them allocate past the budget, and what they asked
+      # past it was carved from the pages this sweep had just handed back:
+      # a release, a fault a page after it, and on Windows a decommit and
+      # a commit whose TLB flush reaches every core (issue #150) - the
+      # carve is counted, so the next room holds it. And pages are counted
+      # as pages: payload under a budget had to be rounded per class for
+      # BigInt's 40 KB limb arrays in 48 KB chunks, a fifth short of warm
+      # pages each epoch until it was.
       def self.warm_pages(chunk : UInt64, pages : UInt64) : UInt64
-        kept = Pointer(Atomic(UInt64)).new(pointerof(@@kept_warm).address)
+        line = IyiHeap.class_line(IyiHeap.class_index(chunk))
+        room = IyiHeap.read64(line + IyiHeap::CLASS_ROOM)
+        kept = Pointer(Atomic(UInt64)).new(line + IyiHeap::CLASS_KEPT)
         seen = kept.value.get
-        limit = budget + @@warm_extra
-        return 0_u64 if seen >= limit
-        floor = chunk > 128_u64 ? IyiHeap.chunk_of(IyiHeap.class_index(chunk) - 1) + 1_u64 : chunk
-        per_page = (IyiHeap::PAGE * (floor - IyiHeap::HEADER)).unsafe_div(chunk)
-        room = (limit - seen + per_page - 1_u64).unsafe_div(per_page)
-        take = pages < room ? pages : room
-        kept.value.add(take * per_page)
+        return 0_u64 if seen >= room
+        take = pages < room - seen ? pages : room - seen
+        kept.value.add(take)
         take
       end
 
       # A class no cache refilled in the last two collections or this one
       # so far, nor for a second (`IyiHeap::CLASS_USED`): its idle pages
-      # go cold whatever the budget, counting nothing against it, and an
+      # go cold whatever the room, counting nothing against it, and an
       # empty arena of it is let go by its cache (`scavenge`). Pages kept
       # warm for a class the program stopped allocating in held the room
       # the classes it moved to wanted. One whole epoch unused is not
@@ -7504,18 +7675,19 @@ require "./file"
       end
 
       # A run of idle pages `[low, high)` the slice met, left by an earlier
-      # epoch: each warm page counts against this epoch's budget as a run
-      # closed today would, and past the budget it goes cold - the runs of
-      # them released in one `madvise` each. Cold pages stay as they are.
-      # The run's first page stays warm whatever the budget when a chunk
-      # of the page before reaches into it: that chunk was a list's when
-      # the run closed, or an idle run's own that the carve may take up
-      # at any moment, and may be an object by the time the `madvise`
-      # lands - which would zero its tail. A run closed today releases
-      # before its edge chunks can be handed out and its own straddlers
-      # are below every carve's reach (`close_run`, `IyiHeap.reopen_in`);
-      # a page aged later has no such order to lean on, so it leans on
-      # nothing.
+      # epoch: each warm page counts against this epoch's room for the
+      # class as a run closed today would, and past the room it goes cold
+      # - the runs of them released in one `madvise` each. Cold pages stay
+      # as they are. The run's first page stays warm whatever the room
+      # when a chunk of the page before reaches into it: that chunk was a
+      # list's when the run closed, or an idle run's own that the carve
+      # may take up at any moment, or the last of a warm run a refill
+      # threaded short of the run's end (`IyiHeap.take_run`), and may be
+      # an object by the time the `madvise` lands - which would zero its
+      # tail. A run closed today releases before its edge chunks can be
+      # handed out and its own straddlers are below every carve's reach
+      # (`close_run`, `IyiHeap.reopen_in`); a page aged later has no such
+      # order to lean on, so it leans on nothing.
       def self.age_idle(arena : UInt64, low : UInt64, high : UInt64) : Nil
         return if IyiHeap.read64(arena + IyiHeap::OFF_WARM) == 0
         chunk = IyiHeap.arena_chunk(arena)
@@ -7525,7 +7697,7 @@ require "./file"
         page = low
         page = page + IyiHeap::PAGE if (low - first).unsafe_mod(chunk) != 0
         while page <= high
-          # A warm page within the budget stays; past it, it is a cold
+          # A warm page within the room stays; past it, it is a cold
           # run's from here.
           cool = page < high && !IyiHeap.page_cold?(arena, page) && (idle || warm_pages(chunk, 1_u64) == 0)
           if cool
@@ -7539,6 +7711,68 @@ require "./file"
           end
           page = page + IyiHeap::PAGE
         end
+      end
+
+      # ── The idle trim ──────────────────────────────────────────────────
+      #
+      # The warm room is a prediction that the next epoch comes, and an
+      # idle program has no next epoch: nothing allocates, nothing
+      # collects, and the pages the last sweep kept warm stay resident for
+      # as long as the program waits - with no sweep to age them, they
+      # never go cold at all. Issue #145's app, its 11 endpoints served
+      # one after another, held 228 MB of working set 5 s after its last
+      # request on Windows 11, 12 logical processors (the user's machine),
+      # and 235 MB of resident set on macOS 26.6, Apple M2 Pro, 10 cores
+      # (the user's machine), against goturkiye's 46 and 57.
+      #
+      # So the pool's monitor, parked while every worker is idle, wakes
+      # once after a second of it (`IyiWorkers::IDLE_WAIT_NS`) with no
+      # collection in between and asks for this
+      # (`IyiWorkers.park_monitor`): every class's warm pages go cold. The
+      # centre's batches with warm pages listed are dropped first, their
+      # listed pages idle and warm as the pause would make them
+      # (`IyiHeap.idle_batches`), then every warm run goes cold
+      # (`IyiHeap.cool_warm`). The program that wakes again carves its
+      # first epoch from cold pages, a fault a page, once a wait.
+      #
+      # It runs on the monitor, beside the program: under the runtime
+      # lock, so no pause - which edits the same lists, bits and arenas
+      # with every program thread stopped but not this one - runs inside
+      # it, and under each class's lock in turn, so no refill, carve or
+      # slice claim of the class does. An arena with a slice in flight is
+      # left as it is. It allocates nothing, as the monitor may not.
+      # Answers false when a collection was under way, for the monitor to
+      # ask again.
+      @@trims : UInt64 = 0_u64
+
+      # Idle trims run, for the exercises.
+      def self.trims : UInt64
+        @@trims
+      end
+
+      def self.trim_idle : Bool
+        IyiRuntimeLock.lock
+        if @@collecting
+          IyiRuntimeLock.unlock
+          return false
+        end
+        index = 0
+        while index < IyiHeap::CLASSES
+          if IyiHeap.class_first(index) != 0
+            IyiHeap.class_lock(index)
+            IyiHeap.idle_batches(index)
+            arena = IyiHeap.class_first(index)
+            while arena != 0
+              IyiHeap.cool_warm(arena) if IyiHeap.read64(arena + IyiHeap::OFF_WARM) != 0 && IyiHeap.read64(arena + IyiHeap::OFF_SWEEPING) == 0
+              arena = IyiHeap.class_next(arena)
+            end
+            IyiHeap.class_unlock(index)
+          end
+          index = index + 1
+        end
+        @@trims = @@trims + 1_u64
+        IyiRuntimeLock.unlock
+        true
       end
 
       # The scavenge, in the pause with every thread stopped: an arena the
@@ -7563,7 +7797,7 @@ require "./file"
       # resident until the lazy sweep reaches it, beside the pages that
       # sweep keeps warm, and 0.11.0's first cycle had measured the same
       # (140 against 129). A kept arena is debt like any other: its sweep
-      # keeps a budget's worth of its pages warm and hands the rest back
+      # keeps its classes' rooms of its pages warm and hands the rest back
       # cold (GC_DESIGN.md, the footprint section). Runs after the mark
       # and before the epoch turns, so a released arena is never debt.
       SPARE_BELOW = 67108864_u64
@@ -7635,13 +7869,6 @@ require "./file"
       # sweep of their arena finds them where it finds the dead, and they
       # join whatever run they lie in.
       def self.begin_sweep : Nil
-        @@kept_warm = 0_u64
-        # The pages the carve took up cold since the last turn are pages
-        # the sweep released and the epoch wanted back: the warm budget
-        # was short by that much (`warm_pages`), and this epoch keeps it.
-        reopened_cold = IyiHeap.pages_reopened - IyiHeap.pages_rewarmed
-        @@warm_extra = @@warm_extra - @@warm_extra.unsafe_shr(4_u64) + (reopened_cold - @@reopened_cold) * IyiHeap::PAGE
-        @@reopened_cold = reopened_cold
         @@epoch = @@epoch + 1_u64
         @@epoch_ns = now_ns
         @@first_turn_ns = @@epoch_ns if @@first_turn_ns == 0_u64
@@ -7655,6 +7882,17 @@ require "./file"
         index = 0
         while index < IyiHeap::CLASSES
           IyiHeap.central[IyiHeap::SWEEP_LEFT_AT + index] = 0_u64
+          # The class's warm room for this epoch (`warm_pages`): what it
+          # took in the last, at once when that is more, and otherwise a
+          # quarter of the way down to it - the take of one epoch is not
+          # the next one's to the page, and a room cut to every dip had
+          # the next epoch carve the difference cold.
+          line = IyiHeap.class_line(index)
+          taken = (IyiHeap.taken_of(index) + IyiHeap::PAGE - 1_u64).unsafe_shr(IyiHeap::PAGE_SHIFT)
+          room = IyiHeap.read64(line + IyiHeap::CLASS_ROOM)
+          room = taken >= room ? taken : room - (room - taken + ROOM_FADE - 1_u64).unsafe_div(ROOM_FADE)
+          IyiHeap.write64(line + IyiHeap::CLASS_ROOM, room)
+          IyiHeap.write64(line + IyiHeap::CLASS_KEPT, 0_u64)
           index = index + 1
         end
         arena = IyiHeap.first_arena

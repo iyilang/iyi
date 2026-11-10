@@ -47,13 +47,13 @@ fi
 
 echo
 echo "== every check reported"
-for phrase in reclaimed warm survivor liveness large steady refault; do
+for phrase in reclaimed warm survivor liveness large steady refault room threaded cut trim batches idle; do
   grep -q "$phrase" "$WORK/sweep.out" 2>/dev/null || {
     echo "  MISSING: nothing reported for $phrase"
     status=1
   }
 done
-[ "$status" -eq 0 ] && echo "  reclaimed, warm, survivor, liveness, large, steady and refault all reported"
+[ "$status" -eq 0 ] && echo "  reclaimed, warm, survivor, liveness, large, steady, refault, room, threaded, cut, trim, batches and idle all reported"
 
 echo
 echo "== the same program with optimisation on"
@@ -72,11 +72,13 @@ echo "== the checks fail when the sweep is broken"
 # Two directions. A sweep that reclaims nothing is a leak; a sweep that reclaims
 # something live is a corrupted program. A check that cannot see both is not
 # testing a collector.
+# The script edits `prelude.iyi` unless a fifth argument names another
+# file of `src/iyi`.
 prove_fails() {
-  local label="$1" dir="$2" phrase="$3" script="$4"
+  local label="$1" dir="$2" phrase="$3" script="$4" file="${5:-prelude.iyi}"
   mkdir -p "$WORK/$dir/iyi"
   cp -R "$REPO/src/iyi/." "$WORK/$dir/iyi/"
-  awk "$script" "$REPO/src/iyi/prelude.iyi" > "$WORK/$dir/iyi/prelude.iyi"
+  awk "$script" "$REPO/src/iyi/$file" > "$WORK/$dir/iyi/$file"
   if ! IYI_PATH="$WORK/$dir:$REPO/src" "$IYI" build \
        -o "$WORK/$dir/program" "$REPO/bench/sweep_exercise.iyi" \
        >"$WORK/$dir/build.log" 2>&1; then
@@ -138,7 +140,7 @@ prove_fails "sweep frees the live" reckless "sweep:" \
 # The refill stops threading idle warm runs: the pages stay idle, the
 # class carves its frontier, and the warm check names how many were left.
 prove_fails "warm pages never taken up" nowarm "warm:" \
-  '{ sub(/head = thread_warm\(candidate\) if /, "head = 0_u64 if "); print }'
+  '{ sub(/head = thread_warm\(candidate, table, index\) if /, "head = 0_u64 if "); print }'
 
 # A chunk popped off the list is handed out with the dead object's bytes
 # still in it - a warm page holds what the dead left - so the clearing
@@ -151,16 +153,58 @@ prove_fails "warm chunks not cleared" dirtywarm "warm:" \
 prove_fails "the fast path does not clear" dirtyfast "warm:" \
   '{ if ($0 ~ /^                write64\(word, 0_u64\)$/) { print "                # removed"; next } print }'
 
-# A quarter-step class's warm pages counted at the full chunk again: a
-# fifth too few stay warm, and the steady churn hands pages back.
-prove_fails "warm pages counted at the full chunk" roundwarm "rounding:" \
-  '{ if ($0 ~ /^        floor = chunk > 128_u64 \?/) { print "        floor = chunk"; next } print }'
+# The carve not counted as the class's take: an epoch that carves what
+# its warm pages fell short of keeps no more warm the epoch after - the
+# first warm check's burst keeps none, and the churn asking twice its
+# budget hands its excess back every epoch and carves it again (#150).
+prove_fails "the carve not counted" carvetake "warm:|refault:|rounding:" \
+  '{ if ($0 ~ /^        taken_add\(table, index, count &\* chunk\)$/) { print "        # removed"; found = 1; next } print } END { if (!found) exit 3 }'
 
-# The cold reopenings not carried into the next epoch's warm room: the
-# churn that asks twice its budget hands its excess back every epoch and
-# carves it again (issue #150).
-prove_fails "cold reopenings not kept warm" refault "refault:" \
-  '{ if ($0 ~ /^        @@warm_extra = @@warm_extra - @@warm_extra.unsafe_shr\(4_u64\) \+ \(reopened_cold - @@reopened_cold\) \* IyiHeap::PAGE$/) { print "        @@warm_extra = 0_u64"; found = 1; next } print } END { if (!found) exit 3 }'
+# A budget's worth of pages kept warm on top of the class's take, as
+# every class's room held a budget before it followed the take: the
+# burst's pages stay warm.
+prove_fails "a budget kept warm past the take" roombudget "room:" \
+  '{ if ($0 ~ /^          room = taken >= room \? taken : room - \(room - taken \+ ROOM_FADE - 1_u64\)\.unsafe_div\(ROOM_FADE\)$/) { print "          room = taken + budget.unsafe_shr(IyiHeap::PAGE_SHIFT)"; found = 1; next } print } END { if (!found) exit 3 }'
+
+# A room that rises with the take and never falls: the burst's pages
+# stay warm through every small epoch after it.
+prove_fails "the room never falls" roomflat "room:" \
+  '{ if ($0 ~ /^          room = taken >= room \? taken : room - \(room - taken \+ ROOM_FADE - 1_u64\)\.unsafe_div\(ROOM_FADE\)$/) { print "          room = taken >= room ? taken : room"; found = 1; next } print } END { if (!found) exit 3 }'
+
+# The pause's sweep handing a whole arena's dead chunks over as one
+# batch: the one refill that takes it takes every warm page the arena
+# kept, and the class reads as taking them all.
+prove_fails "a pause's batch a whole arena" wholebatch "room:" \
+  '{ if ($0 ~ /^      def self\.sweep_one_held : Bool$/) held = 1
+     if (held && $0 ~ /^          batch = sweep_slice\(arena, SWEEP_SPAN\)$/) { print "          batch = sweep_slice(arena, IyiHeap::SWEEP_DONE)"; held = 0; found = 1; next }
+     print } END { if (!found) exit 3 }'
+
+# A warm run threaded whole, as before: one refill takes the run.
+prove_fails "a warm run threaded whole" uncapped "threaded:" \
+  '{ if (sub(/run = take_run\(arena, true, WARM_RUN\.unsafe_shr\(PAGE_SHIFT\)\)/, "run = take_run(arena, true, 0_u64)")) found = 1; print } END { if (!found) exit 3 }'
+
+# A warm run cut at the page a slab's worth on, off the chunk grid: the
+# last chunk threaded reaches pages into the rest of the run, which the
+# trim hands back under it.
+prove_fails "a warm run cut off the grid" offgrid "cut:|trim:" \
+  '{ if ($0 ~ /^          cut = \(first \+ \(target - first \+ chunk - 1_u64\)\.unsafe_div\(chunk\) \* chunk - arena\)\.unsafe_shr\(PAGE_SHIFT\)$/) { print "          cut = page + most"; found = 1; next } print } END { if (!found) exit 3 }'
+
+# The trim handing back a run's first page whatever reaches into it:
+# the chunk threaded last before it loses its tail.
+prove_fails "the trim takes a reached-into page" trimedge "trim:" \
+  '{ if ($0 ~ /^          low = low \+ PAGE if \(low - first\)\.unsafe_mod\(chunk\) != 0$/) { print "          # removed"; found = 1; next } print } END { if (!found) exit 3 }'
+
+# The trim turning a batch's listed pages idle and leaving the batch on
+# the centre: the next refill hands out chunks of idle pages.
+prove_fails "a trimmed batch left on the centre" trimstack "batches:" \
+  '{ if ($0 ~ /^              write64\(line \+ CLASS_BATCHES, following\)$/) { print "              # removed"; found = 1; next }
+     if ($0 ~ /^              write64\(previous \+ BATCH_NEXT, /) { print "              # removed"; next }
+     print } END { if (!found) exit 3 }'
+
+# The monitor never asking for the trim: the warm pages of an idle pool
+# stay.
+prove_fails "the idle pool never trims" notrim "idle:" \
+  '{ if (sub(/trimmed = IyiMark\.trim_idle$/, "trimmed = true")) found = 1; print } END { if (!found) exit 3 }' concurrency.iyi
 
 # A class nobody allocates in any more kept warm within the budget, as
 # every class was: its pages hold the room the classes in use want.

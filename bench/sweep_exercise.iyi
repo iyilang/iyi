@@ -100,6 +100,119 @@
     arenas
   end
 
+  # Garbage: `count` chunks of `size` bytes nothing keeps.
+  def burst(size : UInt64, count : UInt64) : Nil
+    index = 0_u64
+    while index < count
+      fresh(size)
+      index = index + 1_u64
+    end
+  end
+
+  # The pages of a class's arenas the sweep listed warm on its batches,
+  # which `IyiHeap.warm_of` (idle warm pages) does not count.
+  def listed_in(index : Int32) : UInt64
+    listed = 0_u64
+    arena = IyiHeap.first_arena
+    while arena != 0
+      listed = listed + IyiHeap.read64(arena + IyiHeap::OFF_LISTED) if IyiHeap.arena_chunk(arena) == IyiHeap.chunk_of(index)
+      arena = IyiHeap.arena_next(arena)
+    end
+    listed
+  end
+
+  # The pages of `arena` from the one `low` is on to the one `high - 1`
+  # is on that are idle and warm - the ones the trim hands back. A chunk
+  # reaching into cold pages is safe: they went back before it was
+  # anybody's, and only a warm page is handed back later.
+  def warm_pages_in(arena : UInt64, low : UInt64, high : UInt64) : UInt64
+    pages = 0_u64
+    page = low & (0_u64 &- IyiHeap::PAGE)
+    while page < high
+      pages = pages + 1_u64 if IyiHeap.page_idle?(arena, page) && !IyiHeap.page_cold?(arena, page)
+      page = page + IyiHeap::PAGE
+    end
+    pages
+  end
+
+  # The runs of warm idle pages a class's arenas hold: each may keep its
+  # first page warm past any room, when a chunk of the page before
+  # reaches into it (`IyiMark.age_idle`).
+  def warm_runs(index : Int32) : UInt64
+    runs = 0_u64
+    arena = IyiHeap.first_arena
+    while arena != 0
+      if IyiHeap.arena_chunk(arena) == IyiHeap.chunk_of(index)
+        warm = false
+        page = arena
+        stop = arena + IyiHeap.read64(arena + IyiHeap::OFF_MAP)
+        while page < stop
+          now = IyiHeap.page_idle?(arena, page) && !IyiHeap.page_cold?(arena, page)
+          runs = runs + 1_u64 if now && !warm
+          warm = now
+          page = page + IyiHeap::PAGE
+        end
+      end
+      arena = IyiHeap.arena_next(arena)
+    end
+    runs
+  end
+
+  # Check 10's work for one class: warm runs threaded a slab's worth at
+  # a time, as a refill threads them, up to `cuts` times - and, `reached`
+  # asked, no more once a list's last chunk reaches into an idle page, so
+  # that the trim meets that page; every chunk of every list written
+  # whole, as the objects a program made of them would be; the last chunk
+  # of each list checked to reach under a page into the idle rest of its
+  # run; then the idle trim, and every byte read back. Answers how many
+  # lists' last chunk reached into an idle page.
+  def trim_threaded(size : UInt64, cuts : Int32, reached : Bool) : UInt64
+    index = IyiHeap.class_index(size)
+    chunk = IyiHeap.chunk_of(index)
+    table = Pointer(UInt64).new(IyiHeap.cache_page)
+    Seen.forget
+    reaching = 0_u64
+    cut = 0
+    while cut < cuts && !(reached && reaching != 0_u64)
+      head = IyiHeap.thread_warm_of(table, index)
+      raise "cut: the #{count(chunk)}-byte class had no warm run left to thread at cut #{cut}" if head == 0_u64
+      node = head
+      last = 0_u64
+      while node != 0_u64
+        following = Pointer(UInt64).new(node).value
+        byte = 0_u64
+        while byte < chunk
+          Pointer(UInt8).new(node + byte).value = 0xC3_u8
+          byte = byte + 1_u64
+        end
+        Seen.add(node)
+        last = node
+        node = following
+      end
+      arena = IyiHeap.arena_of(last)
+      reach = warm_pages_in(arena, last, last + chunk)
+      raise "cut: the last chunk of a threaded warm run, #{count(chunk)} bytes at #{hex(last)}, reaches over #{count(reach)} idle pages of the rest of the run" if reach > 1_u64
+      reaching = reaching + reach
+      cut = cut + 1
+    end
+    released_before = IyiHeap.pages_released
+    raise "trim: the idle trim found a collection under way in a program that runs none" unless IyiMark.trim_idle
+    raise "trim: the idle trim handed back no page with the #{count(chunk)}-byte class's warm runs to hand back" if IyiHeap.pages_released == released_before
+    entry = 0_u64
+    while entry < Seen.count
+      block = Seen.at(entry)
+      byte = 0_u64
+      while byte < chunk
+        if Pointer(UInt8).new(block + byte).value != 0xC3_u8
+          raise "trim: byte #{count(byte)} of a threaded #{count(chunk)}-byte chunk at #{hex(block)} reads #{count(Pointer(UInt8).new(block + byte).value.to_u64)} after the idle trim"
+        end
+        byte = byte + 1_u64
+      end
+      entry = entry + 1_u64
+    end
+    reaching
+  end
+
   # Garbage in a class nothing below asks for, made before the first
   # collection, for check 6c.
   def first_epoch_garbage(size : UInt64) : Nil
@@ -421,6 +534,126 @@
   raise "batch: the next allocation came from #{hex(following)}, not the listed chunk at #{hex(listed)}" if following != listed
   raise "batch: the listed chunk handed out still reads free" if IyiHeap.read8(IyiHeap.meta(carve_arena, following)) & IyiHeap::FREE_FLAG != 0_u64
   puts "    batch: a carve lists the rest of its page, stamped free and this epoch's, and the next allocation pops it"
+
+  # 8. A class's warm room is what it took last epoch, not the budget.
+  # A budget's worth of 896-byte garbage leaves that many pages warm;
+  # sixteen epochs asking 64 KiB of the class each follow, served by the
+  # chunks of pages partly alive, and the class keeps its room - a few
+  # slabs' worth - and at most the first page of each warm run past it,
+  # where a room of the budget kept the burst's pages for as long as the
+  # program ran: issue #145's app kept 14-57 MB idle across a collection
+  # on a 40-48 MB budget.
+  room_size = 896_u64
+  room_index = IyiHeap.class_index(room_size)
+  burst(room_size, IyiMark.budget.unsafe_div(room_size))
+  IyiMark.collect
+  burst_warm = IyiHeap.warm_of(room_index) + listed_in(room_index)
+  small = 65536_u64.unsafe_div(room_size)
+  epoch = 0
+  while epoch < 16
+    burst(room_size, small)
+    IyiMark.collect
+    epoch = epoch + 1
+  end
+  room_warm = IyiHeap.warm_of(room_index) + listed_in(room_index)
+  room_runs = warm_runs(room_index)
+  room_limit = 4_u64 * 65536_u64.unsafe_div(IyiHeap::PAGE)
+  raise "room: the #{count(room_size)}-byte class keeps #{count(room_warm)} pages warm in #{count(room_runs)} runs after sixteen epochs asking #{count(small)} chunks each, past #{count(room_limit)} and a page a run; a budget's worth of its garbage had left #{count(burst_warm)}" if room_warm > room_limit + room_runs || room_warm * 2_u64 > burst_warm
+  puts "    room: a budget's worth of #{count(room_size)}-byte garbage left #{count(burst_warm)} pages warm, and sixteen epochs asking #{count(small)} chunks each left #{count(room_warm)}, in #{count(room_runs)} runs"
+
+  # 9. A refill threads a slab's worth of a warm run, and the rest stays
+  # idle and warm for the next: the pages a cache threads are what its
+  # class is counted as taking, and a cache that threaded a run of
+  # hundreds of pages to allocate a few read as a class that took them
+  # all. 640-byte chunks, 128 pages of them garbage, two collections.
+  thread_size = 640_u64
+  thread_index = IyiHeap.class_index(thread_size)
+  burst(thread_size, (128_u64 * IyiHeap::PAGE).unsafe_div(thread_size))
+  IyiMark.collect
+  IyiMark.collect
+  thread_before = IyiHeap.warm_of(thread_index)
+  slab_pages = IyiHeap::WARM_RUN.unsafe_div(IyiHeap::PAGE)
+  raise "threaded: the #{count(thread_size)}-byte class has #{count(thread_before)} warm idle pages, too few to cut a slab's worth from" if thread_before < 3_u64 * slab_pages
+  head = IyiHeap.thread_warm_of(Pointer(UInt64).new(IyiHeap.cache_page), thread_index)
+  raise "threaded: no warm run of the #{count(thread_size)}-byte class was threaded" if head == 0_u64
+  thread_after = IyiHeap.warm_of(thread_index)
+  raise "threaded: one refill threaded #{count(thread_before - thread_after)} of #{count(thread_before)} warm pages, past a slab's worth (#{count(slab_pages)} pages and a chunk)" if thread_before - thread_after > slab_pages + 1_u64
+  puts "    threaded: one refill threaded #{count(thread_before - thread_after)} of #{count(thread_before)} warm idle pages, a slab's worth, and left the rest idle"
+
+  # 10. The idle trim hands every warm run back and keeps every chunk a
+  # program holds. A run threaded short of its end leaves its last chunk
+  # reaching into the first page of the rest, still idle: the cut is on
+  # the chunk grid, so that chunk reaches under a page into it, and the
+  # trim keeps a run's first page when a chunk reaches into it. One class
+  # under a page, whose chunks straddle page boundaries, and one of
+  # fourteen 4 KB pages (three and a half of 16 KB), whose last chunk
+  # cut off the grid would reach several pages into the rest.
+  trim_small = 2560_u64
+  burst(trim_small, (256_u64 * IyiHeap::PAGE).unsafe_div(trim_small))
+  IyiMark.collect
+  IyiMark.collect
+  reaching_small = trim_threaded(trim_small, 8, true)
+  raise "trim: no threaded #{count(trim_small)}-byte chunk reached into an idle page, so the trim's first page was never at stake" if reaching_small == 0_u64
+  trim_large = 57344_u64
+  burst(trim_large, (512_u64 * IyiHeap::PAGE).unsafe_div(trim_large))
+  IyiMark.collect
+  IyiMark.collect
+  reaching_large = trim_threaded(trim_large, 4, false)
+  small_index = IyiHeap.class_index(trim_small)
+  raise "trim: #{count(IyiHeap.warm_of(small_index))} pages of the #{count(trim_small)}-byte class still warm after the idle trim, in #{count(warm_runs(small_index))} runs: a run keeps its first page at most" if IyiHeap.warm_of(small_index) > warm_runs(small_index)
+  puts "    cut: slabs of #{count(trim_small)}-byte chunks and of #{count(trim_large)}-byte ones threaded, each list's last chunk reaching under a page into the rest of its run (#{count(reaching_small)} and #{count(reaching_large)} times into an idle one)"
+  puts "    trim: every warm run of both classes handed back but #{count(IyiHeap.warm_of(small_index))} first pages of the #{count(trim_small)}-byte class's runs, and every byte of every threaded chunk intact"
+
+  # 11. The idle trim takes the warm pages the sweep listed on the
+  # centre's batches too: the batches are dropped and the pages inside
+  # each batch's range handed back, and what the refill hands out next is
+  # on no idle page - a batch left on the centre with its pages gone idle
+  # hands out objects the mark would refuse.
+  batch_size = 1280_u64
+  batch_index = IyiHeap.class_index(batch_size)
+  burst(batch_size, (96_u64 * IyiHeap::PAGE).unsafe_div(batch_size))
+  IyiMark.collect
+  listed_before = listed_in(batch_index)
+  raise "batches: the sweep listed no page of the #{count(batch_size)}-byte class's garbage" if listed_before == 0_u64
+  released_before = IyiHeap.pages_released
+  raise "batches: the idle trim found a collection under way in a program that runs none" unless IyiMark.trim_idle
+  listed_after = listed_in(batch_index)
+  raise "batches: #{count(listed_after)} of #{count(listed_before)} listed pages of the #{count(batch_size)}-byte class still listed after the idle trim" if listed_after * 4_u64 > listed_before
+  batch_released = IyiHeap.pages_released - released_before
+  index = 0_u64
+  while index < 200_u64
+    taken = fresh(batch_size)
+    raise "batches: an allocation at #{hex(taken)} lies on an idle page after the idle trim, handed out of a batch whose pages went idle" if IyiHeap.page_idle?(IyiHeap.arena_of(taken), taken)
+    index = index + 1_u64
+  end
+  puts "    batches: the idle trim took #{count(listed_before - listed_after)} of #{count(listed_before)} listed pages off the centre's batches and handed back #{count(batch_released)} pages, and 200 allocations after it landed on no idle page"
+
+  # 12. A program whose pool goes idle hands its warm pages back without
+  # anything allocating: the pool's monitor, parked with every worker
+  # idle, asks for the idle trim after a second of it with no collection
+  # in between (`IyiWorkers.park_monitor`). Last, because the task below
+  # starts the pool, and its workers are threads every later stop would
+  # stop. 1792-byte garbage, two collections, warm idle pages left; one
+  # task on the pool; three seconds asleep.
+  idle_size = 1792_u64
+  idle_class = IyiHeap.class_index(idle_size)
+  burst(idle_size, (64_u64 * IyiHeap::PAGE).unsafe_div(idle_size))
+  IyiMark.collect
+  IyiMark.collect
+  idle_warm = IyiHeap.warm_of(idle_class)
+  raise "idle: the #{count(idle_size)}-byte class kept no page warm to hand back" if idle_warm == 0_u64
+  trims_before = IyiMark.trims
+  group do |g|
+    task = g.spawn(unit: :new) do
+      1
+    end
+    raise "idle: the pool's task answered #{task.value}" if task.value != 1
+  end
+  sleep(3000)
+  idle_trims = IyiMark.trims - trims_before
+  idle_left = IyiHeap.warm_of(idle_class)
+  raise "idle: three seconds with the pool idle ran #{count(idle_trims)} idle trims and left #{count(idle_left)} of #{count(idle_warm)} warm pages of the #{count(idle_size)}-byte class" if idle_trims == 0_u64 || idle_left * 8_u64 > idle_warm
+  puts "    idle: three seconds with the pool idle ran #{count(idle_trims)} idle trim and left #{count(idle_left)} of #{count(idle_warm)} warm pages of the #{count(idle_size)}-byte class"
 
   puts "    all sweep checks passed"
 {% else %}

@@ -6103,9 +6103,12 @@ class IyiWorkers
     {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
       page = __iyi_mmap(4096_u64).address
       {% if flag?(:linux) || flag?(:darwin) %}
-        # The tick, as a timespec: no seconds, PREEMPT_TICK_NS.
+        # The tick, as a timespec: no seconds, PREEMPT_TICK_NS. And at
+        # +16 the parked monitor's first wait (`monitor_wait_idle`).
         Pointer(UInt64).new(page).value = 0_u64
         Pointer(UInt64).new(page &+ 8_u64).value = PREEMPT_TICK_NS
+        Pointer(UInt64).new(page &+ 16_u64).value = IDLE_WAIT_NS // 1000000000_u64
+        Pointer(UInt64).new(page &+ 24_u64).value = IDLE_WAIT_NS % 1000000000_u64
       {% end %}
       {% if flag?(:darwin) %}
         kq = LibC.kqueue
@@ -6287,6 +6290,12 @@ class IyiWorkers
   # worker started has come up: one that finds a task the moment it
   # starts never waits, so never leaves a wait to wake the monitor - the
   # unit step's task was never preempted that way, on a pool of one.
+  #
+  # The first waits are timed: a pool that stays idle for IDLE_WAIT_NS,
+  # with no collection in it, has the heap's warm pages handed back
+  # (`IyiMark.trim_idle` says why), once, and the monitor parks for good
+  # after it. A collection meanwhile - a thread outside the pool
+  # allocating - starts the wait again.
   private def self.park_monitor : Nil
     IyiSchedLock.lock
     count = word(pointerof(@@listed_count)).value.get
@@ -6299,6 +6308,21 @@ class IyiWorkers
     monitor_word.value.set(1_u64) if quiet
     IyiSchedLock.unlock
     return unless quiet
+    {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || flag?(:darwin) || flag?(:win32)) %}
+      epoch = IyiMark.epoch
+      since = __iyi_monotonic_ns
+      trimmed = false
+      while !trimmed && monitor_word.value.get != 0_u64
+        monitor_wait_idle
+        now = __iyi_monotonic_ns
+        if IyiMark.epoch != epoch
+          epoch = IyiMark.epoch
+          since = now
+        elsif monitor_word.value.get != 0_u64 && now - since >= IDLE_WAIT_NS.to_i64
+          trimmed = IyiMark.trim_idle
+        end
+      end
+    {% end %}
     while monitor_word.value.get != 0_u64
       monitor_wait(true)
     end
@@ -6357,6 +6381,21 @@ class IyiWorkers
         end
       end
       LibC.WaitForSingleObject(Pointer(Void).new(@@monitor_handle), parked ? -1_i32 : PREEMPT_TICK_MS)
+    {% end %}
+  end
+
+  # The parked monitor's first waits (`park_monitor`): as `monitor_wait`
+  # parked, but for IDLE_WAIT_NS at most.
+  IDLE_WAIT_NS = 1000000000_u64
+
+  private def self.monitor_wait_idle : Nil
+    {% if flag?(:linux) %}
+      __iyi_conc_syscall6(IYI_SYS_FUTEX, pointerof(@@monitor_parked).address.to_i64, IYI_FUTEX_WAIT, 1_i64, (@@monitor_page &+ 16_u64).to_i64, 0_i64, 0_i64)
+    {% elsif flag?(:darwin) %}
+      page = @@monitor_page
+      LibC.kevent(@@monitor_handle.to_i32, Pointer(Void).new(0_u64), 0, Pointer(Void).new(page &+ 64_u64), 1, Pointer(Void).new(page &+ 16_u64))
+    {% elsif flag?(:win32) %}
+      LibC.WaitForSingleObject(Pointer(Void).new(@@monitor_handle), (IDLE_WAIT_NS // 1000000_u64).to_i32)
     {% end %}
   end
 end

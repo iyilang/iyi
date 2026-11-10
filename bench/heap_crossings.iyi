@@ -576,10 +576,26 @@
     nil
   end
 
+  # The table `ENV[]=` installed and every entry in it, the shared heap's
+  # (owner 0; the C runtime's own entries are outside the heap, owner 0
+  # too). Windows writes to the platform and keeps no table of iyi's.
+  def env_table_shared : Nil
+    {% if !flag?(:win32) %}
+      table = __iyi_environ
+      shared_made(table.address, "env: the table")
+      index = 0
+      while (entry = table[index]).address != 0_u64
+        shared_made(entry.address, "env: entry #{index}")
+        index = index + 1
+      end
+    {% end %}
+  end
+
   def env_check : Nil
     group do |g|
       g.spawn(unit: :new) do
         set_env(23)
+        env_table_shared
         collect_here
         0
       end

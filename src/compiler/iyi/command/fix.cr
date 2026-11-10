@@ -5,7 +5,10 @@
 # *performs* it. Nothing here invents a repair: the only edits applied
 # are the ones the semantic pass computed at the raise site — the
 # Levenshtein did-you-mean, the `and`→`&&` operator hint, the III.1.7a
-# participle. If the compiler did not say it, `fix` does not do it.
+# participle, and the `@[SafeReach]` claim above module state a parallel
+# unit reaches, which the compiler offers only where it proves the claim
+# (III.4.5) and which goes in the file that declares the state. If the
+# compiler did not say it, `fix` does not do it.
 #
 # The loop is compile → apply the one edit the error carries → compile
 # again, because the front end stops at the first error and every edit
@@ -49,6 +52,10 @@ class Iyi::Command
           X::{a}` is `import X::{a}`, folded into a bare `import X`. Exit 0 when the file ends clean. When
           the remaining error lives in another file of the program, the
           verb names it (`cause` in `--json`): that is the file to fix next.
+          One edit is made in that other file itself: the `@[SafeReach]`
+          claim above a constant or class variable a parallel unit reaches,
+          offered only where the compiler proves it (SPEC.md III.4.5), and
+          never under std's or the library path's directories.
 
           Several files, or a directory - every .iyi under it, hidden
           directories and lib/ aside - are one run: every `using` in all
@@ -146,6 +153,12 @@ class Iyi::Command
     path = File.expand_path(file)
     remaining = nil
     capped = false
+    # Edits made in another file of the program's own: a claim above the
+    # declaration a parallel unit reaches (SPEC.md III.4.5), which is where
+    # the error is placed and where the state is declared - rarely the
+    # file a program's tasks are written in.
+    elsewhere_applied = [] of {String, Int32, Int32, String, String}
+    library = IyiPath.default_paths.map { |entry| File.expand_path(entry) }
 
     # Thirty-two is a cap on the *edits*, and the verdict is always the check
     # after the last one. A file that genuinely carries more consecutive
@@ -195,7 +208,7 @@ class Iyi::Command
 
       # Asked with a diagnostic in hand, so a capped run names what is left
       # rather than reporting nothing at all.
-      if applied.size >= edit_cap
+      if applied.size + elsewhere_applied.size >= edit_cap
         capped = true
         remaining = diag
         break
@@ -203,15 +216,19 @@ class Iyi::Command
 
       # Where the edit goes: the diagnostic's own span, or the place the
       # compiler named for it - the unsafe mark goes above the header of the
-      # module whose operation was refused (SPEC.md III.13).
+      # module whose operation was refused (SPEC.md III.13), the claim above
+      # the declaration a parallel unit reaches, in that declaration's file
+      # when it is the program's own and not the library's (III.4.5).
       edit_line, edit_column, edit_size = diag.edit_at || {diag.line, diag.column, diag.size}
       replacement = diag.suggestion
-      unless replacement && edit_size > 0
+      target = diag.edit_file.try { |other| File.expand_path(other) } || path
+      unless replacement && edit_size > 0 && (target == path || (File.file?(target) && library.none? { |root| target.starts_with?(root) }))
         remaining = diag
         break
       end
 
-      lines = text.split('\n')
+      target_text = target == path ? text : File.read(target)
+      lines = target_text.split('\n')
       line_text = lines[edit_line - 1]?
       unless line_text
         remaining = diag
@@ -239,8 +256,12 @@ class Iyi::Command
       if at + edit_size > chars.size && edit_line < lines.size
         lines[edit_line - 1] += lines.delete_at(edit_line)
       end
-      File.write(path, lines.join('\n'))
-      applied << {edit_line, edit_column, from, replacement}
+      File.write(target, lines.join('\n'))
+      if target == path
+        applied << {edit_line, edit_column, from, replacement}
+      else
+        elsewhere_applied << {target, edit_line, edit_column, from, replacement}
+      end
     end
 
     # Where the remaining error actually is, when that is another file of
@@ -251,7 +272,6 @@ class Iyi::Command
     # to run it again. The deepest frame in another file is where to
     # point the verb instead - unless that file is the library's, which
     # is nobody's to fix from here and would be advice to edit the prelude.
-    library = IyiPath.default_paths.map { |entry| File.expand_path(entry) }
     elsewhere = remaining.try do |diag|
       diag.related.reverse.find do |(file, _, _, _)|
         file != path && library.none? { |root| file.starts_with?(root) }
@@ -270,6 +290,21 @@ class Iyi::Command
                   json.field "column", column
                   json.field "from", from
                   json.field "to", to
+                end
+              end
+            end
+          end
+          unless elsewhere_applied.empty?
+            json.field "applied_elsewhere" do
+              json.array do
+                elsewhere_applied.each do |(target, line, column, from, to)|
+                  json.object do
+                    json.field "file", target
+                    json.field "line", line
+                    json.field "column", column
+                    json.field "from", from
+                    json.field "to", to
+                  end
                 end
               end
             end
@@ -302,6 +337,9 @@ class Iyi::Command
       applied.each do |(line, column, from, to)|
         puts "fixed #{file}:#{line}:#{column}: `#{from}` -> `#{to}`"
       end
+      elsewhere_applied.each do |(target, line, column, from, to)|
+        puts "fixed #{Iyi.relative_filename(target)}:#{line}:#{column}: `#{from}` -> `#{to}`"
+      end
       if remaining
         STDERR.puts "#{file}:#{remaining.line}:#{remaining.column}: #{remaining.message}"
         if elsewhere
@@ -312,7 +350,7 @@ class Iyi::Command
           STDERR.puts "#{applied.size} edits is this run's cap and the file still " \
                       "reports an error: run `#{Command.program_name} fix #{file}` again"
         end
-      elsif applied.empty? && single
+      elsif applied.empty? && elsewhere_applied.empty? && single
         puts "#{file}: already clean"
       end
     end

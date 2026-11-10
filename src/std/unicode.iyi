@@ -2722,154 +2722,185 @@ pub struct Unicode
   end
 
   # ---------------------------------------------------------------------
-  # Tables: decoded once, searched by rows.
+  # Tables: decoded once, each by its class variable's initializer at the
+  # first read, then only read; searched by rows.
   # ---------------------------------------------------------------------
 
-  @@letter : Array(Int32)?
-  @@number : Array(Int32)?
-  @@mark : Array(Int32)?
-  @@whitespace : Array(Int32)?
-  @@control : Array(Int32)?
-  @@lowercase : Array(Int32)?
-  @@uppercase : Array(Int32)?
-  @@titlecase : Array(Int32)?
-  @@cased : Array(Int32)?
-  @@case_ignorable : Array(Int32)?
-  @@upcase : Array(Int32)?
-  @@downcase : Array(Int32)?
-  @@alternate : Array(Int32)?
-  @@casefold : Array(Int32)?
-  @@special_upcase : Array(Int32)?
-  @@special_downcase : Array(Int32)?
-  @@special_titlecase : Array(Int32)?
-  @@special_fold : Array(Int32)?
-  @@combining_class : Array(Int32)?
-  @@canonical_decomposition : Array(Int32)?
-  @@compatibility_decomposition : Array(Int32)?
-  @@compatibility_data : Array(Int32)?
-  @@composition : Array(Int32)?
-  @@general_category : Array(Int32)?
-  @@script : Array(Int32)?
-  @@category_names : Array(String)?
-  @@script_names : Array(String)?
-  @@orbits : Hash(Int32, Array(Int32))?
-  @@simple_fold : Array(Int32)?
-  @@grapheme : Array(Int32)?
+  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @@letter : Array(Int32) = decode(LETTER)
+  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @@number : Array(Int32) = decode(NUMBER)
+  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @@mark : Array(Int32) = decode(MARK)
+  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @@whitespace : Array(Int32) = decode(WHITESPACE)
+  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @@control : Array(Int32) = decode(CONTROL)
+  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @@lowercase : Array(Int32) = decode(LOWERCASE)
+  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @@uppercase : Array(Int32) = decode(UPPERCASE)
+  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @@titlecase : Array(Int32) = decode(TITLECASE)
+  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @@cased : Array(Int32) = decode(CASED)
+  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @@case_ignorable : Array(Int32) = decode(CASE_IGNORABLE)
+  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @@upcase : Array(Int32) = decode(UPCASE)
+  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @@downcase : Array(Int32) = decode(DOWNCASE)
+  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @@alternate : Array(Int32) = decode(ALTERNATE)
+  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @@casefold : Array(Int32) = decode(CASEFOLD)
+  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @@special_upcase : Array(Int32) = decode(SPECIAL_UPCASE)
+  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @@special_downcase : Array(Int32) = decode(SPECIAL_DOWNCASE)
+  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @@special_titlecase : Array(Int32) = decode(SPECIAL_TITLECASE)
+  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @@special_fold : Array(Int32) = decode(SPECIAL_FOLD)
+  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @@combining_class : Array(Int32) = decode(COMBINING_CLASS)
+  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @@canonical_decomposition : Array(Int32) = decode(CANONICAL_DECOMPOSITION)
+  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @@compatibility_decomposition : Array(Int32) = decode(COMPATIBILITY_DECOMPOSITION)
+  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @@compatibility_data : Array(Int32) = decode(COMPATIBILITY_DATA)
+  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @@composition : Array(Int32) = decode(COMPOSITION)
+  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @@general_category : Array(Int32) = decode(GENERAL_CATEGORY)
+  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @@script : Array(Int32) = decode(SCRIPT)
+  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @@category_names : Array(String) = CATEGORY_NAMES.split(',')
+  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @@script_names : Array(String) = SCRIPT_NAMES.split(',')
+  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @@orbits : Hash(Int32, Array(Int32)) = build_orbits
+  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @@simple_fold : Array(Int32) = decode(SIMPLE_FOLD)
+  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @@grapheme : Array(Int32) = decode(GRAPHEME)
 
   private def self.letter_table : Array(Int32)
-    @@letter ||= decode(LETTER)
+    @@letter
   end
 
   private def self.number_table : Array(Int32)
-    @@number ||= decode(NUMBER)
+    @@number
   end
 
   private def self.mark_table : Array(Int32)
-    @@mark ||= decode(MARK)
+    @@mark
   end
 
   private def self.whitespace_table : Array(Int32)
-    @@whitespace ||= decode(WHITESPACE)
+    @@whitespace
   end
 
   private def self.control_table : Array(Int32)
-    @@control ||= decode(CONTROL)
+    @@control
   end
 
   private def self.lowercase_table : Array(Int32)
-    @@lowercase ||= decode(LOWERCASE)
+    @@lowercase
   end
 
   private def self.uppercase_table : Array(Int32)
-    @@uppercase ||= decode(UPPERCASE)
+    @@uppercase
   end
 
   private def self.titlecase_table : Array(Int32)
-    @@titlecase ||= decode(TITLECASE)
+    @@titlecase
   end
 
   private def self.cased_table : Array(Int32)
-    @@cased ||= decode(CASED)
+    @@cased
   end
 
   private def self.case_ignorable_table : Array(Int32)
-    @@case_ignorable ||= decode(CASE_IGNORABLE)
+    @@case_ignorable
   end
 
   private def self.upcase_table : Array(Int32)
-    @@upcase ||= decode(UPCASE)
+    @@upcase
   end
 
   private def self.downcase_table : Array(Int32)
-    @@downcase ||= decode(DOWNCASE)
+    @@downcase
   end
 
   private def self.alternate_table : Array(Int32)
-    @@alternate ||= decode(ALTERNATE)
+    @@alternate
   end
 
   private def self.casefold_table : Array(Int32)
-    @@casefold ||= decode(CASEFOLD)
+    @@casefold
   end
 
   private def self.special_upcase_table : Array(Int32)
-    @@special_upcase ||= decode(SPECIAL_UPCASE)
+    @@special_upcase
   end
 
   private def self.special_downcase_table : Array(Int32)
-    @@special_downcase ||= decode(SPECIAL_DOWNCASE)
+    @@special_downcase
   end
 
   private def self.special_titlecase_table : Array(Int32)
-    @@special_titlecase ||= decode(SPECIAL_TITLECASE)
+    @@special_titlecase
   end
 
   private def self.special_fold_table : Array(Int32)
-    @@special_fold ||= decode(SPECIAL_FOLD)
+    @@special_fold
   end
 
   private def self.combining_class_table : Array(Int32)
-    @@combining_class ||= decode(COMBINING_CLASS)
+    @@combining_class
   end
 
   private def self.canonical_decomposition_table : Array(Int32)
-    @@canonical_decomposition ||= decode(CANONICAL_DECOMPOSITION)
+    @@canonical_decomposition
   end
 
   private def self.compatibility_decomposition_table : Array(Int32)
-    @@compatibility_decomposition ||= decode(COMPATIBILITY_DECOMPOSITION)
+    @@compatibility_decomposition
   end
 
   private def self.compatibility_data_table : Array(Int32)
-    @@compatibility_data ||= decode(COMPATIBILITY_DATA)
+    @@compatibility_data
   end
 
   private def self.composition_table : Array(Int32)
-    @@composition ||= decode(COMPOSITION)
+    @@composition
   end
 
   private def self.general_category_table : Array(Int32)
-    @@general_category ||= decode(GENERAL_CATEGORY)
+    @@general_category
   end
 
   private def self.script_table : Array(Int32)
-    @@script ||= decode(SCRIPT)
+    @@script
   end
 
   private def self.category_names : Array(String)
-    @@category_names ||= CATEGORY_NAMES.split(',')
+    @@category_names
   end
 
   private def self.script_names : Array(String)
-    @@script_names ||= SCRIPT_NAMES.split(',')
+    @@script_names
   end
 
   private def self.simple_fold_table : Array(Int32)
-    @@simple_fold ||= decode(SIMPLE_FOLD)
+    @@simple_fold
   end
 
   private def self.grapheme_table : Array(Int32)
-    @@grapheme ||= decode(GRAPHEME)
+    @@grapheme
   end
 
   # The integers a table string spells, in order: a sign, decimal digits,
@@ -3292,11 +3323,12 @@ pub struct Unicode
   end
 
   # The simple foldings read backwards: each folded code point to every
-  # code point that folds to it, itself included, sorted. Built once from
-  # the tables `simple_fold` reads, in the order it reads them, so a code
-  # point one table folds is not folded again by a later one.
+  # code point that folds to it, itself included, sorted. Built once, by
+  # `@@orbits`'s initializer, from the tables `simple_fold` reads, in the
+  # order it reads them, so a code point one table folds is not folded
+  # again by a later one.
   private def self.orbits : Hash(Int32, Array(Int32))
-    @@orbits ||= build_orbits
+    @@orbits
   end
 
   private def self.build_orbits : Hash(Int32, Array(Int32))

@@ -462,7 +462,7 @@ pub class SHA256 < Digest
 
   private def compress(block : Pointer(UInt8)) : Nil
     w = @w
-    k = round_constants
+    k = SHA256Rounds.k
     DigestUtil.load_u32s_be(w, block, 16)
     i = 16
     while i < 64
@@ -509,13 +509,22 @@ pub class SHA256 < Digest
     @h[6] = @h[6] &+ g
     @h[7] = @h[7] &+ hh
   end
+end
 
-  @@k = Pointer(UInt32).new(0_u64)
+# The 64 round constants of SHA-256 and SHA-224: the first 32 bits of the
+# fractional parts of the cube roots of the first 64 primes. Built whole
+# by the initializer, at the first read, and never written again. Kept
+# here rather than in `SHA256`, where `SHA224` would hold a class variable
+# of its own, a second state beside the first.
+struct SHA256Rounds
+  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @@k : Pointer(UInt32) = build
 
-  # The 64 round constants, made once: the first 32 bits of the
-  # fractional parts of the cube roots of the first 64 primes.
-  private def round_constants : Pointer(UInt32)
-    return @@k if @@k.address != 0_u64
+  def self.k : Pointer(UInt32)
+    @@k
+  end
+
+  private def self.build : Pointer(UInt32)
     words = [
       0x428a2f98_u32, 0x71374491_u32, 0xb5c0fbcf_u32, 0xe9b5dba5_u32,
       0x3956c25b_u32, 0x59f111f1_u32, 0x923f82a4_u32, 0xab1c5ed5_u32,
@@ -536,7 +545,6 @@ pub class SHA256 < Digest
     ]
     table = Pointer(UInt32).malloc(64_u64)
     table.copy_from(words.to_unsafe, 64)
-    @@k = table
     table
   end
 end
@@ -602,7 +610,7 @@ pub class SHA512 < Digest
 
   private def compress(block : Pointer(UInt8)) : Nil
     w = @w
-    k = round_constants
+    k = SHA512Rounds.k
     i = 0
     while i < 16
       w[i] = DigestUtil.load_u64_be(block + (i * 8).to_i64)
@@ -646,13 +654,21 @@ pub class SHA512 < Digest
     @h[6] = @h[6] &+ g
     @h[7] = @h[7] &+ hh
   end
+end
 
-  @@k = Pointer(UInt64).new(0_u64)
+# The 80 round constants of SHA-512 and SHA-384: the first 64 bits of the
+# fractional parts of the cube roots of the first 80 primes. Built whole
+# by the initializer, at the first read, and never written again; kept
+# out of `SHA512` as `SHA256Rounds` is out of `SHA256`.
+struct SHA512Rounds
+  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @@k : Pointer(UInt64) = build
 
-  # The 80 round constants, made once: the first 64 bits of the
-  # fractional parts of the cube roots of the first 80 primes.
-  private def round_constants : Pointer(UInt64)
-    return @@k if @@k.address != 0_u64
+  def self.k : Pointer(UInt64)
+    @@k
+  end
+
+  private def self.build : Pointer(UInt64)
     words = [
       0x428a2f98d728ae22_u64, 0x7137449123ef65cd_u64, 0xb5c0fbcfec4d3b2f_u64, 0xe9b5dba58189dbbc_u64,
       0x3956c25bf348b538_u64, 0x59f111f1b605d019_u64, 0x923f82a4af194f9b_u64, 0xab1c5ed5da6d8118_u64,
@@ -677,7 +693,6 @@ pub class SHA512 < Digest
     ]
     table = Pointer(UInt64).malloc(80_u64)
     table.copy_from(words.to_unsafe, 80)
-    @@k = table
     table
   end
 end
@@ -707,13 +722,14 @@ end
 # (lane 1, then each lane pi sends it to), the compact form of the
 # Keccak team's reference, so the step needs one lane of temporary.
 struct Keccak
-  @@tables = Pointer(UInt64).new(0_u64)
-
   # The 24 iota round constants, then the 24 rho offsets of the lanes the
   # cycle visits, then the 24 lanes themselves, FIPS 202 sections 3.2.2
-  # to 3.2.5.
-  private def self.tables : Pointer(UInt64)
-    return @@tables if @@tables.address != 0_u64
+  # to 3.2.5. Built whole by the initializer, at the first read, and never
+  # written again.
+  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @@tables : Pointer(UInt64) = build_tables
+
+  private def self.build_tables : Pointer(UInt64)
     words = [
       0x0000000000000001_u64, 0x0000000000008082_u64, 0x800000000000808a_u64, 0x8000000080008000_u64,
       0x000000000000808b_u64, 0x0000000080000001_u64, 0x8000000080008081_u64, 0x8000000000008009_u64,
@@ -728,7 +744,6 @@ struct Keccak
     ]
     table = Pointer(UInt64).malloc(72_u64)
     table.copy_from(words.to_unsafe, 72)
-    @@tables = table
     table
   end
 
@@ -739,7 +754,7 @@ struct Keccak
 
   # The 24 rounds over the 25 lanes at *a*; *c* is five lanes of scratch.
   def self.permute(a : Pointer(UInt64), c : Pointer(UInt64)) : Nil
-    t = tables
+    t = @@tables
     round = 0
     while round < 24
       # theta: each lane takes the parity of the two columns beside it.
@@ -1052,7 +1067,7 @@ pub struct CRC32
   # what `Gzip.decompress` spent, the inflating itself taking 30.
   def self.update(crc : UInt32, data : Pointer(UInt8), count : Int32) : UInt32
     raise "CRC32: a negative count of bytes: #{count}" if count < 0
-    t = tables
+    t = @@tables
     crc = crc ^ 0xffffffff_u32
     p = data
     n = count
@@ -1071,12 +1086,13 @@ pub struct CRC32
     crc ^ 0xffffffff_u32
   end
 
-  @@tables = Pointer(UInt32).new(0_u64)
+  # The eight tables: the first is the byte-at-a-time table, and each
+  # after it is one more byte of zeros through the one before. Built whole
+  # by the initializer, at the first read, and never written again.
+  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @@tables : Pointer(UInt32) = build_tables
 
-  # The eight tables, made once: the first is the byte-at-a-time table,
-  # and each after it is one more byte of zeros through the one before.
-  private def self.tables : Pointer(UInt32)
-    return @@tables if @@tables.address != 0_u64
+  private def self.build_tables : Pointer(UInt32)
     t = Pointer(UInt32).malloc(2048_u64)
     n = 0
     while n < 256
@@ -1099,7 +1115,6 @@ pub struct CRC32
       end
       slice = slice + 1
     end
-    @@tables = t
     t
   end
 
@@ -1162,7 +1177,7 @@ pub struct CRC64
   # follow it in the step.
   def self.update(crc : UInt64, data : Pointer(UInt8), count : Int32) : UInt64
     raise "CRC64: a negative count of bytes: #{count}" if count < 0
-    t = tables
+    t = @@tables
     crc = crc ^ 0xffffffffffffffff_u64
     p = data
     n = count
@@ -1183,11 +1198,12 @@ pub struct CRC64
     crc ^ 0xffffffffffffffff_u64
   end
 
-  @@tables = Pointer(UInt64).new(0_u64)
+  # The eight tables, built as `CRC32` builds its own: whole, by the
+  # initializer, at the first read, and never written again.
+  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @@tables : Pointer(UInt64) = build_tables
 
-  # The eight tables, made once, as `CRC32` makes its own.
-  private def self.tables : Pointer(UInt64)
-    return @@tables if @@tables.address != 0_u64
+  private def self.build_tables : Pointer(UInt64)
     t = Pointer(UInt64).malloc(2048_u64)
     n = 0
     while n < 256
@@ -1210,7 +1226,6 @@ pub struct CRC64
       end
       slice = slice + 1
     end
-    @@tables = t
     t
   end
 

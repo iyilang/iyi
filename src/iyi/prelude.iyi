@@ -10456,6 +10456,7 @@ end
   class IyiWeak
     # Every live weak reference's cell, by address, in atomic memory: the
     # table is read by `clear` and by nothing that marks.
+    @[UnsafeReach("written under the runtime lock, and grown into a table allocated in the shared heap; it holds addresses, never a reference the collector follows")]
     @@cells : Pointer(UInt64) = Pointer(UInt64).new(0_u64)
     @@count : UInt64 = 0_u64
     @@capacity : UInt64 = 0_u64
@@ -11314,11 +11315,13 @@ end
 # says a panic is caught. `NoReturn` is a type-system fact `.or_panic`
 # depends on (III.1.3): the fiber never resumes.
 class IyiPanic
+  @[UnsafeReach("set once, by std/debug's module initializer before any task starts, then only read")]
   @@resolver : Proc(Pointer(Void*), Int32, Nil)? = nil
   # Linux has no stack walk to call: a program that imports `std/debug`
   # installs one, which fills the buffer with the return addresses of the
   # frames whose CFA lies above the address it is given, and answers how
   # many. A program that does not import it captures nothing.
+  @[UnsafeReach("set once, by std/debug's module initializer before any task starts, then only read")]
   @@capturer : Proc(Pointer(Void*), Int32, UInt64, Int32)? = nil
 
   def self.resolver=(r : Proc(Pointer(Void*), Int32, Nil)?) : Nil
@@ -11669,6 +11672,7 @@ end
 # entries are reached through it.
 {% if !flag?(:wasm32) && !flag?(:win32) %}
   class IyiEnvironTable
+    @[UnsafeReach("written only by std/env's writes, one at a time (`ENV.writing`), each installing a whole new table made in the shared heap")]
     @@held = Pointer(UInt8*).new(0_u64)
 
     def self.hold(entries : UInt8**) : Nil

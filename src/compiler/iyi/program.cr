@@ -1463,6 +1463,11 @@ module Iyi
 
       argc_unsafe.no_init_flag = true
       argv_unsafe.no_init_flag = true
+      # iyi: set by the program's entry before any task can start and
+      # never written after, so a parallel unit reaches it as it reaches a
+      # number (SPEC.md III.4.5); `ARGV` copies out of it.
+      argv_unsafe.iyi_safe_reach = "set by the program's entry before any task starts, then only read"
+      iyi_reach_robust << argv_unsafe.object_id
 
       predefined_constants << argc_unsafe
       predefined_constants << argv_unsafe

@@ -3048,12 +3048,17 @@ module Iyi
     # iyi: the prelude's files that hold the runtime - the scheduler and the
     # pool (`concurrency.iyi`), kernel threads and the collector's stop
     # (`thread.iyi`), and the allocator, the collector, panics and the
-    # entry point (`prelude.iyi`). Their code never checks for preemption:
-    # a loop of theirs giving the worker up would park a fiber inside the
-    # runtime, with a worker's structures half changed or a reference to
-    # one worker's state held across a move to another. The prelude's
-    # other files are a library, and check as a program's own code does.
-    IYI_RUNTIME_FILES = {"prelude.iyi", "concurrency.iyi", "thread.iyi", "chaos.iyi"}
+    # entry point (`prelude.iyi`), and a unit's own heap - publication,
+    # local collection, a partition's death (`heap_partition.iyi`) and its
+    # verifier (`heap_verify.iyi`). Their code never checks for preemption
+    # and their `Atomic` verbs are no chaos points: a loop of theirs giving
+    # the worker up would park a fiber inside the runtime, with a worker's
+    # structures half changed or a reference to one worker's state held
+    # across a move to another, and a switch inside a publication walk or a
+    # local collection would run another fiber of the unit in the middle of
+    # it. The prelude's other files are a library, and check as a program's
+    # own code does.
+    IYI_RUNTIME_FILES = {"prelude.iyi", "concurrency.iyi", "thread.iyi", "chaos.iyi", "heap_partition.iyi", "heap_verify.iyi"}
 
     @iyi_runtime_files = {} of String => Bool
 

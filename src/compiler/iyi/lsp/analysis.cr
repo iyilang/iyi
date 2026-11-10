@@ -34,8 +34,11 @@ module Iyi::Lsp
     related : Array({String, Int32, Int32, String}),
     suggestion : String? = nil,
     # Where the suggestion goes when that is not the diagnostic's own span
-    # (`TypeException#edit_at`): {line, column, size} in the same file.
-    edit_at : {Int32, Int32, Int32}? = nil
+    # (`TypeException#edit_at`): {line, column, size}, in the same file
+    # unless *edit_file* names another - the declaration a parallel unit
+    # reaches (SPEC.md III.4.5), which `iyi fix` claims where it is.
+    edit_at : {Int32, Int32, Int32}? = nil,
+    edit_file : String? = nil
 
   class Analysis
     # The last result that type-checked, per *open* document. Hover and
@@ -896,6 +899,11 @@ module Iyi::Lsp
           message += "\n(in #{far[0]}:#{far[1]})"
         end
         carried = frames.map { |(file, line, col, _, msg, _)| {file, line, col, msg} }
+        # The one edit placed in the far file that `iyi fix` makes there:
+        # the error's own, when it carries a place for it.
+        if far && (suggestion = far[5]) && (edit_at = ex.as?(TypeException).try(&.edit_at))
+          return Diag.new(1, 1, 0, message, Iyi.iyi_spec_references(message), carried, suggestion, edit_at, far[0])
+        end
         return Diag.new(1, 1, 0, message, Iyi.iyi_spec_references(message), carried)
       end
 

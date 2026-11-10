@@ -376,6 +376,7 @@ class Inflate
   DONE    = 6
 
   # The order a dynamic block sends the code-length code's lengths in.
+  @[SafeReach("set before the first parallel task starts, then only read")]
   ORDER = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]
 
   @envelope : Envelope
@@ -1549,9 +1550,13 @@ class Encoder
   # search past a match this long, or at levels 1 to 3 no entering a
   # match's positions into the chains (`lazy`); a match this long ends
   # the search (`nice`); how many links of a chain are followed (`chain`).
+  @[SafeReach("set before the first parallel task starts, then only read")]
   GOOD  = [0, 4, 4, 4, 4, 8, 8, 8, 32, 32]
+  @[SafeReach("set before the first parallel task starts, then only read")]
   LAZY  = [0, 4, 5, 6, 4, 16, 16, 32, 128, 258]
+  @[SafeReach("set before the first parallel task starts, then only read")]
   NICE  = [0, 8, 16, 32, 16, 32, 128, 128, 258, 258]
+  @[SafeReach("set before the first parallel task starts, then only read")]
   CHAIN = [0, 4, 8, 32, 16, 32, 128, 256, 1024, 4096]
 
   @level : Int32

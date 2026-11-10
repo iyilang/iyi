@@ -431,7 +431,10 @@ end
 struct MlKemPoly
   ETA = 2
 
-  @@tables = Pointer(UInt32).new(0_u64)
+  # `build_tables`'s zetas and gammas, built whole by the initializer at
+  # the first read and never written again.
+  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @@tables : Pointer(UInt32) = build_tables
 
   def self.poly : Pointer(UInt32)
     Pointer(UInt32).malloc(256_u64)
@@ -443,8 +446,7 @@ struct MlKemPoly
 
   # The 128 zetas, 17^BitRev7(i) mod q, then the 128 gammas,
   # 17^(2 BitRev7(i) + 1) mod q: FIPS 203 appendix A.
-  private def self.tables : Pointer(UInt32)
-    return @@tables if @@tables.address != 0_u64
+  private def self.build_tables : Pointer(UInt32)
     words = [
       1_u32, 1729_u32, 2580_u32, 3289_u32, 2642_u32, 630_u32, 1897_u32, 848_u32, 1062_u32, 1919_u32, 193_u32, 797_u32,
       2786_u32, 3260_u32, 569_u32, 1746_u32, 296_u32, 2447_u32, 1339_u32, 1476_u32, 3046_u32, 56_u32, 2240_u32, 1333_u32,
@@ -471,14 +473,13 @@ struct MlKemPoly
     ]
     table = Pointer(UInt32).malloc(256_u64)
     table.copy_from(words.to_unsafe, 256)
-    @@tables = table
     table
   end
 
   # The NTT in place (Algorithm 9): seven layers of butterflies, the zeta of
   # each block taken in order from the second.
   def self.ntt(f : Pointer(UInt32)) : Nil
-    zetas = tables
+    zetas = @@tables
     k = 1
     len = 128
     while len >= 2
@@ -502,7 +503,7 @@ struct MlKemPoly
   # The inverse NTT in place (Algorithm 10), then the product by
   # 128^-1 = 3303 mod q.
   def self.inverse_ntt(f : Pointer(UInt32)) : Nil
-    zetas = tables
+    zetas = @@tables
     k = 127
     len = 2
     while len <= 128
@@ -532,7 +533,7 @@ struct MlKemPoly
   # in the NTT domain (Algorithms 11 and 12): a row of A for step 1 from
   # first = 3i, a column for step 3 from first = i.
   def self.dot(m : Pointer(UInt32), first : Int32, step : Int32, v : Pointer(UInt32), dst : Pointer(UInt32)) : Nil
-    gammas = tables + 128
+    gammas = @@tables + 128
     i = 0
     while i < 256
       dst[i] = 0_u32

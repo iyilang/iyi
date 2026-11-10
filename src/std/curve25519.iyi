@@ -819,17 +819,20 @@ end
 # The fixed-base table `CurvePoint.base_mult` reads: 32 rows of eight,
 # entry (j, m) the point (m + 1) 256^j B made ready. It holds multiples
 # of B, which is public, so nothing in it is secret; only which entry is
-# read is, and that is chosen by masks. The table is worked out once, the
-# first time it is wanted, and kept: 248 doublings and 224 additions,
-# their 256 Z inverted together by Montgomery's trick (one inversion and
-# three products a point), which is about what one multiplication by the
-# old 4-bit window cost. Two threads that reach it first both work it
-# out and store the same table.
+# read is, and that is chosen by masks. The table is worked out once, by
+# the class variable's initializer at the first read, and kept: 248
+# doublings and 224 additions, their 256 Z inverted together by
+# Montgomery's trick (one inversion and three products a point), which is
+# about what one multiplication by the old 4-bit window cost.
 struct CurveBaseTable
-  @@table = Pointer(CurvePrecomp).new(0_u64)
+  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @@table : Pointer(CurvePrecomp) = build
 
   def self.get : Pointer(CurvePrecomp)
-    return @@table if @@table.address != 0_u64
+    @@table
+  end
+
+  private def self.build : Pointer(CurvePrecomp)
     points = Pointer(CurvePoint).malloc(256_u64)
     p = CurvePoint.base
     row = 0
@@ -870,7 +873,6 @@ struct CurveBaseTable
       table[i] = CurvePrecomp.new(y + x, y - x, x * y * CurveField.d2)
       i = i - 1
     end
-    @@table = table
     table
   end
 

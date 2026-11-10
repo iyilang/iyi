@@ -644,6 +644,9 @@
     end
 
     def self.start(proc : Proc(Nil)) : IyiThread
+      # What the proc captured is read on the new thread, which allocates
+      # in the shared heap (heap22 row 1c), as the thread object is made.
+      IyiCross.publish(proc)
       register_current
       install_handler
       # A second scheduler thread is coming: from here fibers on two
@@ -652,7 +655,7 @@
       # runs a fiber the lock does not cover.
       IyiScheduler.expect_thread
       line = new_line
-      thread = IyiThread.new(line, proc)
+      thread = IyiCross.shared { IyiThread.new(line, proc) }
       IyiHeap.write64(line + IYI_TL_OBJECT, thread.object_id)
       # Rooted before anything else can run: the list is a class variable.
       IyiRuntimeLock.lock

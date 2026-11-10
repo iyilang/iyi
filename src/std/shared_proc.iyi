@@ -31,20 +31,43 @@ module std/shared_proc
 @[Share(owns: true)]
 pub struct SharedProc(A, R)
   @proc : Proc(A, R)
+  {% if flag?(:heap_partitions) %}
+    # The compiler could not prove the block's crossing (heap22
+    # `pinned:`): a unit that calls it allocates in the shared heap.
+    @pinned : Bool
+  {% end %}
 
   # Private: a `SharedProc` made from a proc nobody checked would be the
   # hole this type closes.
   private def initialize(@proc : Proc(A, R))
+    {% if flag?(:heap_partitions) %}
+      @pinned = false
+    {% end %}
   end
 
+  {% if flag?(:heap_partitions) %}
+    private def initialize(@proc : Proc(A, R), @pinned : Bool)
+    end
+  {% end %}
+
   # The block, checked as a parallel task's block is, as a value any
-  # thread may call.
+  # thread may call. With `-Dheap_partitions` what it captured is
+  # published here (heap22 row 8); *pinned* is the compiler's, as
+  # `spawn_new`'s is.
   @[Share]
-  def self.of(&block : A -> R) : SharedProc(A, R)
-    new(block)
+  def self.of(*, pinned : Bool = false, &block : A -> R) : SharedProc(A, R)
+    {% if flag?(:heap_partitions) %}
+      IyiCross.publish(block)
+      new(block, pinned)
+    {% else %}
+      new(block)
+    {% end %}
   end
 
   def call(argument : A) : R
+    {% if flag?(:heap_partitions) %}
+      IyiHeap.pin if @pinned
+    {% end %}
     @proc.call(argument)
   end
 end

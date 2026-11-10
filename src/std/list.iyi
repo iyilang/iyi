@@ -32,13 +32,20 @@ import std/iterator::{Iterator, Stop}
 pub struct List(T)
   @items : Array(T)
 
+  # With `-Dheap_partitions` (heap22 row 21) the copy is made in the
+  # shared heap and the elements are published, since any unit may hold
+  # the list.
   def initialize(items : Array(T))
-    @items = items.dup
+    @items = IyiCross.shared { items.dup }
+    {% if flag?(:heap_partitions) && T.has_inner_pointers? %}
+      @items.each { |item| IyiCross.publish(item) }
+    {% end %}
   end
 
   # A list over an array nothing else holds: the one `appended` or
   # `concatenated` has just built. The copy above is for a caller's array,
-  # which the caller still has; one made here has no other owner.
+  # which the caller still has; one made here has no other owner, and is
+  # published whole (array, buffer and elements) instead.
   protected def self.owning(items : Array(T)) : List(T)
     list = List(T).new([] of T)
     list.adopt(items)
@@ -46,6 +53,7 @@ pub struct List(T)
   end
 
   protected def adopt(items : Array(T)) : Nil
+    IyiCross.publish(items)
     @items = items
   end
 

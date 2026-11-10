@@ -5158,6 +5158,8 @@ class IyiScheduler
     # deferred `g.join`, above all — must see that its owner is already
     # dying and keep quiet rather than re-raise into the unwind.
     fiber.panicked = true
+    # Read by whoever joins the task, from any unit (heap22 row 7).
+    IyiCross.publish(message)
     fiber.panic_message = message
     # A deadlock found while this fiber waited in a group's join: that join
     # is a cleanup already off the list, and it is finished here as a
@@ -7013,6 +7015,14 @@ class IyiGroup
       @placed = Atomic(UInt64).new(UNPLACED)
     end
 
+    # heap22 row 4: the unit, made first so the value is born in its
+    # partition (std/unit's `Unit.new`), with the placement settled then
+    # rather than at the first task: a `Unit` on the main thread
+    # (`MAIN`) runs its tasks in the shared heap, so its unit is pinned.
+    protected def initialize(@value : T, @unit : IyiUnit, placed : UInt64)
+      @placed = Atomic(UInt64).new(placed)
+    end
+
     protected def iyi_value : T
       @value
     end
@@ -7133,9 +7143,12 @@ class IyiGroup
   # leaves the unit while the unit lives on).
   def spawn(*, in owner : Unit(S), &block : S -> T) : IyiTask(T) forall S, T
     value = owner.iyi_value
+    # The block's captures cross into the Unit's unit (heap22 row 1d), and
+    # `work`, which another unit's fiber runs, is made in the shared heap.
     # Named outside the `{% if %}`: a block parameter read only inside one
     # is not captured.
-    work = -> { block.call(value) }
+    IyiCross.publish(block)
+    work = IyiCross.shared { unit_work(block, value) }
     {% if flag?(:gc_none) || flag?(:gc_boehm) %}
       # One thread: every task is a unit-mate of every other already.
       in_unit(&work)
@@ -7146,6 +7159,17 @@ class IyiGroup
         on_main(owner, &work)
       end
     {% end %}
+  end
+
+  # A `Unit` task's body, made where `spawn(in:)` says. Its answer leaves
+  # the unit while the unit lives on, so it is published here, before
+  # `IyiTask#finish` stores it (heap22 row 2b).
+  private def unit_work(block : S -> T, value : S) : -> T forall S, T
+    -> {
+      answer = block.call(value)
+      IyiCross.publish(answer)
+      answer
+    }
   end
 
   # Both placements at once, which the compiler refuses at the call
@@ -7162,7 +7186,9 @@ class IyiGroup
   private def in_unit(&block : -> T) : IyiTask(T) forall T
     raise "a task spawned on a group whose block has ended: no scope is left to join it" if @ended
     IyiScheduler.make_stacks_with { |fresh| fresh.prepare_stack } unless IyiScheduler.makes_stacks?
-    fiber = IyiFiber.new
+    # Fibers are the shared heap's whatever unit they run (heap22 row 14);
+    # the rest of a same-unit task stays in its unit, since nothing crosses.
+    fiber = IyiCross.shared { IyiFiber.new }
     fiber.home = IyiScheduler.state
     fiber.unit = IyiScheduler.current.unit
     {% if flag?(:iyi_chaos) %}
@@ -7187,12 +7213,15 @@ class IyiGroup
     # its spawner's unit, so a program held to one worker runs its spawns
     # on one thread, as before. Private: nothing but the compiler, which
     # has checked the block, may call it.
-    private def spawn_pooled(&block : -> T) : IyiTask(T) forall T
+    #
+    # *pinned*: the compiler's, when the crossing could not be proven and
+    # the new unit allocates in the shared heap (heap22 `pinned:`).
+    private def spawn_pooled(*, pinned : Bool = false, &block : -> T) : IyiTask(T) forall T
       {% if flag?(:iyi_chaos) %}
         return IyiChaos.parallel_task(in_unit(&block)) if IyiChaos.simulated?
       {% end %}
       return in_unit(&block) unless IyiWorkers.parallel?
-      on_pool(&block)
+      on_pool(pinned, &block)
     end
 
     # :nodoc: — `g.spawn(unit: :new) { }`, which the compiler points here
@@ -7204,25 +7233,47 @@ class IyiGroup
     # policy, the answer through `value`. Named `spawn_` so that the proof
     # of `@[SafeReach]`, which runs after the call is pointed here, counts
     # its block as a parallel start (`ReachProof#parallel_start?`).
-    private def spawn_new(&block : -> T) : IyiTask(T) forall T
-      on_pool(&block)
+    private def spawn_new(*, pinned : Bool = false, &block : -> T) : IyiTask(T) forall T
+      on_pool(pinned, &block)
     end
 
-    private def on_pool(&block : -> T) : IyiTask(T) forall T
+    # The block's captures published as they cross (heap22 row 1), and
+    # the unit made in the shared heap.
+    private def on_pool(pinned : Bool, &block : -> T) : IyiTask(T) forall T
       {% if flag?(:iyi_chaos) %}
         return IyiChaos.parallel_task(in_unit(&block)) if IyiChaos.simulated?
       {% end %}
-      pooled(IyiUnit.new, &block)
+      IyiCross.publish(block)
+      pooled(IyiCross.shared { IyiUnit.new(pinned: pinned) }, &block)
     end
 
     # A task of *unit* on the pool: a new unit's first, or a `Unit`'s.
+    # The caller has published what the block captures.
     private def pooled(unit : IyiUnit, &block : -> T) : IyiTask(T) forall T
       raise "a task spawned on a group whose block has ended: no scope is left to join it" if @ended
       IyiScheduler.make_stacks_with { |fresh| fresh.prepare_stack } unless IyiScheduler.makes_stacks?
       IyiWorkers.start
-      fiber = IyiFiber.new
-      fiber.parallel = true
-      fiber.unit = unit
+      # The group is told of the task's end on the task's thread.
+      IyiCross.publish(self)
+      task = IyiCross.shared do
+        fiber = IyiFiber.new
+        fiber.parallel = true
+        fiber.unit = unit
+        crossing_task(fiber, block)
+      end
+      IyiSchedLock.lock
+      IyiWorkers.push(task.fiber)
+      IyiSchedLock.unlock
+      # A worker the push found none idle for, started now the lock is let
+      # go (`IyiWorkers.grow`).
+      IyiWorkers.pay
+      task
+    end
+
+    # The task, its box and the closure its fiber runs, for a task another
+    # unit runs: made in the shared heap by the caller's bracket (heap22
+    # row 14), and the fiber adopted.
+    private def crossing_task(fiber : IyiFiber, block : -> T) : IyiTask(T) forall T
       task = IyiTask(T).new(fiber)
       runner = self
       install(fiber) do
@@ -7231,12 +7282,6 @@ class IyiGroup
         runner.finished(fiber, value.is_a?(::Error))
       end
       adopt(fiber)
-      IyiSchedLock.lock
-      IyiWorkers.push(fiber)
-      IyiSchedLock.unlock
-      # A worker the push found none idle for, started now the lock is let
-      # go (`IyiWorkers.grow`).
-      IyiWorkers.pay
       task
     end
 
@@ -7250,19 +7295,16 @@ class IyiGroup
     private def on_main(owner : Unit(S), &block : -> T) : IyiTask(T) forall S, T
       raise "a task spawned on a group whose block has ended: no scope is left to join it" if @ended
       IyiScheduler.make_stacks_with { |fresh| fresh.prepare_stack } unless IyiScheduler.makes_stacks?
-      fiber = IyiFiber.new
-      fiber.home = IyiScheduler.main_state
-      {% if flag?(:iyi_chaos) %}
-        IyiChaos.adopt_into(fiber, owner)
-      {% end %}
-      task = IyiTask(T).new(fiber)
-      runner = self
-      install(fiber) do
-        value = block.call
-        task.finish(value)
-        runner.finished(fiber, value.is_a?(::Error))
+      IyiCross.publish(self)
+      task = IyiCross.shared do
+        fiber = IyiFiber.new
+        fiber.home = IyiScheduler.main_state
+        {% if flag?(:iyi_chaos) %}
+          IyiChaos.adopt_into(fiber, owner)
+        {% end %}
+        crossing_task(fiber, block)
       end
-      adopt(fiber)
+      fiber = task.fiber
       IyiScheduler.ready(fiber, false)
       {% if flag?(:iyi_chaos) %}
         IyiChaos.point
@@ -7451,6 +7493,49 @@ struct IyiMissed
   end
 end
 
+# ── Crossings — heap22 ─────────────────────────────────────────────────
+#
+# What the crossing code of the runtime and std calls (design B, SPEC.md
+# III.4.19 PROPOSED): a value made reachable from another unit is
+# published first, and glue another unit reads is made in the shared
+# heap. Without `-Dheap_partitions` both compile to nothing but the
+# block, so a default build is the build it was.
+module IyiCross
+  # *value* published (`__iyi_publish`) before it crosses: each word of
+  # it, so a reference, a struct, a union and a proc's closure are all
+  # one walk; a word that is no heap address is nobody's and stops at
+  # once. A pointer-free `T` compiles to nothing.
+  def self.publish(value : T) : Nil forall T
+    {% if flag?(:heap_partitions) && T.has_inner_pointers? %}
+      words = Pointer(UInt64).new(pointerof(value).address)
+      index = 0_u64
+      count = sizeof(T).to_u64 // 8_u64
+      while index < count
+        word = (words + index.to_i64).value
+        __iyi_publish(Pointer(Void).new(word)) if word != 0_u64
+        index = index + 1_u64
+      end
+    {% end %}
+  end
+
+  # The block, allocating in the shared heap (`IyiHeap.shared`).
+  def self.shared(&)
+    {% if flag?(:heap_partitions) %}
+      IyiHeap.shared { yield }
+    {% else %}
+      yield
+    {% end %}
+  end
+
+  # The running unit pinned (`IyiHeap.pin`): a pointer handed where no
+  # collector looks.
+  def self.pin : Nil
+    {% if flag?(:heap_partitions) %}
+      IyiHeap.pin
+    {% end %}
+  end
+end
+
 # ── Channel — III.4.6 ──────────────────────────────────────────────────
 #
 # `Channel(T).new` is a rendezvous, as Crystal's is: a send completes when
@@ -7513,7 +7598,9 @@ class Channel(T)
   def initialize(capacity : Int32)
     raise "a channel's capacity is not negative" if capacity < 0
     @slots = capacity < 1 ? 1 : capacity
-    @ring = Pointer(T).malloc(@slots.to_u64)
+    # The ring is read by every unit that sends or receives, so it is
+    # the shared heap's, as its growth and the send nodes are.
+    @ring = IyiCross.shared { Pointer(T).malloc(@slots.to_u64) }
     @first = 0
     @count = 0
     @capacity = capacity
@@ -7558,6 +7645,8 @@ class Channel(T)
     {% if flag?(:iyi_chaos) %}
       IyiChaos.point
     {% end %}
+    # Published before another unit can take it (heap22 row 3).
+    IyiCross.publish(value)
     fiber = IyiScheduler.current
     lock
     if fiber.cancelled
@@ -7753,6 +7842,7 @@ class Channel(T)
     {% if flag?(:iyi_chaos) %}
       IyiChaos.point
     {% end %}
+    IyiCross.publish(value)
     lock
     answer = put_held(value)
     woken = take_woken
@@ -7789,6 +7879,7 @@ class Channel(T)
   end
 
   def send_select_action(value : T) : IyiSendSelect(T)
+    IyiCross.publish(value)
     IyiSendSelect(T).new(self, value)
   end
 
@@ -7797,7 +7888,7 @@ class Channel(T)
   # them ran have all those values in hand, so a full ring doubles.
   private def push_item(value : T) : Nil
     if @count == @slots
-      grown = Pointer(T).malloc((@slots * 2).to_u64)
+      grown = IyiCross.shared { Pointer(T).malloc((@slots * 2).to_u64) }
       index = 0
       while index < @count
         grown[index] = @ring[(@first + index) % @slots]
@@ -7835,7 +7926,7 @@ class Channel(T)
     if waiter.is_a?(IyiWaiter) && !waiter.linked
       waiter.renew(nonce, slot)
     else
-      waiter = IyiWaiter.new(fiber, nonce, slot)
+      waiter = IyiCross.shared { IyiWaiter.new(fiber, nonce, slot) }
       fiber.spare_waiter = waiter
     end
     waiter.linked = true
@@ -7858,7 +7949,7 @@ class Channel(T)
     if node.is_a?(IyiSendNode(T)) && node.read && !node.linked
       node.renew(fiber, nonce, value)
     else
-      node = IyiSendNode(T).new(fiber, nonce, value)
+      node = IyiCross.shared { IyiSendNode(T).new(fiber, nonce, value) }
       @spare_send = node
     end
     node.read = false

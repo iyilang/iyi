@@ -305,10 +305,10 @@ if [ "$PARTITIONS" -eq 1 ]; then
   # returns before the line that copy rewrites.
   echo "  floor blind to the threads: not run under -Dheap_partitions, where the floor is SHARED_MIN whatever the threads and next_budget returns before the floor it rewrites; the shared floor's copies follow"
 
-  # The shared floor removed: a collection with a few KB live leaves a
-  # budget of twice them, and the idle budget is not the floor.
-  prove_fails "the shared floor removed" nosharedfloor "floor:" \
-    "{ if (sub(/$SHARED_RETURN/, \"return grown_shared\")) found = 1; print } END { if (!found) exit 3 }"
+  # The shared floor back at a thread's, MIN_BUDGET: a collection with a
+  # few KB live leaves half the shared floor, busy or idle.
+  prove_fails "the shared floor at a thread's" lowfloor "floor:" \
+    "{ if (sub(/$SHARED_RETURN/, \"return grown_shared < MIN_BUDGET ? MIN_BUDGET : grown_shared\")) found = 1; print } END { if (!found) exit 3 }"
 
   # The old floor back, SHARED_MIN for every thread that filled a slice:
   # four threads churning leave four floors.
@@ -367,9 +367,11 @@ if [ "$PARTITIONS" -eq 1 ]; then
   # ceiling's copy cannot move it. What bounds it is each partition's
   # own collection (design section 4.1): the copy turns every local
   # collection off - in flight, at a park and by an idle worker - and
-  # forty thousand rounds a worker, a fifth of the step's, allocate
-  # about half a GiB with nothing taking any of it back, past the four
-  # budgets the step holds the twelve to.
+  # twenty thousand rounds a worker, a tenth of the step's, are left to
+  # pile up with nothing taking any of it back: forty thousand peaked at
+  # 888 MiB through no collection on macOS 26.6, an M2 Pro with 10
+  # cores, so twenty thousand are about twice the four budgets the step
+  # holds the twelve to.
   echo "  the ceiling never holds: not run under -Dheap_partitions, where working_set's workers allocate in their partitions, whose slices never reach the shared heap's ceiling; the partitions' own collection's copy follows"
   mkdir -p "$WORK/nolocal/iyi"
   cp -R "$REPO/src/iyi/." "$WORK/nolocal/iyi/"
@@ -380,7 +382,7 @@ if [ "$PARTITIONS" -eq 1 ]; then
          -o "$WORK/nolocal/program" "$REPO/bench/working_set.iyi" >"$WORK/nolocal/build.log" 2>&1; then
     echo "  a partition never collects: the patched runtime did not build"; sed -n '1,12p' "$WORK/nolocal/build.log"; status=1
   else
-    "$WORK/nolocal/program" 12 40000 >"$WORK/nolocal/out" 2>&1
+    "$WORK/nolocal/program" 12 20000 >"$WORK/nolocal/out" 2>&1
     exit_code=$?
     if [ "$exit_code" -eq 0 ]; then
       echo "  a partition never collects: the working set still stayed within the bound, so it does not test this"

@@ -6027,7 +6027,7 @@ describe "Semantic: iyi" do
               end
             end
 
-            @[SafeReach("filled before the first parallel task starts, then only read")]
+            @[UnsafeReach("filled before the first parallel task starts, then only read")]
             TABLE = Table.new
             TABLE.add { ask(1_i64) }
 

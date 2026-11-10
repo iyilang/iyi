@@ -226,6 +226,13 @@ import std/socket::{IyiSocket, SocketError}
   # 32 tasks, each holding a list on its own stack, park on a channel 30
   # times; the main thread sends, so each wake goes to the pool's shared
   # queue and whichever worker is free resumes it. Each round allocates.
+  #
+  # With partitions in the runtime (`-Dheap_partitions`) each task's
+  # rounds allocate in its unit's own partition, which never feeds the
+  # global trigger (heap22 design, section 4.2) and collects itself with
+  # no worker stopped (section 4.1): there the main thread asks for a
+  # global collection after every eighth send, while the task it just woke
+  # is on its way to a worker, and the tasks' own collections must run.
   def channels(watch : Int32) : Nil
     watched("channels", watch) do
       tasks = 32
@@ -233,6 +240,9 @@ import std/socket::{IyiSocket, SocketError}
       feed = Channel(Int32).new
       moves = Tally.new
       stops = IyiThread.stops
+      {% if flag?(:heap_partitions) %}
+        locals = IyiHeap.local_collections
+      {% end %}
       group do |g|
         tasks.times do |t|
           g.spawn(unit: :new) do
@@ -248,13 +258,26 @@ import std/socket::{IyiSocket, SocketError}
             0
           end
         end
-        (tasks * rounds).times { feed.send(1) }
+        {% if flag?(:heap_partitions) %}
+          (tasks * rounds).times do |i|
+            feed.send(1)
+            IyiMark.collect if i % 8 == 7
+          end
+        {% else %}
+          (tasks * rounds).times { feed.send(1) }
+        {% end %}
       end
       fail("channels: no collection stopped a worker while the tasks moved") if IyiThread.stops == stops
       if IyiWorkers.count > 1 && moves.count == 0_i64
         fail("channels: none of #{tasks * rounds} parks on a channel resumed on another worker")
       end
-      puts "channels: #{tasks} tasks parked #{rounds} times each, #{moves.count} resumed on another worker, lists whole through #{IyiThread.stops - stops} stops"
+      {% if flag?(:heap_partitions) %}
+        held = IyiHeap.local_collections - locals
+        fail("channels: no local collection ran while #{tasks} tasks allocated in partitions of their own") if IyiWorkers.count > 1 && held == 0_u64
+        puts "channels: #{tasks} tasks parked #{rounds} times each, #{moves.count} resumed on another worker, lists whole through #{held} local collections and #{IyiThread.stops - stops} stops"
+      {% else %}
+        puts "channels: #{tasks} tasks parked #{rounds} times each, #{moves.count} resumed on another worker, lists whole through #{IyiThread.stops - stops} stops"
+      {% end %}
     end
   end
 

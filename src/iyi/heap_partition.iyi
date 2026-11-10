@@ -1346,12 +1346,16 @@ class IyiHeap
   # One local collection of partition *record*, on this thread, which
   # holds its unit's token: *running* is the fiber of the unit on this
   # stack, nil for an idle worker's takeover. None starts while a mark
-  # runs beside the program; a stop asked while it marks ends it, nothing
-  # swept, and the parity it began leaves at most retention. Answers
-  # whether it swept.
+  # runs beside the program, nor on a partition a pointer answer
+  # detached: the task's box, which is the shared heap's and no root of a
+  # local mark, holds the answer from then on, so only the global
+  # collection may free what it reaches. A stop asked while it marks ends
+  # it, nothing swept, and the parity it began leaves at most retention.
+  # Answers whether it swept.
   @[NoInline]
   def self.local_collect(record : UInt64, running : IyiFiber?, takeover : Bool) : Bool
     return false if LibIyiGCTable.__iyi_marking != 0_u8
+    return false if read64(record &+ REC_STATE) & REC_DETACHED != 0
     registers = uninitialized UInt64[12]
     spill_into(pointerof(registers).address)
     enter_barrier

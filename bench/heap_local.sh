@@ -5,7 +5,8 @@
 # check in each direction that matters - a local mark that follows words
 # into other partitions, a free that lists another heap's chunk, a global
 # sweep that drops what it frees for a partition, a pointer answer left
-# as a store into the box, a death that frees a pinned unit's partition,
+# as a store into the box, a partition that answer detached still
+# collected locally, a death that frees a pinned unit's partition,
 # a local mark blind to the unit's other fibers, and a local sweep that
 # leaves a weak cell naming the chunk it freed.
 #
@@ -128,6 +129,12 @@ if [ "$PART" = all ] || [ "$PART" = broken ]; then
   prove_fails "a merge left as a box store" noanswer "answer:" \
     '/^      answered\(box\.object_id, / { found = 1; next } { print } END { if (!found) exit 3 }' \
     concurrency.iyi
+
+  # A partition detached by a pointer answer still collected locally: the
+  # answer, held only by the task's shared box, is freed.
+  prove_fails "a detached partition collected" nodetach "detach:" \
+    '{ if ($0 ~ /^    return false if read64\(record &\+ REC_STATE\) & REC_DETACHED != 0$/) { found = 1; next } print } END { if (!found) exit 3 }' \
+    heap_partition.iyi
 
   # A pin that moves the unit's allocation to the shared heap and leaves
   # its partition the unit's: the death frees it whole.

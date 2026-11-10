@@ -24,6 +24,9 @@
 # - `answer:` units answer a list built in their partition; after the
 #   units die and the shared heap has collected, every answer reads back
 #   whole (the partition was detached and the shared heap adopted it).
+# - `detach:` a unit answers a list into a box of the shared heap, scrubs
+#   its stack and asks for a local collection: the list reads back whole
+#   (a detached partition is the global collection's alone).
 # - `pin:` a unit pins itself with a list alive, hands it to the shared
 #   heap, and dies; the list reads back whole after a collection.
 # - `free:` a unit asks to free a chunk of the shared heap and then
@@ -302,6 +305,44 @@
       fail("answer: #{wrong} nodes of unit #{t}'s answer read wrong after it died") if wrong != 0
     end
     fail("answer: no partition was detached by a pointer answer") if IyiHeap.detached_partitions == detached
+  end
+
+  # ── detach ────────────────────────────────────────────────────────────
+
+  # A list built in the unit's partition and answered into a box of the
+  # shared heap, as `IyiTask#finish` answers, in a frame of its own.
+  @[NoInline]
+  def stash_answer(box : Array(Node?)) : Nil
+    IyiHeap.answer(box, build(3000000000_i64, 300, 0))
+  end
+
+  # The answered list is reachable only from the shared box, which no
+  # local mark reads: a local collection asked for after the answer must
+  # not free it. Answers how many nodes read wrong, or a negative failure.
+  def detach_task : Int64
+    record = IyiHeap.current_record
+    return -1_i64 if record == 0_u64
+    box = [] of Node?
+    IyiHeap.shared { box = Array(Node?).new(1) }
+    return -2_i64 if IyiHeap.owner_of(box.object_id) != 0_u64
+    detached = IyiHeap.detached_partitions
+    stash_answer(box)
+    return -3_i64 if IyiHeap.detached_partitions == detached
+    scrub_stack
+    IyiHeap.collect_local(record)
+    broken(box[0], 3000000000_i64, 300)
+  end
+
+  def detach_check : Nil
+    group do |g|
+      handle = g.spawn(unit: :new) { detach_task }
+      value = handle.value
+      fail("detach: the unit answered #{value}") unless value.is_a?(Int64)
+      fail("detach: the unit allocates in no partition") if value == -1_i64
+      fail("detach: a box made in the shared bracket is a partition's") if value == -2_i64
+      fail("detach: a pointer answer into a shared box did not detach the partition") if value == -3_i64
+      fail("detach: #{value} nodes of an answered list read wrong after its unit collected") if value != 0_i64
+    end
   end
 
   # Every unit's partition gone: the units are reaped a little after their
@@ -650,6 +691,7 @@
   free_check
   return_check
   answer_check(workers)
+  detach_check
   pin_check
   poison_check
   graphs_check(workers, rounds)

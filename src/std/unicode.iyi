@@ -2722,186 +2722,70 @@ pub struct Unicode
   end
 
   # ---------------------------------------------------------------------
-  # Tables: decoded once, each by its class variable's initializer at the
-  # first read, then only read; searched by rows.
+  # Tables: decoded once, each by its class variable's initializer as the
+  # module starts, then only read; searched by rows.
   # ---------------------------------------------------------------------
 
-  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @[SafeReach("decoded whole by its initializer as the module starts, before any parallel task; then only read")]
   @@letter : Array(Int32) = decode(LETTER)
-  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @[SafeReach("decoded whole by its initializer as the module starts, before any parallel task; then only read")]
   @@number : Array(Int32) = decode(NUMBER)
-  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @[SafeReach("decoded whole by its initializer as the module starts, before any parallel task; then only read")]
   @@mark : Array(Int32) = decode(MARK)
-  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @[SafeReach("decoded whole by its initializer as the module starts, before any parallel task; then only read")]
   @@whitespace : Array(Int32) = decode(WHITESPACE)
-  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @[SafeReach("decoded whole by its initializer as the module starts, before any parallel task; then only read")]
   @@control : Array(Int32) = decode(CONTROL)
-  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @[SafeReach("decoded whole by its initializer as the module starts, before any parallel task; then only read")]
   @@lowercase : Array(Int32) = decode(LOWERCASE)
-  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @[SafeReach("decoded whole by its initializer as the module starts, before any parallel task; then only read")]
   @@uppercase : Array(Int32) = decode(UPPERCASE)
-  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @[SafeReach("decoded whole by its initializer as the module starts, before any parallel task; then only read")]
   @@titlecase : Array(Int32) = decode(TITLECASE)
-  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @[SafeReach("decoded whole by its initializer as the module starts, before any parallel task; then only read")]
   @@cased : Array(Int32) = decode(CASED)
-  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @[SafeReach("decoded whole by its initializer as the module starts, before any parallel task; then only read")]
   @@case_ignorable : Array(Int32) = decode(CASE_IGNORABLE)
-  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @[SafeReach("decoded whole by its initializer as the module starts, before any parallel task; then only read")]
   @@upcase : Array(Int32) = decode(UPCASE)
-  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @[SafeReach("decoded whole by its initializer as the module starts, before any parallel task; then only read")]
   @@downcase : Array(Int32) = decode(DOWNCASE)
-  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @[SafeReach("decoded whole by its initializer as the module starts, before any parallel task; then only read")]
   @@alternate : Array(Int32) = decode(ALTERNATE)
-  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @[SafeReach("decoded whole by its initializer as the module starts, before any parallel task; then only read")]
   @@casefold : Array(Int32) = decode(CASEFOLD)
-  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @[SafeReach("decoded whole by its initializer as the module starts, before any parallel task; then only read")]
   @@special_upcase : Array(Int32) = decode(SPECIAL_UPCASE)
-  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @[SafeReach("decoded whole by its initializer as the module starts, before any parallel task; then only read")]
   @@special_downcase : Array(Int32) = decode(SPECIAL_DOWNCASE)
-  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @[SafeReach("decoded whole by its initializer as the module starts, before any parallel task; then only read")]
   @@special_titlecase : Array(Int32) = decode(SPECIAL_TITLECASE)
-  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @[SafeReach("decoded whole by its initializer as the module starts, before any parallel task; then only read")]
   @@special_fold : Array(Int32) = decode(SPECIAL_FOLD)
-  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @[SafeReach("decoded whole by its initializer as the module starts, before any parallel task; then only read")]
   @@combining_class : Array(Int32) = decode(COMBINING_CLASS)
-  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @[SafeReach("decoded whole by its initializer as the module starts, before any parallel task; then only read")]
   @@canonical_decomposition : Array(Int32) = decode(CANONICAL_DECOMPOSITION)
-  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @[SafeReach("decoded whole by its initializer as the module starts, before any parallel task; then only read")]
   @@compatibility_decomposition : Array(Int32) = decode(COMPATIBILITY_DECOMPOSITION)
-  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @[SafeReach("decoded whole by its initializer as the module starts, before any parallel task; then only read")]
   @@compatibility_data : Array(Int32) = decode(COMPATIBILITY_DATA)
-  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @[SafeReach("decoded whole by its initializer as the module starts, before any parallel task; then only read")]
   @@composition : Array(Int32) = decode(COMPOSITION)
-  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @[SafeReach("decoded whole by its initializer as the module starts, before any parallel task; then only read")]
   @@general_category : Array(Int32) = decode(GENERAL_CATEGORY)
-  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @[SafeReach("decoded whole by its initializer as the module starts, before any parallel task; then only read")]
   @@script : Array(Int32) = decode(SCRIPT)
-  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @[SafeReach("decoded whole by its initializer as the module starts, before any parallel task; then only read")]
   @@category_names : Array(String) = CATEGORY_NAMES.split(',')
-  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @[SafeReach("decoded whole by its initializer as the module starts, before any parallel task; then only read")]
   @@script_names : Array(String) = SCRIPT_NAMES.split(',')
-  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @[SafeReach("decoded whole by its initializer as the module starts, before any parallel task; then only read")]
   @@orbits : Hash(Int32, Array(Int32)) = build_orbits
-  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @[SafeReach("decoded whole by its initializer as the module starts, before any parallel task; then only read")]
   @@simple_fold : Array(Int32) = decode(SIMPLE_FOLD)
-  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @[SafeReach("decoded whole by its initializer as the module starts, before any parallel task; then only read")]
   @@grapheme : Array(Int32) = decode(GRAPHEME)
-
-  private def self.letter_table : Array(Int32)
-    @@letter
-  end
-
-  private def self.number_table : Array(Int32)
-    @@number
-  end
-
-  private def self.mark_table : Array(Int32)
-    @@mark
-  end
-
-  private def self.whitespace_table : Array(Int32)
-    @@whitespace
-  end
-
-  private def self.control_table : Array(Int32)
-    @@control
-  end
-
-  private def self.lowercase_table : Array(Int32)
-    @@lowercase
-  end
-
-  private def self.uppercase_table : Array(Int32)
-    @@uppercase
-  end
-
-  private def self.titlecase_table : Array(Int32)
-    @@titlecase
-  end
-
-  private def self.cased_table : Array(Int32)
-    @@cased
-  end
-
-  private def self.case_ignorable_table : Array(Int32)
-    @@case_ignorable
-  end
-
-  private def self.upcase_table : Array(Int32)
-    @@upcase
-  end
-
-  private def self.downcase_table : Array(Int32)
-    @@downcase
-  end
-
-  private def self.alternate_table : Array(Int32)
-    @@alternate
-  end
-
-  private def self.casefold_table : Array(Int32)
-    @@casefold
-  end
-
-  private def self.special_upcase_table : Array(Int32)
-    @@special_upcase
-  end
-
-  private def self.special_downcase_table : Array(Int32)
-    @@special_downcase
-  end
-
-  private def self.special_titlecase_table : Array(Int32)
-    @@special_titlecase
-  end
-
-  private def self.special_fold_table : Array(Int32)
-    @@special_fold
-  end
-
-  private def self.combining_class_table : Array(Int32)
-    @@combining_class
-  end
-
-  private def self.canonical_decomposition_table : Array(Int32)
-    @@canonical_decomposition
-  end
-
-  private def self.compatibility_decomposition_table : Array(Int32)
-    @@compatibility_decomposition
-  end
-
-  private def self.compatibility_data_table : Array(Int32)
-    @@compatibility_data
-  end
-
-  private def self.composition_table : Array(Int32)
-    @@composition
-  end
-
-  private def self.general_category_table : Array(Int32)
-    @@general_category
-  end
-
-  private def self.script_table : Array(Int32)
-    @@script
-  end
-
-  private def self.category_names : Array(String)
-    @@category_names
-  end
-
-  private def self.script_names : Array(String)
-    @@script_names
-  end
-
-  private def self.simple_fold_table : Array(Int32)
-    @@simple_fold
-  end
-
-  private def self.grapheme_table : Array(Int32)
-    @@grapheme
-  end
 
   # The integers a table string spells, in order: a sign, decimal digits,
   # a comma between.
@@ -2985,54 +2869,54 @@ pub struct Unicode
 
   # Category L: Lu, Ll, Lt, Lm and Lo.
   def self.letter?(char : Char) : Bool
-    in_category?(letter_table, char.ord)
+    in_category?(@@letter, char.ord)
   end
 
   # Category N: Nd, Nl and No — digits in every script, letter numbers, and
   # the fractions and superscripts.
   def self.number?(char : Char) : Bool
-    in_category?(number_table, char.ord)
+    in_category?(@@number, char.ord)
   end
 
   # Category M: Mn, Mc and Me — the combining marks.
   def self.mark?(char : Char) : Bool
-    in_category?(mark_table, char.ord)
+    in_category?(@@mark, char.ord)
   end
 
   # Category Z: Zs, Zl and Zp — the spaces and the line and paragraph
   # separators. Tab and newline are controls, not whitespace, here.
   def self.whitespace?(char : Char) : Bool
-    in_category?(whitespace_table, char.ord)
+    in_category?(@@whitespace, char.ord)
   end
 
   # Category C: Cc, Cf, Cs and Co — controls, format characters,
   # surrogates and private use.
   def self.control?(char : Char) : Bool
-    in_category?(control_table, char.ord)
+    in_category?(@@control, char.ord)
   end
 
   # Category Ll.
   def self.lowercase?(char : Char) : Bool
-    in_category?(lowercase_table, char.ord)
+    in_category?(@@lowercase, char.ord)
   end
 
   # Category Lu.
   def self.uppercase?(char : Char) : Bool
-    in_category?(uppercase_table, char.ord)
+    in_category?(@@uppercase, char.ord)
   end
 
   # Category Lt: the digraphs whose first half is capital, `ǅ` and `ᾈ`.
   def self.titlecase?(char : Char) : Bool
-    in_category?(titlecase_table, char.ord)
+    in_category?(@@titlecase, char.ord)
   end
 
   # The two-letter general category of a character: `"Lu"` for `A`, `"Po"`
   # for `!`, `"Sm"` for `+`; `"Cn"` for a code point no character is
   # assigned to.
   def self.general_category(char : Char) : String
-    table = general_category_table
+    table = @@general_category
     at = search_range(table, 3, char.ord)
-    at < 0 ? "Cn" : category_names[table.to_unsafe[at + 2]]
+    at < 0 ? "Cn" : @@category_names[table.to_unsafe[at + 2]]
   end
 
   # The script a character is written in, as `Scripts.txt` names it:
@@ -3040,9 +2924,9 @@ pub struct Unicode
   # punctuation every script shares; `"Unknown"` for a code point the file
   # does not list.
   def self.script(char : Char) : String
-    table = script_table
+    table = @@script
     at = search_range(table, 3, char.ord)
-    at < 0 ? "Unknown" : script_names[table.to_unsafe[at + 2]]
+    at < 0 ? "Unknown" : @@script_names[table.to_unsafe[at + 2]]
   end
 
   # The code points a property names, as sorted `{from, to}` pairs that
@@ -3053,7 +2937,7 @@ pub struct Unicode
   # from the ranges once rather than asking per character, which is what a
   # regex's `\p{..}` needs: ranges it can negate and case-fold.
   def self.property_ranges(name : String) : Array(Int32)?
-    categories = category_names
+    categories = @@category_names
     wanted = [] of Int32
     if name.bytesize == 1 || name.bytesize == 2
       i = 0
@@ -3062,15 +2946,15 @@ pub struct Unicode
         i = i + 1
       end
     end
-    table = general_category_table
+    table = @@general_category
     if wanted.empty?
-      names = script_names
+      names = @@script_names
       i = 0
       while i < names.size
         wanted << i if names[i] == name
         i = i + 1
       end
-      table = script_table
+      table = @@script
     end
     return nil if wanted.empty?
     ranges = [] of Int32
@@ -3099,20 +2983,20 @@ pub struct Unicode
     # their capital and small forms and have no row in the table; their
     # uppercase is the capital one before them.
     return cp - 1 if cp == 0x1C5 || cp == 0x1C8 || cp == 0x1CB || cp == 0x1F2
-    table = upcase_table
+    table = @@upcase
     at = search_range(table, 3, cp)
     return cp + table.to_unsafe[at + 2] if at >= 0
-    alternate = alternate_table
+    alternate = @@alternate
     at = search_range(alternate, 2, cp)
     return cp - 1 if at >= 0 && (cp - alternate.to_unsafe[at]).odd?
     cp
   end
 
   private def self.simple_downcase(cp : Int32) : Int32
-    table = downcase_table
+    table = @@downcase
     at = search_range(table, 3, cp)
     return cp + table.to_unsafe[at + 2] if at >= 0
-    alternate = alternate_table
+    alternate = @@alternate
     at = search_range(alternate, 2, cp)
     return cp + 1 if at >= 0 && (cp - alternate.to_unsafe[at]).even?
     cp
@@ -3182,7 +3066,7 @@ pub struct Unicode
         return
       end
     end
-    return if yield_special(special_upcase_table, cp) { |part| yield part.unsafe_chr }
+    return if yield_special(@@special_upcase, cp) { |part| yield part.unsafe_chr }
     yield simple_upcase(cp).unsafe_chr
   end
 
@@ -3218,7 +3102,7 @@ pub struct Unicode
         return
       end
     end
-    return if yield_special(special_downcase_table, cp) { |part| yield part.unsafe_chr }
+    return if yield_special(@@special_downcase, cp) { |part| yield part.unsafe_chr }
     yield simple_downcase(cp).unsafe_chr
   end
 
@@ -3231,7 +3115,7 @@ pub struct Unicode
       turkic = turkic_upcase(cp)
       return turkic.unsafe_chr if turkic >= 0
     end
-    table = special_titlecase_table
+    table = @@special_titlecase
     at = search_key(table, 4, cp)
     if at >= 0 && table.to_unsafe[at + 2] == 0
       return table.to_unsafe[at + 1].unsafe_chr
@@ -3253,8 +3137,8 @@ pub struct Unicode
         return
       end
     end
-    return if yield_special(special_titlecase_table, cp) { |part| yield part.unsafe_chr }
-    return if yield_special(special_upcase_table, cp) { |part| yield part.unsafe_chr }
+    return if yield_special(@@special_titlecase, cp) { |part| yield part.unsafe_chr }
+    return if yield_special(@@special_upcase, cp) { |part| yield part.unsafe_chr }
     yield simple_upcase(cp).unsafe_chr
   end
 
@@ -3263,10 +3147,10 @@ pub struct Unicode
   # is answered unchanged — the block form and the string form fold it.
   def self.foldcase(char : Char) : Char
     cp = char.ord
-    table = casefold_table
+    table = @@casefold
     at = search_range(table, 3, cp)
     return (cp + table.to_unsafe[at + 2]).unsafe_chr if at >= 0
-    special = special_fold_table
+    special = @@special_fold
     at = search_key(special, 4, cp)
     return special.to_unsafe[at + 1].unsafe_chr if at >= 0 && special.to_unsafe[at + 2] == 0
     char
@@ -3275,13 +3159,13 @@ pub struct Unicode
   # The full case folding, one character at a time: `ß` yields `s` twice.
   def self.foldcase(char : Char, & : Char -> Nil) : Nil
     cp = char.ord
-    table = casefold_table
+    table = @@casefold
     at = search_range(table, 3, cp)
     if at >= 0
       yield (cp + table.to_unsafe[at + 2]).unsafe_chr
       return
     end
-    return if yield_special(special_fold_table, cp) { |part| yield part.unsafe_chr }
+    return if yield_special(@@special_fold, cp) { |part| yield part.unsafe_chr }
     yield char
   end
 
@@ -3298,7 +3182,7 @@ pub struct Unicode
   # there `ẞ` folds to itself.
   def self.case_orbit(char : Char) : Array(Char)
     chars = [] of Char
-    members = orbits[simple_fold(char.ord)]?
+    members = @@orbits[simple_fold(char.ord)]?
     if members
       members.each { |cp| chars << cp.unsafe_chr }
     else
@@ -3313,11 +3197,11 @@ pub struct Unicode
   # of them, rather than asking `case_orbit` of each of the hundred
   # thousand code points a class like `\p{L}` holds.
   def self.each_case_orbit(& : Array(Int32) -> Nil) : Nil
-    orbits.each_value { |members| yield members.dup }
+    @@orbits.each_value { |members| yield members.dup }
   end
 
   private def self.simple_fold(cp : Int32) : Int32
-    table = simple_fold_table
+    table = @@simple_fold
     at = search_key(table, 2, cp)
     at >= 0 ? table.to_unsafe[at + 1] : foldcase(cp.unsafe_chr).ord
   end
@@ -3327,20 +3211,16 @@ pub struct Unicode
   # `@@orbits`'s initializer, from the tables `simple_fold` reads, in the
   # order it reads them, so a code point one table folds is not folded
   # again by a later one.
-  private def self.orbits : Hash(Int32, Array(Int32))
-    @@orbits
-  end
-
   private def self.build_orbits : Hash(Int32, Array(Int32))
     map = Hash(Int32, Array(Int32)).new
-    simple = simple_fold_table
+    simple = @@simple_fold
     data = simple.to_unsafe
     row = 0
     while row < simple.size
       join_orbit(map, data[row + 1], data[row])
       row = row + 2
     end
-    table = casefold_table
+    table = @@casefold
     data = table.to_unsafe
     row = 0
     while row < table.size
@@ -3351,7 +3231,7 @@ pub struct Unicode
       end
       row = row + 3
     end
-    special = special_fold_table
+    special = @@special_fold
     data = special.to_unsafe
     row = 0
     while row < special.size
@@ -3499,11 +3379,11 @@ pub struct Unicode
   # Answered from the categories and a list of punctuation, `"ΑΣ\u200BΑ"`
   # lowered to a final `ς` and `"\u216BΣ"` to `σ`.
   private def self.cased?(cp : Int32) : Bool
-    in_category?(cased_table, cp)
+    in_category?(@@cased, cp)
   end
 
   private def self.case_ignorable?(cp : Int32) : Bool
-    in_category?(case_ignorable_table, cp)
+    in_category?(@@case_ignorable, cp)
   end
 
   # ---------------------------------------------------------------------
@@ -3792,7 +3672,7 @@ pub struct Unicode
   end
 
   private def self.combining_class(cp : Int32) : Int32
-    table = combining_class_table
+    table = @@combining_class
     at = search_range(table, 3, cp)
     at < 0 ? 0 : table.to_unsafe[at + 2]
   end
@@ -3809,7 +3689,7 @@ pub struct Unicode
       points << trailing unless trailing == HANGUL_T_BASE
       return
     end
-    canonical = canonical_decomposition_table
+    canonical = @@canonical_decomposition
     at = search_key(canonical, 3, cp)
     if at >= 0
       decompose(points, canonical.to_unsafe[at + 1], compatibility)
@@ -3818,10 +3698,10 @@ pub struct Unicode
       return
     end
     if compatibility
-      compat = compatibility_decomposition_table
+      compat = @@compatibility_decomposition
       at = search_key(compat, 3, cp)
       if at >= 0
-        data = compatibility_data_table
+        data = @@compatibility_data
         offset = compat.to_unsafe[at + 1]
         count = compat.to_unsafe[at + 2]
         index = 0
@@ -3879,7 +3759,7 @@ pub struct Unicode
        second > HANGUL_T_BASE && second < HANGUL_T_BASE + HANGUL_T_COUNT
       return first + (second - HANGUL_T_BASE)
     end
-    table = composition_table
+    table = @@composition
     data = table.to_unsafe
     low = 0
     high = table.size // 3
@@ -4042,7 +3922,7 @@ pub struct Unicode
 
   private def self.grapheme_value(cp : Int32) : Int32
     return 0 if cp >= 0x20 && cp < 0x7F
-    table = grapheme_table
+    table = @@grapheme
     at = search_range(table, 3, cp)
     at < 0 ? 0 : table.to_unsafe[at + 2]
   end

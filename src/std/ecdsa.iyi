@@ -631,7 +631,7 @@ struct EcdsaP256
   Q_WIDTH = 5
   G_WIDTH = 7
 
-  @[UnsafeReach("built whole by its initializer, which runs once, at the first read and in the shared heap; then only read")]
+  @[SafeReach("built whole by its initializer as the module starts, before any parallel task; then only read")]
   @@g_table : Pointer(EcdsaP256Num) = build_g_table(EcdsaGroup.of(EcdsaCurve::P256))
 
   # Whether u1·G + u2·Q is a point whose x is r modulo n, as

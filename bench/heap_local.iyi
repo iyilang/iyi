@@ -57,7 +57,7 @@
 #   one reads whole (the abandoned mark's parities are not trusted).
 # - `death:` every partition is gone once its unit has died.
 
-@[Unsafe("the checks read freed chunks, weak cells and large blocks through raw pointers, and hand a shared-heap address to free, to see what the partitions did with them")]
+@[Unsafe("the checks read freed chunks, weak cells and large blocks through raw pointers, hand a shared-heap address to free, and zero the stack under them through pointerof and an empty asm, to see what the partitions did with them")]
 {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
   import std/unit::{Unit}
 
@@ -140,7 +140,14 @@
   # 16 KiB of the stack under the caller zeroed, so no dead frame there
   # still holds a dropped object's address when a collection scans it.
   # Called from the frame that called the droppers: its own frame lies
-  # over theirs.
+  # over theirs. The empty `asm` that takes the buffer and clobbers
+  # memory keeps the zeroing: without it a `--release` build saw a
+  # function that writes only its own frame, and dropped the call - the
+  # objdump of the verifying release build had no call between the
+  # droppers and `collect_now`, and with round 1's order of checks a
+  # word Node.new left there, in the six words of `local_collect`'s
+  # twelve-word register buffer that x86_64 does not write, kept poison's
+  # last dropped node in 10 runs of 10 (Linux x86_64, 12 vCPUs).
   @[NoInline]
   def scrub_stack : UInt64
     buffer = uninitialized UInt64[2048]
@@ -150,6 +157,7 @@
       (words + i.to_i64).value = 0_u64
       i = i + 1
     end
+    asm("" :: "r"(words) : "memory" : "volatile")
     stack_word(words.address) &+ stack_word((words + 2047_i64).address)
   end
 

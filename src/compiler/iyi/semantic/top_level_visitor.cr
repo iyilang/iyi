@@ -2372,7 +2372,7 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
           all_value = enum_type.base_type.kind.cast(0).as(Int::Primitive)
 
           enum_type.types.each_value do |member|
-            all_value |= interpret_enum_value(member.as(Const).value, enum_type.base_type)
+            all_value |= @program.layout_fold_consumer(LayoutFoldUseKind::EnumValue, member.as(Const).value) { interpret_enum_value(member.as(Const).value, enum_type.base_type) }
           end
 
           all_member = enum_type.add_constant("All", all_value)
@@ -2418,7 +2418,7 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
       end
 
       if default_value = member.default_value
-        counter = interpret_enum_value(default_value, enum_type.base_type)
+        counter = @program.layout_fold_consumer(LayoutFoldUseKind::EnumValue, member) { interpret_enum_value(default_value, enum_type.base_type) }
       elsif previous_counter
         if enum_type.flags?
           if previous_counter == 0 # In case the member is set to 0

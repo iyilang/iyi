@@ -100,6 +100,15 @@ class Iyi::Program
       Prof.span("recursive struct check") { RecursiveStructChecker.new(self).run }
     end
 
+    # iyi: every layout fold is settled here, after the last code the compiler
+    # types, the cleanup's own included, and after the recursive struct check above,
+    # since the settling typer lowers every folded type (layout_folds.cr).
+    Prof.span("layout folds") { settle_layout_folds(patch: true) } if cleanup
+
+    # iyi: the layout folds that went stale while typing, printed when
+    # IYI_LAYOUT_FOLD_REPORT is set (layout_folds.cr).
+    report_layout_folds
+
     result
   end
 

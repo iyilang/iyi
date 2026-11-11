@@ -46,7 +46,13 @@ module Iyi
       filename
     end
 
-    delegate warnings, to: @program
+    def warnings
+      if @replay
+        @temp_warnings ||= WarningCollection.new
+      else
+        @program.warnings
+      end
+    end
 
     def interpret_top_level_call(node)
       interpret_top_level_call?(node) ||
@@ -54,7 +60,19 @@ module Iyi
     end
 
     def interpret_top_level_call?(node)
-      iyi_tell_recorder(node)
+      if @replay
+        case node.name
+        when "compare_versions", "flag?", "host_flag?", "raise"
+          # Answered from the compiler's own flags and arguments.
+        when "`", "system", "run", "env", "read_file", "read_file?", "file_exists?"
+          # The first expansion's answer was not kept, and asking again is a second command, read or lookup.
+          raise ReplayUnknownException.new("it reaches `#{node.name}`, whose answer lies outside the compiler", external: true)
+        else
+          raise ReplayUnknownException.new("it reaches `#{node.name}`, which the replay does not perform")
+        end
+      else
+        iyi_tell_recorder(node)
+      end
 
       # Please order method names in lexicographical order
       case node.name
@@ -2233,7 +2251,7 @@ module Iyi
       when "constant"
         interpret_check_args do |arg|
           value = arg.to_string("argument to 'TypeNode#constant'")
-          TypeNode.constant(type, value)
+          TypeNode.constant(type, value, interpreter)
         end
       when "has_constant?"
         interpret_check_args do |arg|
@@ -2558,10 +2576,11 @@ module Iyi
       BoolLiteral.new(type.types.has_key?(name))
     end
 
-    def self.constant(type, name)
+    def self.constant(type, name, interpreter)
       type = type.types[name]?
       case type
       when Const
+        interpreter.program.layout_fold_constant_read(type, nil)
         type.value
       when Type
         TypeNode.new(type)

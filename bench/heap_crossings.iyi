@@ -625,6 +625,84 @@
     end
   end
 
+  # ── A bracket's node left naming the unit's own (S6, DeferFix) ─────────
+  # A `Mutex`'s release node is born in the shared heap and linked over the
+  # task's own cleanups while the lock is held (`__iyi_defer_push_node`).
+  # A panic's drain, and a cancelled task's stop, took it off the list with
+  # its link still naming the cleanup below it, made in the unit's
+  # partition; the Mutex outlives the task, so its node named that cleanup
+  # after the unit's death freed it. `-Dheap_verify`'s death check reads
+  # every live chunk: without the drain's unlink both checks exit 86.
+  @[NoInline]
+  def drain_in_lock(m : Mutex(Int32), log : Array(String), seed : Int32) : Int32
+    defer log << label_for(seed, 1)
+    m.lock { |held| raise label_for(seed, held) + " (heap_crossings panics here on purpose)" }
+    0
+  end
+
+  @[NoInline]
+  def stop_in_lock(m : Mutex(Int32), quit : Channel(Int32), log : Array(String), seed : Int32) : Int32
+    defer log << label_for(seed, 1)
+    m.lock do |held|
+      # No arm binds a value, so a cancel stops the task here.
+      select
+      when quit.receive
+      end
+    end
+    0
+  end
+
+  def defer_drain_check(seed : Int32, how : String) : Nil
+    m = Mutex.new { 2 }
+    quit = Channel(Int32).new
+    before = partitions_now
+    group do |outer|
+      task = outer.spawn(unit: :new) do
+        log = [] of String
+        how == "stop" ? stop_in_lock(m, quit, log, seed) : drain_in_lock(m, log, seed)
+      end
+      if how == "stop"
+        until m.locked?
+          sleep(1)
+        end
+        outer.cancel_children
+      end
+      got = task.value
+      fail("defer #{how}: the task answered no panic") unless got.is_a?(Panicked)
+    end
+    settled(before, "defer #{how}")
+    held = m.get { |value| value }
+    fail("defer #{how}: the lock was not let go") unless held == 2
+  end
+
+  # A group opened inside a lock block is the shared heap's (the block's
+  # bracket), and its `outer` names the group the task had open, made in
+  # the unit's partition. Joined, it is garbage no global mark has proved
+  # so yet, and its `outer` named the enclosing group once that group's
+  # scope had ended and the unit's collection freed it.
+  @[NoInline]
+  def open_in_lock(m : Mutex(Int32)) : Int32
+    group do |g|
+      m.lock do |held|
+        group do |inner|
+          held
+        end
+      end
+      0
+    end
+  end
+
+  def group_outer_check : Nil
+    m = Mutex.new { 3 }
+    group do |outer|
+      outer.spawn(unit: :new) do
+        open_in_lock(m)
+        collect_here
+        0
+      end
+    end
+  end
+
   # ── Row 8: SharedProc.of's captures ────────────────────────────────────
   @[NoInline]
   def make_proc(seed : Int32) : SharedProc(Int32, Int32)
@@ -960,8 +1038,9 @@
   TLS_SEED = "3c9cb8fdef08086c92abb13f615fcbd54466dac12a3a363db6fb289ef88bc7a2"
 
   CHECKS = ["spawn", "thread", "in", "answer", "unit_answer", "channel", "select", "ring",
-            "unit_new", "mutex_capture", "mutex_bracket", "mutex_new", "panic", "shared_proc",
-            "box", "malloc", "storage", "env", "glue", "list", "tls", "closed"]
+            "unit_new", "mutex_capture", "mutex_bracket", "mutex_new", "panic", "defer_drain",
+            "defer_stop", "group_outer", "shared_proc", "box", "malloc", "storage", "env", "glue",
+            "list", "tls", "closed"]
 
   def run(name : String) : Nil
     case name
@@ -978,6 +1057,9 @@
     when "mutex_bracket" then mutex_check(29, "bracket")
     when "mutex_new"     then mutex_check(30, "new")
     when "panic"         then panic_check
+    when "defer_drain"   then defer_drain_check(32, "drain")
+    when "defer_stop"    then defer_drain_check(33, "stop")
+    when "group_outer"   then group_outer_check
     when "shared_proc"   then shared_proc_check
     when "box"           then pin_check("box")
     when "malloc"        then pin_check("malloc")

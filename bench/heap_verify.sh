@@ -121,7 +121,8 @@ named() {
     "$dir/$tag.err" >"$dir/$tag.named" 2>/dev/null
   awk '
     /^  holder: / { kind = substr($0, 11) }
-    /^    holder / { what = $0; sub(/^    holder 0x[0-9a-f]+ /, "", what); sub(/, [0-9]+ bytes$/, "", what) }
+    /^    holder 0x/ { what = $0; sub(/^    holder 0x[0-9a-f]+ /, "", what); sub(/, [0-9]+ bytes$/, "", what) }
+    /^    holder allocated at: / { hsite = $0; if (match(hsite, /\[[^]]*\]$/)) hsite = substr(hsite, RSTART + 1, RLENGTH - 2); else hsite = "" }
     /^    field \+/ { field = $0; if (match(field, /\[[^]]*\]$/)) field = substr(field, RSTART + 1, RLENGTH - 2); else { sub(/ at 0x.*/, "", field); sub(/^ +/, "", field) } }
     /^    held by / && parent == "" { parent = $0; sub(/^    held by (0x[0-9a-f]+ )?/, "", parent); sub(/, [0-9]+ bytes$/, "", parent) }
     /^    held by / && /\[/ && parentfield == "" { }
@@ -133,6 +134,7 @@ named() {
     END {
       h = kind
       if (what != "") h = h ": " what
+      if (hsite != "") h = h " made at [" hsite "]"
       if (field != "") h = h " / " field
       if (parent != "") h = h " (held by " parent ")"
       if (word != "") h = h " [" word "]"

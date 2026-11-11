@@ -209,12 +209,13 @@ class IyiHeapVerify
   end
 
   # The call site of an allocation (`__iyi_new` and the mallocs, given
-  # their return address), kept for a chunk of a partition arena: only a
-  # partition's chunk is ever a target.
+  # their return address), kept for a chunk of any arena: a partition's
+  # chunk is a report's target, and a shared one may be its holder, which
+  # an untyped one (a closure, a buffer) is named by (`holder_site`).
   def self.note_site(object : Void*, site : Void*) : Nil
     address = object.address
     arena = IyiHeap.arena_of(address)
-    return if arena == 0 || !IyiHeap.partition_arena?(arena)
+    return if arena == 0
     # Inside the allocator's bracket, where a chaos point is none
     # (chaos.iyi): the table's first claim is a compare-and-set.
     IyiHeap.enter_barrier
@@ -783,7 +784,10 @@ class IyiHeapVerify
       say(" at ")
       say_hex(address)
       say("\n")
-      parents(base, type_id) if type_id == 0
+      if type_id == 0
+        holder_site(base)
+        parents(base, type_id)
+      end
     elsif kind == K_STACK
       fiber = Pointer(Void).new(who).as(IyiFiber)
       running = IyiScheduler.current?
@@ -882,6 +886,20 @@ class IyiHeapVerify
       say_hex(site)
       say("\n")
     end
+  end
+
+  # An untyped holder's own allocation site: a closure's environment or a
+  # buffer has no layout to name a field by, but where it was made names
+  # it (heap_crossings' `spawn(in:) publish` copy: a closure held by a
+  # closure, which `parents` alone leaves as untyped memory twice).
+  def self.holder_site(base : UInt64) : Nil
+    arena = IyiHeap.arena_of(base)
+    return if arena == 0
+    site = site_of(arena, IyiHeap.chunk_index(arena, base))
+    return if site == 0
+    say("    holder allocated at: image+")
+    say_hex(site)
+    say("\n")
   end
 
   # An untyped holder - a buffer, a closure without a layout - named by

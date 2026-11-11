@@ -475,6 +475,21 @@ module Iyi
     # unless `--emit-iyimod` asked for artifacts.
     getter iyi_exported_owners = Set(Type).new
 
+    # Computed before codegen from the same unit names selected for carriage.
+    getter iyi_carried_closure_suffixes = {} of String => String
+
+    def register_iyi_carried_closure_units(names : Array(String)) : Nil
+      names.each do |name|
+        @iyi_carried_closure_suffixes[name] ||= Iyi.safe_mangling(self, "^unit:#{name.to_slice.hexstring}")
+      end
+    end
+
+    def iyi_closure_linkage_name(requested : String, host_name : String?, main_host : Bool) : String
+      return requested if main_host || host_name.nil?
+      suffix = @iyi_carried_closure_suffixes[host_name]?
+      suffix ? requested + suffix : requested
+    end
+
     property stale_recorder : Iyi::Stale::Recorder? = nil
     property stale_reach : Iyi::Stale::Reach? = nil
     property stale_closure_result : Iyi::Effects::ClosureResult? = nil

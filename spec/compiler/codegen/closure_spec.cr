@@ -1,6 +1,37 @@
 require "../../spec_helper"
 
 describe "Code gen: closure" do
+  it "namespaces only closures hosted in selected carried units" do
+    program = Iyi::Program.new
+    program.flags.delete("msvc")
+    names = ["Boot::Half", "Boot::Half+", "Boot::Half::Nested", "A%@^", "雪"]
+    program.register_iyi_carried_closure_units(names)
+    requested = "~procProc(Int32)^source.iyi:12"
+    names.each do |name|
+      suffix = "^unit:#{name.to_slice.hexstring}"
+      program.iyi_carried_closure_suffixes[name].should eq(suffix)
+      program.iyi_closure_linkage_name(requested, name, false).should eq(requested + suffix)
+    end
+    program.iyi_carried_closure_suffixes.values.uniq.size.should eq(names.size)
+    program.iyi_closure_linkage_name(requested, nil, false).should eq(requested)
+    program.iyi_closure_linkage_name(requested, "Caller::Other", false).should eq(requested)
+    program.iyi_closure_linkage_name(requested, "Boot::Half", true).should eq(requested)
+    program.register_iyi_carried_closure_units(names)
+    program.iyi_closure_linkage_name(requested, "Boot::Half", false)
+      .should eq("#{requested}^unit:426f6f743a3a48616c66")
+  end
+
+  it "mangles only the carried unit suffix on MSVC" do
+    program = Iyi::Program.new
+    program.flags << "msvc"
+    program.register_iyi_carried_closure_units(["Boot::Half", "雪"])
+    requested = ".7E.proc.28.Int32.29."
+    program.iyi_closure_linkage_name(requested, "Boot::Half", false)
+      .should eq("#{requested}.5E.unit.3A.426f6f743a3a48616c66")
+    program.iyi_closure_linkage_name(requested, "雪", false)
+      .should eq("#{requested}.5E.unit.3A.e99baa")
+  end
+
   it "codegens simple closure at global scope" do
     run(<<-CODE).to_i.should eq(1)
       a = 1

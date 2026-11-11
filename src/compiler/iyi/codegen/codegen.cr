@@ -1072,14 +1072,22 @@ module Iyi
       # the same answer, and the same reason, as the callees the closure
       # already copies.
       host = @iyi_closure_host
-      the_fun = codegen_fun fun_literal_name, node.def, context.type,
+      linkage_name = @program.iyi_closure_linkage_name(fun_literal_name, host.try(&.mod.name),
+        host.nil? || host.mod == @main_mod)
+      if host && linkage_name != fun_literal_name && @llvm_mod != host.mod
+        node.raise "cannot reference a private carried closure from another LLVM module"
+      end
+      the_fun = codegen_fun linkage_name, node.def, context.type,
         fun_module_info: host || @main_module_info, is_fun_literal: true,
         is_closure: is_closure, iyi_internal: !host.nil?
+      if linkage_name != fun_literal_name && the_fun.func.name != linkage_name
+        node.raise "carried closure LLVM symbol collision: #{linkage_name}"
+      end
       the_fun =
         if host
-          check_mod_fun host.mod, fun_literal_name, the_fun
+          check_mod_fun host.mod, the_fun.func.name, the_fun
         else
-          check_main_fun fun_literal_name, the_fun
+          check_main_fun the_fun.func.name, the_fun
         end
 
       set_current_debug_location(node) if @debug.line_numbers?

@@ -874,6 +874,7 @@ module Iyi
       program.iyi_fills_boundary = true
       program.iyi_exported_owners << type
       collect_iyi_owners type, program.iyi_exported_owners
+      program.register_iyi_carried_closure_units(iyi_unit_names(type)) if emit_bind
     end
 
     private def prepare_iyimods(program : Program) : Array({String, IyiMod::Artifact})?
@@ -887,6 +888,7 @@ module Iyi
       program.iyi_module_paths.each_value do |module_name|
         if type = program.iyi_module_type(module_name)
           program.iyi_exported_owners << type
+          program.register_iyi_carried_closure_units(iyi_unit_names(type))
           collect_iyi_owners type, program.iyi_exported_owners
         end
       end
@@ -1089,9 +1091,7 @@ module Iyi
       type = program.types?.try &.[]?(root)
       return unless type.is_a?(ModuleType)
 
-      names = [type.to_s] of String
-      collect_iyi_unit_names type, names
-      names.sort!.uniq!
+      names = iyi_unit_names(type)
 
       path = File.join(dir, "#{Iyi.iyi_module_name(root).gsub('/', '-')}.iyimod")
       return unless File.file?(path)
@@ -1645,7 +1645,11 @@ module Iyi
       names = [] of String
       return names unless type = program.iyi_module_type(module_name)
 
-      names << type.to_s
+      iyi_unit_names(type)
+    end
+
+    private def iyi_unit_names(type : ModuleType) : Array(String)
+      names = [type.to_s] of String
       collect_iyi_unit_names type, names
       names.sort!.uniq!
       names

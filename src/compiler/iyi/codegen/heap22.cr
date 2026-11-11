@@ -53,10 +53,21 @@ class Iyi::CodeGenVisitor
     return false if SPAWN_BROKEN.includes?("new-shared")
     @iyi_born_shared.fetch(type) do
       base = type.is_a?(GenericClassInstanceType) ? type.generic_type.as(Type) : type
-      @iyi_born_shared[type] = !type.struct? && base.is_a?(NamedType) && base.namespace.is_a?(Program) &&
-                               IYI_BORN_SHARED.includes?(base.name) &&
+      @iyi_born_shared[type] = !type.struct? && base.is_a?(NamedType) &&
+                               IYI_BORN_SHARED.includes?(base.name) && iyi_born_shared_home?(base) &&
                                @program.iyi_share_reach.std_at?(base.locations.try(&.first?))
     end
+  end
+
+  # Where a born-shared type is declared: the prelude's at the top level,
+  # std's in the module of its own name (`Std::Mutex::Mutex`,
+  # `Std::Unit::Unit`; a std module's types are in `Std::<module>`).
+  private def iyi_born_shared_home?(type : NamedType) : Bool
+    namespace = type.namespace
+    return true if namespace.is_a?(Program)
+    return false unless namespace.is_a?(NamedType) && namespace.name == type.name
+    std = namespace.namespace
+    std.is_a?(NamedType) && std.name == "Std" && std.namespace.is_a?(Program)
   end
 
   def iyi_new_shared_fun

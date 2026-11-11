@@ -56,17 +56,23 @@
   threads allocating beside the mark all took chunks of the same arena,
   and the marks beside the program lasted 6.4 ms against 4.6. That pass
   hands an arena over as one batch again, as 0.21.0 did; the eager sweep
-  after an explicit collection stays a batch a slice. On macOS 26.6,
-  Apple M2 Pro, 10 cores (the user's machine), alloc_scaling at 8
-  workers, medians of three sessions of 5 interleaved rounds: 564-577 ms
-  against 628-650 before the fix and 535-566 with 0.21.0's prelude. The
-  warm room was not it: it starts at the first epoch's take, and a room
-  that hands nothing back ran as slowly. On Windows 11, 12 logical
-  processors, five sessions of 5-9 rounds put the branch within 1-3% of
-  0.21.0 at 4 and 8 workers (medians 347-352 ms against 338-354 at
-  8), inside the machine's noise. `bench/sweep_exercise.iyi` check 12
-  counts the batches the pause hands a held arena over in; the copy
-  that cuts it a slice at a time fails at 1 arena over as 5 batches.
+  after an explicit collection stays a batch a slice. Final run,
+  `bench/alloc_scaling.iyi` 200000 at 1 / 4 / 8 workers, 5 interleaved
+  rounds of 0.21.0, the branch before the fix and the fix, medians in
+  ms (ranges at 8). On macOS 26.6, Apple M2 Pro, 10 cores (the user's
+  machine): 220 / 306 / 541 (523-566), 221 / 305 / 625 (582-644), 221 /
+  306 / 562 (553-607); the fix keeps 4% of the 15% at 8 workers. On
+  Windows 11, 12 logical processors: 118 / 214 / 374 (332-471), 136 /
+  207 / 359 (335-407), 124 / 201 / 387 (351-413), inside the machine's
+  noise. On this Linux machine: 120 / 201 / 393 (367-410), 116 / 200 /
+  366 (366-376), 122 / 200 / 379 (357-388). The warm room was not it:
+  it starts at the first epoch's take, and a room that hands nothing
+  back ran as slowly. #145's harness, 3 rounds, with the fix: steady /
+  peak / 5 s idle 128 / 168 / 145 MB against 176 / 241 / 240 on
+  Windows 11, 135 / 165 / 153 against 179 / 236 / 234 on macOS 26.6.
+  `bench/sweep_exercise.iyi` check 12 counts the batches the pause hands
+  a held arena over in; the copy that cuts it a slice at a time fails
+  at 1 arena over as 5 batches.
 
   The trim runs beside threads that allocate. Two refills adopting the
   batches of adjacent sweep slices both counted off the page the slices

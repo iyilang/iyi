@@ -1105,9 +1105,12 @@ while the mark runs beside them, each allocation counted live in its
 arena (`count_live`, 15-16 million adds a run either way), and an arena
 the stop found a walker in went out to every thread at once; the marks
 beside the program lasted 6.4 ms against 4.6. The debt pass hands each
-arena over as one batch again (`IyiMark.sweep_one_held`) and ran
-564-577 ms, marks 5.0 ms, while the eager sweep after an explicit
-collection's turn stays a batch a slice for the room's count.
+arena over as one batch again (`IyiMark.sweep_one_held`), marks 5.0 ms,
+while the eager sweep after an explicit collection's turn stays a batch
+a slice for the room's count. Final run at 8 workers, medians of 5
+interleaved rounds, 0.21.0 / before / fix: macOS 541 / 625 / 562 ms,
+Windows 11 374 / 359 / 387, Linux 393 / 366 / 379; at 1 and 4 workers
+the fix is within 5% of 0.21.0 on each machine.
 [INFERENCE: the cost is eight threads adding to one arena's line;
 Windows 11's and Linux's x86 cores showed no difference past noise.]
 `bench/sweep_exercise.iyi` check 12 holds an arena as a stopped walker

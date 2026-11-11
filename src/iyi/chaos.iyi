@@ -415,7 +415,16 @@ class IyiChaos
         @@changed = @@changed &+ 1_u64
         unit.priority = LOW &+ @@depth &- @@changed
       end
-      drop(unit) if @@streak >= SPIN_STEPS
+      if @@streak >= SPIN_STEPS
+        drop(unit)
+        # A unit that spins waits for something: a sleeper whose time has
+        # come and the poller's news join the run queue here, as an OS's
+        # timer lets them in. Without it the run queue was looked at only
+        # where a task parks, and a task spinning for a unit asleep in
+        # `sleep(1)` outranked nothing for ever (heap_crossings' ring
+        # check on tmac, seeds 1 and 2, under `IYI_HEAP_STRESS`).
+        IyiScheduler.poll_now(IyiScheduler.state)
+      end
       return unless outranked?(IyiScheduler.state, unit)
     else
       return unless draw % @@odds == @@odds &- 1_u64

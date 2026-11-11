@@ -43,16 +43,15 @@
 class IyiHeap
   # ── Granules, tables, states ──────────────────────────────────────────
 
-  # Ownership is per granule: 512 bytes from heap22 S6 (1 KiB in slice
-  # S1b, 4 KiB in S1), every platform. A class's first run in a partition
-  # is the least whole number of granules that holds a chunk, so an idle
-  # unit holds about half a KiB per small class it keeps something in
-  # (design section 5.2): an idle keep-alive connection's partition kept
-  # 11.2 KiB of runs in 11 small classes for 3.7 KiB of objects at 1 KiB
-  # (C10k at 2,000 connections, Linux, after its idle collection). A
-  # run's length in granules (`RUN_N_MASK`) still holds the top class's
-  # 1 MiB chunk: 2,048 of them.
-  GRANULE_SHIFT = 9_u64
+  # Ownership is per granule: 1 KiB from slice S1b, every platform (4 KiB
+  # in S1). A class's first run in a partition is the least whole number
+  # of granules that holds a chunk, so an idle unit holds about 1 KiB per
+  # small class it keeps something in (design section 5.2). S6 tried 512
+  # bytes: an idle keep-alive connection's partition kept 11.2 KiB of runs
+  # in 11 small classes for 3.7 KiB of objects at 1 KiB (C10k at 2,000
+  # connections, Linux), but busy units paid for the finer tables
+  # (alloc_scaling 1.06-1.09, web_cores 0.89-0.90 of the rate at 1 KiB).
+  GRANULE_SHIFT = 10_u64
 
   # The arena header's words for partition arenas (contract section 3):
   # byte offsets from the arena's base of the owner table (16 bits per

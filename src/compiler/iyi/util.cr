@@ -391,11 +391,11 @@ module Iyi
   # and the refusal, raised out of the runner's `ensure`, replaced the
   # program's own verdict: `std_http_latency.iyi` printed ALL CHECKS PASSED
   # and `iyi run` exited 1 (CI job 130381353157). Asked again for two
-  # seconds: a reader that let go 300 ms after the exit still had the file
-  # refused a second after it (CI job 130589942769), so whatever else holds
-  # a fresh executable on a runner outlasts the reader. A file still held
-  # then is left for `sweep_run_leftovers`, whose next run past the hour
-  # takes it. Elsewhere a refusal is not the platform's habit, and raises.
+  # seconds: one second failed once on a CI runner against a gate's 300 ms
+  # hold (CI job 130589942769), the cause not recorded, and two leave room.
+  # A file still held then is left for `sweep_run_leftovers`, whose next run
+  # past the hour takes it. Elsewhere a refusal is not the platform's habit,
+  # and raises.
   def self.delete_run_output(path : String) : Nil
     {% if flag?(:win32) %}
       40.times do |attempt|

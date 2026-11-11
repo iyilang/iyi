@@ -62,8 +62,9 @@
   with a reader holding the program until 300 ms after it exits: exit 1
   and the file left before, exit 0 and the file deleted now;
   `bench/verbs_exercise.sh` holds both, and a 5 s hold, on Windows. One
-  second was too short on a CI runner: the 300 ms hold still found the
-  file refused at its end (job 130589942769).
+  second failed once on a CI runner, the 300 ms hold's file kept (job
+  130589942769); the gate now prints when its reader let go and when the
+  runner ended, so another such failure says which was late.
 
 ### Gates
 

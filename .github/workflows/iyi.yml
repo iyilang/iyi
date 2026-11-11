@@ -46,14 +46,18 @@ name: iyi
 # answers within the compiler specs' twenty-odd minutes - narrowed further
 # when it touches only docs or only bench files. A push to master or to
 # mt/next, the branch a release is integrated on before it reaches master,
-# a `v*` tag, the nightly schedule and a manual dispatch run every job. A
-# push to any other branch runs nothing: open a pull request, or dispatch
-# the workflow on the branch for the full set.
+# a `v*` tag, the nightly schedule and a manual dispatch run every job -
+# except a nightly run of a commit that passed the full set on master in
+# the last week, which runs none. A push to any other branch runs nothing:
+# open a pull request, or dispatch the workflow on the branch for the full
+# set.
 #
-# The free plan runs twenty jobs at once, five of them on macOS, and the
+# The free plan ran twenty jobs at once, five of them on macOS, and the
 # full set was thirty-nine jobs and about twenty runner-hours a run (runs of
 # 2026-11-04 to 11-07). Every pull request paid that, a README edit as much
 # as a compiler change, and two at once queued behind each other for hours.
+# The Team plan runs up to sixty at once, and still five on macOS, which is
+# what a full run waits on longest.
 on:
   push:
     branches: [master, mt/next]
@@ -102,6 +106,8 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+      # Whether the nightly run's commit already passed (scripts/ci_plan.py).
+      actions: read
     outputs:
       jobs: ${{ steps.plan.outputs.jobs }}
     steps:
@@ -153,6 +159,13 @@ jobs:
       # stopped passing, which is a measurement no reader could repeat.
       - name: The numbers the docs quote from a measurement
         run: python3 bench/measured_numbers.py
+
+      # What a pull request is tested by is the planner's answer, and it was
+      # checked by nothing: it credited a gate to the job a comment about it
+      # sat in, and ran no module exercise a script finds by a glob. Here,
+      # because it reads only the tree and every tier runs this job.
+      - name: The planner picks the jobs that run a change
+        run: python3 bench/ci_plan_exercise.py
 
   build:
     needs: plan

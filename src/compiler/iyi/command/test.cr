@@ -14,6 +14,13 @@
 #     iyi test dir file.iyi # these, recursing into directories
 #     iyi test --json       # the run as data, for a harness
 #     iyi test --affected FILE  # only tests whose imports reach FILE
+#     iyi test --run TEXT   # only the named cases whose name holds TEXT
+#     iyi test -p 1         # one test at a time
+#
+# A directory is walked as `fix` and `mod tidy` walk a module's source:
+# not into a dot directory, `lib` (the installed dependencies, whose tests
+# are theirs), a directory with a manifest of its own (another module), or
+# a link.
 #
 # `--affected` is the edit loop's discount, and its rule is runtime truth,
 # not a heuristic: a test is affected exactly when the changed file is in
@@ -27,7 +34,15 @@
 # Each test builds and runs alone: one file, one process, one verdict — a
 # crash, a panic and a deadlock are all failures that name their file. A
 # test that neither exits nor fails is killed at the deadline (`--timeout`,
-# 60 s default), because a harness that can hang is not a harness.
+# 60 s default) with everything it started, because a harness that can
+# hang is not a harness. Tests are independent programs, so half as many
+# build and run at once as the machine has cores (`-p N` says otherwise), and
+# the report is in file order whatever order they finished in.
+#
+# A named case (`test "name" { }`, testing.iyi) reports its verdict to the
+# file IYI_TEST_REPORT names, so `--json` carries each case's verdict and
+# its evidence as data rather than as lines in the output; IYI_TEST_RUN is
+# how `--run` reaches the program.
 #
 # `--chaos` is for the bugs the compiler cannot rule out (SPEC.md
 # III.4.17): it builds each test with `-Diyi_chaos` and runs it under the
@@ -49,6 +64,12 @@ class Iyi::Command
   # How many seeds `--chaos` runs a test under when not told.
   private CHAOS_RUNS = 100
 
+  # One named case's verdict, as the program reported it (testing.iyi):
+  # `ok`, `FAIL` or `skip`, and the panic's message or the reason to skip.
+  private record TestCase, verdict : String, name : String, detail : String
+
+  private alias TestResult = {file: String, status: String, seconds: Float64, output: String, seed: UInt64?, run: Int32, cases: Array(TestCase)}
+
   private def test
     as_json = false
     timeout = 60.0
@@ -57,6 +78,16 @@ class Iyi::Command
     chaos = false
     chaos_seed : UInt64? = nil
     chaos_runs : Int32? = nil
+    # Half the cores: a test's build is some 200 MB and runs threads of its
+    # own. 24 tests on 12 logical cores took 6.3 to 7.2 s at 12 at once, 7.4
+    # to 7.6 s at 6 and 9.5 to 9.9 s at 4 (a non-release compiler), so the
+    # other half bought a tenth of the time for twice the memory.
+    parallel = (::System.cpu_count // 2).clamp(1, nil)
+    only : String? = nil
+    verbose = false
+    # What every test is built with beyond `build FILE -o BINARY`: the
+    # flags a test can need to be built the way the program it tests is.
+    build_flags = [] of String
 
     while option = options.shift?
       case option
@@ -104,6 +135,31 @@ class Iyi::Command
         end
         chaos_runs = runs
         chaos = true
+      when "-p", "--parallel"
+        value = options.shift?
+        abort! "#{option} takes a number of tests to run at once", :USAGE_ERROR unless value
+        count = value.to_i?
+        unless count && count > 0
+          abort! "#{option} takes a number of tests to run at once, at least 1, not '#{value}'", :USAGE_ERROR
+        end
+        parallel = count
+      when "--run"
+        # Text, not a pattern: the program matches it, and the prelude
+        # has no regular expressions. "" would be in every name, which is
+        # `--run` with nothing to say, so it is refused like `--affected ""`.
+        value = options.shift?.presence
+        abort! "--run takes text a named case's name holds", :USAGE_ERROR unless value
+        only = value
+      when "-v", "--verbose"
+        verbose = true
+      when "--release"
+        build_flags << "--release"
+      when "-D", "--define"
+        value = options.shift?.presence
+        abort! "#{option} takes a flag to define", :USAGE_ERROR unless value
+        build_flags << "-D#{value}"
+      when .starts_with?("-D")
+        build_flags << option
       when "--help", "-h"
         puts test_usage
         exit
@@ -125,13 +181,10 @@ class Iyi::Command
       # path at all means the working directory on purpose; "" is not that.
       abort! "test takes paths, and '' is not one (no path at all runs the working directory)", :USAGE_ERROR if path.empty?
       if File.directory?(path)
-        # The pattern is built in posix form because a backslash is an escape
-        # character in a glob, not a separator: `C:\dir\**\*_test.iyi` matched
-        # nothing, so `iyi test` in a directory of tests found no tests.
-        # The extension in any case, so that `x_test.IYI` is refused below
-        # rather than walked past: "no *_test.iyi found" in a directory of
-        # one test (`Lexer.iyi_miscased?`).
-        Dir.glob(Iyi.glob_root(path).join("**", "*_test.[iI][yY][iI]")) { |file| files << file }
+        # A walk, not a `**` glob: the glob went into `lib`, so a run in a
+        # project ran its dependencies' tests and failed on theirs, which
+        # the project cannot fix (see `test_files_under`).
+        test_files_under(path, files)
       elsif File.file?(path)
         # As stored: `X_TEST.IYI` typed on Windows or a Mac for `x_test.iyi` is it.
         files << Lexer.stored_name(path)
@@ -218,8 +271,12 @@ class Iyi::Command
       plan = {first, chaos_runs || (chaos_seed ? 1 : CHAOS_RUNS)}
     end
 
-    results = files.map { |file| run_one_test(file, timeout, plan, workers) }
+    results = run_tests(files, parallel) { |file| run_one_test(file, timeout, plan, workers, only, build_flags, verbose) }
     failed = results.count { |result| result[:status] != "pass" }
+    # `--run` with a name that matches no case ran none of them, and a run
+    # that tested nothing it was asked to is not a pass: a mistyped name
+    # would otherwise read as green.
+    unmatched = only if only && results.all? { |result| result[:cases].empty? }
 
     if as_json
       JSON.build(STDOUT) do |json|
@@ -236,6 +293,27 @@ class Iyi::Command
                     json.field "chaos_run", result[:run]
                   end
                   json.field "output", result[:output] unless result[:output].empty?
+                  unless result[:cases].empty?
+                    json.field "cases" do
+                      json.array do
+                        result[:cases].each do |test_case|
+                          json.object do
+                            json.field "name", test_case.name
+                            case test_case.verdict
+                            when "ok"
+                              json.field "status", "pass"
+                            when "skip"
+                              json.field "status", "skip"
+                              json.field "reason", test_case.detail
+                            else
+                              json.field "status", "fail"
+                              json.field "message", test_case.detail
+                            end
+                          end
+                        end
+                      end
+                    end
+                  end
                 end
               end
             end
@@ -270,12 +348,13 @@ class Iyi::Command
               json.array { unimported.each { |name| json.scalar name } }
             end
           end
+          json.field "run_matched_none", unmatched if unmatched
         end
       end
       STDOUT.puts
     else
       results.each do |result|
-        next if result[:status] == "pass"
+        next if result[:status] == "pass" && !verbose
         STDOUT << result[:file] << ": " << result[:status]
         if (seed = result[:seed]) && plan
           STDOUT << " (chaos seed " << seed << ", run " << result[:run] << " of " << plan[1] << ')'
@@ -283,7 +362,11 @@ class Iyi::Command
         STDOUT << '\n'
         result[:output].each_line { |line| STDOUT << "  " << line << '\n' }
         if seed = result[:seed]
-          STDOUT << "  reproduce: " << Command.program_name << " test --chaos=" << seed << ' ' << result[:file] << '\n'
+          # With the flags the test was built with, or the seed reruns
+          # another program.
+          STDOUT << "  reproduce: " << Command.program_name << " test --chaos=" << seed
+          build_flags.each { |flag| STDOUT << ' ' << flag }
+          STDOUT << ' ' << result[:file] << '\n'
           if workers != "1"
             STDOUT << "  (IYI_WORKERS=" << workers << ": the pool's threads are real, and the seed does not name one schedule)\n"
           end
@@ -301,6 +384,9 @@ class Iyi::Command
         puts "#{discount_off.join(", ")} is not there, so every test ran: " \
              "a file that is gone cannot be proven untouched by anything"
       end
+      if unmatched
+        puts "no named case's name holds '#{unmatched}', so --run ran none of them"
+      end
       tail = skipped.zero? ? "" : ", #{skipped} skipped"
       chaos_tail = ""
       if plan
@@ -311,7 +397,7 @@ class Iyi::Command
       puts "#{results.size - failed} passed, #{failed} failed#{tail}#{chaos_tail}" + (failed.zero? ? "" : " — a failing test prints above")
     end
 
-    exit 1 unless failed.zero?
+    exit 1 unless failed.zero? && unmatched.nil?
   end
 
   # iyi: whether no import closure can hold *path*, so no selection by
@@ -388,10 +474,64 @@ class Iyi::Command
     File.dirname(path)
   end
 
+  # The `*_test.iyi` files under *dir*, walked as `fix` and `mod tidy` walk
+  # a module's source: not into a dot directory, `lib` (the installed
+  # dependencies), a directory with a manifest of its own (another module,
+  # whose tests it runs itself), or a link, which a junction back to its
+  # own parent would make endless. The extension in any case, so that
+  # `x_test.IYI` is refused by name rather than walked past: "no
+  # *_test.iyi found" in a directory of one test (`Lexer.iyi_miscased?`).
+  private def test_files_under(dir : String, found : Array(String)) : Nil
+    Dir.each_child(dir) do |entry|
+      full = File.join(dir, entry)
+      if File.info?(full, follow_symlinks: false).try(&.directory?)
+        next if entry.starts_with?('.') || entry == "lib"
+        next if File.file?(File.join(full, Iyi::Mod::Installer::MANIFEST))
+        test_files_under(full, found)
+      elsif File.extname(entry).compare(".iyi", case_insensitive: true) == 0 && entry.rchop(File.extname(entry)).ends_with?("_test")
+        found << full
+      end
+    end
+  end
+
+  # Every file through *run*, *parallel* at a time, the results in the
+  # files' order. A fiber each: a test's build and its run are processes,
+  # so what is waited on is the processes, and one thread waits on all of
+  # them. An exception escaping a test is raised here, after the others
+  # have ended, as it was raised when they ran one by one.
+  private def run_tests(files : Array(String), parallel : Int32, &run : String -> TestResult) : Array(TestResult)
+    slots = Array(TestResult?).new(files.size, nil)
+    queue = ::Channel(Int32).new(files.size)
+    files.each_index { |index| queue.send(index) }
+    queue.close
+    ended = ::Channel(Exception?).new
+    runners = parallel.clamp(1, files.size)
+    runners.times do
+      spawn do
+        escaped = nil
+        begin
+          while index = queue.receive?
+            slots[index] = run.call(files[index])
+          end
+        rescue ex
+          escaped = ex
+        end
+        ended.send(escaped)
+      end
+    end
+    escaped = nil
+    runners.times { ended.receive.try { |ex| escaped ||= ex } }
+    escaped.try { |ex| raise ex }
+    slots.map(&.not_nil!)
+  end
+
   # The test built once, then run once - or, under `--chaos`, once per seed
   # of *chaos* (the first seed and how many) until one fails. *seed* and
   # *run* name the schedule a chaos failure came from; nil and 0 otherwise.
-  private def run_one_test(file : String, deadline : Float64, chaos : {UInt64, Int32}?, workers : String) : {file: String, status: String, seconds: Float64, output: String, seed: UInt64?, run: Int32}
+  # *cases* are the named cases of the run the verdict is from. A pass's
+  # output is kept only when *verbose* asks for it (the last seed's, under
+  # `--chaos`).
+  private def run_one_test(file : String, deadline : Float64, chaos : {UInt64, Int32}?, workers : String, only : String?, build_flags : Array(String), verbose : Bool) : TestResult
     started = Time.instant
     output = IO::Memory.new
 
@@ -400,8 +540,11 @@ class Iyi::Command
     # had, and on Windows every test left its program and its `.pdb` in
     # %TEMP%.
     binary = File.tempname("iyi-test", {{ flag?(:win32) ? ".exe" : nil }})
+    report = File.tempname("iyi-test-report", ".txt")
+    environment = {"IYI_TEST_REPORT" => report}
+    environment["IYI_TEST_RUN"] = only if only
     begin
-      arguments = ["build", file, "-o", binary]
+      arguments = ["build", file, "-o", binary] + build_flags
       arguments << "-Diyi_chaos" if chaos
       build_status = Process.run(
         Process.executable_path.not_nil!,
@@ -409,31 +552,40 @@ class Iyi::Command
         output: output, error: output,
       )
       unless build_status.success?
-        return {file: file, status: "does not build", seconds: elapsed(started), output: output.to_s, seed: nil, run: 0}
+        return {file: file, status: "does not build", seconds: elapsed(started), output: output.to_s, seed: nil, run: 0, cases: [] of TestCase}
       end
 
       unless chaos
-        status, evidence = run_built_test(binary, deadline, output, nil)
-        return {file: file, status: status, seconds: elapsed(started), output: evidence, seed: nil, run: 0}
+        status, evidence = run_built_test(binary, deadline, output, environment)
+        evidence = "" if status == "pass" && !verbose
+        return {file: file, status: status, seconds: elapsed(started), output: evidence, seed: nil, run: 0, cases: read_cases(report)}
       end
 
       # What the build printed is the start of every run's evidence, as it
       # is of a plain run's.
       built = output.to_s
       first, runs = chaos
-      environment = {"IYI_CHAOS" => first.to_s, "IYI_WORKERS" => workers}
+      environment["IYI_WORKERS"] = workers
+      cases = [] of TestCase
+      last = ""
       runs.times do |index|
         seed = first &+ index.to_u64
         environment["IYI_CHAOS"] = seed.to_s
         ran = IO::Memory.new
         ran << built
+        File.delete?(report)
         status, evidence = run_built_test(binary, deadline, ran, environment)
-        next if status == "pass"
-        return {file: file, status: status, seconds: elapsed(started), output: evidence, seed: seed, run: index + 1}
+        cases = read_cases(report)
+        if status == "pass"
+          last = evidence if verbose
+          next
+        end
+        return {file: file, status: status, seconds: elapsed(started), output: evidence, seed: seed, run: index + 1, cases: cases}
       end
-      {file: file, status: "pass", seconds: elapsed(started), output: "", seed: nil, run: runs}
+      {file: file, status: "pass", seconds: elapsed(started), output: last, seed: nil, run: runs, cases: cases}
     ensure
       File.delete?(binary)
+      File.delete?(report)
       # And what the link wrote beside it: MSVC's `.pdb`, and on darwin the
       # `.dwarf` dsymutil makes, which the new check found there too.
       {% if flag?(:win32) %}
@@ -444,15 +596,61 @@ class Iyi::Command
     end
   end
 
+  # The named cases a run reported (testing.iyi `IyiTestCases.tell`): a
+  # header of the verdict and two byte counts, then the name and the
+  # detail as they are. A program that ran no named case wrote nothing,
+  # and one that died in the middle of a write left a record cut short,
+  # which is dropped with what follows it.
+  private def read_cases(report : String) : Array(TestCase)
+    cases = [] of TestCase
+    return cases unless File.exists?(report)
+    File.open(report) do |io|
+      while header = io.gets
+        fields = header.split(' ')
+        break unless fields.size == 3
+        name_bytes, detail_bytes = fields[1].to_i?, fields[2].to_i?
+        break unless name_bytes && detail_bytes && name_bytes >= 0 && detail_bytes >= 0
+        cases << TestCase.new(fields[0], io.read_string(name_bytes), io.read_string(detail_bytes))
+      end
+    end
+    cases
+  rescue IO::Error
+    cases || [] of TestCase
+  end
+
   # One run of a built test, its output into *output*: the verdict, and
-  # the evidence a failure shows - empty for a pass. *environment* is laid
-  # over this process's own.
-  private def run_built_test(binary : String, deadline : Float64, output : IO::Memory, environment : Hash(String, String)?) : {String, String}
-    process = Process.new(binary, env: environment, output: output, error: output)
+  # what it printed, with the death that ended it where one did.
+  # *environment* is laid over this process's own.
+  #
+  # Standard output and standard error are one pipe, written in the order
+  # the program wrote them. As two pipes, each copied by a fiber of its own,
+  # a failed case's `FAIL - name` (stdout) landed above or below the panic
+  # that failed it (stderr) as the two copies happened to be scheduled.
+  private def run_built_test(binary : String, deadline : Float64, output : IO::Memory, environment : Hash(String, String)) : {String, String}
+    reader, writer = IO.pipe(write_blocking: true)
+    begin
+      process = Process.new(binary, env: environment, output: writer, error: writer, process_group: true)
+    rescue ex
+      reader.close
+      raise ex
+    ensure
+      # The child has its own copies; with this one open the pipe never ends.
+      writer.close
+    end
     tree = TestTree.new(process)
     begin
       done = ::Channel(Process::Status).new
-      spawn { done.send(process.wait) }
+      # The run ends when the program has and the pipe has: a child the test
+      # started holds the pipe after the test exits, and the deadline below
+      # is what ends that child.
+      spawn do
+        begin
+          IO.copy(reader, output)
+        rescue IO::Error
+        end
+        reader.close
+        done.send(process.wait)
+      end
       select
       when status = done.receive
         verdict = status.success? ? "pass" : "fail"
@@ -464,10 +662,10 @@ class Iyi::Command
           evidence += "\n" unless evidence.empty? || evidence.ends_with?('\n')
           evidence += Command.death_sentence(status) + "\n"
         end
-        {verdict, status.success? ? "" : evidence}
+        {verdict, evidence}
       when timeout(deadline.seconds)
         # The test and whatever it started: its output is copied through
-        # a pipe, and `wait` waits for that pipe's end, which a child the
+        # a pipe, and the run waits for that pipe's end, which a child the
         # test started holds open. Only the test was killed, so a test
         # that ran `ping -n 25` answered "hung: killed at 3.0s" after 25
         # seconds, with the pings printed after the kill, and one whose
@@ -482,13 +680,22 @@ class Iyi::Command
   end
 
   # A test's program and what it starts, ended together: on Windows a job
-  # object the program is put in as soon as it runs; elsewhere the program
-  # alone. [INFERENCE] A child a test starts on Linux or darwin outlives
-  # the kill and holds the pipe the same way; unmeasured there.
+  # object the program is put in as soon as it runs; on POSIX the process
+  # group it leads from its spawn (`process_group: true`), which its
+  # children are born into. A child that leaves the group (`setsid`, a
+  # daemon) is out of reach, as it is out of a shell's job control.
+  #
+  # Leading a group of its own takes a test out of the terminal's, so ^C
+  # reaches `iyi test` and not the tests: `iyi test` ends every group still
+  # running before it exits on SIGINT, SIGTERM or SIGHUP, or a test that
+  # hangs would outlive the run that started it (`TestTree.trap_endings`).
   private class TestTree
     @process : Process
     {% if flag?(:win32) %}
       @job : LibC::HANDLE = LibC::HANDLE.null
+    {% else %}
+      @@running = Set(Int64).new
+      @@trapped = false
     {% end %}
 
     def initialize(@process : Process)
@@ -508,6 +715,9 @@ class Iyi::Command
           return
         end
         @job = job
+      {% else %}
+        TestTree.trap_endings
+        @@running << @process.pid
       {% end %}
     end
 
@@ -519,6 +729,10 @@ class Iyi::Command
           @job = LibC::HANDLE.null
           return
         end
+      {% else %}
+        # The group's id is its leader's pid. A group that is gone already
+        # leaves the leader, which is killed as before.
+        return if LibC.kill(-@process.pid.to_i32, Signal::KILL.value) == 0
       {% end %}
       @process.terminate(graceful: false)
     end
@@ -528,8 +742,23 @@ class Iyi::Command
       {% if flag?(:win32) %}
         LibC.CloseHandle(@job) unless @job.null?
         @job = LibC::HANDLE.null
+      {% else %}
+        @@running.delete(@process.pid)
       {% end %}
     end
+
+    {% unless flag?(:win32) %}
+      def self.trap_endings : Nil
+        return if @@trapped
+        @@trapped = true
+        [Signal::INT, Signal::TERM, Signal::HUP].each do |signal|
+          signal.trap do
+            @@running.each { |pid| LibC.kill(-pid.to_i32, Signal::KILL.value) }
+            exit 128 + signal.value
+          end
+        end
+      end
+    {% end %}
   end
 
   private def elapsed(started : Time::Instant) : Float64
@@ -538,11 +767,27 @@ class Iyi::Command
 
   private def test_usage
     <<-USAGE
-    Usage: #{Command.program_name} test [--json] [--timeout SECONDS] [--affected FILE]... [--chaos[=SEED]] [--chaos-runs N] [paths]
+    Usage: #{Command.program_name} test [--json] [-v] [--timeout SECONDS] [-p N] [--run TEXT] [--release] [-D FLAG]... [--affected FILE]... [--chaos[=SEED]] [--chaos-runs N] [paths]
 
-    Runs every `*_test.iyi` under the given paths (default: `.`). A test is
+    Runs every `*_test.iyi` under the given paths (default: `.`), but not
+    under `lib`, a dot directory or another module's directory. A test is
     a plain iyi program: exit 0 is a pass, anything else is a failure that
-    prints its own evidence. `--json` reports the run as data.
+    prints its own evidence. `--json` reports the run as data, each named
+    case (`test "name" { }`) with its verdict.
+
+    `-p N` (`--parallel N`) builds and runs N tests at once; half as many as
+    the machine has cores unless given. The report is in file order.
+
+    `-v` (`--verbose`) shows what a passing test printed too, which is
+    otherwise shown only for a failure. `--release` and `-D FLAG` build
+    every test that way, as `build` takes them.
+
+    `--run TEXT` runs only the named cases whose name holds TEXT; a test's
+    code outside its named cases still runs. A run in which no case's name
+    holds TEXT fails, because it tested nothing it was asked to.
+
+    A named case written `test "name", skip: "why" do ... end` does not
+    run, and says `skip - name: why`.
 
     `--affected FILE` (repeatable) runs only the tests whose transitive
     import closure contains a named file — name every file you changed.

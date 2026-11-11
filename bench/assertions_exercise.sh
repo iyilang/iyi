@@ -279,13 +279,13 @@ prove_fails "assert_panics that ignores the words" panics_wordless "assert_panic
 prove_driver_fails "a failure that names the library's line" no_site site_check \
   's/^  raise(headline + "\\n" + evidence, file, line)$/  raise(headline + "\\n" + evidence)/'
 prove_driver_fails "named cases that count no failure" uncounted cases_check \
-  's/^    @@failed = @@failed + 1 unless passed$/    @@failed = @@failed + 0/'
+  's/^      @@failed = @@failed + 1$/      @@failed = @@failed + 0/'
 prove_driver_fails "a named case that ends the program" no_task cases_check \
   '/^  def test(name/,/^  end$/s/^        block.call$/        block.call; __iyi_exit(1)/'
 prove_driver_fails "named cases that exit 1 with none failed" always_fails passing_cases_check \
   's/^    @@failed == 0 ? 0 : 1$/    1/'
 prove_driver_fails "a summary when no case ran" always_summary no_cases_check \
-  's/^    return 0 if @@ran == 0$/    puts "0 named tests"; return 0 if @@ran == 0/'
+  's/^    return 0 if @@ran + @@skipped == 0$/    puts "0 named tests"; return 0 if @@ran + @@skipped == 0/'
 
 echo
 if [ "$status" -eq 0 ]; then

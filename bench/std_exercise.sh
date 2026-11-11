@@ -473,7 +473,9 @@ echo "== every std module exercise runs from artifacts as it runs from source"
 # links against the wrong body runs fine and answers differently, which is
 # the failure this is most worth catching.
 unconsumable=""
-for source in "$REPO"/bench/std_*_exercise.iyi; do
+# The module tests that `iyi test` runs (`bench/std_*_test.iyi`) are the
+# same kind of program, and answer the same question.
+for source in "$REPO"/bench/std_*_exercise.iyi "$REPO"/bench/std_*_test.iyi; do
   name="$(basename "$source" .iyi)"
   work="$WORK/r1/$name"
   mkdir -p "$work/mods"
@@ -550,7 +552,7 @@ if [ -n "$unconsumable" ]; then
   echo "  FAIL: cannot be consumed as artifacts:$unconsumable"
   status=1
 else
-  echo "  all $(ls "$REPO"/bench/std_*_exercise.iyi | wc -l | tr -d ' ') exercises answer the same from source and from artifacts"
+  echo "  all $(ls "$REPO"/bench/std_*_exercise.iyi "$REPO"/bench/std_*_test.iyi | wc -l | tr -d ' ') exercises answer the same from source and from artifacts"
 fi
 
 # The filter above (bench/darwin_frames.sh) leaves out a frame, whichever

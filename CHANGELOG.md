@@ -2,6 +2,54 @@
 
 ## Unreleased
 
+### Added
+
+- **`iyi test` runs tests at once, says what each named case came to, and
+  can run some of them.** Half as many tests build and run together as the
+  machine has cores, `-p N` says how many, and the report stays in file
+  order. 24 small tests on 12 logical cores, with a non-release compiler:
+  22.6 to 24.0 s one at a time, 6.3 to 7.2 s twelve at once, 7.4 to 7.6 s
+  six at once - so the default stops at half, a tenth slower for half the
+  memory (a test's build is some 200 MB).
+  `--json` carries each named case (`test "name" { }`) with its verdict and
+  its panic's message or its reason to skip, where it was only lines in the
+  output. `--run TEXT` runs the named cases whose name holds TEXT, and a
+  run in which none does fails rather than passing having tested nothing.
+  `test "name", skip: "why" do ... end` is a case that does not run and
+  says `skip - name: why`. The MCP `test` tool takes `run` too.
+- **`iyi test --release` and `-D FLAG` build every test that way, and
+  `-v` shows what a passing test printed.** A test was built as `build
+  FILE -o BINARY` and nothing else, so neither the optimised program nor a
+  flag-gated path could be tested; a `--chaos` failure's `reproduce:` line
+  carries the flags, since without them the seed reruns another program.
+
+### Changed
+
+- **`iyi test` in a directory no longer runs other projects' tests.** It
+  walks the tree as `fix` and `mod tidy` do: not into `lib` (the installed
+  dependencies, whose failing test failed the run of the project that
+  installed them), a dot directory, a directory with an `iyi.mod` of its
+  own, or a link.
+- **A test killed at its deadline on Linux and macOS takes what it
+  started with it.** It leads a process group of its own from its spawn
+  (`Process.new(..., process_group: true)`, which this fork adds) and the
+  deadline ends the group, as a job object already did on Windows; ^C or
+  a SIGTERM to `iyi test` ends every group still running.
+- **A test's output is in the order it wrote it.** Standard output and
+  standard error were two pipes copied by two fibers, and a failed case's
+  panic landed above or below all of the test's other lines as the copies
+  were scheduled: sixteen tests at once came back out of order in 8 of 16.
+  They are one pipe now, and the same run comes back in order in 16 of 16.
+- **The prelude's library is held to 4,738 lines, by the owner's
+  decision** (SPEC.md I.4): the 49 lines `skip:`, `--run`, the case
+  report and taking them out of a test's environment need, which only the
+  test program can do.
+- **A program a test starts no longer reports into the test's file or runs
+  only its `--run` cases.** IYI_TEST_REPORT and IYI_TEST_RUN were in the
+  environment the test's children inherit; the prelude reads them at the
+  test's first named case and takes them out of it. Only a test with a
+  named case reads its environment, so no other program links `environ`.
+
 ### Fixed
 
 - **`iyi run`'s exit is the program's, when Windows holds its executable a
@@ -9,11 +57,76 @@
   raised when Windows refused - "being used by another process" - and the
   refusal replaced the program's verdict: `std_http_latency.iyi` printed
   ALL CHECKS PASSED and `iyi run` exited 1 (CI job 130381353157). The
-  delete is asked again for about a second, and a file still held then is
+  delete is asked again for two seconds, and a file still held then is
   left for the sweep that takes an hour-old runner's leftovers. Reproduced
   with a reader holding the program until 300 ms after it exits: exit 1
   and the file left before, exit 0 and the file deleted now;
-  `bench/verbs_exercise.sh` holds both, and a 2.5 s hold, on Windows.
+  `bench/verbs_exercise.sh` holds both, and a 5 s hold, on Windows. One
+  second failed once on a CI runner, the 300 ms hold's file kept (job
+  130589942769); the gate now prints when its reader let go and when the
+  runner ended, so another such failure says which was late.
+
+### Gates
+
+- **Four module exercises are tests now.** `bench/std_bool_test.iyi`,
+  `std_box_test.iyi`, `std_heap_test.iyi` and `std_string_pool_test.iyi`
+  are named cases over the prelude's assertions, and their drivers run
+  them with `iyi test --json` and require each case's verdict by name,
+  including the one a broken module must fail. The box proof broke
+  `unbox` with a `raise`, which stopped the program building and was read
+  as the test catching it; it now hands C a null pointer, which the case
+  fails at run time. `std_exercise.sh`'s artifact round trip and
+  `std_platforms.sh` read `bench/std_*_test.iyi` beside the exercises.
+  The four drivers share `bench/module_test.sh` instead of carrying the
+  same hundred lines each, and build the release half with `iyi test
+  --release`.
+- **`spec/std/process_spec.cr` holds `process_group:`** on POSIX: the
+  child leads a group of its own, what it starts is in that group, and a
+  signal to the group ends it; without the option the child stays in this
+  process's group.
+- **`bench/test_verb.sh` proves a test's children are out of its reach**:
+  a child program with a named case of its own neither lands in the test's
+  report nor runs only the test's `--run` cases. Against a prelude that
+  leaves the two variables in place the report carried the child's case.
+- **A pull request runs the jobs that run what it changed.**
+  `scripts/ci_plan.py` credited a bench file to every job whose text held
+  its name, comments included, and a comment above a job header counted
+  for the job before it: a pull request changing only
+  `bench/std_tls_exercise.sh` ran `windows-std-platforms`, which never runs
+  it, and passed. Nor did it see a gate another script runs: 483 of the
+  590 files under bench/ were run by no job it knew of, so a change to a
+  module exercise fell to the fast tier, which runs none. It reads code
+  now, not comments, and follows what runs what - a step, a script that
+  runs, sources or finds a file by a glob or a `${VAR}` in its name, a
+  program that reads its own template, a directory a script names - so
+  two files under bench/ are run by nothing, and both are used by nothing.
+  Measured against the old planner over every bench file: the only jobs it
+  no longer chooses, for eleven files, are ones it chose from a comment.
+- **`bench/ci_plan_exercise.py`, in the docs job**, holds the planner to
+  that on this tree and on a workflow of its own. Pointed at the planner
+  before this change it fails the three checks above.
+- **`bench/gates_reachable.py` counts what is run, not what is named.** A
+  name in a comment, a message, a docstring or a list of strings was a run,
+  so thirteen measurement scripts were "reached" through
+  `measured_numbers.py`'s list of what it cannot re-measure, and three tools
+  through the gate's own list of them; and `.iyi` programs were not looked
+  at. A file is run now when a job or a Makefile runs it, or a script that
+  is itself run does - by a command on its line, a loop or variable a
+  command uses, or a function that runs one - and that covers every
+  `.sh`, `.py` and `.iyi` directly under bench/: 399 of 415 are run, and
+  the sixteen that are not are named as tools with what each is for
+  (`machine_probe.py`, and the instruments `measured_numbers.py` holds the
+  docs' quotes to). On a copy of the tree with a gate named only in a
+  comment, the gate before this counted it reached; this one does not.
+- **The nightly run skips a commit that already passed.** A scheduled run
+  of a commit that passed the full set on master in the last seven days
+  selects no job (`scripts/ci_plan.py`, `RECHECK_AFTER`): 08ce6c1cb had
+  passed it on its push and on the night after, and the third run, the
+  night after that, put 44 jobs in a queue that already held three pull
+  requests. An unchanged master still runs again once a week - a run counts
+  only if a job past the plan and the verdict succeeded in it, or a nightly
+  that selected nothing would restart the week - and a run whose history
+  cannot be read runs everything.
 
 ## 0.21.0 — 2026-11-09
 
@@ -27769,7 +27882,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 28,806-line library and nothing else. Every other
+  written against iyi's own 28,880-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

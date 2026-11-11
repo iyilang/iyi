@@ -11284,6 +11284,32 @@ end
   end
 {% end %}
 
+# *name* out of this process's environment, every entry, as std/env's `delete`.
+def __iyi_env_forget(name : String) : Nil
+  {% if flag?(:win32) %}
+    __iyi_win_env_unset(name.to_unsafe, name.bytesize)
+  {% elsif !flag?(:wasm32) %}
+    table = __iyi_environ
+    return if table.address == 0_u64
+    length = name.bytesize
+    bytes = name.to_unsafe
+    index = 0
+    kept = 0
+    while (entry = table[index]).address != 0_u64
+      offset = 0
+      while offset < length && entry[offset] == bytes[offset]
+        offset = offset + 1
+      end
+      unless offset == length && entry[length] == 61_u8
+        table[kept] = entry
+        kept = kept + 1
+      end
+      index = index + 1
+    end
+    table[kept] = Pointer(UInt8).new(0_u64)
+  {% end %}
+end
+
 # The running program: its arguments and its environment, on demand.
 class Program
   # The arguments after the program's own name, the way every shell

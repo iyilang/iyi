@@ -70,7 +70,11 @@ arenas from a list made once per injection. Under `IYI_HEAP_STRESS`,
 concurrency_exercise cuts 16b and 16d to 10,000 messages and round trips
 and 32,000 selects at stress 1 (128,000 above it), each still failing its
 broken copy and every bound unchanged; the concurrency matrix row passes
-inside its 240 s on Linux (84 s) and macOS (100-107 s).
+inside its 240 s on Linux (84 s) and macOS (100-107 s). `-Dheap_verify`
+reports a local mark that writes another partition's mark bits, and
+heap_local's stale check keeps its object carved to the unit's death, so
+both copies are caught every run with the dead stack cleared under local
+collections.
 
 A parallel unit reaching module state that is not Share through the code
 it calls is a compile error (SPEC.md III.4.5), std's and the prelude's
@@ -27878,7 +27882,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 33,931-line library and nothing else. Every other
+  written against iyi's own 33,958-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

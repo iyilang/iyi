@@ -250,7 +250,7 @@ if [ "$PART" = all ] || [ "$PART" = broken ]; then
   # a stale word naming one passes the collector's root test, and a
   # global mark would keep what the dead chunk names.
   prove_fails "a pooled run's dead chunks left carved" nostale "stale:" \
-    '/^          free_locals_in\(arena, run, n\)$/ { found = found + 1; next } /^            drain_run\(arena, run, n\)$/ { print "            free_locals_in(arena, run, n)"; found = found + 1 } { print } END { if (found != 2) exit 3 }' \
+    '/^          free_locals_in\(arena, run, n\)$/ { found = found + 1; next } /^            drain_run\(index, arena, run, n\)$/ { print "            free_locals_in(arena, run, n)"; found = found + 1 } { print } END { if (found != 2) exit 3 }' \
     heap_partition.iyi
 
   # The publication walk's frontier test made of the word, not the

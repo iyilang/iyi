@@ -142,15 +142,18 @@ prove_fails() { # label dir phrase awk-script file
     status=1
     return
   fi
-  if ! grep -q "^FAIL: $phrase" "$WORK/$dir/out"; then
+  # Unanchored: the verifier's report runs on another thread, and its
+  # "iyi: heap_verify: partition " can sit unfinished in front of the
+  # program's FAIL line (Linux, nofrontier, v2 prep).
+  if ! grep -q "FAIL: $phrase" "$WORK/$dir/out"; then
     echo "  $label: failed (exit $code), but not at the expected check"
     sed -n '$p' "$WORK/$dir/out"
     status=1
     return
   fi
   local verifier="the verifier did not report"
-  grep -q "^iyi: heap_verify: going on" "$WORK/$dir/out" && verifier="the verifier reported too"
-  printf '  %s: exits %s at "%s" (%s)\n' "$label" "$code" "$(grep -m1 "^FAIL: $phrase" "$WORK/$dir/out" | sed 's/^FAIL: //')" "$verifier"
+  grep -q "iyi: heap_verify: going on" "$WORK/$dir/out" && verifier="the verifier reported too"
+  printf '  %s: exits %s at "%s" (%s)\n' "$label" "$code" "$(grep -m1 "FAIL: $phrase" "$WORK/$dir/out" | sed 's/^.*FAIL: //')" "$verifier"
 }
 
 if [ "$PART" = all ] || [ "$PART" = broken ]; then

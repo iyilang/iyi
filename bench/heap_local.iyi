@@ -685,8 +685,12 @@
     group do |g|
       handle = g.spawn(unit: :new) { stale_task }
       value = handle.value
-      fail("stale: the unit answered #{value}") unless value.is_a?(UInt64)
-      hidden = value
+      # `fail` goes on under HEAP22_PRINT_ONLY, so it narrows nothing.
+      if value.is_a?(UInt64)
+        hidden = value
+      else
+        fail("stale: the unit answered #{value}")
+      end
     end
     settle("stale")
     base = IyiRoots.base_of(hide(hidden))

@@ -2623,8 +2623,9 @@ class IyiHeap
   end
 
   # Partition *record*'s emptied runs to the shared heap (`drain_run`),
-  # for its sweep to pool: a partition handed over whole, or one whose
-  # dead large object outlived its death.
+  # on their classes' drain lists for a partition to take
+  # (`adopt_drained`): a partition handed over whole, or one whose dead
+  # large object outlived its death.
   def self.drain_emptied(record : UInt64) : Nil
     run = read64(record &+ REC_EMPTIED)
     while run != 0
@@ -2633,7 +2634,7 @@ class IyiHeap
       index = class_index(read64(arena + OFF_CHUNK))
       class_lock(index)
       quiet(index, arena, false)
-      drain_run(arena, run, run_n(word))
+      drain_run(index, arena, run, run_n(word))
       class_unlock(index)
       run = word & RUN_LINK
     end

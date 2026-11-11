@@ -273,18 +273,28 @@ def test_darwin_backward_compatibility():
     ret, rule, _ = capture_violation(compare_same_opt, d1, d2)
     assert ret == 0, f"Darwin equivalence failed: {rule}"
 
-    # Legacy paths may correspond, but distinct ordinals do not.
+    # Legacy paths correspond, and so do the numbers two builds gave one closure.
     sym_a = b"0   a.out                               0x0000000100003f50 ~proc123@src/std/big.iyi:10 + 16\n"
     sym_b = b"0   a.out                               0x0000000100009999 ~proc123@mods/std/big.iyimod:10 + 32\n"
     ret, rule, _ = capture_violation(compare_same_opt, [sym_a], [sym_b])
     assert ret == 0, f"Darwin proc/std canonicalization failed: {rule}"
     ret, rule, _ = capture_violation(compare_same_opt, [sym_a], [sym_b.replace(b'proc123', b'proc456')])
-    assert ret == 1 and rule == "function", "legacy proc ordinal was discarded"
+    assert ret == 0, f"a legacy closure's build number was compared: {rule}"
+    for old, new in [(b':10 ', b':11 '), (b'big.iyimod', b'toml.iyimod'), (b'~proc123@', b'~fun123@')]:
+        changed = sym_b.replace(old, new, 1)
+        assert changed != sym_b
+        ret, rule, _ = capture_violation(compare_same_opt, [sym_a], [changed])
+        assert ret == 1 and rule == "function", f"legacy closure {old!r} -> {new!r} was masked"
 
+    # A body compiled from an artifact's source carries one `~iyi` after its name.
     sym_c = b"0   a.out                               0x0000000100003f50 run_loop~iyi + 16\n"
     sym_d = b"0   a.out                               0x0000000100009999 run_loop + 32\n"
     ret, rule, _ = capture_violation(compare_same_opt, [sym_c], [sym_d])
-    assert ret == 1 and rule == "function", "function suffix was discarded"
+    assert ret == 0, f"an artifact body's suffix was compared: {rule}"
+    for other in [b"run_loop~iyi~iyi", b"run~iyi_loop", b"run_loops~iyi", b"run_loop~iy", b"run_loop~IYI"]:
+        changed = sym_c.replace(b"run_loop~iyi", other, 1)
+        ret, rule, _ = capture_violation(compare_same_opt, [changed], [sym_d])
+        assert ret == 1 and rule == "function", f"{other!r} was taken for run_loop"
     # Darwin mutations fail with their expected rules
     mut_idx = generate_mutant("index", d1)
     ret, rule, _ = capture_violation(compare_same_opt, d1, mut_idx)
@@ -420,7 +430,7 @@ def test_captured_darwin_proc_and_collisions():
         (b'http.iyimod', b'debug.iyimod'),
         (b':1832', b':1833'),
         (b'Proc(Int32)', b'Proc(Int64)'),
-        (b'~procProc', b'~proc2Proc'),
+        (b'~procProc', b'~proxProc'),
         (b'~procProc', b'~funProc'),
         (b'std_http_exercise', b'other_image'),
         (b'4   ', b'5   '),
@@ -432,12 +442,51 @@ def test_captured_darwin_proc_and_collisions():
         ret, _, _ = capture_violation(compare_same_opt, [source], [changed])
         assert ret == 1, f"masked difference {old!r} -> {new!r}"
 
+    # One closure, numbered third by the build from source and second by the build from
+    # artifacts. What the frame says of the source (its type, its file, its line) agrees.
     parallel_source = b'2   std_parallel_exercise               0x00000001030158e0 ~proc3Proc(Array(Tuple(Int64, Array(Int32))))^/Users/runner/work/iyi/iyi/.build/../src/std/parallel.iyi:215 + 396\n'
     parallel_artifact = b'2   std_parallel_exercise               0x0000000102f63c64 ~proc2Proc(Array(Tuple(Int64, Array(Int32))))^mods/std/parallel.iyimod:215 + 444\n'
     ret, rule, _ = capture_violation(compare_same_opt, [parallel_source], [parallel_artifact])
-    assert ret == 1 and rule == "function", "unverified parallel ordinal alias accepted"
-    ret, _, _ = capture_violation(compare_same_opt, [parallel_source], [parallel_artifact.replace(b'~proc2', b'~proc3')])
-    assert ret == 0, "nested type path alias failed"
+    assert ret == 0, f"a closure's build number was compared: {rule}"
+    ret, _, _ = capture_violation(compare_same_opt, [source], [artifact.replace(b'~procProc', b'~proc2Proc', 1)])
+    assert ret == 0, "an unnumbered closure and a numbered one were told apart"
+    for old, new in [(b':215', b':216'), (b'parallel.iyimod', b'debug.iyimod'),
+                     (b'Array(Int32)', b'Array(Int64)'), (b'~proc2Proc', b'~proc2Fun')]:
+        changed = parallel_artifact.replace(old, new, 1)
+        assert changed != parallel_artifact
+        ret, rule, _ = capture_violation(compare_same_opt, [parallel_source], [changed])
+        assert ret == 1 and rule == "function", f"closure {old!r} -> {new!r} was masked"
+    # A proc name with no location keeps its number: nothing else says which closure it is.
+    bare = b'2   std_parallel_exercise               0x00000001030158e0 ~proc3Proc(Nil) + 396\n'
+    ret, rule, _ = capture_violation(compare_same_opt, [bare], [bare.replace(b'~proc3', b'~proc2')])
+    assert ret == 1 and rule == "function", "a closure with no location lost its number"
+
+    # Captured on darwin arm64: a closure hosted in a carried unit, from source and from artifacts.
+    unit_source = b'5   std_http_exercise                   0x0000000103d790ec ~proc4Proc(Nil)^/Users/runner/work/iyi/iyi/src/iyi/concurrency.iyi:7029^unit:5374643a3a487474703a3a536572766572 + 92\n'
+    unit_artifact = b'5   std_http_exercise                   0x0000000104185870 ~proc2Proc(Nil)^/Users/runner/work/iyi/iyi/src/iyi/concurrency.iyi:7029 + 92\n'
+    ret, rule, _ = capture_violation(compare_same_opt, [unit_source], [unit_artifact])
+    assert ret == 0, f"a carried closure's unit was compared: {rule}"
+    hosted = source.replace(b':1832 +', b':1832^unit:5374643a3a487474703a3a536572766572 +')
+    assert hosted != source
+    ret, rule, _ = capture_violation(compare_same_opt, [hosted], [artifact], require_frames=True)
+    assert ret == 0, f"a carried closure's unit hid its std path: {rule}"
+    unit = b'^unit:5374643a3a487474703a3a536572766572'
+    for other in [b'^unit:5374643A3A', b'^unit:', b'^unit:std', b'^unit:53^unit:54', b'^unit:53~x', b'^Unit:53']:
+        changed = unit_source.replace(unit, other, 1)
+        assert changed != unit_source
+        ret, rule, _ = capture_violation(compare_same_opt, [changed], [unit_artifact])
+        assert ret == 1 and rule == "function", f"{other!r} was taken for a unit suffix"
+    named = b'5   std_http_exercise                   0x0000000103d790ec *Std::Http::Server#run:Nil^unit:53 + 92\n'
+    ret, rule, _ = capture_violation(compare_same_opt, [named], [named.replace(b'^unit:53', b'')])
+    assert ret == 1 and rule == "function", "a unit suffix was taken off a name that is no closure"
+
+    # Captured: a method whose body the consumer compiled from the artifact's source.
+    body_source = b'0   std_file_exercise                   0x0000000100f35a78 *File::rename<String, String>:Nil + 116\n'
+    body_artifact = b'0   std_file_exercise                   0x000000010418d808 *File::rename<String, String>:Nil~iyi + 116\n'
+    ret, rule, _ = capture_violation(compare_same_opt, [body_source], [body_artifact])
+    assert ret == 0, f"an artifact body's suffix was compared: {rule}"
+    ret, rule, _ = capture_violation(compare_same_opt, [body_source], [body_artifact.replace(b'rename<', b'delete<')])
+    assert ret == 1 and rule == "function", "another method was taken for the one compiled from its artifact"
 
     escaped_source = source.replace(b'Proc(Int32)', b'Proc(NamedTuple("a%5Eb%40c%25": Array(Int32)))').replace(b'http.iyi', b'http%5E%40%25.iyi')
     escaped_artifact = artifact.replace(b'Proc(Int32)', b'Proc(NamedTuple("a%5Eb%40c%25": Array(Int32)))').replace(b'http.iyimod', b'http%5E%40%25.iyimod')

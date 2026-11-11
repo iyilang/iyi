@@ -60,24 +60,56 @@ def proc_location(sym: bytes):
     return None
 
 
+# What a carried closure's linkage name ends with: the unit that hosts it, as the
+# lowercase hex of the unit's name (SPEC.md IV, "The unit is the object file").
+UNIT_SUFFIX_RE = re.compile(rb'\^unit:[0-9a-f]+\Z')
+PROC_ORDINAL_RE = re.compile(rb'\A~proc\d*')
+
+
 def canonical_function(sym: bytes) -> bytes:
+    """The function a frame names, without what only one build's linkage adds.
+
+    Two builds of one program name the same function differently in three ways,
+    and none of them says anything about the source:
+
+    * a body compiled from an artifact's carried source is linked beside the
+      artifact's own object for it, under the same name with one `~iyi` after it;
+    * a closure a carried unit hosts ends in `^unit:` and the unit's name in hex,
+      and the closure a consumer compiles from the same source does not;
+    * a closure is numbered in the order its build reached it (`~proc3`), and a
+      build from artifacts reaches them in another order.
+
+    So a function is its name without one trailing `~iyi`, and a closure is its
+    Proc type and the file and line it was written at. Two closures of one type
+    written on one line are not told apart: the frame a person reads does not
+    tell them apart either. A proc name that carries no location keeps its
+    number, and so does anything this does not recognise.
+    """
+    if sym.endswith(b'~iyi'):
+        sym = sym[:-4]
+    if sym.startswith(b'~proc'):
+        unit = UNIT_SUFFIX_RE.search(sym)
+        if unit:
+            sym = sym[:unit.start()]
     location = proc_location(sym)
     if location:
         start, end, _, _ = location
+        head = PROC_ORDINAL_RE.sub(b'~proc', sym[:start], count=1)
         path = sym[start:end]
         canonical = canonical_file(path)
         if canonical != path:
             # NUL cannot occur in a linkage name and prevents a literal path
             # already named std/X from colliding with this equivalence class.
-            return sym[:start] + b'\0' + canonical + sym[end:]
-        return sym
+            return head + b'\0' + canonical + sym[end:]
+        return head + sym[start:]
     # Older proc symbols use @ as their location separator.
-    legacy = re.fullmatch(rb'(~proc\d*@)([^@:]+):(\d+)', sym)
+    legacy = re.fullmatch(rb'~proc\d*@([^@:]+):(\d+)', sym)
     if legacy:
-        path = legacy.group(2)
+        path = legacy.group(1)
         canonical = canonical_file(path)
         if canonical != path:
-            return legacy.group(1) + b'\0' + canonical + b':' + legacy.group(3)
+            return b'~proc@\0' + canonical + b':' + legacy.group(2)
+        return b'~proc@' + path + b':' + legacy.group(2)
     return sym
 
 def canonical_file(path: bytes) -> bytes:

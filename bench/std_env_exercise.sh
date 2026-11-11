@@ -87,7 +87,7 @@ fi
 
 echo
 echo "== every env section reported"
-for phrase in "== set and get" "== absent key and defaults" "== delete and presence" "== iteration and hash" "== nil assignment, empty value, positions, and Program.env" "== what was set outlives a collection" "== a name the environment holds twice"; do
+for phrase in "== set and get" "== absent key and defaults" "== delete and presence" "== iteration and hash" "== nil assignment, empty value, positions, and Program.env" "== what was set outlives a collection" "== a name the environment holds twice" "== writers and readers at once"; do
   if ! grep -q "$phrase" "$WORK/env-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -138,7 +138,7 @@ case "$(uname -s)" in
     elif ! "$PY" - <<PY
 from pathlib import Path
 src = Path("$REPO/src/std/env.iyi").read_text()
-old = '        unless offset == k_len && entry[k_len] == 61_u8\n          ptr[kept] = entry\n'
+old = '              unless offset == k_len && entry[k_len] == 61_u8\n                fresh[kept] = entry\n'
 if src.count(old) != 1:
     raise SystemExit("patch site missing")
 new = old.replace('== 61_u8', '== 61_u8 && kept == index', 1)
@@ -160,41 +160,36 @@ PY
     ;;
 esac
 
-# `each` yielded from the live table, so a block that deleted the name it
-# was handed moved the next entry into the slot just read. Put back, it
-# must be caught where the exercise deletes inside `each`.
+# `delete` closed the installed table up in place, so an `each` whose block
+# deleted the name it was handed moved the next entry into the slot just
+# read, and a reader in another unit missed what moved past it. Put back,
+# it must be caught where the exercise deletes inside `each`.
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT) ;;
   *)
-    mkdir -p "$WORK/liveeach/std"
+    mkdir -p "$WORK/inplace/std"
     if [ -z "$PY" ]; then
-      echo "  no python3 on this machine, so the live-table each proof is unmeasured"
+      echo "  no python3 on this machine, so the in-place delete proof is unmeasured"
     elif ! "$PY" - <<PY
 from pathlib import Path
 src = Path("$REPO/src/std/env.iyi").read_text()
-old = '''          names << String.new(eq_pos) { |t| t.copy_from(entry, eq_pos) }
-          v_len = len - eq_pos - 1
-          values << String.new(v_len) { |t| t.copy_from(entry + (eq_pos + 1), v_len) }
-'''
+old = '            fresh = Pointer(UInt8*).malloc((count + 1).to_u64)\n'
 if src.count(old) != 1:
     raise SystemExit("patch site missing")
-new = '''          v_len = len - eq_pos - 1
-          yield String.new(eq_pos) { |t| t.copy_from(entry, eq_pos) }, String.new(v_len) { |t| t.copy_from(entry + (eq_pos + 1), v_len) }
-'''
-Path("$WORK/liveeach/std/env.iyi").write_text(src.replace(old, new, 1))
+Path("$WORK/inplace/std/env.iyi").write_text(src.replace(old, '            fresh = ptr\n', 1))
 PY
     then
-      echo "  the live-table each patch did not apply"
+      echo "  the in-place delete patch did not apply"
       status=1
-    elif IYI_PATH="$WORK/liveeach${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_env_exercise.iyi" >"$WORK/liveeach.out" 2>&1; then
-      echo "  the exercise PASSED with each yielding from the live table"
+    elif IYI_PATH="$WORK/inplace${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_env_exercise.iyi" >"$WORK/inplace.out" 2>&1; then
+      echo "  the exercise PASSED with delete closing the installed table up in place"
       status=1
-    elif ! grep -q "ASSERTION FAILED: each visits every variable while its block deletes" "$WORK/liveeach.out"; then
-      echo "  an each over the live table failed somewhere else:"
-      sed 's/^/    /' "$WORK/liveeach.out"
+    elif ! grep -q "ASSERTION FAILED: each visits every variable while its block deletes" "$WORK/inplace.out"; then
+      echo "  a delete in place failed somewhere else:"
+      sed 's/^/    /' "$WORK/inplace.out"
       status=1
     else
-      echo "  an each that skips past what its block deleted is caught"
+      echo "  a delete that closes the installed table up in place is caught"
     fi
     ;;
 esac
@@ -230,6 +225,146 @@ PY
         status=1
       else
         echo "  a table held nowhere is caught (exit $code): $(grep -v '^\s*$' "$WORK/unheld.out" | tail -1 | cut -c1-120)"
+      fi
+    fi
+    ;;
+esac
+
+# Writers take turns (`ENV.writing`). The exercise's "writers and readers
+# at once" holds on the pool's threads above; here it runs on the chaos
+# scheduler's simulated schedule (SPEC.md III.4.17), where a seed is one
+# interleaving and names it again. The sound module passes every seed of
+# CHAOS_SEEDS; with the turn taken out, every seed of CAUGHT_SEEDS fails at
+# the race's own checks. Windows writes to the platform's block, which
+# takes no turn of iyi's, so the copy changes nothing there.
+CHAOS_SEEDS="${CHAOS_SEEDS:-1 2 3 4 5 6 7 8}"
+CAUGHT_SEEDS="${CAUGHT_SEEDS:-3 6}"
+TO=""
+command -v timeout >/dev/null 2>&1 && TO="timeout -k 5 120"
+RACE_FAILED="ASSERTION FAILED: writers at once keep every write\|ASSERTION FAILED: a reader sees its variable while another unit deletes"
+chaos_seeds() { # chaos_seeds <name> <search path>: sets passed, caught, other
+  local name="$1" seed
+  passed=""; caught=""; other=""
+  if ! IYI_PATH="$2" "$IYI" build -Diyi_chaos -o "$WORK/$name" "$REPO/bench/std_env_exercise.iyi" >"$WORK/$name.build.log" 2>&1; then
+    other="build"
+    tail -12 "$WORK/$name.build.log"
+    return
+  fi
+  for seed in $CHAOS_SEEDS; do
+    IYI_CHAOS=$seed IYI_WORKERS=1 $TO "$WORK/$name" >"$WORK/$name-$seed.out" 2>&1
+    if grep -q "ALL CHECKS PASSED" "$WORK/$name-$seed.out"; then
+      passed="$passed $seed"
+    elif grep -q "$RACE_FAILED" "$WORK/$name-$seed.out"; then
+      caught="$caught $seed"
+    else
+      other="$other $seed"
+    fi
+  done
+}
+
+echo
+echo "== writers and readers at once, on the chaos schedule (IYI_WORKERS=1)"
+chaos_seeds env-chaos "$REPO/src${PSEP}$REPO/samples/iyi"
+if [ -n "$other$caught" ]; then
+  echo "  the sound module failed on the chaos schedule: seeds$caught$other (caught by the race's checks: seeds$caught)"
+  for seed in $caught $other; do
+    [ -f "$WORK/env-chaos-$seed.out" ] && grep -v '^\s*$' "$WORK/env-chaos-$seed.out" | tail -3 | sed "s/^/    seed $seed: /"
+  done
+  status=1
+else
+  echo "  seeds$passed pass"
+fi
+
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) ;;
+  *)
+    mkdir -p "$WORK/unturned/std"
+    if [ -z "$PY" ]; then
+      echo "  no python3 on this machine, so the writers' turn proof is unmeasured"
+    elif ! "$PY" - <<PY
+from pathlib import Path
+src = Path("$REPO/src/std/env.iyi").read_text()
+old = "    until WRITER.compare_and_set(0, 1)[1]\n    end\n"
+if src.count(old) != 1:
+    raise SystemExit("patch site missing")
+Path("$WORK/unturned/std/env.iyi").write_text(src.replace(old, "", 1))
+PY
+    then
+      echo "  the writers' turn patch did not apply"
+      status=1
+    else
+      chaos_seeds env-unturned "$WORK/unturned${PSEP}$REPO/src${PSEP}$REPO/samples/iyi"
+      missed=""
+      for seed in $CAUGHT_SEEDS; do
+        case " $caught " in *" $seed "*) ;; *) missed="$missed $seed" ;; esac
+      done
+      if [ -n "$missed" ]; then
+        echo "  writers that take no turns: not caught on seeds$missed (passed:${passed:- none}, caught:${caught:- none}, other:${other:- none})"
+        status=1
+      else
+        echo "  writers that take no turns are caught on seeds$caught (passed:${passed:- none}, other:${other:- none})"
+      fi
+    fi
+    ;;
+esac
+
+# The table is installed and read as an atomic word (prelude
+# `__iyi_set_environ`, `__iyi_environ`): a reader on another core walks a
+# new table with no lock, and with a plain store arm64 may make the install
+# visible before the entries. No run shows that on demand, so the build is
+# read instead: both functions' IR holds the atomic, and with the plain
+# store and load put back it does not.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) ;;
+  *)
+    cat >"$WORK/ir_env.iyi" <<'IYI'
+import std/env::{ENV}
+
+ENV["_IYI_ENV_EXERCISE_IR"] = "x"
+puts ENV["_IYI_ENV_EXERCISE_IR"]?
+IYI
+    # "<definitions found> <atomic stores in the install> <atomic loads in the read>"
+    ir_atomics() { # ir_atomics <name> <search path>
+      IYI_PATH="$2" "$IYI" build --emit llvm-ir -o "$WORK/$1" "$WORK/ir_env.iyi" >"$WORK/$1.build.log" 2>&1 || { echo "build failed"; return; }
+      awk '/^define .*__iyi_set_environ/ { s = 1; defs++ } s && (/store atomic/ || (/Atomic/ && /#set/)) { stores++ } s && /^}/ { s = 0 }
+           /^define .*__iyi_environ/ { g = 1; defs++ } g && (/load atomic/ || (/Atomic/ && /#get/)) { loads++ } g && /^}/ { g = 0 }
+           END { print defs + 0, stores + 0, loads + 0 }' "$WORK/$1.ll"
+    }
+    sound_ir="$(ir_atomics ir-sound "$REPO/src${PSEP}$REPO/samples/iyi")"
+    case "$sound_ir" in
+      "2 0 "* | "2 "*" 0" | "build failed" | "0 "* | "1 "*)
+        echo "  the environment table is not installed and read as an atomic word (definitions, atomic stores, atomic loads: $sound_ir)"
+        status=1
+        ;;
+      *) echo "  the table is installed and read as an atomic word (definitions, atomic stores, atomic loads in the IR: $sound_ir)" ;;
+    esac
+    mkdir -p "$WORK/plainword/iyi"
+    cp "$REPO"/src/iyi/*.iyi "$WORK/plainword/iyi/"
+    if [ -z "$PY" ]; then
+      echo "  no python3 on this machine, so the plain-word proof is unmeasured"
+    elif ! "$PY" - <<PY
+from pathlib import Path
+src = Path("$REPO/src/iyi/prelude.iyi").read_text()
+pairs = [
+    ("    Pointer(UInt8*).new(Pointer(Atomic(UInt64)).new(pointerof(LibIyiEnv.environ).address).value.get)\n", "    LibIyiEnv.environ\n"),
+    ("    Pointer(Atomic(UInt64)).new(pointerof(LibIyiEnv.environ).address).value.set(entries.address)\n", "    LibIyiEnv.environ = entries\n"),
+]
+for old, new in pairs:
+    if src.count(old) != 1:
+        raise SystemExit("patch site missing")
+    src = src.replace(old, new, 1)
+Path("$WORK/plainword/iyi/prelude.iyi").write_text(src)
+PY
+    then
+      echo "  the plain-word patch did not apply"
+      status=1
+    else
+      plain_ir="$(ir_atomics ir-plain "$WORK/plainword${PSEP}$REPO/src${PSEP}$REPO/samples/iyi")"
+      if [ "$plain_ir" = "2 0 0" ]; then
+        echo "  a plain store and load are caught (definitions, atomic stores, atomic loads in the IR: $plain_ir)"
+      else
+        echo "  the plain store and load were not caught (definitions, atomic stores, atomic loads in the IR: $plain_ir)"
+        status=1
       fi
     fi
     ;;

@@ -59,7 +59,10 @@ copy is caught on Windows too; and the crossing fuzz driver runs on
 Windows. bench/heap_verify.sh builds heap_crossings' copies the way
 heap_crossings.sh does (both trees, the compiler's `IYI_SPAWN_BROKEN`), so
 the std `Mutex` copies and the compiler-broken `Unit.new` rows are caught
-by the verifier.
+by the verifier. The verifier clears the dead stack under its whole-heap
+scans, so an idle worker that then waits in the kernel holds no stale word
+naming a live object (Windows: concurrency_exercise's 64 MB channel checks
+kept 61 MiB under `-Dheap_verify`).
 
 A parallel unit reaching module state that is not Share through the code
 it calls is a compile error (SPEC.md III.4.5), std's and the prelude's
@@ -27851,7 +27854,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 33,898-line library and nothing else. Every other
+  written against iyi's own 33,908-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

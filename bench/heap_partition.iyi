@@ -35,12 +35,19 @@
 #   task asks for one every 65,536 rounds in its record, then runs its
 #   rounds again in its own unit's partition, where local collections
 #   (section 4.1) must run on their own.
+# - `dead:` (with partitions) a fiber is born in the shared heap and
+#   outlives its unit through its task's handle, so nothing it keeps may
+#   name the dead unit's partition: the waiter `park_on` keeps as its
+#   spare is the shared heap's, and a reaped fiber lets its group and its
+#   block go. `dead` runs this check alone, `dead quiet` its steps only.
 #
 # With no arguments it runs the checks on a pool of four workers and
 # prints one fixed line, as every bench program's bare run does on CI.
 # `W ROUNDS` sets the pool and each task's rounds.
 
 {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
+  import std/mutex::{Mutex}
+
   def fail(message : String) : Nil
     print "FAIL: #{message}\n"
     __iyi_exit(1)
@@ -218,9 +225,92 @@
     lost
   end
 
+  {% if flag?(:heap_partitions) %}
+    # A `:new` task that parks once on a lock main holds (`park_on`), then
+    # runs a child of its own unit in a group made in its partition and
+    # waits until the child is reaped. With *check* it asserts that
+    # nothing the dead fibers keep names its partition; without, it only
+    # does the same steps, so `-Dheap_verify`'s death check is what sees
+    # a broken copy.
+    def dead_task(slots : Mutex(Array(IyiFiber?)), go : Channel(Int64), check : Bool) : Int64
+      unit = IyiScheduler.current.unit
+      fail("dead: a :new task has no unit") unless unit.is_a?(IyiUnit)
+      own = unit.heap
+      fail("dead: the task's unit has no partition of its own") if own == 0_u64
+      go.receive
+      slots.lock { |s| s[0] = IyiScheduler.current }
+      waiter = IyiScheduler.current.spare_waiter
+      if check
+        fail("dead: the task never parked on the lock main held") unless waiter.is_a?(IyiWaiter)
+        at = IyiHeap.owner_of(waiter.object_id)
+        fail("dead: park_on's waiter, the fiber's spare, was made in partition #{at}, not the shared heap") if at != 0_u64
+      end
+      group do |g|
+        g.spawn(unit: :same) do
+          slots.lock { |s| s[1] = IyiScheduler.current }
+          0
+        end.value
+      end
+      waited = 0
+      while unit.fiber_count != 1 && waited < 2000
+        sleep(1)
+        waited = waited + 1
+      end
+      fail("dead: the unit still lists #{unit.fiber_count} fibers 2 s after its child ended") unless unit.fiber_count == 1
+      if check
+        child = slots.get { |s| s[1] }
+        fail("dead: the child never ran") unless child.is_a?(IyiFiber)
+        fail("dead: a reaped fiber still names its group, made in partition #{IyiHeap.owner_of(child.group.object_id)}") unless child.group.is_a?(Nil)
+        fail("dead: a reaped fiber still names its block") unless child.proc.is_a?(Nil)
+      end
+      0_i64
+    end
+
+    # `dead:` a fiber is born in the shared heap and outlives its unit
+    # through its task's handle, and the global mark still traces it: the
+    # waiter `park_on` keeps as its spare is the shared heap's, and a
+    # reaped fiber lets its group and its block go (HS4c's reports
+    # IyiFiber#@spare_waiter and IyiFiber#@group; the block's context
+    # named as IyiFiber#@proc once the group was let go, web_cores
+    # `parallel` --reference, tmac).
+    def dead_check(check : Bool) : Nil
+      slots = Mutex.new { Array(IyiFiber?).new(2, nil) }
+      go = Channel(Int64).new
+      live = IyiHeap.partitions_live
+      group do |g|
+        handle = g.spawn(unit: :new) { dead_task(slots, go, check) }
+        slots.lock do |s|
+          go.send(1_i64)
+          sleep(20)
+        end
+        fail("dead: the task answered #{handle.value}") unless handle.value == 0_i64
+      end
+      waited = 0
+      while IyiHeap.partitions_live > live && waited < 2000
+        sleep(1)
+        waited = waited + 1
+      end
+      fail("dead: #{IyiHeap.partitions_live} records live 2 s after the task's unit ended, #{live} before") if IyiHeap.partitions_live > live
+      return unless check
+      task = slots.get { |s| s[0] }
+      fail("dead: the task never took the lock") unless task.is_a?(IyiFiber)
+      fail("dead: the reaped task still names its group") unless task.group.is_a?(Nil)
+      fail("dead: the reaped task still names its block") unless task.proc.is_a?(Nil)
+    end
+  {% end %}
+
   arguments = Program.args
+  # `dead` runs that check alone; `dead quiet` its steps without the
+  # asserts, for `-Dheap_verify`'s death check (bench/heap_partition.sh).
+  {% if flag?(:heap_partitions) %}
+    if !arguments.empty? && arguments[0] == "dead"
+      dead_check(arguments.size == 1)
+      puts "dead: no dead fiber names its unit's partition"
+      exit(0)
+    end
+  {% end %}
   quiet = arguments.empty?
-  fail("usage: heap_partition WORKERS ROUNDS") unless quiet || arguments.size == 2
+  fail("usage: heap_partition WORKERS ROUNDS | dead [quiet]") unless quiet || arguments.size == 2
   workers = quiet ? 4 : arguments[0].to_i
   rounds = quiet ? 200000_i64 : arguments[1].to_i.to_i64
   records_check
@@ -251,6 +341,7 @@
       waited = waited + 1
     end
     fail("records: #{IyiHeap.partitions_live} records live 2 s after every task freed its own and every unit ended") unless IyiHeap.partitions_live == 0_u64
+    dead_check(true)
   {% else %}
     fail("records: #{IyiHeap.partitions_live} records live after every task freed its own") unless IyiHeap.partitions_live == 0_u64
   {% end %}

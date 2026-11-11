@@ -1290,14 +1290,17 @@
     hidden_free?(hidden[0]) ? 0_i64 : 1_i64
   end
 
-  # 2,000 nodes made and dropped, the 1,500th hung on a `Far` in *box*,
-  # in a frame of their own: that node, its address hidden. Made after
-  # the unit's first 100, it lies on a run of `Node`'s class that holds
-  # nothing else live (the runs double, 64 KiB at most).
+  # 2,000 nodes made and dropped, the 1,500th hung on a `Far` made and
+  # dropped with them, in a frame of their own: that node, its address
+  # hidden. Made after the unit's first 100, it lies on a run of `Node`'s
+  # class that holds nothing else live (the runs double, 64 KiB at most).
+  # Nothing outside the frame holds the `Far`: with a box the caller
+  # emptied after the call, the stopped sweep kept the node in the
+  # optimised builds on win64 (tssh, S6Lead2's v1 round) - the box, or
+  # its emptying store dropped, a likely root to the stack scan.
   @[NoInline]
-  def far_over_nodes(box : Array(Far?)) : UInt64
+  def far_over_nodes : UInt64
     far = Far.new
-    box[0] = far
     hidden = 0_u64
     i = 0
     while i < 2000
@@ -1317,9 +1320,7 @@
   # hidden node and whether its run stopped being the partition's then.
   def unswept_run(record : UInt64) : Tuple(UInt64, Int64)
     id = IyiHeap.read64(record + IyiHeap::REC_ID)
-    box = Array(Far?).new(1, nil)
-    hidden = far_over_nodes(box)
-    box[0] = nil
+    hidden = far_over_nodes
     return {hidden, -3_i64} unless stopped_sweep(record, hidden_class(hidden))
     return {hidden, -4_i64} unless hidden_free?(hidden)
     {hidden, hidden_owner(hidden) == id ? 0_i64 : 1_i64}
@@ -1374,9 +1375,7 @@
     record = IyiHeap.current_record
     return -1_i64 if record == 0_u64
     keep = build(8400000000_i64, 100, 0)
-    box = Array(Far?).new(1, nil)
-    hidden = far_over_nodes(box)
-    box[0] = nil
+    hidden = far_over_nodes
     words = Pointer(UInt64).new(flags)
     words[2] = hidden
     words[3] = IyiHeap.read64(record + IyiHeap::REC_ID)

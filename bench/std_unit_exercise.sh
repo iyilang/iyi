@@ -23,7 +23,12 @@
 #      taken), and one whose tasks run on the spawner's thread on a pool
 #      of one. Of the compiler, through `IYI_SPAWN_BROKEN`: the capture
 #      check removed (`unit-capture`), and the answer check removed
-#      (`unit-answer`).
+#      (`unit-answer`). With `-Dheap_verify` in IYI_OPTS a runtime copy is
+#      built twice: without it, the rest of IYI_OPTS kept, where its own
+#      check is the one it must fail; and with it, where it must fail its
+#      own check or exit 86 at the verifier's report that names it (the
+#      tokenless copy's tasks leave the Unit's value in units of their
+#      own, which the verifier finds at such a unit's death).
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -100,6 +105,14 @@ counts.iyi_value << 1' || exit 1
 
 # ── 3. Broken copies ──────────────────────────────────────────────────────
 # Of the runtime: a copy of src/iyi with concurrency.iyi changed by awk.
+# `-Dheap_verify` ends a copy at its report (exit 86) before the copy's
+# own check can fail, so the own check's build leaves it out; with it in
+# IYI_OPTS, the copy is built with it as well (`$1-verify`).
+VERIFY=0
+OWN_OPTS=""
+for opt in ${IYI_OPTS:-}; do
+  if [ "$opt" = -Dheap_verify ]; then VERIFY=1; else OWN_OPTS="${OWN_OPTS:+$OWN_OPTS }$opt"; fi
+done
 broken() { # name, awk program
   mkdir -p "$1/iyi"
   cp "$REPO"/src/iyi/*.iyi "$1/iyi/"
@@ -107,15 +120,21 @@ broken() { # name, awk program
   if cmp -s "$1/iyi/concurrency.iyi" "$REPO/src/iyi/concurrency.iyi"; then
     echo "the awk for $1 found nothing to change"; exit 1
   fi
-  if ! IYI_PATH="$WORK/$1${PSEP}$REPO/src" "$IYI" build "$REPO/bench/std_unit_exercise.iyi" -o "$1-run" > "build-$1.log" 2>&1; then
+  if ! IYI_OPTS="$OWN_OPTS" IYI_PATH="$WORK/$1${PSEP}$REPO/src" "$IYI" build "$REPO/bench/std_unit_exercise.iyi" -o "$1-run" > "build-$1.log" 2>&1; then
     echo "the broken copy $1 failed to build:"; tail -20 "build-$1.log"; exit 1
+  fi
+  if [ "$VERIFY" = 1 ] &&
+     ! IYI_PATH="$WORK/$1${PSEP}$REPO/src" "$IYI" build "$REPO/bench/std_unit_exercise.iyi" -o "$1-verify" > "build-$1-verify.log" 2>&1; then
+    echo "the broken copy $1 failed to build with -Dheap_verify:"; tail -20 "build-$1-verify.log"; exit 1
   fi
 }
 # A run that ends any way but exit 1 at the sentence is run again, up to
-# five times, as bench/spawn_eligible.sh's are.
-caught() { # name, expected FAIL text, step arguments...
-  local name="$1" want="$2" code attempt
-  shift 2
+# five times, as bench/spawn_eligible.sh's are. The `-Dheap_verify` build
+# is caught by the same sentence, or by exit 86 with the report's line
+# that names the copy (none: the sentence alone).
+caught() { # name, expected FAIL text, verifier's report line, step arguments...
+  local name="$1" want="$2" report="$3" code attempt how
+  shift 3
   for attempt in 1 2 3 4 5; do
     timeout -k 5 120 "./$name-run" "$@" > "$name.txt" 2>&1
     code=$?
@@ -124,16 +143,34 @@ caught() { # name, expected FAIL text, step arguments...
   if [ "$code" -ne 1 ] || ! grep -qF "$want" "$name.txt"; then
     echo "the broken copy $name was not caught at \"$want\" (exit $code):"; tail -20 "$name.txt"; exit 1
   fi
-  echo "  exits 1 at \"$(grep -m1 -F "$want" "$name.txt" | sed 's/^FAIL: //')\""
+  echo "  exits 1 at \"$(grep -m1 -F "$want" "$name.txt" | sed 's/^FAIL: //')\"${OWN_OPTS:+ ($OWN_OPTS)}"
+  [ "$VERIFY" = 1 ] || return 0
+  for attempt in 1 2 3 4 5; do
+    timeout -k 5 120 "./$name-verify" "$@" > "$name-verify.txt" 2>&1
+    code=$?
+    if [ "$code" -eq 1 ] && grep -qF "$want" "$name-verify.txt"; then
+      how="exits 1 at \"$(grep -m1 -F "$want" "$name-verify.txt" | sed 's/^FAIL: //')\""; break
+    fi
+    if [ -n "$report" ] && [ "$code" -eq 86 ] && grep -q "^iyi: heap_verify: partition " "$name-verify.txt" &&
+       grep -qxF "  $report" "$name-verify.txt"; then
+      how="exits 86 at the verifier's \"$report\""; break
+    fi
+  done
+  if [ -z "${how:-}" ]; then
+    [ -n "$report" ] && want="$want\" or the verifier's \"$report"
+    echo "the broken copy $name built with -Dheap_verify was not caught at \"$want\" (exit $code):"
+    tail -20 "$name-verify.txt"; exit 1
+  fi
+  echo "  with -Dheap_verify: $how"
 }
 
 step "failure proof: a Unit whose tasks do not take its token"
 broken tokenless '/^        pooled\(owner\.iyi_unit, &work\)$/ { print "        pooled(IyiUnit.new, &work)"; next } { print }'
-caught tokenless 'tasks of one Unit were running at one instant' alone --workers=4
+caught tokenless 'tasks of one Unit were running at one instant' "at its unit's death, a slot names one of its LOCAL chunks, about to be freed" alone --workers=4
 
 step "failure proof: a Unit's tasks on the spawner's thread on a pool of one"
 broken spawnerthread '/^        fiber.home = IyiScheduler.main_state$/ { print "        fiber.home = IyiScheduler.state"; next } { print }'
-caught spawnerthread 'ran on the spawner'"'"'s thread on a pool of one' main --workers=1
+caught spawnerthread 'ran on the spawner'"'"'s thread on a pool of one' '' main --workers=1
 
 # Of the compiler: `IYI_SPAWN_BROKEN` turns one check off each, and the
 # program it refused compiles.

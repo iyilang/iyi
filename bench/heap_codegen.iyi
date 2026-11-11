@@ -296,6 +296,8 @@
   def born_shared_check : Nil
     before = partitions_now
     go = Channel(Int32).new(1)
+    # The new unit's fiber, for the main fiber to watch.
+    watched = Atomic(UInt64).new(0_u64)
     group do |outer|
       outer.spawn(unit: :new) do
         m = Mutex.new { 1 }
@@ -320,13 +322,32 @@
             shared_made(unit.object_id, "born_shared: a new unit's object") if unit.is_a?(IyiUnit)
           {% end %}
           collect_here
-          go.send(1)
+          watched.set(task.fiber.object_id)
           fail("born_shared: the new unit's answer reads wrong") unless task.value == 5
         end
         0
       end
+      # The new unit parked in its receive before the send, so that its
+      # waiter is made (in its partition, with the `new-shared` copy) and
+      # named at its death: a send that came first left the receive
+      # nothing to park on, and the copy was reported at the maker's death
+      # instead (Linux, 4976717e5, seed 1: 1 run of 14). Watched from the
+      # main fiber, whose parks collect no partition under
+      # `IYI_HEAP_STRESS=1`, so the verifier's check count stays the same.
+      parked = 0
+      while !parked_in_receive?(watched.get) && parked < 5000
+        sleep(1)
+        parked = parked + 1
+      end
+      fail("born_shared: the new unit did not park in its receive in 5 s") unless parked_in_receive?(watched.get)
+      go.send(1)
     end
     settled(before, "born_shared")
+  end
+
+  # Whether the fiber at *address* is parked in a channel's receive.
+  def parked_in_receive?(address : UInt64) : Bool
+    address != 0_u64 && Pointer(Void).new(address).as(IyiFiber).state == IyiFiberState::WaitingCh
   end
 
   # ── Owning types and `lends:` ─────────────────────────────────────────
@@ -406,8 +427,26 @@
     end
   end
 
+  # The pool grown to its workers from the main fiber before any unit
+  # runs. A worker started later from a unit's fiber is an `IyiThread`
+  # made in that unit's partition when the compiler's `new-shared` copy is
+  # off, which the verifier reported at that partition's local collection
+  # or at born_shared's unit's death, whichever came first (Linux,
+  # 4976717e5, seed 1: 4 runs of 10 the first).
+  def grow_pool : Nil
+    IyiWorkers.start
+    waited = 0
+    while IyiWorkers.launched < IyiWorkers.count && waited < 5000
+      IyiWorkers.grow
+      sleep(1)
+      waited = waited + 1
+    end
+    fail("the pool has #{IyiWorkers.launched} of its #{IyiWorkers.count} workers 5 s after its start") if IyiWorkers.launched < IyiWorkers.count
+  end
+
   Checks.read_env
   IyiWorkers.count = 4
+  grow_pool
   arguments = Program.args
   if arguments.empty?
     CHECKS.each { |name| run(name) }

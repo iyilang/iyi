@@ -255,11 +255,12 @@
     thread
   end
 
-  # Settled before the program reads on: Windows starts the thread at a
-  # raised priority, so it is parked in `go.receive` with the closure on its
-  # stack before `collect_here`, which marks the closure from that stack
-  # and frees nothing; the unit's death then finds `IyiThread#@proc`
-  # naming it, where the program would otherwise have exited first.
+  # Settled before the program reads on. Windows starts the thread at a
+  # raised priority, and `collect_here`'s mark can find the closure on the
+  # thread's stack and free nothing; the unit's collections once the thread
+  # has ended find `IyiThread#@proc` naming it, and without the wait the
+  # program had exited before them (tssh: bench/heap_verify.sh's thread
+  # publish copy was missed in 5 runs of 5 without it, caught in 5 of 5).
   def thread_check : Nil
     before = partitions_now
     go = Channel(Int32).new(1)

@@ -78,6 +78,14 @@
 #   the pool's runs of that class (whose `-Dheap_verify` check would
 #   read the dead object naming its chunk), and goes to the pool after
 #   the next whole sweep, or at the unit's death.
+# - `lazy:` a collection at a park leaves its sweep to the allocator:
+#   a dead object on a run the unit left unswept is freed before the
+#   next mark (whose parity it wears) can take it for reached; nodes
+#   made after the global sweep freed dead ones on an unswept run, and
+#   after the collection left a part-used list, read whole; a lazy setup
+#   stopped part way and a mark abandoned after it leave the unswept
+#   runs to no lazy sweep; and twenty requests' worth of garbage keep
+#   the unit's runs within twice what three held.
 # - `death:` every partition is gone once its unit has died.
 
 @[Unsafe("the checks read freed chunks, weak cells and large blocks through raw pointers, hand a shared-heap address to free, and zero the stack under them through pointerof and an empty asm, to see what the partitions did with them")]
@@ -1400,6 +1408,181 @@
     IyiHeap.park_collections_off = false
   end
 
+  # ── lazy ──────────────────────────────────────────────────────────────
+
+  # The running unit's partition collected at a park, as `at_park`
+  # collects a unit between two requests - its sweep left to the
+  # allocator - retried past one a global mark aborted. Answers whether
+  # one ran. The caller scrubs first: this frame lies over its callees'.
+  @[NoInline]
+  def park_collect : Bool
+    record = IyiHeap.current_record
+    tries = 0
+    while tries < 100
+      scrub_stack
+      before = IyiHeap.partition_collections(record)
+      sleep(0)
+      return true if IyiHeap.partition_collections(record) != before
+      tries = tries + 1
+    end
+    false
+  end
+
+  # *count* nodes made and dropped in a frame of their own.
+  @[NoInline]
+  def churn(base : Int64, count : Int32) : Nil
+    junk : Node? = nil
+    i = 0
+    while i < count
+      junk = Node.new(base &+ i.to_i64, i % 50 == 0 ? nil : junk)
+      i = i + 1
+    end
+  end
+
+  # A `Far` reached at one park's collection is dropped holding a node
+  # made after it, and nothing of `Far`'s class is made again: the next
+  # collection leaves its run unswept, and the one after must sweep that
+  # run under the parity it wears before it marks - the `Far` wears the
+  # new mark's parity, which taken as its own keeps it. A new `Far` then
+  # has the class swept. Answers 0 when the dead `Far` was freed, 1 when
+  # it outlived both collections, or a negative failure.
+  def lazy_finish_task : Int64
+    record = IyiHeap.current_record
+    return -1_i64 if record == 0_u64
+    box = Array(Far?).new(1, nil)
+    far_into(box)
+    return -2_i64 unless park_collect
+    hidden = hang_node(box)
+    box[0] = nil
+    return -2_i64 unless park_collect
+    return -2_i64 unless park_collect
+    far = hide(hidden[0])
+    return -5_i64 unless IyiHeap.unswept?(record, class_of(far))
+    fresh = Far.new
+    chunk_free?(far) || fresh.object_id == far ? 0_i64 : 1_i64
+  end
+
+  # 3,000 nodes dropped and a park's collection: `Node`'s runs unswept,
+  # holding them dead. Two global collections, the first one's sweep
+  # done before the second marks, free them in place. Then 4,000 nodes
+  # kept and 8,000 more made and dropped: a chunk of an unswept run
+  # handed to the allocator before its lazy sweep - off the return stack,
+  # or off the list the collection left - is freed by that sweep under
+  # what it holds. Answers how many nodes read wrong, or a negative
+  # failure.
+  def lazy_return_task : Int64
+    record = IyiHeap.current_record
+    return -1_i64 if record == 0_u64
+    keep = build(9100000000_i64, 200, 0)
+    churn(9200000000_i64, 3000)
+    # A few more, so the list the collection finds is part used.
+    churn(9300000000_i64, 7)
+    return -2_i64 unless park_collect
+    return -1_i64 unless keep.is_a?(Node)
+    return -5_i64 unless IyiHeap.unswept?(record, class_of(keep.object_id))
+    IyiMark.collect
+    IyiMark.collect
+    more = build(9400000000_i64, 4000, 0)
+    churn(9500000000_i64, 8000)
+    wrong = broken(keep, 9100000000_i64, 200) + broken(more, 9400000000_i64, 4000)
+    return wrong if wrong != 0_i64
+    return -2_i64 unless park_collect
+    churn(9600000000_i64, 8000)
+    broken(keep, 9100000000_i64, 200) + broken(more, 9400000000_i64, 4000)
+  end
+
+  # A park's collection whose lazy setup is stopped once it has set up
+  # `Node`'s class - its runs unswept under that mark's parity, the mark
+  # not whole - then a park whose mark, clearing the bits first, is
+  # abandoned 256 objects in, the next parity on part of the list. Then
+  # 6,000 nodes made: no lazy sweep may read those runs until a mark
+  # ends whole. Answers how many of the 2,000 kept nodes read wrong, or a
+  # negative failure.
+  def lazy_marking_task : Int64
+    record = IyiHeap.current_record
+    return -1_i64 if record == 0_u64
+    keep = build(9700000000_i64, 2000, 0)
+    return -1_i64 unless keep.is_a?(Node)
+    index = class_of(keep.object_id)
+    IyiHeap.stop_local_sweep(record, index)
+    tries = 0
+    while IyiHeap.local_sweep_stop_pending? && tries < 100
+      scrub_stack
+      sleep(0)
+      tries = tries + 1
+    end
+    if IyiHeap.local_sweep_stop_pending?
+      IyiHeap.stop_local_sweep(0_u64, -1)
+      return -3_i64
+    end
+    return -5_i64 unless IyiHeap.unswept?(record, index)
+    IyiHeap.abandon_next_local_mark = true
+    tries = 0
+    while IyiHeap.abandon_next_local_mark && tries < 100
+      scrub_stack
+      sleep(0)
+      tries = tries + 1
+    end
+    if IyiHeap.abandon_next_local_mark
+      IyiHeap.abandon_next_local_mark = false
+      return -4_i64
+    end
+    churn(9800000000_i64, 6000)
+    broken(keep, 9700000000_i64, 2000)
+  end
+
+  # 20 requests' worth of nodes made and dropped, a park's collection
+  # after each: the runs the unit holds stay within twice what it held
+  # after three, the lazy sweeps handing its dead back to it. Answers the
+  # bytes past that bound, or a negative failure.
+  def lazy_held_task : Int64
+    record = IyiHeap.current_record
+    return -1_i64 if record == 0_u64
+    keep = build(9900000000_i64, 300, 0)
+    first = 0_u64
+    round = 0
+    while round < 20
+      churn(9910000000_i64, 3400)
+      return -2_i64 unless park_collect
+      first = IyiHeap.partition_held(record) if round == 2
+      round = round + 1
+    end
+    return -6_i64 if broken(keep, 9900000000_i64, 300) != 0_i64
+    excess = IyiHeap.partition_held(record).to_i64 - (first * 2_u64).to_i64
+    excess > 0_i64 ? excess : 0_i64
+  end
+
+  def lazy_check : Nil
+    IyiHeap.collect_every_park = true
+    group do |g|
+      finish = g.spawn(unit: :new) { lazy_finish_task }.value
+      fail("lazy: the finishing unit answered #{finish}") unless finish.is_a?(Int64)
+      fail("lazy: the unit allocates in no partition") if finish == -1_i64
+      fail("lazy: no collection at a park ran in 100 tries") if finish == -2_i64
+      fail("lazy: a collection at a park left Far's class swept") if finish == -5_i64
+      fail("lazy: a dead object outlived two collections, the second's mark trusting the parity it wore on a run the first left unswept") if finish == 1_i64
+      returned = g.spawn(unit: :new) { lazy_return_task }.value
+      fail("lazy: the returning unit answered #{returned}") unless returned.is_a?(Int64)
+      fail("lazy: the returning unit allocates in no partition") if returned == -1_i64
+      fail("lazy: no collection at a park ran in 100 tries, for the return") if returned == -2_i64
+      fail("lazy: a collection at a park left Node's class swept") if returned == -5_i64
+      fail("lazy: #{returned} nodes read wrong, allocated on runs before their lazy sweep") if returned != 0_i64
+      marking = g.spawn(unit: :new) { lazy_marking_task }.value
+      fail("lazy: the marking unit answered #{marking}") unless marking.is_a?(Int64)
+      fail("lazy: the marking unit allocates in no partition") if marking == -1_i64
+      fail("lazy: no lazy setup stopped by the switch in 100 tries") if marking == -3_i64
+      fail("lazy: no local mark was abandoned in 100 tries") if marking == -4_i64
+      fail("lazy: the stopped setup left Node's class swept") if marking == -5_i64
+      fail("lazy: #{marking} of 2000 nodes read wrong, swept lazily under a mark that did not end whole") if marking != 0_i64
+      held = g.spawn(unit: :new) { lazy_held_task }.value
+      fail("lazy: the holding unit answered #{held}") unless held.is_a?(Int64)
+      fail("lazy: the holding unit allocates in no partition") if held == -1_i64
+      fail("lazy: no collection at a park ran in 100 tries, for the runs held") if held == -2_i64
+      fail("lazy: the kept nodes read wrong, for the runs held") if held == -6_i64
+      fail("lazy: the unit holds #{held} bytes of runs past twice what it held after three requests") if held > 0_i64
+    end
+  end
+
   # ── large ─────────────────────────────────────────────────────────────
 
   # A large block made, written and dropped in a frame of its own.
@@ -1622,7 +1805,9 @@
   # In this order, so that each broken copy of bench/heap_local.sh meets
   # its own check before any other could notice it: `abandon` first, as
   # a real stop abandons local marks in any check that collects, then
-  # `unswept`, before `weak` stops a sweep of its own; `detach`
+  # `unswept`, before `weak` stops a sweep of its own; `lazy` after
+  # them, as its copies break the collection at a park that their units
+  # turn off, and before every check that parks; `detach`
   # before `answer`, whose units hold detached partitions until they die:
   # the nodetach copy ended at `answer:` once (Linux, 933b4d005); `weak`
   # before `frontier`, whose weak cells are cleared by the same sweep: the
@@ -1630,6 +1815,7 @@
   # 933b4d005), and `weak` leaves the frontier's cells to `frontier`.
   abandon_check
   unswept_check
+  lazy_check
   weak_check
   frontier_check
   filter_check

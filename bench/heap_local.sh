@@ -14,11 +14,15 @@
 # object left off its partition's list, a local mark that trusts
 # the parities a mark abandoned part way left, or a sweep stopped part
 # way left, a run a stopped sweep emptied pooled under a dead object
-# naming its chunk, a death that keeps the runs its sweeps emptied, an
-# idle takeover that reads no parked fiber's stack, an idle takeover of
-# a unit whose `Unit` value is still being built, a dead unit's pooled
-# run left carved for a stale word to pass the root test, a publication
-# walk that takes a chunk straddling the carve frontier for uncarved,
+# naming its chunk, a death that keeps the runs its sweeps emptied, a
+# collection that marks over runs the last one left unswept, a global
+# sweep that hands an unswept run's dead back to its unit, a lazy setup
+# that keeps the free list, a lazy sweep under a mark that did not end
+# whole, an idle takeover that reads no parked fiber's stack, an idle
+# takeover of a unit whose `Unit` value is still being built, a dead
+# unit's pooled run left carved for a stale word to pass the root test,
+# a publication walk that takes a chunk straddling the carve frontier
+# for uncarved,
 # an owner test and a weak sweep that do the same to a weak cell, and a
 # counter put back in the data segment at a value that names a `LOCAL`
 # chunk the mark left unmarked, which only the verifier sees: the
@@ -213,7 +217,7 @@ if [ "$PART" = all ] || [ "$PART" = broken ]; then
   # freed; an empty run the sweep pooled was taken by another worker's
   # unit before it looked, which no single run shows.)
   prove_fails "a weak pass after the local sweep" noweakfirst "weak:" \
-    '/^    sweep_weak\(record, id, parity\)$/ { found = found + 1; next } /^    IyiStat\.add\(IyiStat::LOCAL_FREED, freed\)$/ { print "    sweep_weak(record, id, parity)"; found = found + 1 } { print } END { if (found != 2) exit 3 }' \
+    '/def self\.local_sweep\(/ { inside = 1 } /def self\.local_sweep_large\(/ { inside = 0 } inside && /^    sweep_weak\(record, id, parity\)$/ { found = found + 1; next } inside && /^    IyiStat\.add\(IyiStat::LOCAL_FREED, freed\)$/ { print "    sweep_weak(record, id, parity)"; found = found + 1 } { print } END { if (found != 2) exit 3 }' \
     heap_partition.iyi
 
   # A weak cell to a large object left off its partition's list, as it
@@ -252,6 +256,36 @@ if [ "$PART" = all ] || [ "$PART" = broken ]; then
   # and collect while the dying one is between two classes.)
   prove_fails "a death that keeps its emptied runs" deathleak "unswept:" \
     '/^      pool_emptied\(record, false\)$/ { found = 1; next } { print } END { if (!found) exit 3 }' \
+    heap_partition.iyi
+
+  # A collection that marks over the runs the last one left unswept,
+  # their dead not swept first: one dead since the mark before wears the
+  # new mark's parity, is taken for reached, and outlives it.
+  prove_fails "a mark over runs left unswept" nofinish "lazy:" \
+    '/^    if read64\(record &\+ REC_MARKING\) == 0_u64 && any_unswept\?\(record\)$/ { getline; getline; found = 1; next } { print } END { if (!found) exit 3 }' \
+    heap_partition.iyi
+
+  # The global sweep hands the dead of an unswept run back to its unit,
+  # as it does for an owned run: the allocator takes them off the return
+  # stack before the run's lazy sweep, which then frees what was made
+  # there.
+  prove_fails "an unswept run's dead handed back" pushunswept "lazy:" \
+    '{ if (sub(/record = state == IyiHeap::RUN_OWNED \? IyiHeap\.partition_at\(owner\) : 0_u64$/, "record = state != IyiHeap::RUN_DRAINING ? IyiHeap.partition_at(owner) : 0_u64")) found = found + 1; print } END { if (found != 1) exit 3 }' \
+    heap_partition.iyi
+
+  # A lazy setup that keeps the class's free list: its chunks, on runs
+  # now unswept, are allocated before their run's lazy sweep, which frees
+  # them under what was made there.
+  prove_fails "a lazy setup that keeps the free list" nodrop "lazy:" \
+    '/def self\.lazy_setup\(/ { inside = 1 } inside && /^        table\[index\] = 0_u64$/ { inside = 0; found = 1; next } { print } END { if (!found) exit 3 }' \
+    heap_partition.iyi
+
+  # A lazy sweep that reads an unswept run's marks while `REC_MARKING`
+  # says the last mark did not end whole: after a stopped setup and an
+  # abandoned mark the runs wear part of a mark, and what it did not
+  # reach is freed.
+  prove_fails "a lazy sweep after a mark that did not end whole" nomarking "lazy:" \
+    '{ if (sub(/return 0_u64 if read64\(record &\+ REC_MARKING\) != 0_u64 \|\| LibIyiGCTable\.__iyi_marking != 0_u8$/, "return 0_u64 if LibIyiGCTable.__iyi_marking != 0_u8")) found = found + 1; print } END { if (found != 1) exit 3 }' \
     heap_partition.iyi
 
   # An idle worker's takeover that reads none of the parked unit's

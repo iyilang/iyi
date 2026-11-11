@@ -494,7 +494,8 @@ class IyiHeapVerify
             word = IyiHeap.run_word(arena, IyiHeap.granule_of(arena, run))
             stop = run + IyiHeap.run_n(word).unsafe_shl(IyiHeap::GRANULE_SHIFT)
             chunk = IyiHeap.arena_chunk(arena)
-            cursor = IyiHeap.first_head(arena, run)
+            # An unswept run's free chunks wait for its lazy sweep.
+            cursor = IyiHeap.run_state(word) == IyiHeap::RUN_UNSWEPT ? stop : IyiHeap.first_head(arena, run)
             while cursor < stop
               slot = IyiHeap.chunk_index(arena, cursor)
               bits = IyiHeap.read8(arena &+ IyiHeap::META &+ slot &* IyiHeap::META_ENTRY)

@@ -3,7 +3,6 @@ require "../stale/reach"
 require "../iyimod"
 
 module Iyi
-
   module Effects
     record NotReusableReason,
       category : String,

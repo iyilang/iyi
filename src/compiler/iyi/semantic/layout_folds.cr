@@ -475,268 +475,268 @@ module Iyi
     end
 
     {% unless flag?(:without_llvm) %}
-    private def settle_with_layouts(patch : Bool) : Nil
-      native = iyi_prelude?
-      report = ENV["IYI_LAYOUT_FOLD_REPORT"]?
-      typer = LLVMTyper.new(self, LLVM::Context.new)
-      graph = LayoutFoldGraph.new
+      private def settle_with_layouts(patch : Bool) : Nil
+        native = iyi_prelude?
+        report = ENV["IYI_LAYOUT_FOLD_REPORT"]?
+        typer = LLVMTyper.new(self, LLVM::Context.new)
+        graph = LayoutFoldGraph.new
 
-      # The final value of each fold, computed once per subject and kind. A raise
-      # can leave the typer holding a half-lowered type: a tuple is cached as an
-      # opaque struct before its elements are lowered (llvm_typer.cr,
-      # `create_llvm_type(TupleInstanceType)`), so a later fold in the same typer
-      # would read that struct. Later folds get a fresh one.
-      final_values = {} of {LayoutFoldKind, UInt64, Int32?} => {UInt64?, String?}
-      final_of = ->(fold : LayoutFold) {
-        key = {fold.kind, fold.subject.object_id, fold.index}
-        final_values[key]? || begin
-          final : UInt64? = nil
-          failure : String? = nil
-          begin
-            final = recompute_layout_fold(fold, typer)
-          rescue error : Exception
-            failure = error.message || error.class.name
-            typer = LLVMTyper.new(self, LLVM::Context.new)
+        # The final value of each fold, computed once per subject and kind. A raise
+        # can leave the typer holding a half-lowered type: a tuple is cached as an
+        # opaque struct before its elements are lowered (llvm_typer.cr,
+        # `create_llvm_type(TupleInstanceType)`), so a later fold in the same typer
+        # would read that struct. Later folds get a fresh one.
+        final_values = {} of {LayoutFoldKind, UInt64, Int32?} => {UInt64?, String?}
+        final_of = ->(fold : LayoutFold) {
+          key = {fold.kind, fold.subject.object_id, fold.index}
+          final_values[key]? || begin
+            final : UInt64? = nil
+            failure : String? = nil
+            begin
+              final = recompute_layout_fold(fold, typer)
+            rescue error : Exception
+              failure = error.message || error.class.name
+              typer = LLVMTyper.new(self, LLVM::Context.new)
+            end
+            final_values[key] = {final, failure}
           end
-          final_values[key] = {final, failure}
+        }
+
+        # The own and root node ids of a fold's subject, once per subject and layout kind.
+        nodes = {} of {UInt64, Bool} => {Int32, Array(Int32)}
+        walk = ->(fold : LayoutFold) {
+          instance = instance_layout_kind?(fold.kind)
+          nodes[{fold.subject.object_id, instance}] ||= {graph.id_for(fold.subject, instance), graph.roots_of(fold.subject, instance, [] of Type)}
+        }
+
+        # Every record, and every fold a use read, is walked before anything is pinned,
+        # so the graph is complete when the pins look up their components.
+        current = layout_folds.values
+        current.each { |fold| walk.call(fold) }
+        layout_fold_uses.each do |use|
+          use.reads.each { |read| walk.call(read.fold) }
         end
-      }
 
-      # The own and root node ids of a fold's subject, once per subject and layout kind.
-      nodes = {} of {UInt64, Bool} => {Int32, Array(Int32)}
-      walk = ->(fold : LayoutFold) {
-        instance = instance_layout_kind?(fold.kind)
-        nodes[{fold.subject.object_id, instance}] ||= {graph.id_for(fold.subject, instance), graph.roots_of(fold.subject, instance, [] of Type)}
-      }
-
-      # Every record, and every fold a use read, is walked before anything is pinned,
-      # so the graph is complete when the pins look up their components.
-      current = layout_folds.values
-      current.each { |fold| walk.call(fold) }
-      layout_fold_uses.each do |use|
-        use.reads.each { |read| walk.call(read.fold) }
-      end
-
-      # Judges every use in the order it was taken. A read whose final value differs
-      # makes its use harmful, unless the use's derivation gives the same result from
-      # the final values.
-      harms = [] of LayoutFoldHarm
-      # The uses already judged harmful, by their place in `layout_fold_uses`.
-      harmful = Set(Int32).new
-      # Each use's final values and the reads whose final value differs.
-      judged = layout_fold_uses.map do |use|
-        finals = use.reads.map { |read| final_of.call(read.fold)[0] }
-        changed = [] of LayoutFoldRead
-        use.reads.each_with_index do |read, i|
-          final = finals[i]
-          changed << read if final.nil? || final.to_s != read.value
+        # Judges every use in the order it was taken. A read whose final value differs
+        # makes its use harmful, unless the use's derivation gives the same result from
+        # the final values.
+        harms = [] of LayoutFoldHarm
+        # The uses already judged harmful, by their place in `layout_fold_uses`.
+        harmful = Set(Int32).new
+        # Each use's final values and the reads whose final value differs.
+        judged = layout_fold_uses.map do |use|
+          finals = use.reads.map { |read| final_of.call(read.fold)[0] }
+          changed = [] of LayoutFoldRead
+          use.reads.each_with_index do |read, i|
+            final = finals[i]
+            changed << read if final.nil? || final.to_s != read.value
+          end
+          {finals, changed}
         end
-        {finals, changed}
-      end
-      layout_fold_uses.each_with_index do |use, index|
-        finals, changed = judged[index]
-        next if changed.empty?
-
-        if derivation = use.derivation
-          rerun = layout_fold_rerun(use, derivation, finals)
-          next if rerun && rerun == derivation.result
-          harms << LayoutFoldHarm.new(use, changed, rerun)
-        else
-          harms << LayoutFoldHarm.new(use, changed, nil)
-        end
-        harmful << index
-      end
-
-      # A native program refuses the first harmful use, before anything is written.
-      if native && patch && (refused = harms.first?)
-        refused_read = refused.changed.first
-        refused_final, refused_failure = final_of.call(refused_read.fold)
-        refused_inner = TypeException.for_node(refused_read.fold.node, "#{layout_fold_node(refused_read.fold)} measured #{refused_read.value} here")
-        (refused.use.site || refused_read.fold.node).raise layout_fold_harm_message(refused, refused_read, refused_final, refused_failure), inner: refused_inner
-      end
-
-      # Every harmful use pins the layouts of each fold it read. The first use to pin
-      # a component gives the tie that is reported.
-      pinned = {} of Int32 => {String, LayoutFoldUseKind}
-      pin = ->(harm : LayoutFoldHarm) {
-        harm.changed.each do |read|
-          own, roots = walk.call(read.fold)
-          site = layout_fold_at(harm.use.site || read.fold.node)
-          ([own] + roots).each { |id| pinned[graph.find(id)] ||= {site, harm.use.kind} }
-        end
-      }
-      harms.each { |harm| pin.call(harm) }
-
-      # A derivation that gave the same result from the final values was judged as if
-      # every literal it read took its final value. A literal whose layout another use
-      # pinned keeps the value it was read at, so the derivation is computed again from
-      # the values the program ends with: the read value where the layout is pinned or
-      # the literal was adopted, the final value elsewhere. A different result makes
-      # the use harmful and pins what it read. That can change the answer for another
-      # derivation, so this repeats until a pass pins nothing.
-      loop do
-        grew = false
         layout_fold_uses.each_with_index do |use, index|
-          next if harmful.includes?(index)
-          next unless derivation = use.derivation
           finals, changed = judged[index]
           next if changed.empty?
 
-          ending = use.reads.map_with_index do |read, i|
-            own, roots = walk.call(read.fold)
-            kept = read.adopted || ([own] + roots).any? { |id| pinned.has_key?(graph.find(id)) }
-            kept ? read.value.to_u64? : finals[i]
-          end
-          rerun = layout_fold_rerun(use, derivation, ending)
-          next if rerun && rerun == derivation.result
-
-          harm = LayoutFoldHarm.new(use, changed, rerun)
-          harms << harm
-          harmful << index
-          pin.call(harm)
-          grew = true
-        end
-        break unless grew
-      end
-
-      # The kind of harmful use that kept each fold literal. A type argument is named first.
-      kept_by = Hash(NumberLiteral, LayoutFoldUseKind).new.compare_by_identity
-      harms.each do |harm|
-        harm.changed.each do |read|
-          kind = harm.use.kind
-          kept_by[read.literal] = kind if kept_by[read.literal]?.nil? || kind == LayoutFoldUseKind::TypeArgument
-        end
-      end
-
-      # A literal a type variable adopted is never written.
-      held = Set(NumberLiteral).new.compare_by_identity
-      layout_fold_uses.each do |use|
-        use.reads.each { |read| held << read.literal if read.adopted }
-      end
-
-      lines = [] of String
-      current.each do |fold|
-        literal = fold.node.as(ExpandableNode).expanded.as?(NumberLiteral)
-        final, failure = final_of.call(fold)
-        own, roots = walk.call(fold)
-        tie = ([own] + roots).compact_map { |id| pinned[graph.find(id)]? }.first?
-        held_here = literal ? held.includes?(literal) : false
-
-        # A pinned literal keeps the value its uses read.
-        if patch && final && literal && !held_here && !tie
-          target = final.to_s
-          literal.value = target unless literal.value == target
-        end
-
-        if report && !roots.empty?
-          lines << "layout fold open: #{layout_fold_location(fold)}: #{layout_fold_node(fold)} in #{layout_fold_owner(fold)}: #{fold.subject} holds #{graph.witness_of(roots.first)} by value"
-        end
-        next if final && final == fold.value
-        next unless report
-
-        kind = literal ? kept_by[literal]? : nil
-        disposition =
-          if final.nil?
-            "kept (cannot recompute: #{failure})"
-          elsif kind == LayoutFoldUseKind::TypeArgument
-            "kept (type argument)"
-          elsif kind == LayoutFoldUseKind::Typing || held_here
-            "kept (used by later typing)"
-          elsif tie
-            "kept (tied to #{layout_fold_pin_name(tie[1])} at #{tie[0]})"
-          elsif literal.nil?
-            "kept (no literal)"
-          elsif !patch
-            "kept (--crystal)"
+          if derivation = use.derivation
+            rerun = layout_fold_rerun(use, derivation, finals)
+            next if rerun && rerun == derivation.result
+            harms << LayoutFoldHarm.new(use, changed, rerun)
           else
-            "corrected"
+            harms << LayoutFoldHarm.new(use, changed, nil)
           end
+          harmful << index
+        end
 
-        final_text = final ? final.to_s : "unknown"
-        lines << "layout fold stale: #{layout_fold_location(fold)}: #{layout_fold_node(fold)} in #{layout_fold_owner(fold)}: folded #{fold.value}, final #{final_text}: #{disposition}"
-      end
+        # A native program refuses the first harmful use, before anything is written.
+        if native && patch && (refused = harms.first?)
+          refused_read = refused.changed.first
+          refused_final, refused_failure = final_of.call(refused_read.fold)
+          refused_inner = TypeException.for_node(refused_read.fold.node, "#{layout_fold_node(refused_read.fold)} measured #{refused_read.value} here")
+          (refused.use.site || refused_read.fold.node).raise layout_fold_harm_message(refused, refused_read, refused_final, refused_failure), inner: refused_inner
+        end
 
-      if report
+        # Every harmful use pins the layouts of each fold it read. The first use to pin
+        # a component gives the tie that is reported.
+        pinned = {} of Int32 => {String, LayoutFoldUseKind}
+        pin = ->(harm : LayoutFoldHarm) {
+          harm.changed.each do |read|
+            own, roots = walk.call(read.fold)
+            site = layout_fold_at(harm.use.site || read.fold.node)
+            ([own] + roots).each { |id| pinned[graph.find(id)] ||= {site, harm.use.kind} }
+          end
+        }
+        harms.each { |harm| pin.call(harm) }
+
+        # A derivation that gave the same result from the final values was judged as if
+        # every literal it read took its final value. A literal whose layout another use
+        # pinned keeps the value it was read at, so the derivation is computed again from
+        # the values the program ends with: the read value where the layout is pinned or
+        # the literal was adopted, the final value elsewhere. A different result makes
+        # the use harmful and pins what it read. That can change the answer for another
+        # derivation, so this repeats until a pass pins nothing.
+        loop do
+          grew = false
+          layout_fold_uses.each_with_index do |use, index|
+            next if harmful.includes?(index)
+            next unless derivation = use.derivation
+            finals, changed = judged[index]
+            next if changed.empty?
+
+            ending = use.reads.map_with_index do |read, i|
+              own, roots = walk.call(read.fold)
+              kept = read.adopted || ([own] + roots).any? { |id| pinned.has_key?(graph.find(id)) }
+              kept ? read.value.to_u64? : finals[i]
+            end
+            rerun = layout_fold_rerun(use, derivation, ending)
+            next if rerun && rerun == derivation.result
+
+            harm = LayoutFoldHarm.new(use, changed, rerun)
+            harms << harm
+            harmful << index
+            pin.call(harm)
+            grew = true
+          end
+          break unless grew
+        end
+
+        # The kind of harmful use that kept each fold literal. A type argument is named first.
+        kept_by = Hash(NumberLiteral, LayoutFoldUseKind).new.compare_by_identity
         harms.each do |harm|
-          read = harm.changed.first
-          lines << layout_fold_harm_line(harm, read, final_of.call(read.fold)[0])
-        end
-      end
-
-      if patch
-        watch = Hash(Type, String).new.compare_by_identity
-        current.each do |fold|
-          _, roots = walk.call(fold)
-          roots.each do |id|
-            witness = graph.witness_of(id)
-            watch[witness] ||= layout_fingerprint(witness)
+          harm.changed.each do |read|
+            kind = harm.use.kind
+            kept_by[read.literal] = kind if kept_by[read.literal]?.nil? || kind == LayoutFoldUseKind::TypeArgument
           end
         end
-        @layout_fold_watch = watch
-        @llvm_typer = typer if native
-        @layout_fold_typer_fresh = false
-        @layout_fold_settled_epoch = @layout_fold_epoch
-        @layout_fold_open = current.any? { |fold| !walk.call(fold)[1].empty? }
-      end
-      @layout_fold_lines = lines
-      self.layout_fold_state = patch ? LayoutFoldState::Patched : LayoutFoldState::Reported
-    end
 
-    # Recomputes a derivation from the final values of the literals its use read.
-    # The rerun has no visitor and no reader open, so it takes nothing. A macro
-    # call in it raises, and a missing final value gives no result. Either way the
-    # rerun gives nil.
-    private def layout_fold_rerun(use : LayoutFoldUse, derivation : LayoutFoldDerivation, finals : Array(UInt64?)) : String?
-      values = Hash(NumberLiteral, String).new.compare_by_identity
-      use.reads.each_with_index do |read, i|
-        final = finals[i]
-        return nil unless final
-        values[read.literal] = final.to_s
-      end
-      interpreter = MathInterpreter.new(derivation.scope, nil, derivation.target, layout_values: values)
-      layout_fold_interpret(interpreter, derivation.root).to_s
-    rescue CodeError
-      nil
-    end
+        # A literal a type variable adopted is never written.
+        held = Set(NumberLiteral).new.compare_by_identity
+        layout_fold_uses.each do |use|
+          use.reads.each { |read| held << read.literal if read.adopted }
+        end
 
-    # `MathInterpreter#interpret` is overloaded by node type, so the root is dispatched
-    # on its type here. A root of any other type reaches the generic overload, which raises.
-    private def layout_fold_interpret(interpreter : MathInterpreter, root : ASTNode)
-      case root
-      when NumberLiteral then interpreter.interpret(root)
-      when Call          then interpreter.interpret(root)
-      when Path          then interpreter.interpret(root)
-      when Expressions   then interpreter.interpret(root)
-      else                    interpreter.interpret(root)
-      end
-    end
+        lines = [] of String
+        current.each do |fold|
+          literal = fold.node.as(ExpandableNode).expanded.as?(NumberLiteral)
+          final, failure = final_of.call(fold)
+          own, roots = walk.call(fold)
+          tie = ([own] + roots).compact_map { |id| pinned[graph.find(id)]? }.first?
+          held_here = literal ? held.includes?(literal) : false
 
-    private def instance_layout_kind?(kind : LayoutFoldKind) : Bool
-      case kind
-      when LayoutFoldKind::InstanceSize, LayoutFoldKind::InstanceAlign, LayoutFoldKind::InstanceOffset
-        true
-      else
-        false
-      end
-    end
+          # A pinned literal keeps the value its uses read.
+          if patch && final && literal && !held_here && !tie
+            target = final.to_s
+            literal.value = target unless literal.value == target
+          end
 
-    private def recompute_layout_fold(fold : LayoutFold, typer : LLVMTyper) : UInt64
-      subject = fold.subject
-      case fold.kind
-      when LayoutFoldKind::Size
-        size_of(subject, typer).to_u64
-      when LayoutFoldKind::Align
-        align_of(subject, typer).to_u64
-      when LayoutFoldKind::InstanceSize
-        instance_size_of(subject, typer).to_u64
-      when LayoutFoldKind::InstanceAlign
-        instance_align_of(subject, typer).to_u64
-      when LayoutFoldKind::Offset
-        offset_of(subject, fold.index.not_nil!, typer).to_u64
-      else
-        instance_offset_of(subject, fold.index.not_nil!, typer).to_u64
+          if report && !roots.empty?
+            lines << "layout fold open: #{layout_fold_location(fold)}: #{layout_fold_node(fold)} in #{layout_fold_owner(fold)}: #{fold.subject} holds #{graph.witness_of(roots.first)} by value"
+          end
+          next if final && final == fold.value
+          next unless report
+
+          kind = literal ? kept_by[literal]? : nil
+          disposition =
+            if final.nil?
+              "kept (cannot recompute: #{failure})"
+            elsif kind == LayoutFoldUseKind::TypeArgument
+              "kept (type argument)"
+            elsif kind == LayoutFoldUseKind::Typing || held_here
+              "kept (used by later typing)"
+            elsif tie
+              "kept (tied to #{layout_fold_pin_name(tie[1])} at #{tie[0]})"
+            elsif literal.nil?
+              "kept (no literal)"
+            elsif !patch
+              "kept (--crystal)"
+            else
+              "corrected"
+            end
+
+          final_text = final ? final.to_s : "unknown"
+          lines << "layout fold stale: #{layout_fold_location(fold)}: #{layout_fold_node(fold)} in #{layout_fold_owner(fold)}: folded #{fold.value}, final #{final_text}: #{disposition}"
+        end
+
+        if report
+          harms.each do |harm|
+            read = harm.changed.first
+            lines << layout_fold_harm_line(harm, read, final_of.call(read.fold)[0])
+          end
+        end
+
+        if patch
+          watch = Hash(Type, String).new.compare_by_identity
+          current.each do |fold|
+            _, roots = walk.call(fold)
+            roots.each do |id|
+              witness = graph.witness_of(id)
+              watch[witness] ||= layout_fingerprint(witness)
+            end
+          end
+          @layout_fold_watch = watch
+          @llvm_typer = typer if native
+          @layout_fold_typer_fresh = false
+          @layout_fold_settled_epoch = @layout_fold_epoch
+          @layout_fold_open = current.any? { |fold| !walk.call(fold)[1].empty? }
+        end
+        @layout_fold_lines = lines
+        self.layout_fold_state = patch ? LayoutFoldState::Patched : LayoutFoldState::Reported
       end
-    end
+
+      # Recomputes a derivation from the final values of the literals its use read.
+      # The rerun has no visitor and no reader open, so it takes nothing. A macro
+      # call in it raises, and a missing final value gives no result. Either way the
+      # rerun gives nil.
+      private def layout_fold_rerun(use : LayoutFoldUse, derivation : LayoutFoldDerivation, finals : Array(UInt64?)) : String?
+        values = Hash(NumberLiteral, String).new.compare_by_identity
+        use.reads.each_with_index do |read, i|
+          final = finals[i]
+          return nil unless final
+          values[read.literal] = final.to_s
+        end
+        interpreter = MathInterpreter.new(derivation.scope, nil, derivation.target, layout_values: values)
+        layout_fold_interpret(interpreter, derivation.root).to_s
+      rescue CodeError
+        nil
+      end
+
+      # `MathInterpreter#interpret` is overloaded by node type, so the root is dispatched
+      # on its type here. A root of any other type reaches the generic overload, which raises.
+      private def layout_fold_interpret(interpreter : MathInterpreter, root : ASTNode)
+        case root
+        when NumberLiteral then interpreter.interpret(root)
+        when Call          then interpreter.interpret(root)
+        when Path          then interpreter.interpret(root)
+        when Expressions   then interpreter.interpret(root)
+        else                    interpreter.interpret(root)
+        end
+      end
+
+      private def instance_layout_kind?(kind : LayoutFoldKind) : Bool
+        case kind
+        when LayoutFoldKind::InstanceSize, LayoutFoldKind::InstanceAlign, LayoutFoldKind::InstanceOffset
+          true
+        else
+          false
+        end
+      end
+
+      private def recompute_layout_fold(fold : LayoutFold, typer : LLVMTyper) : UInt64
+        subject = fold.subject
+        case fold.kind
+        when LayoutFoldKind::Size
+          size_of(subject, typer).to_u64
+        when LayoutFoldKind::Align
+          align_of(subject, typer).to_u64
+        when LayoutFoldKind::InstanceSize
+          instance_size_of(subject, typer).to_u64
+        when LayoutFoldKind::InstanceAlign
+          instance_align_of(subject, typer).to_u64
+        when LayoutFoldKind::Offset
+          offset_of(subject, fold.index.not_nil!, typer).to_u64
+        else
+          instance_offset_of(subject, fold.index.not_nil!, typer).to_u64
+        end
+      end
     {% end %}
 
     # The place a node is written, as a report names it.
@@ -821,11 +821,11 @@ module Iyi
 
     private def layout_fold_node(fold : LayoutFold) : String
       name = case fold.kind
-             when LayoutFoldKind::Size then "sizeof"
-             when LayoutFoldKind::Align then "alignof"
-             when LayoutFoldKind::InstanceSize then "instance_sizeof"
+             when LayoutFoldKind::Size          then "sizeof"
+             when LayoutFoldKind::Align         then "alignof"
+             when LayoutFoldKind::InstanceSize  then "instance_sizeof"
              when LayoutFoldKind::InstanceAlign then "instance_alignof"
-             else "offsetof"
+             else                                    "offsetof"
              end
       "#{name}(#{fold.subject})"
     end

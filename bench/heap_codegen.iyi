@@ -2,35 +2,93 @@
 # emits so that no pointer crosses from one unit's heap into another's
 # unpublished, one check per mechanism.
 #
-#   ./bin/iyi build -Dheap_partitions -Dheap_verify bench/heap_codegen.iyi
-#   ./heap_codegen              # every check
-#   ./heap_codegen c1           # one
+#   ./bin/iyi build -Dheap_partitions -Dheap_verify -Diyi_chaos bench/heap_codegen.iyi
+#   IYI_CHAOS=1 IYI_HEAP_STRESS=1 ./heap_codegen   # every check
+#   ./heap_codegen c1                               # one
 #   bash bench/heap_codegen.sh  # every check, and the compiler's broken copies
 #
 # - `c1`: a crossing block's closure is a context of its own (C1). The
 #   scope that makes the block also keeps a mutable array in its own
-#   closure; publishing the block's context must leave the array the
-#   unit's. Read before any collection: `IyiHeap.local?`.
-# - `classvar`: a unit stores a graph of its own into a Share class
-#   variable through a call; the store publishes it.
+#   closure, and grows it after the crossing; publishing the block's
+#   context must leave the array the unit's. Read before any collection:
+#   `IyiHeap.local?`.
+# - `classvar`: a unit stores a graph of its own into a class variable
+#   through a call; the store publishes it.
 # - `born_shared`: `Mutex`, `Channel`, `Unit`'s handle, a same-unit task's
-#   fiber and a new unit made in a unit's code are the shared heap's,
-#   through `__iyi_new_shared` (`IyiHeap.owner_of`).
+#   fiber (and the buffer its constructor makes) and a new unit made in a
+#   unit's code are the shared heap's, through `__iyi_new_shared`
+#   (`IyiHeap.owner_of`).
 # - `pin`: a crossing that reaches an owning type that does not keep the
-#   lend protocol runs pinned, in the shared heap; one that keeps it gets
-#   its own heap.
+#   lend protocol runs pinned, in the shared heap, and what it stores into
+#   that type's graph is shared; one that keeps the protocol gets its own
+#   heap.
+#
+# Each check ends its units' stores with `collect_here`: the stack below
+# scrubbed and the unit's partition collected, so that under
+# `-Dheap_verify` a word left pointing into the partition's unmarked
+# `LOCAL` chunks (a store a broken compiler did not publish) is the
+# verifier's report and exit 86, whatever the program's own check said.
 #
 # Without `-Dheap_partitions` every check passes: that build is the
 # flag-off control.
 
-@[Unsafe("the checks ask the runtime's partition records where a chunk lives, and stand in for a library's owning types")]
+@[Unsafe("the checks ask the runtime's partition records where a chunk lives, wipe their stack with raw words, and stand in for a library's owning types")]
 {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
   import std/mutex::{Mutex}
   import std/unit::{Unit}
 
+  # `HEAP22_PRINT_ONLY=1`: a failed check prints its `FAIL:` line and the
+  # program goes on, so that bench/heap_codegen.sh can show a broken copy
+  # caught by `-Dheap_verify`'s verifier alone (the run then exits 86 at
+  # the verifier's report, or 0 when nothing but the program saw it).
+  class Checks
+    @@print_only = false
+
+    def self.print_only : Bool
+      @@print_only
+    end
+
+    def self.read_env : Nil
+      @@print_only = Program.env("HEAP22_PRINT_ONLY") == "1"
+    end
+  end
+
   def fail(message : String) : Nil
     print "FAIL: #{message}\n"
-    __iyi_exit(1)
+    __iyi_exit(1) unless Checks.print_only
+  end
+
+  # The stack below the caller zeroed, so that no dead frame's word is a
+  # root of the collection that follows.
+  @[NoInline]
+  def scrub : UInt64
+    room = uninitialized StaticArray(UInt64, 2048)
+    words = pointerof(room).as(Pointer(UInt64))
+    index = 0
+    while index < 2048
+      words[index] = 0_u64
+      index = index + 1
+    end
+    words[2047]
+  end
+
+  # The running unit's partition collected, until one collection has run;
+  # nothing in a unit that runs in the shared heap.
+  @[NoInline]
+  def collect_here : Nil
+    scrub
+    {% if flag?(:heap_partitions) %}
+      record = IyiScheduler.current.alloc
+      return if record == 0_u64
+      before = IyiHeap.partition_collections(record)
+      tries = 0
+      while IyiHeap.partition_collections(record) == before && tries < 1000
+        IyiHeap.collect_local(record)
+        tries = tries + 1
+        sleep(1) if IyiHeap.partition_collections(record) == before
+      end
+      fail("a local collection did not run in 1000 tries") if IyiHeap.partition_collections(record) == before
+    {% end %}
   end
 
   class Payload
@@ -97,6 +155,10 @@
   end
 
   # ── C1: a crossing block's context holds its captures alone ────────────
+  # The scope grows its own array after the crossing: published with the
+  # block's context (no C1), the array's grown buffer and its new element
+  # are the unit's and only a published object holds them, which the
+  # collection after it frees under the array.
   @[NoInline]
   def launch_c1(g : IyiGroup, go : Channel(Int32), seed : Int32) : Nil
     payload = build(seed)
@@ -122,6 +184,7 @@
       outer.spawn(unit: :new) do
         group do |g|
           launch_c1(g, go, 41)
+          collect_here
           go.send(1)
         end
         0
@@ -129,8 +192,9 @@
     end
   end
 
-  # ── A Share class variable a unit stores into ─────────────────────────
+  # ── A class variable a unit stores into ───────────────────────────────
   class Latest
+    @[UnsafeReach("the check stores a unit's graph here on purpose, so that the store's publication is what keeps it")]
     @@payload : Payload? = nil
 
     def self.put(payload : Payload) : Nil
@@ -152,6 +216,7 @@
       g.spawn(unit: :new) do
         store_latest(42)
         published(Latest.get, "classvar: the stored chain")
+        collect_here
         0
       end
     end
@@ -160,7 +225,12 @@
   end
 
   # ── Trusted types born in the shared heap ─────────────────────────────
+  # The new unit's object a crossing spawn makes in its spawner's code is
+  # held, once the spawner drops it, only by the new unit's fiber, which is
+  # the shared heap's: made in the spawner's partition, the collection
+  # there frees it under the fiber.
   def born_shared_check : Nil
+    go = Channel(Int32).new(1)
     group do |outer|
       outer.spawn(unit: :new) do
         m = Mutex.new { 1 }
@@ -172,7 +242,21 @@
         group do |g|
           task = g.spawn(unit: :same) { 3 }
           shared_made(task.fiber.object_id, "born_shared: a same-unit task's fiber")
+          shared_made(task.fiber.@wait_overlapped.address, "born_shared: the buffer a same-unit task's fiber's constructor makes")
           task.value
+        end
+        group do |g|
+          task = g.spawn(unit: :new) do
+            go.receive
+            5
+          end
+          {% if flag?(:heap_partitions) %}
+            unit = task.fiber.unit
+            shared_made(unit.object_id, "born_shared: a new unit's object") if unit.is_a?(IyiUnit)
+          {% end %}
+          collect_here
+          go.send(1)
+          fail("born_shared: the new unit's answer reads wrong") unless task.value == 5
         end
         0
       end
@@ -181,14 +265,23 @@
 
   # ── Owning types and `lends:` ─────────────────────────────────────────
   # A library's owning type that does not keep the lend protocol, and one
-  # that does.
+  # that does. The pinned unit stores a node of its own into the pool's
+  # graph: made in a heap of its own (no pin), only the pool holds it once
+  # the unit drops it, and the unit's collection frees it under the pool.
   @[Share(owns: true)]
   class Pool
+    @items = [] of Payload
+
     def initialize
     end
 
-    def touch : Int32
-      1
+    def add(item : Payload) : Int32
+      @items << item
+      @items.size
+    end
+
+    def first? : Payload?
+      @items.first?
     end
   end
 
@@ -202,13 +295,21 @@
     end
   end
 
+  @[NoInline]
+  def fill(pool : Pool, seed : Int32) : Nil
+    pool.add(build(seed))
+    nil
+  end
+
   def pin_check : Nil
     pool = Pool.new
     lent = LentPool.new
     group do |g|
       pinned = g.spawn(unit: :new) do
-        pool.touch
-        heap_here
+        fill(pool, 43)
+        here = heap_here
+        collect_here
+        here
       end
       own = g.spawn(unit: :new) do
         lent.touch
@@ -222,6 +323,7 @@
         own.value
       {% end %}
     end
+    fail("pin: the pool lost its node") unless pool.first?.is_a?(Payload)
   end
 
   CHECKS = ["c1", "classvar", "born_shared", "pin"]
@@ -236,6 +338,7 @@
     end
   end
 
+  Checks.read_env
   IyiWorkers.count = 4
   arguments = Program.args
   if arguments.empty?

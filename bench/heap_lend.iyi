@@ -471,10 +471,11 @@
   # Not a lend, but the same question of the local mark's roots: a held
   # `Mutex`'s release node, born in the shared heap, sits on the fiber's
   # defer list over the unit's own nodes, and a collection while the lock
-  # is held - here by another fiber of the unit while this one is parked
-  # in the lock block - must still reach the nodes below it.
+  # is held - here from inside the lock block, as a stress point there
+  # would, the partition installed for it - must still reach the nodes
+  # below it.
   @[NoInline]
-  def defer_hold(m : Mutex(Int32), parked : Atomic(Int32), go : Channel(Int32), seed : Int32) : Nil
+  def defer_hold(m : Mutex(Int32), seed : Int32) : Nil
     witness = chain(seed)
     # Four nodes, so that a frame's residue keeping one marked does not
     # hide the others.
@@ -483,34 +484,29 @@
     defer check_chain(witness, seed, "defer: the third cleanup's chain")
     defer check_chain(witness, seed, "defer: the fourth cleanup's chain")
     m.lock do |v|
-      parked.set(1)
-      go.receive
+      collect_in_lock
       v
     end
     nil
   end
 
+  # The running unit's partition collected from inside a lock block,
+  # where the fiber allocates in the shared heap: installed again for
+  # the collection (`IyiHeap.within`).
+  @[NoInline]
+  def collect_in_lock : Nil
+    {% if flag?(:heap_partitions) %}
+      record = IyiHeap.unit_record
+      IyiHeap.within(record) { collect_here } if record != 0_u64
+    {% end %}
+  end
+
   def defer_check : Nil
     before = partitions_now
     m = Mutex.new { 0 }
-    group do |outer|
-      outer.spawn(unit: :new) do
-        parked = Atomic(Int32).new(0)
-        go = Channel(Int32).new(1)
-        group do |g|
-          g.spawn(unit: :same) do
-            defer_hold(m, parked, go, 8)
-            0
-          end
-          g.spawn(unit: :same) do
-            while parked.get == 0
-              sleep(1)
-            end
-            collect_here
-            go.send(1)
-            0
-          end
-        end
+    group do |g|
+      g.spawn(unit: :new) do
+        defer_hold(m, 8)
         0
       end
     end

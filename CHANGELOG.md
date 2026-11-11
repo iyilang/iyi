@@ -85,6 +85,20 @@
   20 µs: the old counting was caught on the first run in 20 of 20 on
   Windows 11 and on macOS 26.6, and on run 1 on this Linux machine.
 
+### Fixed
+
+- **A finished thread's main fiber no longer stays on the scheduler's
+  fiber registry**, naming a stack that is gone (0.21.0 included): the
+  retiring thread asked whether the registry held its fiber without the
+  runtime lock, and a neighbour unlinking itself between the two reads
+  made the answer no. It asks under the lock (`IyiScheduler.registered?`).
+  On macOS 26.6, Apple M2 Pro, waves of 16 threads that end together left
+  a main fiber behind in 59 of 8,000 waves at 0.21.0 and none after;
+  `thread_exercise` named one in 1 of 24 runs. bench/thread_exercise.sh
+  5f holds the ask open 300 ms in copies of the runtime while a neighbour
+  retires: under the lock nothing is left, 5 runs of 5; without it a main
+  fiber is, 5 of 5.
+
 ## 0.21.0 — 2026-11-09
 
 **A spawn has one verb and names its unit, and a plain `spawn` runs in

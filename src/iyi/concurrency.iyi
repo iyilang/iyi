@@ -1969,12 +1969,16 @@ class IyiScheduler
       fiber.next_in_unit = nil
       fiber.prev_in_unit = nil
       # Off the list the fiber is no root of its unit's (R(u)), but the
-      # shared fiber outlives it through its task's handle: its group may
-      # be the unit's own, which the next local sweep or the unit's death
-      # frees, so the dead fiber stops naming it (heap22). Nothing reads a
-      # reaped fiber's group.
+      # shared fiber outlives it through its task's handle: its group and
+      # its block's context may be the unit's own, which the next local
+      # sweep or the unit's death frees, so the dead fiber stops naming
+      # them and the global mark never follows it into a freed run
+      # (heap22). Nothing reads a reaped fiber's group or proc: the
+      # trampoline reads the proc once, and a panic only the running
+      # fiber's.
       {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) %}
         fiber.group = nil
+        fiber.proc = nil
       {% end %}
       # The unit's death (heap22 S1, design section 4.4): its last fiber
       # gone and no `Unit`'s handle holding it, nothing will allocate in

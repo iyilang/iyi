@@ -1269,7 +1269,9 @@ def generate(seed, out_dir, only=None):
     out_dir.mkdir(parents=True, exist_ok=True)
     text, kinds = Gen(seed, only).program()
     path = out_dir / (f"heap_verify_fuzz_{seed}" + ("_" + "_".join(only) if only else "") + ".iyi")
-    path.write_text(text)
+    # UTF-8 named: Windows' default code page (cp1252) has no `─` or `—`,
+    # and the program's comments carry both.
+    path.write_text(text, encoding="utf-8")
     return path, kinds
 
 
@@ -1342,19 +1344,19 @@ def run(args):
         build_times.append(took)
         if not ok:
             keep("the reference build failed", f"log {pdir / 'reference.build.log'}", [pdir / "reference.build.log"])
-            print((pdir / "reference.build.log").read_text()[-3000:])
+            print((pdir / "reference.build.log").read_text(encoding="utf-8", errors="replace")[-3000:])
             continue
         ok, took = build(src, ver, VERIFY_FLAGS, args.release, pdir / "verify.build.log", tmp)
         build_times.append(took)
         if not ok:
             keep("the verify build failed", f"log {pdir / 'verify.build.log'}", [pdir / "verify.build.log"])
-            print((pdir / "verify.build.log").read_text()[-3000:])
+            print((pdir / "verify.build.log").read_text(encoding="utf-8", errors="replace")[-3000:])
             continue
         rc, expected, err, timed_out, took = run_one(ref, {}, tmp)
         ref_times.append(took)
-        (pdir / "reference.out").write_text(expected)
+        (pdir / "reference.out").write_text(expected, encoding="utf-8")
         if rc != 0 or timed_out or "MISMATCH" in expected or "PANICKED" in expected:
-            (pdir / "reference.err").write_text(err)
+            (pdir / "reference.err").write_text(err, encoding="utf-8")
             keep("the reference run failed (a generator bug)",
                  f"rc={rc} timed_out={timed_out}; {pdir / 'reference'}",
                  [pdir / "reference.out", pdir / "reference.err"])
@@ -1382,8 +1384,8 @@ def run(args):
                     reasons.append("stdout differs from the reference")
                 if reasons:
                     tag = f"c{chaos}-w{w}"
-                    (pdir / f"{tag}.out").write_text(got)
-                    (pdir / f"{tag}.err").write_text(err)
+                    (pdir / f"{tag}.out").write_text(got, encoding="utf-8")
+                    (pdir / f"{tag}.err").write_text(err, encoding="utf-8")
                     dest = fails / f"p{seed}"
                     repro = (f"cd {ROOT} && ./bin/iyi build {flags_text} -o {dest}/verify {dest}/{src.name} && "
                              f"{env_text(env)} {dest}/verify")

@@ -18,14 +18,19 @@
 # (heap_verify_reach: the trusted reach claims).
 #
 # Every run is one line of OUT/NAME/results: `seed words workers exit
-# verdict detail`. The verdicts: `pass` (exit 0 and the program's line of
-# success), `report` (an `iyi: heap_verify:` report: the run is kept as
-# OUT/NAME/s<seed>w<words>.{out,err}), `poison` (a read of the
+# verdict seconds detail`. The verdicts: `pass` (exit 0 and the program's
+# line of success), `report` (an `iyi: heap_verify:` report: the run is
+# kept as OUT/NAME/s<seed>w<words>.{out,err}), `poison` (a read of the
 # poison-on-free pattern 0xdeaddeaddeaddead, or a crash), `hang` (ended at
-# LIMIT seconds), `fail` (anything else). `summary` counts them.
+# LIMIT seconds; the detail is the last line it printed), `fail` (anything
+# else). `summary` counts them.
 #
 # OUT defaults to $TMPDIR/heap_verify_matrix; IYI names the compiler;
-# LIMIT the seconds a run may take (default 600).
+# LIMIT the seconds a run may take (default 600); `WORDS="0"` or `"1"`
+# runs a seed without or with the false words only; `STRESS=0` runs without
+# the stress (a control: a slow run from a hung one). The reach program
+# runs print-only (`HEAP22_PRINT_ONLY=1`): every claim is checked in each
+# run, and a failed run's detail names every claim whose check failed.
 
 set -u
 
@@ -92,8 +97,10 @@ run_one() {
   workers=$((seed % 2 == 1 ? 1 : 4))
   tag="s${seed}w${words}"
   ok="$(success_of "$name")"
-  local -a env_words=(IYI_CHAOS="$seed" IYI_HEAP_STRESS=1)
+  local -a env_words=(IYI_CHAOS="$seed" IYI_HEAP_STRESS="${STRESS:-1}")
+  [ "$name" = reach ] && env_words+=(HEAP22_PRINT_ONLY=1)
   [ "$words" = 1 ] && env_words+=(IYI_HEAP_FALSE_WORDS=1)
+  local start=$SECONDS
   case "$name" in
     web)
       local tls=""
@@ -117,6 +124,7 @@ run_one() {
       code=$?
       ;;
   esac
+  local took=$((SECONDS - start))
   detail=""
   if grep -q "^iyi: heap_verify: partition" "$dir/$tag.err"; then
     verdict=report
@@ -129,6 +137,8 @@ run_one() {
     detail="$(grep -ih -m1 deaddeaddeaddead "$dir/$tag.err" "$dir/$tag.out" | head -1 | cut -c1-160)"
   elif [ "$code" = 124 ] || [ "$code" = 137 ]; then
     verdict=hang
+    # Where it stood: a slow run's last line moves on with a larger LIMIT.
+    detail="last line: $(tail -1 "$dir/$tag.out" | cut -c1-120)"
   elif [ "$code" = 139 ] || [ "$code" = 134 ] || [ "$code" = 135 ] || grep -q "Invalid memory access\|Segmentation fault\|Access violation" "$dir/$tag.err"; then
     verdict=poison
     detail="crash: $(grep -m1 . "$dir/$tag.err" | cut -c1-160)"
@@ -137,8 +147,9 @@ run_one() {
   else
     verdict=fail
     detail="$( (grep -m1 'FAIL\|panic\|error' "$dir/$tag.out" "$dir/$tag.err" || tail -1 "$dir/$tag.err") | head -1 | cut -c1-160)"
+    [ "$name" = reach ] && detail="claims failing: $(sed -n 's/^FAIL: \([a-z_]*\):.*/\1/p' "$dir/$tag.out" | sort -u | tr '\n' ' ')| $detail"
   fi
-  echo "$seed $words $workers $code $verdict $detail" >>"$dir/results"
+  echo "$seed $words $workers $code $verdict ${took}s $detail" >>"$dir/results"
   # Passing runs leave nothing behind.
   [ "$verdict" = pass ] && rm -f "$dir/$tag.out" "$dir/$tag.err"
   echo "$name seed $seed words $words workers $workers: $verdict $detail"
@@ -155,8 +166,7 @@ case "${1:-}" in
     name="$2"
     seed="$3"
     while [ "$seed" -le "$4" ]; do
-      run_one "$name" "$seed" 0
-      run_one "$name" "$seed" 1
+      for words in ${WORDS:-0 1}; do run_one "$name" "$seed" "$words"; done
       seed=$((seed + 1))
     done
     ;;

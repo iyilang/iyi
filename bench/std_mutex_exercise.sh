@@ -189,6 +189,88 @@ else
 fi
 
 echo
+echo "== a wait beside a thread that has yet to run is no deadlock"
+# On darwin, and on Linux when libc makes the threads, a started thread puts
+# itself on the threads' list only once it runs, so a `wait_for` right after
+# `IyiThread.start` found one thread with nothing else to run on it and
+# panicked "deadlock" (`Mutex.alone?`): on tmac (macOS 26.6, M2 Pro) the
+# exercise built `-Diyi_chaos`, one worker, did so on every seed 1-8, in the
+# wait for a write from another thread. Built so here, where the waiting
+# task reaches the check before the thread can run; the copy that counts
+# the list alone must be caught where threads link themselves.
+cat >"$WORK/starting.iyi" <<'IYI'
+module starting
+
+import std/mutex::{Mutex}
+
+late = Mutex.new { [0] }
+writer = IyiThread.start do
+  late.lock { |cell| cell[0] = 9 }.or_panic
+  nil
+end
+seen = late.wait_for { |cell| cell[0] == 0 ? nil : cell[0] }.or_panic
+writer.join
+puts "answered #{seen}"
+IYI
+starting_runs() { # starting_runs <name> <search path>: sets answered, deadlocked, other (seed lists)
+  answered=""; deadlocked=""; other=""
+  if ! IYI_PATH="$2" "$IYI" build -Diyi_chaos -o "$WORK/$1" "$WORK/starting.iyi" >"$WORK/$1.build.log" 2>&1; then
+    other=" build"
+    tail -5 "$WORK/$1.build.log" | sed 's/^/    /'
+    return
+  fi
+  for seed in 1 2 3 4 5 6 7 8; do
+    IYI_CHAOS=$seed IYI_WORKERS=1 $LIMIT "$WORK/$1" >"$WORK/$1-$seed.out" 2>&1
+    if grep -q "answered 9" "$WORK/$1-$seed.out"; then
+      answered="$answered $seed"
+    elif grep -q "Mutex#wait_for: deadlock" "$WORK/$1-$seed.out"; then
+      deadlocked="$deadlocked $seed"
+    else
+      other="$other $seed"
+    fi
+  done
+}
+starting_runs starting "$REPO/src${PSEP}$REPO/samples/iyi"
+if [ -n "$deadlocked$other" ]; then
+  echo "  a wait beside a starting thread failed: deadlock on seeds${deadlocked:- none}, otherwise on${other:- none}"
+  status=1
+else
+  echo "  answered on seeds$answered"
+fi
+if [ -z "$PY" ]; then
+  echo "  no python3 on this machine, so the threads'-list-only proof is unmeasured"
+else
+  rm -rf "$WORK/listonly" && mkdir -p "$WORK/listonly/std"
+  if ! "$PY" - <<PY
+from pathlib import Path
+src = Path("$REPO/src/std/mutex.iyi").read_text()
+old = "        return false if IyiThread.others_started?\n"
+if src.count(old) != 1:
+    raise SystemExit("patch site missing")
+Path("$WORK/listonly/std/mutex.iyi").write_text(src.replace(old, "        return false if IyiThread.program_threads > 1_u64\n", 1))
+PY
+  then
+    echo "  the threads'-list-only patch did not apply"
+    status=1
+  else
+    starting_runs listonly "$WORK/listonly${PSEP}$REPO/src${PSEP}$REPO/samples/iyi"
+    case "$(uname -s)" in
+      Darwin)
+        if [ -n "$deadlocked" ] && [ -z "$answered" ]; then
+          echo "  a deadlock check counting the threads' list alone is caught: deadlock on seeds$deadlocked"
+        else
+          echo "  a deadlock check counting the threads' list alone was not caught on every seed: answered on${answered:- none}, deadlock on${deadlocked:- none}, otherwise on${other:- none}"
+          status=1
+        fi
+        ;;
+      *)
+        echo "  a deadlock check counting the threads' list alone, here where \`start\` lists the thread itself: answered on${answered:- none}, deadlock on${deadlocked:- none} (caught on darwin)"
+        ;;
+    esac
+  fi
+fi
+
+echo
 echo "== proving the checks can fail when the module is broken"
 # prove_broken <label> <phrase> <old> <new> [argument...]: the exercise,
 # given the arguments, must fail on a copy of the module with <old>

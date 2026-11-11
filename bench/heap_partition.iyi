@@ -260,7 +260,8 @@
       if check
         child = slots.get { |s| s[1] }
         fail("dead: the child never ran") unless child.is_a?(IyiFiber)
-        fail("dead: a reaped fiber still names its group, made in partition #{IyiHeap.owner_of(child.group.object_id)}") unless child.group.is_a?(Nil)
+        kept = child.group
+        fail("dead: a reaped fiber still names its group, made in partition #{IyiHeap.owner_of(kept.object_id)}") if kept.is_a?(IyiGroup)
         fail("dead: a reaped fiber still names its block") unless child.proc.is_a?(Nil)
       end
       0_i64

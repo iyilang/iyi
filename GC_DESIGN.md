@@ -1090,6 +1090,29 @@ Linux +9.9% over the six rounds, most of it one round (+23%), the median
 round +2.7%, where Go's own CPU a request moved between 2.98 and 4.38 ms
 from round to round.
 
+The pause's sweep went a batch a slice with the room, so that a refill
+taking a batch is counted for the warm pages on it alone. Its first
+pass, the debt it pays before the mark, kept that and cost
+`bench/alloc_scaling.iyi` at 8 workers 13-17% on macOS 26.6, Apple M2
+Pro, 10 cores (the user's machine): 628-650 ms against 535-566 with
+0.21.0's prelude (medians of three sessions of 5 interleaved rounds).
+Not the room: it starts at the first epoch's take (7.3-8.2 MB in epoch
+1, nothing handed back in the first five epochs), a room that never
+hands a page back ran as slowly, and no idle trim ran. Not the refill
+either: the time in refills and carves moved by 20 ms of the 750 ms of
+CPU the run gained. Those batches are what the threads allocate from
+while the mark runs beside them, each allocation counted live in its
+arena (`count_live`, 15-16 million adds a run either way), and an arena
+the stop found a walker in went out to every thread at once; the marks
+beside the program lasted 6.4 ms against 4.6. The debt pass hands each
+arena over as one batch again (`IyiMark.sweep_one_held`) and ran
+564-577 ms, marks 5.0 ms, while the eager sweep after an explicit
+collection's turn stays a batch a slice for the room's count.
+[INFERENCE: the cost is eight threads adding to one arena's line;
+Windows 11's and Linux's x86 cores showed no difference past noise.]
+`bench/sweep_exercise.iyi` check 12 holds an arena as a stopped walker
+would and counts the batches the pause hands it over in.
+
 **The heap's neighbours, read from `/proc/self/smaps`.** The second
 cycle began by reading every mapping's resident size at the end of
 binary trees and of the probe, rather than the terms the first cycle

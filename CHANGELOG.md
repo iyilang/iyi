@@ -48,8 +48,25 @@
   4 workers 194-233 against 183-195; binary trees 0.53-0.61 s against
   0.51-0.58; JSON 5.23-6.06 s against 5.33-5.50; web_cores `order`
   110-122k against 116-125k, peak 64-66 MB against 76-79 and 40-43 MB
-  after the load against 73-77. alloc_scaling at 8 workers is slower on
-  macOS and Windows, and at 4 on Windows, and that is not explained yet.
+  after the load against 73-77.
+
+  Those alloc_scaling rounds at 8 workers on macOS and Windows were
+  slower than 0.21.0's, and the cause was on macOS: the pause's sweep of
+  the debt before its mark handed each arena over a slice at a time, the
+  threads allocating beside the mark all took chunks of the same arena,
+  and the marks beside the program lasted 6.4 ms against 4.6. That pass
+  hands an arena over as one batch again, as 0.21.0 did; the eager sweep
+  after an explicit collection stays a batch a slice. On macOS 26.6,
+  Apple M2 Pro, 10 cores (the user's machine), alloc_scaling at 8
+  workers, medians of three sessions of 5 interleaved rounds: 564-577 ms
+  against 628-650 before the fix and 535-566 with 0.21.0's prelude. The
+  warm room was not it: it starts at the first epoch's take, and a room
+  that hands nothing back ran as slowly. On Windows 11, 12 logical
+  processors, five sessions of 5-9 rounds put the branch within 1-3% of
+  0.21.0 at 4 and 8 workers (medians 347-352 ms against 338-354 at
+  8), inside the machine's noise. `bench/sweep_exercise.iyi` check 12
+  counts the batches the pause hands a held arena over in; the copy
+  that cuts it a slice at a time fails at 1 arena over as 5 batches.
 
   The trim runs beside threads that allocate. Two refills adopting the
   batches of adjacent sweep slices both counted off the page the slices
@@ -27816,7 +27833,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 29,107-line library and nothing else. Every other
+  written against iyi's own 29,136-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

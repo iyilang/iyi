@@ -14,16 +14,21 @@
 # Exits non-zero if any step fails.
 #
 # A copy is caught when its program exits non-zero: a `FAIL: <row>` line,
-# or the crash a poisoned word makes (a signal, or Windows' access
+# the verifier's report at a collection (`-Dheap_verify`, exit 86), or
+# the crash a poisoned word makes (a signal, or Windows' access
 # violation). A hang is ended at 120 s and counts as caught too, and is
-# named so. Poison alone is not deterministic - a word a register or a
-# frame still holds keeps an unpublished graph alive through the
-# collection - so the checks of rows 1, 1c, 1d, 3 (ring growth), 13, 14
-# and 21 also ask, where the graph crossed and before any collection,
-# whether it is published or the shared heap's (`IyiHeap.local?`,
-# `owner_of`). Mechanisms neither can show - the reference is still
-# rooted on a stack, a second crossing publishes it again, or the answer's
-# detach covers it - are listed at the end as the verifier's (S4,
+# named so. Neither the poison nor the verifier is deterministic - a word
+# a register or a frame still holds keeps an unpublished graph alive
+# through the collection, and a marked chunk is neither freed nor
+# reported (`Mutex.new capture publish` and `Box pin` passed on Linux,
+# `Mutex capture publish` on tmac and tssh) - so the checks of rows 1,
+# 1c, 1d, 2b, 3, 4, 4b, 9, 13, 14 and 21 also ask, where the graph
+# crossed and before any collection, whether it is published or the
+# shared heap's, or not its maker's (`IyiHeap.local?`, `owner_of`). Row
+# 2's answer is freed whole at its unit's death, which marks nothing.
+# Mechanisms none of these can show - the reference is still rooted on a
+# stack, a second crossing publishes it again, or the answer's detach
+# covers it - are listed at the end as the verifier's (S4,
 # `-Dheap_verify`'s scan): no copy is built for them here.
 
 set -u
@@ -116,6 +121,8 @@ prove_caught() {
     how="a hang, ended at 120 s"
   elif grep -q "^FAIL: " "$WORK/$dir/out"; then
     how="$(grep -m1 "^FAIL: " "$WORK/$dir/out" | sed 's/^FAIL: //')"
+  elif [ "$code" -eq 86 ] && grep -q "^iyi: heap_verify: " "$WORK/$dir/out"; then
+    how="the verifier: $(grep -m1 "^iyi: heap_verify: " "$WORK/$dir/out" | sed 's/^iyi: heap_verify: //')"
   else
     how="a crash (exit $code)"
   fi
@@ -194,6 +201,14 @@ prove_caught "TlsIdentity chain copy" r16 tls \
 # Row 21: a List's elements not published.
 prove_caught "List publish" r21 list \
   "$(del 'def initialize\(items : Array\(T\)\)' 'IyiCross\.publish\(item\)')" std list.iyi
+# The scheduler's list of closes posted to another thread, made in the
+# closer's partition. Not on Windows, which posts no list.
+if [ "$WINDOWS" -eq 1 ]; then
+  echo "  closed list shared: skipped on Windows, a close there ends the posted operation and no list is made"
+else
+  prove_caught "closed list shared" r22 closed \
+    "$(subst 'def self\.wake_closed\(fd : Int32\)' 'IyiCross\.shared do' 'begin')" iyi concurrency.iyi
+fi
 
 echo
 echo "== the verifier's (S4): mechanisms whose loss no poison shows here"

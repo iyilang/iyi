@@ -556,6 +556,23 @@
       @@count > 1_i64 ? @@count.to_u64 : 1_u64
     end
 
+    # Whether a thread besides the calling one has been started and has
+    # not ended: one on the stops' list, or one started and not running
+    # yet - on darwin, and on Linux when libc made it, a thread puts itself
+    # on the list only once it runs (`run`, `link`), so `program_threads`
+    # was 1 in the instant after `start` returned. Read under the lock both
+    # change under; a thread leaves `@@head` after it has linked itself, so
+    # one coming is never between the two. std/mutex's deadlock check
+    # (`Mutex.alone?`) reads it: on macOS 26.6 (tmac), a `wait_for` right
+    # after starting the thread that would answer it panicked "deadlock"
+    # on every chaos seed 1-8 with one worker.
+    def self.others_started? : Bool
+      IyiRuntimeLock.lock
+      others = @@count > 1_i64 || !@@head.nil?
+      IyiRuntimeLock.unlock
+      others
+    end
+
     def self.new_line : UInt64
       __iyi_mmap(IYI_THREAD_LINE).address
     end

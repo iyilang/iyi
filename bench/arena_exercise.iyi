@@ -144,7 +144,17 @@ end
       chunk - 120
     end
 
+    # Under partitions the shared heap's budget is floored at
+    # `IyiHeap::SHARED_MIN`, 8 MiB, where it was `IyiMark::MIN_BUDGET`,
+    # 4 MiB, for the one thread that allocated before the second
+    # collection (heap22, design section 4.2): the warm room is that much
+    # larger, and as many more blocks leave as many pages past it to go
+    # cold. Without them 4,687 blocks met 9 cold pages, none a run's last
+    # chunk's, and a carve that trusted them was not caught.
     def self.count : Int32
+      {% if flag?(:heap_partitions) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
+        return (20_480_000_u64 + IyiHeap::SHARED_MIN - IyiMark::MIN_BUDGET).to_i32 // chunk
+      {% end %}
       20_480_000 // chunk
     end
 

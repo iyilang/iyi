@@ -19,9 +19,12 @@
 #      proc handed to a spawn, an `IyiDeferNode` pushed, a `Hash`'s
 #      default block, a block handed to a def that calls it, and a kept
 #      literal calling its def's block. Each is refused naming the
-#      program's state and the path to it. The state between - the table,
-#      the guard, the hash, the proc - carries a proven `@[SafeReach]`, so
-#      the state refused is the one written from the unit.
+#      program's state and the path to it. The state between carries a
+#      claim - the hash and the proc a proven `@[SafeReach]`, the table
+#      and the guard an `@[UnsafeReach]`, since each keeps a copy of
+#      itself the proof cannot follow (a handler holding the table, a
+#      pushed node) - so the state refused is the one written from the
+#      unit.
 #   2. std's and the prelude's state is walked: a unit that prints, reads
 #      the clock and sets an environment variable compiles, since every
 #      piece of runtime state it reaches is Share or marked. Its broken
@@ -209,7 +212,10 @@ IYI
 } > r6_handed.iyi
 refused r6_handed 'reaches `BOX : R6Handed::Box` (not Share) through `work` → '
 
-{ echo 'module r6_node'; echo; box; cat <<'IYI'
+# The guard's claim is the author's word (`@[UnsafeReach]`, in a module
+# marked `@[Unsafe]`): pushing its node keeps a copy of it on the fiber,
+# which `@[SafeReach]`'s proof refuses wherever it is kept.
+{ echo '@[Unsafe("the gate pushes a defer node by hand")]'; echo 'module r6_node'; echo; box; cat <<'IYI'
 BOX = Box.new
 
 class Guard
@@ -222,7 +228,7 @@ class Guard
   end
 end
 
-@[SafeReach("made once, then only pushed")]
+@[UnsafeReach("made once, then only pushed, by the unit that runs its node")]
 GUARD = Guard.new
 
 def work(n : Int32) : Int32
@@ -278,7 +284,9 @@ IYI
 } > r6_param.iyi
 refused r6_param 'reaches `BOX : R6Param::Box` (not Share) through `work` → `BOX.add`'
 
-{ echo 'module r6_captured'; echo; box; cat <<'IYI'
+# The table's claim is the author's word as the guard's is: the handler
+# it keeps holds the table, a copy `@[SafeReach]`'s proof refuses.
+{ echo '@[Unsafe("the gate keeps its handlers in a table it claims by hand")]'; echo 'module r6_captured'; echo; box; cat <<'IYI'
 BOX = Box.new
 
 class Table
@@ -297,7 +305,7 @@ class Table
   end
 end
 
-@[SafeReach("filled before the first parallel task starts, then only read")]
+@[UnsafeReach("filled before the first parallel task starts, then only read")]
 TABLE = Table.new
 
 TABLE.add do

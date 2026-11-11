@@ -4,7 +4,10 @@
 # then proven to fail in each direction that matters - a switch that does
 # not install the fiber's partition, a bracket that does not put back what
 # it found, a unit whose fiber list keeps its dead or never lists its
-# living, and a freed record left on the caches list the pause strips.
+# living, and a freed record left on the caches list the pause strips;
+# with partitions (`-Dheap_partitions` in IYI_OPTS), a dead unit's fiber
+# still naming its partition, caught by the exercise and, with its check
+# left out, by `-Dheap_verify` at the unit's death.
 #
 #   bash bench/heap_partition.sh
 #
@@ -123,9 +126,89 @@ prove_fails "the unit lists nobody" nolink "fibers:" \
   concurrency.iyi
 
 # A freed record left on the caches list, its lists never handed back.
-prove_fails "a freed record stays listed" noretire "caches:" \
-  '/def self\.partition_free\(record : UInt64\)/ { inside = 1 } inside && /^        retire_lists\(record\)$/ { inside = 0; found = 1; next } { print } END { if (!found) exit 3 }' \
-  prelude.iyi
+# With partitions in the runtime (`-Dheap_partitions` in IYI_OPTS)
+# `partition_free` hands the record's runs to the shared heap and lets the
+# record go in `partition_release` (heap_partition.iyi), which takes it off
+# the list instead, so that copy leaves the record on the list there.
+case " ${IYI_OPTS:-} " in
+  *" -Dheap_partitions "*)
+    prove_fails "a freed record stays listed" noretire "caches:" \
+      '/def self\.partition_release\(record : UInt64\)/ { inside = 1 } inside && /^    if cursor == record$/ { print "    if false"; inside = 0; found = 1; next } { print } END { if (!found) exit 3 }' \
+      heap_partition.iyi ;;
+  *)
+    prove_fails "a freed record stays listed" noretire "caches:" \
+      '/def self\.partition_free\(record : UInt64\)/ { inside = 1 } inside && /^        retire_lists\(record\)$/ { inside = 0; found = 1; next } { print } END { if (!found) exit 3 }' \
+      prelude.iyi ;;
+esac
+
+# What a dead unit's fibers keep (`dead:`, partitions only). The waiter
+# `park_on` keeps as the fiber's spare made in the unit's partition; a
+# reaped fiber that keeps naming its group, or its block's context, both
+# its unit's. Each is caught twice: by the exercise's own check, and with
+# the check left out (`dead quiet`) by `-Dheap_verify`'s scan at the
+# unit's death, which finds the shared fiber naming a chunk about to be
+# freed (exit 86).
+NOWAITER='{ if (sub(/waiter = IyiCross\.shared \{ IyiWaiter\.new\(fiber, nonce, word\.address\) \}/, "waiter = IyiWaiter.new(fiber, nonce, word.address)")) found = 1; print } END { if (!found) exit 3 }'
+NOGROUP='/^        fiber\.group = nil$/ { found = 1; next } { print } END { if (!found) exit 3 }'
+NOPROC='/^        fiber\.proc = nil$/ { found = 1; next } { print } END { if (!found) exit 3 }'
+
+prove_verified() { # label dir awk-script file
+  local label="$1" dir="$2" script="$3" file="$4"
+  mkdir -p "$WORK/$dir/iyi"
+  cp -R "$REPO/src/iyi/." "$WORK/$dir/iyi/"
+  if ! awk "$script" "$REPO/src/iyi/$file" > "$WORK/$dir/iyi/$file"; then
+    echo "  $label: what the copy changes is not in $file any more"
+    status=1
+    return
+  fi
+  # shellcheck disable=SC2086
+  if ! IYI_PATH="$WORK/$dir${PSEP}$REPO/src" "$IYI" build -Dheap_verify \
+       -o "$WORK/$dir/program" "$REPO/bench/heap_partition.iyi" \
+       >"$WORK/$dir/build.log" 2>&1; then
+    echo "  $label: the patched runtime did not build"
+    sed -n '1,12p' "$WORK/$dir/build.log"
+    status=1
+    return
+  fi
+  timeout 120 "$WORK/$dir/program" dead quiet >"$WORK/$dir/out" 2>&1
+  local code=$?
+  if [ "$code" -ne 86 ] || ! grep -q "at its unit's death" "$WORK/$dir/out"; then
+    echo "  $label: -Dheap_verify did not report it at the unit's death (exit $code)"
+    sed -n '1,8p' "$WORK/$dir/out"
+    status=1
+    return
+  fi
+  printf '  %s: -Dheap_verify exits 86 at "%s", holder %s\n' "$label" \
+    "$(grep -m1 "at its unit's death" "$WORK/$dir/out" | sed 's/^ *//')" \
+    "$(grep -m1 'holder 0x' "$WORK/$dir/out" | sed 's/^ *holder 0x[0-9a-f]* //')"
+}
+
+case " ${IYI_OPTS:-} " in
+  *" -Dheap_partitions "*)
+    prove_fails "the spare waiter in the partition" nowaiter "dead:" "$NOWAITER" concurrency.iyi
+    prove_fails "a reaped fiber keeps its group" nogroup "dead:" "$NOGROUP" concurrency.iyi
+    prove_fails "a reaped fiber keeps its block" noproc "dead:" "$NOPROC" concurrency.iyi
+
+    echo
+    echo "== the same, with -Dheap_verify and the exercise's own check left out"
+    if ! "$IYI" build -Dheap_verify -o "$WORK/verify" "$REPO/bench/heap_partition.iyi" >"$WORK/verify.build.log" 2>&1; then
+      echo "verify: build failed"
+      sed -n '1,12p' "$WORK/verify.build.log"
+      status=1
+    else
+      timeout 120 "$WORK/verify" dead quiet >"$WORK/verify.out" 2>&1
+      code=$?
+      sed 's/^/  /' "$WORK/verify.out"
+      if [ "$code" -ne 0 ]; then
+        echo "verify, dead quiet: exit $code"
+        status=1
+      fi
+    fi
+    prove_verified "the spare waiter in the partition" vnowaiter "$NOWAITER" concurrency.iyi
+    prove_verified "a reaped fiber keeps its group" vnogroup "$NOGROUP" concurrency.iyi
+    prove_verified "a reaped fiber keeps its block" vnoproc "$NOPROC" concurrency.iyi
+    ;;
+esac
 
 echo
 if [ "$status" -eq 0 ]; then

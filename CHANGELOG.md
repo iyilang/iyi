@@ -15,6 +15,30 @@ answer copies. A unit's local collection abandoned by a stop no longer
 leaves mark bits the next one trusts (a live list was freed under
 heap_partitions).
 
+Under `-Dheap_partitions` a published object whose chunk straddled the
+end of its run was left local and freed at its unit's death, and a weak
+cell to such an object kept naming the freed chunk: the carve frontier is
+now tested against the chunk's head (heap_crossings' channel and spawn
+rows under simulated chaos and `IYI_HEAP_STRESS=1`, Linux: seeds 3, 6 and
+8 caught by the verifier before, seeds 1-10 clean after). A dead unit's
+fibers name nothing of its partition: `park_on`'s spare waiter, the poll
+loop's grown arrays and a close posted to another thread's poller are the
+shared heap's, and a reaped fiber lets its group and its block go
+(web_cores `parallel` under `-Dheap_verify`, tmac: 3 of 3 runs reported
+the freed group, or with the group let go the freed block, before; 3 of 3
+clean after). `-Dheap_verify` tests a chunk's head against the carve
+frontier and builds under LLVM 23.
+
+Two races older than heap22, in every build: units setting or deleting
+environment variables at once lost them (tmac, 6 units × 300 rounds at
+`IYI_WORKERS=4`: 261-301 of 1,800 reads of their own write lost); writers
+now take turns, a delete installs a new table instead of closing the
+installed one up in place, and the table is installed and read as one
+atomic word (Windows writes to the platform and lost none). And a
+`Mutex#wait_for` right after starting the thread that would answer it no
+longer panics "deadlock" on macOS, where a started thread was counted
+only once it ran.
+
 ## 0.21.0 — 2026-11-09
 
 **A spawn has one verb and names its unit, and a plain `spawn` runs in

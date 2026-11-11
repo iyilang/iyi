@@ -248,6 +248,66 @@ puts "\n== a name the environment holds twice"
   puts "  not measured: this platform keeps no environ table to hold it twice"
 {% end %}
 
+puts "\n== writers and readers at once"
+# A write reads the table, copies it with its change and installs the
+# copy, so two units writing at once both started from one table and the
+# second install dropped the first's variable. Measured on tmac (macOS
+# 26.6, M2 Pro) before writers took turns, 6 units x 300 rounds of this
+# loop, IYI_WORKERS=4: 261-301 of 1,800 reads lost their own write and 1-4
+# of the 6 variables were wrong at the end; IYI_WORKERS=1 lost none.
+RACE_UNITS  = 6
+RACE_ROUNDS = 200
+race_lost = group do |g|
+  tasks = (0...RACE_UNITS).map do |i|
+    g.spawn(unit: :new) do
+      lost = 0
+      RACE_ROUNDS.times do |r|
+        ENV["#{PREFIX}RACE_#{i}"] = "v#{i}-#{r}"
+        lost = lost + 1 unless ENV["#{PREFIX}RACE_#{i}"]? == "v#{i}-#{r}"
+        ENV["#{PREFIX}RACE_GONE_#{i}"] = "x"
+        ENV.delete("#{PREFIX}RACE_GONE_#{i}")
+      end
+      lost
+    end
+  end
+  tasks.sum { |t| t.value.as(Int32) }
+end
+race_wrong = 0
+RACE_UNITS.times do |i|
+  race_wrong = race_wrong + 1 unless ENV["#{PREFIX}RACE_#{i}"]? == "v#{i}-#{RACE_ROUNDS - 1}"
+  ENV.delete("#{PREFIX}RACE_#{i}")
+end
+assert_true race_lost == 0 && race_wrong == 0, "writers at once keep every write: #{race_lost} reads lost their own write, #{race_wrong} of #{RACE_UNITS} variables wrong at the end"
+
+# A reader takes no turn: it walks whichever table is installed. `delete`
+# closed the table up in place, so a variable after the deleted one moved
+# down into a slot a reader had already passed, and the reader missed it.
+# Here the reader puts its own variable last each round and reads it
+# back, while another unit deletes and sets one that sits before it.
+reader_missed = group do |g|
+  reader = g.spawn(unit: :new) do
+    missed = 0
+    RACE_ROUNDS.times do |r|
+      ENV.delete("#{PREFIX}RACE_LAST")
+      ENV["#{PREFIX}RACE_LAST"] = "r#{r}"
+      4.times { missed = missed + 1 unless ENV["#{PREFIX}RACE_LAST"]? == "r#{r}" }
+    end
+    missed
+  end
+  g.spawn(unit: :new) do
+    RACE_ROUNDS.times do
+      ENV.delete("#{PREFIX}RACE_BEFORE")
+      ENV["#{PREFIX}RACE_BEFORE"] = "b"
+    end
+    0
+  end
+  reader.value.as(Int32)
+end
+ENV.delete("#{PREFIX}RACE_LAST")
+ENV.delete("#{PREFIX}RACE_BEFORE")
+assert_true reader_missed == 0, "a reader sees its variable while another unit deletes: #{reader_missed} of #{RACE_ROUNDS * 4} reads missed it"
+puts "  #{RACE_UNITS} units x #{RACE_ROUNDS} rounds keep every write, and a reader misses nothing while another unit deletes"
+
 # Clean up all created variables
 ENV.delete(K1)
 ENV.delete(K2)

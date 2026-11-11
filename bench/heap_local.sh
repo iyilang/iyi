@@ -344,7 +344,10 @@ fi
 # called into it was "undefined method 'partition_slice'" on x86_64-darwin
 # with the flag (9539ec448, Linux). arm-linux-gnueabihf has no prelude
 # branch, so an iyi program is refused there by name, flag or no flag; the
-# check is that the flag adds no other error.
+# check is that the flag adds no other error. Each build names its flags,
+# `IYI_OPTS` left out: under the on gate's `-Dheap_partitions` the "(no
+# flag)" row was built with the flag, and x86_64-darwin's missing guard
+# (095d32d63) failed both rows.
 if [ "$PART" = all ] || [ "$PART" = cross ]; then
   echo
   echo "== the program cross-compiled for every target, flag on and off"
@@ -355,7 +358,7 @@ if [ "$PART" = all ] || [ "$PART" = cross ]; then
       out="$WORK/cross-$target${flags:+-on}"
       label="$(printf '%-22s %s' "$target" "${flags:-(no flag)}")"
       # shellcheck disable=SC2086
-      if "$IYI" build --cross-compile --target "$target" $flags \
+      if env -u IYI_OPTS "$IYI" build --cross-compile --target "$target" $flags \
            -o "$out" "$REPO/bench/heap_local.iyi" >"$out.log" 2>&1; then
         built=1
       else

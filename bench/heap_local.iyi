@@ -1455,6 +1455,11 @@
           IyiHeap.write64(record &+ IyiHeap::REC_IDLE_TICK, 1_u64)
         end
         IyiStat.atomic(IyiStat::IDLE_PENDING).value.set(1_u64)
+        # A park stamps on its own worker, whose next wait is cut to a
+        # tick; stamped by hand, every worker may already wait without
+        # a bound (bench/heap_verify.sh, Linux, every seed), so one is
+        # rung.
+        IyiWorkers.wake_one
       end
       waited = 0
       left = units

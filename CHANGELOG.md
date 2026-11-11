@@ -84,12 +84,14 @@ state proves the claim itself. The share check's mutation scan no longer
 builds an undefined constant's suggestions for macro code it only probes:
 `Object#in?` cost ~6 ms per scanned type, and std_http_exercise's cleanup
 drops from 0.30 s to 0.14 s (Linux, release). Against 0.21.0, a warm
-whole compile takes 0.95 times as long for iyiturkiye, 1.00 for 16 std
-programs together, 1.01 for web_cores and 1.02 for std_http_exercise
-(tmac, release, medians of 5 interleaved rounds); single small std
-programs (0.2-0.37 s) take up to 1.08, +0.011-0.027 s. A cold one takes
-0.97 for iyiturkiye and 1.04-1.07 for the others on tmac, and on Linux
-1.08 for the 16 std programs and 1.14 for web_cores. An initialiser first
+whole compile of 16 std programs and web_cores together takes 1.01 times
+as long, of web_cores 1.02 and of std_http_exercise 1.04 (tmac, release,
+medians of 5 interleaved rounds; Linux 1.05, 1.06 and 1.04); single small
+std programs of 0.2-0.4 s take up to 1.09 on tmac and 1.17 on Linux,
+0.01-0.035 s more, most of it `Semantic (main)` and the reach proof. A
+cold one takes 1.04, 1.06 and 1.04 on tmac and 1.09, 1.11 and 1.09 on
+Linux. iyiturkiye took 0.95 warm and 0.97 cold on tmac before the
+startup change below (e60a1affe). An initialiser first
 run by a read before its declaration is born in the shared heap under
 `-Dheap_partitions`. A constant that only definition-site typing reads is
 no longer built as its module starts. std's decoded and worked-out tables

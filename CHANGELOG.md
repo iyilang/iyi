@@ -151,11 +151,13 @@ registry, naming a stack that is gone, in any build (0.21.0 included): the
 retiring thread asked whether the registry held its fiber without the
 runtime lock, and a neighbour unlinking itself between the two reads made
 the answer no. It asks under the lock. On tmac, waves of 16 threads that
-end together left a main fiber behind in 11 of 2,000 waves at 0.21.0 and
-none after; `thread_exercise` named one in 1 of 24 runs (S6, flag off).
-bench/thread_exercise.sh 5f holds the ask open 300 ms in copies of the
-runtime while a neighbour retires: under the lock nothing is left, 5 runs
-of 5; without it a main fiber is, 5 of 5.
+end together left a main fiber behind in 59 of 8,000 waves at 0.21.0, 96
+at the head without the flag and 86 with it, and none of 8,000 after;
+`thread_exercise` named one in 1 of 24 runs (S6, flag off). Linux x86_64
+left none in 4,000 waves of any build. bench/thread_exercise.sh 5f holds
+the ask open 300 ms in copies of the runtime while a neighbour retires:
+under the lock nothing is left, 5 runs of 5; without it a main fiber is,
+5 of 5.
 
 ## 0.21.0 — 2026-11-09
 

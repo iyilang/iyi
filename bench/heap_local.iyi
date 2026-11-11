@@ -33,9 +33,12 @@
 #   allocates; the chunk still holds what the main thread wrote in it.
 # - `filter:` a unit's local collection with another unit's object
 #   address on its stack leaves that object's `OWN` byte as it was.
+# - `frontier:` a unit allocates 16-byte strings until one is the last
+#   chunk of a run off the carve frontier with its head below the run's
+#   end and its address on it; published, it is not `LOCAL` any more.
 # - `stale:` a dead unit's object, on a run that went to the pool whole,
-#   named by a word in a class variable: the 4 MB string it held, which
-#   the unit published, is freed by the next collections.
+#   is no object to a stale word: the collector's root test
+#   (`IyiRoots.base_of`) rejects its address.
 # - `return:` with local collections off, a unit's garbage is freed by
 #   global collections alone and comes back to it: the runs it holds stay
 #   bounded and the return stacks hand chunks back.
@@ -531,16 +534,65 @@
     Holder.kept = nil
   end
 
+  # ── frontier ──────────────────────────────────────────────────────────
+
+  # A run taken off its class's frontier ends on a granule line and moves
+  # the frontier (`OFF_HIGH`) there, but its last chunk may straddle the
+  # line: with 40-byte chunks the head of one in five run ends lies 8
+  # bytes below it, and a headed object's address - a `String`'s - is
+  # then the line itself. The publication walk tested that address
+  # against the frontier, took the chunk for uncarved and left it `LOCAL`
+  # under its published referrer, and the unit's death freed it while
+  # another held it: heap_crossings' node 20 label read another label
+  # (HS4b, `channel channel`, simulated chaos, IYI_HEAP_STRESS=1, seeds
+  # 3, 6 and 8, Linux). Every string is kept, so the unit's runs come off
+  # the frontier and not off its own free list. Answers the allocation
+  # that met such a chunk, -1 if it stayed local, -2 if none came in a
+  # million.
+  def frontier_task : Int64
+    kept = [] of String
+    i = 0
+    while i < 1000000
+      text = "y" * 16
+      kept << text
+      address = text.object_id
+      arena = IyiHeap.arena_of(address)
+      if arena != 0_u64
+        high = IyiHeap.arena_high(arena)
+        if IyiHeap.head_of(arena, address) < high && address >= high
+          IyiHeap.publish(address)
+          return IyiHeap.local?(address) ? -1_i64 : i.to_i64
+        end
+      end
+      i = i + 1
+    end
+    -2_i64
+  end
+
+  def frontier_check : Nil
+    group do |g|
+      handle = g.spawn(unit: :new) { frontier_task }
+      value = handle.value
+      fail("frontier: the unit answered #{value}") unless value.is_a?(Int64)
+      fail("frontier: a published string whose chunk straddles its run's end, its address on the carve frontier, is still local") if value == -1_i64
+      fail("frontier: no string in a million was a run's last chunk with its address on the frontier") if value == -2_i64
+    end
+    settle("frontier")
+  end
+
   # ── stale ─────────────────────────────────────────────────────────────
 
-  # A unit's object holding a 4 MB string it published: the unit dies
-  # with nothing else published, so the object's run goes to the pool
-  # whole and the string to the shared heap. A word in a class variable
-  # then names the dead object - a stale word, as a register or a frame
-  # can leave - and a collection must free the string: the object's chunk
-  # reads free, so the word is no pointer (design section 2.3). A pooled
-  # chunk left carved kept a dead select's 64 MB string in
-  # bench/concurrency_exercise (tmac, tssh).
+  # A unit's object that dies with it, on a run with nothing published
+  # that goes to the pool whole. A stale word naming it - a register or a
+  # frame can leave one - must be no pointer to a global mark, which
+  # would read the dead object's fields and keep what they name: its
+  # chunk reads free (design section 2.3), and `IyiRoots.base_of`
+  # answers 0. A pooled chunk left carved kept a dead select's 64 MB
+  # string in bench/concurrency_exercise (tmac, tssh). An earlier form
+  # asked whether two collections freed a 4 MB string such an object
+  # held: a word naming the string itself kept it on tmac's release
+  # build with the fix in, and the copy without the fix freed it on
+  # Linux, so it tested neither; the root test is the mechanism.
   class Wrap
     getter text : String
 
@@ -548,42 +600,22 @@
     end
   end
 
-  class Stale
-    @@word = 0_u64
-
-    def self.word=(word : UInt64) : UInt64
-      @@word = word
-    end
-  end
-
-  def stale_task : Tuple(UInt64, UInt64)
-    text = "s" * 4000000
-    IyiHeap.publish(text.object_id)
-    wrap = Wrap.new(text)
-    {hide(wrap.object_id), hide(text.object_id)}
-  end
-
-  # Whether the large object at a hidden address is still mapped.
-  @[NoInline]
-  def large_alive?(hidden : UInt64) : Bool
-    IyiHeap.containing_large(Pointer(Void).new(hide(hidden))) != 0_u64
+  def stale_task : UInt64
+    wrap = Wrap.new("stale " + "x" * 20)
+    hide(wrap.object_id)
   end
 
   def stale_check : Nil
-    hidden = {0_u64, 0_u64}
+    hidden = 0_u64
     group do |g|
       handle = g.spawn(unit: :new) { stale_task }
       value = handle.value
-      fail("stale: the unit answered #{value}") unless value.is_a?(Tuple(UInt64, UInt64))
+      fail("stale: the unit answered #{value}") unless value.is_a?(UInt64)
       hidden = value
     end
     settle("stale")
-    Stale.word = hide(hidden[0])
-    IyiMark.collect
-    IyiMark.collect
-    kept = large_alive?(hidden[1])
-    Stale.word = 0_u64
-    fail("stale: a word naming a dead unit's object kept the 4 MB string it held through two collections") if kept
+    base = IyiRoots.base_of(hide(hidden))
+    fail("stale: a dead unit's object on a pooled run is still an object to a stale word (base 0x#{base.to_s(16)})") if base != 0_u64
   end
 
   # ── free ──────────────────────────────────────────────────────────────
@@ -937,6 +969,7 @@
   # its own check before any other could notice it: `abandon` first, as
   # a real stop abandons local marks in any check that collects.
   abandon_check
+  frontier_check
   filter_check
   stale_check
   free_check

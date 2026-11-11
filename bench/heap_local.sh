@@ -10,8 +10,11 @@
 # a local mark blind to the unit's other fibers, a local sweep that
 # leaves a weak cell naming the chunk it freed, a local mark that trusts
 # the parities a mark abandoned part way left, an idle takeover of a unit
-# whose `Unit` value is still being built, and a dead unit's pooled run
-# left carved for a stale word to keep. Last, the same
+# whose `Unit` value is still being built, a dead unit's pooled run
+# left carved for a stale word to pass the root test, and a publication
+# walk that takes a chunk straddling the carve frontier for uncarved.
+# The copies' verifier reports and goes on, so each copy must reach the
+# program's own check. Last, the same
 # program cross-compiled to an object for each of the nine targets the
 # README names, with the flag and without it: a hook the prelude compiles
 # on a target where heap_partition.iyi is not loaded fails there.
@@ -77,12 +80,25 @@ if [ "$PART" = all ] || [ "$PART" = cases ]; then
   run_case "no flag" noflag ""
 fi
 
+# The copy's verifier (`-Dheap_verify`, bench/heap_verify.sh's to prove)
+# reports and lets the run go on instead of ending it at exit 86, so the
+# program's own check is the one each copy must reach: with S4's verifier
+# merged, 7 of 9 copies ended at its report before their check
+# (HHeapLead3.GMark, Linux and tmac). Whether it reported is said beside.
+VERIFY_GOES_ON='/^  def self\.report_end : NoReturn$/ { print "  def self.report_end : Nil"; print "    say(\"iyi: heap_verify: going on (a broken copy of bench/heap_local.sh)\\n\")"; print "    @@reporting = 0_u64"; print "  end"; skip = 1; found = 1; next } skip && /^  end$/ { skip = 0; next } skip { next } { print } END { if (!found) exit 3 }'
+
 prove_fails() { # label dir phrase awk-script file
   local label="$1" dir="$2" phrase="$3" script="$4" file="$5"
   mkdir -p "$WORK/$dir/iyi"
   cp -R "$REPO/src/iyi/." "$WORK/$dir/iyi/"
   if ! awk "$script" "$REPO/src/iyi/$file" > "$WORK/$dir/iyi/$file"; then
     echo "  $label: what the copy changes is not in $file any more"
+    status=1
+    return
+  fi
+  if ! awk "$VERIFY_GOES_ON" "$WORK/$dir/iyi/heap_verify.iyi" > "$WORK/$dir/heap_verify.iyi" ||
+     ! mv "$WORK/$dir/heap_verify.iyi" "$WORK/$dir/iyi/heap_verify.iyi"; then
+    echo "  $label: heap_verify.iyi's report_end is not where the copy looks for it"
     status=1
     return
   fi
@@ -107,7 +123,9 @@ prove_fails() { # label dir phrase awk-script file
     status=1
     return
   fi
-  printf '  %s: exits %s at "%s"\n' "$label" "$code" "$(grep -m1 "^FAIL: $phrase" "$WORK/$dir/out" | sed 's/^FAIL: //')"
+  local verifier="the verifier did not report"
+  grep -q "^iyi: heap_verify: going on" "$WORK/$dir/out" && verifier="the verifier reported too"
+  printf '  %s: exits %s at "%s" (%s)\n' "$label" "$code" "$(grep -m1 "^FAIL: $phrase" "$WORK/$dir/out" | sed 's/^FAIL: //')" "$verifier"
 }
 
 if [ "$PART" = all ] || [ "$PART" = broken ]; then
@@ -175,10 +193,17 @@ if [ "$PART" = all ] || [ "$PART" = broken ]; then
     heap_partition.iyi
 
   # A run of a dead unit to the pool with its `LOCAL` chunks left carved:
-  # a stale word naming one is a pointer to the global mark, which keeps
-  # what the dead chunk names.
+  # a stale word naming one passes the collector's root test, and a
+  # global mark would keep what the dead chunk names.
   prove_fails "a pooled run's dead chunks left carved" nostale "stale:" \
     '/^          free_locals_in\(arena, run, n\)$/ { found = found + 1; next } /^            drain_run\(arena, run, n\)$/ { print "            free_locals_in(arena, run, n)"; found = found + 1 } { print } END { if (found != 2) exit 3 }' \
+    heap_partition.iyi
+
+  # The publication walk's frontier test made of the word, not the
+  # chunk's head: a headed object whose chunk straddles its run's end,
+  # its address on the frontier, is taken for uncarved and stays local.
+  prove_fails "a frontier test of the word" nofrontier "frontier:" \
+    '/# The head against the frontier, not the word/ { print; getline; if (sub(/return 0_u64 if head >= read64\(arena &\+ OFF_HIGH\)$/, "return 0_u64 if word >= read64(arena \\&+ OFF_HIGH)")) found = 1 } { print } END { if (!found) exit 3 }' \
     heap_partition.iyi
 fi
 

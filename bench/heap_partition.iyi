@@ -10,7 +10,10 @@
 # - `records:` a partition's record (`IyiHeap.partition_new`) has an id of
 #   its own that maps back to it, a freed record is the next one handed
 #   out, ids run past one slab of 32, and no record is left live after the
-#   tasks that made them end.
+#   tasks that made them end. With partitions in the runtime each `:new`
+#   unit has a record of its own too, let go when the unit's last fiber
+#   leaves the registry (design section 4.4), which may come after its
+#   joiner has its answer: those are waited for, up to 2 s.
 # - `caches:` a live record is on the caches list the pause strips, as a
 #   thread's cache is, and a freed one is off it.
 # - `bracket:` `IyiHeap.within` installs its record's cache for the block
@@ -25,6 +28,13 @@
 #   they have ended.
 # - `kept:` every object a task allocated inside its record and kept
 #   across parks and collections still holds what it was built with.
+#   Without partitions in the runtime the tasks' allocation triggers the
+#   collections. With them (`-Dheap_partitions`) a unit's allocation
+#   never feeds the global trigger, and a record no unit owns is
+#   collected by the global collection alone (design section 4.2): each
+#   task asks for one every 65,536 rounds in its record, then runs its
+#   rounds again in its own unit's partition, where local collections
+#   (section 4.1) must run on their own.
 #
 # With no arguments it runs the checks on a pool of four workers and
 # prints one fixed line, as every bench program's bare run does on CI.
@@ -138,9 +148,38 @@
     end
   end
 
+  # A task's rounds of allocation in the cache *record* names, parking
+  # every eighth round and keeping a ring of objects, and a global
+  # collection asked for every *every* rounds when it is not 0. Answers
+  # how many objects read back wrong.
+  def ring_rounds(task : Int64, rounds : Int64, record : UInt64, every : Int64) : Int64
+    lost = 0_i64
+    ring = Array(Kept?).new(256, nil)
+    round = 0_i64
+    while round < rounds
+      id = task &* 1000000000_i64 &+ round
+      made = Kept.new(id, "k#{id}", [id, id &+ 1_i64, id &+ 2_i64])
+      lost = lost &+ 1_i64 unless made.intact?
+      ring[(round % 256_i64).to_i] = made
+      if round % 8_i64 == 0_i64
+        sleep(0)
+        fail("switch: task #{task} came back from a park on #{IyiHeap.installed_page}, not its record #{record}") unless IyiHeap.installed_page == record
+      end
+      IyiMark.collect if every != 0_i64 && round % every == every - 1_i64
+      round = round + 1_i64
+    end
+    ring.each do |kept|
+      lost = lost &+ 1_i64 if kept.is_a?(Kept) && !kept.intact?
+    end
+    lost
+  end
+
   # A unit's task: three fibers of its own unit parked on a channel while
   # the list is read, then a record of its own for ROUNDS rounds of
-  # allocation, parking every eighth round and keeping a ring of objects.
+  # allocation (`ring_rounds`). With partitions in the runtime the record
+  # feeds no trigger, so the task asks for the global collections itself,
+  # and then runs ROUNDS more in its unit's own partition, which collects
+  # itself.
   def unit_task(task : Int64, rounds : Int64) : Int64
     unit = IyiScheduler.current.unit
     fail("fibers: a :new task has no unit") unless unit.is_a?(IyiUnit)
@@ -162,25 +201,20 @@
     fail("fibers: the one fiber the unit lists is not its task") unless first.is_a?(IyiFiber) && first.object_id == me.object_id
     record = IyiHeap.partition_new
     lost = 0_i64
+    every = 0_i64
+    {% if flag?(:heap_partitions) %}
+      every = 65536_i64
+    {% end %}
     IyiHeap.within(record) do
-      ring = Array(Kept?).new(256, nil)
-      round = 0_i64
-      while round < rounds
-        id = task &* 1000000000_i64 &+ round
-        made = Kept.new(id, "k#{id}", [id, id &+ 1_i64, id &+ 2_i64])
-        lost = lost &+ 1_i64 unless made.intact?
-        ring[(round % 256_i64).to_i] = made
-        if round % 8_i64 == 0_i64
-          sleep(0)
-          fail("switch: task #{task} came back from a park on #{IyiHeap.installed_page}, not its record #{record}") unless IyiHeap.installed_page == record
-        end
-        round = round + 1_i64
-      end
-      ring.each do |kept|
-        lost = lost &+ 1_i64 if kept.is_a?(Kept) && !kept.intact?
-      end
+      lost = ring_rounds(task, rounds, record, every)
     end
     IyiHeap.partition_free(record)
+    {% if flag?(:heap_partitions) %}
+      own = unit.heap
+      fail("kept: task #{task}'s unit has no partition of its own") if own == 0_u64
+      fail("switch: task #{task} runs on #{IyiHeap.installed_page} outside its record, not its unit's partition #{own}") unless IyiHeap.installed_page == own
+      lost = lost &+ ring_rounds(task, rounds, own, 0_i64)
+    {% end %}
     lost
   end
 
@@ -194,6 +228,9 @@
   main_switch_check
   IyiWorkers.count = workers
   collections = IyiMark.collections
+  {% if flag?(:heap_partitions) %}
+    locals = IyiHeap.local_collections
+  {% end %}
   bad = 0_i64
   group do |g|
     handles = [] of IyiTask(Int64)
@@ -207,13 +244,32 @@
     end
   end
   fail("kept: #{bad} objects made inside a record read back wrong") unless bad == 0_i64
-  fail("records: #{IyiHeap.partitions_live} records live after every task freed its own") unless IyiHeap.partitions_live == 0_u64
+  {% if flag?(:heap_partitions) %}
+    waited = 0
+    while IyiHeap.partitions_live != 0_u64 && waited < 2000
+      sleep(1)
+      waited = waited + 1
+    end
+    fail("records: #{IyiHeap.partitions_live} records live 2 s after every task freed its own and every unit ended") unless IyiHeap.partitions_live == 0_u64
+  {% else %}
+    fail("records: #{IyiHeap.partitions_live} records live after every task freed its own") unless IyiHeap.partitions_live == 0_u64
+  {% end %}
   ran = IyiMark.collections - collections
-  fail("kept: no collection ran while the tasks allocated, so nothing was kept across one") if ran == 0_u64
+  {% if flag?(:heap_partitions) %}
+    fail("kept: no global collection ran while the tasks allocated in their records, though each asked for one every 65536 rounds") if ran == 0_u64
+    local = IyiHeap.local_collections - locals
+    fail("kept: no local collection ran while the tasks allocated in their units' own partitions, so nothing was kept across one") if local == 0_u64
+  {% else %}
+    fail("kept: no collection ran while the tasks allocated, so nothing was kept across one") if ran == 0_u64
+  {% end %}
   if quiet
     puts "heap partition: records, brackets, switches and unit fiber lists hold"
   else
-    puts "workers=#{workers} rounds=#{rounds} collections=#{ran}"
+    {% if flag?(:heap_partitions) %}
+      puts "workers=#{workers} rounds=#{rounds} collections=#{ran} local=#{local}"
+    {% else %}
+      puts "workers=#{workers} rounds=#{rounds} collections=#{ran}"
+    {% end %}
   end
 {% else %}
   puts "heap partition: no pool on this target, nothing to check"

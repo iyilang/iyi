@@ -83,11 +83,14 @@ class IyiHeap
   # bytes the last local collection kept; three tables mapped beside the
   # heap (lent graphs, weak cells, large objects: a word of capacity, a
   # word of count, then the entries); local collections of this
-  # partition; bytes of runs it holds; 1 while a local mark is under way
-  # or was abandoned, 0 once one ended whole (`local_collect_in`); and
-  # the return stacks, a word per class, which the global sweep pushes
-  # onto. The per-class run lists are the cache layout's fill slots
-  # (`FILL + index`): a record never carves.
+  # partition; bytes of runs it holds; 1 while a local collection is
+  # under way or ended before its sweep was whole - its mark abandoned,
+  # or its sweep stopped between two classes - 0 once one ended whole
+  # (`local_collect_in`); the return stacks, a word per class, which the
+  # global sweep pushes onto; and, past them, the runs local sweeps found
+  # empty, a chain through their run words, which go to the pool when a
+  # sweep ends whole (`pool_emptied`). The per-class run lists are the
+  # cache layout's fill slots (`FILL + index`): a record never carves.
   REC_PARITY      = 1376_u64
   REC_DEBT        = 1384_u64
   REC_BUDGET      = 1392_u64
@@ -99,6 +102,7 @@ class IyiHeap
   REC_HELD        = 1440_u64
   REC_MARKING     = 1448_u64
   REC_RETURN      = 1472_u64
+  REC_EMPTIED     = 2008_u64
 
   # A run table word, at a run's first granule: the link (48 bits), the
   # run's length in granules (12) and its state (4).
@@ -140,6 +144,9 @@ class IyiHeap
   @@abandon_next : Bool = false
   @@stop_sweep_record : UInt64 = 0_u64
   @@stop_sweep_after : Int32 = -1
+  @@hold_sweep_record : UInt64 = 0_u64
+  @@hold_sweep_after : Int32 = -1
+  @@hold_sweep_flags : UInt64 = 0_u64
   @@pause_ring : UInt64 = 0_u64
 
   # The last `PAUSE_RING` local collections' durations in ns, a ring
@@ -341,6 +348,36 @@ class IyiHeap
   # stopped by it yet.
   def self.local_sweep_stop_pending? : Bool
     @@stop_sweep_record != 0_u64
+  end
+
+  # A test's switch: partition *record*'s next local sweep, once it has
+  # swept class *index*, sets the word at *flags* to 1 and waits for the
+  # word after it before it goes on to the later classes - a whole sweep
+  # caught between two classes (bench/heap_local's `unswept:` check). A
+  # pause asked meanwhile, which would wait for this thread, or ten
+  # seconds, end the wait with the word at *flags* 2.
+  def self.hold_local_sweep(record : UInt64, index : Int32, flags : UInt64) : Nil
+    @@hold_sweep_flags = flags
+    @@hold_sweep_after = index
+    @@hold_sweep_record = record
+  end
+
+  def self.local_sweep_hold_pending? : Bool
+    @@hold_sweep_record != 0_u64
+  end
+
+  def self.held_sweep_waits : Nil
+    flags = @@hold_sweep_flags
+    Pointer(Atomic(UInt64)).new(flags).value.set(1_u64)
+    go_on = Pointer(Atomic(UInt64)).new(flags + 8_u64)
+    began = IyiMark.now_ns
+    while go_on.value.get == 0_u64
+      if stop_requested? || IyiMark.now_ns - began > 10_000_000_000_u64
+        Pointer(Atomic(UInt64)).new(flags).value.set(2_u64)
+        return
+      end
+      IyiMark.spin_pause
+    end
   end
 
   # The `OWN` byte of the chunk holding *address* - a large object's from
@@ -1812,8 +1849,17 @@ class IyiHeap
     # nothing is swept against a collection the mark did not see whole.
     return false if IyiMark.epoch != epoch || LibIyiGCTable.__iyi_marking != 0_u8
     {% if flag?(:heap_verify) %} return false unless IyiHeapVerify.check(record, id, parity, running) {% end %}
+    # The marks are trusted once the sweep has ended whole, not before. A
+    # sweep stopped between two classes leaves the classes after the stop
+    # unswept, their dead chunks carved and wearing the parity of the mark
+    # before this one - the next mark's. Trusted, that mark took them for
+    # reached and never opened them, so they outlived it, and what they
+    # name, dead with them, was freed under them (bench/heap_local's
+    # `unswept:` zombie, which the nounswept copy keeps). Cleared here,
+    # the next mark clears the bits first, as after an abandoned mark.
+    return false unless local_sweep(record, id, parity, idle)
     write64(record &+ REC_MARKING, 0_u64)
-    local_sweep(record, id, parity, idle)
+    true
   end
 
   # Every local mark bit of partition *record* - its runs' `OWN` bytes'
@@ -1981,12 +2027,24 @@ class IyiHeap
   # by class, each under its lock with no global slice on its arenas:
   # every run walked, its free and its dead chunks - `LOCAL`, without
   # this parity - its new list, its published ones counted, an empty run
-  # back to the pool unless it is the class's last and the unit is not
-  # *idle* (between two requests, an idle unit holds runs only where
-  # something lives); the return stack dropped, its chunks being free and
-  # found by the walk. Then the large objects, and the accounts. A stop
-  # asked between two classes ends it: what is swept is whole, and the
-  # rest waits for the next one.
+  # unlinked unless it is the class's last and the unit is not *idle*
+  # (between two requests, an idle unit holds runs only where something
+  # lives); the return stack dropped, its chunks being free and found by
+  # the walk. Then the large objects, the accounts, and the empty runs to
+  # the pool. A stop asked between two classes ends it: what is swept is
+  # whole, and the rest waits for the next one.
+  #
+  # The empty runs wait for the sweep's end because, until it ends, the
+  # classes it has not reached still hold dead chunks carved, and what
+  # they name in the classes it swept is free: a run of those taken off
+  # the pool by another unit puts that unit's objects under the dead
+  # words, which the other unit's `-Dheap_verify` check reads as holders,
+  # and which a stale conservative word reviving the dead object would
+  # make a real cross-unit pointer. In #145's app under `-Dheap_verify
+  # -Diyi_chaos` at stress 0, another unit took such a run 230 to 1,437
+  # times a run (seeds 1-3, Linux, CrossFix2's count), and 0 times once
+  # the runs waited. A stop between two classes widens the same window.
+  # Once a sweep ends whole, nothing dead is left to name them.
   def self.local_sweep(record : UInt64, id : UInt64, parity : UInt64, idle : Bool) : Bool
     table = Pointer(UInt64).new(record)
     kept_bytes = 0_u64
@@ -2012,15 +2070,15 @@ class IyiHeap
           swept = sweep_run(arena, run, n, parity, list)
           live = swept[0]
           if live == 0 && (idle || following != 0 || previous != 0)
-            # Empty, and not the class's last or the unit idle: to the
-            # pool, unlinked.
+            # Empty, and not the class's last or the unit idle: unlinked,
+            # onto the emptied runs.
             if previous == 0
               write64(runs, following)
             else
               set_run_link(previous, following)
             end
-            pool_run(index, arena, run, n)
-            write64(record &+ REC_HELD, read64(record &+ REC_HELD) - n.unsafe_shl(GRANULE_SHIFT))
+            set_run_word(arena, granule_first, read64(record &+ REC_EMPTIED), n, RUN_OWNED)
+            write64(record &+ REC_EMPTIED, run)
           else
             list = swept[1]
             previous = run
@@ -2035,6 +2093,10 @@ class IyiHeap
           @@stop_sweep_record = 0_u64
           return false
         end
+        if record == @@hold_sweep_record && index == @@hold_sweep_after
+          @@hold_sweep_record = 0_u64
+          held_sweep_waits
+        end
       end
       index = index + 1
     end
@@ -2043,9 +2105,12 @@ class IyiHeap
     # under the runtime lock, whose spin parks for a pause: the pause's
     # own sweep of the large list takes what it frees off this table
     # (`IyiMark.sweep_large`), and under a mark beside the program a large
-    # object stays mapped, as `free` leaves it, for the global sweep.
+    # object stays mapped, as `free` leaves it, for the global sweep. One
+    # left so is dead and still names what the classes freed: the sweep
+    # did not end whole.
     large = record &+ REC_LARGE
     {% if flag?(:heap_verify) %} weak_to_large(record, id, parity, false) {% end %}
+    whole = true
     if table_count(large) != 0
       lock
       marking = LibIyiGCTable.__iyi_marking != 0_u8
@@ -2053,13 +2118,15 @@ class IyiHeap
       while k < table_count(large)
         node = table_at(large, k)
         flags = read64(node + 16_u64).unsafe_shr(16_u64)
-        if !marking && flags & OWN_PUB == 0 && flags & OWN_LMARK != parity
+        dead = flags & OWN_PUB == 0 && flags & OWN_LMARK != parity
+        if dead && !marking
           table_set(large, k, table_at(large, table_count(large) - 1_u64))
           table_truncate(large, table_count(large) - 1_u64)
           free_large(node + LARGE_HEAD)
           freed = freed + 1_u64
           IyiStat.add(IyiStat::LARGE_FREED, 1_u64)
         else
+          whole = false if dead
           kept_bytes = kept_bytes + read64(node + OFF_MAP)
           k = k + 1_u64
         end
@@ -2070,7 +2137,53 @@ class IyiHeap
     account_live(record, kept_bytes)
     write64(record &+ REC_DEBT, 0_u64)
     write64(record &+ REC_COLLECTIONS, read64(record &+ REC_COLLECTIONS) + 1_u64)
+    return false unless whole
+    pool_emptied(record, true)
     true
+  end
+
+  # Partition *record*'s emptied runs to their classes' pools, its held
+  # bytes less theirs, once nothing dead of it names their chunks: a
+  # sweep ended whole, or every `LOCAL` chunk freed at its death. A stop
+  # asked while a run waits for a global slice on its arena leaves it
+  # and the rest for the next whole sweep, when *abortable*.
+  def self.pool_emptied(record : UInt64, abortable : Bool) : Nil
+    run = read64(record &+ REC_EMPTIED)
+    while run != 0
+      arena = run & (0_u64 &- MAP)
+      granule_first = granule_of(arena, run)
+      word = run_word(arena, granule_first)
+      n = run_n(word)
+      index = class_index(read64(arena + OFF_CHUNK))
+      class_lock(index)
+      unless quiet(index, arena, abortable)
+        write64(record &+ REC_EMPTIED, run)
+        return
+      end
+      pool_run(index, arena, run, n)
+      class_unlock(index)
+      write64(record &+ REC_HELD, read64(record &+ REC_HELD) - n.unsafe_shl(GRANULE_SHIFT))
+      run = word & RUN_LINK
+    end
+    write64(record &+ REC_EMPTIED, 0_u64)
+  end
+
+  # Partition *record*'s emptied runs to the shared heap (`drain_run`),
+  # for its sweep to pool: a partition handed over whole, or one whose
+  # dead large object outlived its death.
+  def self.drain_emptied(record : UInt64) : Nil
+    run = read64(record &+ REC_EMPTIED)
+    while run != 0
+      arena = run & (0_u64 &- MAP)
+      word = run_word(arena, granule_of(arena, run))
+      index = class_index(read64(arena + OFF_CHUNK))
+      class_lock(index)
+      quiet(index, arena, false)
+      drain_run(arena, run, run_n(word))
+      class_unlock(index)
+      run = word & RUN_LINK
+    end
+    write64(record &+ REC_EMPTIED, 0_u64)
   end
 
   # One run of a local sweep: answers its live chunks, the new list (the
@@ -2438,7 +2551,10 @@ class IyiHeap
 
   # Every run of *record* to the pool or the shared heap, class by class
   # (`partition_death`); the record's lists and return stacks are dropped
-  # with it, their chunks being free on runs that are nobody's now.
+  # with it, their chunks being free on runs that are nobody's now. The
+  # runs for the pool go with the emptied ones once every class's `LOCAL`
+  # chunks are free, for the local sweep's reason: a dead chunk of a
+  # later class still names those of the run.
   def self.free_whole(record : UInt64, id : UInt64) : Nil
     clear_dead_weak(record, id)
     {% if flag?(:heap_verify) %} weak_to_large(record, id, 0_u64, true) {% end %}
@@ -2471,7 +2587,8 @@ class IyiHeap
           # section 2.3: a stale word is rejected because the chunk is free.
           free_locals_in(arena, run, n)
           if published == 0
-            pool_run(index, arena, run, n)
+            set_run_word(arena, granule_first, read64(record &+ REC_EMPTIED), n, RUN_OWNED)
+            write64(record &+ REC_EMPTIED, run)
             IyiStat.add(IyiStat::FREED_WHOLE, 1_u64)
           else
             drain_run(arena, run, n)
@@ -2485,20 +2602,30 @@ class IyiHeap
     end
     # The large objects under the runtime lock, as the local sweep reads
     # them: a published one, or any under a mark beside the program, the
-    # shared heap's; a `LOCAL` one unmapped.
+    # shared heap's; a `LOCAL` one unmapped. A `LOCAL` one left mapped
+    # names what the classes freed, so the runs go to the shared heap,
+    # whose sweep pools them after the mark now running has left it white.
     large = record &+ REC_LARGE
+    held = false
     if table_count(large) != 0
       lock
       while table_count(large) != 0
         node = table_at(large, table_count(large) - 1_u64)
         table_truncate(large, table_count(large) - 1_u64)
-        if read64(node + 16_u64).unsafe_shr(16_u64) & OWN_PUB != 0 || LibIyiGCTable.__iyi_marking != 0_u8
+        out = read64(node + 16_u64).unsafe_shr(16_u64) & OWN_PUB != 0
+        if out || LibIyiGCTable.__iyi_marking != 0_u8
+          held = true unless out
           write64(node + 16_u64, 0_u64)
         else
           free_large(node + LARGE_HEAD)
         end
       end
       unlock
+    end
+    if held
+      drain_emptied(record)
+    else
+      pool_emptied(record, false)
     end
   end
 
@@ -2569,6 +2696,7 @@ class IyiHeap
       end
       index = index + 1
     end
+    drain_emptied(record)
     large = record &+ REC_LARGE
     k = 0_u64
     while k < table_count(large)
@@ -2648,6 +2776,27 @@ class IyiHeap
         k = k + 1_u64
       end
       write64(into &+ REC_HELD, read64(into &+ REC_HELD) + read64(from &+ REC_HELD))
+      # *from*'s emptied runs *into*'s, to pool when *into*'s sweep ends
+      # whole: *from*'s dead chunks, *into*'s now, may name theirs.
+      run = read64(from &+ REC_EMPTIED)
+      while run != 0
+        arena = run & (0_u64 &- MAP)
+        granule_first = granule_of(arena, run)
+        word = run_word(arena, granule_first)
+        n = run_n(word)
+        index = class_index(read64(arena + OFF_CHUNK))
+        class_lock(index)
+        quiet(index, arena, false)
+        k = 0_u64
+        while k < n
+          set_owner_at(arena, granule_first + k, into_id)
+          k = k + 1_u64
+        end
+        set_run_word(arena, granule_first, read64(into &+ REC_EMPTIED), n, RUN_OWNED)
+        write64(into &+ REC_EMPTIED, run)
+        class_unlock(index)
+        run = word & RUN_LINK
+      end
       # *from*'s chunks wear *from*'s parities, which mean nothing to
       # *into*'s marks: its next one clears them first.
       write64(into &+ REC_MARKING, 1_u64)

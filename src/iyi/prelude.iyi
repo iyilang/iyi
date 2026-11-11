@@ -10490,6 +10490,10 @@ require "./file"
     IDLE_CURSOR      = 132_u64
     IDLE_DONE_TICK   = 133_u64
     IDLE_SEEN        = 134_u64
+    # Local sweeps that kept every run (heap_partition.iyi, `local_sweep`'s
+    # *keep*), and the bytes of runs with nothing live those sweeps kept.
+    LOCAL_KEPT        = 135_u64
+    LOCAL_SPARE_BYTES = 136_u64
 
     # A thread's own page's slots.
     OWN_EPOCH_SEEN   = 0_u64

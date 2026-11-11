@@ -72,6 +72,13 @@
 #   within 3 s, their lists whole after, and some partition holds less.
 # - `inflight:` a unit that allocates past its budget without parking is
 #   collected in flight, its live list whole.
+# - `kept:` a unit's parks collect keeping its runs, in rounds of garbage
+#   that global collections hand back on its return stack every other
+#   round: the list it keeps reads whole after 40 rounds, and it holds no
+#   more than twice what it held after five.
+# - `spare:` a unit whose park's collection kept runs with nothing live on
+#   them sits parked: an idle worker collects it whole within 3 s and it
+#   holds less after.
 # - `abandon:` a unit's local mark is abandoned 256 objects into its
 #   list, as a stop asked there abandons one; the list's far links are
 #   then each handed a new object, and after the next collection every
@@ -1857,6 +1864,129 @@
     IyiHeap.collect_every_park = true
   end
 
+  # ── kept ──────────────────────────────────────────────────────────────
+
+  # Garbage in chains of fifty, 3,000 nodes, in a frame of its own.
+  def kept_junk : Int64
+    junk : Node? = nil
+    i = 0
+    while i < 3000
+      junk = Node.new(i.to_i64, i % 50 == 0 ? nil : junk)
+      i = i + 1
+    end
+    junk.is_a?(Node) ? 1_i64 : 0_i64
+  end
+
+  # A unit's own collections keep its runs (`IyiHeap.local_sweep`'s
+  # *keep*): each lists what it frees ahead of the list as it stands,
+  # and leaves a chunk free already - on that list, or on the return
+  # stack the global sweep pushed it onto - where it is. Rounds of
+  # garbage, 25 nodes kept a round, and every other round two global
+  # collections, so that the garbage comes back on the return stack
+  # before the park's collection. The kept list reads whole - a sweep
+  # that listed a free chunk once more hands it out twice - and the unit
+  # holds no more after 40 rounds than twice what it held after five - a
+  # sweep that dropped the return stack, as the whole sweep does, lost
+  # what was on it. Answers the bytes held past that, or minus the nodes
+  # that read wrong.
+  def kept_task : Int64
+    record = IyiHeap.current_record
+    base = 9000000000_i64
+    keep : Node? = nil
+    count = 0
+    first = 0_u64
+    round = 0
+    while round < 40
+      kept_junk
+      i = 0
+      while i < 25
+        keep = Node.new(base &+ count.to_i64, keep)
+        count = count + 1
+        i = i + 1
+      end
+      if round % 2 == 0
+        IyiMark.collect
+        IyiMark.collect
+      end
+      # A park, a collection that keeps.
+      sleep(0)
+      first = IyiHeap.partition_held(record) if round == 4
+      round = round + 1
+    end
+    wrong = broken(keep, base, count)
+    return -wrong if wrong != 0
+    past = IyiHeap.partition_held(record).to_i64 - (first * 2_u64).to_i64
+    past > 0_i64 ? past : 0_i64
+  end
+
+  def kept_check : Nil
+    kept = IyiHeap.local_kept_sweeps
+    returned = IyiHeap.returned_chunks
+    group do |g|
+      handle = g.spawn(unit: :new) { kept_task }
+      value = handle.value
+      if value.is_a?(Int64)
+        fail("kept: #{-value} nodes of the kept list read wrong") if value < 0_i64
+        fail("kept: the unit holds #{value} bytes of runs past twice what it held after five rounds") if value > 0_i64
+      else
+        fail("kept: the unit answered #{value}")
+      end
+    end
+    fail("kept: no local sweep kept its runs") if IyiHeap.local_kept_sweeps == kept
+    fail("kept: the global sweep handed no chunk back to a partition") if IyiHeap.returned_chunks == returned
+  end
+
+  # ── spare ─────────────────────────────────────────────────────────────
+
+  # Garbage first, so its runs hold none of the list (`idle_task`), then
+  # a list; parked, its park's collection keeps the garbage's runs.
+  def spare_task(ready : Channel(UInt64), go : Channel(Int64)) : Int64
+    base = 9500000000_i64
+    idle_junk
+    keep = build(base, 200, 0)
+    ready.send(IyiHeap.current_record)
+    go.receive
+    broken(keep, base, 200)
+  end
+
+  # A unit whose park's collection kept runs with nothing live on them
+  # (`IyiHeap.partition_spare`) is dirty to the idle workers: parked, an
+  # idle worker collects it whole, and those runs go back to the pool.
+  # Under `IYI_HEAP_STRESS` a collection at a chaos point may have given
+  # them back before the park, which then keeps none.
+  def spare_check : Nil
+    stressed = {% if flag?(:heap_verify) %} IyiHeapVerify.stress != 0_u64 {% else %} false {% end %}
+    ready = Channel(UInt64).new(1)
+    go = Channel(Int64).new(1)
+    group do |g|
+      handle = g.spawn(unit: :new) { spare_task(ready, go) }
+      got = ready.receive
+      record = got.is_a?(UInt64) ? got : 0_u64
+      fail("spare: the unit sent no record") if record == 0_u64
+      waited = 0
+      while IyiHeap.partition_spare(record) == 0_u64 && waited < 3000
+        sleep(1)
+        waited = waited + 1
+      end
+      spare = IyiHeap.partition_spare(record)
+      held = IyiHeap.partition_held(record)
+      fail("spare: the park's collection kept no run with nothing live on it") if spare == 0_u64 && !stressed
+      waited = 0
+      while IyiHeap.partition_spare(record) != 0_u64 && waited < 3000
+        sleep(1)
+        waited = waited + 1
+      end
+      left = IyiHeap.partition_spare(record)
+      after = IyiHeap.partition_held(record)
+      go.send(1_i64)
+      value = handle.value
+      fail("spare: the unit answered #{value}") unless value.is_a?(Int64)
+      fail("spare: #{value} nodes of a parked unit's list read wrong") if value != 0_i64
+      fail("spare: a parked unit kept #{left} bytes of runs with nothing live on them 3 s after its park") if left != 0_u64
+      fail("spare: the unit held #{after} bytes after its idle collection, #{held} before") if spare != 0_u64 && after >= held
+    end
+  end
+
   Checks.read_env
   arguments = Program.args
   quiet = arguments.empty?
@@ -1868,7 +1998,12 @@
   # In this order, so that each broken copy of bench/heap_local.sh meets
   # its own check before any other could notice it: `abandon` first, as
   # a real stop abandons local marks in any check that collects, then
-  # `unswept`, before `weak` stops a sweep of its own; `detach`
+  # `return`, whose noreturn copy's lost chunks `kept` would see grow the
+  # unit, then `kept`, before every check whose parks collect meets a
+  # kept sweep's broken list, then `unswept`, before `weak` stops a
+  # sweep of its own;
+  # `spare` after `takeover` and `idle`, whose copies break the idle
+  # worker's collection that `spare` waits for; `detach`
   # before `answer`, whose units hold detached partitions until they die:
   # the nodetach copy ended at `answer:` once (Linux, 933b4d005); `weak`
   # before `frontier`, whose weak cells are cleared by the same sweep: the
@@ -1881,6 +2016,8 @@
     idle_check(workers)
   else
     abandon_check
+    return_check
+    kept_check
     unswept_check
     weak_check
     frontier_check
@@ -1888,7 +2025,6 @@
     stale_check
     fresh_check
     free_check
-    return_check
     detach_check
     answer_check(workers)
     adopt_check
@@ -1900,6 +2036,7 @@
     takeover_check(workers)
     construct_check
     idle_check(workers)
+    spare_check
     inflight_check
     settle("death")
   end

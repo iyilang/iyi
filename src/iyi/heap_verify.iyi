@@ -355,29 +355,16 @@ class IyiHeapVerify
     end
   end
 
-  # After a local sweep: the free lists hold free chunks of the
-  # partition's own runs, each once, and no weak cell names a chunk it
-  # freed.
+  # After a local sweep: every free chunk of the partition's runs on its
+  # free list or its return stack, each once, and nothing else on them
+  # (`lost_free`); no weak cell names a chunk it freed. A sweep that keeps
+  # its runs lists only what it frees, ahead of the list as it stood
+  # (`IyiHeap.local_sweep`): one that listed a chunk free already once
+  # more, or dropped the return stack the full sweep drops, is caught
+  # here.
   def self.after_sweep(record : UInt64) : Nil
     id = IyiHeap.read64(record &+ IyiHeap::REC_ID)
-    table = Pointer(UInt64).new(record)
-    index = 0
-    while index < IyiHeap::CLASSES
-      head = table[index]
-      if head != 0
-        set = IyiVerifySet.new
-        steps = 0_u64
-        while head != 0 && steps < 16777216_u64
-          listed_bad(id, head, "a chunk on the partition's free list") unless own_free?(id, head)
-          listed_twice(id, head, "the partition's free list") if set.includes?(head)
-          set.add(head)
-          head = IyiHeap.read64(head + IyiHeap::OFF_LINK)
-          steps = steps + 1_u64
-        end
-        set.free
-      end
-      index = index + 1
-    end
+    lost_free(record, id)
     weak_cells(id)
   end
 

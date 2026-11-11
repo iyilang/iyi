@@ -3043,12 +3043,18 @@ initialisation and only reads (compress, hpack, zstd, tls, time,
 system_roots, base64, json, dns, mime, mail, autocert), and 42 on caches
 built whole by their class variables' initializers as the module starts
 (digest, mlkem, p256, curve25519, ecdsa, password, mime, and unicode's
-30 tables). Two are `@[UnsafeReach]`: std/http's default TLS
+30 tables). Three are `@[UnsafeReach]`: std/http's default TLS
 configuration, which `HTTP.tls_config=` replaces after publishing it,
-and std/tls's system roots, read at the first handshake that needs them
-and stored once. The runtime carries 23, on the scheduler's, the
-threads', the console's and the environment's state (concurrency.iyi 15,
-io.iyi 3, prelude.iyi 4, thread.iyi 1). `samples/iyi/cores.iyi`'s
+std/tls's system roots, read at the first handshake that needs them
+and stored once, and std/random's `Random::PerThread::ONE`, the object
+the class-level draws go through, whose draws step the drawing thread's
+own `@[ThreadLocal]` PCG words (one generator every thread shared
+raced), unproven because a proven claim would make every program that
+imports std/random pay for the proof's walk. The runtime carries 25, on
+the scheduler's, the threads', the console's and the environment's
+state and, under `-Diyi_chaos`, the chaos scheduler's root unit and
+candidate list (concurrency.iyi 15, io.iyi 3, prelude.iyi 4, chaos.iyi
+2, thread.iyi 1). `samples/iyi/cores.iyi`'s
 `GREETING` and `bench/spawn_eligible.sh`'s `LIMITS` are proven by (c), as
 is `bench/parallel_exercise.sh`'s `Database`, which now builds its rows in
 `initialize` and is only read after. `bench/reuse_integrity.iyi` keeps its

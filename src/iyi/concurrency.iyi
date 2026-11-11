@@ -2067,6 +2067,24 @@ class IyiScheduler
     @@all_head
   end
 
+  # Whether the registry holds *fiber*: it is the head or has a fiber
+  # before it. Asked under the lock, because both words are other threads'
+  # to rewrite as they link and unlink their own fibers. Read without it,
+  # the head before a neighbour's unregister made this fiber the head and
+  # the back link after that unregister cleared it, the answer was no for
+  # a fiber the registry held, and `retire_thread` left the main fiber on
+  # the list, naming a stack that was gone: on an M2 Pro, waves of 16
+  # threads ending together left one in 59 of 8,000 waves (0.21.0), and
+  # `thread_exercise` named it in 1 of 24 runs. Only the asking thread
+  # links or unlinks the fiber it asks about, so the answer holds after.
+  def self.registered?(fiber : IyiFiber) : Bool
+    IyiRuntimeLock.lock
+    head = @@all_head
+    held = fiber.prev_fiber.is_a?(IyiFiber) || (head.is_a?(IyiFiber) && head.object_id == fiber.object_id)
+    IyiRuntimeLock.unlock
+    held
+  end
+
   # A thread's last act with the scheduler: its main fiber leaves the
   # registry, because its stack is about to. A spawned fiber leaves when
   # it is reaped; the main fiber was made by the first `current` on the
@@ -2079,7 +2097,8 @@ class IyiScheduler
   # collector, which no handler of ours claims, and the process died of
   # it with nothing printed (`thread_exercise`, once in sixty runs there).
   # Only a fiber the registry holds is unlinked - `unregister` of one it
-  # does not would rewrite the head.
+  # does not would rewrite the head - and whether it does is asked under
+  # the lock (`registered?`).
   #
   # And what the scheduler made for the thread goes with it: the poller,
   # Windows' deadline timer, the stacks in the pool, and the state on the
@@ -2093,9 +2112,7 @@ class IyiScheduler
     return if state.is_a?(Nil)
     main = state.current
     if main.is_a?(IyiFiber)
-      head = @@all_head
-      linked = main.prev_fiber.is_a?(IyiFiber) || (head.is_a?(IyiFiber) && head.object_id == main.object_id)
-      unregister(main) if linked
+      unregister(main) if registered?(main)
     end
     reap_dying
     # Off the roots' list first, under the scheduler's lock as well as the
@@ -5264,12 +5281,7 @@ class IyiScheduler
     fiber.joining = nil
     group.join(true) if group.is_a?(IyiGroup) && !again
 
-    while true
-      node = fiber.defers
-      break unless node.is_a?(IyiDeferNode)
-      fiber.defers = node.next_node
-      node.run
-    end
+    drain_defers(fiber)
 
     body = fiber.proc
     if body.is_a?(Nil)
@@ -5293,6 +5305,27 @@ class IyiScheduler
     __iyi_exit(1)
   end
 
+  # The fiber's cleanups run innermost first, each taken off the list
+  # before it runs: a panic's path, a cancelled task's stop, `exit`. Under
+  # `-Dheap_partitions` each node's link is taken down as it leaves, as
+  # `__iyi_defer_pop_run` does: a node may be the shared heap's - a
+  # `Mutex`'s release node, one a lock block's `defer` made - over a
+  # cleanup made in the unit's partition, and its link named that cleanup
+  # after the drain had made it garbage and the unit's collection or death
+  # freed it, with the Mutex still live (bench/heap_crossings `defer_drain`,
+  # `defer_stop`: `-Dheap_verify`'s death check, exit 86).
+  def self.drain_defers(fiber : IyiFiber) : Nil
+    while true
+      node = fiber.defers
+      break unless node.is_a?(IyiDeferNode)
+      fiber.defers = node.next_node
+      {% if flag?(:heap_partitions) %}
+        node.next_node = nil
+      {% end %}
+      node.run
+    end
+  end
+
   # III.4.2's other ending: a cancelled task stopped where no answer can
   # carry its `Cancelled`, `Channel.select` with no bound arm for one. Its
   # pending defers run innermost first, as a panic's do, and its group
@@ -5304,12 +5337,7 @@ class IyiScheduler
   # group's join waited forever.
   def self.stop_current : NoReturn
     fiber = current
-    while true
-      node = fiber.defers
-      break unless node.is_a?(IyiDeferNode)
-      fiber.defers = node.next_node
-      node.run
-    end
+    drain_defers(fiber)
     g = fiber.group
     IyiSchedLock.lock
     if g.is_a?(IyiGroup)
@@ -6859,7 +6887,9 @@ end
 # at a lock, with nothing registered below it, read the node and never
 # write it: written each time, it was one more line passed between their
 # cores with the lock's own. A panic's drain leaves the link, which the
-# next push puts right.
+# next push puts right - without `-Dheap_partitions`: with them the drain
+# takes it down (`IyiScheduler.drain_defers`), since the node may be the
+# shared heap's and the one below it the unit's.
 def __iyi_defer_push_node(node : IyiDeferNode) : Nil
   fiber = IyiScheduler.current
   below = fiber.defers
@@ -6907,12 +6937,7 @@ end
 def exit(status : Int32 = 0) : NoReturn
   fiber = IyiScheduler.current
   IyiScheduler.exiting = true
-  while true
-    node = fiber.defers
-    break unless node.is_a?(IyiDeferNode)
-    fiber.defers = node.next_node
-    node.run
-  end
+  IyiScheduler.drain_defers(fiber)
   __iyi_flush_std
   __iyi_exit(status)
 end
@@ -7043,9 +7068,9 @@ class IyiHeap
     {% end %}
   end
 
-  # The lend protocol of an owning type (`@[Share(owns: true, lends:
-  # true)]`): *graph* taken by the running unit, and handed back - its
-  # `LOCAL` chunks published, the mutable middle of the graph walked.
+  # The lend protocol of an owning type (`lends: true`): *graph* taken by
+  # the running unit (once, however often lent), and handed back - walked
+  # and published if lent, nothing to do if not (checked: -Dheap_verify).
   def self.lend_in(graph) : Nil
     {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) %}
       lend_in_address(graph.object_id)
@@ -7307,12 +7332,24 @@ class IyiGroup
   # `Share`) and its answer to what `Mutex#get`'s is (`Share`, since it
   # leaves the unit while the unit lives on).
   def spawn(*, in owner : Unit(S), &block : S -> T) : IyiTask(T) forall S, T
+    {% if flag?(:heap_partitions) %}
+      # Never taken: types the pinned instance the cleanup points a call at when its block must run in the shared heap (heap22 `pinned:`, S6).
+      return spawn_in(owner, pinned: true, &block) if false
+    {% end %}
+    spawn_in(owner, pinned: false, &block)
+  end
+
+  # `spawn(in:)`'s body. *pinned*: the compiler's, when the block reaches
+  # an owning type without `lends:` (heap22 `pinned:`, contract §5 S6
+  # amendment): the task pins *owner*'s unit before it runs the block, and
+  # the unit allocates in the shared heap for the rest of its life.
+  private def spawn_in(owner : Unit(S), *, pinned : Bool, &block : S -> T) : IyiTask(T) forall S, T
     # The block's captures cross into the Unit's unit (heap22 row 1d), and
     # `work`, which another unit's fiber runs, is made in the shared heap.
     # Named outside the `{% if %}`: a block parameter read only inside one
     # is not captured.
     IyiCross.publish(block)
-    work = IyiCross.shared { unit_work(block, owner) }
+    work = IyiCross.shared { unit_work(block, owner, pinned) }
     {% if flag?(:gc_none) || flag?(:gc_boehm) %}
       # One thread: every task is a unit-mate of every other already.
       in_unit(&work)
@@ -7329,8 +7366,11 @@ class IyiGroup
   # the unit while the unit lives on, so it is published here, before
   # `IyiTask#finish` stores it (heap22 row 2b). It names the handle, never
   # the value: a body kept past a dead handle would name the freed value.
-  private def unit_work(block : S -> T, owner : Unit(S)) : Proc(T) forall S, T
+  # A pinned one pins the unit first (`IyiHeap.pin`, a no-op without
+  # partitions or once the unit is pinned).
+  private def unit_work(block : S -> T, owner : Unit(S), pinned : Bool) : Proc(T) forall S, T
     -> {
+      IyiHeap.pin if pinned
       answer = block.call(owner.iyi_value)
       IyiCross.publish(answer)
       answer
@@ -7589,6 +7629,16 @@ class IyiGroup
     end
     @ended = true
     me.open_group = @outer
+    {% if flag?(:heap_partitions) %}
+      # Taken down now that the owner's list is past it: a group opened in
+      # a bracket - a lock block, a constant's initializer - is the shared
+      # heap's, its `outer` the unit's own group, and kept it named that
+      # group after its scope had ended and the unit's collection freed it
+      # (bench/heap_crossings `group_outer`: exit 86). A cancel walks the
+      # owner's list under this lock, from `open_group`, which no longer
+      # leads here.
+      @outer = nil
+    {% end %}
     # The boundary owes a re-raise for any panic *nobody read*: a bug
     # observed through its handle already became a `Panicked` value
     # there, and re-raising it too would report one bug twice. The

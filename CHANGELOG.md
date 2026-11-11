@@ -35,6 +35,22 @@ registers, whose stale `r8` had kept a 64 MB string received through a
 rendezvous alive (tssh: 5 of 5 runs kept 61 MiB before, 5 of 5 clean
 after).
 
+A parallel unit reaching module state that is not Share through the code
+it calls is a compile error (SPEC.md III.4.5), std's and the prelude's
+state included, where 0.21 warned; `iyi fix` adds the `@[SafeReach]` the
+compiler proves, in the file that declares the state. Each std module's
+state is proven once, over all of its code, when the build that writes its
+`.iyimod` runs, and every importer reuses that proof (Linux, the proof's
+stage: web_cores 0.517 s cold, 0.179 s warm; std_http_exercise 0.457 s
+cold, 0.153 s warm). An initialiser first run by a read before its
+declaration is born in the shared heap under `-Dheap_partitions`.
+`TlsConfig#trusted_roots` answers a copy of the system roots, and a failed
+system-root load is retried at the next handshake rather than kept.
+`Random.rand` and the other class-level draws use one PCG-32 stream per
+thread, seeded from the operating system at that thread's first draw; one
+generator shared by every thread raced, and two threads could draw the
+same number.
+
 Two races older than heap22, in every build: units setting or deleting
 environment variables at once lost them (tmac, 6 units × 300 rounds at
 `IYI_WORKERS=4`: 261-301 of 1,800 reads of their own write lost); writers
@@ -27804,7 +27820,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 28,806-line library and nothing else. Every other
+  written against iyi's own 33,705-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

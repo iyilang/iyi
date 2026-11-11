@@ -50,13 +50,21 @@
   # caught by `-Dheap_verify`'s verifier alone.
   class Checks
     @@print_only = false
+    @@base = 0_u64
 
     def self.print_only : Bool
       @@print_only
     end
 
-    def self.read_env : Nil
+    # The partitions live before the first check, which `settled` waits
+    # for the count to come back to.
+    def self.base : UInt64
+      @@base
+    end
+
+    def self.start : Nil
       @@print_only = Program.env("HEAP22_PRINT_ONLY") == "1"
+      @@base = partitions_now
     end
   end
 
@@ -265,14 +273,23 @@
     {% end %}
   end
 
-  # The check's units dead, each death checked under `-Dheap_verify`.
-  def settled(before : UInt64, what : String) : Nil
+  # Every unit the program started dead, each death checked under
+  # `-Dheap_verify`, its lends published (`partition_death`) before the
+  # count drops. The count is the program's, not the check's: a group
+  # returns when its last fiber ends, before the unit's death runs, so a
+  # unit of an earlier check may still be dying when the next check
+  # starts, and its death would take the count below the check's own
+  # starting point while the check's unit is still alive. A stressed
+  # death is long enough for that: under chaos with `IYI_HEAP_STRESS=1`
+  # the `death` check read its chain before its unit's death had
+  # published it.
+  def settled(what : String) : Nil
     waited = 0
-    while partitions_now > before && waited < 5000
+    while partitions_now > Checks.base && waited < 5000
       sleep(1)
       waited = waited + 1
     end
-    fail("#{what}: #{partitions_now - before} partitions still live 5 s after the check's units ended") if partitions_now > before
+    fail("#{what}: #{partitions_now - Checks.base} partitions still live 5 s after the check's units ended") if partitions_now > Checks.base
   end
 
   # An address kept where no local collection looks.
@@ -309,7 +326,6 @@
 
   # ── lend: held through a local collection, published at the hand-back ──
   def lend_check : Nil
-    before = partitions_now
     desk = Desk.new(1)
     group do |g|
       g.spawn(unit: :new) do
@@ -323,13 +339,12 @@
         0
       end
     end
-    settled(before, "lend")
+    settled("lend")
     read_back(desk, 1, "lend")
   end
 
   # ── unlent: handed back with no collection between ────────────────────
   def unlent_check : Nil
-    before = partitions_now
     desk = Desk.new(1)
     group do |g|
       g.spawn(unit: :new) do
@@ -341,13 +356,12 @@
         0
       end
     end
-    settled(before, "unlent")
+    settled("unlent")
     read_back(desk, 2, "unlent")
   end
 
   # ── death: a unit that dies holding a lend ────────────────────────────
   def death_check : Nil
-    before = partitions_now
     desk = Desk.new(1)
     group do |g|
       g.spawn(unit: :new) do
@@ -358,7 +372,7 @@
         0
       end
     end
-    settled(before, "death")
+    settled("death")
     slot = Pointer(Void).new(Stash.take).as(Slot)
     published(slot.res.items.first?, "death")
     check_chain(slot.res.items.first?, 3, "death: read after its unit died")
@@ -377,7 +391,6 @@
   end
 
   def root_check : Nil
-    before = partitions_now
     group do |g|
       g.spawn(unit: :new) do
         lend_own(4)
@@ -385,7 +398,7 @@
         0
       end
     end
-    settled(before, "root")
+    settled("root")
     res = Pointer(Void).new(Stash.take).as(Res)
     published(res.items.first?, "root")
     check_chain(res.items.first?, 4, "root: read after its unit died")
@@ -400,7 +413,6 @@
   end
 
   def mutex_check : Nil
-    before = partitions_now
     desk = Desk.new(1)
     group do |g|
       g.spawn(unit: :new) do
@@ -411,7 +423,7 @@
         0
       end
     end
-    settled(before, "mutex")
+    settled("mutex")
     group do |g|
       g.spawn(unit: :new) do
         slot = desk.take
@@ -432,7 +444,6 @@
   end
 
   def foreign_check : Nil
-    before = partitions_now
     desk = Desk.new(1)
     made = Atomic(UInt64).new(0_u64)
     go = Channel(Int32).new(1)
@@ -463,7 +474,7 @@
         0
       end
     end
-    settled(before, "foreign")
+    settled("foreign")
     read_back(desk, 6, "foreign")
   end
 
@@ -502,7 +513,6 @@
   end
 
   def defer_check : Nil
-    before = partitions_now
     m = Mutex.new { 0 }
     group do |g|
       g.spawn(unit: :new) do
@@ -510,7 +520,7 @@
         0
       end
     end
-    settled(before, "defer")
+    settled("defer")
   end
 
   # ── pool: units take and give back resources, rounds of them ──────────
@@ -523,7 +533,6 @@
   end
 
   def pool_check : Nil
-    before = partitions_now
     desk = Desk.new(3)
     group do |g|
       6.times do |u|
@@ -542,7 +551,7 @@
         end
       end
     end
-    settled(before, "pool")
+    settled("pool")
     desk.each_res do |res|
       res.items.each { |item| check_chain(item, seed_of(item), "pool: read from the main thread") }
     end
@@ -564,7 +573,7 @@
     end
   end
 
-  Checks.read_env
+  Checks.start
   IyiWorkers.count = 4
   arguments = Program.args
   if arguments.empty?

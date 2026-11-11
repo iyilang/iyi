@@ -316,6 +316,15 @@ class IyiHeapVerify
       IyiRuntimeLock.unlock
     end
     scan_everything(record, id, parity, false)
+    # Every heap word went through this scan's frames, and a slot of theirs
+    # is dead stack once it returns, not cleared: an idle worker's takeover
+    # ran it on the thread's own stack, the thread then waited in the
+    # kernel (`wait_for_events`), and the system DLL's frames over that
+    # stretch left one slot unwritten, 0xa8 above the stopped thread's
+    # stack pointer, that the global collector read as a root naming a
+    # live 64 MB string (tssh, concurrency_exercise 16e at stress 0: "61
+    # MiB kept", -Dheap_verify builds only).
+    IyiRoots.clear_dead_stack
     if @@trace
       say("iyi: heap_verify: partition ")
       say_dec(id)
@@ -335,6 +344,7 @@ class IyiHeapVerify
     stat(pointerof(@@death_checks).address)
     @@epoch_seen = IyiMark.epoch
     scan_everything(record, id, 0_u64, true)
+    IyiRoots.clear_dead_stack
     if @@trace
       say("iyi: heap_verify: partition ")
       say_dec(id)

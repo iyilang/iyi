@@ -1370,12 +1370,18 @@
   # sweep is stopped once it has swept `Node`'s class, so the node is
   # freed and its run empty while the `Far` is left carved. Answers the
   # hidden node and whether its run stopped being the partition's then.
+  # The stack below this frame is scrubbed before the sweep: the calls
+  # that made the `Far` and read the node's class leave both addresses
+  # there, and `stopped_sweep`'s frame lies over them, its slots unwritten
+  # (win64's home area): an optimised build kept the node through them.
   def unswept_run(record : UInt64) : Tuple(UInt64, Int64)
     id = IyiHeap.read64(record + IyiHeap::REC_ID)
     box = Array(Far?).new(1, nil)
     hidden = far_over_nodes(box)
     box[0] = nil
-    return {hidden, -3_i64} unless stopped_sweep(record, hidden_class(hidden))
+    index = hidden_class(hidden)
+    scrub_stack
+    return {hidden, -3_i64} unless stopped_sweep(record, index)
     return {hidden, -4_i64} unless hidden_free?(hidden)
     {hidden, hidden_owner(hidden) == id ? 0_i64 : 1_i64}
   end

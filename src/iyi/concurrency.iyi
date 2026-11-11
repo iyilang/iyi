@@ -2750,6 +2750,11 @@ class IyiScheduler
         switch_to(fiber)
         return
       end
+      # Nothing to run here: a thread held to link itself late may now
+      # (`IYI_CHAOS_LATE_THREADS`).
+      {% if flag?(:iyi_chaos) %}
+        IyiChaos.at_idle
+      {% end %}
       if @@shared
         wait_shared(st)
       else

@@ -5737,6 +5737,16 @@ and a hash of every choice made as it ends:
 iyi chaos: seed 6, random walk 1 in 2, 13 points, 6 preemptions, 4 choices, schedule 2f3a4336168015eb
 ```
 
+With `IYI_CHAOS_LATE_THREADS` set on one worker, a thread the program
+starts that links itself into the thread list (on darwin, and on Linux
+when libc makes it) waits to do so until the program's thread has nothing
+left to run, or has passed 1,024 points and back-edges since the start.
+That is as late as an OS may let a new thread in, made the same on every
+seed. `bench/std_mutex_exercise.sh` runs its wait-beside-a-starting-thread
+shape under it, so the copy of `Mutex.alone?` that counts only the
+list is caught on every seed on darwin. Left to the OS, tmac caught it
+on seeds 5 to 7 of 1 to 8.
+
 **2. What a seed chooses.** With one worker every task runs on the
 program's one thread, and the seed decides the schedule
 (`src/iyi/chaos.iyi`):

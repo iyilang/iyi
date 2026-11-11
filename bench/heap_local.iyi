@@ -33,6 +33,14 @@
 #   allocates; the chunk still holds what the main thread wrote in it.
 # - `filter:` a unit's local collection with another unit's object
 #   address on its stack leaves that object's `OWN` byte as it was.
+# - `frontier:` a unit allocates 16-byte strings until one is the last
+#   chunk of a run off the carve frontier with its head below the run's
+#   end and its address on it; published, it is not `LOCAL` any more.
+#   Another drops four such strings, each with a weak cell, and collects:
+#   no cell names a chunk the collection freed.
+# - `stale:` a dead unit's object, on a run that went to the pool whole,
+#   is no object to a stale word: the collector's root test
+#   (`IyiRoots.base_of`) rejects its address.
 # - `return:` with local collections off, a unit's garbage is freed by
 #   global collections alone and comes back to it: the runs it holds stay
 #   bounded and the return stacks hand chunks back. One local collection
@@ -44,6 +52,9 @@
 #   back whole across local collections, dropped ones are unmapped.
 # - `takeover:` units parked with debt are collected by idle workers after
 #   a global collection, their lists whole after.
+# - `construct:` a unit with no fiber and no value slot - a `Unit`'s value
+#   being built by `Unit.new` on its caller's fiber - in debt after a
+#   global collection is taken by no idle worker; the list reads whole.
 # - `inflight:` a unit that allocates past its budget without parking is
 #   collected in flight, its live list whole.
 # - `abandon:` a unit's local mark is abandoned 256 objects into its
@@ -54,6 +65,8 @@
 
 @[Unsafe("the checks read freed chunks, weak cells and large blocks through raw pointers, hand a shared-heap address to free, and zero the stack under them through pointerof and an empty asm, to see what the partitions did with them")]
 {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
+  import std/unit::{Unit}
+
   # `HEAP22_PRINT_ONLY=1`: a failed check prints its `FAIL:` line and the
   # program goes on, so that bench/heap_verify.sh can show a broken copy
   # caught by `-Dheap_verify`'s verifier alone.
@@ -447,10 +460,14 @@
   # ── detach ────────────────────────────────────────────────────────────
 
   # A list built in the unit's partition and answered into a box of the
-  # shared heap, as `IyiTask#finish` answers, in a frame of its own.
+  # shared heap, in a frame of its own: the store and the look
+  # `IyiTask#finish` takes after it (`IyiHeap.answer`), the look called by
+  # itself, so the copy that drops it from `answer` (noanswer) passes here
+  # and meets `answer:`.
   @[NoInline]
   def stash_answer(box : Array(Node?)) : Nil
-    IyiHeap.answer(box, build(3000000000_i64, 300, 0))
+    box << build(3000000000_i64, 300, 0)
+    IyiHeap.answered(box.object_id, box.to_unsafe.address, 8_u64)
   end
 
   # The answered list is reachable only from the shared box, which no
@@ -542,6 +559,140 @@
     Holder.kept = nil
   end
 
+  # ── frontier ──────────────────────────────────────────────────────────
+
+  # A run taken off its class's frontier ends on a granule line and moves
+  # the frontier (`OFF_HIGH`) there, but its last chunk may straddle the
+  # line: with 40-byte chunks the head of one in five run ends lies 8
+  # bytes below it, and a headed object's address - a `String`'s - is
+  # then the line itself. The publication walk tested that address
+  # against the frontier, took the chunk for uncarved and left it `LOCAL`
+  # under its published referrer, and the unit's death freed it while
+  # another held it: heap_crossings' node 20 label read another label
+  # (HS4b, `channel channel`, simulated chaos, IYI_HEAP_STRESS=1, seeds
+  # 3, 6 and 8, Linux). Every string is kept, so the unit's runs come off
+  # the frontier and not off its own free list. Answers the allocation
+  # that met such a chunk, -1 if it stayed local, -2 if none came in a
+  # million.
+  def frontier_task : Int64
+    kept = [] of String
+    i = 0
+    while i < 1000000
+      text = "y" * 16
+      kept << text
+      address = text.object_id
+      arena = IyiHeap.arena_of(address)
+      if arena != 0_u64
+        high = IyiHeap.arena_high(arena)
+        if IyiHeap.head_of(arena, address) < high && address >= high
+          IyiHeap.publish(address)
+          return IyiHeap.local?(address) ? -1_i64 : i.to_i64
+        end
+      end
+      i = i + 1
+    end
+    -2_i64
+  end
+
+  # Weak cells to the first four 16-byte strings met whose chunks
+  # straddle their runs' ends, each string dropped, in a frame of their
+  # own; the strings between are kept, so the runs come off the frontier.
+  @[NoInline]
+  def straddling_cells(kept : Array(String), cells : Array(Pointer(UInt64))) : Nil
+    i = 0
+    while i < 1000000 && cells.size < 4
+      text = "z" * 16
+      address = text.object_id
+      arena = IyiHeap.arena_of(address)
+      if arena != 0_u64 && IyiHeap.head_of(arena, address) < IyiHeap.arena_high(arena) && address >= IyiHeap.arena_high(arena)
+        cells << IyiWeak.cell(address)
+      else
+        kept << text
+      end
+      i = i + 1
+    end
+  end
+
+  # The weak cell of such a string is the partition's to clear: the
+  # chunk's owner registers it (`IyiHeap.weak_registered`, through
+  # `owner_in_arena`) and the local sweep that frees the chunk clears it
+  # (`sweep_weak`). Both tested the address against the frontier before
+  # f383934c7, which would leave the cell naming the freed chunk.
+  # A cell that still names a live chunk is a string a stale word kept,
+  # which is no failure. Answers how many of the strings were freed with
+  # their cells cleared, -1 if a cell names a freed chunk, -2 if no
+  # string in a million straddled, -3 if no local collection ran.
+  def frontier_weak_task : Int64
+    kept = [] of String
+    cells = [] of Pointer(UInt64)
+    straddling_cells(kept, cells)
+    return -2_i64 if cells.empty?
+    scrub_stack
+    return -3_i64 unless collect_now
+    cleared = 0_i64
+    cells.each do |cell|
+      word = cell.value
+      return -1_i64 if word != 0_u64 && IyiRoots.base_of(word) == 0_u64
+      cleared = cleared &+ 1_i64 if word == 0_u64
+    end
+    cleared
+  end
+
+  def frontier_check : Nil
+    group do |g|
+      handle = g.spawn(unit: :new) { frontier_task }
+      value = handle.value
+      fail("frontier: the unit answered #{value}") unless value.is_a?(Int64)
+      fail("frontier: a published string whose chunk straddles its run's end, its address on the carve frontier, is still local") if value == -1_i64
+      fail("frontier: no string in a million was a run's last chunk with its address on the frontier") if value == -2_i64
+      weak = g.spawn(unit: :new) { frontier_weak_task }.value
+      fail("frontier: the weak unit answered #{weak}") unless weak.is_a?(Int64)
+      fail("frontier: a weak cell to a dropped string whose chunk straddles its run's end names the chunk its unit's collection freed") if weak == -1_i64
+      fail("frontier: no string in a million was a run's last chunk with its address on the frontier, for the weak cells") if weak == -2_i64
+      fail("frontier: no local collection ran in 100 tries, for the weak cells") if weak == -3_i64
+      fail("frontier: none of four dropped strings on the frontier was freed by their unit's collection") if weak == 0_i64
+    end
+    settle("frontier")
+  end
+
+  # ── stale ─────────────────────────────────────────────────────────────
+
+  # A unit's object that dies with it, on a run with nothing published
+  # that goes to the pool whole. A stale word naming it - a register or a
+  # frame can leave one - must be no pointer to a global mark, which
+  # would read the dead object's fields and keep what they name: its
+  # chunk reads free (design section 2.3), and `IyiRoots.base_of`
+  # answers 0. A pooled chunk left carved kept a dead select's 64 MB
+  # string in bench/concurrency_exercise (tmac, tssh). An earlier form
+  # asked whether two collections freed a 4 MB string such an object
+  # held: a word naming the string itself kept it on tmac's release
+  # build with the fix in, and the copy without the fix freed it on
+  # Linux, so it tested neither; the root test is the mechanism.
+  class Wrap
+    getter text : String
+
+    def initialize(@text : String)
+    end
+  end
+
+  def stale_task : UInt64
+    wrap = Wrap.new("stale " + "x" * 20)
+    hide(wrap.object_id)
+  end
+
+  def stale_check : Nil
+    hidden = 0_u64
+    group do |g|
+      handle = g.spawn(unit: :new) { stale_task }
+      value = handle.value
+      fail("stale: the unit answered #{value}") unless value.is_a?(UInt64)
+      hidden = value
+    end
+    settle("stale")
+    base = IyiRoots.base_of(hide(hidden))
+    fail("stale: a dead unit's object on a pooled run is still an object to a stale word (base 0x#{base.to_s(16)})") if base != 0_u64
+  end
+
   # ── free ──────────────────────────────────────────────────────────────
 
   def free_task(address : UInt64) : Int64
@@ -596,10 +747,19 @@
     group do |g|
       b = g.spawn(unit: :new) do
         mine = Node.new(31337_i64, nil)
+        record = IyiHeap.current_record
+        collections = IyiHeap.partition_collections(record)
         before = IyiHeap.own_flags(mine.object_id)
         to_a.send(mine.object_id)
         to_b.receive
         after = IyiHeap.own_flags(mine.object_id)
+        # B's own collections meanwhile - a chaos build's `IYI_HEAP_STRESS`
+        # runs one at every point - mark `mine` with B's parity: only the
+        # local-mark bits may move then, and to B's own parity.
+        if IyiHeap.partition_collections(record) != collections
+          rest = 0xFF_u64 ^ IyiHeap::OWN_LMARK
+          before = (before & rest) | IyiHeap.read64(record + IyiHeap::REC_PARITY) if after & rest == before & rest
+        end
         mine.intact?(31337_i64) ? (after == before ? 0_i64 : after.to_i64 * 1000_i64 + before.to_i64 + 1_i64) : -1_i64
       end
       a = g.spawn(unit: :new) do
@@ -807,6 +967,58 @@
     IyiHeap.collect_every_park = true
   end
 
+  # ── construct ─────────────────────────────────────────────────────────
+
+  # A `Unit`'s value under construction (`Unit.new` builds it in the
+  # unit's partition with `IyiHeap.within`): this fiber is no fiber of
+  # the unit and holds no token, and its stack is the list's only root.
+  # The debt is past a quarter of the budget and a global collection arms
+  # the takeover; idle workers are woken until one takes a unit or 300
+  # tries pass. None may take this one. Its partition dies by the hook
+  # `IyiScheduler.unregister` calls, as a `Unit`'s does once its handle
+  # is gone.
+  def construct_check : Nil
+    IyiHeap.park_collections_off = true
+    IyiHeap.collect_every_park = false
+    takeovers = IyiHeap.takeovers
+    unit = IyiHeap.shared { IyiUnit.new }
+    record = unit.heap
+    fail("construct: the unit has no partition") if record == 0_u64
+    wrong = IyiHeap.within(record) do
+      base = 9000000000_i64
+      keep = build(base, 300, 0)
+      junk : Node? = nil
+      i = 0
+      while i < 6000
+        junk = Node.new(i.to_i64, i % 50 == 0 ? nil : junk)
+        i = i + 1
+      end
+      junk = nil
+      IyiMark.collect
+      waited = 0
+      group do |g|
+        while IyiHeap.takeovers == takeovers && waited < 300
+          g.spawn(unit: :new) { 0_i64 }.value
+          sleep(1)
+          waited = waited + 1
+        end
+      end
+      # The count before the walk: a unit taken under construction was
+      # collected with this stack unread, and the copy that lets the
+      # takeover walked the freed list into a memory fault rather than
+      # reaching this check (tssh, 933b4d005).
+      IyiHeap.takeovers != takeovers ? -1_i64 : broken(keep, base, 300)
+    end
+    fail("construct: an idle worker took a unit with no fiber and no value slot") if IyiHeap.takeovers != takeovers
+    fail("construct: an idle worker collected a unit whose value was being built, and #{wrong} nodes of it read wrong") if wrong != 0_i64
+    IyiRuntimeLock.lock
+    unit.heap = 0_u64
+    IyiRuntimeLock.unlock
+    IyiHeap.unit_died(record)
+    IyiHeap.park_collections_off = false
+    IyiHeap.collect_every_park = true
+  end
+
   # ── inflight ──────────────────────────────────────────────────────────
 
   def inflight_task : Int64
@@ -846,13 +1058,17 @@
   IyiHeap.collect_every_park = true
   # In this order, so that each broken copy of bench/heap_local.sh meets
   # its own check before any other could notice it: `abandon` first, as
-  # a real stop abandons local marks in any check that collects.
+  # a real stop abandons local marks in any check that collects; `detach`
+  # before `answer`, whose units hold detached partitions until they die:
+  # the nodetach copy ended at `answer:` once (Linux, 933b4d005).
   abandon_check
+  frontier_check
   filter_check
+  stale_check
   free_check
   return_check
-  answer_check(workers)
   detach_check
+  answer_check(workers)
   pin_check
   poison_check
   graphs_check(workers, rounds)
@@ -860,6 +1076,7 @@
   weak_check
   large_check
   takeover_check(workers)
+  construct_check
   inflight_check
   settle("death")
   if quiet

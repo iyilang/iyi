@@ -34,6 +34,7 @@
   import std/reference_storage::{ReferenceStorage}
   import std/env::{ENV}
   import std/tls::{TlsIdentity}
+  import std/socket::{IyiSocket}
 
   # `HEAP22_PRINT_ONLY=1`: a failed check prints its `FAIL:` line and the
   # program goes on, so that bench/heap_verify.sh can show a broken copy
@@ -883,13 +884,76 @@
     fail("tls: schemes lends its array") unless identity.schemes.size == schemes.size - 1
   end
 
+  # ── A close posted to another thread's poller (the scheduler's glue) ───
+  # A unit that closes a descriptor a fiber of another thread waits on
+  # posts the close to that thread (`IyiScheduler.wake_closed`), in a list
+  # the other thread's state holds until it takes its mail. The other
+  # thread here spins, taking no mail, until the closer has looked at the
+  # list and collected its own partition. Windows posts no list: a close
+  # ends the posted operation, whose packet any thread takes.
+  def closed_list(owner : UInt64, what : String) : Nil
+    {% if flag?(:heap_partitions) %}
+      return unless IyiScheduler.shared?
+      if owner == 0_u64
+        fail("#{what}: the acceptor's descriptor is in no thread's poller")
+        return
+      end
+      list = Pointer(Void).new(owner).as(IyiSchedulerState).closed_fds
+      if list.is_a?(Array(Int32))
+        fail("#{what}: the list of closes was made in the closer's partition") if IyiHeap.local?(list.object_id)
+        fail("#{what}: the list's buffer was made in the closer's partition") if IyiHeap.local?(list.to_unsafe.address)
+      else
+        fail("#{what}: no close was posted to the acceptor's thread")
+      end
+    {% end %}
+  end
+
+  def closed_check : Nil
+    {% if !flag?(:win32) %}
+      listening = Atomic(Int32).new(-1)
+      done = Atomic(Int32).new(0)
+      thread = IyiThread.start do
+        server = IyiSocket.listen("127.0.0.1", 0)
+        group do |g|
+          g.spawn(unit: :same) do
+            server.accept
+            0
+          end
+          # The acceptor parks in this thread's poller, then this fiber
+          # spins, so the close the unit posts waits in this thread's state.
+          sleep(20)
+          listening.set(server.fd)
+          until done.get == 1
+          end
+          server.close
+        end
+        nil
+      end
+      group do |outer|
+        outer.spawn(unit: :new) do
+          while listening.get < 0
+            sleep(1)
+          end
+          fd = listening.get
+          owner = IyiScheduler.io_owner_of(fd * 2)
+          wake_closed(fd)
+          closed_list(owner, "closed")
+          collect_here
+          done.set(1)
+          0
+        end
+      end
+      thread.join
+    {% end %}
+  end
+
   TLS_ROOT = "308201183081cba003020102020101300506032b657030143112301006035504030c0946757a7a20526f6f74301e170d3235303130313030303030305a170d3435303130313030303030305a30143112301006035504030c0946757a7a20526f6f74302a300506032b65700321001494a1cac4481d11b3723830767cce21261aaca39cbd624c5b4d51b3163e8382a3423040301d0603551d0e0416041497ae92205c7302b9b25c2c7219607c7f767904fc300f0603551d130101ff040530030101ff300e0603551d0f0101ff040403020106300506032b657003410081f88cec5b495303ce00ae5a18679fc9d43fc5c2d3a86fd3ff7dd265fd1f1a20f053fe81ae0db33be74fff0cb487b516fc7e489253e914000ec818988635e607"
   TLS_LEAF = "3082016e30820120a003020102020102300506032b657030143112301006035504030c0946757a7a20526f6f74301e170d3235303130313030303030305a170d3435303130313030303030305a30143112301006035504030c0966757a7a2e74657374302a300506032b65700321007fc71c44df1a089f4322e5a7dd03ef64fed0164490819aa2236ea7d4b552c8fba38196308193301d0603551d0e04160414d2780a2e2b99d3a1c8d027b498befbae72ebcdf2301f0603551d2304183016801497ae92205c7302b9b25c2c7219607c7f767904fc300c0603551d130101ff04023000300e0603551d0f0101ff040403020780301d0603551d250416301406082b0601050507030106082b0601050507030230140603551d11040d300b820966757a7a2e74657374300506032b6570034100b6c428830f0b30218d3fe05a43c4b2110f9797356a58d361c0ebc499910287ea3dc5ebc7260c117d8258db51ee3ed2a7c125a0f1f6cf3fb42032f4543ae65b08"
   TLS_SEED = "3c9cb8fdef08086c92abb13f615fcbd54466dac12a3a363db6fb289ef88bc7a2"
 
   CHECKS = ["spawn", "thread", "in", "answer", "unit_answer", "channel", "select", "ring",
             "unit_new", "mutex_capture", "mutex_bracket", "mutex_new", "panic", "shared_proc",
-            "box", "malloc", "storage", "env", "glue", "list", "tls"]
+            "box", "malloc", "storage", "env", "glue", "list", "tls", "closed"]
 
   def run(name : String) : Nil
     case name
@@ -914,6 +978,7 @@
     when "glue"          then glue_check
     when "list"          then list_check
     when "tls"           then tls_check
+    when "closed"        then closed_check
     else                      fail("no check named #{name}")
     end
   end

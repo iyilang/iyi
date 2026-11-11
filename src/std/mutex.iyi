@@ -470,10 +470,12 @@ pub class Mutex(T)
     # The program's one thread, with nothing on it to run but the waiting
     # task: no task runnable, asleep or waiting on I/O, and none another
     # thread has woken into its inbox (SPEC.md III.4.13). Nothing can
-    # release or change the value then.
+    # release or change the value then. A thread started and not yet
+    # running is another thread (`IyiThread.others_started?`): counted by
+    # the threads' list alone, a darwin thread was not there until it ran.
     protected def self.alone? : Bool
       {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
-        return false if IyiThread.program_threads > 1_u64
+        return false if IyiThread.others_started?
       {% end %}
       st = IyiScheduler.state
       busy = !st.run_head.nil? || !st.sleep_head.nil? || !st.io_head.nil? || st.mail?

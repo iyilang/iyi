@@ -11690,13 +11690,18 @@ end
     end
   end
 
+  # Read and installed as an atomic word. A writer fills a new table and
+  # then installs it, and a reader on another thread walks whichever table
+  # it finds, with no lock (std/env). With a plain store arm64 may make the
+  # install visible to another core before the entries written into the
+  # table: the architecture allows it, no run has shown it.
   def __iyi_environ : UInt8**
-    LibIyiEnv.environ
+    Pointer(UInt8*).new(Pointer(Atomic(UInt64)).new(pointerof(LibIyiEnv.environ).address).value.get)
   end
 
   def __iyi_set_environ(entries : UInt8**) : Nil
     IyiEnvironTable.hold(entries)
-    LibIyiEnv.environ = entries
+    Pointer(Atomic(UInt64)).new(pointerof(LibIyiEnv.environ).address).value.set(entries.address)
     nil
   end
 {% end %}

@@ -586,9 +586,24 @@
   # the budget is floored at MIN_BUDGET for every registered thread
   # (`IyiMark.next_budget`), and the lists' own 150,000 nodes each no
   # longer crossed a pool's floor - no stop at all on four workers.
+  #
+  # With partitions in the runtime (`-Dheap_partitions`) each task
+  # allocates in its unit's own partition, which never feeds the global
+  # trigger (heap22 design, section 4.2) and is collected by the unit
+  # itself, no thread stopped (section 4.1). There local collections must
+  # have run by the time all eight have built their lists, and the step
+  # then asks for a global collection itself, which stops the workers
+  # while the eight hold their lists parked, before they count them.
   def collector(watch : Int32) : Nil
     watched("collector", watch) do
       stops = IyiThread.stops
+      {% if flag?(:heap_partitions) %}
+        locals = IyiHeap.local_collections
+        built = Channel(Int64).new
+        go = Channel(Int64).new
+        own = 0_i64
+        held = 0_u64
+      {% end %}
       group do |g|
         handles = [] of IyiTask(Int64)
         8.times do |t|
@@ -609,6 +624,10 @@
               garbage = garbage + 64_u64
             end
             sleep(1)
+            {% if flag?(:heap_partitions) %}
+              built.send(IyiScheduler.current.alloc != 0_u64 ? 1_i64 : 0_i64)
+              go.receive
+            {% end %}
             have = 0_i64
             node = head
             while node.is_a?(Node)
@@ -619,13 +638,28 @@
           end
           handles << task
         end
+        {% if flag?(:heap_partitions) %}
+          8.times do
+            answer = built.receive
+            own = own &+ answer if answer.is_a?(Int64)
+          end
+          held = IyiHeap.local_collections - locals
+          fail("collector: #{own} of 8 parallel tasks built their lists in partitions of their own, and no local collection ran") if own != 0_i64 && held == 0_u64
+          IyiMark.collect
+          8.times { go.send(1_i64) }
+        {% end %}
         handles.each_with_index do |handle, t|
           lost = handle.value
           fail("collector: task #{t}'s list lost #{lost} by checksum") unless lost == 0_i64
         end
       end
-      fail("collector: no collection stopped a thread while 8 parallel tasks allocated, #{IyiThread.program_threads} threads registered under a #{IyiMark.budget}-byte budget") if IyiThread.stops == stops
-      puts "collector: 8 parallel tasks kept lists of 150000 nodes through #{IyiThread.stops - stops} stops, #{IyiThread.program_threads} threads registered under a #{IyiMark.budget}-byte budget"
+      {% if flag?(:heap_partitions) %}
+        fail("collector: no collection stopped a thread while 8 parallel tasks held their lists, #{IyiThread.program_threads} threads registered") if IyiThread.stops == stops
+        puts "collector: 8 parallel tasks kept lists of 150000 nodes, #{own} in partitions of their own, through #{held} local collections and #{IyiThread.stops - stops} stops, #{IyiThread.program_threads} threads registered"
+      {% else %}
+        fail("collector: no collection stopped a thread while 8 parallel tasks allocated, #{IyiThread.program_threads} threads registered under a #{IyiMark.budget}-byte budget") if IyiThread.stops == stops
+        puts "collector: 8 parallel tasks kept lists of 150000 nodes through #{IyiThread.stops - stops} stops, #{IyiThread.program_threads} threads registered under a #{IyiMark.budget}-byte budget"
+      {% end %}
     end
   end
 

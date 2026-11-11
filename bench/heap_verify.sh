@@ -75,16 +75,18 @@ status=0
 TABLE="$WORK/table"
 : >"$TABLE"
 
-# build DIR SOURCE [IYI_PATH]: the program and its type dump in DIR.
+# build DIR SOURCE [IYI_PATH [COMPILER_ENV]]: the program and its type dump
+# in DIR; COMPILER_ENV (`NAME=value`, heap_crossings.sh's seventh argument)
+# is the compiler's environment, `IYI_SPAWN_BROKEN=` when not given.
 build() {
-  local dir="$1" source="$2" path="${3:-}"
+  local dir="$1" source="$2" path="${3:-}" compiler_env="${4:-IYI_SPAWN_BROKEN=}"
   mkdir -p "$dir"
   # shellcheck disable=SC2086
   if [ -n "$path" ]; then
-    IYI_DUMP_TYPE_INFO="$dir/types.json" IYI_PATH="$path" "$IYI" build $FLAGS \
+    env "$compiler_env" IYI_DUMP_TYPE_INFO="$dir/types.json" IYI_PATH="$path" "$IYI" build $FLAGS \
       -o "$dir/program" "$source" >"$dir/build.log" 2>&1
   else
-    IYI_DUMP_TYPE_INFO="$dir/types.json" "$IYI" build $FLAGS \
+    env "$compiler_env" IYI_DUMP_TYPE_INFO="$dir/types.json" "$IYI" build $FLAGS \
       -o "$dir/program" "$source" >"$dir/build.log" 2>&1
   fi
 }
@@ -195,18 +197,22 @@ chosen() {
   [ -z "${ONLY:-}" ] || [[ ",$ONLY," == *",$1,"* ]]
 }
 
-# heap_crossings.sh's interface: label dir check-name awk-script tree file.
+# heap_crossings.sh's interface: label dir check-name awk-script tree file
+# [compiler-env]. Both trees are copied, whichever one the copy changes, as
+# heap_crossings.sh does: the compiler takes a file for std's only where
+# its directory's parent holds `iyi/prelude.iyi`, and a std copy alone was
+# a program module, whose Mutex rows' spawns ran pinned and were missed.
 prove_caught() {
-  local label="$1" dir="$2" check="$3" script="$4" tree="$5" file="$6"
+  local label="$1" dir="$2" check="$3" script="$4" tree="$5" file="$6" compiler_env="${7:-IYI_SPAWN_BROKEN=}"
   chosen "$dir" || return 0
-  mkdir -p "$WORK/$dir/$tree"
-  cp -R "$REPO/src/$tree/." "$WORK/$dir/$tree/"
+  mkdir -p "$WORK/$dir"
+  cp -R "$REPO/src/iyi" "$REPO/src/std" "$WORK/$dir/"
   if ! awk "$script" "$REPO/src/$tree/$file" >"$WORK/$dir/$tree/$file"; then
     echo "  $label: what the copy changes is not in $tree/$file any more"
     status=1
     return
   fi
-  if ! build "$WORK/$dir/b" "$REPO/bench/heap_crossings.iyi" "$WORK/$dir${PSEP}$REPO/src"; then
+  if ! build "$WORK/$dir/b" "$REPO/bench/heap_crossings.iyi" "$WORK/$dir${PSEP}$REPO/src" "$compiler_env"; then
     echo "  $label: the patched tree did not build"
     sed -n '1,12p' "$WORK/$dir/b/build.log"
     status=1

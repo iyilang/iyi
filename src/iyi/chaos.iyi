@@ -637,6 +637,11 @@ class IyiScheduler
   # `wake_on` with the waiters chosen from the stream: up to *count* of
   # those parked on *word*, each drawn from the ones left, readied in the
   # order drawn. A draw of 0 each time is the plain wake's oldest-first.
+  # The ones left are counted and the drawn one found by walking the
+  # bucket, not gathered into an array: an array made here is the
+  # waker's partition's, and names waiters of other units (heap22), which
+  # the verifier reads as a foreign partition's chunk held from this one
+  # once their unit dies.
   def self.chaos_wake_on(word : Pointer(Atomic(UInt64)), count : Int32) : Nil
     heads = @@lot_heads
     tails = @@lot_tails
@@ -644,23 +649,24 @@ class IyiScheduler
     bucket = lot_bucket(word.address)
     lock = lot_lock(bucket)
     IyiChanLock.lock(lock)
-    parked = [] of IyiWaiter
+    left = 0
     node = heads[bucket]
     while node.is_a?(IyiWaiter)
-      parked << node if node.slot == word.address
+      left = left + 1 if node.slot == word.address
       node = node.next_node
     end
     woken = 0
     chain : IyiFiber? = nil
     last : IyiFiber? = nil
-    while woken < count && parked.size > 0
-      index = IyiChaos.below(parked.size)
-      chosen = parked[index]
-      while index + 1 < parked.size
-        parked[index] = parked[index + 1]
-        index = index + 1
+    while woken < count && left > 0
+      index = IyiChaos.below(left)
+      chosen = heads[bucket]
+      while chosen.is_a?(IyiWaiter) && (chosen.slot != word.address || index > 0)
+        index = index - 1 if chosen.slot == word.address
+        chosen = chosen.next_node
       end
-      parked.pop
+      break unless chosen.is_a?(IyiWaiter)
+      left = left - 1
       lot_unlink(heads, tails, bucket, chosen)
       if chosen.claim
         fiber = chosen.fiber

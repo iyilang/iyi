@@ -2587,6 +2587,12 @@ require "./file"
       @@record_free : UInt64 = 0_u64
       @@records_live : UInt64 = 0_u64
 
+      # Whether the program ever made a partition: the shared heap's
+      # budget follows the flag's rule from then on (`IyiMark.next_budget`).
+      def self.partitions_made? : Bool
+        @@record_slabs != 0_u64
+      end
+
       # A zeroed record with an id of its own, on the caches list.
       def self.partition_new : UInt64
         per_slab = PARTITION_SLAB // PARTITION_BYTES
@@ -8154,12 +8160,19 @@ require "./file"
         # floored at `SHARED_MIN` and no longer multiplied by allocating
         # threads - lock blocks allocate in the shared heap on every
         # worker, and the old floor would count every one of them again.
+        # Until the program makes its first partition the budget is the
+        # build's without the flag: a program with no pool unit (the main
+        # thread, `IyiThread`s) has no lock blocks on workers to count, and
+        # `SHARED_MIN` alone halved its collections - churn's peak RSS 6.6
+        # to 10.8 MB (tmac), JsonGenerate 1.036 of the build without it.
         {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
-          partitioned = partition_survived
-          shared = survived > partitioned ? survived - partitioned : 0_u64
-          allocating_threads
-          grown_shared = shared.unsafe_div(100_u64) * IyiStat.get(IyiStat::GROWTH)
-          return grown_shared < IyiHeap::SHARED_MIN ? IyiHeap::SHARED_MIN : grown_shared
+          if IyiHeap.partitions_made?
+            partitioned = partition_survived
+            shared = survived > partitioned ? survived - partitioned : 0_u64
+            allocating_threads
+            grown_shared = shared.unsafe_div(100_u64) * IyiStat.get(IyiStat::GROWTH)
+            return grown_shared < IyiHeap::SHARED_MIN ? IyiHeap::SHARED_MIN : grown_shared
+          end
         {% end %}
         grown = survived.unsafe_div(100_u64) * IyiStat.get(IyiStat::GROWTH)
         floor = MIN_BUDGET

@@ -6014,6 +6014,8 @@ describe "Semantic: iyi" do
         it "follows a kept literal that calls its def's block to the blocks the def is given" do
           message = reach_error.call(unsafe + proc_stub + reach_stub + <<-CODE)
             class Table
+              @handler : Proc(Int32)
+
               def initialize
                 @handler = -> { 0 }
               end

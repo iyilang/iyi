@@ -93,8 +93,13 @@ echo "== each crossing's mechanism removed, caught by its check"
 # the compiler emits (S3) is removed by `IYI_SPAWN_BROKEN`, not a patch.
 prove_caught() {
   local label="$1" dir="$2" check="$3" script="$4" tree="$5" file="$6" compiler_env="${7:-IYI_SPAWN_BROKEN=}"
-  mkdir -p "$WORK/$dir/$tree"
-  cp -R "$REPO/src/$tree/." "$WORK/$dir/$tree/"
+  # Both trees, whichever one the copy changes: the compiler takes a file
+  # for std's only where its directory's parent holds `iyi/prelude.iyi`
+  # (`ShareReach#std_at?`), and a std copy without the prelude beside it
+  # was a program's module there - head 2 ran the Mutex rows' spawns
+  # pinned in the shared heap, and the three copies "still passed".
+  mkdir -p "$WORK/$dir"
+  cp -R "$REPO/src/iyi" "$REPO/src/std" "$WORK/$dir/"
   if ! awk "$script" "$REPO/src/$tree/$file" > "$WORK/$dir/$tree/$file"; then
     echo "  $label: what the copy changes is not in $tree/$file any more"
     status=1

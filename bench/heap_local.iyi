@@ -24,6 +24,9 @@
 # - `answer:` units answer a list built in their partition; after the
 #   units die and the shared heap has collected, every answer reads back
 #   whole (the partition was detached and the shared heap adopted it).
+# - `adopt:` a unit joins a child unit that answered a graph holding an
+#   array, grows the array and collects: every node reads back whole
+#   (the joining unit was pinned when it read the answer).
 # - `detach:` a unit answers a list into a box of the shared heap, scrubs
 #   its stack and asks for a local collection: the list reads back whole
 #   (a detached partition is the global collection's alone).
@@ -457,6 +460,82 @@
     fail("answer: no partition was detached by a pointer answer") if IyiHeap.detached_partitions == detached
   end
 
+  # ── adopt ─────────────────────────────────────────────────────────────
+
+  # A graph a unit may grow: an object holding an array.
+  class Grown
+    getter items : Array(Node)
+
+    def initialize
+      @items = [] of Node
+    end
+  end
+
+  def adopt_child : Grown
+    grown = Grown.new
+    i = 0
+    while i < 4
+      grown.items << Node.new(7000000000_i64 &+ i.to_i64, nil)
+      i = i + 1
+    end
+    grown
+  end
+
+  # The joiner, itself a unit, reads a child unit's pointer answer - the
+  # child's partition detached, the shared heap's from its death - and
+  # grows it: the array's new buffers and nodes are made here, under a
+  # holder this unit's local mark does not read. `IyiTask#value` pins
+  # the reader first (`IyiHeap.adopt_answer`), so they are the shared
+  # heap's and a global collection keeps them; without it the local
+  # collection freed them under the answer (S4h's `answer` fuzz kind,
+  # Linux: exit 86 at seeds 1-3 of 3 with one worker, the holder a
+  # shared Hash's keys). Answers how many nodes read wrong, or a
+  # negative failure.
+  def adopt_task : Int64
+    got = 0_i64
+    group do |g|
+      value = g.spawn(unit: :new) { adopt_child }.value
+      if value.is_a?(Grown)
+        i = 0
+        while i < 200
+          value.items << Node.new(7000000004_i64 &+ i.to_i64, nil)
+          i = i + 1
+        end
+        scrub_stack
+        if IyiHeap.current_record == 0_u64
+          IyiMark.collect
+        elsif !collect_now
+          got = -2_i64
+        end
+        # Freed memory is not walked: a freed buffer or node is one
+        # `IyiRoots.base_of` answers 0 for, as `stale:` asks.
+        if got == 0_i64 && IyiRoots.base_of(value.items.to_unsafe.address) == 0_u64
+          got = -4_i64
+        elsif got == 0_i64
+          value.items.each_with_index do |node, k|
+            got = got &+ 1_i64 unless IyiRoots.base_of(node.object_id) != 0_u64 && node.intact?(7000000000_i64 &+ k.to_i64)
+          end
+          got = -3_i64 if got == 0_i64 && value.items.size != 204
+        end
+      else
+        got = -1_i64
+      end
+    end
+    got
+  end
+
+  def adopt_check : Nil
+    group do |g|
+      value = g.spawn(unit: :new) { adopt_task }.value
+      fail("adopt: the joining unit answered #{value}") unless value.is_a?(Int64)
+      fail("adopt: the child unit answered no graph") if value == -1_i64
+      fail("adopt: no local collection ran in 100 tries") if value == -2_i64
+      fail("adopt: the grown array lost nodes") if value == -3_i64
+      fail("adopt: a child unit's answer, grown by a joining unit, had its array's buffer freed under it by that unit's collection") if value == -4_i64
+      fail("adopt: #{value} nodes a joining unit added to a child unit's answer read wrong after its collection") if value != 0_i64
+    end
+  end
+
   # ── detach ────────────────────────────────────────────────────────────
 
   # A list built in the unit's partition and answered into a box of the
@@ -685,8 +764,12 @@
     group do |g|
       handle = g.spawn(unit: :new) { stale_task }
       value = handle.value
-      fail("stale: the unit answered #{value}") unless value.is_a?(UInt64)
-      hidden = value
+      # `fail` goes on under HEAP22_PRINT_ONLY, so it narrows nothing.
+      if value.is_a?(UInt64)
+        hidden = value
+      else
+        fail("stale: the unit answered #{value}")
+      end
     end
     settle("stale")
     base = IyiRoots.base_of(hide(hidden))
@@ -749,16 +832,32 @@
         mine = Node.new(31337_i64, nil)
         record = IyiHeap.current_record
         collections = IyiHeap.partition_collections(record)
+        parity = IyiHeap.read64(record + IyiHeap::REC_PARITY)
+        marking = IyiHeap.read64(record + IyiHeap::REC_MARKING)
         before = IyiHeap.own_flags(mine.object_id)
         to_a.send(mine.object_id)
         to_b.receive
         after = IyiHeap.own_flags(mine.object_id)
         # B's own collections meanwhile - a chaos build's `IYI_HEAP_STRESS`
         # runs one at every point - mark `mine` with B's parity: only the
-        # local-mark bits may move then, and to B's own parity.
-        if IyiHeap.partition_collections(record) != collections
-          rest = 0xFF_u64 ^ IyiHeap::OWN_LMARK
-          before = (before & rest) | IyiHeap.read64(record + IyiHeap::REC_PARITY) if after & rest == before & rest
+        # local-mark bits may move then. One that ends swept leaves them
+        # at B's parity. One that ended unswept - a pause came into it, or
+        # the verifier's check answered false - flipped the parity, marked
+        # part way and counted nothing, and left `REC_MARKING` set, so the
+        # next one clears its bits first: then they are whatever the last
+        # of those left, either parity or none. bench/heap_verify.sh's
+        # sound part failed here with 4001 (S4e at d467f04dc, Linux, seed
+        # 1): the bits at 4, no collection counted. B's record says which,
+        # and A's collections touch none of it.
+        rest = 0xFF_u64 ^ IyiHeap::OWN_LMARK
+        if after & rest == before & rest
+          counted = IyiHeap.partition_collections(record) != collections
+          unswept = IyiHeap.read64(record + IyiHeap::REC_MARKING) != 0_u64
+          if unswept && (counted || marking == 0_u64 || IyiHeap.read64(record + IyiHeap::REC_PARITY) != parity)
+            before = after
+          elsif counted
+            before = (before & rest) | IyiHeap.read64(record + IyiHeap::REC_PARITY)
+          end
         end
         mine.intact?(31337_i64) ? (after == before ? 0_i64 : after.to_i64 * 1000_i64 + before.to_i64 + 1_i64) : -1_i64
       end
@@ -831,23 +930,42 @@
 
   # ── weak ──────────────────────────────────────────────────────────────
 
+  # The cells of *cells* whose targets' chunks do not straddle their runs'
+  # ends: those are the frontier check's (`frontier_weak_task`), and a
+  # copy that makes the weak owner test or the weak sweep's frontier test
+  # of the address must meet that check and not this one. The frontier
+  # only rises, so a chunk off it now is off it at the collection too.
+  @[NoInline]
+  def off_frontier(cells : Array(Pointer(UInt64))) : Array(Pointer(UInt64))
+    off = [] of Pointer(UInt64)
+    cells.each do |cell|
+      address = cell.value
+      arena = IyiHeap.arena_of(address)
+      high = arena != 0_u64 ? IyiHeap.arena_high(arena) : 0_u64
+      off << cell unless arena != 0_u64 && IyiHeap.head_of(arena, address) < high && address >= high
+    end
+    off
+  end
+
   # A hundred kept nodes and a hundred dropped ones, each with a weak cell,
   # one collection: every kept cell still names its node and every dropped
-  # one reads 0. Answers how many dropped cells were not cleared, or a
-  # negative failure.
+  # one off the frontier reads 0. Answers how many dropped cells were not
+  # cleared, or a negative failure.
   def weak_task : Int64
     kept = [] of Node
     kept_cells = [] of Pointer(UInt64)
-    dropped_cells = [] of Pointer(UInt64)
+    made_cells = [] of Pointer(UInt64)
     i = 0
     while i < 100
       node = Node.new(i.to_i64, nil)
       kept << node
       kept_cells << IyiWeak.cell(node.object_id)
-      dropped_cells << dead_cell(1000_i64 &+ i.to_i64)
+      made_cells << dead_cell(1000_i64 &+ i.to_i64)
       i = i + 1
     end
     node = nil
+    dropped_cells = off_frontier(made_cells)
+    return -3_i64 if dropped_cells.empty?
     scrub_stack
     return -2_i64 unless collect_now
     kept_cells.each_with_index do |cell, k|
@@ -865,7 +983,8 @@
       fail("weak: the unit answered #{value}") unless value.is_a?(Int64)
       fail("weak: a kept object's weak cell was cleared") if value == -1_i64
       fail("weak: no local collection ran in 100 tries") if value == -2_i64
-      fail("weak: #{value} of 100 dropped objects' weak cells were not cleared by their unit's collection") if value != 0_i64
+      fail("weak: every dropped object's chunk straddled its run's end") if value == -3_i64
+      fail("weak: #{value} of the dropped objects' weak cells were not cleared by their unit's collection") if value != 0_i64
     end
   end
 
@@ -962,7 +1081,12 @@
         fail("takeover: #{value} nodes of a parked unit's list read wrong") if value != 0_i64
       end
     end
-    fail("takeover: no idle worker collected a parked unit after a global collection") if IyiHeap.takeovers == takeovers
+    # Under `IYI_HEAP_STRESS` (bench/heap_verify.sh's sound part) each unit
+    # collects itself at every chaos point, so none owes the quarter of
+    # its budget a takeover asks: there the lists are the check (the
+    # count never moved in 3 runs of 3 on Linux and on tssh, 09d45a831).
+    stressed = {% if flag?(:heap_verify) %} IyiHeapVerify.stress != 0_u64 {% else %} false {% end %}
+    fail("takeover: no idle worker collected a parked unit after a global collection") if IyiHeap.takeovers == takeovers && !stressed
     IyiHeap.park_collections_off = false
     IyiHeap.collect_every_park = true
   end
@@ -984,9 +1108,9 @@
     unit = IyiHeap.shared { IyiUnit.new }
     record = unit.heap
     fail("construct: the unit has no partition") if record == 0_u64
-    wrong = IyiHeap.within(record) do
-      base = 9000000000_i64
-      keep = build(base, 300, 0)
+    base = 9000000000_i64
+    keep = IyiHeap.within(record) do
+      built = build(base, 300, 0)
       junk : Node? = nil
       i = 0
       while i < 6000
@@ -995,21 +1119,25 @@
       end
       junk = nil
       IyiMark.collect
-      waited = 0
-      group do |g|
-        while IyiHeap.takeovers == takeovers && waited < 300
-          g.spawn(unit: :new) { 0_i64 }.value
-          sleep(1)
-          waited = waited + 1
-        end
+      built
+    end
+    # The wait, and the count, outside the record: the copy that lets the
+    # takeover had this fiber allocate the group and its tasks in the
+    # record while the idle worker collected it, and died of a memory
+    # fault rather than reaching this check, with the count already
+    # before the walk (tssh, 933b4d005). Nothing allocates in the record
+    # once its value is built, and only the count is read before the
+    # walk: a unit taken here was collected with this stack unread.
+    waited = 0
+    group do |g|
+      while IyiHeap.takeovers == takeovers && waited < 300
+        g.spawn(unit: :new) { 0_i64 }.value
+        sleep(1)
+        waited = waited + 1
       end
-      # The count before the walk: a unit taken under construction was
-      # collected with this stack unread, and the copy that lets the
-      # takeover walked the freed list into a memory fault rather than
-      # reaching this check (tssh, 933b4d005).
-      IyiHeap.takeovers != takeovers ? -1_i64 : broken(keep, base, 300)
     end
     fail("construct: an idle worker took a unit with no fiber and no value slot") if IyiHeap.takeovers != takeovers
+    wrong = broken(keep, base, 300)
     fail("construct: an idle worker collected a unit whose value was being built, and #{wrong} nodes of it read wrong") if wrong != 0_i64
     IyiRuntimeLock.lock
     unit.heap = 0_u64
@@ -1060,8 +1188,12 @@
   # its own check before any other could notice it: `abandon` first, as
   # a real stop abandons local marks in any check that collects; `detach`
   # before `answer`, whose units hold detached partitions until they die:
-  # the nodetach copy ended at `answer:` once (Linux, 933b4d005).
+  # the nodetach copy ended at `answer:` once (Linux, 933b4d005); `weak`
+  # before `frontier`, whose weak cells are cleared by the same sweep: the
+  # noweak copy, which clears none, ended at `frontier:` (tssh,
+  # 933b4d005), and `weak` leaves the frontier's cells to `frontier`.
   abandon_check
+  weak_check
   frontier_check
   filter_check
   stale_check
@@ -1069,11 +1201,11 @@
   return_check
   detach_check
   answer_check(workers)
+  adopt_check
   pin_check
   poison_check
   graphs_check(workers, rounds)
   fibers_check
-  weak_check
   large_check
   takeover_check(workers)
   construct_check

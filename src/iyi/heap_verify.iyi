@@ -768,8 +768,8 @@ class IyiHeapVerify
       say("a large object (owner ")
       say_dec(who)
       say(")")
-    when K_DATA  then say("the data segment")
-    when K_TLS   then say("this thread's thread-local block")
+    when K_DATA then say("the data segment")
+    when K_TLS  then say("this thread's thread-local block")
     else
       say("the stack of fiber ")
       say_hex(who)

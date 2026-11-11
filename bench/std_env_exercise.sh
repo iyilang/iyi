@@ -57,6 +57,14 @@ trap cleanup EXIT
 
 status=0
 export IYI_PATH="$REPO/src${PSEP}$REPO/samples/iyi"
+# std_copy_dir <name>: $WORK/<name>/std made for a patched module, with the
+# prelude's tree beside it. The compiler takes a file for std's only where
+# its directory's parent holds `iyi/prelude.iyi` (`ShareReach#std_at?`), so
+# a std copy alone was a program's module, held to a program's rules.
+std_copy_dir() {
+  mkdir -p "$WORK/$1/std"
+  cp -R "$REPO/src/iyi" "$WORK/$1/"
+}
 build_and_run() {
   local label="$1" name="$2"
   shift 2
@@ -105,7 +113,7 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
-mkdir -p "$WORK/patched/std"
+std_copy_dir patched
 if [ -z "$PY" ]; then
   echo "  no python3 on this machine, so the broken-module proof is unmeasured"
 elif ! "$PY" - <<PY
@@ -132,7 +140,7 @@ fi
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT) ;;
   *)
-    mkdir -p "$WORK/firstonly/std"
+    std_copy_dir firstonly
     if [ -z "$PY" ]; then
       echo "  no python3 on this machine, so the first-entry-only proof is unmeasured"
     elif ! "$PY" - <<PY
@@ -167,7 +175,7 @@ esac
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT) ;;
   *)
-    mkdir -p "$WORK/inplace/std"
+    std_copy_dir inplace
     if [ -z "$PY" ]; then
       echo "  no python3 on this machine, so the in-place delete proof is unmeasured"
     elif ! "$PY" - <<PY
@@ -286,7 +294,7 @@ fi
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT) ;;
   *)
-    mkdir -p "$WORK/unturned/std"
+    std_copy_dir unturned
     if [ -z "$PY" ]; then
       echo "  no python3 on this machine, so the writers' turn proof is unmeasured"
     elif ! "$PY" - <<PY

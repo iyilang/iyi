@@ -961,7 +961,7 @@ struct MailText
   # --- Dates (RFC 5322 section 3.3) ---
 
   @[SafeReach("set before the first parallel task starts, then only read")]
-  WEEKDAYS = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"]
+  WEEKDAYS  = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"]
   @[SafeReach("set before the first parallel task starts, then only read")]
   MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
   @[SafeReach("set before the first parallel task starts, then only read")]

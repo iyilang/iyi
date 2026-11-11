@@ -75,8 +75,14 @@ std_http_exercise 0.150 s); an importer whose own code could reach the
 state proves the claim itself. The share check's mutation scan no longer
 builds an undefined constant's suggestions for macro code it only probes:
 `Object#in?` cost ~6 ms per scanned type, and std_http_exercise's cleanup
-drops from 0.30 s to 0.14 s (Linux, release). An initialiser first run by
-a read before its declaration is born in the shared heap under
+drops from 0.30 s to 0.14 s (Linux, release). Against 0.21.0, a warm
+whole compile takes 0.95 times as long for iyiturkiye, 1.00 for 16 std
+programs together, 1.01 for web_cores and 1.02 for std_http_exercise
+(tmac, release, medians of 5 interleaved rounds); single small std
+programs (0.2-0.37 s) take up to 1.08, +0.011-0.027 s. A cold one takes
+0.97 for iyiturkiye and 1.04-1.07 for the others on tmac, and on Linux
+1.08 for the 16 std programs and 1.14 for web_cores. An initialiser first
+run by a read before its declaration is born in the shared heap under
 `-Dheap_partitions`.
 `TlsConfig#trusted_roots` answers a copy of the system roots, and a failed
 system-root load is retried at the next handshake rather than kept.

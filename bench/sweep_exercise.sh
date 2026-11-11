@@ -171,13 +171,17 @@ prove_fails "a budget kept warm past the take" roombudget "room:" \
 prove_fails "the room never falls" roomflat "room:" \
   '{ if ($0 ~ /^          room = taken >= room \? taken : room - \(room - taken \+ ROOM_FADE - 1_u64\)\.unsafe_div\(ROOM_FADE\)$/) { print "          room = taken >= room ? taken : room"; found = 1; next } print } END { if (!found) exit 3 }'
 
-# The pause's sweep handing a whole arena's dead chunks over as one
-# batch: the one refill that takes it takes every warm page the arena
-# kept, and the class reads as taking them all.
-prove_fails "a pause's batch a whole arena" wholebatch "room:" \
-  '{ if ($0 ~ /^      def self\.sweep_one_held : Bool$/) held = 1
-     if (held && $0 ~ /^          batch = sweep_slice\(arena, SWEEP_SPAN\)$/) { print "          batch = sweep_slice(arena, IyiHeap::SWEEP_DONE)"; held = 0; found = 1; next }
-     print } END { if (!found) exit 3 }'
+# The eager sweep after a collection's turn handing a whole arena's dead
+# chunks over as one batch: the one refill that takes it takes every
+# warm page the arena kept, and the class reads as taking them all.
+prove_fails "an eager sweep's batch a whole arena" wholebatch "room:" \
+  '{ if (sub(/batch = sweep_slice\(arena, whole \? IyiHeap::SWEEP_DONE : SWEEP_SPAN\)/, "batch = sweep_slice(arena, IyiHeap::SWEEP_DONE)")) found = 1; print } END { if (!found) exit 3 }'
+
+# The pause's sweep before its mark handing an arena over a slice at a
+# time: the threads allocating beside the mark all take chunks of it, and
+# alloc_scaling at 8 workers ran 13-17% slower on macOS.
+prove_fails "the pause's debt a batch a slice" heldslice "held:" \
+  '{ if (sub(/batch = sweep_slice\(arena, whole \? IyiHeap::SWEEP_DONE : SWEEP_SPAN\)/, "batch = sweep_slice(arena, SWEEP_SPAN)")) found = 1; print } END { if (!found) exit 3 }'
 
 # A warm run threaded whole, as before: one refill takes the run. On
 # Windows 11 (4 KB pages) the room check, which comes first, fails

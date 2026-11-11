@@ -712,7 +712,50 @@
   edge_upper = trim_edge(edge_size, false)
   puts "    edge: a batch taken off the centre before the idle trim and adopted after it lies on no idle page, the lower of two sharing a listed page (#{count(edge_lower)} chunk on it) and the upper (#{count(edge_upper)} on it)"
 
-  # 12. A program whose pool goes idle hands its warm pages back without
+  # 12. The pause pays the sweep's debt before its mark with each arena
+  # handed to the centre as one batch (`IyiMark.sweep_one_held`): the
+  # threads allocate from those batches while the mark runs beside them,
+  # and an arena cut a slice at a time went out to every thread at once -
+  # bench/alloc_scaling.iyi at 8 workers ran 13-17% slower on macOS
+  # 26.6, Apple M2 Pro. Replayed on this thread: garbage over five slices
+  # of a class nothing else asks for, its arena claimed for the epoch the
+  # next collection turns to, as a walker the stop finds mid-slice holds
+  # it; a collection the trigger runs with no helpers, which leaves every
+  # arena to the lazy sweep; and a collection, whose sweep before the
+  # stop passes the claimed arena by and whose pause finishes it.
+  held_size = 3584_u64
+  held_index = IyiHeap.class_index(held_size)
+  raise "held: the #{count(held_size)}-byte class has arenas already, so its garbage is not one arena's" if class_arenas(held_index) != 0_u64
+  held_first = fresh(held_size)
+  burst(held_size, (5_u64 * IyiMark::SWEEP_SPAN).unsafe_div(held_size))
+  held_arena = IyiHeap.arena_of(held_first)
+  raise "held: the #{count(held_size)}-byte class's garbage spans #{count(class_arenas(held_index))} arenas" if class_arenas(held_index) != 1_u64
+  held_epoch = IyiMark.epoch + 1_u64
+  IyiHeap.write64(held_arena + IyiHeap::OFF_SWEEPING, held_epoch)
+  helpers = IyiMark.workers
+  IyiMark.workers = 0_u64
+  IyiMark.auto = true
+  collections = IyiMark.collections
+  while IyiMark.collections == collections
+    fresh(704_u64)
+  end
+  IyiMark.auto = false
+  raise "held: the triggered collection turned to epoch #{count(IyiMark.epoch)}, not #{count(held_epoch)}" if IyiMark.epoch != held_epoch
+  raise "held: the #{count(held_size)}-byte class's arena was handed back by the triggered collection" unless IyiHeap.mapped?(held_arena)
+  raise "held: the #{count(held_size)}-byte class's arena was swept before the pause, so the pause had nothing of it to pay" unless IyiMark.sweep_left?(held_arena, held_epoch)
+  paid_before = IyiMark.debt_paid_in_pause
+  batches_before = IyiMark.batches_paid_in_pause
+  IyiMark.collect
+  IyiMark.workers = helpers
+  # The walker's claim let go, as `release_claim` lets an older epoch's go.
+  IyiHeap.write64(held_arena + IyiHeap::OFF_SWEEPING, 0_u64) if IyiHeap.read64(held_arena + IyiHeap::OFF_SWEEPING) == held_epoch
+  held_paid = IyiMark.debt_paid_in_pause - paid_before
+  held_batches = IyiMark.batches_paid_in_pause - batches_before
+  raise "held: the pause paid no arena of the sweep's debt, so its sweep was never at stake" if held_paid == 0_u64
+  raise "held: the pause's sweep before its mark handed #{count(held_paid)} arena over as #{count(held_batches)} batches, a slice's at a time" if held_batches > held_paid
+  puts "    held: the pause's sweep before its mark finished #{count(held_paid)} arena a walker held and handed it over as #{count(held_batches)} batch"
+
+  # 13. A program whose pool goes idle hands its warm pages back without
   # anything allocating: the pool's monitor, parked with every worker
   # idle, asks for the idle trim after a second of it with no collection
   # in between (`IyiWorkers.park_monitor`). Last, because the task below

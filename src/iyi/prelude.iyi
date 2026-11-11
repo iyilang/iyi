@@ -7136,13 +7136,32 @@ require "./file"
       # whoever's claim stands on it - a claim stands for a helper waiting
       # at the runtime lock after its slice, whose batch that helper will
       # discard. Answers whether there was one.
-      # A batch a slice, as every other sweep hands them over: a batch is
-      # what one refill takes, and the warm pages listed on it are what
-      # the class is counted as taking (`IyiHeap.taken_add`). A whole
-      # arena's batch made one cache the holder of every warm page of the
-      # arena, and a class that took a few of them read as one that took
-      # them all.
-      def self.sweep_one_held : Bool
+      #
+      # `whole`, the debt the pause pays before its mark (`collect_locked`,
+      # `start_concurrent`): the arena's dead chunks go to the centre as
+      # one batch, as 0.21.0 handed them. These batches are what the
+      # threads allocate from while a mark runs beside them, and every
+      # allocation under a mark is counted live in its arena by an atomic
+      # add each time the thread's arena changes (`count_live`) - about one
+      # an allocation in bench/alloc_scaling.iyi, 15-16 million a run at 8
+      # workers. Handed over a slice at a time, an arena the stop found a
+      # walker in went out to every thread at once, and on macOS 26.6,
+      # Apple M2 Pro, 10 cores (the user's machine), that bench ran 628-650
+      # ms (medians of three sessions of 5 interleaved rounds) against
+      # 535-566 with 0.21.0's prelude and 564-577 with this pass whole: its
+      # marks beside the program lasted 6.4 ms against 4.6 and 5.0, with
+      # as many adds. [INFERENCE: eight threads adding to one arena's
+      # line.] Windows 11, 12 logical processors (the user's machine),
+      # showed no difference past its noise either way. The batches handed
+      # over this way are counted (`batches_paid_in_pause`).
+      #
+      # Otherwise, the eager sweep after the turn (`IyiMark.collect`): a
+      # batch a slice, as every other sweep hands them over. A batch is
+      # what one refill takes, and the warm pages listed on it are what the
+      # class is counted as taking (`IyiHeap.taken_add`): a whole arena's
+      # batch made one cache the holder of every warm page of the arena,
+      # and a class that took a few of them read as one that took them all.
+      def self.sweep_one_held(whole : Bool) : Bool
         epoch = @@epoch
         arena = IyiHeap.first_arena
         while arena != 0 && !sweep_left?(arena, epoch)
@@ -7152,8 +7171,11 @@ require "./file"
         begin_arena(arena, epoch, 0) if IyiHeap.arena_epoch(arena) != epoch
         index = IyiHeap.class_index(IyiHeap.arena_chunk(arena))
         while IyiHeap.read64(arena + IyiHeap::OFF_SWEEP_CURSOR) != IyiHeap::SWEEP_DONE
-          batch = sweep_slice(arena, SWEEP_SPAN)
-          IyiHeap.free_batch(index, batch) if batch != 0
+          batch = sweep_slice(arena, whole ? IyiHeap::SWEEP_DONE : SWEEP_SPAN)
+          if batch != 0
+            IyiHeap.free_batch(index, batch)
+            @@batches_paid_in_pause = @@batches_paid_in_pause + 1_u64 if whole
+          end
         end
         arena_done(arena, epoch)
         true
@@ -7939,6 +7961,7 @@ require "./file"
       @@unswept : UInt64 = 0_u64
       @@sweep_left : UInt64 = 0_u64
       @@debt_paid_in_pause : UInt64 = 0_u64
+      @@batches_paid_in_pause : UInt64 = 0_u64
       @@debt_paid_before_stop : UInt64 = 0_u64
       @@swept_by_allocator : UInt64 = 0_u64
       @@swept_by_helpers : UInt64 = 0_u64
@@ -7968,6 +7991,12 @@ require "./file"
 
       def self.debt_paid_in_pause : UInt64
         @@debt_paid_in_pause
+      end
+
+      # The batches those arenas went to the centre as: one an arena with
+      # anything dead in it (`sweep_one_held`).
+      def self.batches_paid_in_pause : UInt64
+        @@batches_paid_in_pause
       end
 
       # Arenas the allocator began sweeping on its own time, outside any
@@ -8566,7 +8595,7 @@ require "./file"
         {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
           others = IyiThread.stop_others
         {% end %}
-        while sweep_one_held
+        while sweep_one_held(true)
           @@debt_paid_in_pause = @@debt_paid_in_pause + 1_u64
         end
         mark
@@ -8581,10 +8610,10 @@ require "./file"
         # `bench/collect_trigger.sh` names a pause that sweeps, and failed
         # on this line: 25 collections, 0 arenas swept by the allocator.
         {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
-          while eager && sweep_one_held
+          while eager && sweep_one_held(false)
           end
         {% else %}
-          while sweep_one_held
+          while sweep_one_held(false)
           end
         {% end %}
         IyiHeap.allocated_word.value.set(0_u64)
@@ -8716,7 +8745,7 @@ require "./file"
           end
           started = now_ns
           others = IyiThread.stop_others
-          while sweep_one_held
+          while sweep_one_held(true)
             @@debt_paid_in_pause = @@debt_paid_in_pause + 1_u64
           end
           w = worker

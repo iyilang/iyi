@@ -56,8 +56,8 @@ name: iyi
 # full set was thirty-nine jobs and about twenty runner-hours a run (runs of
 # 2026-11-04 to 11-07). Every pull request paid that, a README edit as much
 # as a compiler change, and two at once queued behind each other for hours.
-# The Team plan runs sixty at once, and still five on macOS, which is what
-# a full run waits on longest.
+# The Team plan's documented limit is sixty at once, still five on macOS;
+# an hour after the upgrade on 2026-11-11, twenty ran at once as before.
 on:
   push:
     branches: [master, mt/next]

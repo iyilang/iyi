@@ -17,8 +17,11 @@ The nightly run of a commit the full set already passed on master within
 commit answered, and it held the queue behind it - the third full run of one
 unchanged master took 44 jobs while three pull requests waited. An unchanged
 master is still run again once a week, for what moves under it: the runner
-images, a tool installed at its latest. If the runs cannot be asked about,
-the nightly run runs everything.
+images, a tool installed at its latest. A run counts as a pass of the full
+set when a job past the plan and the verdict succeeded in it: a nightly run
+that selected nothing succeeds too, and counting it would move the week on
+every night. If the runs cannot be asked about, the nightly run runs
+everything.
 
 Within a pull request the changed files narrow it further:
 
@@ -124,21 +127,45 @@ def pull_request_files(event_path, token, repository):
     return None
 
 
-def full_set_passed(sha, token, repository):
-    """When the full set last passed on master at *sha*: a run of this
-    workflow on master, of an event that runs the full set, that succeeded.
-    None when none did."""
-    url = (f"https://api.github.com/repos/{repository}/actions/workflows/iyi.yml/runs"
-           f"?branch=master&head_sha={sha}&status=success&per_page=50")
+def github_get(url, token):
     request = urllib.request.Request(url, headers={
         "Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github+json",
     })
     with urllib.request.urlopen(request, timeout=30) as response:
-        runs = json.load(response)["workflow_runs"]
-    times = [datetime.fromisoformat(run["created_at"].replace("Z", "+00:00"))
-             for run in runs if run["event"] in FULL_EVENTS]
-    return max(times) if times else None
+        return json.load(response)
+
+
+def job_title(job_id, jobs):
+    """The name a job's runs carry: its `name:`, or its id without one."""
+    found = re.search(r'^    name:\s*"?([^"\n]*?)"?\s*$', jobs[job_id]["text"], re.M)
+    return found.group(1) if found else job_id
+
+
+def last_full_pass(runs, ran):
+    """When the newest of *runs* that ran the full set was made, or None: an
+    event that runs it, and *ran(run)* - a job past the plan and the verdict
+    that succeeded. A nightly run that selected nothing succeeds as well, and
+    counted as a pass it moved the week on every night, so an unchanged
+    master would never have been run again."""
+    for run in sorted(runs, key=lambda run: run["created_at"], reverse=True):
+        if run["event"] in FULL_EVENTS and ran(run):
+            return datetime.fromisoformat(run["created_at"].replace("Z", "+00:00"))
+    return None
+
+
+def full_set_passed(sha, token, repository, bookkeeping):
+    """When the full set last passed on master at *sha*. *bookkeeping* is the
+    names of the jobs every run has, which say nothing about what ran."""
+    actions = f"https://api.github.com/repos/{repository}/actions"
+    runs = github_get(f"{actions}/workflows/iyi.yml/runs?branch=master&head_sha={sha}&status=success&per_page=50",
+                      token)["workflow_runs"]
+
+    def ran(run):
+        jobs = github_get(f"{actions}/runs/{run['id']}/jobs?per_page=100", token)["jobs"]
+        return any(job["conclusion"] == "success" and job["name"] not in bookkeeping for job in jobs)
+
+    return last_full_pass(runs, ran)
 
 
 def is_doc(path):
@@ -221,7 +248,8 @@ def main():
     selected, reason = plan(jobs, args.event, args.ref, files)
     if args.event == "schedule":
         try:
-            passed = full_set_passed(args.sha, os.environ["GITHUB_TOKEN"], os.environ["GITHUB_REPOSITORY"])
+            bookkeeping = {job_title("plan", jobs), job_title("result", jobs)}
+            passed = full_set_passed(args.sha, os.environ["GITHUB_TOKEN"], os.environ["GITHUB_REPOSITORY"], bookkeeping)
         except (KeyError, OSError, ValueError) as error:
             passed = None
             print(f"ci_plan: could not ask whether {args.sha[:9]} passed already ({error}), so it runs")

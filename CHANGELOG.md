@@ -9,8 +9,10 @@
   selects no job (`scripts/ci_plan.py`, `RECHECK_AFTER`): 08ce6c1cb had
   passed it on its push and on the night after, and the third run, the
   night after that, put 44 jobs in a queue that already held three pull
-  requests. An unchanged master still runs again once a week, and a run
-  whose history cannot be read runs everything.
+  requests. An unchanged master still runs again once a week - a run counts
+  only if a job past the plan and the verdict succeeded in it, or a nightly
+  that selected nothing would restart the week - and a run whose history
+  cannot be read runs everything.
 
 ## 0.21.0 — 2026-11-09
 

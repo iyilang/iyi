@@ -7305,13 +7305,12 @@ class IyiGroup
   # `Share`) and its answer to what `Mutex#get`'s is (`Share`, since it
   # leaves the unit while the unit lives on).
   def spawn(*, in owner : Unit(S), &block : S -> T) : IyiTask(T) forall S, T
-    value = owner.iyi_value
     # The block's captures cross into the Unit's unit (heap22 row 1d), and
     # `work`, which another unit's fiber runs, is made in the shared heap.
     # Named outside the `{% if %}`: a block parameter read only inside one
     # is not captured.
     IyiCross.publish(block)
-    work = IyiCross.shared { unit_work(block, value) }
+    work = IyiCross.shared { unit_work(block, owner) }
     {% if flag?(:gc_none) || flag?(:gc_boehm) %}
       # One thread: every task is a unit-mate of every other already.
       in_unit(&work)
@@ -7326,10 +7325,11 @@ class IyiGroup
 
   # A `Unit` task's body, made where `spawn(in:)` says. Its answer leaves
   # the unit while the unit lives on, so it is published here, before
-  # `IyiTask#finish` stores it (heap22 row 2b).
-  private def unit_work(block : S -> T, value : S) : Proc(T) forall S, T
+  # `IyiTask#finish` stores it (heap22 row 2b). It names the handle, never
+  # the value: a body kept past a dead handle would name the freed value.
+  private def unit_work(block : S -> T, owner : Unit(S)) : Proc(T) forall S, T
     -> {
-      answer = block.call(value)
+      answer = block.call(owner.iyi_value)
       IyiCross.publish(answer)
       answer
     }

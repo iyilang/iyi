@@ -6327,13 +6327,19 @@ parks on a channel lets its unit-mate run and reads the value's size as 1
 before the park and 2 after, in an order the channels fix; a task that
 panics answers `Panicked` and the four tasks after it run and see its
 append; on a pool of one, a `Unit`'s tasks spawned from an `IyiThread`
-run on the main thread and no pool starts. The compiler refuses a
+run on the main thread and no pool starts. With `-Dheap_partitions`,
+sixteen `Unit`s whose handles are let go while their tasks' handles are
+kept die at a global collection: a task's body names the `Unit`'s handle
+and reads the value when it runs, so a body kept past its task keeps the
+unit and never names a freed value. The compiler refuses a
 `spawn(in:)` block capturing what is not `Share`, a task answering what
 is not `Share`, `Unit.new`'s block capturing what is not `Share`, two
 placements at once, and the value reached from outside its tasks. Broken
 copies, each caught at the check that names it: a `Unit` whose tasks
 each take a unit of their own, one whose tasks run on the spawner's
-thread on a pool of one, and through `IYI_SPAWN_BROKEN` the capture check
+thread on a pool of one, finished tasks' bodies kept (no `Unit` dies),
+the same naming the value (`-Dheap_verify`'s report at the unit's
+death), and through `IYI_SPAWN_BROKEN` the capture check
 removed (`unit-capture`) and the answer check removed (`unit-answer`).
 `bench/spawn_eligible.sh` holds the old spellings refused with `iyi fix`
 making the program run, with a broken copy that keeps `serial:` as an

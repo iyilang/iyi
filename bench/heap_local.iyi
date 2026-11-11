@@ -1395,18 +1395,29 @@
 
   # ── idle ──────────────────────────────────────────────────────────────
 
-  # A unit that builds a list, drops a little garbage - under a slice's
-  # worth, so its park owes nothing - sends its record and parks.
-  def idle_task(t : Int64, go : Channel(Int64), ready : Channel(UInt64)) : Int64
-    base = 7000000000_i64 &+ t &* 10000_i64
-    keep = build(base, 200, 0)
+  # Garbage in chains of fifty, in a frame of its own: the runs it fills
+  # hold nothing live once the frame is gone, but for the last chain a
+  # stale word may keep.
+  def idle_junk : Int64
     junk : Node? = nil
     i = 0
-    while i < 300
+    while i < 400
       junk = Node.new(i.to_i64, i % 50 == 0 ? nil : junk)
       i = i + 1
     end
-    junk = nil
+    junk.is_a?(Node) ? 1_i64 : 0_i64
+  end
+
+  # A unit that drops a little garbage, then builds a list - under a
+  # slice's worth in all, so its park owes nothing - sends its record and
+  # parks. The garbage first, so the runs it filled hold none of the list
+  # and go back whole when the unit is collected: with the list first, no
+  # partition held less after its idle collection in the optimised runs
+  # (Linux, 4 and 8 workers), the plain one's did.
+  def idle_task(t : Int64, go : Channel(Int64), ready : Channel(UInt64)) : Int64
+    base = 7000000000_i64 &+ t &* 10000_i64
+    idle_junk
+    keep = build(base, 200, 0)
     ready.send(IyiHeap.current_record)
     go.receive
     broken(keep, base, 200)

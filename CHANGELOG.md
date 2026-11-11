@@ -15,6 +15,12 @@ answer copies. A unit's local collection abandoned by a stop no longer
 leaves mark bits the next one trusts (a live list was freed under
 heap_partitions).
 
+Under `-Dheap_partitions` the compiler makes the runtime's and std's
+trusted types in the shared heap, publishes class-variable stores, gives
+crossing blocks their own typed context (C1) in which a captured struct is
+boxed in a cell of its own rather than copied, pins crossings that reach
+an owning type without `lends:`, and writes `.iyimod` v63.
+
 Under `-Dheap_partitions` a published object whose chunk straddled the
 end of its run was left local and freed at its unit's death, and a weak
 cell to such an object kept naming the freed chunk: the carve frontier is
@@ -27834,7 +27840,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 33,791-line library and nothing else. Every other
+  written against iyi's own 33,816-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

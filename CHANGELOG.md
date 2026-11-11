@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Gates
+
+- **The nightly run skips a commit that already passed.** A scheduled run
+  of a commit that passed the full set on master in the last seven days
+  selects no job (`scripts/ci_plan.py`, `RECHECK_AFTER`): 08ce6c1cb had
+  passed it on its push and on the night after, and the third run, the
+  night after that, put 44 jobs in a queue that already held three pull
+  requests. An unchanged master still runs again once a week, and a run
+  whose history cannot be read runs everything.
+
 ## 0.21.0 — 2026-11-09
 
 **A spawn has one verb and names its unit, and a plain `spawn` runs in

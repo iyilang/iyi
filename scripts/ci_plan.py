@@ -12,6 +12,14 @@ branch), a tag, the nightly schedule and a manual dispatch. A pull
 request does not stand in for those: a change that only the full set would
 catch shows on master after the merge, and is reverted or fixed there.
 
+The nightly run of a commit the full set already passed on master within
+`RECHECK_AFTER` selects nothing: it would answer what the last run of that
+commit answered, and it held the queue behind it - the third full run of one
+unchanged master took 44 jobs while three pull requests waited. An unchanged
+master is still run again once a week, for what moves under it: the runner
+images, a tool installed at its latest. If the runs cannot be asked about,
+the nightly run runs everything.
+
 Within a pull request the changed files narrow it further:
 
   - only docs (`*.md`, `doc/`, `editors/`): the docs gates, and the editor
@@ -31,6 +39,7 @@ import os
 import re
 import sys
 import urllib.request
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -48,6 +57,9 @@ FAST = ["build", "iyi", "compiler-specs", "stdlib-specs", "targets",
 NOT_PLANNED = {"plan", "result", "release"}
 
 FULL_EVENTS = {"push", "schedule", "workflow_dispatch"}
+
+# How long a commit's passing full run stands for it at night.
+RECHECK_AFTER = timedelta(days=7)
 
 
 def parse_jobs(text):
@@ -112,6 +124,23 @@ def pull_request_files(event_path, token, repository):
     return None
 
 
+def full_set_passed(sha, token, repository):
+    """When the full set last passed on master at *sha*: a run of this
+    workflow on master, of an event that runs the full set, that succeeded.
+    None when none did."""
+    url = (f"https://api.github.com/repos/{repository}/actions/workflows/iyi.yml/runs"
+           f"?branch=master&head_sha={sha}&status=success&per_page=50")
+    request = urllib.request.Request(url, headers={
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+    })
+    with urllib.request.urlopen(request, timeout=30) as response:
+        runs = json.load(response)["workflow_runs"]
+    times = [datetime.fromisoformat(run["created_at"].replace("Z", "+00:00"))
+             for run in runs if run["event"] in FULL_EVENTS]
+    return max(times) if times else None
+
+
 def is_doc(path):
     return path.endswith(".md") or path.startswith(("doc/", "editors/"))
 
@@ -169,6 +198,7 @@ def main():
     parser.add_argument("--event", default=os.environ.get("GITHUB_EVENT_NAME"))
     parser.add_argument("--ref", default=os.environ.get("GITHUB_REF", ""))
     parser.add_argument("--files", nargs="*", help="the changed files, instead of asking the API")
+    parser.add_argument("--sha", default=os.environ.get("GITHUB_SHA", ""), help="the commit a scheduled run tests")
     args = parser.parse_args()
     if not args.event:
         sys.exit("ci_plan: no event: pass --event or run under GitHub Actions")
@@ -189,6 +219,18 @@ def main():
                                    os.environ["GITHUB_REPOSITORY"])
 
     selected, reason = plan(jobs, args.event, args.ref, files)
+    if args.event == "schedule":
+        try:
+            passed = full_set_passed(args.sha, os.environ["GITHUB_TOKEN"], os.environ["GITHUB_REPOSITORY"])
+        except (KeyError, OSError, ValueError) as error:
+            passed = None
+            print(f"ci_plan: could not ask whether {args.sha[:9]} passed already ({error}), so it runs")
+        if passed is not None:
+            age = datetime.now(timezone.utc) - passed
+            if age < RECHECK_AFTER:
+                hours = int(age.total_seconds() // 3600)
+                selected, reason = set(), (f"{args.sha[:9]} passed the full set on master {hours} hours ago, "
+                                           f"and a nightly run of it waits until that is {RECHECK_AFTER.days} days")
     ordered = sorted(selected)
     print(f"{reason}: {len(ordered)} of {len(jobs) - len(NOT_PLANNED)} jobs")
     for name in ordered:

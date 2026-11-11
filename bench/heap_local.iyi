@@ -50,7 +50,9 @@
 #   ends the unit's task, so that `-Dheap_verify` reads its free lists.
 # - `weak:` weak cells to a hundred kept and a hundred dropped objects of
 #   a unit, one collection: every kept cell still names its object and
-#   every dropped one reads 0.
+#   every dropped one reads 0; and in another unit, a sweep stopped once
+#   it has swept the dropped objects' class leaves no cell naming a chunk
+#   it freed.
 # - `large:` objects past the top class in a partition: kept ones read
 #   back whole across local collections, dropped ones are unmapped.
 # - `takeover:` units parked with debt are collected by idle workers after
@@ -1008,6 +1010,58 @@
     left
   end
 
+  # A hundred dropped nodes, each with a weak cell, and a local sweep
+  # stopped once it has swept their class, as a stop asked before the
+  # next class stops it: the sweep freed their chunks, and the cells to
+  # them read 0 all the same. The weak pass comes before the sweep frees
+  # anything; after it, a stopped sweep left the cells naming the freed
+  # chunks, which the unit's next allocations hand out again. Answers
+  # how many cells name a freed chunk, or a negative failure.
+  def weak_stop_task : Int64
+    made = [] of Pointer(UInt64)
+    i = 0
+    while i < 100
+      made << dead_cell(2000_i64 &+ i.to_i64)
+      i = i + 1
+    end
+    cells = off_frontier(made)
+    return -3_i64 if cells.empty?
+    # The targets, hidden from the scan, to look at their chunks after.
+    targets = cells.map { |cell| hide(cell.value) }
+    arena = IyiHeap.arena_of(cells[0].value)
+    record = IyiHeap.current_record
+    IyiHeap.stop_local_sweep(record, IyiHeap.class_index(IyiHeap.arena_chunk(arena)))
+    tries = 0
+    while IyiHeap.local_sweep_stop_pending? && tries < 100
+      scrub_stack
+      IyiHeap.collect_local(record)
+      sleep(1) if IyiHeap.local_sweep_stop_pending?
+      tries = tries + 1
+    end
+    if IyiHeap.local_sweep_stop_pending?
+      IyiHeap.stop_local_sweep(0_u64, -1)
+      return -2_i64
+    end
+    {% if flag?(:heap_verify) %}
+      # The verifier's weak check, which follows only a whole sweep, read
+      # here too: a cell naming a chunk the stopped sweep freed is its
+      # report.
+      IyiHeapVerify.weak_cells(IyiHeap.read64(record &+ IyiHeap::REC_ID))
+    {% end %}
+    freed = 0_i64
+    left = 0_i64
+    cells.each_with_index do |cell, k|
+      target = hide(targets[k])
+      home = IyiHeap.arena_of(target)
+      if home != 0_u64 && IyiHeap.read8(home &+ IyiHeap::META &+ IyiHeap.chunk_index(home, target) &* IyiHeap::META_ENTRY) & IyiHeap::FREE_FLAG != 0
+        freed = freed &+ 1_i64
+        left = left &+ 1_i64 if cell.value != 0_u64
+      end
+    end
+    return -4_i64 if freed == 0_i64
+    left
+  end
+
   def weak_check : Nil
     group do |g|
       handle = g.spawn(unit: :new) { weak_task }
@@ -1017,6 +1071,12 @@
       fail("weak: no local collection ran in 100 tries") if value == -2_i64
       fail("weak: every dropped object's chunk straddled its run's end") if value == -3_i64
       fail("weak: #{value} of the dropped objects' weak cells were not cleared by their unit's collection") if value != 0_i64
+      stopped = g.spawn(unit: :new) { weak_stop_task }.value
+      fail("weak: the stopped sweep's unit answered #{stopped}") unless stopped.is_a?(Int64)
+      fail("weak: no local sweep stopped by the switch in 100 tries") if stopped == -2_i64
+      fail("weak: every dropped node's chunk straddled its run's end, before the stopped sweep") if stopped == -3_i64
+      fail("weak: the stopped sweep freed none of the dropped nodes") if stopped == -4_i64
+      fail("weak: #{stopped} weak cells name chunks a stopped local sweep freed") if stopped != 0_i64
     end
   end
 

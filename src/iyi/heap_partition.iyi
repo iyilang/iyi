@@ -154,6 +154,8 @@ class IyiHeap
   @@local_off : Bool = false
   @@park_off : Bool = false
   @@abandon_next : Bool = false
+  @@stop_sweep_record : UInt64 = 0_u64
+  @@stop_sweep_after : Int32 = -1
   @@returned : UInt64 = 0_u64
   @@large_freed : UInt64 = 0_u64
   @@pauses : UInt64 = 0_u64
@@ -329,6 +331,20 @@ class IyiHeap
 
   def self.abandon_next_local_mark : Bool
     @@abandon_next
+  end
+
+  # A test's switch: partition *record*'s next local sweep stops once it
+  # has swept class *index*, as a stop asked before the next class stops
+  # it (bench/heap_local's `weak:` check).
+  def self.stop_local_sweep(record : UInt64, index : Int32) : Nil
+    @@stop_sweep_record = record
+    @@stop_sweep_after = index
+  end
+
+  # Whether the switch is still set: no sweep of the partition has
+  # stopped by it yet.
+  def self.local_sweep_stop_pending? : Bool
+    @@stop_sweep_record != 0_u64
   end
 
   # The `OWN` byte of the chunk holding *address* - a large object's from
@@ -1709,20 +1725,21 @@ class IyiHeap
     end
   end
 
-  # The sweep of a finished local mark, class by class, each under its
-  # lock with no global slice on its arenas: every run walked, its free
-  # and its dead chunks - `LOCAL`, without this parity - its new list, its
-  # published ones counted, an empty run back to the pool unless it is
-  # the class's last and the unit is not *idle* (between two requests,
-  # an idle unit holds runs only where something lives); the return
-  # stack dropped, its chunks being free and found by the walk. Then the
-  # large objects and the weak cells, and the accounts. A stop asked
-  # between two classes ends it: what is swept is whole, and the rest
-  # waits for the next one.
+  # The sweep of a finished local mark: the weak cells first, then class
+  # by class, each under its lock with no global slice on its arenas:
+  # every run walked, its free and its dead chunks - `LOCAL`, without
+  # this parity - its new list, its published ones counted, an empty run
+  # back to the pool unless it is the class's last and the unit is not
+  # *idle* (between two requests, an idle unit holds runs only where
+  # something lives); the return stack dropped, its chunks being free and
+  # found by the walk. Then the large objects, and the accounts. A stop
+  # asked between two classes ends it: what is swept is whole, and the
+  # rest waits for the next one.
   def self.local_sweep(record : UInt64, id : UInt64, parity : UInt64, idle : Bool) : Bool
     table = Pointer(UInt64).new(record)
     kept_bytes = 0_u64
     freed = 0_u64
+    sweep_weak(record, id, parity)
     index = 0
     while index < CLASSES
       runs = record &+ (FILL + index).to_u64 * 8_u64
@@ -1762,6 +1779,10 @@ class IyiHeap
         end
         table[index] = list
         class_unlock(index)
+        if record == @@stop_sweep_record && index == @@stop_sweep_after
+          @@stop_sweep_record = 0_u64
+          return false
+        end
       end
       index = index + 1
     end
@@ -1793,7 +1814,6 @@ class IyiHeap
       end
       unlock
     end
-    sweep_weak(record)
     stat_add(pointerof(@@local_freed).address, freed)
     account_live(record, kept_bytes)
     write64(record &+ REC_DEBT, 0_u64)
@@ -1904,14 +1924,22 @@ class IyiHeap
     table_add(record &+ REC_WEAK, cell)
   end
 
-  # After a local sweep: a cell whose target's chunk the sweep freed is
+  # Before a local sweep frees anything: a cell whose target's chunk the
+  # sweep frees - carved, `LOCAL`, without *parity* - or freed already is
   # cleared, and leaves the list; one whose target is not the
   # partition's any more (published - the global clear's then) leaves it.
-  def self.sweep_weak(record : UInt64) : Nil
+  # Not after the sweep: an empty run goes to the pool in the sweep, and
+  # another worker's unit took and carved it before a pass after the
+  # sweep looked, which dropped the cell uncleared, naming that unit's
+  # object, and the verifier reported "a weak cell names a chunk the
+  # partition's local sweep freed" once that unit freed it
+  # (bench/heap_verify_reach.iyi, 4 workers, Linux, 46 runs of 120); and
+  # a sweep stopped between two classes freed chunks no pass cleared the
+  # cells to before the unit allocated them again.
+  def self.sweep_weak(record : UInt64, id : UInt64, parity : UInt64) : Nil
     slot = record &+ REC_WEAK
     count = table_count(slot)
     return if count == 0
-    id = read64(record &+ REC_ID)
     kept = 0_u64
     k = 0_u64
     while k < count
@@ -1922,9 +1950,12 @@ class IyiHeap
         arena = arena_of(target)
         if arena != 0 && partition_arena?(arena) && target >= arena_first(arena) && head_of(arena, target) < read64(arena + OFF_HIGH)
           chunk_slot = chunk_index(arena, target)
-          if read8(arena + META + chunk_slot * META_ENTRY) & FREE_FLAG != 0
+          bits = read8(arena + META + chunk_slot * META_ENTRY)
+          flags = read8(own_address(arena, chunk_slot))
+          mine = owner_in_arena(arena, target) == id && flags & OWN_PUB == 0
+          if bits & FREE_FLAG != 0 || (mine && bits & CARVED_FLAG != 0 && flags & OWN_LMARK != parity)
             write64(cell, 0_u64)
-          elsif owner_in_arena(arena, target) == id && read8(own_address(arena, chunk_slot)) & OWN_PUB == 0
+          elsif mine
             keep = true
           end
         end

@@ -9,7 +9,8 @@
 # without being pinned, a partition that answer detached still
 # collected locally, a death that frees a pinned unit's partition,
 # a local mark blind to the unit's other fibers, a local sweep that
-# leaves a weak cell naming the chunk it freed, a local mark that trusts
+# leaves a weak cell naming the chunk it freed, a weak pass after the
+# sweep, which a stop between two classes skips, a local mark that trusts
 # the parities a mark abandoned part way left, an idle takeover that
 # reads no parked fiber's stack, an idle takeover of a unit
 # whose `Unit` value is still being built, a dead unit's pooled run
@@ -185,7 +186,16 @@ if [ "$PART" = all ] || [ "$PART" = broken ]; then
   # The local sweep frees a weak target and leaves its cell naming the
   # freed chunk.
   prove_fails "a weak cell left on a freed target" noweak "weak:" \
-    '/def self\.sweep_weak\(record : UInt64\) : Nil/ { inside = 1 } inside && /^            write64\(cell, 0_u64\)$/ { inside = 0; found = 1; next } { print } END { if (!found) exit 3 }' \
+    '/def self\.sweep_weak\(record : UInt64, id : UInt64, parity : UInt64\) : Nil/ { inside = 1 } inside && /^            write64\(cell, 0_u64\)$/ { inside = 0; found = 1; next } { print } END { if (!found) exit 3 }' \
+    heap_partition.iyi
+
+  # The weak pass after the sweep, as it was: a sweep stopped between
+  # two classes returns before it, and the cells to the chunks it freed
+  # name them still. (With the stop not asked, it clears what the sweep
+  # freed; an empty run the sweep pooled was taken by another worker's
+  # unit before it looked, which no single run shows.)
+  prove_fails "a weak pass after the local sweep" noweakfirst "weak:" \
+    '/^    sweep_weak\(record, id, parity\)$/ { found = found + 1; next } /^    stat_add\(pointerof\(@@local_freed\)\.address, freed\)$/ { print "    sweep_weak(record, id, parity)"; found = found + 1 } { print } END { if (found != 2) exit 3 }' \
     heap_partition.iyi
 
   # The mark bits an abandoned local mark left trusted by the next one:

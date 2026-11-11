@@ -20,7 +20,7 @@
 # Every run is one line of OUT/NAME/results: `seed words workers exit
 # verdict seconds detail`. The verdicts: `pass` (exit 0 and the program's
 # line of success), `report` (an `iyi: heap_verify:` report: the run is
-# kept as OUT/NAME/s<seed>w<words>.{out,err}), `poison` (a read of the
+# kept as OUT/NAME/s<seed>w<words>[-claim].{out,err}), `poison` (a read of the
 # poison-on-free pattern 0xdeaddeaddeaddead, or a crash), `hang` (ended at
 # LIMIT seconds; the detail is the last line it printed), `fail` (anything
 # else). `summary` counts them.
@@ -29,8 +29,10 @@
 # LIMIT the seconds a run may take (default 600); `WORDS="0"` or `"1"`
 # runs a seed without or with the false words only; `STRESS=0` runs without
 # the stress (a control: a slow run from a hung one). The reach program
-# runs print-only (`HEAP22_PRINT_ONLY=1`): every claim is checked in each
-# run, and a failed run's detail names every claim whose check failed.
+# runs once per claim (`REACH_PARTS`, default all nine), print-only
+# (`HEAP22_PRINT_ONLY=1`), since a verifier report ends a run: one claim
+# that does not hold hides none of the others; its lines start `[claim]`.
+# A report's detail ends with the first name heap_verify_names.py gave it.
 
 set -u
 
@@ -91,11 +93,13 @@ build_one() {
   echo "$name: built"
 }
 
+# run_one NAME SEED WORDS [PART]: one run; PART, the reach program's one
+# claim to check (its argument).
 run_one() {
-  local name="$1" seed="$2" words="$3" dir workers tag code verdict detail ok
+  local name="$1" seed="$2" words="$3" part="${4:-}" dir workers tag code verdict detail ok
   dir="$OUT/$name"
   workers=$((seed % 2 == 1 ? 1 : 4))
-  tag="s${seed}w${words}"
+  tag="s${seed}w${words}${part:+-$part}"
   ok="$(success_of "$name")"
   local -a env_words=(IYI_CHAOS="$seed" IYI_HEAP_STRESS="${STRESS:-1}")
   [ "$name" = reach ] && env_words+=(HEAP22_PRINT_ONLY=1)
@@ -119,7 +123,8 @@ run_one() {
       code=$?
       ;;
     *)
-      env "${env_words[@]}" IYI_WORKERS="$workers" timeout -k 10 "$LIMIT" "$dir/program$EXE" \
+      # shellcheck disable=SC2086
+      env "${env_words[@]}" IYI_WORKERS="$workers" timeout -k 10 "$LIMIT" "$dir/program$EXE" $part \
         >"$dir/$tag.out" 2>"$dir/$tag.err"
       code=$?
       ;;
@@ -132,6 +137,7 @@ run_one() {
     # The report named (types, fields, data symbols, sites) beside it.
     "$PY" "$REPO/bench/heap_verify_names.py" --types "$dir/types.json" --binary "$dir/program$EXE" \
       "$dir/$tag.err" >"$dir/$tag.named" 2>/dev/null
+    detail="$detail $(grep -o '\[[^]]*\]' "$dir/$tag.named" | head -1)"
   elif grep -qi "deaddeaddeaddead" "$dir/$tag.err" "$dir/$tag.out"; then
     verdict=poison
     detail="$(grep -ih -m1 deaddeaddeaddead "$dir/$tag.err" "$dir/$tag.out" | head -1 | cut -c1-160)"
@@ -147,8 +153,8 @@ run_one() {
   else
     verdict=fail
     detail="$( (grep -m1 'FAIL\|panic\|error' "$dir/$tag.out" "$dir/$tag.err" || tail -1 "$dir/$tag.err") | head -1 | cut -c1-160)"
-    [ "$name" = reach ] && detail="claims failing: $(sed -n 's/^FAIL: \([a-z_]*\):.*/\1/p' "$dir/$tag.out" | sort -u | tr '\n' ' ')| $detail"
   fi
+  detail="${part:+[$part] }$detail"
   echo "$seed $words $workers $code $verdict ${took}s $detail" >>"$dir/results"
   # Passing runs leave nothing behind.
   [ "$verdict" = pass ] && rm -f "$dir/$tag.out" "$dir/$tag.err"
@@ -166,7 +172,15 @@ case "${1:-}" in
     name="$2"
     seed="$3"
     while [ "$seed" -le "$4" ]; do
-      for words in ${WORDS:-0 1}; do run_one "$name" "$seed" "$words"; done
+      for words in ${WORDS:-0 1}; do
+        if [ "$name" = reach ]; then
+          for part in ${REACH_PARTS:-stdio weak env threads tls_roots http_tls random lazy panic}; do
+            run_one "$name" "$seed" "$words" "$part"
+          done
+        else
+          run_one "$name" "$seed" "$words"
+        fi
+      done
       seed=$((seed + 1))
     done
     ;;

@@ -141,10 +141,10 @@ copy() {
     status=1
     return
   fi
-  build "$name" "$flags" "$dir${PSEP}$REPO/src" || return
+  build "$name-bin" "$flags" "$dir${PSEP}$REPO/src" || return
   local only=""
   [ "$want" = 86 ] && only=1
-  env ${only:+HEAP22_PRINT_ONLY=1} timeout 600 "$WORK/$name" "$@" >"$dir/run.out" 2>"$dir/run.err"
+  env ${only:+HEAP22_PRINT_ONLY=1} timeout 600 "$WORK/$name-bin" "$@" >"$dir/run.out" 2>"$dir/run.err"
   local code=$?
   if [ "$code" -ne "$want" ]; then
     echo "  $label: missed (exit $code, wanted $want)"

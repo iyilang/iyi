@@ -36,6 +36,8 @@
 # - `frontier:` a unit allocates 16-byte strings until one is the last
 #   chunk of a run off the carve frontier with its head below the run's
 #   end and its address on it; published, it is not `LOCAL` any more.
+#   Another drops four such strings, each with a weak cell, and collects:
+#   no cell names a chunk the collection freed.
 # - `stale:` a dead unit's object, on a run that went to the pool whole,
 #   is no object to a stale word: the collector's root test
 #   (`IyiRoots.base_of`) rejects its address.
@@ -439,10 +441,14 @@
   # ── detach ────────────────────────────────────────────────────────────
 
   # A list built in the unit's partition and answered into a box of the
-  # shared heap, as `IyiTask#finish` answers, in a frame of its own.
+  # shared heap, in a frame of its own: the store and the look
+  # `IyiTask#finish` takes after it (`IyiHeap.answer`), the look called by
+  # itself, so the copy that drops it from `answer` (noanswer) passes here
+  # and meets `answer:`.
   @[NoInline]
   def stash_answer(box : Array(Node?)) : Nil
-    IyiHeap.answer(box, build(3000000000_i64, 300, 0))
+    box << build(3000000000_i64, 300, 0)
+    IyiHeap.answered(box.object_id, box.to_unsafe.address, 8_u64)
   end
 
   # The answered list is reachable only from the shared box, which no
@@ -569,6 +575,50 @@
     -2_i64
   end
 
+  # Weak cells to the first four 16-byte strings met whose chunks
+  # straddle their runs' ends, each string dropped, in a frame of their
+  # own; the strings between are kept, so the runs come off the frontier.
+  @[NoInline]
+  def straddling_cells(kept : Array(String), cells : Array(Pointer(UInt64))) : Nil
+    i = 0
+    while i < 1000000 && cells.size < 4
+      text = "z" * 16
+      address = text.object_id
+      arena = IyiHeap.arena_of(address)
+      if arena != 0_u64 && IyiHeap.head_of(arena, address) < IyiHeap.arena_high(arena) && address >= IyiHeap.arena_high(arena)
+        cells << IyiWeak.cell(address)
+      else
+        kept << text
+      end
+      i = i + 1
+    end
+  end
+
+  # The weak cell of such a string is the partition's to clear: the
+  # chunk's owner registers it (`IyiHeap.weak_registered`, through
+  # `owner_in_arena`) and the local sweep that frees the chunk clears it
+  # (`sweep_weak`). Both tested the address against the frontier before
+  # f383934c7, which would leave the cell naming the freed chunk.
+  # A cell that still names a live chunk is a string a stale word kept,
+  # which is no failure. Answers how many of the strings were freed with
+  # their cells cleared, -1 if a cell names a freed chunk, -2 if no
+  # string in a million straddled, -3 if no local collection ran.
+  def frontier_weak_task : Int64
+    kept = [] of String
+    cells = [] of Pointer(UInt64)
+    straddling_cells(kept, cells)
+    return -2_i64 if cells.empty?
+    scrub_stack
+    return -3_i64 unless collect_now
+    cleared = 0_i64
+    cells.each do |cell|
+      word = cell.value
+      return -1_i64 if word != 0_u64 && IyiRoots.base_of(word) == 0_u64
+      cleared = cleared &+ 1_i64 if word == 0_u64
+    end
+    cleared
+  end
+
   def frontier_check : Nil
     group do |g|
       handle = g.spawn(unit: :new) { frontier_task }
@@ -576,6 +626,12 @@
       fail("frontier: the unit answered #{value}") unless value.is_a?(Int64)
       fail("frontier: a published string whose chunk straddles its run's end, its address on the carve frontier, is still local") if value == -1_i64
       fail("frontier: no string in a million was a run's last chunk with its address on the frontier") if value == -2_i64
+      weak = g.spawn(unit: :new) { frontier_weak_task }.value
+      fail("frontier: the weak unit answered #{weak}") unless weak.is_a?(Int64)
+      fail("frontier: a weak cell to a dropped string whose chunk straddles its run's end names the chunk its unit's collection freed") if weak == -1_i64
+      fail("frontier: no string in a million was a run's last chunk with its address on the frontier, for the weak cells") if weak == -2_i64
+      fail("frontier: no local collection ran in 100 tries, for the weak cells") if weak == -3_i64
+      fail("frontier: none of four dropped strings on the frontier was freed by their unit's collection") if weak == 0_i64
     end
     settle("frontier")
   end
@@ -917,10 +973,14 @@
           waited = waited + 1
         end
       end
-      broken(keep, base, 300)
+      # The count before the walk: a unit taken under construction was
+      # collected with this stack unread, and the copy that lets the
+      # takeover walked the freed list into a memory fault rather than
+      # reaching this check (tssh, 933b4d005).
+      IyiHeap.takeovers != takeovers ? -1_i64 : broken(keep, base, 300)
     end
-    fail("construct: an idle worker collected a unit whose value was being built, and #{wrong} nodes of it read wrong") if wrong != 0_i64
     fail("construct: an idle worker took a unit with no fiber and no value slot") if IyiHeap.takeovers != takeovers
+    fail("construct: an idle worker collected a unit whose value was being built, and #{wrong} nodes of it read wrong") if wrong != 0_i64
     IyiRuntimeLock.lock
     unit.heap = 0_u64
     IyiRuntimeLock.unlock
@@ -967,15 +1027,17 @@
   IyiHeap.collect_every_park = true
   # In this order, so that each broken copy of bench/heap_local.sh meets
   # its own check before any other could notice it: `abandon` first, as
-  # a real stop abandons local marks in any check that collects.
+  # a real stop abandons local marks in any check that collects; `detach`
+  # before `answer`, whose units hold detached partitions until they die:
+  # the nodetach copy ended at `answer:` once (Linux, 933b4d005).
   abandon_check
   frontier_check
   filter_check
   stale_check
   free_check
   return_check
-  answer_check(workers)
   detach_check
+  answer_check(workers)
   pin_check
   poison_check
   graphs_check(workers, rounds)

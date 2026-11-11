@@ -11,8 +11,9 @@
 # leaves a weak cell naming the chunk it freed, a local mark that trusts
 # the parities a mark abandoned part way left, an idle takeover of a unit
 # whose `Unit` value is still being built, a dead unit's pooled run
-# left carved for a stale word to pass the root test, and a publication
-# walk that takes a chunk straddling the carve frontier for uncarved.
+# left carved for a stale word to pass the root test, a publication
+# walk that takes a chunk straddling the carve frontier for uncarved,
+# and an owner test and a weak sweep that do the same to a weak cell.
 # The copies' verifier reports and goes on, so each copy must reach the
 # program's own check. Last, the same
 # program cross-compiled to an object for each of the nine targets the
@@ -205,6 +206,19 @@ if [ "$PART" = all ] || [ "$PART" = broken ]; then
   prove_fails "a frontier test of the word" nofrontier "frontier:" \
     '/# The head against the frontier, not the word/ { print; getline; if (sub(/return 0_u64 if head >= read64\(arena &\+ OFF_HIGH\)$/, "return 0_u64 if word >= read64(arena \\&+ OFF_HIGH)")) found = 1 } { print } END { if (!found) exit 3 }' \
     heap_partition.iyi
+
+  # The owner test's frontier test made of the address: a weak cell to a
+  # string whose chunk straddles its run's end is never registered with
+  # the partition, and the local sweep that frees the string leaves it.
+  prove_fails "an owner test of the word, for weak cells" noweakowner "frontier:" \
+    '/def self\.owner_in_arena\(arena : UInt64, address : UInt64\) : UInt64/ { inside = 1 } inside && sub(/return 0_u64 if head >= read64\(arena &\+ OFF_HIGH\)$/, "return 0_u64 if address >= read64(arena \\&+ OFF_HIGH)") { found = 1; inside = 0 } { print } END { if (!found) exit 3 }' \
+    heap_partition.iyi
+
+  # The weak sweep's frontier test made of the target: the cell is
+  # registered, and the sweep that frees its chunk drops it uncleared.
+  prove_fails "a weak sweep's frontier test of the word" noweaksweep "frontier:" \
+    '{ if (sub(/head_of\(arena, target\) < read64\(arena \+ OFF_HIGH\)/, "target < read64(arena + OFF_HIGH)")) found = found + 1; print } END { if (found != 1) exit 3 }' \
+    heap_partition.iyi
 fi
 
 # The nine targets, each to an object (`--cross-compile` links nothing),
@@ -230,6 +244,18 @@ if [ "$PART" = all ] || [ "$PART" = cross ]; then
       else
         built=0
       fi
+      # tssh's compiler links an LLVM with the x86 and aarch64 back ends
+      # only, and says so for wasm32-wasi and arm-linux-gnueabihf with or
+      # without the flag: the machine cannot build those targets, which
+      # says nothing of the flag.
+      backend=""
+      if [ "$built" -eq 0 ] && [ "$(grep -c '^Error: ' "$out.log")" -eq 1 ]; then
+        backend="$(sed -n "s/^Error: [^ ]* needs LLVM's \([A-Za-z0-9]*\) back end.*/\1/p" "$out.log")"
+      fi
+      if [ -n "$backend" ]; then
+        echo "  $label: skipped, this compiler's LLVM has no $backend back end"
+        continue
+      fi
       if [ "$target" = arm-linux-gnueabihf ]; then
         if [ "$built" -eq 0 ] && [ "$(grep -c '^Error: ' "$out.log")" -eq 1 ] &&
            grep -q "^Error: iyi: this target is not one iyi's prelude has platform bindings for" "$out.log"; then
@@ -239,15 +265,6 @@ if [ "$PART" = all ] || [ "$PART" = cross ]; then
           sed -n '1,12p' "$out.log"
           status=1
         fi
-        continue
-      fi
-      # tssh's compiler links an LLVM with the x86 and aarch64 back ends
-      # only, and says so for wasm32-wasi with or without the flag: the
-      # machine cannot build that target, which says nothing of the flag.
-      if [ "$built" -eq 0 ] && [ "$target" = wasm32-wasi ] &&
-         [ "$(grep -c '^Error: ' "$out.log")" -eq 1 ] &&
-         grep -q "^Error: wasm32-unknown-wasi needs LLVM's WebAssembly back end" "$out.log"; then
-        echo "  $label: skipped, this compiler's LLVM has no WebAssembly back end"
         continue
       fi
       if [ "$built" -eq 0 ]; then

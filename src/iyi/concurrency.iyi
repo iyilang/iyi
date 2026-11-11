@@ -7099,6 +7099,11 @@ class IyiTask(T)
       return Panicked.new(@fiber.panic_message)
     end
     return Panicked.new("a task stopped by its cancellation has no value") if @box.empty?
+    # A reader in a partitioned unit that takes a graph not its own is
+    # pinned first (heap22, `IyiHeap.adopt_answer`).
+    {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) %}
+      IyiHeap.adopt_answer(@box.to_unsafe.address, sizeof(T).to_u64)
+    {% end %}
     @box.first
   end
 end

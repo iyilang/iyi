@@ -31,7 +31,9 @@
 #      expected order exits 1).
 #   5. On Windows, the switch's xmm6-xmm15 restore taken out of a copy of
 #      the runtime fails the exercise's doubles check by name, in the
-#      --release build that keeps doubles in those registers.
+#      --release build that keeps doubles in those registers; and a copy
+#      whose stop keeps the volatile registers of a thread stopped inside
+#      a system call fails the rendezvous retention check by name.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -681,6 +683,49 @@ case "$(uname -s)" in
     ;;
   *)
     step "failure proof: a switch that drops xmm6-xmm15 is caught: not here, because this platform's calling convention keeps no xmm register across a call"
+    ;;
+esac
+
+# ── 5b. Failure proof: a thread stopped in a system call, on Windows ─────
+# A stop reads every other thread's registers with GetThreadContext, and
+# for a thread inside a system call the volatile ones - rax, rcx, rdx and
+# r8 to r11 - are not the thread's: the kernel did not save them when it
+# was entered, and the context hands back whatever its trap frame last
+# held. `capture_thread_registers` (prelude.iyi) asks with
+# CONTEXT_EXCEPTION_REQUEST and drops them when the answer says the
+# thread is in a system service. The copy keeps them: an idle worker
+# stopped in NtWaitForMultipleObjects keeps the rendezvous' 64 MB string
+# through a stale r8, in the build with -Dheap_partitions (tssh: 5 runs
+# of 5 with the registers kept, 0 of 5 without). Only Windows answers a
+# context that way.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    step "failure proof: a stop that keeps a system call's volatile registers is caught"
+    mkdir -p volatile/iyi
+    cp -R "$REPO/src/iyi/." volatile/iyi/
+    awk '{ if ($0 == "          in_call = flags & 0x80000000_u64 != 0_u64 && flags & 0x10000000_u64 != 0_u64") { print "          in_call = false"; found = found + 1; next } print }
+         END { if (found != 1) exit 3 }' \
+      "$REPO/src/iyi/prelude.iyi" > volatile/iyi/prelude.iyi
+    if [ $? -ne 0 ]; then
+      echo "the test this proof takes out is not in capture_thread_registers any more; update the proof"
+      exit 1
+    fi
+    if ! IYI_PATH="$WORK/volatile;$REPO/src" "$IYI" build -Dheap_partitions "$REPO/bench/concurrency_exercise.iyi" \
+         -o volatile-exercise > build-volatile.log 2>&1; then
+      echo "the patched runtime did not build:"
+      tail -5 build-volatile.log
+      exit 1
+    fi
+    timeout 120 ./volatile-exercise > volatile.txt 2>&1
+    if [ $? -ne 1 ] || ! grep -q 'FAIL: channel: 64 MB received through a rendezvous left' volatile.txt; then
+      echo "a stop that keeps a system call's volatile registers passed the rendezvous check, so it checks nothing:"
+      tail -5 volatile.txt
+      exit 1
+    fi
+    echo "  caught: $(grep -m1 'FAIL: channel' volatile.txt)"
+    ;;
+  *)
+    step "failure proof: a stop that keeps a system call's volatile registers is caught: not here, because only Windows answers a thread's context with registers the kernel did not save"
     ;;
 esac
 

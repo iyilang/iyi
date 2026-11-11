@@ -38,8 +38,13 @@ case "$(uname -s)" in
 esac
 trap 'rm -rf "$WORK"' EXIT
 
-# The copies whose loss the verifier cannot see, and why: none.
-declare -A OWN_ONLY=()
+# The copies whose loss the verifier cannot see, and why: none. A
+# function, not an associative array, for macOS's bash 3.2.
+own_only() { # copy
+  case "$1" in
+    *) echo "" ;;
+  esac
+}
 
 status=0
 
@@ -155,14 +160,15 @@ prove_caught() { # label copy check
     own="**missed** (exit $code)"
     status=1
   fi
-  local verifier
+  local verifier reason
   verifier="$(verifier_caught "$copy" "$check")"
-  if [ -n "${OWN_ONLY[$copy]:-}" ]; then
+  reason="$(own_only "$copy")"
+  if [ -n "$reason" ]; then
     if [ -n "$verifier" ]; then
-      echo "  $label: listed as own check only, but the verifier caught it: drop it from OWN_ONLY"
+      echo "  $label: listed as own check only, but the verifier caught it: drop it from own_only"
       status=1
     fi
-    verifier="own check only: ${OWN_ONLY[$copy]}"
+    verifier="own check only: $reason"
   elif [ -z "$verifier" ]; then
     echo "  $label: the verifier missed it ($(cat "$WORK/broken-$copy.missed"))"
     sed -n '1,6p' "$WORK/broken-$copy.v1.out" | sed 's/^/    /'

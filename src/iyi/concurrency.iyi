@@ -7666,6 +7666,15 @@ module IyiCross
   end
 
   # The block, allocating in the shared heap (`IyiHeap.shared`).
+  #
+  # `IyiOnce.run` runs a constant's initializer first run by a read here
+  # (heap22, contract amendment 6b): the first read may be a pool unit's,
+  # and the graph the initializer builds is held by a global its
+  # partition's local collection never scans, so built in the unit's
+  # partition it was nobody's to keep. An initializer run at its
+  # declaration runs on the main fiber, which allocates in the shared heap
+  # already. An initializer that panics ends its fiber still allocating in
+  # the shared heap, which is sound.
   def self.shared(&)
     {% if flag?(:heap_partitions) %}
       IyiHeap.shared { yield }

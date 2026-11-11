@@ -10443,6 +10443,17 @@ require "./file"
     RETURNED          = 96_u64
     LARGE_FREED       = 97_u64
     LOCAL_PAUSES      = 98_u64
+    # Drained runs a partition took (`IyiHeap.adopt_drained`), and the
+    # ones it found too full and parked.
+    RUNS_ADOPTED      = 99_u64
+    RUNS_PARKED       = 100_u64
+    # The partitions' pool by age (`IyiHeap.turn_pools`, `cool_pools`):
+    # when it last turned, whether runs wait on a release list, the class
+    # the next release looks at first, and the runs released.
+    POOL_TURNED_NS    = 101_u64
+    COOL_PENDING      = 102_u64
+    COOL_CURSOR       = 103_u64
+    RUNS_COOLED       = 111_u64
     # The verifier (heap_verify.iyi).
     VERIFY_STRESS       = 104_u64
     VERIFY_STRESS_TICK  = 105_u64
@@ -10465,6 +10476,10 @@ require "./file"
     CHAOS_LATE_STEPS   = 122_u64
     CHAOS_FLOOR        = 123_u64
     CHAOS_STREAK       = 124_u64
+    # Partition slices held under a mark (`IyiHeap.hold_partition`), and
+    # the holds that ran out of time.
+    PARTITION_HOLDS           = 125_u64
+    PARTITION_HOLDS_TIMED_OUT = 126_u64
     # Idle collections (heap_partition.iyi, `take_over_quiet`): their
     # count, the idle clock's tick and when it last turned, whether a
     # parked dirty partition may be waiting, and the walk over records.

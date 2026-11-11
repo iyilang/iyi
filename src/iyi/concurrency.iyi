@@ -4260,8 +4260,10 @@ class IyiScheduler
       {% end %}
     end
     # A pool worker with nothing to run wakes at the idle clock's tick
-    # while a parked unit's partition may be waiting for it (heap22 S6,
-    # `IyiHeap.take_over_quiet`): the wake finds no news and the worker
+    # while a parked unit's partition may be waiting for it, and at the
+    # pool's turn while pooled runs still hold their pages (heap22 S6,
+    # `IyiHeap.take_over_quiet`, `IyiHeap.turn_pools`): the wake finds no
+    # news, and the worker's `take_over_idle` gives the pages back and
     # looks for a partition to collect before it waits again.
     {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) %}
       timeout = IyiHeap.idle_wait_ms(timeout) if blocking && st.worker

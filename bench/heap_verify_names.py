@@ -11,11 +11,12 @@ the binary's own symbols:
 
 Every `type_id=N` gains the type's name; a holder's `field +O` the
 instance variable at that offset; `allocated at: image+0x...` and a data
-segment word `image+0x...` the function and line or the symbol (nm)
-there. Sites are read from the binary's debug information by addr2line
-(ELF), atos (Mach-O, from the `.dwarf` companion the build leaves beside
-the program) or llvm-symbolizer (PE, from its `.pdb`; ELF without
-addr2line). Lines it cannot name are passed through unchanged.
+segment word `image+0x...` the function and line or the symbol there
+(nm; a PE's from its `.pdb` publics, by llvm-pdbutil). Sites are read
+from the binary's debug information by addr2line (ELF), atos (Mach-O,
+from the `.dwarf` companion the build leaves beside the program) or
+llvm-symbolizer (PE, from its `.pdb`; ELF without addr2line). Lines it
+cannot name are passed through unchanged.
 """
 
 import argparse
@@ -88,6 +89,11 @@ def image_base(binary):
 ESCAPE_RE = re.compile(r"\.([0-9A-F]{2})\.")
 # atos: `fn (in program.dwarf) (file:line)`, or `fn (in program) + 12`.
 ATOS_RE = re.compile(r"^(.*?) \(in [^)]*\)(?: \((.*)\)| \+ \d+)?$")
+# llvm-pdbutil: a section header's `<hex> virtual address`, a public's
+# name line and its `flags = ..., addr = <section>:<offset>` line.
+PDB_SECTION_RE = re.compile(r"^\s*([0-9A-Fa-f]+) virtual address$", re.M)
+PDB_NAME_RE = re.compile(r"S_PUB32 \[size = \d+\] `(.*)`$")
+PDB_ADDR_RE = re.compile(r"flags = (.*), addr = (\d+):(\d+)$")
 
 
 class Symbols:
@@ -112,6 +118,40 @@ class Symbols:
                         self.names.append(parts[2])
                     except ValueError:
                         pass
+        if self.format == "pe" and not self.addresses:
+            self.pdb_publics()
+
+    def pdb_publics(self):
+        """A PE keeps no symbol table nm reads; its data symbols are the
+        `.pdb`'s publics, each a section and an offset (llvm-pdbutil)."""
+        pdb = os.path.splitext(self.binary)[0] + ".pdb"
+        if not os.path.exists(pdb) or not shutil.which("llvm-pdbutil"):
+            return
+        try:
+            heads = subprocess.run(["llvm-pdbutil", "dump", "--section-headers", pdb],
+                                   capture_output=True, text=True, check=False).stdout
+            publics = subprocess.run(["llvm-pdbutil", "dump", "--publics", pdb],
+                                     capture_output=True, text=True, check=False).stdout
+        except OSError:
+            return
+        starts = [int(m.group(1), 16) for m in PDB_SECTION_RE.finditer(heads)]
+        found = []
+        name = None
+        for line in publics.splitlines():
+            match = PDB_NAME_RE.search(line)
+            if match:
+                name = match.group(1)
+                continue
+            match = PDB_ADDR_RE.search(line)
+            if match and name is not None:
+                section, offset = int(match.group(2)), int(match.group(3))
+                if "function" not in match.group(1) and 1 <= section <= len(starts):
+                    found.append((self.base + starts[section - 1] + offset,
+                                  ESCAPE_RE.sub(lambda m: chr(int(m.group(1), 16)), name)))
+                name = None
+        found.sort()
+        self.addresses = [address for address, _ in found]
+        self.names = [text for _, text in found]
 
     def vaddr(self, image_offset):
         if self.base is None:

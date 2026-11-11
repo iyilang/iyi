@@ -95,7 +95,7 @@ run_case "release" release "--release"
 case "$FLAGS" in
   *heap_partitions*) ;;
   *)
-    if grep -q "runs in the shared heap" "$WORK/plain.build.log"; then
+    if grep -qE "runs in the shared heap|to the shared heap for good" "$WORK/plain.build.log"; then
       echo "flag-off: a pin note was printed without partitions"
       status=1
     fi
@@ -116,6 +116,32 @@ if [ "$pins" -ge 1 ] && [ "$lent" -eq 0 ]; then
 else
   echo "  pin notes: $pins for \`pool\` (want 1+), $lent for \`lent\` (want 0)"
   sed -n '1,20p' "$WORK/plain.build.log"
+  status=1
+fi
+# The blocks handed to the router's `@[Share]` defs: each call is noted,
+# and so is each `SharedProc.of` that wraps them; the spawns that call the
+# `SharedProc`s are not pinned themselves (the `SharedProc` pins them at
+# the call). The `spawn(in: u)` block pins its unit, and says so.
+noted() { # text
+  grep -qF "$1" "$WORK/plain.build.log"
+}
+for want in \
+  "\`Router.direct\` keeps this block for other units, and the crossing that runs it runs in the shared heap because it captures \`pool\`" \
+  "\`Router.through\` keeps this block for other units, and the crossing that runs it runs in the shared heap because it names \`ROUTED_POOL\`" \
+  "SharedProc.of runs its block in the shared heap because it runs the block at heap_codegen.iyi:" \
+  "SharedProc.of runs its block in the shared heap because it reaches \`ROUTED_POOL\` through \`the block at heap_codegen.iyi:" \
+  "this spawn pins the unit it runs in, \`u\`, to the shared heap for good, because it captures \`pool\`"; do
+  if noted "$want"; then
+    echo "  noted: $(echo "$want" | cut -c1-110)"
+  else
+    echo "  missing pin note: $want"
+    status=1
+  fi
+done
+spawns="$(grep -c "this spawn runs in the shared heap because" "$WORK/plain.build.log")"
+if [ "$spawns" -ne 1 ]; then
+  echo "  $spawns spawns noted pinned, want 1 (pin's): the router's callers must be pinned by their SharedProc, not by the compiler"
+  grep "this spawn runs in the shared heap because" "$WORK/plain.build.log" | sed 's/^/    /'
   status=1
 fi
 
@@ -193,6 +219,9 @@ prove_caught "C1 typed crossing context" c1 c1
 prove_caught "class-variable store publish" classvar-publish classvar
 prove_caught "trusted types born shared" new-shared born_shared
 prove_caught "pin (forced off)" pin pin
+prove_caught "pin through a @[Share] def's block (SharedProc.of binds no block)" handed handed
+prove_caught "pin through a block handed to a helper (not followed)" forwarded handed
+prove_caught "pin of a spawn(in: u) task (pinned: not passed)" pin-in pin_in
 
 echo
 echo "Seed $SEED (IYI_CHAOS), IYI_HEAP_STRESS=1, $RUNS verifier runs each with HEAP22_PRINT_ONLY=1."

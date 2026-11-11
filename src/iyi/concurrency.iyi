@@ -7325,12 +7325,24 @@ class IyiGroup
   # `Share`) and its answer to what `Mutex#get`'s is (`Share`, since it
   # leaves the unit while the unit lives on).
   def spawn(*, in owner : Unit(S), &block : S -> T) : IyiTask(T) forall S, T
+    {% if flag?(:heap_partitions) %}
+      # Never taken: types the pinned instance the cleanup points a call at when its block must run in the shared heap (heap22 `pinned:`, S6).
+      return spawn_in(owner, pinned: true, &block) if false
+    {% end %}
+    spawn_in(owner, pinned: false, &block)
+  end
+
+  # `spawn(in:)`'s body. *pinned*: the compiler's, when the block reaches
+  # an owning type without `lends:` (heap22 `pinned:`, contract §5 S6
+  # amendment): the task pins *owner*'s unit before it runs the block, and
+  # the unit allocates in the shared heap for the rest of its life.
+  private def spawn_in(owner : Unit(S), *, pinned : Bool, &block : S -> T) : IyiTask(T) forall S, T
     # The block's captures cross into the Unit's unit (heap22 row 1d), and
     # `work`, which another unit's fiber runs, is made in the shared heap.
     # Named outside the `{% if %}`: a block parameter read only inside one
     # is not captured.
     IyiCross.publish(block)
-    work = IyiCross.shared { unit_work(block, owner) }
+    work = IyiCross.shared { unit_work(block, owner, pinned) }
     {% if flag?(:gc_none) || flag?(:gc_boehm) %}
       # One thread: every task is a unit-mate of every other already.
       in_unit(&work)
@@ -7347,8 +7359,11 @@ class IyiGroup
   # the unit while the unit lives on, so it is published here, before
   # `IyiTask#finish` stores it (heap22 row 2b). It names the handle, never
   # the value: a body kept past a dead handle would name the freed value.
-  private def unit_work(block : S -> T, owner : Unit(S)) : Proc(T) forall S, T
+  # A pinned one pins the unit first (`IyiHeap.pin`, a no-op without
+  # partitions or once the unit is pinned).
+  private def unit_work(block : S -> T, owner : Unit(S), pinned : Bool) : Proc(T) forall S, T
     -> {
+      IyiHeap.pin if pinned
       answer = block.call(owner.iyi_value)
       IyiCross.publish(answer)
       answer

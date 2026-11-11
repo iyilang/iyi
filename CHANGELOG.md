@@ -147,7 +147,12 @@ cancelled task's and `exit`'s drain of a task's cleanups takes each
 node's link down, and a joined group's `outer` is cleared: a `Mutex`'s
 release node, or a group opened inside a lock block, both shared, kept
 naming a unit's chunk after the unit freed it (`-Dheap_verify` exit 86;
-bench/heap_crossings `defer_drain`, `defer_stop`, `group_outer`).
+bench/heap_crossings `defer_drain`, `defer_stop`, `group_outer`). The pin
+fallback now follows a block handed to a `@[Share]` def (iyi-web's router)
+and on to a helper, a `&block` forwarded to `SharedProc.of`, `Unit.new`
+or a spawn, and `g.spawn(in: u)` (which pins `u` for good); before, no
+`SharedProc.of` or `Unit.new` was ever pinned, and an app whose routes
+reached iyi-db's pool crashed at its first request (`.iyimod` v64).
 
 Two races older than heap22, in every build: units setting or deleting
 environment variables at once lost them (tmac, 6 units × 300 rounds at
@@ -27931,7 +27936,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 34,438-line library and nothing else. Every other
+  written against iyi's own 34,453-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

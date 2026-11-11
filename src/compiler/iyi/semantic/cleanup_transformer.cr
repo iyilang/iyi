@@ -912,6 +912,7 @@ module Iyi
         check_share_reach(block, a_def, thread)
       end
       check_block_captures(node, block, a_def, subject, consequence, thread, owning)
+      note_kept_pin(node, target_def) if thread && placement.nil? && target_def.iyi_share_block?
       # The block crosses into another unit or thread: its closure gets a
       # context of its own (heap22 C1), its struct captures boxed. A block
       # behind a lock does not cross, and may assign what it captures.
@@ -1026,6 +1027,7 @@ module Iyi
         into = node.named_args.try(&.find(&.name.==("in"))).try(&.value.to_s)
         reason = nil
         asked = true
+        pinned = pin_in_unit(node, target_def)
       end
       return unless location
       if placement.placed? && reason.nil? && !@spawn_claims.empty? && @program.iyi_rewrites_artifacts
@@ -1268,7 +1270,7 @@ module Iyi
       pass_pinned(node, pinned)
       if location = node.name_location || node.location
         location = location.expanded_location || location
-        @program.warnings.add_note(location, "this spawn runs in the shared heap because #{reason} (SPEC.md III.4.19)") if @pin_noted.add?(location.to_s)
+        @program.warnings.add_note(location, "this spawn runs in the shared heap because #{reason} (SPEC.md III.4.19)") if @pin_noted.add?(pin_key(node))
       end
       reason
     end
@@ -1290,7 +1292,7 @@ module Iyi
       location = node.name_location || node.location
       return unless location
       location = location.expanded_location || location
-      return unless @pin_noted.add?(location.to_s)
+      return unless @pin_noted.add?(pin_key(node))
       @program.iyi_pin_sites << PinSite.new(location, call, reason)
       @program.warnings.add_note(location, "#{call} runs its block in the shared heap because #{reason} (SPEC.md III.4.19)")
     end
@@ -1299,19 +1301,83 @@ module Iyi
     # spawn twice.
     @pin_noted = Set(String).new
 
+    # heap22 S6 (contract §5 amendment): `g.spawn(in: u) { }` runs its
+    # block in *u*'s unit, which may have a heap of its own. When the block
+    # reaches an owning type without `lends:`, the call is pointed at the
+    # `spawn_in(owner, pinned: true)` instance the def types beside itself
+    # on a never-taken `-Dheap_partitions` line, and its task pins *u*'s
+    # unit before it runs the block, for good. Answers why, or nil.
+    # `IYI_SPAWN_BROKEN=pin-in` leaves every such call unpinned.
+    private def pin_in_unit(node : Call, spawn_def : Def) : String?
+      return nil unless @program.has_flag?("heap_partitions")
+      return nil if SPAWN_BROKEN.includes?("pin") || SPAWN_BROKEN.includes?("pin-in")
+      owner = node.named_args.try(&.find(&.name.==("in"))).try(&.value)
+      return nil unless owner
+      reason = pin_reason(node)
+      return nil unless reason
+      pinned = typed_beside(spawn_def, "spawn_in", pinned: true)
+      return nil unless pinned
+      node.args = [owner] of ASTNode
+      pass_pinned(node, pinned)
+      if location = node.name_location || node.location
+        location = location.expanded_location || location
+        @program.warnings.add_note(location, "this spawn pins the unit it runs in, `#{owner}`, to the shared heap for good, because #{reason} (SPEC.md III.4.19)") if @pin_noted.add?(pin_key(node))
+      end
+      reason
+    end
+
+    # The note at a call handing a block to a `@[Share]` def that keeps it
+    # (`get "/" { }` on iyi-web's router): the crossing the def makes of the
+    # block, `SharedProc.of` around it, is pinned for that block
+    # (`pin_constructor`, through `ShareReach#bound`), and that crossing's
+    # note names the def's own line, one for every block of the def's
+    # instance; this one names the block's.
+    private def note_kept_pin(node : Call, target_def : Def) : Nil
+      return unless @program.has_flag?("heap_partitions")
+      return if SPAWN_BROKEN.includes?("pin") || CleanupTransformer.pinnable_call(target_def)
+      reason = pin_reason(node)
+      return unless reason
+      location = node.name_location || node.location
+      return unless location
+      location = location.expanded_location || location
+      return unless @pin_noted.add?(pin_key(node))
+      @program.warnings.add_note(location, "`#{ShareReach.called(target_def)}` keeps this block for other units, and the crossing that runs it runs in the shared heap because #{reason} (SPEC.md III.4.19)")
+    end
+
+    # The key a pin is noted once under: the call as written, not where a
+    # macro's expansion of it is said to be, so that two crossings one
+    # `{% if %}` or `{% for %}` expands are noted apart.
+    private def pin_key(node : Call) : String
+      (node.name_location || node.location).to_s
+    end
+
     # `Unit.new` or `SharedProc.of` when *target_def* is std's, else nil:
     # the calls besides a spawn that take the compiler's `pinned:`
-    # (contract §5), and which no other module may pass it.
+    # (contract §5), and which no other module may pass it. Asked of the
+    # type's own name in std's module of that name (`Std::Unit::Unit`,
+    # `Std::SharedProc::SharedProc`): the full name compared before S6
+    # never matched, so neither call was ever pinned, nor a module's own
+    # `pinned:` on it called unsafe.
     def self.pinnable_call(target_def : Def) : String?
       owner = target_def.owner
       return nil unless owner.metaclass?
       type = owner.instance_type
       type = type.generic_type.as(Type) if type.is_a?(GenericClassInstanceType)
+      return nil unless type.is_a?(NamedType) && std_module_type?(type)
       name = target_def.name.partition(':').first
-      case {type.to_s, name}
+      case {type.name, name}
       when {"Unit", "new"}      then "Unit.new"
       when {"SharedProc", "of"} then "SharedProc.of"
       end
+    end
+
+    # Whether *type* is the type of its own name in std's module of that
+    # name, as codegen's `iyi_born_shared_home?` reads it.
+    def self.std_module_type?(type : NamedType) : Bool
+      namespace = type.namespace
+      return false unless namespace.is_a?(NamedType) && namespace.name == type.name
+      std = namespace.namespace
+      std.is_a?(NamedType) && std.name == "Std" && std.namespace.is_a?(Program)
     end
 
     private def pass_pinned(node : Call, pinned : Def) : Nil
@@ -1321,87 +1387,27 @@ module Iyi
       node.named_args = [NamedArgument.new("pinned", value)]
     end
 
-    # Why the crossing at *node* must run in the shared heap, or nil: the
-    # first owning type outside std without `lends:` among the types of what
-    # its block captures, the module state it names and the module state it
-    # reaches through its calls (`ShareReach`), and the types those hold.
-    # std's own owning types (`Mutex`, `Unit`, `SharedProc`) implement their
-    # crossings in the runtime and do not pin (contract §6).
+    # Why the crossing at *node* must run in the shared heap, or nil
+    # (`ShareReach#pin_reason`): the first owning type outside std without
+    # `lends:` that its block, or any block it may run - a `@[Share]` def's
+    # block it wraps, as iyi-web's router wraps every route's - captures,
+    # names or reaches. A block forwarded as a proc, `SharedProc.of(&block)`,
+    # which only the `@[Share]` def's own block may be
+    # (`check_forwarded_block`), is asked for every block that parameter
+    # may be bound to; one the walk cannot bind pins.
     private def pin_reason(node : Call) : String?
-      fun_literal = node.block.try(&.fun_literal)
-      return nil unless fun_literal.is_a?(ProcLiteral)
-      a_def = fun_literal.def
-      held = [] of {Type, String}
-      vars = a_def.vars
-      captures_self = false
-      ClosuredVarsCollector.collect(a_def).each do |captured|
-        case captured
-        when InstanceVar
-          captures_self = true
-        when Var
-          if captured.name == "self"
-            captures_self = true
-            next
-          end
-          meta = vars.try &.[captured.name]?
-          next unless meta && !meta.belongs_to?(a_def)
-          meta.type?.try { |type| held << {type, "it captures `#{captured.name}`"} }
-        end
+      reach = @program.iyi_share_reach
+      if (fun_literal = node.block.try(&.fun_literal)).is_a?(ProcLiteral)
+        return reach.pin_reason([fun_literal.def], true, @current_def.try(&.owner))
       end
-      if captures_self && (self_type = @current_def.try(&.owner)) && !self_type.is_a?(Program) && !self_type.metaclass?
-        held << {self_type, "it captures `self`"}
+      forwarded = node.block_arg
+      return nil unless forwarded
+      current = @current_def
+      if forwarded.is_a?(Var) && current && reach.param?(current, forwarded.name)
+        reach.pin_reason(reach.bound_literals(current, forwarded.name), false, nil)
+      else
+        "its block is a proc, `&#{forwarded}`, and nothing says which blocks it may run"
       end
-      constants = NamedConstants.new
-      a_def.body.accept constants
-      constants.paths.each { |path, type| held << {type, "it names `#{path}`"} }
-      class_vars = NamedClassVars.new
-      a_def.body.accept class_vars
-      class_vars.vars.each { |class_var, var| var.type?.try { |type| held << {type, "it names `#{class_var.name}`"} } }
-      @program.iyi_share_reach.reach(a_def).each do |found|
-        named = found.named
-        held << {named.type, "it reaches `#{named.label}`"} if named.is_a?(ShareReach::Named)
-      end
-      seen = Set(Type).new
-      held.each do |type, how|
-        if owning = unlent_owning(type, seen, 0)
-          return "#{how}, which holds `#{owning}`, an owning type that does not keep the lend protocol: `@[Share(owns: true, lends: true)]` on it promises the protocol and lets the unit keep a heap of its own"
-        end
-      end
-      nil
-    end
-
-    # The first owning type without `lends:`, declared outside std, in
-    # *type* or what it holds: a union's members, a generic's arguments, a
-    # struct's or a class's fields.
-    private def unlent_owning(type : Type, seen : Set(Type), depth : Int32) : Type?
-      return nil if depth > 8 || !seen.add?(type)
-      base = type
-      base = base.base_type if base.is_a?(VirtualType)
-      generic = base.is_a?(GenericClassInstanceType) ? base.generic_type.as(Type) : base
-      if generic.iyi_share_owns? && !generic.iyi_share_lends? && !@program.iyi_share_reach.std_at?(generic.locations.try(&.first?))
-        return base
-      end
-      case base
-      when UnionType
-        base.union_types.each { |member| (found = unlent_owning(member, seen, depth + 1)) && return found }
-      when TupleInstanceType
-        base.tuple_types.each { |member| (found = unlent_owning(member, seen, depth + 1)) && return found }
-      when NamedTupleInstanceType
-        base.entries.each { |entry| (found = unlent_owning(entry.type, seen, depth + 1)) && return found }
-      end
-      if base.is_a?(GenericInstanceType)
-        base.type_vars.each_value do |var|
-          next unless var.is_a?(Var) && (held = var.type?)
-          (found = unlent_owning(held, seen, depth + 1)) && return found
-        end
-      end
-      if base.is_a?(InstanceVarContainer)
-        base.all_instance_vars.each_value do |ivar|
-          next unless held = ivar.type?
-          (found = unlent_owning(held, seen, depth + 1)) && return found
-        end
-      end
-      nil
     end
 
     # A refusal as a note's reason: the innermost exception's words, since

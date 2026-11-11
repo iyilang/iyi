@@ -34,9 +34,10 @@
 # - `pool`: six units take and give back three resources for thirty
 #   rounds each, hanging chains on them and collecting their partitions
 #   on the way.
-# - `defer`: a fiber's own cleanups below a held lock's release node
-#   (born in the shared heap) survive a collection of the unit's
-#   partition made while the lock is held.
+# - `defer`: a fiber's own cleanups below a shared node of its defer list
+#   - a held lock's release node, and one pushed by a call that returned,
+#   so that only the list names the nodes below it - survive a collection
+#   of the unit's partition.
 #
 # Without `-Dheap_partitions` nothing is collected locally and every
 # check passes: that build is the flag-off control.
@@ -467,18 +468,28 @@
     read_back(desk, 6, "foreign")
   end
 
-  # ── defer: a fiber's cleanups below a lock's shared release node ───────
+  # ── defer: a fiber's cleanups below a shared node of its defer list ────
   # Not a lend, but the same question of the local mark's roots: a held
   # `Mutex`'s release node, born in the shared heap, sits on the fiber's
-  # defer list over the unit's own nodes, and a collection while the lock
-  # is held - here from inside the lock block, as a stress point there
-  # would, the partition installed for it - must still reach the nodes
-  # below it.
+  # defer list over the unit's own nodes (`register_release`), and the
+  # mark follows no shared chunk's link, so the nodes below it are reached
+  # only by the walk of the list (`local_collect_in`, "Its cleanups, node
+  # by node"). Two shapes:
+  #
+  # - the lock itself: four cleanups, then a collection from inside the
+  #   lock block, as a stress point there would make it. The sound tree
+  #   must keep them; it shows nothing without the walk, since the frames
+  #   below the collection still name the top node - `__iyi_defer_push_node`
+  #   read it as the release node's `below` - which leads to the rest
+  #   (Linux, LendFix's c8 missed at e247c5b0f);
+  # - the list alone: the unit's nodes and a shared one over them pushed by
+  #   a call that returns, as `register_release` pushes, the stack below
+  #   scrubbed, then the collection. Nothing but the list names them, so
+  #   without the walk they are freed and `-Dheap_verify` reports the
+  #   shared node's `@next_node`, every run.
   @[NoInline]
   def defer_hold(m : Mutex(Int32), seed : Int32) : Nil
     witness = chain(seed)
-    # Four nodes, so that a frame's residue keeping one marked does not
-    # hide the others.
     defer check_chain(witness, seed, "defer: the first cleanup's chain, after a collection while the lock was held")
     defer check_chain(witness, seed, "defer: the second cleanup's chain")
     defer check_chain(witness, seed, "defer: the third cleanup's chain")
@@ -501,11 +512,64 @@
     {% end %}
   end
 
+  # The order the list's cleanups ran in, one decimal digit each: a
+  # scalar, which names nothing.
+  class DeferRan
+    @@order = 0_u64
+
+    def self.reset : Nil
+      @@order = 0_u64
+    end
+
+    def self.ran(digit : Int32) : Nil
+      @@order = @@order &* 10_u64 &+ digit.to_u64
+    end
+
+    def self.order : UInt64
+      @@order
+    end
+  end
+
+  # A cleanup made in the unit's partition, with a context of its own.
+  @[NoInline]
+  def local_cleanup(witness : Item, seed : Int32, index : Int32) : IyiDeferNode
+    IyiDeferNode.new(-> {
+      check_chain(witness, seed, "defer list: cleanup #{index}'s chain, after a collection below a shared node")
+      DeferRan.ran(index + 1)
+    })
+  end
+
+  # Four of the unit's cleanups and a shared one over them, pushed and
+  # left on the list.
+  @[NoInline]
+  def push_below_shared(seed : Int32) : Nil
+    witness = chain(seed)
+    __iyi_defer_push_node(local_cleanup(witness, seed, 0))
+    __iyi_defer_push_node(local_cleanup(witness, seed, 1))
+    __iyi_defer_push_node(local_cleanup(witness, seed, 2))
+    __iyi_defer_push_node(local_cleanup(witness, seed, 3))
+    __iyi_defer_push_node(IyiCross.shared { IyiDeferNode.new(-> { DeferRan.ran(9) }) })
+    nil
+  end
+
+  @[NoInline]
+  def defer_list(seed : Int32) : Nil
+    DeferRan.reset
+    push_below_shared(seed)
+    scrub
+    collect_here
+    5.times { __iyi_defer_pop_run }
+    fail("defer list: the cleanups ran as #{DeferRan.order}, not 94321") unless DeferRan.order == 94321_u64
+  end
+
   def defer_check : Nil
     before = partitions_now
     m = Mutex.new { 0 }
     group do |g|
       g.spawn(unit: :new) do
+        # The list alone first: a copy without the walk ends here, the
+        # same report every run, before the lock's shape can show one.
+        defer_list(9)
         defer_hold(m, 8)
         0
       end

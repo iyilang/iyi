@@ -177,6 +177,17 @@ prove_caught "Mutex shared bracket" r4bs mutex_bracket \
   "$(subst 'def lock\(&block' 'IyiCross\.shared \{ block\.call\(@value\) \}' 'block.call(@value)')" std mutex.iyi
 prove_caught "Mutex.new capture publish" r4bn mutex_new \
   "$(del 'def self\.new\(&block : -> U\) : Mutex' '^    IyiCross\.publish\(block\)$')" std mutex.iyi
+# The runtime's own links out of a bracket (S6): a drained cleanup's link
+# - a Mutex's release node over the unit's cleanup, through a panic and a
+# cancelled task's stop - and a joined group's `outer`, each left naming
+# the unit's own chunk. Caught by `-Dheap_verify` (the death check, the
+# check at the unit's collection), exit 86.
+prove_caught "defer drain unlink (panic)" rdd defer_drain \
+  "$(del 'def self\.drain_defers\(fiber' '^        node\.next_node = nil$')" iyi concurrency.iyi
+prove_caught "defer drain unlink (stop)" rds defer_stop \
+  "$(del 'def self\.drain_defers\(fiber' '^        node\.next_node = nil$')" iyi concurrency.iyi
+prove_caught "group outer unlink" rgo group_outer \
+  "$(del 'def join\(early : Bool' '^      @outer = nil$')" iyi concurrency.iyi
 # Row 9: Box, GC.malloc and ReferenceStorage pin nothing.
 prove_caught "Box pin" r9b box \
   "$(del 'def self\.box\(object : T\)' '^    IyiCross\.pin$')" std box.iyi

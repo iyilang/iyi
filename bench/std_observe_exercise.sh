@@ -862,6 +862,7 @@ echo "  END race verified: END(0) is last record with no trailing records after 
 echo "== concurrent recorder: allocation measurement (shared writer < 256 bytes/record)"
 ALLOC_SRC="$WORK/alloc_measure.iyi"
 cat << 'EOF' > "$ALLOC_SRC"
+@[Unsafe("Reads the heap counter through a raw pointer to measure recorder allocation")]
 module test/alloc_measure
 import std/observe
 import std/gc::{GC}

@@ -31,6 +31,10 @@ Four things it holds to:
 Run with `--direct` to drive `iyi lsp --worker` — the single-process
 shape — and watch 1 and 2 fail. That is the gate's teeth, kept in the
 gate rather than in a commit message.
+
+`--workspace-only` runs the same workspace gate without the other session
+checks. Set `IYI_LSP_TRACE=1` to log per-process samples and worker events
+for this pull; leave it unset for the uninstrumented comparison.
 """
 
 import json
@@ -472,17 +476,55 @@ def workspace_pull(argv):
     end. A worker stops at that bound now, and the proxy carries the rest
     of the pull in a fresh one; the client still gets one answer."""
     root = REPO / "samples" / "iyi"
-    client = Client(argv)
+    # Opt in for this pull and its workers only. The normal gate must
+    # retain its uninstrumented sampling path for a same-revision control.
+    trace = os.environ.get("IYI_LSP_TRACE") == "1"
+    env = os.environ.copy()
+    env.pop("IYI_LSP_MEMORY_TRACE", None)
+    if trace:
+        env["IYI_LSP_MEMORY_TRACE"] = "1"
+    client = Client(argv, env=env)
     client.send("initialize", {"processId": None, "rootUri": root.as_uri(),
                                "capabilities": {}})
     client.send("initialized", {}, wait=False)
+    if trace:
+        print("lsp-memory-trace: event footprints are process lifetime peak MiB "
+              "(0 means unavailable), not current RSS; timestamps are wall-clock "
+              "observations and may span non-atomic reads", file=sys.stderr, flush=True)
     # Sampled while the pull runs, not after it: what a pull cost is gone
     # the moment its worker is retired.
-    peak, pulling = [0], [True]
+    peak, pulling, sampled = [0], [True], [False]
 
     def sample():
         while pulling[0]:
-            peak[0] = max(peak[0], tree_mb(client.proc.pid))
+            if not trace:
+                peak[0] = max(peak[0], tree_mb(client.proc.pid))
+                time.sleep(0.25)
+                continue
+            started = time.time_ns()
+            parent = client.proc.pid
+            # Keep exactly tree_mb's metric: the parent plus immediate
+            # children, each floored to MiB. This is not an atomic snapshot.
+            readings = [(parent, rss_mb(parent))]
+            readings.extend((pid, rss_mb(pid)) for pid in children(parent))
+            total = sum(rss for _, rss in readings)
+            if not sampled[0] or total > peak[0]:
+                sampled[0] = True
+                peak[0] = total
+                processes = []
+                for pid, rss in readings:
+                    try:
+                        binary = process_binary(pid)
+                    except OSError as error:
+                        binary = f"unavailable: {error}"
+                    processes.append({"pid": pid, "role": "parent" if pid == parent else "child",
+                                      "rss_mib": rss if rss else None, "executable": binary})
+                print("lsp-memory-high-water " + json.dumps({
+                    "start_unix_ns": started, "end_unix_ns": time.time_ns(),
+                    "total_mib": total, "processes": processes,
+                    "observation": "non-atomic; null RSS means unavailable or zero; "
+                                   "children may start or exit between reads",
+                }), file=sys.stderr, flush=True)
             time.sleep(0.25)
     sampler = threading.Thread(target=sample, daemon=True)
     sampler.start()
@@ -500,6 +542,19 @@ def workspace_pull(argv):
     return peak[0], len(items), whole
 
 
+def workspace_gate(argv, measured):
+    peak, judged, whole = workspace_pull(argv)
+    detail = (f"{judged} files of samples/iyi in one answer"
+              f"{', every one' if whole else ', not every one'}, peak {peak} MB")
+    if not measured:
+        step("a workspace pull is bounded too", whole,
+             detail + " (no /proc here; unmeasured)")
+    else:
+        step("a workspace pull is bounded too",
+             whole and peak <= TYPING_CEILING_MB,
+             detail + f", bound {TYPING_CEILING_MB} MB")
+
+
 def main():
     # A step takes seconds; five minutes with none finished is a server
     # that stopped answering, named and killed rather than waited on.
@@ -510,6 +565,12 @@ def main():
         print("memory ---- driving `iyi lsp --worker`: one process, no "
               "retirement. This is the shape the bounds below rule out.")
     measured = rss_mb(os.getpid()) > 0
+    if "--workspace-only" in sys.argv:
+        workspace_gate(argv, measured)
+        if FAILURES:
+            sys.exit(1)
+        return
+
 
     peak, _, first, last, code = typing_session(argv)
     detail = f"{EDITS} edits with no pause, peak {peak} MB"
@@ -548,16 +609,7 @@ def main():
          f"{len(first)} item(s) for `s.up`, identical" if first == last
          else f"{first} -> {last}")
 
-    peak, judged, whole = workspace_pull(argv)
-    detail = (f"{judged} files of samples/iyi in one answer"
-              f"{', every one' if whole else ', not every one'}, peak {peak} MB")
-    if not measured:
-        step("a workspace pull is bounded too", whole,
-             detail + " (no /proc here; unmeasured)")
-    else:
-        step("a workspace pull is bounded too",
-             whole and peak <= TYPING_CEILING_MB,
-             detail + f", bound {TYPING_CEILING_MB} MB")
+    workspace_gate(argv, measured)
 
     # A rebuild unlinks the binary under a running session, which
     # `lsp_session.py` step 46 holds for the process the editor talks to.

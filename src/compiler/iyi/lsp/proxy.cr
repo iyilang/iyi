@@ -793,9 +793,27 @@ module Iyi::Lsp
     private def retire(warm_now : Bool = true) : Nil
       return if @shut_down
       return unless old = @worker
-      return unless successor = spawn_worker
+      if ENV["IYI_LSP_MEMORY_TRACE"]?
+        STDERR.puts "lsp-memory-event time_unix_ms=#{Time.utc.to_unix_ms} pid=#{Process.pid} event=retire_start old_pid=#{old.process.pid} reported_peak_mib=#{old.footprint} warm_now=#{warm_now}"
+        STDERR.flush
+      end
+      unless successor = spawn_worker
+        if ENV["IYI_LSP_MEMORY_TRACE"]?
+          STDERR.puts "lsp-memory-event time_unix_ms=#{Time.utc.to_unix_ms} pid=#{Process.pid} event=retire_spawn_failed old_pid=#{old.process.pid}"
+          STDERR.flush
+        end
+        return
+      end
+      if ENV["IYI_LSP_MEMORY_TRACE"]?
+        STDERR.puts "lsp-memory-event time_unix_ms=#{Time.utc.to_unix_ms} pid=#{Process.pid} event=retire_spawned old_pid=#{old.process.pid} new_pid=#{successor.process.pid}"
+        STDERR.flush
+      end
       @worker = successor
       stop(old)
+      if ENV["IYI_LSP_MEMORY_TRACE"]?
+        STDERR.puts "lsp-memory-event time_unix_ms=#{Time.utc.to_unix_ms} pid=#{Process.pid} event=retire_stopped old_pid=#{old.process.pid} new_pid=#{successor.process.pid}"
+        STDERR.flush
+      end
       hand_over(successor, warm_now)
     end
 

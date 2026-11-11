@@ -4742,28 +4742,34 @@ describe "Semantic: iyi" do
     end
 
     # heap22 contract §6: `pinned:` is the compiler's to pass; a module
-    # that passes it itself is unsafe code.
+    # that passes it itself is unsafe code. Std's own types are stubbed
+    # under their std module's name (`Std::Unit::Unit`), the name
+    # `CleanupTransformer.pinnable_call` matches.
     it "refuses a pinned: written on Unit.new outside an unsafe module" do
       assert_error(<<-CODE, "`pinned:` on `Unit.new` runs the block's unit in the shared heap, which the compiler decides", filename: "x.iyi")
-        class Unit
-          def self.new(*, pinned : Bool = false, &block : -> Int32) : Int32
-            1
+        module Std::Unit
+          class Unit
+            def self.new(*, pinned : Bool = false, &block : -> Int32) : Int32
+              1
+            end
           end
         end
 
-        Unit.new(pinned: true) { 1 }
+        Std::Unit::Unit.new(pinned: true) { 1 }
         CODE
     end
 
     it "takes a pinned: written on SharedProc.of in an unsafe module" do
       assert_type(unsafe + <<-CODE, filename: "x.iyi") { int32 }
-        struct SharedProc
-          def self.of(*, pinned : Bool = false, &block : -> Int32) : Int32
-            1
+        module Std::SharedProc
+          struct SharedProc
+            def self.of(*, pinned : Bool = false, &block : -> Int32) : Int32
+              1
+            end
           end
         end
 
-        SharedProc.of(pinned: true) { 1 }
+        Std::SharedProc::SharedProc.of(pinned: true) { 1 }
         CODE
     end
 

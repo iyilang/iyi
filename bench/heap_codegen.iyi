@@ -454,13 +454,14 @@
   ROUTED_POOL = Pool.new
 
   # The unit that calls *route* runs pinned from that call on: the block
-  # stored its node into the pool's graph in the shared heap.
+  # stored its node into the pool's graph in the shared heap. Checked
+  # before the unit's collection, which the verifier aborts in otherwise.
   def call_route(route : SharedProc(Int32, UInt64), seed : Int32, what : String) : Nil
     group do |g|
       task = g.spawn(unit: :new) do
         here = route.call(seed)
-        collect_here
         fail("handed: #{what} ran in a heap of its own (record #{here}): the SharedProc around it was not pinned") unless here == 0_u64
+        collect_here
         here
       end
       task.value
@@ -502,12 +503,12 @@
     group do |g|
       task = g.spawn(in: u) do |value|
         here = heap_here
+        fail("pin_in: the task ran in its unit's heap (record #{here}): the unit was not pinned") unless here == 0_u64
         fill(pool, 46 + value)
         collect_here
         here
       end
-      here = task.value
-      fail("pin_in: the task ran in its unit's heap (record #{here}): the unit was not pinned") unless here == 0_u64
+      task.value
     end
     {% if flag?(:heap_partitions) %}
       fail("pin_in: #{pins_now - pins} pins for the unit, want 1") unless pins_now - pins == 1

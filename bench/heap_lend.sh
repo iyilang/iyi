@@ -209,6 +209,8 @@ if [ "$PART" = all ] || [ "$PART" = copies ]; then
     "$(del 'def lock\(&block' '^    IyiCross\.publish\(block\)$')"
   copy "nothing behind another unit's chunk (the stop at foreign LOCAL)" c7 foreign bench heap_lend.iyi \
     "$(subst 'def hang_foreign' 'res\.items << item' 'foreign.item = item')"
+  copy "the local mark follows a fiber's cleanups through a shared node" c8 defer iyi heap_partition.iyi \
+    "$(del 'Its cleanups, node by node' '^          local_shade\(record, id, parity, node\.object_id\)$')"
   echo
   echo "| copy | check | caught by \\| holder \\| target @ allocation site | the program's own check, printed and passed over |"
   echo "|---|---|---|---|"

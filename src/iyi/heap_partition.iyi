@@ -1756,6 +1756,17 @@ class IyiHeap
         # unit's own list - a root even if it was made in the partition.
         local_shade(record, id, parity, fiber.object_id)
         each_field(s, fiber.object_id) { |word| local_shade(record, id, parity, word) }
+        # Its cleanups, node by node: a `Mutex`'s release node, born in
+        # the shared heap, is linked over the unit's own while the lock
+        # is held (`__iyi_defer_push_node`), and `local_shade` follows no
+        # shared chunk's link, so the unit's nodes below it - `group`'s
+        # join among them - went unmarked and were freed by a collection
+        # inside a lock block (S7: #145's app under IYI_HEAP_STRESS=1).
+        node = fiber.defers
+        while node.is_a?(IyiDeferNode)
+          local_shade(record, id, parity, node.object_id)
+          node = node.next_node
+        end
         if !(running.is_a?(IyiFiber) && running.object_id == fiber.object_id) && fiber.state != IyiFiberState::Done && fiber.stack_top != 0 && fiber.saved_sp != 0
           while fiber.on_cpu?
             IyiMark.spin_pause

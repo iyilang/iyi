@@ -401,6 +401,18 @@
     seed = 1000_u64 + round.to_u64
     chain = build_chain(seed)
     Roots.holders[round % 64].payload = nil
+    # Under `-Dheap_partitions` the runtime's frames are other frames: a
+    # dead one under this loop's, left by the chain's allocation, still
+    # named the payload when the mark's first stop scanned the stack, and
+    # the payload was no longer white when this thread reached it - 0 of
+    # 96 rounds made their move under a mark, 5 runs of 5 (Linux x86_64,
+    # 12 vCPUs, release); with the stack under this frame zeroed here,
+    # every round's payload was white and the copy whose barrier shades
+    # nothing lost round 0's. Zeroed again after the move, so no word
+    # `move` or `tail_white?` left keeps the payload for the second stop.
+    {% if flag?(:heap_partitions) %}
+      scrub_stack
+    {% end %}
     IyiMark.auto = true
     marking = allocate_until_marking
     holder = born_black_holder(round)
@@ -411,6 +423,9 @@
     marking = marking && IyiMark.marking? && IyiMark.colour(holder.object_id.to_u64) == IyiMark::BLACK && payload_white
     under_mark = under_mark + 1 if marking
     move(chain, holder)
+    {% if flag?(:heap_partitions) %}
+      scrub_stack
+    {% end %}
     # The chain is garbage from here; the payload lives in the holder only.
     chain = build_chain(0_u64)
     IyiMark.settle

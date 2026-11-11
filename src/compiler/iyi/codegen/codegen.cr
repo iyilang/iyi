@@ -3348,11 +3348,92 @@ module Iyi
     # first-class aggregate and stored, which LLVM lowers an element at a
     # time through stack slots when it does not optimise. *fresh* says
     # *pointer* is a slot made for this value, which nothing can point into.
+    #
+    # Then, in a `-Dheap_partitions` build, the slot's holes are written as
+    # zero (`LLVMTyper#iyi_holes`), so a slot holds the value's bytes and
+    # zeros, never what was there before or what the source's padding held.
+    # A value with more than `IYI_HOLES_MAX` holes (only one passed
+    # indirectly can have them, a `StaticArray` of padded structs) is copied
+    # over a zeroed slot instead, through a temporary when the two may
+    # overlap. Without the flag the store is what it was (`iyi_holes?`).
     def store_value(value, type, pointer, *, fresh = false)
       if passed_indirectly?(type)
-        copy_value(pointer, value, type, fresh: fresh)
+        if iyi_holes? && iyi_holes(type).size > IYI_HOLES_MAX
+          unless fresh
+            temporary = alloca llvm_type(type)
+            copy_value(temporary, value, type, fresh: true)
+            value = temporary
+          end
+          res = call c_memset_fun, [cast_to_void_pointer(pointer), int8(0), size_t(llvm_typer.size_of(llvm_type(type))), int1(0)]
+          LibLLVM.set_instr_param_alignment(res, 1, llvm_typer.align_of(llvm_type(type)))
+          return copy_value(pointer, value, type, fresh: true)
+        end
+        stored = copy_value(pointer, value, type, fresh: fresh)
       else
-        store to_rhs(value, type), pointer
+        stored = store to_rhs(value, type), pointer
+      end
+      iyi_clear_holes pointer, type
+      stored
+    end
+
+    IYI_HOLES_MAX = 64
+
+    # The holes of a *type* slot (`LLVMTyper#iyi_holes`). None for a value
+    # not passed by value (a scalar or a reference fills its slot), nor for
+    # a C type's: a C union's members overlap, so its LLVM struct's padding
+    # may be another member's bytes, and C's padding is C's.
+    def iyi_holes(type : Type) : Array({UInt64, UInt64})
+      return IYI_NO_HOLES unless type.passed_by_value?
+      return IYI_NO_HOLES if type.extern? || type.extern_union?
+      llvm_typer.iyi_holes(llvm_type(type))
+    end
+
+    IYI_NO_HOLES = [] of {UInt64, UInt64}
+
+    # The holes of a *type* slot at *pointer* written as zero.
+    def iyi_clear_holes(pointer, type : Type) : Nil
+      return unless iyi_holes?
+      iyi_clear_holes pointer, iyi_holes(type), llvm_typer.align_of(llvm_type(type))
+    end
+
+    IYI_HOLES_BROKEN = SPAWN_BROKEN.includes?("holes")
+
+    # Whether stores write their slot's holes as zero: in a
+    # `-Dheap_partitions` build, whose verifier and local mark read an
+    # untyped chunk's words as pointers, and not in its
+    # `IYI_SPAWN_BROKEN=holes` copy. Without the flag the code is byte for
+    # byte what it was (heap22.cr); plain builds keep the stale words, as
+    # conservative retention only.
+    def iyi_holes? : Bool
+      iyi_heap_partitions? && !IYI_HOLES_BROKEN
+    end
+
+    # Zero stores over *holes*, byte ranges of the slot at *pointer*, which
+    # is aligned to *align*: naturally aligned stores of up to a word, or a
+    # `memset` for a range over four words. None unless `iyi_holes?`.
+    def iyi_clear_holes(pointer, holes : Array({UInt64, UInt64}), align) : Nil
+      return if holes.empty? || @builder.end || !iyi_holes?
+      bytes = pointer_cast(pointer, llvm_context.int8.pointer)
+      holes.each do |(from, to)|
+        if to - from > 32_u64
+          at_align = 1_u64
+          while at_align < align.to_u64 && from % (at_align * 2) == 0
+            at_align *= 2
+          end
+          res = call c_memset_fun, [gep(llvm_context.int8, bytes, int64(from)), int8(0), size_t(to - from), int1(0)]
+          LibLLVM.set_instr_param_alignment(res, 1, at_align.to_u32)
+          next
+        end
+        at = from
+        while at < to
+          size = 8_u64
+          while size > align.to_u64 || at % size != 0 || at + size > to
+            size //= 2
+          end
+          inst = store llvm_context.int((size * 8).to_i32).const_int(0), gep(llvm_context.int8, bytes, int64(at))
+          inst.alignment = size.to_u32
+          at += size
+        end
       end
     end
 

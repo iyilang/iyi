@@ -17,9 +17,13 @@
 #   published with it (`visit(ProcLiteral)`). A struct it captures is
 #   boxed: the scope's variable lives in a cell of its own and the context
 #   holds the cell's address (`MetaVar#iyi_boxed?`).
+# - A store writes every byte of its slot: a union's bytes past its arm and
+#   its tag's padding, and every value's padding, as zero
+#   (`CodeGenVisitor#iyi_holes?`), so that an untyped chunk, which the
+#   verifier and the local mark read word by word, holds no stale pointer.
 #
-# `IYI_SPAWN_BROKEN` takes `c1`, `classvar-publish` and `new-shared`, each
-# turning one of these off, for the verifier's broken copies.
+# `IYI_SPAWN_BROKEN` takes `c1`, `classvar-publish`, `new-shared` and
+# `holes`, each turning one of these off, for the verifier's broken copies.
 class Iyi::CodeGenVisitor
   IYI_NEW_SHARED_NAME = "__iyi_new_shared"
   IYI_PUBLISH_NAME    = "__iyi_publish"

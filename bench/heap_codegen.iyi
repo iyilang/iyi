@@ -33,6 +33,13 @@
 #   it runs in the shared heap from that call on.
 # - `pin_in`: a `g.spawn(in: u)` block reaching a pool without `lends:`
 #   pins *u*'s unit before it runs (`IyiHeap.pins` moves by one).
+# - `holes`: a union written through a smaller arm, in a field and from a
+#   temporary into an array's buffer, holds zeros past the arm and in its
+#   tag's padding, never a stale word. The buffer's unit boxes its values
+#   on a stack whose dead words name another unit's chain, which that
+#   unit then drops and collects: a stale word in the buffer is the
+#   verifier's report. The raw words are read before any collection, in a
+#   `-Dheap_partitions` build only: the compiler zeroes the holes only there.
 #
 # Each check ends its units' stores with `collect_here`: the stack below
 # scrubbed and the unit's partition collected, so that under
@@ -424,6 +431,150 @@
     fail("pin: the pool lost its node") unless pool.first?.is_a?(Payload)
   end
 
+  # ── Union holes: a smaller arm leaves no stale word ───────────────────
+  # `Val` is 40 bytes, a 4-byte tag, its padding and 32 bytes of value,
+  # because `Wide` (a `Time`'s shape: a pointer among integers) is that
+  # wide; an `Int64` arm writes the tag and the first value word. Every
+  # other byte of the union is written as zero by every store of an arm
+  # in a `-Dheap_partitions` build (the compiler's `iyi_clear_union_holes`,
+  # off in the `IYI_SPAWN_BROKEN=holes` copy), and by every store of a
+  # whole union (its tag's padding). Left alone they hold what
+  # the slot held before, or what the temporary the arm was boxed in found
+  # on the stack: in #145's app an `Array(DBValue)` buffer, the program's
+  # own and untyped, which the collector and the verifier read word by
+  # word, named another unit's chunk from an `Int64` element's unused
+  # words (S6 CrossFix2, Linux, seeds 1-5).
+  struct Wide
+    @seconds : Int64
+    @nanoseconds : Int32
+    @label : String
+    @offset : Int32
+
+    def initialize(@seconds : Int64, @nanoseconds : Int32, @label : String, @offset : Int32)
+    end
+
+    def label : String
+      @label
+    end
+  end
+
+  alias Val = Nil | Bool | Int32 | Int64 | String | Wide
+
+  VAL_WORDS = 5
+
+  class ValSlot
+    @value : Val = nil
+
+    def initialize
+    end
+
+    def value=(value : Val) : Nil
+      @value = value
+    end
+
+    def put(seconds : Int64) : Nil
+      @value = seconds
+    end
+  end
+
+  # *value* boxed in a union temporary, as db's `to_db_value` boxes a
+  # query's arguments.
+  def to_val(value : T) : Val forall T
+    value.as(Val)
+  end
+
+  # The values boxed one by one and appended, as db's `collect_args`.
+  @[NoInline]
+  def collect_vals(values : Array(Int64)) : Array(Val)
+    all = [] of Val
+    values.each { |value| all << to_val(value) }
+    all
+  end
+
+  # The dead stack below the caller written with *word*, so that the
+  # frames of the next call find it in every slot they do not write.
+  @[NoInline]
+  def paint(word : UInt64) : UInt64
+    room = uninitialized StaticArray(UInt64, 2048)
+    words = pointerof(room).as(Pointer(UInt64))
+    index = 0
+    while index < 2048
+      words[index] = word
+      index = index + 1
+    end
+    words[2047]
+  end
+
+  # The words of *count* `Val`s at *address* holding `Int64` arms that no
+  # arm wrote: the tag's padding, and the three value words past the
+  # `Int64`. Fails naming the first. Without `-Dheap_partitions` the
+  # compiler leaves the holes as they were (flag-off code is today's), so
+  # there is nothing to check.
+  def no_stale(address : UInt64, count : Int32, what : String) : Nil
+    {% if !flag?(:heap_partitions) %} return {% end %}
+    element = 0
+    while element < count
+      base = address + (element * VAL_WORDS).to_u64 * 8_u64
+      if Pointer(UInt64).new(base).value.unsafe_shr(32_u64) != 0_u64
+        fail("holes: #{what}: element #{element}'s tag padding holds a stale word")
+        return
+      end
+      word = 2
+      while word < VAL_WORDS
+        if Pointer(UInt64).new(base + word.to_u64 * 8_u64).value != 0_u64
+          fail("holes: #{what}: element #{element}'s union word +#{word * 8} past its Int64 holds a stale word")
+          return
+        end
+        word = word + 1
+      end
+      element = element + 1
+    end
+  end
+
+  # Built in a frame of its own, so that once it returns no live frame of
+  # the unit names the chain: held across *built*'s receive, its unit's
+  # collections at that park keep it. Its address goes out as a number.
+  @[NoInline]
+  def hold_target(aims : Channel(UInt64), built : Channel(Int32)) : Int32
+    chain = build(44)
+    aims.send(chain.object_id)
+    built.receive
+    chain.label.bytesize
+  end
+
+  def holes_check : Nil
+    # In place: a field holding a `Wide` given an `Int64`.
+    slot = ValSlot.new
+    slot.value = Wide.new(1_i64, 2, label_for(45, 0), 3)
+    slot.put(79_i64)
+    no_stale(slot.object_id, 1, "a field's Wide overwritten by an Int64")
+
+    # From a temporary, across units: one unit's buffer of `Int64`s boxed
+    # on a stack whose dead words name another unit's chain, which that
+    # unit then drops and collects.
+    before = partitions_now
+    aims = Channel(UInt64).new(1)
+    built = Channel(Int32).new(1)
+    done = Channel(Int32).new(1)
+    group do |g|
+      g.spawn(unit: :new) do
+        hold_target(aims, built)
+        collect_here
+        done.send(1)
+        0
+      end
+      g.spawn(unit: :new) do
+        paint(aims.receive)
+        all = collect_vals([79_i64, 80_i64, 81_i64])
+        no_stale(all.to_unsafe.address, all.size, "an Array(Val) buffer of boxed Int64s")
+        built.send(1)
+        done.receive
+        all.size
+      end
+    end
+    settled(before, "holes")
+  end
+
   # ── A block handed through a `@[Share]` def ───────────────────────────
   # A library's router: each def keeps the block it is given for other
   # units in a `SharedProc`, which no type says the block of. `direct`
@@ -526,7 +677,7 @@
     {% end %}
   end
 
-  CHECKS = ["c1", "classvar", "born_shared", "pin", "handed", "pin_in"]
+  CHECKS = ["c1", "classvar", "born_shared", "pin", "handed", "pin_in", "holes"]
 
   def run(name : String) : Nil
     case name
@@ -536,6 +687,7 @@
     when "pin"         then pin_check
     when "handed"      then handed_check
     when "pin_in"      then pin_in_check
+    when "holes"       then holes_check
     else                    fail("no check named #{name}")
     end
   end

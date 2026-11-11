@@ -222,6 +222,7 @@ prove_caught "pin (forced off)" pin pin
 prove_caught "pin through a @[Share] def's block (SharedProc.of binds no block)" handed handed
 prove_caught "pin through a block handed to a helper (not followed)" forwarded handed
 prove_caught "pin of a spawn(in: u) task (pinned: not passed)" pin-in pin_in
+prove_caught "union holes written as zero" holes holes
 
 echo
 echo "Seed $SEED (IYI_CHAOS), IYI_HEAP_STRESS=1, $RUNS verifier runs each with HEAP22_PRINT_ONLY=1."

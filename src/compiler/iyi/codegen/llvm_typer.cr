@@ -687,5 +687,75 @@ module Iyi
     def pointer_size
       @pointer_size ||= size_of(@llvm_context.void_pointer)
     end
+
+    # iyi: the byte ranges `[from, to)` of a slot of *type* that a store of
+    # a value of *type* leaves unwritten: the padding between fields and
+    # after the last, at every depth. LLVM stores an aggregate field by
+    # field, so those bytes keep whatever the slot held before, and a
+    # `memcpy` of the value carries whatever its source held there. The
+    # collector reads an untyped chunk (a `Pointer.malloc` buffer) word by
+    # word, and the heap22 verifier reads it the same way, so a stale
+    # pointer left in a hole is a word that retains, or a report.
+    # `CodeGenVisitor#iyi_clear_holes` writes them as zero.
+    def iyi_holes(type : LLVM::Type) : Array({UInt64, UInt64})
+      @iyi_holes[type] ||= begin
+        written = [] of {UInt64, UInt64}
+        iyi_written(type, 0_u64, written)
+        iyi_complement(written, @layout.abi_size(type))
+      end
+    end
+
+    # The holes of a mixed union *union_type* whose arm was stored over the
+    # first *payload* bytes of its value (`CodeGenVisitor#union_value`):
+    # the tag's padding and the value past the arm, where a smaller arm
+    # leaves the bytes of the arm the slot held before. The arm's own
+    # holes are its store's (`CodeGenVisitor#store_value`).
+    def iyi_union_holes(union_type : LLVM::Type, payload : UInt64) : Array({UInt64, UInt64})
+      @iyi_union_holes[{union_type, payload}] ||= begin
+        written = [] of {UInt64, UInt64}
+        iyi_written(union_type.struct_element_types[0], offset_of(union_type, 0), written)
+        value = offset_of(union_type, 1)
+        written << {value, value + payload} unless payload == 0
+        iyi_complement(written, @layout.abi_size(union_type))
+      end
+    end
+
+    @iyi_holes = {} of LLVM::Type => Array({UInt64, UInt64})
+    @iyi_union_holes = {} of {LLVM::Type, UInt64} => Array({UInt64, UInt64})
+
+    # The ranges a store of a *type* value at *at* writes, appended to
+    # *into*: a scalar its store size, an aggregate each of its elements.
+    private def iyi_written(type : LLVM::Type, at : UInt64, into : Array({UInt64, UInt64})) : Nil
+      case type.kind
+      when .struct?
+        type.struct_element_types.each_with_index do |element, index|
+          iyi_written(element, at + offset_of(type, index), into)
+        end
+      when .array?
+        element = type.element_type
+        stride = @layout.abi_size(element)
+        count = type.array_size.to_u64
+        if iyi_holes(element).empty?
+          into << {at, at + stride * count} unless count == 0
+        else
+          count.times { |index| iyi_written(element, at + stride * index, into) }
+        end
+      else
+        into << {at, at + @layout.size_in_bytes(type)}
+      end
+    end
+
+    # The gaps of *written* within `[0, size)`.
+    private def iyi_complement(written : Array({UInt64, UInt64}), size : UInt64) : Array({UInt64, UInt64})
+      holes = [] of {UInt64, UInt64}
+      at = 0_u64
+      written.sort_by! { |range| range[0] }
+      written.each do |(from, to)|
+        holes << {at, from} if from > at
+        at = to if to > at
+      end
+      holes << {at, size} if size > at
+      holes
+    end
   end
 end

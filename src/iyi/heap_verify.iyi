@@ -411,6 +411,32 @@ class IyiHeapVerify
     end
   end
 
+  # A local mark of partition *id* about to write the `OWN` byte of the
+  # chunk at *head*: the chunk must be its own. A word into another
+  # partition followed (the mark's owner filter gone) writes that unit's
+  # mark bits with this one's parity: when they match the owner's next
+  # parity, its mark takes the object for reached and never reads its
+  # fields, and what only it holds is freed under it (heap_local's
+  # `filter:`, the nofilter copy). The free was caught only when the
+  # parities met, or when a stale stack word kept the target meanwhile;
+  # the write is caught every time.
+  def self.check_shade(arena : UInt64, head : UInt64, id : UInt64) : Nil
+    owner = IyiHeap.owner_at(arena, IyiHeap.granule_of(arena, head))
+    return if owner == id
+    report_begin(id)
+    say("  a local mark shaded a chunk another partition owns\n")
+    say("  holder: partition ")
+    say_dec(id)
+    say("'s local mark, writing partition ")
+    say_dec(owner)
+    say("'s mark bits\n")
+    say("  target: ")
+    say_hex(head)
+    say("\n")
+    target_detail(head)
+    report_end
+  end
+
   # A statistic, by a plain add (see `at_point`): close, not exact.
   def self.stat(address : UInt64) : Nil
     IyiHeap.write64(address, IyiHeap.read64(address) &+ 1_u64)

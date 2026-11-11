@@ -1652,6 +1652,7 @@ class IyiHeap
     own = arena &+ read64(arena &+ OFF_OWN) &+ slot
     flags = read8(own)
     return if flags & OWN_PUB != 0 || flags & OWN_LMARK == parity
+    {% if flag?(:heap_verify) %} IyiHeapVerify.check_shade(arena, head, id) {% end %}
     write8(own, (flags - (flags & (OWN_LMARK | OWN_LENT))) | parity)
     scratch_push(scratch, bits & HEADED_FLAG != 0 ? head &+ HEADER : head)
   end

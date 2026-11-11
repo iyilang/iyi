@@ -1933,7 +1933,8 @@ class IyiHeap
   # sweep looked, which dropped the cell uncleared, naming that unit's
   # object, and the verifier reported "a weak cell names a chunk the
   # partition's local sweep freed" once that unit freed it
-  # (bench/heap_verify_reach.iyi, 4 workers, Linux, 46 runs of 120); and
+  # (bench/heap_verify_reach.iyi under IYI_HEAP_STRESS, 4 workers: 26
+  # runs of 40, Linux, af4b87c91); and
   # a sweep stopped between two classes freed chunks no pass cleared the
   # cells to before the unit allocated them again.
   def self.sweep_weak(record : UInt64, id : UInt64, parity : UInt64) : Nil

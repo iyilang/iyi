@@ -1049,31 +1049,43 @@ class IyiHeapVerify
     IyiChaosMix.mix(state)
   end
 
-  # A word aimed at a partition arena: a chunk's head, its object, or a
-  # word inside it, of a run owned by a partition other than the running
-  # one's when one is found in a few tries; an arbitrary heap-shaped word
-  # otherwise.
-  def self.false_word(own : UInt64) : UInt64
+  # The partition arenas, listed once per injection into this thread's
+  # own mapping (`@@picks`, not heap memory), so a word's pick is one read
+  # and not two walks of every arena: the walks, up to sixteen a word and
+  # 96 words a chaos point, made a ping-pong's points slow enough that
+  # concurrency_exercise's starvation check saw a 50 ms sleeper wake after
+  # 202-333 ms, over its 200 ms, in 7 of 8 runs under false words (tmac,
+  # stress 1 and 64); in none of 6 so. Answers the count.
+  @[ThreadLocal]
+  @@picks : UInt64 = 0_u64
+
+  PICKS_MAX = 8192_u64
+
+  def self.partition_arenas : UInt64
+    @@picks = __iyi_mmap(PICKS_MAX * 8_u64).address if @@picks == 0
+    picks = @@picks
+    count = 0_u64
+    arena = IyiHeap.first_arena
+    while arena != 0 && count < PICKS_MAX
+      if IyiHeap.partition_arena?(arena)
+        IyiHeap.write64(picks &+ count &* 8_u64, arena)
+        count = count &+ 1_u64
+      end
+      arena = IyiHeap.arena_next(arena)
+    end
+    count
+  end
+
+  # A word aimed at a partition arena (one of the *count* `partition_arenas`
+  # listed): a chunk's head, its object, or a word inside it, of a run
+  # owned by a partition other than the running one's when one is found in
+  # a few tries; an arbitrary heap-shaped word otherwise.
+  def self.false_word(own : UInt64, count : UInt64) : UInt64
     tries = 0
     while tries < 8
       pick = noise
-      arena = IyiHeap.first_arena
-      count = 0_u64
-      while arena != 0
-        count = count + 1_u64 if IyiHeap.partition_arena?(arena)
-        arena = IyiHeap.arena_next(arena)
-      end
       break if count == 0
-      wanted = pick % count
-      arena = IyiHeap.first_arena
-      while arena != 0
-        if IyiHeap.partition_arena?(arena)
-          break if wanted == 0
-          wanted = wanted - 1_u64
-        end
-        arena = IyiHeap.arena_next(arena)
-      end
-      break if arena == 0
+      arena = IyiHeap.read64(@@picks &+ (pick % count) &* 8_u64)
       first = IyiHeap.arena_first(arena)
       high = IyiHeap.arena_high(arena)
       if high > first
@@ -1107,7 +1119,8 @@ class IyiHeapVerify
     # pages only, written downwards so a growing stack's guard is met in
     # order.
     floor = top != 0 ? top - IyiFiber::STACK_BYTES + 2_u64 * IyiFiber::PAGE : sp - 8192_u64
-    fill(sp, floor, own)
+    count = partition_arenas
+    fill(sp, floor, own, count)
     {% if flag?(:iyi_chaos) %}
       if IyiChaos.simulated?
         here = IyiScheduler.state.object_id
@@ -1143,7 +1156,7 @@ class IyiHeapVerify
               limit = IyiHeap.read64(other.saved_sp &+ 8_u64)
               low = limit if limit > low
             {% end %}
-            fill(other.saved_sp, low, own)
+            fill(other.saved_sp, low, own, count)
           end
           other = other.next_fiber
         end
@@ -1151,7 +1164,7 @@ class IyiHeapVerify
     {% end %}
   end
 
-  def self.fill(sp : UInt64, floor : UInt64, own : UInt64) : Nil
+  def self.fill(sp : UInt64, floor : UInt64, own : UInt64, arenas : UInt64) : Nil
     start = (sp - 512_u64) & (0_u64 &- 8_u64)
     return if start <= floor
     room = (start - floor) // 8_u64
@@ -1159,7 +1172,7 @@ class IyiHeapVerify
     count = room if count > room
     k = 0_u64
     while k < count
-      Pointer(UInt64).new(start - k * 8_u64).value = false_word(own)
+      Pointer(UInt64).new(start - k * 8_u64).value = false_word(own, arenas)
       k = k + 1_u64
     end
     stat(pointerof(@@injected).address)

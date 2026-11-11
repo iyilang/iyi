@@ -11,13 +11,18 @@ the binary's own symbols:
 
 Every `type_id=N` gains the type's name; a holder's `field +O` the
 instance variable at that offset; `allocated at: image+0x...` and a data
-segment word `image+0x...` the function and line (addr2line) or the
-symbol (nm) there. Lines it cannot name are passed through unchanged.
+segment word `image+0x...` the function and line or the symbol there
+(nm; a PE's from its `.pdb` publics, by llvm-pdbutil). Sites are read
+from the binary's debug information by addr2line (ELF), atos (Mach-O,
+from the `.dwarf` companion the build leaves beside the program) or
+llvm-symbolizer (PE, from its `.pdb`; ELF without addr2line). Lines it
+cannot name are passed through unchanged.
 """
 
 import argparse
 import bisect
 import json
+import os
 import re
 import shutil
 import struct
@@ -34,32 +39,70 @@ def load_types(path):
     return by_id
 
 
-def first_load_vaddr(binary):
-    """The first PT_LOAD's p_vaddr of an ELF file: what image+0 is."""
+def image_base(binary):
+    """The address image+0 is in the file's own address space: an ELF's
+    first PT_LOAD less its file offset, a Mach-O's `__TEXT` vmaddr (where
+    `_dyld_get_image_header` points), a PE's ImageBase (`GetModuleHandle`).
+    Answers (format, base), or (None, None)."""
     try:
         with open(binary, "rb") as handle:
-            head = handle.read(64)
-            if head[:4] != b"\x7fELF" or head[4] != 2:
-                return None
-            phoff = struct.unpack_from("<Q", head, 32)[0]
-            phentsize, phnum = struct.unpack_from("<HH", head, 54)
-            handle.seek(phoff)
-            table = handle.read(phentsize * phnum)
-        for index in range(phnum):
-            p_type = struct.unpack_from("<I", table, index * phentsize)[0]
-            if p_type == 1:
-                offset = struct.unpack_from("<Q", table, index * phentsize + 8)[0]
-                vaddr = struct.unpack_from("<Q", table, index * phentsize + 16)[0]
-                return vaddr - offset
-    except OSError:
-        return None
-    return None
+            head = handle.read(4096)
+            if head[:4] == b"\x7fELF" and head[4] == 2:
+                phoff = struct.unpack_from("<Q", head, 32)[0]
+                phentsize, phnum = struct.unpack_from("<HH", head, 54)
+                handle.seek(phoff)
+                table = handle.read(phentsize * phnum)
+                for index in range(phnum):
+                    p_type = struct.unpack_from("<I", table, index * phentsize)[0]
+                    if p_type == 1:
+                        offset = struct.unpack_from("<Q", table, index * phentsize + 8)[0]
+                        vaddr = struct.unpack_from("<Q", table, index * phentsize + 16)[0]
+                        return "elf", vaddr - offset
+                return None, None
+            if head[:4] == b"\xcf\xfa\xed\xfe":
+                ncmds, sizeofcmds = struct.unpack_from("<II", head, 16)
+                commands = head[32:] + handle.read(max(0, 32 + sizeofcmds - len(head)))
+                at = 0
+                for _ in range(ncmds):
+                    cmd, cmdsize = struct.unpack_from("<II", commands, at)
+                    # LC_SEGMENT_64
+                    if cmd == 0x19 and commands[at + 8:at + 24].rstrip(b"\0") == b"__TEXT":
+                        return "macho", struct.unpack_from("<Q", commands, at + 24)[0]
+                    at += cmdsize
+                return None, None
+            if head[:2] == b"MZ":
+                pe = struct.unpack_from("<I", head, 0x3C)[0]
+                if head[pe:pe + 4] != b"PE\0\0":
+                    return None, None
+                optional = pe + 24
+                magic = struct.unpack_from("<H", head, optional)[0]
+                if magic == 0x20B:
+                    return "pe", struct.unpack_from("<Q", head, optional + 24)[0]
+                if magic == 0x10B:
+                    return "pe", struct.unpack_from("<I", head, optional + 28)[0]
+    except (OSError, struct.error):
+        return None, None
+    return None, None
+
+
+# A PE's symbol names keep the compiler's escapes, `.2A.` for `*`.
+ESCAPE_RE = re.compile(r"\.([0-9A-F]{2})\.")
+# atos: `fn (in program.dwarf) (file:line)`, or `fn (in program) + 12`.
+ATOS_RE = re.compile(r"^(.*?) \(in [^)]*\)(?: \((.*)\)| \+ \d+)?$")
+# llvm-pdbutil: a section header's `<hex> virtual address`, a public's
+# name line and its `flags = ..., addr = <section>:<offset>` line.
+PDB_SECTION_RE = re.compile(r"^\s*([0-9A-Fa-f]+) virtual address$", re.M)
+PDB_NAME_RE = re.compile(r"S_PUB32 \[size = \d+\] `(.*)`$")
+PDB_ADDR_RE = re.compile(r"flags = (.*), addr = (\d+):(\d+)$")
 
 
 class Symbols:
     def __init__(self, binary):
+        # Windows: the build writes `program.exe` for `-o program`.
+        if binary and not os.path.exists(binary) and os.path.exists(binary + ".exe"):
+            binary = binary + ".exe"
         self.binary = binary
-        self.base = first_load_vaddr(binary) if binary else None
+        self.format, self.base = image_base(binary) if binary else (None, None)
         self.names = []
         self.addresses = []
         if binary and shutil.which("nm"):
@@ -75,6 +118,40 @@ class Symbols:
                         self.names.append(parts[2])
                     except ValueError:
                         pass
+        if self.format == "pe" and not self.addresses:
+            self.pdb_publics()
+
+    def pdb_publics(self):
+        """A PE keeps no symbol table nm reads; its data symbols are the
+        `.pdb`'s publics, each a section and an offset (llvm-pdbutil)."""
+        pdb = os.path.splitext(self.binary)[0] + ".pdb"
+        if not os.path.exists(pdb) or not shutil.which("llvm-pdbutil"):
+            return
+        try:
+            heads = subprocess.run(["llvm-pdbutil", "dump", "--section-headers", pdb],
+                                   capture_output=True, text=True, check=False).stdout
+            publics = subprocess.run(["llvm-pdbutil", "dump", "--publics", pdb],
+                                     capture_output=True, text=True, check=False).stdout
+        except OSError:
+            return
+        starts = [int(m.group(1), 16) for m in PDB_SECTION_RE.finditer(heads)]
+        found = []
+        name = None
+        for line in publics.splitlines():
+            match = PDB_NAME_RE.search(line)
+            if match:
+                name = match.group(1)
+                continue
+            match = PDB_ADDR_RE.search(line)
+            if match and name is not None:
+                section, offset = int(match.group(2)), int(match.group(3))
+                if "function" not in match.group(1) and 1 <= section <= len(starts):
+                    found.append((self.base + starts[section - 1] + offset,
+                                  ESCAPE_RE.sub(lambda m: chr(int(m.group(1), 16)), name)))
+                name = None
+        found.sort()
+        self.addresses = [address for address, _ in found]
+        self.names = [text for _, text in found]
 
     def vaddr(self, image_offset):
         if self.base is None:
@@ -83,18 +160,42 @@ class Symbols:
 
     def code(self, image_offset):
         address = self.vaddr(image_offset)
-        if address is None or not shutil.which("addr2line"):
+        if address is None:
             return None
         # The site is a return address: the call is the instruction before.
+        address -= 1
+        if self.format == "macho":
+            return self.atos(address)
+        if self.format == "elf" and shutil.which("addr2line"):
+            command = ["addr2line", "-f", "-C", "-i", "-e", self.binary, hex(address)]
+        elif shutil.which("llvm-symbolizer"):
+            command = ["llvm-symbolizer", "--output-style=GNU", "-f", "-C", "-i", "--obj=" + self.binary, hex(address)]
+        else:
+            return None
         try:
-            out = subprocess.run(["addr2line", "-f", "-C", "-i", "-e", self.binary, hex(address - 1)],
-                                 capture_output=True, text=True, check=False).stdout.split("\n")
+            out = subprocess.run(command, capture_output=True, text=True, check=False).stdout.split("\n")
         except OSError:
             return None
-        pairs = [(out[i], out[i + 1]) for i in range(0, len(out) - 1, 2) if out[i]]
+        pairs = [(ESCAPE_RE.sub(lambda m: chr(int(m.group(1), 16)), out[i]), out[i + 1])
+                 for i in range(0, len(out) - 1, 2) if out[i] and out[i] != "??"]
         if not pairs:
             return None
         return " <- ".join(f"{fn} ({where})" for fn, where in pairs[:4])
+
+    def atos(self, address):
+        if not shutil.which("atos"):
+            return None
+        dwarf = self.binary + ".dwarf"
+        image = dwarf if os.path.exists(dwarf) else self.binary
+        try:
+            out = subprocess.run(["atos", "-o", image, "-l", hex(self.base), hex(address)],
+                                 capture_output=True, text=True, check=False).stdout.strip()
+        except OSError:
+            return None
+        match = ATOS_RE.match(out)
+        if not match:
+            return None
+        return f"{match.group(1)} ({match.group(2)})" if match.group(2) else match.group(1)
 
     def data(self, image_offset):
         address = self.vaddr(image_offset)

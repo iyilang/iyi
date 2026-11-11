@@ -49,6 +49,8 @@ end
 
 class Iyi::Path
   def raise_undefined_constant(type)
+    # A probe's error is not shown (`Program#iyi_probing_macros?`).
+    self.raise("undefined constant #{self}") if type.program.iyi_probing_macros?
     private_const = type.lookup_path(self, include_private: true)
     if private_const
       # iyi: a type an iyi module left unmarked is closed by `pub` rather than

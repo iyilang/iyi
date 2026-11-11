@@ -483,6 +483,16 @@ module Iyi
     # (`IyiMod.untyped_parameter?`, `IyiMod.open_parameter?`).
     property? iyi_fills_boundary = false
 
+    # iyi: true while `Share`'s mutation scan expands a method's macro code
+    # on a type to see what it assigns, an expansion that may fail and whose
+    # error nobody reads: an undefined constant then raises without the
+    # hints its message would carry. `Object#in?`, whose `{% for %}` reads
+    # its `forall T`, failed that way once for every type the scan read,
+    # and the hints (`lookup_similar_path`, std's declarations) took about
+    # 6 ms each: std_http_exercise's 29 scans took 0.18 s, 0.007 s without
+    # the hints (Linux, release).
+    property? iyi_probing_macros = false
+
     # iyi: true when this program was built against iyi's own prelude.
     #
     # `require` is refused in a `.iyi` file because there is no standard

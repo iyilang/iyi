@@ -809,8 +809,10 @@ class IyiHeap
   end
 
   # A run onto its class's pool, under the class's lock with no slice on
-  # its arena: nobody's, its chunks whatever they were.
+  # its arena: nobody's, its chunks free or never carved (`-Dheap_verify`
+  # checks it before the owner goes).
   def self.pool_run(index : Int32, arena : UInt64, run : UInt64, n : UInt64) : Nil
+    {% if flag?(:heap_verify) %} IyiHeapVerify.check_pooled(arena, run, n) {% end %}
     granule_first = granule_of(arena, run)
     k = 0_u64
     while k < n

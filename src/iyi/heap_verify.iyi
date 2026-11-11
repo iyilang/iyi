@@ -33,7 +33,8 @@
 # (every one of them counts as unmarked then). After a local sweep the
 # partition's free lists must hold only free chunks of its own runs, and
 # no weak cell may name a chunk the sweep freed; before it, every free
-# chunk of its runs must be on its free list or its return stack.
+# chunk of its runs must be on its free list or its return stack. A run
+# going to its class's pool may hold no chunk carved and not free.
 #
 # Beside the checks: `IYI_HEAP_STRESS` (a local collection at every chaos
 # point - chaos.iyi - and, at 1, every park), `IYI_HEAP_FALSE_WORDS` (the
@@ -365,6 +366,39 @@ class IyiHeapVerify
       index = index + 1
     end
     weak_cells(id)
+  end
+
+  # A run going to its class's pool (`IyiHeap.pool_run`, under the
+  # class's lock, its owner not yet cleared): no chunk on it may be carved
+  # and not free. Such a chunk is a live object to a stale word -
+  # `IyiRoots.base_of` answers its base - and a global mark that meets
+  # one reads the dead object's fields and keeps what they name (design
+  # section 2.3; heap_local's `stale:`, the copy that frees a dead unit's
+  # chunks on handed-over runs only).
+  def self.check_pooled(arena : UInt64, run : UInt64, n : UInt64) : Nil
+    chunk = IyiHeap.arena_chunk(arena)
+    stop = run &+ n.unsafe_shl(IyiHeap::GRANULE_SHIFT)
+    head = IyiHeap.first_head(arena, run)
+    while head < stop
+      slot = IyiHeap.chunk_index(arena, head)
+      bits = IyiHeap.read8(arena &+ IyiHeap::META &+ slot &* IyiHeap::META_ENTRY)
+      if bits & IyiHeap::CARVED_FLAG != 0 && bits & IyiHeap::FREE_FLAG == 0
+        report_begin(IyiHeap.owner_at(arena, IyiHeap.granule_of(arena, run)))
+        say("  a run went to the pool with a chunk carved and not free: a stale word naming it passes the collector's root test, and a global mark reads the dead object's fields\n")
+        say("  holder: a run going to the pool\n")
+        say("    run ")
+        say_hex(run)
+        say(", ")
+        say_dec(n)
+        say(" granules\n")
+        say("  target: ")
+        say_hex(head)
+        say("\n")
+        target_detail(head)
+        report_end
+      end
+      head = head &+ chunk
+    end
   end
 
   # A statistic, by a plain add (see `at_point`): close, not exact.

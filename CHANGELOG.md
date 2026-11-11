@@ -142,7 +142,12 @@ now serves 1,057 req/s at 1.97 ms CPU a request, against 1,009 and 1.90
 without the flag, Linux, medians of 3). The local mark follows a fiber's
 defer list through a held `Mutex`'s release node, which is born in the
 shared heap, so a local collection made while a lock is held no longer
-frees the unit's defer nodes below it (a use-after-free).
+frees the unit's defer nodes below it (a use-after-free). A panic's, a
+cancelled task's and `exit`'s drain of a task's cleanups takes each
+node's link down, and a joined group's `outer` is cleared: a `Mutex`'s
+release node, or a group opened inside a lock block, both shared, kept
+naming a unit's chunk after the unit freed it (`-Dheap_verify` exit 86;
+bench/heap_crossings `defer_drain`, `defer_stop`, `group_outer`).
 
 Two races older than heap22, in every build: units setting or deleting
 environment variables at once lost them (tmac, 6 units × 300 rounds at
@@ -27926,7 +27931,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 34,420-line library and nothing else. Every other
+  written against iyi's own 34,438-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

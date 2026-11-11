@@ -146,6 +146,17 @@ on a timer or holds that lock no longer spins for ever on one seed
 (heap_crossings' ring check on macOS). `IYI_CHAOS_LATE_THREADS` holds a
 thread that links itself until the simulated thread is idle.
 
+A finished thread's main fiber no longer stays on the scheduler's fiber
+registry, naming a stack that is gone, in any build (0.21.0 included): the
+retiring thread asked whether the registry held its fiber without the
+runtime lock, and a neighbour unlinking itself between the two reads made
+the answer no. It asks under the lock. On tmac, waves of 16 threads that
+end together left a main fiber behind in 11 of 2,000 waves at 0.21.0 and
+none after; `thread_exercise` named one in 1 of 24 runs (S6, flag off).
+bench/thread_exercise.sh 5f holds the ask open 300 ms in copies of the
+runtime while a neighbour retires: under the lock nothing is left, 5 runs
+of 5; without it a main fiber is, 5 of 5.
+
 ## 0.21.0 — 2026-11-09
 
 **A spawn has one verb and names its unit, and a plain `spawn` runs in
@@ -27900,7 +27911,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 34,143-line library and nothing else. Every other
+  written against iyi's own 34,160-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

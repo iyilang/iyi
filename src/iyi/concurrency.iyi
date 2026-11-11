@@ -2067,6 +2067,24 @@ class IyiScheduler
     @@all_head
   end
 
+  # Whether the registry holds *fiber*: it is the head or has a fiber
+  # before it. Asked under the lock, because both words are other threads'
+  # to rewrite as they link and unlink their own fibers. Read without it,
+  # the head before a neighbour's unregister made this fiber the head and
+  # the back link after that unregister cleared it, the answer was no for
+  # a fiber the registry held, and `retire_thread` left the main fiber on
+  # the list, naming a stack that was gone: on an M2 Pro, waves of 16
+  # threads ending together left one in 11 of 2,000 waves (0.21.0), and
+  # `thread_exercise` named it in 1 of 24 runs. Only the asking thread
+  # links or unlinks the fiber it asks about, so the answer holds after.
+  def self.registered?(fiber : IyiFiber) : Bool
+    IyiRuntimeLock.lock
+    head = @@all_head
+    held = fiber.prev_fiber.is_a?(IyiFiber) || (head.is_a?(IyiFiber) && head.object_id == fiber.object_id)
+    IyiRuntimeLock.unlock
+    held
+  end
+
   # A thread's last act with the scheduler: its main fiber leaves the
   # registry, because its stack is about to. A spawned fiber leaves when
   # it is reaped; the main fiber was made by the first `current` on the
@@ -2079,7 +2097,8 @@ class IyiScheduler
   # collector, which no handler of ours claims, and the process died of
   # it with nothing printed (`thread_exercise`, once in sixty runs there).
   # Only a fiber the registry holds is unlinked - `unregister` of one it
-  # does not would rewrite the head.
+  # does not would rewrite the head - and whether it does is asked under
+  # the lock (`registered?`).
   #
   # And what the scheduler made for the thread goes with it: the poller,
   # Windows' deadline timer, the stacks in the pool, and the state on the
@@ -2093,9 +2112,7 @@ class IyiScheduler
     return if state.is_a?(Nil)
     main = state.current
     if main.is_a?(IyiFiber)
-      head = @@all_head
-      linked = main.prev_fiber.is_a?(IyiFiber) || (head.is_a?(IyiFiber) && head.object_id == main.object_id)
-      unregister(main) if linked
+      unregister(main) if registered?(main)
     end
     reap_dying
     # Off the roots' list first, under the scheduler's lock as well as the

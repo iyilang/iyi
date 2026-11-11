@@ -17,16 +17,18 @@
 # `if false`, is not built at its declaration
 # (`Program#iyi_mark_reached_constants`).
 #
-# The count is the collector's own, not a clock: each program prints the
-# bytes allocated before its first statement (`GC.stats`), and may not be
-# more than one slice (64 KiB, the step the count moves in) above a
-# program importing std/gc alone.
+# The count is by identity, not by bytes or a clock: each program prints
+# how many tables std/lazy has built before its first statement
+# (`LazyBuilds.count`), which must be 0, as a program importing std/lazy
+# alone prints. How big a table is, or the step the collector's byte
+# count moves in, cannot hide one.
 # - tables: imports every one of those modules, std/http, and a module
-#   of its own whose 400 KB constant only a def nothing calls reads; its
+#   of its own whose 400 KB constant only a def nothing calls reads (its
+#   initializer builds through a `Lazy`, so the count sees it built); its
 #   running code reads tables - a category, a script, the grapheme
 #   clusters, NFKC, a MIME type, a digest, a key - only when given an
-#   argument, and then its count must grow by a slice, which shows the
-#   count sees tables built.
+#   argument, and then its count must grow, which shows the count sees
+#   tables built.
 # - web_start: bench/web_cores.iyi without its in-process requests, a server
 #   with TLS, Bcrypt and JSON that answers nothing when not asked to
 #   listen: what a real program pays to start.
@@ -37,7 +39,9 @@
 # (`IYI_SPAWN_BROKEN=probeused`, tables); std/unicode with a class
 # variable whose initializer reads five of its tables as the module
 # starts (tables); and X25519's fixed-base table an eager constant
-# again, which the server's TLS handshakes may read (web_start).
+# again, which the server's TLS handshakes may read (web_start). Each
+# copy builds its table through std/lazy, so it is the count that names
+# it: built before main, or not.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -72,16 +76,14 @@ fi
 status=0
 export IYI_PATH="$REPO/src${PSEP}$REPO/samples/iyi${PSEP}$WORK"
 
-# The count's step: a cache reports its bytes a slice at a time
-# (`IyiHeap::SLICE`).
-SLICE=65536
-
 mkdir -p "$WORK/dep"
 cat >"$WORK/dep/rare.iyi" <<'IYI'
 module dep/rare
 
+import std/lazy::{Lazy}
+
 pub struct Rare
-  ROWS = Array(Int32).new(100_000) { |i| i }
+  ROWS = Lazy(Array(Int32)).new.get { Array(Int32).new(100_000) { |i| i } }
 
   def self.total : Int32
     ROWS.size
@@ -93,7 +95,7 @@ cat >"$WORK/tables.iyi" <<'IYI'
 @[Unsafe("reads a P-256 key's bytes, as the module it calls does")]
 module tables
 
-import std/gc::{GC}
+import std/lazy::{LazyBuilds}
 import std/unicode::{Unicode}
 import std/mime::{MIME}
 import std/digest::{SHA256}
@@ -105,8 +107,7 @@ import std/password
 import std/http::{Request, Response, Server}
 import dep/rare::{Rare}
 
-stats = GC.stats
-puts "#{stats.bytes_since_collection} #{stats.collections}"
+puts LazyBuilds.count
 if Program.args.size > 0
   text = "ﬁ Ǆ ½ ℌ x\u0301"
   puts Unicode.general_category('a')
@@ -118,18 +119,16 @@ if Program.args.size > 0
   puts Ed25519.public_key(Array(UInt8).new(32, 7_u8)).bytesize
   key = P256PrivateKey.from_bytes(Array(UInt8).new(32, 7_u8))
   puts key.is_a?(P256PrivateKey)
-  stats = GC.stats
-  puts "#{stats.bytes_since_collection} #{stats.collections}"
+  puts LazyBuilds.count
 end
 IYI
 
 cat >"$WORK/plain.iyi" <<'IYI'
 module plain
 
-import std/gc::{GC}
+import std/lazy::{LazyBuilds}
 
-stats = GC.stats
-puts "#{stats.bytes_since_collection} #{stats.collections}"
+puts LazyBuilds.count
 IYI
 
 # The server: web_cores up to its in-process requests, which read tables
@@ -144,8 +143,7 @@ imports = list(re.finditer(r"^import [^\n]*\n", src, re.M))
 if cut < 0 or not module or not imports:
     raise SystemExit("bench/web_cores.iyi no longer has its module line, imports and `def asked(`")
 end = imports[-1].end()
-count = ('import std/gc::{GC}\n\nstats = GC.stats\n'
-         'puts "#{stats.bytes_since_collection} #{stats.collections}"\n')
+count = 'import std/lazy::{LazyBuilds}\n\nputs LazyBuilds.count\n'
 out = src[:module.start()] + "module web_start" + src[module.end():end] + count + src[end:cut] + "\n"
 Path(os.environ["DST"]).write_text(out, encoding="utf-8")
 PY
@@ -165,29 +163,27 @@ build() {
   fi
 }
 
-# check LABEL COUNT PLAIN: each "BYTES COLLECTIONS"; the program's start
-# at most a slice above the plain one's, with no collection run before
-# either count.
+# check LABEL COUNT PLAIN: each the number of tables std/lazy built
+# before the program's first statement; the program's must be 0, and so
+# must the plain one's, which nothing it imports builds a table in.
+# Returns 2 when the program built some, 1 for any other failure.
 check() {
-  local label="$1" t_bytes t_cols p_bytes p_cols
-  read -r t_bytes t_cols <<<"$2"
-  read -r p_bytes p_cols <<<"$3"
-  case "$t_bytes$t_cols$p_bytes$p_cols" in
+  local label="$1" t="$2" p="$3"
+  case "$t$p" in
     "" | *[!0-9]*)
-      echo "  $label: no count read ('$2', plain: '$3')"
+      echo "  $label: no count read ('$t', plain: '$p')"
       return 1
       ;;
   esac
-  if [ "$t_cols" -ne 0 ] || [ "$p_cols" -ne 0 ]; then
-    echo "  $label: a collection ran before the count ($t_cols, $p_cols), so the count is not the start's"
+  if [ "$p" -ne 0 ]; then
+    echo "  $label: a program importing std/lazy alone built $p tables before its first statement"
     return 1
   fi
-  local said="the start counted $((t_bytes - p_bytes)) bytes more than std/gc's alone ($t_bytes, $p_bytes; at most $SLICE)"
-  if [ "$t_bytes" -gt $((p_bytes + SLICE)) ]; then
-    echo "  $label: $said"
-    return 1
+  if [ "$t" -ne 0 ]; then
+    echo "  $label: $t tables built before the first statement (std/lazy's alone: 0)"
+    return 2
   fi
-  echo "  $label: $said"
+  echo "  $label: no table built before the first statement (std/lazy's alone: 0)"
 }
 
 for mode in plain release; do
@@ -210,22 +206,19 @@ for mode in plain release; do
 
   echo "== $mode: reading tables builds them, and the count sees it"
   out="$("$WORK/tables-$mode" read 2>&1)"
-  read -r b_bytes b_cols <<<"$(echo "$out" | sed -n 1p)"
-  read -r a_bytes a_cols <<<"$(echo "$out" | tail -1)"
-  case "$b_bytes$b_cols$a_bytes$a_cols" in
+  before="$(echo "$out" | sed -n 1p)"
+  after="$(echo "$out" | tail -1)"
+  case "$before$after" in
     "" | *[!0-9]*)
       echo "  $mode: no count read: $out"
       status=1
       ;;
     *)
-      if [ "$a_cols" -ne "$b_cols" ]; then
-        echo "  $mode: a collection ran between the counts, so the growth is unmeasured"
-        status=1
-      elif [ "$a_bytes" -lt $((b_bytes + SLICE)) ]; then
-        echo "  $mode: reading the tables grew the count by $((a_bytes - b_bytes)) bytes, under a slice: the count does not see them built"
+      if [ "$after" -le "$before" ]; then
+        echo "  $mode: reading the tables built $((after - before)): the count does not see them built"
         status=1
       else
-        echo "  $mode: reading the tables grew the count by $((a_bytes - b_bytes)) bytes (at least $SLICE)"
+        echo "  $mode: reading the tables built $((after - before)) of them"
       fi
       ;;
   esac
@@ -233,15 +226,22 @@ done
 
 echo
 echo "== proving the check fails when a table is built at the start again"
-# caught LABEL NAME: the build NAME must fail the start's check.
+# caught LABEL NAME MODE: the build NAME-MODE must fail the start's check
+# by building a table before its first statement, not by failing anyhow.
 caught() {
-  local label="$1" name="$2"
-  if check "$label" "$("$WORK/$name" 2>&1)" "$("$WORK/plain-plain" 2>&1)" >"$WORK/$name.out"; then
-    echo "  $label: the check PASSED on a table built at the start"
+  local label="$1 ($3)" name="$2-$3" rc
+  check "$label" "$("$WORK/$name" 2>&1)" "$("$WORK/plain-$3" 2>&1)" >"$WORK/$name.out"
+  rc=$?
+  if [ "$rc" -eq 2 ]; then
+    echo "  $label caught:$(sed 's/^ *[^:]*://' "$WORK/$name.out")"
+  else
+    if [ "$rc" -eq 0 ]; then
+      echo "  $label: the check PASSED on a table built at the start"
+    else
+      echo "  $label: failed, but not by a table built at the start"
+    fi
     sed 's/^/  /' "$WORK/$name.out"
     status=1
-  else
-    echo "  $label caught:$(sed 's/^ *[^:]*://' "$WORK/$name.out")"
   fi
 }
 
@@ -264,36 +264,54 @@ Path(os.environ["DST"]).write_text(src, encoding="utf-8")
 PY
 }
 
-if IYI_SPAWN_BROKEN=probeused build eager-probe tables; then
-  caught "a definition probe's reads counted as the program's (probeused)" eager-probe
-else
-  status=1
-fi
-
+eager_start=1
 if ! patch eager-start unicode.iyi "  @@grapheme_rows = Lazy(Array(Int32)).new
 " "  @@grapheme_rows = Lazy(Array(Int32)).new
   @@eager : Int32 = general_category_rows.size + compatibility_decomposition_rows.size + canonical_decomposition_rows.size + grapheme_rows.size + script_rows.size
 "; then
   echo "  std/unicode's start: the patch did not apply"
-  status=1
-elif IYI_PATH="$WORK/eager-start${PSEP}$IYI_PATH" build eager-start-tables tables; then
-  caught "std/unicode reading five tables as it starts" eager-start-tables
-else
+  eager_start=0
   status=1
 fi
 
+eager_constant=1
 if ! patch eager-constant curve25519.iyi "  @@table = Lazy(Pointer(CurvePrecomp)).new
-" "  TABLE = build
+" "  TABLE = Lazy(Pointer(CurvePrecomp)).new.get { build }
 " "    @@table.get { build }
 " "    TABLE
 "; then
   echo "  std/curve25519's eager constant: the patch did not apply"
-  status=1
-elif IYI_PATH="$WORK/eager-constant${PSEP}$IYI_PATH" build eager-constant-server web_start; then
-  caught "the server with X25519's base table an eager constant" eager-constant-server
-else
+  eager_constant=0
   status=1
 fi
+
+for mode in plain release; do
+  flags=()
+  [ "$mode" = release ] && flags=(--release)
+  [ -x "$WORK/plain-$mode" ] || continue
+
+  if IYI_SPAWN_BROKEN=probeused build "eager-probe-$mode" tables "${flags[@]}"; then
+    caught "a definition probe's reads counted as the program's (probeused)" eager-probe "$mode"
+  else
+    status=1
+  fi
+
+  if [ "$eager_start" -eq 1 ]; then
+    if IYI_PATH="$WORK/eager-start${PSEP}$IYI_PATH" build "eager-start-tables-$mode" tables "${flags[@]}"; then
+      caught "std/unicode reading five tables as it starts" eager-start-tables "$mode"
+    else
+      status=1
+    fi
+  fi
+
+  if [ "$eager_constant" -eq 1 ]; then
+    if IYI_PATH="$WORK/eager-constant${PSEP}$IYI_PATH" build "eager-constant-server-$mode" web_start "${flags[@]}"; then
+      caught "the server with X25519's base table an eager constant" eager-constant-server "$mode"
+    else
+      status=1
+    fi
+  fi
+done
 
 echo
 if [ "$status" -eq 0 ]; then

@@ -33,6 +33,12 @@
 # A `Lazy` lives in a class variable, whose struct the calls change in
 # place. It is not `Share` (`get` assigns it), so the class variable is
 # claimed `@[UnsafeReach]` in its module, an `@[Unsafe]` one.
+#
+# `LazyBuilds.count` answers how many builds have run in the program so
+# far, every `Lazy`'s together: one atomic add on a build, nothing on a
+# read. A program that prints it before its first statement shows by
+# identity, not by bytes, whether anything built a table before it ran
+# (`bench/std_lazy_tables_exercise.sh`).
 
 @[Unsafe("the mark is read and claimed by atomic loads, stores and exchanges on the struct's own word")]
 module std/lazy
@@ -49,10 +55,32 @@ pub struct Lazy(T)
       return kept unless kept.is_a?(Nil)
     end
     built = IyiCross.shared { yield }
+    Builds.add
     if IyiAtomic.cmpxchg(pointerof(@mark), 0, 1, :acquire, :monotonic)[1]
       @value = built
       IyiAtomic.store(pointerof(@mark), 2, :release, false)
     end
     built
+  end
+end
+
+pub struct LazyBuilds
+  # How many builds have run, every `Lazy`'s, losers of a race included.
+  def self.count : UInt64
+    Builds.count
+  end
+end
+
+# The count, which only `Lazy#get` adds to.
+struct Builds
+  @@count : Atomic(UInt64) = Atomic(UInt64).new(0_u64)
+
+  def self.count : UInt64
+    @@count.get
+  end
+
+  def self.add : Nil
+    @@count.add(1_u64)
+    nil
   end
 end

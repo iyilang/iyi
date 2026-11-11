@@ -128,11 +128,9 @@ class Iyi::Program
   def expand_macro(a_macro : Macro, call : Call, scope : Type, path_lookup : Type? = nil, a_def : Def? = nil)
     check_call_to_deprecated_macro a_macro, call
 
-    layout_fold_macro_expand(a_macro, call, nil, scope, path_lookup || scope, nil, a_def) do
-      interpreter = MacroInterpreter.new self, scope, path_lookup || scope, a_macro, call, a_def, in_macro: true
-      Prof.span("  macro: interpret") { a_macro.body.accept interpreter }
-      {Prof.span("  macro: to_s (stringify)") { interpreter.to_s }, interpreter.macro_expansion_pragmas}
-    end
+    interpreter = MacroInterpreter.new self, scope, path_lookup || scope, a_macro, call, a_def, in_macro: true
+    Prof.span("  macro: interpret") { a_macro.body.accept interpreter }
+    {Prof.span("  macro: to_s (stringify)") { interpreter.to_s }, interpreter.macro_expansion_pragmas}
   rescue ex
     raise ex if @program.macro_expansion_error_hook.nil?
 
@@ -143,12 +141,10 @@ class Iyi::Program
   end
 
   def expand_macro(node : ASTNode, scope : Type, path_lookup : Type? = nil, free_vars = nil, a_def : Def? = nil)
-    layout_fold_macro_expand(nil, nil, node, scope, path_lookup || scope, free_vars, a_def) do
-      interpreter = MacroInterpreter.new self, scope, path_lookup || scope, node.location, def: a_def, in_macro: false
-      interpreter.free_vars = free_vars
-      Prof.span("  macro: interpret") { node.accept interpreter }
-      {Prof.span("  macro: to_s (stringify)") { interpreter.to_s }, interpreter.macro_expansion_pragmas}
-    end
+    interpreter = MacroInterpreter.new self, scope, path_lookup || scope, node.location, def: a_def, in_macro: false
+    interpreter.free_vars = free_vars
+    Prof.span("  macro: interpret") { node.accept interpreter }
+    {Prof.span("  macro: to_s (stringify)") { interpreter.to_s }, interpreter.macro_expansion_pragmas}
   rescue ex
     raise ex if @program.macro_expansion_error_hook.nil?
 

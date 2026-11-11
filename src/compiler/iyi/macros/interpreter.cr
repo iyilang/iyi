@@ -1,18 +1,4 @@
 module Iyi
-  # A replay of a macro under final layout values (`Program#layout_fold_macro_rerun`) reached
-  # something it must not do or cannot answer, so the replay proves nothing about the output.
-  #
-  # `external?` is true when the answer lies outside the compiler: a command, a file, the
-  # environment. Running those again is an effect the first expansion did not have. Everything
-  # else is a limit of the replay itself, and the refusal that follows says so.
-  class ReplayUnknownException < Exception
-    getter? external : Bool
-
-    def initialize(message : String, @external : Bool = false)
-      super(message)
-    end
-  end
-
   class MacroInterpreter < Visitor
     getter last : ASTNode
 
@@ -22,8 +8,7 @@ module Iyi
     getter program : Program
     property free_vars : Hash(String, TypeVar)?
     property macro_expansion_pragmas : Hash(Int32, Array(Lexer::LocPragma))? = nil
-    property? replay : Bool = false
-    @temp_warnings : WarningCollection? = nil
+
     def iyi_derive_def? : Bool
       !!@def.try(&.iyi_from_derive?)
     end
@@ -123,7 +108,6 @@ module Iyi
 
     # Calls the program's `interpreted_node_hook` hook with the macro ASTNode that was interpreted.
     def interpreted_hook(node : ASTNode, *, location custom_location : Location? = nil) : ASTNode
-      return node if @replay
       @program.interpreted_node_hook.try &.call(node, false, false, custom_location)
 
       node
@@ -131,7 +115,6 @@ module Iyi
 
     # Calls the program's `interpreted_node_hook` hook with the macro ASTNode that was _not_ interpreted.
     def not_interpreted_hook(node : ASTNode, use_significant_node : Bool = false, *, location custom_location : Location? = nil) : ASTNode
-      return node if @replay
       return node unless interpreted_hook = @program.interpreted_node_hook
 
       interpreted_hook.call node, true, use_significant_node, custom_location
@@ -354,6 +337,7 @@ module Iyi
 
       entries.each_with_index do |entry, i|
         key, value = yield entry, value_var
+
         @vars[key_var.name] = key
         @vars[value_var.name] = value if value_var
         @vars[index_var.name] = NumberLiteral.new(i) if index_var
@@ -490,17 +474,11 @@ module Iyi
         args = node.args.map { |arg| accept arg }
         named_args = node.named_args.try &.to_h { |arg| {arg.name, accept arg.value} }
 
-        if @replay && !is_safe_receiver_method?(receiver, node.name)
-          raise ReplayUnknownException.new("it calls `#{node.name}` on a #{receiver.class_desc}, which the replay has not classified as reading nothing but its own arguments")
-        end
-
-        # normalize needed for param unpacking. It rewrites the block in place, so a replay works on a copy.
-        block = node.block.try { |b| @program.normalize(@replay ? b.clone : b) }
+        # normalize needed for param unpacking
+        block = node.block.try { |b| @program.normalize(b) }
 
         begin
           @last = receiver.interpret(node.name, args, named_args, block, self, node.name_location)
-        rescue ex : ReplayUnknownException
-          raise ex
         rescue ex : MacroRaiseException
           # Re-raise to avoid the logic in the other rescue blocks and to retain the original location
           raise ex
@@ -518,124 +496,6 @@ module Iyi
       end
 
       false
-    end
-
-    def is_safe_receiver_method?(receiver : ASTNode, method : String) : Bool
-      case receiver
-      when NumberLiteral
-        case method
-        when "+", "-", "*", "/", "//", "%", "&", "|", "^", "<<", ">>", "**", "~",
-             "+@", "-@", "abs", "==", "!=", "<", "<=", ">", ">=", "<=>",
-             "to_i", "to_i8", "to_i16", "to_i32", "to_i64",
-             "to_u", "to_u8", "to_u16", "to_u32", "to_u64",
-             "to_f", "to_f32", "to_f64", "to_s", "id", "stringify"
-          true
-        else
-          false
-        end
-      when BoolLiteral
-        case method
-        when "!", "==", "!=", "to_s", "id", "stringify"
-          true
-        else
-          false
-        end
-      when NilLiteral
-        case method
-        when "!", "==", "!=", "nil?", "to_s", "id", "stringify"
-          true
-        else
-          false
-        end
-      when StringLiteral, MacroId
-        case method
-        when "+", "==", "!=", "<", "<=", ">", ">=", "<=>", "=~",
-             "size", "empty?", "capitalize", "downcase", "upcase",
-             "strip", "rstrip", "lstrip", "chomp",
-             "starts_with?", "ends_with?", "includes?",
-             "split", "lines", "chars", "[]", "to_s", "id", "stringify",
-             "gsub", "sub", "tr", "count"
-          true
-        else
-          false
-        end
-      when CharLiteral
-        case method
-        when "==", "!=", "<", "<=", ">", ">=", "<=>", "ord", "to_s", "id", "stringify", "downcase", "upcase"
-          true
-        else
-          false
-        end
-      when SymbolLiteral
-        case method
-        when "==", "!=", "to_s", "id", "stringify"
-          true
-        else
-          false
-        end
-      when TupleLiteral, NamedTupleLiteral
-        case method
-        when "[]", "size", "empty?", "map", "each", "first", "last", "any?", "all?", "join", "to_s", "id", "stringify", "select", "reject", "find", "includes?", "splat", "double_splat"
-          true
-        else
-          false
-        end
-      when ArrayLiteral
-        case method
-        when "[]", "size", "empty?", "map", "each", "first", "last", "any?", "all?", "join", "to_s", "id", "stringify", "select", "reject", "find", "includes?", "compact", "flatten", "uniq", "sort", "reverse", "splat"
-          true
-        else
-          false
-        end
-      when HashLiteral
-        case method
-        when "[]", "[]?", "size", "empty?", "map", "each", "keys", "values", "has_key?", "to_s", "id", "stringify"
-          true
-        else
-          false
-        end
-      when RangeLiteral
-        case method
-        when "begin", "end", "from", "to", "excludes_end?", "exclusive?", "each", "map", "to_a", "to_s", "id", "stringify"
-          true
-        else
-          false
-        end
-      when TypeNode
-        case method
-        # What a type is, fixed where it is declared. What it holds - constants, methods, subclasses,
-        # instance variables, annotations - grows as the program is read, so a replay asking now is
-        # not the expansion asking then.
-        when "abstract?", "class?", "struct?", "module?", "union?", "nilable?",
-             "name", "type_vars", "size", "stringify", "to_s", "id"
-          true
-        else
-          false
-        end
-      when ASTNode
-        case method
-        when "id", "stringify", "to_s", "class_name", "is_a?", "nil?"
-          true
-        when "name"
-          receiver.is_a?(Call) || receiver.is_a?(Def) || receiver.is_a?(Var) || receiver.is_a?(Arg)
-        when "args", "named_args", "block", "receiver"
-          receiver.is_a?(Call) || receiver.is_a?(Def)
-        when "body", "return_type"
-          receiver.is_a?(Def) || receiver.is_a?(Block)
-        when "default_value", "restriction"
-          receiver.is_a?(Arg)
-        when "expressions"
-          receiver.is_a?(Expressions)
-        when "names", "global?"
-          receiver.is_a?(Path)
-        when "left", "right"
-          receiver.is_a?(BinaryOp)
-        else
-          false
-        end
-      else
-        false
-      end
     end
 
     def visit(node : Yield)
@@ -703,13 +563,6 @@ module Iyi
 
       case matched_type
       when Const
-        if @replay
-          # Nothing is recorded and no warning is given twice. The value is the constant's own, which
-          # the replay holds at its final layout values.
-          @program.layout_fold_constant_read(matched_type, node)
-          return matched_type.value
-        end
-
         @program.check_deprecated_constant(matched_type, node)
         @program.layout_fold_constant_read(matched_type, node)
         matched_type.value
@@ -758,16 +611,8 @@ module Iyi
     end
 
     def resolve(node : Generic | Metaclass | ProcNotation)
-      replay_refuses_type(node)
       type = @path_lookup.lookup_type(node, self_type: @scope, free_vars: @free_vars)
       TypeNode.new(type)
-    end
-
-    # Looking a written type up can make it: a generic instance, a metaclass, a union. A replay makes
-    # nothing, so it stops here.
-    private def replay_refuses_type(node : ASTNode) : Nil
-      return unless @replay
-      raise ReplayUnknownException.new("it names the type `#{node}`, and looking that up could create it")
     end
 
     def resolve?(node : Generic | Metaclass | ProcNotation)
@@ -777,7 +622,6 @@ module Iyi
     end
 
     def resolve(node : Union)
-      replay_refuses_type(node)
       union_type = @program.union_of(node.types.map do |type|
         resolve(type).type
       end)
@@ -785,7 +629,6 @@ module Iyi
     end
 
     def resolve?(node : Union)
-      replay_refuses_type(node)
       union_type = @program.union_of(node.types.map do |type|
         resolved = resolve?(type)
         return nil unless resolved
@@ -804,9 +647,6 @@ module Iyi
     end
 
     def visit(node : SizeOf)
-      if @replay
-        raise ReplayUnknownException.new("it measures `sizeof` inside the macro, which the replay does not recompute")
-      end
       type_node = resolve(node.exp)
       unless type_node.is_a?(TypeNode) && stable_abi?(type_node.type)
         node.raise "argument to `sizeof` inside macros must be a type with a stable size"
@@ -817,9 +657,6 @@ module Iyi
     end
 
     def visit(node : AlignOf)
-      if @replay
-        raise ReplayUnknownException.new("it measures `alignof` inside the macro, which the replay does not recompute")
-      end
       type_node = resolve(node.exp)
       unless type_node.is_a?(TypeNode) && stable_abi?(type_node.type)
         node.raise "argument to `alignof` inside macros must be a type with a stable alignment"
@@ -874,29 +711,15 @@ module Iyi
     end
 
     def visit(node : Splat)
-      unless @replay
-        warnings.add_warning(node, "Deprecated use of splat operator. Use `#splat` instead")
-      end
+      warnings.add_warning(node, "Deprecated use of splat operator. Use `#splat` instead")
       node.exp.accept self
-      if @replay
-        unless is_safe_receiver_method?(@last, "splat")
-          raise ReplayUnknownException.new("method `#{@last.class}#splat` cannot be safely evaluated during layout fold settlement")
-        end
-      end
       @last = @last.interpret("splat", [] of ASTNode, nil, nil, self, node.location)
       false
     end
 
     def visit(node : DoubleSplat)
-      unless @replay
-        warnings.add_warning(node, "Deprecated use of double splat operator. Use `#double_splat` instead")
-      end
+      warnings.add_warning(node, "Deprecated use of double splat operator. Use `#double_splat` instead")
       node.exp.accept self
-      if @replay
-        unless is_safe_receiver_method?(@last, "double_splat")
-          raise ReplayUnknownException.new("method `#{@last.class}#double_splat` cannot be safely evaluated during layout fold settlement")
-        end
-      end
       @last = @last.interpret("double_splat", [] of ASTNode, nil, nil, self, node.location)
       false
     end

@@ -51,7 +51,10 @@ on Linux, macOS (atos on the .dwarf companion) and Windows
 class's pool is checked to hold no chunk carved and not free;
 heap_crossings' thread check waits for its unit to end, so its thread
 copy is caught on Windows too; and the crossing fuzz driver runs on
-Windows.
+Windows. bench/heap_verify.sh builds heap_crossings' copies the way
+heap_crossings.sh does (both trees, the compiler's `IYI_SPAWN_BROKEN`), so
+the std `Mutex` copies and the compiler-broken `Unit.new` rows are caught
+by the verifier.
 
 A parallel unit reaching module state that is not Share through the code
 it calls is a compile error (SPEC.md III.4.5), std's and the prelude's

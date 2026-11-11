@@ -1373,7 +1373,10 @@ puts "a parked sender's receipt survived the next sender's park"
   # fails there: 869 / 876 KiB more kept at stress 1 and 1,490 / 807 KiB at
   # stress 64 (Linux / tmac, seed 2, false words). At stress 64 32,000
   # were too few: the copy kept under 256 KiB in the whole program on
-  # tmac.
+  # tmac. On one worker (the matrix's odd seeds) stress 1 takes 117-127 s
+  # on Linux and 155-167 s on tmac, and is cut no further: the copy keeps
+  # 439 KiB there on seed 3, under twice the bound, and none on seed 1's
+  # schedule (Linux).
   select_rounds = heap_stress == 0_u64 ? 400000 : (heap_stress == 1_u64 ? 32000 : 128000)
   select_grown = select_kept_bytes(select_rounds)
   if select_grown > 256_u64 * 1024_u64
@@ -1414,6 +1417,21 @@ puts "a parked sender's receipt survived the next sender's park"
     GC.stats.bytes_kept_by_last_sweep
   end
 
+  # A task's 64 MB value, copied 64 KB at a time. `"r" * 64000000` is a
+  # loop of 64 million back-edges, and on the simulated schedule (one
+  # worker) a back-edge may preempt the task even with nothing else to
+  # run: a park, at which `IYI_HEAP_STRESS=1` collects its partition.
+  # Seed 3's random strategy did so 485,000 times per value, 84 s each in
+  # this program (Linux), and 16e took 161 s of the 285 s a run took,
+  # against bench/heap_verify_matrix.sh's 240. In a program of its own
+  # the value took 7 s (4 MB 0.4 s, 16 MB 1.8 s), the same preemptions
+  # 0.6 s at stress 0, and seed 1's priorities preempt a task running
+  # alone not at all. As 1,000 copies of 64 KB the value is 65,000
+  # back-edges and 480 collections: 16e takes 1.3 s, the run 125 s.
+  def big_value(letter : String) : String
+    (letter * 64000) * 1000
+  end
+
   def through_buffered(ch : Channel(String)) : Nil
     16.times do |i|
       ch.send("#{i}" + ("v" * 4000000))
@@ -1424,7 +1442,7 @@ puts "a parked sender's receipt survived the next sender's park"
   def through_rendezvous(ch : Channel(String)) : Nil
     group do |g|
       g.spawn do
-        ch.send("r" * 64000000)
+        ch.send(big_value("r"))
         0
       end
       g.spawn do
@@ -1441,7 +1459,7 @@ puts "a parked sender's receipt survived the next sender's park"
     group do |g|
       g.spawn do
         select
-        when ch.send("t" * 64000000)
+        when ch.send(big_value("t"))
           fail("channel: a send nobody received was delivered")
         when timeout(5)
           nil
@@ -1454,7 +1472,7 @@ puts "a parked sender's receipt survived the next sender's park"
   def offer_cancelled(ch : Channel(String)) : Nil
     group do |g|
       g.spawn do
-        ch.send("c" * 64000000)
+        ch.send(big_value("c"))
         0
       end
       g.spawn do
@@ -1467,7 +1485,7 @@ puts "a parked sender's receipt survived the next sender's park"
   def offer_refused(ch : Channel(String)) : Nil
     group do |g|
       g.spawn do
-        ch.send("x" * 64000000)
+        ch.send(big_value("x"))
         0
       end
       g.spawn do

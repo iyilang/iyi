@@ -1033,7 +1033,7 @@ class IyiHeapVerify
 
   # Random words below the running fiber's stack pointer - space no frame
   # holds now and the next calls will - and, on the simulated thread, below
-  # every parked fiber's saved stack pointer.
+  # the saved stack pointer of every parked fiber only this thread runs.
   @[NoInline]
   def self.inject_here : Nil
     fiber = IyiScheduler.current?
@@ -1048,10 +1048,40 @@ class IyiHeapVerify
     fill(sp, floor, own)
     {% if flag?(:iyi_chaos) %}
       if IyiChaos.simulated?
+        here = IyiScheduler.state.object_id
         other = IyiScheduler.first_fiber
         while other.is_a?(IyiFiber)
-          if other.object_id != fiber.object_id && other.state != IyiFiberState::Done && other.state != IyiFiberState::Running && other.stack_top != 0 && other.saved_sp != 0
-            fill(other.saved_sp, other.stack_top - IyiFiber::STACK_BYTES + 2_u64 * IyiFiber::PAGE, own)
+          # The registry holds every thread's fibers, and a program that
+          # sizes the pool runs a pool `Unit`'s tasks on its workers even
+          # under the simulation (`spawn(in:)` → `pooled`). A worker's fiber
+          # is not `Running` from the moment it parks until its switch
+          # away, and the park's own frames - under stress a whole local
+          # collection (`collect_every_park`) - stand on its stack below
+          # the saved stack pointer its *last* switch left: words written
+          # there overwrote them. heap_crossings `in`, false words, stress
+          # 1, one worker, seeds 1/3/5/7 x 10 (Linux): 4 runs in 40 died
+          # of SIGSEGV, and both traced under gdb died on the pool worker,
+          # returning into a heap address from `release_unit` under
+          # `Channel#receive`'s park; 7 in 18 on Windows. Only a fiber
+          # homed on this thread and not the pool's runs nowhere else, so
+          # only its parked stack is dead space while this thread runs:
+          # 0 in 40 so (Linux).
+          home = other.home
+          if other.object_id != fiber.object_id && !other.parallel && home.is_a?(IyiSchedulerState) && home.object_id == here &&
+             other.state != IyiFiberState::Done && other.state != IyiFiberState::Running && other.stack_top != 0 && other.saved_sp != 0
+            low = other.stack_top - IyiFiber::STACK_BYTES + 2_u64 * IyiFiber::PAGE
+            {% if flag?(:win32) && flag?(:x86_64) %}
+              # Windows commits a fiber's stack as it grows (`map_stack`):
+              # under the lowest committed byte, the StackLimit its last
+              # switch saved at saved_sp + 8 (`__iyi_ctx_swap`), lie its
+              # PAGE_GUARD page and reserved memory. Only the running
+              # stack's guard page is the kernel's to grow, since only its
+              # bounds are in the TEB: a parked fiber's touched from here
+              # is STATUS_GUARD_PAGE_VIOLATION, a death.
+              limit = IyiHeap.read64(other.saved_sp &+ 8_u64)
+              low = limit if limit > low
+            {% end %}
+            fill(other.saved_sp, low, own)
           end
           other = other.next_fiber
         end

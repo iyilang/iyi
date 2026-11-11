@@ -1579,7 +1579,7 @@
       fail("lazy: the holding unit allocates in no partition") if held == -1_i64
       fail("lazy: no collection at a park ran in 100 tries, for the runs held") if held == -2_i64
       fail("lazy: the kept nodes read wrong, for the runs held") if held == -6_i64
-      fail("lazy: the unit holds #{held} bytes of runs past twice what it held after three requests") if held > 0_i64
+      fail("lazy: the unit holds #{held} bytes of runs past twice what it held after three requests") if held.is_a?(Int64) && held > 0_i64
     end
   end
 

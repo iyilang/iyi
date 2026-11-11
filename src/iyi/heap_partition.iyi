@@ -464,12 +464,22 @@ class IyiHeap
     read64(node &+ 16_u64) & 0xFFFF_u64
   end
 
+  # The frontier (`OFF_HIGH`) is tested against the chunk's head, never
+  # the address: a run ends on a granule line, its last chunk's head below
+  # the line and its tail past it, and the frontier is set to that line
+  # (`partition_take`). A headed object there starts above the frontier -
+  # heap_crossings' node 20 label, head at granule line - 8, its `String`
+  # at the line - and a test of the address took it for uncarved, so the
+  # publication walk left it `LOCAL` under its published node, and the
+  # sender's death freed it while the receiver held it (HS4b's `channel
+  # channel`, simulated chaos, IYI_HEAP_STRESS=1, seeds 3, 6 and 8, Linux).
   def self.owner_in_arena(arena : UInt64, address : UInt64) : UInt64
     owners = read64(arena &+ OFF_OWNERS)
     return 0_u64 if owners == 0
     first = arena_first(arena)
-    return 0_u64 if address < first || address >= read64(arena &+ OFF_HIGH)
+    return 0_u64 if address < first
     head = head_of(arena, address)
+    return 0_u64 if head >= read64(arena &+ OFF_HIGH)
     read16(arena &+ owners &+ (head &- first).unsafe_shr(GRANULE_SHIFT) &* 2_u64)
   end
 
@@ -1178,9 +1188,11 @@ class IyiHeap
     owners = read64(arena &+ OFF_OWNERS)
     return 0_u64 if owners == 0
     first = arena_first(arena)
-    return 0_u64 if word < first || word >= read64(arena &+ OFF_HIGH)
+    return 0_u64 if word < first
     slot = chunk_index(arena, word)
     head = first &+ slot &* read64(arena &+ OFF_CHUNK)
+    # The head against the frontier, not the word (`owner_in_arena`).
+    return 0_u64 if head >= read64(arena &+ OFF_HIGH)
     granule = (head &- first).unsafe_shr(GRANULE_SHIFT)
     return 0_u64 if read16(arena &+ owners &+ granule &* 2_u64) != id
     bits = read8(arena &+ META &+ slot &* META_ENTRY)
@@ -1208,7 +1220,7 @@ class IyiHeap
     arena = arena_of(destination)
     if arena != 0
       owners = read64(arena &+ OFF_OWNERS)
-      if owners != 0 && destination >= arena_first(arena) && destination < read64(arena &+ OFF_HIGH)
+      if owners != 0 && destination >= arena_first(arena)
         return if owner_in_arena(arena, destination) != 0 && read8(own_address(arena, chunk_index(arena, destination))) & OWN_PUB == 0
       end
     else
@@ -1908,7 +1920,7 @@ class IyiHeap
       keep = false
       if target != 0
         arena = arena_of(target)
-        if arena != 0 && partition_arena?(arena) && target >= arena_first(arena) && target < read64(arena + OFF_HIGH)
+        if arena != 0 && partition_arena?(arena) && target >= arena_first(arena) && head_of(arena, target) < read64(arena + OFF_HIGH)
           chunk_slot = chunk_index(arena, target)
           if read8(arena + META + chunk_slot * META_ENTRY) & FREE_FLAG != 0
             write64(cell, 0_u64)

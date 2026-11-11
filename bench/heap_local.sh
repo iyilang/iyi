@@ -5,7 +5,8 @@
 # check in each direction that matters - a local mark that follows words
 # into other partitions, a free that lists another heap's chunk, a global
 # sweep that drops what it frees for a partition, a pointer answer left
-# as a store into the box, a partition that answer detached still
+# as a store into the box, a unit that grows a child unit's answer
+# without being pinned, a partition that answer detached still
 # collected locally, a death that frees a pinned unit's partition,
 # a local mark blind to the unit's other fibers, a local sweep that
 # leaves a weak cell naming the chunk it freed, a local mark that trusts
@@ -154,6 +155,13 @@ if [ "$PART" = all ] || [ "$PART" = broken ]; then
   # is freed whole at the unit's death under the answer.
   prove_fails "a merge left as a box store" noanswer "answer:" \
     '/^      answered\(box\.object_id, / { found = 1; next } { print } END { if (!found) exit 3 }' \
+    concurrency.iyi
+
+  # A unit that reads a child unit's pointer answer left unpinned: what it
+  # adds to the answered graph is `LOCAL` under the shared heap's holder,
+  # and its own collection frees it.
+  prove_fails "a unit joiner that grows an answer unpinned" noadopt "adopt:" \
+    '/^      IyiHeap\.adopt_answer\(@box\.to_unsafe\.address, / { found = 1; next } { print } END { if (!found) exit 3 }' \
     concurrency.iyi
 
   # A partition detached by a pointer answer still collected locally: the

@@ -24,6 +24,9 @@
 # - `answer:` units answer a list built in their partition; after the
 #   units die and the shared heap has collected, every answer reads back
 #   whole (the partition was detached and the shared heap adopted it).
+# - `adopt:` a unit joins a child unit that answered a graph holding an
+#   array, grows the array and collects: every node reads back whole
+#   (the joining unit was pinned when it read the answer).
 # - `detach:` a unit answers a list into a box of the shared heap, scrubs
 #   its stack and asks for a local collection: the list reads back whole
 #   (a detached partition is the global collection's alone).
@@ -455,6 +458,82 @@
       fail("answer: #{wrong} nodes of unit #{t}'s answer read wrong after it died") if wrong != 0
     end
     fail("answer: no partition was detached by a pointer answer") if IyiHeap.detached_partitions == detached
+  end
+
+  # ── adopt ─────────────────────────────────────────────────────────────
+
+  # A graph a unit may grow: an object holding an array.
+  class Grown
+    getter items : Array(Node)
+
+    def initialize
+      @items = [] of Node
+    end
+  end
+
+  def adopt_child : Grown
+    grown = Grown.new
+    i = 0
+    while i < 4
+      grown.items << Node.new(7000000000_i64 &+ i.to_i64, nil)
+      i = i + 1
+    end
+    grown
+  end
+
+  # The joiner, itself a unit, reads a child unit's pointer answer - the
+  # child's partition detached, the shared heap's from its death - and
+  # grows it: the array's new buffers and nodes are made here, under a
+  # holder this unit's local mark does not read. `IyiTask#value` pins
+  # the reader first (`IyiHeap.adopt_answer`), so they are the shared
+  # heap's and a global collection keeps them; without it the local
+  # collection freed them under the answer (S4h's `answer` fuzz kind,
+  # Linux: exit 86 at seeds 1-3 of 3 with one worker, the holder a
+  # shared Hash's keys). Answers how many nodes read wrong, or a
+  # negative failure.
+  def adopt_task : Int64
+    got = 0_i64
+    group do |g|
+      value = g.spawn(unit: :new) { adopt_child }.value
+      if value.is_a?(Grown)
+        i = 0
+        while i < 200
+          value.items << Node.new(7000000004_i64 &+ i.to_i64, nil)
+          i = i + 1
+        end
+        scrub_stack
+        if IyiHeap.current_record == 0_u64
+          IyiMark.collect
+        elsif !collect_now
+          got = -2_i64
+        end
+        # Freed memory is not walked: a freed buffer or node is one
+        # `IyiRoots.base_of` answers 0 for, as `stale:` asks.
+        if got == 0_i64 && IyiRoots.base_of(value.items.to_unsafe.address) == 0_u64
+          got = -4_i64
+        elsif got == 0_i64
+          value.items.each_with_index do |node, k|
+            got = got &+ 1_i64 unless IyiRoots.base_of(node.object_id) != 0_u64 && node.intact?(7000000000_i64 &+ k.to_i64)
+          end
+          got = -3_i64 if got == 0_i64 && value.items.size != 204
+        end
+      else
+        got = -1_i64
+      end
+    end
+    got
+  end
+
+  def adopt_check : Nil
+    group do |g|
+      value = g.spawn(unit: :new) { adopt_task }.value
+      fail("adopt: the joining unit answered #{value}") unless value.is_a?(Int64)
+      fail("adopt: the child unit answered no graph") if value == -1_i64
+      fail("adopt: no local collection ran in 100 tries") if value == -2_i64
+      fail("adopt: the grown array lost nodes") if value == -3_i64
+      fail("adopt: a child unit's answer, grown by a joining unit, had its array's buffer freed under it by that unit's collection") if value == -4_i64
+      fail("adopt: #{value} nodes a joining unit added to a child unit's answer read wrong after its collection") if value != 0_i64
+    end
   end
 
   # ── detach ────────────────────────────────────────────────────────────
@@ -1122,6 +1201,7 @@
   return_check
   detach_check
   answer_check(workers)
+  adopt_check
   pin_check
   poison_check
   graphs_check(workers, rounds)

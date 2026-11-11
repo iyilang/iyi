@@ -2020,6 +2020,48 @@ class IyiHeap
     stat_add(pointerof(@@detached).address, 1_u64)
   end
 
+  # `IyiTask#value`, read by a fiber of a partitioned unit: an answer
+  # whose words name a chunk that is not the reader's - the child's
+  # detached partition, the shared heap's from its death
+  # (`hand_to_shared`), another unit's, or a large object - is a graph
+  # the reader may grow, and what growing it makes would be `LOCAL` under
+  # a holder its local mark never reads, freed there. Amendment 4 called
+  # the shared adoption always sound; it is only while the joiner is not
+  # a unit (S4h's `answer` fuzz kind, Linux: a unit joiner growing an
+  # answered Hash exited 86 at seeds 1-3 of 3 with one worker). The
+  # reader is pinned first, its partition the shared heap's, so what it
+  # makes from here is shared too. A scalar or nil answer, or one naming
+  # the reader's own partition, changes nothing.
+  def self.adopt_answer(slot : UInt64, bytes : UInt64) : Nil
+    fiber = IyiScheduler.current?
+    return unless fiber.is_a?(IyiFiber)
+    unit = fiber.unit
+    return unless unit.is_a?(IyiUnit)
+    record = unit.heap
+    return if record == 0
+    id = read64(record &+ REC_ID)
+    foreign = false
+    word = slot
+    while word + 8_u64 <= slot + bytes && !foreign
+      value = read64(word)
+      if value != 0
+        arena = arena_of(value)
+        if arena != 0
+          foreign = partition_arena?(arena) && value >= arena_first(arena) && owner_in_arena(arena, value) != id
+        elsif value > 0xFFFF_u64 && value & 7_u64 == 0_u64
+          # A large object's node, looked for only behind a word that
+          # could be an address: a scalar answer takes no lock.
+          lock
+          node = containing_large(Pointer(Void).new(value))
+          foreign = node != 0 && read64(node &+ 16_u64) & 0xFFFF_u64 != id
+          unlock
+        end
+      end
+      word = word + 8_u64
+    end
+    pin_running if foreign
+  end
+
   # The hook in `IyiScheduler.unregister`: the unit's last fiber has left
   # its list, and the unit is no `Unit`'s, so nothing will ever allocate
   # in its partition again. Called after the registry's lock is let go.

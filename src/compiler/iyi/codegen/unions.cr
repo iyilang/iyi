@@ -74,9 +74,10 @@ module Iyi
 
     # *value* is in the form `to_lhs` gives, as `assign` takes it.
     #
-    # iyi: every store of an arm writes the whole union, the bytes past the
-    # arm and the tag's padding as zero (`iyi_clear_union_holes`), after
-    # the arm so that a value read from the slot itself is read first.
+    # iyi: in a `-Dheap_partitions` build every store of an arm writes the
+    # whole union, the bytes past the arm and the tag's padding as zero
+    # (`iyi_clear_union_holes`), after the arm so that a value read from the
+    # slot itself is read first.
     # Left alone they kept what the slot held before - a wider arm's
     # pointer, or a stack temporary's stale word - and an `Array(DBValue)`
     # buffer, which the collector and the heap22 verifier read word by
@@ -92,6 +93,7 @@ module Iyi
     # The holes of the *struct_type* union at *union_pointer* once an arm
     # wrote the first *payload* bytes of its value, written as zero.
     def iyi_clear_union_holes(struct_type, union_pointer, payload : UInt64) : Nil
+      return unless iyi_holes?
       iyi_clear_holes union_pointer, @llvm_typer.iyi_union_holes(struct_type, payload), @llvm_typer.align_of(struct_type)
     end
 

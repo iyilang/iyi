@@ -38,8 +38,8 @@
 #   tag's padding, never a stale word. The buffer's unit boxes its values
 #   on a stack whose dead words name another unit's chain, which that
 #   unit then drops and collects: a stale word in the buffer is the
-#   verifier's report. Read before any collection: the raw words. A
-#   `-Dheap_partitions` build's (the compiler zeroes the holes only there).
+#   verifier's report. The raw words are read before any collection, in a
+#   `-Dheap_partitions` build only: the compiler zeroes the holes only there.
 #
 # Each check ends its units' stores with `collect_here`: the stack below
 # scrubbed and the unit's partition collected, so that under
@@ -436,8 +436,9 @@
   # because `Wide` (a `Time`'s shape: a pointer among integers) is that
   # wide; an `Int64` arm writes the tag and the first value word. Every
   # other byte of the union is written as zero by every store of an arm
-  # (the compiler's `union_holes`, `IYI_SPAWN_BROKEN=holes`), and by every
-  # store of a whole union (its tag's padding). Left alone they hold what
+  # in a `-Dheap_partitions` build (the compiler's `iyi_clear_union_holes`,
+  # off in the `IYI_SPAWN_BROKEN=holes` copy), and by every store of a
+  # whole union (its tag's padding). Left alone they hold what
   # the slot held before, or what the temporary the arm was boxed in found
   # on the stack: in #145's app an `Array(DBValue)` buffer, the program's
   # own and untyped, which the collector and the verifier read word by

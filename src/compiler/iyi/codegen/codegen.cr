@@ -3349,15 +3349,16 @@ module Iyi
     # time through stack slots when it does not optimise. *fresh* says
     # *pointer* is a slot made for this value, which nothing can point into.
     #
-    # Then the slot's holes are written as zero (`LLVMTyper#iyi_holes`), so
-    # a slot holds the value's bytes and zeros, never what was there before
-    # or what the source's padding held. A value with more than
-    # `IYI_HOLES_MAX` holes (only one passed indirectly can have them, a
-    # `StaticArray` of padded structs) is copied over a zeroed slot
-    # instead, through a temporary when the two may overlap.
+    # Then, in a `-Dheap_partitions` build, the slot's holes are written as
+    # zero (`LLVMTyper#iyi_holes`), so a slot holds the value's bytes and
+    # zeros, never what was there before or what the source's padding held.
+    # A value with more than `IYI_HOLES_MAX` holes (only one passed
+    # indirectly can have them, a `StaticArray` of padded structs) is copied
+    # over a zeroed slot instead, through a temporary when the two may
+    # overlap. Without the flag the store is what it was (`iyi_holes?`).
     def store_value(value, type, pointer, *, fresh = false)
       if passed_indirectly?(type)
-        if !IYI_HOLES_BROKEN && iyi_holes(type).size > IYI_HOLES_MAX
+        if iyi_holes? && iyi_holes(type).size > IYI_HOLES_MAX
           unless fresh
             temporary = alloca llvm_type(type)
             copy_value(temporary, value, type, fresh: true)
@@ -3371,7 +3372,7 @@ module Iyi
       else
         stored = store to_rhs(value, type), pointer
       end
-      iyi_clear_holes pointer, iyi_holes(type), llvm_typer.align_of(llvm_type(type))
+      iyi_clear_holes pointer, type
       stored
     end
 
@@ -3391,17 +3392,27 @@ module Iyi
 
     # The holes of a *type* slot at *pointer* written as zero.
     def iyi_clear_holes(pointer, type : Type) : Nil
+      return unless iyi_holes?
       iyi_clear_holes pointer, iyi_holes(type), llvm_typer.align_of(llvm_type(type))
     end
 
     IYI_HOLES_BROKEN = SPAWN_BROKEN.includes?("holes")
 
+    # Whether stores write their slot's holes as zero: in a
+    # `-Dheap_partitions` build, whose verifier and local mark read an
+    # untyped chunk's words as pointers, and not in its
+    # `IYI_SPAWN_BROKEN=holes` copy. Without the flag the code is byte for
+    # byte what it was (heap22.cr); plain builds keep the stale words, as
+    # conservative retention only.
+    def iyi_holes? : Bool
+      iyi_heap_partitions? && !IYI_HOLES_BROKEN
+    end
+
     # Zero stores over *holes*, byte ranges of the slot at *pointer*, which
     # is aligned to *align*: naturally aligned stores of up to a word, or a
-    # `memset` for a range over four words. `IYI_SPAWN_BROKEN=holes` emits
-    # none, for bench/heap_codegen.sh's broken copy.
+    # `memset` for a range over four words. None unless `iyi_holes?`.
     def iyi_clear_holes(pointer, holes : Array({UInt64, UInt64}), align) : Nil
-      return if holes.empty? || @builder.end || IYI_HOLES_BROKEN
+      return if holes.empty? || @builder.end || !iyi_holes?
       bytes = pointer_cast(pointer, llvm_context.int8.pointer)
       holes.each do |(from, to)|
         if to - from > 32_u64

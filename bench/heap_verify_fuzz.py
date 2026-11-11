@@ -32,6 +32,9 @@ in a `Unit`, under a `Mutex`, or come back whole as a `unit: :new` task's
 answer (row 2, where the dead child's partition is adopted).
 
 Builds go through ~/.cache/heavy.sh, one build per call. Runs do not.
+`FUZZ_HEAVY=0` builds directly, for a driver itself run under heavy.sh
+(whose slot a nested call would wait on for ever). `IYI` names the
+compiler, `FUZZ_TIMEOUT` the seconds a run may take (default 120).
 """
 
 import argparse
@@ -47,6 +50,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 HEAVY = Path.home() / ".cache" / "heavy.sh"
+USE_HEAVY = HEAVY.exists() and os.environ.get("FUZZ_HEAVY", "1") != "0"
 DEFAULT_TMP = Path(os.environ.get("TMPDIR") or (Path.home() / ".cache" / "h22-hp-s4-tmp"))
 VERIFY_FLAGS = ["-Dheap_partitions", "-Dheap_verify", "-Diyi_chaos"]
 # Seconds a verify run may take (`FUZZ_TIMEOUT`), past which it is a hang.
@@ -1272,7 +1276,7 @@ def generate(seed, out_dir, only=None):
 # ── The driver ──────────────────────────────────────────────────────────────
 
 def build(src, out, flags, release, log, tmp):
-    cmd = ([str(HEAVY)] if HEAVY.exists() else []) + [COMPILER, "build"]
+    cmd = ([str(HEAVY)] if USE_HEAVY else []) + [COMPILER, "build"]
     cmd += (["--release"] if release else []) + flags + ["-o", str(out), str(src)]
     env = dict(os.environ, TMPDIR=str(tmp))
     started = time.monotonic()

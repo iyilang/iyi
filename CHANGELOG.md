@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+### Gates
+
+- **A pull request runs the jobs that run what it changed.**
+  `scripts/ci_plan.py` credited a bench file to every job whose text held
+  its name, comments included, and a comment above a job header counted
+  for the job before it: a pull request changing only
+  `bench/std_tls_exercise.sh` ran `windows-std-platforms`, which never runs
+  it, and passed. Nor did it see a gate another script runs: 483 of the
+  590 files under bench/ were run by no job it knew of, so a change to a
+  module exercise fell to the fast tier, which runs none. It reads code
+  now, not comments, and follows what runs what - a step, a script that
+  runs, sources or finds a file by a glob or a `${VAR}` in its name, a
+  program that reads its own template, a directory a script names - so
+  two files under bench/ are run by nothing, and both are used by nothing.
+  Measured against the old planner over every bench file: the only jobs it
+  no longer chooses, for eleven files, are ones it chose from a comment.
+- **`bench/ci_plan_exercise.py`, in the docs job**, holds the planner to
+  that on this tree and on a workflow of its own. Pointed at the planner
+  before this change it fails the three checks above.
+
 ## 0.21.0 — 2026-11-09
 
 **A spawn has one verb and names its unit, and a plain `spawn` runs in

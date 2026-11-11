@@ -154,6 +154,13 @@ jobs:
       - name: The numbers the docs quote from a measurement
         run: python3 bench/measured_numbers.py
 
+      # What a pull request is tested by is the planner's answer, and it was
+      # checked by nothing: it credited a gate to the job a comment about it
+      # sat in, and ran no module exercise a script finds by a glob. Here,
+      # because it reads only the tree and every tier runs this job.
+      - name: The planner picks the jobs that run a change
+        run: python3 bench/ci_plan_exercise.py
+
   build:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'build') }}

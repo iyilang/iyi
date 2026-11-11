@@ -59,6 +59,7 @@ module std/ecdsa
 import std/asn1::{Der, DerValue, DerTag, Asn1Error}
 import std/big::{BigInt}
 import std/digest::{SHA256, SHA384, SHA512}
+import std/lazy::{Lazy}
 
 # What reading a key answers for bytes that are not an ECDSA public key.
 pub struct EcdsaError
@@ -623,7 +624,7 @@ end
 # digits under 2^(w - 1) in size with at least w - 1 zeros after each:
 # u2 at width 5 against Q, 3Q ... 15Q, made for each signature in
 # Jacobian coordinates, and u1 at width 7 against G, 3G ... 63G, made
-# once and kept affine (`G_TABLE`). A signature then takes 256 doublings
+# once and kept affine (`g_table`). A signature then takes 256 doublings
 # and about 43 and 32 additions, where the bits read one at a time took
 # an addition for three bits in four. Measured with the rest of the
 # check in the header.
@@ -631,8 +632,12 @@ struct EcdsaP256
   Q_WIDTH = 5
   G_WIDTH = 7
 
-  @[SafeReach("built whole by its initializer, which runs once, before any parallel task or under IyiOnce in the shared heap, and only in a program that reads it; then only read")]
-  G_TABLE = build_g_table(EcdsaGroup.of(EcdsaCurve::P256))
+  @[UnsafeReach("built whole in the shared heap by its first reader (std/lazy), kept once and marked; read only after the mark; then only read")]
+  @@g_table = Lazy(Pointer(EcdsaP256Num)).new
+
+  private def self.g_table : Pointer(EcdsaP256Num)
+    @@g_table.get { build_g_table(EcdsaGroup.of(EcdsaCurve::P256)) }
+  end
 
   # Whether u1·G + u2·Q is a point whose x is r modulo n, as
   # `EcdsaPlane#check` answers it.
@@ -647,7 +652,7 @@ struct EcdsaP256
     g_digits = EcdsaWnaf.digits(u1, 32, G_WIDTH)
     q_digits = EcdsaWnaf.digits(u2, 32, Q_WIDTH)
     return false unless g_digits && q_digits
-    acc = sum(g_digits, q_digits, odd_multiples(qx, qy), G_TABLE)
+    acc = sum(g_digits, q_digits, odd_multiples(qx, qy), g_table)
     return false if acc.z.zero?
     zz = EcdsaP256Num.square(acc.z)
     return true if EcdsaP256Num.mul(EcdsaP256Num.enter(r), zz) == acc.x
@@ -701,7 +706,7 @@ struct EcdsaP256
   # G, 3G, ... 63G of *group*'s G as affine x and y, entry j's x at 2j and
   # y at 2j + 1 (so digit d's point is at d - 1 and d): a doubling, 31
   # additions and their Z inverted together by Montgomery's trick. Built
-  # once, for P-256, by `G_TABLE`'s initializer at the first read.
+  # once, for P-256, by `g_table` at the first call that reads it.
   private def self.build_g_table(group : EcdsaGroup) : Pointer(EcdsaP256Num)
     count = 1 << (G_WIDTH - 2)
     g = EcdsaP256Point.new(EcdsaP256Num.enter(group.gx), EcdsaP256Num.enter(group.gy), EcdsaP256Num.one)

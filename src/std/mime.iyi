@@ -22,6 +22,7 @@
 
 @[Unsafe("types and extensions are matched by walking the bytes of their strings through a raw pointer")]
 module std/mime
+import std/lazy::{Lazy}
 
 pub struct MIME
   # Extension without its dot, lowercase, then the media type. The first
@@ -111,13 +112,22 @@ pub struct MIME
     {"jar", "application/java-archive"},
   ]
 
-  # Built whole by their initializers, once, in a program that looks one
-  # up; a lookup is a hash probe. `extensions` answers a copy of a list,
-  # never the list itself.
-  @[SafeReach("built whole by its initializer, which runs once, before any parallel task or under IyiOnce in the shared heap, and only in a program that reads it; then only read")]
-  BY_EXTENSION = build_by_extension
-  @[SafeReach("built whole by its initializer, which runs once, before any parallel task or under IyiOnce in the shared heap, and only in a program that reads it; then only read, and its lists are answered as copies")]
-  BY_TYPE = build_by_type
+  # Built whole at the first lookup that reads one (std/lazy); a lookup is
+  # a hash probe. `extensions` answers a copy of a list, never the list
+  # itself.
+  @[UnsafeReach("built whole in the shared heap by its first reader (std/lazy), kept once and marked; read only after the mark; then only read")]
+  @@by_extension = Lazy(Hash(String, String)).new
+
+  private def self.by_extension : Hash(String, String)
+    @@by_extension.get { build_by_extension }
+  end
+
+  @[UnsafeReach("built whole in the shared heap by its first reader (std/lazy), kept once and marked; read only after the mark; then only read, and its lists are answered as copies")]
+  @@by_type = Lazy(Hash(String, Array(String))).new
+
+  private def self.by_type : Hash(String, Array(String))
+    @@by_type.get { build_by_type }
+  end
 
   private def self.build_by_extension : Hash(String, String)
     map = Hash(String, String).new
@@ -168,7 +178,7 @@ pub struct MIME
     end
     ext = dot < 0 ? name : slice(name, dot + 1, size - dot - 1)
     return nil if ext.empty?
-    BY_EXTENSION[lower(ext)]?
+    by_extension[lower(ext)]?
   end
 
   # The same, falling back to *default*.
@@ -183,7 +193,7 @@ pub struct MIME
   def self.extensions(media_type : String) : Array(String)
     essence = essence_of(media_type)
     return Array(String).new if essence.nil?
-    list = BY_TYPE[essence]?
+    list = by_type[essence]?
     list ? list.dup : Array(String).new
   end
 

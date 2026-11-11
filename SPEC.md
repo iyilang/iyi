@@ -64,7 +64,7 @@ own reference accepts.
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
 | iyi's own prelude | 33,898 lines, of which 4,678 are the library held to the 4,689 ceiling (7,046 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 139,611 lines, none of it written in iyi |
+| compiler | 139,752 lines, none of it written in iyi |
 | artifact format | `.iyimod` v63, checksum per section |
 | samples | 28 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -1051,8 +1051,8 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 139,611 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 33,898-line own prelude + 126,751 in std |
+| Compiler | 24,984 lines, **written in Crystal** | 139,752 lines, Crystal, forked |
+| Library | 8,161 lines (3,551 of it core) | 33,898-line own prelude + 127,023 in std |
 | Specs | 21,146 lines | 17,303 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
@@ -3038,18 +3038,19 @@ claim, are kept for such a module too.
 
 **Where the repository stands.** Until 0.22 no `SafeReach` was in
 `src/iyi` or `src/std`, and no `UnsafeReach` either, since the walk left
-them out. Walked now (III.4.5), std carries 80 `@[SafeReach]` claims,
-each proven by (c) in every importer: 38 on tables a module builds at its
+them out. Walked now (III.4.5), std carries 38 `@[SafeReach]` claims,
+each proven by (c) in every importer, on tables a module builds at its
 initialisation and only reads (compress, hpack, zstd, tls, time,
-system_roots, base64, json, dns, mime, mail, autocert), and 42 on tables
-built whole by their constants' initializers, which run once and only in
-a program that reads the constant (digest, mlkem, p256, curve25519,
-ecdsa, password, mime, and unicode's 30 tables; as class variables'
-initializers they ran as their modules started, in every importer,
-`bench/std_lazy_tables_exercise.sh`). Three are `@[UnsafeReach]`:
-std/http's default TLS configuration, which `HTTP.tls_config=` replaces
-after publishing it,
-std/tls's system roots, read at the first handshake that needs them
+system_roots, base64, json, dns, mime, mail, autocert). 45 are
+`@[UnsafeReach]`. 42 are on tables built at the first call that reads
+them and kept (std/lazy's `Lazy`: built in the shared heap outside any
+lock, stored by the build that claims the mark and read only after it;
+digest, mlkem, p256, curve25519, ecdsa, password, mime, and unicode's 30
+tables), which as constants were built at their declarations in every
+program whose running code may read them (III.5), a server's included.
+The other three are std/http's default TLS configuration, which
+`HTTP.tls_config=` replaces after publishing it, std/tls's system roots,
+read at the first handshake that needs them
 and stored once, and std/random's `Random::PerThread::ONE`, the object
 the class-level draws go through, whose draws step the drawing thread's
 own `@[ThreadLocal]` PCG words (one generator every thread shared
@@ -6429,6 +6430,35 @@ module initialiser mostly does, then, is compute constants, and the order in
 which constants are computed is a much smaller question than the order in which
 arbitrary side effects run.
 
+**A constant is computed only where code that runs reads it. Built (0.22).**
+A constant's initialiser runs at its declaration when the program's running
+code reads the constant, and at its first read when that comes first, once
+(`__iyi_once`, in the shared heap under `-Dheap_partitions`). Definition-site
+typing (R-2c) types every fully declared def of every imported module under an
+`if false`, and a constant such a def named counted as read: `import
+std/unicode` and `puts 1` decoded its thirty tables before printing. Now the
+compiler follows the bodies it typed from the code that runs - the top level,
+every initialiser, a `fun` the outside calls, `finalize` - and a constant met
+only through a probe is still typed and still proven (III.4.4 sees what it
+saw), but its declaration does not run it; its first read does, if any comes
+(`Program#iyi_mark_reached_constants`). That covers the entry module and every
+module it imports, std's included; the prelude's constants are initialised
+where they always were, since the runtime reads some of them from code the
+compiler writes rather than through a call the walk can follow, and running
+one early costs time, never a value. What stays is the rule: a constant
+running code may read is computed at its declaration, whether or not the
+read ever comes, so a server whose handlers may sign or fold would decode
+and work out every table they might read before its first line. std's
+decoded and worked-out tables are therefore not constants: each is kept by a
+first-call accessor (`std/lazy`'s `Lazy`, built in the shared heap and
+stored once, `@[UnsafeReach]`). `bench/std_lazy_tables_exercise.sh` counts
+the bytes a program importing those modules allocates before its first
+statement, and a server's (`bench/web_cores.iyi` without its requests), and
+fails on the compiler copy that counts a probe's reads
+(`IYI_SPAWN_BROKEN=probeused`, which builds the test's own 400 KB constant
+only an uncalled def reads), on a std/unicode that reads five tables as it
+starts, and on a std/curve25519 whose fixed-base table is a constant again.
+
 **1. A module initialises after every module it imports.** R-1 makes `import` a
 DAG, so this is a partial order with no cycles to resolve, and it needs no
 analysis beyond the edges already in the artifact (IV.2).
@@ -9305,8 +9335,8 @@ the runtime's aside - are marked: the compiler writes the list into the
 binary (`Crystal::IYI_UNSAFE_MODULES`), and the Windows handler prints
 it in pieces, allocating nothing.
 
-**Where the repository stands.** `src/std` has 83 marked modules of
-121, every reason read and rewritten by hand from `iyi fix`'s starting
+**Where the repository stands.** `src/std` has 84 marked modules of
+122, every reason read and rewritten by hand from `iyi fix`'s starting
 point; four of them (box, deque, static_array, weak_ref) are marked by
 hand outright, since only a program that instantiates their generic
 bodies types them and `iyi fix src/std` cannot see them. bench has
@@ -9337,7 +9367,7 @@ warning, which keeps the set honest, and splitting raw code into a small
 module of its own, the way Rust crates isolate theirs. Counted at
 2f070a01e by reading the sources, blocks (`unsafe { }`) would have
 wrapped 2,338 runs of lines in src/std, 900 in src/iyi and 607 in bench,
-and a mark per declaration 1,535, 469 and 258 defs, against 83, 15 and
+and a mark per declaration 1,535, 469 and 258 defs, against 84, 15 and
 90 module marks.
 
 ---

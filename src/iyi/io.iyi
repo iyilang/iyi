@@ -421,8 +421,11 @@ end
 
 alias IO = IyiIO
 
+@[UnsafeReach("buffers allocated once by the initializer; a read or a write stores bytes into them, never a reference")]
 STDIN  = IyiIO.new(0_i64, buffer_size: 4096, sync: false)
+@[UnsafeReach("buffers allocated once by the initializer; a write stores bytes into them, never a reference")]
 STDOUT = IyiIO.new(1_i64, buffer_size: 4096, sync: true)
+@[UnsafeReach("buffers allocated once by the initializer; a write stores bytes into them, never a reference")]
 STDERR = IyiIO.new(2_i64, buffer_size: 4096, sync: true)
 
 def stdin : IyiIO

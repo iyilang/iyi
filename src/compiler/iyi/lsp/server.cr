@@ -830,11 +830,13 @@ module Iyi::Lsp
       end
 
       @published[uri] = rows.map do |(line0, start_ch, end_ch, diag)|
-        edit = diag.edit_at.try do |(edit_line, edit_column, edit_size)|
+        # An edit placed in another file (`Diag#edit_file`) is `iyi fix`'s
+        # to make there, not a quick fix on this document.
+        edit = diag.edit_file ? nil : diag.edit_at.try do |(edit_line, edit_column, edit_size)|
           edit_text = lines[edit_line - 1]? || ""
           {edit_line - 1, Lsp.character_of(edit_text, edit_column), Lsp.character_of(edit_text, edit_column + edit_size)}
         end
-        {line0, start_ch, end_ch, diag.message, diag.suggestion, edit}
+        {line0, start_ch, end_ch, diag.message, diag.edit_file ? nil : diag.suggestion, edit}
       end
       rows
     end

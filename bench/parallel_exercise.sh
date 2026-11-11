@@ -72,12 +72,12 @@
 #   6. `Share` gates the parallel block at compile time: a captured
 #      `Array`, a `Channel` of arrays, a local assigned after the spawn, and
 #      a loop's local are refused, each by name. A block that reaches a
-#      constant that is not Share through a def it calls is warned about
-#      with the path, a failed build under `--error-on-warnings`; its
-#      copy with the constant marked `@[SafeReach]` builds clean under it,
-#      the constant built at startup and only read, which the compiler
-#      proves (bench/safe_reach.sh holds what it refuses).
-#      Two blocks reaching it are one warning, counting the other.
+#      constant that is not Share through a def it calls is refused with
+#      the path (SPEC.md III.4.5), and told the claim the compiler would
+#      prove; its copy with the constant marked `@[SafeReach]` builds
+#      clean, the constant built at startup and only read, which the
+#      compiler proves (bench/safe_reach.sh holds what it refuses).
+#      Two blocks reaching it are one refusal, counting the other.
 #   7. Failure proofs against broken copies of the runtime, each caught at
 #      the named check: a cross-thread wake that does not ring (a lost
 #      wakeup), a steal that leaves the task in its victim's queue (a task
@@ -719,20 +719,20 @@ group do |g|
 end'
 
 # #148: the issue's shape, a pool in a constant read through `ask`. The
-# block names no constant, so nothing above refuses it; it is warned
-# about at the block, with the path, by a build and by `check`, and
-# `--error-on-warnings` makes the warning a failure. The broken copy is
-# the clean one with the mark taken off, and the check that passes the
-# marked copy catches it. Two blocks reach `DATABASE`, and that is one
-# warning at the first, counting the second: iyiturkiye's routes gave
-# 1251 warnings about 37 constants, each once per route that reached
-# it, on Linux; gathered they are 37. Its broken copy
-# has the second block left out, and says nothing of another block.
-# The clean copy's `Database` is built at startup and only read: its
-# claim is one the compiler proves. This copy once assigned a field in
-# `query_one`, from both tasks, under the claim that one task asked,
-# and passed; that claim is refused now (bench/safe_reach.sh).
-step "a parallel block reaching a constant through a call is warned about"
+# block names no constant, so nothing above refuses it; it is refused at
+# the constant it reaches, with the block and the path, by a build and by
+# `check` (SPEC.md III.4.5; 0.21 warned). The broken copy is the clean
+# one with the mark taken off, and the build that passes the marked copy
+# catches it. Two blocks reach `DATABASE`, and that is one refusal,
+# counting the second: iyiturkiye's routes gave 1251 warnings about 37
+# constants, each once per route that reached it, on Linux; gathered they
+# are 37. Its broken copy has the second block left out, and says nothing
+# of another block. The clean copy's `Database` is built at startup and
+# only read: its claim is one the compiler proves, and the refusal of the
+# bare copy says so. This copy once assigned a field in `query_one`, from
+# both tasks, under the claim that one task asked, and passed; that claim
+# is refused now (bench/safe_reach.sh).
+step "a parallel block reaching a constant through a call is refused"
 cat > reaches.iyi <<'IYI'
 module reaches
 
@@ -767,36 +767,37 @@ if ! "$IYI" check --error-on-warnings reaches.iyi > check-reaches.log 2>&1; then
   echo "a constant marked @[SafeReach] failed the check under --error-on-warnings:"; cat check-reaches.log; exit 1
 fi
 echo "  checks under --error-on-warnings: DATABASE marked @[SafeReach]"
-if ! "$IYI" build reaches_bare.iyi -o reaches_bare > build-reaches-bare.log 2>&1; then
-  echo "a warning stopped a build without --error-on-warnings:"; cat build-reaches-bare.log; exit 1
+if "$IYI" build reaches_bare.iyi -o reaches_bare > build-reaches-bare.log 2>&1; then
+  echo "the build passed a block reaching DATABASE unmarked:"; cat build-reaches-bare.log; exit 1
 fi
-want='the block spawn(unit: :new) runs in a unit of its own, on another thread reaches `DATABASE : ReachesBare::Database` (not Share) through `ask` → `DATABASE.query_one`, as does 1 other parallel block: '
+want='reaches `DATABASE : ReachesBare::Database` (not Share) through `ask` → `DATABASE.query_one`, as does 1 other parallel block: '
+claim='Nothing writes it once a parallel task may start, so a claim is proven: `iyi fix` adds `@[SafeReach("set before the first parallel task starts, then only read")]`'
 if [ "$(grep -c 'reaches `DATABASE' build-reaches-bare.log)" != 1 ]; then
-  echo "two blocks reaching DATABASE were not one warning:"; cat build-reaches-bare.log; exit 1
+  echo "two blocks reaching DATABASE were not one refusal:"; cat build-reaches-bare.log; exit 1
 fi
-if ! grep -qF "$want" build-reaches-bare.log; then
-  echo "the block reaching DATABASE through ask was not warned about:"; cat build-reaches-bare.log; exit 1
+if ! grep -qF "$want" build-reaches-bare.log || ! grep -qF "$claim" build-reaches-bare.log; then
+  echo "the build was refused, but not for the block reaching DATABASE through ask, with the claim:"; cat build-reaches-bare.log; exit 1
 fi
-if "$IYI" check --error-on-warnings reaches_bare.iyi > check-reaches-strict.log 2>&1; then
-  echo "--error-on-warnings passed the program the warning names:"; cat check-reaches-strict.log; exit 1
+if "$IYI" check reaches_bare.iyi > check-reaches-bare.log 2>&1; then
+  echo "check passed the program the build refuses:"; cat check-reaches-bare.log; exit 1
 fi
-if ! grep -qF "$want" check-reaches-strict.log; then
-  echo "check failed the program, but not for the warning:"; cat check-reaches-strict.log; exit 1
+if ! grep -qF "$want" check-reaches-bare.log; then
+  echo "check failed the program, but not for the block reaching DATABASE:"; cat check-reaches-bare.log; exit 1
 fi
-echo "  broken copy, the mark taken off: warned by the build, and failed by check --error-on-warnings"
-echo "  warned once for two blocks: $(grep -m1 -F "$want" build-reaches-bare.log | sed 's/^Warning: //' | cut -c1-190)"
+echo "  broken copy, the mark taken off: refused by the build and by check, the claim offered"
+echo "  refused once for two blocks: $(grep -m1 -oF "$want" build-reaches-bare.log | cut -c1-150)"
 awk '/ask\(2_i64\)/ { next } /^module reaches_bare$/ { print "module reaches_lone"; next } { print }' reaches_bare.iyi > reaches_lone.iyi
 if cmp -s reaches_bare.iyi reaches_lone.iyi; then
   echo "the awk for reaches_lone found nothing to change"; exit 1
 fi
-if ! "$IYI" check reaches_lone.iyi > check-reaches-lone.log 2>&1; then
-  echo "check failed a program it only warns about:"; cat check-reaches-lone.log; exit 1
+if "$IYI" check reaches_lone.iyi > check-reaches-lone.log 2>&1; then
+  echo "check passed one block reaching DATABASE:"; cat check-reaches-lone.log; exit 1
 fi
 if grep -qF "$want" check-reaches-lone.log || grep -qF 'other parallel block' check-reaches-lone.log \
   || ! grep -qF 'through `ask` → `DATABASE.query_one`: ' check-reaches-lone.log; then
-  echo "one block reaching DATABASE was not warned about alone:"; cat check-reaches-lone.log; exit 1
+  echo "one block reaching DATABASE was not refused alone:"; cat check-reaches-lone.log; exit 1
 fi
-echo "  broken copy, the second block left out: warned with no other block counted"
+echo "  broken copy, the second block left out: refused with no other block counted"
 
 # ── 7. Failure proofs: broken copies of the runtime ──────────────────────
 # Each a copy of src/iyi with one file changed - concurrency.iyi unless

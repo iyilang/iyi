@@ -255,7 +255,7 @@ puts "\n== writers and readers at once"
 # 26.6, M2 Pro) before writers took turns, 6 units x 300 rounds of this
 # loop, IYI_WORKERS=4: 261-301 of 1,800 reads lost their own write and 1-4
 # of the 6 variables were wrong at the end; IYI_WORKERS=1 lost none.
-RACE_UNITS  = 6
+RACE_UNITS  =   6
 RACE_ROUNDS = 200
 race_lost = group do |g|
   tasks = (0...RACE_UNITS).map do |i|

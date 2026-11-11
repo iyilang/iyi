@@ -94,12 +94,14 @@ pub struct SystemRoots
   getter source : String
 
   # The Linux bundles, in the order Go's crypto/x509 tries them.
+  @[SafeReach("set before the first parallel task starts, then only read")]
   BUNDLES = ["/etc/ssl/certs/ca-certificates.crt",
              "/etc/pki/tls/certs/ca-bundle.crt",
              "/etc/ssl/ca-bundle.pem",
              "/etc/pki/tls/cacert.pem",
              "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
              "/etc/ssl/cert.pem"]
+  @[SafeReach("set before the first parallel task starts, then only read")]
   DIRECTORIES = ["/etc/ssl/certs", "/etc/pki/tls/certs"]
 
   def initialize(@certificates : Array(Certificate), @unreadable : Int32, @source : String)

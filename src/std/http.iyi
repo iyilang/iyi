@@ -3084,23 +3084,30 @@ struct ProxyRoute
 end
 
 pub struct HTTP
-  @@tls : TlsConfig? = nil
+  # The default is built whole by the initializer, at the first read; a
+  # program's own replaces it through `tls_config=`, which publishes it
+  # first (std/tls's `TlsConfig` publishes what its setters are given
+  # too), so a request in any unit reads a configuration that lives in
+  # the shared heap, the old one or the new one whole.
+  @[UnsafeReach("the default is built whole by its initializer, which runs once, at the first read and in the shared heap; `tls_config=` publishes the program's own before storing it in one word, so every reader sees a published configuration whole")]
+  @@tls : TlsConfig = default_tls_config
 
   # What an `https://` request is checked against and offers: the
   # system's roots, and ALPN's `http/1.1`, unless a program sets its own -
   # roots of its own for a server it runs, say.
   def self.tls_config : TlsConfig
-    if held = @@tls
-      return held
-    end
-    config = TlsConfig.new
-    config.alpn = ["http/1.1"]
-    @@tls = config
-    config
+    @@tls
   end
 
   def self.tls_config=(config : TlsConfig) : TlsConfig
+    IyiCross.publish(config)
     @@tls = config
+  end
+
+  private def self.default_tls_config : TlsConfig
+    config = TlsConfig.new
+    config.alpn = ["http/1.1"]
+    config
   end
 
   # The request as it goes on the wire, whole. `Host`, `Connection` and

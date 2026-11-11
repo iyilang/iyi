@@ -951,7 +951,9 @@ end
 struct AutocertPem
   # The DER of a SEC 1 ECPrivateKey (RFC 5915) on P-256 runs to 121 bytes:
   # version 1, the 32-byte key, the curve's OID, and the 65-byte point.
+  @[SafeReach("set before the first parallel task starts, then only read")]
   SEC1_HEAD  = [0x30_u8, 0x77_u8, 0x02_u8, 0x01_u8, 0x01_u8, 0x04_u8, 0x20_u8]
+  @[SafeReach("set before the first parallel task starts, then only read")]
   SEC1_CURVE = [0xA0_u8, 0x0A_u8, 0x06_u8, 0x08_u8, 0x2A_u8, 0x86_u8, 0x48_u8, 0xCE_u8, 0x3D_u8, 0x03_u8, 0x01_u8, 0x07_u8,
                 0xA1_u8, 0x44_u8, 0x03_u8, 0x42_u8, 0x00_u8]
 

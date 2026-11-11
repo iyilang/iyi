@@ -155,27 +155,29 @@
   end
 
   # ── C1: a crossing block's context holds its captures alone ────────────
-  # The scope grows its own array after the crossing: published with the
-  # block's context (no C1), the array's grown buffer and its new element
-  # are the unit's and only a published object holds them, which the
-  # collection after it frees under the array.
+  # The scope keeps a variable of its own in its closure and assigns it a
+  # fresh array after the crossing: with the block's context published
+  # beside it (no C1), that array is the unit's and only a published
+  # context holds it, which the collection after it frees under the
+  # context, which the parked unit's block still holds.
   @[NoInline]
   def launch_c1(g : IyiGroup, go : Channel(Int32), seed : Int32) : Nil
     payload = build(seed)
-    # A mutable array the scope keeps in its own closure, beside the one
-    # the crossing block captures: a sibling slot (CO 4.3 #8).
+    # A mutable variable the scope keeps in its own closure, beside the
+    # one the crossing block captures: a sibling slot (CO 4.3 #8).
     sibling = [Payload.new(label_for(seed, 99), nil)]
-    keep = -> { sibling << Payload.new(label_for(seed, 98), nil); sibling.size }
+    first = sibling
+    keep = -> { sibling = [Payload.new(label_for(seed, 98), nil)]; sibling.size }
     g.spawn(unit: :new) do
       go.receive
       payload.label.bytesize
     end
-    keep.call
     published(payload, "c1: the captured chain")
     {% if flag?(:heap_partitions) %}
-      fail("c1: the scope's own array was published with the crossing block's context") unless IyiHeap.local?(sibling.object_id)
-      fail("c1: the scope's own array's element was published with the crossing block's context") unless IyiHeap.local?(sibling[0].object_id)
+      fail("c1: the scope's own array was published with the crossing block's context") unless IyiHeap.local?(first.object_id)
+      fail("c1: the scope's own array's element was published with the crossing block's context") unless IyiHeap.local?(first[0].object_id)
     {% end %}
+    keep.call
   end
 
   def c1_check : Nil
@@ -306,8 +308,9 @@
     lent = LentPool.new
     group do |g|
       pinned = g.spawn(unit: :new) do
-        fill(pool, 43)
         here = heap_here
+        fail("pin: a crossing reaching an owning type without lends: has a heap of its own (record #{here})") unless here == 0_u64
+        fill(pool, 43)
         collect_here
         here
       end
@@ -316,12 +319,11 @@
         heap_here
       end
       {% if flag?(:heap_partitions) %}
-        fail("pin: a crossing reaching an owning type without lends: has a heap of its own (record #{pinned.value})") unless pinned.value == 0_u64
         fail("pin: a crossing reaching only a lends: owning type runs in the shared heap") if own.value == 0_u64
       {% else %}
-        pinned.value
         own.value
       {% end %}
+      pinned.value
     end
     fail("pin: the pool lost its node") unless pool.first?.is_a?(Payload)
   end

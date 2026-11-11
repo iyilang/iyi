@@ -26,8 +26,14 @@ loop's grown arrays and a close posted to another thread's poller are the
 shared heap's, and a reaped fiber lets its group and its block go
 (web_cores `parallel` under `-Dheap_verify`, tmac: 3 of 3 runs reported
 the freed group, or with the group let go the freed block, before; 3 of 3
-clean after). `-Dheap_verify` tests a chunk's head against the carve
-frontier and builds under LLVM 23.
+clean after). A unit that reads another unit's pointer answer is pinned,
+so growing the answered graph no longer frees what it adds (found by
+heap_verify_fuzz's `answer` steps). `-Dheap_verify` tests a chunk's head
+against the carve frontier and builds under LLVM 23. On Windows a thread
+stopped inside a system call lends the collector none of its volatile
+registers, whose stale `r8` had kept a 64 MB string received through a
+rendezvous alive (tssh: 5 of 5 runs kept 61 MiB before, 5 of 5 clean
+after).
 
 Two races older than heap22, in every build: units setting or deleting
 environment variables at once lost them (tmac, 6 units × 300 rounds at
@@ -37,7 +43,12 @@ installed one up in place, and the table is installed and read as one
 atomic word (Windows writes to the platform and lost none). And a
 `Mutex#wait_for` right after starting the thread that would answer it no
 longer panics "deadlock" on macOS, where a started thread was counted
-only once it ran.
+only once it ran. Under `iyi test --chaos` the scheduler that drops a
+spinning unit now polls the sleepers and the poller first, and a chaos
+point stands aside while the runtime's lock is held, so a test that waits
+on a timer or holds that lock no longer spins for ever on one seed
+(heap_crossings' ring check on macOS). `IYI_CHAOS_LATE_THREADS` holds a
+thread that links itself until the simulated thread is idle.
 
 ## 0.21.0 — 2026-11-09
 

@@ -131,6 +131,19 @@ thread, seeded from the operating system at that thread's first draw; one
 generator shared by every thread raced, and two threads could draw the
 same number.
 
+heap22 S6 fixes, under `-Dheap_partitions`. A lend walk stops at objects
+born in the shared heap and at chunks local to another partition, and
+keeps its visited set from walk to walk; `IyiHeap.lend_in` adds a graph
+once, and `lend_out` of a graph that was never lent walks nothing, except
+under `-Dheap_verify`, where the walk reports the first local chunk it
+reaches (#145's app spent 98 % of its flag-on worker time in the walk,
+10.7-46 req/s against ~900 without the flag; on the cities endpoint it
+now serves 1,057 req/s at 1.97 ms CPU a request, against 1,009 and 1.90
+without the flag, Linux, medians of 3). The local mark follows a fiber's
+defer list through a held `Mutex`'s release node, which is born in the
+shared heap, so a local collection made while a lock is held no longer
+frees the unit's defer nodes below it (a use-after-free).
+
 Two races older than heap22, in every build: units setting or deleting
 environment variables at once lost them (tmac, 6 units × 300 rounds at
 `IYI_WORKERS=4`: 261-301 of 1,800 reads of their own write lost); writers
@@ -27913,7 +27926,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 34,160-line library and nothing else. Every other
+  written against iyi's own 34,420-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

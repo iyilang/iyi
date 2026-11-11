@@ -403,15 +403,19 @@ class IyiChaos
   # the running task preempted when the strategy says so. Not before a
   # second unit exists, since a task preempted holding the only unit runs
   # again at once; not while the program is ending, nor in a fiber the
-  # runtime is moving, nor with the scheduler's lock held - none of which
-  # a program's own operation meets, since the runtime's are not points.
+  # runtime is moving, nor with the scheduler's lock or the runtime's lock
+  # held. A std loop that runs under the runtime's lock still reaches its
+  # back-edges here (`GC.stats`, std/gc.iyi), and a park there waited on
+  # the lock its own thread held: under `IYI_HEAP_STRESS` the collection
+  # at the park spun in `IyiRuntimeLock.lock` for ever (std_http_exercise,
+  # seed 3, one worker, every machine), as `thread_point` already knew.
   # A back-edge's step (*edge*) is computing, not waiting, so it does not
   # count towards PCT's spin.
   private def self.step(edge : Bool) : Nil
     return if @@units == 0_u64
     fiber = IyiScheduler.current
     return unless fiber.state == IyiFiberState::Running
-    return if IyiScheduler.exiting? || IyiSchedLock.held_here?
+    return if IyiScheduler.exiting? || IyiSchedLock.held_here? || IyiRuntimeLock.held?
     unit = unit_of(fiber)
     @@steps = @@steps &+ 1_u64
     if unit.id != @@last_unit

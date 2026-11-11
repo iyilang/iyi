@@ -164,13 +164,17 @@ def measured() -> dict[str, int]:
 # `String#byte_at` and `String.new(Array(UInt8), start, count)`, the safe byte
 # calls that let modules drop their marks. And to 4,689, for the six lines of
 # `Pointer#==` (#165), which compares two pointers by the address they hold,
-# the counterpart of #128's class `==`. A check rather than a habit since
-# the night Windows' floor walked 508 lines over it and nothing failed.
-CEILING = 4_689
+# the counterpart of #128's class `==`. And to 4,738, for the 49 lines that
+# let `iyi test` read each named case's verdict, run the cases `--run` names,
+# skip one written with `skip:` and keep what it hands a test away from the
+# test's children, which only the test program can do. A check rather than
+# a habit since the night Windows' floor walked 508 lines over it and
+# nothing failed.
+CEILING = 4_738
 
 
 def prelude_library_lines() -> int:
-    """The figure SPEC.md holds to the 4,689-line ceiling: the library
+    """The figure SPEC.md holds to the 4,738-line ceiling: the library
     without any platform's floor.
 
     Everything under `src/iyi/` except two things. First, what Crystal's

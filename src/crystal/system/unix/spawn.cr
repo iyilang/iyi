@@ -28,7 +28,8 @@ require "c/unistd"
     alias PosixSpawnFileActionsT = UInt64[64]
     alias PosixSpawnattrT = UInt64[64]
 
-    # The same value in glibc, musl and darwin.
+    # The same values in glibc, musl and darwin.
+    POSIX_SPAWN_SETPGROUP  = 0x02
     POSIX_SPAWN_SETSIGMASK = 0x08
 
     fun posix_spawn(pid : PidT*, path : Char*, file_actions : PosixSpawnFileActionsT*, attrp : PosixSpawnattrT*, argv : Char**, envp : Char**) : Int
@@ -42,15 +43,26 @@ require "c/unistd"
     fun posix_spawnattr_destroy(attr : PosixSpawnattrT*) : Int
     fun posix_spawnattr_setflags(attr : PosixSpawnattrT*, flags : Short) : Int
     fun posix_spawnattr_setsigmask(attr : PosixSpawnattrT*, sigmask : SigsetT*) : Int
+    fun posix_spawnattr_setpgroup(attr : PosixSpawnattrT*, pgroup : PidT) : Int
   end
 {% end %}
 
+# iyi: what `process_group: true` asks of a forked child. Every POSIX C
+# library has it, so it is bound here once rather than in each target's
+# `unistd.cr`.
+lib LibC
+  fun setpgid(pid : PidT, pgid : PidT) : Int
+end
+
 struct Crystal::System::Process
-  def self.spawn(prepared_args, shell, env, clear_env, input, output, error, chdir, &)
+  # iyi: *process_group* makes the child the leader of a process group of
+  # its own, whose id is its pid, so that a signal sent to `-pid` reaches
+  # everything it starts (`iyi test` ends a test that way at its deadline).
+  def self.spawn(prepared_args, shell, env, clear_env, input, output, error, chdir, process_group = false, &)
     envp = Env.make_envp(env, clear_env)
 
     {% if LibC.has_method?(:posix_spawn_file_actions_addchdir_np) %}
-      if pid = posix_spawn(prepared_args, envp, input, output, error, chdir) { |errno, command| yield errno, command }
+      if pid = posix_spawn(prepared_args, envp, input, output, error, chdir, process_group) { |errno, command| yield errno, command }
         return pid
       end
     {% end %}
@@ -61,7 +73,7 @@ struct Crystal::System::Process
     if !pid
       LibC.close(r)
       begin
-        self.try_replace(prepared_args, envp, input, output, error, chdir)
+        self.try_replace(prepared_args, envp, input, output, error, chdir, process_group)
         byte = 1_u8
         errno = Errno.value.to_i32
         FileDescriptor.write_fully(w, pointerof(byte))
@@ -130,7 +142,7 @@ struct Crystal::System::Process
     # The child starts with no signal blocked, as the forked one did. Every
     # other descriptor is close-on-exec already (`FileDescriptor.system_pipe`,
     # `O_CLOEXEC`), and closes as it did.
-    private def self.posix_spawn(prepared_args, envp, input, output, error, chdir, &) : LibC::PidT?
+    private def self.posix_spawn(prepared_args, envp, input, output, error, chdir, process_group, &) : LibC::PidT?
       streams = {input, output, error}
       targets = {ORIGINAL_STDIN, ORIGINAL_STDOUT, ORIGINAL_STDERR}
 
@@ -171,7 +183,12 @@ struct Crystal::System::Process
         mask = uninitialized LibC::SigsetT
         LibC.sigemptyset(pointerof(mask))
         return nil unless LibC.posix_spawnattr_setsigmask(pointerof(attributes), pointerof(mask)) == 0
-        return nil unless LibC.posix_spawnattr_setflags(pointerof(attributes), LibC::POSIX_SPAWN_SETSIGMASK.to_i16) == 0
+        flags = LibC::POSIX_SPAWN_SETSIGMASK
+        if process_group
+          return nil unless LibC.posix_spawnattr_setpgroup(pointerof(attributes), 0) == 0
+          flags |= LibC::POSIX_SPAWN_SETPGROUP
+        end
+        return nil unless LibC.posix_spawnattr_setflags(pointerof(attributes), flags.to_i16) == 0
 
         file, argv = prepared_args
         pid = uninitialized LibC::PidT
@@ -242,10 +259,12 @@ struct Crystal::System::Process
   # This method is similar to `.replace` (used for `Process.exec`) with some
   # differences because we're limited in what we can do in the pre-exec phase
   # between `fork` and `exec`.
-  private def self.try_replace(prepared_args, envp, input, output, error, chdir)
+  private def self.try_replace(prepared_args, envp, input, output, error, chdir, process_group)
     reopen_io(input, ORIGINAL_STDIN)
     reopen_io(output, ORIGINAL_STDOUT)
     reopen_io(error, ORIGINAL_STDERR)
+
+    return if process_group && LibC.setpgid(0, 0) != 0
 
     if chdir
       if 0 != LibC.chdir(chdir)

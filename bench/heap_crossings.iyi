@@ -255,7 +255,13 @@
     thread
   end
 
+  # Settled before the program reads on: Windows starts the thread at a
+  # raised priority, so it is parked in `go.receive` with the closure on its
+  # stack before `collect_here`, which marks the closure from that stack
+  # and frees nothing; the unit's death then finds `IyiThread#@proc`
+  # naming it, where the program would otherwise have exited first.
   def thread_check : Nil
+    before = partitions_now
     go = Channel(Int32).new(1)
     verdict = Channel(Int32).new(1)
     group do |outer|
@@ -269,6 +275,7 @@
         0
       end
     end
+    settled(before, "thread")
   end
 
   # ── Row 1d: `spawn(in: u)`'s captures ───────────────────────────────────

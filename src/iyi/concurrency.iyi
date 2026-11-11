@@ -3889,7 +3889,9 @@ class IyiScheduler
     if waiter.is_a?(IyiWaiter) && !waiter.linked
       waiter.renew(nonce, word.address)
     else
-      waiter = IyiWaiter.new(fiber, nonce, word.address)
+      # The shared heap's, as park_receive_node's: the fiber (shared) keeps
+      # it as its spare past the unit's death (heap22).
+      waiter = IyiCross.shared { IyiWaiter.new(fiber, nonce, word.address) }
       fiber.spare_waiter = waiter
     end
     waiter.linked = true

@@ -4418,6 +4418,12 @@ require "./file"
         arena
       end
 
+      # Inlined: the mark's `IyiRoots.base_of` asks it of every word no
+      # arena holds, a float's bits among them. Left to the inliner it was
+      # inlined there while that was its one caller, and called once
+      # `-Dheap_partitions` gave it five more: JsonGenerate's collections
+      # then ran 17 % longer (tmac, no helpers, the same marked bytes).
+      @[AlwaysInline]
       def self.containing_large(pointer : Void*) : UInt64
         address = pointer.address
         # A slot no large mapping touches answers without the walk

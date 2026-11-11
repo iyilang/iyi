@@ -1788,13 +1788,14 @@ class IyiHeap
       end
       index = index + 1
     end
-    # The large objects: a `LOCAL` one not reached is unmapped, any weak
-    # cell to it cleared first. The table is read under the runtime lock,
-    # whose spin parks for a pause: the pause's own sweep of the large
-    # list takes what it frees off this table (`IyiMark.sweep_large`), and
-    # under a mark beside the program a large object stays mapped, as
-    # `free` leaves it, for the global sweep.
+    # The large objects: a `LOCAL` one not reached is unmapped, its weak
+    # cells cleared before the sweep (`sweep_weak`). The table is read
+    # under the runtime lock, whose spin parks for a pause: the pause's
+    # own sweep of the large list takes what it frees off this table
+    # (`IyiMark.sweep_large`), and under a mark beside the program a large
+    # object stays mapped, as `free` leaves it, for the global sweep.
     large = record &+ REC_LARGE
+    {% if flag?(:heap_verify) %} weak_to_large(record, id, parity, false) {% end %}
     if table_count(large) != 0
       lock
       marking = LibIyiGCTable.__iyi_marking != 0_u8
@@ -1803,7 +1804,6 @@ class IyiHeap
         node = table_at(large, k)
         flags = read64(node + 16_u64).unsafe_shr(16_u64)
         if !marking && flags & OWN_PUB == 0 && flags & OWN_LMARK != parity
-          clear_weak_in(record, node + LARGE_USER, node + read64(node + OFF_MAP))
           table_set(large, k, table_at(large, table_count(large) - 1_u64))
           table_truncate(large, table_count(large) - 1_u64)
           free_large(node + LARGE_HEAD)
@@ -1913,12 +1913,25 @@ class IyiHeap
   # ── Weak cells ────────────────────────────────────────────────────────
 
   # A weak cell to *target*, made by `IyiWeak.cell`: listed on the
-  # partition whose `LOCAL` chunk the target is, whose local sweep clears
-  # it. Only that unit's fibers can hold the target, so the caller holds
-  # its token.
+  # partition whose `LOCAL` chunk or large object the target is, whose
+  # local sweep clears it. Only that unit's fibers can hold the target, so
+  # the caller holds its token. A large object's owner and flags are its
+  # node's: a cell to one went unlisted, and the sweep that unmapped the
+  # object left the cell naming the unmapped block (8 of 8 cells, 3
+  # blocks unmapped, in 3 runs of 3, Linux, d3b590476).
   def self.weak_registered(cell : UInt64, target : UInt64) : Nil
     arena = arena_of(target)
-    return if arena == 0 || !partition_arena?(arena)
+    if arena == 0
+      lock
+      node = containing_large(Pointer(Void).new(target))
+      bits = node == 0 ? 0_u64 : read64(node &+ 16_u64)
+      unlock
+      owner = bits & 0xFFFF_u64
+      return if owner == 0 || bits.unsafe_shr(16_u64) & OWN_PUB != 0
+      table_add(partition_at(owner) &+ REC_WEAK, cell)
+      return
+    end
+    return unless partition_arena?(arena)
     id = owner_in_arena(arena, target)
     return if id == 0
     return if read8(own_address(arena, chunk_index(arena, target))) & OWN_PUB != 0
@@ -1928,8 +1941,10 @@ class IyiHeap
 
   # Before a local sweep frees anything: a cell whose target's chunk the
   # sweep frees - carved, `LOCAL`, without *parity* - or freed already is
-  # cleared, and leaves the list; one whose target is not the
-  # partition's any more (published - the global clear's then) leaves it.
+  # cleared, and leaves the list, as is one whose target is a `LOCAL`
+  # large object without *parity*, which the sweep unmaps; one whose
+  # target is not the partition's any more (published - the global
+  # clear's then) leaves it.
   # Not after the sweep: an empty run goes to the pool in the sweep, and
   # another worker's unit took and carved it before a pass after the
   # sweep looked, which dropped the cell uncleared, naming that unit's
@@ -1951,7 +1966,19 @@ class IyiHeap
       keep = false
       if target != 0
         arena = arena_of(target)
-        if arena != 0 && partition_arena?(arena) && target >= arena_first(arena) && head_of(arena, target) < read64(arena + OFF_HIGH)
+        if arena == 0
+          node = own_large_of(record, target)
+          if node != 0
+            large_flags = read64(node + 16_u64).unsafe_shr(16_u64)
+            if large_flags & OWN_PUB == 0
+              if large_flags & OWN_LMARK != parity
+                write64(cell, 0_u64)
+              else
+                keep = true
+              end
+            end
+          end
+        elsif partition_arena?(arena) && target >= arena_first(arena) && head_of(arena, target) < read64(arena + OFF_HIGH)
           chunk_slot = chunk_index(arena, target)
           bits = read8(arena + META + chunk_slot * META_ENTRY)
           flags = read8(own_address(arena, chunk_slot))
@@ -1972,19 +1999,38 @@ class IyiHeap
     table_truncate(slot, kept)
   end
 
-  # Cells whose target lies in `[low, high)` cleared: a large object about
-  # to be unmapped.
-  def self.clear_weak_in(record : UInt64, low : UInt64, high : UInt64) : Nil
-    slot = record &+ REC_WEAK
-    count = table_count(slot)
-    k = 0_u64
-    while k < count
-      cell = table_at(slot, k)
-      target = read64(cell)
-      write64(cell, 0_u64) if target >= low && target < high
-      k = k + 1_u64
+  {% if flag?(:heap_verify) %}
+    # The verifier's, before a local sweep unmaps partition *id*'s
+    # unreached `LOCAL` large objects (at its *death*, every `LOCAL`
+    # one): no weak cell names one. The verifier's own weak check reads
+    # arena chunks only, and a cell left on an unmapped block names
+    # nothing it could find after.
+    def self.weak_to_large(record : UInt64, id : UInt64, parity : UInt64, death : Bool) : Nil
+      large = record &+ REC_LARGE
+      k = 0_u64
+      while k < table_count(large)
+        node = table_at(large, k)
+        flags = read64(node + 16_u64).unsafe_shr(16_u64)
+        if flags & OWN_PUB == 0 && (death || flags & OWN_LMARK != parity)
+          low = node + LARGE_USER
+          high = node + read64(node + OFF_MAP)
+          IyiWeak.each_cell do |cell|
+            target = read64(cell)
+            if target >= low && target < high
+              IyiHeapVerify.report_begin(id)
+              IyiHeapVerify.say("  a weak cell names a large object the partition unmaps\n  cell ")
+              IyiHeapVerify.say_hex(cell)
+              IyiHeapVerify.say(" -> object ")
+              IyiHeapVerify.say_hex(low)
+              IyiHeapVerify.say("\n")
+              IyiHeapVerify.report_end
+            end
+          end
+        end
+        k = k + 1_u64
+      end
     end
-  end
+  {% end %}
 
   # In the pause, after the global clear: cells the mark left white leave
   # every partition's list (their memory is the sweep's next), so no
@@ -2145,6 +2191,7 @@ class IyiHeap
   # with it, their chunks being free on runs that are nobody's now.
   def self.free_whole(record : UInt64, id : UInt64) : Nil
     clear_dead_weak(record, id)
+    {% if flag?(:heap_verify) %} weak_to_large(record, id, 0_u64, true) {% end %}
     index = 0
     while index < CLASSES
       runs = record &+ (FILL + index).to_u64 * 8_u64
@@ -2229,7 +2276,7 @@ class IyiHeap
     end
   end
 
-  # Weak cells to a dead unit's `LOCAL` chunks cleared.
+  # Weak cells to a dead unit's `LOCAL` chunks and large objects cleared.
   def self.clear_dead_weak(record : UInt64, id : UInt64) : Nil
     slot = record &+ REC_WEAK
     count = table_count(slot)
@@ -2239,7 +2286,10 @@ class IyiHeap
       target = read64(cell)
       if target != 0
         arena = arena_of(target)
-        if arena != 0 && owner_in_arena(arena, target) == id && read8(own_address(arena, chunk_index(arena, target))) & OWN_PUB == 0
+        if arena == 0
+          node = own_large_of(record, target)
+          write64(cell, 0_u64) if node != 0 && read64(node + 16_u64).unsafe_shr(16_u64) & OWN_PUB == 0
+        elsif owner_in_arena(arena, target) == id && read8(own_address(arena, chunk_index(arena, target))) & OWN_PUB == 0
           write64(cell, 0_u64)
         end
       end

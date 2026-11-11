@@ -10,7 +10,8 @@
 # collected locally, a death that frees a pinned unit's partition,
 # a local mark blind to the unit's other fibers, a local sweep that
 # leaves a weak cell naming the chunk it freed, a weak pass after the
-# sweep, which a stop between two classes skips, a local mark that trusts
+# sweep, which a stop between two classes skips, a weak cell to a large
+# object left off its partition's list, a local mark that trusts
 # the parities a mark abandoned part way left, an idle takeover that
 # reads no parked fiber's stack, an idle takeover of a unit
 # whose `Unit` value is still being built, a dead unit's pooled run
@@ -196,6 +197,13 @@ if [ "$PART" = all ] || [ "$PART" = broken ]; then
   # unit before it looked, which no single run shows.)
   prove_fails "a weak pass after the local sweep" noweakfirst "weak:" \
     '/^    sweep_weak\(record, id, parity\)$/ { found = found + 1; next } /^    stat_add\(pointerof\(@@local_freed\)\.address, freed\)$/ { print "    sweep_weak(record, id, parity)"; found = found + 1 } { print } END { if (found != 2) exit 3 }' \
+    heap_partition.iyi
+
+  # A weak cell to a large object left off its partition's list, as it
+  # was through d3b590476: the sweep that unmaps the object leaves the
+  # cell naming the unmapped block.
+  prove_fails "a weak cell to a large object unlisted" nolargeweak "weak:" \
+    '/def self\.weak_registered\(cell : UInt64, target : UInt64\) : Nil/ { inside = 1 } inside && /^    if arena == 0$/ { print "    return if arena == 0"; skip = 1; inside = 0; found = 1; next } skip && /^    end$/ { skip = 0; next } skip { next } { print } END { if (!found) exit 3 }' \
     heap_partition.iyi
 
   # The mark bits an abandoned local mark left trusted by the next one:

@@ -91,6 +91,30 @@
     {% end %}
   end
 
+  # The partitions live now; none without `-Dheap_partitions`.
+  def partitions_now : UInt64
+    {% if flag?(:heap_partitions) %}
+      IyiHeap.partitions_live
+    {% else %}
+      0_u64
+    {% end %}
+  end
+
+  # The partitions live back to *before*: the units a check started have
+  # died, and under `-Dheap_verify` each death's check has scanned for any
+  # word still naming a chunk of theirs - a published object's word into
+  # the dead partition's `LOCAL` chunks among them, which the local
+  # collection marks through the published object and does not report.
+  # As bench/heap_crossings.iyi's `settled`.
+  def settled(before : UInt64, what : String) : Nil
+    waited = 0
+    while partitions_now > before && waited < 5000
+      sleep(1)
+      waited = waited + 1
+    end
+    fail("#{what}: #{partitions_now - before} partitions still live 5 s after the check's units ended") if partitions_now > before
+  end
+
   class Payload
     @label : String
     @next : Payload?
@@ -181,6 +205,7 @@
   end
 
   def c1_check : Nil
+    before = partitions_now
     go = Channel(Int32).new(1)
     group do |outer|
       outer.spawn(unit: :new) do
@@ -192,6 +217,7 @@
         0
       end
     end
+    settled(before, "c1")
   end
 
   # ── A class variable a unit stores into ───────────────────────────────
@@ -214,6 +240,7 @@
   end
 
   def classvar_check : Nil
+    before = partitions_now
     group do |g|
       g.spawn(unit: :new) do
         store_latest(42)
@@ -222,16 +249,18 @@
         0
       end
     end
+    settled(before, "classvar")
     node = Latest.get
     fail("classvar: nothing stored") unless node.is_a?(Payload)
   end
 
   # ── Trusted types born in the shared heap ─────────────────────────────
   # The new unit's object a crossing spawn makes in its spawner's code is
-  # held, once the spawner drops it, only by the new unit's fiber, which is
-  # the shared heap's: made in the spawner's partition, the collection
-  # there frees it under the fiber.
+  # held, once the spawner drops it, by the new unit's fiber, which is the
+  # shared heap's: made in the spawner's partition, the spawner's death
+  # (`settled`) frees it under the fiber.
   def born_shared_check : Nil
+    before = partitions_now
     go = Channel(Int32).new(1)
     group do |outer|
       outer.spawn(unit: :new) do
@@ -263,6 +292,7 @@
         0
       end
     end
+    settled(before, "born_shared")
   end
 
   # ── Owning types and `lends:` ─────────────────────────────────────────
@@ -304,6 +334,7 @@
   end
 
   def pin_check : Nil
+    before = partitions_now
     pool = Pool.new
     lent = LentPool.new
     group do |g|
@@ -325,6 +356,7 @@
       {% end %}
       pinned.value
     end
+    settled(before, "pin")
     fail("pin: the pool lost its node") unless pool.first?.is_a?(Payload)
   end
 

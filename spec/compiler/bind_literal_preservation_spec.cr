@@ -5,6 +5,20 @@ require "../../src/compiler/iyi/tools/bind"
 # `tool bind` rewrites names in text it has printed. Only a path the parser reads is a name:
 # what a string, a regex, a comment or a macro literal spells is left as written.
 module Iyi
+  # Runs the block with *names* bound (each name a consumer writes bare, and what it calls
+  # it in full), and answers the boundaries the rewrites in the block met.
+  private def self.bound_names(names : Hash(String, String), &) : Set(String)
+    @@bound_prefix = names
+    @@bound_module = names.transform_values { |qualified| qualified.split("::").first.downcase }
+    @@bound_used = Set(String).new
+    yield
+    @@bound_used
+  ensure
+    @@bound_prefix = {} of String => String
+    @@bound_module = {} of String => String
+    @@bound_used = Set(String).new
+  end
+
   describe "Literal preservation in bind text rewrites" do
     describe "strip_root" do
       it "leaves plain string literals as written" do
@@ -81,7 +95,7 @@ module Iyi
 
       it "strips whole segments of a path and nothing shorter" do
         strip_root("Root::Decl::X.new", "Root::Decl", :body).should eq("X.new")
-        strip_root("Root::Declared::X.new", "Root::Decl", :body).should eq("Root::Declared::X.new")
+        strip_root("Root::Decl::Y.f(Root::Declared::X)", "Root::Decl", :body).should eq("Y.f(Root::Declared::X)")
         strip_root("RootOther::X.new(Root::X)", "Root", :body).should eq("RootOther::X.new(X)")
       end
 
@@ -144,9 +158,28 @@ module Iyi
         strip_root(parameters[1], "Root", :parameter, parameters, 1).should eq("b : B = B.new(a)")
       end
 
-      it "leaves the text of a macro literal as written and rewrites a macro expression" do
-        source = "{% if flag?(:linux) %}\n  Root::A.call(\"Root::B\")\n{% end %}\n{{ Root::C }}"
-        strip_root(source, "Root", :body).should eq("{% if flag?(:linux) %}\n  Root::A.call(\"Root::B\")\n{% end %}\n{{ C }}")
+      # A consumer expands a macro literal's code where the root has been stripped, so the code
+      # is rewritten like the code around it, and what a string in it spells is left as written.
+      it "rewrites the code of a macro literal that reads as source, and a macro expression" do
+        source = "{% if flag?(:linux) %}\n  Root::A.call(\"Root::B\")\n{% else %}\n  Root::C.call\n{% end %}\n{{ Root::D }}"
+        strip_root(source, "Root", :body)
+          .should eq("{% if flag?(:linux) %}\n  A.call(\"Root::B\")\n{% else %}\n  C.call\n{% end %}\n{{ D }}")
+      end
+
+      it "reads a macro literal's code where the signature's parameters are variables" do
+        source = "{% if flag?(:linux) %}\n  x = x.abs\n  Root::A.new(x)\n{% end %}"
+        strip_root(source, "Root", :body, ["x : Int32"]).should eq("{% if flag?(:linux) %}\n  x = x.abs\n  A.new(x)\n{% end %}")
+      end
+
+      # Each branch opens an `if` that the text after the inner macro closes, so no run of
+      # the literal reads as source by itself. Its names are found by search, as every name
+      # used to be.
+      it "searches a macro literal that does not read as source by itself" do
+        source = "{% begin %}\n  {% if flag?(:linux) %}\n    if Root::A.ok?\n  {% else %}\n    if Root::B.ok?\n  {% end %}\n" \
+                 "      Root::C.call\n    end\n{% end %}"
+        strip_root(source, "Root", :body)
+          .should eq("{% begin %}\n  {% if flag?(:linux) %}\n    if A.ok?\n  {% else %}\n    if B.ok?\n  {% end %}\n" \
+                     "      C.call\n    end\n{% end %}")
       end
 
       it "refuses text the parser cannot read rather than rewriting part of it" do
@@ -185,6 +218,36 @@ module Iyi
 
       it "leaves a named argument's label as written" do
         replace_word("call(Old: Old)", "Old", "New", :expression).should eq("call(Old: New)")
+      end
+    end
+
+    describe "map_names" do
+      it "qualifies a bound name where it heads a path, and leaves a string, a longer name and an interior segment" do
+        bound_names({"Node" => "Radix::Node"}) do
+          map_names(%(Node.new(Node::Leaf, "Node", MyNode, Other::Node, ::Node)), :expression)
+            .should eq(%(Radix::Node.new(Radix::Node::Leaf, "Node", MyNode, Other::Node, ::Node)))
+        end
+      end
+
+      it "qualifies a bound name in a macro literal's code" do
+        bound_names({"Node" => "Radix::Node"}) do
+          map_names("{% if flag?(:linux) %}\n  Node.new\n{% end %}", :body)
+            .should eq("{% if flag?(:linux) %}\n  Radix::Node.new\n{% end %}")
+        end
+      end
+
+      it "records the boundary a name belongs to wherever the text spells it, and changes no string" do
+        used = bound_names({"Node" => "Radix::Node"}) do
+          map_names(%(puts "Node"), :body).should eq(%(puts "Node"))
+        end
+        used.should eq(Set{"radix"})
+      end
+
+      it "records nothing for a name the text does not spell on its own" do
+        used = bound_names({"Node" => "Radix::Node"}) do
+          map_names("MyNode.new(NodeList)", :body).should eq("MyNode.new(NodeList)")
+        end
+        used.should be_empty
       end
     end
   end

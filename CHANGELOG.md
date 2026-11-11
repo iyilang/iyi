@@ -9,7 +9,7 @@
 
 - **Private closures hosted in carried artifact units have an owning-unit linkage suffix.** The suffix is `^unit:` and the lowercase hex of the unit's UTF-8 name, so a carried closure cannot collide with a closure the consumer generates. It applies to artifact production and bind filling, `--crystal` included, and can change private symbols and object bytes relative to older compilers. The public method ABI and closure calling convention are unchanged.
 
-- **`tool bind` rewrites a name only where the parser reads a path.** It used to search the text it had printed, so a bound name inside a string, a regex, a comment or a heredoc was rewritten too: `"Kemal::Config"` in a log message came out `"Config"`. The printed text is now parsed, a body where its signature's parameters are variables and a parameter among its siblings. Text inside a macro literal is left as written, and text the parser cannot read is refused.
+- **`tool bind` rewrites a name only where the parser reads a path.** It used to search the text it had printed, so a bound name inside a string, a regex, a comment or a heredoc was rewritten too: `"Kemal::Config"` in a log message came out `"Config"`. The printed text is now parsed, a body where its signature's parameters are variables and a parameter among its siblings. The code of a macro literal (`{% if flag?(:linux) %} ... {% end %}`) is read the same way where it stands as source by itself, and searched as before where it does not. Text the parser cannot read at all is refused.
 
 - **A `.iyimod` whose section table or sections run past the end of the file is refused before anything is allocated for it.**
 

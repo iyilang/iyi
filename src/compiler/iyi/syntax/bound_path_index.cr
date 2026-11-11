@@ -59,7 +59,11 @@ module Iyi
   # holds. So the text is parsed, and the paths are the ones the parser read, at the
   # byte offsets it read them from.
   #
-  # Text inside a macro literal is not parsed, so it holds no path.
+  # The text of a macro literal (what stands between `{% if %}` and `{% end %}`) is not
+  # parsed with the text around it, since which of it survives is the macro's to say. It
+  # is code all the same, and a consumer expands it where the root has been stripped, so
+  # each run of it is read on its own: parsed where it stands as source by itself, and
+  # searched for names where it does not (`when Root::A` whose `case` is outside it).
   module BoundPathIndex
     # What the text is, which decides how it is parsed.
     enum Entry
@@ -86,12 +90,18 @@ module Iyi
     # earlier parameter and a bare `*` must be followed by one.
     def self.paths(text : String, entry : Entry, iyi : Bool,
                    parameters : Array(String) = [] of String, index : Int32? = nil) : Array(BoundPathOccurrence)
+      paths(text, entry, iyi, parameters, index, 0)
+    end
+
+    # *depth* counts the macro literals this text is inside.
+    private def self.paths(text : String, entry : Entry, iyi : Bool,
+                           parameters : Array(String), index : Int32?, depth : Int32) : Array(BoundPathOccurrence)
       failure = nil
       ([entry] + Entry.values.reject { |other| other == entry }).each do |candidate|
         begin
           before, after = wrapper(candidate, parameters, index)
-          return read(text, candidate, iyi, before, after)
-        rescue error : CodeError | ArgumentError | InvalidByteSequenceError
+          return read(text, candidate, iyi, before, after, parameters, depth)
+        rescue error : CodeError | ArgumentError | InvalidByteSequenceError | IndexError
           failure ||= error
         end
       end
@@ -115,9 +125,11 @@ module Iyi
       end
     end
 
-    # A parser that keeps every path it reads and where its first segment started.
+    # A parser that keeps every path it reads and where its first segment started, and the
+    # bytes of every macro literal token.
     class PathReader < Parser
       getter paths = [] of {Array(String), Location}
+      getter macro_literals = [] of {Int32, Int32}
 
       def parse_path(global, location)
         # The first segment's token: a leading `::` has been read already.
@@ -127,17 +139,32 @@ module Iyi
         path
       end
 
+      def next_macro_token(macro_state, skip_whitespace)
+        token = super
+        if token.type.macro_literal?
+          # The token's value is the bytes it was read from, and the reader stands after them.
+          finish = current_pos
+          @macro_literals << {finish - token.value.to_s.bytesize, finish}
+        end
+        token
+      end
+
       # What a lookahead that failed read is read again, so it is not kept twice or kept
       # for a reading the parser gave up.
       def lookahead(preserve_token_on_fail = false, &)
         count = @paths.size
+        literals = @macro_literals.size
         result = super(preserve_token_on_fail) { yield }
-        @paths.pop(@paths.size - count) unless result
+        unless result
+          @paths.pop(@paths.size - count)
+          @macro_literals.pop(@macro_literals.size - literals)
+        end
         result
       end
     end
 
-    private def self.read(text : String, entry : Entry, iyi : Bool, before : String, after : String) : Array(BoundPathOccurrence)
+    private def self.read(text : String, entry : Entry, iyi : Bool, before : String, after : String,
+                          parameters : Array(String), depth : Int32) : Array(BoundPathOccurrence)
       source = "#{before}#{text}#{after}"
       parser = PathReader.new(source)
       parser.iyi = iyi
@@ -148,7 +175,20 @@ module Iyi
       else
         parser.parse
       end
-      occurrences(text, source, before.bytesize, parser.paths)
+      found = occurrences(text, source, before.bytesize, parser.paths)
+
+      literal_runs(parser.macro_literals, before.bytesize, text.bytesize).each do |(start, finish)|
+        literal_paths(text.byte_slice(start, finish - start), iyi, parameters, depth).each do |(names, offset)|
+          path = occurrence(text, start + offset, names)
+          found << path unless found.includes?(path)
+        end
+      end
+
+      found.sort_by!(&.start)
+      found.each_cons_pair do |earlier, later|
+        raise ArgumentError.new("parsed paths overlap") if later.start < earlier.finish
+      end
+      found
     end
 
     # The paths of *source* that lie in *text*, which starts *base* bytes into it.
@@ -172,20 +212,86 @@ module Iyi
         unless text.byte_slice(start, finish - start) == names.join("::")
           raise ArgumentError.new("parsed path is not written as its segments")
         end
-        bytes = text.to_unsafe
-        first_end = start + names[0].bytesize
-        occurrence = BoundPathOccurrence.new(start, finish, names,
-          start > 0 ? bytes[start - 1] : nil,
-          first_end < text.bytesize ? bytes[first_end] : nil,
-          finish < text.bytesize ? bytes[finish] : nil)
-        found << occurrence unless found.includes?(occurrence)
-      end
-
-      found.sort_by!(&.start)
-      found.each_cons_pair do |earlier, later|
-        raise ArgumentError.new("parsed paths overlap") if later.start < earlier.finish
+        path = occurrence(text, start, names)
+        found << path unless found.includes?(path)
       end
       found
+    end
+
+    # The path *names* at byte *start* of *text*, with the bytes beside it.
+    private def self.occurrence(text : String, start : Int32, names : Array(String)) : BoundPathOccurrence
+      finish = start + names.join("::").bytesize
+      bytes = text.to_unsafe
+      first_end = start + names[0].bytesize
+      BoundPathOccurrence.new(start, finish, names,
+        start > 0 ? bytes[start - 1] : nil,
+        first_end < text.bytesize ? bytes[first_end] : nil,
+        finish < text.bytesize ? bytes[finish] : nil)
+    end
+
+    # The runs of macro literal text in the bound text: the tokens' bytes, less the
+    # *base* bytes of source before the text, joined where one token ends as the next
+    # begins. A literal is lexed a line at a time, and a run is what reads as source.
+    private def self.literal_runs(tokens : Array({Int32, Int32}), base : Int32, size : Int32) : Array({Int32, Int32})
+      runs = [] of {Int32, Int32}
+      tokens.uniq.sort!.each do |(token_start, token_finish)|
+        start = Math.max(token_start - base, 0)
+        finish = Math.min(token_finish - base, size)
+        next unless start < finish
+        if (last = runs.last?) && start <= last[1]
+          runs[-1] = {last[0], Math.max(last[1], finish)}
+        else
+          runs << {start, finish}
+        end
+      end
+      runs
+    end
+
+    # The paths of one run of macro literal text, each with its byte offset in the run.
+    private def self.literal_paths(run : String, iyi : Bool, parameters : Array(String), depth : Int32) : Array({Array(String), Int32})
+      # A literal inside a literal's text is searched, not read again.
+      return scan(run) if depth > 0
+      paths(run, Entry::Body, iyi, parameters, nil, depth + 1).map { |path| {path.names, path.start} }
+    rescue ArgumentError
+      scan(run)
+    end
+
+    # The names in text that does not read as source: every run of `Name` and
+    # `Name::Name` that starts where no name is already under way. This is what a
+    # search finds, a name inside a string included.
+    private def self.scan(text : String) : Array({Array(String), Int32})
+      found = [] of {Array(String), Int32}
+      bytes = text.to_slice
+      index = 0
+      while index < bytes.size
+        unless upper?(bytes[index]) && (index == 0 || !name_byte?(bytes[index - 1]))
+          index += 1
+          next
+        end
+        start = index
+        names = [] of String
+        loop do
+          segment = index
+          while index < bytes.size && name_byte?(bytes[index])
+            index += 1
+          end
+          names << String.new(bytes[segment, index - segment])
+          break unless index + 2 < bytes.size && bytes[index] == 0x3A_u8 && bytes[index + 1] == 0x3A_u8 && upper?(bytes[index + 2])
+          index += 2
+        end
+        found << {names, start}
+      end
+      found
+    end
+
+    private def self.upper?(byte : UInt8) : Bool
+      byte >= 0x41_u8 && byte <= 0x5A_u8
+    end
+
+    private def self.name_byte?(byte : UInt8) : Bool
+      byte == 0x5F_u8 || upper?(byte) ||
+        (byte >= 0x30_u8 && byte <= 0x39_u8) ||
+        (byte >= 0x61_u8 && byte <= 0x7A_u8)
     end
   end
 end

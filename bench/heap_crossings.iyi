@@ -392,9 +392,18 @@
   # spin on an `Atomic`). With the sends merely 100 ms after the receivers
   # parked, a receiver ran between the two whenever the first send's
   # chaos point collected (`IYI_HEAP_STRESS`), and no round of 50 grew
-  # the ring (bench/heap_verify.sh's sound part, Linux). A round where a
-  # receiver had not parked yet - the simulation may run the sender
-  # between a receiver's count and its park - is tried again.
+  # the ring (bench/heap_verify.sh's sound part, Linux). A round where no
+  # ring grew is tried again.
+  #
+  # The sender waits for its start on a channel, parked, so the start
+  # readies it. It used to poll an `Atomic` with `sleep(1)`, and on the
+  # simulated one-thread schedule a sleeping sender is on this thread's
+  # timer list, which only a park looks at: under PCT (seed 1) nothing
+  # else was runnable, so the spin below was never preempted, never
+  # parked, and the sender's timer never fired - every check run together
+  # under IYI_HEAP_STRESS=1 hung here for good, with each check alone
+  # passing (Linux, h22/hp-s4 d467f04dc, matrix seed 1 and heap_verify.sh's
+  # simulated part).
   @[NoInline]
   def grow_ring(box : Channel(String), seed : Int32) : Nil
     box.send(label_for(seed, 0))
@@ -408,7 +417,7 @@
     got = Channel(Int32).new(2)
     grew = Channel(Bool).new(1)
     parked = Atomic(Int32).new(0)
-    go = Atomic(Int32).new(0)
+    start = Channel(Int32).new(1)
     sent = Atomic(Int32).new(0)
     group do |g|
       2.times do
@@ -422,9 +431,7 @@
         end
       end
       g.spawn(unit: :new) do
-        while go.get == 0
-          sleep(1)
-        end
+        start.receive
         grow_ring(box, 16)
         sent.set(1)
         grown = box.@slots > 1
@@ -439,7 +446,7 @@
       while parked.get < 2
         sleep(1)
       end
-      go.set(1)
+      start.send(1)
       while sent.get == 0
       end
       fail("ring: a value read wrong") unless got.receive == 1 && got.receive == 1

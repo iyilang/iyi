@@ -40,7 +40,7 @@ module Iyi::Stale
                    @def_names : Set(String) = Set(String).new,
                    @proc_literals : Set(UInt64) = Set(UInt64).new,
                    @consts : Set(Const) = Set(Const).new,
-                   @class_vars : Set(MetaTypeVar) = Set(MetaTypeVar).new)
+                   @class_vars : Set(MetaTypeVar) = Set(MetaTypeVar).new.compare_by_identity)
       @mismatch = [] of String
     end
 
@@ -83,7 +83,7 @@ module Iyi::Stale
       @emitted_defs = Set(String).new
       @emitted_proc_literals = [] of {ProcLiteral, String}
       @emitted_consts = Set(Const).new
-      @emitted_class_vars = Set(MetaTypeVar).new
+      @emitted_class_vars = Set(MetaTypeVar).new.compare_by_identity
     end
 
     def record_def(mangled_name : String) : Nil
@@ -148,11 +148,12 @@ module Iyi::Stale
       @def_names = Set(String).new
       @proc_literals = Set(UInt64).new
       @consts = Set(Const).new
-      @class_vars = Set(MetaTypeVar).new
+      @class_vars = Set(MetaTypeVar).new.compare_by_identity
 
       @visited_defs = Set(String).new
       @visited_consts = Set(Const).new
-      @visited_class_vars = Set(MetaTypeVar).new
+      # MetaTypeVar inherits Var's name-only equality; owners must stay distinct.
+      @visited_class_vars = Set(MetaTypeVar).new.compare_by_identity
       @allocated_types = Set(Type).new
       @visited_fun_defs = Set(External).new
       @current_type = @program

@@ -6322,17 +6322,44 @@ keep it so. An initializer run at its declaration runs on the main fiber,
 which allocates in the shared heap; one run by a first read before its
 declaration may run on a unit's fiber, and runs in the shared heap
 (`IyiOnce.run`, nothing but the call without the flag). And a class
-variable of a `Share` type that a unit reassigns is to publish what it
-is given, at the store (not built yet).
+variable's store of a value that holds pointers publishes it, outside the
+prelude, since a unit may reassign a `Share` class variable another unit
+reads, or a `@[ThreadLocal]` one the next unit on its thread reads. A
+constant is stored only by its initializer, and needs nothing more.
+
+What the compiler emits under `-Dheap_partitions`, and nothing of it
+without the flag:
+
+- A crossing block - a parallel unit's, a thread's, a `@[Share]` def's -
+  gets a closure context of its own, holding only what the block captures,
+  copied in where the block is made, and typed, so the collector and the
+  publication walk read it precisely. Without that, publishing the block
+  published every slot of the scope's closure beside it, mutable ones
+  included. A block behind a lock is no crossing and keeps the scope's.
+- `Mutex`, `Channel`, `Unit`'s handle and the runtime's fibers, units,
+  waiters, send nodes and threads are made in the shared heap directly,
+  whatever unit makes them. A library's `@[Share]` type is not: its
+  constructor stores what its caller hands it.
+- A crossing whose captures, named module state or module state reached
+  through its calls hold an owning type declared outside std that does not
+  say `@[Share(owns: true, lends: true)]` runs *pinned*, in the shared
+  heap: such a type hands its units a graph no publication sees. `lends:
+  true` promises the lend protocol (`IyiHeap.lend_in` when a unit takes the
+  graph, `IyiHeap.lend_out` when it hands it back), is refused without
+  `owns: true`, and is a claim, kept for an `@[Unsafe]` module as `owns:`
+  is. The compiler passes `pinned: true` to the spawn (`g.spawn` placed in
+  a unit of its own, `unit: :new`), `Unit.new` or `SharedProc.of`, and says
+  so in a note ("this spawn runs in the shared heap because ..."); a module
+  that passes `pinned:` itself is unsafe code.
+- The artifact (`.iyimod` v63) carries that object code, each spawn's pin
+  bit and each pinned `Unit.new` and `SharedProc.of`, and an owning type's
+  `lends: true`. Its flags, `-Dheap_partitions` among them, must be the
+  consumer's (IV.5): code built without the flag lacks the publication.
 
 Without `-Dheap_partitions` a build is today's. `-Dheap_verify` adds the
 verifier at every local collection and poisons what a partition frees.
-Not built in the compiler yet: publication at a class variable's store,
-typed crossing contexts, the `pinned:` argument at a spawn that reaches an
-owning type without `lends:` (`@[Share(owns: true, lends: true)]`, the
-lend protocol), and the artifact (`.iyimod`) recording whether its object
-code was built with the flag. Kept or dropped on the measurements of
-pauses and throughput the prototype is built to give.
+Kept or dropped on the measurements of pauses and throughput the
+prototype is built to give.
 
 ### III.5 Module initialisation: **PROPOSED; rules 1, 2 and 4 BUILT**
 

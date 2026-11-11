@@ -320,6 +320,7 @@ module Iyi
       compute_starts
       propagate_contexts
       compute_written
+      index_state_events
       @claims.each do |claim|
         next unless @tracked.has_key?(claim.state.object_id)
         unless refusal = refusal_of(claim)
@@ -362,22 +363,19 @@ module Iyi
         namespace = state.namespace
         return false if namespace.is_a?(ModuleType) && namespace.exported_names.try(&.includes?(state.name))
       end
-      @callables.each do |callable|
-        next if callable.literal?
-        if (a_def = callable.a_def) && callable.answerer? && state_out(callable).includes?(key)
-          answer = a_def.type?
-          return false unless answer && deep_share?(answer)
-        end
-        callable.events.each do |event|
-          next if event.root.kind.slot?
-          next unless states_of(event.root).includes?(key)
-          return false if fired?(event.cause, escapes: true)
-          next unless fired?(event.cause, escapes: false)
-          origin = event.origin
-          return false unless origin && origin.kind.top_level? && before_start?(origin.index)
-          written = event.at.try { |place| (place.expanded_location || place).filename }
-          return false unless written == file
-        end
+      @answerers.each do |callable|
+        a_def = callable.a_def.not_nil!
+        next unless state_out(callable).includes?(key)
+        answer = a_def.type?
+        return false unless answer && deep_share?(answer)
+      end
+      @state_events[key]?.try &.each do |(_, event)|
+        return false if fired?(event.cause, escapes: true)
+        next unless fired?(event.cause, escapes: false)
+        origin = event.origin
+        return false unless origin && origin.kind.top_level? && before_start?(origin.index)
+        written = event.at.try { |place| (place.expanded_location || place).filename }
+        return false unless written == file
       end
       true
     end
@@ -986,6 +984,28 @@ module Iyi
       spread(@escaped, seeds, reverse, true)
     end
 
+    # Each claimed state's events, by the state's key, in the order the
+    # callables and their events were met, and the callables that may
+    # answer claimed state: what `refusal_of` and `robust?` read of one
+    # claim. Built once; each claim read every callable's events, which
+    # grew with std's claims (33, then 80 after the trust review).
+    @state_events = {} of UInt64 => Array({Callable, Event})
+    @answerers = [] of Callable
+
+    private def index_state_events : Nil
+      @callables.each do |callable|
+        next if callable.literal?
+        @answerers << callable if callable.a_def && callable.answerer?
+        callable.events.each do |event|
+          next if event.root.kind.slot?
+          states_of(event.root).each do |key|
+            next unless @tracked.has_key?(key)
+            (@state_events[key] ||= [] of {Callable, Event}) << {callable, event}
+          end
+        end
+      end
+    end
+
     private def spread(into : Written, seeds : Array({Int32, Int32, Event}), reverse : Hash({Int32, Int32}, Array({Callable, Int32, Event})), escapes : Bool) : Nil
       queue = Deque({Int32, Int32}).new
       seeds.each do |(id, slot, event)|
@@ -1100,20 +1120,15 @@ module Iyi
     private def refusal_of(claim : ReachClaim) : String?
       key = claim.state.object_id
       writes = [] of Write
-      @callables.each do |callable|
-        next if callable.literal?
-        callable.events.each do |event|
-          next if event.root.kind.slot?
-          next unless states_of(event.root).includes?(key)
-          if fired?(event.cause, escapes: true)
-            # A copy kept out of the walk's sight may be written through
-            # anywhere, whenever: before the first task, or under a lock,
-            # the keeping proves nothing about the writes.
-            writes << Write.new(event, callable, false, true, [] of Lock, escape: true)
-          elsif fired?(event.cause, escapes: false)
-            init, free, locks = context_of(callable, event.origin)
-            writes << Write.new(event, callable, init, free, locks)
-          end
+      @state_events[key]?.try &.each do |(callable, event)|
+        if fired?(event.cause, escapes: true)
+          # A copy kept out of the walk's sight may be written through
+          # anywhere, whenever: before the first task, or under a lock,
+          # the keeping proves nothing about the writes.
+          writes << Write.new(event, callable, false, true, [] of Lock, escape: true)
+        elsif fired?(event.cause, escapes: false)
+          init, free, locks = context_of(callable, event.origin)
+          writes << Write.new(event, callable, init, free, locks)
         end
       end
       writes.sort_by! { |write| location_key(write.event.at) }

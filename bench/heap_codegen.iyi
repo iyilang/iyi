@@ -190,8 +190,28 @@
   # The scope keeps a variable of its own in its closure and assigns it a
   # fresh array after the crossing: with the block's context published
   # beside it (no C1), that array is the unit's and only a published
-  # context holds it, which the collection after it frees under the
-  # context, which the parked unit's block still holds.
+  # context holds it. A local collection marks through what its unit
+  # published, so the word is the verifier's at the scope's unit's death,
+  # whose check scans only what the last global mark found live: the
+  # block leaves where its context lives in `C1Hold`, as a block a
+  # long-lived unit keeps would hold it. Without it the block's unit,
+  # joined inside the scope's, ended first, and its context was found
+  # live or not by the time of the scope's death (Linux, 3f6cd14b4,
+  # `IYI_HEAP_STRESS=1`: missed on seeds 1-5, caught under
+  # `IYI_HEAP_TRACE=1`).
+  class C1Hold
+    @[UnsafeReach("the crossing block leaves where its context lives here, a raw word the global mark reads and no publication follows, so that the context outlives the scope's unit")]
+    @@context : Pointer(Void) = Pointer(Void).new(0_u64)
+
+    def self.put(word : Pointer(Void)) : Nil
+      @@context = word
+    end
+
+    def self.drop : Nil
+      @@context = Pointer(Void).new(0_u64)
+    end
+  end
+
   @[NoInline]
   def launch_c1(g : IyiGroup, go : Channel(Int32), seed : Int32) : Nil
     payload = build(seed)
@@ -205,6 +225,7 @@
     g.spawn(unit: :new) do
       go.receive
       fail("c1: the crossing block read a copy of the scope's Atomic, not the scope's (#{flag.get})") unless flag.get == 1
+      C1Hold.put(pointerof(payload).as(Pointer(Void)))
       payload.label.bytesize
     end
     flag.set(1)
@@ -230,6 +251,7 @@
       end
     end
     settled(before, "c1")
+    C1Hold.drop
   end
 
   # ── A class variable a unit stores into ───────────────────────────────

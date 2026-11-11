@@ -50,11 +50,15 @@
 #   ends the unit's task, so that `-Dheap_verify` reads its free lists.
 # - `weak:` weak cells to a hundred kept and a hundred dropped objects of
 #   a unit, one collection: every kept cell still names its object and
-#   every dropped one reads 0.
+#   every dropped one reads 0; and in another unit, a sweep stopped once
+#   it has swept the dropped objects' class leaves no cell naming a chunk
+#   it freed.
 # - `large:` objects past the top class in a partition: kept ones read
 #   back whole across local collections, dropped ones are unmapped.
 # - `takeover:` units parked with debt are collected by idle workers after
-#   a global collection, their lists whole after.
+#   a global collection, their lists whole after; under `IYI_HEAP_STRESS`,
+#   where each unit collects itself before it parks, the debt is handed
+#   to the parked units.
 # - `construct:` a unit with no fiber and no value slot - a `Unit`'s value
 #   being built by `Unit.new` on its caller's fiber - in debt after a
 #   global collection is taken by no idle worker; the list reads whole.
@@ -591,8 +595,15 @@
 
   # ── pin ───────────────────────────────────────────────────────────────
 
+  # Holders in the data segment, which `-Dheap_verify`'s scan reads word
+  # by word: `kept` a pinned unit's list (`pin`), `text` a published
+  # string (`frontier`), `word` the address of a value whose only real
+  # holder is another unit's stack, which no local mark and no verifier
+  # reads (`construct`) - a plain word, so no store publishes it.
   class Holder
     @@kept : Node? = nil
+    @@text : String? = nil
+    @@word : UInt64 = 0_u64
 
     def self.kept : Node?
       @@kept
@@ -600,6 +611,22 @@
 
     def self.kept=(list : Node?) : Node?
       @@kept = list
+    end
+
+    def self.text : String?
+      @@text
+    end
+
+    def self.text=(text : String?) : String?
+      @@text = text
+    end
+
+    def self.word : UInt64
+      @@word
+    end
+
+    def self.word=(address : UInt64) : UInt64
+      @@word = address
     end
   end
 
@@ -650,9 +677,14 @@
   # another held it: heap_crossings' node 20 label read another label
   # (HS4b, `channel channel`, simulated chaos, IYI_HEAP_STRESS=1, seeds
   # 3, 6 and 8, Linux). Every string is kept, so the unit's runs come off
-  # the frontier and not off its own free list. Answers the allocation
-  # that met such a chunk, -1 if it stayed local, -2 if none came in a
-  # million.
+  # the frontier and not off its own free list. The string is held from
+  # the data segment too (`Holder.text`, until the unit has died), as a
+  # published object is held from outside its unit: one left `LOCAL` is
+  # freed at the death under that slot, which `-Dheap_verify`'s death
+  # check reads - the nofrontier copy was caught by this check alone,
+  # the verifier reporting nothing (tmac, hp-s4 6122d4d63 + 3ee055f6f).
+  # Answers the allocation that met such a chunk, -1 if it stayed local,
+  # -2 if none came in a million.
   def frontier_task : Int64
     kept = [] of String
     i = 0
@@ -665,6 +697,7 @@
         high = IyiHeap.arena_high(arena)
         if IyiHeap.head_of(arena, address) < high && address >= high
           IyiHeap.publish(address)
+          Holder.text = text
           return IyiHeap.local?(address) ? -1_i64 : i.to_i64
         end
       end
@@ -732,6 +765,7 @@
       fail("frontier: none of four dropped strings on the frontier was freed by their unit's collection") if weak == 0_i64
     end
     settle("frontier")
+    Holder.text = nil
   end
 
   # ── stale ─────────────────────────────────────────────────────────────
@@ -976,6 +1010,58 @@
     left
   end
 
+  # A hundred dropped nodes, each with a weak cell, and a local sweep
+  # stopped once it has swept their class, as a stop asked before the
+  # next class stops it: the sweep freed their chunks, and the cells to
+  # them read 0 all the same. The weak pass comes before the sweep frees
+  # anything; after it, a stopped sweep left the cells naming the freed
+  # chunks, which the unit's next allocations hand out again. Answers
+  # how many cells name a freed chunk, or a negative failure.
+  def weak_stop_task : Int64
+    made = [] of Pointer(UInt64)
+    i = 0
+    while i < 100
+      made << dead_cell(2000_i64 &+ i.to_i64)
+      i = i + 1
+    end
+    cells = off_frontier(made)
+    return -3_i64 if cells.empty?
+    # The targets, hidden from the scan, to look at their chunks after.
+    targets = cells.map { |cell| hide(cell.value) }
+    arena = IyiHeap.arena_of(cells[0].value)
+    record = IyiHeap.current_record
+    IyiHeap.stop_local_sweep(record, IyiHeap.class_index(IyiHeap.arena_chunk(arena)))
+    tries = 0
+    while IyiHeap.local_sweep_stop_pending? && tries < 100
+      scrub_stack
+      IyiHeap.collect_local(record)
+      sleep(1) if IyiHeap.local_sweep_stop_pending?
+      tries = tries + 1
+    end
+    if IyiHeap.local_sweep_stop_pending?
+      IyiHeap.stop_local_sweep(0_u64, -1)
+      return -2_i64
+    end
+    {% if flag?(:heap_verify) %}
+      # The verifier's weak check, which follows only a whole sweep, read
+      # here too: a cell naming a chunk the stopped sweep freed is its
+      # report.
+      IyiHeapVerify.weak_cells(IyiHeap.read64(record &+ IyiHeap::REC_ID))
+    {% end %}
+    freed = 0_i64
+    left = 0_i64
+    cells.each_with_index do |cell, k|
+      target = hide(targets[k])
+      home = IyiHeap.arena_of(target)
+      if home != 0_u64 && IyiHeap.read8(home &+ IyiHeap::META &+ IyiHeap.chunk_index(home, target) &* IyiHeap::META_ENTRY) & IyiHeap::FREE_FLAG != 0
+        freed = freed &+ 1_i64
+        left = left &+ 1_i64 if cell.value != 0_u64
+      end
+    end
+    return -4_i64 if freed == 0_i64
+    left
+  end
+
   def weak_check : Nil
     group do |g|
       handle = g.spawn(unit: :new) { weak_task }
@@ -985,6 +1071,12 @@
       fail("weak: no local collection ran in 100 tries") if value == -2_i64
       fail("weak: every dropped object's chunk straddled its run's end") if value == -3_i64
       fail("weak: #{value} of the dropped objects' weak cells were not cleared by their unit's collection") if value != 0_i64
+      stopped = g.spawn(unit: :new) { weak_stop_task }.value
+      fail("weak: the stopped sweep's unit answered #{stopped}") unless stopped.is_a?(Int64)
+      fail("weak: no local sweep stopped by the switch in 100 tries") if stopped == -2_i64
+      fail("weak: every dropped node's chunk straddled its run's end, before the stopped sweep") if stopped == -3_i64
+      fail("weak: the stopped sweep freed none of the dropped nodes") if stopped == -4_i64
+      fail("weak: #{stopped} weak cells name chunks a stopped local sweep freed") if stopped != 0_i64
     end
   end
 
@@ -1041,7 +1133,7 @@
 
   # ── takeover ──────────────────────────────────────────────────────────
 
-  def takeover_task(t : Int64, go : Channel(Int64)) : Int64
+  def takeover_task(t : Int64, go : Channel(Int64), ready : Channel(UInt64)) : Int64
     base = 8000000000_i64 &+ t &* 10000_i64
     keep = build(base, 300, 0)
     junk : Node? = nil
@@ -1051,6 +1143,7 @@
       i = i + 1
     end
     junk = nil
+    ready.send(IyiHeap.current_record)
     go.receive
     broken(keep, base, 300)
   end
@@ -1059,12 +1152,32 @@
     IyiHeap.park_collections_off = true
     IyiHeap.collect_every_park = false
     takeovers = IyiHeap.takeovers
+    stressed = {% if flag?(:heap_verify) %} IyiHeapVerify.stress != 0_u64 {% else %} false {% end %}
     units = workers
     go = Channel(Int64).new(units)
+    ready = Channel(UInt64).new(units)
     group do |g|
       handles = [] of IyiTask(Int64)
-      units.times { |t| handles << g.spawn(unit: :new) { takeover_task(t.to_i64, go) } }
+      units.times { |t| handles << g.spawn(unit: :new) { takeover_task(t.to_i64, go, ready) } }
+      records = [] of UInt64
+      units.times do
+        got = ready.receive
+        if got.is_a?(UInt64)
+          records << got
+        else
+          fail("takeover: a parked unit sent no record")
+        end
+      end
       sleep(50)
+      # Under `IYI_HEAP_STRESS` (bench/heap_verify.sh) each unit collects
+      # itself at every chaos point, the last on its way to the park, and
+      # owes nothing parked: no takeover came in 3 runs of 3 on Linux and
+      # on tssh (09d45a831), and bench/heap_local.sh's notakeover copy,
+      # which reads no parked stack, passed the verifier's table unseen.
+      # Each parked unit is handed the quarter of its budget a takeover
+      # asks, so one comes stressed too, and the verifier reads the parked
+      # stacks the takeover's mark should have.
+      records.each { |record| IyiHeap.write64(record &+ IyiHeap::REC_DEBT, IyiHeap.budget_of(record)) } if stressed
       IyiMark.collect
       # A worker woken after the collection, by a task of its own: once it
       # has run it, the worker is idle with the takeover armed.
@@ -1081,12 +1194,7 @@
         fail("takeover: #{value} nodes of a parked unit's list read wrong") if value != 0_i64
       end
     end
-    # Under `IYI_HEAP_STRESS` (bench/heap_verify.sh's sound part) each unit
-    # collects itself at every chaos point, so none owes the quarter of
-    # its budget a takeover asks: there the lists are the check (the
-    # count never moved in 3 runs of 3 on Linux and on tssh, 09d45a831).
-    stressed = {% if flag?(:heap_verify) %} IyiHeapVerify.stress != 0_u64 {% else %} false {% end %}
-    fail("takeover: no idle worker collected a parked unit after a global collection") if IyiHeap.takeovers == takeovers && !stressed
+    fail("takeover: no idle worker collected a parked unit after a global collection") if IyiHeap.takeovers == takeovers
     IyiHeap.park_collections_off = false
     IyiHeap.collect_every_park = true
   end
@@ -1100,7 +1208,12 @@
   # the takeover; idle workers are woken until one takes a unit or 300
   # tries pass. None may take this one. Its partition dies by the hook
   # `IyiScheduler.unregister` calls, as a `Unit`'s does once its handle
-  # is gone.
+  # is gone. The list's address is a plain word of the data segment too
+  # (`Holder.word`) from before the collection until the death: this
+  # stack is another unit's, read by no local mark and by no verifier,
+  # and the noconstruct copy was caught by the count below alone (tmac,
+  # hp-s4 6122d4d63 + 3ee055f6f); a unit taken here is collected under
+  # that word, which `-Dheap_verify`'s check before the sweep reads.
   def construct_check : Nil
     IyiHeap.park_collections_off = true
     IyiHeap.collect_every_park = false
@@ -1111,6 +1224,7 @@
     base = 9000000000_i64
     keep = IyiHeap.within(record) do
       built = build(base, 300, 0)
+      Holder.word = built ? built.object_id : 0_u64
       junk : Node? = nil
       i = 0
       while i < 6000
@@ -1139,6 +1253,7 @@
     fail("construct: an idle worker took a unit with no fiber and no value slot") if IyiHeap.takeovers != takeovers
     wrong = broken(keep, base, 300)
     fail("construct: an idle worker collected a unit whose value was being built, and #{wrong} nodes of it read wrong") if wrong != 0_i64
+    Holder.word = 0_u64
     IyiRuntimeLock.lock
     unit.heap = 0_u64
     IyiRuntimeLock.unlock

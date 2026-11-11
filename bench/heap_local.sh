@@ -9,8 +9,10 @@
 # without being pinned, a partition that answer detached still
 # collected locally, a death that frees a pinned unit's partition,
 # a local mark blind to the unit's other fibers, a local sweep that
-# leaves a weak cell naming the chunk it freed, a local mark that trusts
-# the parities a mark abandoned part way left, an idle takeover of a unit
+# leaves a weak cell naming the chunk it freed, a weak pass after the
+# sweep, which a stop between two classes skips, a local mark that trusts
+# the parities a mark abandoned part way left, an idle takeover that
+# reads no parked fiber's stack, an idle takeover of a unit
 # whose `Unit` value is still being built, a dead unit's pooled run
 # left carved for a stale word to pass the root test, a publication
 # walk that takes a chunk straddling the carve frontier for uncarved,
@@ -184,7 +186,16 @@ if [ "$PART" = all ] || [ "$PART" = broken ]; then
   # The local sweep frees a weak target and leaves its cell naming the
   # freed chunk.
   prove_fails "a weak cell left on a freed target" noweak "weak:" \
-    '/def self\.sweep_weak\(record : UInt64\) : Nil/ { inside = 1 } inside && /^            write64\(cell, 0_u64\)$/ { inside = 0; found = 1; next } { print } END { if (!found) exit 3 }' \
+    '/def self\.sweep_weak\(record : UInt64, id : UInt64, parity : UInt64\) : Nil/ { inside = 1 } inside && /^            write64\(cell, 0_u64\)$/ { inside = 0; found = 1; next } { print } END { if (!found) exit 3 }' \
+    heap_partition.iyi
+
+  # The weak pass after the sweep, as it was: a sweep stopped between
+  # two classes returns before it, and the cells to the chunks it freed
+  # name them still. (With the stop not asked, it clears what the sweep
+  # freed; an empty run the sweep pooled was taken by another worker's
+  # unit before it looked, which no single run shows.)
+  prove_fails "a weak pass after the local sweep" noweakfirst "weak:" \
+    '/^    sweep_weak\(record, id, parity\)$/ { found = found + 1; next } /^    stat_add\(pointerof\(@@local_freed\)\.address, freed\)$/ { print "    sweep_weak(record, id, parity)"; found = found + 1 } { print } END { if (found != 2) exit 3 }' \
     heap_partition.iyi
 
   # The mark bits an abandoned local mark left trusted by the next one:
@@ -192,6 +203,17 @@ if [ "$PART" = all ] || [ "$PART" = broken ]; then
   # and what it holds is freed.
   prove_fails "an abandoned mark's parities trusted" noclear "abandon:" \
     '{ if ($0 ~ /^    clear_local_marks\(record\) if read64\(record &\+ REC_MARKING\) != 0_u64$/) { found = 1; next } print } END { if (!found) exit 3 }' \
+    heap_partition.iyi
+
+  # An idle worker's takeover that reads none of the parked unit's
+  # stacks, as the unit's own collection reads all but the running one:
+  # a list held only by a parked fiber's frame is freed under it. A
+  # takeover comes in every run (`takeover:` fails when none does): under
+  # `IYI_HEAP_STRESS`, where each unit collects itself before it parks,
+  # the check hands the parked units their debt, so bench/heap_verify.sh's
+  # table sees the takeover too.
+  prove_fails "a takeover that reads no parked stack" notakeover "takeover:" \
+    '{ if (sub(/if !\(running\.is_a\?\(IyiFiber\) && running\.object_id == fiber\.object_id\) && fiber\.state/, "if running.is_a?(IyiFiber) \\&\\& running.object_id != fiber.object_id \\&\\& fiber.state")) found = 1; print } END { if (!found) exit 3 }' \
     heap_partition.iyi
 
   # An idle worker's takeover that takes a unit with no fiber and no

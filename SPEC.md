@@ -1052,7 +1052,7 @@ Checking it moved two things and left the shape alone.
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
 | Compiler | 24,984 lines, **written in Crystal** | 139,752 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 33,908-line own prelude + 127,023 in std |
+| Library | 8,161 lines (3,551 of it core) | 33,908-line own prelude + 127,051 in std |
 | Specs | 21,146 lines | 17,303 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
@@ -6452,9 +6452,10 @@ and work out every table they might read before its first line. std's
 decoded and worked-out tables are therefore not constants: each is kept by a
 first-call accessor (`std/lazy`'s `Lazy`, built in the shared heap and
 stored once, `@[UnsafeReach]`). `bench/std_lazy_tables_exercise.sh` counts
-the bytes a program importing those modules allocates before its first
-statement, and a server's (`bench/web_cores.iyi` without its requests), and
-fails on the compiler copy that counts a probe's reads
+the tables std/lazy has built before the first statement of a program
+importing those modules, and of a server (`bench/web_cores.iyi` without its
+requests), by identity (`LazyBuilds.count`, one atomic add per build), not by
+bytes: it must be 0. It fails on the compiler copy that counts a probe's reads
 (`IYI_SPAWN_BROKEN=probeused`, which builds the test's own 400 KB constant
 only an uncalled def reads), on a std/unicode that reads five tables as it
 starts, and on a std/curve25519 whose fixed-base table is a constant again.

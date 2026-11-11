@@ -16,16 +16,23 @@ Within a pull request the changed files narrow it further:
 
   - only docs (`*.md`, `doc/`, `editors/`): the docs gates, and the editor
     client's package when `editors/vscode/` changed;
-  - only `bench/` files, each named by some job: those jobs and the docs gates;
+  - only `bench/` files, each run by some job: those jobs and the docs gates;
   - anything under `.github/` or this script: everything, because a change to
     how CI runs is only proven by running it;
-  - otherwise: the fast tier, plus every job that names a changed bench file.
+  - otherwise: the fast tier, plus every job that runs a changed bench file.
+
+A job runs a bench file when one of its steps names it, or names a bench
+script that runs, sources or finds it by a glob - followed as far as it goes,
+so a job that runs `std_siblings.sh` runs every `std_*_exercise.sh` and what
+they source. Only code is read: a name in a comment ran nothing, and was
+once credited to whichever job the comment happened to sit in.
 
 A job is selected with the jobs it `needs`, so a selection never waits on a
 skipped job. The selection is printed, and written to `$GITHUB_OUTPUT` as a
 JSON list, `jobs=`, when that is set.
 """
 import argparse
+import fnmatch
 import json
 import os
 import re
@@ -35,6 +42,17 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 WORKFLOW = ROOT / ".github" / "workflows" / "iyi.yml"
+BENCH = ROOT / "bench"
+
+# A file a step or a script names: a basename, after `bench/` or `bench\`
+# where it has one. `*`, `${VAR}` and `$VAR` in it stand for any name, which
+# is how `std_siblings.sh` finds the module exercises and `module_test.sh`
+# names a module's test.
+FILE_NAME = re.compile(r"((?:bench[/\\])?)([A-Za-z0-9_*${}]+\.(?:sh|py|iyi|eiy|cr|c|go))\b")
+# What can run, build or read another file here: a script, and a program
+# that reads its own template or fixture. Their comments start with `#`.
+CALLER_SUFFIXES = (".sh", ".py", ".iyi")
+VARIABLE = re.compile(r"\$\{[^}]*\}|\$[A-Za-z_][A-Za-z0-9_]*")
 
 # The jobs a pull request runs whatever it touches. `docs` and `vscode` take
 # seconds; the rest are the Linux build and what it feeds that finishes within
@@ -116,11 +134,70 @@ def is_doc(path):
     return path.endswith(".md") or path.startswith(("doc/", "editors/"))
 
 
-def naming_jobs(jobs, path):
-    """The jobs whose steps name `path`, with either slash."""
-    spellings = {path, path.replace("/", "\\")}
-    return {name for name, job in jobs.items()
-            if name not in NOT_PLANNED and any(s in job["text"] for s in spellings)}
+def code(text):
+    """*text* without its whole-line comments, in YAML, shell and Python alike."""
+    return "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
+
+
+def named_files(text, names):
+    """The files of *names* that *text*'s code names, a glob or a variable in
+    a name standing for any. A name that is nothing but a wildcard counts only
+    after `bench/`: `"$WORK"/*.iyi` is a scratch directory, `bench\\*.iyi` is
+    every program here."""
+    found = set()
+    for prefix, written in FILE_NAME.findall(code(text)):
+        pattern = VARIABLE.sub("*", written)
+        if not pattern.rsplit(".", 1)[0].strip("*") and not prefix:
+            continue
+        found.update(fnmatch.filter(names, pattern))
+    return found
+
+
+def bench_texts(directory=BENCH):
+    """Each file directly under bench/, by name, with its text."""
+    return {path.name: path.read_text(encoding="utf-8", errors="ignore")
+            for path in directory.iterdir() if path.is_file()}
+
+
+class Reach:
+    """Who runs what: for each bench file the scripts whose code names it -
+    what runs it, sources it or finds it by a glob - and for each job the
+    bench files its steps name. Read once; a plan asks it once per file."""
+
+    def __init__(self, jobs, bench):
+        self.bench = bench
+        names = list(bench)
+        self.scripts = {name: code(text) for name, text in bench.items()
+                        if name.endswith(CALLER_SUFFIXES)}
+        self.called_by = {}
+        for name, text in self.scripts.items():
+            for callee in named_files(text, names) - {name}:
+                self.called_by.setdefault(callee, set()).add(name)
+        self.jobs = {name: code(job["text"]) for name, job in jobs.items() if name not in NOT_PLANNED}
+        self.job_files = {name: named_files(text, names) for name, text in self.jobs.items()}
+
+    def running_jobs(self, path):
+        """The jobs that run `bench/...` *path*: whose steps name it or a
+        script that reaches it, as far as the scripts go. A file in a
+        directory under bench/ - a fixture, an oracle's source - is reached by
+        the scripts whose code names that directory, and by a step that does."""
+        parts = path.split("/")
+        nested = None
+        if len(parts) == 2 and parts[1] in self.bench:
+            start = {parts[1]}
+        else:
+            directory = re.compile(rf"\b{re.escape(parts[1])}\b")
+            start = {name for name, text in self.scripts.items() if directory.search(text)}
+            nested = re.compile(rf"bench[/\\]{re.escape(parts[1])}\b")
+        reached = set(start)
+        pending = list(start)
+        while pending:
+            for caller in self.called_by.get(pending.pop(), ()):
+                if caller not in reached:
+                    reached.add(caller)
+                    pending.append(caller)
+        return {name for name, files in self.job_files.items()
+                if files & reached or (nested is not None and nested.search(self.jobs[name]))}
 
 
 def close_over_needs(jobs, selected):
@@ -133,7 +210,7 @@ def close_over_needs(jobs, selected):
     return selected
 
 
-def plan(jobs, event, ref, files):
+def plan(jobs, event, ref, files, bench):
     """The selected job ids and the reason, in one sentence."""
     every = {name for name in jobs if name not in NOT_PLANNED}
     if event == "push" and ref.startswith("refs/tags/editor-v"):
@@ -147,21 +224,22 @@ def plan(jobs, event, ref, files):
     if any(f.startswith(".github/") or f == "scripts/ci_plan.py" for f in files):
         return every, "the change is to CI itself"
 
-    code = [f for f in files if not is_doc(f)]
+    code_files = [f for f in files if not is_doc(f)]
     selected = {"docs"}
     if any(f.startswith("editors/vscode/") for f in files):
         selected.add("vscode")
-    if not code:
+    if not code_files:
         return close_over_needs(jobs, selected), "only docs changed"
 
-    bench = [f for f in code if f.startswith("bench/")]
-    named = {f: naming_jobs(jobs, f) for f in bench}
-    for found in named.values():
+    changed_bench = [f for f in code_files if f.startswith("bench/")]
+    reach = Reach(jobs, bench) if changed_bench else None
+    running = {f: reach.running_jobs(f) for f in changed_bench}
+    for found in running.values():
         selected |= found
-    if len(bench) == len(code) and all(named.values()):
-        return close_over_needs(jobs, selected), "only bench files changed, each named by a job"
+    if len(changed_bench) == len(code_files) and all(running.values()):
+        return close_over_needs(jobs, selected), "only bench files changed, each run by a job"
     selected |= set(FAST)
-    return close_over_needs(jobs, selected), "the fast tier, and the jobs that name a changed bench file"
+    return close_over_needs(jobs, selected), "the fast tier, and the jobs that run a changed bench file"
 
 
 def main():
@@ -188,7 +266,7 @@ def main():
         files = pull_request_files(os.environ["GITHUB_EVENT_PATH"], os.environ["GITHUB_TOKEN"],
                                    os.environ["GITHUB_REPOSITORY"])
 
-    selected, reason = plan(jobs, args.event, args.ref, files)
+    selected, reason = plan(jobs, args.event, args.ref, files, bench_texts())
     ordered = sorted(selected)
     print(f"{reason}: {len(ordered)} of {len(jobs) - len(NOT_PLANNED)} jobs")
     for name in ordered:

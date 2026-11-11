@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Every gate in `bench/` is reached by something.
+"""Every gate in `bench/` is run by something.
 
     python3 bench/gates_reachable.py
 
@@ -12,21 +12,24 @@ the fourth, in a narrower form: it ran on Linux and darwin and the sentence
 it asserts is Windows' own, so the one platform it was about was the one
 platform nothing checked it on.
 
-So this is that lesson, made a check. A script counts as reached when
+So this is that lesson, made a check, over every script and program directly
+under bench/ (`.sh`, `.py` and `.iyi`). A file counts as run when something
+that is itself run *runs* it, starting from the workflow's jobs and the
+Makefiles:
 
-  * a workflow step names it,
-  * another script under `bench/` runs or sources it — including
-    `bench/std_exercise.sh`'s discovery glob, which is how the sixty
-    `std_*_exercise.sh` siblings run,
-  * the `Makefile` or `Makefile.win` names it, or
-  * a script under `scripts/` or a spec names it.
+  * a line of code that runs a command names it - `bash`, `python3`, `"$PY"`,
+    `"$IYI" build`, `source` or `.`, pwsh's `&`, `subprocess` and
+    `sys.executable` in Python, or a shell function whose body does one of
+    those - at the command's place in the line, not inside a message;
+  * or it is bound to a variable or a loop - `for s in bench/std_*_exercise.sh`,
+    `TEST=".../std_${MODULE}_test.iyi"`, pwsh's `foreach` - that such a line
+    uses. `*`, `${VAR}` and `$VAR` in a name stand for any.
 
-Measured on this tree, the last two arms carry nothing: every reached
-script is named by a workflow step or by another bench script, so the
-`Makefile` and `scripts/` arms are there for a way of running a gate that
-nothing uses yet rather than for one it relies on. A mention in a target
-no job invokes would count as reached, which is the one way this check can
-be too generous — worth knowing where the generosity is.
+It counted a mention until this: a name in a comment, in a docstring, in a
+message or in a list of strings was a run. Thirteen measurement scripts were
+"reached" that way, through `measured_numbers.py`'s list of what it cannot
+re-measure and through each other's prose, and so was every tool below,
+through this file's own list of them. A program was not looked at at all.
 
 What is left is either a gate nobody runs — the thing to fix — or a *tool*,
 which is a different kind of file: it takes an argument and answers a
@@ -36,13 +39,14 @@ is neither run nor explained is what this exists to name.
 
 Exits non-zero if anything is unreached and unexplained.
 """
-import os
+import fnmatch
 import re
 import sys
+from pathlib import Path
 
-ROOT = os.path.dirname(os.path.abspath(os.path.dirname(__file__)))
-BENCH = os.path.join(ROOT, "bench")
-REFERENCE = re.compile(r"bench/([A-Za-z0-9_]+\.(?:sh|py))")
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "scripts"))
+import ci_plan  # noqa: E402  the planner's reading of names, globs and comments
 
 # A tool, not a gate: it takes a path and prints a measurement, so there is
 # nothing for a job to pass or fail. Each says where its answer is used,
@@ -64,77 +68,197 @@ TOOLS = {
     # WEIGHTS `bench/std_siblings.sh` deals its shards by; the logs are a
     # run's, downloaded, so there is nothing in a checkout to point it at.
     "sibling_times.py",
+    # `python3 bench/machine_probe.py` prints the machine a timing came from
+    # and three figures that tell a slower machine from slower code. The
+    # README and BENCHMARKS.md point a reader at it before they re-take a
+    # published number; on a CI runner it would describe the runner.
+    "machine_probe.py",
+    # The instruments: each measures seconds or megabytes with a release
+    # compiler, and most against Go or the compatibility binary beside it,
+    # which a shared runner can neither build nor time - the same binary
+    # read 0.048 s and 0.109 s minutes apart on one. SPEC.md and the README
+    # quote what they print, and `measured_numbers.py`, in the docs job,
+    # holds those quotes to the rows, columns and parameters the instrument
+    # still produces; it lists each, with what it needs, in UNCHECKABLE.
+    # Run by hand.
+    "alloc_scaling.py",
+    "artifact_speed.py",
+    "bind_speed.py",
+    "build_speed.py",
+    "daemon_full_build.py",
+    "edit_loop.py",
+    "gc_default.py",
+    "incremental.py",
+    "macro_cost.py",
+    "resident_probe.py",
+    "runtime.py",
+    "web_cores.py",
 }
 
+# A command's place in a line: its start, after `;`, `&&`, `|`, `$(`, a
+# backtick, `{`, `run:`, a shell keyword or `!`, past `VAR=value` and a
+# `timeout 60`-like prefix. A word anywhere else is prose.
+COMMAND = (r"(?:^|[;&|(`{]|\$\(|\brun:|\b(?:do|then|else|elif|if|while|until)\b)\s*(?:!\s*)?"
+           r"(?:[A-Za-z_]\w*=\S*\s+)*(?:(?:timeout|env|nice|command|exec|time)\s+(?:-\S+\s+)*(?:\d\S*\s+)?)*")
+SH_RUNNER = (COMMAND + r"(?:bash|sh|python3?|pwsh|powershell|node|go|wasmtime|source|\.|"
+             r"\"?\$\{?(?:PY|PYTHON|IYI|iyi|exe|python)\}?\"?|"
+             r"(?:\S*[/\\])?iyi(?:\.exe|\.bat)?|&\s*\S+)(?=\s)")
+PY_RUNNER = r"sys\.executable|subprocess|Popen|check_output|check_call|os\.system|runpy"
 
-def scripts():
-    return {f for f in os.listdir(BENCH) if f.endswith((".sh", ".py"))}
+SH_BIND = re.compile(r"^\s*(?:local\s+|export\s+|readonly\s+)?([A-Za-z_]\w*)=(.*)$")
+PY_BIND = re.compile(r"^\s*([A-Za-z_]\w*)\s*=(?!=)(.*)$")
+FOR = re.compile(r"^\s*for\s+([A-Za-z_]\w*)\s+in\s+(.*?)(?:;\s*do)?\s*$")
+FOREACH = re.compile(r"foreach\s*\(\s*\$(\w+)\s+in\s+(.*)\)", re.I)
+FUNCTION = re.compile(r"^\s*(?:function\s+)?([A-Za-z_][\w-]*)\s*\(\)\s*\{?\s*$|^\s*function\s+([A-Za-z_][\w-]*)")
 
 
-def text_of(path):
-    with open(path, errors="ignore") as handle:
-        return handle.read()
-
-
-def reached(every):
-    """Every script something names, and who names it."""
-    by = {}
-
-    def note(name, who):
-        if name in every:
-            by.setdefault(name, set()).add(who)
-
-    workflow = os.path.join(ROOT, ".github", "workflows")
-    for directory, _, files in os.walk(workflow):
-        for name in files:
-            path = os.path.join(directory, name)
-            for found in REFERENCE.findall(text_of(path)):
-                note(found, os.path.relpath(path, ROOT))
-
-    for name in sorted(every):
-        # This script names other scripts in order to explain them, and a
-        # mention is not a run: counting its own prose reported the tool
-        # below as reached and would report the next unrun gate the same
-        # way, as long as somebody had written its name down here.
-        if name == os.path.basename(__file__):
+def names_in(line, names):
+    """The files of *names* a line names, as the planner reads a name."""
+    found = set()
+    for prefix, written in ci_plan.FILE_NAME.findall(line):
+        pattern = ci_plan.VARIABLE.sub("*", written)
+        if not pattern.rsplit(".", 1)[0].strip("*") and not prefix:
             continue
-        body = text_of(os.path.join(BENCH, name))
-        for found in REFERENCE.findall(body):
-            if found != name:
-                note(found, f"bench/{name}")
-        # The discovery glob: `std_exercise.sh` runs every sibling it finds,
-        # which is how sixty module exercises reach CI without sixty steps.
-        if "std_*_exercise.sh" in body:
-            for sibling in every:
-                if sibling.startswith("std_") and sibling.endswith("_exercise.sh"):
-                    note(sibling, f"bench/{name} (discovered)")
+        found.update(fnmatch.filter(names, pattern))
+    return found
 
-    for extra in ("Makefile", "Makefile.win"):
-        path = os.path.join(ROOT, extra)
-        if os.path.isfile(path):
-            for found in REFERENCE.findall(text_of(path)):
-                note(found, extra)
 
-    for tree in ("scripts", "spec"):
-        base = os.path.join(ROOT, tree)
-        for directory, _, files in os.walk(base):
-            for name in files:
-                path = os.path.join(directory, name)
-                for found in REFERENCE.findall(text_of(path)):
-                    note(found, os.path.relpath(path, ROOT))
+# A quoted text with a space in it is a message, and a command named inside
+# one runs nothing: `echo "then bash bench/x.sh by hand"`. A quoted word -
+# `"$PY"`, `"$REPO/bench/x.sh"` - is still a word of the command, and so is
+# everything in a `$( )` inside quotes: `scan="$("$PY" bench/x.py)"` runs
+# x.py. The quotes are paired left to right, as the shell pairs them: a
+# pattern found `" "` between two quoted words and took it for a message.
+def commands(line):
+    """*line* with its messages blanked, for asking where a command is."""
+    out = []
+    held = []
+    stack = []  # the open quotes and command substitutions, innermost last
 
-    return by
+    def close_text(closing):
+        text = "".join(held)
+        held.clear()
+        out.append(("" if any(char.isspace() for char in text) else text) + closing)
+
+    at = 0
+    while at < len(line):
+        char = line[at]
+        inner = stack[-1] if stack else None
+        if inner == "'":
+            if char == "'":
+                close_text("'")
+                stack.pop()
+            else:
+                held.append(char)
+        elif inner == '"':
+            if char == "\\" and at + 1 < len(line):
+                held.append(line[at:at + 2])
+                at += 1
+            elif char == '"':
+                close_text('"')
+                stack.pop()
+            elif line.startswith("$(", at):
+                close_text("$(")
+                stack.append("(")
+                at += 1
+            else:
+                held.append(char)
+        elif char in "\"'":
+            out.append(char)
+            stack.append(char)
+        elif line.startswith("$(", at):
+            out.append("$(")
+            stack.append("(")
+            at += 1
+        elif char == ")" and inner == "(":
+            out.append(char)
+            stack.pop()
+        else:
+            out.append(char)
+        at += 1
+    if stack and stack[-1] in "\"'":
+        # Open at the end of the line: a quoted text that goes on to the next.
+        close_text("")
+    return "".join(out)
+
+
+def runs(text, names, python=False):
+    """The files of *names* that *text*'s code runs: named on a line that runs
+    a command, or bound to a variable or a loop that such a line uses."""
+    lines = ci_plan.code(text).splitlines()
+    runner = re.compile(PY_RUNNER if python else SH_RUNNER + "|" + PY_RUNNER, re.I)
+    if not python:
+        # A function whose body runs something runs it when it is called.
+        functions = set()
+        current = None
+        for line in lines:
+            defined = FUNCTION.match(line)
+            if defined:
+                current = defined.group(1) or defined.group(2)
+            elif current and runner.search(commands(line)):
+                functions.add(current)
+            if line.startswith("}"):
+                current = None
+        if functions:
+            called = COMMAND + "(?:" + "|".join(map(re.escape, sorted(functions))) + r")\b"
+            runner = re.compile(SH_RUNNER + "|" + PY_RUNNER + "|" + called, re.I)
+
+    ran = set()
+    bound = {}
+    for line in lines:
+        for binding in (FOR, FOREACH, PY_BIND if python else SH_BIND):
+            found = binding.search(line)
+            if found:
+                bound.setdefault(found.group(1), set()).update(names_in(found.group(2), names))
+        if runner.search(commands(line)):
+            ran |= names_in(line, names)
+    running = [line for line in lines if runner.search(commands(line))]
+    for variable, files in bound.items():
+        if not files:
+            continue
+        if python:
+            used = re.compile(rf"\b{re.escape(variable)}\b")
+        else:
+            used = re.compile(rf"\$\{{?{re.escape(variable)}\b", re.I)
+        if any(used.search(line) for line in running):
+            ran |= files
+    return ran
+
+
+def reached(bench):
+    """Every file under bench/ something runs, from the jobs and the
+    Makefiles down through the scripts they run."""
+    names = list(bench)
+    jobs = ci_plan.parse_jobs(ci_plan.WORKFLOW.read_text(encoding="utf-8"))
+    roots = set()
+    for name, job in jobs.items():
+        roots |= runs(job["text"], names)
+    for makefile in ("Makefile", "Makefile.win"):
+        path = ROOT / makefile
+        if path.is_file():
+            roots |= runs(path.read_text(encoding="utf-8", errors="ignore"), names)
+    edges = {name: runs(text, names, name.endswith(".py")) - {name}
+             for name, text in bench.items() if name.endswith(ci_plan.CALLER_SUFFIXES)}
+    found = set(roots)
+    pending = list(roots)
+    while pending:
+        for callee in edges.get(pending.pop(), ()):
+            if callee not in found:
+                found.add(callee)
+                pending.append(callee)
+    return found
 
 
 def main():
-    every = scripts()
-    by = reached(every)
-    unreached = sorted(every - set(by))
+    bench = ci_plan.bench_texts()
+    every = {name for name in bench if name.endswith((".sh", ".py", ".iyi"))}
+    run = reached(bench) & every
+    unreached = sorted(every - run)
     unexplained = [name for name in unreached if name not in TOOLS]
 
-    print(f"{len(every)} scripts under bench/, {len(by)} of them reached")
+    print(f"{len(every)} scripts and programs under bench/, {len(run)} of them run")
     for name in unreached:
-        why = "a tool, not a gate" if name in TOOLS else "REACHED BY NOTHING"
+        why = "a tool, not a gate" if name in TOOLS else "RUN BY NOTHING"
         print(f"  {name:34s} {why}")
 
     missing_tools = sorted(TOOLS - every)
@@ -144,7 +268,7 @@ def main():
         print("Remove it from the list, in the same commit as the file.")
         return 1
 
-    named_tools = sorted(TOOLS & set(by))
+    named_tools = sorted(TOOLS & run)
     if named_tools:
         print()
         print("TOOLS names a file something runs: " + ", ".join(named_tools))
@@ -158,13 +282,13 @@ def main():
         for name in unexplained:
             print(f"    bench/{name}")
         print()
-        print("Name it in a workflow job — the job whose platform the gate is")
+        print("Run it in a workflow job — the job whose platform the gate is")
         print("about — or, if it is a tool rather than a gate, add it to TOOLS")
         print("in this script with what its answer is for, in the same commit.")
         return 1
 
     print()
-    print("every gate under bench/ is reached by something that runs it.")
+    print("every gate under bench/ is run by something that runs it.")
     return 0
 
 

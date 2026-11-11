@@ -93,11 +93,10 @@ require "./atomic"
     {% raise "-Diyi_chaos is not available on wasm32-wasi: there is no scheduler here for it to drive (SPEC.md III.4.17)" %}
   {% end %}
 {% end %}
-
-# heap22's partition API (concurrency.iyi has the runtime's): a target with
-# no scheduler has one heap and one thread, so a bracket is the block, an
-# answer is its store, and there is nothing to lend or pin.
 {% if !((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
+  # heap22's partition API (concurrency.iyi has the runtime's): a target with
+  # no scheduler has one heap and one thread, so a bracket is the block, an
+  # answer is its store, and there is nothing to lend or pin.
   class IyiHeap
     def self.shared(&)
       yield

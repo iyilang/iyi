@@ -295,7 +295,8 @@ a program in this repository needs it.
 fibers over pthreads. Its allocator was Boehm's libgc, its float printing
 was libc's `printf`, its scheduler leaned on libevent, and none of those
 was in the count. iyi's prelude now carries all three itself - the
-collector (GC_DESIGN.md, the block between two marks in `prelude.iyi`),
+collector (GC_DESIGN.md, the block between two marks in `prelude.iyi`, and
+under `-Dheap_partitions` `heap_partition.iyi` and `heap_verify.iyi`),
 the scheduler and the kernel thread (III.4, `concurrency.iyi` and
 `thread.iyi`, with the chaos scheduler that drives the scheduler from a
 seed under `-Diyi_chaos`, `chaos.iyi` and `chaos_points.iyi`, III.4.17),

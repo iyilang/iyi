@@ -339,28 +339,13 @@
   # epoch hands back a seventeenth of its excess once it has settled -
   # under a quarter of it here, the excess every epoch without the
   # carry-over.
-  # Under partitions the shared heap's budget is floored at
-  # `IyiHeap::SHARED_MIN`, 8 MiB (heap22, design section 4.2), and twice
-  # it is more than an arena (`IyiHeap::MAP`): every epoch's churn filled
-  # one arena whole, the pause handed that arena back as a mapping
-  # (`IyiMark.scavenge`) and the next epoch mapped one afresh, so no page
-  # went back cold, none was carved again, and a copy without the
-  # carry-over passed. There an epoch asks the budget and
-  # `IyiMark::MIN_BUDGET` more - the excess the 4 MiB budget had flag off -
-  # which stays inside the class's fill arena, and the excess is that.
   request = 3000_u64
   excess_pages = IyiMark.budget.unsafe_div(IyiHeap::PAGE)
-  {% if flag?(:heap_partitions) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
-    excess_pages = IyiMark::MIN_BUDGET.unsafe_div(IyiHeap::PAGE)
-  {% end %}
   epoch = 0
   released_before = 0_u64
   while epoch < 16
     released_before = IyiHeap.pages_released if epoch == 8
     asked = (IyiMark.budget * 2_u64).unsafe_div(request)
-    {% if flag?(:heap_partitions) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
-      asked = (IyiMark.budget + IyiMark::MIN_BUDGET).unsafe_div(request)
-    {% end %}
     index = 0_u64
     while index < asked
       fresh(request)
@@ -370,13 +355,8 @@
     epoch = epoch + 1
   end
   released = IyiHeap.pages_released - released_before
-  {% if flag?(:heap_partitions) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
-    raise "refault: #{count(released)} pages handed back in eight steady epochs of #{count(request)}-byte requests asking the budget and #{count(IyiMark::MIN_BUDGET)} bytes more, where the excess is #{count(excess_pages)} pages an epoch" if released * 4_u64 > excess_pages * 8_u64
-    puts "    refault: eight epochs asking the budget and #{count(IyiMark::MIN_BUDGET)} bytes more handed back under a quarter of their excess"
-  {% else %}
-    raise "refault: #{count(released)} pages handed back in eight steady epochs of #{count(request)}-byte requests asking twice the budget, where the excess is #{count(excess_pages)} pages an epoch" if released * 4_u64 > excess_pages * 8_u64
-    puts "    refault: eight epochs asking twice the budget handed back under a quarter of their excess"
-  {% end %}
+  raise "refault: #{count(released)} pages handed back in eight steady epochs of #{count(request)}-byte requests asking twice the budget, where the excess is #{count(excess_pages)} pages an epoch" if released * 4_u64 > excess_pages * 8_u64
+  puts "    refault: eight epochs asking twice the budget handed back under a quarter of their excess"
 
   # 6c. A class the program stops allocating in keeps none of its pages
   # warm: the warm room is for the classes the next epoch will ask, and

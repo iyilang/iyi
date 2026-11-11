@@ -54,6 +54,17 @@ unit's death then freed; `-Dheap_verify` reported it after
 reads the value through the handle when it runs; the exercise's `outlive`
 step and its `keptproc`/`keptbody` copies hold it.
 
+Under `-Dheap_partitions` a program that never makes a pool unit keeps the
+shared heap's budget of the build without the flag (a thread's floor per
+allocating thread) until its first partition: the shared floor alone had
+halved churn's collections and raised its peak resident set from 6.6 to
+10.8 MB (tmac). A unit that reaches its budget in flight doubles it at
+each such collection, up to 4 MiB within its share of the partitions'
+headroom, and a collection at a park or by an idle worker sets it from
+what was kept again: at twice what was kept alone, alloc_scaling's lone
+unit collected every MiB, 317 local collections where the shared heap
+runs 57, 1.17 of 0.21.0's wall time on one worker (tmac).
+
 heap22's verifier: the false-word injector no longer writes under a pool
 worker's parking fiber or below a Windows fiber's committed stack; reports
 name String and untyped-holder allocation sites and data-segment holders

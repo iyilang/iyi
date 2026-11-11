@@ -135,13 +135,22 @@ class IyiHeap
   # A class's runs double from the smallest that holds a chunk to this.
   RUN_MAX = 65536_u64
 
-  # The budget (design section 4.1): `B_u` is twice what the partition's
-  # last local collection kept, at least `UNIT_MIN`, at most its share of
-  # the headroom `H = max(HEADROOM_MIN, 2 x every partition's live)`; the
+  # The budget (design section 4.1, tuned in S6): `B_u` is twice what the
+  # partition's last local collection kept, at least `UNIT_MIN`, at most
+  # its share of the headroom `H = max(HEADROOM_MIN, 2 x every partition's
+  # live)`. A collection the budget brought on in flight - the unit keeps
+  # allocating, not a request between two parks - doubles the budget
+  # (within the share) up to `UNIT_BUSY_MAX`, a thread's floor in the
+  # shared heap (`IyiMark::MIN_BUDGET`); one at a park or by an idle
+  # worker sets it from what was kept again. At 2 x kept alone a lone
+  # busy unit collected every MiB: alloc_scaling on one worker ran 317
+  # local collections where the shared heap runs 57, 1.17-1.49 of 0.21.0's
+  # wall time (tmac, tssh); grown, 60 and 0.84 on tmac (S6, Tune6). The
   # shared heap's own floor no longer multiplies by threads.
-  UNIT_MIN     =   262144_u64
-  HEADROOM_MIN = 16777216_u64
-  SHARED_MIN   =  8388608_u64
+  UNIT_MIN      =   262144_u64
+  UNIT_BUSY_MAX =  4194304_u64
+  HEADROOM_MIN  = 16777216_u64
+  SHARED_MIN    =  8388608_u64
 
   # What a freed chunk reads as in a `-Dheap_verify` build.
   POISON = 0xDEADDEADDEADDEAD_u64
@@ -2238,7 +2247,7 @@ class IyiHeap
       unlock
     end
     IyiStat.add(IyiStat::LOCAL_FREED, freed)
-    account_live(record, kept_bytes)
+    account_live(record, kept_bytes, !idle)
     write64(record &+ REC_DEBT, 0_u64)
     write64(record &+ REC_COLLECTIONS, read64(record &+ REC_COLLECTIONS) + 1_u64)
     return false unless whole
@@ -2360,8 +2369,10 @@ class IyiHeap
   end
 
   # The bytes partition *record* kept, into the sum every partition's
-  # headroom is set by, and its budget from both.
-  def self.account_live(record : UInt64, kept : UInt64) : Nil
+  # headroom is set by, and its budget from both: *busy* when the
+  # collection came from the budget reached in flight, not at a park or
+  # by an idle worker.
+  def self.account_live(record : UInt64, kept : UInt64, busy : Bool) : Nil
     before = read64(record &+ REC_LIVE_BYTES)
     write64(record &+ REC_LIVE_BYTES, kept)
     total = Pointer(Atomic(UInt64)).new(pointerof(@@partition_live).address)
@@ -2370,10 +2381,10 @@ class IyiHeap
     else
       total.value.sub(before - kept)
     end
-    write64(record &+ REC_BUDGET, budget_for(kept))
+    write64(record &+ REC_BUDGET, budget_for(kept, budget_of(record), busy))
   end
 
-  def self.budget_for(kept : UInt64) : UInt64
+  def self.budget_for(kept : UInt64, previous : UInt64, busy : Bool) : UInt64
     live = @@partition_live
     headroom = live * 2_u64
     headroom = HEADROOM_MIN if headroom < HEADROOM_MIN
@@ -2381,6 +2392,11 @@ class IyiHeap
     active = 1_u64 if active == 0
     share = headroom.unsafe_div(active)
     want = kept * 2_u64
+    if busy
+      grown = previous * 2_u64
+      grown = UNIT_BUSY_MAX if grown > UNIT_BUSY_MAX
+      want = grown if want < grown
+    end
     want = share if want > share
     want < UNIT_MIN ? UNIT_MIN : want
   end

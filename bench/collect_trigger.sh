@@ -9,8 +9,9 @@
 # while a triggered collection pays its debt, threads allocating past the
 # collection's ceiling, and a descriptor every thread keeps.
 # Under `-Dheap_partitions` the budget and floor copies change the
-# partition branch of the budget, and working_set's bound gets a copy
-# with the partitions' own collection off instead of the ceiling's.
+# partition branch of the budget, two more take that branch from the
+# start and never, and working_set's bound gets a copy with the
+# partitions' own collection off instead of the ceiling's.
 #
 #   bash bench/collect_trigger.sh
 #
@@ -48,8 +49,9 @@ trap 'rm -rf "$WORK"' EXIT
 status=0
 
 # Built with `-Dheap_partitions` (the compiler reads `IYI_OPTS`) the shared
-# heap's budget is `IyiMark.next_budget`'s partition branch: twice what
-# survived outside the partitions, floored at `IyiHeap::SHARED_MIN`
+# heap's budget is `IyiMark.next_budget`'s partition branch once the
+# program has made a partition (the exercise's step 1c makes one): twice
+# what survived outside the partitions, floored at `IyiHeap::SHARED_MIN`
 # whatever the threads (heap22, design section 4.2). The copies that
 # change the budget or its floor change that branch then.
 PARTITIONS=0
@@ -97,6 +99,10 @@ for phrase in quiet trigger bounded_or_budget fiber scavenge pauses threads floo
   esac
 done
 [ "$status" -eq 0 ] && echo "  quiet, trigger, budget, fiber, scavenge, pauses, threads and floor all reported"
+if [ "$PARTITIONS" -eq 1 ] && ! grep -q "partitions:" "$WORK/trigger.out"; then
+  echo "  MISSING: partitions"
+  status=1
+fi
 
 echo
 echo "== a triggered collection's debt, swept by the threads past the budget"
@@ -313,12 +319,23 @@ if [ "$PARTITIONS" -eq 1 ]; then
   # The old floor back, SHARED_MIN for every thread that filled a slice:
   # four threads churning leave four floors.
   prove_fails "floor counts the threads" threadfloor "floor:" \
-    "{ if (sub(/^          allocating_threads\$/, \"          threads = allocating_threads\")) found++; if (sub(/$SHARED_RETURN/, \"return grown_shared < IyiHeap::SHARED_MIN * threads ? IyiHeap::SHARED_MIN * threads : grown_shared\")) found++; print } END { if (found != 2) exit 3 }"
+    "{ if (sub(/^ +allocating_threads\$/, \"          threads = allocating_threads\")) found++; if (sub(/$SHARED_RETURN/, \"return grown_shared < IyiHeap::SHARED_MIN * threads ? IyiHeap::SHARED_MIN * threads : grown_shared\")) found++; print } END { if (found != 2) exit 3 }"
 
   # The floor counting every registered thread, idle or not: the four
   # threads stop allocating, and the next budget is still five floors.
   prove_fails "floor counts idle threads" idlefloor "floor:" \
     "{ if (sub(/$SHARED_RETURN/, \"return grown_shared < IyiHeap::SHARED_MIN * IyiThread.program_threads ? IyiHeap::SHARED_MIN * IyiThread.program_threads : grown_shared\")) found = 1; print } END { if (!found) exit 3 }"
+
+  # The shared heap's rule from the program's start: a program with no
+  # partition yet has its budget floored at `SHARED_MIN` rather than a
+  # thread's, and step 1c names the collection that left it.
+  prove_fails "the shared rule before any partition" sharedfirst "partitions:" \
+    '{ if (sub(/if IyiHeap\.partitions_made\?$/, "if true")) found = 1; print } END { if (!found) exit 3 }'
+
+  # The rule without partitions for good: the shared heap's floor counts
+  # the threads again once the pool units run, and the floor step names it.
+  prove_fails "the shared rule never taken" sharednever "floor:" \
+    '{ if (sub(/if IyiHeap\.partitions_made\?$/, "if false")) found = 1; print } END { if (!found) exit 3 }'
 else
   # The floor back at MIN_BUDGET whatever the threads: four threads
   # registered, and the budget a collection leaves is a single thread's.

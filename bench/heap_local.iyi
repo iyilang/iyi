@@ -35,7 +35,8 @@
 #   address on its stack leaves that object's `OWN` byte as it was.
 # - `return:` with local collections off, a unit's garbage is freed by
 #   global collections alone and comes back to it: the runs it holds stay
-#   bounded and the return stacks hand chunks back.
+#   bounded and the return stacks hand chunks back. One local collection
+#   ends the unit's task, so that `-Dheap_verify` reads its free lists.
 # - `weak:` weak cells to a hundred kept and a hundred dropped objects of
 #   a unit, one collection: every kept cell still names its object and
 #   every dropped one reads 0.
@@ -639,8 +640,16 @@
       round = round + 1
     end
     wrong = broken(keep, 6000000000_i64, 500)
+    held = IyiHeap.partition_held(record).to_i64 - (first * 2_u64).to_i64
+    # One local collection after the global sweeps, so that under
+    # `-Dheap_verify` the verifier's free-list pass reads what they handed
+    # back: a chunk they freed and gave nobody is lost to the partition,
+    # which no death check sees (the death frees the runs whole).
+    IyiHeap.local_collections_off = false
+    scrub_stack
+    collect_now
     return -wrong if wrong != 0
-    IyiHeap.partition_held(record).to_i64 - (first * 2_u64).to_i64
+    held
   end
 
   def return_check : Nil

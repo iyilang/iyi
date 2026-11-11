@@ -127,13 +127,25 @@ def field_name(entry, offset):
     return text if inner == 0 else f"{text} (+{inner})"
 
 
+# A C1 crossing context's type id: IYI_C1_FIRST_ID plus the order the
+# build made it in (the compiler's gc_closure_layout). The dump has no
+# entry for it; its slots are named by offset.
+C1_FIRST_ID = 0x40000000
+
+
+def c1_context(type_id):
+    if type_id < C1_FIRST_ID:
+        return None
+    return {"name": f"C1 context #{type_id - C1_FIRST_ID}", "instance_vars": [], "c1": True}
+
+
 def annotate(lines, types, symbols, out):
     last_entry = None
     for raw in lines:
         line = raw.rstrip("\n")
         match = TYPE_RE.search(line)
         if match and ("holder" in line or "held by" in line or "chunk" in line):
-            entry = types.get(int(match.group(1)))
+            entry = types.get(int(match.group(1))) or c1_context(int(match.group(1)))
             if entry is not None:
                 line = line.replace(match.group(0), f"{match.group(0)} {entry['name']}")
             last_entry = entry if ("holder" in line or "held by" in line) else last_entry
@@ -141,7 +153,10 @@ def annotate(lines, types, symbols, out):
             last_entry = None
         match = FIELD_RE.match(line)
         if match and last_entry is not None:
-            name = field_name(last_entry, int(match.group(2)))
+            if last_entry.get("c1"):
+                name = f"+{match.group(2)}"
+            else:
+                name = field_name(last_entry, int(match.group(2)))
             if name:
                 line = f"{line}  [{last_entry['name']}#{name}]"
         match = SITE_RE.search(line)

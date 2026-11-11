@@ -25,7 +25,10 @@
 # LIMIT seconds), `fail` (anything else). `summary` counts them.
 #
 # OUT defaults to $TMPDIR/heap_verify_matrix; IYI names the compiler;
-# LIMIT the seconds a run may take (default 600).
+# LIMIT the seconds a run may take (default 600); `STRESS=0` runs without
+# the stress (a control: a slow run from a hung one). The reach program
+# runs print-only (`HEAP22_PRINT_ONLY=1`): every claim is checked in each
+# run, and a failed run's detail names every claim whose check failed.
 
 set -u
 
@@ -92,7 +95,8 @@ run_one() {
   workers=$((seed % 2 == 1 ? 1 : 4))
   tag="s${seed}w${words}"
   ok="$(success_of "$name")"
-  local -a env_words=(IYI_CHAOS="$seed" IYI_HEAP_STRESS=1)
+  local -a env_words=(IYI_CHAOS="$seed" IYI_HEAP_STRESS="${STRESS:-1}")
+  [ "$name" = reach ] && env_words+=(HEAP22_PRINT_ONLY=1)
   [ "$words" = 1 ] && env_words+=(IYI_HEAP_FALSE_WORDS=1)
   case "$name" in
     web)
@@ -137,6 +141,7 @@ run_one() {
   else
     verdict=fail
     detail="$( (grep -m1 'FAIL\|panic\|error' "$dir/$tag.out" "$dir/$tag.err" || tail -1 "$dir/$tag.err") | head -1 | cut -c1-160)"
+    [ "$name" = reach ] && detail="claims failing: $(sed -n 's/^FAIL: \([a-z_]*\):.*/\1/p' "$dir/$tag.out" | sort -u | tr '\n' ' ')| $detail"
   fi
   echo "$seed $words $workers $code $verdict $detail" >>"$dir/results"
   # Passing runs leave nothing behind.

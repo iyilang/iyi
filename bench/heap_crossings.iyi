@@ -776,21 +776,35 @@
     shared_made(unit.object_id, what) if unit.is_a?(IyiUnit)
   end
 
+  # The task spawned and checked in a frame of its own, which keeps no
+  # reference to it: the answer comes back by channel. The spawner's
+  # collection that follows, while the task is parked, then marks nothing
+  # of the glue, so glue made in the spawner's partition is held only by
+  # what the scheduler and the group keep - the verifier's holders - and
+  # is caught there, while the task still runs, not only at a death
+  # (where the reaped fiber is no holder).
+  @[NoInline]
+  def spawn_glued(g : IyiGroup, go : Channel(Int32), back : Channel(String)) : Nil
+    task = g.spawn(unit: :new) do
+      go.receive
+      back.send(label_for(24, 1))
+      0
+    end
+    shared_made(task.object_id, "glue: the task")
+    unit_shared(task.fiber, "glue: the unit")
+  end
+
   def glue_check : Nil
     go = Channel(Int32).new(1)
+    back = Channel(String).new(1)
     before = partitions_now
     group do |outer|
       outer.spawn(unit: :new) do
         group do |g|
-          task = g.spawn(unit: :new) do
-            go.receive
-            label_for(24, 1)
-          end
-          shared_made(task.object_id, "glue: the task")
-          unit_shared(task.fiber, "glue: the unit")
+          spawn_glued(g, go, back)
           collect_here
           go.send(1)
-          got = task.value
+          got = back.receive
           fail("glue: the answer reads wrong") unless got == label_for(24, 1)
         end
         0

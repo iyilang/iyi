@@ -1,0 +1,339 @@
+# heap22's trusted reach claims, stressed: every state the runtime and std
+# keep behind `@[UnsafeReach]` (trusted, unchecked by the reach rule) first
+# made, grown or replaced from inside `unit: :new` units, several at once,
+# each of which then collects its own partition. A claim holds when what
+# the state names lives in the shared heap (owner 0) or is published: the
+# checks below read `IyiHeap.owner_of`/`local?` where the state is in
+# reach, and `-Dheap_verify`'s verifier, at every one of those local
+# collections, reads the data segment (constants, class variables), the
+# collecting thread's TLS block and every heap chunk for a word into the
+# partition's unmarked `LOCAL` chunks.
+#
+#   ./bin/iyi build -Dheap_partitions -Dheap_verify -Diyi_chaos bench/heap_verify_reach.iyi
+#   IYI_CHAOS=1 IYI_HEAP_STRESS=1 ./heap_verify_reach          # every check, in this process
+#   ./heap_verify_reach stdio weak                               # these
+#   HEAP22_PRINT_ONLY=1 ./heap_verify_reach                      # every check, past a failure
+#
+# `HEAP22_PRINT_ONLY=1`: a failed check prints its `FAIL:` line and the
+# program goes on to the next, so one run shows every claim that does not
+# hold (and a verifier report still ends it, exit 86); the program exits
+# 1 at the end if any check failed.
+#
+# The states (HRule2's list of the claims left after the std caches moved
+# to `@[SafeReach]`):
+#   stdio      STDIN/STDOUT/STDERR's buffers (io.iyi), first written from units
+#   weak       IyiWeak's cell table (prelude), grown from units
+#   env        IyiEnvironTable's held table (prelude), set from units (not win32)
+#   threads    IyiThread's started list (thread.iyi), started from units
+#   tls_roots  TlsConfig's system roots (std/tls), first read from units at once
+#   http_tls   HTTP's TLS configuration (std/http): the default first read
+#              from a unit, then replaced from a unit that dies, then read
+#   random     Random's shared generator (`@[ThreadLocal]`), first drawn in units
+#   lazy       a constant and a class variable of Share type, first read in units
+#   panic      std/debug's IyiPanic procs, used by panics in units
+# The scheduler's own claimed lists (states, registry, parking lot, queues,
+# workers) are exercised by every check: units park, wake and migrate.
+
+@[Unsafe("the checks wipe their stack with raw words and read heap22's owner tables, to see what a trusted claim left in a partition")]
+{% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
+  import std/list::{List}
+  import std/env::{ENV}
+  import std/tls::{TlsConfig}
+  import std/x509::{Certificate}
+  import std/http::{HTTP}
+  import std/random::{Random}
+  import std/weak_ref::{WeakRef}
+  import std/debug
+
+  class Checks
+    @@print_only = false
+    @@failed = false
+
+    def self.print_only : Bool
+      @@print_only
+    end
+
+    def self.failed? : Bool
+      @@failed
+    end
+
+    # Only ever set, from any unit: a race between two stores of true
+    # loses nothing.
+    def self.note_failure : Nil
+      @@failed = true
+    end
+
+    def self.read_env : Nil
+      @@print_only = Program.env("HEAP22_PRINT_ONLY") == "1"
+    end
+  end
+
+  def fail(message : String) : Nil
+    print "FAIL: #{message}\n"
+    Checks.note_failure
+    __iyi_exit(1) unless Checks.print_only
+  end
+
+  UNITS = 6
+
+  # The stack below the caller zeroed, so that no dead frame's word is a
+  # root of the collection that follows.
+  @[NoInline]
+  def scrub : UInt64
+    room = uninitialized StaticArray(UInt64, 2048)
+    words = pointerof(room).as(Pointer(UInt64))
+    index = 0
+    while index < 2048
+      words[index] = 0_u64
+      index = index + 1
+    end
+    words[2047]
+  end
+
+  # The running unit's partition collected, until one collection has run.
+  @[NoInline]
+  def collect_here : Nil
+    scrub
+    {% if flag?(:heap_partitions) %}
+      record = IyiScheduler.current.alloc
+      return if record == 0_u64
+      before = IyiHeap.partition_collections(record)
+      tries = 0
+      while IyiHeap.partition_collections(record) == before && tries < 1000
+        IyiHeap.collect_local(record)
+        tries = tries + 1
+        sleep(1) if IyiHeap.partition_collections(record) == before
+      end
+      fail("a local collection did not run in 1000 tries") if IyiHeap.partition_collections(record) == before
+    {% end %}
+  end
+
+  # *address* in the shared heap: no partition owns its chunk.
+  def shared_made(address : UInt64, what : String) : Nil
+    {% if flag?(:heap_partitions) %}
+      owner = IyiHeap.owner_of(address)
+      fail("#{what}: in partition #{owner}, not the shared heap") if address != 0_u64 && owner != 0_u64
+    {% end %}
+  end
+
+  # *address* not `LOCAL` to a partition: shared, or published.
+  def not_local(address : UInt64, what : String) : Nil
+    {% if flag?(:heap_partitions) %}
+      fail("#{what}: still local to partition #{IyiHeap.owner_of(address)}") if IyiHeap.local?(address)
+    {% end %}
+  end
+
+  # UNITS units at once, each running the block's body (its argument the
+  # unit's index) and then collecting. A macro: a closure handed to the
+  # units would cross as a non-Share capture.
+  macro in_units(&block)
+    group do |g|
+      UNITS.times do |\{{block.args[0]}}|
+        g.spawn(unit: :new) do
+          \{{block.body}}
+          collect_here
+          0
+        end
+      end
+    end
+  end
+
+  # ── stdio ──────────────────────────────────────────────────────────────
+  def stdio_check : Nil
+    # Through the accessors: the constants themselves are not Share, and
+    # a unit naming one is refused before the claims (S3 head 1) land.
+    in_units do |i|
+      stdout.print "reach: unit #{i} writes\n"
+      stderr.print ""
+      stdin.object_id
+      nil
+    end
+    shared_made(STDOUT.object_id, "stdio: STDOUT")
+    shared_made(STDOUT.@write_buffer.address, "stdio: STDOUT's write buffer")
+    shared_made(STDERR.object_id, "stdio: STDERR")
+    shared_made(STDERR.@write_buffer.address, "stdio: STDERR's write buffer")
+    shared_made(STDIN.object_id, "stdio: STDIN")
+    shared_made(STDIN.@read_buffer.address, "stdio: STDIN's read buffer")
+  end
+
+  # ── weak ───────────────────────────────────────────────────────────────
+  class Target
+    getter n : Int32
+
+    def initialize(@n : Int32)
+    end
+  end
+
+  def weak_check : Nil
+    in_units do |i|
+      kept = [] of Target
+      refs = [] of WeakRef(Target)
+      300.times do |k|
+        t = Target.new(i * 1000 + k)
+        kept << t if k % 2 == 0
+        refs << WeakRef.new(t)
+      end
+      collect_here
+      refs.each_with_index do |r, k|
+        v = r.value
+        fail("weak: a kept target's reference reads #{v.n if v}") if k % 2 == 0 && !(v.is_a?(Target) && v.n == i * 1000 + k)
+      end
+      nil
+    end
+  end
+
+  # ── env ────────────────────────────────────────────────────────────────
+  def env_check : Nil
+    {% if !flag?(:win32) %}
+      in_units do |i|
+        ENV["HEAP22_REACH_#{i}"] = "value-#{i}-" + "x" * (i + 3)
+        nil
+      end
+      UNITS.times do |i|
+        got = ENV["HEAP22_REACH_#{i}"]?
+        fail("env: HEAP22_REACH_#{i} reads #{got}") unless got == "value-#{i}-" + "x" * (i + 3)
+      end
+      table = __iyi_environ
+      shared_made(table.address, "env: the table")
+    {% end %}
+  end
+
+  # ── threads ────────────────────────────────────────────────────────────
+  def threads_check : Nil
+    in_units do |i|
+      go = Channel(Int32).new(1)
+      back = Channel(Int32).new(1)
+      label = "thread-#{i}"
+      thread = IyiThread.start do
+        go.receive
+        back.send(label == "thread-#{i}" ? 1 : 0)
+        nil
+      end
+      collect_here
+      go.send(1)
+      fail("threads: thread #{i} read its capture wrong") unless back.receive == 1
+      thread.join
+      nil
+    end
+  end
+
+  # ── tls_roots ──────────────────────────────────────────────────────────
+  def tls_roots_check : Nil
+    in_units do |i|
+      roots = TlsConfig.new.trusted_roots
+      collect_here
+      if roots.is_a?(Array(Certificate))
+        roots.each do |cert|
+          shared_made(cert.object_id, "tls_roots: a root certificate")
+          shared_made(cert.raw.object_id, "tls_roots: a root's raw bytes")
+          shared_made(cert.subject_name.object_id, "tls_roots: a root's subject name")
+        end
+      end
+      nil
+    end
+  end
+
+  # ── http_tls ───────────────────────────────────────────────────────────
+  def http_tls_check : Nil
+    group do |g|
+      g.spawn(unit: :new) do
+        HTTP.tls_config.trusted_roots
+        collect_here
+        0
+      end.value
+    end
+    not_local(HTTP.tls_config.object_id, "http_tls: the default configuration")
+    group do |g|
+      g.spawn(unit: :new) do
+        config = TlsConfig.new
+        config.alpn = ["h2", "http/1.1"]
+        HTTP.tls_config = config
+        collect_here
+        0
+      end.value
+    end
+    in_units do |i|
+      config = HTTP.tls_config
+      fail("http_tls: the configuration a dead unit set reads wrong") unless config.alpn == ["h2", "http/1.1"]
+      nil
+    end
+    not_local(HTTP.tls_config.object_id, "http_tls: the configuration a dead unit set")
+  end
+
+  # ── random ─────────────────────────────────────────────────────────────
+  def random_check : Nil
+    in_units do |i|
+      sum = 0
+      100.times { sum = sum + Random.rand(10) }
+      fail("random: 100 draws below 10 summed to #{sum}") unless sum >= 0 && sum < 1000
+      nil
+    end
+  end
+
+  # ── lazy ───────────────────────────────────────────────────────────────
+  NAMES = List.new(Array(String).new(48) { |k| "name-#{k}-" + "y" * (k % 5 + 2) })
+
+  class Lazy
+    @@words : List(String) = List.new(Array(String).new(32) { |k| "word-#{k}" })
+
+    def self.words : List(String)
+      @@words
+    end
+  end
+
+  def lazy_check : Nil
+    in_units do |i|
+      fail("lazy: NAMES reads wrong") unless NAMES.size == 48 && NAMES[47] == "name-47-" + "y" * 4
+      fail("lazy: Lazy.words reads wrong") unless Lazy.words.size == 32 && Lazy.words[31] == "word-31"
+      nil
+    end
+    shared_made(NAMES.@items.object_id, "lazy: the constant's array")
+    48.times { |k| shared_made(NAMES[k].object_id, "lazy: the constant's string #{k}") }
+    shared_made(Lazy.words.@items.object_id, "lazy: the class variable's array")
+    32.times { |k| shared_made(Lazy.words[k].object_id, "lazy: the class variable's string #{k}") }
+  end
+
+  # ── panic ──────────────────────────────────────────────────────────────
+  def panic_check : Nil
+    group do |g|
+      tasks = (0...UNITS).map do |i|
+        g.spawn(unit: :new) do
+          collect_here
+          raise "reach: unit #{i} panics here on purpose"
+          0
+        end
+      end
+      tasks.each_with_index do |t, i|
+        got = t.value
+        fail("panic: unit #{i} answered no panic") unless got.is_a?(Panicked)
+      end
+    end
+  end
+
+  CHECKS = ["stdio", "weak", "env", "threads", "tls_roots", "http_tls", "random", "lazy", "panic"]
+
+  def run(name : String) : Nil
+    case name
+    when "stdio"     then stdio_check
+    when "weak"      then weak_check
+    when "env"       then env_check
+    when "threads"   then threads_check
+    when "tls_roots" then tls_roots_check
+    when "http_tls"  then http_tls_check
+    when "random"    then random_check
+    when "lazy"      then lazy_check
+    when "panic"     then panic_check
+    else                  fail("no check named #{name}")
+    end
+  end
+
+  Checks.read_env
+  IyiWorkers.count = 4
+  arguments = Program.args
+  names = arguments.empty? ? CHECKS : arguments
+  names.each { |name| run(name) }
+  __iyi_exit(1) if Checks.failed?
+  puts "heap_verify_reach: #{names.size} trusted claims hold"
+{% else %}
+  puts "heap_verify_reach: no pool on this target, nothing to check"
+{% end %}

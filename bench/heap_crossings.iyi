@@ -34,10 +34,27 @@
   import std/reference_storage::{ReferenceStorage}
   import std/env::{ENV}
   import std/tls::{TlsIdentity}
+  import std/socket::{IyiSocket}
+
+  # `HEAP22_PRINT_ONLY=1`: a failed check prints its `FAIL:` line and the
+  # program goes on, so that bench/heap_verify.sh can show a broken copy
+  # caught by `-Dheap_verify`'s verifier alone (the run then exits 86 at
+  # the verifier's report, or 0 when nothing but the program saw it).
+  class Checks
+    @@print_only = false
+
+    def self.print_only : Bool
+      @@print_only
+    end
+
+    def self.read_env : Nil
+      @@print_only = Program.env("HEAP22_PRINT_ONLY") == "1"
+    end
+  end
 
   def fail(message : String) : Nil
     print "FAIL: #{message}\n"
-    __iyi_exit(1)
+    __iyi_exit(1) unless Checks.print_only
   end
 
   # A chain of fresh nodes, each labelled with a string made at run time.
@@ -146,12 +163,40 @@
       before = IyiHeap.partition_collections(record)
       tries = 0
       while IyiHeap.partition_collections(record) == before
-        fail("a local collection did not run in 1000 tries") if tries == 1000
+        if tries == 1000
+          fail("a local collection did not run in 1000 tries")
+          break
+        end
         IyiHeap.collect_local(record)
         tries = tries + 1
         sleep(1) if IyiHeap.partition_collections(record) == before
       end
     {% end %}
+  end
+
+  # The partitions live now; none without `-Dheap_partitions`.
+  def partitions_now : UInt64
+    {% if flag?(:heap_partitions) %}
+      IyiHeap.partitions_live
+    {% else %}
+      0_u64
+    {% end %}
+  end
+
+  # The partitions live back to *before*: the units a check started have
+  # died, and under `-Dheap_verify` each death's check has scanned for any
+  # word still naming a chunk of theirs. A graph a frame's residue kept
+  # marked through the check's own collection is seen there, before the
+  # program reads it and exits: in bench/heap_verify.sh's print-only runs
+  # the program reached its end before the unit's death, and the verifier
+  # alone missed `Box pin` (Linux).
+  def settled(before : UInt64, what : String) : Nil
+    waited = 0
+    while partitions_now > before && waited < 5000
+      sleep(1)
+      waited = waited + 1
+    end
+    fail("#{what}: #{partitions_now - before} partitions still live 5 s after the check's units ended") if partitions_now > before
   end
 
   # An address kept where no local collection looks: a scalar class
@@ -283,6 +328,7 @@
     group do |g|
       task = g.spawn(in: u) { |value| build(15) }
       got = task.value
+      crossed(got.is_a?(Payload) ? got.object_id : 0_u64, "unit answer")
       g.spawn(in: u) do |value|
         collect_here
         value
@@ -308,6 +354,13 @@
     nil
   end
 
+  # The value a send left in *box*'s ring, checked where it crossed
+  # (`crossed`). No receiver waits on *box* yet, so the send stored it.
+  @[NoInline]
+  def ring_crossed(box : Channel(Payload), what : String) : Nil
+    crossed(box.@ring[box.@first].object_id, what) if box.@count > 0
+  end
+
   def channel_check(seed : Int32, by_select : Bool) : Nil
     box = Channel(Payload).new(1)
     done = Channel(Int32).new(1)
@@ -315,8 +368,10 @@
       g.spawn(unit: :new) do
         if by_select
           select_payload(box, seed)
+          ring_crossed(box, "select")
         else
           send_payload(box, seed)
+          ring_crossed(box, "channel")
         end
         collect_here
         done.send(1)
@@ -404,10 +459,31 @@
     Unit.new { build(seed) }
   end
 
+  # The value `Unit.new` made, checked where it crossed, before any
+  # collection: in the new unit's partition, or the shared heap's for a
+  # unit placed on the main thread, and in no chunk of its maker's.
+  @[NoInline]
+  def made_for(u : Unit(Payload), what : String) : Nil
+    {% if flag?(:heap_partitions) %}
+      record = IyiScheduler.current.alloc
+      return if record == 0_u64
+      maker = IyiHeap.partition_id(record)
+      node = Pointer(Void).new(u.@value.object_id).as(Payload?)
+      index = NODES - 1
+      while node.is_a?(Payload)
+        fail("#{what}: node #{index} was made in its maker's partition") if IyiHeap.owner_of(node.object_id) == maker
+        fail("#{what}: node #{index}'s label was made in its maker's partition") if IyiHeap.owner_of(node.label.object_id) == maker
+        node = node.next_node
+        index = index - 1
+      end
+    {% end %}
+  end
+
   def unit_new_check : Nil
     group do |outer|
       outer.spawn(unit: :new) do
         u = make_unit(17)
+        made_for(u, "unit new")
         collect_here
         group do |g|
           g.spawn(in: u) do |value|
@@ -448,15 +524,42 @@
     Mutex.new { [first] }
   end
 
+  # The strings in *m*, checked where they crossed, before any collection:
+  # none `LOCAL` to a partition, since a lock block's captures and
+  # `Mutex.new`'s are published, and what the block makes is the shared
+  # heap's (the lock's bracket). Deterministic where the poison is not
+  # (`crossed`): without the publish the strings are reached from the
+  # shared value only, yet a word a frame still held kept them through the
+  # collection on one machine and not another (`mutex_new` and `box`
+  # passed on Linux, `mutex_capture` on tmac and tssh).
+  @[NoInline]
+  def held_crossed(m : Mutex(Array(String)), what : String) : Nil
+    {% if flag?(:heap_partitions) %}
+      first = m.get do |held|
+        local = -1
+        held.each_with_index { |s, i| local = i if local < 0 && IyiHeap.local?(s.object_id) }
+        local
+      end
+      fail("#{what}: string #{first} is still local to its unit's partition after the crossing") unless first == -1
+    {% end %}
+  end
+
   def mutex_check(seed : Int32, how : String) : Nil
     shared = Mutex.new { [] of String }
     made = Channel(Mutex(Array(String))).new(1)
     group do |g|
       g.spawn(unit: :new) do
         case how
-        when "capture" then lock_capture(shared, seed)
-        when "bracket" then lock_bracket(shared, seed)
-        else                made.send(mutex_made(seed))
+        when "capture"
+          lock_capture(shared, seed)
+          held_crossed(shared, "mutex capture")
+        when "bracket"
+          lock_bracket(shared, seed)
+          held_crossed(shared, "mutex bracket")
+        else
+          fresh = mutex_made(seed)
+          held_crossed(fresh, "mutex new")
+          made.send(fresh)
         end
         collect_here
         0
@@ -464,9 +567,12 @@
     end
     if how == "new"
       m = made.receive
-      fail("mutex new: no Mutex came back") unless m.is_a?(Mutex(Array(String)))
-      first = m.get { |held| held[0] }
-      fail("mutex new: the value reads wrong") unless first.is_a?(String) && first == label_for(seed, 0)
+      if m.is_a?(Mutex(Array(String)))
+        first = m.get { |held| held[0] }
+        fail("mutex new: the value reads wrong") unless first.is_a?(String) && first == label_for(seed, 0)
+      else
+        fail("mutex new: no Mutex came back")
+      end
     else
       ok = shared.get do |held|
         good = held.size == NODES
@@ -493,8 +599,11 @@
           sleep(50)
           got = task.value
           collect_here
-          fail("panic: the task answered no panic") unless got.is_a?(Panicked)
-          fail("panic: the message reads wrong") unless got.message == label_for(18, 5) + " (heap_crossings panics here on purpose)"
+          if got.is_a?(Panicked)
+            fail("panic: the message reads wrong") unless got.message == label_for(18, 5) + " (heap_crossings panics here on purpose)"
+          else
+            fail("panic: the task answered no panic")
+          end
         end
         0
       end
@@ -524,8 +633,11 @@
       g.spawn(unit: :new) do
         done.receive
         p = procs.receive
-        fail("shared proc: none came") unless p.is_a?(SharedProc(Int32, Int32))
-        fail("shared proc: a wrong answer") unless p.call(1) == 2
+        if p.is_a?(SharedProc(Int32, Int32))
+          fail("shared proc: a wrong answer") unless p.call(1) == 2
+        else
+          fail("shared proc: none came")
+        end
         0
       end
     end
@@ -565,18 +677,51 @@
     nil
   end
 
+  # What a pin check stashed, checked where it crossed, before any
+  # collection: the pin merged the unit's partition into the shared heap,
+  # so the stash's chunk and every node and label of the chain have no
+  # owner. Deterministic where the poison is not (`held_crossed`).
+  @[NoInline]
+  def pinned(how : String, what : String) : Nil
+    {% if flag?(:heap_partitions) %}
+      address = Stash.take
+      shared_made(address, "#{what}: the stash")
+      chain = case how
+              when "box"    then Box(Payload).unbox(Pointer(Void).new(address)).object_id
+              when "malloc" then Pointer(UInt64).new(address).value
+              else               Pointer(Void).new(address).as(Holder).payload.object_id
+              end
+      node = Pointer(Void).new(chain).as(Payload?)
+      index = NODES - 1
+      while node.is_a?(Payload)
+        shared_made(node.object_id, "#{what}: node #{index}")
+        shared_made(node.label.object_id, "#{what}: node #{index}'s label")
+        node = node.next_node
+        index = index - 1
+      end
+    {% end %}
+  end
+
   def pin_check(how : String) : Nil
+    before = partitions_now
     group do |g|
       g.spawn(unit: :new) do
         case how
-        when "box"     then stash_box(20)
-        when "malloc"  then stash_malloc(21)
-        else                stash_storage(22)
+        when "box"
+          stash_box(20)
+          pinned(how, "box")
+        when "malloc"
+          stash_malloc(21)
+          pinned(how, "gc malloc")
+        else
+          stash_storage(22)
+          pinned(how, "reference storage")
         end
         collect_here
         0
       end
     end
+    settled(before, how)
     address = Stash.take
     case how
     when "box"
@@ -624,24 +769,49 @@
   end
 
   # ── Row 14: a crossing task's glue (task, box, install closure, unit) ──
+  # The unit *fiber* runs, the shared heap's, checked from a frame of its
+  # own, which the collection that follows finds scrubbed.
+  @[NoInline]
+  def unit_shared(fiber : IyiFiber, what : String) : Nil
+    unit = fiber.unit
+    shared_made(unit.object_id, what) if unit.is_a?(IyiUnit)
+  end
+
+  # The task spawned and checked in a frame of its own, which keeps no
+  # reference to it: the answer comes back by channel. The spawner's
+  # collection that follows, while the task is parked, then marks nothing
+  # of the glue, so glue made in the spawner's partition is held only by
+  # what the scheduler and the group keep - the verifier's holders - and
+  # is caught there, while the task still runs, not only at a death
+  # (where the reaped fiber is no holder).
+  @[NoInline]
+  def spawn_glued(g : IyiGroup, go : Channel(Int32), back : Channel(String)) : Nil
+    task = g.spawn(unit: :new) do
+      go.receive
+      back.send(label_for(24, 1))
+      0
+    end
+    shared_made(task.object_id, "glue: the task")
+    unit_shared(task.fiber, "glue: the unit")
+  end
+
   def glue_check : Nil
     go = Channel(Int32).new(1)
+    back = Channel(String).new(1)
+    before = partitions_now
     group do |outer|
       outer.spawn(unit: :new) do
         group do |g|
-          task = g.spawn(unit: :new) do
-            go.receive
-            label_for(24, 1)
-          end
-          shared_made(task.object_id, "glue: the task")
+          spawn_glued(g, go, back)
           collect_here
           go.send(1)
-          got = task.value
+          got = back.receive
           fail("glue: the answer reads wrong") unless got == label_for(24, 1)
         end
         0
       end
     end
+    settled(before, "glue")
   end
 
   # ── Row 21: List's elements ────────────────────────────────────────────
@@ -668,9 +838,12 @@
       g.spawn(unit: :new) do
         done.receive
         got = box.receive
-        fail("list: none came") unless got.is_a?(List(String))
-        fail("list: #{got.size} strings") unless got.size == NODES
-        NODES.times { |i| fail("list: string #{i} reads wrong") unless got[i] == label_for(25, i) }
+        if got.is_a?(List(String))
+          fail("list: #{got.size} strings") unless got.size == NODES
+          NODES.times { |i| fail("list: string #{i} reads wrong") unless i < got.size && got[i] == label_for(25, i) }
+        else
+          fail("list: none came")
+        end
         0
       end
     end
@@ -690,7 +863,10 @@
 
   def tls_check : Nil
     identity = TlsIdentity.from_der([hex(TLS_LEAF), hex(TLS_ROOT)], hex(TLS_SEED))
-    fail("tls: the identity did not load") unless identity.is_a?(TlsIdentity)
+    unless identity.is_a?(TlsIdentity)
+      fail("tls: the identity did not load")
+      return
+    end
     chain = identity.chain
     size = chain[0].size
     chain[0] << 0_u8
@@ -701,13 +877,76 @@
     fail("tls: schemes lends its array") unless identity.schemes.size == schemes.size - 1
   end
 
+  # ── A close posted to another thread's poller (the scheduler's glue) ───
+  # A unit that closes a descriptor a fiber of another thread waits on
+  # posts the close to that thread (`IyiScheduler.wake_closed`), in a list
+  # the other thread's state holds until it takes its mail. The other
+  # thread here spins, taking no mail, until the closer has looked at the
+  # list and collected its own partition. Windows posts no list: a close
+  # ends the posted operation, whose packet any thread takes.
+  def closed_list(owner : UInt64, what : String) : Nil
+    {% if flag?(:heap_partitions) %}
+      return unless IyiScheduler.shared?
+      if owner == 0_u64
+        fail("#{what}: the acceptor's descriptor is in no thread's poller")
+        return
+      end
+      list = Pointer(Void).new(owner).as(IyiSchedulerState).closed_fds
+      if list.is_a?(Array(Int32))
+        fail("#{what}: the list of closes was made in the closer's partition") if IyiHeap.local?(list.object_id)
+        fail("#{what}: the list's buffer was made in the closer's partition") if IyiHeap.local?(list.to_unsafe.address)
+      else
+        fail("#{what}: no close was posted to the acceptor's thread")
+      end
+    {% end %}
+  end
+
+  def closed_check : Nil
+    {% if !flag?(:win32) %}
+      listening = Atomic(Int32).new(-1)
+      done = Atomic(Int32).new(0)
+      thread = IyiThread.start do
+        server = IyiSocket.listen("127.0.0.1", 0)
+        group do |g|
+          g.spawn(unit: :same) do
+            server.accept
+            0
+          end
+          # The acceptor parks in this thread's poller, then this fiber
+          # spins, so the close the unit posts waits in this thread's state.
+          sleep(20)
+          listening.set(server.fd)
+          until done.get == 1
+          end
+          server.close
+        end
+        nil
+      end
+      group do |outer|
+        outer.spawn(unit: :new) do
+          while listening.get < 0
+            sleep(1)
+          end
+          fd = listening.get
+          owner = IyiScheduler.io_owner_of(fd * 2)
+          wake_closed(fd)
+          closed_list(owner, "closed")
+          collect_here
+          done.set(1)
+          0
+        end
+      end
+      thread.join
+    {% end %}
+  end
+
   TLS_ROOT = "308201183081cba003020102020101300506032b657030143112301006035504030c0946757a7a20526f6f74301e170d3235303130313030303030305a170d3435303130313030303030305a30143112301006035504030c0946757a7a20526f6f74302a300506032b65700321001494a1cac4481d11b3723830767cce21261aaca39cbd624c5b4d51b3163e8382a3423040301d0603551d0e0416041497ae92205c7302b9b25c2c7219607c7f767904fc300f0603551d130101ff040530030101ff300e0603551d0f0101ff040403020106300506032b657003410081f88cec5b495303ce00ae5a18679fc9d43fc5c2d3a86fd3ff7dd265fd1f1a20f053fe81ae0db33be74fff0cb487b516fc7e489253e914000ec818988635e607"
   TLS_LEAF = "3082016e30820120a003020102020102300506032b657030143112301006035504030c0946757a7a20526f6f74301e170d3235303130313030303030305a170d3435303130313030303030305a30143112301006035504030c0966757a7a2e74657374302a300506032b65700321007fc71c44df1a089f4322e5a7dd03ef64fed0164490819aa2236ea7d4b552c8fba38196308193301d0603551d0e04160414d2780a2e2b99d3a1c8d027b498befbae72ebcdf2301f0603551d2304183016801497ae92205c7302b9b25c2c7219607c7f767904fc300c0603551d130101ff04023000300e0603551d0f0101ff040403020780301d0603551d250416301406082b0601050507030106082b0601050507030230140603551d11040d300b820966757a7a2e74657374300506032b6570034100b6c428830f0b30218d3fe05a43c4b2110f9797356a58d361c0ebc499910287ea3dc5ebc7260c117d8258db51ee3ed2a7c125a0f1f6cf3fb42032f4543ae65b08"
   TLS_SEED = "3c9cb8fdef08086c92abb13f615fcbd54466dac12a3a363db6fb289ef88bc7a2"
 
   CHECKS = ["spawn", "thread", "in", "answer", "unit_answer", "channel", "select", "ring",
             "unit_new", "mutex_capture", "mutex_bracket", "mutex_new", "panic", "shared_proc",
-            "box", "malloc", "storage", "env", "glue", "list", "tls"]
+            "box", "malloc", "storage", "env", "glue", "list", "tls", "closed"]
 
   def run(name : String) : Nil
     case name
@@ -732,10 +971,12 @@
     when "glue"          then glue_check
     when "list"          then list_check
     when "tls"           then tls_check
+    when "closed"        then closed_check
     else                      fail("no check named #{name}")
     end
   end
 
+  Checks.read_env
   IyiWorkers.count = 4
   arguments = Program.args
   if arguments.empty?

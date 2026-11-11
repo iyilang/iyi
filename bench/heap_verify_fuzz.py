@@ -32,6 +32,9 @@ in a `Unit`, under a `Mutex`, or come back whole as a `unit: :new` task's
 answer (row 2, where the dead child's partition is adopted).
 
 Builds go through ~/.cache/heavy.sh, one build per call. Runs do not.
+`FUZZ_HEAVY=0` builds directly, for a driver itself run under heavy.sh
+(whose slot a nested call would wait on for ever). `IYI` names the
+compiler, `FUZZ_TIMEOUT` the seconds a run may take (default 120).
 """
 
 import argparse
@@ -47,9 +50,16 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 HEAVY = Path.home() / ".cache" / "heavy.sh"
+USE_HEAVY = HEAVY.exists() and os.environ.get("FUZZ_HEAVY", "1") != "0"
 DEFAULT_TMP = Path(os.environ.get("TMPDIR") or (Path.home() / ".cache" / "h22-hp-s4-tmp"))
 VERIFY_FLAGS = ["-Dheap_partitions", "-Dheap_verify", "-Diyi_chaos"]
-RUN_TIMEOUT = 120
+# Seconds a verify run may take (`FUZZ_TIMEOUT`), past which it is a hang.
+RUN_TIMEOUT = int(os.environ.get("FUZZ_TIMEOUT", "120"))
+WINDOWS = sys.platform == "win32"
+EXE = ".exe" if WINDOWS else ""
+# The compiler: `IYI` (on Windows the .build's iyi.exe, since bin/iyi is
+# a shell script), else bin/iyi.
+COMPILER = os.environ.get("IYI") or str(ROOT / "bin" / "iyi")
 
 # ── The fixed part of every program ─────────────────────────────────────────
 
@@ -1266,7 +1276,7 @@ def generate(seed, out_dir, only=None):
 # ── The driver ──────────────────────────────────────────────────────────────
 
 def build(src, out, flags, release, log, tmp):
-    cmd = ([str(HEAVY)] if HEAVY.exists() else []) + [str(ROOT / "bin" / "iyi"), "build"]
+    cmd = ([str(HEAVY)] if USE_HEAVY else []) + [COMPILER, "build"]
     cmd += (["--release"] if release else []) + flags + ["-o", str(out), str(src)]
     env = dict(os.environ, TMPDIR=str(tmp))
     started = time.monotonic()
@@ -1280,12 +1290,15 @@ def run_one(binary, env_extra, tmp):
     env.update(env_extra, TMPDIR=str(tmp))
     started = time.monotonic()
     proc = subprocess.Popen([str(binary)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
-                            start_new_session=True)
+                            start_new_session=not WINDOWS)
     try:
         out, err = proc.communicate(timeout=RUN_TIMEOUT)
         timed_out = False
     except subprocess.TimeoutExpired:
-        os.killpg(proc.pid, signal.SIGKILL)
+        if WINDOWS:
+            proc.kill()
+        else:
+            os.killpg(proc.pid, signal.SIGKILL)
         out, err = proc.communicate()
         timed_out = True
     return proc.returncode, out.decode(errors="replace"), err.decode(errors="replace"), timed_out, \
@@ -1313,7 +1326,7 @@ def run(args):
         if pdir.exists():
             shutil.rmtree(pdir)
         src, kinds = generate(seed, pdir, args.only)
-        ref, ver = pdir / "reference", pdir / "verify"
+        ref, ver = pdir / ("reference" + EXE), pdir / ("verify" + EXE)
 
         def keep(reason, detail, files):
             dest = fails / name

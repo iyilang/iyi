@@ -185,7 +185,12 @@ prove_verified() { # label dir awk-script file
 
 case " ${IYI_OPTS:-} " in
   *" -Dheap_partitions "*)
-    prove_fails "the spare waiter in the partition" nowaiter "dead:" "$NOWAITER" concurrency.iyi
+    # A compiler with S3's head 2 makes `IyiWaiter` born shared in codegen
+    # (`IYI_BORN_SHARED`), which the bracket NOWAITER takes out only
+    # repeats: the copy turns that off too (`IYI_SPAWN_BROKEN=new-shared`,
+    # a value an older compiler ignores), or it passes (Rule2f, Linux,
+    # 7ae0f9b18).
+    IYI_SPAWN_BROKEN=new-shared prove_fails "the spare waiter in the partition" nowaiter "dead:" "$NOWAITER" concurrency.iyi
     prove_fails "a reaped fiber keeps its group" nogroup "dead:" "$NOGROUP" concurrency.iyi
     prove_fails "a reaped fiber keeps its block" noproc "dead:" "$NOPROC" concurrency.iyi
 
@@ -204,7 +209,7 @@ case " ${IYI_OPTS:-} " in
         status=1
       fi
     fi
-    prove_verified "the spare waiter in the partition" vnowaiter "$NOWAITER" concurrency.iyi
+    IYI_SPAWN_BROKEN=new-shared prove_verified "the spare waiter in the partition" vnowaiter "$NOWAITER" concurrency.iyi
     prove_verified "a reaped fiber keeps its group" vnogroup "$NOGROUP" concurrency.iyi
     prove_verified "a reaped fiber keeps its block" vnoproc "$NOPROC" concurrency.iyi
     ;;

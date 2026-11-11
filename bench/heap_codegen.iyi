@@ -37,6 +37,7 @@
 
 @[Unsafe("the checks ask the runtime's partition records where a chunk lives, wipe their stack with raw words, and stand in for a library's owning types")]
 {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
+  import std/gc::{GC}
   import std/mutex::{Mutex}
   import std/unit::{Unit}
 
@@ -108,10 +109,14 @@
   # word still naming a chunk of theirs - a published object's word into
   # the dead partition's `LOCAL` chunks among them, which the local
   # collection marks through the published object and does not report.
-  # As bench/heap_crossings.iyi's `settled`.
+  # As bench/heap_crossings.iyi's `settled`, with a global collection
+  # every 100 ms: a `Unit`'s partition dies only at the mark that finds
+  # its handle dead (`find_dead_units`), and `born_shared`'s handle kept
+  # one live through 5 s of waiting (Linux, plain and release).
   def settled(before : UInt64, what : String) : Nil
     waited = 0
     while partitions_now > before && waited < 5000
+      GC.collect if waited % 100 == 0
       sleep(1)
       waited = waited + 1
     end

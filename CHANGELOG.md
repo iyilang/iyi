@@ -40,9 +40,9 @@ it calls is a compile error (SPEC.md III.4.5), std's and the prelude's
 state included, where 0.21 warned; `iyi fix` adds the `@[SafeReach]` the
 compiler proves, in the file that declares the state. Each std module's
 state is proven once, over all of its code, when the build that writes its
-`.iyimod` runs, and every importer reuses that proof (Linux, the proof's
-stage: web_cores 0.517 s cold, 0.179 s warm; std_http_exercise 0.457 s
-cold, 0.153 s warm). An initialiser first run by a read before its
+`.iyimod` runs, and every importer reuses that proof (Linux, release
+compiler, the proof's stage cold, median of 3: web_cores 0.148 s,
+std_http_exercise 0.150 s). An initialiser first run by a read before its
 declaration is born in the shared heap under `-Dheap_partitions`.
 `TlsConfig#trusted_roots` answers a copy of the system roots, and a failed
 system-root load is retried at the next handshake rather than kept.
@@ -27820,7 +27820,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 33,705-line library and nothing else. Every other
+  written against iyi's own 33,703-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

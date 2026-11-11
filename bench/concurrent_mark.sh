@@ -54,7 +54,10 @@
 #      each a parallel task parked on its socket for every request, ten
 #      seconds with the runtime's helpers and ten with one: every
 #      collection finishes, and no collection count stands still while
-#      the tasks allocate.
+#      the tasks allocate. Under `-Dheap_partitions` (IYI_OPTS) the
+#      clients allocate in the shared heap's bracket, since a partition
+#      feeds no global collection, and each checks that its own node is
+#      its partition's and the bracket's is not.
 #  12. Failure proof: the remainder round's store of the count of workers
 #      marking put back, every second stop retreating once, and a window
 #      before the store held open until an assist has counted itself in;

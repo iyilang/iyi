@@ -2734,7 +2734,7 @@ require "./file"
       # never switches fibers, so nothing between the two swaps reads a
       # fiber's `alloc`. Under the flag its type is noted (`born_shared`).
       def self.new_shared(size : UInt64, type_id : UInt64, headed : Bool, atomic : Bool) : Void*
-        page = @@cache; {% if flag?(:heap_partitions) %} born_shared(type_id) {% end %}
+        page = @@cache; {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %} born_shared(type_id) {% end %}
         return new_object(size, type_id, headed, atomic) if page == @@home
         install(0_u64)
         made = new_object(size, type_id, headed, atomic)

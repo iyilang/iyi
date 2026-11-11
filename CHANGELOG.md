@@ -175,6 +175,23 @@ partitions' targets, so an x86_64-darwin cross-compile with
 `-Dheap_partitions` builds again, and bench/heap_lend waits for every
 unit of the program to die before reading what a dead unit lent.
 
+heap22 S6 costs, under `-Dheap_partitions`. Fresh chunks above a page
+are no longer cleared whole, and a unit parked dirty for two 100 ms
+ticks of the idle clock is collected by an idle pool worker, so an idle
+keep-alive connection's partition holds far less (bench/heap_local
+`noidle`, `nofresh`). A busy unit's collection budget doubles with each
+collection it brings on in flight, up to 4 MiB within its share of the
+heap, and is worked out again from what was kept when the unit parks, so
+request-shaped units keep 256 KiB: alloc_scaling ran 317 local
+collections on one worker where the shared heap runs 57, and now takes
+0.84 (one worker) and 0.79 (two) of 0.21.0's time (tmac, 9 rounds). A
+program that never made a partition keeps the flag-off budget
+(bench/collect_trigger `sharedfirst`, `sharednever`).
+`IyiHeap.containing_large` is always inlined: the flag gave the mark's
+`base_of` five more callers, the inliner stopped inlining it there, and
+JsonGenerate's global collections ran 17 % longer (tmac, 143.5 ms against
+122.7); flag on and off now retire the same instructions.
+
 Two races older than heap22, in every build: units setting or deleting
 environment variables at once lost them (tmac, 6 units × 300 rounds at
 `IYI_WORKERS=4`: 261-301 of 1,800 reads of their own write lost); writers

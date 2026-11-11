@@ -59,7 +59,7 @@
 
     # Only ever set, from any unit: a race between two stores of true
     # loses nothing.
-    def self.failed! : Nil
+    def self.note_failure : Nil
       @@failed = true
     end
 
@@ -70,7 +70,7 @@
 
   def fail(message : String) : Nil
     print "FAIL: #{message}\n"
-    Checks.failed!
+    Checks.note_failure
     __iyi_exit(1) unless Checks.print_only
   end
 

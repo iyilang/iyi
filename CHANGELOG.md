@@ -35,6 +35,16 @@ registers, whose stale `r8` had kept a 64 MB string received through a
 rendezvous alive (tssh: 5 of 5 runs kept 61 MiB before, 5 of 5 clean
 after).
 
+heap22's verifier: the false-word injector no longer writes under a pool
+worker's parking fiber or below a Windows fiber's committed stack; reports
+name String and untyped-holder allocation sites and data-segment holders
+on Linux, macOS (atos on the .dwarf companion) and Windows
+(llvm-symbolizer and llvm-pdbutil on the .pdb); a run going to its
+class's pool is checked to hold no chunk carved and not free;
+heap_crossings' thread check waits for its unit to end, so its thread
+copy is caught on Windows too; and the crossing fuzz driver runs on
+Windows.
+
 A parallel unit reaching module state that is not Share through the code
 it calls is a compile error (SPEC.md III.4.5), std's and the prelude's
 state included, where 0.21 warned; `iyi fix` adds the `@[SafeReach]` the
@@ -27820,7 +27830,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 33,703-line library and nothing else. Every other
+  written against iyi's own 33,791-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

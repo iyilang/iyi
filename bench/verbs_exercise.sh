@@ -658,8 +658,10 @@ fi
 # out of the runner's cleanup, was the run's verdict: `std_http_latency.iyi`
 # printed ALL CHECKS PASSED and `iyi run` exited 1 (CI job 130381353157).
 # A reader here holds the program until 300 ms after it exits, which the
-# runner waits out and deletes, and then for 2.5 s, past what it waits: the
-# program's own exit is the verdict, and the file is the sweep's above.
+# runner waits out and deletes, and then for 5 s, past the two seconds it
+# waits: the program's own exit is the verdict, and the file is the sweep's
+# above. The runner waited one second once, and a 300 ms hold still found
+# the file refused at its end (CI job 130589942769).
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
     printf 'module main\n\ni = 0\nwhile i < 600 && !File.exists?("held.flag")\n  sleep(20)\n  i = i + 1\nend\nFile.write("done.flag", "1")\nputs "held program done"\n' > held.iyi
@@ -707,7 +709,7 @@ case "$(uname -s)" in
       sed -n '1,3p' held.out
       status=1
     fi
-    held_run 2500
+    held_run 5000
     if [ -n "$held_exe" ] && [ "$held_status" -eq 0 ] && grep -qx 'held program done' held.out && [ -e "$held_exe" ]; then
       echo "  a program held past what the runner waits: its verdict, and its file left for the sweep"
     else

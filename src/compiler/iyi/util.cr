@@ -390,18 +390,20 @@ module Iyi
   # exit - "being used by another process", whatever still held the image -
   # and the refusal, raised out of the runner's `ensure`, replaced the
   # program's own verdict: `std_http_latency.iyi` printed ALL CHECKS PASSED
-  # and `iyi run` exited 1 (CI job 130381353157). Asked again for about a
-  # second; a file still held then is left for `sweep_run_leftovers`, whose
-  # next run past the hour takes it. Elsewhere a refusal is not the
-  # platform's habit, and raises.
+  # and `iyi run` exited 1 (CI job 130381353157). Asked again for two
+  # seconds: a reader that let go 300 ms after the exit still had the file
+  # refused a second after it (CI job 130589942769), so whatever else holds
+  # a fresh executable on a runner outlasts the reader. A file still held
+  # then is left for `sweep_run_leftovers`, whose next run past the hour
+  # takes it. Elsewhere a refusal is not the platform's habit, and raises.
   def self.delete_run_output(path : String) : Nil
     {% if flag?(:win32) %}
-      20.times do |attempt|
+      40.times do |attempt|
         begin
           File.delete?(path)
           return
         rescue File::Error
-          sleep 50.milliseconds unless attempt == 19
+          sleep 50.milliseconds unless attempt == 39
         end
       end
     {% else %}

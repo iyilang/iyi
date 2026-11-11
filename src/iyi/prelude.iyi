@@ -10738,9 +10738,6 @@ fun __iyi_program(argc : Int32, argv : UInt8**) : Nil
   {% if flag?(:iyi_chaos) %}
     IyiChaos.start
   {% end %}
-  # And what `iyi test` handed a test, out of the environment its children
-  # inherit (testing.iyi).
-  IyiTestCases.take_environment
   LibIyiMain.__iyi_main(argc, argv)
 end
 
@@ -11287,8 +11284,7 @@ end
   end
 {% end %}
 
-# *name* taken out of this process's environment, every entry of it, as
-# `ENV.delete` (std/env) does: what `iyi test` hands a test (testing.iyi).
+# *name* out of this process's environment, every entry, as std/env's `delete`.
 def __iyi_env_forget(name : String) : Nil
   {% if flag?(:win32) %}
     __iyi_win_env_unset(name.to_unsafe, name.bytesize)

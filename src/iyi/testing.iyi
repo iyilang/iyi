@@ -194,21 +194,24 @@ class IyiTestCases
   @@skipped = 0
   @@report : String?
   @@only : String?
+  @@taken = false
 
-  # Read before the program's first line (`__iyi_program`), then taken out
-  # of the environment: a child the test starts inherited them, wrote its
-  # own cases into this test's report and ran only this test's `--run`.
+  # Read at the first named case and taken out of the environment, so that
+  # a child the test starts neither reports into its file nor runs only its
+  # `--run`. Not earlier: read in every program, it linked `environ` into
+  # each, past the dependency floor (SPEC.md III.9).
   def self.take_environment : Nil
+    @@taken = true
     @@report = Program.env("IYI_TEST_REPORT")
     @@only = Program.env("IYI_TEST_RUN")
     __iyi_env_forget("IYI_TEST_REPORT")
     __iyi_env_forget("IYI_TEST_RUN")
   end
 
-  # Whether the case runs: not when `iyi test --run TEXT` named text its
-  # name does not hold, which leaves no verdict at all, and not when it has
-  # a reason to skip, which is its verdict.
+  # Whether the case runs: not when `--run TEXT` names text its name does
+  # not hold (no verdict at all), nor when it has a reason to skip.
   def self.runs?(name : String, skip : String?) : Bool
+    take_environment unless @@taken
     only = @@only
     return false if only.is_a?(String) && !name.includes?(only)
     return true unless skip.is_a?(String)
@@ -228,10 +231,8 @@ class IyiTestCases
     end
   end
 
-  # The verdict's line, and the same as data where `iyi test` asked for it
-  # by naming a file in IYI_TEST_REPORT: a header of the verdict and the
-  # byte sizes of the name and the detail, then the two texts as they are,
-  # so that nothing in either needs escaping.
+  # The verdict's line, and as data in the file IYI_TEST_REPORT named: the
+  # verdict and two byte sizes, then the name and the detail, unescaped.
   private def self.tell(verdict : String, name : String, detail : String) : Nil
     STDOUT.puts(verdict + " - " + name + (verdict == "skip" ? ": " + detail : ""))
     STDOUT.flush

@@ -46,8 +46,9 @@
   test program can do.
 - **A program a test starts no longer reports into the test's file or runs
   only its `--run` cases.** IYI_TEST_REPORT and IYI_TEST_RUN were in the
-  environment the test's children inherit; the prelude reads them before
-  the test's first line and takes them out of it.
+  environment the test's children inherit; the prelude reads them at the
+  test's first named case and takes them out of it. Only a test with a
+  named case reads its environment, so no other program links `environ`.
 
 ### Gates
 
@@ -27826,7 +27827,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 28,883-line library and nothing else. Every other
+  written against iyi's own 28,880-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

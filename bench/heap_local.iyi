@@ -790,12 +790,21 @@
     end
   end
 
+  # The object stays carved to the unit's death, where the copy leaves it:
+  # no collection at every park here, and one while it is held pays the
+  # unit's debt, so the fiber's end (`IyiHeap.at_park`) collects nothing.
+  # Under `collect_every_park` that last collection freed the object
+  # first once a local collection cleared the dead stack under it
+  # (79c2e3e8c), and the nostale copy passed (Linux, 5 runs of 5);
+  # before, a stale word in that collection's frames kept the object.
   def stale_task : UInt64
     wrap = Wrap.new("stale " + "x" * 20)
+    collect_holding(wrap.object_id)
     hide(wrap.object_id)
   end
 
   def stale_check : Nil
+    IyiHeap.collect_every_park = false
     hidden = 0_u64
     group do |g|
       handle = g.spawn(unit: :new) { stale_task }
@@ -809,6 +818,7 @@
     end
     settle("stale")
     base = IyiRoots.base_of(hide(hidden))
+    IyiHeap.collect_every_park = true
     fail("stale: a dead unit's object on a pooled run is still an object to a stale word (base 0x#{base.to_s(16)})") if base != 0_u64
   end
 

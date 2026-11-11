@@ -258,11 +258,15 @@
       end
       fail("dead: the unit still lists #{unit.fiber_count} fibers 2 s after its child ended") unless unit.fiber_count == 1
       if check
-        child = slots.get { |s| s[1] }
-        fail("dead: the child never ran") unless child.is_a?(IyiFiber)
-        kept = child.group
-        fail("dead: a reaped fiber still names its group, made in partition #{IyiHeap.owner_of(kept.object_id)}") if kept.is_a?(IyiGroup)
-        fail("dead: a reaped fiber still names its block") unless child.proc.is_a?(Nil)
+        # The fibers stay behind the lock: `get` answers only Share values,
+        # and a fiber is not one (its state has a setter).
+        slots.lock do |s|
+          child = s[1]
+          fail("dead: the child never ran") unless child.is_a?(IyiFiber)
+          kept = child.group
+          fail("dead: a reaped fiber still names its group, made in partition #{IyiHeap.owner_of(kept.object_id)}") if kept.is_a?(IyiGroup)
+          fail("dead: a reaped fiber still names its block") unless child.proc.is_a?(Nil)
+        end
       end
       0_i64
     end
@@ -293,10 +297,12 @@
       end
       fail("dead: #{IyiHeap.partitions_live} records live 2 s after the task's unit ended, #{live} before") if IyiHeap.partitions_live > live
       return unless check
-      task = slots.get { |s| s[0] }
-      fail("dead: the task never took the lock") unless task.is_a?(IyiFiber)
-      fail("dead: the reaped task still names its group") unless task.group.is_a?(Nil)
-      fail("dead: the reaped task still names its block") unless task.proc.is_a?(Nil)
+      slots.lock do |s|
+        task = s[0]
+        fail("dead: the task never took the lock") unless task.is_a?(IyiFiber)
+        fail("dead: the reaped task still names its group") unless task.group.is_a?(Nil)
+        fail("dead: the reaped task still names its block") unless task.proc.is_a?(Nil)
+      end
     end
   {% end %}
 

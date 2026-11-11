@@ -1678,6 +1678,7 @@ class Iyi::Call
 
   def prepare_typed_def_with_args(untyped_def, owner, self_type, arg_types, block_arg_type, named_args_types)
     original_untyped_def = untyped_def
+    original_untyped_def.iyi_instantiated = true
 
     # If there's an argument count mismatch, or we have a splat, or a double splat, or there are
     # named arguments, we create another def that sets ups everything for the real call.

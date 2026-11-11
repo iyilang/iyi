@@ -284,7 +284,7 @@ module Iyi
     end
 
     def run : Nil
-      settle(@program.iyi_reach_robust) { |claim, refusal| claim.annotation.raise refusal }
+      settle(@program.iyi_reach_robust, reuse: true) { |claim, refusal| claim.annotation.raise refusal }
     end
 
     def verdicts : Hash(UInt64, String)
@@ -295,7 +295,10 @@ module Iyi
 
     # Proves every claim, adding to *robust* the states whose claim holds
     # for every importer, and yields each refused claim with its refusal.
-    private def settle(robust : Set(UInt64), & : ReachClaim, String ->) : Nil
+    # With *reuse*, a std module's claims are taken from the answer a
+    # program that proved them stored, and each module this program proves
+    # stores its own (`reach_module_proof.cr`).
+    private def settle(robust : Set(UInt64), reuse : Bool = false, & : ReachClaim, String ->) : Nil
       @claims.each do |claim|
         # An `UnsafeReach` is the author's word, kept for a module marked
         # `@[Unsafe]` (`UnsafeCheck`), and holds wherever the module is
@@ -308,6 +311,10 @@ module Iyi
         next if type.nil?
         # (a), by what the type declares: nothing to walk.
         if share?(type)
+          robust << claim.state.object_id
+          next
+        end
+        if reuse && module_proven?(claim)
           robust << claim.state.object_id
           next
         end
@@ -324,7 +331,10 @@ module Iyi
       @claims.each do |claim|
         next unless @tracked.has_key?(claim.state.object_id)
         unless refusal = refusal_of(claim)
-          robust << claim.state.object_id if robust?(claim)
+          if robust?(claim)
+            robust << claim.state.object_id
+            @proven_by_walk << claim.state.object_id
+          end
           next
         end
         # (a), structurally: a value nothing writes once it is made. Read
@@ -338,6 +348,7 @@ module Iyi
         end
         yield claim, refusal
       end
+      record_module_proofs if reuse
     end
 
     # Whether a proven claim holds in every program that imports the

@@ -14,9 +14,12 @@ module Iyi
   # `headers` reads a function from an artifact as reaching nothing,
   # `robust` writes an artifact that leaves out state under any claim its
   # build proved, as if every claim held for every importer, `callbacks`
-  # walks no def of std or the prelude (`ShareReach#enqueue`), and `claimed`
+  # walks no def of std or the prelude (`ShareReach#enqueue`), `claimed`
   # leaves a module's spawn in parallel on a claim proven for its producer
-  # alone (`Program#iyi_settle_claimed_spawns`). And `bench/std_unit_exercise.sh`'s
+  # alone (`Program#iyi_settle_claimed_spawns`), `modulereach` stores a std
+  # module's claim its proof did not cover every def of, and `modulepass`
+  # takes a stored one past an importer's override (`reach_module_proof.cr`).
+  # And `bench/std_unit_exercise.sh`'s
   # (SPEC.md III.4.18): `unit-capture` lets `spawn(in: u)`'s block capture
   # what is not Share, and `unit-answer` lets its task answer what is not.
   # Read once; empty in every other run.

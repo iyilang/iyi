@@ -237,7 +237,7 @@ caught "$WORK/prngignored" join "$REPO/bench/chaos_join.iyi" > prngignored.txt 2
 expect_caught prngignored "join: not caught in seeds 1 to 100"
 
 step "broken copy: the seed not honoured, the stream seeded from the clock"
-broken seedignored chaos.iyi '/^    @@stream = @@seed$/ { print "    @@stream = __iyi_monotonic_ns.to_u64"; next } { print }'
+broken seedignored chaos.iyi '/^    IyiStat\.set\(IyiStat::CHAOS_STREAM, seed\)$/ { print "    IyiStat.set(IyiStat::CHAOS_STREAM, __iyi_monotonic_ns.to_u64)"; next } { print }'
 seeds "$WORK/seedignored" seedignored > seedignored.txt 2>&1
 expect_caught seedignored "two runs differ"
 
@@ -247,7 +247,7 @@ seeds "$WORK/unitsignored" unitsignored > unitsignored.txt 2>&1
 expect_caught unitsignored "FAIL: "
 
 step "broken copy: a parallel task left in its spawner's unit"
-broken leftinunit chaos.iyi '/^    task.fiber.chaos_unit = IyiCross.shared \{ IyiChaosUnit.new\(@@units, fresh_priority\) \}$/ { next } { print }'
+broken leftinunit chaos.iyi '/^    task.fiber.chaos_unit = IyiCross.shared \{ IyiChaosUnit.new\(IyiStat.get\(IyiStat::CHAOS_UNITS\), fresh_priority\) \}$/ { next } { print }'
 seeds "$WORK/leftinunit" leftinunit > leftinunit.txt 2>&1
 expect_caught leftinunit "no seed started a parallel unit before the spawner parked"
 

@@ -501,12 +501,6 @@
       end
     {% end %}
 
-    @@stops : UInt64 = 0_u64
-    @@stopped : UInt64 = 0_u64
-    @@stop_ns : UInt64 = 0_u64
-    @@owing_stops : UInt64 = 0_u64
-    @@turn_waits_out : UInt64 = 0_u64
-
     # The running thread's stack top, 0 for an unregistered thread, whose
     # stack is the base `IyiRoots` discovered.
     def self.current_stack_top : UInt64
@@ -519,17 +513,17 @@
     # stopped at least one other thread, and threads stopped in all.
     # Written under the lock, read by whoever.
     def self.stops : UInt64
-      @@stops
+      IyiStat.get(IyiStat::STOPS)
     end
 
     def self.stopped : UInt64
-      @@stopped
+      IyiStat.get(IyiStat::STOPPED)
     end
 
     # Nanoseconds spent from the first signal to the last count-in, in
     # all: the stop half of every pause, on the collector's clock.
     def self.stop_ns : UInt64
-      @@stop_ns
+      IyiStat.get(IyiStat::STOP_NS)
     end
 
     # Stops that began while a thread the stop before had parked in the
@@ -542,11 +536,11 @@
     # first than of the second, and a runtime without the wait began 86
     # to 464,783 a run on 12 vCPUs.
     def self.owing_stops : UInt64
-      @@owing_stops
+      IyiStat.get(IyiStat::OWING_STOPS)
     end
 
     def self.turn_waits_out : UInt64
-      @@turn_waits_out
+      IyiStat.get(IyiStat::TURN_WAITS_OUT)
     end
 
     # The program's own threads: every registered one, and the main
@@ -1164,7 +1158,7 @@
       {% end %}
       started = IyiMark.now_ns
       page = control
-      @@owing_stops = @@owing_stops + 1_u64 if word(page + IYI_TC_TURNS).value.get != 0_u64
+      IyiStat.bump(IyiStat::OWING_STOPS, 1_u64) if word(page + IYI_TC_TURNS).value.get != 0_u64
       # The last stop's threads out of their park before its words are
       # cleared: one still inside reads the release word, and cleared
       # under it, the release it was given is taken back. On Windows the
@@ -1209,9 +1203,9 @@
         end
         wait_count(page + IYI_TC_SUSPENDED, others.to_u64)
       {% end %}
-      @@stops = @@stops + 1_u64
-      @@stopped = @@stopped + others.to_u64
-      @@stop_ns = @@stop_ns + (IyiMark.now_ns - started).to_u64
+      IyiStat.bump(IyiStat::STOPS, 1_u64)
+      IyiStat.bump(IyiStat::STOPPED, others.to_u64)
+      IyiStat.bump(IyiStat::STOP_NS, (IyiMark.now_ns - started).to_u64)
       others
     end
 
@@ -1388,7 +1382,7 @@
         yield_cpu
       end
       # Not under the lock: two collections can wait at once.
-      word(pointerof(@@turn_waits_out).address).value.add(1_u64) if turns.value.get != 0_u64
+      IyiStat.add(IyiStat::TURN_WAITS_OUT, 1_u64) if turns.value.get != 0_u64
     end
 
     # The cores this process may run on: what the marker sizes its

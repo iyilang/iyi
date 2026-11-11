@@ -17,9 +17,12 @@
 # whose `Unit` value is still being built, a dead unit's pooled run
 # left carved for a stale word to pass the root test, a publication
 # walk that takes a chunk straddling the carve frontier for uncarved,
-# and an owner test and a weak sweep that do the same to a weak cell.
-# The copies' verifier reports and goes on, so each copy must reach the
-# program's own check. Last, the same
+# an owner test and a weak sweep that do the same to a weak cell, and a
+# counter put back in the data segment at a value that names a `LOCAL`
+# chunk the mark left unmarked, which only the verifier sees: the
+# program's checks pass, and the verifier must name the data segment.
+# The copies' verifier reports and goes on, so each other copy must
+# reach the program's own check. Last, the same
 # program cross-compiled to an object for each of the nine targets the
 # README names, with the flag and without it: a hook the prelude compiles
 # on a target where heap_partition.iyi is not loaded fails there.
@@ -117,6 +120,18 @@ prove_fails() { # label dir phrase awk-script file
   fi
   timeout 200 "$WORK/$dir/program" >"$WORK/$dir/out" 2>&1
   local code=$?
+  # `verifier:`: a copy whose word holds nothing the program reads, so
+  # the program passes and the verifier's report is the check.
+  if [ "$phrase" = "verifier:" ]; then
+    if [ "$code" -ne 0 ] || ! grep -q "^  holder: the data segment$" "$WORK/$dir/out"; then
+      echo "  $label: the verifier named no data-segment holder (exit $code)"
+      sed -n '$p' "$WORK/$dir/out"
+      status=1
+      return
+    fi
+    printf '  %s: the verifier named the data segment as the holder (exit %s, %s reports)\n' "$label" "$code" "$(grep -c '^  holder: the data segment$' "$WORK/$dir/out")"
+    return
+  fi
   if [ "$code" -eq 0 ]; then
     echo "  $label: the exercise still passed, so it does not test this"
     status=1
@@ -196,7 +211,7 @@ if [ "$PART" = all ] || [ "$PART" = broken ]; then
   # freed; an empty run the sweep pooled was taken by another worker's
   # unit before it looked, which no single run shows.)
   prove_fails "a weak pass after the local sweep" noweakfirst "weak:" \
-    '/^    sweep_weak\(record, id, parity\)$/ { found = found + 1; next } /^    stat_add\(pointerof\(@@local_freed\)\.address, freed\)$/ { print "    sweep_weak(record, id, parity)"; found = found + 1 } { print } END { if (found != 2) exit 3 }' \
+    '/^    sweep_weak\(record, id, parity\)$/ { found = found + 1; next } /^    IyiStat\.add\(IyiStat::LOCAL_FREED, freed\)$/ { print "    sweep_weak(record, id, parity)"; found = found + 1 } { print } END { if (found != 2) exit 3 }' \
     heap_partition.iyi
 
   # A weak cell to a large object left off its partition's list, as it
@@ -256,6 +271,20 @@ if [ "$PART" = all ] || [ "$PART" = broken ]; then
   # registered, and the sweep that frees its chunk drops it uncleared.
   prove_fails "a weak sweep's frontier test of the word" noweaksweep "frontier:" \
     '{ if (sub(/head_of\(arena, target\) < read64\(arena \+ OFF_HIGH\)/, "target < read64(arena + OFF_HIGH)")) found = found + 1; print } END { if (found != 1) exit 3 }' \
+    heap_partition.iyi
+
+  # A counter of the runtime's back in the data segment, at a value that
+  # names a `LOCAL` chunk the local mark left unmarked - what `local_ns`
+  # read on tmac at 4.77 s of local collections (0x11c3b1a6d, five bytes
+  # into one; heap_local's "verify release, 8 workers" exited 86). The
+  # counters live in `IyiStat`'s page now; this copy proves the scan of
+  # the data segment still sees such a word, so the fix moved the words
+  # and left the verifier's rule alone.
+  prove_fails "a counter in the data segment naming a LOCAL chunk" countword "verifier:" \
+    '/^  @@pause_ring : UInt64 = 0_u64$/ { print; print "  @@local_ns : UInt64 = 0_u64"; found = found + 1; next }
+     /^  def self\.clear_local_marks\(record : UInt64\) : Nil$/ { print "  def self.unmarked_local(record : UInt64, id : UInt64, parity : UInt64) : UInt64"; print "    index = 0"; print "    while index < CLASSES"; print "      run = read64(record &+ (FILL + index).to_u64 * 8_u64)"; print "      while run != 0"; print "        arena = run & (0_u64 &- MAP)"; print "        word = run_word(arena, granule_of(arena, run))"; print "        stop = run + run_n(word).unsafe_shl(GRANULE_SHIFT)"; print "        head = first_head(arena, run)"; print "        while head < stop"; print "          return head if IyiHeapVerify.target_of(record, id, parity, false, head) != 0"; print "          head = head + read64(arena + OFF_CHUNK)"; print "        end"; print "        run = word & RUN_LINK"; print "      end"; print "      index = index + 1"; print "    end"; print "    0_u64"; print "  end"; print ""; found = found + 1 }
+     /return false unless IyiHeapVerify\.check\(record, id, parity, running\)/ { print "    @@local_ns = unmarked_local(record, id, parity)"; found = found + 1 }
+     { print } END { if (found != 3) exit 3 }' \
     heap_partition.iyi
 fi
 

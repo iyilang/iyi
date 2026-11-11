@@ -782,7 +782,7 @@ sleep_proof() { # sleep_proof <label> <dir> <awk program> <phrase>
   echo "  caught: $(grep -m1 "$4" "$2.txt")"
 }
 sleep_proof "a sleep queue walked on every insertion" walked \
-  '/^    fiber.sleep_seq = st.sleep_seq$/ { print; print "    walk = st.sleep_head"; print "    walk = walk.sleep_child if walk.is_a?(IyiFiber)"; print "    while walk.is_a?(IyiFiber)"; print "      @@sleep_steps = @@sleep_steps &+ 1_u64"; print "      walk = walk.next_sleep"; print "    end"; found = 1; next }
+  '/^    fiber.sleep_seq = st.sleep_seq$/ { print; print "    walk = st.sleep_head"; print "    walk = walk.sleep_child if walk.is_a?(IyiFiber)"; print "    while walk.is_a?(IyiFiber)"; print "      IyiStat.bump(IyiStat::SLEEP_STEPS, 1_u64)"; print "      walk = walk.next_sleep"; print "    end"; found = 1; next }
    { print } END { if (!found) exit 3 }' \
   'FAIL: sleep: 32000 sleepers took'
 sleep_proof "a sleep queue that puts the latest first" latest \

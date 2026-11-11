@@ -132,22 +132,6 @@ class IyiHeap
 
   @@pcentre : UInt64 = 0_u64
   @@partition_live : UInt64 = 0_u64
-  @@pins : UInt64 = 0_u64
-  @@published_objects : UInt64 = 0_u64
-  @@published_bytes : UInt64 = 0_u64
-  @@local_collections : UInt64 = 0_u64
-  @@local_ns : UInt64 = 0_u64
-  @@local_max_ns : UInt64 = 0_u64
-  @@local_aborts : UInt64 = 0_u64
-  @@local_freed : UInt64 = 0_u64
-  @@merges : UInt64 = 0_u64
-  @@freed_whole : UInt64 = 0_u64
-  @@handed_shared : UInt64 = 0_u64
-  @@runs_taken : UInt64 = 0_u64
-  @@runs_pooled : UInt64 = 0_u64
-  @@runs_drained : UInt64 = 0_u64
-  @@takeovers : UInt64 = 0_u64
-  @@detached : UInt64 = 0_u64
   @@takeover_armed : UInt64 = 0_u64
   @@dead_queued : UInt64 = 0_u64
   @@collect_every_park : Bool = false
@@ -156,9 +140,6 @@ class IyiHeap
   @@abandon_next : Bool = false
   @@stop_sweep_record : UInt64 = 0_u64
   @@stop_sweep_after : Int32 = -1
-  @@returned : UInt64 = 0_u64
-  @@large_freed : UInt64 = 0_u64
-  @@pauses : UInt64 = 0_u64
   @@pause_ring : UInt64 = 0_u64
 
   # The last `PAUSE_RING` local collections' durations in ns, a ring
@@ -199,39 +180,44 @@ class IyiHeap
 
   # ── Statistics (S6 reads them) ────────────────────────────────────────
 
+  # `IyiStat`'s words, not class variables: `local_ns` in the data
+  # segment, 0x11c3b1a6d after 4.77 s of local collections, named a
+  # `LOCAL` chunk on tmac and the verifier reported the data segment as
+  # its holder (prelude.iyi, `IyiStat`, says the rest).
+
   def self.pins : UInt64
-    @@pins
+    IyiStat.get(IyiStat::PINS)
   end
 
   def self.published_objects : UInt64
-    @@published_objects
+    IyiStat.get(IyiStat::PUBLISHED_OBJECTS)
   end
 
   def self.published_bytes : UInt64
-    @@published_bytes
+    IyiStat.get(IyiStat::PUBLISHED_BYTES)
   end
 
   def self.local_collections : UInt64
-    @@local_collections
+    IyiStat.get(IyiStat::LOCAL_COLLECTIONS)
   end
 
   def self.local_ns : UInt64
-    @@local_ns
+    IyiStat.get(IyiStat::LOCAL_NS)
   end
 
   def self.local_max_ns : UInt64
-    @@local_max_ns
+    IyiStat.get(IyiStat::LOCAL_MAX_NS)
   end
 
   def self.local_pauses : UInt64
-    @@pauses
+    IyiStat.get(IyiStat::LOCAL_PAUSES)
   end
 
   # The duration of local collection *k* (from 0), in ns, while it is one
   # of the ring's last `PAUSE_RING`; 0 otherwise.
   def self.local_pause(k : UInt64) : UInt64
     ring = @@pause_ring
-    return 0_u64 if ring == 0 || k >= @@pauses || @@pauses - k > PAUSE_RING
+    return 0_u64 if ring == 0 || k >= IyiStat.get(IyiStat::LOCAL_PAUSES) || IyiStat.get(IyiStat::LOCAL_PAUSES) - k > PAUSE_RING
     read64(ring + (k & (PAUSE_RING - 1_u64)) * 8_u64)
   end
 
@@ -247,56 +233,56 @@ class IyiHeap
         ring = word.value.get
       end
     end
-    k = Pointer(Atomic(UInt64)).new(pointerof(@@pauses).address).value.add(1_u64)
+    k = IyiStat.add(IyiStat::LOCAL_PAUSES, 1_u64)
     write64(ring + (k & (PAUSE_RING - 1_u64)) * 8_u64, took)
   end
 
   def self.local_aborts : UInt64
-    @@local_aborts
+    IyiStat.get(IyiStat::LOCAL_ABORTS)
   end
 
   def self.large_freed : UInt64
-    @@large_freed
+    IyiStat.get(IyiStat::LARGE_FREED)
   end
 
   def self.local_freed : UInt64
-    @@local_freed
+    IyiStat.get(IyiStat::LOCAL_FREED)
   end
 
   def self.merges : UInt64
-    @@merges
+    IyiStat.get(IyiStat::MERGES)
   end
 
   def self.freed_whole : UInt64
-    @@freed_whole
+    IyiStat.get(IyiStat::FREED_WHOLE)
   end
 
   def self.handed_shared : UInt64
-    @@handed_shared
+    IyiStat.get(IyiStat::HANDED_SHARED)
   end
 
   def self.runs_taken : UInt64
-    @@runs_taken
+    IyiStat.get(IyiStat::RUNS_TAKEN)
   end
 
   def self.runs_pooled : UInt64
-    @@runs_pooled
+    IyiStat.get(IyiStat::RUNS_POOLED)
   end
 
   def self.runs_drained : UInt64
-    @@runs_drained
+    IyiStat.get(IyiStat::RUNS_DRAINED)
   end
 
   def self.note_drained : Nil
-    stat_add(pointerof(@@runs_drained).address, 1_u64)
+    IyiStat.add(IyiStat::RUNS_DRAINED, 1_u64)
   end
 
   def self.takeovers : UInt64
-    @@takeovers
+    IyiStat.get(IyiStat::TAKEOVERS)
   end
 
   def self.detached_partitions : UInt64
-    @@detached
+    IyiStat.get(IyiStat::DETACHED)
   end
 
   def self.partition_live : UInt64
@@ -305,7 +291,7 @@ class IyiHeap
 
   # Chunks the global sweep returned that their owners took back.
   def self.returned_chunks : UInt64
-    @@returned
+    IyiStat.get(IyiStat::RETURNED)
   end
 
   # A test's switch: no local collection is triggered - in flight, at a
@@ -383,10 +369,6 @@ class IyiHeap
 
   def self.collect_every_park : Bool
     @@collect_every_park
-  end
-
-  def self.stat_add(address : UInt64, amount : UInt64) : Nil
-    Pointer(Atomic(UInt64)).new(address).value.add(amount)
   end
 
   # ── Arena tables ──────────────────────────────────────────────────────
@@ -539,7 +521,7 @@ class IyiHeap
       # megabytes resident for a few runs.
       __iyi_madvise_nohuge(base, MAP)
     {% end %}
-    @@arenas_mapped = @@arenas_mapped &+ 1_u64
+    IyiStat.bump(IyiStat::ARENAS_MAPPED, 1_u64)
     chunk = chunk_of(index)
     magic = (1_u64.unsafe_shl(MAGIC_SHIFT) + chunk.unsafe_shr(3_u64) - 1_u64).unsafe_div(chunk.unsafe_shr(3_u64))
     chunks = (MAP - HEAD).unsafe_div(chunk)
@@ -724,7 +706,7 @@ class IyiHeap
     end
     class_unlock(index)
     write64(record &+ REC_HELD, read64(record &+ REC_HELD) + n * granule)
-    stat_add(pointerof(@@runs_taken).address, 1_u64)
+    IyiStat.add(IyiStat::RUNS_TAKEN, 1_u64)
     table[index]
   end
 
@@ -808,7 +790,7 @@ class IyiHeap
       chain = following
       returned = returned + 1_u64
     end
-    stat_add(pointerof(@@returned).address, returned)
+    IyiStat.add(IyiStat::RETURNED, returned)
     table[index] = head
     head
   end
@@ -838,7 +820,7 @@ class IyiHeap
     line = pline(index)
     set_run_word(arena, granule_first, read64(line + PC_POOL), n, RUN_POOL)
     write64(line + PC_POOL, run)
-    stat_add(pointerof(@@runs_pooled).address, 1_u64)
+    IyiStat.add(IyiStat::RUNS_POOLED, 1_u64)
   end
 
   # A run handed to the shared heap, under the class's lock with no slice
@@ -852,7 +834,7 @@ class IyiHeap
       k = k + 1_u64
     end
     set_run_word(arena, granule_first, 0_u64, n, RUN_DRAINING)
-    stat_add(pointerof(@@handed_shared).address, 1_u64)
+    IyiStat.add(IyiStat::HANDED_SHARED, 1_u64)
   end
 
   # ── Allocation hooks (prelude) ────────────────────────────────────────
@@ -1182,8 +1164,8 @@ class IyiHeap
         end
       end
     end
-    stat_add(pointerof(@@published_objects).address, objects)
-    stat_add(pointerof(@@published_bytes).address, bytes)
+    IyiStat.add(IyiStat::PUBLISHED_OBJECTS, objects)
+    IyiStat.add(IyiStat::PUBLISHED_BYTES, bytes)
     allocated_word.value.add(bytes)
   end
 
@@ -1469,16 +1451,13 @@ class IyiHeap
     took = IyiMark.now_ns - began
     leave_barrier
     if swept
-      stat_add(pointerof(@@local_collections).address, 1_u64)
-      stat_add(pointerof(@@local_ns).address, took)
+      IyiStat.add(IyiStat::LOCAL_COLLECTIONS, 1_u64)
+      IyiStat.add(IyiStat::LOCAL_NS, took)
       note_pause(took)
-      seen = Pointer(Atomic(UInt64)).new(pointerof(@@local_max_ns).address)
-      while (prior = seen.value.get) < took
-        break if seen.value.compare_and_set(prior, took)[1]
-      end
-      stat_add(pointerof(@@takeovers).address, 1_u64) if takeover
+      IyiStat.raise_to(IyiStat::LOCAL_MAX_NS, took)
+      IyiStat.add(IyiStat::TAKEOVERS, 1_u64) if takeover
     else
-      stat_add(pointerof(@@local_aborts).address, 1_u64)
+      IyiStat.add(IyiStat::LOCAL_ABORTS, 1_u64)
     end
     # The register buffer read after the collection, so it is alive across
     # it in every build: the stack scan below this frame reads it.
@@ -1819,7 +1798,7 @@ class IyiHeap
           table_truncate(large, table_count(large) - 1_u64)
           free_large(node + LARGE_HEAD)
           freed = freed + 1_u64
-          stat_add(pointerof(@@large_freed).address, 1_u64)
+          IyiStat.add(IyiStat::LARGE_FREED, 1_u64)
         else
           kept_bytes = kept_bytes + read64(node + OFF_MAP)
           k = k + 1_u64
@@ -1827,7 +1806,7 @@ class IyiHeap
       end
       unlock
     end
-    stat_add(pointerof(@@local_freed).address, freed)
+    IyiStat.add(IyiStat::LOCAL_FREED, freed)
     account_live(record, kept_bytes)
     write64(record &+ REC_DEBT, 0_u64)
     write64(record &+ REC_COLLECTIONS, read64(record &+ REC_COLLECTIONS) + 1_u64)
@@ -2108,7 +2087,7 @@ class IyiHeap
     return unless found
     state = Pointer(Atomic(UInt64)).new(record &+ REC_STATE)
     state.value.add(REC_DETACHED) if state.value.get & REC_DETACHED == 0
-    stat_add(pointerof(@@detached).address, 1_u64)
+    IyiStat.add(IyiStat::DETACHED, 1_u64)
   end
 
   # `IyiTask#value`, read by a fiber of a partitioned unit: an answer
@@ -2233,7 +2212,7 @@ class IyiHeap
           free_locals_in(arena, run, n)
           if published == 0
             pool_run(index, arena, run, n)
-            stat_add(pointerof(@@freed_whole).address, 1_u64)
+            IyiStat.add(IyiStat::FREED_WHOLE, 1_u64)
           else
             drain_run(arena, run, n)
           end
@@ -2414,7 +2393,7 @@ class IyiHeap
       write64(into &+ REC_MARKING, 1_u64)
     end
     leave_barrier
-    stat_add(pointerof(@@merges).address, 1_u64)
+    IyiStat.add(IyiStat::MERGES, 1_u64)
     partition_release(from)
   end
 
@@ -2441,7 +2420,7 @@ class IyiHeap
     state = Pointer(Atomic(UInt64)).new(record &+ REC_STATE)
     state.value.add(REC_PINNED)
     merge(record, 0_u64)
-    stat_add(pointerof(@@pins).address, 1_u64)
+    IyiStat.add(IyiStat::PINS, 1_u64)
   end
 
   # A record let go: its tables unmapped, its live bytes out of the sum,
@@ -2661,10 +2640,10 @@ class IyiMark
       walked = walked + n.unsafe_shl(IyiHeap::GRANULE_SHIFT)
       cursor = stop
     end
-    @@swept = @@swept + swept
-    @@bytes_freed = @@bytes_freed + freed
-    @@kept = @@kept + kept
-    @@bytes_kept = @@bytes_kept + kept_bytes
+    IyiStat.bump(IyiStat::SWEPT, swept)
+    IyiStat.bump(IyiStat::BYTES_FREED, freed)
+    IyiStat.bump(IyiStat::KEPT, kept)
+    IyiStat.bump(IyiStat::BYTES_KEPT, kept_bytes)
     IyiHeap.write64(arena + IyiHeap::OFF_SWEEP_CURSOR, cursor >= high ? IyiHeap::SWEEP_DONE : cursor)
     0_u64
   end
@@ -2692,7 +2671,7 @@ class IyiMark
   def self.partition_sweep_for(record : UInt64, index : Int32) : UInt64
     while IyiHeap.sweep_left_of(index) != 0_u64
       IyiHeap.class_lock(index)
-      epoch = @@epoch
+      epoch = IyiStat.get(IyiStat::EPOCH)
       arena = IyiHeap.class_first(index)
       chosen = 0_u64
       while arena != 0 && chosen == 0

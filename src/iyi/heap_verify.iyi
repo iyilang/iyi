@@ -55,21 +55,16 @@ class IyiHeapVerify
   CONFIRM = 4096
 
   @@started : Bool = false
-  @@stress : UInt64 = 0_u64
-  @@stress_tick : UInt64 = 0_u64
   @@false_words : Bool = false
   @@trace : Bool = false
-  @@noise : UInt64 = 0x9E3779B97F4A7C15_u64
-  @@checks : UInt64 = 0_u64
-  @@death_checks : UInt64 = 0_u64
-  @@scanned : UInt64 = 0_u64
-  @@injected : UInt64 = 0_u64
   @@reporting : UInt64 = 0_u64
   @@image : UInt64 = 0_u64
-  # The epoch a check began in, on its thread: a hit found after a pause
-  # is not trusted, the liveness it read having changed under it.
-  @[ThreadLocal]
-  @@epoch_seen : UInt64 = 0_u64
+  # The epoch a check began in, on its thread (`IyiStat::OWN_EPOCH_SEEN`,
+  # the thread's own page: an epoch is a count, which the thread-local
+  # block would hand the scan as a word): a hit found after a pause is not
+  # trusted, the liveness it read having changed under it. The counters
+  # and the false words' stream are `IyiStat`'s for the same reason.
+
   # The fiber at a stress point on this thread (`at_point`), 0 for none:
   # a fiber, not a flag, since a point may switch and the fiber move.
   @[ThreadLocal]
@@ -88,14 +83,14 @@ class IyiHeapVerify
     @@started = true
     @@image = image_base
     stress = Program.env("IYI_HEAP_STRESS")
-    @@stress = number(stress) if stress.is_a?(String)
-    IyiHeap.collect_every_park = true if @@stress == 1_u64
+    IyiStat.set(IyiStat::VERIFY_STRESS, number(stress)) if stress.is_a?(String)
+    IyiHeap.collect_every_park = true if IyiStat.get(IyiStat::VERIFY_STRESS) == 1_u64
     words = Program.env("IYI_HEAP_FALSE_WORDS")
     @@false_words = words.is_a?(String) && words != "0" && words.bytesize > 0
     trace = Program.env("IYI_HEAP_TRACE")
     @@trace = trace.is_a?(String) && trace != "0" && trace.bytesize > 0
     seed = Program.env("IYI_CHAOS")
-    @@noise = @@noise ^ number(seed) if seed.is_a?(String)
+    IyiStat.set(IyiStat::VERIFY_NOISE, IyiStat.get(IyiStat::VERIFY_NOISE) ^ number(seed)) if seed.is_a?(String)
   end
 
   private def self.number(text : String) : UInt64
@@ -112,7 +107,7 @@ class IyiHeapVerify
   end
 
   def self.stress : UInt64
-    @@stress
+    IyiStat.get(IyiStat::VERIFY_STRESS)
   end
 
   def self.false_words? : Bool
@@ -124,19 +119,19 @@ class IyiHeapVerify
   end
 
   def self.checks : UInt64
-    @@checks
+    IyiStat.get(IyiStat::VERIFY_CHECKS)
   end
 
   def self.death_checks : UInt64
-    @@death_checks
+    IyiStat.get(IyiStat::VERIFY_DEATH_CHECKS)
   end
 
   def self.chunks_scanned : UInt64
-    @@scanned
+    IyiStat.get(IyiStat::VERIFY_SCANNED)
   end
 
   def self.words_injected : UInt64
-    @@injected
+    IyiStat.get(IyiStat::VERIFY_INJECTED)
   end
 
   # ── Stress (chaos.iyi calls it at every point) ─────────────────────────
@@ -157,14 +152,14 @@ class IyiHeapVerify
 
   def self.at_point_once : Nil
     inject_here if @@false_words
-    stress = @@stress
+    stress = IyiStat.get(IyiStat::VERIFY_STRESS)
     return if stress == 0
     if stress > 1_u64
       # Plain words, not `Atomic`: an `Atomic` verb here is a chaos point
       # (this file is not one of the compiler's runtime files), and the
       # point is where this was called from. A lost count is harmless.
-      tick = @@stress_tick &+ 1_u64
-      @@stress_tick = tick
+      tick = IyiStat.get(IyiStat::VERIFY_STRESS_TICK) &+ 1_u64
+      IyiStat.set(IyiStat::VERIFY_STRESS_TICK, tick)
       return unless tick % stress == 0
     end
     fiber = IyiScheduler.current?
@@ -293,8 +288,8 @@ class IyiHeapVerify
   # (`mark_read`). Answers whether the sweep may go on: no pause came
   # meanwhile.
   def self.check(record : UInt64, id : UInt64, parity : UInt64, running : IyiFiber?) : Bool
-    stat(pointerof(@@checks).address)
-    @@epoch_seen = IyiMark.epoch
+    stat(IyiStat.at(IyiStat::VERIFY_CHECKS))
+    epoch_seen_is(IyiMark.epoch)
     lost_free(record, id)
     # Roots: the stacks the mark read - the running one as it read it,
     # since the collector's own frames on it have changed since.
@@ -335,14 +330,22 @@ class IyiHeapVerify
     inject_here if @@false_words
     # The runtime lock's spin parks for a pause: one that came while the
     # scan ran leaves the mark stale, and the collection ends unswept.
-    IyiMark.epoch == @@epoch_seen && LibIyiGCTable.__iyi_marking == 0_u8
+    IyiMark.epoch == epoch_seen && LibIyiGCTable.__iyi_marking == 0_u8
+  end
+
+  def self.epoch_seen : UInt64
+    Pointer(UInt64).new(IyiStat.own_at(IyiStat::OWN_EPOCH_SEEN)).value
+  end
+
+  def self.epoch_seen_is(epoch : UInt64) : Nil
+    Pointer(UInt64).new(IyiStat.own_at(IyiStat::OWN_EPOCH_SEEN)).value = epoch
   end
 
   # A unit's death, its `LOCAL` chunks about to be freed: none may be
   # named from anywhere the program reaches.
   def self.check_death(record : UInt64, id : UInt64) : Nil
-    stat(pointerof(@@death_checks).address)
-    @@epoch_seen = IyiMark.epoch
+    stat(IyiStat.at(IyiStat::VERIFY_DEATH_CHECKS))
+    epoch_seen_is(IyiMark.epoch)
     scan_everything(record, id, 0_u64, true)
     IyiRoots.clear_dead_stack
     if @@trace
@@ -759,7 +762,7 @@ class IyiHeapVerify
   end
 
   def self.scan_chunk(record : UInt64, id : UInt64, parity : UInt64, death : Bool, kind : Int32, owner : UInt64, arena : UInt64, head : UInt64, slot : UInt64, bits : UInt64) : Nil
-    @@scanned = @@scanned &+ 1_u64
+    IyiStat.bump(IyiStat::VERIFY_SCANNED, 1_u64)
     chunk = IyiHeap.arena_chunk(arena)
     base = bits & IyiHeap::HEADED_FLAG != 0 ? head &+ IyiHeap::HEADER : head
     size = bits & IyiHeap::HEADED_FLAG != 0 ? chunk &- IyiHeap::HEADER : chunk
@@ -778,7 +781,7 @@ class IyiHeapVerify
       return if death || flags & IyiHeap::OWN_LMARK != parity
     end
     type_id = word.unsafe_shr(IyiHeap::TYPE_SHIFT)
-    @@scanned = @@scanned &+ 1_u64
+    IyiStat.bump(IyiStat::VERIFY_SCANNED, 1_u64)
     scan_object(record, id, parity, death, K_LARGE, owner, base, IyiHeap.read64(node + IyiHeap::OFF_MAP) - IyiHeap::LARGE_USER, type_id)
   end
 
@@ -821,7 +824,7 @@ class IyiHeapVerify
       pause = pause + 1
     end
     return if IyiHeap.read64(address) != word
-    return if IyiMark.epoch != @@epoch_seen || (!death && LibIyiGCTable.__iyi_marking != 0_u8)
+    return if IyiMark.epoch != epoch_seen || (!death && LibIyiGCTable.__iyi_marking != 0_u8)
     return if target_of(record, id, parity, death, word) != target
     report_begin(id)
     say(death ? "  at its unit's death, a slot names one of its LOCAL chunks, about to be freed\n" : "  a slot names a LOCAL chunk its local mark left unmarked, about to be freed\n")
@@ -1024,7 +1027,7 @@ class IyiHeapVerify
     record = IyiHeap.partition_at(id)
     say_hex(record == 0 ? 0_u64 : IyiHeap.read64(record &+ IyiHeap::REC_UNIT))
     say(", check ")
-    say_dec(@@checks)
+    say_dec(IyiStat.get(IyiStat::VERIFY_CHECKS))
     say("\n")
   end
 
@@ -1070,8 +1073,8 @@ class IyiHeapVerify
   # Plain, for the reason `at_point`'s count is: the injector runs at a
   # chaos point.
   def self.noise : UInt64
-    state = @@noise &+ 0x9E3779B97F4A7C15_u64
-    @@noise = state
+    state = IyiStat.get(IyiStat::VERIFY_NOISE) &+ 0x9E3779B97F4A7C15_u64
+    IyiStat.set(IyiStat::VERIFY_NOISE, state)
     IyiChaosMix.mix(state)
   end
 
@@ -1201,7 +1204,7 @@ class IyiHeapVerify
       Pointer(UInt64).new(start - k * 8_u64).value = false_word(own, arenas)
       k = k + 1_u64
     end
-    stat(pointerof(@@injected).address)
+    stat(IyiStat.at(IyiStat::VERIFY_INJECTED))
   end
 end
 

@@ -158,12 +158,21 @@ require "./atomic"
 # thread can be holding it. A size class's centre has a lock of its own,
 # taken inside this one when both are (`IyiHeap.class_lock`). Bit 0
 # holds it, bits 1-15 count the spinners `IyiThread.lock_turn` counts, by
-# 2, and each release adds 1 at bit 16.
+# 2, and each release adds 1 at bit 16: a count of releases, so the word
+# is `IyiStat`'s, off the data segment, wherever that page is - past some
+# 65,000 releases it reads as an address above 4 GiB, where macOS maps
+# the heap.
 class IyiRuntimeLock
-  @@word : UInt64 = 0_u64
+  {% unless (!flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || flag?(:darwin) || flag?(:win32))) || (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
+    @@word : UInt64 = 0_u64
+  {% end %}
 
   def self.word : Pointer(Atomic(UInt64))
-    Pointer(Atomic(UInt64)).new(pointerof(@@word).address)
+    {% if (!flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || flag?(:darwin) || flag?(:win32))) || (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
+      IyiStat.atomic(IyiStat::RUNTIME_LOCK)
+    {% else %}
+      Pointer(Atomic(UInt64)).new(pointerof(@@word).address)
+    {% end %}
   end
 
   def self.lock : Nil
@@ -172,7 +181,7 @@ class IyiRuntimeLock
     # fifteen helpers spinning on one slowed the holder.
     spins = 0_i64
     since = 0_u64
-    until ((seen = word.value.get) & 1_u64) == 0_u64 && ((seen & 0xFFFE_u64) == 0_u64 || spins != 0) && (spins < 0 ? word.value.compare_and_set(seen, seen &- 1_u64)[1] : (IyiAtomic.rmw(:or, pointerof(@@word), 1_u64, :sequentially_consistent, false) & 1_u64) == 0_u64)
+    until ((seen = word.value.get) & 1_u64) == 0_u64 && ((seen & 0xFFFE_u64) == 0_u64 || spins != 0) && (spins < 0 ? word.value.compare_and_set(seen, seen &- 1_u64)[1] : (IyiAtomic.rmw(:or, word.as(Pointer(UInt64)), 1_u64, :sequentially_consistent, false) & 1_u64) == 0_u64)
       {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
         spins, since = IyiThread.lock_turn(word, seen, spins, since)
       {% end %}
@@ -188,7 +197,7 @@ class IyiRuntimeLock
   # One try, no wait and no park: for a walk that must not park here.
   def self.try_lock : Bool
     word = self.word
-    ((seen = word.value.get) & 1_u64) == 0_u64 && (IyiAtomic.rmw(:or, pointerof(@@word), 1_u64, :sequentially_consistent, false) & 1_u64) == 0_u64
+    ((seen = word.value.get) & 1_u64) == 0_u64 && (IyiAtomic.rmw(:or, word.as(Pointer(UInt64)), 1_u64, :sequentially_consistent, false) & 1_u64) == 0_u64
   end
 
   def self.unlock : Nil
@@ -3661,8 +3670,8 @@ require "./file"
         set_idle(arena, low, high, false)
         set_cold(arena, low, high, false) unless warm
         idle_sub(arena, stop - page, warm)
-        Pointer(Atomic(UInt64)).new(pointerof(@@pages_reopened).address).value.add(stop - page)
-        Pointer(Atomic(UInt64)).new(pointerof(@@pages_rewarmed).address).value.add(stop - page) if warm
+        IyiStat.add(IyiStat::PAGES_REOPENED, stop - page)
+        IyiStat.add(IyiStat::PAGES_REWARMED, stop - page) if warm
         {low, high}
       end
 
@@ -3741,33 +3750,24 @@ require "./file"
         head
       end
 
-      @@pages_released : UInt64 = 0_u64
-      @@pages_retained : UInt64 = 0_u64
-      @@pages_reopened : UInt64 = 0_u64
-      @@pages_rewarmed : UInt64 = 0_u64
-
       # Pages the sweep handed back cold, pages it kept warm, pages the
       # carve took up again and how many of those were warm, in all: the
       # exercises and `bench/resident_probe.iyi` read them.
       def self.pages_released : UInt64
-        @@pages_released
+        IyiStat.get(IyiStat::PAGES_RELEASED)
       end
 
       def self.pages_retained : UInt64
-        @@pages_retained
+        IyiStat.get(IyiStat::PAGES_RETAINED)
       end
 
       def self.pages_reopened : UInt64
-        @@pages_reopened
+        IyiStat.get(IyiStat::PAGES_REOPENED)
       end
 
       def self.pages_rewarmed : UInt64
-        @@pages_rewarmed
+        IyiStat.get(IyiStat::PAGES_REWARMED)
       end
-
-      @@release_calls : UInt64 = 0_u64
-      @@release_calls_inside : UInt64 = 0_u64
-      @@release_ns : UInt64 = 0_u64
 
       # A run of pages handed back (`__iyi_release_pages`), counted: the
       # calls, the calls made by a thread inside the allocator - an
@@ -3784,27 +3784,27 @@ require "./file"
         {% end %}
         __iyi_release_pages(address, length)
         {% if flag?(:gc_release_timing) %}
-          Pointer(Atomic(UInt64)).new(pointerof(@@release_ns).address).value.add(IyiMark.now_ns - started)
+          IyiStat.add(IyiStat::RELEASE_NS, IyiMark.now_ns - started)
         {% end %}
-        Pointer(Atomic(UInt64)).new(pointerof(@@release_calls).address).value.add(1_u64)
-        Pointer(Atomic(UInt64)).new(pointerof(@@release_calls_inside).address).value.add(1_u64) if inside
-        Pointer(Atomic(UInt64)).new(pointerof(@@pages_released).address).value.add(length.unsafe_shr(PAGE_SHIFT))
+        IyiStat.add(IyiStat::RELEASE_CALLS, 1_u64)
+        IyiStat.add(IyiStat::RELEASE_CALLS_INSIDE, 1_u64) if inside
+        IyiStat.add(IyiStat::PAGES_RELEASED, length.unsafe_shr(PAGE_SHIFT))
       end
 
       def self.release_calls : UInt64
-        @@release_calls
+        IyiStat.get(IyiStat::RELEASE_CALLS)
       end
 
       def self.release_calls_inside : UInt64
-        @@release_calls_inside
+        IyiStat.get(IyiStat::RELEASE_CALLS_INSIDE)
       end
 
       def self.release_ns : UInt64
-        @@release_ns
+        IyiStat.get(IyiStat::RELEASE_NS)
       end
 
       def self.pages_retained_add(count : UInt64) : Nil
-        Pointer(Atomic(UInt64)).new(pointerof(@@pages_retained).address).value.add(count)
+        IyiStat.add(IyiStat::PAGES_RETAINED, count)
       end
 
       # A chunk nobody was handed, as a reader without the lock may ask -
@@ -3941,12 +3941,11 @@ require "./file"
       # churn's longest pause read 4 to 10 ms in three runs of twelve
       # where it reads 0.1 to 0.35. Linux only; darwin has no such advice.
       HUGE_AT = 4194304_u64
-      @@arenas_mapped : UInt64 = 0_u64
 
       # Mappings made, in all: with `IyiMark.arenas_released` the churn
       # of arenas a program's classes went through.
       def self.arenas_mapped : UInt64
-        @@arenas_mapped
+        IyiStat.get(IyiStat::ARENAS_MAPPED)
       end
 
       def self.map_arena(index : Int32, owner : UInt64) : UInt64
@@ -3954,7 +3953,7 @@ require "./file"
         {% if flag?(:linux) %}
           __iyi_madvise_nohuge(base, HUGE_AT)
         {% end %}
-        @@arenas_mapped = @@arenas_mapped &+ 1_u64
+        IyiStat.bump(IyiStat::ARENAS_MAPPED, 1_u64)
         chunk = chunk_of(index)
         # The tables: a byte and then sixteen bits for every chunk the
         # mapping could hold past the header page, and the grid on the
@@ -5618,24 +5617,12 @@ require "./file"
       @@helpers_wanted : UInt64 = 0_u64
       @@helpers_decided : Bool = false
       @@workers_set : Bool = false
-      @@last_marked : UInt64 = 0_u64
       PARALLEL_FROM = 1048576_u64
 
-      # What the last sweep reclaimed and kept, and how many collections have
-      # run. Literal initializers, so codegen folds them to a static zero the
-      # way every other piece of state in this file does.
-      @@swept : UInt64 = 0_u64
-      @@kept : UInt64 = 0_u64
-      @@bytes_freed : UInt64 = 0_u64
-      @@bytes_kept : UInt64 = 0_u64
-      # What the sweep walked: every carved byte of every arena, live or
-      # not, which is what a sweep costs and what the budget is floored by.
-      @@bytes_walked : UInt64 = 0_u64
-      @@collections : UInt64 = 0_u64
-      @@arenas_released : UInt64 = 0_u64
-      @@pause_last : UInt64 = 0_u64
-      @@pause_max : UInt64 = 0_u64
-      @@pause_total : UInt64 = 0_u64
+      # What the sweeps reclaimed, kept and walked - every carved byte of
+      # every arena, live or not, which is what a sweep costs and what the
+      # budget is floored by - how many collections have run, and the
+      # pauses: `IyiStat`'s words, read below (`swept`, `pause_max_ns`).
 
       # The pause clock. Linux reads CLOCK_MONOTONIC through the vDSO
       # (`IyiClock`), the timespec in the caller's frame, because a
@@ -5868,15 +5855,13 @@ require "./file"
         IyiHeap.write64(w + W_STACK, stack)
         IyiHeap.write64(w + W_CAP, grown)
         __iyi_munmap(old, cap * 8_u64)
-        @@stacks_grown = @@stacks_grown + 1_u64
+        IyiStat.bump(IyiStat::STACKS_GROWN, 1_u64)
         stack
       end
 
-      @@stacks_grown : UInt64 = 0_u64
-
       # Times a worker's stack doubled, in all: the exercises read it.
       def self.stacks_grown : UInt64
-        @@stacks_grown
+        IyiStat.get(IyiStat::STACKS_GROWN)
       end
 
       # ── The write barrier's half ────────────────────────────────────────
@@ -6367,7 +6352,7 @@ require "./file"
         @@collector_worker = w
         IyiHeap.write64(w + W_LEN, 0_u64)
         IyiHeap.write64(w + W_BYTES, 0_u64)
-        @@bytes_marked = 0_u64
+        IyiStat.set(IyiStat::BYTES_MARKED, 0_u64)
         arena = IyiHeap.first_arena
         while arena != 0
           IyiHeap.arena_live_reset(arena)
@@ -6382,7 +6367,7 @@ require "./file"
         # the mark waking, contending for the pool and detecting the end
         # (94 ms across binary trees against 47 with three), and a large
         # live set is where they pay.
-        helpers = @@last_marked.unsafe_div(PARALLEL_FROM)
+        helpers = IyiStat.get(IyiStat::LAST_MARKED).unsafe_div(PARALLEL_FROM)
         helpers = @@helpers_wanted if helpers > @@helpers_wanted
         if helpers > 0_u64
           start_helpers(helpers)
@@ -6390,7 +6375,7 @@ require "./file"
         end
         @@workers = helpers + 1_u64
         pool_word(POOL_FINISH).value.set(0_u64)
-        @@helper_black = 0_u64
+        IyiStat.set(IyiStat::HELPER_BLACK, 0_u64)
         # This thread is counted in now, before a helper can see the
         # generation: counted in by its own drain, a helper that woke in
         # the instant between the turn and that count found no worker
@@ -6419,8 +6404,8 @@ require "./file"
         while pool_word(POOL_HELPERS_DONE).value.get < takers
           spin_pause
         end
-        @@bytes_marked = @@bytes_marked + IyiHeap.read64(w + W_BYTES)
-        @@last_marked = @@bytes_marked
+        IyiStat.bump(IyiStat::BYTES_MARKED, IyiHeap.read64(w + W_BYTES))
+        IyiStat.set(IyiStat::LAST_MARKED, IyiStat.get(IyiStat::BYTES_MARKED))
         @@workers = 0_u64
         mark_ends
         black
@@ -6551,12 +6536,11 @@ require "./file"
       MARK_OVERDUE_NS = 10000000000_u64
       OVERDUE_LOOK = 64_u64
       OVERDUE_SPINS = 65536_u64
-      @@mark_began : UInt64 = 0_u64
 
       # A mark's clock started, inside the stop that begins it.
       def self.mark_begins : Nil
         began = now_ns
-        @@mark_began = began
+        IyiStat.set(IyiStat::MARK_BEGAN_NS, began)
         pool_word(POOL_OVERDUE_AT).value.set(began + MARK_OVERDUE_NS)
       end
 
@@ -6590,7 +6574,7 @@ require "./file"
         return if at == 0_u64
         now = now_ns
         return if now < at
-        age = now - @@mark_began
+        age = now - IyiStat.get(IyiStat::MARK_BEGAN_NS)
         return unless due.value.compare_and_set(at, now + age)[1]
         line = line_text(w, w + W_LINE, "iyi: the collector's mark has run ")
         line = line_number(w, line, age.unsafe_div(1000000_u64))
@@ -6817,8 +6801,8 @@ require "./file"
       # per-arena counts were flushed by the drain.
       def self.fold_helper(w : UInt64) : Nil
         pool_lock
-        @@bytes_marked = @@bytes_marked + IyiHeap.read64(w + W_BYTES)
-        @@helper_black = @@helper_black + IyiHeap.read64(w + W_BLACK)
+        IyiStat.bump(IyiStat::BYTES_MARKED, IyiHeap.read64(w + W_BYTES))
+        IyiStat.bump(IyiStat::HELPER_BLACK, IyiHeap.read64(w + W_BLACK))
         pool_unlock
         # Folded once: the second stop folds every worker page's bytes
         # for the mutators' assists, and a helper's page is on that list
@@ -6830,10 +6814,8 @@ require "./file"
       # helpers were woken and found nothing to share, which
       # `bench/parallel_mark.sh` refuses.
       def self.helper_black : UInt64
-        @@helper_black
+        IyiStat.get(IyiStat::HELPER_BLACK)
       end
-
-      @@helper_black : UInt64 = 0_u64
 
       # The helpers the last mark beside the program asked for, for the
       # exercises: on Windows no more than the cores the program's own
@@ -7130,7 +7112,7 @@ require "./file"
           IyiHeap.leave_barrier
           return arena
         end
-        epoch = @@epoch
+        epoch = IyiStat.get(IyiStat::EPOCH)
         batch = sweep_slice(arena, SWEEP_SPAN)
         index = IyiHeap.class_index(IyiHeap.arena_chunk(arena))
         IyiHeap.class_lock(index)
@@ -7164,7 +7146,7 @@ require "./file"
         arena = claim_class(index, 1)
         IyiHeap.class_unlock(index)
         return arena if arena < 4_u64
-        epoch = @@epoch
+        epoch = IyiStat.get(IyiStat::EPOCH)
         batch = sweep_slice(arena, SWEEP_SPAN)
         IyiHeap.class_lock(index)
         release_claim(arena, epoch)
@@ -7180,7 +7162,7 @@ require "./file"
       # is begun here: its cursor set to its first chunk, the count of
       # unbegun arenas down by one. The walk is the class's own arenas.
       def self.claim_class(index : Int32, who : Int32) : UInt64
-        epoch = @@epoch
+        epoch = IyiStat.get(IyiStat::EPOCH)
         busy = false
         arena = IyiHeap.class_first(index)
         while arena != 0
@@ -7251,9 +7233,9 @@ require "./file"
       def self.begin_arena(arena : UInt64, epoch : UInt64, who : Int32) : Nil
         IyiHeap.arena_epoch_set(arena, epoch)
         IyiHeap.write64(arena + IyiHeap::OFF_SWEEP_CURSOR, IyiHeap.arena_first(arena))
-        count_down(pointerof(@@unswept).address)
-        Pointer(Atomic(UInt64)).new(pointerof(@@swept_by_helpers).address).value.add(1_u64) if who == 2
-        Pointer(Atomic(UInt64)).new(pointerof(@@swept_by_allocator).address).value.add(1_u64) if who == 1
+        count_down(IyiStat.at(IyiStat::UNSWEPT))
+        IyiStat.add(IyiStat::SWEPT_BY_HELPERS, 1_u64) if who == 2
+        IyiStat.add(IyiStat::SWEPT_BY_ALLOCATOR, 1_u64) if who == 1
       end
 
       # One off a count the heap shares, never below zero.
@@ -7270,13 +7252,13 @@ require "./file"
       # arena of an epoch that is gone, and the new epoch's count is the
       # new epoch's.
       def self.arena_done(arena : UInt64, epoch : UInt64) : Nil
-        return unless @@epoch == epoch && IyiHeap.mapped?(arena)
+        return unless IyiStat.get(IyiStat::EPOCH) == epoch && IyiHeap.mapped?(arena)
         return unless IyiHeap.read64(arena + IyiHeap::OFF_SWEEP_CURSOR) == IyiHeap::SWEEP_DONE
         # Once: a walker that waited out a pause that finished its arena
         # comes here after the pause did.
         return if IyiHeap.read64(arena + IyiHeap::OFF_SWEEP_COUNTED) == epoch
         IyiHeap.write64(arena + IyiHeap::OFF_SWEEP_COUNTED, epoch)
-        count_down(pointerof(@@sweep_left).address)
+        count_down(IyiStat.at(IyiStat::SWEEP_LEFT))
         IyiHeap.sweep_left_add(IyiHeap.class_index(IyiHeap.arena_chunk(arena)), -1_i64)
       end
 
@@ -7298,7 +7280,7 @@ require "./file"
       # at the runtime lock after its slice, whose batch that helper will
       # discard. Answers whether there was one.
       def self.sweep_one_held : Bool
-        epoch = @@epoch
+        epoch = IyiStat.get(IyiStat::EPOCH)
         arena = IyiHeap.first_arena
         while arena != 0 && !sweep_left?(arena, epoch)
           arena = IyiHeap.arena_next(arena)
@@ -7319,7 +7301,7 @@ require "./file"
       # is inside a slice of is left to the pause. Answers whether there
       # was one.
       def self.sweep_one_before_stop : Bool
-        epoch = @@epoch
+        epoch = IyiStat.get(IyiStat::EPOCH)
         arena = claim_slice(0_u64, 0)
         return false if arena < 4_u64
         # The walk at the thread's own priority on Windows, as before a
@@ -7347,7 +7329,7 @@ require "./file"
       # spins on a class's batch only while one is coming.
       def self.helpers_sweeping? : Bool
         {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
-          @@helpers > 0_u64 && @@sweep_left != 0_u64 && pool_word(POOL_SWEEP).value.get != 0_u64
+          @@helpers > 0_u64 && IyiStat.get(IyiStat::SWEEP_LEFT) != 0_u64 && pool_word(POOL_SWEEP).value.get != 0_u64
         {% else %}
           false
         {% end %}
@@ -7400,7 +7382,7 @@ require "./file"
             end
             return true
           end
-          epoch = @@epoch
+          epoch = IyiStat.get(IyiStat::EPOCH)
           # The class, read before the walk rather than past the runtime
           # lock, which a whole collection may come and go behind.
           index = IyiHeap.class_index(IyiHeap.arena_chunk(arena))
@@ -7410,7 +7392,7 @@ require "./file"
           IyiHeap.class_lock(index)
           release_claim(arena, epoch)
           arena_done(arena, epoch)
-          IyiHeap.push_batch(index, batch) if batch != 0 && @@epoch == epoch
+          IyiHeap.push_batch(index, batch) if batch != 0 && IyiStat.get(IyiStat::EPOCH) == epoch
           IyiHeap.class_unlock(index)
           IyiRuntimeLock.unlock
           true
@@ -7425,7 +7407,7 @@ require "./file"
         # every platform waking them all, and the first SWEEP_HELPERS take
         # a permit.
         def self.open_sweep_round : Nil
-          return if @@helpers == 0_u64 || @@sweep_left == 0_u64
+          return if @@helpers == 0_u64 || IyiStat.get(IyiStat::SWEEP_LEFT) == 0_u64
           open_mark_permits(0_u64)
           pool_word(POOL_HELPERS_DONE).value.set(0_u64)
           pool_word(POOL_SWEEP_PERMITS).value.set(@@helpers < SWEEP_HELPERS ? @@helpers : SWEEP_HELPERS)
@@ -7494,7 +7476,6 @@ require "./file"
       # linked the same pages a second time while the program carved the
       # frontier or waited (GC_DESIGN.md, the footprint section).
       RELEASE_PAGES = 2_u64
-      @@kept_warm : UInt64 = 0_u64
 
       # One slice: from the arena's cursor, `span` bytes or to its high
       # water, whichever is first; the cursor written back at the end,
@@ -7518,7 +7499,7 @@ require "./file"
         end
         stop = high
         stop = cursor + span if stop - cursor > span
-        @@bytes_walked = @@bytes_walked + (stop - cursor)
+        IyiStat.bump(IyiStat::BYTES_WALKED, stop - cursor)
         # The uncarved part of the bump region, read once. The cursor
         # rises within a region, and a chunk carved past the value read
         # here wears this epoch's parity and is left alone either way; a
@@ -7643,10 +7624,10 @@ require "./file"
           mark = mark &+ 1_u64
           slot = slot &+ 1_u64
         end
-        @@swept = @@swept + swept
-        @@bytes_freed = @@bytes_freed + freed
-        @@kept = @@kept + kept
-        @@bytes_kept = @@bytes_kept + kept_bytes
+        IyiStat.bump(IyiStat::SWEPT, swept)
+        IyiStat.bump(IyiStat::BYTES_FREED, freed)
+        IyiStat.bump(IyiStat::KEPT, kept)
+        IyiStat.bump(IyiStat::BYTES_KEPT, kept_bytes)
         # The run in progress closes at the slice's end and the next slice
         # begins one of its own: a run cut back for a page release is the
         # batch's newest prefix, and a batch handed over is nobody's to
@@ -7793,18 +7774,16 @@ require "./file"
       # 157-203 MB against 367-434; 4 workers 1.91M-1.92M against
       # 1.94M-1.96M, 25-26 MB against 26-30; over HTTP to wrk at 12
       # workers 215k against 220k.
-      @@warm_extra : UInt64 = 0_u64
-      @@reopened_cold : UInt64 = 0_u64
 
       # The carry-over as it stands, for the exercises and the benches.
       def self.warm_extra : UInt64
-        @@warm_extra
+        IyiStat.get(IyiStat::WARM_EXTRA)
       end
 
       def self.warm_pages(chunk : UInt64, pages : UInt64) : UInt64
-        kept = Pointer(Atomic(UInt64)).new(pointerof(@@kept_warm).address)
+        kept = IyiStat.atomic(IyiStat::KEPT_WARM)
         seen = kept.value.get
-        limit = budget + @@warm_extra
+        limit = budget + IyiStat.get(IyiStat::WARM_EXTRA)
         return 0_u64 if seen >= limit
         floor = chunk > 128_u64 ? IyiHeap.chunk_of(IyiHeap.class_index(chunk) - 1) + 1_u64 : chunk
         per_page = (IyiHeap::PAGE * (floor - IyiHeap::HEADER)).unsafe_div(chunk)
@@ -7842,15 +7821,13 @@ require "./file"
       # against 1.51M.
       IDLE_EPOCHS = 3_u64
       IDLE_NS = 1000000000_u64
-      @@epoch_ns : UInt64 = 0_u64
-      @@first_turn_ns : UInt64 = 0_u64
 
       # When this epoch began, read by the refill for its stamp.
       def self.epoch_ns : UInt64
-        @@epoch_ns
+        IyiStat.get(IyiStat::EPOCH_NS)
       end
 
-      # The first epoch has no start on record (`@@epoch_ns` is 0 until
+      # The first epoch has no start on record (`EPOCH_NS` is 0 until
       # the first turn), so a class refilled only in it carries a stamp of
       # 0, which every clock reading is more than a second past: three
       # collections in, it was idle however short they were. Measured on
@@ -7862,9 +7839,9 @@ require "./file"
       def self.class_idle?(chunk : UInt64) : Bool
         line = IyiHeap.class_line(IyiHeap.class_index(chunk))
         used_ns = IyiHeap.read64(line + IyiHeap::CLASS_USED_NS)
-        used_ns = @@first_turn_ns if used_ns == 0_u64
-        @@epoch - IyiHeap.read64(line + IyiHeap::CLASS_USED) >= IDLE_EPOCHS &&
-          @@epoch_ns - used_ns >= IDLE_NS
+        used_ns = IyiStat.get(IyiStat::FIRST_TURN_NS) if used_ns == 0_u64
+        IyiStat.get(IyiStat::EPOCH) - IyiHeap.read64(line + IyiHeap::CLASS_USED) >= IDLE_EPOCHS &&
+          IyiStat.get(IyiStat::EPOCH_NS) - used_ns >= IDLE_NS
       end
 
       # A run of idle pages `[low, high)` the slice met, left by an earlier
@@ -7975,7 +7952,7 @@ require "./file"
             spared = spared + IyiHeap::MAP
             previous = arena
           elsif empty && IyiHeap.release_arena(previous, arena)
-            @@arenas_released = @@arenas_released + 1_u64
+            IyiStat.bump(IyiStat::ARENAS_RELEASED, 1_u64)
           else
             previous = arena
           end
@@ -7992,8 +7969,8 @@ require "./file"
           base = node + IyiHeap::LARGE_USER
           word = IyiHeap.read64(base - 8_u64)
           if word & COLOUR == WHITE && word & IyiHeap::EPOCH_FLAG != @@epoch_flag
-            @@bytes_freed = @@bytes_freed + IyiHeap.read64(node + IyiHeap::OFF_MAP) - IyiHeap::LARGE_USER
-            @@swept = @@swept + 1_u64
+            IyiStat.bump(IyiStat::BYTES_FREED, IyiHeap.read64(node + IyiHeap::OFF_MAP) - IyiHeap::LARGE_USER)
+            IyiStat.bump(IyiStat::SWEPT, 1_u64)
             # A partition's large object leaves its table first (heap22).
             {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
               owner = IyiHeap.read64(node + 16_u64) & 0xFFFF_u64
@@ -8001,9 +7978,9 @@ require "./file"
             {% end %}
             IyiHeap.free_large(node + IyiHeap::LARGE_HEAD)
           elsif word & COLOUR != WHITE
-            @@bytes_kept = @@bytes_kept + IyiHeap.read64(node + IyiHeap::OFF_MAP) - IyiHeap::LARGE_USER
+            IyiStat.bump(IyiStat::BYTES_KEPT, IyiHeap.read64(node + IyiHeap::OFF_MAP) - IyiHeap::LARGE_USER)
             IyiHeap.write64(base - 8_u64, (word - (word & COLOUR) - (word & IyiHeap::EPOCH_FLAG)) | @@epoch_flag)
-            @@kept = @@kept + 1_u64
+            IyiStat.bump(IyiStat::KEPT, 1_u64)
           end
           node = following
         end
@@ -8020,22 +7997,24 @@ require "./file"
       # sweep of their arena finds them where it finds the dead, and they
       # join whatever run they lie in.
       def self.begin_sweep : Nil
-        @@kept_warm = 0_u64
+        IyiStat.set(IyiStat::KEPT_WARM, 0_u64)
         # The pages the carve took up cold since the last turn are pages
         # the sweep released and the epoch wanted back: the warm budget
         # was short by that much (`warm_pages`), and this epoch keeps it.
         reopened_cold = IyiHeap.pages_reopened - IyiHeap.pages_rewarmed
-        @@warm_extra = @@warm_extra - @@warm_extra.unsafe_shr(4_u64) + (reopened_cold - @@reopened_cold) * IyiHeap::PAGE
-        @@reopened_cold = reopened_cold
-        @@epoch = @@epoch + 1_u64
-        @@epoch_ns = now_ns
-        @@first_turn_ns = @@epoch_ns if @@first_turn_ns == 0_u64
-        @@epoch_flag = (@@epoch & 1_u64) * IyiHeap::EPOCH_FLAG
-        @@swept = 0_u64
-        @@kept = 0_u64
-        @@bytes_freed = 0_u64
-        @@bytes_kept = 0_u64
-        @@bytes_walked = 0_u64
+        extra = IyiStat.get(IyiStat::WARM_EXTRA)
+        IyiStat.set(IyiStat::WARM_EXTRA, extra - extra.unsafe_shr(4_u64) + (reopened_cold - IyiStat.get(IyiStat::REOPENED_COLD)) * IyiHeap::PAGE)
+        IyiStat.set(IyiStat::REOPENED_COLD, reopened_cold)
+        IyiStat.bump(IyiStat::EPOCH, 1_u64)
+        turned = now_ns
+        IyiStat.set(IyiStat::EPOCH_NS, turned)
+        IyiStat.set(IyiStat::FIRST_TURN_NS, turned) if IyiStat.get(IyiStat::FIRST_TURN_NS) == 0_u64
+        @@epoch_flag = (IyiStat.get(IyiStat::EPOCH) & 1_u64) * IyiHeap::EPOCH_FLAG
+        IyiStat.set(IyiStat::SWEPT, 0_u64)
+        IyiStat.set(IyiStat::KEPT, 0_u64)
+        IyiStat.set(IyiStat::BYTES_FREED, 0_u64)
+        IyiStat.set(IyiStat::BYTES_KEPT, 0_u64)
+        IyiStat.set(IyiStat::BYTES_WALKED, 0_u64)
         debt = 0_u64
         index = 0
         while index < IyiHeap::CLASSES
@@ -8048,27 +8027,19 @@ require "./file"
           IyiHeap.sweep_left_add(IyiHeap.class_index(IyiHeap.arena_chunk(arena)), 1_i64)
           arena = IyiHeap.arena_next(arena)
         end
-        @@unswept = debt
-        @@sweep_left = debt
-        @@collections = @@collections + 1_u64
+        IyiStat.set(IyiStat::UNSWEPT, debt)
+        IyiStat.set(IyiStat::SWEEP_LEFT, debt)
+        IyiStat.bump(IyiStat::COLLECTIONS, 1_u64)
       end
 
-      @@epoch : UInt64 = 1_u64
       # `EPOCH_FLAG` or 0: the parity the allocator stamps on a chunk it
       # hands out, and the sweep compares against.
       @@epoch_flag : UInt64 = 16_u64
       # Arenas whose sweep for this epoch has not begun, and arenas with
       # any of it left - the second is the allocator's fast answer.
-      @@unswept : UInt64 = 0_u64
-      @@sweep_left : UInt64 = 0_u64
-      @@debt_paid_in_pause : UInt64 = 0_u64
-      @@debt_paid_before_stop : UInt64 = 0_u64
-      @@swept_by_allocator : UInt64 = 0_u64
-      @@swept_by_helpers : UInt64 = 0_u64
-      @@bytes_marked : UInt64 = 0_u64
 
       def self.epoch : UInt64
-        @@epoch
+        IyiStat.get(IyiStat::EPOCH)
       end
 
       def self.epoch_flag : UInt64
@@ -8078,7 +8049,7 @@ require "./file"
       # Arenas whose sweep this epoch has not begun: what the next pause
       # would have to sweep first, less the ones begun and unfinished.
       def self.debt : UInt64
-        @@unswept
+        IyiStat.get(IyiStat::UNSWEPT)
       end
 
       # Arenas the pauses swept before marking, in all — the lazy sweep's
@@ -8086,25 +8057,25 @@ require "./file"
       # Arenas a concurrent collection's triggering thread swept before its
       # first stop: paid by the program, but by nobody else's clock.
       def self.debt_paid_before_stop : UInt64
-        @@debt_paid_before_stop
+        IyiStat.get(IyiStat::DEBT_PAID_BEFORE_STOP)
       end
 
       def self.debt_paid_in_pause : UInt64
-        @@debt_paid_in_pause
+        IyiStat.get(IyiStat::DEBT_PAID_IN_PAUSE)
       end
 
       # Arenas the allocator began sweeping on its own time, outside any
       # pause; and the ones the helpers began.
       def self.swept_by_allocator : UInt64
-        @@swept_by_allocator
+        IyiStat.get(IyiStat::SWEPT_BY_ALLOCATOR)
       end
 
       def self.swept_by_helpers : UInt64
-        @@swept_by_helpers
+        IyiStat.get(IyiStat::SWEPT_BY_HELPERS)
       end
 
       def self.bytes_marked : UInt64
-        @@bytes_marked
+        IyiStat.get(IyiStat::BYTES_MARKED)
       end
 
       # The allocation-pressure trigger — what makes this a collector rather
@@ -8127,7 +8098,6 @@ require "./file"
       # its own memory until it turns it back on.
       MIN_BUDGET = 4194304_u64
 
-      @@budget : UInt64 = 0_u64
       @@collecting : Bool = false
       @@auto : Bool = true
 
@@ -8139,14 +8109,13 @@ require "./file"
       # allocation path is where it pays - at 100, binary trees was 35 MB
       # resident to 30 for a fifth more wall time. A program sets it
       # once, the way it sets `workers`.
-      @@growth : UInt64 = 200_u64
 
       def self.growth=(percent : UInt64) : Nil
-        @@growth = percent
+        IyiStat.set(IyiStat::GROWTH, percent)
       end
 
       def self.growth : UInt64
-        @@growth
+        IyiStat.get(IyiStat::GROWTH)
       end
 
       # The survivors grown by the percentage, floored at MIN_BUDGET for
@@ -8189,10 +8158,10 @@ require "./file"
           partitioned = partition_survived
           shared = survived > partitioned ? survived - partitioned : 0_u64
           allocating_threads
-          grown_shared = shared.unsafe_div(100_u64) * @@growth
+          grown_shared = shared.unsafe_div(100_u64) * IyiStat.get(IyiStat::GROWTH)
           return grown_shared < IyiHeap::SHARED_MIN ? IyiHeap::SHARED_MIN : grown_shared
         {% end %}
-        grown = survived.unsafe_div(100_u64) * @@growth
+        grown = survived.unsafe_div(100_u64) * IyiStat.get(IyiStat::GROWTH)
         floor = MIN_BUDGET
         {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
           floor = MIN_BUDGET * allocating_threads
@@ -8205,12 +8174,11 @@ require "./file"
       # registered thread that does not allocate adds nothing to the
       # sweep's arenas, and its stop is the pause's own. In the pause.
       @@allocating : UInt64 = 0_u64
-      @@round : UInt64 = 1_u64
 
       def self.allocating_threads : UInt64
         counted = Pointer(Atomic(UInt64)).new(pointerof(@@allocating).address).value.get
         Pointer(Atomic(UInt64)).new(pointerof(@@allocating).address).value.set(0_u64)
-        @@round = @@round + 1_u64
+        IyiStat.bump(IyiStat::ROUND, 1_u64)
         counted > 1_u64 ? counted : 1_u64
       end
 
@@ -8218,7 +8186,7 @@ require "./file"
       # the allocator's bracket, so no pause turns the round in between.
       def self.count_allocating : Nil
         page = IyiHeap.cache_page
-        round = @@round
+        round = IyiStat.get(IyiStat::ROUND)
         return if IyiHeap.read64(page + IyiHeap::CACHE_ROUND) == round
         IyiHeap.write64(page + IyiHeap::CACHE_ROUND, round)
         Pointer(Atomic(UInt64)).new(pointerof(@@allocating).address).value.add(1_u64)
@@ -8299,8 +8267,6 @@ require "./file"
       # against 100 to 102. `bench/working_set.iyi` holds the peak.
       HOLD_PAST = 125_u64
 
-      @@holds : UInt64 = 0_u64
-
       # What a collection lets the program allocate, counted from the
       # last one's end, before an allocating thread holds.
       def self.ceiling : UInt64
@@ -8326,11 +8292,11 @@ require "./file"
       HOLD_NS = 100000000_u64
 
       def self.hold : Nil
-        Pointer(Atomic(UInt64)).new(pointerof(@@holds).address).value.add(1_u64)
+        IyiStat.add(IyiStat::HOLDS, 1_u64)
         until_ns = now_ns + HOLD_NS
         while @@collecting && !IyiHeap.stop_requested?
           if now_ns >= until_ns
-            Pointer(Atomic(UInt64)).new(pointerof(@@holds_timed_out).address).value.add(1_u64)
+            IyiStat.add(IyiStat::HOLDS_TIMED_OUT, 1_u64)
             break
           end
           if LibIyiGCTable.__iyi_marking != 0_u8
@@ -8350,7 +8316,6 @@ require "./file"
 
       # The word a held thread sleeps on, turned as each collection is let
       # go (`let_go_holders`), and how many sleep on it.
-      @@let_go : UInt64 = 0_u64
       @@holders_asleep : UInt64 = 0_u64
       # Windows' doorbell for them, a kernel32 semaphore as the helpers'
       # is (`wait_generation`); darwin's empty kqueue, waited on for its
@@ -8388,7 +8353,7 @@ require "./file"
           end
           IyiHeap.write64(page + IyiHeap::CACHE_INSIDE, 0_u64)
           IyiThread.park_if_requested if IyiHeap.read64(page + IyiHeap::CACHE_REQUEST) != 0_u64
-          word = Pointer(Atomic(UInt64)).new(pointerof(@@let_go).address)
+          word = IyiStat.atomic(IyiStat::LET_GO)
           asleep = Pointer(Atomic(UInt64)).new(pointerof(@@holders_asleep).address)
           seen = word.value.get
           asleep.value.add(1_u64)
@@ -8397,7 +8362,7 @@ require "./file"
               timeout = IyiHeap.central.address + HOLD_TIMEOUT_AT
               IyiHeap.write64(timeout, 0_u64)
               IyiHeap.write64(timeout + 8_u64, 1000000_u64)
-              __iyi_conc_syscall6(IYI_SYS_FUTEX, pointerof(@@let_go).address.to_i64, IYI_FUTEX_WAIT, seen.to_i64, timeout.to_i64, 0_i64, 0_i64)
+              __iyi_conc_syscall6(IYI_SYS_FUTEX, IyiStat.at(IyiStat::LET_GO).to_i64, IYI_FUTEX_WAIT, seen.to_i64, timeout.to_i64, 0_i64, 0_i64)
             {% elsif flag?(:win32) %}
               bell = Pointer(Atomic(UInt64)).new(pointerof(@@holder_bell).address).value.get
               if bell == 0_u64
@@ -8442,30 +8407,26 @@ require "./file"
       # millisecond in. The world is still stopped, and a sleeper woken
       # runs when it is released.
       def self.let_go_holders : Nil
-        Pointer(Atomic(UInt64)).new(pointerof(@@let_go).address).value.add(1_u64)
+        IyiStat.add(IyiStat::LET_GO, 1_u64)
         asleep = Pointer(Atomic(UInt64)).new(pointerof(@@holders_asleep).address).value.get
         return if asleep == 0_u64
         {% if flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64)) %}
-          __iyi_conc_syscall6(IYI_SYS_FUTEX, pointerof(@@let_go).address.to_i64, IYI_FUTEX_WAKE, 1000000_i64, 0_i64, 0_i64, 0_i64)
+          __iyi_conc_syscall6(IYI_SYS_FUTEX, IyiStat.at(IyiStat::LET_GO).to_i64, IYI_FUTEX_WAKE, 1000000_i64, 0_i64, 0_i64, 0_i64)
         {% elsif flag?(:win32) && flag?(:x86_64) %}
           bell = @@holder_bell
           LibC.ReleaseSemaphore(Pointer(Void).new(bell), asleep.unsafe_to_i32, nil) if bell != 0_u64
         {% end %}
       end
 
-      @@holds_timed_out : UInt64 = 0_u64
-
       # Slices whose thread held at the ceiling, in all, and the holds a
       # collection outlasted.
       def self.holds : UInt64
-        @@holds
+        IyiStat.get(IyiStat::HOLDS)
       end
 
       def self.holds_timed_out : UInt64
-        @@holds_timed_out
+        IyiStat.get(IyiStat::HOLDS_TIMED_OUT)
       end
-
-      @@sweep_assists : UInt64 = 0_u64
 
       # The debt's assist: while a triggered collection's thread sweeps
       # what the last epoch left (`sweep_one_before_stop`), a thread past
@@ -8479,13 +8440,13 @@ require "./file"
         while @@collecting && LibIyiGCTable.__iyi_marking == 0_u8
           break if IyiHeap.stop_requested?
           break if sweep_one(0_u64) != 1_u64
-          Pointer(Atomic(UInt64)).new(pointerof(@@sweep_assists).address).value.add(1_u64)
+          IyiStat.add(IyiStat::SWEEP_ASSISTS, 1_u64)
         end
       end
 
       # Slices the debt's assists swept, in all, for the exercises.
       def self.sweep_assists : UInt64
-        @@sweep_assists
+        IyiStat.get(IyiStat::SWEEP_ASSISTS)
       end
 
       def self.collect_if_due : Nil
@@ -8696,14 +8657,14 @@ require "./file"
         # thread's. What a thread was inside a slice of is finished under
         # the stop, where no slice is in flight.
         while sweep_one_before_stop
-          @@debt_paid_before_stop = @@debt_paid_before_stop + 1_u64
+          IyiStat.bump(IyiStat::DEBT_PAID_BEFORE_STOP, 1_u64)
         end
         started = now_ns
         {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
           others = IyiThread.stop_others
         {% end %}
         while sweep_one_held
-          @@debt_paid_in_pause = @@debt_paid_in_pause + 1_u64
+          IyiStat.bump(IyiStat::DEBT_PAID_IN_PAUSE, 1_u64)
         end
         mark
         scavenge
@@ -8724,12 +8685,12 @@ require "./file"
           end
         {% end %}
         IyiHeap.allocated_word.value.set(0_u64)
-        # The next budget: what the mark found live times `@@growth` - twice
+        # The next budget: what the mark found live times `GROWTH` - twice
         # it by default, Go's GOGC=200 - floored at MIN_BUDGET so a small
         # program pays nothing. The mark knows the live bytes — it added
         # each object's size as it blackened it — which is what lets the
         # sweep be lazy: the budget no longer waits on a sweep to count.
-        @@budget = next_budget(@@bytes_marked)
+        IyiStat.set(IyiStat::BUDGET, next_budget(IyiStat.get(IyiStat::BYTES_MARKED)))
         # The collection let go before the threads are released, as helper
         # 0 lets its own go (`finish_concurrent`). `collect_locked`'s
         # callers and `finish_stopped` cleared the flag after the release,
@@ -8754,13 +8715,13 @@ require "./file"
         {% end %}
         pause = now_ns - started
         IyiHeap.unmap_released
-        @@pause_last = pause
-        @@pause_max = pause if pause > @@pause_max
-        @@pause_total = @@pause_total + pause
+        IyiStat.set(IyiStat::PAUSE_LAST_NS, pause)
+        IyiStat.set(IyiStat::PAUSE_MAX_NS, pause) if pause > IyiStat.get(IyiStat::PAUSE_MAX_NS)
+        IyiStat.bump(IyiStat::PAUSE_TOTAL_NS, pause)
       end
 
       def self.budget : UInt64
-        budget = @@budget
+        budget = IyiStat.get(IyiStat::BUDGET)
         budget == 0 ? MIN_BUDGET : budget
       end
 
@@ -8784,7 +8745,6 @@ require "./file"
         # live set is walked between them, by the helpers, while the
         # program runs.
         @@concurrent : Bool = false
-        @@stw_first_ns : UInt64 = 0_u64
 
         # Concurrent needs a thread to finish on: at least one helper.
         # Whether a mark *uses* one is not decided here and not from an
@@ -8848,19 +8808,19 @@ require "./file"
           # of sweeping against 20 us of roots), and it is what Stage 8's
           # sweep beside the program is for.
           while sweep_one_before_stop
-            @@debt_paid_before_stop = @@debt_paid_before_stop + 1_u64
+            IyiStat.bump(IyiStat::DEBT_PAID_BEFORE_STOP, 1_u64)
           end
           started = now_ns
           others = IyiThread.stop_others
           while sweep_one_held
-            @@debt_paid_in_pause = @@debt_paid_in_pause + 1_u64
+            IyiStat.bump(IyiStat::DEBT_PAID_IN_PAUSE, 1_u64)
           end
           w = worker
           @@collector_worker = w
           IyiHeap.write64(w + W_LEN, 0_u64)
           IyiHeap.write64(w + W_BYTES, 0_u64)
-          @@bytes_marked = 0_u64
-          @@helper_black = 0_u64
+          IyiStat.set(IyiStat::BYTES_MARKED, 0_u64)
+          IyiStat.set(IyiStat::HELPER_BLACK, 0_u64)
           arena = IyiHeap.first_arena
           while arena != 0
             IyiHeap.arena_live_reset(arena)
@@ -8881,13 +8841,13 @@ require "./file"
           # inside the bound is the whole live set and this stop is the
           # collection.
           # What the last mark kept, whole: the sweep debt was paid above.
-          bounded = drain_bounded(w, @@kept < STW_MARK_SMALL ? STW_MARK_SMALL : STW_MARK_BOUND)
+          bounded = drain_bounded(w, IyiStat.get(IyiStat::KEPT) < STW_MARK_SMALL ? STW_MARK_SMALL : STW_MARK_BOUND)
           if bounded
             # The whole live set, inside the bound: this stop is the
             # collection. The tail is `collect_locked`'s, and the caller
             # is told so.
-            @@bytes_marked = @@bytes_marked + IyiHeap.read64(w + W_BYTES)
-            @@last_marked = @@bytes_marked
+            IyiStat.bump(IyiStat::BYTES_MARKED, IyiHeap.read64(w + W_BYTES))
+            IyiStat.set(IyiStat::LAST_MARKED, IyiStat.get(IyiStat::BYTES_MARKED))
             @@workers = 0_u64
             mark_ends
             # The live counts this thread was holding into their arenas
@@ -8954,7 +8914,7 @@ require "./file"
           open_mark_permits(helpers)
           pool_word(POOL_GENERATION).value.add(1_u64)
           IyiThread.resume_others(others)
-          @@stw_first_ns = now_ns - started
+          IyiStat.set(IyiStat::STOP_FIRST_NS, now_ns - started)
           # The wake after the release: threads woken inside the stop were
           # the stop's largest part under load, and a helper's first
           # microseconds are the futex's either way. It is the program's
@@ -8962,9 +8922,9 @@ require "./file"
           woke = now_ns
           wake_helpers
           woke = now_ns - woke
-          @@wake_longest_ns = woke if woke > @@wake_longest_ns
-          @@wakes = @@wakes + 1_u64
-          @@wakes_slow = @@wakes_slow + 1_u64 if woke > WAKE_SLOW_NS
+          IyiStat.set(IyiStat::WAKE_LONGEST_NS, woke) if woke > IyiStat.get(IyiStat::WAKE_LONGEST_NS)
+          IyiStat.bump(IyiStat::WAKES, 1_u64)
+          IyiStat.bump(IyiStat::WAKES_SLOW, 1_u64) if woke > WAKE_SLOW_NS
           true
         end
 
@@ -8991,18 +8951,18 @@ require "./file"
           begin_sweep
           sweep_large
           IyiHeap.allocated_word.value.set(0_u64)
-          @@budget = next_budget(@@bytes_marked)
+          IyiStat.set(IyiStat::BUDGET, next_budget(IyiStat.get(IyiStat::BYTES_MARKED)))
           open_sweep_round
           @@collecting = false
           let_go_holders
           IyiThread.resume_others(others)
           pause = now_ns - started
           IyiHeap.unmap_released
-          @@stw_first_ns = pause
-          @@stop_second_ns = 0_u64
-          @@pause_last = pause
-          @@pause_max = pause if pause > @@pause_max
-          @@pause_total = @@pause_total + pause
+          IyiStat.set(IyiStat::STOP_FIRST_NS, pause)
+          IyiStat.set(IyiStat::STOP_SECOND_NS, 0_u64)
+          IyiStat.set(IyiStat::PAUSE_LAST_NS, pause)
+          IyiStat.set(IyiStat::PAUSE_MAX_NS, pause) if pause > IyiStat.get(IyiStat::PAUSE_MAX_NS)
+          IyiStat.bump(IyiStat::PAUSE_TOTAL_NS, pause)
         end
 
         # The second stop, on helper 0, once every helper found nothing.
@@ -9052,7 +9012,7 @@ require "./file"
                 # What the assists blackened on this mutator: its bytes
                 # into the collection's, its live counts into the arenas.
                 flush_live(page)
-                @@bytes_marked = @@bytes_marked + IyiHeap.read64(page + W_BYTES)
+                IyiStat.bump(IyiStat::BYTES_MARKED, IyiHeap.read64(page + W_BYTES))
                 IyiHeap.write64(page + W_BYTES, 0_u64)
               end
               page = IyiHeap.read64(page + W_NEXT)
@@ -9085,8 +9045,8 @@ require "./file"
             # The retreats are spent and work remains: with the helpers,
             # inside the stop, the one case the stop is not bounded.
             remainder_round(w) if unfinished
-            @@bytes_marked = @@bytes_marked + IyiHeap.read64(w + W_BYTES)
-            @@last_marked = @@bytes_marked
+            IyiStat.bump(IyiStat::BYTES_MARKED, IyiHeap.read64(w + W_BYTES))
+            IyiStat.set(IyiStat::LAST_MARKED, IyiStat.get(IyiStat::BYTES_MARKED))
             LibIyiGCTable.__iyi_marking = 0_u8
             mark_ends
             @@concurrent = false
@@ -9108,9 +9068,9 @@ require "./file"
               IyiHeap.write64(page + W_BORN, 0_u64)
               page = IyiHeap.read64(page + W_NEXT)
             end
-            survived = @@bytes_marked
+            survived = IyiStat.get(IyiStat::BYTES_MARKED)
             IyiHeap.allocated_word.value.set(born)
-            @@budget = next_budget(survived)
+            IyiStat.set(IyiStat::BUDGET, next_budget(survived))
             # The round opened before the threads are released: a thread
             # that refilled first found no round and swept the arena it
             # wanted - the largest - itself, a millisecond on the
@@ -9141,17 +9101,17 @@ require "./file"
             IyiThread.resume_others(others)
             pause = now_ns - started
             IyiHeap.unmap_released
-            @@stop_second_ns = pause
-            @@finish_retries = @@finish_retries + attempts
+            IyiStat.set(IyiStat::STOP_SECOND_NS, pause)
+            IyiStat.bump(IyiStat::FINISH_RETRIES, attempts)
             # Every stop is the collection's pause: the longest of them is
             # the number a program feels, and the sum is what it paid.
-            total = pause + @@stw_first_ns + retries_ns
-            longest = pause > @@stw_first_ns ? pause : @@stw_first_ns
+            total = pause + IyiStat.get(IyiStat::STOP_FIRST_NS) + retries_ns
+            longest = pause > IyiStat.get(IyiStat::STOP_FIRST_NS) ? pause : IyiStat.get(IyiStat::STOP_FIRST_NS)
             longest = longest_retry if longest_retry > longest
-            @@pause_last = longest
-            @@pause_max = longest if longest > @@pause_max
-            @@pause_total = @@pause_total + total
-            @@concurrent_collections = @@concurrent_collections + 1_u64
+            IyiStat.set(IyiStat::PAUSE_LAST_NS, longest)
+            IyiStat.set(IyiStat::PAUSE_MAX_NS, longest) if longest > IyiStat.get(IyiStat::PAUSE_MAX_NS)
+            IyiStat.bump(IyiStat::PAUSE_TOTAL_NS, total)
+            IyiStat.bump(IyiStat::CONCURRENT_COLLECTIONS, 1_u64)
             unlock_released
             wake_sweep_round
             return generation
@@ -9185,26 +9145,20 @@ require "./file"
           generation
         end
 
-        @@finish_retries : UInt64 = 0_u64
-
         # How many times a second stop found the pool full and retreated,
         # across every collection, for the exercises.
         def self.finish_retries : UInt64
-          @@finish_retries
+          IyiStat.get(IyiStat::FINISH_RETRIES)
         end
-
-        @@concurrent_collections : UInt64 = 0_u64
 
         # The last concurrent collection's two stops, for the exercises:
         # the roots stop on the triggering thread, and helper 0's finish.
-        @@stop_second_ns : UInt64 = 0_u64
-
         def self.stop_first_ns : UInt64
-          @@stw_first_ns
+          IyiStat.get(IyiStat::STOP_FIRST_NS)
         end
 
         def self.stop_second_ns : UInt64
-          @@stop_second_ns
+          IyiStat.get(IyiStat::STOP_SECOND_NS)
         end
 
         # The longest the triggering thread - the program's own - spent
@@ -9215,20 +9169,17 @@ require "./file"
         # help; a wake that lets the helpers take its core is slow again
         # and again.
         WAKE_SLOW_NS = 1000000_u64
-        @@wake_longest_ns : UInt64 = 0_u64
-        @@wakes : UInt64 = 0_u64
-        @@wakes_slow : UInt64 = 0_u64
 
         def self.wake_longest_ns : UInt64
-          @@wake_longest_ns
+          IyiStat.get(IyiStat::WAKE_LONGEST_NS)
         end
 
         def self.wakes : UInt64
-          @@wakes
+          IyiStat.get(IyiStat::WAKES)
         end
 
         def self.wakes_slow : UInt64
-          @@wakes_slow
+          IyiStat.get(IyiStat::WAKES_SLOW)
         end
 
         # Whether a mark is running beside the program right now: the byte
@@ -9239,7 +9190,7 @@ require "./file"
 
         # Collections that ran beside the program, for the exercises.
         def self.concurrent_collections : UInt64
-          @@concurrent_collections
+          IyiStat.get(IyiStat::CONCURRENT_COLLECTIONS)
         end
       {% end %}
 
@@ -9249,39 +9200,39 @@ require "./file"
       # and a hook in the hot path, and neither is worth adding before there is
       # something that reads them.
       def self.swept : UInt64
-        @@swept
+        IyiStat.get(IyiStat::SWEPT)
       end
 
       def self.kept : UInt64
-        @@kept
+        IyiStat.get(IyiStat::KEPT)
       end
 
       def self.bytes_freed : UInt64
-        @@bytes_freed
+        IyiStat.get(IyiStat::BYTES_FREED)
       end
 
       def self.bytes_kept : UInt64
-        @@bytes_kept
+        IyiStat.get(IyiStat::BYTES_KEPT)
       end
 
       def self.collections : UInt64
-        @@collections
+        IyiStat.get(IyiStat::COLLECTIONS)
       end
 
       def self.arenas_released : UInt64
-        @@arenas_released
+        IyiStat.get(IyiStat::ARENAS_RELEASED)
       end
 
       def self.pause_last_ns : UInt64
-        @@pause_last
+        IyiStat.get(IyiStat::PAUSE_LAST_NS)
       end
 
       def self.pause_max_ns : UInt64
-        @@pause_max
+        IyiStat.get(IyiStat::PAUSE_MAX_NS)
       end
 
       def self.pause_total_ns : UInt64
-        @@pause_total
+        IyiStat.get(IyiStat::PAUSE_TOTAL_NS)
       end
     end
   {% elsif flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64)) %}
@@ -10341,6 +10292,277 @@ require "./file"
              "Teach src/iyi/prelude.iyi a branch for this platform rather than " \
              "linking something absent." %}
   {% end %}
+{% end %}
+
+# The runtime's unscanned words: its statistics, clocks and counters - and
+# the runtime lock's word, whose high bits count releases - in a page of
+# their own, mapped at the first use and never given back, which is
+# neither the heap nor the image. A conservative scan reads the data
+# segment, the thread-local blocks and the stacks word by word
+# (`IyiRoots`, and the heap verifier at every local collection), and a
+# word there that falls inside a chunk is a holder of it, whatever the
+# word meant: `IyiHeap.local_ns`, the local collections' nanoseconds
+# summed, read 0x11c3b1a6d after 4.77 s of them on tmac, a `LOCAL` chunk
+# five bytes in, and the verifier ended heap_local's sound case "verify
+# release, 8 workers" at exit 86 naming the data segment's word (1 run of
+# 1, Lead10's final round; 0 of 6 on repeat). A sum of nanoseconds or
+# bytes, a clock reading, a count of events, a generation, a random
+# stream: each takes values a heap address takes, given time, and the
+# floors under the heap are low - an arena is a 16 MiB-aligned mapping,
+# a large object any mapping, which is 4 GiB up on macOS and 64 KiB up on
+# Windows. So none of them lives in a class variable. What stays in one
+# is an address of a mapping or of the image that the heap never shares,
+# a pointer the collector is meant to see, or a value below 65536 by
+# construction - a flag, a mode, a count of workers, helpers or
+# partitions (`PARTITIONS_MAX` is 65535) - where nothing is mapped on any
+# target and which the verifier skips. The page is mapped by whoever
+# first asks, one `compare_and_set` deciding between two who race, so a
+# stop or a collector asking first maps it without a lock; the words that
+# start other than 0 are written before it is published.
+#
+# Per thread, `own_at` answers a word of the calling thread's page, the
+# same way, for what was a `@[ThreadLocal]` word of that kind (the
+# verifier's last epoch, the chaos scheduler's stream on a real thread):
+# the thread-local block is scanned as the data segment is. Like the
+# partition scratch page, a thread's page outlives it.
+{% if (!flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || flag?(:darwin) || flag?(:win32))) || (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
+  {% if (flag?(:gc_none) || flag?(:gc_boehm)) && flag?(:darwin) %}
+    lib LibC
+      fun munmap(address : Void*, length : UInt64) : Int32
+    end
+  {% end %}
+
+  class IyiStat
+    PAGE = 4096_u64
+
+    # The slots, a word each, a group to a 64-byte line or more. The
+    # runtime lock's word has its line alone: every thread spins on it.
+    RUNTIME_LOCK = 0_u64
+    # The allocator (`IyiHeap`).
+    PAGES_RELEASED       =  8_u64
+    PAGES_RETAINED       =  9_u64
+    PAGES_REOPENED       = 10_u64
+    PAGES_REWARMED       = 11_u64
+    RELEASE_CALLS        = 12_u64
+    RELEASE_CALLS_INSIDE = 13_u64
+    RELEASE_NS           = 14_u64
+    ARENAS_MAPPED        = 15_u64
+    # The collector (`IyiMark`): what the allocator reads, then the
+    # holders' futex word alone, then what the sweep and the pauses count.
+    EPOCH        = 16_u64
+    UNSWEPT      = 17_u64
+    SWEEP_LEFT   = 18_u64
+    BUDGET       = 19_u64
+    GROWTH       = 20_u64
+    ROUND        = 21_u64
+    BYTES_MARKED = 22_u64
+    LAST_MARKED  = 23_u64
+    LET_GO       = 24_u64
+    SWEPT           = 32_u64
+    KEPT            = 33_u64
+    BYTES_FREED     = 34_u64
+    BYTES_KEPT      = 35_u64
+    BYTES_WALKED    = 36_u64
+    COLLECTIONS     = 37_u64
+    ARENAS_RELEASED = 38_u64
+    KEPT_WARM       = 39_u64
+    WARM_EXTRA            = 40_u64
+    REOPENED_COLD         = 41_u64
+    EPOCH_NS              = 42_u64
+    FIRST_TURN_NS         = 43_u64
+    DEBT_PAID_IN_PAUSE    = 44_u64
+    DEBT_PAID_BEFORE_STOP = 45_u64
+    SWEPT_BY_ALLOCATOR    = 46_u64
+    SWEPT_BY_HELPERS      = 47_u64
+    PAUSE_LAST_NS   = 48_u64
+    PAUSE_MAX_NS    = 49_u64
+    PAUSE_TOTAL_NS  = 50_u64
+    STOP_FIRST_NS   = 51_u64
+    STOP_SECOND_NS  = 52_u64
+    WAKE_LONGEST_NS = 53_u64
+    MARK_BEGAN_NS   = 54_u64
+    STACKS_GROWN    = 55_u64
+    HELPER_BLACK           = 56_u64
+    HOLDS                  = 57_u64
+    HOLDS_TIMED_OUT        = 58_u64
+    SWEEP_ASSISTS          = 59_u64
+    FINISH_RETRIES         = 60_u64
+    CONCURRENT_COLLECTIONS = 61_u64
+    WAKES                  = 62_u64
+    WAKES_SLOW             = 63_u64
+    # The stops (`IyiThread`).
+    STOPS          = 64_u64
+    STOPPED        = 65_u64
+    STOP_NS        = 66_u64
+    OWING_STOPS    = 67_u64
+    TURN_WAITS_OUT = 68_u64
+    # The scheduler (`IyiWorkers`, `IyiScheduler`).
+    STEALS      = 72_u64
+    GRABS       = 73_u64
+    PREEMPTS    = 74_u64
+    LOOKS       = 75_u64
+    OWES        = 76_u64
+    SLEEP_STEPS = 77_u64
+    PORT_JOINS  = 78_u64
+    # The partitions (heap_partition.iyi).
+    PINS              = 80_u64
+    PUBLISHED_OBJECTS = 81_u64
+    PUBLISHED_BYTES   = 82_u64
+    LOCAL_COLLECTIONS = 83_u64
+    LOCAL_NS          = 84_u64
+    LOCAL_MAX_NS      = 85_u64
+    LOCAL_ABORTS      = 86_u64
+    LOCAL_FREED       = 87_u64
+    MERGES            = 88_u64
+    FREED_WHOLE       = 89_u64
+    HANDED_SHARED     = 90_u64
+    RUNS_TAKEN        = 91_u64
+    RUNS_POOLED       = 92_u64
+    RUNS_DRAINED      = 93_u64
+    TAKEOVERS         = 94_u64
+    DETACHED          = 95_u64
+    RETURNED          = 96_u64
+    LARGE_FREED       = 97_u64
+    LOCAL_PAUSES      = 98_u64
+    # The verifier (heap_verify.iyi).
+    VERIFY_STRESS       = 104_u64
+    VERIFY_STRESS_TICK  = 105_u64
+    VERIFY_NOISE        = 106_u64
+    VERIFY_CHECKS       = 107_u64
+    VERIFY_DEATH_CHECKS = 108_u64
+    VERIFY_SCANNED      = 109_u64
+    VERIFY_INJECTED     = 110_u64
+    # The chaos scheduler (chaos.iyi).
+    CHAOS_SEED         = 112_u64
+    CHAOS_STREAM       = 113_u64
+    CHAOS_SCHEDULE     = 114_u64
+    CHAOS_STEPS        = 115_u64
+    CHAOS_YIELDS       = 116_u64
+    CHAOS_PICKS        = 117_u64
+    CHAOS_UNITS        = 118_u64
+    CHAOS_LAST_UNIT    = 119_u64
+    CHAOS_GENERATION   = 120_u64
+    CHAOS_THREADS_SEEN = 121_u64
+    CHAOS_LATE_STEPS   = 122_u64
+    CHAOS_FLOOR        = 123_u64
+    CHAOS_STREAK       = 124_u64
+
+    # A thread's own page's slots.
+    OWN_EPOCH_SEEN   = 0_u64
+    OWN_CHAOS_STREAM = 1_u64
+
+    @@page : UInt64 = 0_u64
+    @[ThreadLocal]
+    @@own : UInt64 = 0_u64
+
+    # The address of *slot*'s word.
+    @[AlwaysInline]
+    def self.at(slot : UInt64) : UInt64
+      page = @@page
+      page = map_shared if page == 0_u64
+      page &+ slot.unsafe_shl(3_u64)
+    end
+
+    @[AlwaysInline]
+    def self.get(slot : UInt64) : UInt64
+      Pointer(UInt64).new(at(slot)).value
+    end
+
+    @[AlwaysInline]
+    def self.set(slot : UInt64, value : UInt64) : Nil
+      Pointer(UInt64).new(at(slot)).value = value
+    end
+
+    # A plain read-modify-write, where one thread at a time writes the
+    # word (under a lock, or in a pause).
+    @[AlwaysInline]
+    def self.bump(slot : UInt64, amount : UInt64) : Nil
+      word = Pointer(UInt64).new(at(slot))
+      word.value = word.value &+ amount
+    end
+
+    @[AlwaysInline]
+    def self.atomic(slot : UInt64) : Pointer(Atomic(UInt64))
+      Pointer(Atomic(UInt64)).new(at(slot))
+    end
+
+    # An atomic add; answers the value before it.
+    @[AlwaysInline]
+    def self.add(slot : UInt64, amount : UInt64) : UInt64
+      atomic(slot).value.add(amount)
+    end
+
+    # *slot* raised to *value* if it is below, atomically.
+    def self.raise_to(slot : UInt64, value : UInt64) : Nil
+      word = atomic(slot)
+      while (prior = word.value.get) < value
+        break if word.value.compare_and_set(prior, value)[1]
+      end
+    end
+
+    # The address of *slot*'s word in the calling thread's own page.
+    def self.own_at(slot : UInt64) : UInt64
+      page = @@own
+      if page == 0_u64
+        page = map
+        @@own = page
+      end
+      page &+ slot.unsafe_shl(3_u64)
+    end
+
+    @[NoInline]
+    private def self.map_shared : UInt64
+      fresh = map
+      Pointer(UInt64).new(fresh &+ EPOCH.unsafe_shl(3_u64)).value = 1_u64
+      Pointer(UInt64).new(fresh &+ ROUND.unsafe_shl(3_u64)).value = 1_u64
+      Pointer(UInt64).new(fresh &+ GROWTH.unsafe_shl(3_u64)).value = 200_u64
+      Pointer(UInt64).new(fresh &+ VERIFY_NOISE.unsafe_shl(3_u64)).value = 0x9E3779B97F4A7C15_u64
+      word = Pointer(Atomic(UInt64)).new(pointerof(@@page).address)
+      return fresh if word.value.compare_and_set(0_u64, fresh)[1]
+      unmap(fresh)
+      word.value.get
+    end
+
+    # A zeroed page from the kernel: the allocator's own mapping where
+    # there is one, else the call the fiber stacks are mapped with
+    # (`IyiFiber#map_stack`), which every scheduler build has.
+    private def self.map : UInt64
+      {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+        __iyi_mmap(PAGE).address
+      {% elsif flag?(:win32) %}
+        page = LibC.VirtualAlloc(nil, PAGE, 0x3000_i32, 4_i32).address
+        failed if page == 0_u64
+        page
+      {% elsif flag?(:darwin) %}
+        page = LibC.mmap(Pointer(Void).new(0_u64), PAGE, 3, 4098, -1, 0_i64).address
+        failed if page &+ 1_u64 == 0_u64
+        page
+      {% else %}
+        result = __iyi_conc_syscall6(IYI_SYS_MMAP, 0_i64, PAGE.to_i64, 3_i64, 34_i64, -1_i64, 0_i64)
+        failed if result < 0 && result >= -4095
+        result.to_u64
+      {% end %}
+    end
+
+    private def self.unmap(page : UInt64) : Nil
+      {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+        __iyi_munmap(page, PAGE)
+      {% elsif flag?(:win32) %}
+        LibC.VirtualFree(Pointer(Void).new(page), 0_u64, 0x8000_i32)
+      {% elsif flag?(:darwin) %}
+        LibC.munmap(Pointer(Void).new(page), PAGE)
+      {% elsif flag?(:x86_64) %}
+        __iyi_conc_syscall6(11_i64, page.to_i64, PAGE.to_i64, 0_i64, 0_i64, 0_i64, 0_i64)
+      {% else %}
+        __iyi_conc_syscall6(215_i64, page.to_i64, PAGE.to_i64, 0_i64, 0_i64, 0_i64, 0_i64)
+      {% end %}
+    end
+
+    private def self.failed : NoReturn
+      __iyi_write(2, "iyi: out of memory\n".to_unsafe.as(Void*), 19_u64)
+      __iyi_exit(1)
+    end
+  end
 {% end %}
 
 # heap22's publication entries, which codegen and the trusted modules call

@@ -173,8 +173,6 @@ class IyiChaos
   SPIN_STEPS =          1024_u64
 
   @@mode : Int32 = 0
-  @@seed : UInt64 = 0_u64
-  @@stream : UInt64 = 0_u64
   @@pct : Bool = false
   @@odds : UInt64 = 2_u64
   @@depth : UInt64 = 1_u64
@@ -182,37 +180,29 @@ class IyiChaos
   @@change_one : UInt64 = 0_u64
   @@change_two : UInt64 = 0_u64
   @@changed : UInt64 = 0_u64
-  @@floor : UInt64 = 0_u64
   @@edge_mean : UInt64 = 16_u64
   @@edge_left : UInt64 = 1_u64
-  @@steps : UInt64 = 0_u64
-  @@yields : UInt64 = 0_u64
-  @@picks : UInt64 = 0_u64
-  @@schedule : UInt64 = 0_u64
-  @@units : UInt64 = 0_u64
   @[UnsafeReach("the root unit, made in the shared heap by `start` on the main thread before the program's first line, or by the first `unit_of`; its fields are integers")]
   @@root : IyiChaosUnit?
-  @@last_unit : UInt64 = 0_u64
-  @@streak : UInt64 = 0_u64
   @[UnsafeReach("read and written only by `pick` on the simulation's one thread (`@@here`); every other thread's `pick` returns before it")]
   @@candidates : Array(IyiFiber)?
-  @@generation : UInt64 = 0_u64
   @@trace : Bool = false
   @@reported : Bool = false
-  @@threads_seen : UInt64 = 0_u64
   # `IYI_CHAOS_LATE_THREADS`: a thread the simulated thread starts links
   # itself late (`hold_start`, `wait_late`); 1 in `@@late_closed` while
-  # one waits, `@@late_steps` the points and back-edges passed since.
+  # one waits, `CHAOS_LATE_STEPS` the points and back-edges passed since.
+  #
+  # The seed, the streams, the schedule's hash and every count are
+  # `IyiStat`'s words, a thread's own stream its own page's: none is in
+  # the data segment or the thread-local block for a scan to read as a
+  # pointer, a stream's word least of all, being any 64-bit value.
   LATE_STEPS = 1024_u64
   @@late_threads : Bool = false
   @@late_closed : UInt64 = 0_u64
-  @@late_steps : UInt64 = 0_u64
   # The thread the simulation runs on: the main thread, which `start`
   # marks before the program's first line.
   @[ThreadLocal]
   @@here : Bool = false
-  @[ThreadLocal]
-  @@thread_stream : UInt64 = 0_u64
   @[ThreadLocal]
   @@thread_seeded : Bool = false
 
@@ -227,9 +217,10 @@ class IyiChaos
       @@mode = OFF
       return
     end
-    @@seed = seed_of(text)
-    @@stream = @@seed
-    @@schedule = FNV_BASIS
+    seed = seed_of(text)
+    IyiStat.set(IyiStat::CHAOS_SEED, seed)
+    IyiStat.set(IyiStat::CHAOS_STREAM, seed)
+    IyiStat.set(IyiStat::CHAOS_SCHEDULE, FNV_BASIS)
     @@trace = Program.env("IYI_CHAOS_TRACE").is_a?(String)
     @@late_threads = Program.env("IYI_CHAOS_LATE_THREADS").is_a?(String)
     @@here = true
@@ -240,7 +231,7 @@ class IyiChaos
     @@horizon = 8_u64.unsafe_shl(draw % 12_u64)
     @@change_one = 1_u64 &+ draw % @@horizon
     @@change_two = 1_u64 &+ draw % @@horizon
-    @@floor = LOW
+    IyiStat.set(IyiStat::CHAOS_FLOOR, LOW)
     @@edge_mean = 16_u64.unsafe_shl(draw % 7_u64)
     @@edge_left = 1_u64 &+ draw % (@@edge_mean &* 2_u64)
     fold(@@pct ? 1_u64 : 0_u64)
@@ -289,17 +280,18 @@ class IyiChaos
   # is what bench/chaos_exercise.sh's copy with the stream ignored shows.
   def self.draw : UInt64
     if @@mode == SIMULATED && @@here
-      state = @@stream &+ GOLDEN
-      @@stream = state
+      state = IyiStat.get(IyiStat::CHAOS_STREAM) &+ GOLDEN
+      IyiStat.set(IyiStat::CHAOS_STREAM, state)
       return mix(state)
     end
     unless @@thread_seeded
-      ordinal = Pointer(Atomic(UInt64)).new(pointerof(@@threads_seen).address).value.add(1_u64)
-      @@thread_stream = @@seed ^ mix(ordinal &+ 1_u64)
+      ordinal = IyiStat.add(IyiStat::CHAOS_THREADS_SEEN, 1_u64)
+      Pointer(UInt64).new(IyiStat.own_at(IyiStat::OWN_CHAOS_STREAM)).value = IyiStat.get(IyiStat::CHAOS_SEED) ^ mix(ordinal &+ 1_u64)
       @@thread_seeded = true
     end
-    state = @@thread_stream &+ GOLDEN
-    @@thread_stream = state
+    stream = Pointer(UInt64).new(IyiStat.own_at(IyiStat::OWN_CHAOS_STREAM))
+    state = stream.value &+ GOLDEN
+    stream.value = state
     mix(state)
   end
 
@@ -316,7 +308,7 @@ class IyiChaos
   end
 
   private def self.fold(value : UInt64) : Nil
-    @@schedule = (@@schedule ^ value) &* FNV_PRIME
+    IyiStat.set(IyiStat::CHAOS_SCHEDULE, (IyiStat.get(IyiStat::CHAOS_SCHEDULE) ^ value) &* FNV_PRIME)
   end
 
   private def self.fresh_priority : UInt64
@@ -345,9 +337,9 @@ class IyiChaos
   # thread as a unit of its own (`IyiGroup#chaos_task`); and a point at
   # once, since such a task may start beside its spawner.
   def self.parallel_task(task : IyiTask(T)) : IyiTask(T) forall T
-    @@units = @@units &+ 1_u64
+    IyiStat.bump(IyiStat::CHAOS_UNITS, 1_u64)
     # The shared heap's, as the fibers that name it are (heap22 row 14).
-    task.fiber.chaos_unit = IyiCross.shared { IyiChaosUnit.new(@@units, fresh_priority) }
+    task.fiber.chaos_unit = IyiCross.shared { IyiChaosUnit.new(IyiStat.get(IyiStat::CHAOS_UNITS), fresh_priority) }
     point
     task
   end
@@ -366,8 +358,8 @@ class IyiChaos
     return unless @@mode == SIMULATED
     unit = owner.iyi_chaos_unit
     unless unit.is_a?(IyiChaosUnit)
-      @@units = @@units &+ 1_u64
-      unit = IyiCross.shared { IyiChaosUnit.new(@@units, fresh_priority) }
+      IyiStat.bump(IyiStat::CHAOS_UNITS, 1_u64)
+      unit = IyiCross.shared { IyiChaosUnit.new(IyiStat.get(IyiStat::CHAOS_UNITS), fresh_priority) }
       owner.iyi_chaos_unit = unit
     end
     fiber.chaos_unit = unit
@@ -414,25 +406,25 @@ class IyiChaos
   # A back-edge's step (*edge*) is computing, not waiting, so it does not
   # count towards PCT's spin.
   private def self.step(edge : Bool) : Nil
-    return if @@units == 0_u64
+    return if IyiStat.get(IyiStat::CHAOS_UNITS) == 0_u64
     fiber = IyiScheduler.current
     return unless fiber.state == IyiFiberState::Running
     return if IyiScheduler.exiting? || IyiSchedLock.held_here? || IyiRuntimeLock.held?
     unit = unit_of(fiber)
-    @@steps = @@steps &+ 1_u64
-    if unit.id != @@last_unit
-      @@last_unit = unit.id
-      @@streak = 0_u64
+    IyiStat.bump(IyiStat::CHAOS_STEPS, 1_u64)
+    if unit.id != IyiStat.get(IyiStat::CHAOS_LAST_UNIT)
+      IyiStat.set(IyiStat::CHAOS_LAST_UNIT, unit.id)
+      IyiStat.set(IyiStat::CHAOS_STREAK, 0_u64)
     elsif !edge
-      @@streak = @@streak &+ 1_u64
+      IyiStat.bump(IyiStat::CHAOS_STREAK, 1_u64)
     end
     if @@pct
-      steps = @@steps
+      steps = IyiStat.get(IyiStat::CHAOS_STEPS)
       if @@changed &+ 1_u64 < @@depth && (steps == @@change_one || steps == @@change_two)
         @@changed = @@changed &+ 1_u64
         unit.priority = LOW &+ @@depth &- @@changed
       end
-      if @@streak >= SPIN_STEPS
+      if IyiStat.get(IyiStat::CHAOS_STREAK) >= SPIN_STEPS
         drop(unit)
         # A unit that spins waits for something: a sleeper whose time has
         # come and the poller's news join the run queue here, as an OS's
@@ -446,8 +438,8 @@ class IyiChaos
     else
       return unless draw % @@odds == @@odds &- 1_u64
     end
-    @@yields = @@yields &+ 1_u64
-    fold(0xFFFFFFFF00000000_u64 | @@steps)
+    IyiStat.bump(IyiStat::CHAOS_YIELDS, 1_u64)
+    fold(0xFFFFFFFF00000000_u64 | IyiStat.get(IyiStat::CHAOS_STEPS))
     fiber.chaos_held = true
     IyiScheduler.enqueue(fiber)
     IyiScheduler.reschedule
@@ -455,9 +447,9 @@ class IyiChaos
 
   # PCT: below every unit there is, for a unit that ran too long alone.
   private def self.drop(unit : IyiChaosUnit) : Nil
-    @@floor = @@floor &- 1_u64
-    unit.priority = @@floor
-    @@streak = 0_u64
+    IyiStat.set(IyiStat::CHAOS_FLOOR, IyiStat.get(IyiStat::CHAOS_FLOOR) &- 1_u64)
+    unit.priority = IyiStat.get(IyiStat::CHAOS_FLOOR)
+    IyiStat.set(IyiStat::CHAOS_STREAK, 0_u64)
   end
 
   # PCT: whether a unit other than *unit* waits with a higher priority.
@@ -477,7 +469,7 @@ class IyiChaos
   def self.back_edge : Bool
     return false unless @@mode == SIMULATED && @@here
     late_tick if @@late_closed != 0_u64
-    return true if @@units == 0_u64
+    return true if IyiStat.get(IyiStat::CHAOS_UNITS) == 0_u64
     left = @@edge_left
     if left > 1_u64
       @@edge_left = left &- 1_u64
@@ -503,8 +495,8 @@ class IyiChaos
       candidates = Array(IyiFiber).new(16)
       @@candidates = candidates
     end
-    generation = @@generation &+ 1_u64
-    @@generation = generation
+    generation = IyiStat.get(IyiStat::CHAOS_GENERATION) &+ 1_u64
+    IyiStat.set(IyiStat::CHAOS_GENERATION, generation)
     count = 0
     walk = head
     while walk.is_a?(IyiFiber)
@@ -528,11 +520,11 @@ class IyiChaos
       if @@pct
         # A unit picked again and again at its own parks - a spin on
         # `sleep(0)` - drops as one spinning on an operation does.
-        if @@streak >= SPIN_STEPS
+        if IyiStat.get(IyiStat::CHAOS_STREAK) >= SPIN_STEPS
           index = 0
           while index < count
             spinner = unit_of(candidates[index])
-            drop(spinner) if spinner.id == @@last_unit
+            drop(spinner) if spinner.id == IyiStat.get(IyiStat::CHAOS_LAST_UNIT)
             index = index + 1
           end
         end
@@ -546,18 +538,18 @@ class IyiChaos
       else
         chosen = candidates[below(count)]
       end
-      @@picks = @@picks &+ 1_u64
+      IyiStat.bump(IyiStat::CHAOS_PICKS, 1_u64)
       fold(unit_of(chosen).id)
       fold(count.to_u64)
     end
     take_out(st, chosen)
     chosen.chaos_held = false
     unit = unit_of(chosen)
-    if unit.id == @@last_unit
-      @@streak = @@streak &+ 1_u64
+    if unit.id == IyiStat.get(IyiStat::CHAOS_LAST_UNIT)
+      IyiStat.bump(IyiStat::CHAOS_STREAK, 1_u64)
     else
-      @@last_unit = unit.id
-      @@streak = 0_u64
+      IyiStat.set(IyiStat::CHAOS_LAST_UNIT, unit.id)
+      IyiStat.set(IyiStat::CHAOS_STREAK, 0_u64)
     end
     chosen
   end
@@ -648,7 +640,7 @@ class IyiChaos
   # In `IyiThread.start`, before the thread exists.
   def self.hold_start : Nil
     return unless @@late_threads && @@mode == SIMULATED && @@here
-    @@late_steps = 0_u64
+    IyiStat.set(IyiStat::CHAOS_LATE_STEPS, 0_u64)
     late_word.value.set(1_u64)
   end
 
@@ -667,8 +659,8 @@ class IyiChaos
   end
 
   private def self.late_tick : Nil
-    @@late_steps = @@late_steps &+ 1_u64
-    late_word.value.set(0_u64) if @@late_steps >= LATE_STEPS
+    IyiStat.bump(IyiStat::CHAOS_LATE_STEPS, 1_u64)
+    late_word.value.set(0_u64) if IyiStat.get(IyiStat::CHAOS_LATE_STEPS) >= LATE_STEPS
   end
 
   # ── The end ──────────────────────────────────────────────────────────
@@ -680,9 +672,9 @@ class IyiChaos
     @@reported = true
     strategy = @@pct ? "pct depth #{@@depth} over #{@@horizon} steps" : "random walk 1 in #{@@odds}"
     text = if @@mode == SIMULATED
-             "iyi chaos: seed #{@@seed}, #{strategy}, #{@@steps} points, #{@@yields} preemptions, #{@@picks} choices, schedule #{@@schedule.to_s(16)}\n"
+             "iyi chaos: seed #{IyiStat.get(IyiStat::CHAOS_SEED)}, #{strategy}, #{IyiStat.get(IyiStat::CHAOS_STEPS)} points, #{IyiStat.get(IyiStat::CHAOS_YIELDS)} preemptions, #{IyiStat.get(IyiStat::CHAOS_PICKS)} choices, schedule #{IyiStat.get(IyiStat::CHAOS_SCHEDULE).to_s(16)}\n"
            else
-             "iyi chaos: seed #{@@seed}, #{strategy}, real threads: no schedule to name\n"
+             "iyi chaos: seed #{IyiStat.get(IyiStat::CHAOS_SEED)}, #{strategy}, real threads: no schedule to name\n"
            end
     __iyi_write(2, text.to_unsafe.as(Void*), text.bytesize.to_u64)
   end

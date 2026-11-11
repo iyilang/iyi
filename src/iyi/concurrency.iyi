@@ -3217,7 +3217,6 @@ class IyiScheduler
     @@port_records : UInt64 = 0_u64
     # Calls to join a handle, in all: what `bench/socket_exercise.iyi` reads
     # to know a wait on a socket std made makes none.
-    @@port_joins : UInt64 = 0_u64
 
     def self.join_port(handle : Void*) : Nil
       word = port_word(handle, false)
@@ -3229,7 +3228,7 @@ class IyiScheduler
     # the port: without it, 50 reads that answered at once left 50
     # completions that woke the next read.
     def self.join_handle(handle : Void*) : Bool
-      Pointer(Atomic(UInt64)).new(pointerof(@@port_joins).address).value.add(1_u64)
+      IyiStat.add(IyiStat::PORT_JOINS, 1_u64)
       return false if LibC.CreateIoCompletionPort(handle, Pointer(Void).new(pollfd.to_u64), 0_u64, 0_i32).address == 0_u64
       LibC.SetFileCompletionNotificationModes(handle, 1_u8)
       true
@@ -3261,7 +3260,7 @@ class IyiScheduler
     end
 
     def self.port_joins : UInt64
-      Pointer(Atomic(UInt64)).new(pointerof(@@port_joins).address).value.get
+      IyiStat.atomic(IyiStat::PORT_JOINS).value.get
     end
 
     # A park for standard input's reader thread: off the io list, which is
@@ -4979,17 +4978,15 @@ class IyiScheduler
     a.deadline < b.deadline || (a.deadline == b.deadline && a.sleep_seq < b.sleep_seq)
   end
 
-  @@sleep_steps : UInt64 = 0_u64
-
   # Melds the sleep heap has made, in all: what an insertion and a removal
   # cost, counted, which the exercises read rather than a clock.
   def self.sleep_steps : UInt64
-    @@sleep_steps
+    IyiStat.get(IyiStat::SLEEP_STEPS)
   end
 
   # Two roots into one: the later becomes the earlier's first child.
   private def self.sleep_meld(a : IyiFiber, b : IyiFiber) : IyiFiber
-    @@sleep_steps = @@sleep_steps &+ 1_u64
+    IyiStat.bump(IyiStat::SLEEP_STEPS, 1_u64)
     first = sleep_before?(b, a) ? b : a
     second = first.object_id == a.object_id ? b : a
     older = first.sleep_child
@@ -5360,10 +5357,9 @@ class IyiWorkers
   # Worker threads started so far, at most `@@started` (`grow`); 1 when
   # one was wanted where none could be started, on a thread holding a
   # lock `IyiThread.start` takes or on the monitor's (`pay`); and how many
-  # times that happened.
+  # times that happened (`IyiStat::OWES`).
   @@launched : Int64 = 0_i64
   @@owed : Int64 = 0_i64
-  @@owes : UInt64 = 0_u64
   @[UnsafeReach("the pool's inject queue, written under IyiSchedLock; every IyiFiber is born in the shared heap")]
   @@inject_head : IyiFiber?
   @[UnsafeReach("the pool's inject queue, written under IyiSchedLock; every IyiFiber is born in the shared heap")]
@@ -5394,10 +5390,9 @@ class IyiWorkers
   @@idle : Int64 = 0_i64
   @@spinning : Int64 = 0_i64
   # Unstarted tasks taken from another worker's queue, and started fibers
-  # taken from another worker's ring, in all: what the exercise reads to
-  # know each steal ran.
-  @@steals : UInt64 = 0_u64
-  @@grabs : UInt64 = 0_u64
+  # taken from another worker's ring, in all (`IyiStat::STEALS`,
+  # `GRABS`): what the exercise reads to know each steal ran.
+  #
   # Preemption at loop back-edges (SPEC.md III.4.13, part 9). `@@preempt`
   # is each worker's own word, which the code the compiler emits at every
   # loop's back-edge in a program with a pool loads through the thread
@@ -5409,8 +5404,9 @@ class IyiWorkers
   # idle; its page holds the tick's timespec on Linux and darwin, on
   # darwin the kevent its kqueue answers into, and on Windows the tick as
   # a relative due time for its waitable timer (`monitor_wait`), whose
-  # handle `@@monitor_timer` is. `@@looks` counts the monitor's looks, which
-  # is what the exercise reads its period from.
+  # handle `@@monitor_timer` is. `IyiStat::LOOKS` counts the monitor's
+  # looks, which is what the exercise reads its period from, and
+  # `PREEMPTS` the tasks it preempted.
   #
   # On x86-64 Windows the word is not `@@preempt` but a slot of the TEB's
   # own: `@@preempt_slot` is its offset from `%gs`, which the compiler's
@@ -5435,12 +5431,10 @@ class IyiWorkers
   @[UnsafeReach("the preempted queue, written under IyiSchedLock; every IyiFiber is born in the shared heap")]
   @@preempted_tail : IyiFiber?
   @@preempted : Int64 = 0_i64
-  @@preempts : UInt64 = 0_u64
   @@monitor_parked : UInt64 = 0_u64
   @@monitor_page : UInt64 = 0_u64
   @@monitor_handle : UInt64 = 0_u64
   @@monitor_timer : UInt64 = 0_u64
-  @@looks : UInt64 = 0_u64
   # Workers marked with news in their pollers (`held_io?`), not yet taken.
   @@held_io : Int64 = 0_i64
 
@@ -5470,11 +5464,11 @@ class IyiWorkers
   end
 
   def self.steals : UInt64
-    @@steals
+    IyiStat.get(IyiStat::STEALS)
   end
 
   def self.grabs : UInt64
-    Pointer(Atomic(UInt64)).new(pointerof(@@grabs).address).value.get
+    IyiStat.atomic(IyiStat::GRABS).value.get
   end
 
   # Whether the pool has started (`start`).
@@ -5756,7 +5750,7 @@ class IyiWorkers
           victim.pool_head = fiber.next_run
           victim.pool_tail = nil if victim.pool_head.is_a?(Nil)
           fiber.next_run = nil
-          @@steals = @@steals &+ 1_u64
+          IyiStat.bump(IyiStat::STEALS, 1_u64)
           return fiber
         end
       end
@@ -5951,7 +5945,7 @@ class IyiWorkers
         end
         fiber = grab(victim, st)
         if fiber.is_a?(IyiFiber)
-          Pointer(Atomic(UInt64)).new(pointerof(@@grabs).address).value.add(1_u64)
+          IyiStat.add(IyiStat::GRABS, 1_u64)
           # More than this worker can run next came with it.
           wake_one if st.ring_size > 0_u64
           return fiber
@@ -6072,7 +6066,7 @@ class IyiWorkers
     if IyiSchedLock.held_here? || IyiScheduler.state_id == 0_u64 || !runtime_lock_free?
       word(pointerof(@@spinning)).value.sub(1_i64)
       word(pointerof(@@owed)).value.set(1_i64)
-      Pointer(Atomic(UInt64)).new(pointerof(@@owes).address).value.add(1_u64)
+      IyiStat.add(IyiStat::OWES, 1_u64)
       return
     end
     word(pointerof(@@launched)).value.add(1_i64)
@@ -6095,7 +6089,7 @@ class IyiWorkers
   # Starts `grow` owed rather than made, in all: what the exercise names
   # when the pool did not grow.
   def self.owes : UInt64
-    Pointer(Atomic(UInt64)).new(pointerof(@@owes).address).value.get
+    IyiStat.atomic(IyiStat::OWES).value.get
   end
 
   # A start `grow` owed, called for again: an idle worker rung if one has
@@ -6157,13 +6151,13 @@ class IyiWorkers
   # Tasks that gave their worker up at a back-edge, in all: what the
   # exercise reads to know a preemption ran.
   def self.preempts : UInt64
-    Pointer(Atomic(UInt64)).new(pointerof(@@preempts).address).value.get
+    IyiStat.atomic(IyiStat::PREEMPTS).value.get
   end
 
   # The monitor's looks, in all: what the exercise divides a busy
   # stretch by to know the monitor's period.
   def self.looks : UInt64
-    Pointer(Atomic(UInt64)).new(pointerof(@@looks).address).value.get
+    IyiStat.atomic(IyiStat::LOOKS).value.get
   end
 
   # x86-64 Windows: a `TlsAlloc` slot for the preemption word, as its
@@ -6289,7 +6283,7 @@ class IyiWorkers
       @@preempted_tail = fiber
       word(pointerof(@@preempted)).value.add(1_i64)
       IyiSchedLock.unlock
-      Pointer(Atomic(UInt64)).new(pointerof(@@preempts).address).value.add(1_u64)
+      IyiStat.add(IyiStat::PREEMPTS, 1_u64)
       IyiScheduler.switch_to(following)
     {% end %}
   end
@@ -6366,7 +6360,7 @@ class IyiWorkers
   # The monitor's whole life.
   def self.monitor(page : UInt64) : Nil
     while true
-      Pointer(Atomic(UInt64)).new(pointerof(@@looks).address).value.add(1_u64)
+      IyiStat.add(IyiStat::LOOKS, 1_u64)
       if look
         monitor_wait(false)
       else

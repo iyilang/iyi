@@ -160,23 +160,23 @@ prove_fails "warm pages counted at the full chunk" roundwarm "rounding:" \
 # churn that asks twice its budget hands its excess back every epoch and
 # carves it again (issue #150).
 prove_fails "cold reopenings not kept warm" refault "refault:" \
-  '{ if ($0 ~ /^        @@warm_extra = @@warm_extra - @@warm_extra.unsafe_shr\(4_u64\) \+ \(reopened_cold - @@reopened_cold\) \* IyiHeap::PAGE$/) { print "        @@warm_extra = 0_u64"; found = 1; next } print } END { if (!found) exit 3 }'
+  '{ if ($0 ~ /^        IyiStat\.set\(IyiStat::WARM_EXTRA, extra - extra\.unsafe_shr\(4_u64\) \+ \(reopened_cold - IyiStat\.get\(IyiStat::REOPENED_COLD\)\) \* IyiHeap::PAGE\)$/) { print "        IyiStat.set(IyiStat::WARM_EXTRA, 0_u64)"; found = 1; next } print } END { if (!found) exit 3 }'
 
 # A class nobody allocates in any more kept warm within the budget, as
 # every class was: its pages hold the room the classes in use want.
 prove_fails "idle classes kept warm" idlewarm "idle class:" \
-  '{ if ($0 ~ /^        @@epoch - IyiHeap\.read64\(line \+ IyiHeap::CLASS_USED\) >= IDLE_EPOCHS &&$/) { print "        false &&"; found = 1; next } print } END { if (!found) exit 3 }'
+  '{ if ($0 ~ /^        IyiStat\.get\(IyiStat::EPOCH\) - IyiHeap\.read64\(line \+ IyiHeap::CLASS_USED\) >= IDLE_EPOCHS &&$/) { print "        false &&"; found = 1; next } print } END { if (!found) exit 3 }'
 
 # A class idle after a few epochs however short: four collections back
 # to back hand its pages back.
 prove_fails "idle by epochs alone" idleshort "idle class:" \
-  '{ if ($0 ~ /^          @@epoch_ns - used_ns >= IDLE_NS$/) { print "          true"; found = 1; next } print } END { if (!found) exit 3 }'
+  '{ if ($0 ~ /^          IyiStat\.get\(IyiStat::EPOCH_NS\) - used_ns >= IDLE_NS$/) { print "          true"; found = 1; next } print } END { if (!found) exit 3 }'
 
 # A class refilled only in the first epoch read at its stamp of 0, which
 # every clock reading is more than a second past: its arenas go back three
 # collections in, however short.
 prove_fails "the first epoch's classes idle at once" idlefirst "idle class:" \
-  '{ if ($0 ~ /^        used_ns = @@first_turn_ns if used_ns == 0_u64$/) { print "        # removed"; found = 1; next } print } END { if (!found) exit 3 }'
+  '{ if ($0 ~ /^        used_ns = IyiStat\.get\(IyiStat::FIRST_TURN_NS\) if used_ns == 0_u64$/) { print "        # removed"; found = 1; next } print } END { if (!found) exit 3 }'
 
 # An idle class's empty arena kept by its cache as every fill arena was:
 # its pages go cold but the mapping, its header and its tables stay.

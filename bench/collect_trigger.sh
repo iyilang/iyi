@@ -263,7 +263,7 @@ if [ "$PARTITIONS" -eq 1 ]; then
     "{ if (sub(/$SHARED_RETURN/, \"return IyiHeap::SHARED_MIN\")) found = 1; print } END { if (!found) exit 3 }"
 else
   prove_fails "budget never grows" nogrow "budget:" \
-    '{ sub(/@@budget = next_budget\(.*\)/, "@@budget = MIN_BUDGET"); print }'
+    '{ sub(/IyiStat\.set\(IyiStat::BUDGET, next_budget\(.*\)\)/, "IyiStat.set(IyiStat::BUDGET, MIN_BUDGET)"); print }'
 fi
 
 # The scavenge disabled: sweeps keep reclaiming chunks, mappings never go
@@ -280,7 +280,7 @@ prove_fails "empty arenas never spared" nospare "spare:" \
 # debt until a pause pays it, which is the eager sweep back inside the
 # pause, and the lazy check names it.
 prove_fails "sweep never lazy" nolazy "lazy:" \
-  '{ sub(/answer = IyiMark\.sweep_for\(table, index\)/, "answer = 0_u64"); sub(/return if @@helpers == 0_u64 \|\| @@sweep_left == 0_u64/, "return"); print }'
+  '{ sub(/answer = IyiMark\.sweep_for\(table, index\)/, "answer = 0_u64"); sub(/return if @@helpers == 0_u64 \|\| IyiStat\.get\(IyiStat::SWEEP_LEFT\) == 0_u64/, "return"); print }'
 
 # The scheduler's state left off every root: the thread-local still names
 # it, nothing the walk scans does, the churn's own size class takes the

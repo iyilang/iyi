@@ -3041,11 +3041,14 @@ claim, are kept for such a module too.
 them out. Walked now (III.4.5), std carries 80 `@[SafeReach]` claims,
 each proven by (c) in every importer: 38 on tables a module builds at its
 initialisation and only reads (compress, hpack, zstd, tls, time,
-system_roots, base64, json, dns, mime, mail, autocert), and 42 on caches
-built whole by their class variables' initializers as the module starts
-(digest, mlkem, p256, curve25519, ecdsa, password, mime, and unicode's
-30 tables). Three are `@[UnsafeReach]`: std/http's default TLS
-configuration, which `HTTP.tls_config=` replaces after publishing it,
+system_roots, base64, json, dns, mime, mail, autocert), and 42 on tables
+built whole by their constants' initializers, which run once and only in
+a program that reads the constant (digest, mlkem, p256, curve25519,
+ecdsa, password, mime, and unicode's 30 tables; as class variables'
+initializers they ran as their modules started, in every importer,
+`bench/std_lazy_tables_exercise.sh`). Three are `@[UnsafeReach]`:
+std/http's default TLS configuration, which `HTTP.tls_config=` replaces
+after publishing it,
 std/tls's system roots, read at the first handshake that needs them
 and stored once, and std/random's `Random::PerThread::ONE`, the object
 the class-level draws go through, whose draws step the drawing thread's

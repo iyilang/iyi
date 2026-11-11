@@ -819,14 +819,14 @@ end
 # entry (j, m) the point (m + 1) 256^j B made ready. It holds multiples
 # of B, which is public, so nothing in it is secret; only which entry is
 # read is, and that is chosen by masks. The table is worked out once, by
-# the class variable's initializer as the module starts, and kept: 248
+# the constant's initializer in a program that reads it, and kept: 248
 # doublings and 224 additions, their 256 Z inverted together by
 # Montgomery's trick (one inversion and three products a point), which is
 # about what one multiplication by the old 4-bit window cost. Only `pick`
 # reads it, so no function answers it.
 struct CurveBaseTable
-  @[SafeReach("built whole by its initializer as the module starts, before any parallel task; then only read")]
-  @@table : Pointer(CurvePrecomp) = build
+  @[SafeReach("built whole by its initializer, which runs once, before any parallel task or under IyiOnce in the shared heap, and only in a program that reads it; then only read")]
+  TABLE = build
 
   private def self.build : Pointer(CurvePrecomp)
     points = Pointer(CurvePoint).malloc(256_u64)
@@ -882,7 +882,7 @@ struct CurveBaseTable
     ypx = CurveField.one
     ymx = CurveField.one
     xy2d = CurveField.zero
-    base = @@table + (row * 8).to_i64
+    base = TABLE + (row * 8).to_i64
     j = 1
     while j <= 8
       diff = j.to_u64 ^ index

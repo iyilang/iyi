@@ -1521,7 +1521,10 @@ module Iyi
 
     def codegen_assign(target : Path, value, node)
       const = target.target_const.not_nil!
-      if const.used? && !const.simple? && !const.compile_time_value
+      # iyi: a constant only a definition-site probe read is left to its
+      # first read, if any (`Program#iyi_mark_reached_constants`).
+      reached = const.iyi_reached? || !@program.iyi_reached_marked?
+      if const.used? && reached && !const.simple? && !const.compile_time_value
         initialize_const(const)
       end
       @last = llvm_nil

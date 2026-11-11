@@ -3734,6 +3734,10 @@ module Iyi
 
     property fake_def : Def?
     property? used = false
+    # iyi: whether code that runs reads it, not only a definition-site
+    # probe (`Program#iyi_mark_reached_constants`); `codegen_assign`
+    # initialises a constant at its declaration only then.
+    property? iyi_reached = false
     property? visited = false
 
     # Was this const's value cleaned up by CleanupTransformer yet?

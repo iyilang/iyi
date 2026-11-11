@@ -478,18 +478,19 @@ end
 
 # The 64 round constants of SHA-256 and SHA-224: the first 32 bits of the
 # fractional parts of the cube roots of the first 64 primes. Built whole
-# by the initializer as the module starts, and never written again. Kept
-# here rather than in `SHA256`, where `SHA224` would hold a copy of its
-# own, built again and read through a dispatch on the receiver's class;
-# and read only here, by the rounds, so that no function answers the
-# table and the claim holds in every program importing the module.
+# by the initializer, once, in a program that reads it, and never written
+# again. Kept here rather than in `SHA256`, where `SHA224` would hold a
+# copy of its own, built again and read through a dispatch on the
+# receiver's class; and read only here, by the rounds, so that no
+# function answers the table and the claim holds in every program
+# importing the module.
 struct SHA256Rounds
-  @[SafeReach("built whole by its initializer as the module starts, before any parallel task; then only read")]
-  @@k : Pointer(UInt32) = build
+  @[SafeReach("built whole by its initializer, which runs once, before any parallel task or under IyiOnce in the shared heap, and only in a program that reads it; then only read")]
+  K = build
 
   # The 64 rounds over the state *h* and the schedule *w*, added into *h*.
   def self.run(h : Pointer(UInt32), w : Pointer(UInt32)) : Nil
-    k = @@k
+    k = K
     a = h[0]
     b = h[1]
     c = h[2]
@@ -632,15 +633,16 @@ end
 
 # The 80 round constants of SHA-512 and SHA-384: the first 64 bits of the
 # fractional parts of the cube roots of the first 80 primes. Built whole
-# by the initializer as the module starts, and never written again; kept
-# out of `SHA512`, and read only by the rounds, as `SHA256Rounds` is.
+# by the initializer, once, in a program that reads it, and never written
+# again; kept out of `SHA512`, and read only by the rounds, as
+# `SHA256Rounds` is.
 struct SHA512Rounds
-  @[SafeReach("built whole by its initializer as the module starts, before any parallel task; then only read")]
-  @@k : Pointer(UInt64) = build
+  @[SafeReach("built whole by its initializer, which runs once, before any parallel task or under IyiOnce in the shared heap, and only in a program that reads it; then only read")]
+  K = build
 
   # The 80 rounds over the state *h* and the schedule *w*, added into *h*.
   def self.run(h : Pointer(UInt64), w : Pointer(UInt64)) : Nil
-    k = @@k
+    k = K
     a = h[0]
     b = h[1]
     c = h[2]
@@ -728,10 +730,10 @@ end
 struct Keccak
   # The 24 iota round constants, then the 24 rho offsets of the lanes the
   # cycle visits, then the 24 lanes themselves, FIPS 202 sections 3.2.2
-  # to 3.2.5. Built whole by the initializer as the module starts, and
-  # never written again.
-  @[SafeReach("built whole by its initializer as the module starts, before any parallel task; then only read")]
-  @@tables : Pointer(UInt64) = build_tables
+  # to 3.2.5. Built whole by the initializer, once, in a program that
+  # reads it, and never written again.
+  @[SafeReach("built whole by its initializer, which runs once, before any parallel task or under IyiOnce in the shared heap, and only in a program that reads it; then only read")]
+  TABLES = build_tables
 
   private def self.build_tables : Pointer(UInt64)
     words = [
@@ -758,7 +760,7 @@ struct Keccak
 
   # The 24 rounds over the 25 lanes at *a*; *c* is five lanes of scratch.
   def self.permute(a : Pointer(UInt64), c : Pointer(UInt64)) : Nil
-    t = @@tables
+    t = TABLES
     round = 0
     while round < 24
       # theta: each lane takes the parity of the two columns beside it.
@@ -1071,7 +1073,7 @@ pub struct CRC32
   # what `Gzip.decompress` spent, the inflating itself taking 30.
   def self.update(crc : UInt32, data : Pointer(UInt8), count : Int32) : UInt32
     raise "CRC32: a negative count of bytes: #{count}" if count < 0
-    t = @@tables
+    t = TABLES
     crc = crc ^ 0xffffffff_u32
     p = data
     n = count
@@ -1091,10 +1093,11 @@ pub struct CRC32
   end
 
   # The eight tables: the first is the byte-at-a-time table, and each
-  # after it is one more byte of zeros through the one before. Built whole
-  # by the initializer as the module starts, and never written again.
-  @[SafeReach("built whole by its initializer as the module starts, before any parallel task; then only read")]
-  @@tables : Pointer(UInt32) = build_tables
+  # after it is one more byte of zeros through the one before. Built
+  # whole by the initializer, once, in a program that reads it, and never
+  # written again.
+  @[SafeReach("built whole by its initializer, which runs once, before any parallel task or under IyiOnce in the shared heap, and only in a program that reads it; then only read")]
+  TABLES = build_tables
 
   private def self.build_tables : Pointer(UInt32)
     t = Pointer(UInt32).malloc(2048_u64)
@@ -1181,7 +1184,7 @@ pub struct CRC64
   # follow it in the step.
   def self.update(crc : UInt64, data : Pointer(UInt8), count : Int32) : UInt64
     raise "CRC64: a negative count of bytes: #{count}" if count < 0
-    t = @@tables
+    t = TABLES
     crc = crc ^ 0xffffffffffffffff_u64
     p = data
     n = count
@@ -1203,9 +1206,9 @@ pub struct CRC64
   end
 
   # The eight tables, built as `CRC32` builds its own: whole, by the
-  # initializer as the module starts, and never written again.
-  @[SafeReach("built whole by its initializer as the module starts, before any parallel task; then only read")]
-  @@tables : Pointer(UInt64) = build_tables
+  # initializer, once, in a program that reads it, and never written again.
+  @[SafeReach("built whole by its initializer, which runs once, before any parallel task or under IyiOnce in the shared heap, and only in a program that reads it; then only read")]
+  TABLES = build_tables
 
   private def self.build_tables : Pointer(UInt64)
     t = Pointer(UInt64).malloc(2048_u64)

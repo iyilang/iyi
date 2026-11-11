@@ -431,10 +431,10 @@ end
 struct MlKemPoly
   ETA = 2
 
-  # `build_tables`'s zetas and gammas, built whole by the initializer as
-  # the module starts and never written again.
-  @[SafeReach("built whole by its initializer as the module starts, before any parallel task; then only read")]
-  @@tables : Pointer(UInt32) = build_tables
+  # `build_tables`'s zetas and gammas, built whole by the initializer,
+  # once, in a program that reads them, and never written again.
+  @[SafeReach("built whole by its initializer, which runs once, before any parallel task or under IyiOnce in the shared heap, and only in a program that reads it; then only read")]
+  TABLES = build_tables
 
   def self.poly : Pointer(UInt32)
     Pointer(UInt32).malloc(256_u64)
@@ -479,7 +479,7 @@ struct MlKemPoly
   # The NTT in place (Algorithm 9): seven layers of butterflies, the zeta of
   # each block taken in order from the second.
   def self.ntt(f : Pointer(UInt32)) : Nil
-    zetas = @@tables
+    zetas = TABLES
     k = 1
     len = 128
     while len >= 2
@@ -503,7 +503,7 @@ struct MlKemPoly
   # The inverse NTT in place (Algorithm 10), then the product by
   # 128^-1 = 3303 mod q.
   def self.inverse_ntt(f : Pointer(UInt32)) : Nil
-    zetas = @@tables
+    zetas = TABLES
     k = 127
     len = 2
     while len <= 128
@@ -533,7 +533,7 @@ struct MlKemPoly
   # in the NTT domain (Algorithms 11 and 12): a row of A for step 1 from
   # first = 3i, a column for step 3 from first = i.
   def self.dot(m : Pointer(UInt32), first : Int32, step : Int32, v : Pointer(UInt32), dst : Pointer(UInt32)) : Nil
-    gammas = @@tables + 128
+    gammas = TABLES + 128
     i = 0
     while i < 256
       dst[i] = 0_u32

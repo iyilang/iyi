@@ -254,7 +254,7 @@ PY
 # The lookup lowercases before it probes; without that `index.HTML`
 # finds nothing.
 prove_broken "a case-sensitive lookup" "upper dotted" \
-  '    @@by_extension[lower(ext)]?' '    @@by_extension[ext]?'
+  '    BY_EXTENSION[lower(ext)]?' '    BY_EXTENSION[ext]?'
 # A backslash kept rather than undone in a quoted parameter.
 prove_broken "a quoted value keeping its backslashes" "quoted with escapes" \
   "        at = at + 1 if bytes[at] == '\\\\'.ord.to_u8

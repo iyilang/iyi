@@ -69,6 +69,7 @@ class Iyi::Program
         visit_main(node, process_finished_hooks: true, cleanup: cleanup, visitor: main_visitor)
       end
     end
+    Prof.span("main: reached constants") { iyi_mark_reached_constants }
 
     @progress_tracker.stage("Semantic (cleanup)") do
       Prof.span("cleanup: types + files") do

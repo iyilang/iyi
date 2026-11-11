@@ -1101,7 +1101,7 @@ pub abstract class TlsConnection
   @[SafeReach("set before the first parallel task starts, then only read")]
   GROUPS12 = [GROUP_X25519, GROUP_SECP256R1, GROUP_SECP384R1]
   @[SafeReach("set before the first parallel task starts, then only read")]
-  GROUPS   = [GROUP_X25519MLKEM768] + GROUPS12
+  GROUPS = [GROUP_X25519MLKEM768] + GROUPS12
   # X25519MLKEM768's shares (the draft's section 4): the client's is its
   # ML-KEM-768 encapsulation key, then its X25519 key; the server's is the
   # ML-KEM ciphertext, then its X25519 key.

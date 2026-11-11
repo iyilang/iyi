@@ -346,7 +346,7 @@ pub struct SvcbRecord
   ECH             = 5
   IPV6HINT        = 6
   @[SafeReach("set before the first parallel task starts, then only read")]
-  NAMES           = ["mandatory", "alpn", "no-default-alpn", "port", "ipv4hint", "ech", "ipv6hint"]
+  NAMES = ["mandatory", "alpn", "no-default-alpn", "port", "ipv4hint", "ech", "ipv6hint"]
 
   # The name the record was found at: what a ServiceMode target of "."
   # stands for.

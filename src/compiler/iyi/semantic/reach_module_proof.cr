@@ -83,7 +83,7 @@ module Iyi
 
     alias Verdict = Hash(String, Answer)
 
-    VERDICT_FORMAT = "iyi reach verdict 2"
+    VERDICT_FORMAT    = "iyi reach verdict 2"
     VERDICT_SEPARATOR = '\u001f'
 
     # Each module's stored answer, by its file, once looked for: nil when

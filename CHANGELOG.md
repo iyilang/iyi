@@ -152,7 +152,17 @@ fallback now follows a block handed to a `@[Share]` def (iyi-web's router)
 and on to a helper, a `&block` forwarded to `SharedProc.of`, `Unit.new`
 or a spawn, and `g.spawn(in: u)` (which pins `u` for good); before, no
 `SharedProc.of` or `Unit.new` was ever pinned, and an app whose routes
-reached iyi-db's pool crashed at its first request (`.iyimod` v64).
+reached iyi-db's pool crashed at its first request (`.iyimod` v64). A
+local sweep no longer pools the runs it empties before it has swept every
+class, nor lets the next mark trust parities after it stopped part way: a
+dead object of a later class could name a chunk another unit had taken
+(#145's app, `-Dheap_verify`, stress 0: 230-1,437 such takes a run, now
+0), which a stale conservative word reviving that object would have made
+a real cross-unit pointer (bench/heap_local `nounswept`, `poolearly`,
+`deathleak`). `IyiHeap.new_shared` notes born-shared types only on the
+partitions' targets, so an x86_64-darwin cross-compile with
+`-Dheap_partitions` builds again, and bench/heap_lend waits for every
+unit of the program to die before reading what a dead unit lent.
 
 Two races older than heap22, in every build: units setting or deleting
 environment variables at once lost them (tmac, 6 units × 300 rounds at
@@ -27936,7 +27946,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 34,453-line library and nothing else. Every other
+  written against iyi's own 34,602-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

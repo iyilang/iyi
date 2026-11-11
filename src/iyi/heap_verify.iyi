@@ -33,7 +33,8 @@
 # (every one of them counts as unmarked then). After a local sweep the
 # partition's free lists must hold only free chunks of its own runs, and
 # no weak cell may name a chunk the sweep freed; before it, every free
-# chunk of its runs must be on its free list or its return stack.
+# chunk of its runs must be on its free list or its return stack. A run
+# going to its class's pool may hold no chunk carved and not free.
 #
 # Beside the checks: `IYI_HEAP_STRESS` (a local collection at every chaos
 # point - chaos.iyi - and, at 1, every park), `IYI_HEAP_FALSE_WORDS` (the
@@ -209,12 +210,13 @@ class IyiHeapVerify
   end
 
   # The call site of an allocation (`__iyi_new` and the mallocs, given
-  # their return address), kept for a chunk of a partition arena: only a
-  # partition's chunk is ever a target.
+  # their return address), kept for a chunk of any arena: a partition's
+  # chunk is a report's target, and a shared one may be its holder, which
+  # an untyped one (a closure, a buffer) is named by (`holder_site`).
   def self.note_site(object : Void*, site : Void*) : Nil
     address = object.address
     arena = IyiHeap.arena_of(address)
-    return if arena == 0 || !IyiHeap.partition_arena?(arena)
+    return if arena == 0
     # Inside the allocator's bracket, where a chaos point is none
     # (chaos.iyi): the table's first claim is a compare-and-set.
     IyiHeap.enter_barrier
@@ -364,6 +366,39 @@ class IyiHeapVerify
       index = index + 1
     end
     weak_cells(id)
+  end
+
+  # A run going to its class's pool (`IyiHeap.pool_run`, under the
+  # class's lock, its owner not yet cleared): no chunk on it may be carved
+  # and not free. Such a chunk is a live object to a stale word -
+  # `IyiRoots.base_of` answers its base - and a global mark that meets
+  # one reads the dead object's fields and keeps what they name (design
+  # section 2.3; heap_local's `stale:`, the copy that frees a dead unit's
+  # chunks on handed-over runs only).
+  def self.check_pooled(arena : UInt64, run : UInt64, n : UInt64) : Nil
+    chunk = IyiHeap.arena_chunk(arena)
+    stop = run &+ n.unsafe_shl(IyiHeap::GRANULE_SHIFT)
+    head = IyiHeap.first_head(arena, run)
+    while head < stop
+      slot = IyiHeap.chunk_index(arena, head)
+      bits = IyiHeap.read8(arena &+ IyiHeap::META &+ slot &* IyiHeap::META_ENTRY)
+      if bits & IyiHeap::CARVED_FLAG != 0 && bits & IyiHeap::FREE_FLAG == 0
+        report_begin(IyiHeap.owner_at(arena, IyiHeap.granule_of(arena, run)))
+        say("  a run went to the pool with a chunk carved and not free: a stale word naming it passes the collector's root test, and a global mark reads the dead object's fields\n")
+        say("  holder: a run going to the pool\n")
+        say("    run ")
+        say_hex(run)
+        say(", ")
+        say_dec(n)
+        say(" granules\n")
+        say("  target: ")
+        say_hex(head)
+        say("\n")
+        target_detail(head)
+        report_end
+      end
+      head = head &+ chunk
+    end
   end
 
   # A statistic, by a plain add (see `at_point`): close, not exact.
@@ -783,7 +818,10 @@ class IyiHeapVerify
       say(" at ")
       say_hex(address)
       say("\n")
-      parents(base, type_id) if type_id == 0
+      if type_id == 0
+        holder_site(base)
+        parents(base, type_id)
+      end
     elsif kind == K_STACK
       fiber = Pointer(Void).new(who).as(IyiFiber)
       running = IyiScheduler.current?
@@ -882,6 +920,20 @@ class IyiHeapVerify
       say_hex(site)
       say("\n")
     end
+  end
+
+  # An untyped holder's own allocation site: a closure's environment or a
+  # buffer has no layout to name a field by, but where it was made names
+  # it (heap_crossings' `spawn(in:) publish` copy: a closure held by a
+  # closure, which `parents` alone leaves as untyped memory twice).
+  def self.holder_site(base : UInt64) : Nil
+    arena = IyiHeap.arena_of(base)
+    return if arena == 0
+    site = site_of(arena, IyiHeap.chunk_index(arena, base))
+    return if site == 0
+    say("    holder allocated at: image+")
+    say_hex(site)
+    say("\n")
   end
 
   # An untyped holder - a buffer, a closure without a layout - named by
@@ -1033,7 +1085,7 @@ class IyiHeapVerify
 
   # Random words below the running fiber's stack pointer - space no frame
   # holds now and the next calls will - and, on the simulated thread, below
-  # every parked fiber's saved stack pointer.
+  # the saved stack pointer of every parked fiber only this thread runs.
   @[NoInline]
   def self.inject_here : Nil
     fiber = IyiScheduler.current?
@@ -1048,10 +1100,40 @@ class IyiHeapVerify
     fill(sp, floor, own)
     {% if flag?(:iyi_chaos) %}
       if IyiChaos.simulated?
+        here = IyiScheduler.state.object_id
         other = IyiScheduler.first_fiber
         while other.is_a?(IyiFiber)
-          if other.object_id != fiber.object_id && other.state != IyiFiberState::Done && other.state != IyiFiberState::Running && other.stack_top != 0 && other.saved_sp != 0
-            fill(other.saved_sp, other.stack_top - IyiFiber::STACK_BYTES + 2_u64 * IyiFiber::PAGE, own)
+          # The registry holds every thread's fibers, and a program that
+          # sizes the pool runs a pool `Unit`'s tasks on its workers even
+          # under the simulation (`spawn(in:)` → `pooled`). A worker's fiber
+          # is not `Running` from the moment it parks until its switch
+          # away, and the park's own frames - under stress a whole local
+          # collection (`collect_every_park`) - stand on its stack below
+          # the saved stack pointer its *last* switch left: words written
+          # there overwrote them. heap_crossings `in`, false words, stress
+          # 1, one worker, seeds 1/3/5/7 x 10 (Linux): 4 runs in 40 died
+          # of SIGSEGV, and both traced under gdb died on the pool worker,
+          # returning into a heap address from `release_unit` under
+          # `Channel#receive`'s park; 7 in 18 on Windows. Only a fiber
+          # homed on this thread and not the pool's runs nowhere else, so
+          # only its parked stack is dead space while this thread runs:
+          # 0 in 40 so (Linux).
+          home = other.home
+          if other.object_id != fiber.object_id && !other.parallel && home.is_a?(IyiSchedulerState) && home.object_id == here &&
+             other.state != IyiFiberState::Done && other.state != IyiFiberState::Running && other.stack_top != 0 && other.saved_sp != 0
+            low = other.stack_top - IyiFiber::STACK_BYTES + 2_u64 * IyiFiber::PAGE
+            {% if flag?(:win32) && flag?(:x86_64) %}
+              # Windows commits a fiber's stack as it grows (`map_stack`):
+              # under the lowest committed byte, the StackLimit its last
+              # switch saved at saved_sp + 8 (`__iyi_ctx_swap`), lie its
+              # PAGE_GUARD page and reserved memory. Only the running
+              # stack's guard page is the kernel's to grow, since only its
+              # bounds are in the TEB: a parked fiber's touched from here
+              # is STATUS_GUARD_PAGE_VIOLATION, a death.
+              limit = IyiHeap.read64(other.saved_sp &+ 8_u64)
+              low = limit if limit > low
+            {% end %}
+            fill(other.saved_sp, low, own)
           end
           other = other.next_fiber
         end

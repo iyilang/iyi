@@ -35,6 +35,16 @@ registers, whose stale `r8` had kept a 64 MB string received through a
 rendezvous alive (tssh: 5 of 5 runs kept 61 MiB before, 5 of 5 clean
 after).
 
+heap22's verifier: the false-word injector no longer writes under a pool
+worker's parking fiber or below a Windows fiber's committed stack; reports
+name String and untyped-holder allocation sites and data-segment holders
+on Linux, macOS (atos on the .dwarf companion) and Windows
+(llvm-symbolizer and llvm-pdbutil on the .pdb); a run going to its
+class's pool is checked to hold no chunk carved and not free;
+heap_crossings' thread check waits for its unit to end, so its thread
+copy is caught on Windows too; and the crossing fuzz driver runs on
+Windows.
+
 A parallel unit reaching module state that is not Share through the code
 it calls is a compile error (SPEC.md III.4.5), std's and the prelude's
 state included, where 0.21 warned; `iyi fix` adds the `@[SafeReach]` the
@@ -42,8 +52,12 @@ compiler proves, in the file that declares the state. Each std module's
 state is proven once, over all of its code, when the build that writes its
 `.iyimod` runs, and every importer reuses that proof (Linux, release
 compiler, the proof's stage cold, median of 3: web_cores 0.148 s,
-std_http_exercise 0.150 s). An initialiser first run by a read before its
-declaration is born in the shared heap under `-Dheap_partitions`.
+std_http_exercise 0.150 s). The share check's mutation scan no longer
+builds an undefined constant's suggestions for macro code it only probes:
+`Object#in?` cost ~6 ms per scanned type, and std_http_exercise's cleanup
+drops from 0.30 s to 0.14 s (Linux, release). An initialiser first run by
+a read before its declaration is born in the shared heap under
+`-Dheap_partitions`.
 `TlsConfig#trusted_roots` answers a copy of the system roots, and a failed
 system-root load is retried at the next handshake rather than kept.
 `Random.rand` and the other class-level draws use one PCG-32 stream per
@@ -27820,7 +27834,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 33,703-line library and nothing else. Every other
+  written against iyi's own 33,791-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

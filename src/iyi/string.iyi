@@ -46,6 +46,10 @@ class String
 
   protected def self.memory(bytes : Int32) : Pointer(UInt8)
     {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || flag?(:darwin) || flag?(:wasm32) || flag?(:win32)) %}
+      # Under `-Dheap_verify` the site is kept as `__iyi_new`'s is, so a
+      # report about a String names where it was made rather than "no site
+      # kept" (every fuzz and crossings report so far was about one).
+      {% if flag?(:heap_verify) && flag?(:heap_partitions) %} return IyiHeapVerify.sited(IyiHeap.new_object(bytes.to_u64, "".crystal_type_id.to_u64, true, true), LibIyiVerify.return_address(0)).as(Pointer(UInt8)) {% end %}
       IyiHeap.new_object(bytes.to_u64, "".crystal_type_id.to_u64, true, true).as(Pointer(UInt8))
     {% else %}
       memory = Pointer(UInt8).malloc(bytes.to_u64)

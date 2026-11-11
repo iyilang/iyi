@@ -14,7 +14,9 @@
 # object left off its partition's list, a local mark that trusts
 # the parities a mark abandoned part way left, an idle takeover that
 # reads no parked fiber's stack, an idle takeover of a unit
-# whose `Unit` value is still being built, a dead unit's pooled run
+# whose `Unit` value is still being built, the same stacks unread by a
+# collection of a unit parked dirty and owing nothing, a pooled run's
+# blocks taken as never written, a dead unit's pooled run
 # left carved for a stale word to pass the root test, a publication
 # walk that takes a chunk straddling the carve frontier for uncarved,
 # an owner test and a weak sweep that do the same to a weak cell, and a
@@ -244,6 +246,22 @@ if [ "$PART" = all ] || [ "$PART" = broken ]; then
   # fiber is collected with that stack unread.
   prove_fails "a takeover of a unit under construction" noconstruct "construct:" \
     '{ if (sub(/if \(unit\.fibers\.is_a\?\(IyiFiber\) \|\| unit\.value_slot != 0_u64\) && unit\.holder == 0_u64/, "if unit.holder == 0_u64")) found = 1; print } END { if (!found) exit 3 }' \
+    heap_partition.iyi
+
+  # An idle worker's collection of a unit parked dirty and owing nothing
+  # (heap22 S6's idle trigger) that reads none of its parked stacks: the
+  # idle check alone (`HEAP22_ONLY=idle`), since the takeover check, which
+  # runs first, meets the same collection. Under `IYI_HEAP_STRESS` the
+  # check stamps the parked units dirty itself.
+  HEAP22_ONLY=idle prove_fails "an idle collection that reads no parked stack" noidle "idle:" \
+    '{ if (sub(/if !\(running\.is_a\?\(IyiFiber\) && running\.object_id == fiber\.object_id\) && fiber\.state/, "if running.is_a?(IyiFiber) \\&\\& running.object_id != fiber.object_id \\&\\& fiber.state")) found = 1; print } END { if (!found) exit 3 }' \
+    heap_partition.iyi
+
+  # A pool run's chunks threaded as fresh - the kernel's zero past their
+  # link words - as only a frontier run's are: a unit that takes a dead
+  # unit's pooled block reads the dead unit's words in it.
+  prove_fails "a pooled run taken as fresh" nofresh "fresh:" \
+    '{ if (sub(/^    thread_run\(table, index, arena, run, n, frontier\)$/, "    thread_run(table, index, arena, run, n, true)")) found = 1; print } END { if (!found) exit 3 }' \
     heap_partition.iyi
 
   # A run of a dead unit to the pool with its `LOCAL` chunks left carved:

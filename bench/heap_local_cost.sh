@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # heap22 slices S1 and S1b, measured: bench/heap_local_cost.iyi built
-# --release without partitions, with them at the tree's granule (1 KiB),
-# and with a copy of the runtime at S1's 4 KiB granule; each runs the
+# --release without partitions, with them at the tree's granule (512
+# bytes), and with a copy of the runtime at S1's 4 KiB granule; each runs the
 # idle test (as is, and collecting at every park) and the pause test.
 # Prints the programs' lines; fails only if a program fails.
 #
@@ -56,14 +56,14 @@ run() { # name args...
 
 mkdir -p "$WORK/g12/iyi"
 cp -R "$REPO/src/iyi/." "$WORK/g12/iyi/"
-awk '{ if (sub(/^  GRANULE_SHIFT = 10_u64$/, "  GRANULE_SHIFT = 12_u64")) found = 1; print } END { if (!found) exit 3 }' \
-  "$REPO/src/iyi/heap_partition.iyi" > "$WORK/g12/iyi/heap_partition.iyi" || { echo "the granule is not 1 KiB in this tree"; exit 1; }
+awk '{ if (sub(/^  GRANULE_SHIFT = 9_u64$/, "  GRANULE_SHIFT = 12_u64")) found = 1; print } END { if (!found) exit 3 }' \
+  "$REPO/src/iyi/heap_partition.iyi" > "$WORK/g12/iyi/heap_partition.iyi" || { echo "the granule is not 512 bytes in this tree"; exit 1; }
 
 build off "" && { run off idle "$UNITS" "$WORKERS"; run off pause "$PUNITS" "$PROUNDS" "$WORKERS"; }
-if build g10 "-Dheap_partitions"; then
-  run g10 idle "$UNITS" "$WORKERS"
-  run g10 idle "$UNITS" "$WORKERS" shrink
-  run g10 pause "$PUNITS" "$PROUNDS" "$WORKERS"
+if build g9 "-Dheap_partitions"; then
+  run g9 idle "$UNITS" "$WORKERS"
+  run g9 idle "$UNITS" "$WORKERS" shrink
+  run g9 pause "$PUNITS" "$PROUNDS" "$WORKERS"
 fi
 if build g12 "-Dheap_partitions" "$WORK/g12${PSEP}$REPO/src"; then
   run g12 idle "$UNITS" "$WORKERS"

@@ -43,11 +43,16 @@
 class IyiHeap
   # ── Granules, tables, states ──────────────────────────────────────────
 
-  # Ownership is per granule: 1 KiB from slice S1b, every platform (4 KiB
-  # in S1). A class's first run in a partition is the least whole number
-  # of granules that holds a chunk, so an idle unit holds about 1 KiB per
-  # small class it touched (design section 5.2).
-  GRANULE_SHIFT = 10_u64
+  # Ownership is per granule: 512 bytes from heap22 S6 (1 KiB in slice
+  # S1b, 4 KiB in S1), every platform. A class's first run in a partition
+  # is the least whole number of granules that holds a chunk, so an idle
+  # unit holds about half a KiB per small class it keeps something in
+  # (design section 5.2): an idle keep-alive connection's partition kept
+  # 11.2 KiB of runs in 11 small classes for 3.7 KiB of objects at 1 KiB
+  # (C10k at 2,000 connections, Linux, after its idle collection). A
+  # run's length in granules (`RUN_N_MASK`) still holds the top class's
+  # 1 MiB chunk: 2,048 of them.
+  GRANULE_SHIFT = 9_u64
 
   # The arena header's words for partition arenas (contract section 3):
   # byte offsets from the arena's base of the owner table (16 bits per
@@ -68,6 +73,15 @@ class IyiHeap
   OWN_PUB   =   1_u64
   OWN_LMARK =   6_u64
   OWN_LENT  =   8_u64
+  # A free chunk of a class above a page, threaded from a run the
+  # frontier gave (`partition_take`), that nobody has written past its
+  # link and index: the kernel's zero there, so its first taker clears
+  # the two words alone (`take_fresh`). The shared heap's carve leaves a
+  # frontier chunk the kernel's zero the same way; cleared whole, a
+  # connection's 16 KiB read buffer was four resident pages where the
+  # shared heap's was one (11.8 KiB more per idle connection, C10k at
+  # 2,000 connections, Linux, 3984c899a).
+  OWN_FRESH =  16_u64
   OWN_SEEN  = 128_u64
 
   # `REC_STATE` bits past `REC_LIVE` (contract section 2), and S1's own:
@@ -84,7 +98,10 @@ class IyiHeap
   # heap (lent graphs, weak cells, large objects: a word of capacity, a
   # word of count, then the entries); local collections of this
   # partition; bytes of runs it holds; 1 while a local mark is under way
-  # or was abandoned, 0 once one ended whole (`local_collect_in`); and
+  # or was abandoned, 0 once one ended whole (`local_collect_in`); the
+  # idle clock's tick (plus one) at the unit's last park with something
+  # allocated since its last collection, 0 once collected, and the
+  # record's slice counter as that collection left it (`note_idle`); and
   # the return stacks, a word per class, which the global sweep pushes
   # onto. The per-class run lists are the cache layout's fill slots
   # (`FILL + index`): a record never carves.
@@ -98,6 +115,8 @@ class IyiHeap
   REC_COLLECTIONS = 1432_u64
   REC_HELD        = 1440_u64
   REC_MARKING     = 1448_u64
+  REC_IDLE_TICK   = 1456_u64
+  REC_IDLE_SLICE  = 1464_u64
   REC_RETURN      = 1472_u64
 
   # A run table word, at a run's first granule: the link (48 bits), the
@@ -698,7 +717,7 @@ class IyiHeap
     granule_first = granule_of(arena, run)
     n = frontier ? bytes.unsafe_shr(GRANULE_SHIFT) : run_n(run_word(arena, granule_first))
     claim_run(record, index, arena, run, n, id)
-    thread_run(table, index, arena, run, n)
+    thread_run(table, index, arena, run, n, frontier)
     if frontier
       # The chunks stamped, the frontier past them: a slice that reads the
       # new high water finds them free and this epoch's.
@@ -728,8 +747,11 @@ class IyiHeap
   # Every chunk of a run, free, white, local and this epoch's, linked in
   # address order ahead of the class's list. A pool run's chunks are free
   # but wear whatever else their last owner left - epochs, `OWN` bytes,
-  # links - so every byte of each is written here.
-  def self.thread_run(table : Pointer(UInt64), index : Int32, arena : UInt64, run : UInt64, n : UInt64) : Nil
+  # links - so every byte of each is written here. A *fresh* run is off
+  # the frontier, never written: its chunks of a class above a page are
+  # `OWN_FRESH`, and a verifying build leaves them unpoisoned, zero for
+  # `take_fresh` to check.
+  def self.thread_run(table : Pointer(UInt64), index : Int32, arena : UInt64, run : UInt64, n : UInt64, fresh : Bool) : Nil
     chunk = read64(arena + OFF_CHUNK)
     first = arena_first(arena)
     stop = run + n.unsafe_shl(GRANULE_SHIFT)
@@ -739,17 +761,18 @@ class IyiHeap
     mark = read64(arena + OFF_MARKS) + slot
     own = own_address(arena, slot)
     stamp = CARVED_FLAG | FREE_FLAG | IyiMark.epoch_flag
+    flags = fresh && chunk > PAGE ? OWN_FRESH : 0_u64
     tail = table[index]
     table[index] = head
     while head < stop
       following = head + chunk
       write8(meta, stamp)
       write8(mark, IyiMark::WHITE)
-      write8(own, 0_u64)
+      write8(own, flags)
       write64(head + OFF_LINK, following < stop ? following : tail)
       write64(head + OFF_INDEX, slot)
       {% if flag?(:heap_verify) %}
-        poison(head, chunk)
+        poison(head, chunk) if flags == 0_u64
       {% end %}
       head = following
       slot = slot + 1_u64
@@ -757,6 +780,39 @@ class IyiHeap
       mark = mark + 1_u64
       own = own + 1_u64
     end
+  end
+
+  # The chunk at *head*, just stamped for its first taker: whether it is
+  # `OWN_FRESH`, which it is no more. A fresh chunk's link and index
+  # are cleared here, the rest being the kernel's zero; a verifying build
+  # checks every word of that rest.
+  def self.take_fresh(table : Pointer(UInt64), index : Int32, head : UInt64) : Bool
+    arena = head & (0_u64 &- MAP)
+    own = own_address(arena, read64(head &+ OFF_INDEX))
+    flags = read8(own)
+    return false if flags & OWN_FRESH == 0
+    write8(own, flags - OWN_FRESH)
+    write64(head &+ OFF_LINK, 0_u64)
+    write64(head &+ OFF_INDEX, 0_u64)
+    {% if flag?(:heap_verify) %}
+      chunk = chunk_of(index)
+      word = head &+ 16_u64
+      while word &+ 8_u64 <= head &+ chunk
+        if read64(word) != 0_u64
+          IyiHeapVerify.report_begin(read64(table.address &+ REC_ID))
+          IyiHeapVerify.say("  a chunk taken as fresh - the kernel's zero past its link and index - holds a word written before\n  holder: the partition's list of a class above a page\n  target: ")
+          IyiHeapVerify.say_hex(head)
+          IyiHeapVerify.say("\n    word at ")
+          IyiHeapVerify.say_hex(word)
+          IyiHeapVerify.say(" = ")
+          IyiHeapVerify.say_hex(read64(word))
+          IyiHeapVerify.say("\n")
+          IyiHeapVerify.report_end
+        end
+        word = word &+ 8_u64
+      end
+    {% end %}
+    true
   end
 
   # A freed chunk's words past its link and index, poisoned.
@@ -856,7 +912,8 @@ class IyiHeap
   end
 
   # `take_inside` for a record: its list, or a refill of it; past the top
-  # class a mapping of the partition's own.
+  # class a mapping of the partition's own. A chunk above a page is
+  # cleared whole only when it is not fresh (`OWN_FRESH`).
   def self.partition_take_inside(table : Pointer(UInt64), bytes : UInt64, clear : Bool, bits : UInt64, type_id : UInt64) : UInt64
     headed = bits & HEADED_FLAG != 0
     return take_large_owned(table.address, headed ? bytes - HEADER : bytes, bits) + HEADER if bytes > TOP
@@ -864,7 +921,9 @@ class IyiHeap
     head = table[index]
     head = partition_take(table, index) if head == 0
     stamp(table, index, head, bits, type_id)
-    clear_block(head, chunk_of(index)) if clear
+    chunk = chunk_of(index)
+    fresh = chunk > PAGE && take_fresh(table, index, head)
+    clear_block(head, chunk) if clear && !fresh
     headed ? head &+ HEADER : head
   end
 
@@ -1365,16 +1424,61 @@ class IyiHeap
   # before the shared cache goes back in): its collection, when a
   # quarter of its budget is owed - the connection between two requests,
   # its stack shallow and its live set small - or at every park when a
-  # test asks.
+  # test asks; otherwise, or when the collection could not end whole, a
+  # note that it parked dirty, for the idle workers (`note_idle`).
   def self.at_park(record : UInt64) : Nil
-    return if LibIyiGCTable.__iyi_marking != 0_u8
     return if @@local_off || @@park_off
-    return unless @@collect_every_park || read64(record &+ REC_DEBT) &* 4_u64 >= budget_of(record)
+    if LibIyiGCTable.__iyi_marking != 0_u8 || !(@@collect_every_park || read64(record &+ REC_DEBT) &* 4_u64 >= budget_of(record))
+      note_idle(record)
+      return
+    end
     fiber = IyiScheduler.current?
     return unless fiber.is_a?(IyiFiber) && fiber.alloc == record
     unit = fiber.unit
     return unless unit.is_a?(IyiUnit) && unit.heap == record
-    local_collect(record, fiber, false, true)
+    note_idle(record) unless local_collect(record, fiber, false, true)
+  end
+
+  # ── Idle collection (heap22 S6) ───────────────────────────────────────
+
+  # A unit that parks owing less than a quarter of its budget keeps
+  # what it allocated since its last collection - a connection's setup
+  # and its first request's garbage, in a run per class touched - for as
+  # long as it sits idle: 36.6 KiB of runs per idle keep-alive
+  # connection, 20.6 KiB of them in 17 small classes holding 7.6 KiB
+  # (C10k at 2,000 connections, Linux, 3984c899a). The park says so
+  # instead (`note_idle`), and an idle pool worker collects the
+  # partition once it has stayed parked and dirty for two ticks of the
+  # idle clock (`take_over_quiet`): its empty runs go back to the pool,
+  # a class's last one included, and its garbage is free. A busy unit,
+  # which parks again within a tick, is never taken, and pays a load and
+  # a compare at each park; one waiting long on the network mid-request
+  # is collected as any idle takeover collects it.
+  IDLE_NS = 100000000_u64
+
+  # Partition *record* is dirty - allocated in since its last whole
+  # collection - at a park its unit's thread makes: stamped with the idle
+  # clock's tick, and the idle workers told one may be waiting.
+  @[AlwaysInline]
+  def self.note_idle(record : UInt64) : Nil
+    return unless idle_dirty?(record)
+    stamp = IyiStat.get(IyiStat::IDLE_TICK) &+ 1_u64
+    write64(record &+ REC_IDLE_TICK, stamp) if read64(record &+ REC_IDLE_TICK) != stamp
+    pending = IyiStat.atomic(IyiStat::IDLE_PENDING)
+    pending.value.set(1_u64) if pending.value.get == 0_u64
+  end
+
+  @[AlwaysInline]
+  def self.idle_dirty?(record : UInt64) : Bool
+    read64(record &+ REC_DEBT) != 0_u64 || read64(record &+ CACHE_SLICE) != read64(record &+ REC_IDLE_SLICE)
+  end
+
+  # An idle worker's wait, in ms (`IyiScheduler.wait_for_events`), cut
+  # to a tick while a dirty partition may be waiting for the clock.
+  def self.idle_wait_ms(timeout : Int64) : Int64
+    return timeout if IyiStat.get(IyiStat::IDLE_PENDING) == 0_u64 && IyiStat.get(IyiStat::IDLE_CURSOR) == 0_u64
+    cap = (IDLE_NS // 1000000_u64).to_i64 &+ 1_i64
+    timeout < 0_i64 || timeout > cap ? cap : timeout
   end
 
   # The callee-saved registers into *buffer*, `IyiRoots.spill_registers`'s
@@ -1809,6 +1913,9 @@ class IyiHeap
     IyiStat.add(IyiStat::LOCAL_FREED, freed)
     account_live(record, kept_bytes)
     write64(record &+ REC_DEBT, 0_u64)
+    # Clean for the idle workers until it allocates again (`note_idle`).
+    write64(record &+ REC_IDLE_TICK, 0_u64)
+    write64(record &+ REC_IDLE_SLICE, read64(record &+ CACHE_SLICE))
     write64(record &+ REC_COLLECTIONS, read64(record &+ REC_COLLECTIONS) + 1_u64)
     true
   end
@@ -1858,7 +1965,10 @@ class IyiHeap
           end
         end
         if free
-          write8(own, 0_u64) if read8(own) != 0
+          # A chunk never taken keeps `OWN_FRESH`: the sweep writes only
+          # its link and index.
+          left = read8(own)
+          write8(own, 0_u64) if left != 0 && left != OWN_FRESH
           write8(mark, IyiMark::WHITE) if read8(mark) != IyiMark::WHITE
           write64(head + OFF_LINK, list)
           write64(head + OFF_INDEX, slot)
@@ -2512,45 +2622,117 @@ class IyiHeap
 
   # ── Idle takeover (design section 4.1, trigger 3) ─────────────────────
 
-  # An idle pool worker *st*, holding no unit (`IyiWorkers.work`), after a
-  # global collection: the free token of a unit whose partition owes a
-  # quarter of its budget taken - never a `YIELDED` one - its partition
-  # collected on the worker's own fiber with nothing installed, and the
-  # token given back, the fibers that waited for it onto this worker's
-  # ring. Answers whether it collected one; disarmed once a look finds
-  # none. A unit with neither a fiber nor a value slot is passed over: a
-  # `Unit` whose value `Unit.new` is still building on its caller's
-  # fiber (`IyiHeap.within`), which holds no token and is no fiber of
-  # the unit - that stack, the value's only root, is no root of this
-  # collection, and the caller allocates in the record meanwhile.
+  # An idle pool worker *st*, holding no unit (`IyiWorkers.work`): after
+  # a global collection, the free token of a unit whose partition owes a
+  # quarter of its budget (`take_over_owing`, disarmed once a look finds
+  # none); otherwise a unit parked dirty for two ticks of the idle clock
+  # (`take_over_quiet`). Answers whether to look again.
   def self.take_over_idle(st : IyiSchedulerState) : Bool
     reap_dead_partitions if @@dead_queued != 0
-    return false if @@takeover_armed == 0 || @@local_off || LibIyiGCTable.__iyi_marking != 0_u8
+    return false if @@local_off || LibIyiGCTable.__iyi_marking != 0_u8
+    return true if @@takeover_armed != 0 && take_over_owing(st)
+    take_over_quiet(st)
+  end
+
+  def self.take_over_owing(st : IyiSchedulerState) : Bool
     found = 0_u64
-    unit_address = 0_u64
     IyiRuntimeLock.lock
     each_record do |record|
-      if found == 0 && read64(record + REC_STATE) & (REC_DEAD | REC_BUSY | REC_DETACHED) == 0
-        address = read64(record + REC_UNIT)
-        if address != 0 && read64(record + REC_DEBT) &* 4_u64 >= budget_of(record)
-          unit = Pointer(Void).new(address).as(IyiUnit)
-          if (unit.fibers.is_a?(IyiFiber) || unit.value_slot != 0_u64) && unit.holder == 0_u64 && unit.take(st.object_id)
-            found = record
-            unit_address = address
-            write64(record + REC_STATE, read64(record + REC_STATE) | REC_BUSY)
-          end
-        end
-      end
+      found = record if found == 0 && read64(record + REC_DEBT) &* 4_u64 >= budget_of(record) && take_unit(st, record)
     end
     @@takeover_armed = 0_u64 if found == 0
     IyiRuntimeLock.unlock
     return false if found == 0
-    unit = Pointer(Void).new(unit_address).as(IyiUnit)
-    st.unit = unit
-    local_collect(found, nil, true, true)
-    Pointer(Atomic(UInt64)).new(found + REC_STATE).value.sub(REC_BUSY)
-    IyiScheduler.release_unit(st)
+    collect_taken(st, found, true)
     true
+  end
+
+  # The next dirty partition parked for two ticks or more, its unit taken
+  # and collected as an owing one is. The records are walked 256 at a
+  # time under the runtime lock, one walk a tick at most, which turns the
+  # clock when a tick has passed; true while a walk is under way or one
+  # was taken.
+  def self.take_over_quiet(st : IyiSchedulerState) : Bool
+    pending = IyiStat.atomic(IyiStat::IDLE_PENDING)
+    return false if pending.value.get == 0_u64 && IyiStat.get(IyiStat::IDLE_CURSOR) == 0_u64
+    now = IyiMark.now_ns
+    turned = IyiStat.atomic(IyiStat::IDLE_TICK_NS)
+    last = turned.value.get
+    IyiStat.add(IyiStat::IDLE_TICK, 1_u64) if now &- last >= IDLE_NS && turned.value.compare_and_set(last, now)[1]
+    # In the stamps' terms: the tick plus one.
+    tick = IyiStat.get(IyiStat::IDLE_TICK) &+ 1_u64
+    found = 0_u64
+    IyiRuntimeLock.lock
+    cursor = IyiStat.get(IyiStat::IDLE_CURSOR)
+    if cursor == 0_u64
+      if IyiStat.get(IyiStat::IDLE_DONE_TICK) == tick
+        IyiRuntimeLock.unlock
+        return false
+      end
+      # Cleared before the walk: a park that stamps behind it says so
+      # again.
+      pending.value.set(0_u64)
+      IyiStat.set(IyiStat::IDLE_SEEN, 0_u64)
+      cursor = 1_u64
+    end
+    last_id = @@record_slabs * (PARTITION_SLAB // PARTITION_BYTES)
+    looked = 0
+    while found == 0 && cursor <= last_id && looked < 256
+      record = partition_at(cursor)
+      cursor = cursor &+ 1_u64
+      looked = looked + 1
+      if record != 0 && read64(record + REC_STATE) & REC_LIVE != 0
+        stamp = read64(record + REC_IDLE_TICK)
+        if stamp != 0_u64 && idle_dirty?(record)
+          if stamp &+ 2_u64 > tick
+            IyiStat.set(IyiStat::IDLE_SEEN, 1_u64)
+          elsif take_unit(st, record)
+            found = record
+          end
+        end
+      end
+    end
+    more = cursor <= last_id
+    if more
+      IyiStat.set(IyiStat::IDLE_CURSOR, cursor)
+    else
+      IyiStat.set(IyiStat::IDLE_CURSOR, 0_u64)
+      IyiStat.set(IyiStat::IDLE_DONE_TICK, tick)
+      pending.value.set(1_u64) if IyiStat.get(IyiStat::IDLE_SEEN) != 0_u64
+    end
+    IyiRuntimeLock.unlock
+    collect_taken(st, found, false) if found != 0
+    more || found != 0
+  end
+
+  # Under the runtime lock: partition *record*'s unit's free token taken
+  # for idle worker *st* - never a `YIELDED` one - and the record busy.
+  # A unit with neither a fiber nor a value slot is passed over: a `Unit`
+  # whose value `Unit.new` is still building on its caller's fiber
+  # (`IyiHeap.within`), which holds no token and is no fiber of the unit
+  # - that stack, the value's only root, is no root of this collection,
+  # and the caller allocates in the record meanwhile.
+  def self.take_unit(st : IyiSchedulerState, record : UInt64) : Bool
+    return false if read64(record + REC_STATE) & (REC_DEAD | REC_BUSY | REC_DETACHED) != 0
+    address = read64(record + REC_UNIT)
+    return false if address == 0
+    unit = Pointer(Void).new(address).as(IyiUnit)
+    if (unit.fibers.is_a?(IyiFiber) || unit.value_slot != 0_u64) && unit.holder == 0_u64 && unit.take(st.object_id)
+      write64(record + REC_STATE, read64(record + REC_STATE) | REC_BUSY)
+      return true
+    end
+    false
+  end
+
+  # The partition of the unit *st* took, collected on the worker's own
+  # fiber with nothing installed, as if idle, and the token given back,
+  # the fibers that waited for it onto this worker's ring.
+  def self.collect_taken(st : IyiSchedulerState, record : UInt64, takeover : Bool) : Nil
+    st.unit = Pointer(Void).new(read64(record + REC_UNIT)).as(IyiUnit)
+    swept = local_collect(record, nil, takeover, true)
+    IyiStat.add(IyiStat::IDLE_COLLECTIONS, 1_u64) if swept && !takeover
+    Pointer(Atomic(UInt64)).new(record + REC_STATE).value.sub(REC_BUSY)
+    IyiScheduler.release_unit(st)
   end
 end
 

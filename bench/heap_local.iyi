@@ -44,6 +44,9 @@
 # - `stale:` a dead unit's object, on a run that went to the pool whole,
 #   is no object to a stale word: the collector's root test
 #   (`IyiRoots.base_of`) rejects its address.
+# - `fresh:` blocks of a class above a page read zero when taken: off the
+#   frontier (cleared only at their link words), off the unit's own list
+#   after a collection freed them, and off a dead unit's pooled runs.
 # - `return:` with local collections off, a unit's garbage is freed by
 #   global collections alone and comes back to it: the runs it holds stay
 #   bounded and the return stacks hand chunks back. One local collection
@@ -64,6 +67,9 @@
 # - `construct:` a unit with no fiber and no value slot - a `Unit`'s value
 #   being built by `Unit.new` on its caller's fiber - in debt after a
 #   global collection is taken by no idle worker; the list reads whole.
+# - `idle:` units parked with garbage but no debt, and no global
+#   collection: idle workers, woken by the idle clock, collect every one
+#   within 3 s, their lists whole after, and some partition holds less.
 # - `inflight:` a unit that allocates past its budget without parking is
 #   collected in flight, its live list whole.
 # - `abandon:` a unit's local mark is abandoned 256 objects into its
@@ -822,6 +828,55 @@
     fail("stale: a dead unit's object on a pooled run is still an object to a stale word (base 0x#{base.to_s(16)})") if base != 0_u64
   end
 
+  # ── fresh ─────────────────────────────────────────────────────────────
+
+  # 20,480-byte blocks, a class above a page on every platform (darwin's
+  # is 16 KiB): how many words of *count* of them read other than zero
+  # when taken, each then filled with a pattern and kept in *kept*.
+  FRESH_WORDS = 2560
+
+  def fresh_take(count : Int32, kept : Array(Pointer(UInt64))) : Int64
+    wrong = 0_i64
+    k = 0
+    while k < count
+      block = Pointer(UInt64).malloc(FRESH_WORDS.to_u64)
+      w = 0
+      while w < FRESH_WORDS
+        wrong = wrong + 1 if block[w] != 0_u64
+        block[w] = 0x5A5A5A5A5A5A5A5A_u64
+        w = w + 1
+      end
+      kept << block
+      k = k + 1
+    end
+    wrong
+  end
+
+  # Off the frontier, then off its own list after a collection freed
+  # them: every block reads zero when taken.
+  def fresh_first : Int64
+    kept = [] of Pointer(UInt64)
+    wrong = fresh_take(4, kept)
+    kept = [] of Pointer(UInt64)
+    IyiHeap.collect_local(IyiHeap.current_record)
+    wrong + fresh_take(4, kept)
+  end
+
+  # Off the runs `fresh_first`'s death pooled, written all over.
+  def fresh_second : Int64
+    kept = [] of Pointer(UInt64)
+    fresh_take(4, kept)
+  end
+
+  def fresh_check : Nil
+    group do |g|
+      first = g.spawn(unit: :new) { fresh_first }.value
+      fail("fresh: #{first} words of blocks a unit took off the frontier or its own list read other than zero") if first != 0_i64
+      second = g.spawn(unit: :new) { fresh_second }.value
+      fail("fresh: #{second} words of blocks a unit took off a dead unit's pooled runs read other than zero") if second != 0_i64
+    end
+  end
+
   # ── free ──────────────────────────────────────────────────────────────
 
   def free_task(address : UInt64) : Int64
@@ -1338,6 +1393,80 @@
     IyiHeap.collect_every_park = true
   end
 
+  # ── idle ──────────────────────────────────────────────────────────────
+
+  # A unit that builds a list, drops a little garbage - under a slice's
+  # worth, so its park owes nothing - sends its record and parks.
+  def idle_task(t : Int64, go : Channel(Int64), ready : Channel(UInt64)) : Int64
+    base = 7000000000_i64 &+ t &* 10000_i64
+    keep = build(base, 200, 0)
+    junk : Node? = nil
+    i = 0
+    while i < 300
+      junk = Node.new(i.to_i64, i % 50 == 0 ? nil : junk)
+      i = i + 1
+    end
+    junk = nil
+    ready.send(IyiHeap.current_record)
+    go.receive
+    broken(keep, base, 200)
+  end
+
+  # Units parked dirty, owing nothing, with no global collection: idle
+  # workers, woken by the idle clock, collect their partitions, the lists
+  # whole after and the garbage's runs given back. Under
+  # `IYI_HEAP_STRESS` each unit collects itself on its way to the park
+  # and parks clean: its record is made dirty and stamped by hand.
+  def idle_check(workers : Int32) : Nil
+    IyiHeap.collect_every_park = false
+    stressed = {% if flag?(:heap_verify) %} IyiHeapVerify.stress != 0_u64 {% else %} false {% end %}
+    units = workers
+    go = Channel(Int64).new(units)
+    ready = Channel(UInt64).new(units)
+    group do |g|
+      handles = [] of IyiTask(Int64)
+      units.times { |t| handles << g.spawn(unit: :new) { idle_task(t.to_i64, go, ready) } }
+      records = [] of UInt64
+      units.times do
+        got = ready.receive
+        if got.is_a?(UInt64)
+          records << got
+        else
+          fail("idle: a parked unit sent no record")
+        end
+      end
+      sleep(20)
+      held = records.map { |record| IyiHeap.partition_held(record) }
+      counts = records.map { |record| IyiHeap.partition_collections(record) }
+      if stressed
+        records.each do |record|
+          IyiHeap.write64(record &+ IyiHeap::REC_DEBT, 1_u64)
+          IyiHeap.write64(record &+ IyiHeap::REC_IDLE_TICK, 1_u64)
+        end
+        IyiStat.atomic(IyiStat::IDLE_PENDING).value.set(1_u64)
+      end
+      waited = 0
+      left = units
+      while left > 0 && waited < 3000
+        sleep(1)
+        waited = waited + 1
+        left = 0
+        records.each_with_index { |record, k| left = left + 1 if IyiHeap.partition_collections(record) == counts[k] }
+      end
+      shrank = 0
+      records.each_with_index { |record, k| shrank = shrank + 1 if IyiHeap.partition_held(record) < held[k] }
+      units.times { go.send(1_i64) }
+      handles.each do |handle|
+        value = handle.value
+        fail("idle: a unit answered #{value}") unless value.is_a?(Int64)
+        fail("idle: #{value} nodes of a parked unit's list read wrong") if value != 0_i64
+      end
+      fail("idle: #{left} of #{units} units parked dirty were not collected by an idle worker in 3 s") if left != 0
+      fail("idle: no parked unit's partition held less after its idle collection") if !stressed && shrank == 0
+    end
+    IyiHeap.collect_every_park = true
+  end
+
   # ── inflight ──────────────────────────────────────────────────────────
 
   def inflight_task : Int64
@@ -1383,25 +1512,34 @@
   # before `frontier`, whose weak cells are cleared by the same sweep: the
   # noweak copy, which clears none, ended at `frontier:` (tssh,
   # 933b4d005), and `weak` leaves the frontier's cells to `frontier`.
-  abandon_check
-  weak_check
-  frontier_check
-  filter_check
-  stale_check
-  free_check
-  return_check
-  detach_check
-  answer_check(workers)
-  adopt_check
-  pin_check
-  poison_check
-  graphs_check(workers, rounds)
-  fibers_check
-  large_check
-  takeover_check(workers)
-  construct_check
-  inflight_check
-  settle("death")
+  # `HEAP22_ONLY=idle`: the idle check alone, for the noidle copy of
+  # bench/heap_local.sh, whose broken collection the takeover check would
+  # otherwise meet first.
+  if Program.env("HEAP22_ONLY") == "idle"
+    idle_check(workers)
+  else
+    abandon_check
+    weak_check
+    frontier_check
+    filter_check
+    stale_check
+    fresh_check
+    free_check
+    return_check
+    detach_check
+    answer_check(workers)
+    adopt_check
+    pin_check
+    poison_check
+    graphs_check(workers, rounds)
+    fibers_check
+    large_check
+    takeover_check(workers)
+    construct_check
+    idle_check(workers)
+    inflight_check
+    settle("death")
+  end
   if quiet
     puts "heap local: units collect their own partitions, and every crossing check holds"
   else

@@ -4242,6 +4242,13 @@ class IyiScheduler
         gap_ns = gap
       {% end %}
     end
+    # A pool worker with nothing to run wakes at the idle clock's tick
+    # while a parked unit's partition may be waiting for it (heap22 S6,
+    # `IyiHeap.take_over_quiet`): the wake finds no news and the worker
+    # looks for a partition to collect before it waits again.
+    {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) %}
+      timeout = IyiHeap.idle_wait_ms(timeout) if blocking && st.worker
+    {% end %}
 
     count = 0_i64
     {% if flag?(:win32) %}

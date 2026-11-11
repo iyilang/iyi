@@ -10446,6 +10446,16 @@ require "./file"
     CHAOS_LATE_STEPS   = 122_u64
     CHAOS_FLOOR        = 123_u64
     CHAOS_STREAK       = 124_u64
+    # Idle collections (heap_partition.iyi, `take_over_quiet`): their
+    # count, the idle clock's tick and when it last turned, whether a
+    # parked dirty partition may be waiting, and the walk over records.
+    IDLE_COLLECTIONS = 128_u64
+    IDLE_TICK        = 129_u64
+    IDLE_TICK_NS     = 130_u64
+    IDLE_PENDING     = 131_u64
+    IDLE_CURSOR      = 132_u64
+    IDLE_DONE_TICK   = 133_u64
+    IDLE_SEEN        = 134_u64
 
     # A thread's own page's slots.
     OWN_EPOCH_SEEN   = 0_u64

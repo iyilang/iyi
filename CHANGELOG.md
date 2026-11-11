@@ -39,7 +39,9 @@ against the carve frontier and builds under LLVM 23. On Windows a thread
 stopped inside a system call lends the collector none of its volatile
 registers, whose stale `r8` had kept a 64 MB string received through a
 rendezvous alive (tssh: 5 of 5 runs kept 61 MiB before, 5 of 5 clean
-after).
+after). A unit's local collection clears the weak references to what it
+frees before it frees anything, so a weak reference never names memory
+another unit has since been given (bench/heap_verify_reach, 4 workers).
 
 heap22's verifier: the false-word injector no longer writes under a pool
 worker's parking fiber or below a Windows fiber's committed stack; reports
@@ -27840,7 +27842,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 33,816-line library and nothing else. Every other
+  written against iyi's own 33,848-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

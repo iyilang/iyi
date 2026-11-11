@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
-# heap22 S6 (LeakHunt): drained runs taken again, driven. bench/heap_drain.iyi
-# built with partitions, plain and optimised, its partition arenas flat
-# round after round; with the verifier and under chaos with a local
-# collection at every park, no report; the flag-off control; then one
-# broken copy per mechanism: without the take or without the global
-# sweep's listing the arenas grow (the program fails), and a taken run's
-# objects left `LOCAL` instead of published are caught by `-Dheap_verify`
-# (exit 86).
+# heap22 S6 (LeakHunt): the partitions' runs given back, driven.
+# bench/heap_drain.iyi built with partitions, plain and optimised: its
+# partition arenas flat round after round (drained runs taken again) and
+# its pooled runs' pages back after an idle wait; its mark mode, the
+# partitions held under long global marks; with the verifier and under
+# chaos with a local collection at every park, no report; the flag-off
+# control; then one broken copy per mechanism: without the take of
+# drained runs or the global sweep's listing the arenas grow, without
+# the idle wake the pool stays warm, without the release the resident set
+# stays, without the hold the arenas grow under the marks (the program
+# fails), and a taken run's objects left `LOCAL` instead of published are
+# caught by `-Dheap_verify` (exit 86).
 #
 #   bash bench/heap_drain.sh           # every part
 #   bash bench/heap_drain.sh sound     # plain, optimised, verifier, chaos
@@ -68,11 +72,31 @@ whole() {
   echo "  $label: $(head -1 "$WORK/$name.out")"
 }
 
+# again LABEL NAME OUT [ARGS...]: NAME, built by `whole`, run again with
+# ARGS into OUT; exit 0, no report.
+again() {
+  local label="$1" name="$2" out="$3"
+  shift 3
+  [ -x "$WORK/$name" ] || return
+  timeout 600 "$WORK/$name" "$@" >"$WORK/$out.out" 2>"$WORK/$out.err"
+  local code=$?
+  if [ "$code" -ne 0 ] || grep -q "^iyi: heap_verify: partition" "$WORK/$out.err"; then
+    echo "  $label: exit $code"
+    sed -n '1,12p' "$WORK/$out.out" "$WORK/$out.err" | sed 's/^/    /'
+    status=1
+    return
+  fi
+  echo "  $label: $(head -1 "$WORK/$out.out")"
+}
+
 if [ "$PART" = all ] || [ "$PART" = sound ]; then
   echo "== the arenas flat round after round (-Dheap_partitions)"
   whole "plain" plain "-Dheap_partitions"
   whole "optimised" release "-Dheap_partitions --release"
   whole "verifier" verify "-Dheap_partitions -Dheap_verify" 8 24 4
+  echo "== the partitions held under long marks (mark mode)"
+  again "optimised" release release-mark mark
+  again "verifier" verify verify-mark mark 1000000 4 2
   build stress "-Dheap_partitions -Dheap_verify -Diyi_chaos" && for seed in $SEEDS; do
     env IYI_CHAOS="$seed" IYI_HEAP_STRESS=1 timeout 600 "$WORK/stress" 6 8 4 >"$WORK/stress-$seed.out" 2>"$WORK/stress-$seed.err"
     code=$?
@@ -89,6 +113,7 @@ fi
 if [ "$PART" = all ] || [ "$PART" = off ]; then
   echo "== the flag-off control"
   whole "flag off" off ""
+  again "flag off, mark mode" off off-mark mark
 fi
 
 # One line deleted after a marker: `del MARKER LINE` as an awk program.
@@ -142,6 +167,12 @@ if [ "$PART" = all ] || [ "$PART" = copies ]; then
     "$(del 'def self\.sweep_partition_slice' 'IyiHeap\.list_drained\(index, arena, cursor, n\)')"
   copy "a taken run's objects published" c3 86 \
     "$(subst 'def self\.adopt_drained' 'write8\(own, OWN_PUB\)' 'write8(own, 0_u64)')" "-Dheap_partitions -Dheap_verify" 8 24 4
+  copy "an idle worker wakes for the warm pool" c4 1 \
+    "$(subst 'def self\.idle_wait_ms' 'return timeout unless pool_warm\?' 'return timeout')"
+  copy "a cooled run's pages go back" c5 1 \
+    "$(del 'def self\.cool_pools' '__iyi_release_pages\(low, high - low\)')"
+  copy "a partition holds under a mark" c6 1 \
+    "$(del 'def self\.partition_slice' 'hold_partition\(record, debt\)')" "-Dheap_partitions --release" mark
 fi
 
 exit $status

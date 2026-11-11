@@ -10457,6 +10457,10 @@ require "./file"
     CHAOS_LATE_STEPS   = 122_u64
     CHAOS_FLOOR        = 123_u64
     CHAOS_STREAK       = 124_u64
+    # Partition slices held under a mark (`IyiHeap.hold_partition`), and
+    # the holds that ran out of time.
+    PARTITION_HOLDS           = 125_u64
+    PARTITION_HOLDS_TIMED_OUT = 126_u64
 
     # A thread's own page's slots.
     OWN_EPOCH_SEEN   = 0_u64

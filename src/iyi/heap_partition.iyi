@@ -321,6 +321,19 @@ class IyiHeap
     IyiStat.get(IyiStat::RUNS_PARKED)
   end
 
+  # Pooled runs whose pages went back (`cool_pools`).
+  def self.runs_cooled : UInt64
+    IyiStat.get(IyiStat::RUNS_COOLED)
+  end
+
+  def self.partition_holds : UInt64
+    IyiStat.get(IyiStat::PARTITION_HOLDS)
+  end
+
+  def self.partition_holds_timed_out : UInt64
+    IyiStat.get(IyiStat::PARTITION_HOLDS_TIMED_OUT)
+  end
+
   def self.takeovers : UInt64
     IyiStat.get(IyiStat::TAKEOVERS)
   end
@@ -406,9 +419,9 @@ class IyiHeap
   end
 
   # Bytes of the partition arenas runs were ever carved from: what every
-  # run - owned, pooled, drained or parked - spans, which stays resident
-  # (no run's pages go back), read under the heap's lock
-  # (bench/heap_drain).
+  # run - owned, pooled, drained, parked or cold - spans, read under the
+  # heap's lock (bench/heap_drain). A cold run's pages went back
+  # (`cool_pools`); the rest stay resident.
   def self.partition_carved : UInt64
     total = 0_u64
     enter_barrier
@@ -734,10 +747,14 @@ class IyiHeap
   end
 
   # Partition *record*'s list for class *index* is empty: what the global
-  # sweep returned, or a run - off the class's pool, off its drain list
-  # (`adopt_drained`), off its frontier, or off a partition arena mapped
-  # for it - owned and threaded into the list. Answers the list's head,
-  # never 0. Inside the allocator's bracket.
+  # sweep returned, or a run - off the class's drain list
+  # (`adopt_drained`), off its pool, off its frontier, or off a partition
+  # arena mapped for it - owned and threaded into the list. Answers the
+  # list's head, never 0. Inside the allocator's bracket. The drain list
+  # first: its runs' room is lost while they wait, and a pooled run that
+  # waits gives its pages back (`cool_pools`). Taken after the pool, the
+  # drained runs of #145's app stayed 60 to 75 MB with 1 to 5 MB of them
+  # allocated (tssh, LeakHunt2, S6).
   def self.partition_take(table : Pointer(UInt64), index : Int32) : UInt64
     record = table.address
     head = drain_return(record, index)
@@ -760,17 +777,17 @@ class IyiHeap
     run = 0_u64
     frontier = false
     while run == 0
+      drained = pop_listed(index, PC_DRAIN)
+      if drained != 0
+        if adopt_drained(table, index, drained, id)
+          class_unlock(index)
+          IyiStat.add(IyiStat::RUNS_TAKEN, 1_u64)
+          return table[index]
+        end
+        next
+      end
       run = take_pool_run(index)
       if run == 0
-        drained = pop_listed(index, PC_DRAIN)
-        if drained != 0
-          if adopt_drained(table, index, drained, id)
-            class_unlock(index)
-            IyiStat.add(IyiStat::RUNS_TAKEN, 1_u64)
-            return table[index]
-          end
-          next
-        end
         run = take_frontier_run(index, bytes)
         frontier = run != 0
       end
@@ -1014,6 +1031,54 @@ class IyiHeap
     IyiStat.set(IyiStat::COOL_PENDING, 1_u64)
   end
 
+  # A pool worker's idle wait, in milliseconds (`IyiScheduler.wait_for_
+  # events`): no longer than the pool's turn while a class's pooled runs
+  # still hold their pages - on its pool, old or release list - so that a
+  # program gone quiet gives them back without a wake of its own: a
+  # worker's last `take_over_idle` before it waits finds the runs pooled
+  # in the last second too young to go.
+  def self.idle_wait_ms(timeout : Int64) : Int64
+    return timeout unless pool_warm?
+    cap = (POOL_TURN_NS // 1000000_u64).to_i64 &+ 1_i64
+    timeout < 0_i64 || timeout > cap ? cap : timeout
+  end
+
+  # Whether a class's pool, old or release list holds a run, read without
+  # its lock.
+  def self.pool_warm? : Bool
+    return false if @@pcentre == 0
+    index = 0
+    while index < CLASSES
+      line = pline(index)
+      return true if read64(line + PC_POOL) | read64(line + PC_OLD) | read64(line + PC_RELEASE) != 0
+      index = index + 1
+    end
+    false
+  end
+
+  # Bytes of the runs on the cold lists, whose pages went back, read
+  # under each class's lock (bench/heap_drain).
+  def self.pool_cold_bytes : UInt64
+    return 0_u64 if @@pcentre == 0
+    total = 0_u64
+    enter_barrier
+    index = 0
+    while index < CLASSES
+      class_lock(index)
+      run = read64(pline(index) + PC_COLD)
+      while run != 0
+        arena = run & (0_u64 &- MAP)
+        word = run_word(arena, granule_of(arena, run))
+        total = total + run_n(word).unsafe_shl(GRANULE_SHIFT)
+        run = word & RUN_LINK
+      end
+      class_unlock(index)
+      index = index + 1
+    end
+    leave_barrier
+    total
+  end
+
   # Up to *limit* runs off the release lists, class after class from where
   # the last call stopped, inside the allocator's bracket: each run's
   # whole pages back to the kernel (`__iyi_release_pages`; they read zero
@@ -1021,13 +1086,21 @@ class IyiHeap
   # the run onto its class's cold list. A pool run's chunks are free and
   # nobody's: the global sweep and the verifier pass a `RUN_POOL` run over,
   # and a stale word's mark is refused by the chunk's `FREE` flag, which
-  # the arena's tables hold, not the page.
+  # the arena's tables hold, not the page. None while a mark runs beside
+  # the program, whose marker may hold a chunk it grayed before the chunk
+  # was handed back (`IyiMark.scan` reads its flag, then its words): on
+  # Windows a release decommits the pages before it commits them again,
+  # and a read between the two faults (design section 2.3). The bracket
+  # keeps a mark from starting meanwhile; a stop asked for ends the
+  # releases where they stand.
   def self.cool_pools(limit : Int32) : Nil
     return if IyiStat.get(IyiStat::COOL_PENDING) == 0_u64
+    return if LibIyiGCTable.__iyi_marking != 0_u8
     index = (IyiStat.get(IyiStat::COOL_CURSOR) % CLASSES.to_u64).to_i32
     done = 0
     looked = 0
     while done < limit && looked < CLASSES
+      break if stop_requested?
       run = 0_u64
       if read64(pline(index) + PC_RELEASE) != 0
         class_lock(index)
@@ -1819,14 +1892,17 @@ class IyiHeap
   # A slice's worth allocated in partition *record* (`slice_full`): its
   # debt, and its collection once the debt reaches its budget. Under a
   # mark beside the program the slice assists, as the shared heap's do,
-  # and never holds: the ceiling is the shared heap's.
+  # and the debt still counts: the first slice after the mark collects
+  # what the unit allocated under it, and past its ceiling the unit holds
+  # (`hold_partition`).
   def self.partition_slice(record : UInt64, slice : UInt64) : Nil
-    if LibIyiGCTable.__iyi_marking != 0_u8
-      IyiMark.assist
-      return
-    end
     debt = read64(record &+ REC_DEBT) &+ slice
     write64(record &+ REC_DEBT, debt)
+    if LibIyiGCTable.__iyi_marking != 0_u8
+      IyiMark.assist
+      hold_partition(record, debt)
+      return
+    end
     # A record no unit owns (a bracket's, `IyiHeap.within`) has no roots
     # the runtime can name: the global collection alone reclaims it.
     return if debt < budget_of(record) || @@local_off || read64(record &+ REC_UNIT) == 0
@@ -1838,6 +1914,34 @@ class IyiHeap
     unit = fiber.unit
     return unless unit.is_a?(IyiUnit) && unit.heap == record
     local_collect(record, fiber, false, false)
+  end
+
+  # A partition's slice under a mark beside the program, its *debt* past
+  # `IyiMark::HOLD_PAST` percent of its budget: the thread allocates no
+  # further until the mark is over - it marks while the mark's pool has
+  # work for it and otherwise sleeps (`IyiMark.hold_wait`) - since no
+  # local collection starts under a mark (`local_collect`) and the
+  # partition would grow by all it allocates meanwhile. #145's app grew
+  # its partitions from 16-33 MB to 76-111 MB under marks of 75 to 480
+  # ms: every 1 s sample above 50 MB fell in one or in the 500 ms after
+  # it, against 24 of 279 below (tssh, LeakHunt2, S6). A stop asked for
+  # ends the wait, and `IyiMark::HOLD_NS` bounds it, as the shared heap's
+  # `IyiMark.hold`. A partition no local collection empties - one no unit
+  # owns, a detached one, or all of them while a test turns local
+  # collections off - never holds: its debt is never paid.
+  def self.hold_partition(record : UInt64, debt : UInt64) : Nil
+    return if @@local_off || read64(record &+ REC_UNIT) == 0 || read64(record &+ REC_STATE) & REC_DETACHED != 0
+    return if debt < budget_of(record).unsafe_div(100_u64) &* IyiMark::HOLD_PAST
+    IyiStat.add(IyiStat::PARTITION_HOLDS, 1_u64)
+    until_ns = IyiMark.now_ns &+ IyiMark::HOLD_NS
+    while LibIyiGCTable.__iyi_marking != 0_u8 && !stop_requested?
+      if IyiMark.now_ns >= until_ns
+        IyiStat.add(IyiStat::PARTITION_HOLDS_TIMED_OUT, 1_u64)
+        return
+      end
+      IyiMark.assist
+      IyiMark.hold_wait if LibIyiGCTable.__iyi_marking != 0_u8
+    end
   end
 
   def self.budget_of(record : UInt64) : UInt64

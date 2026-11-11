@@ -4259,6 +4259,13 @@ class IyiScheduler
         gap_ns = gap
       {% end %}
     end
+    # A pool worker with nothing to run wakes at the pool's turn while
+    # pooled runs still hold their pages (heap22 S6, `IyiHeap.turn_pools`):
+    # the wake finds no news, and the worker's `take_over_idle` gives
+    # them back before it waits again.
+    {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) %}
+      timeout = IyiHeap.idle_wait_ms(timeout) if blocking && st.worker
+    {% end %}
 
     count = 0_i64
     {% if flag?(:win32) %}

@@ -80,7 +80,16 @@ inside its 240 s on Linux (84 s) and macOS (100-107 s). `-Dheap_verify`
 reports a local mark that writes another partition's mark bits, and
 heap_local's stale check keeps its object carved to the unit's death, so
 both copies are caught every run with the dead stack cleared under local
-collections.
+collections. In every build the runtime's statistics, clocks, counters,
+generations and random streams, and the runtime lock's word, live in a
+page mapped outside the heap and the image (`IyiStat`), which no root scan
+reads: `IyiHeap.local_ns` in the data segment read as a word five bytes
+into a LOCAL chunk, and `-Dheap_verify` reported the data segment holding
+it (heap_local's "verify release, 8 workers", tmac); heap_local's new copy
+puts such a counter back and is caught. concurrency_exercise's 16e builds
+its 64 MB values 64 KB at a time, so the one-worker matrix rows under
+`IYI_HEAP_STRESS=1` no longer collect once per back-edge park (Linux,
+seed 3: 285 s to 125.5 s against the row's 240 s).
 
 A parallel unit reaching module state that is not Share through the code
 it calls is a compile error (SPEC.md III.4.5), std's and the prelude's
@@ -27888,7 +27897,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 33,958-line library and nothing else. Every other
+  written against iyi's own 34,143-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

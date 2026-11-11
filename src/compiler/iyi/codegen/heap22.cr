@@ -108,7 +108,9 @@ class Iyi::CodeGenVisitor
   # heap22 C1: the context a crossing block's proc is made with, in place
   # of the scope's. Answers the proc's function and the context pointer, or
   # nil when the block captures something the scope does not hold as a
-  # variable here, and the scope's context is used as before.
+  # variable here, or something a copy would part from the scope's
+  # variable (`iyi_c1_copyable?`), and the scope's context is used as
+  # before.
   def iyi_c1_proc(node : ProcLiteral, fun_literal_name : String, host) : {LLVMTypedFunction, LLVM::Value}?
     return nil unless iyi_heap_partitions? && node.iyi_crossing?
     return nil if SPAWN_BROKEN.includes?("c1")
@@ -121,6 +123,7 @@ class Iyi::CodeGenVisitor
     names.names.each do |name|
       meta = def_vars.try &.[name]?
       next unless meta && meta.closured? && !meta.belongs_to?(a_def) && (meta_type = meta.type?)
+      return nil unless iyi_c1_copyable?(meta_type)
       source = context.vars[name]?
       return nil unless source && source.type == meta_type
       metas << meta
@@ -128,6 +131,7 @@ class Iyi::CodeGenVisitor
     end
     self_type = iyi_chain_self(context)
     return nil if metas.empty? && self_type.nil?
+    return nil if self_type && !iyi_c1_copyable?(self_type)
 
     closure_type, pointerful = llvm_typer.closure_context_type(metas, nil, self_type)
     closure_ptr = iyi_c1_allocate(closure_type, pointerful, metas, self_type)
@@ -172,6 +176,29 @@ class Iyi::CodeGenVisitor
       context.closure_self = saved_self
     end
     {the_fun, closure_ptr}
+  end
+
+  # Whether a capture of *type* may be copied into a C1 context: a value
+  # nothing changes in place - a reference, a number, a bool, a char, a
+  # symbol, nil, a pointer, a proc, or a tuple or union of them. A struct
+  # (`Atomic`, a record, a static array) is changed in place through the
+  # scope's variable after the block is made, and a copy would not see it:
+  # bench/heap_crossings' `ring` spun forever on a copied `Atomic(Int32)`
+  # the scope set (Linux, 10:25). The rule refuses a capture assigned again
+  # after the crossing, so a value copied at the block is the one it reads.
+  private def iyi_c1_copyable?(type : Type) : Bool
+    case type
+    when UnionType
+      type.union_types.all? { |member| iyi_c1_copyable?(member) }
+    when TupleInstanceType
+      type.tuple_types.all? { |member| iyi_c1_copyable?(member) }
+    when NamedTupleInstanceType
+      type.entries.all? { |entry| iyi_c1_copyable?(entry.type) }
+    when PrimitiveType, PointerInstanceType, ProcInstanceType
+      true
+    else
+      !type.struct?
+    end
   end
 
   # The `self` the scope's closure chain holds, as `setup_closure_vars`

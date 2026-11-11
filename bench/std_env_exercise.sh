@@ -233,14 +233,22 @@ esac
 # Writers take turns (`ENV.writing`). The exercise's "writers and readers
 # at once" holds on the pool's threads above; here it runs on the chaos
 # scheduler's simulated schedule (SPEC.md III.4.17), where a seed is one
-# interleaving and names it again. The sound module passes every seed of
+# interleaving and names it again. A seed's schedule follows what the
+# program does, and the exercise walks the whole environment, so the runs
+# get an empty one (`env -i`) wherever the platform allows it: the same
+# table on every machine and in CI. The sound module passes every seed of
 # CHAOS_SEEDS; with the turn taken out, every seed of CAUGHT_SEEDS fails at
 # the race's own checks. Windows writes to the platform's block, which
-# takes no turn of iyi's, so the copy changes nothing there.
+# takes no turn of iyi's, so the copy changes nothing there, and a Windows
+# program needs its environment to start: its runs keep the one they have.
 CHAOS_SEEDS="${CHAOS_SEEDS:-1 2 3 4 5 6 7 8}"
 CAUGHT_SEEDS="${CAUGHT_SEEDS:-3 6}"
 TO=""
 command -v timeout >/dev/null 2>&1 && TO="timeout -k 5 120"
+CLEAN="env -i"
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) CLEAN="env" ;;
+esac
 RACE_FAILED="ASSERTION FAILED: writers at once keep every write\|ASSERTION FAILED: a reader sees its variable while another unit deletes"
 chaos_seeds() { # chaos_seeds <name> <search path>: sets passed, caught, other
   local name="$1" seed
@@ -251,7 +259,7 @@ chaos_seeds() { # chaos_seeds <name> <search path>: sets passed, caught, other
     return
   fi
   for seed in $CHAOS_SEEDS; do
-    IYI_CHAOS=$seed IYI_WORKERS=1 $TO "$WORK/$name" >"$WORK/$name-$seed.out" 2>&1
+    $TO $CLEAN IYI_CHAOS=$seed IYI_WORKERS=1 "$WORK/$name" >"$WORK/$name-$seed.out" 2>&1
     if grep -q "ALL CHECKS PASSED" "$WORK/$name-$seed.out"; then
       passed="$passed $seed"
     elif grep -q "$RACE_FAILED" "$WORK/$name-$seed.out"; then

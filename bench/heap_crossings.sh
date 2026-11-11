@@ -198,6 +198,14 @@ prove_caught "TlsIdentity chain copy" r16 tls \
 # Row 21: a List's elements not published.
 prove_caught "List publish" r21 list \
   "$(del 'def initialize\(items : Array\(T\)\)' 'IyiCross\.publish\(item\)')" std list.iyi
+# The scheduler's list of closes posted to another thread, made in the
+# closer's partition. Not on Windows, which posts no list.
+if [ "$WINDOWS" -eq 1 ]; then
+  echo "  closed list shared: skipped on Windows, a close there ends the posted operation and no list is made"
+else
+  prove_caught "closed list shared" r22 closed \
+    "$(subst 'def self\.wake_closed\(fd : Int32\)' 'IyiCross\.shared do' 'begin')" iyi concurrency.iyi
+fi
 
 echo
 echo "== the verifier's (S4): mechanisms whose loss no poison shows here"

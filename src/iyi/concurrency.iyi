@@ -4783,12 +4783,18 @@ class IyiScheduler
       while other.is_a?(IyiSchedulerState)
         id = other.object_id
         if id != me && (id == reader || id == writer)
-          closed = other.closed_fds
-          unless closed.is_a?(Array(Int32))
-            closed = [] of Int32
-            other.closed_fds = closed
+          # The list is the other thread's, read there when it takes its
+          # mail, so it and its growth are the shared heap's (heap22): made
+          # in the closer's partition, the closer's next local collection
+          # freed it while it waited in the other thread's state.
+          IyiCross.shared do
+            closed = other.closed_fds
+            unless closed.is_a?(Array(Int32))
+              closed = [] of Int32
+              other.closed_fds = closed
+            end
+            closed << fd
           end
-          closed << fd
           other.post_mail
           ring(other)
         end

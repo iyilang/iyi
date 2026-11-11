@@ -1261,7 +1261,8 @@ module Iyi
       return nil unless pinned
       pass_pinned(node, pinned)
       if location = node.name_location || node.location
-        @program.warnings.add_note(location.expanded_location || location, "this spawn runs in the shared heap because #{reason} (SPEC.md III.4.19)")
+        location = location.expanded_location || location
+        @program.warnings.add_note(location, "this spawn runs in the shared heap because #{reason} (SPEC.md III.4.19)") if @pin_noted.add?(location.to_s)
       end
       reason
     end
@@ -1283,9 +1284,14 @@ module Iyi
       location = node.name_location || node.location
       return unless location
       location = location.expanded_location || location
+      return unless @pin_noted.add?(location.to_s)
       @program.iyi_pin_sites << PinSite.new(location, call, reason)
       @program.warnings.add_note(location, "#{call} runs its block in the shared heap because #{reason} (SPEC.md III.4.19)")
     end
+
+    # The places a pin was noted at, once each: a def typed twice meets its
+    # spawn twice.
+    @pin_noted = Set(String).new
 
     # `Unit.new` or `SharedProc.of` when *target_def* is std's, else nil:
     # the calls besides a spawn that take the compiler's `pinned:`

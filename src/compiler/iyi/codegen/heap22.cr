@@ -53,7 +53,7 @@ class Iyi::CodeGenVisitor
     return false if SPAWN_BROKEN.includes?("new-shared")
     @iyi_born_shared.fetch(type) do
       base = type.is_a?(GenericClassInstanceType) ? type.generic_type.as(Type) : type
-      @iyi_born_shared[type] = !type.struct? && base.namespace.is_a?(Program) &&
+      @iyi_born_shared[type] = !type.struct? && base.is_a?(NamedType) && base.namespace.is_a?(Program) &&
                                IYI_BORN_SHARED.includes?(base.name) &&
                                @program.iyi_share_reach.std_at?(base.locations.try(&.first?))
     end

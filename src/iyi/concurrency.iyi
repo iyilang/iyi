@@ -1944,7 +1944,7 @@ class IyiScheduler
   # the back link after that unregister cleared it, the answer was no for
   # a fiber the registry held, and `retire_thread` left the main fiber on
   # the list, naming a stack that was gone: on an M2 Pro, waves of 16
-  # threads ending together left one in 11 of 2,000 waves (0.21.0), and
+  # threads ending together left one in 59 of 8,000 waves (0.21.0), and
   # `thread_exercise` named it in 1 of 24 runs. Only the asking thread
   # links or unlinks the fiber it asks about, so the answer holds after.
   def self.registered?(fiber : IyiFiber) : Bool

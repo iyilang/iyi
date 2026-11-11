@@ -11216,14 +11216,7 @@ class IyiOnce
       # A proc is its function and its closure; this one closes over
       # nothing.
       cell = {initializer.address, 0_u64}
-      # In the shared heap (heap22, contract amendment 6b): the first read
-      # may be a pool unit's, and the graph the initializer builds is held
-      # by a global its partition's local collection never scans, so
-      # built in the unit's partition it was nobody's to keep. An
-      # initializer run at its declaration runs on the main fiber, which
-      # allocates in the shared heap already. Nothing but the call without
-      # `-Dheap_partitions`. An initializer that panics ends its fiber
-      # still allocating in the shared heap, which is sound.
+      # In the shared heap: contract amendment 6b, at `IyiCross.shared`.
       IyiCross.shared { pointerof(cell).as(Pointer(Proc(Nil))).value.call }
       IyiAtomic.store(flag, 1_u8, :release, false)
     end
@@ -11536,28 +11529,27 @@ end
 # On wasm32 there is no environment to read and `env` answers nil for
 # every name: the sandbox story (SPEC.md III.12) is that the runtime
 # hands the program nothing, and an absent surface beats a permission.
-#
-# On Windows there is no `environ` worth reaching. The CRT's `_environ`,
-# whose address `__p__environ` hands back, is the *ANSI* environment: a
-# copy of the real block folded into the process's code page. Measured
-# with PowerShell setting `IYI_PROBE_TR` to `değer-日本`, 13 bytes of
-# UTF-8, and the program reading it back through that table: `deger-??`,
-# 8 bytes — `ğ` best-fitted to `g`, `ı` to `i`, `ş` to `s`, and `日本` to
-# two question marks, the same defect the paths and the console had.
-#
-# It is also not the environment anybody else reads. `ENV["X"] = …` used
-# to install a table of its own here, and measured, after that write
-# `GetEnvironmentStringsW` — the block `CreateProcess` copies into a
-# child — did not carry the variable at all, while the CRT table did. Two
-# environments that disagreed, and the one every child inherits was the
-# one iyi was not writing.
-#
-# So on Windows the platform's own block is the only environment: a lookup
-# is `GetEnvironmentVariableW`, a write and a delete are
-# `SetEnvironmentVariableW`, and enumeration is `GetEnvironmentStringsW`
-# (`src/std/env.iyi`). UTF-16 both ways, nothing folded, and one
-# environment instead of two.
 {% if flag?(:win32) %}
+  # On Windows there is no `environ` worth reaching. The CRT's `_environ`,
+  # whose address `__p__environ` hands back, is the *ANSI* environment: a
+  # copy of the real block folded into the process's code page. Measured
+  # with PowerShell setting `IYI_PROBE_TR` to `değer-日本`, 13 bytes of
+  # UTF-8, and the program reading it back through that table: `deger-??`,
+  # 8 bytes — `ğ` best-fitted to `g`, `ı` to `i`, `ş` to `s`, and `日本` to
+  # two question marks, the same defect the paths and the console had.
+  #
+  # It is also not the environment anybody else reads. `ENV["X"] = …` used
+  # to install a table of its own here, and measured, after that write
+  # `GetEnvironmentStringsW` — the block `CreateProcess` copies into a
+  # child — did not carry the variable at all, while the CRT table did. Two
+  # environments that disagreed, and the one every child inherits was the
+  # one iyi was not writing.
+  #
+  # So on Windows the platform's own block is the only environment: a
+  # lookup is `GetEnvironmentVariableW`, a write and a delete are
+  # `SetEnvironmentVariableW`, and enumeration is `GetEnvironmentStringsW`
+  # (`src/std/env.iyi`). UTF-16 both ways, nothing folded, and one
+  # environment instead of two.
   @[Link("kernel32")]
   lib LibIyiEnv
     fun GetEnvironmentVariableW(name : UInt16*, buffer : UInt16*, size : Int32) : Int32

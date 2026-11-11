@@ -16,8 +16,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 # The oracle and the mutations are bench/stale_ir_normalize.py and
-# bench/stale_mutate.py, imported rather than run, so this names them for
-# bench/gates_reachable.py.
+# bench/stale_mutate.py, imported here rather than run. Each is also run by
+# path, which is what bench/gates_reachable.py reads: the normalizer by
+# bench/stale_ir_normalize_selftest.sh, the mutations' selftest by
+# bench/stale_callpath.sh before it runs this.
 from stale_ir_normalize import normalize_ir
 from stale_mutate import Mutation, generate_mutations_for_source, selftest as stale_mutate_selftest
 

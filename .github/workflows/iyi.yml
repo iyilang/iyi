@@ -35,6 +35,8 @@ name: iyi
 #                    the windows- and darwin- shards and windows-std-platforms
 #                    beside their own jobs)
 #   stale-fresh      a fresh runner audits the producer's imported receipts
+#   stale-callpath   the stale key's own gates: link once, RG4, the reach walk
+#                    against what codegen recorded, RG8 and RG9
 #
 # Every job carries a `timeout-minutes`. The default is six hours, and these
 # jobs start daemons, listen on sockets, serve HTTP, soak an LSP and run
@@ -344,6 +346,42 @@ jobs:
           path: stale-index/master-candidate-x86_64-linux-gnu.json
           archive: false
           retention-days: 1
+
+  # The stale key's own gates, which no job ran: `bench/gates_reachable.py`
+  # named them when it arrived from upstream. They need the compiler that
+  # builds `iyi` as well as `iyi`: the link section asks it what the target
+  # links, and RG8 builds an `iyi` with the def body dropped from the walk's
+  # encoding to prove a mutation there is caught. That and RG9 over the
+  # 140-program corpus took 17 minutes together on twelve darwin arm64 cores,
+  # so this is a job of its own rather than more steps of `iyi`, which is
+  # already most of the way to its hour.
+  stale-callpath:
+    needs: [plan, build]
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'stale-callpath') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    container:
+      image: crystallang/crystal:1.21.0-build
+    name: "The stale key: link, reach, RG4, RG8 and RG9"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v5
+        with:
+          name: crystal
+          path: .build
+      - run: chmod +x .build/crystal
+      - name: Build `iyi`
+        run: make -o .build/crystal iyi
+
+      - name: Link once, RG4, the reach walk, the key's phases, RG8 and RG9
+        run: IYI="$PWD/.build/iyi" bash bench/stale_callpath.sh all
+
+      # Row 21: two processes record a thousand receipts each into one
+      # store, and every record parses with the sequence at two thousand.
+      - name: Two processes record into one store
+        run: bash bench/stale_store_concurrency.sh
 
   # A second runner gets only the producer's compiler and portable receipt
   # snapshot. No cache crosses this boundary: a hit here is evidence that the
@@ -3880,7 +3918,7 @@ jobs:
   # red would ship a claim nobody on that platform can reproduce.
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [binary, darwin, darwin-std, darwin-std-siblings, clean-room, iyi, stale-fresh, compiler-specs, stdlib-specs,
+    needs: [binary, darwin, darwin-std, darwin-std-siblings, clean-room, iyi, stale-callpath, stale-fresh, compiler-specs, stdlib-specs,
             samples, lsp-positions, std, std-siblings, std-platforms, targets, cross-objects, cross-run,
             wasi-run, windows-probe, windows-collector, windows-runtime, windows-native,
             windows-native-gates, windows-native-surfaces, windows-std,
@@ -4009,7 +4047,7 @@ jobs:
   # failed or cancelled one does not. `scripts/ci_plan.py` refuses a
   # workflow whose jobs this list does not name.
   result:
-    needs: [plan, docs, build, iyi, stale-fresh, compiler-specs, stdlib-specs, lsp-positions, samples, std,
+    needs: [plan, docs, build, iyi, stale-callpath, stale-fresh, compiler-specs, stdlib-specs, lsp-positions, samples, std,
             std-platforms, std-siblings, targets, cross-objects, cross-run, darwin,
             darwin-std-siblings, darwin-std, windows-probe, windows-collector, windows-runtime,
             windows-native, windows-native-gates, windows-native-surfaces, windows-std,

@@ -37,11 +37,22 @@ trap 'rm -rf "$WORK"' EXIT
 
 PYTHON="${PYTHON:-python3}"
 EQUIV_SCRIPT="$REPO/bench/stale_equivalence.sh"
+EVIDENCE_MODULE="$REPO/bench/stale_evidence.py"
 
 step() { echo "== §evidence step $1: $2 =="; }
 fail() { echo "stale_evidence_test: $*" >&2; exit 1; }
 expect_eq() { [ "$1" = "$2" ] || fail "expected $2, got $1${3:+: $3}"; }
 expect_contains() { case "$1" in *"$2"*) ;; *) fail "missing $2${3:+: $3}";; esac; }
+
+# --------------------------------------------------------------------------
+# Step 0: the module every step below imports loads on its own
+# --------------------------------------------------------------------------
+# Each step imports it inside a heredoc, where a syntax or import error reads
+# as that step's failure. Run once by path it is one failure, named for what
+# it is, and bench/gates_reachable.py sees the module run: an import inside a
+# heredoc is not a command it can read.
+step 0 "bench/stale_evidence.py loads under $PYTHON"
+"$PYTHON" -B "$EVIDENCE_MODULE" || fail "bench/stale_evidence.py does not load"
 
 # --------------------------------------------------------------------------
 # Step 1: Direct invocation of production stale_evidence module: default / empty

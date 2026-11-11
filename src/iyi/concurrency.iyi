@@ -702,8 +702,10 @@ class IyiFiber
     # runtime's, the id of the thread whose io list the fiber parks on
     # while the operation is posted, written when it is armed: whichever
     # thread takes the packet finds the fiber there
-    # (`IyiScheduler.complete_packet`).
-    @wait_overlapped = Pointer(UInt8).malloc(40_u64)
+    # (`IyiScheduler.complete_packet`). Made in the shared heap, as the
+    # fiber is (`__iyi_new_shared` makes the fiber alone, not what its
+    # constructor allocates, heap22 row 14).
+    @wait_overlapped = IyiCross.shared { Pointer(UInt8).malloc(40_u64) }
     @io_bytes_read = 0_i64
     @io_pending = false
   end

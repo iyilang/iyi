@@ -29,7 +29,8 @@
 # each round's collection (`IyiHeap.partition_carved`) and the resident
 # set, then the resident set and the bytes gone cold before and after
 # IDLE_MS idle; the program fails when the span after the last round is
-# more than a quarter (and 4 MiB) above the span after round WARM, when
+# more than a quarter (and 4 MiB) above the span after round WARM, plus
+# three times what the kept strings grew by meanwhile, when
 # a kept string is not what was sent, when a pooled run still holds its
 # pages after the idle wait, or when the resident set fell by less than
 # half of what went cold meanwhile.
@@ -178,6 +179,10 @@ module bench/heap_drain
     previous_burst = [] of String
     spans = [] of UInt64
     residents = [] of UInt64
+    # The kept strings' bytes after each round: the live set grows by them,
+    # and the arenas may grow by as much, three times over for headers and
+    # the runs they fill to three quarters before they are parked.
+    payloads = [] of UInt64
     round = 0
     while round < rounds
       # The last round's burst let go: dead at this round's collection.
@@ -189,6 +194,13 @@ module bench/heap_drain
         spans << 0_u64
       {% end %}
       residents << resident_bytes
+      payload = 0_u64
+      k = 0
+      while k < kept.size
+        payload = payload + kept[k].bytesize.to_u64
+        k = k + 1
+      end
+      payloads << payload
       round = round + 1
     end
     fail("#{previous_burst.size} burst strings, not #{units * DENSE}") if previous_burst.size != units * DENSE
@@ -212,6 +224,7 @@ module bench/heap_drain
       last = spans[rounds - 1]
       slack = base // 4_u64
       slack = 4_u64 * mib if slack < 4_u64 * mib
+      slack = slack + (payloads[rounds - 1] - payloads[WARM - 1]) * 3_u64
       # Idle: the pool's runs turn cold - their pages given back - with
       # no unit left to wake a worker (`IyiHeap.idle_wait_ms`).
       busy = resident_bytes

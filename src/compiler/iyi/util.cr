@@ -385,6 +385,32 @@ module Iyi
     name
   end
 
+  # iyi: a runner's own program and what the link wrote beside it, once the
+  # program has exited. Windows refused the delete for a moment after the
+  # exit - "being used by another process", whatever still held the image -
+  # and the refusal, raised out of the runner's `ensure`, replaced the
+  # program's own verdict: `std_http_latency.iyi` printed ALL CHECKS PASSED
+  # and `iyi run` exited 1 (CI job 130381353157). Asked again for two
+  # seconds: one second failed once on a CI runner against a gate's 300 ms
+  # hold (CI job 130589942769), the cause not recorded, and two leave room.
+  # A file still held then is left for `sweep_run_leftovers`, whose next run
+  # past the hour takes it. Elsewhere a refusal is not the platform's habit,
+  # and raises.
+  def self.delete_run_output(path : String) : Nil
+    {% if flag?(:win32) %}
+      40.times do |attempt|
+        begin
+          File.delete?(path)
+          return
+        rescue File::Error
+          sleep 50.milliseconds unless attempt == 39
+        end
+      end
+    {% else %}
+      File.delete?(path)
+    {% end %}
+  end
+
   def self.with_line_numbers(
     source : String | Array(String),
     highlight_line_number = nil,

@@ -255,7 +255,9 @@ struct Crystal::System::Process
     {new_handle, dup_handle}
   end
 
-  def self.spawn(prepared_args, shell, env, clear_env, input, output, error, chdir, new_pgroup : Bool = false, &)
+  # iyi: *process_group* is POSIX's (`unix/spawn.cr`): a job object is
+  # Windows' way to end a process and what it started, so it changes nothing here.
+  def self.spawn(prepared_args, shell, env, clear_env, input, output, error, chdir, process_group = false, &)
     startup_info = LibC::STARTUPINFOW.new
     startup_info.cb = sizeof(LibC::STARTUPINFOW)
     startup_info.dwFlags = LibC::STARTF_USESTDHANDLES

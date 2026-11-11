@@ -61,7 +61,7 @@ Implementation starts only after Jason Waldrip approves this pull request. Appro
 * **Time, randomness and temp names:** `src/std/time.iyi:1252-1349`, `src/std/random.iyi:440-475`, temp names from getrandom, arc4random or clock (`src/std/file.iyi:1963-1985`), `TMPDIR` read by `Dir.tempdir` (`src/std/dir.iyi:425-431`) and `File.tempfile` (`src/std/file.iyi:1921-1931`), GC pause clock and accessor (`src/iyi/prelude.iyi:4781`, `7529`).
 * SHA-256 exists in iyi (`src/std/digest.iyi:429`). The host side has only `src/crystal/digest/md5.cr` and `sha1.cr`.
 * The cache cleaner keeps ten most recently used directories (`src/compiler/iyi/codegen/cache_dir.cr:109-117`, `212-233`). The MCP `test` tool is at `src/compiler/iyi/command/mcp.cr:179`, `221`.
-* **Corpus and CI:** No committed `*_test.iyi`. The test verb is exercised by generated fixtures: `bench/test_verb.sh` and `bench/agent_loop.py:72-76`, `674-695`, at `.github/workflows/iyi.yml:604`, `644`, `1519`, `1531`, `2106`, `2134`. The std exercises run as four weighted shards per platform (`.github/workflows/iyi.yml:934-985`, `1663`, `2450`). `on: [push, pull_request]` (`iyi.yml:41`), `permissions: {}` (`iyi.yml:65`). The only `secrets.` references are in the VS Code job (`iyi.yml:3174-3175`). `github.token` is exported in step environments (`iyi.yml:2708`, `2795`, `3139`), and PR jobs use `actions/cache` (`iyi.yml:1362`, `1647`, `2700`, `2787`, `2880`). Linux executables dynamically link libc (`SPEC.md:6425-6432`).
+* **Corpus and CI:** Four committed tests, `bench/std_{bool,box,heap,string_pool}_test.iyi`, which were std exercises and are run by `bench/module_test.sh`; they are not in the corpus below. The test verb is otherwise exercised by generated fixtures: `bench/test_verb.sh` and `bench/agent_loop.py:72-76`, `674-695`, at `.github/workflows/iyi.yml:604`, `644`, `1519`, `1531`, `2106`, `2134`. The std exercises run as four weighted shards per platform (`.github/workflows/iyi.yml:934-985`, `1663`, `2450`). `on: [push, pull_request]` (`iyi.yml:41`), `permissions: {}` (`iyi.yml:65`). The only `secrets.` references are in the VS Code job (`iyi.yml:3174-3175`). `github.token` is exported in step environments (`iyi.yml:2708`, `2795`, `3139`), and PR jobs use `actions/cache` (`iyi.yml:1362`, `1647`, `2700`, `2787`, `2880`). Linux executables dynamically link libc (`SPEC.md:6425-6432`).
 
 ## 3. The claim and what it assumes
 
@@ -278,15 +278,15 @@ iyi test [--json] [--timeout S] [--affected FILE]... [--cached | --fresh] [--exp
 
 | Gate | Proves | Blocks | Until green |
 |---|---|---|---|
-| RG1 | Compilers with equal build-input digests produce byte-identical test executables for corpus (integrated 144-program corpus) | Hits across commits | Executable SHA-256 stays in identity |
-| RG2 | Normal and `-Diyi_observe` builds give equal exit status, stdout and stderr outside calibrated masks, non-reusable output, and normalized backtraces across all 144 programs (28 samples + 116 std exercises), 0 excluded, zero failures | Shipping `--cached` | Shipping waits |
-| RG3 | Zero unclassified runtime sites reachable from corpus on target (144-program integrated corpus); report lists candidate runtime defs flagged by the §4 walk, with completeness resting on review and RG6 as the check | Enabling platform CI | Platform runs fresh |
+| RG1 | Compilers with equal build-input digests produce byte-identical test executables for corpus (integrated 140-program corpus) | Hits across commits | Executable SHA-256 stays in identity |
+| RG2 | Normal and `-Diyi_observe` builds give equal exit status, stdout and stderr outside calibrated masks, non-reusable output, and normalized backtraces across all 140 programs (28 samples + 112 std exercises), 0 excluded, zero failures | Shipping `--cached` | Shipping waits |
+| RG3 | Zero unclassified runtime sites reachable from corpus on target (140-program integrated corpus); report lists candidate runtime defs flagged by the §4 walk, with completeness resting on review and RG6 as the check | Enabling platform CI | Platform runs fresh |
 | RG4 | Links byte-identical under randomized variables outside `CHILD_ENV` | Treating `CHILD_ENV` as whole link environment | Full link environment digested |
 | RG5 | Runtime patched via `IYI_PATH` dropping each observer allows changed input to pass; gate catches it | Claiming kind is covered | Kind is not claimed |
 | RG6 | Standing shadow audit catches unannotated leaks or disagreements | Keeping consumption enabled after disagreement | Consumption disabled until fix (publishes empty snapshot) |
 | RG7 | Different `--threads` produce identical executables | Leaving `n_threads` out of behavior key | `n_threads` stays in key |
 | RG8 | Over C2, C3 and single-site mutations generated from the walk's own elements (body, callee, overload capture, instance variable and its initializer, constant, class variable initializer, annotation, macro input, position change above a reached call or failable cast): every mutation changing normalized reached IR changes `CallPathFp`; link annotation mutations change the link command line and `LinkFp`; artifact object unit mutations change linked bytes and `Build`; mutations outside the reached set (unreached def body, unrelated type, unused constant, comment above code holding no location literal) change neither; codegen emits no function the walk did not reach | Shipping `--cached` | Shipping waits |
-| RG9 | Every C2 and C3 program (integrated 144-program corpus) checked in two processes with address randomization, with and without a preanalysed prelude (`compiler.cr:605-617`), and on the `stale-fresh` runner gets one `CallPathFp` | Shipping `--cached` | Shipping waits |
+| RG9 | Every C2 and C3 program (integrated 140-program corpus) checked in two processes with address randomization, with and without a preanalysed prelude (`compiler.cr:605-617`), and on the `stale-fresh` runner gets one `CallPathFp` | Shipping `--cached` | Shipping waits |
 
 Normalized reached IR is the unoptimized IR printed under `DUMP=1` (`codegen.cr:755-779`), with debug metadata stripped, type-id constants replaced by the names they denote and range checks by the sorted names in range, symbol indices by symbol strings, proc and temporary names by first-occurrence ordinals, union cases sorted by type name, and module-level tables (simple constants, type-id globals, GC layouts, symbol table) restricted to entries the emitted functions reference.
 
@@ -366,7 +366,7 @@ Automated in `bench/stale_tests.sh` unless marked CI:
 
 ## 13. Measurements and completion
 
-Census (`bench/stale_census.sh`) per platform over C2 (`samples/iyi/*.iyi`, 28 programs) and C3 (`bench/std_*_exercise.iyi` standalone, 116 programs): full integrated 144-program corpus.
+Census (`bench/stale_census.sh`) per platform over C2 (`samples/iyi/*.iyi`, 28 programs) and C3 (`bench/std_*_exercise.iyi` standalone, 112 programs): full integrated 140-program corpus.
 * Records verdict, reusable or not, reason category and site.
 * Categories: requested effect, opaque program construct, refused build mode, runner (trace incomplete, racy run input), internal (unclassified runtime site, internal effect reported as reason, `ambiguous key`, `ambiguous test id`, `reach mismatch`, signature unstable between two checks).
 
@@ -379,7 +379,7 @@ Overhead reported as measured with no thresholds and no promised speedup:
 
 Completion requires all of:
 1. Every §12 row automated and green on every enabled platform.
-2. RG1 through RG9 each green on the integrated 144-program corpus, or claim withdrawn in SPEC.md.
+2. RG1 through RG9 each green on the integrated 140-program corpus, or claim withdrawn in SPEC.md.
 3. Census with zero runner or internal reasons, and reusable programs on every enabled platform.
 4. Consumption and audit run on master with zero disagreements since enablement.
 5. SPEC.md recording census and overhead as measured.

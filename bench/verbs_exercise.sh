@@ -653,6 +653,86 @@ else
     echo "  an old runner's leftover is taken, a fresh one kept"
   fi
 fi
+# A runner's own program held for a moment after it exits. Windows refused
+# the delete - "being used by another process" - and the refusal, raised
+# out of the runner's cleanup, was the run's verdict: `std_http_latency.iyi`
+# printed ALL CHECKS PASSED and `iyi run` exited 1 (CI job 130381353157).
+# A reader here holds the program until 300 ms after it exits, which the
+# runner waits out and deletes, and then for 5 s, past the two seconds it
+# waits: the program's own exit is the verdict, and the file is the sweep's
+# above. With a one-second wait the 300 ms case failed once on a CI runner,
+# the exit right and the file kept (CI job 130589942769); whether the reader
+# let go late or the file stayed refused after it did was not recorded, so
+# a failure prints when the reader saw the program done, when it let go,
+# and when the runner ended.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    printf 'module main\n\ni = 0\nwhile i < 600 && !File.exists?("held.flag")\n  sleep(20)\n  i = i + 1\nend\nFile.write("done.flag", "1")\nputs "held program done"\n' > held.iyi
+    held_run() { # held_run <ms>: sets held_status and held_exe ("" if no program was made)
+      local hold="$1" cache="$WORK/heldcache_$1" exe="" i holder runner
+      rm -rf "$cache" held.flag done.flag held.times
+      mkdir -p "$cache"
+      IYI_CACHE_DIR="$cache" "$IYI" run held.iyi > held.out 2>&1 &
+      runner=$!
+      # The program, once linked; a runner that ended first made none (a
+      # build that failed), and nothing is held then.
+      for i in $(seq 1 1200); do
+        exe="$(ls "$cache" 2>/dev/null | grep -E '^iyi-run-.*\.exe$' | head -1)"
+        [ -n "$exe" ] && break
+        kill -0 "$runner" 2>/dev/null || break
+        sleep 0.05
+      done
+      held_exe=""
+      if [ -z "$exe" ]; then
+        wait "$runner"
+        held_status=$?
+        return
+      fi
+      held_exe="$cache/$exe"
+      # Bounded at every wait, so a program that never says it is done
+      # cannot hold the gate: a minute for the flag.
+      powershell -NoProfile -Command "
+        \$f = \$null
+        for (\$i = 0; \$i -lt 400 -and -not \$f; \$i++) { try { \$f = [IO.File]::Open('$(cygpath -w "$held_exe")', 'Open', 'Read', 'Read') } catch { Start-Sleep -Milliseconds 25 } }
+        New-Item -ItemType File -Path '$(cygpath -w "$WORK")\\held.flag' -Force | Out-Null
+        for (\$i = 0; \$i -lt 6000 -and -not (Test-Path '$(cygpath -w "$WORK")\\done.flag'); \$i++) { Start-Sleep -Milliseconds 10 }
+        \$saw = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+        Start-Sleep -Milliseconds $hold
+        if (\$f) { \$f.Close() }
+        Set-Content -Path '$(cygpath -w "$WORK")\\held.times' -Value (\$saw, [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())
+      " &
+      holder=$!
+      wait "$runner"
+      held_status=$?
+      held_end=$(date +%s%3N)
+      wait "$holder"
+    }
+    held_times() { # when the reader let go and the runner ended, after the reader saw the program done
+      local saw closed
+      { read -r saw; read -r closed; } < <(tr -d '\r' < held.times 2>/dev/null)
+      [ -n "$saw" ] && [ -n "$closed" ] || { echo "    (the reader recorded no times)"; return; }
+      echo "    the reader let go $((closed - saw)) ms after it saw the program done; the runner ended at $((held_end - saw)) ms"
+    }
+    held_run 300
+    if [ -n "$held_exe" ] && [ "$held_status" -eq 0 ] && grep -qx 'held program done' held.out && [ ! -e "$held_exe" ]; then
+      echo "  a program held a moment past its exit: its verdict, and its file deleted"
+    else
+      echo "  a program held a moment past its exit (exit $held_status, file $( [ -e "$held_exe" ] && echo kept || echo gone)):"
+      held_times
+      sed -n '1,3p' held.out
+      status=1
+    fi
+    held_run 5000
+    if [ -n "$held_exe" ] && [ "$held_status" -eq 0 ] && grep -qx 'held program done' held.out && [ -e "$held_exe" ]; then
+      echo "  a program held past what the runner waits: its verdict, and its file left for the sweep"
+    else
+      echo "  a program held past what the runner waits (exit $held_status):"
+      held_times
+      sed -n '1,3p' held.out
+      status=1
+    fi
+    ;;
+esac
 # A path in another case, where the file system says it is the same
 # file. The root a header names was found by comparing strings, so `iyi
 # run HDR/APP/MAIN.IYI` found none, and the import beside the header was

@@ -302,8 +302,8 @@ published list requires, a plain build with iyi's own prelude links the
 platform's C library and nothing else: no libgc, no libevent, no openssl, no
 zlib ([INSTALL.md](INSTALL.md#what-a-program-depends-on) has each platform). A
 program links only what it uses, and
-iyi's own library is 28,933 lines, written to be linked that way. That
-library is 1,221 KB on disk beside the binary.
+iyi's own library is 29,007 lines, written to be linked that way. That
+library is 1,224 KB on disk beside the binary.
 
 <sup>Sizes and start times are a plain `iyi build` on macOS arm64 with LLVM 22,
 and move with the platform; `python3 bench/machine_probe.py` prints your
@@ -324,11 +324,15 @@ projects would import it by (`example.com/me/kemal`, or a bare `kemal`), and
 directory's name is the module: `iyi init` in `my-project` writes `module
 my-project` and `my_project.iyi`. It never writes over a file that is there.
 A test is a `*_test.iyi` beside it, a program that passes by exiting 0, run by
-`iyi test`. Opt-in `iyi test --cached` reuses passing test receipts on equal
-build keys and replayed observations (SPEC.md III.14). `iyi test --chaos` runs
-each test under 100 seeded schedules, so a test that passes only because its
-tasks happened to run in one order fails on some seed. `--chaos=SEED` runs that
-failing schedule again (SPEC.md III.4.17).
+`iyi test`, half as many at once as there are cores (`-p N`), and not in `lib` or
+another module's directory. `test "name" do ... end` is a named case: `--json`
+reports each one's verdict, `--run TEXT` runs only those whose name holds
+TEXT, and `skip: "why"` leaves one out. `--release` and `-D FLAG` build every
+test that way, and `-v` shows a passing test's output. Opt-in `iyi test --cached`
+reuses passing test receipts on equal build keys and replayed observations
+(SPEC.md III.14). `iyi test --chaos` runs each test under 100 seeded schedules,
+so a test that passes only because its tasks happened to run in one order fails
+on some seed. `--chaos=SEED` runs that failing schedule again (SPEC.md III.4.17).
 
 A dependency is one line in `iyi.mod`, `require example.com/someone/lib
 v1.2.0`, and `iyi get example.com/someone/lib` writes it: the latest release
@@ -716,7 +720,7 @@ $ curl localhost:3000/json
 traits, `impl … forall`, error unions and `!`, `.or`, `or_panic`, `defer` — all
 of them work in a program that requires a shard, and R-2 still refuses an
 export that does not write its types. What changes is what the program *has*:
-Crystal's standard library instead of 28,933 lines of iyi's own prelude.
+Crystal's standard library instead of 29,007 lines of iyi's own prelude.
 
 **One class of names is unreachable.** `!` in iyi propagates an error, so a
 method whose name ends in one cannot be called from a `.iyi` file. Crystal's
@@ -788,7 +792,7 @@ not the library.
 
 ## What is not here
 
-- **iyi's own library is 28,933 lines, and its IO is `puts`, `print`, the
+- **iyi's own library is 29,007 lines, and its IO is `puts`, `print`, the
   three standard streams and `File`.** `gets`, `read_all`, `write` and `flush`
   on the streams; `File.read`, `File.write`, `File.exists?`, `File.delete`
   and `File.open(path, mode)`. Its collections carry a method because a
@@ -824,7 +828,7 @@ not the library.
 | [BENCHMARKS.md](BENCHMARKS.md) | the build, run-time and server measurements, with their machines and commands |
 | [`samples/iyi`](samples/iyi) | twenty-eight programs: twenty documenting a part of it, seven being a first hour, and `calc`, a language |
 | [`samples/crystal/kemal`](samples/crystal/kemal) | a kemal application, from `shard.yml`: built from source and across four `.iyimod` boundaries |
-| [`src/iyi`](src/iyi) | iyi's own library, 28,933 lines. `--crystal` swaps it for Crystal's |
+| [`src/iyi`](src/iyi) | iyi's own library, 29,007 lines. `--crystal` swaps it for Crystal's |
 | [`src/std`](src/std) | the standard library, in iyi. Opt-in with `import std/...`, and not counted against the prelude's size limit (SPEC.md I.4) |
 | [`src/compiler/iyi/iyimod.cr`](src/compiler/iyi/iyimod.cr) | the artifact format |
 | [`bench/`](bench/) | every script a number in these documents names |

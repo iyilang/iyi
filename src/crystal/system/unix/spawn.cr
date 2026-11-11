@@ -28,9 +28,9 @@ require "c/unistd"
     alias PosixSpawnFileActionsT = UInt64[64]
     alias PosixSpawnattrT = UInt64[64]
 
-    # The same value in glibc, musl and darwin.
-    POSIX_SPAWN_SETSIGMASK = 0x08
+    # The same values in glibc, musl and darwin.
     POSIX_SPAWN_SETPGROUP  = 0x02
+    POSIX_SPAWN_SETSIGMASK = 0x08
 
     fun posix_spawn(pid : PidT*, path : Char*, file_actions : PosixSpawnFileActionsT*, attrp : PosixSpawnattrT*, argv : Char**, envp : Char**) : Int
     fun posix_spawnp(pid : PidT*, file : Char*, file_actions : PosixSpawnFileActionsT*, attrp : PosixSpawnattrT*, argv : Char**, envp : Char**) : Int
@@ -47,27 +47,33 @@ require "c/unistd"
   end
 {% end %}
 
+# iyi: what `process_group: true` asks of a forked child. Every POSIX C
+# library has it, so it is bound here once rather than in each target's
+# `unistd.cr`.
 lib LibC
   fun setpgid(pid : PidT, pgid : PidT) : Int
 end
 
 struct Crystal::System::Process
-  def self.spawn(prepared_args, shell, env, clear_env, input, output, error, chdir, new_pgroup : Bool = false, &)
+  # iyi: *process_group* makes the child the leader of a process group of
+  # its own, whose id is its pid, so that a signal sent to `-pid` reaches
+  # everything it starts (`iyi test` ends a test that way at its deadline).
+  def self.spawn(prepared_args, shell, env, clear_env, input, output, error, chdir, process_group = false, &)
     envp = Env.make_envp(env, clear_env)
 
     {% if LibC.has_method?(:posix_spawn_file_actions_addchdir_np) %}
-      if pid = posix_spawn(prepared_args, envp, input, output, error, chdir, new_pgroup) { |errno, command| yield errno, command }
+      if pid = posix_spawn(prepared_args, envp, input, output, error, chdir, process_group) { |errno, command| yield errno, command }
         return pid
       end
     {% end %}
 
     r, w = FileDescriptor.system_pipe
 
-    pid = self.fork_for_exec(new_pgroup)
+    pid = self.fork_for_exec
     if !pid
       LibC.close(r)
       begin
-        self.try_replace(prepared_args, envp, input, output, error, chdir)
+        self.try_replace(prepared_args, envp, input, output, error, chdir, process_group)
         byte = 1_u8
         errno = Errno.value.to_i32
         FileDescriptor.write_fully(w, pointerof(byte))
@@ -136,7 +142,7 @@ struct Crystal::System::Process
     # The child starts with no signal blocked, as the forked one did. Every
     # other descriptor is close-on-exec already (`FileDescriptor.system_pipe`,
     # `O_CLOEXEC`), and closes as it did.
-    private def self.posix_spawn(prepared_args, envp, input, output, error, chdir, new_pgroup : Bool = false, &) : LibC::PidT?
+    private def self.posix_spawn(prepared_args, envp, input, output, error, chdir, process_group, &) : LibC::PidT?
       streams = {input, output, error}
       targets = {ORIGINAL_STDIN, ORIGINAL_STDOUT, ORIGINAL_STDERR}
 
@@ -178,9 +184,9 @@ struct Crystal::System::Process
         LibC.sigemptyset(pointerof(mask))
         return nil unless LibC.posix_spawnattr_setsigmask(pointerof(attributes), pointerof(mask)) == 0
         flags = LibC::POSIX_SPAWN_SETSIGMASK
-        if new_pgroup
-          flags |= LibC::POSIX_SPAWN_SETPGROUP
+        if process_group
           return nil unless LibC.posix_spawnattr_setpgroup(pointerof(attributes), 0) == 0
+          flags |= LibC::POSIX_SPAWN_SETPGROUP
         end
         return nil unless LibC.posix_spawnattr_setflags(pointerof(attributes), flags.to_i16) == 0
 
@@ -219,7 +225,7 @@ struct Crystal::System::Process
     end
   {% end %}
 
-  private def self.fork_for_exec(new_pgroup : Bool = false)
+  private def self.fork_for_exec
     pid, errno = lock_write do
       pthread_disable_cancelstate do
         block_signals do |sigmask|
@@ -229,9 +235,6 @@ struct Crystal::System::Process
 
             Crystal::System::Signal.after_fork_before_exec
 
-            if new_pgroup
-              LibC.setpgid(0, 0)
-            end
             # reset sigmask (inherited on exec)
             LibC.sigemptyset(sigmask)
           end
@@ -256,10 +259,12 @@ struct Crystal::System::Process
   # This method is similar to `.replace` (used for `Process.exec`) with some
   # differences because we're limited in what we can do in the pre-exec phase
   # between `fork` and `exec`.
-  private def self.try_replace(prepared_args, envp, input, output, error, chdir)
+  private def self.try_replace(prepared_args, envp, input, output, error, chdir, process_group)
     reopen_io(input, ORIGINAL_STDIN)
     reopen_io(output, ORIGINAL_STDOUT)
     reopen_io(error, ORIGINAL_STDERR)
+
+    return if process_group && LibC.setpgid(0, 0) != 0
 
     if chdir
       if 0 != LibC.chdir(chdir)

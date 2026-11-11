@@ -393,7 +393,7 @@ module Iyi::Stale
                 input: null_io,
                 output: run_out,
                 error: run_out,
-                new_pgroup: true
+                process_group: true
               )
               tree = Command::TestTree.new(process)
               active_tree = tree

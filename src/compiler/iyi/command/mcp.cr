@@ -177,13 +177,14 @@ class Iyi::Command
       },
       {
         "name": "test",
-        "description": "Run *_test.iyi programs: exit 0 is a pass. Optionally pass affected=[changed files] to run only the tests whose transitive import closure reaches a change - the selection is exact, computed by parsing.",
+        "description": "Run *_test.iyi programs: exit 0 is a pass, and each named case's verdict comes back as data. Optionally pass affected=[changed files] to run only the tests whose transitive import closure reaches a change - the selection is exact, computed by parsing - and run=TEXT to run only the named cases whose name holds TEXT.",
         "inputSchema": {
           "type": "object",
           "properties": {
             "path": {"type": "string", "description": "directory or test file (default: .)"},
             "affected": {"type": "array", "items": {"type": "string"}, "description": "files that changed; only tests that can reach them run"},
-            "cached": {"type": "boolean", "description": "reuse test receipts when code and environment have not changed"}
+            "cached": {"type": "boolean", "description": "reuse test receipts when code and environment have not changed"},
+            "run": {"type": "string", "description": "text a named case's name holds; the other named cases do not run"}
           }
         }
       },
@@ -228,6 +229,9 @@ class Iyi::Command
           if path = changed.as_s?
             built << "--affected" << path
           end
+        end
+        if only = arguments.try(&.dig?("run")).try(&.as_s?)
+          built << "--run" << only
         end
         if path = arguments.try(&.dig?("path")).try(&.as_s?)
           built << path

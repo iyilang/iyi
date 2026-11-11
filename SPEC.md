@@ -63,8 +63,8 @@ own reference accepts.
 | warm full build, `hello` / 6,900-line pair | 0.07 s / 0.24 s, against `go build`'s 0.08 s / 0.09 s |
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
-| iyi's own prelude | 28,933 lines, of which 4,689 are the library held to the 4,689 ceiling (7,015 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 148,211 lines, none of it written in iyi |
+| iyi's own prelude | 29,007 lines, of which 4,738 are the library held to the 4,738 ceiling (7,089 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
+| compiler | 148,510 lines, none of it written in iyi |
 | artifact format | `.iyimod` v62, checksum per section |
 | samples | 28 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -88,7 +88,7 @@ shape.
 > is a library and the rules are the language, so a program can keep one and
 > change the other: `--crystal` builds against Crystal's standard library, and
 > there `require` reaches the ecosystem while every rule stays where it was.
-> "No standard library worth the name" is still true of iyi's own 28,933 lines
+> "No standard library worth the name" is still true of iyi's own 29,007 lines
 > and no longer true of what a program can have. Part V item 12a is the
 > measurement, nine shards wide.
 
@@ -270,8 +270,8 @@ of binary. It is not made the default on that trade, and the middle needs the
 initialisers to run *later* rather than not at all, which is the `dlsym` table
 above, and a larger piece of work than the number it wins.
 
-**3. A deliberately tiny prelude, written in iyi. Done: 28,933 lines,
-primitives included, of which the library is 4,689.** Not a standard library:
+**3. A deliberately tiny prelude, written in iyi. Done: 29,007 lines,
+primitives included, of which the library is 4,738.** Not a standard library:
 integers, booleans, a string, one sequence, one dictionary, one range, `puts`,
 and an `enum`'s surface — the member's name, an order, the members, and the
 bits of a `@[Flags]` one. **Its scope is set by what the
@@ -301,11 +301,11 @@ the scheduler and the kernel thread (III.4, `concurrency.iyi` and
 seed under `-Diyi_chaos`, `chaos.iyi` and `chaos_points.iyi`, III.4.17),
 the shortest-round-trip float text (`float.iyi`) - and they
 are most of its lines. So the figure held to the ceiling is the library:
-**4,689 lines** of the 21,556, measured by `bench/doc_numbers.py` as
+**4,738 lines** of the 21,556, measured by `bench/doc_numbers.py` as
 everything under `src/iyi/` except those three and except every platform's
-floor of 2,326 lines — the arms behind `flag?(:win32)`, `flag?(:linux)`,
+floor of 2,351 lines — the arms behind `flag?(:win32)`, `flag?(:linux)`,
 `flag?(:darwin)` and `flag?(:wasm32)`, which the paragraph on the breach
-below settles and explains. Opening `src/iyi/` counts 7,015 with the floor
+below settles and explains. Opening `src/iyi/` counts 7,089 with the floor
 still in it, and the whole-prelude figure is stated beside both because a
 reader sees the whole file, and a "tiny prelude" claim that hid 9,000 lines
 of runtime would be a claim about the wrong number.
@@ -426,7 +426,7 @@ where most of the 1,040 lines are.
 by hand.** Counting the lines inside a macro conditional whose condition
 names an OS, architecture or ABI flag — every arm of it, `else` included,
 since an `else` under `flag?(:linux)` is what the other platforms take and
-exists for the same reason — the platform floor measures **2,326 lines**
+exists for the same reason — the platform floor measures **2,351 lines**
 today (1,871 of the 4,803 that day), and Windows is the largest arm of it
 by a wide margin, which is what a platform whose every path, console byte
 and integer division needs its own answer costs.
@@ -494,6 +494,18 @@ never found in a `Hash`. It is the counterpart of #128's `Class#==`, which
 the library already carries, and an import in front of comparing two
 pointers would leave the comparison silently wrong for every program that
 forgot it. The owner chose the number, as measured with it in: 4,689.
+
+**And to 4,738, by the owner's decision.** `iyi test` reads each named
+case's verdict as data, runs only the cases `--run` names and leaves out
+one written with `skip:` (testing.iyi), and takes what it handed the test
+out of the environment at its first named case - not at its first line,
+which linked `environ` into every program (III.9) - so that a program the
+test starts neither reports into its file nor runs only its cases: 49
+lines, and all of it is something the test program itself has to do,
+because only it knows its cases and its children. Behind an import they
+would be a framework a test asks for before it can be skipped, which is the
+one thing `iyi test` set out not to be. The owner chose the number, as
+measured with them in: 4,738.
 
 What the rule does *not* forgive: a `pub def` a program calls is API and
 counts wherever it is written, macro arm or not — the exclusion is for the
@@ -1050,8 +1062,8 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 148,211 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 28,933-line own prelude + 128,396 in std |
+| Compiler | 24,984 lines, **written in Crystal** | 148,510 lines, Crystal, forked |
+| Library | 8,161 lines (3,551 of it core) | 29,007-line own prelude + 128,396 in std |
 | Specs | 21,146 lines | 17,314 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
@@ -8014,7 +8026,7 @@ The status entries below describe earlier runs, not verification of the reconcil
 | Gate | Proves | Status | How Proven |
 |---|---|---|---|
 | RG1 | A second compiler built from a copy of the tree, with the same build-input digest and the same commit stamp, builds all 27 C2 programs byte for byte the same. The stamp (`Crystal 1.22.0-dev [commit] (date)`) is in every executable, so compilers built at two commits differ in every program even from identical sources | green locally | bench/stale_reproducible.sh |
-| RG2 | Normal and observed output and backtraces agree for the full integrated corpus: 144 of 144 (28 samples + 116 std exercises), zero excluded and zero failures | historical 141-program run passed; integrated corpus pending | bench/stale_equivalence.sh rg2 |
+| RG2 | Normal and observed output and backtraces agree for the full integrated corpus: 140 of 140 (28 samples + 112 std exercises), zero excluded and zero failures | historical 141-program run passed; integrated corpus pending | bench/stale_equivalence.sh rg2 |
 | RG3 | 0 unclassified runtime sites reachable from corpus programs (macOS arm64, x86_64 Linux and aarch64 Linux) | historical runs passed on those targets; integrated corpus pending. Windows arms remain unclassified | bench/stale_effects.sh |
 | RG4 | Link under randomized non-CHILD_ENV variables | green | bench/stale_callpath.sh |
 | RG5 | 20 of 20 observer kinds load-bearing | green | bench/stale_equivalence.sh rg5 |
@@ -8025,7 +8037,7 @@ The status entries below describe earlier runs, not verification of the reconcil
 
 Acceptance rows from design section 12: rows 1-22 and 25-50 are automated in `bench/stale_tests.sh` and green on the original baseline. Rows 23-24 are CI-only and wait for master.
 
-**Census as measured (historical, original 141-program corpus).** Measured on macOS arm64 on this machine across 141 programs (27 C2 samples/iyi, 114 C3 bench/std_*_exercise); integrated 144-program corpus to be re-measured after merge integration:
+**Census as measured (historical, original 141-program corpus).** Measured on macOS arm64 on this machine across 141 programs (27 C2 samples/iyi, 114 C3 bench/std_*_exercise); integrated 140-program corpus (four std exercises have since become tests) to be re-measured after merge integration:
 - Runtime reusable on second run: 87 of 141 (61.7%). C2: 25 of 27 (92.6%). C3: 62 of 114 (54.4%).
 - Static build-key reusable: 138 of 141 (97.9%). C2: 27 of 27. C3: 111 of 114.
 - Build failures: 0 of 141.
@@ -8068,7 +8080,7 @@ No speedup is claimed. No warm-cache `--fresh` numbers were measured.
 - The census has one opaque program construct that prevents reuse.
 - Consumption and audit on master are unproven.
 - Cross-machine hits and hits across commits wait on RG1 in CI.
-- Integrated qualification requires full 144/144 RG2 and RG2a verification with zero exclusions.
+- Integrated qualification requires full 140/140 RG2 and RG2a verification with zero exclusions.
 One thing was a bug rather than a design question: `iyi tool` printed
 `Usage: crystal tool`, because the name fix reached the top-level commands and
 not the subcommand's own usage. It prints `Usage: iyi tool` now.
@@ -13397,7 +13409,7 @@ Named honestly, so nobody mistakes this draft for complete.
     shards exist and none of them is written to iyi's rules, so "run them
     directly" is not a compatibility problem, it is the four rules: `require`
     against R-1, inference against R-2, monkey patching against R-3, and
-    Crystal's 8,161-line standard library against iyi's own 28,933-line prelude.
+    Crystal's 8,161-line standard library against iyi's own 29,007-line prelude.
 
     What is measurable is narrower and better than that framing suggests, and
     it was measured on **Kemal 1.12.0**, which compiles under this compiler

@@ -382,16 +382,19 @@ fi
 if [ "$PART" = all ] || [ "$PART" = crossings ]; then
   echo
   echo "== bench/heap_crossings.sh's copies, caught by the verifier"
-  # The copies as heap_crossings.sh writes them, from its `del` to its last.
-  # shellcheck disable=SC1090
-  source <(awk '/^# One line deleted after a marker/ { on = 1 } on && /^echo$/ { exit } on { print }' "$REPO/bench/heap_crossings.sh")
+  # The copies as heap_crossings.sh writes them, from its `del` to its last,
+  # through a file: macOS's bash 3.2 sources nothing from `<(...)`.
+  awk '/^# One line deleted after a marker/ { on = 1 } on && /^echo$/ { exit } on { print }' "$REPO/bench/heap_crossings.sh" >"$WORK/crossings-copies.sh"
+  # shellcheck disable=SC1091
+  source "$WORK/crossings-copies.sh"
 fi
 
 if [ "$PART" = all ] || [ "$PART" = local ]; then
   echo
   echo "== bench/heap_local.sh's copies, caught by the verifier"
-  # shellcheck disable=SC1090
-  source <(awk '/== the checks fail when a mechanism is broken/ { on = 1; next } on && /^fi$/ { exit } on { print }' "$REPO/bench/heap_local.sh")
+  awk '/== the checks fail when a mechanism is broken/ { on = 1; next } on && /^fi$/ { exit } on { print }' "$REPO/bench/heap_local.sh" >"$WORK/local-copies.sh"
+  # shellcheck disable=SC1091
+  source "$WORK/local-copies.sh"
 fi
 
 if [ "$PART" = all ] || [ "$PART" = own ]; then

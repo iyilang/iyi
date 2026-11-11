@@ -573,8 +573,14 @@ module Iyi
         elems = Array(LLVM::Type).new(vars.size + (parent_llvm_type ? 1 : 0) + (self_type ? 1 : 0))
 
         vars.each do |var|
-          elems << llvm_type(var.type)
-          has_inner_pointers ||= var.type.has_inner_pointers?
+          if var.iyi_boxed?
+            # heap22 C1: the address of the variable's cell.
+            elems << llvm_type(var.type).pointer
+            has_inner_pointers = true
+          else
+            elems << llvm_type(var.type)
+            has_inner_pointers ||= var.type.has_inner_pointers?
+          end
         end
 
         # Make sure to copy the given LLVM::Type to this context

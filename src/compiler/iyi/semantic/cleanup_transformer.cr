@@ -907,9 +907,9 @@ module Iyi
       end
       check_block_captures(node, block, a_def, subject, consequence, thread, owning)
       # The block crosses into another unit or thread: its closure gets a
-      # context of its own (heap22 C1). A block behind a lock does not
-      # cross, and may assign what it captures.
-      fun_literal.iyi_crossing = true if thread && @program.has_flag?("heap_partitions")
+      # context of its own (heap22 C1), its struct captures boxed. A block
+      # behind a lock does not cross, and may assign what it captures.
+      fun_literal.iyi_cross if thread && @program.has_flag?("heap_partitions")
     end
 
     # The captures of a block crossing a boundary: each variable it closed
@@ -1243,7 +1243,7 @@ module Iyi
     # block's does (`check_share_boundary`).
     private def mark_crossing(node : Call) : Nil
       return unless @program.has_flag?("heap_partitions")
-      node.block.try(&.fun_literal).as?(ProcLiteral).try { |literal| literal.iyi_crossing = true }
+      node.block.try(&.fun_literal).as?(ProcLiteral).try &.iyi_cross
     end
 
     # heap22 pin codegen (contract §5, §6): a spawn whose block reaches an

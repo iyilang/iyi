@@ -878,13 +878,18 @@ class Iyi::CodeGenVisitor
         # died with "BUG: trying to downcast Int32 <- String".
         next if self.context.vars.has_key?(var.name)
 
-        if context.fun.naked?
+        var_ptr = gep(closure_type, closure_ptr, 0, i, var.name)
+        if var.iyi_boxed?
+          # heap22 C1: the slot holds the address of the variable's cell
+          # (`MetaVar#iyi_boxed?`), which debug info does not describe.
+          var_ptr = load(llvm_type(var.type).pointer, var_ptr)
+          debug_variable_created = false
+        elsif context.fun.naked?
           debug_variable_created = false
         else
           var_offset = llvm_typer.offset_of(closure_type, i)
           debug_variable_created = declare_variable(var.name, var.type, closure_ptr, target_def.location, offset: var_offset)
         end
-        var_ptr = gep(closure_type, closure_ptr, 0, i, var.name)
         self.context.vars[var.name] = LLVMVar.new(var_ptr, var.type, debug_variable_created: debug_variable_created)
       end
 

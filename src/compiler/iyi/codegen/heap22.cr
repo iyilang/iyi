@@ -14,7 +14,9 @@
 # - A crossing block's closure (C1) is a typed context of its own holding
 #   only what the block captures, copied in where the block is made, with
 #   no link to the scope's context, whose other slots would otherwise be
-#   published with it (`visit(ProcLiteral)`).
+#   published with it (`visit(ProcLiteral)`). A struct it captures is
+#   boxed: the scope's variable lives in a cell of its own and the context
+#   holds the cell's address (`MetaVar#iyi_boxed?`).
 #
 # `IYI_SPAWN_BROKEN` takes `c1`, `classvar-publish` and `new-shared`, each
 # turning one of these off, for the verifier's broken copies.
@@ -108,30 +110,33 @@ class Iyi::CodeGenVisitor
   # heap22 C1: the context a crossing block's proc is made with, in place
   # of the scope's. Answers the proc's function and the context pointer, or
   # nil when the block captures something the scope does not hold as a
-  # variable here, or something a copy would part from the scope's
-  # variable (`iyi_c1_copyable?`), and the scope's context is used as
-  # before.
+  # variable here, or a struct that was not boxed, and the scope's context
+  # is used as before.
   def iyi_c1_proc(node : ProcLiteral, fun_literal_name : String, host) : {LLVMTypedFunction, LLVM::Value}?
     return nil unless iyi_heap_partitions? && node.iyi_crossing?
     return nil if SPAWN_BROKEN.includes?("c1")
     a_def = node.def
-    names = IyiC1Names.new
-    a_def.body.accept names
     metas = [] of MetaVar
     sources = [] of LLVMVar
     def_vars = a_def.vars
-    names.names.each do |name|
+    node.iyi_capture_names.each do |name|
       meta = def_vars.try &.[name]?
       next unless meta && meta.closured? && !meta.belongs_to?(a_def) && (meta_type = meta.type?)
-      return nil unless iyi_c1_copyable?(meta_type)
+      return nil unless meta.iyi_boxed? || ProcLiteral.iyi_copyable?(meta_type)
       source = context.vars[name]?
       return nil unless source && source.type == meta_type
+      return nil if meta.iyi_boxed? && source.already_loaded
       metas << meta
       sources << source
     end
+    # A struct `self` is no variable to box: the scope's context holds the
+    # copy it took where that context was made (`malloc_closure`), and a
+    # copy taken here could differ from it, so the block keeps the scope's
+    # context, which is published whole: sound, and what it costs is the
+    # retention of the scope's other slots.
     self_type = iyi_chain_self(context)
     return nil if metas.empty? && self_type.nil?
-    return nil if self_type && !iyi_c1_copyable?(self_type)
+    return nil if self_type && !ProcLiteral.iyi_copyable?(self_type)
 
     closure_type, pointerful = llvm_typer.closure_context_type(metas, nil, self_type)
     closure_ptr = iyi_c1_allocate(closure_type, pointerful, metas, self_type)
@@ -139,9 +144,15 @@ class Iyi::CodeGenVisitor
     metas.each_with_index do |meta, index|
       source = sources[index]
       slot = gep(closure_type, closure_ptr, 0, index, meta.name)
-      value = source.already_loaded ? source.pointer : load(llvm_type(meta.type), source.pointer)
-      iyi_with_write_barrier(slot, meta.type) do
-        store value, slot
+      if meta.iyi_boxed?
+        iyi_with_write_barrier(slot, @program.pointer_of(meta.type)) do
+          store source.pointer, slot
+        end
+      else
+        value = source.already_loaded ? source.pointer : load(llvm_type(meta.type), source.pointer)
+        iyi_with_write_barrier(slot, meta.type) do
+          store value, slot
+        end
       end
     end
     if self_type
@@ -178,29 +189,6 @@ class Iyi::CodeGenVisitor
     {the_fun, closure_ptr}
   end
 
-  # Whether a capture of *type* may be copied into a C1 context: a value
-  # nothing changes in place - a reference, a number, a bool, a char, a
-  # symbol, nil, a pointer, a proc, or a tuple or union of them. A struct
-  # (`Atomic`, a record, a static array) is changed in place through the
-  # scope's variable after the block is made, and a copy would not see it:
-  # bench/heap_crossings' `ring` spun forever on a copied `Atomic(Int32)`
-  # the scope set (Linux, 10:25). The rule refuses a capture assigned again
-  # after the crossing, so a value copied at the block is the one it reads.
-  private def iyi_c1_copyable?(type : Type) : Bool
-    case type
-    when UnionType
-      type.union_types.all? { |member| iyi_c1_copyable?(member) }
-    when TupleInstanceType
-      type.tuple_types.all? { |member| iyi_c1_copyable?(member) }
-    when NamedTupleInstanceType
-      type.entries.all? { |entry| iyi_c1_copyable?(entry.type) }
-    when PrimitiveType, PointerInstanceType, ProcInstanceType
-      true
-    else
-      !type.struct?
-    end
-  end
-
   # The `self` the scope's closure chain holds, as `setup_closure_vars`
   # would find it for a proc made here.
   private def iyi_chain_self(ctx : Context) : Type?
@@ -222,30 +210,13 @@ class Iyi::CodeGenVisitor
   private def iyi_c1_allocate(closure_type : LLVM::Type, pointerful : Bool, metas : Array(MetaVar), self_type : Type?) : LLVM::Value
     if @iyi_closure_host.nil? && @program.iyi_exported_owners.empty? && (new_fun = iyi_new_fun)
       id = IYI_C1_FIRST_ID + @iyi_c1_layouts.size
-      slots = metas.map(&.type.as(Type))
+      slots = metas.map { |meta| meta.iyi_boxed? ? @program.pointer_of(meta.type) : meta.type }
       slots << self_type if self_type
       @iyi_c1_layouts << @program.gc_closure_layout(id, llvm_typer, closure_type, slots)
       flags = pointerful ? 1_i64 : 3_i64
       pointer_cast call(new_fun, [closure_type.size, int64(id), int64(flags)]), closure_type.pointer
     else
       pointerful ? malloc(closure_type) : malloc_atomic(closure_type)
-    end
-  end
-
-  # Every variable name a body uses, its blocks and procs included: the
-  # captures a C1 context copies are the scope's closured variables among
-  # these.
-  class IyiC1Names < Visitor
-    getter names = [] of String
-    @seen = Set(String).new
-
-    def visit(node : Var) : Bool
-      @names << node.name if @seen.add?(node.name)
-      false
-    end
-
-    def visit(node : ASTNode) : Bool
-      true
     end
   end
 end

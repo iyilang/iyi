@@ -6341,7 +6341,18 @@ without the flag:
   copied in where the block is made, and typed, so the collector and the
   publication walk read it precisely. Without that, publishing the block
   published every slot of the scope's closure beside it, mutable ones
-  included. A block behind a lock is no crossing and keeps the scope's.
+  included. A copy is right for a reference or a plain value, since the
+  rule refuses a capture assigned again after the crossing. A struct (an
+  `Atomic`, a record, a static array) is changed in place by the scope
+  after the crossing, and the block must see that, so a captured struct
+  is boxed instead: the scope's variable lives in a cell of its own, and
+  the scope's closure and the block's context both hold the cell's
+  address, so publishing the block publishes the cell and nothing else of
+  the scope. A block in a struct's method that reaches `self` keeps the
+  scope's context, which holds the copy of `self` taken where that context
+  was made: the whole context is published with it, which is sound and
+  costs the retention of its other slots. A block behind a lock is no
+  crossing and keeps the scope's.
 - `Mutex`, `Channel`, `Unit`'s handle and the runtime's fibers, units,
   waiters, send nodes and threads are made in the shared heap directly,
   whatever unit makes them. A library's `@[Share]` type is not: its

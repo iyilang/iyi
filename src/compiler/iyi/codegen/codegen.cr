@@ -2643,7 +2643,19 @@ module Iyi
         closure_ptr = closure_has_inner_pointers ? malloc(closure_type) : malloc_atomic(closure_type)
 
         closure_vars.each_with_index do |var, i|
-          current_context.vars[var.name] = LLVMVar.new(gep(closure_type, closure_ptr, 0, i, var.name), var.type)
+          slot = gep(closure_type, closure_ptr, 0, i, var.name)
+          if var.iyi_boxed?
+            # heap22 C1: a struct a crossing block captures lives in a cell
+            # of its own, which the block's context points at too
+            # (`MetaVar#iyi_boxed?`).
+            cell_type = llvm_type(var.type)
+            cell = var.type.has_inner_pointers? ? malloc(cell_type) : malloc_atomic(cell_type)
+            iyi_with_write_barrier(slot, @program.pointer_of(var.type)) do
+              store cell, slot
+            end
+            slot = cell
+          end
+          current_context.vars[var.name] = LLVMVar.new(slot, var.type)
         end
         closure_skip_parent = false
 

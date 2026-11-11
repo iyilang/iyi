@@ -11,7 +11,10 @@
 #   scope that makes the block also keeps a mutable array in its own
 #   closure, and grows it after the crossing; publishing the block's
 #   context must leave the array the unit's. Read before any collection:
-#   `IyiHeap.local?`.
+#   `IyiHeap.local?`. The block also captures an `Atomic` the scope sets
+#   after the crossing: a struct capture is boxed, not copied, so the
+#   block sees the scope's store, and the scope's context still stays
+#   the unit's.
 # - `classvar`: a unit stores a graph of its own into a class variable
 #   through a call; the store publishes it.
 # - `born_shared`: `Mutex`, `Channel`, `Unit`'s handle, a same-unit task's
@@ -192,10 +195,14 @@
     sibling = [Payload.new(label_for(seed, 99), nil)]
     first = sibling
     keep = -> { sibling = [Payload.new(label_for(seed, 98), nil)]; sibling.size }
+    # A struct the block captures and the scope sets after the crossing.
+    flag = Atomic(Int32).new(0)
     g.spawn(unit: :new) do
       go.receive
+      fail("c1: the crossing block read a copy of the scope's Atomic, not the scope's (#{flag.get})") unless flag.get == 1
       payload.label.bytesize
     end
+    flag.set(1)
     published(payload, "c1: the captured chain")
     {% if flag?(:heap_partitions) %}
       fail("c1: the scope's own array was published with the crossing block's context") unless IyiHeap.local?(first.object_id)

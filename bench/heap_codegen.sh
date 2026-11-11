@@ -16,10 +16,15 @@
 #
 # A copy is caught when every one of `RUNS` (default 2) runs with
 # `HEAP22_PRINT_ONLY=1` - the program's failed checks print their `FAIL:`
-# line and the run goes on - exits 86 with an `iyi: heap_verify:` report
-# naming the same check, after the `collect_here` that ends the broken
-# store; and when the run without it stops at its check's `FAIL:` line,
-# read before any collection. A copy whose loss no verifier sees is listed
+# line and the run goes on - exits 86 with the same `iyi: heap_verify:`
+# report: its partition, what the slot named, the holder's and the
+# target's type, size and field, with addresses masked; the count of
+# checks run before it (which bench/heap_verify.sh's comparison leaves
+# out too), which the pool's threads move by one or two run to run, and
+# the holder's own holders, which a search of what is still live finds
+# or not, are masked and left out;
+# and when the run without it stops at its check's `FAIL:` line, read
+# before any collection. A copy whose loss no verifier sees is listed
 # apart (`OWN_ONLY`), with why, and caught by its `FAIL:` line alone.
 
 set -u
@@ -118,27 +123,31 @@ TABLE="$WORK/table.md"
 : >"$TABLE"
 
 # The copy's verifier runs: each exits 86 with a report, the same in every
-# run once addresses are masked. Prints the report's first line, or
-# nothing when a run missed.
+# run once addresses and the count of checks are masked and the holder's
+# own holders (`held by`, found by a search of whatever is still live)
+# left out. Prints the report's first line and what it found, or nothing
+# when a run missed.
 verifier_caught() { # copy check
-  local copy="$1" check="$2" k=1 first="" line code
+  local copy="$1" check="$2" k=1 first="" report line code
   while [ "$k" -le "$RUNS" ]; do
     verified "broken-$copy" "broken-$copy.v$k" 1 "$check"
     code="$(cat "$WORK/broken-$copy.v$k.code")"
-    line="$(grep -m1 "^iyi: heap_verify: " "$WORK/broken-$copy.v$k.err" | sed -E 's/0x[0-9a-f]{6,}/0x…/g')"
-    if [ "$code" != 86 ] || [ -z "$line" ]; then
-      echo "run $k: exit $code, $( [ -n "$line" ] && echo "report" || echo "no report")" >"$WORK/broken-$copy.missed"
+    report="$(sed -n '/^iyi: heap_verify: partition [0-9]*, /,/^iyi: heap_verify: aborting/p' "$WORK/broken-$copy.v$k.err" |
+      sed -E '/^    held by /d; /^    field \+[0-9]+$/d; s/0x[0-9a-f]{6,}/0x…/g; s/, check [0-9]+$/, check …/')"
+    if [ "$code" != 86 ] || [ -z "$report" ]; then
+      echo "run $k: exit $code, $( [ -n "$report" ] && echo "report" || echo "no report")" >"$WORK/broken-$copy.missed"
       return
     fi
     if [ -z "$first" ]; then
-      first="$line"
-    elif [ "$line" != "$first" ]; then
-      echo "run $k reported another word: $line" >"$WORK/broken-$copy.missed"
+      first="$report"
+    elif [ "$report" != "$first" ]; then
+      echo "run $k reported another word: $(echo "$report" | sed -n '1,2p' | tr -s ' ' | tr '\n' ' ')" >"$WORK/broken-$copy.missed"
       return
     fi
     k=$((k + 1))
   done
-  echo "$first"
+  line="$(echo "$first" | sed -n 1p)"
+  echo "$line -$(echo "$first" | sed -n 2p | tr -s ' ')"
 }
 
 prove_caught() { # label copy check

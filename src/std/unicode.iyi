@@ -2786,11 +2786,18 @@ pub struct Unicode
   @[SafeReach("decoded whole by its initializer, which runs once, before any parallel task or under IyiOnce in the shared heap, and only in a program that reads it; then only read")]
   SCRIPT_LIST = SCRIPT_NAMES.split(',')
   @[SafeReach("decoded whole by its initializer, which runs once, before any parallel task or under IyiOnce in the shared heap, and only in a program that reads it; then only read")]
-  ORBITS = build_orbits
-  @[SafeReach("decoded whole by its initializer, which runs once, before any parallel task or under IyiOnce in the shared heap, and only in a program that reads it; then only read")]
   SIMPLE_FOLD_ROWS = decode(SIMPLE_FOLD)
   @[SafeReach("decoded whole by its initializer, which runs once, before any parallel task or under IyiOnce in the shared heap, and only in a program that reads it; then only read")]
   GRAPHEME_ROWS = decode(GRAPHEME)
+  # Last: its initializer reads SIMPLE_FOLD_ROWS, CASEFOLD_ROWS and
+  # SPECIAL_FOLD_ROWS, which are declared, and so initialised, before it.
+  # Declared ahead of one, it read that one before its declaration, through
+  # `__iyi_once`, and a release build whose only `__iyi_once` caller that was
+  # made the call into the table's initializer a direct one, which
+  # bench/preempt_audit.py follows from the runtime's own `__iyi_once`
+  # (`IYI_OPTS=-Dheap_partitions bash bench/parallel_exercise.sh`, Linux).
+  @[SafeReach("decoded whole by its initializer, which runs once, before any parallel task or under IyiOnce in the shared heap, and only in a program that reads it; then only read")]
+  ORBITS = build_orbits
 
   # The integers a table string spells, in order: a sign, decimal digits,
   # a comma between.

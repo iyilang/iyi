@@ -1,0 +1,209 @@
+# heap22 S6 (LeakHunt): the runs a dead unit hands to the shared heap are
+# taken again. Each round, UNITS pool units allocate about 6,000 strings
+# over eight size classes, local garbage but for every 97th, which they
+# send to the main thread - published - and which it keeps for the rest
+# of the program, as #145's pool keeps a statement or a buffer a request
+# lent into a connection; then a burst of 1,500 more, sent and kept until
+# the next round ends. The units die: every run holding something sent is
+# handed to the shared heap whole (a drained run). A global collection
+# ends the round.
+#
+# Before the fix nothing ever took a drained run while one object on it
+# lived, so the partition arenas grew by the units' runs every round (the
+# #145 app's flag-on resident set ratcheting endpoint after endpoint). Now
+# a partition that needs a run takes a drained one (`IyiHeap.adopt_
+# drained`), its live objects published on the taker's run, its free
+# chunks the taker's list; a run fuller than three quarters is parked
+# instead and listed again by the global sweep once it has room.
+#
+#   ./bin/iyi build --release -Dheap_partitions bench/heap_drain.iyi
+#   ./heap_drain [ROUNDS [UNITS [WORKERS]]]     # default 12 48 4
+#   bash bench/heap_drain.sh                    # with its broken copies
+#
+# The line printed gives the bytes the partition arenas' runs span after
+# each round's collection (`IyiHeap.partition_carved`, which stays
+# resident) and the resident set; the program fails when the span after
+# the last round is more than a quarter (and 4 MiB) above the span after
+# round WARM, or when a kept string is not what was sent.
+
+@[Unsafe("the resident set is read through a C call - task_info, K32GetProcessMemoryInfo - that fills Pointer#malloc memory")]
+module bench/heap_drain
+
+{% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
+  {% if flag?(:win32) %}
+    lib LibResident
+      fun GetCurrentProcess : Void*
+      fun K32GetProcessMemoryInfo(process : Void*, counters : UInt64*, size : UInt32) : Int32
+    end
+
+    def resident_bytes : UInt64
+      counters = Pointer(UInt64).malloc(9_u64)
+      counters.value = 72_u64
+      return 0_u64 if LibResident.K32GetProcessMemoryInfo(LibResident.GetCurrentProcess, counters, 72_u32) == 0
+      counters[2]
+    end
+  {% elsif flag?(:darwin) %}
+    lib LibResident
+      fun task_self_trap : UInt32
+      fun task_info(task : UInt32, flavor : Int32, info : UInt64*, count : UInt32*) : Int32
+    end
+
+    def resident_bytes : UInt64
+      info = Pointer(UInt64).malloc(6_u64)
+      count = Pointer(UInt32).malloc(1_u64)
+      count.value = 12_u32
+      return 0_u64 if LibResident.task_info(LibResident.task_self_trap, 20, info, count) != 0
+      info[1]
+    end
+  {% else %}
+    def resident_bytes : UInt64
+      fields = File.read("/proc/self/statm").split(' ')
+      fields[1].to_i.to_u64 * 4096_u64
+    end
+  {% end %}
+
+  # `HEAP22_PRINT_ONLY=1`: a failed check prints its `FAIL:` line and the
+  # program goes on, so that bench/heap_drain.sh can show a broken copy
+  # caught by `-Dheap_verify`'s verifier alone.
+  class Checks
+    @@print_only = false
+
+    def self.print_only : Bool
+      @@print_only
+    end
+
+    def self.read_env : Nil
+      @@print_only = Program.env("HEAP22_PRINT_ONLY") == "1"
+    end
+  end
+
+  def fail(message : String) : Nil
+    print "FAIL: #{message}\n"
+    __iyi_exit(1) unless Checks.print_only
+  end
+
+  # The strings' lengths, one size class each.
+  SIZES  = {20, 36, 52, 84, 116, 180, 244, 372}
+  ALLOCS = 6000
+  SPARSE = 97
+  DENSE  = 1500
+  WARM   = 3
+
+  # What unit *t* of round *round* sends as its *i*th kept string, and
+  # its burst's: a tag, the three numbers, padding to the length.
+  def kept_text(round : Int32, t : Int32, i : Int32) : String
+    head = "k#{round}.#{t}.#{i}."
+    head + "k" * (SIZES[i % SIZES.size] - head.bytesize)
+  end
+
+  def burst_text(round : Int32, t : Int32, k : Int32) : String
+    head = "d#{round}.#{t}.#{k}."
+    head + "d" * (40 - head.bytesize)
+  end
+
+  def unit_body(round : Int32, t : Int32, sink : Channel(String)) : Int32
+    junk = 0_i64
+    i = 0
+    while i < ALLOCS
+      if i % SPARSE == 0
+        sink.send(kept_text(round, t, i))
+      else
+        s = "j" * SIZES[i % SIZES.size]
+        junk = junk &+ s.bytesize.to_i64
+      end
+      i = i + 1
+    end
+    k = 0
+    while k < DENSE
+      sink.send(burst_text(round, t, k))
+      k = k + 1
+    end
+    junk > 0 ? 0 : 1
+  end
+
+  def sparse_per_unit : Int32
+    (ALLOCS + SPARSE - 1) // SPARSE
+  end
+
+  # One round: its units spawned, what they send received - the kept
+  # strings onto *kept*, with what each must read (`kept_text`'s numbers)
+  # onto *keys* - and their answers checked. Answers the burst.
+  def play(round : Int32, units : Int32, kept : Array(String), keys : Array(Int64)) : Array(String)
+    burst = [] of String
+    sink = Channel(String).new(1024)
+    group do |g|
+      handles = [] of IyiTask(Int32)
+      units.times { |t| handles << g.spawn(unit: :new) { unit_body(round, t, sink) } }
+      (units * (sparse_per_unit + DENSE)).times do
+        s = sink.receive
+        if s.byte_at(0) == 'k'.ord.to_u8
+          kept << s
+          parts = s.split('.')
+          keys << parts[0][1, parts[0].bytesize - 1].to_i64 &* 100000000_i64 &+ parts[1].to_i64 &* 10000_i64 &+ parts[2].to_i64
+        else
+          burst << s
+        end
+      end
+      handles.each_with_index do |handle, t|
+        value = handle.value
+        fail("round #{round}: unit #{t} answered #{value}") unless value == 0
+      end
+    end
+    burst
+  end
+
+  Checks.read_env
+  arguments = Program.args
+  rounds = arguments.size > 0 ? arguments[0].to_i : 12
+  units = arguments.size > 1 ? arguments[1].to_i : 48
+  IyiWorkers.count = arguments.size > 2 ? arguments[2].to_i : 4
+  fail("usage: heap_drain [ROUNDS [UNITS [WORKERS]]], ROUNDS > #{WARM}") if rounds <= WARM
+
+  kept = [] of String
+  keys = [] of Int64
+  previous_burst = [] of String
+  spans = [] of UInt64
+  residents = [] of UInt64
+  round = 0
+  while round < rounds
+    # The last round's burst let go: dead at this round's collection.
+    previous_burst = play(round, units, kept, keys)
+    IyiMark.collect
+    {% if flag?(:heap_partitions) %}
+      spans << IyiHeap.partition_carved
+    {% else %}
+      spans << 0_u64
+    {% end %}
+    residents << resident_bytes
+    round = round + 1
+  end
+  fail("#{previous_burst.size} burst strings, not #{units * DENSE}") if previous_burst.size != units * DENSE
+
+  # Every kept string as it was sent.
+  want = rounds * units * sparse_per_unit
+  fail("#{kept.size} kept strings, not #{want}") if kept.size != want
+  kept.each_with_index do |s, k|
+    key = keys[k]
+    want_text = kept_text((key // 100000000_i64).to_i, (key // 10000_i64 % 10000_i64).to_i, (key % 10000_i64).to_i)
+    fail("kept string #{k} reads #{s.bytesize} bytes, not #{want_text}") if s != want_text
+  end
+
+  mib = 1048576_u64
+  line = "drain rounds=#{rounds} units=#{units} workers=#{IyiWorkers.count}"
+  line = line + " carved_mib=#{spans.map { |b| b // mib }.join(",")}"
+  line = line + " rss_mib=#{residents.map { |b| b // mib }.join(",")}"
+  {% if flag?(:heap_partitions) %}
+    line = line + " handed=#{IyiHeap.handed_shared} adopted=#{IyiHeap.runs_adopted} parked=#{IyiHeap.runs_parked} relisted=#{IyiHeap.runs_drained}"
+    base = spans[WARM - 1]
+    last = spans[rounds - 1]
+    slack = base // 4_u64
+    slack = 4_u64 * mib if slack < 4_u64 * mib
+    print line + "\n"
+    fail("the partition arenas grew from #{base // mib} MiB after round #{WARM} to #{last // mib} MiB after round #{rounds}") if last > base + slack
+  {% else %}
+    print line + "\n"
+  {% end %}
+  print "drain: #{kept.size} kept strings intact\n"
+{% else %}
+  puts "heap drain: no collector of iyi's own here, nothing to measure"
+{% end %}

@@ -10424,6 +10424,17 @@ require "./file"
     RETURNED          = 96_u64
     LARGE_FREED       = 97_u64
     LOCAL_PAUSES      = 98_u64
+    # Drained runs a partition took (`IyiHeap.adopt_drained`), and the
+    # ones it found too full and parked.
+    RUNS_ADOPTED      = 99_u64
+    RUNS_PARKED       = 100_u64
+    # The partitions' pool by age (`IyiHeap.turn_pools`, `cool_pools`):
+    # when it last turned, whether runs wait on a release list, the class
+    # the next release looks at first, and the runs released.
+    POOL_TURNED_NS    = 101_u64
+    COOL_PENDING      = 102_u64
+    COOL_CURSOR       = 103_u64
+    RUNS_COOLED       = 111_u64
     # The verifier (heap_verify.iyi).
     VERIFY_STRESS       = 104_u64
     VERIFY_STRESS_TICK  = 105_u64

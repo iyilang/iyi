@@ -149,8 +149,10 @@ class IyiHeap
 
   # The thread's scratch page for the local mark and the publication
   # walk: a stack of chunk bases mapped beside it, its capacity and
-  # length, a one-entry layout cache, and a visited set for the walks
-  # through lent graphs. Not heap memory: the collector never reads it.
+  # length, a one-entry layout cache, the visited set of the walks
+  # through lent graphs - its mapping, capacity, count and the current
+  # walk's generation - and what `lend_step` found. Not heap memory: the
+  # collector never reads it.
   @[ThreadLocal]
   @@scratch : UInt64 = 0_u64
 
@@ -163,6 +165,14 @@ class IyiHeap
   SCR_SETCAP = 48_u64
   SCR_SETN   = 56_u64
   SCR_COUNT  = 64_u64
+  SCR_GEN    = 72_u64
+  SCR_STEP   = 80_u64
+
+  # The types `__iyi_new_shared` has made an object of (`born_shared`): a
+  # byte per type id below `BORN_TYPES`, mapped at the first. The walks
+  # through lent graphs stop at such an object (`lend_step`).
+  @@born_types : UInt64 = 0_u64
+  BORN_TYPES = 65536_u64
 
   def self.pcentre : UInt64
     page = @@pcentre
@@ -1020,52 +1030,70 @@ class IyiHeap
     read64(read64(s &+ SCR_STACK) &+ len &* 8_u64)
   end
 
-  # A set of addresses for one walk, open-addressed in a mapping: true
-  # when *address* was not in it and is now.
-  def self.visit(s : UInt64, address : UInt64) : Bool
-    cap = read64(s + SCR_SETCAP)
-    if cap == 0 || read64(s + SCR_SETN) * 2_u64 >= cap
-      visit_grow(s)
-      cap = read64(s + SCR_SETCAP)
+  # The visited set of the walks through lent graphs: open addressing in
+  # a mapping of (address, generation) pairs that stays mapped from walk
+  # to walk, each walk a generation of its own (`visit_begin`), so a
+  # pair of another generation is an empty slot and no walk clears,
+  # maps or unmaps the set. It used to be mapped at a walk's first
+  # visit, grown by remapping and unmapped at its end, and Diag6's stack
+  # samples of #145's app (Linux, flag on, `/web/api/v1/cities`) had
+  # most of the busy workers in those three calls. A set a huge graph
+  # grew past `VISIT_KEEP` pairs is given back when the next walk begins.
+  VISIT_FIRST =  1024_u64
+  VISIT_KEEP  = 65536_u64
+
+  def self.visit_begin(s : UInt64) : Nil
+    cap = read64(s &+ SCR_SETCAP)
+    if cap > VISIT_KEEP
+      __iyi_munmap(read64(s &+ SCR_SET), cap &* 16_u64)
+      write64(s &+ SCR_SET, 0_u64)
+      write64(s &+ SCR_SETCAP, 0_u64)
     end
-    set = read64(s + SCR_SET)
-    probe = (address.unsafe_shr(3_u64) &* 0x9E3779B97F4A7C15_u64).unsafe_shr(20_u64) & (cap - 1_u64)
+    write64(s &+ SCR_GEN, read64(s &+ SCR_GEN) &+ 1_u64)
+    write64(s &+ SCR_SETN, 0_u64)
+  end
+
+  # True when *address* was not in this walk's set and is now.
+  def self.visit(s : UInt64, address : UInt64) : Bool
+    if read64(s &+ SCR_SETN) &* 2_u64 >= read64(s &+ SCR_SETCAP)
+      visit_grow(s)
+    end
+    cap = read64(s &+ SCR_SETCAP)
+    set = read64(s &+ SCR_SET)
+    gen = read64(s &+ SCR_GEN)
+    mask = cap &- 1_u64
+    probe = (address.unsafe_shr(3_u64) &* 0x9E3779B97F4A7C15_u64).unsafe_shr(20_u64) & mask
     while true
-      seen = read64(set + probe * 8_u64)
-      return false if seen == address
-      if seen == 0
-        write64(set + probe * 8_u64, address)
-        write64(s + SCR_SETN, read64(s + SCR_SETN) + 1_u64)
+      pair = set &+ probe.unsafe_shl(4_u64)
+      if read64(pair &+ 8_u64) != gen
+        write64(pair, address)
+        write64(pair &+ 8_u64, gen)
+        write64(s &+ SCR_SETN, read64(s &+ SCR_SETN) &+ 1_u64)
         return true
       end
-      probe = (probe + 1_u64) & (cap - 1_u64)
+      return false if read64(pair) == address
+      probe = (probe &+ 1_u64) & mask
     end
     false
   end
 
+  # Twice the pairs (`VISIT_FIRST` at first), this walk's carried over.
+  @[NoInline]
   def self.visit_grow(s : UInt64) : Nil
-    cap = read64(s + SCR_SETCAP)
-    old = read64(s + SCR_SET)
-    fresh_cap = cap == 0 ? 4096_u64 : cap * 2_u64
-    write64(s + SCR_SET, __iyi_mmap(fresh_cap * 8_u64).address)
-    write64(s + SCR_SETCAP, fresh_cap)
-    write64(s + SCR_SETN, 0_u64)
+    cap = read64(s &+ SCR_SETCAP)
+    old = read64(s &+ SCR_SET)
+    gen = read64(s &+ SCR_GEN)
+    fresh_cap = cap == 0 ? VISIT_FIRST : cap &* 2_u64
+    write64(s &+ SCR_SET, __iyi_mmap(fresh_cap &* 16_u64).address)
+    write64(s &+ SCR_SETCAP, fresh_cap)
+    write64(s &+ SCR_SETN, 0_u64)
     k = 0_u64
     while k < cap
-      seen = read64(old + k * 8_u64)
-      visit(s, seen) if seen != 0
-      k = k + 1_u64
+      pair = old &+ k.unsafe_shl(4_u64)
+      visit(s, read64(pair)) if read64(pair &+ 8_u64) == gen
+      k = k &+ 1_u64
     end
-    __iyi_munmap(old, cap * 8_u64) if cap != 0
-  end
-
-  def self.visit_reset(s : UInt64) : Nil
-    cap = read64(s + SCR_SETCAP)
-    return if cap == 0
-    __iyi_munmap(read64(s + SCR_SET), cap * 8_u64)
-    write64(s + SCR_SET, 0_u64)
-    write64(s + SCR_SETCAP, 0_u64)
-    write64(s + SCR_SETN, 0_u64)
+    __iyi_munmap(old, cap &* 16_u64) if cap != 0
   end
 
   # The layout entry for *type_id*, one entry cached on the scratch page.
@@ -1246,21 +1274,53 @@ class IyiHeap
     0_u64
   end
 
-  # ── Lending (contract section 4, row 15) ──────────────────────────────
+  # ── Lending (contract section 4, row 15; section 6, S6 amendment) ─────
 
+  # *graph* into L(u) of the running unit, once however often it is lent:
+  # a library may lend at every store that hangs something on the graph.
   def self.lend_in_address(graph : UInt64) : Nil
     record = unit_record
     return if record == 0
-    table_add(record &+ REC_LEND, graph)
+    lend_add(record &+ REC_LEND, graph)
   end
 
+  def self.lend_add(slot : UInt64, graph : UInt64) : Nil
+    table_add(slot, graph) unless table_has?(slot, graph)
+  end
+
+  def self.table_has?(slot : UInt64, entry : UInt64) : Bool
+    count = table_count(slot)
+    k = 0_u64
+    while k < count
+      return true if table_at(slot, k) == entry
+      k = k &+ 1_u64
+    end
+    false
+  end
+
+  # *graph* handed back. Lent: walked, every `LOCAL` chunk of the unit
+  # met published, and out of L(u). Not lent: the unit hung nothing of
+  # its own on it - the lend protocol lends a graph before the unit
+  # stores into it - so there is nothing to publish and no walk; a
+  # library keeps the graph published instead, publishing what it stores
+  # (iyi-db's connections). Under `-Dheap_verify` that is checked: the
+  # walk runs, and a `LOCAL` chunk of the unit's it reaches is reported.
   def self.lend_out_address(graph : UInt64) : Nil
     record = unit_record
     return if record == 0
-    enter_barrier
-    lend_walk(record, graph, true)
-    leave_barrier
-    table_remove(record &+ REC_LEND, graph)
+    slot = record &+ REC_LEND
+    if table_has?(slot, graph)
+      enter_barrier
+      lend_walk(record, graph, LEND_PUBLISH)
+      leave_barrier
+      table_remove(slot, graph)
+    else
+      {% if flag?(:heap_verify) %}
+        enter_barrier
+        lend_walk(record, graph, LEND_CHECK)
+        leave_barrier
+      {% end %}
+    end
   end
 
   # The record of the running fiber's unit, whatever is installed: a lend
@@ -1273,54 +1333,243 @@ class IyiHeap
     unit.heap
   end
 
-  # A lent graph walked from *graph*: every chunk reachable from it, and
-  # each of partition *record*'s `LOCAL` chunks met on the way published
-  # with its `LOCAL` closure when *publish* (`lend_out`), or marked live
-  # and `OWN_LENT` otherwise (the local mark's roots). The walk goes on
-  # through published and shared chunks, which may be the mutable middle
-  # of the graph; atomic chunks are never opened, so a graph's strings
-  # end it, and a visited set bounds the rest.
-  def self.lend_walk(record : UInt64, graph : UInt64, publish : Bool) : Nil
+  # What a walk through a lent graph does at the unit's `LOCAL` chunks:
+  # marks them live and `OWN_LENT` (the local mark's roots), publishes
+  # them (`lend_out`, the unit's death), or reports them (`lend_out` of a
+  # graph that was not lent, `-Dheap_verify`).
+  LEND_MARK    = 0
+  LEND_PUBLISH = 1
+  LEND_CHECK   = 2
+
+  # What `lend_step` found at a chunk the walk goes to.
+  STEP_LOCAL  = 1_u64
+  STEP_ATOMIC = 2_u64
+
+  # A lent graph walked from *graph*, the root included, for partition
+  # *record*, doing *mode* at each of its `LOCAL` chunks. The walk goes
+  # through the mutable middle of the graph - shared chunks, published
+  # ones of any partition, the unit's own - and stops (`lend_step`) where
+  # no pointer of the unit's can be behind a chunk:
+  #
+  # - a chunk `LOCAL` to another partition. By invariant I only that
+  #   partition's unit can load a reference to it, so this unit never
+  #   stored into it, and nothing `LOCAL` to this unit is reachable
+  #   through it (I-b). The old walk went on, reading other units'
+  #   unpublished chunks while they changed them.
+  # - an object of a type born in the shared heap (`__iyi_new_shared`:
+  #   `Mutex`, `Channel`, `Unit`'s handle, the runtime's fibers, units,
+  #   waiters, send nodes and threads), other than the root. Their
+  #   writers allocate in the shared heap or publish what they store - a
+  #   lock block runs in the shared heap with its captures published, a
+  #   send publishes the value, a `Unit`'s value lives in its own
+  #   partition - and a fiber's pointer fields are its unit's registered
+  #   roots; what such a type hands a unit out of its graph is `Share`
+  #   or an owning type's, lent on its own. So no `LOCAL` pointer of the
+  #   unit's sits behind one (design section 4.1: the walk "stops at ...
+  #   shared trusted chunks"). This is what keeps a hand-back of one of
+  #   iyi-db's connections from walking the whole pool: connection,
+  #   database, pool, and the pool's book behind its `Mutex`, with every
+  #   other connection in it.
+  #
+  # A pointer of the unit's hidden behind either stop is still seen by
+  # `-Dheap_verify`: its local collection's scan reads every heap slot.
+  # Atomic chunks are never opened nor kept in the visited set.
+  def self.lend_walk(record : UInt64, graph : UInt64, mode : Int32) : Nil
     s = scratch
     id = read64(record &+ REC_ID)
     parity = read64(record &+ REC_PARITY)
-    entry = read64(s + SCR_LEN)
-    visit_reset(s)
-    base = lend_base(graph)
-    return if base == 0
-    visit(s, base)
-    scratch_push(s, base)
-    while read64(s + SCR_LEN) > entry
+    entry = read64(s &+ SCR_LEN)
+    visit_begin(s)
+    objects = 0_u64
+    bytes = lend_meet(s, record, id, parity, mode, graph, 0_u64, graph, true)
+    objects = 1_u64 if bytes != 0
+    while read64(s &+ SCR_LEN) > entry
       object = scratch_pop(s)
       each_field(s, object) do |word|
-        target = lend_base(word)
-        if target != 0 && visit(s, target)
-          if publish
-            publish_in(record, word)
-          else
-            local_shade_lent(record, id, parity, word)
-          end
-          scratch_push(s, target)
+        published = lend_meet(s, record, id, parity, mode, graph, object, word, false)
+        if published != 0
+          objects = objects &+ 1_u64
+          bytes = bytes &+ published
         end
       end
     end
-    visit_reset(s)
+    if objects != 0
+      IyiStat.add(IyiStat::PUBLISHED_OBJECTS, objects)
+      IyiStat.add(IyiStat::PUBLISHED_BYTES, bytes)
+      allocated_word.value.add(bytes)
+    end
   end
 
-  # The object a word of a lent graph names, as the root walk's
-  # `base_of` answers; a large object's looked for under the runtime
-  # lock, since a mutator walks here and another thread may be unmapping
-  # its own large object meanwhile.
-  def self.lend_base(word : UInt64) : UInt64
+  # One word of a lent graph, held by *holder* (0 for the root): the
+  # object it names queued once if the walk goes there and it can hold
+  # pointers, and *mode* done if it is the unit's `LOCAL` chunk. Answers
+  # the bytes it published.
+  @[AlwaysInline]
+  def self.lend_meet(s : UInt64, record : UInt64, id : UInt64, parity : UInt64, mode : Int32, graph : UInt64, holder : UInt64, word : UInt64, root : Bool) : UInt64
+    base = lend_step(s, id, word, root)
+    return 0_u64 if base == 0
+    step = read64(s &+ SCR_STEP)
+    if step & STEP_ATOMIC == 0
+      return 0_u64 unless visit(s, base)
+      scratch_push(s, base)
+    end
+    return 0_u64 if step & STEP_LOCAL == 0
+    if mode == LEND_PUBLISH
+      return publish_one(record, id, base) != 0 ? size_of(base) : 0_u64
+    elsif mode == LEND_MARK
+      local_shade_lent(record, id, parity, base)
+    else
+      {% if flag?(:heap_verify) %} unlent_report(id, graph, holder, word, base) {% end %}
+    end
+    0_u64
+  end
+
+  # The base of the object a word of a lent graph names, 0 where the walk
+  # stops (`lend_walk`) or the word names nothing the heap handed out;
+  # what the object is in the scratch page's `SCR_STEP`. *root*: the
+  # graph itself, walked whatever its type.
+  def self.lend_step(s : UInt64, id : UInt64, word : UInt64, root : Bool) : UInt64
     return 0_u64 if word == 0
-    return IyiRoots.base_of(word) if arena_of(word) != 0
+    arena = arena_of(word)
+    return lend_step_large(s, id, word, root) if arena == 0
+    first = arena_first(arena)
+    return 0_u64 if word < first
+    slot = chunk_index(arena, word)
+    head = first &+ slot &* read64(arena &+ OFF_CHUNK)
+    return 0_u64 if uncarved?(arena, head)
+    meta = arena &+ META &+ slot &* META_ENTRY
+    bits = read8(meta)
+    return 0_u64 if bits & FREE_FLAG != 0 || bits & CARVED_FLAG == 0
+    step = bits & ATOMIC_FLAG != 0 ? STEP_ATOMIC : 0_u64
+    owners = read64(arena &+ OFF_OWNERS)
+    if owners != 0
+      owner = read16(arena &+ owners &+ (head &- first).unsafe_shr(GRANULE_SHIFT) &* 2_u64)
+      if owner != 0 && read8(arena &+ read64(arena &+ OFF_OWN) &+ slot) & OWN_PUB == 0
+        return 0_u64 if owner != id
+        step = step | STEP_LOCAL
+      end
+    elsif !root && bits & (ATOMIC_FLAG | UNTYPED_FLAG) == 0
+      return 0_u64 if born_shared?(bits & HEADED_FLAG != 0 ? read64(head).unsafe_shr(TYPE_SHIFT) : read16(meta &+ 1_u64))
+    end
+    write64(s &+ SCR_STEP, step)
+    bits & HEADED_FLAG != 0 ? head &+ HEADER : head
+  end
+
+  # The same for a large object: its node found, and its owner, `OWN`
+  # byte and header read, under the runtime lock, since a mutator walks
+  # here and another thread may be unmapping its own large object
+  # meanwhile.
+  def self.lend_step_large(s : UInt64, id : UInt64, word : UInt64, root : Bool) : UInt64
     slot = word.unsafe_shr(24_u64)
     return 0_u64 if slot < DIR_SLOTS && Pointer(UInt8).new(arena_dir + slot).value == 0_u8
     lock
     node = containing_large(Pointer(Void).new(word))
+    own = node == 0 ? 0_u64 : read64(node &+ 16_u64)
+    header = node == 0 ? 0_u64 : read64(node &+ LARGE_USER &- 8_u64)
     unlock
-    node == 0 ? 0_u64 : node + LARGE_USER
+    return 0_u64 if node == 0
+    step = header & ATOMIC_FLAG != 0 ? STEP_ATOMIC : 0_u64
+    owner = own & 0xFFFF_u64
+    if owner != 0
+      if own.unsafe_shr(16_u64) & OWN_PUB == 0
+        return 0_u64 if owner != id
+        step = step | STEP_LOCAL
+      end
+    elsif !root && step == 0
+      return 0_u64 if born_shared?(header.unsafe_shr(TYPE_SHIFT))
+    end
+    write64(s &+ SCR_STEP, step)
+    node &+ LARGE_USER
   end
+
+  # *type_id*'s instances are born in the shared heap: `new_shared` has
+  # made one (`IyiHeap.new_shared` calls `born_shared`). Codegen sends a
+  # type to `__iyi_new_shared` for all its instances or none, so the
+  # first instance names the type for every later one.
+  def self.born_shared(type_id : UInt64) : Nil
+    return if type_id == 0 || type_id >= BORN_TYPES
+    table = @@born_types
+    table = born_types_table if table == 0
+    write8(table &+ type_id, 1_u64) if read8(table &+ type_id) == 0
+  end
+
+  def self.born_shared?(type_id : UInt64) : Bool
+    table = @@born_types
+    table != 0 && type_id < BORN_TYPES && read8(table &+ type_id) != 0
+  end
+
+  def self.born_types_table : UInt64
+    fresh = __iyi_mmap(BORN_TYPES).address
+    word = Pointer(Atomic(UInt64)).new(pointerof(@@born_types).address)
+    return fresh if word.value.compare_and_set(0_u64, fresh)[1]
+    __iyi_munmap(fresh, BORN_TYPES)
+    word.value.get
+  end
+
+  {% if flag?(:heap_verify) %}
+    # `lend_out` of *graph*, which its unit never lent in, reaches *base*,
+    # a `LOCAL` chunk of the unit's, through *holder*'s slot holding
+    # *word* (*holder* 0: the graph itself). The hand-back publishes
+    # nothing, so the next unit to take the graph reads a chunk this one
+    # may free: the library stored into a graph it had not lent. Reported
+    # as the verifier reports a slot, and the program ends.
+    def self.unlent_report(id : UInt64, graph : UInt64, holder : UInt64, word : UInt64, base : UInt64) : Nil
+      IyiHeapVerify.report_begin(id)
+      IyiHeapVerify.say("  a graph handed back un-lent (lend_out of a graph not in its unit's lend set) reaches a LOCAL chunk of the unit's\n")
+      IyiHeapVerify.say("  graph: ")
+      IyiHeapVerify.say_hex(graph)
+      IyiHeapVerify.say("\n")
+      if holder == 0
+        IyiHeapVerify.say("  holder: none, the graph is the unit's LOCAL chunk itself\n")
+      else
+        owner = owner_of(holder)
+        IyiHeapVerify.say("  holder: ")
+        if owner == 0
+          IyiHeapVerify.say("a shared-heap chunk")
+        else
+          IyiHeapVerify.say("a published chunk of partition ")
+          IyiHeapVerify.say_dec(owner)
+          IyiHeapVerify.say(owner == id ? " (its own)" : "")
+        end
+        IyiHeapVerify.say("\n")
+        type_id = lend_type_of(holder)
+        IyiHeapVerify.say_object("holder", holder, type_id)
+        offset = 0_u64
+        limit = size_of(holder)
+        while offset &+ 8_u64 < limit && read64(holder &+ offset) != word
+          offset = offset &+ 8_u64
+        end
+        IyiHeapVerify.say("    field +")
+        IyiHeapVerify.say_dec(offset)
+        IyiHeapVerify.say(" at ")
+        IyiHeapVerify.say_hex(holder &+ offset)
+        IyiHeapVerify.say("\n")
+        IyiHeapVerify.holder_site(holder) if type_id == 0
+      end
+      IyiHeapVerify.say("  target: ")
+      IyiHeapVerify.say_hex(word)
+      IyiHeapVerify.say("\n")
+      arena = arena_of(base)
+      if arena == 0
+        IyiHeapVerify.target_detail(base &- LARGE_USER)
+      else
+        bits = read8(arena &+ META &+ chunk_index(arena, base) &* META_ENTRY)
+        IyiHeapVerify.target_detail(bits & HEADED_FLAG != 0 ? base &- HEADER : base)
+      end
+      IyiHeapVerify.report_end
+    end
+
+    # The type id of the object at *base*, 0 for untyped memory.
+    def self.lend_type_of(base : UInt64) : UInt64
+      arena = arena_of(base)
+      return read64(base &- 8_u64).unsafe_shr(TYPE_SHIFT) if arena == 0
+      slot = chunk_index(arena, base)
+      bits = read8(arena &+ META &+ slot &* META_ENTRY)
+      return 0_u64 if bits & UNTYPED_FLAG != 0
+      return read64(base &- HEADER).unsafe_shr(TYPE_SHIFT) if bits & HEADED_FLAG != 0
+      read16(arena &+ META &+ slot &* META_ENTRY &+ 1_u64)
+    end
+  {% end %}
 
   # ── The local collection (design section 4.1) ────────────────────────
 
@@ -1529,7 +1778,7 @@ class IyiHeap
     lends = table_count(record &+ REC_LEND)
     k = 0_u64
     while k < lends
-      lend_walk(record, table_at(record &+ REC_LEND, k), false)
+      lend_walk(record, table_at(record &+ REC_LEND, k), LEND_MARK)
       k = k + 1_u64
     end
     # Published objects of its own runs: reached from outside, perhaps,
@@ -2163,7 +2412,7 @@ class IyiHeap
     lends = record &+ REC_LEND
     k = 0_u64
     while k < table_count(lends)
-      lend_walk(record, table_at(lends, k), true)
+      lend_walk(record, table_at(lends, k), LEND_PUBLISH)
       k = k + 1_u64
     end
     if state.value.get & REC_DETACHED != 0
@@ -2384,7 +2633,7 @@ class IyiHeap
       lends = from &+ REC_LEND
       k = 0_u64
       while k < table_count(lends)
-        table_add(into &+ REC_LEND, table_at(lends, k))
+        lend_add(into &+ REC_LEND, table_at(lends, k))
         k = k + 1_u64
       end
       write64(into &+ REC_HELD, read64(into &+ REC_HELD) + read64(from &+ REC_HELD))

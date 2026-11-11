@@ -1,0 +1,531 @@
+# heap22's lend protocol, driven (design B row 15; contract sections 4
+# and 6, as amended in S6): an owning type lends a mutable graph to the
+# unit that takes it (`IyiHeap.lend_in`), the unit hangs chunks of its
+# own on the graph, and the hand-back (`IyiHeap.lend_out`) publishes them
+# before another unit can take the graph.
+#
+#   ./bin/iyi build -Dheap_partitions -Dheap_verify bench/heap_lend.iyi
+#   ./heap_lend            # every check
+#   ./heap_lend mutex      # one
+#   bash bench/heap_lend.sh   # every check, and the broken copies
+#
+# The owning type here has the shape of iyi-db's `Pool`: its resources in
+# a book behind a `Mutex`, each in a slot of an owning type of its own,
+# and each resource naming the owner back, as a connection names its
+# database and the database its pool. So a walk through one resource
+# that did not stop at the book's `Mutex` would walk every other one.
+#
+# The checks:
+#
+# - `lend`: what a unit hangs on a lent resource lives through its local
+#   collection (the lend set roots the local mark) and is published at
+#   the hand-back, for the next unit to read.
+# - `unlent`: the same without a collection before the hand-back, so a
+#   resource given back that was never lent in is caught at the hand-back
+#   itself (`-Dheap_verify`'s check of a graph not in the lend set).
+# - `death`: a unit that dies holding a lent resource lends it out.
+# - `root`: a lent graph that is the unit's own chunk is published with
+#   what hangs on it.
+# - `mutex`: a `Mutex` inside the resource is where the walk stops (a
+#   type born in the shared heap); what a lock block stores there is
+#   shared or published by the lock itself.
+# - `foreign`: another unit's unpublished chunk reached from the resource
+#   is where the walk stops.
+# - `pool`: six units take and give back three resources for thirty
+#   rounds each, hanging chains on them and collecting their partitions
+#   on the way.
+#
+# Without `-Dheap_partitions` nothing is collected locally and every
+# check passes: that build is the flag-off control.
+
+@[Unsafe("an owning type lends its resources to units; the checks wipe their stack with raw words, hide addresses as integers, and reach another unit's chunk through its address")]
+{% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
+  import std/mutex::{Mutex}
+
+  # `HEAP22_PRINT_ONLY=1`: a failed check prints its `FAIL:` line and the
+  # program goes on, so that bench/heap_lend.sh can show a broken copy
+  # caught by `-Dheap_verify`'s verifier alone.
+  class Checks
+    @@print_only = false
+
+    def self.print_only : Bool
+      @@print_only
+    end
+
+    def self.read_env : Nil
+      @@print_only = Program.env("HEAP22_PRINT_ONLY") == "1"
+    end
+  end
+
+  def fail(message : String) : Nil
+    print "FAIL: #{message}\n"
+    __iyi_exit(1) unless Checks.print_only
+  end
+
+  # A chain of fresh items, each labelled with a string made at run time.
+  class Item
+    @label : String
+    @next : Item?
+
+    def initialize(@label : String, @next : Item?)
+    end
+
+    def label : String
+      @label
+    end
+
+    def next_item : Item?
+      @next
+    end
+  end
+
+  NODES = 32
+
+  def label_for(seed : Int32, index : Int32) : String
+    "l#{seed}-#{index}-" + "x" * (index % 5 + 2)
+  end
+
+  @[NoInline]
+  def chain(seed : Int32) : Item
+    item = Item.new(label_for(seed, 0), nil)
+    index = 1
+    while index < NODES
+      item = Item.new(label_for(seed, index), item)
+      index = index + 1
+    end
+    item
+  end
+
+  def check_chain(item : Item?, seed : Int32, what : String) : Nil
+    index = NODES - 1
+    while item.is_a?(Item)
+      fail("#{what}: item #{index} reads #{item.label.bytesize} bytes, not #{label_for(seed, index)}") unless item.label == label_for(seed, index)
+      item = item.next_item
+      index = index - 1
+    end
+    fail("#{what}: the chain ended #{index + 1} items short") unless index == -1
+  end
+
+  # A chain's labels as one string, which leaves a lock block (`Share`).
+  def chain_text(item : Item?) : String
+    String.build do |io|
+      while item.is_a?(Item)
+        io << item.label << ","
+        item = item.next_item
+      end
+    end
+  end
+
+  def expected_text(seed : Int32) : String
+    String.build do |io|
+      index = NODES - 1
+      while index >= 0
+        io << label_for(seed, index) << ","
+        index = index - 1
+      end
+    end
+  end
+
+  # Every item of a chain published or the shared heap's, none `LOCAL` to
+  # a partition: what a hand-back must leave. Deterministic where the
+  # poison is not (a word a frame still holds keeps a chain marked).
+  def published(item : Item?, what : String) : Nil
+    {% if flag?(:heap_partitions) %}
+      index = NODES - 1
+      while item.is_a?(Item)
+        fail("#{what}: item #{index} is still local to its unit after the hand-back") if IyiHeap.local?(item.object_id)
+        fail("#{what}: item #{index}'s label is still local to its unit after the hand-back") if IyiHeap.local?(item.label.object_id)
+        item = item.next_item
+        index = index - 1
+      end
+    {% end %}
+  end
+
+  # Another unit's chunk, reached from a resource (`foreign`).
+  class Holder
+    property item : Item? = nil
+  end
+
+  # A resource: a mutable graph with a mutable middle (an `Array` made in
+  # the shared heap), a `Mutex` of its own, a slot for another unit's
+  # chunk, and its owner named back.
+  class Res
+    getter items : Array(Item)
+    getter book : Mutex(Array(Item))
+    property other : Holder? = nil
+    property desk : Desk? = nil
+
+    def initialize
+      @items = [] of Item
+      @book = Mutex.new { [] of Item }
+    end
+  end
+
+  # The book's hold on a resource, the one `Share` claim of the desk's
+  # graph besides the desk: handed to one unit at a time.
+  @[Share(owns: true, lends: true)]
+  class Slot
+    getter res : Res
+
+    def initialize(@res : Res)
+    end
+  end
+
+  # The owning type: a slot out of the book lends its resource to the
+  # taking unit, and the hand-back lends it out before the book can give
+  # it to another.
+  @[Share(owns: true, lends: true)]
+  class Desk
+    @book : Mutex(Array(Slot))
+
+    def initialize(count : Int32)
+      @book = Mutex.new { Array(Slot).new(count) { Slot.new(Res.new) } }
+      desk = self
+      @book.lock { |slots| slots.each { |slot| slot.res.desk = desk } }
+    end
+
+    def take : Slot
+      while true
+        got = @book.get { |slots| slots.shift? }
+        if got.is_a?(Slot)
+          IyiHeap.lend_in(got.res)
+          return got
+        end
+        sleep(1)
+      end
+    end
+
+    def give_back(slot : Slot) : Nil
+      IyiHeap.lend_out(slot.res)
+      @book.lock { |slots| slots << slot }
+      nil
+    end
+
+    # Every resource's chains, checked from the main thread.
+    def each_res(& : Res ->) : Nil
+      slots = [] of Slot
+      while got = take?
+        slots << got
+      end
+      slots.each { |slot| yield slot.res }
+      slots.each { |slot| give_back(slot) }
+    end
+
+    private def take? : Slot?
+      got = @book.get { |slots| slots.shift? }
+      got.is_a?(Slot) ? got : nil
+    end
+  end
+
+  # The stack below the caller zeroed, so that no word of a frame that has
+  # returned is read as a root by the collection that follows.
+  @[NoInline]
+  def scrub : UInt64
+    room = uninitialized StaticArray(UInt64, 2048)
+    words = pointerof(room).as(Pointer(UInt64))
+    index = 0
+    while index < 2048
+      words[index] = 0_u64
+      index = index + 1
+    end
+    words[2047]
+  end
+
+  # The running unit's partition collected, as its own token holder; asked
+  # again until one has run (a local collection steps aside while a global
+  # mark runs).
+  @[NoInline]
+  def collect_here : Nil
+    scrub
+    {% if flag?(:heap_partitions) %}
+      record = IyiScheduler.current.alloc
+      return if record == 0_u64
+      before = IyiHeap.partition_collections(record)
+      tries = 0
+      while IyiHeap.partition_collections(record) == before
+        if tries == 1000
+          fail("a local collection did not run in 1000 tries")
+          break
+        end
+        IyiHeap.collect_local(record)
+        tries = tries + 1
+        sleep(1) if IyiHeap.partition_collections(record) == before
+      end
+    {% end %}
+  end
+
+  def partitions_now : UInt64
+    {% if flag?(:heap_partitions) %}
+      IyiHeap.partitions_live
+    {% else %}
+      0_u64
+    {% end %}
+  end
+
+  # The check's units dead, each death checked under `-Dheap_verify`.
+  def settled(before : UInt64, what : String) : Nil
+    waited = 0
+    while partitions_now > before && waited < 5000
+      sleep(1)
+      waited = waited + 1
+    end
+    fail("#{what}: #{partitions_now - before} partitions still live 5 s after the check's units ended") if partitions_now > before
+  end
+
+  # An address kept where no local collection looks.
+  class Stash
+    @@slot = 0_u64
+
+    def self.put(address : UInt64) : Nil
+      @@slot = address
+    end
+
+    def self.take : UInt64
+      @@slot
+    end
+  end
+
+  # A chain hung on the resource from a frame that has returned.
+  @[NoInline]
+  def hang(res : Res, seed : Int32) : Nil
+    res.items << chain(seed)
+    nil
+  end
+
+  # The resource's first chain read by a unit that takes it next.
+  def read_back(desk : Desk, seed : Int32, what : String) : Nil
+    group do |g|
+      g.spawn(unit: :new) do
+        slot = desk.take
+        check_chain(slot.res.items.first?, seed, "#{what}: read by the next unit")
+        desk.give_back(slot)
+        0
+      end
+    end
+  end
+
+  # ── lend: held through a local collection, published at the hand-back ──
+  def lend_check : Nil
+    before = partitions_now
+    desk = Desk.new(1)
+    group do |g|
+      g.spawn(unit: :new) do
+        slot = desk.take
+        hang(slot.res, 1)
+        collect_here
+        check_chain(slot.res.items.first?, 1, "lend: held through a local collection")
+        desk.give_back(slot)
+        published(slot.res.items.first?, "lend")
+        collect_here
+        0
+      end
+    end
+    settled(before, "lend")
+    read_back(desk, 1, "lend")
+  end
+
+  # ── unlent: handed back with no collection between ────────────────────
+  def unlent_check : Nil
+    before = partitions_now
+    desk = Desk.new(1)
+    group do |g|
+      g.spawn(unit: :new) do
+        slot = desk.take
+        hang(slot.res, 2)
+        desk.give_back(slot)
+        published(slot.res.items.first?, "unlent")
+        collect_here
+        0
+      end
+    end
+    settled(before, "unlent")
+    read_back(desk, 2, "unlent")
+  end
+
+  # ── death: a unit that dies holding a lend ────────────────────────────
+  def death_check : Nil
+    before = partitions_now
+    desk = Desk.new(1)
+    group do |g|
+      g.spawn(unit: :new) do
+        slot = desk.take
+        hang(slot.res, 3)
+        collect_here
+        Stash.put(slot.object_id)
+        0
+      end
+    end
+    settled(before, "death")
+    slot = Pointer(Void).new(Stash.take).as(Slot)
+    published(slot.res.items.first?, "death")
+    check_chain(slot.res.items.first?, 3, "death: read after its unit died")
+    desk.give_back(slot)
+  end
+
+  # ── root: a lent graph of the unit's own ──────────────────────────────
+  @[NoInline]
+  def lend_own(seed : Int32) : Nil
+    res = Res.new
+    IyiHeap.lend_in(res)
+    hang(res, seed)
+    IyiHeap.lend_out(res)
+    Stash.put(res.object_id)
+    nil
+  end
+
+  def root_check : Nil
+    before = partitions_now
+    group do |g|
+      g.spawn(unit: :new) do
+        lend_own(4)
+        collect_here
+        0
+      end
+    end
+    settled(before, "root")
+    res = Pointer(Void).new(Stash.take).as(Res)
+    published(res.items.first?, "root")
+    check_chain(res.items.first?, 4, "root: read after its unit died")
+  end
+
+  # ── mutex: the walk stops at a type born in the shared heap ────────────
+  @[NoInline]
+  def hang_locked(res : Res, seed : Int32) : Nil
+    item = chain(seed)
+    res.book.lock { |items| items << item }
+    nil
+  end
+
+  def mutex_check : Nil
+    before = partitions_now
+    desk = Desk.new(1)
+    group do |g|
+      g.spawn(unit: :new) do
+        slot = desk.take
+        hang_locked(slot.res, 5)
+        desk.give_back(slot)
+        collect_here
+        0
+      end
+    end
+    settled(before, "mutex")
+    group do |g|
+      g.spawn(unit: :new) do
+        slot = desk.take
+        text = slot.res.book.get { |items| chain_text(items.first?) }
+        fail("mutex: the chain behind the resource's Mutex reads wrong") unless text == expected_text(5)
+        desk.give_back(slot)
+        0
+      end
+    end
+  end
+
+  # ── foreign: the walk stops at another unit's unpublished chunk ───────
+  @[NoInline]
+  def hang_foreign(res : Res, foreign : Holder, seed : Int32) : Nil
+    item = chain(seed)
+    res.items << item
+    nil
+  end
+
+  def foreign_check : Nil
+    before = partitions_now
+    desk = Desk.new(1)
+    made = Atomic(UInt64).new(0_u64)
+    go = Channel(Int32).new(1)
+    group do |g|
+      g.spawn(unit: :new) do
+        holder = Holder.new
+        made.set(holder.object_id)
+        go.receive
+        {% if flag?(:heap_partitions) %}
+          fail("foreign: the walk through another unit's resource published this unit's chunk") unless IyiHeap.local?(holder.object_id)
+        {% end %}
+        0
+      end
+      g.spawn(unit: :new) do
+        while made.get == 0_u64
+          sleep(1)
+        end
+        foreign = Pointer(Void).new(made.get).as(Holder)
+        slot = desk.take
+        slot.res.other = foreign
+        hang_foreign(slot.res, foreign, 6)
+        desk.give_back(slot)
+        collect_here
+        slot = desk.take
+        slot.res.other = nil
+        desk.give_back(slot)
+        go.send(1)
+        0
+      end
+    end
+    settled(before, "foreign")
+    read_back(desk, 6, "foreign")
+  end
+
+  # ── pool: units take and give back resources, rounds of them ──────────
+  KEEP = 3
+
+  def seed_of(item : Item) : Int32
+    text = item.label
+    stop = text.index('-')
+    stop.is_a?(Int32) ? text[1, stop - 1].to_i : -1
+  end
+
+  def pool_check : Nil
+    before = partitions_now
+    desk = Desk.new(3)
+    group do |g|
+      6.times do |u|
+        g.spawn(unit: :new) do
+          30.times do |r|
+            slot = desk.take
+            res = slot.res
+            res.items.each { |item| check_chain(item, seed_of(item), "pool: unit #{u} round #{r}") }
+            hang(res, 1000 + u * 100 + r)
+            res.items.shift if res.items.size > KEEP
+            collect_here if r % 7 == u
+            desk.give_back(slot)
+            collect_here if r % 5 == u
+          end
+          0
+        end
+      end
+    end
+    settled(before, "pool")
+    desk.each_res do |res|
+      res.items.each { |item| check_chain(item, seed_of(item), "pool: read from the main thread") }
+    end
+  end
+
+  CHECKS = ["lend", "unlent", "death", "root", "mutex", "foreign", "pool"]
+
+  def run(name : String) : Nil
+    case name
+    when "lend"    then lend_check
+    when "unlent"  then unlent_check
+    when "death"   then death_check
+    when "root"    then root_check
+    when "mutex"   then mutex_check
+    when "foreign" then foreign_check
+    when "pool"    then pool_check
+    else                fail("no check named #{name}")
+    end
+  end
+
+  Checks.read_env
+  IyiWorkers.count = 4
+  arguments = Program.args
+  if arguments.empty?
+    CHECKS.each { |name| run(name) }
+    puts "heap lend: #{CHECKS.size} checks hold"
+  else
+    arguments.each do |name|
+      run(name)
+      puts "#{name}: holds"
+    end
+  end
+{% else %}
+  puts "heap lend: no pool on this target, nothing to check"
+{% end %}

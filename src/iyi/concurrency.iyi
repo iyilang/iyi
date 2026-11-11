@@ -7036,9 +7036,9 @@ class IyiHeap
     {% end %}
   end
 
-  # The lend protocol of an owning type (`@[Share(owns: true, lends:
-  # true)]`): *graph* taken by the running unit, and handed back - its
-  # `LOCAL` chunks published, the mutable middle of the graph walked.
+  # The lend protocol of an owning type (`lends: true`): *graph* taken by
+  # the running unit (once, however often lent), and handed back - walked
+  # and published if lent, nothing to do if not (checked: -Dheap_verify).
   def self.lend_in(graph) : Nil
     {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) %}
       lend_in_address(graph.object_id)

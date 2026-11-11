@@ -822,7 +822,7 @@ struct Iyi::TypeDeclarationProcessor
     # said `@x` was set in *other* initializers, and both its fixes made a
     # field that is never nil nilable.
     field = name.lchop('@')
-    if Lexer.iyi_source?(info.def.location.try(&.filename)) && (value = iyi_self_setter_value(info.def.body, field))
+    if Lexer.iyi_source?(info.def.location.try(&.read_from)) && (value = iyi_self_setter_value(info.def.body, field))
       info.def.raise "`self.#{field} = #{value}` calls a setter, and does not assign the field, so this 'initialize' leaves '#{name}' of #{ivar.owner} unset: " \
                      "write `#{name} = #{value}`, or take it as `def initialize(#{name} : #{ivar.type})`"
     end

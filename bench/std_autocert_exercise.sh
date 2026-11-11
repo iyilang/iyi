@@ -22,11 +22,17 @@
 # second process taking the first's certificates from the cache with no
 # order; http-01 answered on port 80; the cache's modes; from a second
 # Pebble that issues certificates for 24 seconds, a renewal seen as a new
-# serial before the first certificate ends; and a manager that trusts
-# only Pebble's minica refusing the chain Pebble issues, not caching it.
+# serial before the first certificate ends; a manager that trusts
+# only Pebble's minica refusing the chain Pebble issues, not caching it;
+# and the server under `Server.serve(workers: 4)` with
+# `frozen_tls_config`, run under `IYI_WORKERS=2` and staying up though a
+# spawn started the pool before `serve` asked for its four: ten first
+# handshakes at once making one order,
+# answered on more than one worker, and ten more shown the held
+# certificate with no order.
 # Then `iyi doc`, the formatting, five targets, the artifacts, and broken
-# copies of std/autocert and of std/tls's identity source, each caught at
-# the check that names it.
+# copies of std/autocert, of std/tls's identity source and of the
+# exercise's own pool size, each caught at the check that names it.
 #
 # Where Pebble runs in CI: the Linux module-exercise shards, whose job
 # sets Go up for it (`actions/setup-go`); darwin's and Windows' runners
@@ -34,6 +40,7 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO/bench/end_process.sh"
 
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT) PSEP=';' ;;
@@ -65,7 +72,7 @@ CLIENT="$REPO/bench/std_autocert_client.py"
 PIDS=""
 cleanup() {
   for pid in $PIDS; do
-    kill "$pid" >/dev/null 2>&1
+    end_process "$pid"
     wait "$pid" >/dev/null 2>&1
   done
   rm -rf "$WORK"
@@ -298,7 +305,8 @@ fi
 echo
 echo "== proving the checks can fail when the modules are broken"
 # prove_broken <module> <label> <phrase> <part> <old> <new>: a copy of
-# std/<module> with <old> replaced must fail at the check that names
+# std/<module> - or of the exercise itself, when <module> is `exercise` -
+# with <old> replaced must fail at the check that names
 # <phrase>. <part> is where that check is: `local`, the exercise's own
 # checks; `cache`, those and then Python's reading of the cache they
 # wrote, which needs cryptography and POSIX's modes; `alpn`, Python's
@@ -332,13 +340,19 @@ prove_broken() {
   esac
   rm -rf "$WORK/patched" "$WORK/mutant-cache" "$WORK/mutant-alpn" "$WORK/pebble/cache" "$WORK/pebble/renew-cache" "$WORK/pebble/unknown-cache" "$WORK/pebble/root-"*.pem
   mkdir -p "$WORK/patched/std"
+  local from="$REPO/src/std/$module.iyi" to="$WORK/patched/std/$module.iyi" program="$REPO/bench/std_autocert_exercise.iyi"
+  if [ "$module" = exercise ]; then
+    from="$program"
+    to="$WORK/patched/std_autocert_exercise.iyi"
+    program="$to"
+  fi
   if ! OLD="$5" NEW="$6" "$PY" - <<PY
 import os
 from pathlib import Path
-src = Path("$REPO/src/std/$module.iyi").read_text(encoding="utf-8")
+src = Path("$from").read_text(encoding="utf-8")
 if src.count(os.environ["OLD"]) != 1:
     raise SystemExit("patch site missing or not one")
-Path("$WORK/patched/std/$module.iyi").write_text(src.replace(os.environ["OLD"], os.environ["NEW"], 1), encoding="utf-8", newline="\n")
+Path("$to").write_text(src.replace(os.environ["OLD"], os.environ["NEW"], 1), encoding="utf-8", newline="\n")
 PY
   then
     echo "  the $label patch did not apply"
@@ -346,7 +360,7 @@ PY
     return
   fi
   if ! IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" build -o "$WORK/mutant" \
-      "$REPO/bench/std_autocert_exercise.iyi" >"$WORK/mutant.build.log" 2>&1; then
+      "$program" >"$WORK/mutant.build.log" 2>&1; then
     echo "  the $label copy did not build: $(grep -m1 -E 'Error' "$WORK/mutant.build.log")"
     status=1
     return
@@ -405,6 +419,12 @@ prove_broken autocert "an order run in the handshake that asked, with run runnin
   '    if @running' '    if false'
 prove_broken autocert "an order cancelled at the deadline remembered as a failure" "without run, an order cancelled at the deadline is not remembered as a failure" local \
   '      return made if flight.abandoned' ''
+prove_broken autocert "a worker's ask that run never answers" "on four workers, ten concurrent first connections verify, one certificate" parallel \
+  '          answer_ask(g, asked) if asked.is_a?(AutocertAsk)' '          nil'
+prove_broken tls "a frozen config's identity source not asked" "on four workers, ten concurrent first connections verify, one certificate" parallel \
+  '    if shared = @shared_source' '    if shared = nil.as(SharedProc({String?, Array(String)?, Int32?}, TlsIdentity | TlsError | Nil)?)'
+prove_broken exercise "the pool's size asked for after a spawn started it" "on four workers, the server stays up beside the pool its first spawn started" parallel \
+  '  IyiWorkers.count = 4 if parallel' '  0'
 prove_broken tls "std/tls's identity source not told the time left" "without run, a handshake waiting for an order ends by its" local \
   '    return nil if @deadline_ns == 0_i64' '    return nil'
 

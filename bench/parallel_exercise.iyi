@@ -6,15 +6,18 @@
 #
 # Every claim the pool makes, run rather than asserted: parallel tasks
 # start on worker threads and not on the thread that spawned them, on more
-# than one of them, and each stays on the thread that started it across
-# every park; a thousand of them run exactly once each; workers that run
-# out steal what another worker's tasks spawned; values cross threads
-# through channels exactly once and in each sender's order; a cancel
-# reaches a task asleep or parked on a channel on another thread, and a
-# task still waiting in the pool starts cancelled; a panic stops at the
-# task's boundary on whatever thread it ran; collections stop workers
-# with live lists on their fibers' stacks and free nothing of them; and
-# the typed group answers a tuple of parallel tasks.
+# than one of them, and resume on a worker - not always the one they
+# parked on - across every park; a thousand of them run exactly once
+# each; workers that run out steal what another worker's tasks spawned;
+# values cross threads through channels exactly once and in each sender's
+# order; a cancel reaches a task asleep or parked on a channel on another
+# thread, and a task still waiting in the pool starts cancelled; a panic
+# stops at the task's boundary on whatever thread it ran; collections stop
+# workers with live lists on their fibers' stacks and free nothing of
+# them; the typed group answers a tuple of parallel tasks; and wakes that
+# race across workers - selects parked on two channels, cancels landing
+# as tasks park, turns handed through `park_on` - are neither lost nor
+# doubled.
 #
 # Every step runs under a watchdog: a task on the main thread that sleeps
 # and fails the run by name if the step has not finished, so a wake that
@@ -25,6 +28,7 @@
 # one worker and at several and holds the ratio to a floor, and runs
 # broken copies of the runtime to prove each step above can fail.
 
+@[Unsafe("allocates raw blocks through Pointer.malloc in tasks, and Turns trusts @[Share] to hand its word's pointerof address to park_on and wake_on")]
 {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
   def fail(message : String) : Nil
     print "FAIL: #{message}\n"
@@ -137,6 +141,29 @@
     end
   end
 
+  # Every worker of the pool started: one task a worker, each spinning
+  # until all have arrived, up to two seconds. The pool starts a worker
+  # only while none is idle (SPEC.md III.4.15, part 6), so a step that
+  # needs its tasks on threads of their own fills it first; after this
+  # each worker is idle, and each spawn rings one not yet rung.
+  def fill_pool : Nil
+    arrived = Tally.new
+    workers = IyiWorkers.count
+    want = workers.to_i64
+    group do |g|
+      workers.times do
+        g.spawn(unit: :new) do
+          arrived.add(1_i64)
+          until_ns = __iyi_monotonic_ns + 2_000_000_000_i64
+          while arrived.count < want && __iyi_monotonic_ns < until_ns
+            IyiThread.spin_pause
+          end
+          0
+        end
+      end
+    end
+  end
+
   # ── speed ────────────────────────────────────────────────────────────
   def speed(workers : Int32, tasks : Int32, rounds : Int64) : Nil
     IyiWorkers.count = workers
@@ -145,7 +172,7 @@
     group do |g|
       handles = [] of IyiTask(UInt64)
       tasks.times do |i|
-        handles << g.spawn_parallel { spin(rounds, (i + 1).to_u64) }
+        handles << g.spawn(unit: :new) { spin(rounds, (i + 1).to_u64) }
       end
       handles.each do |handle|
         value = handle.value
@@ -159,8 +186,10 @@
   # ── the properties ───────────────────────────────────────────────────
 
   # Placement: parallel tasks run on the pool, not on the spawning thread,
-  # on more than one worker, and each stays on the thread that started it
-  # across every park - a sleep and a channel handoff from the main thread.
+  # on more than one worker, and never on the spawning thread after a park
+  # either - a sleep and a channel handoff from the main thread - though
+  # they may resume on another worker (bench/parallel_migrate.iyi holds
+  # what a move keeps).
   #
   # Every task, as it starts, counts itself and then keeps its worker busy
   # - spinning, never parking - until a second task has started. A worker
@@ -176,10 +205,11 @@
       pings = Channel(Int32).new
       arrived = Tally.new
       seen = [] of UInt64
+      moved = 0
       group do |g|
         handles = [] of IyiTask(Tuple(UInt64, UInt64, UInt64))
         16.times do |i|
-          task = g.spawn_parallel do
+          task = g.spawn(unit: :new) do
             first = thread_here
             arrived.add(1_i64)
             held = __iyi_monotonic_ns
@@ -200,12 +230,13 @@
           ids = handle.value
           fail("placement: a parallel task answered #{ids}") unless ids.is_a?(Tuple(UInt64, UInt64, UInt64))
           fail("placement: a parallel task ran on the thread that spawned it") if ids[0] == main_thread
-          fail("placement: a started task changed threads across a park: #{ids[0]}, #{ids[1]}, #{ids[2]}") unless ids[0] == ids[1] && ids[1] == ids[2]
+          fail("placement: a parallel task resumed on the thread that spawned it: #{ids[0]}, #{ids[1]}, #{ids[2]}") if ids[1] == main_thread || ids[2] == main_thread
+          moved = moved + 1 unless ids[0] == ids[1] && ids[1] == ids[2]
           seen << ids[0] unless seen.includes?(ids[0])
         end
       end
       fail("placement: 16 parallel tasks all ran on one worker of #{IyiWorkers.count}") if seen.size < 2
-      puts "placement: 16 parallel tasks on #{seen.size} of #{IyiWorkers.count} workers, none on the spawning thread, none moved across a sleep and a channel"
+      puts "placement: 16 parallel tasks on #{seen.size} of #{IyiWorkers.count} workers, none on the spawning thread, #{moved} resumed on another worker across a sleep and a channel"
     end
   end
 
@@ -218,7 +249,7 @@
       group do |g|
         handles = [] of IyiTask(Int64)
         1000.times do |i|
-          task = g.spawn_parallel do
+          task = g.spawn(unit: :new) do
             tally.add(i.to_i64)
             i.to_i64
           end
@@ -247,7 +278,7 @@
       rounds = 2_000_000
       group do |g|
         tasks.times do
-          g.spawn_parallel do
+          g.spawn(unit: :new) do
             n = 0
             while n < rounds
               racer.bump
@@ -275,7 +306,7 @@
       expected = Array(Int32).new(producers, 0)
       group do |g|
         producers.times do |p|
-          g.spawn_parallel do
+          g.spawn(unit: :new) do
             i = 0
             while i < per
               fan.send({p, i})
@@ -299,7 +330,7 @@
       jobs = Channel(Int64).new
       results = Channel(Int64).new
       group do |g|
-        g.spawn_parallel do
+        g.spawn(unit: :new) do
           while true
             job = jobs.receive
             break unless job.is_a?(Int64)
@@ -321,7 +352,7 @@
       tally = Tally.new
       group do |g|
         4.times do
-          g.spawn_parallel do
+          g.spawn(unit: :new) do
             while true
               item = work.receive
               break unless item.is_a?(Int64)
@@ -343,20 +374,99 @@
     end
   end
 
+  # One task's claims on places as std/http's pooled `serve` holds them:
+  # a send claims one and parks while all are held, a `take_now` frees it.
+  def claim_places(places : Channel(Int32), served : Tally, rounds : Int32) : Int32
+    n = 0
+    while n < rounds
+      places.send(0)
+      served.add(1_i64)
+      places.take_now
+      n = n + 1
+    end
+    0
+  end
+
+  # `Channel#take_now` and `#put_now` from every worker at once, which
+  # take the scheduler's lock themselves (they were `select`'s lock-held
+  # halves, and std/http called them from workers with no lock). First
+  # places as the pooled `serve` holds them: a send claims one of two and
+  # parks while both are held, a `take_now` frees one and wakes the oldest
+  # claimant wherever it waits - eight parallel tasks and the main thread
+  # claiming beside them, so the wakes cross to a thread outside the pool
+  # as well. Then values `put_now` from six workers into one buffer, taken
+  # on the main thread, which parks whenever it is empty and is woken by
+  # whichever producer puts next: each value once, in each producer's
+  # order. A task's panic is read off its handle and named here.
+  def now_halves(watch : Int32) : Nil
+    watched("now", watch) do
+      places = Channel(Int32).new(2)
+      served = Tally.new
+      rounds = 2000
+      group do |g|
+        handles = [] of IyiTask(Int32)
+        8.times do
+          handles << g.spawn(unit: :new) { claim_places(places, served, rounds) }
+        end
+        handles << g.spawn { claim_places(places, served, rounds) }
+        handles.each do |handle|
+          answer = handle.value
+          fail("now: a task claiming places answered #{answer.is_a?(Panicked) ? answer.text : answer}") unless answer == 0
+        end
+      end
+      fail("now: #{served.count} of #{9 * rounds} places claimed and freed") unless served.count == 9_i64 * rounds
+      fail("now: a place is still held after every claim was freed") if places.receive_ready?
+
+      producers = 6
+      per = 20000
+      fan = Channel(Tuple(Int32, Int32)).new(producers * per)
+      expected = Array(Int32).new(producers, 0)
+      group do |g|
+        handles = [] of IyiTask(Int32)
+        producers.times do |p|
+          handles << g.spawn(unit: :new) do
+            i = 0
+            while i < per
+              fan.put_now({p, i})
+              i = i + 1
+            end
+            0
+          end
+        end
+        (producers * per).times do
+          got = fan.receive
+          fail("now: a receive of what put_now sent answered #{got}") unless got.is_a?(Tuple(Int32, Int32))
+          who = got[0]
+          fail("now: producer #{who} put #{got[1]} where #{expected[who]} was next") unless got[1] == expected[who]
+          expected[who] = expected[who] + 1
+        end
+        handles.each do |handle|
+          answer = handle.value
+          fail("now: a producer answered #{answer.is_a?(Panicked) ? answer.text : answer}") unless answer == 0
+        end
+      end
+      fail("now: values left in the channel after #{producers * per} were taken") if fan.receive_ready?
+      puts "now: #{9 * rounds} places claimed and freed with take_now from 8 workers and the main thread, #{producers * per} values put_now from #{producers} workers taken once each in each one's order"
+    end
+  end
+
   # A cancel reaches a task on another thread: asleep, parked on a
-  # channel, and still waiting in the pool to start.
+  # channel, and still waiting in the pool to start. The pool is filled
+  # first: with it grown to the work instead, a copy that delivers no
+  # cancel to another thread passed the step.
   def cancel(watch : Int32) : Nil
     watched("cancel", watch) do
+      fill_pool
       never = Channel(Int32).new
       started = __iyi_monotonic_ns
       slept = 0
       parked = 0
       pinned = 0
       group do |g|
-        sleeper = g.spawn_parallel { sleep(10000).is_a?(Cancelled) ? 1 : 0 }
-        waiter = g.spawn_parallel { never.receive.is_a?(Cancelled) ? 1 : 0 }
+        sleeper = g.spawn(unit: :new) { sleep(10000).is_a?(Cancelled) ? 1 : 0 }
+        waiter = g.spawn(unit: :new) { never.receive.is_a?(Cancelled) ? 1 : 0 }
         local = g.spawn { sleep(10000).is_a?(Cancelled) ? 1 : 0 }
-        g.spawn_parallel do
+        g.spawn(unit: :new) do
           sleep(100)
           Boom.new
         end
@@ -382,12 +492,12 @@
       waited = Tally.new
       go = Channel(Int32).new
       group do |g|
-        g.spawn_parallel do
+        g.spawn(unit: :new) do
           go.receive
           Boom.new
         end
         (IyiWorkers.count * 8).times do
-          g.spawn_parallel do
+          g.spawn(unit: :new) do
             waited.add(1_i64) unless sleep(1000).is_a?(Cancelled)
             0
           end
@@ -407,11 +517,11 @@
       fine = 0
       text = ""
       group do |g|
-        bad = g.spawn_parallel do
+        bad = g.spawn(unit: :new) do
           raise "parallel boom" unless thread_here == 0_u64
           1
         end
-        good = g.spawn_parallel { 2 }
+        good = g.spawn(unit: :new) { 2 }
         answer = bad.value
         text = answer.is_a?(Panicked) ? answer.text : "not a panic: #{answer}"
         other = good.value
@@ -438,11 +548,11 @@
       elsewhere = Tally.new
       waited_ms = 0_i64
       group do |g|
-        spawner = g.spawn_parallel do
+        spawner = g.spawn(unit: :new) do
           home = thread_here
           group do |inner|
             64.times do |i|
-              inner.spawn_parallel do
+              inner.spawn(unit: :new) do
                 spin(1_000_000_i64, (i + 7).to_u64)
                 elsewhere.add(1_i64) unless thread_here == home
                 tally.add(1_i64)
@@ -471,14 +581,18 @@
 
   # Collections stop the workers: tasks build lists that live only on
   # their fibers' stacks while every worker allocates, and every node is
-  # still there by checksum.
+  # still there by checksum. Each task then allocates a quarter of the
+  # budget in garbage, so the eight cross it twice whatever it stands at:
+  # the budget is floored at MIN_BUDGET for every registered thread
+  # (`IyiMark.next_budget`), and the lists' own 150,000 nodes each no
+  # longer crossed a pool's floor - no stop at all on four workers.
   def collector(watch : Int32) : Nil
     watched("collector", watch) do
       stops = IyiThread.stops
       group do |g|
         handles = [] of IyiTask(Int64)
         8.times do |t|
-          task = g.spawn_parallel do
+          task = g.spawn(unit: :new) do
             head = nil.as(Node?)
             want = 0_i64
             i = 0_i64
@@ -487,6 +601,12 @@
               head = Node.new(value, head)
               want = want &+ value
               i = i + 1_i64
+            end
+            garbage = 0_u64
+            quarter = IyiMark.budget // 4_u64
+            while garbage < quarter
+              Pointer(UInt8).malloc(64_u64).value = 1_u8
+              garbage = garbage + 64_u64
             end
             sleep(1)
             have = 0_i64
@@ -504,16 +624,16 @@
           fail("collector: task #{t}'s list lost #{lost} by checksum") unless lost == 0_i64
         end
       end
-      fail("collector: no collection stopped a thread while 8 parallel tasks allocated") if IyiThread.stops == stops
-      puts "collector: 8 parallel tasks kept lists of 150000 nodes through #{IyiThread.stops - stops} stops"
+      fail("collector: no collection stopped a thread while 8 parallel tasks allocated, #{IyiThread.program_threads} threads registered under a #{IyiMark.budget}-byte budget") if IyiThread.stops == stops
+      puts "collector: 8 parallel tasks kept lists of 150000 nodes through #{IyiThread.stops - stops} stops, #{IyiThread.program_threads} threads registered under a #{IyiMark.budget}-byte budget"
     end
   end
 
   # The typed group (III.4.9) answers parallel tasks' tuple.
   def typed : Tuple(Int32, String) | Panicked
     group do |g|
-      a = g.spawn_parallel { 6 * 7 }
-      b = g.spawn_parallel { "parallel" }
+      a = g.spawn(unit: :new) { 6 * 7 }
+      b = g.spawn(unit: :new) { "parallel" }
     end!
   end
 
@@ -525,7 +645,196 @@
     end
   end
 
-  STEPS = ["placement", "exactly_once", "race", "channels", "cancel", "panics", "steal", "collector", "typed"]
+  # Turns two tasks take on one word, for the wakes step: `park_on` and
+  # `wake_on` take its address, which only atomics reach, as std/mutex's
+  # word is.
+  @[Share(owns: true)]
+  class Turns
+    @word : Atomic(UInt64)
+
+    def initialize
+      @word = Atomic(UInt64).new(0_u64)
+    end
+
+    def word : Pointer(Atomic(UInt64))
+      pointerof(@word)
+    end
+  end
+
+  # Receives from either channel until one is closed, with a timeout arm
+  # beside them, so three wakers race for each park: a send on *a*, a
+  # send on *b*, the deadline.
+  def select_both(a : Channel(Int64), b : Channel(Int64), got : Tally) : Int32
+    while true
+      closed = false
+      select
+      when x = a.receive
+        if x.is_a?(Int64)
+          got.add(x)
+        else
+          closed = true
+        end
+      when y = b.receive
+        if y.is_a?(Int64)
+          got.add(y)
+        else
+          closed = true
+        end
+      when timeout(1)
+        closed = false
+      end
+      return 0 if closed
+    end
+    0
+  end
+
+  def send_run(channel : Channel(Int64), first : Int64, count : Int64) : Int32
+    i = 0_i64
+    while i < count
+      return 1 unless channel.send(first + i).nil?
+      i = i + 1_i64
+    end
+    0
+  end
+
+  # A child parked on a channel nobody sends on, cancelled the moment it
+  # has started, so the cancel lands as it parks; *ended* counts it if
+  # its receive answered `Cancelled`.
+  def cancel_as_parked(ended : Tally) : Nil
+    started = Tally.new
+    never = Channel(Int32).new
+    group do |inner|
+      inner.spawn(unit: :new) do
+        started.add(1_i64)
+        ended.add(1_i64) if never.receive.is_a?(Cancelled)
+        0
+      end
+      while started.count == 0_i64
+        IyiThread.spin_pause
+      end
+      inner.cancel_children
+    end
+  end
+
+  # The parked side of the turns: odd turns are its own, and it parks on
+  # the word whenever the turn is not.
+  def parked_turns(turns : Turns, rounds : Int64) : Int32
+    word = turns.word
+    done = 0_i64
+    while done < rounds
+      seen = word.value.get
+      if seen % 2_u64 == 0_u64
+        IyiScheduler.park_on(word, seen, false)
+        next
+      end
+      word.value.set(seen + 1_u64)
+      IyiScheduler.wake_on(word, 1)
+      done = done + 1_i64
+    end
+    0
+  end
+
+  # The other side, on the main thread, which is no worker: it never
+  # parks, but looks at the word until its turn comes, so it takes the
+  # turn the moment the parked side hands it over - while that side looks
+  # at the word again and parks - and its wake lands between a park's
+  # look and its link as often as a race can make it. The main thread's
+  # watchdog cannot run while it looks, so it names a turn that never
+  # comes itself. The copy that looks outside the lock
+  # (bench/parallel_exercise.sh) is caught here in 10 runs of 10 on Linux
+  # x86_64; with both sides parked tasks it was caught in 1 run of 10, and
+  # with both looking 32 times before they parked, in none of 10.
+  def spun_turns(turns : Turns, rounds : Int64, watch : Int32) : Nil
+    word = turns.word
+    done = 0_i64
+    while done < rounds
+      seen = word.value.get
+      if seen % 2_u64 == 1_u64
+        started = __iyi_monotonic_ns
+        while word.value.get == seen
+          IyiThread.spin_pause
+          fail("wakes, words: turn #{seen + 1_u64} was not taken in #{watch} ms, so a wake on the word was lost") if elapsed_ms(started) >= watch.to_i64
+        end
+        next
+      end
+      word.value.set(seen + 1_u64)
+      IyiScheduler.wake_on(word, 1)
+      done = done + 1_i64
+    end
+  end
+
+  # Wakes that race, now that each channel and each list `park_on` waits
+  # in has a lock of its own and a parked fiber's wake goes to whichever
+  # waker claims it (`IyiFiber#claim`). Selects parked on two channels
+  # and a deadline at once, sent to from four workers: each value
+  # arrives exactly once. Cancels landing as tasks park on a channel:
+  # each task ends cancelled, which a cancel between the park's look at
+  # its flag and its wake word does only if the park looks again
+  # (`IyiScheduler.suspend`). Tasks handing turns through a word with
+  # `park_on` and `wake_on`: every turn is taken, which a wake between
+  # the look at the word and the link in its list does only if the look
+  # is under the list's lock. A lost wake is a hang the watchdogs name;
+  # bench/parallel_exercise.sh breaks each of the three.
+  def wakes(watch : Int32) : Nil
+    per = 20000_i64
+    want = 0_i64
+    got = Tally.new
+    watched("wakes, selects", watch) do
+      a = Channel(Int64).new
+      b = Channel(Int64).new
+      group do |g|
+        2.times { g.spawn(unit: :new) { select_both(a, b, got) } }
+        senders = [] of IyiTask(Int32)
+        4.times do |k|
+          channel = k % 2 == 0 ? a : b
+          first = k.to_i64 * per
+          senders << g.spawn(unit: :new) { send_run(channel, first, per) }
+        end
+        senders.each do |sender|
+          answer = sender.value
+          fail("wakes: a sender answered #{answer.is_a?(Panicked) ? answer.text : answer}") unless answer == 0
+        end
+        a.close
+        b.close
+      end
+      want = 4_i64 * per * (4_i64 * per - 1_i64) // 2_i64
+      fail("wakes: selects over two channels received #{got.count} of #{4_i64 * per} values sent, summing #{got.sum} for #{want}") unless got.count == 4_i64 * per && got.sum == want
+    end
+
+    # Half the workers spin waiting for their child to start, so the
+    # other half are there to start it: four spinners on four workers
+    # left each child to wait for a preemption.
+    tasks = IyiWorkers.count // 2 < 1 ? 1 : IyiWorkers.count // 2
+    rounds = 2000
+    ended = Tally.new
+    watched("wakes, cancels", watch) do
+      group do |g|
+        tasks.times do
+          g.spawn(unit: :new) do
+            round = 0
+            while round < rounds
+              cancel_as_parked(ended)
+              round = round + 1
+            end
+            0
+          end
+        end
+      end
+      fail("wakes: #{ended.count} of #{tasks * rounds} tasks cancelled as they parked answered Cancelled") unless ended.count == tasks.to_i64 * rounds
+    end
+
+    turns_each = 20000_i64
+    turns = Turns.new
+    group do |g|
+      parker = g.spawn(unit: :new) { parked_turns(turns, turns_each) }
+      spun_turns(turns, turns_each, watch)
+      answer = parker.value
+      fail("wakes: the parked side answered #{answer.is_a?(Panicked) ? answer.text : answer}") unless answer == 0
+    end
+    puts "wakes: #{got.count} values through selects over two channels and a deadline, each once; #{ended.count} tasks cancelled as they parked; #{turns_each * 2_i64} turns handed through park_on and wake_on"
+  end
+
+  STEPS = ["placement", "exactly_once", "race", "channels", "now", "cancel", "panics", "steal", "collector", "typed", "wakes"]
 
   arguments = Program.args
   if arguments.size == 4 && arguments[0] == "speed"
@@ -549,11 +858,13 @@
       when "exactly_once" then exactly_once(watch)
       when "race"         then race(watch)
       when "channels"     then channels(watch)
+      when "now"          then now_halves(watch)
       when "cancel"       then cancel(watch)
       when "panics"       then panics(watch)
       when "steal"        then steal(watch)
       when "collector"    then collector(watch)
       when "typed"        then typed_step(watch)
+      when "wakes"        then wakes(watch)
       end
     end
     puts "parallel exercise: every property held on #{IyiWorkers.count} workers"

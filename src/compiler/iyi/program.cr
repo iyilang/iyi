@@ -109,6 +109,10 @@ module Iyi
     # any other module's, because that order is over modules and not over text.
     getter iyi_module_initialiser_source = {} of String => String
 
+    # iyi: where the nodes of each module's initialiser were written, beside
+    # `iyi_module_initialiser_source` (`IyiMod::SourcePosition`).
+    getter iyi_module_initialiser_positions = {} of String => Array(IyiMod::SourcePosition)
+
     # iyi: which modules each file imports, by absolute filename (SPEC.md
     # III.5 rule 2). `iyi_module_inits` is one order the DAG allows; these are
     # the edges, which is what makes every *other* order it allows computable.
@@ -171,7 +175,7 @@ module Iyi
       end
       return unless unit.is_a?(NamedType)
 
-      unit_file = unit.as?(ModuleType).try(&.iyi_unit_file) || unit.locations.try(&.first?).try(&.filename).as?(String)
+      unit_file = unit.as?(ModuleType).try(&.iyi_unit_file) || unit.locations.try(&.first?).try(&.read_from).as?(String)
       return unless unit_file && iyi_imported_files.includes?(unit_file)
 
       # Code a macro expanded was written in the file that expanded it, the
@@ -181,15 +185,18 @@ module Iyi
       # beside `std/bool`, `def self.remove_directory : Bool` there was
       # "must return Std::Bool but it is returning Bool", while the same
       # line outside the `{% if %}` meant the type.
-      writer = location.try(&.original_filename)
+      #
+      # The file it was read from, which is what the edges are keyed on: a
+      # mono body or initialiser read from an artifact is located in its
+      # module's source (`IyiMod::SourcePosition`), and asked of that path the
+      # walk found no edges, so `Tuple(DnsMessage, String)` in a body
+      # `std/socket` ships met `Std::Tuple`, a module std/socket never
+      # imports: "Std::Tuple is not a generic type".
+      writer = location.try(&.original_read_from)
       return unless writer
       return if writer == unit_file
       # Only writers this build read as files: the entry and everything
-      # imported (artifact declaration replays included — their path is
-      # an edge value). A mono body or initialiser replayed out of an
-      # artifact carries its *far machine's* source path; it was checked
-      # when its own module built, and refusing it here would sanction
-      # code nobody on this machine wrote.
+      # imported (artifact replays included — their path is an edge value).
       return unless writer == filename || iyi_imported_files.includes?(writer)
       return if iyi_reachable_files(writer).includes?(unit_file)
 
@@ -379,6 +386,47 @@ module Iyi
     # tried after the entry's directory.
     property iyi_header_root : String? = nil
 
+    # iyi: the directory the program's own module paths are resolved from:
+    # the project root a tool set, else the entry file's.
+    def iyi_import_root : String?
+      iyi_project_root || filename.try { |name| File.dirname(name) }
+    end
+
+    # iyi: the directories an import's path is resolved from, in the order
+    # they are tried: the import root, then the root the entry's own header
+    # names (IV.6 read backwards: that is how `iyi check app/greeter.iyi` — or
+    # a migrated module built on its own — resolves `import app/formal` the
+    # way a build from the project root would; after the entry's directory,
+    # never instead of it), then `IYI_PATH`. Inside a package only `IYI_PATH`
+    # is asked: what reaches there from a package is iyi's standard library
+    # (`SemanticVisitor#resolve_package`), and a module of the same name in
+    # the consuming project is not it.
+    def iyi_import_roots(inside_package : Bool = false) : Array(String)
+      roots = [] of String
+      unless inside_package
+        iyi_import_root.try { |root| roots << root }
+        iyi_header_root.try { |root| roots << root }
+      end
+      roots.concat(iyi_path.entries)
+    end
+
+    # iyi: the files `import a/b` may be, in the order they are tried: each
+    # root's `a/b.iyi` and then its `a/b.cr`, so an iyi module can shadow a
+    # `.cr` file of the same name during the transition. Each in the
+    # platform's spelling (`Iyi.native_path`): the module path's `/` went
+    # into the file name as it was, and on Windows every place an imported
+    # file is named - a diagnostic, `check -f json`, `fix --json` - named
+    # `C:\proj\app/deep/util.iyi`, which a tool matching paths does not match
+    # to `C:\proj\app\deep\util.iyi`.
+    def iyi_import_candidates(path : String, inside_package : Bool) : Array(String)
+      candidates = [] of String
+      iyi_import_roots(inside_package).each do |root|
+        candidates << Iyi.native_path(File.join(root, "#{path}.iyi"))
+        candidates << Iyi.native_path(File.join(root, "#{path}.cr"))
+      end
+      candidates
+    end
+
     # iyi: whether this build is writing artifacts as well as reading them
     # (SPEC.md IV.3). Set by the compiler from `--emit-iyimod`.
     #
@@ -527,6 +575,72 @@ module Iyi
     # half of that rule answers instead.
     property iyi_prelude_dir : String? = nil
 
+    # iyi: whether code the cleanup kept calls `IyiWorkers.start` - a
+    # `spawn(unit: :new)`, or a `spawn` it found eligible (SPEC.md III.4.15) -
+    # which is what makes a program's loops check for preemption
+    # (`CodeGenVisitor#iyi_preempt_on?`). Asked of the kept code rather
+    # than of the typed defs: every program that spawns types the pool's
+    # path beside `spawn`'s, for a call the cleanup may never point at it.
+    property? iyi_pool_reached : Bool = false
+
+    # iyi: whether code written outside the prelude calls a C function — a
+    # `lib` fun that is neither an LLVM intrinsic nor a variable. Set where
+    # such a call is typed (`Call#recalculate_lib_call`).
+    #
+    # It decides how a Linux thread is made (`IyiThread.program_calls_c?`).
+    # The main thread is libc's, started by `__libc_start_main`; a raw
+    # `clone` gets a TLS block made from the executable's PT_TLS and no
+    # thread control block, so C that reaches its own thread state there —
+    # `pthread_self` answered 0, `strerror` faulted, `errno` was written
+    # outside the block (issue #158) — runs on nothing. A program that calls
+    # C has libc's thread names already; one that does not keeps the floor.
+    property? iyi_calls_c = false
+
+    # Whether the program runs C: its own calls, or a `lib` an imported
+    # artifact's object code calls into, which this build never typed.
+    def iyi_runs_c? : Bool
+      @iyi_calls_c || iyi_artifact_calls_c?(@types)
+    end
+
+    private def iyi_artifact_calls_c?(types) : Bool
+      return false if iyi_artifact_libs.empty? || types.nil?
+      types.each_value.any? { |type| iyi_artifact_lib_calls_c?(type) || iyi_artifact_calls_c?(type.types?) }
+    end
+
+    private def iyi_artifact_lib_calls_c?(type : Type) : Bool
+      return false unless type.is_a?(LibType) && iyi_artifact_libs.includes?(type.to_s)
+      defs = type.defs
+      return false unless defs
+      defs.each_value.any? { |overloads| overloads.any? { |item| iyi_c_function?(item.def) } }
+    end
+
+    # A `lib` fun whose machine code is C's: not a variable, and not an LLVM
+    # intrinsic, which is an instruction rather than a call.
+    def iyi_c_function?(target : Def) : Bool
+      target.is_a?(External) && !target.external_var? && !target.real_name.starts_with?("llvm.")
+    end
+
+    # Whether *location* is in one of the prelude's own files, following a
+    # macro expansion back to its source.
+    def iyi_prelude_location?(location : Location?) : Bool
+      return false unless dir = @iyi_prelude_dir
+      prefix = "#{::Path[dir].to_posix}/"
+      !!location.try(&.expanded_location).try(&.read_from.as?(String)).try do |filename|
+        ::Path[filename].to_posix.to_s.starts_with?(prefix)
+      end
+    end
+
+    # iyi: the global of the pool's preemption word, `IyiWorkers::preempt`,
+    # once codegen has marked a loop's back-edge for the check
+    # (`CodeGenVisitor#iyi_back_edge`); nil in a program with no pool. The
+    # checks go in after optimisation (`PreemptChecks`).
+    property iyi_preempt_flag : String? = nil
+
+    # iyi: the name of every function codegen made whose loops check, which
+    # is where a call cycle gets a check at its entry too
+    # (`PreemptChecks.mark_recursion`).
+    getter iyi_preempt_funs = [] of String
+
     # iyi: the types each object-code unit refers to a type id of, by unit name
     # (SPEC.md IV.1g).
     #
@@ -602,12 +716,12 @@ module Iyi
     # iyi: the witness types an imported artifact's object code refers to a
     # type id of and this build does not have, by name.
     #
-    # Definition-site typing (R-2c) gives a trait a witness type in the build
-    # that typed a def restricted to it, and the witness implements the trait,
-    # so every dispatch over the trait that build compiled tests for it. No
-    # value ever has that type - its probe sits under `if false` - so the
-    # consumer defines the id as one no type has rather than refusing the
-    # module over a type that exists only to be typed against.
+    # Definition-site typing (R-2c) adds witnesses to a trait's implementers,
+    # which can change both dispatch and trait-valued field/call layouts.
+    # Consumers restore supported witnesses as real types before typing their
+    # own bodies, preserving the producer's representation. These names are
+    # the fallback for witnesses that cannot be restored: codegen defines an
+    # unmatchable id for them. Compound matches must resolve to real types.
     getter iyi_artifact_phantom_types = Set(String).new
 
     # iyi: one name an imported artifact's object code refers to, waiting for
@@ -697,7 +811,7 @@ module Iyi
     #
     # Every rule that tried to derive this from the shape of a def was wrong on
     # one side or the other: guessing "the artifact has it" left
-    # `Kemal::FilterHandler@Reference::new` undefined, guessing the reverse made
+    # `Kemal::FilterHandler^Reference::new` undefined, guessing the reverse made
     # it a duplicate, and compiling a private copy in the consumer put the
     # definition where `_main` could not see it. So the producer says what it
     # emitted.
@@ -889,6 +1003,10 @@ module Iyi
     # code in `ObjectCode`.
     getter iyi_mono_bodies = {} of String => Hash(String, String)
 
+    # iyi: where the nodes of each body in `iyi_mono_bodies` were written, by
+    # the same two keys (`IyiMod::SourcePosition`).
+    getter iyi_mono_body_positions = {} of String => Hash(String, Array(IyiMod::SourcePosition))
+
     # iyi: the defs whose bodies travel because their machine code enumerates an
     # open type's members, by the location each was written at (SPEC.md III.6).
     #
@@ -941,7 +1059,7 @@ module Iyi
     # scope of the question: a type id is resolved from a definition in *this
     # program*, not from whatever had been read by the time one artifact was
     # opened. See `IyiArtifactRef`.
-    def resolve_iyi_artifact_refs : Nil
+    def resolve_iyi_artifact_refs(defer_witness_matches : Bool = false) : Nil
       refs = @iyi_artifact_refs
       return if refs.empty?
       @iyi_artifact_refs = [] of IyiArtifactRef
@@ -980,6 +1098,13 @@ module Iyi
         # `iyi_artifact_phantom_types`.
         if !ref.match && ref.name.starts_with?(DefinitionTyping::WITNESS_PREFIX)
           iyi_artifact_phantom_types << ref.name
+        elsif ref.match && defer_witness_matches && ref.name.includes?(DefinitionTyping::WITNESS_PREFIX)
+          # A carried match can name a witness as a member of a union or a
+          # generic argument. Its declaration is restored by definition typing
+          # after the ordinary imported declarations have been processed.
+          # Keep the full reference, then resolve it strictly after restoration;
+          # treating the union as a phantom would lose its real runtime members.
+          @iyi_artifact_refs << ref
         elsif ref.match
           ref.node.raise <<-MESSAGE
             "#{ref.module_name}" matches against `#{ref.name}`, and this build cannot name it
@@ -1374,6 +1499,25 @@ module Iyi
       # every type it found shareable, and a consumer reads that and never
       # recomputes: the bodies that would tell it are not in the artifact.
       types["Share"] = @share_annotation = AnnotationType.new self, self, "Share"
+      # iyi: `@[NoPreempt]` on a def keeps the back-edge check out of its
+      # body and of the blocks inlined into it (SPEC.md III.4.13, part 9):
+      # a loop there is never where a parallel task gives its worker up.
+      types["NoPreempt"] = @no_preempt_annotation = AnnotationType.new self, self, "NoPreempt"
+      # iyi: `@[SafeReach("why")]` on a constant or a class variable is the
+      # program's word that every thread may reach it through the defs a
+      # shared block calls - set once and then only read, or guarded some
+      # other way the type does not show - and the reason is the claim,
+      # written where the state is. It quiets the warning that walk gives
+      # (SPEC.md III.4.4), never the refusal of a block that names it itself.
+      types["SafeReach"] = @safe_reach_annotation = AnnotationType.new self, self, "SafeReach"
+      # iyi: `@[UnsafeReach("why")]` is the unchecked claim, kept for a module
+      # marked `@[Unsafe]` (SPEC.md III.4.4, III.13): what `ReachProof` cannot
+      # prove there is said to be unsafe by name.
+      types["UnsafeReach"] = @unsafe_reach_annotation = AnnotationType.new self, self, "UnsafeReach"
+      # iyi: `@[Unsafe("why")]` first in a file marks the module as one that
+      # handles raw memory, and `@[Unsafe(call: "what")]` on a def is the
+      # promise its caller keeps (SPEC.md III.13, `UnsafeCheck`).
+      types["Unsafe"] = @unsafe_annotation = AnnotationType.new self, self, "Unsafe"
 
       # iyi: the marker that makes a union member an error member (SPEC.md
       # III.1.1). Created here rather than declared in the prelude because the
@@ -1399,6 +1543,24 @@ module Iyi
     # warnings with this program.
     def new_parser(source : String, var_scopes = [Set(String).new])
       Parser.new(source, string_pool, var_scopes, warnings)
+    end
+
+    # iyi: how many threads parse ahead of the top-level pass (`ParseAhead`);
+    # below 2, none do. Set by the compiler from `--threads`.
+    property parse_ahead_threads = 0
+
+    # iyi: the parse ahead of the top-level pass running now, if one is.
+    property parse_ahead : ParseAhead? = nil
+
+    # iyi: *filename*'s nodes, read as *source*, with *parser* set up for it:
+    # parsed ahead when that was the same parse (`ParseAhead#parse`), else
+    # here.
+    def parse_file(parser : Parser, filename : String, source : String) : ASTNode
+      if ahead = @parse_ahead
+        ahead.parse(parser, filename, source)
+      else
+        parser.parse
+      end
     end
 
     # Returns a `LiteralExpander` useful to expand literal like arrays and hashes
@@ -1470,6 +1632,13 @@ module Iyi
         MD
       define_crystal_string_constant "TARGET_TRIPLE", codegen_target.to_s, <<-MD
         The LLVM target triple of the target system (the machine that the compiler builds for).
+        MD
+      # iyi: the program's own modules marked `@[Unsafe]`, which the runtime's
+      # memory-fault message names (SPEC.md III.13). Filled in once the unsafe
+      # check has read the program (`UnsafeCheck#run`).
+      @iyi_unsafe_modules_literal = literal = StringLiteral.new("").tap(&.set_type(string))
+      define_crystal_constant "IYI_UNSAFE_MODULES", literal, <<-MD
+        The modules of this program, std's and the runtime's aside, marked `@[Unsafe]`.
         MD
     end
 
@@ -1707,7 +1876,7 @@ module Iyi
                      always_inline_annotation naked_annotation returns_twice_annotation
                      raises_annotation primitive_annotation call_convention_annotation
                      flags_annotation link_annotation extern_annotation deprecated_annotation experimental_annotation
-                     share_annotation error_trait) %}
+                     share_annotation no_preempt_annotation safe_reach_annotation unsafe_reach_annotation unsafe_annotation error_trait) %}
       def {{name.id}}
         @{{name.id}}.not_nil!
       end
@@ -1808,7 +1977,7 @@ module Iyi
     # the prefix `__temp_cd6ae5dd_*`. This localizes the impact on incremental
     # object file generation to all types defined or reopened in that same file.
     def new_temp_var_name(node : ASTNode) : String
-      if filename = node.location.try(&.original_filename)
+      if filename = node.location.try(&.original_read_from)
         # the parser creates `Location`s with an empty filename by default,
         # assume they are equivalent to `nil` to make compiler specs less noisy
         unless filename == ""
@@ -1882,7 +2051,7 @@ module Iyi
     def check_private(node)
       return nil unless node.visibility.private?
 
-      filename = node.location.try &.original_filename
+      filename = node.location.try &.original_read_from
       return nil unless filename
 
       file_module(filename)

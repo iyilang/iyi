@@ -1,3 +1,5 @@
+require "./process_cost"
+
 module Iyi
   # Fine-grained profiling, gated behind IYI_PROF=1.
   # Temporary instrumentation for the compile-speed investigation.
@@ -168,11 +170,12 @@ module Iyi
       print_stats
       print_progress
 
+      before = cost if @stats
       time_start = Time.instant
       retval = yield
       time_taken = time_start.elapsed
 
-      print_stats(time_taken)
+      print_stats(time_taken, before)
       print_progress
 
       @current_stage += 1
@@ -188,17 +191,56 @@ module Iyi
       print "\r"
     end
 
-    def print_stats(time_taken = nil)
+    # What `-s` prints beside a phase's time: the process's resident set when
+    # the phase ended, and the processor seconds and page faults the phase
+    # itself spent (`ProcessCost`, `Process.times`).
+    #
+    # It printed `GC.stats.heap_size` until #144, which is zero in a compiler
+    # built `-Dgc_none` and so said `( 0.00MB)` after every phase. The heap is
+    # not what it reads now, so the column says which number it is, and a
+    # figure the platform cannot give is left out rather than printed as zero.
+    #
+    # Processor time is user plus system across every thread, so a phase that
+    # codegens on several threads can spend more of it than its wall time, and
+    # one that waits on a child (a macro run, the linker) less. A phase whose
+    # processor time is close to a fast run's and whose wall time is not was
+    # kept off the processor or waiting on a child; one whose faults went up
+    # paid for memory. That is the question #143 left open.
+    private record Cost, cpu_seconds : Float64?, faults : Int64?
+
+    private def cost : Cost
+      {% if flag?(:wasm32) %}
+        Cost.new(nil, ProcessCost.page_faults)
+      {% else %}
+        times = Process.times
+        Cost.new(times.utime + times.stime, ProcessCost.page_faults)
+      {% end %}
+    end
+
+    def print_stats(time_taken = nil, before : Cost? = nil)
       return unless @stats
 
       justified_name = "#{current_stage_name}:".ljust(STAGE_PADDING)
       if time_taken
-        memory_usage_mb = GC.stats.heap_size / 1024.0 / 1024.0
-        memory_usage_str = " (%7.2fMB)" % {memory_usage_mb}
-        puts "#{justified_name} #{time_taken}#{memory_usage_str}"
+        puts "#{justified_name} #{time_taken}#{cost_column(before)}"
       else
         print "#{justified_name}\r" unless @progress
       end
+    end
+
+    private def cost_column(before : Cost?) : String
+      after = cost
+      parts = [] of String
+      if resident = ProcessCost.resident_bytes
+        parts << "%8.2fMB rss" % {resident / 1024.0 / 1024.0}
+      end
+      if (cpu_now = after.cpu_seconds) && (cpu_was = before.try(&.cpu_seconds))
+        parts << "%6.2fs cpu" % {cpu_now - cpu_was}
+      end
+      if (faults_now = after.faults) && (faults_was = before.try(&.faults))
+        parts << "%8d page faults" % {faults_now - faults_was}
+      end
+      parts.empty? ? "" : " (#{parts.join(", ")})"
     end
 
     def print_progress

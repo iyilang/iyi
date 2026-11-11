@@ -33,6 +33,7 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO/bench/darwin_frames.sh"
 
 # The search path is a list, and the byte between its entries is the
 # platform's: `;` where a drive letter already owns the colon.
@@ -853,7 +854,8 @@ echo
 echo "== the same answers from artifacts"
 # Built once with --emit-iyimod and again from those artifacts: a method
 # whose body the artifact keeps as text must read back as it was written.
-# The timing lines are left out of the comparison, being times.
+# The timing lines are left out of the comparison, being times, and so are
+# darwin's frames under a task's panic (bench/darwin_frames.sh).
 mkdir -p "$WORK/art"
 if ! (cd "$WORK/art" && "$IYI" build --emit-iyimod mods -o from-source "$REPO/bench/std_big_exercise.iyi") >"$WORK/art.log" 2>&1; then
   echo "  FAIL: the build that writes the artifacts: $(tail -2 "$WORK/art.log")"
@@ -862,8 +864,8 @@ elif ! (cd "$WORK/art" && "$IYI" build --use-iyimod mods -o from-artifact "$REPO
   echo "  FAIL: the build from the artifacts: $(grep -m1 -A2 'In mods' "$WORK/art.log" | tr '\n' ' ')"
   status=1
 else
-  "$WORK/art/from-source" 2>&1 | grep -v '^powtime: ' >"$WORK/art/source.out"
-  "$WORK/art/from-artifact" 2>&1 | grep -v '^powtime: ' >"$WORK/art/artifact.out"
+  "$WORK/art/from-source" 2>&1 | grep -v '^powtime: ' | without_frames >"$WORK/art/source.out"
+  "$WORK/art/from-artifact" 2>&1 | grep -v '^powtime: ' | without_frames >"$WORK/art/artifact.out"
   if cmp -s "$WORK/art/source.out" "$WORK/art/artifact.out" && grep -q "ALL CHECKS PASSED" "$WORK/art/artifact.out"; then
     echo "  built from artifacts, the exercise prints what it prints from source"
   else

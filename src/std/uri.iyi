@@ -21,6 +21,7 @@
 # DNS looks up and an HTTP `Host` header carries, an internationalized
 # name in its `xn--` labels by `std/idna`.
 
+@[Unsafe("URIs are parsed and escaped by reading the bytes of their strings directly")]
 module std/uri
 
 import std/text

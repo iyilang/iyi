@@ -52,6 +52,7 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO/bench/end_process.sh"
 # The compiler, overridable: `bin/iyi` is a POSIX shell wrapper, and on
 # Windows the caller is the only one who knows where the real binary is.
 IYI="${IYI:-$REPO/bin/iyi}"
@@ -134,6 +135,34 @@ if "$IYI" build --emit-iyimod mods -o user user.iyi > build.log 2>&1 && [ "$(./u
 else
   echo "  the good path does not hold"
   sed -n '1,8p' build.log
+  status=1
+fi
+# `-s` prints, beside each phase's time, what the process holds resident.
+# It printed the collector's heap there, which a compiler built `-Dgc_none`
+# does not have, so every phase read `( 0.00MB)` (#144). Every phase line
+# names its figure `rss`, none is under 1 MB, and the largest is a compiler
+# that has typed the prelude: tens to hundreds of MB, not zero and not a
+# count of bytes read as megabytes. A phase's name is printed, then
+# returned over with `\r` before its time follows, hence the `tr`.
+if "$IYI" build -s -o user-stats user.iyi > stats.log 2>&1 &&
+   tr '\r' '\n' < stats.log | awk '
+     /^[A-Z][^:]*: +[0-9][0-9]:[0-9][0-9]:[0-9.]+ / {
+       phases++
+       if (match($0, /\( *[0-9.]+MB rss/)) {
+         mb = substr($0, RSTART + 1, RLENGTH - 7) + 0
+         if (mb < 1) low++
+         if (mb > most) most = mb
+       } else unnamed++
+     }
+     END {
+       printf "  %d phases, largest %.2f MB rss\n", phases, most > "/dev/stderr"
+       exit !(phases >= 5 && unnamed == 0 && low == 0 && most >= 20 && most < 65536)
+     }' 2> stats.verdict; then
+  echo "  -s names each phase's resident set:$(sed 's/^ *//' stats.verdict | sed 's/^/ /')"
+else
+  echo "  -s does not name each phase's resident set:"
+  cat stats.verdict 2>/dev/null
+  tr '\r' '\n' < stats.log | grep -m4 -E '^[A-Z][^:]*: +[0-9]' | sed 's/^/    /'
   status=1
 fi
 cp mods/app/lib.iyimod lib.good
@@ -414,7 +443,7 @@ refuses "bytes that are not text" "not a valid iyi source file" -- "$IYI" run bi
 # invalid memory access" about a language with no null to dereference.
 printf 'module deep\n\ndef down(n : Int32) : Int32\n  down(n + 1) + 1\nend\n\nputs down(0)\n' > deep.iyi
 refuses "a program that ran out of stack" "stack overflow" -- "$IYI" run deep.iyi
-printf 'module wild\n\np = Pointer(Int32).new(16_u64)\nputs p.value\n' > wild.iyi
+printf '@[Unsafe("the program reads through a pointer to address 16 on purpose, the kill iyi run must explain")]\nmodule wild\n\np = Pointer(Int32).new(16_u64)\nputs p.value\n' > wild.iyi
 refuses "a program the kernel killed" "died of a memory fault" -- "$IYI" run wild.iyi
 # A generic struct holding a trait it implements, `Box(Show)` beside `impl
 # Show for Box(T) forall T`: the recursive-struct check never met
@@ -591,7 +620,7 @@ refuses "two traits' defaults answering one method" "and impl Column for User an
 # "Missing hash key: Wt (KeyError)" and a stack trace. A trait's
 # `initialize` is a default method like any other now, and an implementer
 # is made with it.
-printf 'pub trait Wt\n  def initialize(x : Int32)\n  end\nend\n\nstruct B\n  getter v : Int32 = 3\nend\n\nimpl Wt for B\nend\n\nlib LibQ\n  struct CS\n    a : Int32\n  end\nend\n\npub trait Tq\nend\n\nimpl Tq for LibQ::CS\n  def initialize\n  end\nend\n\nputs B.new(1).v\nputs LibQ::CS.new.a\n' > traitinit.iyi
+printf '@[Unsafe("an impl gives an initialize to a struct declared inside a lib, the C layout the check once crashed on")]\npub trait Wt\n  def initialize(x : Int32)\n  end\nend\n\nstruct B\n  getter v : Int32 = 3\nend\n\nimpl Wt for B\nend\n\nlib LibQ\n  struct CS\n    a : Int32\n  end\nend\n\npub trait Tq\nend\n\nimpl Tq for LibQ::CS\n  def initialize\n  end\nend\n\nputs B.new(1).v\nputs LibQ::CS.new.a\n' > traitinit.iyi
 if "$IYI" run traitinit.iyi > traitinit.out 2>&1 && [ "$(tr -d '\r' < traitinit.out)" = "$(printf '3\n0')" ]; then
   echo "  an initialize in a trait and in an impl for a lib struct makes the value"
 else
@@ -604,15 +633,106 @@ fi
 mkdir -p "$WORK/runcache"
 : > "$WORK/runcache/iyi-run-main-99999.tmp.exe"
 : > "$WORK/runcache/iyi-run-main-99998.tmp.exe"
-touch -d '2 hours ago' "$WORK/runcache/iyi-run-main-99999.tmp.exe"
-IYI_CACHE_DIR="$WORK/runcache" "$IYI" run twin_b/main.iyi > sweep.out 2>&1
-if [ -e "$WORK/runcache/iyi-run-main-99999.tmp.exe" ]; then
-  echo "  a runner's leftover from two hours ago is still in the cache"; status=1
-elif [ ! -e "$WORK/runcache/iyi-run-main-99998.tmp.exe" ]; then
-  echo "  a runner's leftover from just now was taken"; status=1
+# Two hours back in POSIX's own terms: `touch -d '2 hours ago'` is GNU's,
+# and BSD touch refused it, so on a Mac the leftover stayed fresh and this
+# read "still in the cache" of a runner that was right. The stamp is the
+# clock two hours west of UTC, set as UTC; `find -mmin` then holds that the
+# file is between one and three hours old, so a stamp that did not take
+# says so instead of passing or failing for the wrong reason.
+stale_stamp=$(TZ=UTC2 date +%Y%m%d%H%M.%S)
+TZ=UTC0 touch -t "$stale_stamp" "$WORK/runcache/iyi-run-main-99999.tmp.exe"
+if [ -z "$(find "$WORK/runcache/iyi-run-main-99999.tmp.exe" -mmin +60 -mmin -180)" ]; then
+  echo "  a leftover could not be dated two hours back (touch -t $stale_stamp)"; status=1
 else
-  echo "  an old runner's leftover is taken, a fresh one kept"
+  IYI_CACHE_DIR="$WORK/runcache" "$IYI" run twin_b/main.iyi > sweep.out 2>&1
+  if [ -e "$WORK/runcache/iyi-run-main-99999.tmp.exe" ]; then
+    echo "  a runner's leftover from two hours ago is still in the cache"; status=1
+  elif [ ! -e "$WORK/runcache/iyi-run-main-99998.tmp.exe" ]; then
+    echo "  a runner's leftover from just now was taken"; status=1
+  else
+    echo "  an old runner's leftover is taken, a fresh one kept"
+  fi
 fi
+# A runner's own program held for a moment after it exits. Windows refused
+# the delete - "being used by another process" - and the refusal, raised
+# out of the runner's cleanup, was the run's verdict: `std_http_latency.iyi`
+# printed ALL CHECKS PASSED and `iyi run` exited 1 (CI job 130381353157).
+# A reader here holds the program until 300 ms after it exits, which the
+# runner waits out and deletes, and then for 5 s, past the two seconds it
+# waits: the program's own exit is the verdict, and the file is the sweep's
+# above. With a one-second wait the 300 ms case failed once on a CI runner,
+# the exit right and the file kept (CI job 130589942769); whether the reader
+# let go late or the file stayed refused after it did was not recorded, so
+# a failure prints when the reader saw the program done, when it let go,
+# and when the runner ended.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    printf 'module main\n\ni = 0\nwhile i < 600 && !File.exists?("held.flag")\n  sleep(20)\n  i = i + 1\nend\nFile.write("done.flag", "1")\nputs "held program done"\n' > held.iyi
+    held_run() { # held_run <ms>: sets held_status and held_exe ("" if no program was made)
+      local hold="$1" cache="$WORK/heldcache_$1" exe="" i holder runner
+      rm -rf "$cache" held.flag done.flag held.times
+      mkdir -p "$cache"
+      IYI_CACHE_DIR="$cache" "$IYI" run held.iyi > held.out 2>&1 &
+      runner=$!
+      # The program, once linked; a runner that ended first made none (a
+      # build that failed), and nothing is held then.
+      for i in $(seq 1 1200); do
+        exe="$(ls "$cache" 2>/dev/null | grep -E '^iyi-run-.*\.exe$' | head -1)"
+        [ -n "$exe" ] && break
+        kill -0 "$runner" 2>/dev/null || break
+        sleep 0.05
+      done
+      held_exe=""
+      if [ -z "$exe" ]; then
+        wait "$runner"
+        held_status=$?
+        return
+      fi
+      held_exe="$cache/$exe"
+      # Bounded at every wait, so a program that never says it is done
+      # cannot hold the gate: a minute for the flag.
+      powershell -NoProfile -Command "
+        \$f = \$null
+        for (\$i = 0; \$i -lt 400 -and -not \$f; \$i++) { try { \$f = [IO.File]::Open('$(cygpath -w "$held_exe")', 'Open', 'Read', 'Read') } catch { Start-Sleep -Milliseconds 25 } }
+        New-Item -ItemType File -Path '$(cygpath -w "$WORK")\\held.flag' -Force | Out-Null
+        for (\$i = 0; \$i -lt 6000 -and -not (Test-Path '$(cygpath -w "$WORK")\\done.flag'); \$i++) { Start-Sleep -Milliseconds 10 }
+        \$saw = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+        Start-Sleep -Milliseconds $hold
+        if (\$f) { \$f.Close() }
+        Set-Content -Path '$(cygpath -w "$WORK")\\held.times' -Value (\$saw, [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())
+      " &
+      holder=$!
+      wait "$runner"
+      held_status=$?
+      held_end=$(date +%s%3N)
+      wait "$holder"
+    }
+    held_times() { # when the reader let go and the runner ended, after the reader saw the program done
+      local saw closed
+      { read -r saw; read -r closed; } < <(tr -d '\r' < held.times 2>/dev/null)
+      [ -n "$saw" ] && [ -n "$closed" ] || { echo "    (the reader recorded no times)"; return; }
+      echo "    the reader let go $((closed - saw)) ms after it saw the program done; the runner ended at $((held_end - saw)) ms"
+    }
+    held_run 300
+    if [ -n "$held_exe" ] && [ "$held_status" -eq 0 ] && grep -qx 'held program done' held.out && [ ! -e "$held_exe" ]; then
+      echo "  a program held a moment past its exit: its verdict, and its file deleted"
+    else
+      echo "  a program held a moment past its exit (exit $held_status, file $( [ -e "$held_exe" ] && echo kept || echo gone)):"
+      held_times
+      sed -n '1,3p' held.out
+      status=1
+    fi
+    held_run 5000
+    if [ -n "$held_exe" ] && [ "$held_status" -eq 0 ] && grep -qx 'held program done' held.out && [ -e "$held_exe" ]; then
+      echo "  a program held past what the runner waits: its verdict, and its file left for the sweep"
+    else
+      echo "  a program held past what the runner waits (exit $held_status):"
+      held_times
+      sed -n '1,3p' held.out
+      status=1
+    fi
+    ;;
+esac
 # A path in another case, where the file system says it is the same
 # file. The root a header names was found by comparing strings, so `iyi
 # run HDR/APP/MAIN.IYI` found none, and the import beside the header was
@@ -1071,7 +1191,7 @@ case "$(uname -s)" in
       else
         echo "  a program rebuilt while it runs: build $rebuilt, it said '$said'"; sed -n '1,3p' busy.log; status=1
       fi
-      kill "$running" 2>/dev/null; wait "$running" 2>/dev/null
+      end_process "$running"; wait "$running" 2>/dev/null
     else
       echo "  the busy program did not build:"; sed -n '1,3p' busy.log; status=1
     fi
@@ -1217,6 +1337,22 @@ elif ! (cd "$WORK/mig" && "$IYI" fix .) 2>&1 | grep -q "3 files: 0 rewritten, ev
   status=1
 else
   echo "  fix over a directory: every using rewritten in one run, and the second run changes nothing"
+fi
+# The summary counts every file the run rewrote, whatever the edit: it
+# counted the `using` rewrites alone, and a directory moved off
+# `spawn_parallel` - 0.21.0's migration, iyi-db's two files - said
+# "0 rewritten" under the lines that rewrote them.
+mkdir -p "$WORK/migspawn"
+printf 'group do |g|\n  g.spawn_parallel do\n    1\n  end\nend\nputs "ran"\n' > "$WORK/migspawn/main.iyi"
+printf 'puts "clean"\n' > "$WORK/migspawn/other.iyi"
+if ! (cd "$WORK/migspawn" && "$IYI" fix .) > "$WORK/migspawn.txt" 2>&1 ||
+   ! grep -q "2 files: 1 rewritten, every one clean" "$WORK/migspawn.txt" ||
+   [ "$("$IYI" run "$WORK/migspawn/main.iyi" 2>&1)" != "ran" ]; then
+  echo "  fix over a directory: a did-you-mean edit was not counted as a rewrite"
+  sed 's/^/    /' "$WORK/migspawn.txt"
+  status=1
+else
+  echo "  fix over a directory: a file rewritten by a did-you-mean edit is counted"
 fi
 # A `using` folded into its import in a CRLF file left two blank lines
 # where the LF file is left one - only `\n` was a blank line's ending - and

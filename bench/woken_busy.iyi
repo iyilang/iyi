@@ -1,0 +1,53 @@
+# A thread its wait let go is busy before it takes anything: SPEC.md
+# III.4.13, part 5.
+#
+#   ./bin/iyi run bench/woken_busy.iyi
+#
+# On Windows a deadlock's walk reads an idle thread's lists as well as
+# what the thread said when it went idle (`IyiScheduler.all_quiet?`):
+# another thread may have taken its last io waiter's completion since.
+# So a thread still marked idle while it takes its own expired sleeper
+# into its own run queue reads as idle with nothing to wait for. Each
+# round here starts a thread that sleeps a millisecond at a time for
+# `SLEEPS_MS`, and the main thread computes for `JOIN_AT_MS` and then
+# joins it: the join parks, the main thread goes idle with nothing of its
+# own, and the walk reads the second thread, asleep or just woken by its
+# timer. The second thread is never blocked for good, so a deadlock named
+# here is a false one, and it ends the run with the scheduler's panic.
+#
+# That window was the time a woken thread took from taking its sleeper
+# to marking itself busy, and a join seldom lands in it: on master's
+# runtime this named a deadlock in 1 run of 50 on the user's Windows 11
+# machine with 12 logical processors, and in none of 50 at 4 processors'
+# affinity, where bench/release_trigger.iyi's joins named one in 9 runs
+# of 200 and 15 of 200 (bench/concurrent_mark.sh failed so on master's
+# Windows runner). So bench/concurrency_exercise.sh also builds copies of
+# the runtime whose idle wait holds the woken thread 200 ms once it has
+# taken its sleeper, marked busy before the hold, as the runtime is, or
+# after it, which makes the landing certain.
+
+module bench/woken_busy
+
+ROUNDS     =      20
+SLEEPS_MS  = 100_i64
+JOIN_AT_MS =  50_i64
+
+# One round: the second thread's sleeps, and the main thread's join after
+# `JOIN_AT_MS`.
+def round : Nil
+  started = __iyi_monotonic_ns
+  second = IyiThread.start do
+    while __iyi_monotonic_ns - started < SLEEPS_MS * 1_000_000_i64
+      sleep(1)
+    end
+    nil
+  end
+  # Computed, not slept: a sleep is a sleeper of the main thread's own,
+  # and its wake would be a wake of the main thread's.
+  while __iyi_monotonic_ns - started < JOIN_AT_MS * 1_000_000_i64
+  end
+  second.join
+end
+
+ROUNDS.times { round }
+puts "woken busy: #{ROUNDS} joins parked beside a thread waking from its sleeps, none named a deadlock"

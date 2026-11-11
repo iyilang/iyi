@@ -30,52 +30,76 @@
 # argument somewhere global; that is the same edge the thread check has.
 #
 # **Waiting.** A task that finds the lock held waits without holding its
-# thread hostage. If the holder is on another thread, it first spins a few
-# turns, which is what a short critical section wants. Then, if its own
-# thread has other work - runnable tasks, sleepers, tasks waiting on I/O -
-# it yields to them, and after sixteen yields sleeps a millisecond at a
-# time, so a holder parked on I/O costs the waiter no core. If its thread
-# has nothing else to do and the holder is elsewhere, the thread sleeps in
-# the kernel until the release: a futex on the lock's word on Linux, a
-# semaphore on Windows; darwin, which has neither on the floor, sleeps the
-# millisecond. A waiting task is cancellable, as every blocking call is
-# (III.4.2): `lock`, `get` and `update` answer `Cancelled` then, and the
-# block does not run.
+# thread hostage. While the holder may be running on another thread it
+# first spins a few turns, which is what a short critical section wants;
+# then it parks, as a task waiting on a channel parks, on the lock's word
+# (`IyiScheduler.park_on`, a futex for tasks), and the release wakes one
+# task parked there. Its thread runs its other tasks meanwhile, and on the
+# pool another worker takes them: a worker that slept in the kernel here
+# held every task queued behind the waiter with it. A waiting task is
+# cancellable, as every blocking call is (III.4.2): `lock`, `get` and
+# `update` answer `Cancelled` then, and the block does not run.
 #
 # **What is refused.** A task locking a Mutex it already holds would wait
-# for itself, and panics saying so. A holder parked on the waiter's own
-# thread with nothing left there to wake it is a deadlock, and panics
-# saying that too. A panic inside the block releases the lock as it leaves
-# (`defer`), so a task that dies does not take the lock with it.
+# for itself, and panics saying so. A wait on a program's one thread with
+# nothing else on it to run, asleep or waiting - so nothing that could
+# ever release or change the value - panics saying that too, in the task
+# that waits; a deadlock anywhere else is the scheduler's to name, as it
+# names one on a channel. A panic inside the block releases the lock as
+# it leaves (a cleanup registered as `defer` registers one), so a task
+# that dies does not take the lock with it.
 #
-# The lock is not fair: a task arriving as it is released may take it ahead
-# of one that waited. A Windows semaphore made for a contended Mutex is
-# kept for the program's life.
+# The lock is not fair, until a waiter starves: a task arriving as it is
+# released may take it ahead of one that waited, which is what keeps a
+# lock passed between running tasks fast, but a waiter that has waited
+# 1 ms, or been woken 4 times to find it taken again, is handed it by the
+# next release, as Go's `sync.Mutex` does in its starvation mode.
 
+@[Unsafe("a mutex is trusted to cross tasks under @[Share] because it guards its value with its own lock")]
 module std/mutex
 
 @[Share(owns: true)]
 pub class Mutex(T)
   @value : T
-  # Bit 0 is the lock. The high 32 bits count the threads asleep in the
-  # kernel waiting for it, which a release wakes one of.
+  # The futex word: `FREE`, `HELD`, `CONTENDED` - held, and a task may
+  # be parked on it, so the release wakes one - or `HANDED`: let go by a
+  # release to a waiter that starved, and taken by no other task
+  # (`hand_over`). Drepper's three states ("Futexes Are Tricky", mutex2),
+  # and Go's starvation mode for the fourth: a task that has waited takes
+  # the lock as `CONTENDED`, since another may be parked behind it.
   @word : Atomic(UInt64)
-  # The task holding it and the thread that task runs on, by object id;
-  # 0 when it is free.
+  # The task holding it and the thread it took it on, by object id; 0
+  # when it is free. The thread is a hint for spinning, and may be old:
+  # a parallel task moves between workers (SPEC.md III.4.13). Neither
+  # orders anything, so both are written and read relaxed (`record`).
   @holder : Atomic(UInt64)
   @holder_thread : Atomic(UInt64)
-  # Windows' doorbell: a semaphore made by the first thread to sleep here.
-  @doorbell : Atomic(UInt64)
-  # How many times the lock has been released, which `wait_for` watches
-  # for a change, and how many threads sleep in the kernel watching it.
+  # How many times the lock has been released with a task waiting for a
+  # change, which `wait_for` watches, and how many tasks are waiting for
+  # one, each counted in with the lock held (`held`).
   @changes : Atomic(UInt64)
-  @change_sleepers : Atomic(UInt64)
+  @change_waiters : Atomic(UInt64)
+  # Waiters that have starved, which a release hands the lock to.
+  @starving : Atomic(UInt64)
+  # The release as a registered cleanup, made once (`register_release`).
+  @release_node : IyiDeferNode
 
-  # Spins before a waiter gives its thread's turn away; yields before it
-  # sleeps a millisecond at a time; one sleeper on the word's high half.
-  SPINS  =            100
-  YIELDS =             16
-  WAITER = 4294967296_u64
+  # Spins before a waiter parks, while the holder may be running.
+  SPINS     =   100
+  FREE      = 0_u64
+  HELD      = 1_u64
+  CONTENDED = 2_u64
+  HANDED    = 3_u64
+  # A waiter starves once it has waited this long in nanoseconds, or
+  # been woken this many times to find the lock taken again (`acquire`).
+  # Under the chaos scheduler only by the count, so that whether a waiter
+  # starves is the seed's to say and not the clock's (SPEC.md III.4.17).
+  {% if flag?(:iyi_chaos) %}
+    STARVE_NS = 0x7FFFFFFFFFFFFFFF_i64
+  {% else %}
+    STARVE_NS = 1000000_i64
+  {% end %}
+  RETAKES = 4
 
   # The value is the block's: made here, so nothing outside holds it. The
   # constructor that takes a value is private for that reason.
@@ -88,12 +112,13 @@ pub class Mutex(T)
   end
 
   private def initialize(@value : T)
-    @word = Atomic(UInt64).new(0_u64)
+    @word = Atomic(UInt64).new(FREE)
     @holder = Atomic(UInt64).new(0_u64)
     @holder_thread = Atomic(UInt64).new(0_u64)
-    @doorbell = Atomic(UInt64).new(0_u64)
     @changes = Atomic(UInt64).new(0_u64)
-    @change_sleepers = Atomic(UInt64).new(0_u64)
+    @change_waiters = Atomic(UInt64).new(0_u64)
+    @starving = Atomic(UInt64).new(0_u64)
+    @release_node = IyiDeferNode.new(-> { release })
   end
 
   # Runs the block with the value, the lock held; answers nil, or
@@ -102,8 +127,9 @@ pub class Mutex(T)
     if refused = acquire
       return refused
     end
-    defer release
+    register_release
     block.call(@value)
+    run_release
     nil
   end
 
@@ -113,8 +139,10 @@ pub class Mutex(T)
     if refused = acquire
       return refused
     end
-    defer release
-    block.call(@value)
+    register_release
+    answer = block.call(@value)
+    run_release
+    answer
   end
 
   # The value replaced by the block's answer, with the lock held: what a
@@ -124,8 +152,9 @@ pub class Mutex(T)
     if refused = acquire
       return refused
     end
-    defer release
+    register_release
     @value = block.call(@value)
+    run_release
     nil
   end
 
@@ -137,65 +166,97 @@ pub class Mutex(T)
   #     job = queue.wait_for { |q| q.empty? ? nil : q.shift }.or_panic
   #
   # A change is any lock, get, update or wait_for of this Mutex by another
-  # task; between them the waiter holds no lock, and what it does while it
-  # waits is `lock`'s: yields, then sleeps a millisecond at a time, and on
-  # Linux a thread with nothing else to run sleeps in the kernel until the
-  # next release. Cancellable, as `lock` is. A wait nothing could end - one
-  # thread, and nothing else on it to run - panics saying so.
+  # task; between them the waiter holds no lock, and is parked on the count
+  # of releases until another task's moves it. Cancellable, as `lock` is.
+  # A wait nothing could end - one thread, and nothing else on it to run -
+  # panics saying so.
   def wait_for(&block : T -> R?) : R | Cancelled forall R
-    waits = 0
     while true
       if refused = acquire
         return refused
       end
       # Read with the lock held, so the only release before the wait below
-      # is this task's own: one more than this is another task's.
+      # is this task's own, which counts since this task is counted: one
+      # more than this is another task's.
       mine = @changes.get + 1_u64
       answer = held(block)
       return answer unless answer.nil?
-      waited = await_change(mine, waits)
+      waited = await_change(mine)
       return waited if waited.is_a?(Cancelled)
-      waits = waits + 1
     end
   end
 
+  # A block that answers nil counts this task as waiting for a change
+  # before the release, with the lock still held, which is what lets a
+  # release with nobody counted skip the count (`release`).
   private def held(block : T -> R?) : R? forall R
-    defer release
-    block.call(@value)
+    register_release
+    answer = block.call(@value)
+    @change_waiters.add(1_u64) if answer.nil?
+    run_release
+    answer
+  end
+
+  # The lock just taken: its release registered with the task's cleanups,
+  # so a panic in the block lets it go on its way out, as a `defer
+  # release` would. A `defer` makes its node and its block's closure
+  # each time it is entered; this node is the Mutex's own, and a task
+  # holds the lock once at most (`acquire`), so it is registered once at
+  # a time (`__iyi_defer_push_node`). A 20 us hold in a block with a
+  # `defer` overran by 90 to 135 ns more than in one without, a node made
+  # once 50 to 60 (interleaved, 20,000 each, Linux x86_64, 12 vCPU,
+  # shared), where a loop of nothing but updates took 16 to 18 ns each.
+  #
+  # bench/chan_scaling.iyi before and with this: `held`, the least
+  # nanoseconds an update lost beyond its 20 us hold at 1/2/4/8 pairs,
+  # and Go's twin; `mutex`, millions of updates a second by tasks on one
+  # Mutex, and `mutexes`, by pairs on a Mutex each. Best of interleaved
+  # runs, 7 (`mutexes` 5):
+  #
+  #   Linux x86_64, 12 vCPU, shared: held 195/203/195/492 to 145/123/151/395
+  #     (Go 137/222/364/473); mutex 4/12 tasks 44.8/35.3 to 64.9/43.9;
+  #     mutexes 1/4/12 pairs 50.1/53.5/98.6 to 86.5/306.6/678.9
+  #   macOS 26.6, M2 Pro, 10 cores (the user's machine): held 57/57/164/374
+  #     to 13/17/74/208 (Go 58/83/399/550); mutex 4/10 36.0/32.6 to
+  #     68.1/36.3; mutexes 1/4/10 39.0/55.5/58.0 to 83.6/313.8/179.2
+  #   Windows 11, 12 logical processors (the user's machine): held
+  #     159/225/271/298 to 86/153/131/151; mutex 4/12 36.2/28.2 to
+  #     67.8/73.1; mutexes 1/4/12 41.0/35.6/90.1 to 77.8/235.8/474.2
+  #
+  # Most of what pairs gain is a holder taking its lock back before its
+  # partner wakes: written by every push, the node was one more line the
+  # two cores passed between them, and on the M2 four pairs made 25.6
+  # million updates a second with it against 330.7 without.
+  private def register_release : Nil
+    __iyi_defer_push_node(@release_node)
+  end
+
+  # The registered release, taken off the task's cleanups and run.
+  private def run_release : Nil
+    __iyi_defer_pop_run
   end
 
   # Parks until the count of releases is past *mine*, the one this task's
-  # own release made.
-  private def await_change(mine : UInt64, waits : Int32) : Nil | Cancelled
+  # own release made, and counts itself out of the waiters once it stops.
+  # `park_on` looks at the count again under its list's lock, and a
+  # release that moves it wakes the list after, so no move is missed.
+  private def await_change(mine : UInt64) : Nil | Cancelled
     {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
       while @changes.get == mine
-        busy = Mutex.thread_busy?
-        alone = true
-        {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
-          alone = IyiThread.program_threads <= 1_u64
-        {% end %}
-        if !busy && alone
+        if Mutex.alone?
+          @change_waiters.sub(1_u64)
           raise "Mutex#wait_for: deadlock: nothing is left to change the value - no other task on this thread, and no other thread"
         end
-        {% if !flag?(:gc_none) && !flag?(:gc_boehm) && flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64)) %}
-          if !busy && waits >= YIELDS
-            # Counted before the count of releases is looked at again, so a
-            # release that misses the sleeper has already moved the count,
-            # and the futex, which compares it, answers at once.
-            @change_sleepers.add(1_u64)
-            if @changes.get == mine
-              __iyi_conc_syscall6(IYI_SYS_FUTEX, pointerof(@changes).address.to_i64, IYI_FUTEX_WAIT, (mine & 0xFFFFFFFF_u64).to_i64, 0_i64, 0_i64, 0_i64)
-            end
-            @change_sleepers.sub(1_u64)
-            next
-          end
-        {% end %}
-        waited = IyiScheduler.sleep_current(waits < YIELDS ? 0 : 1)
-        return waited if waited.is_a?(Cancelled)
-        waits = waits + 1
+        waited = IyiScheduler.park_on(pointerof(@changes), mine)
+        if waited.is_a?(Cancelled)
+          @change_waiters.sub(1_u64)
+          return waited
+        end
       end
+      @change_waiters.sub(1_u64)
       nil
     {% else %}
+      @change_waiters.sub(1_u64)
       raise "Mutex#wait_for: deadlock: this program's one thread waits, and nothing else can change the value"
     {% end %}
   end
@@ -203,44 +264,89 @@ pub class Mutex(T)
   # Whether some task holds it now: an answer that may be old by the time
   # it is read, for a report rather than a decision.
   def locked? : Bool
-    @word.get & 1_u64 != 0_u64
+    @word.get != FREE
   end
 
   private def acquire : Cancelled?
     me = Mutex.task_id
     return nil if take(me)
-    if @holder.get == me
+    if Mutex.relaxed_get(pointerof(@holder)) == me
       raise "Mutex: this task already holds the lock, and a second lock would wait for itself"
     end
     {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
       turns = 0
-      waits = 0
-      while true
+      while turns < SPINS && Mutex.holder_may_run?(Mutex.relaxed_get(pointerof(@holder_thread)))
         return nil if take(me)
-        elsewhere = @holder_thread.get != Mutex.thread_id
-        {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
-          if elsewhere && turns < SPINS && IyiThread.program_threads > 1_u64
-            IyiThread.spin_pause
-            turns = turns + 1
-            next
+        IyiThread.spin_pause
+        turns = turns + 1
+      end
+      # Marked contended, so the release wakes; and taken, still marked,
+      # when it is free, since a task may be parked behind. A task woken
+      # here takes it the same way and never as `HELD`: taken plainly, the
+      # mark was gone with tasks still parked, the release woke none of
+      # them, and twenty tasks on one thread ended in a deadlock.
+      #
+      # A waiter starves once it has waited `STARVE_NS` here or been woken
+      # `RETAKES` times to find the lock taken again: it counts itself in
+      # `@starving`, and the next release hands it the lock (`hand_over`)
+      # rather than letting it go to whichever task runs first, which is
+      # most often the one that let it go, running while the waiter wakes.
+      # Only a starving waiter takes a lock handed over, so the holder
+      # parks behind it. A waiter beside a holder that took the lock back
+      # after each 1 ms hold waited out all 600 holds, 599 ms on Linux
+      # x86_64 (12 vCPU, shared; bench/std_mutex_exercise.sh), and beside
+      # 20 us holds 611 ms, all 30,000 of them. It waits 7.3 ms now, two
+      # wakes, each queued in the holder's worker's ring until the
+      # monitor preempts the holder; 0.14 ms with the pool calling an idle
+      # worker for a fiber a running task hands over, Go's `wakep`.
+      began = __iyi_monotonic_ns
+      retakes = 0
+      starving = false
+      while true
+        seen = @word.get
+        if seen == FREE || (seen == HANDED && starving)
+          if @word.compare_and_set(seen, CONTENDED)[1]
+            @starving.sub(1_u64) if starving
+            break
           end
-        {% end %}
-        busy = Mutex.thread_busy?
-        if !elsewhere && !busy && locked?
+          next
+        end
+        if seen == HELD
+          next unless @word.compare_and_set(HELD, CONTENDED)[1]
+          seen = CONTENDED
+        end
+        if Mutex.alone?
+          @starving.sub(1_u64) if starving
           raise "Mutex: deadlock: the task holding this lock is parked on this thread, and nothing left on this thread can wake it"
         end
-        {% if !flag?(:gc_none) && !flag?(:gc_boehm) && !flag?(:darwin) %}
-          if elsewhere && !busy
-            sleep_in_kernel
-            @holder.set(me)
-            @holder_thread.set(Mutex.thread_id)
-            return nil
+        waited = IyiScheduler.park_on(pointerof(@word), seen)
+        if waited.is_a?(Cancelled)
+          # A starving waiter counts itself out before it looks for a lock
+          # handed to it meanwhile, which it lets go again; `hand_over`
+          # writes `HANDED` before it reads the count, so one of the two
+          # sees the other.
+          if starving
+            @starving.sub(1_u64)
+            if @word.compare_and_set(HANDED, CONTENDED)[1]
+              release
+              return waited
+            end
           end
-        {% end %}
-        waited = IyiScheduler.sleep_current(waits < YIELDS ? 0 : 1)
-        waits = waits + 1
-        return waited if waited.is_a?(Cancelled)
+          # A release may have woken this task as it was cancelled, and the
+          # wake goes on to the next task parked here, or that one waits
+          # for a release nobody holding the lock now will make.
+          IyiScheduler.wake_on(pointerof(@word), 1)
+          return waited
+        end
+        unless starving
+          retakes = retakes + 1
+          if retakes >= RETAKES || __iyi_monotonic_ns - began >= STARVE_NS
+            starving = true
+            @starving.add(1_u64)
+          end
+        end
       end
+      record(me)
       nil
     {% else %}
       # One thread and no tasks: a lock held here is held by its caller.
@@ -250,77 +356,85 @@ pub class Mutex(T)
 
   # One try: the lock taken and its holder recorded, or false.
   private def take(me : UInt64) : Bool
-    seen = @word.get
-    return false if seen & 1_u64 != 0_u64
-    return false unless @word.compare_and_set(seen, seen | 1_u64)[1]
-    @holder.set(me)
-    @holder_thread.set(Mutex.thread_id)
+    return false unless @word.compare_and_set(FREE, HELD)[1]
+    record(me)
     true
   end
 
+  # Relaxed stores, as the reads are: neither field orders anything.
+  # `@holder` answers whether the asking task holds the lock, and a task
+  # reads its own last write to the word or a later one - its 0 from its
+  # release, or another holder's id - so it reads its own id only while
+  # it holds the lock; a parallel task that moved worker meanwhile was
+  # handed over through the scheduler's queues, which order it.
+  # `@holder_thread` is a hint, right or wrong either way. Sequentially
+  # consistent, each was an `xchg` on x86_64, four of seven locked
+  # instructions in a lock and its release; relaxed, with the count below
+  # skipped, two are left, and bench/chan_scaling.iyi's `mutexes` on Linux
+  # x86_64 (12 vCPU, shared), median of 5 interleaved, went from 25.8 to
+  # 37.6 million updates a second with one pair, and 43.3 with the skip.
+  private def record(me : UInt64) : Nil
+    Mutex.relaxed_set(pointerof(@holder), me)
+    Mutex.relaxed_set(pointerof(@holder_thread), Mutex.thread_id)
+  end
+
+  protected def self.relaxed_set(word : Pointer(Atomic(UInt64)), value : UInt64) : Nil
+    IyiAtomic.store(word.as(Pointer(UInt64)), value, :monotonic, false)
+  end
+
+  protected def self.relaxed_get(word : Pointer(Atomic(UInt64))) : UInt64
+    IyiAtomic.load(word.as(Pointer(UInt64)), :monotonic, false)
+  end
+
   private def release : Nil
-    @holder.set(0_u64)
-    @holder_thread.set(0_u64)
+    Mutex.relaxed_set(pointerof(@holder), 0_u64)
+    Mutex.relaxed_set(pointerof(@holder_thread), 0_u64)
     # A change for `wait_for`, counted before the lock is free, so a waiter
-    # that takes the lock next sees it.
-    @changes.add(1_u64)
-    before = @word.sub(1_u64)
-    {% if !flag?(:gc_none) && !flag?(:gc_boehm) && flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64)) %}
-      if before >= WAITER
-        __iyi_conc_syscall6(IYI_SYS_FUTEX, pointerof(@word).address.to_i64, IYI_FUTEX_WAKE, 1_i64, 0_i64, 0_i64, 0_i64)
+    # that takes the lock next sees it - and counted only when a task is
+    # waiting for one. A waiter counts itself before its own release, the
+    # lock held (`held`), and counts itself out only once it stops
+    # waiting, to take the lock and look again. So a task that looked
+    # before this holder took the lock and waits for a change was counted
+    # before that look's release, which came before this holder's take:
+    # the read here, under the lock, sees its count, relaxed or not. Read
+    # as 0, nobody is parked on `@changes` or about to park, and the add
+    # and the wake are both skipped. A waiter that counted itself after
+    # its release, as one did, left a window: a release read 0 before the
+    # count, and the waiter parked on a count that release never moved.
+    counted = Mutex.relaxed_get(pointerof(@change_waiters)) != 0_u64
+    @changes.add(1_u64) if counted
+    {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
+      # Held plainly, nobody waits; marked, the word is `CONTENDED`, since
+      # only waiters change it while it is held, and only that way.
+      unless @word.compare_and_set(HELD, FREE)[1]
+        if @starving.get == 0_u64
+          @word.set(FREE)
+          IyiScheduler.wake_on(pointerof(@word), 1)
+        else
+          hand_over
+        end
       end
-      if @change_sleepers.get != 0_u64
-        __iyi_conc_syscall6(IYI_SYS_FUTEX, pointerof(@changes).address.to_i64, IYI_FUTEX_WAKE, 0x7FFFFFFF_i64, 0_i64, 0_i64, 0_i64)
-      end
-    {% elsif !flag?(:gc_none) && !flag?(:gc_boehm) && flag?(:win32) && flag?(:x86_64) %}
-      if before >= WAITER
-        LibC.ReleaseSemaphore(Pointer(Void).new(@doorbell.get), 1_i32, Pointer(Int32).new(0_u64))
-      end
+      IyiScheduler.wake_on(pointerof(@changes), 0x7FFFFFFF) if counted
+    {% else %}
+      @word.set(FREE)
     {% end %}
   end
 
-  {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:win32) && flag?(:x86_64))) %}
-    # The thread sleeps until a release, counted on the word's high half so
-    # the release knows to ring. Taking the lock and uncounting are one
-    # exchange, so no release can find a count that has already left.
-    private def sleep_in_kernel : Nil
-      {% if flag?(:win32) %}
-        bell = doorbell
-      {% end %}
-      @word.add(WAITER)
-      while true
-        seen = @word.get
-        if seen & 1_u64 == 0_u64
-          break if @word.compare_and_set(seen, (seen | 1_u64) - WAITER)[1]
-          next
-        end
-        {% if flag?(:linux) %}
-          # The futex reads the word's low half - the lock bit - and sleeps
-          # only while it still reads as held; a release between the load
-          # above and here changes it, and the futex answers at once.
-          __iyi_conc_syscall6(IYI_SYS_FUTEX, pointerof(@word).address.to_i64, IYI_FUTEX_WAIT, (seen & 0xFFFFFFFF_u64).to_i64, 0_i64, 0_i64, 0_i64)
-        {% else %}
-          LibC.WaitForSingleObject(bell, -1_i32)
-        {% end %}
-      end
+  # The lock let go to a starving waiter: left `HANDED`, which only a
+  # starving waiter takes, and every task parked on it woken, since the
+  # one that starves may be any of them. The count is read again once the
+  # word says so: a starving waiter cancelled meanwhile counts itself out
+  # before it looks at the word (`acquire`), so either it sees `HANDED`
+  # and lets the lock go again, or this sees its count gone and frees the
+  # lock as an ordinary release would.
+  private def hand_over : Nil
+    @word.set(HANDED)
+    if @starving.get == 0_u64 && @word.compare_and_set(HANDED, FREE)[1]
+      IyiScheduler.wake_on(pointerof(@word), 1)
+    else
+      IyiScheduler.wake_on(pointerof(@word), 0x7FFFFFFF)
     end
-  {% end %}
-
-  {% if !flag?(:gc_none) && !flag?(:gc_boehm) && flag?(:win32) && flag?(:x86_64) %}
-    # Made once, by whichever sleeper is first; one that loses the race
-    # closes its own. Made before a sleeper counts itself, so a release
-    # that sees the count finds the semaphore.
-    private def doorbell : Void*
-      bell = @doorbell.get
-      return Pointer(Void).new(bell) if bell != 0_u64
-      made = LibC.CreateSemaphoreW(Pointer(Void).new(0_u64), 0_i32, 0x7FFFFFFF_i32, Pointer(UInt16).new(0_u64)).address
-      raise "Mutex: Windows refused a semaphore to sleep on" if made == 0_u64
-      seen, won = @doorbell.compare_and_set(0_u64, made)
-      return Pointer(Void).new(made) if won
-      LibC.CloseHandle(Pointer(Void).new(made))
-      Pointer(Void).new(seen)
-    end
-  {% end %}
+  end
 
   {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
     protected def self.task_id : UInt64
@@ -331,16 +445,31 @@ pub class Mutex(T)
       IyiScheduler.state.object_id
     end
 
-    # Whether this thread has anything to run besides the waiting task:
-    # tasks ready to run, tasks asleep, tasks waiting on I/O, and tasks
-    # another thread has woken into its inbox (SPEC.md III.4.13).
-    protected def self.thread_busy? : Bool
+    # Whether the holder, which took the lock on *thread*, may be running
+    # now: another thread exists, and the holder is not on this one, which
+    # is running the waiter.
+    protected def self.holder_may_run?(thread : UInt64) : Bool
+      {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+        IyiThread.program_threads > 1_u64 && thread != 0_u64 && thread != thread_id
+      {% else %}
+        false
+      {% end %}
+    end
+
+    # The program's one thread, with nothing on it to run but the waiting
+    # task: no task runnable, asleep or waiting on I/O, and none another
+    # thread has woken into its inbox (SPEC.md III.4.13). Nothing can
+    # release or change the value then.
+    protected def self.alone? : Bool
+      {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+        return false if IyiThread.program_threads > 1_u64
+      {% end %}
       st = IyiScheduler.state
       busy = !st.run_head.nil? || !st.sleep_head.nil? || !st.io_head.nil? || st.mail?
       {% if flag?(:win32) %}
         busy = busy || !st.stdin_waiter.nil?
       {% end %}
-      busy
+      !busy
     end
   {% else %}
     protected def self.task_id : UInt64

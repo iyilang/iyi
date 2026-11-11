@@ -40,6 +40,7 @@
 # Left out: `peek_behind`, `rewind`, `current_char`, `previous_byte` and
 # `beginning_of_line?`, which read `string` and `offset` in a line each.
 
+@[Unsafe("the scanner compares the bytes of the string at its offset through a raw pointer, for speed")]
 module std/string_scanner
 
 import std/regex::{Regex}

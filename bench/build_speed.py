@@ -307,7 +307,9 @@ def time_crystal(source, out_dir, codegen, cold, runs = RUNS, linker = None):
         if cold and cache.exists():
             shutil.rmtree(cache)
         cache.mkdir(parents=True, exist_ok=True)
-        argv = [str(CRYSTAL), "build", "-o", str(out_dir / f"out{suffix}")]
+        # `--force`: warm means a reused cache, not an output that is already
+        # current, which the up-to-date check would answer without compiling.
+        argv = [str(CRYSTAL), "build", "--force", "-o", str(out_dir / f"out{suffix}")]
         if not codegen:
             argv.append("--no-codegen")
         if linker:
@@ -343,7 +345,7 @@ def link_seconds(source, out_dir):
     """
     cache = out_dir / "cache_stats"
     cache.mkdir(parents=True, exist_ok=True)
-    argv = [str(CRYSTAL), "build", "--stats", "-o", str(out_dir / "out_stats"), str(source)]
+    argv = [str(CRYSTAL), "build", "--force", "--stats", "-o", str(out_dir / "out_stats"), str(source)]
     env = dict(os.environ)
     env.update(CRYSTAL_ENV)
     env["IYI_CACHE_DIR"] = str(cache)

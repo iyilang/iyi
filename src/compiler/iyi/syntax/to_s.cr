@@ -48,7 +48,7 @@ module Iyi
 
       if (macro_expansion_pragmas = @macro_expansion_pragmas) && (loc = node.location) && (filename = loc.filename).is_a?(String)
         pragmas = macro_expansion_pragmas[@str.pos.to_i32] ||= [] of Lexer::LocPragma
-        pragmas << Lexer::LocSetPragma.new(filename, loc.line_number, loc.column_number)
+        pragmas << Lexer::LocSetPragma.new(filename, loc.line_number, loc.column_number, loc.artifact)
       end
 
       true

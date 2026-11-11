@@ -16,6 +16,7 @@
 # Not under `samples/`: the sample count is a gated number, and samples are
 # explanations rather than torture tests.
 
+@[Unsafe("it keeps addresses in a raw buffer the collector does not scan, so the sweep frees what only that buffer names")]
 {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || flag?(:darwin) || (flag?(:win32) && flag?(:x86_64))) %}
   # The allocation-pressure trigger is off for this exercise: it
   # choreographs colours and free lists across explicit collections,
@@ -87,6 +88,30 @@
   def fresh(size : UInt64) : UInt64
     Pointer(UInt8).malloc(size).address
   end
+
+  # The arenas mapped for one class, counted off the list of all of them.
+  def class_arenas(index : Int32) : UInt64
+    arenas = 0_u64
+    arena = IyiHeap.first_arena
+    while arena != 0
+      arenas = arenas + 1_u64 if IyiHeap.arena_chunk(arena) == IyiHeap.chunk_of(index)
+      arena = IyiHeap.arena_next(arena)
+    end
+    arenas
+  end
+
+  # Garbage in a class nothing below asks for, made before the first
+  # collection, for check 6c.
+  def first_epoch_garbage(size : UInt64) : Nil
+    index = 0
+    while index < 64
+      fresh(size)
+      index = index + 1
+    end
+  end
+
+  FIRST_EPOCH_SIZE = 1500_u64
+  first_epoch_garbage(FIRST_EPOCH_SIZE)
 
   puts "== the exercise, the collector's allocator"
 
@@ -303,6 +328,83 @@
   released = IyiHeap.pages_released - released_before
   raise "rounding: #{count(released)} pages of #{count(request)}-byte requests handed back in eight steady epochs, each asking a budget's worth" if released != 0
   puts "    rounding: eight epochs of a budget's worth of #{count(request)}-byte requests, and no page of theirs went back cold"
+
+  # 6b. An epoch can ask for more than the budget: a mark beside many
+  # workers runs as long as its helpers take, and the workers allocate all
+  # the while. The budget's worth of dead pages stays warm and the rest
+  # goes back cold, and the next epoch carves that rest again - a release
+  # and a fault a page for nothing, which twelve workers paid on 94-98% of
+  # what the sweep released (issue #150). What the carve takes back cold
+  # is kept warm the epoch after, so a churn asking twice its budget every
+  # epoch hands back a seventeenth of its excess once it has settled -
+  # under a quarter of it here, the excess every epoch without the
+  # carry-over.
+  request = 3000_u64
+  excess_pages = IyiMark.budget.unsafe_div(IyiHeap::PAGE)
+  epoch = 0
+  released_before = 0_u64
+  while epoch < 16
+    released_before = IyiHeap.pages_released if epoch == 8
+    asked = (IyiMark.budget * 2_u64).unsafe_div(request)
+    index = 0_u64
+    while index < asked
+      fresh(request)
+      index = index + 1_u64
+    end
+    IyiMark.collect
+    epoch = epoch + 1
+  end
+  released = IyiHeap.pages_released - released_before
+  raise "refault: #{count(released)} pages handed back in eight steady epochs of #{count(request)}-byte requests asking twice the budget, where the excess is #{count(excess_pages)} pages an epoch" if released * 4_u64 > excess_pages * 8_u64
+  puts "    refault: eight epochs asking twice the budget handed back under a quarter of their excess"
+
+  # 6c. A class the program stops allocating in keeps none of its pages
+  # warm: the warm room is for the classes the next epoch will ask, and
+  # pages kept for one nobody refills held the room the classes the
+  # program moved to wanted. But not after a few short epochs: a class
+  # asked for now and then would hand its arena back and map it again.
+  # The 3,000-byte requests above stop, and four epochs of 200-byte ones
+  # follow at once: the 3,000-byte class keeps its warm pages, and the
+  # 1,500-byte class allocated in only before the first collection keeps
+  # its arena - a stamp from the first epoch, which has no start on
+  # record, read as more than a second old, and that class's arenas went
+  # back three collections in. Past a second (`IyiMark::IDLE_NS`), four
+  # more, and the 3,000-byte class's warm pages go back to the kernel, its
+  # empty arena with them, and the 1,500-byte class's arena too.
+  def idle_churn : Nil
+    epoch = 0
+    while epoch < 4
+      index = 0_u64
+      while index < 2000_u64
+        fresh(200_u64)
+        index = index + 1_u64
+      end
+      IyiMark.collect
+      epoch = epoch + 1
+    end
+  end
+
+  idle_index = IyiHeap.class_index(request)
+  idle_churn
+  idle_short = IyiHeap.warm_of(idle_index)
+  raise "idle class: the #{count(request)}-byte class kept no page warm through four short epochs, under IDLE_NS" if idle_short == 0_u64
+  first_index = IyiHeap.class_index(FIRST_EPOCH_SIZE)
+  raise "idle class: the #{count(FIRST_EPOCH_SIZE)}-byte class shares a class with the 3,000-byte one, so it tests nothing of its own" if first_index == idle_index
+  first_short = class_arenas(first_index)
+  raise "idle class: the #{count(FIRST_EPOCH_SIZE)}-byte class, allocated in only before the first collection, maps no arena four short epochs on, under IDLE_NS" if first_short == 0_u64
+  released_before = IyiHeap.pages_released
+  mapped_before = IyiHeap.arenas_mapped
+  sleep(1100)
+  idle_churn
+  idle_after = IyiHeap.warm_of(idle_index)
+  raise "idle class: the #{count(request)}-byte class kept #{count(idle_after)} pages warm through four epochs nobody allocated in it, past IDLE_NS" if idle_after != 0_u64
+  # And its arena, empty and nobody's cushion now, went back whole: the
+  # header and the tables with it.
+  idle_arenas = class_arenas(idle_index)
+  raise "idle class: the #{count(request)}-byte class still maps #{count(idle_arenas)} empty arenas a second and four epochs after its last allocation" if idle_arenas != 0_u64
+  first_after = class_arenas(first_index)
+  raise "idle class: the #{count(FIRST_EPOCH_SIZE)}-byte class, allocated in only before the first collection, still maps #{count(first_after)} empty arenas a second and four epochs on" if first_after != 0_u64
+  puts "    idle class: #{count(idle_short)} pages of a class the program stopped allocating in still warm four short epochs on, and #{count(first_short)} arenas of one allocated in only before the first collection still mapped; a second and four epochs on, none warm and none of either's arenas mapped, #{count(IyiHeap.pages_released - released_before)} pages handed back cold, #{count(IyiHeap.arenas_mapped - mapped_before)} arenas mapped"
 
   # 7. A carve takes a page's worth of chunks: the first is the object,
   # the rest go onto the cache's list stamped free and this epoch's, so

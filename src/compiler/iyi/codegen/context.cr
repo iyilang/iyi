@@ -19,6 +19,14 @@ class Iyi::CodeGenVisitor
     # the function — inside a `while` or a block — which is what
     # `keep_call_out_of_main` asks before it keeps a call out of line.
     property? repeats = false
+    # iyi: whether a loop's back-edge here checks the worker's preemption
+    # word (`CodeGenVisitor#iyi_back_edge`): set per function, for the def
+    # the function is, and kept through the blocks inlined into it.
+    property? iyi_preempt = false
+    # iyi: whether the code emitted here is the runtime's, or a library
+    # def compiled for the runtime to call (`CodeGenVisitor#target_def_fun`):
+    # a library def called from here is that copy, which checks nowhere.
+    property? iyi_runtime = false
     property! block : Block
     property! block_context : Context
     property closure_vars : Array(MetaVar)?
@@ -53,6 +61,8 @@ class Iyi::CodeGenVisitor
       context.next_phi = @next_phi
       context.while_block = @while_block
       context.repeats = @repeats
+      context.iyi_preempt = @iyi_preempt
+      context.iyi_runtime = @iyi_runtime
       if block = @block
         context.block = block
       end

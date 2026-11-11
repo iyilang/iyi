@@ -5,6 +5,7 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO/bench/end_process.sh"
 
 # The search path is a list, and the byte between its entries is the
 # platform's: `;` where a drive letter already owns the colon.
@@ -106,13 +107,13 @@ refuses "an event type with a line break" event_break 'SSE: an event type cannot
 refuses "an id with a CR" id_cr 'SSE: an id cannot hold a line break or a NUL: "1\r"' \
   'w.send("x", id: "1\r")'
 refuses "an id with a NUL" id_nul 'SSE: an id cannot hold a line break or a NUL' \
-  'w.send("x", id: "1" + String.new(1) { |p| p[0] = 0_u8 })'
+  'w.send("x", id: "1" + String.new([0_u8]))'
 refuses "a negative retry" retry_negative 'SSE: a retry is 0 or more milliseconds, not -5' \
   'w.send("x", retry: -5)'
 refuses "data that is not UTF-8" data_bytes 'SSE: the data is not UTF-8' \
-  'w.send("a" + String.new(1) { |p| p[0] = 0xFF_u8 })'
+  'w.send("a" + String.new([0xFF_u8]))'
 refuses "a comment that is not UTF-8" comment_bytes 'SSE: a comment is not UTF-8' \
-  'w.comment(String.new(1) { |p| p[0] = 0xC0_u8 })'
+  'w.comment(String.new([0xC0_u8]))'
 refuses "a stream's own Content-Type" stream_type "SSE: Content-Type is the stream's own, text/event-stream" \
   'SSE.stream({"content-type" => "text/plain"}) { |events| nil }'
 refuses "a client's own Last-Event-ID" open_header "SSE: Last-Event-ID is the stream's own header; the last event ID is last_event_id:" \
@@ -275,7 +276,7 @@ else
   if [ -z "$port" ]; then
     echo "  the server printed no port"
     status=1
-    kill "$serve_pid" 2>/dev/null
+    end_process "$serve_pid"
   else
     if command -v curl >/dev/null 2>&1; then
       curl -sN --max-time 10 "http://127.0.0.1:$port/events" > "$WORK/curl.events" 2>/dev/null
@@ -350,7 +351,7 @@ PY
     then
       wait "$serve_pid"
     else
-      kill "$serve_pid" 2>/dev/null
+      end_process "$serve_pid"
       status=1
     fi
   fi

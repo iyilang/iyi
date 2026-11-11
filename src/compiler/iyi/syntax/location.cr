@@ -6,7 +6,37 @@ class Iyi::Location
   getter column_number
   getter filename
 
-  def initialize(@filename : String | VirtualFile | Nil, @line_number : Int32, @column_number : Int32)
+  # iyi: the `.iyimod` this build read the node out of, or nil for a node of
+  # a file it read. A body that travelled in an artifact is located in its
+  # module's source (`IyiMod::SourcePosition`), which is what a person and a
+  # macro's `@caller` see; this is what says it came from the artifact all
+  # the same, for every decision about *which file this build read*: import
+  # edges, file-private names, and the refusals a module's own build already
+  # made of its own source (`read_from`).
+  getter artifact : String?
+
+  def initialize(@filename : String | VirtualFile | Nil, @line_number : Int32, @column_number : Int32,
+                 @artifact : String? = nil)
+  end
+
+  # iyi: the `artifact` of `expanded_location`: what a node a macro wrote
+  # was read out of is what the call that expanded it was.
+  def original_artifact : String?
+    expanded_location.try &.artifact
+  end
+
+  # iyi: the file this build read the node out of: the artifact, for a node
+  # read from one, and the filename otherwise. The question a decision about
+  # the build asks, where `filename` is the one a person is shown.
+  def read_from : String | VirtualFile | Nil
+    filename = @filename
+    filename.is_a?(String) ? (@artifact || filename) : filename
+  end
+
+  # iyi: `read_from` of `expanded_location`, as `original_filename` is its
+  # filename.
+  def original_read_from : String?
+    original_artifact || original_filename
   end
 
   # Returns a location from a string representation. Used by compiler tools like

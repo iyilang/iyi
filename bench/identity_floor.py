@@ -305,6 +305,14 @@ ALLOWED_LINES: list[tuple[str, str]] = [
     (r"crystal-release|src/compiler/crystal\.cr|clean_cache crystal", "the compatibility binary's build"),
     (r"names crystal in the same banner|program_name = \"crystal\"", "the spec that pins the compatibility name"),
     (r"from-crystal|reads CRYSTAL_PATH when IYI_PATH", "the spec that pins the Crystal env-var fallback"),
+    # SPEC.md III.13. The list of a program's own marked modules is a constant
+    # the compiler defines in the `Crystal` module a compiled program reads,
+    # beside `Crystal::VERSION`; `iyi migrate`'s reason says what the module
+    # was migrated from; and `bench/unsafe.sh`'s last step holds that the
+    # check leaves `--crystal` and `.cr` programs alone, reading a test word.
+    (r"Crystal::IYI_UNSAFE_MODULES", "the Crystal module a compiled program reads"),
+    (r"migrated from Crystal that uses", "what a migrated module's reason says it came from"),
+    (r'Crystal is unaffected|"crystal"\.to_unsafe', "bench/unsafe.sh's step on the other language"),
     # Backticks required. A bare `CRYSTAL_DAEMON` matched the Makefile's
     # `CRYSTAL_DAEMON_BIN`, which the cutover had renamed to `IYI_DAEMON_BIN`,
     # and so hid a real break: upstream's new `check_daemon_matches` expanded
@@ -319,6 +327,9 @@ ALLOWED_LINES: list[tuple[str, str]] = [
     # they do not have. Backticked or quoted, by the rule above — a bare
     # `CRYSTAL_CACHE_DIR` would cover a slip as well as this.
     (r'`CRYSTAL_CACHE_DIR`|: "CRYSTAL_CACHE_DIR"', "the variable the other command surface's author set"),
+    # The bootstrap compiler's cache, set beside iyi's in the gate that reads
+    # the broken copy's objects out of it: the bootstrap reads no other name.
+    (r'CRYSTAL_CACHE_DIR="\$WORK/\$label-cache"', "the bootstrap compiler's cache, where bench/symbol_names.sh reads its broken copy"),
     # The linker's search path, in the gate that proves the binaries build
     # with bdw-gc unreachable. `IYI_LIBRARY_PATH` is not a substitute: it adds
     # to the default search path where `CRYSTAL_LIBRARY_PATH` replaces it, and

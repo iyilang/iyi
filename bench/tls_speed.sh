@@ -17,12 +17,13 @@
 #   bash bench/tls_speed.sh            needs openssl and python3
 set -u
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO/bench/end_process.sh"
 IYI="${IYI:-$REPO/bin/iyi}"
 FLOOR="${FLOOR:-25}"
 MIB=32
 WORK="$(mktemp -d)"
 SERVER=""
-trap '[ -n "$SERVER" ] && kill "$SERVER" 2>/dev/null; rm -rf "$WORK"' EXIT
+trap '[ -n "$SERVER" ] && end_process "$SERVER"; rm -rf "$WORK"' EXIT
 
 command -v openssl >/dev/null || { echo "tls_speed: no openssl"; exit 1; }
 command -v python3 >/dev/null || { echo "tls_speed: no python3"; exit 1; }
@@ -58,7 +59,7 @@ pull() {
     sleep 0.1
   done
   answer="$("$WORK/tls_speed" pull "$port" ca.pem data 2>&1)"
-  kill "$SERVER" 2>/dev/null
+  end_process "$SERVER"
   wait "$SERVER" 2>/dev/null
   SERVER=""
   printf '%s\n' "$answer" | awk -v s="$1" '$1 == "pull" && $2 == s { print $3 }'
@@ -80,7 +81,7 @@ push() {
   client=$!
   wait "$SERVER" 2>/dev/null
   SERVER=""
-  kill "$client" 2>/dev/null
+  end_process "$client"
   wait "$client" 2>/dev/null
   awk -v s="$1" '$1 == "push" && $2 == s { print $3 }' push.out
 }

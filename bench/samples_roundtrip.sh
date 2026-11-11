@@ -298,7 +298,7 @@ reach "reading it --release" use-release --release --use-iyimod modsr
 # `impl_block` linked no further than `Kit::Lib::B#walk<&Proc(Int32, Nil)>`
 # and Enumerable's `map` said "can't use yield inside a proc literal";
 # `abstract_generic` came back as `pub abstract generic class GA(T)`;
-# `empty_body` ended on `G(Int32)@G(T)#noop:Nil`; `field_default` was refused
+# `empty_body` ended on `G(Int32)^G(T)#noop:Nil`; `field_default` was refused
 # for "code inside a type body that has to run"; `hooks` said `undefined
 # method 'kind' for Main::Mine`; `macro_def` put `class ::Main::User` in
 # the library's artifact - `superclass mismatch for class Main::User`; and
@@ -630,7 +630,7 @@ travel supertrait true
 # And a method the build writing the artifact never called, which the
 # artifact declares and has no machine code for (SPEC.md IV.1g). It is
 # refused naming the module; it was a link error naming a mangled symbol,
-# `.2A.Kit.3A..3A.Lib.40.Kit.3A..3A.Lib.3A..3A.fb_public.3C.Int32.3E.`.
+# `.2A.Kit.3A..3A.Lib.5E.Kit.3A..3A.Lib.3A..3A.fb_public.3C.Int32.3E.`.
 cat > "$TRAVEL/unreached/kit/lib.iyi" <<'IYI'
 module kit/lib
 
@@ -908,6 +908,82 @@ for build in first second; do
 done
 if [ "$bounded_ok" = 1 ]; then
   echo "bounded: a trait-typed parameter's instantiation at another module's type stays out of kit/lib's artifact"
+else
+  status=1
+fi
+
+# And a travelling body that asks where it was written (issue #140). The
+# layout is the issue's: `lib/page`'s `forall` `greet` calls
+# `Eiy.render("../views/greet.eiy")`, whose macro reads the template beside
+# `@caller.first.filename`. Read back from `mods/lib/page.iyimod`, the body
+# was located in the artifact, and the build that read it ended on
+# `cannot read mods/lib/../views/greet.eiy`. Both of the issue's sequences:
+# a build writing artifacts and then one reading them too, and two builds
+# each writing and reading from an empty directory. The body has a `defer`
+# too: a travelling body comes back as text, its `defer` as the `ensure` it
+# was lowered to, and once the body was located in its `.iyi` the refusal
+# of `ensure` in iyi source took it for one a person wrote, which refused
+# 19 std exercises' artifacts until a node read from an artifact said so
+# by a mark of its own (`Location#artifact`) rather than by its filename.
+EIY="$WORK/eiyart"
+mkdir -p "$EIY/lib" "$EIY/views"
+printf 'module eiyart\n' > "$EIY/iyi.mod"
+cat > "$EIY/lib/page.iyi" <<'IYI'
+module lib/page
+
+import std/eiy::{Eiy}
+
+# A `forall` def: the caller instantiates it, so its body travels in the artifact.
+pub def greet(name : T) : String forall T
+  said = [] of String
+  defer said << "done"
+  Eiy.render("../views/greet.eiy")
+end
+IYI
+printf 'Hello, <%%= name %%>!' > "$EIY/views/greet.eiy"
+printf 'module main\n\nimport lib/page::{greet}\n\nputs greet("world")\n' > "$EIY/main.iyi"
+eiy_ok=1
+for sequence in emit-then-both both-twice; do
+  rm -rf "$EIY/mods"
+  for build in first second; do
+    flags="--emit-iyimod mods --use-iyimod mods"
+    [ "$sequence" = emit-then-both ] && [ "$build" = first ] && flags="--emit-iyimod mods"
+    # shellcheck disable=SC2086
+    if ! (cd "$EIY" && "$IYI" build $flags -o "$build" main.iyi) > "$EIY/$sequence-$build.log" 2>&1; then
+      echo "eiy: the $build build of $sequence failed"
+      grep -m3 -E "error|Error|cannot read" "$EIY/$sequence-$build.log"
+      eiy_ok=0
+    elif [ "$("$EIY/$build" 2>&1 | tr -d '\r')" != 'Hello, world!' ]; then
+      echo "eiy: the $build build of $sequence printed '$("$EIY/$build" 2>&1)'"
+      eiy_ok=0
+    fi
+  done
+done
+# And an error inside a travelling body, which names the line of the source
+# the body was written on rather than a line of the artifact's rendering.
+cat > "$EIY/lib/sized.iyi" <<'IYI'
+module lib/sized
+
+pub def sized(x : T) : Int32 forall T
+  x.size + 1
+end
+IYI
+printf 'module main\n\nimport lib/sized::{sized}\n\nputs sized("abc")\n' > "$EIY/sized.iyi"
+printf 'module main\n\nimport lib/sized::{sized}\n\nputs sized(2)\n' > "$EIY/unsized.iyi"
+if ! (cd "$EIY" && "$IYI" build --emit-iyimod mods -o sized sized.iyi) > "$EIY/sized.log" 2>&1; then
+  echo "eiy: lib/sized failed to write its artifact"
+  grep -m3 -E "error|Error" "$EIY/sized.log"
+  eiy_ok=0
+else
+  (cd "$EIY" && "$IYI" build --use-iyimod mods -o unsized unsized.iyi) > "$EIY/unsized.log" 2>&1
+  if ! grep -q -E "^In (.*[/\\\\])?lib[/\\\\]sized\.iyi:4:5" "$EIY/unsized.log"; then
+    echo "eiy: an error in a body read from lib/sized's artifact is not at lib/sized.iyi:4:5"
+    grep -m3 -E "^In |Error" "$EIY/unsized.log"
+    eiy_ok=0
+  fi
+fi
+if [ "$eiy_ok" = 1 ]; then
+  echo "eiy: a travelling body's Eiy.render and its errors are located in its source, both build sequences"
 else
   status=1
 fi

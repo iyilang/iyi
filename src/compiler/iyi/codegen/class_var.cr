@@ -305,6 +305,14 @@ class Iyi::CodeGenVisitor
   def get_class_var_global(class_var)
     global_name = class_var_global_name(class_var)
     global = get_global global_name, class_var.type, class_var
+    # iyi: a thread-local's address is the one `get_global` worked out on
+    # this thread, through the accessor or the thread pointer, and is kept
+    # in every module. This used to look the global up again here outside
+    # the main module and answer the bare global, which undid the accessor
+    # on Mach-O and COFF in every unit but the main one: harmless while a
+    # fiber never changed threads, wrong once a parallel task resumes on
+    # another worker (SPEC.md III.4.13).
+    return global if class_var.thread_local?
     global = ensure_class_var_in_this_module(global, class_var)
     global
   end

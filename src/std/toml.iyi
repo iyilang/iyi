@@ -114,6 +114,7 @@
 # with it. As in std/yaml, every test of the union goes through
 # `Any#kind`, which tests the reference types first.
 
+@[Unsafe("the parser and printer read the bytes of strings through raw pointers")]
 module std/toml
 
 # What is wrong with a document, and where: `line` and `column` count from

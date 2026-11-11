@@ -15,6 +15,7 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO/bench/darwin_frames.sh"
 
 # The search path is a list, and the byte between its entries is the
 # platform's: `;` where a drive letter already owns the colon.
@@ -472,7 +473,9 @@ echo "== every std module exercise runs from artifacts as it runs from source"
 # links against the wrong body runs fine and answers differently, which is
 # the failure this is most worth catching.
 unconsumable=""
-for source in "$REPO"/bench/std_*_exercise.iyi; do
+# The module tests that `iyi test` runs (`bench/std_*_test.iyi`) are the
+# same kind of program, and answer the same question.
+for source in "$REPO"/bench/std_*_exercise.iyi "$REPO"/bench/std_*_test.iyi; do
   name="$(basename "$source" .iyi)"
   work="$WORK/r1/$name"
   mkdir -p "$work/mods"
@@ -536,17 +539,44 @@ for source in "$REPO"/bench/std_*_exercise.iyi; do
       continue
       ;;
   esac
-  if ! cmp -s "$work/source.out" "$work/artifact.out"; then
+  # Without darwin's frames under a task's panic (bench/darwin_frames.sh).
+  without_frames < "$work/source.out" > "$work/source.cmp"
+  without_frames < "$work/artifact.out" > "$work/artifact.cmp"
+  if ! cmp -s "$work/source.cmp" "$work/artifact.cmp"; then
     unconsumable="$unconsumable $name"
     echo "  $name: runs differently from its artifacts"
-    diff "$work/source.out" "$work/artifact.out" | sed -n '1,6p' | sed 's/^/    /'
+    diff "$work/source.cmp" "$work/artifact.cmp" | sed -n '1,6p' | sed 's/^/    /'
   fi
 done
 if [ -n "$unconsumable" ]; then
   echo "  FAIL: cannot be consumed as artifacts:$unconsumable"
   status=1
 else
-  echo "  all $(ls "$REPO"/bench/std_*_exercise.iyi | wc -l | tr -d ' ') exercises answer the same from source and from artifacts"
+  echo "  all $(ls "$REPO"/bench/std_*_exercise.iyi "$REPO"/bench/std_*_test.iyi | wc -l | tr -d ' ') exercises answer the same from source and from artifacts"
+fi
+
+# The filter above (bench/darwin_frames.sh) leaves out a frame, whichever
+# binary it names, and nothing else: a panic's message beside it, a line
+# that starts with a number and a name, one with a shorter hexadecimal
+# number, and a byte that is not UTF-8 stay, so a difference there is
+# still a difference.
+kept="$(printf '%s\n' "iyi: panic: refused" \
+  "3 from-source answers" \
+  "4   from-source                         0x12ab answered")"
+printf '%s\n' "iyi: panic: refused" \
+  "0   from-source                         0x000000010299550c *Std::Cookie::Cookie#to_set_cookie:String + 356" \
+  "1   libsystem_c.dylib                   0x0000000180001234 abort + 12" \
+  "3 from-source answers" \
+  "12  toml-plain                          0x0000000100c0447c ~procProc(Nil) + 92" \
+  "4   from-source                         0x12ab answered" > "$WORK/frames.in"
+printf '%s\n' "$kept" > "$WORK/frames.want"
+printf 'after \377 a byte\n' | tee -a "$WORK/frames.in" >> "$WORK/frames.want"
+if without_frames < "$WORK/frames.in" > "$WORK/frames.out" && cmp -s "$WORK/frames.want" "$WORK/frames.out"; then
+  echo "  darwin's frames are left out of the comparison, and nothing else is"
+else
+  echo "  FAIL: the frame filter left out more or less than the frames:"
+  LC_ALL=C sed 's/^/    /' "$WORK/frames.out"
+  status=1
 fi
 
 echo
@@ -576,40 +606,15 @@ else
 fi
 
 echo
-echo "== and on the platforms this runner is not"
-# The front end only, which is where a platform differs: a module's
-# `{% if flag?(:darwin) %}` branch declares a different `lib` with
-# different `fun`s, and nothing outside darwin ever read one. That is how
-# the section above passed here and failed there — `undefined fun
-# 'opendir' for LibC` — a whole day after it was written.
-#
-# `--no-codegen` because the answer is what a consumer's front end
-# resolves, and because it costs half a second per exercise instead of
-# five: the whole sweep over four targets is a minute.
-unportable=""
-for target in aarch64-darwin x86_64-windows-msvc aarch64-linux-gnu x86_64-linux-musl; do
-  for source in "$REPO"/bench/std_*_exercise.iyi; do
-    name="$(basename "$source" .iyi)"
-    work="$WORK/cross/$target/$name"
-    mkdir -p "$work/mods"
-    if ! (cd "$work" && "$IYI" build --no-codegen --target "$target" \
-            --emit-iyimod mods -o out "$source") > "$work/emit.log" 2>&1; then
-      unportable="$unportable $target/$name"
-      echo "  $target $name: cannot write its artifacts: $(grep -m1 -E 'Error|BUG' "$work/emit.log" | cut -c1-120)"
-      continue
-    fi
-    if ! (cd "$work" && "$IYI" build --no-codegen --target "$target" \
-            --use-iyimod mods -o out2 "$source") > "$work/use.log" 2>&1; then
-      unportable="$unportable $target/$name"
-      echo "  $target $name: $(grep -m1 -E 'Error|BUG' "$work/use.log" | cut -c1-120)"
-    fi
-  done
-done
-if [ -n "$unportable" ]; then
-  echo "  FAIL: cannot be consumed on another platform:$unportable"
+# Every exercise read from its own artifacts for darwin, Windows, aarch64
+# and musl, through bench/std_platforms.sh, which CI runs in jobs of its
+# own instead: 47 of a slow Windows job's 127 minutes went to it (CI job
+# 128265739456). `STD_PLATFORMS=0` leaves it to them.
+if [ "${STD_PLATFORMS:-1}" = 0 ]; then
+  echo "== and on the platforms this runner is not"
+  echo "  left to bench/std_platforms.sh (STD_PLATFORMS=0)"
+elif ! bash "$REPO/bench/std_platforms.sh"; then
   status=1
-else
-  echo "  every exercise reads its own artifacts on darwin, windows, aarch64 and musl"
 fi
 
 echo

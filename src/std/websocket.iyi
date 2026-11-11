@@ -146,6 +146,7 @@
 # halves against each other, against hand-made frames, and against
 # Python and Node peers, compressed and not.
 
+@[Unsafe("frames are read into byte buffers it allocates, grows and indexes itself")]
 module std/websocket
 
 import std/http::{HTTP, Request, Response, Upgraded, HTTPError, TlsStream}

@@ -94,6 +94,7 @@ echo "== what a digest refuses"
 # A digest that has given its final has nothing left to give: a second
 # final, or more bytes, would answer a hash of nothing anyone asked for.
 cat >"$WORK/refuse.iyi" <<'IYI'
+@[Unsafe("the refusals hand each digest a string's bytes through to_unsafe with a negative count, the call it must refuse")]
 module refuse
 
 import std/digest::{SHA1, SHA256, SHA224, SHA3_256, SHAKE128, CRC32, CRC64, Adler32, XXH64}
@@ -168,6 +169,7 @@ echo "== sha-3 and shake against python's hashlib"
 # and reads its output in one piece. The same program then times 4 MB
 # through SHA3-256, SHAKE128 and SHA-256, in a release build.
 cat >"$WORK/sha3_random.iyi" <<'IYI'
+@[Unsafe("the random messages are written through String.new's buffer and hex is read through to_unsafe, byte by byte as the Python side does")]
 module sha3_random
 
 import std/digest::{SHA256, SHA3_224, SHA3_256, SHA3_384, SHA3_512, SHAKE128, SHAKE256, Shake}
@@ -318,6 +320,7 @@ echo "== crc-64 against liblzma"
 # `lzma.compress(message, check=CHECK_CRC64)`, which xz's decoder holds
 # every block to. The same splitmix64 on both sides, as above.
 cat >"$WORK/crc64_random.iyi" <<'IYI'
+@[Unsafe("the random messages are written through String.new's buffer and hex is read through to_unsafe, byte by byte as the Python side does")]
 module crc64_random
 
 import std/digest::{CRC64}
@@ -419,6 +422,7 @@ echo "== xxh64 against python's zstd"
 # message; and the 64 bits iyi answers held to the reference. The same
 # splitmix64 on both sides, as above.
 cat >"$WORK/xxh64_random.iyi" <<'IYI'
+@[Unsafe("the random messages are written through String.new's buffer and hex is read through to_unsafe, byte by byte as the Python side does")]
 module xxh64_random
 
 import std/digest::{XXH64}

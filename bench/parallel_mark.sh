@@ -3,13 +3,15 @@
 #
 #     bash bench/parallel_mark.sh
 #
-# Nine steps, six of them failure proofs:
+# Ten steps, seven of them failure proofs:
 #   1. The program holds, release: a million-node tree survives five marks
 #      alone and five with helpers, and the helpers blackened nodes; a
 #      mark's round of permits, closed, gives none to a late helper; the
 #      pool holds a handful of pieces after them; a worker's stack grew to
-#      hold a 300,000-wide object marked alone; and, on Linux and Windows,
-#      a helper with no work spins fifty microseconds before it parks.
+#      hold a 300,000-wide object marked alone; once the marks are over,
+#      a second of sleep costs the process under a tenth of a core's
+#      second, every helper parked; and a helper with no work spins
+#      SPIN_BEFORE_PARK_NS before it parks.
 #   2. The two pause means, printed: alone against with helpers.
 #   3. Failure proof: the marker's donation of its stack's bottom removed
 #      from a copy of the prelude; the helpers wake and find nothing, and
@@ -20,15 +22,20 @@
 #      by name, on the wide object.
 #   6. Failure proof: the spin before the park counted in pause hints, far
 #      past the bound on any machine; the park check names its length.
-#   7. Failure proof: a close that leaves the round's permits open; the
+#   7. Failure proof: the spin before the park never gives up, as darwin's
+#      helpers spun until they parked; the idle check names the CPU.
+#   8. Failure proof: a close that leaves the round's permits open; the
 #      late take succeeds, and the permits check says so.
-#   8. A helper a round late is counted: on a copy of the prelude where
-#      every helper waits between its wake and its permit, and the
-#      collector after opening a mark's permits, 200 back-to-back
-#      collections with helpers end, in each of five runs.
-#   9. Failure proof: that copy with the permits opened before the
-#      mark's counts are reset, as every round had them; it never ends,
-#      and the bound ends it.
+#   9. A helper a round late is counted: on a copy of the prelude where
+#      every helper woken for one round waits for that round to close and
+#      the next to open before it takes a permit, and the collector waits
+#      after opening a mark's permits for every late helper to take one
+#      and finish its drain, 200 back-to-back collections with helpers
+#      end, in each of five runs.
+#  10. Failure proof: that copy with the permits opened before the
+#      mark's counts are reset, as every round had them; the late helpers'
+#      finished drains are wiped from the takers done before the third
+#      collection waits for them, so it never ends, and the bound ends it.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -78,7 +85,7 @@ fi
 grep -q 'every property held' answers.txt || { cat answers.txt; exit 1; }
 
 step "the mark, alone and with helpers ($CORES cores here)"
-grep -E '^(tree|permits|mark|pool|stack|park):' answers.txt | sed 's/^/  /'
+grep -E '^(tree|permits|mark|pool|stack|idle|park):' answers.txt | sed 's/^/  /'
 
 # $1 label, $2 awk program over the prelude, $3 the phrase the failing check
 # prints, $4 the exit code expected.
@@ -126,17 +133,27 @@ prove_fails "a stack that will not grow dies by name" \
   '{ if ($0 ~ /^        return IyiHeap\.read64\(w \+ W_STACK\) if need <= cap$/) { print "        IyiRoots.fatal(\"iyi: a mark worker'"'"'s stack overflowed\\n\") if need > cap"; print; next } print }' "stack overflowed" 1
 
 # A spin counted in pause hints and not by the clock, long enough on any
-# machine: the check reads the spin's length and names it.
-case "$(uname -s)" in
-  Darwin)
-    step "failure proof: a spin before the park that ignores the clock is refused"
-    echo "  not here: darwin's helpers spin without parking, so the spin before a park is Linux's and Windows'"
-    ;;
-  *)
-    prove_fails "a spin before the park that ignores the clock is refused" \
-      '{ sub(/spins & \(SPIN_CHECK - 1_u64\) == 0_u64 && now_ns >= deadline/, "spins >= 200000_u64"); print }' "park:" 1
-    ;;
-esac
+# machine: the check reads the spin's length and names it. A hundred
+# hints for every nanosecond the clock allows, which is past the check's
+# five times wherever a hint costs more than 0.05 ns. It was 200,000
+# hints, 4.4 ms on a twelve-core Linux machine and 3.6 on a four-core
+# Windows runner, and 113 us on the three-core M1 of CI's macos-14, a
+# hint there being 0.56 ns: inside the bound, and the proof did not fire.
+prove_fails "a spin before the park that ignores the clock is refused" \
+  '{ sub(/spins & \(SPIN_CHECK - 1_u64\) == 0_u64 && now_ns >= deadline/, "spins >= 100_u64 * SPIN_BEFORE_PARK_NS"); print }' "park:" 1
+
+# A helper that never parks: the spin before the park never gives up,
+# which is what darwin's helpers did until they parked. The second of
+# sleep after the marks is then a second of every helper's CPU, and the
+# idle check names it - on every platform, since every platform's park
+# begins with that spin.
+if [ "$CORES" -gt 1 ]; then
+  prove_fails "helpers that spin forever once the marks are over are refused" \
+    '{ sub(/return seen if spins & \(SPIN_CHECK - 1_u64\) == 0_u64 && now_ns >= deadline/, "return seen if false"); print }' "idle:" 1
+else
+  step "failure proof: helpers that spin forever once the marks are over are refused"
+  echo "  one core here: the runtime starts no helper, so there is none to spin"
+fi
 
 # The round's close leaves its permits where they were: a helper waking
 # after the wait takes one, on any machine and any core count.
@@ -147,11 +164,21 @@ prove_fails "a round whose close leaves its permits open is refused" \
 # round is open - preempted between its wake and its take - takes a
 # permit a generation early, and every count it adds to has to be that
 # round's by then (`open_mark_permits`). A copy of the prelude makes it
-# happen every round: each helper waits 200 us between its wake and its
-# take, and the collector 50 us once a mark's permits are open. The
-# program collects 200 times back to back with a 2 MiB block live, so
-# every mark asks for helpers and is over before a helper's wait is.
+# happen every round, and in the order that breaks the counts: each
+# helper, once woken, waits for that round's permits to close and the
+# next round's to open, then takes one; the collector, once a mark's
+# permits are open, waits for every helper to have taken one and finished
+# its drain, or 10 ms. Opened after the resets, a late helper's drain
+# waits for the collector counted in before it, so the collector waits
+# its 10 ms and goes on; opened before them, the helpers drain an empty
+# pool and count themselves done, and the reset wipes that. The copy
+# waited 200 us in the helper and 50 us in the collector instead, which
+# left the order to the scheduler: on a 4-vCPU runner its broken copy
+# once ran all 200 collections to the end (run 42519177002, job
+# 128849118545). The program collects 200 times back to back with a
+# 2 MiB block live, so every mark from the third asks for two helpers.
 cat > late.iyi <<'IYI'
+@[Unsafe("the program keeps a 2 MiB block from Pointer#malloc live as an address, so every mark has a large object to scan")]
 class Held
   @@block : UInt64 = 0_u64
 
@@ -176,8 +203,25 @@ raise "late: the live block was lost" if Held.block == 0_u64
 puts "late: 200 collections back to back, each mark with helpers a round late, and every one ended"
 IYI
 LATE='
-  /^          seen = wait_generation\(seen\)$/ { print; print "          until_ns = now_ns + 200000_u64"; print "          while now_ns < until_ns"; print "            spin_pause"; print "          end"; late = 1; next }
-  /^        open_mark_permits\(helpers\)$/ { print; print "        until_ns = now_ns + 50000_u64"; print "        while now_ns < until_ns"; print "          spin_pause"; print "        end"; slow = 1; next }
+  /^          seen = wait_generation\(seen\)$/ { print
+    print "          until_ns = now_ns + 2000000000_u64"
+    print "          while pool_word(POOL_MARK_PERMITS).value.get & MARK_PERMITS_LEFT != 0_u64 && now_ns < until_ns"
+    print "            spin_pause"
+    print "          end"
+    print "          while pool_word(POOL_MARK_PERMITS).value.get & MARK_PERMITS_LEFT == 0_u64 && now_ns < until_ns"
+    print "            spin_pause"
+    print "          end"
+    late = 1; next }
+  /^        open_mark_permits\(helpers\)$/ {
+    print "        done_before = pool_word(POOL_HELPERS_DONE).value.get"
+    print
+    print "        until_ns = now_ns + 10000000_u64"
+    print "        while now_ns < until_ns"
+    print "          taken = pool_word(POOL_MARK_PERMITS).value.get.unsafe_shr(32_u64)"
+    print "          break if taken >= helpers && pool_word(POOL_HELPERS_DONE).value.get >= done_before + taken"
+    print "          spin_pause"
+    print "        end"
+    slow = 1; next }
   { print }
   END { if (!(late && slow)) exit 3 }'
 # $1 the copy's directory, $2 the prelude to make it late from.

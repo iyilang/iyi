@@ -77,6 +77,7 @@
 # because TLS checks the certificate either way. A URL with an address for
 # its host asks nothing.
 
+@[Unsafe("answers are parsed by walking the bytes of the messages through a raw pointer")]
 module std/secure_dns
 
 import std/dns::{DnsError, DnsMessage, DnsName}

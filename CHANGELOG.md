@@ -1,9 +1,3188 @@
 # Changelog
 
-## 0.19.1 — 2026-10-23
+## Unreleased
 
-**A collector hang and a handful of TLS and PKI edges fixed, and TLS
-Encrypted Client Hello added.** A program whose collections mark with
+### Added
+
+- **`iyi test` runs tests at once, says what each named case came to, and
+  can run some of them.** Half as many tests build and run together as the
+  machine has cores, `-p N` says how many, and the report stays in file
+  order. 24 small tests on 12 logical cores, with a non-release compiler:
+  22.6 to 24.0 s one at a time, 6.3 to 7.2 s twelve at once, 7.4 to 7.6 s
+  six at once - so the default stops at half, a tenth slower for half the
+  memory (a test's build is some 200 MB).
+  `--json` carries each named case (`test "name" { }`) with its verdict and
+  its panic's message or its reason to skip, where it was only lines in the
+  output. `--run TEXT` runs the named cases whose name holds TEXT, and a
+  run in which none does fails rather than passing having tested nothing.
+  `test "name", skip: "why" do ... end` is a case that does not run and
+  says `skip - name: why`. The MCP `test` tool takes `run` too.
+- **`iyi test --release` and `-D FLAG` build every test that way, and
+  `-v` shows what a passing test printed.** A test was built as `build
+  FILE -o BINARY` and nothing else, so neither the optimised program nor a
+  flag-gated path could be tested; a `--chaos` failure's `reproduce:` line
+  carries the flags, since without them the seed reruns another program.
+
+### Changed
+
+- **`iyi test` in a directory no longer runs other projects' tests.** It
+  walks the tree as `fix` and `mod tidy` do: not into `lib` (the installed
+  dependencies, whose failing test failed the run of the project that
+  installed them), a dot directory, a directory with an `iyi.mod` of its
+  own, or a link.
+- **A test killed at its deadline on Linux and macOS takes what it
+  started with it.** It leads a process group of its own from its spawn
+  (`Process.new(..., process_group: true)`, which this fork adds) and the
+  deadline ends the group, as a job object already did on Windows; ^C or
+  a SIGTERM to `iyi test` ends every group still running.
+- **A test's output is in the order it wrote it.** Standard output and
+  standard error were two pipes copied by two fibers, and a failed case's
+  panic landed above or below all of the test's other lines as the copies
+  were scheduled: sixteen tests at once came back out of order in 8 of 16.
+  They are one pipe now, and the same run comes back in order in 16 of 16.
+- **The prelude's library is held to 4,738 lines, by the owner's
+  decision** (SPEC.md I.4): the 49 lines `skip:`, `--run`, the case
+  report and taking them out of a test's environment need, which only the
+  test program can do.
+- **A program a test starts no longer reports into the test's file or runs
+  only its `--run` cases.** IYI_TEST_REPORT and IYI_TEST_RUN were in the
+  environment the test's children inherit; the prelude reads them at the
+  test's first named case and takes them out of it. Only a test with a
+  named case reads its environment, so no other program links `environ`.
+
+### Fixed
+
+- **`iyi run`'s exit is the program's, when Windows holds its executable a
+  moment past the exit.** The runner deleted its program in a cleanup that
+  raised when Windows refused - "being used by another process" - and the
+  refusal replaced the program's verdict: `std_http_latency.iyi` printed
+  ALL CHECKS PASSED and `iyi run` exited 1 (CI job 130381353157). The
+  delete is asked again for two seconds, and a file still held then is
+  left for the sweep that takes an hour-old runner's leftovers. Reproduced
+  with a reader holding the program until 300 ms after it exits: exit 1
+  and the file left before, exit 0 and the file deleted now;
+  `bench/verbs_exercise.sh` holds both, and a 5 s hold, on Windows. One
+  second failed once on a CI runner, the 300 ms hold's file kept (job
+  130589942769); the gate now prints when its reader let go and when the
+  runner ended, so another such failure says which was late.
+
+### Gates
+
+- **Four module exercises are tests now.** `bench/std_bool_test.iyi`,
+  `std_box_test.iyi`, `std_heap_test.iyi` and `std_string_pool_test.iyi`
+  are named cases over the prelude's assertions, and their drivers run
+  them with `iyi test --json` and require each case's verdict by name,
+  including the one a broken module must fail. The box proof broke
+  `unbox` with a `raise`, which stopped the program building and was read
+  as the test catching it; it now hands C a null pointer, which the case
+  fails at run time. `std_exercise.sh`'s artifact round trip and
+  `std_platforms.sh` read `bench/std_*_test.iyi` beside the exercises.
+  The four drivers share `bench/module_test.sh` instead of carrying the
+  same hundred lines each, and build the release half with `iyi test
+  --release`.
+- **`spec/std/process_spec.cr` holds `process_group:`** on POSIX: the
+  child leads a group of its own, what it starts is in that group, and a
+  signal to the group ends it; without the option the child stays in this
+  process's group.
+- **`bench/test_verb.sh` proves a test's children are out of its reach**:
+  a child program with a named case of its own neither lands in the test's
+  report nor runs only the test's `--run` cases. Against a prelude that
+  leaves the two variables in place the report carried the child's case.
+- **A pull request runs the jobs that run what it changed.**
+  `scripts/ci_plan.py` credited a bench file to every job whose text held
+  its name, comments included, and a comment above a job header counted
+  for the job before it: a pull request changing only
+  `bench/std_tls_exercise.sh` ran `windows-std-platforms`, which never runs
+  it, and passed. Nor did it see a gate another script runs: 483 of the
+  590 files under bench/ were run by no job it knew of, so a change to a
+  module exercise fell to the fast tier, which runs none. It reads code
+  now, not comments, and follows what runs what - a step, a script that
+  runs, sources or finds a file by a glob or a `${VAR}` in its name, a
+  program that reads its own template, a directory a script names - so
+  two files under bench/ are run by nothing, and both are used by nothing.
+  Measured against the old planner over every bench file: the only jobs it
+  no longer chooses, for eleven files, are ones it chose from a comment.
+- **`bench/ci_plan_exercise.py`, in the docs job**, holds the planner to
+  that on this tree and on a workflow of its own. Pointed at the planner
+  before this change it fails the three checks above.
+- **`bench/gates_reachable.py` counts what is run, not what is named.** A
+  name in a comment, a message, a docstring or a list of strings was a run,
+  so thirteen measurement scripts were "reached" through
+  `measured_numbers.py`'s list of what it cannot re-measure, and three tools
+  through the gate's own list of them; and `.iyi` programs were not looked
+  at. A file is run now when a job or a Makefile runs it, or a script that
+  is itself run does - by a command on its line, a loop or variable a
+  command uses, or a function that runs one - and that covers every
+  `.sh`, `.py` and `.iyi` directly under bench/: 399 of 415 are run, and
+  the sixteen that are not are named as tools with what each is for
+  (`machine_probe.py`, and the instruments `measured_numbers.py` holds the
+  docs' quotes to). On a copy of the tree with a gate named only in a
+  comment, the gate before this counted it reached; this one does not.
+- **The nightly run skips a commit that already passed.** A scheduled run
+  of a commit that passed the full set on master in the last seven days
+  selects no job (`scripts/ci_plan.py`, `RECHECK_AFTER`): 08ce6c1cb had
+  passed it on its push and on the night after, and the third run, the
+  night after that, put 44 jobs in a queue that already held three pull
+  requests. An unchanged master still runs again once a week - a run counts
+  only if a job past the plan and the verdict succeeded in it, or a nightly
+  that selected nothing would restart the week - and a run whose history
+  cannot be read runs everything.
+
+## 0.21.0 — 2026-11-09
+
+**A spawn has one verb and names its unit, and a plain `spawn` runs in
+parallel where the compiler can prove it safe.** `g.spawn { }`,
+`g.spawn(unit: :new) { }` and `g.spawn(unit: :same) { }` replace
+`spawn_parallel`, `spawn_serial`, `serial:` and `parallel:`, and a
+*unit*, a set of tasks of which at most one runs at a time, is defined
+with a `Unit(T)` value in std/unit to hold what only one unit reaches
+(SPEC.md III.4.16, III.4.18). A plain `spawn` whose block passes every
+check `unit: :new` does is a parallel task of its own unit; any other
+stays where it was (III.4.15). `std/parallel` cuts a `List`, an `Array`
+or a range into chunks across the workers (III.4.14), and `iyi test
+--chaos` runs each test under seeds that draw every scheduling choice, to
+find a test that passes only because its tasks ran in one order
+(III.4.17). A module that handles raw memory says so with
+`@[Unsafe("why")]`, and `String#byte_at`, `Bytes.of` and
+`String.new(Array(UInt8))` read and build bytes without it (III.13).
+`@[SafeReach]` is proven, not trusted. In the runtime each channel has a
+lock of its own, a `std/mutex` lock and its release are two locked
+instructions and a starving waiter is handed the lock, the pool starts
+one worker and grows to the work, a collection has a ceiling, and a size
+class the program stopped allocating in gives its memory back. A build
+compiles its units on threads of their own and a `--release` build
+optimises on every core. On a Mac a path typed in another case is the
+file it names, and two pointers compare equal when they hold the same
+address (#165).
+
+**What a user must change.** `spawn_parallel`, `spawn_serial`, `serial:`
+and `parallel:` are compile errors naming the new spelling, and `iyi fix`
+rewrites them. A module that compiled may be refused until it carries
+`@[Unsafe("why")]` or moves to the safe byte calls, and a library it
+uses needs a release that carries its own marks; 0.20.1 refuses the mark,
+so code that carries one needs 0.21.0.
+
+### Breaking
+
+- **One spawn verb: `g.spawn { }`, `g.spawn(unit: :new) { }` and
+  `g.spawn(unit: :same) { }` (SPEC.md III.4.16, III.4.18).**
+  `spawn_parallel` and `spawn_serial` are gone. A call to either is a
+  compile error naming the new spelling - "`spawn_parallel` is gone: one
+  verb starts a task now. Write `g.spawn(unit: :new) { }`" - and carries
+  it as an edit, so `iyi fix` rewrites `g.spawn_parallel do` and
+  `g.spawn_serial do` where the call has a block and no parentheses.
+  `unit: :new` is held to everything `spawn_parallel` was, with the same
+  refusals, now worded `the block spawn(unit: :new) runs in a unit of its
+  own, on another thread`. The argument takes the literal `:same` or
+  `:new`: another symbol, a value only known at run time, `unit: :new`
+  under `-Dgc_none` or `-Dgc_boehm`, and two placements at once are
+  refused. The typed group takes each spelling. The repository's 173 call
+  sites were moved, std's included; std/http's connections and
+  std/parallel's chunks run as before. The rename leaves the runtime's
+  paths as they were, and `bench/web_cores.py`'s server says so: on macOS
+  26.6, Apple M2 Pro, 10 cores (the user's machine), 10 workers, best of 3
+  interleaved 5 s rounds, `check_version` answered 104,591 req/s before
+  and 104,868 after, `order` 103,420 and 103,597; on Windows 11, 12
+  logical processors (the user's machine), 12 workers, 6 interleaved 8 s
+  rounds, the medians were 129,533 and 131,692 req/s for `check_version`
+  and 135,045 and 136,016 for `order`, within the rounds' own spread
+  (124,921 to 145,595).
+
+- **A spawn names its unit: `g.spawn(unit: :same)` and
+  `g.spawn(unit: :new)` replace `serial: true` and `parallel: true`
+  (SPEC.md III.4.18).** Breaking for builds of `mt/next` only: 0.20.1 had
+  neither spelling. A *unit* is now defined - a set of tasks of which at
+  most one runs at any instant and which switch only where one parks: the
+  main thread or an `IyiThread` with its tasks, a `unit: :new` task with
+  the tasks it starts, or a `Unit` value - and the spellings name it.
+  There is no alias: `serial:` and `parallel:` are each one compile error
+  naming the new spelling, "`serial:` is gone: a spawn names its unit
+  now. Write `g.spawn(unit: :same) { }`, which keeps the task in its
+  spawner's unit whatever it captures; `g.spawn { }` lets the compiler
+  place it (SPEC.md III.4.16, III.4.18)", carrying the edit when the
+  argument is the literal `true`, so `iyi fix` rewrites the call. A
+  program that only asks for `:same` starts no pool. Every in-repo
+  caller moved: bench, the specs, the samples, std, README and
+  PARALLEL_PLAN.md.
+
+- **A module that handles raw memory says so: `@[Unsafe("why")]`
+  (SPEC.md III.13).** Any `.iyi` file could reach memory the compiler
+  does not check, without spelling `Pointer`: four tasks writing one
+  `Share` string through `name.to_unsafe[i] = ...` printed `AAAA…`,
+  `AAAA…` and `DDDD…` on three runs, and `Slice.new("hello".to_unsafe,
+  1_000_000)[999_999]` died of a memory fault behind a bounds-checked
+  `[]`, while the fault message said that outside `Pointer` a program
+  cannot reach memory it does not own. Now a module whose first
+  statement is `@[Unsafe("why")]` may use what the compiler does not
+  check - a value whose type is or holds a `Pointer` however it was
+  reached (`to_unsafe`, the buffer of `String.new(n) { |buffer| }`, a
+  parameter, a cast, `pointerof`), `uninitialized`, a `lib` or top-level
+  `fun`, `@[Extern]`, `asm`, `@[Primitive]`, a call to a def whose
+  caller keeps a promise (`@[Unsafe(call: "index is in 0...size")]`, as
+  `unsafe_fetch`, `unsafe_put` and `Array.unsafe_build` carry), and the
+  trust marks `@[Share]` and `@[UnsafeReach]` - and every other module
+  is refused at its first such operation, with the count of the others
+  and the mark as the edit. The check reads types after typing, so `iyi
+  check`, `iyi build` and the editor agree. The reason is required, and
+  a mark nothing needs is a warning (`--error-on-warnings` fails it)
+  unless a macro conditional may hide what another target needs.
+  `String#byte_at(i)`, `Bytes.of(text)` and `String.new(Array(UInt8))`
+  read and build bytes without raw memory. `iyi fix` inserts the mark
+  with a reason for a person to rewrite, the language server offers it
+  as a quick fix and shows it on hover, `iyi migrate` writes it into a
+  migrated module whose Crystal source handles raw memory, `.iyimod`
+  (v62) carries it, and the fault message names the program's own
+  marked modules. **A program that compiled may be refused:** mark the
+  module with what it does with raw memory, or read its bytes with
+  `byte_at` and `Bytes.of`; 0.20.1 refuses the mark above a `module`
+  header, so code that carries one needs 0.21.0. In this repository the
+  prelude marks 13 of its 20 files, std 83 of its 121 modules (sixteen
+  that only read or built bytes, or made one C call, need none now), and
+  bench 85 of its 175 programs, every reason written by hand; no sample
+  needs one. The 33 library lines this adds - nine marks, two promises,
+  `byte_at` and `String.new(Array(UInt8), start, count)` - raised the
+  library's ceiling, by the owner's decision, from 4,650 to 4,683 (SPEC.md
+  I.4). Outside it, iyi-web (fourteen library modules), iyi-db (its
+  `@[Share]` and `@[Share(owns: true)]` types and an `uninitialized`),
+  iyi-pg (four modules marked, the rest moved to the safe calls),
+  iyi-metric (one), jwt (`jwt/base64url` marked, `jwt/keys` moved to
+  `byte_at`) and iyiturkiye (three Crystal-format parsers marked, two
+  controllers moved to the safe calls, and releases of iyi-web, iyi-pg,
+  iyi-db and jwt that carry theirs) need marks or the safe calls before
+  they build on 0.21.0. The check costs,
+  as `IYI_PROF=1`'s `main: unsafe check` against the whole `iyi check`
+  (median of five), 14 ms of 285 for `samples/iyi/hello.iyi`, 239 of
+  2,238 for `bench/std_fuzz_exercise.iyi` and 576 of 2,231 for
+  `bench/std_tls_exercise.iyi` on Linux (12 vCPU, shared), 17 of 342,
+  300 of 2,945 and 744 of 2,896 on Windows 11, 12 logical processors
+  (the user's machine), and 12 of 243, 202 of 1,863 and 491 of 1,870 on
+  macOS 26.6, an M2 Pro with 10 cores (the user's machine): 5% of a small
+  program's check, 10 to 26% of a large one's.
+
+### Added
+
+- **`iyi init` with no module path names the project after its directory
+  (#156).** `mkdir my-project && cd my-project && iyi init` writes `module
+  my-project` and `my_project.iyi`, and says which name it took and that a
+  project others will import wants its whole path. The name is held to the
+  checks a typed one is and never rewritten: `MyProject` or `my project` is
+  refused, and nothing is written. `iyi init .` stays refused - the first
+  argument is a module path, not a directory - and now says that `iyi init`
+  with no arguments is the form that means this directory.
+
+- **`Unit(T)` in `std/unit`: a value only one unit's tasks reach (SPEC.md
+  III.4.18).** `Unit.new { {} of String => Int32 }` makes a `Unit` owning
+  what the block answers, and `g.spawn(in: u) { |hits| ... }` starts a task
+  of `g` in `u`'s unit, handed the value: never at the same instant as
+  another of `u`'s tasks, interleaving with them where one parks, as
+  Swift's actors do, so a value read before a park may have changed after
+  it. The compiler holds the block to `Share` captures (``the block
+  spawn(in: counts) runs in another unit captures `log : Array(Int32)`,
+  which is not Share: ...``) and its answer to `Share` (``spawn(in:
+  counts) answers `Hash(String, Int32)`, which is not Share: ...``), and
+  refuses `in:` with `unit:`; so `Unit(T)` is `Share` for any `T`, as
+  `Mutex(T)` is. A task that panics answers `Panicked` and does not
+  poison the `Unit`. On more than one worker its tasks run on the pool;
+  on one worker, on the main thread, whichever thread spawned them, so
+  one worker stays one thread. There is no `Unit.current`. Ten thousand
+  tasks given to one `Unit` from the main thread, against ten thousand
+  `spawn(unit: :new)` tasks, on four workers (`bench/std_unit_exercise.sh`
+  counts both and bounds neither), took per task: on Linux (12 vCPUs,
+  shared), in five runs, 5133 to 6686 ns against 3904 to 6889 plain and
+  3376 to 4442 against 2249 to 4142 with `--release`; on macOS 26.6,
+  Apple M2 Pro, 10 cores (the user's machine), in four runs, 3011 to 4140
+  against 2483 to 2707 plain and 5224 to 6630 against 1124 to 1231 with
+  `--release`, where a `Unit`'s tasks cost four to six times a unit of
+  their own; on Windows 11, 12 logical processors (the user's machine),
+  built by Crystal 1.21.0, in one run, 5618 against 6359 plain and 4369
+  against 3948 with `--release`.
+
+- **Data parallelism as a library: `std/parallel` (SPEC.md
+  III.4.14).** `each_parallel`, `map_parallel`, `sum_parallel` and
+  `reduce_parallel` on a `List`, an `Array` and an `Int32` or `Int64`
+  range cut the elements into chunks, eight a worker unless `grain:`
+  names a chunk's size, and as many parallel tasks as there are workers
+  take chunks from one count. `map_parallel` answers what `map` does, in
+  order; `each_parallel` answers the error of the lowest failing index
+  and starts nothing past a failure it knows of; a panic in a chunk
+  reaches the caller, and a cancelled caller is stopped without a partial
+  answer. The block and the elements must be `Share`: a def says its
+  elements cross with `@[Share(elements: "...")]`, refused at the call -
+  ``Array#map_parallel hands its block `Counter` on other threads, ...``
+  - and a refused capture names the one-thread twin (`map`) as the other
+  way out. An `Array` is copied into a `List` first, since a task of the
+  caller's unit may write it while the caller waits. With one worker, one
+  chunk, `-Dgc_none` or `-Dgc_boehm` the chunks run on the caller. On
+  macOS 26.6, an M2 Pro with 10 cores (the user's machine), ten workers
+  ran two CPU-bound sums, SHA-256 of 20,000 strings and a string
+  transform 6.4 to 7.4 times faster than one thread; on Windows 11 with
+  12 logical processors (the user's machine), twelve workers ran the
+  sums and SHA-256 6.4 to 7.9 times faster, and the transform, which
+  allocates, 3.8 times. `bench/std_parallel_exercise.sh` holds it, with
+  five broken copies caught by name.
+
+- **A `std/mutex` lock and its release are two locked instructions, from
+  seven.** The holder's task and thread were four sequentially consistent
+  stores, an `xchg` each on x86_64, and neither orders anything: one
+  tells a task whether it holds the lock already, the other is a hint
+  for spinning. They are relaxed, through `IyiAtomic` inside std/mutex,
+  and `Atomic` keeps its one ordering. Every release also counted itself
+  a change for `wait_for`, a `lock xadd`; a waiter now counts itself as
+  waiting before its own release, with the lock held, so a release that
+  reads no waiter under the lock skips the count and the wake, and the
+  window a waiter counted after its release left - a release reading 0
+  first, the waiter parking on a count it never moved - is closed (the
+  proof is beside `release`). `bench/chan_scaling.iyi`'s `mutexes`, a
+  mutex to each pair of tasks, median of 5 interleaved on Linux x86_64
+  (12 vCPU, shared): 25.8 million updates a second with one pair, 37.6
+  with the stores relaxed, 43.3 with the count skipped too; twelve pairs
+  73.6, 106.6 and 111.9; `mutex`, twelve tasks on one, 21.6, 32.0 and
+  40.1. With the entry below as well, median of 5: on Windows 11, 12
+  logical processors (the user's machine), one pair 22.4 to 37.6 million
+  and twelve tasks on one 21.3 to 34.8; on macOS 26.6, an M2 Pro with 10
+  cores (the user's machine), one pair 36.4 and 35.3, where the stores
+  were `stlr` either way, and four pairs 36.2 to 45.9.
+  `bench/std_mutex_exercise.sh` proves a waiter counted after its
+  release hangs the exercise.
+
+- **A `std/mutex` waiter that starves is handed the lock.** A task that
+  let the lock go and took it straight back, running while the waiter it
+  woke was still waking, kept it for as long as it went on: beside a
+  holder taking it back after every 20 us hold, a waiter waited 611 ms,
+  all 30,000 holds, on Linux x86_64 (12 vCPU, shared), and 3.0 s beside
+  100 us holds. A waiter that has waited 1 ms, or been woken 4 times to
+  find the lock taken again, now starves, and the next release hands it
+  the lock rather than letting it go, Go's `sync.Mutex` starvation mode;
+  until a waiter starves the lock goes to whoever takes it first. The
+  same waiter has it in 7.3 and 7.1 ms, two wakes each queued behind the
+  running holder until the monitor preempts it, and in 0.14 and 0.50 ms
+  with the pool calling an idle worker for a hand-off from a running
+  task. On macOS 26.6, an M2 Pro with 10 cores (the user's machine), 41.9
+  ms and 3.0 s before, median of 5, and 1.6 ms after; on Windows 11, 12
+  logical processors (the user's machine), 181 ms and 3.0 s before, 4.6
+  and 9.1 ms after, 0.20 and 0.54 ms with the hand-off call.
+  `bench/std_mutex_exercise.sh` has the step, a waiter beside 1 ms holds
+  (599 ms before), with a broken copy each for a waiter that never
+  starves and a release that frees the lock where it hands it over.
+  `bench/chan_scaling.iyi`'s `held`, two tasks taking turns on each of W
+  mutexes with 20 us holds, against its Go twin on `sync.Mutex`, `over_ns`
+  before, after and Go's, median of 7 interleaved on Linux: 281/263/110
+  at one pair, 307/287/151 at two, 356/301/189 at four, 454/566/239 at
+  eight. The park, the wake and the switch, `over_ns` less the new
+  `floor_ns` (the same updates with nothing waiting), are -2 to 41 ns
+  after against Go's -34 to 17; the rest is the hold's clock, a
+  clock_gettime syscall where Go reads the vDSO. On the M2, median of 5,
+  after against Go: 59/55 at one pair, 61/95 at two, 136/392 at four,
+  231/507 at eight. On the Windows machine, median of 7, `over_ns`
+  before and after: 194/149 at one pair, 206/157 at two, 258/213 at four,
+  303/318 at eight; the park, the wake and the switch 16, -69, 30 and 30
+  ns after, Go's -22, -3, 277 and 216. Go's monotonic clock moved too
+  coarsely there for the hold - 1.84 ms an update - and its twin spins a
+  count measured at start instead.
+
+- **A `--release` build optimises on every core.** It still generates one
+  LLVM module, so LLVM sees the whole program, and then cuts it into
+  partitions of about 20,000 instructions, each optimised and compiled on
+  a thread of its own (`ReleasePartition`). A partition gets its own copy
+  of the functions its code calls and of the constants it reads, as LLVM's
+  ThinLTO imports them, done through the C API because that is all
+  Windows' `LLVM-C.dll` exports: a local copy of a local function of up to
+  100 instructions, an `available_externally` one of up to 300 of any
+  other, such as `__iyi_new`, there only to be inlined, and none of what
+  LLVM may not inline. A local function that one function alone calls
+  goes with that function, to its partition and into every copy of it,
+  since one module inlines it whatever its size, and what LLVM must
+  inline (`alwaysinline`, such as the collector's `IyiMark.barrier_word`)
+  is copied whatever its size. A copy the inliner turns down is compiled
+  anyway, so the limits are what the build costs: `samples/iyi/cores.iyi`
+  (std/http and TLS), cold, took 22.45 s of processor in 22.45 s as one
+  module against 35.78 s in 7.87 s cut on a shared 12-vCPU Linux VM,
+  20.75 s in 22.24 s against 34.72 s in 7.94 s on macOS 26.6, Apple M2
+  Pro, 10 cores (the user's machine), and 29.83 s in 30.65 s against
+  50.37 s in 12.14 s on Windows 11, 12 logical processors (the user's
+  machine). On the M2 Pro the programs it builds ran within 1.2% of the
+  one-module build, best of 45 interleaved runs: bcrypt, SHA-256,
+  ChaCha20-Poly1305 and `bench/runtime.py`'s four from 0.98x to 1.00x,
+  and JSON 1.012x, where the one-module binary against itself ran 1.001x.
+  **Windows keeps one module by default**: there the seven ran from 0.98x
+  to 1.01x, but JSON 1.015x, and 1.033x as the median of three bests of
+  15, where the one-module binary against itself ran 0.995x and 1.002x.
+  `IYI_RELEASE_PARTITIONS=0` cuts it there too.
+
+  What the cut still costs JSON is what ThinLTO's costs: a local function
+  reached from another partition is promoted, 86 of them in JSON's, and
+  loses what one module proves of it, such as `Int64#to_s`'s base being
+  10 to 16, and the chance to be dropped once inlined; and a copy with one
+  call in its partition is inlined where one module, seeing every caller,
+  keeps it whole. Copying locals only `available_externally` ran JSON
+  1.029x on the M2 Pro. Attributes inferred over the whole module before
+  the cut (`function-attrs`) took it to 1.009x, but ChaCha20-Poly1305 from
+  0.98x to 1.04x and JSON on Windows to 1.07x; constants propagated over
+  it first (`mem2reg`, `ipsccp`) left JSON where it was and cost
+  ChaCha20-Poly1305 5%.
+
+  Two causes of the Windows numbers are found. LLVM 23, which Windows
+  builds with, added a value kind before `Instruction`, so every
+  instruction read as an unnamed kind and the cut took every local
+  function for reached from elsewhere and made it external: 819 functions
+  in the hash benchmark's binary against 254 for one module, and the hash
+  at 1.07x. `LLVM::Value::Kind` has the kind now, and the binary has 317.
+  The arithmetic benchmark's 1.43x was where its loop landed: the same
+  instructions, at offset 16 of a 64-byte line in the cut build and 32 in
+  the one module. The loop alone, at each offset, ran 0.32 s from offset 0
+  to 12, 0.43 s from 13 to 16 and 0.30 s from 17 on, the same on Windows
+  and on Linux; which offset a build draws moves with any change before
+  the loop, and LLVM's branch alignment (`-x86-align-branch`) left the
+  cut build's at 1.43x. Innermost loops now start on a 32-byte boundary
+  on x86, so that loop lands at 0 or 32. The cut is a function of the
+  program, so the objects are the same on one thread and on twelve.
+  `IYI_RELEASE_PARTITIONS=1` keeps the one module, and
+  `IYI_RELEASE_IMPORT` and `IYI_RELEASE_INLINE` set the two limits.
+  `bench/release_cores.sh` holds the cores, the output, the objects and
+  the inlining across the cut, each against a broken copy, and the
+  `available_externally` copies against a build with none. On `mt/next`,
+  `bench/concurrent_mark.sh`'s copy whose barrier shades nothing passed
+  when cut, 8 runs of 8 on Linux: the loop that reads the payload's
+  colour held it where the second stop's conservative scan found it. That
+  read is in a frame of its own now, as the move was, and the cut copy
+  lost round 0's payload in 5 runs of 5.
+
+- **`iyi test --chaos[=SEED] [--chaos-runs N]` finds a test that passes
+  only because its tasks ran in one order (SPEC.md III.4.17).** The
+  compiler rules out memory races; this is for the ordering races left.
+  Each test is built with `-Diyi_chaos` and run once per seed, 100 seeds
+  from a drawn one unless told, with one worker. Every scheduling choice
+  is drawn from the seed: which task runs next, a preemption at any
+  `Atomic` verb, channel operation, `select`, spawn, `value` or loop
+  back-edge, the order a wake readies a word's waiters, and which ready
+  `select` arm goes first. Half the seeds walk at random, and half use PCT
+  priorities for depth. A parallel task runs as a unit of its own, so the
+  orders two cores could produce are met, and tasks of one unit still
+  meet only at parks. A failure prints its seed and `reproduce: iyi test
+  --chaos=SEED file`, which runs the same schedule again; `--json`
+  carries `chaos_seed`. On Linux (12 vCPUs, shared), a check-then-act on
+  an `Atomic` and a missing join each passed 1,000 of 1,000 plain runs
+  on the 12-worker pool. They were caught under 63 and 57 of seeds 1 to
+  1,000 - the random walk caught the first, PCT the second. A seed is
+  the same schedule on every target. Seeds 6 and 42 caught the two bugs
+  with the same schedule hashes on Linux, on macOS 26.6 (Apple M2 Pro,
+  10 cores, the user's machine) and on Windows 11 (12 logical
+  processors, the user's machine). With more than one worker the threads
+  are real and a seed names no schedule, which the report says. A build
+  without the flag is unchanged. On Linux, release `web_cores` and
+  `chan_scaling` have the same IR, but for line numbers. On all three
+  machines their sections are the same size as before, and on macOS
+  chan_scaling's instructions are the same.
+
+### Changed
+
+- **`@[SafeReach]` is proven, not trusted (SPEC.md III.4.4).** The mark
+  on a constant or a class variable quieted the reach warning and let a
+  spawn that reaches the state run in parallel, and nothing checked it:
+  `bench/parallel_exercise.sh` carried a constant whose method assigned a
+  field from two parallel tasks under the claim. The compiler now accepts
+  the mark only when (a) the state's type is `Share`, (b) every write,
+  and every read once a parallel task may run, is behind one `Mutex#lock`
+  on a constant or a class variable (or a prelude `IyiSchedLock` or
+  `IyiRuntimeLock` bracket), or (c) every write comes before the first
+  parallel task can start; anything else refuses the annotation, naming a
+  write that breaks it, how it writes and where it may run from. A copy
+  of the state kept where the proof cannot follow it - stored in an
+  array or a field, answered from a proc - is refused wherever it is
+  kept. A program that compiled may now be refused: the ways out are a
+  `Share` type (`Mutex`, `Atomic`, `List`), moving the writes before the
+  first spawn, one `Mutex` around every write and read, or, in a module
+  marked `@[Unsafe("why")]` (SPEC.md III.13), the new
+  `@[UnsafeReach("why")]`, taken on trust. In this repository
+  `bench/reuse_integrity.iyi` keeps its
+  pairs in a `Mutex`, `bench/parallel_exercise.sh`'s `Database` builds its
+  rows in `initialize` and is only read, and `bench/arena_exercise.iyi`
+  and `bench/thread_exercise.iyi` say `@[UnsafeReach]` beside their
+  `Pointer`s. No external code carries the mark: iyi-db has none,
+  iyi-pg's CHANGELOG and iyi-web's README mention it in prose, and the
+  website excerpts `samples/iyi/cores.iyi`, still proven. The proof adds
+  0.09 to 0.10 s and 15 MB of RSS to a 1.9 to 2.3 s `iyi check` of a small
+  server with three claims, and 0.10 to 0.11 s and 20 MB to 2.5 to 2.7 s on
+  iyi-web's `examples/security.iyi` given two (Linux, 12 vCPU, three runs
+  each); as first written it took 3.87 s and grew RSS to 4,069 MB.
+- **A `std/mutex` lock allocates nothing.** Its release was registered
+  for a panic in the block by a `defer`, a node and a closure made each
+  time; a Mutex now makes its node once and registers that, and its link
+  is written only when it changes, so tasks taking turns at a lock do not
+  pass the node's line between their cores. An uncontended update went
+  from 16-18 ns to 11-12 (Go's `sync.Mutex`: 8), and
+  `bench/chan_scaling.iyi`'s `held` shape, the nanoseconds an update loses
+  beyond its 20 us hold at 1, 2, 4 and 8 pairs, least of 7 interleaved:
+  on Linux x86_64 (12 vCPU, shared) 195/203/195/492 before, 145/123/151/395
+  after, Go's twin 137/222/364/473; on macOS 26.6, an M2 Pro with 10 cores
+  (the user's machine) 57/57/164/374, 13/17/74/208 and 58/83/399/550; on
+  Windows 11, 12 logical processors (the user's machine) 159/225/271/298
+  and 86/153/131/151 (Go's twin holds by a calibrated spin there, so its
+  figures do not compare). Tasks on one Mutex, millions of updates a
+  second at 4 and 12 (10 on the M2): 44.8/35.3 to 64.9/43.9 on Linux,
+  36.0/32.6 to 68.1/36.3 on the M2, 36.2/28.2 to 67.8/73.1 on Windows.
+
+- **Many producers into one channel no longer queue at its lock.** Every
+  task waiting for a channel's lock read it between each of the holder's
+  writes; now one of them spins on it and the rest look every 512 pauses
+  on x86-64, or 2,048 `isb`s on arm64, Go's spinbit lock without its
+  sleep. `bench/chan_scaling.iyi`'s `fanin`, 2, 4, 8 and 12 producers
+  into one channel of 128 (10 on the M2), millions of values a second
+  before, after and Go's twin's: on Linux x86_64 (12 vCPU, shared, best
+  of 9) 22.7/16.1/9.0/9.4, 58.2/39.9/25.3/30.2 and 36.4/30.3/23.4/26.0;
+  on Windows 11, 12 logical processors (the user's machine, best of 7)
+  14.7/18.4/10.7/6.6, 43.4/34.7/27.0/28.5 and 17.5/15.7/14.7/12.9; on
+  macOS 26.6, an M2 Pro with 10 cores (the user's machine, best of 7)
+  19.8/4.1/4.5/4.3, 53.5/30.4/19.7/18.6 and 20.5/13.8/9.1/8.1. The
+  scheduler's lock and the lists `std/mutex` parks in spin as before:
+  waiting long there too cut Windows' twelve tasks on one mutex from
+  26.7 to 17.9 million updates a second.
+
+- **Linux reads its clocks through the vDSO.** The runtime's monotonic
+  clock, the collector's pause clock and std/time's `Time.monotonic` and
+  `Time.utc` each made a `clock_gettime` syscall, 64 to 65 ns a read on
+  Linux x86_64 (12 vCPU, shared, kvm-clock); they call the
+  `clock_gettime` the kernel maps into every process, found through the
+  auxiliary vector and the vDSO's own symbol table as Go's runtime finds
+  it, 17 to 18 ns a read, with the syscall behind it where there is no
+  vDSO. No libc symbol is bound, so the dependency floor is unchanged.
+  The scheduler's sleep queue, its timers and the preemption monitor read
+  this clock. `bench/chan_scaling.iyi`'s `held` shape, which holds a
+  mutex 20 us by watching the clock, lost 303, 355, 413 and 1,169 ns an
+  update beyond the hold at 1, 2, 4 and 8 pairs and loses 200, 239, 314
+  and 529 (least of five interleaved runs, same machine).
+
+- **Each channel has a lock of its own, and so does each list a
+  `std/mutex` waiter parks in.** Every channel was behind the runtime's
+  one scheduler lock, and tasks talking on channels of their own on
+  different cores waited for each other there: `bench/chan_scaling.iyi`'s
+  twelve pairs of tasks, each ping-ponging on two channels of its own,
+  made 1.49 million messages a second on twelve workers, against 12.7
+  million for one pair on one worker, with 127 of 144 sampled task
+  stacks in that lock; they make 57.3 million now (Linux x86_64, 12
+  vCPU, shared). On Windows 11, 12 logical processors (the user's
+  machine), they went from 1.13 to 38.2 million (Go's twin,
+  `bench/chan_scaling/main.go`: 24.5 million), and on macOS 26.6, an
+  M2 Pro with 10 cores (the user's machine), from 0.85 to 27.5 million;
+  twelve producers into one channel went from 1.93 to 14.4 million values
+  a second on the Windows machine (Go 12.4 million). A woken fiber is
+  readied once the channel's lock is let go. `web_cores`, whose requests
+  take no channel operation, held: best of four interleaved at twelve
+  workers on the Windows machine, `check_version` 103,770 req/s before
+  and 104,787 after, `order` 93,478 and 91,607; best of three at ten on
+  the M2, 118,593 and 118,855, 114,853 and 115,602. A `select` takes its
+  channels' locks in address order, and a fiber parked in several queues
+  is woken once, by whichever waker
+  claims its park. `bench/parallel_exercise.sh`'s new `wakes` step holds
+  selects over two channels and a deadline to each value once, cancels
+  landing as tasks park to ending them, and turns handed through
+  `park_on` to every one taken, with a broken copy caught for each; its
+  proof that `take_now` and `put_now` need their lock now runs the copy
+  until it fails by name, where a run that died of a memory fault failed
+  the gate on Windows.
+
+- **On Windows a mark beside the program counts a waiting worker's core
+  free.** The mark's helpers there are held to the cores the program's
+  own threads leave, and every pool worker counted as one of those
+  threads whether it was running or waiting in its poller with nothing
+  to run: a server of twelve workers on twelve processors, idle between
+  requests, marked with one helper at every collection. A scheduler
+  thread waiting in its poller is not counted now. On Windows 11 with 12
+  logical processors (the user's machine), iyiturkiye against postgres
+  at twelve workers, seven endpoints, three interleaved runs of each:
+  the helpers a mark asked for went from 1 at every one of 546 marks to
+  5.4 to 9.0 on average across the endpoints, and the median mark from
+  5.9 ms to 4.5; the longest marks did not move (90th percentile 200 ms
+  against 167, the longest 557 against 592), nor did request p99 beyond
+  the runs' own spread. Linux and darwin never held the helpers so.
+  `bench/concurrent_mark.sh` asks a mark beside a pool of a worker per
+  core for more than one helper while every worker waits, everywhere,
+  and for one while every worker runs a task, on Windows; one broken
+  copy counts the waiting workers again and one counts every worker of
+  a started pool free, and each is caught.
+
+- **A plain `spawn` runs in parallel where the compiler can prove it
+  safe (SPEC.md III.4.15).** A `g.spawn { }` whose block
+  passes every check `spawn(unit: :new)`'s does, and whose walk of the
+  module state it reaches through calls finds nothing that is not
+  `Share` other than state marked `@[SafeReach]`, is a parallel task of
+  its own unit on the pool. Any other spawn stays in its spawner's unit,
+  as before. Nothing that compiled stops compiling, and there are no new
+  warnings. `--explain-spawn` on `build`, `check` and `run` writes a note
+  for each spawn: `spawn runs in parallel, in a unit of its own`, or
+  `spawn stays in its spawner's unit (SPEC.md III.4.18):` followed by the
+  refusal that kept it there, which names the capture.
+  `--explain-spawn-std` adds std's spawns. `-f json` marks these notes
+  `"severity": "note"`, and the language server shows the same verdict as
+  an inlay hint. `g.spawn(unit: :same) { }` keeps a task in its unit
+  whatever it captures. `IYI_WORKERS=1` keeps every eligible spawn on one
+  thread and the pool unstarted. The pool starts at the first eligible
+  spawn, with one worker (the entry below). Of the spawns that bench/ and
+  samples/ programs reach, 125 locations now run in parallel, 289 stay in
+  their spawner's unit and 6 differ by instantiation. All 12 of std's
+  spawns stay in their spawner's unit. `bench/spawn_eligible.sh` holds the
+  placement, the unit, the opt-out, one worker and the notes, with a
+  broken copy caught for each. `bench/spawn_fanout.iyi` hashes 31 MiB in
+  64 plain spawns. It runs in 99 ms on one worker and 12 ms on twelve on
+  Linux (12 vCPUs), in 158 ms on one and 20 ms on ten on macOS 26.6
+  (Apple M2 Pro, 10 cores, the user's machine), and in 95 ms on one and
+  10 ms on twelve on Windows 11 (12 logical processors, the user's
+  machine). `bench/web_cores.iyi`'s server, whose connections std
+  spawns, held: best of three interleaved, `check_version` 119,836 req/s
+  before and 118,532 after on the M2 at ten workers, 117,313 and 114,976
+  on the Windows machine at twelve. Gate steps that tested a
+  unit's order or one thread's turns, and depended on spawns staying
+  in their unit, spawn with `spawn(unit: :same)`: in `runtime_exercise`,
+  `thread_exercise`, `concurrency_exercise` (its two-panics step among
+  them) and `parallel_exercise`, and in `std_http_exercise`'s copy that
+  serves a connection on the accepting thread (SPEC.md III.4.15, part 8).
+  `std_mutex_exercise`, run where std/mutex and this meet, ended at
+  "deadlock: every fiber is blocked": the pool its plain spawns started
+  left its refusal of a wait nothing could end, which only a one-thread
+  program makes, waiting instead. Its twenty tasks parking inside the lock
+  and its deadlock on one thread spawn with `spawn(unit: :same)`, the refusals
+  run before the first step that starts the pool, and the run asks for its
+  two workers before anything does.
+
+- **A spawn kept in its unit is said where the author looks (SPEC.md
+  III.4.16).** `iyi check` notes, unasked, each `g.spawn` the compiler
+  kept in its spawner's unit in a file under the project's root, with
+  what kept it there; a note is not a warning, so `--error-on-warnings`
+  is unchanged, and `g.spawn(unit: :same)` says the unit is meant and
+  takes no note. `iyi build` prints nothing new. The reason names the
+  module that declared a type in its chain: `Dep::Config::Config's field
+  @hits (module `dep/config`) is assigned in `bump``. The language
+  server's hint after a plain `spawn` reads `in a unit of its own` or `in
+  its spawner's unit: ` and the reason's first clause. A `.iyimod` records
+  where each spawn of its module ran (`iyi mod dump` lists them, under
+  `spawns`), and a build that rewrites it prints one note for each spawn
+  that moved since, each way: `spawn in `App::Work.crunch` ran in parallel
+  when app/work was last built, and stays in its spawner's unit now
+  (SPEC.md III.4.18): ...`. The new section is outside the hashes and the
+  format version is unchanged. `bench/spawn_eligible.sh` holds each
+  spelling, the refusals and the fix, the remote reason and the rebuild's
+  line, with a broken copy of the runtime or of the compiler
+  (`IYI_SPAWN_BROKEN`) caught for each; `bench/lsp_session.py` step 23s
+  holds the hints.
+
+- **The spawn notes say what a unit makes safe.** A spawn kept in its
+  spawner's unit because its block shares a cell - a captured local it
+  assigns, a module-level value it writes - was told "a data race" and
+  asked for a lock, though the unit made it safe. The reason now reads
+  "share one mutable cell: safe within one unit and a data race across
+  two (SPEC.md III.4.4). To run it in a unit of its own, keep the value
+  in an `Atomic`, ...". The notes cite III.4.18 (`spawn stays in its
+  spawner's unit (SPEC.md III.4.18): ...`, `spawn runs in a unit of its
+  own: `unit: :new` asks for it, ...`, `spawn runs in parallel, in a unit
+  of its own: ...`), and so do the rebuild notes, `iyi mod dump` (`in its
+  spawner's unit: ...`), `iyi check --help` and `--explain-spawn`'s help.
+  The language server's hint after a plain `spawn` reads `in a unit of
+  its own` or `in its spawner's unit: ...`, and its tooltip ends with
+  the definition of a unit. `unit: :new`'s refusals open `the block
+  spawn(unit: :new) runs in a unit of its own, on another thread`.
+
+- **The pool starts one worker and grows to the work.** The first
+  parallel task, from `spawn(unit: :new)`, `Server.serve` or an eligible
+  `spawn`, started every worker at once. It now starts one, and another
+  only when a task is waiting and no worker is idle to take it, up to
+  `IyiWorkers.count`, one on its way at a time, as Go starts a thread
+  from `wakep`. On a shared 12-vCPU Linux machine, a program whose one
+  eligible spawn prints a line took 2.46 ms on twelve workers and now
+  takes 0.68 ms, against 0.44 ms with the spawn serial. One eligible
+  spawn followed by the main thread building 200 lists of 20,000
+  strings peaked at 82 MB resident on twelve workers, and now peaks at 17
+  to 28 MB, because the collector's budget floor counts threads.
+  `bench/spawn_fanout.iyi` runs as fast as before: 10 ms on twelve
+  workers, 96 ms on one. `IyiWorkers.launched` says how many have
+  started. `bench/spawn_eligible.sh`'s `grows` step holds that one spawn
+  starts one worker and four tasks running at once start four, and
+  catches a pool that starts whole and one that never grows (SPEC.md
+  III.4.15, part 6).
+
+- **darwin's spinners give their core away, and a stop sleeps on its
+  count.** `IyiThread.yield_cpu` was the ARM `yield` hint on darwin, which
+  gives the scheduler nothing, so the runtime lock's spinner, a class
+  lock's and the scheduler's spun through the timeslice of the thread they
+  waited for; it is Mach's `thread_switch` with the depress option now,
+  after 1,024 turns of the hint (`IyiThread::YIELD_AFTER`), and darwin's
+  floor has one name more (SPEC.md III.9). The stop's waits for its
+  threads to count in and out spin briefly and then sleep on the count,
+  woken by the last thread (Linux's futex, darwin's `os_sync`). On macOS
+  26.6, an M2 Pro with 10 cores, five interleaved runs: 7d's storm beside
+  ten busy processes made 784 to 1,056 threads in its 10 s and makes
+  3,200 in 1.0 to 1.6 s; `bench/thread_exercise.iyi` at 20 threads alone
+  took 3.3 to 4.8 s and takes 1.5 to 3.7; `bench/web_cores.iyi` serves
+  the same (login 171.02 against 171.45 req/s, `check_version` 119,338
+  against 118,778, `order` 117,066 against 115,664, best of five). On
+  Linux, 12 vCPU, the storm beside nine busy processes went from 848 to
+  1,184 threads in 10 s to 3,200 in 5.8 to 8.6 s. `sched_yield`, measured
+  first, lost at 20 threads beside a busy process per core (src/iyi/
+  thread.iyi). `bench/thread_exercise.sh` 7h runs the storm with its
+  stops asleep, and proves the wake by a run that hangs without it; 7i
+  asks darwin's storm beside busy processes for half its rate alone, and
+  puts the hint back to fail it.
+  counts every registered thread fails the second. The busy budget is
+  the one the churn's own collections leave: a `collect` asked for
+  straight after one the churn triggered counted the two threads that
+  filled a slice in between, an 8 MiB budget, once on Windows 11, 12
+  logical processors (the user's machine).
+
+- **A size class the program stopped allocating in gives its memory
+  back.** Issue #145's app on twelve workers kept every size class's
+  pages from the endpoints before: after its 11 endpoints one after
+  another it held 617 arenas (thirteen threads' fill arenas in about 47
+  classes, none ever released) and 208 MB resident. The arenas were 195
+  MB of it: 18 MB of chunk tables and 176 MB of chunk pages, against 4.4
+  MB live and 133 MB counted warm idle. Fiber stacks were 1.2 MB and
+  images 6.8 MB. A class no cache has refilled for three collections and
+  at least a second now keeps no warm pages, and its empty arenas are
+  let go by their caches and unmapped. The same run ended with 432
+  arenas and 182 MB, 63 MB of it warm idle.
+
+  Against the branch before it, 2 interleaved rounds, on Windows 11, 12
+  logical processors (the user's machine): peak working set 205 MB
+  against 222; requests a second 613.4 against 615.4 and p99 161.5
+  against 159.8 ms at the geometric mean, app CPU 4.42 against 4.43 ms a
+  request. `bench/release_pages.iyi`, whose handler asks for the same
+  classes every epoch, held there (best of 3, 4.03M against 3.84M a
+  second, peak 100-103 MB against 101-104) and on macOS 26.6, Apple M2
+  Pro, 10 cores (the user's machine; 1.51M against 1.51M).
+
+  The rest of the gap to goturkiye's 53-129 MB is structural. The epoch
+  allocates up to the budget, 28-52 MB at the floor of 4 MiB for each
+  allocating thread, and the sweep keeps another budget's worth (plus
+  #150's carry-over) warm for the next one; goturkiye under
+  `GODEBUG=gctrace=1` ran a 16-24 MB goal on 7-11 MB live in #145's
+  campaign, Windows 11, 12 logical processors (the user's machine).
+  `bench/sweep_exercise.sh` checks it both ways: a class idle
+  for four short epochs keeps its warm pages, and past a second it keeps
+  none and maps no arena. Each direction has a broken copy that fails,
+  and so does a copy whose cache keeps the arena. A class refilled only
+  before the first collection is counted used at that collection: the
+  first epoch has no start on record, its stamp of 0 read as more than a
+  second old, and `bench/std_gc_exercise.iyi`'s 160 MiB of arenas fell to
+  112 MiB thirteen collections and under 134 ms in on Linux. Check 6c
+  holds such a class's arena through four short epochs, against a broken
+  copy.
+
+- **A build compiles its units on threads of their own, the largest
+  first, and parses the files a program imports ahead of the walk that
+  reads them (SPEC.md IV.7).** Each unit's module is now verified,
+  written as bitcode and compared with the cache on a codegen thread and
+  compiled in the context it was built in, instead of the main thread
+  writing every unit's bitcode in turn for workers that read it back;
+  the workers are threads rather than fibers of the default context, and
+  the largest units start first. And up to four threads parse the files
+  a program imports and requires, and the files those name, while the
+  top-level pass does the rest; the pass takes a parse only of the bytes
+  it read itself, and a parse's warnings where it would have made them.
+  Wall time of a debug build of samples/iyi/cores.iyi, best / median of
+  five interleaved builds, before both, after the first, after both:
+  cold 1.435 / 1.534 s, 1.165 / 1.182 and 1.087 / 1.123, warm 0.989 /
+  1.031, 0.869 / 0.877 and 0.742 / 0.830 on Linux (12 vCPU VM); cold
+  1.132 / 1.163, 0.903 / 0.909 and 0.869 / 0.871, warm 0.773 / 0.778,
+  0.639 / 0.642 and 0.610 / 0.612 on macOS 26.6, Apple M2 Pro, 10 cores
+  (the user's machine); cold 2.777 / 2.845, 2.466 / 2.643 and 2.413 /
+  2.449, warm 1.923 / 2.006, 1.635 / 1.685 and 1.592 / 1.629 on Windows
+  11, 12 logical processors (the user's machine). The top-level pass
+  alone went from 0.140 s to 0.084 (median) on Linux, 0.107 to 0.066 on
+  the M2 and 0.251 to 0.166 on Windows, for 0.04-0.11 s more processor
+  time. The objects are the same bytes, and peak memory went down:
+  1,037-1,039 MB to 954-955 on Linux, 1,005 to 937 on the M2, a working
+  set of 1,063-1,066 to 999-1,002 on Windows. `--threads 1` keeps both
+  on one thread.
+- **On x86 an innermost loop starts on a 32-byte boundary.** LLVM aligns
+  every loop to 16; `-x86-experimental-pref-innermost-loop-alignment` is
+  set once a process. Where a hot loop lands decides how fast it runs:
+  `bench/runtime.py`'s arithmetic, cut into partitions, drew a slow
+  offset and ran 1.29x its one-module time, best of 30 interleaved on a
+  shared 12-vCPU Linux VM, and 0.99x aligned. What is left is 0 against
+  32 in a 64-byte line, 1.07x in one cut on Windows 11, 12 logical
+  processors (the user's machine); aligning to 64 put every build at 0,
+  the slower of the two there, 1.07x against the 32-aligned one module.
+  The padding is 1.5% of `samples/iyi/cores.iyi`'s text on Linux,
+  1480302 bytes to 1502862, and 1.1% of its binary on Windows, 1871360
+  to 1891840.
+### Gates
+
+- **parallel_mark's late-helper proof is ordered, not timed.** Its copy of
+  the runtime made helpers late by timing - 200 us between a helper's
+  wake and its take, 50 us after the collector opened a mark's permits -
+  and left the rest to the scheduler, so the broken copy, permits opened
+  before the counts are reset, once ran all 200 collections to the end
+  on a 4-vCPU CI runner (run 42519177002) where it should hang. The copy
+  now orders it: a woken helper waits for its round to close and the
+  next to open before it takes a permit, and the collector waits for
+  every helper to take one and finish its drain, or 10 ms. On Linux (12
+  vCPU) every helper was late in 197 or 198 of the 199 marks with
+  helpers; the broken copy hung 20 runs of 20 pinned to 4 CPUs and 20 of
+  20 unpinned, and the shipped runtime ended 20 of 20 each way, in about
+  2 s a run.
+
+- **concurrent_mark's idle pool is full before it is asked anything, on
+  twelve Windows processors too.** The step spawned a spinning task per
+  core and let each go once all had arrived; the pool starts its workers
+  one at a time, and on Windows 11 with 12 logical processors (the user's
+  machine) the twelve arrived time-sliced on 7 to 11 workers within 10 to
+  25 ms, each preempted in its quantum, so the step read "11 of 12 workers
+  waiting" (down to 7) in 13 of 60 runs of the plain build - once in the
+  windows-native-gates runtime-exercise step of the pre-release soak at
+  6c8e14725. CI's four-core runners never showed it, nor Linux (12 vCPU,
+  every one of 500 runs of the step alone launched twelve, in 1.5 ms).
+  The tasks now spin until the pool has launched every worker too, and
+  `bench/concurrent_mark.sh` proves it on a copy of the runtime whose
+  workers each start 50 ms late: the step holds there ("12 of them pool
+  workers waiting" on Linux), and the step as it was is caught ("3 of 12
+  workers waiting").
+
+- **spawn_fuzz matches the two builds' notes on macOS too.** The fuzzer
+  keyed each spawn note by its path relative to the seed's directory,
+  which it left as `tempfile` named it; the compiler prints a note at the
+  file's real path, and darwin's /tmp and `$TMPDIR` are reached through
+  /private, so every key read "../../private/tmp/..." and each parallel
+  spawn was UNMATCHED: 2,291 findings in seeds 6400-6899 in the
+  pre-release soak at 1ad0cae3f on macOS 26.6, Apple M2 Pro (the user's
+  machine), and 22 in seeds 6893-6895 on Linux with `TMPDIR` through a
+  symlink, none with it resolved. CI runs the gate on Linux alone, where
+  /tmp is real, so it never showed. The work directory is now resolved,
+  and `bench/spawn_fuzz.sh` proves it: seed 1 is clean with `TMPDIR`
+  through a symlink, and a copy of the fuzzer that leaves it unresolved
+  is caught (Linux, 12 vCPU: the gate held in 168 s, 167 s with its own
+  `TMPDIR` through a symlink).
+
+- **A pull request runs the fast part of CI; master, mt/next and the
+  nightly run the whole of it.** Every pull request ran all 39 jobs,
+  about twenty runner-hours, a README edit as much as a compiler change,
+  on a plan that runs twenty jobs at once: a run took 93 to 192 minutes,
+  and one job of #118's waited 112 for a runner. `scripts/ci_plan.py` now
+  picks the jobs: a pull request runs the Linux build, the specs, the rules
+  gate, the cross-compiled Windows binaries and the docs gates; only docs
+  runs the docs gates alone, and only `bench/` the jobs that name the
+  changed files. A push to a branch other than master and mt/next, the
+  integration branch, runs nothing, and a manual dispatch runs everything. `iyi, built and run on Windows`, the
+  critical path at a median of 105 minutes, is three jobs that run beside
+  each other, and `result` is one check that every selected job passed.
+
+- **`bench/thread_exercise.sh` runs on Windows in two halves, each under
+  a bound of its own.** On windows-2025's four cores the whole took 802 s
+  of its 900 s bound (CI job 128265739456), and the next run was ended at
+  the bound (job 128494833123). 388 and 454 s of those were the plain
+  build's ten more runs of step 1, 39 to 45 s a run, where the user's
+  Windows 11 machine held to four of its 12 logical processors takes 2.3
+  s: most of a run there is the exercise's eight threads on four cores,
+  50,592 ns per allocation in the release build against 133 ns with four
+  threads. `bash bench/thread_exercise.sh again` runs those ten runs
+  alone and `but-again` every other step; the Windows collector job
+  bounds each half to 15 minutes, which the two jobs' steps put at 393 to
+  469 s and 414 to 467 s, and Linux and darwin still run the whole. The
+  failure proof that reads the allocator's word before the context counts
+  a hung run at 30 s rather than 120: its copy hung 8 runs in 28 on that
+  machine, and a hung run had spun 107 s in job 128494833123 when the
+  bound ended the gate.
+
+- **`bench/std_platforms.sh`: every std exercise read from its own
+  artifacts for darwin, Windows, aarch64 and musl, in jobs of its own.**
+  The section of `bench/std_exercise.sh` it was took 2,794 s of the
+  Windows std job's 127 minutes on a slow windows-2025 runner (CI job
+  128265739456; the job's limit is 150) and 2,175 to 2,222 s of the Linux
+  std job's 75 to 77 (limit 90). `bench/std_exercise.sh` still runs it in
+  place unless `STD_PLATFORMS=0`, which is how the Linux and Windows
+  foundation jobs leave it to `std-platforms` and `windows-std-platforms`;
+  darwin-std runs it in place. The release job waits on both.
+
+- **`bench/std_unit_exercise.sh`: a `Unit`'s tasks run one at a time,
+  interleave where they park, survive a panic, and on one worker run on
+  the main thread (SPEC.md III.4.18).** Plain and `--release`, on four
+  workers and on one, with the compiler's five refusals of a block that
+  reaches a `Unit`'s value, and four broken copies each caught at the
+  check that names it: a `Unit` whose tasks each take a unit of their
+  own, one whose tasks run on the spawner's thread on a pool of one, and
+  `IYI_SPAWN_BROKEN=unit-capture` and `unit-answer`, the compiler's two
+  checks removed. `bench/spawn_eligible.sh` adds the old spellings'
+  refusal and `iyi fix`, with broken copies that keep `serial:` as an
+  alias and that drop the refusal; `bench/chaos_exercise.sh` adds a
+  `Unit` whose tasks must start before the spawner parks under some seeds
+  and not others, with copies that give each of its tasks a chaos unit
+  and that leave them in the spawner's; `bench/lsp_session.py` step 23s
+  holds the definition in the hints' tooltips and step 23u the hovers on
+  `Unit` and on `spawn(in:)`. `bench/std_http_exercise.sh` builds a
+  `workers: 1` server whose block appends to an array, whose connections
+  std/http spells `unit: :same`, and refuses the copy that puts them in
+  units of their own, for the socket its block captures.
+
+- **`bench/symbol_names.sh`: no symbol the compiler defines has an `@`
+  (SPEC.md IV.1g).** A program with one of each family - an inherited
+  method and class method, a proc literal in the main file and one under a
+  `pkg@v1.0.0` directory, that file's private def, class variable and
+  constant, a quoted `NamedTuple` key and a `Symbol` - is built and every
+  symbol its objects define is read: none may carry an `@`, each family
+  must be there under its new name, and on Linux the executable is linked
+  with GNU ld and must define no symbol version. The broken copy is the
+  same program from the bootstrap Crystal, which still joins with `@`:
+  1,829 such symbols and 1,388 version definitions on Linux, 1,709 on
+  macOS 26.6, an M2 Pro with 10 cores (the user's machine). Linux, darwin
+  and Windows jobs.
+
+- **`bench/spawn_fuzz.sh`: spawn placement from source and from
+  artifacts, compared over generated programs (SPEC.md III.4.15).**
+  `bench/spawn_fuzz.py` generates by seed programs of two and three levels
+  of modules and builds each from source and from its dependencies'
+  artifacts; the artifact build may keep a spawn in its unit that the
+  source build runs in parallel and never the other way, and both print
+  on four workers what one worker prints. CI runs seeds 0-59 in at most
+  four minutes, and four broken copies of the artifact side through
+  `IYI_SPAWN_BROKEN`, each caught on a seed clean without it. Run by hand
+  on Linux, 1,330 seeds across the generator's versions at about 2.3 s a
+  seed found the first four fixes below, and seeds 75, 2046, 2054, 2248,
+  2256, 2364 and 2388 the fifth; seeds 3000-5999 with every fix found
+  nothing, at 2.6 s a seed.
+
+- **`bench/ensure_park.sh` holds an `ensure` that parks while an
+  exception passes, on Windows.** `bench/ensure_park.cr` raises through
+  seven kinds of ensure that park (`Fiber.yield`, `sleep`, a channel, a
+  contended mutex, the ensure after a rescue that raised again, after a
+  rescue that did not match, and nested ensures), 8 fibers x 400 rounds
+  on one thread and four of them 16 x 200 on four threads, and requires
+  every exception to arrive as the same object carrying the same
+  callstack array. Its broken copy is the old funclet codegen itself,
+  the same program built by the bootstrap Crystal: it passes the
+  control, an ensure that does not park, and fails all seven (0xC0000409,
+  which Git's bash reports as exit 127). 19 s on Windows 11, 12 logical
+  processors (the user's machine); run by CI's windows-gates job, and
+  reported unmeasured elsewhere, since the funclet is MSVC's alone.
+
+- **`bench/spawn_eligible.sh` places spawns that call into an artifact
+  (SPEC.md III.4.15).** A dependency compiled once to its `.iyimod` and a
+  program built against it: the spawn calling the dependency's unguarded
+  append stays in its unit and the program prints 20,000 of 20,000 on
+  four workers, three runs; the one reading state only the dependency's
+  initialiser writes runs in parallel; and state under a claim proven
+  only for the program that wrote the artifact keeps its spawns in their
+  unit, through a call and through a body that travelled. Its broken
+  copies are caught: an artifact without the record, whose consumer
+  keeps every spawn calling into it in its unit naming the module; a
+  function from an artifact read as reaching nothing, which places the
+  spawn in parallel again and printed 19,927 of 20,000 (Linux x86-64,
+  12 vCPU, shared); and an artifact
+  that takes every proven claim to hold for every importer.
+  `bench/safe_reach.sh` adds a constant whose initializer writes claimed
+  state: declared before the first parallel task and first read by a
+  task, accepted; declared after, refused.
+
+- **`bench/safe_reach.sh` holds the SafeReach proof (SPEC.md III.4.4).**
+  The issue's unguarded write is refused, where the compiler before
+  checked it clean; (a), (b) and (c) are each accepted beside broken
+  copies refused - a counter class, a write and a read outside the lock,
+  a write after the first spawn and a copy kept at module init; and
+  `@[UnsafeReach]` is accepted beside a `Pointer` and refused without
+  one. It runs in CI's Linux job.
+- **root_exercise.sh holds the two retentions conservative stack scanning
+  cannot avoid by itself, and the fix for each.** In each, a 64 MB
+  string nobody keeps is held by a word that only looks like a pointer
+  into it. In the first the word is a frame's, left under a slot that a
+  frame laid over it never writes, as dyld's words were under `main` on
+  macos-15. In the second it is an integer kept live in the top level's
+  frame, like the clock reading that kept step 16e's string in
+  bench/concurrency_exercise.iyi. Each fix must free the string:
+  zeroing the stack under a frame before it is used, as `__iyi_enter`
+  does, and reading the clock in a `def` of its own. Without its fix,
+  each case must keep the string. That is the scan being conservative,
+  and it is what precise roots would change. Measured 5 runs of 5 per
+  build on Linux x86_64 (12 vCPU, shared) and on macOS 26.6, Apple M2
+  Pro, 10 cores (the user's machine): 64,050,705 bytes kept without the
+  fix, 50,696 to 50,712 with it. Other platforms report the step as
+  unmeasured.
+
+  Precise roots themselves were measured and are not taken; GC_DESIGN.md's
+  "Precise Stack Roots: Measured, and Not Taken" has the numbers. With
+  LLVM statepoints, on iyi's own optimised IR, JSON ran 1.047 to 1.050x
+  on the M2 Pro tracking pointers alone, and 1.080x once the allocator's
+  integer addresses were roots too, against a bar of 1.03x. web_cores'
+  `.text` grew 15.3% on Linux and 7.1% on the M2 Pro, with a stack map
+  1.3 to 1.8 times the code beside it, and LLVM's code generation took
+  19 to 37% longer. A shadow stack ran JSON 1.52x.
+
+- **concurrent_mark.sh's wake-boost proof fires whatever the machine.**
+  The proof gives the mark's helpers back the boost a satisfied wait
+  brings and expects the wake check to catch them preempting the
+  program's thread, which they do only when no processor is idle: on
+  Windows 11 with 12 logical processors (the user's machine) the boosted
+  build lost 0 to 3 wakes of 256 in five runs, and a soak's runs at two
+  and four workers missed it in all ten tries. Each run of it is now
+  held to two processors beside a spinning process, where the boosted
+  build lost 118 to 132 wakes of 256 in four runs of four started after
+  the spinner, and the shipped build, run the same way first, 0 or 1.
+
+- **The wake-boost proof takes out the collection's raises too.** Since
+  the collecting thread is raised before it takes the runtime lock, it
+  wakes the helpers at the highest priority, where a boosted helper
+  preempts nothing: the proof lost 0 wakes of 256 in three runs on
+  windows-2025 (run 41800443380). With the raises out it failed all 30
+  runs on three of those runners (debug run 41812323963).
+
+- **collect_trigger.sh's "debt never assisted" copy takes out both of
+  the assist's calls.** A thread held at the collection's ceiling swept
+  the debt too, and on darwin arm64's 3-core runner the copy that took
+  out only the slice's assist passed (run 41800443380): 2 of 10 runs
+  there, 5 of 10 held to 3 cores on Linux. With the hold's taken out as
+  well it failed 10 of 10 there and 20 of 20 on Linux (debug run
+  41812323963).
+
+- **collect_trigger.sh's working set is the best of three runs.**
+  Twelve workers' peak resident set is held to four budgets of 48 MiB,
+  and single runs went past that at every commit from ad0712a65 on, none
+  of them moving the distribution: held to 4 of Windows 11's 12 logical
+  processors (the user's machine) 124 to 236 MiB, past it in 2 to 4 runs
+  of 30 a runtime; on macOS 26.6, an M2 Pro with 10 cores (the user's
+  machine), 147 to 206, past it in 17 runs of 400 over five commits; on
+  Linux held to 4, in 0 to 2 of 40. CI read 201 on Windows and 193 on
+  darwin (run 42279517248). A run within the bound passes the step, and
+  the copy without the ceiling must go past it in all three of its runs:
+  217 to 873 MiB on the Windows machine, 420 to 569 on the M2, 406 to
+  685 on Linux.
+
+- **std_mutex's starving waiter asks five times, each against a holder
+  retaking the lock.** Asked five times in a row, the copy that never
+  starves still passed 2 of 40 runs on windows-2025: a waiter that had
+  the lock once was the running thread at its own release, and took it
+  back as the holder had. Each ask waits for the holder's next two takes
+  now, and the copy failed 120 of 120 runs on three runners, the shipped
+  build passing 60 of 60 (debug run 41812323963).
+
+- **thread_exercise.sh's stop beside a burst leaves a processor idle,
+  and lets three stray stops pass.** On windows-2025's 4-processor
+  runners a healthy stop sometimes took 24 to 33 ms against the 20 ms
+  bound, all but 12 us of it in one `GetThreadContext` waiting for a
+  stopped thread on another processor; the burst holds dozens a run, 21
+  to 33 stops of 100 to 142 ms. The lock taker's longest wait, beside two
+  computing threads on three processors, was up to 41 ms against its 50;
+  beside one, 1.6 ms (debug run 41812323963, 45 runs each).
+
+- **thread_exercise.sh's copy without the wait for the lock waiters'
+  turns is caught when it crawls, not only when it hangs.** On
+  ubuntu-24.04's 4-core runners the copy made the storm's floor of 320
+  threads in 28.3 s, under the 30 s timeout (run 41800443380), and held
+  to 4 cores on Linux in 14.7 to 22.8 s, 6 runs of 6, where the runtime
+  made its 3,200 in 1.28 to 1.34 s. A run that ends now has to make its
+  threads at under a tenth of the slowest rate the runtime made beside
+  it.
+
+- **thread_exercise.sh's copy without the wait for the lock waiters'
+  turns is caught by the stops it begins owing them, not by its rate.**
+  How fast the copy runs is the box's load: on Linux (12 vCPU) beside 8
+  busy loops it ended 10 runs of 10 at 262 to 877 threads a second
+  against the runtime's slowest 1,288 to 1,785, and the gate failed two
+  of its own runs on that machine with the copy at 147 and 155 a second.
+  The runtime counts the stops that begin while a thread the stop
+  before parked in the lock's spin has yet to try it
+  (`IyiThread.owing_stops`), and the waits for those tries that ran
+  out (`IyiThread.turn_waits_out`); 7h asks on Linux for no more of the
+  first than the second. The copy began 86 to 464,783 such stops a run
+  with no wait run out, alone, beside 8 busy loops and beside 11, and
+  hung or was caught 36 runs of 36; the runtime passed 108 runs of 108,
+  making its 3,200 threads in 1.27 to 1.92 s alone, as at every merge
+  since ad0712a65 (1.25 to 1.68 s).
+
+- **chaos_exercise.sh: `iyi test --chaos` catches a check-then-act and a
+  missing join, and their seeds reproduce.** Both bugs pass 40 of 40
+  plain runs on the machine's pool. `--chaos=1 --chaos-runs 100` catches
+  each, the printed `--chaos=SEED` fails again, and five traced runs of
+  the seed print one schedule. A seed drawn by `iyi test` catches the
+  claim and reproduces. The exercise's 30 seeds, run twice each, are
+  alike run for run, meet 28 orders, and never break the unit rules.
+  Five broken copies are each caught at their own check: the stream
+  ignored, the seed not honoured, units ignored, parallel tasks left in
+  their unit, and the scheduler left in a plain build. It held in 36 s on
+  Linux (12 vCPUs, shared), 23 s on macOS 26.6 (Apple M2 Pro, 10 cores,
+  the user's machine) and 42 s on Windows 11 (12 logical processors, the
+  user's machine). test_verb.sh refuses a `--chaos=` seed that is not
+  decimal digits below 2^64, which `to_u64?` alone would have read from
+  `+7` and ` 7`, and a `--chaos-runs` below 1.
+
+- **std_term_exercise.sh reads darwin's own `stty -g`.** The gate
+  compares `stty -g` before and after each block, and read it as GNU's
+  colon-separated hex; darwin's stty writes `gfmt1:cflag=4b00:...:lflag=5cb:...`,
+  so on a Mac whose PATH has no coreutils `gnubin` in front - CI's
+  darwin job puts it there - the plain build failed with
+  `int('lflag=200005cb', 16)` and the copy that never restores the mode
+  failed for that reason instead of its own. Measured on macOS 26.6,
+  Apple M2 Pro, 10 cores (the user's machine): base ffca07d96 and
+  h/unsafe failed the same way with darwin's stty and passed with GNU's;
+  the gate now masks the kernel's `PENDIN` bit in both formats.
+
+### Fixed
+
+- **On Linux, C called from a parallel task or an `IyiThread` runs on a
+  thread libc made** (#158). The pool's threads were a raw `clone` with
+  a TLS block made from the executable's PT_TLS and none of libc's
+  thread state, so a `lib` function that reached for it answered wrong
+  or faulted: `pthread_self` answered 0, `strerror` died of SIGSEGV, and
+  `errno` was written below the block. A program whose code outside the
+  prelude calls a C function, or that imports an artifact whose code
+  does, now starts its threads and the collector's mark helpers with
+  `pthread_create` on the same 1 MiB mapping and guard page, and joins
+  with `pthread_join`; the compiler answers `IyiThread.program_calls_c?`
+  once the whole program is typed, so a program that calls no C still
+  starts them with `clone` and names nothing on the link line. A program
+  that binds C with `lib LibC` on Linux can no longer bind
+  `pthread_create`, `pthread_join` or the three `pthread_attr_` calls
+  with signatures other than the runtime's, as on darwin.
+
+- **A module consumed from its `.iyimod` keeps the definition witnesses its
+  producer typed against (#118).** Definition typing gives a trait a witness
+  type in the build that typed a def restricted to it, and that witness is
+  among the trait's implementers. A consumer without the module's source had
+  no witness: object code that matched a union containing it, such as
+  `is_a?(Value)` on a `Value | Bool` field, was refused with "this build
+  cannot name it". Artifacts now record the witnesses of the traits their
+  module declares, and the consumer restores them before typing its own
+  bodies, so it numbers and lays out the trait as the producer did.
+  Artifacts emitted by earlier compilers do not carry that record: rebuild
+  them with `--emit-iyimod`. The prelude analysed ahead by the build daemon
+  does not restore witnesses yet.
+
+- **Two pointers compare equal when they hold the same address (#165).**
+  `Pointer` had no `==`, so `Object#==` answered false for `p == p`, for
+  two `Void*` of one address and for two null pointers, and a pointer key
+  was never found in a `Hash`. Held by
+  `spec/compiler/codegen/iyi_case_equality_spec.cr`. Its six lines raised
+  the library's ceiling, by the owner's decision, from 4,683 to 4,689
+  (SPEC.md I.4), as #128's class `==` is already in the library.
+
+- **The language server's hover shows the doc comment of a declaration
+  written under an annotation.** It read the `#` lines straight above the
+  declaration and stopped at an `@[...]` line, so a documented type or
+  def with an annotation - `std/unit`'s `Unit` among them - hovered as
+  its signature alone; the annotations between the comment and the
+  declaration are now stepped over. `bench/lsp_session.py` step 23u, the
+  hover on `Unit`, failed on Linux with `Unit`'s doc comment in place and
+  holds with the fix.
+
+- **On a Mac, a path typed in another case is the file it names, and its
+  header's imports resolve.** `iyi run HDR/APP/MAIN.IYI` of a stored
+  `hdr/app/main.iyi` was refused as a file that "ends in `.IYI`", because
+  the stored name was looked up on Windows alone; with it looked up, the
+  root the header names was still found by comparing strings, and
+  `import app/util` was "can't find module 'app/util'". Both are now asked
+  of the volume, per path - a sibling is the stored name, and a root the
+  header's, only when the file system opens the same file under both -
+  since APFS folds case by default but can be formatted not to. Linux
+  volumes are left to the string, and Windows answers as before.
+  `bench/verbs_exercise.sh` never ran on darwin and failed there in three
+  places, the third its own `touch -d '2 hours ago'`, which BSD touch
+  refuses; it now dates the leftover with POSIX `touch -t` and checks the
+  stamp took (`find -mmin`), and it runs in the darwin CI job. The gate
+  exits 0 in 49 s on macOS 26.6, Apple M2 Pro, 10 cores (the user's
+  machine), where the old Windows-only lookup exits 1 in 49 s at both
+  `MAIN.IYI` and `BANG.IYI`, and the lookup without the header-root probe
+  exits 1 in 50 s at `MAIN.IYI`; it exits 0 in 132 s on Windows 11, 12
+  logical processors (the user's machine, Crystal 1.21.0, LLVM 20.1.7,
+  pinned to four), and exits 0 on Linux (12 vCPU).
+
+- **`GC.collect` clears the dead stack from its caller's frame, so what
+  a returned helper built is freed whatever the frames' layout.** A
+  collection zeroes 2 KiB of dead stack before it scans, and did so from
+  its own frame, which is not inlined into the top level and whose words
+  above the cleared stretch were scanned all the same. Once the stopper's
+  priority became two thread-locals, that frame grew from 64 to 160
+  bytes, and its lowest word, which nothing writes, lay on a word of
+  `bench/root_exercise.iyi`'s dead helper that still held the helper's
+  array: 33,566,736 bytes kept in every --release run on the
+  windows-2025 runners (CI jobs 128176433783 and 128229123908) and in 30
+  runs of 30 built by the same LLVM 20.1.7 on Windows 11, 12 logical
+  processors (the user's machine), where LLVM 23.1.1's layout of the
+  same source freed them in 30 of 30. `GC.collect` and the runtime's
+  `IyiMark.collect` are now always inlined, so the clear runs from the
+  caller's frame and every frame of the collection is built over
+  zeroes, and the clear itself keeps no frame. The exercise now fills
+  the kilobyte under its frame with the helper's address before it
+  collects: this runtime frees the 32 MB in 20 runs of 20, and a runtime
+  without the clear, or clearing from the collection's own frame, keeps
+  it in 20 of 20, built by LLVM 20.1.7 or 23.1.1 alike.
+
+- **A large program links with GNU ld, because no symbol has an `@` in
+  it (SPEC.md IV.1g).** An inherited method was `*Derived@Base#hi` and a
+  proc literal `~procProc(Int32, Int32)@src/a.iyi:3`, and GNU ld reads
+  every `@` in a definition as a symbol version. Built at 9f0d82076 and
+  linked with GNU ld 2.46, `std_spec` defined 39,376 versions; the loader
+  keeps 15 bits of an index, glibc 2.34's 39,384 was read as 6,616, and
+  the program stopped before `main`: `undefined symbol:
+  __libc_start_main, version Object::==<Pointer(SpecEnumFlags).class>:Bool`
+  (Linux). lld cut the names at the `@` instead, so a backtrace or a
+  profiler reading the symbol table saw `*Array(Int32)` for every method an
+  array inherits. Symbols now join with `^` - `*Derived^Base#hi`,
+  `~procProc(Int32, Int32)^src/a.iyi:3` - and text a person wrote inside
+  one (a file's path, so every file of a dependency under
+  `<cache>/mod/<path>@v<version>`, a quoted `NamedTuple` key, a `Symbol`'s
+  name) has `%`, `@` and `^` written `%25`, `%40` and `%5E`; MSVC's
+  `.XX.` spelling is unchanged and the join is `.5E.`. Names in a
+  full-information backtrace, `nm`, `perf` and the like read so. The same
+  `std_spec` linked with GNU ld defines no version and passes, 17,804
+  examples, 0 failures, 30 pending, and the compiler built by itself
+  defines none of its 41,263 joined symbols with an `@` (Linux; 41,265 on
+  macOS 26.6, an M2 Pro with 10 cores, the user's machine). `.iyimod` is
+  v61: a v60 artifact's object code defines the old names and is refused
+  and rebuilt.
+
+- **One spawn starts one worker, also when it lands as that worker
+  first goes idle (SPEC.md III.4.15, part 6).** A worker the pool starts
+  holds the token of the one worker out looking, so that the spawns
+  behind it start no other, and it gave the token back before it counted
+  itself idle: a spawn landing between its empty look and its count found
+  no worker idle and the token free, and started a second worker for one
+  task. `bench/spawn_eligible.sh`'s `grows` failed so on a darwin CI
+  runner (run 42187717533), and in 17 of 8,000 runs on Linux (12 vCPU,
+  shared); none of 8,000 on macOS 26.6, an M2 Pro with 10 cores, or of
+  2,000 on Windows 11, 12 logical processors (the user's machines). A
+  worker now counts itself idle, then gives the token back and looks once
+  more, as Go's `findRunnable` drops `nmspinning` only after `pidleput`,
+  and one that finds work there takes a token again so that it calls the
+  next: none of 6,000 Linux runs failed, interleaved with 6,000 of the old
+  runtime that failed 11 times, and none of 6,000 on the M2 or 1,000 on
+  Windows. The step now also holds that window open in a copy of the
+  runtime - the main thread waits 50 ms after the pool's start, the first
+  worker's first empty look 200 ms before its count - where one spawn
+  starts one worker, and the same copy with the token given back first
+  started a second in 20 runs of 20 on each of the three machines.
+
+- **`Term.read_password` turns echo off before it writes the prompt.**
+  Since 0.18.0 it wrote the prompt to standard error first and turned
+  echo off after, so a key typed at the sight of the prompt and before
+  the change was echoed: the start of a password could show on the
+  screen. The plain build's run of `bench/std_term_exercise.sh` on darwin
+  CI (run 42187717533, job 127791920345) typed on seeing the prompt, read
+  the local flags still at 0x5cb and saw `hunter2` echoed, while the
+  `--release` build in the same job held all 69 checks. Echo goes off
+  first now, as Python's `getpass` orders it, and a terminal that refuses
+  the change panics without the prompt. The gate runs the program in a
+  background process group, where the kernel stops it with SIGTTOU at
+  its mode change before the change is made, and checks that no prompt
+  has been written by then. The copy that prompts first is caught there
+  in 200 of 200 runs; the old check, reading the mode on seeing the
+  prompt, caught it in 0 of 200 (Linux, 12 vCPU VM; the same 200 and 0
+  of 200 on macOS 26.6, Apple M2 Pro, 10 cores, the user's machine).
+
+- **Equal strings no longer compare unequal while another thread counts
+  one's characters (SPEC.md IV.7b).** A compiler built without
+  `--release` stopped now and then at `undefined macro method
+  'ArrayLiteral#includes?'` in std's `primitives.iyi`: 3 of 37,722 builds
+  on Windows CI (run 42087347632, windows-2025), and on Linux an
+  aarch64-linux-gnu `--emit-iyimod` build of `std_benchmark_exercise` in
+  a soak and a native build of a pool program. The parse-ahead workers
+  keep the strings of the files the walk has taken in their string pools,
+  `String#size` fills a string's character count in on whichever thread
+  asks first, and the compiler's `String#==` read the other string's count
+  twice, so a worker filling it in between the two reads made
+  `"includes?"` unequal to the same nine bytes. A probe in the comparison
+  recorded that each of the three times: the count 9 on both sides, equal
+  bytes and an equal compare just after. `==` reads each count once now.
+  In the same run the arms where the walk parsed every file itself
+  (37,578 builds) or the workers parsed nothing (25,414) missed none.
+  `spec/std/string_spec.cr` compares a string while a thread empties and
+  refills its count: 403 to 1,430 unequal of 10,000,000 with the old `==`
+  in five runs, none now (Linux, 12 vCPU VM). Crystal 1.22.1's own `==`
+  missed 2 to 132 times in 10,000,000 built without `--release` and none
+  in five runs built with it (macOS 26.6, Apple M2 Pro, 10 cores, the
+  user's machine).
+
+- **A spawn that reaches module state through what std calls back stays
+  in its unit (SPEC.md III.4.15).** The walk deciding whether a plain
+  `g.spawn` may run in parallel stopped at std, and so at the program's
+  own defs std calls: an interpolation's `to_s`, `Array#includes?`'s
+  `==`. A spawn interpolating a value whose `to_s` appended to an
+  unguarded `Array` ran in parallel and lost appends (8,095 to 8,100 of
+  8,102 on four workers; `bench/spawn_eligible.sh`'s copy with the walk
+  stopping at std printed 18,541 of 40,000; Linux). The walk now passes
+  through std to what it calls back; std's own state is still std's. `iyi
+  check --explain-spawn` of `bench/std_http_exercise.iyi`, medians of
+  ten: 1.86 s and 652 MB with the walk stopping at std, 1.92 s and 663 MB
+  passing through it (Linux, 12 vCPU). A spawn
+  that ran in parallel may now stay in its unit, and `iyi check` says
+  why. Found by `bench/spawn_fuzz.py`.
+
+- **A module's own spawn is not compiled into its artifact in parallel
+  on a claim its producer alone proved (SPEC.md III.4.15).** A build
+  writing `.iyimod`s placed a spawn in one of those modules in parallel
+  on a `@[SafeReach]` it proved for itself; the artifact carried that
+  code to consumers that break the claim. `bench/spawn_eligible.sh`'s
+  `fill`, whose tasks append behind a lock, beside a consumer appending
+  through the module's unlocked `add`, printed 39,299 of 40,000 on four
+  workers (Linux); 40,000 now. Such a spawn goes back to its unit unless
+  the claim holds for every importer; the producing program's own binary
+  is the same code and keeps it there too. Found by `bench/spawn_fuzz.py`.
+
+- **A def that spawns no longer counts as a start where it is declared
+  (SPEC.md III.4.4).** R-2c's definition-site probes, `if false` calls
+  prepended to the program, were read as statements that may start a
+  parallel task: a program with a fully declared def that spawned refused
+  every `@[SafeReach]` written at module init. Such programs now compile.
+
+- **A start in a module the writer's module does not import no longer
+  refuses its initialiser's writes (SPEC.md III.4.4).** The proof took the
+  program's first start for every statement, so whether a claim written
+  only by its module's initialiser held depended on the importer's import
+  order: the producing build proved it and left the state out of the
+  artifact's `Reaches`, the consumer's build from source refused it. A
+  statement now sees the starts of its own module and those it imports.
+
+- **A block of the importer's no longer makes a module's statement a
+  start (SPEC.md III.4.4).** A proc call reaches every literal of its
+  type, so std's `IyiDeferNode#run`, which `raise` reaches, reached any
+  `-> Nil` block of the program that started a group, and through it
+  `Mutex.new`'s initializer: a module's `LOCK = Mutex.new { 0 }` became
+  a start, and the claim its initialiser wrote after it was refused, in
+  a program with such a block, while the build that wrote the module's
+  artifact, without one, proved the claim for every importer. A module's
+  statement now counts a start only through its own module's code, its
+  imports' and std's. Found by `bench/spawn_fuzz.py` (seeds 75, 2046,
+  2054, 2248, 2256, 2364, 2388).
+
+- **A `@[SafeReach]` refusal on Windows names its places relative to the
+  working directory, as its header does.** The header said
+  `unguarded.iyi:14:1` and the write it named
+  `C:\Users\...\unguarded.iyi:18:12`; both are relative now, as on Linux
+  and macOS (`bench/safe_reach.sh`, now run on Windows too).
+
+- **`iyi fix` over several files counts every file it rewrote.** Its
+  last line, `N files: M rewritten`, counted the files whose `using` it
+  rewrote and no other: moving iyi-db off `spawn_parallel`, the run
+  printed seven `fixed ...: spawn_parallel -> ...` lines in two files
+  and then `27 files: 0 rewritten, 1 still reporting
+  an error`. It says `2 rewritten` now. `bench/verbs_exercise.sh` holds a
+  directory moved off `spawn_parallel` to `2 files: 1 rewritten`.
+
+- **A module's private types carry their `Share` marker into its
+  `.iyimod` (SPEC.md III.4.4).** A type the producer found shareable was
+  written wearing `@[Share]` only when the module exported it; a private
+  one, which a body that travels still reaches, arrived bare and read as
+  not Share. iyi-db's `AROUND_HOOKS`, an `AroundHooks` of a `Mutex` and an
+  `Atomic` that every query reads, did: built against db's artifacts,
+  `manual/load.iyi`'s plain spawn at line 42, which runs in parallel built
+  from source, stayed in its spawner's unit, and `db/parallel_test.iyi`
+  and `db/database_test.iyi` were warned that their parallel blocks reach
+  state that is not Share, as they were in 0.20.1. Both build from the
+  artifacts as from source now. Migration: none.
+
+- **On Windows an `ensure` that parks its fiber while an exception
+  passes through it no longer aborts the process.** Crystal code the
+  fork builds for x86_64-windows-msvc, `iyi.exe` included, ran an
+  `ensure` inside the C++ catch funclet and re-raised with
+  `_CxxThrowException(NULL, NULL)`, which rethrows the C++ runtime's
+  per-thread current exception. An ensure that switched fibers there
+  (`Fiber.yield`, `sleep`, a channel, a contended mutex) left that state
+  to the next fiber on the thread: two fibers raising through an ensure
+  that yields aborted with 0xC0000409 in 3 runs of 3 on one thread, one
+  fiber alone passed, and each of seven ways of reaching an ensure
+  aborted 3 of 3 at 8 fibers (Windows 11, 12 logical processors, the
+  user's machine). The catch pad now takes the exception object, leaves
+  the funclet with `catchret`, runs the ensure as ordinary code and
+  throws the same object again, so it keeps its identity and its
+  callstack: all seven pass 3 of 3, and on four threads. iyi programs
+  were not affected: a panic unwinds by registry and nothing throws, so
+  a `defer`'s funclet is never entered, and a `defer` that sleeps and
+  waits on a channel while four tasks panic passed 1,200 of 1,200, three
+  runs each with `IYI_WORKERS=1` and the default, before the fix and
+  after. Elsewhere nothing changes: x86_64-linux IR for a program with
+  every one of those ensures is the same but for the compiler's own
+  version strings, and on Windows the change emits only blocks an
+  exception enters. Migration: none.
+
+- **On Linux a `$` in `--link-flags` reaches the linker without a
+  backslash.** The compiler links by itself from a template it reads out
+  of what `cc -###` prints, and `cc` prints a `$`, `"` or `\` escaped
+  between double quotes; `Process.parse_arguments_posix` kept a
+  backslash there before every character, where a shell drops it before
+  `$`, `` ` ``, `"`, `\` and a newline. `-Wl,-rpath,\$ORIGIN/../lib`,
+  the Makefile's own flag, became the RPATH `\$ORIGIN/../lib`, which
+  names no directory: on Linux (12 vCPU) `make iyi-tarball` against the
+  system's shared LLVM 21 bundled ten libraries beside the binaries, and
+  its check refused the package because `iyi` and `iyi-daemon` loaded
+  all ten from `/usr/lib/x86_64-linux-gnu`. CI's tarball links a static
+  LLVM and bundles nothing, so the wrong RPATH loaded nothing there. A
+  template cached by an earlier compiler is not reused. Specs: three
+  `parse_arguments_posix` examples, and a program built with
+  `--link-flags=-Wl,-rpath,\$ORIGIN/…` carries the path with no
+  backslash before it.
+
+- **On macOS a collection straight after a thread's start no longer
+  leaves the next one waiting forever.** A thread there links its line
+  into the list a stop walks itself, once its thread-locals are made,
+  and `IyiThread.start` had counted it before it got there. A collection
+  in between - `bench/std_gc_exercise.iyi`'s main thread allocates as
+  soon as it has started three threads - counted a thread its walk never
+  found: it cleared the counts the threads of the last release leave by,
+  stopped nobody and so released nobody, and the next stop waited, the
+  runtime lock held, for those threads to count out of a count it had
+  cleared. On macOS 26.6, an Apple M2 Pro with 10 cores (the user's
+  machine), that program's plain build hung so in 3 runs of 276, and
+  once in the darwin-std-siblings shard that runs it. The thread counts
+  its line where it links it now, and the same program ran 433 runs
+  there without a hang. Linux and Windows link and count a thread in its
+  parent under one lock and never had the gap: 154 runs on Linux (12
+  vCPU) and 500 on Windows 11 (12 logical processors) ended.
+  `bench/thread_exercise.sh` step 7j collects straight after each start,
+  which on the M2 landed before the thread's link in all 2,000 rounds of
+  each of 10 runs, and with the count back in `start` it hangs 5 runs of
+  5.
+
+- **A spawn that calls into a module read from its `.iyimod` is no
+  longer placed in parallel blind (SPEC.md III.4.15).** A module built
+  against an artifact has the dependency's declarations and not its
+  bodies, and the walk that decides whether a plain `g.spawn` may run in
+  parallel read each of the dependency's functions as reaching nothing.
+  A spawn whose block called a dependency's `note`, which appended to
+  the dependency's unguarded `SEEN : Array(Int32)`, ran in parallel and
+  kept 19,870 to 19,952 of 20,000 appends on four workers (five runs,
+  Linux x86-64, 12 vCPU, shared), where the same program built from
+  source kept it in its unit. The artifact now records what each
+  function reaches that is not safe for every thread
+  (`Section::Reaches`, format v60, so v59 artifacts are rebuilt), the
+  consumer's walk reads it where the body is not, and the program prints
+  20,000; the reason names the module. A `@[SafeReach]` on the
+  dependency's state was trusted the same way: a claim proven by the
+  program that wrote the artifact, which called `register` only at
+  startup, let a consumer's spawn run `register` in parallel and keep
+  19,926 to 19,938 of 20,000. Such state is recorded as reached unless
+  the claim holds for every importer (a `Share` type, an `UnsafeReach`,
+  or writes only in the module's own initialiser). An artifact with no
+  record, such as an `iyi bind` boundary, keeps every spawn calling into
+  it in its unit, naming the module. Migration: none; a spawn into a
+  dependency that writes unguarded state now stays in its unit, as it
+  does from source, and `--explain-spawn` says why.
+
+- **On Windows a collecting thread is raised before it takes the
+  runtime lock, not at its stop.** Everything from the lock to the stop
+  holds it, and a thread above the collector on its processor held the
+  lock for as long as it ran: beside `bench/thread_exercise.sh`'s burst,
+  one level above normal for 100 ms at a time on the collecting thread's
+  processor, 9 of 15 runs on windows-2025's 4-processor runners had a
+  thread wait 53 to 107 ms for the lock (debug run 41794057208). Raised
+  once the collection was decided, the lock already held, 3 of 24 still
+  waited, 54 to 100 ms (debug run 41795743763); the thread is raised
+  before the lock now, lowered for each debt walk, and waits at its own
+  priority for a collection running beside the program. With the raise
+  at the decision, on Windows 11, 12 logical processors (the user's
+  machine), 8 runs of 8 held, and the exercise's copies were caught in
+  each: the priority put back inside the release with 36 or 37 waits
+  past 50 ms a run, and with no raise 28 to 34 stops past 20 ms. The
+  exercise's no-raise copy takes out the collection's raises too. Each
+  thread puts its own raise back: the record of what to put back was one
+  for the program, the last raiser's, so of the threads that crossed the
+  budget or collected at once all but one kept the highest priority for
+  good. `bench/mark_stall.iyi` at twelve workers ended each of 30 runs
+  with 8 to 11 of its 14 threads raised and made 89,327 to 387,547
+  requests in its 10 s, against none raised and 320,668 to 554,078 with a
+  record per thread (Windows 11, 12 logical processors held to 4, the
+  user's machine). What led here: on a four-processor CI runner its tasks
+  allocated 60 MiB in five seconds, under the budget, and
+  `bench/concurrent_mark.sh` failed the run as a stall (job
+  128104679578). The exercise raises threads together and catches a copy
+  with one record.
+
+- **A second `Signal.wait` is refused whichever thread it is on.** One
+  fiber waits for signals at a time, and the second was refused by the
+  poller's rule of one reader per descriptor, which is each thread's
+  own. Two plain spawns that capture nothing run on the pool, and where
+  they landed on two workers both parked on the signal pipe, neither
+  refused; with no signal sent, both waited for good - 5 of 30 runs of
+  `bench/std_signal_exercise.sh`'s two waiters on Linux (12 vCPUs), and
+  its CI shard. `std/signal` counts its waits across the process now,
+  and refuses the second with the same "two fibers reading one fd" - 60
+  of 60 runs, and 40 of 40 with one waiter on the main thread and one on
+  the pool. Its pending and installed bits and its pipe are behind a
+  lock of their own, so a `wait` on one thread and an `ignore` on
+  another take turns. The exercise runs the two on two threads too, and
+  its broken copy without the count hangs there, on Linux and darwin.
+
+- **A connection's answer in the poller of a held worker is taken by an
+  idle one (Linux, darwin).** Each worker keeps its own epoll or kqueue
+  and looked at it only when its task parked or a back-edge check called
+  it to, so a worker held where no check is - the runtime, the
+  collector, a `@[NoPreempt]` def - or left by the kernel in its ready
+  queue kept its connections' news until it came back: an answer sent
+  while its reader's worker was held 100 ms with preemption off was read
+  98 ms later, three workers idle, on Linux (12 vCPUs) and on macOS 26.6
+  (an M2 Pro with 10 cores). The pool's monitor now asks the poller of a
+  running worker with io waiters that has not looked at it for a
+  millisecond, without waiting and taking nothing, and with news there
+  calls an idle worker, which takes the waiters off that worker's lists
+  and runs them: the answer is read on another worker in 0.4 to 5.0 ms
+  on Linux. A worker's io list, slots and sleep heap are behind its
+  lists lock on every platform, as Windows' were, held by the owner from
+  the second-waiter check through the registration, and the io
+  functions take the state they change rather than the caller's. The
+  epoll event each wait and narrowing built is in its frame now, not a
+  16-byte heap block. `bench/parallel_migrate.iyi`'s heldio step holds
+  the answer to 20 ms in `bench/parallel_exercise.sh`, and its failure
+  proof takes the monitor's call away. A worker's idle wait still takes
+  its own news before it says it is busy, so a deadlock's walk reads only
+  what an idle worker said, and a taker that empties the lists of one
+  that went idle meanwhile rings it to say again. Said busy first, as on
+  Windows, 32 tasks each making 100 queries in turn on 12 workers, with
+  the database's process on all 12 vCPUs, had a request p99 of 69 to 83
+  ms and 38 to 91 queries over 20 ms in 8 s, against 58 to 65 ms and 0
+  to 2 with the order kept and 59 to 66 ms and 0 to 3 before the change
+  (Linux, five runs each, interleaved).
+
+- **A task handed over by a task that computes on starts on an idle
+  worker.** A send, a `Mutex` let go or any other wake from a running
+  parallel task put the woken task in its waker's ring and called nobody
+  when it was the ring's only fiber, so it waited until the waker parked:
+  beside a 50 ms loop with preemption off it started 50.0 ms after the
+  send in all 20 wakes of two runs, with three workers idle (Linux, 12
+  vCPUs). Such a hand-off now calls an idle worker, Go's `ready` calling
+  `wakep`, and the task starts in 23 to 28 us at the median. Calling on
+  every one cost a channel ping-pong between two parallel tasks 323 to
+  338 ns a round trip against 137 to 139 on macOS 26.6, an M2 Pro with 10
+  cores, so a worker that keeps taking back the fiber it called for -
+  the waker parked first - calls for fewer and fewer, down to one
+  hand-off in 4,096, and starts over when it goes idle; and a worker
+  stealing a lone fiber from a running one waits up to 3 us for its
+  owner to take it, as Go spares a running P's `runnext`. The ping-pong
+  is 144 to 146 ns on the M2 and 150 to 157 against 136 to 156 on
+  Windows 11, 12 logical processors. `bench/parallel_migrate.iyi`'s
+  handoff step holds the wake in `bench/parallel_exercise.sh`, and its
+  failure proof takes the call away.
+
+- **A fiber left in the ring of a worker held a whole tick is stolen.**
+  A worker whose task runs where no back-edge check is - the runtime,
+  the collector, a `@[NoPreempt]` def - or whose thread the kernel left
+  in the ready queue, held what was in its ring until it came back: a
+  completion taken off Windows' port onto it, a lone fiber pushed on its
+  way to the next, a hand-off its back-off left uncalled (the entry
+  above). Traced on Windows 11, 12 logical processors, against a local
+  postgres in the tags endpoints' loop (103 queries a request, 32 tasks
+  on 12 workers), 17 to 33 fibers a run of 8 s waited 100 ms or more
+  runnable after their completion was taken, while hand-offs never
+  waited 10 ms. The pool's monitor now calls an idle worker for a worker
+  it finds held by one task a tick with fibers in its ring. On Linux, 12
+  vCPUs, a hand-off its back-off skipped beside a 100 ms hold started
+  7.8 to 9.9 ms after its send, against 100.0 ms without the call.
+  `bench/parallel_migrate.iyi`'s backstop step holds it, and its failure
+  proof takes the call away. The tags loop's tail did not move with it:
+  six runs each, interleaved, request p99 179 to 257 ms before and 175 to
+  250 after, the slowest query 253 to 621 ms and 372 to 628. Whether the
+  rest is the kernel's ready queue agent TagsTick traced is not measured.
+
+- **On Windows a stop no longer waits out a thread above the one
+  stopping.** A stop there is the stopping thread's own loop of
+  `SuspendThread` and `ResumeThread`, and a busier thread on its
+  processor held the world stopped until it let go: in iyiturkiye on a
+  saturated machine (Windows 11, 12 logical processors, the user's
+  machine) single calls in that loop took 148 to 214 ms, and of the
+  stops past 2 ms in three runs, 17 of 145 passed 10 ms on master. The
+  stopping thread now runs at `THREAD_PRIORITY_HIGHEST` from the start
+  of the stop until it lets the runtime lock go after the release, and
+  is put back then, or at a panic raised inside the stop. Raised, 4 of
+  127 passed 10 ms, the longest 33 ms, and the longest single call took
+  26 us; the geometric mean of the endpoints' p99 was 289 ms, against
+  306 without the raise and 290 on master. Put back at the end of the
+  release instead, the drop was where the thread was descheduled, the
+  lock still held: every release past 5 ms in six endpoints' two rounds,
+  24 of them, 12 to 179 ms, was spent after the last `ResumeThread`.
+  `bench/thread_exercise.sh` collects in a loop beside a process one
+  level above normal that computes 100 ms at a time on the stopping
+  thread's processor, and holds every stop to 20 ms: five interleaved
+  runs there gave 0.7 to 1.9 ms with the raise and 100.3 to 103.1 ms in
+  every run without it. A thread beside them taking the runtime lock in
+  a loop is held to 50 ms a wait: 0.3 to 16.8 ms in five runs, and 100.1
+  to 102.6 ms in every run with the priority put back inside the
+  release. Both broken copies are caught, and so is a copy whose panic
+  inside a stop keeps the priority. Linux and darwin are unchanged.
+
+- **A collection no longer waits for the threads it releases to run
+  again.** A stop's release waited for every thread it had stopped to
+  leave its park, so the collecting thread - a request's - spun until the
+  last of them had a processor. The next stop waits for that instead,
+  before it clears the words they read. On Windows 11, 12 logical
+  processors, a thread parked inside the allocator and held off its
+  processor by another program kept each collection 403-410 ms past its
+  stop, 25-28 without the wait. A thread a stop parks in the runtime
+  lock's spin now owes the next collection a try of the lock, and the
+  collection waits for those tries before it takes the lock, 2 ms at
+  most: without that, a thread collecting in a loop retook the lock
+  before the threads it released had tried it, and the storm of
+  `bench/thread_exercise.sh` 7h hung 5 runs of 5 on Linux (12 vCPU),
+  where it now makes its 3,200 threads in 1.3-1.6 s. Step 4e holds the
+  release, with a copy that waits again; 7h holds the turns, with a copy
+  that skips the wait. Step 4b's lock ratio is printed and no longer
+  bounded: under the new lock path no broken copy of the lock crossed
+  the bound (spin-only 2.4-3.5 times one thread, against the runtime's
+  2.0), and 4c holds what the lock's yield is for.
+
+- **A collection has a ceiling, and twelve workers allocating flat out
+  peak at 154 to 180 MB where they peaked at 204 to 856.** Past the budget every thread
+  allocated on while a collection paid its debt, stopped the threads and
+  marked beside them, and an object born under a mark lives to the sweep
+  after the next, so the heap held the largest epoch twice: twelve
+  workers of `bench/alloc_scaling.iyi` on a 52 MB budget counted up to
+  232 MB in one epoch. Now a thread whose slice finds a collection under
+  way and the epoch past 125% of its budget sweeps the debt or marks for
+  it, and sleeps when there is neither, until the collection is let go
+  (GC_DESIGN.md, "The collection's ceiling"). The twelve workers peak at
+  158 to 180 MB in 0.70 to 0.74 s against 692 to 856 MB in 1.02 to 1.12
+  on a 12-vCPU Linux machine; at 154 to 161 MB against 204 to 265 on
+  Windows 11 with 12 logical processors; and at 156 to 162 MB in 1.33
+  to 1.41 s against 408 to 481 MB in 1.68 to 1.99 on macOS 26.6 with an
+  M2 Pro's 10 cores (both the user's machines). `bench/web_cores.iyi`
+  on twelve workers did not move on either of the user's machines, and
+  `bench/release_pages.iyi` on the M2 answered 1.83M requests a second
+  against 1.79M, peaking at 121 to 124 MB against 267 to 355.
+  `bench/collect_trigger.sh` runs `bench/working_set.iyi`, which fails
+  past four budgets, and a copy without the ceiling it catches (231 to
+  248 MiB on the Windows machine, past four budgets of 52 MiB).
+
+- **Idle threads no longer raise the collection budget's floor.** The
+  floor was 4 MiB for every registered thread, so a pool of twelve with
+  one parallel task and the main thread churning collected on a 52 MB
+  budget and peaked at 95 MB resident. It counts the threads that filled
+  an allocation slice since the last collection now: the same program
+  runs on 8 MB and peaks at 18 MB, in 0.15 s against 0.17 (a shared
+  12-vCPU Linux machine, 3 runs each).
+
+  Issue #145's app (iyiturkiye, twelve workers, 11 GET endpoints, oha
+  with 32 connections) counted 7 to 13 threads an epoch under load, so
+  its budget read 28 to 52 MB against master's 52. With the ceiling
+  beside it, against master (decc9f1fb), on Windows 11, 12 logical
+  processors (the user's machine), 3 interleaved rounds with goturkiye:
+
+  | | master | this branch | goturkiye |
+  |---|---:|---:|---:|
+  | requests a second, geometric mean of the best | 605.3 | 608.5 | 564.7 |
+  | p99, geometric mean of the best (ms) | 171.0 | 159.7 | 102.2 |
+  | app CPU per request (ms) | 4.56 | 4.56 | 5.00 |
+  | peak working set (MB) | 493 | 220 | 129 |
+
+  A counting copy (2 rounds) read each collection's epoch and debt:
+  `/api/v1/` allocated up to 59-60 MB an epoch against 214-223, paid
+  at most 2.2-2.7 ms of debt before a stop against 5-249 ms, and its
+  carry-over (#150's `warm_extra`) reached 23-25 MB against 141-172.
+  Across the endpoints the carry-over peaked at 41 MB against 172, so
+  it needs no cap of its own. Best p99 rose on web tags (384 ms against
+  366; the bursts of stalled queries #145's entry below describes) and
+  on cities, discover and `/admin` by 0.2-8 ms, and fell on the other
+  seven.
+
+  `bench/collect_trigger.sh` asks for both: four threads allocating keep
+  four threads' floor, and the same four idle add nothing; a copy that
+  counts every registered thread fails the second.
+
+## 0.20.1 — 2026-11-04
+
+**Fixes found by soaking 0.20.0 on every core: a darwin server a client
+could kill, two compiler crashes and a miscompile around NoReturn
+blocks, a collector crash on aarch64 and a fault that hung instead of
+ending, and Windows builds that picked up the wrong DLL.** A darwin
+server was killed by SIGPIPE when a client reset its connection before
+the accept, nine times in seventy seconds of adversarial load; every
+send now says `MSG_NOSIGNAL`. A collection
+that stopped a thread at the first instruction of a new task scanned
+past that task's stack, and crashed 9 of 23 runs of a test on an M2; a
+memory fault inside a collection hung the process instead of ending it.
+A block kept by a def, such as iyi-web's `get "/boom" do raise ... end`,
+stopped the compiler with a TypeCastError when its body passed a NoReturn
+value to a call, and a proc whose body did so panicked "can't execute"
+without running. std/http's stop no longer panics under a
+`stream_bodies` block waiting on its body, and an answer made while the
+server stops, or that the server will close after, says
+`Connection: close`. On Windows a stale DLL in the shared build cache no
+longer stands beside a new program, and `-Dgc_none`/`-Dgc_boehm` builds
+that read standard input or link libgc build and start.
+
+### Fixed
+
+- **README no longer calls Crystal 0.1.0's library Crystal's standard
+  library.** The 8,161 lines it compared iyi's 25,763-line prelude with
+  are the library Crystal shipped at 0.1.0 (SPEC.md I.4), not what
+  `--crystal` links today, and the efficiency paragraph read as iyi's
+  library being three times Crystal's. The README now opens with the
+  claim, the table and the install, and is a quarter shorter: the build,
+  run-time and server measurements moved to BENCHMARKS.md, installing,
+  targets and dependencies to INSTALL.md, both carried by the tarball and
+  the zip beside it. `bench/doc_numbers.py` and
+  `bench/measured_numbers.py` check the numbers where they now live.
+
+- **A thread stopped as a task begins is scanned on that task's stack.**
+  A fresh fiber's first resume pops the whole frame laid for it, and on
+  aarch64 the switch's `ret` and `__iyi_fiber_main`'s first instruction
+  run with sp at the stack's top. The stop's scan read the top as no
+  fiber's, scanned from there up to the thread's own top across the
+  mappings between, and the collector died of SIGSEGV or SIGBUS. On
+  macOS 26.6, an M2 Pro with 10 cores, a thread collecting in a loop
+  beside bursts of 64 tasks killed 9 runs of 23 of 5 s so, the main
+  thread stopped at that instruction in every crash report; and
+  `bench/concurrency_exercise.iyi`, which a mark helper stops for the
+  mark beside the program, hung in 2 of 675 soak runs, the one sampled
+  with the helper faulted there (the entry below). A fiber's top is its
+  own now, and the same program ended 26 runs of 26. Linux aarch64 lays
+  the same frame.
+  `bench/thread_exercise.sh` 7f asks the scan each task's own top beside
+  a thread collecting in a loop; its failure proof puts the old bound
+  back.
+
+- **A memory fault inside a collection kills the process rather than
+  hanging it.** The stack guard's handler hands a fault that is not a
+  stack's edge back to the signal's default action, and built that
+  action in a heap block. A mark helper has no allocator cache: one that
+  faulted inside a collection, holding the runtime lock, waited for that
+  lock at the block's first touch for good, and the process hung where
+  it should have died. On macOS 26.6, an M2 Pro with 10 cores, a soak
+  run of `bench/concurrency_exercise.iyi` hung so, sampled with the
+  helper in `IyiRuntimeLock.lock` under the handler, under a root scan
+  that had faulted. The action is in the handler's frame now.
+  `bench/thread_exercise.sh` 7g: a helper that takes the runtime lock
+  and stores to address 8 kills the process with SIGSEGV at once, where
+  the process was alive 5 s later before (2 runs of 2 on the M2, 1 of 1
+  on Linux x86_64); its failure proof puts the heap block back.
+
+- **A kept block whose body passes a NoReturn value to a call compiles.**
+  iyi-web's `get "/boom" do raise "..." end` stopped the compiler with
+  "Cast from Nil to Iyi::ProcInstanceType failed" (bindings.cr:622): the
+  route's block was `Proc(Context, NoReturn)`, and the router's
+  `@[Share(serial: workers)]` def handed `SharedProc.of` a block that
+  passed what it answered to a generic def. A call given a NoReturn
+  argument is never typed, so the block's proc was left without a type
+  while the call that keeps it went on with the type its block
+  parameter declares; cleanup rewrote the call to its arguments, which
+  are typed, but nothing typed the proc from them, and code generation
+  asked it for its return type. The cleanup now types a block's proc
+  from the body it leaves, and the program raises at run time as
+  written. The same happened with no `@[Share]` and no `SharedProc`, in
+  any def that keeps a block, `def keep(&b : Int32 -> String)` given
+  `{ |x| block.call(x).to_s }`. A spec in
+  `spec/compiler/semantic/iyi_spec.cr` compiles the router's shape.
+
+- **So does a kept block whose body is more than that call.** The fix
+  above typed the block's proc from the body cleanup leaves, and cleanup
+  leaves no type on a body it cuts at its NoReturn expression: a line
+  before the call, `{ |y| puts "x"; wrap(raise "x") }`, the value
+  assigned first, `{ |y| v = raise "x"; v.to_s }`, or the call in both
+  branches of an `if`. Each still stopped the compiler with "Cast from
+  Nil to Iyi::ProcInstanceType failed" (bindings.cr:622), in a block
+  `Kept.of`, `SharedProc.of` or any `&block : Int32 -> String` keeps. No
+  way out of such a body returns, so its proc is NoReturn, which is what
+  a block with no type is everywhere else. A spec in
+  `spec/compiler/semantic/iyi_spec.cr` compiles the three shapes.
+
+- **A proc whose body gives a call a NoReturn value runs that body.**
+  iyi-web's `get "/boom", workers: 1 do ... raise "..." end` answered
+  500 with "iyi: panic: can't execute `route_answer(block.call(ctx))`"
+  in its log, and the route never ran: not the line before its `raise`,
+  not the `raise`. A call given a NoReturn argument, `wrap(block.call(x))`
+  with the block `Proc(Int32, NoReturn)`, is never typed, which left the
+  proc's def without a type, and cleanup replaced the whole body of such
+  a proc with that panic, where a def's body is cleaned up instead: the
+  call becomes the arguments up to the NoReturn one. A proc's body now
+  is too, so `->(x : Int32) : String { puts "ran"; wrap(block.call(x)) }`
+  prints "ran", calls the block and panics with the block's message, or
+  exits with the block's `exit` status. Inherited from Crystal, whose
+  1.21 raises the same "can't execute". A spec in
+  `spec/compiler/compiler_spec.cr` runs the shape.
+
+- **A DLL beside a Windows program is the one the program was linked
+  against.** The compiler copies each DLL a program links beside it, and
+  kept any file already there by that name (Crystal's #14315, so that a
+  DLL a running program holds did not fail the copy). So the cache
+  directory `crystal spec` and `iyi run` link into, one for the machine,
+  kept an older build's: on Windows 11 with 12 logical processors (the
+  user's machine), its LLVM-C.dll of 2026-09-17, 53,079,552 bytes, stood
+  beside every compiler spec program linked against LLVM 23.1.1's,
+  55,308,800 bytes, and each exited 0xC0000139
+  (STATUS_ENTRYPOINT_NOT_FOUND) before its first line, which the spec
+  runner printed as "Process terminated abnormally, the cause is unknown".
+  That was the windows-native job's "Every rule this fork adds" step
+  failing on that machine on 0.19.1 and 0.20.0 alike, which an earlier
+  soak had put down to its Crystal 1.22-dev bootstrap; CI's runners start
+  with an empty cache. A DLL there now stays only with its source's size
+  and modification time, which the copy is given, and one a running
+  program holds is moved aside. A spec in `spec/compiler/compiler_spec.cr`
+  builds beside a gc.dll that is not one.
+
+- **A Windows program built with `-Dgc_none` or `-Dgc_boehm` that reads
+  standard input builds.** Standard input's reader thread took its page
+  from `__iyi_mmap`, which only iyi's own collector defines, and the
+  build stopped at "undefined method '__iyi_mmap' for
+  IyiStdinReader.class". In those builds the page is `VirtualAlloc`'s.
+  `bench/windows_exercise.sh` cross-compiles such a program under each
+  flag, reads a piped line through it on Windows, and refuses a copy
+  whose reader asks `__iyi_mmap` again.
+
+- **A Windows program built with `-Dgc_boehm` has its gc.dll beside it.**
+  The prelude's libgc binding named the library but not the DLL its link
+  imports, so the compiler put none beside the program, which found
+  gc.dll only on PATH. On Windows 11 with 12 logical processors (the
+  user's machine), with the Crystal installation taken off PATH, it exited
+  0xC0000135 (STATUS_DLL_NOT_FOUND) before its first line. The binding
+  names gc.dll on Windows as Crystal's `gc/boehm.cr` does.
+  `bench/std_weak_ref_exercise.sh` runs its `-Dgc_boehm` program there
+  with only the system directory on PATH, and refuses a copy of the
+  prelude that does not name the DLL.
+
+- **A darwin server is no longer killed by SIGPIPE when a client resets
+  its connection before the accept.** darwin's sockets were kept from
+  SIGPIPE by SO_NOSIGPIPE, set as each was accepted; on a connection its
+  client had already reset, darwin refuses the option (EINVAL, "the
+  socket has been shut down"), and the server's first write to it ended
+  the process. On macOS 26.6 (Apple M2 Pro, 10 cores, the user's
+  machine) an std/http server under clients that connect and reset -
+  bad heads refused, TLS handshakes cut, requests and answers cut short
+  - died within a second of each start, 9 times in 70 seconds. Every
+  send now says MSG_NOSIGNAL, as Linux's has. `bench/socket_exercise.iyi`
+  writes to a connection reset before its accept, and on darwin the gate
+  builds a copy whose send drops the flag and sees it killed (exit 141).
+  The gate runs with SIGPIPE at its default: the macos-15 runners start
+  their steps with it ignored, every write to a gone peer there was a
+  quiet EPIPE, and that copy exited 0 in 10 runs of 10 (141 in 10 of 10
+  with the signal reset; debug job 126320045389).
+
+- **A stopping server's `stream_bodies` block that waits on its body no
+  longer panics.** The stop closes a connection waiting on its client
+  (`close_for_stop`), and a block reading its own body waits on its
+  client: its read was cancelled, the block answered, and the server
+  wrote that answer on the socket the stop had closed - "iyi: panic:
+  socket is closed", once per such connection, on a pool worker or under
+  `workers: 1` alike, in 3 of 16 stops of a 30-minute soak on 12 cores.
+  The answer, with nowhere to go, is no longer written (a stream it
+  answers with is closed), and a `Response.stream` block's write after
+  such a read is `Cancelled` rather than the panic.
+  `bench/std_http_stop.iyi` stops a server under two such blocks, one
+  answering a string and one a stream; the gate counts the panics, and a
+  copy without either guard is caught.
+
+- **An answer the server makes while it stops says `Connection: close`,
+  and a body the stop cut short is not answered 400.** An answer in
+  progress at a stop went out `keep-alive` and the connection closed
+  after it, so a client's next request on it met the close; and a
+  request read behind it whose body was still arriving was answered "400
+  Bad Request: the body ended after 500 of its 1000 bytes", blaming the
+  client for the server's going, in place of the close a client may
+  retry on. `bench/std_http_parallel.iyi`'s stop holds both, with a
+  broken copy of each.
+
+- **A `stream_bodies` answer says `Connection: close` when the server
+  will close after it.** A block that left more of a body than the
+  server reads past (`Server::MAX_DRAIN`, by the body's
+  `Content-Length`) was answered `keep-alive` and the connection closed
+  after the answer, so Python's http.client sent its next request into
+  the close (RemoteDisconnected). And a block that answered an `Expect:
+  100-continue` request without reading its body had `100 Continue`
+  written after its answer - read by the client as its next request's -
+  and then the body it held back waited for, for the server's timeout.
+  Both now say `close`, and no `100 Continue` follows an answer.
+  `bench/std_http_exercise.sh`'s close cases hold both, plain and over
+  std/tls, with a broken copy of each.
+
+### Known
+
+- **0.20.0's Windows light-endpoint loss is the load generator sharing
+  every processor, not the shared completion port.** On Windows 11 with
+  12 logical processors (the user's machine), interleaved best of 3
+  against 0d8922efd, the commit before the shared port: `check_version`
+  and `order` at twelve workers answer 0.89 and 0.94 of it only when oha
+  runs on all 12 processors beside them. Given processors of its own, the
+  shared port answers 9-12% more (6 or 12 workers on 6 processors, oha on
+  the other 6) and 19-36% more with oha held to 4. Kernel traces put the
+  port's own cost level (ntoskrnl 22.6 against 22.9 us a request); under
+  that co-location the workers seldom idle, so the port is drained in
+  batches of 7 by 1 ms polls, and both the server (+3.5 us) and oha
+  (+5.5 to +6 us) spend more CPU a request. Keeping a connection on its
+  worker without stalling it would take per-worker ports again, which is
+  not a patch.
+
+## 0.20.0 — 2026-11-02
+
+**std/http's `Server.serve` answers on every core, and a parallel task
+is free to move between them.** `serve` now runs each connection as a
+parallel task on the pool, `workers: 1` keeps the one-thread server, and
+the pooled method 0.19.1 added beside it is gone (#145). A parallel task
+that parks resumes on whichever worker is free, idle workers steal half
+of a busy one's queue, and a task that computes in a loop, a long
+library call or a recursion gives its worker up after 5 to 10 ms; the
+allocator's centre is split by size class, so workers no longer queue on
+one lock to refill, and a collection's budget is floored per thread, its
+debt swept by every thread past it. A block that runs on other threads
+and reaches module state through a call is warned about, once a
+constant, and `@[SafeReach("why")]` marks the state that is safe (#148);
+std/log's `Logger` and std/regex's `Regex` are `Share`, so a constant of
+either says nothing. Windows has one completion port for the whole
+process, which any thread takes from, with the priority boost off;
+darwin's stop and mark helpers park on libSystem's futex, which needs
+macOS 14.4, and CI's darwin jobs run on macos-15 building for 14.4. A
+concurrent mark that could stall for good ends (#149), the sweep keeps
+warm the pages the next epoch comes back for (#150), and Windows no
+longer names a deadlock where a woken thread holds its sleeper; a darwin
+thread stopped at its birth is no longer killed by libplatform, and a
+task switched in on a worker begins its own quantum. A std/tls
+connection that refuses its peer lets the alert arrive before it closes.
+From contributors: a refused non-blocking connect is reported on Unix
+(#153), macOS's own libiconv skips invalid bytes correctly (#152), a
+`Process` spec pins its `PATH` (#154), and `bench/windows_exercise.sh`
+§2e ends the runner alone and proves its check can fail (#155).
+
+**Not here, and said so:** std/tls has not been audited and is not to be
+called secure until it is. A parallel task's unit - the task and the
+tasks `spawn` starts inside it - still runs one at a time; a program that
+wants more cores starts more parallel tasks.
+
+**Known, measured and not fixed.** On Windows 11 with 12 logical
+processors (the user's machine), best of 3 interleaved with the master
+before the shared completion port, bench/web_cores.iyi's light endpoints
+on twelve workers are 6-11% slower: `check_version` 105,837 requests a
+second against 119,161 and `order` 95,523 against 101,976, both still
+above Go's twin (74,596 and 42,970). The cause is not found. On the same
+machine issue #145's real app on master 1ae9e94db, twelve workers and
+best of 3, answers 1.08 times goturkiye at the geometric mean of its 11
+GET endpoints (648.4 requests a second against 602.3), but its p99 on the
+heavy endpoints (246-352 ms against 152-260) and its peak working set
+(430 MB against 139) are still above Go's.
+
+### Breaking
+
+- **std/http's `Server.serve` serves on every core by default (#145).**
+  `serve(listener) { |request| ... }` runs each connection as a
+  parallel task on the pool, `IyiWorkers.count` workers - `IYI_WORKERS`,
+  else the cores - and `serve(..., workers: 1)` is the one-thread server
+  `serve` was. The pooled method 0.19.1 added beside `serve` is removed,
+  with no alias; its value form, `serve(listener, routes)` with a
+  `SharedRouter` or a `SharedProc`, keeps its arguments under `serve`,
+  and takes any handler value under `workers: 1` - a plain `Router`
+  included - while on more than one worker one that is not `Share` is
+  refused at the argument with the same two ways out.
+  The block is checked as a parallel task's is, and a capture that is not
+  `Share` is refused where it is written, naming both ways out: ``the
+  block Server.serve keeps, which may run on other threads captures
+  `seen : Array(String)`, which is not Share: Array(String)'s field @size
+  is assigned in `append`. Put it behind a lock, a `Mutex(Array(String))`
+  (std/mutex), or pass `workers: 1` so the block runs on one thread``.
+  The mark is the compiler's: `@[Share(serial: workers, crossing: {tls:
+  "..."})]` on a def, which a program's own server loop may take - a call
+  that passes the serial parameter the literal `1` is not checked, a
+  count in a variable is.
+
+- **A `TlsServerConfig` on more than one worker is refused; pass
+  `config.frozen` (#145).** A `TlsServerConfig` given to `serve(tls:)`
+  on more than one worker is refused by the compiler at the argument
+  (``Pass `config.frozen`, the copy every worker may read, or pass
+  `workers: 1` so it stays on one thread``) rather than frozen by
+  `serve`: `frozen` copies, so a property assigned while the
+  server runs would reach no worker and nothing would say so, and a
+  config whose `identity_source` is a `Proc` cannot be frozen at all.
+  `TlsServerConfig#frozen` is a `TlsFrozenServerConfig`, a copy no
+  property of which changes, `Share` (SPEC.md III.4.4) and taken by
+  `serve(tls:)` on the pool and under `workers: 1` alike. An identity
+  source goes to `frozen` as a block, `config.frozen { |name, alpn,
+  left_ms| ... }`, whose captures the compiler checks; freezing a config
+  whose `identity_source` is set panics, saying so. `TlsServerConfig#dup`
+  copies a config, sharing its ticket keys and replay guard.
+  `TlsIdentity#ocsp_staple` is a method now, not a getter of a field, and
+  answers the same.
+
+- **std/log's `Logger` is `Share`, and its API changed for it.** A
+  constant `LOG = Log.for("x")` may be reached from a parallel block, a
+  server's handler or a route. It was warned about: the logger's level had
+  a setter and its children were a `Hash`, and its `IOBackend` wrote the
+  entry and its newline as two writes to an IO no lock kept. Twelve
+  workers writing 100,000 lines each through it to one file left 2,563 to
+  4,378 of the 1.2 million torn or lost in five runs.
+  - The level is an `Atomic`; the backend and the children are each
+    behind a `Mutex`, so two workers asking `for` one name get one
+    logger. `level=`, `backend=` and the rest keep their names.
+  - Every backend writes behind its own lock. `IOBackend` writes each
+    line, newline and all, through a handle of its own on the IO's
+    descriptor, as `AsyncBackend` did, and no longer has `io`;
+    `MemoryBackend#entries` answers a copy; `AsyncBackend` keeps its
+    writer thread behind its queue's lock, where `close` joins it.
+  - A backend's formatter is set in `new` and has no setter any more,
+    and `Formatter#format(entry, io)` is gone: a backend formats with
+    `format(entry)`. An `Entry` keeps its data as `pairs`, a `List`;
+    `data` answers a hash of them.
+  - A backend or formatter of the program's own must be `Share` too, and
+    one that is not is refused where std/log hands it to a lock, naming
+    its field.
+  - `Log.root` is made once, by the first read, on whichever thread.
+  - Measured with `--release` on 12-core x86_64 Linux, medians of five:
+    a disabled `debug` costs 2.0 ns where it cost 1.7; an enabled line to
+    a file on one thread 652 ns where it cost 569 (the two locks); twelve
+    workers 864 ns a line between them where they took 1,008, and none
+    torn.
+  - `bench/std_log_exercise.sh` holds it: twelve workers' 48,000 lines
+    through one constant each whole and each once, which a copy of the
+    backend claiming `Share` without its lock fails; and the constant
+    logger checks under `--error-on-warnings`, which a copy whose level
+    field its setter names fails.
+  - **Migrating.** Keep the IO you hand `IOBackend.new` rather than
+    reading `io` back. Pass a formatter to the backend's `new` rather than
+    assigning `formatter=`. A custom `Formatter` defines `format(entry)`
+    answering the line; `format(entry, io)` is not called any more.
+    `MemoryBackend#entries` is a snapshot: read it again after more lines,
+    and empty the backend with `clear`, not by changing the array. A
+    program's own backend or formatter keeps its state behind a `Mutex` or
+    in an `Atomic` and is `Share`, as std's are.
+
+- **darwin programs need macOS 14.4.** The mark helpers and the stop now
+  park on libSystem's public futex, `os_sync_wait_on_address` and
+  `os_sync_wake_by_address_all`, which macOS 14.4 added (CI's macos-14
+  builds say `minos` 14.0); the entries under Fixed say why and what it
+  measured. **Migrating:** run darwin builds on macOS 14.4 or later;
+  there is no fallback for an older system.
+
+- **A build with `--error-on-warnings` may stop at the reach warning
+  below** until the state it names is marked `@[SafeReach("...")]` or
+  moved behind a `Mutex`. Nothing that compiled without that flag stops
+  compiling.
+  **Migrating:** mark state that is set once and then only read
+  `@[SafeReach("why")]`, put the rest behind a `Mutex` or in an `Atomic`,
+  or make a read-only array a `List`; a package's state is fixed in the
+  package, which the warning names.
+
+- **Migrating.** A call to the removed `serve_parallel` is a call to
+  `serve` with the same arguments. A `serve` whose block captures a
+  `Router`, an array, a counter or the listener it closes, or whose
+  `tls:` is a `TlsServerConfig`, either keeps one thread with
+  `workers: 1` or moves to what crosses threads: the state behind a
+  `Mutex` or in an `Atomic`, the router to a `SharedRouter`, the config
+  to `config.frozen`, and the stop to a `Channel` that a task beside the
+  server receives from before it closes the listener. A block that
+  captures nothing unshareable needs no change, and now uses every core.
+  In this repository the exercise servers that close their listener from
+  the block or record into arrays pass `workers: 1`;
+  `bench/std_fileserver_exercise.iyi`'s two servers moved to a stopping
+  channel and serve on the pool.
+
+  The pool path is the removed method's, unchanged. `bench/web_cores.py`
+  over HTTP on twelve workers, best of 3, run twice each and interleaved
+  with the compiler of the branch master merged for it (8b9c1de1a)
+  building the same program around the removed method, on a twelve-thread
+  Linux VM with 0.1 cores busy
+  elsewhere: login 293 and 292 a second on 1,184% and 1,185% CPU before,
+  293 and 292 on 1,185% and 1,184% after; `check_version` 286,866 and
+  286,004 before, 283,493 and 288,208 after. `bench/std_http_exercise.sh`
+  holds the default (requests that compute answered on more than one
+  worker, none the accepting thread), `workers: 1` (every answer on the
+  accepting thread, from a block that appends to an `Array` and closes
+  its listener), and the refusals, with broken copies: a `serve` on the
+  calling thread whatever its workers, `workers: 1` served on the pool,
+  `serve`'s mark taken off, its `crossing:` taken off, and its `serial:`
+  taken off.
+
+### Added
+
+- **A shared block that reaches module state through a call is warned
+  about (#148).** The block of `IyiThread.start`, of `spawn_parallel` and
+  of a `@[Share]` def - `Server.serve`'s, a router's - was checked only
+  for what it names, so a parallel block calling `ask`, which ran
+  `DATABASE.query_one` on a pool that assumes one thread, compiled with
+  nothing said. The compiler now walks the typed call graph from the
+  block through the program's modules and its packages, never std or
+  the prelude, and warns at the block for every constant and class
+  variable it reaches whose type is not `Share`, once each, by the
+  shortest path: ``the block spawn_parallel runs on another thread
+  reaches `DATABASE : Main::Database` (not Share) through `ask` →
+  `DATABASE.query_one`: ...``. Every target of a virtual call is
+  walked, and a recursive def once; a constant typed `Mutex`, `Atomic`,
+  `List` or another trusted `@[Share]` type is `Share` and says nothing,
+  and an array of `Share` elements is told it can be a `List` if it is
+  only read.
+  State that is safe - set once and then only read, or guarded some
+  other way - is marked on its declaration with the reason as the claim,
+  `@[SafeReach("set once at startup, then only read")]`, on a constant
+  or a class variable; the mark quiets the warning for that state
+  alone, and a block that names it is still refused. `iyi check` now
+  takes `--error-on-warnings` (and `--warnings`, `--exclude-warnings`),
+  which it refused as invalid options, so the warning can fail a check
+  as it fails a build; like a build, it now leaves out warnings from
+  `lib`. In this repository three benches whose threads
+  take turns at a class variable carry the mark with their reason. A
+  warning rather than a refusal, so nothing that compiled stops
+  compiling.
+  - **State many shared blocks reach is one warning, and a package's says
+    whose it is (#148).** The reach warning was written once per block, so
+    every route of an iyi-web app that reached a constant warned about it
+    again: iyiturkiye (8c56a83, on iyi-web 4684125, iyi-db v0.3.0 and
+    iyi-pg v0.3.1) printed 1251 from 91 blocks under `iyi check` on Linux,
+    88 each for iyi-db's `LOG` and for the app's own pool, `SQL`. Each
+    constant or class variable is now one warning, at the first block that
+    reaches it, by that block's shortest path, with the count of the
+    others: ``... reaches `SQL : Iyiturkiye::Src::Database::SharedDatabase`
+    (not Share) through `Home.index` → `Submission.latest` →
+    `SQL.query_all`, as do 87 other parallel blocks: ...``. iyiturkiye's
+    are 37. One that a package
+    declares - a file in the checkout of one of the program's requirements -
+    says so, since the change goes there: ``... `TLS_VERSIONS` is the
+    package github.com/iyilang/pg's at pg/pq/conninfo.iyi:45, so the change
+    goes there``. 1057 of the 1251 were iyi-pg's, iyi-db's and iyi-web's;
+    `TLS_VERSIONS` and `DECODERS`, whose types are std's, are iyi-pg's,
+    and no std constant warned. Whether a constant is std's is now read
+    off its declaration rather than its value. `--error-on-warnings` fails
+    as before. `iyi check` of iyiturkiye took 3.94 to 4.22 s against 4.12
+    to 5.78 s, three interleaved runs each (Linux, a 12-vCPU QEMU guest).
+    `bench/parallel_exercise.sh`'s `Share` step builds two blocks reaching
+    `DATABASE` and wants one warning counting the other.
+
+- **std/http's pooled `Server.serve` serves TLS (#145).**
+  `serve(listener, tls: config.frozen)` runs each connection's
+  handshake and requests on the pool worker that serves it - HTTP/2 and
+  HTTP/1.1 by ALPN, client certificates, Encrypted Client Hello - with
+  one set of ticket keys among the workers, so a ticket a connection on
+  one worker was sent resumes on any other, and at a stop each waiting
+  connection is sent close_notify from its own worker. Measured on Linux
+  (twelve hardware threads, four busy with other work), release, wrk with
+  32 kept-alive HTTPS connections and a request that computes: 3,867
+  requests a second on one thread, and 3,884, 7,727, 14,877 and 26,751
+  on the pool's 1, 2, 4 and 8 workers.
+  - std/tls: `TlsTicketKeys`, `TlsReplayGuard` and each `TlsIdentity`'s
+    OCSP staple keep their state behind a `Mutex`, and may be used from
+    any thread; `TlsIdentity` is `Share`, and its constructor copies the
+    arrays it is given.
+  - std/autocert: `AutocertManager#frozen_tls_config` serves on the
+    pool's workers: held certificates and tls-alpn-01 challenges are
+    answered on the workers, and a name not held is asked of the
+    manager's `run`, which must run; one order still serves every worker
+    asking for a name at once.
+
+- **`bench/web_cores.py` measures issue #145's shape against a Go twin
+  (#145).** It times three endpoints: a bcrypt login, a `check_version`
+  and a JSON `order`. They are written once in iyi (`bench/web_cores.iyi`)
+  and once in Go (`bench/web_cores/main.go`), and both must answer with
+  the same bytes. Each is driven by wrk over 32 kept-alive connections,
+  in the clear and over TLS, with no database. Measured on a twelve-thread
+  Linux VM with about two cores busy elsewhere, over HTTP, before the
+  allocator's split below:
+  - login: `serve` on 12 workers answers 247 a second on 1,032% CPU,
+    against Go's 242 on 1,033% and `workers: 1`'s 27. The issue had 9.9
+    against 108.2.
+  - `check_version`: 205,879 a second against Go's 216,298.
+  - `order`: 131,160 a second against Go's 90,732.
+
+  bcrypt costs 37 to 38.5 ms of CPU per cost-10 verify in both languages,
+  so the login gap was cores. Past four workers, gdb samples then put the
+  light endpoints' workers in the collector's runtime lock on the
+  allocator's refill: 139 of 260 samples at twelve workers, 17 of 100 at
+  four - the lock the split by size class took off the refill.
+  The script is not a gate. `bench/measured_numbers.py` names it, and
+  holds the docs' description of the run and the stored hash's cost to
+  the script's constants.
+
+### Changed
+
+- **A parallel task moves between workers (#145).** SPEC.md III.4.13
+  describes the scheduler whole; what changed:
+  - *Work stealing.* Each worker has a run queue of 256 that idle workers
+    take half of (Go's `runqgrab`), a task woken from outside the pool
+    goes to a shared queue, and a parallel task and the tasks `spawn`
+    starts inside it are one unit, never two of them running at once but
+    each free to park on one worker and resume on another. A worker waits
+    on its own stack, a fiber is not resumed before the worker that
+    parked it has left its stack, a cancel finds the poller or sleep heap
+    a moved task waits in, a socket a sibling closes on another worker
+    wakes the read parked there, and on Windows any thread takes a
+    completion off the process's one port (below).
+    Measured on 8 workers, release, three runs each against the runtime
+    before: 48 tasks that park on a channel and then compute 25 ms took
+    2.11 to 2.57 times the ideal and now 1.03 to 1.11; 32 connections of
+    25 ms requests 1.26 to 2.20 and now 1.16 to 1.20.
+    `bench/parallel_migrate.iyi`, run by `bench/parallel_exercise.sh`
+    plain and release, checks lists on moved tasks' stacks through
+    collections, thread-locals against the kernel's thread pointer,
+    sockets, cancels, closes and deep frames after moves, and seven
+    broken copies are caught by name.
+  - *A contended `Mutex` and a thread's join park the task, not the
+    thread.* std/mutex is a three-state futex mutex over the scheduler's
+    new `park_on`/`wake_on`, so a waiter's worker runs other tasks (a
+    task spawned beside a parked waiter started at once, where a waiter
+    asleep in the kernel left it nowhere to start for the holder's 300
+    ms), and darwin waits no longer sleep a millisecond at a time. A join
+    parks until the thread's body returns. A deadlock on a lock is named
+    by the scheduler as on a channel, and on a program's one thread by
+    the `Mutex` as before. Windows' process wait, where
+    `RegisterWaitForSingleObject` is refused, asks with a zero wait
+    between sleeps instead of holding its thread.
+  - *`Channel#take_now` and `#put_now` take the scheduler's lock.* They
+    were `select`'s lock-held halves, public because its arms call them,
+    and std/http called them from pool workers with no lock: a wake of a
+    task parked on another thread went into that thread's inbox unlocked
+    while other threads changed the same channel, and a stop was lost
+    now and then. The public `take_now`, `put_now`, `receive_ready?` and
+    `send_ready?` lock and look under the lock; `select`, `send` and
+    `receive` use the `*_held` halves, and the pooled `serve` gives a
+    connection's place back with the channel's locked `receive`.
+    `bench/parallel_exercise.sh`'s new `now` step claims and frees places
+    from eight workers and the main thread and puts 120,000 values from
+    six workers; a copy without the lock ended that step by name in 10 of
+    12 runs here and hung in 2, and the gate reruns a hung or faulted
+    copy up to five times.
+  - *A thread-local is read through the thread pointer at every access*
+    on ELF, where it was the bare global and LLVM kept its address across
+    calls - on aarch64 across the calls in a loop, on x86_64 across a
+    call when the address was passed on (llc 21) - which a fiber that
+    resumes on another thread cannot survive. Mach-O and COFF keep the
+    accessor, which no longer gets replaced by the bare global outside
+    the main module. Twenty million allocations, release, best of five:
+    41 and 45 ms before, 42 and 41 ms after, with other jobs loading the
+    machine.
+
+- **A parallel task gives its worker up after 5 to 10 ms (#145).**
+  - *In a loop.* In a program with a pool, every loop of a def that is
+    not the prelude's checks the worker's preemption word at its
+    back-edge, a load through the thread pointer and a branch, put in
+    after optimisation so no loop loses its vectorisation
+    (`src/compiler/iyi/preempt_checks.cr`); the pool's monitor raises the
+    word of a worker one task has held for a tick. The slow half hands
+    the worker's poller news and expired sleepers to idle workers, and
+    yields only when nothing idle can take what waits; the task keeps its
+    unit's token. 28 connections of 0.2 ms requests beside 4 of 100 ms:
+    67 to 84 of 11,200 fast requests over 20 ms, at most 112 to 206 ms,
+    before; 0 to 5, at most 19 to 20 ms, with a 10 to 15 ms quantum, and
+    none at most 13 to 17 with the 5 to 10 kept. Tight loops against
+    `@[NoPreempt]` twins of themselves: a xorshift walk 1.001x, a
+    vectorised sum 0.97x, the same through `each` 1.012x, a CRC 0.992x.
+    `bench/parallel_preempt.iyi` holds it in
+    `bench/parallel_exercise.sh`, with broken copies caught by name.
+  - *Inside a long library call or a recursion.* The prelude's files
+    other than the runtime's three (`prelude.iyi`, `concurrency.iyi`,
+    `thread.iyi`) check as a program's code does, a library def the
+    runtime calls is compiled a second time for it with no check
+    (`$runtime` after its name), `Pointer#copy_from` copies a million
+    elements a run with a check between, and a function on a call cycle
+    checks at its entry (`PreemptChecks.mark_recursion`). One worker,
+    release, a short task spawned 20 ms into the call: a sort waited 175
+    ms before and 4 to 7 after, a `Hash` growth 85 and 17 to 18, a join
+    34 and 4 to 12, a naive `fib` 45 and 4 to 5. Cost, best of seven,
+    three interleaved rounds: a sort of 1,000,000 `Int64`s 57.9 to 59.6
+    ms before, 60.3 to 63.7 after, a join of 1,000,000 strings 5.0 to 5.4
+    and 5.5 to 6.6, copies, appends, hash inserts, a JSON parse and `fib`
+    within the noise. `bench/parallel_preempt_lib.iyi` and
+    `bench/preempt_audit.py` (no function the runtime reaches holds a
+    check) hold it in `bench/parallel_exercise.sh`, with three broken
+    copies caught by name.
+  - *Inside a large `Pointer.malloc`.* Codegen cleared every
+    `Pointer.malloc` with a `memset` after the allocator's call, the
+    prelude's, which never checks; past 1 MiB the block is a fresh
+    mapping already zero, and that `memset` took every page's first
+    fault. A `Hash(Int32, Int32)` growing at 8,388,608 entries takes
+    three such blocks, 256 MB together, and in a plain build a short task
+    spawned 20 ms into it waited 36 to 80 ms on Linux and 79 to 198 on
+    darwin, past the gate's 100 there; the collection the allocation
+    triggers paused 1.4 to 3.6 ms of it. Under the arena both allocation
+    entries now hand the block back zeroed - a reused chunk cleared by
+    the allocator, a chunk carved from a cold run cleared past its first
+    page, a frontier chunk or a large mapping left as the kernel zeroed
+    it - and codegen clears nothing after them, so the pages fault in the
+    growth's own loops, which check: 1 to 9 ms on Linux and 1 to 12 on
+    darwin; the release growth 16 to 18 ms before and 0 to 9 after on
+    Linux. Hash inserts, a sort, a JSON parse and the other costs,
+    release, did not move. The `memset` had hidden that a cold run is
+    zero on a chunk's first page only - the run's last chunk reaches onto
+    a page never released, and a chunk that was a list's while pages
+    past its head went cold was written there - and without it the
+    std/compress, std/big, std/png, std/fuzz and std/mlkem exercises
+    failed in CI on Linux, darwin and Windows; they pass on Linux with
+    the carve clearing those chunks from their second page on.
+    `bench/arena_exercise.iyi` checks a dirty chunk comes back zeroed
+    through the atomic entry, and blocks carved from thinned cold runs
+    read zero; a copy without either clear fails by name.
+  - *On Windows and darwin, measured on GitHub's runners.* Windows'
+    monitor waited on the system timer's tick, with looks 11.2 to 12.3 ms
+    apart. It now waits on a high-resolution waitable timer: 5.15 to 5.27
+    ms, with turns of 10.3 to 10.5 ms. The back-edge check there had
+    called the thread-local accessor at every turn, which cost vectorised
+    sums 3.4 to 4.9 times their `@[NoPreempt]` twins on Windows and 5.3
+    to 5.8 times on darwin. Windows now checks a TEB slot the pool
+    claims, `cmpq $0, %gs:off` (1.46 to 1.49x, a cost Linux CI's `%fs`
+    form shares on those runners). darwin arm64 reads `tpidrro_el0` and
+    dyld's pthread slot (0.94 to 1.07x). `bench/parallel_preempt.iyi`
+    gains a `period` step, held to 4 to 10.5 ms a look and 20 ms a turn.
+    Its tight loops are now held to 2x. The gate shows a Windows monitor
+    on the system tick (`period`) and the accessor check (`tight`,
+    `-Dpreempt_check_accessor`) both failing. On Windows the gate runs
+    the server shape on one worker fewer than the cores. Run with no
+    arguments, the bench now uses a pool of one and prints only its
+    verdict; on 4 workers its slice step had failed, on Windows CI and on
+    Linux alike, because an idle worker took the short task.
+  - *`bench/parallel_exercise.sh` tells the accessor check from the
+    cheap one in the IR, not by the clock.* Its proof that a check
+    calling the thread-local accessor at every back-edge is refused
+    failed on master's Windows CI (job 122792275988): that copy's `sum`
+    measured 1.776x its `@[NoPreempt]` twin and `each` 1.828x, under the
+    `tight` step's bound of 2x, where macos-14 had measured it at 5.35x.
+    The gate now reads the release build's IR (`tight_checks`): each
+    back-edge check of the tight step's loops, now `@[NoInline]` so each
+    is a function of its own, must read the worker's word through the
+    thread pointer - `%gs:off` on Windows, `tpidrro_el0` on darwin,
+    `%fs:off` and `tpidr_el0` on Linux - and none may call
+    `*IyiWorkers::preempt`. Cross-compiled, the normal build's 9 checks
+    read the thread pointer on x86_64-windows-msvc and
+    aarch64-apple-darwin, and the `-Dpreempt_check_accessor` copy's 9
+    call the accessor on both, which the gate refuses there. On Linux the
+    copy builds the same code, which the step says. The timing stays a
+    measurement, its bound 2x: the cheap check itself measured `each` up
+    to 1.762x on a windows-2025 runner (job 122916661258), about what the
+    accessor copy cost on job 122792275988's, so no bound between them
+    holds. The copy's timing is no longer run.
+  - **A short copy passes no preemption check, and the library's join
+    costs nothing for its checks on Linux.** `Pointer#copy_from` calls its
+    run directly for a copy of a million elements or less; its loop of runs
+    checked at the latch, so every `String::Builder#<<` read the word once
+    and a join of 1,000,000 strings three times a string. Against the same
+    program with the library unchecked (Linux, release, best of seven, 21
+    interleaved rounds, load 0.5 to 0.8): the join 1.095x to 1.097x before
+    and 0.974x to 0.978x after (5.43 ms against 6.83), the sort of
+    1,000,000 `Int64`s 1.011x to 1.016x and 0.993x to 0.995x. A check on
+    the edge back to the header alone was measured too and dropped: sort
+    1.06x to 1.08x, join 1.09x to 1.10x (load 5 to 6).
+    `bench/parallel_exercise.sh`'s new `copy_checks` reads the release IR
+    of `copy_bytes` and fails a `copy_from` without the way around.
+  - **darwin's check makes what it reads through where its loop is
+    entered, not at every function's entry.** The accessor call that gives
+    darwin arm64's check its slot and offset was in the entry block of every
+    function with a checked loop, so each append paid it. It now goes where
+    the outermost loop around the checks is entered (natural loops from a
+    dominator tree, `PreemptChecks::Loops`). On an M2 Pro (macOS 26.6, the
+    user's machine, eleven interleaved rounds, load 3 to 18) the join went
+    from 1.37x-1.43x to 1.08x-1.18x the unchecked one; the sort stays at
+    1.08x-1.14x, the check's own read (a plain-global probe: 1.05x-1.07x).
+    Linux's objects are byte-identical. `copy_checks` fails a build with
+    `-Dpreempt_anchor_entry` on darwin.
+
+- **The allocator's centre is split by size class (#145).** Each class
+  has its own lock, its stack of batches and its own list of arenas, so a
+  refill, a sweep slice's claim, a warm run and a new bump region take
+  their class's lock and walk only their class's arenas. The runtime lock
+  keeps the heap's lists and the pause, and is always taken before a
+  class's lock. A worker that sweeps a slice keeps that slice's batch as
+  its own list. Interleaved with the build before, best of 3, HTTPS
+  `check_version` on twelve workers went from 167,319 a second on 819%
+  CPU to 204,526 on 599%, and `order` from 91,435 to 148,015; no sampled
+  worker stack is in a lock. `bench/alloc_cache.sh` is the new gate, with
+  broken copies for a sweep that hands nothing back, a worker that throws
+  its swept batch away, lists kept across a collection, a class's lock or
+  a slice claim that excludes nobody, and an unretired cache. Its reuse
+  check runs with no helper: the workers drop every other cell of an
+  88-byte class, sweep it back themselves, and a second wave of as many
+  may move the class's frontier by one slice and one page per cache at
+  most. It passed 60 runs of 60 at 4, 8 and 12 workers, plain and
+  release, moving it 65,472 bytes at most, where the frontier check it
+  replaces failed 21 runs in 120 before the split and 11 after and caught
+  neither broken copy. Twelve HTTPS `check_version` workers peaked at 29
+  to 30 MB resident (47 to 75 before) with 81,370 to 103,065 minor faults
+  in 20 s (1,428,966 to 1,446,569). `bench/alloc_scaling.py` times a pool
+  allocating flat out at 1 to 12 workers and samples lock stacks with gdb;
+  its curve did not move (22% of one worker's rate per worker at twelve),
+  and its twelve workers' heap of 637 to 925 MB (593 to 899 before) is
+  allocation while one thread pays the last epoch's sweep debt alone
+  before a collection's first stop - not the budget, which reaches 9.1 MB
+  at the most - and is left as it is.
+
+- **Windows: one completion port for the process, any thread takes any
+  completion, and the pool turns the priority boost off.** On the user's
+  Windows 11 machine with 12 logical processors, saturated by postgres,
+  the tags endpoints' 103 queries a request stalled for several 125 ms
+  ticks: iyi's boosted workers starved postgres, and with the boost off
+  an answer waited on the port of the worker its task had parked on
+  while other workers ran (agent TagsTick). Now every handle joins the
+  process's one port once (`IyiScheduler.pollfd`; #151's moves are
+  gone), whichever thread takes a packet wakes its fiber off the owner's
+  lists under that thread's lists lock, one idle worker at a time waits
+  on the port as a waitable object so a packet stays for any running
+  worker to take, doorbells are per-thread events, and
+  `SetProcessPriorityBoost` turns the boost off as the pool starts, as
+  Go does (SPEC.md III.4.13, part 5). Measured there, interleaved with
+  master, best of 3: TagsTick's loop at request p99 355-484 ms against
+  582-610 (Go 321-516), 7-14 queries a run past three ticks against
+  73-103; the real app's 11 GET endpoints at 563.9 requests a second at
+  the geometric mean against 519.5 (goturkiye 535.2), p99 176.6 ms
+  against 220.4. Worse, and open: at four processors' affinity the app
+  is at 397.1 against 412.5, the tags endpoints 8-11% behind (in the
+  loop there, master with its boost turned off from outside was as
+  slow), and bench/web_cores.iyi's `check_version` on
+  twelve workers makes 105,837 requests a second against 119,161, with
+  p99 1.15 ms against 2.29. A packet in hand while its fiber was between
+  a list and a queue read as a deadlock in 3 runs of 5 of the new
+  bench/completions_taken.iyi; the thread holding it is marked busy now
+  (under Fixed).
+  bench/parallel_exercise.sh runs that program on Windows, with broken
+  copies whose packets only the parking worker runs and that leave the
+  boost on; bench/socket_exercise.sh counts joins, and
+  std_http_parallel's ticket check holds the other workers with
+  preemption off, since a connection's next request no longer runs where
+  its last one did.
+  - *Before the one port, #151 kept a wait from moving a handle already
+    on its thread's port.* Every overlapped wait moved its handle to the
+    waiting thread's completion port and set its skip-on-success mode
+    again - two `NtSetInformationFile` calls, 3.1% of a 12-worker server's
+    running samples in the issue - even when the handle was there. The
+    port each
+    socket, accepted connection, datagram socket and child-process pipe the
+    standard library made was last moved to is recorded now, by the port's
+    serial, and a wait on one already on its thread's port makes neither
+    call; a closing std makes zeroes the record first, a serial is never
+    given twice, a move by another thread at the same time leaves no record
+    standing, and a move of a handle with no record - a program's own, where
+    a duplicate would be - makes every record stale (`IyiScheduler.to_port`
+    says why each is enough). On a 4-logical-processor runner, release, a
+    connection trading 32 bytes between two parallel tasks, medians of five:
+    one connection from 98,808 round trips a second to 127,028, and 3 moves
+    for its 80,000 waits; 8 and 32 connections on 4 workers from 228,748 to
+    239,830 and from 264,846 to 281,057, where 51% and 64% of waits are a
+    task's first on another worker and still move (job 122342296628).
+    `bench/socket_exercise.sh` counts the moves of 200 round trips on one
+    thread (at most 4; a copy that moves on every wait makes 400), reads a
+    pipe the program made with a closed socket's value, a socket another
+    thread closed whose value is made again here, one a thread that has ended
+    waited on last, and one parallel tasks read in turn on two workers; a
+    copy that skips the move whenever a port is recorded never completes the
+    ended thread's socket, and one whose close leaves the record never
+    completes the pipe's read, each ended by a watcher that names the step.
+
+- **darwin's kevent change is on the caller's stack.**
+  `__iyi_kevent_change` answers the 32 bytes by value instead of a heap
+  block, at every cross-thread wake (`ring`), fd add and forget. A
+  ping-pong between the main thread and one parallel task (200,000 round
+  trips, best of seven, five interleaved pairs, M2 Pro, load 8 to 14):
+  333,926-392,822 wakes/s before, 691,911-703,810 after.
+
+- **A collection's fixed price is bought per thread, and its debt is
+  swept by every thread past the budget.** Issue #145's app on twelve
+  workers (Windows 11, 12 logical processors) kept 3-5 MB live on a
+  6-10 MB budget and collected 4.5-21 times a second; each collection's
+  triggering thread first swept every arena the last epoch left (a
+  median of 380 on `/api/v1/`, 15-19 ms, up to 844 ms) while the other
+  threads allocated free, up to 514 MB past an 8.7 MB budget. The
+  budget is now floored at `MIN_BUDGET` for every registered thread
+  (`IyiMark.next_budget`), and a slice that finds a collection triggered
+  and the count past the budget sweeps slices of its debt
+  (`IyiMark.sweep_assist`, counted in `IyiMark.sweep_assists`). Over the
+  11 GET endpoints, best of 3: 593.8 requests a second at the geometric
+  mean against 571.3 (goturkiye 609.3), app CPU 4.52 ms a request
+  against 5.20 (Go 4.59), peak working set 424 MB against 811; p99 1.91×
+  goturkiye's against 2.02×, worse on both tags endpoints. That tail is
+  not the collector's: tags' 103 queries a request stall in bursts of
+  four or more across workers, all ending together, and on the old
+  budget 115 of 125 such bursts ended at a collection's first stop or its
+  mark; with the floor, 60 of 445 did, and the bursts ran on. A wakeup
+  the stops used to deliver, open. `bench/collect_trigger.sh` checks the floor and
+  runs `bench/debt_assist.iyi`, with a broken copy of each;
+  `bench/parallel_exercise.iyi`'s collector step allocates a quarter of
+  the budget a task, since its lists alone no longer crossed a pool's
+  floor.
+
+- **The sweep keeps warm what the last epoch carved back cold (#150).**
+  Beside many workers a concurrent mark lets them allocate past the
+  budget, and the sweep released those pages - on the allocating thread's
+  refill, 99% of the calls, a decommit and a commit on Windows - for the
+  carve to fault them in again: 94-98% of what twelve workers released
+  came back. The pages the carve takes up cold are added to the next
+  epoch's warm room, fading by a sixteenth an epoch. In-process
+  check_version (`bench/release_pages.iyi`), before against after, three
+  interleaved rounds of 8 s: on a windows-2025 runner (2 cores, 4 logical
+  processors) at twelve workers 473,000-514,000 requests a second and
+  151,000-162,000 releases against 720,000-758,000 and 14,000-18,000,
+  peak working set 292-427 MB against 407-719; at four workers
+  689,000-831,000 against 594,000-723,000, within the runner's noise (an
+  earlier run of the same arms read 7-9% the other way). Served to oha
+  at 32 connections on the same processors, 41,000-42,000 a second at
+  twelve workers against 54,000-67,000, and 48,000-50,000 at four
+  against 67,000-72,000. On a 12-core Linux machine at twelve workers
+  1.57-1.60 million against 3.54-3.59 million, 366,000-372,000 releases
+  against 70,000-74,000, peak RSS 157-203 MB against 367-434; at four
+  workers 1.91-1.92 million against 1.94-1.96 and 25-26 MB against
+  26-30. Over HTTP to wrk on Linux the releases were already the
+  helpers' (12-15 a second inside the allocator of 854-1,037), and halve.
+  `bench/sweep_exercise.sh`'s refault check churns twice the budget an
+  epoch and allows a quarter of the excess back (344 pages of 8,256);
+  its broken copy, without the carry-over, hands back 6,960.
+
+- **std/regex's `Regex` is `Share`, so one constant pattern may be
+  matched from every worker at once.** A match never wrote the pattern -
+  the thread lists and capture positions it steps were always its own,
+  made for that match - but the compiled machine was held in `Array`s and
+  raw pointers, and a parallel block reaching a constant regex was warned
+  about. The machine is now frozen into `List`s and its byte tables into
+  strings once the compiler has built it. Matching speed is unchanged:
+  over 2 MB of words, addresses and DNA, medians of five runs moved by
+  less than their spread on every path (groups 62.1 ms then 60.1; the
+  byte-run path 4.22 then 4.19; Shift-And 1.78 both). The byte-run path
+  took 5.4 ms while it read where each run began from a list beside the
+  lengths; it steps past each run instead. `bench/std_regex_exercise.sh`
+  matches one constant from twelve workers and wants one thread's
+  answers, which a copy that hands one match's scratch to the next fails;
+  and the constant checks under `--error-on-warnings`, which a copy whose
+  machine has a setter fails.
+
+- **CI's darwin jobs run on macos-15, and the darwin tarball still runs
+  on macOS 14.4.** GitHub retires the macos-14 image on November 2,
+  2026, and its scheduled brownouts cancelled every darwin job of two
+  master runs (job 124229745795). The three darwin jobs now run on
+  `macos-15`, pinned. A runner builds for its own major version, so the
+  tarball's `iyi` would have said `minos` 15.0 and refused every Mac on
+  14, where 0.19.1's, built on macos-14, says 14.0. The jobs build with
+  `MACOSX_DEPLOYMENT_TARGET` at 14.4, iyi's own floor (the collector's
+  futex), which iyi's build honours as clang does; the static LLVM's
+  cache key names the image and the target, since an archive is bound
+  to the SDK and libc++ it was built with; and a new step holds the
+  unpacked `iyi` and daemon to `minos` 14.4, beside a build of the same
+  sample without the target, which says the runner's 15.0 and must be
+  told apart (job 124324684183). The runner is macOS 15.8.2 on a
+  three-core Apple M1 (Virtual), with Xcode 16.4 and Python 3.15.2.
+  There `backtrace` walks a task's stack, which on macos-14 it did not,
+  so a panic a task raises on purpose prints its frames, each naming
+  its binary and an address of its own: 22 of the 113 std exercises,
+  and the std/big, std/toml and std/websocket gates, printed otherwise
+  from their artifacts for those lines alone, and std/toml's release
+  build otherwise than its plain one. Those comparisons now leave
+  darwin's frames out (`bench/darwin_frames.sh`, byte-safe, since
+  darwin's sed stops at a byte that is not UTF-8), and
+  bench/std_exercise.sh proves the filter leaves out a frame and nothing
+  else. A darwin job that builds the static LLVM pays 25 to 37 minutes
+  for it there, and the foundation's job was cut off at its 90 by that,
+  so it has 120. The numbers labelled macos-14 in these notes, SPEC.md,
+  GC_DESIGN.md and the gates' comments were measured on that image, a
+  three-core M1 virtual machine on macOS 14.8.9, and stay as measured.
+
+### Gates
+
+- **The cursor sweep runs in four CI jobs.** `bench/lsp_positions.py
+  --shard K/N` sweeps one of N shards of the std modules, dealt by the
+  seconds each module's sweep took, and prints each module's seconds as
+  it goes. Whole, the sweep took 37 to 71 minutes on GitHub's runners in
+  ten green runs and was cut off at its job's 75 in four, master's among
+  them. On one machine it took 2,105 s under master's compiler and 2,206
+  under this branch's; std/autocert went from 50 s to 79, its compile
+  now 492 MB against the 512 at which the server retires its worker.
+  Dealt three ways, the heaviest shard took up to 28 minutes of its job's
+  45 in green runs and master's 1ae9e94db had one cut off; the shards
+  cost the same on a median runner from 10-26 to 10-30, so the runners
+  differ, not the sweep. The weights are now the runners' own seconds
+  (std/http 442), and four shards hold 1,063 to 1,079 s each.
+
+- **bench: std/tls names a TLS 1.2 Python server whose client never
+  connects, rather than waiting on it.** Python's ssl server in the gate's
+  TLS 1.2 section accepted with no timeout, and the gate waited on it
+  with a plain `wait`: a client that failed before it connected would
+  have held the gate until the sibling's 35-minute limit. The server's
+  accept now gives up after 10 s ("no client connected in 10 s"), and the
+  gate gives a server 15 s after its client - one ends 2 to 54 ms after
+  it, in 75 rounds on Linux - before naming it and stopping it with
+  `stop_server`. Three copies run side by side, 25 s each: a client that
+  never connects is named by Python, a server without its accept timeout
+  is named and stopped by the gate, and the plain wait it replaced is
+  caught still waiting. Found looking into master's Linux std-siblings
+  shard 1 (job 124230515630), which was not hung there: its runner built
+  iyi 3.6 times and ran the siblings before std/tls 3.4 times slower than
+  the same shard's first attempt, and the job's 90 minutes ran out inside
+  std/tls.
+
+- **std_http_exercise ends every process it started, stops each server
+  with a KILL after its TERM, and waits a minute for a copy's port.**
+  `bench/std_siblings.sh` stopped it past its 50 minutes on the user's
+  Windows 11 machine (12 logical processors), and a bash of the gate's
+  and the `close_nolinger.bin` it ran were still alive four and a half
+  hours later. Run alone there, master's gate waited 44 minutes on a
+  broken copy's `close_nohalf.bin` that its TERM had not ended, and a
+  TERM to the gate's group, as the sibling limit sends, left that
+  round's bash and the server running. Each server is now stopped as
+  `bench/std_tls_exercise.sh` stops its own (`stop_server`: a KILL every
+  second after the TERM, a server alive after a minute named and the gate
+  failed), with its proof against a server that ignores TERM. A trap on
+  exit, TERM, INT and HUP kills every process under the gate, found by
+  parent in one table of every process (with `taskkill /T` on Windows):
+  stopped from outside at 2 minutes and during the close rounds, no
+  process of the gate's was left on that machine or on Linux. And a
+  copy's port is waited for a minute, not ten seconds: held to 4
+  processors, an HTTP/2 copy's frames were sent to an empty port. The
+  gate then held there in three runs of three held to 4 processors, in
+  1617, 1499 and 1583 s, and in one at 12, 1761 s; 805 s on Linux.
+
+- **std_netip_exercise says which Python its oracle needs.** Python 3.12
+  writes an IPv4-mapped address `::ffff:102:304` and 3.13 on
+  `::ffff:1.2.3.4`, as `std/netip` does, so under 3.12 the corpus
+  disagreed in 2726 of 108204 answers. An older Python now fails the gate
+  at once: "the oracle needs Python 3.13 or later (IPv4-mapped formatting
+  changed in 3.13), found 3.12.10". CI's is 3.14.
+
+- **thread_exercise's proof that Windows' stop asks every suspend at
+  once holds on any core count.** Its copy that waits for each suspend
+  before asking the next stayed under the 60 ms bound beside 48
+  computing threads on the user's Windows 11 machine (12 logical
+  processors) in 15 runs of 15, and below 8 cores the proof did not run.
+  The stop is now measured beside three threads held to one processor:
+  one at the highest priority, computing 400 ms at a time, and two at
+  the lowest, which it keeps off the processor, with each collection
+  started as a run of the high one does. On that machine, in 10 runs of
+  10 each at 12 processors and held to 4, the copy stopped them in 400
+  to 401 ms and the runtime in 81 to 608 us; in one run each held to 2
+  and to 1, 400 and 380 ms against 108 and 44 us. The proof runs at
+  every core count; the lock's proof still needs 8.
+
+- **lsp_session's 73j and 73k hold the worker until the gate lets go.**
+  73k failed on master's Windows CI with "the worker gone before the
+  kill" (job 124281113104), and with WinError 87 at that kill before it
+  (job 122939534975): the hold was `cmd` and a `ping -n 61`, a minute by
+  its own clock, and in both failures the steps ran 97 and 98 s past step
+  73c's line, where 122 passing Windows runs printed 73k 2.7 to 3.2 s
+  after it. What held the gate up is in neither log. The Windows hold now
+  waits on a named pipe the gate keeps open until the step is over, and
+  Linux's shell on a FIFO the gate holds, rather than for a minute. On the
+  user's Windows 11 machine (12 logical processors) the session held in
+  20 runs of 20 and the orphan steps in 30 of 30 on 4 processors beside 6
+  busy loops, and stalls of 92 s after the listing and 65 s after the
+  pull were refused -32603; on Linux, held up 92 s, 73k was refused in
+  1.8 s. A proxy without the check at the quiet fails 73k (no answer in
+  10.0 s), and one without the check in `post` fails 73j. darwin runs
+  neither hold.
+
+- **parallel_exercise's proof that the slow half polls holds its window.**
+  The copy whose back-edge does not poll was caught by the server shape
+  only when a fast connection happened to wait in the poller of a worker
+  a slow request then took: eight runs on the M2 read 76, 77, 78, 81,
+  81, 121, 125 and 141 ms against the 80 ms bound, three of them passing.
+  `bench/parallel_preempt.iyi`'s `poller` step makes it certain on a pool
+  of one: the fast connection's server is parked in the worker's poller,
+  and the slow request computes until the fast one is answered or a
+  second has passed. The real slow half answers in 11.1 to 11.2 ms there
+  (ten runs on the M2) and 5.1 to 9.2 ms in five on 12-core Linux; the
+  copy at the second, 999 ms in five of five on the M2 and 1,000 in four
+  of four on Linux. The server shape's own check is unchanged.
+
+- **parallel_exercise's server shape leaves Windows two cores.** Its
+  clients are the main thread, and on 4 cores the gate ran 3 workers,
+  which left that thread one core and none for anything else the runner
+  ran. GitHub's 4-core Windows runners come in two speeds, and on the
+  slower the plain build's server step read 36 to 63 ms in 13 jobs, then
+  157 and 159 ms against the 80 ms bound, 2753 and 1682 of 11,200 fast
+  requests over 20 ms (CI jobs 123312302895 and 123350279733), the poller
+  step before it. That step leaves nothing running: its process ends with
+  its group joined, and on Windows 11, 12 logical processors (the user's
+  machine), held to 4, 15 runs each with it, without it and on master
+  read 19 to 25, 18 to 30 and 20 to 29 ms. A shell loop busy on one of
+  the 4 made the failure's shape there, 59 to 104 ms and 914 to 1364
+  over 20 on 3 workers in 24 runs, with each of the three alike; on 2,
+  26 to 31 ms and 123 to 300 over in 20. The gate now leaves Windows two
+  cores, so 2 workers on 4: the preemption part of the gate passed 15
+  runs of 15 there, its server step 27 to 33 ms plain and 26 to 36
+  release, and the Windows job passed four of four in CI, three of them
+  on the slower runner, at 27 to 31 ms plain and 27 to 37 release. The 4
+  slow connections still outnumber the workers, so a fast request is
+  still answered beside them only by a preemption.
+
+- **parallel_exercise's server shape runs 2 workers on four cores or
+  fewer, and its period step holds the turn to its own looks.** darwin's
+  three-core runners starved the main thread as Windows' had: 3 workers
+  read 24 to 46 ms in 13 runs in CI's logs, then 87 and 85 ms against the
+  80 ms bound in two of the three macos-15 runs of master 7cdb1271a's
+  soak. 1 worker there made it worse, 54 to 100 ms and 4 of 10 runs
+  failing, so every machine of four cores or fewer now runs 2: ten runs
+  of the preemption part on macos-15 read 31 to 55 ms, and ten on
+  windows-2025 23 to 47. The same soak's Windows job failed the proof
+  that a monitor on the system timer's tick looks too seldom: that copy
+  looked every 10.6 to 14.3 ms in 36 CI runs, but under the 10.5 ms bound
+  darwin's slow looks need, and was caught only by the 20 ms turn. On
+  Windows, whose real looks read 5.14 to 5.42 ms in 101 runs and 5.15 to
+  5.30 in 20 debug runs, the look is now held to 8 ms; the copy read 10.1
+  to 13.1 there. The turn is held to three of the looks the same run
+  measured, where real monitors took 1.52 to 2.52 looks a turn in CI's
+  logs and 1.61 to 2.25 in the debug runs, and a new copy whose monitor
+  waits three unchanged looks rather than one, 3.45 to 4.35, fails it.
+
+- **`bench/parallel_migrate.iyi`'s closes step has the main thread close
+  one socket under a parallel task's read, so a close crosses threads in
+  every run.** The step needs one close made on another thread than its
+  reader's, and its 16 closers, each a task of its reader's parallel
+  task, run on whichever worker takes them first: darwin's release build
+  once took all 16 on their readers' own workers, and its plain build on
+  3 cores, run in rounds of 16 until one crossed, had none of 80 cross
+  (job 122696158944). The main thread is never a pool worker, and its
+  close posts to the reader's worker as a worker's does (`wake_closed`):
+  120 runs on a 12-core Linux machine, 30 of each build on 3 cores and on
+  12, all crossed, two with no sibling crossing, and so did 20 on
+  macos-14's 3 cores (job 122760384513) and 20 on windows-2025's 4 (job
+  122760384624). A read made on the main thread instead
+  (`-Dparallel_closes_home`) fails the step by name in
+  bench/parallel_exercise.sh, and `noclose` still hangs it.
+
+- **std/weak_ref's threaded check counts a round's two collections from
+  after its targets are made, and its gate names every failure in its
+  verdict.** Master's second soak run failed the Windows std shard 2 (job
+  124704511844) at "a round's targets nothing held are cleared once two
+  collections end (3557 of 4000)", in the plain build, 30 lines above a
+  verdict that said only "did not hold" under the proof section. A reader
+  read the collection count before it made its 400 objects: a collection
+  that ended while they were made, with the next already marking, counted
+  as one of the two, and the targets born black under the next lived
+  through it. On tssh (Windows 11, 12 logical processors, the user's
+  machine), held to 4 processors, 20 of 620 plain rounds kept 5 or more
+  of their 200, 19 of them 50 to 200, each with a collection ended inside
+  its `make`; held to 2, master's gate failed the check in 10 of 10 runs,
+  plain and --release, keeping up to 45 a round where the bound allows
+  20. Counted from after `make`, the gate passed 10 of 10 at 2, 4 and 12
+  processors, keeping 1.06, 1.09 and 1.13 a round in the plain build, and
+  10 of 10 on Linux; the bound stays at nine in ten. Every failure of the
+  gate now goes through one `fail`: it prints `FAIL:` with the reason (an
+  exit names its first assertion or panic, and a broken copy caught
+  elsewhere names where), and the verdict lists each again. "Every
+  section reported" says so on its own account, where a failure before it
+  had left it silent.
+
+### Fixed
+
+- **A top-level frame no longer keeps what the loader left in it.**
+  Two of master 9147544d1's three CI runs failed on macos-15 at
+  "channel: 64 MB received through a rendezvous left 61 MiB kept"
+  (bench/concurrency_exercise.iyi, step 16e; jobs 124704511841 and
+  124728418948). Not the darwin stack-top change that commit made: the
+  exercise starts no thread there, and built for darwin with 4552e9305's
+  runtime and with 9147544d1's its code differs in two line-number
+  immediates; on a macos-15 runner (macOS 15.8.2, a three-core M1
+  virtual machine) the check failed in 21 runs of 60 with master's
+  runtime and 24 of 60 with 4552e9305's. A copy of the collector that
+  records each object's parent as the mark pushes it named the root the
+  same in every failing run: one word of `__iyi_main`'s frame, whose
+  high four bytes are the `Int32` of step 16a's
+  `(round % 5).times`, left at 4, and whose low four the program never
+  writes. Those were dyld's, from before `main` (0x9e0c7d00 on one
+  runner, 0x9b47bd00 on another), and the word they made lay inside the
+  64 MB string whenever its mapping covered it (at 0x49a000020,
+  0x49b000020 and 0x49c000020 in the failing runs). dyld left 2,209 nonzero words down to 21,696 bytes under
+  `main` there, the same in 40 runs, and Linux x86_64's start 453, 5,352
+  bytes deep. On a runner whose word did alias, the check failed 25 runs
+  of 40, the instrumented copy kept the bytes in 24, and with the stack
+  under `main` zeroed in none of 40. `main` now enters the program
+  through `__iyi_enter`, which zeroes the 64 KiB under its own stack
+  pointer, reading a word that is zero already rather than storing it,
+  and stops at the committed limit on Windows; `__iyi_program`, never
+  inlined, makes `__iyi_main`'s frame after it. Cleared from a leaf, the
+  leaf's frame and red zone stayed the loader's (22 words of them on
+  Linux), and called straight from `main`, --release inlined
+  `__iyi_main` there and made its frame before the clear (458 words). The
+  new step of `bench/root_exercise.sh` reads a 32 KiB top-level array the
+  program never writes, plain and --release: 0 words on Linux, on
+  macos-15 and on Windows 11 with 12 logical processors (the user's
+  machine), where `__chkstk`'s call from the frame's prologue writes the
+  top two words and the probe reads the 4,094 under them; its broken
+  copy, a `main` that zeroes nothing, leaves 452 there, 2,209 and 774.
+  With the change, on a macos-15 runner where master's runtime failed the
+  check in 25 runs of 40, the exercise held it in 40 of 40 and a copy
+  printing its numbers in 39 of 40: one run still kept the 61 MiB, from
+  a root not found. On a third, where master's failed 8 of 20, the
+  printing copy held 40 of 40 and the recording collector found nothing
+  kept in 40; on a fourth, where master's held 40 of 40, both held 80
+  of 80. The gate held three times of three on two of them, and twice on
+  the Windows machine.
+
+- **Windows: a thread its idle wait lets go is busy before it takes
+  anything, so a join beside a thread waking from its sleeps is not
+  named a deadlock.** Master's `bench/concurrent_mark.sh` failed on the
+  Windows runner at "every collection a program's thread finishes is let
+  go before its threads are released": bench/release_trigger.iyi
+  panicked "deadlock: every fiber is blocked". Its main thread joins a
+  second thread that sleeps a millisecond at a time. Under the process's
+  one completion port a deadlock's walk reads an idle thread's lists as
+  well as what the thread said when it went idle
+  (`IyiScheduler.all_quiet?`), and a thread its timer woke still said
+  idle while its sleeper went from its heap into its own run queue,
+  which the walk does not read. On the user's Windows 11 machine (12
+  logical processors) release_trigger named a deadlock in 9 runs of 200,
+  and in 15 of 200 at 4 processors' affinity. A snapshot the walk now
+  prints under `-Ddeadlock_dump` showed the second thread idle, with no
+  sleeper and its root fiber runnable at the head of its run queue,
+  beside the main thread parked in its join. The idle wait now marks the
+  thread busy before it takes the port's packets or its expired sleepers
+  (`end_idle`); elsewhere the walk reads only what a thread said when it
+  went idle, and the mark stays where it was. A thread that takes
+  another's packet is then busy for as long as it holds the fiber, so
+  the count of packets in hand that mended bench/completions_taken.iyi's
+  false deadlock is gone, and with it an atomic add and subtract a
+  packet, and the ring a dropped packet sent the deadlock's reporter.
+  release_trigger then held 300 runs of 300 at 12 processors and at 4.
+  The new bench/woken_busy.iyi is that join; bench/concurrency_exercise.sh
+  runs it, and on Windows two copies of the runtime whose idle wait
+  holds the woken thread 200 ms once it has taken its sleeper: the one
+  marked busy before the hold passes, and the one marked busy after it
+  names the deadlock, its snapshot showing the sleeper in the run queue.
+
+- **A worker's switch lowers its preemption word, so the task switched in
+  begins its own quantum.** Master's `bench/parallel_exercise.sh` failed on
+  a slower Windows runner at "server: a fast request took 83 ms beside the
+  100 ms ones, past 80 ms" (CI job 124117601245, 2 workers on 4 cores);
+  the rerun passed. On the user's Windows 11 machine (12 logical
+  processors), held to 4 with one of them busy, a trace of the server
+  step's tasks found it: the two slowest of 30 runs, 45 and 44 ms, were
+  each a fast request whose task was given up 2 to 3 µs after its switch,
+  at its first back-edge. The monitor raises a worker's word, not a
+  task's, and it had raised it 22 to 33 µs before, for a slow request's
+  task that then answered and parked before its next back-edge. The word
+  stayed up across the switch, so the fast task went into the queue of
+  preempted tasks, which every worker looks at last, and waited 28.6 and
+  38.6 ms there, where the slow tasks waited up to 47 and 51. In those
+  runs every request's packets were taken off the port within 11.1 ms,
+  by a computing worker's back-edge poll or by a thread's look that does
+  not wait (`take_port`, `poll_now`), and the main thread, which runs the
+  clients, ran a client within 3.8 ms of its answer being taken.
+  `IyiScheduler.switch_to` now lowers the word beside the count it
+  already moves: a load, and a store only when the word is up. Traced
+  again, 20 runs each and interleaved, a fast task was given up so in 2
+  runs before and in none after; untraced, the slowest fast request took
+  24 to 43 ms plain and 22 to 38 release before, 23 to 29 and 22 to 31
+  after. The new `fresh` step of `bench/parallel_preempt.iyi` holds it on
+  a pool of one: a task holds the worker 30 ms with no check, so its word
+  is raised, and ends; the task switched in next computes a millisecond
+  beside a third, and gives the worker up only on its own word. Master's
+  runtime gave it up 0 to 1 µs in, at round 1 of 10, in three runs of
+  three on that machine and on Linux here (12 vCPUs), and the gate's copy
+  without the lowering is caught there by name; with it, 10 rounds of 10
+  ran with no preemption.
+
+- **server_load's OVERLAPPED copy ends at its catch, and a panic or an
+  exit is gated with tasks parked on the poller.** Master's
+  `bench/server_load.sh` timed out on its Windows broken copy, whose
+  fibers hold their OVERLAPPED as a number (job 123987176637). It
+  printed its panic and then ran on until the 300 s timeout: exit 124,
+  where exit 1 was owed. The runtime's panic and exit paths were not
+  the cause. The copy frees every fiber's OVERLAPPED while the kernel
+  still writes into it, and since the process's one completion port,
+  the thread taking a packet finds its fiber through the OVERLAPPED's
+  owner word (`IyiScheduler.take_packet`). In a chunk the allocator has
+  handed on, that word is garbage. The panic cancels the sibling tasks,
+  and its join waits until each cancelled operation's packet comes;
+  those packets were dropped. On the user's Windows 11 machine (12
+  logical processors), 2 runs in 10 hung. A debug line named the two
+  dropped packets, whose owner word was not the one thread's, and cdb
+  showed that thread in `GetQueuedCompletionStatus` with no timeout.
+  The check now prints its FAIL line and ends the process with
+  `__iyi_exit 1`, because the heap past it is corrupt by design: 50 runs
+  in 50 exited 1, in 0.13 s each after the first, and `server_load.sh`
+  held 10 times in 10. The new `bench/panic_exit.iyi` parks tasks on
+  reads nobody answers and on an accept, beside sleepers and channel
+  receivers. It then ends the program by a task's panic, by the main
+  task's panic, and by a task's `exit(3)`, on twelve workers and on the
+  main thread alone. `bench/parallel_exercise.sh` runs it under the
+  program's 5 s watchdog. Every task ended 300 to 316 ms after the
+  start, 300 of them the lead before the ending, on that Windows
+  machine, on Linux (12-vCPU QEMU) and on macOS 26.6 (Apple M2 Pro, 10
+  cores, the user's machine). Its broken copy is a cancel that leaves
+  an io wait parked, which is caught by name: "task-panic: still running
+  5000 ms after it started".
+
+- **A darwin thread keeps no descriptor past its end.** The stop parked
+  each stopped thread on a pipe of its own, made when the thread was and
+  never closed: two descriptors for every thread a program ever started,
+  242 pipe ends in `lsof` after 120 threads had run and been joined
+  (macOS 26.6, Apple M2 Pro, 10 cores, the user's machine). Under a
+  terminal's `ulimit -n` of 256, `bench/collect_trigger.sh`'s 500
+  short-lived threads died at "pipe failed", and `bench/thread_exercise.sh`
+  at "kqueue failed" once the pipes had left a thread's poller one
+  descriptor short. The stop parks on libSystem's public futex now, as
+  Linux's parks on the kernel's: `os_sync_wait_on_address` on the stop's
+  release word, read off its disassembly as one `__ulock_wait2` call
+  holding nothing, and one `os_sync_wake_by_address_all` for every
+  thread parked. Both are the mark helpers' already, so darwin still
+  needs macOS 14.4, and errno is put back around both. The same 120
+  threads leave nothing open; a live thread holds one kqueue while it
+  polls, closed at its end. Three rounds of 300 collections each, the two
+  runtimes interleaved: beside 8 computing threads a pause averaged 313
+  to 351 µs against 669 to 780 with the pipes, its median 146 to 148 µs
+  against 159 to 165, and the stop's own half 121 to 143 µs against 193
+  to 287; beside 1 and 4, and beside sleeping threads, the medians did
+  not move (31 to 32 µs against 32 to 35, 74 to 75 against 76 to 77),
+  nor did a thread's start and join (21 to 36 µs against 21 to 34).
+  `pipe` and `read` left the names every darwin program carries, and
+  `pipe` stays on the floor for `std/process` and `std/signal`.
+  `collect_trigger` runs its exercise under `ulimit -n 256` on Linux and
+  darwin, where the old pipe, or on Linux an eventfd per thread, dies by
+  name; `bench/thread_floor.iyi` parks on the futex too, with the pipe
+  kept as `-Dtf_park_pipe`.
+
+- **A darwin thread a collection stops at its birth is not killed by
+  libplatform.** dyld makes a thread's `@[ThreadLocal]`s at its first
+  touch of one, one `calloc` of the image's block, and the stop's handler
+  reads two of them: `IyiThread`'s line and the heap's cache. A thread's
+  line was linked for the stops by its parent, before `pthread_create`,
+  so a collection could signal the thread inside that `calloc`; the
+  handler's read made the block again and took the allocator's lock the
+  interrupted call held. On macOS 26.6 (an M2 Pro) libplatform killed the
+  process ("BUG IN CLIENT OF LIBPLATFORM: Trying to recursively lock an
+  os_unfair_lock", SIGKILL) or libmalloc trapped ("ulock_wait failure",
+  SIGTRAP): `bench/thread_exercise.sh`'s switching program died so in 3
+  runs of the gate in 14, and in 5 of 130 runs alone. A darwin thread
+  links its own line now, under the runtime lock, once it has written
+  it: no stop names it before its thread-locals are made, and until then
+  it has allocated nothing from the heap and holds no pointer into it.
+  `start` still counts it and still creates it under the lock, so its
+  handle is in the line before a stop can read it, and the handler's
+  search by handle for a line not yet written is Linux's alone. No
+  libSystem name was added. Linux's thread-locals are a block the parent
+  maps and copies before `clone`, read by loads that allocate nothing;
+  Windows' stop suspends a thread and runs no code on it. The gate's new
+  darwin step starts threads sixteen at a time beside a thread that
+  collects in a loop, 3,200 or 10 s' worth a run, five runs, every thread
+  born and joined: origin/master's runtime died in 19 runs of 20 of 3,200
+  there (18 killed, 1 trapped), each inside 4 s, and this one ran 20 of
+  20, the switching program 30 of 30. Its broken copy links the line in
+  the parent again; its handler then finds no line and returns without
+  counting in, and the stop waited forever in 5 runs of 5, so the copy's
+  handler aborts there by name, and the proof counts each run killed,
+  trapped or aborted: 5 aborted in 5.
+
+- **A darwin thread's first allocation is a root.** A thread wrote its
+  stack's top on its line after `IyiStackGuard.install`, whose `stack_t`
+  is its first heap chunk, so a stop between that allocation and the
+  chunk's three stores scanned the thread's stack from sp up to 0.
+  `GC.collect` sweeps inside its pause: the chunk went onto a free batch
+  there, the stores wrote over the batch's chain, and the centre's next
+  pop of the class read address 0x10008 - the `stack_t`'s 65,536 plus 8.
+  The thread-local fix's step (`bench/thread_exercise.sh` 7d) failed 2
+  of 3 CI runs on macos-15's three cores, one of them this SIGSEGV, and
+  debug jobs died of it in 13 runs of 342 of 3,200 threads: 6 of 115
+  with the runtime from before that fix, 5 of 103 after it, 2 of 124
+  with the stop masked across the first touch instead, 12 of the 13 at
+  0x10008, every one inside the newborn thread's install. Linux's top is
+  written by the parent before `clone`, and 60 runs held to three cores
+  did not fault. A darwin thread's first store is its top now,
+  `pthread_get_stackaddr_np`'s as the main thread's is, rather than a
+  local's address in `run`, so the scan takes `run`'s own frame whole.
+  Step 7e holds it: a copy of the runtime keeps the `stack_t` in the
+  install's frame until two collections have stopped the thread and
+  aborts by name if the sweep's flag says the chunk was freed; its
+  broken copy writes the top after the install again. With the top
+  first, 128 runs of 128 of 3,200 threads held on a macos-15 runner (7.8
+  to 48.8 s), and three runs of the gate held 7d and 7e there, their
+  proofs catching 15 runs of 15 and 9 of 9. 7d's runs are bounded by
+  their own clock now - twenty rounds, then rounds until 10 s, 3,200
+  threads at most - because the other CI failure was its 60 s timeout:
+  macos-15's runners made 54 to 479 threads a second (147 the median,
+  425 runs on four runners) where the M2 makes about 1,100, 3,200
+  threads took 7.2 to 59.6 s, and none of the 438 runs hung - every one
+  ended or faulted inside 60 s. Bounded, a run bore 512 to 2,640 threads
+  there.
+
+- **darwin's mark helpers park: an idle program no longer burns every
+  core.** They spun on the generation forever (`yield` is ARM's hint,
+  not a syscall): `bench/web_cores.iyi`'s server, idle after a second of
+  load, used 88.9 s of CPU in 10 s on a ten-core M2 Pro (macOS 26.6) and
+  19.9 s on CI's three-core macos-14; it uses 0.0 on both now. A helper
+  spins `SPIN_BEFORE_PARK_NS` - 250 µs on darwin, chosen from fifty
+  microseconds to five milliseconds; fifty stays on Linux and Windows -
+  and then sleeps on the generation word in `os_sync_wait_on_address`,
+  woken by one `os_sync_wake_by_address_all` when the sleepers count
+  says anyone sleeps. On the M2, best of five: check_version at eight
+  workers 64,331 requests a second to 114,495 (p99 44.7 ms to 0.92),
+  binary trees 0.281 s to 0.144, churn 0.076 to 0.060. On macos-14, best
+  (median) of nine: binary trees 0.177 s (0.199) to 0.192 (0.205), churn
+  0.067 (0.078) to 0.064 (0.075), check_version 37,743 (33,385) to
+  40,870 (37,366). The futex is libSystem's public one, so darwin
+  programs need macOS 14.4 (CI's macos-14 builds say `minos` 14.0); two
+  names join `FLOOR_BASE_DARWIN` and the exact darwin lists.
+  `bench/parallel_mark.sh` now checks on every platform that a second of
+  sleep after the marks costs under 100 ms of CPU (0 ms on Linux,
+  Windows and both Macs), and a copy whose spin never gives up is caught
+  (2.0 s on macos-14, 3.0 on windows-2025, 9.2 on twelve-core Linux);
+  its spin-length proof counts a hundred hints a nanosecond of the spin,
+  since 200,000 hints were 113 µs on macos-14 and did not fire.
+
+- **darwin's floor names `memset_pattern16`, LLVM's call for a pattern
+  fill.** `samples/iyi/cores.iyi` is the first sample to reach
+  std/compress's Inflater (through std/http's `BodyReader#read`), and
+  its `--release` build on darwin asked libSystem for
+  `memset_pattern16`: LLVM 20.1.2's loop-idiom pass rewrites the
+  Inflater's fill of the fixed distance code's thirty lengths with 5.
+  The fill is library code, not the runtime that clears its own memory,
+  so the name joins `bench/dependency_floor.sh`'s darwin list with that
+  reason. It was latent: `std_compress_exercise --release` names it on
+  master too, and the exercises build plain.
+
+- **A mark beside the program counts its workers by one and never stores
+  the count (#149).** The remainder round, which runs beside the program
+  when the second stop retreats, stored the count of workers marking over
+  the mutators' assists counted in; their -1s took it below zero, every
+  helper spun in `drain`, no collection ran again and the heap grew -
+  on Windows at eight and twelve workers. The count moves by one now; the
+  remainder round counts helper 0 in by one; and helper 0 reads the
+  generation it waits past before `@@collecting` falls, where a mark
+  another thread began in between was one it skipped (with one helper,
+  nobody drained it). A mark that does not end says so on standard error,
+  naming POOL_ACTIVE, POOL_HEAD, the generation, the permits and the
+  helpers done: fatally at the -1 that takes the count below zero or at
+  a stop that begins a round with a worker counted in, and once per
+  doubling of its age past ten seconds otherwise (the longest mark
+  measured beside the stress program was 42 ms). `bench/mark_stall.iyi`
+  is the server's shape - 24 connections on 12 workers, each a parallel
+  task parked on its socket - with a watchdog that holds the tasks when
+  collections stand still and fails the run if none ends;
+  `bench/concurrent_mark.sh` runs it with every helper and with one. Its
+  broken copies - the store put back with a retreat forced at every
+  second stop and an assist held across it, the late generation read with
+  one helper held until the next mark begins - fail every run, at the
+  first collection and the second, 12 runs of 12 each held to three, four
+  and twelve cores; left to the machine, the first missed on four-core
+  Windows and three-core darwin runners and the second on a four-core
+  Windows one. Linux never stalled unwidened: twenty runs of fifteen
+  seconds at twelve workers on master, 1,588 second stops retreated.
+  Windows showed one more in the same place: `@@collecting` fell after
+  helper 0 released the threads, and on a four-core runner the released
+  workers took helper 0's cores and allocated with no mark to assist and
+  no trigger to cross, 334 MB counted against a budget of 4.3 MB. The
+  collections a program's own thread finishes - the trigger's that end in
+  their first stop, the trigger's with no helper, and `collect` - had the
+  same order: with 8 and 12 threads allocating, their window lasted up to
+  24.2 ms on twelve Linux cores, 164.2 ms on four-core Windows runners
+  and 151.5 ms on a three-core darwin one, and up to 176,816,128 bytes
+  were counted in one against a budget of 4,194,304. Every collection is
+  let go before its release now, `settle` waits for the accounts, and
+  broken copies put each old order back with the collecting thread held:
+  helper 0 ten seconds after its unlock, caught by the watchdog, and
+  the others a second, caught by `bench/release_trigger.iyi`, whose
+  second thread's slices past the budget must trigger the next
+  collection.
+
+- **A `std/tls` connection that refuses its peer lets the alert arrive.**
+  After a fatal alert either end now shuts the socket's sending half and
+  reads and drops what the peer sent until the peer closes, a second and
+  64 KiB at most, then closes the socket. The server read on before,
+  without the shut; the client closed at once, and with a server's
+  records past its Finished still unread - 0.5-RTT data, tickets - the
+  close was a reset. `bench/std_tls_server.py`'s new `untrusted-late`
+  sends a certificate the client refuses and three full records of
+  0.5-RTT data in one write: it read alert 42 and then a reset in 100 of
+  100 refusals on Linux and 100 of 100 on darwin, and the alert and then
+  the end of the stream in 100 of 100 on each with the change. Linux and
+  darwin still hand over the alert, even read 300 ms after the reset;
+  Windows throws away what a reset connection received and had not read,
+  as the ECH oracle's client showed the std/tls server, which lost
+  ech_required in 18 and 15 of 20 runs. A peer that closes once it has
+  the alert ends the wait then - OpenSSL's s_server 0.2 ms after it on
+  darwin - and `untrusted-hold`, a server that sends a record every 50 ms
+  and never closes, has the refusal back after its second (1000 to 1005
+  ms on Linux and darwin). `bench/std_tls_exercise.sh` asks
+  `untrusted-late` 20 times and `untrusted-hold` once, with broken copies
+  that close at once, linger without the shut, and linger ten seconds.
+  `untrusted-late` sends a fourth record 300 ms after the three: Windows
+  closes a socket with bytes unread in order, and resets it only when
+  bytes come after the close, so without it the copy that closes at once
+  had the alert and the end of the stream read in each of 20 runs there
+  (CI job 122639709895).
+  - `bench/std_tls_ech_oracle.go`'s client reads what the std/tls server
+    sent after its Finished before closing a connection whose ECH it
+    refused. Closed with those 314 bytes unread, the connection was
+    reset, and Windows drops what a reset connection received and was not
+    read: the server read "the connection was aborted" in place of the
+    client's ech_required in 18 and 15 of 20 runs here, and in none of 40
+    after.
+  - `bench/std_tls_exercise.sh` reads the alert s_server took from the
+    std/tls client once s_server has written it, five seconds at most,
+    before killing it. Two of darwin's stapling checks found no alert in
+    CI job 122532136003, the log holding the port probe's line alone:
+    s_server writes the alert after it reads it, and a client gone as soon
+    as its alert was sent left the gate to kill s_server first. With
+    s_server at nice 19 beside a busy loop on its CPU (Linux), such a
+    client's alert was written in 0 of 50 runs killed at once and in 50 of
+    50 awaited. The stapling checks waited for nothing, and `client_alert`
+    slept 300 ms.
+
+- **A refused TCP connect from a `--crystal` program on macOS 27 reported
+  success, and now raises `Socket::ConnectError` (#153).** Non-blocking
+  `Socket#connect` on Unix waited for writability and retried `connect(2)`
+  treating `EISCONN` as success, hiding connection failures. The socket
+  error state is now inspected via `SO_ERROR` without retrying connect
+  (crystal-lang/crystal#17436, #17619).
+
+- **macOS's system libiconv handles invalid byte skip and shift states
+  correctly (#152).** macOS 14+ provides FreeBSD Citrus iconv without GNU
+  extensions. Crystal::Iconv no longer appends //IGNORE on Darwin when
+  using system libiconv, avoiding dropped characters after invalid bytes,
+  and std specs reflect Citrus shift state mappings for BIG5-HKSCS and
+  EUC-JP.
+
+- **An integer constant is cut to its type's width before LLVM gets it**
+  (`LLVM::Type#const_int`, as Crystal 1.22 has it). A negative value went
+  to `LLVMConstInt` sign-extended to 64 bits, and the LLVM in the Windows
+  Crystal package (23.1.1) kept the bits past an `i32`: `(-1).unsafe_to_u32
+  == 4294967295_u32` was false and its `to_u64` 18446744073709551615 in a
+  plain build (`bench/std_int_exercise.iyi`), and a `--release` build made
+  `String#to_i?`'s `value < -214748364 || (value == -214748364 && digit >
+  8)` into `digit > 8`, so any number with a 9 in it read as no number -
+  `"9".to_i` panicked, std/http refused `HTTP/1.1 999`, and std/tls's
+  exercise could not read the port Go's ECH server wrote. The compiler
+  built with Crystal 1.21 (LLVM 20.1.7) answered both right.
+  `bench/number_exercise.iyi` reads numbers made at run time with every
+  digit; its release build panicked under the compiler before this.
+
+- **aarch64 Linux reads a thread-local afresh after a loop's back-edge
+  check.** Its thread pointer was `llvm.read_register`, which LLVM models
+  as only reading memory, and a release build hoisted it out of a loop
+  that stores nothing: a parallel task reading `IyiThread.current_line`
+  beside a xorshift walk loaded the line once before the loop, and a
+  check that moved the task left it reading the line of the thread it
+  had left. The thread pointer is now a volatile `mrs` marked as writing
+  memory nothing else names, read in every turn of the loop and after it
+  (llvm-objdump of release cross-builds). x86-64 Linux, darwin and Windows
+  already read at every access, in the loop and after a park, and their
+  objects are unchanged. Under qemu-user, 20,000,000 allocations, release,
+  best of five, three interleaved runs: 596, 617 and 601 ms before, 582,
+  937 and 578 after. `bench/parallel_migrate.iyi`'s new `loops` step reads
+  the line before, in and after loops whose checks moved the task,
+  against the kernel's thread. The gate runs it on Linux, darwin and
+  Windows and CI on aarch64 Linux under emulation; built for aarch64 by
+  the compiler before this change it failed under qemu-user in 2 runs of
+  2, and a copy reading the line from before the loop fails it by name.
+
+- **A Windows `--release` build with a pool its optimiser cannot reach
+  links.** x86-64 Windows' preemption checks read the TEB slot's offset,
+  `IyiWorkers::preempt_slot`, by name after optimisation, and only the
+  pool's start and its workers touch that global. A program whose every
+  `serve` passes `workers: 1` has the pool in its types and none on any
+  path, so `--release` deleted the internal global and the link stopped
+  at `LNK2019: unresolved external symbol IyiWorkers::preempt_slot` - the
+  release builds of std/http, std/cookie, std/sse, std/websocket and
+  std/acme's exercises on Windows. The global is kept external now, and
+  holds the fallback slot, 0x28, which nothing raises. A cross-compiled
+  object of `bench/std_cookie_exercise.iyi` named it undefined before
+  and defines it after.
+
+- **Windows' `-Dpreempt_check_accessor` build links again.** Its checks
+  call the preemption word's thread-local accessor, which nothing else on
+  Windows names since the word moved to a TEB slot, so
+  `bench/parallel_exercise.sh`'s proof that the accessor check costs a
+  tight loop stopped at LNK2019 (`*IyiWorkers::preempt`) on GitHub's
+  runner and on a 12-core Windows 11 machine. Codegen now defines the
+  accessor, with external linkage so `--release` keeps it, wherever that
+  check will call it (`iyi_preempt_accessor?`), and that build keeps the
+  word in the thread-local the monitor raises. It links, fails at
+  `tight: sum:` - 2.95x on windows-2025, 2.56x on the Windows 11
+  machine, 5.5x on macos-14 - and still preempts.
+
+- **A Windows build waits for a program Smart App Control holds.**
+  Evaluating, its services (`CryptSvc`, `AppIDSvc`, the `applockerfltr`
+  filter) open a program that has just run, shared for reading only, for
+  0.1 to 1.1 s, and a build begun at once could neither write nor rename
+  it: "LNK1104: cannot open file" at the link in 6 of 60 builds made right
+  after a run, or "in use and cannot be replaced or moved aside" before
+  the compile. The check before the compile now waits up to two seconds
+  for such a holder, as Go's `cmd/go` does, and a link that stops at
+  LNK1104 waits and links once more, its first words held back: 0 of 60.
+  `bench/rebuild_reuse.py` holds the program that way for a second and
+  builds; the compiler before this failed that step in 2 runs of 2.
+
+- **A macro's `run` program is kept apart from the builds the cache
+  rotates (#143).** The cache keeps the ten directories used last, and a
+  helper such as std/eiy's counted with them: after ten builds of anything
+  else it was gone, and the next build of a program that renders
+  templates, nothing in it changed, built it again inside `Semantic
+  (main)`. On Windows its directory also kept the time it was first made,
+  its times never set when it ran. iyiturkiye (10,700 lines, 51 runs of
+  the helper) after 11 other programs, five rounds on Windows 11:
+  `Semantic (main)` 6.03 to 14.17 s before - 2.06 to 4.47 s building the
+  helper, and once 9.21 s for its runs, a program Windows had not seen
+  starting - and 3.44 to 4.11 s after, against 3.28 to 3.81 s for a build
+  right after another. Helpers are rotated among themselves, ten kept, and
+  their directory's time is set on every platform.
+  `bench/rebuild_reuse.py` builds 11 other programs into its cache and
+  wants the EIY helper reused; the compiler before this built it again.
+
+## 0.19.1 — 2026-10-25
+
+**A collector hang and a handful of TLS and PKI edges fixed, a build
+with nothing changed that builds nothing, std/http's connections on every
+core, and TLS Encrypted Client Hello.** A program whose collections mark with
 helper threads back to back could hang for good: a helper that took its
 permit a round early was erased by the round's reset, on every platform,
 14 runs in 24,000 of `bench/sweep_exercise.iyi` before the fix and none
@@ -15,14 +3194,30 @@ handshake that authenticated it; a server declines early data a lowered
 limit no longer allows rather than cutting the client off, and refuses a
 server_name past 253 bytes (in 0.19.0 one past 255 ended that
 connection's task with `arithmetic overflow` when its ticket was
-written, the server serving on); std/acme requires
-HTTPS; std/autocert checks an issued chain against its roots and holds a
-handshake no longer than its deadline; DNS over TLS and over HTTPS pad
-their queries to 128 bytes. std/hpke is Hybrid Public Key Encryption
+written, the server serving on); std/acme requires HTTPS; std/autocert
+checks an issued chain against its roots and holds a handshake no longer
+than its deadline; DNS over TLS and over HTTPS pad their queries to 128
+bytes. std/hpke is Hybrid Public Key Encryption
 (RFC 9180), and std/tls speaks Encrypted Client Hello (RFC 9849) at both
 ends over it, held to Go's crypto/tls each way; std/dns reads SVCB and
 HTTPS records (RFC 9460), and an `HTTPClient` asked to takes a site's
-ECH configuration and protocols from them.
+ECH configuration and protocols from them. A body that travels in an
+artifact is located in its module's source, so `Eiy.render` in one finds
+its template from artifacts as it does from source (#140).
+
+The edit loop, from a port of a 10,700-line web application (#141-#144):
+`iyi build` records what a build read and, when none of it moved, says the
+program is up to date in about 0.01 s, where every program SPEC.md IV.3a
+times took 0.10 s to 1.09 s; a rebuild that does compile reuses every
+object, where debug builds put initialisers in a new order each time;
+`run` starts its program with `posix_spawn`, whose cost does not grow with
+the compiler's memory as `fork`'s did, and a template rendered several
+times in one compile runs its helper once, which took a 24-template
+application's `Semantic (main)` from 3.97 s to 1.66 s; and `-s` prints
+each phase's resident memory, where it printed `0.00MB`.
+`Server.serve_parallel` answers std/http's connections on every core
+(#145's first step): a request that computes went from 411 a second under
+`serve` to 4,033 on 12 workers, measured on Windows on 12 logical CPUs.
 
 **Some answers change:** a std/tls client sends a GREASE
 encrypted_client_hello extension in every ClientHello without an ECH
@@ -32,12 +3227,71 @@ do not lead to, so a manager pointed at a private CA must set them;
 `TlsServerConfig#identity_source` is given a third argument, the
 milliseconds left of the handshake; and tickets a 0.19.0 server issued
 are not read by this one, so those clients make one full handshake.
+`.iyimod` is v59, and an artifact an earlier compiler wrote is refused
+and built again. `iyi build` skips a build with nothing changed unless
+given `--force`, and a debug build's initialiser order is fixed for a
+given import graph (`IYI_INIT_SEED` salts it) where it changed from build
+to build. **Some programs that compiled are refused:** a proc handed to a
+parallel boundary as `&work` (`g.spawn_parallel(&work)`,
+`m.lock(&work)`), whose captures nothing checked.
 
 **Not here, and said so:** std/tls has not been audited and is not to be
 called secure until it is; ECH's split mode is not here; the Go legs of
-the ECH gate run on Linux CI alone, where Go is 1.25 or later.
+the ECH gate run on Linux CI alone, where Go is 1.25 or later; the
+2x-5x spread of `Semantic (main)` on Windows (#143) did not reproduce on
+Linux and is not explained, and `-s` now prints what would show it.
 
 ### Added
+
+- **`Server.serve_parallel(listener) { |request| ... }` answers
+  connections on every core (#145).** `serve` runs every connection on the thread that
+  accepts it, so a server had one core whatever the machine had: the Açık
+  Türkiye port never passed 178% CPU on 12 vCPUs where its Go port reached
+  1,117%. `serve_parallel` starts each connection as a parallel task
+  (SPEC.md III.4.13) - whichever pool worker is free starts it and serves
+  it to its end - while the calling thread accepts. Its block is checked
+  where it is written as a parallel task's is: every value it captures
+  `Share` - a pool behind a `Mutex`, a count in an `Atomic` - and every
+  captured local assigned once, with the variable and the field that
+  failed named; a block capturing a `Router` or an `Array` is refused. It
+  also takes a value whose `call(Request) : Response` answers, Go's
+  `http.Handler`, refused the same way unless it is `Share`. There is no
+  `tls:`, since a `TlsServerConfig` is not `Share`.
+  The rest is `serve`'s, the stop included: the listener closed on the
+  accepting thread, a watcher beside each connection on its worker closes
+  the ones waiting on their client, and answers in progress are written.
+  `IyiSocket#family` is public: with `fd`, what makes a socket again on
+  another thread. Measured on Windows 11, 12 logical CPUs, release, 32
+  kept-alive connections: a request that computes (2,000,000 xorshift
+  rounds) went from 411 requests a second under `serve` to 410, 821,
+  1,617, 3,047 and 4,033 on 1, 2, 4, 8 and 12 workers; one that answers a
+  few bytes from 23,255 to 21,699 on one worker and 77,163 on four (oha on
+  the same machine). `bench/std_http_parallel.iyi`, run by
+  `bench/std_http_exercise.sh`, holds answers on more than one worker and
+  none on the accepting thread, a panicking handler ending its own
+  connection, and the stop under watchdogs; copies with the connection
+  spawned on the accepting thread and with the stop never carried to a
+  worker are caught by name.
+- **`@[Share]` on a def: its block may run on other threads, and is
+  checked at every call (SPEC.md III.4.4).** What made the block form
+  possible: the block of a def marked `@[Share]` is held to what
+  `spawn_parallel`'s is, and inside the def that block, a `Proc`, is the
+  one non-`Share` value a parallel block may capture or be given as
+  `&block`. `std/shared_proc`'s `SharedProc(A, R).of { }` makes such a
+  block a value any thread may call. A proc passed to a boundary as
+  `&work` - `g.spawn_parallel(&work)`, `m.lock(&work)` - is refused now:
+  nothing saw what it captured, and it compiled whatever `work` closed
+  over. Six shapes in `spec/compiler/semantic/iyi_spec.cr`.
+- **std/router's `SharedRouter`: `Router`'s table for
+  `serve_parallel`.** The same patterns, precedence, conflicts and
+  answers, by the same code (`Router.route`); `handle` is `@[Share]` and
+  answers a new router with the route added, so the one being served is
+  never written. `Pattern` keeps its segments in `List`s, so it is `Share`.
+  The block form and a `SharedRouter` measured as the value did: 392 and
+  3,751 requests a second on one and twelve workers, and 393 and 4,003.
+  `bench/std_router_exercise.sh` routes every table through a
+  `SharedRouter`, holds its answers and its conflict sentence to
+  `Router`'s, and serves one under `serve_parallel` over the wire.
 
 - **std/dns: SVCB and HTTPS records (RFC 9460); std/http: `HTTPClient`
   connects by them.** `SvcbRecord.parse` reads a record's priority,
@@ -136,6 +3390,135 @@ the ECH gate run on Linux CI alone, where Go is 1.25 or later.
   without the sender's key, are each caught at the check that names it.
 
 ### Fixed
+
+- **A rebuild with nothing changed reuses every object, `_main`
+  included (#141).** Debug builds ordered the initialisers of
+  independent modules (SPEC.md III.5 rule 2) with a fresh random order
+  each build, and codegen follows the order the program's code runs in,
+  so every build was a slightly different program: `_main` changed, and
+  so did the order functions were emitted into whichever units an
+  initialiser reached first, `String`, `Hash(String, Int32)`,
+  `Std::Regex::RxCompiler` and the like. Ten no-change rebuilds of a
+  seven-module program compiled 1 to 12 of its 100 objects again and
+  relinked, the set changing from build to build. The order is now
+  Kahn's algorithm taking the ready module whose path hashes lowest -
+  Go's rule since 1.21, with a hash where Go sorts by import path - so it
+  is the same in every build of an import graph and in general not the
+  load order release builds keep, and those ten rebuilds compile
+  nothing. `IYI_INIT_SEED` now salts the hash rather than seeding a
+  shuffle, so a seed names another order and not the one it named
+  before.
+  `bench/rebuild_reuse.py` holds three no-change rebuilds of a program
+  with generics, unions, std/regex, `derive serializable` and an EIY
+  template to "all previous .o files were reused", a one-line edit to
+  its own unit, and the reordering to both orders across eight seeds.
+- **`Semantic (main)` no longer pays for a process per template render,
+  and a spawn no longer costs more the more the compiler holds (#143).**
+  Every `Eiy.render` was a process inside `Semantic (main)`: the macro
+  names its buffer afresh, so no two renders passed the helper the same
+  arguments. The compiler now runs `std/eiy`'s helper under a placeholder
+  buffer name, keeps its output for the rest of the compile against the
+  text of the template it read, and gives each render that output with its
+  own buffer's name put back; any `run` whose program names the files it
+  read is reused the same way when its arguments and files match. On a
+  generated 24-template app (five no-change builds each, `--no-codegen`)
+  that took the helper from 144 runs to 24, and `Semantic (main)` from a
+  1.89 s median to 1.66 s; on a 40-template one, 240 renders are 40 runs.
+  On Linux and darwin a spawn is `posix_spawn` wherever every redirect,
+  `chdir:` and environment asked for maps onto it, `fork` + `exec` where
+  not: `fork` copies the parent's page tables, and a compiler built
+  without a collector never shrinks, so 100 runs of `/bin/true` from a
+  process holding 0, 256 and 1,024 MB took 0.73, 5.82 and 22.39 ms each
+  with `fork` and 0.52, 0.49 and 0.47 ms with `posix_spawn`. And the
+  helper was relinked on every build whose search path had a `..` in it,
+  as the compiler's own `$ORIGIN/../src` does: the up-to-date check
+  compared the paths it recorded against expanded ones. With all three,
+  the 24-template app's `Semantic (main)` went from 3.97 s to 1.66 s.
+  bench/std_eiy_exercise.sh holds the run counts, the output of two
+  renders of a template and of one with a partial, a template edited
+  between builds, a template with the placeholder in its text, the helper
+  reused by the second build, and a broken copy of the substitution.
+
+  **What of #143 this explains, and what not.** The report is of
+  `Semantic (main)` taking 2–5× its usual time on some builds of
+  identical input, on Windows. It did not reproduce on Linux: five
+  no-change builds of the 24-template app varied by at most 1.07× of
+  their median before and after. What is explained is where much of that
+  phase went, process starts and a relink, and those are now one run per
+  template and caller and no relink, on Windows too, where `CreateProcess`
+  is still what each run costs. Why some Windows builds take several
+  times longer is not explained. `-s` now prints, beside each phase,
+  the processor seconds and page faults it spent, and under "Macro runs"
+  how many runs there were and how long they took, so the next slow
+  build there can say whether the time was spent computing (processor
+  seconds near the wall time), waiting on a child or the machine (well
+  below it), or taking memory (page faults up).
+
+- **`-s` prints the compiler's resident set, not `0.00MB` (#144).** The
+  column read the collector's heap, which a compiler built `-Dgc_none` does
+  not have. It is now the process's resident set when the phase ended,
+  labelled `rss` (`/proc/self/statm` on Linux, `task_info` on darwin,
+  `K32GetProcessMemoryInfo`'s working set on Windows), and left out where a
+  platform cannot say. bench/verbs_exercise.sh checks every phase names a
+  figure and that the largest is a plausible one.
+- **`iyi build` with nothing changed builds nothing (#142).** A build that
+  finishes records what it was built from - every file it opened or asked
+  about, every directory it listed, every environment variable it read, the
+  files a macro `run` program names (`std/eiy` names its template), the link
+  command's files and the libraries its `-l` flags find, the compiler, the
+  command line and the output - and the next build of that output reads the
+  record back and stops at `prog is up to date` when none of it moved: 0.009 s
+  to 0.011 s on every program SPEC.md IV.3a times, against 0.10 s to 1.09 s.
+  On by default; `--force` builds anyway, and `-s` says what moved, or why
+  the check was off. It is off for a build whose inputs cannot be listed - a
+  macro that runs a command, a `run` program that does not say what it read,
+  a linker flag that runs one, a library found nowhere the check looks, a
+  macro that prints, a build that warned - and the next build compiles. A
+  program on Crystal's prelude is one today, through `src/gc/boehm.cr`'s
+  `pkg-config`. `bench/up_to_date.sh` holds it: no change is skipped; a
+  source, a template, a variable a macro read, a flag, the output, an
+  artifact, a linked library and the compiler each rebuild a correct
+  program; each broken input is refused; and a record with one class of
+  input taken out takes that change for up to date. SPEC.md V.9 (e).
+- **SPEC.md IV.3a says what real programs cost.** `bench/edit_loop.py` times
+  the loop on `samples/iyi/webapp.iyi` with `kemal` and `app`, on
+  `bench/std_http_exercise.iyi`, on IV.3a's generated project and on a
+  generated web application of the issue's size
+  (`bench/incremental/generate_webapp.py`: generics, unions, `derive`, EIY).
+  The generated project understates the loop: from source the web
+  application rebuilds in 0.74 s against its 0.22 s. Measured on a 12-vCPU
+  Linux VM, where artifacts make the generated project's loop slower, not
+  faster (0.96 s an edit against 0.22 s), which is written down there and
+  not explained.
+
+- **A body read back from an artifact is located in its module's source,
+  so `Eiy.render` in a travelling body finds its template (#140).** A
+  `forall` def's body, and any other a consumer compiles itself, travels
+  in the `.iyimod` as text, and the consumer parsed it inside the
+  declarations the artifact renders, so each of its nodes was located at
+  a line of that rendering under the artifact's path. A macro reading
+  `@caller.first.filename` read `mods/lib/page.iyimod`, and the second of
+  `iyi build --emit-iyimod mods` and `iyi build --emit-iyimod mods
+  --use-iyimod mods` ended on `cannot read mods/lib/../views/greet.eiy`;
+  an error inside such a body said `In mods/lib/sized.iyimod:6:5` where
+  the source build says `In lib/sized.iyi:4:5`. The artifact now records
+  where each node of a travelling body and of the module's initialiser
+  was written, and the consumer's parse puts it there: `@caller`, errors,
+  `run` macros and debug line info answer as the source build does, and
+  with the source gone an error names the source's line and shows it as
+  the artifact carried it. What the build decides is still asked of the
+  artifact the node was read from, which every location parsed from one
+  carries beside its filename (`Location#artifact`): import edges and
+  the import wall, file-private names, proc symbol names, and the
+  refusals the module's own build already made, so a `defer` in a
+  travelling body, which travels as the `ensure` it lowers to, is not
+  refused as an `ensure` written in the source. `.iyimod` is v59, and a
+  v58 artifact is refused and built again. The positions stay out of the
+  implementation hash, so a line added above a body rebuilds no
+  dependent. `bench/samples_roundtrip.sh` builds the issue's layout both
+  ways it was reported and checks the error's location, and
+  `spec/compiler/iyimod_spec.cr` checks `@caller` in a body and in the
+  initialiser, all of which failed before this, and a `defer` in a body.
 
 - **DNS over TLS and DNS over HTTPS queries are padded (RFC 7830), so a
   name's length no longer shows through the encryption.** A query was a
@@ -24499,7 +27882,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 22,608-line library and nothing else. Every other
+  written against iyi's own 28,880-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

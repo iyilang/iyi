@@ -47,13 +47,13 @@ fi
 
 echo
 echo "== every check reported"
-for phrase in reclaimed warm survivor liveness large steady; do
+for phrase in reclaimed warm survivor liveness large steady refault; do
   grep -q "$phrase" "$WORK/sweep.out" 2>/dev/null || {
     echo "  MISSING: nothing reported for $phrase"
     status=1
   }
 done
-[ "$status" -eq 0 ] && echo "  reclaimed, warm, survivor, liveness, large and steady all reported"
+[ "$status" -eq 0 ] && echo "  reclaimed, warm, survivor, liveness, large, steady and refault all reported"
 
 echo
 echo "== the same program with optimisation on"
@@ -155,6 +155,33 @@ prove_fails "the fast path does not clear" dirtyfast "warm:" \
 # fifth too few stay warm, and the steady churn hands pages back.
 prove_fails "warm pages counted at the full chunk" roundwarm "rounding:" \
   '{ if ($0 ~ /^        floor = chunk > 128_u64 \?/) { print "        floor = chunk"; next } print }'
+
+# The cold reopenings not carried into the next epoch's warm room: the
+# churn that asks twice its budget hands its excess back every epoch and
+# carves it again (issue #150).
+prove_fails "cold reopenings not kept warm" refault "refault:" \
+  '{ if ($0 ~ /^        @@warm_extra = @@warm_extra - @@warm_extra.unsafe_shr\(4_u64\) \+ \(reopened_cold - @@reopened_cold\) \* IyiHeap::PAGE$/) { print "        @@warm_extra = 0_u64"; found = 1; next } print } END { if (!found) exit 3 }'
+
+# A class nobody allocates in any more kept warm within the budget, as
+# every class was: its pages hold the room the classes in use want.
+prove_fails "idle classes kept warm" idlewarm "idle class:" \
+  '{ if ($0 ~ /^        @@epoch - IyiHeap\.read64\(line \+ IyiHeap::CLASS_USED\) >= IDLE_EPOCHS &&$/) { print "        false &&"; found = 1; next } print } END { if (!found) exit 3 }'
+
+# A class idle after a few epochs however short: four collections back
+# to back hand its pages back.
+prove_fails "idle by epochs alone" idleshort "idle class:" \
+  '{ if ($0 ~ /^          @@epoch_ns - used_ns >= IDLE_NS$/) { print "          true"; found = 1; next } print } END { if (!found) exit 3 }'
+
+# A class refilled only in the first epoch read at its stamp of 0, which
+# every clock reading is more than a second past: its arenas go back three
+# collections in, however short.
+prove_fails "the first epoch's classes idle at once" idlefirst "idle class:" \
+  '{ if ($0 ~ /^        used_ns = @@first_turn_ns if used_ns == 0_u64$/) { print "        # removed"; found = 1; next } print } END { if (!found) exit 3 }'
+
+# An idle class's empty arena kept by its cache as every fill arena was:
+# its pages go cold but the mapping, its header and its tables stay.
+prove_fails "idle classes' arenas kept" idlearena "idle class:" \
+  '{ if ($0 ~ /^          IyiHeap\.let_go_fill\(arena\) if idle$/) { print "          # removed"; found = 1; next } print } END { if (!found) exit 3 }'
 
 # The carve's batch left unstamped: the listed chunks read as nothing the
 # sweep or the mark can tell from an uncarved one.

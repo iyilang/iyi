@@ -42,6 +42,7 @@
 # Strings are the byte type here, as everywhere in `src/std`: a
 # compressed stream is a `String` whose bytes are the stream.
 
+@[Unsafe("the output of a stream is built in a byte buffer it allocates, grows and indexes itself")]
 module std/compress
 
 import std/int

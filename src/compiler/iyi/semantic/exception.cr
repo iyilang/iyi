@@ -34,6 +34,12 @@ module Iyi
     # against carrying the name we already computed.
     property suggestion : String?
 
+    # iyi: where the suggestion goes when that is not the error's own span:
+    # {line, column, size} in the same file. The unsafe check (SPEC.md
+    # III.13) refuses an operation where it is written and suggests the mark
+    # above the module's header.
+    property edit_at : {Int32, Int32, Int32}?
+
     # `size` overrides the node's own `name_size` — a literal has no name,
     # and a suggestion that replaces one needs the literal's whole span.
     def self.for_node(node, message, inner = nil, suggestion = nil, size : Int32? = nil)
@@ -95,14 +101,17 @@ module Iyi
         # locationless error has no edit, and saying so beats guessing.
         # Nor has a frame in a macro's expansion: the token is in text the
         # macro wrote, not in any file an edit can open.
-        if in_file && (replacement = @suggestion) && @size > 0 && (line = @line_number)
-          json.field "suggested_edit" do
-            json.object do
-              json.field "file", @filename.as?(String) || ""
-              json.field "line", line
-              json.field "column", @column_number
-              json.field "size", @size
-              json.field "replacement", replacement
+        if in_file && (replacement = @suggestion) && (line = @line_number)
+          edit_line, edit_column, edit_size = @edit_at || {line, @column_number, @size}
+          if edit_size > 0
+            json.field "suggested_edit" do
+              json.object do
+                json.field "file", @filename.as?(String) || ""
+                json.field "line", edit_line
+                json.field "column", edit_column
+                json.field "size", edit_size
+                json.field "replacement", replacement
+              end
             end
           end
         end
@@ -302,9 +311,9 @@ module Iyi
       io << relative_filename(filename) << ':' << line_number
       io << "\n\n"
 
-      return unless lines
-
-      line = lines[line_number - 1]
+      # A body read from an artifact is located in the module's source, which
+      # may since have changed under it.
+      return unless lines && (line = lines[line_number - 1]?)
 
       name_location = node.name_location
       name_size = node.name_size

@@ -227,7 +227,7 @@ module Iyi
   class Program
     def lookup_path_item(name : String, lookup_self, lookup_in_namespace, include_private, location)
       # Check if there's a private type in location
-      if location && (original_filename = location.original_filename) &&
+      if location && (original_filename = location.original_read_from) &&
          (file_module = file_module?(original_filename)) &&
          (item = file_module.types[name]?)
         return item

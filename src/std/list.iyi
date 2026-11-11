@@ -12,6 +12,7 @@
 # It is also the second test of II.6's claim, after `Enumerable` itself: one
 # `each`, and the trait supplies the rest.
 
+@[Unsafe("a list is trusted to cross tasks under @[Share] because what it holds is copied in at the boundary")]
 module std/list
 
 import std/enumerable::{Enumerable}

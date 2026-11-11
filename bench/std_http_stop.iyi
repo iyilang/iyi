@@ -9,14 +9,18 @@
 # and clients that keep a connection to each: HTTP/1.1 and HTTP/2 over
 # TLS, HTTP/1.1 and h2c in the clear, a std/tls client that sent one
 # request and waits for the next answer, and an upgrade over each whose
-# block reads until the connection ends and then says goodbye. Then both
-# listeners close, by a request, with every one of those connections
-# still open, and each line says what a connection was told: the waiting
-# TLS client close_notify, the upgrades that they are closed. A line
-# that is not what it should be is followed by "FAIL <check>: <found>,
-# not <wanted>", and the run ends "ALL CHECKS PASSED" or exits 1. A
-# panic anywhere is printed by the task it happened in, which no check
-# here can see: bench/std_http_exercise.sh counts them in the output.
+# block reads until the connection ends and then says goodbye; and under
+# `stream_bodies` two blocks that read their own bodies, one answering a
+# string and one a stream, each waiting on the second half of its body.
+# Then the listeners close, by a request, with every one of those
+# connections still open, and each line says what a connection was told:
+# the waiting TLS client close_notify, the upgrades that they are closed,
+# the reading blocks that their reads were cancelled, and what they
+# answer after it, with nowhere to go, is not written. A line that is not
+# what it should be is followed by "FAIL <check>: <found>, not
+# <wanted>", and the run ends "ALL CHECKS PASSED" or exits 1. A panic
+# anywhere is printed by the task it happened in, which no check here
+# can see: bench/std_http_exercise.sh counts them in the output.
 #
 # `serve` is the TLS server alone, HTTP/1.1, until a GET of /stop, for a
 # client the gate writes in Python to hold a connection to while it stops.
@@ -83,6 +87,23 @@ def answer(req : Request, said : Array(String)) : Response
   Response.new(200, req.version)
 end
 
+# What a block that reads its own body (`stream_bodies`) was answered by
+# its last read: the stop closes the connection under the read it waits
+# in, and the read is cancelled. *started* is told once the first piece
+# has come, so the stop comes while the block waits for the rest.
+def read_out(req : Request, started : Channel(Int32)) : String
+  reader = req.body_io
+  told = false
+  while true
+    got = reader.read(4096)
+    return "cancelled" if got.is_a?(Cancelled)
+    return got.message unless got.is_a?(String)
+    return "the body whole" if got.empty?
+    started.send(0) unless told
+    told = true
+  end
+end
+
 args = Program.args
 mode = args.size > 0 ? args[0] : ""
 
@@ -122,22 +143,48 @@ if mode.empty?
   h2.alpn = ["h2", "http/1.1"]
   tls = IyiSocket.listen("127.0.0.1", 0)
   plain = IyiSocket.listen("127.0.0.1", 0)
+  # Blocks that read their own bodies, one answering a string and one a
+  # stream, each waiting on its body's second half when the server stops.
+  reading = IyiSocket.listen("127.0.0.1", 0)
   secure_base = "https://localhost:#{tls.local_port}"
   plain_base = "http://127.0.0.1:#{plain.local_port}"
   said = [] of String
+  reads = [] of String
+  waiting_blocks = Channel(Int32).new(2)
   failures = [] of String
   group do |g|
     g.spawn do
-      Server.serve(tls, tls: secure) do |req|
+      # One thread: `/stop` closes the listener from the block, and the
+      # answers append to `said`.
+      Server.serve(tls, tls: secure, workers: 1) do |req|
         tls.close if req.path == "/stop"
         answer(req, said)
       end
       0
     end
     g.spawn do
-      Server.serve(plain) do |req|
-        plain.close if req.path == "/stop"
+      Server.serve(plain, workers: 1) do |req|
+        if req.path == "/stop"
+          plain.close
+          reading.close
+        end
         answer(req, said)
+      end
+      0
+    end
+    g.spawn do
+      Server.serve(reading, stream_bodies: true, workers: 1) do |req|
+        if req.path == "/stream"
+          Response.stream(200) do |w|
+            reads << "streamed: #{read_out(req, waiting_blocks)}"
+            wrote = w.write("after the stop")
+            reads << "streamed, then written: #{wrote.nil? ? "written" : wrote.message}"
+            nil
+          end
+        else
+          reads << "whole: #{read_out(req, waiting_blocks)}"
+          Response.new(200, "after the stop")
+        end
       end
       0
     end
@@ -159,8 +206,26 @@ if mode.empty?
       HTTP.tls_config = h1
       upgraded = [HTTP.upgrade(secure_base + "/upgrade", "hold").or_panic, HTTP.upgrade(plain_base + "/upgrade", "hold").or_panic]
       check("upgraded", upgraded.map { |u| u.response.status }.join(" and "), "101 and 101", failures)
+      halves = ["/whole", "/stream"].map do |path|
+        half = IyiSocket.connect("127.0.0.1", reading.local_port, 5000)
+        raise "connect: #{half}" unless half.is_a?(IyiSocket)
+        half.write("POST #{path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: 1000\r\n\r\n" + "b" * 500)
+        half
+      end
+      # Both blocks waiting on their second halves: each says so once its
+      # first half has come.
+      2.times { waiting_blocks.receive }
       HTTP.get(secure_base + "/stop").or_panic
       HTTP.get(plain_base + "/stop").or_panic
+      # Read to the end the stop makes: closed here first, the server's
+      # read would end with the client rather than with the stop.
+      halves.each do |half|
+        while true
+          got = half.read(4096)
+          break unless got.is_a?(String) && !got.empty?
+        end
+        half.close
+      end
       ended = waiting.read
       check("the waiting std/tls client, on the stop", ended.is_a?(TlsError) ? ended.message : (ended.empty? ? "close_notify" : "#{ended.bytesize} bytes more"),
         "close_notify", failures)
@@ -174,6 +239,8 @@ if mode.empty?
     end
   end
   check("the upgrades' last writes", said.sorted.join(", "), "closed, closed", failures)
+  check("the blocks reading their bodies, on the stop", reads.sorted.join(", "),
+    "streamed, then written: cancelled, streamed: cancelled, whole: cancelled", failures)
   exit 1 unless failures.empty?
   puts "ALL CHECKS PASSED"
   exit 0
@@ -184,7 +251,8 @@ if mode == "serve"
   secure.alpn = ["http/1.1"]
   listener = IyiSocket.listen("127.0.0.1", 0)
   File.write(args[1], listener.local_port.to_s)
-  Server.serve(listener, tls: secure) do |req|
+  # One thread: `/stop` closes the listener, which is this thread's.
+  Server.serve(listener, tls: secure, workers: 1) do |req|
     listener.close if req.path == "/stop"
     Response.new(200, "ok")
   end

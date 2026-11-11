@@ -4,6 +4,7 @@
 # Run via:
 #     ./bin/iyi run bench/std_capsule_exercise.iyi
 
+@[Unsafe("it builds a Bytes over the last bytes of a string's buffer through a raw address, so std/capsule's reads meet the buffer's edge")]
 module bench/std_capsule_exercise
 
 import std/slice::{Bytes}

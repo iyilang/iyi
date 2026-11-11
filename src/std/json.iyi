@@ -35,6 +35,7 @@
 # `Any` implements it, and so do the prelude's scalars, arrays and hashes
 # through `write_value`.
 
+@[Unsafe("output is built in a byte buffer it allocates, grows and indexes itself, and input is read through raw pointers")]
 module std/json
 
 # A growable byte buffer for the text a string or a document is assembled in.

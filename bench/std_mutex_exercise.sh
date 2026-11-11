@@ -79,7 +79,7 @@ fi
 
 echo
 echo "== every mutex section reported"
-for phrase in "== a value behind a lock" "== tasks that park while they hold it" "== threads" "== a thread asleep until the release" "== cancelled while it waits" "== waiting for the value to change" "== what it refuses"; do
+for phrase in "== a value behind a lock" "== tasks that park while they hold it" "== threads" "== a thread asleep until the release" "== cancelled while it waits" "== waiting for the value to change" "== what it refuses" "== a waiter parks, and its worker runs other tasks" "== a waiter the holder keeps taking the lock back from"; do
   if ! grep -q "$phrase" "$WORK/mutex-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -154,6 +154,10 @@ refuse_build value_constructor "private method 'new' called" \
 
 echo
 echo "== a deadlock on one thread is said, not waited out"
+# The two tasks are `spawn(unit: :same)`: each block captures only the Mutex,
+# which is `Share`, and a plain `spawn` put them on the pool, where the
+# deadlock is no longer one thread's and the scheduler names it instead
+# ("deadlock: every fiber is blocked"), each task then failing `cancelled`.
 cat >"$WORK/deadlock.iyi" <<'IYI'
 module deadlock
 
@@ -161,13 +165,13 @@ import std/mutex::{Mutex}
 
 m = Mutex.new { [0] }
 group do |g|
-  g.spawn do
+  g.spawn(unit: :same) do
     # A channel nobody else holds: the block may not capture one that is
     # not Share, so the holder makes its own, and waits on it for good.
     m.lock { |a| a[0] = Channel(Int32).new.receive.or_panic }.or_panic
     0
   end
-  g.spawn do
+  g.spawn(unit: :same) do
     m.lock { |a| a[0] = 1 }.or_panic
     0
   end
@@ -186,9 +190,10 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
-# prove_broken <label> <phrase> <old> <new>: the exercise must fail on a
-# copy of the module with <old> replaced, at the check that names <phrase>,
-# or, given `hangs` as the phrase, by running past the time limit.
+# prove_broken <label> <phrase> <old> <new> [argument...]: the exercise,
+# given the arguments, must fail on a copy of the module with <old>
+# replaced, at the check that names <phrase>, or, given `hangs` as the
+# phrase, by running past the time limit.
 prove_broken() {
   rm -rf "$WORK/patched"
   mkdir -p "$WORK/patched/std"
@@ -213,45 +218,51 @@ PY
     status=1
     return
   fi
-  IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" $LIMIT "$IYI" run "$REPO/bench/std_mutex_exercise.iyi" >"$WORK/mut.out" 2>&1
+  local label="$1" phrase="$2"
+  shift 4
+  IYI_PATH="${UNPREEMPTED:+$UNPREEMPTED$PSEP}$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" $LIMIT "$IYI" run "$REPO/bench/std_mutex_exercise.iyi" -- "$@" >"$WORK/mut.out" 2>&1
   code=$?
   if [ "$code" -eq 0 ]; then
-    echo "  the exercise PASSED on $1"
+    echo "  the exercise PASSED on $label"
     status=1
-  elif [ "$2" = hangs ] && [ "$code" -eq 124 ]; then
-    echo "  $1 is caught: the waiter never woke"
-  elif [ "$2" != hangs ] && grep -qF "$2" "$WORK/mut.out"; then
-    echo "  $1 is caught"
+  elif [ "$phrase" = hangs ] && [ "$code" -eq 124 ]; then
+    echo "  $label is caught: the waiter never woke"
+  elif [ "$phrase" != hangs ] && grep -qF "$phrase" "$WORK/mut.out"; then
+    echo "  $label is caught"
   else
-    echo "  $1 failed, but not where it should have (exit $code):"
+    echo "  $label failed, but not where it should have (exit $code):"
     tail -2 "$WORK/mut.out" | sed 's/^/    /'
     status=1
   fi
 }
 prove_broken "a lock taken while it is held" "parking inside the lock counted" \
-  '    return false if seen & 1_u64 != 0_u64
-' ''
+  '    return false unless @word.compare_and_set(FREE, HELD)[1]
+' '    @word.set(HELD)
+'
 # A waiter whose cancellation is ignored takes the lock anyway, and its
 # block runs; the exercise's waiter then reports that it ran.
 prove_broken "a cancelled waiter whose block runs anyway" "not Cancelled" \
   '    if refused = acquire
       return refused
     end
-    defer release
+    register_release
     block.call(@value)
+    run_release
     nil
   end
 
   # The block'"'"'s answer' '    acquire
-    defer release
+    register_release
     block.call(@value)
+    run_release
     nil
   end
 
   # The block'"'"'s answer'
 prove_broken "a block that does not release" "already holds the lock" \
-  '    defer release
+  '    register_release
     block.call(@value)
+    run_release
     nil
   end
 
@@ -260,31 +271,95 @@ prove_broken "a block that does not release" "already holds the lock" \
   end
 
   # The block'"'"'s answer'
+# A release not registered with the task's cleanups (`register_release`):
+# the lock is let go after the block, and kept by a block that panics -
+# first by the second lock its holder refuses.
+prove_broken "a release a panic does not run" "the panic released the lock it held" \
+  '    register_release
+    block.call(@value)
+    run_release
+    nil
+  end
+
+  # The block'"'"'s answer' '    block.call(@value)
+    release
+    nil
+  end
+
+  # The block'"'"'s answer'
 # A release that does not count itself as a change: a waiter reads its own
 # release as one, checks again at once, and spins with the lock in turn,
 # never yielding to the producer on its thread.
 prove_broken "a release not counted as a change" hangs \
-  '    @changes.add(1_u64)
+  '    @changes.add(1_u64) if counted
 ' ''
-# The refusal of a wait nothing could end, taken out: the wait sleeps on.
-prove_broken "a wait nothing could end left to wait" hangs \
-  '        if !busy && alone
+# A waiter that counts itself as waiting only after its release, as one
+# once did: its own release reads nobody waiting and skips the count, and
+# the waiter spins as above.
+prove_broken "a waiter counted after its release" hangs \
+  '    answer = block.call(@value)
+    @change_waiters.add(1_u64) if answer.nil?
+    run_release
+' '    answer = block.call(@value)
+    run_release
+    @change_waiters.add(1_u64) if answer.nil?
+'
+# The refusal of a wait nothing could end, taken out: the task parks, and
+# the scheduler names the deadlock on the main thread, which the
+# exercise's `assert_panics` around that task does not catch.
+prove_broken "a wait nothing could end left to wait" "deadlock: every fiber is blocked" \
+  '        if Mutex.alone?
+          @change_waiters.sub(1_u64)
           raise "Mutex#wait_for: deadlock: nothing is left to change the value - no other task on this thread, and no other thread"
         end
 ' ''
-case "$(uname -s)" in
-  Linux)
-    # A thread asleep on the futex is woken by the release and nothing
-    # else; without the wake it sleeps for good.
-    prove_broken "a release that does not wake a sleeping thread" hangs \
-      '        __iyi_conc_syscall6(IYI_SYS_FUTEX, pointerof(@word).address.to_i64, IYI_FUTEX_WAKE, 1_i64, 0_i64, 0_i64, 0_i64)
+# A task parked on the lock is woken by a release and nothing else;
+# without the wake it stays parked, and with nothing left to run the
+# scheduler names the deadlock.
+prove_broken "a release that does not wake a task parked on the lock" "deadlock: every fiber is blocked" \
+  '          @word.set(FREE)
+          IyiScheduler.wake_on(pointerof(@word), 1)
+        else
+' '          @word.set(FREE)
+        else
+'
+# The same for a task parked waiting for a change.
+prove_broken "a release that does not wake a task waiting for a change" "deadlock: every fiber is blocked" \
+  '      IyiScheduler.wake_on(pointerof(@changes), 0x7FFFFFFF) if counted
 ' ''
-    # The same for a thread asleep waiting for a change.
-    prove_broken "a release that does not wake a thread waiting for a change" hangs \
-      '        __iyi_conc_syscall6(IYI_SYS_FUTEX, pointerof(@changes).address.to_i64, IYI_FUTEX_WAKE, 0x7FFFFFFF_i64, 0_i64, 0_i64, 0_i64)
-' ''
-    ;;
-esac
+# A waiter that never starves, and a release that lets the lock go where
+# it should hand it over: either way the holder takes it back after each
+# hold, and the waiter waits out all of them.
+prove_broken "a waiter that never starves" "the holder taking it back each time it let it go" \
+  '          if retakes >= RETAKES || __iyi_monotonic_ns - began >= STARVE_NS
+' '          if false
+' starves
+prove_broken "a release that lets go where it hands over" "the holder taking it back each time it let it go" \
+  '    @word.set(HANDED)
+' '    @word.set(FREE)
+' starves
+# A waiter that holds its worker until the lock is free, spinning where it
+# parked, as one asleep in the kernel holds it: the task spawned beside it
+# waits for the release to start. Built against a prelude whose pool never
+# preempts (SPEC.md III.4.13, part 9): the spin is a loop in a library
+# module, and a preempted spinner gives its worker to the task beside it,
+# which a waiter asleep in the kernel would not.
+mkdir -p "$WORK/unpreempted/iyi"
+cp "$REPO"/src/iyi/*.iyi "$WORK/unpreempted/iyi/"
+grep -v '^            Pointer(Atomic(UInt64)).new(address).value.set(1_u64) if address != 0_u64$' \
+  "$REPO/src/iyi/concurrency.iyi" > "$WORK/unpreempted/iyi/concurrency.iyi"
+if cmp -s "$WORK/unpreempted/iyi/concurrency.iyi" "$REPO/src/iyi/concurrency.iyi"; then
+  echo "  the monitor's raise was not found, so the copy without preemption is the tree"
+  status=1
+fi
+UNPREEMPTED="$WORK/unpreempted"
+prove_broken "a waiter that holds its worker" "while a Mutex waiter held one worker of two" \
+  '        waited = IyiScheduler.park_on(pointerof(@word), seen)
+' '        while @word.get == seen
+          IyiThread.spin_pause
+        end
+        waited = nil
+' parks
 
 echo
 if [ "$status" -eq 0 ]; then

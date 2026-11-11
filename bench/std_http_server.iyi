@@ -8,7 +8,10 @@ import std/socket::{IyiSocket}
 
 listener = IyiSocket.listen(0)
 puts listener.local_port
-Server.serve(listener, compress: true) do |req|
+# One thread (`workers: 1`): `/stop` closes the listener, which is this
+# thread's, and the wrk figure SPEC.md III.4.11 quotes for this server is
+# one thread's.
+Server.serve(listener, compress: true, workers: 1) do |req|
   if req.path == "/stop"
     listener.close
     Response.new(200, "stopping")

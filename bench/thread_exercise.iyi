@@ -17,6 +17,7 @@
 # removes the thread-root walk from a copy of the prelude to prove the
 # live-list check fails by name.
 
+@[Unsafe("its threads count in a page mapped with __iyi_mmap, read and written as atomics through raw pointers")]
 {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
   def fail(message : String) : Nil
     print "FAIL: #{message}\n"
@@ -153,6 +154,10 @@
   # back, and the check that names the fault read the ledger through
   # zeros. The global's array is a root in every build.
   class Ledgers
+    # Unproven, and said so: each thread writes its own slot, a split the
+    # compiler cannot see (SPEC.md III.4.4); this file reaches its tallies
+    # through `Pointer`s already.
+    @[UnsafeReach("reserved to its full size before any thread starts; each thread writes only its own slot, and nothing grows it while they run")]
     @@all : Array(Ledger?) = [] of Ledger?
 
     def self.reserve(count : Int32) : Nil
@@ -198,12 +203,14 @@
     # Fibers on a thread that is not the main one: a parked fiber holding
     # the only reference to an object while the thread's main fiber
     # churns, which is the fiber root walk on a thread whose main fiber
-    # has a top of its own.
+    # has a top of its own. `spawn(unit: :same)`, since the fiber must be this
+    # thread's: its block captures only channels, and a plain spawn would
+    # run on the pool (SPEC.md III.4.15).
     ready = Channel(Int32).new
     release = Channel(Int32).new
     verdict = Channel(Int32).new
     group do |g|
-      g.spawn do
+      g.spawn(unit: :same) do
         kept = Ledger.new(100)
         keep = build_list(100, seed &+ 7000_u64, kept)
         sum = checksum(keep)
@@ -340,6 +347,10 @@
 
   # ── 1. Threads, collections, live lists ────────────────────────────────
   before = IyiMark.collections
+  # The main thread's own fiber is made first: a join parks the joining
+  # task (`IyiThread#join`), and the first park makes the main thread's,
+  # which belongs to no thread that finishes.
+  IyiScheduler.current
   fibers_before = registered_fibers
   threads = start_threads(count)
   # The main thread churns beside them and holds a list of its own.
@@ -391,7 +402,8 @@
   while index < 200
     worker = IyiThread.start do
       group do |g|
-        4.times { g.spawn { sleep(1); 0 } }
+        # This thread's own tasks, whose scheduler is what is counted.
+        4.times { g.spawn(unit: :same) { sleep(1); 0 } }
       end
       nil
     end

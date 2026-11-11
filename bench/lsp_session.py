@@ -1104,14 +1104,14 @@ def holders(worker):
     """The processes *worker* started that hold its stdout: on Windows
     every child of a worker, which inherits each handle the worker could
     hand on (its own stdin and stdout among them) - the `cmd.exe` a
-    macro's `system` runs, and what that runs; on Linux the ones whose
-    stdout is the worker's pipe, read back through /proc."""
+    macro's `system` runs; on Linux the ones whose stdout is the
+    worker's pipe, read back through /proc."""
     found = descendants(worker)
     if os.name == "nt":
         named = []
         for pid in found:
             try:
-                if os.path.basename(process_binary(pid)).lower() in ("cmd.exe", "ping.exe"):
+                if os.path.basename(process_binary(pid)).lower() == "cmd.exe":
                     named.append(pid)
             except OSError:
                 continue
@@ -1160,9 +1160,10 @@ def orphan_steps():
     watchdog waited (Windows CI, the step after 73b).
 
     The hold is a macro's `system` that writes a file the gate names and
-    then waits a minute: `cmd` and a `ping` on Windows, which hold the
-    pipes by inheritance from the start, and on Linux a shell that opens
-    the worker's two pipes through /proc before it writes the file. The
+    then waits on a pipe the gate keeps open until the step is over: on
+    Windows `cmd`, which holds the worker's pipes by inheritance from the
+    start, reading a named pipe; on Linux a shell that opens the worker's
+    two pipes through /proc before it writes the file, reading a FIFO. The
     file is the gate's proof that the worker is inside that compile, and
     nothing else compiles that text. The step used to take a `ping` or
     `sleep` found under the worker as that proof, and hold an outline
@@ -1170,7 +1171,18 @@ def orphan_steps():
     one, killed the worker, and had the outline answered before the kill,
     so whatever was found, the worker was not inside the compile then.
     The held request is now the compile itself, a pull. The worker alone
-    is killed, and the holders are left running until the step is over."""
+    is killed, and the holders are left running until the step is over.
+
+    The wait used to be a minute by its own clock, `ping -n 61` on
+    Windows and `sleep 60` on Linux. Twice on master's CI (jobs
+    122939534975 and 124281113104) these steps took 97 and 98 s from step
+    73c's line to 73k's, where 122 passing Windows runs took 2.7 to 3.2 s,
+    and by the kill the ping had ended: the pull was answered clean
+    (`items: []`), nothing held the worker's pipes, and the worker was
+    gone (WinError 87 for its pid). What held the gate up is not in
+    either log. Held up 92 s after listing 73k's worker, a Linux gate
+    with the `sleep` failed 73k the same way, and with the FIFO it held.
+    A wait the gate ends cannot end first."""
     if os.name != "nt" and not sys.platform.startswith("linux"):
         for label, name in (("73j", "a request after a worker died with its pipes held is answered"),
                             ("73k", "a request the worker died holding, its pipes held, is refused")):
@@ -1185,15 +1197,32 @@ def orphan_steps():
     other_uri = opened(o, own, "other.iyi", "def other\nend\n")
     left = []
 
+    # The pipes the holds wait on, let go of when the step is over: named
+    # pipes on Windows, and on Linux the gate's ends of FIFOs.
+    pipes, fifos = [], []
+
     def held_text(name):
         """A module whose compile writes *name*.started under the gate's
-        directory, holding the worker's pipes by then, and waits a minute."""
+        directory, holding the worker's pipes by then, and waits until
+        the gate lets go of a pipe."""
         mark = os.path.join(own, f"{name}.started")
         if os.name == "nt":
-            hold = f'cmd /c type nul > "{mark}" & ping -n 61 127.0.0.1'
+            pipe = r"\\.\pipe\%s-%s" % (os.path.basename(own), name)
+            pipes.append(nt_pipe(pipe))
+            # `set /p` and not `type`: `type` was refused a pipe of one
+            # instance nothing else had opened ("All pipe instances are
+            # busy"), and `set /p` waited on it until it was closed.
+            hold = f'cmd /c type nul > "{mark}" & set /p held=< "{pipe}"'
         else:
+            # Held open for writing by the gate alone, so `read` waits until
+            # the gate closes it - or dies, which closes it too. Read-write,
+            # so this open does not wait for the reader; Linux allows that
+            # on a FIFO (fifo(7)), and only Linux runs these steps.
+            fifo = os.path.join(own, f"{name}.held")
+            os.mkfifo(fifo)
+            fifos.append(os.open(fifo, os.O_RDWR))
             hold = (f"exec </proc/$PPID/fd/0 >/proc/$PPID/fd/1 2>/dev/null; "
-                    f"touch '{mark}'; sleep 60")
+                    f"touch '{mark}'; read held < '{fifo}'")
         return mark, f"module {name}\n\n{{% system({json.dumps(hold)}) %}}\nputs 1\n"
 
     def inside(mark):
@@ -1210,8 +1239,18 @@ def orphan_steps():
         left.extend(descendants(workers[0]))
         return workers[0], held
 
+    # A worker already gone when the kill lands is reported rather than
+    # raised: Windows answered the kill with WinError 87 (no such process)
+    # on master's CI (job 122939534975), and the traceback ended the
+    # session before 73k could say what the request got. The step's own
+    # verdict - the answer, and its code - is what judges it either way.
+    gone_first = []
+
     def kill_alone(worker):
-        os.kill(worker, signal.SIGTERM if os.name == "nt" else signal.SIGKILL)
+        try:
+            os.kill(worker, signal.SIGTERM if os.name == "nt" else signal.SIGKILL)
+        except OSError:
+            gone_first.append(worker)
         deadline = time.monotonic() + 10
         while worker in children(o.proc.pid) and time.monotonic() < deadline:
             time.sleep(0.1)
@@ -1256,6 +1295,10 @@ def orphan_steps():
             os.kill(pid, signal.SIGTERM if os.name == "nt" else signal.SIGKILL)
         except OSError:
             pass
+    for kernel, handle in pipes:
+        kernel.CloseHandle(handle)
+    for writer in fifos:
+        os.close(writer)
     stuck = (worker and after is None) or (second and refused is None)
     if not stuck and answer_within(o, o.request_nowait("shutdown", {}), 10):
         o.send("exit", {}, wait=False)
@@ -1268,14 +1311,14 @@ def orphan_steps():
          "the held compile did not start within 30 s" if not worker else
          f"{len(held)} holder(s); "
          f"{'no answer' if after is None else 'an outline' if 'result' in after else json.dumps(after.get('error'))[:70]} "
-         f"in {after_took:.1f} s")
+         f"in {after_took:.1f} s{', the worker gone before the kill' if worker in gone_first else ''}")
     step("73k", "a request the worker died holding, its pipes held, is refused",
          bool(second) and bool(second_held) and refused is not None
          and refused.get("error", {}).get("code") == -32603,
          "the held request's compile did not start within 30 s" if not second else
          f"{len(second_held)} holder(s); "
          f"{'no answer' if refused is None else json.dumps(refused.get('error') or refused.get('result'))[:70]} "
-         f"in {refused_took:.1f} s")
+         f"in {refused_took:.1f} s{', the worker gone before the kill' if second in gone_first else ''}")
 
 
 def restore_binary(backup, binary):
@@ -1296,6 +1339,25 @@ def restore_binary(backup, binary):
             time.sleep(0.2)
 
 
+def nt_pipe(path):
+    """A named pipe at *path* that nothing is written to: a reader that
+    opens it waits until this side closes it, then reads as empty. The
+    kernel32 that closes it, and its handle."""
+    import ctypes
+    from ctypes import wintypes
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateNamedPipeW.restype = wintypes.HANDLE
+    kernel.CreateNamedPipeW.argtypes = [wintypes.LPCWSTR] + [wintypes.DWORD] * 6 + [ctypes.c_void_p]
+    kernel.ConnectNamedPipe.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    # Outbound, bytes, one instance. A reader connects to it before this
+    # side has asked for one, and reads until it is closed.
+    handle = kernel.CreateNamedPipeW(path, 2, 0, 1, 0, 0, 0, None)
+    if handle == wintypes.HANDLE(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    return kernel, handle
+
+
 def held_open(work, seconds):
     """A path a macro's `read_file` waits on for *seconds*, then reads
     as empty: a FIFO on POSIX, a named pipe on Windows. A compile that
@@ -1303,17 +1365,8 @@ def held_open(work, seconds):
     go of, the path is gone, and a later compile of the same text
     fails at once rather than waiting again."""
     if os.name == "nt":
-        import ctypes
-        from ctypes import wintypes
-        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel.CreateNamedPipeW.restype = wintypes.HANDLE
-        kernel.CreateNamedPipeW.argtypes = [wintypes.LPCWSTR] + [wintypes.DWORD] * 6 + [ctypes.c_void_p]
-        kernel.ConnectNamedPipe.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
-        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
         path = r"\\.\pipe\iyi-lsp-held-%d" % os.getpid()
-        # Outbound, bytes, one instance. A reader connects to it before
-        # this side has asked for one, and reads until it is closed.
-        handle = kernel.CreateNamedPipeW(path, 2, 0, 1, 0, 0, 0, None)
+        kernel, handle = nt_pipe(path)
 
         def release():
             time.sleep(seconds)
@@ -2529,6 +2582,120 @@ def main():
          type_hint is not None and param_hint is not None and
          param_hint["position"] == {"line": 6, "character": 14},
          f"{len(hints)} hint(s): {[h['label'] for h in hints]}")
+
+    # 23s. inlayHint after a plain `spawn` (SPEC.md III.4.16, III.4.18):
+    #      `in a unit of its own` where the compiler placed it on the pool,
+    #      `in its spawner's unit: ` and the first clause of the reason
+    #      where it kept it in its unit, the whole reason and what a unit is
+    #      as the tooltip, and nothing after a spawn that spelled its
+    #      placement, a `Unit`'s included. Hover on `spawn(in:)` and on
+    #      `Unit` says what each is in units.
+    spawns_text = ("module spawns\n"
+                   "\n"
+                   "import std/unit::{Unit}\n"
+                   "\n"
+                   "done = Atomic(Int32).new(0)\n"
+                   "log = [] of Int32\n"
+                   "counts = Unit.new { [] of Int32 }\n"
+                   "group do |g|\n"
+                   "  g.spawn { done.add(1) }\n"
+                   "  g.spawn { log << 1; 0 }\n"
+                   "  g.spawn(unit: :same) { done.add(1) }\n"
+                   "  g.spawn(in: counts) { |c| c << 1; 0 }\n"
+                   "end\n")
+    spawns_uri = opened(c, work, "spawns.iyi", spawns_text)
+    reply = c.send("textDocument/inlayHint",
+                   {"textDocument": {"uri": spawns_uri},
+                    "range": {"start": {"line": 0, "character": 0},
+                              "end": {"line": 13, "character": 0}}})
+    hints = reply["result"] or []
+    after_spawn = {line: at(spawns_text, line, "spawn") + len("spawn") for line in (8, 9, 10, 11)}
+    placed = {h["position"]["line"]: h for h in hints
+              if h["position"]["line"] in after_spawn
+              and h["position"]["character"] == after_spawn[h["position"]["line"]]}
+    unit_label = "in its spawner's unit: the block captures `log : Array(Int32)`, which is not Share"
+    definition = "A unit is a set of tasks of which at most one runs at any instant"
+    step("23s", "inlayHint names the unit each plain spawn runs in, and why one stays in its spawner's",
+         8 in placed and placed[8]["label"] == "in a unit of its own" and
+         definition in placed[8].get("tooltip", "") and
+         9 in placed and placed[9]["label"] == unit_label and
+         "Array(Int32)'s field" in placed[9].get("tooltip", "") and
+         definition in placed[9].get("tooltip", "") and
+         10 not in placed and 11 not in placed,
+         f"{[(line, h['label']) for line, h in sorted(placed.items())]}")
+    reply = c.send("textDocument/hover",
+                   {"textDocument": {"uri": spawns_uri},
+                    "position": {"line": 6, "character": at(spawns_text, 6, "Unit") + 1}})
+    unit_doc = (reply["result"] or {}).get("contents", {}).get("value", "")
+    reply = c.send("textDocument/hover",
+                   {"textDocument": {"uri": spawns_uri},
+                    "position": {"line": 11, "character": at(spawns_text, 11, "spawn") + 1}})
+    spawn_doc = (reply["result"] or {}).get("contents", {}).get("value", "")
+    step("23u", "hover on Unit and on spawn(in:) says what each is in units",
+         "only one unit's tasks reach" in unit_doc and "runs in the `Unit`" in spawn_doc,
+         f"Unit: {unit_doc[:80]!r}; spawn(in:): {spawn_doc[:80]!r}")
+
+    # 23x. Unsafe code (SPEC.md III.13) in the editor: a module that reads
+    #      through `to_unsafe` unmarked is refused, with the mark as a quick
+    #      fix; the fix applied checks clean; a hover over the mark shows
+    #      its reason; and the hint after a plain spawn whose block reaches
+    #      the module says so. None of the four had a step, and the merge
+    #      with the units' hints rewrote the line the hint is built on.
+    raw_text = ("module rawmod\n"
+                "\n"
+                "def first(text : String) : UInt8\n"
+                "  text.to_unsafe[0]\n"
+                "end\n"
+                "\n"
+                "group do |g|\n"
+                "  g.spawn { first(\"hi\").to_i32 }\n"
+                "end\n")
+    raw_path = os.path.join(work, "rawmod.iyi")
+    with open(raw_path, "w", encoding="utf-8") as f:
+        f.write(raw_text)
+    raw_uri = file_uri(raw_path)
+    c.send("textDocument/didOpen", {"textDocument": {
+        "uri": raw_uri, "languageId": "iyi", "version": 1, "text": raw_text}}, wait=False)
+    raw_diags = c.diagnostics(raw_uri)["diagnostics"]
+    refused = next((d for d in raw_diags if "is not marked unsafe" in d["message"]), None)
+    reply = c.send("textDocument/codeAction",
+                   {"textDocument": {"uri": raw_uri},
+                    "range": refused["range"] if refused else
+                    {"start": {"line": 3, "character": 0}, "end": {"line": 3, "character": 0}},
+                    "context": {"diagnostics": raw_diags}})
+    mark_fix = next((a for a in (reply["result"] or []) if a["title"].startswith("Insert `@[Unsafe(")), None)
+    marked = ""
+    if mark_fix:
+        lines = raw_text.split("\n")
+        for edits in mark_fix["edit"]["changes"].values():
+            for e in edits:
+                l = e["range"]["start"]["line"]
+                s = e["range"]["start"]["character"]
+                t = e["range"]["end"]["character"]
+                lines[l] = lines[l][:s] + e["newText"] + lines[l][t:]
+        marked = "\n".join(lines)
+    c.send("textDocument/didChange",
+           {"textDocument": {"uri": raw_uri, "version": 2},
+            "contentChanges": [{"text": marked or raw_text}]}, wait=False)
+    marked_clean = c.diagnostics(raw_uri)["diagnostics"] == []
+    reply = c.send("textDocument/hover",
+                   {"textDocument": {"uri": raw_uri},
+                    "position": {"line": 0, "character": 3}})
+    mark_doc = (reply["result"] or {}).get("contents", {}).get("value", "")
+    spawn_line = next((i for i, row in enumerate(marked.split("\n")) if "g.spawn" in row), 8)
+    reply = c.send("textDocument/inlayHint",
+                   {"textDocument": {"uri": raw_uri},
+                    "range": {"start": {"line": 0, "character": 0},
+                              "end": {"line": spawn_line + 2, "character": 0}}})
+    raw_hint = next((h for h in (reply["result"] or []) if h["position"]["line"] == spawn_line
+                     and h["label"].startswith("in a unit of its own")), None)
+    step("23x", "unsafe code: refused unmarked with the mark as a quick fix, its reason on hover, a spawn reaching it hinted",
+         refused is not None and mark_fix is not None and marked.startswith("@[Unsafe(\"") and marked_clean and
+         "**Unsafe module:**" in mark_doc and "`to_unsafe`" in mark_doc and
+         raw_hint is not None and raw_hint["label"] == "in a unit of its own, reaching unsafe code" and
+         "spawn reaches unsafe code in rawmod" in raw_hint.get("tooltip", ""),
+         f"refused: {refused is not None}; fix: {mark_fix and mark_fix['title'][:60]!r}; clean: {marked_clean}; "
+         f"hover: {mark_doc[:50]!r}; hint: {raw_hint and raw_hint['label']!r}")
 
     # 24. typeDefinition: from the local to where String is declared.
     reply = c.send("textDocument/typeDefinition",

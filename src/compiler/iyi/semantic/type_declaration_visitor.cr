@@ -93,7 +93,7 @@ class Iyi::TypeDeclarationVisitor < Iyi::SemanticVisitor
   end
 
   def visit(node : ExternalVar)
-    thread_local = check_class_var_annotations
+    thread_local, _ = check_class_var_annotations
 
     var_type = lookup_type(node.type_spec)
     var_type = check_allowed_in_lib node.type_spec, var_type

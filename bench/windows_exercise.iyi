@@ -7,6 +7,7 @@
 # callee-saved register spilling, sweep reclamation, and address reuse;
 # and that a fiber stack back from the pool keeps its frames.
 
+@[Unsafe("it keeps addresses in a raw buffer the collector does not scan and reads a stack frame through pointerof, to check what the Windows collector frees")]
 {% if flag?(:gc_none) || flag?(:gc_boehm) %}
   puts "windows: collector not enabled (-Dgc_none or -Dgc_boehm)"
 {% else %}

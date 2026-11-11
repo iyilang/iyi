@@ -45,6 +45,16 @@ for candidate in python3 python; do
   fi
 done
 
+# The oracle's answers are Python 3.13's or later: 3.13 writes an
+# IPv4-mapped address dotted, `::ffff:1.2.3.4`, as this module does, and
+# 3.12 wrote it in hex, `::ffff:102:304` - 2,726 of the corpus's 108,204
+# answers then differed on a Windows machine whose python was 3.12.10.
+# CI's is 3.14. An older one fails here, by name, before anything is built.
+if [ -n "$PY" ] && ! "$PY" -c 'import sys; sys.exit(sys.version_info < (3, 13))' >/dev/null 2>&1; then
+  echo "FAIL: the oracle needs Python 3.13 or later (IPv4-mapped formatting changed in 3.13), found $("$PY" -c 'import platform; print(platform.python_version())' | tr -d '\r')"
+  exit 1
+fi
+
 status=0
 export IYI_PATH="$REPO/src${PSEP}$REPO/samples/iyi"
 export PYTHONIOENCODING=utf-8

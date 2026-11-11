@@ -20,6 +20,10 @@ module Iyi
   WRITE_BARRIER_BEGIN_NAME = "__iyi_write_barrier_begin"
   WRITE_BARRIER_NAME       = "__iyi_write_barrier"
   MARKING_NAME             = "__iyi_marking"
+  # iyi: the slow half of a loop's back-edge check (SPEC.md III.4.13, part
+  # 9), which the prelude defines and a program with a worker pool calls
+  # when the pool's monitor has flagged the worker running it.
+  PREEMPT_NAME = "__iyi_preempt"
 
   class Program
     def run(code, filename : String? = nil, debug = Debug::Default)
@@ -278,6 +282,8 @@ module Iyi
     @realloc_fun : LLVMTypedFunction?
     @write_barrier_begin_fun : LLVMTypedFunction?
     @write_barrier_fun : LLVMTypedFunction?
+    @iyi_preempt_fun : LLVMTypedFunction?
+    @iyi_preempt_on : Bool?
     @raise_overflow_fun : LLVMTypedFunction?
     @raise_cast_failed_fun : LLVMTypedFunction?
     @c_malloc_fun : LLVMTypedFunction?
@@ -385,6 +391,12 @@ module Iyi
       alloca_vars @program.vars, @program
 
       emit_vars_debug_info(@program.vars) if @debug.variables?
+
+      # iyi: in a chaos build the program's top-level code checks at its
+      # loops' back-edges as a def's code does (SPEC.md III.4.17): the main
+      # thread is never a pool worker, so nothing preempts it elsewhere, but
+      # the chaos scheduler runs every task on it and preempts there.
+      @context.iyi_preempt = iyi_chaos? && iyi_preempt_on?
     end
 
     getter llvm_context
@@ -695,7 +707,7 @@ module Iyi
         when @codegen.malloc_name, @codegen.malloc_atomic_name, @codegen.realloc_name, @codegen.raise_name,
              @codegen.personality_name, @codegen.get_exception_name, @codegen.raise_overflow_name,
              @codegen.raise_cast_failed_name, @codegen.once_init_name, @codegen.once_name,
-             WRITE_BARRIER_BEGIN_NAME, WRITE_BARRIER_NAME
+             WRITE_BARRIER_BEGIN_NAME, WRITE_BARRIER_NAME, PREEMPT_NAME
           @codegen.accept node
         end
 
@@ -781,7 +793,14 @@ module Iyi
         # Always run verifications so we can catch bugs earlier and more often.
         # We can probably remove this, or only enable this when compiling in
         # release mode, once we reach 1.0.
-        mod.verify
+        #
+        # iyi: one module is verified here; a unit per type is verified by
+        # `CompilationUnit#prepare`, on the codegen threads. Each unit's
+        # module has a context of its own (`type_module`), so nothing stops
+        # them being verified at once, and here they were 64 ms of one core
+        # out of `Codegen (crystal)`'s 0.31 s for samples/iyi/cores.iyi
+        # (Linux, 12 vCPU, `IYI_PROF=1`, release compiler).
+        mod.verify if @single_module
       end
 
       if type_info_path = ENV["IYI_DUMP_TYPE_INFO"]?.presence
@@ -824,6 +843,10 @@ module Iyi
       if @in_lib
         return false
       end
+
+      # iyi: the back-edge's slow half is the pool's, and a program with no
+      # pool neither calls it nor carries it (`iyi_preempt_on?`).
+      return false if node.name == PREEMPT_NAME && !iyi_preempt_on?
 
       unless node.external.dead?
         # Mark as dead so we don't generate it twice
@@ -1036,7 +1059,7 @@ module Iyi
       # A proc literal is otherwise emitted into `_main`, and the unit that
       # creates one refers to it from there — which is fine for a program and
       # not for an artifact: the router's unit called
-      # `~procProc(Context, String)@kemal/router.iyi:211` and the producing
+      # `~procProc(Context, String)^kemal/router.iyi:211` and the producing
       # build had left the definition in a module nothing carries. Nor could
       # the consumer make its own, because the name has the file and line it
       # was written on in it and the consumer reads declarations under another
@@ -1072,8 +1095,21 @@ module Iyi
       location = node.location.try &.expanded_location
       if location && (type = node.type?)
         proc_name = true
-        filename = location.filename.as(String)
-        fun_literal_name = Iyi.safe_mangling(@program, "~proc#{type}@#{Iyi.relative_filename(filename)}:#{location.line_number}")
+        # The file this build read it from, which for a body read from an
+        # artifact is the artifact (`Location#read_from`): the artifact's own
+        # object code names its procs after the source, and a body compiled
+        # here is not that code.
+        filename = location.read_from.as(String)
+        # Joined with `SYMBOL_JOIN`, and the type and the path written as text
+        # a person chose: a quoted `NamedTuple` key in the type, a package's
+        # `@v1.0.0` directory in the path (`Iyi.symbol_text`).
+        fun_literal_name = Iyi.safe_mangling(@program, String.build do |str|
+          str << "~proc"
+          Iyi.symbol_text(str, type.to_s)
+          str << SYMBOL_JOIN
+          Iyi.symbol_text(str, Iyi.relative_filename(filename))
+          str << ':' << location.line_number
+        end)
       else
         proc_name = false
         fun_literal_name = "~fun_literal"
@@ -1351,7 +1387,7 @@ module Iyi
             position_at_end while_block
 
             discard_value(node.body)
-            br while_block
+            iyi_back_edge while_block
           end
         else
           while_block, body_block, fail_block = new_blocks "while", "body", "fail"
@@ -1373,7 +1409,7 @@ module Iyi
             position_at_end body_block
 
             discard_value(node.body)
-            br while_block
+            iyi_back_edge while_block
 
             position_at_end fail_block
 
@@ -1442,7 +1478,7 @@ module Iyi
       when While
         if while_block = context.while_block
           execute_ensures_until(target)
-          br while_block
+          iyi_back_edge while_block
           return false
         end
       else
@@ -1580,27 +1616,107 @@ module Iyi
     end
 
     def get_global(name, type, real_var, initial_value = nil)
-      # iyi: a program under iyi's prelude, on ELF, reads a thread-local
-      # straight off the thread pointer - one `%fs:`/`tpidr_el0` load,
-      # local-exec. The NoInline accessor below guards against LLVM hoisting
-      # a thread-local's address across a fiber switch that lands the fiber
-      # on another thread; an iyi fiber belongs to its scheduler thread and
-      # never moves (`src/iyi/concurrency.iyi`, the scheduler), so the
-      # address is a constant for the fiber's life and the guard priced four
-      # calls into every allocation.
+      # iyi: a program under iyi's prelude, on ELF, reaches a thread-local
+      # through the thread pointer as it is at the access, never as it was
+      # earlier in the function (`iyi_thread_local_address`): a parallel
+      # task parks on one worker and resumes on another (SPEC.md III.4.13),
+      # and the address of a thread-local is a different address on the
+      # thread it resumed on. Read straight off the global, as it was while
+      # a fiber never moved, LLVM takes that address as fixed for the life
+      # of a function: on aarch64 it computed `tpidr_el0` plus the offset
+      # once at the top of a loop and loaded through it after every call in
+      # it, and on x86_64 a thread-local whose address is passed on had
+      # `%fs:0` read once and kept in a callee-saved register across the
+      # call (llc 21, both seen in its output). A task that moved would
+      # have allocated from the cache of the thread it left.
       #
-      # Mach-O keeps the accessor, and the reason is the platform's: there
-      # is no local-exec there, a thread-local's address comes from
-      # `_tlv_bootstrap` through a call whatever the model, and one accessor
-      # per read is what keeps that call from being made several times in an
-      # allocation - measured, the direct form cost darwin's binary trees
-      # six times its wall time. A `--crystal` program keeps it everywhere:
-      # its fibers are Crystal's, which may change threads.
-      if real_var.thread_local? && !(@program.iyi_prelude? && @program.has_flag?("linux"))
-        get_thread_local(name, type, real_var)
+      # Mach-O and COFF keep the NoInline accessor below, which hands back
+      # the address on every call and is the guard Crystal's own moving
+      # fibers rely on: there is no local-exec on either, a thread-local's
+      # address comes from `_tlv_bootstrap` or `_tls_index` and the TEB's
+      # array through a call or a load whatever the model, and one accessor
+      # per read is what keeps that out of the middle of an allocation -
+      # measured, the direct form cost darwin's binary trees six times its
+      # wall time. LLVM 21 infers `memory(argmem: write)` for the accessor
+      # and still calls it at every read: release cross-builds for
+      # aarch64-apple-darwin and x86_64-windows-msvc call it in each turn
+      # of a loop whose only other call is the back-edge check's, and again
+      # after a channel receive (llvm-objdump). bench/parallel_migrate.iyi's
+      # `loops` step, run on both, is what fails if a later LLVM shares it.
+      # A `--crystal` program keeps it everywhere.
+      if real_var.thread_local?
+        if @program.iyi_prelude? && @program.has_flag?("linux")
+          iyi_thread_local_address(get_global_var(name, type, real_var, initial_value))
+        else
+          get_thread_local(name, type, real_var)
+        end
       else
         get_global_var(name, type, real_var, initial_value)
       end
+    end
+
+    # The address of thread-local *global* on the thread executing this
+    # access: the thread pointer read here, every time, plus the variable's
+    # offset from it, which is the same on every thread and may be computed
+    # once and hoisted anywhere.
+    #
+    # The offset is a link-time constant (local-exec: an executable, never a
+    # shared object) that IR has no spelling for, so it comes out of a pure
+    # asm the linker fills in - `$sym@TPOFF`, or `:tprel_g1:`/`:tprel_g0_nc:`
+    # on aarch64 - marked `memory(none)` so LLVM may share and hoist it as
+    # it would a constant. The thread pointer is what must not be shared,
+    # across a call or across a loop's back-edge, where the check put in
+    # after optimisation (`PreemptChecks`) may hand the task to another
+    # worker: on x86_64 a volatile load of `%fs:0`, which no pass removes,
+    # merges or moves, and which instruction selection still folds into an
+    # `%fs:`-relative load of the variable; on aarch64 `iyi_tpidr_el0`.
+    private def iyi_thread_local_address(global : LLVM::Value) : LLVM::Value
+      ctx = llvm_context
+      int64 = ctx.int64
+      aarch64 = @program.has_flag?("aarch64")
+      text = aarch64 ? "movz $0, #:tprel_g1:${1:c}\n\tmovk $0, #:tprel_g0_nc:${1:c}" : "movq $$${1:P}@TPOFF, $0"
+      asm_type = LLVM::Type.function([global.type], int64)
+      assembly = LLVM::Function.from_value(asm_type.inline_asm(text, "=r,s", false, false, false, LLVM::InlineAsmDialect::ATT))
+      offset = call LLVMTypedFunction.new(asm_type, assembly), [global]
+      {"memory", "nounwind", "willreturn"}.each do |attribute|
+        kind = LibLLVM.get_enum_attribute_kind_for_name(attribute, attribute.bytesize)
+        LibLLVM.add_call_site_attribute(offset, LLVM::AttributeIndex::FunctionIndex, LibLLVM.create_enum_attribute(ctx, kind, 0_u64))
+      end
+      if aarch64
+        pointer = iyi_tpidr_el0
+      else
+        pointer = builder.load(int64, ctx.pointer(257).null)
+        pointer.volatile = true
+      end
+      builder.int2ptr(builder.add(pointer, offset), ctx.pointer)
+    end
+
+    # aarch64's thread pointer as it is here: a volatile `mrs` of
+    # `tpidr_el0` that reads and writes memory nothing else can name
+    # (`memory(inaccessiblemem: readwrite)`), so no two of them are merged
+    # and none moves out of a loop, while the loads and stores around it are
+    # still optimised as if it were not there. `PreemptChecks` reads the
+    # thread pointer the same way.
+    #
+    # `llvm.read_register` was the read until this one. It is modelled as
+    # only reading memory, so it was read again after a call, but LLVM 21
+    # hoisted it out of a loop that stores nothing: a release build of a
+    # parallel task's loop that reads `IyiThread.current_line` beside a
+    # xorshift walk loaded the line once before the loop
+    # (`ldr x22, [x9, x8]`), and the back-edge check in it could resume the
+    # task on another worker, which went on summing the line of the thread
+    # it left. The same `mrs` marked `memory(none)`, as a pure asm, was
+    # hoisted too, out of that loop and past calls (opt -O3, LLVM 21).
+    private def iyi_tpidr_el0 : LLVM::Value
+      ctx = llvm_context
+      read_type = LLVM::Type.function([] of LLVM::Type, ctx.int64)
+      assembly = LLVM::Function.from_value(read_type.inline_asm("mrs $0, tpidr_el0", "=r", true, false, false, LLVM::InlineAsmDialect::ATT))
+      pointer = call LLVMTypedFunction.new(read_type, assembly), [] of LLVM::Value
+      {"memory" => PreemptChecks::INACCESSIBLE_READ_WRITE, "nounwind" => 0_u64, "willreturn" => 0_u64}.each do |attribute, value|
+        kind = LibLLVM.get_enum_attribute_kind_for_name(attribute, attribute.bytesize)
+        LibLLVM.add_call_site_attribute(pointer, LLVM::AttributeIndex::FunctionIndex, LibLLVM.create_enum_attribute(ctx, kind, value))
+      end
+      pointer
     end
 
     def get_global_var(name, type, real_var, initial_value = nil)
@@ -2306,6 +2422,7 @@ module Iyi
       # and the link ended on an undefined symbol.
       old_iyi_closure_host = @iyi_closure_host
       @iyi_closure_host = nil
+      old_iyi_preempt = context.iyi_preempt?
 
       clear_current_debug_location if @debug.line_numbers?
 
@@ -2326,6 +2443,7 @@ module Iyi
       @iyi_closure_host = old_iyi_closure_host
       context.fun = old_fun
       context.fun_type = old_fun_type
+      context.iyi_preempt = old_iyi_preempt
       set_current_debug_location old_debug_location if @debug.line_numbers?
 
       block_value
@@ -2344,6 +2462,10 @@ module Iyi
       context.fun = func.func
       context.fun_type = type
       context.fun.linkage = LLVM::Linkage::Internal if iyi_internalise?
+      # A chaos build's top-level code checks (`initialize`); what is
+      # defined here is the compiler's own - an initializer, a `~match` -
+      # which may run inside the runtime, and never checks there.
+      context.iyi_preempt = false if iyi_chaos?
       if needs_alloca
         new_entry_block
         yield func.func
@@ -2768,7 +2890,18 @@ module Iyi
         pointer = call c_malloc_fun, size_t(size)
       end
 
-      memset pointer, int8(0), size_t(size)
+      # iyi: under the arena both entries hand the block back zeroed - a
+      # chunk off a list is cleared inside the allocator, a chunk carved
+      # from a cold run past its first page (`IyiHeap.carve`), and a
+      # frontier chunk or a large mapping is the kernel's zero - so a memset
+      # here would clear it twice. It was worse than twice: the memset is the
+      # prelude's, runtime code with no preemption check, and on a large
+      # block it took every page fault of the fresh mapping as well. A
+      # `Hash(Int32, Int32)` of 8,388,608 entries growing, three blocks of
+      # 256 MB together, held its worker that way (SPEC.md III.4.13 part
+      # 9); left alone, the pages fault in the growth's own loops, which
+      # check.
+      memset pointer, int8(0), size_t(size) unless malloc_fun && @program.iyi_gc_arena?
       pointer_cast pointer, type.pointer
     end
 
@@ -2844,6 +2977,205 @@ module Iyi
 
     def iyi_marking_flag
       declare_lib_var(MARKING_NAME, @program.uint8, false)
+    end
+
+    # iyi: whether this program's loops check for preemption at their
+    # back-edges (SPEC.md III.4.13, part 9): a program with a worker pool,
+    # which is a program whose kept code calls `IyiWorkers.start` - every
+    # `spawn(unit: :new)` does, and every `spawn` the compiler found eligible
+    # (III.4.15; `Program#iyi_pool_reached?`). The flag is only ever raised
+    # on a pool worker, so a program without one would pay for checks that
+    # never fire, and carries none. A build writing artifacts carries none
+    # either: the object code it writes is linked into programs that may
+    # have no pool, and a check calls the pool's slow half by name.
+    def iyi_preempt_on? : Bool
+      on = @iyi_preempt_on
+      return on unless on.nil?
+      @iyi_preempt_on = iyi_preempt_wanted?
+    end
+
+    private def iyi_preempt_wanted? : Bool
+      return false unless @program.iyi_prelude? && @program.iyi_exported_owners.empty?
+      return false unless @program.iyi_pool_reached? || iyi_chaos?
+      !iyi_preempt_word.nil?
+    end
+
+    # iyi: a build for the chaos scheduler (`-Diyi_chaos`, SPEC.md
+    # III.4.17), which `iyi test --chaos` makes. Its loops check at their
+    # back-edges whether or not a pool is reached, since the scheduler
+    # preempts at them on the program's one thread; and the runtime's code
+    # is told from the program's whether or not they do, since a chaos
+    # point is dropped from the runtime's copy of a library def (`visit(Call)`).
+    def iyi_chaos? : Bool
+      on = @iyi_chaos
+      return on unless on.nil?
+      @iyi_chaos = @program.has_flag?("iyi_chaos")
+    end
+
+    @iyi_chaos : Bool?
+
+    # iyi: whether *target_def* is `IyiChaos.at_atomic`, the point an
+    # `Atomic` verb makes under `-Diyi_chaos` (`visit(Call)`).
+    def iyi_chaos_atomic_point?(target_def : Def) : Bool
+      return false unless target_def.name == "at_atomic"
+      owner = target_def.owner
+      owner.metaclass? && owner.instance_type.to_s == "IyiChaos"
+    end
+
+    # The worker's preemption word, `IyiWorkers.@@preempt`: a thread-local
+    # the pool's monitor sets on a worker that has run one task for a
+    # quantum, through the address the worker published.
+    private def iyi_preempt_word : MetaTypeVar?
+      workers = @program.types["IyiWorkers"]?
+      return nil unless workers.is_a?(ClassVarContainer)
+      workers.class_vars["@@preempt"]?
+    end
+
+    # Whether the loops of *target_def*'s function check: a def of the
+    # program's own, of a library module, or of the prelude's library -
+    # `Array`, `Hash`, `String` and the rest - in a program with a pool.
+    # Not the runtime's (`iyi_runtime_def?`), and not a def the runtime
+    # calls: that is compiled a second time for it, unchecked
+    # (`target_def_fun`). Not a `fun`, which C may call on any thread. Not
+    # a def marked `@[NoPreempt]`.
+    def iyi_preemptible?(target_def : Def) : Bool
+      return false unless iyi_preempt_on?
+      return false if target_def.is_a?(External)
+      return false if target_def.annotation(@program.no_preempt_annotation)
+      !iyi_runtime_def?(target_def)
+    end
+
+    # iyi: the prelude's files that hold the runtime - the scheduler and the
+    # pool (`concurrency.iyi`), kernel threads and the collector's stop
+    # (`thread.iyi`), and the allocator, the collector, panics and the
+    # entry point (`prelude.iyi`). Their code never checks for preemption:
+    # a loop of theirs giving the worker up would park a fiber inside the
+    # runtime, with a worker's structures half changed or a reference to
+    # one worker's state held across a move to another. The prelude's
+    # other files are a library, and check as a program's own code does.
+    IYI_RUNTIME_FILES = {"prelude.iyi", "concurrency.iyi", "thread.iyi", "chaos.iyi"}
+
+    @iyi_runtime_files = {} of String => Bool
+
+    # Whether *target_def* is written in one of `IYI_RUNTIME_FILES`, in the
+    # prelude's directory itself.
+    def iyi_runtime_def?(target_def : Def) : Bool
+      return false unless dir = @program.iyi_prelude_dir
+      filename = target_def.location.try(&.expanded_location).try(&.read_from.as?(String))
+      return false unless filename
+      @iyi_runtime_files.put_if_absent(filename) do
+        path = ::Path[filename].to_posix.to_s
+        prefix = "#{::Path[dir].to_posix}/"
+        path.starts_with?(prefix) && IYI_RUNTIME_FILES.includes?(path[prefix.size..])
+      end
+    end
+
+    # iyi: whether a call from here to *target_def* goes to the copy of it
+    # compiled for the runtime: the caller is the runtime's code, or such a
+    # copy, and the callee is a library def, which checks where it is
+    # compiled for a program's own code. So nothing the runtime runs checks,
+    # whatever it calls - the push that grows the poller's list of closed
+    # fds, the `raise` of a failed `clone` - and the runtime needs no rule
+    # about which of its calls are safe places to give a worker up. A def
+    # read from a `.iyimod` has one body, compiled where no pool was
+    # (`iyi_preempt_on?`), and so no checks either.
+    def iyi_runtime_copy?(target_def : Def) : Bool
+      context.iyi_runtime? && !target_def.is_a?(External) && !target_def.iyi_from_artifact? &&
+        !iyi_runtime_def?(target_def)
+    end
+
+    # iyi: a loop's back-edge (SPEC.md III.4.13, part 9). Where the
+    # function checks, the branch carries a loop property, `iyi.preempt`,
+    # in the loop's `!llvm.loop` metadata - one loop ID per `while`, on its
+    # every back-edge, as LLVM wants - and the check itself goes in after
+    # optimisation (`PreemptChecks`): emitted here, a volatile load in the
+    # loop kept LLVM from vectorising it.
+    def iyi_back_edge(target : LLVM::BasicBlock) : Nil
+      marked = context.iyi_preempt? && !@builder.end && iyi_preempt_fun
+      branch = br target
+      return unless marked
+      LibLLVM.set_metadata(branch, LibLLVM.get_md_kind_id_in_context(llvm_context, "llvm.loop", 9), iyi_loop_id(target))
+    end
+
+    @iyi_loop_ids = {} of UInt64 => LLVM::Value
+
+    # The loop ID of the `while` whose condition block is *header*:
+    # `distinct !{!self, !{!"iyi.preempt"}}`, made through a temporary node
+    # for the self-reference.
+    private def iyi_loop_id(header : LLVM::BasicBlock) : LLVM::Value
+      @iyi_loop_ids.put_if_absent(header.to_unsafe.address) do
+        ctx = llvm_context
+        temporary = LibLLVM.temporary_md_node(ctx, nil, 0)
+        text = LibLLVM.md_string_in_context2(ctx, PreemptChecks::MARK, PreemptChecks::MARK.bytesize)
+        property = LibLLVM.md_node_in_context2(ctx, pointerof(text), 1)
+        operands = StaticArray[temporary.as(LibLLVM::ValueRef), property]
+        loop_id = LibLLVM.md_node_in_context2(ctx, operands.to_unsafe, 2)
+        LibLLVM.metadata_replace_all_uses_with(temporary, loop_id.as(LibLLVM::MetadataRef))
+        LLVM::Value.new(LibLLVM.metadata_as_value(ctx, loop_id.as(LibLLVM::MetadataRef)))
+      end
+    end
+
+    # The slow half, emitted ahead of the program (`CodegenWellKnownFunctions`)
+    # and `cold`, so the check's call sits off the loop's path; nil in a
+    # program with no pool. Asked first at a back-edge, which is where the
+    # word's global is named for `PreemptChecks`.
+    #
+    # Where the check calls the word's accessor, it is defined here, in the
+    # main module, as a read of the variable defines it: `PreemptChecks`
+    # only declares it in the module it checks. And external: the check's
+    # call comes after optimisation, and before it nothing may call the
+    # accessor, which a `--release` build makes internal and so deletes.
+    # Nothing in the runtime read `@@preempt` on x86-64 Windows, where the
+    # word is a TEB slot, so `-Dpreempt_check_accessor` linked there to
+    # `unresolved external symbol *IyiWorkers::preempt` (CI job
+    # 121231000410); defined here but internal, the cross-compiled object
+    # still named it undefined. darwin had it because its slow half writes
+    # the variable.
+    #
+    # The TEB slot's offset, `IyiWorkers.@@preempt_slot`, which every check
+    # on x86-64 Windows reads by name after optimisation, is kept external
+    # for the same reason. Only the pool's start writes it and a worker
+    # reads it, and a program whose every server is `workers: 1` has a pool
+    # in its types and none its optimiser can reach: a `--release` build
+    # deleted the internal global with them, and every std/http program
+    # built so on Windows stopped at `unresolved external symbol
+    # IyiWorkers::preempt_slot referenced in function __iyi_main` (CI job
+    # 121953306408). Its checks then read the fallback slot, 0x28, which
+    # nothing raises.
+    private def iyi_preempt_fun : LLVMTypedFunction?
+      return nil unless word = iyi_preempt_word
+      preempt = @iyi_preempt_fun ||= typed_fun?(@main_mod, PREEMPT_NAME)
+      return nil unless preempt
+      preempt.func.add_attribute LLVM::Attribute::Cold
+      unless @program.iyi_preempt_flag
+        name = class_var_global_name(word)
+        @program.iyi_preempt_flag = name
+        if iyi_preempt_accessor?
+          declare_thread_local_fun(name, word.type, word).func.linkage = LLVM::Linkage::External
+        elsif @program.has_flag?("win32") && (slot = iyi_preempt_slot)
+          global = declare_class_var(slot)
+          global.initializer ||= @main_llvm_typer.llvm_type(slot.type).null
+          global.linkage = LLVM::Linkage::External
+        end
+      end
+      preempt
+    end
+
+    private def iyi_preempt_slot : MetaTypeVar?
+      workers = @program.types["IyiWorkers"]?
+      return nil unless workers.is_a?(ClassVarContainer)
+      workers.class_vars["@@preempt_slot"]?
+    end
+
+    # Whether `PreemptChecks` calls the word's accessor: never on Linux,
+    # which reads the thread pointer; on x86-64 Windows only in the
+    # accessor-check variant, the TEB slot otherwise; and on darwin and
+    # arm64 Windows always, darwin arm64 once per function for the word's
+    # offset and the rest at every back-edge.
+    private def iyi_preempt_accessor? : Bool
+      return false if @program.has_flag?("linux")
+      return true if @program.has_flag?("preempt_check_accessor")
+      !(@program.has_flag?("win32") && @program.has_flag?("x86_64"))
     end
 
     # iyi: a store whose destination is a stack slot — an alloca, or a

@@ -950,6 +950,12 @@ module Iyi
     # References and every other "who calls this" answer skip them: a
     # person is never asking about the compiler's own probe.
     property? iyi_synthetic = false
+    # iyi: true on a call whose `expanded` is the compiler's own lowering
+    # rather than a macro's - the slice literal, which takes the address of
+    # the constant holding its elements. The unsafe check (SPEC.md III.13)
+    # reads what the person wrote, so it follows the calls of such an
+    # expansion and refuses nothing in it.
+    property? iyi_compiler_expansion = false
     @name_size = -1
     property doc : String?
     property visibility = Visibility::Public
@@ -1046,7 +1052,7 @@ module Iyi
       loc = @name_location
       return unless loc
 
-      Location.new(loc.filename, loc.line_number, loc.column_number + name_size - 1)
+      Location.new(loc.filename, loc.line_number, loc.column_number + name_size - 1, loc.artifact)
     end
 
     # Returns `true` if this call has any arguments.
@@ -1663,6 +1669,28 @@ module Iyi
     property? uses_block_arg = false
     property? assigns_special_var = false
     property? abstract : Bool
+    # iyi: `@[Share]` on the def: the block it keeps may run on other
+    # threads, several at once, so every block given to it is checked where
+    # it is written as a parallel task's is (SPEC.md III.4.4, III.4.13), and
+    # inside the def the proc it became is the one non-`Share` value a
+    # parallel block may capture or pass on. A flag rather than the
+    # annotation because an instance is a clone, and a clone carries no
+    # annotations.
+    property? iyi_share_block = false
+    # iyi: `@[Share(serial: workers)]`: the parameter whose literal `1` at a
+    # call runs the def on the caller's thread alone, so that call's block
+    # and crossing arguments are not checked (SPEC.md III.4.13). Nil when
+    # every call crosses.
+    property iyi_share_serial : String? = nil
+    # iyi: `@[Share(crossing: {tls: "..."})]`: parameters whose values the
+    # def hands to other threads, each with the sentence that says what to
+    # pass instead when a call's value is not `Share`.
+    property iyi_share_crossing : Hash(String, String)? = nil
+    # iyi: `@[Share(elements: "...")]`: the values the def hands its block
+    # are read on other threads, several at once - std/parallel's
+    # `map_parallel` - so each block parameter's type must be `Share`; the
+    # sentence says what to do instead when one is not.
+    property iyi_share_elements : String? = nil
 
     def initialize(@name, @args = [] of Arg, body = nil, @receiver = nil, @block_arg = nil, @return_type = nil, @macro_def = false, @block_arity = nil, @abstract = false, @splat_index = nil, @double_splat = nil, @free_vars = nil)
       @body = Expressions.from body
@@ -1698,6 +1726,10 @@ module Iyi
       a_def.iyi_open_travel = iyi_open_travel?
       a_def.iyi_defer = iyi_defer?
       a_def.iyi_from_derive = iyi_from_derive?
+      a_def.iyi_share_block = iyi_share_block?
+      a_def.iyi_share_serial = iyi_share_serial
+      a_def.iyi_share_crossing = iyi_share_crossing
+      a_def.iyi_share_elements = iyi_share_elements
       a_def.name_location = name_location
       a_def.visibility = visibility
       a_def.free_var_bounds = @free_var_bounds.clone
@@ -3571,6 +3603,11 @@ module Iyi
     property args : Array(ASTNode)
     property named_args : Array(NamedArgument)?
     property doc : String?
+    # iyi: true on `@[Unsafe("why")]` when it is its file's first statement,
+    # the mark that says the module handles raw memory (SPEC.md III.13).
+    # The parser sets it, and only there is the mark a mark: elsewhere a
+    # positional `@[Unsafe]` is refused.
+    property? iyi_file_mark = false
 
     def initialize(@path, @args = [] of ASTNode, @named_args = nil)
     end

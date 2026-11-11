@@ -20,34 +20,39 @@
 # cannot say whether the body assigns.
 #
 # What it gates today: the block `IyiThread.start` captures (III.4.11), the
-# block `IyiGroup#spawn_parallel` captures (III.4.13), and the block an
+# block `IyiGroup#spawn(unit: :new)` captures (III.4.13), the block
+# `IyiGroup#spawn(in: u)` captures (III.4.18), and the block an
 # owning type's method runs (`Mutex#lock` and the rest), in
 # `CleanupTransformer`. A channel crosses threads as a trusted type,
 # `@[Share]` on `Channel(T)`: shareable whenever its element type is.
 module Iyi::Share
   # Shareable, or a sentence saying why not: the first field that fails and
-  # the reason, one level at a time.
-  def self.reason(type : Type) : String?
-    reason(type, Set(Type).new)
+  # the reason, one level at a time. With *from*, the file of the code
+  # asking, a field whose type another module declares is said with that
+  # module: "Config's field @hits (module `dep/config`) is assigned in
+  # `bump`" - the place a spawn's verdict moved from when that module
+  # changed (SPEC.md III.4.16).
+  def self.reason(type : Type, from : String? = nil) : String?
+    reason(type, Set(Type).new, from)
   end
 
   def self.shareable?(type : Type) : Bool
     reason(type).nil?
   end
 
-  private def self.reason(type : Type, visiting : Set(Type)) : String?
+  private def self.reason(type : Type, visiting : Set(Type), from : String?) : String?
     # A recursive type reached again while its own check is open is not
     # the fault; whatever fails, fails elsewhere.
     return nil if visiting.includes?(type)
     visiting.add(type)
     begin
-      check(type, visiting)
+      check(type, visiting, from)
     ensure
       visiting.delete(type)
     end
   end
 
-  private def self.check(type : Type, visiting : Set(Type)) : String?
+  private def self.check(type : Type, visiting : Set(Type), from : String?) : String?
     case type
     when NilType, BoolType, CharType, IntegerType, FloatType, SymbolType, VoidType, NoReturnType
       nil
@@ -58,9 +63,9 @@ module Iyi::Share
       # consumer's instantiation is where the argument is checked.
       nil
     when AliasType
-      reason(type.aliased_type, visiting)
+      reason(type.aliased_type, visiting, from)
     when TypeDefType
-      reason(type.typedef, visiting)
+      reason(type.typedef, visiting, from)
     when MetaclassType, GenericClassInstanceMetaclassType, VirtualMetaclassType
       nil
     when PointerInstanceType
@@ -71,43 +76,43 @@ module Iyi::Share
       "#{type} is a closure, and what it captured is not written in its type"
     when TupleInstanceType
       type.tuple_types.each do |member|
-        if why = reason(member, visiting)
+        if why = reason(member, visiting, from)
           return "#{type} holds #{member}: #{why}"
         end
       end
       nil
     when NamedTupleInstanceType
       type.entries.each do |entry|
-        if why = reason(entry.type, visiting)
+        if why = reason(entry.type, visiting, from)
           return "#{type} holds #{entry.name} : #{entry.type}: #{why}"
         end
       end
       nil
     when UnionType
       type.union_types.each do |member|
-        if why = reason(member, visiting)
+        if why = reason(member, visiting, from)
           return "#{type} may be #{member}: #{why}"
         end
       end
       nil
     when VirtualType
       # A value typed as the base may be any subclass; every one must hold.
-      if why = reason(type.base_type, visiting)
+      if why = reason(type.base_type, visiting, from)
         return why
       end
       type.base_type.all_subclasses.each do |subclass|
-        if why = reason(subclass, visiting)
+        if why = reason(subclass, visiting, from)
           return "#{type} may be #{subclass}: #{why}"
         end
       end
       nil
     when GenericClassInstanceType
       if trusted?(type)
-        type.generic_type.iyi_share_owns? ? nil : trusted_arguments(type, visiting)
+        type.generic_type.iyi_share_owns? ? nil : trusted_arguments(type, visiting, from)
       elsif type.generic_type.iyi_from_artifact?
-        "#{type} came from an artifact whose producer did not find it shareable"
+        "#{type}#{declared_in(type, from)} came from an artifact whose producer did not find it shareable"
       else
-        structural(type, visiting)
+        structural(type, visiting, from)
       end
     when GenericModuleInstanceType, NonGenericModuleType, GenericModuleType
       # A module as a value's type is its including types, which the virtual
@@ -125,9 +130,9 @@ module Iyi::Share
       if type.iyi_share_trusted? || type == type.program.string
         nil
       elsif type.iyi_from_artifact?
-        "#{type} came from an artifact whose producer did not find it shareable"
+        "#{type}#{declared_in(type, from)} came from an artifact whose producer did not find it shareable"
       else
-        structural(type, visiting)
+        structural(type, visiting, from)
       end
     when GenericClassType
       # The uninstantiated generic, as a producer asks about it: shareable
@@ -136,7 +141,7 @@ module Iyi::Share
       if type.iyi_share_trusted?
         nil
       else
-        structural(type, visiting)
+        structural(type, visiting, from)
       end
     else
       "#{type} (#{type.class}) has no shareability rule"
@@ -148,12 +153,12 @@ module Iyi::Share
   end
 
   # `@[Share]` on the generic: shareable whenever its arguments are.
-  private def self.trusted_arguments(type : GenericClassInstanceType, visiting : Set(Type)) : String?
+  private def self.trusted_arguments(type : GenericClassInstanceType, visiting : Set(Type), from : String?) : String?
     type.type_vars.each do |name, var|
       next unless var.is_a?(Var)
       argument = var.type?
       next unless argument
-      if why = reason(argument, visiting)
+      if why = reason(argument, visiting, from)
         return "#{type}'s #{name} is #{argument}: #{why}"
       end
     end
@@ -163,21 +168,48 @@ module Iyi::Share
   # The structural half: every field immutable after `initialize`, every
   # field's type shareable. An instance's defs are its generic's, read with
   # the instance's type arguments: a macro in one expands on the instance.
-  private def self.structural(type : Type, visiting : Set(Type)) : String?
+  private def self.structural(type : Type, visiting : Set(Type), from : String?) : String?
     mutated = mutated_fields(type)
     if type.responds_to?(:all_instance_vars)
       type.all_instance_vars.each do |name, var|
         if how = mutated[name]?
-          return "#{type}'s field #{name} is #{how}"
+          return "#{type}'s field #{name}#{declared_in(field_owner(type, name), from)} is #{how}"
         end
         var_type = var.type?
         next unless var_type
-        if why = reason(var_type, visiting)
-          return "#{type}'s field #{name} : #{var_type} is not shareable: #{why}"
+        if why = reason(var_type, visiting, from)
+          return "#{type}'s field #{name} : #{var_type}#{declared_in(field_owner(type, name), from)} is not shareable: #{why}"
         end
       end
     end
     nil
+  end
+
+  # The class among *type* and its superclasses that declares the field
+  # *name*: a subclass's chain names the module the field was written in.
+  private def self.field_owner(type : Type, name : String) : Type
+    current = type
+    while current
+      if current.responds_to?(:instance_vars) && current.instance_vars.has_key?(name)
+        return current
+      end
+      current = current.responds_to?(:superclass) ? current.superclass : nil
+    end
+    type
+  end
+
+  # " (module `dep/config`)" when *type* is declared in a module other than
+  # the file *from*; empty when nothing asked, when the type is the
+  # asking file's own, and for a type no module declares - the prelude's.
+  private def self.declared_in(type : Type, from : String?) : String
+    return "" unless from && !SPAWN_BROKEN.includes?("remote")
+    type = type.generic_type.as(Type) if type.is_a?(GenericClassInstanceType)
+    location = type.locations.try(&.first?)
+    file = (location.try(&.expanded_location) || location).try(&.filename)
+    return "" unless file.is_a?(String) && file != from
+    program = type.program
+    name = program.iyi_module_paths[file]? || program.iyi_artifact_modules[file]?
+    name ? " (module `#{name}`)" : ""
   end
 
   # Field name -> how it is mutable: "assigned in `clear`" or "given a setter

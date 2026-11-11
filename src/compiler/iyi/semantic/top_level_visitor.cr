@@ -175,7 +175,7 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
         # iyi: `class MyError < Exception` compiled, and `MyError.new("bad")`
         # then listed `Reference.new()` as its one overload; the prelude's
         # `Exception` is the runtime's and has no hierarchy under it.
-        if superclass.same?(@program.types["Exception"]?) && @program.iyi_prelude? && Lexer.iyi_source?(node.location.try(&.filename))
+        if superclass.same?(@program.types["Exception"]?) && @program.iyi_prelude? && Lexer.iyi_source?(node.location.try(&.read_from))
           node_superclass.raise "iyi has no exception hierarchy: an error is a type of its own, `struct #{node.name}` " \
                                 "with a `def message : String` and `impl Error for #{node.name}`, returned as a member " \
                                 "of the result's union, `Int32 | #{node.name}` (SPEC.md III.1)"
@@ -237,6 +237,11 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
         # synchronised type that owns its contents: shareable whatever its
         # arguments are, its blocks checked at every call instead.
         type.iyi_share_trusted = true
+        # A claim, so it is kept for a module that says it handles what the
+        # compiler does not check (SPEC.md III.13).
+        @program.iyi_unsafe_site(ann, "@[Share] on `#{type}` is a claim the compiler takes on trust",
+          "make its fields Share (`Atomic`, `Mutex`, `List`) and `#{type}` is Share without it (SPEC.md III.4.4), ",
+          "trusts @[Share] on `#{type}`")
         unless ann.args.empty?
           ann.raise "Share annotation can't have positional arguments, only named arguments: 'owns'"
         end
@@ -252,12 +257,19 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
         end
       end
 
+      if annotation_type == @program.unsafe_annotation
+        ann.raise "@[Unsafe(call: \"...\")] is the promise a def's caller keeps, and `#{type}` is a type: " \
+                  "write it on the def, or mark the module with `@[Unsafe(\"why\")]` above its header (SPEC.md III.13)"
+      end
+
       if node.struct? && type.is_a?(NonGenericClassType)
         case annotation_type
         when @program.extern_annotation
           unless type.is_a?(NonGenericClassType)
             node.raise "can only use Extern annotation with non-generic structs"
           end
+          @program.iyi_unsafe_site(ann, "@[Extern] makes `#{type}` a C struct the compiler does not check", "",
+            "declares the C struct `#{type}`")
 
           unless ann.args.empty?
             ann.raise "Extern annotation can't have positional arguments, only named arguments: 'union'"
@@ -570,10 +582,10 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
     return false unless type = @program.types[name]?
     return false unless locations = type.locations
     return false unless module_locations = used_type.locations
-    files = module_locations.compact_map(&.original_filename).to_set
+    files = module_locations.compact_map(&.original_read_from).to_set
     return false if files.empty?
     locations.any? do |location|
-      (filename = location.original_filename) && files.includes?(filename)
+      (filename = location.original_read_from) && files.includes?(filename)
     end
   end
 
@@ -743,7 +755,7 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
       # where `impl Comparable` gets the import line from the undefined
       # constant. The same std scan answers here.
       written = node.trait.is_a?(Generic) ? node.trait.as(Generic).name : node.trait
-      if written.is_a?(Path) && written.names.size == 1 && Lexer.iyi_source?(written.location.try(&.filename)) &&
+      if written.is_a?(Path) && written.names.size == 1 && Lexer.iyi_source?(written.location.try(&.read_from)) &&
          (hint = written.iyi_std_declares_hint(program, written.names.first))
         message = "#{message}\n#{hint}"
       end
@@ -815,7 +827,7 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
     # body as well makes the consumer define a symbol the artifact defines too.
     file = @iyi_importing.last?
     target_declared_here =
-      !!(file && target_type.locations.try &.any? { |location| location.filename == file })
+      !!(file && target_type.locations.try &.any? { |location| location.read_from == file })
     bodies_travel = target_type.is_a?(GenericType) || !target_declared_here
     container = IyiMod.mono_body_container(trait_type.to_s, target_type.to_s)
 
@@ -847,8 +859,10 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
       # struct this module declares carried a header alone, and the
       # consumer's link ended on `Kit::Lib::B#walk<&Proc(Int32, Nil)>:Nil`.
       if file && (bodies_travel || IyiMod.caller_instantiated?(a_def) || iyi_impl_signature_widened?(a_def))
-        bodies = @program.iyi_mono_bodies[file] ||= {} of String => String
-        bodies[IyiMod.mono_body_key(container, signature)] = a_def.body.to_s
+        key = IyiMod.mono_body_key(container, signature)
+        text, positions = IyiMod.located_source(a_def.body)
+        (@program.iyi_mono_bodies[file] ||= {} of String => String)[key] = text
+        (@program.iyi_mono_body_positions[file] ||= {} of String => Array(IyiMod::SourcePosition))[key] = positions
       end
     end
 
@@ -1290,9 +1304,9 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
   # (`class ::String` in `std/text`) is inside no module either, and is
   # not the entry.
   private def iyi_headerless_entry_type?(node : ASTNode) : Bool
-    file = node.location.try(&.filename)
+    file = node.location.try(&.read_from)
     while file.is_a?(VirtualFile)
-      file = file.expanded_location.try(&.filename)
+      file = file.expanded_location.try(&.read_from)
     end
     return false unless file.is_a?(String) && file == @program.filename
     unit = current_type
@@ -1430,7 +1444,7 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
     type.private = true if node.visibility.private?
     if node.iyi_unit?
       type.iyi_unit = true
-      type.iyi_unit_file ||= node.location.try(&.original_filename)
+      type.iyi_unit_file ||= node.location.try(&.original_read_from)
     end
 
     node.resolved_type = type
@@ -1619,6 +1633,57 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
     process_def_annotations(node, annotations) do |annotation_type, ann|
       if annotation_type == @program.primitive_annotation
         process_def_primitive_annotation(node, ann)
+      end
+
+      # iyi: `@[Share]` on a def says its block crosses threads (SPEC.md
+      # III.4.13): what the block captures is checked at every call, as a
+      # parallel task's block is. Only a def that keeps its block has one
+      # to send anywhere - or that hands arguments named by `crossing` to
+      # other threads, each checked at every call with the sentence given
+      # for it. `serial: workers` names the parameter whose literal `1` at
+      # a call keeps the def on the caller's thread: that call is not
+      # checked (std/http's `Server.serve(..., workers: 1)`). `elements:`
+      # says the values the def hands its block are read on several
+      # threads at once, so the block's parameters must be Share too
+      # (std/parallel's `map_parallel`, SPEC.md III.4.14).
+      if annotation_type == @program.share_annotation
+        unless ann.args.empty?
+          ann.raise "Share on a def takes only named arguments, 'serial', 'crossing' and 'elements': it says the block the def keeps may run on other threads"
+        end
+        ann.named_args.try &.each do |named_arg|
+          value = named_arg.value
+          case named_arg.name
+          when "serial"
+            param = value.name if value.is_a?(Call) && value.obj.nil? && value.args.empty? && value.block.nil?
+            unless param && node.args.any? { |arg| arg.external_name == param }
+              named_arg.raise "Share's 'serial' names a parameter of `#{node.name}`, as `serial: workers`: a call that passes it the literal 1 keeps the def on one thread"
+            end
+            node.iyi_share_serial = param
+          when "crossing"
+            unless value.is_a?(NamedTupleLiteral) && value.entries.all? { |entry| entry.value.is_a?(StringLiteral) && node.args.any? { |arg| arg.external_name == entry.key } }
+              named_arg.raise "Share's 'crossing' names parameters of `#{node.name}` it hands to other threads, each with what to pass instead of a value that is not Share: `crossing: {tls: \"Pass `config.frozen`\"}`"
+            end
+            node.iyi_share_crossing = value.entries.to_h { |entry| {entry.key, entry.value.as(StringLiteral).value} }
+          when "elements"
+            unless value.is_a?(StringLiteral) && node.block_arg.try(&.name.presence)
+              named_arg.raise "Share's 'elements' says the values `#{node.name}` hands its block are read on other threads, with what to do instead when they are not Share: `elements: \"Make them Share\"`, on a def that keeps its block, `&block : T -> R`"
+            end
+            node.iyi_share_elements = value.as(StringLiteral).value
+          else
+            named_arg.raise "unknown Share named argument on a def, valid arguments are: 'serial', 'crossing', 'elements'"
+          end
+        end
+        block_kept = !!node.block_arg.try(&.name.presence)
+        unless block_kept || node.iyi_share_crossing
+          ann.raise "Share on a def says the block it keeps may run on other threads, and `#{node.name}` keeps no block: name one, `&block : A -> R`"
+        end
+        node.iyi_share_block = block_kept
+      end
+
+      if annotation_type == @program.no_preempt_annotation
+        unless ann.args.empty? && ann.named_args.nil?
+          ann.raise "NoPreempt takes no arguments: it says no loop in this def gives its worker up (SPEC.md III.4.13)"
+        end
       end
 
       node.add_annotation(annotation_type, ann)
@@ -1984,7 +2049,7 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
         # replacing a def it wrote itself is its own business, as it is the
         # prelude's.
         return unless iyi_written_in?(replaced, ".iyi")
-        file = replaced.location.try(&.expanded_location).try(&.filename.as?(String))
+        file = replaced.location.try(&.expanded_location).try(&.read_from.as?(String))
         return if file.nil? || iyi_written_file(replaced) == iyi_written_file(node)
         writer = @program.iyi_module_paths[file]? || @program.iyi_artifact_modules[file]? || Iyi.relative_filename(file)
         whose = "#{writer}'s"
@@ -2033,7 +2098,7 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
     return false unless dir = @program.iyi_prelude_dir
     prefix = "#{::Path[dir].to_posix}/"
     !!node.location.try(&.expanded_location).try do |at|
-      at.filename.as?(String).try do |filename|
+      at.read_from.as?(String).try do |filename|
         ::Path[filename].to_posix.to_s.starts_with?(prefix)
       end
     end
@@ -2042,14 +2107,14 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
   # Where a definition was written, following a macro back to its source.
   private def iyi_written_in?(node : Def | Macro, extension : String) : Bool
     !!node.location.try(&.expanded_location).try do |at|
-      at.filename.as?(String).try &.ends_with?(extension)
+      at.read_from.as?(String).try &.ends_with?(extension)
     end
   end
 
   # The file a definition was written in, following a macro back to its
   # source, as a posix path so that two spellings of one file are one.
   private def iyi_written_file(node : Def | Macro) : String?
-    node.location.try(&.expanded_location).try(&.filename.as?(String)).try { |file| ::Path[file].to_posix.to_s }
+    node.location.try(&.expanded_location).try(&.read_from.as?(String)).try { |file| ::Path[file].to_posix.to_s }
   end
 
   private def process_def_primitive_annotation(node, ann)
@@ -2068,6 +2133,8 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
     primitive.location = node.location
 
     node.body = primitive
+    @program.iyi_unsafe_site(ann, "@[Primitive] makes `#{node.name}` the compiler's own code, which nothing checks", "",
+      "declares the primitive `#{node.name}`")
   end
 
   def visit(node : Include)
@@ -2475,6 +2542,12 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
     process_annotations(annotations) do |annotation_type, ann|
       # annotations on constants are inaccessible in macros so we only add deprecations
       const.add_annotation(annotation_type, ann) if annotation_type == @program.deprecated_annotation
+      # iyi: the program's word that every thread may reach the constant
+      # through a call (SPEC.md III.4.4): proven by `ReachProof` when it is
+      # `SafeReach`, taken on trust where `UnsafeReach` is allowed.
+      if annotation_type == @program.safe_reach_annotation || annotation_type == @program.unsafe_reach_annotation
+        iyi_mark_reach(const, "`#{name}`", ann, annotation_type == @program.unsafe_reach_annotation)
+      end
     end
 
     check_ditto node, node.location
@@ -3115,7 +3188,7 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
   # qualified declaration is exactly how a `.cr` file reopens a type, which is
   # a thing Crystal has and iyi does not.
   private def iyi_check_not_reopening(node : ASTNode, path : Path, prefix : Path) : Nil
-    filename = path.location.try(&.filename)
+    filename = path.location.try(&.read_from)
     return unless filename.is_a?(String) && filename.ends_with?(".iyi")
 
     # `module app/formal` is a qualified declaration the parser wrote, not one
@@ -3133,7 +3206,7 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
 
     # A namespace this file declared is its own to add to.
     locations = existing.locations
-    return if locations.try &.any? { |location| location.filename == filename }
+    return if locations.try &.any? { |location| location.read_from == filename }
 
     declared_in = locations.try(&.first?).try(&.filename)
     where = declared_in.is_a?(String) ? " (declared in `#{declared_in}`)" : ""

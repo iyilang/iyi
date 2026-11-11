@@ -35,6 +35,8 @@
 
 module bench/reuse_integrity
 
+import std/mutex::{Mutex}
+
 class Body
   getter x : Float64
   getter y : Float64
@@ -125,31 +127,23 @@ puts "reuse integrity: #{rounds} rounds, every key spells its value, the startup
     end
   end
 
-  class Pairs
-    @@all : Array(Pair)? = nil
-    @@kept : Array(Pair) = [] of Pair
-
-    def self.all=(value : Array(Pair)?) : Nil
-      @@all = value
-    end
-
-    def self.kept : Array(Pair)
-      @@kept
-    end
-  end
+  # The pairs kept past the fill: appended to by the filler thread and
+  # read by nothing, they hold one in 4,096 alive after that thread ends.
+  # Behind a `Mutex`, which is `Share`, so the thread reaches them with
+  # nothing to claim; they were a class variable under a `@[SafeReach]`
+  # nothing proved, which the compiler now refuses (SPEC.md III.4.4).
+  KEPT = Mutex.new { [] of Pair }
 
   def fill(count : Int32) : Nil
     all = [] of Pair
-    Pairs.all = all
     word = 0x0000123456780000_u64
     n = 0
     while n < count
       pair = Pair.new(word, word)
       all << pair
-      Pairs.kept << pair if n % 4096 == 0
+      KEPT.lock { |kept| kept << pair } if n % 4096 == 0
       n = n + 1
     end
-    Pairs.all = nil
   end
 
   def fresh(count : Int32) : Int32

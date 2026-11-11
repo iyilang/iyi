@@ -1,0 +1,43 @@
+# iyi: the chaos scheduler's points in `Atomic`'s verbs - SPEC.md III.4.17.
+# Required beside `chaos.iyi` and only in a build with `-Diyi_chaos`, so
+# a plain build's verbs are atomic.iyi's alone.
+#
+# Each verb is first a point where the scheduler may run another task,
+# then the verb as atomic.iyi defines it (`previous_def`), so the two
+# cannot drift apart. The point is the program's alone: this file is not
+# one of the runtime's (`IYI_RUNTIME_FILES`), and the compiler drops
+# `at_atomic` from the copy of these defs the runtime's code calls
+# (`CodeGenVisitor#visit(Call)`), since the runtime's atomics are its
+# locks, queues and wake words, and a switch inside one would park a task
+# holding them.
+struct Atomic(T)
+  def get : T
+    IyiChaos.at_atomic
+    previous_def
+  end
+
+  def set(value : T) : Nil
+    IyiChaos.at_atomic
+    previous_def
+  end
+
+  def add(value : T) : T
+    IyiChaos.at_atomic
+    previous_def
+  end
+
+  def sub(value : T) : T
+    IyiChaos.at_atomic
+    previous_def
+  end
+
+  def swap(value : T) : T
+    IyiChaos.at_atomic
+    previous_def
+  end
+
+  def compare_and_set(expected : T, desired : T) : Tuple(T, Bool)
+    IyiChaos.at_atomic
+    previous_def
+  end
+end

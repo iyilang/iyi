@@ -456,6 +456,38 @@ describe Process do
       output.should eq "`echo hi`\n"
     end
 
+    # iyi: `process_group: true` makes the child the leader of a group of its
+    # own, and what it starts is born into that group, so a signal to `-pid`
+    # reaches all of it (`iyi test` ends a test at its deadline that way).
+    # Windows has no process group and ignores it.
+    pending_win32 "leads a process group of its own with process_group" do
+      process = Process.new("sleep", {"30"}, process_group: true)
+      begin
+        Process.pgid(process.pid).should eq(process.pid)
+      ensure
+        process.terminate(graceful: false)
+        process.wait
+      end
+    end
+
+    pending_win32 "stays in this process's group without process_group" do
+      process = Process.new("sleep", {"30"})
+      begin
+        Process.pgid(process.pid).should eq(Process.pgid)
+      ensure
+        process.terminate(graceful: false)
+        process.wait
+      end
+    end
+
+    pending_win32 "puts what the leader starts in its group, and a signal to the group ends it" do
+      process = Process.new("sh", {"-c", "sleep 30 & echo $!; wait"}, output: Process::Redirect::Pipe, process_group: true)
+      started = process.output.gets.not_nil!.to_i
+      Process.pgid(started).should eq(process.pid)
+      LibC.kill(-process.pid.to_i32, Signal::KILL.value).should eq(0)
+      process.wait.exit_signal?.should eq(Signal::KILL)
+    end
+
     describe "does not execute batch files" do
       %w[.bat .Bat .BAT .cmd .cmD .CmD .bat\  .cmd\ ... .bat.\ .].each do |ext|
         it ext do
@@ -652,14 +684,18 @@ describe Process do
           Dir.mkdir dir
           File.write(Path[dir, "foo"], "#!/bin/sh\necho bar")
           File.chmod(Path[dir, "foo"], 0o555)
-          if {{ flag?(:darwin) }}
-            String.build do |io|
-              Process.run("foo", chdir: dir, output: io)
-            end.should eq "bar\n"
-          else
+          # The search reads only $PATH, so the runner's own PATH must not decide the result.
+          # Never use a trailing : here.
+          with_env("PATH": "/does/not/exist") do
             expect_raises(File::NotFoundError) do
               Process.run("foo", chdir: dir)
             end
+          end
+
+          with_env("PATH": ":/does/not/exist") do
+            String.build do |io|
+              Process.run("foo", chdir: dir, output: io)
+            end.should eq "bar\n"
           end
         end
       end

@@ -574,7 +574,7 @@ pub struct DerValue
   end
 
   private def ascii_text : String
-    String.new(@content_size) { |p| p.copy_from(@data.to_unsafe + content_offset.to_i64, @content_size) }
+    String.new(@data, content_offset, @content_size)
   end
 
   # BMPString (*width* 2) or UniversalString (4), big-endian, to UTF-8.

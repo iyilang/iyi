@@ -141,14 +141,15 @@ if mode == "self" || mode == "once"
   tls = IyiSocket.listen("127.0.0.1", 0)
   group do |g|
     g.spawn do
-      Server.serve(plain) do |req|
+      # One thread: `/stop` closes the listener, which is this thread's.
+      Server.serve(plain, workers: 1) do |req|
         plain.close if req.path == "/stop"
         answer(req.path)
       end
       0
     end
     g.spawn do
-      Server.serve(tls, tls: secure) do |req|
+      Server.serve(tls, tls: secure, workers: 1) do |req|
         tls.close if req.path == "/stop"
         answer(req.path)
       end
@@ -185,7 +186,8 @@ end
 if mode == "serve"
   listener = IyiSocket.listen("127.0.0.1", 0)
   File.write(args[1], listener.local_port.to_s)
-  Server.serve(listener, tls: server_config(args[2], args[3])) do |req|
+  # One thread: `/quit` closes the listener, which is this thread's.
+  Server.serve(listener, tls: server_config(args[2], args[3]), workers: 1) do |req|
     listener.close if req.path == "/quit"
     Response.new(200, "ok")
   end
@@ -216,7 +218,8 @@ puts "nodelay: TCP_NODELAY set on the connected and the accepted socket, and cle
 streamed = [] of Int64
 group do |g|
   g.spawn do
-    Server.serve(listener) do |req|
+    # One thread: `/stop` closes the listener, which is this thread's.
+    Server.serve(listener, workers: 1) do |req|
       listener.close if req.path == "/stop"
       answer(req.path)
     end

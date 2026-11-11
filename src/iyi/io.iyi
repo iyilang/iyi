@@ -2,6 +2,7 @@
 # streams, files, pipes and sockets - one read path and one write path,
 # shared by `puts`, `print` and `File`.
 
+@[Unsafe("reads and writes go through buffers it allocates and the platform's descriptors")]
 class IyiIO
   @fd : Int64
   @closed : Bool

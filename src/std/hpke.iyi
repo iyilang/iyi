@@ -692,13 +692,8 @@ class HpkeCipher
   private def nonce : String
     base = @base_nonce
     seq = @sequence
-    String.new(12) do |buf|
-      i = 0
-      while i < 12
-        buf[i] = base[i] ^ seq.unsafe_shr((11 - i) * 8).unsafe_to_u8
-        i = i + 1
-      end
-    end
+    bytes = Array(UInt8).new(12) { |i| base[i] ^ seq.unsafe_shr((11 - i) * 8).unsafe_to_u8 }
+    String.new(bytes)
   end
 end
 
@@ -754,8 +749,7 @@ struct HpkeBytes
   # The bytes of *data*: a String's copied out, an Array as it is.
   def self.array(data : String | Array(UInt8)) : Array(UInt8)
     return data unless data.is_a?(String)
-    p = data.to_unsafe
-    Array(UInt8).new(data.bytesize) { |i| p[i] }
+    Array(UInt8).new(data.bytesize) { |i| data.byte_at(i) }
   end
 
   # The bytes of *data*, always a copy: what a key keeps.

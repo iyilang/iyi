@@ -3,6 +3,7 @@
 # Run via:
 #     ./bin/iyi run bench/std_base32_exercise.iyi
 
+@[Unsafe("it copies encoded bytes into String.new's buffer through to_unsafe, to compare std/base32's output byte for byte")]
 module bench/std_base32_exercise
 
 import std/base32::{Base32, Base32Hex, Base32Error}

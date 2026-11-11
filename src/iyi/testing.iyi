@@ -147,8 +147,10 @@ end
   # `ok - name` or `FAIL - name`, and the program exits 1 when it ends if
   # any failed (`fun main` asks `IyiTestCases.verdict`), which is the one
   # thing `iyi test` reads. The failure's evidence is the panic's own lines,
-  # printed above the case's verdict.
-  def test(name : String, &block : -> _) : Nil
+  # printed above the case's verdict. `skip:` is the reason a case does not
+  # run, and its verdict is `skip - name: reason`.
+  def test(name : String, skip : String? = nil, &block : -> _) : Nil
+    return unless IyiTestCases.runs?(name, skip)
     STDOUT.flush
     said = nil
     group do |g|
@@ -160,7 +162,7 @@ end
       said = outcome.message if outcome.is_a?(Panicked)
       0
     end
-    IyiTestCases.record(name, said.nil?)
+    IyiTestCases.record(name, said)
   end
 {% else %}
   # Where no task can end alone, a panic ends the program, and there is no
@@ -176,10 +178,11 @@ end
   # The case runs in the program itself: a failing assertion ends the
   # program, exit 1, which is still the verdict `iyi test` reads - the
   # cases after it do not run.
-  def test(name : String, &block : -> _) : Nil
+  def test(name : String, skip : String? = nil, &block : -> _) : Nil
+    return unless IyiTestCases.runs?(name, skip)
     STDOUT.flush
     block.call
-    IyiTestCases.record(name, true)
+    IyiTestCases.record(name, nil)
   end
 {% end %}
 
@@ -188,19 +191,64 @@ end
 class IyiTestCases
   @@ran = 0
   @@failed = 0
+  @@skipped = 0
+  @@report : String?
+  @@only : String?
+  @@taken = false
 
-  def self.record(name : String, passed : Bool) : Nil
+  # Read at the first named case and taken out of the environment, so that
+  # a child the test starts neither reports into its file nor runs only its
+  # `--run`. Not earlier: read in every program, it linked `environ` into
+  # each, past the dependency floor (SPEC.md III.9).
+  def self.take_environment : Nil
+    @@taken = true
+    @@report = Program.env("IYI_TEST_REPORT")
+    @@only = Program.env("IYI_TEST_RUN")
+    __iyi_env_forget("IYI_TEST_REPORT")
+    __iyi_env_forget("IYI_TEST_RUN")
+  end
+
+  # Whether the case runs: not when `--run TEXT` names text its name does
+  # not hold (no verdict at all), nor when it has a reason to skip.
+  def self.runs?(name : String, skip : String?) : Bool
+    take_environment unless @@taken
+    only = @@only
+    return false if only.is_a?(String) && !name.includes?(only)
+    return true unless skip.is_a?(String)
+    @@skipped = @@skipped + 1
+    tell("skip", name, skip)
+    false
+  end
+
+  # A case that ran: *failure* is its panic's message, nil for a pass.
+  def self.record(name : String, failure : String?) : Nil
     @@ran = @@ran + 1
-    @@failed = @@failed + 1 unless passed
-    STDOUT.puts((passed ? "ok - " : "FAIL - ") + name)
+    if failure.is_a?(String)
+      @@failed = @@failed + 1
+      tell("FAIL", name, failure)
+    else
+      tell("ok", name, "")
+    end
+  end
+
+  # The verdict's line, and as data in the file IYI_TEST_REPORT named: the
+  # verdict and two byte sizes, then the name and the detail, unescaped.
+  private def self.tell(verdict : String, name : String, detail : String) : Nil
+    STDOUT.puts(verdict + " - " + name + (verdict == "skip" ? ": " + detail : ""))
     STDOUT.flush
+    report = @@report
+    return unless report.is_a?(String)
+    File.open(report, "a") do |io|
+      io.write(verdict + " " + name.bytesize.to_s + " " + detail.bytesize.to_s + "\n" + name + detail)
+    end
   end
 
   # The program's exit status for its named cases: 0 when none failed, so
   # a program without one is untouched, and 1 with a count when any did.
   def self.verdict : Int32
-    return 0 if @@ran == 0
-    STDOUT.puts(@@ran.to_s + " named tests: " + (@@ran - @@failed).to_s + " passed, " + @@failed.to_s + " failed")
+    return 0 if @@ran + @@skipped == 0
+    skipped = @@skipped == 0 ? "" : ", " + @@skipped.to_s + " skipped"
+    STDOUT.puts((@@ran + @@skipped).to_s + " named tests: " + (@@ran - @@failed).to_s + " passed, " + @@failed.to_s + " failed" + skipped)
     @@failed == 0 ? 0 : 1
   end
 end

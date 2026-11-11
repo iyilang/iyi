@@ -502,6 +502,14 @@ module LLVM
       ConstantDataArray
       ConstantDataVector
       ConstantInt
+      # iyi: LLVM 23 put a kind here, and every kind after it moved up one.
+      # Without it LLVM 23's instruction was a kind this enum has no name
+      # for and its inline assembly `Instruction`, which is how Windows'
+      # release partitions (`ReleasePartition.reached_elsewhere?`) made
+      # every local function of the program external.
+      {% unless LibLLVM::IS_LT_230 %}
+        ConstantByte
+      {% end %}
       ConstantFP
       ConstantPointerNull
       ConstantTokenNone

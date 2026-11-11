@@ -69,7 +69,7 @@
 # `SocketError` now, and `disconnected?` says the client is gone. What a
 # program does wrong itself - reading a socket it closed, a negative
 # count - still panics. Writing to a connection the peer closed does not
-# raise SIGPIPE: `MSG_NOSIGNAL` on Linux, `SO_NOSIGPIPE` on darwin.
+# raise SIGPIPE: every send says `MSG_NOSIGNAL`, on Linux and on darwin.
 #
 # Where it lives:
 # Outside the prelude, because a program that opens no socket should not
@@ -79,6 +79,7 @@
 # here, applied to the file that broke the library ceiling with them
 # (SPEC.md III.9).
 
+@[Unsafe("sockets and addresses are made and used through the platform's raw calls and byte buffers")]
 module std/socket
 
 import std/dns::{DnsError, DnsMessage, DnsName, DnsRecord, HostsFile, ResolvConf, SvcbAnswer, SvcbRecord}
@@ -388,7 +389,10 @@ pub class IyiSocket
 
   # The address family, the platform's number for it: an accepted
   # connection is its listener's, and on Windows the socket `AcceptEx`
-  # fills in has to be made in it.
+  # fills in has to be made in it. With `fd`, what makes the socket again
+  # on another thread (std/http's `Server.serve`, on its pool).
+  getter family : Int32
+
   def initialize(@fd : Int32, @family : Int32 = AF_INET)
   end
 
@@ -951,6 +955,14 @@ pub class IyiSocket
     end
   end
 
+  # Reads into *buffer*, as many bytes as one read gives and at most its
+  # size: the count, or why not. The checked spelling of
+  # `read(buffer.to_unsafe, buffer.size)` (SPEC.md III.13).
+  def read(buffer : Bytes) : Int32 | Cancelled | SocketError
+    raise "cannot read into a read-only Slice" if buffer.read_only?
+    read(buffer.to_unsafe, buffer.size)
+  end
+
   def recv(max_bytes : Int32 = 4096) : String | Cancelled | SocketError
     read(max_bytes)
   end
@@ -982,6 +994,12 @@ pub class IyiSocket
       written = written + n.to_i32
     end
     written
+  end
+
+  # Writes all of *bytes*: the count, or why not.
+  def write(bytes : Bytes) : Int32 | Cancelled | SocketError
+    raise "socket is closed" if @fd < 0
+    write(bytes.to_unsafe, bytes.size)
   end
 
   def send(contents : String) : Int32 | Cancelled | SocketError
@@ -1500,6 +1518,9 @@ pub class IyiSocket
   # answer EOF rather than a reset is `closesocket`'s.
   def self.__sys_close(fd : Int32) : Nil
     {% if flag?(:win32) %}
+      # Its port record goes first, while the value is still this socket's
+      # (`IyiScheduler.port_closing`).
+      IyiScheduler.port_closing(Pointer(Void).new(__sys_handle(fd)))
       # The send side ends first (SD_SEND, 1): a FIN behind whatever was
       # written. `closesocket` with a read still posted beneath a parked
       # task - the kernel's until its completion is dequeued - reset the
@@ -1580,8 +1601,17 @@ pub class IyiSocket
       LibC.connect(fd, addr.as(Void*), __sys_addr_size(family))
     end
 
+    # MSG_NOSIGNAL (0x80000), as Linux's send says it: a write to a
+    # connection the peer closed answers EPIPE instead of killing the
+    # process with SIGPIPE. SO_NOSIGPIPE alone (`__sys_no_sigpipe`) was
+    # not enough: a client that resets its connection before the server
+    # accepts it leaves a socket the option is refused on (EINVAL, "the
+    # socket has been shut down"), and the server's first write to it
+    # killed the server - measured on macOS 26.6, an iyi std/http server
+    # under clients that connect and reset died within a second of each
+    # start.
     def self.__sys_send(fd : Int32, buf : Pointer(UInt8), len : UInt64, ms : Int32) : Int64
-      LibC.send(fd, buf.as(Void*), len, 0)
+      LibC.send(fd, buf.as(Void*), len, 0x80000)
     end
 
     # Every connect here parks; see the Windows arm for the one that does not.
@@ -1589,8 +1619,9 @@ pub class IyiSocket
       false
     end
 
-    # SO_NOSIGPIPE (0x1022) at SOL_SOCKET: a write to a connection the peer
-    # closed answers EPIPE instead of killing the process.
+    # SO_NOSIGPIPE (0x1022) at SOL_SOCKET, beside `__sys_send`'s
+    # MSG_NOSIGNAL: a write to a connection the peer closed answers EPIPE
+    # instead of killing the process, by whatever call it is written.
     def self.__sys_no_sigpipe(fd : Int32) : Nil
       val = 1_i32
       LibC.setsockopt(fd, 0xffff, 0x1022, pointerof(val).as(Void*), 4_u32)
@@ -2070,13 +2101,12 @@ pub class IyiSocket
     # Windows has no `fcntl`, and the flag cannot be read back.
     FIONBIO = -2147195266
 
-    # The three numbers this arm reads by name: what a non-blocking call with
-    # nothing to do says, what a posted operation says, and what an
-    # operation that is not over yet says when it is asked how it went.
-    WSAEWOULDBLOCK    = 10035
-    WSAETIMEDOUT      = 10060
-    ERROR_IO_PENDING  =   997
-    WSA_IO_INCOMPLETE =   996
+    # The numbers this arm reads by name: what a non-blocking call with
+    # nothing to do says, what a deadline that ran out says, and what a
+    # posted operation says.
+    WSAEWOULDBLOCK   = 10035
+    WSAETIMEDOUT     = 10060
+    ERROR_IO_PENDING =   997
 
     INVALID_SOCKET                     = 0xffffffffffffffff_u64
     SIO_GET_EXTENSION_FUNCTION_POINTER =         0xc8000006_u32
@@ -2130,11 +2160,19 @@ pub class IyiSocket
       -(LibWs2_32.WSAGetLastError.to_i64)
     end
 
+    # A socket this file made, as the class carries it: joined to the
+    # process's port now, and recorded as one whose closes are this file's,
+    # so no wait on it asks to join it again (`IyiScheduler.port_made`).
+    def self.__sys_made(s : UInt64) : Int32
+      IyiScheduler.port_made(Pointer(Void).new(s))
+      s.unsafe_to_i32
+    end
+
     def self.__sys_socket(family : Int32) : Int32
       __sys_winsock
       s = LibWs2_32.socket(family, SOCK_STREAM, __sys_protocol(family))
       return -1 if s == INVALID_SOCKET
-      s.unsafe_to_i32
+      __sys_made(s)
     end
 
     def self.__sys_bind(fd : Int32, addr : Pointer(UInt8), family : Int32) : Int32
@@ -2163,7 +2201,7 @@ pub class IyiSocket
     def self.__sys_accept(fd : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32), family : Int32) : Int32
       s = __sys_handle(fd)
       client = LibWs2_32.accept(s, addr.as(Void*), addrlen.as(Pointer(Int32)))
-      return client.unsafe_to_i32 if client != INVALID_SOCKET
+      return __sys_made(client) if client != INVALID_SOCKET
       err = LibWs2_32.WSAGetLastError
       return -err if err != WSAEWOULDBLOCK
       # Nothing was queued, and a listening socket has no readable state a
@@ -2240,7 +2278,7 @@ pub class IyiSocket
       addrlen.value = size == SOCKADDR_UN_SIZE ? 110_u32 : size == SOCKADDR_IN6_SIZE ? 28_u32 : 16_u32
       owner = s
       LibWs2_32.setsockopt(client, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT, pointerof(owner).as(Void*), 8)
-      client.unsafe_to_i32
+      __sys_made(client)
     end
 
     # The handshake is waited for here, inside `ConnectEx`, so *ms* bounds
@@ -2509,7 +2547,7 @@ pub class IyiSocket
     # request, and on a socket tied to a completion port the operation is not
     # over when it returns: measured here, the status stays STATUS_PENDING
     # and the address block, the descriptor and the OVERLAPPED are the
-    # kernel's until the completion packet is taken *off the port* — the
+    # kernel's until the completion packet is taken *off the port* — a
     # poller's `GetQueuedCompletionStatus` is what writes them. The same
     # measurement on an unassociated socket had the status written by
     # `CancelIoEx` itself, which is why this is not obvious. So
@@ -2518,15 +2556,15 @@ pub class IyiSocket
     # and the socket handle it falls back to is never signalled for a socket
     # on a port — it hung forever on the first cancelled receive tried.
     #
-    # What ends the operation is the poller, so the frame parks once more and
+    # What ends the operation is a poller, so the frame parks once more and
     # lets it. `IyiScheduler.cancel` has already unregistered this fiber,
     # which is what would have left the packet to be dropped; parking puts it
-    # back, and the wake means the dequeue has happened. Asked first, because
-    # a completion the poller delivered *before* the cancel is already over
-    # and no second packet is coming — parking on one would never wake.
+    # back, and the wake means the packet was taken. A packet some thread
+    # took already - before the cancel, or since - is no second packet, and
+    # the park answers at once (`IyiScheduler.park_overlapped_current`).
+    # The status is not the question: it is written as the packet is taken,
+    # before the thread that took it has handed it over.
     def self.__sys_overlapped_await(s : UInt64, ov : Pointer(UInt8)) : Int64
-      result = __sys_overlapped_result(s, ov)
-      return result if result != -(WSA_IO_INCOMPLETE.to_i64)
       IyiScheduler.park_overlapped_current
       __sys_overlapped_result(s, ov)
     end
@@ -2542,7 +2580,7 @@ pub class IyiSocket
       return __sys_error.to_i32 if s == INVALID_SOCKET
       on = 1
       LibWs2_32.ioctlsocket(s, FIONBIO, pointerof(on))
-      s.unsafe_to_i32
+      __sys_made(s)
     end
 
     # The plain call, not `__sys_connect`'s `ConnectEx`, which is TCP's: a

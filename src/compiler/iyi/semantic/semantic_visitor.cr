@@ -45,7 +45,7 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
 
     location = node.location
     filename = node.string
-    relative_to = location.try &.original_filename
+    relative_to = location.try &.original_read_from
 
     # iyi: `require "json"` in a `.iyi` file used to load Crystal's standard
     # library and fail somewhere inside it, on a syntax this parser does not
@@ -217,7 +217,7 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     path = iyi_expand_short_name(node, written)
     node.path = path.split('/') unless path == written
     location = node.location
-    relative_to = location.try &.original_filename
+    relative_to = location.try &.original_read_from
 
     # iyi: a package import (SPEC.md III.7). The manifest's prefix table is
     # asked first — longest prefix first, so `/v2` is a different module —
@@ -497,44 +497,11 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
   # about what `app/greeter` is. Go takes the same position.
   #
   # The project root is the directory of the entry file until iyi has a
-  # manifest to declare one.
-  #
-  # `.iyi` wins over `.cr` so an iyi module can shadow a Crystal file of the
-  # same name during the transition.
+  # manifest to declare one. The roots, their order and the files tried in
+  # each are `Program#iyi_import_candidates`'s, which `ParseAhead` guesses
+  # with as well.
   private def resolve_import(path : String) : String?
-    candidates = [] of String
-
-    # Inside a package only `IYI_PATH` is asked: what reaches here from
-    # there is iyi's standard library (`resolve_package`), and a module of
-    # the same name in the consuming project is not it.
-    inside_package = !@iyi_package_stack.empty?
-
-    # Each in the platform's spelling (`Iyi.native_path`): the module path's
-    # `/` went into the file name as it was, and on Windows every place an
-    # imported file is named - a diagnostic, `check -f json`, `fix --json`
-    # - named `C:\proj\app/deep/util.iyi`, which a tool matching paths
-    # does not match to `C:\proj\app\deep\util.iyi`.
-    if !inside_package && (root = project_root)
-      candidates << Iyi.native_path(File.join(root, "#{path}.iyi"))
-      candidates << Iyi.native_path(File.join(root, "#{path}.cr"))
-    end
-
-    # Then the root the entry's own header names, if its path ends with it
-    # (IV.6 read backwards): that is how `iyi check app/greeter.iyi` —
-    # or a migrated module built on its own — resolves `import app/formal`
-    # the way a build from the project root would. After the entry's
-    # directory, never instead of it.
-    if !inside_package && (header_root = @program.iyi_header_root)
-      candidates << Iyi.native_path(File.join(header_root, "#{path}.iyi"))
-      candidates << Iyi.native_path(File.join(header_root, "#{path}.cr"))
-    end
-
-    @program.iyi_path.entries.each do |entry|
-      candidates << Iyi.native_path(File.join(entry, "#{path}.iyi"))
-      candidates << Iyi.native_path(File.join(entry, "#{path}.cr"))
-    end
-
-    candidates.find do |candidate|
+    @program.iyi_import_candidates(path, inside_package: !@iyi_package_stack.empty?).find do |candidate|
       !@program.iyi_file_override(candidate).nil? || File.file?(candidate)
     end
   end
@@ -576,14 +543,7 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
   # chosen from. `calc/ad` looks in every root's `calc/` and answers
   # `calc/add` for `calc/add.iyi`.
   private def import_siblings(path : String) : Array(String)
-    roots = [] of String
-    if root = project_root
-      roots << root
-    end
-    if header_root = @program.iyi_header_root
-      roots << header_root
-    end
-    roots.concat(@program.iyi_path.entries)
+    roots = @program.iyi_import_roots
 
     dir = File.dirname(path)
     prefix = dir == "." ? "" : "#{dir}/"
@@ -594,14 +554,6 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
       end
     end
     siblings.uniq!
-  end
-
-  private def project_root : String?
-    if root = @program.iyi_project_root
-      return root
-    end
-    filename = @program.filename
-    filename ? File.dirname(filename) : nil
   end
 
   # iyi: refuses an import cycle (R-1, SPEC.md III.5 rule 1).
@@ -645,7 +597,7 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
   # The module path a file would be imported by, for diagnostics. Files outside
   # the project root have none, so they keep their name.
   private def iyi_module_name(filename : String) : String
-    root = project_root
+    root = @program.iyi_import_root
     # The file's path from the root, spelled as a module path: posix by
     # grammar (R-1), while both sides of the question arrive in the
     # platform's own separators. `starts_with?("#{root}/")` therefore
@@ -1022,9 +974,31 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     # records the far end's hashes whichever way the far end arrived (IV.3).
     @program.iyi_artifact_hashes[artifact.module_name] = artifact.hashes
 
-    source = String.build { |io| IyiMod.declarations(artifact, io) }
+    # And what its functions reach of module state, which the walk from a
+    # spawn's block reads where their bodies are not here (SPEC.md
+    # III.4.15, `ShareReach#remote_of`).
+    @program.iyi_record_artifact_reaches(artifact_path, artifact)
+
+    # And whether the module is marked `@[Unsafe]` (SPEC.md III.13): its
+    # travelling bodies are typed again here, at its source's locations,
+    # and what its mark allowed there it allows here.
+    @program.iyi_mark_unsafe_artifact(artifact.source_path, artifact.unsafe)
+
+    # With the places the travelling bodies and the initialiser were written,
+    # so their nodes are located in the module's source and not in this
+    # rendering of it (`IyiMod::SourcePosition`): a macro's
+    # `@caller.first.filename`, an error and the debug info answer as they
+    # do when the module is built from source. Every node keeps the artifact
+    # as `Location#artifact`, which is what decisions about the file this
+    # build read ask (`Location#read_from`).
+    io = IO::Memory.new
+    pragmas = {} of Int32 => Array(Lexer::LocPragma)
+    travelled = IyiMod.declarations(artifact, io, pragmas, artifact_path)
+    source = io.to_s
     parser = @program.new_parser(source)
     parser.filename = artifact_path
+    parser.artifact = artifact_path
+    parser.macro_expansion_pragmas = pragmas unless pragmas.empty?
     # In the language of the module they came from, which the artifact's
     # name does not say: `.iyimod` is no extension the lexer knows, so an
     # iyi module's declarations were read by the other language's rules,
@@ -1044,6 +1018,9 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     # The path is where these declarations came from and not a file anyone can
     # read them out of, so the text goes where an error will look for it.
     Iyi.register_iyi_declarations artifact_path, source
+    # And the lines its travelling code came from, for a source that is not
+    # here to show them from.
+    travelled.each { |filename, lines| Iyi.register_travelled_lines filename, lines }
     @iyi_importing << artifact_path
     # Where this module was written, for a `run` inside a macro that
     # travelled — see `Program#iyi_artifact_source_paths`.
@@ -1085,6 +1062,7 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
         top_source = String.build { |io| IyiMod.top_level_declarations(artifact, io) }
         top_path = "#{artifact_path} (top level)"
         top_parser = @program.new_parser(top_source)
+        top_parser.artifact = top_path
         top_parser.filename = top_path
         top_parser.iyi = true if iyi_declarations
         Iyi.register_iyi_declarations top_path, top_source
@@ -1410,8 +1388,8 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
         parser.iyi_package_name = @program.iyi_record_module_package(module_path,
           @program.iyi_root_package_name_for(module_path, filename))
       end
-      parsed_nodes = parser.parse
-      parsed_nodes = @program.normalize(parsed_nodes, inside_exp: false)
+      parsed_nodes = Prof.span("import: parse") { @program.parse_file(parser, filename, source) }
+      parsed_nodes = Prof.span("import: normalize") { @program.normalize(parsed_nodes, inside_exp: false) }
       iyi_at_top_level { parsed_nodes.accept self }
     rescue ex : InvalidByteSequenceError
       # Wherever the byte is. `new_parser` decodes the first character and
@@ -1433,8 +1411,11 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     # separately whether any runnable code is somewhere this cannot reach —
     # which is what a consumer has to be refused over rather than given a
     # module that half sets itself up.
-    source = iyi_initialiser_source(parsed_nodes)
-    @program.iyi_module_initialiser_source[filename] = source unless source.empty?
+    source, positions = iyi_initialiser_source(parsed_nodes)
+    unless source.empty?
+      @program.iyi_module_initialiser_source[filename] = source
+      @program.iyi_module_initialiser_positions[filename] = positions
+    end
     @program.iyi_module_initialisers << filename if iyi_uncarried_initialiser?(parsed_nodes)
     FileNode.new(parsed_nodes, filename)
   end
@@ -1565,10 +1546,11 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
   # `iyi_uncarried_initialiser?` still sees it.
   #
   # In text order, because that is the order III.5 gives a module's own code.
-  private def iyi_initialiser_source(node : ASTNode) : String
+  # With where each node of it was written (`IyiMod::SourcePosition`).
+  private def iyi_initialiser_source(node : ASTNode) : {String, Array(IyiMod::SourcePosition)}
     statements = [] of ASTNode
     iyi_collect_initialiser node, statements
-    statements.join('\n', &.to_s)
+    IyiMod.located_source(statements)
   end
 
   private def iyi_collect_initialiser(node : ASTNode, statements : Array(ASTNode)) : Nil
@@ -1772,7 +1754,7 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     parser.filename = filename
     parser.wants_doc = @program.wants_doc?
     begin
-      parsed_nodes = Prof.span("require: parse") { parser.parse }
+      parsed_nodes = Prof.span("require: parse") { @program.parse_file(parser, filename, source) }
       parsed_nodes = Prof.span("require: normalize") { @program.normalize(parsed_nodes, inside_exp: inside_exp?) }
       # We must type the node immediately, in case a file requires another
       # *before* one of the files in `filenames`
@@ -1902,6 +1884,13 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
   end
 
   def visit(node : Annotation)
+    # iyi: a module's `@[Unsafe("why")]` belongs to its file, not to the
+    # declaration after it (SPEC.md III.13).
+    if node.iyi_file_mark?
+      @program.iyi_mark_unsafe_file(node)
+      return false
+    end
+    @program.iyi_check_unsafe_contract(node) if node.path.single?("Unsafe")
     annotations = @annotations ||= [] of Annotation
     annotations << node
     false
@@ -2269,16 +2258,47 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     annotations.try(&.first?).try &.doc
   end
 
-  def check_class_var_annotations
+  # Whether a class variable is `@[ThreadLocal]`, and its
+  # `@[SafeReach("...")]` or `@[UnsafeReach("...")]` (SPEC.md III.4.4), if
+  # it has one, with whether it is the unsafe one; `iyi_mark_class_var_reach`
+  # records it on the variable.
+  def check_class_var_annotations : {Bool, {Annotation, Bool}?}
     thread_local = false
+    reach = nil
     process_annotations(@annotations) do |annotation_type, ann|
       if annotation_type == @program.thread_local_annotation
         thread_local = true
+      elsif annotation_type == @program.safe_reach_annotation
+        reach = {ann, false}
+      elsif annotation_type == @program.unsafe_reach_annotation
+        reach = {ann, true}
       else
-        ann.raise "class variables can only be annotated with ThreadLocal"
+        ann.raise "class variables can only be annotated with ThreadLocal, SafeReach or UnsafeReach"
       end
     end
-    thread_local
+    {thread_local, reach}
+  end
+
+  def iyi_mark_class_var_reach(var : MetaTypeVar, reach : {Annotation, Bool}?) : Nil
+    return unless reach
+    ann, unsafe = reach
+    iyi_mark_reach(var, "this class variable", ann, unsafe)
+  end
+
+  # The claim `@[SafeReach("why")]` or `@[UnsafeReach("why")]` makes for a
+  # constant or a class variable: its reason quiets the reach warning
+  # (`ShareReach`), and the program keeps the claim for `ReachProof`, which
+  # proves a `SafeReach` once every def is typed and refuses an
+  # `UnsafeReach` written where it is not allowed. One state takes one of
+  # the two.
+  def iyi_mark_reach(state : Const | MetaTypeVar, what : String, ann : Annotation, unsafe : Bool) : Nil
+    reason = ShareReach.claim(ann, what)
+    label = state.name
+    if (earlier = @program.iyi_reach_claim?(state)) && earlier.unsafe? != unsafe
+      ann.raise "`#{label}` is marked both @[SafeReach] and @[UnsafeReach]; it takes one: SafeReach when the compiler can prove it, UnsafeReach where it cannot and that is allowed (SPEC.md III.4.4)"
+    end
+    state.iyi_safe_reach = reason
+    @program.iyi_claim_reach(ReachClaim.new(state, label, reason, ann, unsafe))
   end
 
   def check_allowed_in_lib(node, type = node.type.instance_type)

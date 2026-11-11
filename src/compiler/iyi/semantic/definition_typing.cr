@@ -64,6 +64,15 @@ module Iyi::DefinitionTyping
   # `Program#iyi_artifact_phantom_types`).
   WITNESS_PREFIX = "IyiDefTypeWitness_"
 
+  def self.witness_name(trait_type : TraitType) : String
+    "#{WITNESS_PREFIX}#{trait_type.to_s.gsub("::", "_")}"
+  end
+
+  # A witness name inside a carried union or generic reference. Compiled once
+  # through Iyi::Rx, the compiler's own engine, so this file is not one of the
+  # reasons pcre2 stays on the link line (SPEC.md III.10).
+  WITNESS_NAME = Rx::Pattern.compile("#{WITNESS_PREFIX}[\\p{L}\\p{M}\\p{N}_]+")
+
   def self.append_probes(program : Program, node : ASTNode) : Nil
     return unless node.is_a?(Expressions)
     runner = Runner.new(program)
@@ -78,11 +87,13 @@ module Iyi::DefinitionTyping
     @probes = [] of ASTNode
     @witness_nodes = [] of ASTNode
     @witnesses = {} of Type => String?
+    @restored_witnesses = Set(String).new
 
     def initialize(@program : Program)
     end
 
     def collect : Nil
+      restore_artifact_witnesses
       files = user_files
       return if files.empty?
 
@@ -92,7 +103,7 @@ module Iyi::DefinitionTyping
         defs.each_value do |overloads|
           overloads.each do |with_metadata|
             a_def = with_metadata.def
-            filename = a_def.location.try(&.filename).as?(String)
+            filename = a_def.location.try(&.read_from).as?(String)
             next unless filename && filename.ends_with?(".iyi") && files.includes?(filename)
             synthesize(owner, a_def)
           end
@@ -101,7 +112,7 @@ module Iyi::DefinitionTyping
     end
 
     def flush_into(node : Expressions) : Nil
-      return if @probes.empty?
+      return if @probes.empty? && @witness_nodes.empty?
       was_empty = node.expressions.empty?
       unless @witness_nodes.empty?
         # Witnesses are declarations, and declarations are the top-level
@@ -112,6 +123,12 @@ module Iyi::DefinitionTyping
         wrapper = Expressions.new(@witness_nodes.dup)
         wrapper.accept(visitor)
         visitor.process_finished_hooks
+        @restored_witnesses.each do |name|
+          if type = @program.types?.try(&.[]?(name))
+            @program.iyi_artifact_phantom_types.delete(name)
+            @program.iyi_artifact_numbered_types << type
+          end
+        end
       end
       # Prepend witness declarations and probes before user code so that
       # definition typing probes under `if false` do not overwrite the
@@ -133,6 +150,38 @@ module Iyi::DefinitionTyping
         imports.each { |imported| files << imported }
       end
       files
+    end
+
+    # An imported object's trait-valued fields were laid out with the producer's
+    # definition witness among the trait's implementers. A consumer that only
+    # recompiles a generic body otherwise sees a smaller trait representation:
+    # treating the absent witness as an unmatchable id preserves dispatch, but
+    # not that field/call ABI. Recreate exactly the numbered producer witnesses
+    # before typing consumer bodies, including an import-only entry point.
+    private def restore_artifact_witnesses : Nil
+      wanted = Set(String).new
+      @program.iyi_artifact_phantom_types.each { |name| wanted << name }
+      @program.iyi_artifact_refs.each do |ref|
+        # Besides direct type ids, matches can carry witness names inside a
+        # union or a generic. They must be restored before naming that match.
+        Rx.scan(ref.name, WITNESS_NAME).each { |match| wanted << match[0].not_nil! }
+      end
+      return if wanted.empty?
+      queue = [] of Type
+      if types = @program.types?
+        types.each_value { |type| queue << type }
+      end
+      while type = queue.pop?
+        if type.is_a?(TraitType)
+          name = DefinitionTyping.witness_name(type)
+          if wanted.includes?(name) && witness_for(type)
+            @restored_witnesses << name
+          end
+        end
+        if types = type.types?
+          types.each_value { |inner| queue << inner }
+        end
+      end
     end
 
     # Every type that can own a probeable def: the program itself (a
@@ -283,7 +332,7 @@ module Iyi::DefinitionTyping
       # The name leaks into error messages ("undefined method 'length'
       # for ..."), so it carries the trait's own name: a reader meets
       # the witness *for Sized*, not an anonymous serial.
-      witness = "#{WITNESS_PREFIX}#{trait_type.to_s.gsub("::", "_")}"
+      witness = DefinitionTyping.witness_name(trait_type)
       stubs = [] of String
 
       if defs = trait_type.defs

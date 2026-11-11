@@ -127,8 +127,13 @@ if (Test-Path -LiteralPath $sums -PathType Leaf) {
 }
 
 if (-not $WorkDir) { $WorkDir = Join-Path $env:TEMP ("iyi-package-gate-" + [IO.Path]::GetRandomFileName()) }
-$WorkDir = [IO.Path]::GetFullPath($WorkDir)
-if ($WorkDir.StartsWith($RepoRoot, [StringComparison]::OrdinalIgnoreCase)) {
+$WorkDir = [IO.Path]::GetFullPath($WorkDir).TrimEnd('\')
+# Inside means the checkout itself or under it, a separator after its
+# path: `iyi-wt\h-soak-aux\tmp` is not inside `iyi-wt\h-soak`, and a bare
+# StartsWith refused it - every run on a machine whose TEMP sat in such a
+# sibling (tssh, 2026-11-05, with TEMP set to the soak's own directory).
+$inside = $RepoRoot.TrimEnd('\') + '\'
+if ($WorkDir -eq $RepoRoot.TrimEnd('\') -or $WorkDir.StartsWith($inside, [StringComparison]::OrdinalIgnoreCase)) {
     Die "-WorkDir $WorkDir is inside the checkout, where a program can reach this tree's src; pick one that is not"
 }
 if (Test-Path -LiteralPath $WorkDir) { Remove-Item -LiteralPath $WorkDir -Recurse -Force }
@@ -158,6 +163,8 @@ try {
         'share\iyi\samples\std_text.iyi',
         'share\iyi\README.md',
         'share\iyi\SPEC.md',
+        'share\iyi\BENCHMARKS.md',
+        'share\iyi\INSTALL.md',
         'share\licenses\iyi\LICENSE',
         'share\licenses\iyi\NOTICE.md'
     )

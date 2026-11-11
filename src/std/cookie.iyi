@@ -20,6 +20,7 @@
 # from std/http because it reads the clock: std/time is what knows what
 # an `Expires` date means, and std/http reaches the network alone.
 
+@[Unsafe("a header's fields are parsed by walking the bytes of its string through a raw pointer")]
 module std/cookie
 
 import std/http::{HTTP, Response, CookieStore}

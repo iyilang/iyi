@@ -16,6 +16,17 @@ class Iyi::CodeGenVisitor
       return false
     end
 
+    # iyi: an `Atomic` verb's chaos point (SPEC.md III.4.17) is the
+    # program's alone. Where the runtime's own code - or the copy of a
+    # library def compiled for it - calls `IyiChaos.at_atomic`, nothing is
+    # emitted: the runtime's atomics are its locks, queues and wake words,
+    # and a switch to another task inside one would park a task holding
+    # them, on a thread whose other tasks may need them.
+    if context.iyi_runtime? && iyi_chaos_atomic_point?(node.target_def)
+      @last = llvm_nil
+      return false
+    end
+
     owner = node.super? ? node.scope : node.target_def.owner
 
     call_args = prepare_call_args node, owner
@@ -362,6 +373,10 @@ class Iyi::CodeGenVisitor
         context.reset_closure
 
         target_def = node.target_def
+        # iyi: the inlined def's loops check as its caller's do, unless the
+        # def is `@[NoPreempt]`; the block's own code, run at each `yield`,
+        # keeps the caller's answer through `block_context`.
+        context.iyi_preempt = false if target_def.annotation(@program.no_preempt_annotation)
 
         set_ensure_exception_handler(node)
         set_ensure_exception_handler(target_def)

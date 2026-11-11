@@ -1,0 +1,472 @@
+# `std/parallel`: data parallelism as a library - SPEC.md III.4.14.
+#
+#     import std/parallel
+#
+#     squares = (0...1000).map_parallel { |i| i * i }      # order kept
+#     total = words.sum_parallel { |w| w.size }            # an Array, copied once
+#     failed = jobs.each_parallel { |job| job.run }        # nil, or the first error
+#
+# `each_parallel`, `map_parallel`, `sum_parallel` and `reduce_parallel` on
+# a `List(T)` (std/list), an `Array(T)` and an integer `Range`: the
+# elements are cut into chunks, and as many parallel tasks as the pool
+# has workers (`g.spawn(unit: :new)`, III.4.13) take the chunks one at a
+# time from a shared count until none is left, so a worker that finishes
+# early takes more. The caller waits in the tasks' group, so a caller on
+# a worker - inside a parallel task, or inside another `map_parallel` -
+# gives its worker to the chunks while it waits.
+#
+# What the compiler asks, at the call: the block may capture only `Share`
+# values, as `spawn(unit: :new)`'s block may, and what the method hands the
+# block - the elements - must be `Share` too, since chunks on several
+# workers read them at once (`@[Share(elements: ...)]`). The sequence the
+# chunks read must not change under them either: a `List` and a range
+# cannot, and an `Array` is copied into a `List` first, the price `List`
+# already names for an array nobody else may write while tasks read it.
+#
+# The answers:
+#
+# * `map_parallel` answers what `map` answers: one value per element, in
+#   the elements' order, an error member included in its place.
+# * `each_parallel` answers nil, or the error member the block answered
+#   for the lowest index that answered one, as a loop that stops at its
+#   first error would: no element after it is started, every element
+#   before it is run.
+# * `sum_parallel` adds each chunk's sum in chunk order; `reduce_parallel`
+#   folds each chunk from `identity` with the block and folds the chunks'
+#   answers in order, so the block must be associative and `identity` its
+#   identity. A `Float64` sum is the same for the same chunks, which the
+#   worker count decides, and may differ from `sum`'s in its last bits.
+# * A panic in one chunk stops the chunks not yet started, and the caller
+#   panics with it at the join, "a task panicked: ...", as a group's
+#   unread panic does.
+# * A cancelled caller - its group failed or was cancelled - stops the
+#   chunks not yet started, and is stopped itself at the end of the call,
+#   as a cancelled task joining another is: no caller ever sees part of
+#   an answer.
+#
+# Run on the caller, chunk after chunk, with no task started: when the
+# pool would have one worker (`IYI_WORKERS=1`), when there is one chunk,
+# and in a build under `-Dgc_none` or `-Dgc_boehm`, which has no threads.
+# The answers are the same.
+
+module std/parallel
+
+import std/list::{List}
+import std/shared_proc::{SharedProc}
+
+# The four verbs, on whatever can say how many elements it has and give
+# the sequence the chunks read (`ParallelRun.source`).
+pub trait Parallel
+  type Elem
+
+  # The block on every element, in chunks the pool's tasks take one at a
+  # time; nil, or the error the block answered for the lowest index that
+  # answered one. A chunk is *grain* elements; 0 cuts `PIECES` chunks a
+  # worker. The same for the three below.
+  @[Share(elements: "Make the elements Share - every field assigned only in `initialize`, what changes behind a `Mutex` (std/mutex) - or use `each`, which stays on one thread")]
+  def each_parallel(grain : Int32 = 0, &block : Elem -> R) : R? forall R
+    ParallelRun.each(ParallelRun.source(self), grain, SharedProc(Elem, R).of(&block))
+  end
+
+  # `map`'s answer, computed in chunks on the pool, in the elements' order.
+  @[Share(elements: "Make the elements Share - every field assigned only in `initialize`, what changes behind a `Mutex` (std/mutex) - or use `map`, which stays on one thread")]
+  def map_parallel(grain : Int32 = 0, &block : Elem -> U) : Array(U) forall U
+    ParallelRun.map(ParallelRun.source(self), grain, SharedProc(Elem, U).of(&block))
+  end
+
+  # The sum of what the block answers for each element, and its type's
+  # zero when there are none.
+  @[Share(elements: "Make the elements Share - every field assigned only in `initialize`, what changes behind a `Mutex` (std/mutex) - or use `sum`, which stays on one thread")]
+  def sum_parallel(grain : Int32 = 0, &block : Elem -> U) : U forall U
+    ParallelRun.sum(ParallelRun.source(self), grain, SharedProc(Elem, U).of(&block))
+  end
+
+  # The elements folded with the block from *identity*, a chunk at a time.
+  @[Share(elements: "Make the elements Share - every field assigned only in `initialize`, what changes behind a `Mutex` (std/mutex) - or use `reduce`, which stays on one thread")]
+  def reduce_parallel(identity : Elem, grain : Int32 = 0, &block : Elem, Elem -> Elem) : Elem
+    ParallelRun.reduce(ParallelRun.source(self), identity, grain, SharedProc({Elem, Elem}, Elem).of { |pair| block.call(pair[0], pair[1]) })
+  end
+end
+
+impl Parallel for List(T) forall T
+  type Elem = T
+end
+
+impl Parallel for Array(T) forall T
+  type Elem = T
+end
+
+impl Parallel for Range(B, E) forall B, E
+  type Elem = B
+end
+
+# :nodoc: - the engine the verbs share.
+pub class ParallelRun
+  # Chunks a worker when the program names no grain. On macOS 26.6, an
+  # M2 Pro with 10 cores (the user's machine), ten workers summing
+  # 4,000,000 elements whose cost grows with their index took 29.3 ms in
+  # one chunk a worker, 20.7 in four and 18.7 in eight, sixteen and
+  # sixty-four 18.6 and 18.1; hashing 20,000 strings 12.3, 10.7 and
+  # 10.4 ms; an even sum 6.2 to 7.5 ms whatever the count. SPEC.md
+  # III.4.14 has the table.
+  PIECES = 8
+
+  # The sequence the chunks read, which nothing may write while they do.
+  def self.source(list : List(T)) : List(T) forall T
+    list
+  end
+
+  def self.source(array : Array(T)) : List(T) forall T
+    List.new(array)
+  end
+
+  def self.source(range : Range(Int32, Int32)) : Range(Int32, Int32)
+    range
+  end
+
+  def self.source(range : Range(Int64, Int64)) : Range(Int64, Int64)
+    range
+  end
+
+  def self.size(list : List(T)) : Int64 forall T
+    list.size.to_i64
+  end
+
+  def self.size(range : Range(B, E)) : Int64 forall B, E
+    span = range.end.to_i64 - range.begin.to_i64
+    span = span + 1_i64 unless range.exclusive?
+    span < 0_i64 ? 0_i64 : span
+  end
+
+  def self.fetch(list : List(T), index : Int64) : T forall T
+    list.at(index.to_i32)
+  end
+
+  def self.fetch(range : Range(Int32, Int32), index : Int64) : Int32
+    range.begin + index.to_i32
+  end
+
+  def self.fetch(range : Range(Int64, Int64), index : Int64) : Int64
+    range.begin + index
+  end
+
+  # How the elements are cut: {elements a chunk, chunks, tasks to take
+  # them}, and 0 tasks when the caller runs them itself - one worker, one
+  # chunk, or a build with no threads.
+  def self.plan(size : Int64, grain : Int32) : {Int64, Int64, Int32}
+    workers = IyiWorkers.count
+    {% if flag?(:gc_none) || flag?(:gc_boehm) %}
+      workers = 1
+    {% end %}
+    pieces = workers.to_i64 * PIECES.to_i64
+    chunk = grain > 0 ? grain.to_i64 : (size + pieces - 1_i64) // pieces
+    chunk = 1_i64 if chunk < 1_i64
+    chunks = size == 0_i64 ? 0_i64 : (size + chunk - 1_i64) // chunk
+    tasks = chunks < workers.to_i64 ? chunks.to_i32 : workers
+    tasks = 0 if tasks < 2
+    {chunk, chunks, tasks}
+  end
+
+  # The caller, cancelled while the chunks ran, does not see what they
+  # left: it stops here, as a cancelled task joining another does.
+  def self.stop_if_cancelled : Nil
+    IyiScheduler.stop_current if IyiScheduler.current.cancelled
+  end
+
+  # The chunk *at*'s bounds.
+  def self.bounds(at : Int64, chunk : Int64, size : Int64) : {Int64, Int64}
+    from = at * chunk
+    to = from + chunk
+    {from, to > size ? size : to}
+  end
+
+  # ---- map -----------------------------------------------------------------
+
+  def self.map(source : S, grain : Int32, work : SharedProc(T, U)) : Array(U) forall S, T, U
+    size = ParallelRun.size(source)
+    cut = plan(size, grain)
+    return map_here(source, size, cut[0], work) if cut[2] == 0
+    {% if flag?(:gc_none) || flag?(:gc_boehm) %}
+      map_here(source, size, cut[0], work)
+    {% else %}
+      parts = Array(Array(U)?).new(cut[1].to_i32, nil)
+      map_tasks(source, size, cut[0], cut[1], cut[2], work).each do |handle|
+        answer = handle.value
+        raise "map_parallel: a chunk left no answer: " + answer.text if answer.is_a?(Panicked)
+        answer.each { |piece| parts[piece[0].to_i32] = piece[1] }
+      end
+      result = Array(U).new(size.to_i32)
+      parts.each { |part| result.concat(part) if part.is_a?(Array(U)) }
+      result
+    {% end %}
+  end
+
+  def self.map_here(source : S, size : Int64, chunk : Int64, work : SharedProc(T, U)) : Array(U) forall S, T, U
+    result = Array(U).new(size.to_i32)
+    index = 0_i64
+    while index < size
+      stop_if_cancelled if index % chunk == 0_i64
+      result << work.call(ParallelRun.fetch(source, index))
+      index = index + 1_i64
+    end
+    result
+  end
+
+  {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+    # The tasks, each taking chunks until none is left, and each answering
+    # the chunks it ran by number; joined before this answers.
+    def self.map_tasks(source : S, size : Int64, chunk : Int64, chunks : Int64, tasks : Int32, work : SharedProc(T, U)) : Array(IyiTask(Array({Int64, Array(U)}))) forall S, T, U
+      taken = Atomic(Int64).new(0_i64)
+      handles = group do |g|
+        started = [] of IyiTask(Array({Int64, Array(U)}))
+        count = 0
+        while count < tasks
+          started << g.spawn(unit: :new) do
+            done = [] of {Int64, Array(U)}
+            while !IyiScheduler.current.cancelled
+              at = taken.add(1_i64)
+              break if at >= chunks
+              span = ParallelRun.bounds(at, chunk, size)
+              part = Array(U).new((span[1] - span[0]).to_i32)
+              index = span[0]
+              while index < span[1]
+                part << work.call(ParallelRun.fetch(source, index))
+                index = index + 1_i64
+              end
+              done << {at, part}
+            end
+            done
+          end
+          count = count + 1
+        end
+        started
+      end
+      stop_if_cancelled
+      handles
+    end
+  {% end %}
+
+  # ---- each ----------------------------------------------------------------
+
+  def self.each(source : S, grain : Int32, work : SharedProc(T, R)) : R? forall S, T, R
+    size = ParallelRun.size(source)
+    cut = plan(size, grain)
+    return each_here(source, size, cut[0], work) if cut[2] == 0
+    {% if flag?(:gc_none) || flag?(:gc_boehm) %}
+      each_here(source, size, cut[0], work)
+    {% else %}
+      lowest = size
+      found = Array(R).new(1)
+      each_tasks(source, size, cut[0], cut[1], cut[2], work).each do |handle|
+        answer = handle.value
+        raise "each_parallel: a chunk left no answer: " + answer.text if answer.is_a?(Panicked)
+        if answer[0] < lowest
+          lowest = answer[0]
+          found = answer[1]
+        end
+      end
+      unless found.empty?
+        failure = found[0]
+        return failure if failure.is_a?(::Error)
+      end
+      nil
+    {% end %}
+  end
+
+  def self.each_here(source : S, size : Int64, chunk : Int64, work : SharedProc(T, R)) : R? forall S, T, R
+    index = 0_i64
+    while index < size
+      stop_if_cancelled if index % chunk == 0_i64
+      answer = work.call(ParallelRun.fetch(source, index))
+      return answer if answer.is_a?(::Error)
+      index = index + 1_i64
+    end
+    nil
+  end
+
+  {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+    # Each task answers the lowest index it saw fail, with its error, or
+    # *size* and nothing. `failed_at` is the lowest any task has seen: no
+    # chunk starting past it is begun, no element past it is run, and
+    # every element before it still is.
+    def self.each_tasks(source : S, size : Int64, chunk : Int64, chunks : Int64, tasks : Int32, work : SharedProc(T, R)) : Array(IyiTask({Int64, Array(R)})) forall S, T, R
+      taken = Atomic(Int64).new(0_i64)
+      failed_at = Atomic(Int64).new(size)
+      handles = group do |g|
+        started = [] of IyiTask({Int64, Array(R)})
+        count = 0
+        while count < tasks
+          started << g.spawn(unit: :new) do
+            first = size
+            failure = Array(R).new(1)
+            while !IyiScheduler.current.cancelled
+              at = taken.add(1_i64)
+              break if at >= chunks
+              span = ParallelRun.bounds(at, chunk, size)
+              index = span[0]
+              while index < span[1] && index < failed_at.get
+                answer = work.call(ParallelRun.fetch(source, index))
+                if answer.is_a?(::Error)
+                  # Lowered in place: an `Atomic` handed to a def is a
+                  # copy of the word, and lowering the copy stopped no
+                  # other task.
+                  seen = failed_at.get
+                  while index < seen
+                    exchanged = failed_at.compare_and_set(seen, index)
+                    break if exchanged[1]
+                    seen = exchanged[0]
+                  end
+                  if index < first
+                    first = index
+                    failure = Array(R).new(1)
+                    failure << answer
+                  end
+                  break
+                end
+                index = index + 1_i64
+              end
+            end
+            {first, failure}
+          end
+          count = count + 1
+        end
+        started
+      end
+      stop_if_cancelled
+      handles
+    end
+  {% end %}
+
+  # ---- sum -----------------------------------------------------------------
+
+  def self.sum(source : S, grain : Int32, work : SharedProc(T, U)) : U forall S, T, U
+    size = ParallelRun.size(source)
+    return U.zero if size == 0_i64
+    cut = plan(size, grain)
+    return sum_here(source, size, cut[0], work) if cut[2] == 0
+    {% if flag?(:gc_none) || flag?(:gc_boehm) %}
+      sum_here(source, size, cut[0], work)
+    {% else %}
+      parts = Array(U).new(cut[1].to_i32, U.zero)
+      sum_tasks(source, size, cut[0], cut[1], cut[2], work).each do |handle|
+        answer = handle.value
+        raise "sum_parallel: a chunk left no answer: " + answer.text if answer.is_a?(Panicked)
+        answer.each { |piece| parts[piece[0].to_i32] = piece[1] }
+      end
+      total = parts[0]
+      index = 1
+      while index < parts.size
+        total = total + parts[index]
+        index = index + 1
+      end
+      total
+    {% end %}
+  end
+
+  def self.sum_here(source : S, size : Int64, chunk : Int64, work : SharedProc(T, U)) : U forall S, T, U
+    total = work.call(ParallelRun.fetch(source, 0_i64))
+    index = 1_i64
+    while index < size
+      stop_if_cancelled if index % chunk == 0_i64
+      total = total + work.call(ParallelRun.fetch(source, index))
+      index = index + 1_i64
+    end
+    total
+  end
+
+  {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+    def self.sum_tasks(source : S, size : Int64, chunk : Int64, chunks : Int64, tasks : Int32, work : SharedProc(T, U)) : Array(IyiTask(Array({Int64, U}))) forall S, T, U
+      taken = Atomic(Int64).new(0_i64)
+      handles = group do |g|
+        started = [] of IyiTask(Array({Int64, U}))
+        count = 0
+        while count < tasks
+          started << g.spawn(unit: :new) do
+            done = [] of {Int64, U}
+            while !IyiScheduler.current.cancelled
+              at = taken.add(1_i64)
+              break if at >= chunks
+              span = ParallelRun.bounds(at, chunk, size)
+              part = work.call(ParallelRun.fetch(source, span[0]))
+              index = span[0] + 1_i64
+              while index < span[1]
+                part = part + work.call(ParallelRun.fetch(source, index))
+                index = index + 1_i64
+              end
+              done << {at, part}
+            end
+            done
+          end
+          count = count + 1
+        end
+        started
+      end
+      stop_if_cancelled
+      handles
+    end
+  {% end %}
+
+  # ---- reduce --------------------------------------------------------------
+
+  def self.reduce(source : S, identity : T, grain : Int32, work : SharedProc({T, T}, T)) : T forall S, T
+    size = ParallelRun.size(source)
+    cut = plan(size, grain)
+    return reduce_here(source, identity, size, cut[0], work) if cut[2] == 0
+    {% if flag?(:gc_none) || flag?(:gc_boehm) %}
+      reduce_here(source, identity, size, cut[0], work)
+    {% else %}
+      parts = Array(T).new(cut[1].to_i32, identity)
+      reduce_tasks(source, identity, size, cut[0], cut[1], cut[2], work).each do |handle|
+        answer = handle.value
+        raise "reduce_parallel: a chunk left no answer: " + answer.text if answer.is_a?(Panicked)
+        answer.each { |piece| parts[piece[0].to_i32] = piece[1] }
+      end
+      total = identity
+      parts.each { |part| total = work.call({total, part}) }
+      total
+    {% end %}
+  end
+
+  def self.reduce_here(source : S, identity : T, size : Int64, chunk : Int64, work : SharedProc({T, T}, T)) : T forall S, T
+    total = identity
+    index = 0_i64
+    while index < size
+      stop_if_cancelled if index % chunk == 0_i64
+      total = work.call({total, ParallelRun.fetch(source, index)})
+      index = index + 1_i64
+    end
+    total
+  end
+
+  {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+    def self.reduce_tasks(source : S, identity : T, size : Int64, chunk : Int64, chunks : Int64, tasks : Int32, work : SharedProc({T, T}, T)) : Array(IyiTask(Array({Int64, T}))) forall S, T
+      taken = Atomic(Int64).new(0_i64)
+      handles = group do |g|
+        started = [] of IyiTask(Array({Int64, T}))
+        count = 0
+        while count < tasks
+          started << g.spawn(unit: :new) do
+            done = [] of {Int64, T}
+            while !IyiScheduler.current.cancelled
+              at = taken.add(1_i64)
+              break if at >= chunks
+              span = ParallelRun.bounds(at, chunk, size)
+              part = identity
+              index = span[0]
+              while index < span[1]
+                part = work.call({part, ParallelRun.fetch(source, index)})
+                index = index + 1_i64
+              end
+              done << {at, part}
+            end
+            done
+          end
+          count = count + 1
+        end
+        started
+      end
+      stop_if_cancelled
+      handles
+    end
+  {% end %}
+end

@@ -3,6 +3,7 @@
 # Provides opening, reading entries, creating, deleting, traversing,
 # changing current working directory, and globbing without external C libraries.
 
+@[Unsafe("directories are opened, read and changed through the platform's raw calls with C path strings")]
 module std/dir
 
 import std/path::{Path}

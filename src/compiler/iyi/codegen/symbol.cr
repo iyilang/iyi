@@ -71,8 +71,12 @@ class Iyi::CodeGenVisitor
     end
   end
 
+  # A symbol's name is text a person chose: `:"a@b"` is one (`Iyi.symbol_text`).
   private def iyi_symbol_global_name(name : String) : String
-    "~symbol:#{name}"
+    String.build do |str|
+      str << "~symbol:"
+      Iyi.symbol_text(str, name)
+    end
   end
 
   private def iyi_define_symbol_global(global_name : String, index : Int32) : Nil

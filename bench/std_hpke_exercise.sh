@@ -350,8 +350,10 @@ prove_broken hpke "the key schedule's suite_id with the KDF and the AEAD swapped
   'HpkeBytes.two(suite.kdf.value) + HpkeBytes.two(suite.aead.value)' 'HpkeBytes.two(suite.aead.value) + HpkeBytes.two(suite.kdf.value)'
 prove_broken hpke "the key schedule under the KEM's suite_id" "$V0: encryption 0" \
   '@labels = HpkeLabels.suite(suite)' '@labels = HpkeLabels.kem(suite.kem)'
+# The nonce's twelve bytes are one `Array(UInt8).new(12) { ... }` block since
+# 0bf244380 took the module's raw buffer out; the copy keeps the base nonce.
 prove_broken hpke "a nonce without the sequence XORed in" "$V0: encryption 1" \
-  'buf[i] = base[i] ^ seq.unsafe_shr((11 - i) * 8).unsafe_to_u8' 'buf[i] = base[i]'
+  '{ |i| base[i] ^ seq.unsafe_shr((11 - i) * 8).unsafe_to_u8 }' '{ |i| base[i] }'
 prove_broken hpke "the sequence XORed in little-endian" "$V0: encryption 1" \
   'seq.unsafe_shr((11 - i) * 8)' 'seq.unsafe_shr(i * 8)'
 prove_broken hpke "a sender whose sequence is not incremented" "$V0: encryption 1" \

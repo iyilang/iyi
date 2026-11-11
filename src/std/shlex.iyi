@@ -50,6 +50,7 @@
 # and checks `/bin/sh` reading `join`'s output as `printf` arguments
 # gives the arguments back.
 
+@[Unsafe("the splitter walks the bytes of the text through a raw pointer, for speed")]
 module std/shlex
 
 # Why a text does not split: an unclosed quote or a final backslash.

@@ -16,7 +16,7 @@
 
       IYI_PREFIX       where to unpack, default %LOCALAPPDATA%\Programs\iyi;
                        the zip is relocatable, so any writable directory works
-      IYI_VERSION      a release to pin, e.g. 0.19.1; default is the latest
+      IYI_VERSION      a release to pin, e.g. 0.21.0; default is the latest
       IYI_RELEASE_URL  where the release's files are, default the GitHub
                        release. A local directory or a file:// URL also works,
                        which is how CI gates this script against a zip the run
@@ -91,7 +91,7 @@ try {
 $arch = $env:PROCESSOR_ARCHITEW6432
 if (-not $arch) { $arch = $env:PROCESSOR_ARCHITECTURE }
 if ($arch -eq 'x86') {
-    Die "no release for 32-bit Windows: releases ship windows-x86_64, see README.md (Getting it) to build from source"
+    Die "no release for 32-bit Windows: releases ship windows-x86_64, see INSTALL.md (From source) to build from source"
 }
 if ($arch -eq 'ARM64') {
     Say "note: this is an arm64 Windows and the release is x86_64; it runs under the system's x64 emulation"

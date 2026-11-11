@@ -5,11 +5,91 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+# Its servers and clients are ended by end_process: on Windows, bash's own
+# `kill` ends a native program's stranger with it (bench/end_process.sh).
+. "$REPO/bench/end_process.sh"
 # The gate runs the compiler the caller names; bin/iyi is a POSIX shell
 # wrapper a Windows build cannot run.
 IYI="${IYI:-$REPO/bin/iyi}"
 WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+
+# Every process under this gate - its servers, the broken copies' rounds
+# and their clients, python, node - ends with it, at its end and at a
+# TERM, INT or HUP: bench/std_siblings.sh stops a sibling past its limit
+# with `timeout`'s TERM to the gate's whole group, and on a Windows
+# machine (Windows 11, 12 logical processors) this gate's stop there
+# left a bash of its own and the `close_nolinger.bin` it ran alive four
+# and a half hours later. A TERM to this shell alone ends them once the
+# command in the foreground has ended, as bash runs a trap. They are
+# found by their parents in one table of every process: /proc's ppid on
+# Windows, which is Git bash's view, one `ps` elsewhere, and each is ended
+# by end_process. What a native program started in turn is not Git bash's
+# to see and is not reached: `taskkill /T`, which reached it, walks parent
+# pids as bash's `kill` does (bench/end_process.sh). A walk that asked `pgrep`
+# parent by parent started a process under the gate with each question,
+# found it, and never ended.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) windows=1 ;;
+  *) windows=0 ;;
+esac
+CHILDREN=""
+gate_children() {
+  local table="" list=" $$ " changed=1 dir pid parent
+  if [ "$windows" -eq 1 ]; then
+    for dir in /proc/[0-9]*; do
+      { read -r parent < "$dir/ppid"; } 2>/dev/null && table="$table${dir#/proc/} $parent
+"
+    done
+  else
+    table="$(ps -A -o pid= -o ppid=)"
+  fi
+  while [ "$changed" -eq 1 ]; do
+    changed=0
+    while read -r pid parent; do
+      case "$list" in *" $pid "*) continue ;; esac
+      case "$list" in *" $parent "*) list="$list$pid "; changed=1 ;; esac
+    done <<<"$table"
+  done
+  CHILDREN="${list# $$ }"
+}
+end_children() {
+  local round p
+  for round in 1 2; do
+    gate_children
+    for p in $CHILDREN; do
+      end_process "$p" KILL
+    done
+  done
+}
+trap 'end_children; rm -rf "$WORK"' EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
+trap 'exit 129' HUP
+
+# stop_server <pid>: the server <pid> ends and is reaped, as
+# bench/std_tls_exercise.sh stops its own. A TERM, then a KILL every
+# second until it has gone, so a lost signal costs a second, not the gate;
+# one still there after a minute is named, and the gate fails rather than
+# waiting on it. Each server here was stopped with a TERM and a wait, and
+# on that Windows machine the TERM to a broken copy's `close_nohalf.bin`,
+# once its client had finished, did not end it: the gate waited on it 44
+# minutes, until a TERM to its group ended the gate and left that round's
+# bash and the server running, as the sibling limit had.
+stop_server() {
+  local pid="$1" i
+  end_process "$pid"
+  for i in $(seq 1 600); do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      wait "$pid" 2>/dev/null
+      return 0
+    fi
+    [ $((i % 10)) -eq 0 ] && end_process "$pid" KILL
+    sleep 0.1
+  done
+  echo "  FAIL: a server, pid $pid, outlived a minute of TERM and KILL"
+  : >"$WORK/outlived"
+  return 1
+}
 
 # A native compiler cannot resolve this shell's own path mapping: a search
 # path built from the shell's `pwd` finds no prelude at all, and a scratch
@@ -104,10 +184,12 @@ echo "== what the module reaches"
 # and the byte slices it reads are iyi over the prelude, as std/zstd is
 # over std/digest's XXH64, and std/x509 - the certificate a request
 # carries - is std/tls's own already, as std/unicode is std/uri's, and
-# std/dns - the HTTPS records a client may connect by - std/socket's. No
-# std/env: a proxy the environment names is std/http_proxy's to read.
+# std/dns - the HTTPS records a client may connect by - std/socket's.
+# std/shared_proc, the handler `serve` calls on every worker, is
+# iyi over the prelude and reaches nothing. No std/env: a proxy the
+# environment names is std/http_proxy's to read.
 imports=$(grep -oE '^import std/[a-z_0-9]+' "$REPO/src/std/http.iyi" | sed 's/^import //' | sort | tr '\n' ' ')
-if [ "$imports" = "std/base64 std/compress std/digest std/dns std/hpack std/mime std/slice std/socket std/time std/tls std/unicode std/uri std/x509 std/zstd " ]; then
+if [ "$imports" = "std/base64 std/compress std/digest std/dns std/hpack std/mime std/shared_proc std/slice std/socket std/time std/tls std/unicode std/uri std/x509 std/zstd " ]; then
   echo "  std/socket, std/time and std/tls (std/x509 its own, std/dns std/socket's), and std/base64, std/compress, std/digest, std/hpack, std/mime, std/slice, std/unicode, std/uri and std/zstd, which reach nothing"
 else
   echo "  std/http imports $imports"
@@ -161,6 +243,36 @@ refuses "a chunked body cut inside a chunk" chunk_cut "HTTP: chunked body ends i
 refuses "a status that is not a number" status_text "HTTP: not a status line" \
   'HTTP.parse_response("HTTP/1.1 OK\r\n\r\n").status'
 
+echo
+echo "== a one-thread server's connections stay in its unit"
+# `workers: 1` serves each connection with `g.spawn(unit: :same)`
+# (std/http's spawn_handler): the block holds the accepted socket, the
+# server's idle table and a handler that need not be Share, all of the one
+# thread's. A server whose block appends to an array builds; the copy whose
+# connections go to `unit: :new` is refused at compile time, naming the
+# socket the block captures, so a server that went parallel there is
+# caught before it runs rather than by a race it may not lose.
+mkdir -p "$WORK/unitnew/std"
+printf 'module main\n\nimport std/http::{Response, Server}\nimport std/socket::{IyiSocket}\n\nseen = [] of String\nlistener = IyiSocket.listen("127.0.0.1", 0)\nServer.serve(listener, workers: 1) do |req|\n  seen << req.path\n  Response.new(200, "ok")\nend\nputs seen.size\n' > "$WORK/one_thread.iyi"
+sed 's/^    g\.spawn(unit: :same) do$/    g.spawn(unit: :new) do/' "$REPO/src/std/http.iyi" > "$WORK/unitnew/std/http.iyi"
+if ! "$IYI" build -o "$WORK/one_thread" "$WORK/one_thread.iyi" > "$WORK/one_thread.build" 2>&1; then
+  echo "  a workers: 1 server whose block appends to an array did not build"
+  sed -n '1,8p' "$WORK/one_thread.build"
+  status=1
+elif cmp -s "$REPO/src/std/http.iyi" "$WORK/unitnew/std/http.iyi"; then
+  echo "  the copy that puts each connection in a unit of its own changed nothing, so it proves nothing"
+  status=1
+elif IYI_PATH="$WORK/unitnew${PSEP}$IYI_PATH" "$IYI" build -o "$WORK/one_thread_new" "$WORK/one_thread.iyi" > "$WORK/one_thread_new.build" 2>&1; then
+  echo "  the copy whose connections run in units of their own built: nothing holds spawn_handler to unit: :same"
+  status=1
+elif ! grep -q "spawn(unit: :new) runs in a unit of its own, on another thread captures .client : Std::Socket::IyiSocket., which is not Share" "$WORK/one_thread_new.build"; then
+  echo "  the copy whose connections run in units of their own was refused, but not for the socket"
+  sed -n '1,8p' "$WORK/one_thread_new.build"
+  status=1
+else
+  echo "  a workers: 1 server whose block appends to an array builds; with its connections in units of their own it is refused: the block captures \`client : Std::Socket::IyiSocket\`, which is not Share"
+fi
+
 # The first line a server printed, which is its port, once it has printed
 # it. The wait is for the process to start running: on Windows, Defender
 # checks an exe it has not seen before the exe's first launch runs, and its
@@ -184,6 +296,23 @@ await_port() { # await_port <output file> <pid>
   printf '%s' "$line"
 }
 
+# port_written <file> <pid>: until the server <pid> has written its port to
+# <file>, it has ended, or a minute has passed, as bench/std_tls_exercise.sh
+# waits. Each wait here was ten seconds, and a broken copy is a program
+# linked a moment before, whose first start on Windows took 1.2 to 9.5 s
+# to write its port there: on that Windows machine held to four
+# processors, with two copies built and run at a time, an HTTP/2 copy's
+# frames were sent to an empty port.
+port_written() {
+  local _
+  for _ in $(seq 1 600); do
+    [ -s "$1" ] && return 0
+    kill -0 "$2" 2>/dev/null || return 1
+    sleep 0.1
+  done
+  return 1
+}
+
 echo
 echo "== Python's http.client against the server"
 if "$IYI" build -o "$WORK/server" "$REPO/bench/std_http_server.iyi" >"$WORK/server.build.log" 2>&1; then
@@ -193,11 +322,11 @@ if "$IYI" build -o "$WORK/server" "$REPO/bench/std_http_server.iyi" >"$WORK/serv
   if [ -z "$port" ]; then
     echo "  the server printed no port"
     sed -n '1,5p' "$WORK/server.out" | sed 's/^/    /'
-    kill "$server_pid" 2>/dev/null
+    end_process "$server_pid"
     status=1
   elif [ -z "$PY" ]; then
     echo "  skipped: no working python3, so its http.client was not run against the server"
-    kill "$server_pid" 2>/dev/null
+    end_process "$server_pid"
   elif PORT="$port" "$PY" - <<'PY'
 import http.client, os, shutil, subprocess, sys, gzip, zlib
 try:
@@ -280,7 +409,7 @@ PY
     grep -q "^stopped$" "$WORK/server.out" || { echo "  the server did not return from serve"; status=1; }
   else
     echo "  Python's client and the server disagree"
-    kill "$server_pid" 2>/dev/null
+    end_process "$server_pid"
     status=1
   fi
 else
@@ -686,8 +815,7 @@ PY
     serve_tls
     tport=$(await_port "$WORK/tls_server.out" "$tls_pid")
     said=$(timeout 60 "$WORK/tls_client" "$tport" "$WORK/tls/root.pem" "$WORK/tls/other.pem" 2>&1)
-    kill "$tls_pid" 2>/dev/null
-    wait "$tls_pid" 2>/dev/null
+    stop_server "$tls_pid"
     expected="gzip true true
 hop 200 GET https://localhost:$tport/landed
 kept 1 made, 1 reused
@@ -732,8 +860,7 @@ PY
       serve_tls
       tport=$(await_port "$WORK/tls_server.out" "$tls_pid")
       broken=$(timeout 60 "$WORK/tls_broken" "$tport" "$WORK/tls/root.pem" "$WORK/tls/other.pem" 2>&1)
-      kill "$tls_pid" 2>/dev/null
-      wait "$tls_pid" 2>/dev/null
+      stop_server "$tls_pid"
       want="$(printf '%s\n' "$expected" | sed "s/$tport/PORT/g" | grep -m1 "^$line")"
       got="$(printf '%s\n' "$broken" | sed "s/$tport/PORT/g" | grep -m1 "^$line")"
       if [ -n "$got" ] && [ "$got" != "$want" ]; then
@@ -762,8 +889,7 @@ PY
       serve_tls
       tport=$(await_port "$WORK/tls_server.out" "$tls_pid")
       clear=$(timeout 60 "$WORK/tls_clear" "$tport" "$WORK/tls/root.pem" "$WORK/tls/other.pem" 2>&1)
-      kill "$tls_pid" 2>/dev/null
-      wait "$tls_pid" 2>/dev/null
+      stop_server "$tls_pid"
       if [ "$clear" = "$expected" ]; then
         echo "  https:// sent in the clear answered the same, so the section does not test TLS"
         status=1
@@ -848,17 +974,13 @@ latency_run() {
       sleep 0.1
     done
     timeout 120 "$bin" s_server "$port" "$WORK/tls/root.pem" 50 2>&1
-    kill "$pid" 2>/dev/null
-    wait "$pid" 2>/dev/null
+    stop_server "$pid"
   fi
   if [ "$latency_curl" = yes ]; then
     rm -f "$WORK/latency.port"
     "$bin" serve "$WORK/latency.port" "$WORK/tls/p256.pem" "$WORK/tls/leaf.key" >/dev/null 2>&1 &
     pid=$!
-    for _ in $(seq 1 100); do
-      [ -s "$WORK/latency.port" ] && break
-      sleep 0.1
-    done
+    port_written "$WORK/latency.port" "$pid"
     port="$(cat "$WORK/latency.port" 2>/dev/null)"
     # A curl that could not speak to the server answers 000 in no time,
     # which is no latency: only 200s are counted, and all 50 must be.
@@ -1004,17 +1126,22 @@ echo "== a server stopped while clients hold connections (bench/std_http_stop.iy
 # here: std/http's clients keeping HTTP/1.1 and HTTP/2 over TLS, HTTP/1.1
 # and h2c in the clear, and an upgrade each way whose block reads until
 # the stop and asks `closed?` before it says goodbye, as std/websocket
-# does - no panic printed, exit 0, both upgrades told "closed"; and
+# does - no panic printed, exit 0, both upgrades told "closed"; under
+# `stream_bodies`, a block waiting on the rest of its body, answering a
+# string or a stream, its read cancelled by the stop and its answer not
+# written - "iyi: panic: socket is closed" was printed for each, the
+# server writing on the socket the stop had closed under the block; and
 # Python's ssl, holding a kept-alive connection with
 # `suppress_ragged_eofs=False` while the server stops, reading
 # close_notify rather than an end without one (SSLEOFError, which it read
 # before). Then copies of the modules without the write's check, with
-# `closed?` blind to the socket, and with a stop that sends no
-# close_notify, each caught at the line that names it. The iyi half is
-# the program run with no arguments, as CI runs every bench program: it
-# holds what each of its lines should say, under a test PKI of its own -
-# a std/tls client among its own clients, reading close_notify as Python
-# does - and names one that is not so with "FAIL <line>:".
+# `closed?` blind to the socket, with a stop that sends no close_notify,
+# and with either answer written on the closed socket, each caught at
+# the line that names it. The iyi half is the program run with no
+# arguments, as CI runs every bench program: it holds what each of its
+# lines should say, under a test PKI of its own - a std/tls client among
+# its own clients, reading close_notify as Python does - and names one
+# that is not so with "FAIL <line>:".
 STOP_EXPECTED="ALL CHECKS PASSED
 exit 0
 kept connection: HTTP/1.1 200 OK, then on the server's stop: close_notify
@@ -1147,7 +1274,345 @@ PY
     @socket.close' '      nil
     end
     @socket.close' "the waiting std/tls client, on the stop"
+  stop_breaks "a reading block's answer written on the socket the stop closed" http.iyi \
+    '        if conn.socket.closed?
+          if source = response.source
+            source.close
+          end
+          return false
+        end
+' '' "panics printed"
+  stop_breaks "a stream's write on the socket the stop closed" http.iyi \
+    '    if socket.is_a?(IyiSocket) && socket.closed?
+      @fault = Cancelled.new
+      return false
+    end
+' '' "panics printed"
 fi
+
+echo
+echo "== connections on every core: serve's default workers, and workers: 1 (bench/std_http_parallel.iyi)"
+# `Server.serve` starts each connection as a parallel task on the pool,
+# one worker per core unless *workers* says otherwise, so a request is
+# answered on a pool worker rather than on the thread that accepts, and
+# a stop closes the listener on that thread while the connections it
+# must close are on others. The program holds it: eight requests that
+# compute, waiting before anything accepts, answered on more than one
+# worker and on none of them the accepting thread; a handler that
+# panics ending its own connection; and the stop, the answers in
+# progress written - the one made at the stop saying `Connection:
+# close` - requests half sent behind them closed on rather than answered
+# 400, and a kept-alive connection closed, under watchdogs. Then
+# `workers: 1`: four requests waiting before anything accepts, every one
+# answered on the accepting thread, by a block that appends to an
+# `Array` and closes its own listener. Then the same over TLS (`tls:
+# config.frozen`): eight connections answered on more than one worker,
+# h2 and http/1.1 by ALPN, a ticket a connection on one worker was sent
+# resumed by a connection that started on another, a client's
+# certificate seen and an encrypted ClientHello taken on a worker, and
+# the stop reaching a kept-alive connection on its worker as
+# close_notify. Then copies of std/http with `serve` on the calling
+# thread whatever *workers* says, with `workers: 1` served on the pool,
+# with the connection spawned on the accepting thread, with the watcher
+# that carries the stop to a connection's worker made to do nothing,
+# with the stop sending no close_notify, with an answer made at the stop
+# saying `keep-alive`, and with a body the stop cut short answered 400,
+# and a copy of std/tls whose ticket keys are every worker's own, each
+# caught at the line that names it. And what the compiler refuses and
+# takes: a block that captures an `Array` under the default workers, a
+# `TlsServerConfig` that is not frozen, a `Router` given as the handler
+# value, and a `frozen` identity source that captures a table of
+# identities, each refused with its sentence; and the `Array`, the
+# config and the `Router` under `workers: 1`, taken.
+if ! "$IYI" build -o "$WORK/parallel" "$REPO/bench/std_http_parallel.iyi" >"$WORK/parallel.build" 2>&1; then
+  echo "  bench/std_http_parallel.iyi did not build"
+  sed -n '1,8p' "$WORK/parallel.build"
+  status=1
+elif ! timeout 120 "$WORK/parallel" >"$WORK/parallel.out" 2>&1; then
+  echo "  serve on every core did not hold:"
+  grep -e '^FAIL ' "$WORK/parallel.out" | sed 's/^/    /'
+  status=1
+else
+  grep -v -e 'ALL CHECKS PASSED' -e '^iyi: panic' -e '^  at ' "$WORK/parallel.out" | tr -d '\r' | sed 's/^/  /'
+  # parallel_breaks <label> <old> <new> <check> [module]: the program over
+  # a copy of std/<module> (http unless given) with <old> made <new> must
+  # print "FAIL <check>".
+  parallel_breaks() {
+    local label="$1" old="$2" new="$3" check="$4" module="${5:-http}"
+    rm -rf "$WORK/parbreak" && mkdir -p "$WORK/parbreak/std"
+    if ! OLD="$old" NEW="$new" "$PY" - "$REPO/src/std/$module.iyi" "$WORK/parbreak/std/$module.iyi" <<'PY'
+import os, sys
+src = open(sys.argv[1], encoding="utf-8").read()
+if src.count(os.environ["OLD"]) != 1:
+    raise SystemExit("patch site missing or not unique")
+open(sys.argv[2], "w", encoding="utf-8", newline="\n").write(src.replace(os.environ["OLD"], os.environ["NEW"], 1))
+PY
+    then
+      echo "  $label: the patch did not apply"
+      status=1
+      return
+    fi
+    if ! IYI_PATH="$WORK/parbreak${PSEP}$IYI_PATH" "$IYI" build -o "$WORK/parallel-broken" "$REPO/bench/std_http_parallel.iyi" >"$WORK/parallel-broken.build" 2>&1; then
+      echo "  $label: the broken copy did not build"
+      sed -n '1,6p' "$WORK/parallel-broken.build" | sed 's/^/    /'
+      status=1
+      return
+    fi
+    timeout 120 "$WORK/parallel-broken" >"$WORK/parallel-broken.out" 2>&1
+    got="$(grep -m1 "^FAIL $check" "$WORK/parallel-broken.out" | tr -d '\r')"
+    if [ -n "$got" ]; then
+      echo "  $label: caught: $got"
+    else
+      echo "  $label: not caught at \"$check\""
+      sed -n '1,12p' "$WORK/parallel-broken.out" | sed 's/^/    /'
+      status=1
+    fi
+  }
+  # Every count is at least 1 by here, so the copy serves on the calling
+  # thread whatever it is given, and `tls` is narrowed as `serve`'s is.
+  parallel_breaks "a serve on the calling thread whatever its workers" \
+    '    if workers == 1 || tls.is_a?(TlsServerConfig)
+      serve_one_thread(listener, stream_bodies, compress, timeout_ms, tls, request_timeout_ms, max_connections, &handler)' '    if workers > 0 || tls.is_a?(TlsServerConfig)
+      serve_one_thread(listener, stream_bodies, compress, timeout_ms, tls, request_timeout_ms, max_connections, &handler)' "threads that answered"
+  parallel_breaks "workers: 1 served on the pool" \
+    '    if workers == 1 || tls.is_a?(TlsServerConfig)
+      serve_one_thread(listener, stream_bodies, compress, timeout_ms, tls, request_timeout_ms, max_connections, &handler)
+      return
+    end
+    serve_pool(listener, SharedProc(Request, Response).of(&handler), stream_bodies, compress, timeout_ms, tls, request_timeout_ms, max_connections, workers)' '    if tls.is_a?(TlsServerConfig)
+      serve_one_thread(listener, stream_bodies, compress, timeout_ms, tls, request_timeout_ms, max_connections, &handler)
+      return
+    end
+    serve_pool(listener, SharedProc(Request, Response).of(&handler), stream_bodies, compress, timeout_ms, tls, request_timeout_ms, max_connections, IyiWorkers.count)' "workers: 1, the threads that answered"
+  # `spawn(unit: :same)`, not `spawn`: the block passes every check
+  # `spawn(unit: :new)`'s does, so a plain `spawn` of it runs on the pool
+  # (SPEC.md III.4.15), and that copy answered every request on a worker.
+  parallel_breaks "a connection served on the thread that accepted it" \
+    '    g.spawn(unit: :new) do
+      client = IyiSocket.new(fd, family)' '    g.spawn(unit: :same) do
+      client = IyiSocket.new(fd, family)' "answered on the accepting thread"
+  parallel_breaks "a stop that never reaches a connection on another worker" \
+    '            stop.close
+            idle.values.each { |waiting| waiting.close_for_stop }' '            nil' "the stop"
+  parallel_breaks "a stop that sends no close_notify on a worker" \
+    '      stream.close_write
+    end
+    @socket.close' '      nil
+    end
+    @socket.close' "the kept-alive TLS connection, on the stop"
+  parallel_breaks "an answer made at the stop saying keep-alive" \
+    'head.close || conn.stopped?' 'head.close' "the answer being made at the stop, its Connection"
+  parallel_breaks "a body the stop cut short answered 400" \
+    'return false if conn.ended? || conn.stopped?' 'return false if conn.ended?' "a request half sent behind that answer, on the stop"
+  # Each thread seals and opens under a key of its own, named as the
+  # shared one: a ticket opens only on the worker that sealed it.
+  parallel_breaks "workers keeping ticket keys of their own" \
+    '    rotate_if_due(now_ms, period_ms)
+    TlsTicketKeySet.new(@name, @key, @previous_name, @previous)' '    rotate_if_due(now_ms, period_ms)
+    own = (IyiScheduler.state.object_id.to_s * 4)[0, 32]
+    TlsTicketKeySet.new(@name, own, @previous_name, @previous)' "a ticket resumed on another worker" tls
+fi
+
+# What the compiler refuses of a server whose connections run on every
+# worker: a block that captures an `Array`, which every worker would
+# append to at once; a config that is not frozen, which changes as it
+# serves; and an identity source given to `frozen` that captures a
+# table. Each must be refused with its sentence, and each must compile
+# against a copy of std/http or std/tls with the mark that refuses it
+# taken off - `serve`'s `@[Share]` gone (its block handed on as a value
+# nothing checked), its `crossing:` gone, `frozen`'s block no longer
+# kept by a `@[Share]` def - so the refusal is the mark's doing. And
+# what it takes: the same `Array` and config under `workers: 1`, which
+# must compile, and be refused by a copy of std/http whose `serve`
+# names no `serial:` parameter.
+cat >"$WORK/captures.iyi" <<'IYI'
+module main
+
+import std/http::{Response, Server}
+import std/socket::{IyiSocket}
+
+seen = [] of String
+Server.serve(IyiSocket.listen("127.0.0.1", 0)) do |request|
+  seen << request.path
+  Response.new(200, "here")
+end
+IYI
+cat >"$WORK/unfrozen.iyi" <<'IYI'
+module main
+
+import std/http::{Response, Server}
+import std/socket::{IyiSocket}
+import std/tls::{TlsServerConfig}
+
+config = TlsServerConfig.from_pem(Program.args[0], Program.args[1])
+raise "no config" unless config.is_a?(TlsServerConfig)
+Server.serve(IyiSocket.listen("127.0.0.1", 0), tls: config) { |request| Response.new(200, "here") }
+IYI
+cat >"$WORK/alone.iyi" <<'IYI'
+module main
+
+import std/http::{Response, Server}
+import std/socket::{IyiSocket}
+import std/tls::{TlsServerConfig}
+
+config = TlsServerConfig.from_pem(Program.args[0], Program.args[1])
+raise "no config" unless config.is_a?(TlsServerConfig)
+seen = [] of String
+Server.serve(IyiSocket.listen("127.0.0.1", 0), tls: config, workers: 1) do |request|
+  seen << request.path
+  Response.new(200, "here")
+end
+IYI
+cat >"$WORK/router_value.iyi" <<'IYI'
+module main
+
+import std/http::{Response, Server}
+import std/router::{Router}
+import std/socket::{IyiSocket}
+
+router = Router.new
+router.handle("GET /") { |_, _| Response.new(200, "home") }
+Server.serve(IyiSocket.listen("127.0.0.1", 0), router)
+IYI
+cat >"$WORK/router_alone.iyi" <<'IYI'
+module main
+
+import std/http::{Response, Server}
+import std/router::{Router}
+import std/socket::{IyiSocket}
+
+router = Router.new
+router.handle("GET /") { |_, _| Response.new(200, "home") }
+Server.serve(IyiSocket.listen("127.0.0.1", 0), router, workers: 1)
+IYI
+cat >"$WORK/source.iyi" <<'IYI'
+module main
+
+import std/tls::{TlsIdentity, TlsServerConfig}
+
+config = TlsServerConfig.from_pem(Program.args[0], Program.args[1])
+raise "no config" unless config.is_a?(TlsServerConfig)
+held = {} of String => TlsIdentity
+frozen = config.frozen { |name, alpn, left_ms| held[name || ""]? }
+puts frozen.alpn.size
+IYI
+# mark_off <module> <old> <new> [<old2> <new2>]: $WORK/refbreak/std/<module>.iyi,
+# std's with each <old> made its <new>.
+mark_off() {
+  rm -rf "$WORK/refbreak" && mkdir -p "$WORK/refbreak/std"
+  OLD="$2" NEW="$3" OLD2="${4:-}" NEW2="${5:-}" "$PY" - "$REPO/src/std/$1.iyi" "$WORK/refbreak/std/$1.iyi" <<'PY'
+import os, sys
+src = open(sys.argv[1], encoding="utf-8").read()
+for old, new in ((os.environ["OLD"], os.environ["NEW"]), (os.environ["OLD2"], os.environ["NEW2"])):
+    if not old:
+        continue
+    if src.count(old) != 1:
+        raise SystemExit("patch site missing or not unique")
+    src = src.replace(old, new, 1)
+open(sys.argv[2], "w", encoding="utf-8", newline="\n").write(src)
+PY
+}
+# refused <label> <file> <sentence> <module> <old> <new> [<old2> <new2>]
+refused() {
+  local label="$1" file="$2" sentence="$3"
+  shift 3
+  if "$IYI" build --no-codegen -o "$WORK/refused" "$WORK/$file" >"$WORK/refused.log" 2>&1; then
+    echo "  FAIL $label: compiled"
+    status=1
+    return
+  fi
+  if ! grep -qF "$sentence" "$WORK/refused.log"; then
+    echo "  FAIL $label: refused, but not for the reason: $(grep -m1 'Error' "$WORK/refused.log")"
+    status=1
+    return
+  fi
+  echo "  $label: refused: $(grep -m1 -F "$sentence" "$WORK/refused.log" | sed 's/^Error: //' | cut -c1-150)"
+  if ! mark_off "$@"; then
+    echo "  $label: the patch did not apply"
+    status=1
+  elif IYI_PATH="$WORK/refbreak${PSEP}$IYI_PATH" "$IYI" build --no-codegen -o "$WORK/refused" "$WORK/$file" >"$WORK/refused-broken.log" 2>&1; then
+    echo "  $label, the mark taken off: compiled, so caught"
+  else
+    echo "  FAIL $label, the mark taken off: still refused: $(grep -m1 'Error' "$WORK/refused-broken.log")"
+    status=1
+  fi
+}
+# taken <label> <file> <sentence> <module> <old> <new>: <file> compiles,
+# and over the copy refuses with <sentence>.
+taken() {
+  local label="$1" file="$2" sentence="$3"
+  shift 3
+  if ! "$IYI" build --no-codegen -o "$WORK/refused" "$WORK/$file" >"$WORK/taken.log" 2>&1; then
+    echo "  FAIL $label: refused: $(grep -m1 'Error' "$WORK/taken.log")"
+    status=1
+    return
+  fi
+  echo "  $label: compiled"
+  if ! mark_off "$@"; then
+    echo "  $label: the patch did not apply"
+    status=1
+  elif IYI_PATH="$WORK/refbreak${PSEP}$IYI_PATH" "$IYI" build --no-codegen -o "$WORK/refused" "$WORK/$file" >"$WORK/taken-broken.log" 2>&1; then
+    echo "  FAIL $label, the mark taken off: still compiled"
+    status=1
+  elif grep -qF "$sentence" "$WORK/taken-broken.log"; then
+    echo "  $label, the mark taken off: refused, so caught"
+  else
+    echo "  FAIL $label, the mark taken off: refused, but not for the reason: $(grep -m1 'Error' "$WORK/taken-broken.log")"
+    status=1
+  fi
+}
+serve_mark='  @[Share(serial: workers, crossing: {tls: "Pass `config.frozen`, the copy every worker may read"})]
+  def self.serve(listener : IyiSocket, stream_bodies'
+refused "a block that captures an Array, on every worker" captures.iyi \
+  'the block Server.serve keeps, which may run on other threads captures `seen : Array(String)`, which is not Share: Array(String)'"'"'s field @size is assigned in `append`. Put it behind a lock, a `Mutex(Array(String))` (std/mutex), or pass `workers: 1` so the block runs on one thread' \
+  http "$serve_mark" '  @[Share]
+  struct UncheckedHandler
+    def initialize(@proc : Proc(Request, Response))
+    end
+
+    def call(request : Request) : Response
+      @proc.call(request)
+    end
+  end
+
+  def self.serve(listener : IyiSocket, stream_bodies' \
+  '    serve_pool(listener, SharedProc(Request, Response).of(&handler), stream_bodies' '    serve_pool(listener, UncheckedHandler.new(handler), stream_bodies'
+refused "a TlsServerConfig on every worker" unfrozen.iyi \
+  'Server.serve hands `tls : Std::Tls::TlsServerConfig` to other threads, several at once, and it is not Share: Std::Tls::TlsServerConfig'"'"'s field @alpn is given a setter `alpn=`. Pass `config.frozen`, the copy every worker may read, or pass `workers: 1` so it stays on one thread' \
+  http "$serve_mark" '  @[Share(serial: workers)]
+  def self.serve(listener : IyiSocket, stream_bodies'
+refused "an identity source that captures a table" source.iyi \
+  'the block TlsServerConfig#frozen keeps, which may run on other threads captures `held : Hash(String, Std::Tls::TlsIdentity)`, which is not Share' \
+  tls '  @[Share]
+  def frozen(&source : String?, Array(String)?, Int32? -> TlsIdentity | TlsError | Nil) : TlsFrozenServerConfig
+    TlsFrozenServerConfig.new(self, SharedProc({String?, Array(String)?, Int32?}, TlsIdentity | TlsError | Nil).of { |asked| source.call(asked[0], asked[1], asked[2]) })' \
+  '  def frozen(&source : String?, Array(String)?, Int32? -> TlsIdentity | TlsError | Nil) : TlsFrozenServerConfig
+    TlsFrozenServerConfig.new(self, nil)'
+taken "an Array and a TlsServerConfig under workers: 1" alone.iyi \
+  'Server.serve hands `tls : Std::Tls::TlsServerConfig` to other threads' \
+  http "$serve_mark" '  @[Share(crossing: {tls: "Pass `config.frozen`, the copy every worker may read"})]
+  def self.serve(listener : IyiSocket, stream_bodies'
+# The value form: a `Router` refused at the argument on every worker, and
+# taken under `workers: 1`. Its mark taken off is the `handler:` crossing
+# gone and the value handed to the workers unchecked.
+value_mark='  @[Share(serial: workers, crossing: {handler: "Make it Share - a `SharedRouter` for a `Router`, its state behind a `Mutex` (std/mutex)", tls:'
+refused "a Router as the handler, on every worker" router_value.iyi \
+  'Server.serve hands `handler : Std::Router::Router` to other threads, several at once, and it is not Share' \
+  http "$value_mark" '  @[Share(owns: true)]
+  struct UncheckedValue(H)
+    def initialize(@handler : H)
+    end
+
+    def call(request : Request) : Response
+      @handler.call(request)
+    end
+  end
+
+  @[Share(serial: workers, crossing: {tls:' \
+  '    serve_pool(listener, SharedProc(Request, Response).of { |request| handler.call(request) }, stream_bodies' '    serve_pool(listener, UncheckedValue.new(handler), stream_bodies'
+taken "a Router as the handler under workers: 1" router_alone.iyi \
+  'Server.serve hands `handler : Std::Router::Router` to other threads' \
+  http "$value_mark" '  @[Share(crossing: {handler: "Make it Share - a `SharedRouter` for a `Router`, its state behind a `Mutex` (std/mutex)", tls:'
 
 echo
 echo "== TLS resumption: an HTTPClient's tickets (bench/std_http_resume.iyi)"
@@ -1231,14 +1696,12 @@ resume_run() {
     sleep 0.1
   done
   if [ "$listening" = no ]; then
-    kill "$pid" 2>/dev/null
-    wait "$pid" 2>/dev/null
+    stop_server "$pid"
     echo "s_server never listened: $("$OPENSSL" version 2>&1 | head -1); it said: $(head -5 "$log" | tr '\n' ' ')"
     return 0
   fi
   timeout 60 "$bin" s_server "$port" "$WORK/tls/root.pem" 2>&1
-  kill "$pid" 2>/dev/null
-  wait "$pid" 2>/dev/null
+  stop_server "$pid"
   "$PY" - "$log" <<'PY'
 import re, sys
 lines = open(sys.argv[1], encoding="utf-8", errors="replace").read().splitlines()
@@ -1499,10 +1962,7 @@ h2_serve() {
   rm -f "$WORK/h2.port"
   "$H2BIN" serve "$WORK/h2.port" >"$WORK/h2-serve.log" 2>&1 &
   H2PID=$!
-  for _ in $(seq 1 100); do
-    [ -s "$WORK/h2.port" ] && break
-    sleep 0.1
-  done
+  port_written "$WORK/h2.port" "$H2PID"
   H2PORT="$(cat "$WORK/h2.port" 2>/dev/null)"
 }
 h2_stop() {
@@ -1511,7 +1971,7 @@ h2_stop() {
   elif command -v curl >/dev/null 2>&1; then
     curl -s "http://127.0.0.1:$H2PORT/quit" >/dev/null 2>&1
   fi
-  ( sleep 10; kill "$H2PID" 2>/dev/null ) &
+  ( sleep 10; end_process "$H2PID" ) &
   wait "$H2PID" 2>/dev/null
 }
 
@@ -1744,7 +2204,10 @@ echo "== a close while the client still sends (RFC 9112 section 9.6)"
 # `Connection: close` - and by curl, with no reset anywhere, and the end
 # of the stream (a FIN; over TLS a close_notify first, which Python is
 # told to insist on) within half a second of the answer's last byte, not
-# the second a server that never shuts its half lingers for.
+# the second a server that never shuts its half lingers for. And the
+# answer says the close is coming: http.client's next request after a
+# body past MAX_DRAIN is answered, and an `Expect: 100-continue` answered
+# before its body is closed on, with no `100 Continue` after the answer.
 cat >"$WORK/close.py" <<'PY'
 import http.client, os, select, shutil, socket, ssl, subprocess, sys, time
 
@@ -1931,11 +2394,70 @@ def by_curl(close):
             out.returncode, time.monotonic() - began, len(body), out.stdout.decode(errors="replace"), curl_said(out.stderr))
     return None
 
+
+# A body past MAX_DRAIN that the block left unread is closed on after the
+# answer, so the answer says `Connection: close`: http.client takes a
+# `keep-alive` at its word, sends its next request on the connection,
+# and the close ends it unanswered (RemoteDisconnected).
+def next_after():
+    if ctx:
+        c = http.client.HTTPSConnection("localhost", port, context=ctx, timeout=STALL)
+    else:
+        c = http.client.HTTPConnection("127.0.0.1", port, timeout=STALL)
+    said = None
+    try:
+        c.request("POST", "/ignore?n=%d" % SMALL, body=b"u" * UP)
+        r = c.getresponse()
+        got = r.read()
+        said = r.getheader("Connection")
+        if r.status != 200 or got != small:
+            return "answered %d, %d bytes" % (r.status, len(got))
+        c.request("GET", "/ignore?n=%d" % SMALL)
+        r = c.getresponse()
+        got = r.read()
+    except OSError as e:
+        return "%s on the request after it, the answer before saying Connection: %s" % (type(e).__name__, said)
+    finally:
+        c.close()
+    return None if r.status == 200 and got == small else "the request after it answered %d, %d bytes" % (r.status, len(got))
+
+
+# `Expect: 100-continue`, answered before the body is asked for: the client
+# holds its body back, so the connection closes after the answer, which
+# says so. Before, `100 Continue` went out after the answer - a client
+# reads it as its next request's - and the server waited out its timeout
+# for the body. The body is short, well inside MAX_DRAIN, so that the
+# close is the expectation's alone.
+def expect_unasked():
+    s = connect()
+    s.sendall(("POST /ignore?n=%d HTTP/1.1\r\nHost: %s\r\nContent-Length: 1000\r\nExpect: 100-continue\r\n\r\n" % (SMALL, host)).encode())
+    s.settimeout(STALL)
+    data = b""
+    try:
+        while True:
+            more = s.recv(65536)
+            if not more:
+                break
+            data += more
+    except OSError as e:
+        s.close()
+        return "%s after %d bytes, ending %r" % (type(e).__name__, len(data), data[-40:])
+    s.close()
+    head, _, body = data.partition(b"\r\n\r\n")
+    if not head.startswith(b"HTTP/1.1 200"):
+        return "answered %r" % head[:40]
+    if b"\r\nconnection: close" not in head.lower():
+        return "the answer's head: %r" % head
+    return None if body == small else "%d bytes after the head, ending %r" % (len(body), body[-40:])
+
+
 cases = {
     "Python reading as it sends, Connection: close": lambda: as_sent(True),
     "Python reading as it sends, a body past MAX_DRAIN": lambda: as_sent(False),
     "http.client, Connection: close": lambda: sent_first(True),
     "http.client, a body past MAX_DRAIN": lambda: sent_first(False),
+    "http.client, a body past MAX_DRAIN and a request after it": next_after,
+    "Expect: 100-continue answered before the body": expect_unasked,
     "200 requests pipelined behind Connection: close": pipelined,
 }
 if CURL:
@@ -1989,14 +2511,10 @@ close_round() {
     "$bin" serve-close "$WORK/close-$tag.port" >"$WORK/close-$tag.log" 2>&1 &
   fi
   cpid=$!
-  for _ in $(seq 1 100); do
-    [ -s "$WORK/close-$tag.port" ] && break
-    sleep 0.1
-  done
+  port_written "$WORK/close-$tag.port" "$cpid"
   cport="$(cat "$WORK/close-$tag.port" 2>/dev/null || echo 1)"
   timeout -k 5 600 "$PY" "$WORK/close.py" "$cport" "$runs" "$root" "$@" || code=1
-  kill "$cpid" 2>/dev/null
-  wait "$cpid" 2>/dev/null
+  stop_server "$cpid"
   return "$code"
 }
 # Five runs a case by default, CLOSE_RUNS= for more: closed at once, the
@@ -2097,10 +2615,7 @@ client_close_round() { # client_close_round <binary> [tls] [tag]
     "$PY" "$WORK/close_server.py" "$WORK/$tag.port" >"$WORK/$tag.sout" 2>&1 &
   fi
   spid=$!
-  for _ in $(seq 1 100); do
-    [ -s "$WORK/$tag.port" ] && break
-    sleep 0.1
-  done
+  port_written "$WORK/$tag.port" "$spid"
   sport="$(cat "$WORK/$tag.port" 2>/dev/null || echo 1)"
   if [ -n "$over" ]; then
     timeout -k 5 60 "$bin" close-client "https://localhost:$sport" "$WORK/tls/root.pem" 2>&1
@@ -2280,15 +2795,11 @@ JS
     rm -f "$WORK/node.port" "$WORK/node.log"
     "$NODE" "$WORK/h2-server.js" "$mode" "$WORK/node.port" "$WORK/node.log" "$WORK/tls/leaf.pem" "$WORK/tls/leaf.key" &
     local npid=$!
-    for _ in $(seq 1 100); do
-      [ -s "$WORK/node.port" ] && break
-      sleep 0.1
-    done
+    port_written "$WORK/node.port" "$npid"
     local host=127.0.0.1
     [ "$scheme" = "https" ] && host=localhost
     timeout -k 5 120 "$H2BIN" fetch "$scheme://$host:$(cat "$WORK/node.port")" $roots >"$WORK/fetch.out" 2>&1
-    kill "$npid" 2>/dev/null
-    wait "$npid" 2>/dev/null
+    stop_server "$npid"
     if ! grep -qx "connections 1" "$WORK/fetch.out"; then
       echo "  $label: FAIL: $(grep -v '^/' "$WORK/fetch.out" | head -n 3 | tr '\n' ' ')"
       status=1
@@ -2350,10 +2861,7 @@ https_checks() {
   rm -f "$WORK/h2tls.port"
   "$bin" serve-tls "$WORK/h2tls.port" "$chain" "$key" >"$WORK/h2tls.log" 2>&1 &
   tpid=$!
-  for _ in $(seq 1 100); do
-    [ -s "$WORK/h2tls.port" ] && break
-    sleep 0.1
-  done
+  port_written "$WORK/h2tls.port" "$tpid"
   tport="$(cat "$WORK/h2tls.port" 2>/dev/null)"
   local base="https://localhost:$tport"
   https_fail() { echo "  FAIL: $1"; failed=$((failed + 1)); }
@@ -2371,8 +2879,7 @@ https_checks() {
   # it only wait out their timeouts against a server that cannot answer
   # them: "the TLS handshake skipped" spent 684 s of the gate there.
   if [ -n "${HTTPS_FIRST_FAIL:-}" ] && [ "$failed" -gt 0 ]; then
-    kill "$tpid" 2>/dev/null
-    wait "$tpid" 2>/dev/null
+    stop_server "$tpid"
     return $failed
   fi
   if curl_asked "$kind"; then
@@ -2403,8 +2910,7 @@ https_checks() {
     got="$(timeout -k 5 120 "$NODE" "$WORK/h2-client.js" "$tport" "$WORK/tls/root.pem" 2>&1)"
     case "$got" in *FAIL*|"") https_fail "Node's client: $got" ;; esac
   fi
-  kill "$tpid" 2>/dev/null
-  wait "$tpid" 2>/dev/null
+  stop_server "$tpid"
   return $failed
 }
 # mtls_checks <binary>: its serve-tls asking for a client's certificate
@@ -2417,10 +2923,7 @@ mtls_checks() {
   rm -f "$WORK/mtls.port"
   "$bin" serve-tls "$WORK/mtls.port" "$WORK/tls/ed.pem" "$WORK/tls/ed.key" "$WORK/tls/root.pem" >"$WORK/mtls.log" 2>&1 &
   mpid=$!
-  for _ in $(seq 1 100); do
-    [ -s "$WORK/mtls.port" ] && break
-    sleep 0.1
-  done
+  port_written "$WORK/mtls.port" "$mpid"
   mport="$(cat "$WORK/mtls.port" 2>/dev/null)"
   local base="https://localhost:$mport"
   got="$(timeout -k 5 60 "$bin" whoami "$base" "$WORK/tls/root.pem" "$WORK/tls/leaf.pem" "$WORK/tls/leaf.key" 2>&1 | tr '\n' '|')"
@@ -2447,8 +2950,7 @@ print(data.decode().split("\r\n\r\n")[1])
 ' "$mport" "$WORK/tls/root.pem" "$WORK/tls/leaf.pem" "$WORK/tls/leaf.key" 2>&1)"
     [ "$got" = "peer=CN=localhost HTTP/1.0" ] || { echo "  FAIL: Python presenting a certificate: $got"; failed=$((failed + 1)); }
   fi
-  kill "$mpid" 2>/dev/null
-  wait "$mpid" 2>/dev/null
+  stop_server "$mpid"
   return $failed
 }
 if [ "$h2_built" -ne 1 ] || [ ! -s "$WORK/tls/ed.key" ]; then
@@ -2649,14 +3151,10 @@ guarded() {
   rm -f "$WORK/guarded.port"
   "$bin" serve-guarded "$WORK/guarded.port" "$WORK/tls/p256.pem" "$WORK/tls/leaf.key" 2 3000 5000 >"$WORK/guarded.log" 2>&1 &
   gpid=$!
-  for _ in $(seq 1 100); do
-    [ -s "$WORK/guarded.port" ] && break
-    sleep 0.1
-  done
+  port_written "$WORK/guarded.port" "$gpid"
   timeout -k 5 180 "$PY" "$WORK/guard.py" "$(cat "$WORK/guarded.port" 2>/dev/null || echo 1)" "$WORK/tls/root.pem" 3000 5000 "$@" >"$out" 2>&1
   local code=$?
-  kill "$gpid" 2>/dev/null
-  wait "$gpid" 2>/dev/null
+  stop_server "$gpid"
   return $code
 }
 guard_ready=0
@@ -2803,9 +3301,11 @@ config.alpn = ["h2", "http/1.1"]
 plain = IyiSocket.listen("127.0.0.1", 0)
 secure = IyiSocket.listen("127.0.0.1", 0)
 File.write(Program.args[0], "#{plain.local_port} #{secure.local_port}")
+# Both on every worker, `serve`'s default: the TLS one with its config
+# frozen, which every worker reads.
 group do |g|
   g.spawn { Server.serve(plain) { |req| told(req) }; 0 }
-  g.spawn { Server.serve(secure, tls: config) { |req| told(req) }; 0 }
+  g.spawn { Server.serve(secure, tls: config.frozen) { |req| told(req) }; 0 }
   0
 end
 IYI
@@ -2880,15 +3380,12 @@ proxy_up() {
   "$WORK/proxy_origin" "$WORK/origin.ports" "$WORK/tls/p256.pem" "$WORK/tls/leaf.key" > "$WORK/origin.out" 2>&1 &
   origin_pid=$!
   PPORT=$(await_port "$WORK/proxy.out" "$proxy_pid")
-  for _ in $(seq 1 100); do
-    [ -s "$WORK/origin.ports" ] && break
-    sleep 0.1
-  done
+  port_written "$WORK/origin.ports" "$origin_pid"
   read -r HPORT SPORT < "$WORK/origin.ports"
 }
 proxy_down() {
-  kill "$proxy_pid" "$origin_pid" 2>/dev/null
-  wait "$proxy_pid" "$origin_pid" 2>/dev/null
+  stop_server "$proxy_pid"
+  stop_server "$origin_pid"
 }
 # What the client must print, and the proxy log, for ALPN's HTTP/<version>.
 proxy_expected() {
@@ -3689,6 +4186,11 @@ close_breaks "TLS: the client closing at once" close_client_tls http.iyi \
     else' '    elsif stream = @stream
       close_now
     else' - - client-tls
+close_breaks "a body past MAX_DRAIN answered keep-alive" close_drain_kept http.iyi \
+  '    @kind == LENGTH && @left > limit' '    false' plain 'http.client, a body past MAX_DRAIN and a request after it'
+close_breaks "100 Continue written after the answer" close_late_continue http.iyi \
+  '    return true if @hello
+' '' plain 'Expect: 100-continue answered before the body'
 h2_frames_breaks "HEADERS on a closed stream passed over" h2_stale \
   '          mode = @reset_lately.includes?(id) ? IGNORED_BLOCK : STALE_BLOCK' '          mode = IGNORED_BLOCK' \
   'HEADERS on a closed stream'
@@ -3748,8 +4250,11 @@ guard_breaks "an HTTP/2 body bounded per read alone" guard_h2 \
   '      conn.deadline_at(whole, "read a request") if whole > 0_i64
       unless stream_bodies' '      unless stream_bodies' \
   h2 "an HTTP/2 body a frame of a byte at a time"
+# `workers: 1`'s own line: the pool makes its places the same way, and
+# the comment above this one is `serve_one_thread`'s alone.
 guard_breaks "connections served without a cap" guard_cap \
-  'slots = max_connections > 0 ? Channel(Int32).new(max_connections) : nil' 'slots = nil.as(Channel(Int32)?)' \
+  '    # A place per connection served: a send waits while every one is held.
+    slots = max_connections > 0 ? Channel(Int32).new(max_connections) : nil' '    slots = nil.as(Channel(Int32)?)' \
   cap "cap"
 guard_breaks "a connection's place never given back" guard_leak \
   "      # The connection's place, given back however it ended.
@@ -3829,6 +4334,58 @@ proxy_breaks "a ws:// handshake sent to the proxy in absolute form" proxy_upgrad
 mutations_report
 judge_later
 close_breaks_report
+
+echo
+echo "== a server whose TERM is lost is stopped all the same"
+# A server that ignores TERM stands in for one whose TERM was lost (above
+# stop_server): stop_server ends it, and the stop it replaced - a TERM,
+# then a wait - does not, so the check is seen to fail. Each is given 15
+# seconds, where stop_server needs its first KILL's one.
+stop_holds() { # stop_holds <stop>: <stop> ends a server that ignores TERM
+  local checker _
+  rm -f "$WORK/deaf.pid"
+  (
+    bash -c 'trap "" TERM; while :; do sleep 0.2; done' >/dev/null 2>&1 &
+    deaf=$!
+    echo "$deaf" >"$WORK/deaf.pid"
+    sleep 0.5
+    "$1" "$deaf" >/dev/null
+    ! kill -0 "$deaf" 2>/dev/null
+  ) &
+  checker=$!
+  for _ in $(seq 1 150); do
+    kill -0 "$checker" 2>/dev/null || break
+    sleep 0.1
+  done
+  if kill -0 "$checker" 2>/dev/null; then
+    kill -9 "$checker" "$(cat "$WORK/deaf.pid" 2>/dev/null)" 2>/dev/null
+    wait "$checker" 2>/dev/null
+    return 1
+  fi
+  wait "$checker"
+}
+term_then_wait() {
+  kill "$1" 2>/dev/null
+  wait "$1" 2>/dev/null
+}
+if stop_holds stop_server; then
+  echo "  a server that ignores TERM is ended by the KILL after it"
+else
+  echo "  FAIL: stop_server left a server that ignores TERM running"
+  status=1
+fi
+if stop_holds term_then_wait; then
+  echo "  FAIL: the check holds a stop that waits on a TERM that was lost"
+  status=1
+else
+  echo "  the stop it replaced, a TERM and a wait, is caught waiting"
+fi
+# A server stop_server could not end was named where it was stopped, in a
+# broken copy's subshell as often as not; the gate fails for it here.
+if [ -e "$WORK/outlived" ]; then
+  echo "FAIL: a server outlived its stop (named above)"
+  status=1
+fi
 echo
 if [ "$status" -eq 0 ]; then
   echo "the std/http exercise holds"

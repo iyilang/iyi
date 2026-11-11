@@ -35,6 +35,7 @@
 # bench/concurrent_mark.sh drives it and proves the check fails when the
 # barrier shades nothing.
 
+@[Unsafe("moves raw Pointer.malloc blocks while the marker walks, flags threads through words in an __iyi_mmap page, and scrubs an uninitialized stack pad through pointerof and asm")]
 {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
   def fail(message : String) : Nil
     print "FAIL: #{message}\n"
@@ -200,6 +201,20 @@
     last.payload = nil
   end
 
+  # Whether the chain's tail still holds a white payload, read in a frame
+  # of its own for `move`'s reason: the payload is in no local of the
+  # caller's. Read in the loop below, a `--release` build cut into
+  # partitions (`src/compiler/iyi/release_partition.cr`) kept it where the
+  # second stop's conservative scan found it, and the copy whose barrier
+  # shades nothing kept every payload: 8 of 8 runs on Linux x86_64 (12
+  # vCPUs, shared), against 5 of 5 caught when built as one module. Read
+  # here, the partitioned copy lost round 0's payload in 4 of 4 runs.
+  @[NoInline]
+  def tail_white?(chain : Cell) : Bool
+    payload = tail(chain).payload
+    payload.is_a?(Payload) && IyiMark.colour(payload.object_id.to_u64) == IyiMark::WHITE
+  end
+
   def check(holder : Holder, seed : UInt64, round : Int32) : Nil
     payload = holder.payload
     fail("round #{round}: the holder's payload is nil") unless payload.is_a?(Payload)
@@ -275,6 +290,11 @@
 
     def self.stop : Pointer(Atomic(UInt64))
       Pointer(Atomic(UInt64)).new(@@page)
+    end
+
+    # The idle-pool step's count of tasks arrived, the page's second word.
+    def self.arrived : Pointer(Atomic(UInt64))
+      Pointer(Atomic(UInt64)).new(@@page + 8_u64)
     end
   end
 
@@ -387,8 +407,7 @@
     # Under a mark, and the chain's tail not reached yet: a payload the
     # workers found through the chain is saved by the chain, and that
     # round is not the barrier's to prove.
-    payload = tail(chain).payload
-    payload_white = payload.is_a?(Payload) && IyiMark.colour(payload.object_id.to_u64) == IyiMark::WHITE
+    payload_white = tail_white?(chain)
     marking = marking && IyiMark.marking? && IyiMark.colour(holder.object_id.to_u64) == IyiMark::BLACK && payload_white
     under_mark = under_mark + 1 if marking
     move(chain, holder)
@@ -541,6 +560,106 @@
     {% end %}
     puts "share: with #{threads.to_i64} threads of the program's on #{cores.to_i64} cores, the mark beside them asked for #{asked.to_i64} helpers"
     fail("the chain's tail lost its payload beside the busy threads") unless tail(chain).payload.is_a?(Payload)
+  end
+
+  # ── The helpers' share beside an idle pool ────────────────────────────
+  # A pool of a worker per core, every worker waiting in its poller with
+  # nothing to run, and a mark beside the program from the main thread:
+  # the waiting workers hold no core, and the mark asks for more than one
+  # helper. On Windows it asked for one, the workers counted as threads
+  # computing, and a server idle between requests marked alone. Then the
+  # same pool with every worker running a task: on Windows the mark asks
+  # for one helper again, the busy workers' cores not the helpers' to
+  # take. Asserted everywhere for the idle pool, on Windows for the busy.
+  if cores >= 3_u64
+    IyiWorkers.count = cores.to_i32
+    # Every worker started first: the pool starts a worker only while none
+    # is idle (SPEC.md III.4.15, part 6), so a task a worker that returns
+    # at once can leave all but two unstarted, and this step then read "2
+    # of 12 workers waiting". Each task spins, up to two seconds, until all
+    # have arrived and the pool has launched every worker. All arrived is
+    # not enough: the pool starts its workers one at a time, each started by
+    # the last to find a task (`IyiWorkers.grow`), and a task spinning past
+    # its quantum gives its worker to one still queued, so the twelve can
+    # all arrive time-sliced on fewer threads and end before the pool has
+    # grown. On Windows 11 with 12 logical processors (the user's machine)
+    # this step read "11 of 12 workers waiting" (and down to 7) in 13 of 60
+    # runs of the plain build, where the twelve arrived within 10 to 25 ms
+    # on 7 to 11 launched workers; a start there takes about a millisecond,
+    # a quantum is 5 to 10 ms. On Linux (12 vCPU) the step alone started
+    # all twelve in each of 500 runs, in 1.5 ms (median).
+    Busy.arrived.value.set(0_u64)
+    group do |g|
+      cores.to_i32.times do
+        g.spawn(unit: :new) do
+          Busy.arrived.value.add(1_u64)
+          until_ns = IyiMark.now_ns + 2000000000_u64
+          while (Busy.arrived.value.get < cores || IyiWorkers.launched < cores.to_i32) && IyiMark.now_ns < until_ns
+            IyiThread.spin_pause
+          end
+          0
+        end
+      end
+    end
+    deadline = IyiMark.now_ns + 5000000000_u64
+    # A spin, not a sleep: this thread asleep would be counted waiting.
+    while IyiScheduler.waiting_threads < cores && IyiMark.now_ns < deadline
+      IyiThread.yield_cpu
+    end
+    waiting = IyiScheduler.waiting_threads
+    fail("idle pool: #{waiting.to_i64} of #{cores.to_i64} workers waiting after five seconds") if waiting < cores
+    threads = IyiThread.program_threads
+    IyiMark.auto = false
+    chain = build_chain(11_u64)
+    IyiMark.auto = true
+    asked = 0_u64
+    marked = false
+    attempt = 0
+    while !marked && attempt < 8
+      marked = allocate_until_marking
+      asked = IyiMark.beside_helpers if marked
+      IyiMark.settle
+      attempt = attempt + 1
+    end
+    IyiMark.auto = false
+    fail("idle pool: no mark ran beside the idle pool in 8 tries") unless marked
+    fail("idle pool: with #{threads.to_i64} threads of the program's on #{cores.to_i64} cores, #{waiting.to_i64} of them pool workers waiting, the mark beside them asked for #{asked.to_i64} helper") if asked < 2_u64
+    puts "idle pool: with #{threads.to_i64} threads of the program's on #{cores.to_i64} cores, #{waiting.to_i64} of them pool workers waiting, the mark beside them asked for #{asked.to_i64} helpers"
+    fail("the chain's tail lost its payload beside the idle pool") unless tail(chain).payload.is_a?(Payload)
+
+    Busy.stop.value.set(0_u64)
+    busy_asked = 0_u64
+    busy_waiting = 0_u64
+    group do |g|
+      cores.to_i32.times do
+        g.spawn(unit: :new) do
+          busy_until_stopped
+          0
+        end
+      end
+      deadline = IyiMark.now_ns + 5000000000_u64
+      while IyiScheduler.waiting_threads > 0_u64 && IyiMark.now_ns < deadline
+        IyiThread.yield_cpu
+      end
+      busy_waiting = IyiScheduler.waiting_threads
+      IyiMark.auto = true
+      marked = false
+      attempt = 0
+      while !marked && attempt < 8
+        marked = allocate_until_marking
+        busy_asked = IyiMark.beside_helpers if marked
+        IyiMark.settle
+        attempt = attempt + 1
+      end
+      IyiMark.auto = false
+      Busy.stop.value.set(1_u64)
+    end
+    fail("busy pool: no mark ran beside the busy pool in 8 tries") unless marked
+    {% if flag?(:win32) %}
+      fail("busy pool: with #{cores.to_i64} pool workers running on #{cores.to_i64} cores, #{busy_waiting.to_i64} waiting, the mark beside them asked for #{busy_asked.to_i64} helpers rather than 1") if busy_asked != 1_u64
+    {% end %}
+    puts "busy pool: with #{cores.to_i64} pool workers running on #{cores.to_i64} cores, #{busy_waiting.to_i64} waiting, the mark beside them asked for #{busy_asked.to_i64} helpers"
+    fail("the chain's tail lost its payload beside the busy pool") unless tail(chain).payload.is_a?(Payload)
   end
   puts "concurrent mark: every property held"
 {% else %}

@@ -1,0 +1,239 @@
+# `std/unit`, exercised: SPEC.md III.4.18.
+#
+#   ./bin/iyi run bench/std_unit_exercise.iyi -- alone parks panic cost --workers=4
+#   ./bin/iyi run bench/std_unit_exercise.iyi -- alone parks panic main --workers=1
+#
+#   alone  eight tasks of one `Unit`, four spawned from the main thread and
+#          four from inside a task in a unit of its own, each spinning
+#          without a park: the most running at one instant is one, the
+#          value holds the eight appends, and each ran on a pool worker on
+#          a pool of more than one and on the main thread on a pool of one.
+#   parks  a task of a `Unit` that parks lets another of its tasks run,
+#          and finds the value changed when it resumes: the first reads the
+#          value's size, says it has started, and parks on a channel; the
+#          spawner, told, spawns the second only then, which appends and
+#          sends. The first read 1 before its park and 2 after, every run:
+#          the order is the channels', not the scheduler's.
+#   panic  a task of a `Unit` that appends and panics answers `Panicked`,
+#          and the `Unit` is neither held nor poisoned: four tasks after it
+#          run, and see its append.
+#   main   on a pool of one, a `Unit`'s task spawned from an `IyiThread`
+#          runs on the main thread, and no pool starts.
+#   cost   10,000 tasks given to one `Unit` from the main thread, against
+#          10,000 `spawn(unit: :new)` tasks: both counted, and timed.
+#
+# bench/std_unit_exercise.sh runs it, the compiler's refusals, and broken
+# copies of each, caught by the step that names them.
+
+module bench/std_unit_exercise
+
+import std/unit::{Unit}
+
+{% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+  def fail(message : String) : Nil
+    print "FAIL: #{message}\n"
+    __iyi_exit(1)
+  end
+
+  SPIN_NS = 200_000_000_i64
+
+  # Each task counts itself in, notes the most it saw running, spins
+  # without parking, and counts itself out: an `Atomic` read in the
+  # block's own text, since one passed to a def is a copy of the word.
+  def alone(workers : Int32) : Nil
+    tally = Unit.new { [] of Int32 }
+    running = Atomic(Int64).new(0_i64)
+    most = Atomic(Int64).new(0_i64)
+    pooled = Atomic(Int64).new(0_i64)
+    on_main = Atomic(Int64).new(0_i64)
+    main_id = IyiScheduler.main_state.object_id
+    group do |g|
+      4.times do |i|
+        g.spawn(in: tally) do |t|
+          now = running.add(1_i64) + 1_i64
+          seen = most.get
+          while now > seen
+            seen, set = most.compare_and_set(seen, now)
+            break if set
+          end
+          pooled.add(1_i64) if IyiScheduler.state.worker
+          on_main.add(1_i64) if IyiScheduler.state.object_id == main_id
+          until_ns = __iyi_monotonic_ns + SPIN_NS // 4_i64
+          while __iyi_monotonic_ns < until_ns && running.get == 1_i64
+          end
+          running.add(-1_i64)
+          t << i
+          0
+        end
+      end
+      g.spawn(unit: :new) do
+        group do |inner|
+          4.times do |i|
+            inner.spawn(in: tally) do |t|
+              now = running.add(1_i64) + 1_i64
+              seen = most.get
+              while now > seen
+                seen, set = most.compare_and_set(seen, now)
+                break if set
+              end
+              pooled.add(1_i64) if IyiScheduler.state.worker
+              on_main.add(1_i64) if IyiScheduler.state.object_id == main_id
+              until_ns = __iyi_monotonic_ns + SPIN_NS // 4_i64
+              while __iyi_monotonic_ns < until_ns && running.get == 1_i64
+              end
+              running.add(-1_i64)
+              t << 10 + i
+              0
+            end
+          end
+        end
+        0
+      end
+    end
+    size = 0
+    group do |g|
+      answer = g.spawn(in: tally) { |t| t.size }.value
+      size = answer if answer.is_a?(Int32)
+    end
+    fail("alone: #{most.get} tasks of one Unit were running at one instant") if most.get != 1_i64
+    fail("alone: the Unit's value holds #{size} appends, not 8") if size != 8
+    if workers > 1
+      fail("alone: #{8_i64 - pooled.get} of 8 tasks of a Unit ran off the pool on #{workers} workers") if pooled.get != 8_i64
+    else
+      fail("alone: #{8_i64 - on_main.get} of 8 tasks of a Unit ran off the main thread on a pool of one") if on_main.get != 8_i64
+    end
+    where = workers > 1 ? "on pool workers" : "on the main thread"
+    puts "alone: 8 tasks of one Unit, from two units, ran one at a time #{where}, and the value holds the 8 appends"
+  end
+
+  def parks : Nil
+    tally = Unit.new { [] of Int32 }
+    started = Channel(Int32).new(1)
+    ping = Channel(Int32).new
+    sizes = {0, 0}
+    group do |g|
+      first = g.spawn(in: tally) do |t|
+        t << 1
+        before = t.size
+        started.send(1)
+        ping.receive
+        {before, t.size}
+      end
+      started.receive
+      g.spawn(in: tally) do |t|
+        t << 2
+        ping.send(0)
+        0
+      end
+      answer = first.value
+      sizes = answer if answer.is_a?(Tuple(Int32, Int32))
+    end
+    if sizes != {1, 2}
+      fail("parks: the first task read #{sizes[0]} before its park and #{sizes[1]} after, not 1 and 2: a unit-mate did not run while it was parked")
+    end
+    puts "parks: a task of a Unit read the value's size as 1 before its park and 2 after: its unit-mate ran while it was parked"
+  end
+
+  def panic : Nil
+    tally = Unit.new { [] of Int32 }
+    said = ""
+    sizes = [] of Int32
+    group do |g|
+      broken = g.spawn(in: tally) do |t|
+        t << 7
+        raise "a task of a Unit panicked, as it was meant to"
+        0
+      end
+      outcome = broken.value
+      said = outcome.message if outcome.is_a?(Panicked)
+      after = [] of IyiTask(Int32)
+      4.times { after << g.spawn(in: tally) { |t| t.size } }
+      after.each do |task|
+        size = task.value
+        sizes << size if size.is_a?(Int32)
+      end
+    end
+    fail("panic: the panicking task answered no Panicked") unless said.includes?("a task of a Unit panicked")
+    fail("panic: the tasks after the panic saw sizes #{sizes}, not [1, 1, 1, 1]") if sizes != [1, 1, 1, 1]
+    puts "panic: a task of a Unit panicked and answered Panicked; the four after it ran, and saw its append"
+  end
+
+  def main_thread : Nil
+    tally = Unit.new { [] of Int32 }
+    main_id = IyiScheduler.main_state.object_id
+    there = Atomic(Int64).new(0_i64)
+    away = Atomic(Int64).new(0_i64)
+    thread = IyiThread.start do
+      group do |g|
+        4.times do |i|
+          g.spawn(in: tally) do |t|
+            if IyiScheduler.state.object_id == main_id
+              there.add(1_i64)
+            else
+              away.add(1_i64)
+            end
+            t << i
+            0
+          end
+        end
+      end
+      nil
+    end
+    thread.join
+    fail("main: #{away.get} of 4 tasks of a Unit spawned from a thread ran on the spawner's thread on a pool of one") if away.get != 0_i64
+    fail("main: a pool started for a Unit on a pool of one") if IyiWorkers.started?
+    puts "main: on a pool of one, 4 tasks of a Unit spawned from a thread ran on the main thread, and no pool started"
+  end
+
+  COST_TASKS = 10_000
+
+  def cost : Nil
+    tally = Unit.new { [0_i64] }
+    started = __iyi_monotonic_ns
+    group do |g|
+      COST_TASKS.times { g.spawn(in: tally) { |t| t[0] += 1_i64; 0 } }
+    end
+    unit_ns = __iyi_monotonic_ns - started
+    counted = 0_i64
+    group do |g|
+      answer = g.spawn(in: tally) { |t| t[0] }.value
+      counted = answer if answer.is_a?(Int64)
+    end
+    fail("cost: the Unit counted #{counted} of #{COST_TASKS}") if counted != COST_TASKS.to_i64
+    plain = Atomic(Int64).new(0_i64)
+    started = __iyi_monotonic_ns
+    group do |g|
+      COST_TASKS.times { g.spawn(unit: :new) { plain.add(1_i64); 0 } }
+    end
+    new_ns = __iyi_monotonic_ns - started
+    fail("cost: spawn(unit: :new) counted #{plain.get} of #{COST_TASKS}") if plain.get != COST_TASKS.to_i64
+    puts "cost: #{COST_TASKS} tasks of one Unit in #{unit_ns // 1000_i64} us (#{unit_ns // COST_TASKS.to_i64} ns each); #{COST_TASKS} spawn(unit: :new) tasks in #{new_ns // 1000_i64} us (#{new_ns // COST_TASKS.to_i64} ns each)"
+  end
+
+  STEPS = ["alone", "parks", "panic", "main", "cost"]
+
+  workers = 4
+  chosen = [] of String
+  Program.args.each do |argument|
+    if argument.starts_with?("--workers=")
+      workers = argument[10, argument.size - 10].to_i
+    else
+      fail("no step named #{argument}") unless STEPS.includes?(argument)
+      chosen << argument
+    end
+  end
+  chosen = ["alone", "parks", "panic"] if chosen.empty?
+  IyiWorkers.count = workers
+  chosen.each do |name|
+    case name
+    when "alone" then alone(workers)
+    when "parks" then parks
+    when "panic" then panic
+    when "main"  then main_thread
+    when "cost"  then cost
+    end
+  end
+  puts "std/unit: every property held on #{IyiWorkers.count} workers"
+{% else %}
+  puts "std/unit: no pool on this target, nothing to hold"
+{% end %}

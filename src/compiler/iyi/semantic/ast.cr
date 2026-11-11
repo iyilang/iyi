@@ -595,6 +595,11 @@ module Iyi
     # to global and class variables.
     property? thread_local = false
 
+    # iyi: the reason a class variable's `@[SafeReach("...")]` gives: the
+    # program says every thread may reach it through a call, and the walk
+    # from a shared block does not warn about it (SPEC.md III.4.4).
+    property iyi_safe_reach : String? = nil
+
     # Is this variable "unsafe" (no need to check if it was initialized)?
     property? uninitialized = false
 

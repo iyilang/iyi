@@ -12,6 +12,7 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO/bench/end_process.sh"
 
 # The search path is a list, and the byte between its entries is the
 # platform's: `;` where a drive letter already owns the colon.
@@ -316,7 +317,7 @@ else
   if [ -z "$port" ]; then
     echo "  the server printed no port"
     status=1
-    kill "$serve_pid" 2>/dev/null
+    end_process "$serve_pid"
   elif PORT="$port" "$PY" - <<'PY'
 import os, sys, http.client
 c = http.client.HTTPConnection("127.0.0.1", int(os.environ["PORT"]), timeout=10)
@@ -362,7 +363,7 @@ PY
   then
     wait "$serve_pid"
   else
-    kill "$serve_pid" 2>/dev/null
+    end_process "$serve_pid"
     status=1
   fi
 fi
@@ -401,7 +402,7 @@ PY
 prove_broken "GET not taking HEAD" "routed HEAD any.example /static/app.js" \
   '@method.empty? || @method == method || (@method == "GET" && method == "HEAD")' '@method.empty? || @method == method'
 prove_broken "the first match taken, not the most specific" "routed GET example.com /" \
-  '(chosen < 0 || pattern.more_specific?(@patterns[chosen]))' '(chosen < 0)'
+  '(chosen < 0 || pattern.more_specific?(patterns[chosen]))' '(chosen < 0)'
 prove_broken "a host's pattern compared with the rest" "routed GET example.com /index.html" \
   'if pattern.host == host && pattern.matches_method?(method)' 'if (pattern.host == host || pattern.host.empty?) && pattern.matches_method?(method)'
 prove_broken "an overlap taken as no conflict" "/index.html beside GET / conflicts" \
@@ -414,7 +415,7 @@ prove_broken "{x} matching an empty segment" "no rest past the end, no empty seg
   '        return nil if piece.empty?
 ' ''
 prove_broken "a subtree's root not redirected" "routed GET any.example /static" \
-  'if (again = find(host, req.method, slashed)) && @patterns[again[0]].exact?(slashed)' 'if false'
+  'if (again = find(patterns, host, req.method, slashed)) && patterns[again[0]].exact?(slashed)' 'if false'
 prove_broken "an unclean path routed as it is" "routed GET any.example /a/../index.html" \
   '    return Router.redirect(path, req.query) unless path == raw
 ' ''

@@ -39,11 +39,21 @@ class Iyi::Command
         reach a changed file is compiled alone, and every failure is
         named.
 
+        Each `g.spawn` the compiler kept in its spawner's unit, in a
+        file under the project's root, gets a note saying what kept it
+        there - `file:line:column: note: spawn stays in its spawner's
+        unit (SPEC.md III.4.18): ...` - so a spawn that could not run in
+        parallel is seen before it is measured. `g.spawn(unit: :same)`
+        says the unit is meant, and takes no note; `--explain-spawn`
+        notes every spawn. A note is not a warning.
+
         Under `-f json` standard error holds one JSON array whatever
         ends the run: a warning is a frame marked `"severity":
-        "warning"`, after the error's frames when there is one, and a
-        refusal with no place in a file - no such file, bytes that are
-        not text - is a frame whose `line` is null.
+        "warning"`, after the error's frames when there is one, a note
+        one marked `"severity": "note"`, and a refusal with no place in
+        a file - no such file, bytes that are not text - is a frame
+        whose `line` is null. `--error-on-warnings` makes a warning exit
+        1, as it does a build; a note never does.
         USAGE
       exit
     end
@@ -60,11 +70,12 @@ class Iyi::Command
       return check_affected
     end
 
-    compile_no_codegen "check"
+    compile_no_codegen "check", warning_options: true
 
-    # Nothing to print on success: the verdict is the exit code, the
-    # same contract `test` and `vet` keep. Errors never reach this line —
-    # they raise out to the one rescue that serves every verb.
+    # Nothing to print on success but the spawn notes (SPEC.md III.4.16):
+    # the verdict is the exit code, the same contract `test` and `vet`
+    # keep. Errors never reach this line — they raise out to the one
+    # rescue that serves every verb.
     report_warnings
     exit 1 if warnings_fail_on_exit?
   end

@@ -15,7 +15,11 @@ describe HTTP::LogHandler do
     handler = HTTP::LogHandler.new
     handler.next = ->(ctx : HTTP::Server::Context) { called = true }
     logs = Log.capture("http.server") { handler.call(context) }
-    logs.check(:info, %r(^192.168.0.1 - GET / HTTP/1.1 - 200 \(\d+(\.\d+)?[mµn]s\)$))
+    # The prefix is optional: a handler that returns within the clock's
+    # resolution reads 0 elapsed, which `humanize` writes as "0.00" with no
+    # prefix. A Windows CI run's entry matched none of the prefixed forms
+    # (job 124991890668); which time it logged was not printed.
+    logs.check(:info, %r(^192.168.0.1 - GET / HTTP/1.1 - 200 \(\d+(\.\d+)?[mµn]?s\)$))
     called.should be_true
   end
 
@@ -31,7 +35,7 @@ describe HTTP::LogHandler do
     handler.call(context)
 
     logs = Log::EntriesChecker.new(backend.entries)
-    logs.check(:info, %r(^- - GET / HTTP/1.1 - 200 \(\d+(\.\d+)?[mµn]s\)$))
+    logs.check(:info, %r(^- - GET / HTTP/1.1 - 200 \(\d+(\.\d+)?[mµn]?s\)$))
   end
 
   it "log failed request" do
@@ -47,6 +51,6 @@ describe HTTP::LogHandler do
         handler.call(context)
       end
     end
-    logs.check(:info, %r(^- - GET / HTTP/1.1 - 200 \(\d+(\.\d+)?[mµn]s\)$))
+    logs.check(:info, %r(^- - GET / HTTP/1.1 - 200 \(\d+(\.\d+)?[mµn]?s\)$))
   end
 end

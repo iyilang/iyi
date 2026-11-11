@@ -1,4 +1,4 @@
-# iyi: `iyi init MODULE [DIR]` — a project, from nothing.
+# iyi: `iyi init [MODULE [DIR]]` — a project, from nothing.
 #
 # `go mod init example.com/me/hello` writes `go.mod` and stops; this writes
 # the manifest and the one file the name promises, and stops there too:
@@ -17,6 +17,14 @@
 # module is a file and whose test is a program. The refusal told the reader
 # to run it "with the `crystal` binary in this checkout", and a person who
 # installed the zip has neither.
+#
+# With no MODULE, the current directory's name is the module path, as `npm
+# init -y` takes it (#156): `mkdir my-project && cd my-project && iyi init`
+# is `module my-project` and `my_project.iyi`. The name is held to the same
+# checks as a typed one and never rewritten to pass them - `MyProject` is
+# refused, not lower-cased - because it is the import path's last segment,
+# and a guess there is a name the project keeps. `.` stays refused: MODULE
+# is a name, not a directory, and `init . foo` would mean nothing.
 #
 # Nothing is ever overwritten: a file that is already there is a refusal
 # before anything is written, so `iyi init` twice is one project, not a
@@ -43,10 +51,15 @@ class Iyi::Command
       end
     end
 
-    unless module_path
-      abort! "init takes a module path: `#{Command.program_name} init example.com/me/hello`, " \
-             "or a bare name like `hello` for a project nobody else will import", :USAGE_ERROR
+    if module_path == "."
+      abort! "init: '.' is a directory, not a module path. `#{Command.program_name} init` with no arguments " \
+             "names the project after the directory it runs in, and `#{Command.program_name} init MODULE DIR` " \
+             "writes into DIR", :USAGE_ERROR
     end
+
+    # No module path: the directory's name, checked below like a typed one.
+    inferred = module_path.nil?
+    module_path ||= ::Path[Dir.current].basename
 
     # The manifest's own grammar decides what a module path is (III.7), and
     # its sentences say why one is not — the same ones a hand-written
@@ -57,6 +70,12 @@ class Iyi::Command
     begin
       Mod::ModFile.check_module_path(module_path)
     rescue ex : Mod::ModError
+      if inferred
+        abort! "init: no module path given, and this directory's name, '#{module_path}', is not one: a module " \
+               "path is lower-case segments joined by `/`, with `.` and `-` allowed inside a segment. Name it: " \
+               "`#{Command.program_name} init example.com/me/hello`, or a bare name like `hello` for a project " \
+               "nobody else will import", :USAGE_ERROR
+      end
       abort! "init: #{ex.message}", :USAGE_ERROR
     end
 
@@ -91,6 +110,13 @@ class Iyi::Command
     unless taken.empty?
       abort! "#{Iyi.relative_filename(directory)} already has #{taken.map { |name| "`#{name}`" }.join(", ")}; " \
              "init writes a new project and never over an old one", :USAGE_ERROR
+    end
+
+    # Said before anything is written: the name was a guess, and a project
+    # others will import wants its whole path, which no directory spells.
+    if inferred
+      puts "no module path given; using #{module_path}, this directory's name. Pass a path like " \
+           "example.com/you/#{module_path} instead if other projects will import this one"
     end
 
     Dir.mkdir_p(directory)
@@ -147,6 +173,7 @@ class Iyi::Command
   private def iyi_init_usage
     <<-USAGE
     Usage: #{Command.program_name} init MODULE [DIR]
+           #{Command.program_name} init
 
     Write a new project: `iyi.mod` naming MODULE, and NAME.iyi, its root
     module, where NAME is MODULE's last segment (`-` written `_`) - `iyi
@@ -156,7 +183,10 @@ class Iyi::Command
 
     MODULE is the path other projects would import this one by — a URL's
     path half, `example.com/me/hello` — or a bare name like `hello` for a
-    project nobody else will import.
+    project nobody else will import. With no MODULE, the current
+    directory's name is MODULE: `iyi init` in `my-project` writes `module
+    my-project` and my_project.iyi, and a name that is not a module path,
+    like `MyProject`, is refused rather than rewritten.
     USAGE
   end
 end

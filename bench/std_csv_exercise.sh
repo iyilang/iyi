@@ -95,6 +95,7 @@ fi
 # row a line and a field `x` and its bytes in hex, so Python's rows and
 # these are compared byte for byte, a row of no fields an empty line.
 cat >"$WORK/oracle.iyi" <<'IYI'
+@[Unsafe("the oracle turns fields to hex and back by reading the strings' bytes through to_unsafe and writing String.new's buffer")]
 module oracle
 
 import std/csv::{CSVReader, CSVWriter, CSVError}

@@ -9,6 +9,26 @@
 
 set -u
 
+# SIGPIPE at its default, whatever this gate was started with. A signal
+# ignored on entry stays ignored in every program the shell starts, and
+# the macos-15 runners (macOS 15.8.2) hand their steps SIGPIPE ignored
+# (debug job 126320045389). There every write to a gone peer is a quiet
+# EPIPE, so the exercise passes whether or not the library protects its
+# writes, and the proof below that the check sees a missing MSG_NOSIGNAL
+# exited 0 in every run: 10 of 10 there, against 141 in 10 of 10 with the
+# signal reset to its default. The step's shell is /bin/bash 3.2, whose
+# `trap -p` does not show a signal ignored on entry, so the gate does not
+# ask; it re-runs itself, once, through a reset it can always make.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) ;;
+  *)
+    if [ -z "${SOCKET_EXERCISE_SIGPIPE_DEFAULT:-}" ]; then
+      export SOCKET_EXERCISE_SIGPIPE_DEFAULT=1
+      exec python3 -c 'import os, signal, sys; signal.signal(signal.SIGPIPE, signal.SIG_DFL); os.execvp(sys.argv[1], sys.argv[1:])' \
+        bash "$0" "$@"
+    fi ;;
+esac
+
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 
 # The search path is a list, and the byte between its entries is the
@@ -80,10 +100,11 @@ fi
 
 echo
 echo "== every socket check reported"
-phrases="connect_accept message_exchange short_read nodelay connect_bound closed_peer close_write ipv6 localhost localhost_v6 localhost_race unix timeout closed_under_read stream"
+phrases="connect_accept message_exchange short_read nodelay connect_bound closed_peer close_write ipv6 localhost localhost_v6 localhost_race unix timeout closed_under_read stream port_stays port_reuse port_thread_ended port_migrate"
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT) phrases="$phrases backlog" ;;
   Linux) phrases="$phrases reset_after_chunk" ;;
+  Darwin) phrases="$phrases reset_before_accept" ;;
 esac
 for phrase in $phrases; do
   grep -q "$phrase: ok" "$WORK/socket-exercise.out" 2>/dev/null || {
@@ -91,7 +112,7 @@ for phrase in $phrases; do
     status=1
   }
 done
-[ "$status" -eq 0 ] && echo "  connect_accept, message_exchange, short_read, nodelay, connect_bound, closed_peer, close_write, ipv6, localhost, localhost_v6, localhost_race, unix, timeout and stream all reported ok"
+[ "$status" -eq 0 ] && echo "  connect_accept, message_exchange, short_read, nodelay, connect_bound, closed_peer, close_write, ipv6, localhost, localhost_v6, localhost_race, unix, timeout, stream, port_stays, port_reuse, port_thread_ended and port_migrate all reported ok"
 
 echo
 echo "== the same program with optimisation on (--release)"
@@ -270,8 +291,17 @@ case "$(uname -s)" in
       echo "  SIGPIPE on a gone peer: the patched library did not build"
       status=1
     else
-      "$WORK/sigpipe/program" >"$WORK/sigpipe/out" 2>&1
-      code=$?
+      # A write to a peer whose reset has already arrived answers
+      # ECONNRESET, which raises no signal, where one before it answers
+      # EPIPE and the signal: which comes first is the scheduler's timing,
+      # and a run on the work-stealing pool once answered the first and
+      # exited 0. The copy is run up to five times; one death by the
+      # signal is the proof.
+      for attempt in 1 2 3 4 5; do
+        "$WORK/sigpipe/program" >"$WORK/sigpipe/out" 2>&1
+        code=$?
+        [ "$code" -eq 141 ] && break
+      done
       if [ "$code" -eq 141 ] && ! grep -q "disconnect: ok" "$WORK/sigpipe/out"; then
         echo "  SIGPIPE on a gone peer: killed by the signal at the disconnect (exit 141)"
       else
@@ -279,8 +309,37 @@ case "$(uname -s)" in
         status=1
       fi
     fi ;;
+  Darwin)
+    # The send without MSG_NOSIGNAL, SO_NOSIGPIPE left as it was: the
+    # connection reset before its accept refuses that option (EINVAL, on
+    # macOS 15.8.2 and 26.6 alike), and the first write to it ends the
+    # process. With SIGPIPE at its default (above) this copy was killed
+    # there in 10 runs of 10 on a macos-15 runner (debug job 126320045389)
+    # and in 10 of 10 on macOS 26.6.2 (Apple M2 Pro, 10 cores, the user's
+    # machine).
+    mkdir -p "$WORK/sigpipe/std"
+    cp -R "$REPO/src/std/." "$WORK/sigpipe/std/"
+    awk '{ sub(/LibC.send\(fd, buf.as\(Void\*\), len, 0x80000\)/, "LibC.send(fd, buf.as(Void*), len, 0)"); print }' \
+      "$REPO/src/std/socket.iyi" > "$WORK/sigpipe/std/socket.iyi"
+    if cmp -s "$REPO/src/std/socket.iyi" "$WORK/sigpipe/std/socket.iyi"; then
+      echo "  SIGPIPE on a connection reset before its accept: the patch changed nothing"
+      status=1
+    elif ! IYI_PATH="$WORK/sigpipe${PSEP}$REPO/src" "$IYI" build -o "$WORK/sigpipe/program" \
+         "$REPO/bench/socket_exercise.iyi" >"$WORK/sigpipe/build.log" 2>&1; then
+      echo "  SIGPIPE on a connection reset before its accept: the patched library did not build"
+      status=1
+    else
+      "$WORK/sigpipe/program" >"$WORK/sigpipe/out" 2>&1
+      code=$?
+      if [ "$code" -eq 141 ] && grep -q "disconnect: ok" "$WORK/sigpipe/out" && ! grep -q "reset_before_accept: ok" "$WORK/sigpipe/out"; then
+        echo "  SIGPIPE on a connection reset before its accept: killed by the signal there (exit 141)"
+      else
+        echo "  SIGPIPE on a connection reset before its accept: exited $code, so the check does not see it"
+        status=1
+      fi
+    fi ;;
   *)
-    echo "  SIGPIPE on a gone peer: Linux's MSG_NOSIGNAL, proved there" ;;
+    echo "  SIGPIPE on a gone peer: MSG_NOSIGNAL, proved on Linux and darwin" ;;
 esac
 
 # 7. The poller keeping one waiter per fd, as it did: the reading fiber
@@ -293,7 +352,10 @@ case "$(uname -s)" in
   *)
 mkdir -p "$WORK/onewaiter/iyi"
 cp -R "$REPO/src/iyi/." "$WORK/onewaiter/iyi/"
-awk '{ sub(/raise "two fibers #\{direction == 1 \? "reading" : "writing"\} one fd" if others & direction != 0/, "raise \"two fibers waiting on one fd\" if others != 0"); print }' \
+awk '/def self\.wait_posix\(fd/ { inwait = 1 }
+     inwait && /^    if others & direction != 0$/ { print "    if others != 0"; next }
+     inwait && /^      raise "two fibers #\{direction == 1 \? "reading" : "writing"\} one fd"$/ { print "      raise \"two fibers waiting on one fd\""; inwait = 0; next }
+     { print }' \
   "$REPO/src/iyi/concurrency.iyi" > "$WORK/onewaiter/iyi/concurrency.iyi"
 if cmp -s "$REPO/src/iyi/concurrency.iyi" "$WORK/onewaiter/iyi/concurrency.iyi"; then
   echo "  one waiter per fd: the patch changed nothing"
@@ -347,6 +409,60 @@ else
     echo "  a deadline left behind: caught (exit $code: $(grep -m1 -E "timeout: (a read with no deadline|the read's old deadline)" "$WORK/stale/out" | sed 's/^iyi: panic: //'))"
   fi
 fi
+
+# 12. The process's one port and the record of the handles std joined to
+#     it (#151), on Windows: a copy that asks to join a socket at every
+#     wait, which the join count catches; one whose close leaves the
+#     record for the next handle with its value, which a pipe the program
+#     made takes and never completes a read on; and one that closes the
+#     port as a thread ends, the port each thread had before the process
+#     had one, which the first wait after a thread's end never completes -
+#     port_reuse's, since the first thread to end is port_stays' watcher;
+#     port_thread_ended holds the same after a thread that waited on the
+#     socket. The exercise's watcher ends a wait that never completes with
+#     the step's name.
+prove_port() { # prove_port <label> <dir> <phrase, a regex> <awk script>
+  local label="$1" dir="$2" phrase="$3" script="$4"
+  mkdir -p "$WORK/$dir/iyi"
+  cp -R "$REPO/src/iyi/." "$WORK/$dir/iyi/"
+  awk "$script" "$REPO/src/iyi/concurrency.iyi" > "$WORK/$dir/iyi/concurrency.iyi"
+  if cmp -s "$REPO/src/iyi/concurrency.iyi" "$WORK/$dir/iyi/concurrency.iyi"; then
+    echo "  $label: the patch changed nothing"
+    status=1
+    return
+  fi
+  if ! IYI_PATH="$WORK/$dir${PSEP}$REPO/src" "$IYI" build -o "$WORK/$dir/program" \
+       "$REPO/bench/socket_exercise.iyi" >"$WORK/$dir/build.log" 2>&1; then
+    echo "  $label: the patched prelude did not build"
+    sed -n '1,12p' "$WORK/$dir/build.log"
+    status=1
+    return
+  fi
+  timeout -k 5 120 "$WORK/$dir/program" >"$WORK/$dir/out" 2>&1
+  local code=$?
+  if [ "$code" -eq 0 ] && ! grep -q "iyi: panic" "$WORK/$dir/out"; then
+    echo "  $label: the exercise still passed, so it does not test this"
+    status=1
+  elif ! grep -q -E "$phrase" "$WORK/$dir/out"; then
+    echo "  $label: failed (exit $code), but not at the expected check"
+    tail -2 "$WORK/$dir/out" | sed 's/^/    /'
+    status=1
+  else
+    printf '  %s: exits %s at "%s"\n' "$label" "$code" \
+      "$(grep -m1 -E "$phrase" "$WORK/$dir/out" | sed 's/^iyi: panic: //')"
+  fi
+}
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    prove_port "a socket joined at every wait" portevery "port_stays: 200 round trips" \
+      '{ sub(/return if word.address != 0_u64 && word.value.get == PORT_JOINED$/, "return if false"); print }'
+    prove_port "the port closed as a thread ends" portclosed "port_(reuse|thread_ended): a wait had not completed" \
+      '{ print } /^      __iyi_close\(state.deadline_timer\) if state.deadline_timer > 0_i64$/ { print "      __iyi_close(pollfd)" }'
+    prove_port "a close that leaves its record" portkept "port_reuse: a wait had not completed" \
+      '{ sub(/word.value.set\(0_u64\) if word.address != 0_u64$/, "nil"); print }' ;;
+  *)
+    echo "  the port record: Windows' completion ports, proved there" ;;
+esac
 
 # 8. An IPv6 address written without its `::`, or a family forgotten.
 prove_fails "ipv6 written uncompressed" badsix "ipv6:" \
@@ -546,8 +662,8 @@ echo
 if [ "$status" -eq 0 ]; then
   echo "Sockets: connect, accept, message exchange, short reads, closed peer,"
   echo "refused connections, IPv6, unix sockets and timeouts all verified, a port and an address are checked before"
-  echo "they are packed, a closed socket says so, and every check is proved to fail"
-  echo "when broken."
+  echo "they are packed, a closed socket says so, a socket std made waits on the process's one port with no call to join it,"
+  echo "and every check is proved to fail when broken."
 else
   echo "Sockets: something above failed."
 fi

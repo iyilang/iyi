@@ -100,10 +100,10 @@ def check_bind_speed(wrong: list[str], held: list[str]) -> None:
 
 
 def check_build_pair(wrong: list[str], held: list[str]) -> None:
-    """README.md quotes the generated head-to-head pair's two line counts."""
-    text = doc("README.md")
-    iyi_lines = quoted(text, r"and ([\d,]+) for what\n`[^`]*generate_pair\.py 300", "README.md", wrong)
-    go_lines = quoted(text, r"each row is \d+ lines and ([\d,]+)", "README.md", wrong)
+    """BENCHMARKS.md quotes the generated head-to-head pair's two line counts."""
+    text = doc("BENCHMARKS.md")
+    iyi_lines = quoted(text, r"and ([\d,]+) for what\n`[^`]*generate_pair\.py 300", "BENCHMARKS.md", wrong)
+    go_lines = quoted(text, r"each row is \d+ lines and ([\d,]+)", "BENCHMARKS.md", wrong)
     if not iyi_lines or not go_lines:
         return
     with tempfile.TemporaryDirectory() as raw:
@@ -117,11 +117,11 @@ def check_build_pair(wrong: list[str], held: list[str]) -> None:
     want_go = int(go_lines[0].replace(",", ""))
     if (want_iyi, want_go) != (measured_iyi, measured_go):
         wrong.append(
-            f"README.md: the head-to-head pair is quoted as {want_iyi} iyi and {want_go} Go "
+            f"BENCHMARKS.md: the head-to-head pair is quoted as {want_iyi} iyi and {want_go} Go "
             f"lines, the generator writes {measured_iyi} and {measured_go}"
         )
         return
-    held.append(f"the generated pair is {measured_iyi} iyi and {measured_go} Go lines, as README.md says")
+    held.append(f"the generated pair is {measured_iyi} iyi and {measured_go} Go lines, as BENCHMARKS.md says")
 
 
 def check_gc_arms(wrong: list[str], held: list[str]) -> None:
@@ -221,6 +221,72 @@ def check_context_threshold(wrong: list[str], held: list[str]) -> None:
     held.append(f"the context pack's line is {stated[0]}% in both")
 
 
+def check_webapp_size(wrong: list[str], held: list[str]) -> None:
+    """SPEC.md IV.3a quotes the generated web application's size; the generator writes it."""
+    webapp = load("bench/incremental/generate_webapp.py")
+    text = doc("SPEC.md")
+    prose = quoted(text, r"(\d+) controllers in (\d+) files and ([\d,]+) lines", "SPEC.md", wrong)
+    rows = quoted(text, r"\| generated web app \(\d+ controllers\) \| ([\d,]+, [\d,]+) \|", "SPEC.md", wrong)
+    if not prose or not rows:
+        return
+    with tempfile.TemporaryDirectory() as raw:
+        webapp.generate(raw, webapp.CONTROLLERS)
+        files = [p for p in pathlib.Path(raw).rglob("*") if p.suffix in (".iyi", ".eiy")]
+        lines = sum(p.read_bytes().count(b"\n") for p in files)
+    measured = (webapp.CONTROLLERS, len(files), lines)
+    stated = re.search(r"(\d+) controllers in (\d+) files and ([\d,]+) lines", text)
+    said = tuple(int(group.replace(",", "")) for group in stated.groups())
+    table = rows[0]
+    if said != measured or table != f"{measured[1]}, {measured[2]:,}":
+        wrong.append(
+            f"SPEC.md: the generated web application is quoted as {said} and `{table}`, "
+            f"bench/incremental/generate_webapp.py writes {measured[0]} controllers, "
+            f"{measured[1]} files, {measured[2]:,} lines"
+        )
+        return
+    held.append(f"the generated web application is {measured[1]} files and {measured[2]:,} lines, as SPEC.md says")
+
+
+def check_web_cores_shape(wrong: list[str], held: list[str]) -> None:
+    """SPEC.md and BENCHMARKS.md say how issue #145's table was taken; the script holds it.
+
+    The sentence is matched with its line breaks folded to spaces, since a
+    rewrapped paragraph is the same sentence.
+    """
+    cores = load("bench/web_cores.py")
+    pattern = (
+        r"`bench/web_cores\.py`: wrk with (\d+) threads and (\d+) kept-alive connections, "
+        r"bcrypt at cost (\d+), `serve` on ([\d, and]+) workers, best of (\d+) runs of "
+        r"(\d+) s \(login\) and (\d+) s \(the others\)"
+    )
+    instrument = (
+        cores.WRK_THREADS, cores.CONNECTIONS, cores.COST, list(cores.WORKERS), cores.RUNS,
+        cores.SECONDS["login"], cores.SECONDS["check_version"],
+    )
+    if cores.SECONDS["check_version"] != cores.SECONDS["order"]:
+        wrong.append("bench/web_cores.py: check_version and order run for different times, which the docs' one figure cannot say")
+        return
+    for twin in ("bench/web_cores.iyi", "bench/web_cores/main.go"):
+        stored = re.search(r"\$2b\$(\d\d)\$", doc(twin))
+        if stored is None or int(stored.group(1)) != cores.COST:
+            wrong.append(f"{twin}: its stored hash is not at bench/web_cores.py's cost {cores.COST}")
+            return
+    for where in ("SPEC.md", "BENCHMARKS.md"):
+        text = " ".join(doc(where).split())
+        if not quoted(text, pattern, where, wrong):
+            continue
+        found = re.search(pattern, text)
+        threads, connections, cost, workers, runs, login, others = found.groups()
+        said = (
+            int(threads), int(connections), int(cost),
+            [int(n) for n in re.findall(r"\d+", workers)], int(runs), int(login), int(others),
+        )
+        if said != instrument:
+            wrong.append(f"{where}: issue #145's table is said to be taken as {said}, bench/web_cores.py runs {instrument}")
+            continue
+        held.append(f"{where}'s web_cores table is taken as bench/web_cores.py takes it")
+
+
 # What no gate on a shared runner can check, named rather than left implied.
 # Each is a figure the docs state in the present tense and only a quiet,
 # release-built machine can produce; `bench/machine_probe.py` prints the
@@ -235,6 +301,9 @@ UNCHECKABLE = [
     "the macro tables' seconds (bench/macro_cost.py, needs a release compiler)",
     "the resident-set band (bench/resident_probe.py, needs a release build)",
     "the runtime ratios (bench/runtime.py, needs release builds of both libraries)",
+    "the real-program edit-loop table (bench/edit_loop.py, needs a release compiler)",
+    "issue #145's requests a second, CPU and latency (bench/web_cores.py, needs wrk and go)",
+    "the allocator's scaling across a pool and its lock samples (bench/alloc_scaling.py, needs release builds and gdb)",
 ]
 
 
@@ -248,6 +317,8 @@ def main() -> int:
         check_macro_sizes,
         check_daemon_shape,
         check_context_threshold,
+        check_webapp_size,
+        check_web_cores_shape,
     ):
         check(wrong, held)
 

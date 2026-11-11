@@ -10,6 +10,7 @@
 #   robust FILE     each line a value in hex: read and walked, every
 #                   primitive decoded by its tag, and never a panic.
 
+@[Unsafe("its hex and byte helpers read strings' bytes through to_unsafe and copy bytes into String.new's buffer, the way std/asn1 reads its input")]
 import std/asn1::{Der, DerValue, DerClass, DerTag, Asn1Error}
 import std/file::{File}
 import std/time::{Time}

@@ -105,12 +105,13 @@ fi
 echo
 echo "== dedicated boundary failure probes (panics on contract violations)"
 
-prove_panic() {
-  local label="$1" code="$2" expected_phrase="$3"
+prove_panic() { # prove_panic <label> <code> <phrase> [<@[Unsafe] mark, for code that handles raw memory>]
+  local label="$1" code="$2" expected_phrase="$3" mark="${4:-}"
   local probe_file="$WORK/probe_${label}.iyi"
   local bin_file="$WORK/probe_${label}"
 
   cat <<EOF > "$probe_file"
+$mark
 module bench/probe_${label}
 
 import std/slice::{Slice}
@@ -165,7 +166,8 @@ prove_panic "bad_copy_length" \
 
 prove_panic "bad_copy_count" \
   'src = Slice(Int32).new(3, 1); ptr = Pointer(Int32).malloc(2_u64); src.copy_to(ptr, 5)' \
-  "copy count 5 exceeds source size 3"
+  "copy count 5 exceeds source size 3" \
+  '@[Unsafe("the probe copies a slice into a two-element buffer from Pointer#malloc, asking for five")]'
 
 prove_panic "readonly_write" \
   's = Slice(Int32).new(3, read_only: true); s[0] = 42' \

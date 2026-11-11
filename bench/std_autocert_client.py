@@ -11,7 +11,8 @@ the gate's broken copies are each caught at the name of the check that
 covers them. The exit status is 1 when any check failed.
 
 `pebble`'s PARTS, by commas or `all`, in the order they run: first,
-refused, ten, remembered, restart, http01, modes, renewal, unknown. A
+refused, ten, remembered, restart, http01, modes, renewal, unknown,
+parallel. A
 part runs the parts it rests on first (restart needs first and ten,
 http01 restart's server, modes the cache they wrote).
 """
@@ -190,17 +191,19 @@ class Pebble:
 class Served:
     """One `serve` process of the exercise, and its log."""
 
-    def __init__(self, setup, label, pebble, cache, hosts, challenges, roots=None):
+    def __init__(self, setup, label, pebble, cache, hosts, challenges, roots=None, parallel=False, workers=None):
         self.ready = os.path.join(setup["work"], f"{label}.ready")
         if os.path.exists(self.ready):
             os.remove(self.ready)
         self.out = os.path.join(setup["work"], f"{label}.out")
         # ROOTS, which the manager checks each chain to: Pebble's own root
         # unless another is given.
+        # *workers*, the pool size the environment asks for (IYI_WORKERS).
+        env = dict(os.environ, IYI_WORKERS=str(workers)) if workers else None
         self.process = subprocess.Popen(
             [setup["exercise"], "serve", pebble.directory, setup["minica"], roots or pebble.root, cache, str(setup["tls_port"]),
-             str(setup["http_port"]), ",".join(hosts), ",".join(challenges), self.ready],
-            stdout=open(self.out, "w"), stderr=subprocess.STDOUT)
+             str(setup["http_port"]), ",".join(hosts), ",".join(challenges), self.ready] + (["parallel"] if parallel else []),
+            stdout=open(self.out, "w"), stderr=subprocess.STDOUT, env=env)
         # The exercise tries a port held after the last server for a minute.
         deadline = time.time() + 90
         while not os.path.exists(self.ready):
@@ -436,12 +439,71 @@ class Scenario:
         finally:
             server.stop()
 
+    def parallel(self):
+        print("\n== serve on four workers: handshakes on the pool, the manager on its own thread", flush=True)
+        if self.server:
+            self.server.stop()
+            self.server = None
+        # Ten first handshakes for a name at once, each on whichever worker
+        # takes it: one order, made by `run` on the manager's thread, and
+        # its tls-alpn-01 validation answered by a worker from the table
+        # the manager put the challenge in. Then ten more, answered from
+        # the certificates the workers read, with no order.
+        cache = os.path.join(self.setup["work"], "parallel-cache")
+        # Under IYI_WORKERS=2, so the pool a spawn starts before `serve`
+        # differs from serve's four on every machine, CI's four-vCPU
+        # runners included: a size asked for after that spawn panics.
+        server = Served(self.setup, "parallel", self.a, cache, ["p.autocert.example"], ["tls-alpn-01"], parallel=True, workers=2)
+        try:
+            for round in ("first", "held"):
+                before = self.a.orders()
+                results = [None] * 10
+                start = threading.Barrier(10)
+
+                def one(i):
+                    start.wait()
+                    try:
+                        leaf, _, _, body = handshake(server.port, "p.autocert.example", cafile=self.a.root, request=True)
+                        results[i] = (serial(leaf), body)
+                    except (ssl.SSLError, OSError) as e:
+                        results[i] = (f"error: {e}", "")
+
+                threads = [threading.Thread(target=one, args=(i,)) for i in range(10)]
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join()
+                made = self.a.orders() - before
+                if round == "first":
+                    # Its own check, so that a server that died is not
+                    # read as any of the failures below.
+                    up = server.process.poll() is None
+                    held(up, "on four workers, the server stays up beside the pool its first spawn started",
+                         "IYI_WORKERS=2, serve(workers: 4)" if up else f"exited {server.process.returncode}: {open(server.out).read()[-240:]}")
+                    if not up:
+                        return
+                serials = [r[0] for r in results if r and not r[0].startswith("error")]
+                workers = {r[1] for r in results if r and r[1].startswith("worker ")}
+                errors = [r[0] for r in results if r and r[0].startswith("error")][:1]
+                if round == "first":
+                    held(len(serials) == 10 and len(set(serials)) == 1, "on four workers, ten concurrent first connections verify, one certificate",
+                         f"{len(serials)} verified, serials {sorted(set(serials))}; {errors}; server: {open(server.out).read()[-300:] if errors else ''}")
+                    held(made == 1, "on four workers, ten concurrent first connections create one order", f"Pebble made {made}")
+                    first_workers = workers
+                else:
+                    held(len(serials) == 10 and made == 0, "on four workers, a held certificate is shown with no order",
+                         f"{len(serials)} verified; Pebble made {made}; {errors}")
+                    every = first_workers | workers
+                    held(len(every) > 1, "on four workers, handshakes answered on more than one worker", f"{len(every)} workers answered")
+        finally:
+            server.stop()
+
     def close(self):
         if self.server:
             self.server.stop()
 
 
-PARTS = ["first", "refused", "ten", "remembered", "restart", "http01", "modes", "renewal", "unknown"]
+PARTS = ["first", "refused", "ten", "remembered", "restart", "http01", "modes", "renewal", "unknown", "parallel"]
 
 
 def pebble(exercise, setup_path, parts):

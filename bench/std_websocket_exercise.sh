@@ -18,6 +18,8 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO/bench/darwin_frames.sh"
+. "$REPO/bench/end_process.sh"
 # The gate runs the compiler the caller names; bin/iyi is a POSIX shell
 # wrapper a Windows build cannot run.
 IYI="${IYI:-$REPO/bin/iyi}"
@@ -139,15 +141,15 @@ refuses() { # refuses <label> <name> <phrase> <statement>
   printf '  %s: exits %s at "%s"\n' "$label" "$code" "$(grep -m1 -oF "$phrase" "$WORK/$name.out")"
 }
 refuses "text that is not UTF-8" text_bytes "WebSocket: send's text is not UTF-8; send_binary sends bytes" \
-  'ws.send(String.new(1) { |p| p[0] = 255_u8 })'
+  'ws.send(String.new([255_u8]))'
 refuses "a ping past 125 bytes" ping_long "WebSocket: a ping carries at most 125 bytes, not 200" \
-  'ws.ping(String.new(200) { |p| 200.times { |i| p[i] = 97_u8 } })'
+  'ws.ping("a" * 200)'
 refuses "close 1006" close_1006 "WebSocket: close code 1006 is not one an endpoint sends: 1000-1003, 1007-1014 or 3000-4999" \
   'ws.close(1006)'
 refuses "close 5000" close_5000 "WebSocket: close code 5000 is not one an endpoint sends" \
   'ws.close(5000)'
 refuses "a close reason past 123 bytes" reason_long "WebSocket: a close reason is at most 123 bytes, not 124" \
-  'ws.close(1000, String.new(124) { |p| 124.times { |i| p[i] = 97_u8 } })'
+  'ws.close(1000, "a" * 124)'
 refuses "a caller's Upgrade" own_upgrade "WebSocket: Upgrade is the handshake's own header" \
   'WebSocket.connect("ws://127.0.0.1:#{l.local_port}/", {"Upgrade" => "h2c"})'
 refuses "a negative limit" limit_negative "WebSocket: max_message is a count of bytes, not -1" \
@@ -632,7 +634,7 @@ if [ -n "$port" ]; then
     status=1
   fi
 fi
-kill "$serve_pid" 2>/dev/null
+end_process "$serve_pid"
 
 echo
 echo "== the client against a Python server"
@@ -967,7 +969,7 @@ PY
       status=1
     fi
   fi
-  kill "$wss_pid" 2>/dev/null
+  end_process "$wss_pid"
   if [ -s "$WORK/ws-server.py" ]; then
     TLS_CERT="$WORK/wss/chain.pem" TLS_KEY="$WORK/wss/key.pem" HOST=localhost timeout 120 "$PY" "$WORK/ws-server.py" > "$WORK/wss-pyserver.out" 2>&1 &
     py_pid=$!
@@ -1038,7 +1040,7 @@ PY
       else
         echo "  an upgrade that hands over the bare socket under TLS is caught: $(grep -m1 -E 'FAIL|Error' "$WORK/bare-client.out" | sed 's/^ *//' | cut -c1-100)"
       fi
-      kill "$bare_pid" 2>/dev/null
+      end_process "$bare_pid"
     fi
   fi
 fi
@@ -1046,20 +1048,23 @@ fi
 echo
 echo "== the exercise's artifacts and other platforms"
 # Built from the modules' artifacts, the exercise must print what it
-# printed from source; and it typechecks for the four other platforms std
-# is held to.
+# printed from source, darwin's frames under a task's panic left out
+# (bench/darwin_frames.sh); and it typechecks for the four other
+# platforms std is held to.
 mkdir -p "$WORK/r1/mods"
 if (cd "$WORK/r1" && "$IYI" build --emit-iyimod mods -o from-source "$REPO/bench/std_websocket_exercise.iyi" \
       && "$IYI" build --use-iyimod mods -o from-artifact "$REPO/bench/std_websocket_exercise.iyi") > "$WORK/r1/build.log" 2>&1 \
    && timeout -k 5 300 "$WORK/r1/from-source" > "$WORK/r1/source.out" 2>&1 \
    && timeout -k 5 300 "$WORK/r1/from-artifact" > "$WORK/r1/artifact.out" 2>&1 \
-   && cmp -s "$WORK/r1/source.out" "$WORK/r1/artifact.out" \
+   && without_frames < "$WORK/r1/source.out" > "$WORK/r1/source.cmp" \
+   && without_frames < "$WORK/r1/artifact.out" > "$WORK/r1/artifact.cmp" \
+   && cmp -s "$WORK/r1/source.cmp" "$WORK/r1/artifact.cmp" \
    && grep -q "ALL CHECKS PASSED" "$WORK/r1/artifact.out"; then
   echo "  from source and from its artifacts alike, $(wc -l < "$WORK/r1/artifact.out" | tr -d ' ') lines"
 else
   echo "  FAIL: the exercise does not run the same from its artifacts"
   grep -m3 -E 'Error|panic: ASSERTION' "$WORK/r1/build.log" "$WORK/r1/source.out" "$WORK/r1/artifact.out" 2>/dev/null | sed 's/^/    /'
-  diff "$WORK/r1/source.out" "$WORK/r1/artifact.out" 2>/dev/null | sed -n '1,6p' | sed 's/^/    /'
+  diff "$WORK/r1/source.cmp" "$WORK/r1/artifact.cmp" 2>/dev/null | sed -n '1,6p' | sed 's/^/    /'
   status=1
 fi
 for target in x86_64-linux-gnu aarch64-darwin x86_64-windows-msvc aarch64-linux-gnu x86_64-linux-musl; do

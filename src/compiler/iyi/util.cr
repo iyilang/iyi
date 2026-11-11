@@ -22,6 +22,55 @@ module Iyi
     filename
   end
 
+  # iyi: the character a symbol joins two names with, and never `@` (SPEC.md
+  # IV.1g, *A symbol has no `@` in it*).
+  #
+  # An inherited method is `*Derived^Base#hi` and a proc literal is
+  # `~procProc(Int32, Int32)^src/a.iyi:3`. Both were joined with `@`, which
+  # GNU ld reads as a symbol version: every distinct suffix in a definition
+  # became a version definition of the executable, and the loader keeps 15
+  # bits of a version index. Built at 9f0d82076 and linked with GNU ld 2.46,
+  # `std_spec` had 39,376 of them, so glibc 2.34's index was 39,384, read
+  # back as 6,616, and the program stopped before `main` on
+  # `__libc_start_main` wanting version `Object::==<Pointer(SpecEnumFlags).
+  # class>:Bool` (Linux). lld drops the suffix instead and leaves
+  # `*Array(Int32)` for every method an array inherits. The compiler itself
+  # defined 41,263 such symbols (40,901 inherited methods and 362 procs).
+  #
+  # `^` because neither side of it can hold one. Before it is a type and
+  # after it a type (a method) or a file and a line (a proc). The type names
+  # in those 41,263 symbols use letters, digits and `_`, `:`, `(`, `)`, ` `,
+  # `,`, `+`, `|`, `*` and `.` of their own; everything else in them, `/`,
+  # `-`, `"`, `\` and `'`, was text a person wrote — a file's path, a quoted
+  # `NamedTuple` key — and that goes through `symbol_text`, which escapes
+  # `^`. A method's own name comes after `#` or `::`, past the join. Every
+  # target takes it as written: ELF, Mach-O and wasm symbols are any bytes
+  # but NUL, and on MSVC `safe_mangling` spells it `.5E.` as it spelled `@`
+  # `.40.`.
+  SYMBOL_JOIN = '^'
+
+  # Writes *text*, which somebody other than the compiler chose, into a
+  # symbol: a file's path (a private def's owner, a proc literal's place), a
+  # quoted `NamedTuple` key, a `Symbol`'s name. `@` is escaped for the reason
+  # above, and the package cache is where it is common: every file of a
+  # dependency lives under `<cache>/mod/<path>@v<version>`. `^` is escaped so
+  # that `SYMBOL_JOIN` is never the person's, and `%` so that the escape is
+  # one: two texts that differ give two names, `a@b` and `a%40b` included.
+  def self.symbol_text(io : IO, text : String) : Nil
+    unless text.each_byte.any? &.unsafe_chr.in?('%', '@', '^')
+      io << text
+      return
+    end
+    text.each_char do |char|
+      case char
+      when '%' then io << "%25"
+      when '@' then io << "%40"
+      when '^' then io << "%5E"
+      else          io << char
+      end
+    end
+  end
+
   # iyi: whether *name* names a variable this compiler wrote rather than one
   # somebody typed.
   #
@@ -186,25 +235,44 @@ module Iyi
   # file, which is the question.
   # iyi: on Windows, *path* made free for a new file: false only when it is
   # there, cannot be opened for writing - a running program, a read-only
-  # file - and cannot be renamed either. Moved to `*.old`, or `*.old-<pid>`
-  # when an earlier one is still running and cannot be deleted.
+  # file - and cannot be renamed either, for `BUSY_WAIT`. Moved to `*.old`,
+  # or `*.old-<pid>` when an earlier one is still running and cannot be
+  # deleted.
+  #
+  # The wait is for a holder that lets go. With Smart App Control
+  # evaluating (Windows 11), a program that has just run is opened by
+  # `CryptSvc`, `AppIDSvc` and the `applockerfltr` filter, shared for
+  # reading only, so it can be neither written nor renamed: the Restart
+  # Manager named those three after each run, held 0.1 to 1.1 s, and a
+  # build begun at once over 30 seeds of `bench/rebuild_reuse.py`'s probe
+  # stopped at "LNK1104: cannot open file" in 6 of 60 builds, or here at
+  # "in use and cannot be replaced". Go's `cmd/go` waits the same way
+  # for the same holders (`robustio`, two seconds).
+  BUSY_WAIT = 2.seconds
+
   def self.move_aside_if_busy(path : String) : Bool
-    return true unless File.file?(path)
-    begin
-      File.open(path, "r+") { }
-      return true
-    rescue File::Error
+    deadline = Time.instant + BUSY_WAIT
+    while true
+      return true unless File.file?(path)
+      begin
+        File.open(path, "r+") { }
+        return true
+      rescue File::Error
+      end
+      aside = "#{path}.old"
+      begin
+        File.delete(aside) if File.exists?(aside)
+      rescue File::Error
+        aside = "#{path}.old-#{Process.pid}"
+      end
+      begin
+        File.rename(path, aside)
+        return true
+      rescue File::Error
+        return false if Time.instant >= deadline
+        sleep 20.milliseconds
+      end
     end
-    aside = "#{path}.old"
-    begin
-      File.delete(aside) if File.exists?(aside)
-    rescue File::Error
-      aside = "#{path}.old-#{Process.pid}"
-    end
-    File.rename(path, aside)
-    true
-  rescue File::Error
-    false
   end
 
   def self.writable_directory?(directory : String) : Bool
@@ -315,6 +383,32 @@ module Iyi
       name += ".exe"
     {% end %}
     name
+  end
+
+  # iyi: a runner's own program and what the link wrote beside it, once the
+  # program has exited. Windows refused the delete for a moment after the
+  # exit - "being used by another process", whatever still held the image -
+  # and the refusal, raised out of the runner's `ensure`, replaced the
+  # program's own verdict: `std_http_latency.iyi` printed ALL CHECKS PASSED
+  # and `iyi run` exited 1 (CI job 130381353157). Asked again for two
+  # seconds: one second failed once on a CI runner against a gate's 300 ms
+  # hold (CI job 130589942769), the cause not recorded, and two leave room.
+  # A file still held then is left for `sweep_run_leftovers`, whose next run
+  # past the hour takes it. Elsewhere a refusal is not the platform's habit,
+  # and raises.
+  def self.delete_run_output(path : String) : Nil
+    {% if flag?(:win32) %}
+      40.times do |attempt|
+        begin
+          File.delete?(path)
+          return
+        rescue File::Error
+          sleep 50.milliseconds unless attempt == 39
+        end
+      end
+    {% else %}
+      File.delete?(path)
+    {% end %}
   end
 
   def self.with_line_numbers(

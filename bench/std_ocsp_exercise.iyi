@@ -34,6 +34,7 @@
 #                   and DIR/list: `name|response|leaf|issuer|verdict|hash`
 #                   for OpenSSL to judge as well, under the CertID's hash.
 
+@[Unsafe("its hex and byte helpers read strings' bytes through to_unsafe and copy bytes into String.new's buffer, the way std/ocsp reads its input")]
 import std/ocsp::{OcspResponse, OcspError, OcspCertStatus, OcspHash, OcspCertId, Ocsp, OcspVerdict}
 import std/x509::{Certificate, X509Error}
 import std/time::{Time}

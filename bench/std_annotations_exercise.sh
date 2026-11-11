@@ -147,9 +147,9 @@ fi
 
 echo
 echo "== what annotations refuse"
-refuses() { # refuses <label> <name> <phrase> <code_snippet>
-  local label="$1" name="$2" phrase="$3" snippet="$4"
-  printf 'module %s\nimport std/annotations::{Deprecated, Experimental, TargetFeature, Link}\n%s\n' "$name" "$snippet" > "$WORK/$name.iyi"
+refuses() { # refuses <label> <name> <phrase> <code_snippet> [<@[Unsafe] mark, for a snippet that binds C>]
+  local label="$1" name="$2" phrase="$3" snippet="$4" mark="${5:-}"
+  printf '%s\nmodule %s\nimport std/annotations::{Deprecated, Experimental, TargetFeature, Link}\n%s\n' "$mark" "$name" "$snippet" > "$WORK/$name.iyi"
   if "$IYI" build -o "$WORK/$name" "$WORK/$name.iyi" > "$WORK/$name.build.log" 2>&1; then
     echo "  $label: unexpectedly succeeded"
     status=1
@@ -183,7 +183,8 @@ case "$(uname -s)" in
   *) missing_library="-lnosuchlib_annotations_probe" ;;
 esac
 refuses "bogus Link library" bad_lib "$missing_library" \
-  $'@[Link("nosuchlib_annotations_probe")]\nlib LibMissing\n  fun nosuch_annotations_probe_sym : Int32\nend\nputs LibMissing.nosuch_annotations_probe_sym'
+  $'@[Link("nosuchlib_annotations_probe")]\nlib LibMissing\n  fun nosuch_annotations_probe_sym : Int32\nend\nputs LibMissing.nosuch_annotations_probe_sym' \
+  '@[Unsafe("the program calls a C function from a library that does not exist, so the link must name it")]'
 
 echo
 echo "== deprecation warning after import"

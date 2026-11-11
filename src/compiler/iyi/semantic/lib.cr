@@ -22,6 +22,13 @@ class Iyi::Call
 
     obj_type.used = true
     external.used = true
+    # iyi: a C call written outside the prelude makes the program one whose
+    # Linux threads libc makes (`Program#iyi_calls_c?`). The prelude's own
+    # calls are the runtime's and do not count: on Linux the only ones it
+    # has are the thread start's, which this answer decides.
+    if !program.iyi_calls_c? && program.iyi_c_function?(external) && !program.iyi_prelude_location?(location)
+      program.iyi_calls_c = true
+    end
 
     untyped_defs = [external] of Def
     @target_defs = untyped_defs

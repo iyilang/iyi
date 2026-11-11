@@ -10,6 +10,7 @@
 # file describes, `parse DIR COUNT` describes the messages in DIR, and
 # `codec FILE` answers the encodings a case file asks for.
 
+@[Unsafe("its test helpers walk messages' bytes through to_unsafe, to check what std/mail writes byte for byte")]
 module std_mail_exercise
 
 import std/mail::{Mail, MailError}

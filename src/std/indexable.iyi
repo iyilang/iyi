@@ -34,6 +34,7 @@
 # `index 5 out of range for 3 elements`, naming the index as it was written;
 # `first`/`last` on an empty collection panic, `first?`/`last?` answer nil.
 
+@[Unsafe("its walks call `unsafe_fetch` and `unsafe_put` with an index each keeps in 0...size, the promise the two make their callers keep")]
 module std/indexable
 
 import std/enumerable::{Enumerable}
@@ -44,6 +45,8 @@ pub trait Indexable
   type Elem
 
   abstract def size : Int32
+
+  @[Unsafe(call: "index is in 0...size")]
   abstract def unsafe_fetch(index : Int32) : Elem
 
   # ---- iteration -----------------------------------------------------------
@@ -428,6 +431,7 @@ end
 pub trait IndexableMutable : Indexable
   type Elem
 
+  @[Unsafe(call: "index is in 0...size")]
   abstract def unsafe_put(index : Int32, value : Elem) : Elem
 
   # Replaces the element at index with what the block answers for it,

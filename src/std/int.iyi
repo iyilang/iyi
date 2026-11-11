@@ -29,6 +29,7 @@
 # `9007199254740993_i128 == 9007199254740992.0` is false. The prelude's own
 # four (`Int32`, `Int64`, `UInt8`, `UInt64`) keep the prelude's `==` family,
 # which is exact as well and agrees with their `<=>` here.
+@[Unsafe("conversions between the integer widths are compiler primitives")]
 module std/int
 
 {% begin %}

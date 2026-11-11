@@ -707,7 +707,7 @@ module Iyi
   #
   # There is nothing new in it. The two sides mangle names identically, being
   # one compiler — `Lib::Greeter.polite(String) : String` is
-  # `*Lib::Greeter@Lib::Greeter::polite<String>:String` compiled from either
+  # `*Lib::Greeter^Lib::Greeter::polite<String>:String` compiled from either
   # language — so a shard's object file already defines the symbols an iyi
   # consumer would call. What was missing was a `.iyimod` saying they exist.
   #
@@ -753,9 +753,9 @@ module Iyi
         name: method.name,
         # Whose method it is, which the symbol carries. A module written
         # `extend self` defines `polite` on the module and mangles
-        # `*Widget@Widget::polite<String>:String`; one written `def self.polite`
+        # `*Widget^Widget::polite<String>:String`; one written `def self.polite`
         # defines it on the metaclass and mangles `*Widget::polite<String>:String`
-        # — no `@`. Both were recorded as the first, so every `def self.` in a
+        # — no `^`. Both were recorded as the first, so every `def self.` in a
         # shard produced a declaration the consumer called by a name nothing
         # emitted. Crystal's own library is written the second way throughout.
         receiver: method.owner == "#{root}:Module" && method.receiver.empty? ? "self" : method.receiver,
@@ -797,7 +797,7 @@ module Iyi
       # so there is no single symbol for the producer to emit. `module Gen`
       # writes `def next_pair` and `class Fixed` includes it; what a consumer
       # calling `Fixed#next_pair` wants is
-      # `*Gen::Fixed@Gen#next_pair:Tuple(UInt32, UInt32)`, and the producer
+      # `*Gen::Fixed^Gen#next_pair:Tuple(UInt32, UInt32)`, and the producer
       # emits that only for the including types *its own code* instantiated.
       # `db` has them because `db`'s code calls `close` on all three of its
       # `Disposable`s; a module whose includers the shard never uses has none,
@@ -805,7 +805,7 @@ module Iyi
       #
       # Only where the module does not `extend self`, which is the same
       # distinction the keep file takes: a module that does answers to these
-      # itself, so the producer emits `*Gen@Gen#next_pair` and the keep file
+      # itself, so the producer emits `*Gen^Gen#next_pair` and the keep file
       # keeps it alive.
       #
       # And whatever its side, a function that takes a block, for the reason
@@ -2294,7 +2294,7 @@ module Iyi
         io << "#\n"
         io << "# `def self.`, because that is how the declaration is written and\n"
         io << "# the two have to agree on the symbol: one spelling is\n"
-        io << "# `Kemal@Kemal::x`, the other `Kemal::x`. It was `extend self`\n"
+        io << "# `Kemal^Kemal::x`, the other `Kemal::x`. It was `extend self`\n"
         io << "# here while an iyi module header supplied one on the far side;\n"
         io << "# now the header supplies it only where the shard wrote it, so\n"
         io << "# these say for themselves which side of the type they are on.\n"
@@ -2448,7 +2448,7 @@ module Iyi
       # one, and which of the two a call has is in the symbol: `BinData::
       # VerificationException.to_s(io)` emits `*BinData::VerificationException::
       # to_s<IO+>` where a consumer holding the class asks for `*BinData::
-      # VerificationException+@BinData::VerificationException::to_s<IO+>`. A
+      # VerificationException+^BinData::VerificationException::to_s<IO+>`. A
       # consumer holds it virtually because that is what holding a class in a
       # variable is — `io << exception.class`, through `Exception+.class` — and
       # `iyi_artifact_self_type` writes the virtual form for exactly that
@@ -2819,7 +2819,7 @@ module Iyi
   # is written, and `IyiMod::DeclarationMarker` reads a `Nop` body as a method
   # somebody else compiled. The consumer then promises a symbol the producer
   # never emitted, because a travelling method is left out of the keep file —
-  # `undefined symbol: *ExceptionPage+@ExceptionPage#backtracer:Nil`,
+  # `undefined symbol: *ExceptionPage+^ExceptionPage#backtracer:Nil`,
   # referenced by the consumer's own copy of the `initialize` that calls it.
   #
   # `nil` is the same method: an empty body answers `nil`, and the declaration
@@ -2835,7 +2835,7 @@ module Iyi
   # the root, then mapped to what a consumer calls another boundary's types. A
   # key left behind is a body nobody finds: the declaration arrives without one,
   # the consumer reads it as a method somebody else compiled, and the link ends
-  # on `undefined symbol: *Radix::Tree(Kemal::Route)@Radix::Tree(T)#add<…>`.
+  # on `undefined symbol: *Radix::Tree(Kemal::Route)^Radix::Tree(T)#add<…>`.
   private def self.rekey_body(container : String, before : IyiMod::Signature,
                               after : IyiMod::Signature,
                               ordinal : Int32 = 0,
@@ -2942,7 +2942,7 @@ module Iyi
   # What an iyi program calls this shard, which is not a matter of taste.
   #
   # The symbol is the whole reason. Both sides mangle alike, so `Greeter.polite`
-  # is `*Greeter@Greeter::polite<String>:String` compiled from either language —
+  # is `*Greeter^Greeter::polite<String>:String` compiled from either language —
   # but only if the consumer's module *is* `Greeter`, and the consumer builds
   # that name by camelcasing the module path it imported. `downcase` broke the
   # round trip for every name with an inner capital: `MyGreeter` became
@@ -2985,7 +2985,7 @@ module Iyi
   # in the path and `camelcase` reads two as one. The check stays because the
   # failure it catches is the worst-behaved kind: the mangled symbol carries
   # whichever name the side that compiled it had, so a producer writing
-  # `*Foo_Bar@Foo_Bar::...` and a consumer asking for `*FooBar@FooBar::...` agree
+  # `*Foo_Bar^Foo_Bar::...` and a consumer asking for `*FooBar^FooBar::...` agree
   # on everything a compiler checks and disagree only where `ld` looks.
   private def self.round_trips?(root : String) : Bool
     consumer_name(root) == root
@@ -3063,7 +3063,7 @@ module Iyi
 
     types.each do |name, type|
       next unless type.is_a?(NamedType)
-      written_here = type.locations.try(&.any? { |location| location.filename.to_s.starts_with?(root) })
+      written_here = type.locations.try(&.any? { |location| location.read_from.to_s.starts_with?(root) })
       next unless written_here || type.types?
 
       # A `private` type of the library is not a name a consumer can write.
@@ -3175,7 +3175,7 @@ module Iyi
       locations = type.locations
       next unless locations && !locations.empty?
       next unless locations.all? do |location|
-                    filename = location.filename
+                    filename = location.read_from
                     filename.is_a?(String) && filename.starts_with?(directory)
                   end
       # A namespace with nothing in it is nothing to bind: `PQ` holds types
@@ -3193,7 +3193,7 @@ module Iyi
     return false unless locations && !locations.empty?
 
     locations.all? do |location|
-      filename = location.filename
+      filename = location.read_from
       filename.is_a?(String) && filename.starts_with?(root)
     end
   end
@@ -3762,13 +3762,13 @@ module Iyi
     # is the consumer's. `abstract class ExceptionPage` fills with 0 units and
     # that is not a bug — there is no machine code, because nothing in that
     # shard subclasses it — so a consumer that writes `class Report < Sheet`
-    # asked for `*Sheet+@Sheet#render` and nobody had made one.
+    # asked for `*Sheet+^Sheet#render` and nobody had made one.
     #
     # A *module*'s methods are the fourth, and the same sentence says it: they
     # are instantiated per *including* type, and the includer may be in another
     # boundary altogether. `db` writes `module Disposable` with a `close` in
     # it; `sqlite3`'s `ResultSet` includes it through `DB::ResultSet`, and
-    # neither artifact can define `*SQLite3::ResultSet@DB::Disposable#close` —
+    # neither artifact can define `*SQLite3::ResultSet^DB::Disposable#close` —
     # db's build has no such type, and sqlite3's has the method only as a
     # header. Nobody could compile it, so nobody did.
     abstract_owner = (type.responds_to?(:abstract?) && type.abstract?) ||
@@ -4571,7 +4571,7 @@ module Iyi
   # `Location#expanded_location` is the walk, and it already exists for this.
   private def self.written_in(location : Location?) : String?
     return nil unless location
-    location.expanded_location.try(&.filename).as?(String)
+    location.expanded_location.try(&.read_from).as?(String)
   end
 
   # What the shard added to types it does not own.
@@ -4643,7 +4643,7 @@ module Iyi
     return nil unless type.is_a?(AliasType)
     return nil unless type.namespace.is_a?(Program)
 
-    written = type.locations.try(&.compact_map { |at| at.filename.as?(String) })
+    written = type.locations.try(&.compact_map { |at| at.read_from.as?(String) })
     return nil unless written.try(&.any?(&.starts_with?(directory)))
 
     # And this root's own only. A shard's files are read once per root it
@@ -4687,7 +4687,7 @@ module Iyi
     return nil unless type.responds_to?(:locations)
     locations = type.locations
     return nil unless locations
-    files = locations.compact_map { |location| location.filename.as?(String) }
+    files = locations.compact_map { |location| location.read_from.as?(String) }
     return nil unless files.any? &.starts_with?(directory)
     owned = !files.any?(&.starts_with?(library))
 
@@ -4963,7 +4963,7 @@ module Iyi
     return nil unless type.responds_to?(:locations)
     locations = type.locations
     return nil unless locations
-    files = locations.compact_map { |location| location.filename.as?(String) }
+    files = locations.compact_map { |location| location.read_from.as?(String) }
     return nil unless files.any? &.starts_with?(library)
     return nil unless files.any? &.starts_with?(directory)
 

@@ -29,8 +29,9 @@ class Iyi::Program
 
   # The passes that follow the top-level ones, split out so that the prelude
   # fork probe can run the top-level pass over the prelude and over the user
-  # file separately and then finish over the combined tree. Calling
-  # `top_level_semantic` and then this is exactly `semantic`.
+  # file separately and then finish over the combined tree.
+  # `semantic` also appends definition-typing probes between these passes;
+  # the fork probe currently omits that step.
   #
   # *also_check* is for the fork probe, whose prelude was processed by a
   # different `TypeDeclarationProcessor` in the parent. Its class-var check has
@@ -56,6 +57,10 @@ class Iyi::Program
     processor.check_non_nilable_class_vars_without_initializers
     also_check.try &.check_non_nilable_class_vars_without_initializers
 
+    # Definition typing has now declared the imported witnesses. Resolve
+    # deferred union/generic matches strictly before typing consumer bodies.
+    Prof.span("restored artifact references") { resolve_iyi_artifact_refs }
+
     result = @progress_tracker.stage("Semantic (main)") do
       Prof.span("main: visit_main") do
         visit_main(node, process_finished_hooks: true, cleanup: cleanup, visitor: main_visitor)
@@ -68,6 +73,26 @@ class Iyi::Program
         cleanup_files
       end
     end
+
+    # iyi: every shared block is checked by now, so each piece of state
+    # they reach is warned about once, with how many blocks reach it
+    # (SPEC.md III.4.4).
+    @cleanup_transformer.try &.report_share_reach
+    # And every `@[SafeReach]` is proven, or refused naming the write that
+    # breaks it (`ReachProof`, SPEC.md III.4.4): the whole typed program is
+    # final only once the cleanup has met every def.
+    if cleanup && !iyi_reach_claims.empty?
+      @progress_tracker.stage("Semantic (reach proof)") { ReachProof.run(self, result) }
+    end
+    # A spawn of a module this build writes an artifact for, placed in
+    # parallel on a claim that holds only for this program, goes back to
+    # its unit (III.4.15).
+    iyi_settle_claimed_spawns unless iyi_claimed_spawns.empty?
+    # And every spawn is classified (III.4.15): `--explain-spawn`'s notes.
+    iyi_note_spawns
+    # And beside a parallel one, the unsafe modules its block reaches
+    # (III.13), which the placement takes at their word.
+    iyi_note_unsafe_spawns
 
     @progress_tracker.stage("Semantic (recursive struct check)") do
       Prof.span("recursive struct check") { RecursiveStructChecker.new(self).run }
@@ -108,7 +133,15 @@ class Iyi::Program
       # use a new MainVisitor which will have no vars.
       visitor.vars = main_visitor.vars.dup unless main_visitor.vars.empty?
 
-      Prof.span("top level: node.accept") { node.accept visitor }
+      # The files this walk will read are parsed ahead of it, on threads of
+      # their own, for as long as the walk runs (`ParseAhead`).
+      @parse_ahead = ParseAhead.start(self, node, parse_ahead_threads)
+      begin
+        Prof.span("top level: node.accept") { node.accept visitor }
+      ensure
+        @parse_ahead.try &.stop
+        @parse_ahead = nil
+      end
       Prof.span("top level: finished hooks") { visitor.process_finished_hooks }
       visitor.new_expansions
     end
@@ -121,7 +154,7 @@ class Iyi::Program
     # by name. Asked per import it was a stricter order than the question: `pg`
     # declares `PG` and `PQ`, each names the other, and no order of two
     # boundaries answers both. See `Program::IyiArtifactRef`.
-    Prof.span("artifact references") { resolve_iyi_artifact_refs }
+    Prof.span("artifact references") { resolve_iyi_artifact_refs(defer_witness_matches: true) }
 
     @progress_tracker.stage("Semantic (new)") do
       Prof.span("new methods") { define_new_methods(new_expansions) }
@@ -165,7 +198,7 @@ class Iyi::Program
     return node if inits.empty?
     @iyi_module_inits = [] of ASTNode
 
-    inits = shuffle_iyi_module_initialisers(inits) unless has_flag?("release")
+    inits = reorder_iyi_module_initialisers(inits) unless has_flag?("release")
 
     expressions = node.is_a?(Expressions) ? node.expressions : [node] of ASTNode
 
@@ -190,25 +223,42 @@ class Iyi::Program
 
   # iyi: reorders independent modules (SPEC.md III.5 rule 2).
   #
-  # Rule 2 says the relative order of two modules that do not import each other
-  # is *unobservable*, not merely unspecified — a module can only name what it
-  # imports (R-1), reach what that module exports (R-2), and reopen nothing
-  # (R-3), so an initialiser has nothing of an unrelated module to look at. A
-  # rule nobody can observe is a rule that rots, so debug builds do not hand
-  # out the same order twice: this walks the DAG the way Kahn's algorithm does
-  # and picks at random among the modules whose imports have all been placed,
-  # which produces a different valid topological order each build.
+  # Rule 2 leaves the order of two modules that do not import each other
+  # unspecified, and a program whose output changes with it is wrong. A rule
+  # a program can break without a word is a rule that rots, so debug builds
+  # do not keep the load order: this walks the DAG the way Kahn's algorithm
+  # does and, among the modules whose imports have all been placed, takes the
+  # one whose module path hashes lowest. That is a valid topological order and
+  # in general not the load order, so a program that leans on the load order
+  # shows it in a debug build. Release builds keep the load order.
   #
-  # Release builds keep the load order, so what ships is reproducible.
-  # `IYI_INIT_SEED` pins the order, for a program that fails under one.
-  private def shuffle_iyi_module_initialisers(inits : Array(ASTNode)) : Array(ASTNode)
-    seed = ENV["IYI_INIT_SEED"]?.try &.to_u64?
-    random = seed ? Random.new(seed) : Random.new
+  # The pick used to be a fresh `Random` per build, and that made no two
+  # debug builds of one program the same program (#141). Codegen is
+  # demand-driven from `__iyi_main`, so a new order of the initialisers
+  # changed `_main` and the order functions were emitted into every unit an
+  # initialiser reached first, and a unit's object is reused only when its
+  # bitcode is the last build's byte for byte: ten no-change rebuilds of
+  # `bench/rebuild_reuse.py`'s fixture compiled 1 to 12 of its 100 objects
+  # again, `_main` every time and `String`, `Hash(String, Int32)` and
+  # `Std::Regex::RxCompiler` among the rest. The hash is of the module path
+  # and the seed, so every build of an import graph hands out the same order
+  # and those ten rebuilds compile nothing. A module that nothing else
+  # imports goes in without reordering the others.
+  #
+  # `IYI_INIT_SEED` salts the hash: another seed is another order, the same
+  # one each build, for looking at a program under more than one.
+  private def reorder_iyi_module_initialisers(inits : Array(ASTNode)) : Array(ASTNode)
+    seed = ENV["IYI_INIT_SEED"]?.try(&.to_u64?) || 0_u64
 
     by_file = {} of String => ASTNode
+    rank = {} of String => {UInt64, String}
     pending = inits.map do |init|
       filename = init.as(FileNode).filename
       by_file[filename] = init
+      # The module path rather than the filename, so that where the checkout
+      # is does not decide the order. The path breaks a tie of the hashes.
+      path = @iyi_module_paths[filename]? || @iyi_artifact_modules[filename]? || filename
+      rank[filename] = {iyi_init_rank(seed, path), path}
       filename
     end
 
@@ -223,16 +273,33 @@ class Iyi::Program
         imports.nil? || imports.all? { |dep| placed.includes?(dep) || !by_file.has_key?(dep) }
       end
       # Cannot be empty: `import` is refused a cycle, so some module's imports
-      # are all placed. Falling back rather than dividing by zero if it is.
+      # are all placed. Falling back rather than `min_by` raising if it is.
       ready = pending if ready.empty?
 
-      chosen = ready[random.rand(ready.size)]
+      chosen = ready.min_by { |filename| rank[filename] }
       pending.delete chosen
       placed << chosen
       ordered << by_file[chosen]
     end
 
     ordered
+  end
+
+  # Where a module goes among the ready ones: FNV-1a over the seed's eight
+  # bytes and then the path's, finished with splitmix64's mixer so that two
+  # paths differing in their last byte are not ordered by that byte.
+  # `String#hash` is no use here: it is seeded afresh in every process.
+  private def iyi_init_rank(seed : UInt64, path : String) : UInt64
+    hash = 0xcbf29ce484222325_u64
+    8.times do |index|
+      hash = (hash ^ ((seed >> (8 * index)) & 0xff_u64)) &* 0x100000001b3_u64
+    end
+    path.each_byte do |byte|
+      hash = (hash ^ byte) &* 0x100000001b3_u64
+    end
+    hash = (hash ^ (hash >> 30)) &* 0xbf58476d1ce4e5b9_u64
+    hash = (hash ^ (hash >> 27)) &* 0x94d049bb133111eb_u64
+    hash ^ (hash >> 31)
   end
 
   # This property indicates that the compiler has finished the top-level semantic

@@ -109,10 +109,27 @@ module Iyi
     # Keeps the 10 most recently used directories in the cache,
     # and removes all others. Directories a compiler is working in right now
     # are kept whatever their age (see `#directory_in_use?`).
+    #
+    # iyi: and a macro's `run` program counts only against the others, ten
+    # of them kept apart (`MACRO_RUN`). It is the program's to build again
+    # whenever it is gone, inside `Semantic (main)`, and every program that
+    # runs it shares it: counted with the builds, ten builds of anything
+    # else removed std/eiy's, and the next build of a 10,700-line
+    # application that renders templates, nothing in it changed, took
+    # 6.03 to 14.17 s in `Semantic (main)` instead of 3.28 to 3.81 - 2.06 to
+    # 4.47 s building the helper again, and once 9.21 s for its 51 runs,
+    # a program Windows had not yet seen starting (Windows 11, five rounds).
+    # Kept apart, the same five rounds took 3.44 to 4.11 s.
     def cleanup(dir = compute_dir)
       entries = gather_cache_entries(dir)
       cleanup_dirs(entries)
     end
+
+    # What a macro's `run` program is called in its directory.
+    MACRO_RUN = "macro_run"
+
+    # How many directories of each kind the rotation keeps.
+    KEPT = 10
 
     # Returns a filename that has prepended the cache directory.
     def join(filename)
@@ -210,12 +227,16 @@ module Iyi
     end
 
     private def cleanup_dirs(entries)
-      entries
+      helpers, builds = entries
         .select { |dir| Dir.exists?(dir) }
-        .sort_by! { |dir| File.info?(dir).try(&.modification_time) || Time.unix(0) }
-        .reverse!
-        .skip(10)
-        .each { |name| FileUtils.rm_rf(name) unless directory_in_use?(name) }
+        .partition { |dir| File.exists?(File.join(dir, MACRO_RUN)) }
+      {builds, helpers}.each do |dirs|
+        dirs
+          .sort_by! { |dir| File.info?(dir).try(&.modification_time) || Time.unix(0) }
+          .reverse!
+          .skip(KEPT)
+          .each { |name| FileUtils.rm_rf(name) unless directory_in_use?(name) }
+      end
     end
 
     # iyi: whether a compiler is working in this directory right now.

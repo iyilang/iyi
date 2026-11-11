@@ -1,5 +1,6 @@
 require "./spec_helper"
 require "../support/string"
+require "../support/thread"
 require "spec/helpers/iterate"
 require "spec/helpers/string"
 
@@ -638,6 +639,29 @@ describe "String" do
 
   it "compares strings: same size, different string" do
     "foo".should_not eq("bar")
+  end
+
+  # iyi: the compiler's parse-ahead workers count the characters of strings
+  # the walk compares (`#size` fills a zero `@length` in). `==` read the
+  # other string's `@length` twice, and 0 then the count made equal bytes
+  # compare unequal; here a thread empties and refills one string's count
+  # while this one compares it.
+  it "compares strings: same string while another thread counts its characters" do
+    literal = "includes?"
+    counted = String.new("includes?".to_slice)
+    header = counted.as(Int32*)
+    stop = Atomic(Bool).new(false)
+    thread = new_thread do
+      until stop.get(:relaxed)
+        header[2] = 0
+        counted.size
+      end
+    end
+    unequal = 0
+    10_000_000.times { unequal += 1 unless literal == counted }
+    stop.set(true, :relaxed)
+    thread.join
+    unequal.should eq(0)
   end
 
   it "interpolates string" do
@@ -2941,7 +2965,7 @@ describe "String" do
         bytes.should eq Bytes[72, 0, 101, 0, 108, 0, 108, 0, 111, 0]
       end
 
-      {% unless flag?(:musl) || flag?(:solaris) || flag?(:freebsd) || flag?(:dragonfly) || flag?(:netbsd) %}
+      {% unless flag?(:musl) || flag?(:solaris) || flag?(:freebsd) || flag?(:dragonfly) || flag?(:netbsd) || (flag?(:darwin) && !flag?(:use_libiconv)) %}
         it "flushes the shift state (#11992)" do
           "\u{00CA}".encode("BIG5-HKSCS").should eq(Bytes[0x88, 0x66])
           "\u{00CA}\u{0304}".encode("BIG5-HKSCS").should eq(Bytes[0x88, 0x62])
@@ -2950,7 +2974,8 @@ describe "String" do
 
       # FreeBSD iconv encoder expects ISO/IEC 10646 compatibility code points,
       # see https://www.ccli.gov.hk/doc/e_hkscs_2008.pdf for details.
-      {% if flag?(:freebsd) || flag?(:dragonfly) || flag?(:netbsd) %}
+      # macOS 27.0.1 (Citrus iconv) gives the same answers.
+      {% if flag?(:freebsd) || flag?(:dragonfly) || flag?(:netbsd) || (flag?(:darwin) && !flag?(:use_libiconv)) %}
         it "flushes the shift state (#11992)" do
           "\u{F329}".encode("BIG5-HKSCS").should eq(Bytes[0x88, 0x66])
           "\u{F325}".encode("BIG5-HKSCS").should eq(Bytes[0x88, 0x62])
@@ -2994,7 +3019,7 @@ describe "String" do
         String.new(bytes, "UTF-16LE").should eq("Hello")
       end
 
-      {% unless flag?(:solaris) || flag?(:freebsd) || flag?(:dragonfly) || flag?(:netbsd) %}
+      {% unless flag?(:solaris) || flag?(:freebsd) || flag?(:dragonfly) || flag?(:netbsd) || (flag?(:darwin) && !flag?(:use_libiconv)) %}
         it "decodes with shift state" do
           String.new(Bytes[0x88, 0x66], "BIG5-HKSCS").should eq("\u{00CA}")
           String.new(Bytes[0x88, 0x62], "BIG5-HKSCS").should eq("\u{00CA}\u{0304}")
@@ -3007,6 +3032,15 @@ describe "String" do
         it "decodes with shift state" do
           String.new(Bytes[0x88, 0x66], "BIG5-HKSCS").should eq("\u{00CA}")
           String.new(Bytes[0x88, 0x62], "BIG5-HKSCS").should eq("\u{F325}")
+        end
+      {% end %}
+
+      # macOS Citrus iconv decodes both 8866 and 8862 to "\u{00CA}", whereas
+      # GNU returns "\u{00CA}\u{0304}" for 8862 and FreeBSD returns "\u{F325}".
+      {% if flag?(:darwin) && !flag?(:use_libiconv) %}
+        it "decodes with shift state" do
+          String.new(Bytes[0x88, 0x66], "BIG5-HKSCS").should eq("\u{00CA}")
+          String.new(Bytes[0x88, 0x62], "BIG5-HKSCS").should eq("\u{00CA}")
         end
       {% end %}
 

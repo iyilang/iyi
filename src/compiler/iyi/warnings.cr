@@ -30,6 +30,32 @@ module Iyi
     # get them as text in front of the JSON (`Command#json_report`).
     getter reports = [] of CodeError
 
+    # iyi: `--explain-spawn` (SPEC.md III.4.15): a note for each `g.spawn`,
+    # saying whether it runs in parallel and, when it stays in its
+    # spawner's unit, what kept it there - the program's own spawns, or
+    # with `--explain-spawn-std` std's and the prelude's too. `Fallback`,
+    # `iyi check`'s level when nothing else is asked for (III.4.16): a note
+    # only for a spawn the compiler kept in its unit, in a file under the
+    # project's root. A note is not a warning: nothing is detected, so
+    # `--error-on-warnings` does not count one, and a build that asked for
+    # none prints none.
+    enum ExplainSpawn
+      None
+      Fallback
+      Program
+      All
+    end
+
+    property explain_spawn = ExplainSpawn::None
+
+    # Each note as where it is and what it says, in the order the cleanup
+    # met the spawns.
+    getter notes = [] of {Location, String}
+
+    def add_note(location : Location, message : String) : Nil
+      @notes << {location, message}
+    end
+
     # The detected warnings as text, one each.
     def infos : Array(String)
       @reports.map(&.to_s_with_source(nil))
@@ -73,6 +99,18 @@ module Iyi
       @reports << report
     end
 
+    # iyi: an empty collection that keeps what this one keeps, for a parse on
+    # another thread (`ParseAhead`). Its reports join these when the walk
+    # takes the file, in the order the walk reads files.
+    def fork : WarningCollection
+      dup.tap &.forget_reports
+    end
+
+    protected def forget_reports : Nil
+      @reports = [] of CodeError
+      @notes = [] of {Location, String}
+    end
+
     def report(io : IO)
       unless @reports.empty?
         @reports.each do |report|
@@ -86,7 +124,7 @@ module Iyi
     def ignore_warning_due_to_location?(location : Location?)
       return false unless location
 
-      filename = location.original_filename
+      filename = location.original_read_from
       return false unless filename
 
       if lib_path = @lib_path
@@ -110,16 +148,23 @@ module Iyi
   class Command
     def report_warnings
       return unless compiler = @compiler
+      warnings = compiler.warnings
       if @json_output
-        json_report { } unless compiler.warnings.reports.empty?
+        json_report { } unless warnings.reports.empty? && warnings.notes.empty?
       else
-        compiler.warnings.report(STDERR)
+        # A note is one line, `file:line:column: note: ...`, the shape an
+        # editor's quickfix list and `grep` read.
+        warnings.notes.each do |(location, message)|
+          STDERR.puts "#{location}: note: #{message}"
+        end
+        warnings.report(STDERR)
       end
     end
 
     # iyi: what `-f json` writes to standard error, whatever ends the run: one
     # JSON array, the frames the block writes and then every warning, marked
-    # `"severity": "warning"`. Warnings were printed there as text, so
+    # `"severity": "warning"`, then every note (`--explain-spawn`), marked
+    # `"severity": "note"`. Warnings were printed there as text, so
     # `check -f json` on a file with one answered `In colon2.iyi:3:17 ...
     # Warning: ...` and exit 0, and a caller parsing it as JSON got nothing.
     def json_report(& : JSON::Builder ->) : Nil
@@ -127,6 +172,16 @@ module Iyi
         json.array do
           yield json
           @compiler.try &.warnings.reports.each(&.to_json_single(json))
+          @compiler.try &.warnings.notes.each do |(location, message)|
+            json.object do
+              json.field "file", location.filename.to_s
+              json.field "line", location.line_number
+              json.field "column", location.column_number
+              json.field "size", 0
+              json.field "message", message
+              json.field "severity", "note"
+            end
+          end
         end
       end)
     end

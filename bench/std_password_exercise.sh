@@ -92,10 +92,9 @@ fi
 # The oracles below write an iyi program of their cases, run it, and read
 # what it printed against Python's answers.
 B_HELPER='def b(hex : String) : Array(UInt8)
-  p = hex.to_unsafe
   Array(UInt8).new(hex.bytesize // 2) do |i|
-    hi = p[i * 2].to_i32
-    lo = p[i * 2 + 1].to_i32
+    hi = hex.byte_at(i * 2).to_i32
+    lo = hex.byte_at(i * 2 + 1).to_i32
     hi = hi >= 97 ? hi - 87 : hi - 48
     lo = lo >= 97 ? lo - 87 : lo - 48
     (hi * 16 + lo).to_u8

@@ -61,6 +61,7 @@
 # with the mantissa exactly `precision` bits, each result rounded once to
 # the nearest, ties to even, from its exact value (see `BigFloat`).
 
+@[Unsafe("a number's digits are read and parsed straight out of the string's buffer, for speed")]
 module std/big
 
 import std/int

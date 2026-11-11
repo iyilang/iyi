@@ -15,6 +15,7 @@
 #      the next line to the next read, and that read is another thread's:
 #      on Windows the line was posted to the first reader's port, and the
 #      read had not answered 10 s on.
+@[Unsafe("it reads stdin with iyi_read into a buffer it allocates, the raw read the parked fiber waits on")]
 module stdin_park
 
 import std/file::{File}

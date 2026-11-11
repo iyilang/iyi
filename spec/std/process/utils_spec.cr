@@ -76,6 +76,12 @@ describe Process do
     it { Process.parse_arguments_posix(%q[foo"bar"baz]).should eq [%q[foobarbaz]] }
     it { Process.parse_arguments_posix(%q[foo'bar'baz]).should eq [%q[foobarbaz]] }
     it { Process.parse_arguments_posix(%q[this 'is a "'very wei"rd co"m"mand please" don't do t'h'a't p"leas"e]).should eq [%q[this], %q[is a "very], %q[weird command please], %q[dont do that], %q[please]] }
+    # iyi: what `cc -###` prints for `-Wl,-rpath,$ORIGIN/../lib`, which the
+    # compiler's own link parses, and the other characters a backslash quotes
+    # between double quotes; before anything else it is itself.
+    it { Process.parse_arguments_posix(%q["-rpath" "\$ORIGIN/../lib"]).should eq [%q[-rpath], %q[$ORIGIN/../lib]] }
+    it { Process.parse_arguments_posix(%q["a\"b" "c\\d" "e\`f" "g\h"]).should eq [%q[a"b], %q[c\d], %q[e`f], %q[g\h]] }
+    it { Process.parse_arguments_posix("\"a\\\nb\"").should eq ["ab"] }
 
     it "raises an error when double quote is unclosed" do
       expect_raises ArgumentError, "Unmatched quote" do

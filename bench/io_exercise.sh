@@ -229,7 +229,7 @@ PY
     #    a console of its own and ends it after 20 seconds.
     echo
     echo "== a fatal sentence on a console, the heap lock held"
-    printf 'module badfree\n\nimport std/gc::{GC}\n\nputs "freeing"\nx = 5\nGC.free(pointerof(x).as(Void*))\nputs "survived"\n' > "$WORK/badfree.iyi"
+    printf '@[Unsafe("the program hands GC.free the address of a local through pointerof, the bad free whose fatal sentence the console must show")]\nmodule badfree\n\nimport std/gc::{GC}\n\nputs "freeing"\nx = 5\nGC.free(pointerof(x).as(Void*))\nputs "survived"\n' > "$WORK/badfree.iyi"
     if [ -z "$PY" ]; then
       echo "  no python3 on this machine, so the console is unmeasured"
     elif ! "$IYI" build -o "$WORK/badfree" "$WORK/badfree.iyi" > "$WORK/badfree.build" 2>&1; then

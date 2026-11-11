@@ -47,13 +47,13 @@ fi
 
 echo
 echo "== every check reported"
-for phrase in reclaimed warm survivor liveness large steady refault; do
+for phrase in reclaimed warm survivor liveness large steady refault room threaded cut trim batches edge idle; do
   grep -q "$phrase" "$WORK/sweep.out" 2>/dev/null || {
     echo "  MISSING: nothing reported for $phrase"
     status=1
   }
 done
-[ "$status" -eq 0 ] && echo "  reclaimed, warm, survivor, liveness, large, steady and refault all reported"
+[ "$status" -eq 0 ] && echo "  reclaimed, warm, survivor, liveness, large, steady, refault, room, threaded, cut, trim, batches, edge and idle all reported"
 
 echo
 echo "== the same program with optimisation on"
@@ -72,11 +72,13 @@ echo "== the checks fail when the sweep is broken"
 # Two directions. A sweep that reclaims nothing is a leak; a sweep that reclaims
 # something live is a corrupted program. A check that cannot see both is not
 # testing a collector.
+# The script edits `prelude.iyi` unless a fifth argument names another
+# file of `src/iyi`.
 prove_fails() {
-  local label="$1" dir="$2" phrase="$3" script="$4"
+  local label="$1" dir="$2" phrase="$3" script="$4" file="${5:-prelude.iyi}"
   mkdir -p "$WORK/$dir/iyi"
   cp -R "$REPO/src/iyi/." "$WORK/$dir/iyi/"
-  awk "$script" "$REPO/src/iyi/prelude.iyi" > "$WORK/$dir/iyi/prelude.iyi"
+  awk "$script" "$REPO/src/iyi/$file" > "$WORK/$dir/iyi/$file"
   if ! IYI_PATH="$WORK/$dir:$REPO/src" "$IYI" build \
        -o "$WORK/$dir/program" "$REPO/bench/sweep_exercise.iyi" \
        >"$WORK/$dir/build.log" 2>&1; then
@@ -138,7 +140,7 @@ prove_fails "sweep frees the live" reckless "sweep:" \
 # The refill stops threading idle warm runs: the pages stay idle, the
 # class carves its frontier, and the warm check names how many were left.
 prove_fails "warm pages never taken up" nowarm "warm:" \
-  '{ sub(/head = thread_warm\(candidate\) if /, "head = 0_u64 if "); print }'
+  '{ sub(/head = thread_warm\(candidate, table, index\) if /, "head = 0_u64 if "); print }'
 
 # A chunk popped off the list is handed out with the dead object's bytes
 # still in it - a warm page holds what the dead left - so the clearing
@@ -151,16 +153,77 @@ prove_fails "warm chunks not cleared" dirtywarm "warm:" \
 prove_fails "the fast path does not clear" dirtyfast "warm:" \
   '{ if ($0 ~ /^                write64\(word, 0_u64\)$/) { print "                # removed"; next } print }'
 
-# A quarter-step class's warm pages counted at the full chunk again: a
-# fifth too few stay warm, and the steady churn hands pages back.
-prove_fails "warm pages counted at the full chunk" roundwarm "rounding:" \
-  '{ if ($0 ~ /^        floor = chunk > 128_u64 \?/) { print "        floor = chunk"; next } print }'
+# The carve not counted as the class's take: an epoch that carves what
+# its warm pages fell short of keeps no more warm the epoch after - the
+# first warm check's burst keeps none, and the churn asking twice its
+# budget hands its excess back every epoch and carves it again (#150).
+prove_fails "the carve not counted" carvetake "warm:|refault:|rounding:" \
+  '{ if ($0 ~ /^        taken_add\(table, index, count &\* chunk\)$/) { print "        # removed"; found = 1; next } print } END { if (!found) exit 3 }'
 
-# The cold reopenings not carried into the next epoch's warm room: the
-# churn that asks twice its budget hands its excess back every epoch and
-# carves it again (issue #150).
-prove_fails "cold reopenings not kept warm" refault "refault:" \
-  '{ if ($0 ~ /^        @@warm_extra = @@warm_extra - @@warm_extra.unsafe_shr\(4_u64\) \+ \(reopened_cold - @@reopened_cold\) \* IyiHeap::PAGE$/) { print "        @@warm_extra = 0_u64"; found = 1; next } print } END { if (!found) exit 3 }'
+# A budget's worth of pages kept warm on top of the class's take, as
+# every class's room held a budget before it followed the take: the
+# burst's pages stay warm.
+prove_fails "a budget kept warm past the take" roombudget "room:" \
+  '{ if ($0 ~ /^          room = taken >= room \? taken : room - \(room - taken \+ ROOM_FADE - 1_u64\)\.unsafe_div\(ROOM_FADE\)$/) { print "          room = taken + budget.unsafe_shr(IyiHeap::PAGE_SHIFT)"; found = 1; next } print } END { if (!found) exit 3 }'
+
+# A room that rises with the take and never falls: the burst's pages
+# stay warm through every small epoch after it.
+prove_fails "the room never falls" roomflat "room:" \
+  '{ if ($0 ~ /^          room = taken >= room \? taken : room - \(room - taken \+ ROOM_FADE - 1_u64\)\.unsafe_div\(ROOM_FADE\)$/) { print "          room = taken >= room ? taken : room"; found = 1; next } print } END { if (!found) exit 3 }'
+
+# The eager sweep after a collection's turn handing a whole arena's dead
+# chunks over as one batch: the one refill that takes it takes every
+# warm page the arena kept, and the class reads as taking them all.
+prove_fails "an eager sweep's batch a whole arena" wholebatch "room:" \
+  '{ if (sub(/batch = sweep_slice\(arena, whole \? IyiHeap::SWEEP_DONE : SWEEP_SPAN\)/, "batch = sweep_slice(arena, IyiHeap::SWEEP_DONE)")) found = 1; print } END { if (!found) exit 3 }'
+
+# The pause's sweep before its mark handing an arena over a slice at a
+# time: the threads allocating beside the mark all take chunks of it, and
+# alloc_scaling at 8 workers ran 13-17% slower on macOS.
+prove_fails "the pause's debt a batch a slice" heldslice "held:" \
+  '{ if (sub(/batch = sweep_slice\(arena, whole \? IyiHeap::SWEEP_DONE : SWEEP_SPAN\)/, "batch = sweep_slice(arena, SWEEP_SPAN)")) found = 1; print } END { if (!found) exit 3 }'
+
+# A warm run threaded whole, as before: one refill takes the run. On
+# Windows 11 (4 KB pages) the room check, which comes first, fails
+# instead: the refills of its sixteen small epochs each threaded and
+# counted a whole run, and the 896-byte class kept 116 pages warm past
+# its 64.
+prove_fails "a warm run threaded whole" uncapped "threaded:|room:" \
+  '{ if (sub(/run = take_run\(arena, true, WARM_RUN\.unsafe_shr\(PAGE_SHIFT\)\)/, "run = take_run(arena, true, 0_u64)")) found = 1; print } END { if (!found) exit 3 }'
+
+# A warm run cut at the page a slab's worth on, off the chunk grid: the
+# last chunk threaded reaches pages into the rest of the run, which the
+# trim hands back under it.
+prove_fails "a warm run cut off the grid" offgrid "cut:|trim:" \
+  '{ if ($0 ~ /^          cut = \(first \+ \(target - first \+ chunk - 1_u64\)\.unsafe_div\(chunk\) \* chunk - arena\)\.unsafe_shr\(PAGE_SHIFT\)$/) { print "          cut = page + most"; found = 1; next } print } END { if (!found) exit 3 }'
+
+# The trim handing back a run's first page whatever reaches into it:
+# the chunk threaded last before it loses its tail.
+prove_fails "the trim takes a reached-into page" trimedge "trim:" \
+  '{ if ($0 ~ /^          low = low \+ PAGE if \(low - first\)\.unsafe_mod\(chunk\) != 0$/) { print "          # removed"; found = 1; next } print } END { if (!found) exit 3 }'
+
+# The trim turning a batch's listed pages idle and leaving the batch on
+# the centre: the next refill hands out chunks of idle pages.
+prove_fails "a trimmed batch left on the centre" trimstack "batches:" \
+  '{ if ($0 ~ /^              write64\(line \+ CLASS_BATCHES, following\)$/) { print "              # removed"; found = 1; next }
+     if ($0 ~ /^              write64\(previous \+ BATCH_NEXT, /) { print "              # removed"; next }
+     print } END { if (!found) exit 3 }'
+
+# The trim turning a batch's first page idle with the rest: the batch
+# below shares it, and taken off the centre before the trim and adopted
+# after it, that batch's last chunk lies on an idle page.
+prove_fails "the trim takes a batch's first page" trimfirst "edge:" \
+  '{ if (sub(/page = read64\(head \+ OFF_LINK\)\.unsafe_shr\(RANGE_SHIFT\) \+ 1_u64$/, "page = read64(head + OFF_LINK).unsafe_shr(RANGE_SHIFT)")) found = 1; print } END { if (!found) exit 3 }'
+
+# The trim turning a batch's last page idle with the rest: the batch
+# above shares it, and its chunks on that page lie on an idle page.
+prove_fails "the trim takes a batch's last page" trimlast "edge:" \
+  '{ if (sub(/^            while page < last$/, "            while page <= last")) found = 1; print } END { if (!found) exit 3 }'
+
+# The monitor never asking for the trim: the warm pages of an idle pool
+# stay.
+prove_fails "the idle pool never trims" notrim "idle:" \
+  '{ if (sub(/trimmed = IyiMark\.trim_idle$/, "trimmed = true")) found = 1; print } END { if (!found) exit 3 }' concurrency.iyi
 
 # A class nobody allocates in any more kept warm within the budget, as
 # every class was: its pages hold the room the classes in use want.
@@ -208,6 +271,102 @@ case "$(uname -s)" in
     echo "  an idle bit trusted past its page: not proven here, because this platform's pages keep idle ones out of the rounding check's slices"
     ;;
 esac
+
+echo
+echo "== the idle trim beside eight threads that allocate"
+# bench/trim_stress.iyi, release: eight threads keep rings of blocks in
+# six classes, each word written with its thread's pattern and read back,
+# while a ninth runs the idle trim back to back for 20 s.
+stress_run() {
+  "$2" 8 "${3:-20}" >"$WORK/$1.out" 2>&1 && grep -q "every block read back whole" "$WORK/$1.out"
+}
+if ! "$IYI" build --release -o "$WORK/trim_stress" "$REPO/bench/trim_stress.iyi" >"$WORK/trim_stress.build.log" 2>&1; then
+  echo "  trim stress: build failed"; sed -n '1,12p' "$WORK/trim_stress.build.log"; status=1
+elif stress_run trim_stress "$WORK/trim_stress"; then
+  sed 's/^/  /' "$WORK/trim_stress.out"
+else
+  echo "  trim stress failed:"; tail -3 "$WORK/trim_stress.out" | sed 's/^/    /'; status=1
+fi
+
+# The listed pages counted off by every refill that read them listed, as
+# before `IyiHeap.unlist_page`: two refills adopting the batches of
+# adjacent slices both count the page the slices share, the arena's count
+# reaches zero with pages listed, and the trim and the pause make idle
+# pages under objects a cache handed out. The two refills must read the
+# shared page between one's read and its clear, and that window is a few
+# instructions: on darwin's sixteen-kilobyte pages the plain stress caught
+# the old counting in 11 runs of 11 of 20 s on macOS 26.6, Apple M2 Pro, 10
+# cores (the user's machine), but on four-kilobyte pages it passed 3 runs
+# of 3 on Windows 11, 12 logical processors (the user's machine), where
+# two adoptions met in the window 0-3 times in 10 s. So both copies here
+# hold the window open: an adoption that reads a batch's first or last
+# page listed spins WIDEN_NS before it clears the bit, and counts the
+# times the clear finds another adoption got there first
+# (`IyiHeap.widen_hits`, reported by trim_stress.iyi built with
+# -Dtrim_widen). The fix, widened, must read every block back whole with
+# the window met; the old counting, widened, must fail within three runs
+# of 10 s. At 20 microseconds the old counting was caught on the first run
+# in 20 runs of 20, within 0-6 s, on Windows 11, 12 logical processors and
+# on macOS 26.6, Apple M2 Pro, 10 cores (the user's machines), and the fix
+# read every block back whole in 5 runs of 5 and 3 of 3 with the window
+# met 4,706-5,750 and 9,483-15,972 times. With a run's miss rate under
+# 3/20 (95%), three misses in a row are under 0.4%.
+WIDEN_NS=20000
+widen_prelude() {
+  mkdir -p "$WORK/$1/iyi"
+  cp -R "$REPO/src/iyi/." "$WORK/$1/iyi/"
+  awk -v mode="$1" -v widen="$WIDEN_NS" '
+    /^      @@pages_released : UInt64 = 0_u64$/ {
+      print
+      print "      @@widen_hits : UInt64 = 0_u64"
+      print "      def self.widen_hits : UInt64"
+      print "        @@widen_hits"
+      print "      end"
+      print "      def self.spin_widen : Nil"
+      print "        stop = IyiMark.now_ns + " widen "_u64"
+      print "        spun = 0_u64"
+      print "        while IyiMark.now_ns < stop"
+      print "          spun = spun + 1_u64"
+      print "        end"
+      print "      end"
+      n++; next }
+    /^      def self\.unlist_batch\(/ { batch = 1 }
+    batch && /^        while page <= last$/ { print "        low_edge = page"; print; n++; next }
+    /^          count = count \+ 1_u64 if unlist_page\(arena, page\)$/ {
+      batch = 0
+      print "          if page_listed?(arena, arena + page * PAGE)"
+      print "            spin_widen if page == low_edge || page == last"
+      print "            won = unlist_page(arena, page)"
+      print "            Pointer(Atomic(UInt64)).new(pointerof(@@widen_hits).address).value.add(1_u64) unless won"
+      print (mode == "doublecount" ? "            count = count + 1_u64" : "            count = count + 1_u64 if won")
+      print "          end"
+      n++; next }
+    { print }
+    END { if (n != 3) exit 3 }' "$REPO/src/iyi/prelude.iyi" > "$WORK/$1/iyi/prelude.iyi" &&
+    IYI_PATH="$WORK/$1:$REPO/src" "$IYI" build --release -Dtrim_widen -o "$WORK/$1/program" "$REPO/bench/trim_stress.iyi" >"$WORK/$1/build.log" 2>&1
+}
+if ! widen_prelude widened; then
+  echo "  the window held open: the lines it edits are not in the prelude any more, or the copy did not build"; status=1
+elif stress_run widened "$WORK/widened/program" 10 &&
+     hits=$(sed -n 's/.*, \([0-9]*\) edge pages read listed by two adoptions at once$/\1/p' "$WORK/widened.out") &&
+     [ -n "$hits" ] && [ "$hits" -gt 0 ]; then
+  echo "  the window held open ${WIDEN_NS} ns: every block read back whole, $hits edge pages read listed by two adoptions at once"
+else
+  echo "  the window held open: the fix failed, or the window was never met:"; tail -3 "$WORK/widened.out" | sed 's/^/    /'; status=1
+fi
+if ! widen_prelude doublecount; then
+  echo "  the listed pages counted twice: the lines it edits are not in the prelude any more, or the copy did not build"; status=1
+else
+  caught=0
+  for again in 1 2 3; do
+    stress_run doublecount "$WORK/doublecount/program" 10 || { caught=$again; break; }
+  done
+  if [ "$caught" -ne 0 ]; then
+    echo "  the listed pages counted twice: caught on run $caught: $(grep -m1 'FAIL\|panic' "$WORK/doublecount.out" | cut -c1-200)"
+  else
+    echo "  the listed pages counted twice: three runs passed, so the stress does not test it"; status=1
+  fi
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

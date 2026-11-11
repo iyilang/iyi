@@ -451,8 +451,19 @@ puts "realloc: same-class, cross-class and null all hold their bytes"
       nil
     end
     filler.join
-    IyiMark.collect
-    IyiMark.collect
+    # The class's warm room follows what it took (`IyiMark.warm_pages`):
+    # the fill's twenty megabytes, falling by a quarter of the way to
+    # nothing an epoch with nothing taken (`ROOM_FADE`). After two
+    # collections, on macOS 26.6, Apple M2 Pro, 10 cores (the user's
+    # machine), the take-up met 16 cold pages in 1,410 blocks, none a
+    # run's last chunk reaching onto a kept block's page, and a carve
+    # that cleared nothing read zero anyway; after eight, 270 cold pages
+    # in 1,000 blocks, and that carve read a kept block's 170.
+    epochs = 0
+    while epochs < 8
+      IyiMark.collect
+      epochs = epochs + 1
+    end
     # Taken up on a thread of its own too, which owns no arena of the
     # class: its carve looks for a cold run or a frontier in every arena
     # nobody owns.

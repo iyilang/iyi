@@ -46,7 +46,13 @@ A weak reference to a unit's large object (past the top size class) is
 cleared by the local collection that unmaps it, as one to a small object
 is: it was left naming the unmapped block, where the unit's next large
 allocation could be mapped (Linux: 7 of 8 cells in 3 of 3 runs before, 0
-after).
+after). A `Unit` task's body names the `Unit`, not its value:
+`g.spawn(in: u)`'s body closed over u's value, so a body a global mark
+kept (a stale word) while it left the handle unreached named a value the
+unit's death then freed; `-Dheap_verify` reported it after
+`bench/std_unit_exercise.sh`'s panic step in 34 of 35 tmac runs. The body
+reads the value through the handle when it runs; the exercise's `outlive`
+step and its `keptproc`/`keptbody` copies hold it.
 
 heap22's verifier: the false-word injector no longer writes under a pool
 worker's parking fiber or below a Windows fiber's committed stack; reports

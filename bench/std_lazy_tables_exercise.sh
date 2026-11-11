@@ -187,16 +187,18 @@ check() {
 }
 
 for mode in plain release; do
+  # `${flags[@]+...}`: macOS's bash 3.2 under `set -u` calls an empty
+  # array's "${flags[@]}" unbound.
   flags=()
   [ "$mode" = release ] && flags=(--release)
   echo "== $mode: no module's start builds a table"
-  if ! build "plain-$mode" plain "${flags[@]}"; then
+  if ! build "plain-$mode" plain ${flags[@]+"${flags[@]}"}; then
     status=1
     continue
   fi
   plain_count="$("$WORK/plain-$mode" 2>&1)"
   for program in tables web_start; do
-    if build "$program-$mode" "$program" "${flags[@]}"; then
+    if build "$program-$mode" "$program" ${flags[@]+"${flags[@]}"}; then
       check "$mode $program" "$("$WORK/$program-$mode" 2>&1)" "$plain_count" || status=1
     else
       status=1
@@ -290,14 +292,14 @@ for mode in plain release; do
   [ "$mode" = release ] && flags=(--release)
   [ -x "$WORK/plain-$mode" ] || continue
 
-  if IYI_SPAWN_BROKEN=probeused build "eager-probe-$mode" tables "${flags[@]}"; then
+  if IYI_SPAWN_BROKEN=probeused build "eager-probe-$mode" tables ${flags[@]+"${flags[@]}"}; then
     caught "a definition probe's reads counted as the program's (probeused)" eager-probe "$mode"
   else
     status=1
   fi
 
   if [ "$eager_start" -eq 1 ]; then
-    if IYI_PATH="$WORK/eager-start${PSEP}$IYI_PATH" build "eager-start-tables-$mode" tables "${flags[@]}"; then
+    if IYI_PATH="$WORK/eager-start${PSEP}$IYI_PATH" build "eager-start-tables-$mode" tables ${flags[@]+"${flags[@]}"}; then
       caught "std/unicode reading five tables as it starts" eager-start-tables "$mode"
     else
       status=1
@@ -305,7 +307,7 @@ for mode in plain release; do
   fi
 
   if [ "$eager_constant" -eq 1 ]; then
-    if IYI_PATH="$WORK/eager-constant${PSEP}$IYI_PATH" build "eager-constant-server-$mode" web_start "${flags[@]}"; then
+    if IYI_PATH="$WORK/eager-constant${PSEP}$IYI_PATH" build "eager-constant-server-$mode" web_start ${flags[@]+"${flags[@]}"}; then
       caught "the server with X25519's base table an eager constant" eager-constant-server "$mode"
     else
       status=1

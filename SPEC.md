@@ -64,7 +64,7 @@ own reference accepts.
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
 | iyi's own prelude | 28,933 lines, of which 4,689 are the library held to the 4,689 ceiling (7,015 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 146,905 lines, none of it written in iyi |
+| compiler | 148,477 lines, none of it written in iyi |
 | artifact format | `.iyimod` v62, checksum per section |
 | samples | 28 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -1050,7 +1050,7 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 146,905 lines, Crystal, forked |
+| Compiler | 24,984 lines, **written in Crystal** | 148,477 lines, Crystal, forked |
 | Library | 8,161 lines (3,551 of it core) | 28,933-line own prelude + 128,396 in std |
 | Specs | 21,146 lines | 17,314 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
@@ -9547,6 +9547,14 @@ file per type, and the split is a **partition**: on the Kemal port, 23 units
 and no symbol defined by two of them. So "this module's own definitions" is a
 set of whole object files rather than a filter inside one, and carrying them is
 copying bytes rather than teaching codegen a second way to lay out a program.
+
+Private closures hosted in selected carried artifact units use a linkage suffix
+`^unit:` followed by the lowercase hex encoding of the complete UTF-8 logical
+unit name. This prevents a carried closure from colliding with a separately
+generated closure. The requested spelling remains unchanged. This correction
+applies to artifact production and bind filling, including `--crystal`, and can
+change private symbols and object bytes compared with older compilers. It does
+not change the public method ABI or closure calling convention.
 
 A module's units are the module type itself, where its own `pub def`s are
 owned: plus every non-generic type declared under it, recursively.

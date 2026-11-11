@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **A layout fold taken during typing is settled to the final layout once the compiler has typed everything, including the code its cleanup types.** `sizeof`, `alignof`, `instance_sizeof`, `instance_alignof` and `offsetof` could fold to a size the typer saw before a module held by value gained implementors, or before a container it was cached in had its element grow. In a `--crystal` build, `arr.dup` of an array of `{Int32, M}` could then return a zeroed element and trap when printed. Settling runs at the end of semantic analysis, after the cleanup has typed its own raises, tuple and proc literals, and splats, so a module that only that code grows is part of the final layout. A stale expression fold is corrected in place. A fold inside a generic type argument keeps its value, because the type is already built, and so does every expression that shares that layout with it, so the program's types and numbers agree. A literal that later code used as a type variable or a cast is kept as it was. A native program refuses a stale type argument, or such a literal, with a compile error at that expression, and refuses codegen that types code which grows a layout a settled fold reaches. A native program also gets a fresh shared layout typer after settling, and the write barrier sizes with its module's typer. `--crystal` output changes only where Crystal 1.21.0 folded two different sizes for one type. `IYI_LAYOUT_FOLD_REPORT=1` prints each stale fold and each open layout to stderr. Not covered: a macro that reads a stale constant but never uses its value, and an autocast whose fit is the same at both values, are refused under the native gate. Neither takes a wrong native type.
+- A value taken from a layout fold before it settles is judged by what took it: a type argument, an enum value, a macro or a typing decision the final layout would change is refused under the native gate and kept under `--crystal`, with the expressions sharing its layout; one the final layout leaves unchanged, and any value only an expression uses, takes the final layout.
+
+- **Private closures hosted in carried artifact units have an owning-unit linkage suffix.** The suffix is `^unit:` and the lowercase hex of the unit's UTF-8 name, so a carried closure cannot collide with a closure the consumer generates. It applies to artifact production and bind filling, `--crystal` included, and can change private symbols and object bytes relative to older compilers. The public method ABI and closure calling convention are unchanged.
+
+- **`tool bind` rewrites a name only where the parser reads a path.** It used to search the text it had printed, so a bound name inside a string, a regex, a comment or a heredoc was rewritten too: `"Kemal::Config"` in a log message came out `"Config"`. The printed text is now parsed, a body where its signature's parameters are variables and a parameter among its siblings. Text inside a macro literal is left as written, and text the parser cannot read is refused.
+
+- **A `.iyimod` whose section table or sections run past the end of the file is refused before anything is allocated for it.**
+
+- **A program that requires only `compiler/iyi/syntax` compiles again.** A def's effect was declared in the syntax tree with a type the semantic pass owned, and the lexer and parser specs run alone ended in `BUG: called create_llvm_type for Effect`.
+
+- **Stale reach tracks class variables by identity.** Two types' class variables of one name were counted once.
+
 ## 0.21.0 — 2026-11-09
 
 **A spawn has one verb and names its unit, and a plain `spawn` runs in

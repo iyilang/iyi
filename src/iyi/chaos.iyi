@@ -190,9 +190,11 @@ class IyiChaos
   @@picks : UInt64 = 0_u64
   @@schedule : UInt64 = 0_u64
   @@units : UInt64 = 0_u64
+  @[UnsafeReach("the root unit, made in the shared heap by `start` on the main thread before the program's first line, or by the first `unit_of`; its fields are integers")]
   @@root : IyiChaosUnit?
   @@last_unit : UInt64 = 0_u64
   @@streak : UInt64 = 0_u64
+  @[UnsafeReach("read and written only by `pick` on the simulation's one thread (`@@here`); every other thread's `pick` returns before it")]
   @@candidates : Array(IyiFiber)?
   @@generation : UInt64 = 0_u64
   @@trace : Bool = false

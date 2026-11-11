@@ -14,6 +14,8 @@
 #     closures without a layout), as the global mark reads them; atomic
 #     memory is not opened. A chunk the last global mark proved dead and
 #     its sweep has not reached is no holder: the program cannot reach it.
+#     A reaped fiber is a holder like any other: a task naming it keeps it
+#     live, and the global mark reads its fields.
 #   - the data segment, word by word, and this thread's thread-local block;
 #   - the stacks of the unit's fibers: the running one from the mark's
 #     frame up, the parked ones from their saved stack pointer up - the
@@ -62,7 +64,6 @@ class IyiHeapVerify
   @@scanned : UInt64 = 0_u64
   @@injected : UInt64 = 0_u64
   @@reporting : UInt64 = 0_u64
-  @@fiber_type : UInt64 = 0_u64
   @@image : UInt64 = 0_u64
   # The epoch a check began in, on its thread: a hit found after a pause
   # is not trusted, the liveness it read having changed under it.
@@ -292,7 +293,6 @@ class IyiHeapVerify
   def self.check(record : UInt64, id : UInt64, parity : UInt64, running : IyiFiber?) : Bool
     stat(pointerof(@@checks).address)
     @@epoch_seen = IyiMark.epoch
-    note_fiber_type(running)
     lost_free(record, id)
     # Roots: the stacks the mark read - the running one as it read it,
     # since the collector's own frames on it have changed since.
@@ -306,7 +306,6 @@ class IyiHeapVerify
       IyiRuntimeLock.lock
       fiber = unit.fibers
       while fiber.is_a?(IyiFiber)
-        note_fiber_type(fiber)
         if !(running.is_a?(IyiFiber) && running.object_id == fiber.object_id) && fiber.state != IyiFiberState::Done && fiber.stack_top != 0 && fiber.saved_sp != 0
           scan_words(record, id, parity, false, K_STACK, fiber.object_id, fiber.saved_sp, fiber.stack_top)
         end
@@ -365,10 +364,6 @@ class IyiHeapVerify
       index = index + 1
     end
     weak_cells(id)
-  end
-
-  def self.note_fiber_type(fiber : IyiFiber?) : Nil
-    @@fiber_type = fiber.crystal_type_id.to_u64 if @@fiber_type == 0 && fiber.is_a?(IyiFiber)
   end
 
   # A statistic, by a plain add (see `at_point`): close, not exact.
@@ -692,21 +687,12 @@ class IyiHeapVerify
     IyiHeap.read16(arena &+ IyiHeap::META &+ slot &* IyiHeap::META_ENTRY &+ 1_u64)
   end
 
-  # A reaped fiber of any unit: its object lives while a task names it,
-  # and its closure, defer list and groups were its unit's, which nothing
-  # runs again.
-  def self.dead_fiber?(type_id : UInt64, base : UInt64) : Bool
-    return false if type_id == 0 || type_id != @@fiber_type
-    Pointer(Void).new(base).as(IyiFiber).state == IyiFiberState::Done
-  end
-
   def self.scan_chunk(record : UInt64, id : UInt64, parity : UInt64, death : Bool, kind : Int32, owner : UInt64, arena : UInt64, head : UInt64, slot : UInt64, bits : UInt64) : Nil
     @@scanned = @@scanned &+ 1_u64
     chunk = IyiHeap.arena_chunk(arena)
     base = bits & IyiHeap::HEADED_FLAG != 0 ? head &+ IyiHeap::HEADER : head
     size = bits & IyiHeap::HEADED_FLAG != 0 ? chunk &- IyiHeap::HEADER : chunk
     type_id = type_of(arena, head, slot, bits)
-    return if dead_fiber?(type_id, base)
     scan_object(record, id, parity, death, kind, owner, base, size, type_id)
   end
 
@@ -721,7 +707,6 @@ class IyiHeapVerify
       return if death || flags & IyiHeap::OWN_LMARK != parity
     end
     type_id = word.unsafe_shr(IyiHeap::TYPE_SHIFT)
-    return if dead_fiber?(type_id, base)
     @@scanned = @@scanned &+ 1_u64
     scan_object(record, id, parity, death, K_LARGE, owner, base, IyiHeap.read64(node + IyiHeap::OFF_MAP) - IyiHeap::LARGE_USER, type_id)
   end

@@ -52,8 +52,9 @@
 #   a unit, one collection: every kept cell still names its object and
 #   every dropped one reads 0; in another unit, a sweep stopped once it
 #   has swept the dropped objects' class leaves no cell naming a chunk it
-#   freed; and in a third, no cell names a large object its unit's
-#   collection unmapped.
+#   freed; and in a third, a cell to a large object its unit holds names
+#   it across the unit's collections, and once the object is dropped no
+#   cell names it after the collection that unmapped it.
 # - `large:` objects past the top class in a partition: kept ones read
 #   back whole across local collections, dropped ones are unmapped.
 # - `takeover:` units parked with debt are collected by idle workers after
@@ -1063,37 +1064,59 @@
     left
   end
 
-  # A weak cell to a large object made and dropped in a frame of its own.
+  # A large object made in a frame of its own, held by *held*, and a weak
+  # cell to it in *cells*.
   @[NoInline]
-  def dead_large_cell(i : Int32) : Pointer(UInt64)
+  def held_large_cell(i : Int32, held : Array(Pointer(UInt64)), cells : Array(Pointer(UInt64))) : Nil
     block = Pointer(UInt64).malloc(262144_u64)
     block[0] = i.to_u64
-    IyiWeak.cell(block.address)
+    held << block
+    cells << IyiWeak.cell(block.address)
   end
 
-  # Eight large objects dropped, each with a weak cell, one collection:
-  # every cell to one the collection unmapped reads 0. A large object's
-  # owner is its node's, and a cell to one went unlisted: the sweep that
-  # unmapped the block left the cell naming it. Answers how many cells
-  # name an unmapped block, or a negative failure.
+  # Eight large objects, each with a weak cell, held through their unit's
+  # collections - each 2 MiB malloc is a slice past the unit's budget and
+  # collects first - and one more: every cell names its own block. Then
+  # the test drops them, one collection: every cell to one the collection
+  # unmapped reads 0. A large object's owner is its node's, and a cell to
+  # one went unlisted: the sweep that unmapped the block left the cell
+  # naming it. Dropped as each was made, each block was unmapped by the
+  # next one's collection and its cell cleared then, and the kernel mapped
+  # the next block at the same address (Linux, 415f169db): the check read
+  # the blocks back out of cells already 0, and a cell cleared under a
+  # live block would have passed it too. Answers how many cells name an
+  # unmapped block, or a negative failure.
   def weak_large_task : Int64
-    cells = [] of Pointer(UInt64)
+    held = Array(Pointer(UInt64)).new(8)
+    cells = Array(Pointer(UInt64)).new(8)
     i = 0
     while i < 8
-      cells << dead_large_cell(i)
+      held_large_cell(i, held, cells)
       i = i + 1
     end
-    # The blocks, hidden from the scan, to ask after whether they went.
-    blocks = cells.map { |cell| hide(cell.value) }
+    scrub_stack
+    return -2_i64 unless collect_now
+    # The blocks, hidden from the scan, to ask after whether they went;
+    # the holder's words zeroed, so the drop is the test's.
+    blocks = Array(UInt64).new(8)
+    k = 0
+    while k < 8
+      return -1_i64 if cells[k].value != held[k].address || held[k][0] != k.to_u64
+      blocks << hide(held[k].address)
+      held[k] = Pointer(UInt64).new(0_u64)
+      k = k + 1
+    end
     scrub_stack
     return -2_i64 unless collect_now
     unmapped = 0_i64
     left = 0_i64
-    cells.each_with_index do |cell, k|
+    k = 0
+    while k < 8
       unless IyiHeap.local?(hide(blocks[k]))
         unmapped = unmapped &+ 1_i64
-        left = left &+ 1_i64 if cell.value != 0_u64
+        left = left &+ 1_i64 if cells[k].value != 0_u64
       end
+      k = k + 1
     end
     return -4_i64 if unmapped == 0_i64
     left
@@ -1116,6 +1139,7 @@
       fail("weak: #{stopped} weak cells name chunks a stopped local sweep freed") if stopped != 0_i64
       large = g.spawn(unit: :new) { weak_large_task }.value
       fail("weak: the large objects' unit answered #{large}") unless large.is_a?(Int64)
+      fail("weak: a weak cell to a held large object was cleared or names another block") if large == -1_i64
       fail("weak: no local collection ran in 100 tries, for the large objects") if large == -2_i64
       fail("weak: the collection unmapped none of the dropped large objects") if large == -4_i64
       fail("weak: #{large} weak cells name large objects their unit's collection unmapped") if large != 0_i64

@@ -1662,6 +1662,121 @@ if [ "$total" -ne 80000 ] || [ "$broken" -ne 0 ]; then
 fi
 echo "  80000 lines from four threads, none merged"
 
+# ── 5f. A finished thread asks the registry under the lock ────────────────
+# A thread's retirement unlinks its main fiber only if the registry holds
+# it: the fiber is the head or has a fiber before it. Both words are other
+# threads' to rewrite as they link and unlink their own fibers, and read
+# without the lock the answer was no for a fiber the registry held - the
+# head read before a neighbour's unregister made this fiber the head, the
+# back link after that unregister cleared it - and the main fiber stayed
+# on the list, naming a stack that was gone: the exercise's registry check
+# fired once in 24 runs on the M2 (S6 bench, flag off). Here two threads
+# make their main fibers in turn, so the second's is before the first's;
+# the first ends, and the second 100 ms after it. Copies of the runtime
+# hold a 300 ms window between the head's read and the back link's, for a
+# fiber that is not the head: under the lock the second's unregister waits
+# for the window and nothing is left on the registry, five runs of five;
+# with the lock taken out of the ask, as it was, the second unlinks itself
+# inside the window and the first's main fiber is left, five of five.
+step "two neighbours retire together: the registry is asked under the lock"
+cat > neighbours.iyi <<'IYI'
+@[Unsafe("the threads' turns are words of a page from __iyi_mmap read as atomics, and the first reads its own fiber's back link, which only the registry's writers change")]
+module neighbours
+
+class Turns
+  @@page = 0_u64
+
+  def self.setup : Nil
+    @@page = __iyi_mmap(4096_u64).address
+  end
+
+  def self.word(index : UInt64) : Pointer(Atomic(UInt64))
+    Pointer(Atomic(UInt64)).new(@@page + index * 64_u64)
+  end
+end
+
+def wait_for(index : UInt64) : Nil
+  while Turns.word(index).value.get == 0_u64
+  end
+end
+
+def registered : Int32
+  count = 0
+  fiber = IyiScheduler.first_fiber
+  while fiber.is_a?(IyiFiber)
+    count = count + 1
+    fiber = fiber.next_fiber
+  end
+  count
+end
+
+Turns.setup
+IyiScheduler.current
+before = registered
+first = IyiThread.start do
+  IyiScheduler.current
+  Turns.word(0_u64).value.set(1_u64)
+  wait_for(1_u64)
+  Turns.word(3_u64).value.set(1_u64) if IyiScheduler.current.prev_fiber.is_a?(IyiFiber)
+  Turns.word(2_u64).value.set(1_u64)
+  nil
+end
+second = IyiThread.start do
+  wait_for(0_u64)
+  IyiScheduler.current
+  Turns.word(1_u64).value.set(1_u64)
+  wait_for(2_u64)
+  gap = __iyi_monotonic_ns + 100_000_000_i64
+  while __iyi_monotonic_ns < gap
+  end
+  nil
+end
+first.join
+second.join
+puts "behind=#{Turns.word(3_u64).value.get} left=#{registered - before}"
+IYI
+window='/^  def self\.registered\?\(fiber : IyiFiber\) : Bool$/ { inside = 1 }
+  inside && /^  end$/ { inside = 0 }
+  inside && unlocked && /^    IyiRuntimeLock\.(un)?lock$/ { dropped++; next }
+  { print }
+  inside && /^    head = @@all_head$/ {
+    print "    if !(head.is_a?(IyiFiber) && head.object_id == fiber.object_id)"
+    print "      window = __iyi_monotonic_ns + 300_000_000_i64"
+    print "      while __iyi_monotonic_ns < window"
+    print "      end"
+    print "    end"
+    found = 1
+  }
+  END { if (!found || (unlocked && dropped != 2)) exit 3 }'
+for copy in window unlocked; do
+  mkdir -p "$copy/iyi"
+  cp "$REPO"/src/iyi/*.iyi "$copy/iyi/"
+  awk -v unlocked="$([ "$copy" = unlocked ] && echo 1)" "$window" \
+    "$REPO/src/iyi/concurrency.iyi" > "$copy/iyi/concurrency.iyi" || { echo "the registry's ask is not in concurrency.iyi any more"; exit 1; }
+done
+if ! "$IYI" build neighbours.iyi -o neighbours > build-neighbours.log 2>&1; then
+  cat build-neighbours.log; exit 1
+fi
+for copy in window unlocked; do
+  if ! IYI_PATH="$WORK/$copy${PSEP}$REPO/src" "$IYI" build neighbours.iyi -o "neighbours-$copy" > "build-neighbours-$copy.log" 2>&1; then
+    cat "build-neighbours-$copy.log"; exit 1
+  fi
+done
+for run in neighbours neighbours-window neighbours-unlocked; do
+  want=0
+  [ "$run" = neighbours-unlocked ] && want=1
+  again=1
+  while [ "$again" -le 5 ]; do
+    timeout -k 5 30 "./$run" > "$run.txt" 2>&1
+    code=$?
+    if [ "$code" -ne 0 ] || ! grep -qx "behind=1 left=$want" "$run.txt"; then
+      echo "$run, run $again, exited $code where it should leave $want fiber(s) registered:"; tail -3 "$run.txt"; exit 1
+    fi
+    again=$((again + 1))
+  done
+done
+echo "  five runs of five each: none left as the tree asks, none with the window under the lock, one left in every run with the lock taken out"
+
 # ── 6. Share: what a thread's block may capture is decided at compile time ─
 # SPEC.md III.4.4's marker, gating III.4.11's block: a value whose type has
 # a mutable field — here an `Array`, whose size is assigned by its own

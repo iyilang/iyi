@@ -2587,6 +2587,12 @@ require "./file"
       @@record_free : UInt64 = 0_u64
       @@records_live : UInt64 = 0_u64
 
+      # Whether the program ever made a partition: the shared heap's
+      # budget follows the flag's rule from then on (`IyiMark.next_budget`).
+      def self.partitions_made? : Bool
+        @@record_slabs != 0_u64
+      end
+
       # A zeroed record with an id of its own, on the caches list.
       def self.partition_new : UInt64
         per_slab = PARTITION_SLAB // PARTITION_BYTES
@@ -2732,9 +2738,9 @@ require "./file"
       # `__iyi_new_shared`, which codegen emits for trusted `Share` types.
       # The home cache is installed around the one allocation; `take`
       # never switches fibers, so nothing between the two swaps reads a
-      # fiber's `alloc`.
+      # fiber's `alloc`. Under the flag its type is noted (`born_shared`).
       def self.new_shared(size : UInt64, type_id : UInt64, headed : Bool, atomic : Bool) : Void*
-        page = @@cache
+        page = @@cache; {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %} born_shared(type_id) {% end %}
         return new_object(size, type_id, headed, atomic) if page == @@home
         install(0_u64)
         made = new_object(size, type_id, headed, atomic)
@@ -4412,6 +4418,12 @@ require "./file"
         arena
       end
 
+      # Inlined: the mark's `IyiRoots.base_of` asks it of every word no
+      # arena holds, a float's bits among them. Left to the inliner it was
+      # inlined there while that was its one caller, and called once
+      # `-Dheap_partitions` gave it five more: JsonGenerate's collections
+      # then ran 17 % longer (tmac, no helpers, the same marked bytes).
+      @[AlwaysInline]
       def self.containing_large(pointer : Void*) : UInt64
         address = pointer.address
         # A slot no large mapping touches answers without the walk
@@ -8154,12 +8166,19 @@ require "./file"
         # floored at `SHARED_MIN` and no longer multiplied by allocating
         # threads - lock blocks allocate in the shared heap on every
         # worker, and the old floor would count every one of them again.
+        # Until the program makes its first partition the budget is the
+        # build's without the flag: a program with no pool unit (the main
+        # thread, `IyiThread`s) has no lock blocks on workers to count, and
+        # `SHARED_MIN` alone halved its collections - churn's peak RSS 6.6
+        # to 10.8 MB (tmac), JsonGenerate 1.036 of the build without it.
         {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
-          partitioned = partition_survived
-          shared = survived > partitioned ? survived - partitioned : 0_u64
-          allocating_threads
-          grown_shared = shared.unsafe_div(100_u64) * IyiStat.get(IyiStat::GROWTH)
-          return grown_shared < IyiHeap::SHARED_MIN ? IyiHeap::SHARED_MIN : grown_shared
+          if IyiHeap.partitions_made?
+            partitioned = partition_survived
+            shared = survived > partitioned ? survived - partitioned : 0_u64
+            allocating_threads
+            grown_shared = shared.unsafe_div(100_u64) * IyiStat.get(IyiStat::GROWTH)
+            return grown_shared < IyiHeap::SHARED_MIN ? IyiHeap::SHARED_MIN : grown_shared
+          end
         {% end %}
         grown = survived.unsafe_div(100_u64) * IyiStat.get(IyiStat::GROWTH)
         floor = MIN_BUDGET
@@ -10424,6 +10443,17 @@ require "./file"
     RETURNED          = 96_u64
     LARGE_FREED       = 97_u64
     LOCAL_PAUSES      = 98_u64
+    # Drained runs a partition took (`IyiHeap.adopt_drained`), and the
+    # ones it found too full and parked.
+    RUNS_ADOPTED      = 99_u64
+    RUNS_PARKED       = 100_u64
+    # The partitions' pool by age (`IyiHeap.turn_pools`, `cool_pools`):
+    # when it last turned, whether runs wait on a release list, the class
+    # the next release looks at first, and the runs released.
+    POOL_TURNED_NS    = 101_u64
+    COOL_PENDING      = 102_u64
+    COOL_CURSOR       = 103_u64
+    RUNS_COOLED       = 111_u64
     # The verifier (heap_verify.iyi).
     VERIFY_STRESS       = 104_u64
     VERIFY_STRESS_TICK  = 105_u64
@@ -10446,6 +10476,20 @@ require "./file"
     CHAOS_LATE_STEPS   = 122_u64
     CHAOS_FLOOR        = 123_u64
     CHAOS_STREAK       = 124_u64
+    # Partition slices held under a mark (`IyiHeap.hold_partition`), and
+    # the holds that ran out of time.
+    PARTITION_HOLDS           = 125_u64
+    PARTITION_HOLDS_TIMED_OUT = 126_u64
+    # Idle collections (heap_partition.iyi, `take_over_quiet`): their
+    # count, the idle clock's tick and when it last turned, whether a
+    # parked dirty partition may be waiting, and the walk over records.
+    IDLE_COLLECTIONS = 128_u64
+    IDLE_TICK        = 129_u64
+    IDLE_TICK_NS     = 130_u64
+    IDLE_PENDING     = 131_u64
+    IDLE_CURSOR      = 132_u64
+    IDLE_DONE_TICK   = 133_u64
+    IDLE_SEEN        = 134_u64
 
     # A thread's own page's slots.
     OWN_EPOCH_SEEN   = 0_u64

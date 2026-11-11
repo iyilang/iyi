@@ -17,14 +17,16 @@
 #      holds only a number, refused as well: the rule asks the type, not
 #      what is stored), a block spawned `unit: :same` inside the unit, a
 #      proc handed to a spawn, an `IyiDeferNode` pushed, a `Hash`'s
-#      default block, a block handed to a def that calls it, and a kept
-#      literal calling its def's block. Each is refused naming the
-#      program's state and the path to it. The state between carries a
-#      claim - the hash and the proc a proven `@[SafeReach]`, the table
-#      and the guard an `@[UnsafeReach]`, since each keeps a copy of
-#      itself the proof cannot follow (a handler holding the table, a
-#      pushed node) - so the state refused is the one written from the
-#      unit.
+#      default block, a block handed to a def that calls it, a kept
+#      literal calling its def's block, one handing it on to a helper
+#      that calls it (S6), and a block given to a `@[Share]` def that
+#      keeps it in a `SharedProc` (refused where it is given). Each is
+#      refused naming the program's state and the path to it. The state
+#      between carries a claim - the hash and the proc a proven
+#      `@[SafeReach]`, the tables and the guard an `@[UnsafeReach]`, since
+#      each keeps a copy of itself the proof cannot follow (a handler
+#      holding the table, a pushed node) - so the state refused is the
+#      one written from the unit.
 #   2. std's and the prelude's state is walked: a unit that prints, reads
 #      the clock and sets an environment variable compiles, since every
 #      piece of runtime state it reaches is Share or marked. Its broken
@@ -44,8 +46,10 @@
 #      the block handed to a def; the `defer` is still refused, by its
 #      inline copy), no proc call std or the prelude makes followed
 #      (`allruntime`: the `Hash`'s default block), no parameter a literal
-#      captures bound (`captured`: the kept literal), and no std def
-#      entered (`callbacks`: the `Hash`'s default block).
+#      captures bound (`captured`: the kept literal), no parameter a
+#      literal hands on followed (`forwarded`: the kept literal handing it
+#      to a helper), and no std def entered (`callbacks`: the `Hash`'s
+#      default block).
 #   5. A std module's claims are proven once, over all of its code, and
 #      the answer is reused by every importer (`reach_module_proof.cr`).
 #      In a std tree of the test's own: a table read by a probed def is
@@ -56,6 +60,12 @@
 #      second table anyway, and the unit's program compiles on it;
 #      `modulepass` takes the first past the override, and so does that
 #      program.
+#   6. heap22 pins through artifacts (`-Dheap_partitions`, built with
+#      codegen where an artifact is written): a spawn calling a function
+#      that reaches a Share constant holding an owning type without
+#      `lends:` is pinned, built from source and against the module's
+#      artifact, whose pin record says it. Broken copy: `pinrecords`
+#      writes the artifact without them, and the spawn is not pinned.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -334,6 +344,85 @@ IYI
 } > r6_captured.iyi
 refused r6_captured 'reaches `BOX : R6Captured::Box` (not Share) through `serve` → `Table#run_all` → '
 
+# A kept literal handing its def's block on to a helper that calls it, as
+# iyi-web's route literal hands a route's block to `typed_answer`: the
+# helper's call of its own parameter adds nothing, so the literal reaches
+# what it hands on (`ShareReach::Scanner#hands`). Before S6 nothing did,
+# and this program compiled.
+{ echo '@[Unsafe("the gate keeps its handlers in a table it claims by hand")]'; echo 'module r6_forwarded'; echo; box; cat <<'IYI'
+BOX = Box.new
+
+class Table
+  def initialize
+    @handlers = [] of Proc(Int32)
+  end
+
+  def add(&block : -> String) : Nil
+    @handlers << -> { size_of(block) }
+  end
+
+  def size_of(block : -> String) : Int32
+    block.call.size
+  end
+
+  def run_all : Int32
+    sum = 0
+    @handlers.each { |handler| sum += handler.call }
+    sum
+  end
+end
+
+@[UnsafeReach("filled before the first parallel task starts, then only read")]
+TABLE = Table.new
+
+TABLE.add do
+  BOX.add("route")
+  "route"
+end
+
+def serve : Int32
+  TABLE.run_all
+end
+
+group do |g|
+  g.spawn(unit: :new) { serve }
+end
+IYI
+} > r6_forwarded.iyi
+refused r6_forwarded 'reaches `BOX : R6Forwarded::Box` (not Share) through `serve` → `Table#run_all` → '
+
+# A block handed to a `@[Share]` def that keeps it in a `SharedProc`,
+# calling it through a helper, as iyi-web's router does: the walk from the
+# `SharedProc`'s block binds the def's block to nothing (each block given
+# to it is a parallel block of its own), so the rule holds at the call
+# that gives it.
+{ echo 'module r6_shared'; echo; echo 'import std/shared_proc::{SharedProc}'; echo; box; cat <<'IYI'
+BOX = Box.new
+
+class Router
+  @[Share]
+  def self.route(&block : Int32 -> Int32) : SharedProc(Int32, Int32)
+    SharedProc(Int32, Int32).of { |n| answer(n, block) }
+  end
+
+  def self.answer(n : Int32, block : Int32 -> Int32) : Int32
+    block.call(n)
+  end
+end
+
+def work(n : Int32) : Int32
+  BOX.add("route #{n}")
+  n
+end
+
+route = Router.route { |n| work(n) }
+group do |g|
+  g.spawn(unit: :new) { route.call(1) }
+end
+IYI
+} > r6_shared.iyi
+refused r6_shared 'reaches `BOX : R6Shared::Box` (not Share) through `work` → `BOX.add`'
+
 # ── 2. std's and the prelude's state ───────────────────────────────────────
 step "a unit reaching the runtime's state compiles where the state is Share or marked"
 cat > runtime_state.iyi <<'IYI'
@@ -439,6 +528,7 @@ echo "  a table the unit writes: refused, left to a hand, the file unchanged"
 # ── 4. Broken copies of the compiler ───────────────────────────────────────
 step "failure proofs: broken copies of the walk"
 for name in r6_same r6_handed r6_node r6_param; do caught creation "$name"; done
+caught forwarded r6_forwarded
 still_refused creation r6_defer 'reaches `BOX : R6Defer::Box` (not Share)'
 caught allruntime r6_hash
 caught captured r6_captured
@@ -568,6 +658,80 @@ if in_std broken-pass fed && in_std broken-pass spilled IYI_SPAWN_BROKEN=modulep
   echo "  caught: with IYI_SPAWN_BROKEN=modulepass, spilled.iyi compiles on the answer fed.iyi's build stored"
 else
   echo "the broken copy modulepass was not caught:"; cat fed-broken-pass.log spilled-broken-pass.log; exit 1
+fi
+
+# ── 6. A pin through a function read from an artifact (heap22) ─────────────
+step "a crossing calling an artifact's function that reaches an owning type without lends: is pinned"
+# `fill` reaches `POOL`, a Share constant (no refusal) holding an owning
+# type without `lends:`. Built from source the spawn calling it is pinned;
+# against the artifact, only the artifact's pin record says so (format
+# v64). Its broken copy, `pinrecords`, writes the artifact without them,
+# and the spawn runs in a heap of its own beside the pool.
+mkdir -p pinmod/dep
+cat > pinmod/dep/pool.iyi <<'IYI'
+@[Unsafe("an owning type that keeps no lend protocol, for the gate")]
+module dep/pool
+
+@[Share(owns: true)]
+pub class Pool
+  @items = [] of Int32
+
+  def initialize
+  end
+
+  def add(n : Int32) : Int32
+    @items << n
+    @items.size
+  end
+end
+
+POOL = Pool.new
+
+pub def fill(n : Int32) : Int32
+  POOL.add(n)
+end
+IYI
+cat > pinmod/first.iyi <<'IYI'
+module main
+
+import dep/pool::{fill}
+
+puts fill(1)
+IYI
+cat > pinmod/app.iyi <<'IYI'
+module main
+
+import dep/pool::{fill}
+
+group do |g|
+  g.spawn(unit: :new) { fill(2) }
+end
+IYI
+pinned_note='this spawn runs in the shared heap because it reaches the constant `POOL : '
+pinned_path='(module `dep/pool`) through `fill` → `POOL.add`, which holds `'
+if ! (cd pinmod && "$IYI" build --no-codegen -Dheap_partitions -o app app.iyi) > pin-source.log 2>&1 ||
+  ! grep -qF 'this spawn runs in the shared heap because it reaches `POOL` through `fill`' pin-source.log; then
+  echo "built from source, the spawn reaching POOL through fill was not pinned:"; cat pin-source.log; exit 1
+fi
+if ! (cd pinmod && "$IYI" build -Dheap_partitions --emit-iyimod mods -o first first.iyi) > pin-first.log 2>&1; then
+  echo "the build writing dep/pool's artifact failed:"; cat pin-first.log; exit 1
+fi
+if ! "$IYI" mod dump pinmod/mods/dep/pool.iyimod 2>&1 | grep -qF 'fill reaches the constant `POOL : '; then
+  echo "dep/pool's artifact has no pin record for fill:"; "$IYI" mod dump pinmod/mods/dep/pool.iyimod; exit 1
+fi
+if ! (cd pinmod && "$IYI" build --no-codegen -Dheap_partitions --use-iyimod mods -o app app.iyi) > pin-app.log 2>&1 ||
+  ! grep -qF "$pinned_note" pin-app.log || ! grep -qF "$pinned_path" pin-app.log; then
+  echo "against the artifact, the spawn reaching POOL through fill was not pinned:"; cat pin-app.log; exit 1
+fi
+echo "  pinned against the artifact: $(grep -m1 -o 'because it reaches the constant `POOL[^,]*' pin-app.log | cut -c1-140)"
+if ! (cd pinmod && IYI_SPAWN_BROKEN=pinrecords "$IYI" build -Dheap_partitions --emit-iyimod nopins -o first first.iyi) > pin-nopins.log 2>&1; then
+  echo "the build writing the artifact without pin records failed:"; cat pin-nopins.log; exit 1
+fi
+if (cd pinmod && "$IYI" build --no-codegen -Dheap_partitions --use-iyimod nopins -o app app.iyi) > pin-broken.log 2>&1 &&
+  ! grep -qF "runs in the shared heap" pin-broken.log; then
+  echo "  caught: with IYI_SPAWN_BROKEN=pinrecords, the spawn calling fill is not pinned"
+else
+  echo "the broken copy pinrecords was not caught:"; cat pin-broken.log; exit 1
 fi
 
 echo "reach_rule: every refusal holds, and every broken copy is caught"

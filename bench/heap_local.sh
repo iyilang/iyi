@@ -12,10 +12,15 @@
 # leaves a weak cell naming the chunk it freed, a weak pass after the
 # sweep, which a stop between two classes skips, a weak cell to a large
 # object left off its partition's list, a local mark that trusts
-# the parities a mark abandoned part way left, an idle takeover that
-# reads no parked fiber's stack, an idle takeover of a unit
-# whose `Unit` value is still being built, a dead unit's pooled run
-# left carved for a stale word to pass the root test, a publication
+# the parities a mark abandoned part way left, or a sweep stopped part
+# way left, a run a sweep emptied pooled before its later classes, under
+# a dead object naming its chunk, a death that keeps the runs its
+# sweeps emptied, an idle takeover that reads no parked fiber's stack,
+# an idle takeover of a unit whose `Unit` value is still being built, the
+# same stacks unread by a collection of a unit parked dirty and owing
+# nothing, a pooled run's blocks taken as never written, a dead unit's
+# pooled run left carved for a stale word to pass the root test, a
+# publication
 # walk that takes a chunk straddling the carve frontier for uncarved,
 # an owner test and a weak sweep that do the same to a weak cell, and a
 # counter put back in the data segment at a value that names a `LOCAL`
@@ -137,15 +142,18 @@ prove_fails() { # label dir phrase awk-script file
     status=1
     return
   fi
-  if ! grep -q "^FAIL: $phrase" "$WORK/$dir/out"; then
+  # Unanchored: the verifier's report runs on another thread, and its
+  # "iyi: heap_verify: partition " can sit unfinished in front of the
+  # program's FAIL line (Linux, nofrontier, v2 prep).
+  if ! grep -q "FAIL: $phrase" "$WORK/$dir/out"; then
     echo "  $label: failed (exit $code), but not at the expected check"
     sed -n '$p' "$WORK/$dir/out"
     status=1
     return
   fi
   local verifier="the verifier did not report"
-  grep -q "^iyi: heap_verify: going on" "$WORK/$dir/out" && verifier="the verifier reported too"
-  printf '  %s: exits %s at "%s" (%s)\n' "$label" "$code" "$(grep -m1 "^FAIL: $phrase" "$WORK/$dir/out" | sed 's/^FAIL: //')" "$verifier"
+  grep -q "iyi: heap_verify: going on" "$WORK/$dir/out" && verifier="the verifier reported too"
+  printf '  %s: exits %s at "%s" (%s)\n' "$label" "$code" "$(grep -m1 "FAIL: $phrase" "$WORK/$dir/out" | sed 's/^.*FAIL: //')" "$verifier"
 }
 
 if [ "$PART" = all ] || [ "$PART" = broken ]; then
@@ -228,6 +236,32 @@ if [ "$PART" = all ] || [ "$PART" = broken ]; then
     '{ if ($0 ~ /^    clear_local_marks\(record\) if read64\(record &\+ REC_MARKING\) != 0_u64$/) { found = 1; next } print } END { if (!found) exit 3 }' \
     heap_partition.iyi
 
+  # The marks trusted once the mark ends, as they were through
+  # 3984c899a: a sweep stopped between two classes leaves a dead object
+  # of a later class wearing the parity the next mark wears, which takes
+  # it for reached and keeps it.
+  prove_fails "a stopped sweep's parities trusted" nounswept "unswept:" \
+    '/^    return false unless local_sweep\(record, id, parity, idle\)$/ { print "    write64(record &+ REC_MARKING, 0_u64)"; print "    local_sweep(record, id, parity, idle)"; getline; getline; found = 1; next } { print } END { if (!found) exit 3 }' \
+    heap_partition.iyi
+
+  # An empty run to the pool as the sweep meets it, as through 3984c899a:
+  # while the sweep has later classes to go, a dead object of one names
+  # its chunk, and another unit that takes the run puts its own object
+  # under that word - a whole sweep held between two classes, which
+  # #145's app met at stress 0 (seeds 2 and 3 of 3, Linux), and a stopped one.
+  prove_fails "an emptied run pooled before the sweep ends" poolearly "unswept:" \
+    '/def self\.local_sweep\(/ { inside = 1 } inside && /^            set_run_word\(arena, granule_first, read64\(record &\+ REC_EMPTIED\), n, RUN_OWNED\)$/ { print "            pool_run(index, arena, run, n)"; print "            write64(record &+ REC_HELD, read64(record &+ REC_HELD) - n.unsafe_shl(GRANULE_SHIFT))"; getline; inside = 0; found = 1; next } { print } END { if (!found) exit 3 }' \
+    heap_partition.iyi
+
+  # A death that leaves the runs its stopped sweep emptied on the record:
+  # nobody's list holds them, and they stay the dead partition's. (Their
+  # order at a death - the runs pooled only once every class's dead
+  # chunks are free - has no copy: another unit would have to take one
+  # and collect while the dying one is between two classes.)
+  prove_fails "a death that keeps its emptied runs" deathleak "unswept:" \
+    '/^      pool_emptied\(record, false\)$/ { found = 1; next } { print } END { if (!found) exit 3 }' \
+    heap_partition.iyi
+
   # An idle worker's takeover that reads none of the parked unit's
   # stacks, as the unit's own collection reads all but the running one:
   # a list held only by a parked fiber's frame is freed under it. A
@@ -244,6 +278,22 @@ if [ "$PART" = all ] || [ "$PART" = broken ]; then
   # fiber is collected with that stack unread.
   prove_fails "a takeover of a unit under construction" noconstruct "construct:" \
     '{ if (sub(/if \(unit\.fibers\.is_a\?\(IyiFiber\) \|\| unit\.value_slot != 0_u64\) && unit\.holder == 0_u64/, "if unit.holder == 0_u64")) found = 1; print } END { if (!found) exit 3 }' \
+    heap_partition.iyi
+
+  # An idle worker's collection of a unit parked dirty and owing nothing
+  # (heap22 S6's idle trigger) that reads none of its parked stacks: the
+  # idle check alone (`HEAP22_ONLY=idle`), since the takeover check, which
+  # runs first, meets the same collection. Under `IYI_HEAP_STRESS` the
+  # check stamps the parked units dirty itself.
+  HEAP22_ONLY=idle prove_fails "an idle collection that reads no parked stack" noidle "idle:" \
+    '{ if (sub(/if !\(running\.is_a\?\(IyiFiber\) && running\.object_id == fiber\.object_id\) && fiber\.state/, "if running.is_a?(IyiFiber) \\&\\& running.object_id != fiber.object_id \\&\\& fiber.state")) found = 1; print } END { if (!found) exit 3 }' \
+    heap_partition.iyi
+
+  # A pool run's chunks threaded as fresh - the kernel's zero past their
+  # link words - as only a frontier run's are: a unit that takes a dead
+  # unit's pooled block reads the dead unit's words in it.
+  prove_fails "a pooled run taken as fresh" nofresh "fresh:" \
+    '{ if (sub(/^    thread_run\(table, index, arena, run, n, frontier\)$/, "    thread_run(table, index, arena, run, n, true)")) found = 1; print } END { if (!found) exit 3 }' \
     heap_partition.iyi
 
   # A run of a dead unit to the pool with its `LOCAL` chunks left carved:

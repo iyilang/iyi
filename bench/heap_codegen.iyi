@@ -25,12 +25,21 @@
 #   lend protocol runs pinned, in the shared heap, and what it stores into
 #   that type's graph is shared; one that keeps the protocol gets its own
 #   heap.
+# - `handed`: the same through a library's `@[Share]` def, as iyi-web's
+#   router keeps a route: the def wraps the block it is given in a
+#   `SharedProc.of`, calling it directly or through a helper it hands the
+#   block to, and the block captures a pool without `lends:` or names a
+#   constant holding one. The `SharedProc` is pinned, so the unit calling
+#   it runs in the shared heap from that call on.
+# - `pin_in`: a `g.spawn(in: u)` block reaching a pool without `lends:`
+#   pins *u*'s unit before it runs (`IyiHeap.pins` moves by one).
 # - `holes`: a union written through a smaller arm, in a field and from a
 #   temporary into an array's buffer, holds zeros past the arm and in its
 #   tag's padding, never a stale word. The buffer's unit boxes its values
 #   on a stack whose dead words name another unit's chain, which that
 #   unit then drops and collects: a stale word in the buffer is the
-#   verifier's report. Read before any collection: the raw words.
+#   verifier's report. Read before any collection: the raw words. A
+#   `-Dheap_partitions` build's (the compiler zeroes the holes only there).
 #
 # Each check ends its units' stores with `collect_here`: the stack below
 # scrubbed and the unit's partition collected, so that under
@@ -45,6 +54,7 @@
 {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
   import std/gc::{GC}
   import std/mutex::{Mutex}
+  import std/shared_proc::{SharedProc}
   import std/unit::{Unit}
 
   # `HEAP22_PRINT_ONLY=1`: a failed check prints its `FAIL:` line and the
@@ -496,8 +506,11 @@
 
   # The words of *count* `Val`s at *address* holding `Int64` arms that no
   # arm wrote: the tag's padding, and the three value words past the
-  # `Int64`. Fails naming the first.
+  # `Int64`. Fails naming the first. Without `-Dheap_partitions` the
+  # compiler leaves the holes as they were (flag-off code is today's), so
+  # there is nothing to check.
   def no_stale(address : UInt64, count : Int32, what : String) : Nil
+    {% if !flag?(:heap_partitions) %} return {% end %}
     element = 0
     while element < count
       base = address + (element * VAL_WORDS).to_u64 * 8_u64
@@ -561,7 +574,109 @@
     settled(before, "holes")
   end
 
-  CHECKS = ["c1", "classvar", "born_shared", "pin", "holes"]
+  # ── A block handed through a `@[Share]` def ───────────────────────────
+  # A library's router: each def keeps the block it is given for other
+  # units in a `SharedProc`, which no type says the block of. `direct`
+  # calls the block in the `SharedProc`'s own block; `through` hands it to
+  # a helper that calls it, as iyi-web's `typed_answer` does. Neither
+  # literal names the pool: only the blocks given to the defs do. The
+  # compiler's walk from each `SharedProc.of` binds the def's block to the
+  # blocks given (`IYI_SPAWN_BROKEN=handed` binds none) and follows the
+  # block handed to the helper (`forwarded` does not).
+  class Router
+    @[Share]
+    def self.direct(&block : Int32 -> UInt64) : SharedProc(Int32, UInt64)
+      SharedProc(Int32, UInt64).of { |seed| block.call(seed) }
+    end
+
+    @[Share]
+    def self.through(&block : Int32 -> UInt64) : SharedProc(Int32, UInt64)
+      SharedProc(Int32, UInt64).of { |seed| answer(seed, block) }
+    end
+
+    def self.answer(seed : Int32, block : Int32 -> UInt64) : UInt64
+      block.call(seed)
+    end
+  end
+
+  # Module state holding an owning type without `lends:`, which the block
+  # given to `through` names.
+  ROUTED_POOL = Pool.new
+
+  # The unit that calls *route* runs pinned from that call on: the block
+  # stored its node into the pool's graph in the shared heap. Checked
+  # before the unit's collection, which the verifier aborts in otherwise.
+  def call_route(route : SharedProc(Int32, UInt64), seed : Int32, what : String) : Nil
+    group do |g|
+      task = g.spawn(unit: :new) do
+        here = route.call(seed)
+        fail("handed: #{what} ran in a heap of its own (record #{here}): the SharedProc around it was not pinned") unless here == 0_u64
+        collect_here
+        here
+      end
+      task.value
+    end
+  end
+
+  def handed_check : Nil
+    before = partitions_now
+    pins = pins_now
+    pool = Pool.new
+    direct = Router.direct do |seed|
+      fill(pool, seed)
+      heap_here
+    end
+    through = Router.through do |seed|
+      fill(ROUTED_POOL, seed)
+      heap_here
+    end
+    call_route(direct, 44, "the block given to `direct`, which captures a pool without lends:")
+    call_route(through, 45, "the block given to `through`, called by a helper, which names a constant holding a pool without lends:")
+    settled(before, "handed")
+    fail("handed: the pool lost its node") unless pool.first?.is_a?(Payload)
+    fail("handed: the constant's pool lost its node") unless ROUTED_POOL.first?.is_a?(Payload)
+    {% if flag?(:heap_partitions) %}
+      fail("handed: #{pins_now - pins} pins for the two units, want 2") unless pins_now - pins == 2
+    {% end %}
+  end
+
+  # ── A task in a `Unit`'s unit ─────────────────────────────────────────
+  # `g.spawn(in: u)` runs the block in *u*'s unit, which has a heap of its
+  # own; the block captures a pool without `lends:`, so the compiler points
+  # the call at its pinned instance and the task pins *u* before it runs
+  # (`IYI_SPAWN_BROKEN=pin-in` does not).
+  def pin_in_check : Nil
+    before = partitions_now
+    pins = pins_now
+    pool = Pool.new
+    u = Unit.new { 0 }
+    group do |g|
+      task = g.spawn(in: u) do |value|
+        here = heap_here
+        fail("pin_in: the task ran in its unit's heap (record #{here}): the unit was not pinned") unless here == 0_u64
+        fill(pool, 46 + value)
+        collect_here
+        here
+      end
+      task.value
+    end
+    {% if flag?(:heap_partitions) %}
+      fail("pin_in: #{pins_now - pins} pins for the unit, want 1") unless pins_now - pins == 1
+    {% end %}
+    settled(before, "pin_in")
+    fail("pin_in: the pool lost its node") unless pool.first?.is_a?(Payload)
+  end
+
+  # The pins so far; none without `-Dheap_partitions`.
+  def pins_now : UInt64
+    {% if flag?(:heap_partitions) %}
+      IyiHeap.pins
+    {% else %}
+      0_u64
+    {% end %}
+  end
+
+  CHECKS = ["c1", "classvar", "born_shared", "pin", "handed", "pin_in", "holes"]
 
   def run(name : String) : Nil
     case name
@@ -569,6 +684,8 @@
     when "classvar"    then classvar_check
     when "born_shared" then born_shared_check
     when "pin"         then pin_check
+    when "handed"      then handed_check
+    when "pin_in"      then pin_in_check
     when "holes"       then holes_check
     else                    fail("no check named #{name}")
     end

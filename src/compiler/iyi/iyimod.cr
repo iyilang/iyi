@@ -108,7 +108,14 @@ module Iyi::IyiMod
   # consumer already compares whole (IV.5): code without the publication
   # calls is unsound in a partitioned program. A v62 artifact is refused
   # and rebuilt.
-  FORMAT_VERSION = 63_u32
+  # v64 (heap22 S6): a `Reaches` record may be a pin record (*owning* set):
+  # state, or a capture of a block the function may run, that holds an
+  # owning type declared outside std without `lends:`, written by a build
+  # with `-Dheap_partitions` whatever the state's Share verdict, so that a
+  # consumer's crossing calling the function is pinned. A v63 artifact said
+  # nothing of such state, and a crossing calling into it ran unpinned; it
+  # is refused and rebuilt.
+  FORMAT_VERSION = 64_u32
 
   FORMAT = IO::ByteFormat::LittleEndian
 
@@ -284,9 +291,16 @@ module Iyi::IyiMod
   # constant" or "the class variable", *use* the expression it is used in,
   # *path* the functions between *function* and that expression, *why* the
   # reason it is not safe for every thread, and *module_name* the module
-  # that declares it.
+  # that declares it. A pin record (heap22) has *owning*, the owning type
+  # without `lends:` the state holds, and no *why*: it is not a refusal,
+  # and only a pin's walk reads it (`ShareReach#pin_reason`); its *kind*
+  # may also be "the capture of the block at file:line".
   record ReachRecord, function : String, label : String, type : String, kind : String,
-    use : String, path : Array(String), why : String, module_name : String
+    use : String, path : Array(String), why : String, module_name : String, owning : String = "" do
+    def pin? : Bool
+      !owning.empty?
+    end
+  end
 
   # One `g.spawn` written in a module, and where the build placed it
   # (SPEC.md III.4.16). *owner* is the def it is written in, as a reader
@@ -2184,6 +2198,10 @@ module Iyi::IyiMod
             next
           end
           through = (record.path + [record.use]).map { |step| "`#{step}`" }.join(" → ")
+          if record.pin?
+            io.puts "  #{record.function} reaches #{record.kind} `#{record.label} : #{record.type}` (module `#{record.module_name}`) through #{through}, which holds `#{record.owning}`, an owning type without `lends:` (a crossing calling it is pinned)"
+            next
+          end
           io.puts "  #{record.function} reaches #{record.kind} `#{record.label} : #{record.type}` (module `#{record.module_name}`) through #{through}"
         end
       end
@@ -3761,6 +3779,7 @@ module Iyi::IyiMod
       write_strings io, record.path
       write_string io, record.why
       write_string io, record.module_name
+      write_string io, record.owning
     end
     io.to_slice
   end
@@ -3775,7 +3794,8 @@ module Iyi::IyiMod
       use = read_string(io)
       path = read_strings(io)
       why = read_string(io)
-      ReachRecord.new(function, label, type, kind, use, path, why, read_string(io))
+      module_name = read_string(io)
+      ReachRecord.new(function, label, type, kind, use, path, why, module_name, read_string(io))
     end
     records
   end

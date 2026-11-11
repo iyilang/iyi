@@ -14,10 +14,12 @@
 #
 # Built with `-Dheap_partitions` the shared heap's budget is twice what
 # survived outside the partitions, floored at `IyiHeap::SHARED_MIN` (8 MiB)
-# whatever the threads (heap22, design section 4.2): the budget step
-# roots 16 MiB rather than 4 to lift it off that floor, and the floor
-# step checks the floor is the same for four allocating threads as for
-# none.
+# whatever the threads (heap22, design section 4.2), once the program has
+# made a partition; before that it is the build's without partitions. Step
+# 1c checks both sides of that line and makes the partition; from there the
+# budget step roots 16 MiB rather than 4 to lift it off that floor, and the
+# floor step checks the floor is the same for four allocating threads as
+# for none.
 #
 # Everything here needs the collector's allocator, the default on POSIX.
 # Built with `-Dgc_none` or `-Dgc_boehm` the program says so in
@@ -206,6 +208,27 @@
     IyiMark.collect
     raise "scheduler state: marked black, and still not a live chunk after the first collection" if IyiRoots.base_of(first_marks[0] ^ 0x5A5A5A5A5A5A5A5A_u64) == 0_u64
     puts "    scheduler's state: the object its thread-local names lived through the first collection"
+  {% end %}
+
+  # 1c. Partitions (heap22): a program that never makes one keeps the
+  # budget of the build without them, so the collection 1b ran, with a few
+  # KB live and the main thread alone allocating, left a thread's floor,
+  # not the shared floor. Then one pool unit, and a collection: the shared
+  # heap's rule stands from there, and every step below runs under it (the
+  # floor step checks it).
+  {% if flag?(:heap_partitions) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
+    raise "partitions: a partition was made before the program made a pool unit" if IyiHeap.partitions_made?
+    if IyiMark.budget != IyiMark::MIN_BUDGET
+      raise "partitions: no partition made yet, and the first collection left a #{count(IyiMark.budget)}-byte budget, not a thread's #{count(IyiMark::MIN_BUDGET)}"
+    end
+    unit_answer = 0
+    group do |g|
+      unit_answer = g.spawn(unit: :new) { 7 }.value
+    end
+    raise "partitions: the pool unit answered #{unit_answer}" unless unit_answer == 7
+    raise "partitions: a pool unit ran and no partition was made" unless IyiHeap.partitions_made?
+    IyiMark.collect
+    puts "    partitions: a thread's #{count(IyiMark::MIN_BUDGET)}-byte budget before the first partition, #{count(IyiMark.budget)} after it"
   {% end %}
 
   # 2. Churn, and nobody calls collect. A rooted object with a pattern in it,

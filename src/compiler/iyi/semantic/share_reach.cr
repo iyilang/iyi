@@ -72,12 +72,13 @@ module Iyi
   # makes it, since its body is read as part of that code. A def calling
   # its own parameter adds nothing more - the literal behind it was made, or
   # handed on, by the code that called the def, which reaches it. A literal
-  # made in a def that calls one of the def's parameters reaches what the
-  # parameter is bound to: the literals handed to it at every call, through
-  # forwarded parameters. A call that hands a def a proc it did not make
-  # and did not get as a parameter reaches every literal of that proc's
-  # type, and so does a call of any other proc (one read from a field or
-  # answered by a call). The runtime's own dispatch is not followed:
+  # made in a def that calls one of the def's parameters, or hands one on
+  # to a call, reaches what the parameter is bound to: the literals handed
+  # to it at every call, through forwarded parameters. A call that hands a
+  # def a proc it did not make and did not get as a parameter reaches every
+  # literal of that proc's type, and so does a call of any other proc (one
+  # read from a field or answered by a call). The runtime's own dispatch
+  # is not followed:
   # `IyiDeferNode#run`, the fiber trampoline and the spawn verbs run a proc
   # in the unit that handed it over or in a unit of its own, which is a
   # parallel block of its own (`DROPPED`); followed by type, the fiber
@@ -86,7 +87,10 @@ module Iyi
   # maker and follows no proc handed on, `allruntime` follows no proc call
   # std or the prelude makes - `Hash#[]`'s default block included - and
   # `captured` binds no parameter a literal captures: each a copy
-  # `bench/reach_rule.sh` catches.
+  # `bench/reach_rule.sh` catches. `forwarded` reaches nothing through a
+  # parameter a literal hands on, and `handed` binds no `@[Share]` def's
+  # block in a pin's walk (`pin_reason`): copies bench/heap_codegen.sh
+  # catches.
   #
   # A module read from its `.iyimod` has declarations and no bodies, and
   # the walk read each of its functions as reaching nothing: a spawn
@@ -131,7 +135,10 @@ module Iyi
     # What one body names, the defs it calls, the proc calls it makes, the
     # procs it hands on that it did not make (nil: an `IyiDeferNode`), and
     # whether its proc calls are the runtime's dispatch (`DROPPED`).
-    record Facts, named : Array(Named), calls : Array(Def), procs : Array(ProcCall), passes : Array(Type?), dropped : Bool
+    # *locals* are the thread-local class variables it names, which the
+    # reach rule leaves out - each thread has its own - and a pin does not:
+    # what one holds, the unit running on that thread reaches.
+    record Facts, named : Array(Named), locals : Array(Named), calls : Array(Def), procs : Array(ProcCall), passes : Array(Type?), dropped : Bool
 
     # A named thing the walk found, and the defs that lead to it from the
     # block: the first is one the block calls, the last the one naming it.
@@ -175,30 +182,185 @@ module Iyi
       walk(start, seen)
     end
 
-    # The walk from what *start* calls, past what *seen* holds. A function
-    # read from an artifact has no body here (SPEC.md IV.1g): what it
-    # reaches is what its artifact recorded when the body was there, and
-    # the walk does not go past it. Each def met keeps the one it was met
-    # from, so a path is built only for what is found.
-    private def walk(start : Facts, seen : Set(UInt64)) : Array(Found)
-      remote = Set({String, String}).new
+    # heap22 pins (contract §5, §6): why a crossing whose block may be any
+    # of the literals *roots* must run in the shared heap, or nil. The
+    # first owning type declared outside std without `lends:` among the
+    # types of what the block captures (`self` too), of the module state
+    # it names and reaches through its calls (thread-local class variables
+    # included), and of what every literal it may run captures - a proc
+    # call's, a parameter's binding's, a `@[Share]` def's block's
+    # (`bound`) - and the types those hold. A function read from an
+    # artifact answers with its pin records, and one whose artifact
+    # recorded nothing pins: nothing says what it reaches. std's own owning
+    # types (`Mutex`, `Unit`, `SharedProc`) implement their crossings in
+    # the runtime and do not pin, and the runtime's dispatch (`DROPPED`) is
+    # not followed: a `SharedProc` a unit calls was decided where it was
+    # made, and pins its caller if it must. *own* says the first root is
+    # the block written at the crossing, whose captures and names are said
+    # as its own; *self_type* is its `self` when the index did not see
+    # where it was made.
+    def pin_reason(roots : Array(Def), own : Bool, self_type : Type?) : String?
+      return nil if roots.empty?
+      index
+      literals = [] of Def
+      found = walk(nil, Set(UInt64).new, roots, pin: true, met: literals)
+      first = roots.first
+      held = [] of {Type, String}
+      literals.each do |literal|
+        written = own && literal.same?(first)
+        prefix = written ? "it" : "it runs #{ShareReach.called(literal)}, which"
+        captured_holds(literal, literal_self(literal, written ? self_type : nil)) do |type, name|
+          held << {type, "#{prefix} captures `#{name}`"}
+        end
+      end
+      remote = nil
+      found.each do |entry|
+        path = entry.path
+        path = path[1..] if own && path.first?.same?(first)
+        steps = path.map { |step| "`#{ShareReach.called(step)}`" }
+        case named = entry.named
+        in Named
+          held << {named.type, steps.empty? ? "it names `#{named.label}`" : "it reaches `#{named.label}` through #{steps.join(" → ")}"}
+        in IyiMod::ReachRecord
+          if named.pin?
+            through = (steps + (named.path + [named.use]).map { |step| "`#{step}`" }).join(" → ")
+            remote ||= "it reaches #{named.kind} `#{named.label} : #{named.type}` (module `#{named.module_name}`) through #{through}, which holds `#{named.owning}`, #{PIN_TAIL}"
+          elsif named.kind.empty?
+            remote ||= "it calls #{steps.join(" → ")}, and #{named.module_name} arrived as an artifact that does not record what its functions reach, so nothing says whether they reach an owning type without `lends:`; build #{named.module_name}'s artifact again with this compiler, or build against its source"
+          end
+        end
+      end
+      seen = Set(Type).new
+      held.each do |type, how|
+        if owning = unlent_owning(type, seen, 0)
+          return "#{how}, which holds `#{owning}`, #{PIN_TAIL}"
+        end
+      end
+      remote
+    end
+
+    PIN_TAIL = "an owning type that does not keep the lend protocol: `@[Share(owns: true, lends: true)]` on it promises the protocol and lets the unit keep a heap of its own"
+
+    # The literals a pin's walk binds *home*'s parameter *param* to, a
+    # `@[Share]` def's block included (`bound`): what a crossing given
+    # that parameter as its block, `SharedProc.of(&block)`, may run.
+    def bound_literals(home : Def, param : String) : Array(Def)
+      index
+      literals = [] of Def
+      bound(home, param, true) { |literal| literals << literal unless literals.any?(&.same?(literal)) }
+      literals
+    end
+
+    # The `self` of the literal *literal*: the owner of the def it was made
+    # in, none at the top level, and *fallback* for a literal the index did
+    # not see made.
+    private def literal_self(literal : Def, fallback : Type?) : Type?
+      if made = @literal_home[literal]?
+        made[0].try(&.owner)
+      else
+        fallback
+      end
+    end
+
+    # Each value *literal* captures, with its type and name, and `self`
+    # (*self_type*) when it reads an instance variable or calls one of
+    # self's methods receiverless.
+    private def captured_holds(literal : Def, self_type : Type?, & : Type, String ->) : Nil
+      vars = literal.vars
+      captures_self = false
+      CleanupTransformer::ClosuredVarsCollector.collect(literal).each do |captured|
+        case captured
+        when InstanceVar
+          captures_self = true
+        when Var
+          if captured.name == "self"
+            captures_self = true
+            next
+          end
+          meta = vars.try &.[captured.name]?
+          next unless meta && !meta.belongs_to?(literal)
+          meta.type?.try { |type| yield type, captured.name }
+        end
+      end
+      captures_self ||= CleanupTransformer::ReceiverlessSelfCalls.any?(literal.body)
+      if captures_self && self_type && !self_type.is_a?(Program) && !self_type.is_a?(FileModule) && !self_type.metaclass?
+        yield self_type, "self"
+      end
+    end
+
+    # The first owning type without `lends:`, declared outside std, in
+    # *type* or what it holds: a union's members, a generic's arguments, a
+    # struct's or a class's fields.
+    def unlent_owning(type : Type, seen : Set(Type) = Set(Type).new, depth : Int32 = 0) : Type?
+      return nil if depth > 8 || !seen.add?(type)
+      base = type
+      base = base.base_type if base.is_a?(VirtualType)
+      generic = base.is_a?(GenericClassInstanceType) ? base.generic_type.as(Type) : base
+      if generic.iyi_share_owns? && !generic.iyi_share_lends? && !std_at?(generic.locations.try(&.first?))
+        return base
+      end
+      case base
+      when UnionType
+        base.union_types.each { |member| (found = unlent_owning(member, seen, depth + 1)) && return found }
+      when TupleInstanceType
+        base.tuple_types.each { |member| (found = unlent_owning(member, seen, depth + 1)) && return found }
+      when NamedTupleInstanceType
+        base.entries.each { |entry| (found = unlent_owning(entry.type, seen, depth + 1)) && return found }
+      end
+      if base.is_a?(GenericInstanceType)
+        base.type_vars.each_value do |var|
+          next unless var.is_a?(Var) && (held = var.type?)
+          (found = unlent_owning(held, seen, depth + 1)) && return found
+        end
+      end
+      if base.is_a?(InstanceVarContainer)
+        base.all_instance_vars.each_value do |ivar|
+          next unless held = ivar.type?
+          (found = unlent_owning(held, seen, depth + 1)) && return found
+        end
+      end
+      nil
+    end
+
+    # The walk from what *start* calls, and from the defs *roots*, past
+    # what *seen* holds. A function read from an artifact has no body here
+    # (SPEC.md IV.1g): what it reaches is what its artifact recorded when
+    # the body was there, and the walk does not go past it. Each def met
+    # keeps the one it was met from, so a path is built only for what is
+    # found. *pin* is a pin's walk (`pin_reason`): it binds the block of a
+    # `@[Share]` def too, reads thread-local class variables and the
+    # artifacts' pin records, and lists the literals it meets in *met*.
+    private def walk(start : Facts?, seen : Set(UInt64), roots : Array(Def) = [] of Def, pin : Bool = false, met : Array(Def)? = nil) : Array(Found)
+      remote = Set({String, String, Bool}).new
       parent = {} of Def => Def?
       parent.compare_by_identity
       queue = Deque(Def).new
-      enqueue(start, nil, parent, queue)
+      enqueue(start, nil, parent, queue, pin) if start
+      roots.each do |root|
+        next if parent.has_key?(root)
+        parent[root] = nil
+        queue << root
+      end
       found = [] of Found
       while a_def = queue.shift?
         if header?(a_def)
           remote_of(a_def).each do |record|
-            found << Found.new(record, path_to(a_def, parent)) if remote.add?({record.module_name, record.label})
+            next if record.pin? && !pin
+            found << Found.new(record, path_to(a_def, parent)) if remote.add?({record.module_name, record.label, record.pin?})
           end
           next
         end
+        met << a_def if met && (@literal_home.has_key?(a_def) || roots.any?(&.same?(a_def)))
         facts = facts_of(a_def)
         facts.named.each do |named|
           found << Found.new(named, path_to(a_def, parent)) if seen.add?(named.key)
         end
-        enqueue(facts, a_def, parent, queue)
+        if pin
+          facts.locals.each do |named|
+            found << Found.new(named, path_to(a_def, parent)) if seen.add?(named.key)
+          end
+        end
+        enqueue(facts, a_def, parent, queue, pin)
       end
       found
     end
@@ -211,7 +373,7 @@ module Iyi
       path.reverse!
     end
 
-    private def enqueue(facts : Facts, from : Def?, parent : Hash(Def, Def?), queue : Deque(Def)) : Nil
+    private def enqueue(facts : Facts, from : Def?, parent : Hash(Def, Def?), queue : Deque(Def), pin : Bool) : Nil
       add = ->(target : Def) do
         unless parent.has_key?(target)
           parent[target] = from
@@ -228,7 +390,7 @@ module Iyi
         home = call.home
         param = call.param
         if home && param
-          bound(home, param) { |literal| add.call(literal) }
+          bound(home, param, pin) { |literal| add.call(literal) }
         else
           @literals[call.type]?.try &.each { |literal| add.call(literal) }
         end
@@ -250,10 +412,21 @@ module Iyi
     # The literals *home*'s parameter *param* may be bound to. A def whose
     # parameters a call may fill unseen - a splat's, an implicit `super`'s -
     # has them bound to every literal of the proc's type. A `@[Share]`
-    # def's block is bound to none: every block given to it is a parallel
-    # block of its own, checked where it is given.
-    private def bound(home : Def, param : String, & : Def ->) : Nil
-      return if home.iyi_share_block? && home.block_arg.try(&.name) == param
+    # def's block is bound to none in the reach rule's walk: every block
+    # given to it is a parallel block of its own, checked where it is
+    # given. A pin's walk (*through*) binds it all the same: the crossing
+    # the def makes of it runs that block, and a pin is decided at the
+    # crossing, where the block is not written. iyi-web's router wraps
+    # every route's block in one `SharedProc.of`; bound to nothing, that
+    # crossing read no route, and an app whose routes reached iyi-db's
+    # pool, an owning type without `lends:`, ran them unpinned and died of
+    # it under `-Dheap_partitions` (S6). `IYI_SPAWN_BROKEN=handed` binds it
+    # to none there too.
+    private def bound(home : Def, param : String, through : Bool, & : Def ->) : Nil
+      if home.iyi_share_block? && home.block_arg.try(&.name) == param
+        return unless through
+        return if SPAWN_BROKEN.includes?("handed")
+      end
       return if SPAWN_BROKEN.includes?("captured")
       if @open.includes?(home.object_id)
         types = home.args.select(&.name.==(param)).compact_map(&.type?)
@@ -384,6 +557,7 @@ module Iyi
       {"concurrency.iyi", "spawn"}, {"concurrency.iyi", "in_unit"}, {"concurrency.iyi", "pooled"},
       {"concurrency.iyi", "on_main"}, {"concurrency.iyi", "on_pool"}, {"concurrency.iyi", "spawn_new"},
       {"concurrency.iyi", "spawn_pooled"}, {"concurrency.iyi", "crossing_task"}, {"concurrency.iyi", "unit_work"},
+      {"concurrency.iyi", "spawn_in"},
       {"testing.iyi", "test"}, {"testing.iyi", "assert_panics"}, {"shared_proc.iyi", "call"},
     }
 
@@ -455,11 +629,16 @@ module Iyi
     # what it reaches that is not safe for every thread of every program
     # importing the module. State under a claim that holds in every such
     # program (`ReachProof#robust?`) is left out; under one proven only
-    # for this program, it is recorded, saying so.
+    # for this program, it is recorded, saying so. A build with
+    # `-Dheap_partitions` also records, as pin records, what a pin's walk
+    # from the function finds holding an owning type without `lends:`
+    # (`pin_reason`), Share or not: a consumer's crossing that calls the
+    # function is pinned on them. `IYI_SPAWN_BROKEN=pinrecords` writes none.
     def summarise(file : String) : Array(IyiMod::ReachRecord)
       index
       records = [] of IyiMod::ReachRecord
-      recorded = Set({String, String, String}).new
+      recorded = Set({String, String, String, Bool}).new
+      pins = @program.has_flag?("heap_partitions") && !SPAWN_BROKEN.includes?("pinrecords")
       instances_in(file).each do |a_def|
         next if a_def.iyi_from_artifact?
         key = ShareReach.reach_key(a_def)
@@ -470,12 +649,29 @@ module Iyi
         found.concat walk(own, seen)
         found.each do |entry|
           record = summary_record(key, entry, file)
-          records << record if record && recorded.add?({key, record.module_name, record.label})
+          records << record if record && recorded.add?({key, record.module_name, record.label, false})
+        end
+        next unless pins
+        seen = Set(UInt64).new
+        found = [] of Found
+        (own.named + own.locals).each { |named| found << Found.new(named, [] of Def) if seen.add?(named.key) }
+        met = [] of Def
+        found.concat walk(own, seen, pin: true, met: met)
+        found.each do |entry|
+          record = pin_record(key, entry)
+          records << record if record && recorded.add?({key, record.module_name, record.label, true})
+        end
+        met.each do |literal|
+          captured_holds(literal, literal_self(literal, nil)) do |type, name|
+            next unless owning = unlent_owning(type)
+            record = IyiMod::ReachRecord.new(key, name, type.to_s, "the capture of #{ShareReach.called(literal)}", name, [] of String, "", module_at(literal.location), owning.to_s)
+            records << record if recorded.add?({key, record.module_name, "#{record.kind} #{name}", true})
+          end
         end
       end
       # In one order whatever order this build typed them in, since the
       # interface hash is over them.
-      records.sort_by! { |record| {record.function, record.module_name, record.label} }
+      records.sort_by! { |record| {record.function, record.module_name, record.label, record.kind, record.owning} }
     end
 
     # One found thing as the record *key*'s function keeps: nil for state
@@ -496,13 +692,33 @@ module Iyi
         if state.iyi_safe_reach
           why = "#{why}; its @[SafeReach] is proven for the program that wrote this artifact and not for every program importing the module: it is written outside the module's initialiser, named outside the module, or answered by a function"
         end
-        declared = named.declared
-        declared_file = declared.try { |at| (at.expanded_location || at).filename }.as?(String)
-        owner = declared_file.try { |path| @program.iyi_module_paths[path]? } ||
-                @program.iyi_artifact_module_at(declared) || ""
         kind = state.is_a?(Const) ? "the constant" : "the class variable"
-        IyiMod::ReachRecord.new(key, named.label, named.type.to_s, kind, named.use, steps, why, owner)
+        IyiMod::ReachRecord.new(key, named.label, named.type.to_s, kind, named.use, steps, why, module_at(named.declared))
       end
+    end
+
+    # One thing a pin's walk found as the pin record *key*'s function
+    # keeps: state holding an owning type without `lends:`, or another
+    # artifact's pin record, passed on. nil for anything else; a function
+    # of an artifact that recorded nothing is already its own record.
+    private def pin_record(key : String, entry : Found) : IyiMod::ReachRecord?
+      steps = entry.path.map { |target| ShareReach.called(target) }
+      case named = entry.named
+      in IyiMod::ReachRecord
+        named.pin? ? named.copy_with(function: key, path: steps + named.path) : nil
+      in Named
+        owning = unlent_owning(named.type)
+        return nil unless owning
+        kind = named.state.is_a?(Const) ? "the constant" : "the class variable"
+        IyiMod::ReachRecord.new(key, named.label, named.type.to_s, kind, named.use, steps, "", module_at(named.declared), owning.to_s)
+      end
+    end
+
+    # The module whose file holds *location*: this build's, or the one an
+    # artifact it read was written from; "" for neither.
+    private def module_at(location : Location?) : String
+      file = location.try { |at| (at.expanded_location || at).filename }.as?(String)
+      file.try { |path| @program.iyi_module_paths[path]? } || @program.iyi_artifact_module_at(location) || ""
     end
 
     # Every def instance this build typed whose def is written in *file*,
@@ -555,7 +771,7 @@ module Iyi
     private def scan(body : ASTNode, home : Def?, depth : Int32, bound : Array(String)) : Facts
       scanner = Scanner.new(self, home, depth, bound)
       body.accept scanner
-      Facts.new(scanner.named, scanner.calls, scanner.procs, scanner.passes, dropped?(home))
+      Facts.new(scanner.named, scanner.locals, scanner.calls, scanner.procs, scanner.passes, dropped?(home))
     end
 
     # The reason `@[SafeReach("...")]` or `@[UnsafeReach("...")]` on a
@@ -660,6 +876,7 @@ module Iyi
     # blocks around it bind, which shadow the def's parameters.
     class Scanner < Visitor
       getter named = [] of Named
+      getter locals = [] of Named
       getter calls = [] of Def
       getter procs = [] of ProcCall
       getter passes = [] of Type?
@@ -689,8 +906,8 @@ module Iyi
             note(const, obj.to_s, type, "#{obj}.#{node.name}", obj.location)
           end
         when ClassVar
-          if (var = obj.var?) && !var.thread_local? && (type = var.type?)
-            note(var, obj.name, type, "#{obj.name}.#{node.name}", obj.location)
+          if (var = obj.var?) && (type = var.type?)
+            note(var, obj.name, type, "#{obj.name}.#{node.name}", obj.location, var.thread_local?)
           end
         end
         true
@@ -721,7 +938,15 @@ module Iyi
       # What procs the call hands *target*: a literal made at the call is
       # this body's, and binds the parameter; the def's own parameter is
       # forwarded; any other proc may be any literal of its type, and the
-      # call reaches them all.
+      # call reaches them all. A literal handing on a parameter of the def
+      # it was made in reaches what that parameter is bound to, as if it
+      # called it: the callee may, and no one else reaches it for the
+      # literal. iyi-web's route literal `{ |ctx| typed_answer(ctx, block,
+      # ...) }` runs the route's block through `typed_answer`'s call of its
+      # own parameter, which adds nothing (`proc_call`). Only a def handing
+      # on its own parameter leaves the literal behind it to its caller,
+      # which made or forwarded it. `IYI_SPAWN_BROKEN=forwarded` reaches
+      # nothing there.
       private def hands(node : Call, target : Def) : Nil
         splat = !target.splat_index.nil? || !target.double_splat.nil? || node.args.any? { |arg| arg.is_a?(Splat) || arg.is_a?(DoubleSplat) }
         implicit = (node.name == "super" || node.name == "previous_def") && node.args.empty? && !target.args.empty?
@@ -752,6 +977,7 @@ module Iyi
           if member.is_a?(ProcInstanceType)
             if !defer && (name = own_param(arg))
               @reach.note_arg(Arg.new(target, param, from: {@home.not_nil!, name}))
+              @procs << ProcCall.new(member, @home, name) if @depth > 0 && !SPAWN_BROKEN.includes?("forwarded")
             else
               @reach.note_arg(Arg.new(target, param, type: member, defer: defer))
               @passes << member unless defer
@@ -778,8 +1004,8 @@ module Iyi
       end
 
       def visit(node : ClassVar) : Bool
-        if (var = node.var?) && !var.thread_local? && (type = var.type?)
-          note(var, node.name, type, node.name, node.location)
+        if (var = node.var?) && (type = var.type?)
+          note(var, node.name, type, node.name, node.location, var.thread_local?)
         end
         false
       end
@@ -835,9 +1061,11 @@ module Iyi
         true
       end
 
-      private def note(state : Const | MetaTypeVar, label : String, type : Type, use : String, at : Location?) : Nil
+      # A thread-local class variable goes to *locals*, which only a pin's
+      # walk reads.
+      private def note(state : Const | MetaTypeVar, label : String, type : Type, use : String, at : Location?, local : Bool = false) : Nil
         return unless @keys.add?(state.object_id)
-        @named << Named.new(state, label, type, use, at)
+        (local ? @locals : @named) << Named.new(state, label, type, use, at)
       end
     end
   end

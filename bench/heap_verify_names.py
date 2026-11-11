@@ -107,7 +107,8 @@ class Symbols:
         self.addresses = []
         if binary and shutil.which("nm"):
             try:
-                out = subprocess.run(["nm", "-C", "-n", binary], capture_output=True, text=True, check=False).stdout
+                out = subprocess.run(["nm", "-C", "-n", binary], capture_output=True, text=True, errors="replace",
+                                     check=False).stdout
             except OSError:
                 out = ""
             for line in out.splitlines():
@@ -129,9 +130,9 @@ class Symbols:
             return
         try:
             heads = subprocess.run(["llvm-pdbutil", "dump", "--section-headers", pdb],
-                                   capture_output=True, text=True, check=False).stdout
+                                   capture_output=True, text=True, errors="replace", check=False).stdout
             publics = subprocess.run(["llvm-pdbutil", "dump", "--publics", pdb],
-                                     capture_output=True, text=True, check=False).stdout
+                                     capture_output=True, text=True, errors="replace", check=False).stdout
         except OSError:
             return
         starts = [int(m.group(1), 16) for m in PDB_SECTION_RE.finditer(heads)]
@@ -173,7 +174,8 @@ class Symbols:
         else:
             return None
         try:
-            out = subprocess.run(command, capture_output=True, text=True, check=False).stdout.split("\n")
+            out = subprocess.run(command, capture_output=True, text=True, errors="replace",
+                                 check=False).stdout.split("\n")
         except OSError:
             return None
         pairs = [(ESCAPE_RE.sub(lambda m: chr(int(m.group(1), 16)), out[i]), out[i + 1])
@@ -189,7 +191,7 @@ class Symbols:
         image = dwarf if os.path.exists(dwarf) else self.binary
         try:
             out = subprocess.run(["atos", "-o", image, "-l", hex(self.base), hex(address)],
-                                 capture_output=True, text=True, check=False).stdout.strip()
+                                 capture_output=True, text=True, errors="replace", check=False).stdout.strip()
         except OSError:
             return None
         match = ATOS_RE.match(out)

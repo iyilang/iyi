@@ -54,6 +54,17 @@ unit's death then freed; `-Dheap_verify` reported it after
 reads the value through the handle when it runs; the exercise's `outlive`
 step and its `keptproc`/`keptbody` copies hold it.
 
+Under `-Dheap_partitions` a program that never makes a pool unit keeps the
+shared heap's budget of the build without the flag (a thread's floor per
+allocating thread) until its first partition: the shared floor alone had
+halved churn's collections and raised its peak resident set from 6.6 to
+10.8 MB (tmac). A unit that reaches its budget in flight doubles it at
+each such collection, up to 4 MiB within its share of the partitions'
+headroom, and a collection at a park or by an idle worker sets it from
+what was kept again: at twice what was kept alone, alloc_scaling's lone
+unit collected every MiB, 317 local collections where the shared heap
+runs 57, 1.17 of 0.21.0's wall time on one worker (tmac).
+
 heap22's verifier: the false-word injector no longer writes under a pool
 worker's parking fiber or below a Windows fiber's committed stack; reports
 name String and untyped-holder allocation sites and data-segment holders
@@ -131,6 +142,56 @@ thread, seeded from the operating system at that thread's first draw; one
 generator shared by every thread raced, and two threads could draw the
 same number.
 
+heap22 S6 fixes, under `-Dheap_partitions`. A lend walk stops at objects
+born in the shared heap and at chunks local to another partition, and
+keeps its visited set from walk to walk; `IyiHeap.lend_in` adds a graph
+once, and `lend_out` of a graph that was never lent walks nothing, except
+under `-Dheap_verify`, where the walk reports the first local chunk it
+reaches (#145's app spent 98 % of its flag-on worker time in the walk,
+10.7-46 req/s against ~900 without the flag; on the cities endpoint it
+now serves 1,057 req/s at 1.97 ms CPU a request, against 1,009 and 1.90
+without the flag, Linux, medians of 3). The local mark follows a fiber's
+defer list through a held `Mutex`'s release node, which is born in the
+shared heap, so a local collection made while a lock is held no longer
+frees the unit's defer nodes below it (a use-after-free). A panic's, a
+cancelled task's and `exit`'s drain of a task's cleanups takes each
+node's link down, and a joined group's `outer` is cleared: a `Mutex`'s
+release node, or a group opened inside a lock block, both shared, kept
+naming a unit's chunk after the unit freed it (`-Dheap_verify` exit 86;
+bench/heap_crossings `defer_drain`, `defer_stop`, `group_outer`). The pin
+fallback now follows a block handed to a `@[Share]` def (iyi-web's router)
+and on to a helper, a `&block` forwarded to `SharedProc.of`, `Unit.new`
+or a spawn, and `g.spawn(in: u)` (which pins `u` for good); before, no
+`SharedProc.of` or `Unit.new` was ever pinned, and an app whose routes
+reached iyi-db's pool crashed at its first request (`.iyimod` v64). A
+local sweep no longer pools the runs it empties before it has swept every
+class, nor lets the next mark trust parities after it stopped part way: a
+dead object of a later class could name a chunk another unit had taken
+(#145's app, `-Dheap_verify`, stress 0: 230-1,437 such takes a run, now
+0), which a stale conservative word reviving that object would have made
+a real cross-unit pointer (bench/heap_local `nounswept`, `poolearly`,
+`deathleak`). `IyiHeap.new_shared` notes born-shared types only on the
+partitions' targets, so an x86_64-darwin cross-compile with
+`-Dheap_partitions` builds again, and bench/heap_lend waits for every
+unit of the program to die before reading what a dead unit lent.
+
+heap22 S6 costs, under `-Dheap_partitions`. Fresh chunks above a page
+are no longer cleared whole, and a unit parked dirty for two 100 ms
+ticks of the idle clock is collected by an idle pool worker, so an idle
+keep-alive connection's partition holds far less (bench/heap_local
+`noidle`, `nofresh`). A busy unit's collection budget doubles with each
+collection it brings on in flight, up to 4 MiB within its share of the
+heap, and is worked out again from what was kept when the unit parks, so
+request-shaped units keep 256 KiB: alloc_scaling ran 317 local
+collections on one worker where the shared heap runs 57, and now takes
+0.84 (one worker) and 0.79 (two) of 0.21.0's time (tmac, 9 rounds). A
+program that never made a partition keeps the flag-off budget
+(bench/collect_trigger `sharedfirst`, `sharednever`).
+`IyiHeap.containing_large` is always inlined: the flag gave the mark's
+`base_of` five more callers, the inliner stopped inlining it there, and
+JsonGenerate's global collections ran 17 % longer (tmac, 143.5 ms against
+122.7); flag on and off now retire the same instructions.
+
 Two races older than heap22, in every build: units setting or deleting
 environment variables at once lost them (tmac, 6 units × 300 rounds at
 `IYI_WORKERS=4`: 261-301 of 1,800 reads of their own write lost); writers
@@ -145,6 +206,19 @@ point stands aside while the runtime's lock is held, so a test that waits
 on a timer or holds that lock no longer spins for ever on one seed
 (heap_crossings' ring check on macOS). `IYI_CHAOS_LATE_THREADS` holds a
 thread that links itself until the simulated thread is idle.
+
+A finished thread's main fiber no longer stays on the scheduler's fiber
+registry, naming a stack that is gone, in any build (0.21.0 included): the
+retiring thread asked whether the registry held its fiber without the
+runtime lock, and a neighbour unlinking itself between the two reads made
+the answer no. It asks under the lock. On tmac, waves of 16 threads that
+end together left a main fiber behind in 59 of 8,000 waves at 0.21.0, 96
+at the head without the flag and 86 with it, and none of 8,000 after;
+`thread_exercise` named one in 1 of 24 runs (S6, flag off). Linux x86_64
+left none in 4,000 waves of any build. bench/thread_exercise.sh 5f holds
+the ask open 300 ms in copies of the runtime while a neighbour retires:
+under the lock nothing is left, 5 runs of 5; without it a main fiber is,
+5 of 5.
 
 ## 0.21.0 — 2026-11-09
 
@@ -27900,7 +27974,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 34,143-line library and nothing else. Every other
+  written against iyi's own 34,803-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

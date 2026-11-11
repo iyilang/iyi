@@ -201,8 +201,8 @@ fi
 step "failure proof: a Unit task's body kept after it finished names the Unit's value"
 if [ "$VERIFY" = 1 ] && [ "$PARTITIONS" = 1 ]; then
   broken keptbody "$KEEPPROC"'
-    /^    work = IyiCross\.shared \{ unit_work\(block, owner\) \}$/ { print "    work = IyiCross.shared { unit_work(block, owner.iyi_value) }"; kept++; next }
-    /^  private def unit_work\(block : S -> T, owner : Unit\(S\)\) : Proc\(T\) forall S, T$/ { print "  private def unit_work(block : S -> T, value : S) : Proc(T) forall S, T"; kept++; next }
+    /^    work = IyiCross\.shared \{ unit_work\(block, owner, pinned\) \}$/ { print "    work = IyiCross.shared { unit_work(block, owner.iyi_value, pinned) }"; kept++; next }
+    /^  private def unit_work\(block : S -> T, owner : Unit\(S\), pinned : Bool\) : Proc\(T\) forall S, T$/ { print "  private def unit_work(block : S -> T, value : S, pinned : Bool) : Proc(T) forall S, T"; kept++; next }
     /^      answer = block\.call\(owner\.iyi_value\)$/ { print "      answer = block.call(value)"; kept++; next }
     { print } END { if (kept != 4) exit 3 }'
   want="at its unit's death, a slot names one of its LOCAL chunks, about to be freed"

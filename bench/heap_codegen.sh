@@ -193,6 +193,7 @@ prove_caught "C1 typed crossing context" c1 c1
 prove_caught "class-variable store publish" classvar-publish classvar
 prove_caught "trusted types born shared" new-shared born_shared
 prove_caught "pin (forced off)" pin pin
+prove_caught "union holes written as zero" holes holes
 
 echo
 echo "Seed $SEED (IYI_CHAOS), IYI_HEAP_STRESS=1, $RUNS verifier runs each with HEAP22_PRINT_ONLY=1."

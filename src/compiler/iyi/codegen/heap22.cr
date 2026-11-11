@@ -19,7 +19,9 @@
 #   holds the cell's address (`MetaVar#iyi_boxed?`).
 #
 # `IYI_SPAWN_BROKEN` takes `c1`, `classvar-publish` and `new-shared`, each
-# turning one of these off, for the verifier's broken copies.
+# turning one of these off, for the verifier's broken copies; and `holes`,
+# which leaves a union's bytes past its arm and every value's padding as
+# they were (`CodeGenVisitor#iyi_clear_holes`, in every build).
 class Iyi::CodeGenVisitor
   IYI_NEW_SHARED_NAME = "__iyi_new_shared"
   IYI_PUBLISH_NAME    = "__iyi_publish"

@@ -5478,9 +5478,9 @@ describe "Semantic: iyi" do
     end
 
     # #148: a parallel block that reaches a constant through the defs it
-    # calls is warned about, with the path; one that names it is refused,
-    # as above. The issue's program kept its database pool in `DATABASE`
-    # and read it through `ask`, and compiled silently.
+    # calls is refused, with the path (SPEC.md III.4.5); 0.21 warned. The
+    # issue's program kept its database pool in `DATABASE` and read it
+    # through `ask`, and compiled silently.
     describe "what a shared block reaches through the defs it calls" do
       reach_stub = <<-STUB
         class IyiGroup
@@ -5513,6 +5513,23 @@ describe "Semantic: iyi" do
 
       reach_warnings = ->(code : String) { semantic(code, filename: "x.iyi").program.warnings.infos }
 
+      # The refusal's text, raised once every block is checked.
+      reach_error = ->(code : String) do
+        ex = expect_raises(TypeException) { semantic(code, filename: "x.iyi") }
+        ex.message.not_nil!
+      end
+
+      # `Proc#call`, for the shapes that call a proc they were handed.
+      proc_stub = <<-PROC
+        struct Proc
+          @[Primitive(:proc_call)]
+          @[Raises]
+          def call(*args : *T) : R
+          end
+        end
+
+        PROC
+
       # A type that is not Share - `add` assigns its field - with a reader:
       # what a SafeReach claim the compiler can prove is made on.
       ledger = <<-LEDGER
@@ -5532,7 +5549,7 @@ describe "Semantic: iyi" do
 
         LEDGER
 
-      it "warns at the block, naming the constant, its type, why and the path" do
+      it "refuses the block, naming the constant, its type, why, the path and why no claim is proven" do
         code = reach_stub + <<-CODE
           def ask_twice : Int64
             ask(2_i64)
@@ -5547,14 +5564,34 @@ describe "Semantic: iyi" do
           end
           CODE
         line = code.lines.index!(&.includes?("g.spawn(unit: :new) do")) + 1
-        infos = reach_warnings.call(code)
-        infos.size.should eq(1)
-        infos[0].should start_with("warning in line #{line}\n")
-        infos[0].should contain("Warning: the block spawn(unit: :new) runs in a unit of its own, on another thread reaches `DATABASE : Database` (not Share) through `ask` → `DATABASE.query_one`: Database's field @total is assigned in `query_one`. Keep the value behind a `Mutex` (std/mutex), or, when every thread may reach it safely - every write is before the first parallel task starts, or behind one `Mutex#lock` on a constant or a class variable - say why on the constant: `@[SafeReach(\"...\")]`, which the compiler proves (SPEC.md III.4.4)")
+        ex = expect_raises(TypeException) { semantic(code, filename: "x.iyi") }
+        ex.line_number.should eq(line)
+        ex.message.to_s.should contain("the block spawn(unit: :new) runs in a unit of its own, on another thread (x.iyi:#{line}) reaches `DATABASE : Database` (not Share) through `ask` → `DATABASE.query_one`: Database's field @total is assigned in `query_one`. A parallel unit may not reach module state that is not Share (SPEC.md III.4.5). Keep the value behind a `Mutex` (std/mutex), or, when every thread may reach it safely - every write is before the first parallel task starts, or behind one `Mutex#lock` on a constant or a class variable - say why on the constant: `@[SafeReach(\"...\")]`, which the compiler proves. A claim here would not be proven, so `iyi fix` leaves it to a hand: @[SafeReach] on `DATABASE` is refused: nothing proves every thread may reach it safely. `DATABASE.query_one(n)` in `ask` at x.iyi:")
       end
 
-      it "warns for the block a @[Share] def keeps" do
-        infos = reach_warnings.call(reach_stub + <<-CODE)
+      # A state nothing writes once a parallel task may start is refused
+      # all the same, and told the claim that would be proven.
+      it "refuses state a claim would be proven for, naming the claim" do
+        message = reach_error.call(reach_stub + ledger + <<-CODE)
+          FILLED = Ledger.new
+          FILLED.add
+
+          def rows : Int32
+            FILLED.rows
+          end
+
+          g = G
+          g.spawn(unit: :new) do
+            rows
+            nil
+          end
+          CODE
+        message.should contain("reaches `FILLED : Ledger` (not Share) through `rows` → `FILLED.rows`: Ledger's field @rows is assigned in `add`.")
+        message.should contain("Nothing writes it once a parallel task may start, so a claim is proven: write `@[SafeReach(\"set before the first parallel task starts, then only read\")]` on its declaration")
+      end
+
+      it "refuses the block a @[Share] def keeps" do
+        message = reach_error.call(reach_stub + <<-CODE)
           @[Share]
           def everywhere(&work : -> Int64) : Nil
             G.spawn(unit: :new) do
@@ -5566,8 +5603,8 @@ describe "Semantic: iyi" do
 
           everywhere { ask(1_i64) }
           CODE
-        infos.size.should eq(1)
-        infos[0].should contain("the block everywhere keeps, which may run on other threads reaches `DATABASE : Database` (not Share) through `ask` → `DATABASE.query_one`")
+        message.should contain("the block everywhere keeps, which may run on other threads (x.iyi:")
+        message.should contain(") reaches `DATABASE : Database` (not Share) through `ask` → `DATABASE.query_one`")
       end
 
       it "still refuses a block that names the constant, marked or not" do
@@ -5583,7 +5620,7 @@ describe "Semantic: iyi" do
           CODE
       end
 
-      it "does not warn for Share constants: an owning type, a trusted one, one whose fields nothing assigns" do
+      it "does not refuse Share constants: an owning type, a trusted one, one whose fields nothing assigns" do
         infos = reach_warnings.call(unsafe + owning + reach_stub + <<-CODE)
           @[Share]
           class Cell
@@ -5624,8 +5661,8 @@ describe "Semantic: iyi" do
         infos.should be_empty
       end
 
-      it "is silenced by @[SafeReach] for that constant alone" do
-        infos = reach_warnings.call(reach_stub + ledger + <<-CODE)
+      it "takes @[SafeReach] for that constant alone" do
+        message = reach_error.call(reach_stub + ledger + <<-CODE)
           @[SafeReach("set once at startup, then only read")]
           QUIET = Ledger.new
           QUIET.add
@@ -5641,8 +5678,8 @@ describe "Semantic: iyi" do
             nil
           end
           CODE
-        infos.size.should eq(1)
-        infos[0].should contain("reaches `DATABASE : Database` (not Share) through `both` → `ask` → `DATABASE.query_one`")
+        message.should contain("reaches `DATABASE : Database` (not Share) through `both` → `ask` → `DATABASE.query_one`")
+        message.should_not contain("QUIET")
       end
 
       it "refuses SafeReach without a reason" do
@@ -5653,7 +5690,7 @@ describe "Semantic: iyi" do
       end
 
       it "follows a path through two defs and a recursive pair to the shortest one" do
-        infos = reach_warnings.call(reach_stub + <<-CODE)
+        message = reach_error.call(reach_stub + <<-CODE)
           def outer(n : Int32) : Int64
             inner(n)
           end
@@ -5674,12 +5711,11 @@ describe "Semantic: iyi" do
             nil
           end
           CODE
-        infos.size.should eq(1)
-        infos[0].should contain("reaches `DATABASE : Database` (not Share) through `outer` → `inner` → `again` → `DATABASE.query_one`")
+        message.should contain("reaches `DATABASE : Database` (not Share) through `outer` → `inner` → `again` → `DATABASE.query_one`")
       end
 
       it "walks every target of a virtual call" do
-        infos = reach_warnings.call(reach_stub + <<-CODE)
+        message = reach_error.call(reach_stub + <<-CODE)
           abstract class Store
             abstract def get : Int64
           end
@@ -5703,12 +5739,11 @@ describe "Semantic: iyi" do
             nil
           end
           CODE
-        infos.size.should eq(1)
-        infos[0].should contain("reaches `DATABASE : Database` (not Share) through `DbStore#get` → `ask` → `DATABASE.query_one`")
+        message.should contain("reaches `DATABASE : Database` (not Share) through `DbStore#get` → `ask` → `DATABASE.query_one`")
       end
 
-      it "warns for a class variable reached through a call" do
-        infos = reach_warnings.call(reach_stub + <<-CODE)
+      it "refuses a class variable reached through a call" do
+        message = reach_error.call(reach_stub + <<-CODE)
           class Registry
             @@db = Database.new
 
@@ -5723,11 +5758,10 @@ describe "Semantic: iyi" do
             nil
           end
           CODE
-        infos.size.should eq(1)
-        infos[0].should contain("reaches `@@db : Database` (not Share) through `Registry.ask` → `@@db.query_one`: Database's field @total is assigned in `query_one`. Keep the value behind a `Mutex` (std/mutex), or, when every thread may reach it safely - every write is before the first parallel task starts, or behind one `Mutex#lock` on a constant or a class variable - say why on the class variable: `@[SafeReach(\"...\")]`, which the compiler proves (SPEC.md III.4.4)")
+        message.should contain("reaches `@@db : Database` (not Share) through `Registry.ask` → `@@db.query_one`: Database's field @total is assigned in `query_one`. A parallel unit may not reach module state that is not Share (SPEC.md III.4.5). Keep the value behind a `Mutex` (std/mutex), or, when every thread may reach it safely - every write is before the first parallel task starts, or behind one `Mutex#lock` on a constant or a class variable - say why on the class variable: `@[SafeReach(\"...\")]`, which the compiler proves. A claim here would not be proven, so `iyi fix` leaves it to a hand: @[SafeReach] on `@@db` is refused")
       end
 
-      it "is silenced by @[SafeReach] on a class variable" do
+      it "takes @[SafeReach] on a class variable" do
         infos = reach_warnings.call(reach_stub + ledger + <<-CODE)
           class Registry
             @[SafeReach("filled at startup, then only read")]
@@ -5752,11 +5786,13 @@ describe "Semantic: iyi" do
         infos.should be_empty
       end
 
-      # std's own state is std's to keep safe: a def written beside the
-      # prelude is not walked - the class variable `std_take` reaches is
-      # never seen - and a constant declared there is not warned about when
-      # the program names it in a def of its own.
-      it "does not warn for state std keeps" do
+      # std's own state is refused as the program's is (SPEC.md III.4.5):
+      # a unit's heap is broken by std's state as by the program's, so a
+      # def written beside the prelude is walked - the class variable
+      # `std_take` reaches is found - and a constant declared there is
+      # refused when the program names it in a def of its own. std keeps
+      # its own state Share, proven or marked `@[UnsafeReach]`.
+      it "refuses state std keeps, as the program's" do
         root = File.tempname("iyi-reach")
         Dir.mkdir_p(File.join(root, "iyi"))
         File.write(File.join(root, "iyi", "prelude.iyi"), "")
@@ -5798,18 +5834,22 @@ describe "Semantic: iyi" do
               nil
             end
             CODE
-          warnings = WarningCollection.new
-          semantic(Expressions.new([std, user] of ASTNode), warnings: warnings)
-          warnings.infos.should be_empty
+          ex = expect_raises(TypeException) do
+            semantic(Expressions.new([std, user] of ASTNode))
+          end
+          message = ex.message.not_nil!
+          message.should contain("reaches `STDPOOL : StdPool` (not Share) through `mine` → `STDPOOL.take`: StdPool's field @n is assigned in `take`.")
+          message.should contain("1 more piece of module state is reached by parallel units the same way: `@@pool : StdPool`")
         ensure
           FileUtils.rm_rf(root)
         end
       end
 
-      # One warning per piece of state, at the first block that reaches it,
-      # with the count of the others: iyiturkiye's 91 warned blocks gave
-      # 1251 warnings about 37 constants, each once per block reaching it.
-      it "warns once for state many blocks reach, counting the others" do
+      # One refusal, raised at the first block that reaches the first
+      # piece of state, counting the other blocks, with the other pieces
+      # listed after it: warned once per block, iyiturkiye's 91 blocks
+      # gave 1251 warnings about 37 constants.
+      it "refuses once for state many blocks reach, counting the others" do
         code = reach_stub + <<-CODE
           TALLY = Database.new
 
@@ -5833,18 +5873,16 @@ describe "Semantic: iyi" do
           end
           CODE
         first = code.lines.index!(&.includes?("g.spawn(unit: :new) do")) + 1
-        second = first + 4
-        infos = reach_warnings.call(code)
-        infos.size.should eq(2)
-        infos[0].should start_with("warning in line #{first}\n")
-        infos[0].should contain("reaches `DATABASE : Database` (not Share) through `ask` → `DATABASE.query_one`, as do 2 other parallel blocks: Database's field @total is assigned in `query_one`.")
-        infos[1].should start_with("warning in line #{second}\n")
-        infos[1].should contain("reaches `TALLY : Database` (not Share) through `tally` → `TALLY.query_one`: ")
-        infos[1].should_not contain("other parallel block")
+        ex = expect_raises(TypeException) { semantic(code, filename: "x.iyi") }
+        ex.line_number.should eq(first)
+        message = ex.message.not_nil!
+        message.should contain("(x.iyi:#{first}) reaches `DATABASE : Database` (not Share) through `ask` → `DATABASE.query_one`, as do 2 other parallel blocks: Database's field @total is assigned in `query_one`.")
+        message.should contain("1 more piece of module state is reached by parallel units the same way: `TALLY : Database`")
+        message.should_not contain("TALLY : Database` (not Share)")
       end
 
       it "counts one other block in the singular" do
-        infos = reach_warnings.call(reach_stub + <<-CODE)
+        message = reach_error.call(reach_stub + <<-CODE)
           g = G
           g.spawn(unit: :new) do
             ask(1_i64)
@@ -5855,29 +5893,28 @@ describe "Semantic: iyi" do
             nil
           end
           CODE
-        infos.size.should eq(1)
-        infos[0].should contain("through `ask` → `DATABASE.query_one`, as does 1 other parallel block: ")
+        message.should contain("through `ask` → `DATABASE.query_one`, as does 1 other parallel block: ")
       end
 
-      it "fails --error-on-warnings with the one warning" do
+      it "is an error whatever the warning flags say, and no warning" do
         warnings = WarningCollection.new
-        warnings.error_on_warnings = true
-        semantic(parse(reach_stub + <<-CODE, filename: "x.iyi"), warnings: warnings)
-          g = G
-          g.spawn(unit: :new) do
-            ask(1_i64)
-            nil
-          end
-          g.spawn(unit: :new) do
-            ask(2_i64)
-            nil
-          end
-          CODE
-        warnings.reports.size.should eq(1)
-        warnings.error_on_warnings?.should be_true
+        expect_raises(TypeException, "through `ask` → `DATABASE.query_one`, as does 1 other parallel block: ") do
+          semantic(parse(reach_stub + <<-CODE, filename: "x.iyi"), warnings: warnings)
+            g = G
+            g.spawn(unit: :new) do
+              ask(1_i64)
+              nil
+            end
+            g.spawn(unit: :new) do
+              ask(2_i64)
+              nil
+            end
+            CODE
+        end
+        warnings.infos.should be_empty
       end
 
-      # A dependency's constant is changed in the dependency: the warning
+      # A dependency's constant is changed in the dependency: the refusal
       # names the package and the file in its checkout, from the program's
       # requirements (`Program#iyi_mod_table`).
       it "names the package a reached constant is declared in" do
@@ -5913,13 +5950,124 @@ describe "Semantic: iyi" do
           program.color = false
           program.warnings = WarningCollection.new
           program.iyi_mod_table = [{"example.com/me/pool", root}, {"@pool", "example.com/me/pool"}]
-          program.semantic(program.normalize(Expressions.new([package, user] of ASTNode)))
-          infos = program.warnings.infos
-          infos.size.should eq(2)
-          infos[0].should contain("reaches `STORE : Store` (not Share) through `pkg_take` → `STORE.take`: Store's field @n is assigned in `take`. `STORE` is the package example.com/me/pool's at pool/core.iyi:11, so the change goes there. Keep the value behind a `Mutex`")
-          infos[1].should contain("reaches `DATABASE : Database` (not Share) through `ask` → `DATABASE.query_one`: Database's field @total is assigned in `query_one`. Keep the value")
+          ex = expect_raises(TypeException) do
+            program.semantic(program.normalize(Expressions.new([package, user] of ASTNode)))
+          end
+          message = ex.message.not_nil!
+          message.should contain("reaches `STORE : Store` (not Share) through `pkg_take` → `STORE.take`: Store's field @n is assigned in `take`. A parallel unit may not reach module state that is not Share (SPEC.md III.4.5). `STORE` is the package example.com/me/pool's at pool/core.iyi:11, so the change goes there. Keep the value behind a `Mutex`")
+          message.should contain("1 more piece of module state is reached by parallel units the same way: `DATABASE : Database`")
         ensure
           FileUtils.rm_rf(root)
+        end
+      end
+
+      # A proc call is followed to the literals it may run, and only to
+      # those (R6): a literal is the code of the def that makes it, a def
+      # calling its own parameter adds nothing, a literal made in a def
+      # that calls the def's parameter reaches what the parameter is bound
+      # to, and a proc handed on that the code did not make reaches every
+      # literal of its type. `bench/reach_rule.sh` holds the runtime's
+      # shapes (`defer`, `IyiDeferNode`, a `Hash`'s default block, a proc
+      # handed to a spawn) and the broken copies of each rule.
+      describe "through a proc call (R6)" do
+        it "reads a block handed to a def that calls it as the code of the def that makes it" do
+          message = reach_error.call(unsafe + proc_stub + reach_stub + <<-CODE)
+            def twice(&block : -> Int64) : Int64
+              block.call
+              block.call
+            end
+
+            def work : Int64
+              twice { ask(1_i64) }
+            end
+
+            g = G
+            g.spawn(unit: :new) do
+              work
+              nil
+            end
+            CODE
+          message.should contain("reaches `DATABASE : Database` (not Share) through `work` → `ask` → `DATABASE.query_one`")
+        end
+
+        it "adds nothing for a def calling its own parameter, so another caller's block is not reached" do
+          infos = reach_warnings.call(unsafe + proc_stub + reach_stub + <<-CODE)
+            def run_it(&block : -> Int64) : Int64
+              block.call
+            end
+
+            def quiet : Int64
+              run_it { 1_i64 }
+            end
+
+            run_it { ask(1_i64) }
+
+            g = G
+            g.spawn(unit: :new) do
+              quiet
+              nil
+            end
+            CODE
+          infos.should be_empty
+        end
+
+        it "follows a kept literal that calls its def's block to the blocks the def is given" do
+          message = reach_error.call(unsafe + proc_stub + reach_stub + <<-CODE)
+            class Table
+              @handler : Proc(Int32)
+
+              def initialize
+                @handler = -> { 0 }
+              end
+
+              def add(&block : -> Int64) : Nil
+                @handler = -> { block.call; 1 }
+              end
+
+              def run : Int32
+                @handler.call
+              end
+            end
+
+            @[UnsafeReach("filled before the first parallel task starts, then only read")]
+            TABLE = Table.new
+            TABLE.add { ask(1_i64) }
+
+            def serve : Int32
+              TABLE.run
+            end
+
+            g = G
+            g.spawn(unit: :new) do
+              serve
+              nil
+            end
+            CODE
+          message.should contain("reaches `DATABASE : Database` (not Share) through `serve` → `Table#run` → ")
+          message.should contain(" → `ask` → `DATABASE.query_one`")
+        end
+
+        it "follows a proc handed on that the code did not make to every literal of its type" do
+          message = reach_error.call(unsafe + proc_stub + reach_stub + <<-CODE)
+            @[SafeReach("made once, then only called")]
+            BODY = -> { ask(1_i64) }
+
+            def run_it(&block : -> Int64) : Int64
+              block.call
+            end
+
+            def work : Int64
+              run_it(&BODY)
+            end
+
+            g = G
+            g.spawn(unit: :new) do
+              work
+              nil
+            end
+            CODE
+          message.should contain("reaches `DATABASE : Database` (not Share) through `work` → ")
+          message.should contain(" → `ask` → `DATABASE.query_one`")
         end
       end
 
@@ -5928,6 +6076,24 @@ describe "Semantic: iyi" do
       # one lock (b), or when every write comes before the first parallel
       # task (c); refused otherwise, naming a write that breaks it.
       describe "a SafeReach claim" do
+        # Only std's lock names one for (b) (SPEC.md III.4.19): a `Mutex`
+        # block runs in the shared heap with its captures published, so
+        # what it stores in the state is never a unit's. The owning type
+        # stands in for std's, written beside a prelude; a program's own
+        # owning type gives no such promise.
+        std_guard = ->(code : String) do
+          root = File.tempname("iyi-guard")
+          Dir.mkdir_p(File.join(root, "iyi"))
+          File.write(File.join(root, "iyi", "prelude.iyi"), "")
+          begin
+            std = parse(unsafe + owning, filename: File.join(root, "std", "guard.iyi"))
+            user = parse(code, filename: "x.iyi")
+            semantic(Expressions.new([std, user] of ASTNode))
+          ensure
+            FileUtils.rm_rf(root)
+          end
+        end
+
         it "is refused when a parallel block writes the state through a call" do
           assert_error(reach_stub + <<-CODE, "@[SafeReach] on `QUIET` is refused: nothing proves every thread may reach it safely. `QUIET.query_one(1_i64)` in `both` at x.iyi:", filename: "x.iyi")
             @[SafeReach("set once at startup, then only read")]
@@ -5989,6 +6155,52 @@ describe "Semantic: iyi" do
             CODE
         end
 
+        # A subclass holds a copy of each class variable it inherits: its
+        # own storage, set by the same initializer. The claim on the
+        # declaration covers the copy, and is proven for it on its own.
+        it "covers a subclass's copy of the class variable" do
+          semantic(reach_stub + ledger + <<-CODE, filename: "x.iyi")
+            class Registry
+              @[SafeReach("set once at startup, then only read")]
+              @@db = Ledger.new
+
+              def rows : Int32
+                @@db.rows
+              end
+            end
+
+            class Local < Registry
+            end
+
+            g = G
+            g.spawn(unit: :new) do
+              Local.new.rows
+              nil
+            end
+            CODE
+        end
+
+        it "is refused for a subclass's copy a parallel block writes" do
+          assert_error(reach_stub + ledger + <<-CODE, "@[SafeReach] on `@@db` is refused: nothing proves every thread may reach it safely. `@@db.add` in `Local#note` at x.iyi:", filename: "x.iyi")
+            class Registry
+              @[SafeReach("set once at startup, then only read")]
+              @@db = Ledger.new
+            end
+
+            class Local < Registry
+              def note : Nil
+                @@db.add
+              end
+            end
+
+            g = G
+            g.spawn(unit: :new) do
+              Local.new.note
+              nil
+            end
+            CODE
+        end
+
         it "is refused for a write through a local that holds the state" do
           assert_error(reach_stub + ledger + <<-CODE, "@[SafeReach] on `QUIET` is refused: nothing proves every thread may reach it safely. `held.add` in `note`", filename: "x.iyi")
             @[SafeReach("set once at startup, then only read")]
@@ -6034,8 +6246,8 @@ describe "Semantic: iyi" do
           infos.should be_empty
         end
 
-        it "is accepted when every write and every later read is behind one lock (b)" do
-          infos = reach_warnings.call(unsafe + owning + reach_stub + ledger + <<-CODE)
+        it "is accepted when every write and every later read is behind one std lock (b)" do
+          result = std_guard.call(reach_stub + ledger + <<-CODE)
             GUARD = Guard.new { Bag.new }
 
             @[SafeReach("every write and every read is behind GUARD")]
@@ -6056,11 +6268,30 @@ describe "Semantic: iyi" do
               nil
             end
             CODE
-          infos.should be_empty
+          result.program.warnings.infos.should be_empty
+        end
+
+        it "is refused when the lock is a program's own owning type's (b)" do
+          assert_error(unsafe + owning + reach_stub + ledger + <<-CODE, "behind `GUARD`'s lock, which the compiler cannot name (a std `Mutex` on a constant or a class variable it can)", filename: "x.iyi")
+            GUARD = Guard.new { Bag.new }
+
+            @[SafeReach("every write and every read is behind GUARD")]
+            QUIET = Ledger.new
+
+            def note : Nil
+              QUIET.add
+            end
+
+            g = G
+            g.spawn(unit: :new) do
+              GUARD.lock { |bag| note }
+              nil
+            end
+            CODE
         end
 
         it "is refused when a write is behind a second lock (b)" do
-          assert_error(unsafe + owning + reach_stub + ledger + <<-CODE, "is behind `OTHER`'s lock, and `QUIET.add` at x.iyi:", filename: "x.iyi")
+          ex = expect_raises(TypeException) { std_guard.call(reach_stub + ledger + <<-CODE) }
             GUARD = Guard.new { Bag.new }
             OTHER = Guard.new { Bag.new }
 
@@ -6078,10 +6309,11 @@ describe "Semantic: iyi" do
               nil
             end
             CODE
+          ex.message.to_s.should contain("is behind `OTHER`'s lock, and `QUIET.add` at x.iyi:")
         end
 
         it "is refused when a read beside the locked writes takes no lock (b)" do
-          assert_error(unsafe + owning + reach_stub + ledger + <<-CODE, "@[SafeReach] on `QUIET` is refused: `QUIET.add` at x.iyi:", filename: "x.iyi")
+          ex = expect_raises(TypeException) { std_guard.call(reach_stub + ledger + <<-CODE) }
             GUARD = Guard.new { Bag.new }
 
             @[SafeReach("every write is behind GUARD")]
@@ -6102,6 +6334,7 @@ describe "Semantic: iyi" do
               nil
             end
             CODE
+          ex.message.to_s.should contain("@[SafeReach] on `QUIET` is refused: `QUIET.add` at x.iyi:")
         end
 
         it "is refused when the lock's receiver is not a constant or a class variable (b)" do

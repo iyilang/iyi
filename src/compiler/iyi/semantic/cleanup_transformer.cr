@@ -14,9 +14,12 @@ module Iyi
   # `headers` reads a function from an artifact as reaching nothing,
   # `robust` writes an artifact that leaves out state under any claim its
   # build proved, as if every claim held for every importer, `callbacks`
-  # walks no def std calls back (`ShareReach#exits_of`), and `claimed`
+  # walks no def of std or the prelude (`ShareReach#enqueue`), `claimed`
   # leaves a module's spawn in parallel on a claim proven for its producer
-  # alone (`Program#iyi_settle_claimed_spawns`). And `bench/std_unit_exercise.sh`'s
+  # alone (`Program#iyi_settle_claimed_spawns`), `modulereach` stores a std
+  # module's claim its proof did not cover every def of, and `modulepass`
+  # takes a stored one past an importer's override (`reach_module_proof.cr`).
+  # And `bench/std_unit_exercise.sh`'s
   # (SPEC.md III.4.18): `unit-capture` lets `spawn(in: u)`'s block capture
   # what is not Share, and `unit-answer` lets its task answer what is not.
   # Read once; empty in every other run.
@@ -1257,7 +1260,6 @@ module Iyi
         return refusal_text(refused, node)
       end
       reach = @program.iyi_share_reach
-      return nil if reach.std?(block)
       reach.reach(a_def).each do |found|
         named = found.named
         path = found.path.map { |target| "`#{ShareReach.called(target)}`" }
@@ -1698,28 +1700,26 @@ module Iyi
       end
     end
 
-    # iyi: module state the block reaches through the defs it calls, which
-    # the checks above, reading the block's own text, do not see: a
-    # parallel block calling `ask`, which ran `DATABASE.query_one` on a pool
-    # that assumes one thread, compiled silently, and at 12 workers a
-    # request was answered another's rows (#148). A warning rather than a
-    # refusal: whether a call is really made, or the state is set once and
-    # only read after, is not something the walk can tell, and a program
-    # that knows says so on the constant or class variable with
-    # `@[SafeReach("why")]`. The walk is `ShareReach`'s.
+    # iyi: a parallel unit may not reach module state that is not Share
+    # (SPEC.md III.4.5): the module state the block reaches through the defs
+    # it calls, std's and the prelude's included, which the checks above,
+    # reading the block's own text, do not see. A parallel block calling
+    # `ask`, which ran `DATABASE.query_one` on a pool that assumes one
+    # thread, compiled silently, and at 12 workers a request was answered
+    # another's rows (#148); 0.22 refuses it, where 0.21 warned, because a
+    # unit's own heap (III.4.19) holds only where the module state its code
+    # reaches never receives a pointer into it. State a proven
+    # `@[SafeReach("why")]` covers is reached as Share state is. The walk is
+    # `ShareReach`'s.
     #
-    # Each piece of state is one warning, at the first block that reaches
+    # Each piece of state is gathered once, at the first block that reaches
     # it, by that block's shortest path, counting the other blocks that
-    # reach it too; `report_share_reach` writes them once every block is
-    # checked. Warned once per block, iyiturkiye's 91 warned blocks gave
-    # 1251 warnings about 37 constants (`iyi check`, Linux): iyi-db's `LOG`
-    # was 88 of them, and the app's own pool, `SQL`, 88 more; gathered,
-    # they are 37. A block where warnings are not reported
-    # (`--exclude-warnings`, `lib`) is not counted either.
+    # reach it too; `report_share_reach` refuses them once every block is
+    # checked. Refused once per block, iyiturkiye's 91 blocks would have
+    # given 1251 refusals about 37 constants (`iyi check`, Linux): iyi-db's
+    # `LOG` 88 of them, and the app's own pool, `SQL`, 88 more.
     def check_share_reach(block : Block, a_def : Def, boundary : ShareBoundary) : Nil
       reach = @program.iyi_share_reach
-      return if reach.std?(block)
-      return if @program.warnings.ignore_warning_due_to_location?(block.location)
       reach.reach(a_def).each do |found|
         named = found.named
         if named.is_a?(IyiMod::ReachRecord)
@@ -1743,23 +1743,23 @@ module Iyi
           instead = "If it is only read, make it a `#{list}` (std/list), which is Share. #{instead}"
         end
         # A package's state is changed in the package, which the program
-        # cannot do: the warning says whose it is and where.
+        # cannot do: the refusal says whose it is and where.
         if (package = reach.package_at(named.declared, @program.iyi_mod_table))
           prefix, file = package
           at = named.state.is_a?(Const) ? named.declared.try { |declared| " at #{file}:#{declared.line_number}" } : nil
           instead = "`#{named.label}` is the package #{prefix}'s#{at}, so the change goes there. #{instead}"
         end
-        head = "#{boundary.subject} reaches `#{named.label} : #{named.type}` (not Share) through #{path.join(" → ")}"
-        tail = ": #{why}. #{instead} (SPEC.md III.4.4)"
-        @share_reach_gathered[named.key] = ShareReachWarning.new(block, head, tail, Set{block.location.to_s})
+        head = "#{boundary.subject} (#{block_place(block)}) reaches `#{named.label} : #{named.type}` (not Share) through #{path.join(" → ")}"
+        tail = ": #{why}. A parallel unit may not reach module state that is not Share (SPEC.md III.4.5). #{instead}"
+        @share_reach_gathered[named.key] = ShareReachRefusal.new(block, head, tail, Set{block.location.to_s}, named)
       end
     end
 
-    # The warning for state a function read from an artifact reaches, as
+    # The refusal for state a function read from an artifact reaches, as
     # its artifact recorded it (SPEC.md III.4.15); gathered by the state,
     # as the others are. Not for a function whose artifact recorded
     # nothing, an `iyi bind` boundary's: that keeps a plain spawn in its
-    # unit, and warning every parallel block that calls into a bound shard
+    # unit, and refusing every parallel block that calls into a bound shard
     # would say only that nothing is known.
     private def gather_remote_reach(block : Block, boundary : ShareBoundary, found : ShareReach::Found, record : IyiMod::ReachRecord) : Nil
       return if record.kind.empty?
@@ -1771,31 +1771,108 @@ module Iyi
       path = found.path.map { |target| "`#{ShareReach.called(target)}`" }
       path.concat record.path.map { |step| "`#{step}`" }
       path << "`#{record.use}`"
-      head = "#{boundary.subject} reaches `#{record.label} : #{record.type}` (not Share; module `#{record.module_name}`) through #{path.join(" → ")}"
-      tail = ": #{record.why}. The change goes in #{record.module_name}, whose artifact recorded it: keep the value behind a `Mutex` (std/mutex), or say why every thread may reach it with `@[SafeReach(\"...\")]`, which the compiler proves (SPEC.md III.4.4, III.4.15)"
-      @share_reach_gathered[key] = ShareReachWarning.new(block, head, tail, Set{block.location.to_s})
+      head = "#{boundary.subject} (#{block_place(block)}) reaches `#{record.label} : #{record.type}` (not Share; module `#{record.module_name}`) through #{path.join(" → ")}"
+      tail = ": #{record.why}. A parallel unit may not reach module state that is not Share (SPEC.md III.4.5). The change goes in #{record.module_name}, whose artifact recorded it: keep the value behind a `Mutex` (std/mutex), or say why every thread may reach it with `@[SafeReach(\"...\")]`, which the compiler proves (SPEC.md III.4.4, III.4.15)"
+      @share_reach_gathered[key] = ShareReachRefusal.new(block, head, tail, Set{block.location.to_s}, nil)
     end
 
-    # One warning being gathered: the first block to reach the state, the
-    # text either side of the count of the others, and every block, by its
-    # location, that reaches it - one block typed for two instantiations is
-    # one block.
-    record ShareReachWarning, block : Block, head : String, tail : String, blocks : Set(String)
+    # Where a block is written, as a refusal raised at the state names it:
+    # `app.iyi:22`.
+    private def block_place(block : Block) : String
+      at = block.location
+      at = at.try(&.expanded_location) || at
+      at ? "#{File.basename(at.filename.to_s)}:#{at.line_number}" : "a block"
+    end
 
-    # The gathered warnings, one per piece of state, in the order their
-    # first blocks were checked. Called once every block is checked
-    # (`Program#semantic_after_top_level`); a warning is never written twice.
-    def report_share_reach : Nil
-      @share_reach_gathered.each_value do |gathered|
-        others = gathered.blocks.size - 1
-        count = case others
-                when 0 then ""
-                when 1 then ", as does 1 other parallel block"
-                else        ", as do #{others} other parallel blocks"
-                end
-        @program.warnings.add_warning(gathered.block, "#{gathered.head}#{count}#{gathered.tail}")
-      end
+    # One refusal being gathered: the first block to reach the state, the
+    # text either side of the count of the others, every block, by its
+    # location, that reaches it - one block typed for two instantiations is
+    # one block - and the state, when the program has its declaration.
+    record ShareReachRefusal, block : Block, head : String, tail : String, blocks : Set(String), named : ShareReach::Named?
+
+    # The gathered refusals, raised once every block is checked
+    # (`Program#semantic_after_top_level`), as one error: the front end
+    # stops at its first. It is raised at the state's declaration, with
+    # the others listed after it, so `iyi fix` can make the one edit that
+    # is safe there: a state a `@[SafeReach]` claim would be proven for -
+    # nothing writes it once a parallel task may start - gets the claim
+    # (`ReachProof.provable`). The first such state is the one raised, so
+    # each round of `iyi fix` takes one; a state no claim would be proven
+    # for is raised with the write that breaks the claim, and needs a
+    # hand: a `Mutex`, an `Atomic`, a `List`, or a race fixed.
+    def report_share_reach(root : ASTNode) : Nil
+      return if @share_reach_gathered.empty?
+      gathered = @share_reach_gathered.values
       @share_reach_gathered.clear
+      states = gathered.compact_map(&.named.try(&.state))
+      verdicts = ReachProof.provable(@program, root, states)
+      chosen_at = gathered.index { |refusal| (state = refusal.named.try(&.state)) && verdicts[state.object_id]?.nil? && fix_edit(state) } || 0
+      chosen = gathered[chosen_at]
+      others = chosen.blocks.size - 1
+      count = case others
+              when 0 then ""
+              when 1 then ", as does 1 other parallel block"
+              else        ", as do #{others} other parallel blocks"
+              end
+      message = "#{chosen.head}#{count}#{chosen.tail}"
+      edit = nil
+      at = chosen.block.location
+      if state = chosen.named.try(&.state)
+        refusal = verdicts[state.object_id]?
+        edit = fix_edit(state) unless refusal
+        message += if refusal
+                     ". A claim here would not be proven, so `iyi fix` leaves it to a hand: #{refusal}"
+                   elsif edit
+                     ". Nothing writes it once a parallel task may start, so a claim is proven: `iyi fix` adds `#{SAFE_REACH_FIX}`"
+                   else
+                     ". Nothing writes it once a parallel task may start, so a claim is proven: write `#{SAFE_REACH_FIX}` on its declaration"
+                   end
+        at = declaration_of(state) || at if edit
+      end
+      rest = gathered.each_with_index.reject { |(_, index)| index == chosen_at }.map(&.[0]).to_a
+      unless rest.empty?
+        listed = rest.map do |refusal|
+          label = refusal.head.partition(" reaches ")[2].partition(" (not Share")[0]
+          fixed = (state = refusal.named.try(&.state)) && verdicts[state.object_id]?.nil? && fix_edit(state)
+          fixed ? "#{label} (`iyi fix` claims it)" : label
+        end
+        message += ". #{rest.size} more #{rest.size == 1 ? "piece" : "pieces"} of module state #{rest.size == 1 ? "is" : "are"} reached by parallel units the same way: #{listed.join(", ")}"
+      end
+      ex = at ? TypeException.new(message, at) : TypeException.new(message)
+      if edit
+        ex.edit_at, ex.suggestion = edit
+      end
+      raise ex
+    end
+
+    # What `iyi fix` writes above a state no write reaches once a parallel
+    # task may start: the claim, which the compiler then proves.
+    SAFE_REACH_FIX = %(@[SafeReach("set before the first parallel task starts, then only read")])
+
+    # Where the claim goes and what is written: above the line that
+    # declares the state - a constant's assignment, a class variable's
+    # initializer - by replacing that line's first character with the claim,
+    # a line break, the line's indentation and that character. Nil when the
+    # declaration is not in a source file the program has, or a class
+    # variable has no initializer to place it by.
+    private def fix_edit(state : Const | MetaTypeVar) : { {Int32, Int32, Int32}, String }?
+      at = declaration_of(state)
+      return nil unless at
+      return nil if at.original_artifact
+      file = at.filename
+      return nil unless file.is_a?(String) && File.file?(file)
+      line = File.read_lines(file)[at.line_number - 1]?
+      return nil unless line
+      indent = line.size - line.lstrip.size
+      first = line[indent]?
+      return nil unless first
+      { {at.line_number, indent + 1, 1}, "#{SAFE_REACH_FIX}\n#{line[0, indent]}#{first}" }
+    end
+
+    # The line a state is declared on: a constant's assignment, a class
+    # variable's initializer.
+    private def declaration_of(state : Const | MetaTypeVar) : Location?
+      state.is_a?(Const) ? (state.locations.try(&.first?) || state.value.location) : state.initializer.try(&.node.location)
     end
 
     # `List(String)` for an `Array(String)` whose elements are Share: the
@@ -1807,7 +1884,7 @@ module Iyi
       "List(#{element})"
     end
 
-    @share_reach_gathered = {} of UInt64 => ShareReachWarning
+    @share_reach_gathered = {} of UInt64 => ShareReachRefusal
     # `spawn_pooled` or `spawn_new` by the spawn def instance it was typed
     # beside (`typed_beside`); by identity, since a def's `==` compares its text.
     @pooled_spawns = ({} of Def => Def?).compare_by_identity

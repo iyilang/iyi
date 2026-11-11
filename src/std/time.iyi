@@ -2057,7 +2057,9 @@ pub struct Time
   # are each a `TimeParseError`, never a panic. A day name is checked to be
   # one and not checked against the date, as Crystal, Go and Python read it.
   struct Format
+    @[SafeReach("set before the first parallel task starts, then only read")]
     MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
+    @[SafeReach("set before the first parallel task starts, then only read")]
     DAY_NAMES   = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
 
     getter pattern : String

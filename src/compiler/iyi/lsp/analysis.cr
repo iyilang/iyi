@@ -34,8 +34,11 @@ module Iyi::Lsp
     related : Array({String, Int32, Int32, String}),
     suggestion : String? = nil,
     # Where the suggestion goes when that is not the diagnostic's own span
-    # (`TypeException#edit_at`): {line, column, size} in the same file.
-    edit_at : {Int32, Int32, Int32}? = nil
+    # (`TypeException#edit_at`): {line, column, size}, in the same file
+    # unless *edit_file* names another - the declaration a parallel unit
+    # reaches (SPEC.md III.4.5), which `iyi fix` claims where it is.
+    edit_at : {Int32, Int32, Int32}? = nil,
+    edit_file : String? = nil
 
   class Analysis
     # The last result that type-checked, per *open* document. Hover and
@@ -76,7 +79,7 @@ module Iyi::Lsp
     # pull, until its own buffer was edited: `name` renamed to `title` in
     # `geo/b.iyi` answered `[]`, and with `geo/b.iyi` written back, "can't
     # find module 'geo/b'".
-    @memo_key : {String, UInt64, UInt64}?
+    @memo_key : {String, UInt64, UInt64, Bool}?
     @memo : {Compiler::Result?, Array(Diag)}?
     @memo_disk = [] of {String, UInt64}
     # What the latest `compile` touched on disk, for `check` to keep.
@@ -84,12 +87,16 @@ module Iyi::Lsp
 
     # Compile one buffer as its own entry, front end only. Returns the
     # typed result and no diagnostics, or nil and what went wrong.
-    def check(path : String, text : String, overrides : Hash(String, String)) : {Compiler::Result?, Array(Diag)}
-      key = {path, text.hash, overrides.hash}
+    # *cleanup* runs the cleanup pass too, as a build does, for a caller
+    # that wants every error a build gives and reads no typed AST after:
+    # `iyi fix`, whose reach refusal (SPEC.md III.4.5) is raised there, and
+    # which answered "already clean" for a program the build refused.
+    def check(path : String, text : String, overrides : Hash(String, String), *, cleanup : Bool = false) : {Compiler::Result?, Array(Diag)}
+      key = {path, text.hash, overrides.hash, cleanup}
       if @memo_key == key && (hit = @memo) && @memo_disk.all? { |(file, stamp)| Analysis.disk_stamp(file) == stamp }
         return hit
       end
-      answer = compile(path, text, overrides)
+      answer = compile(path, text, overrides, cleanup)
       @memo_key = key
       @memo = answer
       @memo_disk = @touched
@@ -140,7 +147,7 @@ module Iyi::Lsp
       @aligned = @aligned_key = nil if @aligned_key.try(&.[0]) == path
     end
 
-    private def compile(path : String, text : String, overrides : Hash(String, String)) : {Compiler::Result?, Array(Diag)}
+    private def compile(path : String, text : String, overrides : Hash(String, String), cleanup : Bool = false) : {Compiler::Result?, Array(Diag)}
       # IV.6 read backwards, as a build reads it: `<root>/calc/parser.iyi`
       # resolves its `import calc/lexer` from `<root>`, and its packages
       # through `<root>/iyi.mod` (`Compiler.entry_root_of`).
@@ -155,7 +162,7 @@ module Iyi::Lsp
       compiler = Compiler.new
       compiler.prelude = "iyi/prelude"
       compiler.no_codegen = true
-      compiler.no_cleanup = true # the visitors read the typed AST after
+      compiler.no_cleanup = !cleanup # the visitors read the typed AST after
       compiler.iyi_mod_table = table
       compiler.iyi_file_overrides = overrides
       compiler.stdout = IO::Memory.new
@@ -896,6 +903,11 @@ module Iyi::Lsp
           message += "\n(in #{far[0]}:#{far[1]})"
         end
         carried = frames.map { |(file, line, col, _, msg, _)| {file, line, col, msg} }
+        # The one edit placed in the far file that `iyi fix` makes there:
+        # the error's own, when it carries a place for it.
+        if far && (suggestion = far[5]) && (edit_at = ex.as?(TypeException).try(&.edit_at))
+          return Diag.new(1, 1, 0, message, Iyi.iyi_spec_references(message), carried, suggestion, edit_at, far[0])
+        end
         return Diag.new(1, 1, 0, message, Iyi.iyi_spec_references(message), carried)
       end
 

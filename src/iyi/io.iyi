@@ -421,8 +421,14 @@ end
 
 alias IO = IyiIO
 
-STDIN  = IyiIO.new(0_i64, buffer_size: 4096, sync: false)
+# Every unit reads and writes the program's three streams: their buffers are
+# allocated once, by the constant's initializer, and nothing but bytes is
+# ever stored in them (SPEC.md III.4.5).
+@[UnsafeReach("buffers allocated once by the initializer; a read or a write stores bytes into them, never a reference")]
+STDIN = IyiIO.new(0_i64, buffer_size: 4096, sync: false)
+@[UnsafeReach("buffers allocated once by the initializer; a write stores bytes into them, never a reference")]
 STDOUT = IyiIO.new(1_i64, buffer_size: 4096, sync: true)
+@[UnsafeReach("buffers allocated once by the initializer; a write stores bytes into them, never a reference")]
 STDERR = IyiIO.new(2_i64, buffer_size: 4096, sync: true)
 
 def stdin : IyiIO

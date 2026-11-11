@@ -691,7 +691,6 @@ struct CurvePoint
   # adds the identity like any other. This is ref10's
   # `ge_scalarmult_base` (Bernstein, Duif, Lange, Schwabe and Yang).
   def self.base_mult(k : Pointer(UInt8)) : CurvePoint
-    table = CurveBaseTable.get
     digits = uninitialized UInt64[64]
     e = pointerof(digits).as(Pointer(UInt64))
     i = 0
@@ -715,13 +714,13 @@ struct CurvePoint
     q = identity
     i = 1
     while i < 64
-      q = q.madd(CurveBaseTable.pick(table, i >> 1, e[i]))
+      q = q.madd(CurveBaseTable.pick(i >> 1, e[i]))
       i = i + 2
     end
     q = q.double.double.double.double
     i = 0
     while i < 64
-      q = q.madd(CurveBaseTable.pick(table, i >> 1, e[i]))
+      q = q.madd(CurveBaseTable.pick(i >> 1, e[i]))
       i = i + 2
     end
     q
@@ -819,17 +818,17 @@ end
 # The fixed-base table `CurvePoint.base_mult` reads: 32 rows of eight,
 # entry (j, m) the point (m + 1) 256^j B made ready. It holds multiples
 # of B, which is public, so nothing in it is secret; only which entry is
-# read is, and that is chosen by masks. The table is worked out once, the
-# first time it is wanted, and kept: 248 doublings and 224 additions,
-# their 256 Z inverted together by Montgomery's trick (one inversion and
-# three products a point), which is about what one multiplication by the
-# old 4-bit window cost. Two threads that reach it first both work it
-# out and store the same table.
+# read is, and that is chosen by masks. The table is worked out once, by
+# the class variable's initializer as the module starts, and kept: 248
+# doublings and 224 additions, their 256 Z inverted together by
+# Montgomery's trick (one inversion and three products a point), which is
+# about what one multiplication by the old 4-bit window cost. Only `pick`
+# reads it, so no function answers it.
 struct CurveBaseTable
-  @@table = Pointer(CurvePrecomp).new(0_u64)
+  @[SafeReach("built whole by its initializer as the module starts, before any parallel task; then only read")]
+  @@table : Pointer(CurvePrecomp) = build
 
-  def self.get : Pointer(CurvePrecomp)
-    return @@table if @@table.address != 0_u64
+  private def self.build : Pointer(CurvePrecomp)
     points = Pointer(CurvePoint).malloc(256_u64)
     p = CurvePoint.base
     row = 0
@@ -870,7 +869,6 @@ struct CurveBaseTable
       table[i] = CurvePrecomp.new(y + x, y - x, x * y * CurveField.d2)
       i = i - 1
     end
-    @@table = table
     table
   end
 
@@ -878,13 +876,13 @@ struct CurveBaseTable
   # complement): every entry of the row read, and all but |digit|'s
   # masked away; the identity for zero; then negated by a mask when the
   # digit is.
-  def self.pick(table : Pointer(CurvePrecomp), row : Int32, digit : UInt64) : CurvePrecomp
+  def self.pick(row : Int32, digit : UInt64) : CurvePrecomp
     negative = digit.unsafe_shr(63)
     index = (digit ^ (0_u64 &- negative)) &+ negative
     ypx = CurveField.one
     ymx = CurveField.one
     xy2d = CurveField.zero
-    base = table + (row * 8).to_i64
+    base = @@table + (row * 8).to_i64
     j = 1
     while j <= 8
       diff = j.to_u64 ^ index

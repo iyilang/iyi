@@ -1755,6 +1755,7 @@ class IyiScheduler
 
   @[ThreadLocal]
   @@state : IyiSchedulerState?
+  @[UnsafeReach("the runtime's list of scheduler states, linked and unlinked under IyiRuntimeLock; each state is born in the shared heap")]
   @@states_head : IyiSchedulerState?
 
   # Whether a second scheduler thread has ever been started (III.4.13):
@@ -1811,6 +1812,7 @@ class IyiScheduler
     IyiSchedLock.unlock
   end
 
+  @[UnsafeReach("set once by the main thread before any task starts, then only read")]
   @@main_state : IyiSchedulerState?
 
   # The main thread's state: this thread's while no other has started.
@@ -1917,6 +1919,7 @@ class IyiScheduler
   # collection walk every request the process ever served. A fiber
   # leaves when its stack does, which is one step with the back link.
   # Under the runtime lock, for the reason the states are.
+  @[UnsafeReach("the runtime's fiber registry, written under IyiRuntimeLock; every IyiFiber is born in the shared heap")]
   @@all_head : IyiFiber?
 
   # A fiber of a unit joins the unit's list too, and its heap (heap22):
@@ -2930,6 +2933,7 @@ class IyiScheduler
   # switches too, and naming `prepare_stack` in the switch put the stack
   # mapping's `mprotect` into every such program, one more name on
   # darwin's floor for a stack it never makes.
+  @[UnsafeReach("set once, at startup, by the platform's stack setup, then only read")]
   @@stack_maker : Proc(IyiFiber, Nil)?
 
   def self.make_stacks_with(&maker : IyiFiber -> Nil) : Nil
@@ -3883,8 +3887,11 @@ class IyiScheduler
   # mutexes on two cores contended for it whenever either parked.
   LOT        = 64
   LOT_STRIDE =  8
+  @[UnsafeReach("the parking lot, made once by the first park on the program's one thread or before a second thread starts, then written only under its bucket locks; waiters are born in the shared heap")]
   @@lot_heads : Array(IyiWaiter?)?
+  @[UnsafeReach("the parking lot, made once by the first park on the program's one thread or before a second thread starts, then written only under its bucket locks; waiters are born in the shared heap")]
   @@lot_tails : Array(IyiWaiter?)?
+  @[UnsafeReach("the parking lot's bucket locks, made once with the lot, then only read and swapped atomically")]
   @@lot_locks : Pointer(UInt64) = Pointer(UInt64).new(0_u64)
 
   def self.park_on(word : Pointer(Atomic(UInt64)), seen : UInt64, cancellable : Bool = true) : Nil | Cancelled
@@ -5347,20 +5354,26 @@ class IyiWorkers
   @@launched : Int64 = 0_i64
   @@owed : Int64 = 0_i64
   @@owes : UInt64 = 0_u64
+  @[UnsafeReach("the pool's inject queue, written under IyiSchedLock; every IyiFiber is born in the shared heap")]
   @@inject_head : IyiFiber?
+  @[UnsafeReach("the pool's inject queue, written under IyiSchedLock; every IyiFiber is born in the shared heap")]
   @@inject_tail : IyiFiber?
   # Started fibers that may move, runnable and in no worker's ring: woken
   # by a thread outside the pool, or pushed out of a full ring. Under the
   # lock.
+  @[UnsafeReach("the pool's shared run queue, written under IyiSchedLock; every IyiFiber is born in the shared heap")]
   @@shared_head : IyiFiber?
+  @[UnsafeReach("the pool's shared run queue, written under IyiSchedLock; every IyiFiber is born in the shared heap")]
   @@shared_tail : IyiFiber?
   # Every worker's state, as each comes up; and where the next steal or
   # ring starts looking, so no worker is always asked first.
+  @[UnsafeReach("made once by `IyiWorkers.start` under IyiSchedLock, on a thread outside every pool unit, then grown only under the lock; states are born in the shared heap")]
   @@workers : Array(IyiSchedulerState)?
   @@turn : Int32 = 0
   # The same states by address, for a steal from a ring, which takes no
   # lock: written before the count that makes them visible, and never
   # moved, as an array's buffer may be when it grows.
+  @[UnsafeReach("made once by `IyiWorkers.start` under IyiSchedLock, then written slot by slot by the worker that owns the slot")]
   @@listed : Pointer(UInt64) = Pointer(UInt64).new(0_u64)
   @@listed_count : Int64 = 0_i64
   # Fibers in the queues behind the lock - the shared queue, the
@@ -5407,7 +5420,9 @@ class IyiWorkers
   @[ThreadLocal]
   @@preempt : UInt64 = 0_u64
   @@preempt_slot : UInt64 = 0x28_u64
+  @[UnsafeReach("the preempted queue, written under IyiSchedLock; every IyiFiber is born in the shared heap")]
   @@preempted_head : IyiFiber?
+  @[UnsafeReach("the preempted queue, written under IyiSchedLock; every IyiFiber is born in the shared heap")]
   @@preempted_tail : IyiFiber?
   @@preempted : Int64 = 0_i64
   @@preempts : UInt64 = 0_u64

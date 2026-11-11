@@ -409,6 +409,7 @@
     # Every thread object started and not yet running, so a body's closure
     # is rooted from `start` until the thread that runs it holds it on its
     # own stack, and no longer (`run`).
+    @[UnsafeReach("the started threads' list, linked and unlinked under the runtime lock; every IyiThread is born in the shared heap")]
     @@head : IyiThread?
 
     @line : UInt64

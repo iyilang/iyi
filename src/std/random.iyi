@@ -109,6 +109,13 @@ pub class Random
   def next_u : UInt32
     old = @state
     @state = old &* 6364136223846793005_u64 &+ @inc
+    Random.output(old)
+  end
+
+  # PCG-32's output for the state a step leaves behind: the high bits
+  # xorshifted, then rotated by the top five. `PerThread` steps its own
+  # state and answers through this too.
+  protected def self.output(old : UInt64) : UInt32
     mixed = ((old >> 18) ^ old) >> 27
     xorshifted = (mixed & 4294967295_u64).to_u32
     rot = (old >> 59).to_i32
@@ -314,10 +321,11 @@ pub class Random
     String.new(bytes.size) { |dst| dst.copy_from(bytes.to_unsafe, bytes.size) }
   end
 
-  # The same draws without a generator in hand, from one seeded the first
-  # time it is asked, as the other library's `Random.rand` draws from its
-  # default. `Random::Secure.rand(...)` and the rest are these, answered by
-  # the operating system instead.
+  # The same draws without a generator in hand, as the other library's
+  # `Random.rand` draws from its default: from one stream a thread
+  # (`PerThread`), seeded the first time that thread asks.
+  # `Random::Secure.rand(...)` and the rest are these, answered by the
+  # operating system instead.
   def self.next_u : UInt32
     shared.next_u
   end
@@ -382,21 +390,14 @@ pub class Random
     shared.urlsafe_base64(n, padding)
   end
 
-  @@shared : Random? = nil
-
   private def self.shared : Random
-    if generator = @@shared
-      return generator
-    end
-    generator = Random.new
-    @@shared = generator
-    generator
+    PerThread::ONE
   end
 
   # Sixteen bytes of the operating system's, through the same call
   # `Random::Secure` makes. wasm32 seeds from the clocks, as it did before
   # it had a `Random::Secure`.
-  private def self.entropy : UInt64
+  protected def self.entropy : UInt64
     {% if flag?(:wasm32) %}
       Time.utc.to_unix.to_u64 ^ Time.monotonic.total_nanoseconds.to_u64
     {% else %}
@@ -404,6 +405,61 @@ pub class Random
       Secure.fill(pointerof(word).as(UInt8*), 8)
       word
     {% end %}
+  end
+end
+
+# What `Random.rand(...)` and the other class-level draws draw from: one
+# PCG-32 stream a thread, its state in two thread-local words, each
+# thread's seeded from the operating system the first time it draws.
+#
+# One generator every thread shared raced: a draw reads the state and
+# writes the next, so two threads drawing at once could both read one
+# state and answer the same number, and a parallel unit's first draw left
+# the unit's object in a class variable every unit reads (HRule2's trust
+# review). A thread-local generator object raced with nothing, but no
+# root the collector reads held it: the root walk scans the stacks and the
+# image's data, not a thread-local block (concurrency.iyi says so for the
+# scheduler's state, which a list in the data holds as well). So the
+# thread-local words are integers, which hold nothing for a collector to
+# keep, and the one object every thread draws through is `ONE`, made at
+# the module's start, whose fields nothing writes after: `next_u` is the
+# only draw that writes a generator's state, and this one writes the
+# thread's words instead. The next unit on a thread draws on from where
+# the last one left the stream. `ONE` is an `UnsafeReach`, not a proven
+# `SafeReach`: a `SafeReach` the proof has to walk the whole program for
+# in every build that imports std/random, which is every program that
+# shuffles an array, and none did before.
+class Random::PerThread < Random
+  @[ThreadLocal]
+  @@state : UInt64 = 0_u64
+  # Odd once the thread's stream is seeded, as PCG's increment always is;
+  # zero before.
+  @[ThreadLocal]
+  @@inc : UInt64 = 0_u64
+
+  @[UnsafeReach("made at the module's start and never written after: PerThread#next_u, the only draw that writes a generator, steps the drawing thread's own thread-local words")]
+  ONE = PerThread.new
+
+  # The fields a `Random` carries, which nothing here reads.
+  def initialize
+    @state = 0_u64
+    @inc = 1_u64
+  end
+
+  # `Random.new(seed, sequence)`'s first two steps, then one more, on the
+  # thread's words: the seed and the stream from the operating system, as
+  # `Random.new` takes them.
+  def next_u : UInt32
+    inc = @@inc
+    if inc == 0_u64
+      seed = Random.entropy
+      inc = (Random.entropy << 1) | 1_u64
+      @@inc = inc
+      @@state = (inc &+ seed) &* 6364136223846793005_u64 &+ inc
+    end
+    old = @@state
+    @@state = old &* 6364136223846793005_u64 &+ inc
+    Random.output(old)
   end
 end
 

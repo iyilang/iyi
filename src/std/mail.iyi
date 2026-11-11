@@ -136,6 +136,7 @@ struct MailText
   HEX = "0123456789ABCDEF"
 
   # windows-1252's 0x80 to 0x9F, -1 where it defines nothing.
+  @[SafeReach("set before the first parallel task starts, then only read")]
   CP1252 = [0x20AC, -1, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021,
             0x02C6, 0x2030, 0x0160, 0x2039, 0x0152, -1, 0x017D, -1,
             -1, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014,
@@ -959,11 +960,15 @@ struct MailText
 
   # --- Dates (RFC 5322 section 3.3) ---
 
-  WEEKDAYS  = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"]
-  MONTHS    = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+  @[SafeReach("set before the first parallel task starts, then only read")]
+  WEEKDAYS = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"]
+  @[SafeReach("set before the first parallel task starts, then only read")]
+  MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+  @[SafeReach("set before the first parallel task starts, then only read")]
   DAY_NAMES = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 
   # The obsolete zones of RFC 5322 section 4.3, in minutes.
+  @[SafeReach("set before the first parallel task starts, then only read")]
   ZONES = {"ut" => 0, "gmt" => 0, "z" => 0, "edt" => -240, "est" => -300, "cdt" => -300, "cst" => -360,
            "mdt" => -360, "mst" => -420, "pdt" => -420, "pst" => -480}
 

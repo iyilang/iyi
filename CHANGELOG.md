@@ -73,10 +73,12 @@ dead stack under it first, so a thread stopped mid-collection holds no
 stale word naming a dead 64 MB string (Linux, `IYI_HEAP_STRESS=1`: 3 of 3
 runs kept 61 MiB before, 0 of 4 after). The false-word injector picks
 arenas from a list made once per injection. Under `IYI_HEAP_STRESS`,
-concurrency_exercise cuts 16b and 16d to 10,000 messages and round trips
-and 32,000 selects at stress 1 (128,000 above it), each still failing its
-broken copy and every bound unchanged; the concurrency matrix row passes
-inside its 240 s on Linux (84 s) and macOS (100-107 s). `-Dheap_verify`
+concurrency_exercise cuts 16b to 10,000 messages and round trips at
+stress 1 (128,000 above it), and 16d parks every select (an idle channel
+and `timeout(1)`, 16,000 times), so a losing arm left in its queue fails
+on every seed and worker count, where the busy loop's parks were the
+schedule's (one worker, seed 1: none); each broken copy still fails and
+every bound is unchanged. `-Dheap_verify`
 reports a local mark that writes another partition's mark bits, and
 heap_local's stale check keeps its object carved to the unit's death, so
 both copies are caught every run with the dead stack cleared under local
@@ -87,9 +89,10 @@ reads: `IyiHeap.local_ns` in the data segment read as a word five bytes
 into a LOCAL chunk, and `-Dheap_verify` reported the data segment holding
 it (heap_local's "verify release, 8 workers", tmac); heap_local's new copy
 puts such a counter back and is caught. concurrency_exercise's 16e builds
-its 64 MB values 64 KB at a time, so the one-worker matrix rows under
-`IYI_HEAP_STRESS=1` no longer collect once per back-edge park (Linux,
-seed 3: 285 s to 125.5 s against the row's 240 s).
+its 64 MB values 64 KB at a time: a one-worker run under
+`IYI_HEAP_STRESS=1` collected at 485,000 preemptions per value. The
+concurrency matrix row passes inside its 240 s on every seed, one worker
+and four (Linux 20-30 s a seed, macOS 23-45 s).
 
 A parallel unit reaching module state that is not Share through the code
 it calls is a compile error (SPEC.md III.4.5), std's and the prelude's

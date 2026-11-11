@@ -1176,9 +1176,9 @@ cancelled_select_beats
 # with the verifier's scan of every heap word) 16b's and 16d's loops cost
 # the square of their length: 16d's 400,000 selects would take about
 # 8,000 s at stress 1 on tmac, against bench/heap_verify_matrix.sh's
-# limit. Their counts are cut there alone, each still long enough for its
-# broken copy to fail its check unchanged (the numbers are beside each);
-# unstressed runs keep theirs.
+# limit. 16b's counts are cut there alone, still long enough for each
+# broken copy to fail its check unchanged (the numbers are beside it), and
+# 16d checks a select made to park instead; unstressed runs keep theirs.
 {% if flag?(:heap_verify) %}
   heap_stress = IyiHeapVerify.stress
 {% else %}
@@ -1366,23 +1366,52 @@ puts "a parked sender's receipt survived the next sender's park"
     grown
   end
 
-  # Under the stress fewer selects, against the same 256 KiB: 32,000 at
-  # stress 1, 38 s on Linux and 51 s on tmac (seeds 2 and 4, false
-  # words), and 128,000 above it, 3-8 s on Linux and 14 s on tmac at
-  # stress 64. A select whose losing receive arm stays in its queue still
-  # fails there: 869 / 876 KiB more kept at stress 1 and 1,490 / 807 KiB at
-  # stress 64 (Linux / tmac, seed 2, false words). At stress 64 32,000
-  # were too few: the copy kept under 256 KiB in the whole program on
-  # tmac. On one worker (the matrix's odd seeds) stress 1 takes 117-127 s
-  # on Linux and 155-167 s on tmac, and is cut no further: the copy keeps
-  # 439 KiB there on seed 3, under twice the bound, and none on seed 1's
-  # schedule (Linux).
-  select_rounds = heap_stress == 0_u64 ? 400000 : (heap_stress == 1_u64 ? 32000 : 128000)
-  select_grown = select_kept_bytes(select_rounds)
-  if select_grown > 256_u64 * 1024_u64
-    fail("select: #{select_rounds // 2} selects beside an idle channel left #{select_grown // 1024_u64} KiB more kept")
+  # Under the stress each select is made to park. The loop above parks
+  # only when its select finds no sender waiting, which the schedule
+  # decides: on one worker seed 1's priorities never left it parked, and
+  # a select whose losing receive arm stays in its queue kept nothing
+  # there in 16,000 selects, 439 KiB on seed 3 (Linux, stress 1); and its
+  # 32,000 selects took 117-167 s of a one-worker run. Here a select waits
+  # on an idle channel and `timeout(1)`, neither of which can answer at
+  # once, so every one parks and the timeout wins: that copy leaves its
+  # node in the idle channel's queue each time, which the next park cannot
+  # take again, 55-56 bytes a select on one worker and four, at stress 1
+  # and 64 (652-656 KiB in 12,000, Linux), where the sound loop kept 0.
+  # About 1.1 ms a select; 16,000 against the same 256 KiB.
+  def parked_select_kept_bytes(rounds : Int32) : UInt64
+    idle = Channel(Int32).new
+    grown = 0_u64
+    GC.collect
+    before = GC.stats.bytes_kept_by_last_sweep
+    group do |g|
+      g.spawn do
+        rounds.times do
+          select
+          when v = idle.receive
+            fail("select: a channel nobody sends to answered a select")
+          when timeout(1)
+            nil
+          end
+        end
+        GC.collect
+        after = GC.stats.bytes_kept_by_last_sweep
+        grown = after > before ? after - before : 0_u64
+        0
+      end
+    end
+    grown
   end
-  puts "#{select_rounds // 2} selects beside an idle channel kept under 256 KiB more"
+
+  if heap_stress == 0_u64
+    select_grown = select_kept_bytes(400000)
+    fail("select: 200000 selects beside an idle channel left #{select_grown // 1024_u64} KiB more kept") if select_grown > 256_u64 * 1024_u64
+    puts "200000 selects beside an idle channel kept under 256 KiB more"
+  else
+    parked_selects = 16000
+    parked_grown = parked_select_kept_bytes(parked_selects)
+    fail("select: #{parked_selects} selects parked beside an idle channel left #{parked_grown // 1024_u64} KiB more kept") if parked_grown > 256_u64 * 1024_u64
+    puts "#{parked_selects} selects parked beside an idle channel kept under 256 KiB more"
+  end
 {% end %}
 
 # ── 16e. A channel keeps no value it has handed out ─────────────────────
@@ -1427,7 +1456,7 @@ puts "a parked sender's receipt survived the next sender's park"
   # the value took 7 s (4 MB 0.4 s, 16 MB 1.8 s), the same preemptions
   # 0.6 s at stress 0, and seed 1's priorities preempt a task running
   # alone not at all. As 1,000 copies of 64 KB the value is 65,000
-  # back-edges and 480 collections: 16e takes 1.3 s, the run 125 s.
+  # back-edges and 480 collections, and 16e takes 1.3 s.
   def big_value(letter : String) : String
     (letter * 64000) * 1000
   end

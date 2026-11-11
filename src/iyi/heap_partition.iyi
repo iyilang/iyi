@@ -128,6 +128,10 @@ class IyiHeap
   # which partitions take runs from as from the pool (`adopt_drained`),
   # or `RUN_PARKED`, on no list: too full to be worth taking when last
   # looked at, and listed again by the global sweep once it holds room.
+  # One handed over while something dead and not yet freed may still
+  # name its free chunks is `RUN_HELD`, on no list: the global sweep
+  # parks it, and the sweep after that lists it, a mark begun after the
+  # handing having found that dead thing dead (`drain_run`).
   RUN_LINK        = 0xFFFFFFFFFFFF_u64
   RUN_N_SHIFT     =             48_u64
   RUN_N_MASK      =          0xFFF_u64
@@ -136,6 +140,7 @@ class IyiHeap
   RUN_POOL        =              2_u64
   RUN_DRAINING    =              3_u64
   RUN_PARKED      =              4_u64
+  RUN_HELD        =              5_u64
   # A class's runs double from the smallest that holds a chunk to this.
   RUN_MAX = 65536_u64
   # A drained run is taken while at most this many quarters of its chunks
@@ -1182,6 +1187,16 @@ class IyiHeap
   # and a read between the two faults (design section 2.3). The bracket
   # keeps a mark from starting meanwhile; a stop asked for ends the
   # releases where they stand.
+  #
+  # A run's bytes are its chunks', from its first head to the next run's
+  # first head - its last chunk's tail reaches into the next run - and a
+  # page they share with a neighbour goes back too, under the class's
+  # lock, once every run with a byte on it is pooled (`pooled_page?`).
+  # Runs start at a granule, a kibibyte, and double from the least that
+  # holds a chunk: whole pages alone, a darwin run of 16 KiB or less gave
+  # back nothing, and heap_drain's idle check found 5 MiB of runs cold
+  # and the resident set 2 MiB lower (tmac, 16 KiB pages); on Linux 3 MiB
+  # and 2 (LeakHunt3, S6).
   def self.cool_pools(limit : Int32) : Nil
     return if IyiStat.get(IyiStat::COOL_PENDING) == 0_u64
     return if LibIyiGCTable.__iyi_marking != 0_u8
@@ -1204,12 +1219,18 @@ class IyiHeap
       arena = run & (0_u64 &- MAP)
       granule_first = granule_of(arena, run)
       n = run_n(run_word(arena, granule_first))
-      # From the run's first chunk head: the bytes before it are the
-      # tail of the chunk before, another run's.
-      low = (first_head(arena, run) + PAGE - 1_u64) & (0_u64 &- PAGE)
-      high = (run + n.unsafe_shl(GRANULE_SHIFT)) & (0_u64 &- PAGE)
+      span_low = first_head(arena, run)
+      span_high = first_head(arena, run + n.unsafe_shl(GRANULE_SHIFT))
+      low = (span_low + PAGE - 1_u64) & (0_u64 &- PAGE)
+      high = span_high & (0_u64 &- PAGE)
       __iyi_release_pages(low, high - low) if high > low
       class_lock(index)
+      # The pages shared with the neighbours, the one below first: this
+      # run is off every list, still `RUN_POOL`, and theirs cannot leave
+      # the pool while the lock is held.
+      edge = span_low & (0_u64 &- PAGE)
+      __iyi_release_pages(edge, PAGE) if edge < low && pooled_page?(arena, edge)
+      __iyi_release_pages(high, PAGE) if high < span_high && high >= low && pooled_page?(arena, high)
       line = pline(index)
       set_run_word(arena, granule_first, read64(line + PC_COLD), n, RUN_POOL)
       write64(line + PC_COLD, run)
@@ -1221,18 +1242,53 @@ class IyiHeap
     IyiStat.set(IyiStat::COOL_PENDING, 0_u64) if looked >= CLASSES
   end
 
+  # Whether every byte of the page at *page* in partition arena *arena*
+  # below its frontier is a pooled run's - the chunk holding its first
+  # byte on one, and every run from there to the page's end - under the
+  # arena's class lock. A run's word is at its first granule alone, and
+  # its others read zero: the walk back finds the run of the first chunk.
+  # Past the frontier nothing was carved and nothing is resident.
+  def self.pooled_page?(arena : UInt64, page : UInt64) : Bool
+    first = arena_first(arena)
+    return false if page < first
+    stop = page + PAGE
+    top = read64(arena + OFF_HIGH)
+    stop = top if stop > top
+    chunk = read64(arena + OFF_CHUNK)
+    granule = ((page - first).unsafe_div(chunk) * chunk).unsafe_shr(GRANULE_SHIFT)
+    while run_word(arena, granule) == 0_u64
+      return false if granule == 0_u64
+      granule = granule - 1_u64
+    end
+    while first + granule.unsafe_shl(GRANULE_SHIFT) < stop
+      word = run_word(arena, granule)
+      return false if word == 0_u64 || run_state(word) != RUN_POOL
+      granule = granule + run_n(word)
+    end
+    true
+  end
+
   # A run handed to the shared heap, under class *index*'s lock with no
   # slice on its arena: owned by nobody, its objects the global sweep's to
   # free, on the class's drain list for a partition to take
-  # (`adopt_drained`).
-  def self.drain_run(index : Int32, arena : UInt64, run : UInt64, n : UInt64) : Nil
+  # (`adopt_drained`) - or, *held*, on no list until two global sweeps
+  # have passed it (`RUN_HELD`): a partition that took it at once would
+  # hand out its free chunks while a dead object the runtime has not
+  # freed - a dead unit's large object a mark kept mapped, a handed-over
+  # partition's garbage - still names them, and a mark reaching that
+  # object, or the verifier, reads them as its.
+  def self.drain_run(index : Int32, arena : UInt64, run : UInt64, n : UInt64, held : Bool) : Nil
     granule_first = granule_of(arena, run)
     k = 0_u64
     while k < n
       set_owner_at(arena, granule_first + k, 0_u64)
       k = k + 1_u64
     end
-    list_drained(index, arena, run, n)
+    if held
+      set_run_word(arena, granule_first, 0_u64, n, RUN_HELD)
+    else
+      list_drained(index, arena, run, n)
+    end
     IyiStat.add(IyiStat::HANDED_SHARED, 1_u64)
   end
 
@@ -2622,23 +2678,28 @@ class IyiHeap
     write64(record &+ REC_EMPTIED, 0_u64)
   end
 
-  # Partition *record*'s emptied runs to the shared heap (`drain_run`),
-  # on their classes' drain lists for a partition to take
-  # (`adopt_drained`): a partition handed over whole, or one whose dead
-  # large object outlived its death.
+  # Partition *record*'s emptied runs to the shared heap, held
+  # (`drain_run`): a partition handed over whole, whose garbage is the
+  # shared heap's now and may name their chunks, or one whose dead large
+  # object outlived its death.
   def self.drain_emptied(record : UInt64) : Nil
-    run = read64(record &+ REC_EMPTIED)
+    drain_chain(read64(record &+ REC_EMPTIED), true)
+    write64(record &+ REC_EMPTIED, 0_u64)
+  end
+
+  # A chain of runs, linked through their run words, to the shared heap
+  # (`drain_run`), each under its class's lock with no slice on its arena.
+  def self.drain_chain(run : UInt64, held : Bool) : Nil
     while run != 0
       arena = run & (0_u64 &- MAP)
       word = run_word(arena, granule_of(arena, run))
       index = class_index(read64(arena + OFF_CHUNK))
       class_lock(index)
       quiet(index, arena, false)
-      drain_run(index, arena, run, run_n(word))
+      drain_run(index, arena, run, run_n(word), held)
       class_unlock(index)
       run = word & RUN_LINK
     end
-    write64(record &+ REC_EMPTIED, 0_u64)
   end
 
   # One run of a local sweep: answers its live chunks, the new list (the
@@ -3019,8 +3080,16 @@ class IyiHeap
   # with it, their chunks being free on runs that are nobody's now. The
   # runs for the pool go with the emptied ones once every class's `LOCAL`
   # chunks are free, for the local sweep's reason: a dead chunk of a
-  # later class still names those of the run.
+  # later class still names those of the run. So do the runs for the
+  # shared heap, whose free chunks a partition takes (`adopt_drained`):
+  # handed over class by class, a 32-byte chunk the dead unit freed was
+  # taken and allocated by another partition while a 192-byte `LOCAL`
+  # chunk of the dead one, a class later and not yet freed, still named
+  # it - `-Dheap_verify` exit 86 on 3 seeds of 5 in #145's app (UnionPad2,
+  # S6). Meanwhile they are nobody's, on no list, and the global sweep
+  # frees their dead in place.
   def self.free_whole(record : UInt64, id : UInt64) : Nil
+    handed = 0_u64
     clear_dead_weak(record, id)
     {% if flag?(:heap_verify) %} weak_to_large(record, id, 0_u64, true) {% end %}
     index = 0
@@ -3056,7 +3125,13 @@ class IyiHeap
             write64(record &+ REC_EMPTIED, run)
             IyiStat.add(IyiStat::FREED_WHOLE, 1_u64)
           else
-            drain_run(index, arena, run, n)
+            k = 0_u64
+            while k < n
+              set_owner_at(arena, granule_first + k, 0_u64)
+              k = k + 1_u64
+            end
+            set_run_word(arena, granule_first, handed, n, RUN_OWNED)
+            handed = run
           end
           run = following
         end
@@ -3068,8 +3143,9 @@ class IyiHeap
     # The large objects under the runtime lock, as the local sweep reads
     # them: a published one, or any under a mark beside the program, the
     # shared heap's; a `LOCAL` one unmapped. A `LOCAL` one left mapped
-    # names what the classes freed, so the runs go to the shared heap,
-    # whose sweep pools them after the mark now running has left it white.
+    # names what the classes freed, so the runs go to the shared heap
+    # held (`drain_run`) until a mark begun after this one has found it
+    # dead.
     large = record &+ REC_LARGE
     held = false
     if table_count(large) != 0
@@ -3087,6 +3163,7 @@ class IyiHeap
       end
       unlock
     end
+    drain_chain(handed, held)
     if held
       drain_emptied(record)
     else
@@ -3141,7 +3218,9 @@ class IyiHeap
 
   # Every run of *record* handed to the shared heap whole, nothing freed:
   # a pointer answer's partition, or a pinned unit's. Its objects are the
-  # shared heap's from here, freed by the global sweep when unreachable.
+  # shared heap's from here, freed by the global sweep when unreachable;
+  # its garbage, a class's dead not swept, may name free chunks of its
+  # runs, which are held (`drain_run`) until a mark has found it dead.
   def self.hand_to_shared(record : UInt64) : Nil
     index = 0
     while index < CLASSES
@@ -3153,7 +3232,7 @@ class IyiHeap
         while run != 0
           arena = run & (0_u64 &- MAP)
           word = run_word(arena, granule_of(arena, run))
-          drain_run(index, arena, run, run_n(word))
+          drain_run(index, arena, run, run_n(word), true)
           run = word & RUN_LINK
         end
         write64(runs, 0_u64)
@@ -3515,9 +3594,10 @@ class IyiMark
   # partition's run, a white chunk the mark found dead and older than it
   # freed onto its owner's return stack, a marked one white again and this
   # epoch's; on a run handed to the shared heap the same, the dead freed
-  # in place, and a parked run (`IyiHeap.adopt_drained`) back on its
-  # class's drain list once it has room. A free chunk is its owner's
-  # list's or nobody's, and only whitened.
+  # in place, a parked run (`IyiHeap.adopt_drained`) back on its class's
+  # drain list once it has room, and a held one (`IyiHeap.drain_run`)
+  # parked. A free chunk is its owner's list's or nobody's, and only
+  # whitened.
   # Answers 0: nothing of a partition arena is the centre's.
   def self.sweep_partition_slice(arena : UInt64, span : UInt64) : UInt64
     chunk = IyiHeap.arena_chunk(arena)
@@ -3589,6 +3669,10 @@ class IyiMark
           IyiHeap.list_drained(index, arena, cursor, n)
           IyiHeap.class_unlock(index)
           IyiHeap.note_drained
+        elsif state == IyiHeap::RUN_HELD
+          IyiHeap.class_lock(index)
+          IyiHeap.set_run_word(arena, granule, 0_u64, n, IyiHeap::RUN_PARKED)
+          IyiHeap.class_unlock(index)
         end
       end
       walked = walked + n.unsafe_shl(IyiHeap::GRANULE_SHIFT)

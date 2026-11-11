@@ -44,11 +44,13 @@ esac
 status=0
 
 # build NAME FLAGS [PATH]: the program built with FLAGS (against PATH's
-# runtime when given); false when it does not build.
+# runtime when given); false when it does not build. Each build names
+# its flags, `IYI_OPTS` left out: under a gate's `-Dheap_partitions` the
+# flag-off control was built with the flag.
 build() {
   local name="$1" flags="$2" path="${3:-}"
   # shellcheck disable=SC2086
-  if ! env ${path:+IYI_PATH="$path"} "$IYI" build $flags -o "$WORK/$name" "$REPO/bench/heap_drain.iyi" >"$WORK/$name.build.log" 2>&1; then
+  if ! env -u IYI_OPTS ${path:+IYI_PATH="$path"} "$IYI" build $flags -o "$WORK/$name" "$REPO/bench/heap_drain.iyi" >"$WORK/$name.build.log" 2>&1; then
     echo "  $name: build failed"
     sed -n '1,12p' "$WORK/$name.build.log" | sed 's/^/    /'
     status=1
@@ -168,9 +170,9 @@ if [ "$PART" = all ] || [ "$PART" = copies ]; then
   copy "a taken run's objects published" c3 86 \
     "$(subst 'def self\.adopt_drained' 'write8\(own, OWN_PUB\)' 'write8(own, 0_u64)')" "-Dheap_partitions -Dheap_verify" 8 24 4
   copy "an idle worker wakes for the warm pool" c4 1 \
-    "$(subst 'def self\.idle_wait_ms' 'return timeout unless pool_warm\?' 'return timeout')"
+    "$(subst 'def self\.idle_wait_ms' 'elsif pool_warm\?' 'elsif false')"
   copy "a cooled run's pages go back" c5 1 \
-    "$(del 'def self\.cool_pools' '__iyi_release_pages\(low, high - low\)')"
+    '/def self\.cool_pools/ { armed = 1 } armed && /^  end$/ { armed = 0 } armed && /__iyi_release_pages\(/ { found = found + 1; next } { print } END { if (found != 3) exit 3 }'
   copy "a partition holds under a mark" c6 1 \
     "$(del 'def self\.partition_slice' 'hold_partition\(record, debt\)')" "-Dheap_partitions --release" mark
 fi

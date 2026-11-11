@@ -192,6 +192,28 @@ program that never made a partition keeps the flag-off budget
 JsonGenerate's global collections ran 17 % longer (tmac, 143.5 ms against
 122.7); flag on and off now retire the same instructions.
 
+heap22 S6 memory return, under `-Dheap_partitions`. Inside one process
+#145's app ratcheted its resident set endpoint after endpoint (50 to 343
+MB in a round, tssh): a run a dead unit handed to the shared heap was
+never allocated in again while one object on it lived, and a pooled run
+kept its pages for the program's life. A partition now takes a
+handed-over run before its pool and the frontier, the objects on it
+published there, and a run more than three quarters full waits for the
+global sweep; a pooled run nobody took for one to two seconds gives its
+pages back, with the pages it shares with pooled neighbours (darwin's 16
+KiB pages kept every run of 16 KiB or less: 5 MiB of runs cold, 2 MiB
+given back, tmac), an idle pool worker waking for it; and a partition
+whose debt passes 125 % of its budget under a global mark waits for the
+mark to end (#145's partitions had grown from 16-33 MB to 76-111 MB
+under marks). A dead unit's runs go to the shared heap only once every
+class's `LOCAL` chunks are free, and the ones a dead object may still
+name - a large object a mark kept mapped, a handed-over partition's
+garbage - only after two global sweeps: a dying unit's 192-byte chunk
+had named a 32-byte chunk another unit had taken (`-Dheap_verify`,
+#145's app). Over four cycles of the 11 endpoints in one process the app
+now averages 104, 136, 154 and 175 MB a cycle where it averaged 246,
+450, 477 and 494 (tssh, 8 s an endpoint; bench/heap_drain).
+
 Two races older than heap22, in every build: units setting or deleting
 environment variables at once lost them (tmac, 6 units × 300 rounds at
 `IYI_WORKERS=4`: 261-301 of 1,800 reads of their own write lost); writers

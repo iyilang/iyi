@@ -85,6 +85,7 @@ import std/digest::{SHA256, SHA384, SHA512}
 import std/crypto::{HMAC}
 import std/asn1::{Der, DerValue, DerTag, Asn1Error}
 import std/ecdsa::{EcdsaPublicKey, EcdsaCurve, EcdsaHash, EcdsaError}
+import std/lazy::{Lazy}
 
 # A P-256 private key, and the public key that goes with it.
 pub struct P256PrivateKey
@@ -782,15 +783,20 @@ end
 # (m + 1) 256^j G, and [2^256]G after them for the recoding's carry. It
 # holds multiples of G, which is public, so nothing in it is secret; only
 # which entry is read is, and that is chosen by masks. The table is worked
-# out once, by the class variable's initializer as the module starts, and
-# kept: 224 additions and 256 doublings, the 257 Z inverted together by
+# out once, at the first call that reads it (std/lazy), and kept: 224
+# additions and 256 doublings, the 257 Z inverted together by
 # Montgomery's trick (one inversion and three products a point). Only
 # `pick` and `top` read it, so no function answers it.
 struct P256BaseTable
   ENTRIES = 257
 
-  @[SafeReach("built whole by its initializer as the module starts, before any parallel task; then only read")]
-  @@table : Pointer(P256Num) = build
+  @[UnsafeReach("built whole in the shared heap by its first reader (std/lazy), kept once and marked; read only after the mark; then only read")]
+  @@table = Lazy(Pointer(P256Num)).new
+
+  private def self.precomputed : Pointer(P256Num)
+    @@table.get { build }
+  end
+
   # 0, read by `pick` through an atomic load (see there).
   @@opaque = Atomic(UInt64).new(0_u64)
 
@@ -853,7 +859,7 @@ struct P256BaseTable
     index = (digit ^ (0_u64 &- negative)) &+ negative
     x = P256Num.zero
     y = P256Num.zero
-    base = @@table + (row * 16).to_i64
+    base = precomputed + (row * 16).to_i64
     j = 1
     while j <= 8
       bit = ((j.to_u64 ^ index) &- 1_u64).unsafe_shr(63) ^ zero
@@ -869,7 +875,7 @@ struct P256BaseTable
   # [2^256]G when *carry* is 1, the identity when it is 0, by masks.
   def self.top(carry : UInt64) : P256Point
     f = P256Modulus.field
-    table = @@table
+    table = precomputed
     P256Point.new(P256Num.choose(carry, table[512], P256Num.zero), P256Num.choose(carry, table[513], f.one),
       P256Num.choose(carry, f.one, P256Num.zero))
   end

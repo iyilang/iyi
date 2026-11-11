@@ -232,6 +232,7 @@ module Iyi
           program.const_initializers << type
         end
 
+        iyi_note_reach(type)
         node.target_const = type
         node.bind_to type.value
       when Type
@@ -880,9 +881,15 @@ module Iyi
     @definition_probes_stopped = false
     @definition_probe_vars_forgotten = false
 
+    # iyi: whether this visitor is typing a definition-site probe's own
+    # statements, which never run: what they read and call is not reached
+    # from `main` (`Program#iyi_mark_reached_constants`).
+    property? iyi_probing = false
+
     private def visit_definition_probe(probe : If) : Nil
       return if @definition_probes_stopped
       vars = @vars
+      @iyi_probing = true
       begin
         ignoring_type_filters { probe.accept self }
       rescue ex : CodeError
@@ -892,7 +899,19 @@ module Iyi
         @definition_probes_stopped = true
       ensure
         @vars = vars
+        @iyi_probing = false
       end
+    end
+
+    # iyi: one constant read or one call made by the body being typed - a
+    # def's, a block's in it, a constant's value or, without a def, code
+    # that runs as the program starts - for `iyi_mark_reached_constants`.
+    # A probe's own statements are left out: they stand under `if false`.
+    # `IYI_SPAWN_BROKEN=probeused` keeps them, as if a probe ran.
+    private def iyi_note_reach(target : Const | ASTNode) : Nil
+      typed_def = @typed_def
+      return if !typed_def && @iyi_probing && !SPAWN_BROKEN.includes?("probeused")
+      @program.iyi_note_reach(typed_def, target)
     end
 
     private def forget_definition_probe_vars : Nil
@@ -1283,6 +1302,7 @@ module Iyi
       @block_nest += 1
 
       block_visitor = MainVisitor.new(program, before_block_vars, @typed_def, meta_vars)
+      block_visitor.iyi_probing = @iyi_probing
       block_visitor.yield_vars = @yield_vars
       block_visitor.match_context = @match_context
       block_visitor.untyped_def = @untyped_def
@@ -1409,6 +1429,7 @@ module Iyi
         node.expected_return_type = def_type.virtual_type
       end
 
+      iyi_note_reach(node)
       node.bind_to node.def
       node.def.bind_to node.def.body
       node.def.vars = meta_vars
@@ -1448,6 +1469,7 @@ module Iyi
       # The call might have been created if this is a proc pointer at the top-level
       call = node.call? || Call.new(obj, node.name).at(obj)
       prepare_call(call)
+      iyi_note_reach(call)
 
       # A proc pointer like `->foo` where `foo` is a macro is invalid
       if expand_macro(call)
@@ -1546,6 +1568,7 @@ module Iyi
 
     def visit(node : Call)
       prepare_call(node)
+      iyi_note_reach(node)
 
       if expand_macro(node)
         # It can happen that this call is inside an ArrayLiteral or HashLiteral,

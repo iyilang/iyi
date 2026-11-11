@@ -22,7 +22,10 @@ module Iyi
   # And `bench/std_unit_exercise.sh`'s
   # (SPEC.md III.4.18): `unit-capture` lets `spawn(in: u)`'s block capture
   # what is not Share, and `unit-answer` lets its task answer what is not.
-  # Read once; empty in every other run.
+  # And `bench/std_lazy_tables_exercise.sh`'s `probeused` counts a
+  # definition probe's statements as code that runs
+  # (`Program#iyi_mark_reached_constants`). Read once; empty in every
+  # other run.
   SPAWN_BROKEN = (ENV["IYI_SPAWN_BROKEN"]? || "").split(',')
 
   # iyi: a `g.spawn` the cleanup classified (SPEC.md III.4.15): where its

@@ -90,6 +90,7 @@ module std/curve25519
 
 import std/int
 import std/digest::{SHA512}
+import std/lazy::{Lazy}
 
 # What is wrong with a peer's key: `message` is the sentence.
 pub struct CurveError
@@ -818,15 +819,19 @@ end
 # The fixed-base table `CurvePoint.base_mult` reads: 32 rows of eight,
 # entry (j, m) the point (m + 1) 256^j B made ready. It holds multiples
 # of B, which is public, so nothing in it is secret; only which entry is
-# read is, and that is chosen by masks. The table is worked out once, by
-# the class variable's initializer as the module starts, and kept: 248
+# read is, and that is chosen by masks. The table is worked out once, at
+# the first call that reads it (std/lazy), and kept: 248
 # doublings and 224 additions, their 256 Z inverted together by
 # Montgomery's trick (one inversion and three products a point), which is
 # about what one multiplication by the old 4-bit window cost. Only `pick`
 # reads it, so no function answers it.
 struct CurveBaseTable
-  @[SafeReach("built whole by its initializer as the module starts, before any parallel task; then only read")]
-  @@table : Pointer(CurvePrecomp) = build
+  @[UnsafeReach("built whole in the shared heap by its first reader (std/lazy), kept once and marked; read only after the mark; then only read")]
+  @@table = Lazy(Pointer(CurvePrecomp)).new
+
+  private def self.precomputed : Pointer(CurvePrecomp)
+    @@table.get { build }
+  end
 
   private def self.build : Pointer(CurvePrecomp)
     points = Pointer(CurvePoint).malloc(256_u64)
@@ -882,7 +887,7 @@ struct CurveBaseTable
     ypx = CurveField.one
     ymx = CurveField.one
     xy2d = CurveField.zero
-    base = @@table + (row * 8).to_i64
+    base = precomputed + (row * 8).to_i64
     j = 1
     while j <= 8
       diff = j.to_u64 ^ index

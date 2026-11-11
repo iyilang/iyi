@@ -83,7 +83,15 @@ programs (0.2-0.37 s) take up to 1.08, +0.011-0.027 s. A cold one takes
 0.97 for iyiturkiye and 1.04-1.07 for the others on tmac, and on Linux
 1.08 for the 16 std programs and 1.14 for web_cores. An initialiser first
 run by a read before its declaration is born in the shared heap under
-`-Dheap_partitions`.
+`-Dheap_partitions`. A constant that only definition-site typing reads is
+no longer built as its module starts. std's decoded and worked-out tables
+(unicode, MIME, the digests, ML-KEM, Blowfish, and the X25519, P-256 and
+ECDSA fixed-base tables) are kept by first-call accessors (`std/lazy`),
+built in the shared heap. A program, or a server whose handlers may read
+them, starts no slower than before heap22's std changes
+(`bench/std_lazy_tables_exercise.sh`, `IYI_SPAWN_BROKEN=probeused`; Linux,
+release, median of 40 starts of a program importing std/http: 0.43 ms,
+against 0.50 ms at 50c8d34de and 1.14 ms with the tables built eagerly).
 `TlsConfig#trusted_roots` answers a copy of the system roots, and a failed
 system-root load is retried at the next handshake rather than kept.
 `Random.rand` and the other class-level draws use one PCG-32 stream per

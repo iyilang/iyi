@@ -1,0 +1,58 @@
+# A value worked out the first time it is asked for, and kept.
+#
+#     import std/lazy::{Lazy}
+#
+#     @[UnsafeReach("built whole in the shared heap by its first reader (std/lazy) and kept once; then only read")]
+#     @@rows = Lazy(Array(Int32)).new
+#
+#     def self.rows : Array(Int32)
+#       @@rows.get { decode(ROWS) }
+#     end
+#
+# What std's decoded and worked-out tables are kept in: unicode's thirty,
+# MIME's two maps, the digests' round constants and CRC tables, Keccak's,
+# ML-KEM's zetas, Blowfish's initial state and the fixed-base tables of
+# X25519, P-256 and ECDSA. Built at the first call, as their `@@x ||=`
+# caches were. A constant is built at its declaration in every program
+# whose running code may read it (SPEC.md III.5), so a server whose
+# handlers may sign worked out P-256's table before its first line, and
+# a class variable's initializer runs as its module starts in every
+# importer.
+#
+# `get` answers the kept value once one is marked kept. Otherwise it runs
+# the block in the shared heap (`IyiCross.shared`, contract amendment 6b),
+# outside any lock, so a block that decodes a table reaches its own
+# preemption checks and never holds a once a worker waits on
+# (`bench/preempt_audit.py`). The first build to claim the mark stores
+# its value and marks it kept; the mark's release store comes after the
+# value's, and a reader reads the value only after an acquire load of the
+# mark, so nobody sees it half stored. Two callers that both find it
+# unkept both build and answer their own; one of the two is kept. A
+# builder must answer the same value each time and change nothing else.
+#
+# A `Lazy` lives in a class variable, whose struct the calls change in
+# place. It is not `Share` (`get` assigns it), so the class variable is
+# claimed `@[UnsafeReach]` in its module, an `@[Unsafe]` one.
+
+@[Unsafe("the mark is read and claimed by atomic loads, stores and exchanges on the struct's own word")]
+module std/lazy
+
+pub struct Lazy(T)
+  # 0 unkept, 1 claimed by a build that is storing, 2 kept. First, so the
+  # word the atomics act on is the struct's own first word.
+  @mark : Int32 = 0
+  @value : T? = nil
+
+  def get(& : -> T) : T
+    if IyiAtomic.load(pointerof(@mark), :acquire, false) == 2
+      kept = @value
+      return kept unless kept.is_a?(Nil)
+    end
+    built = IyiCross.shared { yield }
+    if IyiAtomic.cmpxchg(pointerof(@mark), 0, 1, :acquire, :monotonic)[1]
+      @value = built
+      IyiAtomic.store(pointerof(@mark), 2, :release, false)
+    end
+    built
+  end
+end

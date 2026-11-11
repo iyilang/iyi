@@ -60,7 +60,8 @@ compiler proves, in the file that declares the state. Each std module's
 state is proven once, over all of its code, when the build that writes its
 `.iyimod` runs, and every importer reuses that proof (Linux, release
 compiler, the proof's stage cold, median of 3: web_cores 0.148 s,
-std_http_exercise 0.150 s). The share check's mutation scan no longer
+std_http_exercise 0.150 s); an importer whose own code could reach the
+state proves the claim itself. The share check's mutation scan no longer
 builds an undefined constant's suggestions for macro code it only probes:
 `Object#in?` cost ~6 ms per scanned type, and std_http_exercise's cleanup
 drops from 0.30 s to 0.14 s (Linux, release). An initialiser first run by

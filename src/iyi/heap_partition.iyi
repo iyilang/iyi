@@ -144,6 +144,9 @@ class IyiHeap
   @@abandon_next : Bool = false
   @@stop_sweep_record : UInt64 = 0_u64
   @@stop_sweep_after : Int32 = -1
+  @@hold_sweep_record : UInt64 = 0_u64
+  @@hold_sweep_after : Int32 = -1
+  @@hold_sweep_flags : UInt64 = 0_u64
   @@pause_ring : UInt64 = 0_u64
 
   # The last `PAUSE_RING` local collections' durations in ns, a ring
@@ -335,6 +338,36 @@ class IyiHeap
   # stopped by it yet.
   def self.local_sweep_stop_pending? : Bool
     @@stop_sweep_record != 0_u64
+  end
+
+  # A test's switch: partition *record*'s next local sweep, once it has
+  # swept class *index*, sets the word at *flags* to 1 and waits for the
+  # word after it before it goes on to the later classes - a whole sweep
+  # caught between two classes (bench/heap_local's `unswept:` check). A
+  # pause asked meanwhile, which would wait for this thread, or ten
+  # seconds, end the wait with the word at *flags* 2.
+  def self.hold_local_sweep(record : UInt64, index : Int32, flags : UInt64) : Nil
+    @@hold_sweep_flags = flags
+    @@hold_sweep_after = index
+    @@hold_sweep_record = record
+  end
+
+  def self.local_sweep_hold_pending? : Bool
+    @@hold_sweep_record != 0_u64
+  end
+
+  def self.held_sweep_waits : Nil
+    flags = @@hold_sweep_flags
+    Pointer(Atomic(UInt64)).new(flags).value.set(1_u64)
+    go_on = Pointer(Atomic(UInt64)).new(flags + 8_u64)
+    began = IyiMark.now_ns
+    while go_on.value.get == 0_u64
+      if stop_requested? || IyiMark.now_ns - began > 10_000_000_000_u64
+        Pointer(Atomic(UInt64)).new(flags).value.set(2_u64)
+        return
+      end
+      IyiMark.spin_pause
+    end
   end
 
   # The `OWN` byte of the chunk holding *address* - a large object's from
@@ -1561,9 +1594,8 @@ class IyiHeap
     # unswept, their dead chunks carved and wearing the parity of the mark
     # before this one - the next mark's. Trusted, that mark took them for
     # reached and never opened them, so they outlived it, and what they
-    # name, dead with them, was freed under them: #145's app under
-    # `-Dheap_verify -Diyi_chaos` at stress 0 exited 86 with such a chunk
-    # as the holder, seeds 1 and 3 of 3 (CrossFix, Linux). Cleared here,
+    # name, dead with them, was freed under them (bench/heap_local's
+    # `unswept:` zombie, which the nounswept copy keeps). Cleared here,
     # the next mark clears the bits first, as after an abandoned mark.
     return false unless local_sweep(record, id, parity, idle)
     write64(record &+ REC_MARKING, 0_u64)
@@ -1742,14 +1774,17 @@ class IyiHeap
   # the pool. A stop asked between two classes ends it: what is swept is
   # whole, and the rest waits for the next one.
   #
-  # The empty runs wait for the sweep's end because a stop leaves dead
-  # chunks carved in the classes after it, and what they name in the
-  # classes before it is free: a run of those taken off the pool by
-  # another unit puts that unit's objects under the dead words. In #145's
-  # app, run under `-Dheap_verify -Diyi_chaos` at stress 0, a dead
-  # `Params` of one connection's unit named the `Hash` another unit had
-  # made where its `@url` had been (exit 86, seeds 1 and 3 of 3, CrossFix,
-  # Linux). Once a sweep ends whole, nothing dead is left to name them.
+  # The empty runs wait for the sweep's end because, until it ends, the
+  # classes it has not reached still hold dead chunks carved, and what
+  # they name in the classes it swept is free: a run of those taken off
+  # the pool by another unit puts that unit's objects under the dead
+  # words, which the other unit's `-Dheap_verify` check reads as holders,
+  # and which a stale conservative word reviving the dead object would
+  # make a real cross-unit pointer. In #145's app under `-Dheap_verify
+  # -Diyi_chaos` at stress 0, another unit took such a run 230 to 1,437
+  # times a run (seeds 1-3, Linux, CrossFix2's count), and 0 times once
+  # the runs waited. A stop between two classes widens the same window.
+  # Once a sweep ends whole, nothing dead is left to name them.
   def self.local_sweep(record : UInt64, id : UInt64, parity : UInt64, idle : Bool) : Bool
     table = Pointer(UInt64).new(record)
     kept_bytes = 0_u64
@@ -1797,6 +1832,10 @@ class IyiHeap
         if record == @@stop_sweep_record && index == @@stop_sweep_after
           @@stop_sweep_record = 0_u64
           return false
+        end
+        if record == @@hold_sweep_record && index == @@hold_sweep_after
+          @@hold_sweep_record = 0_u64
+          held_sweep_waits
         end
       end
       index = index + 1

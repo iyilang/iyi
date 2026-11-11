@@ -70,10 +70,13 @@
 #   list, as a stop asked there abandons one; the list's far links are
 #   then each handed a new object, and after the next collection every
 #   one reads whole (the abandoned mark's parities are not trusted).
-# - `unswept:` a local sweep stopped between two classes leaves dead
-#   objects of the later classes carved, naming chunks of the earlier
-#   ones it freed: a dead object wearing the parity of the mark before
-#   is freed by the next whole collection; a run of `Node`'s class the
+# - `unswept:` a local sweep between two classes - held there, or
+#   stopped - leaves dead objects of the later classes carved, naming
+#   chunks of the earlier ones it freed: a dead object wearing the parity
+#   of the mark before is freed by the next whole collection; a run of
+#   `Node`'s class a whole sweep emptied stays the partition's while the
+#   sweep is held before `Far`'s class and another unit takes the pool's
+#   runs of that class and collects; a run of `Node`'s class the
 #   stopped sweep emptied stays the partition's while another unit takes
 #   the pool's runs of that class (whose `-Dheap_verify` check would
 #   read the dead object naming its chunk), and goes to the pool after
@@ -1205,6 +1208,25 @@
     IyiHeap.read8(arena &+ IyiHeap::META &+ IyiHeap.chunk_index(arena, address) &* IyiHeap::META_ENTRY) & IyiHeap::FREE_FLAG != 0
   end
 
+  # The class, the freedom and the owner of the chunk at the hidden
+  # address *hidden*, unhidden in a frame of their own: an address the
+  # caller held across a collection would be a root to its stack scan,
+  # which marks the dead object and keeps it.
+  @[NoInline]
+  def hidden_class(hidden : UInt64) : Int32
+    class_of(hide(hidden))
+  end
+
+  @[NoInline]
+  def hidden_free?(hidden : UInt64) : Bool
+    chunk_free?(hide(hidden))
+  end
+
+  @[NoInline]
+  def hidden_owner(hidden : UInt64) : UInt64
+    IyiHeap.owner_of(hide(hidden))
+  end
+
   # Partition *record*'s next local sweep stopped once it has swept class
   # *index*, as a stop asked before the next class stops one: whether
   # one was.
@@ -1260,14 +1282,12 @@
     hidden = hang_node(box)
     box[0] = nil
     return -3_i64 unless stopped_sweep(record, first)
-    far = hide(hidden[0])
-    node = hide(hidden[1])
-    return -5_i64 if class_of(far) <= first || class_of(node) <= first
-    return -4_i64 if chunk_free?(far) || chunk_free?(node)
+    return -5_i64 if hidden_class(hidden[0]) <= first || hidden_class(hidden[1]) <= first
+    return -4_i64 if hidden_free?(hidden[0]) || hidden_free?(hidden[1])
     scrub_stack
     return -2_i64 unless collect_now
     tiny.value = 1_u64
-    chunk_free?(far) ? 0_i64 : 1_i64
+    hidden_free?(hidden[0]) ? 0_i64 : 1_i64
   end
 
   # 2,000 nodes made and dropped, the 1,500th hung on a `Far` in *box*,
@@ -1300,10 +1320,9 @@
     box = Array(Far?).new(1, nil)
     hidden = far_over_nodes(box)
     box[0] = nil
-    node = hide(hidden)
-    return {hidden, -3_i64} unless stopped_sweep(record, class_of(node))
-    return {hidden, -4_i64} unless chunk_free?(node)
-    {hidden, IyiHeap.owner_of(node) == id ? 0_i64 : 1_i64}
+    return {hidden, -3_i64} unless stopped_sweep(record, hidden_class(hidden))
+    return {hidden, -4_i64} unless hidden_free?(hidden)
+    {hidden, hidden_owner(hidden) == id ? 0_i64 : 1_i64}
   end
 
   # `unswept_run`, then a word at *flags* set for the caller and a wait
@@ -1344,6 +1363,67 @@
     collect_now ? 0_i64 : -2_i64
   end
 
+  # A dead `Far` naming a dead node on a run with nothing else live, and
+  # the unit's next sweep held once it has swept `Node`'s class, which
+  # empties that run, while `Far`'s class is still to come: a whole sweep
+  # caught between two classes. The words at *flags*: the hold's state
+  # (`IyiHeap.hold_local_sweep`; 3 when no sweep reached it), the
+  # caller's word to go on, the hidden node and the partition's id.
+  # Answers 0 or a negative failure.
+  def unswept_hold_task(flags : UInt64) : Int64
+    record = IyiHeap.current_record
+    return -1_i64 if record == 0_u64
+    keep = build(8400000000_i64, 100, 0)
+    box = Array(Far?).new(1, nil)
+    hidden = far_over_nodes(box)
+    box[0] = nil
+    words = Pointer(UInt64).new(flags)
+    words[2] = hidden
+    words[3] = IyiHeap.read64(record + IyiHeap::REC_ID)
+    IyiHeap.hold_local_sweep(record, hidden_class(hidden), flags)
+    scrub_stack
+    collected = collect_now
+    if IyiHeap.local_sweep_hold_pending?
+      IyiHeap.hold_local_sweep(0_u64, -1, 0_u64)
+      Pointer(Atomic(UInt64)).new(flags).value.set(3_u64)
+    end
+    return -2_i64 unless collected
+    broken(keep, 8400000000_i64, 100) == 0_i64 ? 0_i64 : -6_i64
+  end
+
+  # `unswept_hold_task` on a unit of its own, and while its sweep is held,
+  # the node's run read and another unit made to take the pool's runs of
+  # `Node`'s class and collect: its `-Dheap_verify` check reads the held
+  # unit's dead `Far`. Answers the hold's state, the held unit's answer,
+  # whether the run had left the partition, and the taker's answer.
+  def unswept_hold_round : Tuple(UInt64, Int64, Bool, Int64)
+    hold = Pointer(UInt64).malloc(4_u64)
+    address = hold.address
+    left = false
+    taker = 0_i64
+    state = 0_u64
+    answer = 0_i64
+    group do |g|
+      held = g.spawn(unit: :new) { unswept_hold_task(address) }
+      state_word = Pointer(Atomic(UInt64)).new(hold.address)
+      waited = 0
+      while state_word.value.get == 0_u64 && waited < 10000
+        sleep(1)
+        waited = waited + 1
+      end
+      if state_word.value.get == 1_u64
+        left = hidden_owner(hold[2]) != hold[3]
+        took = g.spawn(unit: :new) { unswept_taker }.value
+        taker = took.is_a?(Int64) ? took : -7_i64
+      end
+      Pointer(Atomic(UInt64)).new(hold.address + 8_u64).value.set(1_u64)
+      held_answer = held.value
+      answer = held_answer.is_a?(Int64) ? held_answer : -7_i64
+      state = state_word.value.get
+    end
+    {state, answer, left, taker}
+  end
+
   # `unswept_run` and the unit's death: answers the hidden node, 0 on a
   # failure.
   def unswept_death_task : UInt64
@@ -1369,6 +1449,21 @@
       fail("unswept: the sweep stopped after class 0 freed the dead Far or its node") if zombie == -4_i64
       fail("unswept: Far or Node is in class 0") if zombie == -5_i64
       fail("unswept: a dead object a stopped sweep left carved outlived the next whole collection, its mark trusting the parity of the one before") if zombie == 1_i64
+    end
+    # A pause asked while the sweep is held ends the hold: tried again.
+    round = unswept_hold_round
+    tries = 1
+    while round[0] == 2_u64 && tries < 5
+      round = unswept_hold_round
+      tries = tries + 1
+    end
+    fail("unswept: no local sweep reached the hold in 100 tries") if round[0] == 3_u64
+    fail("unswept: the held sweep was let go by a pause in #{tries} tries") if round[0] == 2_u64
+    fail("unswept: the held sweep never began (state #{round[0]})") if round[0] != 1_u64
+    fail("unswept: the held unit answered #{round[1]}") if round[1] != 0_i64
+    fail("unswept: a run a sweep emptied left the partition before the sweep reached a later class's dead object naming its chunk") if round[2]
+    fail("unswept: the unit taking the pool's runs answered #{round[3]}") if round[3] != 0_i64
+    group do |g|
       pool = g.spawn(unit: :new) { unswept_pool_task(address) }
       waited = 0
       while flags.value == 0_u64 && waited < 10000

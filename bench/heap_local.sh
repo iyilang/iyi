@@ -13,11 +13,12 @@
 # sweep, which a stop between two classes skips, a weak cell to a large
 # object left off its partition's list, a local mark that trusts
 # the parities a mark abandoned part way left, or a sweep stopped part
-# way left, a run a stopped sweep emptied pooled under a dead object
-# naming its chunk, a death that keeps the runs its sweeps emptied, an
-# idle takeover that reads no parked fiber's stack, an idle takeover of
-# a unit whose `Unit` value is still being built, a dead unit's pooled
-# run left carved for a stale word to pass the root test, a publication
+# way left, a run a sweep emptied pooled before its later classes, under
+# a dead object naming its chunk, a death that keeps the runs its
+# sweeps emptied, an idle takeover that reads no parked fiber's stack,
+# an idle takeover of a unit whose `Unit` value is still being built, a
+# dead unit's pooled run left carved for a stale word to pass the root
+# test, a publication
 # walk that takes a chunk straddling the carve frontier for uncarved,
 # an owner test and a weak sweep that do the same to a weak cell, and a
 # counter put back in the data segment at a value that names a `LOCAL`
@@ -239,9 +240,11 @@ if [ "$PART" = all ] || [ "$PART" = broken ]; then
     heap_partition.iyi
 
   # An empty run to the pool as the sweep meets it, as through 3984c899a:
-  # a sweep stopped after it leaves a dead object naming its chunk, and
-  # another unit that takes the run puts its own object under that word.
-  prove_fails "an emptied run pooled before the sweep ends" poolstopped "unswept:" \
+  # while the sweep has later classes to go, a dead object of one names
+  # its chunk, and another unit that takes the run puts its own object
+  # under that word - a whole sweep held between two classes, which
+  # #145's app met at stress 0 (seeds 2 and 3 of 3, Linux), and a stopped one.
+  prove_fails "an emptied run pooled before the sweep ends" poolearly "unswept:" \
     '/def self\.local_sweep\(/ { inside = 1 } inside && /^            set_run_word\(arena, granule_first, read64\(record &\+ REC_EMPTIED\), n, RUN_OWNED\)$/ { print "            pool_run(index, arena, run, n)"; print "            write64(record &+ REC_HELD, read64(record &+ REC_HELD) - n.unsafe_shl(GRANULE_SHIFT))"; getline; inside = 0; found = 1; next } { print } END { if (!found) exit 3 }' \
     heap_partition.iyi
 

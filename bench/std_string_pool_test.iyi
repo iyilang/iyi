@@ -1,0 +1,20 @@
+# Tests `std/string_pool`: interned strings: the same bytes become one object.
+#
+# Run via:
+#     ./bin/iyi test bench/std_string_pool_test.iyi
+
+module bench/std_string_pool_test
+
+import std/string_pool::{StringPool}
+
+test "intern" do
+  pool = StringPool.new
+  a = pool.get("hello")
+  b = pool.get("hello")
+  c = pool.get("world")
+  assert_eq 2, pool.size, "two distinct"
+  assert_eq 5, a.bytesize, "bytes"
+  assert_eq "hello", a, "text"
+  assert_eq "hello", b, "again"
+  assert_eq "world", c, "other"
+end

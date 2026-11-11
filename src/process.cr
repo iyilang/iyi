@@ -534,6 +534,10 @@ class Process
   # *chdir* changes the working directory of the child process. If `nil`, uses
   # the current working directory of the parent process.
   #
+  # *process_group* (iyi) makes the child, on POSIX, the leader of a process
+  # group of its own, so that `LibC.kill(-pid, signal)` reaches what it starts
+  # as well. Windows has no such group and ignores it.
+  #
   # Example:
   #
   # ```
@@ -548,14 +552,15 @@ class Process
   #    and wait for it to finish.
   # * `Process.exec` replaces the current process.
   def initialize(command : String, args : Enumerable(String)? = nil, env : Env = nil, clear_env : Bool = false, shell : Bool = false,
-                 input : Stdio = Redirect::Close, output : Stdio = Redirect::Close, error : Stdio = Redirect::Close, chdir : Path | String? = nil)
+                 input : Stdio = Redirect::Close, output : Stdio = Redirect::Close, error : Stdio = Redirect::Close, chdir : Path | String? = nil,
+                 process_group : Bool = false)
     begin
       fork_input = stdio_to_fd(input, for: STDIN)
       fork_output = stdio_to_fd(output, for: STDOUT)
       fork_error = stdio_to_fd(error, for: STDERR)
 
       prepared_args = Crystal::System::Process.prepare_args(command, args, shell)
-      pid = Crystal::System::Process.spawn(prepared_args, shell, env, clear_env, fork_input, fork_output, fork_error, chdir.try &.to_s) do |error, command|
+      pid = Crystal::System::Process.spawn(prepared_args, shell, env, clear_env, fork_input, fork_output, fork_error, chdir.try &.to_s, process_group) do |error, command|
         raise ::File::Error.from_os_error("Error executing process", error, file: command)
       end
       process_info = Crystal::System::Process.new(pid)

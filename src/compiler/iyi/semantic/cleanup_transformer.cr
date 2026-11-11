@@ -1306,7 +1306,7 @@ module Iyi
       type = type.generic_type.as(Type) if type.is_a?(GenericClassInstanceType)
       name = target_def.name.partition(':').first
       case {type.to_s, name}
-      when {"Unit", "new"}       then "Unit.new"
+      when {"Unit", "new"}      then "Unit.new"
       when {"SharedProc", "of"} then "SharedProc.of"
       end
     end

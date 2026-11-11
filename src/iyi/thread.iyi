@@ -409,6 +409,7 @@
     # Every thread object started and not yet running, so a body's closure
     # is rooted from `start` until the thread that runs it holds it on its
     # own stack, and no longer (`run`).
+    @[UnsafeReach("the started threads' list, linked and unlinked under the runtime lock; every IyiThread is born in the shared heap")]
     @@head : IyiThread?
 
     @line : UInt64
@@ -671,6 +672,11 @@
       # (SPEC.md III.4.13). Said before the thread exists, so it never
       # runs a fiber the lock does not cover.
       IyiScheduler.expect_thread
+      # `IYI_CHAOS_LATE_THREADS`: a thread that links itself does so only
+      # once this one has nothing to run (`IyiChaos.hold_start`).
+      {% if flag?(:iyi_chaos) %}
+        IyiChaos.hold_start
+      {% end %}
       line = new_line
       thread = IyiCross.shared { IyiThread.new(line, proc) }
       IyiHeap.write64(line + IYI_TL_OBJECT, thread.object_id)
@@ -842,9 +848,17 @@
       # made: no stop names it before, and nothing it did before allocates
       # from the heap or holds a pointer into it.
       {% if flag?(:darwin) %}
+        {% if flag?(:iyi_chaos) %}
+          IyiChaos.wait_late
+        {% end %}
         link(line)
       {% elsif flag?(:linux) %}
-        link(line) if program_calls_c?
+        if program_calls_c?
+          {% if flag?(:iyi_chaos) %}
+            IyiChaos.wait_late
+          {% end %}
+          link(line)
+        end
       {% end %}
       # An alternate signal stack is a thread's own, so a stack overflow on
       # this thread has somewhere to say so (`IyiStackGuard`).

@@ -190,14 +190,23 @@ class IyiChaos
   @@picks : UInt64 = 0_u64
   @@schedule : UInt64 = 0_u64
   @@units : UInt64 = 0_u64
+  @[UnsafeReach("the root unit, made in the shared heap by `start` on the main thread before the program's first line, or by the first `unit_of`; its fields are integers")]
   @@root : IyiChaosUnit?
   @@last_unit : UInt64 = 0_u64
   @@streak : UInt64 = 0_u64
+  @[UnsafeReach("read and written only by `pick` on the simulation's one thread (`@@here`); every other thread's `pick` returns before it")]
   @@candidates : Array(IyiFiber)?
   @@generation : UInt64 = 0_u64
   @@trace : Bool = false
   @@reported : Bool = false
   @@threads_seen : UInt64 = 0_u64
+  # `IYI_CHAOS_LATE_THREADS`: a thread the simulated thread starts links
+  # itself late (`hold_start`, `wait_late`); 1 in `@@late_closed` while
+  # one waits, `@@late_steps` the points and back-edges passed since.
+  LATE_STEPS = 1024_u64
+  @@late_threads : Bool = false
+  @@late_closed : UInt64 = 0_u64
+  @@late_steps : UInt64 = 0_u64
   # The thread the simulation runs on: the main thread, which `start`
   # marks before the program's first line.
   @[ThreadLocal]
@@ -222,6 +231,7 @@ class IyiChaos
     @@stream = @@seed
     @@schedule = FNV_BASIS
     @@trace = Program.env("IYI_CHAOS_TRACE").is_a?(String)
+    @@late_threads = Program.env("IYI_CHAOS_LATE_THREADS").is_a?(String)
     @@here = true
     # Every parameter from the stream, so a seed names all of them.
     @@pct = draw % 2_u64 == 1_u64
@@ -378,7 +388,10 @@ class IyiChaos
     {% end %}
     mode = @@mode
     if mode == SIMULATED
-      step(false) if @@here
+      if @@here
+        late_tick if @@late_closed != 0_u64
+        step(false)
+      end
     elsif mode == THREADS
       thread_point
     end
@@ -392,15 +405,19 @@ class IyiChaos
   # the running task preempted when the strategy says so. Not before a
   # second unit exists, since a task preempted holding the only unit runs
   # again at once; not while the program is ending, nor in a fiber the
-  # runtime is moving, nor with the scheduler's lock held - none of which
-  # a program's own operation meets, since the runtime's are not points.
+  # runtime is moving, nor with the scheduler's lock or the runtime's lock
+  # held. A std loop that runs under the runtime's lock still reaches its
+  # back-edges here (`GC.stats`, std/gc.iyi), and a park there waited on
+  # the lock its own thread held: under `IYI_HEAP_STRESS` the collection
+  # at the park spun in `IyiRuntimeLock.lock` for ever (std_http_exercise,
+  # seed 3, one worker, every machine), as `thread_point` already knew.
   # A back-edge's step (*edge*) is computing, not waiting, so it does not
   # count towards PCT's spin.
   private def self.step(edge : Bool) : Nil
     return if @@units == 0_u64
     fiber = IyiScheduler.current
     return unless fiber.state == IyiFiberState::Running
-    return if IyiScheduler.exiting? || IyiSchedLock.held_here?
+    return if IyiScheduler.exiting? || IyiSchedLock.held_here? || IyiRuntimeLock.held?
     unit = unit_of(fiber)
     @@steps = @@steps &+ 1_u64
     if unit.id != @@last_unit
@@ -415,7 +432,16 @@ class IyiChaos
         @@changed = @@changed &+ 1_u64
         unit.priority = LOW &+ @@depth &- @@changed
       end
-      drop(unit) if @@streak >= SPIN_STEPS
+      if @@streak >= SPIN_STEPS
+        drop(unit)
+        # A unit that spins waits for something: a sleeper whose time has
+        # come and the poller's news join the run queue here, as an OS's
+        # timer lets them in. Without it the run queue was looked at only
+        # where a task parks, and a task spinning for a unit asleep in
+        # `sleep(1)` outranked nothing for ever (heap_crossings' ring
+        # check on tmac, seeds 1 and 2, under `IYI_HEAP_STRESS`).
+        IyiScheduler.poll_now(IyiScheduler.state)
+      end
       return unless outranked?(IyiScheduler.state, unit)
     else
       return unless draw % @@odds == @@odds &- 1_u64
@@ -450,6 +476,7 @@ class IyiChaos
   # it was the simulation's, so `IyiWorkers.preempted` does nothing more.
   def self.back_edge : Bool
     return false unless @@mode == SIMULATED && @@here
+    late_tick if @@late_closed != 0_u64
     return true if @@units == 0_u64
     left = @@edge_left
     if left > 1_u64
@@ -596,6 +623,52 @@ class IyiChaos
 
   def self.forced_turn? : Bool
     @@mode == THREADS && draw % @@odds == @@odds &- 1_u64
+  end
+
+  # ── A thread that links itself late ──────────────────────────────────
+  #
+  # A thread started on darwin, and on Linux when libc made it, links and
+  # counts itself only once it runs (`IyiThread.run`): until then only
+  # `IyiThread.others_started?` sees it, and how long that lasts is the
+  # OS's choice, not the seed's - on tmac the threads'-list-only copy of
+  # `Mutex.alone?` deadlocked on seeds 5-7 and was answered on 1-4 and 8.
+  # With `IYI_CHAOS_LATE_THREADS` set, a thread the simulated thread
+  # starts waits to link itself until that thread has nothing left to run
+  # (`at_idle`, before the scheduler waits) or has passed `LATE_STEPS`
+  # points and back-edges since: the latest an OS lets it in, on every
+  # seed (bench/std_mutex_exercise.sh). The step bound keeps a program
+  # that spins for the thread from waiting for ever, as no OS keeps a
+  # thread out for ever. The word is an `Atomic`'s, read and written here
+  # only, the runtime's, so not a point; the simulated thread is its only
+  # writer.
+  private def self.late_word : Pointer(Atomic(UInt64))
+    Pointer(Atomic(UInt64)).new(pointerof(@@late_closed).address)
+  end
+
+  # In `IyiThread.start`, before the thread exists.
+  def self.hold_start : Nil
+    return unless @@late_threads && @@mode == SIMULATED && @@here
+    @@late_steps = 0_u64
+    late_word.value.set(1_u64)
+  end
+
+  # On the started thread, before it links itself: nothing here touches
+  # the heap, which no stop scans for this thread yet.
+  def self.wait_late : Nil
+    return unless @@late_threads
+    while late_word.value.get != 0_u64
+      IyiThread.yield_cpu
+    end
+  end
+
+  # The simulated thread has nothing to run: a thread held is let in.
+  def self.at_idle : Nil
+    late_word.value.set(0_u64) if @@late_closed != 0_u64 && @@mode == SIMULATED && @@here
+  end
+
+  private def self.late_tick : Nil
+    @@late_steps = @@late_steps &+ 1_u64
+    late_word.value.set(0_u64) if @@late_steps >= LATE_STEPS
   end
 
   # ── The end ──────────────────────────────────────────────────────────

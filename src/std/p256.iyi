@@ -674,7 +674,6 @@ struct P256Point
   # from its row by masks, all eight touched, its sign applied by a mask;
   # a zero digit adds the identity, as the complete formulas allow.
   def self.base_mult(k : P256Num) : P256Point
-    table = P256BaseTable.get
     digits = uninitialized UInt64[64]
     e = pointerof(digits).as(Pointer(UInt64))
     # A nibble is 0 to 15 and the carry in 0 or 1, so nibble + 8 is never
@@ -692,16 +691,16 @@ struct P256Point
     acc = P256Point.identity
     i = 1
     while i < 64
-      acc = acc + P256BaseTable.pick(table, i >> 1, e[i])
+      acc = acc + P256BaseTable.pick(i >> 1, e[i])
       i = i + 2
     end
     acc = acc.double.double.double.double
     i = 0
     while i < 64
-      acc = acc + P256BaseTable.pick(table, i >> 1, e[i])
+      acc = acc + P256BaseTable.pick(i >> 1, e[i])
       i = i + 2
     end
-    acc + P256BaseTable.top(table, carry)
+    acc + P256BaseTable.top(carry)
   end
 
   # [k]P for a secret k below n: 64 windows of four bits from the top,
@@ -783,19 +782,19 @@ end
 # (m + 1) 256^j G, and [2^256]G after them for the recoding's carry. It
 # holds multiples of G, which is public, so nothing in it is secret; only
 # which entry is read is, and that is chosen by masks. The table is worked
-# out once, the first time it is wanted, and kept: 224 additions and 256
-# doublings, the 257 Z inverted together by Montgomery's trick (one
-# inversion and three products a point). Two threads that reach it first
-# both work it out and store the same table.
+# out once, by the class variable's initializer as the module starts, and
+# kept: 224 additions and 256 doublings, the 257 Z inverted together by
+# Montgomery's trick (one inversion and three products a point). Only
+# `pick` and `top` read it, so no function answers it.
 struct P256BaseTable
   ENTRIES = 257
 
-  @@table = Pointer(P256Num).new(0_u64)
+  @[SafeReach("built whole by its initializer as the module starts, before any parallel task; then only read")]
+  @@table : Pointer(P256Num) = build
   # 0, read by `pick` through an atomic load (see there).
   @@opaque = Atomic(UInt64).new(0_u64)
 
-  def self.get : Pointer(P256Num)
-    return @@table if @@table.address != 0_u64
+  private def self.build : Pointer(P256Num)
     f = P256Modulus.field
     points = Pointer(P256Point).malloc(ENTRIES.to_u64)
     p = P256Point.base
@@ -835,7 +834,6 @@ struct P256BaseTable
       table[2 * i + 1] = f.mul(point.y, zi)
       i = i - 1
     end
-    @@table = table
     table
   end
 
@@ -848,14 +846,14 @@ struct P256BaseTable
   # jump each (`xor`, `dec`, `js`), a branch on the nonce's digits, and
   # bench/ct_timing.sh put P-256 signing at |t| = 16 to 24 over 100,000
   # signatures, fixed message against random.
-  def self.pick(table : Pointer(P256Num), row : Int32, digit : UInt64) : P256Point
+  def self.pick(row : Int32, digit : UInt64) : P256Point
     f = P256Modulus.field
     zero = @@opaque.get
     negative = digit.unsafe_shr(63) ^ zero
     index = (digit ^ (0_u64 &- negative)) &+ negative
     x = P256Num.zero
     y = P256Num.zero
-    base = table + (row * 16).to_i64
+    base = @@table + (row * 16).to_i64
     j = 1
     while j <= 8
       bit = ((j.to_u64 ^ index) &- 1_u64).unsafe_shr(63) ^ zero
@@ -869,8 +867,9 @@ struct P256BaseTable
   end
 
   # [2^256]G when *carry* is 1, the identity when it is 0, by masks.
-  def self.top(table : Pointer(P256Num), carry : UInt64) : P256Point
+  def self.top(carry : UInt64) : P256Point
     f = P256Modulus.field
+    table = @@table
     P256Point.new(P256Num.choose(carry, table[512], P256Num.zero), P256Num.choose(carry, table[513], f.one),
       P256Num.choose(carry, f.one, P256Num.zero))
   end

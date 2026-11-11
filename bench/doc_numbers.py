@@ -169,13 +169,25 @@ def measured() -> dict[str, int]:
 CEILING = 4_689
 
 
+# The runtime's files that `prelude_library_lines` leaves out whole: the
+# scheduler and kernel thread, the float text, the chaos scheduler, and the
+# collector's partitioned heap and its verifier (`-Dheap_partitions`,
+# `-Dheap_verify`), which are the collector as much as the memory layer in
+# `prelude.iyi` is.
+RUNTIME_FILES = {
+    "concurrency.iyi", "thread.iyi", "float.iyi", "chaos.iyi", "chaos_points.iyi",
+    "heap_partition.iyi", "heap_verify.iyi",
+}
+
+
 def prelude_library_lines() -> int:
     """The figure SPEC.md holds to the 4,689-line ceiling: the library
     without any platform's floor.
 
     Everything under `src/iyi/` except two things. First, what Crystal's
     0.1.0 core got from outside its own count - the allocator and collector
-    (Boehm's libgc; the block between two marks in prelude.iyi), the
+    (Boehm's libgc; the block between two marks in prelude.iyi, and the
+    partitioned heap's `heap_partition.iyi` and `heap_verify.iyi`), the
     scheduler and kernel thread (pthreads and libevent, beyond the 183 lines
     the ceiling already carries for fibers), and the float printer and parser
     (libc's printf and strtod). The chaos scheduler, which drives that
@@ -198,11 +210,10 @@ def library_with_floor_lines() -> int:
     """The library with every platform's floor still in it: the number a
     reader counts by opening the files. See `prelude_library_lines`."""
     files = sorted((REPO / "src/iyi").glob("*.iyi"))
-    outside = {"concurrency.iyi", "thread.iyi", "float.iyi", "chaos.iyi", "chaos_points.iyi"}
     total = 0
     for path in files:
         lines = path.read_text().splitlines()
-        if path.name in outside:
+        if path.name in RUNTIME_FILES:
             continue
         if path.name == "prelude.iyi":
             start = next(i for i, l in enumerate(lines) if l.startswith("# ── The memory layer"))
@@ -244,10 +255,9 @@ def platform_floor_lines(only: str | None = None) -> int:
     *only* narrows it to the arms naming one flag, for the breakdown.
     """
     files = sorted((REPO / "src/iyi").glob("*.iyi"))
-    outside = {"concurrency.iyi", "thread.iyi", "float.iyi", "chaos.iyi", "chaos_points.iyi"}
     total = 0
     for path in files:
-        if path.name in outside:
+        if path.name in RUNTIME_FILES:
             continue
         lines = path.read_text().splitlines()
         if path.name == "prelude.iyi":

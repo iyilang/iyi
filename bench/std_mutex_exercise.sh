@@ -44,6 +44,16 @@ trap 'rm -rf "$WORK"' EXIT
 status=0
 export IYI_PATH="$REPO/src${PSEP}$REPO/samples/iyi"
 
+# std_copy_dir <name>: $WORK/<name>/std made for a patched module, with the
+# prelude's tree beside it. The compiler takes a file for std's only where
+# its directory's parent holds `iyi/prelude.iyi` (`ShareReach#std_at?`), so
+# a std copy alone was a program's module, held to a program's rules.
+std_copy_dir() {
+  rm -rf "$WORK/$1"
+  mkdir -p "$WORK/$1/std"
+  cp -R "$REPO/src/iyi" "$WORK/$1/"
+}
+
 # A broken lock can wait forever; where `timeout` exists, a run that does
 # is ended and counted as caught.
 LIMIT=""
@@ -195,9 +205,12 @@ echo "== a wait beside a thread that has yet to run is no deadlock"
 # `IyiThread.start` found one thread with nothing else to run on it and
 # panicked "deadlock" (`Mutex.alone?`): on tmac (macOS 26.6, M2 Pro) the
 # exercise built `-Diyi_chaos`, one worker, did so on every seed 1-8, in the
-# wait for a write from another thread. Built so here, where the waiting
-# task reaches the check before the thread can run; the copy that counts
-# the list alone must be caught where threads link themselves.
+# wait for a write from another thread. Built so here, and run with
+# `IYI_CHAOS_LATE_THREADS`, which holds a thread that links itself until
+# the simulated thread has nothing to run: the waiting task reaches the
+# check before the thread is on the list, on every seed, and the copy that
+# counts the list alone must be caught on every seed where threads link
+# themselves. Left to the OS, tmac caught it on seeds 5-7 of 1-8.
 cat >"$WORK/starting.iyi" <<'IYI'
 module starting
 
@@ -220,7 +233,7 @@ starting_runs() { # starting_runs <name> <search path>: sets answered, deadlocke
     return
   fi
   for seed in 1 2 3 4 5 6 7 8; do
-    IYI_CHAOS=$seed IYI_WORKERS=1 $LIMIT "$WORK/$1" >"$WORK/$1-$seed.out" 2>&1
+    IYI_CHAOS=$seed IYI_WORKERS=1 IYI_CHAOS_LATE_THREADS=1 $LIMIT "$WORK/$1" >"$WORK/$1-$seed.out" 2>&1
     if grep -q "answered 9" "$WORK/$1-$seed.out"; then
       answered="$answered $seed"
     elif grep -q "Mutex#wait_for: deadlock" "$WORK/$1-$seed.out"; then
@@ -240,23 +253,26 @@ fi
 if [ -z "$PY" ]; then
   echo "  no python3 on this machine, so the threads'-list-only proof is unmeasured"
 else
-  rm -rf "$WORK/listonly" && mkdir -p "$WORK/listonly/std"
+  # The patched module's directory is not the binary's name: `-o
+  # $WORK/listonly` over a directory of that name ran nothing (darwin:
+  # "Permission denied" on every seed), so the copy was never proven.
+  std_copy_dir listonly-std
   if ! "$PY" - <<PY
 from pathlib import Path
 src = Path("$REPO/src/std/mutex.iyi").read_text()
 old = "        return false if IyiThread.others_started?\n"
 if src.count(old) != 1:
     raise SystemExit("patch site missing")
-Path("$WORK/listonly/std/mutex.iyi").write_text(src.replace(old, "        return false if IyiThread.program_threads > 1_u64\n", 1))
+Path("$WORK/listonly-std/std/mutex.iyi").write_text(src.replace(old, "        return false if IyiThread.program_threads > 1_u64\n", 1))
 PY
   then
     echo "  the threads'-list-only patch did not apply"
     status=1
   else
-    starting_runs listonly "$WORK/listonly${PSEP}$REPO/src${PSEP}$REPO/samples/iyi"
+    starting_runs listonly "$WORK/listonly-std${PSEP}$REPO/src${PSEP}$REPO/samples/iyi"
     case "$(uname -s)" in
       Darwin)
-        if [ -n "$deadlocked" ] && [ -z "$answered" ]; then
+        if [ -n "$deadlocked" ] && [ -z "$answered$other" ]; then
           echo "  a deadlock check counting the threads' list alone is caught: deadlock on seeds$deadlocked"
         else
           echo "  a deadlock check counting the threads' list alone was not caught on every seed: answered on${answered:- none}, deadlock on${deadlocked:- none}, otherwise on${other:- none}"
@@ -265,6 +281,10 @@ PY
         ;;
       *)
         echo "  a deadlock check counting the threads' list alone, here where \`start\` lists the thread itself: answered on${answered:- none}, deadlock on${deadlocked:- none} (caught on darwin)"
+        if [ -n "$other" ]; then
+          echo "  ... and neither on${other}: the copy did not run as built"
+          status=1
+        fi
         ;;
     esac
   fi
@@ -277,8 +297,7 @@ echo "== proving the checks can fail when the module is broken"
 # replaced, at the check that names <phrase>, or, given `hangs` as the
 # phrase, by running past the time limit.
 prove_broken() {
-  rm -rf "$WORK/patched"
-  mkdir -p "$WORK/patched/std"
+  std_copy_dir patched
   if [ -z "$PY" ]; then
     echo "  no python3 on this machine, so the $1 proof is unmeasured"
     return

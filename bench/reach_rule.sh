@@ -46,6 +46,16 @@
 #      (`allruntime`: the `Hash`'s default block), no parameter a literal
 #      captures bound (`captured`: the kept literal), and no std def
 #      entered (`callbacks`: the `Hash`'s default block).
+#   5. A std module's claims are proven once, over all of its code, and
+#      the answer is reused by every importer (`reach_module_proof.cr`).
+#      In a std tree of the test's own: a table read by a probed def is
+#      stored as proven for every importer, and an importer whose subclass
+#      overrides the method the module hands it to is proven again and
+#      refused; a table a block-taking def writes is not stored, so a unit
+#      calling that def is refused. Broken copies: `modulereach` stores the
+#      second table anyway, and the unit's program compiles on it;
+#      `modulepass` takes the first past the override, and so does that
+#      program.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -433,5 +443,131 @@ still_refused creation r6_defer 'reaches `BOX : R6Defer::Box` (not Share)'
 caught allruntime r6_hash
 caught captured r6_captured
 caught callbacks r6_hash
+
+# ── 5. A std module's claims, proven once and reused ───────────────────────
+step "a std module's claims are proven once, over all of its code, and reused"
+# Two modules of a std tree of the test's own (std is a module whose tree
+# holds the prelude), each with a table claimed safe. `reachtable` also
+# has a def that writes its table and takes a block, which no
+# definition-site probe calls; `reachpass` hands its table to a method of
+# a class the importer may inherit.
+mkdir -p mystd/iyi mystd/std
+cp "$REPO"/src/iyi/*.iyi mystd/iyi/
+cat > mystd/std/reachtable.iyi <<'IYI'
+module std/reachtable
+
+@[SafeReach("filled at module start, then only read")]
+TABLE = [3, 1, 2]
+TABLE.sort_in_place
+
+pub def lowest : Int32
+  TABLE[0]
+end
+
+pub def each_grown(& : Int32 -> Nil) : Nil
+  TABLE << TABLE.size
+  yield TABLE.size
+end
+IYI
+cat > mystd/std/reachpass.iyi <<'IYI'
+module std/reachpass
+
+@[SafeReach("filled at module start, then only read")]
+NAMES = ["a", "b"]
+
+pub class Sink
+  def take(names : Array(String)) : Int32
+    names.size
+  end
+end
+
+pub def feed(sink : Sink) : Int32
+  sink.take(NAMES)
+end
+IYI
+cat > lowest.iyi <<'IYI'
+module lowest
+
+import std/reachtable::{lowest}
+
+group do |g|
+  g.spawn(unit: :new) { lowest }
+end
+IYI
+cat > grown.iyi <<'IYI'
+module grown
+
+import std/reachtable::{each_grown}
+
+group do |g|
+  g.spawn(unit: :new) { each_grown { |n| puts n } }
+end
+IYI
+cat > fed.iyi <<'IYI'
+module fed
+
+import std/reachpass::{Sink, feed}
+
+group do |g|
+  g.spawn(unit: :new) { feed(Sink.new) }
+end
+IYI
+cat > spilled.iyi <<'IYI'
+module spilled
+
+import std/reachpass::{Sink, feed}
+
+class Spill < Sink
+  def take(names : Array(String)) : Int32
+    names << "x"
+    names.size
+  end
+end
+
+group do |g|
+  g.spawn(unit: :new) { feed(Spill.new) }
+end
+IYI
+# in_std CACHE NAME [VAR=VALUE...]: NAME.iyi built against the test's std,
+# with its own compiler cache, where a module's answer is stored.
+in_std() {
+  local cache="$1" name="$2"
+  shift 2
+  env IYI_PATH="$WORK/mystd${PSEP}$REPO/src" IYI_CACHE_DIR="$WORK/$cache" "$@" \
+    "$IYI" build --no-codegen -o "$name" "$name.iyi" > "$name-$cache.log" 2>&1
+}
+answers() { cat "$WORK/$1"/reach-* 2> /dev/null; }
+if ! in_std sound lowest; then
+  echo "lowest.iyi was refused:"; cat lowest-sound.log; exit 1
+fi
+if ! answers sound | grep -qxF 'iyi reach verdict 2' || ! answers sound | grep -q "^dormant	each_grown	"; then
+  echo "the proof of std/reachtable stored no answer, or stored TABLE without each_grown, which it never read, as dormant:"; answers sound; exit 1
+fi
+echo "  lowest.iyi compiles; std/reachtable's answer holds TABLE only for an importer that never types each_grown, which writes it and no probe can call"
+if in_std sound grown || ! grep -qF 'is refused: nothing proves every thread may reach it safely' grown-sound.log || ! grep -qF 'TABLE' grown-sound.log; then
+  echo "grown.iyi, whose unit calls each_grown, was not refused for TABLE:"; cat grown-sound.log; exit 1
+fi
+echo "  refused: grown.iyi, whose unit calls each_grown"
+if ! in_std sound fed; then
+  echo "fed.iyi was refused:"; cat fed-sound.log; exit 1
+fi
+if ! answers sound | grep -q '^state.*NAMES'; then
+  echo "the proof of std/reachpass did not store NAMES:"; answers sound; exit 1
+fi
+echo "  fed.iyi compiles, and std/reachpass's answer proves NAMES for every importer"
+if in_std sound spilled || ! grep -qF 'is refused: nothing proves every thread may reach it safely' spilled-sound.log || ! grep -qF 'NAMES' spilled-sound.log; then
+  echo "spilled.iyi, whose subclass writes what feed hands it, was not refused for NAMES:"; cat spilled-sound.log; exit 1
+fi
+echo "  refused: spilled.iyi, the stored answer set aside for its override of Sink#take"
+if in_std broken-cover lowest IYI_SPAWN_BROKEN=modulereach && in_std broken-cover grown IYI_SPAWN_BROKEN=modulereach; then
+  echo "  caught: with IYI_SPAWN_BROKEN=modulereach, grown.iyi compiles on the answer lowest.iyi's build stored"
+else
+  echo "the broken copy modulereach was not caught:"; cat lowest-broken-cover.log grown-broken-cover.log; exit 1
+fi
+if in_std broken-pass fed && in_std broken-pass spilled IYI_SPAWN_BROKEN=modulepass; then
+  echo "  caught: with IYI_SPAWN_BROKEN=modulepass, spilled.iyi compiles on the answer fed.iyi's build stored"
+else
+  echo "the broken copy modulepass was not caught:"; cat fed-broken-pass.log spilled-broken-pass.log; exit 1
+fi
 
 echo "reach_rule: every refusal holds, and every broken copy is caught"

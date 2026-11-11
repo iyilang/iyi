@@ -3144,6 +3144,27 @@ an `UnsafeReach`, or writes only in the module's own initialiser (III.4.15,
 III.4.15 moves it, since where it runs depends on the claims being
 proven.
 
+**A std module's claims are proven once.** Proving a std claim walked
+every callable of the program importing the module - 0.24 s of a 2.1 s
+build of `bench/web_cores.iyi` on an Apple M2 Pro - and every importer
+reached the same answer about the same code. So a build that proves a std
+module's claims stores, in its compiler cache, the ones that hold for every
+importer, keyed by the bytes of the module, of every module it imports and
+of the prelude, by the compiler and by the flags; a build whose key finds
+them walks nothing for them. A claim is stored only when the proof covered
+every function of the module and not just the ones the program calls:
+each def written in the module that names the state was read, through its
+definition-site probe when nothing calls it, and is typed the same in any
+importer (it takes no block, holds no macro code, has no generic owner and
+no parameter another program's type may fill save through a subclass); no
+proc call is handed the state and no def answering it takes a block; and
+each call the state passes through runs a def of the module, of a module
+it imports or of the prelude. An importer's own defs are asked again: an
+override of such a call's method on a subtype of its receiver, or an
+overload written on the receiver or an ancestor outside those files, and
+the claim is proven again in that program (`bench/reach_rule.sh`, step 5,
+with the broken copies `modulereach` and `modulepass`).
+
 This is Rust's `Send`/`Sync` **without** ownership or borrowing, and it is worth
 being exact about what that buys and what it does not. It rules out data races,
 because anything two tasks can both reach is either immutable or synchronised.

@@ -138,6 +138,11 @@ module Iyi
 
     property! owner : Type
     property! original_owner : Type
+    # iyi: whether a call has typed this def, as written, at least once: a
+    # std module's stored proof leaves out a def that names claimed state
+    # and that the proving program never typed, and its claim holds in a
+    # program that has not typed it either (`ReachProof#module_proven?`).
+    property? iyi_instantiated = false
     property vars : MetaVars?
     property yield_vars : Array(Var)?
     property previous : DefWithMetadata?

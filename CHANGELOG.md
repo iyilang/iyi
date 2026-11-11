@@ -21,6 +21,19 @@
 - **`bench/ci_plan_exercise.py`, in the docs job**, holds the planner to
   that on this tree and on a workflow of its own. Pointed at the planner
   before this change it fails the three checks above.
+- **`bench/gates_reachable.py` counts what is run, not what is named.** A
+  name in a comment, a message, a docstring or a list of strings was a run,
+  so thirteen measurement scripts were "reached" through
+  `measured_numbers.py`'s list of what it cannot re-measure, and three tools
+  through the gate's own list of them; and `.iyi` programs were not looked
+  at. A file is run now when a job or a Makefile runs it, or a script that
+  is itself run does - by a command on its line, a loop or variable a
+  command uses, or a function that runs one - and that covers every
+  `.sh`, `.py` and `.iyi` directly under bench/: 398 of 414 are run, and
+  the sixteen that are not are named as tools with what each is for
+  (`machine_probe.py`, and the instruments `measured_numbers.py` holds the
+  docs' quotes to). On a copy of the tree with a gate named only in a
+  comment, the gate before this counted it reached; this one does not.
 
 ## 0.21.0 — 2026-11-09
 

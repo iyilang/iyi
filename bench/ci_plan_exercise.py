@@ -10,14 +10,17 @@ ran `windows-std-platforms` - which never runs it - and passed. And it did
 not see a gate another script runs: 483 of the 590 files under bench/ were
 run by no job it knew of, so a change to a module exercise ran none of them.
 
-Two halves. The first runs the planner as CI does, on this tree, and names
+Three parts. The first runs the planner as CI does, on this tree, and names
 the jobs each change must and must not select. It takes the planner's path,
-so it can be pointed at an older one: the planner before this fix fails
-the first three checks, and has no `Reach` for the second half. The second builds a
-workflow and a bench directory of its own, for the shapes this tree only
-has one of: a sourced helper, a glob, a variable in a name, a program's
+so it can be pointed at an older one: the planner before this fix fails the
+first three checks, and has no `Reach` for the second part. The second
+builds a workflow and a bench directory of its own, for the shapes this tree
+only has one of: a sourced helper, a glob, a variable in a name, a program's
 template, a scratch glob that must not reach everything, a name in a
-comment above the next job.
+comment above the next job. The third holds `bench/gates_reachable.py`'s
+stricter reading - what a line *runs*, not what it names - to a command, a
+comment, a message, a `$( )` in quotes, a loop, a function and Python's
+strings, reads and subprocesses.
 """
 import importlib.util
 import os
@@ -134,6 +137,34 @@ else:
     selected, reason = planner.plan(planner.parse_jobs(workflow), "pull_request", "", ["bench/std_one.eiy"], bench)
     check("a plan of one bench file is its jobs, what they need, and the docs gates",
           selected == {"alpha", "docs"} and reason.startswith("only bench files changed"), f"{reason}: {sorted(selected)}")
+
+print()
+print("== and the reach gate, which asks the stricter question: what runs it")
+
+# `bench/gates_reachable.py` reads names the planner's way and then asks
+# whether a line runs what it names. A planner may choose too many jobs; that
+# gate may not count too much as run, or an unrun gate passes it. It counted
+# a comment, a message and a list of strings once.
+spec = importlib.util.spec_from_file_location("gates_reachable_under_test", ROOT / "bench" / "gates_reachable.py")
+gates = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(gates)
+names = ["x.sh", "y.py", "z.iyi", "std_a_exercise.sh", "std_b_exercise.sh"]
+for text, python, expected, what in [
+    ("bash bench/x.sh\n", False, {"x.sh"}, "a command"),
+    ("# bash bench/x.sh\n", False, set(), "a comment"),
+    ('echo "  then bash bench/x.sh by hand"\n', False, set(), "a message"),
+    ('out="$("$PY" "$REPO/bench/y.py" arg)"\n', False, {"y.py"}, "a command inside a quoted $( )"),
+    ('if ! "$IYI" build -o p "$REPO/bench/z.iyi"; then\n', False, {"z.iyi"}, "a build after `if !`"),
+    ('for s in "$REPO"/bench/std_*_exercise.sh; do\n  bash "$s"\ndone\n', False,
+     {"std_a_exercise.sh", "std_b_exercise.sh"}, "a loop's files, run through its variable"),
+    ('for s in "$REPO"/bench/std_*_exercise.sh; do\n  echo "$s"\ndone\n', False, set(), "a loop that only prints"),
+    ('check() {\n  "$IYI" run "$1"\n}\ncheck "$REPO/bench/z.iyi"\n', False, {"z.iyi"}, "a call of a function that runs"),
+    ('LISTED = ["x.sh", "y.py"]\n', True, set(), "a list of strings"),
+    ('source = (REPO / "bench/y.py").read_text()\n', True, set(), "a file read for its text"),
+    ('subprocess.run([sys.executable, str(BENCH / "y.py")])\n', True, {"y.py"}, "a subprocess"),
+]:
+    found = gates.runs(text, names, python)
+    check(f"{what} -> {sorted(expected) or 'nothing'}", found == expected, f"got {sorted(found)}")
 
 print()
 if failures:

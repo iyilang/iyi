@@ -241,6 +241,15 @@ if [ "$PART" = all ] || [ "$PART" = cross ]; then
         fi
         continue
       fi
+      # tssh's compiler links an LLVM with the x86 and aarch64 back ends
+      # only, and says so for wasm32-wasi with or without the flag: the
+      # machine cannot build that target, which says nothing of the flag.
+      if [ "$built" -eq 0 ] && [ "$target" = wasm32-wasi ] &&
+         [ "$(grep -c '^Error: ' "$out.log")" -eq 1 ] &&
+         grep -q "^Error: wasm32-unknown-wasi needs LLVM's WebAssembly back end" "$out.log"; then
+        echo "  $label: skipped, this compiler's LLVM has no WebAssembly back end"
+        continue
+      fi
       if [ "$built" -eq 0 ]; then
         echo "  $label: cross-compile failed"
         sed -n '1,12p' "$out.log"

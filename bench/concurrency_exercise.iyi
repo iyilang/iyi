@@ -1171,6 +1171,20 @@ end
 
 cancelled_select_beats
 
+# Under the stress (`IYI_HEAP_STRESS=N`, a `-Dheap_verify` build: a local
+# collection at every Nth chaos point, and at every park when N is 1, each
+# with the verifier's scan of every heap word) 16b's and 16d's loops cost
+# the square of their length: 16d's 400,000 selects would take about
+# 8,000 s at stress 1 on tmac, against bench/heap_verify_matrix.sh's
+# limit. Their counts are cut there alone, each still long enough for its
+# broken copy to fail its check unchanged (the numbers are beside each);
+# unstressed runs keep theirs.
+{% if flag?(:heap_verify) %}
+  heap_stress = IyiHeapVerify.stress
+{% else %}
+  heap_stress = 0_u64
+{% end %}
+
 # ── 16b. A ring of tasks passing a value allocates nothing per message ──
 #
 # Every park took a node from the heap - a receiver's and, where the
@@ -1251,15 +1265,23 @@ cancelled_select_beats
 
   # What starting costs is the same for any number of messages, so the
   # difference between two lengths is what the messages cost.
+  # Under the stress 10,000 messages and round trips, not 100,000: the
+  # check is any byte a message, and the copies that take a node from the
+  # heap for every park still fail it there, 45 bytes a message and 104 a
+  # round trip at stress 1 and 64 (Linux, tmac; bench/concurrency_exercise.sh's
+  # fresh_sender and fresh_waiter, seed 2, false words). 16b then takes
+  # 0.03 s on Linux and 0.4 s on tmac at stress 1 (seeds 2 and 4, false
+  # words).
+  ring_messages = heap_stress != 0_u64 ? 10000 : 100000
   short_ring = ring_bytes(8, 1000)
-  long_ring = ring_bytes(8, 101000)
-  per_pass = long_ring > short_ring ? (long_ring - short_ring) // 100000_u64 : 0_u64
+  long_ring = ring_bytes(8, 1000 + ring_messages)
+  per_pass = long_ring > short_ring ? (long_ring - short_ring) // ring_messages.to_u64 : 0_u64
   fail("ring: #{per_pass} bytes a message around a ring, where a message allocates nothing") if per_pass > 0_u64
   short_pong = ping_pong_bytes(1000)
-  long_pong = ping_pong_bytes(101000)
-  per_round = long_pong > short_pong ? (long_pong - short_pong) // 100000_u64 : 0_u64
+  long_pong = ping_pong_bytes(1000 + ring_messages)
+  per_round = long_pong > short_pong ? (long_pong - short_pong) // ring_messages.to_u64 : 0_u64
   fail("ring: #{per_round} bytes a round trip between two tasks, where a round trip allocates nothing") if per_round > 0_u64
-  puts "100000 messages around a ring and 100000 round trips allocated nothing for them"
+  puts "#{ring_messages} messages around a ring and #{ring_messages} round trips allocated nothing for them"
 {% end %}
 
 # ── 16c. A send node is handed out again only once its sender has read it ─
@@ -1344,11 +1366,20 @@ puts "a parked sender's receipt survived the next sender's park"
     grown
   end
 
-  select_grown = select_kept_bytes(400000)
+  # Under the stress fewer selects, against the same 256 KiB: 32,000 at
+  # stress 1, 38 s on Linux and 51 s on tmac (seeds 2 and 4, false
+  # words), and 128,000 above it, 3-8 s on Linux and 14 s on tmac at
+  # stress 64. A select whose losing receive arm stays in its queue still
+  # fails there: 869 / 876 KiB more kept at stress 1 and 1,490 / 807 KiB at
+  # stress 64 (Linux / tmac, seed 2, false words). At stress 64 32,000
+  # were too few: the copy kept under 256 KiB in the whole program on
+  # tmac.
+  select_rounds = heap_stress == 0_u64 ? 400000 : (heap_stress == 1_u64 ? 32000 : 128000)
+  select_grown = select_kept_bytes(select_rounds)
   if select_grown > 256_u64 * 1024_u64
-    fail("select: 200000 selects beside an idle channel left #{select_grown // 1024_u64} KiB more kept")
+    fail("select: #{select_rounds // 2} selects beside an idle channel left #{select_grown // 1024_u64} KiB more kept")
   end
-  puts "200000 selects beside an idle channel kept under 256 KiB more"
+  puts "#{select_rounds // 2} selects beside an idle channel kept under 256 KiB more"
 {% end %}
 
 # ── 16e. A channel keeps no value it has handed out ─────────────────────

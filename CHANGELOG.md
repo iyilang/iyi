@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **`iyi run`'s exit is the program's, when Windows holds its executable a
+  moment past the exit.** The runner deleted its program in a cleanup that
+  raised when Windows refused - "being used by another process" - and the
+  refusal replaced the program's verdict: `std_http_latency.iyi` printed
+  ALL CHECKS PASSED and `iyi run` exited 1 (CI job 130381353157). The
+  delete is asked again for about a second, and a file still held then is
+  left for the sweep that takes an hour-old runner's leftovers. Reproduced
+  with a reader holding the program until 300 ms after it exits: exit 1
+  and the file left before, exit 0 and the file deleted now;
+  `bench/verbs_exercise.sh` holds both, and a 2.5 s hold, on Windows.
+
 ## 0.21.0 — 2026-11-09
 
 **A spawn has one verb and names its unit, and a plain `spawn` runs in

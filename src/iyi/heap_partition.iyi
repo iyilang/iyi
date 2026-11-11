@@ -1439,6 +1439,16 @@ class IyiHeap
   def self.local_collect(record : UInt64, running : IyiFiber?, takeover : Bool, idle : Bool) : Bool
     return false if LibIyiGCTable.__iyi_marking != 0_u8
     return false if read64(record &+ REC_STATE) & REC_DETACHED != 0
+    # The dead stack under this frame zeroed, as `IyiMark.collect` does
+    # before a global collection: the collection's frames are laid over
+    # what the fiber's deeper calls left there, and a slot they never write
+    # kept that word in a live frame for as long as the collection ran. A
+    # global collection that stopped the thread there read it as a root:
+    # under `IYI_HEAP_STRESS=1` (a collection at every park) a word the
+    # channel's frames had left named 16e's 64 MB string, and
+    # concurrency_exercise kept 61 MiB in 3 runs of 3 (Linux, seed 2, 4
+    # workers), in none of 4 with this.
+    IyiRoots.clear_dead_stack
     # Zeroed first: x86-64's spill writes 6 of the 12 words (8 on
     # Windows), and the rest held whatever an earlier frame left there,
     # which the stack scan below read as roots - a stale word in

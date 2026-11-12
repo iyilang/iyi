@@ -1616,12 +1616,16 @@
 
   # ── takeover ──────────────────────────────────────────────────────────
 
+  # The junk until half the budget is owed, whatever the floor: an idle
+  # worker takes a parked unit that owes a quarter (`IyiHeap.take_over_owing`),
+  # and 1,500 nodes owed less than that of a 512 KiB floor.
   def takeover_task(t : Int64, go : Channel(Int64), ready : Channel(UInt64)) : Int64
     base = 8000000000_i64 &+ t &* 10000_i64
     keep = build(base, 300, 0)
+    record = IyiHeap.current_record
     junk : Node? = nil
     i = 0
-    while i < 1500
+    while i < 1500 || (i < 1000000 && IyiHeap.read64(record &+ IyiHeap::REC_DEBT) &* 2_u64 < IyiHeap.budget_of(record))
       junk = Node.new(i.to_i64, i % 50 == 0 ? nil : junk)
       i = i + 1
     end

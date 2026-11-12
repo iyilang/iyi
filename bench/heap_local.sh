@@ -319,11 +319,12 @@ if [ "$PART" = all ] || [ "$PART" = broken ]; then
     '{ if (sub(/^    thread_run\(table, index, arena, run, n, frontier\)$/, "    thread_run(table, index, arena, run, n, true)")) found = 1; print } END { if (!found) exit 3 }' \
     heap_partition.iyi
 
-  # A run of a dead unit to the pool with its `LOCAL` chunks left carved:
-  # a stale word naming one passes the collector's root test, and a
-  # global mark would keep what the dead chunk names.
+  # A run of a dead unit to the pool with its `LOCAL` chunks left carved
+  # (freed on a run handed to the shared heap alone): a stale word naming
+  # one passes the collector's root test, and a global mark would keep
+  # what the dead chunk names.
   prove_fails "a pooled run's dead chunks left carved" nostale "stale:" \
-    '/^          free_locals_in\(arena, run, n\)$/ { found = found + 1; next } /^            drain_run\(index, arena, run, n\)$/ { print "            free_locals_in(arena, run, n)"; found = found + 1 } { print } END { if (found != 2) exit 3 }' \
+    '/^          free_locals_in\(arena, run, n\)$/ { found = found + 1; next } { print } found == 1 && /^          else$/ { print "            free_locals_in(arena, run, n)"; found = found + 1 } END { if (found != 2) exit 3 }' \
     heap_partition.iyi
 
   # The publication walk's frontier test made of the word, not the

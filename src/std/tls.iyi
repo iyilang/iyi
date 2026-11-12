@@ -257,9 +257,14 @@
 # is unexpected_message, a record that does not open bad_record_mac.
 # What the guard does not do is in its own comment: chiefly, a client
 # that sends a request again after a broken connection runs it twice, so
-# only what is safe twice may come early. A client given `early_data:`
-# sends it with the ClientHello when its ticket allows that much,
-# EndOfEarlyData after the server's flight when it was taken, and
+# only what is safe twice may come early. Nor is early data that was
+# passed over gone: the client sends it again after the handshake, where
+# `read` reads it, and when it was passed over because a copy of its
+# ClientHello had been taken, the server has then had it twice;
+# `TlsServer#early_declined?` says a connection is one where that may be.
+# A client given `early_data:` sends it with the ClientHello when its
+# ticket allows that much, EndOfEarlyData after the server's flight when it
+# was taken, and
 # otherwise sends it after the handshake - unless the server chose
 # another protocol than the ticket's, for which section 4.2.10 forbids
 # that; `TlsClient#early_data` says which. std/http takes and sends none.
@@ -513,7 +518,8 @@ pub enum TlsEarlyData
   # section 8).
   Accepted
   # Sent with the ClientHello, refused, and sent again after the
-  # handshake, which chose the protocol it was written for.
+  # handshake, which chose the protocol it was written for. A server that
+  # refused it for having taken a copy of the ClientHello has it twice.
   Resent
   # Not sent early - no ticket allowed it, or not that much of it - and
   # sent after the handshake.
@@ -4163,7 +4169,11 @@ end
 # replay that is still fresh comes within two windows of its original, so
 # a binder is held that long and then dropped; with `capacity` held, early
 # data is refused until some are - the guard fails closed. A refusal costs
-# the client a round trip, never its request.
+# the client a round trip, never its request: it sends the data again
+# after the handshake. Where the ClientHello refused is the original and
+# the one taken was its copy, the server therefore has the request twice,
+# from `read_early` on the copy's connection and from `read` on this one,
+# which `TlsServer#early_declined?` marks.
 #
 # What it does not do. It holds in this process, as the ticket keys do, so
 # a ticket - and the early data under it - is taken by no other server
@@ -4585,6 +4595,7 @@ pub class TlsServer < TlsConnection
   # and is not read yet.
   @takes_early : Bool = true
   @early_taken : Bool = false
+  @early_declined : Bool = false
   @early_open : Bool = false
   @awaiting : Bool = false
   @early_limit : Int64 = 0_i64
@@ -4621,6 +4632,19 @@ pub class TlsServer < TlsConnection
   # it, and `read` never does.
   def early_data? : Bool
     @early_taken
+  end
+
+  # Whether the client sent early data with its ClientHello and this
+  # server passed it over. Such a client may send it again after the
+  # handshake (section 4.2.10), as `TlsClient` does, and `read` then reads
+  # it as it reads anything else. It is still what section 8 warns of: one
+  # reason to pass early data over is that a copy of its ClientHello was
+  # taken first, and then the same bytes have already come from
+  # `read_early` on the copy's connection. What `read` answers first on a
+  # connection where this is true is to be acted on only where twice is
+  # safe, as early data is.
+  def early_declined? : Bool
+    @early_declined
   end
 
   # Up to *max* bytes of the early data the client sent with its
@@ -4675,8 +4699,10 @@ pub class TlsServer < TlsConnection
     nil
   end
 
-  # Up to *max* bytes the client sent after the handshake - never its early
-  # data, which `read_early` reads - the handshake finished first.
+  # Up to *max* bytes the client sent after the handshake - never early
+  # data this server took, which `read_early` reads; early data it passed
+  # over and the client sent again comes here (`early_declined?`) - the
+  # handshake finished first.
   def read(max : Int32 = 16384) : String | TlsError
     problem = finish
     return problem if problem
@@ -4747,6 +4773,8 @@ pub class TlsServer < TlsConnection
     # 1.2: that handshake from here.
     return handshake12(hello, offer) if offer.is_a?(TlsOffer12)
     @early_left = EARLY_ALLOWANCE if offer.early_data
+    # Offered, and passed over unless it is taken below.
+    @early_declined = offer.early_data
     @suite = offer.suites.find { |s| SUITES.includes?(s) } || 0
     @cipher_suite = TlsSuites.name(@suite)
     @schedule = TlsKeySchedule.new(@suite == TlsSuites::AES_256_GCM)
@@ -4829,6 +4857,7 @@ pub class TlsServer < TlsConnection
         # no more of it than the ticket allows, which `take_early?` held to
         # no more than `max_early_data` allows now: the less of the two.
         @early_taken = true
+        @early_declined = false
         @early_limit = ticket.max_early_data
         @early_left = 0
         early_secret = @schedule.early_traffic(ticket.psk, hello)

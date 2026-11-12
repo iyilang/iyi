@@ -1580,7 +1580,7 @@ def binding_round(listener : IyiSocket, served : TlsServerConfig, host : String,
             got = conn.read
             conn.write("echo") unless got.is_a?(TlsError)
             conn.close
-            "resumed=#{conn.resumed? ? "yes" : "no"} early=#{heard.bytesize}"
+            "resumed=#{conn.resumed? ? "yes" : "no"} early=#{heard.bytesize}#{conn.early_declined? ? " declined" : ""}"
           end
         end
       else
@@ -1750,8 +1750,8 @@ check binding_round(first_listener, eager, "fuzz.test", trusting, early_session)
 check binding_round(first_listener, eager, "fuzz.test", trusting, early_session, "x" * 1000) == "client resumed=yes early=Accepted; server resumed=yes early=1000",
   "early data within an unchanged limit is taken"
 eager.max_early_data = 100
-check binding_round(first_listener, eager, "fuzz.test", trusting, early_session, "x" * 1000) == "client resumed=yes early=Resent; server resumed=yes early=0",
-  "early data a ticket allows past a lowered limit is declined, and sent again"
+check binding_round(first_listener, eager, "fuzz.test", trusting, early_session, "x" * 1000) == "client resumed=yes early=Resent; server resumed=yes early=0 declined",
+  "early data a ticket allows past a lowered limit is declined, and sent again, and the server says it declined it"
 # The socket closed under a connection whose early data was taken: reading
 # for what is still behind it is the connection's end, at `read_early` and
 # at `read`, which finishes the handshake first.

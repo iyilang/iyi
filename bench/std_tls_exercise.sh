@@ -3353,6 +3353,11 @@ prove_broken "early data delivered as 1-RTT data" "FAIL early-ok " \
   '        return content unless content.empty?' '        @pending = content unless content.empty?' server
 prove_broken "early data past the ticket's max_early_data_size taken" "FAIL early-too-much " \
   '        if @early_read > @early_limit' '        if false' server
+prove_broken "early data passed over without the server saying so" "early data a ticket allows past a lowered limit is declined, and sent again" \
+  '    @early_declined = offer.early_data' '    @early_declined = false'
+prove_broken "early data taken and still said to be declined" "early data within an unchanged limit is taken" \
+  '        @early_declined = false
+' ''
 prove_broken "early data a ticket allows past a lowered limit taken" "early data a ticket allows past a lowered limit is declined, and sent again" \
   '    return false if ticket.max_early_data > @config.early_limit' ''
 prove_broken "early data declined at a limit no lower than the ticket's" "early data within an unchanged limit is taken" \

@@ -123,9 +123,18 @@ pub struct HOTP
     # a SHA-1 MAC's twenty.
     offset = mac[mac.size - 1].to_i32 & 15
     binary = ((mac[offset].to_i32 & 0x7F) << 24) | (mac[offset + 1].to_i32 << 16) | (mac[offset + 2].to_i32 << 8) | mac[offset + 3].to_i32
-    modulus = 1_i64
-    digits.times { modulus = modulus * 10_i64 }
-    (binary.to_i64 % modulus).to_s.rjust(digits, '0')
+    # The number's last *digits* decimal digits, written from the right,
+    # zeros as well: the loop runs *digits* times whatever the number is,
+    # and what it divides by is the constant ten.
+    number = binary.unsafe_to_u32
+    String.new(digits) do |dst|
+      k = digits - 1
+      while k >= 0
+        dst[k] = (48_u32 + number % 10_u32).unsafe_to_u8
+        number = number // 10_u32
+        k = k - 1
+      end
+    end
   end
 end
 

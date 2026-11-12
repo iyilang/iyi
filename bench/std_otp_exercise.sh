@@ -424,6 +424,8 @@ prove_broken "a window one step short ahead" "a code one step ahead verifies" \
   'while k <= window' 'while k < window'
 prove_broken "a window one step long behind" "a code two steps behind does not verify" \
   'k = -window' 'k = -window - 1'
+prove_broken "a code's digits written backwards" "RFC 4226 count 0" \
+  'dst[k] = (48_u32 + number % 10_u32).unsafe_to_u8' 'dst[digits - 1 - k] = (48_u32 + number % 10_u32).unsafe_to_u8'
 prove_broken "every step thirty seconds" "a step of 60" \
   'unix_time // step.to_i64' 'unix_time // 30_i64'
 prove_broken "SHA-512 asked for and SHA-256 used" "RFC 6238 SHA512 at 59" \

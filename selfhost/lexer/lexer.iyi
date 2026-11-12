@@ -161,6 +161,42 @@ pub class Lexer
     utf8(code)
   end
 
+  # `\xHH` is one byte: the two hex digits that follow the `x`. The compiler
+  # refuses anything but two, and this takes the digits there are. A short
+  # escape is therefore a place the port can differ from the compiler, and
+  # the oracle prints nothing for a file the compiler refuses to lex.
+  def hex_byte : String
+    value = 0
+    taken = 0
+    while taken < 2 && digit_value(peek, 16) >= 0
+      value = value * 16 + digit_value(peek, 16)
+      advance
+      taken = taken + 1
+    end
+    byte_string(value)
+  end
+
+  # `\NNN` is one byte: up to three octal digits, starting at the one under
+  # the cursor, as the compiler reads them. A value past 255 is a compile
+  # error there. It is masked to its low byte here, and no file that
+  # compiles reaches that.
+  def octal_byte : String
+    value = 0
+    taken = 0
+    while taken < 3 && digit_value(peek, 8) >= 0
+      value = value * 8 + digit_value(peek, 8)
+      advance
+      taken = taken + 1
+    end
+    byte_string(value & 255)
+  end
+
+  # A string of exactly one byte. `utf8` encodes a number as a code point,
+  # which is two bytes for anything from 0x80 up: the bug this avoids.
+  def byte_string(value : Int32) : String
+    String.new([value.to_u8])
+  end
+
   # What `\n` means, rather than the two characters it is written as.
   # The token carries the character and the dump escapes it again, which
   # is how `'\''` and `'` stay different tokens: the first is a quote.
@@ -607,6 +643,15 @@ pub class Lexer
       if peek == 'u'
         advance
         return Token.new("STRING", line, col, read_unicode_escape)
+      end
+      # `\xHH` and `\NNN` are one byte each, not the letter after the
+      # backslash followed by the digits as text.
+      if peek == 'x'
+        advance
+        return Token.new("STRING", line, col, hex_byte)
+      end
+      if digit_value(peek, 8) >= 0
+        return Token.new("STRING", line, col, octal_byte)
       end
       esc = advance
       return Token.new("STRING", line, col, unescape(esc))

@@ -169,11 +169,11 @@ pub class Shape
   def kind : String
     said = register_kind(@name)
     return said unless said == ""
-    @reference ? "ptr" : "%#{@name}"
+    @reference ? "ptr" : "%#{quoted(@name)}"
   end
 
   def layout : String
-    "%#{@name}"
+    "%#{quoted(@name)}"
   end
 
   def declaration(known : Known) : String

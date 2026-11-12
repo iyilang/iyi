@@ -1633,6 +1633,11 @@ pub class Parser
   # The files this one requires, in the order it wrote them. A require
   # is not a module edge: what it names is read as if it were here.
   @requires : Array(Node)
+  # The UsingNodes an import writes when it is followed by `::{...}` or `::*`.
+  # A header's go to the top of the module body; one written inside a body
+  # waits in `@pending` for the statement it is read with.
+  @scopes : Array(Node)
+  @pending : Array(Node)
   @header : String
   # How many method bodies enclose the cursor. A name declared with a type
   # is a local inside one and a field outside one, and the two are read
@@ -1670,6 +1675,8 @@ pub class Parser
     @locals = [] of String
     @imports = [] of Node
     @requires = [] of Node
+    @scopes = [] of Node
+    @pending = [] of Node
     @header = ""
     @def_depth = 0
     @path_from_root = false
@@ -1748,6 +1755,13 @@ pub class Parser
     end
   end
 
+  # One statement of a body. The import it reads is followed by the
+  # UsingNode the compiler's tree puts beside it, here as there.
+  def statement_into(items : Array(Node)) : Nil
+    items << parse_statement
+    items << @pending.shift unless @pending.empty?
+  end
+
   def accept(value : String) : Bool
     if peek.kind == "IDENT" && peek.value == value
       advance
@@ -1809,6 +1823,9 @@ pub class Parser
         advance if peek.value == "pub"
         advance # import
         @imports << ImportNode.new(module_path).as(Node)
+        # The `::{...}` or `::*` after the path brings names into scope: a
+        # UsingNode at the top of the body (SPEC R-2b).
+        @scopes << UsingNode.new.as(Node) if peek.kind == "::"
         skip_line
         skip_newlines
       end
@@ -1819,10 +1836,11 @@ pub class Parser
     # that skips it produces a different tree even when every statement agrees.
     # A file with no module has no body to extend.
     body << ExtendNode.new.as(Node) unless header == ""
+    @scopes.each { |scope| body << scope }
     while !at_end?
       skip_newlines
       break if at_end?
-      body << parse_statement
+      statement_into(body)
       skip_newlines
     end
 
@@ -2011,6 +2029,9 @@ pub class Parser
         advance if offset == 1
         advance # import
         named = module_path
+        # `import a/b::{C}` and `import a/b::*` also bring names into scope,
+        # and the UsingNode follows the import in the body (SPEC R-2b).
+        @pending << UsingNode.new.as(Node) if peek.kind == "::"
         skip_line
         return ImportNode.new(named).as(Node)
       end
@@ -2398,7 +2419,7 @@ pub class Parser
       else
         # Methods and macro branches are part of the enum body after the
         # member list; they are declarations, not strangely named members.
-        members << parse_statement
+        statement_into(members)
       end
       skip_newlines
     end
@@ -2445,7 +2466,7 @@ pub class Parser
           (peek.value == "end" || peek.value == "else" ||
           peek.value == "elsif" || peek.value == "when" ||
           peek.value == "in"))
-      items << parse_statement
+      statement_into(items)
       skip_newlines
     end
     return NopNode.new.as(Node) if items.size == 0
@@ -2495,7 +2516,7 @@ pub class Parser
     items = [] of Node
     skip_newlines
     while !at_end? && !(peek.kind == "IDENT" && peek.value == "end")
-      items << parse_statement
+      statement_into(items)
       skip_newlines
     end
     advance # end
@@ -2773,7 +2794,7 @@ pub class Parser
     skip_newlines
     @def_depth = @def_depth + 1
     while !at_end? && !(peek.kind == "IDENT" && peek.value == "end")
-      body << parse_statement
+      statement_into(body)
       skip_newlines
     end
     @def_depth = @def_depth - 1

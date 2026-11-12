@@ -45,7 +45,7 @@ agree=0
 differ=0
 no_oracle=0
 for f in "${files[@]}"; do
-  "$WORK/oracle" "$f" 2>/dev/null \
+  IYI_PATH="$REPO/src:$REPO/selfhost" "$WORK/oracle" "$f" 2>/dev/null \
     | grep -v "Using compiled" > "$WORK/a.txt"
   # An empty answer is the pass refusing the file, not a file that
   # declares nothing: every sample declares something.

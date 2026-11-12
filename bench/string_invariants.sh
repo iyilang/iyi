@@ -31,6 +31,7 @@ trap 'rm -rf "$WORK"' EXIT
 [ -x "$REPO/bin/iyi" ] || { echo "  no $REPO/bin/iyi: run make first"; exit 1; }
 
 cat > "$WORK/strings.iyi" <<'IYI'
+@[Unsafe("the checksum reads each byte of a string through to_unsafe, which is the thing this gate checks")]
 # Each line prints a name, what was asked, and what came back. The
 # checker below holds the answers, so a wrong one is a diff rather than
 # an opinion.

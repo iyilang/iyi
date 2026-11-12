@@ -580,7 +580,7 @@ machine_code() {
   local target wrong=0 name count mode
   mkdir -p "$2"
   for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
-    if ! IYI_PATH="$1" "$IYI" build --release --emit asm --x86-asm-syntax intel --cross-compile --target "$target" \
+    if ! IYI_PATH="$1" "$IYI" build --release --emit asm,llvm-ir --x86-asm-syntax intel --cross-compile --target "$target" \
       -o "$2/$target" "$WORK/pick.iyi" >"$2/$target.log" 2>&1 || [ ! -s "$2/$target.s" ]; then
       echo "$target: no assembly was written: $(grep -m1 -E 'Error|BUG' "$2/$target.log")"
       wrong=1
@@ -604,6 +604,45 @@ elif machine_code "$IYI_PATH" "$WORK/machine" >"$WORK/machine.out"; then
   echo "  x86_64 and aarch64, --release: every mask goes through its barrier, both sides of a swap and every entry of a row are read and masked, and nothing branches but the loops"
 else
   sed 's/^/  /' "$WORK/machine.out"
+  status=1
+fi
+
+echo
+echo "== how the table's address reaches a second thread, read off the IR"
+# The fixed-base table is worked out by the first thread that wants it,
+# and a second thread must never read it part written: a wrong multiple
+# gives a signature a wrong point under the right nonce, which beside the
+# right signature of the same message gives the key away. On x86_64 a
+# plain store of the table's address after its entries is seen in that
+# order by every thread; on a machine that orders its stores loosely it is
+# not, and no run on this one would show it. So it is read off the IR of
+# the program built above (x86_64's, the orderings being the module's
+# request and the same for every target): every read of the word the
+# address is kept in has to be an acquire load and its one write a release
+# store.
+# published <file.ll> <class variable>: what in the IR reads or writes the
+# word a table's address is kept in other than by an acquire load and a
+# release store, a line each; 1 if anything does, or if either is missing.
+# The zero the word starts from is a plain store, made before the
+# program's first line.
+published() {
+  awk -v name="$2" '
+    !(index($0, "@\"" name "\"") || index($0, "@\"" name ".")) || /^@/ || /store i64 0, ptr @/ { next }
+    / = load atomic i64, ptr @[^ ]* acquire,/ { loads++; next }
+    /store atomic i64 [^,]*, ptr @[^ ]* release,/ { stores++; next }
+    { print name ": neither an acquire load nor a release store:" $0; other++ }
+    END {
+      if (!loads) print name ": no acquire load of it"
+      if (!stores) print name ": no release store to it"
+      exit (other || !loads || !stores) ? 1 : 0
+    }' "$1"
+}
+if [ -z "$PY" ]; then
+  echo "  no python here, so the program above was not built and its IR goes unread"
+elif published "$WORK/machine/x86_64-unknown-linux-gnu.ll" 'Std::Curve25519::CurveBaseTable::table' >"$WORK/published.out"; then
+  echo "  the table's address is read by an acquire load and written, once the table is whole, by a release store"
+else
+  sed 's/^/  /' "$WORK/published.out"
   status=1
 fi
 
@@ -685,14 +724,12 @@ prove_broken "a decoding that never sets x's sign" "rfc 8032 test 1: the signatu
 # pick by masks from one a compiler was left free to make a choice of, the
 # answers being the same; the reading of the machine code has to, with
 # <phrase> in what it says, for both targets.
-prove_unmasked() {
+# patched_copy <old> <new>: a copy of the module with <old>, which it has
+# once, replaced, under $WORK/patched.
+patched_copy() {
   rm -rf "$WORK/patched"
   mkdir -p "$WORK/patched/std"
-  if [ -z "$PY" ]; then
-    echo "  no python3 on this machine, so the $1 proof is unmeasured"
-    return
-  fi
-  if ! OLD="$3" NEW="$4" "$PY" - <<PY
+  OLD="$1" NEW="$2" "$PY" - <<PY
 import os
 from pathlib import Path
 src = Path("$REPO/src/std/curve25519.iyi").read_text(encoding="utf-8")
@@ -700,7 +737,13 @@ if src.count(os.environ["OLD"]) != 1:
     raise SystemExit("patch site missing or not one")
 Path("$WORK/patched/std/curve25519.iyi").write_text(src.replace(os.environ["OLD"], os.environ["NEW"], 1), encoding="utf-8", newline="\n")
 PY
-  then
+}
+prove_unmasked() {
+  if [ -z "$PY" ]; then
+    echo "  no python3 on this machine, so the $1 proof is unmeasured"
+    return
+  fi
+  if ! patched_copy "$3" "$4"; then
     echo "  the $1 patch did not apply"
     status=1
   elif machine_code "$WORK/patched${PSEP}$IYI_PATH" "$WORK/patched/machine" >"$WORK/mut.out"; then
@@ -720,6 +763,34 @@ prove_unmasked "a fixed-base entry's mask the compiler can see" "CurveBaseTable:
   '      mask = ValueBarrier.u64((diff | (0_u64 &- diff)).unsafe_shr(63) &- 1_u64)' '      mask = (diff | (0_u64 &- diff)).unsafe_shr(63) &- 1_u64'
 prove_unmasked "a fixed-base sign's mask the compiler can see" "CurveBaseTable::pick<: not the 2 value barriers" \
   '    flip = ValueBarrier.u64(0_u64 &- negative)' '    flip = 0_u64 &- negative'
+# prove_unpublished <label> <phrase> <old> <new>: nor can the exercise tell
+# how the table's address reaches a second thread; the reading of the IR
+# has to refuse the copy, with <phrase> in what it says.
+prove_unpublished() {
+  if [ -z "$PY" ]; then
+    echo "  no python3 on this machine, so the $1 proof is unmeasured"
+    return
+  fi
+  if ! patched_copy "$3" "$4"; then
+    echo "  the $1 patch did not apply"
+    status=1
+  elif ! machine_code "$WORK/patched${PSEP}$IYI_PATH" "$WORK/patched/machine" >"$WORK/mut.out"; then
+    echo "  $1: its picks' machine code was refused, which is not what it breaks:"
+    sed 's/^/    /' "$WORK/mut.out"
+    status=1
+  elif published "$WORK/patched/machine/x86_64-unknown-linux-gnu.ll" 'Std::Curve25519::CurveBaseTable::table' >"$WORK/mut.out"; then
+    echo "  the IR of $1 was read as sound"
+    status=1
+  elif grep -qF "$2" "$WORK/mut.out"; then
+    echo "  $1 is caught"
+  else
+    echo "  $1 was refused, but not for what it is:"
+    sed 's/^/    /' "$WORK/mut.out"
+    status=1
+  fi
+}
+prove_unpublished "a table's address read with no ordering" "no acquire load of it" \
+  '    ready = @@table.get_acquire' '    ready = @@table.get_relaxed'
 
 echo
 if [ "$status" -eq 0 ]; then

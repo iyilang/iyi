@@ -90,13 +90,15 @@
 # RFC 5480's id-ecPublicKey with prime256v1) or SEC 1's ECPrivateKey (RFC
 # 5915), whose public key, when it carries one, must be d's.
 #
-# Pure computation: std/digest, std/crypto's HMAC, std/asn1, and std/ecdsa
-# for the public key and its checking.
+# Pure computation: std/digest, std/crypto's HMAC, std/asn1, std/ecdsa
+# for the public key and its checking, and std/atomic for the word the
+# fixed-base table is published through.
 
 @[Unsafe("keys and points are read out of the bytes of strings through raw pointers")]
 module std/p256
 
 import std/int
+import std/atomic
 import std/digest::{SHA256, SHA384, SHA512, ValueBarrier}
 import std/crypto::{HMAC}
 import std/asn1::{Der, DerValue, DerTag, Asn1Error}
@@ -804,14 +806,24 @@ end
 # out once, the first time it is wanted, and kept: 224 additions and 256
 # doublings, the 257 Z inverted together by Montgomery's trick (one
 # inversion and three products a point). Two threads that reach it first
-# both work it out and store the same table.
+# both work it out, and the later store stands, the tables being the
+# same. What a thread must never read is a table part written: a wrong
+# multiple of G gives a signature a wrong r under the right nonce, and
+# that signature beside the right one for the same message gives the key
+# away. So the table's address is kept in an atomic word, stored last, by
+# a release store, and read by an acquire load (std/atomic): a thread
+# that reads the address reads every entry written before it. A plain
+# store and load promise that on x86_64 and on no machine that orders its
+# stores more loosely.
 struct P256BaseTable
   ENTRIES = 257
 
-  @@table = Pointer(P256Num).new(0_u64)
+  # The table's address once it is whole, 0 until then.
+  @@table = ::Atomic(UInt64).new(0_u64)
 
   def self.get : Pointer(P256Num)
-    return @@table if @@table.address != 0_u64
+    ready = @@table.get_acquire
+    return Pointer(P256Num).new(ready) if ready != 0_u64
     f = P256Modulus.field
     points = Pointer(P256Point).malloc(ENTRIES.to_u64)
     p = P256Point.base
@@ -851,7 +863,7 @@ struct P256BaseTable
       table[2 * i + 1] = f.mul(point.y, zi)
       i = i - 1
     end
-    @@table = table
+    @@table.set_release(table.address)
     table
   end
 

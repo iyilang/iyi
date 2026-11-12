@@ -14,8 +14,9 @@
 # Keys, seeds, messages and signatures are a `String`, whose bytes are
 # taken, or an `Array(UInt8)`; what comes back is a `String` of raw bytes.
 # The caller brings every secret: a private key or a seed is 32 bytes from
-# wherever the caller draws them. This module imports nothing past std/int
-# and std/digest's SHA-512 and `ValueBarrier`, so a package that signs or
+# wherever the caller draws them. This module imports nothing past
+# std/int, std/atomic (the word its table is published through) and
+# std/digest's SHA-512 and `ValueBarrier`, so a package that signs or
 # agrees on a key is not counted as reaching the operating system (`iyi
 # mod reach`); `Random::Secure.random_bytes(32)` from std/random is where
 # a fresh key comes from.
@@ -95,6 +96,7 @@
 module std/curve25519
 
 import std/int
+import std/atomic
 import std/digest::{SHA512, ValueBarrier}
 
 # What is wrong with a peer's key: `message` is the sentence.
@@ -835,12 +837,21 @@ end
 # their 256 Z inverted together by Montgomery's trick (one inversion and
 # three products a point), which is about what one multiplication by the
 # old 4-bit window cost. Two threads that reach it first both work it
-# out and store the same table.
+# out, and the later store stands, the tables being the same. What a
+# thread must never read is a table part written: a wrong multiple of B
+# gives a signature a wrong R under the right nonce, and that signature
+# beside the right one for the same message gives the secret scalar away.
+# So the table's address is kept in an atomic word, stored last, by a
+# release store, and read by an acquire load (std/atomic): a thread that
+# reads the address reads every entry written before it, which a plain
+# store and load promise on x86_64 alone.
 struct CurveBaseTable
-  @@table = Pointer(CurvePrecomp).new(0_u64)
+  # The table's address once it is whole, 0 until then.
+  @@table = ::Atomic(UInt64).new(0_u64)
 
   def self.get : Pointer(CurvePrecomp)
-    return @@table if @@table.address != 0_u64
+    ready = @@table.get_acquire
+    return Pointer(CurvePrecomp).new(ready) if ready != 0_u64
     points = Pointer(CurvePoint).malloc(256_u64)
     p = CurvePoint.base
     row = 0
@@ -881,7 +892,7 @@ struct CurveBaseTable
       table[i] = CurvePrecomp.new(y + x, y - x, x * y * CurveField.d2)
       i = i - 1
     end
-    @@table = table
+    @@table.set_release(table.address)
     table
   end
 

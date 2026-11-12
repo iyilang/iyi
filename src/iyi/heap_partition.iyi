@@ -164,9 +164,12 @@ class IyiHeap
   # wall time (tmac, tssh); grown, 60 and 0.84 on tmac (S6, Tune6). The
   # shared heap's own floor no longer multiplies by threads. At a 256 KiB
   # floor #145's app collected 0.4-6.6 times a request, each paying its
-  # published-roots walk (~40 % of a collection): 512 KiB halves that for
-  # ~8 MB of steady RSS (Linux, S6, CpuFix3).
-  UNIT_MIN      =   524288_u64
+  # published-roots walk (~40 % of a collection). With the flag on against
+  # off, CPU a request and steady RSS were 1.040 and 92 / 174 MB at 512 KiB,
+  # 1.003 and 96 / 169 at 768 KiB, 1.042 and 102 / 169 at 1 MiB (Linux,
+  # quiet, 5-6 rounds side by side); 0.920 and 89 / 168 at 768 KiB on
+  # tssh (S6, CpuFix4).
+  UNIT_MIN      =   786432_u64
   UNIT_BUSY_MAX =  4194304_u64
   HEADROOM_MIN  = 16777216_u64
   SHARED_MIN    =  8388608_u64
@@ -2140,8 +2143,9 @@ class IyiHeap
   # idle workers (`note_idle`): a collection not whole leaves its debt,
   # and a kept sweep its spare runs (`REC_SPARE`). At a quarter, #145's
   # app paid a collection's fixed cost - its roots, its published
-  # objects - twice as often for the same garbage: half cut its CPU a
-  # request by 6.8 % (Linux, quiet, CpuFix, S6).
+  # objects - twice as often for the same garbage: half, with a spare of
+  # two budgets, took its CPU a request to 0.985 of a quarter's (Linux,
+  # quiet, 3 rounds side by side, S6 CpuFix2).
   def self.at_park(record : UInt64) : Nil
     return if @@local_off || @@park_off
     if LibIyiGCTable.__iyi_marking != 0_u8 || !(@@collect_every_park || read64(record &+ REC_DEBT) &* 2_u64 >= budget_of(record))

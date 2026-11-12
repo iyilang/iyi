@@ -28,11 +28,14 @@
 #      holding the table, a pushed node) - so the state refused is the
 #      one written from the unit.
 #   2. std's and the prelude's state is walked: a unit that prints, reads
-#      the clock and sets an environment variable compiles, since every
-#      piece of runtime state it reaches is Share or marked. Its broken
-#      copy, the prelude with the mark taken off the environment's table
-#      (`IyiEnvironTable.@@held`, which `ENV[]=` writes from the unit):
-#      refused, naming it.
+#      the clock and its input and sets an environment variable compiles,
+#      since every piece of runtime state it reaches is Share or marked.
+#      Its broken copies, the prelude with the mark taken off a piece of
+#      that state, each refused naming it: the standard input (`STDIN`,
+#      which `STDIN.gets` reads from the unit), and, where the prelude
+#      has one, the environment's table (`IyiEnvironTable.@@held`, which
+#      `ENV[]=` writes from the unit; Windows writes through
+#      `SetEnvironmentVariableW` and has none).
 #   3. `iyi fix` claims what it proves: a unit reaching a table that a
 #      module fills at its initialisation and only reads after is refused,
 #      told the claim is proven; `iyi fix` writes `@[SafeReach]` above the
@@ -73,6 +76,7 @@ IYI="${IYI:-$REPO/bin/iyi}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 PSEP=":"
+WINDOWS=0
 
 # A native compiler cannot resolve this shell's own path mapping: an
 # IYI_PATH of `C:/...;/c/...` is not converted, and std beside the
@@ -82,6 +86,7 @@ case "$(uname -s)" in
     REPO="$(cygpath -m "$REPO")"
     WORK="$(cygpath -m "$WORK")"
     PSEP=";"
+    WINDOWS=1
     ;;
 esac
 
@@ -437,7 +442,8 @@ import std/time::{Time}
 
 def note(n : Int32) : Int32
   ENV["REACH_RULE_SEEN"] = n.to_s
-  puts "unit #{n} at #{Time.monotonic.to_s}"
+  line = STDIN.gets
+  puts "unit #{n} at #{Time.monotonic.to_s}, read #{line ? line.bytesize : 0} bytes"
   n
 end
 
@@ -446,20 +452,35 @@ group do |g|
 end
 IYI
 compiles runtime_state
-echo "  compiles: runtime_state.iyi (prints, reads the clock, sets ENV from a unit)"
-mkdir -p unmarked/iyi
-cp "$REPO"/src/iyi/*.iyi unmarked/iyi/
-awk '/written only by std\/env.s writes/ { next } { print }' "$REPO/src/iyi/prelude.iyi" > unmarked/iyi/prelude.iyi
-if cmp -s unmarked/iyi/prelude.iyi "$REPO/src/iyi/prelude.iyi"; then
-  echo "the awk for the unmarked prelude found nothing to change"; exit 1
+echo "  compiles: runtime_state.iyi (prints, reads the clock and its input, sets ENV from a unit)"
+# unmarked NAME FILE AWK STATE: the prelude with FILE rewritten by AWK, which
+# takes the mark off STATE (`label : type`), refuses runtime_state.iyi,
+# naming STATE on the unit's path.
+unmarked() {
+  local name="$1" file="$2" program="$3" state="$4"
+  mkdir -p "$name/iyi"
+  cp "$REPO"/src/iyi/*.iyi "$name/iyi/"
+  awk "$program" "$REPO/src/iyi/$file" > "$name/iyi/$file"
+  if cmp -s "$name/iyi/$file" "$REPO/src/iyi/$file"; then
+    echo "the awk for the prelude without the mark on ${state%% :*} found nothing to change"; exit 1
+  fi
+  if IYI_PATH="$WORK/$name${PSEP}$REPO/src" "$IYI" build --no-codegen -o runtime_state runtime_state.iyi > "$name.log" 2>&1; then
+    echo "the prelude without the mark on ${state%% :*} was not refused:"; cat "$name.log"; exit 1
+  fi
+  if ! grep -qF "reaches \`$state\` (not Share) through \`note\` → " "$name.log"; then
+    echo "the prelude without the mark on ${state%% :*} was refused, but not for it:"; cat "$name.log"; exit 1
+  fi
+  echo "  broken copy, the mark taken off ${state%% :*}: refused, $(grep -m1 -o "reaches \`$state\` (not Share) through [^:]*" "$name.log" | cut -c1-150)"
+}
+unmarked noinput io.iyi '/^@\[UnsafeReach\(/ { held = $0; next } held != "" { if ($0 !~ /^STDIN /) print held; held = "" } { print }' 'STDIN : IyiIO'
+# The environment's table is the prelude's on Linux and darwin: on Windows
+# `ENV[]=` calls `SetEnvironmentVariableW`, and the unit reaches no state
+# of iyi's own for it.
+if [ "$WINDOWS" = 1 ]; then
+  echo "  no IyiEnvironTable on Windows: ENV[]= writes through SetEnvironmentVariableW"
+else
+  unmarked unmarked prelude.iyi '/written only by std\/env.s writes/ { next } { print }' '@@held : Pointer(Pointer(UInt8))'
 fi
-if IYI_PATH="$WORK/unmarked${PSEP}$REPO/src" "$IYI" build --no-codegen -o runtime_state runtime_state.iyi > unmarked.log 2>&1; then
-  echo "the prelude without the mark on IyiEnvironTable.@@held was not refused:"; cat unmarked.log; exit 1
-fi
-if ! grep -qF 'reaches `@@held : Pointer(Pointer(UInt8))` (not Share) through `note` → ' unmarked.log; then
-  echo "the prelude without the mark was refused, but not for @@held:"; cat unmarked.log; exit 1
-fi
-echo "  broken copy, the mark taken off @@held: refused, $(grep -m1 -o 'reaches `@@held[^:]*' unmarked.log | cut -c1-120)"
 
 # ── 3. iyi fix ─────────────────────────────────────────────────────────────
 step "iyi fix writes the claim it proves, in the file that declares the state"

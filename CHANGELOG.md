@@ -66,7 +66,10 @@
   `iyi.sum` lines are `h2:`: the first build with this compiler writes
   an `s1:` file again, and a 0.21.0 compiler does not read what it
   wrote, so those who share one `iyi.sum` upgrade together; a package
-  with a line break in a file's name no longer builds.
+  with a line break in a file's name no longer builds, and one that
+  relied on a symbolic link finds a file there. A module cache on Linux
+  or macOS filled by an earlier compiler holds real links and hashes
+  otherwise until it is cleared.
   `install.sh` stops where SHA256SUMS cannot be fetched, and takes an
   `IYI_RELEASE_URL` that is `https://` or `file://` and no other.
 
@@ -153,14 +156,23 @@
   under the line the first tree wrote, on any fresh cache. `h2:` is
   SHA-256 over a line for each file - its own SHA-256, whether it is a
   file or a link, its path - and such a tree is refused. An `s1:` line is
-  held to its checkout the old way once more, then written again as
-  `h2:`; one that does not match is refused as before.
+  held to its checkout the old way once more, in the module cache too,
+  then written again as `h2:`; one that does not match is refused as
+  before, and an `iyi.sum` that cannot be written does not fail a build
+  that only restates it. A symbolic link in a package is checked out as
+  a file holding its target's path on every platform
+  (`core.symlinks=false`), as Git for Windows already did, so one tag
+  has one hash and a link cannot stand where a file was pinned.
 - **The `.iyimod` reader allocates by no count the file's own bytes
   cannot hold.** Every count and length in an artifact was handed to an
   allocator as read: a file of 16 bytes asked for 32 GiB and ended the
   compiler - `build`, `check` and the language server, which read `mods/`
-  beside a project unasked. Each is now held to the bytes that remain: the
-  same file is refused in 0.1 s at 45 MiB, with a sentence.
+  beside a project unasked. Each is now held to the bytes that remain,
+  and a section's counts to its size between them: the same file is
+  refused in 0.1 s at 45 MiB, with a sentence, and one whose nested type
+  declarations each claimed what was left - 385 KB that asked for
+  1,940 MiB - at 46. Types nest no deeper than 200, read or written; a
+  chain of 20,000 was a stack overflow.
 - **std/password: bcrypt refuses what it would cut.** `Bcrypt` stopped
   at a password's first NUL, in an `Array(UInt8)` as in a `String`, and at
   72 bytes: a digest handed to it - `Bcrypt.hash(SHA256(password))` - is

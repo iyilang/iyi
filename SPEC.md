@@ -64,7 +64,7 @@ own reference accepts.
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
 | iyi's own prelude | 28,880 lines, of which 4,738 are the library held to the 4,738 ceiling (7,034 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 137,967 lines, none of it written in iyi |
+| compiler | 138,188 lines, none of it written in iyi |
 | artifact format | `.iyimod` v62, checksum per section |
 | samples | 28 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -1062,9 +1062,9 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 137,967 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 28,880-line own prelude + 126,520 in std |
-| Specs | 21,146 lines | 16,992 for iyi |
+| Compiler | 24,984 lines, **written in Crystal** | 138,188 lines, Crystal, forked |
+| Library | 8,161 lines (3,551 of it core) | 28,880-line own prelude + 127,744 in std |
+| Specs | 21,146 lines | 17,214 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
 | Own status line | *"pre-alpha: we are still designing the language"* | design largely settled, 0.2.0 released, a language written in it |
@@ -9127,7 +9127,7 @@ the runtime's aside - are marked: the compiler writes the list into the
 binary (`Crystal::IYI_UNSAFE_MODULES`), and the Windows handler prints
 it in pieces, allocating nothing.
 
-**Where the repository stands.** `src/std` has 83 marked modules of
+**Where the repository stands.** `src/std` has 84 marked modules of
 121, every reason read and rewritten by hand from `iyi fix`'s starting
 point; four of them (box, deque, static_array, weak_ref) are marked by
 hand outright, since only a program that instantiates their generic
@@ -9159,7 +9159,7 @@ warning, which keeps the set honest, and splitting raw code into a small
 module of its own, the way Rust crates isolate theirs. Counted at
 2f070a01e by reading the sources, blocks (`unsafe { }`) would have
 wrapped 2,338 runs of lines in src/std, 900 in src/iyi and 607 in bench,
-and a mark per declaration 1,535, 469 and 258 defs, against 83, 13 and
+and a mark per declaration 1,535, 469 and 258 defs, against 84, 13 and
 85 module marks.
 
 ---

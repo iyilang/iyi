@@ -579,7 +579,7 @@ found is in the second commit named beside a finding.
 | 4 | Medium | std/cookie | An `http://` answer replaced a `Secure` cookie of the same name, removed it with `Max-Age=0`, or set a longer path's beside it; the header said it could not | shown | fixed, `36be36443` |
 | 5 | Medium | std/http | `HTTP.upgrade`, and so `wss://`, handshook under a configuration of its own without `require_staple` and `ech_configs` | shown | fixed, `fb78ceb85` |
 | 6 | Medium | std/password | `Bcrypt` stopped at a NUL in an `Array(UInt8)` too, so a digest given to it is the empty password one time in 256 | shown | fixed, `bcd0c4684` |
-| 7 | Medium | `iyi.sum` | The tree hash had no lengths, and a file may hold the zero byte that ended one: a tag moved to a tree whose bytes crossed a file's edge built under the line the first tree wrote. (And it was SHA-1.) | shown | fixed, `b4ebefaf2`, `4e795f909` |
+| 7 | Medium | `iyi.sum` | The tree hash had no lengths, and a file may hold the zero byte that ended one: a tag moved to a tree whose bytes crossed a file's edge built under the line the first tree wrote. (And it was SHA-1.) | shown | fixed, `b4ebefaf2`, `4e795f909`; `7def2192f`, `5863467e3` and `4d1c3674f` for the cache, an unwritable file and a link |
 | 8 | Medium | workflows | The jobs that build a release's archives used actions by tags a publisher can move (89 `uses:`), and Crystal, CMake, LLVM's source and `make` unchecked; SHA256SUMS is made after the build | read | fixed, `5dcab2159`, but for the Crystal that builds the Windows zip and darwin's, which the action and Homebrew fetch unhashed; unrun until CI runs it |
 | 9 | Medium | workflows | The VS Code job's registry tokens were in every step's environment, beside an `npx --yes` of whatever the registry answered, on every pull request | read | fixed, `3bee42788`; unrun until CI runs it |
 | 10 | Low | std/tls | A socket closed under a connection whose early data was taken was a panic at `read_early` and `read` | shown | fixed, `ad201ebea` |
@@ -602,7 +602,7 @@ found is in the second commit named beside a finding.
 | 27 | Low | std/cookie | `to_set_cookie` wrote a `Path`, `Domain` or `SameSite` as given, a `;` and what follows it too | shown | fixed, `283241a29` |
 | 28 | Low | std/autocert | On Windows the cache's private keys took the access list of the directory above them | shown | fixed, `06ad424fe`, `a7cd2b2fc` |
 | 29 | Low | std/otp | A secret of one byte was taken, and a label's control and bidirectional characters read | shown | fixed, `7e0dd407c`, `3ebe84b83` |
-| 30 | Low | `.iyimod` reader | Every count in an artifact was allocated as read: 16 bytes asked for 32 GiB. No read past a buffer was found in 430 mutated files | shown | fixed, `ff6bd7832` |
+| 30 | Low | `.iyimod` reader | Every count in an artifact was allocated as read: 16 bytes asked for 32 GiB. No read past a buffer was found in 430 mutated files | shown | fixed, `ff6bd7832`, and `da744a9cf` for counts that nest |
 | 31 | Low | `install.sh` | A SHA256SUMS that could not be fetched was a note and an install | shown | fixed, `28339c03f` |
 | 32 | Low | workflows | A release carried no signature or provenance | read | fixed, `9f31d26fe`; unrun until CI runs it |
 | 33 | Informational | std/tls | The client takes a server's acceptance of early data without holding ALPN and the suite to the ticket's (the server is held to it) | read | open |

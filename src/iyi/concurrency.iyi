@@ -2742,7 +2742,7 @@ class IyiScheduler
     st = state
     # A partitioned fiber's park is its partition's quiet point (heap22
     # S1, design section 4.1, trigger 2): collected here, the token still
-    # held, when a quarter of its budget is owed.
+    # held, when half its budget is owed.
     {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) %}
       IyiHeap.at_park(st.alloc) if st.alloc != 0_u64
     {% end %}

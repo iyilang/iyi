@@ -1953,11 +1953,28 @@
   # (`IyiHeap.partition_spare`) is dirty to the idle workers: parked, an
   # idle worker collects it whole, and those runs go back to the pool.
   # Under `IYI_HEAP_STRESS` a collection at a chaos point may have given
-  # them back before the park, which then keeps none.
+  # them back before the park, which then keeps none; and a park under a
+  # global mark beside the program collects nothing, leaving the unit to
+  # the idle workers' whole collection (verify release, 1 run of 1,
+  # Linux, CpuFix2): a unit that showed no spare is tried again, five
+  # times in all.
   def spare_check : Nil
     stressed = {% if flag?(:heap_verify) %} IyiHeapVerify.stress != 0_u64 {% else %} false {% end %}
+    attempt = 0
+    while attempt < 5
+      attempt = attempt + 1
+      spare = spare_once
+      return if spare != 0_u64 || stressed
+    end
+    fail("spare: the park's collection kept no run with nothing live on it, 5 units in a row")
+  end
+
+  # One unit of `spare_check`: the spare its park left, after the checks
+  # of its idle collection.
+  def spare_once : UInt64
     ready = Channel(UInt64).new(1)
     go = Channel(Int64).new(1)
+    spare = 0_u64
     group do |g|
       handle = g.spawn(unit: :new) { spare_task(ready, go) }
       got = ready.receive
@@ -1970,7 +1987,6 @@
       end
       spare = IyiHeap.partition_spare(record)
       held = IyiHeap.partition_held(record)
-      fail("spare: the park's collection kept no run with nothing live on it") if spare == 0_u64 && !stressed
       waited = 0
       while IyiHeap.partition_spare(record) != 0_u64 && waited < 3000
         sleep(1)
@@ -1985,6 +2001,7 @@
       fail("spare: a parked unit kept #{left} bytes of runs with nothing live on them 3 s after its park") if left != 0_u64
       fail("spare: the unit held #{after} bytes after its idle collection, #{held} before") if spare != 0_u64 && after >= held
     end
+    spare
   end
 
   Checks.read_env

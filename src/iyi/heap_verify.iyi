@@ -444,10 +444,13 @@ class IyiHeapVerify
     IyiHeap.read8(arena &+ IyiHeap::META &+ slot &* IyiHeap::META_ENTRY) & IyiHeap::FREE_FLAG != 0
   end
 
-  # Before the sweep, each class under its lock with no global slice in
-  # flight: a free chunk of the partition's runs on neither its free list
-  # nor its return stack is lost to it (the global sweep freed it and
-  # handed it to nobody).
+  # After a local sweep, each class under its lock with no global slice
+  # in flight: a free chunk of the partition's runs on neither its free
+  # list nor its return stack is lost to it (the global sweep freed it
+  # and handed it to nobody). A walk ends at the first chunk it meets
+  # twice: the list may be a ring, and a broken copy of bench/heap_local
+  # whose verifier goes on reported each step of the ring, 16 Mi of them,
+  # and ran out its time before its own check (`nokeptfree`).
   def self.lost_free(record : UInt64, id : UInt64) : Nil
     table = Pointer(UInt64).new(record)
     index = 0
@@ -461,7 +464,10 @@ class IyiHeapVerify
           steps = 0_u64
           while head != 0 && steps < 16777216_u64
             listed_bad(id, head, "a chunk on the partition's free list") unless own_free?(id, head)
-            listed_twice(id, head, "the partition's free list") if set.includes?(head)
+            if set.includes?(head)
+              listed_twice(id, head, "the partition's free list")
+              break
+            end
             set.add(head)
             head = IyiHeap.read64(head + IyiHeap::OFF_LINK)
             steps = steps + 1_u64
@@ -470,7 +476,10 @@ class IyiHeapVerify
           steps = 0_u64
           while head != 0 && steps < 16777216_u64
             listed_bad(id, head, "a chunk on the partition's return stack") unless own_free?(id, head)
-            listed_twice(id, head, "the partition's free list and return stack") if set.includes?(head)
+            if set.includes?(head)
+              listed_twice(id, head, "the partition's free list and return stack")
+              break
+            end
             set.add(head)
             head = IyiHeap.read64(head + IyiHeap::OFF_LINK)
             steps = steps + 1_u64

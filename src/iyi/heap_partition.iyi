@@ -168,6 +168,10 @@ class IyiHeap
   HEADROOM_MIN  = 16777216_u64
   SHARED_MIN    =  8388608_u64
 
+  # The spare a sweep that keeps may leave, in budgets (`local_sweep`):
+  # past it, the next collection sweeps whole and pools the empty runs.
+  SPARE_BUDGETS = 2_u64
+
   # What a freed chunk reads as in a `-Dheap_verify` build.
   POISON = 0xDEADDEADDEADDEAD_u64
 
@@ -216,24 +220,27 @@ class IyiHeap
 
   # The thread's scratch page for the local mark and the publication
   # walk: a stack of chunk bases mapped beside it, its capacity and
-  # length, a one-entry layout cache, the visited set of the walks
-  # through lent graphs - its mapping, capacity, count and the current
-  # walk's generation - and what `lend_step` found. Not heap memory: the
-  # collector never reads it.
+  # length, the visited set of the walks through lent graphs - its
+  # mapping, capacity, count and the current walk's generation - what
+  # `lend_step` found, and a layout cache (`scratch_layout`). Not heap
+  # memory: the collector never reads it.
   @[ThreadLocal]
   @@scratch : UInt64 = 0_u64
 
   SCR_STACK  =  0_u64
   SCR_CAP    =  8_u64
   SCR_LEN    = 16_u64
-  SCR_LTYPE  = 24_u64
-  SCR_LENTRY = 32_u64
   SCR_SET    = 40_u64
   SCR_SETCAP = 48_u64
   SCR_SETN   = 56_u64
   SCR_COUNT  = 64_u64
   SCR_GEN    = 72_u64
   SCR_STEP   = 80_u64
+  SCR_LAYOUT = 1024_u64
+
+  # The layout cache's lines, a type id and its layout entry each,
+  # indexed by the id's low bits.
+  LAYOUT_LINES = 128_u64
 
   # The types `__iyi_new_shared` has made an object of (`born_shared`): a
   # byte per type id below `BORN_TYPES`, mapped at the first. The walks
@@ -1571,13 +1578,19 @@ class IyiHeap
     __iyi_munmap(old, cap &* 16_u64) if cap != 0
   end
 
-  # The layout entry for *type_id*, one entry cached on the scratch page.
+  # The layout entry for *type_id*, from the scratch page's cache, whose
+  # line the id's low bits pick. One entry cached, the objects a local
+  # mark and its published roots meet, of many types in turn, searched
+  # the layout table again at almost every one: a local collection of
+  # #145's app opened 2,000 to 4,000 published objects (Linux, CpuFix2,
+  # S6).
   def self.scratch_layout(s : UInt64, type_id : UInt64) : UInt64
     return 0_u64 if type_id == 0
-    return read64(s &+ SCR_LENTRY) if type_id == read64(s &+ SCR_LTYPE)
+    line = s &+ SCR_LAYOUT &+ (type_id & (LAYOUT_LINES &- 1_u64)).unsafe_shl(4_u64)
+    return read64(line &+ 8_u64) if read64(line) == type_id
     entry = IyiMark.layout_search(type_id)
-    write64(s &+ SCR_LTYPE, type_id)
-    write64(s &+ SCR_LENTRY, entry)
+    write64(line, type_id)
+    write64(line &+ 8_u64, entry)
     entry
   end
 
@@ -2117,15 +2130,18 @@ class IyiHeap
   end
 
   # A fiber of partition *record*'s unit parks (`IyiScheduler.reschedule`,
-  # before the shared cache goes back in): its collection, when a
-  # quarter of its budget is owed - the connection between two requests,
-  # its stack shallow and its live set small - or at every park when a
-  # test asks; then, or when it owes less, a note that it parked dirty,
-  # for the idle workers (`note_idle`): a collection not whole leaves
-  # its debt, and a kept sweep its spare runs (`REC_SPARE`).
+  # before the shared cache goes back in): its collection, when half its
+  # budget is owed - the connection between two requests, its stack
+  # shallow and its live set small - or at every park when a test asks;
+  # then, or when it owes less, a note that it parked dirty, for the
+  # idle workers (`note_idle`): a collection not whole leaves its debt,
+  # and a kept sweep its spare runs (`REC_SPARE`). At a quarter, #145's
+  # app paid a collection's fixed cost - its roots, its published
+  # objects - twice as often for the same garbage: half cut its CPU a
+  # request by 6.8 % (Linux, quiet, CpuFix, S6).
   def self.at_park(record : UInt64) : Nil
     return if @@local_off || @@park_off
-    if LibIyiGCTable.__iyi_marking != 0_u8 || !(@@collect_every_park || read64(record &+ REC_DEBT) &* 4_u64 >= budget_of(record))
+    if LibIyiGCTable.__iyi_marking != 0_u8 || !(@@collect_every_park || read64(record &+ REC_DEBT) &* 2_u64 >= budget_of(record))
       note_idle(record)
       return
     end
@@ -2139,9 +2155,9 @@ class IyiHeap
 
   # ── Idle collection (heap22 S6) ───────────────────────────────────────
 
-  # A unit that parks owing less than a quarter of its budget keeps
-  # what it allocated since its last collection - a connection's setup
-  # and its first request's garbage, in a run per class touched - for as
+  # A unit that parks owing less than half its budget keeps what it
+  # allocated since its last collection - a connection's setup and its
+  # first request's garbage, in a run per class touched - for as
   # long as it sits idle: 36.6 KiB of runs per idle keep-alive
   # connection, 20.6 KiB of them in 17 small classes holding 7.6 KiB
   # (C10k at 2,000 connections, Linux, 3984c899a). The park says so
@@ -2523,14 +2539,18 @@ class IyiHeap
             high = low + granule_bytes
             head = first_head(arena, low)
             chunk = read64(arena + OFF_CHUNK)
+            slot = chunk_index(arena, head)
+            meta = arena + META + slot * META_ENTRY
+            own = own_address(arena, slot)
             while head < high
-              slot = chunk_index(arena, head)
-              bits = read8(arena + META + slot * META_ENTRY)
-              if bits & CARVED_FLAG != 0 && bits & FREE_FLAG == 0 && read8(own_address(arena, slot)) & OWN_PUB != 0
+              bits = read8(meta)
+              if bits & CARVED_FLAG != 0 && bits & FREE_FLAG == 0 && read8(own) & OWN_PUB != 0
                 base = bits & HEADED_FLAG != 0 ? head + HEADER : head
                 each_field(s, base) { |field| local_shade(record, id, parity, field) }
               end
               head = head + chunk
+              meta = meta + META_ENTRY
+              own = own + 1_u64
             end
           end
           k = k + 1_u64
@@ -2575,27 +2595,31 @@ class IyiHeap
   # Once a sweep ends whole, nothing dead is left to name them.
   #
   # A sweep that *keeps* - the unit's own collections, in flight or at
-  # its park, while its last kept sweep left no more spare than its
-  # budget - unlinks no run and lists only what it frees, ahead of the
-  # class's list as it stands: a chunk free already is on that list or
-  # on the return stack (`-Dheap_verify`'s `lost_free`), and stays there
-  # untouched. The full sweep wrote the link of every free chunk of
-  # every run the unit held, and at a park handed its emptied runs to
-  # the pool, which the next request took back and threaded whole: a
-  # cost by the runs held, not by the garbage. #145's app spent 0.08 to
-  # 2.2 ms a request in local collections, 12 to 37 % of its CPU, and
-  # 8 to 10 % more CPU a request than without partitions (Linux,
-  # CpuAttr, S6). The bytes of runs a keeping sweep found with nothing
-  # live are the record's spare (`REC_SPARE`): a spare unit is dirty to
-  # the idle workers (`idle_dirty?`), whose takeover sweeps whole and
-  # gives those runs back, and one whose spare outgrew its budget sweeps
-  # whole at its next collection.
+  # its park, while its last kept sweep left no more spare than
+  # `SPARE_BUDGETS` budgets - unlinks no run and lists only what it
+  # frees, ahead of the class's list as it stands: a chunk free already
+  # is on that list or on the return stack (`-Dheap_verify`'s
+  # `lost_free`), and stays there untouched. The full sweep wrote the
+  # link of every free chunk of every run the unit held, and at a park
+  # handed its emptied runs to the pool, which the next request took
+  # back and threaded whole: a cost by the runs held, not by the
+  # garbage. #145's app spent 0.08 to 2.2 ms a request in local
+  # collections, 12 to 37 % of its CPU, and 8 to 10 % more CPU a request
+  # than without partitions (Linux, CpuAttr, S6). The bytes of runs a
+  # keeping sweep found with nothing live are the record's spare
+  # (`REC_SPARE`): a spare unit is dirty to the idle workers
+  # (`idle_dirty?`), whose takeover sweeps whole and gives those runs
+  # back, and one whose spare outgrew `SPARE_BUDGETS` sweeps whole at
+  # its next collection. A spare run's chunks are listed, the next ones
+  # the unit allocates in: a cap of one budget swept #145's heaviest
+  # endpoints whole about once a request (spare 170 to 260 kB at 256
+  # KiB; Linux, CpuFix, S6).
   def self.local_sweep(record : UInt64, id : UInt64, parity : UInt64, idle : Bool, keep : Bool) : Bool
     table = Pointer(UInt64).new(record)
     kept_bytes = 0_u64
     freed = 0_u64
     spare = 0_u64
-    keep = keep && read64(record &+ REC_SPARE) <= budget_of(record)
+    keep = keep && read64(record &+ REC_SPARE) <= budget_of(record) &* SPARE_BUDGETS
     sweep_weak(record, id, parity)
     index = 0
     while index < CLASSES

@@ -1,0 +1,5 @@
+class Bytes
+  def go : String
+    "\x88\x02\x1c\b\xA0\xD5\x8F\xFA\x7F\u0080# #\"\\\x41"
+  end
+end

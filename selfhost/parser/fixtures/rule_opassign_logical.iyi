@@ -1,0 +1,6 @@
+def tally(a : Int32, b : Int32) : Int32
+  a ||= b
+  a &&= b
+  a **= 2
+  a
+end

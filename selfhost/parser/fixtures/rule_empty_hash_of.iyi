@@ -1,0 +1,5 @@
+def table : Int32
+  x = {} of String | Nil => Int32
+  y = {} of String? => Int32
+  1
+end

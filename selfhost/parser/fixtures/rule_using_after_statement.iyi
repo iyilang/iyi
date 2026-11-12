@@ -1,0 +1,9 @@
+module demo/using
+
+class First
+end
+
+import std/file::{File}
+
+class Second
+end

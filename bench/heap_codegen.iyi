@@ -564,7 +564,7 @@
         0
       end
       g.spawn(unit: :new) do
-        paint(aims.receive)
+        paint(aims.receive.as(UInt64))
         all = collect_vals([79_i64, 80_i64, 81_i64])
         no_stale(all.to_unsafe.address, all.size, "an Array(Val) buffer of boxed Int64s")
         built.send(1)

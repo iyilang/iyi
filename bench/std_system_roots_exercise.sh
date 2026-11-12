@@ -277,6 +277,12 @@ prove_broken "a denied root left where it was" "a denied root is dropped" \
 prove_broken "a denied root kept when met again" "a denied root is not kept after" \
   '    @denied[key] = true
     at = @seen[key]?' '    at = @seen[key]?'
+prove_broken "a denied certificate not held as distrusted" "a denied certificate is distrusted once, and was 0 times" \
+  '    @distrusted << der unless @listed.has_key?(key)' ''
+prove_broken "a denied certificate held as often as it is denied" "a denied certificate is distrusted once, and was 2 times" \
+  '    @distrusted << der unless @listed.has_key?(key)' '    @distrusted << der'
+prove_broken "the distrusted left out of the answer" "the store answers what was denied" \
+  '    SystemRoots.new(@certificates, @unreadable, where, @restricted, @distrusted)' '    SystemRoots.new(@certificates, @unreadable, where)'
 prove_broken "a root restricted counted twice" "a root restricted twice counted 2 times" \
   '    @restricted = @restricted + 1 unless @limited.has_key?(key)' '    @restricted = @restricted + 1'
 # The Windows reader's own lines: the oracle is what catches them, so they

@@ -4,7 +4,7 @@
 # certificate once - then what a collector does with a certificate the
 # platform denies and a root it restricts, then, where
 # `$SYSTEM_ROOTS_ORACLE` names a file, the platform's store against the
-# roots and the restricted that file says another reader
+# roots, the restricted and the distrusted that file says another reader
 # of the same store found, and then `$SSL_CERT_FILE` and `$SSL_CERT_DIR`
 # over files written here: a bundle holding a root twice beside a broken
 # block, a directory of two files, and a bundle with no certificate in it,
@@ -57,7 +57,7 @@ store = SystemRoots.load.or_panic
 check store.certificates.size > 0, "no roots from #{store.source}"
 fingerprints = store.certificates.map { |c| hex(SHA256.hash_bytes(c.raw)) }
 check fingerprints.uniq.size == fingerprints.size, "a root twice in #{store.source}"
-puts "  #{store.certificates.size} roots from #{store.source}, #{store.unreadable} unreadable, #{store.restricted} restricted"
+puts "  #{store.certificates.size} roots from #{store.source}, #{store.unreadable} unreadable, #{store.restricted} restricted, #{store.distrusted.size} distrusted"
 
 puts "== what the platform denies and what it restricts"
 one = Certificate.pem_blocks(ROOT_ONE).or_panic[0]
@@ -70,10 +70,13 @@ gathered.deny(one)
 check gathered.certificates.map(&.subject_name) == ["CN=Fixture Root Two"], "a denied root is dropped: #{gathered.certificates.map(&.subject_name)}"
 gathered.add(one)
 check gathered.certificates.size == 1, "a denied root is not kept after: #{gathered.certificates.size} roots"
+check gathered.distrusted == [one], "a denied certificate is distrusted once, and was #{gathered.distrusted.size} times"
+answered = gathered.answer("a collector").or_panic
+check answered.distrusted == [one] && answered.restricted == 0, "the store answers what was denied: #{answered.distrusted.size} distrusted, #{answered.restricted} restricted"
 unseen = SystemRootsCollector.new
 unseen.deny(two)
 unseen.add(two)
-check unseen.empty?, "a certificate denied before it is met is never kept"
+check unseen.empty? && unseen.distrusted == [two], "a certificate denied before it is met is distrusted and never kept"
 limited = SystemRootsCollector.new
 limited.add(one)
 limited.add(two)
@@ -82,8 +85,9 @@ limited.restrict(two)
 limited.add(two)
 check limited.certificates.map(&.subject_name) == ["CN=Fixture Root One"], "a restricted root is left out: #{limited.certificates.map(&.subject_name)}"
 check limited.restricted == 1, "a root restricted twice counted #{limited.restricted} times"
+check limited.distrusted.empty?, "a restricted root is not distrusted"
 check limited.answer("a collector").or_panic.restricted == 1, "the store answers what was restricted"
-puts "  a denied certificate dropped, a restricted root left out and counted"
+puts "  a denied certificate dropped and distrusted, a restricted root left out and counted"
 
 puts "== the platform's store held to another reader of it"
 oracle = ENV["SYSTEM_ROOTS_ORACLE"]?
@@ -106,6 +110,8 @@ if oracle && !oracle.empty?
   check unknown.empty?, "a root the oracle does not list: #{unknown}"
   check store.restricted >= verdicts["drop"].size && store.restricted <= verdicts["drop"].size + verdicts["either"].size,
     "#{store.restricted} roots restricted, where the oracle has #{verdicts["drop"].size} and #{verdicts["either"].size} either way"
+  check store.distrusted.map { |der| hex(SHA256.hash_bytes(der)) }.sorted == gone.sorted,
+    "#{store.distrusted.size} certificates distrusted, where the oracle has #{gone.size}"
   puts "  held to the oracle: #{verdicts["keep"].size} to keep, #{verdicts["drop"].size} to drop, #{verdicts["either"].size} either way, #{gone.size} distrusted"
 else
   puts "  no oracle named, so the store goes uncompared"
@@ -124,7 +130,7 @@ check named.certificates.size == 1, "a root written twice read #{named.certifica
 check named.unreadable == 1, "a broken block counted #{named.unreadable} times, not once"
 check named.certificates[0].subject_name == "CN=Fixture Root One", "the bundle's root: #{named.certificates[0].subject_name}"
 check named.source.includes?(bundle), "the source names the file: #{named.source}"
-check named.restricted == 0, "named roots carry none of the platform's verdicts"
+check named.distrusted.empty? && named.restricted == 0, "named roots carry none of the platform's verdicts"
 File.write(work + "/dir/a.pem", ROOT_ONE)
 File.write(work + "/dir/b.crt", ROOT_TWO)
 File.write(work + "/dir/notes.txt", "not a certificate\n")

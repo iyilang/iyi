@@ -5,7 +5,7 @@
 #     import std/x509::{X509}
 #
 #     store = SystemRoots.load.or_panic        # certificates, unreadable, source,
-#                                              # restricted
+#                                              # restricted, distrusted
 #     X509.verify(leaf, intermediates, store.certificates, "example.com")
 #
 # Each platform's own store, as Go's crypto/x509 reads it:
@@ -50,6 +50,14 @@
 # These are the roots a TLS client trusts for a server's certificate, read
 # when `load` is called: a later change to the platform's store is seen by
 # the next `load`, not by a store already answered.
+#
+# `distrusted` is the DER of every certificate the platform says never to
+# trust, for `X509.verify` to refuse at any place in a chain: all of the
+# Windows Disallowed store, which holds intermediates and leaves as well
+# as roots, and on darwin the certificates a trust setting denies. It is
+# empty on Linux, whose bundles hold no denials, and when
+# `$SSL_CERT_FILE` or `$SSL_CERT_DIR` names the roots, as the platform's
+# store is not read then.
 #
 # The same certificate twice is kept once. One that std/x509 cannot read -
 # a key type it does not take, a DSA root on an old system - is counted in
@@ -123,6 +131,9 @@ pub struct SystemRoots
   # How many roots the platform holds but keeps from authenticating a
   # server, and so are not among `certificates`.
   getter restricted : Int32
+  # The DER of every certificate the platform says never to trust, root
+  # or not: what `X509.verify` takes as `distrusted`.
+  getter distrusted : Array(Array(UInt8))
 
   # The Linux bundles, in the order Go's crypto/x509 tries them.
   BUNDLES = ["/etc/ssl/certs/ca-certificates.crt",
@@ -134,7 +145,7 @@ pub struct SystemRoots
   DIRECTORIES = ["/etc/ssl/certs", "/etc/pki/tls/certs"]
 
   def initialize(@certificates : Array(Certificate), @unreadable : Int32, @source : String,
-                 @restricted : Int32 = 0)
+                 @restricted : Int32 = 0, @distrusted : Array(Array(UInt8)) = [] of Array(UInt8))
   end
 
   # The operating system's trusted roots, or why there are none.
@@ -171,8 +182,10 @@ pub class SystemRootsCollector
   getter certificates : Array(Certificate) = [] of Certificate
   getter unreadable : Int32 = 0
   getter restricted : Int32 = 0
+  getter distrusted : Array(Array(UInt8)) = [] of Array(UInt8)
   @seen : Hash(String, Int32) = {} of String => Int32
   @denied : Hash(String, Bool) = {} of String => Bool
+  @listed : Hash(String, Bool) = {} of String => Bool
   @limited : Hash(String, Bool) = {} of String => Bool
 
   def initialize
@@ -195,14 +208,19 @@ pub class SystemRootsCollector
     end
   end
 
-  # A certificate the platform says not to trust: dropped if kept, and
-  # never kept after.
+  # A certificate the platform says not to trust: dropped if kept, never
+  # kept after, and held in `distrusted` once.
   def deny(der : Array(UInt8)) : Nil
-    leave_out(SystemRootsCollector.key(der))
+    key = SystemRootsCollector.key(der)
+    @distrusted << der unless @listed.has_key?(key)
+    @listed[key] = true
+    leave_out(key)
   end
 
   # A root the platform trusts for other purposes than a server's
-  # certificate: dropped if kept, never kept after, and counted once.
+  # certificate: dropped if kept, never kept after, and counted once. It
+  # is not distrusted - a chain may still pass through the certificate
+  # under another root.
   def restrict(der : Array(UInt8)) : Nil
     key = SystemRootsCollector.key(der)
     @restricted = @restricted + 1 unless @limited.has_key?(key)
@@ -238,7 +256,7 @@ pub class SystemRootsCollector
 
   def answer(where : String) : SystemRoots | X509Error
     return X509Error.new("no root certificates in #{where}") if @certificates.empty?
-    SystemRoots.new(@certificates, @unreadable, where, @restricted)
+    SystemRoots.new(@certificates, @unreadable, where, @restricted, @distrusted)
   end
 
   # A certificate's identity: its DER, as text a Hash can key.

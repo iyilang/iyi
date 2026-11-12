@@ -36,30 +36,42 @@ end
 # The names a program declared, as opposed to the ones its prelude did.
 # Everything here comes from one file, so anything with a location in that
 # file is the file's and everything else is furniture.
-private def declared_in(type, path : String, found : Array(String)) : Nil
+#
+# The walk goes through every type, not only the ones this file located. A
+# module can be declared by an import and nested into by this file:
+# `module std/bzip2` nests `Std::Bzip2` under the `Std` that `std/int`
+# declared first, so `Std` is located in `int.iyi` and the types the file
+# declares are under it. Only what this file located is reported.
+private def located_in?(type, path : String) : Bool
+  locs = type.locations
+  return false if locs.nil? || locs.empty?
+  locs.any? { |l| (f = l.filename).is_a?(String) && File.expand_path(f) == File.expand_path(path) }
+end
+
+private def declared_in(type, path : String, found : Array(String), seen : Set(UInt64)) : Nil
   type.types?.try &.each_value do |nested|
     next unless nested.responds_to?(:locations)
-    locs = nested.locations
-    next if locs.nil? || locs.empty?
-    next unless locs.any? { |l| (f = l.filename).is_a?(String) && File.expand_path(f) == File.expand_path(path) }
+    next if seen.includes?(nested.object_id)
+    seen << nested.object_id
+    if located_in?(nested, path)
+      # `responds_to?` is not enough: a non-generic type answers it and then
+      # raises "doesn't implement type_vars" when asked, so the question has
+      # to be about the type's kind rather than its method set.
+      vars = ""
+      if nested.is_a?(Iyi::GenericType)
+        tv = nested.type_vars
+        vars = "(#{tv.join(" ")})" unless tv.empty?
+      end
 
-    # `responds_to?` is not enough: a non-generic type answers it and then
-    # raises "doesn't implement type_vars" when asked, so the question has
-    # to be about the type's kind rather than its method set.
-    vars = ""
-    if nested.is_a?(Iyi::GenericType)
-      tv = nested.type_vars
-      vars = "(#{tv.join(" ")})" unless tv.empty?
+      methods = [] of String
+      nested.defs.try &.each do |name, defs|
+        methods << name.to_s if defs.any? { |d| (loc = d.def.location) && (f = loc.filename).is_a?(String) && File.expand_path(f) == File.expand_path(path) }
+      end
+      methods.sort!.uniq!
+
+      found << "(#{kind_of(nested)} #{nested.to_s}#{vars} (defs #{methods.join(" ")}))"
     end
-
-    methods = [] of String
-    nested.defs.try &.each do |name, defs|
-      methods << name.to_s if defs.any? { |d| (loc = d.def.location) && (f = loc.filename).is_a?(String) && File.expand_path(f) == File.expand_path(path) }
-    end
-    methods.sort!.uniq!
-
-    found << "(#{kind_of(nested)} #{nested.to_s}#{vars} (defs #{methods.join(" ")}))"
-    declared_in(nested, path, found)
+    declared_in(nested, path, found, seen)
   end
 end
 
@@ -84,7 +96,10 @@ class Iyi::Compiler
 end
 
 path = ARGV[0]
-prelude_only = File.basename(File.dirname(path)) == "iyi"
+# Only the compiler's own prelude, `src/iyi`, is the prelude. A sample in
+# `samples/iyi` shares the directory name and is an entry like any other.
+prelude_dir = File.dirname(path)
+prelude_only = File.basename(prelude_dir) == "iyi" && File.basename(File.dirname(prelude_dir)) == "src"
 compiler = Iyi::Compiler.new
 compiler.prelude = "iyi/prelude"
 compiler.no_codegen = true
@@ -95,7 +110,7 @@ begin
   source = Iyi::Compiler::Source.new(path, File.read(path))
   program = compiler.declare_program(source, prelude_only)
   found = [] of String
-  declared_in(program, path, found)
+  declared_in(program, path, found, Set(UInt64).new)
   STDERR.puts "compiler: the top-level pass declares no type in this file" if found.empty?
   puts found.sort.join(" ")
 rescue error

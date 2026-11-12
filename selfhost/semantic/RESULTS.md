@@ -34,4 +34,70 @@ The samples row is the CI run; the gate's own output says `agree 27, differ 0, n
 
 ## Mutation table
 
-PENDING. Phase B2 is running on a 35-file subset, and this section will be completed when it finishes.
+Measured on `8ff62d884` (the gate code is identical at `a51a81501`). Each row is one variant run over a **35-file subset** of the 168-file corpus, not the full corpus: the 10 std files that the head differs on or whose rules the mutants touch (`format json math bzip2 static_array random reference_storage hpke float file`), all 20 prelude files, and 5 samples (`derive hello modules calc std_text`). The verdict per file is `diff.sh`'s rule: empty oracle answer is NO ORACLE, otherwise port stdout must equal oracle stdout byte for byte.
+
+```
+BASELINE (head oracle vs head port, mutation harness)
+  std      n= 10 agree 7, differ 3, no oracle 0
+  prelude  n= 20 agree 16, differ 1, no oracle 3
+  samples  n=  5 agree 4, differ 0, no oracle 1
+  total    n= 35 agree 27, differ 4, no oracle 4
+
+MUTATIONS (verdict changed against the head baseline)
+m1 (port): agree 26, differ 5, no oracle 4; 1 file(s) changed verdict
+    std/random.iyi: AGREE -> DIFFER
+m2 (port): agree 27, differ 4, no oracle 4; 0 file(s) changed verdict
+m3 (port): agree 26, differ 5, no oracle 4; 1 file(s) changed verdict
+    samples/derive.iyi: AGREE -> DIFFER
+m4 (port): agree 26, differ 5, no oracle 4; 1 file(s) changed verdict
+    std/reference_storage.iyi: AGREE -> DIFFER
+m5 (port): agree 26, differ 5, no oracle 4; 1 file(s) changed verdict
+    prelude/float.iyi: AGREE -> DIFFER
+m6 (port): agree 26, differ 5, no oracle 4; 1 file(s) changed verdict
+    std/hpke.iyi: AGREE -> DIFFER
+m7 (port): agree 21, differ 10, no oracle 4; 6 file(s) changed verdict
+    std/bzip2.iyi: AGREE -> DIFFER
+    std/static_array.iyi: AGREE -> DIFFER
+    std/random.iyi: AGREE -> DIFFER
+    std/hpke.iyi: AGREE -> DIFFER
+    std/float.iyi: AGREE -> DIFFER
+    std/file.iyi: AGREE -> DIFFER
+o8 (oracle): agree 21, differ 7, no oracle 7; 7 file(s) changed verdict
+    std/math.iyi: DIFFER -> NO ORACLE
+    std/bzip2.iyi: AGREE -> NO ORACLE
+    std/static_array.iyi: AGREE -> DIFFER
+    std/random.iyi: AGREE -> DIFFER
+    std/hpke.iyi: AGREE -> NO ORACLE
+    std/float.iyi: AGREE -> DIFFER
+    std/file.iyi: AGREE -> DIFFER
+o9 (oracle): agree 23, differ 4, no oracle 8; 4 file(s) changed verdict
+    samples/derive.iyi: AGREE -> NO ORACLE
+    samples/hello.iyi: AGREE -> NO ORACLE
+    samples/modules.iyi: AGREE -> NO ORACLE
+    samples/calc.iyi: AGREE -> NO ORACLE
+```
+
+A row lists each file whose verdict changed against the head baseline. The `m2` mutant changed no verdict on this subset, so this subset does not catch it: it was built and run, and that is recorded, not omitted.
+
+Mutants: `m1`..`m7` are port mutations of `declare.iyi` (`m7` restores the header-import rule, `first_segment` and `opens_own_module?` from `0f01c3bed^`, with the module body guarded by it); `o8` makes the oracle walk only types located in the file, `o9` makes any directory named `iyi` the prelude. Their sources are not committed: they were scratch copies, now outside the checkout.
+
+### First differing line per DIFFER or NO ORACLE file (head)
+
+```
+DIFFER src/std/format.iyi: first differing line 1 of oracle output:
+    oracle: (class IyiBig (defs div_small to_decimal)) (class String (defs %)) (const IyiFloatText::MAX_PLACES (defs )) (module IyiFloatText (defs )) (module IyiFormat (defs )) (modu
+    port:   (class IyiBig (defs div_small to_decimal)) (class String (defs %)) (const IyiFloatText::MAX_PLACES (defs )) (module IyiFormat (defs )) (module Std (defs )) (module Std::F
+DIFFER src/std/json.iyi: first differing line 1 of oracle output:
+    oracle: (aliastype Std::Json::Any::Type (defs )) (annotationtype Std::Json::JSON::Field (defs )) (class Object (defs __json_write)) (class Std::Json::Builder (defs array before_v
+    port:   (aliastype Std::Json::Any::Type (defs )) (class Object (defs __json_write)) (class Std::Json::Builder (defs array before_value bool empty? end_array end_object field inde
+DIFFER src/std/math.iyi: first differing line 1 of oracle output:
+    oracle: (const Std::Math::Math::ACOSH_CL2 (defs )) (const Std::Math::Math::ACOSH_CL3 (defs )) (const Std::Math::Math::ACOSH_CL4 (defs )) (const Std::Math::Math::ACOSH_CL9 (defs )
+    port:   (const Std::Math::Math::E (defs )) (const Std::Math::Math::LOG10 (defs )) (const Std::Math::Math::LOG2 (defs )) (const Std::Math::Math::PI (defs )) (const Std::Math::Math
+NO ORACLE src/iyi/chaos_points.iyi: oracle says: compiler: the top-level pass declares no type in this file
+NO ORACLE src/iyi/chaos.iyi: oracle says: compiler: the top-level pass declares no type in this file
+DIFFER src/iyi/primitives.iyi: first differing line 1 of oracle output:
+    oracle: (booltype Bool (defs )) (chartype Char (defs + hash ord)) (class Object (defs class crystal_type_id)) (class Reference (defs == hash initialize object_id)) (metaclasstype
+    port:   (booltype Bool (defs )) (chartype Char (defs + hash ord)) (class Object (defs class crystal_type_id)) (class Reference (defs == hash initialize object_id)) (metaclasstype
+NO ORACLE src/iyi/thread.iyi: oracle says: compiler: the top-level pass declares no type in this file
+NO ORACLE samples/iyi/std_text.iyi: oracle says: compiler: the top-level pass declares no type in this file
+```

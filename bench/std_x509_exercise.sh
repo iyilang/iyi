@@ -6,10 +6,10 @@
 # The exercise holds chains Python's cryptography made, each judged as
 # Python's own verifier judges it and each refusal for its reason, hosts
 # matched, certificates that are not certificates, Ed25519 keys and
-# signatures (RFC 8410), what a search costs, bounded, and IPv4-mapped
-# IPv6 addresses under IPv4 ranges - chains it writes itself; this gate
-# runs it plain and --release, holds 200
-# fresh chains - random keys (P-256, P-384, RSA, Ed25519), depths and
+# signatures (RFC 8410), what a search costs, bounded, IPv4-mapped IPv6
+# addresses under IPv4 ranges, and certificates given as distrusted -
+# chains it writes itself; this gate runs it plain and --release, holds
+# 200 fresh chains - random keys (P-256, P-384, RSA, Ed25519), depths and
 # defects - to Python's verifier, holds chains with an RSA key at or under
 # the 2048-bit floor to OpenSSL's verify at security level 2, reads every
 # certificate in the machine's CA bundle as Python reads it, shows an
@@ -86,7 +86,7 @@ fi
 
 echo
 echo "== every x509 section reported"
-for phrase in "== chains Python's cryptography made" "== hosts matched" "== certificates that are not certificates" "== Ed25519 (RFC 8410)" "== RSA keys under 2048 bits" "== a client's certificate (X509Purpose::Client)" "== a search for a chain, bounded" "== what a search costs, bounded" "== IPv4-mapped IPv6 addresses" "== certificates written (X509.self_signed)"; do
+for phrase in "== chains Python's cryptography made" "== hosts matched" "== certificates that are not certificates" "== Ed25519 (RFC 8410)" "== RSA keys under 2048 bits" "== a client's certificate (X509Purpose::Client)" "== a search for a chain, bounded" "== what a search costs, bounded" "== IPv4-mapped IPv6 addresses" "== certificates that are distrusted" "== certificates written (X509.self_signed)"; do
   if ! grep -q "$phrase" "$WORK/x509-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -592,6 +592,18 @@ prove_broken "a signature checked again under a key that answered" "seven interm
   '      return search.signatures[child_at][i] if key == issuer.public_key_info' ''
 prove_broken "an RSA key of 8193 bits taken" "a leaf whose key is 8193-bit RSA: expected a refusal" \
   '  MAX_RSA_BITS = 8192' '  MAX_RSA_BITS = 16384'
+# Certificates given as distrusted: each break below passes one over.
+prove_broken "a distrusted leaf taken" "a distrusted leaf: expected a refusal" \
+  '    problem = distrusted_error(leaf, search)
+    return X509Error.new(problem) if problem' ''
+prove_broken "a distrusted issuer taken" "a distrusted intermediate: expected a refusal" \
+  '    distrusted = distrusted_error(issuer, search)
+    return distrusted if distrusted' ''
+prove_broken "a distrusted key under another certificate taken" "an intermediate holding a distrusted certificate's key: expected a refusal" \
+  '    if search.distrusted_keys.any? { |info| info == certificate.public_key_info }' '    if false'
+prove_broken "a distrusted key read only from a certificate that can be read" "an intermediate holding the key of a distrusted certificate that cannot be read: expected a refusal" \
+  '      info = X509Keys.info_of(der)' '      read = Certificate.parse(der)
+      info = read.is_a?(Certificate) ? read.public_key_info : nil'
 prove_broken "a second extensions block read over the first" "a TBSCertificate with two extensions blocks refused" \
   '      return X509Error.new("#{field.describe} after [#{last}], where RFC 5280 has each of [1], [2] and [3] once and in order") unless tag > last' ''
 prove_broken "an empty RelativeDistinguishedName taken" "an empty RDN refused: accepted" \

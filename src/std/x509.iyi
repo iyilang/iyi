@@ -77,6 +77,15 @@
 # (`X509::MAX_CONSTRAINT_COMPARISONS`); a chain that would take more is
 # refused.
 #
+# `X509.verify` takes, last, certificates that are never to be trusted,
+# each as its DER, which is how a platform's store of them keeps them
+# (std/system_roots): a chain is refused at any certificate that is one
+# of them, leaf, intermediate or root, or that holds the key of one - the
+# same SubjectPublicKeyInfo - since a key that is distrusted is no better
+# under another certificate. One that cannot be read as a certificate
+# still refuses its own bytes, and its key where its
+# SubjectPublicKeyInfo can be found.
+#
 # Written: `X509.request` is a PKCS #10 request (RFC 2986) - CN=<the first
 # name> and subjectAltName's dNSNames in an extensionRequest attribute -
 # and `X509.self_signed` a version 3 certificate for itself with
@@ -457,13 +466,18 @@ pub struct X509
   # *host* (nil: any) at *now* - leaf first, root last - or why there is
   # none. *purpose* is what the leaf is for: a server's certificate
   # (serverAuth, the default) or a client's (clientAuth), each certificate
-  # that carries extKeyUsage allowing it. See the module's header for what
-  # else is checked.
+  # that carries extKeyUsage allowing it. *distrusted* is the DER of
+  # certificates never to be trusted: a chain is refused at any
+  # certificate that is one of them or holds the key of one. See the
+  # module's header for what else is checked.
   def self.verify(leaf : Certificate, intermediates : Array(Certificate), roots : Array(Certificate),
-                  host : String? = nil, now : Time = Time.utc, purpose : X509Purpose = X509Purpose::Server) : Array(Certificate) | X509Error
+                  host : String? = nil, now : Time = Time.utc, purpose : X509Purpose = X509Purpose::Server,
+                  distrusted : Array(Array(UInt8))? = nil) : Array(Certificate) | X509Error
     problem = leaf_error(leaf, host, now, purpose)
     return X509Error.new(problem) if problem
-    search = X509Search.new(intermediates, roots, now, purpose)
+    search = X509Search.new(intermediates, roots, now, purpose, distrusted)
+    problem = distrusted_error(leaf, search)
+    return X509Error.new(problem) if problem
     chain = grow([leaf], 0, search)
     return chain if chain
     spent = search.spent
@@ -567,6 +581,18 @@ pub struct X509
     usages.includes?(purpose.oid) || usages.includes?(X509Oids::ANY_EXTENDED_KEY_USAGE)
   end
 
+  # Why *certificate* is among the search's distrusted certificates, by
+  # its own bytes or by its key, or nil.
+  private def self.distrusted_error(certificate : Certificate, search : X509Search) : String?
+    if search.distrusted.any? { |der| der == certificate.raw }
+      return "#{certificate.subject_name} is a certificate that is distrusted"
+    end
+    if search.distrusted_keys.any? { |info| info == certificate.public_key_info }
+      return "#{certificate.subject_name} holds the key of a certificate that is distrusted"
+    end
+    nil
+  end
+
   # Why *certificate*'s key is too weak to be in a chain, or too large to
   # be checked with, or nil.
   private def self.weak_key(certificate : Certificate) : String?
@@ -628,6 +654,8 @@ pub struct X509
   private def self.issuer_error(child : Certificate, child_at : Int32, issuer : Certificate, issuer_at : Int32,
                                 chain : Array(Certificate), search : X509Search) : String?
     name = issuer.subject_name
+    distrusted = distrusted_error(issuer, search)
+    return distrusted if distrusted
     now = search.now
     return "#{name} is not valid at #{now}: from #{issuer.not_before} to #{issuer.not_after}" unless issuer.valid_at?(now)
     weak = weak_key(issuer)
@@ -734,6 +762,10 @@ class X509Search
   getter roots : Array(Certificate)
   getter now : Time
   getter purpose : X509Purpose
+  # Certificates never to be trusted, each as its DER, and the
+  # SubjectPublicKeyInfo of each that has one to find.
+  getter distrusted : Array(Array(UInt8))
+  getter distrusted_keys : Array(Array(UInt8))
   # Why each candidate that failed did.
   getter failures : Array(String)
   # Candidates weighed, and comparisons of a name with a constraint.
@@ -750,7 +782,14 @@ class X509Search
   getter judged : Array(Bool)
   getter verdicts : Array(String?)
 
-  def initialize(@intermediates : Array(Certificate), @roots : Array(Certificate), @now : Time, @purpose : X509Purpose)
+  def initialize(@intermediates : Array(Certificate), @roots : Array(Certificate), @now : Time, @purpose : X509Purpose,
+                 distrusted : Array(Array(UInt8))?)
+    @distrusted = distrusted || [] of Array(UInt8)
+    @distrusted_keys = [] of Array(UInt8)
+    @distrusted.each do |der|
+      info = X509Keys.info_of(der)
+      @distrusted_keys << info if info
+    end
     count = 1 + @intermediates.size + @roots.size
     @failures = [] of String
     @checks = 0
@@ -996,6 +1035,22 @@ struct X509Keys
     else
       X509Error.new("a key for #{oid}, which this does not read")
     end
+  end
+
+  # The SubjectPublicKeyInfo in a certificate's DER, as written, or nil
+  # where there is none to find: the sixth value of its TBSCertificate
+  # after the version, whatever the rest of it says, so that a
+  # certificate `Certificate.parse` refuses still names its key.
+  def self.info_of(der : Array(UInt8)) : Array(UInt8)?
+    whole = Der.parse(der)
+    return nil if whole.is_a?(Asn1Error)
+    outer = whole.sequence
+    return nil if outer.is_a?(Asn1Error) || outer.empty?
+    tbs = outer[0].sequence
+    return nil if tbs.is_a?(Asn1Error)
+    at = tbs.size > 0 && tbs[0].context?(0) ? 6 : 5
+    return nil unless tbs.size > at && tbs[at].universal?(DerTag::SEQUENCE)
+    tbs[at].raw
   end
 
   # A key's kind, for a sentence.

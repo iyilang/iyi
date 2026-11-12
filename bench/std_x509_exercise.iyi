@@ -14,8 +14,9 @@
 # certificates, PEM, and Ed25519 keys and signatures (RFC 8410), held and
 # refused, and what a search costs: chains written here, their names and
 # constraints by the hundred and their RSA keys past 8192 bits, each
-# refused before the work is done, and an IPv4-mapped IPv6 address held
-# to the ranges its IPv4 address is. The modes the gate script drives:
+# refused before the work is done, an IPv4-mapped IPv6 address held to
+# the ranges its IPv4 address is, and chains refused at a certificate
+# given as distrusted or at its key. The modes the gate script drives:
 #   verify FILE   each line `host leaf intermediates roots`, certificates
 #                 in hex and lists joined by `,` (`-` for none), checked
 #                 at 2026-06-01: `true` or `false: <why>`;
@@ -471,11 +472,15 @@ end
 # A version 3 certificate for *cn* under *issuer*, holding the key
 # *key_info* (a SubjectPublicKeyInfo) and signed by *signer*, valid
 # through 2026.
-def made(cn : String, issuer : String, key_info : Array(UInt8), signer : SigningKey, serial : Int32, extensions : Array(Array(UInt8))) : Certificate
+def made_der(cn : String, issuer : String, key_info : Array(UInt8), signer : SigningKey, serial : Int32, extensions : Array(Array(UInt8))) : Array(UInt8)
   tbs = seq([b("a003020102"), tlv(0x02, [serial.to_u8]), signer.algorithm_identifier, made_name(issuer),
              b("301e170d3236303130313030303030305a170d3237303130313030303030305a"), made_name(cn), key_info,
              tlv(0xA3, seq(extensions))])
-  Certificate.parse(seq([tbs, signer.algorithm_identifier, tlv(0x03, [0_u8] + signer.sign(tbs))])).or_panic
+  seq([tbs, signer.algorithm_identifier, tlv(0x03, [0_u8] + signer.sign(tbs))])
+end
+
+def made(cn : String, issuer : String, key_info : Array(UInt8), signer : SigningKey, serial : Int32, extensions : Array(Array(UInt8))) : Certificate
+  Certificate.parse(made_der(cn, issuer, key_info, signer, serial, extensions)).or_panic
 end
 
 # The SubjectPublicKeyInfo of an RSA key whose modulus is *bits* long: no
@@ -605,6 +610,47 @@ outside = made("mapped outside", "Mapped CA", leaf_key.public_key_info, mapped_k
 cost_refused X509.verify(outside, [permitting], [work_root], "11.0.0.1", NOW),
   "0:0:0:0:0:ffff:b00:1 is outside the addresses CN=Mapped CA permits", "an IPv4-mapped address outside a permitted IPv4 range"
 puts "  a host and an entry matched in either spelling; a range holds an address in both spellings, excluded and permitted"
+
+puts "== certificates that are distrusted"
+
+# What a platform keeps as never to be trusted (Windows' Disallowed
+# store, std/system_roots) is handed to X509.verify as DER: a chain is
+# refused at any certificate that is one of them, or that holds the key
+# of one under another certificate, wherever in the chain it stands.
+ca_key = made_key(6)
+other_key = made_key(7)
+distrust_ca = made("Distrust CA", "Work Root", ca_key.public_key_info, root_key, 50, [a_ca])
+distrust_leaf = made("distrust leaf", "Distrust CA", other_key.public_key_info, ca_key, 51, [alt_names(["d.example"])])
+
+def under_distrust(leaf : Certificate, ca : Certificate, root : Certificate, distrusted : Array(Array(UInt8))?) : Array(Certificate) | X509Error
+  X509.verify(leaf, [ca], [root], "d.example", NOW, X509Purpose::Server, distrusted)
+end
+
+[nil, [] of Array(UInt8), [heavy.raw, [1_u8, 2_u8, 3_u8], [] of UInt8]].each do |others|
+  trusted = under_distrust(distrust_leaf, distrust_ca, work_root, others)
+  check trusted.is_a?(Array(Certificate)) && trusted.size == 3, "a chain none of whose certificates is distrusted: #{trusted.is_a?(X509Error) ? trusted.message : ""}"
+end
+cost_refused under_distrust(distrust_leaf, distrust_ca, work_root, [heavy.raw, distrust_leaf.raw]),
+  "CN=distrust leaf is a certificate that is distrusted", "a distrusted leaf"
+cost_refused under_distrust(distrust_leaf, distrust_ca, work_root, [distrust_ca.raw]),
+  "CN=Distrust CA is a certificate that is distrusted", "a distrusted intermediate"
+cost_refused under_distrust(distrust_leaf, distrust_ca, work_root, [work_root.raw]),
+  "CN=Work Root is a certificate that is distrusted", "a distrusted root"
+# The same keys under other certificates, from another issuer: the
+# certificates differ, the SubjectPublicKeyInfo does not.
+cost_refused under_distrust(distrust_leaf, distrust_ca, work_root, [made_der("Twin CA", "Elsewhere", ca_key.public_key_info, other_key, 52, [a_ca])]),
+  "CN=Distrust CA holds the key of a certificate that is distrusted", "an intermediate holding a distrusted certificate's key"
+cost_refused under_distrust(distrust_leaf, distrust_ca, work_root, [made_der("twin leaf", "Elsewhere", other_key.public_key_info, other_key, 53, [alt_names(["e.example"])])]),
+  "CN=distrust leaf holds the key of a certificate that is distrusted", "a leaf holding a distrusted certificate's key"
+cost_refused under_distrust(distrust_leaf, distrust_ca, work_root, [made_der("Twin Root", "Elsewhere", root_key.public_key_info, other_key, 54, [a_ca])]),
+  "CN=Work Root holds the key of a certificate that is distrusted", "a root holding a distrusted certificate's key"
+# One that is no certificate to `Certificate.parse`, an extension written
+# twice, still names its key.
+unread = made_der("Twin CA", "Elsewhere", ca_key.public_key_info, other_key, 55, [a_ca, a_ca])
+check Certificate.parse(unread).is_a?(X509Error), "a distrusted certificate with an extension written twice is not read"
+cost_refused under_distrust(distrust_leaf, distrust_ca, work_root, [unread]),
+  "CN=Distrust CA holds the key of a certificate that is distrusted", "an intermediate holding the key of a distrusted certificate that cannot be read"
+puts "  a chain refused at a distrusted leaf, intermediate and root, by its bytes and by its key"
 
 puts "== a P-256 chain checked inside a task, 100 frames down"
 

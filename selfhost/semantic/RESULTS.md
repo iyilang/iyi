@@ -1,4 +1,42 @@
 # Declaration pass: measured results
+## Final measurement on `4a4b7e318` (this section supersedes the table below)
+
+Measured after five causes were fixed, one commit each: `159207eed` (private constant keeps its value), `e0182e389` (annotation declaration keeps its name), `7ce1bfa0c` (a module the file writes is located in it), `80323b985` (the file under the pass creates what it declares when the prelude reads it), `250579a75` (a `@[Primitive] self.new` is not a source constructor), and `4a4b7e318` (formatter-only whitespace in `parser.iyi`).
+
+| gate | command | exit | summary |
+|---|---|---|---|
+| declaration pass, samples | `bash selfhost/semantic/diff.sh` | 0 | agree 27, differ 0, no oracle 1 |
+| declaration pass, std | `bash selfhost/semantic/diff.sh src/std/*.iyi` | 0 | agree 120, differ 0, no oracle 0 |
+| declaration pass, prelude | `bash selfhost/semantic/diff.sh src/iyi/*.iyi` | 0 | agree 17, differ 0, no oracle 3 |
+| inference | `bash selfhost/semantic/infer_diff.sh` | 0 | 4 fixtures agree |
+| identity floor | `python3 bench/identity_floor.py` | 0 | `iyi owns its name` |
+
+Previously differing, now agree: `std/format.iyi`, `std/json.iyi`, `std/math.iyi`, `prelude/primitives.iyi`.
+
+Still no oracle (the gate's exit is 0; these are reported, not counted as differences):
+
+- `prelude/thread.iyi`, `prelude/chaos.iyi`, `prelude/chaos_points.iyi`: the oracle answers `compiler: the top-level pass declares no type in this file`. The port answers 0 entries for `thread.iyi`, 14 for `chaos.iyi` (`IyiChaos`, `IyiChaosUnit`, `IyiScheduler`, `IyiWorkers`, and their constants), and 1 for `chaos_points.iyi` (`Atomic(T)`). The oracle's answer is empty for all three. Measured, not isolated: the oracle's prelude-only path (`src/iyi` files) builds a program from the prelude and only reports types whose location is this file. `thread.iyi` sits behind platform and GC flags in `prelude.iyi`, and `chaos*.iyi` behind `-Diyi_chaos`, so the oracle compile may never reach them. Not fixed. Next step: check whether the oracle's program contains the file's types when built with the flags the prelude uses (`-Diyi_chaos` for the chaos pair), and if it does, fix the driver in `oracle.cr`.
+- `samples/iyi/std_text.iyi`: the same oracle refusal, same cause not isolated (its types need imports the pass does not resolve).
+
+### Causes fixed, and the targeted mutation for each
+
+Each mutation reverts one fix line in the working tree, runs `diff.sh` on the one file it fixes, and restores from HEAD (`git status --short` empty afterwards). The verdict is the gate's own output.
+
+| cause | file | fix | mutation | gate on mutant |
+|---|---|---|---|---|
+| `private CONST = value` assignment dropped | `std/math.iyi` | parser keeps the expression in the visibility node | restore `parse_expression` with empty body | exit 1, agree 0, differ 1 |
+| `annotation Field` declaration name dropped | `std/json.iyi` | parser keeps name; pass reports `annotationtype` | report kind `class` instead | exit 1, agree 0, differ 1 |
+| reopened `module ::X` not located in the file | `std/format.iyi` | pass reports a module the file writes | remove `entry.report_it` | exit 1, agree 0, differ 1 |
+| prelude-read file's types not counted as declared | `iyi/primitives.iyi` | file under the pass is read with reporting on, and expansion read as its own | remove `into.reporting(true) if under` | exit 1, agree 0, differ 1 |
+| `@[Primitive] self.new` counted as a source constructor | `iyi/primitives.iyi` | `declares_constructor?` ignores Primitive-marked `self.new` | drop the `!primitive` guard | exit 1, agree 0, differ 1 |
+
+Shared causes: none; each file had one cause. The `Pointer` constructor cause is the only `@[Primitive]` case measured. The other `self.new` structs in the corpus keep the rule.
+
+Formatter: `crystal tool format --check` is clean on `selfhost/parser/parser.iyi` and `selfhost/semantic/declare.iyi` at `4a4b7e318`. The formatter-only fix touched three lines of `parser.iyi` (whitespace only; `git diff -w` is empty for it).
+
+The earlier table below was measured on `8ff62d884` and is kept as the record of the starting state.
+
+## Earlier measurement on `8ff62d884`
 
 Head measured: `8ff62d884` (formatting-only commit on top of `b74b451b8`).
 Compiler: `bin/iyi` 0.21.0, built from `c77beab00`. The compiler sources are unchanged across the merge into this branch.

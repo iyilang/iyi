@@ -179,7 +179,17 @@ heap22 S6 costs, under `-Dheap_partitions`. Fresh chunks above a page
 are no longer cleared whole, and a unit parked dirty for two 100 ms
 ticks of the idle clock is collected by an idle pool worker, so an idle
 keep-alive connection's partition holds far less (bench/heap_local
-`noidle`, `nofresh`). A busy unit's collection budget doubles with each
+`noidle`, `nofresh`). std/http's HTTP/1.1 loop serves each request, its
+wait for the head included, in a call of its own and zeroes the stack
+under the loop before a wait nothing read already answers: the parked
+fiber's stale words had kept the last request alive (Windows the answer
+and its body, Linux the request and its headers; bench/http_idle and its
+copy). With 10,000 idle keep-alive connections on 4 workers, 30 s idle,
+the flag-on server's resident set is now 1.19× 0.21.0's on tssh, 1.22× on
+Linux and 1.10× on tmac (was 1.53×, 1.38× and 1.12×), and an idle
+connection's partition holds 24.4 KiB on all three (was 32.7, 27.8 and
+26.4; 5 rounds each); the flag-off build is unchanged byte for byte. A
+busy unit's collection budget doubles with each
 collection it brings on in flight, up to 4 MiB within its share of the
 heap, and is worked out again from what was kept when the unit parks, so
 request-shaped units keep at least 768 KiB: alloc_scaling ran 317 local

@@ -2021,10 +2021,10 @@ pub struct Server
     wrote_last ? conn.close : conn.close_now
   end
 
-  # HTTP/1.1's requests on *conn*, one after another: whether this side
-  # wrote last - an answer or a refusal - when they end.
-  private def self.serve_h1(conn : Conn, handler : Proc(Request, Response), stream_bodies : Bool, compress : Bool, remote : String?, peer : Array(Certificate), timeout_ms : Int32, request_timeout_ms : Int32) : Bool
-    while true
+  # HTTP/1.1's requests on *conn*: whether this side wrote last when they end.
+  {% begin %}{% if flag?(:heap_partitions) %}@[NoInline]{% end %}
+  private def self.{% if flag?(:heap_partitions) %}serve_h1_request{% else %}serve_h1{% end %}(conn : Conn, handler : Proc(Request, Response), stream_bodies : Bool, compress : Bool, remote : String?, peer : Array(Certificate), timeout_ms : Int32, request_timeout_ms : Int32) : Bool{% if flag?(:heap_partitions) %}?{% end %}
+    {% if flag?(:heap_partitions) %}1.times do{% else %}while true{% end %}
       started = Time.monotonic_nanoseconds.to_i64
       whole = until_whole(started, request_timeout_ms)
       conn.deadline_at(until_head(started, timeout_ms, whole))
@@ -2104,7 +2104,7 @@ pub struct Server
         return true unless drained
       end
     end
-  end
+  end{% end %}
 
   # Whether the client said this request is its last: `Connection: close`,
   # or HTTP/1.0 without keep-alive.
@@ -6253,3 +6253,31 @@ class H2Out
     SocketError.layered("write an HTTP/2 answer", fault ? fault.message : "the client reset the stream")
   end
 end
+
+# `Server.serve_h1` under `-Dheap_partitions`: the loop is here, and each
+# request - the wait for its head and its work - is a call of its own,
+# `serve_h1_request` (the flag-off `serve_h1`'s text, one pass: nil when
+# the next request is to be read), with the stack under the loop zeroed
+# (`IyiRoots.clear_dead_stack`) before a call that nothing read already
+# answers. The connection parks in that call's wait for as long as it is
+# idle, and the parked fiber's stack is scanned conservatively. With the
+# requests done in the loop, the last one's objects stayed in the frames
+# the wait laid over them - in a register a callee saved, a slot it never
+# wrote - and an idle worker's collection found them alive: on Windows
+# the answer, its body and the buffer it was written from, 5 KiB of runs
+# in classes nothing else of the connection uses; on Linux the request,
+# its headers and its body reader (C10k diag, IdleFix3, S6;
+# bench/http_idle.iyi). Here, after every line the flag-off build
+# compiles, so that build's code and the line numbers it carries stay as
+# they were.
+{% if flag?(:heap_partitions) %}
+  pub struct Server
+    private def self.serve_h1(conn : Conn, handler : Proc(Request, Response), stream_bodies : Bool, compress : Bool, remote : String?, peer : Array(Certificate), timeout_ms : Int32, request_timeout_ms : Int32) : Bool
+      while true
+        IyiRoots.clear_dead_stack if conn.available == 0
+        ended = serve_h1_request(conn, handler, stream_bodies, compress, remote, peer, timeout_ms, request_timeout_ms)
+        return ended unless ended.nil?
+      end
+    end
+  end
+{% end %}

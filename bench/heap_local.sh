@@ -29,7 +29,11 @@
 # chunk the mark left unmarked, which only the verifier sees: the
 # program's checks pass, and the verifier must name the data segment.
 # The copies' verifier reports and goes on, so each other copy must
-# reach the program's own check. Last, the same
+# reach the program's own check. bench/http_idle.iyi runs beside it, with
+# the flag and without: an idle keep-alive connection's partition holds
+# nothing of its last request, and a std/http copy whose HTTP/1.1 loop
+# serves requests in its own frame and zeroes nothing must fail there.
+# Last, the same
 # program cross-compiled to an object for each of the nine targets the
 # README names, with the flag and without it: a hook the prelude compiles
 # on a target where heap_partition.iyi is not loaded fails there.
@@ -82,6 +86,28 @@ run_case() { # label name build-flags program-args...
   fi
 }
 
+# bench/http_idle.iyi: an idle keep-alive connection's partition holds
+# nothing of its last request once collected (std/http's `serve_h1`).
+# Flags named, `IYI_OPTS` left out, so the no-flag row has no flag.
+run_http_idle() { # label name build-flags
+  local label="$1" name="$2" flags="$3"
+  # shellcheck disable=SC2086
+  if ! env -u IYI_OPTS "$IYI" build $flags -o "$WORK/$name" "$REPO/bench/http_idle.iyi" \
+       >"$WORK/$name.build.log" 2>&1; then
+    echo "$label: build failed"
+    sed -n '1,16p' "$WORK/$name.build.log"
+    status=1
+    return
+  fi
+  timeout 300 "$WORK/$name" >"$WORK/$name.out" 2>&1
+  local code=$?
+  sed 's/^/  /' "$WORK/$name.out"
+  if [ "$code" -ne 0 ]; then
+    echo "$label: exit $code"
+    status=1
+  fi
+}
+
 if [ "$PART" = all ] || [ "$PART" = cases ]; then
   echo "== partitions and poison-on-free, plain"
   run_case "verify" verify "-Dheap_partitions -Dheap_verify"
@@ -93,6 +119,9 @@ if [ "$PART" = all ] || [ "$PART" = cases ]; then
   run_case "release" release "--release -Dheap_partitions" 4 200
   echo "== without partitions"
   run_case "no flag" noflag ""
+  echo "== an idle keep-alive connection (bench/http_idle.iyi), on and off"
+  run_http_idle "http idle" httpidle "--release -Dheap_partitions"
+  run_http_idle "http idle, no flag" httpidleoff "--release"
 fi
 
 # The copy's verifier (`-Dheap_verify`, bench/heap_verify.sh's to prove)
@@ -156,6 +185,39 @@ prove_fails() { # label dir phrase awk-script file
   local verifier="the verifier did not report"
   grep -q "iyi: heap_verify: going on" "$WORK/$dir/out" && verifier="the verifier reported too"
   printf '  %s: exits %s at "%s" (%s)\n' "$label" "$code" "$(grep -m1 "FAIL: $phrase" "$WORK/$dir/out" | sed 's/^.*FAIL: //')" "$verifier"
+}
+
+# A copy of std/http.iyi patched by *awk-script*, ahead of the tree's on
+# `IYI_PATH`, under bench/http_idle.iyi: it must fail at "FAIL: phrase".
+prove_http_idle_fails() { # label dir awk-script
+  local label="$1" dir="$2" script="$3" phrase="idle:"
+  mkdir -p "$WORK/$dir/std"
+  if ! awk "$script" "$REPO/src/std/http.iyi" > "$WORK/$dir/std/http.iyi"; then
+    echo "  $label: what the copy changes is not in std/http.iyi any more"
+    status=1
+    return
+  fi
+  if ! IYI_PATH="$WORK/$dir${PSEP}$REPO/src" env -u IYI_OPTS "$IYI" build --release -Dheap_partitions \
+       -o "$WORK/$dir/program" "$REPO/bench/http_idle.iyi" >"$WORK/$dir/build.log" 2>&1; then
+    echo "  $label: the patched std/http did not build"
+    sed -n '1,12p' "$WORK/$dir/build.log"
+    status=1
+    return
+  fi
+  timeout 300 "$WORK/$dir/program" >"$WORK/$dir/out" 2>&1
+  local code=$?
+  if [ "$code" -eq 0 ]; then
+    echo "  $label: the exercise still passed, so it does not test this"
+    status=1
+    return
+  fi
+  if ! grep -q "^FAIL: $phrase" "$WORK/$dir/out"; then
+    echo "  $label: failed (exit $code), but not at the expected check"
+    sed -n '$p' "$WORK/$dir/out"
+    status=1
+    return
+  fi
+  printf '  %s: exits %s at "%s"\n' "$label" "$code" "$(grep -m1 "^FAIL: $phrase" "$WORK/$dir/out" | sed 's/^FAIL: //')"
 }
 
 if [ "$PART" = all ] || [ "$PART" = broken ]; then
@@ -362,6 +424,17 @@ if [ "$PART" = all ] || [ "$PART" = broken ]; then
      /return false unless IyiHeapVerify\.check\(record, id, parity, running\)/ { print "    @@local_ns = unmarked_local(record, id, parity)"; found = found + 1 }
      { print } END { if (found != 3) exit 3 }' \
     heap_partition.iyi
+
+  # std/http's HTTP/1.1 loop as the flag-off build has it: each request's
+  # wait and work in the loop's own frame, and nothing zeroed before the
+  # wait for the next, so the last request's objects stay in the parked
+  # fiber's stack and its partition's idle collection keeps them. Both
+  # halves go: the call alone frees most of it on Linux (the request; a
+  # 1 KiB buffer stays, IdleFix3's diag).
+  prove_http_idle_fails "a parked connection that keeps its last request" httpkeeps \
+    '/^  \{% begin %\}/ { inside = 1 } inside { found = found + gsub(/flag\?\(:heap_partitions\)/, "false") } inside && /^  end\{% end %\}$/ { inside = 0 }
+     /^# `Server\.serve_h1` under `-Dheap_partitions`/ { tail = 1 } tail { if (/IyiRoots\.clear_dead_stack if conn\.available == 0$/) found = found + 1; next }
+     { print } END { if (found != 5) exit 3 }'
 fi
 
 # The nine targets, each to an object (`--cross-compile` links nothing),

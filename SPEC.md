@@ -1052,7 +1052,7 @@ Checking it moved two things and left the shape alone.
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
 | Compiler | 24,984 lines, **written in Crystal** | 140,242 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 35,433-line own prelude + 127,051 in std |
+| Library | 8,161 lines (3,551 of it core) | 35,433-line own prelude + 127,079 in std |
 | Specs | 21,146 lines | 17,309 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
@@ -9357,7 +9357,7 @@ it in pieces, allocating nothing.
 point; four of them (box, deque, static_array, weak_ref) are marked by
 hand outright, since only a program that instantiates their generic
 bodies types them and `iyi fix src/std` cannot see them. bench has
-92 marked programs of 184, and none of `samples/iyi`'s 28 programs
+93 marked programs of 185, and none of `samples/iyi`'s 28 programs
 needs one. The specs' snippets whose stand-in for the prelude or std (a
 `@[Primitive]`, a `lib`, a `Pointer` field, a `@[Share]` type,
 `uninitialized` storage) sits in the compiled module are marked as the
@@ -9385,7 +9385,7 @@ module of its own, the way Rust crates isolate theirs. Counted at
 2f070a01e by reading the sources, blocks (`unsafe { }`) would have
 wrapped 2,338 runs of lines in src/std, 900 in src/iyi and 607 in bench,
 and a mark per declaration 1,535, 469 and 258 defs, against 84, 15 and
-92 module marks.
+93 module marks.
 
 ---
 

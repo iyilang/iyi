@@ -8016,6 +8016,7 @@ Chaos mode: combining `--cached` with chaos testing (`--chaos`, `--chaos=SEED`, 
 - *Cross-commit hits:* Hits across commits wait on RG1 compiler reproducibility in CI.
 - *Environment writes:* Environment mutations (`ENV.[]=`, `ENV.delete`, `__iyi_set_environ`) over-approximate by recording `env_all`, so any change to the runner's environment reruns a test that sets a variable. `ENV.[]=` and `ENV.delete` also name the variable, and the test reading back its own value is not an input.
 - *Windows:* Nothing on Windows is reusable yet. Its platform arms are not classified (RG3 below), so every test reaches an unclassified site and runs. macOS and Linux are classified.
+- *Host questions:* A test that asks the machine something through an `@[Effect(:host)]` def (its name, its page size, who the program runs as, an account or a group) is never reused. The answer is recorded, but a check has no way to ask the question again, so the receipt is not one it can validate and the test runs.
 - *Chaos mode:* `--cached` cannot be combined with `--chaos`, `--chaos=SEED`, or `--chaos-runs`; chaos runs always execute fresh.
 - *No speedup promised:* No speedup is promised or claimed.
 
@@ -8037,7 +8038,42 @@ The status entries below are of the tree reconciled with upstream master at `140
 
 Acceptance rows from design section 12: rows 1-22 and 25-50 are automated in `bench/stale_tests.sh` and green on darwin arm64 and x86_64 Linux. Rows 23-24 are CI-only and wait for master.
 
-**Census as measured (historical, original 141-program corpus).** Measured on macOS arm64 on this machine across 141 programs (27 C2 samples/iyi, 114 C3 bench/std_*_exercise); integrated 140-program corpus (four std exercises have since become tests) to be re-measured after merge integration:
+**Census as measured on the reconciled tree.** x86_64 Linux, the `stale-fresh` job of run 43137318814, across the 140 programs (28 C2 samples/iyi, 112 C3 bench/std_*_exercise):
+- Runtime reusable on second run: 81 of 140 (57.9%). C2: 24 of 28 (85.7%). C3: 57 of 112 (50.9%).
+- Static build-key reusable: 136 of 140. C2: 28 of 28. C3: 108 of 112.
+- Build failures: 0 of 140.
+- First not-reusable reasons by category: requested effect 56, opaque program construct 2, runner 0, internal 1. All 59 not-reusable programs passed.
+  - The 2 opaque constructs are `asm` in `std_digest_exercise.iyi` and `pointer_new` in `std_number_format_exercise.iyi`.
+  - The 1 internal reason is `std_user_exercise.iyi`, which asks the machine who the program runs as. An `@[Effect(:host)]` def records its answer, and a check has no way to ask again (`Trace.supported?` leaves `host` out), so such a test runs every time. On darwin arm64 `--explain` says `miss: run: unsupported observation host` for it; the JSON the census reads carries no reason for that miss, which is why the census calls it unclassified.
+
+| Category | Specific Reason | Occurrences |
+|---|---|---|
+| `requested effect` | `clock` | 18 |
+| `requested effect` | `process` | 12 |
+| `requested effect` | `entropy` | 10 |
+| `requested effect` | `runtime_timing` | 8 |
+| `requested effect` | `network` | 4 |
+| `requested effect` | `timer` | 3 |
+| `opaque program construct` | `asm` | 1 |
+| `requested effect` | `dir_stream` | 1 |
+| `opaque program construct` | `pointer_new` | 1 |
+| `internal` | `unclassified` (the `host` observation above) | 1 |
+
+**Overhead as measured on the reconciled tree.** The same job, wall-clock seconds while the census ran up to 8 programs at once on a 4-core runner:
+
+| Program | Default Build+Run (s) | --fresh Time (s) | --cached Validation (s) | Reached Elements | Trace Bytes | Receipt Bytes | Key Bytes |
+|---|---|---|---|---|---|---|---|
+| hello.iyi | 1.215s | 66.377s | 3.558s | 1878 | 91 B | 7908 B | 7790 B |
+| calc.iyi | 1.489s | 64.976s | 4.223s | 2033 | 91 B | 7904 B | 7787 B |
+| collections.iyi | 2.074s | 64.195s | 4.448s | 2002 | 91 B | 7932 B | 7808 B |
+| format.iyi | 1.684s | 64.740s | 4.816s | 2023 | 91 B | 8100 B | 7997 B |
+| shapes.iyi | 1.394s | 65.271s | 3.884s | 1960 | 91 B | 7912 B | 7793 B |
+| std_int_exercise.iyi | 1.798s | 63.267s | 3.946s | 2065 | 91 B | 8011 B | 7823 B |
+| std_bit_array_exercise.iyi | 2.668s | 67.103s | N/A | 1913 | 0 B | 0 B | 8051 B |
+
+A `--cached` check took 3.6 to 4.8 s there, against 1.2 to 2.1 s to build and run the same program: a hit is slower than the run it saves for each of the six. On `hello.iyi` the check spent 0.512 s hashing the call path and build key, 0.286 s and 0.250 s in the two semantic passes, and ran no codegen.
+
+**Census as measured (historical, original 141-program corpus).** Measured on macOS arm64 on this machine across 141 programs (27 C2 samples/iyi, 114 C3 bench/std_*_exercise), before four std exercises became tests; not taken again on darwin since:
 - Runtime reusable on second run: 87 of 141 (61.7%). C2: 25 of 27 (92.6%). C3: 62 of 114 (54.4%).
 - Static build-key reusable: 138 of 141 (97.9%). C2: 27 of 27. C3: 111 of 114.
 - Build failures: 0 of 141.
@@ -8059,7 +8095,7 @@ Top not-reusable reasons:
 | `requested effect` | `signal` | 1 |
 | `requested effect` | `host_state` | 1 |
 
-**Overhead as measured (historical).** Wall-clock seconds measured while the original census ran up to 8 programs at once (to be recomputed on the integrated tree):
+**Overhead as measured (historical).** Wall-clock seconds measured on macOS arm64 while the original census ran up to 8 programs at once:
 
 | Program | Default Build+Run (s) | --fresh Time (s) | --cached Validation (s) | Reached Elements | Trace Bytes | Receipt Bytes | Key Bytes |
 |---|---|---|---|---|---|---|---|
@@ -8077,10 +8113,10 @@ No speedup is claimed. No warm-cache `--fresh` numbers were measured.
 
 **Completion status (design section 13).** Completion is NOT met and the default stays off:
 - Rows 23-24 and RG6 need master CI.
-- The census has one opaque program construct that prevents reuse.
+- The census has two opaque program constructs that prevent reuse, and one internal reason: a test that asks the host a question is recorded and never reused.
 - Consumption and audit on master are unproven.
 - Cross-machine hits and hits across commits wait on RG1 in CI.
-- Integrated qualification requires full 140/140 RG2 and RG2a verification with zero exclusions.
+- A check costs more than the build and run it replaces, for every program measured.
 One thing was a bug rather than a design question: `iyi tool` printed
 `Usage: crystal tool`, because the name fix reached the top-level commands and
 not the subcommand's own usage. It prints `Usage: iyi tool` now.

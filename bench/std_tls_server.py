@@ -135,6 +135,8 @@ SCENARIOS = {
     "ticket-many": "twenty NewSessionTickets before the echo",
     "ticket-huge": "a NewSessionTicket whose ticket is 16,385 bytes, over two records",
     "ticket-bad": "a NewSessionTicket cut short",
+    "ticket-wide": "a NewSessionTicket with 16,370 extensions of no bytes, each of another type",
+    "ticket-twice": "the same, the last extension the first's type again",
     # Early data: the first connection's ticket allows 1024 bytes (4 for
     # early-small, none for early-unoffered); the second's early data is
     # taken (early: read to EndOfEarlyData under the early keys, echoed as
@@ -798,6 +800,16 @@ class Conn:
             self.sock.sendall(writer.seal(22, message(4, struct.pack(">IIB", 3600, 1, 4) + b"tick" + b"\x00\x04abcd\x00\x00")))
         if s == "ticket-bad":
             self.sock.sendall(writer.seal(22, message(4, struct.pack(">IIB", 3600, 1, 4) + b"tick" + b"\x00\x04ab")))
+        if s in ("ticket-wide", "ticket-twice"):
+            # As many extensions as a handshake message holds, none of them
+            # early_data: each is passed over (section 4.6.1), and one that
+            # comes twice is refused however far apart the two are.
+            types = list(range(1000, 1000 + 16370))
+            if s == "ticket-twice":
+                types[-1] = types[0]
+            extensions = b"".join(struct.pack(">HH", t, 0) for t in types)
+            nst = message(4, struct.pack(">IIB", 3600, 1, 4) + b"tick" + b"\x00\x04abcd" + struct.pack(">H", len(extensions)) + extensions)
+            self.sock.sendall(b"".join(writer.seal(22, nst[k:k + 16384]) for k in range(0, len(nst), 16384)))
         if early_data:
             self.sock.sendall(writer.seal(23, b"early:" + early_data))
         if (s.startswith(("resume", "early")) and psk is None) or s in ("ticket-many", "ticket-huge"):

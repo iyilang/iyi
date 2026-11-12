@@ -3305,6 +3305,8 @@ prove_broken "tickets kept past the session's limit" "ticket-many:" \
     end' '' scenarios
 prove_broken "a ticket past 16 KiB kept" "ticket-huge:" \
   '    return nil if lifetime == 0_i64 || ticket.size > TlsSession::MAX_TICKET' '    return nil if lifetime == 0_i64' scenarios
+prove_broken "an extension twice in a NewSessionTicket taken" "ticket-twice:" \
+  '      return TlsError.new("extension #{type} twice in a NewSessionTicket", TlsAlert::ILLEGAL_PARAMETER) if seen.has_key?(type)' '' scenarios
 prove_broken "a NewSessionTicket cut short taken" "ticket-bad:" \
   '    return TlsError.new("a NewSessionTicket cut short", TlsAlert::DECODE_ERROR) if reader.short? || !reader.done? || ticket.empty?' '' scenarios
 prove_broken "the client's resumption master secret short of its Finished" "FAIL resumed by OpenSSL's tickets, the default suites" \

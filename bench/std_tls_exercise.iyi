@@ -180,6 +180,8 @@ TICKET_SCENARIOS = [
   {"ticket-many", 8, ""},
   {"ticket-huge", 0, ""},
   {"ticket-bad", 0, "a NewSessionTicket cut short (decode_error)"},
+  {"ticket-wide", 1, ""},
+  {"ticket-twice", 0, "extension 1000 twice in a NewSessionTicket (illegal_parameter)"},
 ]
 
 # A connection to the scripted server for *name*, through *session*, or

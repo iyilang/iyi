@@ -2471,14 +2471,14 @@ pub class TlsClient < TlsConnection
     ticket = reader.bytes(reader.u16)
     list = TlsReader.new(reader.bytes(reader.u16))
     return TlsError.new("a NewSessionTicket cut short", TlsAlert::DECODE_ERROR) if reader.short? || !reader.done? || ticket.empty?
-    seen = [] of Int32
+    seen = {} of Int32 => Bool
     early = 0_i64
     until list.done?
       type = list.u16
       data = list.bytes(list.u16)
       return TlsError.new("NewSessionTicket extensions cut short", TlsAlert::DECODE_ERROR) if list.short?
-      return TlsError.new("extension #{type} twice in a NewSessionTicket", TlsAlert::ILLEGAL_PARAMETER) if seen.includes?(type)
-      seen << type
+      return TlsError.new("extension #{type} twice in a NewSessionTicket", TlsAlert::ILLEGAL_PARAMETER) if seen.has_key?(type)
+      seen[type] = true
       # Section 4.6.1: an extension a client does not know is passed over.
       next unless type == 42
       field = TlsReader.new(data)
@@ -2511,13 +2511,13 @@ pub class TlsClient < TlsConnection
     # which this client does not offer; in the handshake it is empty.
     return TlsError.new("a CertificateRequest with a request context in the handshake", TlsAlert::ILLEGAL_PARAMETER) unless context.empty?
     schemes = nil
-    seen = [] of Int32
+    seen = {} of Int32 => Bool
     until list.done?
       type = list.u16
       data = list.bytes(list.u16)
       return TlsError.new("a CertificateRequest cut short", TlsAlert::DECODE_ERROR) if list.short?
-      return TlsError.new("extension #{type} twice in a CertificateRequest", TlsAlert::ILLEGAL_PARAMETER) if seen.includes?(type)
-      seen << type
+      return TlsError.new("extension #{type} twice in a CertificateRequest", TlsAlert::ILLEGAL_PARAMETER) if seen.has_key?(type)
+      seen[type] = true
       if type == 13
         field = TlsReader.new(data)
         schemes = TlsBytes.u16_list(field.bytes(field.u16))
@@ -2675,19 +2675,19 @@ pub class TlsClient < TlsConnection
     extensions = reader.bytes(reader.u16)
     return TlsError.new("a ServerHello cut short", TlsAlert::DECODE_ERROR) if reader.short? || !reader.done?
     found = [] of {Int32, Array(UInt8)}
-    seen = [] of Int32
+    seen = {} of Int32 => Bool
     list = TlsReader.new(extensions)
     until list.done?
       type = list.u16
       data = list.bytes(list.u16)
       return TlsError.new("ServerHello extensions cut short", TlsAlert::DECODE_ERROR) if list.short?
-      return TlsError.new("extension #{type} twice in a ServerHello", TlsAlert::ILLEGAL_PARAMETER) if seen.includes?(type)
-      seen << type
+      return TlsError.new("extension #{type} twice in a ServerHello", TlsAlert::ILLEGAL_PARAMETER) if seen.has_key?(type)
+      seen[type] = true
       found << {type, data}
     end
     # With TLS 1.2 asked for, a ServerHello with no supported_versions is
     # 1.2's; without, it is a server that does not speak 1.3, refused below.
-    if !seen.includes?(43) && @config.min_version == TlsVersion::TLS12
+    if !seen.has_key?(43) && @config.min_version == TlsVersion::TLS12
       return server_hello12(version, random, echo, suite, compression, found, session)
     end
     return TlsError.new("a ServerHello of legacy version #{version}", TlsAlert::PROTOCOL_VERSION) unless version == 0x0303
@@ -2759,7 +2759,7 @@ pub class TlsClient < TlsConnection
         return TlsError.new("extension #{type} in a ServerHello, which was not offered", TlsAlert::UNSUPPORTED_EXTENSION)
       end
     end
-    return TlsError.new("the server does not speak TLS 1.3", TlsAlert::PROTOCOL_VERSION) unless seen.includes?(43)
+    return TlsError.new("the server does not speak TLS 1.3", TlsAlert::PROTOCOL_VERSION) unless seen.has_key?(43)
     hello = TlsServerHello.new(retry, suite, group, share, cookie, false, random)
     hello.psk_identity = psk_identity
     hello.ech_confirmation = confirmation
@@ -2829,13 +2829,13 @@ pub class TlsClient < TlsConnection
     reader = TlsReader.new(message[4, message.size - 4])
     list = TlsReader.new(reader.bytes(reader.u16))
     return TlsError.new("EncryptedExtensions cut short", TlsAlert::DECODE_ERROR) if reader.short? || !reader.done?
-    seen = [] of Int32
+    seen = {} of Int32 => Bool
     until list.done?
       type = list.u16
       data = list.bytes(list.u16)
       return TlsError.new("EncryptedExtensions cut short", TlsAlert::DECODE_ERROR) if list.short?
-      return TlsError.new("extension #{type} twice in EncryptedExtensions", TlsAlert::ILLEGAL_PARAMETER) if seen.includes?(type)
-      seen << type
+      return TlsError.new("extension #{type} twice in EncryptedExtensions", TlsAlert::ILLEGAL_PARAMETER) if seen.has_key?(type)
+      seen[type] = true
       case type
       when 0
         problem = server_name_ack(data)
@@ -2938,13 +2938,13 @@ pub class TlsClient < TlsConnection
   # module's header says.
   private def entry_status(extensions : Array(UInt8), leaf : Bool) : TlsError?
     list = TlsReader.new(extensions)
-    seen = [] of Int32
+    seen = {} of Int32 => Bool
     until list.done?
       type = list.u16
       data = list.bytes(list.u16)
       return TlsError.new("a certificate entry's extensions cut short", TlsAlert::DECODE_ERROR) if list.short?
-      return TlsError.new("extension #{type} twice in a certificate entry", TlsAlert::ILLEGAL_PARAMETER) if seen.includes?(type)
-      seen << type
+      return TlsError.new("extension #{type} twice in a certificate entry", TlsAlert::ILLEGAL_PARAMETER) if seen.has_key?(type)
+      seen[type] = true
       return TlsError.new("a certificate entry with extension #{type}, which nobody asked for", TlsAlert::UNSUPPORTED_EXTENSION) unless type == 5
       staple = TlsClient.certificate_status(data)
       return staple if staple.is_a?(TlsError)
@@ -5903,10 +5903,10 @@ pub class TlsEchConfig
   # not know (section 4.2; none is defined yet).
   def hpke_suite : HpkeSuite?
     return nil unless TlsEchConfig.public_name?(@public_name)
-    seen = [] of Int32
+    seen = {} of Int32 => Bool
     @extensions.each do |extension|
-      return nil if seen.includes?(extension[0]) || (extension[0] & 0x8000) != 0
-      seen << extension[0]
+      return nil if seen.has_key?(extension[0]) || (extension[0] & 0x8000) != 0
+      seen[extension[0]] = true
     end
     @suites.each do |suite|
       next if suite[1] == HpkeAead::ExportOnly.value

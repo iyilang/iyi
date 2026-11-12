@@ -7396,8 +7396,9 @@ one that matches has its line written again as `h2:`, with one line on
 stderr saying so - written again unread, it would have pinned whatever
 the first build after an upgrade found checked out, moved tag or not.
 Under the cache's `mod/`, where nothing is written, it stays as it is
-and holds its checkout to nothing; that file is a dependency's own, and
-the tree it sits in is pinned, file included, by whoever required it. The
+and is compared the same way: a dependency's own `iyi.sum` saying `s1:`
+for what it requires is refused there when the checkout does not hash to
+it, as it was before `h2:`. The
 rule the build taught: **a checkout is read-only.** The first version let
 a build whose entry sat inside the module cache write a sum *into the
 checkout*, which changed the tree a user's sum pinned — the verifier

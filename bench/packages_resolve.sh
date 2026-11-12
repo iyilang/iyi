@@ -368,6 +368,41 @@ grep -q "says $wrong_s1, the checkout hashes to $liba_s1" unmatched.log || {
 }
 [ "$unmatched_written" -eq 0 ] || { echo "a refused build rewrote iyi.sum"; exit 1; }
 
+# The same line where it cannot be written again: a dependency's own
+# `iyi.sum`, read by a build inside its cached checkout. Nothing is
+# written under the cache's `mod/`, and for a while nothing was compared
+# there either - an `s1:` line of any forty digits passed. The file is
+# put into the cached libb for this step and taken back out, because the
+# app's sum pins that tree without it.
+step "an s1: line in a cached dependency's own iyi.sum is held to its checkout, and stays s1:"
+libb_cached="$IYI_CACHE_DIR/mod/example.test/user/libb@v1.0.0"
+[ -f "$libb_cached/libb.iyi" ] || { echo "no cached libb at $libb_cached"; exit 1; }
+printf 'example.test/user/liba v1.1.0 %s\n' "$wrong_s1" > "$libb_cached/iyi.sum"
+(cd "$libb_cached" && "$IYI" check libb.iyi) > cached_wrong.log 2>&1
+cached_wrong_status=$?
+printf 'example.test/user/liba v1.1.0 %s\n' "$liba_s1" > "$libb_cached/iyi.sum"
+cp "$libb_cached/iyi.sum" cached.sum
+(cd "$libb_cached" && "$IYI" check libb.iyi) > cached_right.log 2>&1
+cached_right_status=$?
+cmp -s "$libb_cached/iyi.sum" cached.sum
+cached_written=$?
+rm -f "$libb_cached/iyi.sum" cached.sum
+if [ "$cached_wrong_status" -eq 0 ]; then
+  echo "inside the module cache an s1: line its checkout does not match was compared with nothing"
+  exit 1
+fi
+grep -q "says $wrong_s1, the checkout hashes to $liba_s1" cached_wrong.log || {
+  echo "the cached libb's unmatched s1: line was not refused naming both s1: hashes:"
+  tail -6 cached_wrong.log
+  exit 1
+}
+if [ "$cached_right_status" -ne 0 ]; then
+  echo "inside the module cache an s1: line its checkout matches was refused:"
+  tail -6 cached_right.log
+  exit 1
+fi
+[ "$cached_written" -eq 0 ] || { echo "a check inside the module cache rewrote the cached libb's iyi.sum"; exit 1; }
+
 # ── 5b. A package's tree may contain a symbolic link ─────────────────────
 # The hash is over the checkout's files, and a walk that asks the *target*
 # whether it is a directory walks through a link — into the package's own

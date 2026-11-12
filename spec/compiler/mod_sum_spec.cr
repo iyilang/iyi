@@ -182,6 +182,37 @@ describe Iyi::Mod::Sum do
       end
     end
 
+    # A dependency's own `iyi.sum`, read where the dependency was fetched
+    # to: nothing is written under the cache's `mod/`, so the line is not
+    # restated there, and for a while it was not compared either - a line
+    # of forty zeros passed.
+    it "holds an `s1:` line to its checkout inside the module cache, and writes nothing there" do
+      with_tempdir do
+        checkout = tree "liba", {"sub/liba.iyi" => "x\n"}
+        cached = File.join(Iyi::CacheDir.instance.join("mod"), "spec-sum-#{Random::Secure.hex(8)}@v1.0.0")
+        Dir.mkdir_p cached
+        begin
+          sum = File.join(cached, "iyi.sum")
+          picked = [selection("example.test/user/liba", "1.0.0")]
+          held = unframed({"sub/liba.iyi" => "x\n"})
+
+          wrong = "example.test/user/liba v1.0.0 s1:#{"0" * 40}\n"
+          File.write sum, wrong
+          expect_raises(Iyi::Mod::ModError, /is not what it was: .* says s1:0{40}, the checkout hashes to #{held}\./) do
+            Iyi::Mod::Sum.check(cached, picked) { checkout }
+          end
+          File.read(sum).should eq wrong
+
+          right = "example.test/user/liba v1.0.0 #{held}\n"
+          File.write sum, right
+          Iyi::Mod::Sum.check(cached, picked) { checkout }
+          File.read(sum).should eq right
+        ensure
+          FileUtils.rm_rf cached
+        end
+      end
+    end
+
     it "refuses a line that is neither" do
       with_tempdir do
         checkout = tree "liba", {"liba.iyi" => "x\n"}

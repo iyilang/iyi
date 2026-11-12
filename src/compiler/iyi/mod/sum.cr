@@ -38,9 +38,9 @@
 # with one line on stderr saying so. Rewriting it unread would have pinned
 # whatever the first build after an upgrade found checked out, moved tag
 # or not. Inside the module cache, where nothing is written, such a line
-# stays as it is and holds its checkout to nothing — it is a dependency's
-# own file there, and the tree it sits in is already pinned, that file
-# included, by the `h2:` line of whoever required it.
+# stays as it is and is compared the same way: a dependency's own
+# `iyi.sum` that says `s1:` for what it requires is still a claim about
+# that checkout, and a build there refuses one that does not hold.
 require "crystal/digest/sha1"
 require "crystal/digest/sha256"
 require "../codegen/cache_dir"
@@ -72,13 +72,12 @@ module Iyi::Mod
         actual = tree_hash(tree)
         if expected = known[key]?
           if expected.starts_with?(LEGACY)
-            # Held to the hash it was written with before it is written
-            # again, except where it cannot be written again.
-            unless read_only
-              was = legacy_tree_hash(tree)
-              raise changed(key, sum_path, expected, was) unless expected == was
-              restated += 1
-            end
+            # Held to the hash it was written with, wherever it is read.
+            # Where it cannot be written again it stays as it is.
+            was = legacy_tree_hash(tree)
+            raise changed(key, sum_path, expected, was) unless expected == was
+            next if read_only
+            restated += 1
           else
             next if expected == actual
             raise changed(key, sum_path, expected, actual)

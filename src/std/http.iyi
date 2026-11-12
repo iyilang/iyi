@@ -3071,7 +3071,7 @@ struct ProxyRoute
     return HTTPError.new("the proxy's URL names no host") unless host && host.bytesize > 0
     credential = nil.as(String?)
     if user = uri.user
-      credential = "Basic " + Base64.encode(user + ":" + (uri.password || ""))
+      credential = "Basic " + Base64.encode_secret(user + ":" + (uri.password || ""))
     end
     ProxyRoute.new(host, uri.port || 80, credential, "proxy " + written)
   end

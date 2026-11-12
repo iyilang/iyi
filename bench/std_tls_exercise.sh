@@ -3277,6 +3277,18 @@ prove_broken "a ticket's chain taken unchecked" "a ticket's chain is checked und
   '    !X509.verify(chain[0], chain[1, chain.size - 1], roots, nil, @config.now || Time.utc, X509Purpose::Client).is_a?(X509Error)' '    true'
 prove_broken "a ticket's chain carried to a configuration that asks for none" "a ticket's chain is not carried to a configuration that asks for none" \
   '    return chain.empty? unless roots' '    return true unless roots'
+prove_broken "records without data read without end" "idle-over:" \
+  '    return nil if @idle_records <= MAX_IDLE_RECORDS' '    return nil' scenarios
+prove_broken "the records without data counted one short" "idle-most:" \
+  '    return nil if @idle_records <= MAX_IDLE_RECORDS' '    return nil if @idle_records < MAX_IDLE_RECORDS' scenarios
+prove_broken "a KeyUpdate not counted among the records without data" "idle-kinds:" \
+  '        problem = post_handshake(content) || idle_record' '        problem = post_handshake(content)' scenarios
+prove_broken "the count of records without data not started again by data" "idle-again:" \
+  '        @idle_records = 0
+' '' scenarios
+prove_broken "an empty handshake record taken after the handshake" "empty-handshake:" \
+  '    return TlsError.new("an empty handshake record", TlsAlert::UNEXPECTED_MESSAGE) if content.empty?
+    add_handshake(content)' '    add_handshake(content)' scenarios
 prove_broken "a binder over the whole ClientHello" "resume: refused" \
   '    binder = schedule.binder(offered.psk, prefix + hello[0, hello.size - binders.size])' '    binder = schedule.binder(offered.psk, prefix + hello)' scenarios
 prove_broken "a ticket's age sent without its age_add" "resume: refused" \

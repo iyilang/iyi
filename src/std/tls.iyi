@@ -973,6 +973,7 @@ pub abstract class TlsConnection
   @handshake_at : Int32 = 0
   # ChangeCipherSpec records passed over: a peer sends one (appendix D.4).
   @ccs_seen : Int32 = 0
+  @idle_records : Int32 = 0
   # When what is being read must be in by (monotonic ns), or 0: the whole
   # handshake under its deadline, and one `read` under the socket's read
   # timeout - which bounds each wait of the socket, where one record a
@@ -1020,6 +1021,13 @@ pub abstract class TlsConnection
   # More than a peer has any reason to send: past it, the records are
   # refused rather than passed over without end.
   MAX_CCS = 16
+  # Records after the handshake, one after another, that carry nothing a
+  # read can answer with - application data of no bytes, a KeyUpdate, a
+  # NewSessionTicket, a user_canceled warning, TLS 1.2's HelloRequest:
+  # past this many the peer is refused rather than read from without end,
+  # as OpenSSL refuses it (at 32) and Go (at 16). A record of data starts
+  # the count again.
+  MAX_IDLE_RECORDS = 32
   # How long a handshake may take, from the first byte to the peer's
   # Finished, unless the caller gives another bound: a peer that sends a
   # byte now and then holds a connection no longer than this.
@@ -1119,14 +1127,19 @@ pub abstract class TlsConnection
       when TlsRecords::APPLICATION_DATA
         cut = cut_message(type)
         return fail(cut) if cut
-        next if content.empty?
+        if content.empty?
+          idle = idle_record
+          return fail(idle) if idle
+          next
+        end
+        @idle_records = 0
         if content.size > max
           @pending = content[max, content.size - max]
           return TlsBytes.text(content[0, max])
         end
         return TlsBytes.text(content)
       when TlsRecords::HANDSHAKE
-        problem = post_handshake(content)
+        problem = post_handshake(content) || idle_record
         return fail(problem) if problem
       when TlsRecords::ALERT
         # user_canceled after the handshake is a warning (section 6.1): the
@@ -1136,7 +1149,11 @@ pub abstract class TlsConnection
         return fail(answer) if answer
         cut = cut_message(type)
         return fail(cut) if cut
-        next if warning
+        if warning
+          idle = idle_record
+          return fail(idle) if idle
+          next
+        end
         # close_notify: no more from the peer. This side's own goes out
         # with `close` or `close_write`, never from a read - a task writing
         # beside this one owns the socket's writes. In TLS 1.3 this side
@@ -1150,6 +1167,14 @@ pub abstract class TlsConnection
         return fail(TlsError.new("a record of type #{type} after the handshake", TlsAlert::UNEXPECTED_MESSAGE))
       end
     end
+  end
+
+  # One more record that brought no data: refused past `MAX_IDLE_RECORDS`
+  # of them in a row.
+  private def idle_record : TlsError?
+    @idle_records = @idle_records + 1
+    return nil if @idle_records <= MAX_IDLE_RECORDS
+    TlsError.new("more than #{MAX_IDLE_RECORDS} records without data", TlsAlert::UNEXPECTED_MESSAGE)
   end
 
   # Section 5.1: a handshake message split across records has no record of
@@ -1378,6 +1403,9 @@ pub abstract class TlsConnection
   # handshake, is owed its refusal; a ClientHello, the only one a client
   # sends, is refused.
   private def post_handshake(content : Array(UInt8)) : TlsError?
+    # Section 5.1, and RFC 5246 section 6.2.1: no handshake record is
+    # empty, after the handshake as in it.
+    return TlsError.new("an empty handshake record", TlsAlert::UNEXPECTED_MESSAGE) if content.empty?
     add_handshake(content)
     while true
       message = take_handshake

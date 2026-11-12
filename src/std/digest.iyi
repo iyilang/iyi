@@ -25,6 +25,11 @@
 # where the last one stopped. XXH64 is the hash std/zstd's frames carry
 # the low half of: `checksum(data, seed)`, or `update` in pieces and a
 # `digest` that can be asked midway.
+#
+# `ValueBarrier` is not a digest. It hides a mask from the optimiser,
+# for the code that picks by a secret, and it lives here because std/mlkem,
+# std/p256, std/p384 and std/curve25519 all import this module and share
+# no other: one barrier, written once, with no import any of them lacked.
 
 @[Unsafe("each hash reads its input and writes its digest through raw byte pointers, a block at a time, for speed")]
 module std/digest
@@ -1485,5 +1490,54 @@ struct DigestUtil
 
   private def self.nibble(n : Int32) : UInt8
     n < 10 ? (48 + n).to_u8 : (87 + n).to_u8
+  end
+end
+
+# A value handed back as one the optimiser knows nothing about: what a
+# mask goes through before std's constant-time code picks by it. A mask
+# made from a secret is 0 or all ones, and LLVM, once it has seen that,
+# may write `(a & mask) | (b & ~mask)` as a choice instead: one of two
+# pointers kept by a conditional move and a single load through it (what
+# a --release build made of std/mlkem's K against its implicit-rejection
+# key), or a conditional jump (what one made of std/p256's table entries,
+# on each digit of a nonce). The first shows which was picked by the
+# address read, the second by the branch taken. A mask that has been
+# through here is a number like any other to the optimiser, so the `&`,
+# `|` and `^` written are the instructions emitted, on both operands.
+#
+# On x86_64 and aarch64 it is an empty inline assembly whose output is
+# tied to its input, BoringSSL's `value_barrier_w`: no instruction, the
+# value stays in the register it was in, and LLVM does not reason about
+# what an `asm` does to its operands. On every other target it is a
+# volatile load of the value from a stack slot, which LLVM has to perform
+# and may assume nothing of: a store and a load where the others cost
+# nothing. Held on the first two by the --release assembly the gates of
+# the modules above read. The other targets' assembly has not been read:
+# the LLVM this was written against carries those two back ends alone.
+#
+# It hides one value from one compiler. It does not make the arithmetic
+# around it constant-time, and it says nothing of what runs the code
+# afterwards: a wasm32 module is compiled again by its engine.
+pub struct ValueBarrier
+  # *x*, unchanged.
+  @[AlwaysInline]
+  def self.u64(x : UInt64) : UInt64
+    {% if flag?(:x86_64) || flag?(:aarch64) %}
+      asm("" : "=r"(x) : "0"(x))
+      x
+    {% else %}
+      IyiAtomic.load(pointerof(x), :not_atomic, true)
+    {% end %}
+  end
+
+  # *x*, unchanged.
+  @[AlwaysInline]
+  def self.u8(x : UInt8) : UInt8
+    {% if flag?(:x86_64) || flag?(:aarch64) %}
+      asm("" : "=r"(x) : "0"(x))
+      x
+    {% else %}
+      IyiAtomic.load(pointerof(x), :not_atomic, true)
+    {% end %}
   end
 end

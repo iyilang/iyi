@@ -16,9 +16,9 @@
 # seed of a key pair (FIPS 203's d and z, the "internal" key generation of
 # Algorithm 16) and the 32-byte m of an encapsulation (Algorithm 17).
 # `Random::Secure.random_bytes` from std/random is where they come from.
-# This module imports std/digest's SHA3-256, SHA3-512, SHAKE128 and
-# SHAKE256 and nothing else, so a package that uses it is not counted as
-# reaching the operating system (`iyi mod reach`).
+# This module imports std/digest's SHA3-256, SHA3-512, SHAKE128, SHAKE256
+# and `ValueBarrier` and nothing else, so a package that uses it is not
+# counted as reaching the operating system (`iyi mod reach`).
 #
 # The arithmetic is FIPS 203's: polynomials of 256 coefficients modulo
 # q = 3329, multiplied in the NTT domain (Algorithms 9 to 12), the zetas
@@ -38,8 +38,12 @@
 # whatever the values; every loop bound is a size. Decapsulation decrypts,
 # encrypts again and compares the ciphertexts by OR-ing the XOR of every
 # byte, and the comparison's result picks between the real key and the
-# implicit-rejection key J(z || c) by masks over all 32 bytes of both:
-# FIPS 203 Algorithm 18 with no early exit. How that was checked: by
+# implicit-rejection key J(z || c) by a mask over all 32 bytes of both:
+# FIPS 203 Algorithm 18 with no early exit. The mask goes through
+# std/digest's `ValueBarrier` before it is used, so the compiler cannot
+# know it is 0 or all ones and has to read both keys' bytes and combine
+# them; without that, LLVM picked one key's address by a conditional move
+# and read that key alone (see `decapsulate`). How that was checked: by
 # reading, every `if`, `while`, `? :`, `unless` and `[]` on the paths
 # from `decapsulate` and the key generation was listed, and each depends on
 # a size, a loop counter, the ciphertext (which is public) or the
@@ -86,14 +90,19 @@
 # |t| = 2.1 to 2.4 over 50,000; one key and its ciphertext against 64
 # other keys and theirs, |t| = 5.2 to 6.3 over 50,000 (under 10 is no
 # leak seen, on a machine at load 8 to 11). The --release assembly of
-# `decapsulate` reads every ciphertext byte in the re-encryption compare
-# with no early exit and keeps K or K-bar by masks; its conditional jumps
-# compare loop counters, constants and pointer ranges.
+# `decapsulate` (x86_64 and aarch64) reads every ciphertext byte in the
+# re-encryption compare with no early exit, and for each of the 32 bytes
+# loads K's and K-bar's, xors them, ands the mask and xors K-bar's again;
+# its conditional jumps compare loop counters, constants and pointer
+# ranges. Timing cannot tell a key picked by a conditional move of its
+# address from one picked by masks, and did not: the first is what the
+# assembly showed before the mask went through the barrier, at the |t|
+# above. bench/std_mlkem_exercise.sh reads the assembly for it.
 
 @[Unsafe("keys and ciphertexts are read through raw byte pointers by the lattice arithmetic, for speed")]
 module std/mlkem
 
-import std/digest::{SHA3_256, SHA3_512, SHAKE128, SHAKE256}
+import std/digest::{SHA3_256, SHA3_512, SHAKE128, SHAKE256, ValueBarrier}
 
 # What is wrong with a key or a ciphertext from outside: `message` is the
 # sentence.
@@ -241,8 +250,14 @@ pub struct MlKem768PrivateKey
   # The 32-byte shared secret *ciphertext* carries, FIPS 203 Algorithm 18,
   # or an `MlKemError` for a ciphertext that is not 1,088 bytes. A
   # ciphertext that does not re-encrypt to itself is answered with the
-  # implicit-rejection key J(z || c), chosen by masks: the caller cannot
-  # tell the two apart, and neither can the time taken.
+  # implicit-rejection key J(z || c), chosen by a mask: the caller cannot
+  # tell the two apart, and neither can the time taken or the addresses
+  # read. Every byte of the answer is K-bar's xored with the mask's share
+  # of K's difference from it, both loaded. The mask is 0xff or 0, and a
+  # compiler that knows so may read only the key it keeps: a --release
+  # build did, `cmovle` on the two arrays and one load through the winner,
+  # which is the validity of the ciphertext in the address of a load. So
+  # the mask is passed through `ValueBarrier` first.
   def decapsulate(ciphertext : String | Array(UInt8)) : Array(UInt8) | MlKemError
     c, n = MlKemBytes.of(ciphertext)
     return MlKemError.new("ML-KEM-768: a ciphertext is 1088 bytes, not #{n}") unless n == MlKem768::CIPHERTEXT_SIZE
@@ -258,11 +273,11 @@ pub struct MlKem768PrivateKey
     end
     # 0xff when every byte matched (diff - 1 borrows only from zero), 0 if not.
     keep = ((diff &- 1_u32) >> 31).to_u8
-    keep = 0_u8 &- keep
+    keep = ValueBarrier.u8(0_u8 &- keep)
     secret = Array(UInt8).new(32, 0_u8)
     i = 0
     while i < 32
-      secret[i] = (g[i] & keep) | (rejected[i] & ~keep)
+      secret[i] = rejected[i] ^ ((g[i] ^ rejected[i]) & keep)
       i = i + 1
     end
     secret

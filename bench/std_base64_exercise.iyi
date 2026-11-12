@@ -105,6 +105,10 @@ assert_str "ABCD", Base64.decode("QUJDRA=="), "a full group then a padded one"
 # All six ASCII whitespace bytes, as the module's header says: `\v` and
 # `\f` were refused as invalid bytes.
 assert_str "ABCD", Base64.decode("QUJD\vRA=\f="), "vertical tab and form feed are whitespace"
+# And what the header says of the two alphabets and of a last character's
+# spare bits: read loosely here, and refused by `decode_secret` below.
+assert_str "A", Base64.decode("QR=="), "bits past the data dropped by decode"
+assert_str Base64.decode("Q+_/"), Base64.decode("Q-_/"), "the two alphabets in one text read by decode"
 puts "  decode and round trip"
 
 puts "\n== decode?"

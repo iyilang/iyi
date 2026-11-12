@@ -24,6 +24,15 @@
 # text would be the one choosing it. `decode` is for a text the program
 # made itself.
 #
+# Both read loosely, and stay so for the texts other encoders write. The
+# two alphabets may be mixed in one text (`"Q-_/"` is `"Q+_/"`), and the
+# bits a last character sets past the data are dropped: `"QR=="` and
+# `"QX=="` are `"A"` as `"QQ=="` is (RFC 4648 §3.5 lets a decoder refuse
+# them, and std/base32 does). One byte string has many texts that way.
+# That is nothing to a caller that uses the bytes - a signature is over
+# them - and wrong for one that compares, stores or counts the texts,
+# which wants `decode_secret`'s reading: one text for each byte string.
+#
 # `encode_secret` and `decode_secret` are for key material: the body of a
 # private key's PEM block. `encode` reads a 16 KiB table of character
 # pairs at an index made of twelve bits of the data, and `decode` a table

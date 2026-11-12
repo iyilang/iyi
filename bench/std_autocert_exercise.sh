@@ -417,9 +417,9 @@ prove_broken tls "std/tls's identity source not asked in TLS 1.2" "a TLS 1.2 cli
 # Each break below is the module as it was before the 0.19.0 PKI
 # review's findings 2 and 3, one rule at a time.
 prove_broken autocert "a cached chain kept unchecked" "a cached chain from a CA the manager does not trust is not shown" local \
-  '    verified = X509.verify(identity.leaf, chain[1, chain.size - 1], trust!, name)' '    verified = chain'
+  '    verified = X509.verify(identity.leaf, chain[1, chain.size - 1], trust!, name, distrusted: @roots ? nil : TlsConfig.new.distrusted)' '    verified = chain'
 prove_broken autocert "an issued chain kept unchecked" "a chain from a CA the manager does not trust is refused, not cached" unknown \
-  '    verified = X509.verify(identity.leaf, chain[1, chain.size - 1], trust!, name)' '    verified = chain'
+  '    verified = X509.verify(identity.leaf, chain[1, chain.size - 1], trust!, name, distrusted: @roots ? nil : TlsConfig.new.distrusted)' '    verified = chain'
 prove_broken autocert "a handshake's wait not cut to its deadline" "without run, a handshake waiting for an order ends by its" local \
   '    cut = left_ms ? left_ms < limit : false' '    cut = false'
 prove_broken autocert "an order run in the handshake that asked, with run running" "with run, the order goes on past its handshake" local \

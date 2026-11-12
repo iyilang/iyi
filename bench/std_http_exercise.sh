@@ -4292,8 +4292,10 @@ mtls_breaks "an HTTP/2 request without the client's certificate" mtls_h2 \
   '      req.peer_certificates = peer
       response = handler.call(req)' '      response = handler.call(req)'
 mtls_breaks "an upgrade's handshake presenting no certificate" mtls_upgrade \
-  '              offered.identity = under.identity
-' ''
+  '              offered = under.dup
+' '              offered = under.dup
+              offered.identity = nil
+'
 # The client through a proxy, broken in a copy: the round against the
 # Python proxy and the iyi server above must fail.
 proxy_breaks() { # proxy_breaks <label> <name> <old> <new>

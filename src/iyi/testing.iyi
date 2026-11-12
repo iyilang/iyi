@@ -204,8 +204,8 @@ class IyiTestCases
     @@taken = true
     @@report = Program.env("IYI_TEST_REPORT")
     @@only = Program.env("IYI_TEST_RUN")
-    __iyi_env_forget("IYI_TEST_REPORT")
-    __iyi_env_forget("IYI_TEST_RUN")
+    __iyi_env_forget("IYI_TEST_REPORT") if @@report.is_a?(String) # only what was set: taking a variable out
+    __iyi_env_forget("IYI_TEST_RUN") if @@only.is_a?(String)      # writes the environment (`env_all`, III.14)
   end
 
   # Whether the case runs: not when `--run TEXT` names text its name does

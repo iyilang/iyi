@@ -637,6 +637,60 @@ describe Iyi::IyiMod do
     end
   end
 
+  it "adopts std/env artifact with operator effect defs under observed and plain builds" do
+    with_tempdir("iyimod_env_operator_effects") do
+      var_name = "IYI_SPEC_ENV_#{Process.pid}"
+      File.write "main.iyi", <<-IYI
+        module main
+
+        import app/twice
+        import std/env::{ENV}
+
+        ENV["#{var_name}"] = "set"
+        puts ENV["#{var_name}"]?.inspect
+        ENV["#{var_name}"] = nil
+        puts ENV["#{var_name}"]?.inspect
+        puts App::Twice.twice(21)
+        IYI
+
+      source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
+      expected_output = %("set"\nnil\n42\n)
+
+      [true, false].each do |observed|
+        mode = observed ? "observed" : "plain"
+        mods_dir = "mods-#{mode}"
+
+        Dir.mkdir_p "app"
+        File.write "app/twice.iyi", <<-IYI
+          module app/twice
+
+          pub def twice(n : Int32) : Int32
+            n + n
+          end
+          IYI
+
+        producer = create_spec_compiler
+        producer.prelude = "iyi/prelude"
+        producer.emit_iyimod = mods_dir
+        producer.flags << "iyi_observe" if observed
+        producer.compile source, File.expand_path("from-source-#{mode}")
+        source_output = `./from-source-#{mode}`
+        source_output.should eq expected_output
+
+        File.delete "app/twice.iyi"
+
+        consumer = create_spec_compiler
+        consumer.prelude = "iyi/prelude"
+        consumer.use_iyimod = mods_dir
+        consumer.flags << "iyi_observe" if observed
+        result = consumer.compile source, File.expand_path("from-artifact-#{mode}")
+        result.program.iyi_artifact_hashes.has_key?("std/env").should be_true
+        artifact_output = `./from-artifact-#{mode}`
+        artifact_output.should eq source_output
+      end
+    end
+  end
+
   # An exported `enum`, which travels as its members and the numbers they were
   # given. Three things were in the way, each invisible until one was exported:
   # the question methods the compiler writes carried no return type, so R-2
@@ -6629,6 +6683,274 @@ describe "a module compiled against Crystal's library" do
       from_source, from_artifact = iyimod_round_trip(modules, main)
       from_source.should eq "true\n3\n4\ntrue\n"
       from_artifact.should eq from_source
+    end
+  end
+
+  it "observed producer and consumer inline effect bodies with no __iyi_effect_ artifact symbols" do
+    with_tempdir("iyimod_observed_effect_inline") do
+      modules = {
+        "helpers.iyi" => <<-IYI,
+          module helpers
+
+          import std/dir::{Dir}
+          import std/env::{ENV}
+
+          pub def probe_effects : Int32
+            ENV["X"] = "1"
+            Dir.children(".").size >= 0 ? 42 : 0
+          end
+          IYI
+      }
+      main = <<-IYI
+        module main
+
+        import helpers::{probe_effects}
+
+        puts probe_effects
+        IYI
+
+      modules.each do |path, text|
+        Dir.mkdir_p File.dirname(path)
+        File.write path, text
+      end
+      File.write "main.iyi", main
+      source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), main)
+
+      producer = create_spec_compiler
+      producer.prelude = "iyi/prelude"
+      producer.flags << "iyi_observe"
+      producer.emit_iyimod = "mods"
+      producer.compile source, File.expand_path("from-source")
+      from_source = `./from-source`
+
+      modules.each_key { |path| File.delete path }
+
+      consumer = create_spec_compiler
+      consumer.prelude = "iyi/prelude"
+      consumer.flags << "iyi_observe"
+      consumer.use_iyimod = "mods"
+      result = consumer.compile source, File.expand_path("from-artifact")
+      from_artifact = `./from-artifact`
+
+      result.program.iyi_artifact_symbols.none?(&.includes?("__iyi_effect_")).should be_true
+      from_source.should eq "42\n"
+      from_artifact.should eq from_source
+    end
+  end
+
+  it "observed warm consumer resolves artifact type ids while unimported def return type is refused" do
+    with_tempdir("iyimod_warm_std_time") do
+      modules = {
+        "app.iyi" => <<-IYI,
+          module app
+
+          import std/dir::{Dir}
+
+          pub def count_entries : Int32
+            Dir.children(".").size >= 0 ? 1 : 0
+          end
+          IYI
+      }
+      main = <<-IYI
+        module main
+
+        import app::{count_entries}
+
+        puts count_entries
+        IYI
+
+      modules.each do |path, text|
+        Dir.mkdir_p File.dirname(path)
+        File.write path, text
+      end
+      File.write "main.iyi", main
+      source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), main)
+
+      producer = create_spec_compiler
+      producer.prelude = "iyi/prelude"
+      producer.flags << "iyi_observe"
+      producer.emit_iyimod = "mods"
+      producer.compile source, File.expand_path("from-source")
+      from_source = `./from-source`
+
+      time_art = Iyi::IyiMod.read(File.join("mods", "std", "time.iyimod"))
+      time_art.type_ids.any?(&.includes?("Std::Time::")).should be_true
+
+      modules.each_key { |path| File.delete path }
+
+      old_warm = ENV["IYI_WARM"]?
+      ENV["IYI_WARM"] = "1"
+      begin
+        Iyi::Compiler.preanalysed.clear
+        consumer = create_spec_compiler
+        consumer.prelude = "iyi/prelude"
+        consumer.flags << "iyi_observe"
+        consumer.use_iyimod = "mods"
+        consumer.compile source, File.expand_path("from-artifact")
+        from_artifact = `./from-artifact`
+        from_artifact.should eq from_source
+
+        File.write "unimported.iyi", <<-IYI
+          module main
+
+          def peek : Std::Time::Location::Zone?
+            nil
+          end
+          IYI
+        unimported = Iyi::Compiler::Source.new(File.expand_path("unimported.iyi"), File.read("unimported.iyi"))
+        refuser = create_spec_compiler
+        refuser.prelude = "iyi/prelude"
+        refuser.flags << "iyi_observe"
+        refuser.use_iyimod = "mods"
+        refuser.no_codegen = true
+        expect_raises(Iyi::TypeException, /`Std::Time` is not imported here/) do
+          refuser.compile unimported, "unused"
+        end
+      ensure
+        Iyi::Compiler.preanalysed.clear
+        if old_warm
+          ENV["IYI_WARM"] = old_warm
+        else
+          ENV.delete("IYI_WARM")
+        end
+      end
+    end
+  end
+
+  it "carries a type its module does not export under observed warm build" do
+    with_tempdir("iyimod_type_ids_private_warm") do
+      Dir.mkdir_p "app"
+      File.write "app/box.iyi", <<-IYI
+        module app/box
+
+        struct Secret
+          @n : Int32
+
+          def initialize(@n : Int32)
+          end
+
+          def n : Int32
+            @n
+          end
+        end
+
+        pub def total : Int32
+          items = Array(Secret).new
+          items << Secret.new(2)
+          items << Secret.new(3)
+          items[0].n + items[1].n
+        end
+        IYI
+      File.write "main.iyi", <<-IYI
+        module main
+
+        import app/box
+
+        puts App::Box.total
+        IYI
+
+      source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
+
+      producer = create_spec_compiler
+      producer.prelude = "iyi/prelude"
+      producer.flags << "iyi_observe"
+      producer.emit_iyimod = "mods"
+      producer.compile source, File.expand_path("from-source")
+      `./from-source`.chomp.should eq "5"
+
+      File.delete "app/box.iyi"
+
+      old_warm = ENV["IYI_WARM"]?
+      ENV["IYI_WARM"] = "1"
+      begin
+        Iyi::Compiler.preanalysed.clear
+        consumer = create_spec_compiler
+        consumer.prelude = "iyi/prelude"
+        consumer.flags << "iyi_observe"
+        consumer.use_iyimod = "mods"
+        consumer.compile source, File.expand_path("from-artifact")
+        `./from-artifact`.chomp.should eq "5"
+
+        File.write "reach.iyi", <<-IYI
+          module main
+
+          import app/box
+
+          puts App::Box::Secret.new(1).n
+          IYI
+        reaching = Iyi::Compiler::Source.new(File.expand_path("reach.iyi"), File.read("reach.iyi"))
+
+        refuser = create_spec_compiler
+        refuser.prelude = "iyi/prelude"
+        refuser.flags << "iyi_observe"
+        refuser.use_iyimod = "mods"
+        refuser.no_codegen = true
+        expect_raises(Iyi::TypeException, /does not export App::Box::Secret/) do
+          refuser.compile reaching, "unused"
+        end
+      ensure
+        Iyi::Compiler.preanalysed.clear
+        if old_warm
+          ENV["IYI_WARM"] = old_warm
+        else
+          ENV.delete("IYI_WARM")
+        end
+      end
+    end
+  end
+
+  it "resolves composite generic, tuple, union, proc and metaclass artifact type references" do
+    with_tempdir("iyimod_composite_refs") do
+      compiler = create_spec_compiler
+      compiler.prelude = "iyi/prelude"
+      compiler.no_codegen = true
+      source = Iyi::Compiler::Source.new("test.iyi", <<-IYI
+        module spec/test
+
+        import std/time::{Time}
+
+        puts Time.utc(2026, 1, 1, 0, 0, 0)
+        IYI
+      )
+      result = compiler.compile(source, "unused")
+      program = result.program
+      program.filename = ""
+
+      dummy_decl = Iyi::ImportDecl.new(["std", "time"])
+
+      z_type = "Std::Time::Location::Zone"
+      l_type = "Std::Time::Location"
+
+      type_id_names = [
+        "Array(#{z_type})",
+        "NamedTuple(zone: #{z_type})",
+        "(#{z_type} | Nil)",
+        "Proc(#{z_type}, Nil)",
+        "#{l_type}.class",
+      ]
+
+      match_names = [
+        z_type,
+        "Array(#{z_type})",
+      ]
+
+      type_id_names.each do |tname|
+        program.iyi_artifact_refs << Iyi::Program::IyiArtifactRef.new("std/time", tname, dummy_decl, match: false)
+      end
+
+      match_names.each do |mname|
+        program.iyi_artifact_refs << Iyi::Program::IyiArtifactRef.new("std/time", mname, dummy_decl, match: true)
+      end
+
+      program.resolve_iyi_artifact_refs
+
+      numbered_names = program.iyi_artifact_numbered_types.map(&.to_s)
+      type_id_names.each do |expected_name|
+        numbered_names.should contain(expected_name)
+      end
+      match_names.each do |mname|
+        program.iyi_artifact_match_types.has_key?(mname).should be_true
+      end
     end
   end
 end

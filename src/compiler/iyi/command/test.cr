@@ -1,3 +1,5 @@
+require "../stale/runner"
+
 # iyi: `iyi test` — the verify loop, with no framework to learn
 # (AI_FIRST.md §2 #4).
 #
@@ -75,6 +77,12 @@ class Iyi::Command
     timeout = 60.0
     paths = [] of String
     affected = [] of String
+    cached = false
+    fresh = false
+    explain = false
+    shard = nil : String?
+    import_indices = [] of String
+    export_indices = [] of String
     chaos = false
     chaos_seed : UInt64? = nil
     chaos_runs : Int32? = nil
@@ -83,6 +91,7 @@ class Iyi::Command
     # to 7.6 s at 6 and 9.5 to 9.9 s at 4 (a non-release compiler), so the
     # other half bought a tenth of the time for twice the memory.
     parallel = (::System.cpu_count // 2).clamp(1, nil)
+    parallel_given = false
     only : String? = nil
     verbose = false
     # What every test is built with beyond `build FILE -o BINARY`: the
@@ -116,6 +125,24 @@ class Iyi::Command
           abort! "#{value} is a directory, not a changed file", :USAGE_ERROR
         end
         affected << value
+      when "--cached"
+        cached = true
+      when "--fresh"
+        fresh = true
+      when "--explain"
+        explain = true
+      when "--shard"
+        value = options.shift?
+        abort! "--shard takes K/N", :USAGE_ERROR unless value
+        shard = value
+      when "--import-index"
+        value = options.shift?
+        abort! "--import-index takes NS=FILE", :USAGE_ERROR unless value
+        import_indices << value
+      when "--export-index"
+        value = options.shift?
+        abort! "--export-index takes NS=FILE", :USAGE_ERROR unless value
+        export_indices << value
       when "--chaos"
         chaos = true
       when .starts_with?("--chaos=")
@@ -143,6 +170,7 @@ class Iyi::Command
           abort! "#{option} takes a number of tests to run at once, at least 1, not '#{value}'", :USAGE_ERROR
         end
         parallel = count
+        parallel_given = true
       when "--run"
         # Text, not a pattern: the program matches it, and the prelude
         # has no regular expressions. "" would be in every name, which is
@@ -172,6 +200,54 @@ class Iyi::Command
         paths << option
       end
     end
+    if cached && fresh
+      abort! "cannot pass both --cached and --fresh", :USAGE_ERROR
+    end
+    # The receipt runner (`--cached` and what goes with it) builds and runs each
+    # test one way: one at a time, every named case, under its own build flags,
+    # because a receipt says what one whole test did under one build. So it
+    # refuses the options that would have it run another way, as `--chaos` is
+    # refused below, rather than take them and do something else.
+    receipts = if cached
+                 "--cached"
+               elsif fresh
+                 "--fresh"
+               elsif explain
+                 "--explain"
+               elsif shard
+                 "--shard"
+               elsif !import_indices.empty?
+                 "--import-index"
+               elsif !export_indices.empty?
+                 "--export-index"
+               end
+    if receipts
+      if only
+        abort! "cannot pass both --run and #{receipts}: a receipt is for a test's every named case", :USAGE_ERROR
+      elsif !build_flags.empty?
+        abort! "cannot pass both #{build_flags.first} and #{receipts}: a receipt's build is the runner's own", :USAGE_ERROR
+      elsif parallel_given
+        abort! "cannot pass both -p and #{receipts}: tests with receipts run one at a time", :USAGE_ERROR
+      elsif verbose
+        abort! "cannot pass both -v and #{receipts}: a test answered from its receipt printed nothing to show", :USAGE_ERROR
+      end
+    end
+    if chaos
+      if cached
+        abort! "cannot pass both --chaos and --cached", :USAGE_ERROR
+      elsif fresh
+        abort! "cannot pass both --chaos and --fresh", :USAGE_ERROR
+      elsif explain
+        abort! "cannot pass both --chaos and --explain", :USAGE_ERROR
+      elsif shard
+        abort! "cannot pass both --chaos and --shard", :USAGE_ERROR
+      elsif !import_indices.empty?
+        abort! "cannot pass both --chaos and --import-index", :USAGE_ERROR
+      elsif !export_indices.empty?
+        abort! "cannot pass both --chaos and --export-index", :USAGE_ERROR
+      end
+    end
+
     paths << "." if paths.empty?
 
     files = [] of String
@@ -258,6 +334,27 @@ class Iyi::Command
         puts "0 to run, #{skipped} skipped: no test's imports reach the change"
       end
       exit
+    end
+    if receipts
+      runner = Iyi::Stale::Runner.new(
+        files: files,
+        paths: paths,
+        as_json: as_json,
+        timeout: timeout,
+        affected: affected,
+        cached: cached,
+        fresh: fresh,
+        explain: explain,
+        shard: shard,
+        import_indices: import_indices,
+        export_indices: export_indices,
+        skipped: skipped,
+        discount_off: discount_off,
+        manifest_changed: manifest_changed,
+        unimported: unimported
+      )
+      runner.run
+      return
     end
 
     # The seeds: the one asked for and those after it, or from a seed
@@ -689,7 +786,7 @@ class Iyi::Command
   # reaches `iyi test` and not the tests: `iyi test` ends every group still
   # running before it exits on SIGINT, SIGTERM or SIGHUP, or a test that
   # hangs would outlive the run that started it (`TestTree.trap_endings`).
-  private class TestTree
+  class TestTree
     @process : Process
     {% if flag?(:win32) %}
       @job : LibC::HANDLE = LibC::HANDLE.null
@@ -767,7 +864,10 @@ class Iyi::Command
 
   private def test_usage
     <<-USAGE
-    Usage: #{Command.program_name} test [--json] [-v] [--timeout SECONDS] [-p N] [--run TEXT] [--release] [-D FLAG]... [--affected FILE]... [--chaos[=SEED]] [--chaos-runs N] [paths]
+    Usage: #{Command.program_name} test [--json] [-v] [--timeout SECONDS] [-p N] [--run TEXT] [--release] [-D FLAG]...
+                                        [--affected FILE]... [--cached | --fresh] [--explain] [--shard K/N]
+                                        [--import-index NS=FILE]... [--export-index NS=FILE]...
+                                        [--chaos[=SEED]] [--chaos-runs N] [paths]
 
     Runs every `*_test.iyi` under the given paths (default: `.`), but not
     under `lib`, a dot directory or another module's directory. A test is
@@ -790,10 +890,20 @@ class Iyi::Command
     run, and says `skip - name: why`.
 
     `--affected FILE` (repeatable) runs only the tests whose transitive
-    import closure contains a named file — name every file you changed.
+    import closure contains a named file: name every file you changed.
     The closure is read by parsing, so selection costs milliseconds; a
     deleted file turns the discount off, because nothing can prove the
     tests that imported it unaffected.
+
+    `--cached` reuses passing test results when code and observed inputs match.
+    `--fresh` forces execution and records new receipts.
+    `--explain` prints decision lines explaining hits and misses.
+    `--shard K/N` runs shard K of N shards dealt round-robin.
+    `--import-index NS=FILE` imports verified test receipts for namespace NS.
+    `--export-index NS=FILE` exports test receipts for namespace NS (requires --fresh).
+    These run each test one at a time, every named case, under the runner's
+    own build, so they are not taken with `--run`, `-p`, `-v`, `--release`
+    or `-D`.
 
     `--chaos` builds each test for the chaos scheduler and runs it once per
     seed, `--chaos-runs N` seeds (100 unless given) from one drawn at

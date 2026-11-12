@@ -31,21 +31,22 @@ import std/dir::{Dir}
 import std/gc::{GC}
 # For TMPDIR, TEMP and TMP unset around `File.tempfile`'s GetTempPathW.
 import std/env::{ENV}
-
+import std/time::{Time}
 # The sandbox is the argument, then IYI_FILE_SANDBOX, then the platform's
-# own temporary directory. It was `/tmp` last, which is not a directory on
-# Windows: every write panicked there unless a gate set the variable, and
-# `bench/std_exercise.sh`, which runs every exercise from source and from
-# artifacts without it, compared two panics whose locations differed.
+# own temporary directory. `bench/std_exercise.sh` sets IYI_FILE_SANDBOX to
+# an empty sandbox directory before each of the source and artifact runs
+# so their panic messages name the same directory path.
 args = Program.args
 env_sandbox = Program.env("IYI_FILE_SANDBOX")
+scratch = args.size == 0 && env_sandbox.nil?
 sandbox = if args.size > 0
             args[0]
           elsif !env_sandbox.nil?
             env_sandbox
           else
-            Dir.tempdir
+            Dir.tempdir + "/iyi_file_exercise_#{Time.utc.to_unix_ms}"
           end
+Dir.mkdir_p(sandbox)
 
 puts "== write, read, and append"
 f1 = sandbox + "/std_file_ex_1.txt"
@@ -324,6 +325,10 @@ symlinks_allowed = true
   target_wide = __iyi_wide_path(f1.to_unsafe)
   symlinks_allowed = probe_wide.address != 0_u64 && target_wide.address != 0_u64 &&
                      Std::File::LibKernel32.CreateSymbolicLinkW(probe_wide, target_wide, 0x2_u32) != 0_u8
+  # The capability probe is itself a link in the sandbox. Remove it while
+  # its target still exists, including when the exercise owns the sandbox.
+  File.delete(probe) if symlinks_allowed
+  assert_true !Dir.children(sandbox).includes?("std_file_ex_probe.txt"), "the symlink capability probe leaves no entry"
 {% end %}
 if symlinks_allowed
   File.symlink(f1, fsym)
@@ -576,5 +581,6 @@ end
 File.delete(fren)
 assert_true !File.exists?(fren), "fren deleted"
 puts "  file deletion verified"
+Dir.delete(sandbox) if scratch && Dir.exists?(sandbox)
 
 puts "\nALL CHECKS PASSED"

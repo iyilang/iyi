@@ -102,11 +102,14 @@ ALLOWED_PATHS: list[tuple[str, str]] = [
     (r"^bench/(machine_probe|dependency_floor|build_tool_floor|build_tool_scan)", "measures the compatibility binary, its libraries, and build tools"),
     (r"^spec/compiler/util_spec\.cr$", "specs Crystal's own util module"),
     (r"^samples/iyi/", "programs whose comments compare iyi with Crystal"),
+    (r"^spec/compiler/stale/predefined_constants_spec\.cr$", "predefined constants in the Crystal module, tested for omission when unread"),
 ]
 
 # Lines that name Crystal legitimately inside a file that is otherwise iyi's.
 ALLOWED_LINES: list[tuple[str, str]] = [
     (r"--crystal", "the compatibility mode's own flag"),
+    (r"Crystal library effects are not classified", "stale testing refusal reason for crystal compatibility mode"),
+    (r"category.*['\"]crystal['\"]", "stale testing refusal category for crystal compatibility mode"),
     # `bench/std_dependency_floor.sh` fails when a standard library module
     # reaches an ancestor dependency, and the failure has to say where the
     # reachable bindings are. They are Crystal's, under src/openssl, src/yaml,
@@ -319,7 +322,7 @@ ALLOWED_LINES: list[tuple[str, str]] = [
     # `IYI_CACHE_DIR` read by somebody who set the other one names a variable
     # they do not have. Backticked or quoted, by the rule above — a bare
     # `CRYSTAL_CACHE_DIR` would cover a slip as well as this.
-    (r'`CRYSTAL_CACHE_DIR`|: "CRYSTAL_CACHE_DIR"', "the variable the other command surface's author set"),
+    (r'`CRYSTAL_CACHE_DIR`|: "CRYSTAL_CACHE_DIR"|"?CRYSTAL_OPTS"?|"?CRYSTAL_CACHE_DIR"?', "the variable the other command surface's author set, or locator variables in stale/compiler_env"),
     # The bootstrap compiler's cache, set beside iyi's in the gate that reads
     # the broken copy's objects out of it: the bootstrap reads no other name.
     (r'CRYSTAL_CACHE_DIR="\$WORK/\$label-cache"', "the bootstrap compiler's cache, where bench/symbol_names.sh reads its broken copy"),

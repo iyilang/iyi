@@ -205,6 +205,11 @@ prove_fails() {
     status=1
     return
   fi
+  if cmp -s "$REPO/src/iyi/$file" "$WORK/$dir/iyi/$file"; then
+    echo "  $label: mutation did not change $file"
+    status=1
+    return
+  fi
   if ! IYI_PATH="$WORK/$dir${PSEP}$REPO/src" "$IYI" build \
        -o "$WORK/$dir/program" "$REPO/bench/$program" \
        >"$WORK/$dir/build.log" 2>&1; then
@@ -351,12 +356,12 @@ case "$(uname -s)" in
   Darwin)
     prove_fails "a pipe every thread keeps" keptpipe "pipe failed" \
       '/^      fun sysctlbyname\(name : UInt8\*/ { print; print "      fun pipe(fds : Int32*) : Int32"; next }
-       /^    def self\.start\(proc : Proc\(Nil\)\) : IyiThread$/ { start = 1 }
+       /^    (@\[Effect\(:threads\)\]; )?def self\.start\(proc : Proc\(Nil\)\) : IyiThread$/ { start = 1 }
        start && /^      \{% elsif flag\?\(:darwin\) %\}$/ { print; print "        fds = Pointer(Int32).malloc(2_u64)"; print "        raise \"pipe failed\" if LibC.pipe(fds) != 0"; start = 0; next }
        { print }' thread.iyi collect_trigger.iyi 256 ;;
   *)
     prove_fails "an eventfd every thread keeps" keptfd "eventfd2 failed" \
-      '/^    def self\.start\(proc : Proc\(Nil\)\) : IyiThread$/ { start = 1 }
+      '/^    (@\[Effect\(:threads\)\]; )?def self\.start\(proc : Proc\(Nil\)\) : IyiThread$/ { start = 1 }
        start && /^      \{% if flag\?\(:linux\) %\}$/ { print; print "        raise \"eventfd2 failed\" if __iyi_conc_syscall3(IYI_SYS_EVENTFD2, 0_i64, 0x80000_i64, 0_i64) < 0"; start = 0; next }
        { print }' thread.iyi collect_trigger.iyi 256 ;;
 esac

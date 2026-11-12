@@ -1,0 +1,223 @@
+{
+  "source_sha": "1b7d2c30fc523080632d72185b9fccaf70a0ccba",
+  "compiler_version": "iyi 0.19.1 (built on Crystal 1.22.0-dev [1b7d2c30f] (2026-10-28))",
+  "crystal_version": "Crystal 1.22.0-dev [1b7d2c30f] (2026-10-28)",
+  "worktree": "iyi-stale-runtime-final-20261028",
+  "branch": "proof/stale-runtime-final-20261028",
+  "gates": [
+    {
+      "gate": "collector_free_floor",
+      "command": "bash bench/collector_free_floor.sh",
+      "status": "pass",
+      "exit_code": 0,
+      "summary": "Compiler built without collector (-Dgc_none), 81 sample builds across 3 runs with 0 failures, string constructor terminator room verified at 3000 lengths, 30-module project built 3 times with 0 failures, bdw-gc unreachability verified, default build restored (.build/iyi, .build/crystal, .build/iyi-daemon)."
+    },
+    {
+      "gate": "dependency_floor",
+      "command": "bash bench/dependency_floor.sh",
+      "status": "pass",
+      "exit_code": 0,
+      "summary": "Symbols and libraries checked for plain and release builds; libgc opt-in verified; dladdr and dprintf approved on Darwin; the floor holds."
+    },
+    {
+      "gate": "build_tool_floor",
+      "command": "bash bench/build_tool_floor.sh",
+      "status": "pass",
+      "exit_code": 0,
+      "summary": "External build-time and runtime tool dependency audit verified; the tool floor holds."
+    },
+    {
+      "gate": "concurrency_exercise",
+      "command": "bash bench/concurrency_exercise.sh",
+      "status": "pass",
+      "exit_code": 0,
+      "summary": "Concurrency runtime verified; stdin parking and cancellation verified; deadlock diagnosis and failure proofs held; concurrency gate: every step held."
+    },
+    {
+      "gate": "parallel_exercise",
+      "command": "bash bench/parallel_exercise.sh",
+      "status": "pass",
+      "exit_code": 0,
+      "summary": "Parallel tasks across workers, migration across worker threads, loop back-edge preemption, tight loop costs, speedup measured; every property held."
+    },
+    {
+      "gate": "server_load",
+      "command": "bash bench/server_load.sh",
+      "status": "pass",
+      "exit_code": 0,
+      "summary": "200 connections answered, collections while parked, stack reuse verified, failure proofs held; server load: every step held."
+    },
+    {
+      "gate": "panics",
+      "command": "bash bench/panics.sh",
+      "status": "pass",
+      "exit_code": 0,
+      "summary": "Panics, unwinding, defers, task boundaries, exit statuses, cast failures, failure proofs, backtraces verified; panics gate: every step held."
+    },
+    {
+      "gate": "thread_floor",
+      "command": "bash bench/thread_floor.sh",
+      "status": "pass",
+      "exit_code": 0,
+      "summary": "Thread floor on Darwin libSystem, stop-the-world pause measurements across thread counts, thread-local storage, failure proofs; thread floor: every step held."
+    },
+    {
+      "gate": "thread_exercise",
+      "command": "bash bench/thread_exercise.sh",
+      "status": "pass",
+      "exit_code": 0,
+      "summary": "Kernel threads under collector, 8 and 32 threads, allocations per thread, stop-the-world, Share safety checks and failure proofs; thread exercise: every step held."
+    },
+    {
+      "gate": "parallel_mark",
+      "command": "bash bench/parallel_mark.sh",
+      "status": "pass",
+      "exit_code": 0,
+      "summary": "Parallel marker alone and with helpers, permit distribution, failure proofs; parallel mark: every step held."
+    },
+    {
+      "gate": "concurrent_mark",
+      "command": "bash bench/concurrent_mark.sh",
+      "status": "pass",
+      "exit_code": 0,
+      "summary": "Concurrent marker with write barrier, realloc buffers, assists, failure proofs; concurrent mark: every step held."
+    },
+    {
+      "gate": "arena_exercise",
+      "command": "bash bench/arena_exercise.sh",
+      "status": "pass",
+      "exit_code": 0,
+      "summary": "Size-class arena allocator, size classes, addressability, clearing, reuse, traversal, large mappings, allocation floor; the arena allocator holds."
+    },
+    {
+      "gate": "root_exercise",
+      "command": "bash bench/root_exercise.sh",
+      "status": "pass",
+      "exit_code": 0,
+      "summary": "Stack, register, global roots discovery, interior pointer resolution, maps parser, failure proofs; Roots: stack, registers and globals are all found."
+    },
+    {
+      "gate": "mark_exercise",
+      "command": "bash bench/mark_exercise.sh",
+      "status": "pass",
+      "exit_code": 0,
+      "summary": "Mark phase traversal, cycle termination, precision, failure proofs; Marking: live set black, unreachable white, cycles terminate."
+    },
+    {
+      "gate": "sweep_exercise",
+      "command": "bash bench/sweep_exercise.sh",
+      "status": "pass",
+      "exit_code": 0,
+      "summary": "Sweep phase reclamation, warm page reuse, survivor preservation, failure proofs; Sweeping: unreachable chunks come back and are handed out again."
+    },
+    {
+      "gate": "reuse_integrity",
+      "command": "bash bench/reuse_integrity.sh",
+      "status": "pass",
+      "exit_code": 0,
+      "summary": "Chunk reuse integrity, zeroed fields on reuse, failure proofs; reuse integrity gate: every step held."
+    },
+    {
+      "gate": "collect_trigger",
+      "command": "bash bench/collect_trigger.sh",
+      "status": "pass",
+      "exit_code": 0,
+      "summary": "Allocation pressure trigger, bounded heap, empty arena return, failure proofs; Trigger: collections come from allocation pressure alone."
+    },
+    {
+      "gate": "samples_roundtrip",
+      "command": "bash bench/samples_roundtrip.sh",
+      "status": "pass",
+      "exit_code": 0,
+      "summary": "Samples compilation from source and from .iyimod artifacts with source deleted; 12 modules identical output, symbol numbering and travel defs verified."
+    },
+    {
+      "gate": "socket_exercise",
+      "command": "bash bench/socket_exercise.sh",
+      "status": "pass",
+      "exit_code": 0,
+      "summary": "Sockets connect, accept, message exchange, short reads, IPv6, unix sockets, timeouts, failure proofs verified; Sockets: all checks passed."
+    },
+    {
+      "gate": "tls_speed",
+      "command": "bash bench/tls_speed.sh",
+      "status": "pass",
+      "exit_code": 0,
+      "summary": "TLS throughput verified against cipher rate (AES-128-GCM pull 90%/push 83%, ChaCha20-Poly1305 pull 80%/push 65%, all above 25% floor)."
+    },
+    {
+      "gate": "metric_port",
+      "command": "bash bench/metric_port.sh",
+      "status": "pass",
+      "exit_code": 0,
+      "summary": "crystal-metric port, all 26 benchmarks correct (26.00/26, award 1.00), failure proofs held; crystal-metric's port holds."
+    },
+    {
+      "gate": "migrate_gate",
+      "command": "bash bench/migrate_gate.sh",
+      "status": "pass",
+      "exit_code": 0,
+      "summary": "iyi migrate on a Crystal fixture, compilation of migrated modules, 16 lines output match, artifact emission, failure proofs; migrate gate: passed."
+    }
+  ],
+  "rg17": {
+    "source_sha": "dce806cd07201196e32cc8d7277334a759af4369",
+    "worktree_head": "ed5f75dd4feaf3fc711dbe8bbcc724f1bea3cd3d",
+    "command": "LIBRARY_PATH=/opt/homebrew/opt/bdw-gc/lib PKG_CONFIG_PATH=/opt/homebrew/opt/openssl@3/lib/pkgconfig CRYSTAL_CACHE_DIR=$PWD/.build/rg17-bootstrap-cache IYI=/Users/jwaldrip/dev/worktrees/iyi-stale-integration-repair/.build/iyi bash bench/stale_reproducible.sh",
+    "environment_unset": ["IYI_CACHE_DIR", "IYI_OPTS", "IYI_WARM", "IYI_DAEMON_SOCKET", "CRYSTAL_DAEMON_SOCKET"],
+    "compiler_sha256": "d480492ba4e5a43fcd90c7a70e0117fd179431b13b68346ffae245a6db87169f",
+    "exit_code": 0,
+    "rg7_matched": 27,
+    "rg1_matched": 27,
+    "build_inputs_sha256": "23c09427f0287edf5b474dad23e54f613cc5d28b624d6bfc02de363e62631d26",
+    "log": "proof/rg17.log",
+    "log_sha256": "d30e10a119f114e61967de7bca2a851f6630c913ed60bac3d31b10a6b87d56c0",
+    "warnings": "The linker reported objects built for macOS 28.0 while linking for macOS 27.0.",
+    "protected_binary_identity": "All four compiler binary hashes, sizes, inodes and mtimes matched before and after."
+  },
+  "final_census": {
+    "source_sha": "dce806cd07201196e32cc8d7277334a759af4369",
+    "compiler_sha256": "d480492ba4e5a43fcd90c7a70e0117fd179431b13b68346ffae245a6db87169f",
+    "command": "bash bench/stale_census.sh all",
+    "exit_code": 0,
+    "programs": 141,
+    "c2_programs": 27,
+    "c3_programs": 114,
+    "reuse_hits": 87,
+    "c2_hits": 25,
+    "c3_hits": 62,
+    "nonreusable": 54,
+    "requested_effect": 53,
+    "opaque_construct": 1,
+    "static_reusable": 138,
+    "build_failures": 0,
+    "runner_failures": 0,
+    "internal_failures": 0,
+    "normal_and_warm_hit_codegen_lines": 0,
+    "fresh_scope": "Cold private cache, including runtime compilation, with up to eight concurrent workers; no warm-cache fresh measurement.",
+    "log": "proof/final-census.log",
+    "log_sha256": "57c6011201f234e1cebbef0d927f3ff9793c7d9da42821b85a5c1ca8f01911d8"
+  },
+  "big_observation_overhead": {
+    "source_sha": "dce806cd07201196e32cc8d7277334a759af4369",
+    "worktree_head": "a48cec9e0722d5da5d1adbf5feb2c382dfe0379e",
+    "compiler_sha256": "d480492ba4e5a43fcd90c7a70e0117fd179431b13b68346ffae245a6db87169f",
+    "build_command": "$IYI build bench/std_big_exercise.iyi -Diyi_observe -o $D/big",
+    "run_commands": ["/usr/bin/time -p $D/big", "IYI_OBSERVE=$D/trace /usr/bin/time -p $D/big"],
+    "environment": "D=$PWD/.build/final-big-overhead-unique; IYI is the integration worktree .build/iyi; IYI_CACHE_DIR and CRYSTAL_CACHE_DIR=$D/cache; TMPDIR=$D; IYI_PATH=$PWD/src:$PWD/samples/iyi; LIBRARY_PATH=/opt/homebrew/opt/bdw-gc/lib; PKG_CONFIG_PATH=/opt/homebrew/opt/openssl@3/lib/pkgconfig; IYI_OPTS, IYI_WARM, IYI_DAEMON_SOCKET, CRYSTAL_DAEMON_SOCKET and initially IYI_OBSERVE unset.",
+    "historical_environment": "Controlled TMPDIR, paths and cache as described; the historical ambient environment is unknown.",
+    "build_exit": 0,
+    "direct_exit": 0,
+    "observed_exit": 0,
+    "direct_real_seconds": 32.26,
+    "observed_real_seconds": 30.61,
+    "observed_over_direct": 0.9488530688,
+    "ratio_ceiling": 1.5,
+    "both_completion_markers": true,
+    "trace": "proof/big-overhead/trace",
+    "trace_sha256": "de95fff41fae8972f9a1671184cb990eb5136bef3971166f00882b9b37df114d",
+    "trace_records": "One clock taint, one runtime_timing taint and a final END status 0, no trailing record.",
+    "compiler_identity": "SHA-256, inode 2521706399, size 50711392 and mtime 1793215419 unchanged before and after.",
+    "logs": "proof/big-overhead/"
+  }
+}

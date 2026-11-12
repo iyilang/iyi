@@ -177,7 +177,7 @@ build_and_run() {
     status=1
     return 1
   fi
-  timeout 300 "$WORK/$name" "$WORK/cases.txt" "$WORK/groups.txt" >"$WORK/$name.out" 2>&1
+  timeout 300 "$WORK/$name" "data" "$WORK/cases.txt" "$WORK/groups.txt" >"$WORK/$name.out" 2>&1
   local exit_code=$?
   sed 's/^/  /' "$WORK/$name.out"
   if [ "$exit_code" -ne 0 ]; then
@@ -421,7 +421,7 @@ PY
       sed 's/^/    /' "$WORK/mut.out"
       status=1
     fi
-  elif IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" timeout 300 "$IYI" run "$REPO/bench/std_regex_exercise.iyi" -- "$WORK/cases.txt" "$WORK/groups.txt" >"$WORK/mut.out" 2>&1; then
+  elif IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" timeout 300 "$IYI" run "$REPO/bench/std_regex_exercise.iyi" -- "data" "$WORK/cases.txt" "$WORK/groups.txt" >"$WORK/mut.out" 2>&1; then
     echo "  $label: the exercise PASSED on a broken module"
     status=1
   elif [ -n "$phrase" ] && ! grep -qF -- "$phrase" "$WORK/mut.out"; then

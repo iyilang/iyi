@@ -141,6 +141,7 @@ class Iyi::CodeGenVisitor
 
   def create_initialize_class_var_function(class_var, initializer)
     return nil if class_var.simple_initializer?
+
     type = class_var.type
     node = initializer.node
     init_function_name = "~#{class_var_global_initialized_name(class_var)}"
@@ -187,6 +188,7 @@ class Iyi::CodeGenVisitor
         new_func.func.delete
         nil
       else
+        @program.stale_recorder.try &.record_class_var(class_var)
         new_func
       end
     end

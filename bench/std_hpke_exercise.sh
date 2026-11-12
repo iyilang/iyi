@@ -28,13 +28,15 @@ esac
 # the patches and oracles below are written in python, and windows answers
 # `python3` with a store stub that prints and exits rather than running it, so
 # the interpreter is measured here instead of assumed.
-PY=""
-for candidate in python3 python; do
-  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys' >/dev/null 2>&1; then
-    PY="$candidate"
-    break
-  fi
-done
+PY="${PY:-}"
+if [ -z "$PY" ]; then
+  for candidate in python3 python; do
+    if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys' >/dev/null 2>&1; then
+      PY="$candidate"
+      break
+    fi
+  done
+fi
 
 IYI="${IYI:-$REPO/bin/iyi}"
 WORK="$(mktemp -d)"
@@ -56,6 +58,38 @@ status=0
 export IYI_PATH="$REPO/src${PSEP}$REPO/samples/iyi"
 VECTORS="$REPO/bench/std_hpke_fixture/rfc9180_vectors.json"
 
+if [ "${IYI_PROOF_INPUTS_DIR+set}" = "set" ]; then
+  if [ -z "$IYI_PROOF_INPUTS_DIR" ]; then
+    echo "FAIL: IYI_PROOF_INPUTS_DIR must not be empty" >&2
+    exit 1
+  fi
+  case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN* | Windows_NT)
+      case "$IYI_PROOF_INPUTS_DIR" in
+        /* | [a-zA-Z]:/* | [a-zA-Z]:\\* | \\\\*) ;;
+        *)
+          echo "FAIL: IYI_PROOF_INPUTS_DIR must be an absolute path: $IYI_PROOF_INPUTS_DIR" >&2
+          exit 1
+          ;;
+      esac
+      command -v cygpath >/dev/null 2>&1 && IYI_PROOF_INPUTS_DIR="$(cygpath -m "$IYI_PROOF_INPUTS_DIR")"
+      ;;
+    *)
+      case "$IYI_PROOF_INPUTS_DIR" in
+        /*) ;;
+        *)
+          echo "FAIL: IYI_PROOF_INPUTS_DIR must be an absolute path: $IYI_PROOF_INPUTS_DIR" >&2
+          exit 1
+          ;;
+      esac
+      ;;
+  esac
+  if [ ! -d "$IYI_PROOF_INPUTS_DIR" ]; then
+    echo "FAIL: IYI_PROOF_INPUTS_DIR is not a directory: $IYI_PROOF_INPUTS_DIR" >&2
+    exit 1
+  fi
+fi
+
 build_and_run() {
   local label="$1" name="$2"
   shift 2
@@ -66,7 +100,7 @@ build_and_run() {
     status=1
     return 1
   fi
-  "$WORK/$name" "$VECTORS" >"$WORK/$name.out" 2>&1
+  "$WORK/$name" "data" "$VECTORS" >"$WORK/$name.out" 2>&1
   local exit_code=$?
   sed 's/^/  /' "$WORK/$name.out"
   if [ "$exit_code" -ne 0 ]; then
@@ -154,28 +188,45 @@ echo "== every vector of the CFRG's test-vectors.json, every encryption"
 # JSON: a Windows checkout may have its line ends rewritten), and with no
 # encryption left out, which the exercise checks one by one. Offline, or
 # without curl or python, the vendored subset above is what was checked.
-CFRG="https://raw.githubusercontent.com/cfrg/draft-irtf-cfrg-hpke/5f503c564da00b0687b3de75f1dfbdfc4079ad31/test-vectors.json"
 FETCHED=0
-if [ -z "$PY" ] || ! command -v curl >/dev/null 2>&1; then
-  echo "  no curl or python here, so only the vendored subset was checked"
-elif ! curl -sSfL --max-time 60 -o "$WORK/test-vectors.json" "$CFRG" 2>"$WORK/curl.log"; then
-  echo "  the file could not be fetched ($(tail -1 "$WORK/curl.log")), so only the vendored subset was checked"
-elif ! "$PY" -c 'import hashlib, sys; sys.exit(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest() != "61fc662f01996cd06d713dacf5e133167bd309a1f329442d53f1e21a47b3ede6")' "$WORK/test-vectors.json"; then
-  echo "  FAIL test-vectors.json: not the sha256 bench/std_hpke_fixture/NOTICE records"
-  status=1
-elif ! cut_vectors "$WORK/test-vectors.json" "$WORK/subset.json" subset >/dev/null ||
-  ! "$PY" -c 'import json, sys; sys.exit(json.load(open(sys.argv[1])) != json.load(open(sys.argv[2])))' "$WORK/subset.json" "$VECTORS"; then
-  echo "  FAIL the file cut by the vendored rule is not bench/std_hpke_fixture/rfc9180_vectors.json"
-  status=1
-elif ! cut_vectors "$WORK/test-vectors.json" "$WORK/every.json" every; then
-  status=1
-elif "$WORK/hpke-release" "$WORK/every.json" >"$WORK/every.out" 2>&1; then
-  FETCHED=1
-  echo "  cut by the vendored rule, the file is the vendored subset, value for value"
-  grep -A1 '^== rfc 9180 vectors' "$WORK/every.out" | grep '^  [0-9]' | sed 's/^  /  checked: /'
+if [ "${IYI_PROOF_INPUTS_DIR+set}" = "set" ]; then
+  if [ -z "$PY" ]; then
+    echo "  FAIL: python is required to process IYI_PROOF_INPUTS_DIR vectors" >&2
+    status=1
+  elif ! "$PY" "$REPO/proof/offline_vectors.py" hpke "$WORK/every.json" --subset-out "$WORK/subset.json" --vendored "$VECTORS"; then
+    echo "  FAIL IYI_PROOF_INPUTS_DIR: missing or corrupt HPKE vectors" >&2
+    status=1
+  elif "$WORK/hpke-release" "data" "$WORK/every.json" >"$WORK/every.out" 2>&1; then
+    FETCHED=1
+    echo "  cut by the vendored rule, the file is the vendored subset, value for value"
+    grep -A1 '^== rfc 9180 vectors' "$WORK/every.out" | grep '^  [0-9]' | sed 's/^  /  checked: /'
+  else
+    tail -3 "$WORK/every.out" | sed 's/^/  /'
+    status=1
+  fi
 else
-  tail -3 "$WORK/every.out" | sed 's/^/  /'
-  status=1
+  CFRG="https://raw.githubusercontent.com/cfrg/draft-irtf-cfrg-hpke/5f503c564da00b0687b3de75f1dfbdfc4079ad31/test-vectors.json"
+  if [ -z "$PY" ] || ! command -v curl >/dev/null 2>&1; then
+    echo "  no curl or python here, so only the vendored subset was checked"
+  elif ! curl -sSfL --max-time 60 -o "$WORK/test-vectors.json" "$CFRG" 2>"$WORK/curl.log"; then
+    echo "  the file could not be fetched ($(tail -1 "$WORK/curl.log")), so only the vendored subset was checked"
+  elif ! "$PY" -c 'import hashlib, sys; sys.exit(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest() != "61fc662f01996cd06d713dacf5e133167bd309a1f329442d53f1e21a47b3ede6")' "$WORK/test-vectors.json"; then
+    echo "  FAIL test-vectors.json: not the sha256 bench/std_hpke_fixture/NOTICE records"
+    status=1
+  elif ! cut_vectors "$WORK/test-vectors.json" "$WORK/subset.json" subset >/dev/null ||
+    ! "$PY" -c 'import json, sys; sys.exit(json.load(open(sys.argv[1])) != json.load(open(sys.argv[2])))' "$WORK/subset.json" "$VECTORS"; then
+    echo "  FAIL the file cut by the vendored rule is not bench/std_hpke_fixture/rfc9180_vectors.json"
+    status=1
+  elif ! cut_vectors "$WORK/test-vectors.json" "$WORK/every.json" every; then
+    status=1
+  elif "$WORK/hpke-release" "data" "$WORK/every.json" >"$WORK/every.out" 2>&1; then
+    FETCHED=1
+    echo "  cut by the vendored rule, the file is the vendored subset, value for value"
+    grep -A1 '^== rfc 9180 vectors' "$WORK/every.out" | grep '^  [0-9]' | sed 's/^  /  checked: /'
+  else
+    tail -3 "$WORK/every.out" | sed 's/^/  /'
+    status=1
+  fi
 fi
 
 echo
@@ -186,6 +237,7 @@ if [ -n "$PY" ] && "$PY" -c 'from cryptography.hazmat.primitives.asymmetric impo
 fi
 if [ "$HAVE_CRYPTOGRAPHY" -eq 0 ]; then
   echo "  no python with cryptography here, so the Python HPKE goes unasked"
+  if [ "${IYI_PROOF_INPUTS_DIR+set}" = "set" ]; then status=1; fi
 else
   "$PY" "$REPO/bench/std_hpke_oracle.py" vectors "$VECTORS" || status=1
   if [ "$FETCHED" -eq 1 ]; then
@@ -215,6 +267,7 @@ if [ "$HAVE_CRYPTOGRAPHY" -eq 1 ]; then
   "$PY" "$REPO/bench/std_hpke_oracle.py" drive "$WORK/hpke-release" 5 || status=1
 else
   echo "  no python with cryptography here, so it goes unasked"
+  if [ "${IYI_PROOF_INPUTS_DIR+set}" = "set" ]; then status=1; fi
 fi
 
 echo
@@ -332,7 +385,7 @@ PY
   then
     echo "  the $2 patch did not apply"
     status=1
-  elif IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_hpke_exercise.iyi" -- "$VECTORS" >"$WORK/mut.out" 2>&1; then
+  elif IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_hpke_exercise.iyi" -- "data" "$VECTORS" >"$WORK/mut.out" 2>&1; then
     echo "  the exercise PASSED on $2"
     status=1
   elif grep -qF "$3" "$WORK/mut.out"; then

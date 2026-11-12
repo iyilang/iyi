@@ -374,7 +374,8 @@ puts "\n== over a socket"
 # is Share (III.4.4): the listener's descriptor is a number, and what the
 # server read comes back inside the answer it writes, so nothing mutable
 # is shared.
-listener = IyiSocket.listen(0)
+listener = IyiSocket.listen("127.0.0.1", 0)
+assert_str "127.0.0.1", listener.local_address, "listener binds explicitly to loopback"
 port = listener.local_port
 fd = listener.to_unsafe
 server = IyiThread.start do
@@ -535,6 +536,57 @@ assert_str "refused: HTTP: response headers past 1048576 bytes", endless_said, "
 assert_true endless_sent.get < 256, "the client stopped taking an endless head: #{endless_sent.get} pieces of 64 KB went"
 puts "  a head past a megabyte is refused, not read for as long as it comes"
 
+# `read_all` takes at most 65536 bytes per piece. Sending twice that
+# amount forces the second iteration even when the network coalesces the
+# whole body into one read. The half-close makes the short read finish,
+# and the channel reports the result only after the measured read returns.
+short_payload = "s" * 131072
+short_listener = IyiSocket.listen("127.0.0.1", 0)
+short_port = short_listener.local_port
+short_done = Channel(Tuple(String, UInt64)).new(1)
+short_result = "no acknowledgment"
+short_bytes = 0_u64
+group do |g|
+  g.spawn do
+    Server.serve(short_listener, stream_bodies: true, workers: 1) do |req|
+      GC.disable
+      before = GC.stats.bytes_since_collection
+      got = req.body_io.read_all
+      used = GC.stats.bytes_since_collection - before
+      GC.enable
+      message = got.is_a?(HTTPError) ? got.message : "unexpected result: #{got.inspect}"
+      short_done.send({message, used})
+      Response.new(200, "done")
+    end
+    0
+  end
+  g.spawn do
+    client = IyiSocket.connect("127.0.0.1", short_port).or_panic
+    client.write("POST /short HTTP/1.1\r\nHost: x\r\nContent-Length: 67108864\r\n\r\n").or_panic
+    client.write(short_payload).or_panic
+    if refusal = client.close_write
+      raise "short-body close_write: #{refusal.message}"
+    end
+    select
+    when completed = short_done.receive
+      if completed.is_a?(Tuple(String, UInt64))
+        short_result = completed[0]
+        short_bytes = completed[1]
+      else
+        short_result = "channel failed: #{completed.inspect}"
+      end
+    when timeout(10000)
+      short_result = "acknowledgment timed out"
+    end
+    client.close
+    short_listener.close
+    0
+  end
+end
+assert_str "HTTP: the body ended after 131072 of its 67108864 bytes", short_result, "the acknowledged short body reports its exact length"
+assert_true short_bytes < 1048576_u64, "short-body allocation budget: #{short_bytes} bytes, under 1048576"
+puts "  an acknowledged short body costs under 1 MB despite its 64 MB declared length"
+
 # A client partway through a request: it sends *part*, and leaves three
 # seconds later.
 def partway(port : Int32, part : String) : Int32
@@ -594,7 +646,8 @@ puts "\n== the server, from a raw socket"
 # What the server does with the wire: keep-alive across requests, a
 # chunked request body, HEAD, a request that is not HTTP, and `Connection:
 # close`. The client here is a bare socket so every byte is ours.
-listener = IyiSocket.listen(0)
+listener = IyiSocket.listen("127.0.0.1", 0)
+assert_str "127.0.0.1", listener.local_address, "raw socket listener binds to loopback"
 sport = listener.local_port
 seen_paths = [] of String
 group do |g|
@@ -833,7 +886,8 @@ puts "\n== the block's own close"
 # An answer whose `Connection` says `close` closes the connection after
 # it, as Go's server and Python's do: the line was dropped, `keep-alive`
 # written in its place, and the next request on the connection served.
-closer = IyiSocket.listen(0)
+closer = IyiSocket.listen("127.0.0.1", 0)
+assert_str "127.0.0.1", closer.local_address, "closer listener binds to loopback"
 closer_port = closer.local_port
 group do |g|
   g.spawn do
@@ -868,7 +922,8 @@ puts "\n== a burst of connections"
 # ran: connections that came together were read by several tasks - "two
 # fibers reading one fd" - and the rest by none, their clients waiting for
 # an answer that never came.
-burst_listener = IyiSocket.listen(0)
+burst_listener = IyiSocket.listen("127.0.0.1", 0)
+assert_str "127.0.0.1", burst_listener.local_address, "burst listener binds to loopback"
 burst_port = burst_listener.local_port
 burst = [] of IyiSocket
 20.times do |i|
@@ -897,7 +952,8 @@ puts "  twenty connections that arrived together, each answered its own request"
 puts "\n== empty lines before a request"
 # An empty line before a request is skipped (RFC 9112 §2.2): a client that
 # ended its body with one more CRLF had its next request answered 400.
-blank = IyiSocket.listen(0)
+blank = IyiSocket.listen("127.0.0.1", 0)
+assert_str "127.0.0.1", blank.local_address, "blank listener binds to loopback"
 blank_port = blank.local_port
 group do |g|
   g.spawn do

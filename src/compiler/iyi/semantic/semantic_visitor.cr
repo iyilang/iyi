@@ -370,7 +370,7 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     # module reached twice is entered twice and printed once, which is what
     # "duplicate skipped" means in the other language's tree.
     printer = @program.compiler.try(&.dependency_printer)
-    unseen = @program.requires.add?(filename)
+    unseen = @program.requires.add?(File.expand_path(filename))
     printer.try(&.enter_file(filename, unseen))
     begin
       if unseen
@@ -2148,6 +2148,7 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
         expanded_type = expansion_scope.lookup_path(expanded)
         case expanded_type
         when Const
+          @program.layout_fold_constant_read(expanded_type, node)
           expanded = expanded_type.value
         when Type
           expanded = TypeNode.new(expanded_type)
@@ -2251,6 +2252,8 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     when @program.experimental_annotation
       # ditto DeprecatedAnnotation
       ExperimentalAnnotation.from(ann)
+    when @program.effect_annotation
+      Effects.validate_annotation(ann)
     end
   end
 
@@ -2339,9 +2342,12 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
   end
 
   def interpret_enum_value(node : ASTNode, target_type : IntegerType? = nil)
-    MathInterpreter
-      .new(current_type, self, target_type)
-      .interpret(node)
+    scope = current_type
+    @program.layout_fold_derive(node, scope, target_type) do
+      MathInterpreter
+        .new(scope, self, target_type)
+        .interpret(node)
+    end
   end
 
   def inside_exp?

@@ -63,8 +63,8 @@ own reference accepts.
 | warm full build, `hello` / 6,900-line pair | 0.07 s / 0.24 s, against `go build`'s 0.08 s / 0.09 s |
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
-| iyi's own prelude | 28,880 lines, of which 4,738 are the library held to the 4,738 ceiling (7,034 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 137,967 lines, none of it written in iyi |
+| iyi's own prelude | 29,007 lines, of which 4,738 are the library held to the 4,738 ceiling (7,089 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
+| compiler | 148,546 lines, none of it written in iyi |
 | artifact format | `.iyimod` v62, checksum per section |
 | samples | 28 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -88,7 +88,7 @@ shape.
 > is a library and the rules are the language, so a program can keep one and
 > change the other: `--crystal` builds against Crystal's standard library, and
 > there `require` reaches the ecosystem while every rule stays where it was.
-> "No standard library worth the name" is still true of iyi's own 28,880 lines
+> "No standard library worth the name" is still true of iyi's own 29,007 lines
 > and no longer true of what a program can have. Part V item 12a is the
 > measurement, nine shards wide.
 
@@ -270,7 +270,7 @@ of binary. It is not made the default on that trade, and the middle needs the
 initialisers to run *later* rather than not at all, which is the `dlsym` table
 above, and a larger piece of work than the number it wins.
 
-**3. A deliberately tiny prelude, written in iyi. Done: 28,880 lines,
+**3. A deliberately tiny prelude, written in iyi. Done: 29,007 lines,
 primitives included, of which the library is 4,738.** Not a standard library:
 integers, booleans, a string, one sequence, one dictionary, one range, `puts`,
 and an `enum`'s surface — the member's name, an order, the members, and the
@@ -303,9 +303,9 @@ the shortest-round-trip float text (`float.iyi`) - and they
 are most of its lines. So the figure held to the ceiling is the library:
 **4,738 lines** of the 21,556, measured by `bench/doc_numbers.py` as
 everything under `src/iyi/` except those three and except every platform's
-floor of 2,296 lines — the arms behind `flag?(:win32)`, `flag?(:linux)`,
+floor of 2,351 lines — the arms behind `flag?(:win32)`, `flag?(:linux)`,
 `flag?(:darwin)` and `flag?(:wasm32)`, which the paragraph on the breach
-below settles and explains. Opening `src/iyi/` counts 7,034 with the floor
+below settles and explains. Opening `src/iyi/` counts 7,089 with the floor
 still in it, and the whole-prelude figure is stated beside both because a
 reader sees the whole file, and a "tiny prelude" claim that hid 9,000 lines
 of runtime would be a claim about the wrong number.
@@ -426,7 +426,7 @@ where most of the 1,040 lines are.
 by hand.** Counting the lines inside a macro conditional whose condition
 names an OS, architecture or ABI flag — every arm of it, `else` included,
 since an `else` under `flag?(:linux)` is what the other platforms take and
-exists for the same reason — the platform floor measures **2,296 lines**
+exists for the same reason — the platform floor measures **2,351 lines**
 today (1,871 of the 4,803 that day), and Windows is the largest arm of it
 by a wide margin, which is what a platform whose every path, console byte
 and integer division needs its own answer costs.
@@ -1062,9 +1062,9 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 137,967 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 28,880-line own prelude + 126,520 in std |
-| Specs | 21,146 lines | 16,992 for iyi |
+| Compiler | 24,984 lines, **written in Crystal** | 148,546 lines, Crystal, forked |
+| Library | 8,161 lines (3,551 of it core) | 29,007-line own prelude + 128,396 in std |
+| Specs | 21,146 lines | 17,314 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
 | Own status line | *"pre-alpha: we are still designing the language"* | design largely settled, 0.2.0 released, a language written in it |
@@ -7975,7 +7975,7 @@ implements them.
 | `gofmt` | **`iyi fmt`, built** (`tool format`) | nine visit methods (above); `--check` makes a change the exit code |
 | `go vet` | **`iyi vet`, built** | the verb the row asked for: `tool unreachable`'s analysis, go vet's contract — findings are the exit code |
 | `go doc` | **`iyi doc`, built** | the `Docs` section from III.7, then a renderer: a module's exported surface, docs included, or a prelude type's |
-| `go test` | **`iyi test`, built** | a runner: every `*_test.iyi` is a program, exit 0 passes and anything else fails |
+| `go test` | **`iyi test`, built** | a runner: every `*_test.iyi` is a program, exit 0 passes and anything else fails; opt-in `--cached` reuses passing receipts |
 | `go get`, `go mod` | **`iyi get`, `iyi mod tidy`, built** | III.7's steps 1 and 2; the registry half is still proposed |
 | `go doc` offline | **built** | falls out of artifacts: `iyi doc lib/thing.iyimod` reads one with no source beside it |
 
@@ -7983,6 +7983,140 @@ implements them.
 one a person notices second. The answer that was built is the small one: a
 test is a program, and its exit status is the verdict.
 
+
+**Native stale testing: opt-in `--cached`, `--fresh`, and `--explain`.** Default `iyi test` behavior and output are unchanged. `--cached` is opt-in. A test reports as passing from a receipt without generating code, linking, or running a test process when two conditions hold: its build key matches the recorded build key, and every recorded run observation replays equal now. Every `--cached` check type-checks the test first. The compiler computes the build key itself after semantic analysis and before codegen; a hit stops there. The source-side build key is `CallPathFp`, a SHA signature over the typed call path (every function, initializer, and type layout reached from program entry, with program-wide numbering left out), linked object units from `.iyimod` artifacts by content, linker flags (`LinkFp` including `CHILD_ENV`), compiler environment reads (`CompilerEnvFp`), toolchain identity, and the effective compiler behavior key.
+
+`--fresh` forces execution and records a receipt under observation. `--explain` prints one decision line per test naming why it ran: toolchain, behavior, compiler environment, link, call path (with files whose elements differ), profile, or run observation mismatch. JSON output (`--json`) reports per-test fields: `cached` (boolean), `source` (`local` or imported namespace), `reuse` (`hit`, `miss`, or `not reusable`), and `reason` (mismatch or taint site).
+
+**What makes a test not reusable.** An observation build monitors the run. A test is marked not reusable and runs without producing a reusable receipt when it uses:
+- *Requested effects:* `clock`, `entropy`, `timer`, `network`, `process`, `signal`, `runtime_timing`, `code_location`, `dir_stream`, or `host_state`.
+- *Opaque program constructs:* raw pointer manipulation (`pointer_new`, integer-to-pointer conversions), inline assembly, unclassified C library calls, or calls to unclassified internal defs.
+- *Shared writes:* file writes outside the test's scratch directory (`TMPDIR`/`TEMP`/`TMP`), writes through file descriptors outside runner-inherited stdio or a recorded open, symlinks created in scratch pointing outside scratch, or hard links created to files outside scratch. Self-written files and directories within the scratch directory remain internal and reusable.
+- *Refused build modes:* `--emit`, `--emit-iyimod`, `--emit-bind`, `--no-cleanup`, `--cross-compile`, `--iyi-keep`, or `IYI_FORK_PROBE`. Stale builds also refuse daemon execution (`IYI_DAEMON_SOCKET` is cleared for children).
+
+Crystal mode (`IYI_OPTS="--crystal"`) always runs fresh with reason `Crystal library effects are not classified`.
+
+Chaos mode: combining `--cached` with chaos testing (`--chaos`, `--chaos=SEED`, or `--chaos-runs`) is refused before execution with `--cached cannot be combined with chaos testing; run chaos tests fresh` (III.4.17). Chaos testing exercises scheduling permutations and always runs fresh.
+
+**Limits a user must know.**
+- *Every hit type-checks:* Parse, semantic analysis, and macro execution (including macro `run` programs) execute on every check. Only codegen, linking, and program execution are skipped.
+- *Flaky tests and unspecified values:* Verdicts depending on compiler numbering (type ids, symbol indices) can change across unrelated edits and remain hidden until a `--fresh` run or master shadow audit. Non-deterministic behavior is bounded by contradiction detection (a non-pass exit revokes any validating receipt) and shadow audit.
+- *Adversarial code:* Detection assumes cooperative code; deliberately adversarial test code is not defended against.
+- *Artifact granularity:* Modules read from `.iyimod` artifacts are keyed per linked object unit, not per function.
+- *Search path libraries:* Libraries found by search path are identified by link flags, `CHILD_ENV`, and toolchain, not by library content.
+- *Edits behind NoReturn:* Where codegen stops after `NoReturn`, edits behind it still rerun because the reach walk does not truncate.
+- *Preserved mtimes:* File writers that preserve size and mtime (`cp -p`, `tar`, `rsync -t`) cannot be observed if contents change while size and mtime hold still.
+- *Process limits:* Process limits or loader settings outside recorded profile properties are unspecified.
+- *Per-file unit:* The unit of reuse is the whole `*_test.iyi` file. There is no per-case reuse within a test file.
+- *Host only:* Non-host targets are not supported.
+- *Passes only:* Cached failures are never served; only passing runs write receipts.
+- *CI export restriction:* Snapshot export is restricted to CI producer contexts with an attestation flag to prevent accidental workstation export.
+- *Path sensitivity:* Cross-machine hits require identical checkout and toolchain paths because reached code carries absolute source location literals in assertions.
+- *Runner parity:* Cross-machine hits expect alike runner configurations (matching kernel release, rlimits, cgroup memory limits, and loader variables).
+- *Cross-commit hits:* Hits across commits wait on RG1 compiler reproducibility in CI.
+- *Environment writes:* Environment mutations (`ENV.[]=`, `ENV.delete`, `__iyi_set_environ`) over-approximate by recording `env_all`, so any change to the runner's environment reruns a test that sets a variable. `ENV.[]=` and `ENV.delete` also name the variable, and the test reading back its own value is not an input.
+- *Windows:* Nothing on Windows is reusable yet. Its platform arms are not classified (RG3 below), so every test reaches an unclassified site and runs. macOS and Linux are classified.
+- *Host questions:* A test that asks the machine something through an `@[Effect(:host)]` def (its name, its page size, who the program runs as, an account or a group) is never reused. The answer is recorded, but a check has no way to ask the question again, so the receipt is not one it can validate and the test runs.
+- *Chaos mode:* `--cached` cannot be combined with `--chaos`, `--chaos=SEED`, or `--chaos-runs`; chaos runs always execute fresh.
+- *No speedup promised:* No speedup is promised or claimed.
+
+**Verification gates (RG1-RG9).**
+
+The status entries below are of the tree reconciled with upstream master at `140375a3b`: on Linux in the workflow's `iyi`, `stale-fresh`, `stale-callpath` and `stale-equivalence` jobs (runs 43137318814 and 43160142332), and on darwin arm64 by hand with the same scripts. RG6 is the one gate still unproven.
+
+| Gate | Proves | Status | How Proven |
+|---|---|---|---|
+| RG1 | A second compiler built from a copy of the tree, with the same build-input digest and the same commit stamp, builds all 28 C2 programs byte for byte the same. The stamp (`Crystal 1.22.0-dev [commit] (date)`) is in every executable, so compilers built at two commits differ in every program even from identical sources | green, x86_64 Linux | bench/stale_reproducible.sh |
+| RG2 | Normal and observed output and backtraces agree for the full integrated corpus: 140 of 140 (28 samples + 112 std exercises), zero excluded and zero failures; RG2a, each program given one empty directory as its argument, the same | green, darwin arm64 and x86_64 Linux | bench/stale_equivalence.sh rg2, rg2a |
+| RG3 | 0 unclassified runtime sites reachable from the 140 corpus programs (macOS arm64, x86_64 Linux and aarch64 Linux) | green on those three. Windows arms remain unclassified | bench/stale_effects.sh |
+| RG4 | Link under randomized non-CHILD_ENV variables | green | bench/stale_callpath.sh |
+| RG5 | Each observer kind is load-bearing where a site reaches it, by the record or taint it writes being gone when it is dropped: 20 of 20 on darwin arm64, 19 of 19 on x86_64 Linux. Nothing on Linux reaches `host_state` (the roots are files, which the path observers record), and the gate holds that kind to no taint there | green | bench/stale_equivalence.sh rg5 |
+| RG6 | Standing shadow audit catches unannotated leaks or disagreements | NOT yet proven | wired in CI (.github/workflows/iyi.yml audit + empty snapshot on disagreement), provable only on master after merge |
+| RG7 | Threads 1 vs 8 identical executables, all 28 C2 programs | green, x86_64 Linux | bench/stale_reproducible.sh |
+| RG8 | Over 7 programs (5 C2 + 2 C3) and 14 kinds of single-site mutation, 3 'unreached' mutations rerun because the compiler does emit them (over-approximation, never a missed rerun) | green, darwin arm64 and x86_64 Linux | bench/stale_rg8.py via bench/stale_callpath.sh |
+| RG9 | CallPathFp equal across two processes with ASLR and with/without preanalysed prelude, all 140 programs | green, darwin arm64 and x86_64 Linux | bench/stale_rg9.py via bench/stale_callpath.sh |
+
+Acceptance rows from design section 12: rows 1-22 and 25-50 are automated in `bench/stale_tests.sh` and green on darwin arm64 and x86_64 Linux. Rows 23-24 are CI-only and wait for master.
+
+**Census as measured on the reconciled tree.** x86_64 Linux, the `stale-fresh` job of run 43137318814, across the 140 programs (28 C2 samples/iyi, 112 C3 bench/std_*_exercise):
+- Runtime reusable on second run: 81 of 140 (57.9%). C2: 24 of 28 (85.7%). C3: 57 of 112 (50.9%).
+- Static build-key reusable: 136 of 140. C2: 28 of 28. C3: 108 of 112.
+- Build failures: 0 of 140.
+- First not-reusable reasons by category: requested effect 56, opaque program construct 2, runner 0, internal 1. All 59 not-reusable programs passed.
+  - The 2 opaque constructs are `asm` in `std_digest_exercise.iyi` and `pointer_new` in `std_number_format_exercise.iyi`.
+  - The 1 internal reason is `std_user_exercise.iyi`, which asks the machine who the program runs as. An `@[Effect(:host)]` def records its answer, and a check has no way to ask again (`Trace.supported?` leaves `host` out), so such a test runs every time. On darwin arm64 `--explain` says `miss: run: unsupported observation host` for it; the JSON the census reads carries no reason for that miss, which is why the census calls it unclassified.
+
+| Category | Specific Reason | Occurrences |
+|---|---|---|
+| `requested effect` | `clock` | 18 |
+| `requested effect` | `process` | 12 |
+| `requested effect` | `entropy` | 10 |
+| `requested effect` | `runtime_timing` | 8 |
+| `requested effect` | `network` | 4 |
+| `requested effect` | `timer` | 3 |
+| `opaque program construct` | `asm` | 1 |
+| `requested effect` | `dir_stream` | 1 |
+| `opaque program construct` | `pointer_new` | 1 |
+| `internal` | `unclassified` (the `host` observation above) | 1 |
+
+**Overhead as measured on the reconciled tree.** The same job, wall-clock seconds while the census ran up to 8 programs at once on a 4-core runner:
+
+| Program | Default Build+Run (s) | --fresh Time (s) | --cached Validation (s) | Reached Elements | Trace Bytes | Receipt Bytes | Key Bytes |
+|---|---|---|---|---|---|---|---|
+| hello.iyi | 1.215s | 66.377s | 3.558s | 1878 | 91 B | 7908 B | 7790 B |
+| calc.iyi | 1.489s | 64.976s | 4.223s | 2033 | 91 B | 7904 B | 7787 B |
+| collections.iyi | 2.074s | 64.195s | 4.448s | 2002 | 91 B | 7932 B | 7808 B |
+| format.iyi | 1.684s | 64.740s | 4.816s | 2023 | 91 B | 8100 B | 7997 B |
+| shapes.iyi | 1.394s | 65.271s | 3.884s | 1960 | 91 B | 7912 B | 7793 B |
+| std_int_exercise.iyi | 1.798s | 63.267s | 3.946s | 2065 | 91 B | 8011 B | 7823 B |
+| std_bit_array_exercise.iyi | 2.668s | 67.103s | N/A | 1913 | 0 B | 0 B | 8051 B |
+
+A `--cached` check took 3.6 to 4.8 s there, against 1.2 to 2.1 s to build and run the same program: a hit is slower than the run it saves for each of the six. On `hello.iyi` the check spent 0.512 s hashing the call path and build key, 0.286 s and 0.250 s in the two semantic passes, and ran no codegen.
+
+**Census as measured (historical, original 141-program corpus).** Measured on macOS arm64 on this machine across 141 programs (27 C2 samples/iyi, 114 C3 bench/std_*_exercise), before four std exercises became tests; not taken again on darwin since:
+- Runtime reusable on second run: 87 of 141 (61.7%). C2: 25 of 27 (92.6%). C3: 62 of 114 (54.4%).
+- Static build-key reusable: 138 of 141 (97.9%). C2: 27 of 27. C3: 111 of 114.
+- Build failures: 0 of 141.
+- First not-reusable reasons by category: requested effect 53, runner 0, opaque program construct 1, internal 0. All 54 not-reusable programs passed.
+  - The 1 opaque construct is `pointer_new` in `std_number_format_exercise.iyi`.
+
+Top not-reusable reasons:
+
+| Category | Specific Reason | Occurrences |
+|---|---|---|
+| `requested effect` | `clock` | 17 |
+| `requested effect` | `runtime_timing` | 10 |
+| `requested effect` | `entropy` | 9 |
+| `requested effect` | `network` | 8 |
+| `requested effect` | `process` | 4 |
+| `requested effect` | `timer` | 2 |
+| `requested effect` | `dir_stream` | 1 |
+| `opaque program construct` | `pointer_new` | 1 |
+| `requested effect` | `signal` | 1 |
+| `requested effect` | `host_state` | 1 |
+
+**Overhead as measured (historical).** Wall-clock seconds measured on macOS arm64 while the original census ran up to 8 programs at once:
+
+| Program | Default Build+Run (s) | --fresh Time (s) | --cached Validation (s) | Reached Elements | Trace Bytes | Receipt Bytes | Key Bytes |
+|---|---|---|---|---|---|---|---|
+| hello.iyi | 0.543s | 15.686s | 0.845s | 1610 | 91 B | 7906 B | 7790 B |
+| calc.iyi | 0.608s | 15.721s | 0.883s | 1769 | 91 B | 7902 B | 7787 B |
+| collections.iyi | 0.682s | 15.794s | 0.892s | 1736 | 91 B | 7930 B | 7808 B |
+| format.iyi | 0.672s | 16.022s | 1.021s | 1752 | 91 B | 8098 B | 7997 B |
+| shapes.iyi | 0.547s | 16.179s | 0.883s | 1692 | 91 B | 7910 B | 7793 B |
+| std_int_exercise.iyi | 0.949s | 22.013s | 1.411s | 1800 | 91 B | 8018 B | 7823 B |
+| std_bit_array_exercise.iyi | 1.130s | 19.468s | N/A | 1651 | 0 B | 0 B | 8051 B |
+
+`--fresh` starts from an empty private cache, so it includes compiling the runtime with `-Diyi_observe`. `--cached` is the second run in that cache, validated against the first run's receipt. `std_bit_array_exercise.iyi` was not reusable, so it has no cached validation time or receipt. The normal and preanalysed-prelude consumer runs both hit with exit 0 and no codegen.
+
+No speedup is claimed. No warm-cache `--fresh` numbers were measured.
+
+**Completion status (design section 13).** Completion is NOT met and the default stays off:
+- Rows 23-24 and RG6 need master CI.
+- The census has two opaque program constructs that prevent reuse, and one internal reason: a test that asks the host a question is recorded and never reused.
+- Consumption and audit on master are unproven.
+- Cross-machine hits and hits across commits wait on RG1 in CI.
+- A check costs more than the build and run it replaces, for every program measured.
 One thing was a bug rather than a design question: `iyi tool` printed
 `Usage: crystal tool`, because the name fix reached the top-level commands and
 not the subcommand's own usage. It prints `Usage: iyi tool` now.
@@ -8010,15 +8144,19 @@ standard library and may pull every library a required shard pulls.
 
 #### What a plain own-prelude program depends on, counted
 
-Every undefined symbol in a linked own-prelude program, plain `iyi build`, read
-off the executable on darwin arm64:
+A plain build of `samples/iyi/hello.iyi` on darwin arm64 links only
+`/usr/lib/libSystem.B.dylib`. Its complete undefined-symbol list, with
+Mach-O's leading underscore removed:
 
 ```
-write  exit                                                # libc staples
-kqueue  kevent  clock_gettime_nsec_np  __error             # the poller (III.4.8)
+read  write  exit  pipe                                    # platform IO
+kqueue  kevent  clock_gettime_nsec_np  __error              # the poller (III.4.8)
 mmap  munmap                                               # the collector's arena
-pthread_self  pthread_get_stackaddr_np                     # root discovery
-_dyld_get_image_header  _dyld_get_image_vmaddr_slide       # root discovery, dyld
+pthread_create  pthread_self  pthread_get_stackaddr_np      # threads and root discovery
+pthread_kill  sigaction  sigaltstack  sysctlbyname          # thread stops and stack guards
+_tlv_bootstrap                                             # thread-local state
+_dyld_get_image_header  _dyld_get_image_vmaddr_slide         # root discovery, dyld
+backtrace  dladdr  dprintf                                  # panic frames and boundary-symbol lookup
 ```
 
 The symbols are all libSystem — the prelude's staples, the concurrency
@@ -8063,16 +8201,16 @@ So **an own-prelude program's dependency is the platform libc and nothing
 else**, and what that is worth depends on which artifact is being read, so this
 section says which. The gate checks this mode at two layers.
 
-**At the object layer**, which is the per-target cross-compile audit in CI, an
-own-prelude program's object for `x86_64-linux-gnu` leaves nothing undefined:
-the prelude issues the raw syscalls itself for `write`, `exit` and the
-collector's `mmap`/`munmap`, and imports nothing. That is the strong form of
-the claim and it is measured rather than projected. On darwin the same audit
-defers to libSystem, because Apple supports it as the only interface and raw
-syscalls are not a stable ABI there — the concurrency runtime and the
-collector follow the same rule, so on darwin their calls are undefined
-symbols in the object — counted by the exercise gates and by
-`bench/dependency_floor.sh` — where the Linux object carries nothing.
+**At the object layer**, which is the per-target cross-compile audit in CI,
+the measured hello objects for `x86_64-linux-gnu` and `aarch64-linux-gnu`
+request no external runtime functions. Their undefined names are
+`__data_start`, `__ehdr_start` and `_end`, supplied by the linker for root
+discovery. The prelude issues raw syscalls for `write`, `exit` and the
+collector's `mmap`/`munmap`. On darwin the same audit defers to libSystem,
+because Apple supports it as the only interface and raw syscalls are not a
+stable ABI there. The concurrency runtime and collector follow that rule:
+their libSystem calls are undefined symbols counted by the exercise gates
+and by `bench/dependency_floor.sh`.
 
 **At the executable layer**, the linked program carries what its link template
 adds. On Linux that is the C runtime's five undefined references,
@@ -9087,12 +9225,12 @@ the runtime's aside - are marked: the compiler writes the list into the
 binary (`Crystal::IYI_UNSAFE_MODULES`), and the Windows handler prints
 it in pieces, allocating nothing.
 
-**Where the repository stands.** `src/std` has 83 marked modules of
-121, every reason read and rewritten by hand from `iyi fix`'s starting
+**Where the repository stands.** `src/std` has 84 marked modules of
+122, every reason read and rewritten by hand from `iyi fix`'s starting
 point; four of them (box, deque, static_array, weak_ref) are marked by
 hand outright, since only a program that instantiates their generic
 bodies types them and `iyi fix src/std` cannot see them. bench has
-85 marked programs of 175, and none of `samples/iyi`'s 28 programs
+85 marked programs of 176, and none of `samples/iyi`'s 28 programs
 needs one. The specs' snippets whose stand-in for the prelude or std (a
 `@[Primitive]`, a `lib`, a `Pointer` field, a `@[Share]` type,
 `uninitialized` storage) sits in the compiled module are marked as the
@@ -9119,7 +9257,7 @@ warning, which keeps the set honest, and splitting raw code into a small
 module of its own, the way Rust crates isolate theirs. Counted at
 2f070a01e by reading the sources, blocks (`unsafe { }`) would have
 wrapped 2,338 runs of lines in src/std, 900 in src/iyi and 607 in bench,
-and a mark per declaration 1,535, 469 and 258 defs, against 83, 13 and
+and a mark per declaration 1,535, 469 and 258 defs, against 84, 13 and
 85 module marks.
 
 ---
@@ -9457,6 +9595,14 @@ file per type, and the split is a **partition**: on the Kemal port, 23 units
 and no symbol defined by two of them. So "this module's own definitions" is a
 set of whole object files rather than a filter inside one, and carrying them is
 copying bytes rather than teaching codegen a second way to lay out a program.
+
+Private closures hosted in selected carried artifact units use a linkage suffix
+`^unit:` followed by the lowercase hex encoding of the complete UTF-8 logical
+unit name. This prevents a carried closure from colliding with a separately
+generated closure. The requested spelling remains unchanged. This correction
+applies to artifact production and bind filling, including `--crystal`, and can
+change private symbols and object bytes compared with older compilers. It does
+not change the public method ABI or closure calling convention.
 
 A module's units are the module type itself, where its own `pub def`s are
 owned: plus every non-generic type declared under it, recursively.
@@ -13299,7 +13445,7 @@ Named honestly, so nobody mistakes this draft for complete.
     shards exist and none of them is written to iyi's rules, so "run them
     directly" is not a compatibility problem, it is the four rules: `require`
     against R-1, inference against R-2, monkey patching against R-3, and
-    Crystal's 8,161-line standard library against iyi's own 28,880-line prelude.
+    Crystal's 8,161-line standard library against iyi's own 29,007-line prelude.
 
     What is measurable is narrower and better than that framing suggests, and
     it was measured on **Kemal 1.12.0**, which compiles under this compiler

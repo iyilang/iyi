@@ -226,13 +226,16 @@ def sweep(path: Path, stride: int) -> tuple[int, int]:
     asked = 0
     peak = 0
 
+    print(f"  starting {path.name}: {len(asks)} questions", flush=True)
     client = Client()
     try:
+        print(f"    {path.name}: initialize", flush=True)
         client.send("initialize", {"rootUri": file_uri(str(REPO)), "capabilities": {}})
         client.send("initialized", {}, wait=False)
         client.send("textDocument/didOpen",
                     {"textDocument": {"uri": uri, "languageId": "iyi",
                                       "version": 1, "text": text}}, wait=False)
+        print(f"    {path.name}: waiting for open diagnostics", flush=True)
         published = client.diagnostics(uri)
         if published["diagnostics"]:
             first = published["diagnostics"][0]
@@ -242,6 +245,8 @@ def sweep(path: Path, stride: int) -> tuple[int, int]:
             )
         for number, (method, params, where) in enumerate(asks):
             asked += 1
+            print(f"    {path.name}: question {number + 1}/{len(asks)} "
+                  f"{where} {method}", flush=True)
             reply = client.send(method, params)
             error = reply.get("error")
             if error and error.get("code") == -32603:
@@ -252,6 +257,7 @@ def sweep(path: Path, stride: int) -> tuple[int, int]:
             if number % 50 == 0:
                 peak = max(peak, tree_mb(client.proc.pid))
         peak = max(peak, tree_mb(client.proc.pid))
+        print(f"    {path.name}: shutdown", flush=True)
         client.send("shutdown", {})
         client.send("exit", {}, wait=False)
         code = client.proc.wait(timeout=30)

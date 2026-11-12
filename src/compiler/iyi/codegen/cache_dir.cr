@@ -279,7 +279,7 @@ module Iyi
     # `clear_cache` still removes it. The root's files - `msvc-probe`,
     # `linker-probe`, the link templates - are not directories and the
     # rotation passes over them already.
-    NOT_BUILDS = {"mod"}
+    NOT_BUILDS = {"mod", "tests-v1"}
 
     private def gather_cache_entries(dir)
       Dir.children(dir).reject!(&.in?(NOT_BUILDS)).map! { |name| File.join(dir, name) }

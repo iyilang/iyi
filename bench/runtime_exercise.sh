@@ -85,7 +85,7 @@ case "$(uname -s)" in
     # `_environ` and `_close` are the pool's, as in the Linux branch below:
     # macOS 26.6 (Apple M2 Pro, 10 cores, the user's machine) listed both
     # once the exercise's eligible spawns started it.
-    allowed='___error|__tlv_bootstrap|_backtrace|_backtrace_symbols_fd|_pipe|_pthread_create|_pthread_kill|_sigaction|_sigaltstack|_sysctlbyname|_thread_switch|__dyld_get_image_header|__dyld_get_image_vmaddr_slide|_clock_gettime_nsec_np|_close|_environ|_exit|_fstat64|_kevent|_kqueue|_malloc|_memset|_mmap|_mprotect|_munmap|_os_sync_wait_on_address|_os_sync_wake_by_address_all|_pipe|_pthread_get_stackaddr_np|_pthread_self|_read|_realloc|_write'
+    allowed='___error|__tlv_bootstrap|_backtrace|_dladdr|_dprintf|_pipe|_pthread_create|_pthread_kill|_sigaction|_sigaltstack|_sysctlbyname|_thread_switch|__dyld_get_image_header|__dyld_get_image_vmaddr_slide|_clock_gettime_nsec_np|_close|_environ|_exit|_fstat64|_kevent|_kqueue|_malloc|_memset|_mmap|_mprotect|_munmap|_os_sync_wait_on_address|_os_sync_wake_by_address_all|_pthread_get_stackaddr_np|_pthread_self|_read|_realloc|_write'
     added="$(nm -u exercise | sed -e 's/^ *//' | awk '{ print $NF }' |
       grep -E -cv "^($allowed)\$")"
     extra_libs="$(otool -L exercise | sed -n '2,$p' | awk '{ print $1 }' |

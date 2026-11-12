@@ -567,6 +567,7 @@ module Iyi
 
     private def note(node : ASTNode, what : String, hint : String, reason : String) : Nil
       return if @exempt > 0
+      return if (node.is_a?(Call) || node.is_a?(Path)) && node.iyi_synthetic?
       written = (node.is_a?(Call) ? node.name_location : nil) || node.location
       return unless written
       at = written.expanded_location

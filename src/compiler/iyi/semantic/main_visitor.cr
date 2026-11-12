@@ -10,6 +10,11 @@ module Iyi
       Prof.span("  main: missing types") { node.accept missing_types }
       program.process_finished_hooks(missing_types) if process_finished_hooks
 
+      # iyi: the cleanup below types some code of its own, so layout folds are
+      # settled after it, in semantic_after_top_level (layout_folds.cr). A native
+      # program's cleanup folds with a typer that cached nothing while typing.
+      fresh_layout_typer_for_cleanup if cleanup
+
       # iyi: unsafe code is code in a module that says so (SPEC.md III.13),
       # read off the typed program before the cleanup inlines what the
       # compiler wrote into what the person did.
@@ -185,6 +190,11 @@ module Iyi
     end
 
     def visit(node : Path)
+      if target_type = node.target_type
+        node.type = check_type_in_type_args(target_type.remove_alias_if_simple).devirtualize
+        return false
+      end
+
       lookup_scope = @path_lookup || @scope || @current_type
 
       # If the lookup scope is a generic type, like Foo(T), we don't
@@ -233,6 +243,7 @@ module Iyi
         end
 
         node.target_const = type
+        type.iyi_runtime_read = true
         node.bind_to type.value
       when Type
         # We devirtualize the type because in an expression like
@@ -1143,6 +1154,7 @@ module Iyi
         literal_type = NumberAutocastType.new(program, value)
         restricted = literal_type.restrict(var_type, MatchContext.new(value.type, value.type))
         if restricted.is_a?(IntegerType) || restricted.is_a?(FloatType)
+          program.layout_fold_use(value, LayoutFoldUseKind::Typing, assign, adopted: true)
           value.type = restricted
           value.kind = restricted.kind
           assign.value = value if assign
@@ -3170,30 +3182,31 @@ module Iyi
     end
 
     def visit(node : SizeOf)
-      visit_size_or_align_of(node) do |type|
-        @program.size_of(type.sizeof_type)
+      visit_size_or_align_of(node, LayoutFoldKind::Size) do |subject|
+        @program.size_of(subject)
       end
     end
 
     def visit(node : InstanceSizeOf)
-      visit_instance_size_or_align_of(node) do |type|
-        @program.instance_size_of(type.sizeof_type)
+      visit_instance_size_or_align_of(node, LayoutFoldKind::InstanceSize) do |subject|
+        @program.instance_size_of(subject)
       end
     end
 
     def visit(node : AlignOf)
-      visit_size_or_align_of(node) do |type|
-        @program.align_of(type.sizeof_type)
+      visit_size_or_align_of(node, LayoutFoldKind::Align) do |subject|
+        @program.align_of(subject)
       end
     end
 
     def visit(node : InstanceAlignOf)
-      visit_instance_size_or_align_of(node) do |type|
-        @program.instance_align_of(type.sizeof_type)
+      visit_instance_size_or_align_of(node, LayoutFoldKind::InstanceAlign) do |subject|
+        @program.instance_align_of(subject)
       end
     end
 
-    private def visit_size_or_align_of(node, &)
+    private def visit_size_or_align_of(node, kind : LayoutFoldKind, &)
+      type_argument = @in_type_args > 0
       @in_type_args += 1
       node.exp.accept self
       @in_type_args -= 1
@@ -3206,12 +3219,16 @@ module Iyi
 
       # Try to resolve the node right now to a number literal
       # (useful for sizeof/alignof inside as a generic type argument, but also
-      # to make it easier for LLVM to optimize things)
+      # to make it easier for LLVM to optimize things). The fold is recorded with
+      # what it measured, so settling can compare it with the final layout.
       if type && !node.exp.is_a?(TypeOf) &&
          !(type.module? || (type.abstract? && type.struct?))
-        expanded = NumberLiteral.new(yield(type).to_s, :i32)
+        subject = type.sizeof_type
+        value = yield(subject).to_u64
+        expanded = NumberLiteral.new(value.to_s, :i32)
         expanded.type = @program.int32
         node.expanded = expanded
+        @program.record_layout_fold LayoutFold.new(node, kind, subject, nil, value, type_argument, @typed_def)
       end
 
       node.type = @program.int32
@@ -3219,7 +3236,8 @@ module Iyi
       false
     end
 
-    private def visit_instance_size_or_align_of(node, &)
+    private def visit_instance_size_or_align_of(node, kind : LayoutFoldKind, &)
+      type_argument = @in_type_args > 0
       @in_type_args += 1
       node.exp.accept self
       @in_type_args -= 1
@@ -3232,11 +3250,15 @@ module Iyi
 
       # Try to resolve the instance_sizeof right now to a number literal
       # (useful for instance_sizeof inside as a generic type argument, but also
-      # to make it easier for LLVM to optimize things)
+      # to make it easier for LLVM to optimize things). The fold is recorded with
+      # what it measured, so settling can compare it with the final layout.
       if type && type.devirtualize.class? && !type.metaclass? && !type.struct? && !node.exp.is_a?(TypeOf)
-        expanded = NumberLiteral.new(yield(type).to_s, :i32)
+        subject = type.sizeof_type
+        value = yield(subject).to_u64
+        expanded = NumberLiteral.new(value.to_s, :i32)
         expanded.type = @program.int32
         node.expanded = expanded
+        @program.record_layout_fold LayoutFold.new(node, kind, subject, nil, value, type_argument, @typed_def)
       end
 
       node.type = @program.int32
@@ -3258,6 +3280,7 @@ module Iyi
     end
 
     def visit(node : OffsetOf)
+      type_argument = @in_type_args > 0
       @in_type_args += 1
       node.offsetof_type.accept self
       @in_type_args -= 1
@@ -3289,9 +3312,13 @@ module Iyi
       end
 
       if type && (type.struct? || type.is_a?(TupleInstanceType))
-        offset = @program.offset_of(type.sizeof_type, ivar_index)
+        subject = type.sizeof_type
+        kind = LayoutFoldKind::Offset
+        offset = @program.offset_of(subject, ivar_index).to_u64
       elsif type && type.instance_type.devirtualize.class?
-        offset = @program.instance_offset_of(type.sizeof_type, ivar_index)
+        subject = type.sizeof_type
+        kind = LayoutFoldKind::InstanceOffset
+        offset = @program.instance_offset_of(subject, ivar_index).to_u64
       else
         node.offsetof_type.raise "#{type} is neither a class, a struct nor a Tuple, it's a #{type.type_desc}"
       end
@@ -3299,6 +3326,7 @@ module Iyi
       expanded = NumberLiteral.new(offset.to_s, :i32)
       expanded.type = @program.int32
       node.expanded = expanded
+      @program.record_layout_fold LayoutFold.new(node, kind, subject, ivar_index.to_i32, offset, type_argument, @typed_def)
       node.type = @program.int32
 
       false

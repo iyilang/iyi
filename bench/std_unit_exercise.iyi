@@ -27,8 +27,8 @@
 
 module bench/std_unit_exercise
 
+import std/dir::{Dir}
 import std/unit::{Unit}
-
 {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
   def fail(message : String) : Nil
     print "FAIL: #{message}\n"
@@ -214,12 +214,16 @@ import std/unit::{Unit}
 
   workers = 4
   chosen = [] of String
+  scratch_dir = nil
   Program.args.each do |argument|
     if argument.starts_with?("--workers=")
       workers = argument[10, argument.size - 10].to_i
-    else
-      fail("no step named #{argument}") unless STEPS.includes?(argument)
+    elsif STEPS.includes?(argument)
       chosen << argument
+    elsif scratch_dir.nil? && Dir.exists?(argument)
+      scratch_dir = argument
+    else
+      fail("no step named #{argument}")
     end
   end
   chosen = ["alone", "parks", "panic"] if chosen.empty?

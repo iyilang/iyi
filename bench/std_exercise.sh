@@ -41,6 +41,13 @@ esac
 trap 'rm -rf "$WORK"' EXIT
 
 status=0
+PY=""
+for candidate in python3 python; do
+  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys' >/dev/null 2>&1; then
+    PY="$candidate"
+    break
+  fi
+done
 
 run_case() {
   local label="$1" name="$2"
@@ -352,7 +359,10 @@ echo "== the library is iyi all the way down"
 # only once a program reaches it and links libyaml, and a declaration nothing
 # reaches yet is exactly what this loop exists to name. So they are checked
 # too, against the libraries the platform supplies.
-PLATFORM_LIBS='LibC|LibSystem|LibKernel32|LibWasi|LibLLVMMath|LibAdvapi32|LibWs2_32|LibCrypt32|LibSecurity|LibCoreFoundation'
+# `LibObserveC` is `std/observe`'s: the libc calls (`getenv`, `getcwd`, `stat`,
+# `realpath`) the test recorder makes about the process it records. Only a
+# `-Diyi_observe` build reaches them, and that build is run, never shipped.
+PLATFORM_LIBS='LibC|LibSystem|LibKernel32|LibWasi|LibLLVMMath|LibAdvapi32|LibWs2_32|LibCrypt32|LibSecurity|LibCoreFoundation|LibObserveC'
 # The `@[Link]`s an exempt module may carry: the DLLs Windows itself ships,
 # named in SPEC.md III.10's inventory. `std/random` is here for `advapi32` —
 # the OS entropy `Random::Secure` reads is `RtlGenRandom`, and Windows has
@@ -375,7 +385,7 @@ for source in "$REPO"/src/std/*.iyi; do
     # `std/path` folds a Windows name's case the way NTFS does, which is
     # the platform's own table (LCMapStringEx); ASCII alone called `C:\Ä`
     # and `c:\ä` two names.
-    socket|time|debug|file|dir|udp|random|signal|process|path|system|term|user|system_roots)
+    socket|time|debug|file|dir|udp|random|signal|process|path|system|term|user|system_roots|observe)
       # Named libraries only: a `lib` block of platform bindings is the
       # exemption, an `@[Link]` to something the platform does not supply is
       # not covered by it.
@@ -478,8 +488,8 @@ unconsumable=""
 for source in "$REPO"/bench/std_*_exercise.iyi "$REPO"/bench/std_*_test.iyi; do
   name="$(basename "$source" .iyi)"
   work="$WORK/r1/$name"
-  mkdir -p "$work/mods"
-  if ! (cd "$work" && "$IYI" build --emit-iyimod mods -o from-source "$source") \
+  mkdir -p "$work/mods" "$work/s" "$work/a"
+  if ! (cd "$work" && "$IYI" build --emit-iyimod mods -o "s/$name" "$source") \
        > "$work/emit.log" 2>&1; then
     unconsumable="$unconsumable $name"
     why="$(grep -m1 -E 'Error|BUG' "$work/emit.log" | cut -c1-140)"
@@ -489,7 +499,7 @@ for source in "$REPO"/bench/std_*_exercise.iyi "$REPO"/bench/std_*_test.iyi; do
     echo "  $name: cannot write its artifacts: $why"
     continue
   fi
-  (cd "$work" && "$IYI" build --use-iyimod mods -o from-artifact "$source") \
+  (cd "$work" && "$IYI" build --use-iyimod mods -o "a/$name" "$source") \
     > "$work/use.log" 2>&1
   use_status=$?
   if [ "$use_status" -ne 0 ]; then
@@ -502,9 +512,11 @@ for source in "$REPO"/bench/std_*_exercise.iyi "$REPO"/bench/std_*_test.iyi; do
     echo "  $name: $(printf '%s' "$said" | cut -c1-140)"
     continue
   fi
-  "$work/from-source" > "$work/source.out" 2>&1
+  rm -rf "$work/sandbox" && mkdir -p "$work/sandbox"
+  IYI_FILE_SANDBOX="$work/sandbox" "$work/s/$name" > "$work/source.out" 2>&1
   source_status=$?
-  "$work/from-artifact" > "$work/artifact.out" 2>&1
+  rm -rf "$work/sandbox" && mkdir -p "$work/sandbox"
+  IYI_FILE_SANDBOX="$work/sandbox" "$work/a/$name" > "$work/artifact.out" 2>&1
   artifact_status=$?
   if [ "$source_status" -ne "$artifact_status" ]; then
     unconsumable="$unconsumable $name"
@@ -539,13 +551,22 @@ for source in "$REPO"/bench/std_*_exercise.iyi "$REPO"/bench/std_*_test.iyi; do
       continue
       ;;
   esac
-  # Without darwin's frames under a task's panic (bench/darwin_frames.sh).
-  without_frames < "$work/source.out" > "$work/source.cmp"
-  without_frames < "$work/artifact.out" > "$work/artifact.cmp"
-  if ! cmp -s "$work/source.cmp" "$work/artifact.cmp"; then
+  passed=0
+  if cmp -s "$work/source.out" "$work/artifact.out"; then
+    passed=1
+  elif [ "$(uname -s)" = "Darwin" ] && [ -n "$PY" ]; then
+    if "$PY" "$REPO/bench/frames_equivalent.py" "$work/source.out" "$work/artifact.out" > "$work/frames.out" 2>&1; then
+      passed=1
+    fi
+  fi
+  if [ "$passed" -eq 0 ]; then
     unconsumable="$unconsumable $name"
     echo "  $name: runs differently from its artifacts"
-    diff "$work/source.cmp" "$work/artifact.cmp" | sed -n '1,6p' | sed 's/^/    /'
+    if [ -s "$work/frames.out" ]; then
+      sed 's/^/    /' "$work/frames.out"
+    else
+      diff "$work/source.out" "$work/artifact.out" | sed -n '1,6p' | sed 's/^/    /'
+    fi
   fi
 done
 if [ -n "$unconsumable" ]; then
@@ -586,16 +607,29 @@ echo "== a panic std raises names no site from its artifact either"
 # artifact's path, and from artifacts `Deque#pop` of an empty deque printed
 # `at mods\std\deque.iyimod:297`, which its build from source did not.
 site="$WORK/r1/panic_site"
-mkdir -p "$site/mods"
+mkdir -p "$site/mods" "$site/s" "$site/a"
 printf 'import std/deque::{Deque}\n\nDeque(Int32).new.pop\n' > "$site/pop.iyi"
-if (cd "$site" && "$IYI" build --emit-iyimod mods -o from-source pop.iyi \
-      && "$IYI" build --use-iyimod mods -o from-artifact pop.iyi) > "$site/build.log" 2>&1; then
-  "$site/from-source" > "$site/source.out" 2>&1
-  "$site/from-artifact" > "$site/artifact.out" 2>&1
-  # The first line and the absence of a site, not the whole stream: darwin
-  # prints a backtrace after it, and its addresses differ between builds.
-  if [ "$(head -1 "$site/source.out")" != "$(head -1 "$site/artifact.out")" ] || grep -q '^  at ' "$site/artifact.out"; then
-    echo "  FAIL: from artifacts the panic reads"; sed -n '1,4p' "$site/artifact.out" | sed 's/^/    /'
+if (cd "$site" && "$IYI" build --emit-iyimod mods -o s/pop pop.iyi \
+      && "$IYI" build --use-iyimod mods -o a/pop pop.iyi) > "$site/build.log" 2>&1; then
+  "$site/s/pop" > "$site/source.out" 2>&1
+  "$site/a/pop" > "$site/artifact.out" 2>&1
+  # The full stream is compared for semantic frame equivalence on Darwin;
+  # and the panic must still name no call site from artifacts.
+  passed=0
+  if cmp -s "$site/source.out" "$site/artifact.out"; then
+    passed=1
+  elif [ "$(uname -s)" = "Darwin" ] && [ -n "$PY" ]; then
+    if "$PY" "$REPO/bench/frames_equivalent.py" "$site/source.out" "$site/artifact.out" > "$site/frames.out" 2>&1; then
+      passed=1
+    fi
+  fi
+  if [ "$passed" -eq 0 ] || grep -q '^  at ' "$site/artifact.out"; then
+    echo "  FAIL: from artifacts the panic reads"
+    if [ -s "$site/frames.out" ]; then
+      sed 's/^/    /' "$site/frames.out"
+    else
+      sed -n '1,4p' "$site/artifact.out" | sed 's/^/    /'
+    fi
     status=1
   else
     echo "  both print: $(head -1 "$site/artifact.out")"

@@ -679,71 +679,73 @@ module Iyi
 
         generic_type = instance_type.instantiate_named_args(entries)
       else
-        type_vars_types = Array(TypeVar).new(type_vars.size + 1)
-        type_vars.each do |node|
-          if node.is_a?(Path) && (syntax_replacement = node.syntax_replacement)
-            node = syntax_replacement
-          end
-          if node.is_a?(SizeOf) && (expanded = node.expanded)
-            node = expanded
-          end
-          if node.is_a?(InstanceSizeOf) && (expanded = node.expanded)
-            node = expanded
-          end
-          if node.is_a?(AlignOf) && (expanded = node.expanded)
-            node = expanded
-          end
-          if node.is_a?(InstanceAlignOf) && (expanded = node.expanded)
-            node = expanded
-          end
-          if node.is_a?(OffsetOf) && (expanded = node.expanded)
-            node = expanded
-          end
-
-          case node
-          when NumberLiteral
-            type_var = node
-          when Splat
-            type = node.type?
-            return unless type.is_a?(TupleInstanceType)
-
-            type_vars_types.concat(type.tuple_types)
-            next
-          else
-            node_type = node.type?
-            return unless node_type
-
-            # If the Path points to a constant, we solve it and use it if it's a number literal
-            if node.is_a?(Path) && (target_const = node.target_const)
-              value = target_const.value
-              if value.is_a?(NumberLiteral)
-                type_var = value
-              else
-                # Try to interpret the value
-                visitor = target_const.visitor
-                if visitor
-                  numeric_value = visitor.interpret_enum_value(value)
-                  numeric_type = node_type.program.int?(numeric_value) || raise "BUG: expected integer type, not #{numeric_value.class}"
-                  type_var = NumberLiteral.new(numeric_value.to_s, numeric_type.kind)
-                  type_var.set_type_from(numeric_type, from)
-                else
-                  node.raise "can't use constant #{node} (value = #{value}) as generic type argument, it must be a numeric constant"
-                end
-              end
-            else
-              unless node_type.can_be_stored?
-                node.raise "can't use #{node_type} as generic type argument yet, use a more specific type"
-              end
-              type_var = node_type.virtual_type
+        generic_type = instance_type.program.layout_fold_consumer(LayoutFoldUseKind::TypeArgument, self) do
+          type_vars_types = Array(TypeVar).new(type_vars.size + 1)
+          type_vars.each do |node|
+            if node.is_a?(Path) && (syntax_replacement = node.syntax_replacement)
+              node = syntax_replacement
             end
+            if node.is_a?(SizeOf) && (expanded = node.expanded)
+              node = expanded
+            end
+            if node.is_a?(InstanceSizeOf) && (expanded = node.expanded)
+              node = expanded
+            end
+            if node.is_a?(AlignOf) && (expanded = node.expanded)
+              node = expanded
+            end
+            if node.is_a?(InstanceAlignOf) && (expanded = node.expanded)
+              node = expanded
+            end
+            if node.is_a?(OffsetOf) && (expanded = node.expanded)
+              node = expanded
+            end
+
+            case node
+            when NumberLiteral
+              instance_type.program.layout_fold_adopt(node)
+              type_var = node
+            when Splat
+              type = node.type?
+              return unless type.is_a?(TupleInstanceType)
+
+              type_vars_types.concat(type.tuple_types)
+              next
+            else
+              node_type = node.type?
+              return unless node_type
+
+              # If the Path points to a constant, we solve it and use it if it's a number literal
+              if node.is_a?(Path) && (target_const = node.target_const)
+                value = target_const.value
+                if value.is_a?(NumberLiteral)
+                  instance_type.program.layout_fold_adopt(value)
+                  type_var = value
+                else
+                  # Try to interpret the value
+                  visitor = target_const.visitor
+                  if visitor
+                    numeric_value = visitor.interpret_enum_value(value)
+                    numeric_type = node_type.program.int?(numeric_value) || raise "BUG: expected integer type, not #{numeric_value.class}"
+                    type_var = NumberLiteral.new(numeric_value.to_s, numeric_type.kind)
+                    type_var.set_type_from(numeric_type, from)
+                  else
+                    node.raise "can't use constant #{node} (value = #{value}) as generic type argument, it must be a numeric constant"
+                  end
+                end
+              else
+                unless node_type.can_be_stored?
+                  node.raise "can't use #{node_type} as generic type argument yet, use a more specific type"
+                end
+                type_var = node_type.virtual_type
+              end
+            end
+
+            type_vars_types << type_var
           end
 
-          type_vars_types << type_var
-        end
-
-        begin
-          generic_instance_type = instance_type.as(GenericType)
-          generic_type =
+          begin
+            generic_instance_type = instance_type.as(GenericType)
             if generic_instance_type.is_a?(GenericUnionType) && inside_is_a?
               # In the case of `exp.is_a?(Union(X, Y))` we make it work exactly
               # like `exp.is_a?(X | Y)`, which won't resolve `X | Y` to the virtual
@@ -752,8 +754,9 @@ module Iyi
             else
               generic_instance_type.instantiate(type_vars_types)
             end
-        rescue ex : Iyi::CodeError
-          raise ex.message, ex
+          rescue ex : Iyi::CodeError
+            raise ex.message, ex
+          end
         end
       end
 

@@ -145,7 +145,7 @@ if [ -f "$WORK/mark" ]; then
     -e pthread_self -e pthread_get_stackaddr_np -e _dyld_get_image_header -e _dyld_get_image_vmaddr_slide \
     -e kqueue -e kevent -e clock_gettime_nsec_np -e __error -e _tlv_bootstrap -e pthread_kill -e pthread_create -e sysctlbyname -e sigaction -e sigaltstack \
     -e os_sync_wait_on_address -e os_sync_wake_by_address_all -e thread_switch \
-    -e backtrace -e backtrace_symbols_fd \
+    -e backtrace -e dladdr -e dprintf \
     -e open -e openat -e close -e read -e unlink -e chmod \
     -e ITM_deregisterTMCloneTable -e ITM_registerTMCloneTable -e _cxa_finalize -e _gmon_start__ -e _libc_start_main || true)"
   if [ -n "$extra" ]; then

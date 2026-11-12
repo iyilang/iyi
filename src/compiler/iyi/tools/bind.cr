@@ -322,6 +322,10 @@ module Iyi
   @@bound_module = {} of String => String
   @@bound_used = Set(String).new
 
+  # Whether the program being bound is iyi source, which decides how its printed text is
+  # read back (`bound_paths`). Reset per run.
+  @@iyi_text = false
+
   # iyi: this scanner is reached by the compiler, so stdlib Regex would keep
   # pcre2 on its link line. Compile the grammar once through Iyi::Rx instead
   # of maintaining four hand-written tokenizers (SPEC.md III.10).
@@ -363,6 +367,7 @@ module Iyi
 
     @@library = library_root(program) || ""
     @@root = root
+    @@iyi_text = Lexer.iyi_source?(program.filename || "")
     @@duck_bodies = nil
     @@builtin = program.builtin_type_names
     @@crystal_private = Set(String).new
@@ -983,10 +988,10 @@ module Iyi
 
     if module_root? program, root
       exported = exported.map do |signature|
-        rekey_body(iyi_module_name(root), signature, strip_root(signature, root)) { |body| strip_root body, root }
+        rekey_body(iyi_module_name(root), signature, strip_root(signature, root)) { |text, parameters| strip_root(text, root, :body, parameters) }
       end
       carried_functions = carried_functions.map do |signature|
-        rekey_body(iyi_module_name(root), signature, strip_root(signature, root)) { |body| strip_root body, root }
+        rekey_body(iyi_module_name(root), signature, strip_root(signature, root)) { |text, parameters| strip_root(text, root, :body, parameters) }
       end
       top_exported = top_exported.map do |signature|
         # The *signature* is stripped and the body is not, and that is the one
@@ -994,12 +999,12 @@ module Iyi
         # module — that is what makes it top-level — so a name inside its body
         # has to be the one the module is known by from out there:
         # `Kemal::Utils` rather than `Utils`, which is nothing at that level.
-        rekey_body(IyiMod::TOP_LEVEL_CONTAINER, signature, strip_root(signature, root)) { |body| body }
+        rekey_body(IyiMod::TOP_LEVEL_CONTAINER, signature, strip_root(signature, root)) { |text, _| text }
       end
       carried_types = carried_types.map { |declaration| strip_root_declaration declaration, root }
       root_class_vars = root_class_vars.map do |class_var|
-        class_var.copy_with(type: strip_root(class_var.type, root),
-          value: strip_root(class_var.value, root))
+        class_var.copy_with(type: strip_root(class_var.type, root, :type),
+          value: strip_root(class_var.value, root, :expression))
       end
     end
 
@@ -1019,18 +1024,18 @@ module Iyi
     # consumer will see it.
     unless @@bound_prefix.empty?
       exported = exported.map do |signature|
-        rekey_body(iyi_module_name(root), signature, map_names(signature)) { |body| map_names body }
+        rekey_body(iyi_module_name(root), signature, map_names(signature)) { |text, parameters| map_names(text, :body, parameters) }
       end
       carried_functions = carried_functions.map do |signature|
-        rekey_body(iyi_module_name(root), signature, map_names(signature)) { |body| map_names body }
+        rekey_body(iyi_module_name(root), signature, map_names(signature)) { |text, parameters| map_names(text, :body, parameters) }
       end
       top_exported = top_exported.map do |signature|
-        rekey_body(IyiMod::TOP_LEVEL_CONTAINER, signature, map_names(signature)) { |body| map_names body }
+        rekey_body(IyiMod::TOP_LEVEL_CONTAINER, signature, map_names(signature)) { |text, parameters| map_names(text, :body, parameters) }
       end
       reopened = reopened.map { |declaration| map_names_declaration declaration }
       carried_types = carried_types.map { |declaration| map_names_declaration declaration }
       root_class_vars = root_class_vars.map do |class_var|
-        class_var.copy_with(type: map_names(class_var.type), value: map_names(class_var.value))
+        class_var.copy_with(type: map_names(class_var.type, :type), value: map_names(class_var.value, :expression))
       end
     end
 
@@ -2701,45 +2706,64 @@ module Iyi
     before === 0x3A_u8 || identifier_byte?(before) # :
   end
 
-  # Every place *needle* appears in *text* on a name boundary, replaced by what
-  # *replacement_for* answers. `nil` from the block leaves the occurrence alone.
-  private def self.replace_on_boundary(text : String, needle : String,
-                                       trailing_name_ends : Bool, & : -> String) : String
-    return text if needle.empty? || !text.includes?(needle)
-
-    result = String::Builder.new(text.bytesize)
-    index = 0
-    while index < text.bytesize
-      if text.byte_index(needle, index) == index && !after_name_byte?(text, index)
-        after = index + needle.bytesize
-        ends_name = !trailing_name_ends ||
-                    after >= text.bytesize ||
-                    !identifier_byte?(text.to_unsafe[after])
-        if ends_name
-          result << yield
-          index = after
-          next
-        end
-      end
-      result.write_byte text.to_unsafe[index]
-      index += 1
-    end
-    result.to_s
+  # The paths of *text*, as the parser reads them. See `BoundPathIndex`.
+  #
+  # Every rewrite of printed text below goes through here. It used to search the text for a name, and a
+  # search also finds the name inside a string, a regex or a comment: `"Kemal::Config"` in a log message
+  # came out `"Config"`. A lexer on its own cannot tell those apart either - whether `/` divides or opens a
+  # regex is the parser's call - so the text is parsed and only a path is rewritten.
+  #
+  # *parameters* and *index* place the text in its signature: a body is read where its parameters are
+  # variables, and a parameter among the ones beside it (`BoundPathIndex.paths`).
+  private def self.bound_paths(text : String, entry : BoundPathIndex::Entry,
+                               parameters : Array(String) = [] of String, index : Int32? = nil) : Array(BoundPathOccurrence)
+    BoundPathIndex.paths(text, entry, @@iyi_text, parameters, index)
   end
 
-  # `MyLib::Entry` becomes `Entry`, and `MyLibOther::X` is left alone — the
-  # prefix has to end at a name boundary or this renames types it never owned.
-  private def self.strip_root(text : String, root : String) : String
-    replace_on_boundary(text, "#{root}::", trailing_name_ends: false) { "" }
+  # A signature's parameters as a def writes them, the block parameter last.
+  private def self.signature_parameters(signature : IyiMod::Signature) : Array(String)
+    signature.block_parameter.empty? ? signature.parameters : signature.parameters + [signature.block_parameter]
+  end
+
+  # *text* with each edit made. An edit is the bytes `start...finish` of *text* and what replaces them,
+  # and the edits are in order.
+  private def self.splice(text : String, edits : Array({Int32, Int32, String})) : String
+    return text if edits.empty?
+    source = text.to_slice
+    String.build(text.bytesize) do |io|
+      cursor = 0
+      edits.each do |(start, finish, replacement)|
+        io.write source[cursor, start - cursor]
+        io << replacement
+        cursor = finish
+      end
+      io.write source[cursor, source.size - cursor]
+    end
+  end
+
+  # `MyLib::Entry` becomes `Entry`, and `MyLibOther::X` is left alone — the prefix has to be whole
+  # segments of a path or this renames types it never owned.
+  private def self.strip_root(text : String, root : String, entry : BoundPathIndex::Entry,
+                              parameters : Array(String) = [] of String, index : Int32? = nil) : String
+    segments = root.split("::")
+    return text if segments.any?(&.empty?) || !text.includes?("#{root}::")
+
+    prefix = root.bytesize + 2
+    edits = [] of {Int32, Int32, String}
+    bound_paths(text, entry, parameters, index).each do |path|
+      edits << {path.start, path.start + prefix, ""} if BoundPathRules.rooted_at?(path, segments)
+    end
+    splice(text, edits)
   end
 
   private def self.strip_root(signature : IyiMod::Signature, root : String) : IyiMod::Signature
+    all = signature_parameters(signature)
     IyiMod::Signature.new(
       name: signature.name,
       receiver: signature.receiver,
-      parameters: signature.parameters.map { |parameter| strip_root parameter, root },
-      block_parameter: strip_root(signature.block_parameter, root),
-      return_type: strip_root(signature.return_type, root),
+      parameters: signature.parameters.map_with_index { |parameter, index| strip_root(parameter, root, :parameter, all, index) },
+      block_parameter: strip_root(signature.block_parameter, root, :parameter, all, signature.parameters.size),
+      return_type: strip_root(signature.return_type, root, :type),
       free_variables: signature.free_variables,
       required: signature.required,
     )
@@ -2769,11 +2793,14 @@ module Iyi
     # The header line is not inside it. A superclass, an `include` and an
     # `alias`'s value are read in the enclosing scope, so they keep the root's.
     inside = "#{root}::#{declaration.name}"
-    scoped = ->(text : String) { strip_root(strip_root(text, inside), root) }
+    scoped = ->(text : String, entry : BoundPathIndex::Entry) { strip_root(strip_root(text, inside, entry), root, entry) }
+    scoped_body = ->(text : String, parameters : Array(String)) { strip_root(strip_root(text, inside, :body, parameters), root, :body, parameters) }
 
     # `copy_with`, for the reason `prune_declaration` gives.
     declaration.copy_with(
-      fields: declaration.fields.map { |(name, type, value)| {name, scoped.call(type), scoped.call(value)} },
+      fields: declaration.fields.map do |(name, type, value)|
+        {name, scoped.call(type, BoundPathIndex::Entry::Type), scoped.call(value, BoundPathIndex::Entry::Expression)}
+      end,
       # `map_with_index` over the ordinals, because two definitions of one
       # signature are two bodies and each has to move to its own new key. The
       # pruner does not need the same care: it filters on the signature's text,
@@ -2781,8 +2808,8 @@ module Iyi
       methods: begin
         ordinals = IyiMod.mono_body_ordinals(declaration.methods)
         declaration.methods.map_with_index do |signature, index|
-          rekey_body(path, signature, strip_root(strip_root(signature, inside), root), ordinals[index]) do |body|
-            scoped.call body
+          rekey_body(path, signature, strip_root(strip_root(signature, inside), root), ordinals[index]) do |text, parameters|
+            scoped_body.call(text, parameters)
           end
         end
       end,
@@ -2794,20 +2821,20 @@ module Iyi
       types: declaration.types.map do |nested|
         strip_root_declaration nested, "#{root}::#{declaration.name}", "#{path}::#{nested.name}"
       end,
-      value: strip_root(declaration.value, root),
+      value: strip_root(declaration.value, root, :type),
       # The value as well as the type. It is an expression that names types —
       # `@@config = Config.new` — and it is rendered inside the module the same
       # way an alias's right-hand side is.
       class_vars: declaration.class_vars.map do |class_var|
-        class_var.copy_with(type: scoped.call(class_var.type),
-          value: scoped.call(class_var.value))
+        class_var.copy_with(type: scoped.call(class_var.type, BoundPathIndex::Entry::Type),
+          value: scoped.call(class_var.value, BoundPathIndex::Entry::Expression))
       end,
-      superclass: strip_root(declaration.superclass, root),
-      includes: declaration.includes.map { |name| strip_root(name, root) },
+      superclass: strip_root(declaration.superclass, root, :type),
+      includes: declaration.includes.map { |name| strip_root(name, root, :type) },
       # A `fun` line is text and the types in it are the shard's like any
       # other: `fun open_v2 = sqlite3_open_v2(… flags : SQLite3::Flag …)` is
       # `flags : Flag` once the declaration is inside the module.
-      funs: declaration.funs.map { |source| scoped.call(source) },
+      funs: declaration.funs.map { |source| scoped.call(source, BoundPathIndex::Entry::FunLine) },
     )
   end
 
@@ -2839,7 +2866,7 @@ module Iyi
   private def self.rekey_body(container : String, before : IyiMod::Signature,
                               after : IyiMod::Signature,
                               ordinal : Int32 = 0,
-                              & : String -> String) : IyiMod::Signature
+                              & : String, Array(String) -> String) : IyiMod::Signature
     old_key = IyiMod.mono_body_key(container, before, ordinal)
     new_key = IyiMod.mono_body_key(container, after, ordinal)
 
@@ -2851,24 +2878,32 @@ module Iyi
     # `SQLite3 does not export SQLite3::TIME_ZONE`. Stripped, it is
     # `TIME_ZONE`, which is what the shard's own file means by it.
     if body = @@mono_bodies.delete(old_key)
-      @@mono_bodies[new_key] = yield body
+      # The body with the parameters of the signature it was written under, which are its variables.
+      @@mono_bodies[new_key] = yield body, signature_parameters(before)
     end
     after
   end
 
   # Rewrites every bound name in *text* to what the consumer calls it. The name
   # has to stand alone on both sides: `JSON` is bound, `JSONThing` is not.
-  private def self.map_names(text : String) : String
+  private def self.map_names(text : String, entry : BoundPathIndex::Entry,
+                             parameters : Array(String) = [] of String, index : Int32? = nil) : String
     mapped = @@bound_prefix.reduce(text) do |carried, (name, qualified)|
+      next carried unless carried.includes?(name)
+
       # Recorded where the name is *met* rather than where the text changed. A
       # class root needs no rewriting — the consumer names its types exactly as
       # it declares them — so `mapped != carried` would have said "this
       # boundary is not depended on" of every one of them, and the import edge
       # that reads off this went missing.
-      replace_on_boundary(carried, name, trailing_name_ends: true) do
-        @@bound_used << @@bound_module[name]
-        qualified
+      @@bound_used << @@bound_module[name] if names_on_boundary?(carried, name)
+      next carried if qualified == name
+
+      edits = [] of {Int32, Int32, String}
+      bound_paths(carried, entry, parameters, index).each do |path|
+        edits << {path.start, path.start + name.bytesize, qualified} if BoundPathRules.headed_by?(path, name)
       end
+      splice(carried, edits)
     end
 
     # And a name the producer already wrote in full, which the rewrite above
@@ -2886,8 +2921,8 @@ module Iyi
     mapped
   end
 
-  # Whether *needle* stands in *text* as a whole name, by the rule
-  # `replace_on_boundary` replaces on.
+  # Whether *needle* stands in *text* as a whole name: not inside a longer name on either side. It
+  # reads the text, so a string that spells the name counts, which records an import edge and changes no text.
   private def self.names_on_boundary?(text : String, needle : String) : Bool
     return false if needle.empty?
     index = 0
@@ -2903,12 +2938,13 @@ module Iyi
   end
 
   private def self.map_names(signature : IyiMod::Signature) : IyiMod::Signature
+    all = signature_parameters(signature)
     IyiMod::Signature.new(
       name: signature.name,
       receiver: signature.receiver,
-      parameters: signature.parameters.map { |parameter| map_names parameter },
-      block_parameter: map_names(signature.block_parameter),
-      return_type: map_names(signature.return_type),
+      parameters: signature.parameters.map_with_index { |parameter, index| map_names(parameter, :parameter, all, index) },
+      block_parameter: map_names(signature.block_parameter, :parameter, all, signature.parameters.size),
+      return_type: map_names(signature.return_type, :type),
       free_variables: signature.free_variables,
       required: signature.required,
     )
@@ -2921,21 +2957,21 @@ module Iyi
     # reopened `lib` carried, so `sqlite3`'s consumer said `undefined fun
     # 'value_text' for LibSQLite3` about a lib whose types had all arrived.
     declaration.copy_with(
-      fields: declaration.fields.map { |(name, type, value)| {name, map_names(type), map_names(value)} },
+      fields: declaration.fields.map { |(name, type, value)| {name, map_names(type, :type), map_names(value, :expression)} },
       methods: begin
         ordinals = IyiMod.mono_body_ordinals(declaration.methods)
         declaration.methods.map_with_index do |signature, index|
-          rekey_body(path, signature, map_names(signature), ordinals[index]) { |body| map_names body }
+          rekey_body(path, signature, map_names(signature), ordinals[index]) { |text, parameters| map_names(text, :body, parameters) }
         end
       end,
       types: declaration.types.map { |nested| map_names_declaration nested, "#{path}::#{nested.name}" },
-      value: map_names(declaration.value),
+      value: map_names(declaration.value, :type),
       class_vars: declaration.class_vars.map do |class_var|
-        class_var.copy_with(type: map_names(class_var.type), value: map_names(class_var.value))
+        class_var.copy_with(type: map_names(class_var.type, :type), value: map_names(class_var.value, :expression))
       end,
-      superclass: map_names(declaration.superclass),
-      includes: declaration.includes.map { |name| map_names(name) },
-      funs: declaration.funs.map { |source| map_names(source) },
+      superclass: map_names(declaration.superclass, :type),
+      includes: declaration.includes.map { |name| map_names(name, :type) },
+      funs: declaration.funs.map { |source| map_names(source, :fun_line) },
     )
   end
 
@@ -4254,26 +4290,18 @@ module Iyi
     )
   end
 
-  # *text* with every whole-word *name* replaced by *replacement*.
+  # *text* with every path that is just *name* replaced by *replacement*.
   #
-  # Whole-word, for the reason `calls?` is: `StoreTypes` inside `MyStoreTypes`
-  # is a different name and rewriting it would invent one.
-  private def self.replace_word(text : String, name : String, replacement : String) : String
+  # The whole path, for the reason `calls?` reads whole words: `StoreTypes` in `MyStoreTypes` or in
+  # `Other::StoreTypes` is a different name and rewriting it would invent one.
+  private def self.replace_word(text : String, name : String, replacement : String, entry : BoundPathIndex::Entry) : String
     return text unless text.includes?(name)
 
-    String.build do |io|
-      index = 0
-      while (found = text.index(name, index))
-        before = found == 0 ? nil : text[found - 1]
-        after = found + name.size >= text.size ? nil : text[found + name.size]
-        word = (before.nil? || !(before.alphanumeric? || before == '_' || before == ':')) &&
-               (after.nil? || !(after.alphanumeric? || after == '_' || after == ':'))
-        io << text[index...found]
-        io << (word ? replacement : name)
-        index = found + name.size
-      end
-      io << text[index..]
+    edits = [] of {Int32, Int32, String}
+    bound_paths(text, entry).each do |path|
+      edits << {path.start, path.finish, replacement} if BoundPathRules.alias_of?(path, name)
     end
+    splice(text, edits)
   end
 
   # Whether *body* names *method* as a word rather than as part of one.
@@ -4993,7 +5021,7 @@ module Iyi
     if type.responds_to?(:instance_vars_initializers)
       type.instance_vars_initializers.try &.each do |initializer|
         written = initializer.written
-        aliases.each { |simple, resolved| written = replace_word written, simple, resolved }
+        aliases.each { |simple, resolved| written = replace_word(written, simple, resolved, :expression) }
         defaults[initializer.name] = written
       end
     end

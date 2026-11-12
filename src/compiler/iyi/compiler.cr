@@ -7,6 +7,14 @@ require "./wasm_roots"
 require "./release_partition"
 require "./preempt_checks"
 require "./mod/installer"
+require "./stale/encoding"
+require "./stale/toolchain"
+require "./stale/link"
+require "./stale/compiler_env"
+require "./stale/roots"
+require "./stale/call_path"
+require "./stale/machine_key"
+require "./stale/check"
 {% if flag?(:msvc) %}
   require "./loader"
 {% end %}
@@ -205,6 +213,8 @@ module Iyi
     # and can later be used to generate API docs.
     property? wants_doc = false
 
+    property stale_drop : Stale::EdgeKind? = nil
+
     # Warning settings and all detected warnings.
     property warnings = WarningCollection.new
 
@@ -248,6 +258,16 @@ module Iyi
 
     # Program that was created for the last compilation.
     property! program : Program
+
+    # Stale testing properties (S2 pre-listed DISPLAY_ONLY)
+    property stale_key : String? = nil
+    property stale_accept : String? = nil
+    property stale_block : String? = nil
+    property stale_dump_elements : String? = nil
+
+    def stale_build? : Bool
+      !@stale_key.nil?
+    end
 
     # Compiles the given *source*, with *output_filename* as the name
     # of the generated executable.
@@ -390,6 +410,7 @@ module Iyi
     private def compile_with_preanalysed_prelude(pre : Preanalysed, sources : Array(Source),
                                                  output_filename : String, & : Program -> Nil) : Result
       program = pre.program
+      @iyi_link_driver_only = true if stale_build?
 
       # What the prelude was read from belongs to this build's record too:
       # it was read before this build began, under the analysis's own.
@@ -474,17 +495,30 @@ module Iyi
         # field's layout, and a carried union or generic match naming one is
         # refused when `semantic_after_top_level` resolves the deferred refs.
         node, processor = program.top_level_semantic(node, processor: pre.processor)
+        # A preanalysed prelude was analysed without the entry file, so its module
+        # initialisers were spliced at the end of the prelude expressions. Rejoin the
+        # prelude's and the entry's module initialisers into a single block placed
+        # after the entry's header block (matching whole-program `semantic`).
+        node = program.iyi_rejoin_module_initialisers(pre.node, pre.module_inits, node)
+        combined = Expressions.from([pre.node, node] of ASTNode)
+        DefinitionTyping.append_probes(program, combined)
         node = program.semantic_after_top_level(
-          Expressions.from([pre.node, node] of ASTNode), processor,
+          combined, processor,
           cleanup: !no_cleanup?)
       rescue ex : SkipMacroCodeCoverageException
         program.macro_expansion_error_hook.try &.call(ex.cause)
+      end
+
+      if stale_check(program, node, sources)
+        return Result.new(program, node)
       end
 
       prepared = prepare_iyimods program
       keep_iyi_namespace program
 
       units = codegen program, node, sources, output_filename unless @no_codegen
+
+      stale_cross_check(program, sources)
 
       write_iyimods program, prepared, units
       fill_bind_artifact program, units
@@ -514,8 +548,9 @@ module Iyi
       # What the analysis read, for the up-to-date record of each build that
       # adopts it.
       getter inputs : BuildInputs
+      getter module_inits : Tuple(Array(ASTNode), ASTNode)?
 
-      def initialize(@program, @node, @processor, @key, @inputs)
+      def initialize(@program, @node, @processor, @key, @inputs, @module_inits = nil)
         @fingerprint = {} of String => Time
         @program.requires.each do |filename|
           if info = File.info?(filename)
@@ -573,7 +608,8 @@ module Iyi
       cleanup cross_compile dependency_printer dump_ll emit_base_filename
       emit_bind emit_targets frame_pointers iyi_direct_link iyi_keep
       iyi_link_driver_only link_flags mattr mcmodel mcpu n_threads no_cleanup
-      program progress_tracker single_module stderr target_machine verbose
+      program progress_tracker single_module stale_drop stderr target_machine verbose
+      stale_accept stale_block stale_dump_elements stale_key
     )
 
     # Everything that changes what the prelude analyses *to*. Macros branch on
@@ -600,6 +636,129 @@ module Iyi
       end
     end
 
+    IN_BEHAVIOR_KEY = %w(
+      cleanup codegen_target cross_compile crystal_library debug dump_ll
+      emit_bind emit_iyimod emit_targets flags frame_pointers iyi_direct_link
+      iyi_keep iyi_link_driver_only iyi_prefers_source link_flags mattr mcmodel
+      mcpu n_threads no_cleanup no_codegen optimization_mode prelude single_module
+      static target_machine wants_doc
+    )
+
+    LOCATION_ONLY = %w(
+      emit_base_filename iyi_file_overrides iyi_header_root iyi_mod_table
+      iyi_project_root program use_iyimod
+    )
+
+    DISPLAY_ONLY = %w(
+      color dependency_printer progress_tracker show_error_trace stale_accept
+      stale_block stale_drop stale_dump_elements stale_key stderr stdout verbose warnings
+    )
+
+    def behavior_key : Stale::Digest
+      {% begin %}
+        {% classified = IN_BEHAVIOR_KEY + LOCATION_ONLY + DISPLAY_ONLY %}
+        {% for ivar in @type.instance_vars %}
+          {% unless classified.includes?(ivar.name.stringify) %}
+            {% raise "Compiler##{ivar.name} is new, and nothing says what it is to the " +
+                     "behavior key. Say which this is: add it to IN_BEHAVIOR_KEY, " +
+                     "LOCATION_ONLY or DISPLAY_ONLY in compiler.cr." %}
+          {% end %}
+        {% end %}
+      {% end %}
+
+      Stale.d("behavior") do |encoder|
+        encoder.bool(@cleanup)
+        encoder.str(@codegen_target.to_s)
+        encoder.bool(@cross_compile)
+        encoder.bool(@crystal_library)
+        encoder.str(@debug.to_s)
+        encoder.bool(@dump_ll)
+
+        if eb = @emit_bind
+          encoder.str(eb)
+        else
+          encoder.absent
+        end
+
+        if em = @emit_iyimod
+          encoder.str(em)
+        else
+          encoder.absent
+        end
+
+        encoder.uint(@emit_targets.value.to_u64)
+
+        eff_flags = @flags.dup
+        eff_flags << "release" if release? && !eff_flags.includes?("release")
+        eff_flags << "debug" if !debug.none? && !eff_flags.includes?("debug")
+        eff_flags << "static" if static? && !eff_flags.includes?("static")
+        eff_flags.sort!
+        encoder.list(eff_flags.size) do |enc|
+          eff_flags.each { |f| enc.str(f) }
+        end
+
+        encoder.str(@frame_pointers.to_s)
+        encoder.bool(@iyi_direct_link)
+
+        if ik = @iyi_keep
+          encoder.str(ik)
+        else
+          encoder.absent
+        end
+
+        encoder.bool(@iyi_link_driver_only)
+        encoder.bool(@iyi_prefers_source)
+
+        if lf = @link_flags
+          encoder.str(lf)
+        else
+          encoder.absent
+        end
+
+        if ma = @mattr
+          encoder.str(ma)
+        else
+          encoder.absent
+        end
+
+        encoder.str(@mcmodel.to_s)
+
+        if mc = @mcpu
+          encoder.str(mc)
+        else
+          encoder.absent
+        end
+
+        if Stale::THREADS_IN_BEHAVIOR
+          encoder.int(@n_threads.to_i64)
+        else
+          encoder.absent
+        end
+
+        encoder.bool(@no_cleanup)
+        encoder.bool(@no_codegen)
+        encoder.str(@optimization_mode.to_s)
+        encoder.str(@prelude)
+        encoder.bool(@single_module)
+        encoder.bool(@static)
+        encoder.str(target_machine.triple)
+        encoder.bool(@wants_doc)
+      end
+    end
+
+    def stale_refusals : Array(String)
+      refusals = [] of String
+      refusals << "refused build mode: --no-cleanup" if @no_cleanup
+      refusals << "refused build mode: --emit" unless @emit_targets.none?
+      refusals << "refused build mode: --emit-iyimod" if @emit_iyimod
+      refusals << "refused build mode: --emit-bind" if @emit_bind
+      refusals << "refused build mode: --iyi-keep" if @iyi_keep
+      refusals << "refused build mode: --cross-compile" if @cross_compile
+      refusals << "refused build mode: --no-codegen" if @no_codegen
+      refusals << "refused build mode: IYI_FORK_PROBE" if ENV.has_key?("IYI_FORK_PROBE")
+      refusals
+    end
+
     # Analyses the prelude on its own, so a later compile can start from it.
     # The filename is a placeholder: the build that adopts this has its own, and
     # sets it before compiling.
@@ -616,7 +775,7 @@ module Iyi
         BuildInputs.current = held
       end
       @progress_tracker.clear
-      Preanalysed.new(program, node, processor, prelude_cache_key, inputs)
+      Preanalysed.new(program, node, processor, prelude_cache_key, inputs, program.iyi_spliced_module_inits)
     end
 
     # :ditto:
@@ -624,6 +783,7 @@ module Iyi
     # Yields a `Program` instance before compiling.
     def compile_configure_program(source : Source | Array(Source), output_filename : String, & : Program -> Nil) : Result
       source = [source] unless source.is_a?(Array)
+      @iyi_link_driver_only = true if stale_build?
       return prelude_fork_probe(source, output_filename) if ENV["IYI_FORK_PROBE"]?
 
       # iyi: `IYI_WARM=1` — analyse the prelude and adopt it, in one process and
@@ -664,10 +824,16 @@ module Iyi
         program.macro_expansion_error_hook.try &.call(ex.cause)
       end
 
+      if stale_check(program, node, source)
+        return Result.new(program, node)
+      end
+
       prepared = prepare_iyimods program
       keep_iyi_namespace program
 
       units = codegen program, node, source, output_filename unless @no_codegen
+
+      stale_cross_check(program, source)
 
       write_iyimods program, prepared, units
       fill_bind_artifact program, units
@@ -708,6 +874,7 @@ module Iyi
       program.iyi_fills_boundary = true
       program.iyi_exported_owners << type
       collect_iyi_owners type, program.iyi_exported_owners
+      program.register_iyi_carried_closure_units(iyi_unit_names(type)) if emit_bind
     end
 
     private def prepare_iyimods(program : Program) : Array({String, IyiMod::Artifact})?
@@ -721,6 +888,7 @@ module Iyi
       program.iyi_module_paths.each_value do |module_name|
         if type = program.iyi_module_type(module_name)
           program.iyi_exported_owners << type
+          program.register_iyi_carried_closure_units(iyi_unit_names(type))
           collect_iyi_owners type, program.iyi_exported_owners
         end
       end
@@ -923,9 +1091,7 @@ module Iyi
       type = program.types?.try &.[]?(root)
       return unless type.is_a?(ModuleType)
 
-      names = [type.to_s] of String
-      collect_iyi_unit_names type, names
-      names.sort!.uniq!
+      names = iyi_unit_names(type)
 
       path = File.join(dir, "#{Iyi.iyi_module_name(root).gsub('/', '-')}.iyimod")
       return unless File.file?(path)
@@ -1479,7 +1645,11 @@ module Iyi
       names = [] of String
       return names unless type = program.iyi_module_type(module_name)
 
-      names << type.to_s
+      iyi_unit_names(type)
+    end
+
+    private def iyi_unit_names(type : ModuleType) : Array(String)
+      names = [type.to_s] of String
       collect_iyi_unit_names type, names
       names.sort!.uniq!
       names
@@ -4493,19 +4663,55 @@ module Iyi
       {% end %}
       errors = complained || STDERR
       begin
-        Process.run(command, args, shell: true,
-          input: Process::Redirect::Close, output: said || Process::Redirect::Inherit, error: Process::Redirect::Pipe) do |process|
-          process.error.each_line(chomp: false) do |line|
-            # iyi: the three `gsub(/... -l(\S+)\b/, "... \\1 hint")` rewrites,
-            # by hand — the compiler's own code must not be what links pcre2
-            # (zero-dep). A matching line gets the same hint; any other line
-            # passes through unchanged, byte for byte.
-            line = linker_library_hint(line, "cannot find -l")
-            line = linker_library_hint(line, "unable to find library -l")
-            line = linker_library_hint(line, "library not found for -l")
-            errors << line
+        {% if flag?(:win32) %}
+          Process.run(command, args, shell: true,
+            input: Process::Redirect::Close, output: said || Process::Redirect::Inherit, error: Process::Redirect::Pipe) do |process|
+            process.error.each_line(chomp: false) do |line|
+              # iyi: the three `gsub(/... -l(\S+)\b/, "... \\1 hint")` rewrites,
+              # by hand — the compiler's own code must not be what links pcre2
+              # (zero-dep). A matching line gets the same hint; any other line
+              # passes through unchanged, byte for byte.
+              line = linker_library_hint(line, "cannot find -l")
+              line = linker_library_hint(line, "unable to find library -l")
+              line = linker_library_hint(line, "library not found for -l")
+              errors << line
+            end
           end
-        end
+        {% else %}
+          if stale_build?
+            tokens = Process.parse_arguments_posix(command)
+            argv = [] of String
+            tokens.each do |token|
+              if token == "${@}"
+                argv.concat(args) if args
+              else
+                argv << token
+              end
+            end
+            if argv.empty?
+              raise CompilerError.new("empty linker command")
+            end
+            Process.run(argv[0], argv[1..], shell: false,
+              input: Process::Redirect::Close, output: Process::Redirect::Inherit, error: Process::Redirect::Pipe) do |process|
+              process.error.each_line(chomp: false) do |line|
+                line = linker_library_hint(line, "cannot find -l")
+                line = linker_library_hint(line, "unable to find library -l")
+                line = linker_library_hint(line, "library not found for -l")
+                STDERR << line
+              end
+            end
+          else
+            Process.run(command, args, shell: true,
+              input: Process::Redirect::Close, output: Process::Redirect::Inherit, error: Process::Redirect::Pipe) do |process|
+              process.error.each_line(chomp: false) do |line|
+                line = linker_library_hint(line, "cannot find -l")
+                line = linker_library_hint(line, "unable to find library -l")
+                line = linker_library_hint(line, "library not found for -l")
+                STDERR << line
+              end
+            end
+          end
+        {% end %}
       rescue exc : File::AccessDeniedError | File::NotFoundError
         linker_not_found exc.class, linker_name
       end
@@ -4602,6 +4808,50 @@ module Iyi
     # asked of the streams this compiler was actually given.
     private def colorize(obj)
       obj.colorize.toggle(@color && Colorize.default_enabled?(stdout, stderr))
+    end
+
+    private def stale_check(program : Program, node : ASTNode, source_or_sources) : Bool
+      return false unless stale_build? || @stale_drop || @stale_dump_elements
+
+      result = Stale::Check.run(self, program, node, source_or_sources)
+      result.hit?
+    end
+
+    private def stale_cross_check(program : Program, source_or_sources) : Nil
+      reach = program.stale_reach
+      recorder = program.stale_recorder
+      return unless reach && recorder
+
+      reach.cross_check(recorder)
+
+      if (result = program.stale_check_result) && (key_file = @stale_key)
+        Stale::KeyFile.write_out(
+          path: key_file,
+          phase: "linked",
+          test_root: result.test_root,
+          test_path: result.test_path,
+          local: result.local_mode_build,
+          portable: result.portable_mode_build,
+          not_reusable: result.not_reusable,
+          hit: result.hit,
+          blocked: result.blocked?,
+          reach: reach,
+          rg3: result.rg3
+        )
+      elsif key_file = @stale_key
+        primary_source = source_or_sources.is_a?(Array) ? source_or_sources.first : source_or_sources
+        test_root = "src"
+        entry_root = Compiler.entry_root_of(primary_source.filename, primary_source.code)
+        test_path = ::Path[primary_source.filename].relative_to(entry_root).to_s
+        test_path = test_path[2..-1] if test_path.starts_with?("./")
+        closure = program.stale_closure_result || Effects.closure_check(program, reach)
+        Stale::KeyFile.write_out(key_file, phase: "linked", test_root: test_root, test_path: test_path, reach: reach,
+          not_reusable: closure.not_reusable, rg3: closure.rg3_sites)
+      end
+
+      unless reach.mismatch.empty?
+        raise Error.new("reach mismatch: #{reach.mismatch.join(", ")}")
+      end
     end
 
     # An LLVM::Module with information to compile it.

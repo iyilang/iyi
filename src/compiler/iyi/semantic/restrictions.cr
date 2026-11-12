@@ -621,6 +621,9 @@ module Iyi
       # ```
       case self_type = owner.lookup_path(self)
       when Const
+        if (value = self_type.value).is_a?(NumberLiteral)
+          owner.program.layout_fold_use(value, LayoutFoldUseKind::Typing, self)
+        end
         self_type.value == other
       when NumberLiteral
         self_type == other
@@ -653,6 +656,9 @@ module Iyi
       # ```
       case other_type = owner.lookup_path(other)
       when Const
+        if (value = other_type.value).is_a?(NumberLiteral)
+          owner.program.layout_fold_use(value, LayoutFoldUseKind::Typing, other)
+        end
         other_type.value == self
       when NumberLiteral
         other_type == self
@@ -1837,6 +1843,7 @@ module Iyi
       literal = self.literal
 
       if literal.is_a?(NumberLiteral)
+        program.layout_fold_use(literal, LayoutFoldUseKind::Typing, literal)
         literal.representable_in?(type)
       else
         literal_type = literal.type

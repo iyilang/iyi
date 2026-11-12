@@ -195,6 +195,24 @@ step "a flag is a flag, and a directory is not a changed file"
 [ $? -eq 1 ] && grep -q 'is a directory, not a changed file' dir.txt ||
   { echo "a directory was accepted as a changed file:"; cat dir.txt; exit 1; }
 
+step "a run that answers from receipts takes no option that would run a test another way"
+# `--cached` and what goes with it build and run each test one way: one at
+# a time, every named case, under the runner's own build. Taken with `--run`
+# a receipt would stand for a test of which only some cases ran, and with
+# `--release` for a build it was not made from, so each is refused by name.
+for receipts in --cached --fresh --explain "--shard 1/2"; do
+  for other in "--run adds" "-p 2" "-v" "--release" "-D probe"; do
+    # shellcheck disable=SC2086
+    "$IYI" test $receipts $other . > both.txt 2>&1
+    [ $? -eq 1 ] && grep -q "cannot pass both ${other%% *}.* and ${receipts%% *}" both.txt ||
+      { echo "$other was taken with $receipts:"; cat both.txt; exit 1; }
+  done
+done
+# And without a receipt option they are taken: the refusal is of the pair.
+"$IYI" test -p 2 -v . > alone.txt 2>&1
+grep -q 'cannot pass both' alone.txt &&
+  { echo "-p and -v were refused without a receipt option:"; cat alone.txt; exit 1; }
+
 step "a timeout is a wait, so zero, less and more than a clock holds are refused"
 # `--timeout 0` and `--timeout -1` were taken, and every test came back
 # "hung: killed at -1.0s" - a verdict about the flag, printed as one about

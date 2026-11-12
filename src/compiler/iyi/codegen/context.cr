@@ -43,6 +43,9 @@ class Iyi::CodeGenVisitor
     def block_context=(@block_context : Nil)
     end
 
+    def block=(@block : Nil)
+    end
+
     def reset_closure
       @closure_vars = nil
       @closure_type = nil

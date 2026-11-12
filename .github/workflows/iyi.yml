@@ -18,7 +18,7 @@ name: iyi
 #
 # What each job is for:
 #
-#   iyi              the rules, the artifact, the import path: this fork's work
+#   iyi              the rules, artifact, import path, and stale receipt producer
 #   compiler-specs   Crystal's compiler suite. Every rule iyi adds is a change
 #                    to the parser, the semantic passes or the codegen
 #   stdlib-specs     Crystal's library suite. The compiler is still a Crystal
@@ -34,6 +34,11 @@ name: iyi
 #                    exercises read for other platforms in std-platforms (and
 #                    the windows- and darwin- shards and windows-std-platforms
 #                    beside their own jobs)
+#   stale-fresh      a fresh runner audits the producer's imported receipts
+#   stale-callpath   the stale key's own gates: link once, RG4, the reach walk
+#                    against what codegen recorded, RG8 and RG9
+#   stale-equivalence  RG2, RG2a, RG2r and RG5: what observing a program
+#                    changes about it
 #
 # Every job carries a `timeout-minutes`. The default is six hours, and these
 # jobs start daemons, listen on sockets, serve HTTP, soak an LSP and run
@@ -200,7 +205,11 @@ jobs:
     needs: [plan, build]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'iyi') }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # 30 minutes held iyi's own specs and the daemon specs; the stale
+    # acceptance suite (about 10 minutes) and the effect census on two
+    # targets (about 9 each) came on top, and a run was cancelled in the
+    # census.
+    timeout-minutes: 60
     container:
       image: crystallang/crystal:1.21.0-build
     name: "The rules, the artifact and the import path"
@@ -263,9 +272,301 @@ jobs:
       # `mod` refusing the prefixes every other command accepts.
       - name: The commands, and the daemon
         run: |
-          export IYI_PATH="lib:$(pwd)/src"
+          IYI_PATH="lib:$(pwd)/src"
+          export IYI_PATH
           make -o .build/crystal cli_spec
 
+      # Stale tests are a separate proof, not an assertion over YAML. The
+      # acceptance suite includes the local rows; stale-fresh below owns the
+      # cross-run audit rows.
+      - name: Stale test acceptance suite
+        run: bash bench/stale_tests.sh
+
+      # Every runtime site the reached code can take is classified, on this
+      # host and, through the front end, on the other Linux target. Windows
+      # is not claimed: its arms are unclassified, so a Windows test is
+      # never reusable.
+      - name: Effect classification (RG3), x86_64 and aarch64 Linux
+        run: |
+          bash bench/stale_effects.sh check
+          RG3_TARGET=aarch64-linux-gnu bash bench/stale_effects.sh check
+
+      # The receipt digest and the RG8 oracle each answer to an outside
+      # reference: std/digest's SHA-256 to Python's hashlib, the IR
+      # normalizer to three cases it must tell apart.
+      - name: Stale receipt digest, RG8 oracle, and evidence self-tests
+        run: |
+          bash bench/stale_sha256.sh
+          bash bench/stale_ir_normalize_selftest.sh
+          bash bench/stale_evidence_test.sh
+      - name: Build the receipt producer compiler
+        run: make -o .build/crystal iyi
+
+      # Keep export credential-free. `assert-export-env` is intentionally in
+      # this same step: moving a token into this environment makes the step
+      # fail before the producer can write a portable receipt.
+      - name: Export fresh run receipts
+        env:
+          IYI_CI_PRODUCER: "1"
+        shell: bash
+        run: |
+          bash bench/stale_ci.sh assert-export-env
+          mkdir -p stale-index
+          args=(
+            --fresh
+            --export-index "run:${GITHUB_RUN_ID}=stale-index/run-${GITHUB_RUN_ID}-x86_64-linux-gnu.json"
+          )
+          if [ "${GITHUB_REF}" = "refs/heads/master" ]; then
+            args+=(--export-index "master=stale-index/master-candidate-x86_64-linux-gnu.json")
+          fi
+          mapfile -t tests < <(find samples/iyi -maxdepth 1 -type f -name '*.iyi' -print | sort)
+          .build/iyi test "${args[@]}" "${tests[@]}"
+
+      # archive: false leaves the uploaded JSON unhashed by an outer zip. The
+      # filename and artifact name must remain identical (upload-artifact#785).
+      - name: Upload producer compiler
+        uses: actions/upload-artifact@v7
+        with:
+          name: iyi
+          path: .build/iyi
+          archive: false
+          retention-days: 1
+
+      - name: Upload run receipt snapshot
+        uses: actions/upload-artifact@v7
+        with:
+          name: run-${{ github.run_id }}-x86_64-linux-gnu.json
+          path: stale-index/run-${{ github.run_id }}-x86_64-linux-gnu.json
+          archive: false
+          retention-days: 1
+
+      - name: Upload master candidate receipt snapshot
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        uses: actions/upload-artifact@v7
+        with:
+          name: master-candidate-x86_64-linux-gnu.json
+          path: stale-index/master-candidate-x86_64-linux-gnu.json
+          archive: false
+          retention-days: 1
+
+  # The stale key's own gates, which no job ran: `bench/gates_reachable.py`
+  # named them when it arrived from upstream. They need the compiler that
+  # builds `iyi` as well as `iyi`: the link section asks it what the target
+  # links, and RG8 builds an `iyi` with the def body dropped from the walk's
+  # encoding to prove a mutation there is caught. That and RG9 over the
+  # 140-program corpus took 41 minutes in one run here and 69 in the next
+  # (43117744255, 43137318814; 17 on eighteen darwin arm64 cores), so this
+  # is a job of its own rather than more steps of `iyi`, with two hours.
+  stale-callpath:
+    needs: [plan, build]
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'stale-callpath') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    container:
+      image: crystallang/crystal:1.21.0-build
+    name: "The stale key: link, reach, RG4, RG8 and RG9"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v5
+        with:
+          name: crystal
+          path: .build
+      - run: chmod +x .build/crystal
+      - name: Build `iyi`
+        run: make -o .build/crystal iyi
+
+      - name: Link once, RG4, the reach walk, the key's phases, RG8 and RG9
+        run: IYI="$PWD/.build/iyi" bash bench/stale_callpath.sh all
+
+      # Row 21: two processes record a thousand receipts each into one
+      # store, and every record parses with the sequence at two thousand.
+      - name: Two processes record into one store
+        run: bash bench/stale_store_concurrency.sh
+
+  # What observing a program changes about it, which has to be nothing.
+  # RG2 builds each of the 140 programs plain and observed and holds the
+  # observed run to the plain one's exit, stdout and stderr outside what
+  # two plain runs disagree on. RG2a runs each with one empty directory as
+  # its argument against the run with none, RG2r takes three probes through
+  # an artifact and back, and RG5 drops each observer in turn and wants the
+  # gate to notice. Of these the workflow reached RG2r alone, through
+  # `stale_evidence_test.sh`, which hands it a compiler made of shell.
+  #
+  # A job of its own because the one above ran out of its ninety minutes
+  # here, on the runner that took 69 over the key's gates: RG2 had passed
+  # in 9.6 minutes and RG2a in 6.4, 140 of 140 with none excluded both
+  # times, and RG2r was a minute in (run 43137318814).
+  stale-equivalence:
+    needs: [plan, build]
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'stale-equivalence') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    container:
+      image: crystallang/crystal:1.21.0-build
+    name: "What observing a program changes: RG2, RG2a, RG2r and RG5"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v5
+        with:
+          name: crystal
+          path: .build
+      - run: chmod +x .build/crystal
+      - name: Build `iyi`
+        run: make -o .build/crystal iyi
+
+      # RG2 and RG2a report a program they could not compare as excluded
+      # and pass; the rule is none excluded (STALE_TESTS_DESIGN, RG2), so
+      # an exclusion fails here.
+      - name: RG2, RG2a, RG2r and RG5, with no program excluded
+        shell: bash
+        run: |
+          IYI="$PWD/.build/iyi" bash bench/stale_equivalence.sh all | tee stale-equivalence.log
+          if grep -E '^RG2a?: .* [1-9][0-9]* still excluded' stale-equivalence.log; then
+            echo "RG2 or RG2a excluded a program" >&2
+            exit 1
+          fi
+
+  # A second runner gets only the producer's compiler and portable receipt
+  # snapshot. No cache crosses this boundary: a hit here is evidence that the
+  # receipt is complete, rather than an accidental local-store hit.
+  stale-fresh:
+    needs: [plan, iyi]
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'stale-fresh') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      actions: read
+    container:
+      image: crystallang/crystal:1.21.0-build
+    name: "Fresh runner receipt audit"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # v8: these two were uploaded with `archive: false`, which v5 cannot
+      # download (it reads every artifact as a zip and failed after 5 retries).
+      - name: Download producer compiler
+        uses: actions/download-artifact@v8
+        with:
+          name: iyi
+          path: .build
+      - run: chmod +x .build/iyi
+
+      - name: Download producer receipt snapshot
+        uses: actions/download-artifact@v8
+        with:
+          name: run-${{ github.run_id }}-x86_64-linux-gnu.json
+          path: stale-index
+
+      - name: Download master candidate receipt snapshot
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        uses: actions/download-artifact@v8
+        with:
+          name: master-candidate-x86_64-linux-gnu.json
+          path: stale-index
+
+      - name: All producer receipts hit on a fresh runner
+        shell: bash
+        run: |
+          mapfile -t tests < <(find samples/iyi -maxdepth 1 -type f -name '*.iyi' -print | sort)
+          .build/iyi test --cached --json \
+            --import-index "run:${GITHUB_RUN_ID}=stale-index/run-${GITHUB_RUN_ID}-x86_64-linux-gnu.json" \
+            "${tests[@]}" > stale-index/cached.json
+          bash bench/stale_ci.sh assert-hits --json stale-index/cached.json \
+            --snapshot "stale-index/run-${GITHUB_RUN_ID}-x86_64-linux-gnu.json"
+
+      # This is an export step, and therefore the only stale-fresh step that
+      # carries IYI_CI_PRODUCER. Comparing portable snapshots preserves both
+      # the public Build and every ordered observation for the shadow audit.
+      - name: Shadow audit fresh execution and export
+        id: shadow_audit
+        env:
+          IYI_CI_PRODUCER: "1"
+        shell: bash
+        run: |
+          bash bench/stale_ci.sh assert-export-env
+          mapfile -t tests < <(find samples/iyi -maxdepth 1 -type f -name '*.iyi' -print | sort)
+          .build/iyi test --fresh --json \
+            --export-index "audit:${GITHUB_RUN_ID}=stale-index/audit-${GITHUB_RUN_ID}-x86_64-linux-gnu.json" \
+            "${tests[@]}" > stale-index/fresh.json
+          bash bench/stale_ci.sh shadow-audit \
+            --cached-json stale-index/cached.json \
+            --fresh-json stale-index/fresh.json \
+            --cached-snapshot "stale-index/run-${GITHUB_RUN_ID}-x86_64-linux-gnu.json" \
+            --fresh-snapshot "stale-index/audit-${GITHUB_RUN_ID}-x86_64-linux-gnu.json"
+
+      - name: Planted hidden-read shadow-audit proof
+        run: bash bench/stale_ci.sh test-planted-hidden-read
+      - name: Master snapshot path and Actions API proof
+        run: IYI="$PWD/.build/iyi" bash bench/stale_ci.sh test-master-path
+
+
+      - name: RG1 and RG7 with the producer compiler
+        run: IYI="$PWD/.build/iyi" bash bench/stale_reproducible.sh
+
+      - name: RG9 CallPathFp on the fresh runner
+        run: IYI="$PWD/.build/iyi" bash bench/stale_ci.sh rg9
+
+      # C3 gives the compiler a single credential-scoped route to master.
+      # A missing artifact is a normal condition: no master import happens.
+      - name: Download master snapshot for git-diff audit
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          bash bench/stale_ci.sh fetch-master \
+            --out stale-index/master-x86_64-linux-gnu.json \
+            --target x86_64-linux-gnu
+
+      - name: Master snapshot git-diff self-check
+        run: |
+          IYI="$PWD/.build/iyi" bash bench/stale_ci.sh master-self-check \
+            --snapshot stale-index/master-x86_64-linux-gnu.json \
+            --out-json stale-index/master-cached.json
+
+      - name: Census and overhead measurements
+        run: IYI="$PWD/.build/iyi" bash bench/stale_census.sh
+
+      # After required successful audits, publish canonical master snapshot once.
+      - name: Prepare audited master receipt snapshot
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        shell: bash
+        run: |
+          cp -f stale-index/master-candidate-x86_64-linux-gnu.json stale-index/master-x86_64-linux-gnu.json
+
+      - name: Publish audited master receipt snapshot
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        uses: actions/upload-artifact@v7
+        with:
+          name: master-x86_64-linux-gnu.json
+          path: stale-index/master-x86_64-linux-gnu.json
+          archive: false
+          retention-days: 7
+
+      # RG6: an audit disagreement makes the next master consumer see an empty
+      # snapshot. The artifact is emitted only on master, and `always()` keeps
+      # this containment action reachable after the failing audit.
+      - name: Prepare empty master snapshot after disagreement
+        id: empty_snapshot
+        if: always() && !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.shadow_audit.outcome == 'failure'
+        run: |
+          bash bench/stale_ci.sh empty-snapshot \
+            --from stale-index/master-candidate-x86_64-linux-gnu.json \
+            --out stale-index/master-x86_64-linux-gnu.json
+
+      - name: Publish empty master snapshot after disagreement
+        if: always() && !cancelled() && steps.empty_snapshot.outcome == 'success'
+        uses: actions/upload-artifact@v7
+        with:
+          name: master-x86_64-linux-gnu.json
+          path: stale-index/master-x86_64-linux-gnu.json
+          archive: false
+          retention-days: 7
   compiler-specs:
     needs: [plan, build]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'compiler-specs') }}
@@ -797,6 +1098,11 @@ jobs:
       - name: The test verb tells its four verdicts apart
         run: bash bench/test_verb.sh
 
+      - name: Offline Pebble module mirror and dependency gate
+        run: bash bench/test_offline_pebble.sh
+
+      - name: Offline vector intake and fail-closed validation gate
+        run: bash bench/test_offline_vectors.sh
       # SPEC.md III.8 #2: the language server. One scripted session is a
       # person's first five minutes plus the agent's first question, and
       # every capability the release claims is a step: diagnostics with
@@ -1772,6 +2078,12 @@ jobs:
       - name: The test verb (III.8)
         run: bash bench/test_verb.sh
 
+      - name: Offline Pebble module mirror and dependency gate
+        run: bash bench/test_offline_pebble.sh
+
+      - name: Offline vector intake and fail-closed validation gate
+        run: bash bench/test_offline_vectors.sh
+
       # The refusals and the paths they name, on the volume that folds case
       # by default and the BSD tools under the script: it ran on Linux and
       # Windows only, and on a Mac `iyi run HDR/APP/MAIN.IYI` of a stored
@@ -1780,7 +2092,6 @@ jobs:
       # refused by BSD touch - three failures nothing here could see.
       - name: What the verbs say when they refuse, on darwin
         run: bash bench/verbs_exercise.sh
-
       # The same protocol edges on BSD sockets, where a peer that hangs
       # up mid-frame surfaces differently from Linux and the EPIPE path
       # that used to exit the daemon 0 is exactly the same code.
@@ -2357,6 +2668,7 @@ jobs:
         shell: bash
         run: bash bench/init_project.sh
 
+
       # The package a Windows person downloads, built and judged by the run
       # that builds the compiler. Kept inside this job rather than given its
       # own: a second job would check the tree out again and build
@@ -2668,6 +2980,8 @@ jobs:
         run: |
           bash bench/verbs_exercise.sh
           bash bench/test_verb.sh
+          bash bench/test_offline_pebble.sh
+          bash bench/test_offline_vectors.sh
           bash bench/packages_resolve.sh
           bash bench/packages_get.sh
           bash bench/migrate_gate.sh
@@ -3050,7 +3364,8 @@ jobs:
         env:
           PYTHONUNBUFFERED: "1"
         run: |
-          export IYI="$(cygpath -m "$PWD")/.build/iyi.exe"
+          IYI="$(cygpath -m "$PWD")/.build/iyi.exe"
+          export IYI
           python bench/debug_info.py
           python bench/measured_numbers.py
           python bench/lsp_latency.py
@@ -3603,7 +3918,8 @@ jobs:
       - name: install.sh installs the tarball, and refuses a wrong checksum
         run: |
           (cd dist && sha256sum *.tar.gz > SHA256SUMS)
-          tarball="$(basename dist/*.tar.gz)"
+          set -- dist/*.tar.gz
+          tarball="$(basename "$1")"
           version="${tarball#iyi-}"; version="${version%-linux-x86_64.tar.gz}"
           export IYI_RELEASE_URL="file://$PWD/dist" IYI_VERSION="$version"
           IYI_PREFIX="$PWD/installed" sh install.sh
@@ -3649,7 +3965,7 @@ jobs:
   # red would ship a claim nobody on that platform can reproduce.
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [binary, darwin, darwin-std, darwin-std-siblings, clean-room, iyi, compiler-specs, stdlib-specs,
+    needs: [binary, darwin, darwin-std, darwin-std-siblings, clean-room, iyi, stale-callpath, stale-equivalence, stale-fresh, compiler-specs, stdlib-specs,
             samples, lsp-positions, std, std-siblings, std-platforms, targets, cross-objects, cross-run,
             wasi-run, windows-probe, windows-collector, windows-runtime, windows-native,
             windows-native-gates, windows-native-surfaces, windows-std,
@@ -3778,7 +4094,7 @@ jobs:
   # failed or cancelled one does not. `scripts/ci_plan.py` refuses a
   # workflow whose jobs this list does not name.
   result:
-    needs: [plan, docs, build, iyi, compiler-specs, stdlib-specs, lsp-positions, samples, std,
+    needs: [plan, docs, build, iyi, stale-callpath, stale-equivalence, stale-fresh, compiler-specs, stdlib-specs, lsp-positions, samples, std,
             std-platforms, std-siblings, targets, cross-objects, cross-run, darwin,
             darwin-std-siblings, darwin-std, windows-probe, windows-collector, windows-runtime,
             windows-native, windows-native-gates, windows-native-surfaces, windows-std,

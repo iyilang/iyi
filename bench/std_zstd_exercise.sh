@@ -385,7 +385,7 @@ build_and_run() {
     status=1
     return 1
   fi
-  "$WORK/$name" "$WORK/fixtures" >"$WORK/$name.out" 2>&1
+  "$WORK/$name" "data" "$WORK/fixtures" >"$WORK/$name.out" 2>&1
   local exit_code=$?
   sed 's/^/  /' "$WORK/$name.out"
   if [ "$exit_code" -ne 0 ]; then
@@ -507,7 +507,7 @@ PY
     echo "  $label: the broken copy did not compile"
     sed -n '1,6p' "$WORK/mut.out"
     status=1
-  elif "$WORK/mut-$mutations.bin" "$WORK/fixtures" >"$WORK/mut.out" 2>&1; then
+  elif "$WORK/mut-$mutations.bin" "data" "$WORK/fixtures" >"$WORK/mut.out" 2>&1; then
     echo "  $label: the exercise PASSED on a broken module"
     status=1
   elif ! grep -qF "$phrase" "$WORK/mut.out"; then

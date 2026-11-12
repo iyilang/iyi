@@ -1788,7 +1788,7 @@ module Iyi::IyiMod
   end
 
   # The magic, the format version and the section table.
-  private def self.read_table(file : IO, path : String) : Array({UInt16, UInt32, UInt64})
+  private def self.read_table(file : File, path : String) : Array({UInt16, UInt32, UInt64})
     magic = Bytes.new(MAGIC.size)
     file.read_fully?(magic) || raise Error.new("#{path} is too short to be a .iyimod")
     raise Error.new("#{path} is not a .iyimod") unless magic == MAGIC
@@ -1799,11 +1799,22 @@ module Iyi::IyiMod
     end
 
     count = file.read_bytes(UInt32, FORMAT)
-    Array({UInt16, UInt32, UInt64}).new(count) do
+    # Said as a truncated file is said everywhere else here (`is truncated`), with where it ends.
+    remaining = file.size - file.pos
+    raise Error.new("#{path} is truncated: it ends inside the section table") if remaining < 0 || count.to_u64 > remaining.to_u64 // 16
+    table = Array({UInt16, UInt32, UInt64}).new(count) do
       kind = file.read_bytes(UInt16, FORMAT)
       file.read_bytes(UInt16, FORMAT) # padding
       {kind, file.read_bytes(UInt32, FORMAT), file.read_bytes(UInt64, FORMAT)}
     end
+    remaining = file.size - file.pos
+    raise Error.new("#{path} is truncated: it ends inside a section") if remaining < 0
+    available = remaining.to_u64
+    table.each do |(_, length, _)|
+      raise Error.new("#{path} is truncated: it ends inside a section") if length.to_u64 > available
+      available -= length.to_u64
+    end
+    table
   end
 
   # What a build needs to decide whether to read the rest of *path* (IV.3): the

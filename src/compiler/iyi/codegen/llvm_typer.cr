@@ -7,6 +7,27 @@ module Iyi
 
     alias TypeCache = Hash(Type, LLVM::Type)
 
+    # iyi: one `DataLayout`, disposed when nothing reaches it. An object of
+    # its own, holding nothing else, because a typer holds its program and
+    # a program holds a typer: the collector does not finalize an object it
+    # can reach from itself, and says so on stderr each time it meets one
+    # (93,668 "Finalization cycle" warnings over the compiler specs when
+    # the finalizer was the typer's).
+    private class OwnedLayout
+      getter data : LLVM::TargetData
+
+      def initialize(machine : LLVM::TargetMachine)
+        layout = LibLLVM.create_target_data_layout(machine)
+        raise "Missing layout for #{machine}" unless layout
+        @data = LLVM::TargetData.new(layout)
+      end
+
+      def finalize
+        LibLLVM.dispose_target_data(@data)
+      end
+    end
+
+    @owned_layout : OwnedLayout
     @layout : LLVM::TargetData
     @landing_pad_type : LLVM::Type
 
@@ -47,8 +68,24 @@ module Iyi
 
       @structs = {} of String => LLVM::Type
 
-      machine = program.target_machine
-      @layout = machine.data_layout
+      # iyi: a layout of this typer's own, not the machine's shared one
+      # (`LLVM::TargetMachine#data_layout`). LLVM's `DataLayout` caches each
+      # struct's layout under the struct type's address and never forgets
+      # it, and a context's types are freed with the context. A typer in a
+      # context that is dropped while the program compiles on - the one a
+      # layout fold settles against (`Program#settle_layout_folds`), a shared
+      # typer replaced by a fresh one - left its structs' layouts in the
+      # shared cache, and the next context to put a struct at one of those
+      # addresses was told the dead struct's size: 160 bytes for a struct of
+      # one byte, five contexts out of five (darwin arm64). Two modules'
+      # typers that disagree that way on whether a type is passed through
+      # memory (`passed_indirectly?`) emit a call LLVM refuses, which is
+      # what five of 102 Windows builds of `iyi.exe` and one of 14,860
+      # compiler specs on darwin did; upstream master, which drops no such
+      # context, built forty of forty. A layout that only ever sees this
+      # context's types cannot hold another context's.
+      @owned_layout = OwnedLayout.new(program.target_machine)
+      @layout = @owned_layout.data
       @landing_pad_type = @llvm_context.struct([@llvm_context.void_pointer, @llvm_context.int32], "landing_pad")
     end
 

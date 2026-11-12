@@ -854,22 +854,33 @@ echo
 echo "== the same answers from artifacts"
 # Built once with --emit-iyimod and again from those artifacts: a method
 # whose body the artifact keeps as text must read back as it was written.
-# The timing lines are left out of the comparison, being times, and so are
-# darwin's frames under a task's panic (bench/darwin_frames.sh).
-mkdir -p "$WORK/art"
-if ! (cd "$WORK/art" && "$IYI" build --emit-iyimod mods -o from-source "$REPO/bench/std_big_exercise.iyi") >"$WORK/art.log" 2>&1; then
+# The timing lines are left out of the comparison, being times.
+mkdir -p "$WORK/art/mods" "$WORK/art/s" "$WORK/art/a"
+if ! (cd "$WORK/art" && "$IYI" build --emit-iyimod mods -o s/std_big_exercise "$REPO/bench/std_big_exercise.iyi") >"$WORK/art.log" 2>&1; then
   echo "  FAIL: the build that writes the artifacts: $(tail -2 "$WORK/art.log")"
   status=1
-elif ! (cd "$WORK/art" && "$IYI" build --use-iyimod mods -o from-artifact "$REPO/bench/std_big_exercise.iyi") >"$WORK/art.log" 2>&1; then
+elif ! (cd "$WORK/art" && "$IYI" build --use-iyimod mods -o a/std_big_exercise "$REPO/bench/std_big_exercise.iyi") >"$WORK/art.log" 2>&1; then
   echo "  FAIL: the build from the artifacts: $(grep -m1 -A2 'In mods' "$WORK/art.log" | tr '\n' ' ')"
   status=1
 else
-  "$WORK/art/from-source" 2>&1 | grep -v '^powtime: ' | without_frames >"$WORK/art/source.out"
-  "$WORK/art/from-artifact" 2>&1 | grep -v '^powtime: ' | without_frames >"$WORK/art/artifact.out"
-  if cmp -s "$WORK/art/source.out" "$WORK/art/artifact.out" && grep -q "ALL CHECKS PASSED" "$WORK/art/artifact.out"; then
+  "$WORK/art/s/std_big_exercise" 2>&1 | grep -v '^powtime: ' >"$WORK/art/source.out"
+  "$WORK/art/a/std_big_exercise" 2>&1 | grep -v '^powtime: ' >"$WORK/art/artifact.out"
+  passed=0
+  if cmp -s "$WORK/art/source.out" "$WORK/art/artifact.out"; then
+    passed=1
+  elif [ "$(uname -s)" = "Darwin" ] && [ -n "$PY" ]; then
+    if "$PY" "$REPO/bench/frames_equivalent.py" "$WORK/art/source.out" "$WORK/art/artifact.out" > "$WORK/art/frames.out" 2>&1; then
+      passed=1
+    fi
+  fi
+  if [ "$passed" -eq 1 ] && grep -q "ALL CHECKS PASSED" "$WORK/art/artifact.out"; then
     echo "  built from artifacts, the exercise prints what it prints from source"
   else
-    echo "  FAIL: from artifacts the exercise printed otherwise: $(diff "$WORK/art/source.out" "$WORK/art/artifact.out" | sed -n '1,3p' | tr '\n' ' ')"
+    if [ -s "$WORK/art/frames.out" ]; then
+      echo "  FAIL: from artifacts the exercise printed otherwise: $(head -n 1 "$WORK/art/frames.out")"
+    else
+      echo "  FAIL: from artifacts the exercise printed otherwise: $(diff "$WORK/art/source.out" "$WORK/art/artifact.out" | sed -n '1,3p' | tr '\n' ' ')"
+    fi
     status=1
   fi
 fi

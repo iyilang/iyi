@@ -251,7 +251,7 @@ def tree_mb(pid):
 
 
 class Client:
-    def __init__(self, argv=("lsp",)):
+    def __init__(self, argv=("lsp",), env=None):
         """*argv* is the verb to run. `("lsp",)` is the server a person
         points an editor at — a proxy that keeps the buffers and a child
         that compiles. `("lsp", "--worker")` is that child alone, which
@@ -265,7 +265,7 @@ class Client:
         # job 120203398014 ended on "server closed the pipe" alone.
         self.proc = subprocess.Popen(
             [IYI, *argv], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE)
+            stderr=subprocess.PIPE, env=env)
         self.started = time.monotonic()
         self.stderr_tail = collections.deque(maxlen=40)
         self.stderr_reader = threading.Thread(target=self.keep_stderr, daemon=True)

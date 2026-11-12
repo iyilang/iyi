@@ -148,6 +148,11 @@ class Iyi::Type
     end
 
     def lookup_type_var?(node : Path)
+      if node.iyi_synthetic?
+        if target = node.target_type
+          return target
+        end
+      end
       # Check if the Path begins with a free variable
       if !node.global? && (free_var = @free_vars.try &.[node.names.first]?)
         if node.names.size == 1
@@ -178,7 +183,7 @@ class Iyi::Type
       # `pub import`s. Only on authoritative lookups: a speculative one
       # (`@raise` off — overload matching trying restrictions) must
       # keep its answer, not acquire a new way to fail.
-      if @raise && type.is_a?(Type) && !type_var_name?(node)
+      if @raise && type.is_a?(Type) && !type_var_name?(node) && !node.iyi_synthetic?
         @root.program.iyi_check_import_reach(node, type)
       end
 
@@ -238,6 +243,13 @@ class Iyi::Type
     end
 
     def lookup(node : Generic)
+      program.layout_fold_consumer(LayoutFoldUseKind::TypeArgument, node) do
+        lookup_generic(node)
+      end
+    end
+
+    # A failed lookup returns without a type, so the consumer above records no use.
+    private def lookup_generic(node : Generic)
       type = lookup(node.name)
       return if !@raise && !type
       type = type.not_nil!
@@ -302,6 +314,7 @@ class Iyi::Type
       node.type_vars.each do |type_var|
         case type_var
         when NumberLiteral
+          program.layout_fold_adopt(type_var)
           type_vars << type_var
           next
         when Splat
@@ -336,13 +349,14 @@ class Iyi::Type
             program.check_deprecated_constant(type, type_var)
             interpreter = MathInterpreter.new(@root)
             begin
-              num = interpreter.interpret(type.value)
+              num = program.layout_fold_derive(type.value, @root, nil) { interpreter.interpret(type.value) }
               type_vars << NumberLiteral.new(num)
             rescue ex : Iyi::CodeError
               type_var.raise "expanding constant value for a number value", inner: ex
             end
             next
           when NumberLiteral
+            program.layout_fold_adopt(type)
             type_vars << type
             next
           end

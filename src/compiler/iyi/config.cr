@@ -1,4 +1,11 @@
 require "./codegen/target"
+{% if flag?(:darwin) %}
+  require "json"
+
+  lib LibC
+    fun sysctlbyname(name : UInt8*, old : Void*, old_size : UInt64*, new : Void*, new_size : UInt64) : Int32
+  end
+{% end %}
 
 module Iyi
   module Config
@@ -50,6 +57,11 @@ module Iyi
       sha
     end
 
+    def self.build_inputs : String?
+      sha = {{ env("IYI_CONFIG_BUILD_INPUTS") || "" }}
+      sha.empty? ? nil : sha
+    end
+
     def self.date
       source_date_epoch = {{ (t = env("SOURCE_DATE_EPOCH")) && !t.empty? ? t.to_i : nil }}
       if source_date_epoch
@@ -89,27 +101,30 @@ module Iyi
         end
 
         if target.macos?
-          # By default, LLVM infers the target macOS SDK version from the host
-          # version detected in `LLVM.default_target_triple`, and independently
-          # Clang will infer a different one from several options: `-target`,
-          # `-mtargetos`, `-mmacosx-version-min`, `$MACOSX_DEPLOYMENT_TARGET`,
-          # `-isysroot`, then finally the LLVM default (see
-          # https://github.com/llvm/llvm-project/blob/5f58f3dda8b17f664a85d4e5e3c808edde41ff46/clang/lib/Driver/ToolChains/Darwin.cpp#L2293-L2378
-          # for details). If the one we use is higher than the linker's, each
-          # object file being linked will produce a warning:
+          # LLVM derives the target macOS version from the host kernel version
+          # in `LLVM.default_target_triple`, and that can run ahead of the OS
+          # (e.g. darwin27.0.0 yields macosx28.0 on macOS 27.0.1 with SDK 27.0).
+          # When an object file's deployment target is higher than the linker's
+          # target, each object file being linked produces a linker warning:
           #
-          # > ld: warning: object file (...o0.o) was built for newer macOS version (15.0) than being linked (11.0)
+          # > ld: warning: object file (...o0.o) was built for newer 'macOS' version (28.0) than being linked (27.0)
           #
-          # We have to match our SDK version with that of the linker. As long as
-          # we are not passing any of those command-line options to Clang in
-          # `Iyi::Compiler#linker_command`, the only override we need to
-          # handle ourselves is the environment variable one.
-          #
-          # Note that other platforms (e.g. iOS, tvOS) use different environment
-          # variables!
+          # Clang's linker driver resolves the deployment target by taking
+          # `MACOSX_DEPLOYMENT_TARGET` first, then the SDK version capped at the
+          # system version. We take both steps: an explicit environment variable
+          # override first, else the component-wise minimum of the resolved macOS
+          # SDK version and OS product version. If neither is available, LLVM's
+          # default triple is kept.
           if min_version = ENV["MACOSX_DEPLOYMENT_TARGET"]?
             triple = "#{target.architecture}-#{target.vendor}-macosx#{min_version}"
             target = Iyi::Codegen::Target.new(triple)
+          else
+            {% if flag?(:darwin) %}
+              if v = macos_link_version(macos_sdk_version(darwin_sdk), macos_os_version)
+                triple = "#{target.architecture}-#{target.vendor}-macosx#{v}"
+                target = Iyi::Codegen::Target.new(triple)
+              end
+            {% end %}
           end
         end
 
@@ -138,6 +153,96 @@ module Iyi
 
     def self.library_path
       {{env("IYI_CONFIG_LIBRARY_PATH") || ""}}
+    end
+
+    {% if flag?(:darwin) %}
+      # `SDKROOT` when it is set, which is what the driver reads first, and
+      # otherwise `xcrun`'s answer. Nil when neither answers, and a library
+      # only the SDK has is then one the check says it cannot see.
+      def self.darwin_sdk : String?
+        if sdk = ENV["SDKROOT"]?.presence
+          return sdk
+        end
+        output = IO::Memory.new
+        status = Process.run("xcrun", {"--show-sdk-path"}, output: output, error: Process::Redirect::Close)
+        status.success? ? output.to_s.strip.presence : nil
+      rescue IO::Error
+        nil
+      end
+
+      def self.macos_sdk_version(path : ::Path | String | Nil) : String?
+        return nil if path.nil? || path.to_s.empty?
+        settings_path = File.join(path.to_s, "SDKSettings.json")
+        return nil unless File.file?(settings_path)
+        content = File.read(settings_path)
+        JSON.parse(content)["Version"]?.try { |v| v.as_s? || v.to_s }
+      rescue
+        nil
+      end
+
+      def self.macos_os_version : String?
+        size = 256_u64
+        buffer = uninitialized UInt8[256]
+        if LibC.sysctlbyname("kern.osproductversion".to_unsafe, buffer.to_unsafe.as(Void*), pointerof(size), Pointer(Void).null, 0_u64) == 0 && size > 1
+          raw = String.new(buffer.to_unsafe).strip
+          parts = raw.split('.')
+          if parts.size >= 2
+            "#{parts[0]}.#{parts[1]}"
+          elsif parts.size == 1 && !parts[0].empty?
+            parts[0]
+          else
+            nil
+          end
+        else
+          nil
+        end
+      rescue
+        nil
+      end
+    {% end %}
+
+    def self.macos_link_version(sdk : String?, os : String?) : String?
+      if sdk.nil? && os.nil?
+        return nil
+      elsif os.nil?
+        v = parse_version(sdk)
+        return v ? "#{v[0]}.#{v[1]}" : nil
+      elsif sdk.nil?
+        v = parse_version(os)
+        return v ? "#{v[0]}.#{v[1]}" : nil
+      end
+
+      v_sdk = parse_version(sdk)
+      v_os = parse_version(os)
+
+      if v_sdk && v_os
+        min = v_sdk < v_os ? v_sdk : v_os
+        "#{min[0]}.#{min[1]}"
+      elsif v_sdk
+        "#{v_sdk[0]}.#{v_sdk[1]}"
+      elsif v_os
+        "#{v_os[0]}.#{v_os[1]}"
+      else
+        nil
+      end
+    end
+
+    private def self.parse_version(str : String?) : Tuple(Int32, Int32)?
+      return nil unless str
+      parts = str.split('.')
+      return nil if parts.empty?
+
+      major = parts[0].to_i?
+      return nil unless major
+
+      minor = 0
+      if parts.size > 1
+        m = parts[1].to_i?
+        return nil unless m
+        minor = m
+      end
+
+      {major, minor}
     end
   end
 end

@@ -103,8 +103,8 @@ puts "  a double truncates, then the truncation is range-checked"
 # single nearest `n`, found exactly. The zero added is one the optimiser
 # cannot see, so the conversion is the call and not a constant.
 puts "\n== conversion to doubles and singles"
-opaque_u = Program.args.size.to_u128
-opaque_i = Program.args.size.to_i128
+opaque_u = (Program.args.size > 100 ? Program.args.size : 0).to_u128
+opaque_i = (Program.args.size > 100 ? Program.args.size : 0).to_i128
 infinity = 1.0 / 0.0
 [
   {9007199254740993_u128 + opaque_u, 9007199254740992.0, 9007199254740992.0},

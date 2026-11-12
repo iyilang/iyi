@@ -12,6 +12,19 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 # wrapper a Windows build cannot run.
 IYI="${IYI:-$REPO/bin/iyi}"
 WORK="$(mktemp -d)"
+# Strip ambient proxy environment variables to isolate loopback test traffic.
+unset http_proxy https_proxy ftp_proxy all_proxy HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY
+export no_proxy="127.0.0.1,localhost,::1"
+export NO_PROXY="127.0.0.1,localhost,::1"
+# Verify launch boundary sanitization: ambient proxy vars are cleared and loopback is exempted
+if [ -n "${http_proxy:-}" ] || [ -n "${HTTP_PROXY:-}" ] || [ -n "${all_proxy:-}" ] || [ -n "${ALL_PROXY:-}" ]; then
+  echo "  FAIL: script entry failed to strip ambient proxy variables"
+  exit 1
+fi
+if [ "${no_proxy:-}" != "127.0.0.1,localhost,::1" ] || [ "${NO_PROXY:-}" != "127.0.0.1,localhost,::1" ]; then
+  echo "  FAIL: script entry failed to set loopback no_proxy exemption"
+  exit 1
+fi
 
 # Every process under this gate - its servers, the broken copies' rounds
 # and their clients, python, node - ends with it, at its end and at a
@@ -382,7 +395,7 @@ if zstd:
 # among them, the server's choice is zstd, and curl undoes it.
 curl = shutil.which("curl")
 if curl and "zstd" in subprocess.run([curl, "--version"], capture_output=True, text=True).stdout.split("Features:")[-1].lower().split():
-    out = subprocess.run([curl, "-sS", "--compressed", "-D", "-", f"http://127.0.0.1:{port}/text"], capture_output=True)
+    out = subprocess.run([curl, "-sS", "--noproxy", "*", "--compressed", "-D", "-", f"http://127.0.0.1:{port}/text"], capture_output=True)
     head, _, got = out.stdout.partition(b"\r\n\r\n")
     check(out.returncode == 0 and b"\r\ncontent-encoding: zstd" in head.lower() and got == text, f"curl --compressed: {head!r}, {len(got)} bytes")
     said += ", and by curl --compressed"
@@ -985,13 +998,13 @@ latency_run() {
     # A curl that could not speak to the server answers 000 in no time,
     # which is no latency: only 200s are counted, and all 50 must be.
     for _ in $(seq 1 51); do
-      curl -s -o /dev/null -w '%{http_code} %{time_total}\n' --max-time 10 --cacert "$WORK/tls/root.pem" "https://localhost:$port/"
+      curl -s -o /dev/null --noproxy '*' -w '%{http_code} %{time_total}\n' --max-time 10 --cacert "$WORK/tls/root.pem" "https://localhost:$port/"
     done | tail -50 | awk '$1 == "200" { print $2 }' | sort -n | awk -v label="$LATENCY_CURL" '{ t[NR] = $1 * 1000 } END {
       m = NR > 0 ? t[int(NR / 2) + 1] : 0
       if (NR != 50) printf "%s: %d of 50 answered 200\n", label, NR
       else if (m < 15) printf "%s: under 15 ms (median %.2f ms of %d)\n", label, m, NR
       else printf "%s: %.2f ms, past 15 ms (the median of %d)\n", label, m, NR }'
-    curl -s -o /dev/null --max-time 10 --cacert "$WORK/tls/root.pem" "https://localhost:$port/quit"
+    curl -s -o /dev/null --noproxy '*' --max-time 10 --cacert "$WORK/tls/root.pem" "https://localhost:$port/quit"
     wait "$pid" 2>/dev/null
   fi
   if [ "$latency_strace" = yes ]; then
@@ -1967,9 +1980,9 @@ h2_serve() {
 }
 h2_stop() {
   if [ -n "$PY" ]; then
-    "$PY" -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:$H2PORT/quit').read()" >/dev/null 2>&1
+    "$PY" -c "import urllib.request; opener = urllib.request.build_opener(urllib.request.ProxyHandler({})); opener.open('http://127.0.0.1:$H2PORT/quit').read()" >/dev/null 2>&1
   elif command -v curl >/dev/null 2>&1; then
-    curl -s "http://127.0.0.1:$H2PORT/quit" >/dev/null 2>&1
+    curl -s --noproxy '*' "http://127.0.0.1:$H2PORT/quit" >/dev/null 2>&1
   fi
   ( sleep 10; end_process "$H2PID" ) &
   wait "$H2PID" 2>/dev/null
@@ -2654,11 +2667,11 @@ else
   h2_serve
   base="http://127.0.0.1:$H2PORT"
   ok=1
-  got="$(curl -sS --http2-prior-knowledge -H 'X-Test: curl' "$base/echo?x=1")"
+  got="$(curl -sS --noproxy '*' --http2-prior-knowledge -H 'X-Test: curl' "$base/echo?x=1")"
   [ "$got" = "GET /echo x=1 HTTP/2 host=127.0.0.1:$H2PORT length=0 fnv=cbf29ce484222325 x=curl" ] || { echo "  FAIL: GET answered '$got'"; ok=0; }
   if [ -n "$PY" ]; then
     "$PY" -c "import sys; sys.stdout.buffer.write(bytes((i * 31 + 7) & 255 for i in range(300000)))" >"$WORK/up.bin"
-    got="$(curl -sS --http2-prior-knowledge -X PUT --data-binary @"$WORK/up.bin" "$base/echo")"
+    got="$(curl -sS --noproxy '*' --http2-prior-knowledge -X PUT --data-binary @"$WORK/up.bin" "$base/echo")"
     want="PUT /echo  HTTP/2 host=127.0.0.1:$H2PORT length=300000 fnv=$("$PY" -c "
 h = 0xcbf29ce484222325
 for i in range(300000):
@@ -2667,12 +2680,44 @@ for i in range(300000):
 print(format(h, 'x'))") x="
     [ "$got" = "$want" ] || { echo "  FAIL: a 300 KB PUT answered '$got'"; ok=0; }
   fi
-  curl -sS --http2-prior-knowledge -I "$base/big?n=12345" | tr -d '\r' >"$WORK/curl-head"
+  curl -sS --noproxy '*' --http2-prior-knowledge -I "$base/big?n=12345" | tr -d '\r' >"$WORK/curl-head"
   grep -qx 'HTTP/2 200 ' "$WORK/curl-head" && grep -qx 'content-length: 12345' "$WORK/curl-head" || { echo "  FAIL: HEAD: $(cat "$WORK/curl-head" | tr '\n' ' ')"; ok=0; }
-  got="$(curl -sS --http2-prior-knowledge --compressed "$base/text" | head -c 54)"
+  got="$(curl -sS --noproxy '*' --http2-prior-knowledge --compressed "$base/text" | head -c 54)"
   [ "$got" = "hello, compressible world. hello, compressible world. " ] || { echo "  FAIL: gzip: '$got'"; ok=0; }
-  got="$(curl -sS --http2-prior-knowledge -w '<%{num_connects}>' "$base/echo?a" "$base/echo?b" "$base/echo?c" | grep -o '<[0-9]*>' | tr -d '\n')"
+  got="$(curl -sS --noproxy '*' --http2-prior-knowledge -w '<%{num_connects}>' "$base/echo?a" "$base/echo?b" "$base/echo?c" | grep -o '<[0-9]*>' | tr -d '\n')"
   [ "$got" = "<1><0><0>" ] || { echo "  FAIL: three requests took connections '$got'"; ok=0; }
+  # Behavior test: prove that --noproxy '*' protects curl even when no_proxy/NO_PROXY exemptions are neutralized,
+  # using an owned loopback proxy trap that records any diverted connection.
+  if [ -n "$PY" ]; then
+    cat >"$WORK/proxy_trap.py" <<'PY'
+import socket, sys
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+s.listen(1)
+print(s.getsockname()[1], flush=True)
+s.settimeout(2)
+try:
+    conn, _ = s.accept()
+    conn.close()
+    sys.exit(42)
+except (socket.timeout, TimeoutError):
+    sys.exit(0)
+PY
+    "$PY" "$WORK/proxy_trap.py" > "$WORK/proxy_trap.out" 2>&1 &
+    trap_pid=$!
+    trap_port=$(await_port "$WORK/proxy_trap.out" "$trap_pid")
+    polluted_got="$(no_proxy="" NO_PROXY="" http_proxy="http://127.0.0.1:$trap_port" ALL_PROXY="http://127.0.0.1:$trap_port" curl -sS --noproxy '*' --http2-prior-knowledge -H 'X-Test: curl' "$base/echo?x=proxy_isolation")"
+    wait "$trap_pid"
+    trap_status=$?
+    if [ "$polluted_got" != "GET /echo x=proxy_isolation HTTP/2 host=127.0.0.1:$H2PORT length=0 fnv=cbf29ce484222325 x=curl" ]; then
+      echo "  FAIL: curl failed to receive response directly from owned loopback target"
+      ok=0
+    fi
+    if [ "$trap_status" -ne 0 ]; then
+      echo "  FAIL: curl routed to loopback proxy trap despite --noproxy '*'"
+      ok=0
+    fi
+  fi
   [ "$ok" -eq 1 ] && echo "  GET, a 300 KB PUT, HEAD, gzip, and three requests over one connection, as curl (nghttp2) sends and reads them" || status=1
   h2_stop
 fi
@@ -2883,7 +2928,7 @@ https_checks() {
     return $failed
   fi
   if curl_asked "$kind"; then
-    local c=(curl -sS --cacert "$WORK/tls/root.pem" --resolve "localhost:$tport:127.0.0.1")
+    local c=(curl -sS --noproxy '*' --cacert "$WORK/tls/root.pem" --resolve "localhost:$tport:127.0.0.1")
     got="$("${c[@]}" -H 'X-Test: curl' -w ' <%{http_version}>' "$base/echo?x=1" 2>&1)"
     [ "$got" = "GET /echo x=1 HTTP/2 host=localhost:$tport length=0 fnv=cbf29ce484222325 x=curl <2>" ] || https_fail "curl over h2: $got"
     got="$("${c[@]}" --http1.1 -w ' <%{http_version}>' "$base/echo?x=1" 2>&1)"
@@ -3577,7 +3622,7 @@ if command -v wrk >/dev/null 2>&1; then
   errs=$(grep -o 'Socket errors: .*' "$WORK/wrk.out" | grep -oE 'connect [1-9][0-9]*|timeout [1-9][0-9]*' || true)
   non2xx=$(grep -o 'Non-2xx or 3xx responses: [0-9]*' "$WORK/wrk.out" | grep -o '[0-9]*$' || echo 0)
   total=$(grep -o '^ *[0-9]* requests in' "$WORK/wrk.out" | grep -o '[0-9]*' | head -1)
-  curl -s "http://127.0.0.1:$lport/stop" >/dev/null 2>&1 || { [ -n "$PY" ] && "$PY" -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:$lport/stop').read()"; }
+  curl -s --noproxy '*' "http://127.0.0.1:$lport/stop" >/dev/null 2>&1 || { [ -n "$PY" ] && "$PY" -c "import urllib.request; opener = urllib.request.build_opener(urllib.request.ProxyHandler({})); opener.open('http://127.0.0.1:$lport/stop').read()"; }
   wait "$load_pid"
   if [ -z "$reqs" ] || [ "${non2xx:-0}" -ne 0 ] || [ -n "$errs" ]; then
     echo "  wrk -c50 -d3s: $reqs req/s, ${total:-0} requests, non-2xx ${non2xx:-0} $errs"
@@ -3625,12 +3670,12 @@ mutation_said() { # mutation_said <n> <line>...: the n-th mutation's answer
   shift
   printf '%s\n' "$@" > "$WORK/mutres/$n"
 }
-mutate() { # mutate <label> <old> <new> [module, http.iyi by default]
+mutate() { # mutate <label> <old> <new> [module, http.iyi by default] [required failure]
   # A binary of its own each: on Windows the last one's file can still be
   # held a moment after it ended, and the next link over it failed with
   # LNK1104 - three of thirty mutations here, whichever came after.
   mutations=$((mutations + 1))
-  local label="$1" old="$2" new="$3" module="${4:-http.iyi}" n="$mutations"
+  local label="$1" old="$2" new="$3" module="${4:-http.iyi}" required="${5:-}" n="$mutations"
   local P="$WORK/patched-$n"
   if [ -z "$PY" ]; then
     mutation_said "$n" "  $label: skipped, no working python3 to make the broken copy with"
@@ -3662,7 +3707,19 @@ PY
       mutation_said "$n" "  $label: the exercise PASSED on a broken module"
       touch "$WORK/mutres/failed"
     else
-      mutation_said "$n" "  $label: caught"
+      local_code=$?
+      if [ -n "$required" ]; then
+        # A timeout or unrelated crash is not evidence that this allocation
+        # check caught the mutation. Retain the assertion and its delta.
+        if [ "$local_code" -eq 1 ] && grep -Eq "$required" "$WORK/mut-$n.out"; then
+          mutation_said "$n" "  $label: caught" "$(grep -E -m1 "$required" "$WORK/mut-$n.out")"
+        else
+          mutation_said "$n" "  $label: exited $local_code without the required assertion" "$(tail -12 "$WORK/mut-$n.out")"
+          touch "$WORK/mutres/failed"
+        fi
+      else
+        mutation_said "$n" "  $label: caught"
+      fi
     fi
     rm -rf "$P/cache"
   ) &
@@ -3709,7 +3766,7 @@ mutate "a server that keeps a chunked body so far beside it, copied per piece" '
 mutate "a server that holds a body at its declared length, not at what has arrived" '      pieces << got
     end' '      Pointer(UInt8).malloc(@declared.to_u64) if pieces.size == 1
       pieces << got
-    end'
+    end' http.iyi 'ASSERTION FAILED: short-body allocation budget: [0-9]+ bytes, under 1048576'
 mutate "a server that copies the head so far at every read" '      @searched = @stop
       return HTTPError.new("#{what} headers past #{limit} bytes", 431) if available > limit' '      @searched = @stop
       String.new(available) do |copy|

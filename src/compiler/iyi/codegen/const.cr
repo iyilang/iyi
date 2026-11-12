@@ -36,7 +36,7 @@ class Iyi::CodeGenVisitor
   # in the main function.
   def initialize_predefined_constants
     @program.predefined_constants.each do |const|
-      initialize_no_init_flag_const(const)
+      initialize_no_init_flag_const(const) if const.iyi_runtime_read?
     end
   end
 
@@ -179,6 +179,8 @@ class Iyi::CodeGenVisitor
   end
 
   def create_initialize_const_function(fun_name, const)
+    @program.stale_recorder.try &.record_const(const)
+
     global, _ = declare_const_and_initialized_flag(const)
 
     in_main do
@@ -250,6 +252,10 @@ class Iyi::CodeGenVisitor
   end
 
   def read_const_pointer(const)
+    if @program.predefined_constants.includes?(const) && !const.iyi_runtime_read?
+      raise "BUG: reading uninitialized predefined constant #{const}"
+    end
+
     const.read = true
 
     # iyi: which unit read it, so an artifact carrying that unit can say so

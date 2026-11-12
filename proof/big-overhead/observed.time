@@ -1,0 +1,46 @@
+iyi: panic: BigFloat: division by zero
+0   big                                 0x00000001022ee904 *Std::Big::BigFloat#/<Std::Big::BigFloat>:Std::Big::BigFloat + 116
+1   big                                 0x0000000102299a60 ~procProc(Std::Big::BigFloat)@bench/std_big_exercise.iyi:1004 + 104
+2   big                                 0x0000000102299f28 ~procProc(Int32)@src/iyi/testing.iyi:118 + 40
+3   big                                 0x0000000102299fb8 ~procProc(Nil)@src/iyi/concurrency.iyi:5426 + 92
+4   big                                 0x00000001022a17a8 *IyiScheduler::run_spawned_fiber:NoReturn + 240
+5   big                                 0x000000010229783c __iyi_fiber_main + 12
+6   big                                 0x0000000102297830 __iyi_fiber_main + 0
+iyi: panic: BigFloat: the square root of a negative number
+0   big                                 0x00000001022ea78c *Std::Big::BigFloat#sqrt:Std::Big::BigFloat + 60
+1   big                                 0x000000010229a15c ~procProc(Std::Big::BigFloat)@bench/std_big_exercise.iyi:1005 + 52
+2   big                                 0x0000000102299f28 ~procProc(Int32)@src/iyi/testing.iyi:118 + 40
+3   big                                 0x0000000102299fb8 ~procProc(Nil)@src/iyi/concurrency.iyi:5426 + 92
+4   big                                 0x00000001022a17a8 *IyiScheduler::run_spawned_fiber:NoReturn + 240
+5   big                                 0x000000010229783c __iyi_fiber_main + 12
+6   big                                 0x0000000102297830 __iyi_fiber_main + 0
+iyi: panic: BigFloat: not a number: "1.5x"
+0   big                                 0x00000001022ecf24 *Std::Big::BigFloat::new<String>:Std::Big::BigFloat + 188
+1   big                                 0x000000010229a1ac ~procProc(Std::Big::BigFloat)@bench/std_big_exercise.iyi:1006 + 24
+2   big                                 0x0000000102299f28 ~procProc(Int32)@src/iyi/testing.iyi:118 + 40
+3   big                                 0x0000000102299fb8 ~procProc(Nil)@src/iyi/concurrency.iyi:5426 + 92
+4   big                                 0x00000001022a17a8 *IyiScheduler::run_spawned_fiber:NoReturn + 240
+5   big                                 0x000000010229783c __iyi_fiber_main + 12
+6   big                                 0x0000000102297830 __iyi_fiber_main + 0
+iyi: panic: BigFloat: a precision of 0 bits; it is at least 1
+0   big                                 0x00000001022ea5dc *Std::Big::BigFloat::check<Int32>:Nil + 64
+1   big                                 0x00000001022ea128 *Std::Big::BigFloat::rounded<Bool, Std::Big::BigInt, Std::Big::BigInt, Int64, Int32>:Std::Big::BigFloat + 84
+2   big                                 0x00000001022ea09c *Std::Big::BigFloat::new<Std::Big::BigInt, Int32>:Std::Big::BigFloat + 148
+3   big                                 0x00000001022e9fd0 *Std::Big::BigFloat::new<Int32, Int32>:Std::Big::BigFloat + 60
+4   big                                 0x000000010229a1fc ~procProc(Std::Big::BigFloat)@bench/std_big_exercise.iyi:1007 + 24
+5   big                                 0x0000000102299f28 ~procProc(Int32)@src/iyi/testing.iyi:118 + 40
+6   big                                 0x0000000102299fb8 ~procProc(Nil)@src/iyi/concurrency.iyi:5426 + 92
+7   big                                 0x00000001022a17a8 *IyiScheduler::run_spawned_fiber:NoReturn + 240
+8   big                                 0x000000010229783c __iyi_fiber_main + 12
+9   big                                 0x0000000102297830 __iyi_fiber_main + 0
+iyi: panic: BigFloat: NaN is not a finite number
+0   big                                 0x00000001022ed660 *Std::Big::BigFloat::new<Float64>:Std::Big::BigFloat + 148
+1   big                                 0x000000010229a24c ~procProc(Std::Big::BigFloat)@bench/std_big_exercise.iyi:1008 + 24
+2   big                                 0x0000000102299f28 ~procProc(Int32)@src/iyi/testing.iyi:118 + 40
+3   big                                 0x0000000102299fb8 ~procProc(Nil)@src/iyi/concurrency.iyi:5426 + 92
+4   big                                 0x00000001022a17a8 *IyiScheduler::run_spawned_fiber:NoReturn + 240
+5   big                                 0x000000010229783c __iyi_fiber_main + 12
+6   big                                 0x0000000102297830 __iyi_fiber_main + 0
+real 30.61
+user 377.35
+sys 1.32

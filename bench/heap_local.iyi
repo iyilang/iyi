@@ -2026,6 +2026,15 @@
         waited = waited + 1
       end
       left = IyiHeap.partition_spare(record)
+      # The sweep writes the spare before it pools the emptied runs and
+      # takes their bytes off the held ones, and a sweep a global mark
+      # left not whole pools them at the idle workers' next visit: read
+      # at the spare's zero, held was still the bytes before (tmac,
+      # verify, CpuFix4).
+      while spare != 0_u64 && left == 0_u64 && IyiHeap.partition_held(record) >= held && waited < 3000
+        sleep(1)
+        waited = waited + 1
+      end
       after = IyiHeap.partition_held(record)
       go.send(1_i64)
       value = handle.value

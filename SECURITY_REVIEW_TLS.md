@@ -665,6 +665,45 @@ table's address - and a broken copy must be refused there.
   branch - which are not in the tree.
 - Replace an audit.
 
+### Gates run for the second review
+
+On Windows 11, x86_64 - the one machine there was - with Python 3.12's
+cryptography 50.0.2 and OpenSSL 3.5, each whole, on the branch with every
+fix in it unless said:
+
+- `bash bench/std_tls_exercise.sh`: "the std/tls exercise holds (344
+  breaks caught)", the scripted server's scenarios at "34 handshakes held
+  and echoed, 54 refused, each for its reason" and "11 resumptions and
+  ticket scenarios".
+- `bash bench/std_http_exercise.sh`: "the std/http exercise holds".
+- `bash bench/std_x509_exercise.sh`: "holds (51 breaks caught)", and
+  `std_rsa_exercise.sh`: "holds (36 breaks caught)" - both before the
+  constant-time fixes were joined to the branch, their exercises again
+  after.
+- `std_acme_exercise.sh`: "holds (18 breaks caught)";
+  `std_autocert_exercise.sh`, with Pebble: "holds (17 of 18 breaks
+  caught, the rest unmeasured here" - the one that reads POSIX modes;
+  `std_smtp_exercise.sh`: "holds".
+- `std_p256_exercise.sh`: "holds (27 breaks caught)";
+  `std_digest_exercise.sh`: "holds"; `std_big_exercise.sh`: "ALL CHECKS
+  PASSED".
+- On each fix's own branch before it was joined: std/cookie's gate (32
+  breaks caught), std/password's and std/otp's, std/system_roots' (15),
+  std/base64's, std/ecdsa's (22), std/p384's (23), std/curve25519's and
+  std/mlkem's, and the package gates `packages_resolve.sh` and
+  `packages_get.sh` with a compiler built from the branch.
+- `bash bench/ct_timing.sh`: its reading of the machine code holds for
+  x86_64 and aarch64, and of its eleven timings ten stay under 10 (the
+  largest 6.61) with the leaking control at 257.81. The eleventh,
+  mlkem-key - one key's decapsulation against 64 others' - did not, at
+  15.56, and does not on this machine for the 0.21.0 module either: five
+  runs of each in turn gave 7.11, 15.56, 16.33, 14.01 and 16.79 for
+  0.21.0's and 19.3, 13.94, 13.2, 14.47 and 19.69 for the branch's. This
+  review's own first run of it, before any fix, measured 8.31 there. What it times is
+  one key that is always in the cache against 64 that are not; it is
+  open, and is not a finding of either review until somebody tells the
+  two apart.
+
 ## References
 
 - RFC 8446 sections 4.1.4, 4.4, 4.6.3, 5.1, 5.2, 5.4; RFC 5246; RFC 7627;

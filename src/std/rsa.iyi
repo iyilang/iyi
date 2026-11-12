@@ -31,9 +31,10 @@
 # certificate's RSASSA-PSS parameters name theirs.
 #
 # A signature that is not one is `false`, whatever the reason: the wrong
-# length, a value not below the modulus, padding that does not match. A
-# caller acts on the answer alone, and a reason given for a failed check
-# is what the padding-oracle attacks were made of.
+# length, a value not below the modulus, padding that does not match, a
+# *salt_length* the encoding has no room for, however large. A caller
+# acts on the answer alone, and a reason given for a failed check is what
+# the padding-oracle attacks were made of.
 #
 # A private key is PKCS #1's RSAPrivateKey (`RSA PRIVATE KEY`, two primes)
 # or a PKCS #8 PrivateKeyInfo around one (`PRIVATE KEY`, rsaEncryption
@@ -247,7 +248,7 @@ pub struct RsaPublicKey
     em = m.to_bytes(em_len)
     return false unless em
     h_len = hash.size
-    return false if em_len < h_len + s_len + 2
+    return false if s_len > em_len - h_len - 2
     return false unless em[em_len - 1] == 0xBC_u8
     db_len = em_len - h_len - 1
     h = em[db_len, h_len]

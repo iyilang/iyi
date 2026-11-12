@@ -275,6 +275,8 @@ puts "  #{SIGNATURES.count { |c| c[6] }} accepted and #{SIGNATURES.count { |c| !
 check k2048.verify_pkcs1v15(RsaHash::SHA256, b("616263"), b(SIGNATURES[1][5])), "a message given as bytes"
 check k2048.verify_pss(RsaHash::SHA256, "abc", b(PSS_DEFAULT_SALT)), "a PSS salt as long as the hash when none is named"
 check !k2048.verify_pss(RsaHash::SHA384, "abc", b(PSS_DEFAULT_SALT)), "a PSS signature under another hash refused"
+check !k2048.verify_pss(RsaHash::SHA256, "abc", b(PSS_DEFAULT_SALT), salt_length: 2147483647), "a salt longer than any encoding refused"
+check !k2048.verify_pss(RsaHash::SHA256, "abc", b(PSS_DEFAULT_SALT), salt_length: 223), "a salt a byte longer than the encoding holds refused"
 
 puts "== keys that are not keys"
 refused EVEN_MODULUS, "even modulus", "an even modulus refused"

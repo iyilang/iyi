@@ -516,6 +516,10 @@ prove_broken "PSS encoded in the modulus's bits" "expected true, got false" \
   '    em_bits = @bits - 1' '    em_bits = @bits'
 prove_broken "SHA-384's DigestInfo with SHA-256's OID" "expected true, got false" \
   '"3041300d060960864801650304020205000430"' '"3041300d060960864801650304020105000430"'
+# Added to the hash's length before it is held to the encoding's, a salt
+# length near 2^31 is no `false`: the sum overflows, which is a panic.
+prove_broken "a salt's length added up before it is bounded" "arithmetic overflow" \
+  '    return false if s_len > em_len - h_len - 2' '    return false if em_len < h_len + s_len + 2'
 prove_broken "a salt of nothing when none is named" "a PSS salt as long as the hash when none is named" \
   's_len = salt_length || hash.size' 's_len = salt_length || 0'
 prove_broken "an even modulus taken" "an even modulus refused" \

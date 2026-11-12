@@ -8021,21 +8021,21 @@ Chaos mode: combining `--cached` with chaos testing (`--chaos`, `--chaos=SEED`, 
 
 **Verification gates (RG1-RG9).**
 
-The status entries below describe earlier runs, not verification of the reconciled tree.
+The status entries below are of the tree reconciled with upstream master at `140375a3b`: on Linux in the workflow's `iyi`, `stale-fresh`, `stale-callpath` and `stale-equivalence` jobs (runs 43137318814 and 43160142332), and on darwin arm64 by hand with the same scripts. RG6 is the one gate still unproven.
 
 | Gate | Proves | Status | How Proven |
 |---|---|---|---|
-| RG1 | A second compiler built from a copy of the tree, with the same build-input digest and the same commit stamp, builds all 27 C2 programs byte for byte the same. The stamp (`Crystal 1.22.0-dev [commit] (date)`) is in every executable, so compilers built at two commits differ in every program even from identical sources | green locally | bench/stale_reproducible.sh |
-| RG2 | Normal and observed output and backtraces agree for the full integrated corpus: 140 of 140 (28 samples + 112 std exercises), zero excluded and zero failures | historical 141-program run passed; integrated corpus pending | bench/stale_equivalence.sh rg2 |
-| RG3 | 0 unclassified runtime sites reachable from corpus programs (macOS arm64, x86_64 Linux and aarch64 Linux) | historical runs passed on those targets; integrated corpus pending. Windows arms remain unclassified | bench/stale_effects.sh |
+| RG1 | A second compiler built from a copy of the tree, with the same build-input digest and the same commit stamp, builds all 28 C2 programs byte for byte the same. The stamp (`Crystal 1.22.0-dev [commit] (date)`) is in every executable, so compilers built at two commits differ in every program even from identical sources | green, x86_64 Linux | bench/stale_reproducible.sh |
+| RG2 | Normal and observed output and backtraces agree for the full integrated corpus: 140 of 140 (28 samples + 112 std exercises), zero excluded and zero failures; RG2a, each program given one empty directory as its argument, the same | green, darwin arm64 and x86_64 Linux | bench/stale_equivalence.sh rg2, rg2a |
+| RG3 | 0 unclassified runtime sites reachable from the 140 corpus programs (macOS arm64, x86_64 Linux and aarch64 Linux) | green on those three. Windows arms remain unclassified | bench/stale_effects.sh |
 | RG4 | Link under randomized non-CHILD_ENV variables | green | bench/stale_callpath.sh |
 | RG5 | Each observer kind is load-bearing where a site reaches it, by the record or taint it writes being gone when it is dropped: 20 of 20 on darwin arm64, 19 of 19 on x86_64 Linux. Nothing on Linux reaches `host_state` (the roots are files, which the path observers record), and the gate holds that kind to no taint there | green | bench/stale_equivalence.sh rg5 |
 | RG6 | Standing shadow audit catches unannotated leaks or disagreements | NOT yet proven | wired in CI (.github/workflows/iyi.yml audit + empty snapshot on disagreement), provable only on master after merge |
-| RG7 | Threads 1 vs 8 identical executables | green | bench/stale_reproducible.sh |
-| RG8 | Over 7 programs (5 C2 + 2 C3) with single-site mutations, 3 'unreached' mutations rerun because the compiler does emit them (over-approximation, never a missed rerun) | green | bench/stale_rg8.py via bench/stale_callpath.sh |
-| RG9 | CallPathFp equal across two processes with ASLR and with/without preanalysed prelude | historical run passed; integrated corpus pending | bench/stale_rg9.py |
+| RG7 | Threads 1 vs 8 identical executables, all 28 C2 programs | green, x86_64 Linux | bench/stale_reproducible.sh |
+| RG8 | Over 7 programs (5 C2 + 2 C3) and 14 kinds of single-site mutation, 3 'unreached' mutations rerun because the compiler does emit them (over-approximation, never a missed rerun) | green, darwin arm64 and x86_64 Linux | bench/stale_rg8.py via bench/stale_callpath.sh |
+| RG9 | CallPathFp equal across two processes with ASLR and with/without preanalysed prelude, all 140 programs | green, darwin arm64 and x86_64 Linux | bench/stale_rg9.py via bench/stale_callpath.sh |
 
-Acceptance rows from design section 12: rows 1-22 and 25-50 are automated in `bench/stale_tests.sh` and green on the original baseline. Rows 23-24 are CI-only and wait for master.
+Acceptance rows from design section 12: rows 1-22 and 25-50 are automated in `bench/stale_tests.sh` and green on darwin arm64 and x86_64 Linux. Rows 23-24 are CI-only and wait for master.
 
 **Census as measured (historical, original 141-program corpus).** Measured on macOS arm64 on this machine across 141 programs (27 C2 samples/iyi, 114 C3 bench/std_*_exercise); integrated 140-program corpus (four std exercises have since become tests) to be re-measured after merge integration:
 - Runtime reusable on second run: 87 of 141 (61.7%). C2: 25 of 27 (92.6%). C3: 62 of 114 (54.4%).

@@ -108,6 +108,12 @@ refuses "a value with a quote inside" value_quote 'Cookie: a has a byte a cookie
   'Cookie.new("a", "x\"y").to_set_cookie'
 refuses "a name with a semicolon" name_semi 'Cookie: not a cookie name: "a;b"' \
   'Cookie.new("a;b", "1").to_set_cookie'
+refuses "a path with an attribute after it" path_semi 'Cookie: sid has a byte a cookie path cannot hold: "/; Domain=evil.example"' \
+  'Cookie.new("sid", "abc", path: "/; Domain=evil.example").to_set_cookie'
+refuses "a domain with an attribute after it" domain_semi 'Cookie: a has a domain that is not a host name: "example.com; Secure"' \
+  'Cookie.new("a", "1", domain: "example.com; Secure").to_set_cookie'
+refuses "a SameSite with an attribute after it" same_semi 'Cookie: a has a SameSite that is not Strict, Lax or None: "None; Domain=evil.example"' \
+  'Cookie.new("a", "1", same_site: "None; Domain=evil.example").to_set_cookie'
 
 echo
 echo "== Python's http.cookies reads what to_set_cookie writes"
@@ -277,6 +283,22 @@ prove_broken "a prefix read in its usual case alone" "a prefix is read in any ca
   'c = c | 32_u8 if c >= 65_u8 && c <= 90_u8' 'c = c | 32_u8 if c == 72_u8 || c == 83_u8'
 prove_broken "a prefix found anywhere in a name" "a name that holds a prefix further in" \
   'host_only = CookieJar.prefixed?(cookie.name, "__host-")' 'host_only = cookie.name.downcase.includes?("__host-")'
+prove_broken "a path written with a semicolon in it" "a path with a semicolon refused" \
+  'if c < 0x20_u8 || c == 0x3B_u8 || c >= 0x7F_u8' 'if c < 0x20_u8 || c >= 0x7F_u8'
+prove_broken "a path written with a control byte in it" "a path with a control byte refused" \
+  'if c < 0x20_u8 || c == 0x3B_u8 || c >= 0x7F_u8' 'if c == 0x3B_u8 || c >= 0x7F_u8'
+prove_broken "a path written with a delete byte in it" "a path with a delete byte refused" \
+  'if c < 0x20_u8 || c == 0x3B_u8 || c >= 0x7F_u8' 'if c < 0x20_u8 || c == 0x3B_u8 || c >= 0x80_u8'
+prove_broken "a path written with a byte outside ASCII in it" "a path outside ASCII refused" \
+  'if c < 0x20_u8 || c == 0x3B_u8 || c >= 0x7F_u8' 'if c < 0x20_u8 || c == 0x3B_u8 || c == 0x7F_u8'
+prove_broken "a domain written as it is" "a domain with a semicolon refused" \
+  'unless DnsName.valid?(host)' 'unless true'
+prove_broken "a domain's leading dot refused" "a domain's one leading dot written" \
+  'unless DnsName.valid?(host)' 'unless DnsName.valid?(domain)'
+prove_broken "a SameSite written as it is" "a SameSite with a semicolon refused" \
+  'unless HTTP.same_name?(same, "Strict") ||' 'unless true ||'
+prove_broken "a SameSite read in one case alone" "a SameSite in any case written" \
+  'HTTP.same_name?(same, "Lax")' 'same == "Lax"'
 
 echo
 if [ "$status" -eq 0 ]; then

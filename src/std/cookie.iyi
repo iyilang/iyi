@@ -10,6 +10,11 @@
 # cookie. A server's line is refused, with the byte that would break it,
 # when its name is not a token or its value holds what a cookie-octet
 # cannot (§4.1.1): a space, a comma, a semicolon, a backslash, a quote.
+# It is refused as well when its `Path` holds a semicolon, a control byte
+# or a byte outside ASCII, when its `Domain`, past one leading dot, is not
+# a host name as std/dns's `DnsName.valid?` reads one, and when its
+# `SameSite` is not `Strict`, `Lax` or `None`, whatever its case: each
+# would end its attribute early or write one no reader takes.
 #
 # The jar matches a request as §5.4 does - domain, path at a slash, not
 # lapsed - sends the longer paths first, and sends a `Secure` cookie over
@@ -31,6 +36,7 @@
 module std/cookie
 
 import std/http::{HTTP, Response, CookieStore}
+import std/dns::{DnsName}
 import std/uri::{URI}
 import std/time::{Time, Span}
 
@@ -38,9 +44,10 @@ import std/time::{Time, Span}
 # keeps. `Cookie.parse(line)` reads a `Set-Cookie` value as RFC 6265 §5.2
 # has a user agent read one - a name and value, then attributes in any
 # case, an unknown attribute ignored - and answers nil for a line that
-# has no name-value pair. `to_set_cookie` writes one, refusing a name or
-# value that would break the line. `expires` is the instant it lapses,
-# from `Max-Age` before `Expires` (§5.3, step 3); nil is a session cookie.
+# has no name-value pair. `to_set_cookie` writes one, refusing a name,
+# value, `path`, `domain` or `same_site` that would break the line.
+# `expires` is the instant it lapses, from `Max-Age` before `Expires`
+# (§5.3, step 3); nil is a session cookie.
 pub class Cookie
   getter name : String
   getter value : String
@@ -144,7 +151,10 @@ pub class Cookie
 
   # The `Set-Cookie` value a server writes (§4.1). A name is a token, and a
   # value the cookie-octets: a space, a comma, a semicolon, a backslash or
-  # a quote inside one would end it or another field early.
+  # a quote inside one would end it or another field early. A path is
+  # printable ASCII with no semicolon, which would start an attribute of
+  # its own; a domain is a host name, one leading dot allowed; `SameSite`
+  # is `Strict`, `Lax` or `None`, whatever its case. Anything else panics.
   def to_set_cookie : String
     raise "Cookie: not a cookie name: #{@name.inspect}" unless HTTP.token?(@name)
     p = @value.to_unsafe
@@ -159,9 +169,18 @@ pub class Cookie
     text = String::Builder.new
     text << @name << "=" << @value
     if path = @path
+      q = path.to_unsafe
+      i = 0
+      while i < path.bytesize
+        c = q[i]
+        raise "Cookie: #{@name} has a byte a cookie path cannot hold: #{path.inspect}" if c < 0x20_u8 || c == 0x3B_u8 || c >= 0x7F_u8
+        i = i + 1
+      end
       text << "; Path=" << path
     end
     if domain = @domain
+      host = domain.starts_with?(".") ? domain[1, domain.bytesize - 1] : domain
+      raise "Cookie: #{@name} has a domain that is not a host name: #{domain.inspect}" unless DnsName.valid?(host)
       text << "; Domain=" << domain
     end
     if age = @max_age
@@ -172,6 +191,9 @@ pub class Cookie
     text << "; Secure" if @secure
     text << "; HttpOnly" if @http_only
     if same = @same_site
+      unless HTTP.same_name?(same, "Strict") || HTTP.same_name?(same, "Lax") || HTTP.same_name?(same, "None")
+        raise "Cookie: #{@name} has a SameSite that is not Strict, Lax or None: #{same.inspect}"
+      end
       text << "; SameSite=" << same
     end
     text.to_s

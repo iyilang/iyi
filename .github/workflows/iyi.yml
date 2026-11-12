@@ -36,7 +36,8 @@ name: iyi
 #                    beside their own jobs)
 #   stale-fresh      a fresh runner audits the producer's imported receipts
 #   stale-callpath   the stale key's own gates: link once, RG4, the reach walk
-#                    against what codegen recorded, RG8 and RG9
+#                    against what codegen recorded, RG8 and RG9; and RG2, RG2a,
+#                    RG2r and RG5, what observing a program changes about it
 #
 # Every job carries a `timeout-minutes`. The default is six hours, and these
 # jobs start daemons, listen on sockets, serve HTTP, soak an LSP and run
@@ -352,9 +353,9 @@ jobs:
   # builds `iyi` as well as `iyi`: the link section asks it what the target
   # links, and RG8 builds an `iyi` with the def body dropped from the walk's
   # encoding to prove a mutation there is caught. That and RG9 over the
-  # 140-program corpus took 17 minutes together on twelve darwin arm64 cores,
-  # so this is a job of its own rather than more steps of `iyi`, which is
-  # already most of the way to its hour.
+  # 140-program corpus took 41 minutes here (run 43117744255) and 17 on
+  # eighteen darwin arm64 cores, so this is a job of its own rather than
+  # more steps of `iyi`, which runs 54 minutes of its hour.
   stale-callpath:
     needs: [plan, build]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'stale-callpath') }}
@@ -362,7 +363,7 @@ jobs:
     timeout-minutes: 90
     container:
       image: crystallang/crystal:1.21.0-build
-    name: "The stale key: link, reach, RG4, RG8 and RG9"
+    name: "The stale key and what observing changes: link, reach, RG2, RG4, RG5, RG8 and RG9"
     steps:
       - uses: actions/checkout@v7
         with:
@@ -382,6 +383,25 @@ jobs:
       # store, and every record parses with the sequence at two thousand.
       - name: Two processes record into one store
         run: bash bench/stale_store_concurrency.sh
+
+      # RG2 builds each of the 140 programs plain and observed and holds the
+      # observed run to the plain one's exit, stdout and stderr outside what
+      # two plain runs disagree on. RG2a runs each with one empty directory
+      # as its argument against the run with none, RG2r takes three probes
+      # through an artifact and back, and RG5 drops each observer in turn
+      # and wants the gate to notice. Of these the workflow reached RG2r
+      # alone, through `stale_evidence_test.sh`, which hands it a compiler
+      # made of shell. RG2 and RG2a report a program they could not compare
+      # as excluded and pass; the rule is none excluded (STALE_TESTS_DESIGN,
+      # RG2), so an exclusion fails here.
+      - name: RG2, RG2a, RG2r and RG5, with no program excluded
+        shell: bash
+        run: |
+          IYI="$PWD/.build/iyi" bash bench/stale_equivalence.sh all | tee stale-equivalence.log
+          if grep -E '^RG2a?: .* [1-9][0-9]* still excluded' stale-equivalence.log; then
+            echo "RG2 or RG2a excluded a program" >&2
+            exit 1
+          fi
 
   # A second runner gets only the producer's compiler and portable receipt
   # snapshot. No cache crosses this boundary: a hit here is evidence that the

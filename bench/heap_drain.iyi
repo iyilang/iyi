@@ -32,8 +32,9 @@
 # set and the bytes gone cold before and after IDLE_MS idle; the program
 # fails when the span after the last round is more than a quarter (and
 # 4 MiB) above the span after round WARM, plus three times what the kept
-# strings grew by meanwhile, when a kept string is not what was sent,
-# when a pooled run still holds its pages after the idle wait, when less
+# strings grew by meanwhile and half a `IyiHeap::UNIT_MIN` a unit, when a
+# kept string is not what was sent, when a pooled run still holds its
+# pages after the idle wait, when less
 # than a quarter of POOL_BYTES went cold, or when the resident set fell
 # by less than half of what went cold meanwhile.
 
@@ -263,6 +264,14 @@ module bench/heap_drain
       slack = base // 4_u64
       slack = 4_u64 * mib if slack < 4_u64 * mib
       slack = slack + (payloads[rounds - 1] - payloads[WARM - 1]) * 3_u64
+      # And half a budget a unit: a unit parked on the full sink keeps its
+      # garbage until it owes half its budget (`IyiHeap.at_park`), and the
+      # span is the most the round's units held at once - a peak a later
+      # round may reach by its scheduling alone, with no global mark in it.
+      # At the 768 KiB floor a round rose 3 to 27 MiB so (Linux, 36 rounds,
+      # no mark or hold in the round) and 5 runs of 26 failed on tssh,
+      # none at 512 KiB (S6, CpuFix4).
+      slack = slack + units.to_u64 * IyiHeap::UNIT_MIN // 2_u64
       # Idle: the pool's runs turn cold - their pages given back - with
       # no unit left to wake a worker (`IyiHeap.idle_wait_ms`), the last
       # round's whole runs among them.

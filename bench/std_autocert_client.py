@@ -114,9 +114,13 @@ def modes(directory, name="cache files are 0600"):
     reads back with cryptography, and a certificate's key is its leaf's."""
     if os.name == "nt":
         # The owner's rights, SYSTEM, the Administrators, and the account
-        # this runs as, which whoami names by its SID.
+        # this runs as, which whoami names by its SID. SDDL writes the
+        # machine's built-in Administrator (RID 500) as `LA` rather than
+        # by its SID, and that is who a hosted runner runs as.
         me = re.search(r"S-1-[0-9-]+", subprocess.run(["whoami", "/user"], capture_output=True, text=True).stdout)
         own = {"OW", "SY", "BA"} | ({me.group(0)} if me else set())
+        if me and me.group(0).endswith("-500"):
+            own.add("LA")
         flags, trustees = windows_dacl(directory)
         entries = sorted(os.listdir(directory))
         loose = [f"{e} lets in {', '.join(sorted(set(t) - own))}" for e in entries

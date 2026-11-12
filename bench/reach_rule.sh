@@ -74,8 +74,12 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 PSEP=":"
 
+# A native compiler cannot resolve this shell's own path mapping: an
+# IYI_PATH of `C:/...;/c/...` is not converted, and std beside the
+# patched prelude was not found (`can't find module 'std/env'`).
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    REPO="$(cygpath -m "$REPO")"
     WORK="$(cygpath -m "$WORK")"
     PSEP=";"
     ;;

@@ -692,8 +692,15 @@
     end
   end
 
+  # The unit's death waited for (`settled`). A frame's residue can keep the
+  # enclosing group marked through `collect_here` - tssh's plain builds,
+  # every seed: still `LOCAL`, not poisoned after it - and then only the
+  # death check, or a later collection of the unit, sees the shared
+  # group's word; bench/heap_verify.sh's print-only `rgo` runs ended the
+  # program first and exited 0.
   def group_outer_check : Nil
     m = Mutex.new { 3 }
+    before = partitions_now
     group do |outer|
       outer.spawn(unit: :new) do
         open_in_lock(m)
@@ -701,6 +708,7 @@
         0
       end
     end
+    settled(before, "group outer")
   end
 
   # ── Row 8: SharedProc.of's captures ────────────────────────────────────

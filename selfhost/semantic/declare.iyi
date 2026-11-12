@@ -20,7 +20,7 @@ module main
 import std/env::{ENV}
 import std/file::{File}
 import macro/expand::{expand_with, host_flags}
-import parser/parser::{Parser, Node, PathNode, DefNode, ClassDefNode, TraitDefNode, ImplDefNode, ModuleDefNode, EnumDefNode, AssocTypeNode, ExprsNode, AssignNode, AnnotationNode, CallNode, VarNode, ArgNode, GenericNode, VisibilityModifierNode, AliasNode, ImportNode, LibDefNode, RequireNode}
+import parser/parser::{Parser, Node, PathNode, DefNode, ClassDefNode, TraitDefNode, ImplDefNode, ModuleDefNode, EnumDefNode, AssocTypeNode, ExprsNode, AssignNode, AnnotationNode, AnnotationDefNode, CallNode, VarNode, ArgNode, GenericNode, VisibilityModifierNode, AliasNode, ImportNode, LibDefNode, RequireNode}
 
 # One declared type. `path` is what the compiler calls it, `vars` is the
 # parameter list it prints after that, and `defs` are the methods that
@@ -365,6 +365,11 @@ pub class Walk
     when VisibilityModifierNode
       # A private method is still a method the type has.
       body(node.body, scope, holder)
+    when AnnotationDefNode
+      # `annotation Field` declares an annotation type, which the compiler
+      # reports by its kind, as it does the classes and structs.
+      full = join_scope(scope, node.name)
+      @into.at("annotationtype", full, full, "")
     when AliasNode
       name = node.name
       unless name == ""

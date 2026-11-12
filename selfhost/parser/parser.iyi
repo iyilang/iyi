@@ -881,9 +881,12 @@ pub struct UntilNode
 end
 
 # `annotation Name ... end` declares an annotation type. The shape prints the
-# declaration alone; its fields are not part of the canonical tree.
+# declaration alone; its fields are not part of the canonical tree. The name
+# is kept for the declaration pass, which reports the type it declares.
 pub struct AnnotationDefNode
-  def initialize
+  getter name : String
+
+  def initialize(@name : String)
   end
 end
 
@@ -2282,9 +2285,10 @@ pub class Parser
       if word.value == "annotation" && peek_at(offset + 1).kind == "CONST"
         advance if offset == 1
         advance # annotation
+        name = peek.value
         skip_line
         skip_to_matching_end
-        return AnnotationDefNode.new.as(Node)
+        return AnnotationDefNode.new(name).as(Node)
       end
       if word.value == "macro"
         advance if offset == 1

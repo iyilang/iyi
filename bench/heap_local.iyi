@@ -1881,18 +1881,43 @@
     junk.is_a?(Node) ? 1_i64 : 0_i64
   end
 
+  # The first class whose free list meets itself, by Floyd's two walkers,
+  # which allocate nothing (an allocation takes from the list they read);
+  # -1 when every list ends. Read by the unit's own fiber between its
+  # allocations, when nothing else writes its lists.
+  def ring_class(record : UInt64) : Int32
+    table = Pointer(UInt64).new(record)
+    index = 0
+    while index < IyiHeap::CLASSES
+      slow = table[index]
+      fast = slow
+      while fast != 0
+        fast = IyiHeap.read64(fast + IyiHeap::OFF_LINK)
+        break if fast == 0
+        fast = IyiHeap.read64(fast + IyiHeap::OFF_LINK)
+        slow = IyiHeap.read64(slow + IyiHeap::OFF_LINK)
+        return index if fast == slow && fast != 0
+      end
+      index = index + 1
+    end
+    -1
+  end
+
   # A unit's own collections keep its runs (`IyiHeap.local_sweep`'s
   # *keep*): each lists what it frees ahead of the list as it stands,
   # and leaves a chunk free already - on that list, or on the return
   # stack the global sweep pushed it onto - where it is. Rounds of
   # garbage, 25 nodes kept a round, and every other round two global
   # collections, so that the garbage comes back on the return stack
-  # before the park's collection. The kept list reads whole - a sweep
-  # that listed a free chunk once more hands it out twice - and the unit
-  # holds no more after 40 rounds than twice what it held after five - a
-  # sweep that dropped the return stack, as the whole sweep does, lost
-  # what was on it. Answers the bytes held past that, or minus the nodes
-  # that read wrong.
+  # before the park's collection. No list is a ring after a park - a
+  # sweep that listed a chunk on its list once more closed one, and the
+  # allocator, handing that chunk out twice, read an object's word for
+  # the next free chunk and died of a memory fault before any check (the
+  # nokeptfree copy, exit 139 on Linux and tmac, CpuFix3) - the kept
+  # list reads whole, and the unit holds no more after 40 rounds than
+  # twice what it held after five - a sweep that dropped the return
+  # stack, as the whole sweep does, lost what was on it. Answers the
+  # bytes held past that, or minus the nodes that read wrong.
   def kept_task : Int64
     record = IyiHeap.current_record
     base = 9000000000_i64
@@ -1914,6 +1939,8 @@
       end
       # A park, a collection that keeps.
       sleep(0)
+      ring = ring_class(record)
+      fail("kept: class #{ring}'s free list is a ring after the park of round #{round}") if ring >= 0
       first = IyiHeap.partition_held(record) if round == 4
       round = round + 1
     end
@@ -2032,9 +2059,14 @@
   # 933b4d005), and `weak` leaves the frontier's cells to `frontier`.
   # `HEAP22_ONLY=idle`: the idle check alone, for the noidle copy of
   # bench/heap_local.sh, whose broken collection the takeover check would
-  # otherwise meet first.
-  if Program.env("HEAP22_ONLY") == "idle"
+  # otherwise meet first; `HEAP22_ONLY=kept`, the kept check alone, for
+  # the nokeptfree copy, whose rings the parks of `abandon` and `return`
+  # would hand out first, dying of a memory fault there.
+  only = Program.env("HEAP22_ONLY")
+  if only == "idle"
     idle_check(workers)
+  elsif only == "kept"
+    kept_check
   else
     abandon_check
     return_check

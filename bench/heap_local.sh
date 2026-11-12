@@ -301,8 +301,10 @@ if [ "$PART" = all ] || [ "$PART" = broken ]; then
   # A sweep that keeps its runs and links every free chunk again, as the
   # whole sweep does, ahead of the list that already holds them: a chunk
   # twice on the list, or the list a ring, and the allocator hands one
-  # chunk to two objects.
-  prove_fails "a kept sweep that lists free chunks again" nokeptfree "kept:" \
+  # chunk to two objects. The kept check alone (`HEAP22_ONLY=kept`): the
+  # parks of the checks before it hand a ring's chunks out, and the
+  # program died of a memory fault there (CpuFix3, Linux and tmac).
+  HEAP22_ONLY=kept prove_fails "a kept sweep that lists free chunks again" nokeptfree "kept:" \
     '/def self\.sweep_run_kept\(/ { inside = 1 } { print } inside && /^      bits = read8\(meta\)$/ { print "      if bits & CARVED_FLAG != 0 && bits & FREE_FLAG != 0"; print "        write64(head + OFF_LINK, list)"; print "        write64(head + OFF_INDEX, slot)"; print "        list = head"; print "      end"; inside = 0; found = 1 } END { if (!found) exit 3 }' \
     heap_partition.iyi
 

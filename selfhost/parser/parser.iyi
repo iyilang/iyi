@@ -1136,8 +1136,8 @@ pub alias Node = PathNode | NumNode | StrNode | VarNode | ExtendNode |
                  ArrayNode | IfNode | WhileNode | ReturnNode | AndNode |
                  OrNode | BoolNode | NilNode | NotNode | GenericNode |
                  HashNode | TupleNode | RangeNode | CharNode | UnlessNode |
-                UnionNode | AssocTypeNode | EnumDefNode | AnnotationNode | UntilNode |
-                AnnotationDefNode | TypeofNode |
+                 UnionNode | AssocTypeNode | EnumDefNode | AnnotationNode | UntilNode |
+                 AnnotationDefNode | TypeofNode |
                  WhenNode | CaseNode | SelectNode | BreakNode | NextNode |
                  PropagateNode | RecoverNode | DeferNode | IsANode |
                  AliasNode | ReadInstanceVarNode | RespondsToNode |
@@ -3294,7 +3294,7 @@ pub class Parser
     op = peek.kind
     if op == "+=" || op == "-=" || op == "*=" || op == "/=" || op == "%=" ||
        op == "|=" || op == "&=" || op == "^=" || op == "<<=" || op == ">>=" ||
-      op == "||=" || op == "&&=" || op == "**=" || op == "&+=" || op == "&-=" || op == "&*="
+       op == "||=" || op == "&&=" || op == "**=" || op == "&+=" || op == "&-=" || op == "&*="
       advance
       parse_binary(0)
       case left
@@ -3787,7 +3787,7 @@ pub class Parser
     # compiler rather than a method, and each is its own node.
     if t.kind == "IDENT" && peek_at(1).kind == "(" &&
        (t.value == "pointerof" || t.value == "sizeof" || t.value == "instance_sizeof" ||
-        t.value == "typeof")
+       t.value == "typeof")
       advance
       advance
       depth = 1

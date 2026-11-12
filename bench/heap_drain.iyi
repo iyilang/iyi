@@ -1,7 +1,8 @@
 # heap22 S6 (LeakHunt): the runs a dead unit hands to the shared heap are
-# taken again. Each round, UNITS pool units allocate about 6,000 strings
-# over eight size classes, local garbage but for every 97th, which they
-# send to the main thread - published - and which it keeps for the rest
+# taken again. Each round, UNITS pool units, WORKERS of them at work at a
+# time, allocate about 6,000 strings over eight size classes, local
+# garbage but for every 97th, which they send to the main thread -
+# published - and which it keeps for the rest
 # of the program, as #145's pool keeps a statement or a buffer a request
 # lent into a connection; then a burst of 1,500 more, sent and kept until
 # the next round ends. The units die: every run holding something sent is
@@ -123,7 +124,29 @@ module bench/heap_drain
     head + "d" * (40 - head.bytesize)
   end
 
-  def unit_body(round : Int32, t : Int32, sink : Channel(String)) : Int32
+  # A unit of a round: it takes a token off *slots* before it allocates
+  # and puts it back when it is done, so that a round's units work as many
+  # at a time as there are workers (`play`). The span the growth check
+  # reads is a high water, the most the partitions' runs ever spanned, and
+  # without the tokens it rose with the most any round's units happened
+  # to hold together: a round in which 30 to 48 of the 48 were alive at
+  # once, parked on the full sink with their garbage, raised it by up to
+  # 24 MiB with no global mark in the round, and the runs that peak handed
+  # over stayed on the drain list, adopted and handed again every round.
+  # Not a ratchet - from round 12 to 150 the span stayed 13 to 55 MiB
+  # above 1.73 times the kept strings' bytes and no further above it at
+  # the end than before (Linux, tmac, alone and beside busy loops) - but
+  # past round WARM such a round failed the check: 21 -> 60 MiB beside 8
+  # busy loops (tmac), 20 -> 54 in a broken copy whose own check comes
+  # later (Linux). With the tokens the span after round 12 was 21 MiB in
+  # every run, alone or not, and 11 to 14 MiB above 1.73 times the kept
+  # strings' bytes from there to round 150 (Linux). Holding all of a
+  # round's units to its end instead made every round the full peak, 88
+  # MiB, and the copy without the sweep's relisting grew 92 -> 104 MiB,
+  # inside the bound: the room on a 60 MiB drain list stood in for the
+  # runs it lost (S6, DrainFlake).
+  def unit_body(round : Int32, t : Int32, sink : Channel(String), slots : Channel(Int32)) : Int32
+    slots.receive
     junk = 0_i64
     i = 0
     while i < ALLOCS
@@ -140,6 +163,7 @@ module bench/heap_drain
       sink.send(burst_text(round, t, k))
       k = k + 1
     end
+    slots.send(1)
     junk > 0 ? 0 : 1
   end
 
@@ -191,15 +215,18 @@ module bench/heap_drain
     end
   end
 
-  # One round: its units spawned, what they send received - the kept
-  # strings onto *kept*, with what each must read (`kept_text`'s numbers)
-  # onto *keys* - and their answers checked. Answers the burst.
+  # One round: its units spawned, as many at work at a time as there are
+  # workers, what they send received - the kept strings onto *kept*, with
+  # what each must read (`kept_text`'s numbers) onto *keys* - and their
+  # answers checked. Answers the burst.
   def play(round : Int32, units : Int32, kept : Array(String), keys : Array(Int64)) : Array(String)
     burst = [] of String
     sink = Channel(String).new(1024)
+    slots = Channel(Int32).new(units)
+    IyiWorkers.count.times { slots.send(1) }
     group do |g|
       handles = [] of IyiTask(Int32)
-      units.times { |t| handles << g.spawn(unit: :new) { unit_body(round, t, sink) } }
+      units.times { |t| handles << g.spawn(unit: :new) { unit_body(round, t, sink, slots) } }
       (units * (sparse_per_unit + DENSE)).times do
         got = sink.receive
         s = got.is_a?(String) ? got : ""
@@ -281,11 +308,12 @@ module bench/heap_drain
       slack = slack + (payloads[rounds - 1] - payloads[WARM - 1]) * 3_u64
       # And half a budget a unit: a unit parked on the full sink keeps its
       # garbage until it owes half its budget (`IyiHeap.at_park`), and the
-      # span is the most the round's units held at once - a peak a later
-      # round may reach by its scheduling alone, with no global mark in it.
+      # span was the most the round's units held at once - a peak a later
+      # round reached by its scheduling alone, with no global mark in it.
       # At the 768 KiB floor a round rose 3 to 27 MiB so (Linux, 36 rounds,
       # no mark or hold in the round) and 5 runs of 26 failed on tssh,
-      # none at 512 KiB (S6, CpuFix4).
+      # none at 512 KiB (S6, CpuFix4). The units now work WORKERS at a time
+      # (`unit_body`) and the term stays as it was.
       slack = slack + units.to_u64 * IyiHeap::UNIT_MIN // 2_u64
       # Idle: the pool's runs turn cold - their pages given back - with
       # no unit left to wake a worker (`IyiHeap.idle_wait_ms`), the last

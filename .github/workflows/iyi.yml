@@ -3791,12 +3791,14 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     name: "The VS Code client packages, and a tag publishes it"
-    # A step's `if` cannot read the `secrets` context, and the job's `env`
-    # can: that is what lets a registry whose token is not set yet be
-    # skipped instead of failing the tag that publishes to the other one.
-    env:
-      VSCE_PAT: ${{ secrets.VSCE_PAT }}
-      OVSX_PAT: ${{ secrets.OVSX_PAT }}
+    # The two registry tokens are in no `env` the whole job reads: each is
+    # given to the one step that publishes with it, and that step runs only
+    # on an `editor-v*` tag. Packaging runs on every pull request, and what
+    # it runs is code from the npm registry. `vsce` and `ovsx` are
+    # devDependencies at exact versions, so `package-lock.json` names every
+    # byte of them, `npm ci --ignore-scripts` installs that and runs no
+    # package's install script, and `npx --no-install` runs what was
+    # installed or nothing.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -3809,8 +3811,8 @@ jobs:
       - name: Package the extension
         working-directory: editors/vscode
         run: |
-          npm ci
-          npx --yes @vscode/vsce package
+          npm ci --ignore-scripts
+          npx --no-install vsce package
 
       # A tag that disagrees with the manifest publishes the wrong version
       # under the right name, and the Marketplace keeps what it is given.
@@ -3826,21 +3828,37 @@ jobs:
           }
 
       # `--packagePath` publishes the file the step above built and CI
-      # already looked at, rather than packaging a second time.
+      # already looked at, rather than packaging a second time. A step's
+      # `if` cannot read the `secrets` context, so the step asks its own
+      # environment: a registry whose token is not set yet is skipped
+      # instead of failing the tag that publishes to the other one.
       - name: Publish to the Visual Studio Marketplace
-        if: startsWith(github.ref, 'refs/tags/editor-v') && env.VSCE_PAT != ''
+        if: startsWith(github.ref, 'refs/tags/editor-v')
         working-directory: editors/vscode
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
         run: |
-          npx --yes @vscode/vsce publish \
+          if [ -z "$VSCE_PAT" ]; then
+            echo "VSCE_PAT is not set: nothing is published to the Marketplace"
+            exit 0
+          fi
+          npx --no-install vsce publish \
             --packagePath "iyi-${GITHUB_REF_NAME#editor-v}.vsix"
 
       # The same file, to the registry every VS Code fork reads. `ovsx`
       # takes the token from OVSX_PAT, and the namespace must exist first:
       # `npx ovsx create-namespace iyilang`, once.
       - name: Publish to Open VSX
-        if: startsWith(github.ref, 'refs/tags/editor-v') && env.OVSX_PAT != ''
+        if: startsWith(github.ref, 'refs/tags/editor-v')
         working-directory: editors/vscode
-        run: npx --yes ovsx publish "iyi-${GITHUB_REF_NAME#editor-v}.vsix"
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+        run: |
+          if [ -z "$OVSX_PAT" ]; then
+            echo "OVSX_PAT is not set: nothing is published to Open VSX"
+            exit 0
+          fi
+          npx --no-install ovsx publish "iyi-${GITHUB_REF_NAME#editor-v}.vsix"
 
       - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         with:

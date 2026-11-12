@@ -36,8 +36,9 @@ name: iyi
 #                    beside their own jobs)
 #   stale-fresh      a fresh runner audits the producer's imported receipts
 #   stale-callpath   the stale key's own gates: link once, RG4, the reach walk
-#                    against what codegen recorded, RG8 and RG9; and RG2, RG2a,
-#                    RG2r and RG5, what observing a program changes about it
+#                    against what codegen recorded, RG8 and RG9
+#   stale-equivalence  RG2, RG2a, RG2r and RG5: what observing a program
+#                    changes about it
 #
 # Every job carries a `timeout-minutes`. The default is six hours, and these
 # jobs start daemons, listen on sockets, serve HTTP, soak an LSP and run
@@ -353,17 +354,17 @@ jobs:
   # builds `iyi` as well as `iyi`: the link section asks it what the target
   # links, and RG8 builds an `iyi` with the def body dropped from the walk's
   # encoding to prove a mutation there is caught. That and RG9 over the
-  # 140-program corpus took 41 minutes here (run 43117744255) and 17 on
-  # eighteen darwin arm64 cores, so this is a job of its own rather than
-  # more steps of `iyi`, which runs 54 minutes of its hour.
+  # 140-program corpus took 41 minutes in one run here and 69 in the next
+  # (43117744255, 43137318814; 17 on eighteen darwin arm64 cores), so this
+  # is a job of its own rather than more steps of `iyi`, with two hours.
   stale-callpath:
     needs: [plan, build]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'stale-callpath') }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 120
     container:
       image: crystallang/crystal:1.21.0-build
-    name: "The stale key and what observing changes: link, reach, RG2, RG4, RG5, RG8 and RG9"
+    name: "The stale key: link, reach, RG4, RG8 and RG9"
     steps:
       - uses: actions/checkout@v7
         with:
@@ -384,16 +385,42 @@ jobs:
       - name: Two processes record into one store
         run: bash bench/stale_store_concurrency.sh
 
-      # RG2 builds each of the 140 programs plain and observed and holds the
-      # observed run to the plain one's exit, stdout and stderr outside what
-      # two plain runs disagree on. RG2a runs each with one empty directory
-      # as its argument against the run with none, RG2r takes three probes
-      # through an artifact and back, and RG5 drops each observer in turn
-      # and wants the gate to notice. Of these the workflow reached RG2r
-      # alone, through `stale_evidence_test.sh`, which hands it a compiler
-      # made of shell. RG2 and RG2a report a program they could not compare
-      # as excluded and pass; the rule is none excluded (STALE_TESTS_DESIGN,
-      # RG2), so an exclusion fails here.
+  # What observing a program changes about it, which has to be nothing.
+  # RG2 builds each of the 140 programs plain and observed and holds the
+  # observed run to the plain one's exit, stdout and stderr outside what
+  # two plain runs disagree on. RG2a runs each with one empty directory as
+  # its argument against the run with none, RG2r takes three probes through
+  # an artifact and back, and RG5 drops each observer in turn and wants the
+  # gate to notice. Of these the workflow reached RG2r alone, through
+  # `stale_evidence_test.sh`, which hands it a compiler made of shell.
+  #
+  # A job of its own because the one above ran out of its ninety minutes
+  # here, on the runner that took 69 over the key's gates: RG2 had passed
+  # in 9.6 minutes and RG2a in 6.4, 140 of 140 with none excluded both
+  # times, and RG2r was a minute in (run 43137318814).
+  stale-equivalence:
+    needs: [plan, build]
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'stale-equivalence') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    container:
+      image: crystallang/crystal:1.21.0-build
+    name: "What observing a program changes: RG2, RG2a, RG2r and RG5"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v5
+        with:
+          name: crystal
+          path: .build
+      - run: chmod +x .build/crystal
+      - name: Build `iyi`
+        run: make -o .build/crystal iyi
+
+      # RG2 and RG2a report a program they could not compare as excluded
+      # and pass; the rule is none excluded (STALE_TESTS_DESIGN, RG2), so
+      # an exclusion fails here.
       - name: RG2, RG2a, RG2r and RG5, with no program excluded
         shell: bash
         run: |
@@ -3938,7 +3965,7 @@ jobs:
   # red would ship a claim nobody on that platform can reproduce.
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [binary, darwin, darwin-std, darwin-std-siblings, clean-room, iyi, stale-callpath, stale-fresh, compiler-specs, stdlib-specs,
+    needs: [binary, darwin, darwin-std, darwin-std-siblings, clean-room, iyi, stale-callpath, stale-equivalence, stale-fresh, compiler-specs, stdlib-specs,
             samples, lsp-positions, std, std-siblings, std-platforms, targets, cross-objects, cross-run,
             wasi-run, windows-probe, windows-collector, windows-runtime, windows-native,
             windows-native-gates, windows-native-surfaces, windows-std,
@@ -4067,7 +4094,7 @@ jobs:
   # failed or cancelled one does not. `scripts/ci_plan.py` refuses a
   # workflow whose jobs this list does not name.
   result:
-    needs: [plan, docs, build, iyi, stale-callpath, stale-fresh, compiler-specs, stdlib-specs, lsp-positions, samples, std,
+    needs: [plan, docs, build, iyi, stale-callpath, stale-equivalence, stale-fresh, compiler-specs, stdlib-specs, lsp-positions, samples, std,
             std-platforms, std-siblings, targets, cross-objects, cross-run, darwin,
             darwin-std-siblings, darwin-std, windows-probe, windows-collector, windows-runtime,
             windows-native, windows-native-gates, windows-native-surfaces, windows-std,

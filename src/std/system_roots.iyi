@@ -6,7 +6,8 @@
 #
 #     store = SystemRoots.load.or_panic        # certificates, unreadable, source,
 #                                              # restricted, distrusted
-#     X509.verify(leaf, intermediates, store.certificates, "example.com")
+#     X509.verify(leaf, intermediates, store.certificates, "example.com",
+#       distrusted: store.distrusted)
 #
 # Each platform's own store, as Go's crypto/x509 reads it:
 #
@@ -42,10 +43,10 @@
 #   applied: the dates and purposes Windows stops trusting a root from
 #   (its "disallowed after" properties), so a root Windows trusts only for
 #   certificates issued before a day is trusted here for all of them.
-#   `LocalMachine\AuthRoot` is not read, and Windows fills the ROOT store
-#   as it meets roots it does not have yet, through its own chain
-#   building; a root that is in neither is not there to read, and a chain
-#   to it is refused.
+#   The ROOT store holds what `LocalMachine\AuthRoot` holds too, and
+#   Windows fills that as it meets roots it does not have yet, through its
+#   own chain building; a root it has not fetched is not there to read,
+#   and a chain to it is refused.
 #
 # These are the roots a TLS client trusts for a server's certificate, read
 # when `load` is called: a later change to the platform's store is seen by

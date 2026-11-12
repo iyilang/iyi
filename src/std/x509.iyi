@@ -40,9 +40,10 @@
 # any other kind refuses the chain rather than being passed over. An
 # IPv4-mapped IPv6 address (RFC 4291 section 2.5.5.2, `::ffff:a.b.c.d`)
 # is also the IPv4 address it stands for, and an IPv6 range inside
-# `::ffff:0:0/96` the IPv4 range: an address under a constraint is judged
-# as written and as that, so a range holds an address in both its
-# spellings or in neither. A DNS
+# `::ffff:0:0/96` the IPv4 range: an excluded range holds an address out
+# as written or as that, and a permitted one must permit the IPv4 address
+# - an IPv6 range wider than `::ffff:0:0/96` permits no IPv4 host, in
+# either spelling. A DNS
 # name is judged by a constraint as a host is matched to it, without its
 # final dot, and a constraint or a name under one with an empty label
 # refuses the chain. The leaf must be valid at that time, not a CA (a
@@ -403,8 +404,10 @@ pub struct X509
   # to every constraint, a leaf's names times an issuer's constraints, and
   # a Certificate message has room for 6,300 of one and 900 of the other
   # in each of five intermediates: 100 candidates of that took ten
-  # seconds. A search that would pass this many is refused, as Go's
-  # verifier refuses one past the same 250,000.
+  # seconds. A search that would pass this many is refused. The figure is
+  # Go's, which counts it for each certificate; here it is one search's,
+  # every candidate weighed in it, so a chain Go takes at 200,000 under
+  # each of two issuers is refused here.
   MAX_CONSTRAINT_COMPARISONS = 250_000_i64
 
   # Why *key*, *signer*'s, did not make *signature* over *signed* under
@@ -742,7 +745,12 @@ pub struct X509
       end
     end
     leaf.ip_addresses.each do |ip|
-      unless issuer.permitted_ips.empty? || issuer.permitted_ips.any? { |c| X509Names.ip_under?(ip, c) }
+      # Permitted is asked of the address a socket reaches, the IPv4 one
+      # an IPv4-mapped entry stands for: `matches_host?` takes that entry
+      # for the IPv4 host, and a CA permitted ::/0 alone was never
+      # permitted an IPv4 address. Excluded is asked of either spelling.
+      plain = X509Names.unmapped(ip)
+      unless issuer.permitted_ips.empty? || issuer.permitted_ips.any? { |c| X509Names.ip_under?(plain, c) }
         return "#{X509Names.ip_text(ip)} is outside the addresses #{name} permits"
       end
       if issuer.excluded_ips.any? { |c| X509Names.ip_under?(ip, c) }

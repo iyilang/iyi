@@ -615,10 +615,18 @@ permitting = mapped_ca(mapped_key, root_key, 46, [] of String, ["0a000000ff00000
   inside = X509.verify(mapped_leaf, [permitting], [work_root], host, NOW)
   check inside.is_a?(Array(Certificate)), "an IPv4-mapped address in a permitted IPv4 range, for #{host}: #{inside.is_a?(X509Error) ? inside.message : ""}"
 end
+# A permitted IPv6 range wider than ::ffff:0:0/96 permits no IPv4 host:
+# the mapped entry under ::/0 alone is the IPv4 address to a socket, and
+# the IPv4 entry beside it is refused there too.
+permitting_all6 = mapped_ca(mapped_key, root_key, 48, [] of String, ["0" * 64])
+["10.0.0.1", "::ffff:10.0.0.1"].each do |host|
+  cost_refused X509.verify(mapped_leaf, [permitting_all6], [work_root], host, NOW),
+    "0:0:0:0:0:ffff:a00:1 is outside the addresses CN=Mapped CA permits", "an IPv4-mapped address under a permitted ::/0 alone, for #{host}"
+end
 outside = made("mapped outside", "Mapped CA", leaf_key.public_key_info, mapped_key, 47, [alt_names([] of String, ["00000000000000000000ffff0b000001"])])
 cost_refused X509.verify(outside, [permitting], [work_root], "11.0.0.1", NOW),
   "0:0:0:0:0:ffff:b00:1 is outside the addresses CN=Mapped CA permits", "an IPv4-mapped address outside a permitted IPv4 range"
-puts "  a host and an entry matched in either spelling; a range holds an address in both spellings, excluded and permitted"
+puts "  a host and an entry matched in either spelling; an excluded range holds either out, a permitted one permits the IPv4 address"
 
 puts "== certificates that are distrusted"
 

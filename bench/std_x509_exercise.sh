@@ -533,6 +533,8 @@ prove_broken "an IPv4-mapped address kept from IPv4 ranges" "an IPv4-mapped addr
   end'
 prove_broken "an IPv4-mapped range kept from IPv4 addresses" "an IPv4 address in an excluded IPv4-mapped range, for 10.0.0.1: expected a refusal" \
   '    range[12, 4] + range[28, 4]' '    range'
+prove_broken "an IPv4-mapped address permitted by a range of IPv6 addresses" "an IPv4-mapped address under a permitted ::/0 alone, for 10.0.0.1" \
+  'issuer.permitted_ips.any? { |c| X509Names.ip_under?(plain, c) }' 'issuer.permitted_ips.any? { |c| X509Names.ip_under?(ip, c) }'
 prove_broken "a host matched to an address as written only" "a host written as its IPv4-mapped address, against the IPv4 entry" \
   '      return @ip_addresses.any? { |a| X509Names.unmapped(a) == plain }' '      return @ip_addresses.any? { |a| a == address }'
 prove_broken "inner and outer algorithms unchecked" "an outer algorithm that is not the inner one refused" \

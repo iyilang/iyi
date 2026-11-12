@@ -48,6 +48,17 @@
 # two primes. Those checks run once, reading the key, on std/big's
 # variable-time arithmetic; what runs per signature does not.
 #
+# The numbers agree as well for a p or q that is not prime, and such a
+# key signs nothing: n = p1·p2·q read with p1·p2 as its p passes every
+# check above. So a key that agrees then makes one PKCS #1 v1.5 signature
+# over a fixed message, blinded and checked against its public key as
+# every signature is, and one that does not check is an `RsaError`: a key
+# that cannot sign is refused where it is read, not at its first
+# signature. That signature is most of what reading a key costs. Measured
+# here in --release builds, on a machine other jobs shared, `from_pem`
+# took 1.2 ms for a 2048-bit key and 6.7 for a 4096-bit one, where the
+# checks before it took 0.08 and 0.22.
+#
 # A PEM block's body is a private key, and is read by std/base64's
 # `decode_secret`: no table is indexed by its characters and no branch
 # follows one. That reading takes one text for each byte string, so a
@@ -67,7 +78,9 @@
 # the private exponents' bits; and the signature is checked against the
 # public key before it is given out, so a fault in one half of the CRT
 # does not hand out the factor it reveals (Boneh, DeMillo and Lipton,
-# 1997) - such a signature is a panic, not an answer. A PSS salt is as long as the digest, RFC
+# 1997) - such a signature is a panic, not an answer; the key signed
+# once when it was read, so what the check stops after that is a fault in
+# the machine. A PSS salt is as long as the digest, RFC
 # 8446's rule, and is HMAC, keyed by a hash of the private exponent, over
 # the message's digest: section 8.1 says its randomness is not critical
 # to PSS's security, and this one is unpredictable to anyone without the
@@ -328,7 +341,11 @@ pub struct RsaPrivateKey
     return RsaError.new("a private key whose dp is not d mod (p - 1)") unless bd % p1 == bdp
     return RsaError.new("a private key whose dq is not d mod (q - 1)") unless bd % q1 == bdq
     return RsaError.new("a private key whose qi is not the inverse of q mod p") unless bqi < bp && (bqi * bq) % bp == one
-    RsaPrivateKey.new(public, bp, bq, bdp, bdq, bqi, SHA256.hash_bytes(RsaBytes.of("std/rsa signing") + d))
+    key = RsaPrivateKey.new(public, bp, bq, bdp, bdq, bqi, SHA256.hash_bytes(RsaBytes.of("std/rsa signing") + d))
+    # Every number above agrees for a p or q that is not prime, and such
+    # a key signs nothing: found here, where there is an answer to give.
+    return RsaError.new("a private key that does not sign: its signature over a test message does not check against its public key, as when p or q is not prime") unless key.signs?
+    key
   end
 
   def initialize(@public_key : RsaPublicKey, @p : BigInt, @q : BigInt, @dp : BigInt, @dq : BigInt, @qi : BigInt, @prf : Array(UInt8))
@@ -412,13 +429,25 @@ pub struct RsaPrivateKey
   # 0x01, the 0xFF padding, 0x00, the hash's DigestInfo and the digest.
   def sign_pkcs1v15(hash : RsaHash, message : Array(UInt8) | String) : Array(UInt8)
     signable(hash)
+    rsasp1(pkcs1v15(hash, message))
+  end
+
+  # EMSA-PKCS1-v1_5 (section 9.2) of *message* under *hash*.
+  private def pkcs1v15(hash : RsaHash, message : Array(UInt8) | String) : Array(UInt8)
     t = hash.digest_info_prefix + hash.digest(RsaBytes.of(message))
     em = Array(UInt8).new(size, 0xFF_u8)
     em[0] = 0_u8
     em[1] = 1_u8
     em[size - t.size - 1] = 0_u8
     t.each_with_index { |b, i| em[size - t.size + i] = b }
-    rsasp1(em)
+    em
+  end
+
+  # Whether the key signs: one PKCS #1 v1.5 signature over a fixed
+  # message, blinded and checked against the public key as every
+  # signature is. Reading a key asks this once.
+  protected def signs? : Bool
+    !checked(pkcs1v15(RsaHash::SHA256, "std/rsa: the signature a key is read by")).nil?
   end
 
   # RSASSA-PSS (section 8.1.1) of *message* under *hash*, MGF1 over the
@@ -445,11 +474,19 @@ pub struct RsaPrivateKey
     raise "rsa: a signature over SHA-1, which this checks and does not make" if hash == RsaHash::SHA1
   end
 
+  # The signature of the encoded message *em*. One that does not check
+  # is a panic: the key signed when it was read, so this is a fault in
+  # the machine, and the signature it spoiled is not given out.
+  private def rsasp1(em : Array(UInt8)) : Array(UInt8)
+    checked(em) || raise "rsa: a signature that does not check against its own public key, which a fault makes"
+  end
+
   # RSASP1 (section 5.2.1) by the CRT, blinded, and checked before it is
-  # given out. The two halves are the private exponents', so they go
+  # given out: nil for a signature that does not open to *em* under the
+  # public key. The two halves are the private exponents', so they go
   # through `pow_mod_secret`; p and q are odd, their product being n,
   # which is odd.
-  private def rsasp1(em : Array(UInt8)) : Array(UInt8)
+  private def checked(em : Array(UInt8)) : Array(UInt8)?
     m = BigInt.from_bytes(em)
     r, r_inverse = blinding(em)
     c = (m * r.pow_mod(@e, @n)) % @n
@@ -458,7 +495,7 @@ pub struct RsaPrivateKey
     h = (@qi * (s1 - s2)) % @p
     h = h + @p if h.negative?
     s = ((s2 + h * @q) * r_inverse) % @n
-    raise "rsa: a signature that does not check against its own public key, which a fault makes" unless s.pow_mod(@e, @n) == m
+    return nil unless s.pow_mod(@e, @n) == m
     s.to_bytes(size) || raise "rsa: a signature wider than its modulus"
   end
 

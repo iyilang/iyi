@@ -164,6 +164,14 @@ partitions' targets, so an x86_64-darwin cross-compile with
 `-Dheap_partitions` builds again, and bench/heap_lend waits for every
 unit of the program to die before reading what a dead unit lent.
 
+The pin fallback's walk puts into words only the reason it gives. It
+spelled the path to each of the ~1,100 constants a crossing of #145's app
+reaches, and that app took 4.1 GB to build under `-Dheap_partitions`
+against 2.5 GB before the fallback; it takes 2.4 GB, with the same pins,
+notes and `.iyimod` records. An `--emit-iyimod` build spells a function's
+path only for a record it keeps (bench/web_cores with the flag: 0.9 GB,
+where 3 GiB did not suffice before).
+
 Two races older than heap22, in every build: units setting or deleting
 environment variables at once lost them (tmac, 6 units × 300 rounds at
 `IYI_WORKERS=4`: 261-301 of 1,800 reads of their own write lost); writers

@@ -1823,6 +1823,9 @@ PY
   # tickets are both held to.
   resume_breaks "require_staple assigned in place not seen" \
     ' && @require_staple == config.require_staple' '' "staple" tls
+  resume_breaks "an upgrade made under a configuration of its own" \
+    '              offered = under.dup' '              offered = TlsConfig.new
+              offered.roots = under.roots' "upgrade staple"
   resume_breaks "a ticket offered to another origin" \
     '      if held.origin != origin' '      if false' "another origin"
   resume_breaks "resumption never attempted" \

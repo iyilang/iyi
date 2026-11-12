@@ -15,10 +15,14 @@ curl -fsSL https://raw.githubusercontent.com/iyilang/iyi/master/install.sh | sh
 [`install.sh`](install.sh) (POSIX sh over `curl` and `tar`) picks the
 tarball for your machine, linux-x86_64 or darwin-arm64, and refuses anything
 else. It checks the tarball against the release's `SHA256SUMS` and unpacks
-nothing on a mismatch. `IYI_PREFIX` moves the destination and
-`IYI_VERSION=0.21.0` pins a release. By hand it is the same two lines:
+nothing on a mismatch, and nothing when `SHA256SUMS` cannot be fetched: every
+release from 0.12.0 on publishes one. It fetches over HTTPS only.
+`IYI_PREFIX` moves the destination and `IYI_VERSION=0.21.0` pins a release.
+By hand it is the same check (`shasum -a 256` where there is no `sha256sum`)
+and the same two lines:
 
 ```sh
+sha256sum -c --ignore-missing SHA256SUMS
 tar -xzf iyi-0.21.0-linux-x86_64.tar.gz -C ~/.local
 ~/.local/bin/iyi run ~/.local/share/iyi/samples/hello.iyi
 ```

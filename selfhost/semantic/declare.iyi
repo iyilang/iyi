@@ -474,16 +474,28 @@ pub class Walk
 
   # Whether a struct's body writes a constructor of its own: an `initialize`,
   # or a `self.new` that builds the struct without one. The compiler writes
-  # the `initialize` that `new` calls only where neither is written.
+  # the `initialize` that `new` calls only where neither is written. A
+  # `self.new` marked `@[Primitive]` is the compiler's own constructor, not one
+  # the source writes: `Pointer(T)` in `src/iyi/primitives.iyi` is the case
+  # measured, and the oracle still gives it an `initialize`.
   def declares_constructor?(nodes : Array(Node)) : Bool
-    nodes.any? do |node|
+    found = false
+    primitive = false
+    nodes.each do |node|
       case node
-      when DefNode                then node.name == "initialize" || (node.name == "new" && node.receiver == "self")
-      when ExprsNode              then declares_constructor?(node.items)
-      when VisibilityModifierNode then declares_constructor?(node.body)
-      else                             false
+      when AnnotationNode
+        primitive = true if path_text(node.name) == "Primitive"
+        next
+      when DefNode
+        found = true if node.name == "initialize" || (node.name == "new" && node.receiver == "self" && !primitive)
+      when ExprsNode
+        found = true if declares_constructor?(node.items)
+      when VisibilityModifierNode
+        found = true if declares_constructor?(node.body)
       end
+      primitive = false
     end
+    found
   end
 
   # An enum's members are constants under it, and its methods are the ones

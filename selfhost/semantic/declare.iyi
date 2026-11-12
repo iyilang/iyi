@@ -88,12 +88,15 @@ pub class Declarations
   # The text of every file a require brought, which is where the macros
   # this file calls are declared.
   @required_text : String
+  # The file under the pass, as an absolute path.
+  @under : String
 
   def initialize
     @found = [] of Decl
     @methods_only = false
     @reporting = false
     @required_text = ""
+    @under = ""
     @impl_nodes = [] of Node
     @impl_scopes = [] of String
     @impl_own = [] of Bool
@@ -150,6 +153,16 @@ pub class Declarations
 
   def add_required_text(source : String) : Nil
     @required_text = @required_text + "\n" + source
+  end
+
+  # The file under the pass, as an absolute path. Its own reading as a
+  # prelude or an import is the one that creates what it declares.
+  def under_pass(path : String) : Nil
+    @under = path
+  end
+
+  def under_pass?(path : String) : Bool
+    File.expand_path(path) == @under
   end
 
   # The entry for a path, or a new one. Two passes reach the same type:
@@ -603,6 +616,16 @@ pub def read_file(source : String, into : Declarations, imported : Bool) : Nil
   end
 end
 
+# A file a prelude or an import reads is read where the compile reaches it.
+# When it is the file under the pass, that reading creates what the file
+# declares, so it reports, and its expansion is read as the file's own.
+pub def read_as_required(source : String, path : String, into : Declarations) : Nil
+  under = into.under_pass?(path)
+  into.reporting(true) if under
+  read_file(source, into, !under)
+  into.reporting(false) if under
+end
+
 # What a file imports is read before the file is: a type it reopens was
 # brought into being by the import and carries what the import gave it.
 # `src/std/big.iyi` reaches the whole integer tower this way, through
@@ -663,7 +686,7 @@ pub def load_requires(source : String, from : String,
       required = File.read(found)
       load_requires(required, directory_of(found), seen, into)
       into.add_required_text(required)
-      read_file(required, into, true)
+      read_as_required(required, found, into)
     end
   end
 end
@@ -673,6 +696,7 @@ if path.nil?
   puts "usage: declare <file.iyi>"
 else
   into = Declarations.new
+  into.under_pass(File.expand_path(path))
 
   # The compile starts from the prelude, so what it declares is in place
   # before the file's own imports are read. A prelude struct that gives
@@ -680,8 +704,8 @@ else
   prelude = resolve_import("iyi/prelude", source_roots)
   unless prelude == ""
     prelude_text = File.read(prelude)
-    load_requires(prelude_text, directory_of(prelude), [path] of String, into)
-    read_file(prelude_text, into, true)
+    load_requires(prelude_text, directory_of(prelude), [] of String, into)
+    read_as_required(prelude_text, prelude, into)
   end
   written = File.read(path)
 

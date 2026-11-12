@@ -26,18 +26,36 @@
 #
 # Usage: build-static-llvm.sh <install-prefix>
 #
-# Needs cmake, a C++ toolchain, curl and a tar that reads xz; installing
-# those is the caller's business because it differs per image.
+# Needs cmake, a C++ toolchain, curl, sha256sum or shasum, and a tar that
+# reads xz; installing those is the caller's business because it differs
+# per image.
+#
+# The source is the one tarball whose SHA-256 is written below, beside the
+# version it belongs to: what is compiled here ends up inside the compiler
+# every release ships, so an archive that is not that one, or an error
+# page saved under its name, is refused before it is unpacked. The hash is
+# part of this file, so it is part of the cache key too.
 set -euo pipefail
 
 prefix=${1:?usage: build-static-llvm.sh <install-prefix>}
 version=20.1.2
+sha256=f0a4a240aabc9b056142d14d5478bb6d962aeac549cbd75b809f5499240a8b38
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/llvm-build.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 
-curl -sSL -o "$work/llvm.tar.xz" \
+curl -fsSL -o "$work/llvm.tar.xz" \
   "https://github.com/llvm/llvm-project/releases/download/llvmorg-$version/llvm-project-$version.src.tar.xz"
+if command -v sha256sum >/dev/null 2>&1; then
+  actual=$(sha256sum "$work/llvm.tar.xz")
+else
+  actual=$(shasum -a 256 "$work/llvm.tar.xz")
+fi
+actual=${actual%% *}
+if [ "$actual" != "$sha256" ]; then
+  echo "build-static-llvm: llvm-project-$version.src.tar.xz is not the one pinned here: expected $sha256, got $actual" >&2
+  exit 1
+fi
 tar -xf "$work/llvm.tar.xz" -C "$work"
 
 cmake -S "$work/llvm-project-$version.src/llvm" -B "$work/build" \

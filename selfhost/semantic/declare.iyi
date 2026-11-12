@@ -387,6 +387,10 @@ pub class Walk
       outer = node.from_root ? "" : scope
       inner = join_scope(outer, path_text(node.name))
       entry = @into.at("module", inner, inner, "")
+      # A `module ::X` written in this file is located in it even when an
+      # import or the prelude declared X first, which is what the compiler
+      # reports for a reopened module. The prefix a header implies is not one.
+      entry.report_it if @into.counting?
       body(node.body, inner, entry)
     when ClassDefNode
       declare(node.kind, path_text(node.name), node.vars, node.body,

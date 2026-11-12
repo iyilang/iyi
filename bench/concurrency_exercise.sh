@@ -693,10 +693,13 @@ esac
 # was entered, and the context hands back whatever its trap frame last
 # held. `capture_thread_registers` (prelude.iyi) asks with
 # CONTEXT_EXCEPTION_REQUEST and drops them when the answer says the
-# thread is in a system service. The copy keeps them: an idle worker
-# stopped in NtWaitForMultipleObjects keeps the rendezvous' 64 MB string
-# through a stale r8, in the build with -Dheap_partitions (tssh: 5 runs
-# of 5 with the registers kept, 0 of 5 without). Only Windows answers a
+# thread is in a system service. The copy keeps them. It was first seen
+# by chance: an idle worker stopped in NtWaitForMultipleObjects kept 16e's
+# rendezvous string through a stale r8 (tssh: 5 runs of 5 at af4b87c91),
+# which the partitioned heap's v2 no longer provokes (0 of 19). The
+# exercise's 16f now sets it up on purpose: a thread takes a page fault
+# with every volatile register naming a 64 MB string, then waits in a
+# system call while the main thread collects. Only Windows answers a
 # context that way.
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
@@ -717,12 +720,12 @@ case "$(uname -s)" in
       exit 1
     fi
     timeout 120 ./volatile-exercise > volatile.txt 2>&1
-    if [ $? -ne 1 ] || ! grep -q 'FAIL: channel: 64 MB received through a rendezvous left' volatile.txt; then
-      echo "a stop that keeps a system call's volatile registers passed the rendezvous check, so it checks nothing:"
+    if [ $? -ne 1 ] || ! grep -Eq 'FAIL: (a thread stopped in a system call kept|channel: 64 MB received through a rendezvous left)' volatile.txt; then
+      echo "a stop that keeps a system call's volatile registers passed the exercise's checks, so they check nothing:"
       tail -5 volatile.txt
       exit 1
     fi
-    echo "  caught: $(grep -m1 'FAIL: channel' volatile.txt)"
+    echo "  caught: $(grep -m1 'FAIL: ' volatile.txt)"
     ;;
   *)
     step "failure proof: a stop that keeps a system call's volatile registers is caught: not here, because only Windows answers a thread's context with registers the kernel did not save"

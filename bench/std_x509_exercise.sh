@@ -5,8 +5,9 @@
 #
 # The exercise holds chains Python's cryptography made, each judged as
 # Python's own verifier judges it and each refusal for its reason, hosts
-# matched, certificates that are not certificates, and Ed25519 keys and
-# signatures (RFC 8410); this gate runs it plain and --release, holds 200
+# matched, certificates that are not certificates, Ed25519 keys and
+# signatures (RFC 8410), and what a search costs, bounded - chains it
+# writes itself; this gate runs it plain and --release, holds 200
 # fresh chains - random keys (P-256, P-384, RSA, Ed25519), depths and
 # defects - to Python's verifier, holds chains with an RSA key at or under
 # the 2048-bit floor to OpenSSL's verify at security level 2, reads every
@@ -84,7 +85,7 @@ fi
 
 echo
 echo "== every x509 section reported"
-for phrase in "== chains Python's cryptography made" "== hosts matched" "== certificates that are not certificates" "== Ed25519 (RFC 8410)" "== RSA keys under 2048 bits" "== a client's certificate (X509Purpose::Client)" "== a search for a chain, bounded" "== certificates written (X509.self_signed)"; do
+for phrase in "== chains Python's cryptography made" "== hosts matched" "== certificates that are not certificates" "== Ed25519 (RFC 8410)" "== RSA keys under 2048 bits" "== a client's certificate (X509Purpose::Client)" "== a search for a chain, bounded" "== what a search costs, bounded" "== certificates written (X509.self_signed)"; do
   if ! grep -q "$phrase" "$WORK/x509-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -500,12 +501,10 @@ prove_broken "a CA taken as the leaf" "a leaf that is a CA: expected a refusal" 
 prove_broken "unknown critical extensions passed over" "a leaf with an unknown critical extension: expected a refusal" \
   '        @unhandled_critical << oid if critical' ''
 prove_broken "the issuer's signature unchecked" "a leaf signed by another key under the same name: expected a refusal" \
-  '    child.signature_error(issuer)
-  end' '    nil
-  end'
+  '    problem = signed_error(child, child_at, issuer, search)' '    problem = nil'
 prove_broken "the first candidate issuer only" "a decoy intermediate under the same name, tried first: refused" \
-  '        failures << problem
-        next' '        failures << problem
+  '        search.failures << problem
+        next' '        search.failures << problem
         return nil'
 prove_broken "SHA-1 taken" "a leaf signed under SHA-1: expected a refusal" \
   '    when X509Oids::SHA1_RSA, X509Oids::ECDSA_SHA1
@@ -566,6 +565,22 @@ prove_broken "a leaf's RSA key of any size taken" "a leaf whose key is 1024-bit 
 prove_broken "an issuer's RSA key of any size taken" "an intermediate whose key is 1024-bit RSA: expected a refusal" \
   '    weak = weak_key(issuer)
     return weak if weak' ''
+# What a search costs: each break below is the module as it was before
+# the search was bounded by its work, one bound at a time.
+prove_broken "a candidate's constraints judged before its signature" "a forged leaf under an issuer of 500 constraints: refused with" \
+  '    problem = signed_error(child, child_at, issuer, search)
+    return problem if problem
+    judged_error(chain[0], issuer, issuer_at, search)' '    problem = judged_error(chain[0], issuer, issuer_at, search)
+    return problem if problem
+    signed_error(child, child_at, issuer, search)'
+prove_broken "name constraint comparisons without a bound" "a leaf's 501 names under 500 constraints: expected a refusal" \
+  '  MAX_CONSTRAINT_COMPARISONS = 250_000_i64' '  MAX_CONSTRAINT_COMPARISONS = 1_000_000_000_i64'
+prove_broken "an issuer's constraints judged again on every path" "five intermediates signing each other under 200 constraints each: refused with" \
+  '    return search.verdicts[issuer_at] if search.judged[issuer_at]' ''
+prove_broken "a signature checked again under a key that answered" "seven intermediates under one key, answered together" \
+  '      return search.signatures[child_at][i] if key == issuer.public_key_info' ''
+prove_broken "an RSA key of 8193 bits taken" "a leaf whose key is 8193-bit RSA: expected a refusal" \
+  '  MAX_RSA_BITS = 8192' '  MAX_RSA_BITS = 16384'
 prove_broken "a second extensions block read over the first" "a TBSCertificate with two extensions blocks refused" \
   '      return X509Error.new("#{field.describe} after [#{last}], where RFC 5280 has each of [1], [2] and [3] once and in order") unless tag > last' ''
 prove_broken "an empty RelativeDistinguishedName taken" "an empty RDN refused: accepted" \

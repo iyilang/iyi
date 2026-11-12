@@ -158,6 +158,34 @@ assert_true lapsing.size == 1, "a Secure cookie about to lapse is kept"
 sleep 80
 lapsing.add("http://bank.example/", cookie_of("sid=PLAIN; Path=/"))
 assert_str "sid=PLAIN", lapsing.header_for("https://bank.example/") || "", "a Secure cookie that has lapsed guards nothing"
+# RFC 6265bis §4.1.3: what a name's prefix asks of its cookie.
+named = CookieJar.new
+named.add("https://bank.example/", cookie_of("__Secure-a=1; Path=/"))
+assert_true named.size == 0, "a __Secure- cookie needs Secure (#{named.size})"
+named.add("http://bank.example/", cookie_of("__Secure-a=1; Secure; Path=/"))
+named.add("http://www.bank.example/", cookie_of("__Secure-a=1; Domain=bank.example; Path=/"))
+assert_true named.size == 0, "and an https:// answer (#{named.size})"
+named.add("https://bank.example/", cookie_of("__Host-b=1; Path=/"))
+assert_true named.size == 0, "a __Host- cookie needs Secure (#{named.size})"
+named.add("http://bank.example/", cookie_of("__Host-b=1; Secure; Path=/"))
+named.add("http://www.bank.example/", cookie_of("__Host-b=1; Domain=bank.example; Path=/"))
+assert_true named.size == 0, "and an https:// answer too (#{named.size})"
+named.add("https://bank.example/", cookie_of("__Host-b=1; Secure; Path=/; Domain=bank.example"))
+assert_true named.size == 0, "a __Host- cookie has no Domain (#{named.size})"
+named.add("https://bank.example/", cookie_of("__Host-b=1; Secure; Path=/app"))
+assert_true named.size == 0, "a __Host- cookie has Path=/ (#{named.size})"
+named.add("https://bank.example/", cookie_of("__Host-b=1; Secure"))
+assert_true named.size == 0, "and has it written out (#{named.size})"
+named.add("https://bank.example/", cookie_of("__secure-a=1; Path=/"))
+named.add("https://bank.example/", cookie_of("__HOST-b=1; Secure; Path=/; Domain=bank.example"))
+assert_true named.size == 0, "a prefix is read in any case (#{named.size})"
+named.add("https://bank.example/", cookie_of("__Secure-a=1; Secure; Domain=bank.example; Path=/app"))
+named.add("https://bank.example/", cookie_of("__Host-b=2; Secure; Path=/"))
+assert_str "__Secure-a=1; __Host-b=2", named.header_for("https://bank.example/app/") || "", "a cookie that meets its prefix is kept"
+named.add("http://bank.example/", cookie_of("x__Host-b=3; Path=/"))
+named.add("http://bank.example/", cookie_of("__Host=4; Path=/"))
+named.add("http://bank.example/", cookie_of("__Secure=5; Path=/"))
+assert_str "x__Host-b=3; __Host=4; __Secure=5", named.header_for("http://bank.example/") || "", "a name that holds a prefix further in, or stops short of one, is any name"
 gone = Response.new(200, "")
 gone.add_header("Set-Cookie", "host=; Max-Age=0")
 jar.update("http://www.example.com/c", gone)
@@ -196,6 +224,6 @@ group do |g|
     0
   end
 end
-puts "  Set-Cookie read and written, refusals, a Cookie header, a jar's domains, paths, Secure and expiry, a Secure cookie left alone by http, through a redirect"
+puts "  Set-Cookie read and written, refusals, a Cookie header, a jar's domains, paths, Secure and expiry, a Secure cookie left alone by http, name prefixes, through a redirect"
 
 puts "\nALL CHECKS PASSED"

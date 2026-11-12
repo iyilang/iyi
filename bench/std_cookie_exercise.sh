@@ -262,6 +262,21 @@ prove_broken "an http answer kept from every name beside a Secure cookie" "an ht
   'other.secure && other.name == name &&' 'other.secure &&'
 prove_broken "an https answer kept from a Secure cookie too" "an https answer still replaces a Secure cookie" \
   'return if !secure && secure_kept?' 'return if secure_kept?'
+prove_broken "a __Secure- cookie taken without Secure" "a __Secure- cookie needs Secure" \
+  '      return unless cookie.secure
+' ''
+prove_broken "a __Host- cookie taken without Secure" "a __Host- cookie needs Secure" \
+  'if host_only || CookieJar.prefixed?(cookie.name, "__secure-")' 'if CookieJar.prefixed?(cookie.name, "__secure-")'
+prove_broken "a __Host- cookie taken with a Domain" "a __Host- cookie has no Domain" \
+  'return if host_only && !(cookie.domain.nil? && cookie.path == "/")' 'return if host_only && !(cookie.path == "/")'
+prove_broken "a __Host- cookie taken with another Path" "a __Host- cookie has Path=/" \
+  'return if host_only && !(cookie.domain.nil? && cookie.path == "/")' 'return if host_only && !cookie.domain.nil?'
+prove_broken "a __Host- cookie taken with no Path written" "and has it written out" \
+  'return if host_only && !(cookie.domain.nil? && cookie.path == "/")' 'return if host_only && !(cookie.domain.nil? && (cookie.path || "/") == "/")'
+prove_broken "a prefix read in its usual case alone" "a prefix is read in any case" \
+  'c = c | 32_u8 if c >= 65_u8 && c <= 90_u8' 'c = c | 32_u8 if c == 72_u8 || c == 83_u8'
+prove_broken "a prefix found anywhere in a name" "a name that holds a prefix further in" \
+  'host_only = CookieJar.prefixed?(cookie.name, "__host-")' 'host_only = cookie.name.downcase.includes?("__host-")'
 
 echo
 if [ "$status" -eq 0 ]; then

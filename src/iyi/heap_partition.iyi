@@ -3636,6 +3636,14 @@ class IyiHeap
     cool_pools(1 << 30)
     leave_barrier
     return false if @@local_off || LibIyiGCTable.__iyi_marking != 0_u8
+    # A busy program's idle workers leave the partitions alone while the
+    # global sweep's helpers are at a round: a local sweep waits out every
+    # slice in flight on its classes' arenas (`quiet_class`), and the
+    # takeovers right after a global collection - the owing ones - ran
+    # 1.5 to 3.9 ms each on #145's endpoints, against 0.43 ms for one
+    # later (tmac, S6, CpuTmac). The round ends within milliseconds, and
+    # the next worker out of fibers looks again.
+    return false if IyiStat.get(IyiStat::IDLE_DELAY) == IDLE_BUSY_TICKS && IyiMark.helpers_sweeping?
     return true if @@takeover_armed != 0 && take_over_owing(st)
     take_over_quiet(st, now)
   end

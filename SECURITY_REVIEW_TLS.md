@@ -626,6 +626,7 @@ found is in the second commit named beside a finding.
 | 51 | Informational | `.iyimod` | An artifact is code, and what says it is current is its own word | read | said in SPEC.md IV.2a and SECURITY.md |
 | 52 | Informational | `iyi.sum` | The first fetch is trusted; there is no log to hold it to | read | open, as SPEC.md III.7 says |
 | 53 | Informational | std/rsa | `verify_pss` overflowed for a salt length near 2^31; no caller reaches it | shown | fixed, `b261cf8ca` |
+| 54 | Informational | std/big | `pow_fixed`, `reduce` and `inverse_mod_secret` hide their masks by xoring a zero read through an atomic field, the idiom finding 17 retired in std/p256; in this compiler's `--release` IR the load and the xor are there, and no gate reads that machine code | read (the IR shown) | open |
 
 What each fix holds, and by what check, is in its commit and in the
 module's header and gate; the changelog says what a program sees of them.

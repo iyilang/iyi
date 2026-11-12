@@ -391,6 +391,12 @@ prove_broken "a verify that cuts a long password to its first 72 bytes" "a passw
   '    return false if count > 72' '    return false if count > 7200'
 prove_broken "a verify that keys a password holding a NUL" "a password repeated after a NUL does not verify as the password" \
   '    return false if nul?(bytes, count)' '    return false if false'
+prove_broken "a verify that works at whatever cost the hash names" "a hash naming a cost past max_cost does not verify" \
+  '    return false if cost > max_cost' '    return false if cost > 31'
+# This one does the 131072 key schedules before it fails, so it is the
+# slow proof: seconds, where the others are a build.
+prove_broken "a default max_cost of 17" "a hash naming cost 17 is refused under the default max_cost" \
+  'max_cost : Int32 = 16' 'max_cost : Int32 = 17'
 prove_broken "Salsa20 at six rounds rather than eight" "rfc 7914 case 1" \
   'while double_round < 4' 'while double_round < 3'
 # With r = 1 the two halves are one block each and either order is the

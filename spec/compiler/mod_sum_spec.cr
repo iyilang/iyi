@@ -182,6 +182,48 @@ describe Iyi::Mod::Sum do
       end
     end
 
+    # The restatement is a courtesy to the next build, and this one has
+    # already compared the line. A read-only `iyi.sum` - a mounted source
+    # tree, a build as another user - printed "is recorded again" and then
+    # failed the build with the system's error.
+    it "builds under matching `s1:` lines it cannot write again, and says so" do
+      with_tempdir do
+        checkout = tree "liba", {"sub/liba.iyi" => "x\n"}
+        Dir.mkdir "app"
+        written = "example.test/user/liba v1.0.0 #{unframed({"sub/liba.iyi" => "x\n"})}\n"
+        File.write "app/iyi.sum", written
+        File.chmod "app/iyi.sum", 0o444
+        begin
+          # An administrator on POSIX writes it whatever its mode says.
+          pending! "this user writes a read-only file" if File::Info.writable?("app/iyi.sum")
+
+          notices = IO::Memory.new
+          Iyi::Mod::Sum.check("app", [selection("example.test/user/liba", "1.0.0")], notices) { checkout }
+          said = notices.to_s
+          said.should match(/iyi\.sum: 1 entry said `s1:`.* it matched its checkout and could not be recorded again as `h2:`: the file could not be written \(.+[^.]\)\. The build goes on under the `s1:` line\n\z/)
+          said.should_not contain("is recorded again")
+          File.read("app/iyi.sum").should eq written
+
+          # A requirement with no line is not a restatement: it has to be
+          # recorded, and a file that cannot take it fails as it did.
+          expect_raises(File::Error) do
+            Iyi::Mod::Sum.check("app", [selection("example.test/user/liba", "1.0.0"),
+                                        selection("example.test/user/libz", "2.0.0")], notices) { checkout }
+          end
+          notices.to_s.should eq said
+          File.read("app/iyi.sum").should eq written
+        ensure
+          File.chmod "app/iyi.sum", 0o644
+        end
+
+        # Writable again, it is written and only then said.
+        notices = IO::Memory.new
+        Iyi::Mod::Sum.check("app", [selection("example.test/user/liba", "1.0.0")], notices) { checkout }
+        notices.to_s.should match(/1 entry said `s1:`.* it matched its checkout and is recorded again as `h2:`\n\z/)
+        File.read("app/iyi.sum").should eq "example.test/user/liba v1.0.0 #{Iyi::Mod::Sum.tree_hash(checkout)}\n"
+      end
+    end
+
     # A dependency's own `iyi.sum`, read where the dependency was fetched
     # to: nothing is written under the cache's `mod/`, so the line is not
     # restated there, and for a while it was not compared either - a line

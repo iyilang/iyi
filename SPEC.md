@@ -7395,6 +7395,11 @@ that differs is the refusal it always was, naming both `s1:` hashes, and
 one that matches has its line written again as `h2:`, with one line on
 stderr saying so - written again unread, it would have pinned whatever
 the first build after an upgrade found checked out, moved tag or not.
+The rewrite is not a condition of the build: where `iyi.sum` cannot be
+written and nothing in it is new, the lines matched and the build goes
+on under them, with stderr naming the file and the system's reason each
+time; a requirement with no line at all still has to be recorded, and a
+file that cannot take it is the failure it was.
 Under the cache's `mod/`, where nothing is written, it stays as it is
 and is compared the same way: a dependency's own `iyi.sum` saying `s1:`
 for what it requires is refused there when the checkout does not hash to

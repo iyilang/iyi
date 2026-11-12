@@ -35,7 +35,10 @@
 # way once more (`legacy_tree_hash`, which exists for this and nothing
 # else), a checkout that differs is the refusal it always was, naming both
 # `s1:` hashes, and one that matches has its line written again as `h2:`,
-# with one line on stderr saying so. Rewriting it unread would have pinned
+# with one line on stderr saying so once it is written. Where the file
+# cannot be written and no line of it is new, the build is not failed for
+# that: the lines matched, and stderr says they could not be recorded
+# again and why. Rewriting it unread would have pinned
 # whatever the first build after an upgrade found checked out, moved tag
 # or not. Inside the module cache, where nothing is written, such a line
 # stays as it is and is compared the same way: a dependency's own
@@ -54,11 +57,12 @@ module Iyi::Mod
     LEGACY = "s1:"
 
     # Verifies *selections* against the manifest directory's `iyi.sum`,
-    # appending what is new. *checkout* answers a selection's directory.
-    def self.check(dir : String, selections : Array(Selection), &checkout : Selection -> String) : Nil
+    # appending what is new. *checkout* answers a selection's directory,
+    # and what is said about `s1:` lines is said on *notices*.
+    def self.check(dir : String, selections : Array(Selection), notices : IO = STDERR, &checkout : Selection -> String) : Nil
       sum_path = File.join(dir, FILE)
       known = File.file?(sum_path) ? parse(File.read(sum_path), sum_path) : {} of String => String
-      added = false
+      added = 0
       restated = 0
       # A checkout is read-only. A build whose entry sits inside the module
       # cache — a tool compiling a dependency in place — verifies but never
@@ -82,24 +86,39 @@ module Iyi::Mod
             next if expected == actual
             raise changed(key, sum_path, expected, actual)
           end
+        else
+          added += 1
         end
         known[key] = actual
-        added = true
       end
 
       return if read_only
 
-      return unless added
-      if restated > 0
-        STDERR.puts "#{sum_path}: #{restated} #{restated == 1 ? "entry" : "entries"} said `#{LEGACY}`, a hash " \
-                    "that could not tell two different trees apart; #{restated == 1 ? "it" : "each"} matched its " \
-                    "checkout and is recorded again as `#{PREFIX}`"
+      return if added == 0 && restated == 0
+      said = "#{sum_path}: #{restated} #{restated == 1 ? "entry" : "entries"} said `#{LEGACY}`, a hash " \
+             "that could not tell two different trees apart; #{restated == 1 ? "it" : "each"} matched its checkout"
+      begin
+        File.write(sum_path, String.build do |io|
+          known.to_a.sort_by!(&.first).each do |(key, hash)|
+            io << key << ' ' << hash << '\n'
+          end
+        end)
+      rescue ex : IO::Error
+        # A new entry that cannot be recorded is the failure it was: the
+        # next build would have nothing to hold the checkout to. A line
+        # that only could not be written *again* was compared a moment
+        # ago, and matched; a checkout with `iyi.sum` read-only - a
+        # mounted source tree, a build as another user - built under
+        # `s1:` and builds still. It is said every time, since every
+        # build compares the weaker hash until the file can be written.
+        raise ex if added > 0
+        reason = (ex.os_error.try(&.message) || ex.message || "").rchop('.')
+        notices.puts "#{said} and could not be recorded again as `#{PREFIX}`: the file could not be " \
+                     "written (#{reason}). The build goes on under the `#{LEGACY}` " \
+                     "#{restated == 1 ? "line" : "lines"}"
+        return
       end
-      File.write(sum_path, String.build do |io|
-        known.to_a.sort_by!(&.first).each do |(key, hash)|
-          io << key << ' ' << hash << '\n'
-        end
-      end)
+      notices.puts "#{said} and is recorded again as `#{PREFIX}`" if restated > 0
     end
 
     private def self.changed(key : String, sum_path : String, expected : String, actual : String) : ModError

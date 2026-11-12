@@ -22,31 +22,37 @@ module macro/expand
 pub class Value
   getter kind : String
   getter text : String
-  getter items : Array(String)
+  getter items : Array(Value)
   getter keys : Array(String)
 
-  def initialize(@kind : String, @text : String, @items : Array(String), @keys : Array(String))
+  def initialize(@kind : String, @text : String, @items : Array(Value), @keys : Array(String))
   end
 end
 
 pub def none_value : Value
-  Value.new("none", "", [] of String, [] of String)
+  Value.new("none", "", [] of Value, [] of String)
 end
 
 pub def text_value(text : String) : Value
-  Value.new("text", text, [] of String, [] of String)
+  Value.new("text", text, [] of Value, [] of String)
 end
 
 pub def bool_value(truth : Bool) : Value
-  Value.new("bool", truth ? "true" : "false", [] of String, [] of String)
+  Value.new("bool", truth ? "true" : "false", [] of Value, [] of String)
 end
 
-pub def list_value(items : Array(String)) : Value
+pub def list_value(items : Array(Value)) : Value
   Value.new("list", "", items, [] of String)
 end
 
-pub def map_value(keys : Array(String), items : Array(String)) : Value
+pub def map_value(keys : Array(String), items : Array(Value)) : Value
   Value.new("map", "", items, keys)
+end
+
+pub def texts(words : Array(String)) : Array(Value)
+  values = [] of Value
+  words.each { |word| values << text_value(word) }
+  values
 end
 
 # The flags of the machine this pass was compiled for. The pass is built
@@ -125,6 +131,59 @@ pub def find(source : String, needle : String, from : Int32) : Int32
   -1
 end
 
+# The same search, over code only. A macro delimiter written inside a
+# comment or a string is text about macros rather than a macro: the
+# lexer this pass runs over explains `{%` in a comment and spells both
+# delimiters as string literals, and a scanner that counted those
+# swallowed the four hundred lines between them.
+pub def find_code(source : String, needle : String, from : Int32) : Int32
+  return -1 if needle.bytesize == 0
+  # A double quote and an apostrophe cannot be spelled as character
+  # literals in this language, so they are read out of a string once.
+  # Once, and not per byte: `to_s` on a character allocates, and this
+  # loop runs over every byte of every file the pass reads.
+  quote = "\""[0]
+  tick = "'"[0]
+  # The scan begins where the caller asked rather than at the start of
+  # the file. Every caller passes a position an earlier scan left
+  # outside a comment and outside a literal - the beginning of the
+  # file, or just past a `{%` or a `%}` - so the state this needs is
+  # the state it already has. Measured rather than assumed: expanding
+  # all 84 files of the prelude and the standard library gives output
+  # identical byte for byte either way, in two thirds of the time.
+  limit = source.bytesize - needle.bytesize
+  start = from < 0 ? 0 : from
+  index = start
+  while index < source.bytesize
+    ch = source[index]
+    if ch == '#' && !matches_at?(source, "\#{", index)
+      # A comment runs to the end of its line.
+      index = index + 1
+      while index < source.bytesize && source[index] != '\n'
+        index = index + 1
+      end
+    elsif ch == quote
+      index = index + 1
+      while index < source.bytesize && source[index] != quote
+        # An escape is two bytes and the second one is not a closer:
+        # `"\\"` ends where it looks like it does.
+        index = source[index] == '\\' ? index + 2 : index + 1
+      end
+      index = index + 1
+    elsif ch == tick
+      # A character literal, and never the apostrophe in a word: the
+      # closing quote is two or three bytes along, or this is not one.
+      shut = index + 2
+      shut = index + 3 if index + 1 < source.bytesize && source[index + 1] == '\\'
+      index = shut < source.bytesize && source[shut] == tick ? shut + 1 : index + 1
+    else
+      return index if index >= start && index <= limit && matches_at?(source, needle, index)
+      index = index + 1
+    end
+  end
+  -1
+end
+
 pub def matches_at?(source : String, needle : String, at : Int32) : Bool
   offset = 0
   while offset < needle.bytesize
@@ -157,9 +216,9 @@ pub def matching_end(source : String, from : Int32) : Int32
   depth = 1
   index = from
   while true
-    open = find(source, "{%", index)
+    open = find_code(source, "{%", index)
     return -1 if open < 0
-    close = find(source, "%}", open)
+    close = find_code(source, "%}", open)
     return -1 if close < 0
     word = first_word(slice(source, open + 2, close).strip)
     if word == "end"
@@ -178,9 +237,9 @@ pub def branch_split(region : String) : Int32
   depth = 0
   index = 0
   while true
-    open = find(region, "{%", index)
+    open = find_code(region, "{%", index)
     return -1 if open < 0
-    close = find(region, "%}", open)
+    close = find_code(region, "%}", open)
     return -1 if close < 0
     word = first_word(slice(region, open + 2, close).strip)
     if word == "end"
@@ -194,21 +253,207 @@ pub def branch_split(region : String) : Int32
   end
 end
 
+# One macro a file declares. `params` is what its header names and
+# `body` is the text between the header and its `end`.
+pub class Macro
+  getter name : String
+  getter params : Array(String)
+  getter body : String
+
+  def initialize(@name : String, @params : Array(String), @body : String)
+  end
+end
+
 pub def expand(source : String, flags : Array(String)) : String
-  render(source, Env.new, flags)
+  expand_with("", source, flags)
+end
+
+# A macro runs where its declaration reaches the file. `getter` and
+# `property` are declared in `src/iyi/macros.iyi`, and a file that does
+# not require it does not get them: measured against the compiler, a
+# module file writing `getter a : Int32` declares no reader at all.
+# `defs` is the text of whatever this file required.
+pub def expand_with(defs : String, source : String, flags : Array(String)) : String
+  # A file with no macro in it expands to itself, and the walk that
+  # proves that reads every byte of it many times over. Most of what a
+  # program requires is in that shape, so the cheap question is asked
+  # first: the whole prelude read for one fixture went from minutes to
+  # seconds.
+  return source if find(source, "{%", 0) < 0 && find(source, "{{", 0) < 0 &&
+                   find(defs, "macro ", 0) < 0
+  macros = collect_macros(defs)
+  collect_macros(source).each { |found| macros << found }
+  render(expand_calls(source, macros, flags), Env.new, flags)
+end
+
+# The macros a text declares. A macro ends at the `end` written in the
+# column the `macro` was written in, which is what the formatter
+# guarantees and what reading the nesting by hand would have to guess.
+pub def collect_macros(source : String) : Array(Macro)
+  found = [] of Macro
+  return found if source.bytesize == 0
+  pos = 0
+  while pos < source.bytesize
+    stop = line_stop(source, pos)
+    line = slice(source, pos, stop)
+    bare = line.strip
+    if bare.starts_with?("macro ")
+      column = stop - pos - bare.bytesize
+      header = slice(bare, 6, bare.bytesize).strip
+      name = macro_name(header)
+      body_at = stop + 1
+      closing = closing_end(source, body_at, column)
+      unless name == "" || closing < 0
+        found << Macro.new(name, macro_params(header), slice(source, body_at, closing))
+        pos = line_stop(source, closing) + 1
+        next
+      end
+    end
+    pos = stop + 1
+  end
+  found
+end
+
+# The end of the line `from` is inside, not counting its newline.
+pub def line_stop(source : String, from : Int32) : Int32
+  at = find(source, "\n", from)
+  at < 0 ? source.bytesize : at
+end
+
+# Where the `end` for a declaration opened in `column` is written.
+pub def closing_end(source : String, from : Int32, column : Int32) : Int32
+  pos = from
+  while pos < source.bytesize
+    stop = line_stop(source, pos)
+    line = slice(source, pos, stop)
+    bare = line.strip
+    return pos if bare == "end" && stop - pos - bare.bytesize == column
+    pos = stop + 1
+  end
+  -1
+end
+
+pub def macro_name(header : String) : String
+  cut = header.index('(')
+  bare = cut.nil? ? first_word(header) : header[0, cut]
+  bare.strip
+end
+
+pub def macro_params(header : String) : Array(String)
+  open = header.index('(')
+  return [] of String if open.nil?
+  # The last bracket, found by looking rather than by asking: `rindex` is
+  # a method `std/text` adds, and this file imports nothing. It compiled
+  # only because another file in the same program had imported it.
+  close = -1
+  index = open
+  while index < header.bytesize
+    close = index if header[index] == ')'
+    index = index + 1
+  end
+  return [] of String if close < 0
+  written = [] of String
+  split_top(slice(header, open + 1, close)).each { |piece| written << piece.strip }
+  written
+end
+
+pub def macro_named(macros : Array(Macro), name : String) : Array(Macro)
+  hit = [] of Macro
+  macros.each { |found| hit << found if found.name == name }
+  hit
+end
+
+# A macro call written as a statement: the name, then its arguments, on
+# one line. `property next_node : IyiDeferNode?` is one, and so is a
+# `getter` with several names after it.
+pub def expand_calls(source : String, macros : Array(Macro), flags : Array(String)) : String
+  return source if macros.size == 0
+  built = ""
+  pos = 0
+  while pos < source.bytesize
+    stop = line_stop(source, pos)
+    line = slice(source, pos, stop)
+    bare = line.strip
+    word = first_word(bare)
+    hit = macro_named(macros, word)
+    rest = bare.bytesize > word.bytesize ? slice(bare, word.bytesize, bare.bytesize).strip : ""
+    if hit.size > 0 && rest != "" && !bare.starts_with?("macro ") && !bare.starts_with?("#")
+      built = built + render(hit[0].body, bind_arguments(hit[0], rest), flags)
+    else
+      built = built + line
+    end
+    built = built + "\n" if stop < source.bytesize
+    pos = stop + 1
+  end
+  built
+end
+
+# The arguments a call wrote, bound to the names the macro declared. A
+# `*names` parameter takes all of them as a list, which is how `getter a,
+# b` and `property x : Int32` are one shape.
+pub def bind_arguments(found : Macro, written : String) : Env
+  args = [] of Value
+  inner = written.starts_with?("(") && written.ends_with?(")") ? slice(written, 1, written.bytesize - 1) : written
+  split_top(inner).each { |piece| args << text_value(piece.strip) }
+  env = Env.new
+  index = 0
+  found.params.each do |param|
+    if param.starts_with?("*")
+      rest = [] of Value
+      while index < args.size
+        rest << args[index]
+        index = index + 1
+      end
+      env = env.bind(slice(param, 1, param.bytesize), list_value(rest))
+    else
+      env = env.bind(param, index < args.size ? args[index] : none_value)
+      index = index + 1
+    end
+  end
+  env
+end
+
+# `next_node : IyiDeferNode?` declares a name with a type; `next_node`
+# on its own does not. The colon that says so is this text's own, not
+# one inside a generic argument, and `::` is a path rather than a type.
+pub def declaration_colon(text : String) : Int32
+  depth = 0
+  index = 0
+  while index < text.bytesize
+    ch = text[index]
+    depth = depth + 1 if ch == '(' || ch == '[' || ch == '{'
+    depth = depth - 1 if ch == ')' || ch == ']' || ch == '}'
+    if depth == 0 && ch == ':' && index > 0
+      return index unless text[index + 1] == ':' || text[index - 1] == ':'
+    end
+    index = index + 1
+  end
+  -1
+end
+
+pub def declaration?(text : String) : Bool
+  declaration_colon(text) > 0
+end
+
+# The name a declaration gives, or the type it gives it.
+pub def declaration_half(text : String, name : Bool) : Value
+  at = declaration_colon(text)
+  return none_value if at < 0
+  return text_value(slice(text, 0, at).strip) if name
+  text_value(slice(text, at + 1, text.bytesize).strip)
 end
 
 pub def render(source : String, env : Env, flags : Array(String)) : String
   built = ""
   pos = 0
   while true
-    open = find(source, "{%", pos)
+    open = find_code(source, "{%", pos)
     if open < 0
-      built = built + interpolate(slice(source, pos, source.bytesize), env)
+      built = built + interpolate(slice(source, pos, source.bytesize), env, flags)
       return built
     end
-    built = built + interpolate(slice(source, pos, open), env)
-    close = find(source, "%}", open)
+    built = built + interpolate(slice(source, pos, open), env, flags)
+    close = find_code(source, "%}", open)
     return built if close < 0
     directive = slice(source, open + 2, close).strip
     after = close + 2
@@ -230,7 +475,7 @@ pub def render(source : String, env : Env, flags : Array(String)) : String
 
     stop = matching_end(source, after)
     return built if stop < 0
-    stop_close = find(source, "%}", stop)
+    stop_close = find_code(source, "%}", stop)
     return built if stop_close < 0
     region = slice(source, after, stop)
 
@@ -261,7 +506,7 @@ pub def render_branches(taken : String, region : String, env : Env, flags : Arra
     return taken == "true" ? render(region, env, flags) : ""
   end
   head = slice(region, 0, split)
-  close = find(region, "%}", split)
+  close = find_code(region, "%}", split)
   return "" if close < 0
   directive = slice(region, split + 2, close).strip
   tail = slice(region, close + 2, region.bytesize)
@@ -275,8 +520,13 @@ pub def render_branches(taken : String, region : String, env : Env, flags : Arra
   render(tail, env, flags)
 end
 
+# Whether an expansion left a declaration without a name. A body this
+# pass could not finish is not read by anything downstream, but
+# `def {{ conv[0] }}` is a method named `{{`, which is not a method.
 pub def unresolved?(source : String) : Bool
-  find(source, "{{", 0) >= 0
+  find(source, "def {{", 0) >= 0 || find(source, "struct {{", 0) >= 0 ||
+    find(source, "class {{", 0) >= 0 || find(source, "module {{", 0) >= 0 ||
+    find(source, "::{{", 0) >= 0 || find(source, "enum {{", 0) >= 0
 end
 
 pub def render_loop(directive : String, region : String, env : Env, flags : Array(String)) : String
@@ -288,7 +538,7 @@ pub def render_loop(directive : String, region : String, env : Env, flags : Arra
   built = ""
   if value.kind == "list" && vars.size == 1
     value.items.each do |item|
-      piece = render(region, env.bind(vars[0], text_value(item)), flags)
+      piece = render(region, env.bind(vars[0], item), flags)
       # A body that still carries `{{` asked something of its value that
       # this pass cannot answer - indexing it, or calling a method on it.
       # The loop wrote nothing rather than a method named `{{`.
@@ -301,7 +551,7 @@ pub def render_loop(directive : String, region : String, env : Env, flags : Arra
     index = 0
     while index < value.keys.size
       inner = env.bind(vars[0], text_value(value.keys[index]))
-        .bind(vars[1], text_value(value.items[index]))
+        .bind(vars[1], value.items[index])
       piece = render(region, inner, flags)
       return "" if unresolved?(piece)
       built = built + piece
@@ -317,7 +567,7 @@ end
 # `{{ name }}` is the text the name is bound to. A name this pass does not
 # know is left as it was written: the tree carries a macro expression for
 # it, which is what the current parser builds.
-pub def interpolate(source : String, env : Env) : String
+pub def interpolate(source : String, env : Env, flags : Array(String)) : String
   built = ""
   pos = 0
   while true
@@ -330,8 +580,11 @@ pub def interpolate(source : String, env : Env) : String
     built = built + slice(source, pos, open)
     name = slice(source, open + 2, close).strip
     name = slice(name, 0, name.bytesize - 3) if ends_with_id?(name)
-    if env.has?(name)
-      built = built + env.get(name).text
+    # `{{ mins[name] }}` is read the way a condition is: the value is
+    # whatever the expression answers, not only what a bare name holds.
+    value = evaluate(name, env, flags)
+    if value.kind == "text" || value.kind == "bool"
+      built = built + value.text
     else
       built = built + slice(source, open, close + 2)
     end
@@ -395,6 +648,68 @@ pub def evaluate(source : String, env : Env, flags : Array(String)) : Value
     return bool_value(left.text != right.text)
   end
 
+  index = compare_at(text)
+  if index > 0
+    op = comparison(text, index)
+    left = evaluate(slice(text, 0, index), env, flags)
+    right = evaluate(slice(text, index + op.bytesize, text.bytesize), env, flags)
+    return none_value unless number?(left.text) && number?(right.text)
+    return bool_value(compare(to_position(left.text), to_position(right.text), op))
+  end
+
+  # `types.find { |t| t[0] == name }` answers the row that agrees, and
+  # `prelude.includes?(name)` answers whether a list holds a value.
+  spot = find_top(text, ".find")
+  if spot > 0 && text[text.bytesize - 1] == '}'
+    return find_in(text, spot, env, flags)
+  end
+
+  spot = find_top(text, ".includes?(")
+  if spot > 0 && text[text.bytesize - 1] == ')'
+    base = evaluate(slice(text, 0, spot), env, flags)
+    wanted = evaluate(slice(text, spot + 11, text.bytesize - 1), env, flags)
+    held = false
+    base.items.each { |item| held = true if item.text == wanted.text }
+    return bool_value(held)
+  end
+
+  # What a macro argument is, and the two halves of it when it is a
+  # declaration. `property next_node : IyiDeferNode?` hands its body one
+  # argument, and the body asks whether it carries a type before it
+  # writes the reader that answers one.
+  spot = find_top(text, ".is_a?(")
+  if spot > 0 && text[text.bytesize - 1] == ')'
+    base = evaluate(slice(text, 0, spot), env, flags)
+    wanted = slice(text, spot + 7, text.bytesize - 1).strip
+    return bool_value(wanted == "TypeDeclaration" && declaration?(base.text))
+  end
+
+  spot = find_top(text, ".var")
+  if spot > 0 && spot + 4 == text.bytesize
+    base = evaluate(slice(text, 0, spot), env, flags)
+    return declaration_half(base.text, true)
+  end
+
+  spot = find_top(text, ".type")
+  if spot > 0 && spot + 5 == text.bytesize
+    base = evaluate(slice(text, 0, spot), env, flags)
+    return declaration_half(base.text, false)
+  end
+
+  # `nums + %w(Float32)` is one list and then another. A `+` inside a
+  # literal belongs to the literal: `%w(+ - *)` lists an operator.
+  spot = find_top(text, "+")
+  if spot > 0 && text[0] != '{' && text[0] != '[' && !text.starts_with?("%w(")
+    left = evaluate(slice(text, 0, spot), env, flags)
+    right = evaluate(slice(text, spot + 1, text.bytesize), env, flags)
+    if left.kind == "list" && right.kind == "list"
+      joined = [] of Value
+      left.items.each { |item| joined << item }
+      right.items.each { |item| joined << item }
+      return list_value(joined)
+    end
+  end
+
   if text[0] == '(' && text[text.bytesize - 1] == ')'
     return evaluate(slice(text, 1, text.bytesize - 1), env, flags)
   end
@@ -406,15 +721,26 @@ pub def evaluate(source : String, env : Env, flags : Array(String)) : Value
   end
 
   if text.starts_with?("%w(")
-    return list_value(split_words(slice(text, 3, text.bytesize - 1)))
+    return list_value(texts(split_words(slice(text, 3, text.bytesize - 1))))
+  end
+
+  # `t[0]` reads a row and `mins[name]` reads a table. The brackets come
+  # after what they read, which is how they are told from a literal.
+  if text[text.bytesize - 1] == ']' && text[0] != '['
+    open = index_open(text)
+    if open > 0
+      base = evaluate(slice(text, 0, open), env, flags)
+      key = evaluate(slice(text, open + 1, text.bytesize - 1), env, flags)
+      return index_into(base, key)
+    end
   end
 
   if text[0] == '['
-    return list_value(split_top(slice(text, 1, text.bytesize - 1)))
+    return read_list(slice(text, 1, text.bytesize - 1), env, flags)
   end
 
   if text[0] == '{'
-    return read_map(slice(text, 1, text.bytesize - 1))
+    return read_braces(slice(text, 1, text.bytesize - 1), env, flags)
   end
 
   if text[0] == '"'
@@ -422,19 +748,163 @@ pub def evaluate(source : String, env : Env, flags : Array(String)) : Value
   end
 
   return env.get(text) if env.has?(text)
+  # A literal is worth itself: `t[0]` needs the zero, and a row holds
+  # numbers and truths beside its strings.
+  return bool_value(true) if text == "true"
+  return bool_value(false) if text == "false"
+  return text_value(text) if number?(text)
   none_value
 end
 
-pub def read_map(source : String) : Value
+pub def number?(text : String) : Bool
+  return false if text.bytesize == 0
+  index = text[0] == '-' ? 1 : 0
+  return false if index >= text.bytesize
+  while index < text.bytesize
+    ch = text[index]
+    return false unless (ch >= '0' && ch <= '9') || ch == '_'
+    index = index + 1
+  end
+  true
+end
+
+# The `[` that opens the trailing index, or -1.
+pub def index_open(text : String) : Int32
+  depth = 0
+  index = text.bytesize - 1
+  while index >= 0
+    ch = text[index]
+    depth = depth + 1 if ch == ']' || ch == ')' || ch == '}'
+    depth = depth - 1 if ch == '[' || ch == '(' || ch == '{'
+    return index if depth == 0
+    index = index - 1
+  end
+  -1
+end
+
+pub def index_into(base : Value, key : Value) : Value
+  if base.kind == "list"
+    position = to_position(key.text)
+    return none_value if position < 0 || position >= base.items.size
+    return base.items[position]
+  end
+  if base.kind == "map"
+    place = base.keys.index(key.text)
+    return place.nil? ? none_value : base.items[place]
+  end
+  none_value
+end
+
+pub def to_position(text : String) : Int32
+  return -1 if text.bytesize == 0
+  total = 0
+  index = 0
+  while index < text.bytesize
+    ch = text[index]
+    return -1 unless ch >= '0' && ch <= '9'
+    total = total * 10 + (ch.ord - 48)
+    index = index + 1
+  end
+  total
+end
+
+pub def list_items(source : String, env : Env, flags : Array(String)) : Array(Value)
+  values = [] of Value
+  split_top(source).each { |piece| values << evaluate(piece, env, flags) }
+  values
+end
+
+pub def read_list(source : String, env : Env, flags : Array(String)) : Value
+  list_value(list_items(source, env, flags))
+end
+
+# Braces spell three things: `{a => b}` is a table with written keys,
+# `{a: b}` is a table with named ones, and `{a, b}` is a row.
+# A comparison at the top level, with the longer spelling first so that
+# `<=` is not read as `<`. A brace or a bracket is a literal rather than
+# a comparison, whatever is inside it.
+pub def compare_at(text : String) : Int32
+  return -1 if text[0] == '{' || text[0] == '[' || text.starts_with?("%w(")
+  at = find_top(text, "<=")
+  return at if at > 0
+  at = find_top(text, ">=")
+  return at if at > 0
+  at = find_top(text, "<")
+  return at if at > 0
+  find_top(text, ">")
+end
+
+pub def comparison(text : String, at : Int32) : String
+  return "<=" if matches_at?(text, "<=", at)
+  return ">=" if matches_at?(text, ">=", at)
+  text[at].to_s
+end
+
+pub def compare(left : Int32, right : Int32, op : String) : Bool
+  return left < right if op == "<"
+  return left > right if op == ">"
+  return left <= right if op == "<="
+  left >= right
+end
+
+pub def find_in(text : String, spot : Int32, env : Env, flags : Array(String)) : Value
+  base = evaluate(slice(text, 0, spot), env, flags)
+  brace = find(text, "{", spot)
+  return none_value if brace < 0
+  inner = slice(text, brace + 1, text.bytesize - 1).strip
+  return none_value unless inner.bytesize > 0 && inner[0] == '|'
+  close = find(inner, "|", 1)
+  return none_value if close < 0
+  name = slice(inner, 1, close).strip
+  condition = slice(inner, close + 1, inner.bytesize)
+  answer = none_value
+  base.items.each do |item|
+    next unless answer.kind == "none"
+    answer = item if evaluate(condition, env.bind(name, item), flags).text == "true"
+  end
+  answer
+end
+
+pub def read_braces(source : String, env : Env, flags : Array(String)) : Value
+  pieces = split_top(source)
   keys = [] of String
-  items = [] of String
-  split_top(source).each do |pair|
-    colon = find(pair, ":", 0)
-    next if colon < 0
-    keys << slice(pair, 0, colon).strip
-    items << slice(pair, colon + 1, pair.bytesize).strip
+  items = [] of Value
+  arrow = false
+  named = false
+  pieces.each do |piece|
+    arrow = true if find_top(piece, "=>") > 0
+    named = true if !arrow && named_pair?(piece)
+  end
+  return read_list(source, env, flags) unless arrow || named
+  pieces.each do |piece|
+    if arrow
+      at = find_top(piece, "=>")
+      next if at < 0
+      keys << evaluate(slice(piece, 0, at), env, flags).text
+      items << evaluate(slice(piece, at + 2, piece.bytesize), env, flags)
+    else
+      colon = find(piece, ":", 0)
+      next if colon < 0
+      keys << slice(piece, 0, colon).strip
+      items << text_value(slice(piece, colon + 1, piece.bytesize).strip)
+    end
   end
   map_value(keys, items)
+end
+
+# `to_i: Int32` names a key; `a == b` does not, and neither does a bare
+# value with a colon inside a string.
+pub def named_pair?(piece : String) : Bool
+  colon = find(piece, ":", 0)
+  return false if colon <= 0
+  return false if piece[0] == '"'
+  index = 0
+  while index < colon
+    ch = piece[index]
+    return false unless ch.alphanumeric? || ch == '_' || ch.whitespace?
+    index = index + 1
+  end
+  true
 end
 
 pub def split_words(source : String) : Array(String)

@@ -11,8 +11,14 @@
 # removed on the way out: a differential test that leaves state behind
 # eventually passes because of it.
 set -u
-export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin
-export LIBRARY_PATH=/opt/homebrew/opt/bdw-gc/lib
+# Homebrew is where this laptop keeps clang and libgc. On a machine
+# without it these add nothing and, unlike replacing PATH outright,
+# they take nothing away either: a runner that puts its toolchain
+# somewhere else keeps it.
+if [ -d /opt/homebrew/bin ]; then export PATH="/opt/homebrew/bin:$PATH"; fi
+if [ -d /opt/homebrew/opt/bdw-gc/lib ]; then
+  export LIBRARY_PATH="/opt/homebrew/opt/bdw-gc/lib:${LIBRARY_PATH:-}"
+fi
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
@@ -46,12 +52,18 @@ for f in "${files[@]}"; do
     echo "  NO ORACLE $(basename "$f")"
     continue
   fi
-  "$WORK/parser" "$f" > "$WORK/b.txt" 2>/dev/null
+  # Status and stderr kept rather than dropped: a crash, a refusal and a
+  # wrong tree all print the same blank `port:` line otherwise.
+  "$WORK/parser" "$f" > "$WORK/b.txt" 2> "$WORK/b.err"
+  status=$?
   if diff -q "$WORK/a.txt" "$WORK/b.txt" > /dev/null; then
     agree=$((agree + 1))
   else
     differ=$((differ + 1))
     echo "  DIFFERS $(basename "$f")"
+    if [ "$status" -ne 0 ] || [ ! -s "$WORK/b.txt" ]; then
+      echo "    the port exited $status saying: $(head -2 "$WORK/b.err" | tr '\n' ' ' | cut -c1-150)"
+    fi
     echo "    oracle: $(cut -c1-150 "$WORK/a.txt")"
     echo "    port:   $(cut -c1-150 "$WORK/b.txt")"
   fi

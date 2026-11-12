@@ -1,0 +1,22 @@
+# The thirteenth codegen fixture: a method that lives in another file.
+#
+# Every fixture until now was one file, which let the emitter read the
+# tree it was given and emit what was in it. The bootstrap cannot be
+# one file: `src/iyi/prelude.iyi` is fourteen of them and one program,
+# and reaching a method the prelude writes means reading the file that
+# wrote it first.
+#
+# A require names a file, relative to the file that wrote it, and what
+# it brings is read as if it had been written there. So the emitter
+# reads the required file before the one that required it, and both
+# sets of declarations are in scope for the program at the bottom.
+
+require "./shared/helpers"
+require "./shared/counter"
+
+def answer : Int32
+  count = Tally.new(4)
+  tripled(count.plus(3)) + quadrupled(2) + count.doubled
+end
+
+__iyi_exit(answer)

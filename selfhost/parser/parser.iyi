@@ -697,8 +697,13 @@ pub struct ClassVarNode
   end
 end
 
+# `require "./primitives"` names a file rather than a module: the path is
+# relative to the file that wrote it, and what it brings is read as if it
+# had been written there. The shape does not print the path.
 pub struct RequireNode
-  def initialize
+  getter path : String
+
+  def initialize(@path : String)
   end
 end
 
@@ -722,8 +727,14 @@ pub struct FunDefNode
   end
 end
 
+# A `lib` is a type the compiler prints as `libtype`, and the functions
+# it declares are its methods. Nothing gives them a body, so the name is
+# the whole of what a `fun` inside one says.
 pub struct LibDefNode
-  def initialize
+  getter name : String
+  getter funs : Array(String)
+
+  def initialize(@name : String, @funs : Array(String))
   end
 end
 
@@ -910,8 +921,15 @@ end
 pub class TypeDeclNode
   getter target : Array(Node)
   getter declared : Array(Node)
+  # What the declaration was given, when it was given one. The shape
+  # does not print it and codegen cannot do without it.
+  getter value : Array(Node)
 
   def initialize(@target : Array(Node), @declared : Array(Node))
+    @value = [] of Node
+  end
+
+  def initialize(@target : Array(Node), @declared : Array(Node), @value : Array(Node))
   end
 end
 
@@ -1084,9 +1102,21 @@ impl Sexp for StrNode
     # so a literal control character has to be written as its escape here
     # too. The backslash is left alone on purpose: an escape written in
     # the source already arrives as the two characters that spell it, and
-    # escaping it again would double every one of them.
+    # escaping it again would double every one of them. A `#` that a `{`
+    # follows is the one exception: `inspect` writes it back as `\#{`,
+    # because unescaped it would open an interpolation on a re-read. The
+    # `#` is held for one character to see what comes next.
     out = ""
+    hash = false
     value.each_char do |ch|
+      if hash
+        out = out + (ch == '{' ? "\\#" : "#")
+        hash = false
+      end
+      if ch == '#'
+        hash = true
+        next
+      end
       code = ch.ord
       if ch == '\n'
         out = out + "\\n"
@@ -1116,6 +1146,7 @@ impl Sexp for StrNode
         out = out + ch.to_s
       end
     end
+    out = out + "#" if hash
     "(str \"" + out + "\")"
   end
 end
@@ -1599,6 +1630,9 @@ pub class Parser
   @pos : Int32
   @locals : Array(String)
   @imports : Array(Node)
+  # The files this one requires, in the order it wrote them. A require
+  # is not a module edge: what it names is read as if it were here.
+  @requires : Array(Node)
   @header : String
   # How many method bodies enclose the cursor. A name declared with a type
   # is a local inside one and a field outside one, and the two are read
@@ -1617,6 +1651,12 @@ pub class Parser
     @imports
   end
 
+  # The files this one requires. They are answered after a parse, the
+  # way the imports are: the list is built while the statements are read.
+  def requires : Array(Node)
+    @requires
+  end
+
   # The module path as written, empty when the file has no header. The
   # driver used to re-lex the file to find this and printed a header for a
   # file that had none.
@@ -1629,6 +1669,7 @@ pub class Parser
     @pos = 0
     @locals = [] of String
     @imports = [] of Node
+    @requires = [] of Node
     @header = ""
     @def_depth = 0
     @path_from_root = false
@@ -1999,8 +2040,15 @@ pub class Parser
       end
       if word.value == "require"
         advance if offset == 1
+        # A string is an opening delimiter, its pieces, and a closing
+        # one, so the path a plain `require "./object"` names is the
+        # piece after the delimiter rather than the token after `require`.
+        target = peek_at(1).kind == "DELIMITER_START" &&
+                 peek_at(2).kind == "STRING" ? peek_at(2).value : ""
+        node = RequireNode.new(target)
+        @requires << node.as(Node)
         skip_line
-        return RequireNode.new.as(Node)
+        return node.as(Node)
       end
       if word.value == "macro"
         advance if offset == 1
@@ -2015,9 +2063,9 @@ pub class Parser
       if word.value == "lib"
         advance if offset == 1
         advance # lib
+        name = peek.value
         advance # the name
-        skip_to_matching_end
-        return LibDefNode.new.as(Node)
+        return LibDefNode.new(name, skip_lib_body).as(Node)
       end
       if word.value == "enum"
         advance if offset == 1
@@ -2177,6 +2225,7 @@ pub class Parser
     return "\b" if ch == 'b'
     return "\f" if ch == 'f'
     return "\v" if ch == 'v'
+    return "\a" if ch == 'a'
     ch.to_s
   end
 
@@ -2252,6 +2301,42 @@ pub class Parser
         depth = depth + 1
       end
     end
+  end
+
+  # The same walk, keeping the names of the functions a `lib` declares.
+  # They are the lib type's methods, and a `fun` inside one has no body
+  # to descend into: the name follows the word.
+  def skip_lib_body : Array(String)
+    names = [] of String
+    depth = 1
+    while !at_end? && depth > 0
+      index = @pos
+      token = advance
+      if token.kind == "{%"
+        word = peek
+        if word.kind == "IDENT" && word.value == "end"
+          depth = depth - 1
+        elsif word.kind == "IDENT" &&
+              (word.value == "if" || word.value == "unless" ||
+              word.value == "for" || word.value == "begin")
+          depth = depth + 1
+        end
+        while !at_end? && peek.kind != "%}"
+          advance
+        end
+        advance if peek.kind == "%}"
+        next
+      end
+      next unless token.kind == "IDENT"
+      if token.value == "end"
+        depth = depth - 1
+      elsif token.value == "fun" && depth == 1
+        names << peek.value if peek.kind == "IDENT"
+      elsif opens_block?(index, token.value)
+        depth = depth + 1
+      end
+    end
+    names
   end
 
   # `fun name(a : Int32) : Int32` with a body, or without one inside a
@@ -2832,8 +2917,12 @@ pub class Parser
     # for it: one node for two spellings, because they mean one thing.
     if peek.kind == "?"
       advance
+      skip_newlines
       then_branch = parse_binary(0)
-      advance if peek.kind == ":"
+      if peek.kind == ":"
+        advance
+        skip_newlines
+      end
       else_branch = parse_binary(0)
       return IfNode.new([left] of Node, [then_branch] of Node,
         [else_branch] of Node).as(Node)
@@ -2888,13 +2977,15 @@ pub class Parser
         end
         declared = parse_type
         # `@@word : UInt64 = 0` declares and assigns in one line. The
-        # declaration is the shape; the value is read so it does not
-        # become a statement of its own.
+        # declaration is the shape the compiler prints, and the value is
+        # not in it, so the node carries it: a pass that has to emit the
+        # local cannot read a zero that was written as a five.
+        value = [] of Node
         if peek.kind == "="
           advance
-          parse_expression
+          value << parse_expression
         end
-        return TypeDeclNode.new(target, [declared] of Node).as(Node)
+        return TypeDeclNode.new(target, [declared] of Node, value).as(Node)
       end
     end
 
@@ -2921,8 +3012,14 @@ pub class Parser
       value = parse_binary(0)
       if peek.kind == "?"
         advance
+        # Neither `?` nor `:` can end a statement, so a branch written
+        # on the line below one of them belongs to this ternary.
+        skip_newlines
         then_branch = parse_binary(0)
-        advance if peek.kind == ":"
+        if peek.kind == ":"
+          advance
+          skip_newlines
+        end
         else_branch = parse_binary(0)
         value = IfNode.new([value] of Node, [then_branch] of Node,
           [else_branch] of Node).as(Node)
@@ -3030,10 +3127,21 @@ pub class Parser
     return false unless word == "if" || word == "unless" ||
                         word == "while" || word == "until"
     return true if index == 0
+    # A modifier trails a complete expression and a block does not, so
+    # what decides it is the token in front of the word. An operator
+    # leaves an expression unfinished - `text + if flag` is a value
+    # waiting for one - and `=` is only the most common of them rather
+    # than a case of its own.
+    #
+    # Read the other way round this is wrong: `next if done` and
+    # `return 0 if n < 0` both follow a keyword, and both are modifiers.
     before = @tokens[index - 1]
-    before.kind == "NEWLINE" || before.kind == "=" ||
-      (before.kind == "IDENT" && (before.value == "do" || before.value == "else" ||
-        before.value == "then" || before.value == "begin"))
+    kind = before.kind
+    return true if kind == "NEWLINE" || kind == ";" || kind == "=" ||
+                   kind == "(" || kind == "[" || kind == "," ||
+                   kind == "=>" || kind == "->" || precedence(kind) > 0
+    kind == "IDENT" && (before.value == "do" || before.value == "else" ||
+      before.value == "then" || before.value == "begin")
   end
 
   # A `do` block is read to its `end` the same way every other body is.

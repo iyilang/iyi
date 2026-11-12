@@ -23,22 +23,73 @@ pub struct Token
   def initialize(@kind : String, @line : Int32, @col : Int32, @value : String)
   end
 
+  # Escapes print as escapes, so one token stays one line: a real
+  # newline inside a value turns a line-oriented dump into a liar. The
+  # value itself is what was written, decoded, which is what the current
+  # lexer carries and the only way `'\''` and `'` can be told apart.
   def dump : String
-    "#{kind}\t#{line}\t#{col}\t#{value}"
+    "#{kind}\t#{line}\t#{col}\t#{shown}"
+  end
+
+  # Taken in runs rather than a character at a time: the five that are
+  # escaped are all one byte, and the text between them is whatever it
+  # was written as, including letters wider than a byte.
+  def shown : String
+    out = ""
+    run = 0
+    index = 0
+    while index < value.bytesize
+      ch = value[index]
+      escape = if ch == '\\'
+                 "\\\\"
+               elsif ch == '\n'
+                 "\\n"
+               elsif ch == '\r'
+                 "\\r"
+               elsif ch == '\t'
+                 "\\t"
+               elsif ch == '\0'
+                 "\\0"
+               else
+                 ""
+               end
+      unless escape == ""
+        out = out + value[run, index - run] if index > run
+        out = out + escape
+        run = index + 1
+      end
+      index = index + 1
+    end
+    out = out + value[run, value.bytesize - run] if value.bytesize > run
+    out
   end
 end
 
 pub class Lexer
   @src : String
   @pending : Array(Token)
+  # What the lexer is in the middle of. A string body is not code, and an
+  # interpolation inside one is, so the two alternate and they nest: a
+  # string can hold an interpolation and that can hold another string.
+  # `"string"` means a body is open, `"interp"` means code inside one.
+  @modes : Array(String)
+  # How deep the braces are inside the interpolation on top of `@modes`,
+  # so the `}` that closes a hash written inside one does not close it.
+  @braces : Array(Int32)
   @prev_kind : String
+  # The word the last token was, so a keyword can be told from a name:
+  # `return -1` is a sign and `count -1` is subtraction.
+  @prev_value : String
   @pos : Int32
   @line : Int32
   @col : Int32
 
   def initialize(@src : String)
     @pending = [] of Token
+    @modes = [] of String
+    @braces = [] of Int32
     @prev_kind = ""
+    @prev_value = ""
     @pos = 0
     @line = 1
     @col = 1
@@ -79,15 +130,127 @@ pub class Lexer
     c.ascii_alphanumeric? || c == '_'
   end
 
+  # The character a codepoint names. A Char here carries the codepoint
+  # rather than a byte, so writing the UTF-8 out by hand encoded each of
+  # those bytes again and a byte-order mark came out as three characters.
+  def utf8(code : Int32) : String
+    code.unsafe_chr.to_s
+  end
+
+  # `\u{FEFF}` and `\u00e9` name a character by its number. Read here
+  # because the escape is more than the one character after the
+  # backslash, which is all `unescape` is given.
+  def read_unicode_escape : String
+    code = 0
+    if peek == '{'
+      advance
+      while !at_end? && peek != '}'
+        worth = digit_value(peek, 16)
+        code = code * 16 + worth if worth >= 0
+        advance
+      end
+      advance unless at_end?
+    else
+      taken = 0
+      while taken < 4 && digit_value(peek, 16) >= 0
+        code = code * 16 + digit_value(peek, 16)
+        advance
+        taken = taken + 1
+      end
+    end
+    utf8(code)
+  end
+
+  # What `\n` means, rather than the two characters it is written as.
+  # The token carries the character and the dump escapes it again, which
+  # is how `'\''` and `'` stay different tokens: the first is a quote.
+  def unescape(esc : Char) : String
+    return "\n" if esc == 'n'
+    return "\t" if esc == 't'
+    return "\r" if esc == 'r'
+    return "\0" if esc == '0'
+    return "\\" if esc == '\\'
+    return "\e" if esc == 'e'
+    return "\v" if esc == 'v'
+    return "\f" if esc == 'f'
+    return "\b" if esc == 'b'
+    return "\a" if esc == 'a'
+    esc.to_s
+  end
+
+  # What a character is worth in a base, or -1 when it is not a digit
+  # of it: `f` is fifteen in sixteen and nothing in ten.
+  def digit_value(ch : Char, base : Int32) : Int32
+    value = if ch.ascii_number?
+              ch.ord - '0'.ord
+            elsif ch >= 'a' && ch <= 'f'
+              ch.ord - 'a'.ord + 10
+            elsif ch >= 'A' && ch <= 'F'
+              ch.ord - 'A'.ord + 10
+            else
+              -1
+            end
+    return -1 if value < 0 || value >= base
+    value
+  end
+
+  def to_decimal(digits : String, base : Int32) : String
+    value = 0_u64
+    index = 0
+    while index < digits.bytesize
+      worth = digit_value(digits[index], base)
+      value = value &* base.to_u64 &+ worth.to_u64 if worth >= 0
+      index = index + 1
+    end
+    value.to_s
+  end
+
+  # `1_000` is a thousand: the underscores are for the reader, and the
+  # current lexer reports the number without them.
+  def without_underscores(text : String) : String
+    out = ""
+    index = 0
+    while index < text.bytesize
+      ch = text[index]
+      out = out + ch.to_s unless ch == '_'
+      index = index + 1
+    end
+    out
+  end
+
+  # The words a suffix does not attach to. `end!` is two tokens and
+  # `empty?` is one, and what separates them is that one is a keyword.
+  def keyword?(word : String) : Bool
+    word == "end" || word == "if" || word == "unless" || word == "while" ||
+      word == "until" || word == "do" || word == "then" || word == "else" ||
+      word == "elsif" || word == "begin" || word == "rescue" ||
+      word == "ensure" || word == "return" || word == "yield" ||
+      word == "case" || word == "when" || word == "in" || word == "of" ||
+      word == "def" || word == "class" || word == "struct" ||
+      word == "module" || word == "enum" || word == "lib" || word == "fun" ||
+      word == "macro" || word == "trait" || word == "impl" ||
+      word == "self" || word == "nil" || word == "true" || word == "false" ||
+      word == "and" || word == "or" || word == "not" || word == "next" ||
+      word == "break" || word == "super" || word == "alias" ||
+      word == "require" || word == "import" || word == "using" ||
+      word == "pub" || word == "abstract" || word == "private" ||
+      word == "protected" || word == "with" || word == "as" ||
+      word == "typeof" || word == "sizeof" || word == "pointerof" ||
+      word == "instance_sizeof" || word == "out" || word == "uninitialized"
+  end
+
   # One token, or nil at end of input.
   def next_token : Token?
-    # A string lexes as three tokens the way the current lexer does it:
-    # the opening delimiter, the body, the closing delimiter. Queued here
-    # rather than returned as an array, so the caller stays a simple loop.
+    # A string lexes as a piece at a time: the opening delimiter, the
+    # runs of its body, whatever an interpolation inside it holds, and
+    # the closing delimiter. Queued here rather than returned as an
+    # array, so the caller stays a simple loop.
     unless @pending.empty?
       return @pending.shift
     end
     return nil if at_end?
+    top = @modes.size > 0 ? @modes[@modes.size - 1] : ""
+    return next_string_token if top == "string" || top == "percent"
     line = @line
     col = @col
     c = peek
@@ -110,6 +273,81 @@ pub class Lexer
         text = text + advance.to_s
       end
       return Token.new("COMMENT", line, col, text)
+    end
+
+    # `{%` and `%}` open and close a macro directive, and each is one
+    # token: read as a brace and a percent, every directive in the
+    # prelude came out as arithmetic.
+    if c == '{' && peek_at(1) == '%'
+      advance
+      advance
+      return Token.new("{%", line, col, "{%")
+    end
+
+    # `{{ name }}` substitutes inside a macro, and its opener is one
+    # token the same way `{%` is.
+    if c == '{' && peek_at(1) == '{'
+      advance
+      advance
+      return Token.new("{{", line, col, "{{")
+    end
+
+    # `%w(a b)` opens a word array. What is inside it is words, and the
+    # bracket that closes it closes this too.
+    if c == '%' && peek_at(1) == 'w' && peek_at(2) == '('
+      advance
+      advance
+      advance
+      return Token.new("STRING_ARRAY_START", line, col, "STRING_ARRAY_START")
+    end
+
+    # `%(...)` opens a string. `def %(other : Int32)` declares a method
+    # named `%` and this reads it as a literal, which is what the
+    # current lexer does with it and for the same reason it reads the
+    # `/` in a module path as a regex: the parser is what would say
+    # otherwise, and this is a lexer.
+    if c == '%' && peek_at(1) == '('
+      advance
+      advance
+      @modes << "percent"
+      return Token.new("DELIMITER_START", line, col, "DELIMITER_START")
+    end
+
+    # A backslash at the end of a line joins it to the next one and is
+    # not a token: the prelude writes a long condition that way.
+    if c == '\\' && peek_at(1) == '\n'
+      advance
+      advance
+      return next_token
+    end
+
+    if c == '%' && peek_at(1) == '}'
+      advance
+      advance
+      return Token.new("%}", line, col, "%}")
+    end
+
+    # `:name` is a symbol and `::` is a path: what separates them is
+    # that a symbol's name follows immediately. A colon before a space
+    # is a type annotation or the second half of a ternary.
+    if c == ':' && peek_at(1) != ':' && ident_start?(peek_at(1))
+      advance
+      text = ""
+      while !at_end? && ident_char?(peek)
+        text = text + advance.to_s
+      end
+      if !at_end? && (peek == '?' || peek == '!' || peek == '=')
+        text = text + advance.to_s
+      end
+      return Token.new("SYMBOL", line, col, text)
+    end
+
+    # `@[Flags]` opens an annotation, and the two characters are one
+    # token: an `@` followed by a bracket is not a field named nothing.
+    if c == '@' && peek_at(1) == '['
+      advance
+      advance
+      return Token.new("@[", line, col, "@[")
     end
 
     if c == '@'
@@ -135,9 +373,11 @@ pub class Lexer
       while !at_end? && ident_char?(peek)
         text = text + advance.to_s
       end
-      # `foo?` and `bar!` are one identifier, which is a lexing rule and
-      # not a parsing one.
-      if !at_end? && (peek == '?' || peek == '!')
+      # `empty?`, `nil?` and `in?` are one word and `to_u64!` and `end!`
+      # are two: a question mark is part of a name here and a bang is
+      # not, whatever word is in front of it. A constant takes neither,
+      # because `Session?` is a nilable type.
+      if !at_end? && peek == '?' && !c.ascii_uppercase?
         text = text + advance.to_s
       end
       if text == "_"
@@ -154,7 +394,8 @@ pub class Lexer
     # `-42` is one NUMBER, but `a - 42` is three tokens. What separates them
     # is what came before: after a value, a minus is subtraction.
     if c == '-' && peek_at(1).ascii_number? &&
-       @prev_kind != "IDENT" && @prev_kind != "CONST" && @prev_kind != "NUMBER" &&
+       !(@prev_kind == "IDENT" && !keyword?(@prev_value)) &&
+       @prev_kind != "CONST" && @prev_kind != "NUMBER" &&
        @prev_kind != ")" && @prev_kind != "]" && @prev_kind != "INSTANCE_VAR"
       advance
       text = "-"
@@ -167,13 +408,48 @@ pub class Lexer
           text = text + advance.to_s
         end
       end
+      # `1e3` and `3.4e+38`: the exponent is part of the number, and a
+      # bare `e` after one is a method call on it.
+      if peek == 'e' || peek == 'E'
+        after = peek_at(1) == '+' || peek_at(1) == '-' ? peek_at(2) : peek_at(1)
+        if after.ascii_number?
+          text = text + advance.to_s
+          text = text + advance.to_s if peek == '+' || peek == '-'
+          while !at_end? && peek.ascii_number?
+            text = text + advance.to_s
+          end
+        end
+      end
       if peek == '_' && peek_at(1).ascii_letter?
         advance
         while !at_end? && ident_char?(peek)
           advance
         end
       end
-      return Token.new("NUMBER", line, col, text)
+      return Token.new("NUMBER", line, col, without_underscores(text))
+    end
+
+    # `0x80` is one number and what it means is 128: the current lexer
+    # reports a literal's value, not how it was spelled, so a port that
+    # kept the text answered `0` and an identifier named `x80`.
+    if c == '0' && (peek_at(1) == 'x' || peek_at(1) == 'b' || peek_at(1) == 'o')
+      advance
+      base = peek == 'x' ? 16 : (peek == 'b' ? 2 : 8)
+      advance
+      digits = ""
+      while !at_end? && (digit_value(peek, base) >= 0 ||
+            (peek == '_' && digit_value(peek_at(1), base) >= 0))
+        digits = digits + advance.to_s
+      end
+      # `0xff_u8` says its width after its digits, and the width is the
+      # number's kind rather than part of what it is.
+      if peek == '_' && peek_at(1).ascii_letter?
+        advance
+        while !at_end? && ident_char?(peek)
+          advance
+        end
+      end
+      return Token.new("NUMBER", line, col, to_decimal(digits, base))
     end
 
     if c.ascii_number?
@@ -188,7 +464,7 @@ pub class Lexer
         while !at_end? && ident_char?(peek)
           advance
         end
-        return Token.new("NUMBER", line, col, text)
+        return Token.new("NUMBER", line, col, without_underscores(text))
       end
 
       # A float is one token. The dot only belongs to the number when a
@@ -199,13 +475,25 @@ pub class Lexer
           text = text + advance.to_s
         end
       end
+      # `1e3` and `3.4e+38`: the exponent is part of the number, and a
+      # bare `e` after one is a method call on it.
+      if peek == 'e' || peek == 'E'
+        after = peek_at(1) == '+' || peek_at(1) == '-' ? peek_at(2) : peek_at(1)
+        if after.ascii_number?
+          text = text + advance.to_s
+          text = text + advance.to_s if peek == '+' || peek == '-'
+          while !at_end? && peek.ascii_number?
+            text = text + advance.to_s
+          end
+        end
+      end
       if peek == '_' && peek_at(1).ascii_letter?
         advance
         while !at_end? && ident_char?(peek)
           advance
         end
       end
-      return Token.new("NUMBER", line, col, text)
+      return Token.new("NUMBER", line, col, without_underscores(text))
     end
 
     if c == '\''
@@ -213,8 +501,13 @@ pub class Lexer
       text = ""
       if peek == '\\'
         advance
-        esc = advance
-        text = "\\" + esc.to_s
+        if peek == 'u'
+          advance
+          text = read_unicode_escape
+        else
+          esc = advance
+          text = unescape(esc)
+        end
       else
         text = advance.to_s
       end
@@ -224,36 +517,27 @@ pub class Lexer
 
     if c == '"'
       advance
-      # An escape closes the piece it is in: the current lexer reports a
-      # string body as runs of literal text with each escape as its own
-      # token, and a port that merges them is a different token stream.
-      text = ""
-      pieces = [] of String
-      while !at_end? && peek != '"'
-        if peek == '#'
-          pieces << text unless text == ""
-          pieces << advance.to_s
-          text = ""
-        elsif peek == '\\'
-          pieces << text unless text == ""
-          advance
-          esc = advance
-          # Printed as the escape, not as the byte: a real newline inside a
-          # token value turns a line-oriented dump into a liar.
-          pieces << "\\" + esc.to_s
-          text = ""
-        else
-          text = text + advance.to_s
-        end
-      end
-      pieces << text unless text == ""
-
-      end_line = @line
-      end_col = @col
-      advance unless at_end?
-      pieces.each { |piece| @pending << Token.new("STRING", line, col + 1, piece) }
-      @pending << Token.new("DELIMITER_END", end_line, end_col, "DELIMITER_END")
+      @modes << "string"
       return Token.new("DELIMITER_START", line, col, "DELIMITER_START")
+    end
+
+    # The braces of an interpolation's own code. A hash written inside
+    # one closes itself before the interpolation closes.
+    if c == '{' && @modes.size > 0 && @modes[@modes.size - 1] == "interp"
+      advance
+      @braces[@braces.size - 1] = @braces[@braces.size - 1] + 1
+      return Token.new("{", line, col, "{")
+    end
+
+    if c == '}' && @modes.size > 0 && @modes[@modes.size - 1] == "interp"
+      advance
+      if @braces[@braces.size - 1] == 0
+        @braces.pop
+        @modes.pop
+      else
+        @braces[@braces.size - 1] = @braces[@braces.size - 1] - 1
+      end
+      return Token.new("}", line, col, "}")
     end
 
     # `[]`, `[]=` and `[]?` are one token: they are method names, and the
@@ -287,7 +571,7 @@ pub class Lexer
        two == "*=" || two == "/=" || two == "%=" || two == "|=" ||
        two == "&=" || two == "^=" || two == "<<" || two == ">>" ||
        two == "=~" || two == "!~" || two == "&+" || two == "&-" ||
-       two == "&*"
+       two == "&*" || two == "**" || two == "//"
       advance
       advance
       return Token.new(two, line, col, two)
@@ -297,12 +581,73 @@ pub class Lexer
     Token.new(c.to_s, line, col, c.to_s)
   end
 
+  # One piece of an open string body. An escape is its own piece, the
+  # way the current lexer reports it, and `#{` hands the loop back to
+  # code until the brace that matches it.
+  def next_string_token : Token
+    line = @line
+    col = @col
+    closer = @modes[@modes.size - 1] == "percent" ? ')' : '"'
+    if at_end? || peek == closer
+      advance unless at_end?
+      @modes.pop
+      return Token.new("DELIMITER_END", line, col, "DELIMITER_END")
+    end
+
+    if peek == '#' && peek_at(1) == '{'
+      advance
+      advance
+      @modes << "interp"
+      @braces << 0
+      return Token.new("INTERPOLATION_START", line, col, "INTERPOLATION_START")
+    end
+
+    if peek == '\\'
+      advance
+      if peek == 'u'
+        advance
+        return Token.new("STRING", line, col, read_unicode_escape)
+      end
+      esc = advance
+      return Token.new("STRING", line, col, unescape(esc))
+    end
+
+    # A `#` that opens nothing is a piece of its own, which is what the
+    # body this replaced wrote and what the corpus agreed on.
+    if peek == '#'
+      return Token.new("STRING", line, col, advance.to_s)
+    end
+
+    # A line of a multi-line string is a piece and so is the newline
+    # that ends it, which is how the current lexer reports one.
+    if peek == '\n'
+      advance
+      return Token.new("STRING", line, col, "\n")
+    end
+
+    # Taken as the bytes it was written as, not rebuilt a character at a
+    # time: this scanner indexes bytes, so a letter wider than one comes
+    # back as two and re-encoding each of them writes a different string.
+    start = @pos
+    while !at_end? && peek != closer && peek != '\\' && peek != '#' && peek != '\n'
+      advance
+    end
+    text = @src[start, @pos - start]
+    Token.new("STRING", line, col, text)
+  end
+
   def dump_all : Nil
     while token = next_token
-      # SPACE and NEWLINE do not count as "what came before": `x = -1`
-      # has a space in it and the minus is still part of the literal.
-      unless token.kind == "SPACE" || token.kind == "NEWLINE" || token.kind == "COMMENT"
+      # A space does not count as "what came before": `x = -1` has one
+      # in it and the minus is still part of the literal. A newline is
+      # not the same thing. It starts a statement, and a minus at the
+      # top of a line is a sign however the line above it ended.
+      if token.kind == "NEWLINE"
+        @prev_kind = ""
+        @prev_value = ""
+      elsif token.kind != "SPACE" && token.kind != "COMMENT"
         @prev_kind = token.kind
+        @prev_value = token.value
       end
       puts token.dump
     end

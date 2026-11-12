@@ -21,8 +21,14 @@
 # default it answered "agree 0, differ 0" and exited 0, which is a gate that
 # cannot fail.
 set -u
-export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin
-export LIBRARY_PATH=/opt/homebrew/opt/bdw-gc/lib
+# Homebrew is where this laptop keeps clang and libgc. On a machine
+# without it these add nothing and, unlike replacing PATH outright,
+# they take nothing away either: a runner that puts its toolchain
+# somewhere else keeps it.
+if [ -d /opt/homebrew/bin ]; then export PATH="/opt/homebrew/bin:$PATH"; fi
+if [ -d /opt/homebrew/opt/bdw-gc/lib ]; then
+  export LIBRARY_PATH="/opt/homebrew/opt/bdw-gc/lib:${LIBRARY_PATH:-}"
+fi
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
@@ -51,17 +57,17 @@ agree=0
 differ=0
 skipped=0
 for f in "${files[@]}"; do
-  if grep -q '#{' "$f" 2>/dev/null; then
-    skipped=$((skipped + 1))
-    continue
-  fi
   CRYSTAL_CACHE_DIR="$WORK/cr" "$REPO/bin/crystal" run --no-color "$HERE/oracle.cr" -- "$f" 2>/dev/null \
     | grep -v "Using compiled" > "$WORK/a.txt"
   if [ ! -s "$WORK/a.txt" ]; then
     echo "  NO ORACLE $(basename "$f")"
     continue
   fi
-  "$WORK/lexer" "$f" > "$WORK/b.txt" 2>/dev/null
+  # Status and stderr kept rather than dropped: a crash and a wrong
+  # token stream otherwise print the same diff of one file against
+  # nothing.
+  "$WORK/lexer" "$f" > "$WORK/b.txt" 2> "$WORK/b.err"
+  status=$?
   normalise "$WORK/a.txt" > "$WORK/an.txt"
   normalise "$WORK/b.txt" > "$WORK/bn.txt"
   if diff -q "$WORK/an.txt" "$WORK/bn.txt" > /dev/null; then
@@ -69,8 +75,11 @@ for f in "${files[@]}"; do
   else
     differ=$((differ + 1))
     echo "  DIFFERS $(basename "$f")  $(diff "$WORK/an.txt" "$WORK/bn.txt" | head -4 | tr '\n' ' ' | cut -c1-110)"
+    if [ "$status" -ne 0 ] || [ ! -s "$WORK/b.txt" ]; then
+      echo "    the port exited $status saying: $(head -2 "$WORK/b.err" | tr '\n' ' ' | cut -c1-150)"
+    fi
   fi
 done
-echo "  agree $agree, differ $differ, skipped $skipped (interpolation, out of this slice)"
+echo "  agree $agree, differ $differ, skipped $skipped"
 # Nothing compared is a failure, not a pass.
 [ "$differ" -eq 0 ] && [ "$agree" -gt 0 ]

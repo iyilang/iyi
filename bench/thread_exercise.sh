@@ -296,6 +296,14 @@ esac
 # any runner, and within a runner's patience - 32 threads on the darwin
 # runner's three cores are a stop of 33 for every one of the three that
 # can run, and the step outlived its five minutes there.
+#
+# Clamping to nine was not enough. On 2026-09-21 the darwin runner ran
+# nine threads on its three cores for the full three hundred seconds and
+# was killed a moment after printing its answer, with every live list
+# intact. The work is bounded by the runner's cores, not by anything
+# this is testing, so the bound here is ten minutes rather than five.
+# The run either holds its properties or it does not; how long three
+# cores take to park nine threads is not the question being asked.
 over=$((cores * 2))
 [ "$over" -lt 9 ] && over=9
 [ "$over" -gt 32 ] && over=32

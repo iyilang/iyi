@@ -1,0 +1,19 @@
+# A second required file that requires the first. Two paths reach
+# `helpers.iyi`, and it is read once: emitting it twice is a module
+# with two of every function in it, which is not a module.
+
+require "./helpers"
+
+def quadrupled(value : Int32) : Int32
+  tripled(value) + value
+end
+
+# The type `helpers.iyi` declared, reopened here. A require is read as
+# if it had been written in the file that asked for it, so this is the
+# same declaration continued rather than a second one: two of a type in
+# one module is two `%Tally`, and the module does not assemble.
+struct Tally
+  def doubled : Int32
+    @count + @count
+  end
+end

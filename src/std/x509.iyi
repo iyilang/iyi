@@ -119,7 +119,7 @@ import std/curve25519::{Ed25519, Ed25519PublicKey, CurveError}
 import std/random::{Random}
 import std/big::{BigInt}
 import std/time::{Time}
-import std/base64::{Base64}
+import std/base64::{Base64, Base64Error}
 import std/idna::{IDNA, IdnaError}
 
 # What reading a certificate, or checking a chain, answers when it fails.
@@ -1378,6 +1378,15 @@ struct X509Pem
 
   private def self.decode(text : String, label : String) : Array(UInt8) | X509Error
     return X509Error.new("a #{label} block whose base64 is #{text.bytesize} bytes, not a multiple of 4") unless text.bytesize % 4 == 0 && text.bytesize > 0
+    # A private key's block is read by `Base64.decode_secret`: no table is
+    # looked into by its bytes and nothing branches on them, so the
+    # refusal cannot say which byte it was. It is the strict reader, too:
+    # a last character with bits past the data is refused.
+    if label.ends_with?("PRIVATE KEY")
+      secret = Base64.decode_secret(text)
+      return X509Error.new("a #{label} block that is not base64") if secret.is_a?(Base64Error)
+      return secret
+    end
     padding = 0
     padding = 1 if text.ends_with?("=")
     padding = 2 if text.ends_with?("==")

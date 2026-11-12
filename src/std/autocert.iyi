@@ -1038,7 +1038,8 @@ struct AutocertPem
   end
 
   def self.pem(label : String, der : Array(UInt8)) : String
-    body = Base64.encode(String.new(der))
+    # A key's bytes: the encoder that looks into no table by them.
+    body = Base64.encode_secret(der)
     lines = [] of String
     at = 0
     while at < body.bytesize

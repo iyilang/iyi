@@ -543,6 +543,8 @@ prove_broken "a duplicate extension taken" "an extension written twice refused" 
 # the check expects never comes.
 prove_broken "PEM's base64 unchecked" "base64: invalid byte" \
   '      return X509Error.new("a #{label} block with byte #{b} in its base64, at #{i}") unless ok' ''
+prove_broken "a private key's block read by the reader for texts that are no secret" "a private key's block with bits past its data refused" \
+  '    if label.ends_with?("PRIVATE KEY")' '    if false'
 prove_broken "the purpose passed over: serverAuth asked of every chain" "a leaf for clientAuth only, as a client's" \
   '    usages.includes?(purpose.oid) || usages.includes?(X509Oids::ANY_EXTENDED_KEY_USAGE)' '    usages.includes?(X509Oids::SERVER_AUTH) || usages.includes?(X509Oids::ANY_EXTENDED_KEY_USAGE)'
 prove_broken "an Ed25519 key's parameters taken" "an Ed25519 key whose algorithm carries parameters refused" \

@@ -301,6 +301,15 @@ check read.size == 2 && read[0].raw == b(CERTS[ROOT_INDEX]), "two PEM blocks amo
 check Certificate.from_pem(ROOT_PEM.lines.reject { |l| l.starts_with?("-----END") }.join("\n")).is_a?(X509Error), "a PEM block with no END refused"
 check Certificate.from_pem(ROOT_PEM.lines.map { |l| l.starts_with?("MII") ? "M*" + l[2, l.size - 2] : l }.join("\n")).is_a?(X509Error), "a PEM block that is not base64 refused, not a panic"
 check Certificate.from_pem("no certificates").or_panic.empty?, "a text with no blocks reads as none"
+# A private key's block is read strictly, by the reader that looks into no
+# table by its bytes: "QQ==" is the byte 0x41, "QR==" is that byte with
+# bits past it, which the reader for other blocks passes over.
+key_block = ->(body : String) { X509.pem("-----BEGIN PRIVATE KEY-----\n#{body}\n-----END PRIVATE KEY-----\n", "PRIVATE KEY") }
+held_key = key_block.call("QQ==")
+check !held_key.is_a?(X509Error) && held_key == [[0x41_u8]], "a private key's block read"
+loose = key_block.call("QR==")
+check loose.is_a?(X509Error) && loose.message == "x509: a PRIVATE KEY block that is not base64", "a private key's block with bits past its data refused: #{loose.is_a?(X509Error) ? loose.message : "read"}"
+check key_block.call("Q*==").is_a?(X509Error), "a private key's block that is not base64 refused, not a panic"
 
 puts "== Ed25519 (RFC 8410)"
 # Made by Python's cryptography; the malformed ones assembled by hand and

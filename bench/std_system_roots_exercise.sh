@@ -261,7 +261,12 @@ PY
 }
 prove_broken "a root kept as often as it is written" "a root written twice read 2 times" \
   '    return if @seen.has_key?(key) || @denied.has_key?(key)' '    return if @denied.has_key?(key)'
-prove_broken "an unreadable block not counted" "a broken block counted 0 times" \
+# Without the oracle, which the count answers to first on a machine whose
+# own store holds a certificate std/x509 cannot read (a hosted Windows
+# runner's has seven): there the roots the oracle keeps and this does not
+# are allowed by that count, so a count of nothing fails that comparison
+# before the broken block's own is reached.
+SYSTEM_ROOTS_ORACLE= prove_broken "an unreadable block not counted" "a broken block counted 0 times" \
   '    if certificate.is_a?(X509Error)
       @unreadable = @unreadable + 1' '    if certificate.is_a?(X509Error)'
 prove_broken "\$SSL_CERT_DIR passed over" "a file and a directory" \

@@ -231,7 +231,7 @@ prove_broken "a cookie path matched inside a name" "a path matches at a slash" \
 prove_broken "a Secure cookie sent over http" "a Secure cookie not over http" \
   'next if cookie.secure && !secure' ''
 prove_broken "a Secure cookie taken from an http answer" "a jar keeps three of seven" \
-  'return if cookie.secure && !CookieJar.secure?(uri)' ''
+  'return if cookie.secure && !secure' ''
 prove_broken "a Secure cookie kept from https:// as well" "a Secure cookie from https:// goes back over https://" \
   'next if cookie.secure && !secure' 'next if cookie.secure'
 prove_broken "a one-label Domain kept" "a jar keeps three of seven" \
@@ -241,12 +241,27 @@ prove_broken "Expires read before Max-Age" "Max-Age wins over Expires" \
       expires" "    if (age = max_age) && expires.nil?
       expires"
 prove_broken "a lapsed cookie kept" "a jar keeps three of seven" \
-  '    return if stored.expired?(Time.utc)
+  '    return if stored.expired?(now)
 ' ''
 prove_broken "paths sent in the order they were set" "the longer path first" \
   'long_a == long_b ? (a[1] < b[1] ? -1 : (a[1] > b[1] ? 1 : 0)) : (long_a > long_b ? -1 : 1)' '(a[1] < b[1] ? -1 : (a[1] > b[1] ? 1 : 0))'
 prove_broken "a quoted value written as it is" "cookie value cannot hold" \
   'unless c == 0x21_u8 ||' 'unless true ||'
+prove_broken "a Secure cookie overwritten by an http answer" "an http answer does not overwrite a Secure cookie" \
+  '    return if !secure && secure_kept?(cookie.name, scope, path, now)
+' ''
+prove_broken "a Secure cookie shadowed from a domain above its host" "nor set one for a domain its host is under" \
+  '(CookieJar.domain_match?(scope, held) || CookieJar.domain_match?(held, scope))' 'CookieJar.domain_match?(scope, held)'
+prove_broken "a Secure cookie shadowed from a host under its domain" "nor set one from a host under its domain" \
+  '(CookieJar.domain_match?(scope, held) || CookieJar.domain_match?(held, scope))' 'CookieJar.domain_match?(held, scope)'
+prove_broken "a Secure cookie shadowed from a longer path" "nor set one of a longer path to go beside it" \
+  'CookieJar.path_match?(path, other.path || "/")' 'path == (other.path || "/")'
+prove_broken "a lapsed Secure cookie guarding its name" "a Secure cookie that has lapsed guards nothing" \
+  'other.secure && other.name == name && !other.expired?(now) &&' 'other.secure && other.name == name &&'
+prove_broken "an http answer kept from every name beside a Secure cookie" "an http answer still sets a cookie of another name" \
+  'other.secure && other.name == name &&' 'other.secure &&'
+prove_broken "an https answer kept from a Secure cookie too" "an https answer still replaces a Secure cookie" \
+  'return if !secure && secure_kept?' 'return if secure_kept?'
 
 echo
 if [ "$status" -eq 0 ]; then

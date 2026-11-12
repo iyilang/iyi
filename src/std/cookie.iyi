@@ -13,12 +13,16 @@
 #
 # The jar matches a request as §5.4 does - domain, path at a slash, not
 # lapsed - sends the longer paths first, and sends a `Secure` cookie over
-# `https://` alone, taking one only from an answer that came over it
-# (RFC 6265bis: an http page cannot overwrite a secure cookie). There is
-# no public-suffix list: a `Domain` of one label is refused, and one like
-# `co.uk` is taken, which a browser would refuse. This module is apart
-# from std/http because it reads the clock: std/time is what knows what
-# an `Expires` date means, and std/http reaches the network alone.
+# `https://` alone, taking one only from an answer that came over it. An
+# answer over `http://` leaves a `Secure` cookie alone (RFC 6265bis
+# §5.7): its cookie of that name is ignored when its domain matches the
+# kept one's, either way round, and its path is the kept one's or under
+# it, so it does not replace the kept cookie, remove it with `Max-Age=0`,
+# or go beside it from a longer path. There is no public-suffix list: a
+# `Domain` of one label is refused, and one like `co.uk` is taken, which a
+# browser would refuse. This module is apart from std/http because it
+# reads the clock: std/time is what knows what an `Expires` date means,
+# and std/http reaches the network alone.
 
 @[Unsafe("a header's fields are parsed by walking the bytes of its string through a raw pointer")]
 module std/cookie
@@ -187,8 +191,11 @@ end
 # list here, so a cookie for `co.uk` would be taken, which a browser would
 # refuse. A cookie that has lapsed, or is set lapsed, is gone. A `Secure`
 # cookie is taken from an `https://` answer only, and goes back over
-# `https://` only (§5.4 step 1). A jar may be shared by tasks on one
-# thread, not across threads.
+# `https://` only (§5.4 step 1). While one is kept, an `http://` answer's
+# cookie of its name is ignored when its domain matches the kept one's,
+# either way round, and its path is the kept one's or under it (RFC
+# 6265bis §5.7). A jar may be shared by tasks on one thread, not across
+# threads.
 pub class CookieJar
   # Each cookie, the host it was set by (what one without a `Domain` goes
   # back to), and the order it was made in.
@@ -214,26 +221,44 @@ pub class CookieJar
   end
 
   # *cookie*, as set by an answer from *url*: it replaces one of the same
-  # name, domain and path, and one set already lapsed removes it.
+  # name, domain and path, and one set already lapsed removes it. Over
+  # `http://` it does neither to a `Secure` cookie: it is ignored.
   def add(url : String, cookie : Cookie) : Nil
     uri = URI.parse?(url)
     return unless uri
     host = (uri.hostname || "").downcase
     return if host.bytesize == 0
-    return if cookie.secure && !CookieJar.secure?(uri)
+    secure = CookieJar.secure?(uri)
+    return if cookie.secure && !secure
     if domain = cookie.domain
       return unless domain.includes?(".") && CookieJar.domain_match?(host, domain)
     end
     path = cookie.path || CookieJar.default_path(uri.path)
-    stored = Cookie.new(cookie.name, cookie.value, path, cookie.domain, cookie.expires, cookie.max_age, cookie.secure, cookie.http_only, cookie.same_site)
     scope = cookie.domain || host
+    now = Time.utc
+    return if !secure && secure_kept?(cookie.name, scope, path, now)
+    stored = Cookie.new(cookie.name, cookie.value, path, cookie.domain, cookie.expires, cookie.max_age, cookie.secure, cookie.http_only, cookie.same_site)
     @kept = @kept.reject do |entry|
       other = entry[0]
       other.name == stored.name && (other.domain || entry[1]) == scope && other.path == stored.path
     end
-    return if stored.expired?(Time.utc)
+    return if stored.expired?(now)
     @made = @made + 1_i64
     @kept << {stored, host, @made}
+  end
+
+  # Whether a `Secure` cookie of *name* is kept that one for *scope* and
+  # *path* would replace, remove or be sent beside (RFC 6265bis §5.7):
+  # its domain matches *scope* or *scope* matches it, and *path* is its
+  # path or under it.
+  private def secure_kept?(name : String, scope : String, path : String, now : Time) : Bool
+    @kept.any? do |entry|
+      other = entry[0]
+      held = other.domain || entry[1]
+      other.secure && other.name == name && !other.expired?(now) &&
+        (CookieJar.domain_match?(scope, held) || CookieJar.domain_match?(held, scope)) &&
+        CookieJar.path_match?(path, other.path || "/")
+    end
   end
 
   # The cookies a request to *url* carries: domain and path matching,

@@ -27,6 +27,24 @@ tar -xzf iyi-0.21.0-linux-x86_64.tar.gz -C ~/.local
 ~/.local/bin/iyi run ~/.local/share/iyi/samples/hello.iyi
 ```
 
+### Where an archive was built
+
+`SHA256SUMS` is published from the same place as the archives, so it says a
+download arrived whole. The release job also records a build provenance
+attestation for each archive and for `SHA256SUMS`: a statement, signed with
+the identity GitHub gives that workflow run, that the file came out of
+`.github/workflows/iyi.yml` in this repository. The
+[GitHub CLI](https://cli.github.com) checks a downloaded file against it:
+
+```sh
+gh attestation verify iyi-<version>-linux-x86_64.tar.gz --repo iyilang/iyi
+```
+
+The same line takes the darwin tarball, the Windows zip or `SHA256SUMS`, and
+fails for a file no run of that workflow produced. A release cut before the
+job recorded attestations has none, and `gh` says so. The installers check
+the checksum and not the attestation, which needs `gh`.
+
 The tarball is relocatable and carries every library a program can ask for:
 iyi's own 1,215 KB prelude, the 4,980 KB of `src/std` that `import std/...`
 resolves to, and Crystal's standard library for `--crystal`. `bin/iyi` finds

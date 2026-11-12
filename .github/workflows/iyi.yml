@@ -3732,8 +3732,12 @@ jobs:
             wasm32-collector, docs]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    # `contents` to create the release; `id-token` and `attestations` for
+    # the provenance attestation below, which this job alone writes.
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
@@ -3756,6 +3760,22 @@ jobs:
       # install.ps1 both refuse one that does not match them: what comes out
       # of an archive reaches the linker. One SHA256SUMS for every platform's
       # file, which is the file both installers read a line out of.
+      - name: Write SHA256SUMS for the proven archives
+        run: (cd dist && sha256sum *.tar.gz *.zip > SHA256SUMS && cat SHA256SUMS)
+      # SHA256SUMS is written by this job and published from the same place
+      # as the archives, so by itself it says an archive arrived whole, not
+      # who built it. The attestation does: it is signed with this run's
+      # OIDC identity and kept by GitHub, and `gh attestation verify` checks
+      # a downloaded file against it (INSTALL.md, "Where an archive was
+      # built"). It comes before the release is created, so an archive that
+      # could not be attested is not published.
+      - name: Attest where the archives and SHA256SUMS were built
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/SHA256SUMS
       - name: Create the release from the proven archives
         env:
           GH_TOKEN: ${{ github.token }}
@@ -3763,7 +3783,6 @@ jobs:
           tag="${GITHUB_REF_NAME}"
           git tag -l --format='%(contents)' "$tag" > notes.md
           [ -s notes.md ] || echo "See CHANGELOG.md for ${tag#v}." > notes.md
-          (cd dist && sha256sum *.tar.gz *.zip > SHA256SUMS && cat SHA256SUMS)
           gh release create "$tag" --title "iyi ${tag#v}" --notes-file notes.md \
             dist/*.tar.gz dist/*.zip dist/SHA256SUMS
 

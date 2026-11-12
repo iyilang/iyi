@@ -434,6 +434,25 @@ pub class Lexer
        @prev_kind != "CONST" && @prev_kind != "NUMBER" &&
        @prev_kind != ")" && @prev_kind != "]" && @prev_kind != "INSTANCE_VAR"
       advance
+      # `-0x3f2_i64` is one negative number, and its value is what the digits
+      # make in their base, as `0x3f2` alone is.
+      if peek == '0' && (peek_at(1) == 'x' || peek_at(1) == 'b' || peek_at(1) == 'o')
+        advance
+        base = peek == 'x' ? 16 : (peek == 'b' ? 2 : 8)
+        advance
+        digits = ""
+        while !at_end? && (digit_value(peek, base) >= 0 ||
+              (peek == '_' && digit_value(peek_at(1), base) >= 0))
+          digits = digits + advance.to_s
+        end
+        if peek == '_' && peek_at(1).ascii_letter?
+          advance
+          while !at_end? && ident_char?(peek)
+            advance
+          end
+        end
+        return Token.new("NUMBER", line, col, "-" + to_decimal(digits, base))
+      end
       text = "-"
       while !at_end? && (peek.ascii_number? || (peek == '_' && !peek_at(1).ascii_letter?))
         text = text + advance.to_s
@@ -592,7 +611,8 @@ pub class Lexer
     # and `<=>` is not `<=` and `>`.
     three = "#{c}#{peek_at(1)}#{peek_at(2)}"
     if three == "..." || three == "<=>" || three == "===" || three == "**=" ||
-       three == "||=" || three == "&&=" || three == "<<=" || three == ">>="
+       three == "||=" || three == "&&=" || three == "<<=" || three == ">>=" ||
+       three == "&+=" || three == "&-=" || three == "&*="
       advance
       advance
       advance

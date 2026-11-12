@@ -1,0 +1,4 @@
+def each_pair(a : Int32, b : Int32)
+  yield a > b
+  yield a < b ? 1 : 2, b
+end

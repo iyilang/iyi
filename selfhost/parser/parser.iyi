@@ -91,9 +91,19 @@ pub class Lexer
     c.ascii_alphanumeric? || c == '_'
   end
 
+  # The `count` hex digits after an `\x` escape's `x`, as written.
+  def hex_digits(count : Int32) : String
+    out = ""
+    while out.size < count && !at_end? && base_digit?(peek, 16)
+      out = out + advance.to_s
+    end
+    out
+  end
+
   # The digits of a `\u` escape after its `u`, as written: four hex digits,
   # or a braced run such as `{1F600}`. Empty for every other escape.
   def unicode_digits(esc : Char) : String
+    return hex_digits(2) if esc == 'x'
     return "" unless esc == 'u'
     out = ""
     if peek == '{'
@@ -204,6 +214,26 @@ pub class Lexer
        @prev_kind != "IDENT" && @prev_kind != "CONST" && @prev_kind != "NUMBER" &&
        @prev_kind != ")" && @prev_kind != "]" && @prev_kind != "INSTANCE_VAR"
       advance
+      # `-0x3f2_i64` is one negative number whose value is what the digits make
+      # in their base, as `0x3f2` alone is.
+      if peek == '0' && (peek_at(1) == 'x' || peek_at(1) == 'b' || peek_at(1) == 'o')
+        advance
+        base_char = advance
+        base = base_char == 'x' ? 16 : (base_char == 'b' ? 2 : 8)
+        value = 0_u64
+        while !at_end? && (base_digit?(peek, base) || (peek == '_' && base_digit?(peek_at(1), base)))
+          ch = advance
+          next if ch == '_'
+          value = value &* base.to_u64 &+ digit_value(ch).to_u64
+        end
+        if peek == '_' && peek_at(1).ascii_letter?
+          advance
+          while !at_end? && ident_char?(peek)
+            advance
+          end
+        end
+        return Token.new("NUMBER", line, col, "-" + value.to_s)
+      end
       text = "-"
       while !at_end? && (peek.ascii_number? || (peek == '_' && !peek_at(1).ascii_letter?))
         digit = advance
@@ -404,7 +434,8 @@ pub class Lexer
     # and `<=>` is not `<=` and `>`.
     three = "#{c}#{peek_at(1)}#{peek_at(2)}"
     if three == "..." || three == "<=>" || three == "===" || three == "**=" ||
-       three == "||=" || three == "&&=" || three == "<<=" || three == ">>="
+       three == "||=" || three == "&&=" || three == "<<=" || three == ">>=" ||
+       three == "&+=" || three == "&-=" || three == "&*="
       advance
       advance
       advance
@@ -413,9 +444,10 @@ pub class Lexer
 
     # The macro delimiters, before the braces and percents they are made
     # of: `{%` is not `{` and `%`, and reading it as two made every macro
-    # body a hash literal.
+    # body a hash literal. `}}` is not one of them: the compiler closes a
+    # macro with two `}` tokens, so the lexer leaves each brace alone.
     pair = "#{c}#{peek_at(1)}"
-    if pair == "{%" || pair == "%}" || pair == "{{" || pair == "}}"
+    if pair == "{%" || pair == "%}" || pair == "{{"
       advance
       advance
       return Token.new(pair, line, col, pair)
@@ -835,6 +867,14 @@ pub class CaseNode
   end
 end
 
+pub class SelectNode
+  getter whens : Array(Node)
+  getter else_branch : Array(Node)
+
+  def initialize(@whens : Array(Node), @else_branch : Array(Node))
+  end
+end
+
 pub struct UntilNode
   def initialize
   end
@@ -1095,7 +1135,7 @@ pub alias Node = PathNode | NumNode | StrNode | VarNode | ExtendNode |
                  HashNode | TupleNode | RangeNode | CharNode | UnlessNode |
                 UnionNode | AssocTypeNode | EnumDefNode | AnnotationNode | UntilNode |
                 AnnotationDefNode | TypeofNode |
-                 WhenNode | CaseNode | BreakNode | NextNode |
+                 WhenNode | CaseNode | SelectNode | BreakNode | NextNode |
                  PropagateNode | RecoverNode | DeferNode | IsANode |
                  AliasNode | ReadInstanceVarNode | RespondsToNode |
                  MetaclassNode | MultiAssignNode | OpAssignNode |
@@ -1134,34 +1174,101 @@ impl Sexp for NumNode
   end
 end
 
+# The character at byte *at* of a string, as `[code, width]`: its code point
+# and the bytes it takes. A byte that does not begin valid UTF-8 comes back as
+# code -1, one byte wide, and prints as its escape.
+def str_char_at(text : String, at : Int32) : Array(Int32)
+  lead = text.byte_at(at).to_i32
+  return [lead, 1] of Int32 if lead < 128
+  width = 0
+  code = 0
+  if lead >= 194 && lead <= 223
+    width = 2
+    code = lead - 192
+  elsif lead >= 224 && lead <= 239
+    width = 3
+    code = lead - 224
+  elsif lead >= 240 && lead <= 244
+    width = 4
+    code = lead - 240
+  else
+    return [-1, 1] of Int32
+  end
+  return [-1, 1] of Int32 if at + width > text.bytesize
+  i = 1
+  while i < width
+    b = text.byte_at(at + i).to_i32
+    return [-1, 1] of Int32 if b < 128 || b > 191
+    code = code * 64 + (b - 128)
+    i = i + 1
+  end
+  return [-1, 1] of Int32 if width == 3 && (code < 2048 || (code >= 55296 && code <= 57343))
+  return [-1, 1] of Int32 if width == 4 && (code < 65536 || code > 1114111)
+  [code, width] of Int32
+end
+
+# *value* in upper-case hexadecimal, at least *digits* wide.
+def str_hex(value : Int32, digits : Int32) : String
+  out = ""
+  rest = value
+  while rest > 0 || out.size < digits
+    out = "0123456789ABCDEF"[rest % 16].to_s + out
+    rest = rest // 16
+  end
+  out
+end
+
+# How `inspect` writes a character it does not print: `\uXXXX`, or `\u{...}`
+# past the basic plane.
+def str_unicode_escape(code : Int32) : String
+  return "\\u" + str_hex(code, 4) if code < 65536
+  "\\u{" + str_hex(code, 1) + "}"
+end
+
+# Whether `inspect` writes a character as an escape rather than as itself:
+# controls, format and private-use characters, and the spaces other than the
+# ASCII one. An unassigned or noncharacter code point is written as itself.
+def str_escapes?(code : Int32) : Bool
+  return true if code < 32 || code == 127 || (code >= 128 && code < 160)
+  return true if code == 160 || code == 173 || code == 1564 || code == 1757
+  return true if (code >= 1536 && code <= 1541) || code == 1807 || code == 5760 || code == 6158
+  return true if (code >= 8192 && code <= 8207) || (code >= 8232 && code <= 8238) || (code >= 8288 && code <= 8303)
+  return true if code == 8287 || code == 12288 || code == 65279 || (code >= 65529 && code <= 65531)
+  return true if code == 917505 || (code >= 917536 && code <= 917631)
+  return true if (code >= 57344 && code <= 63743) || (code >= 983040 && code <= 1114109)
+  false
+end
+
 impl Sexp for StrNode
   def sexp : String
-    # A string can carry a real newline: `samples/iyi/calc` opens one and
-    # closes it three lines later. The oracle prints the value inspected,
-    # so a literal control character has to be written as its escape here
-    # too. The backslash is left alone on purpose: an escape written in
-    # the source already arrives as the two characters that spell it, and
-    # escaping it again would double every one of them. A `#` that a `{`
-    # follows is the one exception: `inspect` writes it back as `\#{`,
-    # because unescaped it would open an interpolation on a re-read. The
-    # `#` is held for one character to see what comes next.
+    # The value is bytes, as the literal wrote them, and a byte that is not
+    # part of a character is not text: `\xA0` is one byte, not U+00A0. The
+    # oracle prints the value inspected, so each character is written as
+    # `inspect` writes it, and each such byte as its `\x` escape. A `#` that
+    # a `{` follows is written `\#{`, because unescaped it would open an
+    # interpolation on a re-read. The `#` is held for one character to see
+    # what comes next.
     out = ""
     hash = false
-    value.each_char do |ch|
+    at = 0
+    while at < value.bytesize
+      decoded = str_char_at(value, at)
+      code = decoded[0]
+      width = decoded[1]
+      at = at + width
       if hash
-        out = out + (ch == '{' ? "\\#" : "#")
+        out = out + (code == 123 ? "\\#" : "#")
         hash = false
       end
-      if ch == '#'
+      if code == 35
         hash = true
-        next
-      end
-      code = ch.ord
-      if ch == '\n'
+      elsif code < 0
+        out = out + "\\x" + str_hex(value.byte_at(at - 1).to_i32, 2)
+      elsif code == 10
         out = out + "\\n"
-      elsif ch == '\t'
+      elsif code == 9
         out = out + "\\t"
-      elsif ch == '\r'
+      elsif code == 13
         out = out + "\\r"
       elsif code == 7
         out = out + "\\a"
@@ -1173,16 +1280,14 @@ impl Sexp for StrNode
         out = out + "\\f"
       elsif code == 27
         out = out + "\\e"
-      elsif code < 32
-        # The oracle prints what `inspect` prints, and a control character
-        # with no letter of its own arrives as its code point.
-        out = out + "\\u00" + (code < 16 ? "0" : "1") + "0123456789abcdef"[code % 16].to_s
-      elsif ch == '"'
+      elsif str_escapes?(code)
+        out = out + str_unicode_escape(code)
+      elsif code == 34
         out = out + "\\\""
-      elsif ch == '\\'
+      elsif code == 92
         out = out + "\\\\"
       else
-        out = out + ch.to_s
+        out = out + code.chr.to_s
       end
     end
     out = out + "#" if hash
@@ -1499,6 +1604,12 @@ impl Sexp for CaseNode
   end
 end
 
+impl Sexp for SelectNode
+  def sexp : String
+    "(select)"
+  end
+end
+
 impl Sexp for UntilNode
   def sexp : String
     "(until)"
@@ -1788,6 +1899,18 @@ pub class Parser
     end
   end
 
+  # What is left on the line before a statement modifier. The modifier is
+  # the statement's own condition, so the statement reads it rather than
+  # skipping it.
+  def skip_to_modifier : Nil
+    line = peek.line
+    while !at_end? && peek.line == line && peek.kind != "NEWLINE" &&
+          !(peek.kind == "IDENT" && (peek.value == "if" || peek.value == "unless" ||
+          peek.value == "while" || peek.value == "until"))
+      advance
+    end
+  end
+
   # A declaration can run past the end of its first line: a union alias
   # ends a line with `|` and a macro declaration with `,`, and the rest of
   # it is not a statement of its own. Reading one line left the remainder
@@ -1987,7 +2110,7 @@ pub class Parser
     end
     advance if peek.kind == "="
     parse_expression unless at_end? || peek.kind == "NEWLINE"
-    skip_line unless at_end? || peek.kind == "NEWLINE"
+    skip_to_modifier unless at_end? || peek.kind == "NEWLINE"
     MultiAssignNode.new.as(Node)
   end
 
@@ -2002,7 +2125,7 @@ pub class Parser
       word = advance.value
       return MixinNode.new(word, [parse_type] of Node).as(Node)
     end
-    return parse_multiassign if starts_multiassign?
+    return with_modifiers(parse_multiassign) if starts_multiassign?
     # Abstractness changes semantic instantiation, not the declaration's
     # canonical class shape.
     if peek.kind == "IDENT" && peek.value == "pub" &&
@@ -2295,6 +2418,28 @@ pub class Parser
     CaseNode.new(kind, [cond] of Node, arms, else_branch).as(Node)
   end
 
+  # `select` with `when` arms that each take a receive or a timeout. The
+  # shape prints the word alone, and the arms are kept for the program.
+  def parse_select : Node
+    advance # select
+    skip_newlines
+    whens = [] of Node
+    else_branch = [] of Node
+    while !at_end? && !(peek.kind == "IDENT" && peek.value == "end")
+      if peek.kind == "IDENT" && peek.value == "else"
+        advance
+        else_branch << parse_branch_body
+        next
+      end
+      advance # when
+      conds = [] of Node
+      conds << parse_expression
+      whens << WhenNode.new(conds, [parse_branch_body] of Node).as(Node)
+    end
+    advance # end
+    SelectNode.new(whens, else_branch).as(Node)
+  end
+
   # Everything up to the `end` that closes what was just opened, counting
   # the words that open one. A macro body is read this way because its
   # contents are a program in the macro language, not in this one.
@@ -2331,6 +2476,16 @@ pub class Parser
   # the current lexer produces; the value is the character it names, and
   # the shape prints that value inspected.
   def unescape(piece : String) : String
+    if piece.size > 2 && piece[0] == '\\' && piece[1] == 'x'
+      # One byte, not a character: `\xA0` is the byte 0xA0, which is not
+      # text on its own, so the string keeps that byte as it is.
+      code = 0
+      piece[2, piece.size - 2].each_char do |digit|
+        value = digit.ascii_number? ? digit.ord - '0'.ord : digit.ord - (digit.ascii_uppercase? ? 'A'.ord : 'a'.ord) + 10
+        code = code * 16 + value
+      end
+      return String.new([code.to_u8] of UInt8)
+    end
     if piece.size > 2 && piece[0] == '\\' && piece[1] == 'u'
       code = 0
       piece[2, piece.size - 2].each_char do |digit|
@@ -2951,19 +3106,15 @@ pub class Parser
       advance
       types = [] of Node
       skip_newlines
-      while peek.kind != "}" && peek.kind != "}}" && !at_end?
+      while peek.kind != "}" && !at_end?
         types << parse_type
         advance if peek.kind == ","
         skip_newlines
       end
-      # `{A, {B}}` ends in one `}}` token, which closes both: this brace
-      # closes the inner type and the other is left for the outer one.
-      if peek.kind == "}}"
-        closer = peek
-        @tokens[@pos] = Token.new("}", closer.line, closer.col + 1, "}")
-      else
-        advance if peek.kind == "}"
-      end
+      # `{A, {B}}` closes with two `}` tokens, one for each brace. The lexer
+      # does not join them, so the inner type takes the first and the outer
+      # type the second.
+      advance if peek.kind == "}"
       tuple = GenericNode.new([PathNode.new("Tuple").as(Node)] of Node,
         types).as(Node)
       if peek.kind == "?"
@@ -3139,7 +3290,7 @@ pub class Parser
     op = peek.kind
     if op == "+=" || op == "-=" || op == "*=" || op == "/=" || op == "%=" ||
        op == "|=" || op == "&=" || op == "^=" || op == "<<=" || op == ">>=" ||
-       op == "||=" || op == "&&=" || op == "**="
+      op == "||=" || op == "&&=" || op == "**=" || op == "&+=" || op == "&-=" || op == "&*="
       advance
       parse_binary(0)
       case left
@@ -3170,13 +3321,23 @@ pub class Parser
           [else_branch] of Node).as(Node)
       end
       case left
-      when VarNode then @locals << left.name
-      # The current parser replaces `slot = uninitialized T` with the
-      # uninitialized-variable node itself; the slot name is semantic
-      # bookkeeping, not a child in this canonical tree.
-      case value
-      when UninitializedVarNode then return value
-      end
+      when VarNode
+        @locals << left.name
+        # The current parser replaces `slot = uninitialized T` with the
+        # uninitialized-variable node itself; the slot name is semantic
+        # bookkeeping, not a child in this canonical tree.
+        case value
+        when UninitializedVarNode then return value
+        end
+      when IvarNode
+        # An instance or class variable takes the same node as a local.
+        case value
+        when UninitializedVarNode then return value
+        end
+      when ClassVarNode
+        case value
+        when UninitializedVarNode then return value
+        end
       when CallNode
         # `a[i] = v` is one call, `[]=`, not an assignment to a call.
         if left.name == "[]"
@@ -3269,6 +3430,11 @@ pub class Parser
                    word == "struct" || word == "trait" || word == "impl" ||
                    word == "module" || word == "case" || word == "begin" ||
                    word == "enum" || word == "lib"
+    # `select` opens a block the way `case` does, but `xs.select` and
+    # `def select` name a method, and a method name is not a keyword.
+    if word == "select"
+      return index == 0 || (@tokens[index - 1].kind != "." && @tokens[index - 1].value != "def")
+    end
     return false unless word == "if" || word == "unless" ||
                         word == "while" || word == "until"
     return true if index == 0
@@ -3732,10 +3898,17 @@ pub class Parser
 
     if t.kind == "{{"
       advance
-      while !at_end? && peek.kind != "}}"
-        advance
+      # The closer is two `}` tokens, which the lexer never joins. Braces
+      # inside the expression are counted, so only a pair at depth zero ends it.
+      depth = 0
+      while !at_end? && !(depth == 0 && peek.kind == "}" && peek_at(1).kind == "}")
+        k = advance.kind
+        depth = depth + 2 if k == "{{"
+        depth = depth + 1 if k == "{"
+        depth = depth - 1 if k == "}"
       end
-      advance if peek.kind == "}}"
+      advance if peek.kind == "}"
+      advance if peek.kind == "}"
       return with_postfix(MacroExpressionNode.new.as(Node))
     end
 
@@ -3833,6 +4006,10 @@ pub class Parser
 
     if t.kind == "IDENT" && t.value == "case"
       return parse_case
+    end
+
+    if t.kind == "IDENT" && t.value == "select"
+      return parse_select
     end
 
     if t.kind == "IDENT" && (t.value == "if" || t.value == "unless")

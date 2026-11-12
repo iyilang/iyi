@@ -166,6 +166,10 @@ module Iyi
       @assigned = {} of UInt64 => Set(String)
       @defer_literals = [] of Def
       @defer_types = Set(Type).new
+      @parent = {} of Def => Def?
+      @parent.compare_by_identity
+      @queue = Deque(Def).new
+      @unlent = {} of Type => Type?
     end
 
     @indexed = false
@@ -199,44 +203,66 @@ module Iyi
     # the block written at the crossing, whose captures and names are said
     # as its own; *self_type* is its `self` when the index did not see
     # where it was made.
+    #
+    # Asked in order - the literals' captures as the walk met them, then
+    # the state as it found it - and only the answer is put into words: a
+    # crossing of iyiturkiye's reaches some 1,100 constants through 11,000
+    # defs, and spelling each one's path, as this did, took half the
+    # program's typing memory under `-Dheap_partitions` (S6, PinCost). The
+    # lists the walk fills are kept from one crossing to the next.
     def pin_reason(roots : Array(Def), own : Bool, self_type : Type?) : String?
       return nil if roots.empty?
       index
-      literals = [] of Def
-      found = walk(nil, Set(UInt64).new, roots, pin: true, met: literals)
-      first = roots.first
-      held = [] of {Type, String}
-      literals.each do |literal|
-        written = own && literal.same?(first)
-        prefix = written ? "it" : "it runs #{ShareReach.called(literal)}, which"
-        captured_holds(literal, literal_self(literal, written ? self_type : nil)) do |type, name|
-          held << {type, "#{prefix} captures `#{name}`"}
+      literals = @pin_met.clear
+      named_found = @pin_named.clear
+      records = @pin_records.clear
+      each_found(nil, @pin_keys.clear, roots, true, literals) do |named, at|
+        case named
+        in Named               then named_found << {named, at}
+        in IyiMod::ReachRecord then records << {named, at}
         end
       end
-      remote = nil
-      found.each do |entry|
-        path = entry.path
-        path = path[1..] if own && path.first?.same?(first)
-        steps = path.map { |step| "`#{ShareReach.called(step)}`" }
-        case named = entry.named
-        in Named
-          held << {named.type, steps.empty? ? "it names `#{named.label}`" : "it reaches `#{named.label}` through #{steps.join(" → ")}"}
-        in IyiMod::ReachRecord
-          if named.pin?
-            through = (steps + (named.path + [named.use]).map { |step| "`#{step}`" }).join(" → ")
-            remote ||= "it reaches #{named.kind} `#{named.label} : #{named.type}` (module `#{named.module_name}`) through #{through}, which holds `#{named.owning}`, #{PIN_TAIL}"
-          elsif named.kind.empty?
-            remote ||= "it calls #{steps.join(" → ")}, and #{named.module_name} arrived as an artifact that does not record what its functions reach, so nothing says whether they reach an owning type without `lends:`; build #{named.module_name}'s artifact again with this compiler, or build against its source"
+      first = roots.first
+      seen = @pin_types.clear
+      literals.each do |literal|
+        written = own && literal.same?(first)
+        captured_holds(literal, literal_self(literal, written ? self_type : nil)) do |type, name|
+          if owning = unlent_owning(type, seen, 0)
+            prefix = written ? "it" : "it runs #{ShareReach.called(literal)}, which"
+            return "#{prefix} captures `#{name}`, which holds `#{owning}`, #{PIN_TAIL}"
           end
         end
       end
-      seen = Set(Type).new
-      held.each do |type, how|
-        if owning = unlent_owning(type, seen, 0)
+      named_found.each do |(named, at)|
+        if owning = unlent_owning(named.type, seen, 0)
+          steps = pin_steps(at, own, first)
+          how = steps.empty? ? "it names `#{named.label}`" : "it reaches `#{named.label}` through #{steps.join(" → ")}"
           return "#{how}, which holds `#{owning}`, #{PIN_TAIL}"
         end
       end
-      remote
+      records.each do |(record, at)|
+        if record.pin?
+          through = (pin_steps(at, own, first) + (record.path + [record.use]).map { |step| "`#{step}`" }).join(" → ")
+          return "it reaches #{record.kind} `#{record.label} : #{record.type}` (module `#{record.module_name}`) through #{through}, which holds `#{record.owning}`, #{PIN_TAIL}"
+        elsif record.kind.empty?
+          return "it calls #{pin_steps(at, own, first).join(" → ")}, and #{record.module_name} arrived as an artifact that does not record what its functions reach, so nothing says whether they reach an owning type without `lends:`; build #{record.module_name}'s artifact again with this compiler, or build against its source"
+        end
+      end
+      nil
+    end
+
+    @pin_met = [] of Def
+    @pin_named = [] of {Named, Def}
+    @pin_records = [] of {IyiMod::ReachRecord, Def}
+    @pin_keys = Set(UInt64).new
+    @pin_types = Set(Type).new
+
+    # The path of the last pin walk to *at*, each def as the reason spells
+    # it, less the block written at the crossing (*own*, *first*).
+    private def pin_steps(at : Def, own : Bool, first : Def) : Array(String)
+      path = path_to(at)
+      path = path[1..] if own && path.first?.same?(first)
+      path.map { |step| "`#{ShareReach.called(step)}`" }
     end
 
     PIN_TAIL = "an owning type that does not keep the lend protocol: `@[Share(owns: true, lends: true)]` on it promises the protocol and lets the unit keep a heap of its own"
@@ -289,9 +315,17 @@ module Iyi
     end
 
     # The first owning type without `lends:`, declared outside std, in
+    # *type* or what it holds, asked afresh: kept per type, since what a
+    # type holds is settled once the program is typed, and an artifact's
+    # pin records ask it of the same types for every function.
+    def unlent_owning(type : Type) : Type?
+      @unlent.fetch(type) { @unlent[type] = unlent_owning(type, Set(Type).new, 0) }
+    end
+
+    # The first owning type without `lends:`, declared outside std, in
     # *type* or what it holds: a union's members, a generic's arguments, a
-    # struct's or a class's fields.
-    def unlent_owning(type : Type, seen : Set(Type) = Set(Type).new, depth : Int32 = 0) : Type?
+    # struct's or a class's fields, past what *seen* holds.
+    def unlent_owning(type : Type, seen : Set(Type), depth : Int32) : Type?
       return nil if depth > 8 || !seen.add?(type)
       base = type
       base = base.base_type if base.is_a?(VirtualType)
@@ -322,80 +356,88 @@ module Iyi
       nil
     end
 
-    # The walk from what *start* calls, and from the defs *roots*, past
-    # what *seen* holds. A function read from an artifact has no body here
-    # (SPEC.md IV.1g): what it reaches is what its artifact recorded when
-    # the body was there, and the walk does not go past it. Each def met
-    # keeps the one it was met from, so a path is built only for what is
-    # found. *pin* is a pin's walk (`pin_reason`): it binds the block of a
+    # The walk from what *start* calls past what *seen* holds, each thing
+    # found with the path of defs to it.
+    private def walk(start : Facts, seen : Set(UInt64)) : Array(Found)
+      found = [] of Found
+      each_found(start, seen, NO_DEFS, false, nil) { |named, at| found << Found.new(named, path_to(at)) }
+      found
+    end
+
+    NO_DEFS = [] of Def
+
+    # The walk itself, yielding each thing found with the def it was found
+    # in, whose path `path_to` builds until the next walk starts. A
+    # function read from an artifact has no body here (SPEC.md IV.1g):
+    # what it reaches is what its artifact recorded when the body was
+    # there, and the walk does not go past it. Each def met keeps the one
+    # it was met from, so a path is built only for what is asked about.
+    # *pin* is a pin's walk (`pin_reason`): it binds the block of a
     # `@[Share]` def too, reads thread-local class variables and the
     # artifacts' pin records, and lists the literals it meets in *met*.
-    private def walk(start : Facts?, seen : Set(UInt64), roots : Array(Def) = [] of Def, pin : Bool = false, met : Array(Def)? = nil) : Array(Found)
-      remote = Set({String, String, Bool}).new
-      parent = {} of Def => Def?
-      parent.compare_by_identity
-      queue = Deque(Def).new
-      enqueue(start, nil, parent, queue, pin) if start
-      roots.each do |root|
-        next if parent.has_key?(root)
-        parent[root] = nil
-        queue << root
-      end
-      found = [] of Found
-      while a_def = queue.shift?
+    # The defs met and the queue are kept from one walk to the next: a
+    # program's every crossing walks thousands of defs, and the compiler
+    # frees nothing.
+    private def each_found(start : Facts?, seen : Set(UInt64), roots : Array(Def), pin : Bool, met : Array(Def)?, & : Named | IyiMod::ReachRecord, Def ->) : Nil
+      remote = nil
+      @parent.clear
+      @queue.clear
+      enqueue(start, nil, pin) if start
+      roots.each { |root| meet(root, nil) }
+      while a_def = @queue.shift?
         if header?(a_def)
           remote_of(a_def).each do |record|
             next if record.pin? && !pin
-            found << Found.new(record, path_to(a_def, parent)) if remote.add?({record.module_name, record.label, record.pin?})
+            yield record, a_def if (remote ||= Set({String, String, Bool}).new).add?({record.module_name, record.label, record.pin?})
           end
           next
         end
         met << a_def if met && (@literal_home.has_key?(a_def) || roots.any?(&.same?(a_def)))
         facts = facts_of(a_def)
         facts.named.each do |named|
-          found << Found.new(named, path_to(a_def, parent)) if seen.add?(named.key)
+          yield named, a_def if seen.add?(named.key)
         end
         if pin
           facts.locals.each do |named|
-            found << Found.new(named, path_to(a_def, parent)) if seen.add?(named.key)
+            yield named, a_def if seen.add?(named.key)
           end
         end
-        enqueue(facts, a_def, parent, queue, pin)
+        enqueue(facts, a_def, pin)
       end
-      found
     end
 
-    private def path_to(a_def : Def, parent : Hash(Def, Def?)) : Array(Def)
+    # The defs from the first the current walk started at to *a_def*.
+    private def path_to(a_def : Def) : Array(Def)
       path = [a_def]
-      while step = parent[path.last]?
+      while step = @parent[path.last]?
         path << step
       end
       path.reverse!
     end
 
-    private def enqueue(facts : Facts, from : Def?, parent : Hash(Def, Def?), queue : Deque(Def), pin : Bool) : Nil
-      add = ->(target : Def) do
-        unless parent.has_key?(target)
-          parent[target] = from
-          queue << target
-        end
-        nil
-      end
+    # Queues *target*, met from *from*, unless the walk met it already.
+    private def meet(target : Def, from : Def?) : Nil
+      return if @parent.has_key?(target)
+      @parent[target] = from
+      @queue << target
+    end
+
+    private def enqueue(facts : Facts, from : Def?, pin : Bool) : Nil
       facts.calls.each do |target|
         next if SPAWN_BROKEN.includes?("callbacks") && std?(target)
-        add.call(target)
+        meet(target, from)
       end
       return if facts.dropped || SPAWN_BROKEN.includes?("creation")
       facts.procs.each do |call|
         home = call.home
         param = call.param
         if home && param
-          bound(home, param, pin) { |literal| add.call(literal) }
+          bound(home, param, pin) { |literal| meet(literal, from) }
         else
-          @literals[call.type]?.try &.each { |literal| add.call(literal) }
+          @literals[call.type]?.try &.each { |literal| meet(literal, from) }
         end
       end
-      facts.passes.each { |type| passed(type) { |literal| add.call(literal) } }
+      facts.passes.each { |type| passed(type) { |literal| meet(literal, from) } }
     end
 
     # The literals a proc handed on may be: every literal of *type*, or
@@ -644,22 +686,22 @@ module Iyi
         key = ShareReach.reach_key(a_def)
         own = facts_of(a_def)
         seen = Set(UInt64).new
-        found = [] of Found
-        own.named.each { |named| found << Found.new(named, [] of Def) if seen.add?(named.key) }
-        found.concat walk(own, seen)
-        found.each do |entry|
-          record = summary_record(key, entry, file)
+        own.named.each do |named|
+          next unless seen.add?(named.key)
+          record = summary_record(key, named, nil, file)
+          records << record if record && recorded.add?({key, record.module_name, record.label, false})
+        end
+        each_found(own, seen, NO_DEFS, false, nil) do |named, at|
+          record = summary_record(key, named, at, file)
           records << record if record && recorded.add?({key, record.module_name, record.label, false})
         end
         next unless pins
         seen = Set(UInt64).new
-        found = [] of Found
-        (own.named + own.locals).each { |named| found << Found.new(named, [] of Def) if seen.add?(named.key) }
+        own.named.each { |named| pin_summary(records, recorded, key, named, nil) if seen.add?(named.key) }
+        own.locals.each { |named| pin_summary(records, recorded, key, named, nil) if seen.add?(named.key) }
         met = [] of Def
-        found.concat walk(own, seen, pin: true, met: met)
-        found.each do |entry|
-          record = pin_record(key, entry)
-          records << record if record && recorded.add?({key, record.module_name, record.label, true})
+        each_found(own, seen, NO_DEFS, true, met) do |named, at|
+          pin_summary(records, recorded, key, named, at)
         end
         met.each do |literal|
           captured_holds(literal, literal_self(literal, nil)) do |type, name|
@@ -674,15 +716,21 @@ module Iyi
       records.sort_by! { |record| {record.function, record.module_name, record.label, record.kind, record.owning} }
     end
 
+    # The defs of the current walk's path to *at* as a record spells them;
+    # none for what the function names itself (nil).
+    private def steps_to(at : Def?) : Array(String)
+      at ? path_to(at).map { |target| ShareReach.called(target) } : [] of String
+    end
+
     # One found thing as the record *key*'s function keeps: nil for state
-    # that is Share or claimed safe for every importer.
+    # that is Share or claimed safe for every importer. *at* is the def
+    # of the current walk it was found in, nil for the function itself.
     # `IYI_SPAWN_BROKEN=robust` takes every claim this build proved as one
     # that holds for every importer.
-    private def summary_record(key : String, entry : Found, file : String) : IyiMod::ReachRecord?
-      steps = entry.path.map { |target| ShareReach.called(target) }
-      case named = entry.named
+    private def summary_record(key : String, named : Named | IyiMod::ReachRecord, at : Def?, file : String) : IyiMod::ReachRecord?
+      case named
       in IyiMod::ReachRecord
-        named.copy_with(function: key, path: steps + named.path)
+        named.copy_with(function: key, path: steps_to(at) + named.path)
       in Named
         state = named.state
         robust = @program.iyi_reach_robust.includes?(state.object_id) || SPAWN_BROKEN.includes?("robust")
@@ -693,24 +741,30 @@ module Iyi
           why = "#{why}; its @[SafeReach] is proven for the program that wrote this artifact and not for every program importing the module: it is written outside the module's initialiser, named outside the module, or answered by a function"
         end
         kind = state.is_a?(Const) ? "the constant" : "the class variable"
-        IyiMod::ReachRecord.new(key, named.label, named.type.to_s, kind, named.use, steps, why, module_at(named.declared))
+        IyiMod::ReachRecord.new(key, named.label, named.type.to_s, kind, named.use, steps_to(at), why, module_at(named.declared))
       end
+    end
+
+    # One thing a pin's walk found, kept as the pin record *key*'s function
+    # keeps when it is one (`pin_record`) and *recorded* has none like it.
+    private def pin_summary(records : Array(IyiMod::ReachRecord), recorded : Set({String, String, String, Bool}), key : String, named : Named | IyiMod::ReachRecord, at : Def?) : Nil
+      record = pin_record(key, named, at)
+      records << record if record && recorded.add?({key, record.module_name, record.label, true})
     end
 
     # One thing a pin's walk found as the pin record *key*'s function
     # keeps: state holding an owning type without `lends:`, or another
     # artifact's pin record, passed on. nil for anything else; a function
     # of an artifact that recorded nothing is already its own record.
-    private def pin_record(key : String, entry : Found) : IyiMod::ReachRecord?
-      steps = entry.path.map { |target| ShareReach.called(target) }
-      case named = entry.named
+    private def pin_record(key : String, named : Named | IyiMod::ReachRecord, at : Def?) : IyiMod::ReachRecord?
+      case named
       in IyiMod::ReachRecord
-        named.pin? ? named.copy_with(function: key, path: steps + named.path) : nil
+        named.pin? ? named.copy_with(function: key, path: steps_to(at) + named.path) : nil
       in Named
         owning = unlent_owning(named.type)
         return nil unless owning
         kind = named.state.is_a?(Const) ? "the constant" : "the class variable"
-        IyiMod::ReachRecord.new(key, named.label, named.type.to_s, kind, named.use, steps, "", module_at(named.declared), owning.to_s)
+        IyiMod::ReachRecord.new(key, named.label, named.type.to_s, kind, named.use, steps_to(at), "", module_at(named.declared), owning.to_s)
       end
     end
 

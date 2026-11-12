@@ -233,6 +233,12 @@ class IyiHeap
   @[ThreadLocal]
   @@scratch : UInt64 = 0_u64
 
+  # The unit an idle worker's takeover collects on this thread
+  # (`collect_taken`), 0 otherwise: the collection gives way when a fiber
+  # of that unit is woken meanwhile (`give_way?`).
+  @[ThreadLocal]
+  @@taken_unit : UInt64 = 0_u64
+
   SCR_STACK  =    0_u64
   SCR_CAP    =    8_u64
   SCR_LEN    =   16_u64
@@ -407,6 +413,16 @@ class IyiHeap
 
   def self.takeovers : UInt64
     IyiStat.get(IyiStat::TAKEOVERS)
+  end
+
+  # Idle takeovers that gave way to a fiber of the taken unit woken
+  # meanwhile (`give_way?`): an `IyiStat` slot named here, in the flag's
+  # own file, so the flag-off prelude stays as it was line for line.
+  # 137-139 are h22/hp-cputmac's.
+  STAT_GIVEN_WAY = 140_u64
+
+  def self.takeovers_given_way : UInt64
+    IyiStat.get(STAT_GIVEN_WAY)
   end
 
   def self.detached_partitions : UInt64
@@ -750,7 +766,7 @@ class IyiHeap
   def self.quiet(index : Int32, arena : UInt64, abortable : Bool) : Bool
     while read64(arena + OFF_SWEEPING) == IyiMark.epoch
       class_unlock(index)
-      return false if abortable && stop_requested?
+      return false if abortable && (stop_requested? || give_way?)
       IyiMark.spin_pause
       IyiThread.park_if_requested unless abortable
       class_lock(index)
@@ -2399,7 +2415,7 @@ class IyiHeap
       each_field(s, base) { |word| local_shade(record, id, parity, word) }
       count = read64(s + SCR_COUNT) &+ 1_u64
       write64(s + SCR_COUNT, count)
-      if count & 255_u64 == 0 && (stop_requested? || @@abandon_next)
+      if count & 255_u64 == 0 && (stop_requested? || @@abandon_next || give_way?)
         @@abandon_next = false
         write64(s + SCR_LEN, 0_u64)
         return false
@@ -2642,7 +2658,7 @@ class IyiHeap
     while index < CLASSES
       runs = record &+ (FILL + index).to_u64 * 8_u64
       if read64(runs) != 0
-        return false if stop_requested?
+        return false if stop_requested? || give_way?
         class_lock(index)
         return false unless quiet_class(index, true)
         if keep
@@ -3784,10 +3800,30 @@ class IyiHeap
   # the fibers that waited for it onto this worker's ring.
   def self.collect_taken(st : IyiSchedulerState, record : UInt64, takeover : Bool) : Nil
     st.unit = Pointer(Void).new(read64(record + REC_UNIT)).as(IyiUnit)
+    @@taken_unit = read64(record + REC_UNIT)
     swept = local_collect(record, nil, takeover, true, false)
+    @@taken_unit = 0_u64
     IyiStat.add(IyiStat::IDLE_COLLECTIONS, 1_u64) if swept && !takeover
     Pointer(Atomic(UInt64)).new(record + REC_STATE).value.sub(REC_BUSY)
     IyiScheduler.release_unit(st)
+  end
+
+  # Whether the takeover this thread runs (`collect_taken`) gives way: a
+  # fiber of the taken unit was woken and waits for its token on the
+  # unit's list (`IyiScheduler.take_unit`). It ends as a stop ends a
+  # local collection - a mark abandoned, a sweep stopped between two
+  # classes or in a class's wait for the helpers' slices, the next
+  # collection clearing the marks first - and the token goes to the
+  # fiber (`release_unit`). The unit's wake is its own news: a reply on
+  # the network that came while the idle worker collected, which the
+  # fiber waited out to the collection's end, under the shared host's
+  # load of tssh 100 to 260 ms a query (heap22 S6, TailHunt2).
+  def self.give_way? : Bool
+    unit = @@taken_unit
+    return false if unit == 0_u64
+    return false unless Pointer(Void).new(unit).as(IyiUnit).waiting?
+    IyiStat.add(STAT_GIVEN_WAY, 1_u64)
+    true
   end
 end
 

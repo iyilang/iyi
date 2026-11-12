@@ -18,9 +18,10 @@
 # sweeps emptied, an idle takeover that reads no parked fiber's stack,
 # an idle takeover of a unit whose `Unit` value is still being built, the
 # same stacks unread by a collection of a unit parked dirty and owing
-# nothing, a busy program whose parked unit is taken after two ticks, a
-# sweep that keeps its runs and drops the return stack or
-# lists a free chunk again, a parked unit's spare runs left off the idle
+# nothing, a busy program whose parked unit is taken after two ticks, an
+# idle takeover that holds its unit while a fiber of the unit woken
+# meanwhile waits, a sweep that keeps its runs and drops the return stack
+# or lists a free chunk again, a parked unit's spare runs left off the idle
 # workers' test, a pooled run's blocks taken as never written, a dead unit's
 # pooled run left carved for a stale word to pass the root test, a
 # publication
@@ -360,6 +361,14 @@ if [ "$PART" = all ] || [ "$PART" = broken ]; then
   # see it. The busy check alone (`HEAP22_ONLY=busy`).
   HEAP22_ONLY=busy prove_fails "a busy program's parked unit taken after two ticks" nobusy "busy:" \
     '{ if (sub(/parks &- before >= IDLE_BUSY_PARKS &\* \(tick &- since\) \? IDLE_BUSY_TICKS : 2_u64/, "2_u64")) found = 1; print } END { if (!found) exit 3 }' \
+    heap_partition.iyi
+
+  # An idle worker's takeover that ignores the wake of a fiber of the
+  # unit it collects (`IyiHeap.give_way?` never true): the fiber waits
+  # out the whole collection - no soundness check sees it, the giveway
+  # check alone (`HEAP22_ONLY=giveway`) does.
+  HEAP22_ONLY=giveway prove_fails "a takeover that keeps a woken fiber waiting" nogiveway "giveway:" \
+    '{ if (sub(/return false unless Pointer\(Void\)\.new\(unit\)\.as\(IyiUnit\)\.waiting\?/, "return false if unit != 0_u64")) found = 1; print } END { if (!found) exit 3 }' \
     heap_partition.iyi
 
   # A sweep that keeps its runs and drops the return stack, as the whole

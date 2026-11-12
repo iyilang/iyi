@@ -60,6 +60,13 @@ PY="${PYTHON:-python3}"
 # the unit's held bytes show (heap_local's `unswept`, `spare`).
 VALUE_COPIES="TlsIdentity chain copy,a death that keeps its emptied runs,spare runs left off the idle test"
 
+# heap_local.sh's copies not run here: `nobusy` (a busy program's parked
+# unit taken after two ticks) is a timing, which no heap word shows, and
+# its check (heap_local's `busy`) is skipped under `IYI_HEAP_STRESS`,
+# where the program parks too slowly to count as busy; heap_local.sh
+# catches it outside stress.
+NOT_STRESSED="nobusy"
+
 # heap_crossings.sh's copies, sourced below, skip what Windows lacks.
 WINDOWS=0
 case "$(uname -s)" in
@@ -228,6 +235,7 @@ prove_caught() {
 prove_fails() {
   local label="$1" dir="$2" script="$4" file="$5"
   chosen "$dir" || return 0
+  [[ ",$NOT_STRESSED," == *",$dir,"* ]] && return 0
   mkdir -p "$WORK/$dir/iyi"
   cp -R "$REPO/src/iyi/." "$WORK/$dir/iyi/"
   if ! awk "$script" "$REPO/src/iyi/$file" >"$WORK/$dir/iyi/$file"; then

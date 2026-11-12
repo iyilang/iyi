@@ -10482,9 +10482,7 @@ require "./file"
     PARTITION_HOLDS_TIMED_OUT = 126_u64
     # Idle collections (heap_partition.iyi, `take_over_quiet`): their
     # count, the idle clock's tick and when it last turned, whether a
-    # parked dirty partition may be waiting, and the walk over records;
-    # then the threads' parks summed and the tick when the last walk
-    # began, and the ticks a dirty partition waits (`idle_delay`).
+    # parked dirty partition may be waiting, and the walk over records.
     IDLE_COLLECTIONS = 128_u64
     IDLE_TICK        = 129_u64
     IDLE_TICK_NS     = 130_u64
@@ -10492,9 +10490,6 @@ require "./file"
     IDLE_CURSOR      = 132_u64
     IDLE_DONE_TICK   = 133_u64
     IDLE_SEEN        = 134_u64
-    IDLE_PARKS       = 137_u64
-    IDLE_PARKS_TICK  = 138_u64
-    IDLE_DELAY       = 139_u64
     # Local sweeps that kept every run (heap_partition.iyi, `local_sweep`'s
     # *keep*), and the bytes of runs with nothing live those sweeps kept.
     LOCAL_KEPT        = 135_u64

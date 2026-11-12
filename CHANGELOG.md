@@ -214,7 +214,13 @@ least 768 KiB, not 256 KiB, so the app collects less often and pays each
 collection's walk of its published objects (40 % of a collection) less.
 It now takes 1.003 times the flag off's CPU a request at 0.57 of its steady
 RSS (96 against 169 MB; Linux, 6 rounds side by side), and 0.92 at 0.53 on
-tssh (89 against 168 MB).
+tssh (89 against 168 MB). An idle worker's look now takes no lock and
+reads the clock once when the tick's walk is done, and a busy program
+(256 parks a tick or more) leaves a parked unit four ticks, not two, and
+none while the sweep helpers are mid-round: on tmac (k3, 6 clean rounds)
+the flag on's CPU a request went from 1.051 times the flag off's to
+0.976 (0.979 times 0.21.0's, from 1.053), at a steady RSS 0.3 % above
+the old rule's.
 
 heap22 S6 memory return, under `-Dheap_partitions`. Inside one process
 #145's app ratcheted its resident set endpoint after endpoint (50 to 343

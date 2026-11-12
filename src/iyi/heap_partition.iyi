@@ -2174,11 +2174,18 @@ class IyiHeap
   # a class's last one included, and its garbage is free. A busy unit,
   # which parks again within a tick, is never taken, and pays a load and
   # a compare at each park; one waiting long on the network mid-request
-  # is collected as any idle takeover collects it - after ten ticks
+  # is collected as any idle takeover collects it - after four ticks
   # rather than two while the program is busy (`idle_delay`).
   IDLE_NS = 100000000_u64
-  IDLE_BUSY_TICKS = 10_u64
+  IDLE_BUSY_TICKS = 4_u64
   IDLE_BUSY_PARKS = 256_u64
+  # The busy rule's `IyiStat` slots (free in prelude.iyi's table, kept
+  # here so a build without partitions is unchanged): the threads' parks
+  # summed and the tick when the last walk began, and the ticks a dirty
+  # partition waits (`idle_delay`).
+  STAT_IDLE_PARKS      = 137_u64
+  STAT_IDLE_PARKS_TICK = 138_u64
+  STAT_IDLE_DELAY      = 139_u64
 
   # Partition *record* is dirty - allocated in since its last whole
   # collection - at a park its unit's thread makes: stamped with the idle
@@ -3643,7 +3650,7 @@ class IyiHeap
     # 1.5 to 3.9 ms each on #145's endpoints, against 0.43 ms for one
     # later (tmac, S6, CpuTmac). The round ends within milliseconds, and
     # the next worker out of fibers looks again.
-    return false if IyiStat.get(IyiStat::IDLE_DELAY) == IDLE_BUSY_TICKS && IyiMark.helpers_sweeping?
+    return false if IyiStat.get(STAT_IDLE_DELAY) == IDLE_BUSY_TICKS && IyiMark.helpers_sweeping?
     return true if @@takeover_armed != 0 && take_over_owing(st)
     take_over_quiet(st, now)
   end
@@ -3661,7 +3668,7 @@ class IyiHeap
     true
   end
 
-  # The next dirty partition parked for two ticks or more - ten while the
+  # The next dirty partition parked for two ticks or more - four while the
   # program is busy (`idle_delay`) - its unit taken and collected as an
   # owing one is. The records are walked 256 at a time under the runtime
   # lock, one walk a tick at most, which turns the clock (read at *now*)
@@ -3687,7 +3694,7 @@ class IyiHeap
         IyiRuntimeLock.unlock
         return false
       end
-      IyiStat.set(IyiStat::IDLE_DELAY, idle_delay(tick))
+      IyiStat.set(STAT_IDLE_DELAY, idle_delay(tick))
       # Cleared before the walk: a park that stamps behind it says so
       # again.
       pending.value.set(0_u64)
@@ -3696,7 +3703,7 @@ class IyiHeap
     end
     last_id = @@record_slabs * (PARTITION_SLAB // PARTITION_BYTES)
     looked = 0
-    delay = IyiStat.get(IyiStat::IDLE_DELAY)
+    delay = IyiStat.get(STAT_IDLE_DELAY)
     while found == 0 && cursor <= last_id && looked < 256
       record = partition_at(cursor)
       cursor = cursor &+ 1_u64
@@ -3744,10 +3751,10 @@ class IyiHeap
       parks = parks &+ state.parks
       state = state.next_state
     end
-    before = IyiStat.get(IyiStat::IDLE_PARKS)
-    since = IyiStat.get(IyiStat::IDLE_PARKS_TICK)
-    IyiStat.set(IyiStat::IDLE_PARKS, parks)
-    IyiStat.set(IyiStat::IDLE_PARKS_TICK, tick)
+    before = IyiStat.get(STAT_IDLE_PARKS)
+    since = IyiStat.get(STAT_IDLE_PARKS_TICK)
+    IyiStat.set(STAT_IDLE_PARKS, parks)
+    IyiStat.set(STAT_IDLE_PARKS_TICK, tick)
     # A thread gone takes its count with it: no news then, not busy.
     return 2_u64 if parks <= before || tick <= since
     parks &- before >= IDLE_BUSY_PARKS &* (tick &- since) ? IDLE_BUSY_TICKS : 2_u64

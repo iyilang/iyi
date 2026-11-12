@@ -70,6 +70,12 @@
 # - `idle:` units parked with garbage but no debt, and no global
 #   collection: idle workers, woken by the idle clock, collect every one
 #   within 3 s, their lists whole after, and some partition holds less.
+# - `busy:` while two units pass a value back and forth - thousands of
+#   parks a tick - a unit parked dirty is not collected before
+#   `IyiHeap::IDLE_BUSY_TICKS` ticks of the idle clock, by a walk that
+#   gave it that many; once they stop, one parked so is collected by a
+#   walk that gave it two (under `IYI_HEAP_STRESS`, where units collect
+#   themselves before they park, the parked unit is stamped by hand).
 # - `inflight:` a unit that allocates past its budget without parking is
 #   collected in flight, its live list whole.
 # - `kept:` a unit's parks collect keeping its runs, in rounds of garbage
@@ -1841,6 +1847,145 @@
     IyiHeap.collect_every_park = true
   end
 
+  # ── busy ──────────────────────────────────────────────────────────────
+
+  # A value passed back and forth between two units, every receive a
+  # park, until *stop* holds a word; the follower is then sent -1.
+  # Answers the round trips.
+  def busy_lead(ping : Channel(Int64), pong : Channel(Int64), stop : Channel(Int64)) : Int64
+    trips = 0_i64
+    while true
+      done = false
+      select
+      when word = stop.receive
+        done = true
+      else
+      end
+      if done
+        ping.send(-1_i64)
+        return trips
+      end
+      ping.send(trips)
+      pong.receive
+      trips = trips &+ 1
+    end
+    trips
+  end
+
+  def busy_follow(ping : Channel(Int64), pong : Channel(Int64)) : Int64
+    while true
+      got = ping.receive
+      return 0_i64 unless got.is_a?(Int64) && got >= 0_i64
+      pong.send(got)
+    end
+    0_i64
+  end
+
+  # Partition *record*, whose unit parks dirty (`idle_task`), watched
+  # every millisecond until an idle worker has collected it: its stamp,
+  # the idle clock's tick read after the collection was seen - the
+  # collection's own tick or a later one - and the ticks the last walk
+  # gave a parked partition (`IyiHeap::STAT_IDLE_DELAY`).
+  def busy_watch(record : UInt64, what : String) : Array(UInt64)
+    count = IyiHeap.partition_collections(record)
+    stamp = 0_u64
+    waited = 0
+    while stamp == 0_u64 && waited < 3000
+      stamp = IyiHeap.read64(record &+ IyiHeap::REC_IDLE_TICK)
+      if stamp == 0_u64
+        sleep(1)
+        waited = waited + 1
+      end
+    end
+    fail("busy: #{what}: the parked unit's partition was never stamped") if stamp == 0_u64
+    seen = 0_u64
+    collected = false
+    waited = 0
+    while !collected
+      collected = IyiHeap.partition_collections(record) != count
+      seen = IyiStat.get(IyiStat::IDLE_TICK)
+      if !collected
+        # The idle clock turns only at an idle worker's look: a minute
+        # with none is a failure too.
+        if seen > stamp &+ 400_u64 || waited >= 60000
+          fail("busy: #{what}: the parked unit was not collected in #{seen &- stamp} ticks of the idle clock, #{waited} ms")
+          return [stamp, seen, 0_u64]
+        end
+        sleep(1)
+        waited = waited + 1
+      end
+    end
+    [stamp, seen, IyiStat.get(IyiHeap::STAT_IDLE_DELAY)]
+  end
+
+  # The busy rule (`IyiHeap.idle_delay`): a program whose threads park
+  # `IDLE_BUSY_PARKS` times a tick leaves a unit parked dirty for
+  # `IDLE_BUSY_TICKS` ticks - it waits mid-request on something slow -
+  # and an idle one takes it after two. A walk takes a partition stamped
+  # *s* at tick *t* (the clock plus one) once *s* + delay <= *t*: taken
+  # before its ticks, the tick seen after it plus one is below that.
+  def busy_check(workers : Int32) : Nil
+    # Under `IYI_HEAP_STRESS` (bench/heap_verify.sh) every park collects
+    # and every chaos point slows the passing: the pairs park far fewer
+    # than `IDLE_BUSY_PARKS` times a tick, the program is not busy by the
+    # rule's own measure, and the check would fail a sound runtime. The
+    # rule is a timing, not a heap word the verifier could see; it is
+    # checked outside stress, and its copy (`nobusy`) caught there.
+    {% if flag?(:heap_verify) %}
+      return if IyiHeapVerify.stress != 0_u64
+    {% end %}
+    IyiHeap.collect_every_park = false
+    group do |g|
+      # A pair for every two workers, the rest left to look idle; a pair
+      # a worker left no worker idle, and the idle clock never turned.
+      pairs = workers > 2 ? workers // 2 : 1
+      stop = Channel(Int64).new(pairs)
+      leads = [] of IyiTask(Int64)
+      follows = [] of IyiTask(Int64)
+      pairs.times do
+        ping = Channel(Int64).new
+        pong = Channel(Int64).new
+        leads << g.spawn(unit: :new) { busy_lead(ping, pong, stop) }
+        follows << g.spawn(unit: :new) { busy_follow(ping, pong) }
+      end
+      # Three ticks of passing before the unit parks.
+      sleep(300)
+      go = Channel(Int64).new(1)
+      ready = Channel(UInt64).new(1)
+      sleeper = g.spawn(unit: :new) { idle_task(1_i64, go, ready) }
+      got = ready.receive
+      record = got.is_a?(UInt64) ? got : 0_u64
+      fail("busy: a parked unit sent no record") if record == 0_u64
+      busy = busy_watch(record, "busy")
+      pairs.times { stop.send(1_i64) }
+      trips = 0_i64
+      leads.each do |lead|
+        answer = lead.value
+        trips = trips &+ answer if answer.is_a?(Int64)
+      end
+      follows.each { |follow| follow.value }
+      go.send(1_i64)
+      value = sleeper.value
+      fail("busy: #{value} nodes of a parked unit's list read wrong") if value != 0_i64
+      fail("busy: a parked unit stamped #{busy[0]} was collected by tick #{busy[1]} with the program busy (#{trips} round trips), before #{IyiHeap::IDLE_BUSY_TICKS} ticks") if busy[1] &+ 1_u64 < busy[0] &+ IyiHeap::IDLE_BUSY_TICKS
+      fail("busy: the walks gave a parked unit #{busy[2]} ticks with the program busy (#{trips} round trips), not #{IyiHeap::IDLE_BUSY_TICKS}") if busy[2] != IyiHeap::IDLE_BUSY_TICKS
+      # The passing over: the next walks count only what parks now.
+      sleep(300)
+      go_idle = Channel(Int64).new(1)
+      ready_idle = Channel(UInt64).new(1)
+      sleeper_idle = g.spawn(unit: :new) { idle_task(2_i64, go_idle, ready_idle) }
+      got_idle = ready_idle.receive
+      record_idle = got_idle.is_a?(UInt64) ? got_idle : 0_u64
+      fail("busy: a parked unit sent no record") if record_idle == 0_u64
+      idle = busy_watch(record_idle, "idle")
+      go_idle.send(1_i64)
+      value_idle = sleeper_idle.value
+      fail("busy: #{value_idle} nodes of a parked unit's list read wrong") if value_idle != 0_i64
+      fail("busy: the walk that collected a parked unit in an idle program gave it #{idle[2]} ticks, not 2") if idle[2] != 2_u64
+    end
+    IyiHeap.collect_every_park = true
+  end
+
   # ── inflight ──────────────────────────────────────────────────────────
 
   def inflight_task : Int64
@@ -2087,12 +2232,15 @@
   # 933b4d005), and `weak` leaves the frontier's cells to `frontier`.
   # `HEAP22_ONLY=idle`: the idle check alone, for the noidle copy of
   # bench/heap_local.sh, whose broken collection the takeover check would
-  # otherwise meet first; `HEAP22_ONLY=kept`, the kept check alone, for
+  # otherwise meet first; `HEAP22_ONLY=busy`, the busy check alone, for
+  # the nobusy copy; `HEAP22_ONLY=kept`, the kept check alone, for
   # the nokeptfree copy, whose rings the parks of `abandon` and `return`
   # would hand out first, dying of a memory fault there.
   only = Program.env("HEAP22_ONLY")
   if only == "idle"
     idle_check(workers)
+  elsif only == "busy"
+    busy_check(workers)
   elsif only == "kept"
     kept_check
   else
@@ -2117,6 +2265,7 @@
     takeover_check(workers)
     construct_check
     idle_check(workers)
+    busy_check(workers)
     spare_check
     inflight_check
     settle("death")

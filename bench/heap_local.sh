@@ -18,7 +18,8 @@
 # sweeps emptied, an idle takeover that reads no parked fiber's stack,
 # an idle takeover of a unit whose `Unit` value is still being built, the
 # same stacks unread by a collection of a unit parked dirty and owing
-# nothing, a sweep that keeps its runs and drops the return stack or
+# nothing, a busy program whose parked unit is taken after two ticks, a
+# sweep that keeps its runs and drops the return stack or
 # lists a free chunk again, a parked unit's spare runs left off the idle
 # workers' test, a pooled run's blocks taken as never written, a dead unit's
 # pooled run left carved for a stale word to pass the root test, a
@@ -351,6 +352,14 @@ if [ "$PART" = all ] || [ "$PART" = broken ]; then
   # check stamps the parked units dirty itself.
   HEAP22_ONLY=idle prove_fails "an idle collection that reads no parked stack" noidle "idle:" \
     '{ if (sub(/if !\(running\.is_a\?\(IyiFiber\) && running\.object_id == fiber\.object_id\) && fiber\.state/, "if running.is_a?(IyiFiber) \\&\\& running.object_id != fiber.object_id \\&\\& fiber.state")) found = 1; print } END { if (!found) exit 3 }' \
+    heap_partition.iyi
+
+  # The busy rule (`IyiHeap.idle_delay`) gone: every walk gives a parked
+  # unit two ticks, so a busy program's unit waiting on its database is
+  # taken mid-request again - slower, and no check of soundness would
+  # see it. The busy check alone (`HEAP22_ONLY=busy`).
+  HEAP22_ONLY=busy prove_fails "a busy program's parked unit taken after two ticks" nobusy "busy:" \
+    '{ if (sub(/parks &- before >= IDLE_BUSY_PARKS &\* \(tick &- since\) \? IDLE_BUSY_TICKS : 2_u64/, "2_u64")) found = 1; print } END { if (!found) exit 3 }' \
     heap_partition.iyi
 
   # A sweep that keeps its runs and drops the return stack, as the whole

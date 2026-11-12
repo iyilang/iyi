@@ -214,6 +214,19 @@ had named a 32-byte chunk another unit had taken (`-Dheap_verify`,
 now averages 104, 136, 154 and 175 MB a cycle where it averaged 246,
 450, 477 and 494 (tssh, 8 s an endpoint; bench/heap_drain).
 
+Under `-Dheap_partitions` a store writes every byte of its slot: a
+union's bytes past its arm and its tag padding, and every value's
+padding, are written as zero. Stale words there (iyi-db's `DBValue`, 40
+bytes, holds an `Int64` in its first word after the tag and kept three
+words of whatever the slot held before) named chunks another unit had
+freed, and #145's app exited 86 under `-Dheap_verify` at stress 0 on 5
+of 5 seeds; now 0 of 5 (bench/heap_codegen `holes` and its
+`IYI_SPAWN_BROKEN=holes` copy). The flag-off build is unchanged byte for
+byte, and a plain build keeps such words (54 in S6's repro, 69 with
+`--release`, at 0.21.0) as conservative retention only. JSON and the
+db rows probe cost 0.986-1.022 of the build without the zeroing (Linux,
+6 and 15 rounds).
+
 Two races older than heap22, in every build: units setting or deleting
 environment variables at once lost them (tmac, 6 units × 300 rounds at
 `IYI_WORKERS=4`: 261-301 of 1,800 reads of their own write lost); writers

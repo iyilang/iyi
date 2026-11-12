@@ -1972,14 +1972,31 @@
   # ── spare ─────────────────────────────────────────────────────────────
 
   # Garbage first, so its runs hold none of the list (`idle_task`), then
-  # a list; parked, its park's collection keeps the garbage's runs.
+  # a list; parked, its park's collection keeps the garbage's runs. The
+  # garbage fills several runs of the largest size: a stale word keeps
+  # one chain of fifty, and a run is spare only with nothing live on it.
+  # `idle_junk`'s 400 nodes filled one run, and a stale word on it left
+  # no spare for 5 units in a row (Linux, verify release, 1 run of 16,
+  # 8 units of 24 tried without spare); with 3,000 nodes 0 of 24 runs
+  # (CpuFix4).
   def spare_task(ready : Channel(UInt64), go : Channel(Int64)) : Int64
     base = 9500000000_i64
-    idle_junk
+    spare_junk
     keep = build(base, 200, 0)
     ready.send(IyiHeap.current_record)
     go.receive
     broken(keep, base, 200)
+  end
+
+  # `idle_junk`'s chains of fifty, 3,000 nodes: about four 64 KiB runs.
+  def spare_junk : Int64
+    junk : Node? = nil
+    i = 0
+    while i < 3000
+      junk = Node.new(i.to_i64, i % 50 == 0 ? nil : junk)
+      i = i + 1
+    end
+    junk.is_a?(Node) ? 1_i64 : 0_i64
   end
 
   # A unit whose park's collection kept runs with nothing live on them

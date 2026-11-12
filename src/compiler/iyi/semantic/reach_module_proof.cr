@@ -437,8 +437,13 @@ module Iyi
 
     # Whether *other* is a file an answer about *file* rests on: the
     # module's, one it imports, or the prelude's. A path is compared as
-    # `File.expand_path` spells it: std's files are named through the
-    # compiler's own `../src`, the prelude's are not.
+    # `File.expand_path` spells it, read as posix: std's files are named
+    # through the compiler's own `../src`, the prelude's are not, and on
+    # Windows the prefix ended in `File::SEPARATOR`, which is `/` there too,
+    # while every expanded path is spelled with `\`. No prelude file was
+    # inside, every claim whose state passes through a prelude call was
+    # stored as nothing, and each build proved std's claims again
+    # (`bench/reach_rule.sh` step 5, on tssh at 733534bd4).
     private def inside?(file : String, other : String) : Bool
       return true if module_files(file).includes?(other)
       prefix = prelude_prefix(file)
@@ -446,7 +451,7 @@ module Iyi
     end
 
     private def expanded(path : String) : String
-      @expanded[path] ||= File.expand_path(path)
+      @expanded[path] ||= ::Path[File.expand_path(path)].to_posix.to_s
     end
 
     @expanded = {} of String => String
@@ -461,8 +466,8 @@ module Iyi
 
     @prelude_files = {} of String => Array(String)
 
-    # The prelude's directory beside the std tree *file* is in, expanded,
-    # with a trailing separator.
+    # The prelude's directory beside the std tree *file* is in, expanded
+    # and posix, with a trailing `/`.
     private def prelude_prefix(file : String) : String?
       dir = File.dirname(expanded(file))
       @prelude_prefixes.fetch(dir) do
@@ -470,7 +475,7 @@ module Iyi
         current = dir
         loop do
           if File.file?(File.join(current, "iyi", "prelude.iyi"))
-            found = File.join(current, "iyi") + File::SEPARATOR
+            found = "#{::Path[File.join(current, "iyi")].to_posix}/"
             break
           end
           parent = File.dirname(current)

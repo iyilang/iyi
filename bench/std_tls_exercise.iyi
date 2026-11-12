@@ -1608,6 +1608,51 @@ def binding_round(listener : IyiSocket, served : TlsServerConfig, host : String,
   "client #{ends[0]}; server #{ends[1]}"
 end
 
+# A resumption to *listener* whose early data the server takes, and whose
+# socket is then closed under the server's connection, with the early data
+# and the client's Finished still to read: what `read_early` came to at
+# its end, and what `read` did.
+def closed_under_early(listener : IyiSocket, served : TlsServerConfig, config : TlsConfig, session : TlsSession) : String
+  port = listener.local_port
+  ends = [""]
+  group do |g|
+    server = g.spawn do
+      accepted = listener.accept
+      if accepted.is_a?(IyiSocket)
+        conn = TlsServer.over(accepted, served, 5000)
+        if conn.is_a?(TlsError)
+          accepted.close
+          conn.message
+        else
+          taken = conn.early_data?
+          accepted.close
+          early = conn.read_early
+          while early.is_a?(String) && !early.empty?
+            early = conn.read_early
+          end
+          after = conn.read
+          "taken=#{taken} read_early=#{early.is_a?(TlsError) ? early.message : "its end"} read=#{after.is_a?(TlsError) ? after.message : after.inspect}"
+        end
+      else
+        "no connection"
+      end
+    end
+    client = g.spawn do
+      socket = IyiSocket.connect("127.0.0.1", port)
+      if socket.is_a?(IyiSocket)
+        conn = TlsClient.over(socket, "fuzz.test", config, 5000, session, "early-bytes")
+        conn.is_a?(TlsError) ? socket.close : conn.abort
+      end
+      0
+    end
+    client.value
+    heard = server.value
+    ends[0] = heard.is_a?(String) ? heard : "PANIC: #{heard.message}"
+    0
+  end
+  ends[0]
+end
+
 # The client's configuration: the binding root, at a time its leaf is good.
 def binding_config : TlsConfig
   config = TlsConfig.new
@@ -1700,6 +1745,15 @@ check binding_round(first_listener, eager, "fuzz.test", trusting, early_session,
 eager.max_early_data = 100
 check binding_round(first_listener, eager, "fuzz.test", trusting, early_session, "x" * 1000) == "client resumed=yes early=Resent; server resumed=yes early=0",
   "early data a ticket allows past a lowered limit is declined, and sent again"
+# The socket closed under a connection whose early data was taken: reading
+# for what is still behind it is the connection's end, at `read_early` and
+# at `read`, which finishes the handshake first.
+eager.max_early_data = 16384
+closing = TlsSession.new
+binding_round(first_listener, eager, "fuzz.test", trusting, closing)
+said_closed = closed_under_early(first_listener, eager, trusting, closing)
+check said_closed == "taken=true read_early=tls: the connection is closed read=tls: the connection is closed",
+  "a socket closed under taken early data ends read_early and read: #{said_closed}"
 # A server_name of 254 bytes is refused before anything is sealed with it;
 # one of 253 is taken, and the client then refuses the certificate.
 long_name = "a" * 63 + "." + "b" * 63 + "." + "c" * 63 + "." + "d" * 62

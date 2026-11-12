@@ -3269,6 +3269,8 @@ prove_broken "a server_name of any length taken" "a server_name past 253 bytes i
   '          if name.size > MAX_HOST_NAME' '          if false'
 prove_broken "a server_name of 253 bytes refused" "a server_name of 253 bytes is taken" \
   '          if name.size > MAX_HOST_NAME' '          if name.size >= MAX_HOST_NAME'
+prove_broken "a closed socket read for early data" "a socket closed under taken early data ends read_early and read" \
+  '    return TlsError.new("the connection is closed") if @socket.closed?' ''
 prove_broken "a ticket taken whatever is asked of a client now" "a ticket sealed for a client that showed no certificate is not taken where one is required" \
   '      next unless client_held?(chain)' ''
 prove_broken "a ticket's chain taken unchecked" "a ticket's chain is checked under the roots of the configuration that takes it" \

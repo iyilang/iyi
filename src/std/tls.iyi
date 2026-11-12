@@ -1801,8 +1801,12 @@ pub abstract class TlsConnection
   end
 
   # One read of the socket into *buffer*, up to *count* bytes, its wait
-  # cut to what is left of the deadline.
+  # cut to what is left of the deadline. A socket closed under the
+  # connection is the connection's end, said here for every read there is
+  # - `read_early` and `finish` among them: `IyiSocket#read` on a closed
+  # socket is a panic.
   private def read_socket(buffer : Pointer(UInt8), count : Int32) : Int32 | Cancelled | SocketError | TlsError
+    return TlsError.new("the connection is closed") if @socket.closed?
     return @socket.read(buffer, count) if @deadline_ns == 0_i64
     left = (@deadline_ns - Time.monotonic_nanoseconds.to_i64) // 1000000_i64
     return TlsError.new("#{@place} took past the time given to #{@handshaking ? "the handshake" : "the read"}", timed_out: true) if left <= 0

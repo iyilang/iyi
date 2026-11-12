@@ -44,25 +44,6 @@ class String
     memory.as(String)
   end
 
-  # The same, for a caller that already knows how many characters it is
-  # about to write. Concatenation is the caller that matters: the
-  # characters of `a + b` are the characters of `a` and then those of
-  # `b`, because a byte that starts a character in either one still
-  # starts one after the join, so the count is the sum and scanning for
-  # it again reads the whole result a second time. Doing that on every
-  # `+` makes building a string in a loop quadratic in its own length,
-  # which is how a 400 kilobyte file took half a minute to expand.
-  def self.new(bytesize : Int32, length : Int32, & : Pointer(UInt8) -> Nil) : String
-    memory = String.memory(bytesize + HEADER_SIZE + 1)
-    buffer = memory + HEADER_SIZE
-    yield buffer
-
-    header = memory.as(Pointer(Int32))
-    header[0] = bytesize
-    header[1] = length
-    memory.as(String)
-  end
-
   protected def self.memory(bytes : Int32) : Pointer(UInt8)
     {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || flag?(:darwin) || flag?(:wasm32) || flag?(:win32)) %}
       IyiHeap.new_object(bytes.to_u64, "".crystal_type_id.to_u64, true, true).as(Pointer(UInt8))
@@ -96,48 +77,6 @@ class String
       k = k + 1
     end
     width > 1 && (point < (1 << (5 * width - 4)) || point > 0x10FFFF || (point >= 0xD800 && point < 0xE000)) ? -1 : point
-  end
-
-  # Bytes moved eight at a time where both ends allow it, one at a time
-  # where they do not.
-  #
-  # `Pointer#copy_from` is a byte loop, and a profile of the macro
-  # expander said half its time went there and the other half to the
-  # character scan `+` no longer does. `memcpy` is not the answer here:
-  # on Linux this prelude asks libc for nothing, issuing its own
-  # syscalls, and every `lib LibC` in `prelude.iyi` is under `darwin` or
-  # `win32`.
-  #
-  # The word path runs only when both pointers are eight-byte aligned,
-  # which is the case that matters: a string's bytes begin one header
-  # along from an allocation, and the allocator returns aligned memory,
-  # so `a + b` copies `a` by word. The join lands wherever `a` ended, so
-  # the second copy takes the byte path unless that length is a multiple
-  # of eight. An unaligned 64-bit access is fine on two of the nine
-  # targets this compiles for and a question on the rest, so it is not
-  # attempted at all.
-  protected def self.copy_bytes(to : Pointer(UInt8), from : Pointer(UInt8),
-                                count : Int32) : Nil
-    index = 0
-    if aligned?(to) && aligned?(from)
-      words = count // 8
-      destination = to.as(Pointer(UInt64))
-      source = from.as(Pointer(UInt64))
-      at = 0
-      while at < words
-        destination[at] = source[at]
-        at = at + 1
-      end
-      index = words * 8
-    end
-    while index < count
-      to[index] = from[index]
-      index = index + 1
-    end
-  end
-
-  protected def self.aligned?(pointer : Pointer(UInt8)) : Bool
-    (pointer.address % 8_u64) == 0_u64
   end
 
   def bytesize : Int32
@@ -347,9 +286,9 @@ class String
     return other if empty?
     return self if other.empty?
 
-    String.new(bytesize + other.bytesize, size + other.size) do |buffer|
-      String.copy_bytes(buffer, to_unsafe, bytesize)
-      String.copy_bytes(buffer + bytesize, other.to_unsafe, other.bytesize)
+    String.new(bytesize + other.bytesize) do |buffer|
+      buffer.copy_from(to_unsafe, bytesize)
+      (buffer + bytesize).copy_from(other.to_unsafe, other.bytesize)
     end
   end
 

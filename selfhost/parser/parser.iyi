@@ -91,6 +91,25 @@ pub class Lexer
     c.ascii_alphanumeric? || c == '_'
   end
 
+  # The digits of a `\u` escape after its `u`, as written: four hex digits,
+  # or a braced run such as `{1F600}`. Empty for every other escape.
+  def unicode_digits(esc : Char) : String
+    return "" unless esc == 'u'
+    out = ""
+    if peek == '{'
+      out = out + advance.to_s
+      while !at_end? && peek != '}'
+        out = out + advance.to_s
+      end
+      out = out + advance.to_s unless at_end?
+    else
+      while out.size < 4 && !at_end? && base_digit?(peek, 16)
+        out = out + advance.to_s
+      end
+    end
+    out
+  end
+
   # One token, or nil at end of input.
   def next_token : Token?
     # A string lexes as three tokens the way the current lexer does it:
@@ -283,7 +302,7 @@ pub class Lexer
       if peek == '\\'
         advance
         esc = advance
-        text = "\\" + esc.to_s
+        text = "\\" + esc.to_s + unicode_digits(esc)
       else
         text = advance.to_s
       end
@@ -345,7 +364,7 @@ pub class Lexer
           esc = advance
           # Printed as the escape, not as the byte: a real newline inside a
           # token value turns a line-oriented dump into a liar.
-          pieces << "\\" + esc.to_s
+          pieces << "\\" + esc.to_s + unicode_digits(esc)
           kinds << "STRING"
           run = @pos
         else
@@ -821,6 +840,20 @@ pub struct UntilNode
   end
 end
 
+# `annotation Name ... end` declares an annotation type. The shape prints the
+# declaration alone; its fields are not part of the canonical tree.
+pub struct AnnotationDefNode
+  def initialize
+  end
+end
+
+# `typeof(expr)` asks the compiler for a type. The shape prints the word
+# alone, so the expression it names is read and not kept.
+pub struct TypeofNode
+  def initialize
+  end
+end
+
 pub class AnnotationNode
   getter name : Array(Node)
 
@@ -1061,6 +1094,7 @@ pub alias Node = PathNode | NumNode | StrNode | VarNode | ExtendNode |
                  OrNode | BoolNode | NilNode | NotNode | GenericNode |
                  HashNode | TupleNode | RangeNode | CharNode | UnlessNode |
                 UnionNode | AssocTypeNode | EnumDefNode | AnnotationNode | UntilNode |
+                AnnotationDefNode | TypeofNode |
                  WhenNode | CaseNode | BreakNode | NextNode |
                  PropagateNode | RecoverNode | DeferNode | IsANode |
                  AliasNode | ReadInstanceVarNode | RespondsToNode |
@@ -1474,6 +1508,18 @@ end
 impl Sexp for AnnotationNode
   def sexp : String
     "(annotation #{name[0].sexp})"
+  end
+end
+
+impl Sexp for AnnotationDefNode
+  def sexp : String
+    "(annotationdef)"
+  end
+end
+
+impl Sexp for TypeofNode
+  def sexp : String
+    "(typeof)"
   end
 end
 
@@ -1982,7 +2028,10 @@ pub class Parser
     if peek.kind == "IDENT" &&
        (peek.value == "private" || peek.value == "protected") &&
        peek_at(1).kind == "CONST"
-      skip_line
+      # The value can run over several lines (`private TABLE = [`), so the
+      # assignment is read as an expression rather than cut at its line.
+      advance
+      parse_expression
       return VisibilityModifierNode.new([] of Node).as(Node)
     end
     # `private def` and `protected def` are one node with the
@@ -1996,6 +2045,13 @@ pub class Parser
       # is parsed and kept. The shape prints the modifier either way.
       if peek.kind == "IDENT" && peek.value == "def"
         return VisibilityModifierNode.new([parse_def(false)] of Node).as(Node)
+      end
+      # `private abstract def` has no `end` to skip to: it is the abstract
+      # declaration with the modifier in front of it.
+      if peek.kind == "IDENT" && peek.value == "abstract" &&
+         peek_at(1).kind == "IDENT" && peek_at(1).value == "def"
+        advance # abstract
+        return VisibilityModifierNode.new([parse_def(true)] of Node).as(Node)
       end
       declaration = advance.value
       if declaration == "alias" || declaration == "getter" ||
@@ -2100,6 +2156,13 @@ pub class Parser
         skip_line
         return node.as(Node)
       end
+      if word.value == "annotation" && peek_at(offset + 1).kind == "CONST"
+        advance if offset == 1
+        advance # annotation
+        skip_line
+        skip_to_matching_end
+        return AnnotationDefNode.new.as(Node)
+      end
       if word.value == "macro"
         advance if offset == 1
         advance # macro
@@ -2147,7 +2210,9 @@ pub class Parser
     end
     if peek.kind == "IDENT" && peek.value == "defer"
       advance
-      return with_modifiers(DeferNode.new([parse_statement] of Node).as(Node))
+      # The cleanup is an expression. A trailing `if` belongs to the whole
+      # defer (`defer File.delete(p) if File.exists?(p)`), not to the cleanup.
+      return with_modifiers(DeferNode.new([parse_expression] of Node).as(Node))
     end
 
     if peek.kind == "IDENT" && (peek.value == "break" || peek.value == "next")
@@ -2219,6 +2284,7 @@ pub class Parser
       conds << parse_expression
       while peek.kind == ","
         advance
+        skip_newlines
         conds << parse_expression
       end
       advance if peek.kind == "IDENT" && peek.value == "then"
@@ -2265,6 +2331,15 @@ pub class Parser
   # the current lexer produces; the value is the character it names, and
   # the shape prints that value inspected.
   def unescape(piece : String) : String
+    if piece.size > 2 && piece[0] == '\\' && piece[1] == 'u'
+      code = 0
+      piece[2, piece.size - 2].each_char do |digit|
+        next if digit == '{' || digit == '}'
+        value = digit.ascii_number? ? digit.ord - '0'.ord : digit.ord - (digit.ascii_uppercase? ? 'A'.ord : 'a'.ord) + 10
+        code = code * 16 + value
+      end
+      return code.chr.to_s
+    end
     return piece unless piece.size == 2 && piece[0] == '\\'
     ch = piece[1]
     return "\n" if ch == 'n'
@@ -2280,6 +2355,7 @@ pub class Parser
   end
 
   def pointer_kind(word : String) : Node
+    return TypeofNode.new.as(Node) if word == "typeof"
     return PointerOfNode.new.as(Node) if word == "pointerof"
     return SizeOfNode.new.as(Node) if word == "sizeof"
     InstanceSizeOfNode.new.as(Node)
@@ -2875,16 +2951,30 @@ pub class Parser
       advance
       types = [] of Node
       skip_newlines
-      while peek.kind != "}" && !at_end?
+      while peek.kind != "}" && peek.kind != "}}" && !at_end?
         types << parse_type
         advance if peek.kind == ","
         skip_newlines
       end
-      advance if peek.kind == "}"
+      # `{A, {B}}` ends in one `}}` token, which closes both: this brace
+      # closes the inner type and the other is left for the outer one.
+      if peek.kind == "}}"
+        closer = peek
+        @tokens[@pos] = Token.new("}", closer.line, closer.col + 1, "}")
+      else
+        advance if peek.kind == "}"
+      end
       tuple = GenericNode.new([PathNode.new("Tuple").as(Node)] of Node,
         types).as(Node)
       if peek.kind == "?"
         advance
+        return UnionNode.new.as(Node)
+      end
+      # `{A, B} | Err` is a union of the tuple and the error, as the
+      # current parser has it: the union is the node, whatever it holds.
+      if peek.kind == "|"
+        advance
+        parse_type
         return UnionNode.new.as(Node)
       end
       return tuple
@@ -2950,14 +3040,16 @@ pub class Parser
 
     # `Session?` is the union of the type and nothing, and the current
     # parser builds the union rather than a type with a question mark.
+    nilable = false
     if peek.kind == "?"
       advance
-      return UnionNode.new.as(Node)
+      nilable = true
     end
-    return first unless peek.kind == "|"
+    return first unless nilable || peek.kind == "|"
+    # A nilable type can be a member of a union that goes on: `String? | Err`.
     while peek.kind == "|"
       advance
-      parse_primary
+      parse_type
     end
     UnionNode.new.as(Node)
   end
@@ -2975,7 +3067,7 @@ pub class Parser
         advance
         skip_newlines
       end
-      else_branch = parse_binary(0)
+      else_branch = parse_expression
       return IfNode.new([left] of Node, [then_branch] of Node,
         [else_branch] of Node).as(Node)
     end
@@ -3046,7 +3138,8 @@ pub class Parser
     # call as its value.
     op = peek.kind
     if op == "+=" || op == "-=" || op == "*=" || op == "/=" || op == "%=" ||
-       op == "|=" || op == "&=" || op == "^=" || op == "<<=" || op == ">>="
+       op == "|=" || op == "&=" || op == "^=" || op == "<<=" || op == ">>=" ||
+       op == "||=" || op == "&&=" || op == "**="
       advance
       parse_binary(0)
       case left
@@ -3072,7 +3165,7 @@ pub class Parser
           advance
           skip_newlines
         end
-        else_branch = parse_binary(0)
+        else_branch = parse_expression
         value = IfNode.new([value] of Node, [then_branch] of Node,
           [else_branch] of Node).as(Node)
       end
@@ -3108,16 +3201,16 @@ pub class Parser
   # then the arithmetic: `a + 1 > b && c` groups the way it reads.
   def precedence(op : String) : Int32
     if op == "**"
-      7
+      9
     elsif op == "*" || op == "/" || op == "%" || op == "//" || op == "&*"
-      6
+      8
     elsif op == "+" || op == "-" || op == "&+" || op == "&-"
+      7
+    elsif op == "<<" || op == ">>"
+      6
+    elsif op == "&"
       5
     elsif op == "|" || op == "^"
-      4
-    elsif op == "&"
-      4
-    elsif op == "<<" || op == ">>"
       4
     elsif op == "==" || op == "!=" || op == "<" || op == ">" ||
           op == "<=" || op == ">=" || op == "<=>"
@@ -3454,7 +3547,7 @@ pub class Parser
       advance
       # `-1` is one number, not a call on one: the lexer joins the sign
       # to a literal it is written against.
-      if peek.kind == "NUMBER" && peek.line == t.line && peek.col == t.col + 1
+      if t.kind != "~" && peek.kind == "NUMBER" && peek.line == t.line && peek.col == t.col + 1
         digits = advance
         return with_postfix(NumNode.new("#{t.kind}#{digits.value}").as(Node))
       end
@@ -3473,6 +3566,20 @@ pub class Parser
       advance
       parse_type
       return UninitializedVarNode.new.as(Node)
+    end
+    # `begin ... end` is a block of expressions, and the tree keeps the
+    # block even when it holds one statement.
+    if t.kind == "IDENT" && t.value == "begin" &&
+       (peek_at(1).kind == "NEWLINE" || peek_at(1).kind == ";")
+      advance
+      items = [] of Node
+      skip_newlines
+      while !at_end? && !(peek.kind == "IDENT" && peek.value == "end")
+        statement_into(items)
+        skip_newlines
+      end
+      advance # end
+      return with_postfix(ExprsNode.new(items).as(Node))
     end
     if t.kind == "IDENT" && t.value == "yield"
       advance
@@ -3494,13 +3601,14 @@ pub class Parser
       if peek.line == t.line && !at_end? && peek.kind != "NEWLINE" &&
          peek.kind != ")" && peek.kind != "}" && peek.kind != "]" &&
          peek.kind != "," && !modifier_word?(peek)
-        # Without parentheses the arguments stop before a comparison, so
-        # `yield x > 0` compares what the block answered. Arithmetic and
-        # indexing stay inside the argument.
-        parse_binary(4)
+        # Without parentheses the arguments are whole expressions: `yield x
+        # > 0` and `yield x < 0 ? a : b` each carry the comparison or the
+        # conditional inside the argument. The current parser has them
+        # there, not on the yield around them.
+        parse_expression
         while peek.kind == ","
           advance
-          parse_binary(4)
+          parse_expression
         end
       end
       return YieldNode.new.as(Node)
@@ -3508,7 +3616,8 @@ pub class Parser
     # `pointerof(@value)`, `sizeof(T)` and `instance_sizeof(T)` ask the
     # compiler rather than a method, and each is its own node.
     if t.kind == "IDENT" && peek_at(1).kind == "(" &&
-       (t.value == "pointerof" || t.value == "sizeof" || t.value == "instance_sizeof")
+       (t.value == "pointerof" || t.value == "sizeof" || t.value == "instance_sizeof" ||
+        t.value == "typeof")
       advance
       advance
       depth = 1
@@ -3653,10 +3762,10 @@ pub class Parser
       # is what the port did.
       if peek.kind == "IDENT" && peek.value == "of"
         advance
-        parse_primary
+        parse_type
         if peek.kind == "=>"
           advance
-          parse_primary
+          parse_type
           is_hash = true
         end
       end

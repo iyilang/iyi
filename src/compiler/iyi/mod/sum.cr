@@ -5,24 +5,48 @@
 #
 # One line per requirement the build actually used:
 #
-#     example.test/user/liba v1.1.0 s1:9f2a…
+#     example.test/user/liba v1.1.0 h2:9f2a…
 #
-# The hash is a tree hash of the checkout: every file, sorted by relative
-# path, digested as `<relpath>\0<bytes>`; SHA-1, spelled `s1:` so nobody
-# mistakes it for a signature — III.7 is explicit that distribution-grade
-# integrity is a whole-artifact signature and a published key, and that is
-# a later step. Change detection is this file's whole ambition.
+# The hash is a tree hash of the checkout, in two steps so that no byte of
+# one file can be read as part of another. Each file is digested on its
+# own, SHA-256 of its bytes, and written as one line of a list:
+#
+#     <hex digest> <kind> <relative path>\n
+#
+# sorted by path, `f` for a file and `l` for a symbolic link, whose bytes
+# are its target text. The token is `h2:` and the SHA-256 of that list, in
+# hex. A digest is sixty-four hex digits and a kind is one letter, so the
+# only field of a line whose length varies is the last, and a path with a
+# line break in it is refused rather than listed: the list reads back one
+# way. It is still not a signature — III.7 is explicit that
+# distribution-grade integrity is a whole-artifact signature and a
+# published key, and that is a later step. Change detection is this file's
+# whole ambition.
 #
 # The verbs, and who conjugates them: an entry that matches is silence, an
 # entry that differs is a refusal naming both hashes, and a requirement
 # with no entry is appended — the tool records facts, it does not ask a
 # person to transcribe hashes.
-require "crystal/digest/sha1"
+#
+# `s1:` is what this file held before `h2:`: SHA-1 over `<relpath>\0<bytes>\0`
+# for every file, with no lengths, so bytes could move from one file into
+# its neighbour and the hash stay where it was. A line that says `s1:`
+# therefore pins nothing and is read as a requirement with no entry: the
+# checkout is hashed, the line is written again as `h2:`, and one line on
+# stderr says so. Inside the module cache, where nothing is written, such
+# a line stays as it is and holds its checkout to nothing — it is a
+# dependency's own file there, and the tree it sits in is already pinned,
+# that file included, by the `h2:` line of whoever required it.
+require "crystal/digest/sha256"
 require "../codegen/cache_dir"
 
 module Iyi::Mod
   module Sum
     FILE = "iyi.sum"
+
+    # The token's prefix, and the one this file wrote before it.
+    PREFIX = "h2:"
+    LEGACY = "s1:"
 
     # Verifies *selections* against the manifest directory's `iyi.sum`,
     # appending what is new. *checkout* answers a selection's directory.
@@ -30,11 +54,13 @@ module Iyi::Mod
       sum_path = File.join(dir, FILE)
       known = File.file?(sum_path) ? parse(File.read(sum_path), sum_path) : {} of String => String
       added = false
+      restated = 0
 
       selections.each do |selection|
         key = "#{selection.path} v#{selection.version}"
         actual = tree_hash(checkout.call(selection))
-        if expected = known[key]?
+        expected = known[key]?
+        if expected && !expected.starts_with?(LEGACY)
           next if expected == actual
           raise ModError.new(
             "#{key} is not what it was: #{sum_path} says #{expected}, " \
@@ -42,6 +68,7 @@ module Iyi::Mod
             "and this machine changed; that is the one thing this file " \
             "exists to notice (SPEC.md III.7)")
         end
+        restated += 1 if expected
         known[key] = actual
         added = true
       end
@@ -53,6 +80,11 @@ module Iyi::Mod
       return if in_cache?(dir)
 
       return unless added
+      if restated > 0
+        STDERR.puts "#{sum_path}: #{restated} #{restated == 1 ? "entry" : "entries"} said `#{LEGACY}`, a hash " \
+                    "that could not tell two different trees apart; recorded again as `#{PREFIX}` from what is " \
+                    "checked out now"
+      end
       File.write(sum_path, String.build do |io|
         known.to_a.sort_by!(&.first).each do |(key, hash)|
           io << key << ' ' << hash << '\n'
@@ -105,18 +137,24 @@ module Iyi::Mod
       !Iyi.path_under?(Iyi.file_key(File.expand_path(dir)), cache).nil?
     end
 
-    # The checkout's content, as one line-friendly token: files only,
-    # sorted by relative path, each digested with its path so a rename is
-    # a change.
+    # The checkout's content, as one line-friendly token: files only, each
+    # digested on its own and listed by relative path, so a rename is a
+    # change and so is a byte that moves from one file to the next.
     def self.tree_hash(dir : String) : String
-      digest = ::Crystal::Digest::SHA1.new
       files = [] of String
       collect_files(dir, "", files)
       files.sort!
+      list = ::Crystal::Digest::SHA256.new
+      file = ::Crystal::Digest::SHA256.new
       files.each do |relative|
+        if relative.includes?('\n')
+          raise ModError.new(
+            "#{dir} holds a file whose name has a line break in it, #{relative.inspect}. " \
+            "#{FILE} lists a checkout one file to a line, so that name cannot be hashed; " \
+            "the package has to rename it")
+        end
         full = File.join(dir, relative)
-        digest.update(relative)
-        digest.update("\0")
+        file.reset
         # A symbolic link is hashed as the link, which is git's own model:
         # what a repository stores for one is the target *text*, so that is
         # the content, and retargeting it is a change this notices. Reading
@@ -124,15 +162,18 @@ module Iyi::Mod
         # and following one that points at its own parent never ends. A
         # package with `inner/loop -> ..` died with the walker's accident:
         # `Too many levels of symbolic links`, about a path forty levels
-        # deep, in place of a sentence about the dependency.
+        # deep, in place of a sentence about the dependency. The kind is in
+        # the line, so a link is not the file that holds its target's name.
         if File.symlink?(full)
-          digest.update(File.readlink(full))
+          file.update(File.readlink(full))
+          kind = 'l'
         else
-          digest.update(File.read(full))
+          file.file(full)
+          kind = 'f'
         end
-        digest.update("\0")
+        list.update("#{file.hexfinal} #{kind} #{relative}\n")
       end
-      "s1:#{digest.final.hexstring}"
+      "#{PREFIX}#{list.hexfinal}"
     end
 
     private def self.collect_files(root : String, prefix : String, into : Array(String)) : Nil
@@ -160,8 +201,8 @@ module Iyi::Mod
         stripped = line.strip
         next if stripped.empty?
         fields = stripped.split
-        unless fields.size == 3 && fields[2].starts_with?("s1:")
-          raise ModError.new("#{source}:#{line_number}: not a sum line; the shape is `<path> v<version> s1:<hash>`")
+        unless fields.size == 3 && (fields[2].starts_with?(PREFIX) || fields[2].starts_with?(LEGACY))
+          raise ModError.new("#{source}:#{line_number}: not a sum line; the shape is `<path> v<version> #{PREFIX}<hash>`")
         end
         known["#{fields[0]} #{fields[1]}"] = fields[2]
       end

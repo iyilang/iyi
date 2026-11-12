@@ -7377,10 +7377,24 @@ The decisions:
 
 **Step 2 followed, and taught one rule.** `iyi.sum` is the fact half of the
 split above: one line per requirement the build used, a tree hash of its
-checkout (`s1:` — SHA-1, spelled so nobody mistakes it for a signature,
-which III.7 reserves for distribution). A matching entry is silence, a
-mismatch is a refusal naming both hashes, a missing entry is appended —
-the tool records facts, it does not ask a person to transcribe hashes. The
+checkout (`h2:` — still not a signature, which III.7 reserves for
+distribution). The hash is taken in two steps so that no byte of one file
+can be read as part of another: each file is digested on its own, SHA-256
+of its bytes, and written as one line, `<hex digest> <kind> <relative
+path>\n` — `f` for a file, `l` for a symbolic link, whose bytes are its
+target text — and the token is the SHA-256 of those lines in path order. A
+path with a line break in it is refused, so the list reads back one way. A
+matching entry is silence, a mismatch is a refusal naming both hashes, a
+missing entry is appended — the tool records facts, it does not ask a
+person to transcribe hashes. **`s1:` is what the file held first**: SHA-1
+over `<relpath>\0<bytes>\0` for every file, with no lengths, so a tag
+could be moved to a tree in which bytes had crossed from a data file into
+the source file beside it and the line still matched. An `s1:` line
+therefore pins nothing and is read as a missing entry: the checkout is
+hashed, the line is written again as `h2:`, and one line on stderr says
+so. Under the cache's `mod/`, where nothing is written, it stays as it is
+and holds its checkout to nothing; that file is a dependency's own, and
+the tree it sits in is pinned, file included, by whoever required it. The
 rule the build taught: **a checkout is read-only.** The first version let
 a build whose entry sat inside the module cache write a sum *into the
 checkout*, which changed the tree a user's sum pinned — the verifier

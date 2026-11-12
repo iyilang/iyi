@@ -136,10 +136,10 @@ fi
 
 # ── 5. iyi.sum: fact, written by the tool, defended by it ────────────────
 step "iyi.sum is written, and a tampered entry is a refusal"
-grep -q 'example.test/user/liba v1.1.0 s1:' app/iyi.sum || { echo "no sum entry for liba:"; cat app/iyi.sum; exit 1; }
-grep -q 'example.test/user/libb v1.0.0 s1:' app/iyi.sum || { echo "no sum entry for libb:"; cat app/iyi.sum; exit 1; }
+grep -q 'example.test/user/liba v1.1.0 h2:' app/iyi.sum || { echo "no sum entry for liba:"; cat app/iyi.sum; exit 1; }
+grep -q 'example.test/user/libb v1.0.0 h2:' app/iyi.sum || { echo "no sum entry for libb:"; cat app/iyi.sum; exit 1; }
 cp app/iyi.sum app/iyi.sum.good
-sed -i.bak 's/s1:....../s1:dead00/' app/iyi.sum && rm -f app/iyi.sum.bak
+sed -i.bak 's/h2:....../h2:dead00/' app/iyi.sum && rm -f app/iyi.sum.bak
 rm -f app/app
 (cd app && "$IYI" build main.iyi -o app) > tamper.log 2>&1
 if [ $? -eq 0 ] || ! grep -q 'is not what it was' tamper.log; then
@@ -203,6 +203,126 @@ grep -q 'the checkout hashes to' mutated.log || {
   exit 1
 }
 
+# ── 5a. What the hash is of: each file, and where it ends ────────────────
+# `iyi.sum` held `s1:` first: SHA-1 over `<path>\0<bytes>\0` for every
+# file in path order, with no lengths. A file's bytes may hold a zero byte
+# and a file name, so the stream did not say where one file ended: a data
+# file could carry, after a zero byte, the name of the source file beside
+# it and another body for it. A tag moved to the tree in which those bytes
+# had changed places - the other body in the source file, the first one in
+# a data file after it - made the same stream and the same line, and the
+# build that fetched it ran the other body without a word. `h2:` digests
+# each file on its own and hashes the list of digests, kinds and paths, so
+# the two trees are two lines. The control is the step above: a plain
+# change was always refused; this is the change that was not.
+step "a tag moved to a tree whose bytes crossed a file's edge is refused"
+reviewed='module libf
+
+pub def framed : String
+  "the body that was reviewed"
+end
+'
+swapped='module libf
+
+pub def framed : String
+  "the body the moved tag carries"
+end
+'
+mkrepo work/libf
+# Byte for byte: the trick is in the bytes, and a git that rewrites line
+# ends on commit would be testing some other two trees.
+git -C work/libf config core.autocrlf false
+printf 'module example.test/user/libf\n' > work/libf/iyi.mod
+printf '%s' "$reviewed" > work/libf/libf.iyi
+{ printf 'DATA\0libf.iyi\0'; printf '%s' "$swapped"; printf '\0libf.iyz\0JUNK'; } > work/libf/libf.dat
+git -C work/libf add -A && git -C work/libf commit -qm reviewed && git -C work/libf tag v1.0.0
+mkdir -p mirror/example.test/user
+git clone -q --bare work/libf mirror/example.test/user/libf
+mkdir -p framed_app
+printf 'module example.test/user/framed_app\nrequire example.test/user/libf v1.0.0\n' > framed_app/iyi.mod
+printf 'import example.test/user/libf::{framed}\n\nputs framed\n' > framed_app/main.iyi
+if ! (cd framed_app && "$IYI" build main.iyi -o app) > framed.log 2>&1; then
+  echo "the reviewed tree did not build:"
+  tail -6 framed.log
+  exit 1
+fi
+./framed_app/app | grep -q 'the body that was reviewed' || { echo "the reviewed tree answered:"; ./framed_app/app; exit 1; }
+grep -q 'example.test/user/libf v1.0.0 h2:' framed_app/iyi.sum || { echo "no sum entry for libf:"; cat framed_app/iyi.sum; exit 1; }
+cp framed_app/iyi.sum framed_app/iyi.sum.reviewed
+# The same bytes in the same order, cut at other places.
+printf '%s' "$swapped" > work/libf/libf.iyi
+printf 'DATA' > work/libf/libf.dat
+{ printf 'JUNK\0libf.iyi\0'; printf '%s' "$reviewed"; } > work/libf/libf.iyz
+git -C work/libf add -A && git -C work/libf commit -qm moved
+# Asserted rather than assumed: the two trees are the pair `s1:` could not
+# tell apart, or this step proves only that a changed file is noticed.
+unframed() {
+  for f in $(git -C work/libf ls-tree -r --name-only "$1" | LC_ALL=C sort); do
+    printf '%s\0' "$f"; git -C work/libf show "$1:$f"; printf '\0'
+  done
+}
+unframed v1.0.0 > unframed.reviewed
+unframed HEAD > unframed.moved
+cmp -s unframed.reviewed unframed.moved || {
+  echo "the two trees are not one stream of paths and bytes, so this step proves nothing"
+  exit 1
+}
+git -C work/libf tag -f v1.0.0 > /dev/null
+git -C work/libf push -q -f "$WORK/mirror/example.test/user/libf" refs/tags/v1.0.0
+# A machine that never fetched it: the checkout goes, the sum stays.
+framed_checkout="$(find "$IYI_CACHE_DIR" -type d -name 'libf@v1.0.0' | head -1)"
+[ -n "$framed_checkout" ] || { echo "no libf@v1.0.0 checkout under $IYI_CACHE_DIR"; exit 1; }
+rm -rf "$framed_checkout" framed_app/app framed_app/app.exe
+(cd framed_app && "$IYI" build main.iyi -o app) > framed_moved.log 2>&1
+if [ $? -eq 0 ]; then
+  echo "a tag moved to another tree built under the line the first tree wrote:"
+  ./framed_app/app 2>&1 | sed 's/^/  /'
+  exit 1
+fi
+grep -q 'example.test/user/libf v1.0.0 is not what it was' framed_moved.log || {
+  echo "the moved tag was refused for some other reason:"
+  tail -6 framed_moved.log
+  exit 1
+}
+cmp -s framed_app/iyi.sum framed_app/iyi.sum.reviewed || { echo "a refused build rewrote iyi.sum:"; cat framed_app/iyi.sum; exit 1; }
+
+# An `s1:` line is one this compiler's predecessors wrote, and it pins
+# nothing, for the reason above. It is not held against the checkout -
+# whatever it says - and it is not left: the build hashes what is checked
+# out, writes the line again as `h2:`, and says so once, on stderr.
+step "an s1: line is read as no entry, and written again as h2:"
+cp app/iyi.sum app/iyi.sum.good
+sed -i.bak 's/ h2:.*$/ s1:0000000000000000000000000000000000000000/' app/iyi.sum && rm -f app/iyi.sum.bak
+if grep -q ' h2:' app/iyi.sum || ! grep -q ' s1:' app/iyi.sum; then
+  echo "the fixture's sum was not turned into s1: lines:"
+  cat app/iyi.sum
+  exit 1
+fi
+rm -f app/app
+if ! (cd app && "$IYI" build main.iyi -o app) > restated.log 2>&1; then
+  echo "a build under s1: lines did not build:"
+  tail -6 restated.log
+  exit 1
+fi
+cmp -s app/iyi.sum app/iyi.sum.good || {
+  echo "the s1: lines were not written again as what the checkouts hash to:"
+  cat app/iyi.sum
+  mv app/iyi.sum.good app/iyi.sum
+  exit 1
+}
+grep -q '2 entries said `s1:`' restated.log || {
+  echo "the build did not say it restated the s1: lines:"
+  tail -6 restated.log
+  exit 1
+}
+(cd app && "$IYI" build main.iyi -o app) > restated2.log 2>&1
+if [ $? -ne 0 ] || grep -q 's1:' restated2.log; then
+  echo "the build after it said so again, or failed:"
+  tail -6 restated2.log
+  exit 1
+fi
+rm -f app/iyi.sum.good
+
 # ── 5b. A package's tree may contain a symbolic link ─────────────────────
 # The hash is over the checkout's files, and a walk that asks the *target*
 # whether it is a directory walks through a link — into the package's own
@@ -254,7 +374,7 @@ if ! (cd linked_app && "$IYI" build main.iyi -o app) > linked.log 2>&1; then
   exit 1
 fi
 ./linked_app/app | grep -q 'hello from linked' || { echo "the linked package answered:"; ./linked_app/app; exit 1; }
-grep -q 'example.test/user/linked v1.0.0 s1:' linked_app/iyi.sum || { echo "no sum entry for linked:"; cat linked_app/iyi.sum; exit 1; }
+grep -q 'example.test/user/linked v1.0.0 h2:' linked_app/iyi.sum || { echo "no sum entry for linked:"; cat linked_app/iyi.sum; exit 1; }
 
 step "retargeting a link inside the checkout is a change"
 linked_checkout="$(find "$IYI_CACHE_DIR" -type d -name 'linked@v1.0.0' | head -1)"

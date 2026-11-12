@@ -41,7 +41,7 @@ private def declared_in(type, path : String, found : Array(String)) : Nil
     next unless nested.responds_to?(:locations)
     locs = nested.locations
     next if locs.nil? || locs.empty?
-    next unless locs.any? { |l| l.filename == path }
+    next unless locs.any? { |l| (f = l.filename).is_a?(String) && File.expand_path(f) == File.expand_path(path) }
 
     # `responds_to?` is not enough: a non-generic type answers it and then
     # raises "doesn't implement type_vars" when asked, so the question has
@@ -54,7 +54,7 @@ private def declared_in(type, path : String, found : Array(String)) : Nil
 
     methods = [] of String
     nested.defs.try &.each do |name, defs|
-      defs.each { |_| methods << name.to_s }
+      methods << name.to_s if defs.any? { |d| (loc = d.def.location) && (f = loc.filename).is_a?(String) && File.expand_path(f) == File.expand_path(path) }
     end
     methods.sort!.uniq!
 
@@ -63,18 +63,43 @@ private def declared_in(type, path : String, found : Array(String)) : Nil
   end
 end
 
+# The compile's own sequence, up to the top-level pass, reached from outside the
+# class because `parse` and `new_program` are private to the compiler. An entry
+# is the prelude followed by the file, as a compile builds an entry file. A file
+# of the prelude itself is the prelude alone, since it cannot be an entry: it
+# redefines the prelude's own methods.
+class Iyi::Compiler
+  def declare_program(source : Iyi::Compiler::Source, prelude_only : Bool) : Program
+    program = new_program([source])
+    node = if prelude_only
+             location = Iyi::Location.new(program.filename, 1, 1)
+             program.normalize(Iyi::Expressions.new([Iyi::Require.new(prelude).tap(&.iyi_prelude=(true)).at(location)] of Iyi::ASTNode))
+           else
+             parse(program, [source])
+           end
+    node, processor = program.top_level_semantic(node)
+    program.semantic_after_top_level(node, processor, cleanup: false)
+    program
+  end
+end
+
 path = ARGV[0]
-source = File.read(path)
+prelude_only = File.basename(File.dirname(path)) == "iyi"
+compiler = Iyi::Compiler.new
+compiler.prelude = "iyi/prelude"
+compiler.no_codegen = true
+compiler.stdout = IO::Memory.new
+compiler.stderr = IO::Memory.new
 
-parser = Iyi::Parser.new(source)
-parser.filename = path
-node = parser.parse
-
-program = Iyi::Program.new
-program.filename = path
-node = program.normalize(node)
-program.top_level_semantic(node)
-
-found = [] of String
-declared_in(program, path, found)
-puts found.sort.join(" ")
+begin
+  source = Iyi::Compiler::Source.new(path, File.read(path))
+  program = compiler.declare_program(source, prelude_only)
+  found = [] of String
+  declared_in(program, path, found)
+  STDERR.puts "compiler: the top-level pass declares no type in this file" if found.empty?
+  puts found.sort.join(" ")
+rescue error
+  # The compile refused the file. The first line of its message goes to stderr,
+  # and the gate prints it beside the file rather than as a difference.
+  STDERR.puts "compiler: #{error.message.to_s.lines.first? || ""}"
+end

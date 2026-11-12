@@ -33,7 +33,8 @@ IYI_CACHE_DIR="$WORK/iyi" IYI_PATH="$REPO/src:$REPO/selfhost" \
   grep -aoE "Error[^\"]{0,120}" "$WORK/build.log" | head -3 | sed 's|^|    |'
   exit 1
 }
-CRYSTAL_CACHE_DIR="$WORK/cr" "$REPO/bin/crystal" build -o "$WORK/oracle" "$HERE/oracle.cr" >/dev/null 2>&1 || {
+CRYSTAL_PATH="$REPO/src" IYI_CONFIG_PATH="$REPO/src" CRYSTAL_CACHE_DIR="$WORK/cr" \
+  "$REPO/bin/crystal" build -Di_know_what_im_doing -o "$WORK/oracle" "$HERE/oracle.cr" >/dev/null 2>&1 || {
   echo "  the oracle does not build"
   exit 1
 }
@@ -45,13 +46,12 @@ agree=0
 differ=0
 no_oracle=0
 for f in "${files[@]}"; do
-  IYI_PATH="$REPO/src:$REPO/selfhost" "$WORK/oracle" "$f" 2>/dev/null \
-    | grep -v "Using compiled" > "$WORK/a.txt"
+  IYI_PATH="$REPO/src:$REPO/selfhost" "$WORK/oracle" "$f" > "$WORK/a.txt" 2> "$WORK/a.err"
   # An empty answer is the pass refusing the file, not a file that
   # declares nothing: every sample declares something.
   if [ ! -s "$WORK/a.txt" ] || [ -z "$(tr -d '[:space:]' < "$WORK/a.txt")" ]; then
     no_oracle=$((no_oracle + 1))
-    echo "  NO ORACLE $(basename "$f")"
+    echo "  NO ORACLE $(basename "$f"): $(head -n 1 "$WORK/a.err" | cut -c1-170)"
     continue
   fi
   # The port's status and its stderr are kept, not dropped. They used to

@@ -74,11 +74,15 @@ held every such sweep with it: on the user's Windows 11 machine with 12
 logical processors, under #145's app at 99 % CPU, claims stayed held 32 to
 243 ms after walks of microseconds while 5 to 9 workers spun in that wait,
 20 of the 43 local collections past 20 ms on its cities and api tags
-endpoints. `-Dheap_verify` checks that every slice's walk claim outlives
-its walk, and bench/heap_drain.sh's claim mode, the helpers sweeping
-beside a sleeping program, catches a helper that lets go before its walk
-ends. Without the flag the helper is as it was (its IR differs only by a
-line number).
+endpoints. Released first, in 4 rounds interleaved with the old order on
+the same machine, helper claims held past 5 ms went from 28 to 2 (both a
+helper preempted mid-walk), the time local sweeps spent waiting on claims
+from 2,470 to 328 ms, and local collections past 20 ms from 46 to 27,
+none of them waiting on a claim. `-Dheap_verify` checks that every
+slice's walk claim outlives its walk, and bench/heap_drain.sh's claim
+mode, the helpers sweeping beside a sleeping program, catches a helper
+that lets go before its walk ends. Without the flag the helper is as it
+was (its IR differs only by a line number).
 
 heap22's verifier: the false-word injector no longer writes under a pool
 worker's parking fiber or below a Windows fiber's committed stack; reports

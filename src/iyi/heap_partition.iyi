@@ -162,8 +162,11 @@ class IyiHeap
   # busy unit collected every MiB: alloc_scaling on one worker ran 317
   # local collections where the shared heap runs 57, 1.17-1.49 of 0.21.0's
   # wall time (tmac, tssh); grown, 60 and 0.84 on tmac (S6, Tune6). The
-  # shared heap's own floor no longer multiplies by threads.
-  UNIT_MIN      =   262144_u64
+  # shared heap's own floor no longer multiplies by threads. At a 256 KiB
+  # floor #145's app collected 0.4-6.6 times a request, each paying its
+  # published-roots walk (~40 % of a collection): 512 KiB halves that for
+  # ~8 MB of steady RSS (Linux, S6, CpuFix3).
+  UNIT_MIN      =   524288_u64
   UNIT_BUSY_MAX =  4194304_u64
   HEADROOM_MIN  = 16777216_u64
   SHARED_MIN    =  8388608_u64

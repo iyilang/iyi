@@ -597,7 +597,7 @@ pub class AutocertManager
     return AutocertError.new("the certificate issued for #{name} does not name it") unless identity.leaf.matches_host?(name)
     chain = Certificate.from_pem(text)
     return AutocertError.new("the certificate for #{name}: #{chain.message}") if chain.is_a?(X509Error)
-    verified = X509.verify(identity.leaf, chain[1, chain.size - 1], trust!, name)
+    verified = X509.verify(identity.leaf, chain[1, chain.size - 1], trust!, name, distrusted: @roots ? nil : TlsConfig.new.distrusted)
     return AutocertError.new("the certificate for #{name} is not trusted: #{verified.message}") if verified.is_a?(X509Error)
     AutocertHeld.new(identity, renew_time(identity.leaf.not_before.to_unix_ms, identity.leaf.not_after.to_unix_ms))
   end

@@ -7383,7 +7383,24 @@ can be read as part of another: each file is digested on its own, SHA-256
 of its bytes, and written as one line, `<hex digest> <kind> <relative
 path>\n` — `f` for a file, `l` for a symbolic link, whose bytes are its
 target text — and the token is the SHA-256 of those lines in path order. A
-path with a line break in it is refused, so the list reads back one way. A
+path with a line break in it is refused, so the list reads back one way.
+**A link in a fetched package is a file holding its target's path, on
+every platform.** A repository stores a link as its target text, and
+what a checkout made of that was the machine's choice - a link on Linux
+and darwin, a plain file on Windows, where git is installed with
+`core.symlinks=false` - so with the kind in the hash one tag was two
+hashes, and an `iyi.sum` written on one platform was refused on the
+other. The fetcher checks out with `core.symlinks=false` everywhere, the
+entry is `f` everywhere, and one tag is one hash. What that costs is
+said plainly: a package that reached one of its own files through a link
+- a module under a second name, a directory shared between two places -
+does not have that file there when it is fetched, on any platform, as it
+never had on Windows; it has to hold the file. `l` stays in the hash for
+the tree that holds a real link all the same - one put where the fetched
+file was, or a checkout an earlier compiler fetched where links exist -
+so that a link never stands in for a file under the file's hash; a
+cached checkout of the second kind hashes apart from a fresh fetch until
+it is fetched again (`clear_cache`). A
 matching entry is silence, a mismatch is a refusal naming both hashes, a
 missing entry is appended — the tool records facts, it does not ask a
 person to transcribe hashes. **`s1:` is what the file held first**: SHA-1

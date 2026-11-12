@@ -404,26 +404,23 @@ fi
 [ "$cached_written" -eq 0 ] || { echo "a check inside the module cache rewrote the cached libb's iyi.sum"; exit 1; }
 
 # ── 5b. A package's tree may contain a symbolic link ─────────────────────
-# The hash is over the checkout's files, and a walk that asks the *target*
-# whether it is a directory walks through a link — into the package's own
-# parent, or around a cycle. `inner/loop -> ..` ended a build with the
-# walker's accident: `Too many levels of symbolic links`, about a path
-# forty levels deep, in place of any sentence about the dependency. A link
-# is hashed as the link now, which is git's own model — the target text is
-# what a repository stores for one — so the cycle is an entry rather than a
-# descent, and retargeting the link is a change the sum notices.
-# Not on Windows: Git Bash's `ln -s` needs Developer Mode or an
-# administrator to make a real link, and without one it copies or fails —
-# so the fixture this step needs cannot be built there, and a step that
-# cannot build its fixture proves nothing. Said, not skipped in silence.
-case "$(uname -s)" in
-  MINGW* | MSYS* | CYGWIN* | Windows_NT) symlinks=no ;;
-  *) symlinks=yes ;;
-esac
-if [ "$symlinks" = no ]; then
-  step "a package with a symbolic link: not on this platform (ln -s cannot make one here)"
-else
-step "a package with a symbolic link is hashed, cycle and all"
+# What a repository stores for a link is its target text, and what a
+# checkout makes of that depended on the machine: a link where the file
+# system and the account allow one, and on Windows - Git for Windows sets
+# `core.symlinks=false` - a plain file holding the text. `h2:` writes each
+# entry's kind into what it hashes, so the same tag was `l` on Linux and
+# `f` on Windows, and an `iyi.sum` made on one was refused on the other.
+# The fetcher now checks out with `core.symlinks=false` everywhere: a link
+# in a fetched package is a file holding its target's path, on every
+# platform, and one tag is one hash. The hash below is that tree's, worked
+# out apart from the compiler (SHA-256 of `<sha256> f <path>\n` for the
+# four files in path order), and it is the same number on every runner.
+#
+# The entries are written into the index as git stores a link - mode
+# 120000 over a blob that is the target text - and not with `ln -s`: Git
+# Bash's needs Developer Mode or an administrator, the entry is the same
+# either way, and so this step runs on Windows too.
+step "a symbolic link in a package is fetched as a file holding its target, and hashes one way"
 mkrepo work/linked
 printf 'module example.test/user/linked
 ' > work/linked/iyi.mod
@@ -433,11 +430,16 @@ pub def linked_greeting : String
   "hello from linked"
 end
 ' > work/linked/linked.iyi
-mkdir -p work/linked/inner
-ln -s .. work/linked/inner/loop
-ln -s ../linked.iyi work/linked/inner/alias.iyi
-git -C work/linked add -A && git -C work/linked commit -qm one && git -C work/linked tag v1.0.0
-git -C work/linked ls-files -s | grep -q '^120000' || { echo "git did not store a symlink, so this step proves nothing:"; git -C work/linked ls-files -s; exit 1; }
+git -C work/linked add -A
+link_entry() { # link_entry <path in the package> <target text>
+  link_blob="$(printf '%s' "$2" | git -C work/linked hash-object -w --no-filters --stdin)" &&
+    git -C work/linked update-index --add --cacheinfo "120000,$link_blob,$1"
+}
+# `inner/loop -> ..` is the link a walk that followed links never came
+# back from; `inner/alias.iyi` names a source file.
+link_entry inner/loop .. && link_entry inner/alias.iyi ../linked.iyi || { echo "could not write the link entries"; exit 1; }
+git -C work/linked commit -qm one && git -C work/linked tag v1.0.0
+[ "$(git -C work/linked ls-files -s | grep -c '^120000')" -eq 2 ] || { echo "git did not store two symlinks, so this step proves nothing:"; git -C work/linked ls-files -s; exit 1; }
 git clone -q --bare work/linked mirror/example.test/user/linked
 mkdir -p linked_app
 printf 'module example.test/user/linked_app
@@ -454,26 +456,65 @@ if ! (cd linked_app && "$IYI" build main.iyi -o app) > linked.log 2>&1; then
   exit 1
 fi
 ./linked_app/app | grep -q 'hello from linked' || { echo "the linked package answered:"; ./linked_app/app; exit 1; }
-grep -q 'example.test/user/linked v1.0.0 h2:' linked_app/iyi.sum || { echo "no sum entry for linked:"; cat linked_app/iyi.sum; exit 1; }
-
-step "retargeting a link inside the checkout is a change"
-linked_checkout="$(find "$IYI_CACHE_DIR" -type d -name 'linked@v1.0.0' | head -1)"
-[ -n "$linked_checkout" ] || { echo "no linked@v1.0.0 checkout under $IYI_CACHE_DIR"; exit 1; }
-ln -sfn ../iyi.mod "$linked_checkout/inner/alias.iyi"
-rm -f linked_app/app
-(cd linked_app && "$IYI" build main.iyi -o app) > retarget.log 2>&1
-retarget_status=$?
-ln -sfn ../linked.iyi "$linked_checkout/inner/alias.iyi"
-if [ "$retarget_status" -eq 0 ]; then
-  echo "a retargeted link went unnoticed, so the link's target is not in the hash"
+linked_checkout="$IYI_CACHE_DIR/mod/example.test/user/linked@v1.0.0"
+[ -f "$linked_checkout/iyi.mod" ] || { echo "no linked@v1.0.0 checkout at $linked_checkout"; exit 1; }
+for entry in inner/loop inner/alias.iyi; do
+  if [ -L "$linked_checkout/$entry" ] || [ ! -f "$linked_checkout/$entry" ]; then
+    echo "$entry was not checked out as a plain file:"
+    ls -l "$linked_checkout/inner"
+    exit 1
+  fi
+done
+if [ "$(cat "$linked_checkout/inner/loop")" != ".." ] || [ "$(cat "$linked_checkout/inner/alias.iyi")" != "../linked.iyi" ]; then
+  echo "the files checked out for the links do not hold their targets' paths:"
+  head "$linked_checkout/inner/loop" "$linked_checkout/inner/alias.iyi"
   exit 1
 fi
-grep -q 'is not what it was' retarget.log || {
-  echo "the retargeted link was refused for some other reason:"
-  tail -5 retarget.log
+linked_h2="h2:b6b774d98f25e99124dcefc5643d092249ff0f3ad3fc9014a7c84f19abd0f122"
+grep -q "^example.test/user/linked v1.0.0 $linked_h2\$" linked_app/iyi.sum || {
+  echo "the linked package did not hash to $linked_h2, the hash of its four files on every platform:"
+  cat linked_app/iyi.sum
   exit 1
 }
-fi
+
+# The kind is still in the hash, for the tree the fetcher did not make: a
+# real link put where the fetched file was holds the same text and is not
+# the same entry, so it cannot stand in for the file under the file's
+# hash. And it is an entry, not a way in: `inner/loop -> ..` as a real
+# link is hashed as a link, where following it never ended.
+# Not on Windows, where this shell cannot make a link. Said, not skipped
+# in silence.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    step "a real link put where a fetched file was: not on this platform (ln -s cannot make one here)"
+    ;;
+  *)
+    step "a real link put where a fetched file was is refused, cycle and all"
+    rm -f "$linked_checkout/inner/loop" "$linked_checkout/inner/alias.iyi"
+    ln -s .. "$linked_checkout/inner/loop"
+    ln -s ../linked.iyi "$linked_checkout/inner/alias.iyi"
+    rm -f linked_app/app
+    (cd linked_app && "$IYI" build main.iyi -o app) > relinked.log 2>&1
+    relinked_status=$?
+    rm -f "$linked_checkout/inner/loop" "$linked_checkout/inner/alias.iyi"
+    printf '%s' '..' > "$linked_checkout/inner/loop"
+    printf '%s' '../linked.iyi' > "$linked_checkout/inner/alias.iyi"
+    if [ "$relinked_status" -eq 0 ]; then
+      echo "links stood in for the files the package was fetched with, under the same hash"
+      exit 1
+    fi
+    grep -q 'is not what it was' relinked.log || {
+      echo "the links were refused for some other reason:"
+      tail -5 relinked.log
+      exit 1
+    }
+    if ! (cd linked_app && "$IYI" build main.iyi -o app) > unlinked.log 2>&1; then
+      echo "the checkout put back as it was fetched did not build:"
+      tail -5 unlinked.log
+      exit 1
+    fi
+    ;;
+esac
 
 # ── 5c. What `--emit-iyimod` writes, and what it leaves to the sum ────────
 # An artifact carries what the consuming build reached, so the one this

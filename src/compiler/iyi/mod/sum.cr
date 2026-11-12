@@ -15,7 +15,20 @@
 #
 # sorted by path, `f` for a file and `l` for a symbolic link, whose bytes
 # are its target text. The token is `h2:` and the SHA-256 of that list, in
-# hex. A digest is sixty-four hex digits and a kind is one letter, so the
+# hex. A tree the fetcher made has no `l` in it: it checks out with
+# `core.symlinks=false` on every platform (`Fetcher::KEEP_BYTES`), so a
+# link in a package arrives as a file holding its target's path, `f`, the
+# same on Windows - where git makes that file anyway - as anywhere else,
+# and one tag has one hash. `l` is for the tree that holds a real link all
+# the same: a checkout in which a link was put where the fetched file
+# was, a cache filled by something that is not the fetcher, or a checkout
+# a compiler before this one fetched on a platform with links. Such a
+# tree does not hash to what a fetch of the same tag hashes to, and that
+# is the point of the letter - a link cannot stand in for the file under
+# the file's hash. A cached checkout of that last kind is the one honest
+# case: its `h2:` is not the one a fresh fetch writes, and it is brought
+# into line by fetching it again (`clear_cache`, or its directory under
+# the cache's `mod/` deleted). A digest is sixty-four hex digits and a kind is one letter, so the
 # only field of a line whose length varies is the last, and a path with a
 # line break in it is refused rather than listed: the list reads back one
 # way. It is still not a signature — III.7 is explicit that
@@ -194,7 +207,9 @@ module Iyi::Mod
         file.reset
         # A symbolic link is hashed as the link, which is git's own model:
         # what a repository stores for one is the target *text*, so that is
-        # the content, and retargeting it is a change this notices. Reading
+        # the content, and retargeting it is a change this notices. (The
+        # fetcher leaves none in a checkout; see the top of this file for
+        # the trees that have one.) Reading
         # through it would hash something the package does not contain —
         # and following one that points at its own parent never ends. A
         # package with `inner/loop -> ..` died with the walker's accident:

@@ -816,6 +816,11 @@ pub class CaseNode
   end
 end
 
+pub struct UntilNode
+  def initialize
+  end
+end
+
 pub class AnnotationNode
   getter name : Array(Node)
 
@@ -1055,7 +1060,7 @@ pub alias Node = PathNode | NumNode | StrNode | VarNode | ExtendNode |
                  ArrayNode | IfNode | WhileNode | ReturnNode | AndNode |
                  OrNode | BoolNode | NilNode | NotNode | GenericNode |
                  HashNode | TupleNode | RangeNode | CharNode | UnlessNode |
-                 UnionNode | AssocTypeNode | EnumDefNode | AnnotationNode |
+                UnionNode | AssocTypeNode | EnumDefNode | AnnotationNode | UntilNode |
                  WhenNode | CaseNode | BreakNode | NextNode |
                  PropagateNode | RecoverNode | DeferNode | IsANode |
                  AliasNode | ReadInstanceVarNode | RespondsToNode |
@@ -1457,6 +1462,12 @@ impl Sexp for CaseNode
     out = "(#{kind} #{cond[0].sexp} #{sexp_list(arms)}"
     out = out + " else " + else_branch[0].sexp unless else_branch.size == 0
     out + ")"
+  end
+end
+
+impl Sexp for UntilNode
+  def sexp : String
+    "(until)"
   end
 end
 
@@ -2525,8 +2536,10 @@ pub class Parser
   def parse_while(negated : Bool) : Node
     advance # while or until
     cond = parse_expression
-    cond = NotNode.new([cond] of Node).as(Node) if negated
     body = parse_body
+    # The compiler's tree has `until` as a node of its own, which prints as a
+    # bare `(until)`. `while` keeps its condition and body.
+    return UntilNode.new.as(Node) if negated
     WhileNode.new([cond] of Node, [body] of Node).as(Node)
   end
 

@@ -1712,9 +1712,11 @@
     keep = IyiHeap.within(record) do
       built = build(base, 300, 0)
       Holder.word = built ? built.object_id : 0_u64
+      # Half the budget owed whatever the floor, past the quarter a
+      # takeover asks (`takeover_task`).
       junk : Node? = nil
       i = 0
-      while i < 6000
+      while i < 6000 || (i < 1000000 && IyiHeap.read64(record &+ IyiHeap::REC_DEBT) &* 2_u64 < IyiHeap.budget_of(record))
         junk = Node.new(i.to_i64, i % 50 == 0 ? nil : junk)
         i = i + 1
       end

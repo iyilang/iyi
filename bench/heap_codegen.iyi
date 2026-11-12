@@ -35,11 +35,12 @@
 #   pins *u*'s unit before it runs (`IyiHeap.pins` moves by one).
 # - `holes`: a union written through a smaller arm, in a field and from a
 #   temporary into an array's buffer, holds zeros past the arm and in its
-#   tag's padding, never a stale word. The buffer's unit boxes its values
-#   on a stack whose dead words name another unit's chain, which that
-#   unit then drops and collects: a stale word in the buffer is the
+#   tag's padding, never a stale word. One unit's field first holds a
+#   `Wide` labelled with another unit's string, then an `Int64`; that unit
+#   then drops the string and collects: the stale label word is the
 #   verifier's report. The raw words are read before any collection, in a
-#   `-Dheap_partitions` build only: the compiler zeroes the holes only there.
+#   `-Dheap_partitions` build only: the compiler zeroes the holes only
+#   there.
 #
 # Each check ends its units' stores with `collect_here`: the stack below
 # scrubbed and the unit's partition collected, so that under
@@ -446,11 +447,11 @@
   # words (S6 CrossFix2, Linux, seeds 1-5).
   struct Wide
     @seconds : Int64
-    @nanoseconds : Int32
+    @raw : UInt64
     @label : String
     @offset : Int32
 
-    def initialize(@seconds : Int64, @nanoseconds : Int32, @label : String, @offset : Int32)
+    def initialize(@seconds : Int64, @raw : UInt64, @label : String, @offset : Int32)
     end
 
     def label : String
@@ -474,6 +475,10 @@
 
     def put(seconds : Int64) : Nil
       @value = seconds
+    end
+
+    def value : Val
+      @value
     end
   end
 
@@ -510,7 +515,8 @@
   # `Int64`. Fails naming the first. Without `-Dheap_partitions` the
   # compiler leaves the holes as they were (flag-off code is today's), so
   # there is nothing to check.
-  def no_stale(address : UInt64, count : Int32, what : String) : Nil
+  # *masked* is the other unit's chain address `^ AIM_MASK`, to name it.
+  def no_stale(address : UInt64, count : Int32, what : String, masked : UInt64 = 0_u64) : Nil
     {% if !flag?(:heap_partitions) %} return {% end %}
     element = 0
     while element < count
@@ -521,8 +527,9 @@
       end
       word = 2
       while word < VAL_WORDS
-        if Pointer(UInt64).new(base + word.to_u64 * 8_u64).value != 0_u64
-          fail("holes: #{what}: element #{element}'s union word +#{word * 8} past its Int64 holds a stale word")
+        stale = Pointer(UInt64).new(base + word.to_u64 * 8_u64).value
+        if stale != 0_u64
+          fail("holes: #{what}: element #{element}'s union word +#{word * 8} past its Int64 holds a stale word, 0x#{stale.to_s(16)}#{stale ^ AIM_MASK == masked ? " (the other unit's chain)" : ""}")
           return
         end
         word = word + 1
@@ -531,13 +538,17 @@
     end
   end
 
+  AIM_MASK = 0x5a5a_5a5a_5a5a_5a5a_u64
+
   # Built in a frame of its own, so that once it returns no live frame of
   # the unit names the chain: held across *built*'s receive, its unit's
-  # collections at that park keep it. Its address goes out as a number.
+  # collections at that park keep it. Its label's address goes out as a
+  # number, masked (`AIM_MASK`): a channel's slot or waiter holding it
+  # bare would be a word naming the chain that the holes do not make.
   @[NoInline]
   def hold_target(aims : Channel(UInt64), built : Channel(Int32)) : Int32
     chain = build(44)
-    aims.send(chain.object_id)
+    aims.send(chain.label.object_id ^ AIM_MASK)
     built.receive
     chain.label.bytesize
   end
@@ -545,13 +556,17 @@
   def holes_check : Nil
     # In place: a field holding a `Wide` given an `Int64`.
     slot = ValSlot.new
-    slot.value = Wide.new(1_i64, 2, label_for(45, 0), 3)
+    slot.value = Wide.new(1_i64, 2_u64, label_for(45, 0), 3)
     slot.put(79_i64)
     no_stale(slot.object_id, 1, "a field's Wide overwritten by an Int64")
 
-    # From a temporary, across units: one unit's buffer of `Int64`s boxed
-    # on a stack whose dead words name another unit's chain, which that
-    # unit then drops and collects.
+    # Across units: one unit's buffer of `Int64`s, boxed on a stack whose
+    # dead words name another unit's chain (what the boxing temporaries
+    # keep there is the schedule's: the program's own check), and a field
+    # of its own given a `Wide` labelled with the chain's string, then an
+    # `Int64` in place: the field's `label` word, which the collector and
+    # the verifier read as a pointer, is the verifier's report every run.
+    # The other unit then drops the chain and collects.
     before = partitions_now
     aims = Channel(UInt64).new(1)
     built = Channel(Int32).new(1)
@@ -564,12 +579,20 @@
         0
       end
       g.spawn(unit: :new) do
-        paint(aims.receive)
+        masked = aims.receive.as(UInt64)
+        aim = masked ^ AIM_MASK
+        paint(aim)
         all = collect_vals([79_i64, 80_i64, 81_i64])
-        no_stale(all.to_unsafe.address, all.size, "an Array(Val) buffer of boxed Int64s")
+        no_stale(all.to_unsafe.address, all.size, "an Array(Val) buffer of boxed Int64s", masked)
+        kept = ValSlot.new
+        kept.value = Wide.new(1_i64, 0_u64, Pointer(Void).new(aim).as(String), 3)
+        kept.put(79_i64)
+        no_stale(kept.object_id, 1, "a field's Wide labelled with the other unit's string, given an Int64", masked)
         built.send(1)
         done.receive
-        all.size
+        # *kept* read after the other unit's collection, so that an
+        # optimised build keeps it, and its stale word, reachable there.
+        all.size + (kept.value.is_a?(Int64) ? 0 : 1)
       end
     end
     settled(before, "holes")

@@ -2152,10 +2152,10 @@ pub class Parser
        (peek.value == "private" || peek.value == "protected") &&
        peek_at(1).kind == "CONST"
       # The value can run over several lines (`private TABLE = [`), so the
-      # assignment is read as an expression rather than cut at its line.
+      # assignment is read as an expression rather than cut at its line. It
+      # is kept: the constant it assigns is one the file declares.
       advance
-      parse_expression
-      return VisibilityModifierNode.new([] of Node).as(Node)
+      return VisibilityModifierNode.new([parse_expression] of Node).as(Node)
     end
     # `private def` and `protected def` are one node with the
     # declaration inside, and the shape prints the node rather than what

@@ -91,6 +91,40 @@ assert_true TOTP.verify(sha1_seed, "755224", 10_i64), "the first step, from insi
 assert_true TOTP.verify(sha1_seed, "755224", 40_i64), "the first step, from the second"
 puts "  the step either side and not two, windows of 0 and 2, step edges, wrong lengths"
 
+puts "\n== verify_step"
+# 1111111109 is in step 37037036.
+at = 37037036_i64
+assert_true TOTP.verify_step(sha1_seed, now_code, t) == at, "the code for the time is its step's"
+assert_true TOTP.verify_step(sha1_seed, ahead, t) == at + 1_i64, "a code one step ahead is the next step's"
+assert_true TOTP.verify_step(sha1_seed, behind, t) == at - 1_i64, "a code one step behind is the step before's"
+assert_true TOTP.verify_step(sha1_seed, two_ahead, t).nil? && TOTP.verify_step(sha1_seed, "", t).nil?, "a code outside the window is no step"
+assert_true TOTP.verify_step(sha1_seed, two_behind, t, 2) == at - 2_i64, "window 2: two steps behind"
+assert_true TOTP.verify_step(sha1_seed, "755224", 40_i64) == 0_i64, "step 0 is a step, not nil"
+assert_true TOTP.verify_step(sha256_seed, "68084774", t, 1, 30, 8, OTPAlgorithm::SHA256) == at, "eight digits under SHA256, its step"
+# RFC 6238 section 5.2: a code is taken once. The step it was taken at is
+# kept and handed back as *after*, and the same code is then no step, in
+# its own step and in the next, whose window still reaches it.
+kept = TOTP.verify_step(sha1_seed, now_code, t, after: nil)
+assert_true kept == at, "a first login is the code's step"
+assert_true TOTP.verify_step(sha1_seed, now_code, t, after: kept).nil?, "a code is not taken again in its own step"
+assert_true TOTP.verify_step(sha1_seed, now_code, t + 30_i64, after: kept).nil?, "a code is not taken again in the next step"
+assert_true TOTP.verify_step(sha1_seed, behind, t, after: kept).nil?, "a code for a step before the last accepted is not taken"
+assert_true TOTP.verify_step(sha1_seed, ahead, t + 30_i64, after: kept) == at + 1_i64, "the next step's code is taken after it"
+assert_true TOTP.verify_step(sha1_seed, now_code, t, after: at - 1_i64) == at && TOTP.verify_step(sha1_seed, now_code, t, after: -1_i64) == at, "a code past the last accepted step is taken"
+assert_true TOTP.verify_step(sha1_seed, now_code, t, 1, 30, 6, OTPAlgorithm::SHA1, at).nil?, "after, by position"
+# The guard the clock's step cannot make: the login at 1111111109 stored
+# as the clock's step, and the code replayed a step later, is a later
+# step by the clock and the same step by what matched.
+assert_true TOTP.verify(sha1_seed, now_code, t + 30_i64) && (t + 30_i64) // 30_i64 > at, "verify alone takes the replay, and the clock has moved on"
+# Steps 910737 and 910738 of this secret share the code 911617. Either
+# step's window holds both, and the later is the one answered: kept, it
+# leaves the code nothing to match.
+assert_true TOTP.code(sha1_seed, 27322110_i64) == "911617" && TOTP.code(sha1_seed, 27322140_i64) == "911617", "two steps that share a code"
+assert_true TOTP.verify_step(sha1_seed, "911617", 27322110_i64) == 910738_i64, "a code two steps share is the later step"
+assert_true TOTP.verify_step(sha1_seed, "911617", 27322110_i64, after: 910737_i64) == 910738_i64, "a code two steps share, after the earlier"
+assert_true TOTP.verify_step(sha1_seed, "911617", 27322140_i64, after: 910738_i64).nil?, "a code two steps share, after the later"
+puts "  the step that matched, nil outside the window, and nothing at or before the last accepted"
+
 puts "\n== the clock"
 # The code now is the code for the second read before or after it.
 before = Time.utc.to_unix

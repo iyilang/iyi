@@ -4,10 +4,12 @@
 #     bash bench/std_otp_exercise.sh
 #
 # The exercise holds RFC 4226's appendix D, RFC 6238's appendix B under
-# all three hashes, the verify window, the clock, and key URIs against
+# all three hashes, the verify window, the step `verify_step` answers and
+# the one it will not answer twice, the clock, and key URIs against
 # hand-written strings; this gate runs it plain and --release, holds the
-# codes and `verify` to an HOTP written here in Python on `hmac` and
-# `hashlib` over random secrets, counters, times, steps and digits, has
+# codes, `verify` and `verify_step` to an HOTP written here in Python on
+# `hmac` and `hashlib` over random secrets, counters, times, steps and
+# digits, has
 # Python's `urllib.parse` read the URIs this writes and this read the ones
 # Python writes, names what is refused with its sentence, and proves on
 # broken copies of the module that the checks fail where they say.
@@ -82,7 +84,7 @@ fi
 
 echo
 echo "== every otp section reported"
-for phrase in "== HOTP, RFC 4226 appendix D" "== TOTP, RFC 6238 appendix B" "== verify" "== the clock" "== otpauth URIs"; do
+for phrase in "== HOTP, RFC 4226 appendix D" "== TOTP, RFC 6238 appendix B" "== verify" "== verify_step" "== the clock" "== otpauth URIs"; do
   if ! grep -q "$phrase" "$WORK/otp-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -126,9 +128,11 @@ echo "== an HOTP written on python's hmac agrees"
 # digits, HOTP at counters anywhere in 0 to 2^63 - 1 and TOTP at times to
 # 2^40 seconds with steps of 30, 60 or 1 to 600; then 300 verifications,
 # the code sent being the one for a step up to three either side or a
-# made-up one, against windows of 0 to 3. A secret under 16 bytes is one
-# in four, and is passed with min_secret 1: HMAC takes a key of any
-# length, and so must this when it is told to.
+# made-up one, against windows of 0 to 3; then 300 of `verify_step`, the
+# same way, half of them after a last accepted step up to three either
+# side of the clock's, held to the latest step Python finds past it. A
+# secret under 16 bytes is one in four, and is passed with min_secret 1:
+# HMAC takes a key of any length, and so must this when it is told to.
 if [ -z "$PY" ]; then
   echo "  no python3 on this machine, so the codes go uncompared"
 else
@@ -144,7 +148,8 @@ def hotp(key, counter, digits, name):
     number = struct.unpack(">I", mac[offset:offset + 4])[0] & 0x7FFFFFFF
     return str(number % 10 ** digits).zfill(digits)
 
-lines = ["module code_cases", "", "import std/otp::{HOTP, TOTP, OTPAlgorithm}", "", os.environ["HELPERS"]]
+lines = ["module code_cases", "", "import std/otp::{HOTP, TOTP, OTPAlgorithm}", "", os.environ["HELPERS"],
+         "def shown(step : Int64?) : String", '  step.nil? ? "nil" : step.to_s', "end", ""]
 expected = []
 def floor(key):
     return ", 1" if len(key) < 16 else ""
@@ -176,6 +181,24 @@ for _ in range(300):
     accepted = any(hotp(key, t // step + k, digits, name) == code for k in range(-window, window + 1) if t // step + k >= 0)
     lines.append(f'puts TOTP.verify(b("{key.hex()}"), "{code}", {t}_i64, {window}, {step}, {digits}, OTPAlgorithm::{name}{floor(key)})')
     expected.append(f"{'true' if accepted else 'false'}\tverify {name} time {t} step {step} window {window} code {code}")
+for i in range(300):
+    key = bytes(rng.getrandbits(8) for _ in range(rng.randint(1, 64)))
+    name = rng.choice(list(hashes))
+    digits = rng.choice([6, 8])
+    step = rng.choice([30, 60])
+    t = rng.randint(0, 2 ** 34)
+    window = rng.randint(0, 3)
+    off = rng.randint(-3, 3)
+    if rng.random() < 0.2 or t // step + off < 0:
+        code = str(rng.randint(0, 10 ** digits - 1)).zfill(digits)
+    else:
+        code = hotp(key, t // step + off, digits, name)
+    after = t // step + rng.randint(-3, 3) if i % 2 else None
+    steps = [t // step + k for k in range(-window, window + 1)
+             if t // step + k >= 0 and (after is None or t // step + k > after) and hotp(key, t // step + k, digits, name) == code]
+    said = "nil" if after is None else f"{after}_i64"
+    lines.append(f'puts shown(TOTP.verify_step(b("{key.hex()}"), "{code}", {t}_i64, {window}, {step}, {digits}, OTPAlgorithm::{name}, {said}{floor(key)}))')
+    expected.append(f"{max(steps) if steps else 'nil'}\tverify_step {name} time {t} step {step} window {window} after {after} code {code}")
 open(os.path.join(work, "code_cases.iyi"), "w").write("\n".join(lines) + "\n")
 open(os.path.join(work, "code_expected.txt"), "w").write("\n".join(expected) + "\n")
 PY
@@ -191,7 +214,8 @@ bad = [(w, g) for w, g in zip(want, got + [""] * len(want)) if w[0] != g]
 for w, g in bad[:8]:
     print(f"  {w[1]}: python {w[0]}, iyi {g}")
 accepted = sum(1 for w in want if w[0] == "true")
-print(f"  {len(want) - len(bad)} of {len(want)} agree: 400 codes and 300 verifications ({accepted} accepted)")
+stepped = sum(1 for w in want if w[1].startswith("verify_step") and w[0] != "nil")
+print(f"  {len(want) - len(bad)} of {len(want)} agree: 400 codes, 300 verifications ({accepted} accepted) and 300 of verify_step ({stepped} answered a step)")
 sys.exit(1 if bad else 0)
 PY
   then
@@ -349,6 +373,8 @@ when "short-secret-now"
   TOTP.now(short)
 when "short-secret-verify"
   TOTP.verify(short, "123456", 59_i64)
+when "short-secret-verify-step"
+  TOTP.verify_step(short, "123456", 59_i64)
 when "secret-under-a-raised-floor"
   TOTP.code(key + [9_u8], 59_i64, min_secret: 22)
 when "short-secret-uri"
@@ -357,6 +383,8 @@ when "short-secret-hotp-uri"
   OTPAuth.hotp(short, "alice", 0_i64)
 when "empty-secret-uri"
   OTPAuth.totp([] of UInt8, "alice", "Example", min_secret: 0)
+when "negative-window-step"
+  TOTP.verify_step(key, "123456", 59_i64, -1)
 when "parse-short-or-panic"
   OTPAuth.parse("otpauth://totp/alice?secret=JBSWY3DPEHPK3PXP").or_panic
 when "step-0"
@@ -403,10 +431,12 @@ refuse one-byte-secret "HOTP: the secret must be at least 16 bytes, not 1"
 refuse short-secret-totp "HOTP: the secret must be at least 16 bytes, not 15"
 refuse short-secret-now "HOTP: the secret must be at least 16 bytes, not 15"
 refuse short-secret-verify "HOTP: the secret must be at least 16 bytes, not 15"
+refuse short-secret-verify-step "HOTP: the secret must be at least 16 bytes, not 15"
 refuse secret-under-a-raised-floor "HOTP: the secret must be at least 22 bytes, not 21"
 refuse short-secret-uri "OTPAuth: the secret must be at least 16 bytes, not 15"
 refuse short-secret-hotp-uri "OTPAuth: the secret must be at least 16 bytes, not 15"
 refuse empty-secret-uri "OTPAuth: the secret is empty"
+refuse negative-window-step "TOTP: the window must not be negative, not -1"
 refuse step-0 "TOTP: the step must be at least 1 second, not 0"
 refuse before-1970 "TOTP: the Unix time must not be negative, not -30"
 refuse negative-window "TOTP: the window must not be negative, not -1"
@@ -465,6 +495,14 @@ prove_broken "a window one step short ahead" "a code one step ahead verifies" \
   'while k <= window' 'while k < window'
 prove_broken "a window one step long behind" "a code two steps behind does not verify" \
   'k = -window' 'k = -window - 1'
+prove_broken "the last accepted step taken again" "a code is not taken again in its own step" \
+  'matched = at + k if same && at + k > floor' 'matched = at + k if same && at + k >= floor'
+prove_broken "a step at or before the last accepted taken" "a code is not taken again in its own step" \
+  'matched = at + k if same && at + k > floor' 'matched = at + k if same'
+prove_broken "the earlier of two steps that share a code answered" "a code two steps share is the later step" \
+  'matched = at + k if same && at + k > floor' 'matched = at + k if same && at + k > floor && matched.nil?'
+prove_broken "verify_step answering the clock's step, not the code's" "a code one step ahead is the next step's" \
+  'matched = at + k if same && at + k > floor' 'matched = at if same && at + k > floor'
 prove_broken "a code's digits written backwards" "RFC 4226 count 0" \
   'dst[k] = (48_u32 + number % 10_u32).unsafe_to_u8' 'dst[digits - 1 - k] = (48_u32 + number % 10_u32).unsafe_to_u8'
 prove_broken "every step thirty seconds" "a step of 60" \

@@ -50,8 +50,185 @@
   test's first named case and takes them out of it. Only a test with a
   named case reads its environment, so no other program links `environ`.
 
+- **What the fixes below change in a program's source.**
+  `RsaPrivateKey#sign_pss` and `#sign_pkcs1v15` answer `Array(UInt8) |
+  RsaError`, `TlsIdentity#sign` `Array(UInt8) | TlsError`,
+  `SigningKey#sign` `Array(UInt8) | X509Error` and `AcmeJws.sign`
+  `String | AcmeError`. `Bcrypt.hash` panics for a password with a NUL or
+  past 72 bytes, and `Bcrypt.verify` answers false for one and for a
+  stored cost past `max_cost` (16). std/otp refuses a secret under 16
+  bytes unless `min_secret:` says less - the key URI format's own example
+  is 10. `Cookie#to_set_cookie` panics for a `Path`, `Domain` or
+  `SameSite` that would break the line. `iyi.sum` lines are `h2:`.
+  `install.sh` stops where SHA256SUMS cannot be fetched.
+
 ### Fixed
 
+- **std/tls: a server takes a ticket only for a client it would take
+  now.** A resumption asks a client for no certificate, and the server
+  resumed any ticket its keys opened - and `TlsServerConfig#dup` and
+  every `frozen` copy share those keys. A ticket from a listener that asks
+  for no certificate resumed on one whose `client_roots` require one,
+  with `peer_certificates` empty; a chain checked under other roots, or
+  past its notAfter, was reported as the peer's; and `client_roots` set in
+  place did not reach tickets already out, for their two hours to seven
+  days. The ticket's chain is now held to `client_roots`,
+  `client_required` and `now` as a full handshake's is, and a ticket that
+  fails is passed over for a full handshake. The class of Go's
+  CVE-2025-68121.
+- **std/http: `HTTP.upgrade`, and so every `wss://`, keeps
+  `require_staple` and `ech_configs`.** It handshook under a `TlsConfig`
+  of its own that carried the roots, the time and the identity alone: a
+  server with no staple, refused by `HTTP.get`, was taken for a WebSocket,
+  and the host went out in a plain server_name beside a configured ECH.
+- **std/tls: a peer cannot hold a read with records that carry
+  nothing.** After the handshake, application data of no bytes,
+  user_canceled warnings, KeyUpdates, tickets and TLS 1.2's HelloRequests
+  were passed over without end - 3.3 to 4.3 MB/s of KeyUpdates kept a
+  core busy. Past 32 of them in a row (`MAX_IDLE_RECORDS`) the peer is
+  refused, as OpenSSL refuses it at 32 and Go at 16; a handshake record of
+  no bytes is refused after the handshake as in it.
+- **std/tls: the client finds an extension sent twice in a set.** A
+  NewSessionTicket of 16,380 unknown extensions cost a client 44 ms of
+  looking each up in an array of those before it; 5 ms now. The
+  ServerHello's, EncryptedExtensions', a CertificateRequest's, a
+  certificate entry's and an ECHConfig's are kept the same way.
+- **std/tls: a socket closed under taken early data ends `read_early`
+  and `read`**, where it was a panic ("socket is closed") that took the
+  process: `closed?` was asked by `read` and `write` and not by these.
+- **std/tls: `TlsServer#early_declined?` says a client's early data was
+  passed over.** The client sends it again after the handshake, where
+  `read` reads it; when it was passed over because a copy of its
+  ClientHello had been taken, the server has it twice, and the header had
+  called `read` never a replay.
+- **std/x509: a search for a chain is bounded by its work.** The search
+  stopped at 100 candidates, and a candidate's cost had no bound: each
+  was held to its name constraints, every name of the leaf against every
+  constraint, before its signature was looked at. One Certificate message
+  of 65 KB - 6,300 names, five issuers of 900 constraints, all signed by
+  the sender's own key - took 9.3 s to refuse, at a client from any
+  server and at a server that asks for a client's certificate from anyone
+  (`openssl verify` 64 ms). The signature is checked first; the
+  comparisons of one `verify` are held to 250,000 (Go's figure); a
+  verdict is reached once for an issuer; and an RSA key past 8192 bits is
+  refused anywhere in a chain, where a 16384-bit one cost 330 ms a
+  handshake. The same message is refused in under a millisecond.
+- **std/x509: an IPv4 address written as IPv4-mapped IPv6 is held to the
+  ranges its IPv4 form is.** A leaf naming `::ffff:10.0.0.1` passed under
+  an issuer that excludes `10.0.0.0/8`, and std/socket connects to that
+  literal.
+- **std/system_roots: a root Windows keeps from authenticating a server
+  is not a TLS client's.** Windows writes the purposes it trusts a root
+  for beside the certificate (`CertGetEnhancedKeyUsage`), not in it, and
+  every root in the ROOT store was taken: on one machine 8 of 29 were
+  code-signing, time-stamping or mail roots, four of them valid CAs that
+  Python's `ssl` and Windows itself refuse for a server. `restricted`
+  counts the ones left out. `distrusted` holds the Disallowed store's
+  certificates, which `X509.verify` now refuses anywhere in a chain - the
+  store was applied to roots alone, and what Windows distrusts there is
+  mostly intermediates.
+- **std/cookie: an `http://` answer leaves a `Secure` cookie alone**
+  (RFC 6265bis section 5.7): it replaced one of the same name, removed it
+  with `Max-Age=0`, or set a longer path's beside it, though the header
+  said it could not. A jar holds `__Secure-` and `__Host-` names to what
+  their prefixes promise, and `Cookie#to_set_cookie` refuses a `Path`,
+  `Domain` or `SameSite` that would add an attribute to the line, as it
+  refused a name or value.
+- **`iyi.sum`'s hash says where each file ends, and is SHA-256
+  (`h2:`).** The `s1:` hash was SHA-1 over each file's path, a zero byte,
+  its bytes and a zero byte, with no lengths - and a file may hold zero
+  bytes, so bytes moved across a file's edge hashed the same. A tag moved
+  to a tree that turned a data file's tail into the source file built
+  under the line the first tree wrote, on any fresh cache. `h2:` is
+  SHA-256 over a line for each file - its own SHA-256, whether it is a
+  file or a link, its path - and such a tree is refused. An `s1:` line is
+  held to its checkout the old way once more, then written again as
+  `h2:`; one that does not match is refused as before.
+- **The `.iyimod` reader allocates by no count the file's own bytes
+  cannot hold.** Every count and length in an artifact was handed to an
+  allocator as read: a file of 16 bytes asked for 32 GiB and ended the
+  compiler - `build`, `check` and the language server, which read `mods/`
+  beside a project unasked. Each is now held to the bytes that remain: the
+  same file is refused in 0.1 s at 45 MiB, with a sentence.
+- **std/password: bcrypt refuses what it would cut.** `Bcrypt` stopped
+  at a password's first NUL, in an `Array(UInt8)` as in a `String`, and at
+  72 bytes: a digest handed to it - `Bcrypt.hash(SHA256(password))` - is
+  the empty password one time in 256, and whatever follows byte 72 is
+  not part of any password. `hash` now refuses both and `verify` answers
+  false; bytes that are not text are to be base64 or hex first.
+  `Bcrypt.verify` takes `max_cost` (16 unless given) and does no work
+  for a stored hash that names more - one naming 31 is 2^17 times the
+  work of 14.
+- **std/otp: `TOTP.verify_step` answers the step a code matched, and
+  none at or before `after`.** `verify` answered true or false, so the
+  "once" of RFC 6238 section 5.2 could not be kept by a caller: a code
+  was good again for the rest of its window. A secret under 16 bytes is
+  refused unless `min_secret` says less (RFC 4226's R6), and
+  `OTPAuth.parse` refuses a label or an issuer with control, line-breaking
+  or bidirectional characters.
+- **std/autocert: on Windows the cache's directory has an access list of
+  its own.** A mode keeps nobody out there - a file has the list of the
+  directory it is made in - so a cache under `C:\ProgramData` held its
+  private keys, and the ACME account's, where every user could read
+  them. Before the first entry is written the directory is given a
+  protected list: its owner, SYSTEM and the Administrators, inherited by
+  each entry and nothing from above. A directory whose list cannot be set
+  is not written to.
+- **std/rsa: a signature that does not check is an error, and a key that
+  cannot sign is refused when it is read.** Each signature is checked
+  against the public key before it leaves, so that a fault gives out no
+  factor of the key, and one that failed was a panic: a key whose p was
+  not prime passed every check `from_pem` made and ended the process at
+  its first handshake, as one flipped bit would. A key now signs once as
+  it is read (1.2 ms more for 2048 bits, 7 for 4096) and is an `RsaError`
+  if it cannot; a signature that fails later is an `RsaError` from
+  `sign_pss` and `sign_pkcs1v15`, which std/tls ends that one handshake
+  for (internal_error). `verify_pss` answers false for a salt length no
+  encoding holds, where the sum overflowed.
+- **std/base64: `Base64.decode?` answers a text that is not base64, and
+  `encode_secret` and `decode_secret` look into no table.** `decode`
+  raises, and std/smtp gave it a server's CRAM-MD5 challenge: `334 !!`
+  ended the client. `encode` and `decode` index tables by the bytes they
+  are given and branch on them, and a private key's PEM went through
+  both (the Util::Lookup class, CCS 2021): std/rsa, std/x509 and
+  std/autocert now read and write a key's PEM, and std/smtp and std/http
+  a password, by the two that map each character with masks. `decode_secret`
+  is the strict reader besides - `QR==` is refused.
+- **The machine code keeps what the constant-time source says, and the
+  gates read it.** ML-KEM's decapsulation picked between the key and the
+  implicit-rejection key by masks, and a `--release` build made that a
+  `cmov` of a pointer and one load: which buffer was read said whether the
+  ciphertext held (std/tls makes a key for each handshake and was not
+  reached; a kept key was). std/p256's fixed-base lookup read its
+  selectors through an atomic zero the optimiser folded away. Both, and
+  P-384's and Curve25519's lookups and X25519's swap, now pass their
+  masks through std/digest's `ValueBarrier` - an empty inline assembly on
+  x86_64 and aarch64, a volatile load elsewhere - and the modules' gates
+  refuse an assembly without it. std/big's Montgomery products carry by
+  additions in every build, where a build without `--release` branched
+  on secret limbs.
+- **No thread reads a table part written.** SHA-2's and Keccak's
+  constants, ML-KEM's, and the base-point tables of P-256 and Curve25519
+  were built at first use and published by a plain store; on a machine
+  that reorders stores a second thread could read one half filled, and a
+  deterministic signature made with it gives the key beside its repeat.
+  The constants are constants now, and a table's address is stored with
+  release ordering after it is full and loaded with acquire.
+- **`install.sh` does not unpack a tarball it could not check.** A
+  SHA256SUMS that could not be fetched was a note and an install; it is
+  a refusal now, for every release from 0.12.0, the first to publish
+  one. Nothing is fetched over anything but HTTPS, and the script is a
+  function called on its last line, so a download cut short runs none of
+  it.
+- **CI: every action is named by its commit, the downloads a shipped
+  build is made from are checked against a hash, and a release attests
+  where it was built.** 89 `uses:` were tags a publisher can move;
+  Crystal, CMake, LLVM's source and `make` came unchecked into the jobs
+  that build the archives, whose SHA256SUMS is made after. The VS Code
+  job's registry tokens were in the environment of every step, beside an
+  `npx --yes` of whatever the registry answered: each is now the one
+  publishing step's, and `vsce` and `ovsx` are locked. `gh attestation
+  verify` reads a release's provenance (INSTALL.md).
 - **`iyi run`'s exit is the program's, when Windows holds its executable a
   moment past the exit.** The runner deleted its program in a cleanup that
   raised when Windows refused - "being used by another process" - and the

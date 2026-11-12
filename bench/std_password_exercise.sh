@@ -279,6 +279,10 @@ when "bcrypt-cost-3"
   Bcrypt.hash("password", 3)
 when "bcrypt-cost-32"
   Bcrypt.hash("password", 32)
+when "bcrypt-nul"
+  Bcrypt.hash("pass\0word", 4)
+when "bcrypt-digest-with-a-nul"
+  Bcrypt.hash([0_u8, 200_u8, 31_u8, 7_u8], 4)
 when "scrypt-n-1000"
   Scrypt.derive("password", "salt", 1000, 8, 1, 32)
 when "scrypt-n-1"
@@ -313,6 +317,8 @@ refuse() { # refuse <case> <phrase>
 }
 refuse bcrypt-cost-3 "Bcrypt: the cost must be from 4 to 31, not 3"
 refuse bcrypt-cost-32 "Bcrypt: the cost must be from 4 to 31, not 32"
+refuse bcrypt-nul "Bcrypt: the password must not hold a NUL byte; bytes that are not text are encoded first, in base64 or hexadecimal"
+refuse bcrypt-digest-with-a-nul "Bcrypt: the password must not hold a NUL byte; bytes that are not text are encoded first, in base64 or hexadecimal"
 refuse scrypt-n-1000 "Scrypt: n must be a power of two above 1, not 1000"
 refuse scrypt-n-1 "Scrypt: n must be a power of two above 1, not 1"
 refuse scrypt-r-0 "Scrypt: r must be at least 1, not 0"
@@ -365,6 +371,10 @@ prove_broken "a bcrypt that never uses its salt" "a hash given another salt does
     st = Pointer(UInt32).malloc(1042_u64)'
 prove_broken "a bcrypt that ignores its cost" "a hash relabelled with another cost does not verify" \
   'rounds = 1_i64.unsafe_shl(cost)' 'rounds = 16_i64'
+# Without the refusal the key is still built, of the password and its NUL
+# cycled: "a", NUL, "a" cycles to what "a" does.
+prove_broken "a verify that keys a password holding a NUL" "a password repeated after a NUL does not verify as the password" \
+  '    return false if nul?(bytes, count)' '    return false if false'
 prove_broken "Salsa20 at six rounds rather than eight" "rfc 7914 case 1" \
   'while double_round < 4' 'while double_round < 3'
 # With r = 1 the two halves are one block each and either order is the

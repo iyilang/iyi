@@ -470,6 +470,11 @@ prove_broken "PLAIN without its first NUL" "PLAIN's message is NUL, user, NUL, p
   'Base64.encode("\u0000" + user + "\u0000" + password)' 'Base64.encode(user + "\u0000" + password)'
 prove_broken "CRAM-MD5 keyed with the challenge" "RFC 2195's response to its challenge" \
   'HMAC.hexdigest(MD5, password, challenge)' 'HMAC.hexdigest(MD5, challenge, password)'
+prove_broken "a challenge that is not base64 decoded by the decoder that panics" "iyi: panic: base64: invalid byte 33" \
+  'challenge = Base64.decode?(answer.text.strip)' 'challenge = Base64.decode(answer.text.strip)'
+prove_broken "no * after a challenge that is not base64" "the server waited for \"*\"" \
+  '          command("*")
+' ''
 prove_broken "a reply line unbounded" "a line too long" \
   'if (nl || @held.bytesize) > MAX_LINE + 1' 'if false'
 prove_broken "a reply unbounded in lines" "a reply too long" \

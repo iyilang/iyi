@@ -14,7 +14,13 @@ def assert_str(expected : String, actual : String, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
 end
 
-import std/base64::{Base64}
+import std/base64::{Base64, Base64Error}
+
+# What `decode?` answered, as one line: the bytes, or the refusal's
+# sentence.
+def answered(got : String | Base64Error) : String
+  got.is_a?(Base64Error) ? "refused: " + got.message : got
+end
 
 puts "== encode"
 assert_str "aGk=", Base64.encode("hi"), "hi"
@@ -87,5 +93,20 @@ assert_str "ABCD", Base64.decode("QUJDRA=="), "a full group then a padded one"
 # `\f` were refused as invalid bytes.
 assert_str "ABCD", Base64.decode("QUJD\vRA=\f="), "vertical tab and form feed are whitespace"
 puts "  decode and round trip"
+
+puts "\n== decode?"
+assert_str "hi", answered(Base64.decode?("aGk=")), "decode? of a text that is base64"
+assert_str "ABCA", answered(Base64.decode?("QUJD\nQQ=\n=\n")), "decode? reads what decode reads"
+# Each refusal the gate drives through `decode` as a panic, answered here
+# as a value with the same sentence.
+assert_str "refused: base64: invalid byte 42", answered(Base64.decode?("QU*JD")), "decode? answers a byte outside the alphabet"
+assert_str "refused: base64: invalid byte 33", answered(Base64.decode?("QUJDQUJD!!not-base64!!")), "decode? answers a byte after whole groups"
+assert_str "refused: base64: data after padding", answered(Base64.decode?("QQ==QQ==")), "decode? answers data after the padding"
+assert_str "refused: base64: discontinuous padding", answered(Base64.decode?("QU=JD")), "decode? answers data inside the padding"
+assert_str "refused: base64: excess padding", answered(Base64.decode?("QQ===")), "decode? answers more padding than the group needs"
+assert_str "refused: base64: padding with no group to close", answered(Base64.decode?("QUJD=")), "decode? answers padding after a full group"
+assert_str "refused: base64: 1 data characters, 1 more than a multiple of 4: a single character cannot encode a byte", answered(Base64.decode?("Q=")), "decode? answers a padded lone character"
+assert_str "refused: base64: 5 data characters, 1 more than a multiple of 4: a single character cannot encode a byte", answered(Base64.decode?("QUJDR")), "decode? answers a final group of one character"
+puts "  a text that is base64 decoded, and each refusal answered with decode's sentence"
 
 puts "\nALL CHECKS PASSED"

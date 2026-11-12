@@ -1,5 +1,11 @@
 # Base64, RFC 4648, written in iyi.
 #
+#     import std/base64::{Base64, Base64Error}
+#
+#     Base64.encode("hi")                # "aGk="
+#     Base64.decode("aGk=")              # "hi", or a panic
+#     Base64.decode?(challenge)          # the bytes, or a Base64Error
+#
 # `encode` is the alphabet with `+` `/` and `=` padding, no line
 # breaks (RFC 4648 §4). `urlsafe_encode` uses `-` `_` and the same
 # padding. `decode` accepts both alphabets, ignores ASCII whitespace,
@@ -8,6 +14,13 @@
 # the padding, data inside it (`"QU=JD"`), more `=` than the group
 # needs, and a final group of one character (`"Q"`, which cannot encode a
 # byte) are each refused.
+#
+# `decode?` is `decode` with the refusal answered and not raised: a
+# `Base64Error` whose `message` is the sentence `decode` panics with. A
+# text someone else wrote - a server's challenge, a header, a file - is
+# read with `decode?`: a panic ends the process, and whoever wrote the
+# text would be the one choosing it. `decode` is for a text the program
+# made itself.
 
 @[Unsafe("encoding and decoding read the input's bytes through a raw pointer, for speed")]
 module std/base64
@@ -21,6 +34,24 @@ DECODE_VALUES = Base64.decode_values
 PAIRS_STD = Base64.pairs_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
 PAIRS_URL = Base64.pairs_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
 
+# What `decode?` answers for a text that is not base64.
+pub struct Base64Error
+  getter message : String
+
+  def initialize(@message : String)
+  end
+
+  def to_s : String
+    @message
+  end
+end
+
+impl Error for Base64Error
+  def message : String
+    @message
+  end
+end
+
 pub struct Base64
   def self.encode(data : String) : String
     encode_with(data, plus_slash, PAIRS_STD, true)
@@ -31,6 +62,14 @@ pub struct Base64
   end
 
   def self.decode(text : String) : String
+    decoded = decode?(text)
+    raise decoded.message if decoded.is_a?(Base64Error)
+    decoded
+  end
+
+  # `decode`, with a text that is not base64 answered rather than raised:
+  # the error's `message` is the sentence `decode` raises.
+  def self.decode?(text : String) : String | Base64Error
     src = text.to_unsafe
     n = text.bytesize
     # Every data character is six bits and a byte is written per eight, so
@@ -44,16 +83,27 @@ pub struct Base64
     pads = pads + 1 if n > 1 && src[n - 2] == 61_u8
     size = ((n - pads).to_i64 * 6 // 8).to_i32
     written = 0
-    answer = String.new(size) { |buf| written = decode_into(buf, src, n) }
+    refusal = nil.as(Base64Error?)
+    answer = String.new(size) do |buf|
+      got = decode_into(buf, src, n)
+      if got.is_a?(Base64Error)
+        refusal = got
+      else
+        written = got
+      end
+    end
+    refused = refusal
+    return refused if refused
     return answer if written == size
     buf = Pointer(UInt8).malloc(size.to_u64)
-    written = decode_into(buf, src, n)
-    String.new(written) { |dst| dst.copy_from(buf, written) }
+    again = decode_into(buf, src, n)
+    return again if again.is_a?(Base64Error)
+    String.new(again) { |dst| dst.copy_from(buf, again) }
   end
 
   # Decodes into *buf*, which has room for what the text can hold, and
-  # answers the bytes written.
-  private def self.decode_into(buf : Pointer(UInt8), src : Pointer(UInt8), n : Int32) : Int32
+  # answers the bytes written, or what the text is that base64 is not.
+  private def self.decode_into(buf : Pointer(UInt8), src : Pointer(UInt8), n : Int32) : Int32 | Base64Error
     values = DECODE_VALUES.to_unsafe
     acc = 0
     bits = 0
@@ -109,19 +159,19 @@ pub struct Base64
       next if b == 32_u8 || (b >= 9_u8 && b <= 13_u8)
       if b == 61_u8 # '='
         if pads == 0
-          raise "base64: #{chars} data characters, 1 more than a multiple of 4: a single character cannot encode a byte" if bits == 6
-          raise "base64: padding with no group to close" if bits == 0
+          return Base64Error.new("base64: #{chars} data characters, 1 more than a multiple of 4: a single character cannot encode a byte") if bits == 6
+          return Base64Error.new("base64: padding with no group to close") if bits == 0
           pads_needed = bits == 4 ? 2 : 1
         end
         pads = pads + 1
-        raise "base64: excess padding" if pads > pads_needed
+        return Base64Error.new("base64: excess padding") if pads > pads_needed
         next
       end
       v = values[b.to_i32]
-      raise "base64: invalid byte #{b}" if v < 0
+      return Base64Error.new("base64: invalid byte #{b}") if v < 0
       if pads > 0
-        raise "base64: discontinuous padding" if pads < pads_needed
-        raise "base64: data after padding"
+        return Base64Error.new("base64: discontinuous padding") if pads < pads_needed
+        return Base64Error.new("base64: data after padding")
       end
       chars = chars + 1
       acc = (acc << 6) | v
@@ -132,7 +182,7 @@ pub struct Base64
         o = o + 1
       end
     end
-    raise "base64: #{chars} data characters, 1 more than a multiple of 4: a single character cannot encode a byte" if bits == 6
+    return Base64Error.new("base64: #{chars} data characters, 1 more than a multiple of 4: a single character cannot encode a byte") if bits == 6
     o
   end
 

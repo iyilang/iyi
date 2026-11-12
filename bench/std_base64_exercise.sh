@@ -7,7 +7,9 @@
 # decoder is caught, and what `decode` refuses: a byte outside the alphabet, data after
 # the padding, data inside it, more `=` than the group needs, `=` with no
 # group to close, and a final group of one character - each a panic with a
-# sentence, where before the data was silently dropped.
+# sentence, where before the data was silently dropped. The exercise holds
+# `decode?` to the same sentences as values, and a refusal raised inside it
+# is among the breaks proven here.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -79,7 +81,7 @@ fi
 
 echo
 echo "== every base64 section reported"
-for phrase in "== encode" "== decode"; do
+for phrase in "== encode" "== decode" "== decode?"; do
   if ! grep -q "$phrase" "$WORK/base64-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -154,6 +156,9 @@ broken "six bytes read in the wrong order" '(w.unsafe_shr(40) & 0xFF_u64)
 '
 broken "a character pair written backwards" 'chars[k.unsafe_shr(6)].to_i32 | chars[k & 63].to_i32.unsafe_shl(8)' 'chars[k & 63].to_i32 | chars[k.unsafe_shr(6)].to_i32.unsafe_shl(8)'
 broken "vertical tab and form feed refused again" 'next if b == 32_u8 || (b >= 9_u8 && b <= 13_u8)' 'next if b == 32_u8 || b == 10_u8 || b == 13_u8 || b == 9_u8' "base64: invalid byte 11"
+# `decode?` answers what `decode` raises: a refusal raised inside it is the
+# panic a peer's text would be.
+broken "a refusal raised where decode? answers" 'return Base64Error.new("base64: invalid byte #{b}") if v < 0' 'raise "base64: invalid byte #{b}" if v < 0' "iyi: panic: base64: invalid byte 42"
 # The byte loop is cheap enough on arm64 that it stays inside two and a half
 # byte sums there: darwin arm64 let it through. The check runs everywhere;
 # its proof on Linux x86_64, where the byte loop is twice the word loop.

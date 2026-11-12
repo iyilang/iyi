@@ -11186,9 +11186,23 @@ together have to fit in what follows the table, and inside a section a
 count of things that take *n* bytes each has to fit in what the section
 has left. A sixteen-byte file whose table named two thousand million
 sections used to ask for 32 GiB before its first entry was read; it is
-now a sentence naming the count and the room. This bounds what a reader
-allocates by the size of the file it was given and nothing else - it is
-not a judgement of what the file says.
+now a sentence naming the count and the room. **And the counts of one
+section are held to its size together**, which the rule about what is
+left did not do alone: a type's declarations nest, each level was
+measured against the same remaining bytes, and a 385 KB section whose
+every level counted as many declarations as the rest could hold was
+1.9 GiB committed, every level's array alive at once, before the file
+was refused for ending early. *n* is what an element takes itself, apart
+from what its own counts claim, so the claims are of different bytes: a
+section's counts times their *n* come to no more than the section's
+length, or it is refused at the count that passes it. What a section
+makes a reader allocate is therefore no more elements than it has bytes
+for - a multiple of the file's size fixed by the reader's own records,
+not a number the file chooses. The nesting itself is held to 200 types
+inside one another, by the writer as by the reader: both recurse once a
+level, and one type inside one type twenty thousand times, a well-formed
+1.5 MB, ended the reader with the stack instead of a sentence. None of
+this is a judgement of what the file says.
 
 ### IV.3 Hashing. The part that decides whether builds are actually incremental
 

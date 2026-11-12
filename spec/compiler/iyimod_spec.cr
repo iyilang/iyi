@@ -110,6 +110,25 @@ private def header_claiming(flags : UInt32) : Bytes
   io.to_slice
 end
 
+# An exports section's bytes: no functions, then type declarations nested
+# *depth* deep, each level a count and the 73 bytes one declaration with
+# nothing in it takes before its own nested count. The block is given the
+# bytes that follow a level's count and answers the count to write there.
+# With *closed*, the innermost level declares nothing and the section goes
+# on to its end, which is a section a writer could have written.
+private def nested_exports(depth : Int32, closed : Bool, & : Int32 -> UInt32) : Bytes
+  format = Iyi::IyiMod::FORMAT
+  total = 4 + depth * 77 + (closed ? 16 : 0)
+  io = IO::Memory.new
+  io.write_bytes 0_u32, format
+  depth.times do
+    io.write_bytes (yield total - io.pos.to_i32 - 4), format
+    io.write Bytes.new(73)
+  end
+  io.write Bytes.new(16) if closed
+  io.to_slice
+end
+
 # Writes *modules* and `main.iyi`, builds the program from source writing the
 # modules' artifacts, deletes the modules' sources, builds it again from the
 # artifacts and answers what the two programs print. Inside a `with_tempdir`.
@@ -278,6 +297,77 @@ describe Iyi::IyiMod do
 
           expect_raises(Iyi::IyiMod::Error, /a section counts 4294967280 of something that takes 1 byte or more each, and has 26 bytes left/) do
             Iyi::IyiMod.read(path)
+          end
+        end
+      end
+
+      # Each count above is alone in its section. A type's declarations
+      # nest, and a count held only to what is left of the section was
+      # held, at every level, to the same bytes: each level counted as
+      # many declarations as the rest could hold, spent the 77 bytes of
+      # one, and the level inside it counted the rest again, with every
+      # level's array alive at once. These 385 KB were 1.9 GiB before the
+      # file was refused for ending early. The counts of one section are
+      # held to its size together now, so the second level is the refusal.
+      it "refuses nested counts that claim the same bytes of their section over again" do
+        with_temporary_file do |path|
+          exports = nested_exports(5000, closed: false) { |left| (left // 77).to_u32 }
+          File.write path, iyimod_bytes(
+            {Iyi::IyiMod::Section::Header, header_claiming(0_u32)}, {Iyi::IyiMod::Section::Exports, exports})
+
+          GC.collect
+          before = GC.stats.heap_size
+          expect_raises(Iyi::IyiMod::Error, /#{Regex.escape(path)} is not a readable \.iyimod: a section's counts claim 769769 bytes between them, and it is 385004 bytes long/) do
+            Iyi::IyiMod.read(path)
+          end
+          # One level's array and the section itself, not five thousand.
+          (GC.stats.heap_size.to_i64 - before.to_i64).should be < 64_i64 * 1024 * 1024
+        end
+      end
+
+      # Well formed, and as deep as a file cares to be: one type inside
+      # one type twenty thousand times is 1.5 MB, and the reader recursed
+      # once a level until the stack ended. The depth is held to
+      # `MAX_TYPE_NESTING`, by the reader and by the writer.
+      it "refuses types nested deeper than a .iyimod holds, and reads the deepest it does" do
+        with_temporary_file do |path|
+          limit = Iyi::IyiMod::MAX_TYPE_NESTING
+          header = {Iyi::IyiMod::Section::Header, header_claiming(0_u32)}
+
+          File.write path, iyimod_bytes(header,
+            {Iyi::IyiMod::Section::Exports, nested_exports(limit + 1, closed: true) { 1_u32 }})
+          innermost = Iyi::IyiMod.read(path).exports.types
+          limit.times { innermost = innermost.first.types }
+          innermost.size.should eq 1
+          innermost.first.types.should be_empty
+
+          [limit + 2, 20_000].each do |depth|
+            File.write path, iyimod_bytes(header,
+              {Iyi::IyiMod::Section::Exports, nested_exports(depth, closed: true) { 1_u32 }})
+            expect_raises(Iyi::IyiMod::Error, /#{Regex.escape(path)} is not a readable \.iyimod: a section declares types more than #{limit} deep inside one another/) do
+              Iyi::IyiMod.read(path)
+            end
+          end
+        end
+      end
+
+      it "does not write types nested deeper than it reads" do
+        with_temporary_file do |path|
+          limit = Iyi::IyiMod::MAX_TYPE_NESTING
+          nest = ->(depth : Int32) do
+            types = [] of Iyi::IyiMod::TypeDecl
+            depth.times do |level|
+              declaration = type_declaration("T#{depth - level}", "struct")
+              types = [declaration.copy_with(types: types)]
+            end
+            types
+          end
+
+          Iyi::IyiMod.write sample_artifact(types: nest.call(limit + 1)), path
+          Iyi::IyiMod.read(path).exports.types.first.name.should eq "T1"
+
+          expect_raises(Iyi::IyiMod::Error, /T#{limit + 2} is declared more than #{limit} types deep/) do
+            Iyi::IyiMod.write sample_artifact(types: nest.call(limit + 2)), path
           end
         end
       end

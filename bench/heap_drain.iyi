@@ -27,8 +27,8 @@
 #
 # The line printed gives the bytes the partition arenas' runs span after
 # each round's collection (`IyiHeap.partition_carved`) and the resident
-# set, then - after a last round whose units keep POOL_BYTES between them
-# to their end, every run of theirs pooled at their death - the resident
+# set, then - after a last round whose units hold POOL_BYTES between them
+# at once, every run of theirs pooled at their death - the resident
 # set and the bytes gone cold before and after IDLE_MS idle; the program
 # fails when the span after the last round is more than a quarter (and
 # 4 MiB) above the span after round WARM, plus three times what the kept
@@ -149,8 +149,17 @@ module bench/heap_drain
 
   # A unit of the last round: *bytes* of strings kept to its end and
   # nothing sent, so that every run it holds goes to the pool at its
-  # death (`IyiHeap.free_whole`) - the pool the idle wait cools.
-  def pool_body(bytes : Int32) : Int32
+  # death (`IyiHeap.free_whole`) - the pool the idle wait cools. Holding
+  # them all, it says so on *arrived* and waits for a word on *leave*,
+  # which comes once every unit of the round has arrived: the round's
+  # POOL_BYTES are held at once and pooled together. Without the wait the
+  # units ran as many at a time as there were workers, and each took the
+  # runs those before it had pooled: the round grew the pool by 2 to 5
+  # MiB of its 16 (4 to 10 units alive at once), the rest of what went
+  # cold was what earlier rounds happened to leave pooled, and the idle
+  # check failed when that was little - 3 MiB cold, the optimised build
+  # under load, twice (Linux, S6, DrainFlake).
+  def pool_body(bytes : Int32, arrived : Channel(Int32), leave : Channel(Int32)) : Int32
     kept = [] of String
     total = 0
     i = 0
@@ -160,15 +169,21 @@ module bench/heap_drain
       total = total + s.bytesize
       i = i + 1
     end
+    arrived.send(1)
+    leave.receive
     sum = 0
     kept.each { |k| sum = sum + k.bytesize }
     sum == total ? 0 : 1
   end
 
   def pool_round(units : Int32) : Nil
+    arrived = Channel(Int32).new(units)
+    leave = Channel(Int32).new(units)
     group do |g|
       handles = [] of IyiTask(Int32)
-      units.times { handles << g.spawn(unit: :new) { pool_body(POOL_BYTES // units) } }
+      units.times { handles << g.spawn(unit: :new) { pool_body(POOL_BYTES // units, arrived, leave) } }
+      units.times { arrived.receive }
+      units.times { leave.send(0) }
       handles.each_with_index do |handle, t|
         value = handle.value
         fail("pool round: unit #{t} answered #{value}") unless value == 0

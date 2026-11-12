@@ -355,29 +355,16 @@ class IyiHeapVerify
     end
   end
 
-  # After a local sweep: the free lists hold free chunks of the
-  # partition's own runs, each once, and no weak cell names a chunk it
-  # freed.
+  # After a local sweep: every free chunk of the partition's runs on its
+  # free list or its return stack, each once, and nothing else on them
+  # (`lost_free`); no weak cell names a chunk it freed. A sweep that keeps
+  # its runs lists only what it frees, ahead of the list as it stood
+  # (`IyiHeap.local_sweep`): one that listed a chunk free already once
+  # more, or dropped the return stack the full sweep drops, is caught
+  # here.
   def self.after_sweep(record : UInt64) : Nil
     id = IyiHeap.read64(record &+ IyiHeap::REC_ID)
-    table = Pointer(UInt64).new(record)
-    index = 0
-    while index < IyiHeap::CLASSES
-      head = table[index]
-      if head != 0
-        set = IyiVerifySet.new
-        steps = 0_u64
-        while head != 0 && steps < 16777216_u64
-          listed_bad(id, head, "a chunk on the partition's free list") unless own_free?(id, head)
-          listed_twice(id, head, "the partition's free list") if set.includes?(head)
-          set.add(head)
-          head = IyiHeap.read64(head + IyiHeap::OFF_LINK)
-          steps = steps + 1_u64
-        end
-        set.free
-      end
-      index = index + 1
-    end
+    lost_free(record, id)
     weak_cells(id)
   end
 
@@ -457,10 +444,13 @@ class IyiHeapVerify
     IyiHeap.read8(arena &+ IyiHeap::META &+ slot &* IyiHeap::META_ENTRY) & IyiHeap::FREE_FLAG != 0
   end
 
-  # Before the sweep, each class under its lock with no global slice in
-  # flight: a free chunk of the partition's runs on neither its free list
-  # nor its return stack is lost to it (the global sweep freed it and
-  # handed it to nobody).
+  # After a local sweep, each class under its lock with no global slice
+  # in flight: a free chunk of the partition's runs on neither its free
+  # list nor its return stack is lost to it (the global sweep freed it
+  # and handed it to nobody). A walk ends at the first chunk it meets
+  # twice: the list may be a ring, and a broken copy of bench/heap_local
+  # whose verifier goes on reported each step of the ring, 16 Mi of them,
+  # and ran out its time before its own check (`nokeptfree`).
   def self.lost_free(record : UInt64, id : UInt64) : Nil
     table = Pointer(UInt64).new(record)
     index = 0
@@ -474,7 +464,10 @@ class IyiHeapVerify
           steps = 0_u64
           while head != 0 && steps < 16777216_u64
             listed_bad(id, head, "a chunk on the partition's free list") unless own_free?(id, head)
-            listed_twice(id, head, "the partition's free list") if set.includes?(head)
+            if set.includes?(head)
+              listed_twice(id, head, "the partition's free list")
+              break
+            end
             set.add(head)
             head = IyiHeap.read64(head + IyiHeap::OFF_LINK)
             steps = steps + 1_u64
@@ -483,7 +476,10 @@ class IyiHeapVerify
           steps = 0_u64
           while head != 0 && steps < 16777216_u64
             listed_bad(id, head, "a chunk on the partition's return stack") unless own_free?(id, head)
-            listed_twice(id, head, "the partition's free list and return stack") if set.includes?(head)
+            if set.includes?(head)
+              listed_twice(id, head, "the partition's free list and return stack")
+              break
+            end
             set.add(head)
             head = IyiHeap.read64(head + IyiHeap::OFF_LINK)
             steps = steps + 1_u64

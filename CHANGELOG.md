@@ -182,7 +182,7 @@ keep-alive connection's partition holds far less (bench/heap_local
 `noidle`, `nofresh`). A busy unit's collection budget doubles with each
 collection it brings on in flight, up to 4 MiB within its share of the
 heap, and is worked out again from what was kept when the unit parks, so
-request-shaped units keep 256 KiB: alloc_scaling ran 317 local
+request-shaped units keep at least 768 KiB: alloc_scaling ran 317 local
 collections on one worker where the shared heap runs 57, and now takes
 0.84 (one worker) and 0.79 (two) of 0.21.0's time (tmac, 9 rounds). A
 program that never made a partition keeps the flag-off budget
@@ -191,6 +191,16 @@ program that never made a partition keeps the flag-off budget
 `base_of` five more callers, the inliner stopped inlining it there, and
 JsonGenerate's global collections ran 17 % longer (tmac, 143.5 ms against
 122.7); flag on and off now retire the same instructions.
+
+heap22 S6 CPU, under `-Dheap_partitions`. With the flag on, #145's app
+took 1.09 times the CPU a request of the flag off (Linux): a unit's local
+collections now keep its runs and list only what they free, a parked unit
+collects when it owes half its budget, not a quarter, and its budget is at
+least 768 KiB, not 256 KiB, so the app collects less often and pays each
+collection's walk of its published objects (40 % of a collection) less.
+It now takes 1.003 times the flag off's CPU a request at 0.57 of its steady
+RSS (96 against 169 MB; Linux, 6 rounds side by side), and 0.92 at 0.53 on
+tssh (89 against 168 MB).
 
 heap22 S6 memory return, under `-Dheap_partitions`. Inside one process
 #145's app ratcheted its resident set endpoint after endpoint (50 to 343

@@ -55,9 +55,10 @@ PY="${PYTHON:-python3}"
 # The copies whose loss changes a value, not a heap word: a Share type's
 # getter that lends its array is a mutation of the shared graph, which the
 # program's own check sees (heap_crossings' `tls`); runs a dead unit's
-# record kept are free memory nobody holds, which the owner table shows
-# (heap_local's `unswept`).
-VALUE_COPIES="TlsIdentity chain copy,a death that keeps its emptied runs"
+# record kept, or a parked unit's spare runs left off the idle workers'
+# test, are free memory nobody's word names, which the owner table and
+# the unit's held bytes show (heap_local's `unswept`, `spare`).
+VALUE_COPIES="TlsIdentity chain copy,a death that keeps its emptied runs,spare runs left off the idle test"
 
 # heap_crossings.sh's copies, sourced below, skip what Windows lacks.
 WINDOWS=0

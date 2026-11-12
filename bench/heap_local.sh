@@ -18,7 +18,9 @@
 # sweeps emptied, an idle takeover that reads no parked fiber's stack,
 # an idle takeover of a unit whose `Unit` value is still being built, the
 # same stacks unread by a collection of a unit parked dirty and owing
-# nothing, a pooled run's blocks taken as never written, a dead unit's
+# nothing, a sweep that keeps its runs and drops the return stack or
+# lists a free chunk again, a parked unit's spare runs left off the idle
+# workers' test, a pooled run's blocks taken as never written, a dead unit's
 # pooled run left carved for a stale word to pass the root test, a
 # publication
 # walk that takes a chunk straddling the carve frontier for uncarved,
@@ -241,7 +243,7 @@ if [ "$PART" = all ] || [ "$PART" = broken ]; then
   # of a later class wearing the parity the next mark wears, which takes
   # it for reached and keeps it.
   prove_fails "a stopped sweep's parities trusted" nounswept "unswept:" \
-    '/^    return false unless local_sweep\(record, id, parity, idle\)$/ { print "    write64(record &+ REC_MARKING, 0_u64)"; print "    local_sweep(record, id, parity, idle)"; getline; getline; found = 1; next } { print } END { if (!found) exit 3 }' \
+    '/^    return false unless local_sweep\(record, id, parity, idle, keep\)$/ { print "    write64(record &+ REC_MARKING, 0_u64)"; print "    local_sweep(record, id, parity, idle, keep)"; getline; getline; found = 1; next } { print } END { if (!found) exit 3 }' \
     heap_partition.iyi
 
   # An empty run to the pool as the sweep meets it, as through 3984c899a:
@@ -250,7 +252,7 @@ if [ "$PART" = all ] || [ "$PART" = broken ]; then
   # under that word - a whole sweep held between two classes, which
   # #145's app met at stress 0 (seeds 2 and 3 of 3, Linux), and a stopped one.
   prove_fails "an emptied run pooled before the sweep ends" poolearly "unswept:" \
-    '/def self\.local_sweep\(/ { inside = 1 } inside && /^            set_run_word\(arena, granule_first, read64\(record &\+ REC_EMPTIED\), n, RUN_OWNED\)$/ { print "            pool_run(index, arena, run, n)"; print "            write64(record &+ REC_HELD, read64(record &+ REC_HELD) - n.unsafe_shl(GRANULE_SHIFT))"; getline; inside = 0; found = 1; next } { print } END { if (!found) exit 3 }' \
+    '/def self\.local_sweep\(/ { inside = 1 } inside && /^              set_run_word\(arena, granule_first, read64\(record &\+ REC_EMPTIED\), n, RUN_OWNED\)$/ { print "              pool_run(index, arena, run, n)"; print "              write64(record &+ REC_HELD, read64(record &+ REC_HELD) - n.unsafe_shl(GRANULE_SHIFT))"; getline; inside = 0; found = 1; next } { print } END { if (!found) exit 3 }' \
     heap_partition.iyi
 
   # A death that leaves the runs its stopped sweep emptied on the record:
@@ -289,6 +291,29 @@ if [ "$PART" = all ] || [ "$PART" = broken ]; then
     '{ if (sub(/if !\(running\.is_a\?\(IyiFiber\) && running\.object_id == fiber\.object_id\) && fiber\.state/, "if running.is_a?(IyiFiber) \\&\\& running.object_id != fiber.object_id \\&\\& fiber.state")) found = 1; print } END { if (!found) exit 3 }' \
     heap_partition.iyi
 
+  # A sweep that keeps its runs and drops the return stack, as the whole
+  # sweep does: what the global sweep handed back there is free and on no
+  # list, lost to the partition, which takes new runs round after round.
+  prove_fails "a kept sweep that drops the return stack" nokeptreturn "kept:" \
+    '{ print } /^          list = table\[index\]$/ { print "          Pointer(Atomic(UInt64)).new(record &+ REC_RETURN &+ index.to_u64 &* 8_u64).value.set(0_u64)"; found = 1 } END { if (!found) exit 3 }' \
+    heap_partition.iyi
+
+  # A sweep that keeps its runs and links every free chunk again, as the
+  # whole sweep does, ahead of the list that already holds them: a chunk
+  # twice on the list, or the list a ring, and the allocator hands one
+  # chunk to two objects. The kept check alone (`HEAP22_ONLY=kept`): the
+  # parks of the checks before it hand a ring's chunks out, and the
+  # program died of a memory fault there (CpuFix3, Linux and tmac).
+  HEAP22_ONLY=kept prove_fails "a kept sweep that lists free chunks again" nokeptfree "kept:" \
+    '/def self\.sweep_run_kept\(/ { inside = 1 } { print } inside && /^      bits = read8\(meta\)$/ { print "      if bits & CARVED_FLAG != 0 && bits & FREE_FLAG != 0"; print "        write64(head + OFF_LINK, list)"; print "        write64(head + OFF_INDEX, slot)"; print "        list = head"; print "      end"; inside = 0; found = 1 } END { if (!found) exit 3 }' \
+    heap_partition.iyi
+
+  # A unit whose kept sweep left runs with nothing live on them clean to
+  # the idle workers: parked, it holds them for as long as it sits.
+  prove_fails "spare runs left off the idle test" nospare "spare:" \
+    '{ if (sub(/ \|\| read64\(record &\+ REC_SPARE\) != 0_u64/, "")) found = 1; print } END { if (!found) exit 3 }' \
+    heap_partition.iyi
+
   # A pool run's chunks threaded as fresh - the kernel's zero past their
   # link words - as only a frontier run's are: a unit that takes a dead
   # unit's pooled block reads the dead unit's words in it.
@@ -296,9 +321,10 @@ if [ "$PART" = all ] || [ "$PART" = broken ]; then
     '{ if (sub(/^    thread_run\(table, index, arena, run, n, frontier\)$/, "    thread_run(table, index, arena, run, n, true)")) found = 1; print } END { if (!found) exit 3 }' \
     heap_partition.iyi
 
-  # A run of a dead unit to the pool with its `LOCAL` chunks left carved:
-  # a stale word naming one passes the collector's root test, and a
-  # global mark would keep what the dead chunk names.
+  # A run of a dead unit to the pool with its `LOCAL` chunks left carved
+  # (freed on a run handed to the shared heap alone): a stale word naming
+  # one passes the collector's root test, and a global mark would keep
+  # what the dead chunk names.
   prove_fails "a pooled run's dead chunks left carved" nostale "stale:" \
     '/^          free_locals_in\(arena, run, n\)$/ { found = found + 1; next } /^            set_run_word\(arena, granule_first, handed, n, RUN_OWNED\)$/ { print "            free_locals_in(arena, run, n)"; found = found + 1 } { print } END { if (found != 2) exit 3 }' \
     heap_partition.iyi

@@ -103,10 +103,12 @@ class IyiHeap
   # last park with something allocated since its last collection, 0 once
   # collected, and the record's slice counter as that collection left it
   # (`note_idle`); the return stacks, a word per class, which the global
-  # sweep pushes onto; and, past them, the runs local sweeps found empty,
+  # sweep pushes onto; past them, the runs local sweeps found empty,
   # a chain through their run words, which go to the pool when a sweep
-  # ends whole (`pool_emptied`). The per-class run lists are the cache
-  # layout's fill slots (`FILL + index`): a record never carves.
+  # ends whole (`pool_emptied`); and the bytes of the runs with nothing
+  # live on them that its last sweep kept (`local_sweep`'s *keep*). The
+  # per-class run lists are the cache layout's fill slots (`FILL +
+  # index`): a record never carves.
   REC_PARITY      = 1376_u64
   REC_DEBT        = 1384_u64
   REC_BUDGET      = 1392_u64
@@ -121,6 +123,7 @@ class IyiHeap
   REC_IDLE_SLICE  = 1464_u64
   REC_RETURN      = 1472_u64
   REC_EMPTIED     = 2008_u64
+  REC_SPARE       = 2016_u64
 
   # A run table word, at a run's first granule: the link (48 bits), the
   # run's length in granules (12) and its state (4). A run the shared heap
@@ -159,11 +162,21 @@ class IyiHeap
   # busy unit collected every MiB: alloc_scaling on one worker ran 317
   # local collections where the shared heap runs 57, 1.17-1.49 of 0.21.0's
   # wall time (tmac, tssh); grown, 60 and 0.84 on tmac (S6, Tune6). The
-  # shared heap's own floor no longer multiplies by threads.
-  UNIT_MIN      =   262144_u64
+  # shared heap's own floor no longer multiplies by threads. At a 256 KiB
+  # floor #145's app collected 0.4-6.6 times a request, each paying its
+  # published-roots walk (~40 % of a collection). With the flag on against
+  # off, CPU a request and steady RSS were 1.040 and 92 / 174 MB at 512 KiB,
+  # 1.003 and 96 / 169 at 768 KiB, 1.042 and 102 / 169 at 1 MiB (Linux,
+  # quiet, 5-6 rounds side by side); 0.920 and 89 / 168 at 768 KiB on
+  # tssh (S6, CpuFix4).
+  UNIT_MIN      =   786432_u64
   UNIT_BUSY_MAX =  4194304_u64
   HEADROOM_MIN  = 16777216_u64
   SHARED_MIN    =  8388608_u64
+
+  # The spare a sweep that keeps may leave, in budgets (`local_sweep`):
+  # past it, the next collection sweeps whole and pools the empty runs.
+  SPARE_BUDGETS = 2_u64
 
   # What a freed chunk reads as in a `-Dheap_verify` build.
   POISON = 0xDEADDEADDEADDEAD_u64
@@ -213,24 +226,27 @@ class IyiHeap
 
   # The thread's scratch page for the local mark and the publication
   # walk: a stack of chunk bases mapped beside it, its capacity and
-  # length, a one-entry layout cache, the visited set of the walks
-  # through lent graphs - its mapping, capacity, count and the current
-  # walk's generation - and what `lend_step` found. Not heap memory: the
-  # collector never reads it.
+  # length, the visited set of the walks through lent graphs - its
+  # mapping, capacity, count and the current walk's generation - what
+  # `lend_step` found, and a layout cache (`scratch_layout`). Not heap
+  # memory: the collector never reads it.
   @[ThreadLocal]
   @@scratch : UInt64 = 0_u64
 
   SCR_STACK  =  0_u64
   SCR_CAP    =  8_u64
   SCR_LEN    = 16_u64
-  SCR_LTYPE  = 24_u64
-  SCR_LENTRY = 32_u64
   SCR_SET    = 40_u64
   SCR_SETCAP = 48_u64
   SCR_SETN   = 56_u64
   SCR_COUNT  = 64_u64
   SCR_GEN    = 72_u64
   SCR_STEP   = 80_u64
+  SCR_LAYOUT = 1024_u64
+
+  # The layout cache's lines, a type id and its layout entry each,
+  # indexed by the id's low bits.
+  LAYOUT_LINES = 128_u64
 
   # The types `__iyi_new_shared` has made an object of (`born_shared`): a
   # byte per type id below `BORN_TYPES`, mapped at the first. The walks
@@ -321,6 +337,22 @@ class IyiHeap
 
   def self.local_freed : UInt64
     IyiStat.get(IyiStat::LOCAL_FREED)
+  end
+
+  # Local sweeps that kept every run (`local_sweep`'s *keep*), and the
+  # bytes of runs with nothing live on them those sweeps kept, summed.
+  def self.local_kept_sweeps : UInt64
+    IyiStat.get(IyiStat::LOCAL_KEPT)
+  end
+
+  def self.local_spare_bytes : UInt64
+    IyiStat.get(IyiStat::LOCAL_SPARE_BYTES)
+  end
+
+  # Bytes of runs with nothing live on them that partition *record*'s
+  # last sweep kept.
+  def self.partition_spare(record : UInt64) : UInt64
+    record == 0 ? 0_u64 : read64(record &+ REC_SPARE)
   end
 
   def self.merges : UInt64
@@ -1552,13 +1584,19 @@ class IyiHeap
     __iyi_munmap(old, cap &* 16_u64) if cap != 0
   end
 
-  # The layout entry for *type_id*, one entry cached on the scratch page.
+  # The layout entry for *type_id*, from the scratch page's cache, whose
+  # line the id's low bits pick. One entry cached, the objects a local
+  # mark and its published roots meet, of many types in turn, searched
+  # the layout table again at almost every one: a local collection of
+  # #145's app opened 2,000 to 4,000 published objects (Linux, CpuFix2,
+  # S6).
   def self.scratch_layout(s : UInt64, type_id : UInt64) : UInt64
     return 0_u64 if type_id == 0
-    return read64(s &+ SCR_LENTRY) if type_id == read64(s &+ SCR_LTYPE)
+    line = s &+ SCR_LAYOUT &+ (type_id & (LAYOUT_LINES &- 1_u64)).unsafe_shl(4_u64)
+    return read64(line &+ 8_u64) if read64(line) == type_id
     entry = IyiMark.layout_search(type_id)
-    write64(s &+ SCR_LTYPE, type_id)
-    write64(s &+ SCR_LENTRY, entry)
+    write64(line, type_id)
+    write64(line &+ 8_u64, entry)
     entry
   end
 
@@ -2034,7 +2072,7 @@ class IyiHeap
   def self.collect_local(record : UInt64) : Nil
     fiber = IyiScheduler.current
     IyiRoots.fatal("iyi: collect_local of a partition the running fiber does not allocate in\n") if record == 0 || fiber.alloc != record
-    local_collect(record, fiber, false, false)
+    local_collect(record, fiber, false, false, false)
   end
 
   # A slice's worth allocated in partition *record* (`slice_full`): its
@@ -2061,7 +2099,7 @@ class IyiHeap
     return unless fiber.is_a?(IyiFiber) && fiber.alloc == record
     unit = fiber.unit
     return unless unit.is_a?(IyiUnit) && unit.heap == record
-    local_collect(record, fiber, false, false)
+    local_collect(record, fiber, false, false, true)
   end
 
   # A partition's slice under a mark beside the program, its *debt* past
@@ -2098,14 +2136,19 @@ class IyiHeap
   end
 
   # A fiber of partition *record*'s unit parks (`IyiScheduler.reschedule`,
-  # before the shared cache goes back in): its collection, when a
-  # quarter of its budget is owed - the connection between two requests,
-  # its stack shallow and its live set small - or at every park when a
-  # test asks; otherwise, or when the collection could not end whole, a
-  # note that it parked dirty, for the idle workers (`note_idle`).
+  # before the shared cache goes back in): its collection, when half its
+  # budget is owed - the connection between two requests, its stack
+  # shallow and its live set small - or at every park when a test asks;
+  # then, or when it owes less, a note that it parked dirty, for the
+  # idle workers (`note_idle`): a collection not whole leaves its debt,
+  # and a kept sweep its spare runs (`REC_SPARE`). At a quarter, #145's
+  # app paid a collection's fixed cost - its roots, its published
+  # objects - twice as often for the same garbage: half, with a spare of
+  # two budgets, took its CPU a request to 0.985 of a quarter's (Linux,
+  # quiet, 3 rounds side by side, S6 CpuFix2).
   def self.at_park(record : UInt64) : Nil
     return if @@local_off || @@park_off
-    if LibIyiGCTable.__iyi_marking != 0_u8 || !(@@collect_every_park || read64(record &+ REC_DEBT) &* 4_u64 >= budget_of(record))
+    if LibIyiGCTable.__iyi_marking != 0_u8 || !(@@collect_every_park || read64(record &+ REC_DEBT) &* 2_u64 >= budget_of(record))
       note_idle(record)
       return
     end
@@ -2113,14 +2156,15 @@ class IyiHeap
     return unless fiber.is_a?(IyiFiber) && fiber.alloc == record
     unit = fiber.unit
     return unless unit.is_a?(IyiUnit) && unit.heap == record
-    note_idle(record) unless local_collect(record, fiber, false, true)
+    local_collect(record, fiber, false, true, true)
+    note_idle(record)
   end
 
   # ── Idle collection (heap22 S6) ───────────────────────────────────────
 
-  # A unit that parks owing less than a quarter of its budget keeps
-  # what it allocated since its last collection - a connection's setup
-  # and its first request's garbage, in a run per class touched - for as
+  # A unit that parks owing less than half its budget keeps what it
+  # allocated since its last collection - a connection's setup and its
+  # first request's garbage, in a run per class touched - for as
   # long as it sits idle: 36.6 KiB of runs per idle keep-alive
   # connection, 20.6 KiB of them in 17 small classes holding 7.6 KiB
   # (C10k at 2,000 connections, Linux, 3984c899a). The park says so
@@ -2147,7 +2191,7 @@ class IyiHeap
 
   @[AlwaysInline]
   def self.idle_dirty?(record : UInt64) : Bool
-    read64(record &+ REC_DEBT) != 0_u64 || read64(record &+ CACHE_SLICE) != read64(record &+ REC_IDLE_SLICE)
+    read64(record &+ REC_DEBT) != 0_u64 || read64(record &+ REC_SPARE) != 0_u64 || read64(record &+ CACHE_SLICE) != read64(record &+ REC_IDLE_SLICE)
   end
 
   # An idle pool worker's wait, in ms (`IyiScheduler.wait_for_events`):
@@ -2202,14 +2246,16 @@ class IyiHeap
   # holds its unit's token: *running* is the fiber of the unit on this
   # stack, nil for an idle worker's takeover. *idle* (at a park, or a
   # takeover) gives back even a class's last run when nothing on it is
-  # live. None starts while a mark runs beside the program, nor on a
-  # partition a pointer answer detached: the task's box, which is the
-  # shared heap's and no root of a local mark, holds the answer from
-  # then on, so only the global collection may free what it reaches. A
-  # stop asked while it marks ends it, nothing swept, and the next mark
-  # clears the parity it began first. Answers whether it swept.
+  # live; *keep* (the unit's own trigger, in flight or at its park)
+  # sweeps keeping every run (`local_sweep`). None starts while a mark
+  # runs beside the program, nor on a partition a pointer answer
+  # detached: the task's box, which is the shared heap's and no root of
+  # a local mark, holds the answer from then on, so only the global
+  # collection may free what it reaches. A stop asked while it marks ends
+  # it, nothing swept, and the next mark clears the parity it began
+  # first. Answers whether it swept.
   @[NoInline]
-  def self.local_collect(record : UInt64, running : IyiFiber?, takeover : Bool, idle : Bool) : Bool
+  def self.local_collect(record : UInt64, running : IyiFiber?, takeover : Bool, idle : Bool, keep : Bool) : Bool
     return false if LibIyiGCTable.__iyi_marking != 0_u8
     return false if read64(record &+ REC_STATE) & REC_DETACHED != 0
     # The dead stack under this frame zeroed, as `IyiMark.collect` does
@@ -2237,7 +2283,7 @@ class IyiHeap
     spill_into(words.address)
     enter_barrier
     began = IyiMark.now_ns
-    swept = local_collect_in(record, running, idle)
+    swept = local_collect_in(record, running, idle, keep)
     {% if flag?(:heap_verify) %} IyiHeapVerify.after_sweep(record) if swept {% end %}
     took = IyiMark.now_ns - began
     leave_barrier
@@ -2256,7 +2302,7 @@ class IyiHeap
     swept
   end
 
-  def self.local_collect_in(record : UInt64, running : IyiFiber?, idle : Bool) : Bool
+  def self.local_collect_in(record : UInt64, running : IyiFiber?, idle : Bool, keep : Bool) : Bool
     id = read64(record &+ REC_ID)
     epoch = IyiMark.epoch
     # Two parities take turns, so a mark trusts that what wears its own
@@ -2362,7 +2408,7 @@ class IyiHeap
     # name, dead with them, was freed under them (bench/heap_local's
     # `unswept:` zombie, which the nounswept copy keeps). Cleared here,
     # the next mark clears the bits first, as after an abandoned mark.
-    return false unless local_sweep(record, id, parity, idle)
+    return false unless local_sweep(record, id, parity, idle, keep)
     write64(record &+ REC_MARKING, 0_u64)
     true
   end
@@ -2500,14 +2546,18 @@ class IyiHeap
             high = low + granule_bytes
             head = first_head(arena, low)
             chunk = read64(arena + OFF_CHUNK)
+            slot = chunk_index(arena, head)
+            meta = arena + META + slot * META_ENTRY
+            own = own_address(arena, slot)
             while head < high
-              slot = chunk_index(arena, head)
-              bits = read8(arena + META + slot * META_ENTRY)
-              if bits & CARVED_FLAG != 0 && bits & FREE_FLAG == 0 && read8(own_address(arena, slot)) & OWN_PUB != 0
+              bits = read8(meta)
+              if bits & CARVED_FLAG != 0 && bits & FREE_FLAG == 0 && read8(own) & OWN_PUB != 0
                 base = bits & HEADED_FLAG != 0 ? head + HEADER : head
                 each_field(s, base) { |field| local_shade(record, id, parity, field) }
               end
               head = head + chunk
+              meta = meta + META_ENTRY
+              own = own + 1_u64
             end
           end
           k = k + 1_u64
@@ -2550,10 +2600,33 @@ class IyiHeap
   # times a run (seeds 1-3, Linux, CrossFix2's count), and 0 times once
   # the runs waited. A stop between two classes widens the same window.
   # Once a sweep ends whole, nothing dead is left to name them.
-  def self.local_sweep(record : UInt64, id : UInt64, parity : UInt64, idle : Bool) : Bool
+  #
+  # A sweep that *keeps* - the unit's own collections, in flight or at
+  # its park, while its last kept sweep left no more spare than
+  # `SPARE_BUDGETS` budgets - unlinks no run and lists only what it
+  # frees, ahead of the class's list as it stands: a chunk free already
+  # is on that list or on the return stack (`-Dheap_verify`'s
+  # `lost_free`), and stays there untouched. The full sweep wrote the
+  # link of every free chunk of every run the unit held, and at a park
+  # handed its emptied runs to the pool, which the next request took
+  # back and threaded whole: a cost by the runs held, not by the
+  # garbage. #145's app spent 0.08 to 2.2 ms a request in local
+  # collections, 12 to 37 % of its CPU, and 8 to 10 % more CPU a request
+  # than without partitions (Linux, CpuAttr, S6). The bytes of runs a
+  # keeping sweep found with nothing live are the record's spare
+  # (`REC_SPARE`): a spare unit is dirty to the idle workers
+  # (`idle_dirty?`), whose takeover sweeps whole and gives those runs
+  # back, and one whose spare outgrew `SPARE_BUDGETS` sweeps whole at
+  # its next collection. A spare run's chunks are listed, the next ones
+  # the unit allocates in: a cap of one budget swept #145's heaviest
+  # endpoints whole about once a request (spare 170 to 260 kB at 256
+  # KiB; Linux, CpuFix, S6).
+  def self.local_sweep(record : UInt64, id : UInt64, parity : UInt64, idle : Bool, keep : Bool) : Bool
     table = Pointer(UInt64).new(record)
     kept_bytes = 0_u64
     freed = 0_u64
+    spare = 0_u64
+    keep = keep && read64(record &+ REC_SPARE) <= budget_of(record) &* SPARE_BUDGETS
     sweep_weak(record, id, parity)
     index = 0
     while index < CLASSES
@@ -2562,35 +2635,51 @@ class IyiHeap
         return false if stop_requested?
         class_lock(index)
         return false unless quiet_class(index, true)
-        Pointer(Atomic(UInt64)).new(record &+ REC_RETURN &+ index.to_u64 &* 8_u64).value.set(0_u64)
-        list = 0_u64
-        previous = 0_u64
-        run = read64(runs)
-        while run != 0
-          arena = run & (0_u64 &- MAP)
-          granule_first = granule_of(arena, run)
-          word = run_word(arena, granule_first)
-          n = run_n(word)
-          following = word & RUN_LINK
-          swept = sweep_run(arena, run, n, parity, list)
-          live = swept[0]
-          if live == 0 && (idle || following != 0 || previous != 0)
-            # Empty, and not the class's last or the unit idle: unlinked,
-            # onto the emptied runs.
-            if previous == 0
-              write64(runs, following)
-            else
-              set_run_link(previous, following)
-            end
-            set_run_word(arena, granule_first, read64(record &+ REC_EMPTIED), n, RUN_OWNED)
-            write64(record &+ REC_EMPTIED, run)
-          else
+        if keep
+          list = table[index]
+          run = read64(runs)
+          while run != 0
+            arena = run & (0_u64 &- MAP)
+            word = run_word(arena, granule_of(arena, run))
+            n = run_n(word)
+            swept = sweep_run_kept(arena, run, n, parity, list)
             list = swept[1]
-            previous = run
+            spare = spare + n.unsafe_shl(GRANULE_SHIFT) if swept[0] == 0
+            kept_bytes = kept_bytes + swept[2]
+            freed = freed + swept[3]
+            run = word & RUN_LINK
           end
-          kept_bytes = kept_bytes + swept[2]
-          freed = freed + swept[3]
-          run = following
+        else
+          Pointer(Atomic(UInt64)).new(record &+ REC_RETURN &+ index.to_u64 &* 8_u64).value.set(0_u64)
+          list = 0_u64
+          previous = 0_u64
+          run = read64(runs)
+          while run != 0
+            arena = run & (0_u64 &- MAP)
+            granule_first = granule_of(arena, run)
+            word = run_word(arena, granule_first)
+            n = run_n(word)
+            following = word & RUN_LINK
+            swept = sweep_run(arena, run, n, parity, list)
+            live = swept[0]
+            if live == 0 && (idle || following != 0 || previous != 0)
+              # Empty, and not the class's last or the unit idle: unlinked,
+              # onto the emptied runs.
+              if previous == 0
+                write64(runs, following)
+              else
+                set_run_link(previous, following)
+              end
+              set_run_word(arena, granule_first, read64(record &+ REC_EMPTIED), n, RUN_OWNED)
+              write64(record &+ REC_EMPTIED, run)
+            else
+              list = swept[1]
+              previous = run
+            end
+            kept_bytes = kept_bytes + swept[2]
+            freed = freed + swept[3]
+            run = following
+          end
         end
         table[index] = list
         class_unlock(index)
@@ -2641,7 +2730,12 @@ class IyiHeap
     IyiStat.add(IyiStat::LOCAL_FREED, freed)
     account_live(record, kept_bytes, !idle)
     write64(record &+ REC_DEBT, 0_u64)
+    write64(record &+ REC_SPARE, spare)
     write64(record &+ REC_COLLECTIONS, read64(record &+ REC_COLLECTIONS) + 1_u64)
+    if keep
+      IyiStat.add(IyiStat::LOCAL_KEPT, 1_u64)
+      IyiStat.add(IyiStat::LOCAL_SPARE_BYTES, spare)
+    end
     return false unless whole
     pool_emptied(record, true)
     # Clean for the idle workers until it allocates again (`note_idle`);
@@ -2761,6 +2855,61 @@ class IyiHeap
       slot = slot + 1_u64
       meta = meta + META_ENTRY
       mark = mark + 1_u64
+      own = own + 1_u64
+    end
+    {live, list, kept, freed}
+  end
+
+  # One run of a sweep that keeps: as `sweep_run`, but a chunk free
+  # already is passed over - its link, its `OWN` byte and its colour are
+  # its list's or its return stack's - and only a chunk this mark found
+  # dead is freed and linked ahead of *list*.
+  def self.sweep_run_kept(arena : UInt64, run : UInt64, n : UInt64, parity : UInt64, list : UInt64) : Tuple(UInt64, UInt64, UInt64, UInt64)
+    chunk = read64(arena + OFF_CHUNK)
+    first = arena_first(arena)
+    stop = run + n.unsafe_shl(GRANULE_SHIFT)
+    granule_first = granule_of(arena, run)
+    k = 0_u64
+    while k < n
+      set_pub_count_at(arena, granule_first + k, 0_u64)
+      k = k + 1_u64
+    end
+    head = first_head(arena, run)
+    slot = (head - first).unsafe_div(chunk)
+    meta = arena + META + slot * META_ENTRY
+    own = own_address(arena, slot)
+    marks = read64(arena + OFF_MARKS)
+    live = 0_u64
+    kept = 0_u64
+    freed = 0_u64
+    while head < stop
+      bits = read8(meta)
+      if bits & CARVED_FLAG != 0 && bits & FREE_FLAG == 0
+        flags = read8(own)
+        if flags & OWN_PUB != 0
+          granule = (head - first).unsafe_shr(GRANULE_SHIFT)
+          set_pub_count_at(arena, granule, pub_count_at(arena, granule) + 1_u64)
+          live = live + 1_u64
+          kept = kept + chunk
+        elsif flags & OWN_LMARK == parity
+          live = live + 1_u64
+          kept = kept + chunk
+        else
+          write8(meta, bits | FREE_FLAG)
+          {% if flag?(:heap_verify) %}
+            poison(head, chunk)
+          {% end %}
+          write8(own, 0_u64) if flags != 0
+          write8(marks + slot, IyiMark::WHITE) if read8(marks + slot) != IyiMark::WHITE
+          write64(head + OFF_LINK, list)
+          write64(head + OFF_INDEX, slot)
+          list = head
+          freed = freed + 1_u64
+        end
+      end
+      head = head + chunk
+      slot = slot + 1_u64
+      meta = meta + META_ENTRY
       own = own + 1_u64
     end
     {live, list, kept, freed}
@@ -3577,7 +3726,7 @@ class IyiHeap
   # the fibers that waited for it onto this worker's ring.
   def self.collect_taken(st : IyiSchedulerState, record : UInt64, takeover : Bool) : Nil
     st.unit = Pointer(Void).new(read64(record + REC_UNIT)).as(IyiUnit)
-    swept = local_collect(record, nil, takeover, true)
+    swept = local_collect(record, nil, takeover, true, false)
     IyiStat.add(IyiStat::IDLE_COLLECTIONS, 1_u64) if swept && !takeover
     Pointer(Atomic(UInt64)).new(record + REC_STATE).value.sub(REC_BUSY)
     IyiScheduler.release_unit(st)

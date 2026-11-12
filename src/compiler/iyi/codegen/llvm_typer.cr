@@ -47,9 +47,31 @@ module Iyi
 
       @structs = {} of String => LLVM::Type
 
-      machine = program.target_machine
-      @layout = machine.data_layout
+      # iyi: a layout of this typer's own, not the machine's shared one
+      # (`LLVM::TargetMachine#data_layout`). LLVM's `DataLayout` caches each
+      # struct's layout under the struct type's address and never forgets
+      # it, and a context's types are freed with the context. A typer in a
+      # context that is dropped while the program compiles on - the one a
+      # layout fold settles against (`Program#settle_layout_folds`), a shared
+      # typer replaced by a fresh one - left its structs' layouts in the
+      # shared cache, and the next context to put a struct at one of those
+      # addresses was told the dead struct's size: 160 bytes for a struct of
+      # one byte, five contexts out of five (darwin arm64). That is how two
+      # modules' typers came to disagree on whether one type is passed
+      # through memory (`passed_indirectly?`), which LLVM refuses as a call
+      # that does not match its function: two of twenty-two Windows builds of
+      # `iyi.exe`, one of 14,860 compiler specs on darwin. A layout that only
+      # ever sees this context's types cannot hold another context's.
+      layout = LibLLVM.create_target_data_layout(program.target_machine)
+      raise "Missing layout for #{program.target_machine}" unless layout
+      @layout = LLVM::TargetData.new(layout)
       @landing_pad_type = @llvm_context.struct([@llvm_context.void_pointer, @llvm_context.int32], "landing_pad")
+    end
+
+    # The layout is this typer's alone, so nothing else reads it once the
+    # typer is unreachable.
+    def finalize
+      LibLLVM.dispose_target_data(@layout)
     end
 
     def type_id_pointer

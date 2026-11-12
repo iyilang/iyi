@@ -8366,6 +8366,55 @@ denylist names all thirteen of Crystal's ancestor libraries, so if any returns,
 the failure message identifies it as an ancestor dependency rather than a
 generic unexpected library.
 
+#### Proposed: the compiler owns its back end and its linker: **PROPOSED (Appendix B #27); rule 2 stands until it is decided**
+
+Rule 2 declined a native back end and an own linker, and that decision is in
+force. This subsection records a proposal to reverse it, so that what is being
+asked sits beside what it would replace. Nothing here changes what
+`bench/dependency_floor.sh` enforces today.
+
+The proposal, in the rule's own terms:
+
+1. **Rule 1 is unchanged.** A program iyi builds links the platform libc and
+   nothing else.
+2. **The compiler links the platform libc and nothing else.** Instruction
+   selection, register allocation, machine-code emission, object files and
+   linking become iyi code inside the compiler, for each target iyi builds
+   for: aarch64 darwin, x86-64 and aarch64 Linux, x86-64 Windows, and
+   wasm32-wasi. LLVM and `cc` stop being permitted toolchain requirements.
+3. **Rule 3 gets stricter rather than looser.** The compiler starts no host
+   binary to turn a program into an executable: no `cc`, no `ld`, no
+   `codesign`. A gate runs the build under a tripwire that fails if one of
+   them is started.
+4. **LLVM and the system linker move under rule 4**, as temporary entries
+   with exit conditions:
+   - `LLVM`: the oracle the native back end is checked against, and the back
+     end of any target whose native gates are not yet green. It leaves a
+     target's default when that target's gates pass, and leaves the compiler
+     when the compiler builds itself to a fixed point through the native back
+     end: the compiler it builds, building the compiler again, produces the
+     same executable byte for byte.
+   - `cc` and the platform linker: they leave each target with LLVM.
+
+What it costs is what Part V.9 already priced for the back end, with the
+linker added to it, and one thing V.9 did not have to say because it declined
+the work: iyi would own its optimiser. A program built by the native back end
+is slower than the same program built by LLVM at `--release` until iyi's own
+passes exist, and how much slower is a number to measure before any default
+moves, not a promise to make here.
+
+Rule 2's new wording is only true of a compiler that is itself an iyi
+program: `libgc` and `crystal` already carry the exit "when the compiler
+stops being a Crystal program", and LLVM's bindings are that program's. So
+this proposal does not stand alone. It is the second half of Appendix B.2a,
+which asks to reopen B.2, and it is decided with it.
+
+How it would arrive, if the answer is yes: as additive pull requests, each
+green alone, each behind a gate in this repository's own pattern (a
+differential against the compiler that exists, and a mutation that proves the
+gate can fail), and none of them changing a default. A target's default
+changes in a pull request that says so and does nothing else.
+
 #### Order
 
 1. ~~Route the prelude's allocator through the flag, so `gc_none` means
@@ -14318,6 +14367,7 @@ For traceability, since several rules here rest on numbers rather than taste.
 | 24 | ~~**Keep bdw-gc on the compiler? (III.9, III.10)**~~ | **Decided: yes; the exception holds in the present tense, and this row is superseded by #20 in its premise and restated.** The compiler keeps bdw-gc: `-Dgc_none` is proven not viable for it (III.10), and a collector that cannot carry parallel codegen cannot host a compiler that runs parallel codegen over fibers. What changed is the revisit condition: it is no longer gcry's parallel path leaving experimental, since gcry is not being adopted; it is iyi's own collector reaching the stage that serves parallel codegen. Until then the dependency stays a recorded exception carrying this reason rather than an unexamined habit |
 | 25 | ~~**Build the interpreter on the macro interpreter, without C interop? (III.11)**~~ | **Decided: yes, then no: built, removed, and not planned (the owner does not want a REPL).** The first decision, kept for its reasoning: This reopens #11 on the owner's ask, with `iex` as the reference; the evidence that removed the old one still stands. The base is `src/compiler/iyi/macros/interpreter.cr`, 781 lines, a complete AST evaluator that already resolves types, extended for iyi's nine new AST nodes and two `Def` clauses, not the 11,377-line revert that cannot run iyi past the module header. No C interop, so no libffi, and that is enforced rather than assumed: `libffi` is on `bench/dependency_floor.sh`'s denylist, and the gate was proven to fire by adding to a sample the exact `@[Link("ffi")]` shape a naive revert would produce. It failed at three independent layers, reporting the gained symbol `ffi_prep_cif`, the gained library `libffi.8.dylib`, and the denylist hit, so an interpreter cannot quietly bring libffi with it. R-1 bounds what a session recompiles to the module graph; R-3 takes open-class patching away from the prompt |
 | 26 | ~~**wasm32's allocator: wasi-libc as the platform runtime, a qualified platform, or `memory.grow` in the compiler? (III.9, III.10)**~~ | **Decided: bind `memory.grow` so an own-prelude iyi program on wasm32 needs nothing but its WASI imports.** A two-argument `fun` declaration of `llvm.wasm.memory.grow.i32` (memory index, then page delta) lowers to `memory.grow 0`. An earlier probe used the one-argument form, failed the module verifier, and was misread as "Crystal cannot bind this intrinsic". It was an arity error, not an impossibility, so this landed as an own-prelude binding rather than a compiler primitive. Measured after: `hello.wasm` and `webapp.wasm` leave `wasi_fd_write` and `wasi_proc_exit` undefined, and no longer leave `malloc` or `realloc`. Two alternatives were rejected: accepting wasi-libc as the platform's own runtime the way libSystem and kernel32 are accepted, and documenting wasm32 as a qualified target, both because either leaves an asterisk on a platform the owner named as a priority |
+| 27 | **Reverse #10: does iyi build itself, with its own back end and linker and no LLVM? (III.9, B.2a)** | proposed by Jason Waldrip, and Serdar's to decide. What changed is the goal, not B.2's arithmetic, which is accepted as written: the ask is for iyi to stand where Go stands, one toolchain that builds itself and needs nothing else installed. The proposal is the narrower thing III.9 already separated from porting the fork: a compiler for the iyi language, written in iyi, with the hosted compiler kept as its oracle until the new one builds itself to a fixed point. It is asked in two parts so that a yes to the first is not a yes to the second: (a) accept the port and the native back end as additive work behind gates, with no default changed; (b) decide later, on the measurements (a) produces, whether defaults move and the Crystal-hosted compiler is deleted. See B.2a |
 
 ### B.2: The one decision the fork already made: **SETTLED: not a self-hosting project**
 
@@ -14350,6 +14400,58 @@ input from here on, and III.4.7's measurement that the compiler is 38.5%
 shareable *and stays there* is the first thing it would have collided with.
 Deciding it now costs nothing; deciding it after the library exists would have
 cost the library.
+
+### B.2a: A proposal to reopen B.2: **PROPOSED by Jason Waldrip; not decided**
+
+B.2 is settled, and this section does not pretend otherwise. It is a request
+to reopen it, written here because a decision this document made in the open
+should be asked about in the open.
+
+**What changed is the goal.** Nothing in B.2's evidence is disputed.
+Self-hosting is the cost that only rises, the fork is why iyi has a back end
+and a collector at all, and `gc` staying a C compiler for years did Go no
+harm. The proposal comes from wanting the other half of what Go has: a
+toolchain that is one program, builds itself, and asks the machine for
+nothing but a libc. That is a statement about what iyi is for, in the same
+way Appendix B #20 was, and like #20 it is the owner's to make or refuse.
+
+**What is proposed is narrower than what B.2 declined.** B.2 priced porting
+this compiler: the fork, Crystal's library under it, and the style R-3
+forbids. III.9 already separated that from a compiler for iyi written in
+iyi, which has one language to compile rather than two. The proposal is the
+second, and it says what it leaves behind: Crystal mode (`--crystal`), and
+every command of the hosted compiler that nobody ports. Each of those is a
+decision of its own and none is assumed here.
+
+**The method is translation, checked, not a rewrite.** Each stage is ported
+file by file and held against the hosted compiler on the same input: tokens,
+syntax trees, declarations, the type of every expression, and the program a
+build produces. Each comparison has a committed floor that may only rise,
+and a mutation that proves it can fall. The hosted compiler is the oracle
+until the end, and nothing of it is deleted before the new compiler builds
+itself and the result builds itself again to the same bytes.
+
+**What it collides with, said plainly.** B.2's last paragraph named it: the
+compiler's own shape becomes a design input. III.4.7 measured how much of
+the hosted compiler is shareable, and that figure is a property of code
+written in the style R-3 forbids. The port is written under iyi's rules,
+with no reopened types, so the compiler becomes the largest iyi program
+there is and the first test of those rules at that size. If the rules
+cannot carry a compiler, that is worth knowing, and this is how it would be
+found out.
+
+**What would end it.** The parity floors stop rising; a platform's loader
+refuses what the own linker writes; the collector cannot be made safe under
+code the own back end emits; or the answer to this section is no. The last
+ends the upstream half only: the work would continue on a fork, and this
+document would stay as it is.
+
+**What is asked.** Two answers, kept apart on purpose (Appendix B #27):
+whether the port and the native back end may come upstream as additive
+work behind gates, changing no default; and, later and on the numbers that
+work produces, whether defaults move and the Crystal-hosted compiler goes.
+Stale testing is not affected by either: it lands on the hosted compiler
+first, and moves only after the fixed point.
 
 ### B.1: Why #3, #4 and #7 are one decision
 

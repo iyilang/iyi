@@ -69,9 +69,9 @@ class IyiHeap
   # `release_arena` leaves it alone.
   PARTITION_ARENA = 1_u64
 
-  OWN_PUB   =   1_u64
-  OWN_LMARK =   6_u64
-  OWN_LENT  =   8_u64
+  OWN_PUB   = 1_u64
+  OWN_LMARK = 6_u64
+  OWN_LENT  = 8_u64
   # A free chunk of a class above a page, threaded from a run the
   # frontier gave (`partition_take`), that nobody has written past its
   # link and index: the kernel's zero there, so its first taker clears
@@ -233,15 +233,15 @@ class IyiHeap
   @[ThreadLocal]
   @@scratch : UInt64 = 0_u64
 
-  SCR_STACK  =  0_u64
-  SCR_CAP    =  8_u64
-  SCR_LEN    = 16_u64
-  SCR_SET    = 40_u64
-  SCR_SETCAP = 48_u64
-  SCR_SETN   = 56_u64
-  SCR_COUNT  = 64_u64
-  SCR_GEN    = 72_u64
-  SCR_STEP   = 80_u64
+  SCR_STACK  =    0_u64
+  SCR_CAP    =    8_u64
+  SCR_LEN    =   16_u64
+  SCR_SET    =   40_u64
+  SCR_SETCAP =   48_u64
+  SCR_SETN   =   56_u64
+  SCR_COUNT  =   64_u64
+  SCR_GEN    =   72_u64
+  SCR_STEP   =   80_u64
   SCR_LAYOUT = 1024_u64
 
   # The layout cache's lines, a type id and its layout entry each,

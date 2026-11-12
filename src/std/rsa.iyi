@@ -10,7 +10,7 @@
 #     key.verify_pss(RsaHash::SHA384, message, signature, salt_length: 0)
 #
 #     signer = RsaPrivateKey.from_pem(File.read("key.pem")).or_panic
-#     signer.sign_pss(RsaHash::SHA256, message)       # Array(UInt8)
+#     signer.sign_pss(RsaHash::SHA256, message)       # Array(UInt8) | RsaError
 #     signer.sign_pkcs1v15(RsaHash::SHA384, message)
 #
 # A key is read from DER through std/asn1: a SubjectPublicKeyInfo naming

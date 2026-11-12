@@ -520,6 +520,12 @@ prove_broken "issuers that disagree taken" "issuers that disagree" \
 # floor is what is moved, by a byte.
 prove_broken "a URI's secret one byte under the floor read" "a secret of fifteen bytes" \
   'def self.parse(uri : String, min_secret : Int32 = 16)' 'def self.parse(uri : String, min_secret : Int32 = 15)'
+prove_broken "a label that is not UTF-8 read" "an overlong line feed in the label" \
+  '    return OTPError.new("otpauth: the label is not UTF-8") unless Unicode.valid?(label)
+' ''
+prove_broken "an issuer parameter that is not UTF-8 read" "a character cut short in the issuer parameter" \
+  '      return OTPError.new("otpauth: the issuer parameter is not UTF-8") unless Unicode.valid?(issuer_text)
+' ''
 prove_broken "control characters left in a label" "a line feed in the label's issuer" \
   'return i if b < 32_u8 || b == 127_u8' 'return i if false'
 prove_broken "DEL left in a label" "a DEL in the label" \

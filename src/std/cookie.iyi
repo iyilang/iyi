@@ -154,7 +154,10 @@ pub class Cookie
   # a quote inside one would end it or another field early. A path is
   # printable ASCII with no semicolon, which would start an attribute of
   # its own; a domain is a host name, one leading dot allowed; `SameSite`
-  # is `Strict`, `Lax` or `None`, whatever its case. Anything else panics.
+  # is `Strict`, `Lax` or `None`, whatever its case. Anything else panics
+  # - a domain that is an address too, and a line `parse` read from a peer
+  # with such a field - so a path or a domain that comes from a request
+  # is checked before it is given to a cookie.
   def to_set_cookie : String
     raise "Cookie: not a cookie name: #{@name.inspect}" unless HTTP.token?(@name)
     p = @value.to_unsafe

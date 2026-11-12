@@ -219,6 +219,12 @@ assert_str "error: " + shown + "6", said(OTPAuth.parse("otpauth://totp/Google%E2
 assert_str "error: " + shown + "0", said(OTPAuth.parse("otpauth://totp/%E2%81%A6alice?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")), "a left-to-right isolate in the label"
 assert_str "error: " + shown + "5", said(OTPAuth.parse("otpauth://totp/alice%E2%81%A9?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")), "a pop directional isolate in the label"
 assert_str "error: " + shown + "3", said(OTPAuth.parse("otpauth://totp/ali\u202Ece?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")), "a right-to-left override written unescaped"
+# What is not UTF-8 is no character to refuse by: a line feed written in
+# two bytes, a sequence cut short, a surrogate.
+assert_str "error: otpauth: the label is not UTF-8", said(OTPAuth.parse("otpauth://totp/Ex%C0%8Aample:alice?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")), "an overlong line feed in the label"
+assert_str "error: otpauth: the label is not UTF-8", said(OTPAuth.parse("otpauth://totp/alice%E2%80?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")), "a character cut short in the label"
+assert_str "error: otpauth: the label is not UTF-8", said(OTPAuth.parse("otpauth://totp/alice%ED%A0%80?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")), "a surrogate in the label"
+assert_str "error: otpauth: the issuer parameter is not UTF-8", said(OTPAuth.parse("otpauth://totp/alice?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&issuer=ab%C2")), "a character cut short in the issuer parameter"
 in_issuer = "otpauth: the issuer parameter holds a control, line-breaking or bidirectional formatting character at byte "
 assert_str "error: " + in_issuer + "6", said(OTPAuth.parse("otpauth://totp/alice?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&issuer=Google%0D%0Aevil")), "a carriage return in the issuer parameter"
 assert_str "error: " + in_issuer + "0", said(OTPAuth.parse("otpauth://totp/alice?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&issuer=%E2%80%AEelgooG")), "a right-to-left override in the issuer parameter"

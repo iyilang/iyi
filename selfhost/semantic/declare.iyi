@@ -230,6 +230,14 @@ pub def compiler_struct?(name : String) : Bool
     name == "Number" || name == "Value" || name == "Struct"
 end
 
+# `class Class` is its own metaclass, so the `def self.x` it writes are
+# instance methods of `Class`. Every other type's `def self.x` is the
+# type's method and not one of its instances'.
+pub def class_self?(holder : Decl?) : Bool
+  return false if holder.nil?
+  holder.key == "Class"
+end
+
 # `struct Tuple` reopens a type the compiler built with parameters the
 # prelude does not write down, and the compiler reports its own name and
 # its own parameter list for it.
@@ -350,8 +358,10 @@ pub class Walk
       body(node.items, scope, holder)
     when DefNode
       # `def self.x` is the type's method, not its instances'. The two
-      # print the same and land on different types.
-      @into.own_def(holder, node.name) unless node.receiver == "self"
+      # print the same and land on different types, except in `class
+      # Class`, which is its own metaclass: there its `def self.x` are
+      # instance methods of `Class`, and the compiler reports them so.
+      @into.own_def(holder, node.name) if node.receiver != "self" || class_self?(holder)
     when VisibilityModifierNode
       # A private method is still a method the type has.
       body(node.body, scope, holder)
@@ -366,15 +376,6 @@ pub class Walk
       # pass brings into being the way it does a type.
       name = path_text(node.target)
       @into.at("const", join_scope(scope, name), join_scope(scope, name), "") unless name == ""
-    when CallNode
-      # `derive described` runs a macro that declares a method of that
-      # name on the type it is written in — SPEC.md R-5.
-      if node.name == "derive" && node.recv.size == 0 && !holder.nil?
-        node.args.each do |arg|
-          derived = call_name(arg)
-          @into.own_def(holder, derived) unless derived == ""
-        end
-      end
     when ModuleDefNode
       # `module ::Levenshtein` is the root's module wherever it is
       # written, and nothing hangs off the module it was written in.
@@ -444,7 +445,7 @@ pub class Walk
     # compiler writes for it. One a prelude or an import created keeps what
     # it had where it was created, which the file's report does not show.
     fresh = @into.counting? && !prior
-    defaults = (fresh && kind == "struct" && own == "" && !compiler_struct?(full) && !declares_constructor?(inner)) || full == "Reference"
+    defaults = fresh && ((kind == "struct" && own == "" && !compiler_struct?(full) && !declares_constructor?(inner)) || full == "Reference")
     entry.defaults_initialize if defaults
     body(inner, full, entry)
   end
@@ -476,6 +477,13 @@ pub class Walk
       # An enum body holds methods as well as members: `device?` written
       # beside them is one of the enum's methods.
       when DefNode then @into.own_def(entry, member.name) unless member.receiver == "self"
+      # `private def` in an enum body is a method the enum has, as it is in a class.
+      when VisibilityModifierNode
+        member.body.each do |inner|
+          case inner
+          when DefNode then @into.own_def(entry, inner.name) unless inner.receiver == "self"
+          end
+        end
       when ArgNode
         @into.at("const", "#{full}::#{member.name}", "#{full}::#{member.name}", "")
         @into.own_def(entry, "#{underscore(member.name)}?")
@@ -663,7 +671,7 @@ else
   prelude = resolve_import("iyi/prelude", source_roots)
   unless prelude == ""
     prelude_text = File.read(prelude)
-    load_requires(prelude_text, directory_of(prelude), [] of String, into)
+    load_requires(prelude_text, directory_of(prelude), [path] of String, into)
     read_file(prelude_text, into, true)
   end
   written = File.read(path)
@@ -671,7 +679,7 @@ else
   # What the imports and the requires declare, which this file did not,
   # and then what this file declares, which is what gets reported.
   load_imports(written, source_roots, [] of String, into)
-  load_requires(written, directory_of(path), [] of String, into)
+  load_requires(written, directory_of(path), [path] of String, into)
   into.reporting(true)
   read_file(written, into, false)
   Walk.new(into).attach_impls

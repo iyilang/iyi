@@ -408,10 +408,14 @@ puts "a wait after a timed-out one found the bytes waiting"
 # answered at once" mode; the late read then woke on one of them.
 {% if flag?(:win32) %}
   class Handoff
-    @@outcome = Pointer(Atomic(UInt64)).malloc(1_u64)
+    @@outcome = Atomic(UInt64).new(0_u64)
 
-    def self.outcome : Pointer(Atomic(UInt64))
-      @@outcome
+    def self.outcome : UInt64
+      @@outcome.get
+    end
+
+    def self.answer(value : UInt64) : Nil
+      @@outcome.set(value)
     end
   end
 
@@ -425,7 +429,7 @@ puts "a wait after a timed-out one found the bytes waiting"
     end
     late = IyiScheduler.read_current(fd, buffer.as(Void*), 5_u64, 3000)
     whole = ones == 50 && late == 5_i64 && buffer[0] == 102_u8 && buffer[4] == 108_u8
-    Handoff.outcome.value.set(whole ? 1_u64 : 2_u64)
+    Handoff.answer(whole ? 1_u64 : 2_u64)
   end
 
   handoff = make_pipe
@@ -438,11 +442,11 @@ puts "a wait after a timed-out one found the bytes waiting"
   sleep(200)
   __iyi_write(handoff[1], "final".to_unsafe.as(Void*), 5_u64)
   waited = 0
-  while Handoff.outcome.value.get == 0_u64 && waited < 500
+  while Handoff.outcome == 0_u64 && waited < 500
     sleep(10)
     waited = waited + 1
   end
-  handoff_outcome = Handoff.outcome.value.get
+  handoff_outcome = Handoff.outcome
   fail("a pipe read on the main thread and then on a worker hung there for 5 s") if handoff_outcome == 0_u64
   fail("a pipe handed to a worker thread answered its reads wrongly") unless handoff_outcome == 1_u64
   receiver.join

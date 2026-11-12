@@ -20,6 +20,8 @@ else
     # No header, no wrapper: the file's statements are the whole tree.
     puts tree.sexp
   else
-    puts "(exprs (module #{parser.header}) #{imports}#{tree.sexp})"
+    leading = ""
+    parser.leading.each { |node| leading = leading + node.sexp + " " }
+    puts "(exprs #{leading}(module #{parser.header}) #{imports}#{tree.sexp})"
   end
 end

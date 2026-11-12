@@ -1638,6 +1638,9 @@ pub class Parser
   # waits in `@pending` for the statement it is read with.
   @scopes : Array(Node)
   @pending : Array(Node)
+  # The annotations written above a module header. The compiler's tree puts
+  # them before the module, so the driver prints them there.
+  @leading : Array(Node)
   @header : String
   # How many method bodies enclose the cursor. A name declared with a type
   # is a local inside one and a field outside one, and the two are read
@@ -1662,6 +1665,11 @@ pub class Parser
     @requires
   end
 
+  # The annotations a file writes above its module header.
+  def leading : Array(Node)
+    @leading
+  end
+
   # The module path as written, empty when the file has no header. The
   # driver used to re-lex the file to find this and printed a header for a
   # file that had none.
@@ -1677,6 +1685,7 @@ pub class Parser
     @requires = [] of Node
     @scopes = [] of Node
     @pending = [] of Node
+    @leading = [] of Node
     @header = ""
     @def_depth = 0
     @path_from_root = false
@@ -1806,6 +1815,11 @@ pub class Parser
 
   def parse : Node
     skip_newlines
+    # An annotation above the module header is read here, before the header.
+    while peek.kind == "@["
+      @leading << parse_statement
+      skip_newlines
+    end
     header = ""
     if peek.kind == "IDENT" && peek.value == "module"
       header = parse_module_header
@@ -1832,6 +1846,10 @@ pub class Parser
     end
 
     body = [] of Node
+    # Without a header there is no module to print them beside, so they open the body.
+    if header == ""
+      @leading.each { |node| body << node }
+    end
     # The current parser injects an `extend` into a module's body, and a port
     # that skips it produces a different tree even when every statement agrees.
     # A file with no module has no body to extend.

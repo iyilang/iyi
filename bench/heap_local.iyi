@@ -2006,13 +2006,18 @@
   # An idle worker's takeover gives way to a fiber of the unit woken
   # while it collects (`IyiHeap.give_way?`): the collection ends as a
   # stop ends one and the fiber runs at once, its partition uncollected,
-  # rather than waiting out the collection - a database reply that came
-  # meanwhile waited 100 to 300 ms under the shared host's load (heap22
-  # S6, tssh). The unit is woken the moment its record is seen busy; a
-  # wake that comes after the collection's last look is a try lost, and
-  # one of eight tries must give way. Under `IYI_HEAP_STRESS`, where the
-  # unit collects itself on its way to the park and parks clean, or when
-  # its park owed, it is stamped dirty by hand, as `idle_check` does.
+  # rather than waiting out the collection, which under the shared host's
+  # load ran long (heap22 S6, tssh). The fiber is woken from the main
+  # thread, outside the pool, the moment its record is seen busy: onto
+  # the shared queue, and a worker called to it asks for the unit's
+  # token. A wake that comes after the collection's last look is a try
+  # lost, as is one the pool has no worker yet to call for, and one of
+  # eight tries must give way. Under `IYI_HEAP_STRESS`, where the unit
+  # collects itself on its way to the park and parks clean, or when its
+  # park owed, it is stamped dirty by hand, as `idle_check` does, and the
+  # worker the stamp's `wake_one` rang takes it, holding the look's token
+  # until it collects (`IyiHeap.collect_taken`; bench/heap_verify.sh's
+  # `notoken` copy).
   def giveway_check(workers : Int32) : Nil
     IyiHeap.collect_every_park = false
     taken = 0

@@ -57,8 +57,11 @@ PY="${PYTHON:-python3}"
 # program's own check sees (heap_crossings' `tls`); runs a dead unit's
 # record kept, or a parked unit's spare runs left off the idle workers'
 # test, are free memory nobody's word names, which the owner table and
-# the unit's held bytes show (heap_local's `unswept`, `spare`).
-VALUE_COPIES="TlsIdentity chain copy,a death that keeps its emptied runs,spare runs left off the idle test"
+# the unit's held bytes show (heap_local's `unswept`, `spare`); a takeover
+# that keeps a woken fiber waiting, or the look's token that would call a
+# worker to it, loses time, which only the program's `giveway:` check
+# sees.
+VALUE_COPIES="TlsIdentity chain copy,a death that keeps its emptied runs,spare runs left off the idle test,a takeover that keeps a woken fiber waiting,a takeover that keeps the look's token"
 
 # heap_local.sh's copies not run here: `nobusy` (a busy program's parked
 # unit taken after two ticks) is a timing, which no heap word shows, and
@@ -414,6 +417,17 @@ if [ "$PART" = all ] || [ "$PART" = local ]; then
   awk '/== the checks fail when a mechanism is broken/ { on = 1; next } on && /^fi$/ { exit } on { print }' "$REPO/bench/heap_local.sh" >"$WORK/local-copies.sh"
   # shellcheck disable=SC1091
   source "$WORK/local-copies.sh"
+  # A copy the giveway check sees under the stress alone, so heap_local.sh
+  # has it not: a takeover that keeps the look's token while it collects
+  # (`IyiHeap.collect_taken`), whose woken fiber, called to no worker,
+  # waits out the collection. Stressed, every try's unit collects itself
+  # at a chaos point on its way to the park, parks clean and is stamped
+  # by hand, and the worker the check's `wake_one` rang, holding the
+  # token, takes it; unstressed, a worker its idle clock woke, holding
+  # none, does.
+  HEAP22_ONLY=giveway prove_fails "a takeover that keeps the look's token" notoken "giveway:" \
+    '{ if (sub(/IyiWorkers\.stop_spinning\(st, true\)/, "")) found = 1; print } END { if (!found) exit 3 }' \
+    heap_partition.iyi
 fi
 
 if [ "$PART" = all ] || [ "$PART" = own ]; then

@@ -418,7 +418,8 @@ class IyiHeap
   # Idle takeovers that gave way to a fiber of the taken unit woken
   # meanwhile (`give_way?`): an `IyiStat` slot named here, in the flag's
   # own file, so the flag-off prelude stays as it was line for line.
-  # 137-139 are h22/hp-cputmac's.
+  # 137-139 are the busy rule's (`STAT_IDLE_PARKS`, `STAT_IDLE_PARKS_TICK`,
+  # `STAT_IDLE_DELAY`).
   STAT_GIVEN_WAY = 140_u64
 
   def self.takeovers_given_way : UInt64
@@ -3798,7 +3799,26 @@ class IyiHeap
   # The partition of the unit *st* took, collected on the worker's own
   # fiber with nothing installed, as if idle, and the token given back,
   # the fibers that waited for it onto this worker's ring.
+  #
+  # The worker leaves its look for work while it collects, so it first
+  # gives up what a worker out looking holds for the others: the look's
+  # token (`IyiWorkers.stop_spinning`, another worker called if work
+  # already waits), for which a push that finds it taken calls nobody,
+  # and on Windows the port's seat, a sitter called in its place
+  # (`IyiScheduler.left_idle`), as a worker leaving its idle wait to run
+  # a fiber gives both up. Kept, a fiber woken from outside the pool
+  # meanwhile waited on the shared queue for the collection's end,
+  # called to no worker, and so never asked for its unit's token, the
+  # ask a takeover gives way to (`give_way?`): heap_local's giveway check
+  # under `IYI_HEAP_STRESS`, whose unit, stamped dirty by hand, is taken
+  # by the worker its `wake_one` rang, saw 8 takeovers in 8 tries and
+  # none give way (seeds 1-3, Linux, TailHunt4); and a reply that came on
+  # the port while the seat's holder collected waited the same.
   def self.collect_taken(st : IyiSchedulerState, record : UInt64, takeover : Bool) : Nil
+    IyiWorkers.stop_spinning(st, true)
+    {% if flag?(:win32) %}
+      IyiScheduler.left_idle(st)
+    {% end %}
     st.unit = Pointer(Void).new(read64(record + REC_UNIT)).as(IyiUnit)
     @@taken_unit = read64(record + REC_UNIT)
     swept = local_collect(record, nil, takeover, true, false)

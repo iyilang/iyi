@@ -57,11 +57,13 @@ PY="${PYTHON:-python3}"
 # program's own check sees (heap_crossings' `tls`); runs a dead unit's
 # record kept, or a parked unit's spare runs left off the idle workers'
 # test, are free memory nobody's word names, which the owner table and
-# the unit's held bytes show (heap_local's `unswept`, `spare`); a takeover
+# the unit's held bytes show (heap_local's `unswept`, `spare`); a parked
+# connection's partition that keeps its last request holds what the
+# program still names, which http_idle's `idle:` count shows; a takeover
 # that keeps a woken fiber waiting, or the look's token that would call a
 # worker to it, loses time, which only the program's `giveway:` check
 # sees.
-VALUE_COPIES="TlsIdentity chain copy,a death that keeps its emptied runs,spare runs left off the idle test,a takeover that keeps a woken fiber waiting,a takeover that keeps the look's token"
+VALUE_COPIES="TlsIdentity chain copy,a death that keeps its emptied runs,spare runs left off the idle test,a parked connection that keeps its last request,a takeover that keeps a woken fiber waiting,a takeover that keeps the look's token"
 
 # heap_local.sh's copies not run here: `nobusy` (a busy program's parked
 # unit taken after two ticks) is a timing, which no heap word shows, and
@@ -255,6 +257,82 @@ prove_fails() {
   caught "$label" "$WORK/$dir/b"
 }
 
+# heap_local.sh's interface for bench/http_idle.iyi: label dir awk-script
+# (src/std/http.iyi). Both trees copied, as prove_caught does. A parked
+# connection's partition that keeps its last request holds live objects
+# the program still names, which no heap word shows wrong: the program's
+# `idle:` check sees it (`VALUE_COPIES`), and the sound program, built
+# and run the same way, must pass, or that check proves nothing here.
+# Both are built `--release`, as heap_local.sh builds them: std/http's
+# zeroing is for an optimised loop's frames, and an unoptimised
+# `-Diyi_chaos` build's left a slot naming the last request in every
+# idle connection's stack (tmac, sound tree: "32 idle partitions hold 32
+# requests", with the chaos or the stress alone; the release build passes
+# at seeds 1-3, TailHunt5).
+prove_http_idle_fails() {
+  local label="$1" dir="$2" script="$3"
+  chosen "$dir" || return 0
+  local FLAGS="--release $FLAGS"
+  local sound_dir="$WORK/sound-http_idle"
+  if [ ! -f "$sound_dir/plain.code" ]; then
+    if ! build "$sound_dir" "$REPO/bench/http_idle.iyi"; then
+      echo "  http_idle (sound): build failed"
+      sed -n '1,12p' "$sound_dir/build.log"
+      status=1
+      return
+    fi
+    verified "$sound_dir" plain
+  fi
+  if [ "$(cat "$sound_dir/plain.code")" != 0 ] || grep -q "heap_verify: " "$sound_dir/plain.err"; then
+    echo "  $label: the sound bench/http_idle.iyi fails here too (exit $(cat "$sound_dir/plain.code")), so its check proves nothing"
+    sed -n '1,6p' "$sound_dir/plain.out" "$sound_dir/plain.err" | sed 's/^/      /'
+    status=1
+    return
+  fi
+  mkdir -p "$WORK/$dir"
+  cp -R "$REPO/src/iyi" "$REPO/src/std" "$WORK/$dir/"
+  if ! awk "$script" "$REPO/src/std/http.iyi" >"$WORK/$dir/std/http.iyi"; then
+    echo "  $label: what the copy changes is not in std/http.iyi any more"
+    status=1
+    return
+  fi
+  if ! build "$WORK/$dir/b" "$REPO/bench/http_idle.iyi" "$WORK/$dir${PSEP}$REPO/src"; then
+    echo "  $label: the patched std/http did not build"
+    sed -n '1,12p' "$WORK/$dir/b/build.log"
+    status=1
+    return
+  fi
+  caught "$label" "$WORK/$dir/b"
+  if [ "$(cat "$WORK/$dir/b/run1.code")" != 86 ] && ! grep -q "^FAIL: idle:" "$WORK/$dir/b/run1.out"; then
+    echo "  $label: failed, but not at the program's idle: check"
+    status=1
+  fi
+}
+
+# source_copies FILE: another script's copies, run through this script's
+# functions. A function the copies call that this script lacks printed
+# `command not found` and ran nothing, and the gate still passed
+# (heap_local.sh's `prove_http_idle_fails`, from 39bd16bb2): every
+# `prove_*` the file calls must be defined here, and any command not
+# found while it runs fails the gate.
+source_copies() {
+  local copies="$1" called
+  for called in $(awk '{ sub(/^[ \t]*([A-Z_][A-Z0-9_]*=[^ ]* +)*/, ""); if (match($0, /^prove_[a-z_]+/)) print substr($0, RSTART, RLENGTH) }' "$copies" | sort -u); do
+    if ! declare -F "$called" >/dev/null; then
+      echo "  the copies call $called, which heap_verify.sh does not define"
+      status=1
+    fi
+  done
+  # shellcheck disable=SC1090
+  source "$copies" 2>"$copies.err"
+  cat "$copies.err" >&2
+  if grep -q "command not found" "$copies.err"; then
+    echo "  a command the copies call is missing here:"
+    grep "command not found" "$copies.err" | sed 's/^/    /'
+    status=1
+  fi
+}
+
 # sound NAME SOURCE ARGS...: no report, and the false words change nothing.
 sound() {
   local name="$1" source="$2"
@@ -407,16 +485,14 @@ if [ "$PART" = all ] || [ "$PART" = crossings ]; then
   # The copies as heap_crossings.sh writes them, from its `del` to its last,
   # through a file: macOS's bash 3.2 sources nothing from `<(...)`.
   awk '/^# One line deleted after a marker/ { on = 1 } on && /^echo$/ { exit } on { print }' "$REPO/bench/heap_crossings.sh" >"$WORK/crossings-copies.sh"
-  # shellcheck disable=SC1091
-  source "$WORK/crossings-copies.sh"
+  source_copies "$WORK/crossings-copies.sh"
 fi
 
 if [ "$PART" = all ] || [ "$PART" = local ]; then
   echo
   echo "== bench/heap_local.sh's copies, caught by the verifier"
   awk '/== the checks fail when a mechanism is broken/ { on = 1; next } on && /^fi$/ { exit } on { print }' "$REPO/bench/heap_local.sh" >"$WORK/local-copies.sh"
-  # shellcheck disable=SC1091
-  source "$WORK/local-copies.sh"
+  source_copies "$WORK/local-copies.sh"
   # A copy the giveway check sees under the stress alone, so heap_local.sh
   # has it not: a takeover that keeps the look's token while it collects
   # (`IyiHeap.collect_taken`), whose woken fiber, called to no worker,

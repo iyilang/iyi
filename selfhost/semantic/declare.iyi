@@ -477,7 +477,7 @@ pub class Walk
       # An enum body holds methods as well as members: `device?` written
       # beside them is one of the enum's methods.
       when DefNode then @into.own_def(entry, member.name) unless member.receiver == "self"
-      # `private def` in an enum body is a method the enum has, as it is in a class.
+        # `private def` in an enum body is a method the enum has, as it is in a class.
       when VisibilityModifierNode
         member.body.each do |inner|
           case inner

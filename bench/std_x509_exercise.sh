@@ -6,8 +6,9 @@
 # The exercise holds chains Python's cryptography made, each judged as
 # Python's own verifier judges it and each refusal for its reason, hosts
 # matched, certificates that are not certificates, Ed25519 keys and
-# signatures (RFC 8410), and what a search costs, bounded - chains it
-# writes itself; this gate runs it plain and --release, holds 200
+# signatures (RFC 8410), what a search costs, bounded, and IPv4-mapped
+# IPv6 addresses under IPv4 ranges - chains it writes itself; this gate
+# runs it plain and --release, holds 200
 # fresh chains - random keys (P-256, P-384, RSA, Ed25519), depths and
 # defects - to Python's verifier, holds chains with an RSA key at or under
 # the 2048-bit floor to OpenSSL's verify at security level 2, reads every
@@ -85,7 +86,7 @@ fi
 
 echo
 echo "== every x509 section reported"
-for phrase in "== chains Python's cryptography made" "== hosts matched" "== certificates that are not certificates" "== Ed25519 (RFC 8410)" "== RSA keys under 2048 bits" "== a client's certificate (X509Purpose::Client)" "== a search for a chain, bounded" "== what a search costs, bounded" "== certificates written (X509.self_signed)"; do
+for phrase in "== chains Python's cryptography made" "== hosts matched" "== certificates that are not certificates" "== Ed25519 (RFC 8410)" "== RSA keys under 2048 bits" "== a client's certificate (X509Purpose::Client)" "== a search for a chain, bounded" "== what a search costs, bounded" "== IPv4-mapped IPv6 addresses" "== certificates written (X509.self_signed)"; do
   if ! grep -q "$phrase" "$WORK/x509-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -524,6 +525,16 @@ prove_broken "an IP range compared unmasked" "an address inside the permitted ra
   '      return false unless byte & mask == range[i] & mask' '      return false unless byte == range[i]'
 prove_broken "IPv6 :: unexpanded" "an IPv6 address: refused" \
   '    head + Array(UInt8).new(16 - head.size - tail.size, 0_u8) + tail' '    head + tail'
+# An IPv4-mapped IPv6 address is the IPv4 address it stands for: each
+# break below reads one of the two spellings as written only.
+prove_broken "an IPv4-mapped address kept from IPv4 ranges" "an IPv4-mapped address in an excluded IPv4 range, for ::ffff:10.0.0.1: expected a refusal" \
+  '    ip_within?(plain, narrow)
+  end' '    false
+  end'
+prove_broken "an IPv4-mapped range kept from IPv4 addresses" "an IPv4 address in an excluded IPv4-mapped range, for 10.0.0.1: expected a refusal" \
+  '    range[12, 4] + range[28, 4]' '    range'
+prove_broken "a host matched to an address as written only" "a host written as its IPv4-mapped address, against the IPv4 entry" \
+  '      return @ip_addresses.any? { |a| X509Names.unmapped(a) == plain }' '      return @ip_addresses.any? { |a| a == address }'
 prove_broken "inner and outer algorithms unchecked" "an outer algorithm that is not the inner one refused" \
   '    unless inner_algorithm.raw == outer_algorithm.raw' '    if false'
 prove_broken "a duplicate extension taken" "an extension written twice refused" \

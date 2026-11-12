@@ -37,7 +37,12 @@
 # client's, `X509Purpose::Client`), and the leaf's names must fall inside
 # its nameConstraints; it must have signed the certificate below it. Name
 # constraints are checked for DNS names and IP addresses; a constraint of
-# any other kind refuses the chain rather than being passed over. A DNS
+# any other kind refuses the chain rather than being passed over. An
+# IPv4-mapped IPv6 address (RFC 4291 section 2.5.5.2, `::ffff:a.b.c.d`)
+# is also the IPv4 address it stands for, and an IPv6 range inside
+# `::ffff:0:0/96` the IPv4 range: an address under a constraint is judged
+# as written and as that, so a range holds an address in both its
+# spellings or in neither. A DNS
 # name is judged by a constraint as a host is matched to it, without its
 # final dot, and a constraint or a name under one with an empty label
 # refuses the chain. The leaf must be valid at that time, not a CA (a
@@ -49,7 +54,8 @@
 # common name, as browsers and RFC 6125 have it: a DNS name exactly,
 # without regard to case or a final dot, or as `*.rest` where the `*` is
 # the whole of the leftmost label and stands for exactly one; an IP
-# address, v4 or v6, against the iPAddress entries.
+# address, v4 or v6, against the iPAddress entries, an IPv4-mapped IPv6
+# address in either being the IPv4 address it stands for.
 #
 # Signatures: RSA PKCS #1 v1.5 and PSS, and ECDSA, under SHA-256, SHA-384
 # and SHA-512, and Ed25519 (RFC 8410: the key's and the signature's
@@ -339,7 +345,12 @@ pub class Certificate
     name = host
     name = name[1, name.size - 2] if name.starts_with?("[") && name.ends_with?("]")
     address = X509Names.ip(name)
-    return @ip_addresses.any? { |a| a == address } if address
+    if address
+      # One host to the socket that connects, in either spelling; the
+      # constraints over the chain judge an entry in both.
+      plain = X509Names.unmapped(address)
+      return @ip_addresses.any? { |a| X509Names.unmapped(a) == plain }
+    end
     name = name.downcase
     name = name[0, name.size - 1] if name.ends_with?(".")
     return false if name.empty?
@@ -703,10 +714,10 @@ pub struct X509
       end
     end
     leaf.ip_addresses.each do |ip|
-      unless issuer.permitted_ips.empty? || issuer.permitted_ips.any? { |c| X509Names.ip_within?(ip, c) }
+      unless issuer.permitted_ips.empty? || issuer.permitted_ips.any? { |c| X509Names.ip_under?(ip, c) }
         return "#{X509Names.ip_text(ip)} is outside the addresses #{name} permits"
       end
-      if issuer.excluded_ips.any? { |c| X509Names.ip_within?(ip, c) }
+      if issuer.excluded_ips.any? { |c| X509Names.ip_under?(ip, c) }
         return "#{X509Names.ip_text(ip)} is among the addresses #{name} excludes"
       end
     end
@@ -1147,6 +1158,40 @@ struct X509Names
       return false unless byte & mask == range[i] & mask
     end
     true
+  end
+
+  # Whether an address falls in an address-and-mask constraint, as written
+  # or as the IPv4 address and range an IPv4-mapped IPv6 one stands for.
+  # 10.0.0.1 and ::ffff:10.0.0.1 are one host to a socket, and an excluded
+  # 10.0.0.0/8 that held only the first let a constrained CA certify the
+  # second.
+  def self.ip_under?(address : Array(UInt8), range : Array(UInt8)) : Bool
+    return true if ip_within?(address, range)
+    plain = unmapped(address)
+    narrow = unmapped_range(range)
+    return false if plain.size == address.size && narrow.size == range.size
+    ip_within?(plain, narrow)
+  end
+
+  # An IPv4-mapped IPv6 address (RFC 4291 section 2.5.5.2), ten bytes of
+  # zero and two of 0xFF before an IPv4 address, as that address's four
+  # bytes; any other address as it is.
+  def self.unmapped(address : Array(UInt8)) : Array(UInt8)
+    return address unless address.size == 16 && mapped?(address)
+    address[12, 4]
+  end
+
+  # An IPv6 address-and-mask range that lies inside ::ffff:0:0/96 as the
+  # IPv4 range it stands for; any other range as it is.
+  def self.unmapped_range(range : Array(UInt8)) : Array(UInt8)
+    return range unless range.size == 32 && mapped?(range)
+    12.times { |i| return range unless range[16 + i] == 0xFF_u8 }
+    range[12, 4] + range[28, 4]
+  end
+
+  private def self.mapped?(bytes : Array(UInt8)) : Bool
+    10.times { |i| return false unless bytes[i] == 0_u8 }
+    bytes[10] == 0xFF_u8 && bytes[11] == 0xFF_u8
   end
 
   def self.ip_text(address : Array(UInt8)) : String

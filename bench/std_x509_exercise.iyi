@@ -14,7 +14,8 @@
 # certificates, PEM, and Ed25519 keys and signatures (RFC 8410), held and
 # refused, and what a search costs: chains written here, their names and
 # constraints by the hundred and their RSA keys past 8192 bits, each
-# refused before the work is done. The modes the gate script drives:
+# refused before the work is done, and an IPv4-mapped IPv6 address held
+# to the ranges its IPv4 address is. The modes the gate script drives:
 #   verify FILE   each line `host leaf intermediates roots`, certificates
 #                 in hex and lists joined by `,` (`-` for none), checked
 #                 at 2026-06-01: `true` or `false: <why>`;
@@ -557,6 +558,53 @@ big_ca = made("Big CA", "Work Root", rsa_info(8193), root_key, 32, [a_ca])
 cost_refused X509.verify(made("under big", "Big CA", leaf_key.public_key_info, leaf_key, 33, [alt_names(["big.example"])]), [big_ca], [work_root], "big.example", NOW),
   "CN=Big CA's RSA key is 8193 bits, past the 8192 a chain is held to", "an intermediate whose key is 8193-bit RSA"
 puts "  250,000 comparisons of a name with a constraint held and one name more refused; a forged candidate refused unread; issuers judged once and keys checked once; RSA keys past 8192 bits refused"
+
+puts "== IPv4-mapped IPv6 addresses (::ffff:a.b.c.d)"
+
+# 10.0.0.1 and ::ffff:10.0.0.1 are one host to the socket that connects,
+# so a host matches an entry in either spelling, and a range holds an
+# address in both or in neither. A CA excluded from 10.0.0.0/8 certified
+# ::ffff:10.0.0.1 before.
+MAPPED_10_0_0_1 = "00000000000000000000ffff0a000001"
+check ips.matches_host?("::ffff:192.0.2.1"), "a host written as its IPv4-mapped address, against the IPv4 entry"
+check ips.matches_host?("[::FFFF:c000:201]"), "a host written as its IPv4-mapped address in hex groups and brackets, against the IPv4 entry"
+check !ips.matches_host?("::ffff:192.0.2.2"), "another address written IPv4-mapped refused"
+check !ips.matches_host?("::fffe:192.0.2.1"), "an IPv6 address that only ends in the IPv4 entry refused"
+mapped_key = made_key(5)
+mapped_leaf = made("mapped leaf", "Mapped CA", leaf_key.public_key_info, mapped_key, 41, [alt_names([] of String, [MAPPED_10_0_0_1])])
+plain_leaf = made("plain leaf", "Mapped CA", leaf_key.public_key_info, mapped_key, 42, [alt_names([] of String, ["0a000001"])])
+
+def mapped_ca(key : SigningKey, signer : SigningKey, serial : Int32, excluded : Array(String), permitted : Array(String) = [] of String) : Certificate
+  made("Mapped CA", "Work Root", key.public_key_info, signer, serial, [a_ca, constraints([] of String, excluded, permitted)])
+end
+
+excluding = mapped_ca(mapped_key, root_key, 43, ["0a000000ff000000"])
+["::ffff:10.0.0.1", "[::ffff:10.0.0.1]", "10.0.0.1"].each do |host|
+  cost_refused X509.verify(mapped_leaf, [excluding], [work_root], host, NOW),
+    "0:0:0:0:0:ffff:a00:1 is among the addresses CN=Mapped CA excludes", "an IPv4-mapped address in an excluded IPv4 range, for #{host}"
+end
+excluding_mapped = mapped_ca(mapped_key, root_key, 44, ["00000000000000000000ffff0a000000ffffffffffffffffffffffffff000000"])
+["10.0.0.1", "::ffff:10.0.0.1"].each do |host|
+  cost_refused X509.verify(plain_leaf, [excluding_mapped], [work_root], host, NOW),
+    "10.0.0.1 is among the addresses CN=Mapped CA excludes", "an IPv4 address in an excluded IPv4-mapped range, for #{host}"
+end
+# An IPv6 range wider than ::ffff:0:0/96 stands for no IPv4 range: ::/0
+# excluded holds the mapped entry out, as it did, and says nothing of an
+# IPv4 one, as Go and OpenSSL have it.
+excluding_all6 = mapped_ca(mapped_key, root_key, 45, ["0" * 64])
+cost_refused X509.verify(mapped_leaf, [excluding_all6], [work_root], "10.0.0.1", NOW),
+  "0:0:0:0:0:ffff:a00:1 is among the addresses CN=Mapped CA excludes", "an IPv4-mapped address under an excluded ::/0"
+beside = X509.verify(plain_leaf, [excluding_all6], [work_root], "::ffff:10.0.0.1", NOW)
+check beside.is_a?(Array(Certificate)), "an IPv4 address under an excluded ::/0: #{beside.is_a?(X509Error) ? beside.message : ""}"
+permitting = mapped_ca(mapped_key, root_key, 46, [] of String, ["0a000000ff000000"])
+["10.0.0.1", "::ffff:10.0.0.1"].each do |host|
+  inside = X509.verify(mapped_leaf, [permitting], [work_root], host, NOW)
+  check inside.is_a?(Array(Certificate)), "an IPv4-mapped address in a permitted IPv4 range, for #{host}: #{inside.is_a?(X509Error) ? inside.message : ""}"
+end
+outside = made("mapped outside", "Mapped CA", leaf_key.public_key_info, mapped_key, 47, [alt_names([] of String, ["00000000000000000000ffff0b000001"])])
+cost_refused X509.verify(outside, [permitting], [work_root], "11.0.0.1", NOW),
+  "0:0:0:0:0:ffff:b00:1 is outside the addresses CN=Mapped CA permits", "an IPv4-mapped address outside a permitted IPv4 range"
+puts "  a host and an entry matched in either spelling; a range holds an address in both spellings, excluded and permitted"
 
 puts "== a P-256 chain checked inside a task, 100 frames down"
 

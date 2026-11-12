@@ -462,6 +462,48 @@ def taint_kinds(data):
         at += 4 + size
     return found
 
+def record_heads(data):
+    # Every record's type and the first byte of its fields, None for a
+    # record with none (ENV_ALL is a type and a task).
+    found, at = [], 0
+    while at + 4 <= len(data):
+        size = int.from_bytes(data[at:at + 4], 'little')
+        payload = data[at + 4:at + 4 + size]
+        if len(payload) >= 9:
+            found.append((payload[0], payload[9] if len(payload) > 9 else None))
+        at += 4 + size
+    return found
+
+# The record each observer that is not a taint writes, by type: FILE (0x01)
+# carries which of read, stat and exists it was as its first field byte, and
+# the rest are a type each. END (0x7F) is the exit observer's.
+RECORDS = {
+    'file_read': (0x01, 1), 'file_stat': (0x01, 2), 'file_exists': (0x01, 3),
+    'dir_list': (0x02, None), 'env_get': (0x03, None), 'env_all': (0x04, None),
+    'cwd': (0x05, None), 'host': (0x06, None), 'file_write': (0x07, None),
+    'exit': (0x7F, None),
+}
+
+def has_record(data, want):
+    kind_of, first = want
+    return any(head == kind_of and (first is None or byte == first) for head, byte in record_heads(data))
+
+# A kind nothing on this platform reaches: there is no observer call to
+# drop. host_state is the trust store the system keeps (Security.framework,
+# the Windows certificate store); on Linux the roots are files, and the path
+# observers answer for those. Held to having no taint of the kind at all, so
+# a site that arrives later has to bring its proof.
+NO_SITE = {'host_state'} if sys.platform.startswith('linux') else set()
+
+# The runtime records nothing a program reads under its scratch directory,
+# which it takes from TMPDIR and, without one, is /tmp: where this gate's
+# inputs are. The fixtures get a scratch directory of their own, so an input
+# beside it is an input on every platform. Without it the four path kinds
+# failed wherever TMPDIR was unset or /tmp (Linux CI, run 43149638936), for
+# want of a record to drop.
+fixture_scratch = os.path.join(work, 'rg5_scratch')
+os.makedirs(fixture_scratch, exist_ok=True)
+
 kinds = [
     'file_read',
     'file_stat',
@@ -487,6 +529,7 @@ kinds = [
 
 passed_kinds = []
 failed_kinds = []
+no_site_kinds = []
 
 # Directory for patched runtime on IYI_PATH
 patched_lib = os.path.join(work, 'patched_lib')
@@ -657,6 +700,7 @@ SystemRoots.load
     env_a['INPUT_FILE'] = input_file_a
     env_a['INPUT_DIR'] = input_dir_a
     env_a['TEST_INPUT'] = 'value_alpha'
+    env_a['TMPDIR'] = fixture_scratch
     subprocess.run([bin_normal], env=env_a, capture_output=True, text=True)
 
     # Run with input B
@@ -665,6 +709,7 @@ SystemRoots.load
     env_b['INPUT_FILE'] = input_file_b
     env_b['INPUT_DIR'] = input_dir_b
     env_b['TEST_INPUT'] = 'value_beta'
+    env_b['TMPDIR'] = fixture_scratch
     subprocess.run([bin_normal], env=env_b, capture_output=True, text=True)
 
     if not os.path.exists(trace_a) or not os.path.exists(trace_b):
@@ -729,25 +774,45 @@ SystemRoots.load
         data_pa = open(trace_pa, 'rb').read()
         data_pb = open(trace_pb, 'rb').read()
         code = NOT_REUSABLE_CODES.get(kind)
+        if kind in NO_SITE:
+            if code in taint_kinds(data_a):
+                failed_kinds.append((kind, 'a site reaches this kind here, so it is no longer without one: prove it like the others'))
+            else:
+                no_site_kinds.append(kind)
+                print(f'  [no site] {kind}: nothing on {sys.platform} reaches this observer')
+            continue
         if code is not None:
             # A not-reusable kind is load-bearing when its taint is in the
             # observed trace and gone from the patched one. Lengths prove
             # nothing: a run stops recording after its first taint, so a
             # different taint can take the dropped one's place.
-            if code in taint_kinds(data_a) and code not in taint_kinds(data_pa):
+            if code not in taint_kinds(data_a):
+                failed_kinds.append((kind, 'the observed run recorded no taint of this kind: nothing to drop'))
+            elif code in taint_kinds(data_pa):
+                failed_kinds.append((kind, 'taint of this kind still recorded after dropping observer'))
+            else:
                 passed_kinds.append(kind)
                 print(f'  [load-bearing] {kind}: observer is load-bearing')
-            else:
-                failed_kinds.append((kind, 'taint of this kind still recorded after dropping observer'))
             continue
-        # With observer deleted, changed input leaves trace unchanged (or record missing)
-        if data_pa == data_pb or len(data_pa) < len(data_a):
+        want = RECORDS.get(kind)
+        if want is None:
+            failed_kinds.append((kind, 'no record or taint is named for this kind, so nothing proves it'))
+            continue
+        # A kind is load-bearing when its record is in both observed traces
+        # and in neither patched one. Comparing the traces of two inputs, or
+        # their lengths, proves less than it looks: a fixture that reads its
+        # input's name from the environment differs between inputs whatever
+        # the observer does, and one with no input (env_all, host, exit) is
+        # equal between them whatever it does, which is how those three
+        # passed with an observer nobody had dropped.
+        if not has_record(data_a, want) or not has_record(data_b, want):
+            failed_kinds.append((kind, 'the observed run wrote no record of this kind: nothing to drop'))
+        elif has_record(data_pa, want) or has_record(data_pb, want):
+            failed_kinds.append((kind, 'record of this kind still written after dropping observer'))
+        else:
             passed_kinds.append(kind)
             print(f'  [load-bearing] {kind}: observer is load-bearing')
-            continue
-        else:
-            failed_kinds.append((kind, 'Trace still differed after dropping observer'))
-            continue
+        continue
     failed_kinds.append((kind, 'Patched trace not generated'))
 
 # The trace half proves the recorder carries each value. This is the runner
@@ -811,7 +876,9 @@ assert value == \"before\"
         else:
             print('  [cached audit] dropped file_read observer hits after input change; --fresh reports the contradiction')
 
-print(f'RG5 (trace half): {len(passed_kinds)} / {len(kinds)} kinds proven load-bearing')
+proven = len(kinds) - len(no_site_kinds)
+print(f'RG5 (trace half): {len(passed_kinds)} / {proven} kinds proven load-bearing' +
+      (f', {len(no_site_kinds)} without a site on {sys.platform}: ' + ', '.join(no_site_kinds) if no_site_kinds else ''))
 if failed_kinds:
     for kind, reason in failed_kinds:
         print(f'  FAILED: {kind} -> {reason}', file=sys.stderr)

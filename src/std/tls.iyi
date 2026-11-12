@@ -181,7 +181,11 @@
 # alone. A pre_shared_key is taken for the first identity that is such a
 # ticket, within its lifetime by the server's clock and by the age the
 # client gives, issued under a suite of the chosen one's hash, for the
-# server_name asked for now (another name may be another identity's), and
+# server_name asked for now (another name may be another identity's), by
+# a client this configuration takes now - none that showed no certificate
+# where `client_roots` requires one, a chain checked again under these
+# roots at this time, and no chain where none is asked for, whichever
+# configuration sealed the ticket (`dup` and `frozen` share the keys) - and
 # offered for psk_dhe_ke - psk_ke, whose keys are the PSK's alone, is
 # never taken, so that whoever later learns a ticket key cannot read the
 # sessions it resumed. Its binder is then checked, and one that does not
@@ -4986,6 +4990,12 @@ pub class TlsServer < TlsConnection
         chain << certificate if certificate.is_a?(Certificate)
       end
       next unless chain.size == ticket.chain.size
+      # A resumption asks the client for no certificate (section 4.3.2),
+      # so the ticket's session answers to what is asked of a client now,
+      # not to what was asked where the ticket was sealed: `dup` and every
+      # `frozen` copy open each other's tickets, and `client_roots`,
+      # `client_required` and `now` are properties that change.
+      next unless client_held?(chain)
       # The binder is over the messages before this ClientHello and the
       # ClientHello up to its binders.
       transcript = @transcript[0, @transcript.size - hello.size] + hello[0, hello.size - offer.binders_size]
@@ -4995,6 +5005,21 @@ pub class TlsServer < TlsConnection
       return {ticket, index, chain}
     end
     nil
+  end
+
+  # Whether the client a ticket's session saw - *chain*, empty for one
+  # that showed no certificate - is one this configuration takes now, as
+  # `client_certificate` would take it in a full handshake: none where a
+  # certificate is required is not, and a chain is checked again, under
+  # the roots and at the time of this handshake. A ticket that carries a
+  # chain to a configuration that asks for none is not either, since
+  # `peer_certificates` would name a client nobody here checked. Declined,
+  # the handshake is a full one, which asks.
+  private def client_held?(chain : Array(Certificate)) : Bool
+    roots = @config.client_roots
+    return chain.empty? unless roots
+    return !@config.client_required if chain.empty?
+    !X509.verify(chain[0], chain[1, chain.size - 1], roots, nil, @config.now || Time.utc, X509Purpose::Client).is_a?(X509Error)
   end
 
   # The NewSessionTickets this handshake owes (section 4.6.1), after the

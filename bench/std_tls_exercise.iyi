@@ -1652,6 +1652,41 @@ check binding_round(first_listener, served, "fuzz.test", trusting, chained) == R
 renewed = newest_held(chained, first_listener.local_port, trusting)
 check renewed.received_ms > first_ticket.received_ms && renewed.authenticated_ms == first_ticket.authenticated_ms,
   "a ticket a resumed connection receives keeps its full handshake's time"
+# A resumption asks a client for no certificate, so a ticket answers to
+# what the configuration that takes it asks of a client now: `dup` shares
+# the ticket keys, and `client_roots`, `client_required` and `now` change
+# in place. Each session below holds a ticket when its round begins, so a
+# full handshake is the server's choice and not the client's.
+asking = served.dup
+asking.client_roots = [Certificate.parse(b(BINDING_ROOT)).or_panic]
+asking.now = Time.utc(2026, 6, 1)
+bare = TlsSession.new
+binding_round(first_listener, served, "fuzz.test", trusting, bare)
+said_bare = binding_round(first_listener, asking, "fuzz.test", trusting, bare)
+check said_bare.ends_with?("server tls: the client sent no certificate (certificate_required)"),
+  "a ticket sealed for a client that showed no certificate is not taken where one is required: #{said_bare}"
+asking.client_required = false
+check bare.size > 0 && binding_round(first_listener, asking, "fuzz.test", trusting, bare) == RESUMED,
+  "a ticket sealed for a client that showed no certificate is taken where none is required"
+asking.client_required = true
+carded = binding_config
+carded.identity = TlsIdentity.from_der([b(BINDING_LEAF), b(BINDING_ROOT)], b(BINDING_SEED)).or_panic
+shown = TlsSession.new
+check binding_round(first_listener, asking, "fuzz.test", carded, shown) == FULL, "a client's certificate, asked for and shown"
+check binding_round(first_listener, asking, "fuzz.test", carded, shown) == RESUMED, "a ticket whose chain these roots hold resumes"
+elsewhere = served.dup
+elsewhere.client_roots = Certificate.from_pem(ECH_ROOT_PEM).or_panic
+said_elsewhere = binding_round(first_listener, elsewhere, "fuzz.test", carded, shown)
+check said_elsewhere.includes?("server tls: the client's certificate is not trusted"),
+  "a ticket's chain is checked under the roots of the configuration that takes it: #{said_elsewhere}"
+asking.now = Time.utc(2046, 1, 1)
+said_late = shown.size > 0 ? binding_round(first_listener, asking, "fuzz.test", carded, shown) : "no ticket held"
+check said_late.includes?("server tls: the client's certificate is not trusted"),
+  "a ticket's chain is checked at the time of the handshake that takes it: #{said_late}"
+asking.now = Time.utc(2026, 6, 1)
+binding_round(first_listener, asking, "fuzz.test", carded, shown)
+check shown.size > 0 && binding_round(first_listener, served, "fuzz.test", carded, shown) == FULL,
+  "a ticket's chain is not carried to a configuration that asks for none"
 # Early data on a ticket issued under 16 KiB: taken while the server's
 # limit is unchanged; once it has come down to 100 bytes, declined - the
 # client sends it again after the handshake - rather than taken and cut
@@ -1674,8 +1709,8 @@ said_most = binding_round(first_listener, served, long_name[0, 253], trusting, T
 check said_most.ends_with?("server tls: the client sent alert bad_certificate (42)"), "a server_name of 253 bytes is taken"
 first_listener.close
 second_listener.close
-puts "  tickets held to their port and configuration, a resumption's to its full handshake's time, early data past a"
-puts "  lowered limit declined, and a server_name past 253 bytes refused"
+puts "  tickets held to their port and configuration and to what is asked of a client now, a resumption's to its full"
+puts "  handshake's time, early data past a lowered limit declined, and a server_name past 253 bytes refused"
 
 puts "== Encrypted Client Hello (RFC 9849)"
 # The configuration: written, read back, and what a client passes over.

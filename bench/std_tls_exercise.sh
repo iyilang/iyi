@@ -3269,6 +3269,12 @@ prove_broken "a server_name of any length taken" "a server_name past 253 bytes i
   '          if name.size > MAX_HOST_NAME' '          if false'
 prove_broken "a server_name of 253 bytes refused" "a server_name of 253 bytes is taken" \
   '          if name.size > MAX_HOST_NAME' '          if name.size >= MAX_HOST_NAME'
+prove_broken "a ticket taken whatever is asked of a client now" "a ticket sealed for a client that showed no certificate is not taken where one is required" \
+  '      next unless client_held?(chain)' ''
+prove_broken "a ticket's chain taken unchecked" "a ticket's chain is checked under the roots of the configuration that takes it" \
+  '    !X509.verify(chain[0], chain[1, chain.size - 1], roots, nil, @config.now || Time.utc, X509Purpose::Client).is_a?(X509Error)' '    true'
+prove_broken "a ticket's chain carried to a configuration that asks for none" "a ticket's chain is not carried to a configuration that asks for none" \
+  '    return chain.empty? unless roots' '    return true unless roots'
 prove_broken "a binder over the whole ClientHello" "resume: refused" \
   '    binder = schedule.binder(offered.psk, prefix + hello[0, hello.size - binders.size])' '    binder = schedule.binder(offered.psk, prefix + hello)' scenarios
 prove_broken "a ticket's age sent without its age_add" "resume: refused" \

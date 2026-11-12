@@ -108,8 +108,9 @@
 # may read a file - a file has the access list of the directory it is
 # made in, and under `C:\ProgramData` that lets every user read - so the
 # directory is given a list of its own instead, there already or not,
-# before the first entry is written: its owner, SYSTEM and the
-# Administrators, and nothing inherited from above it; an entry inherits
+# before the first entry is written: its owner, the account the program
+# runs as, SYSTEM and the Administrators, and nothing inherited from
+# above it; an entry inherits
 # that, and a directory whose list cannot be set is not written to. A
 # program can hold them elsewhere with a class of its own that implements
 # the trait.
@@ -144,6 +145,7 @@ import std/mutex::{Mutex}
 import std/random::{Random}
 import std/base64::{Base64}
 import std/time::{Time, Span}
+import std/user::{User}
 
 {% if flag?(:win32) %}
   # The access list of the cache's directory. advapi32 is one a program
@@ -266,8 +268,9 @@ struct AutocertFiles
   # mode does that (`Dir.mkdir_p(dir, 0o700)`, `File.open(..., perm:
   # 0o600)`) there is nothing more to do. On Windows the directory is
   # given a protected access list - none of its parent's entries come
-  # down to it - that lets in whoever owns an object in it, SYSTEM and
-  # the Administrators, inherited by every file and directory made in it
+  # down to it - that lets in whoever owns an object in it, the account
+  # the program runs as, SYSTEM and the Administrators, inherited by
+  # every file and directory made in it
   # and written over what those already there inherited; it panics, with
   # the system's error, where the list cannot be set, so that a key is
   # not written beside one that lets others read it.
@@ -275,12 +278,21 @@ struct AutocertFiles
     {% if flag?(:win32) %}
       # D:P a protected DACL; each entry allows (A) full access (FA), to
       # this object and what is made in it (OICI), to OW the owner's
-      # rights, SY SYSTEM and BA the Administrators.
-      text = __iyi_wide_path("D:P(A;OICI;FA;;;OW)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)".to_unsafe)
+      # rights, SY SYSTEM, BA the Administrators and the account this
+      # program runs as, by its SID - which is not always the directory's
+      # owner: a service handed a directory an administrator made would
+      # otherwise write itself out of it.
+      account = User.current.id
+      sddl = "D:P(A;OICI;FA;;;OW)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+      sddl = sddl + "(A;OICI;FA;;;#{account})" if account.starts_with?("S-")
+      # ASCII, widened as it is: it is no path, and the path's converter
+      # would resolve "D:" against a drive.
+      text = Array(UInt16).new(sddl.bytesize + 1, 0_u16)
+      sddl.bytesize.times { |i| text[i] = sddl.byte_at(i).to_u16 }
       name = __iyi_wide_path(dir.to_unsafe)
-      raise "#{dir} is not a path Windows takes" if name.address == 0_u64 || text.address == 0_u64
+      raise "#{dir} is not a path Windows takes" if name.address == 0_u64
       descriptor = Pointer(Void).new(0_u64)
-      if LibAdvapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW(text, 1_u32, pointerof(descriptor), Pointer(UInt32).new(0_u64)) == 0
+      if LibAdvapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW(text.to_unsafe, 1_u32, pointerof(descriptor), Pointer(UInt32).new(0_u64)) == 0
         raise "no access list could be made for #{dir}"
       end
       present = 0

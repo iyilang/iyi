@@ -113,13 +113,17 @@ def modes(directory, name="cache files are 0600"):
     Administrators alone, and each file's is that, inherited. Each key
     reads back with cryptography, and a certificate's key is its leaf's."""
     if os.name == "nt":
-        own = {"OW", "SY", "BA"}
+        # The owner's rights, SYSTEM, the Administrators, and the account
+        # this runs as, which whoami names by its SID.
+        me = re.search(r"S-1-[0-9-]+", subprocess.run(["whoami", "/user"], capture_output=True, text=True).stdout)
+        own = {"OW", "SY", "BA"} | ({me.group(0)} if me else set())
         flags, trustees = windows_dacl(directory)
         entries = sorted(os.listdir(directory))
         loose = [f"{e} lets in {', '.join(sorted(set(t) - own))}" for e in entries
                  for t in [windows_dacl(os.path.join(directory, e))[1]] if not t or set(t) - own]
+        each = "; ".join(loose) or "each the directory's"
         held(entries and not loose and "P" in flags and trustees and not set(trustees) - own, "the cache's access list is its own",
-             f"{len(entries)} files, {'; '.join(loose) or 'each the directory\'s'}; the directory D:{flags} for {', '.join(trustees)}")
+             f"{len(entries)} files, {each}; the directory D:{flags} for {', '.join(trustees)}")
     else:
         entries = sorted(os.listdir(directory))
         loose = [f"{e} {oct(os.stat(os.path.join(directory, e)).st_mode & 0o777)}" for e in entries

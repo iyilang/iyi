@@ -599,9 +599,12 @@ x = BigInt.from_hex(Program.args.size > 0 ? Program.args[0] : "123456789abcdef01
 puts x.pow_mod_secret(x * x + 5, m).to_s(16).size
 IYI
 # carry_branches <file.s>: how many of the three functions the file has, then
-# how many of their instructions branch on an unsigned comparison.
+# how many of their instructions branch on an unsigned comparison. Read as
+# bytes: a string literal's symbol is named by its content, which need not
+# be UTF-8, and darwin's awk stops at the first that is not and prints
+# nothing.
 carry_branches() {
-  awk '
+  LC_ALL=C awk '
     /^"\*Std::Big::Montgomery(#mul|#sqr|::carry_of)<.*":$/ { inside = 1; functions++; next }
     inside && /^\t\.size\t/ { inside = 0 }
     !inside || /^\t\./ || /^\.Ltmp/ { next }
@@ -627,7 +630,10 @@ carries() {
       continue
     fi
     read="$(carry_branches "$1/$target.s")"
-    if [ "${read%% *}" -lt 2 ]; then
+    if [ -z "$read" ]; then
+      echo "$target: the assembly could not be read"
+      wrong=1
+    elif [ "${read%% *}" -lt 2 ]; then
       echo "$target: Montgomery#mul and #sqr are not both in the assembly, so nothing of them was read"
       wrong=1
     elif [ "${read##* }" -ne 0 ]; then

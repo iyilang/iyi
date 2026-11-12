@@ -47,6 +47,13 @@
 # two primes. Those checks run once, reading the key, on std/big's
 # variable-time arithmetic; what runs per signature does not.
 #
+# A PEM block's body is a private key, and is read by std/base64's
+# `decode_secret`: no table is indexed by its characters and no branch
+# follows one. That reading takes one text for each byte string, so a
+# body with a byte outside the `+` `/` alphabet, with padding before its
+# end, or whose last character sets bits past the data is refused, and
+# the `RsaError` does not say where.
+#
 # Signing is RSASP1 by the CRT (section 5.2.1). The message is blinded -
 # multiplied by r^e for an r drawn by HMAC from the private exponent and
 # the encoded message - so its value, which a caller may choose, does not
@@ -89,7 +96,7 @@ import std/asn1::{Der, DerValue, DerTag, Asn1Error}
 import std/big::{BigInt}
 import std/digest::{SHA1, SHA256, SHA384, SHA512}
 import std/crypto::{HMAC}
-import std/base64::{Base64}
+import std/base64::{Base64, Base64Error}
 
 # What reading a key answers for bytes that are not an RSA key.
 pub struct RsaError
@@ -500,21 +507,15 @@ struct RsaPem
     found
   end
 
+  # The bytes of a block's joined lines. They are a private key's, so
+  # they are read by std/base64's `decode_secret`, which indexes no table
+  # by them and branches on none of them, and which says of a text that
+  # is not base64 only that, not where.
   private def self.decode(text : String, label : String) : Array(UInt8) | RsaError
     return RsaError.new("a #{label} block whose base64 is #{text.bytesize} bytes, not a multiple of 4") unless text.bytesize % 4 == 0 && text.bytesize > 0
-    padding = 0
-    padding = 1 if text.ends_with?("=")
-    padding = 2 if text.ends_with?("==")
-    i = 0
-    while i < text.bytesize
-      b = text.byte_at(i)
-      letter = (b >= 65_u8 && b <= 90_u8) || (b >= 97_u8 && b <= 122_u8) || (b >= 48_u8 && b <= 57_u8)
-      ok = letter || b == 43_u8 || b == 47_u8 || (b == 61_u8 && i >= text.bytesize - padding)
-      return RsaError.new("a #{label} block with byte #{b} in its base64, at #{i}") unless ok
-      i = i + 1
-    end
-    decoded = Base64.decode(text)
-    Array(UInt8).new(decoded.bytesize) { |k| decoded.byte_at(k) }
+    decoded = Base64.decode_secret(text)
+    return RsaError.new("a #{label} block that is not base64: a byte outside A-Z, a-z, 0-9, + and /, padding before the end, or a last character with bits past the data") if decoded.is_a?(Base64Error)
+    decoded
   end
 end
 

@@ -7,7 +7,8 @@
 # by hand that break one rule each with the digest still matching, keys
 # that are not keys, and a private key cryptography drew - read every way,
 # its PKCS #1 v1.5 signatures byte for byte cryptography's, and its
-# numbers broken one at a time and refused; this gate runs it plain and
+# numbers broken one at a time and refused, as is a PEM body that is not
+# base64; this gate runs it plain and
 # --release, holds 600 signatures over six key sizes, both schemes, four
 # hashes and the salt lengths PSS allows, half of them broken some way, to
 # Python's verdicts, has cryptography check 240 signatures this makes over
@@ -553,6 +554,11 @@ prove_broken "a PKCS #8 key's parameters unchecked" "a PKCS #8 key without rsaEn
     if false'
 prove_broken "an encrypted key read as base64" "an encrypted key refused by name" \
   '    if text.includes?("-----BEGIN ENCRYPTED PRIVATE KEY-----") || text.includes?(ENCRYPTED_PKCS1)' '    if false'
+# A key's PEM body through the decoder that reads loosely: a last
+# character's spare bits are dropped, and the text is taken.
+prove_broken "a key's PEM body read by the decoder for texts that are no secret" "a PEM body whose last character sets bits past the data refused" \
+  '    decoded = Base64.decode_secret(text)' '    loose = Base64.decode?(text)
+    decoded = loose.is_a?(Base64Error) ? loose : RsaBytes.of(loose)'
 # A fault in one half of the CRT: the check before the signature goes out
 # must be what stops it, by its own sentence.
 prove_broken "a fault in the CRT's first half" "does not check against its own public key, which a fault makes" \

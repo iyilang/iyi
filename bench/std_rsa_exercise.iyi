@@ -14,7 +14,8 @@
 # #1 v1.5 signatures byte for byte cryptography's, its PSS signatures
 # checked; and private keys refused - each CRT parameter that disagrees,
 # 1024 bits, more than two primes, an RSASSA-PSS key, an EC one, missing
-# parameters, an encrypted key, two keys. The modes the gate script drives:
+# parameters, an encrypted key, two keys, a PEM body that is not base64
+# or not the one text of its bytes. The modes the gate script drives:
 #   verify FILE   each line `spki scheme hash salt message signature`, in
 #                 hex, answered `true`, `false` or `key: <why>`;
 #   roots DIR     each certificate's own signature checked with its own
@@ -324,6 +325,16 @@ private_refused RsaPrivateKey.from_pkcs8(der), "expected a SEQUENCE", "PKCS #1 r
 private_refused RsaPrivateKey.from_pem("-----BEGIN ENCRYPTED PRIVATE KEY-----\nMIIB\n-----END ENCRYPTED PRIVATE KEY-----\n"), "an encrypted private key", "an encrypted key refused by name"
 private_refused RsaPrivateKey.from_pem(pem("RSA PRIVATE KEY", der) + pem("PRIVATE KEY", b(PKCS8_HEADER + PRIVATE_PKCS1))), "2 blocks of RSA PRIVATE KEY or PRIVATE KEY, not one", "two keys refused"
 private_refused RsaPrivateKey.from_pem(pem("PUBLIC KEY", b(K2048))), "0 blocks of RSA PRIVATE KEY or PRIVATE KEY, not one", "a public key refused"
-puts "  each CRT parameter that disagrees, 1024 bits, three primes, RSASSA-PSS, EC, no NULL, encrypted, two keys and none refused"
+# A key's PEM body is read as std/base64 reads a secret: one text for its
+# bytes. The PKCS #8 body ends in one `=`, so its last character has two
+# bits to spare, and the character after it in the alphabet sets one.
+pem8 = pem("PRIVATE KEY", b(PKCS8_HEADER + PRIVATE_PKCS1))
+closing = pem8.index('=') || raise "ASSERTION FAILED: the PKCS #8 body has no padding"
+spare = (pem8.byte_at(closing - 1) + 1_u8).unsafe_chr.to_s
+private_refused RsaPrivateKey.from_pem(pem8[0, closing - 1] + spare + pem8[closing, pem8.bytesize - closing]), "block that is not base64", "a PEM body whose last character sets bits past the data refused"
+opening = "-----BEGIN PRIVATE KEY-----\n".bytesize
+private_refused RsaPrivateKey.from_pem(pem8[0, opening + 2] + "*" + pem8[opening + 3, pem8.bytesize - opening - 3]), "block that is not base64", "a PEM body with a byte outside base64 refused"
+private_refused RsaPrivateKey.from_pem(pem8[0, closing] + pem8[closing + 1, pem8.bytesize - closing - 1]), "not a multiple of 4", "a PEM body without its padding refused"
+puts "  each CRT parameter that disagrees, 1024 bits, three primes, RSASSA-PSS, EC, no NULL, encrypted, two keys and none, a body that is not base64 refused"
 
 puts "\nALL CHECKS PASSED"

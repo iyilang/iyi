@@ -79,6 +79,16 @@ check("a doc selects the docs gates alone", jobs == {"docs"}, f"{reason}: {sorte
 reason, jobs = planned(".github/workflows/iyi.yml")
 check("a change to CI runs everything", reason.startswith("the change is to CI itself"), reason)
 
+# The self-host gates: a compiler source, a gate, and a fixture each select both jobs.
+for files, what in [
+    (["src/compiler/codegen/codegen.iyi"], "a self-host compiler source"),
+    (["bench/selfhost_lexer_exercise.sh"], "a self-host gate"),
+    (["bench/fixtures/compile_stdout.iyi"], "a fixture the self-host gates read"),
+    (["bench/selfhost_gates.sh", "src/compiler/syntax/lexer.iyi"], "a mixed change to the self-host gates and the compiler"),
+]:
+    reason, jobs = planned(*files)
+    check(f"{what} selects both self-host jobs", {"selfhost", "selfhost-darwin"} <= jobs, f"{reason}: {sorted(jobs)}")
+
 print()
 print("== a workflow and a bench directory of this exercise's own")
 

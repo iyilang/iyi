@@ -1185,7 +1185,13 @@ prove_broken "a client that drops what came with the 101" "a frame that came wit
   'WebSocket.new(up.socket, up.leftover, true, agreed, max_message, terms)' 'WebSocket.new(up.socket, "", true, agreed, max_message, terms)'
 prove_broken "a server that drops what came after the handshake" "a frame in the leftover" \
   '    @in_stop = leftover.bytesize' '    @in_stop = 0'
-prove_broken "a client that does not mask" "a client's 1 bytes, unmasked by the reader" \
+# Caught at whichever length first reads back wrong, not at one byte alone.
+# The reader still unmasks with the key the frame carries, so a one-byte
+# payload sent unmasked reads back right whenever that key's first byte is
+# zero, one run in 256, and the check that fails is then the two-byte one:
+# 4 runs of 1,536 of this copy (darwin arm64), and the darwin shard of run
+# 43234088310, which named it "failed, but not where it should have".
+prove_broken "a client that does not mask" "bytes, unmasked by the reader" \
   '        WebSocket.mask(dst + head, n, key)' ''
 prove_broken "a server that takes unmasked frames" "an unmasked client frame" \
   '      return fail(1002, "a client'"'"'s frame is not masked") unless masked' ''

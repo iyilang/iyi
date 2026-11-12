@@ -53,14 +53,22 @@
 - **What the fixes below change in a program's source.**
   `RsaPrivateKey#sign_pss` and `#sign_pkcs1v15` answer `Array(UInt8) |
   RsaError`, `TlsIdentity#sign` `Array(UInt8) | TlsError`,
-  `SigningKey#sign` `Array(UInt8) | X509Error` and `AcmeJws.sign`
-  `String | AcmeError`. `Bcrypt.hash` panics for a password with a NUL or
-  past 72 bytes, and `Bcrypt.verify` answers false for one and for a
-  stored cost past `max_cost` (16). std/otp refuses a secret under 16
-  bytes unless `min_secret:` says less - the key URI format's own example
-  is 10. `Cookie#to_set_cookie` panics for a `Path`, `Domain` or
-  `SameSite` that would break the line. `iyi.sum` lines are `h2:`.
-  `install.sh` stops where SHA256SUMS cannot be fetched.
+  `SigningKey#sign` `Array(UInt8) | X509Error`, and `AcmeJws.sign` and
+  `AcmeJws.signature` an `AcmeError` beside what they answered.
+  `Bcrypt.hash` panics for a password with a NUL or past 72 bytes, and
+  `Bcrypt.verify` answers false for one and for a stored cost past
+  `max_cost` (16). std/otp refuses a secret under 16 bytes unless
+  `min_secret:` says less - the key URI format's own example is 10.
+  `Cookie#to_set_cookie` panics for a `Path` that is not printable ASCII
+  or holds a semicolon, a `Domain` that is no host name - an address
+  among them - and a `SameSite` other than `Strict`, `Lax` or `None`, so
+  a path taken from a request is to be checked before it is a cookie's.
+  `iyi.sum` lines are `h2:`: the first build with this compiler writes
+  an `s1:` file again, and a 0.21.0 compiler does not read what it
+  wrote, so those who share one `iyi.sum` upgrade together; a package
+  with a line break in a file's name no longer builds.
+  `install.sh` stops where SHA256SUMS cannot be fetched, and takes an
+  `IYI_RELEASE_URL` that is `https://` or `file://` and no other.
 
 ### Fixed
 
@@ -109,7 +117,8 @@
   the sender's own key - took 9.3 s to refuse, at a client from any
   server and at a server that asks for a client's certificate from anyone
   (`openssl verify` 64 ms). The signature is checked first; the
-  comparisons of one `verify` are held to 250,000 (Go's figure); a
+  comparisons of one `verify` are held to 250,000 (Go's figure for one
+  certificate, here the whole search's); a
   verdict is reached once for an issuer; and an RSA key past 8192 bits is
   refused anywhere in a chain, where a 16384-bit one cost 330 ms a
   handshake. The same message is refused in under a millisecond.
@@ -131,9 +140,11 @@
   (RFC 6265bis section 5.7): it replaced one of the same name, removed it
   with `Max-Age=0`, or set a longer path's beside it, though the header
   said it could not. A jar holds `__Secure-` and `__Host-` names to what
-  their prefixes promise, and `Cookie#to_set_cookie` refuses a `Path`,
-  `Domain` or `SameSite` that would add an attribute to the line, as it
-  refused a name or value.
+  their prefixes promise, and `Cookie#to_set_cookie` refuses, with the
+  panic it had for a name or value, a `Path` that is not printable ASCII
+  without a semicolon, a `Domain` that is no host name and a `SameSite`
+  that is none of the three: a semicolon in one added an attribute to
+  the line.
 - **`iyi.sum`'s hash says where each file ends, and is SHA-256
   (`h2:`).** The `s1:` hash was SHA-1 over each file's path, a zero byte,
   its bytes and a zero byte, with no lengths - and a file may hold zero
@@ -180,7 +191,7 @@
   factor of the key, and one that failed was a panic: a key whose p was
   not prime passed every check `from_pem` made and ended the process at
   its first handshake, as one flipped bit would. A key now signs once as
-  it is read (1.2 ms more for 2048 bits, 7 for 4096) and is an `RsaError`
+  it is read (1.1 ms more for 2048 bits, 6.5 for 4096) and is an `RsaError`
   if it cannot; a signature that fails later is an `RsaError` from
   `sign_pss` and `sign_pkcs1v15`, which std/tls ends that one handshake
   for (internal_error). `verify_pss` answers false for a salt length no
@@ -191,7 +202,7 @@
   ended the client. `encode` and `decode` index tables by the bytes they
   are given and branch on them, and a private key's PEM went through
   both (the Util::Lookup class, CCS 2021): std/rsa, std/x509 and
-  std/autocert now read and write a key's PEM, and std/smtp and std/http
+  std/autocert now read or write a key's PEM, and std/smtp and std/http
   a password, by the two that map each character with masks. `decode_secret`
   is the strict reader besides - `QR==` is refused.
 - **The machine code keeps what the constant-time source says, and the
@@ -208,7 +219,7 @@
   additions in every build, where a build without `--release` branched
   on secret limbs.
 - **No thread reads a table part written.** SHA-2's and Keccak's
-  constants, ML-KEM's, and the base-point tables of P-256 and Curve25519
+  constants, ML-KEM's, bcrypt's, and the base-point tables of P-256 and Curve25519
   were built at first use and published by a plain store; on a machine
   that reorders stores a second thread could read one half filled, and a
   deterministic signature made with it gives the key beside its repeat.
@@ -228,7 +239,9 @@
   job's registry tokens were in the environment of every step, beside an
   `npx --yes` of whatever the registry answered: each is now the one
   publishing step's, and `vsce` and `ovsx` are locked. `gh attestation
-  verify` reads a release's provenance (INSTALL.md).
+  verify` reads a release's provenance (INSTALL.md). Still unchecked,
+  and said where they are fetched: the Crystal that builds the Windows
+  zip, which `install-crystal` downloads, and darwin's from Homebrew.
 - **`iyi run`'s exit is the program's, when Windows holds its executable a
   moment past the exit.** The runner deleted its program in a cleanup that
   raised when Windows refused - "being used by another process" - and the

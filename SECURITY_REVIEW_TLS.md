@@ -550,7 +550,7 @@ implementations rather than read alone:
 
 The first review said it had not read the machine code of the constant-time
 paths. This one did, for `--release` builds on x86-64 and for aarch64 by
-cross-compiling: `Subtle.constant_time_compare` at each of std/tls's five
+cross-compiling: `Subtle.constant_time_compare` at each of std/tls's seven
 uses, the AEADs' tag compare, X25519's swap and field, Ed25519's and the
 NIST curves' table lookups, the bitsliced AES, GHASH, Poly1305's last
 reduction, std/big's `pow_fixed`, `reduce` and `inverse_mod_secret`, and
@@ -567,7 +567,9 @@ narrower ones, or a peer's cheap way to stop a program; Low, a rule not
 held with no known way to use it, or hardening; Informational, a choice.
 Every High, Medium and Low was fixed on the branch `security-review`, each
 with a check that fails on the code before it and, where the module's gate
-breaks copies of it, a broken copy the gate must catch.
+breaks copies of it, a broken copy the gate must catch. The branch was then
+read again, part by part, by six readers who had not written it: what they
+found is in the second commit named beside a finding.
 
 | # | Severity | Where | Finding | Shown | State |
 |---|---|---|---|---|---|
@@ -578,19 +580,19 @@ breaks copies of it, a broken copy the gate must catch.
 | 5 | Medium | std/http | `HTTP.upgrade`, and so `wss://`, handshook under a configuration of its own without `require_staple` and `ech_configs` | shown | fixed, `fb78ceb85` |
 | 6 | Medium | std/password | `Bcrypt` stopped at a NUL in an `Array(UInt8)` too, so a digest given to it is the empty password one time in 256 | shown | fixed, `bcd0c4684` |
 | 7 | Medium | `iyi.sum` | The tree hash had no lengths, and a file may hold the zero byte that ended one: a tag moved to a tree whose bytes crossed a file's edge built under the line the first tree wrote. (And it was SHA-1.) | shown | fixed, `b4ebefaf2`, `4e795f909` |
-| 8 | Medium | workflows | The jobs that build a release's archives used actions by tags a publisher can move (89 `uses:`), and Crystal, CMake, LLVM's source and `make` unchecked; SHA256SUMS is made after the build | read | fixed, `5dcab2159`; unrun until CI runs it |
+| 8 | Medium | workflows | The jobs that build a release's archives used actions by tags a publisher can move (89 `uses:`), and Crystal, CMake, LLVM's source and `make` unchecked; SHA256SUMS is made after the build | read | fixed, `5dcab2159`, but for the Crystal that builds the Windows zip and darwin's, which the action and Homebrew fetch unhashed; unrun until CI runs it |
 | 9 | Medium | workflows | The VS Code job's registry tokens were in every step's environment, beside an `npx --yes` of whatever the registry answered, on every pull request | read | fixed, `3bee42788`; unrun until CI runs it |
 | 10 | Low | std/tls | A socket closed under a connection whose early data was taken was a panic at `read_early` and `read` | shown | fixed, `ad201ebea` |
-| 11 | Low | std/tls | Records that carry nothing - empty application data, user_canceled, KeyUpdate, tickets - were passed over without end; 3.3 to 4.3 MB/s of KeyUpdates held a core | shown | fixed, `03e7e3c55` |
+| 11 | Low | std/tls | Records that carry nothing - empty application data, user_canceled, KeyUpdate, tickets - were passed over without end; 3.3 to 4.3 MB/s of KeyUpdates held a core | shown | fixed, `03e7e3c55`, and `8bf379a91` for early data |
 | 12 | Low | std/tls | The client looked for a repeated extension in an array: 44 ms for one 64 KiB NewSessionTicket | shown | fixed, `586c81fa8` |
 | 13 | Low | std/tls | Early data a server passed over is sent again and read by `read`, which the header called never a replay; with a copy of the ClientHello taken first the server has it twice and could not tell | shown | fixed, `93940d9cf`: `early_declined?` |
 | 14 | Low | std/system_roots, std/x509 | The Windows Disallowed store took roots out and did nothing for an intermediate in it | read; the fix shown | fixed, `82f6f19a3`, `e53db0367`, `c8f8aac94` |
-| 15 | Low | std/x509 | An IPv4 name constraint did not judge an IPv4-mapped IPv6 address (nor does OpenSSL's) | shown | fixed, `752402b0c` |
+| 15 | Low | std/x509 | An IPv4 name constraint did not judge an IPv4-mapped IPv6 address (nor does OpenSSL's) | shown | fixed, `752402b0c`, `7cedec42b` |
 | 16 | Low | std/mlkem | Decapsulation's choice between K and the implicit-rejection key, masks in the source, was a `cmov` of a pointer and a load in the machine code: which buffer is read says whether the ciphertext held. std/tls makes a key for each handshake and is not reached; a kept key is | shown (assembly) | fixed, `aacb73b3e`: std/digest's `ValueBarrier` |
 | 17 | Low | std/p256 | The barrier the fixed-base lookup read its selector through was folded away by every `--release` build, and the lookup was free of branches by the optimiser's choice alone | shown (IR) | fixed, `70a2e23a3`, for P-384's and Curve25519's lookups and X25519's swap too |
 | 18 | Low | std/big | In a build without `--release` the Montgomery products' carries branch on secret limbs | shown (assembly) | fixed, `6eac7c8e8` |
 | 19 | Low | std/base64 | A private key's PEM, read and written, indexed tables by its bytes and branched on them (the Util::Lookup class) | shown (assembly) | fixed, `8a84f9f59`, `ccad03c87`, `48f393c4c` |
-| 20 | Low | std/p256, std/curve25519, std/ecdsa, std/digest | Tables built at first use were published by a plain store; on a machine that reorders stores a second thread may read one half written, and a deterministic signature made with it and its repeat give the key | read | fixed, `c011d3995`: constants where they can be, an atomic address where not |
+| 20 | Low | std/p256, std/curve25519, std/ecdsa, std/digest, std/password | Tables built at first use were published by a plain store; on a machine that reorders stores a second thread may read one half written, and a deterministic signature made with it and its repeat give the key | read | fixed, `c011d3995`, and `3ebe84b83` for bcrypt's table: constants where they can be, an atomic address where not |
 | 21 | Low | std/rsa | A signature that failed its check was a panic, and a key whose p is not prime passed every check at reading: the first handshake ended the process | shown | fixed, `b0424223a`, `b71a18c62` |
 | 22 | Low | std/smtp | A CRAM-MD5 challenge that is not base64 was a panic | shown | fixed, `c73a11483` |
 | 23 | Low | std/password | `Bcrypt` cut a password at 72 bytes | shown | fixed, `87c95c35d` |
@@ -598,8 +600,8 @@ breaks copies of it, a broken copy the gate must catch.
 | 25 | Low | std/otp | `TOTP.verify` said yes or no, so the caller's "once" (RFC 6238 section 5.2) could not be kept | shown | fixed, `9443b4756` |
 | 26 | Low | std/cookie | `__Host-` and `__Secure-` were names like any other to a jar | shown | fixed, `4718ec7a3` |
 | 27 | Low | std/cookie | `to_set_cookie` wrote a `Path`, `Domain` or `SameSite` as given, a `;` and what follows it too | shown | fixed, `283241a29` |
-| 28 | Low | std/autocert | On Windows the cache's private keys took the access list of the directory above them | shown | fixed, `06ad424fe` |
-| 29 | Low | std/otp | A secret of one byte was taken, and a label's control and bidirectional characters read | shown | fixed, `7e0dd407c` |
+| 28 | Low | std/autocert | On Windows the cache's private keys took the access list of the directory above them | shown | fixed, `06ad424fe`, `a7cd2b2fc` |
+| 29 | Low | std/otp | A secret of one byte was taken, and a label's control and bidirectional characters read | shown | fixed, `7e0dd407c`, `3ebe84b83` |
 | 30 | Low | `.iyimod` reader | Every count in an artifact was allocated as read: 16 bytes asked for 32 GiB. No read past a buffer was found in 430 mutated files | shown | fixed, `ff6bd7832` |
 | 31 | Low | `install.sh` | A SHA256SUMS that could not be fetched was a note and an install | shown | fixed, `28339c03f` |
 | 32 | Low | workflows | A release carried no signature or provenance | read | fixed, `9f31d26fe`; unrun until CI runs it |
@@ -611,7 +613,7 @@ breaks copies of it, a broken copy the gate must catch.
 | 38 | Informational | std/tls | A ChangeCipherSpec is passed over between a handshake message's pieces; an alert's level is not read | shown | open |
 | 39 | Informational | std/tls | With early data taken, the wait for the client's Finished is bounded by the socket's read timeout alone | read | open |
 | 40 | Informational | std/ocsp | Any certificate the CA gave OCSPSigning answers for all of the CA's, itself included (RFC 6960 has it so) | shown | open |
-| 41 | Informational | std/system_roots | `LocalMachine\AuthRoot` is not read - a chain to a root only there is refused - and std/tls keeps the roots for the process | shown | open, fails closed |
+| 41 | Informational | std/system_roots | A root Windows has not yet fetched into its store is not there to read - a chain to it is refused, where Windows would fetch it - and std/tls keeps the roots for the process | shown | open, fails closed |
 | 42 | Informational | std/p256, std/p384, std/curve25519 | Signing is deterministic and a signature is not checked before it leaves, as RSA's is | read | open |
 | 43 | Informational | std/curve25519 | Ed25519 is verified without the cofactor, as OpenSSL verifies it (the first review's finding 8, further) | shown | open |
 | 44 | Informational | std/ecdsa | (r, s) and (r, n - s) both verify | shown | open |
@@ -693,9 +695,9 @@ fix in it unless said:
   std/mlkem's, and the package gates `packages_resolve.sh` and
   `packages_get.sh` with a compiler built from the branch.
 - `bash bench/ct_timing.sh`: its reading of the machine code holds for
-  x86_64 and aarch64, and of its eleven timings ten stay under 10 (the
-  largest 6.61) with the leaking control at 257.81. The eleventh,
-  mlkem-key - one key's decapsulation against 64 others' - did not, at
+  x86_64 and aarch64, and of its ten timings of secret paths nine stay
+  under 10 (the largest 6.61) with the leaking control at 257.81. The
+  tenth, mlkem-key - one key's decapsulation against 64 others' - did not, at
   15.56, and does not on this machine for the 0.21.0 module either: five
   runs of each in turn gave 7.11, 15.56, 16.33, 14.01 and 16.79 for
   0.21.0's and 19.3, 13.94, 13.2, 14.47 and 19.69 for the branch's. This

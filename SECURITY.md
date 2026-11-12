@@ -12,9 +12,9 @@ reaches everybody the bug actually affects.
 import path and `iyi.sum`, the rules in [SPEC.md](SPEC.md), and the standard
 library written in iyi under `src/std`, which holds its own TLS (`std/tls`),
 certificate checking (`std/x509`, `std/ocsp`, `std/system_roots`) and every
-primitive under them (`std/aead`, `std/digest`, `std/crypto`, `std/rsa`,
-`std/ecdsa`, `std/p256`, `std/p384`, `std/curve25519`, `std/mlkem`,
-`std/hpke`, `std/random`), with no OpenSSL beneath — open a private security
+primitive under them (`std/aead`, `std/digest`, `std/crypto`, `std/big`,
+`std/rsa`, `std/ecdsa`, `std/p256`, `std/p384`, `std/curve25519`,
+`std/mlkem`, `std/hpke`, `std/asn1`, `std/random`), with no OpenSSL beneath — open a private security
 advisory on this repository, or an ordinary issue if it is not sensitive.
 
 None of that cryptography has been audited, and it is not to be called secure

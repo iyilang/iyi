@@ -252,8 +252,9 @@
   `npx --yes` of whatever the registry answered: each is now the one
   publishing step's, and `vsce` and `ovsx` are locked. `gh attestation
   verify` reads a release's provenance (INSTALL.md). Still unchecked,
-  and said where they are fetched: the Crystal that builds the Windows
-  zip, which `install-crystal` downloads, and darwin's from Homebrew.
+  and said where they are fetched: the bootstrap compiler that builds
+  the Windows zip, which its setup action downloads, and darwin's, from
+  Homebrew.
 - **`iyi run`'s exit is the program's, when Windows holds its executable a
   moment past the exit.** The runner deleted its program in a cleanup that
   raised when Windows refused - "being used by another process" - and the

@@ -309,7 +309,8 @@ echo "== proving the checks can fail when the modules are broken"
 # with <old> replaced must fail at the check that names
 # <phrase>. <part> is where that check is: `local`, the exercise's own
 # checks; `cache`, those and then Python's reading of the cache they
-# wrote, which needs cryptography and POSIX's modes; `alpn`, Python's
+# wrote, which needs cryptography and POSIX's modes; `acl`, the same on
+# Windows, where the reading is of access lists; `alpn`, Python's
 # handshakes with the challenge up; or Pebble's parts, by commas
 # (bench/std_autocert_client.py), which run only where Pebble does.
 mutations=0
@@ -325,12 +326,16 @@ prove_broken() {
     echo "  $label: unmeasured here, as its check is POSIX's modes read by Python's cryptography"
     return
   fi
+  if [ "$part" = acl ] && { [ -z "$ORACLE" ] || [ "$PSEP" != ';' ]; }; then
+    echo "  $label: unmeasured here, as its check is Windows' access lists read by PowerShell"
+    return
+  fi
   if [ "$part" = alpn ] && [ -z "$ORACLE" ]; then
     echo "  $label: unmeasured here, as its check is Python's ssl and cryptography"
     return
   fi
   case "$part" in
-    local | cache | alpn) ;;
+    local | cache | acl | alpn) ;;
     *)
       if [ -z "$PEBBLE" ]; then
         echo "  $label: unmeasured here, as its check orders from Pebble and Pebble is not running"
@@ -367,9 +372,9 @@ PY
   fi
   local passed=yes
   case "$part" in
-    local | cache)
+    local | cache | acl)
       local_run "$WORK/mutant" "$WORK/mutant-cache" "$WORK/mut.out" || passed=""
-      if [ "$part" = cache ]; then
+      if [ "$part" != local ]; then
         "$PY" "$CLIENT" modes "$WORK/mutant-cache" >>"$WORK/mut.out" 2>&1 || passed=""
       fi
       ;;
@@ -397,6 +402,8 @@ prove_broken autocert "the challenge certificate shown beside other protocols" "
   '    if @alpn_challenges.has_key?(name)'
 prove_broken autocert "a private key written world-readable" "cache files are 0600" cache \
   'File.open(temporary, "w", perm: 0o600)' 'File.open(temporary, "w", perm: 0o644)'
+prove_broken autocert "the cache's directory left with its parent's access list" "the cache's access list is its own" acl \
+  '        AutocertFiles.keep(@dir)' ''
 prove_broken autocert "no single flight: each handshake its own order" "ten concurrent first connections create one order" ten \
   '    if running = @flights[name]?' '    if running = nil.as(AutocertFlight?)'
 prove_broken autocert "the cache not read" "the cache survives a restart: no new order" restart \

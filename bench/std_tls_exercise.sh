@@ -3357,6 +3357,10 @@ prove_broken "a replay of early data taken" "FAIL early-replay " \
   '    return false if @held.has_key?(key)' '' server
 prove_broken "early data delivered as 1-RTT data" "FAIL early-ok " \
   '        return content unless content.empty?' '        @pending = content unless content.empty?' server
+prove_broken "early records of no bytes read without end" "FAIL early-idle " \
+  '        idle = idle_record
+        return idle if idle
+' '' server
 prove_broken "early data past the ticket's max_early_data_size taken" "FAIL early-too-much " \
   '        if @early_read > @early_limit' '        if false' server
 prove_broken "early data passed over without the server saying so" "early data a ticket allows past a lowered limit is declined, and sent again" \

@@ -600,18 +600,18 @@ pub class TlsConfig
     made
   end
 
-  @@system : Array(Certificate)? = nil
-  @@system_distrusted : Array(Array(UInt8)) = [] of Array(UInt8)
+  # The system's roots and what it distrusts, kept together: a thread
+  # that sees the one sees the other.
+  @@system : SystemRoots? = nil
 
   def trusted_roots : Array(Certificate) | TlsError
     held = @roots
     return held if held
     kept = @@system
-    return kept if kept
+    return kept.certificates if kept
     store = SystemRoots.load
     return TlsError.new(store.message) if store.is_a?(X509Error)
-    @@system_distrusted = store.distrusted
-    @@system = store.certificates
+    @@system = store
     store.certificates
   end
 
@@ -623,7 +623,8 @@ pub class TlsConfig
   # its trust.
   def distrusted : Array(Array(UInt8))?
     return nil if @roots
-    @@system_distrusted
+    kept = @@system
+    kept ? kept.distrusted : nil
   end
 end
 
@@ -4752,6 +4753,10 @@ pub class TlsServer < TlsConnection
           return TlsError.new("#{@early_read} bytes of early data, past the #{@early_limit} allowed", TlsAlert::UNEXPECTED_MESSAGE)
         end
         return content unless content.empty?
+        # Early data of no bytes brings `read_early` nothing either: no
+        # more of it in a row than after the handshake.
+        idle = idle_record
+        return idle if idle
       when TlsRecords::HANDSHAKE
         return TlsError.new("an empty handshake record", TlsAlert::UNEXPECTED_MESSAGE) if content.empty?
         add_handshake(content)
@@ -5084,18 +5089,20 @@ pub class TlsServer < TlsConnection
         chain << certificate if certificate.is_a?(Certificate)
       end
       next unless chain.size == ticket.chain.size
-      # A resumption asks the client for no certificate (section 4.3.2),
-      # so the ticket's session answers to what is asked of a client now,
-      # not to what was asked where the ticket was sealed: `dup` and every
-      # `frozen` copy open each other's tickets, and `client_roots`,
-      # `client_required` and `now` are properties that change.
-      next unless client_held?(chain)
       # The binder is over the messages before this ClientHello and the
       # ClientHello up to its binders.
       transcript = @transcript[0, @transcript.size - hello.size] + hello[0, hello.size - offer.binders_size]
       unless Subtle.constant_time_compare(offer.binders[index], @schedule.binder(ticket.psk, transcript))
         return TlsError.new("the client's PSK binder does not match its ClientHello", TlsAlert::DECRYPT_ERROR)
       end
+      # A resumption asks the client for no certificate (section 4.3.2),
+      # so the ticket's session answers to what is asked of a client now,
+      # not to what was asked where the ticket was sealed: `dup` and every
+      # `frozen` copy open each other's tickets, and `client_roots`,
+      # `client_required` and `now` are properties that change. After the
+      # binder, so that only who holds the ticket's PSK has its chain
+      # checked.
+      next unless client_held?(chain)
       return {ticket, index, chain}
     end
     nil

@@ -226,7 +226,7 @@ end
 # an `initialize` the way a struct this file declares is.
 pub def compiler_struct?(name : String) : Bool
   name == "Tuple" || name == "Proc" || name == "Enum" ||
-    name == "StaticArray" || name == "Int" || name == "Float" ||
+    name == "Int" || name == "Float" ||
     name == "Number" || name == "Value" || name == "Struct"
 end
 

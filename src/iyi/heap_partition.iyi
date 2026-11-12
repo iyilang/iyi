@@ -3872,6 +3872,7 @@ class IyiMark
       IyiHeap.class_unlock(index)
       return 0_u64 if chosen == 0
       sweep_slice(chosen, SWEEP_SPAN)
+      {% if flag?(:heap_verify) %} IyiHeapVerify.check_claimed(chosen, epoch) {% end %}
       IyiHeap.class_lock(index)
       release_claim(chosen, epoch)
       arena_done(chosen, epoch)

@@ -368,6 +368,30 @@ class IyiHeapVerify
     weak_cells(id)
   end
 
+  # A sweep slice's walker at the walk's end, before it lets its claim go
+  # (`IyiMark.sweep_one`, `sweep_for`, `sweep_one_helper`,
+  # `IyiHeap.partition_sweep_for`): the arena's walk claim must still be
+  # this walk's. One let go before the walk ends lets another walker into
+  # the slice, or a partition's local sweep past `quiet_class` into an
+  # arena whose frees are still landing on its return stack
+  # (bench/heap_sweep_claim.sh's copy, a helper that lets go before its
+  # walk).
+  def self.check_claimed(arena : UInt64, epoch : UInt64) : Nil
+    claim = IyiHeap.read64(arena &+ IyiHeap::OFF_SWEEPING)
+    return if claim == epoch
+    report_begin(0_u64)
+    say("  a sweep slice ended without its walk claim: another walker, or a local sweep past `quiet_class`, could walk the slice with it\n")
+    say("  holder: a sweep slice's walk claim\n")
+    say("    arena ")
+    say_hex(arena)
+    say(", claim ")
+    say_dec(claim)
+    say(", the walk's epoch ")
+    say_dec(epoch)
+    say("\n")
+    report_end
+  end
+
   # A run going to its class's pool (`IyiHeap.pool_run`, under the
   # class's lock, its owner not yet cleared): no chunk on it may be carved
   # and not free. Such a chunk is a live object to a stale word -

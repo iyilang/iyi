@@ -3,13 +3,15 @@
 # bench/heap_drain.iyi built with partitions, plain and optimised: its
 # partition arenas flat round after round (drained runs taken again) and
 # its pooled runs' pages back after an idle wait; its mark mode, the
-# partitions held under long global marks; with the verifier and under
-# chaos with a local collection at every park, no report; the flag-off
-# control; then one broken copy per mechanism: without the take of
-# drained runs or the global sweep's listing the arenas grow, without
+# partitions held under long global marks; its claim mode, the sweep
+# helpers' rounds swept beside a sleeping program; with the verifier and
+# under chaos with a local collection at every park, no report; the
+# flag-off control; then one broken copy per mechanism: without the take
+# of drained runs or the global sweep's listing the arenas grow, without
 # the idle wake the pool stays warm, without the release the resident set
 # stays, without the hold the arenas grow under the marks (the program
-# fails), and a taken run's objects left `LOCAL` instead of published are
+# fails), and a taken run's objects left `LOCAL` instead of published,
+# or a helper that lets its sweep claim go before its walk ends, are
 # caught by `-Dheap_verify` (exit 86).
 #
 #   bash bench/heap_drain.sh           # every part
@@ -99,6 +101,8 @@ if [ "$PART" = all ] || [ "$PART" = sound ]; then
   echo "== the partitions held under long marks (mark mode)"
   again "optimised" release release-mark mark
   again "verifier" verify verify-mark mark 1000000 4 2
+  echo "== the helpers' sweep rounds beside a sleeping program (claim mode)"
+  again "verifier" verify verify-claim claim
   build stress "-Dheap_partitions -Dheap_verify -Diyi_chaos" && for seed in $SEEDS; do
     env IYI_CHAOS="$seed" IYI_HEAP_STRESS=1 timeout 600 "$WORK/stress" 6 8 4 >"$WORK/stress-$seed.out" 2>"$WORK/stress-$seed.err"
     code=$?
@@ -116,6 +120,7 @@ if [ "$PART" = all ] || [ "$PART" = off ]; then
   echo "== the flag-off control"
   whole "flag off" off ""
   again "flag off, mark mode" off off-mark mark
+  again "flag off, claim mode" off off-claim claim
 fi
 
 # One line deleted after a marker: `del MARKER LINE` as an awk program.
@@ -128,18 +133,20 @@ subst() {
 }
 
 # copy LABEL DIR WANT AWK [FLAGS [ARGS...]]: src/iyi/heap_partition.iyi
-# patched by AWK, the program built against it (with FLAGS, default the
-# optimised partitioned build) and run with ARGS: caught when it exits
-# WANT - 1, the arenas' growth the program fails on, or 86, the
-# verifier's report, the program's own checks printed and passed over.
+# (or `COPY_FILE`, another file of src/iyi) patched by AWK, the program
+# built against it (with FLAGS, default the optimised partitioned build)
+# and run with ARGS: caught when it exits WANT - 1, the arenas' growth
+# the program fails on, or 86, the verifier's report, the program's own
+# checks printed and passed over.
 copy() {
   local label="$1" name="$2" dir="$WORK/$2" want="$3" script="$4" flags="${5:--Dheap_partitions --release}"
+  local file="${COPY_FILE:-heap_partition.iyi}"
   shift 4
   [ $# -gt 0 ] && shift
   mkdir -p "$dir"
   cp -R "$REPO/src/iyi" "$REPO/src/std" "$dir/"
-  if ! awk "$script" "$REPO/src/iyi/heap_partition.iyi" >"$dir/iyi/heap_partition.iyi"; then
-    echo "  $label: what the copy changes is not in heap_partition.iyi any more"
+  if ! awk "$script" "$REPO/src/iyi/$file" >"$dir/iyi/$file"; then
+    echo "  $label: what the copy changes is not in $file any more"
     status=1
     return
   fi
@@ -175,6 +182,13 @@ if [ "$PART" = all ] || [ "$PART" = copies ]; then
     '/def self\.cool_pools/ { armed = 1 } armed && /^  end$/ { armed = 0 } armed && /__iyi_release_pages\(/ { found = found + 1; next } { print } END { if (found != 3) exit 3 }'
   copy "a partition holds under a mark" c6 1 \
     "$(del 'def self\.partition_slice' 'hold_partition\(record, debt\)')" "-Dheap_partitions --release" mark
+  # A sweep helper that lets its walk claim go before its walk ends: a
+  # partition's local sweep could pass `quiet_class` into an arena whose
+  # frees are still landing on its return stack (`IyiMark.sweep_one_
+  # helper`, prelude.iyi). The release put above the walk.
+  COPY_FILE=prelude.iyi copy "a helper holds its claim to its walk's end" c7 86 \
+    '/def self\.sweep_one_helper : Bool/ { armed = 1 } armed && /^          batch = sweep_slice\(arena, SWEEP_SPAN\)$/ { print "          IyiHeap.class_lock(index)"; print "          release_claim(arena, epoch)"; print "          IyiHeap.class_unlock(index)"; print; armed = 0; found = 1; next } { print } END { if (!found) exit 3 }' \
+    "-Dheap_partitions -Dheap_verify" claim
 fi
 
 exit $status

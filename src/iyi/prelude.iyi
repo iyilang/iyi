@@ -7126,6 +7126,7 @@ require "./file"
         end
         epoch = IyiStat.get(IyiStat::EPOCH)
         batch = sweep_slice(arena, SWEEP_SPAN)
+        {% if flag?(:heap_verify) %} IyiHeapVerify.check_claimed(arena, epoch) {% end %}
         index = IyiHeap.class_index(IyiHeap.arena_chunk(arena))
         IyiHeap.class_lock(index)
         release_claim(arena, epoch)
@@ -7160,6 +7161,7 @@ require "./file"
         return arena if arena < 4_u64
         epoch = IyiStat.get(IyiStat::EPOCH)
         batch = sweep_slice(arena, SWEEP_SPAN)
+        {% if flag?(:heap_verify) %} IyiHeapVerify.check_claimed(arena, epoch) {% end %}
         IyiHeap.class_lock(index)
         release_claim(arena, epoch)
         arena_done(arena, epoch)
@@ -7352,13 +7354,35 @@ require "./file"
         # thread takes one - so three helpers are on one arena at once,
         # and the arena a program churns through is swept three times
         # faster - its batch handed to the class's centre; or false when
-        # the round is closed or nothing is left. The claim and the hand
-        # over are under the runtime lock, which closes the round, and
-        # the class's inside it. The slice is counted in while it runs,
-        # so the collection that closes the round can wait it out; a
-        # helper at the runtime lock after its slice may wait through a
-        # whole collection, and its batch is then an old epoch's,
-        # discarded.
+        # the round is closed or nothing is left. The claim is taken
+        # under the runtime lock, which closes the round, and the class's
+        # inside it, and so is the hand over. The slice is counted in
+        # while it runs, so the collection that closes the round can wait
+        # it out; a helper at the runtime lock after its slice may wait
+        # through a whole collection, and its batch is then an old
+        # epoch's, discarded.
+        #
+        # Under `-Dheap_partitions` the claim is let go, and the arena
+        # counted out, at the walk's end under the class's lock alone -
+        # `sweep_for`'s order - before the slice is counted out and the
+        # runtime lock taken for the hand over. A partition's local sweep
+        # waits for every claim on its class's partition arenas
+        # (`IyiHeap.quiet_class`), and a helper that held one across its
+        # wait for the runtime lock held every such sweep with it: on the
+        # user's Windows 11 machine with 12 logical processors, under
+        # #145's app at 99 % CPU, claims stayed held 32 to 243 ms after
+        # walks of microseconds, and 5 to 9 workers spun in `quiet` until
+        # each was let go - 20 of the 43 local collections past 20 ms on
+        # cities and api tags (PauseHunt, S6). Let go while counted in,
+        # no collection can close the round and stop the program between
+        # the walk and the release, so the arena is mapped and the epoch
+        # is the walk's, as inside `sweep_for`'s allocator bracket; the
+        # batch keeps its epoch test under the runtime lock. A partition
+        # arena's slice leaves no batch (`sweep_slice`): what it frees is
+        # on its owners' return stacks before the walk ends, so a local
+        # sweep that passes `quiet` once the claim is gone finds nothing
+        # of the slice left to come. Without the flag nothing waits on a
+        # claim this way and the order is as it was.
         def self.sweep_one_helper : Bool
           return false if pool_word(POOL_SWEEP).value.get == 0_u64
           IyiRuntimeLock.lock
@@ -7399,14 +7423,30 @@ require "./file"
           # lock, which a whole collection may come and go behind.
           index = IyiHeap.class_index(IyiHeap.arena_chunk(arena))
           batch = sweep_slice(arena, SWEEP_SPAN)
-          pool_word(POOL_SWEEPERS).value.sub(1_u64)
-          IyiRuntimeLock.lock
-          IyiHeap.class_lock(index)
-          release_claim(arena, epoch)
-          arena_done(arena, epoch)
-          IyiHeap.push_batch(index, batch) if batch != 0 && IyiStat.get(IyiStat::EPOCH) == epoch
-          IyiHeap.class_unlock(index)
-          IyiRuntimeLock.unlock
+          {% if flag?(:heap_partitions) %}
+            {% if flag?(:heap_verify) %} IyiHeapVerify.check_claimed(arena, epoch) {% end %}
+            IyiHeap.class_lock(index)
+            release_claim(arena, epoch)
+            arena_done(arena, epoch)
+            IyiHeap.class_unlock(index)
+            pool_word(POOL_SWEEPERS).value.sub(1_u64)
+            if batch != 0
+              IyiRuntimeLock.lock
+              IyiHeap.class_lock(index)
+              IyiHeap.push_batch(index, batch) if IyiStat.get(IyiStat::EPOCH) == epoch
+              IyiHeap.class_unlock(index)
+              IyiRuntimeLock.unlock
+            end
+          {% else %}
+            pool_word(POOL_SWEEPERS).value.sub(1_u64)
+            IyiRuntimeLock.lock
+            IyiHeap.class_lock(index)
+            release_claim(arena, epoch)
+            arena_done(arena, epoch)
+            IyiHeap.push_batch(index, batch) if batch != 0 && IyiStat.get(IyiStat::EPOCH) == epoch
+            IyiHeap.class_unlock(index)
+            IyiRuntimeLock.unlock
+          {% end %}
           true
         end
 

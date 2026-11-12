@@ -1196,13 +1196,22 @@ pub struct BigInt
   # window, every entry of its table read for each window and the one
   # wanted kept by a mask, so neither a branch nor a memory address depends
   # on the exponent's bits, and as many windows as the longer of the
-  # exponent and the modulus takes, so the exponent's length does not show
-  # either. The modulus has to be odd (a Montgomery modulus): an even one
-  # is a misuse, refused.
+  # exponent and the modulus takes, so an exponent no longer than the
+  # modulus costs the same squares and products whatever its length. The
+  # modulus has to be odd (a Montgomery modulus): an even one is a misuse,
+  # refused.
   #
-  # What it does not hide: the base is reduced by `%`, whose time depends
-  # on the base and the modulus, so a caller with a secret base (RSA's
-  # CRT halves of a message) blinds it first, as std/rsa's signing does.
+  # What it does not hide. The exponent's length, in three places: a
+  # `BigInt` keeps no leading zero limbs, so the length is the size of its
+  # array; `bit_length` counts the bits of the top limb in a loop, a step
+  # for each; and a window's bit past the exponent's last limb is answered
+  # by a branch, not a load (`Montgomery.bit`). An exponent longer than
+  # the modulus adds windows of its own besides. For an RSA key's CRT
+  # exponents, which are within a few bits of their primes' length, that
+  # is those few bits. And the base: it is reduced by `%`, whose time
+  # depends on the base and the modulus, so a caller with a secret base
+  # (RSA's CRT halves of a message) blinds it first, as std/rsa's signing
+  # does.
   def pow_mod_secret(exp : BigInt, mod : BigInt) : BigInt
     raise "modulo by zero" if mod.zero?
     raise "modulus must be positive" if mod.negative?

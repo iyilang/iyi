@@ -25,7 +25,7 @@ private def unframed(files : Hash(String, String)) : String
     digest.update files[relative]
     digest.update "\0"
   end
-  digest.hexfinal
+  "s1:#{digest.hexfinal}"
 end
 
 private def selection(path : String, version : String) : Iyi::Mod::Selection
@@ -144,14 +144,29 @@ describe Iyi::Mod::Sum do
       end
     end
 
-    # An `s1:` line could not tell two trees apart, so it is not held
-    # against the checkout - whatever it says - and not left in the file.
-    it "reads an `s1:` line as no entry, and writes it again as `h2:`" do
+    # An `s1:` line could not tell two trees apart, so it is not left in
+    # the file - but it is held to its checkout the way it was written
+    # first, or the build after an upgrade would pin whatever it found.
+    it "refuses a checkout that is not what its `s1:` line says, and writes nothing" do
       with_tempdir do
-        checkout = tree "liba", {"liba.iyi" => "x\n"}
+        checkout = tree "liba", {"sub/liba.iyi" => "x\n"}
+        Dir.mkdir "app"
+        written = "example.test/user/liba v1.0.0 #{unframed({"sub/liba.iyi" => "y\n"})}\n"
+        File.write "app/iyi.sum", written
+
+        expect_raises(Iyi::Mod::ModError, /is not what it was: .* says s1:[0-9a-f]{40}, the checkout hashes to #{unframed({"sub/liba.iyi" => "x\n"})}\./) do
+          Iyi::Mod::Sum.check("app", [selection("example.test/user/liba", "1.0.0")]) { checkout }
+        end
+        File.read("app/iyi.sum").should eq written
+      end
+    end
+
+    it "writes an `s1:` line its checkout matches again as `h2:`" do
+      with_tempdir do
+        checkout = tree "liba", {"sub/liba.iyi" => "x\n", "iyi.mod" => "module example.test/user/liba\n"}
         Dir.mkdir "app"
         File.write "app/iyi.sum", <<-SUM
-          example.test/user/liba v1.0.0 s1:0aa369130079195ed2d02d149a8f3557ac343a11
+          example.test/user/liba v1.0.0 #{unframed({"sub/liba.iyi" => "x\n", "iyi.mod" => "module example.test/user/liba\n"})}
           example.test/user/libz v2.0.0 s1:f6b216a60000000000000000000000000000dead
 
           SUM

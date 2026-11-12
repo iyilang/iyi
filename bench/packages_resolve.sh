@@ -286,22 +286,43 @@ grep -q 'example.test/user/libf v1.0.0 is not what it was' framed_moved.log || {
 }
 cmp -s framed_app/iyi.sum framed_app/iyi.sum.reviewed || { echo "a refused build rewrote iyi.sum:"; cat framed_app/iyi.sum; exit 1; }
 
-# An `s1:` line is one this compiler's predecessors wrote, and it pins
-# nothing, for the reason above. It is not held against the checkout -
-# whatever it says - and it is not left: the build hashes what is checked
-# out, writes the line again as `h2:`, and says so once, on stderr.
-step "an s1: line is read as no entry, and written again as h2:"
+# An `s1:` line is one this compiler's predecessors wrote. It is not left
+# in the file, and it is not dropped unread: the checkout is hashed the
+# old way once more, a checkout that differs is refused as it always was,
+# and one that matches has its line written again as `h2:`, said once on
+# stderr. Rewritten unread, the first build after an upgrade would pin
+# whatever it found checked out - a moved tag among them.
+step "an s1: line its checkout matches is written again as h2:, and one it does not is refused"
+if command -v sha1sum > /dev/null 2>&1; then
+  sha1() { sha1sum | cut -c1-40; }
+else
+  sha1() { shasum -a 1 | cut -c1-40; }
+fi
+# What `s1:` was, from the checkout's own files: `<path>\0<bytes>\0` for
+# each in path order, under SHA-1.
+s1_of() {
+  (cd "$1" && find . -type f | sed 's#^\./##' | LC_ALL=C sort | while IFS= read -r f; do
+    printf '%s\0' "$f"; cat "$f"; printf '\0'
+  done) | sha1
+}
 cp app/iyi.sum app/iyi.sum.good
-sed -i.bak 's/ h2:.*$/ s1:0000000000000000000000000000000000000000/' app/iyi.sum && rm -f app/iyi.sum.bak
-if grep -q ' h2:' app/iyi.sum || ! grep -q ' s1:' app/iyi.sum; then
-  echo "the fixture's sum was not turned into s1: lines:"
+: > app/iyi.sum.s1
+while read -r path version _; do
+  tree="$IYI_CACHE_DIR/mod/$path@$version"
+  [ -f "$tree/iyi.mod" ] || { echo "no checkout at $tree for the line $path $version"; exit 1; }
+  printf '%s %s s1:%s\n' "$path" "$version" "$(s1_of "$tree")" >> app/iyi.sum.s1
+done < app/iyi.sum.good
+cp app/iyi.sum.s1 app/iyi.sum
+if grep -q ' h2:' app/iyi.sum || [ "$(grep -c ' s1:[0-9a-f]\{40\}$' app/iyi.sum)" -ne 2 ]; then
+  echo "the fixture's sum was not turned into two s1: lines:"
   cat app/iyi.sum
   exit 1
 fi
 rm -f app/app
 if ! (cd app && "$IYI" build main.iyi -o app) > restated.log 2>&1; then
-  echo "a build under s1: lines did not build:"
+  echo "a build under s1: lines its checkouts match did not build:"
   tail -6 restated.log
+  mv app/iyi.sum.good app/iyi.sum
   exit 1
 fi
 cmp -s app/iyi.sum app/iyi.sum.good || {
@@ -321,7 +342,31 @@ if [ $? -ne 0 ] || grep -q 's1:' restated2.log; then
   tail -6 restated2.log
   exit 1
 fi
-rm -f app/iyi.sum.good
+# And the line a checkout does not match: liba's, with one digit moved.
+liba_s1="$(awk '$1 == "example.test/user/liba" { print $3 }' app/iyi.sum.s1)"
+case "$liba_s1" in
+  s1:0*) wrong_s1="s1:1${liba_s1#s1:0}" ;;
+  *) wrong_s1="s1:0${liba_s1#s1:?}" ;;
+esac
+sed "s/$liba_s1/$wrong_s1/" app/iyi.sum.s1 > app/iyi.sum
+cp app/iyi.sum app/iyi.sum.wrong
+rm -f app/app
+(cd app && "$IYI" build main.iyi -o app) > unmatched.log 2>&1
+unmatched_status=$?
+cmp -s app/iyi.sum app/iyi.sum.wrong
+unmatched_written=$?
+mv app/iyi.sum.good app/iyi.sum
+rm -f app/iyi.sum.s1 app/iyi.sum.wrong
+if [ "$unmatched_status" -eq 0 ]; then
+  echo "an s1: line its checkout does not match built, and was taken for an upgrade"
+  exit 1
+fi
+grep -q "says $wrong_s1, the checkout hashes to $liba_s1" unmatched.log || {
+  echo "the unmatched s1: line was not refused naming both s1: hashes:"
+  tail -6 unmatched.log
+  exit 1
+}
+[ "$unmatched_written" -eq 0 ] || { echo "a refused build rewrote iyi.sum"; exit 1; }
 
 # ── 5b. A package's tree may contain a symbolic link ─────────────────────
 # The hash is over the checkout's files, and a walk that asks the *target*

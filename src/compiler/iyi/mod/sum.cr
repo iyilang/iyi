@@ -30,13 +30,18 @@
 #
 # `s1:` is what this file held before `h2:`: SHA-1 over `<relpath>\0<bytes>\0`
 # for every file, with no lengths, so bytes could move from one file into
-# its neighbour and the hash stay where it was. A line that says `s1:`
-# therefore pins nothing and is read as a requirement with no entry: the
-# checkout is hashed, the line is written again as `h2:`, and one line on
-# stderr says so. Inside the module cache, where nothing is written, such
-# a line stays as it is and holds its checkout to nothing — it is a
-# dependency's own file there, and the tree it sits in is already pinned,
-# that file included, by the `h2:` line of whoever required it.
+# its neighbour and the hash stay where it was. A line that says `s1:` is
+# not kept, and not dropped unread either: the checkout is hashed the old
+# way once more (`legacy_tree_hash`, which exists for this and nothing
+# else), a checkout that differs is the refusal it always was, naming both
+# `s1:` hashes, and one that matches has its line written again as `h2:`,
+# with one line on stderr saying so. Rewriting it unread would have pinned
+# whatever the first build after an upgrade found checked out, moved tag
+# or not. Inside the module cache, where nothing is written, such a line
+# stays as it is and holds its checkout to nothing — it is a dependency's
+# own file there, and the tree it sits in is already pinned, that file
+# included, by the `h2:` line of whoever required it.
+require "crystal/digest/sha1"
 require "crystal/digest/sha256"
 require "../codegen/cache_dir"
 
@@ -55,41 +60,55 @@ module Iyi::Mod
       known = File.file?(sum_path) ? parse(File.read(sum_path), sum_path) : {} of String => String
       added = false
       restated = 0
-
-      selections.each do |selection|
-        key = "#{selection.path} v#{selection.version}"
-        actual = tree_hash(checkout.call(selection))
-        expected = known[key]?
-        if expected && !expected.starts_with?(LEGACY)
-          next if expected == actual
-          raise ModError.new(
-            "#{key} is not what it was: #{sum_path} says #{expected}, " \
-            "the checkout hashes to #{actual}. Something between the tag " \
-            "and this machine changed; that is the one thing this file " \
-            "exists to notice (SPEC.md III.7)")
-        end
-        restated += 1 if expected
-        known[key] = actual
-        added = true
-      end
-
       # A checkout is read-only. A build whose entry sits inside the module
       # cache — a tool compiling a dependency in place — verifies but never
       # writes, or the write would change the very tree a *user's* sum pins,
       # which is the mutation this file exists to notice, self-inflicted.
-      return if in_cache?(dir)
+      read_only = in_cache?(dir)
+
+      selections.each do |selection|
+        key = "#{selection.path} v#{selection.version}"
+        tree = checkout.call(selection)
+        actual = tree_hash(tree)
+        if expected = known[key]?
+          if expected.starts_with?(LEGACY)
+            # Held to the hash it was written with before it is written
+            # again, except where it cannot be written again.
+            unless read_only
+              was = legacy_tree_hash(tree)
+              raise changed(key, sum_path, expected, was) unless expected == was
+              restated += 1
+            end
+          else
+            next if expected == actual
+            raise changed(key, sum_path, expected, actual)
+          end
+        end
+        known[key] = actual
+        added = true
+      end
+
+      return if read_only
 
       return unless added
       if restated > 0
         STDERR.puts "#{sum_path}: #{restated} #{restated == 1 ? "entry" : "entries"} said `#{LEGACY}`, a hash " \
-                    "that could not tell two different trees apart; recorded again as `#{PREFIX}` from what is " \
-                    "checked out now"
+                    "that could not tell two different trees apart; #{restated == 1 ? "it" : "each"} matched its " \
+                    "checkout and is recorded again as `#{PREFIX}`"
       end
       File.write(sum_path, String.build do |io|
         known.to_a.sort_by!(&.first).each do |(key, hash)|
           io << key << ' ' << hash << '\n'
         end
       end)
+    end
+
+    private def self.changed(key : String, sum_path : String, expected : String, actual : String) : ModError
+      ModError.new(
+        "#{key} is not what it was: #{sum_path} says #{expected}, " \
+        "the checkout hashes to #{actual}. Something between the tag " \
+        "and this machine changed; that is the one thing this file " \
+        "exists to notice (SPEC.md III.7)")
     end
 
     # Drops every entry that is not one of *keep*, the selections a build
@@ -174,6 +193,25 @@ module Iyi::Mod
         list.update("#{file.hexfinal} #{kind} #{relative}\n")
       end
       "#{PREFIX}#{list.hexfinal}"
+    end
+
+    # What `s1:` was, byte for byte: SHA-1 over `<relpath>\0<bytes>\0` for
+    # every file in path order. Only for holding an `s1:` line to its
+    # checkout one last time before the line is written again (`check`);
+    # nothing is recorded with it.
+    private def self.legacy_tree_hash(dir : String) : String
+      digest = ::Crystal::Digest::SHA1.new
+      files = [] of String
+      collect_files(dir, "", files)
+      files.sort!
+      files.each do |relative|
+        full = File.join(dir, relative)
+        digest.update(relative)
+        digest.update("\0")
+        digest.update(File.symlink?(full) ? File.readlink(full) : File.read(full))
+        digest.update("\0")
+      end
+      "#{LEGACY}#{digest.final.hexstring}"
     end
 
     private def self.collect_files(root : String, prefix : String, into : Array(String)) : Nil

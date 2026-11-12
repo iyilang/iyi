@@ -7389,10 +7389,13 @@ missing entry is appended — the tool records facts, it does not ask a
 person to transcribe hashes. **`s1:` is what the file held first**: SHA-1
 over `<relpath>\0<bytes>\0` for every file, with no lengths, so a tag
 could be moved to a tree in which bytes had crossed from a data file into
-the source file beside it and the line still matched. An `s1:` line
-therefore pins nothing and is read as a missing entry: the checkout is
-hashed, the line is written again as `h2:`, and one line on stderr says
-so. Under the cache's `mod/`, where nothing is written, it stays as it is
+the source file beside it and the line still matched. An `s1:` line is
+held to its checkout the old way once more before it goes: a checkout
+that differs is the refusal it always was, naming both `s1:` hashes, and
+one that matches has its line written again as `h2:`, with one line on
+stderr saying so - written again unread, it would have pinned whatever
+the first build after an upgrade found checked out, moved tag or not.
+Under the cache's `mod/`, where nothing is written, it stays as it is
 and holds its checkout to nothing; that file is a dependency's own, and
 the tree it sits in is pinned, file included, by whoever required it. The
 rule the build taught: **a checkout is read-only.** The first version let

@@ -11169,7 +11169,23 @@ against.
 truncated copy and a partial write; it catches nobody who wants to write a
 `.iyimod` on purpose, and the format does not pretend otherwise. R-1 already
 says a consumer trusts an artifact's declarations, so an artifact from an
-untrusted source is a decision made before the reader ever sees it.
+untrusted source is a decision made before the reader ever sees it. That
+decision is made without a flag: a `mods/` directory beside a workspace's
+root is read by `build`, `run`, `test`, `check`, `doc` and the language
+server for any module whose source is not there, so a repository that
+carries one is trusted as its source is.
+
+**What the reader does hold a file to is its own size.** Every count and
+every length in a `.iyimod` is four bytes the file states, and the reader
+allocates by none of them before comparing it with the bytes that are
+there: the table's entries have to be in the file, the sections' lengths
+together have to fit in what follows the table, and inside a section a
+count of things that take *n* bytes each has to fit in what the section
+has left. A sixteen-byte file whose table named two thousand million
+sections used to ask for 32 GiB before its first entry was read; it is
+now a sentence naming the count and the room. This bounds what a reader
+allocates by the size of the file it was given and nothing else - it is
+not a judgement of what the file says.
 
 ### IV.3 Hashing. The part that decides whether builds are actually incremental
 

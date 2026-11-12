@@ -80,6 +80,36 @@ private def with_temporary_file(&)
   end
 end
 
+# The bytes of a file holding *sections*, each under the checksum its own
+# bytes make: what anybody who can write a section can write beside it.
+private def iyimod_bytes(*sections : {Iyi::IyiMod::Section, Bytes}) : Bytes
+  format = Iyi::IyiMod::FORMAT
+  io = IO::Memory.new
+  io.write Iyi::IyiMod::MAGIC
+  io.write_bytes Iyi::IyiMod::FORMAT_VERSION, format
+  io.write_bytes sections.size.to_u32, format
+  sections.each do |(section, payload)|
+    io.write_bytes section.value, format
+    io.write_bytes 0_u16, format
+    io.write_bytes payload.size.to_u32, format
+    io.write_bytes Iyi::IyiMod.checksum(payload), format
+  end
+  sections.each { |(_, payload)| io.write payload }
+  io.to_slice
+end
+
+# A header section's bytes up to its flags, and *flags* as their count.
+private def header_claiming(flags : UInt32) : Bytes
+  io = IO::Memory.new
+  {"app/greeter", "/src/app/greeter.iyi", "1.0", "triple"}.each do |value|
+    io.write_bytes value.bytesize.to_u32, Iyi::IyiMod::FORMAT
+    io.write value.to_slice
+  end
+  io.write_bytes flags, Iyi::IyiMod::FORMAT
+  io.write Bytes.new(6) # the six flag bytes
+  io.to_slice
+end
+
 # Writes *modules* and `main.iyi`, builds the program from source writing the
 # modules' artifacts, deletes the modules' sources, builds it again from the
 # artifacts and answers what the two programs print. Inside a `with_tempdir`.
@@ -167,6 +197,108 @@ describe Iyi::IyiMod do
         File.write(path, "this is not an artifact\n")
         expect_raises(Iyi::IyiMod::Error, /not a .iyimod|too short/) do
           Iyi::IyiMod.read(path)
+        end
+      end
+    end
+
+    # A count and a length are four bytes each that anybody can write. The
+    # reader used to size an array or a buffer by them before it looked at
+    # how many bytes there were: sixteen bytes of file asked the allocator
+    # for 32 GiB. Each is now held to what is left of the file or of the
+    # section, so what is refused here is refused before it is allocated -
+    # which a spec sees as the sentence that names the count, where the
+    # old reader ran out of bytes or of memory.
+    describe "that claims more than it holds" do
+      it "refuses a table of more sections than the file has bytes for" do
+        with_temporary_file do |path|
+          io = IO::Memory.new
+          io.write Iyi::IyiMod::MAGIC
+          io.write_bytes Iyi::IyiMod::FORMAT_VERSION, Iyi::IyiMod::FORMAT
+          io.write_bytes 0x7FFF_FFFF_u32, Iyi::IyiMod::FORMAT
+          File.write path, io.to_slice
+
+          expect_raises(Iyi::IyiMod::Error, /#{Regex.escape(path)} is truncated: its table names 2147483647 sections/) do
+            Iyi::IyiMod.read(path)
+          end
+          expect_raises(Iyi::IyiMod::Error, /its table names 2147483647 sections/) do
+            Iyi::IyiMod.read_summary(path)
+          end
+          Iyi::IyiMod.read_spawns(path).should be_nil
+        end
+      end
+
+      it "refuses sections that are longer together than what follows the table" do
+        with_temporary_file do |path|
+          io = IO::Memory.new
+          io.write Iyi::IyiMod::MAGIC
+          io.write_bytes Iyi::IyiMod::FORMAT_VERSION, Iyi::IyiMod::FORMAT
+          io.write_bytes 2_u32, Iyi::IyiMod::FORMAT
+          2.times do
+            io.write_bytes Iyi::IyiMod::Section::Header.value, Iyi::IyiMod::FORMAT
+            io.write_bytes 0_u16, Iyi::IyiMod::FORMAT
+            io.write_bytes 0xFFFF_FFF0_u32, Iyi::IyiMod::FORMAT
+            io.write_bytes 0_u64, Iyi::IyiMod::FORMAT
+          end
+          io.write "four".to_slice
+          File.write path, io.to_slice
+
+          expect_raises(Iyi::IyiMod::Error, /its table says its sections are 8589934560 bytes together and 4 bytes follow/) do
+            Iyi::IyiMod.read(path)
+          end
+          expect_raises(Iyi::IyiMod::Error, /8589934560 bytes together/) do
+            Iyi::IyiMod.read_summary(path)
+          end
+          Iyi::IyiMod.read_spawns(path).should be_nil
+        end
+      end
+
+      # With the section's checksum right, which whoever writes the count
+      # writes too: the checksum says the bytes are the ones written, not
+      # that they are an artifact.
+      it "refuses a count the rest of its section cannot hold" do
+        with_temporary_file do |path|
+          File.write path, iyimod_bytes({Iyi::IyiMod::Section::Header, header_claiming(0x7FFF_FFFF_u32)})
+
+          expect_raises(Iyi::IyiMod::Error, /#{Regex.escape(path)} is not a readable \.iyimod: a section counts 2147483647 of something that takes 4 bytes or more each, and has 6 bytes left/) do
+            Iyi::IyiMod.read(path)
+          end
+          expect_raises(Iyi::IyiMod::Error, /a section counts 2147483647/) do
+            Iyi::IyiMod.read_summary(path)
+          end
+          Iyi::IyiMod.read_spawns(path).should be_nil
+        end
+      end
+
+      it "refuses a string longer than the rest of its section" do
+        with_temporary_file do |path|
+          payload = IO::Memory.new
+          payload.write_bytes 0xFFFF_FFF0_u32, Iyi::IyiMod::FORMAT
+          payload.write ("x" * 26).to_slice
+          File.write path, iyimod_bytes({Iyi::IyiMod::Section::Header, payload.to_slice})
+
+          expect_raises(Iyi::IyiMod::Error, /a section counts 4294967280 of something that takes 1 byte or more each, and has 26 bytes left/) do
+            Iyi::IyiMod.read(path)
+          end
+        end
+      end
+
+      # Every section in turn, as four bytes that say 0x7FFFFFFF where its
+      # first count or length is read. Whatever that number would have
+      # sized, the section is refused by the sentence that names it.
+      it "refuses the first count of every section it decodes" do
+        with_temporary_file do |path|
+          claim = IO::Memory.new
+          claim.write_bytes 0x7FFF_FFFF_u32, Iyi::IyiMod::FORMAT
+          Iyi::IyiMod::Section.each do |section|
+            # The header is the case above, and the initialiser is text
+            # from its first byte to its last, with no count in it.
+            next if section.header? || section.initialiser?
+            File.write path, iyimod_bytes(
+              {Iyi::IyiMod::Section::Header, header_claiming(0_u32)}, {section, claim.to_slice})
+            expect_raises(Iyi::IyiMod::Error, /a section counts 2147483647 of something/) do
+              Iyi::IyiMod.read(path, want_object_code: true)
+            end
+          end
         end
       end
     end

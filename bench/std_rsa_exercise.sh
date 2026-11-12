@@ -595,7 +595,8 @@ prove_broken "the CRT's recombination by p's inverse" "a private key that does n
   '    h = (@qi * (s1 - s2)) % @p' '    h = (s1 - s2) % @p'
 # A fault after the key is read - here in every encoding but PKCS #1
 # v1.5's, which the key was read by: the check before a signature goes
-# out must be what stops it, by its own sentence.
+# out must be what stops it, by its own sentence - an error's now, which
+# the exercise's `.or_panic` says.
 prove_broken "a fault in the CRT's first half once the key is read" "does not check against its own public key, which a fault makes" \
   '    s1 = (c % @p).pow_mod_secret(@dp, @p)' '    s1 = (c % @p).pow_mod_secret(@dp, @p) + BigInt.new(em[1] == 1_u8 ? 0 : 1)'
 prove_broken "PKCS #1 v1.5 signed with a block type of 2" "PKCS #1 v1.5 over SHA256 as cryptography signs it" \

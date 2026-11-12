@@ -78,9 +78,10 @@
 # the private exponents' bits; and the signature is checked against the
 # public key before it is given out, so a fault in one half of the CRT
 # does not hand out the factor it reveals (Boneh, DeMillo and Lipton,
-# 1997) - such a signature is a panic, not an answer; the key signed
-# once when it was read, so what the check stops after that is a fault in
-# the machine. A PSS salt is as long as the digest, RFC
+# 1997) - such a signature is an `RsaError`, not an answer, and std/tls
+# ends the handshake it was for (internal_error); the key signed once
+# when it was read, so what the check stops after that is a fault in the
+# machine. A PSS salt is as long as the digest, RFC
 # 8446's rule, and is HMAC, keyed by a hash of the private exponent, over
 # the message's digest: section 8.1 says its randomness is not critical
 # to PSS's security, and this one is unpredictable to anyone without the
@@ -427,7 +428,7 @@ pub struct RsaPrivateKey
 
   # RSASSA-PKCS1-v1_5 (section 8.2.1) of *message* under *hash*: 0x00
   # 0x01, the 0xFF padding, 0x00, the hash's DigestInfo and the digest.
-  def sign_pkcs1v15(hash : RsaHash, message : Array(UInt8) | String) : Array(UInt8)
+  def sign_pkcs1v15(hash : RsaHash, message : Array(UInt8) | String) : Array(UInt8) | RsaError
     signable(hash)
     rsasp1(pkcs1v15(hash, message))
   end
@@ -453,7 +454,7 @@ pub struct RsaPrivateKey
   # RSASSA-PSS (section 8.1.1) of *message* under *hash*, MGF1 over the
   # same hash: EMSA-PSS-ENCODE (section 9.1.1) with a salt as long as the
   # digest, drawn as the module's header says.
-  def sign_pss(hash : RsaHash, message : Array(UInt8) | String) : Array(UInt8)
+  def sign_pss(hash : RsaHash, message : Array(UInt8) | String) : Array(UInt8) | RsaError
     signable(hash)
     m_hash = hash.digest(RsaBytes.of(message))
     h_len = hash.size
@@ -474,11 +475,13 @@ pub struct RsaPrivateKey
     raise "rsa: a signature over SHA-1, which this checks and does not make" if hash == RsaHash::SHA1
   end
 
-  # The signature of the encoded message *em*. One that does not check
-  # is a panic: the key signed when it was read, so this is a fault in
-  # the machine, and the signature it spoiled is not given out.
-  private def rsasp1(em : Array(UInt8)) : Array(UInt8)
-    checked(em) || raise "rsa: a signature that does not check against its own public key, which a fault makes"
+  # The signature of the encoded message *em*, or an error for one that
+  # does not check. The key signed when it was read, so this is a fault in
+  # the machine: the signature it spoiled is not given out, and the caller
+  # is told, as Go's crypto/rsa tells it - one handshake's failure, where
+  # a panic here was the whole process's.
+  private def rsasp1(em : Array(UInt8)) : Array(UInt8) | RsaError
+    checked(em) || RsaError.new("a signature that does not check against its own public key, which a fault makes")
   end
 
   # RSASP1 (section 5.2.1) by the CRT, blinded, and checked before it is

@@ -829,6 +829,7 @@ def run_keys(input : Array(UInt8)) : String
   key = identity.leaf.public_key
   identity.schemes.each do |scheme|
     signature = identity.sign(scheme, SIGNED)
+    return "PROPERTY: a key from_pem took does not sign: #{signature.message}" if signature.is_a?(TlsError)
     good = case key
            in RsaPublicKey
              hash = scheme == 0x0804 ? RsaHash::SHA256 : (scheme == 0x0805 ? RsaHash::SHA384 : RsaHash::SHA512)

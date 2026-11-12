@@ -188,7 +188,7 @@ def measure(target : String, samples : Int32, pem : String?) : {Float64, Int32}
     when "rsa"
       key = rsa_key
       raise "rsa needs a PEM" unless key
-      sink = sink ^ key.sign_pss(RsaHash::SHA256, message).size
+      sink = sink ^ key.sign_pss(RsaHash::SHA256, message).or_panic.size
     when "p256", "p256-length", "p256-two"
       sink = sink ^ p256_key.sign(EcdsaHash::SHA256, message).size
     when "p384"

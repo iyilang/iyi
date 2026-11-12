@@ -539,7 +539,7 @@ pub struct X509
       key.public_key_info,
       X509Der.explicit(3, X509Der.sequence(written)),
     ])
-    X509Der.sequence([tbs, key.algorithm_identifier, X509Der.bit_string(key.sign(tbs))])
+    X509Der.sequence([tbs, key.algorithm_identifier, X509Der.bit_string(key.sign(tbs)!)])
   end
 
   # A certificate request (PKCS #10, RFC 2986) *key* signs, as its DER: the
@@ -559,7 +559,7 @@ pub struct X509
       key.public_key_info,
       X509Der.tlv(0xA0_u8, attribute),
     ])
-    X509Der.sequence([info, key.algorithm_identifier, X509Der.bit_string(key.sign(info))])
+    X509Der.sequence([info, key.algorithm_identifier, X509Der.bit_string(key.sign(info)!)])
   end
 
   private def self.leaf_error(leaf : Certificate, host : String?, now : Time, purpose : X509Purpose) : String?
@@ -1618,8 +1618,9 @@ pub struct SigningKey
     X509Der.sequence([X509Der.oid(X509Oids::ED25519)])
   end
 
-  # *data* signed as `algorithm_identifier` says.
-  def sign(data : Array(UInt8)) : Array(UInt8)
+  # *data* signed as `algorithm_identifier` says, or an error where an RSA
+  # key's signature did not check against the key (std/rsa says when).
+  def sign(data : Array(UInt8)) : Array(UInt8) | X509Error
     if key = @p256
       return key.sign(EcdsaHash::SHA256, data)
     end
@@ -1627,7 +1628,8 @@ pub struct SigningKey
       return key.sign(EcdsaHash::SHA384, data)
     end
     if key = @rsa
-      return key.sign_pkcs1v15(RsaHash::SHA256, data)
+      signed = key.sign_pkcs1v15(RsaHash::SHA256, data)
+      return signed.is_a?(RsaError) ? X509Error.new(signed.message) : signed
     end
     X509Der.bytes(Ed25519.sign(ed25519_seed, data))
   end

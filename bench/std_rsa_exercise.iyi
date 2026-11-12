@@ -249,7 +249,7 @@ if args.size > 0 && args[0] == "sign"
       puts "key: #{key.message}"
     else
       message = b(f[3])
-      puts hex(f[1] == "v15" ? key.sign_pkcs1v15(hash_named(f[2]), message) : key.sign_pss(hash_named(f[2]), message))
+      puts hex((f[1] == "v15" ? key.sign_pkcs1v15(hash_named(f[2]), message) : key.sign_pss(hash_named(f[2]), message)).or_panic)
     end
   end
   exit 0
@@ -304,13 +304,13 @@ from_pem1 = RsaPrivateKey.from_pem(pem("RSA PRIVATE KEY", der)).or_panic
 from_pem8 = RsaPrivateKey.from_pem(pem("PRIVATE KEY", b(PKCS8_HEADER + PRIVATE_PKCS1))).or_panic
 check from_pem1.public_key.modulus == signer.public_key.modulus && from_pem8.public_key.exponent == signer.public_key.exponent, "the key read from both PEM blocks"
 [RsaHash::SHA256, RsaHash::SHA384, RsaHash::SHA512].each do |hash|
-  got = signer.sign_pkcs1v15(hash, "abc")
+  got = signer.sign_pkcs1v15(hash, "abc").or_panic
   check hex(got) == V15_SIGNATURES[hash], "PKCS #1 v1.5 over #{hash} as cryptography signs it"
-  check as_pkcs8.sign_pkcs1v15(hash, b("616263")) == got, "PKCS #1 v1.5 over #{hash} the same from PKCS #8 and over bytes"
-  pss = signer.sign_pss(hash, "abc")
+  check as_pkcs8.sign_pkcs1v15(hash, b("616263")).or_panic == got, "PKCS #1 v1.5 over #{hash} the same from PKCS #8 and over bytes"
+  pss = signer.sign_pss(hash, "abc").or_panic
   check signer.public_key.verify_pss(hash, "abc", pss), "a PSS signature over #{hash} checks with a salt as long as the hash"
   check !signer.public_key.verify_pss(hash, "abd", pss), "a PSS signature over #{hash} does not check for another message"
-  check pss != signer.sign_pss(hash, "abd"), "PSS over #{hash}: another message, another signature"
+  check pss != signer.sign_pss(hash, "abd").or_panic, "PSS over #{hash}: another message, another signature"
 end
 puts "  PKCS #1 and PKCS #8, DER and PEM; PKCS #1 v1.5 over SHA-256, -384 and -512 byte for byte cryptography's; PSS checked"
 v = numbers(der)

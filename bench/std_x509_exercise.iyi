@@ -485,7 +485,7 @@ def made_der(cn : String, issuer : String, key_info : Array(UInt8), signer : Sig
   tbs = seq([b("a003020102"), tlv(0x02, [serial.to_u8]), signer.algorithm_identifier, made_name(issuer),
              b("301e170d3236303130313030303030305a170d3237303130313030303030305a"), made_name(cn), key_info,
              tlv(0xA3, seq(extensions))])
-  seq([tbs, signer.algorithm_identifier, tlv(0x03, [0_u8] + signer.sign(tbs))])
+  seq([tbs, signer.algorithm_identifier, tlv(0x03, [0_u8] + signer.sign(tbs).or_panic)])
 end
 
 def made(cn : String, issuer : String, key_info : Array(UInt8), signer : SigningKey, serial : Int32, extensions : Array(Array(UInt8))) : Certificate

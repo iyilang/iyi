@@ -18,6 +18,15 @@
 # match nothing and say nothing. `Base32.decode` (std/base32) turns the
 # text into the bytes, and `OTPAuth.parse` does it for a URI's secret.
 #
+# A secret is at least 16 bytes: RFC 4226's R6 says the shared secret
+# MUST be 128 bits or more, and recommends 160. A shorter one is refused
+# by every call here that takes a secret, and by `OTPAuth.parse` for the
+# one in a URI. *min_secret*, the last argument of each of them, is that
+# floor in bytes, and a program lowers it, by name, for a secret somebody
+# else issued and it cannot change: the key URI format's own example
+# carries ten bytes, and there are services that still hand out ten. An
+# empty secret is refused whatever the floor.
+#
 # HOTP is RFC 4226 section 5.3: HMAC of the counter's eight bytes,
 # big-endian, under the secret; four bytes at the offset the last byte's
 # low nibble names ("dynamic truncation"), their top bit cleared; that
@@ -63,13 +72,22 @@
 # as a space in values; the account after the label's first colon
 # (written or `%3A`), leading spaces dropped; parameters the format does
 # not name (`image`) passed over. An issuer in the label and one in the
-# parameters must agree.
+# parameters must agree. A label or an issuer is what an app shows a
+# person beside the code, so one that, its escapes decoded, holds a
+# control character (U+0000 to U+001F, U+007F, U+0080 to U+009F), a line
+# or paragraph separator (U+2028, U+2029) or a bidirectional embedding,
+# override or isolate (U+202A to U+202E, U+2066 to U+2069) is not read: a
+# line feed or a right-to-left override there makes "Example" of
+# something else on the screen. That is `parse`, which reads what
+# somebody else wrote; an account or issuer handed to `totp` or `hotp` is
+# escaped byte by byte whatever it holds.
 #
-# Refused with a sentence, as misuse: an empty secret, digits outside 6 to
-# 10, a step or period below one, a negative counter or Unix time, a
-# negative window, a colon in an issuer or account being built (the
-# format gives a colon no escape). Refused as an `OTPError`, because a URI
-# is data: anything else `parse` cannot read, each naming what.
+# Refused with a sentence, as misuse: an empty secret or one shorter than
+# *min_secret*, digits outside 6 to 10, a step or period below one, a
+# negative counter or Unix time, a negative window, a colon in an issuer
+# or account being built (the format gives a colon no escape). Refused as
+# an `OTPError`, because a URI is data: a secret shorter than
+# *min_secret*, and anything else `parse` cannot read, each naming what.
 
 @[Unsafe("URIs and secrets are parsed by walking the bytes of their strings through a raw pointer")]
 module std/otp
@@ -105,8 +123,9 @@ impl Error for OTPError
 end
 
 pub struct HOTP
-  def self.code(secret : Array(UInt8), counter : Int64, digits : Int32 = 6, algorithm : OTPAlgorithm = OTPAlgorithm::SHA1) : String
+  def self.code(secret : Array(UInt8), counter : Int64, digits : Int32 = 6, algorithm : OTPAlgorithm = OTPAlgorithm::SHA1, min_secret : Int32 = 16) : String
     raise "HOTP: the secret is empty" if secret.size == 0
+    raise "HOTP: the secret must be at least #{min_secret} bytes, not #{secret.size}" if secret.size < min_secret
     raise "HOTP: the counter must not be negative, not #{counter}" if counter < 0
     raise "HOTP: digits must be from 6 to 10, not #{digits}" if digits < 6 || digits > 10
     # The counter as eight bytes, most significant first (RFC 4226
@@ -139,19 +158,19 @@ pub struct HOTP
 end
 
 pub struct TOTP
-  def self.code(secret : Array(UInt8), unix_time : Int64, step : Int32 = 30, digits : Int32 = 6, algorithm : OTPAlgorithm = OTPAlgorithm::SHA1) : String
-    HOTP.code(secret, counter(unix_time, step), digits, algorithm)
+  def self.code(secret : Array(UInt8), unix_time : Int64, step : Int32 = 30, digits : Int32 = 6, algorithm : OTPAlgorithm = OTPAlgorithm::SHA1, min_secret : Int32 = 16) : String
+    HOTP.code(secret, counter(unix_time, step), digits, algorithm, min_secret)
   end
 
   # The code for this second by the wall clock.
-  def self.now(secret : Array(UInt8), step : Int32 = 30, digits : Int32 = 6, algorithm : OTPAlgorithm = OTPAlgorithm::SHA1) : String
-    code(secret, Time.utc.to_unix, step, digits, algorithm)
+  def self.now(secret : Array(UInt8), step : Int32 = 30, digits : Int32 = 6, algorithm : OTPAlgorithm = OTPAlgorithm::SHA1, min_secret : Int32 = 16) : String
+    code(secret, Time.utc.to_unix, step, digits, algorithm, min_secret)
   end
 
   # Whether *code* is the code for *unix_time*'s step or one of the
   # *window* steps either side of it. A code of the wrong length is false
   # at once; the length of the right one is not a secret.
-  def self.verify(secret : Array(UInt8), code : String, unix_time : Int64, window : Int32 = 1, step : Int32 = 30, digits : Int32 = 6, algorithm : OTPAlgorithm = OTPAlgorithm::SHA1) : Bool
+  def self.verify(secret : Array(UInt8), code : String, unix_time : Int64, window : Int32 = 1, step : Int32 = 30, digits : Int32 = 6, algorithm : OTPAlgorithm = OTPAlgorithm::SHA1, min_secret : Int32 = 16) : Bool
     raise "TOTP: the window must not be negative, not #{window}" if window < 0
     at = counter(unix_time, step)
     hits = 0
@@ -160,7 +179,7 @@ pub struct TOTP
       # Steps before the epoch have no code; the first ones after it have
       # fewer neighbours to check.
       if at + k >= 0
-        hits = hits + 1 if Subtle.constant_time_compare(HOTP.code(secret, at + k, digits, algorithm), code)
+        hits = hits + 1 if Subtle.constant_time_compare(HOTP.code(secret, at + k, digits, algorithm, min_secret), code)
       end
       k = k + 1
     end
@@ -198,8 +217,9 @@ pub struct OTPAuth
   getter period : Int32
   getter counter : Int64?
 
-  def initialize(@secret : Array(UInt8), @account : String, @issuer : String, @algorithm : OTPAlgorithm, @digits : Int32, @period : Int32, @counter : Int64?)
+  def initialize(@secret : Array(UInt8), @account : String, @issuer : String, @algorithm : OTPAlgorithm, @digits : Int32, @period : Int32, @counter : Int64?, min_secret : Int32 = 16)
     raise "OTPAuth: the secret is empty" if @secret.size == 0
+    raise "OTPAuth: the secret must be at least #{min_secret} bytes, not #{@secret.size}" if @secret.size < min_secret
     raise "OTPAuth: the account is empty" if @account.bytesize == 0
     raise "OTPAuth: the account #{@account.inspect} holds a colon, which the label cannot carry" if OTPText.colon?(@account)
     raise "OTPAuth: the issuer #{@issuer.inspect} holds a colon, which the label cannot carry" if OTPText.colon?(@issuer)
@@ -212,12 +232,12 @@ pub struct OTPAuth
 
   # An empty *issuer* is none: the label is the account alone and no
   # `issuer` parameter is written.
-  def self.totp(secret : Array(UInt8), account : String, issuer : String = "", algorithm : OTPAlgorithm = OTPAlgorithm::SHA1, digits : Int32 = 6, period : Int32 = 30) : OTPAuth
-    new(secret, account, issuer, algorithm, digits, period, nil)
+  def self.totp(secret : Array(UInt8), account : String, issuer : String = "", algorithm : OTPAlgorithm = OTPAlgorithm::SHA1, digits : Int32 = 6, period : Int32 = 30, min_secret : Int32 = 16) : OTPAuth
+    new(secret, account, issuer, algorithm, digits, period, nil, min_secret)
   end
 
-  def self.hotp(secret : Array(UInt8), account : String, counter : Int64, issuer : String = "", algorithm : OTPAlgorithm = OTPAlgorithm::SHA1, digits : Int32 = 6) : OTPAuth
-    new(secret, account, issuer, algorithm, digits, 30, counter)
+  def self.hotp(secret : Array(UInt8), account : String, counter : Int64, issuer : String = "", algorithm : OTPAlgorithm = OTPAlgorithm::SHA1, digits : Int32 = 6, min_secret : Int32 = 16) : OTPAuth
+    new(secret, account, issuer, algorithm, digits, 30, counter, min_secret)
   end
 
   def hotp? : Bool
@@ -250,7 +270,7 @@ pub struct OTPAuth
     end
   end
 
-  def self.parse(uri : String) : OTPAuth | OTPError
+  def self.parse(uri : String, min_secret : Int32 = 16) : OTPAuth | OTPError
     src = uri.to_unsafe
     n = uri.bytesize
     return OTPError.new("otpauth: the URI does not begin with otpauth://") unless n >= 10 && OTPText.slice(uri, 0, 10).downcase == "otpauth://"
@@ -262,6 +282,8 @@ pub struct OTPAuth
     label_end = question < 0 ? n : question
     label = OTPText.unescape(OTPText.slice(uri, slash + 1, label_end), false, "the label")
     return label if label.is_a?(OTPError)
+    odd = OTPText.unshowable(label)
+    return OTPError.new("otpauth: the label holds a control, line-breaking or bidirectional formatting character at byte #{odd}") if odd >= 0
     colon = OTPText.find(label, 58_u8, 0, label.bytesize)
     label_issuer = colon < 0 ? "" : OTPText.slice(label, 0, colon)
     account = colon < 0 ? label : OTPText.slice(label, colon + 1, label.bytesize)
@@ -312,8 +334,11 @@ pub struct OTPAuth
     secret = Base32.decode(secret_text)
     return OTPError.new("otpauth: the secret is not base32: #{secret.message}") if secret.is_a?(Base32Error)
     return OTPError.new("otpauth: the secret is empty") if secret.size == 0
+    return OTPError.new("otpauth: the secret must be at least #{min_secret} bytes, not #{secret.size}") if secret.size < min_secret
     issuer = label_issuer
     if seen.includes?("issuer")
+      odd = OTPText.unshowable(issuer_text)
+      return OTPError.new("otpauth: the issuer parameter holds a control, line-breaking or bidirectional formatting character at byte #{odd}") if odd >= 0
       if colon >= 0 && label_issuer != issuer_text
         return OTPError.new("otpauth: the label's issuer #{label_issuer.inspect} and the issuer parameter #{issuer_text.inspect} differ")
       end
@@ -353,7 +378,7 @@ pub struct OTPAuth
       return c if c.is_a?(OTPError)
       counter = c
     end
-    OTPAuth.new(secret, account, issuer, algorithm, digits, period, counter)
+    OTPAuth.new(secret, account, issuer, algorithm, digits, period, counter, min_secret)
   end
 end
 
@@ -368,6 +393,31 @@ struct OTPText
     i = from
     while i < stop
       return i if src[i] == byte
+      i = i + 1
+    end
+    -1
+  end
+
+  # Where *text* first holds a character that is not to be shown beside
+  # a code, or -1: a control (U+0000 to U+001F, U+007F, and U+0080 to
+  # U+009F, which UTF-8 writes C2 80 to C2 9F), a line or paragraph
+  # separator or a bidirectional embedding or override (U+2028 to U+202E,
+  # E2 80 A8 to E2 80 AE), or a bidirectional isolate (U+2066 to U+2069,
+  # E2 81 A6 to E2 81 A9). C2 and E2 only ever begin a character, so the
+  # bytes after them are that character's.
+  def self.unshowable(text : String) : Int32
+    src = text.to_unsafe
+    n = text.bytesize
+    i = 0
+    while i < n
+      b = src[i]
+      return i if b < 32_u8 || b == 127_u8
+      if b == 0xC2_u8 && i + 1 < n
+        return i if src[i + 1] >= 0x80_u8 && src[i + 1] <= 0x9F_u8
+      elsif b == 0xE2_u8 && i + 2 < n
+        return i if src[i + 1] == 0x80_u8 && src[i + 2] >= 0xA8_u8 && src[i + 2] <= 0xAE_u8
+        return i if src[i + 1] == 0x81_u8 && src[i + 2] >= 0xA6_u8 && src[i + 2] <= 0xA9_u8
+      end
       i = i + 1
     end
     -1

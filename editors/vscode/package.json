@@ -90,5 +90,9 @@
   },
   "dependencies": {
     "vscode-languageclient": "^9.0.0"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "4.1.0",
+    "ovsx": "1.4.0"
   }
 }

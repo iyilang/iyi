@@ -547,6 +547,78 @@ then
 fi
 
 echo
+echo "== how the tables reach a second thread, read off the IR"
+# SHA-2's round constants and Keccak's tables are constants now, whole
+# before anything reads them, and the vectors above are what holds their
+# words. The CRCs' tables are still worked out by the first checksum that
+# wants them, and a second thread must never read them part written. On
+# x86_64 a plain store of the tables' address after their words is seen in
+# that order by every thread; on a machine that orders its stores loosely
+# it is not, and no run on this one would show it. So it is read off the
+# IR of a small program: every read of the word the address is kept in has
+# to be an acquire load and its one write a release store, and no hash
+# may keep a table in a class variable filled on first use.
+cat >"$WORK/published.iyi" <<'IYI'
+module published
+
+import std/digest::{CRC32, CRC64, SHA256, SHA512, SHA3_256}
+
+data = Program.args.size.to_s
+puts CRC32.checksum(data)
+puts CRC64.checksum(data)
+puts SHA256.hexdigest(data)
+puts SHA512.hexdigest(data)
+puts SHA3_256.hexdigest(data)
+IYI
+# published <file.ll> <class variable>: what in the IR reads or writes the
+# word a table's address is kept in other than by an acquire load and a
+# release store, a line each; 1 if anything does, or if either is missing.
+# The zero the word starts from is a plain store, made before the
+# program's first line.
+published() {
+  awk -v name="$2" '
+    !(index($0, "@\"" name "\"") || index($0, "@\"" name ".")) || /^@/ || /store i64 0, ptr @/ { next }
+    / = load atomic i64, ptr @[^ ]* acquire,/ { loads++; next }
+    /store atomic i64 [^,]*, ptr @[^ ]* release,/ { stores++; next }
+    { print name ": neither an acquire load nor a release store:" $0; other++ }
+    END {
+      if (!loads) print name ": no acquire load of it"
+      if (!stores) print name ": no release store to it"
+      exit (other || !loads || !stores) ? 1 : 0
+    }' "$1"
+}
+# The IR is one pinned target's whatever the host is: the orderings are
+# the module's request, the same for every target, and `--cross-compile`
+# writes the IR and links nothing, so no toolchain for it is needed.
+# published_ir <search path> <file>: the program above built into <file>.ll.
+published_ir() {
+  IYI_PATH="$1" "$IYI" build --release --emit llvm-ir --cross-compile --target x86_64-unknown-linux-gnu \
+    -o "$2" "$WORK/published.iyi" >"$2.log" 2>&1 && [ -s "$2.ll" ]
+}
+# lazy_tables <file.ll>: the class variables of std/digest's hashes that
+# the IR still writes a pointer into, which is what a table filled on
+# first use is. A class variable's name is in lower case; a constant's,
+# whose one store is its making, is not.
+lazy_tables() {
+  grep -E 'store ptr [^,]*, ptr @"Std::Digest::(SHA(224|256|384|512)|Keccak)::[a-z_]+"' "$1" | sed 's/^ */  /'
+}
+: >"$WORK/published.out"
+if ! published_ir "$IYI_PATH" "$WORK/published"; then
+  echo "  no IR was written: $(grep -m1 -E 'Error|BUG' "$WORK/published.log")"
+  status=1
+elif [ -n "$(lazy_tables "$WORK/published.ll")" ]; then
+  echo "  a hash keeps a table in a class variable it fills on first use:"
+  lazy_tables "$WORK/published.ll" | head -4
+  status=1
+elif published "$WORK/published.ll" 'Std::Digest::CRC32::tables' >>"$WORK/published.out" &&
+  published "$WORK/published.ll" 'Std::Digest::CRC64::tables' >>"$WORK/published.out"; then
+  echo "  SHA-2's and Keccak's tables are constants; each CRC's tables' address is read by an acquire load and written, once they are whole, by a release store"
+else
+  sed 's/^/  /' "$WORK/published.out"
+  status=1
+fi
+
+echo
 echo "== proving the checks can fail when the module is broken"
 # prove_broken <label> <phrase> <old> <new>: the exercise must fail on a
 # copy of the module with <old> replaced, at the check that names <phrase>.
@@ -638,6 +710,81 @@ prove_broken "an XXH64 update that drops the stripe in progress" "xxh64 in piece
 ' ''
 prove_broken "an XXH64 tail byte mixed with the wrong prime" "xxh64 of 'a'" \
   '      h = XXH64.rotl(h, 11) &* P1' '      h = XXH64.rotl(h, 11) &* P2'
+# prove_unpublished <label> <variable> <phrase> <sed script>: the exercise
+# cannot tell how a table's address reaches a second thread, its answers
+# being the same; the reading of the IR has to refuse the copy, with
+# <phrase> in what it says.
+prove_unpublished() {
+  rm -rf "$WORK/unpublished"
+  mkdir -p "$WORK/unpublished/std"
+  sed -e "$4" "$REPO/src/std/digest.iyi" >"$WORK/unpublished/std/digest.iyi"
+  if cmp -s "$REPO/src/std/digest.iyi" "$WORK/unpublished/std/digest.iyi"; then
+    echo "  $1: the patch changed nothing, so this proves nothing"
+    status=1
+  elif ! published_ir "$WORK/unpublished${PSEP}$IYI_PATH" "$WORK/unpublished/ir"; then
+    echo "  $1: the patched module did not build: $(grep -m1 -E 'Error|BUG' "$WORK/unpublished/ir.log")"
+    status=1
+  elif published "$WORK/unpublished/ir.ll" "$2" >"$WORK/mut.out"; then
+    echo "  the IR of $1 was read as sound"
+    status=1
+  elif grep -qF "$3" "$WORK/mut.out"; then
+    echo "  $1 is caught"
+  else
+    echo "  $1 was refused, but not for what it is:"
+    sed 's/^/    /' "$WORK/mut.out"
+    status=1
+  fi
+}
+# And SHA-256's round constants back in a class variable its first block
+# fills, as they were: every digest is the same, and it is the IR that
+# shows the variable written.
+rm -rf "$WORK/lazy"
+mkdir -p "$WORK/lazy/std"
+if [ -z "$PY" ]; then
+  echo "  no python3 on this machine, so the proof of a table filled on first use is unmeasured"
+elif ! "$PY" - <<PY
+from pathlib import Path
+src = Path("$REPO/src/std/digest.iyi").read_text(encoding="utf-8")
+old = """  private def compress(block : Pointer(UInt8)) : Nil
+    w = @w
+    k = SHA256_K.to_unsafe
+"""
+new = """  @@k = Pointer(UInt32).new(0_u64)
+
+  private def round_constants : Pointer(UInt32)
+    return @@k if @@k.address != 0_u64
+    table = Pointer(UInt32).malloc(64_u64)
+    table.copy_from(SHA256_K.to_unsafe, 64)
+    @@k = table
+    table
+  end
+
+  private def compress(block : Pointer(UInt8)) : Nil
+    w = @w
+    k = round_constants
+"""
+if src.count(old) != 1:
+    raise SystemExit("patch site missing or not one")
+Path("$WORK/lazy/std/digest.iyi").write_text(src.replace(old, new, 1), encoding="utf-8", newline="\n")
+PY
+then
+  echo "  the patch for a table filled on first use did not apply"
+  status=1
+elif ! published_ir "$WORK/lazy${PSEP}$IYI_PATH" "$WORK/lazy/ir"; then
+  echo "  a table filled on first use: the patched module did not build: $(grep -m1 -E 'Error|BUG' "$WORK/lazy/ir.log")"
+  status=1
+elif lazy_tables "$WORK/lazy/ir.ll" | grep -qF 'Std::Digest::SHA256::k"'; then
+  echo "  SHA-256's constants in a class variable filled on first use is caught"
+else
+  echo "  the IR of SHA-256's constants in a class variable filled on first use was read as sound"
+  status=1
+fi
+# Both CRCs end their tables the same way, so the patches name the class
+# they are in by the lines they sit between.
+prove_unpublished "CRC-32's tables' address stored with no ordering" 'Std::Digest::CRC32::tables' "no release store to it" \
+  '/^pub struct CRC32$/,/^pub struct Adler32$/s/^    @@tables.set_release(t.address)$/    @@tables.set_relaxed(t.address)/'
+prove_unpublished "CRC-64's tables' address read with no ordering" 'Std::Digest::CRC64::tables' "no acquire load of it" \
+  '/^pub struct CRC64$/,/^pub class XXH64$/s/^    ready = @@tables.get_acquire$/    ready = @@tables.get_relaxed/'
 
 # The checksums' costs, against the shapes they had: CRC-32 a bit at a
 # time, Adler-32 reduced every byte.

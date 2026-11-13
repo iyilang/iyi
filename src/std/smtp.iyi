@@ -28,7 +28,10 @@
 # CRAM-MD5 (RFC 2195), the first of these the server offers unless the
 # caller names one. Over a connection without TLS it refuses to send the
 # password unless `cleartext_auth` is set: a password in the clear is the
-# one thing a mistaken configuration should not do quietly.
+# one thing a mistaken configuration should not do quietly. A CRAM-MD5
+# challenge that is not base64 is an `SmtpError` with the server's 334,
+# and the exchange is cancelled with `*` (RFC 4954 section 4), so the
+# session is where it was before AUTH.
 #
 # **Sending.** `send` takes a `Mail::Message` - its From as the sender,
 # its To, Cc and Bcc as the recipients, its text with Bcc left out - or a
@@ -70,7 +73,7 @@ module std/smtp
 import std/socket::{IyiSocket, SocketError}
 import std/tls::{TlsClient, TlsConfig, TlsError}
 import std/mail::{Mail}
-import std/base64::{Base64}
+import std/base64::{Base64, Base64Error}
 import std/crypto::{HMAC}
 import std/digest::{MD5}
 
@@ -288,16 +291,26 @@ pub class SmtpClient
     answer = nil.as(SmtpReply | SmtpError | Nil)
     case chosen
     when SmtpAuth::Plain
-      answer = command("AUTH PLAIN " + Base64.encode("\u0000" + user + "\u0000" + password))
+      answer = command("AUTH PLAIN " + Base64.encode_secret("\u0000" + user + "\u0000" + password))
     when SmtpAuth::Login
       answer = step("AUTH LOGIN", 334)
       answer = step(Base64.encode(user), 334) unless answer.is_a?(SmtpError)
-      answer = command(Base64.encode(password)) unless answer.is_a?(SmtpError)
+      answer = command(Base64.encode_secret(password)) unless answer.is_a?(SmtpError)
     when SmtpAuth::CramMd5
       answer = step("AUTH CRAM-MD5", 334)
       if answer.is_a?(SmtpReply)
-        challenge = Base64.decode(answer.text.strip)
-        answer = command(Base64.encode(user + " " + HMAC.hexdigest(MD5, password, challenge)))
+        # The challenge is the server's to write, so what is not base64 is
+        # its error and no panic of this program's; a lone `*` ends the
+        # exchange it left open (RFC 4954 section 4), whatever the server
+        # says to that.
+        challenge = Base64.decode?(answer.text.strip)
+        if challenge.is_a?(Base64Error)
+          refused = SmtpError.new("the server's CRAM-MD5 challenge is not base64", answer.code, answer.text)
+          command("*")
+          answer = refused
+        else
+          answer = command(Base64.encode(user + " " + HMAC.hexdigest(MD5, password, challenge)))
+        end
       end
     end
     return answer if answer.is_a?(SmtpError)

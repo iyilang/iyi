@@ -500,9 +500,12 @@ if [ "$PART" = all ] || [ "$PART" = local ]; then
   # at a chaos point on its way to the park, parks clean and is stamped
   # by hand, and the worker the check's `wake_one` rang, holding the
   # token, takes it; unstressed, a worker its idle clock woke, holding
-  # none, does.
+  # none, does. On Windows the takeover also gives back the port's seat
+  # (`IyiScheduler.left_idle`), whose sitter, called in its place, serves
+  # the woken fiber as well, so the copy keeps both (tssh: the token alone
+  # kept was never caught, 2 of 2 runs).
   HEAP22_ONLY=giveway prove_fails "a takeover that keeps the look's token" notoken "giveway:" \
-    '{ if (sub(/IyiWorkers\.stop_spinning\(st, true\)/, "")) found = 1; print } END { if (!found) exit 3 }' \
+    "BEGIN { win = $WINDOWS } "'{ if (sub(/IyiWorkers\.stop_spinning\(st, true\)/, "")) found = 1; if (win && sub(/IyiScheduler\.left_idle\(st\)/, "")) seat = 1; print } END { if (!found || (win && !seat)) exit 3 }' \
     heap_partition.iyi
 fi
 

@@ -239,7 +239,14 @@ reads the clock once when the tick's walk is done, and a busy program
 none while the sweep helpers are mid-round: on tmac (k3, 6 clean rounds)
 the flag on's CPU a request went from 1.051 times the flag off's to
 0.976 (0.979 times 0.21.0's, from 1.053), at a steady RSS 0.3 % above
-the old rule's.
+the old rule's. An idle worker that takes a parked unit over gives back
+the look's token (on Windows, the port's seat) before it collects, and
+gives way to a fiber of that unit woken meanwhile: before, such a wake
+rang no worker and the fiber waited out the whole collection.
+bench/heap_local's `giveway` check and heap_verify's `nogiveway` and
+`notoken` copies pin it; on tssh, busy4 with it and the sweep helper's
+early release took idle p99 6 and 3 % under v3's, burn no worse, at the
+same RSS.
 
 heap22 S6 memory return, under `-Dheap_partitions`. Inside one process
 #145's app ratcheted its resident set endpoint after endpoint (50 to 343
@@ -28066,7 +28073,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 35,498-line library and nothing else. Every other
+  written against iyi's own 35,612-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

@@ -684,6 +684,8 @@ prove_broken "a delegated responder's own signature unchecked" "a delegated resp
   '    problem = responder.signature_error(issuer)' '    problem = nil.as(String?)'
 prove_broken "a delegated responder's time unchecked" "a delegated responder out of its time: expected" \
   '    return "the responder #{name} is not valid at #{now}: from #{responder.not_before} to #{responder.not_after}" unless responder.valid_at?(now)' ''
+prove_broken "a delegated responder's distrust unchecked" "a delegated responder whose certificate is distrusted: expected" \
+  '    return "the responder #{refused}" if refused' ''
 prove_broken "a delegated responder's keyUsage unchecked" "a delegated responder not allowed digitalSignature: expected" \
   '    return "the responder #{name} is not allowed digitalSignature" if usage && (usage >> Certificate::KEY_DIGITAL_SIGNATURE) & 1 == 0' ''
 prove_broken "the responder matched by any name" "a delegated responder without id-kp-OCSPSigning: expected" \

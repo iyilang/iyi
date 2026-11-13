@@ -11,7 +11,9 @@
 # release build's 2048-, 3072- and 4096-bit
 # `pow_mod` times beside python's and the square-and-multiply it replaced,
 # proves that what the module refuses is refused with the prelude's sentence
-# (`division by zero`, `modulo by zero`, `not a decimal: "12x"`), reads the
+# (`division by zero`, `modulo by zero`, `not a decimal: "12x"`), reads in
+# the assembly of a build with no optimisation that a Montgomery product's
+# carries are not branches, reads the
 # module with `iyi doc`, checks the formatting, typechecks the exercise for
 # five targets, builds it again from `--emit-iyimod` artifacts, and proves
 # the checks can fail by patching copies of std/big.iyi through IYI_PATH.
@@ -22,7 +24,8 @@
 # division rounding, exact-division detection, zero printing, rational
 # reduction, the unbalanced Karatsuba split, the split that prints and
 # parses long values and the recursive division a long print splits by,
-# Montgomery's n', its final subtraction, a column's third word, the
+# Montgomery's n', its final subtraction, a column's third word, a carry's
+# low half, a carry made a comparison again, the
 # square's last-added reduction term, both window tables, the even
 # modulus' exponent bits, the binary GCD inverse's rounds, negations,
 # Montgomery step, range and GCD check, and the correction of a one-limb
@@ -575,6 +578,79 @@ big_panics_with "inverse_mod_secret modulo an even number" inverse_secret_even "
 # ---------------------------------------------------------------------------
 
 echo
+echo "== a Montgomery product's carries in a build with no optimisation, read off the machine code"
+# `iyi build` and `iyi run` without --release optimise nothing, and what
+# the source writes as a comparison is a conditional jump in the program:
+# `acc < w ? 1 : 0` on a column's sum was one for every product of two
+# words of the numbers `pow_mod_secret` is there to hide. The carries are
+# shifts and additions now (`Montgomery.carry_of`), which is read here off
+# the assembly of a small program built plain, for two pinned targets
+# whatever the host is (`--cross-compile` writes the assembly and links
+# nothing, so neither target's toolchain is needed). In `Montgomery#mul`,
+# `#sqr` and `carry_of` nothing may branch on an unsigned comparison: the
+# borrow of a 128-bit subtraction is `jb` or `jae` on x86_64 and `cset lo`
+# with a `tbnz` after it on aarch64, where their counters are signed and
+# an overflow check reads a flag of its own.
+cat >"$WORK/carry.iyi" <<'IYI'
+import std/big::{BigInt}
+
+m = (BigInt.one << 521) - 1
+x = BigInt.from_hex(Program.args.size > 0 ? Program.args[0] : "123456789abcdef0123456789abcdef")
+puts x.pow_mod_secret(x * x + 5, m).to_s(16).size
+IYI
+# carry_branches <file.s>: how many of the three functions the file has, then
+# how many of their instructions branch on an unsigned comparison. Read as
+# bytes: a string literal's symbol is named by its content, which need not
+# be UTF-8, and darwin's awk stops at the first that is not and prints
+# nothing.
+carry_branches() {
+  LC_ALL=C awk '
+    /^"\*Std::Big::Montgomery(#mul|#sqr|::carry_of)<.*":$/ { inside = 1; functions++; next }
+    inside && /^\t\.size\t/ { inside = 0 }
+    !inside || /^\t\./ || /^\.Ltmp/ { next }
+    {
+      if ($1 ~ /^(j(b|ae|a|be|c|nc)|b\.(lo|hs|hi|ls|cc|cs))$/) branches++
+      if (flag != "" && $1 ~ /^(tbn?z|cbn?z)$/ && $2 == flag) branches++
+      flag = ($1 == "cset" && $3 ~ /^(lo|hs|hi|ls|cc|cs)$/) ? $2 : ""
+    }
+    END { print functions + 0, branches + 0 }' "$1"
+}
+# carries <dir> [<patched>]: a line for each target where a carry is a
+# branch or nothing could be read, std/big taken from <patched> when it is
+# given; 1 if there is any.
+carries() {
+  local target read wrong=0
+  mkdir -p "$1"
+  for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
+    if ! ( [ -z "${2-}" ] || export IYI_PATH="$2${PSEP}$REPO/src"
+           "$IYI" build --emit asm --x86-asm-syntax intel --cross-compile --target "$target" -o "$1/$target" "$WORK/carry.iyi" ) \
+         >"$1/$target.log" 2>&1 || [ ! -s "$1/$target.s" ]; then
+      echo "$target: no assembly was written: $(grep -m1 -E 'Error|BUG' "$1/$target.log")"
+      wrong=1
+      continue
+    fi
+    read="$(carry_branches "$1/$target.s")"
+    if [ -z "$read" ]; then
+      echo "$target: the assembly could not be read"
+      wrong=1
+    elif [ "${read%% *}" -lt 2 ]; then
+      echo "$target: Montgomery#mul and #sqr are not both in the assembly, so nothing of them was read"
+      wrong=1
+    elif [ "${read##* }" -ne 0 ]; then
+      echo "$target: ${read##* } branches on an unsigned comparison in Montgomery#mul, #sqr and carry_of"
+      wrong=1
+    fi
+  done
+  return $wrong
+}
+if carries "$WORK/carries" >"$WORK/carries.out"; then
+  echo "  x86_64 and aarch64, no optimisation: mul, sqr and carry_of branch on no unsigned comparison"
+else
+  sed 's/^/  FAIL: /' "$WORK/carries.out"
+  status=1
+fi
+
+echo
 echo "== proving the checks can fail when big number operations are broken"
 
 prove_fails() {
@@ -788,7 +864,31 @@ prove_fails "montgomery n' right to 48 bits" no_mont_inverse "pow_mod: short exp
 prove_fails "a product's final subtraction dropped" no_mont_subtract "pow_mod: short exponents modulo a modulus that fills its top word" \
   's/^    reduce(t, t\[n\], r)$/    n.times { |j| r[j] = t[j] }/'
 prove_fails "a column's third word never carried into" no_mont_column_carry "pow_mod: short exponents modulo a modulus with room in its top word" \
-  's/top = top \&+ (acc < w ? 1_u64 : 0_u64)/top = top \&+ 0_u64/'
+  's/top = top \&+ Montgomery.carry_of(acc, w)/top = top \&+ 0_u64/'
+# The carry out of a column's two words, read off their halves' sums: one
+# that leaves out what the low halves carry into the high ones is right
+# until the high halves add to 2^64 - 1, which a Mersenne modulus' words
+# of all ones bring about.
+prove_fails "a carry that forgets what its low words carried" no_mont_low_carry "pow_mod: short exponents modulo a modulus with room in its top word" \
+  's/ \&+ low.unsafe_shr(64)$//'
+# And the carry as a comparison again, which answers the same and so
+# passes the exercise: it is the reading of the machine code that has to
+# refuse it, on both targets.
+mkdir -p "$WORK/compared/std"
+sed -e 's/^    high.unsafe_shr(64).unsafe_to_u64$/    (acc \&+ w) < w ? 1_u64 : 0_u64/' "$REPO/src/std/big.iyi" > "$WORK/compared/std/big.iyi"
+if cmp -s "$REPO/src/std/big.iyi" "$WORK/compared/std/big.iyi"; then
+  echo "  a carry by comparison: the patch changed nothing, so this proves nothing"
+  status=1
+elif carries "$WORK/compared/read" "$WORK/compared" >"$WORK/compared/out"; then
+  echo "  a carry by comparison: its machine code was read as sound, so the reading does not test this"
+  status=1
+elif [ "$(grep -c 'branches on an unsigned comparison' "$WORK/compared/out")" -eq 2 ]; then
+  echo "  a carry by comparison: refused on both targets, $(sed -n '1s/^[^:]*: \([0-9]*\) .*/\1/p' "$WORK/compared/out") branches on x86_64"
+else
+  echo "  a carry by comparison: refused, but not for what it is:"
+  sed 's/^/    /' "$WORK/compared/out"
+  status=1
+fi
 prove_fails "a square's reduction without q_(k-1) m_1" no_mont_late_term "pow_mod: short exponents modulo a modulus with room in its top word" \
   's/^        w = q\[k \&- 1\].to_u128 \&\* m\[1\].to_u128$/        w = 0_u128/'
 prove_fails "the sliding window's table one power apart" no_mont_table "exponent through the window table" \

@@ -14,7 +14,26 @@ def assert_str(expected : String, actual : String, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
 end
 
-import std/base64::{Base64}
+import std/base64::{Base64, Base64Error}
+
+# What `decode?` answered, as one line: the bytes, or the refusal's
+# sentence.
+def answered(got : String | Base64Error) : String
+  got.is_a?(Base64Error) ? "refused: " + got.message : got
+end
+
+def answered(got : Array(UInt8) | Base64Error) : String
+  return "refused: " + got.message if got.is_a?(Base64Error)
+  String.new(got.size) { |p| p.copy_from(got.to_unsafe, got.size) }
+end
+
+# The bytes *text* is the one text of: what `decode?` reads it as, where
+# `encode` writes exactly *text* for them.
+def canonical(text : String) : String?
+  got = Base64.decode?(text)
+  return nil if got.is_a?(Base64Error)
+  Base64.encode(got) == text ? got : nil
+end
 
 puts "== encode"
 assert_str "aGk=", Base64.encode("hi"), "hi"
@@ -86,6 +105,91 @@ assert_str "ABCD", Base64.decode("QUJDRA=="), "a full group then a padded one"
 # All six ASCII whitespace bytes, as the module's header says: `\v` and
 # `\f` were refused as invalid bytes.
 assert_str "ABCD", Base64.decode("QUJD\vRA=\f="), "vertical tab and form feed are whitespace"
+# And what the header says of the two alphabets and of a last character's
+# spare bits: read loosely here, and refused by `decode_secret` below.
+assert_str "A", Base64.decode("QR=="), "bits past the data dropped by decode"
+assert_str Base64.decode("Q+_/"), Base64.decode("Q-_/"), "the two alphabets in one text read by decode"
 puts "  decode and round trip"
+
+puts "\n== decode?"
+assert_str "hi", answered(Base64.decode?("aGk=")), "decode? of a text that is base64"
+assert_str "ABCA", answered(Base64.decode?("QUJD\nQQ=\n=\n")), "decode? reads what decode reads"
+# Each refusal the gate drives through `decode` as a panic, answered here
+# as a value with the same sentence.
+assert_str "refused: base64: invalid byte 42", answered(Base64.decode?("QU*JD")), "decode? answers a byte outside the alphabet"
+assert_str "refused: base64: invalid byte 33", answered(Base64.decode?("QUJDQUJD!!not-base64!!")), "decode? answers a byte after whole groups"
+assert_str "refused: base64: data after padding", answered(Base64.decode?("QQ==QQ==")), "decode? answers data after the padding"
+assert_str "refused: base64: discontinuous padding", answered(Base64.decode?("QU=JD")), "decode? answers data inside the padding"
+assert_str "refused: base64: excess padding", answered(Base64.decode?("QQ===")), "decode? answers more padding than the group needs"
+assert_str "refused: base64: padding with no group to close", answered(Base64.decode?("QUJD=")), "decode? answers padding after a full group"
+assert_str "refused: base64: 1 data characters, 1 more than a multiple of 4: a single character cannot encode a byte", answered(Base64.decode?("Q=")), "decode? answers a padded lone character"
+assert_str "refused: base64: 5 data characters, 1 more than a multiple of 4: a single character cannot encode a byte", answered(Base64.decode?("QUJDR")), "decode? answers a final group of one character"
+puts "  a text that is base64 decoded, and each refusal answered with decode's sentence"
+
+puts "\n== secrets"
+# `encode_secret` writes what `encode` writes, from a string and from
+# bytes: every byte value, every length to 40, and every six-bit value in
+# each of a group's four places, alone and among set bits.
+assert_str Base64.encode(every_byte), Base64.encode_secret(every_byte), "encode_secret over every byte value"
+assert_str Base64.encode(backwards), Base64.encode_secret(backwards), "encode_secret over every byte value, backwards"
+40.times do |len|
+  piece = every_byte[200 - len, len]
+  text = Base64.encode(piece)
+  assert_str text, Base64.encode_secret(piece), "encode_secret of #{len} bytes"
+  assert_str text, Base64.encode_secret(Array(UInt8).new(len) { |k| piece.to_unsafe[k] }), "encode_secret of #{len} bytes given as an array"
+  assert_str piece, answered(Base64.decode_secret(text)), "decode_secret of #{len} bytes"
+end
+64.times do |value|
+  4.times do |place|
+    shift = 18 - 6 * place
+    [value << shift, (value << shift) | (0xFFFFFF ^ (63 << shift))].each do |triple|
+      piece = String.new(3) do |p|
+        p[0] = (triple >> 16).to_u8
+        p[1] = ((triple >> 8) & 255).to_u8
+        p[2] = (triple & 255).to_u8
+      end
+      assert_str Base64.encode(piece), Base64.encode_secret(piece), "encode_secret of the six bits #{value} in place #{place}"
+    end
+  end
+end
+puts "  encode_secret is encode, from a string and from bytes"
+
+# What `decode_secret` refuses that `decode` reads, each with the one
+# sentence it has for a text's characters; a length is no secret and has
+# its own.
+not_secret = "refused: base64: not a secret's text: a byte outside A-Z, a-z, 0-9, + and /, an = before the end, or a last character with bits past the data"
+assert_str "A", answered(Base64.decode_secret("QQ==")), "decode_secret of a group of two"
+assert_str "", answered(Base64.decode_secret("")), "decode_secret of nothing"
+assert_str not_secret, answered(Base64.decode_secret("QR==")), "bits past the data in a group of two refused in a secret"
+assert_str not_secret, answered(Base64.decode_secret("QUJ=")), "bits past the data in a group of three refused in a secret"
+assert_str not_secret, answered(Base64.decode_secret("QUJ-")), "the url-safe alphabet's minus refused in a secret"
+assert_str not_secret, answered(Base64.decode_secret("QUJ_")), "the url-safe alphabet's underscore refused in a secret"
+assert_str not_secret, answered(Base64.decode_secret("QQ=A")), "padding before the end refused in a secret"
+assert_str not_secret, answered(Base64.decode_secret("Q===")), "three padding characters refused in a secret"
+assert_str not_secret, answered(Base64.decode_secret("QUJDQUJDQUJDQUJDQUJDQUJD*UJDQUJDQUJD")), "a byte outside the alphabet refused in a secret"
+assert_str not_secret, answered(Base64.decode_secret("QUI\n")), "whitespace refused in a secret"
+assert_str "refused: base64: 2 characters, not a multiple of 4: a secret's text is whole groups, padded", answered(Base64.decode_secret("QQ")), "missing padding refused in a secret"
+# Every byte value in every place of a whole group, of each padded group
+# and of a text long enough for the loop a release build makes of wide
+# registers: taken exactly when the text is the one `encode` writes for
+# its bytes, and then as those bytes.
+["QUJD", "QUI=", "QQ==", "QUJDQUJDQUJDQUJDQUJDQUJDQUI="].each do |shape|
+  shape.bytesize.times do |at|
+    256.times do |c|
+      text = String.new(shape.bytesize) do |p|
+        p.copy_from(shape.to_unsafe, shape.bytesize)
+        p[at] = c.to_u8
+      end
+      want = canonical(text)
+      got = Base64.decode_secret(text)
+      if want
+        assert_str want, answered(got), "decode_secret of #{shape} with byte #{c} at #{at}"
+      else
+        assert_true got.is_a?(Base64Error), "decode_secret refuses #{shape} with byte #{c} at #{at}"
+      end
+    end
+  end
+end
+puts "  decode_secret reads the one text encode writes for its bytes, and refuses every other"
 
 puts "\nALL CHECKS PASSED"

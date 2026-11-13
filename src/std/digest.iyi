@@ -9,6 +9,12 @@
 # answers lowercase hex. MD5 and SHA-1 are the checksums they always
 # were, not a lock.
 #
+# Threads may hash at once from a program's first line. The round
+# constants of SHA-2 and Keccak's tables are constants, whole before
+# anything reads them; the CRCs' tables are worked out on first use and
+# their address published by a release store once they are whole (std/atomic),
+# so no thread reads a table part written.
+#
 # The ten hashes are each a `Digest`. `SHA256.hexdigest(data)` and
 # `SHA256.hash_bytes(data)` hash one piece of data; `SHA256.new`, then
 # `update` as often as the data arrives, then `final` or `hexfinal` once,
@@ -25,11 +31,17 @@
 # where the last one stopped. XXH64 is the hash std/zstd's frames carry
 # the low half of: `checksum(data, seed)`, or `update` in pieces and a
 # `digest` that can be asked midway.
+#
+# `ValueBarrier` is not a digest. It hides a mask from the optimiser,
+# for the code that picks by a secret, and it lives here because std/mlkem,
+# std/p256, std/p384 and std/curve25519 all import this module and share
+# no other: one barrier, written once, with no import any of them lacked.
 
 @[Unsafe("each hash reads its input and writes its digest through raw byte pointers, a block at a time, for speed")]
 module std/digest
 
 import std/int
+import std/atomic
 import std/slice::{Slice, Bytes}
 
 # What every block hash shares: the message is cut into blocks, the last
@@ -438,6 +450,31 @@ pub class SHA1 < Digest
   end
 end
 
+# SHA-256's 64 round constants: the first 32 bits of the fractional parts
+# of the cube roots of the first 64 primes. A constant of the module, made
+# before the program's own first line runs, or by its first reader under
+# the lock every constant is made under; the class variable they were
+# kept in, filled by the first block hashed and stored with a plain
+# store, could show a second thread its address before its words.
+SHA256_K = [
+  0x428a2f98_u32, 0x71374491_u32, 0xb5c0fbcf_u32, 0xe9b5dba5_u32,
+  0x3956c25b_u32, 0x59f111f1_u32, 0x923f82a4_u32, 0xab1c5ed5_u32,
+  0xd807aa98_u32, 0x12835b01_u32, 0x243185be_u32, 0x550c7dc3_u32,
+  0x72be5d74_u32, 0x80deb1fe_u32, 0x9bdc06a7_u32, 0xc19bf174_u32,
+  0xe49b69c1_u32, 0xefbe4786_u32, 0x0fc19dc6_u32, 0x240ca1cc_u32,
+  0x2de92c6f_u32, 0x4a7484aa_u32, 0x5cb0a9dc_u32, 0x76f988da_u32,
+  0x983e5152_u32, 0xa831c66d_u32, 0xb00327c8_u32, 0xbf597fc7_u32,
+  0xc6e00bf3_u32, 0xd5a79147_u32, 0x06ca6351_u32, 0x14292967_u32,
+  0x27b70a85_u32, 0x2e1b2138_u32, 0x4d2c6dfc_u32, 0x53380d13_u32,
+  0x650a7354_u32, 0x766a0abb_u32, 0x81c2c92e_u32, 0x92722c85_u32,
+  0xa2bfe8a1_u32, 0xa81a664b_u32, 0xc24b8b70_u32, 0xc76c51a3_u32,
+  0xd192e819_u32, 0xd6990624_u32, 0xf40e3585_u32, 0x106aa070_u32,
+  0x19a4c116_u32, 0x1e376c08_u32, 0x2748774c_u32, 0x34b0bcb5_u32,
+  0x391c0cb3_u32, 0x4ed8aa4a_u32, 0x5b9cca4f_u32, 0x682e6ff3_u32,
+  0x748f82ee_u32, 0x78a5636f_u32, 0x84c87814_u32, 0x8cc70208_u32,
+  0x90befffa_u32, 0xa4506ceb_u32, 0xbef9a3f7_u32, 0xc67178f2_u32,
+]
+
 # SHA-256, FIPS 180-4 §6.2. SHA-224 is the same compression from another
 # starting state, its digest the first 28 bytes.
 pub class SHA256 < Digest
@@ -475,7 +512,7 @@ pub class SHA256 < Digest
 
   private def compress(block : Pointer(UInt8)) : Nil
     w = @w
-    k = round_constants
+    k = SHA256_K.to_unsafe
     DigestUtil.load_u32s_be(w, block, 16)
     i = 16
     while i < 64
@@ -522,36 +559,6 @@ pub class SHA256 < Digest
     @h[6] = @h[6] &+ g
     @h[7] = @h[7] &+ hh
   end
-
-  @@k = Pointer(UInt32).new(0_u64)
-
-  # The 64 round constants, made once: the first 32 bits of the
-  # fractional parts of the cube roots of the first 64 primes.
-  private def round_constants : Pointer(UInt32)
-    return @@k if @@k.address != 0_u64
-    words = [
-      0x428a2f98_u32, 0x71374491_u32, 0xb5c0fbcf_u32, 0xe9b5dba5_u32,
-      0x3956c25b_u32, 0x59f111f1_u32, 0x923f82a4_u32, 0xab1c5ed5_u32,
-      0xd807aa98_u32, 0x12835b01_u32, 0x243185be_u32, 0x550c7dc3_u32,
-      0x72be5d74_u32, 0x80deb1fe_u32, 0x9bdc06a7_u32, 0xc19bf174_u32,
-      0xe49b69c1_u32, 0xefbe4786_u32, 0x0fc19dc6_u32, 0x240ca1cc_u32,
-      0x2de92c6f_u32, 0x4a7484aa_u32, 0x5cb0a9dc_u32, 0x76f988da_u32,
-      0x983e5152_u32, 0xa831c66d_u32, 0xb00327c8_u32, 0xbf597fc7_u32,
-      0xc6e00bf3_u32, 0xd5a79147_u32, 0x06ca6351_u32, 0x14292967_u32,
-      0x27b70a85_u32, 0x2e1b2138_u32, 0x4d2c6dfc_u32, 0x53380d13_u32,
-      0x650a7354_u32, 0x766a0abb_u32, 0x81c2c92e_u32, 0x92722c85_u32,
-      0xa2bfe8a1_u32, 0xa81a664b_u32, 0xc24b8b70_u32, 0xc76c51a3_u32,
-      0xd192e819_u32, 0xd6990624_u32, 0xf40e3585_u32, 0x106aa070_u32,
-      0x19a4c116_u32, 0x1e376c08_u32, 0x2748774c_u32, 0x34b0bcb5_u32,
-      0x391c0cb3_u32, 0x4ed8aa4a_u32, 0x5b9cca4f_u32, 0x682e6ff3_u32,
-      0x748f82ee_u32, 0x78a5636f_u32, 0x84c87814_u32, 0x8cc70208_u32,
-      0x90befffa_u32, 0xa4506ceb_u32, 0xbef9a3f7_u32, 0xc67178f2_u32,
-    ]
-    table = Pointer(UInt32).malloc(64_u64)
-    table.copy_from(words.to_unsafe, 64)
-    @@k = table
-    table
-  end
 end
 
 pub class SHA224 < SHA256
@@ -572,6 +579,31 @@ pub class SHA224 < SHA256
     @h[7] = 0xbefa4fa4_u32
   end
 end
+
+# SHA-512's 80 round constants: the first 64 bits of the fractional parts
+# of the cube roots of the first 80 primes. A constant, as `SHA256_K` is.
+SHA512_K = [
+  0x428a2f98d728ae22_u64, 0x7137449123ef65cd_u64, 0xb5c0fbcfec4d3b2f_u64, 0xe9b5dba58189dbbc_u64,
+  0x3956c25bf348b538_u64, 0x59f111f1b605d019_u64, 0x923f82a4af194f9b_u64, 0xab1c5ed5da6d8118_u64,
+  0xd807aa98a3030242_u64, 0x12835b0145706fbe_u64, 0x243185be4ee4b28c_u64, 0x550c7dc3d5ffb4e2_u64,
+  0x72be5d74f27b896f_u64, 0x80deb1fe3b1696b1_u64, 0x9bdc06a725c71235_u64, 0xc19bf174cf692694_u64,
+  0xe49b69c19ef14ad2_u64, 0xefbe4786384f25e3_u64, 0x0fc19dc68b8cd5b5_u64, 0x240ca1cc77ac9c65_u64,
+  0x2de92c6f592b0275_u64, 0x4a7484aa6ea6e483_u64, 0x5cb0a9dcbd41fbd4_u64, 0x76f988da831153b5_u64,
+  0x983e5152ee66dfab_u64, 0xa831c66d2db43210_u64, 0xb00327c898fb213f_u64, 0xbf597fc7beef0ee4_u64,
+  0xc6e00bf33da88fc2_u64, 0xd5a79147930aa725_u64, 0x06ca6351e003826f_u64, 0x142929670a0e6e70_u64,
+  0x27b70a8546d22ffc_u64, 0x2e1b21385c26c926_u64, 0x4d2c6dfc5ac42aed_u64, 0x53380d139d95b3df_u64,
+  0x650a73548baf63de_u64, 0x766a0abb3c77b2a8_u64, 0x81c2c92e47edaee6_u64, 0x92722c851482353b_u64,
+  0xa2bfe8a14cf10364_u64, 0xa81a664bbc423001_u64, 0xc24b8b70d0f89791_u64, 0xc76c51a30654be30_u64,
+  0xd192e819d6ef5218_u64, 0xd69906245565a910_u64, 0xf40e35855771202a_u64, 0x106aa07032bbd1b8_u64,
+  0x19a4c116b8d2d0c8_u64, 0x1e376c085141ab53_u64, 0x2748774cdf8eeb99_u64, 0x34b0bcb5e19b48a8_u64,
+  0x391c0cb3c5c95a63_u64, 0x4ed8aa4ae3418acb_u64, 0x5b9cca4f7763e373_u64, 0x682e6ff3d6b2b8a3_u64,
+  0x748f82ee5defb2fc_u64, 0x78a5636f43172f60_u64, 0x84c87814a1f0ab72_u64, 0x8cc702081a6439ec_u64,
+  0x90befffa23631e28_u64, 0xa4506cebde82bde9_u64, 0xbef9a3f7b2c67915_u64, 0xc67178f2e372532b_u64,
+  0xca273eceea26619c_u64, 0xd186b8c721c0c207_u64, 0xeada7dd6cde0eb1e_u64, 0xf57d4f7fee6ed178_u64,
+  0x06f067aa72176fba_u64, 0x0a637dc5a2c898a6_u64, 0x113f9804bef90dae_u64, 0x1b710b35131c471b_u64,
+  0x28db77f523047d84_u64, 0x32caab7b40c72493_u64, 0x3c9ebe0a15c9bebc_u64, 0x431d67c49c100d4c_u64,
+  0x4cc5d4becb3e42b6_u64, 0x597f299cfc657e2a_u64, 0x5fcb6fab3ad6faec_u64, 0x6c44198c4a475817_u64,
+]
 
 # SHA-512, FIPS 180-4 §6.4: 64-bit words, 128-byte blocks, 80 rounds.
 # SHA-384 is the same compression from another starting state, its digest
@@ -615,7 +647,7 @@ pub class SHA512 < Digest
 
   private def compress(block : Pointer(UInt8)) : Nil
     w = @w
-    k = round_constants
+    k = SHA512_K.to_unsafe
     i = 0
     while i < 16
       w[i] = DigestUtil.load_u64_be(block + (i * 8).to_i64)
@@ -659,40 +691,6 @@ pub class SHA512 < Digest
     @h[6] = @h[6] &+ g
     @h[7] = @h[7] &+ hh
   end
-
-  @@k = Pointer(UInt64).new(0_u64)
-
-  # The 80 round constants, made once: the first 64 bits of the
-  # fractional parts of the cube roots of the first 80 primes.
-  private def round_constants : Pointer(UInt64)
-    return @@k if @@k.address != 0_u64
-    words = [
-      0x428a2f98d728ae22_u64, 0x7137449123ef65cd_u64, 0xb5c0fbcfec4d3b2f_u64, 0xe9b5dba58189dbbc_u64,
-      0x3956c25bf348b538_u64, 0x59f111f1b605d019_u64, 0x923f82a4af194f9b_u64, 0xab1c5ed5da6d8118_u64,
-      0xd807aa98a3030242_u64, 0x12835b0145706fbe_u64, 0x243185be4ee4b28c_u64, 0x550c7dc3d5ffb4e2_u64,
-      0x72be5d74f27b896f_u64, 0x80deb1fe3b1696b1_u64, 0x9bdc06a725c71235_u64, 0xc19bf174cf692694_u64,
-      0xe49b69c19ef14ad2_u64, 0xefbe4786384f25e3_u64, 0x0fc19dc68b8cd5b5_u64, 0x240ca1cc77ac9c65_u64,
-      0x2de92c6f592b0275_u64, 0x4a7484aa6ea6e483_u64, 0x5cb0a9dcbd41fbd4_u64, 0x76f988da831153b5_u64,
-      0x983e5152ee66dfab_u64, 0xa831c66d2db43210_u64, 0xb00327c898fb213f_u64, 0xbf597fc7beef0ee4_u64,
-      0xc6e00bf33da88fc2_u64, 0xd5a79147930aa725_u64, 0x06ca6351e003826f_u64, 0x142929670a0e6e70_u64,
-      0x27b70a8546d22ffc_u64, 0x2e1b21385c26c926_u64, 0x4d2c6dfc5ac42aed_u64, 0x53380d139d95b3df_u64,
-      0x650a73548baf63de_u64, 0x766a0abb3c77b2a8_u64, 0x81c2c92e47edaee6_u64, 0x92722c851482353b_u64,
-      0xa2bfe8a14cf10364_u64, 0xa81a664bbc423001_u64, 0xc24b8b70d0f89791_u64, 0xc76c51a30654be30_u64,
-      0xd192e819d6ef5218_u64, 0xd69906245565a910_u64, 0xf40e35855771202a_u64, 0x106aa07032bbd1b8_u64,
-      0x19a4c116b8d2d0c8_u64, 0x1e376c085141ab53_u64, 0x2748774cdf8eeb99_u64, 0x34b0bcb5e19b48a8_u64,
-      0x391c0cb3c5c95a63_u64, 0x4ed8aa4ae3418acb_u64, 0x5b9cca4f7763e373_u64, 0x682e6ff3d6b2b8a3_u64,
-      0x748f82ee5defb2fc_u64, 0x78a5636f43172f60_u64, 0x84c87814a1f0ab72_u64, 0x8cc702081a6439ec_u64,
-      0x90befffa23631e28_u64, 0xa4506cebde82bde9_u64, 0xbef9a3f7b2c67915_u64, 0xc67178f2e372532b_u64,
-      0xca273eceea26619c_u64, 0xd186b8c721c0c207_u64, 0xeada7dd6cde0eb1e_u64, 0xf57d4f7fee6ed178_u64,
-      0x06f067aa72176fba_u64, 0x0a637dc5a2c898a6_u64, 0x113f9804bef90dae_u64, 0x1b710b35131c471b_u64,
-      0x28db77f523047d84_u64, 0x32caab7b40c72493_u64, 0x3c9ebe0a15c9bebc_u64, 0x431d67c49c100d4c_u64,
-      0x4cc5d4becb3e42b6_u64, 0x597f299cfc657e2a_u64, 0x5fcb6fab3ad6faec_u64, 0x6c44198c4a475817_u64,
-    ]
-    table = Pointer(UInt64).malloc(80_u64)
-    table.copy_from(words.to_unsafe, 80)
-    @@k = table
-    table
-  end
 end
 
 pub class SHA384 < SHA512
@@ -720,30 +718,24 @@ end
 # (lane 1, then each lane pi sends it to), the compact form of the
 # Keccak team's reference, so the step needs one lane of temporary.
 struct Keccak
-  @@tables = Pointer(UInt64).new(0_u64)
-
   # The 24 iota round constants, then the 24 rho offsets of the lanes the
   # cycle visits, then the 24 lanes themselves, FIPS 202 sections 3.2.2
-  # to 3.2.5.
-  private def self.tables : Pointer(UInt64)
-    return @@tables if @@tables.address != 0_u64
-    words = [
-      0x0000000000000001_u64, 0x0000000000008082_u64, 0x800000000000808a_u64, 0x8000000080008000_u64,
-      0x000000000000808b_u64, 0x0000000080000001_u64, 0x8000000080008081_u64, 0x8000000000008009_u64,
-      0x000000000000008a_u64, 0x0000000000000088_u64, 0x0000000080008009_u64, 0x000000008000000a_u64,
-      0x000000008000808b_u64, 0x800000000000008b_u64, 0x8000000000008089_u64, 0x8000000000008003_u64,
-      0x8000000000008002_u64, 0x8000000000000080_u64, 0x000000000000800a_u64, 0x800000008000000a_u64,
-      0x8000000080008081_u64, 0x8000000000008080_u64, 0x0000000080000001_u64, 0x8000000080008008_u64,
-      1_u64, 3_u64, 6_u64, 10_u64, 15_u64, 21_u64, 28_u64, 36_u64, 45_u64, 55_u64, 2_u64, 14_u64,
-      27_u64, 41_u64, 56_u64, 8_u64, 25_u64, 43_u64, 62_u64, 18_u64, 39_u64, 61_u64, 20_u64, 44_u64,
-      10_u64, 7_u64, 11_u64, 17_u64, 18_u64, 3_u64, 5_u64, 16_u64, 8_u64, 21_u64, 24_u64, 4_u64,
-      15_u64, 23_u64, 19_u64, 13_u64, 12_u64, 2_u64, 20_u64, 14_u64, 22_u64, 9_u64, 6_u64, 1_u64,
-    ]
-    table = Pointer(UInt64).malloc(72_u64)
-    table.copy_from(words.to_unsafe, 72)
-    @@tables = table
-    table
-  end
+  # to 3.2.5. A constant, as `SHA256_K` is: a thread never sees it part
+  # made, where a table filled on first use and stored with a plain store
+  # could be seen as zeros, and a rotation by an offset of zero is not one
+  # `rotl` has.
+  TABLES = [
+    0x0000000000000001_u64, 0x0000000000008082_u64, 0x800000000000808a_u64, 0x8000000080008000_u64,
+    0x000000000000808b_u64, 0x0000000080000001_u64, 0x8000000080008081_u64, 0x8000000000008009_u64,
+    0x000000000000008a_u64, 0x0000000000000088_u64, 0x0000000080008009_u64, 0x000000008000000a_u64,
+    0x000000008000808b_u64, 0x800000000000008b_u64, 0x8000000000008089_u64, 0x8000000000008003_u64,
+    0x8000000000008002_u64, 0x8000000000000080_u64, 0x000000000000800a_u64, 0x800000008000000a_u64,
+    0x8000000080008081_u64, 0x8000000000008080_u64, 0x0000000080000001_u64, 0x8000000080008008_u64,
+    1_u64, 3_u64, 6_u64, 10_u64, 15_u64, 21_u64, 28_u64, 36_u64, 45_u64, 55_u64, 2_u64, 14_u64,
+    27_u64, 41_u64, 56_u64, 8_u64, 25_u64, 43_u64, 62_u64, 18_u64, 39_u64, 61_u64, 20_u64, 44_u64,
+    10_u64, 7_u64, 11_u64, 17_u64, 18_u64, 3_u64, 5_u64, 16_u64, 8_u64, 21_u64, 24_u64, 4_u64,
+    15_u64, 23_u64, 19_u64, 13_u64, 12_u64, 2_u64, 20_u64, 14_u64, 22_u64, 9_u64, 6_u64, 1_u64,
+  ]
 
   # Every rotation here is by 1 to 63, so no branch for a zero.
   private def self.rotl(x : UInt64, n : Int32) : UInt64
@@ -752,7 +744,7 @@ struct Keccak
 
   # The 24 rounds over the 25 lanes at *a*; *c* is five lanes of scratch.
   def self.permute(a : Pointer(UInt64), c : Pointer(UInt64)) : Nil
-    t = tables
+    t = TABLES.to_unsafe
     round = 0
     while round < 24
       # theta: each lane takes the parity of the two columns beside it.
@@ -1084,12 +1076,19 @@ pub struct CRC32
     crc ^ 0xffffffff_u32
   end
 
-  @@tables = Pointer(UInt32).new(0_u64)
+  # The tables' address once every word of them is written, 0 until then.
+  @@tables = ::Atomic(UInt64).new(0_u64)
 
-  # The eight tables, made once: the first is the byte-at-a-time table,
-  # and each after it is one more byte of zeros through the one before.
+  # The eight tables, made by the first thread to want them: the first is
+  # the byte-at-a-time table, and each after it is one more byte of zeros
+  # through the one before. Two threads that want them at once each make
+  # their own and the later store stands, the tables being the same. The
+  # address is stored last, by a release store, and read by an acquire
+  # load, so a thread that reads it reads the words written before it; a
+  # plain store and load promise that on x86_64 alone.
   private def self.tables : Pointer(UInt32)
-    return @@tables if @@tables.address != 0_u64
+    ready = @@tables.get_acquire
+    return Pointer(UInt32).new(ready) if ready != 0_u64
     t = Pointer(UInt32).malloc(2048_u64)
     n = 0
     while n < 256
@@ -1112,7 +1111,7 @@ pub struct CRC32
       end
       slice = slice + 1
     end
-    @@tables = t
+    @@tables.set_release(t.address)
     t
   end
 
@@ -1196,11 +1195,13 @@ pub struct CRC64
     crc ^ 0xffffffffffffffff_u64
   end
 
-  @@tables = Pointer(UInt64).new(0_u64)
+  @@tables = ::Atomic(UInt64).new(0_u64)
 
-  # The eight tables, made once, as `CRC32` makes its own.
+  # The eight tables, made and published as `CRC32` makes and publishes
+  # its own.
   private def self.tables : Pointer(UInt64)
-    return @@tables if @@tables.address != 0_u64
+    ready = @@tables.get_acquire
+    return Pointer(UInt64).new(ready) if ready != 0_u64
     t = Pointer(UInt64).malloc(2048_u64)
     n = 0
     while n < 256
@@ -1223,7 +1224,7 @@ pub struct CRC64
       end
       slice = slice + 1
     end
-    @@tables = t
+    @@tables.set_release(t.address)
     t
   end
 
@@ -1498,5 +1499,54 @@ struct DigestUtil
 
   private def self.nibble(n : Int32) : UInt8
     n < 10 ? (48 + n).to_u8 : (87 + n).to_u8
+  end
+end
+
+# A value handed back as one the optimiser knows nothing about: what a
+# mask goes through before std's constant-time code picks by it. A mask
+# made from a secret is 0 or all ones, and LLVM, once it has seen that,
+# may write `(a & mask) | (b & ~mask)` as a choice instead: one of two
+# pointers kept by a conditional move and a single load through it (what
+# a --release build made of std/mlkem's K against its implicit-rejection
+# key), or a conditional jump (what one made of std/p256's table entries,
+# on each digit of a nonce). The first shows which was picked by the
+# address read, the second by the branch taken. A mask that has been
+# through here is a number like any other to the optimiser, so the `&`,
+# `|` and `^` written are the instructions emitted, on both operands.
+#
+# On x86_64 and aarch64 it is an empty inline assembly whose output is
+# tied to its input, BoringSSL's `value_barrier_w`: no instruction, the
+# value stays in the register it was in, and LLVM does not reason about
+# what an `asm` does to its operands. On every other target it is a
+# volatile load of the value from a stack slot, which LLVM has to perform
+# and may assume nothing of: a store and a load where the others cost
+# nothing. Held on the first two by the --release assembly the gates of
+# the modules above read. The other targets' assembly has not been read:
+# the LLVM this was written against carries those two back ends alone.
+#
+# It hides one value from one compiler. It does not make the arithmetic
+# around it constant-time, and it says nothing of what runs the code
+# afterwards: a wasm32 module is compiled again by its engine.
+pub struct ValueBarrier
+  # *x*, unchanged.
+  @[AlwaysInline]
+  def self.u64(x : UInt64) : UInt64
+    {% if flag?(:x86_64) || flag?(:aarch64) %}
+      asm("" : "=r"(x) : "0"(x))
+      x
+    {% else %}
+      IyiAtomic.load(pointerof(x), :not_atomic, true)
+    {% end %}
+  end
+
+  # *x*, unchanged.
+  @[AlwaysInline]
+  def self.u8(x : UInt8) : UInt8
+    {% if flag?(:x86_64) || flag?(:aarch64) %}
+      asm("" : "=r"(x) : "0"(x))
+      x
+    {% else %}
+      IyiAtomic.load(pointerof(x), :not_atomic, true)
+    {% end %}
   end
 end

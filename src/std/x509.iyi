@@ -37,7 +37,13 @@
 # client's, `X509Purpose::Client`), and the leaf's names must fall inside
 # its nameConstraints; it must have signed the certificate below it. Name
 # constraints are checked for DNS names and IP addresses; a constraint of
-# any other kind refuses the chain rather than being passed over. A DNS
+# any other kind refuses the chain rather than being passed over. An
+# IPv4-mapped IPv6 address (RFC 4291 section 2.5.5.2, `::ffff:a.b.c.d`)
+# is also the IPv4 address it stands for, and an IPv6 range inside
+# `::ffff:0:0/96` the IPv4 range: an excluded range holds an address out
+# as written or as that, and a permitted one must permit the IPv4 address
+# - an IPv6 range wider than `::ffff:0:0/96` permits no IPv4 host, in
+# either spelling. A DNS
 # name is judged by a constraint as a host is matched to it, without its
 # final dot, and a constraint or a name under one with an empty label
 # refuses the chain. The leaf must be valid at that time, not a CA (a
@@ -49,16 +55,37 @@
 # common name, as browsers and RFC 6125 have it: a DNS name exactly,
 # without regard to case or a final dot, or as `*.rest` where the `*` is
 # the whole of the leftmost label and stands for exactly one; an IP
-# address, v4 or v6, against the iPAddress entries.
+# address, v4 or v6, against the iPAddress entries, an IPv4-mapped IPv6
+# address in either being the IPv4 address it stands for.
 #
 # Signatures: RSA PKCS #1 v1.5 and PSS, and ECDSA, under SHA-256, SHA-384
 # and SHA-512, and Ed25519 (RFC 8410: the key's and the signature's
 # AlgorithmIdentifier carry no parameters at all). A certificate signed
 # under SHA-1 is refused, as every browser refuses one, and so is a chain
 # with an RSA key under 2048 bits anywhere in it, root included (see
-# `X509::MIN_RSA_BITS` for how OpenSSL's level 2 compares). A root's own
-# signature is not checked: a root is trusted for being in the store, not
-# for what it says about itself.
+# `X509::MIN_RSA_BITS` for how OpenSSL's level 2 compares), or one past
+# 8192 bits (`X509::MAX_RSA_BITS`). A root's own signature is not checked:
+# a root is trusted for being in the store, not for what it says about
+# itself.
+#
+# What a search costs is bounded whatever the certificates given, which
+# are a peer's to write. It weighs 100 candidate issuers at most
+# (`X509::MAX_SIGNATURE_CHECKS`). A candidate's signature is checked
+# before the leaf's names are held to its constraints, and once for each
+# key: certificates that hold one key under one name are answered
+# together. An issuer's constraints are judged once, and the search
+# compares a name with a constraint 250,000 times at most
+# (`X509::MAX_CONSTRAINT_COMPARISONS`); a chain that would take more is
+# refused.
+#
+# `X509.verify` takes, last, certificates that are never to be trusted,
+# each as its DER, which is how a platform's store of them keeps them
+# (std/system_roots): a chain is refused at any certificate that is one
+# of them, leaf, intermediate or root, or that holds the key of one - the
+# same SubjectPublicKeyInfo - since a key that is distrusted is no better
+# under another certificate. One that cannot be read as a certificate
+# still refuses its own bytes, and its key where its
+# SubjectPublicKeyInfo can be found.
 #
 # Written: `X509.request` is a PKCS #10 request (RFC 2986) - CN=<the first
 # name> and subjectAltName's dNSNames in an extensionRequest attribute -
@@ -93,7 +120,7 @@ import std/curve25519::{Ed25519, Ed25519PublicKey, CurveError}
 import std/random::{Random}
 import std/big::{BigInt}
 import std/time::{Time}
-import std/base64::{Base64}
+import std/base64::{Base64, Base64Error}
 import std/idna::{IDNA, IdnaError}
 
 # What reading a certificate, or checking a chain, answers when it fails.
@@ -169,6 +196,9 @@ pub class Certificate
   getter other_constraints : Bool
   getter subject_key_id : Array(UInt8)?
   getter authority_key_id : Array(UInt8)?
+  # The SubjectPublicKeyInfo as written: two certificates hold the same
+  # key when these are the same bytes.
+  getter public_key_info : Array(UInt8)
   # The subjectPublicKey BIT STRING's bytes, as written: what an OCSP
   # CertID's issuerKeyHash and a responder's byKey are hashes of (RFC
   # 6960 section 4.1.1).
@@ -191,7 +221,7 @@ pub class Certificate
                  @issuer : Array(UInt8), @subject : Array(UInt8), @subject_name : String, @issuer_name : String,
                  @not_before : Time, @not_after : Time, @public_key : RsaPublicKey | EcdsaPublicKey | Ed25519PublicKey,
                  @signature_algorithm : String, @signature_parameters : DerValue?, @signature : Array(UInt8),
-                 @public_key_bits : Array(UInt8), extensions : X509Extensions)
+                 @public_key_info : Array(UInt8), @public_key_bits : Array(UInt8), extensions : X509Extensions)
     @basic_constraints = extensions.basic_constraints
     @ca = extensions.ca
     @path_length = extensions.path_length
@@ -279,7 +309,7 @@ pub class Certificate
     end
     signature = X509Asn1.bytes(outer[2].bit_string)!
     Certificate.new(der, outer[0].raw, version, serial, issuer.raw, subject.raw, subject_name, issuer_name,
-      not_before, not_after, key, signature_algorithm, parameters, signature, key_bits, extensions)
+      not_before, not_after, key, signature_algorithm, parameters, signature, tbs[at + 5].raw, key_bits, extensions)
   end
 
   # Every CERTIFICATE block in a PEM text, read; the first one that is not
@@ -325,7 +355,12 @@ pub class Certificate
     name = host
     name = name[1, name.size - 2] if name.starts_with?("[") && name.ends_with?("]")
     address = X509Names.ip(name)
-    return @ip_addresses.any? { |a| a == address } if address
+    if address
+      # One host to the socket that connects, in either spelling; the
+      # constraints over the chain judge an entry in both.
+      plain = X509Names.unmapped(address)
+      return @ip_addresses.any? { |a| X509Names.unmapped(a) == plain }
+    end
     name = name.downcase
     name = name[0, name.size - 1] if name.ends_with?(".")
     return false if name.empty?
@@ -340,11 +375,12 @@ end
 
 pub struct X509
   MAX_CHAIN = 10
-  # Signature checks one search for a chain may make, whatever the chain:
-  # a peer's intermediates under one name, each signing the others, made
-  # the search try every order of them - seven took 13,700 checks, and a
-  # Certificate message holds far more than seven. The other library's
-  # path builder in Go stops at the same 100.
+  # Candidate issuers one search for a chain may weigh, each at most one
+  # signature check, whatever the chain: a peer's intermediates under one
+  # name, each signing the others, made the search try every order of
+  # them - seven took 13,700 checks, and a Certificate message holds far
+  # more than seven. The other library's path builder in Go stops at the
+  # same 100.
   MAX_SIGNATURE_CHECKS = 100
   # An RSA key under this many bits is refused anywhere in a chain, leaf
   # to root: the floor std/rsa signs at and the CA/Browser Forum's for a
@@ -355,6 +391,24 @@ pub struct X509
   # (OpenSSL 3.5.5), so the two part only between 1990 and 2047 bits.
   # std/rsa itself reads keys down to 1024 bits.
   MIN_RSA_BITS = 2048
+  # An RSA key past this many bits is refused anywhere in a chain as well:
+  # a signature check costs its key's size squared, and a chain is a
+  # peer's to write, a client's before it has proved anything to a server.
+  # A 16384-bit key, the most std/rsa reads, made each of a search's
+  # checks cost 3 ms. The other library's verifier in Go has stopped at
+  # the same 8192 since CVE-2023-29409; no CA in the Web PKI signs with
+  # more than 4096.
+  MAX_RSA_BITS = 8192
+  # Comparisons of one of the leaf's names with one name constraint that
+  # one search for a chain may make. Each issuer weighed holds every name
+  # to every constraint, a leaf's names times an issuer's constraints, and
+  # a Certificate message has room for 6,300 of one and 900 of the other
+  # in each of five intermediates: 100 candidates of that took ten
+  # seconds. A search that would pass this many is refused. The figure is
+  # Go's, which counts it for each certificate; here it is one search's,
+  # every candidate weighed in it, so a chain Go takes at 200,000 under
+  # each of two issuers is refused here.
+  MAX_CONSTRAINT_COMPARISONS = 250_000_i64
 
   # Why *key*, *signer*'s, did not make *signature* over *signed* under
   # *algorithm* (an OID) and its *parameters*, or nil; *what* names what
@@ -399,7 +453,8 @@ pub struct X509
     "#{what}'s signature is not #{signer}'s"
   end
 
-  # Why *certificate*'s RSA key is under `MIN_RSA_BITS`, or nil.
+  # Why *certificate*'s RSA key is under `MIN_RSA_BITS` or past
+  # `MAX_RSA_BITS`, or nil.
   def self.weak_key_error(certificate : Certificate) : String?
     weak_key(certificate)
   end
@@ -414,20 +469,26 @@ pub struct X509
   # *host* (nil: any) at *now* - leaf first, root last - or why there is
   # none. *purpose* is what the leaf is for: a server's certificate
   # (serverAuth, the default) or a client's (clientAuth), each certificate
-  # that carries extKeyUsage allowing it. See the module's header for what
-  # else is checked.
+  # that carries extKeyUsage allowing it. *distrusted* is the DER of
+  # certificates never to be trusted: a chain is refused at any
+  # certificate that is one of them or holds the key of one. See the
+  # module's header for what else is checked.
   def self.verify(leaf : Certificate, intermediates : Array(Certificate), roots : Array(Certificate),
-                  host : String? = nil, now : Time = Time.utc, purpose : X509Purpose = X509Purpose::Server) : Array(Certificate) | X509Error
+                  host : String? = nil, now : Time = Time.utc, purpose : X509Purpose = X509Purpose::Server,
+                  distrusted : Array(Array(UInt8))? = nil) : Array(Certificate) | X509Error
     problem = leaf_error(leaf, host, now, purpose)
     return X509Error.new(problem) if problem
-    failures = [] of String
-    checks = [0]
-    chain = grow([leaf], intermediates, roots, now, failures, purpose, checks)
+    search = X509Search.new(intermediates, roots, now, purpose, distrusted)
+    problem = distrusted_error(leaf, search)
+    return X509Error.new(problem) if problem
+    chain = grow([leaf], 0, search)
     return chain if chain
-    if checks[0] > MAX_SIGNATURE_CHECKS
+    spent = search.spent
+    return X509Error.new(spent) if spent
+    if search.checks > MAX_SIGNATURE_CHECKS
       return X509Error.new("no chain from #{leaf.subject_name} within #{MAX_SIGNATURE_CHECKS} signature checks")
     end
-    return X509Error.new(failures[0]) unless failures.empty?
+    return X509Error.new(search.failures[0]) unless search.failures.empty?
     X509Error.new("no certificate here issued #{leaf.issuer_name}, the issuer of #{leaf.subject_name}")
   end
 
@@ -481,7 +542,7 @@ pub struct X509
       key.public_key_info,
       X509Der.explicit(3, X509Der.sequence(written)),
     ])
-    X509Der.sequence([tbs, key.algorithm_identifier, X509Der.bit_string(key.sign(tbs))])
+    X509Der.sequence([tbs, key.algorithm_identifier, X509Der.bit_string(key.sign(tbs)!)])
   end
 
   # A certificate request (PKCS #10, RFC 2986) *key* signs, as its DER: the
@@ -501,7 +562,7 @@ pub struct X509
       key.public_key_info,
       X509Der.tlv(0xA0_u8, attribute),
     ])
-    X509Der.sequence([info, key.algorithm_identifier, X509Der.bit_string(key.sign(info))])
+    X509Der.sequence([info, key.algorithm_identifier, X509Der.bit_string(key.sign(info)!)])
   end
 
   private def self.leaf_error(leaf : Certificate, host : String?, now : Time, purpose : X509Purpose) : String?
@@ -523,53 +584,82 @@ pub struct X509
     usages.includes?(purpose.oid) || usages.includes?(X509Oids::ANY_EXTENDED_KEY_USAGE)
   end
 
-  # Why *certificate*'s key is too weak to be in a chain, or nil.
+  # Why *certificate* is among the search's distrusted certificates, by
+  # its own bytes or by its key, or nil.
+  private def self.distrusted_error(certificate : Certificate, search : X509Search) : String?
+    if search.distrusted.any? { |der| der == certificate.raw }
+      return "#{certificate.subject_name} is a certificate that is distrusted"
+    end
+    if search.distrusted_keys.any? { |info| info == certificate.public_key_info }
+      return "#{certificate.subject_name} holds the key of a certificate that is distrusted"
+    end
+    nil
+  end
+
+  # Why *certificate*'s key is too weak to be in a chain, or too large to
+  # be checked with, or nil.
   private def self.weak_key(certificate : Certificate) : String?
     key = certificate.public_key
-    return nil unless key.is_a?(RsaPublicKey) && key.bits < MIN_RSA_BITS
+    return nil unless key.is_a?(RsaPublicKey)
+    if key.bits > MAX_RSA_BITS
+      return "#{certificate.subject_name}'s RSA key is #{key.bits} bits, past the #{MAX_RSA_BITS} a chain is held to"
+    end
+    return nil unless key.bits < MIN_RSA_BITS
     "#{certificate.subject_name}'s RSA key is #{key.bits} bits, under the #{MIN_RSA_BITS} a chain is held to"
   end
 
   # The chain grown from *chain* to a root, trying every issuer that
-  # matches, or nil; why each candidate failed goes to *failures*. Each
-  # candidate weighed counts in *checks*, and past `MAX_SIGNATURE_CHECKS`
-  # the search gives up.
-  private def self.grow(chain : Array(Certificate), intermediates : Array(Certificate), roots : Array(Certificate),
-                        now : Time, failures : Array(String), purpose : X509Purpose, checks : Array(Int32)) : Array(Certificate)?
+  # matches, or nil; why each candidate failed goes to the search's
+  # failures. *at* is the number of the chain's last certificate in the
+  # search. Each candidate weighed counts in the search's checks, and past
+  # `MAX_SIGNATURE_CHECKS`, or once its comparisons are spent, the search
+  # gives up.
+  private def self.grow(chain : Array(Certificate), at : Int32, search : X509Search) : Array(Certificate)?
     child = chain[chain.size - 1]
-    roots.each do |root|
+    search.roots.each_with_index do |root, i|
       next unless root.subject == child.issuer
-      checks[0] += 1
-      return nil if checks[0] > MAX_SIGNATURE_CHECKS
-      problem = issuer_error(child, root, chain, now, purpose)
+      search.checks = search.checks + 1
+      return nil if search.checks > MAX_SIGNATURE_CHECKS
+      problem = issuer_error(child, at, root, 1 + search.intermediates.size + i, chain, search)
+      return nil if search.spent
       if problem
-        failures << problem
+        search.failures << problem
       else
         return chain + [root]
       end
     end
     return nil if chain.size + 1 >= MAX_CHAIN
-    intermediates.each do |candidate|
+    search.intermediates.each_with_index do |candidate, i|
       next unless candidate.subject == child.issuer
       next if chain.any? { |c| c.raw == candidate.raw }
-      checks[0] += 1
-      return nil if checks[0] > MAX_SIGNATURE_CHECKS
-      problem = issuer_error(child, candidate, chain, now, purpose)
+      search.checks = search.checks + 1
+      return nil if search.checks > MAX_SIGNATURE_CHECKS
+      problem = issuer_error(child, at, candidate, 1 + i, chain, search)
+      return nil if search.spent
       if problem
-        failures << problem
+        search.failures << problem
         next
       end
-      found = grow(chain + [candidate], intermediates, roots, now, failures, purpose, checks)
+      found = grow(chain + [candidate], 1 + i, search)
       return found if found
-      return nil if checks[0] > MAX_SIGNATURE_CHECKS
+      return nil if search.checks > MAX_SIGNATURE_CHECKS || search.spent
     end
     nil
   end
 
-  # Why *issuer* cannot be the next certificate above *child*, the last of
-  # *chain*, or nil.
-  private def self.issuer_error(child : Certificate, issuer : Certificate, chain : Array(Certificate), now : Time, purpose : X509Purpose) : String?
+  # Why *issuer*, the search's certificate number *issuer_at*, cannot be
+  # the next certificate above *child*, its number *child_at* and the last
+  # of *chain*, or nil. What costs least is asked first, and the leaf's
+  # names are held to the issuer's constraints only once the issuer's key
+  # is known to have signed the child: a candidate anyone can write, a
+  # certificate under the issuer's name with constraints by the thousand,
+  # costs one signature check and no more.
+  private def self.issuer_error(child : Certificate, child_at : Int32, issuer : Certificate, issuer_at : Int32,
+                                chain : Array(Certificate), search : X509Search) : String?
     name = issuer.subject_name
+    distrusted = distrusted_error(issuer, search)
+    return distrusted if distrusted
+    now = search.now
     return "#{name} is not valid at #{now}: from #{issuer.not_before} to #{issuer.not_after}" unless issuer.valid_at?(now)
     weak = weak_key(issuer)
     return weak if weak
@@ -583,10 +673,44 @@ pub struct X509
     if length && chain.size - 1 > length
       return "#{name} allows #{length} CA certificates under it, and the chain has #{chain.size - 1}"
     end
-    return "#{name} is not allowed #{purpose.usage}" unless allowed?(issuer, purpose)
-    problem = constraint_error(chain[0], issuer)
+    return "#{name} is not allowed #{search.purpose.usage}" unless allowed?(issuer, search.purpose)
+    problem = signed_error(child, child_at, issuer, search)
     return problem if problem
-    child.signature_error(issuer)
+    judged_error(chain[0], issuer, issuer_at, search)
+  end
+
+  # Why *issuer*'s key did not sign *child*, or nil, asked of the key once
+  # in a search: the answer is the same for every certificate that holds
+  # that key under that name, so intermediates that share a key and sign
+  # each other cost one check for each certificate they signed, not one
+  # for each order of them.
+  private def self.signed_error(child : Certificate, child_at : Int32, issuer : Certificate, search : X509Search) : String?
+    known = search.signed[child_at]
+    known.each_with_index do |key, i|
+      return search.signatures[child_at][i] if key == issuer.public_key_info
+    end
+    answer = child.signature_error(issuer)
+    known << issuer.public_key_info
+    search.signatures[child_at] << answer
+    answer
+  end
+
+  # Why *leaf*'s names fall outside *issuer*'s constraints, or nil, judged
+  # once in a search for each issuer, and within the search's
+  # `MAX_CONSTRAINT_COMPARISONS`: past them the search is over.
+  private def self.judged_error(leaf : Certificate, issuer : Certificate, issuer_at : Int32, search : X509Search) : String?
+    return search.verdicts[issuer_at] if search.judged[issuer_at]
+    cost = leaf.dns_names.size.to_i64 * (issuer.permitted_dns.size + issuer.excluded_dns.size).to_i64 +
+           leaf.ip_addresses.size.to_i64 * (issuer.permitted_ips.size + issuer.excluded_ips.size).to_i64
+    search.comparisons = search.comparisons + cost
+    if search.comparisons > MAX_CONSTRAINT_COMPARISONS
+      search.spent = "#{leaf.subject_name}'s names take more than #{MAX_CONSTRAINT_COMPARISONS} comparisons to hold to the name constraints over them"
+      return search.spent
+    end
+    verdict = constraint_error(leaf, issuer)
+    search.judged[issuer_at] = true
+    search.verdicts[issuer_at] = verdict
+    verdict
   end
 
   private def self.constraint_error(leaf : Certificate, issuer : Certificate) : String?
@@ -621,14 +745,68 @@ pub struct X509
       end
     end
     leaf.ip_addresses.each do |ip|
-      unless issuer.permitted_ips.empty? || issuer.permitted_ips.any? { |c| X509Names.ip_within?(ip, c) }
+      # Permitted is asked of the address a socket reaches, the IPv4 one
+      # an IPv4-mapped entry stands for: `matches_host?` takes that entry
+      # for the IPv4 host, and a CA permitted ::/0 alone was never
+      # permitted an IPv4 address. Excluded is asked of either spelling.
+      plain = X509Names.unmapped(ip)
+      unless issuer.permitted_ips.empty? || issuer.permitted_ips.any? { |c| X509Names.ip_under?(plain, c) }
         return "#{X509Names.ip_text(ip)} is outside the addresses #{name} permits"
       end
-      if issuer.excluded_ips.any? { |c| X509Names.ip_within?(ip, c) }
+      if issuer.excluded_ips.any? { |c| X509Names.ip_under?(ip, c) }
         return "#{X509Names.ip_text(ip)} is among the addresses #{name} excludes"
       end
     end
     nil
+  end
+end
+
+# One search for a chain: what `X509.verify` was given, and what the
+# search has spent and learnt. Its certificates are numbered, the leaf 0,
+# then the intermediates, then the roots, and what is learnt of one is
+# kept under its number.
+class X509Search
+  getter intermediates : Array(Certificate)
+  getter roots : Array(Certificate)
+  getter now : Time
+  getter purpose : X509Purpose
+  # Certificates never to be trusted, each as its DER, and the
+  # SubjectPublicKeyInfo of each that has one to find.
+  getter distrusted : Array(Array(UInt8))
+  getter distrusted_keys : Array(Array(UInt8))
+  # Why each candidate that failed did.
+  getter failures : Array(String)
+  # Candidates weighed, and comparisons of a name with a constraint.
+  property checks : Int32
+  property comparisons : Int64
+  # Why the search ended before every candidate was weighed, once it has.
+  property spent : String?
+  # For each certificate, the keys its signature was checked under, each
+  # a SubjectPublicKeyInfo, and what each check answered.
+  getter signed : Array(Array(Array(UInt8)))
+  getter signatures : Array(Array(String?))
+  # For each certificate, whether the leaf's names were held to its
+  # constraints, and the verdict.
+  getter judged : Array(Bool)
+  getter verdicts : Array(String?)
+
+  def initialize(@intermediates : Array(Certificate), @roots : Array(Certificate), @now : Time, @purpose : X509Purpose,
+                 distrusted : Array(Array(UInt8))?)
+    @distrusted = distrusted || [] of Array(UInt8)
+    @distrusted_keys = [] of Array(UInt8)
+    @distrusted.each do |der|
+      info = X509Keys.info_of(der)
+      @distrusted_keys << info if info
+    end
+    count = 1 + @intermediates.size + @roots.size
+    @failures = [] of String
+    @checks = 0
+    @comparisons = 0_i64
+    @spent = nil
+    @signed = Array(Array(Array(UInt8))).new(count) { [] of Array(UInt8) }
+    @signatures = Array(Array(String?)).new(count) { [] of String? }
+    @judged = Array(Bool).new(count, false)
+    @verdicts = Array(String?).new(count, nil)
   end
 end
 
@@ -867,6 +1045,22 @@ struct X509Keys
     end
   end
 
+  # The SubjectPublicKeyInfo in a certificate's DER, as written, or nil
+  # where there is none to find: the sixth value of its TBSCertificate
+  # after the version, whatever the rest of it says, so that a
+  # certificate `Certificate.parse` refuses still names its key.
+  def self.info_of(der : Array(UInt8)) : Array(UInt8)?
+    whole = Der.parse(der)
+    return nil if whole.is_a?(Asn1Error)
+    outer = whole.sequence
+    return nil if outer.is_a?(Asn1Error) || outer.empty?
+    tbs = outer[0].sequence
+    return nil if tbs.is_a?(Asn1Error)
+    at = tbs.size > 0 && tbs[0].context?(0) ? 6 : 5
+    return nil unless tbs.size > at && tbs[at].universal?(DerTag::SEQUENCE)
+    tbs[at].raw
+  end
+
   # A key's kind, for a sentence.
   def self.kind(key : RsaPublicKey | EcdsaPublicKey | Ed25519PublicKey) : String
     case key
@@ -1029,6 +1223,40 @@ struct X509Names
     true
   end
 
+  # Whether an address falls in an address-and-mask constraint, as written
+  # or as the IPv4 address and range an IPv4-mapped IPv6 one stands for.
+  # 10.0.0.1 and ::ffff:10.0.0.1 are one host to a socket, and an excluded
+  # 10.0.0.0/8 that held only the first let a constrained CA certify the
+  # second.
+  def self.ip_under?(address : Array(UInt8), range : Array(UInt8)) : Bool
+    return true if ip_within?(address, range)
+    plain = unmapped(address)
+    narrow = unmapped_range(range)
+    return false if plain.size == address.size && narrow.size == range.size
+    ip_within?(plain, narrow)
+  end
+
+  # An IPv4-mapped IPv6 address (RFC 4291 section 2.5.5.2), ten bytes of
+  # zero and two of 0xFF before an IPv4 address, as that address's four
+  # bytes; any other address as it is.
+  def self.unmapped(address : Array(UInt8)) : Array(UInt8)
+    return address unless address.size == 16 && mapped?(address)
+    address[12, 4]
+  end
+
+  # An IPv6 address-and-mask range that lies inside ::ffff:0:0/96 as the
+  # IPv4 range it stands for; any other range as it is.
+  def self.unmapped_range(range : Array(UInt8)) : Array(UInt8)
+    return range unless range.size == 32 && mapped?(range)
+    12.times { |i| return range unless range[16 + i] == 0xFF_u8 }
+    range[12, 4] + range[28, 4]
+  end
+
+  private def self.mapped?(bytes : Array(UInt8)) : Bool
+    10.times { |i| return false unless bytes[i] == 0_u8 }
+    bytes[10] == 0xFF_u8 && bytes[11] == 0xFF_u8
+  end
+
   def self.ip_text(address : Array(UInt8)) : String
     return address.map(&.to_s).join(".") if address.size == 4
     groups = [] of String
@@ -1158,6 +1386,15 @@ struct X509Pem
 
   private def self.decode(text : String, label : String) : Array(UInt8) | X509Error
     return X509Error.new("a #{label} block whose base64 is #{text.bytesize} bytes, not a multiple of 4") unless text.bytesize % 4 == 0 && text.bytesize > 0
+    # A private key's block is read by `Base64.decode_secret`: no table is
+    # looked into by its bytes and nothing branches on them, so the
+    # refusal cannot say which byte it was. It is the strict reader, too:
+    # a last character with bits past the data is refused.
+    if label.ends_with?("PRIVATE KEY")
+      secret = Base64.decode_secret(text)
+      return X509Error.new("a #{label} block that is not base64") if secret.is_a?(Base64Error)
+      return secret
+    end
     padding = 0
     padding = 1 if text.ends_with?("=")
     padding = 2 if text.ends_with?("==")
@@ -1389,8 +1626,9 @@ pub struct SigningKey
     X509Der.sequence([X509Der.oid(X509Oids::ED25519)])
   end
 
-  # *data* signed as `algorithm_identifier` says.
-  def sign(data : Array(UInt8)) : Array(UInt8)
+  # *data* signed as `algorithm_identifier` says, or an error where an RSA
+  # key's signature did not check against the key (std/rsa says when).
+  def sign(data : Array(UInt8)) : Array(UInt8) | X509Error
     if key = @p256
       return key.sign(EcdsaHash::SHA256, data)
     end
@@ -1398,7 +1636,8 @@ pub struct SigningKey
       return key.sign(EcdsaHash::SHA384, data)
     end
     if key = @rsa
-      return key.sign_pkcs1v15(RsaHash::SHA256, data)
+      signed = key.sign_pkcs1v15(RsaHash::SHA256, data)
+      return signed.is_a?(RsaError) ? X509Error.new(signed.message) : signed
     end
     X509Der.bytes(Ed25519.sign(ed25519_seed, data))
   end

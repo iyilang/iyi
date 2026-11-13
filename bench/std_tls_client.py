@@ -212,6 +212,7 @@ SCENARIOS = {
     "early-replay": ("the ClientHello and early data of a connection whose early data was taken, sent again: refused",
                      ("held", ('early=""', "resumed=yes scripted-resumed=yes"))),
     "early-too-much": ("16,385 bytes early, past the 16,384 the ticket allows", ("alert", 10)),
+    "early-idle": ("33 early records of no bytes, one after another, before EndOfEarlyData", ("alert", 10)),
     "early-bad-record": ("an early record one bit off, after the server took early data", ("alert", 20)),
     "early-finished-early": ("Finished under the early keys where EndOfEarlyData belongs", ("alert", 10)),
     "early-stale": ("early data with a ticket age 20 s off the server's count: refused", ("held", ('early=""', "resumed=yes"))),
@@ -866,7 +867,7 @@ def scenario(c, name, offer=None, extra=None, replay=None):
         types.append(t)
         i += 4 + n
     taken = 42 in types
-    wanted = early_data is not None and replay is None and name in ("early-ok", "early-request", "early-too-much", "early-bad-record",
+    wanted = early_data is not None and replay is None and name in ("early-ok", "early-request", "early-too-much", "early-bad-record", "early-idle",
                                                                     "early-finished-early", "early-replay", "early-split-eoed",
                                                                     "early-split-close", "early-padded-over")
     assert taken == wanted, f"early data {'taken' if taken else 'refused'} where it should {'' if wanted else 'not '}be"
@@ -980,6 +981,10 @@ def scenario(c, name, offer=None, extra=None, replay=None):
         c.sock.sendall(early_writer.seal(22, message(20, schedule.finished(c_hs, transcript))))
     elif taken:
         ended = message(5, b"")
+        if name == "early-idle":
+            # Records that bring the server's reads nothing: no more of
+            # them in a row than after the handshake.
+            c.sock.sendall(b"".join(early_writer.seal(23, b"") for _ in range(33)))
         if name == "early-split-eoed":
             c.sock.sendall(early_writer.seal(22, ended[:2]) + early_writer.seal(23, b"early:more"))
         elif name == "early-split-close":

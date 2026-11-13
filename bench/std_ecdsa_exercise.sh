@@ -9,8 +9,9 @@
 # it plain and --release, holds 600 signatures over the three curves and
 # three hashes, most of them broken some way, to Python's verdicts, checks
 # every ECDSA root certificate's signature with its own key as Python does,
-# shows an error value's sentence through `.or_panic`, and proves on broken
-# copies of the module that the checks fail where they say.
+# shows an error value's sentence through `.or_panic`, reads in the IR how
+# P-256's table of G's multiples reaches a second thread, and proves on
+# broken copies of the module that the checks fail where they say.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -248,6 +249,69 @@ else
 fi
 
 echo
+echo "== how a table's address reaches a second thread, read off the IR"
+# P-256's table of G's odd multiples is worked out by the first check that
+# wants it, and a second thread must never read it part written: a good
+# signature would be refused. On x86_64 a plain store of the table's
+# address after its entries is seen in that order by every thread; on a
+# machine that orders its stores loosely it is not, and no run on this one
+# would show it. So it is read off the IR of a small program: every read
+# of the word the address is kept in has to be an acquire load and its one
+# write a release store.
+cat >"$WORK/published.iyi" <<'IYI'
+module published
+
+import std/ecdsa::{EcdsaPublicKey, EcdsaCurve, EcdsaHash}
+
+# G itself, uncompressed, and a signature of r = 1, s = 1.
+g = [
+  0x04_u8, 0x6b_u8, 0x17_u8, 0xd1_u8, 0xf2_u8, 0xe1_u8, 0x2c_u8, 0x42_u8, 0x47_u8, 0xf8_u8, 0xbc_u8,
+  0xe6_u8, 0xe5_u8, 0x63_u8, 0xa4_u8, 0x40_u8, 0xf2_u8, 0x77_u8, 0x03_u8, 0x7d_u8, 0x81_u8, 0x2d_u8,
+  0xeb_u8, 0x33_u8, 0xa0_u8, 0xf4_u8, 0xa1_u8, 0x39_u8, 0x45_u8, 0xd8_u8, 0x98_u8, 0xc2_u8, 0x96_u8,
+  0x4f_u8, 0xe3_u8, 0x42_u8, 0xe2_u8, 0xfe_u8, 0x1a_u8, 0x7f_u8, 0x9b_u8, 0x8e_u8, 0xe7_u8, 0xeb_u8,
+  0x4a_u8, 0x7c_u8, 0x0f_u8, 0x9e_u8, 0x16_u8, 0x2b_u8, 0xce_u8, 0x33_u8, 0x57_u8, 0x6b_u8, 0x31_u8,
+  0x5e_u8, 0xce_u8, 0xcb_u8, 0xb6_u8, 0x40_u8, 0x68_u8, 0x37_u8, 0xbf_u8, 0x51_u8, 0xf5_u8,
+]
+key = EcdsaPublicKey.from_point(EcdsaCurve::P256, g).or_panic
+puts key.verify(EcdsaHash::SHA256, "hello", [0x30_u8, 6_u8, 2_u8, 1_u8, 1_u8, 2_u8, 1_u8, 1_u8])
+IYI
+# published <file.ll> <class variable>: what in the IR reads or writes the
+# word a table's address is kept in other than by an acquire load and a
+# release store, a line each; 1 if anything does, or if either is missing.
+# The zero the word starts from is a plain store, made before the
+# program's first line.
+published() {
+  awk -v name="$2" '
+    !(index($0, "@\"" name "\"") || index($0, "@\"" name ".")) || /^@/ || /store i64 0, ptr @/ { next }
+    / = load atomic i64, ptr @[^ ]* acquire,/ { loads++; next }
+    /store atomic i64 [^,]*, ptr @[^ ]* release,/ { stores++; next }
+    { print name ": neither an acquire load nor a release store:" $0; other++ }
+    END {
+      if (!loads) print name ": no acquire load of it"
+      if (!stores) print name ": no release store to it"
+      exit (other || !loads || !stores) ? 1 : 0
+    }' "$1"
+}
+# The IR is one pinned target's whatever the host is: the orderings are
+# the module's request, the same for every target, and `--cross-compile`
+# writes the IR and links nothing, so no toolchain for it is needed.
+# published_ir <search path> <file>: the program above built into <file>.ll.
+published_ir() {
+  IYI_PATH="$1" "$IYI" build --release --emit llvm-ir --cross-compile --target x86_64-unknown-linux-gnu \
+    -o "$2" "$WORK/published.iyi" >"$2.log" 2>&1 && [ -s "$2.ll" ]
+}
+: >"$WORK/published.out"
+if ! published_ir "$IYI_PATH" "$WORK/published"; then
+  echo "  no IR was written: $(grep -m1 -E 'Error|BUG' "$WORK/published.log")"
+  status=1
+elif published "$WORK/published.ll" 'Std::Ecdsa::EcdsaP256::g_table' >>"$WORK/published.out"; then
+  echo "  the table's address is read by an acquire load and written, once the table is whole, by a release store"
+else
+  sed 's/^/  /' "$WORK/published.out"
+  status=1
+fi
+
+echo
 echo "== proving the checks can fail when the module is broken"
 # prove_broken <label> <phrase> <old> <new>: the exercise must fail on a
 # copy of the module with <old> replaced, at the check that names <phrase>.
@@ -333,6 +397,33 @@ prove_broken "a coordinate past p taken" "a coordinate past p refused" \
 prove_broken "explicit parameters read as a curve's name" "explicit curve parameters refused" \
   'unless algorithm.size == 2 && algorithm[1].universal?(DerTag::OBJECT_IDENTIFIER)' 'if false'
 
+# prove_unpublished <label> <variable> <phrase> <sed script>: the exercise
+# cannot tell how a table's address reaches a second thread, its answers
+# being the same; the reading of the IR has to refuse the copy, with
+# <phrase> in what it says.
+prove_unpublished() {
+  rm -rf "$WORK/unpublished"
+  mkdir -p "$WORK/unpublished/std"
+  sed -e "$4" "$REPO/src/std/ecdsa.iyi" >"$WORK/unpublished/std/ecdsa.iyi"
+  if cmp -s "$REPO/src/std/ecdsa.iyi" "$WORK/unpublished/std/ecdsa.iyi"; then
+    echo "  $1: the patch changed nothing, so this proves nothing"
+    status=1
+  elif ! published_ir "$WORK/unpublished${PSEP}$IYI_PATH" "$WORK/unpublished/ir"; then
+    echo "  $1: the patched module did not build: $(grep -m1 -E 'Error|BUG' "$WORK/unpublished/ir.log")"
+    status=1
+  elif published "$WORK/unpublished/ir.ll" "$2" >"$WORK/mut.out"; then
+    echo "  the IR of $1 was read as sound"
+    status=1
+  elif grep -qF "$3" "$WORK/mut.out"; then
+    echo "  $1 is caught"
+  else
+    echo "  $1 was refused, but not for what it is:"
+    sed 's/^/    /' "$WORK/mut.out"
+    status=1
+  fi
+}
+prove_unpublished "a table's address stored with no ordering" 'Std::Ecdsa::EcdsaP256::g_table' "no release store to it" \
+  's/^    @@g_table.set_release(table.address)$/    @@g_table.set_relaxed(table.address)/'
 echo
 if [ "$status" -eq 0 ]; then
   echo "the std/ecdsa exercise holds ($mutations breaks caught)"

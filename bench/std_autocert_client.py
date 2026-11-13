@@ -93,13 +93,41 @@ def acme_identifier(leaf):
 # --- the local cache's files, and the challenge certificate ---
 
 
+def windows_dacl(path):
+    """The access list of *path* as PowerShell's Get-Acl writes it (SDDL,
+    which names the well-known accounts the same in every language): its
+    flags, and the trustee of each entry."""
+    said = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", "(Get-Acl -LiteralPath $env:IYI_ACL_PATH).Sddl"],
+                          env=dict(os.environ, IYI_ACL_PATH=path), capture_output=True, text=True).stdout.strip()
+    dacl = re.search(r"D:([A-Z]*)((?:\([^)]*\))*)", said)
+    if not dacl:
+        return "", [f"no DACL in {said!r}"]
+    return dacl.group(1), [entry.split(";")[5] for entry in re.findall(r"\(([^)]*)\)", dacl.group(2))]
+
+
 def modes(directory, name="cache files are 0600"):
     """Every file in the cache holds a private key: none may be read or
     written by group or others, and the directory is the owner's alone.
-    Each key reads back with cryptography, and a certificate's key is its
-    leaf's."""
+    On Windows, where a mode keeps nobody out, the directory's access list
+    is protected from its parent's and lets in the owner, SYSTEM and the
+    Administrators alone, and each file's is that, inherited. Each key
+    reads back with cryptography, and a certificate's key is its leaf's."""
     if os.name == "nt":
-        ok(name, "not measured: Windows has no POSIX modes, and the cache's files take the directory's ACL")
+        # The owner's rights, SYSTEM, the Administrators, and the account
+        # this runs as, which whoami names by its SID. SDDL writes the
+        # machine's built-in Administrator (RID 500) as `LA` rather than
+        # by its SID, and that is who a hosted runner runs as.
+        me = re.search(r"S-1-[0-9-]+", subprocess.run(["whoami", "/user"], capture_output=True, text=True).stdout)
+        own = {"OW", "SY", "BA"} | ({me.group(0)} if me else set())
+        if me and me.group(0).endswith("-500"):
+            own.add("LA")
+        flags, trustees = windows_dacl(directory)
+        entries = sorted(os.listdir(directory))
+        loose = [f"{e} lets in {', '.join(sorted(set(t) - own))}" for e in entries
+                 for t in [windows_dacl(os.path.join(directory, e))[1]] if not t or set(t) - own]
+        each = "; ".join(loose) or "each the directory's"
+        held(entries and not loose and "P" in flags and trustees and not set(trustees) - own, "the cache's access list is its own",
+             f"{len(entries)} files, {each}; the directory D:{flags} for {', '.join(trustees)}")
     else:
         entries = sorted(os.listdir(directory))
         loose = [f"{e} {oct(os.stat(os.path.join(directory, e)).st_mode & 0o777)}" for e in entries

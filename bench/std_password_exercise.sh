@@ -160,7 +160,9 @@ echo "== bcrypt against python's bcrypt"
 # Python's bcrypt package hashes sixteen random passwords (1 to 255 each
 # byte, no NUL, 0 to 100 bytes, so past 72 too) at costs 4 and 5 under
 # `$2a$`, `$2b$` and `$2y$`, and iyi must verify each and refuse it a
-# changed password; iyi hashes ten more, which Python must verify.
+# changed password; iyi hashes ten more, of 0 to 72 bytes, which Python
+# must verify. A password past 72 bytes is hashed in Python as the 72 a
+# cutting bcrypt keeps, and iyi must verify those 72 and refuse the whole.
 if [ -z "$PY" ] || ! "$PY" -c 'import bcrypt' >/dev/null 2>&1; then
   echo "  python's bcrypt package is not installed here, so bcrypt goes uncompared with it"
 else
@@ -175,15 +177,21 @@ for i in range(16):
     pw = password()
     prefix = [b"2a", b"2b", b"2b"][i % 3]
     # Python's bcrypt refuses a password past 72 bytes rather than cut
-    # it; it is given the 72 that count, and iyi the whole password.
+    # it, as iyi does; it is given the 72 a cutting bcrypt would key.
     stored = bcrypt.hashpw(pw[:72], bcrypt.gensalt(4 + i % 2, prefix=prefix)).decode()
     if i % 3 == 2:
         stored = "$2y$" + stored[4:]
-    # A changed password: one byte more when that byte still counts,
-    # else its first byte turned.
-    other = pw + b"x" if len(pw) < 72 else bytes([pw[0] ^ 1]) + pw[1:]
-    lines.append(f'puts "verify {i} {stored[:7]} #{{Bcrypt.verify(b("{pw.hex()}"), "{stored}")}} #{{Bcrypt.verify(b("{other.hex()}"), "{stored}")}}"')
-made = [password() for _ in range(10)]
+    # A changed password: one byte more when the key has room for it,
+    # its last byte turned at exactly 72, and past 72 the whole
+    # password, which must not verify as its first 72.
+    if len(pw) < 72:
+        other = pw + b"x"
+    elif len(pw) == 72:
+        other = pw[:71] + bytes([pw[71] ^ 1 or 2])
+    else:
+        other = pw
+    lines.append(f'puts "verify {i} {stored[:7]} #{{Bcrypt.verify(b("{pw[:72].hex()}"), "{stored}")}} #{{Bcrypt.verify(b("{other.hex()}"), "{stored}")}}"')
+made = [password()[:72] for _ in range(10)]
 for i, pw in enumerate(made):
     lines.append(f'puts "made {i} #{{Bcrypt.hash(b("{pw.hex()}"), 4)}}"')
 open(os.path.join(work, "bcrypt_cases.iyi"), "w").write("\n".join(lines) + "\n")
@@ -204,7 +212,7 @@ for _, i, prefix, right, wrong in verified:
         print(f"  python's hash {i} ({prefix}): iyi answered {right} for its password and {wrong} for another"); bad += 1
 hashed = [line.split() for line in got if line.startswith("made ")]
 for _, i, stored in hashed:
-    if not bcrypt.checkpw(made[int(i)][:72], stored.encode()):
+    if not bcrypt.checkpw(made[int(i)], stored.encode()):
         print(f"  iyi's hash {i} does not verify in python: {stored}"); bad += 1
 if len(verified) != 16 or len(hashed) != 10:
     print(f"  {len(verified)} verifications and {len(hashed)} hashes came back, not 16 and 10"); bad += 1
@@ -279,6 +287,14 @@ when "bcrypt-cost-3"
   Bcrypt.hash("password", 3)
 when "bcrypt-cost-32"
   Bcrypt.hash("password", 32)
+when "bcrypt-73-bytes"
+  Bcrypt.hash("0123456789" * 7 + "abc", 4)
+when "bcrypt-73-bytes-as-bytes"
+  Bcrypt.hash(Array(UInt8).new(73, 120_u8), 4)
+when "bcrypt-nul"
+  Bcrypt.hash("pass\0word", 4)
+when "bcrypt-digest-with-a-nul"
+  Bcrypt.hash([0_u8, 200_u8, 31_u8, 7_u8], 4)
 when "scrypt-n-1000"
   Scrypt.derive("password", "salt", 1000, 8, 1, 32)
 when "scrypt-n-1"
@@ -313,6 +329,10 @@ refuse() { # refuse <case> <phrase>
 }
 refuse bcrypt-cost-3 "Bcrypt: the cost must be from 4 to 31, not 3"
 refuse bcrypt-cost-32 "Bcrypt: the cost must be from 4 to 31, not 32"
+refuse bcrypt-73-bytes "Bcrypt: the password must be at most 72 bytes, not 73"
+refuse bcrypt-73-bytes-as-bytes "Bcrypt: the password must be at most 72 bytes, not 73"
+refuse bcrypt-nul "Bcrypt: the password must not hold a NUL byte; bytes that are not text are encoded first, in base64 or hexadecimal"
+refuse bcrypt-digest-with-a-nul "Bcrypt: the password must not hold a NUL byte; bytes that are not text are encoded first, in base64 or hexadecimal"
 refuse scrypt-n-1000 "Scrypt: n must be a power of two above 1, not 1000"
 refuse scrypt-n-1 "Scrypt: n must be a power of two above 1, not 1"
 refuse scrypt-r-0 "Scrypt: r must be at least 1, not 0"
@@ -365,6 +385,18 @@ prove_broken "a bcrypt that never uses its salt" "a hash given another salt does
     st = Pointer(UInt32).malloc(1042_u64)'
 prove_broken "a bcrypt that ignores its cost" "a hash relabelled with another cost does not verify" \
   'rounds = 1_i64.unsafe_shl(cost)' 'rounds = 16_i64'
+# Without the refusals the key is still built, of the first 72 bytes, and
+# of the password and its NUL cycled: "a", NUL, "a" cycles to what "a" does.
+prove_broken "a verify that cuts a long password to its first 72 bytes" "a password past 72 bytes does not verify as its first 72" \
+  '    return false if count > 72' '    return false if count > 7200'
+prove_broken "a verify that keys a password holding a NUL" "a password repeated after a NUL does not verify as the password" \
+  '    return false if nul?(bytes, count)' '    return false if false'
+prove_broken "a verify that works at whatever cost the hash names" "a hash naming a cost past max_cost does not verify" \
+  '    return false if cost > max_cost' '    return false if cost > 31'
+# This one does the 131072 key schedules before it fails, so it is the
+# slow proof: seconds, where the others are a build.
+prove_broken "a default max_cost of 17" "a hash naming cost 17 is refused under the default max_cost" \
+  'max_cost : Int32 = 16' 'max_cost : Int32 = 17'
 prove_broken "Salsa20 at six rounds rather than eight" "rfc 7914 case 1" \
   'while double_round < 4' 'while double_round < 3'
 # With r = 1 the two halves are one block each and either order is the

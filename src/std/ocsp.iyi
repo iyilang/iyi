@@ -36,7 +36,8 @@
 #     section 4.2.2.2 has it), allowed digitalSignature if it carries
 #     keyUsage, and with no critical extension this does not understand.
 #     Signatures are std/x509's: SHA-1 is refused as it is in a
-#     certificate, and so is an RSA key under `X509::MIN_RSA_BITS`;
+#     certificate, and so is an RSA key under `X509::MIN_RSA_BITS` or
+#     past `X509::MAX_RSA_BITS`;
 #   * a SingleResponse whose CertID is the leaf's: issuerNameHash the hash
 #     of the leaf's issuer name, issuerKeyHash the hash of the issuer's
 #     key, and serialNumber the leaf's;

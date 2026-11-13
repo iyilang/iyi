@@ -658,6 +658,9 @@ while IFS= read -r annotation; do
     # (`GetUserNameW`) and the process token's SIDs, which are advapi32's
     # alone, and leaves netapi32's account database and userenv's profile
     # call unlinked.
+    # `std/autocert` sets the access list of its cache's directory there
+    # (`SetNamedSecurityInfoW`): a mode keeps nobody out of a file on
+    # Windows, and its entries are private keys.
     '@[Link("advapi32")]') ;;
     # Windows' sockets are Winsock's: `ws2_32` is the platform's network
     # interface the way kernel32 is its process interface, it ships with

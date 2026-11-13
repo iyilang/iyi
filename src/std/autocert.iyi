@@ -104,8 +104,16 @@
 # name. `AutocertDirCache` is a directory, made 0700 where it is not
 # there, each entry written to a file of its own and renamed over the
 # old - so a reader sees the old or the new whole - and created 0600:
-# every entry holds a private key. A program can hold them elsewhere with
-# a class of its own that implements the trait.
+# every entry holds a private key. On Windows a mode says nothing of who
+# may read a file - a file has the access list of the directory it is
+# made in, and under `C:\ProgramData` that lets every user read - so the
+# directory is given a list of its own instead, there already or not,
+# before the first entry is written: its owner, the account the program
+# runs as, SYSTEM and the Administrators, and nothing inherited from
+# above it; an entry inherits
+# that, and a directory whose list cannot be set is not written to. A
+# program can hold them elsewhere with a class of its own that implements
+# the trait.
 #
 # Not here: ACME Renewal Information (RFC 9773) - renewal is by the
 # certificate's dates alone; jitter on the renewal time; RSA certificate
@@ -122,6 +130,7 @@
 # manager does not trust refused and not cached, a handshake's wait cut
 # to its deadline, and the cache's modes.
 
+@[Unsafe("on Windows the access list of the cache's directory is set through advapi32, whose calls take and answer raw pointers")]
 module std/autocert
 
 import std/acme::{AcmeClient, AcmeError, AcmeHttp01, AcmeTlsAlpn01, AcmeOrder}
@@ -136,6 +145,23 @@ import std/mutex::{Mutex}
 import std/random::{Random}
 import std/base64::{Base64}
 import std/time::{Time, Span}
+import std/user::{User}
+
+{% if flag?(:win32) %}
+  # The access list of the cache's directory. advapi32 is one a program
+  # that connects by name already links (std/socket reads the registry
+  # through it, std/random its bytes), so these are calls and no new DLL.
+  @[Link("advapi32")]
+  lib LibAdvapi32
+    fun ConvertStringSecurityDescriptorToSecurityDescriptorW(text : UInt16*, revision : UInt32, descriptor : Void**, size : UInt32*) : Int32
+    fun GetSecurityDescriptorDacl(descriptor : Void*, present : Int32*, dacl : Void**, defaulted : Int32*) : Int32
+    fun SetNamedSecurityInfoW(name : UInt16*, kind : Int32, information : UInt32, owner : Void*, group : Void*, dacl : Void*, sacl : Void*) : UInt32
+  end
+
+  lib LibKernel32
+    fun LocalFree(memory : Void*) : Void*
+  end
+{% end %}
 
 # Why a certificate could not be had, or the cache not read or written.
 pub struct AutocertError
@@ -168,8 +194,11 @@ end
 # is made, 0700, the first time it is written to where it is not there;
 # an entry is written to a file of its own in it, created 0600 (the
 # umask may take more away, never less), then renamed over the old one.
+# On Windows, where those modes keep nobody out, the directory's access
+# list is set before the first entry is written (`AutocertFiles.keep`).
 pub class AutocertDirCache
   getter dir : String
+  @kept : Bool = false
 
   def initialize(@dir : String)
   end
@@ -200,6 +229,10 @@ impl AutocertCache for AutocertDirCache
     return path if path.is_a?(AutocertError)
     AutocertFiles.guarded("writing #{path}") do
       Dir.mkdir_p(@dir, 0o700) unless Dir.exists?(@dir)
+      unless @kept
+        AutocertFiles.keep(@dir)
+        @kept = true
+      end
       temporary = "#{path}.#{AutocertPem.hex(Random::Secure.random_bytes(8))}.tmp"
       File.open(temporary, "w", perm: 0o600) { |io| io.write(data) }
       File.rename(temporary, path)
@@ -229,6 +262,49 @@ struct AutocertFiles
       0
     end
     failure
+  end
+
+  # The directory *dir* kept to those who may read a private key. Where a
+  # mode does that (`Dir.mkdir_p(dir, 0o700)`, `File.open(..., perm:
+  # 0o600)`) there is nothing more to do. On Windows the directory is
+  # given a protected access list - none of its parent's entries come
+  # down to it - that lets in whoever owns an object in it, the account
+  # the program runs as, SYSTEM and the Administrators, inherited by
+  # every file and directory made in it
+  # and written over what those already there inherited; it panics, with
+  # the system's error, where the list cannot be set, so that a key is
+  # not written beside one that lets others read it.
+  def self.keep(dir : String) : Nil
+    {% if flag?(:win32) %}
+      # D:P a protected DACL; each entry allows (A) full access (FA), to
+      # this object and what is made in it (OICI), to OW the owner's
+      # rights, SY SYSTEM, BA the Administrators and the account this
+      # program runs as, by its SID - which is not always the directory's
+      # owner: a service handed a directory an administrator made would
+      # otherwise write itself out of it.
+      account = User.current.id
+      sddl = "D:P(A;OICI;FA;;;OW)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+      sddl = sddl + "(A;OICI;FA;;;#{account})" if account.starts_with?("S-")
+      # ASCII, widened as it is: it is no path, and the path's converter
+      # would resolve "D:" against a drive.
+      text = Array(UInt16).new(sddl.bytesize + 1, 0_u16)
+      sddl.bytesize.times { |i| text[i] = sddl.byte_at(i).to_u16 }
+      name = __iyi_wide_path(dir.to_unsafe)
+      raise "#{dir} is not a path Windows takes" if name.address == 0_u64
+      descriptor = Pointer(Void).new(0_u64)
+      if LibAdvapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW(text.to_unsafe, 1_u32, pointerof(descriptor), Pointer(UInt32).new(0_u64)) == 0
+        raise "no access list could be made for #{dir}"
+      end
+      present = 0
+      defaulted = 0
+      dacl = Pointer(Void).new(0_u64)
+      held = LibAdvapi32.GetSecurityDescriptorDacl(descriptor, pointerof(present), pointerof(dacl), pointerof(defaulted))
+      # SE_FILE_OBJECT (1); DACL_SECURITY_INFORMATION (4) with
+      # PROTECTED_DACL_SECURITY_INFORMATION (0x80000000).
+      failed = held == 0 || present == 0 ? 1_u32 : LibAdvapi32.SetNamedSecurityInfoW(name, 1, 0x80000004_u32, Pointer(Void).new(0_u64), Pointer(Void).new(0_u64), dacl, Pointer(Void).new(0_u64))
+      LibKernel32.LocalFree(descriptor)
+      raise "#{dir} could not be kept to its owner (Windows error #{failed}), and a private key is not written where others may read it" unless failed == 0_u32
+    {% end %}
   end
 end
 
@@ -533,7 +609,7 @@ pub class AutocertManager
     return AutocertError.new("the certificate issued for #{name} does not name it") unless identity.leaf.matches_host?(name)
     chain = Certificate.from_pem(text)
     return AutocertError.new("the certificate for #{name}: #{chain.message}") if chain.is_a?(X509Error)
-    verified = X509.verify(identity.leaf, chain[1, chain.size - 1], trust!, name)
+    verified = X509.verify(identity.leaf, chain[1, chain.size - 1], trust!, name, distrusted: @roots ? nil : TlsConfig.new.distrusted)
     return AutocertError.new("the certificate for #{name} is not trusted: #{verified.message}") if verified.is_a?(X509Error)
     AutocertHeld.new(identity, renew_time(identity.leaf.not_before.to_unix_ms, identity.leaf.not_after.to_unix_ms))
   end
@@ -974,7 +1050,8 @@ struct AutocertPem
   end
 
   def self.pem(label : String, der : Array(UInt8)) : String
-    body = Base64.encode(String.new(der))
+    # A key's bytes: the encoder that looks into no table by them.
+    body = Base64.encode_secret(der)
     lines = [] of String
     at = 0
     while at < body.bytesize

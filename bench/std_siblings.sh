@@ -36,13 +36,15 @@
 # std/http took 29 to 45 minutes in four runs on Linux). Rerun
 # sibling_times.py on a green run's shard logs when a gate's weight changes
 # much; its `--predict 4` adds the logs up as above.
+# std/cookie's is one Windows machine's, 352 s, taken when its gate went
+# from 10 broken copies to 32 and before a CI run had timed it.
 WEIGHTS="
   tls 1864   http 1632   big 988   xz 460   websocket 422
-  autocert 399   acme 343   mutex 252   zip 249   math 237
-  smtp 223   process 211   sse 199   zstd 195   text_scale 189
-  secure_dns 188   router 160   bzip2 151   x509 149   dir 145
-  compress 140   tar 140   regex 137   rsa 130   dns 122
-  yaml 121   term 116   cookie 115   time 103   ocsp 99
+  autocert 399   cookie 352   acme 343   mutex 252   zip 249
+  math 237   smtp 223   process 211   sse 199   zstd 195
+  text_scale 189   secure_dns 188   router 160   bzip2 151   x509 149
+  dir 145   compress 140   tar 140   regex 137   rsa 130
+  dns 122   yaml 121   term 116   time 103   ocsp 99
   xml 99   p384 97   fileserver 94   toml 88   fuzz 86
   file 84   png 84   curve25519 81   csv 77   mail 76
   digest 71   complex 69   eiy 64

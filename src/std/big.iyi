@@ -1196,13 +1196,22 @@ pub struct BigInt
   # window, every entry of its table read for each window and the one
   # wanted kept by a mask, so neither a branch nor a memory address depends
   # on the exponent's bits, and as many windows as the longer of the
-  # exponent and the modulus takes, so the exponent's length does not show
-  # either. The modulus has to be odd (a Montgomery modulus): an even one
-  # is a misuse, refused.
+  # exponent and the modulus takes, so an exponent no longer than the
+  # modulus costs the same squares and products whatever its length. The
+  # modulus has to be odd (a Montgomery modulus): an even one is a misuse,
+  # refused.
   #
-  # What it does not hide: the base is reduced by `%`, whose time depends
-  # on the base and the modulus, so a caller with a secret base (RSA's
-  # CRT halves of a message) blinds it first, as std/rsa's signing does.
+  # What it does not hide. The exponent's length, in three places: a
+  # `BigInt` keeps no leading zero limbs, so the length is the size of its
+  # array; `bit_length` counts the bits of the top limb in a loop, a step
+  # for each; and a window's bit past the exponent's last limb is answered
+  # by a branch, not a load (`Montgomery.bit`). An exponent longer than
+  # the modulus adds windows of its own besides. For an RSA key's CRT
+  # exponents, which are within a few bits of their primes' length, that
+  # is those few bits. And the base: it is reduced by `%`, whose time
+  # depends on the base and the modulus, so a caller with a secret base
+  # (RSA's CRT halves of a message) blinds it first, as std/rsa's signing
+  # does.
   def pow_mod_secret(exp : BigInt, mod : BigInt) : BigInt
     raise "modulo by zero" if mod.zero?
     raise "modulus must be positive" if mod.negative?
@@ -2010,14 +2019,32 @@ struct Montgomery
     end
   end
 
+  # The carry out of *acc* + *w*, 0 or 1, with no comparison: the low
+  # words' sum is taken in a `UInt128`, whose 65th bit is their carry, and
+  # the high words' sum with that carry added is taken the same way, its
+  # 65th bit being the carry out of all 128. `acc < w` after the addition
+  # says the same, and an optimised build writes either as an add and an
+  # add with carry; but a build that is not optimised (`iyi build` and
+  # `iyi run` without --release) wrote the comparison as a conditional
+  # jump for every product of two words, a branch on the numbers
+  # `pow_mod_secret` is there to hide. These are shifts and additions in
+  # every build.
+  @[AlwaysInline]
+  def self.carry_of(acc : UInt128, w : UInt128) : UInt64
+    low = acc.unsafe_to_u64.to_u128 &+ w.unsafe_to_u64.to_u128
+    high = acc.unsafe_shr(64) &+ w.unsafe_shr(64) &+ low.unsafe_shr(64)
+    high.unsafe_shr(64).unsafe_to_u64
+  end
+
   # r = a b / R mod m by finely integrated product scanning (FIPS): the
   # words of a b + q m are summed a column at a time, low column first,
   # and column k's low word either fixes q_k, the multiple of m that
   # clears it, or is word k - n of the result. Nothing is stored per
   # product: a column's products go into three words held in registers,
-  # a `UInt128` and the carries out of it, which LLVM writes as one add
-  # and two adds with carry, no branch (the assembly of a --release build
-  # branches on counters alone). Word k - n of a and b is not read again
+  # a `UInt128` and the carries out of it (`carry_of`), which LLVM writes
+  # as one add and two adds with carry, no branch (the assembly of a
+  # --release build branches on counters alone, and so does that of a
+  # build with no optimisation). Word k - n of a and b is not read again
   # once column k is reached, so r may be a or b. A 1024-bit product, the
   # size of a 2048-bit RSA key's CRT halves, took 237 ns by operand
   # scanning (CIOS), which loaded and stored a word of t for every
@@ -2042,21 +2069,21 @@ struct Montgomery
       i = 0
       while i < k
         w = a[i].to_u128 &* b[k &- i].to_u128
+        top = top &+ Montgomery.carry_of(acc, w)
         acc = acc &+ w
-        top = top &+ (acc < w ? 1_u64 : 0_u64)
         w = q[i].to_u128 &* m[k &- i].to_u128
+        top = top &+ Montgomery.carry_of(acc, w)
         acc = acc &+ w
-        top = top &+ (acc < w ? 1_u64 : 0_u64)
         i = i &+ 1
       end
       w = a[k].to_u128 &* b[0].to_u128
+      top = top &+ Montgomery.carry_of(acc, w)
       acc = acc &+ w
-      top = top &+ (acc < w ? 1_u64 : 0_u64)
       qk = acc.unsafe_to_u64 &* inv
       q[k] = qk
       w = qk.to_u128 &* m[0].to_u128
+      top = top &+ Montgomery.carry_of(acc, w)
       acc = acc &+ w
-      top = top &+ (acc < w ? 1_u64 : 0_u64)
       acc = acc.unsafe_shr(64) | top.to_u128.unsafe_shl(64)
       top = 0_u64
       k = k &+ 1
@@ -2065,11 +2092,11 @@ struct Montgomery
       i = k &- n &+ 1
       while i < n
         w = a[i].to_u128 &* b[k &- i].to_u128
+        top = top &+ Montgomery.carry_of(acc, w)
         acc = acc &+ w
-        top = top &+ (acc < w ? 1_u64 : 0_u64)
         w = q[i].to_u128 &* m[k &- i].to_u128
+        top = top &+ Montgomery.carry_of(acc, w)
         acc = acc &+ w
-        top = top &+ (acc < w ? 1_u64 : 0_u64)
         i = i &+ 1
       end
       t[k &- n] = acc.unsafe_to_u64
@@ -2107,8 +2134,8 @@ struct Montgomery
       i = k < n ? 0 : k &- n &+ 1
       while i < k &- i
         w = a[i].to_u128 &* a[k &- i].to_u128
+        top = top &+ Montgomery.carry_of(acc, w)
         acc = acc &+ w
-        top = top &+ (acc < w ? 1_u64 : 0_u64)
         i = i &+ 1
       end
       p[k] = acc.unsafe_to_u64
@@ -2142,22 +2169,22 @@ struct Montgomery
       i = 0
       while i &+ 1 < k
         w = q[i].to_u128 &* m[k &- i].to_u128
+        s_top = s_top &+ Montgomery.carry_of(s, w)
         s = s &+ w
-        s_top = s_top &+ (s < w ? 1_u64 : 0_u64)
         i = i &+ 1
       end
+      top = s_top &+ Montgomery.carry_of(acc, s)
       acc = acc &+ s
-      top = s_top &+ (acc < s ? 1_u64 : 0_u64)
       if k > 0
         w = q[k &- 1].to_u128 &* m[1].to_u128
+        top = top &+ Montgomery.carry_of(acc, w)
         acc = acc &+ w
-        top = top &+ (acc < w ? 1_u64 : 0_u64)
       end
       qk = acc.unsafe_to_u64 &* inv
       q[k] = qk
       w = qk.to_u128 &* m[0].to_u128
+      top = top &+ Montgomery.carry_of(acc, w)
       acc = acc &+ w
-      top = top &+ (acc < w ? 1_u64 : 0_u64)
       acc = acc.unsafe_shr(64) | top.to_u128.unsafe_shl(64)
       top = 0_u64
       k = k &+ 1
@@ -2167,8 +2194,8 @@ struct Montgomery
       i = k &- n &+ 1
       while i < n
         w = q[i].to_u128 &* m[k &- i].to_u128
+        top = top &+ Montgomery.carry_of(acc, w)
         acc = acc &+ w
-        top = top &+ (acc < w ? 1_u64 : 0_u64)
         i = i &+ 1
       end
       p[k &- n] = acc.unsafe_to_u64

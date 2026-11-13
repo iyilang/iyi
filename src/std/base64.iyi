@@ -1,5 +1,13 @@
 # Base64, RFC 4648, written in iyi.
 #
+#     import std/base64::{Base64, Base64Error}
+#
+#     Base64.encode("hi")                # "aGk="
+#     Base64.decode("aGk=")              # "hi", or a panic
+#     Base64.decode?(challenge)          # the bytes, or a Base64Error
+#     Base64.encode_secret(key_der)      # a private key's PEM body
+#     Base64.decode_secret(pem_body)     # its bytes, or a Base64Error
+#
 # `encode` is the alphabet with `+` `/` and `=` padding, no line
 # breaks (RFC 4648 §4). `urlsafe_encode` uses `-` `_` and the same
 # padding. `decode` accepts both alphabets, ignores ASCII whitespace,
@@ -8,6 +16,51 @@
 # the padding, data inside it (`"QU=JD"`), more `=` than the group
 # needs, and a final group of one character (`"Q"`, which cannot encode a
 # byte) are each refused.
+#
+# `decode?` is `decode` with the refusal answered and not raised: a
+# `Base64Error` whose `message` is the sentence `decode` panics with. A
+# text someone else wrote - a server's challenge, a header, a file - is
+# read with `decode?`: a panic ends the process, and whoever wrote the
+# text would be the one choosing it. `decode` is for a text the program
+# made itself.
+#
+# Both read loosely, and stay so for the texts other encoders write. The
+# two alphabets may be mixed in one text (`"Q-_/"` is `"Q+_/"`), and the
+# bits a last character sets past the data are dropped: `"QR=="` and
+# `"QX=="` are `"A"` as `"QQ=="` is (RFC 4648 §3.5 lets a decoder refuse
+# them, and std/base32 does). One byte string has many texts that way.
+# That is nothing to a caller that uses the bytes - a signature is over
+# them - and wrong for one that compares, stores or counts the texts,
+# which wants `decode_secret`'s reading: one text for each byte string.
+#
+# `encode_secret` and `decode_secret` are for key material: the body of a
+# private key's PEM block. `encode` reads a 16 KiB table of character
+# pairs at an index made of twelve bits of the data, and `decode` a table
+# of values at each character; which cache lines of a table were touched
+# is something another process on the machine can measure, and private
+# keys have been read out of a PEM decoder that way (Sieck, Berndt,
+# Wichelmann and Eisenbarth, "Util::Lookup", CCS 2021). These two have no
+# table. A six-bit value becomes its character, and a character its
+# value, by arithmetic: the sign of a difference, spread over the word, is
+# the mask that adds an offset or keeps a term. No address and no branch
+# follows a byte of the data; what they branch on is the text's length
+# and how many `=` close it, which are the key's length and not its bits.
+# That was read in the assembly of a plain build and of a --release one
+# for x86-64: the arithmetic is arithmetic in the first, and vector masks
+# and conditional moves between registers in the second.
+# `decode_secret` gathers everything wrong with the characters into one
+# word across the whole text and looks at it once, at the end, so its
+# `Base64Error` says that the text is not base64 and not where. It reads
+# the `+` `/` alphabet, padded, and nothing else: no whitespace (a PEM
+# reader joins the lines, whose breaks are not secret), no missing
+# padding, no `-` or `_`, and a last character that sets bits past the
+# data is refused. What is decoded is an `Array(UInt8)`, as a key is
+# bytes; what is encoded is one, or a `String` whose bytes are taken.
+#
+# Measured here in a --release build over megabytes, on a machine other
+# jobs shared: `encode_secret` 1.0 GB a second where `encode` made 1.7,
+# and `decode_secret` 0.36 where `decode` made 1.5. A key is a few
+# kilobytes; megabytes that are no secret go through the tables.
 
 @[Unsafe("encoding and decoding read the input's bytes through a raw pointer, for speed")]
 module std/base64
@@ -21,6 +74,24 @@ DECODE_VALUES = Base64.decode_values
 PAIRS_STD = Base64.pairs_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
 PAIRS_URL = Base64.pairs_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
 
+# What `decode?` and `decode_secret` answer for a text that is not base64.
+pub struct Base64Error
+  getter message : String
+
+  def initialize(@message : String)
+  end
+
+  def to_s : String
+    @message
+  end
+end
+
+impl Error for Base64Error
+  def message : String
+    @message
+  end
+end
+
 pub struct Base64
   def self.encode(data : String) : String
     encode_with(data, plus_slash, PAIRS_STD, true)
@@ -31,6 +102,14 @@ pub struct Base64
   end
 
   def self.decode(text : String) : String
+    decoded = decode?(text)
+    raise decoded.message if decoded.is_a?(Base64Error)
+    decoded
+  end
+
+  # `decode`, with a text that is not base64 answered rather than raised:
+  # the error's `message` is the sentence `decode` raises.
+  def self.decode?(text : String) : String | Base64Error
     src = text.to_unsafe
     n = text.bytesize
     # Every data character is six bits and a byte is written per eight, so
@@ -44,16 +123,157 @@ pub struct Base64
     pads = pads + 1 if n > 1 && src[n - 2] == 61_u8
     size = ((n - pads).to_i64 * 6 // 8).to_i32
     written = 0
-    answer = String.new(size) { |buf| written = decode_into(buf, src, n) }
+    refusal = nil.as(Base64Error?)
+    answer = String.new(size) do |buf|
+      got = decode_into(buf, src, n)
+      if got.is_a?(Base64Error)
+        refusal = got
+      else
+        written = got
+      end
+    end
+    refused = refusal
+    return refused if refused
     return answer if written == size
     buf = Pointer(UInt8).malloc(size.to_u64)
-    written = decode_into(buf, src, n)
-    String.new(written) { |dst| dst.copy_from(buf, written) }
+    again = decode_into(buf, src, n)
+    return again if again.is_a?(Base64Error)
+    String.new(again) { |dst| dst.copy_from(buf, again) }
+  end
+
+  # *data* in the `+` `/` alphabet with its padding, as `encode` writes
+  # it, by arithmetic alone: no table is read at an index the data chose,
+  # and the only branches are on the data's length.
+  def self.encode_secret(data : String | Array(UInt8)) : String
+    src, n = bytes_of(data)
+    out_n = ((n + 2) // 3) * 4
+    whole = n - n % 3
+    String.new(out_n) do |dst|
+      i = 0
+      o = 0
+      while i < whole
+        triple = src[i].to_i32.unsafe_shl(16) | src[i + 1].to_i32.unsafe_shl(8) | src[i + 2].to_i32
+        dst[o] = secret_char(triple.unsafe_shr(18))
+        dst[o + 1] = secret_char(triple.unsafe_shr(12) & 63)
+        dst[o + 2] = secret_char(triple.unsafe_shr(6) & 63)
+        dst[o + 3] = secret_char(triple & 63)
+        o = o + 4
+        i = i + 3
+      end
+      if i < n
+        last = n - i
+        triple = src[i].to_i32.unsafe_shl(16)
+        triple = triple | src[i + 1].to_i32.unsafe_shl(8) if last == 2
+        dst[o] = secret_char(triple.unsafe_shr(18))
+        dst[o + 1] = secret_char(triple.unsafe_shr(12) & 63)
+        dst[o + 2] = last == 2 ? secret_char(triple.unsafe_shr(6) & 63) : 61_u8
+        dst[o + 3] = 61_u8
+      end
+    end
+  end
+
+  # The bytes of *text*, which is `encode`'s alphabet in whole padded
+  # groups and canonical, or a `Base64Error`. Every character is read the
+  # same way whatever it is, and what is wrong with any of them is kept
+  # in the sign of *bad* until the last has been read.
+  def self.decode_secret(text : String) : Array(UInt8) | Base64Error
+    src = text.to_unsafe
+    n = text.bytesize
+    unless n % 4 == 0
+      return Base64Error.new("base64: #{n} characters, not a multiple of 4: a secret's text is whole groups, padded")
+    end
+    return [] of UInt8 if n == 0
+    # How many `=` close the text is its bytes' count modulo 3, which is
+    # no secret, so the last group is taken by that count. An `=` anywhere
+    # else is a character outside the alphabet, like any other.
+    pads = 0
+    if src[n - 1] == 61_u8
+      pads = src[n - 2] == 61_u8 ? 2 : 1
+    end
+    groups = n // 4
+    whole = pads == 0 ? groups : groups - 1
+    answer = Array(UInt8).new(groups * 3 - pads, 0_u8)
+    p = src
+    q = answer.to_unsafe
+    bad = 0
+    g = 0
+    while g < whole
+      v0 = secret_value(p[0].to_i32)
+      v1 = secret_value(p[1].to_i32)
+      v2 = secret_value(p[2].to_i32)
+      v3 = secret_value(p[3].to_i32)
+      bad = bad | v0 | v1 | v2 | v3
+      triple = v0.unsafe_shl(18) | v1.unsafe_shl(12) | v2.unsafe_shl(6) | v3
+      q[0] = triple.unsafe_shr(16).unsafe_to_u8
+      q[1] = triple.unsafe_shr(8).unsafe_to_u8
+      q[2] = triple.unsafe_to_u8
+      p = p + 4
+      q = q + 3
+      g = g + 1
+    end
+    # A last group of two or three characters: the bits its last character
+    # has past the data must be zero (RFC 4648 §3.5), and a set one makes
+    # *bad* negative as a character outside the alphabet does.
+    if pads == 2
+      v0 = secret_value(p[0].to_i32)
+      v1 = secret_value(p[1].to_i32)
+      bad = bad | v0 | v1 | (0 &- (v1 & 15))
+      q[0] = (v0.unsafe_shl(2) | v1.unsafe_shr(4)).unsafe_to_u8
+    elsif pads == 1
+      v0 = secret_value(p[0].to_i32)
+      v1 = secret_value(p[1].to_i32)
+      v2 = secret_value(p[2].to_i32)
+      bad = bad | v0 | v1 | v2 | (0 &- (v2 & 3))
+      q[0] = (v0.unsafe_shl(2) | v1.unsafe_shr(4)).unsafe_to_u8
+      q[1] = (v1.unsafe_shl(4) | v2.unsafe_shr(2)).unsafe_to_u8
+    end
+    if bad < 0
+      return Base64Error.new("base64: not a secret's text: a byte outside A-Z, a-z, 0-9, + and /, an = before the end, or a last character with bits past the data")
+    end
+    answer
+  end
+
+  # The character of the six-bit *v*: `A` and *v*, then 6 more past `Z`,
+  # 75 fewer past `z`, 15 fewer past `9` and 3 more for `/`. Each step is
+  # a difference whose sign, shifted across the word, is all ones past the
+  # boundary and zero before it, and masks the step in or out.
+  @[AlwaysInline]
+  private def self.secret_char(v : Int32) : UInt8
+    c = v &+ 65
+    c = c &+ ((25 &- v).unsafe_shr(31) & 6)
+    c = c &- ((51 &- v).unsafe_shr(31) & 75)
+    c = c &- ((61 &- v).unsafe_shr(31) & 15)
+    c = c &+ ((62 &- v).unsafe_shr(31) & 3)
+    c.unsafe_to_u8
+  end
+
+  # The value of the character *c*, a byte, or -1 for one outside the `+`
+  # `/` alphabet, `=` included. A range's mask is all ones when neither
+  # `c - low` nor `high - c` is negative, and one character's when `c`
+  # xored with it, less one, is; each mask keeps its range's value, and
+  # where none is set the answer is all ones.
+  @[AlwaysInline]
+  private def self.secret_value(c : Int32) : Int32
+    upper = ((c &- 65) | (90 &- c)).unsafe_shr(31) ^ -1
+    lower = ((c &- 97) | (122 &- c)).unsafe_shr(31) ^ -1
+    digit = ((c &- 48) | (57 &- c)).unsafe_shr(31) ^ -1
+    plus = ((c ^ 43) &- 1).unsafe_shr(31)
+    slash = ((c ^ 47) &- 1).unsafe_shr(31)
+    v = (upper & (c &- 65)) | (lower & (c &- 71)) | (digit & (c &+ 4)) | (plus & 62) | (slash & 63)
+    v | ((upper | lower | digit | plus | slash) ^ -1)
+  end
+
+  private def self.bytes_of(data : String | Array(UInt8)) : {Pointer(UInt8), Int32}
+    if data.is_a?(String)
+      {data.to_unsafe, data.bytesize}
+    else
+      {data.to_unsafe, data.size}
+    end
   end
 
   # Decodes into *buf*, which has room for what the text can hold, and
-  # answers the bytes written.
-  private def self.decode_into(buf : Pointer(UInt8), src : Pointer(UInt8), n : Int32) : Int32
+  # answers the bytes written, or what the text is that base64 is not.
+  private def self.decode_into(buf : Pointer(UInt8), src : Pointer(UInt8), n : Int32) : Int32 | Base64Error
     values = DECODE_VALUES.to_unsafe
     acc = 0
     bits = 0
@@ -109,19 +329,19 @@ pub struct Base64
       next if b == 32_u8 || (b >= 9_u8 && b <= 13_u8)
       if b == 61_u8 # '='
         if pads == 0
-          raise "base64: #{chars} data characters, 1 more than a multiple of 4: a single character cannot encode a byte" if bits == 6
-          raise "base64: padding with no group to close" if bits == 0
+          return Base64Error.new("base64: #{chars} data characters, 1 more than a multiple of 4: a single character cannot encode a byte") if bits == 6
+          return Base64Error.new("base64: padding with no group to close") if bits == 0
           pads_needed = bits == 4 ? 2 : 1
         end
         pads = pads + 1
-        raise "base64: excess padding" if pads > pads_needed
+        return Base64Error.new("base64: excess padding") if pads > pads_needed
         next
       end
       v = values[b.to_i32]
-      raise "base64: invalid byte #{b}" if v < 0
+      return Base64Error.new("base64: invalid byte #{b}") if v < 0
       if pads > 0
-        raise "base64: discontinuous padding" if pads < pads_needed
-        raise "base64: data after padding"
+        return Base64Error.new("base64: discontinuous padding") if pads < pads_needed
+        return Base64Error.new("base64: data after padding")
       end
       chars = chars + 1
       acc = (acc << 6) | v
@@ -132,7 +352,7 @@ pub struct Base64
         o = o + 1
       end
     end
-    raise "base64: #{chars} data characters, 1 more than a multiple of 4: a single character cannot encode a byte" if bits == 6
+    return Base64Error.new("base64: #{chars} data characters, 1 more than a multiple of 4: a single character cannot encode a byte") if bits == 6
     o
   end
 

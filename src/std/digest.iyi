@@ -1510,6 +1510,10 @@ end
 # nothing. Held on the first two by the --release assembly the gates of
 # the modules above read. The other targets' assembly has not been read:
 # the LLVM this was written against carries those two back ends alone.
+# The load is held instead by bench/std_digest_exercise.sh, built on
+# x86_64 in the asm's place, to the same answers and to keeping a volatile
+# load for each barrier in the --release IR, and by CI's wasm32-wasi job,
+# where it is the real branch, run under wasmtime.
 #
 # It hides one value from one compiler. It does not make the arithmetic
 # around it constant-time, and it says nothing of what runs the code

@@ -1,3 +1,0 @@
-Using /usr/bin/llvm-config [version=21.1.8]IYI_CONFIG_BUILD_COMMIT="afacabfc7" IYI_CONFIG_PATH='$ORIGIN/../share/crystal/src' SOURCE_DATE_EPOCH="1794559276"  IYI_CONFIG_LIBRARY_PATH='$ORIGIN/../lib/iyi' IYI_CONFIG_PATH='$ORIGIN/../share/iyi/src:$ORIGIN/../share/iyi/crystal:$ORIGIN/../src' \
-  ./bin/crystal build -D strict_multi_assign -D preview_overload_order --release  -Dwithout_openssl -Dwithout_zlib -Dwithout_iconv -Dgc_none --link-flags='-Wl,-rpath,\$ORIGIN/../lib -Wl,--disable-new-dtags' -o .build/iyi src/compiler/iyi.cr
-built .build/iyi — run it as ./bin/iyi

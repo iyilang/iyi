@@ -1766,6 +1766,18 @@
         waited = waited + 1
       end
     end
+    # A takeover seen at its mark's start is waited out, its token given
+    # back (`REC_BUSY` clear), before the test fails and `Holder.word` is
+    # cleared: `-Dheap_verify`'s check before the sweep reads that word,
+    # and bench/heap_verify.sh asks the verifier to catch the noconstruct
+    # copy too. Ended at the mark's start, the wait missed it in 1 run of
+    # 2 there (Linux, 921182bad); the takeover count it replaced moved at
+    # the sweep's end.
+    waited = 0
+    while IyiHeap.read64(record &+ IyiHeap::REC_STATE) & IyiHeap::REC_BUSY != 0_u64 && waited < 10000
+      sleep(1)
+      waited = waited + 1
+    end
     fail("construct: an idle worker took a unit with no fiber and no value slot") if constructed_collected?(record)
     wrong = broken(keep, base, 300)
     fail("construct: an idle worker collected a unit whose value was being built, and #{wrong} nodes of it read wrong") if wrong != 0_i64

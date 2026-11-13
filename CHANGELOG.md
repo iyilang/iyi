@@ -208,7 +208,7 @@ under the loop before a wait nothing read already answers: the parked
 fiber's stale words had kept the last request alive (Windows the answer
 and its body, Linux the request and its headers; bench/http_idle and its
 copy). With 10,000 idle keep-alive connections on 4 workers, 30 s idle,
-the flag-on server's resident set is now 1.19× 0.21.0's on tssh, 1.22× on
+the flag-on server's resident set is now 1.18× 0.21.0's on tssh, 1.23× on
 Linux and 1.10× on tmac (was 1.53×, 1.38× and 1.12×), and an idle
 connection's partition holds 24.4 KiB on all three (was 32.7, 27.8 and
 26.4; 5 rounds each); the flag-off build is unchanged byte for byte. A

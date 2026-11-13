@@ -6347,7 +6347,7 @@ alias; `bench/chaos_exercise.sh` holds a `Unit` under seeds (III.4.17);
 `bench/lsp_session.py` steps 23s and 23u hold the hints, the definition
 in their tooltips, and the hovers on `Unit` and `spawn(in:)`.
 
-#### III.4.19 Heaps per unit: **PROPOSED — a prototype behind `-Dheap_partitions`, kept or dropped on its measurements**
+#### III.4.19 Heaps per unit: **EXPERIMENTAL — a prototype behind `-Dheap_partitions`, default off**
 
 Every unit allocates in one shared heap today, and a collection marks it
 whole while the program stops. The prototype gives each pool unit
@@ -6427,8 +6427,21 @@ without the flag:
 
 Without `-Dheap_partitions` a build is today's. `-Dheap_verify` adds the
 verifier at every local collection and poisons what a partition frees.
-Kept or dropped on the measurements of pauses and throughput the
-prototype is built to give.
+
+**S6 result (heap22, at d83fd16b0).** Kept, experimental and off by
+default. On #145's app against 0.21.0 (median of the clean rounds) the
+flag cuts the steady resident set 45.2 % on Linux and 44.4 % on tssh,
+and 39.4 % on tmac, short of the 40 % bound (other tmac sessions
+40.2-40.8 %); every other criterion passes on all three: gm p99 at most
++5.6 % worst endpoint, CPU a request -0.3 % (Linux), -0.4 % (tmac),
+-9.3 % (tssh), 0 % of request units pinned, 0.91 % of allocated bytes
+published, and a C10k idle connection's partition 24.4 KiB. A known
+weakness: on tssh, under load from another guest on the same host, the
+flag-on p99 is 20-40 % above 0.21.0's (long io waits, likely behind a
+local collection on the same thread [INFERENCE]). Follow-ups: attribute
+and bound that tail (a slice cap on a local collection or an io-fiber
+handoff), a new pre-registered tmac round, a compiler write barrier for
+the published-roots walk, and the merge onto the release line.
 
 ### III.5 Module initialisation: **PROPOSED; rules 1, 2 and 4 BUILT**
 

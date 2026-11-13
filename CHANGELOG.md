@@ -65,6 +65,25 @@ what was kept again: at twice what was kept alone, alloc_scaling's lone
 unit collected every MiB, 317 local collections where the shared heap
 runs 57, 1.17 of 0.21.0's wall time on one worker (tmac).
 
+Under `-Dheap_partitions` a sweep helper lets its walk claim go at its
+walk's end, under the class's lock alone as an allocating thread's slice
+does, before it takes the runtime lock to hand its batch over. A
+partition's local sweep waits for every claim on its class's partition
+arenas, and a helper that held one through its wait for the runtime lock
+held every such sweep with it: on the user's Windows 11 machine with 12
+logical processors, under #145's app at 99 % CPU, claims stayed held 32 to
+243 ms after walks of microseconds while 5 to 9 workers spun in that wait,
+20 of the 43 local collections past 20 ms on its cities and api tags
+endpoints. Released first, in 4 rounds interleaved with the old order on
+the same machine, helper claims held past 5 ms went from 28 to 2 (both a
+helper preempted mid-walk), the time local sweeps spent waiting on claims
+from 2,470 to 328 ms, and local collections past 20 ms from 46 to 27,
+none of them waiting on a claim. `-Dheap_verify` checks that every
+slice's walk claim outlives its walk, and bench/heap_drain.sh's claim
+mode, the helpers sweeping beside a sleeping program, catches a helper
+that lets go before its walk ends. Without the flag the helper is as it
+was (its IR differs only by a line number).
+
 heap22's verifier: the false-word injector no longer writes under a pool
 worker's parking fiber or below a Windows fiber's committed stack; reports
 name String and untyped-holder allocation sites and data-segment holders
@@ -28047,7 +28066,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 35,433-line library and nothing else. Every other
+  written against iyi's own 35,498-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

@@ -23,6 +23,7 @@
 #   ./bin/iyi build --release -Dheap_partitions bench/heap_drain.iyi
 #   ./heap_drain [ROUNDS [UNITS [WORKERS]]]     # default 12 48 4
 #   ./heap_drain mark [NODES [WORKERS [SECONDS]]]   # see mark_main
+#   ./heap_drain claim [ROUNDS [UNITS]]         # see claim_main
 #   bash bench/heap_drain.sh                    # with its broken copies
 #
 # The line printed gives the bytes the partition arenas' runs span after
@@ -427,10 +428,50 @@ module bench/heap_drain
     print "mark: the list intact\n"
   end
 
+  # Claim mode (PauseHunt, S6): a sweep slice's walk claim held to its
+  # walk's end, the helpers' above all, who let theirs go before the
+  # runtime lock under `-Dheap_partitions` (`IyiMark.sweep_one_helper`).
+  # Each round, UNITS units leave their runs to the pool (`pool_round`)
+  # and the main thread makes shared garbage until a collection the
+  # budget triggers - whose sweep is lazy and opens the helpers' round,
+  # where `IyiMark.collect` sweeps eagerly - then sleeps CLAIM_SLEEP_MS,
+  # so that the helpers sweep what is left alone. Under `-Dheap_verify`
+  # each slice's walker checks at its walk's end that its claim is still
+  # its own (`IyiHeapVerify.check_claimed`). Fails when the helpers began
+  # no arena: no helper's claim would have been tested.
+  #   ./heap_drain claim [ROUNDS [UNITS]]         # default 6 8
+  CLAIM_SLEEP_MS = 200
+
+  def claim_main(arguments : Array(String)) : Nil
+    rounds = arguments.size > 1 ? arguments[1].to_i : 6
+    units = arguments.size > 2 ? arguments[2].to_i : 8
+    first = IyiMark.swept_by_helpers
+    made = 0_i64
+    round = 0
+    while round < rounds
+      pool_round(units)
+      seen = IyiMark.collections
+      while IyiMark.collections == seen
+        100.times do |k|
+          s = "s" * (24 + k % 40)
+          made = made &+ s.bytesize.to_i64
+        end
+      end
+      sleep(CLAIM_SLEEP_MS)
+      round = round + 1
+    end
+    began = IyiMark.swept_by_helpers - first
+    print "claim rounds=#{rounds} units=#{units} collections=#{IyiMark.collections} helper_arenas=#{began} made_mib=#{made // 1048576}\n"
+    fail("claim: the helpers began no arena, so no helper's walk claim was tested") if began == 0
+    print "claim: every walk claim held to its walk's end\n"
+  end
+
   Checks.read_env
   arguments = Program.args
   if arguments.size > 0 && arguments[0] == "mark"
     mark_main(arguments)
+  elsif arguments.size > 0 && arguments[0] == "claim"
+    claim_main(arguments)
   else
     drain_main(arguments)
   end

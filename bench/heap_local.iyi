@@ -1694,26 +1694,47 @@
 
   # ── construct ─────────────────────────────────────────────────────────
 
+  # Whether a local collection of partition *record* began: a new record
+  # is zeroed (`IyiHeap.partition_new`), every local mark sets its parity
+  # before it reads a root, and a sweep that reached the end counts
+  # (`IyiHeap.partition_collections`). Nothing but a local collection
+  # writes either word.
+  def constructed_collected?(record : UInt64) : Bool
+    IyiHeap.read64(record &+ IyiHeap::REC_PARITY) != 0_u64 || IyiHeap.partition_collections(record) != 0_u64
+  end
+
   # A `Unit`'s value under construction (`Unit.new` builds it in the
   # unit's partition with `IyiHeap.within`): this fiber is no fiber of
   # the unit and holds no token, and its stack is the list's only root.
   # The debt is past a quarter of the budget and a global collection arms
-  # the takeover; idle workers are woken until one takes a unit or 300
-  # tries pass. None may take this one. Its partition dies by the hook
+  # the takeover; idle workers are woken until one takes this unit or 300
+  # tries pass. None may take it. Its partition dies by the hook
   # `IyiScheduler.unregister` calls, as a `Unit`'s does once its handle
   # is gone. The list's address is a plain word of the data segment too
   # (`Holder.word`) from before the collection until the death: this
   # stack is another unit's, read by no local mark and by no verifier,
-  # and the noconstruct copy was caught by the count below alone (tmac,
+  # and the noconstruct copy was caught by this check alone (tmac,
   # hp-s4 6122d4d63 + 3ee055f6f); a unit taken here is collected under
   # that word, which `-Dheap_verify`'s check before the sweep reads.
+  #
+  # The test is of this partition alone: a local collection of it began
+  # (`constructed_collected?`), taken over or abandoned. It was the
+  # program's takeover count, which another unit's takeover moved:
+  # `takeover`'s units each still owe half their budget once they have
+  # answered, and stay takeable until their done fiber leaves the unit's
+  # list (`IyiScheduler.reap_dying`), the token given back first, so the
+  # global collection here armed a takeover of one now and then - 1 run
+  # in 3 on tssh (v4 d83fd16b0, verify release, 8 workers). With that
+  # window held 100 ms the count failed 10 runs of 10 on Linux, each
+  # unit taken one of `takeover`'s with its one fiber done, and this test
+  # none (ConstructHunt).
   def construct_check : Nil
     IyiHeap.park_collections_off = true
     IyiHeap.collect_every_park = false
-    takeovers = IyiHeap.takeovers
     unit = IyiHeap.shared { IyiUnit.new }
     record = unit.heap
     fail("construct: the unit has no partition") if record == 0_u64
+    fail("construct: a new partition reads as collected already") if constructed_collected?(record)
     base = 9000000000_i64
     keep = IyiHeap.within(record) do
       built = build(base, 300, 0)
@@ -1730,22 +1751,22 @@
       IyiMark.collect
       built
     end
-    # The wait, and the count, outside the record: the copy that lets the
+    # The wait, and the test, outside the record: the copy that lets the
     # takeover had this fiber allocate the group and its tasks in the
     # record while the idle worker collected it, and died of a memory
     # fault rather than reaching this check, with the count already
     # before the walk (tssh, 933b4d005). Nothing allocates in the record
-    # once its value is built, and only the count is read before the
+    # once its value is built, and only the record is read before the
     # walk: a unit taken here was collected with this stack unread.
     waited = 0
     group do |g|
-      while IyiHeap.takeovers == takeovers && waited < 300
+      while !constructed_collected?(record) && waited < 300
         g.spawn(unit: :new) { 0_i64 }.value
         sleep(1)
         waited = waited + 1
       end
     end
-    fail("construct: an idle worker took a unit with no fiber and no value slot") if IyiHeap.takeovers != takeovers
+    fail("construct: an idle worker took a unit with no fiber and no value slot") if constructed_collected?(record)
     wrong = broken(keep, base, 300)
     fail("construct: an idle worker collected a unit whose value was being built, and #{wrong} nodes of it read wrong") if wrong != 0_i64
     Holder.word = 0_u64

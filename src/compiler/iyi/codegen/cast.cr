@@ -259,6 +259,9 @@ class Iyi::CodeGenVisitor
       assign(target_ptr, target_tuple_type, value_tuple_type, loaded_value)
       index += 1
     end
+    # iyi: the padding between elements, which no element's store writes
+    # (`CodeGenVisitor#store_value`).
+    iyi_clear_holes target_pointer, target_type
     value
   end
 
@@ -274,6 +277,7 @@ class Iyi::CodeGenVisitor
       target_ptr = aggregate_index(target_struct_type, target_pointer, target_index)
       assign target_ptr, target_index_type, entry.type, value_at_index
     end
+    iyi_clear_holes target_pointer, target_type
   end
 
   def assign_distinct(target_pointer, target_type : ProcInstanceType, value_type : ProcInstanceType, value)

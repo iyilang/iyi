@@ -73,11 +73,26 @@ module Iyi
     end
 
     # *value* is in the form `to_lhs` gives, as `assign` takes it.
+    #
+    # iyi: every store of an arm writes the whole union, the bytes past the
+    # arm and the tag's padding as zero (`iyi_clear_union_holes`), after
+    # the arm so that a value read from the slot itself is read first.
+    # Left alone they kept what the slot held before - a wider arm's
+    # pointer, or a stack temporary's stale word - and an `Array(DBValue)`
+    # buffer, which the collector reads word by word, kept what such a
+    # word named alive from an `Int64` element.
     def store_in_union(union_type, union_pointer, value_type, value, *, fresh = false)
       struct_type = llvm_type(union_type)
       store type_id(value, value_type), union_type_id(struct_type, union_pointer)
       casted_value_ptr = cast_to_pointer(union_value(struct_type, union_pointer), value_type)
       store_value value, value_type, casted_value_ptr, fresh: fresh
+      iyi_clear_union_holes struct_type, union_pointer, @llvm_typer.size_of(llvm_type(value_type))
+    end
+
+    # The holes of the *struct_type* union at *union_pointer* once an arm
+    # wrote the first *payload* bytes of its value, written as zero.
+    def iyi_clear_union_holes(struct_type, union_pointer, payload : UInt64) : Nil
+      iyi_clear_holes union_pointer, @llvm_typer.iyi_union_holes(struct_type, payload), @llvm_typer.align_of(struct_type)
     end
 
     def store_bool_in_union(target_type, union_pointer, value)
@@ -94,6 +109,7 @@ module Iyi
       casted_value_ptr = pointer_cast(union_value(struct_type, union_pointer), int_type.pointer)
       inst = store bool_as_extended_int, casted_value_ptr
       set_alignment(inst, @llvm_typer.align_of(union_value_type))
+      iyi_clear_union_holes struct_type, union_pointer, union_size
       inst
     end
 
@@ -105,11 +121,13 @@ module Iyi
       store type_id(value, @program.nil), union_type_id(struct_type, union_pointer)
       casted_value_ptr = pointer_cast union_value(struct_type, union_pointer), union_value_type.pointer
       store value, casted_value_ptr
+      iyi_clear_union_holes struct_type, union_pointer, @llvm_typer.size_of(union_value_type)
     end
 
     def store_void_in_union(target_type, union_pointer)
       struct_type = llvm_type(target_type)
       store type_id(@program.void), union_type_id(struct_type, union_pointer)
+      iyi_clear_union_holes struct_type, union_pointer, 0_u64
     end
 
     # this is needed if `union_type` and `value_type` have different alignments,
@@ -134,6 +152,7 @@ module Iyi
         src_align: @llvm_typer.align_of(from_value_type),
         volatile: int1(0),
       )
+      iyi_clear_union_holes to_llvm_type, union_pointer, size
     end
 
     def assign_distinct_union_types(to_pointer, to_type, from_type, from_pointer)
@@ -151,6 +170,8 @@ module Iyi
         # - store the A | B from the value pointer into the casted target pointer
         casted_target_pointer = cast_to_pointer to_pointer, from_type
         store_value from_pointer, from_type, casted_target_pointer
+        # iyi: and the bytes of the wider union past the narrower one's.
+        iyi_clear_union_holes llvm_type(to_type), to_pointer, @llvm_typer.size_of(llvm_type(from_type).struct_element_types[1])
       else
         # Otherwise, the type ID and the value must be stored separately
         store_union_in_union to_type, to_pointer, from_type, from_pointer

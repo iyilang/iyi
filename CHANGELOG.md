@@ -99,6 +99,22 @@
   retires: under the lock nothing is left, 5 runs of 5; without it a main
   fiber is, 5 of 5.
 
+- **A store writes every byte of its slot.** A union stored through a
+  smaller arm now has its bytes past the arm and its tag's padding
+  written as zero, a narrower union widened into a wider one the wider
+  one's tail, and every padded value its padding. Before, they kept the
+  slot's previous arm or the stack's residue, and an untyped buffer such
+  as an `Array(DBValue)`'s, or a union field, which the collector reads
+  word by word, kept whatever those words named alive (0.21.0 included).
+  `bench/union_holes.sh` reads the raw words of an `Array` buffer and of
+  a field: 0 stale words plain and `--release`, where the compiler that
+  leaves the holes (`IYI_SPAWN_BROKEN=holes`) leaves 63 and 78 on Linux.
+  Cost on this Linux machine, against the compiler before it, medians of
+  5 interleaved rounds: the JSON benches 0.995-1.030, a `DBValue` rows
+  probe 1.016 (noisy: 135-224 ns a row against 143-184); a warm
+  `--release` compile of web_cores 0.96 s against 0.92 and of
+  std_http_exercise 1.36 s against 1.31.
+
 ## 0.21.0 — 2026-11-09
 
 **A spawn has one verb and names its unit, and a plain `spawn` runs in
@@ -27853,7 +27869,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 29,136-line library and nothing else. Every other
+  written against iyi's own 29,153-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

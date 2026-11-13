@@ -695,6 +695,13 @@ jobs:
           bash bench/io_exercise.sh
           bash bench/socket_exercise.sh
 
+      # A union stored through a smaller arm writes zeros past the arm and
+      # in its tag's padding, and every padded value its padding: the raw
+      # words of an array's buffer and a field hold no stale word, and the
+      # `IYI_SPAWN_BROKEN=holes` compiler, which leaves them, is caught.
+      - name: Union holes are written as zero
+        run: bash bench/union_holes.sh
+
       # The collector's own gates (GC_DESIGN.md Stages 2, 3, 5, 6, 10 and the
       # allocation-pressure trigger). Each drives its exercise plain and
       # optimised, audits what the `-Dgc_iyi` binary asks the machine for,

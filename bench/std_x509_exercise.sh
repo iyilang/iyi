@@ -5,9 +5,11 @@
 #
 # The exercise holds chains Python's cryptography made, each judged as
 # Python's own verifier judges it and each refusal for its reason, hosts
-# matched, certificates that are not certificates, and Ed25519 keys and
-# signatures (RFC 8410); this gate runs it plain and --release, holds 200
-# fresh chains - random keys (P-256, P-384, RSA, Ed25519), depths and
+# matched, certificates that are not certificates, Ed25519 keys and
+# signatures (RFC 8410), what a search costs, bounded, IPv4-mapped IPv6
+# addresses under IPv4 ranges, and certificates given as distrusted -
+# chains it writes itself; this gate runs it plain and --release, holds
+# 200 fresh chains - random keys (P-256, P-384, RSA, Ed25519), depths and
 # defects - to Python's verifier, holds chains with an RSA key at or under
 # the 2048-bit floor to OpenSSL's verify at security level 2, reads every
 # certificate in the machine's CA bundle as Python reads it, shows an
@@ -84,7 +86,7 @@ fi
 
 echo
 echo "== every x509 section reported"
-for phrase in "== chains Python's cryptography made" "== hosts matched" "== certificates that are not certificates" "== Ed25519 (RFC 8410)" "== RSA keys under 2048 bits" "== a client's certificate (X509Purpose::Client)" "== a search for a chain, bounded" "== certificates written (X509.self_signed)"; do
+for phrase in "== chains Python's cryptography made" "== hosts matched" "== certificates that are not certificates" "== Ed25519 (RFC 8410)" "== RSA keys under 2048 bits" "== a client's certificate (X509Purpose::Client)" "== a search for a chain, bounded" "== what a search costs, bounded" "== IPv4-mapped IPv6 addresses" "== certificates that are distrusted" "== certificates written (X509.self_signed)"; do
   if ! grep -q "$phrase" "$WORK/x509-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -500,12 +502,10 @@ prove_broken "a CA taken as the leaf" "a leaf that is a CA: expected a refusal" 
 prove_broken "unknown critical extensions passed over" "a leaf with an unknown critical extension: expected a refusal" \
   '        @unhandled_critical << oid if critical' ''
 prove_broken "the issuer's signature unchecked" "a leaf signed by another key under the same name: expected a refusal" \
-  '    child.signature_error(issuer)
-  end' '    nil
-  end'
+  '    problem = signed_error(child, child_at, issuer, search)' '    problem = nil'
 prove_broken "the first candidate issuer only" "a decoy intermediate under the same name, tried first: refused" \
-  '        failures << problem
-        next' '        failures << problem
+  '        search.failures << problem
+        next' '        search.failures << problem
         return nil'
 prove_broken "SHA-1 taken" "a leaf signed under SHA-1: expected a refusal" \
   '    when X509Oids::SHA1_RSA, X509Oids::ECDSA_SHA1
@@ -525,6 +525,18 @@ prove_broken "an IP range compared unmasked" "an address inside the permitted ra
   '      return false unless byte & mask == range[i] & mask' '      return false unless byte == range[i]'
 prove_broken "IPv6 :: unexpanded" "an IPv6 address: refused" \
   '    head + Array(UInt8).new(16 - head.size - tail.size, 0_u8) + tail' '    head + tail'
+# An IPv4-mapped IPv6 address is the IPv4 address it stands for: each
+# break below reads one of the two spellings as written only.
+prove_broken "an IPv4-mapped address kept from IPv4 ranges" "an IPv4-mapped address in an excluded IPv4 range, for ::ffff:10.0.0.1: expected a refusal" \
+  '    ip_within?(plain, narrow)
+  end' '    false
+  end'
+prove_broken "an IPv4-mapped range kept from IPv4 addresses" "an IPv4 address in an excluded IPv4-mapped range, for 10.0.0.1: expected a refusal" \
+  '    range[12, 4] + range[28, 4]' '    range'
+prove_broken "an IPv4-mapped address permitted by a range of IPv6 addresses" "an IPv4-mapped address under a permitted ::/0 alone, for 10.0.0.1" \
+  'issuer.permitted_ips.any? { |c| X509Names.ip_under?(plain, c) }' 'issuer.permitted_ips.any? { |c| X509Names.ip_under?(ip, c) }'
+prove_broken "a host matched to an address as written only" "a host written as its IPv4-mapped address, against the IPv4 entry" \
+  '      return @ip_addresses.any? { |a| X509Names.unmapped(a) == plain }' '      return @ip_addresses.any? { |a| a == address }'
 prove_broken "inner and outer algorithms unchecked" "an outer algorithm that is not the inner one refused" \
   '    unless inner_algorithm.raw == outer_algorithm.raw' '    if false'
 prove_broken "a duplicate extension taken" "an extension written twice refused" \
@@ -533,6 +545,8 @@ prove_broken "a duplicate extension taken" "an extension written twice refused" 
 # the check expects never comes.
 prove_broken "PEM's base64 unchecked" "base64: invalid byte" \
   '      return X509Error.new("a #{label} block with byte #{b} in its base64, at #{i}") unless ok' ''
+prove_broken "a private key's block read by the reader for texts that are no secret" "a private key's block with bits past its data refused" \
+  '    if label.ends_with?("PRIVATE KEY")' '    if false'
 prove_broken "the purpose passed over: serverAuth asked of every chain" "a leaf for clientAuth only, as a client's" \
   '    usages.includes?(purpose.oid) || usages.includes?(X509Oids::ANY_EXTENDED_KEY_USAGE)' '    usages.includes?(X509Oids::SERVER_AUTH) || usages.includes?(X509Oids::ANY_EXTENDED_KEY_USAGE)'
 prove_broken "an Ed25519 key's parameters taken" "an Ed25519 key whose algorithm carries parameters refused" \
@@ -566,6 +580,34 @@ prove_broken "a leaf's RSA key of any size taken" "a leaf whose key is 1024-bit 
 prove_broken "an issuer's RSA key of any size taken" "an intermediate whose key is 1024-bit RSA: expected a refusal" \
   '    weak = weak_key(issuer)
     return weak if weak' ''
+# What a search costs: each break below is the module as it was before
+# the search was bounded by its work, one bound at a time.
+prove_broken "a candidate's constraints judged before its signature" "a forged leaf under an issuer of 500 constraints: refused with" \
+  '    problem = signed_error(child, child_at, issuer, search)
+    return problem if problem
+    judged_error(chain[0], issuer, issuer_at, search)' '    problem = judged_error(chain[0], issuer, issuer_at, search)
+    return problem if problem
+    signed_error(child, child_at, issuer, search)'
+prove_broken "name constraint comparisons without a bound" "a leaf's 501 names under 500 constraints: expected a refusal" \
+  '  MAX_CONSTRAINT_COMPARISONS = 250_000_i64' '  MAX_CONSTRAINT_COMPARISONS = 1_000_000_000_i64'
+prove_broken "an issuer's constraints judged again on every path" "five intermediates signing each other under 200 constraints each: refused with" \
+  '    return search.verdicts[issuer_at] if search.judged[issuer_at]' ''
+prove_broken "a signature checked again under a key that answered" "seven intermediates under one key, answered together" \
+  '      return search.signatures[child_at][i] if key == issuer.public_key_info' ''
+prove_broken "an RSA key of 8193 bits taken" "a leaf whose key is 8193-bit RSA: expected a refusal" \
+  '  MAX_RSA_BITS = 8192' '  MAX_RSA_BITS = 16384'
+# Certificates given as distrusted: each break below passes one over.
+prove_broken "a distrusted leaf taken" "a distrusted leaf: expected a refusal" \
+  '    problem = distrusted_error(leaf, search)
+    return X509Error.new(problem) if problem' ''
+prove_broken "a distrusted issuer taken" "a distrusted intermediate: expected a refusal" \
+  '    distrusted = distrusted_error(issuer, search)
+    return distrusted if distrusted' ''
+prove_broken "a distrusted key under another certificate taken" "an intermediate holding a distrusted certificate's key: expected a refusal" \
+  '    if search.distrusted_keys.any? { |info| info == certificate.public_key_info }' '    if false'
+prove_broken "a distrusted key read only from a certificate that can be read" "an intermediate holding the key of a distrusted certificate that cannot be read: expected a refusal" \
+  '      info = X509Keys.info_of(der)' '      read = Certificate.parse(der)
+      info = read.is_a?(Certificate) ? read.public_key_info : nil'
 prove_broken "a second extensions block read over the first" "a TBSCertificate with two extensions blocks refused" \
   '      return X509Error.new("#{field.describe} after [#{last}], where RFC 5280 has each of [1], [2] and [3] once and in order") unless tag > last' ''
 prove_broken "an empty RelativeDistinguishedName taken" "an empty RDN refused: accepted" \

@@ -417,7 +417,7 @@ pub class AcmeClient
         json.field("oldKey") { json.raw(AcmeJws.jwk(@key.public_key)) }
       end
     end
-    post(url, AcmeJws.sign(new_key, inner_header, inner_payload))!
+    post(url, AcmeJws.sign(new_key, inner_header, inner_payload)!)!
     @key = new_key
     @thumbprint = AcmeJws.thumbprint(new_key.public_key)
     nil
@@ -529,7 +529,7 @@ pub class AcmeClient
       use_jwk = url == @directory.new_account
       kid = use_jwk ? nil : @account_url
       return AcmeError.new("a request to #{url} before the account is known: register first") unless use_jwk || kid
-      body = AcmeJws.sign(@key, AcmeJws.header(@key, nonce, url, kid), payload)
+      body = AcmeJws.sign(@key, AcmeJws.header(@key, nonce, url, kid), payload)!
       response = AcmeClient.exchange("POST", url, body, accept, @timeout_ms)!
       @nonce = response.nonce
       problem = response.problem("POST #{url}")
@@ -798,18 +798,19 @@ pub struct AcmeJws
 
   # The flattened JSON serialization (RFC 7515 section 7.2.2) of *payload*
   # - nil for the empty payload of POST-as-GET - under *header*.
-  def self.sign(key : SigningKey, header : String, payload : String?) : String
+  def self.sign(key : SigningKey, header : String, payload : String?) : String | AcmeError
     head = b64u(header)
     body = payload ? b64u(payload) : ""
-    signed = signature(key, AcmeJws.bytes("#{head}.#{body}"))
+    signed = signature(key, AcmeJws.bytes("#{head}.#{body}"))!
     "{\"protected\":\"#{head}\",\"payload\":\"#{body}\",\"signature\":\"#{b64u(signed)}\"}"
   end
 
   # *key*'s JWS signature of *input*: R || S for ECDSA, each at the
   # curve's width (RFC 7518 section 3.4), where std/p256 and std/p384 sign
   # in X.509's DER; RSA's and Ed25519's as they are.
-  def self.signature(key : SigningKey, input : Array(UInt8)) : Array(UInt8)
+  def self.signature(key : SigningKey, input : Array(UInt8)) : Array(UInt8) | AcmeError
     signed = key.sign(input)
+    return AcmeError.new("the key did not sign: #{signed.message}") if signed.is_a?(X509Error)
     public = key.public_key
     return signed unless public.is_a?(EcdsaPublicKey)
     raw(signed, public.curve.size)

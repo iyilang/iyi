@@ -15,16 +15,38 @@ curl -fsSL https://raw.githubusercontent.com/iyilang/iyi/master/install.sh | sh
 [`install.sh`](install.sh) (POSIX sh over `curl` and `tar`) picks the
 tarball for your machine, linux-x86_64 or darwin-arm64, and refuses anything
 else. It checks the tarball against the release's `SHA256SUMS` and unpacks
-nothing on a mismatch. `IYI_PREFIX` moves the destination and
-`IYI_VERSION=0.21.0` pins a release. By hand it is the same two lines:
+nothing on a mismatch, and nothing when `SHA256SUMS` cannot be fetched: every
+release from 0.12.0 on publishes one. It fetches over HTTPS only.
+`IYI_PREFIX` moves the destination and `IYI_VERSION=0.21.0` pins a release.
+By hand it is the same check (`shasum -a 256` where there is no `sha256sum`)
+and the same two lines:
 
 ```sh
+sha256sum -c --ignore-missing SHA256SUMS
 tar -xzf iyi-0.21.0-linux-x86_64.tar.gz -C ~/.local
 ~/.local/bin/iyi run ~/.local/share/iyi/samples/hello.iyi
 ```
 
+### Where an archive was built
+
+`SHA256SUMS` is published from the same place as the archives, so it says a
+download arrived whole. The release job also records a build provenance
+attestation for each archive and for `SHA256SUMS`: a statement, signed with
+the identity GitHub gives that workflow run, that the file came out of
+`.github/workflows/iyi.yml` in this repository. The
+[GitHub CLI](https://cli.github.com) checks a downloaded file against it:
+
+```sh
+gh attestation verify iyi-<version>-linux-x86_64.tar.gz --repo iyilang/iyi
+```
+
+The same line takes the darwin tarball, the Windows zip or `SHA256SUMS`, and
+fails for a file no run of that workflow produced. A release cut before the
+job recorded attestations has none, and `gh` says so. The installers check
+the checksum and not the attestation, which needs `gh`.
+
 The tarball is relocatable and carries every library a program can ask for:
-iyi's own 1,215 KB prelude, the 4,981 KB of `src/std` that `import std/...`
+iyi's own 1,215 KB prelude, the 5,045 KB of `src/std` that `import std/...`
 resolves to, and Crystal's standard library for `--crystal`. `bin/iyi` finds
 all three beside itself, so there is nothing to configure. LLVM is inside the
 binary — a static minimal build from `scripts/build-static-llvm.sh` — so `lib/`

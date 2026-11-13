@@ -1,0 +1,10 @@
+# The workflow names every action by commit, with the release the commit
+# was resolved from in a comment beside it. A commit does not move, so
+# nothing would ever bring a newer one: Dependabot proposes the bump, hash
+# and comment together, and the pull request runs the workflow it changes.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

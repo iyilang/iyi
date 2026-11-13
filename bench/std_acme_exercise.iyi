@@ -222,10 +222,10 @@ def pure_checks : Nil
   puts "\n== JWS signatures: RFC 7515 appendix A, RFC 8037"
   rs = a2_key
   check AcmeJws.alg(rs) == "RS256", "a 2048-bit RSA key signs RS256"
-  jws = AcmeJws.sign(rs, "{\"alg\":\"RS256\"}", PAYLOAD)
+  jws = AcmeJws.sign(rs, "{\"alg\":\"RS256\"}", PAYLOAD).or_panic
   check jws == "{\"protected\":\"eyJhbGciOiJSUzI1NiJ9\",\"payload\":\"#{PAYLOAD_B64}\",\"signature\":\"#{A2_SIGNATURE}\"}", "RFC 7515 A.2's RS256 JWS, byte for byte"
   check AcmeJws.alg(a3) == "ES256", "a P-256 key signs ES256"
-  head, body, signature = jws_parts(AcmeJws.sign(a3, "{\"alg\":\"ES256\"}", PAYLOAD))
+  head, body, signature = jws_parts(AcmeJws.sign(a3, "{\"alg\":\"ES256\"}", PAYLOAD).or_panic)
   check "#{head}.#{body}" == "eyJhbGciOiJFUzI1NiJ9.#{PAYLOAD_B64}", "RFC 7515 A.3's ES256 signing input"
   raw = unb64(signature)
   check raw.size == 64, "an ES256 signature is R || S, 64 bytes (RFC 7518 section 3.4), not DER: #{raw.size} bytes"
@@ -235,12 +235,12 @@ def pure_checks : Nil
   check key.verify(EcdsaHash::SHA256, input, der_of(unb64(A3_SIGNATURE))), "RFC 7515 A.3's own signature, R || S, verifies under its key"
   wide = SigningKey.p384
   check AcmeJws.alg(wide) == "ES384", "a P-384 key signs ES384"
-  head, body, signature = jws_parts(AcmeJws.sign(wide, "{\"alg\":\"ES384\"}", PAYLOAD))
+  head, body, signature = jws_parts(AcmeJws.sign(wide, "{\"alg\":\"ES384\"}", PAYLOAD).or_panic)
   raw = unb64(signature)
   check raw.size == 96, "an ES384 signature is R || S, 96 bytes, not DER: #{raw.size} bytes"
   check wide.public_key.as(EcdsaPublicKey).verify(EcdsaHash::SHA384, bytes("#{head}.#{body}"), der_of(raw)), "the ES384 signature made here verifies"
   check AcmeJws.alg(ed) == "EdDSA", "an Ed25519 key signs EdDSA"
-  jws = AcmeJws.sign(ed, "{\"alg\":\"EdDSA\"}", "Example of Ed25519 signing")
+  jws = AcmeJws.sign(ed, "{\"alg\":\"EdDSA\"}", "Example of Ed25519 signing").or_panic
   check jws == "{\"protected\":\"eyJhbGciOiJFZERTQSJ9\",\"payload\":\"RXhhbXBsZSBvZiBFZDI1NTE5IHNpZ25pbmc\",\"signature\":\"#{ED_SIGNATURE}\"}", "RFC 8037 A.4's EdDSA JWS, byte for byte"
   header = JSON.parse(AcmeJws.header(a3, "nonce-1", "https://ca.example/acct", nil)).as_h
   check header.has_key?("jwk") && !header.has_key?("kid") && field_s(header, "nonce") == "nonce-1" && field_s(header, "url") == "https://ca.example/acct", "a header without a kid carries the jwk, the nonce and the url"
@@ -805,7 +805,7 @@ def write_artifacts(dir : String) : Nil
   end
   lines = [] of String
   [{"ES256", a3_key}, {"ES384", SigningKey.p384}, {"RS256", a2_key}, {"EdDSA", ed_key}].each do |pair|
-    jws = AcmeJws.sign(pair[1], "{\"alg\":\"#{pair[0]}\"}", PAYLOAD)
+    jws = AcmeJws.sign(pair[1], "{\"alg\":\"#{pair[0]}\"}", PAYLOAD).or_panic
     head, body, signature = jws_parts(jws)
     spki = X509.request(pair[1], ["x.example"]).or_panic
     key_info = Der.parse(spki).or_panic.sequence.or_panic[0].sequence.or_panic[2].raw

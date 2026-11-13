@@ -10,12 +10,24 @@
 # cookie. A server's line is refused, with the byte that would break it,
 # when its name is not a token or its value holds what a cookie-octet
 # cannot (§4.1.1): a space, a comma, a semicolon, a backslash, a quote.
+# It is refused as well when its `Path` holds a semicolon, a control byte
+# or a byte outside ASCII, when its `Domain`, past one leading dot, is not
+# a host name as std/dns's `DnsName.valid?` reads one, and when its
+# `SameSite` is not `Strict`, `Lax` or `None`, whatever its case: each
+# would end its attribute early or write one no reader takes.
 #
 # The jar matches a request as §5.4 does - domain, path at a slash, not
 # lapsed - sends the longer paths first, and sends a `Secure` cookie over
-# `https://` alone, taking one only from an answer that came over it
-# (RFC 6265bis: an http page cannot overwrite a secure cookie). There is
-# no public-suffix list: a `Domain` of one label is refused, and one like
+# `https://` alone, taking one only from an answer that came over it. An
+# answer over `http://` leaves a `Secure` cookie alone (RFC 6265bis
+# §5.7): its cookie of that name is ignored when its domain matches the
+# kept one's, either way round, and its path is the kept one's or under
+# it, so it does not replace the kept cookie, remove it with `Max-Age=0`,
+# or go beside it from a longer path. A name's prefix is held to (RFC
+# 6265bis §4.1.3), read in any case: a `__Secure-` cookie is taken only
+# with `Secure`, so from `https://` alone, and a `__Host-` cookie only
+# with that, no `Domain`, and `Path=/` written out. There is no
+# public-suffix list: a `Domain` of one label is refused, and one like
 # `co.uk` is taken, which a browser would refuse. This module is apart
 # from std/http because it reads the clock: std/time is what knows what
 # an `Expires` date means, and std/http reaches the network alone.
@@ -24,6 +36,7 @@
 module std/cookie
 
 import std/http::{HTTP, Response, CookieStore}
+import std/dns::{DnsName}
 import std/uri::{URI}
 import std/time::{Time, Span}
 
@@ -31,9 +44,10 @@ import std/time::{Time, Span}
 # keeps. `Cookie.parse(line)` reads a `Set-Cookie` value as RFC 6265 §5.2
 # has a user agent read one - a name and value, then attributes in any
 # case, an unknown attribute ignored - and answers nil for a line that
-# has no name-value pair. `to_set_cookie` writes one, refusing a name or
-# value that would break the line. `expires` is the instant it lapses,
-# from `Max-Age` before `Expires` (§5.3, step 3); nil is a session cookie.
+# has no name-value pair. `to_set_cookie` writes one, refusing a name,
+# value, `path`, `domain` or `same_site` that would break the line.
+# `expires` is the instant it lapses, from `Max-Age` before `Expires`
+# (§5.3, step 3); nil is a session cookie.
 pub class Cookie
   getter name : String
   getter value : String
@@ -137,7 +151,13 @@ pub class Cookie
 
   # The `Set-Cookie` value a server writes (§4.1). A name is a token, and a
   # value the cookie-octets: a space, a comma, a semicolon, a backslash or
-  # a quote inside one would end it or another field early.
+  # a quote inside one would end it or another field early. A path is
+  # printable ASCII with no semicolon, which would start an attribute of
+  # its own; a domain is a host name, one leading dot allowed; `SameSite`
+  # is `Strict`, `Lax` or `None`, whatever its case. Anything else panics
+  # - a domain that is an address too, and a line `parse` read from a peer
+  # with such a field - so a path or a domain that comes from a request
+  # is checked before it is given to a cookie.
   def to_set_cookie : String
     raise "Cookie: not a cookie name: #{@name.inspect}" unless HTTP.token?(@name)
     p = @value.to_unsafe
@@ -152,9 +172,18 @@ pub class Cookie
     text = String::Builder.new
     text << @name << "=" << @value
     if path = @path
+      q = path.to_unsafe
+      i = 0
+      while i < path.bytesize
+        c = q[i]
+        raise "Cookie: #{@name} has a byte a cookie path cannot hold: #{path.inspect}" if c < 0x20_u8 || c == 0x3B_u8 || c >= 0x7F_u8
+        i = i + 1
+      end
       text << "; Path=" << path
     end
     if domain = @domain
+      host = domain.starts_with?(".") ? domain[1, domain.bytesize - 1] : domain
+      raise "Cookie: #{@name} has a domain that is not a host name: #{domain.inspect}" unless DnsName.valid?(host)
       text << "; Domain=" << domain
     end
     if age = @max_age
@@ -165,6 +194,9 @@ pub class Cookie
     text << "; Secure" if @secure
     text << "; HttpOnly" if @http_only
     if same = @same_site
+      unless HTTP.same_name?(same, "Strict") || HTTP.same_name?(same, "Lax") || HTTP.same_name?(same, "None")
+        raise "Cookie: #{@name} has a SameSite that is not Strict, Lax or None: #{same.inspect}"
+      end
       text << "; SameSite=" << same
     end
     text.to_s
@@ -187,8 +219,13 @@ end
 # list here, so a cookie for `co.uk` would be taken, which a browser would
 # refuse. A cookie that has lapsed, or is set lapsed, is gone. A `Secure`
 # cookie is taken from an `https://` answer only, and goes back over
-# `https://` only (§5.4 step 1). A jar may be shared by tasks on one
-# thread, not across threads.
+# `https://` only (§5.4 step 1). While one is kept, an `http://` answer's
+# cookie of its name is ignored when its domain matches the kept one's,
+# either way round, and its path is the kept one's or under it (RFC
+# 6265bis §5.7). A cookie named `__Secure-` and on is taken only with
+# `Secure`, and one named `__Host-` and on only with `Secure`, no `Domain`
+# and `Path=/`, the prefix in any case (RFC 6265bis §4.1.3). A jar may be
+# shared by tasks on one thread, not across threads.
 pub class CookieJar
   # Each cookie, the host it was set by (what one without a `Domain` goes
   # back to), and the order it was made in.
@@ -214,26 +251,52 @@ pub class CookieJar
   end
 
   # *cookie*, as set by an answer from *url*: it replaces one of the same
-  # name, domain and path, and one set already lapsed removes it.
+  # name, domain and path, and one set already lapsed removes it. Over
+  # `http://` it does neither to a `Secure` cookie: it is ignored, as is
+  # one whose name has a prefix it does not meet.
   def add(url : String, cookie : Cookie) : Nil
     uri = URI.parse?(url)
     return unless uri
     host = (uri.hostname || "").downcase
     return if host.bytesize == 0
-    return if cookie.secure && !CookieJar.secure?(uri)
+    secure = CookieJar.secure?(uri)
+    return if cookie.secure && !secure
+    # `Secure` here has come over `https://`, which is what both prefixes
+    # ask first; `__Host-` asks for no `Domain` and a written `Path=/` too.
+    host_only = CookieJar.prefixed?(cookie.name, "__host-")
+    if host_only || CookieJar.prefixed?(cookie.name, "__secure-")
+      return unless cookie.secure
+    end
+    return if host_only && !(cookie.domain.nil? && cookie.path == "/")
     if domain = cookie.domain
       return unless domain.includes?(".") && CookieJar.domain_match?(host, domain)
     end
     path = cookie.path || CookieJar.default_path(uri.path)
-    stored = Cookie.new(cookie.name, cookie.value, path, cookie.domain, cookie.expires, cookie.max_age, cookie.secure, cookie.http_only, cookie.same_site)
     scope = cookie.domain || host
+    now = Time.utc
+    return if !secure && secure_kept?(cookie.name, scope, path, now)
+    stored = Cookie.new(cookie.name, cookie.value, path, cookie.domain, cookie.expires, cookie.max_age, cookie.secure, cookie.http_only, cookie.same_site)
     @kept = @kept.reject do |entry|
       other = entry[0]
       other.name == stored.name && (other.domain || entry[1]) == scope && other.path == stored.path
     end
-    return if stored.expired?(Time.utc)
+    return if stored.expired?(now)
     @made = @made + 1_i64
     @kept << {stored, host, @made}
+  end
+
+  # Whether a `Secure` cookie of *name* is kept that one for *scope* and
+  # *path* would replace, remove or be sent beside (RFC 6265bis §5.7):
+  # its domain matches *scope* or *scope* matches it, and *path* is its
+  # path or under it.
+  private def secure_kept?(name : String, scope : String, path : String, now : Time) : Bool
+    @kept.any? do |entry|
+      other = entry[0]
+      held = other.domain || entry[1]
+      other.secure && other.name == name && !other.expired?(now) &&
+        (CookieJar.domain_match?(scope, held) || CookieJar.domain_match?(held, scope)) &&
+        CookieJar.path_match?(path, other.path || "/")
+    end
   end
 
   # The cookies a request to *url* carries: domain and path matching,
@@ -279,6 +342,22 @@ pub class CookieJar
   protected def self.secure?(uri : URI) : Bool
     scheme = (uri.scheme || "").downcase
     scheme == "https" || scheme == "wss"
+  end
+
+  # Whether *name* starts with *prefix*, which is in lower case, whatever
+  # case *name* is in.
+  protected def self.prefixed?(name : String, prefix : String) : Bool
+    return false if name.bytesize < prefix.bytesize
+    p = name.to_unsafe
+    q = prefix.to_unsafe
+    i = 0
+    while i < prefix.bytesize
+      c = p[i]
+      c = c | 32_u8 if c >= 65_u8 && c <= 90_u8
+      return false unless c == q[i]
+      i = i + 1
+    end
+    true
   end
 
   # §5.1.3: the host is the domain, or ends with it after a dot, and is

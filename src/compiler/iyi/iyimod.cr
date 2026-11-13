@@ -463,6 +463,27 @@ module Iyi::IyiMod
   class Error < Iyi::Error
   end
 
+  # A count or a length the file states that its own bytes cannot hold
+  # (`read_count`). Raised where no path is known and named by the reader
+  # that knows it.
+  class Overclaim < Error
+  end
+
+  # One section's bytes as a reader walks them, and how many of them the
+  # counts read so far have claimed between them (`read_count`).
+  private class Payload < IO::Memory
+    property claimed : UInt64 = 0_u64
+  end
+
+  # How deep a type's declarations may nest in a `.iyimod`, written or
+  # read. Both sides recurse once a level, and so does everything that
+  # walks what was read: a file of one type inside one type twenty
+  # thousand times is 1.5 MB of well-formed section, and it ended the
+  # reader with the machine's stack rather than with a sentence. Nobody
+  # writes a type two hundred types deep; the writer refuses it too, so
+  # nothing is written that is not read back.
+  MAX_TYPE_NESTING = 200
+
   # IV.3's three hashes — what decides whether a build is actually incremental.
   #
   # The property the split exists for: **changing a body must not change the
@@ -597,7 +618,9 @@ module Iyi::IyiMod
 
   # A cache key rather than a signature, which is why MD5 is enough and why the
   # compiler's own vendored copy is the one to use: `.iyimod` decides what to
-  # rebuild, and nothing downstream trusts an artifact it did not write.
+  # rebuild. It says nothing about who wrote an artifact, and a build does
+  # read ones it did not write - a library's, from the workspace's `mods/` -
+  # trusting them as it trusts source (SPEC.md IV.2a).
   def self.digest(value : String) : String
     ::Crystal::Digest::MD5.hexdigest(value)
   end
@@ -1787,8 +1810,21 @@ module Iyi::IyiMod
                     "not match what was written. Rebuild it with `--emit-iyimod`")
   end
 
+  # What one entry of the section table takes in the file: kind, padding,
+  # length, checksum.
+  TABLE_ENTRY_SIZE = 16
+
   # The magic, the format version and the section table.
-  private def self.read_table(file : IO, path : String) : Array({UInt16, UInt32, UInt64})
+  #
+  # The table is held to the file before anything is allocated from it. A
+  # count is four bytes anybody can write, and so is a length: sixteen bytes
+  # that said "two thousand million sections" were a 32 GiB table asked of
+  # the allocator before the first entry was read, and one entry that said
+  # "4 GiB" was that much zeroed memory before the read that would have
+  # found the file ended. So the entries the count names have to be in the
+  # file, and the sections they describe have to fit in what follows them;
+  # a reader past this point allocates no section larger than the file.
+  private def self.read_table(file : File, path : String) : Array({UInt16, UInt32, UInt64})
     magic = Bytes.new(MAGIC.size)
     file.read_fully?(magic) || raise Error.new("#{path} is too short to be a .iyimod")
     raise Error.new("#{path} is not a .iyimod") unless magic == MAGIC
@@ -1799,11 +1835,24 @@ module Iyi::IyiMod
     end
 
     count = file.read_bytes(UInt32, FORMAT)
-    Array({UInt16, UInt32, UInt64}).new(count) do
+    room = file.size.to_u64 - file.pos
+    if count.to_u64 * TABLE_ENTRY_SIZE > room
+      raise Error.new("#{path} is truncated: its table names #{count} sections and " \
+                      "#{room} bytes follow it, which is room for #{room // TABLE_ENTRY_SIZE}")
+    end
+    table = Array({UInt16, UInt32, UInt64}).new(count) do
       kind = file.read_bytes(UInt16, FORMAT)
       file.read_bytes(UInt16, FORMAT) # padding
       {kind, file.read_bytes(UInt32, FORMAT), file.read_bytes(UInt64, FORMAT)}
     end
+
+    room -= count.to_u64 * TABLE_ENTRY_SIZE
+    claimed = table.sum(0_u64) { |(_, length, _)| length.to_u64 }
+    if claimed > room
+      raise Error.new("#{path} is truncated: its table says its sections are #{claimed} " \
+                      "bytes together and #{room} bytes follow the table")
+    end
+    table
   end
 
   # What a build needs to decide whether to read the rest of *path* (IV.3): the
@@ -1873,6 +1922,8 @@ module Iyi::IyiMod
         header[:compiler_version], header[:target_triple], header[:flags],
         hashes, imports, inputs, header[:crystal_library], header[:package_name])
     end
+  rescue ex : Overclaim
+    raise unreadable(path, ex.message)
   rescue ex : Error
     raise ex
   rescue ex : IO::EOFError
@@ -1890,9 +1941,13 @@ module Iyi::IyiMod
     # wording, which names this reader's open mode rather than what happened.
     raise Error.new("#{path} cannot be read: #{ex.os_error.try(&.message) || "it could not be opened"}")
   rescue ex
-    raise Error.new("#{path} is not a readable .iyimod: #{ex.message || "its bytes are not the ones this reader expects"}. " \
-                    "It is damaged, or was written by something that is not this " \
-                    "compiler; rebuild it with `--emit-iyimod`")
+    raise unreadable(path, ex.message)
+  end
+
+  private def self.unreadable(path : String, why : String?) : Error
+    Error.new("#{path} is not a readable .iyimod: #{why || "its bytes are not the ones this reader expects"}. " \
+              "It is damaged, or was written by something that is not this " \
+              "compiler; rebuild it with `--emit-iyimod`")
   end
 
   # The spawns the artifact at *path* recorded (`Section::Spawns`), with the
@@ -2031,6 +2086,8 @@ module Iyi::IyiMod
       artifact.reaches = reaches
       artifact
     end
+  rescue ex : Overclaim
+    raise unreadable(path, ex.message)
   rescue ex : Error
     raise ex
   rescue ex : IO::EOFError
@@ -2045,9 +2102,7 @@ module Iyi::IyiMod
     # rebuild it - reads it no better.
     raise Error.new("#{path} cannot be read: #{ex.os_error.try(&.message) || "it could not be opened"}")
   rescue ex
-    raise Error.new("#{path} is not a readable .iyimod: #{ex.message || "its bytes are not the ones this reader expects"}. " \
-                    "It is damaged, or was written by something that is not this " \
-                    "compiler; rebuild it with `--emit-iyimod`")
+    raise unreadable(path, ex.message)
   end
 
   # Text for `crystal mod dump` — under the eventual `iyi` binary this is
@@ -3580,12 +3635,12 @@ module Iyi::IyiMod
   end
 
   private def self.decode_header(payload : Bytes)
-    io = IO::Memory.new(payload)
+    io = Payload.new(payload)
     module_name = read_string(io)
     source_path = read_string(io)
     compiler_version = read_string(io)
     target_triple = read_string(io)
-    flags = Array(String).new(io.read_bytes(UInt32, FORMAT)) { read_string(io) }
+    flags = Array(String).new(read_count(io, 4)) { read_string(io) }
     has_initialiser = io.read_byte == 1_u8
     crystal_library = io.read_byte == 1_u8
     class_root = io.read_byte == 1_u8
@@ -3629,12 +3684,12 @@ module Iyi::IyiMod
   end
 
   private def self.decode_requires(payload : Bytes) : Array(String)
-    read_strings IO::Memory.new(payload)
+    read_strings Payload.new(payload)
   end
 
   private def self.decode_imports(payload : Bytes)
-    io = IO::Memory.new(payload)
-    edges = Array(ImportEdge).new(io.read_bytes(UInt32, FORMAT)) do
+    io = Payload.new(payload)
+    edges = Array(ImportEdge).new(read_count(io, 13)) do
       ImportEdge.new(read_string(io), read_string(io), read_string(io), io.read_byte == 1_u8)
     end
     {imports: edges, usings: read_strings(io)}
@@ -3664,7 +3719,7 @@ module Iyi::IyiMod
   end
 
   private def self.decode_macro_bodies(payload : Bytes) : Array(String)
-    read_strings(IO::Memory.new(payload))
+    read_strings(Payload.new(payload))
   end
 
   private def self.encode_strings(values : Array(String)) : Bytes
@@ -3674,7 +3729,7 @@ module Iyi::IyiMod
   end
 
   private def self.decode_strings(payload : Bytes) : Array(String)
-    read_strings(IO::Memory.new(payload))
+    read_strings(Payload.new(payload))
   end
 
   private def self.encode_spawns(records : Array(SpawnRecord)) : Bytes
@@ -3692,8 +3747,8 @@ module Iyi::IyiMod
   end
 
   private def self.decode_spawns(payload : Bytes) : Array(SpawnRecord)
-    io = IO::Memory.new(payload)
-    Array(SpawnRecord).new(io.read_bytes(UInt32, FORMAT)) do
+    io = Payload.new(payload)
+    Array(SpawnRecord).new(read_count(io, 21)) do
       owner = read_string(io)
       digest = read_string(io)
       line = io.read_bytes(Int32, FORMAT)
@@ -3720,8 +3775,8 @@ module Iyi::IyiMod
   end
 
   private def self.decode_reaches(payload : Bytes) : Array(ReachRecord)
-    io = IO::Memory.new(payload)
-    records = Array(ReachRecord).new(io.read_bytes(UInt32, FORMAT)) do
+    io = Payload.new(payload)
+    records = Array(ReachRecord).new(read_count(io, 32)) do
       function = read_string(io)
       label = read_string(io)
       type = read_string(io)
@@ -3735,9 +3790,9 @@ module Iyi::IyiMod
   end
 
   private def self.decode_mono_bodies(payload : Bytes) : Hash(String, String)
-    io = IO::Memory.new(payload)
+    io = Payload.new(payload)
     bodies = {} of String => String
-    io.read_bytes(UInt32, FORMAT).times do
+    read_count(io, 8).times do
       key = read_string(io)
       bodies[key] = read_string(io)
     end
@@ -3782,10 +3837,10 @@ module Iyi::IyiMod
   end
 
   private def self.decode_source_positions(payload : Bytes) : NamedTuple(bodies: Hash(String, Array(SourcePosition)), initialiser: Array(SourcePosition))
-    io = IO::Memory.new(payload)
+    io = Payload.new(payload)
     filenames = read_strings(io)
     read_positions = -> do
-      Array(SourcePosition).new(io.read_bytes(UInt32, FORMAT)) do
+      Array(SourcePosition).new(read_count(io, 16)) do
         offset = io.read_bytes(UInt32, FORMAT).to_i32
         filename = filenames[io.read_bytes(UInt32, FORMAT)]? || raise IO::EOFError.new
         line = io.read_bytes(UInt32, FORMAT).to_i32
@@ -3794,7 +3849,7 @@ module Iyi::IyiMod
       end
     end
     bodies = {} of String => Array(SourcePosition)
-    io.read_bytes(UInt32, FORMAT).times do
+    read_count(io, 8).times do
       key = read_string(io)
       bodies[key] = read_positions.call
     end
@@ -3810,7 +3865,7 @@ module Iyi::IyiMod
   end
 
   private def self.decode_hashes(payload : Bytes) : Hashes
-    io = IO::Memory.new(payload)
+    io = Payload.new(payload)
     Hashes.new(read_string(io), read_string(io), read_string(io))
   end
 
@@ -3821,7 +3876,7 @@ module Iyi::IyiMod
   end
 
   private def self.decode_constants(payload : Bytes) : Array(String)
-    read_strings(IO::Memory.new(payload))
+    read_strings(Payload.new(payload))
   end
 
   private def self.encode_reopened(artifact : Artifact) : Bytes
@@ -3831,7 +3886,7 @@ module Iyi::IyiMod
   end
 
   private def self.decode_reopened(payload : Bytes) : Array(TypeDecl)
-    read_type_declarations(IO::Memory.new(payload))
+    read_type_declarations(Payload.new(payload))
   end
 
   private def self.encode_top_level(artifact : Artifact) : Bytes
@@ -3841,7 +3896,7 @@ module Iyi::IyiMod
   end
 
   private def self.decode_top_level(payload : Bytes) : Array(Signature)
-    read_signatures(IO::Memory.new(payload))
+    read_signatures(Payload.new(payload))
   end
 
   private def self.encode_libs(artifact : Artifact) : Bytes
@@ -3851,7 +3906,7 @@ module Iyi::IyiMod
   end
 
   private def self.decode_libs(payload : Bytes) : Array(String)
-    read_strings(IO::Memory.new(payload))
+    read_strings(Payload.new(payload))
   end
 
   private def self.encode_symbols(artifact : Artifact) : Bytes
@@ -3861,7 +3916,7 @@ module Iyi::IyiMod
   end
 
   private def self.decode_symbols(payload : Bytes) : Array(String)
-    read_strings(IO::Memory.new(payload))
+    read_strings(Payload.new(payload))
   end
 
   private def self.encode_match_types(artifact : Artifact) : Bytes
@@ -3871,7 +3926,7 @@ module Iyi::IyiMod
   end
 
   private def self.decode_match_types(payload : Bytes) : Array(String)
-    read_strings(IO::Memory.new(payload))
+    read_strings(Payload.new(payload))
   end
 
   private def self.encode_class_vars(artifact : Artifact) : Bytes
@@ -3886,8 +3941,8 @@ module Iyi::IyiMod
   end
 
   private def self.decode_class_vars(payload : Bytes) : Array(ClassVarRef)
-    io = IO::Memory.new(payload)
-    Array(ClassVarRef).new(io.read_bytes(UInt32, FORMAT)) do
+    io = Payload.new(payload)
+    Array(ClassVarRef).new(read_count(io, 5)) do
       ClassVarRef.new(read_string(io), io.read_byte == 1_u8)
     end
   end
@@ -3905,8 +3960,8 @@ module Iyi::IyiMod
   end
 
   private def self.decode_regexes(payload : Bytes) : Array(RegexConst)
-    io = IO::Memory.new(payload)
-    Array(RegexConst).new(io.read_bytes(UInt32, FORMAT)) do
+    io = Payload.new(payload)
+    Array(RegexConst).new(read_count(io, 12)) do
       RegexConst.new(read_string(io), read_string(io), io.read_bytes(UInt32, FORMAT))
     end
   end
@@ -3918,7 +3973,7 @@ module Iyi::IyiMod
   end
 
   private def self.decode_type_ids(payload : Bytes) : Array(String)
-    read_strings(IO::Memory.new(payload))
+    read_strings(Payload.new(payload))
   end
 
   private def self.encode_layouts(artifact : Artifact) : Bytes
@@ -3939,16 +3994,16 @@ module Iyi::IyiMod
   end
 
   private def self.decode_layouts(payload : Bytes) : Array({String, TypeLayout})
-    io = IO::Memory.new(payload)
-    Array({String, TypeLayout}).new(io.read_bytes(UInt32, FORMAT)) do
+    io = Payload.new(payload)
+    Array({String, TypeLayout}).new(read_count(io, 24)) do
       name = read_string(io)
       type_id = io.read_bytes(Int32, FORMAT)
       alloc_size = io.read_bytes(UInt32, FORMAT)
       scan_cap = io.read_bytes(UInt32, FORMAT)
-      scan_offsets = Array(UInt32).new(io.read_bytes(UInt32, FORMAT)) do
+      scan_offsets = Array(UInt32).new(read_count(io, 4)) do
         io.read_bytes(UInt32, FORMAT)
       end
-      noscan_offsets = Array(UInt32).new(io.read_bytes(UInt32, FORMAT)) do
+      noscan_offsets = Array(UInt32).new(read_count(io, 4)) do
         io.read_bytes(UInt32, FORMAT)
       end
       {name, TypeLayout.new(type_id, alloc_size, scan_cap, scan_offsets, noscan_offsets)}
@@ -3968,10 +4023,10 @@ module Iyi::IyiMod
   end
 
   private def self.decode_object_code(payload : Bytes) : Array(ObjectUnit)
-    io = IO::Memory.new(payload)
-    Array(ObjectUnit).new(io.read_bytes(UInt32, FORMAT)) do
+    io = Payload.new(payload)
+    Array(ObjectUnit).new(read_count(io, 8)) do
       name = read_string(io)
-      code = Bytes.new(io.read_bytes(UInt32, FORMAT))
+      code = Bytes.new(read_count(io, 1))
       io.read_fully(code)
       ObjectUnit.new(name, code)
     end
@@ -4008,7 +4063,11 @@ module Iyi::IyiMod
   # Recursive, because a type's declarations are types: the nesting a module
   # wrote is the nesting a consumer has to read back, and iyi cannot reopen a
   # container to add one afterwards.
-  private def self.write_type_declarations(io : IO, types : Array(TypeDecl), docs : Bool = true) : Nil
+  private def self.write_type_declarations(io : IO, types : Array(TypeDecl), docs : Bool = true, depth : Int32 = 0) : Nil
+    if depth > MAX_TYPE_NESTING && !types.empty?
+      raise Error.new("#{types.first.name} is declared more than #{MAX_TYPE_NESTING} types deep, " \
+                      "which is deeper than a .iyimod holds")
+    end
     io.write_bytes types.size.to_u32, FORMAT
     types.each do |declaration|
       write_string io, declaration.name
@@ -4030,12 +4089,17 @@ module Iyi::IyiMod
       io.write_byte(declaration.extends_self ? 1_u8 : 0_u8)
       write_strings io, declaration.usings
       write_signatures io, declaration.methods, docs
-      write_type_declarations io, declaration.types, docs
+      write_type_declarations io, declaration.types, docs, depth + 1
     end
   end
 
-  private def self.read_type_declarations(io : IO) : Array(TypeDecl)
-    Array(TypeDecl).new(io.read_bytes(UInt32, FORMAT)) do
+  private def self.read_type_declarations(io : Payload, depth : Int32 = 0) : Array(TypeDecl)
+    count = read_count(io, 77)
+    if depth > MAX_TYPE_NESTING && count > 0
+      raise Overclaim.new("a section declares types more than #{MAX_TYPE_NESTING} deep inside one another, " \
+                          "which is deeper than a .iyimod holds")
+    end
+    Array(TypeDecl).new(count) do
       name = read_string(io)
       kind = read_string(io)
       value = read_string(io)
@@ -4056,7 +4120,7 @@ module Iyi::IyiMod
       usings = read_strings(io)
       methods = read_signatures(io)
       TypeDecl.new(name, kind, parameters, assoc_types, supertraits, fields, methods,
-        visibility, read_type_declarations(io), value, macros, members, class_vars,
+        visibility, read_type_declarations(io, depth + 1), value, macros, members, class_vars,
         superclass, includes, funs, annotations, doc, extends_self, usings)
     end
   end
@@ -4079,8 +4143,8 @@ module Iyi::IyiMod
     end
   end
 
-  private def self.read_signatures(io : IO) : Array(Signature)
-    Array(Signature).new(io.read_bytes(UInt32, FORMAT)) do
+  private def self.read_signatures(io : Payload) : Array(Signature)
+    Array(Signature).new(read_count(io, 45)) do
       name = read_string(io)
       receiver = read_string(io)
       parameters = read_strings(io)
@@ -4097,12 +4161,12 @@ module Iyi::IyiMod
   end
 
   private def self.decode_exports(payload : Bytes) : Exports
-    io = IO::Memory.new(payload)
+    io = Payload.new(payload)
     functions = read_signatures(io)
 
     types = read_type_declarations(io)
 
-    impls = Array(ImplRecord).new(io.read_bytes(UInt32, FORMAT)) do
+    impls = Array(ImplRecord).new(read_count(io, 28)) do
       trait_name = read_string(io)
       type_name = read_string(io)
       trait_arguments = read_strings(io)
@@ -4121,8 +4185,8 @@ module Iyi::IyiMod
     values.each { |value| write_string io, value }
   end
 
-  private def self.read_strings(io : IO) : Array(String)
-    Array(String).new(io.read_bytes(UInt32, FORMAT)) { read_string(io) }
+  private def self.read_strings(io : Payload) : Array(String)
+    Array(String).new(read_count(io, 4)) { read_string(io) }
   end
 
   private def self.write_pairs(io : IO, values : Array({String, String})) : Nil
@@ -4142,8 +4206,8 @@ module Iyi::IyiMod
     end
   end
 
-  private def self.read_triples(io : IO) : Array({String, String, String})
-    Array({String, String, String}).new(io.read_bytes(UInt32, FORMAT)) do
+  private def self.read_triples(io : Payload) : Array({String, String, String})
+    Array({String, String, String}).new(read_count(io, 12)) do
       {read_string(io), read_string(io), read_string(io)}
     end
   end
@@ -4158,14 +4222,14 @@ module Iyi::IyiMod
     end
   end
 
-  private def self.read_class_vars(io : IO) : Array(ClassVarDecl)
-    Array(ClassVarDecl).new(io.read_bytes(UInt32, FORMAT)) do
+  private def self.read_class_vars(io : Payload) : Array(ClassVarDecl)
+    Array(ClassVarDecl).new(read_count(io, 16)) do
       ClassVarDecl.new(read_string(io), read_string(io), read_string(io), read_strings(io))
     end
   end
 
-  private def self.read_pairs(io : IO) : Array({String, String})
-    Array({String, String}).new(io.read_bytes(UInt32, FORMAT)) do
+  private def self.read_pairs(io : Payload) : Array({String, String})
+    Array({String, String}).new(read_count(io, 8)) do
       {read_string(io), read_string(io)}
     end
   end
@@ -4175,10 +4239,45 @@ module Iyi::IyiMod
     io.write value.to_slice
   end
 
-  private def self.read_string(io : IO) : String
-    size = io.read_bytes(UInt32, FORMAT)
+  private def self.read_string(io : Payload) : String
+    size = read_count(io, 1)
     bytes = Bytes.new(size)
     io.read_fully(bytes)
     String.new(bytes)
+  end
+
+  # A count of things that each take at least *least* bytes, read from a
+  # section and held to what the section has before anything is sized by
+  # it. Every count and every length in a section goes through here: the
+  # number is the file's claim and the bytes are the evidence, and an array
+  # of two thousand million strings asked for on a claim alone was 16 GiB
+  # the reader zeroed before the first string turned out not to be there.
+  #
+  # Held twice. To what is left of the section, which is the sentence a
+  # single count that is too large gets. And to the section as a whole:
+  # *least* is the bytes an element takes itself, apart from whatever its
+  # own counts go on to claim, so the claims of every count in a section
+  # are of different bytes and cannot come to more than the section has.
+  # The first alone was not a bound on what a section makes a reader
+  # allocate, because a type's declarations nest and each level was
+  # measured against the same remainder: a level claimed all that was left
+  # in elements, spent the 77 bytes of one, and the level inside it claimed
+  # all that was left again, every level's array alive at once. 385 KB of
+  # section was 1.9 GiB committed before the file was refused. What a
+  # section's arrays hold together is now no more elements than it has
+  # bytes for.
+  private def self.read_count(io : Payload, least : Int32) : Int32
+    count = io.read_bytes(UInt32, FORMAT)
+    left = io.size - io.pos
+    claim = count.to_u64 * least
+    if claim > left
+      raise Overclaim.new("a section counts #{count} of something that takes #{least} " \
+                          "#{least == 1 ? "byte" : "bytes"} or more each, and has #{left} bytes left")
+    end
+    io.claimed += claim
+    if io.claimed > io.size
+      raise Overclaim.new("a section's counts claim #{io.claimed} bytes between them, and it is #{io.size} bytes long")
+    end
+    count.to_i32
   end
 end

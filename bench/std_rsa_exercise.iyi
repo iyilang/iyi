@@ -13,8 +13,10 @@
 # cryptography drew, read as PKCS #1 and as PKCS #8, DER and PEM: its PKCS
 # #1 v1.5 signatures byte for byte cryptography's, its PSS signatures
 # checked; and private keys refused - each CRT parameter that disagrees,
-# 1024 bits, more than two primes, an RSASSA-PSS key, an EC one, missing
-# parameters, an encrypted key, two keys. The modes the gate script drives:
+# a p that is two primes' product, 1024 bits, more than two primes, an
+# RSASSA-PSS key, an EC one, missing parameters, an encrypted key, two
+# keys, a PEM body that is not base64 or not the one text of its bytes.
+# The modes the gate script drives:
 #   verify FILE   each line `spki scheme hash salt message signature`, in
 #                 hex, answered `true`, `false` or `key: <why>`;
 #   roots DIR     each certificate's own signature checked with its own
@@ -192,6 +194,11 @@ V15_SIGNATURES = {
   RsaHash::SHA384 => "880a94c4c65f89eee16d21a18e0b1a7c2dd9694ba61fe08da2c8ad03d7564fd1cbc167f62bf3a19e6a1be06c667010e2af9e4e6d155032d859f2bff8459b1a36a9bac6f83b5461addc0336caeedfc28c4e0eab3fab072f70ec27834710bab0cb6951eded85b14f998203f1ac87aa8ed7cec768775211fed3c2b13dcd3ad0ecb3a9c64481373807c186f4fdad6bd6fae12416137f48041dc85c398b2b0b525baf9142074db1bbd41a3a045e673b18d8432bab588a7b0fd02cf7c50dd5c78cbbe24a4df5bc1c154246998311a5e0bda7cb04cdde8038c2e525a3457311b76bffc1d2e16e5b2d9a05ad73063187fd749e150ca1721131fbddf21c1c4064de406df8",
   RsaHash::SHA512 => "b0214ef6c140a947b077b487a71808e25770013ab4372fbc102ccffd3c2d30328ddfc03ca666703bf70369733b59898dcfcdf8bcd2c1e3d65c39d1b388fbd1bba288ff7852a144f513a8b1a5741459bafd73e7d2fb1cebd2b861401ebe9cfb64659340ec74746be40737a8b2f8f5eca294c0fa71dee31a411c0aa37d15f0850cb6856fd5219c99e2a68a8720b49733505761e93dd7c3e7196cfe318468bc336e6bad88f42bf57d9c51eb28ab10dbac894bbc77cb5be8a82d08e71f9eb8f0626e27b1e20ecd63f680ec256a7733c4df9c6bf7c78eec15b625b10471203035a2ec35b5abba6c1229611dd3ab06885b94c1b596c9d4e41680bb623b5f072e5e0361",
 }
+# A 2048-bit key whose p is the product of two 512-bit primes, its other
+# numbers made from that p as RFC 8017 makes them: n = p·q, d = e^-1 mod
+# lcm(p - 1, q - 1), dp, dq and qi. Every number agrees with the others,
+# and no signature it makes checks.
+COMPOSITE_P = "308204a10201000282010100af89df607a35ab85c20303a0f141ef5a2635a688a2a50ac298bee4f147f36844a995792e898ccf107c656001282ec738c1988cf4453d3d7be81f0fae0b18a9e12a7978e018545187b1217f8a53967adfde2e4e1a09ff6f60f114efc620af0abfb37994e1c9d6b66998ed0fd376569b400f6990e934b5754187d45dbe3df59104a05d03b7d09ad928c42f3e51b57dd824df8b28d26185716b74ffad34a95d782bb17d3086c376a9dc900ec6dae7208940a373d57974e9e7ec5dee2e2f280867dbab1e923e676a5e5a29430572180c26956046e1c0c159df4b9b16ab627558c4e9618b5d4ab4e809d319bb64dd794c4f514d05b4f0dc19d06b516805d7a84e839d02030100010281ff7678719742fe9e553f6f9a2f232b310afad2f09c40007aee683ca3ac4173fb75335d3176412ff9c5be2ef0631ae0923ca451327f813b64761d5ebe54ae21c4a057c38210e4ab7cd43c92ba1210a208d93d611740d341ecd217fe1376dd91607d3d8c328d663c64b101b783b01c67357490bc6e941e4c30ee719f5edb1e0a2ede7a643f03e62086aee379bda6747771f86ea32898e809e7b6f2075f7c31e91cec70ebfb6408066a39a05624ede149c3d8dcb4163bbcd2114cb158d4cae16f21352746fa55c8cb14160569fdb30363ffcec5ef813dd7590f61b2ffa733ea6f4688fa5e7014103606f20ba9c1d195bfdf0a2b972967e1207f13bc46013c6fb21102818100b46f7e059d35485ddd09bc8c9cfd2cce9f485e7c882344872fbdc75202899c5a944f79295025bb277927f0f4e6183abd03a26869b84209ca60f3276e7d889e777710d1f7bbb45f8532d41465b6ec8e85c9f2b4a00541a72a6cc9d708bc5db94ef8a0177b7977b1fc8d9f12bc4b8e3b6982585203dd44e399bd304e68b03756b102818100f90d60acd1c3e16f8909f16968bafe2bada5fcbc43155e361503d1beb7b5a1d910ee282242c27f53cd7292208898b14650ffd7e01884ac88627428550c0856fe85b987885a88f2e76005d7484da67c9bfb8aaf22fd8bcce9cc82c76134527945edd8f94ed4b21fe312aa81064b41727aec812f4e69e9b759e6c024b68c2f4ead0281800fb4f8ea7231f637bd8b206fb926cce4bbb6e80abd2b1cc70bdfe05f023b8a71d4214af1ceb94a1e788c828c3f0f72e58b5072f86902cea960612a5892f2f6a07dabe82b419ac509ea4fcdeac0cebce5669c0b1f36f5ed206351fab716f6adaff332b4789a2d524022efeb089b272982d8c6e974cea9358ae78e31f52909d83102818100ca0570fb1eb8bee043903e345c10fae62158b89759ef3659b6583fc66dacb719a5e319c918d03e8a92e7b1e3140a901a52d005a3b11fc5f867ac839ee140ce986d8ede82dbb5a51bcc4750a744dd9cccc6916b997d83ee77643e5d4edb2b5f563b263aad185959064ff8e0ea631736aec1b3d4d4cd9318f8a2f60f91c84b038d0281800b5996cb40478fdc69a4e1746ad7c3e0a7bbcd02c3c8f9d053c851341c602d60e7bd1ef9aefea5560df1bea58d0b706b7e948ba8e184844a9b837385d0b47fd99930f1ddd91bd467cfce194d2d971b5b22bc1aaebe6f40fbae99467dafac0b5a67d023b95e50bf6c19b5d0c17dd1b462459826013819c927a763b81b16d91770"
 # The PrivateKeyInfo headers around PRIVATE_PKCS1: rsaEncryption with its
 # NULL, without it, id-RSASSA-PSS, and an EC key's algorithm.
 PKCS8_HEADER        = "308204bd020100300d06092a864886f70d0101010500048204a7"
@@ -242,7 +249,7 @@ if args.size > 0 && args[0] == "sign"
       puts "key: #{key.message}"
     else
       message = b(f[3])
-      puts hex(f[1] == "v15" ? key.sign_pkcs1v15(hash_named(f[2]), message) : key.sign_pss(hash_named(f[2]), message))
+      puts hex((f[1] == "v15" ? key.sign_pkcs1v15(hash_named(f[2]), message) : key.sign_pss(hash_named(f[2]), message)).or_panic)
     end
   end
   exit 0
@@ -274,6 +281,8 @@ puts "  #{SIGNATURES.count { |c| c[6] }} accepted and #{SIGNATURES.count { |c| !
 check k2048.verify_pkcs1v15(RsaHash::SHA256, b("616263"), b(SIGNATURES[1][5])), "a message given as bytes"
 check k2048.verify_pss(RsaHash::SHA256, "abc", b(PSS_DEFAULT_SALT)), "a PSS salt as long as the hash when none is named"
 check !k2048.verify_pss(RsaHash::SHA384, "abc", b(PSS_DEFAULT_SALT)), "a PSS signature under another hash refused"
+check !k2048.verify_pss(RsaHash::SHA256, "abc", b(PSS_DEFAULT_SALT), salt_length: 2147483647), "a salt longer than any encoding refused"
+check !k2048.verify_pss(RsaHash::SHA256, "abc", b(PSS_DEFAULT_SALT), salt_length: 223), "a salt a byte longer than the encoding holds refused"
 
 puts "== keys that are not keys"
 refused EVEN_MODULUS, "even modulus", "an even modulus refused"
@@ -295,13 +304,13 @@ from_pem1 = RsaPrivateKey.from_pem(pem("RSA PRIVATE KEY", der)).or_panic
 from_pem8 = RsaPrivateKey.from_pem(pem("PRIVATE KEY", b(PKCS8_HEADER + PRIVATE_PKCS1))).or_panic
 check from_pem1.public_key.modulus == signer.public_key.modulus && from_pem8.public_key.exponent == signer.public_key.exponent, "the key read from both PEM blocks"
 [RsaHash::SHA256, RsaHash::SHA384, RsaHash::SHA512].each do |hash|
-  got = signer.sign_pkcs1v15(hash, "abc")
+  got = signer.sign_pkcs1v15(hash, "abc").or_panic
   check hex(got) == V15_SIGNATURES[hash], "PKCS #1 v1.5 over #{hash} as cryptography signs it"
-  check as_pkcs8.sign_pkcs1v15(hash, b("616263")) == got, "PKCS #1 v1.5 over #{hash} the same from PKCS #8 and over bytes"
-  pss = signer.sign_pss(hash, "abc")
+  check as_pkcs8.sign_pkcs1v15(hash, b("616263")).or_panic == got, "PKCS #1 v1.5 over #{hash} the same from PKCS #8 and over bytes"
+  pss = signer.sign_pss(hash, "abc").or_panic
   check signer.public_key.verify_pss(hash, "abc", pss), "a PSS signature over #{hash} checks with a salt as long as the hash"
   check !signer.public_key.verify_pss(hash, "abd", pss), "a PSS signature over #{hash} does not check for another message"
-  check pss != signer.sign_pss(hash, "abd"), "PSS over #{hash}: another message, another signature"
+  check pss != signer.sign_pss(hash, "abd").or_panic, "PSS over #{hash}: another message, another signature"
 end
 puts "  PKCS #1 and PKCS #8, DER and PEM; PKCS #1 v1.5 over SHA-256, -384 and -512 byte for byte cryptography's; PSS checked"
 v = numbers(der)
@@ -315,6 +324,7 @@ private_refused from_numbers(v[0, 5] + [v[5] + two] + v[6, 2]), "dp is not d mod
 private_refused from_numbers(v[0, 6] + [v[6] + two, v[7]]), "dq is not d mod (q - 1)", "a dq that is not d's residue refused"
 private_refused from_numbers(v[0, 7] + [v[7] + one]), "qi is not the inverse of q mod p", "a qi that is not q's inverse refused"
 private_refused from_numbers(v[0, 3] + [v[4], v[3], v[6], v[5], v[7]]), "qi is not the inverse of q mod p", "p and q swapped under the same qi refused"
+private_refused RsaPrivateKey.from_pkcs1(b(COMPOSITE_P)), "a private key that does not sign", "a key whose p is not prime refused"
 private_refused RsaPrivateKey.from_pkcs1(b(PRIVATE_1024)), "1024 bits, under the 2048 this signs with", "a 1024-bit key refused for signing"
 private_refused RsaPrivateKey.from_pkcs1(b("308204a3020101" + PRIVATE_PKCS1[14, PRIVATE_PKCS1.bytesize - 14])), "more than two primes", "a key of more than two primes refused"
 private_refused RsaPrivateKey.from_pkcs8(b(PKCS8_RSASSA_PSS + PRIVATE_PKCS1)), "an RSASSA-PSS key (1.2.840.113549.1.1.10)", "an RSASSA-PSS key refused by name"
@@ -324,6 +334,16 @@ private_refused RsaPrivateKey.from_pkcs8(der), "expected a SEQUENCE", "PKCS #1 r
 private_refused RsaPrivateKey.from_pem("-----BEGIN ENCRYPTED PRIVATE KEY-----\nMIIB\n-----END ENCRYPTED PRIVATE KEY-----\n"), "an encrypted private key", "an encrypted key refused by name"
 private_refused RsaPrivateKey.from_pem(pem("RSA PRIVATE KEY", der) + pem("PRIVATE KEY", b(PKCS8_HEADER + PRIVATE_PKCS1))), "2 blocks of RSA PRIVATE KEY or PRIVATE KEY, not one", "two keys refused"
 private_refused RsaPrivateKey.from_pem(pem("PUBLIC KEY", b(K2048))), "0 blocks of RSA PRIVATE KEY or PRIVATE KEY, not one", "a public key refused"
-puts "  each CRT parameter that disagrees, 1024 bits, three primes, RSASSA-PSS, EC, no NULL, encrypted, two keys and none refused"
+# A key's PEM body is read as std/base64 reads a secret: one text for its
+# bytes. The PKCS #8 body ends in one `=`, so its last character has two
+# bits to spare, and the character after it in the alphabet sets one.
+pem8 = pem("PRIVATE KEY", b(PKCS8_HEADER + PRIVATE_PKCS1))
+closing = pem8.index('=') || raise "ASSERTION FAILED: the PKCS #8 body has no padding"
+spare = (pem8.byte_at(closing - 1) + 1_u8).unsafe_chr.to_s
+private_refused RsaPrivateKey.from_pem(pem8[0, closing - 1] + spare + pem8[closing, pem8.bytesize - closing]), "block that is not base64", "a PEM body whose last character sets bits past the data refused"
+opening = "-----BEGIN PRIVATE KEY-----\n".bytesize
+private_refused RsaPrivateKey.from_pem(pem8[0, opening + 2] + "*" + pem8[opening + 3, pem8.bytesize - opening - 3]), "block that is not base64", "a PEM body with a byte outside base64 refused"
+private_refused RsaPrivateKey.from_pem(pem8[0, closing] + pem8[closing + 1, pem8.bytesize - closing - 1]), "not a multiple of 4", "a PEM body without its padding refused"
+puts "  each CRT parameter that disagrees, a p that is not prime, 1024 bits, three primes, RSASSA-PSS, EC, no NULL, encrypted, two keys and none, a body that is not base64 refused"
 
 puts "\nALL CHECKS PASSED"

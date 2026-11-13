@@ -703,10 +703,26 @@ fix in it unless said:
   15.56, and does not on this machine for the 0.21.0 module either: five
   runs of each in turn gave 7.11, 15.56, 16.33, 14.01 and 16.79 for
   0.21.0's and 19.3, 13.94, 13.2, 14.47 and 19.69 for the branch's. This
-  review's own first run of it, before any fix, measured 8.31 there. What it times is
-  one key that is always in the cache against 64 that are not; it is
-  open, and is not a finding of either review until somebody tells the
-  two apart.
+  review's own first run of it, before any fix, measured 8.31 there.
+
+  After the merge it was told apart: the tool timed where an input lived,
+  not what it held. 64 copies of one key against the first copy, every
+  byte alike, gave |t| 14.92 at 200,000 samples on a quiet machine, as
+  much as one key against 64 others (13.65); the key read from 64 copies
+  of itself against 64 other keys gave 2.7. A day later, on the same
+  machine, the same fixed-against-1,024 shape put inverse at 25.76,
+  x25519 at 25.33 and ed25519 at 10.97 for code the review had measured
+  under 7, and their fixed inputs read from 1,024 copies brought x25519
+  to 1.08 to 1.66 and ed25519 to 1.14 to 1.81. Every fixed input is read
+  from as many copies as the other class's now (`bench/ct_timing.iyi`),
+  and two whole runs gave every secret path 4.31 or under, the control at
+  330. inverse alone moved further than the rest: one fixed value against
+  1,024 others gave 3.7 to 50 between builds of one source that differ
+  only in the test program, while two fixed values against each other
+  stayed under 2 in nine runs. That is what a branch on the value would
+  show, and what code placement can; the assembly reading does not cover
+  `inverse_mod_secret`'s preamble (`%` by the modulus, `BigInt.new`'s
+  normalisation), and it is open.
 
 ## References
 

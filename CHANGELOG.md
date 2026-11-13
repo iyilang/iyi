@@ -313,6 +313,15 @@
   stops before anything is published unless the tag is `v` and that
   version, and a version with a pre-release part (`0.22.0-rc.1`) is
   published as a pre-release, which `/releases/latest` passes over.
+- **`bench/ct_timing.sh` times what an input holds, not where it lives.**
+  Each check timed one fixed input against 1,024 (or 64) others, and the
+  fixed one was always in the cache: 64 copies of one ML-KEM key against
+  the first copy, contents alike, gave |t| 14.92 on a quiet machine, and
+  the tool had failed mlkem-key since the second security review for it.
+  Every fixed input is read from as many copies as the other class's now;
+  two runs put every secret path at 4.31 or under and the leaking control
+  at 330. `inverse_mod_secret` alone still moves between builds; what
+  that is, is open (SECURITY_REVIEW_TLS.md).
 - **The std siblings' shards are dealt by what the gates weigh after the
   second security review.** On that review's last CI run the old weights
   dealt a longest shard of 4,753 s on Windows, 3,683 on darwin and 3,140

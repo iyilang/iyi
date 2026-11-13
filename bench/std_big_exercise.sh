@@ -667,12 +667,16 @@ echo "== the masks that pick by a secret, read off the machine code of an optimi
 # `BigInt#pow_mod_secret`, into which `pow_fixed` and its table scan are
 # inlined; `Montgomery#mul` and `#sqr`, each holding `reduce`'s final
 # subtraction; `BigInt#inverse_mod_secret`, into which `inverse` and its
-# helpers are inlined; and `Montgomery#into_range`, which is not. The
-# counts are this LLVM's, unrolled loops writing a barrier once a pass:
-# 13 in the inverse on x86_64 (`bits_of`'s six halvings are six) and 15
-# on aarch64, and 4 in `into_range`, whose two loops of two are unrolled.
-# Fewer is a mask the optimiser can see; a count that changes with the
-# compiler is to be read again, not lowered.
+# helpers are inlined; and `Montgomery#into_range`, which is not. Each
+# must hold at least one barrier for each place in the source whose mask
+# ends up in it: 1 in the table scan, 1 in each of mul and sqr, 8 in the
+# inverse (keep, short, the two equal_masks, bits_of's moved, odd and the
+# two negatives) and 2 in into_range. An unrolled loop writes its barrier
+# once a pass, so a build holds more, and how many more is the compiler's:
+# 13 in the inverse for aarch64 from one LLVM and 15 from another, 4 in
+# into_range. So a broken copy below is held to the count the intact
+# module's build has on the same target, by the same compiler, and one
+# barrier fewer than that is refused.
 cat >"$WORK/secret.iyi" <<'IYI'
 import std/big::{BigInt}
 
@@ -698,9 +702,11 @@ value_barriers() {
     }
     END { for (name in count) print count[name], name }' "$1"
 }
-# barriers <dir> [<patched>]: a line for each target where a function
-# holds fewer barriers than its masks go through, or nothing could be
-# read, std/big taken from <patched> when it is given; 1 if there is any.
+# barriers <dir> [<patched> <intact>]: a line for each target where a
+# function holds fewer barriers than its masks go through - than the
+# floor below, or with <intact> given, than the intact module's reading
+# in that directory - or nothing could be read, std/big taken from
+# <patched> when it is given; 1 if there is any.
 barriers() {
   local target wrong=0 name x86 arm need have
   mkdir -p "$1"
@@ -721,6 +727,7 @@ barriers() {
     while read -r name x86 arm; do
       need="$x86"
       [ "$target" = aarch64-unknown-linux-gnu ] && need="$arm"
+      [ -n "${3-}" ] && need="$(LC_ALL=C awk -v name="$name" '$2 == name { print $1 }' "$3/$target.read")"
       have="$(LC_ALL=C awk -v name="$name" '$2 == name { print $1 }' "$1/$target.read")"
       if [ -z "$have" ]; then
         echo "$target: $name is not in the assembly, so nothing of it was read"
@@ -733,8 +740,8 @@ barriers() {
 BigInt#pow_mod_secret 1 1
 Montgomery#mul 1 1
 Montgomery#sqr 1 1
-BigInt#inverse_mod_secret 13 15
-Montgomery#into_range 4 4
+BigInt#inverse_mod_secret 8 8
+Montgomery#into_range 2 2
 READ
   done
   return $wrong
@@ -1025,7 +1032,7 @@ prove_unmasked() { # prove_unmasked <label> <dir> <phrase> <sed script>
   if cmp -s "$REPO/src/std/big.iyi" "$WORK/$2/std/big.iyi"; then
     echo "  $1: the patch changed nothing, so this proves nothing"
     status=1
-  elif barriers "$WORK/$2/read" "$WORK/$2" >"$WORK/$2/out"; then
+  elif barriers "$WORK/$2/read" "$WORK/$2" "$WORK/barriers" >"$WORK/$2/out"; then
     echo "  $1: its machine code was read as sound, so the reading does not test this"
     status=1
   elif [ "$(grep -cF "$3" "$WORK/$2/out")" -eq 2 ]; then
@@ -1036,13 +1043,13 @@ prove_unmasked() { # prove_unmasked <label> <dir> <phrase> <sed script>
     status=1
   fi
 }
-prove_unmasked "the table scan's mask in the compiler's sight" no_barrier_lookup "BigInt#pow_mod_secret: not the 1 value barriers" \
+prove_unmasked "the table scan's mask in the compiler's sight" no_barrier_lookup "BigInt#pow_mod_secret: not the" \
   's/^        mask = ValueBarrier.u64(\(.*\))$/        mask = \1/'
-prove_unmasked "the final subtraction's mask in the compiler's sight" no_barrier_reduce "Montgomery#mul: not the 1 value barriers" \
+prove_unmasked "the final subtraction's mask in the compiler's sight" no_barrier_reduce "Montgomery#mul: not the" \
   's/^    below = ValueBarrier.u64(\(.*\))$/    below = \1/'
 prove_unmasked "a GCD step's odd mask in the compiler's sight" no_barrier_odd "BigInt#inverse_mod_secret: not the" \
   's/^        odd = ValueBarrier.u64(\(.*\))$/        odd = \1/'
-prove_unmasked "into_range's keep in the compiler's sight" no_barrier_range "Montgomery#into_range: not the 4 value barriers" \
+prove_unmasked "into_range's keep in the compiler's sight" no_barrier_range "Montgomery#into_range: not the" \
   's/^      keep = ValueBarrier.u64(\(.*\))$/      keep = \1/'
 
 # A one-limb quotient left at its estimate, which can be up to three

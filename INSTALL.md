@@ -46,7 +46,7 @@ job recorded attestations has none, and `gh` says so. The installers check
 the checksum and not the attestation, which needs `gh`.
 
 The tarball is relocatable and carries every library a program can ask for:
-iyi's own 1,215 KB prelude, the 5,043 KB of `src/std` that `import std/...`
+iyi's own 1,215 KB prelude, the 5,045 KB of `src/std` that `import std/...`
 resolves to, and Crystal's standard library for `--crystal`. `bin/iyi` finds
 all three beside itself, so there is nothing to configure. LLVM is inside the
 binary — a static minimal build from `scripts/build-static-llvm.sh` — so `lib/`

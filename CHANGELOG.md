@@ -75,6 +75,30 @@
 
 ### Fixed
 
+- **std/big: every mask that picks by a secret goes through
+  `ValueBarrier`.** `pow_mod_secret`'s table scan, Montgomery's final
+  subtraction and each choice `inverse_mod_secret` and the reduction into
+  range make by a secret hid their masks by an xor with a zero read by an
+  atomic load from a field, the idiom std/p256 was taken off in the
+  second security review: it held in a --release build only because
+  `Montgomery`'s methods stayed out of line, and a struct the optimiser
+  could follow as a local would have shown it the zero. They go through
+  std/digest's `ValueBarrier` now, as std/p256's, std/p384's,
+  std/curve25519's and std/mlkem's do, and bench/std_big_exercise.sh
+  counts the barriers in the --release assembly for x86_64 and aarch64
+  Linux and refuses a build with any one of them gone. `pow_mod_secret`
+  at 2048 bits takes as long as it did, within one machine's noise.
+- **std/ocsp: a delegated responder that is distrusted does not sign a
+  response.** `OcspResponse#verify` held a delegated responder to its
+  issuer, extKeyUsage, validity, key, critical extensions, keyUsage and
+  signature, and took no distrusted list, so a responder certificate in
+  Windows' Disallowed store, or one holding a key that is, signed a
+  staple std/tls took. `verify` takes `distrusted:`, the list
+  `X509.verify` takes and matched as it matches a chain's, by
+  certificate and by key, and std/tls passes the one its configuration
+  has - the platform's when its roots are the platform's.
+  `X509.distrusted_error` and `X509.distrusted_keys` are public for it.
+
 - **std/tls: a server takes a ticket only for a client it would take
   now.** A resumption asks a client for no certificate, and the server
   resumed any ticket its keys opened - and `TlsServerConfig#dup` and
@@ -270,6 +294,30 @@
   runner ended, so another such failure says which was late.
 
 ### Gates
+
+- **std/digest's `ValueBarrier` fallback is built and held.** The
+  barrier is an empty inline asm on x86_64 and aarch64 and a volatile
+  load on every other target, and nothing compiled the load.
+  bench/std_digest_exercise.sh now builds it on x86_64 in the asm's
+  place: through X25519, Ed25519, ML-KEM, P-256 and P-384 it gives the
+  RFCs' answers byte for byte, plain and --release, as the asm does; its
+  --release IR keeps a volatile load for each barrier the asm leaves; and
+  a fallback folded to a plain value is refused. CI's wasm32-wasi job,
+  where the load is the real branch, builds an X25519 and ML-KEM program,
+  holds its IR to the same and runs it under wasmtime.
+- **A release tag must be the version its archives are built as.** The
+  installers ask release `v<version>` for `iyi-<version>-...` by name,
+  and the archives are named by `src/IYI_VERSION`: a trial tag on a tree
+  that said another version would have been published as the latest
+  release, whose archives no default install could find. The release job
+  stops before anything is published unless the tag is `v` and that
+  version, and a version with a pre-release part (`0.22.0-rc.1`) is
+  published as a pre-release, which `/releases/latest` passes over.
+- **The std siblings' shards are dealt by what the gates weigh after the
+  second security review.** On that review's last CI run the old weights
+  dealt a longest shard of 4,753 s on Windows, 3,683 on darwin and 3,140
+  on Linux; the new ones, read from that run's logs, 4,460, 3,466 and
+  2,875.
 
 - **Four module exercises are tests now.** `bench/std_bool_test.iyi`,
   `std_box_test.iyi`, `std_heap_test.iyi` and `std_string_pool_test.iyi`

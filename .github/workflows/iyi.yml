@@ -3740,6 +3740,18 @@ jobs:
       attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The archives are named by src/IYI_VERSION and the installers ask a
+      # release `v<version>` for `iyi-<version>-...` by name: a tag that
+      # is not `v` and that version would publish a release whose archives
+      # no installer can find, and as the latest it is every default
+      # install. Checked here, before anything is published.
+      - name: The tag is the version the archives were built as
+        run: |
+          version="$(cat src/IYI_VERSION)"
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "the tag is $GITHUB_REF_NAME, and src/IYI_VERSION builds v$version"
+            exit 1
+          fi
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
           name: iyi-linux-x86_64
@@ -3783,7 +3795,13 @@ jobs:
           tag="${GITHUB_REF_NAME}"
           git tag -l --format='%(contents)' "$tag" > notes.md
           [ -s notes.md ] || echo "See CHANGELOG.md for ${tag#v}." > notes.md
-          gh release create "$tag" --title "iyi ${tag#v}" --notes-file notes.md \
+          # A version with a pre-release part (`0.22.0-rc.1`) is published
+          # as a pre-release, which GitHub's /releases/latest passes over:
+          # the installers' default stays the last full release, and the
+          # candidate is installed by IYI_VERSION alone.
+          prerelease=""
+          case "$tag" in *-*) prerelease="--prerelease" ;; esac
+          gh release create "$tag" --title "iyi ${tag#v}" --notes-file notes.md $prerelease \
             dist/*.tar.gz dist/*.zip dist/SHA256SUMS
 
   # The editor client is the only artifact here that is published somewhere

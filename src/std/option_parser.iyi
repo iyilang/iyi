@@ -54,6 +54,9 @@ pub class OptionParser
   @banner : String?
   @invalid : (String -> Nil)?
   @missing : (String -> Nil)?
+  @stop : Bool
+  @before_each : (String -> Nil)?
+  @unknown_args : (Array(String), Array(String) -> Nil)?
 
   def initialize
     @long = {} of String => {Value, (String -> Nil)}
@@ -63,6 +66,9 @@ pub class OptionParser
     @banner = nil
     @invalid = nil
     @missing = nil
+    @stop = false
+    @before_each = nil
+    @unknown_args = nil
   end
 
   # The help's first line, "options:" until it is set.
@@ -72,6 +78,22 @@ pub class OptionParser
 
   def banner : String?
     @banner
+  end
+
+  def before_each(&block : String -> Nil) : Nil
+    @before_each = block
+  end
+
+  def unknown_args(&block : Array(String), Array(String) -> Nil) : Nil
+    @unknown_args = block
+  end
+
+  def stop : Nil
+    @stop = true
+  end
+
+  def stop? : Bool
+    @stop
   end
 
   # A line of its own in the help, between the flags and commands
@@ -195,11 +217,25 @@ pub class OptionParser
 
   def parse(args : Array(String)) : Array(String)
     rest = [] of String
+    # How many operands were collected when `--` was met, or -1 without one.
+    before_dash_count = -1
     i = 0
     n = args.size
     while i < n
+      if @stop
+        @stop = false
+        while i < n
+          rest << args[i]
+          i = i + 1
+        end
+        break
+      end
       a = args[i]
+      if cb = @before_each
+        cb.call(a)
+      end
       if a == "--"
+        before_dash_count = rest.size
         i = i + 1
         while i < n
           rest << args[i]
@@ -271,6 +307,25 @@ pub class OptionParser
         end
       end
       i = i + 1
+    end
+    if callback = @unknown_args
+      if before_dash_count >= 0
+        # Split by position, not by value: `x -- x` has one operand on each side.
+        before_dash = [] of String
+        after_dash = [] of String
+        j = 0
+        while j < rest.size
+          if j < before_dash_count
+            before_dash << rest[j]
+          else
+            after_dash << rest[j]
+          end
+          j = j + 1
+        end
+        callback.call(before_dash, after_dash)
+      else
+        callback.call(rest, [] of String)
+      end
     end
     rest
   end

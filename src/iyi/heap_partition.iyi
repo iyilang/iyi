@@ -2193,9 +2193,9 @@ class IyiHeap
   # a compare at each park; one waiting long on the network mid-request
   # is collected as any idle takeover collects it - after four ticks
   # rather than two while the program is busy (`idle_delay`).
-  IDLE_NS = 100000000_u64
-  IDLE_BUSY_TICKS = 4_u64
-  IDLE_BUSY_PARKS = 256_u64
+  IDLE_NS         = 100000000_u64
+  IDLE_BUSY_TICKS =         4_u64
+  IDLE_BUSY_PARKS =       256_u64
   # The busy rule's `IyiStat` slots (free in prelude.iyi's table, kept
   # here so a build without partitions is unchanged): the threads' parks
   # summed and the tick when the last walk began, and the ticks a dirty

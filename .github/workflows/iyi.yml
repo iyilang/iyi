@@ -3356,6 +3356,66 @@ jobs:
           bash bench/sandbox_story.sh
           bash bench/wasm_concurrency_probe.sh
 
+      # std/digest's ValueBarrier is an empty inline asm on x86_64 and
+      # aarch64 and a volatile load everywhere else; wasm32 is the one target
+      # CI builds where the load is the real branch. Its --release IR has to
+      # keep a volatile load of a local in X25519's ladder (two) and in
+      # ML-KEM's decapsulation (one) and hold no asm, and the program, run
+      # under wasmtime, has to answer as RFC 7748 and FIPS 203's implicit
+      # rejection do. bench/std_digest_exercise.sh holds the same branch,
+      # built on x86_64 in the asm's place.
+      - name: ValueBarrier's fallback, wasm32's own
+        run: |
+          [ -x room/bin/iyi ] || { mkdir -p room && tar -xzf dist/*.tar.gz -C room; }
+          mkdir -p barrier
+          cat > barrier/barrier.iyi <<'IYI'
+          @[Unsafe("its hex helpers read strings' bytes through to_unsafe")]
+          module barrier
+
+          import std/curve25519::{X25519}
+          import std/mlkem::{MlKem768, MlKem768PrivateKey}
+          import std/digest::{SHAKE256}
+
+          def b(hex : String) : Array(UInt8)
+            p = hex.to_unsafe
+            Array(UInt8).new(hex.bytesize // 2) do |i|
+              hi = p[i * 2].to_i32
+              lo = p[i * 2 + 1].to_i32
+              hi = hi >= 97 ? hi - 87 : hi - 48
+              lo = lo >= 97 ? lo - 87 : lo - 48
+              (hi * 16 + lo).to_u8
+            end
+          end
+
+          def hex(s : String) : String
+            p = s.to_unsafe
+            String.build { |io| s.bytesize.times { |i| io << "0123456789abcdef"[p[i].to_i32 >> 4] << "0123456789abcdef"[p[i].to_i32 & 15] } }
+          end
+
+          alice = b("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a")
+          bob = b("5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb")
+          raise "x25519" unless hex(X25519.shared(alice, X25519.public_key(bob)).or_panic) == "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742"
+          seed = Array(UInt8).new(64) { |i| i.to_u8 }
+          key = MlKem768PrivateKey.from_seed(seed)
+          sent = MlKem768.encapsulate(key.encapsulation_key, Array(UInt8).new(32, 7_u8)).or_panic
+          raise "mlkem accepted" unless key.decapsulate(sent[0]).or_panic == sent[1]
+          bad = sent[0].dup
+          bad[500] = bad[500] ^ 1_u8
+          raise "mlkem rejected" unless key.decapsulate(bad).or_panic == SHAKE256.new.update(seed[32, 32]).update(bad).read(32)
+          puts "ValueBarrier's fallback holds on wasm32"
+          IYI
+          cd barrier
+          command="$(../room/bin/iyi build --release --emit llvm-ir --cross-compile --target wasm32-wasi -o barrier barrier.iyi)"
+          if grep -q 'asm "", "=r,0"' barrier.ll; then echo "an inline asm barrier on wasm32"; exit 1; fi
+          awk '/^define/ { f = $0 }
+               /load volatile i64, ptr %/ && f ~ /CurveLadder::x25519/ { x++ }
+               /load volatile i8, ptr %/ && f ~ /MlKem768PrivateKey#decapsulate/ { k++ }
+               END { print "x25519 ladder: " x + 0 ", decapsulate: " k + 0; exit (x == 2 && k == 1) ? 0 : 1 }' barrier.ll
+          ln -sf /opt/wasi-sdk/bin/clang /opt/wasi-sdk/bin/cc
+          export PATH="/opt/wasi-sdk/bin:$PATH"
+          eval "$command"
+          "$HOME/.wasmtime/bin/wasmtime" barrier | grep -qx "ValueBarrier's fallback holds on wasm32"
+
   # GC Stage 10: wasm32-wasi collector exercise under wasmtime.
   #
   # The driver rather than a transcription of it. This job used to link and
@@ -3740,6 +3800,18 @@ jobs:
       attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The archives are named by src/IYI_VERSION and the installers ask a
+      # release `v<version>` for `iyi-<version>-...` by name: a tag that
+      # is not `v` and that version would publish a release whose archives
+      # no installer can find, and as the latest it is every default
+      # install. Checked here, before anything is published.
+      - name: The tag is the version the archives were built as
+        run: |
+          version="$(cat src/IYI_VERSION)"
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "the tag is $GITHUB_REF_NAME, and src/IYI_VERSION builds v$version"
+            exit 1
+          fi
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
           name: iyi-linux-x86_64
@@ -3783,7 +3855,13 @@ jobs:
           tag="${GITHUB_REF_NAME}"
           git tag -l --format='%(contents)' "$tag" > notes.md
           [ -s notes.md ] || echo "See CHANGELOG.md for ${tag#v}." > notes.md
-          gh release create "$tag" --title "iyi ${tag#v}" --notes-file notes.md \
+          # A version with a pre-release part (`0.22.0-rc.1`) is published
+          # as a pre-release, which GitHub's /releases/latest passes over:
+          # the installers' default stays the last full release, and the
+          # candidate is installed by IYI_VERSION alone.
+          prerelease=""
+          case "$tag" in *-*) prerelease="--prerelease" ;; esac
+          gh release create "$tag" --title "iyi ${tag#v}" --notes-file notes.md $prerelease \
             dist/*.tar.gz dist/*.zip dist/SHA256SUMS
 
   # The editor client is the only artifact here that is published somewhere

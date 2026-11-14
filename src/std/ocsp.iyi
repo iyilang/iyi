@@ -27,14 +27,18 @@
 # server's, fetched before any client asked, and carries none of the
 # client's.
 #
-# `verify(leaf, issuer, now)` checks, in this order, what OpenSSL's `ocsp
-# -verify` checks in it, so that a verdict is refused for the same reason:
+# `verify(leaf, issuer, now, distrusted:)` checks, in this order, what
+# OpenSSL's `ocsp -verify` checks in it, so that a verdict is refused for
+# the same reason:
 #   * the signature, by the issuer itself or by a delegated responder - a
 #     certificate the response carries, named by its responderID, issued
 #     and signed by the issuer, valid at *now*, carrying extKeyUsage with
 #     id-kp-OCSPSigning itself (anyExtendedKeyUsage is not it, as RFC 6960
 #     section 4.2.2.2 has it), allowed digitalSignature if it carries
-#     keyUsage, and with no critical extension this does not understand.
+#     keyUsage, with no critical extension this does not understand, and
+#     neither a certificate in *distrusted* nor holding the key of one
+#     (the list `X509.verify` takes, matched as it matches a chain's;
+#     std/tls passes the same one, the platform's when its roots are).
 #     Signatures are std/x509's: SHA-1 is refused as it is in a
 #     certificate, and so is an RSA key under `X509::MIN_RSA_BITS` or
 #     past `X509::MAX_RSA_BITS`;
@@ -435,13 +439,15 @@ pub struct OcspResponse
   end
 
   # The status this response gives *leaf*, *issuer* its issuer's
-  # certificate, checked at *now* (see the module's header); or why it
-  # gives none that can be taken.
-  def verify(leaf : Certificate, issuer : Certificate, now : Time = Time.utc, skew_seconds : Int32 = Ocsp::SKEW_SECONDS) : OcspVerdict | OcspError
+  # certificate, checked at *now* (see the module's header), a delegated
+  # responder held to *distrusted* as `X509.verify` holds a chain; or why
+  # it gives none that can be taken.
+  def verify(leaf : Certificate, issuer : Certificate, now : Time = Time.utc, skew_seconds : Int32 = Ocsp::SKEW_SECONDS,
+             distrusted : Array(Array(UInt8))? = nil) : OcspVerdict | OcspError
     unless leaf.issuer == issuer.subject
       return OcspError.new("#{leaf.subject_name} was issued by #{leaf.issuer_name}, not #{issuer.subject_name}")
     end
-    signed = signer(issuer, now)!
+    signed = signer(issuer, now, distrusted || [] of Array(UInt8))!
     single = single_for(leaf, issuer)
     return OcspError.new("no response here is for #{leaf.subject_name}, serial #{OcspAsn1.hex(leaf.serial)}") unless single
     late = now.shift(seconds: skew_seconds.to_i64)
@@ -461,12 +467,13 @@ pub struct OcspResponse
   # The certificate that signed this response, and whether it is a
   # delegated responder: each candidate the responderID names - the issuer,
   # then the certificates carried - tried in turn; or why none did.
-  private def signer(issuer : Certificate, now : Time) : {Certificate, Bool} | OcspError
+  private def signer(issuer : Certificate, now : Time, distrusted : Array(Array(UInt8))) : {Certificate, Bool} | OcspError
     failures = [] of String
+    keys = X509.distrusted_keys(distrusted)
     ([issuer] + @certificates).each do |candidate|
       next unless names?(candidate)
       delegated = !(candidate.subject == issuer.subject && candidate.public_key_bits == issuer.public_key_bits)
-      problem = delegated ? delegate_error(candidate, issuer, now) : nil
+      problem = delegated ? delegate_error(candidate, issuer, now, distrusted, keys) : nil
       problem = X509.signature_error(candidate.public_key, @signature_algorithm, @signature_parameters, @tbs, @signature, "the OCSP response", candidate.subject_name) unless problem
       return {candidate, delegated} unless problem
       failures << problem
@@ -484,9 +491,12 @@ pub struct OcspResponse
   end
 
   # Why *responder* may not answer for *issuer*'s certificates at *now*
-  # (RFC 6960 section 4.2.2.2), or nil.
-  private def delegate_error(responder : Certificate, issuer : Certificate, now : Time) : String?
+  # (RFC 6960 section 4.2.2.2), or nil; *keys* are *distrusted*'s.
+  private def delegate_error(responder : Certificate, issuer : Certificate, now : Time,
+                             distrusted : Array(Array(UInt8)), keys : Array(Array(UInt8))) : String?
     name = responder.subject_name
+    refused = X509.distrusted_error(responder, distrusted, keys)
+    return "the responder #{refused}" if refused
     return "the responder #{name} was not issued by #{issuer.subject_name}, the CA it answers for" unless responder.issuer == issuer.subject
     usages = responder.extended_key_usage
     return "the responder #{name} is not allowed id-kp-OCSPSigning" unless usages && usages.includes?(Ocsp::SIGNING)

@@ -598,13 +598,13 @@ prove_broken "an RSA key of 8193 bits taken" "a leaf whose key is 8193-bit RSA: 
   '  MAX_RSA_BITS = 8192' '  MAX_RSA_BITS = 16384'
 # Certificates given as distrusted: each break below passes one over.
 prove_broken "a distrusted leaf taken" "a distrusted leaf: expected a refusal" \
-  '    problem = distrusted_error(leaf, search)
+  '    problem = distrusted_error(leaf, search.distrusted, search.distrusted_keys)
     return X509Error.new(problem) if problem' ''
 prove_broken "a distrusted issuer taken" "a distrusted intermediate: expected a refusal" \
-  '    distrusted = distrusted_error(issuer, search)
+  '    distrusted = distrusted_error(issuer, search.distrusted, search.distrusted_keys)
     return distrusted if distrusted' ''
 prove_broken "a distrusted key under another certificate taken" "an intermediate holding a distrusted certificate's key: expected a refusal" \
-  '    if search.distrusted_keys.any? { |info| info == certificate.public_key_info }' '    if false'
+  '    if keys.any? { |info| info == certificate.public_key_info }' '    if false'
 prove_broken "a distrusted key read only from a certificate that can be read" "an intermediate holding the key of a distrusted certificate that cannot be read: expected a refusal" \
   '      info = X509Keys.info_of(der)' '      read = Certificate.parse(der)
       info = read.is_a?(Certificate) ? read.public_key_info : nil'

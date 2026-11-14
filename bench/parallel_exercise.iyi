@@ -890,31 +890,36 @@
   # `park_on` and `wake_on`: every turn is taken, which a wake between
   # the look at the word and the link in its list does only if the look
   # is under the list's lock. A lost wake is a hang the watchdogs name;
-  # bench/parallel_exercise.sh breaks each of the three.
-  def wakes(watch : Int32) : Nil
+  # bench/parallel_exercise.sh breaks each of the three, and runs each
+  # copy's own part alone (`--only=`): beside 12 busy loops at a load of
+  # 45 the cancels outran a 5000 ms watch in the copy that breaks the
+  # words, so the words were never reached.
+  def wakes(watch : Int32, parts : Array(String)) : Nil
     per = 20000_i64
     want = 0_i64
     got = Tally.new
-    watched("wakes, selects", watch) do
-      a = Channel(Int64).new
-      b = Channel(Int64).new
-      group do |g|
-        2.times { g.spawn(unit: :new) { select_both(a, b, got) } }
-        senders = [] of IyiTask(Int32)
-        4.times do |k|
-          channel = k % 2 == 0 ? a : b
-          first = k.to_i64 * per
-          senders << g.spawn(unit: :new) { send_run(channel, first, per) }
+    if parts.includes?("selects")
+      watched("wakes, selects", watch) do
+        a = Channel(Int64).new
+        b = Channel(Int64).new
+        group do |g|
+          2.times { g.spawn(unit: :new) { select_both(a, b, got) } }
+          senders = [] of IyiTask(Int32)
+          4.times do |k|
+            channel = k % 2 == 0 ? a : b
+            first = k.to_i64 * per
+            senders << g.spawn(unit: :new) { send_run(channel, first, per) }
+          end
+          senders.each do |sender|
+            answer = sender.value
+            fail("wakes: a sender answered #{answer.is_a?(Panicked) ? answer.text : answer}") unless answer == 0
+          end
+          a.close
+          b.close
         end
-        senders.each do |sender|
-          answer = sender.value
-          fail("wakes: a sender answered #{answer.is_a?(Panicked) ? answer.text : answer}") unless answer == 0
-        end
-        a.close
-        b.close
+        want = 4_i64 * per * (4_i64 * per - 1_i64) // 2_i64
+        fail("wakes: selects over two channels received #{got.count} of #{4_i64 * per} values sent, summing #{got.sum} for #{want}") unless got.count == 4_i64 * per && got.sum == want
       end
-      want = 4_i64 * per * (4_i64 * per - 1_i64) // 2_i64
-      fail("wakes: selects over two channels received #{got.count} of #{4_i64 * per} values sent, summing #{got.sum} for #{want}") unless got.count == 4_i64 * per && got.sum == want
     end
 
     # Half the workers spin waiting for their child to start, so the
@@ -923,31 +928,35 @@
     tasks = IyiWorkers.count // 2 < 1 ? 1 : IyiWorkers.count // 2
     rounds = 2000
     ended = Tally.new
-    watched("wakes, cancels", watch) do
-      group do |g|
-        tasks.times do
-          g.spawn(unit: :new) do
-            round = 0
-            while round < rounds
-              cancel_as_parked(ended)
-              round = round + 1
+    if parts.includes?("cancels")
+      watched("wakes, cancels", watch) do
+        group do |g|
+          tasks.times do
+            g.spawn(unit: :new) do
+              round = 0
+              while round < rounds
+                cancel_as_parked(ended)
+                round = round + 1
+              end
+              0
             end
-            0
           end
         end
+        fail("wakes: #{ended.count} of #{tasks * rounds} tasks cancelled as they parked answered Cancelled") unless ended.count == tasks.to_i64 * rounds
       end
-      fail("wakes: #{ended.count} of #{tasks * rounds} tasks cancelled as they parked answered Cancelled") unless ended.count == tasks.to_i64 * rounds
     end
 
     turns_each = 20000_i64
-    turns = Turns.new
-    group do |g|
-      parker = g.spawn(unit: :new) { parked_turns(turns, turns_each) }
-      spun_turns(turns, turns_each, watch)
-      answer = parker.value
-      fail("wakes: the parked side answered #{answer.is_a?(Panicked) ? answer.text : answer}") unless answer == 0
+    if parts.includes?("words")
+      turns = Turns.new
+      group do |g|
+        parker = g.spawn(unit: :new) { parked_turns(turns, turns_each) }
+        spun_turns(turns, turns_each, watch)
+        answer = parker.value
+        fail("wakes: the parked side answered #{answer.is_a?(Panicked) ? answer.text : answer}") unless answer == 0
+      end
     end
-    puts "wakes: #{got.count} values through selects over two channels and a deadline, each once; #{ended.count} tasks cancelled as they parked; #{turns_each * 2_i64} turns handed through park_on and wake_on"
+    puts "wakes: #{got.count} values through selects over two channels and a deadline, each once; #{ended.count} tasks cancelled as they parked; #{parts.includes?("words") ? turns_each * 2_i64 : 0_i64} turns handed through park_on and wake_on"
   end
 
   STEPS = ["placement", "exactly_once", "race", "channels", "now", "cancel", "panics", "steal", "collector", "typed", "wakes"]
@@ -957,10 +966,14 @@
     speed(arguments[1].to_i, arguments[2].to_i, arguments[3].to_i.to_i64)
   else
     watch = 60000
+    parts = ["selects", "cancels", "words"]
     chosen = [] of String
     arguments.each do |argument|
       if argument.starts_with?("--watch=")
         watch = argument[8, argument.size - 8].to_i
+      elsif argument.starts_with?("--only=")
+        parts = [argument[7, argument.size - 7]]
+        fail("wakes has no part named #{parts[0]}") unless ["selects", "cancels", "words"].includes?(parts[0])
       else
         fail("no step named #{argument}") unless STEPS.includes?(argument)
         chosen << argument
@@ -980,7 +993,7 @@
       when "steal"        then steal(watch)
       when "collector"    then collector(watch)
       when "typed"        then typed_step(watch)
-      when "wakes"        then wakes(watch)
+      when "wakes"        then wakes(watch, parts)
       end
     end
     puts "parallel exercise: every property held on #{IyiWorkers.count} workers"

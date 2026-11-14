@@ -1009,11 +1009,11 @@ if [ "$CORES" -lt 2 ]; then
   echo "  one core here: no two wakers race, so the proofs are not run"
 else
   broken unhanded '/^      head.handed = true$/ { next } { print }'
-  caught unhanded 'wakes: selects over two channels received' wakes --watch=5000
+  caught unhanded 'wakes: selects over two channels received' wakes --only=selects --watch=5000
   broken lostcancel '/^    if fiber.cancelled && fiber.claim\(nonce\)$/ { print "    if false"; next } { print }'
-  caught lostcancel 'wakes, cancels: still waiting after 5000 ms' wakes --watch=5000
+  caught lostcancel 'wakes, cancels: still waiting after 5000 ms' wakes --only=cancels --watch=5000
   broken lostword '/def self.park_on\(/ { inpark = 1 } inpark && held == "" && /^    IyiChanLock.lock\(lock\)$/ { held = $0; next } inpark && held != "" && /^      IyiChanLock.unlock\(lock\)$/ { next } inpark && held != "" && /^    end$/ { print; print held; held = ""; inpark = 0; next } { print }'
-  caught lostword 'wakes, words: turn' wakes --watch=5000
+  caught lostword 'wakes, words: turn' wakes --only=words --watch=5000
 fi
 
 step "failure proof: a plain add loses counts when tasks run at the same instant"

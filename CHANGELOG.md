@@ -201,6 +201,10 @@
   leaves four cores free before and after the runs; elsewhere the output
   says it was not judged and why. The one-worker copy is refused by the
   threads at once on every host, and by the time too where it is judged.
+  The three broken copies of the wakes step now each run only their own
+  part (`wakes --only=selects|cancels|words`). At a load of 45, the copy
+  that loses a word's wake outran its 5000 ms watch in the cancels part
+  before it reached the words.
 
 ## 0.21.0 — 2026-11-09
 

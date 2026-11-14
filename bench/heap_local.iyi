@@ -76,10 +76,13 @@
 #   as waiting still (`IyiHeap.idle_held?`); its list reads whole after.
 # - `busy:` while two units pass a value back and forth - thousands of
 #   parks a tick - a unit parked dirty is not collected before
-#   `IyiHeap::IDLE_BUSY_TICKS` ticks of the idle clock, by a walk that
-#   gave it that many; once they stop, one parked so is collected by a
-#   walk that gave it two (under `IYI_HEAP_STRESS`, where units collect
-#   themselves before they park, the parked unit is stamped by hand).
+#   `IyiHeap::IDLE_BUSY_TICKS` ticks of the idle clock, by walks that
+#   gave it that many, whenever the walks it waited through began with
+#   the program busy by the rule's own inputs (a try where they did not,
+#   the pairs off-core under load, is tried again, eight at most); once
+#   they stop, one parked so is collected by a walk that gave it two
+#   (under `IYI_HEAP_STRESS`, where units collect themselves before they
+#   park, the parked unit is stamped by hand).
 # - `inflight:` a unit that allocates past its budget without parking is
 #   collected in flight, its live list whole.
 # - `kept:` a unit's parks collect keeping its runs, in rounds of garbage
@@ -1998,12 +2001,26 @@
   # every millisecond until an idle worker has collected it: its stamp,
   # the idle clock's tick read after the collection was seen - the
   # collection's own tick or a later one - and the ticks the last walk
-  # gave a parked partition (`IyiHeap::STAT_IDLE_DELAY`).
+  # gave a parked partition (`IyiHeap::STAT_IDLE_DELAY`). Then whether
+  # the walks that could have taken it before `IDLE_BUSY_TICKS` ticks -
+  # the stamp's tick plus two and three, those begun by the collection -
+  # began with the program busy: each walk's inputs to the busy rule
+  # (`IyiHeap.idle_delay`: the threads' parks at its tick and the tick),
+  # read under the runtime lock it sets them under, against its
+  # predecessor's. 0 every such walk seen and busy, 1 one seen not busy,
+  # 2 one or its predecessor not seen; the first ticks a busy one of them
+  # gave other than `IDLE_BUSY_TICKS`, with its tick (0 for none); and
+  # the parks the walks at the stamp plus two and three began after
+  # (0 for one not seen).
   def busy_watch(record : UInt64, what : String) : Array(UInt64)
     count = IyiHeap.partition_collections(record)
+    walk_ticks = [] of UInt64
+    walk_parks = [] of UInt64
+    walk_delays = [] of UInt64
     stamp = 0_u64
     waited = 0
     while stamp == 0_u64 && waited < 3000
+      busy_walk_seen(walk_ticks, walk_parks, walk_delays)
       stamp = IyiHeap.read64(record &+ IyiHeap::REC_IDLE_TICK)
       if stamp == 0_u64
         sleep(1)
@@ -2017,18 +2034,75 @@
     while !collected
       collected = IyiHeap.partition_collections(record) != count
       seen = IyiStat.get(IyiStat::IDLE_TICK)
+      busy_walk_seen(walk_ticks, walk_parks, walk_delays)
       if !collected
         # The idle clock turns only at an idle worker's look: a minute
         # with none is a failure too.
         if seen > stamp &+ 400_u64 || waited >= 60000
           fail("busy: #{what}: the parked unit was not collected in #{seen &- stamp} ticks of the idle clock, #{waited} ms")
-          return [stamp, seen, 0_u64]
+          return [stamp, seen, 0_u64, 2_u64, 0_u64, 0_u64, 0_u64, 0_u64]
         end
         sleep(1)
         waited = waited + 1
       end
     end
-    [stamp, seen, IyiStat.get(IyiHeap::STAT_IDLE_DELAY)]
+    given = IyiStat.get(IyiHeap::STAT_IDLE_DELAY)
+    status = 0_u64
+    other = 0_u64
+    other_tick = 0_u64
+    walked = [0_u64, 0_u64]
+    last = seen &+ 1_u64 < stamp &+ 3_u64 ? seen &+ 1_u64 : stamp &+ 3_u64
+    tick = stamp &+ 2_u64
+    while tick <= last
+      found = walk_ticks.index(tick)
+      at = found.is_a?(Int32) ? found : 0
+      if at == 0 || walk_ticks[at - 1] != tick &- 1_u64
+        status = 2_u64
+      else
+        before = walk_parks[at - 1]
+        parks = walk_parks[at]
+        walked[(tick &- stamp &- 2_u64).to_i32] = parks > before ? parks &- before : 0_u64
+        if parks <= before || parks &- before < IyiHeap::IDLE_BUSY_PARKS
+          status = 1_u64 if status == 0_u64
+        elsif other_tick == 0_u64 && walk_delays[at] != IyiHeap::IDLE_BUSY_TICKS
+          other = walk_delays[at]
+          other_tick = tick
+        end
+      end
+      tick = tick &+ 1_u64
+    end
+    [stamp, seen, given, status, other, other_tick, walked[0], walked[1]]
+  end
+
+  # The busy rule's inputs and verdict of the last walk begun, appended
+  # to the walks seen when its tick is new.
+  def busy_walk_seen(ticks : Array(UInt64), parks : Array(UInt64), delays : Array(UInt64)) : Nil
+    IyiRuntimeLock.lock
+    tick = IyiStat.get(IyiHeap::STAT_IDLE_PARKS_TICK)
+    parked = IyiStat.get(IyiHeap::STAT_IDLE_PARKS)
+    delay = IyiStat.get(IyiHeap::STAT_IDLE_DELAY)
+    IyiRuntimeLock.unlock
+    if ticks.empty? || ticks[ticks.size - 1] != tick
+      ticks << tick
+      parks << parked
+      delays << delay
+    end
+  end
+
+  # One unit of group *g* (`idle_task` *t*) parked dirty and watched
+  # (`busy_watch`), then let go: its list read whole.
+  def busy_try(g : IyiGroup, t : Int64) : Array(UInt64)
+    go = Channel(Int64).new(1)
+    ready = Channel(UInt64).new(1)
+    sleeper = g.spawn(unit: :new) { idle_task(t, go, ready) }
+    got = ready.receive
+    record = got.is_a?(UInt64) ? got : 0_u64
+    fail("busy: a parked unit sent no record") if record == 0_u64
+    watched = busy_watch(record, "busy")
+    go.send(1_i64)
+    value = sleeper.value
+    fail("busy: #{value} nodes of a parked unit's list read wrong") if value != 0_i64
+    watched
   end
 
   # The busy rule (`IyiHeap.idle_delay`): a program whose threads park
@@ -2063,13 +2137,28 @@
       end
       # Three ticks of passing before the unit parks.
       sleep(300)
-      go = Channel(Int64).new(1)
-      ready = Channel(UInt64).new(1)
-      sleeper = g.spawn(unit: :new) { idle_task(1_i64, go, ready) }
-      got = ready.receive
-      record = got.is_a?(UInt64) ? got : 0_u64
-      fail("busy: a parked unit sent no record") if record == 0_u64
-      busy = busy_watch(record, "busy")
+      # A try counts when every walk that could take its unit before
+      # `IDLE_BUSY_TICKS` ticks began with the program busy by the rule's
+      # own inputs (`busy_watch`). Under load the pairs run off-core and
+      # park fewer than `IDLE_BUSY_PARKS` times a tick, the rule rightly
+      # calls the program idle, and a unit taken after two ticks is no
+      # fault (heap22 fu, Linux, 12 busy loops: 1 run in 40): another
+      # unit parks and is watched, eight at most.
+      busy = [] of UInt64
+      tries = 0
+      idle_walks = 0
+      unseen = 0
+      while busy.empty? && tries < 8
+        watched = busy_try(g, tries == 0 ? 1_i64 : 2_i64 &+ tries.to_i64)
+        tries = tries + 1
+        if watched[3] == 0_u64
+          busy = watched
+        elsif watched[3] == 1_u64
+          idle_walks = idle_walks + 1
+        else
+          unseen = unseen + 1
+        end
+      end
       pairs.times { stop.send(1_i64) }
       trips = 0_i64
       leads.each do |lead|
@@ -2077,11 +2166,12 @@
         trips = trips &+ answer if answer.is_a?(Int64)
       end
       follows.each { |follow| follow.value }
-      go.send(1_i64)
-      value = sleeper.value
-      fail("busy: #{value} nodes of a parked unit's list read wrong") if value != 0_i64
-      fail("busy: a parked unit stamped #{busy[0]} was collected by tick #{busy[1]} with the program busy (#{trips} round trips), before #{IyiHeap::IDLE_BUSY_TICKS} ticks") if busy[1] &+ 1_u64 < busy[0] &+ IyiHeap::IDLE_BUSY_TICKS
-      fail("busy: the walks gave a parked unit #{busy[2]} ticks with the program busy (#{trips} round trips), not #{IyiHeap::IDLE_BUSY_TICKS}") if busy[2] != IyiHeap::IDLE_BUSY_TICKS
+      if busy.empty?
+        fail("busy: no parked unit of #{tries} waited through walks that all began with the program busy by the rule (#{idle_walks} met one under #{IyiHeap::IDLE_BUSY_PARKS} parks a tick, #{unseen} one unseen; #{trips} round trips)")
+      else
+        fail("busy: a parked unit stamped #{busy[0]} was collected by tick #{busy[1]} with the program busy (#{trips} round trips, #{busy[6]} and #{busy[7]} parks at the walks it waited through, try #{tries}), before #{IyiHeap::IDLE_BUSY_TICKS} ticks") if busy[1] &+ 1_u64 < busy[0] &+ IyiHeap::IDLE_BUSY_TICKS
+        fail("busy: the walk at tick #{busy[5]} gave a parked unit #{busy[4]} ticks with the program busy (#{trips} round trips, try #{tries}), not #{IyiHeap::IDLE_BUSY_TICKS}") if busy[5] != 0_u64
+      end
       # The passing over: the next walks count only what parks now.
       sleep(300)
       go_idle = Channel(Int64).new(1)

@@ -254,7 +254,11 @@ same RSS. The check counts only a try whose woken fiber asked for the
 unit's token while the takeover held it, which the runtime records
 (`IyiHeap.takeovers_asked`): under heavy load the main thread, kept off
 its core through a whole takeover, missed it busy and failed the check
-with nothing wrong.
+with nothing wrong. bench/heap_local's `busy` check holds a parked unit
+to four ticks only when the walks it waited through began with the
+program busy by the rule's own inputs, and parks another, eight at
+most, when they did not: under load its passing pairs, off their cores,
+parked under 256 times a tick, and the rule rightly gave two.
 
 heap22 S6 memory return, under `-Dheap_partitions`. Inside one process
 #145's app ratcheted its resident set endpoint after endpoint (50 to 343

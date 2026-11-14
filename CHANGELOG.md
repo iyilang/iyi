@@ -204,7 +204,10 @@
   The three broken copies of the wakes step now each run only their own
   part (`wakes --only=selects|cancels|words`). At a load of 45, the copy
   that loses a word's wake outran its 5000 ms watch in the cancels part
-  before it reached the words.
+  before it reached the words. `bench/parallel_migrate.iyi`'s deep step
+  needs a wake that moved, as the sockets step does. Beside 12 busy loops
+  its release build once moved none of 160, so a run that moves none is
+  run again, up to five times.
 
 ## 0.21.0 — 2026-11-09
 

@@ -583,33 +583,55 @@ import std/socket::{IyiSocket, SocketError}
   # Windows the pages under the committed top are committed by the
   # kernel as the probes reach the guard page, against the stack bounds
   # in the TEB of the thread now running the fiber.
+  #
+  # A wake moves only when another worker takes it, which a loaded host
+  # makes rarer, as for the sockets: earlier gate runs here moved 19 to
+  # 150 of the 160, and beside 12 busy loops (`procs_running` 17) one
+  # release run moved none. A run that moves none holds nothing of what a
+  # move keeps, so it is run again, up to DEEP_RUNS times; one in which
+  # no wake ever moves fails.
+  DEEP_RUNS = 5
+
   def deep_step(watch : Int32) : Nil
     watched("deep", watch) do
       tasks = 16
       rounds = 10
-      feed = Channel(Int32).new
-      moves = Tally.new
-      group do |g|
-        tasks.times do |t|
-          g.spawn(unit: :new) do
-            rounds.times do |r|
-              os = os_thread
-              st = IyiScheduler.state.object_id
-              feed.receive
-              moves.add(1_i64) if moved?("deep", os, st)
-              deep(200)
-              churn(2000)
-            end
-            0
-          end
-        end
-        (tasks * rounds).times { feed.send(1) }
+      runs = 0
+      moved = 0_i64
+      while moved == 0_i64 && runs < DEEP_RUNS
+        runs += 1
+        moved = deep_run(tasks, rounds)
+        break if IyiWorkers.count <= 1
       end
-      if IyiWorkers.count > 1 && moves.count == 0_i64
-        fail("deep: no task resumed on another worker before its deep frames")
+      if IyiWorkers.count > 1 && moved == 0_i64
+        fail("deep: no task resumed on another worker before its deep frames, in #{runs} runs")
       end
-      puts "deep: #{tasks * rounds} frames 120 KiB deep, #{moves.count} of them after a move"
+      again = runs > 1 ? " (run #{runs}; the #{runs - 1} before moved none)" : ""
+      puts "deep: #{tasks * rounds} frames 120 KiB deep, #{moved} of them after a move#{again}"
     end
+  end
+
+  # One run of the deep step: the wakes that resumed on another worker.
+  def deep_run(tasks : Int32, rounds : Int32) : Int64
+    feed = Channel(Int32).new
+    moves = Tally.new
+    group do |g|
+      tasks.times do |t|
+        g.spawn(unit: :new) do
+          rounds.times do |r|
+            os = os_thread
+            st = IyiScheduler.state.object_id
+            feed.receive
+            moves.add(1_i64) if moved?("deep", os, st)
+            deep(200)
+            churn(2000)
+          end
+          0
+        end
+      end
+      (tasks * rounds).times { feed.send(1) }
+    end
+    moves.count
   end
 
   # ── loops ────────────────────────────────────────────────────────────

@@ -42,6 +42,7 @@ module std/digest
 
 import std/int
 import std/atomic
+import std/slice::{Slice, Bytes}
 
 # What every block hash shares: the message is cut into blocks, the last
 # one padded with a one bit, zeros and the message's length in bits, and
@@ -96,6 +97,18 @@ pub abstract class Digest
 
   def self.hash_bytes(data : String | Array(UInt8)) : Array(UInt8)
     new.update(data).final
+  end
+
+  def self.digest(data : String | Array(UInt8) | Slice(UInt8)) : Array(UInt8)
+    d = new
+    if data.is_a?(String)
+      d.update(data)
+    elsif data.is_a?(Array(UInt8))
+      d.update(data)
+    else
+      d.update(data.to_unsafe, data.size)
+    end
+    d.final
   end
 
   # The digest of no bytes yet, ready again after a `final`.

@@ -277,11 +277,11 @@ bytes, holds an `Int64` in its first word after the tag and kept three
 words of whatever the slot held before) named chunks another unit had
 freed, and #145's app exited 86 under `-Dheap_verify` at stress 0 on 5
 of 5 seeds; now 0 of 5 (bench/heap_codegen `holes` and its
-`IYI_SPAWN_BROKEN=holes` copy). The flag-off build is unchanged byte for
-byte, and a plain build keeps such words (54 in S6's repro, 69 with
-`--release`, at 0.21.0) as conservative retention only. JSON and the
-db rows probe cost 0.986-1.022 of the build without the zeroing (Linux,
-6 and 15 rounds).
+`IYI_SPAWN_BROKEN=holes` copy, built plain and `--release`). The
+flag-off build is unchanged byte for byte, and a plain build keeps such
+words (54 in S6's repro, 69 with `--release`, at 0.21.0) as
+conservative retention only. JSON and the db rows probe cost
+0.986-1.022 of the build without the zeroing (Linux, 6 and 15 rounds).
 
 The pin fallback's walk puts into words only the reason it gives. It
 spelled the path to each of the ~1,100 constants a crossing of #145's app

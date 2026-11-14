@@ -26,6 +26,9 @@
 # and when the run without it stops at its check's `FAIL:` line, read
 # before any collection. A copy whose loss no verifier sees is listed
 # apart (`OWN_ONLY`), with why, and caught by its `FAIL:` line alone.
+# The `holes` copy is caught built `--release` as well: what its check
+# keeps live across a park is the optimiser's to keep or drop, and an
+# optimised copy once went unseen by the verifier.
 
 set -u
 
@@ -153,21 +156,21 @@ TABLE="$WORK/table.md"
 # own holders (`held by`, found by a search of whatever is still live)
 # left out. Prints the report's first line and what it found, or nothing
 # when a run missed.
-verifier_caught() { # copy check
-  local copy="$1" check="$2" k=1 first="" report line code
+verifier_caught() { # program check
+  local program="$1" check="$2" k=1 first="" report line code
   while [ "$k" -le "$RUNS" ]; do
-    verified "broken-$copy" "broken-$copy.v$k" 1 "$check"
-    code="$(cat "$WORK/broken-$copy.v$k.code")"
-    report="$(sed -n '/^iyi: heap_verify: partition [0-9]*, /,/^iyi: heap_verify: aborting/p' "$WORK/broken-$copy.v$k.err" |
+    verified "$program" "$program.v$k" 1 "$check"
+    code="$(cat "$WORK/$program.v$k.code")"
+    report="$(sed -n '/^iyi: heap_verify: partition [0-9]*, /,/^iyi: heap_verify: aborting/p' "$WORK/$program.v$k.err" |
       sed -E '/^    held by /d; /^    field \+[0-9]+$/d; s/0x[0-9a-f]{6,}/0x…/g; s/, check [0-9]+$/, check …/')"
     if [ "$code" != 86 ] || [ -z "$report" ]; then
-      echo "run $k: exit $code, $( [ -n "$report" ] && echo "report" || echo "no report")" >"$WORK/broken-$copy.missed"
+      echo "run $k: exit $code, $( [ -n "$report" ] && echo "report" || echo "no report")" >"$WORK/$program.missed"
       return
     fi
     if [ -z "$first" ]; then
       first="$report"
     elif [ "$report" != "$first" ]; then
-      echo "run $k reported another word: $(echo "$report" | sed -n '1,2p' | tr -s ' ' | tr '\n' ' ')" >"$WORK/broken-$copy.missed"
+      echo "run $k reported another word: $(echo "$report" | sed -n '1,2p' | tr -s ' ' | tr '\n' ' ')" >"$WORK/$program.missed"
       return
     fi
     k=$((k + 1))
@@ -176,27 +179,31 @@ verifier_caught() { # copy check
   echo "$line -$(echo "$first" | sed -n 2p | tr -s ' ')"
 }
 
-prove_caught() { # label copy check
-  local label="$1" copy="$2" check="$3"
-  if ! build "broken-$copy" "IYI_SPAWN_BROKEN=$copy" ""; then
+prove_caught() { # label copy check [release]
+  local label="$1" copy="$2" check="$3" extra="" program="broken-$2"
+  if [ "${4:-}" = release ]; then
+    extra="--release"
+    program="broken-$copy-release"
+  fi
+  if ! build "$program" "IYI_SPAWN_BROKEN=$copy" "$extra"; then
     echo "  $label: the build did not finish"
-    sed -n '1,12p' "$WORK/broken-$copy.build.log"
+    sed -n '1,12p' "$WORK/$program.build.log"
     printf '| %s (`%s`) | **the build did not finish** | |\n' "$label" "$copy" >>"$TABLE"
     status=1
     return
   fi
   # The program's own check, read before any collection.
-  verified "broken-$copy" "broken-$copy.own" "" "$check"
+  verified "$program" "$program.own" "" "$check"
   local code own
-  code="$(cat "$WORK/broken-$copy.own.code")"
-  own="$(grep -m1 "^FAIL: " "$WORK/broken-$copy.own.out" | sed 's/^FAIL: //')"
+  code="$(cat "$WORK/$program.own.code")"
+  own="$(grep -m1 "^FAIL: " "$WORK/$program.own.out" | sed 's/^FAIL: //')"
   if [ "$code" -eq 0 ] || [ -z "$own" ]; then
     echo "  $label: the check '$check' did not fail (exit $code)"
     own="**missed** (exit $code)"
     status=1
   fi
   local verifier reason
-  verifier="$(verifier_caught "$copy" "$check")"
+  verifier="$(verifier_caught "$program" "$check")"
   reason="$(own_only "$copy")"
   if [ -n "$reason" ]; then
     if [ -n "$verifier" ]; then
@@ -205,9 +212,9 @@ prove_caught() { # label copy check
     fi
     verifier="own check only: $reason"
   elif [ -z "$verifier" ]; then
-    echo "  $label: the verifier missed it ($(cat "$WORK/broken-$copy.missed"))"
-    sed -n '1,6p' "$WORK/broken-$copy.v1.out" | sed 's/^/    /'
-    verifier="**missed** ($(cat "$WORK/broken-$copy.missed"))"
+    echo "  $label: the verifier missed it ($(cat "$WORK/$program.missed"))"
+    sed -n '1,6p' "$WORK/$program.v1.out" | sed 's/^/    /'
+    verifier="**missed** ($(cat "$WORK/$program.missed"))"
     status=1
   fi
   printf '| %s (`%s`) | %s | %s |\n' "$label" "$copy" "$verifier" "$own" >>"$TABLE"
@@ -223,6 +230,7 @@ prove_caught "pin through a @[Share] def's block (SharedProc.of binds no block)"
 prove_caught "pin through a block handed to a helper (not followed)" forwarded handed
 prove_caught "pin of a spawn(in: u) task (pinned: not passed)" pin-in pin_in
 prove_caught "union holes written as zero" holes holes
+prove_caught "union holes written as zero, built \`--release\`" holes holes release
 
 echo
 echo "Seed $SEED (IYI_CHAOS), IYI_HEAP_STRESS=1, $RUNS verifier runs each with HEAP22_PRINT_ONLY=1."

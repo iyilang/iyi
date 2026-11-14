@@ -1,0 +1,13 @@
+class Waiter
+  def first(limit : Int32) : Int32
+    select
+    when ended = limit.done.receive
+      ended
+    when timeout(limit)
+      0
+    else
+      -1
+    end
+    limit
+  end
+end

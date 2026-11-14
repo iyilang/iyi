@@ -1,0 +1,5 @@
+class Reply
+  def fetch(key : String) : String? | Err
+    nil
+  end
+end

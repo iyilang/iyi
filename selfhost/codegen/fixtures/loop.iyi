@@ -1,0 +1,42 @@
+# The fourth codegen fixture: a loop, which is a branch that goes
+# backwards.
+#
+# A branch needed two blocks and a value; a loop needs the condition in a
+# block of its own, because it is asked again on every turn. What makes
+# it cheap here is that a local lives in a slot: the counter is loaded and
+# stored rather than carried in a register, so nothing has to be threaded
+# around the back edge.
+#
+# A loop is not a value. The method answers what follows it.
+
+require "../../../src/iyi/prelude"
+
+def sum_to(n : Int32) : Int32
+  total = 0
+  i = 1
+  while i <= n
+    total = total + i
+    i = i + 1
+  end
+  total
+end
+
+# A loop with a branch in it: the condition of one and the arms of the
+# other are four blocks in one method.
+def odds_to(n : Int32) : Int32
+  total = 0
+  i = 1
+  while i <= n
+    if i * 2 > i + 1
+      total = total + 1
+    end
+    i = i + 1
+  end
+  total
+end
+
+def answer : Int32
+  sum_to(7) + odds_to(5)
+end
+
+__iyi_exit(answer)

@@ -1,0 +1,31 @@
+# The eleventh codegen fixture: a string as a value rather than as a
+# literal argument to `print`.
+#
+# Every slice before this one was chosen so that it needed nothing of
+# the prelude compiled. This one needs one thing, and it is a shape
+# rather than a body: `String` is laid out by the compiler itself, in
+# `Program#initialize`, as `@bytesize`, `@length` and the bytes, with
+# the type id in the word underneath. The prelude reopens that type and
+# says what can be done with it; it does not decide what it is.
+#
+# So the emitter borrows the layout the way it already borrows `write`
+# and `malloc`: a literal is a constant with that shape, and a local
+# holding one is a pointer to it. What it still cannot do is make a new
+# string, because that needs the allocator and the collector.
+
+def width(text : String) : Int32
+  text.bytesize
+end
+
+def answer : Int32
+  greeting = "hello"
+  shout = "HELLO, WORLD"
+  # Six bytes and five characters: the two counts in the header are
+  # different numbers, so reading the wrong one is visible.
+  wide = "héllo"
+  print greeting
+  print "\n"
+  width(greeting) + width(shout) + greeting.size + width(wide) * 10 + wide.size
+end
+
+__iyi_exit(answer)

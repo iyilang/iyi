@@ -64,6 +64,14 @@ reason, jobs = planned("bench/std_base64_exercise.sh")
 check("an exercise no step names is still run, through the siblings",
       "std-siblings" in jobs and reason.startswith("only bench files changed"), f"{reason}: {sorted(jobs)}")
 
+reason, jobs = planned("selfhost/parser/parser.iyi")
+check("a change to the port selects the job that diffs it against the compiler",
+      "selfhost" in jobs and "build" in jobs, f"{reason}: {sorted(jobs)}")
+
+reason, jobs = planned("src/iyi/array.iyi")
+check("and a change that is not to the port does not",
+      "selfhost" not in jobs, f"{reason}: {sorted(jobs)}")
+
 reason, jobs = planned("bench/panics.sh")
 check("a gate a job runs selects that job", "windows-native" in jobs, f"{reason}: {sorted(jobs)}")
 

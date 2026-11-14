@@ -30,6 +30,8 @@ Within a pull request the changed files narrow it further:
   - only `bench/` files, each run by some job: those jobs and the docs gates;
   - anything under `.github/` or this script: everything, because a change to
     how CI runs is only proven by running it;
+  - anything under `selfhost/`: the port's own job as well, which diffs it
+    against the compiler it is a port of;
   - otherwise: the fast tier, plus every job that runs a changed bench file.
 
 A job runs a bench file when one of its steps names it, or names a bench
@@ -286,6 +288,11 @@ def plan(jobs, event, ref, files, bench):
         selected.add("vscode")
     if not code_files:
         return close_over_needs(jobs, selected), "only docs changed"
+
+    # The port is diffed against the compiler by its own job, and no bench
+    # file names `selfhost/`: a change to it reaches nothing by `Reach`.
+    if any(f.startswith("selfhost/") for f in code_files):
+        selected.add("selfhost")
 
     changed_bench = [f for f in code_files if f.startswith("bench/")]
     reach = Reach(jobs, bench) if changed_bench else None

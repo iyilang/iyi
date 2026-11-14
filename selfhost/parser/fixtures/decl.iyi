@@ -1,0 +1,24 @@
+module main
+
+pub trait Show
+  abstract def show : String
+end
+
+pub struct Box
+  getter value : Int32
+
+  def initialize(@value : Int32)
+  end
+end
+
+pub class Holder
+  def size : Int32
+    3
+  end
+end
+
+impl Show for Box
+  def show : String
+    "box"
+  end
+end

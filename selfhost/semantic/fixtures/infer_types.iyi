@@ -1,0 +1,75 @@
+# The third inference slice: a method on a value, and the type that holds
+# it.
+#
+# The first two fixtures typed methods at the top level, where a call has
+# no receiver and the only thing to look up is another method in the same
+# file. This one has a type: a struct whose methods answer its fields, a
+# method that reaches another method on itself, a constructor call that is
+# worth the type it builds, and a call on a local whose type came from
+# that constructor.
+#
+# Still no prelude, so nothing here adds two numbers. What the fixture
+# says is what can be said about a value without one.
+
+struct Point
+  def initialize(@x : Int32, @y : Int32)
+  end
+
+  # A field reader is the smallest method a type has, and its type is the
+  # field's.
+  def x
+    @x
+  end
+
+  def y
+    @y
+  end
+
+  # A call with no receiver inside a method is a call on this type, not on
+  # the program.
+  def first
+    x
+  end
+
+  # Reached by nothing. A type's method is typed when a call instantiates
+  # it, the same way a top-level one is.
+  def unused
+    'z'
+  end
+end
+
+struct Label
+  def initialize(@text : String)
+  end
+
+  def text
+    @text
+  end
+end
+
+# A constructor is worth the type it builds.
+def make_point
+  Point.new(1, 2)
+end
+
+def make_label
+  Label.new("here")
+end
+
+# A local carries the type it was assigned, and a call on it is looked up
+# on that type.
+def reach_field
+  point = make_point
+  point.y
+end
+
+# A method that reaches another on the same value, through a call that
+# names no receiver at all.
+def reach_self
+  make_point.first
+end
+
+make_point
+make_label
+reach_field
+reach_self

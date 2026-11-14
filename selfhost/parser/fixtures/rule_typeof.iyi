@@ -1,0 +1,3 @@
+def kind(x : Int32)
+  typeof(x)
+end

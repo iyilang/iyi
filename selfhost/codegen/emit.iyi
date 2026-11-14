@@ -1,0 +1,1557 @@
+module main
+
+# The codegen slice, written in iyi: LLVM IR for the shapes the fixtures
+# under `fixtures/` write.
+#
+# The other slices diff a tree or a type against the current compiler's.
+# Two independent backends do not write the same IR, so comparing the
+# text would measure spelling. What this slice compares is what the
+# program *does*: each fixture ends in `__iyi_exit`, both compilers turn
+# it into an executable, and the gate diffs the exit status and stdout.
+#
+# What it carries: integer literals and arithmetic, comparisons, `if`,
+# `while`, locals, arguments, calls to methods in the file, `print` of a
+# literal, and a struct with fields and methods. Not here: a class, which
+# is a reference and needs a heap; any other type; anything that
+# allocates. Each of those wants its own diffed fixture rather than a
+# guess.
+#
+# The operators are the prelude's primitives. `@[Primitive(:binary)] def
+# +(other : Int32) : self` is an instruction rather than a body, which is
+# why this can emit `add` without reading the prelude at all.
+
+import std/env::{ENV}
+import std/file::{File}
+import std/kernel::{abort}
+import macro/expand
+import parser/parser::{Parser, Node, RequireNode, IfNode, UnlessNode, WhileNode, ReturnNode, NextNode, BreakNode, AndNode, OrNode, NotNode, NopNode, BoolNode, CaseNode, WhenNode, TypeDeclNode, GenericNode, StrNode, NumNode, VarNode, IvarNode, AssignNode, ExprsNode, DefNode, ArgNode, CallNode, ClassDefNode, PathNode, VisibilityModifierNode}
+
+# A value, and what shape it has. Everything in this slice is either an
+# `i32` or a struct passed by value, and knowing which decides how it is
+# stored, loaded and passed.
+pub class Val
+  getter text : String
+  getter kind : String
+  # Which type this is, for looking a method up. A reference prints as
+  # `ptr` and every reference prints the same, so the name cannot be read
+  # back out of the kind.
+  getter shape : String
+
+  def initialize(@text : String, @kind : String)
+    @shape = ""
+  end
+
+  def initialize(@text : String, @kind : String, @shape : String)
+  end
+end
+
+pub def int_val(text : String) : Val
+  Val.new(text, "i32")
+end
+
+# One struct the file declares: the fields it holds, in the order its
+# constructor assigns them, and the methods written on it.
+pub class Shape
+  getter name : String
+  getter fields : Array(String)
+  getter defs : Array(DefNode)
+  # A `class` is a reference and a `struct` is a value. They hold their
+  # fields the same way and are passed around differently: one is a
+  # pointer to an object on the heap, the other is the object.
+  getter reference : Bool
+  # The parameters a generic declares, and what they were given. Empty
+  # for a plain type, and the same length for an instance of one.
+  getter vars : Array(String)
+  getter args : Array(String)
+  # The type each field was declared with, before substitution.
+  getter field_types : Array(String)
+
+  def initialize(@name : String, @reference : Bool)
+    @fields = [] of String
+    @field_types = [] of String
+    @defs = [] of DefNode
+    @vars = [] of String
+    @args = [] of String
+  end
+
+  # The parser hands the parameter list over as it was written, brackets
+  # and all: `struct Box(T)` says `(T)` and `Pair(A, B)` says `(A B)`.
+  def declare_vars(written : String) : Nil
+    name = ""
+    index = 0
+    while index < written.bytesize
+      ch = written[index]
+      if ch == '(' || ch == ')' || ch == ',' || ch == ' '
+        @vars << name unless name == ""
+        name = ""
+      else
+        name = name + ch.to_s
+      end
+      index = index + 1
+    end
+    @vars << name unless name == ""
+  end
+
+  def bind(args : Array(String)) : Nil
+    args.each { |one| @args << one }
+  end
+
+  # What a parameter was given, or the name itself when it is not one.
+  def binding(name : String) : String
+    found = @vars.index(name)
+    return name if found.nil? || found >= @args.size
+    @args[found]
+  end
+
+  def generic? : Bool
+    @vars.size > 0 && @args.size == 0
+  end
+
+  def add_field_type(written : String) : Nil
+    @field_types << written
+  end
+
+  def type_of(field : String) : String
+    found = @fields.index(field)
+    return "Int32" if found.nil? || found >= @field_types.size
+    @field_types[found]
+  end
+
+  def add_field(field : String) : Nil
+    @fields << field unless @fields.includes?(field)
+  end
+
+  def copy_from(other : Shape) : Nil
+    other.fields.each { |field| @fields << field }
+    other.field_types.each { |written| @field_types << written }
+    other.defs.each { |node| @defs << node }
+    other.vars.each { |one| @vars << one }
+  end
+
+  def add(node : DefNode) : Nil
+    @defs << node
+  end
+
+  def index_of(field : String) : Int32
+    found = @fields.index(field)
+    found.nil? ? 0 : found
+  end
+
+  def method(name : String) : Array(DefNode)
+    hit = [] of DefNode
+    @defs.each { |node| hit << node if node.name == name }
+    hit
+  end
+
+  def knows?(name : String) : Bool
+    method(name).size > 0
+  end
+
+  # A type the compiler already knows the width of: `Int32`, `Bool`,
+  # every rung of the tower. The prelude declares each as a `struct`
+  # with methods and no fields, so it arrives here looking exactly like
+  # `Point` does.
+  #
+  # This one is tidiness rather than correctness, said plainly because
+  # the mutation written to prove it came back green: all it does is
+  # keep `%Int32 = type { }` out of the module, and LLVM accepts that
+  # declaration. `kind` below is the line that decides anything, and
+  # answering `%Int32` there is what broke subtraction the first time
+  # this was tried: the body of `Int32#abs` stored `self` as a `%Int32`,
+  # and `-self` on a value of that kind is not arithmetic any more.
+  def primitive? : Bool
+    register_kind(@name) != ""
+  end
+
+  # How a value of the type is written in the IR. A primitive is its
+  # register kind, a reference is an opaque pointer, and the struct type
+  # below it is what an offset into it is measured against.
+  def kind : String
+    said = register_kind(@name)
+    return said unless said == ""
+    @reference ? "ptr" : "%#{quoted(@name)}"
+  end
+
+  def layout : String
+    "%#{quoted(@name)}"
+  end
+
+  def declaration(known : Known) : String
+    written = [] of String
+    @fields.each { |field| written << kind_of(type_of(field), self, known) }
+    "#{layout} = type { #{written.join(", ")} }"
+  end
+
+  # Four bytes an `i32` and one a `Bool`, rounded up to four so the
+  # offsets stay where `getelementptr` puts them.
+  def bytes_of(known : Known) : Int32
+    @fields.size * 4
+  end
+end
+
+# What the file declares: its own methods, and its structs.
+pub class Known
+  @names : Array(String)
+  @nodes : Array(DefNode)
+  @shapes : Array(Shape)
+  @wanted : Array(String)
+  @taken : Array(String)
+
+  def initialize
+    @names = [] of String
+    @nodes = [] of DefNode
+    @shapes = [] of Shape
+    @wanted = [] of String
+    @taken = [] of String
+  end
+
+  def add(node : DefNode) : Nil
+    @names << node.name
+    @nodes << node
+  end
+
+  def nodes : Array(DefNode)
+    @nodes
+  end
+
+  def knows?(name : String) : Bool
+    !@names.index(name).nil?
+  end
+
+  # The methods the program has reached, and the ones already written
+  # out. A name goes on the first list when a call to it is emitted and
+  # moves to the second when its body is.
+  def want(name : String) : Nil
+    @wanted << name unless @wanted.includes?(name) || @taken.includes?(name)
+  end
+
+  def wanted : Array(String)
+    @wanted
+  end
+
+  def take : String
+    name = @wanted.shift
+    @taken << name
+    name
+  end
+
+  # What a top-level method says it answers, which a call has to know
+  # before it can name the register it lands in.
+  def def_named(name : String) : Array(DefNode)
+    found = @names.index(name)
+    return [] of DefNode if found.nil?
+    [@nodes[found]] of DefNode
+  end
+
+  def add_shape(shape : Shape) : Nil
+    @shapes << shape
+  end
+
+  def shapes : Array(Shape)
+    @shapes
+  end
+
+  def shape_named(name : String) : Array(Shape)
+    hit = [] of Shape
+    @shapes.each { |shape| hit << shape if shape.name == name }
+    hit
+  end
+
+  def shape?(name : String) : Bool
+    shape_named(name).size > 0
+  end
+
+  # `Box(Int32)` is a type of its own, made the first time it is named
+  # and reused after that. The name carries its arguments, because two
+  # instantiations of one generic are two types.
+  def instantiate(name : String, args : Array(String)) : Array(Shape)
+    template = shape_named(name)
+    return [] of Shape if template.size == 0
+    full = "#{name}.#{args.join(".")}"
+    found = shape_named(full)
+    return found if found.size > 0
+    made = Shape.new(full, template[0].reference)
+    made.copy_from(template[0])
+    made.bind(args)
+    @shapes << made
+    shape_named(full)
+  end
+
+  def shape_of(name : String) : Array(Shape)
+    return [] of Shape if name == ""
+    shape_named(name)
+  end
+end
+
+# The types whose values live in a register rather than in a layout.
+# The prelude declares every one of them as a `struct` with methods and
+# no fields, so what separates them from `Point` is not how they are
+# written: it is that the compiler already knows how wide they are.
+# Answers "" for everything else, which is what makes it a question a
+# caller can ask rather than a table it has to repeat.
+pub def register_kind(name : String) : String
+  return "i1" if name == "Bool"
+  # A `String` is a pointer at the object the compiler laid out, and it
+  # is the one type here whose shape the prelude did not decide.
+  return "ptr" if name == "String"
+  return "i8" if name == "Int8" || name == "UInt8"
+  return "i16" if name == "Int16" || name == "UInt16"
+  return "i64" if name == "Int64" || name == "UInt64"
+  return "i32" if name == "Int32" || name == "UInt32" || name == "Int" || name == "UInt"
+  ""
+end
+
+pub def kind_of(name : String, shape : Shape, known : Known) : String
+  return "i32" if name == ""
+  bound = shape.binding(name)
+  return kind_of(bound, Shape.new("", false), known) unless bound == name
+  said = register_kind(name)
+  return said unless said == ""
+  hit = known.shape_named(name)
+  return hit[0].kind if hit.size > 0
+  "i32"
+end
+
+# One word out of a string's header: `@bytesize` is the first and
+# `@length` the second, and the pointer points at the first.
+pub def string_field(said : Val, at : Int32, body : Body) : String
+  place = said.text
+  unless at == 0
+    place = body.register
+    body.write("#{place} = getelementptr inbounds i32, ptr #{said.text}, i64 #{at}")
+  end
+  reg = body.register
+  body.write("#{reg} = load i32, ptr #{place}")
+  reg
+end
+
+# The module's string constants. A literal is bytes with a name, and the
+# name is what a call passes. Collected while the functions are emitted
+# and printed above them, so the text reads in the order LLVM would have
+# written it.
+pub class Constants
+  @lines : String
+  @count : Int32
+
+  def initialize
+    @lines = ""
+    @count = 0
+  end
+
+  def text : String
+    @lines
+  end
+
+  # The bytes of a literal, as LLVM spells them: every byte that is not
+  # plain printable ASCII is written as two hex digits, because a newline
+  # inside a constant would end the line it is written on.
+  def add(text : String) : String
+    name = "@str#{@count}"
+    @count = @count + 1
+    written = ""
+    index = 0
+    while index < text.bytesize
+      ch = text[index]
+      written = written + if ch == '"' || ch == '\\' || ch.ord < 32 || ch.ord > 126
+        "\\#{hex(ch.ord)}"
+      else
+        ch.to_s
+      end
+      index = index + 1
+    end
+    @lines = @lines + "#{name} = private unnamed_addr constant [#{text.bytesize} x i8] c\"#{written}\"\n"
+    name
+  end
+
+  # The same bytes as a `String` object. The compiler lays that type out
+  # itself, before any prelude is read: `@bytesize`, `@length`, then the
+  # bytes, with the type id in the word underneath the pointer. The
+  # constant carries all four so that a pointer into it has the same
+  # shape a pointer from the allocator would, and the id is zero because
+  # nothing this slice emits reads one.
+  def add_object(text : String) : String
+    name = "@text#{@count}"
+    @count = @count + 1
+    bytes = text.bytesize
+    @lines = @lines +
+             "#{name} = private unnamed_addr constant #{object_type(bytes)} " +
+             "{ i32 0, i32 #{bytes}, i32 #{text.size}, [#{bytes} x i8] c\"#{escaped(text)}\" }\n"
+    name
+  end
+
+  def object_type(bytes : Int32) : String
+    "{ i32, i32, i32, [#{bytes} x i8] }"
+  end
+
+  def escaped(text : String) : String
+    written = ""
+    index = 0
+    while index < text.bytesize
+      ch = text[index]
+      written = written + if ch == '"' || ch == '\\' || ch.ord < 32 || ch.ord > 126
+        "\\#{hex(ch.ord)}"
+      else
+        ch.to_s
+      end
+      index = index + 1
+    end
+    written
+  end
+
+  # Integer division, spelled so: a bare `/` on two integers is a float
+  # here, and the prelude offers both.
+  def hex(value : Int32) : String
+    "#{digit(value // 16)}#{digit(value % 16)}"
+  end
+
+  def digit(value : Int32) : String
+    return "#{value}" if value < 10
+    return "A" if value == 10
+    return "B" if value == 11
+    return "C" if value == 12
+    return "D" if value == 13
+    return "E" if value == 14
+    "F"
+  end
+end
+
+# One function's worth of instructions.
+pub class Body
+  @lines : String
+  @next : Int32
+  @slots : Array(String)
+  @slot_kinds : Array(String)
+  @slot_shapes : Array(String)
+  # Which block the cursor is in, and how many branches have been given
+  # labels, so two `if`s in one method do not share them.
+  @label : String
+  @marks : Int32
+  # The struct this method belongs to, if any. Its fields are read
+  # through the slot `self` arrived in.
+  @holder : String
+  # The loops this pass is inside, innermost last: `next` branches to
+  # the condition of the one it is in and `break` past its end.
+  @again : Array(String)
+  @after : Array(String)
+
+  def initialize(@holder : String)
+    @lines = ""
+    @next = 0
+    @slots = [] of String
+    @slot_kinds = [] of String
+    @slot_shapes = [] of String
+    @label = "entry"
+    @marks = 0
+    @again = [] of String
+    @after = [] of String
+  end
+
+  def enter_loop(again : String, after : String) : Nil
+    @again << again
+    @after << after
+  end
+
+  def leave_loop : Nil
+    @again.pop
+    @after.pop
+  end
+
+  def in_loop? : Bool
+    @again.size > 0
+  end
+
+  def loop_again : String
+    @again[@again.size - 1]
+  end
+
+  def loop_after : String
+    @after[@after.size - 1]
+  end
+
+  def holder : String
+    @holder
+  end
+
+  def text : String
+    @lines
+  end
+
+  def write(line : String) : Nil
+    @lines = @lines + "  " + line + "\n"
+  end
+
+  # A fresh register. LLVM names them itself when they are unnamed, and
+  # naming them here keeps the emitted text readable and the counter
+  # under this pass's control rather than the printer's.
+  def register : String
+    name = "%t#{@next}"
+    @next = @next + 1
+    name
+  end
+
+  # A local lives in a slot rather than a register, so an assignment can
+  # rewrite it without this pass having to ask which branch wrote it.
+  def slot(name : String, kind : String) : String
+    slot_of(name, kind, "")
+  end
+
+  def slot_of(name : String, kind : String, shape : String) : String
+    index = @slots.index(name)
+    if index.nil?
+      @slots << name
+      @slot_kinds << kind
+      @slot_shapes << shape
+      write("%#{name}.slot = alloca #{kind}")
+    end
+    "%#{name}.slot"
+  end
+
+  def slot_shape(name : String) : String
+    index = @slots.index(name)
+    index.nil? ? "" : @slot_shapes[index]
+  end
+
+  def slot?(name : String) : Bool
+    !@slots.index(name).nil?
+  end
+
+  def slot_kind(name : String) : String
+    index = @slots.index(name)
+    index.nil? ? "i32" : @slot_kinds[index]
+  end
+
+  # A block, and the label this pass is writing into now. A `phi` names
+  # the block each of its values came from, and that is the block the arm
+  # *ended* in rather than the one it started in: an `if` inside an arm
+  # leaves the cursor somewhere else.
+  def block(name : String) : Nil
+    @lines = @lines + name + ":\n"
+    @label = name
+  end
+
+  def label : String
+    @label
+  end
+
+  def mark : Int32
+    @marks = @marks + 1
+    @marks
+  end
+end
+
+# `+`, `-`, `*`, `//` and `%` on integers are instructions. The prelude
+# declares them as primitives, so there is no body to emit and no call
+# to make. `//` is the one that stays an integer: a bare `/` on two of
+# them answers a `Float64`, which this slice does not carry.
+# The conversions, by the type each one names. `to_i` and `to_u` are
+# the pointer-wide pair, which on every target this builds for is 32
+# and 64 bits respectively for `Int32` and `UInt64`; the prelude spells
+# the rest out.
+# How wide a written number has to be. Ten digits is the width of
+# `Int32`'s largest, so a longer one is an `Int64` and one that long
+# is decided by reading it against that number.
+pub def literal_kind(text : String) : String
+  digits = text
+  digits = text[1, text.bytesize - 1] if text.bytesize > 0 && text[0] == '-'
+  return "i32" if digits.bytesize < 10
+  return "i64" if digits.bytesize > 10
+  digits > "2147483647" ? "i64" : "i32"
+end
+
+# And what that width is called. A kind cannot be read back into a name:
+# `Int32`, `UInt32`, `Int` and `UInt` are all `i32`, and their methods
+# are different bodies. So the name travels with the value from the
+# place that knows it, which for a literal is here.
+pub def literal_name(text : String) : String
+  literal_kind(text) == "i64" ? "Int64" : "Int32"
+end
+
+pub def conversion(name : String) : String
+  return "Int8" if name == "to_i8"
+  return "Int16" if name == "to_i16"
+  return "Int32" if name == "to_i32" || name == "to_i"
+  return "Int64" if name == "to_i64"
+  return "UInt8" if name == "to_u8"
+  return "UInt16" if name == "to_u16"
+  return "UInt32" if name == "to_u32" || name == "to_u"
+  return "UInt64" if name == "to_u64"
+  ""
+end
+
+pub def instruction(name : String) : String
+  return "add" if name == "+"
+  return "sub" if name == "-"
+  return "mul" if name == "*"
+  return "sdiv" if name == "//"
+  return "srem" if name == "%"
+  ""
+end
+
+# How wide an integer kind is, so that two of them can be brought to
+# the same width before an instruction reads both.
+pub def unsigned?(name : String) : Bool
+  name.bytesize > 0 && name[0] == 'U'
+end
+
+pub def width_of(kind : String) : Int32
+  return 1 if kind == "i1"
+  return 8 if kind == "i8"
+  return 16 if kind == "i16"
+  return 64 if kind == "i64"
+  32
+end
+
+# One value at another width. Widening is signed for a signed type and
+# zero-filled for an unsigned one, and narrowing drops the top bits,
+# which is what the conversions the prelude declares do.
+pub def widened(value : Val, kind : String, body : Body) : Val
+  return value if value.kind == kind
+  here = width_of(value.kind)
+  there = width_of(kind)
+  op = there > here ? (unsigned?(value.shape) ? "zext" : "sext") : "trunc"
+  reg = body.register
+  body.write("#{reg} = #{op} #{value.kind} #{value.text} to #{kind}")
+  Val.new(reg, kind, value.shape)
+end
+
+# Division and remainder read their operands' sign; addition,
+# subtraction and multiplication do not.
+pub def unsigned_instruction(op : String) : String
+  return "udiv" if op == "sdiv"
+  return "urem" if op == "srem"
+  op
+end
+
+pub def unsigned_compare(test : String) : String
+  return "ult" if test == "slt"
+  return "ule" if test == "sle"
+  return "ugt" if test == "sgt"
+  return "uge" if test == "sge"
+  test
+end
+
+# A comparison is a primitive too, and it answers an `i1` rather than an
+# `i32`. Which spelling depends on whether either side is unsigned.
+pub def compare(name : String) : String
+  return "slt" if name == "<"
+  return "sle" if name == "<="
+  return "sgt" if name == ">"
+  return "sge" if name == ">="
+  return "eq" if name == "=="
+  return "ne" if name == "!="
+  ""
+end
+
+# A branch: the condition, a block per arm, and a `phi` that names what
+# each arm answered and the block it answered from. An arm with nothing
+# in it answers zero, which is what an `if` with no `else` is worth on
+# the side that did not run.
+pub def emit_if(node : IfNode, body : Body, known : Known, constants : Constants) : Val
+  condition = emit_one(node.cond, body, known, constants)
+  mark = body.mark
+  taken = "then#{mark}"
+  other = "else#{mark}"
+  join = "join#{mark}"
+
+  body.write("br i1 #{condition.text}, label %#{taken}, label %#{other}")
+  body.block(taken)
+  first = emit_one(node.then_branch, body, known, constants)
+  from_first = body.label
+  body.write("br label %#{join}")
+
+  body.block(other)
+  second = emit_one(node.else_branch, body, known, constants)
+  from_second = body.label
+  body.write("br label %#{join}")
+
+  body.block(join)
+  reg = body.register
+  kind = first.kind == second.kind ? first.kind : "i32"
+  body.write("#{reg} = phi #{kind} [ #{first.text}, %#{from_first} ], [ #{second.text}, %#{from_second} ]")
+  Val.new(reg, kind, first.shape)
+end
+
+# A `case` over values is a chain of comparisons, which is what it is
+# once the subject is an integer: each `when` gets a block that answers
+# and a block that asks the next one, and the `else` is the last answer.
+# The subject is emitted once, into a slot, because a `case` over a call
+# must not call it again per arm.
+pub def emit_case(node : CaseNode, body : Body, known : Known,
+                  constants : Constants) : Val
+  mark = body.mark
+  subject = emit_one(node.cond, body, known, constants)
+  place = body.slot_of("case#{mark}", subject.kind, subject.shape)
+  body.write("store #{subject.kind} #{subject.text}, ptr #{place}")
+
+  join = "chose#{mark}"
+  answers = [] of String
+  froms = [] of String
+  index = 0
+  node.arms.each do |arm|
+    case arm
+    when WhenNode
+      taken = "arm#{mark}_#{index}"
+      other = "ask#{mark}_#{index}"
+      held = body.register
+      body.write("#{held} = load #{subject.kind}, ptr #{place}")
+      wanted = emit_one(arm.conds, body, known, constants)
+      test = body.register
+      body.write("#{test} = icmp eq #{subject.kind} #{held}, #{wanted.text}")
+      body.write("br i1 #{test}, label %#{taken}, label %#{other}")
+
+      body.block(taken)
+      answer = emit_one(arm.body, body, known, constants)
+      answers << answer.text
+      froms << body.label
+      body.write("br label %#{join}")
+
+      body.block(other)
+      index = index + 1
+    end
+  end
+
+  # The `else` is the block the last `when` fell into.
+  fallback = emit_one(node.else_branch, body, known, constants)
+  answers << fallback.text
+  froms << body.label
+  body.write("br label %#{join}")
+
+  body.block(join)
+  reg = body.register
+  pieces = [] of String
+  step = 0
+  while step < answers.size
+    pieces << "[ #{answers[step]}, %#{froms[step]} ]"
+    step = step + 1
+  end
+  body.write("#{reg} = phi i32 #{pieces.join(", ")}")
+  int_val(reg)
+end
+
+# `unless` is an `if` with its arms the other way round. The parser
+# keeps them as written, so this is where the swap belongs.
+pub def emit_unless(node : UnlessNode, body : Body, known : Known,
+                    constants : Constants) : Val
+  condition = emit_one(node.cond, body, known, constants)
+  mark = body.mark
+  taken = "unless#{mark}"
+  other = "otherwise#{mark}"
+  join = "joined#{mark}"
+
+  body.write("br i1 #{condition.text}, label %#{other}, label %#{taken}")
+  body.block(taken)
+  first = emit_one(node.then_branch, body, known, constants)
+  from_first = body.label
+  body.write("br label %#{join}")
+
+  body.block(other)
+  second = emit_one(node.else_branch, body, known, constants)
+  from_second = body.label
+  body.write("br label %#{join}")
+
+  body.block(join)
+  reg = body.register
+  kind = first.kind == second.kind ? first.kind : "i32"
+  body.write("#{reg} = phi #{kind} [ #{first.text}, %#{from_first} ], [ #{second.text}, %#{from_second} ]")
+  Val.new(reg, kind, first.shape)
+end
+
+# `&&` and `||` answer without asking the other side when the first one
+# settles it, which is why they are blocks rather than instructions. The
+# `phi` reads `false` for an `&&` that stopped early and `true` for an
+# `||` that did, because that is the answer the short circuit gives.
+pub def emit_shortcut(left : Array(Node), right : Array(Node), settled : String,
+                      body : Body, known : Known, constants : Constants) : Val
+  mark = body.mark
+  other = "rest#{mark}"
+  join = "settled#{mark}"
+
+  first = emit_one(left, body, known, constants)
+  from_first = body.label
+  if settled == "false"
+    body.write("br i1 #{first.text}, label %#{other}, label %#{join}")
+  else
+    body.write("br i1 #{first.text}, label %#{join}, label %#{other}")
+  end
+
+  body.block(other)
+  second = emit_one(right, body, known, constants)
+  from_second = body.label
+  body.write("br label %#{join}")
+
+  body.block(join)
+  reg = body.register
+  body.write("#{reg} = phi i1 [ #{settled}, %#{from_first} ], [ #{second.text}, %#{from_second} ]")
+  Val.new(reg, "i1")
+end
+
+# A loop: the condition in a block of its own, because it is asked again
+# on every turn, and a body that branches back to it. Nothing has to be
+# threaded around the back edge, because a local lives in a slot and is
+# loaded where it is read.
+#
+# A loop is not a value, so it answers zero and the method answers what
+# follows it.
+pub def emit_while(node : WhileNode, body : Body, known : Known, constants : Constants) : Val
+  mark = body.mark
+  again = "loop#{mark}"
+  inside = "body#{mark}"
+  after = "done#{mark}"
+
+  body.write("br label %#{again}")
+  body.block(again)
+  condition = emit_one(node.cond, body, known, constants)
+  body.write("br i1 #{condition.text}, label %#{inside}, label %#{after}")
+
+  body.block(inside)
+  body.enter_loop(again, after)
+  emit_one(node.body, body, known, constants)
+  body.leave_loop
+  body.write("br label %#{again}")
+
+  body.block(after)
+  int_val("0")
+end
+
+# Where a field lives: the struct arrived in a slot, and a field is an
+# offset into it.
+pub def field_place(name : String, body : Body, known : Known) : String
+  shape = known.shape_named(body.holder)[0]
+  place = body.slot("self", shape.kind)
+  # For a value the fields are in the slot; for a reference the slot
+  # holds the pointer and the fields are where it points.
+  unless shape.reference
+    reg = body.register
+    body.write("#{reg} = getelementptr #{shape.layout}, ptr #{place}, i32 0, i32 #{shape.index_of(name)}")
+    return reg
+  end
+  object = body.register
+  body.write("#{object} = load ptr, ptr #{place}")
+  reg = body.register
+  body.write("#{reg} = getelementptr #{shape.layout}, ptr #{object}, i32 0, i32 #{shape.index_of(name)}")
+  reg
+end
+
+pub def emit(node : Node, body : Body, known : Known, constants : Constants) : Val
+  case node
+  when NumNode
+    Val.new(node.value, literal_kind(node.value), literal_name(node.value))
+  when StrNode
+    # The literal as an object rather than as bytes: a pointer at the
+    # `@bytesize` the constant opens with, which is where a pointer from
+    # the allocator would point too.
+    name = constants.add_object(node.value)
+    reg = body.register
+    body.write("#{reg} = getelementptr inbounds #{constants.object_type(node.value.bytesize)}, ptr #{name}, i32 0, i32 1")
+    Val.new(reg, "ptr", "String")
+  when VarNode
+    kind = body.slot_kind(node.name)
+    place = body.slot(node.name, kind)
+    reg = body.register
+    body.write("#{reg} = load #{kind}, ptr #{place}")
+    Val.new(reg, kind, body.slot_shape(node.name))
+  when IvarNode
+    shape = known.shape_named(body.holder)[0]
+    kind = kind_of(shape.type_of(node.name), shape, known)
+    place = field_place(node.name, body, known)
+    reg = body.register
+    body.write("#{reg} = load #{kind}, ptr #{place}")
+    Val.new(reg, kind, kind == "ptr" ? shape.type_of(node.name) : "")
+  when AssignNode
+    value = emit_one(node.value, body, known, constants)
+    if node.target.size > 0
+      target = node.target[0]
+      case target
+      when VarNode
+        body.write("store #{value.kind} #{value.text}, ptr #{body.slot_of(target.name, value.kind, value.shape)}")
+      when IvarNode
+        place = field_place(target.name, body, known)
+        body.write("store #{value.kind} #{value.text}, ptr #{place}")
+      end
+    end
+    value
+  when ExprsNode
+    answer = int_val("0")
+    node.items.each { |item| answer = emit(item, body, known, constants) }
+    answer
+  when VisibilityModifierNode
+    emit_one(node.body, body, known, constants)
+  when IfNode
+    emit_if(node, body, known, constants)
+  when UnlessNode
+    emit_unless(node, body, known, constants)
+  when CaseNode
+    emit_case(node, body, known, constants)
+  when TypeDeclNode
+    # `total : Int32 = 0` declares a local and gives it a value. The
+    # shape the compiler prints does not carry the value, so the node
+    # does: a zero written as a five has to arrive as a five.
+    declared = int_val("0")
+    declared = emit_one(node.value, body, known, constants) if node.value.size > 0
+    if node.target.size > 0
+      target = node.target[0]
+      case target
+      when VarNode
+        body.write("store #{declared.kind} #{declared.text}, ptr #{body.slot_of(target.name, declared.kind, declared.shape)}")
+      end
+    end
+    declared
+  when AndNode
+    emit_shortcut(node.left, node.right, "false", body, known, constants)
+  when OrNode
+    emit_shortcut(node.left, node.right, "true", body, known, constants)
+  when NotNode
+    value = emit_one(node.exp, body, known, constants)
+    reg = body.register
+    body.write("#{reg} = xor i1 #{value.text}, true")
+    Val.new(reg, "i1")
+  when BoolNode
+    Val.new(node.value, "i1")
+  when ReturnNode
+    # A block ends at its terminator, so what follows a `return` is
+    # written into a block of its own and nothing branches to it.
+    value = emit_one(node.value, body, known, constants)
+    body.write("ret i32 #{value.text}")
+    body.block("unreached#{body.mark}")
+    int_val("0")
+  when NextNode
+    if body.in_loop?
+      body.write("br label %#{body.loop_again}")
+      body.block("after_next#{body.mark}")
+    end
+    int_val("0")
+  when BreakNode
+    if body.in_loop?
+      body.write("br label %#{body.loop_after}")
+      body.block("after_break#{body.mark}")
+    end
+    int_val("0")
+  when WhileNode
+    emit_while(node, body, known, constants)
+  when CallNode
+    emit_call(node, body, known, constants)
+  when NopNode
+    # Nothing, written down: an `if` with an empty `else`, a `while`
+    # with an empty body. Zero is the right answer here and the only
+    # place it is.
+    int_val("0")
+  else
+    # The same defect as the unresolved call, one level up: a node shape
+    # this slice does not carry used to come back as a literal zero. An
+    # interpolation, an array literal or a proc became `0` and whatever
+    # was built on it was wrong rather than refused. Naming the shape is
+    # the whole message, because what a bootstrap needs next is exactly
+    # the list of shapes that reach here.
+    abort("#{node.class}: this slice has no way to emit that", 2)
+  end
+end
+
+pub def emit_one(nodes : Array(Node), body : Body, known : Known, constants : Constants) : Val
+  return int_val("0") if nodes.size == 0
+  answer = int_val("0")
+  nodes.each { |node| answer = emit(node, body, known, constants) }
+  answer
+end
+
+pub def emit_call(node : CallNode, body : Body, known : Known, constants : Constants) : Val
+  # A comparison answers an `i1`, which is what a branch takes and the
+  # only place this slice puts one.
+  test = compare(node.name)
+  if test != "" && node.recv.size == 1 && node.args.size == 1
+    left = emit(node.recv[0], body, known, constants)
+    right = emit(node.args[0], body, known, constants)
+    kind = width_of(left.kind) >= width_of(right.kind) ? left.kind : right.kind
+    left = widened(left, kind, body)
+    right = widened(right, kind, body)
+    test = unsigned?(left.shape) || unsigned?(right.shape) ? unsigned_compare(test) : test
+    reg = body.register
+    body.write("#{reg} = icmp #{test} #{kind} #{left.text}, #{right.text}")
+    return Val.new(reg, "i1")
+  end
+
+  # `a + b` is a call on a value, and the value is an integer: the
+  # operator is an instruction rather than a function.
+  op = instruction(node.name)
+  if op != "" && node.recv.size == 1 && node.args.size == 1
+    left = emit(node.recv[0], body, known, constants)
+    right = emit(node.args[0], body, known, constants)
+    kind = width_of(left.kind) >= width_of(right.kind) ? left.kind : right.kind
+    shape = width_of(left.kind) >= width_of(right.kind) ? left.shape : right.shape
+    left = widened(left, kind, body)
+    right = widened(right, kind, body)
+    op = unsigned?(shape) ? unsigned_instruction(op) : op
+    reg = body.register
+    body.write("#{reg} = #{op} #{kind} #{left.text}, #{right.text}")
+    return Val.new(reg, kind, shape)
+  end
+
+  # `-x` is one operand, which the path above will not take: it wants a
+  # receiver and an argument. A written `-1` never arrives here, because
+  # the lexer hands the sign to the literal, so this is the negation of
+  # something computed. It is a subtraction from zero at the operand's
+  # own width, and the type name travels with it: negating an `Int32`
+  # answers an `Int32`.
+  if node.name == "-" && node.recv.size == 1 && node.args.size == 0
+    said = emit(node.recv[0], body, known, constants)
+    if integer?(said.kind)
+      reg = body.register
+      body.write("#{reg} = sub #{said.kind} 0, #{said.text}")
+      return Val.new(reg, said.kind, said.shape)
+    end
+  end
+
+  # `print` of a string is a write, the same way `+` is an `add`: the
+  # prelude declares both and this knows what they do. Nothing else in
+  # the prelude is known by name. A literal is written straight out of
+  # its bytes; a value is a pointer to a `String`, so the bytes are
+  # eight along and the count is at the front.
+  if node.name == "print" && node.recv.size == 0 && node.args.size == 1
+    written = node.args[0]
+    case written
+    when StrNode
+      name = constants.add(written.value)
+      reg = body.register
+      body.write("#{reg} = call i64 @write(i32 1, ptr #{name}, i64 #{written.value.bytesize})")
+      return int_val("0")
+    end
+    said = emit(written, body, known, constants)
+    if said.shape == "String"
+      count = string_field(said, 0, body)
+      wide = body.register
+      body.write("#{wide} = sext i32 #{count} to i64")
+      at = body.register
+      body.write("#{at} = getelementptr inbounds i8, ptr #{said.text}, i64 8")
+      reg = body.register
+      body.write("#{reg} = call i64 @write(i32 1, ptr #{at}, i64 #{wide})")
+      return int_val("0")
+    end
+  end
+
+  # `Point.new(3, 1)` names a type rather than a value, and what it
+  # answers is the struct itself.
+  named = path_of(node.recv)
+  if node.name == "new" && named != "" && known.shape?(named)
+    return emit_new(named, node, body, known, constants)
+  end
+
+  if node.name == "new" && node.recv.size == 1
+    written = node.recv[0]
+    case written
+    when GenericNode
+      args = [] of String
+      written.args.each { |one| args << path_of([one] of Node) }
+      made = known.instantiate(path_of(written.name), args)
+      return emit_new(made[0].name, node, body, known, constants) if made.size > 0
+    end
+  end
+
+  # `x.to_i64` and its siblings are conversions the prelude declares as
+  # primitives: a widening, a narrowing, or nothing at all when the
+  # value is already that wide.
+  converted = conversion(node.name)
+  if converted != "" && node.recv.size == 1 && node.args.size == 0
+    said = emit(node.recv[0], body, known, constants)
+    if integer?(said.kind)
+      want = kind_of(converted, Shape.new("", false), known)
+      return Val.new(widened(said, want, body).text, want, converted)
+    end
+  end
+
+  # The two things a `String` answers out of its own header. The prelude
+  # writes the bodies, and both read a field the compiler placed, so
+  # this reads the field rather than the body.
+  if node.recv.size == 1 && node.args.size == 0 &&
+     (node.name == "bytesize" || node.name == "size")
+    said = emit(node.recv[0], body, known, constants)
+    if said.shape == "String"
+      return int_val(string_field(said, node.name == "bytesize" ? 0 : 1, body))
+    end
+  end
+
+  # A method on a struct. The value arrives as the first argument,
+  # because a struct is passed by value and there is nothing to point at.
+  if node.recv.size == 1
+    receiver = emit(node.recv[0], body, known, constants)
+    holder = known.shape_of(receiver.shape)
+    if holder.size > 0 && holder[0].knows?(node.name)
+      return emit_method(holder[0], node, receiver, body, known, constants)
+    end
+    abort("#{node.name}: this slice has no way to emit that call on a #{receiver.shape == "" ? receiver.kind : receiver.shape}", 2)
+  end
+
+  # Written with no receiver inside a method of a struct, this is a call
+  # on that struct: `spread` reaches `x` and `y` without naming itself.
+  if body.holder != "" && known.shape?(body.holder) &&
+     known.shape_named(body.holder)[0].knows?(node.name)
+    holder = known.shape_named(body.holder)[0]
+    place = body.slot("self", holder.kind)
+    reg = body.register
+    body.write("#{reg} = load #{holder.kind}, ptr #{place}")
+    return emit_method(holder, node, Val.new(reg, holder.kind, holder.name), body, known, constants)
+  end
+
+  if known.knows?(node.name)
+    written = [] of Val
+    node.args.each { |arg| written << emit(arg, body, known, constants) }
+    answered = known.def_named(node.name)
+    # An argument arrives at the width the parameter was declared with:
+    # `doubled(5)` passes an `i64` when `doubled` asks for one.
+    if answered.size > 0
+      index = 0
+      answered[0].args.each do |arg|
+        case arg
+        when ArgNode
+          want = argument_kind(arg, Shape.new("", false), known)
+          written[index] = widened(written[index], want, body) if index < written.size &&
+                                                                  integer?(want) && integer?(written[index].kind)
+          index = index + 1
+        end
+      end
+    end
+    kind = answered.size == 0 || answered[0].ret.size == 0 ? "i32" : kind_of(path_of(answered[0].ret), Shape.new("", false), known)
+    named = answered.size == 0 || answered[0].ret.size == 0 ? "" : path_of(answered[0].ret)
+    known.want(mangle(node.name))
+    reg = body.register
+    body.write("#{reg} = call #{kind} @#{mangle(node.name)}(#{arguments(written)})")
+    return Val.new(reg, kind, named)
+  end
+
+  # A name with no method and no instruction is a local read as a call,
+  # which is what a bare `total` is before the parser knows it is one.
+  if node.args.size == 0 && body.slot?(node.name)
+    kind = body.slot_kind(node.name)
+    place = body.slot(node.name, kind)
+    reg = body.register
+    body.write("#{reg} = load #{kind}, ptr #{place}")
+    return Val.new(reg, kind, body.slot_shape(node.name))
+  end
+
+  # Anything else is a call this slice cannot answer, and answering it
+  # with a zero is worse than refusing it. That is what this did: a
+  # program calling `abs` on a prelude method with a body emitted
+  # `add i32 %t, 0`, assembled, ran, and exited 0 where the compiler
+  # exits 39. A gate comparing exit status cannot see a wrong answer
+  # that is also a plausible one, so the emitter says what it could not
+  # do and stops.
+  abort("#{node.name}: this slice has no way to emit that call", 2)
+end
+
+pub def emit_new(named : String, node : CallNode, body : Body, known : Known,
+                 constants : Constants) : Val
+  shape = known.shape_named(named)[0]
+  written = [] of Val
+  node.args.each { |arg| written << emit(arg, body, known, constants) }
+  known.want(mangle_method(named, "new"))
+  reg = body.register
+  body.write("#{reg} = call #{shape.kind} @#{mangle_method(named, "new")}(#{arguments(written)})")
+  Val.new(reg, shape.kind, shape.name)
+end
+
+pub def emit_method(shape : Shape, node : CallNode, receiver : Val, body : Body,
+                    known : Known, constants : Constants) : Val
+  written = [] of Val
+  written << receiver
+  node.args.each { |arg| written << emit(arg, body, known, constants) }
+  kind = answers(shape, node.name, known)
+  known.want(mangle_method(shape.name, node.name))
+  reg = body.register
+  body.write("#{reg} = call #{kind} @#{mangle_method(shape.name, node.name)}(#{arguments(written)})")
+  Val.new(reg, kind)
+end
+
+# The kind a method answers: its declared return type, substituted for
+# the arguments this instance was made with.
+pub def answers(shape : Shape, name : String, known : Known) : String
+  found = shape.method(name)
+  return "i32" if found.size == 0 || found[0].ret.size == 0
+  kind_of(path_of(found[0].ret), shape, known)
+end
+
+pub def arguments(written : Array(Val)) : String
+  pieces = [] of String
+  written.each { |value| pieces << "#{value.kind} #{value.text}" }
+  pieces.join(", ")
+end
+
+pub def path_of(nodes : Array(Node)) : String
+  return "" if nodes.size == 0
+  node = nodes[0]
+  case node
+  when PathNode then node.names
+  else               ""
+  end
+end
+
+# The name a method is emitted under. Prefixed, because `add` and `main`
+# are names a C runtime already has and an operator is not a name at all.
+pub def mangle(name : String) : String
+  quoted("iyi_#{name}")
+end
+
+pub def mangle_method(holder : String, name : String) : String
+  quoted("iyi_#{holder}_#{name}")
+end
+
+# LLVM writes a symbol as a bare identifier or as a quoted string, and
+# only the second can hold a `?`. `even?` and `odd?` are ordinary iyi
+# method names, `+` and `<=>` are method names too, and the prelude is
+# full of both. Every symbol is quoted rather than the awkward ones,
+# because a rule with no exceptions needs nothing that decides which
+# side of it a name falls on, and `@"iyi_answer"` and `@iyi_answer`
+# name the same thing.
+pub def quoted(name : String) : String
+  "\"#{name}\""
+end
+
+pub def parameters(node : DefNode, first : String, shape : Shape,
+                   known : Known) : String
+  pieces = [] of String
+  pieces << first unless first == ""
+  index = 0
+  node.args.each do |arg|
+    case arg
+    when ArgNode
+      pieces << "#{argument_kind(arg, shape, known)} %arg#{index}"
+      index = index + 1
+    end
+  end
+  pieces.join(", ")
+end
+
+pub def argument_kind(arg : ArgNode, shape : Shape, known : Known) : String
+  return "i32" if arg.restriction.size == 0
+  kind_of(path_of(arg.restriction), shape, known)
+end
+
+# An argument arrives in a register and a local lives in a slot, so the
+# first thing a body does is put it there.
+pub def store_arguments(node : DefNode, body : Body, shape : Shape,
+                        known : Known) : Nil
+  index = 0
+  node.args.each do |arg|
+    case arg
+    when ArgNode
+      kind = argument_kind(arg, shape, known)
+      # A pointer argument carries what it points at, the way an
+      # assignment does: without it, a `String` in a parameter is a
+      # pointer with nothing known about it.
+      named = arg.restriction.size == 0 ? "" : shape.binding(path_of(arg.restriction))
+      place = kind == "ptr" ? body.slot_of(arg.name, kind, named) : body.slot(arg.name, kind)
+      body.write("store #{kind} %arg#{index}, ptr #{place}")
+      index = index + 1
+    end
+  end
+end
+
+pub def emit_def(node : DefNode, known : Known, constants : Constants) : String
+  body = Body.new("")
+  plain = Shape.new("", false)
+  store_arguments(node, body, plain, known)
+  answer = emit_one(node.body, body, known, constants)
+  kind = node.ret.size == 0 ? answer.kind : kind_of(path_of(node.ret), plain, known)
+  answer = widened(answer, kind, body) if integer?(kind) && integer?(answer.kind)
+  "define #{kind} @#{mangle(node.name)}(#{parameters(node, "", plain, known)}) {\nentry:\n#{body.text}  ret #{kind} #{answer.text}\n}\n"
+end
+
+# Whether a kind is one of the widths, as opposed to a pointer or a
+# struct: only those two can be widened into one another.
+pub def integer?(kind : String) : Bool
+  kind == "i1" || kind == "i8" || kind == "i16" || kind == "i32" || kind == "i64"
+end
+
+# A method of a struct. `self` arrives by value and is put in a slot, so
+# a field read is the same shape as a local read: an offset and a load.
+pub def emit_method_def(shape : Shape, node : DefNode, known : Known,
+                        constants : Constants) : String
+  body = Body.new(shape.name)
+  body.write("store #{shape.kind} %self, ptr #{body.slot("self", shape.kind)}")
+  store_arguments(node, body, shape, known)
+  answer = emit_one(node.body, body, known, constants)
+  kind = answers(shape, node.name, known)
+  "define #{kind} @#{mangle_method(shape.name, node.name)}(#{parameters(node, "#{shape.kind} %self", shape, known)}) {\nentry:\n#{body.text}  ret #{kind} #{answer.text}\n}\n"
+end
+
+# The `new` the compiler writes: it runs the constructor's body against a
+# value of its own and answers that value. A struct is passed by value,
+# so there is nothing to allocate beyond the slot the body writes into.
+pub def emit_new_def(shape : Shape, node : DefNode, known : Known,
+                     constants : Constants) : String
+  body = Body.new(shape.name)
+  body.slot("self", shape.kind)
+  if shape.reference
+    object = body.register
+    body.write("#{object} = call ptr @malloc(i64 #{shape.bytes_of(known)})")
+    body.write("store ptr #{object}, ptr %self.slot")
+  end
+  store_arguments(node, body, shape, known)
+  emit_one(node.body, body, known, constants)
+  reg = body.register
+  body.write("#{reg} = load #{shape.kind}, ptr %self.slot")
+  "define #{shape.kind} @#{mangle_method(shape.name, "new")}(#{parameters(node, "", shape, known)}) {\nentry:\n#{body.text}  ret #{shape.kind} #{reg}\n}\n"
+end
+
+# The program's own entry. `__iyi_exit(e)` is what a fixture ends on and
+# what it is worth, so it is emitted as the return from `main`: the
+# status a process exits with is the one thing both compilers can be
+# asked for. Everything above it is emitted in order, because a `print`
+# before the exit is part of what the program does.
+pub def emit_main(nodes : Array(Node), known : Known, constants : Constants) : String
+  body = Body.new("")
+  answer = int_val("0")
+  nodes.each do |node|
+    case node
+    when CallNode
+      if node.name == "__iyi_exit" && node.args.size == 1
+        answer = emit(node.args[0], body, known, constants)
+      else
+        emit(node, body, known, constants)
+      end
+    end
+  end
+  answer = widened(answer, "i32", body) if integer?(answer.kind)
+  "define i32 @main() {\nentry:\n#{body.text}  ret i32 #{answer.text}\n}\n"
+end
+
+# What a struct holds, read off the constructor: the parser writes
+# `def initialize(@x : Int32)` as an argument and an assignment, so the
+# fields are the assignments in the order they are made.
+pub def learn_fields(nodes : Array(Node), shape : Shape, args : Array(Node)) : Nil
+  nodes.each do |node|
+    case node
+    when ExprsNode
+      learn_fields(node.items, shape, args)
+    when AssignNode
+      if node.target.size > 0
+        target = node.target[0]
+        case target
+        when IvarNode
+          held = shape.fields.size
+          shape.add_field(target.name)
+          shape.add_field_type(declared_type(node.value, args)) if shape.fields.size > held
+        end
+      end
+    end
+  end
+end
+
+# What the value assigned to a field was declared as. `@x = x` in a
+# constructor is the argument's type, and a type parameter arrives here
+# as its own name.
+pub def declared_type(value : Array(Node), args : Array(Node)) : String
+  return "Int32" if value.size == 0
+  written = value[0]
+  case written
+  when VarNode
+    answer = "Int32"
+    args.each do |arg|
+      case arg
+      when ArgNode
+        answer = path_of(arg.restriction) if arg.name == written.name && arg.restriction.size > 0
+      end
+    end
+    answer
+  else
+    "Int32"
+  end
+end
+
+pub def collect(nodes : Array(Node), known : Known) : Nil
+  nodes.each do |node|
+    case node
+    when ExprsNode
+      collect(node.items, known)
+    when VisibilityModifierNode
+      collect(node.body, known)
+    when DefNode
+      known.add(node)
+    when ClassDefNode
+      # A type reopened in another file is the same declaration
+      # continued, which is what a require means: the prelude declares
+      # `Int32` in one file and adds to it in three more, and two
+      # shapes of one name are two `%Int32` in a module that will not
+      # assemble.
+      named = path_of(node.name)
+      held = known.shape_named(named)
+      shape = held.size > 0 ? held[0] : Shape.new(named, node.kind == "class")
+      if held.size == 0
+        shape.declare_vars(node.vars)
+        known.add_shape(shape)
+      end
+      collect_shape(node.body, shape)
+    end
+  end
+end
+
+pub def collect_shape(nodes : Array(Node), shape : Shape) : Nil
+  nodes.each do |node|
+    case node
+    when ExprsNode
+      collect_shape(node.items, shape)
+    when VisibilityModifierNode
+      collect_shape(node.body, shape)
+    when DefNode
+      shape.add(node)
+      learn_fields(node.body, shape, node.args) if node.name == "initialize"
+    end
+  end
+end
+
+pub def top_items(tree : Node) : Array(Node)
+  case tree
+  when ExprsNode then tree.items
+  else                [tree] of Node
+  end
+end
+
+# A require names a file, relative to the file that wrote it, and what
+# it brings is read as if it had been written there. So the required
+# file's items are put in front of the requiring file's, and a file
+# already read is not read again: two files requiring one third are
+# one copy of it, which is what `require` means.
+pub def read_source(path : String, into : Array(Node), seen : Array(String)) : Nil
+  return if seen.includes?(path)
+  seen << path
+  # Not expanded, and that is measured rather than assumed. A macro
+  # body is not iyi until it has run, so `primitives.iyi` declares
+  # 549 methods this reads as 36. Every fixture agrees either way,
+  # because none of them reaches one: the conversions `wide.iyi`
+  # writes are answered by the table at `conversion`, not by reading
+  # what the prelude declares.
+  #
+  # Expanding here costs 2.7x, 11.6 seconds against 31.6 across the
+  # thirteen, measured with it wired in. That was 25x before the
+  # expander walked code rather than bytes and `String#+` stopped
+  # rescanning, so the price is now one a slice could pay. It buys
+  # nothing yet, because nothing here reads a macro-written
+  # declaration. The slice that replaces that table with a read of
+  # what the prelude actually declares is the slice that pays for it.
+  tree = Parser.new(File.read(path)).parse
+  here = directory_of(path)
+  top_items(tree).each do |node|
+    case node
+    when RequireNode
+      next if node.path == ""
+      # The prelude is read like any other require. It was skipped
+      # while emission followed the file rather than the calls,
+      # because reading it then meant emitting all of it; now what it
+      # declares is in scope and only what a program reaches is
+      # written out.
+      read_source(resolve_require(node.path, here), into, seen)
+    else
+      into << node
+    end
+  end
+end
+
+# `require "./shared/helpers"` from `fixtures/across.iyi` is
+# `fixtures/shared/helpers.iyi`. A relative require is the only shape
+# the fixtures write, and the only one the prelude writes either.
+pub def resolve_require(written : String, here : String) : String
+  bare = written
+  bare = written[2, written.bytesize - 2] if written.bytesize > 2 && written[0] == '.' && written[1] == '/'
+  "#{here}/#{bare}.iyi"
+end
+
+# One name off the list, as its body. A mangled name says which of the
+# three it is: `iyi_answer` is a function, `iyi_Point_new` is the
+# constructor the compiler writes, and `iyi_Point_x` is a method.
+pub def emit_wanted(name : String, known : Known, constants : Constants) : String
+  known.nodes.each do |node|
+    return emit_def(node, known, constants) + "\n" if mangle(node.name) == name
+  end
+  known.shapes.each do |shape|
+    shape.defs.each do |node|
+      wanted = node.name == "initialize" ? mangle_method(shape.name, "new") : mangle_method(shape.name, node.name)
+      next unless wanted == name
+      return (node.name == "initialize" ? emit_new_def(shape, node, known, constants) : emit_method_def(shape, node, known, constants)) + "\n"
+    end
+  end
+  ""
+end
+
+pub def directory_of(path : String) : String
+  cut = -1
+  index = 0
+  while index < path.bytesize
+    cut = index if path[index] == '/'
+    index = index + 1
+  end
+  cut < 0 ? "." : path[0, cut]
+end
+
+# Where the prelude lives, for a program that did not ask for it. Every
+# iyi program is compiled against it without writing a `require`, so a
+# fixture that reaches `Int32#abs` has to find it the same way rather
+# than requiring a copy: the compiler refuses a file that redefines a
+# method the prelude has, so a copy is a program the oracle will not
+# build and a gate cannot compare.
+#
+# `IYI_PATH` is the list the compiler itself searches, so this asks the
+# same question. It is a list because the port is built with `src` and
+# `selfhost` on it, and the prelude is under the first entry that holds
+# it.
+pub def prelude_path : String
+  written = ENV["IYI_PATH"]?
+  return "" if written.nil?
+  here = ""
+  index = 0
+  while index <= written.bytesize
+    ch = index < written.bytesize ? written[index] : ':'
+    if ch == ':'
+      found = "#{here}/iyi/prelude.iyi"
+      return found if here != "" && File.exists?(found)
+      here = ""
+    else
+      here = here + ch.to_s
+    end
+    index = index + 1
+  end
+  ""
+end
+
+path = Program.args[0]?
+if path.nil?
+  puts "usage: emit <file.iyi>"
+else
+  items = [] of Node
+  seen = [] of String
+  found = prelude_path
+  read_source(found, items, seen) unless found == ""
+  read_source(path, items, seen)
+  known = Known.new
+  collect(items, known)
+
+  constants = Constants.new
+  functions = ""
+  # The program first, and then what it reached. A declaration nobody
+  # calls is not emitted: the prelude declares thousands of methods and
+  # a program calls a handful, so a bootstrap has to follow the calls
+  # rather than the file. Emitting one body reaches more, so the list
+  # is drained rather than walked.
+  functions = emit_main(items, known, constants) + "\n"
+  # One list holds both, under the name each is mangled to, because
+  # emitting either can reach either: a method calls a function, a
+  # function makes an instance, and naming `Box(Int32)` brings a shape
+  # into being that was not there when the list started.
+  while known.wanted.size > 0
+    functions = functions + emit_wanted(known.take, known, constants)
+  end
+
+  puts "; #{path}, emitted by selfhost/codegen/emit.iyi"
+  # The one thing this slice borrows from outside the program it is
+  # compiling. The current compiler writes the syscall itself; the port
+  # calls the C library's, and what the gate compares is the bytes that
+  # reach stdout either way.
+  puts "declare i64 @write(i32, ptr, i64)"
+  puts "declare ptr @malloc(i64)"
+  puts ""
+  # A generic with nothing bound has no layout yet, and a primitive has
+  # none at all: `%Int32 = type { }` is a type nothing is a value of.
+  known.shapes.each do |shape|
+    puts shape.declaration(known) unless shape.generic? || shape.primitive?
+  end
+  puts ""
+  print constants.text
+  puts ""
+  print functions
+end

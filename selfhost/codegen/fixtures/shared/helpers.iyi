@@ -1,0 +1,32 @@
+# A file with no program in it, required by the fixture beside it.
+# What a require brings is read as if it had been written there, which
+# is how `src/iyi/prelude.iyi` is fourteen files and one program.
+
+def tripled(value : Int32) : Int32
+  value * 3
+end
+
+struct Tally
+  @count : Int32
+
+  def initialize(@count : Int32)
+  end
+
+  def plus(more : Int32) : Int32
+    @count + more
+  end
+
+  # A method of a reached type that nobody calls. The prelude is mostly
+  # this: `String` answers hundreds of methods and a program calls two.
+  def share : Float64
+    1.5
+  end
+end
+
+# Nobody calls this, and the emitter cannot compile it: a Float64 is
+# not one of the shapes this slice carries. A bootstrap reads files
+# full of methods it will never reach, so reaching is what decides
+# what gets emitted, not reading.
+def ratio : Float64
+  2.5
+end

@@ -80,7 +80,12 @@
   end
 
   # The stack below the caller zeroed, so that no dead frame's word is a
-  # root of the collection that follows.
+  # root of the collection that follows. The empty `asm` that takes the
+  # buffer and clobbers memory keeps the stores, as heap_local's
+  # `scrub_stack`: without it a `--release` build saw stores to a frame
+  # nothing reads, dropped them and the call, and `collect_here`'s
+  # collection frames lay over the droppers' unscrubbed - the `pin-in`
+  # copy's word was kept, and missed, 4 runs of 6 (tmac, `--release`).
   @[NoInline]
   def scrub : UInt64
     room = uninitialized StaticArray(UInt64, 2048)
@@ -90,6 +95,7 @@
       words[index] = 0_u64
       index = index + 1
     end
+    asm("" :: "r"(words) : "memory" : "volatile")
     words[2047]
   end
 
@@ -508,7 +514,8 @@
   end
 
   # The dead stack below the caller written with *word*, so that the
-  # frames of the next call find it in every slot they do not write.
+  # frames of the next call find it in every slot they do not write; kept
+  # in a `--release` build by the same `asm` as `scrub`'s.
   @[NoInline]
   def paint(word : UInt64) : UInt64
     room = uninitialized StaticArray(UInt64, 2048)
@@ -518,6 +525,7 @@
       words[index] = word
       index = index + 1
     end
+    asm("" :: "r"(words) : "memory" : "volatile")
     words[2047]
   end
 

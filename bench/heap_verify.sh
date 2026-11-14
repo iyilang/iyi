@@ -62,8 +62,9 @@ PY="${PYTHON:-python3}"
 # program still names, which http_idle's `idle:` count shows; a takeover
 # that keeps a woken fiber waiting, or the look's token that would call a
 # worker to it, loses time, which only the program's `giveway:` check
-# sees.
-VALUE_COPIES="TlsIdentity chain copy,a death that keeps its emptied runs,spare runs left off the idle test,a parked connection that keeps its last request,a takeover that keeps a woken fiber waiting,a takeover that keeps the look's token"
+# sees; an idle walk that drops a unit whose token was held never
+# collects it, which only the program's `idlehold:` check sees.
+VALUE_COPIES="TlsIdentity chain copy,a death that keeps its emptied runs,spare runs left off the idle test,a parked connection that keeps its last request,a takeover that keeps a woken fiber waiting,a takeover that keeps the look's token,an idle walk that drops a held unit"
 
 # heap_local.sh's copies not run here: `nobusy` (a busy program's parked
 # unit taken after two ticks) is a timing, which no heap word shows, and

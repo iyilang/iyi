@@ -545,6 +545,11 @@
   # collections at that park keep it. Its label's address goes out as a
   # number, masked (`AIM_MASK`): a channel's slot or waiter holding it
   # bare would be a word naming the chain that the holes do not make.
+  # The caller reads the label's size it returns: an optimised build
+  # drops a result nobody reads, and the chain with it before the park,
+  # whose collection then freed the label before the other unit stored
+  # the stale word naming it - a word into a free chunk, which no
+  # verifier reports (the `--release` copy, exit 0; S6 UnionPad2, Linux).
   @[NoInline]
   def hold_target(aims : Channel(UInt64), built : Channel(Int32)) : Int32
     chain = build(44)
@@ -573,8 +578,9 @@
     done = Channel(Int32).new(1)
     group do |g|
       g.spawn(unit: :new) do
-        hold_target(aims, built)
+        held = hold_target(aims, built)
         collect_here
+        fail("holes: the chain's label lost its bytes") if held == 0
         done.send(1)
         0
       end

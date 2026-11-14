@@ -6443,6 +6443,17 @@ and bound that tail (a slice cap on a local collection or an io-fiber
 handoff), a new pre-registered tmac round, a compiler write barrier for
 the published-roots walk, and the merge onto the release line.
 
+**S6 fixes: where each lives (so no port applies one twice).**
+Flag-gated, on `h22/heap-partition` only: PauseHunt 94eb6ff9f, union
+holes de7518e87/df8e744c6 (test a41126348), std/http idle connection
+39bd16bb2, CpuFix2 1dda3a798 (heap-partition files only), CpuTmac
+bdaed8806/c2bcebef4 and busy4 5f97af6c5, TailHunt giveway c339a26db and
+token 74450de02. Already on `mt/next-two` (928f85565): ThreadReg
+062a7bc15/afacabfc7; union holes ungated, 5f7d94cac (on merge keep it,
+drop the flag gate). Release-line candidates not carried: std/http stack
+clearing, deferred (owner); winreach af6132266 n/a
+(`reach_module_proof.cr` is not on `mt/next-two`).
+
 ### III.5 Module initialisation: **PROPOSED; rules 1, 2 and 4 BUILT**
 
 II.9 left this open with a concrete case: Kemal registers routes as a side

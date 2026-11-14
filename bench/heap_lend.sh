@@ -4,9 +4,9 @@
 # the verifier, plain and optimised, every check passing; stressed under
 # chaos at a few seeds with no report; the flag-off control; then one
 # broken copy per mechanism of the protocol and per stop of the walk
-# through a lent graph, each caught by `-Dheap_verify` - exit 86, the
-# report's holder and target named by bench/heap_verify_names.py, the
-# same in every run.
+# through a lent graph, built plain and `--release`, each caught by
+# `-Dheap_verify` - exit 86, the report's holder and target named by
+# bench/heap_verify_names.py, the same in every run.
 #
 #   bash bench/heap_lend.sh           # every part
 #   bash bench/heap_lend.sh sound     # plain and optimised, verifier on
@@ -130,14 +130,15 @@ named() {
   ' "$dir/$tag.named" | sed -E 's/0x[0-9a-f]{6,}/0x…/g'
 }
 
-# copy LABEL DIR CHECK TREE FILE AWK: TREE/FILE (`iyi` or `std` under
-# src/, or `bench` for the program itself) patched by AWK, the program
-# built with the verifier against it, and CHECK run RUNS times with the
-# program's checks print-only: caught when every run exits 86 with the
-# same report, its holder named by type and field, a data symbol, or a
-# stack.
+# copy LABEL DIR CHECK TREE FILE AWK [release]: TREE/FILE (`iyi` or `std`
+# under src/, or `bench` for the program itself) patched by AWK, the
+# program built with the verifier against it (`--release` too with the
+# seventh), and CHECK run RUNS times with the program's checks
+# print-only: caught when every run exits 86 with the same report, its
+# holder named by type and field, a data symbol, or a stack.
 copy() {
-  local label="$1" dir="$WORK/$2" check="$3" tree="$4" file="$5" script="$6"
+  local label="$1" dir="$WORK/$2" check="$3" tree="$4" file="$5" script="$6" opt=""
+  [ "${7:-}" = release ] && opt="--release"
   mkdir -p "$dir"
   local program="$REPO/bench/heap_lend.iyi" path="$REPO/src"
   if [ "$tree" = bench ]; then
@@ -159,7 +160,7 @@ copy() {
     path="$dir${PSEP}$REPO/src"
   fi
   # shellcheck disable=SC2086
-  if ! env IYI_PATH="$path" IYI_DUMP_TYPE_INFO="$dir/types.json" "$IYI" build $VERIFY \
+  if ! env IYI_PATH="$path" IYI_DUMP_TYPE_INFO="$dir/types.json" "$IYI" build $VERIFY $opt \
        -o "$dir/program" "$program" >"$dir/build.log" 2>&1; then
     echo "  $label: the patched tree did not build"
     sed -n '1,12p' "$dir/build.log" | sed 's/^/    /'
@@ -193,23 +194,30 @@ copy() {
   printf '| %s | %s | %s | %s |\n' "$label" "$check" "$first" "$(grep -m1 '^FAIL: ' "$dir/run1.out" | sed 's/^FAIL: //')" >>"$TABLE"
 }
 
+# Each copy built plain, then `--release`: what a check keeps live across
+# a collection is the optimiser's to keep or drop.
+copy_both() { # LABEL DIR CHECK TREE FILE AWK
+  copy "$@"
+  copy "$1, built \`--release\`" "$2-rel" "$3" "$4" "$5" "$6" release
+}
+
 if [ "$PART" = all ] || [ "$PART" = copies ]; then
   echo "== each mechanism removed, caught by the verifier ($VERIFY, $RUNS runs each)"
-  copy "lend_out publishes" c1 lend iyi heap_partition.iyi \
+  copy_both "lend_out publishes" c1 lend iyi heap_partition.iyi \
     "$(del 'def self\.lend_out_address' '^      lend_walk\(record, graph, LEND_PUBLISH\)$')"
-  copy "the lend set roots the local mark" c2 lend iyi heap_partition.iyi \
+  copy_both "the lend set roots the local mark" c2 lend iyi heap_partition.iyi \
     "$(del 'The lent graphs\.' 'lend_walk\(record, table_at\(record &\+ REC_LEND, k\), LEND_MARK\)')"
-  copy "a unit's death lends out" c3 death iyi heap_partition.iyi \
+  copy_both "a unit's death lends out" c3 death iyi heap_partition.iyi \
     "$(del 'def self\.partition_death' 'lend_walk\(record, table_at\(lends, k\), LEND_PUBLISH\)')"
-  copy "the lent root published" c4 root iyi heap_partition.iyi \
+  copy_both "the lent root published" c4 root iyi heap_partition.iyi \
     "$(subst 'def self\.lend_walk' 'bytes = lend_meet\(s, record, id, parity, mode, graph, 0_u64, graph, true\)' 'bytes = 0_u64; scratch_push(s, lend_step(s, id, graph, true))')"
-  copy "lent in at the take (a hand-back of a graph never lent)" c5 unlent bench heap_lend.iyi \
+  copy_both "lent in at the take (a hand-back of a graph never lent)" c5 unlent bench heap_lend.iyi \
     "$(del 'def take : Slot' 'IyiHeap\.lend_in\(got\.res\)')"
-  copy "a Mutex's writer publishes (the stop at born-shared types)" c6 mutex std mutex.iyi \
+  copy_both "a Mutex's writer publishes (the stop at born-shared types)" c6 mutex std mutex.iyi \
     "$(del 'def lock\(&block' '^    IyiCross\.publish\(block\)$')"
-  copy "nothing behind another unit's chunk (the stop at foreign LOCAL)" c7 foreign bench heap_lend.iyi \
+  copy_both "nothing behind another unit's chunk (the stop at foreign LOCAL)" c7 foreign bench heap_lend.iyi \
     "$(subst 'def hang_foreign' 'res\.items << item' 'foreign.item = item')"
-  copy "the local mark follows a fiber's cleanups through a shared node" c8 defer iyi heap_partition.iyi \
+  copy_both "the local mark follows a fiber's cleanups through a shared node" c8 defer iyi heap_partition.iyi \
     "$(del 'Its cleanups, node by node' '^          local_shade\(record, id, parity, node\.object_id\)$')"
   echo
   echo "| copy | check | caught by \\| holder \\| target @ allocation site | the program's own check, printed and passed over |"

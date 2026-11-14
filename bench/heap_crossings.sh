@@ -3,7 +3,8 @@
 # bench/heap_crossings.iyi built with partitions and the verifier's
 # poison-on-free, plain and optimised, every check passing; then one
 # broken copy of the runtime or std per mechanism, each removing exactly
-# that mechanism, and each caught by the check of its row.
+# that mechanism, and each caught by the check of its row, built plain
+# and `--release`.
 #
 #   bash bench/heap_crossings.sh
 #
@@ -88,11 +89,13 @@ esac
 
 echo
 echo "== each crossing's mechanism removed, caught by its check"
-# label dir check-name awk-script tree file [compiler-env]
+# label dir check-name awk-script tree file [compiler-env [release]]
 # The optional seventh, `NAME=value`, is set for the build: a mechanism
 # the compiler emits (S3) is removed by `IYI_SPAWN_BROKEN`, not a patch.
+# The eighth, `release`, builds the copy `--release`.
 prove_caught() {
-  local label="$1" dir="$2" check="$3" script="$4" tree="$5" file="$6" compiler_env="${7:-IYI_SPAWN_BROKEN=}"
+  local label="$1" dir="$2" check="$3" script="$4" tree="$5" file="$6" compiler_env="${7:-IYI_SPAWN_BROKEN=}" opt=""
+  [ "${8:-}" = release ] && opt="--release"
   # Both trees, whichever one the copy changes: the compiler takes a file
   # for std's only where its directory's parent holds `iyi/prelude.iyi`
   # (`ShareReach#std_at?`), and a std copy without the prelude beside it
@@ -106,7 +109,7 @@ prove_caught() {
     return
   fi
   # shellcheck disable=SC2086
-  if ! env "$compiler_env" IYI_PATH="$WORK/$dir${PSEP}$REPO/src" "$IYI" build $FLAGS \
+  if ! env "$compiler_env" IYI_PATH="$WORK/$dir${PSEP}$REPO/src" "$IYI" build $FLAGS $opt \
        -o "$WORK/$dir/program" "$REPO/bench/heap_crossings.iyi" \
        >"$WORK/$dir/build.log" 2>&1; then
     echo "  $label: the patched tree did not build"
@@ -142,58 +145,64 @@ del() {
 subst() {
   printf '/%s/ { armed = 1 } armed && sub(/%s/, "%s") { armed = 0; found = 1 } { print } END { if (!found) exit 3 }' "$1" "$2" "$3"
 }
+# Each copy built plain, then `--release`: what a check keeps live across
+# a collection is the optimiser's to keep or drop.
+caught_both() { # label dir check-name awk-script tree file [compiler-env]
+  prove_caught "$@"
+  prove_caught "$1, built \`--release\`" "$2-rel" "$3" "$4" "$5" "$6" "${7:-IYI_SPAWN_BROKEN=}" release
+}
 
 # Row 1: the spawn's captures not published.
-prove_caught "spawn publish" r1 spawn \
+caught_both "spawn publish" r1 spawn \
   "$(del 'private def on_pool\(pinned' '^      IyiCross\.publish\(block\)$')" iyi concurrency.iyi
 # Row 1c: the thread's captures not published.
-prove_caught "thread publish" r1c thread \
+caught_both "thread publish" r1c thread \
   "$(del 'def self\.start\(proc : Proc' '^      IyiCross\.publish\(proc\)$')" iyi thread.iyi
 # Row 1d: spawn(in:)'s captures not published.
-prove_caught "spawn(in:) publish" r1d in \
+caught_both "spawn(in:) publish" r1d in \
   "$(del 'def spawn\(\*, in owner : Unit\(S\), &block' '^    IyiCross\.publish\(block\)$')" iyi concurrency.iyi
 # Row 2: the answer left a store into the box, no merge.
-prove_caught "answer merge" r2 answer \
+caught_both "answer merge" r2 answer \
   "$(subst 'def finish\(value : T\)' 'IyiHeap\.answer\(@box, value\)' '@box << value')" iyi concurrency.iyi
 # Row 2b: a Unit task's answer not published.
-prove_caught "Unit answer publish" r2b unit_answer \
+caught_both "Unit answer publish" r2b unit_answer \
   "$(del 'private def unit_work' '^      IyiCross\.publish\(answer\)$')" iyi concurrency.iyi
 # Row 3: a send's value not published.
-prove_caught "send publish" r3 channel \
+caught_both "send publish" r3 channel \
   "$(del 'def send\(value : T\)' '^    IyiCross\.publish\(value\)$')" iyi concurrency.iyi
-prove_caught "select send publish" r3s select \
+caught_both "select send publish" r3s select \
   "$(del 'def send_select_action' '^    IyiCross\.publish\(value\)$')" iyi concurrency.iyi
 # Row 3: the ring grown in the sender's partition.
-prove_caught "ring growth shared" r3g ring \
+caught_both "ring growth shared" r3g ring \
   "$(subst 'private def push_item' 'IyiCross\.shared \{ Pointer\(T\)\.malloc\(\(@slots \* 2\)\.to_u64\) \}' 'Pointer(T).malloc((@slots * 2).to_u64)')" iyi concurrency.iyi
 # Row 4: a Unit's value made in its maker's partition.
-prove_caught "Unit.new routing" r4 unit_new \
+caught_both "Unit.new routing" r4 unit_new \
   "$(subst 'def self\.new\(\*, pinned' 'IyiHeap\.within\(unit\.heap\) \{ block\.call \}' 'block.call')" std unit.iyi
 # Row 4b: a lock block's captures not published; a lock block allocating
 # in the holder's partition; Mutex.new's captures not published.
-prove_caught "Mutex capture publish" r4b mutex_capture \
+caught_both "Mutex capture publish" r4b mutex_capture \
   "$(del 'def lock\(&block' '^    IyiCross\.publish\(block\)$')" std mutex.iyi
-prove_caught "Mutex shared bracket" r4bs mutex_bracket \
+caught_both "Mutex shared bracket" r4bs mutex_bracket \
   "$(subst 'def lock\(&block' 'IyiCross\.shared \{ block\.call\(@value\) \}' 'block.call(@value)')" std mutex.iyi
-prove_caught "Mutex.new capture publish" r4bn mutex_new \
+caught_both "Mutex.new capture publish" r4bn mutex_new \
   "$(del 'def self\.new\(&block : -> U\) : Mutex' '^    IyiCross\.publish\(block\)$')" std mutex.iyi
 # The runtime's own links out of a bracket (S6): a drained cleanup's link
 # - a Mutex's release node over the unit's cleanup, through a panic and a
 # cancelled task's stop - and a joined group's `outer`, each left naming
 # the unit's own chunk. Caught by `-Dheap_verify` (the death check, the
 # check at the unit's collection), exit 86.
-prove_caught "defer drain unlink (panic)" rdd defer_drain \
+caught_both "defer drain unlink (panic)" rdd defer_drain \
   "$(del 'def self\.drain_defers\(fiber' '^        node\.next_node = nil$')" iyi concurrency.iyi
-prove_caught "defer drain unlink (stop)" rds defer_stop \
+caught_both "defer drain unlink (stop)" rds defer_stop \
   "$(del 'def self\.drain_defers\(fiber' '^        node\.next_node = nil$')" iyi concurrency.iyi
-prove_caught "group outer unlink" rgo group_outer \
+caught_both "group outer unlink" rgo group_outer \
   "$(del 'def join\(early : Bool' '^      @outer = nil$')" iyi concurrency.iyi
 # Row 9: Box, GC.malloc and ReferenceStorage pin nothing.
-prove_caught "Box pin" r9b box \
+caught_both "Box pin" r9b box \
   "$(del 'def self\.box\(object : T\)' '^    IyiCross\.pin$')" std box.iyi
-prove_caught "GC.malloc pin" r9m malloc \
+caught_both "GC.malloc pin" r9m malloc \
   "$(del 'def self\.malloc\(size : Int\)' '^    IyiCross\.pin$')" std gc.iyi
-prove_caught "ReferenceStorage pin" r9r storage \
+caught_both "ReferenceStorage pin" r9r storage \
   "$(del 'def self\.unsafe_construct' '^    IyiCross\.pin$')" std reference_storage.iyi
 # Row 13: ENV's table made in the setter's partition. Not on Windows:
 # there `ENV[]=` writes to the platform (`SetEnvironmentVariableW`) and
@@ -201,28 +210,28 @@ prove_caught "ReferenceStorage pin" r9r storage \
 if [ "$WINDOWS" -eq 1 ]; then
   echo "  ENV shared: skipped on Windows, ENV is written to the platform and iyi keeps no table to make shared"
 else
-  prove_caught "ENV shared" r13 env \
+  caught_both "ENV shared" r13 env \
     "$(subst 'def self\.\[\]=\(key : String' 'IyiCross\.shared do' 'begin')" std env.iyi
 fi
 # Row 14: a crossing task's glue made in the spawner's partition, and the
 # new unit's object.
-prove_caught "pooled glue shared" r14 glue \
+caught_both "pooled glue shared" r14 glue \
   "$(subst 'private def pooled\(unit : IyiUnit' 'task = IyiCross\.shared do' 'task = begin')" iyi concurrency.iyi
 # The new unit's object: born in the shared heap by codegen
 # (`__iyi_new_shared`, S3), which the compiler's `new-shared` copy turns off.
-prove_caught "IyiUnit shared" r14u glue '{ print }' iyi concurrency.iyi IYI_SPAWN_BROKEN=new-shared
+caught_both "IyiUnit shared" r14u glue '{ print }' iyi concurrency.iyi IYI_SPAWN_BROKEN=new-shared
 # Row 16: TlsIdentity lends its chain.
-prove_caught "TlsIdentity chain copy" r16 tls \
+caught_both "TlsIdentity chain copy" r16 tls \
   "$(subst 'def chain : Array\(Array\(UInt8\)\)' '@chain\.map\(&\.dup\)' '@chain')" std tls.iyi
 # Row 21: a List's elements not published.
-prove_caught "List publish" r21 list \
+caught_both "List publish" r21 list \
   "$(del 'def initialize\(items : Array\(T\)\)' 'IyiCross\.publish\(item\)')" std list.iyi
 # The scheduler's list of closes posted to another thread, made in the
 # closer's partition. Not on Windows, which posts no list.
 if [ "$WINDOWS" -eq 1 ]; then
   echo "  closed list shared: skipped on Windows, a close there ends the posted operation and no list is made"
 else
-  prove_caught "closed list shared" r22 closed \
+  caught_both "closed list shared" r22 closed \
     "$(subst 'def self\.wake_closed\(fd : Int32\)' 'IyiCross\.shared do' 'begin')" iyi concurrency.iyi
 fi
 

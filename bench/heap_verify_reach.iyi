@@ -77,7 +77,10 @@
   UNITS = 6
 
   # The stack below the caller zeroed, so that no dead frame's word is a
-  # root of the collection that follows.
+  # root of the collection that follows. The empty `asm` that takes the
+  # buffer and clobbers memory keeps the stores, as heap_codegen's
+  # `scrub`: without it a `--release` build drops stores to a frame
+  # nothing reads, and the call with them.
   @[NoInline]
   def scrub : UInt64
     room = uninitialized StaticArray(UInt64, 2048)
@@ -87,6 +90,7 @@
       words[index] = 0_u64
       index = index + 1
     end
+    asm("" :: "r"(words) : "memory" : "volatile")
     words[2047]
   end
 

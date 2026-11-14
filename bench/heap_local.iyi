@@ -1433,17 +1433,39 @@
     broken(keep, 8100000000_i64, 100) == 0_i64 ? 0_i64 : -6_i64
   end
 
-  # Nodes enough to take every run of `Node`'s class the pool holds, made
-  # and dropped, then a collection: its `-Dheap_verify` check reads the
-  # other unit's dead `Far` naming a chunk of a run it took.
+  # Whether class *index*'s pool holds a run on any of the lists
+  # `IyiHeap.partition_take` takes from: the drained, the new, the old,
+  # the released and the cold.
+  @[NoInline]
+  def pool_holds?(index : Int32) : Bool
+    line = IyiHeap.pline(index)
+    IyiHeap.read64(line + IyiHeap::PC_DRAIN) | IyiHeap.read64(line + IyiHeap::PC_POOL) | IyiHeap.read64(line + IyiHeap::PC_OLD) | IyiHeap.read64(line + IyiHeap::PC_RELEASE) | IyiHeap.read64(line + IyiHeap::PC_COLD) != 0_u64
+  end
+
+  # Nodes made and dropped until the pool holds no run of `Node`'s class
+  # and the unit's list of that class is empty - every run the pool held
+  # is the unit's, each of its chunks allocated - then a collection: its
+  # `-Dheap_verify` check reads the other unit's dead `Far` naming a
+  # chunk of a run it took. A fixed 4,000 nodes (128 KiB) took the pool's
+  # newest runs only: with 381 KiB of the class pooled, the run the `Far`
+  # names lay below them in some runs, neither round's taker allocated
+  # its chunk, and the verifier missed poolearly (tssh 1 run of 2, Linux
+  # 4 of 26). Answers 0, -1 for no partition, -2 for no collection, -3
+  # when the pool still held a run after 200,000 nodes.
   def unswept_taker : Int64
+    record = IyiHeap.current_record
+    return -1_i64 if record == 0_u64
+    index = hidden_class(dead_node(0_i64))
     junk : Node? = nil
+    drained = false
     i = 0
-    while i < 4000
+    while i < 200000 && !drained
       junk = Node.new(i.to_i64, i % 50 == 0 ? nil : junk)
+      drained = IyiHeap.read64(record &+ index.to_u64 &* 8_u64) == 0_u64 && !pool_holds?(index)
       i = i + 1
     end
     junk = nil
+    return -3_i64 unless drained
     scrub_stack
     collect_now ? 0_i64 : -2_i64
   end

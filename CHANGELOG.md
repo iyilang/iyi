@@ -250,7 +250,11 @@ rang no worker and the fiber waited out the whole collection.
 bench/heap_local's `giveway` check and heap_verify's `nogiveway` and
 `notoken` copies pin it; on tssh, busy4 with it and the sweep helper's
 early release took idle p99 6 and 3 % under v3's, burn no worse, at the
-same RSS.
+same RSS. The check counts only a try whose woken fiber asked for the
+unit's token while the takeover held it, which the runtime records
+(`IyiHeap.takeovers_asked`): under heavy load the main thread, kept off
+its core through a whole takeover, missed it busy and failed the check
+with nothing wrong.
 
 heap22 S6 memory return, under `-Dheap_partitions`. Inside one process
 #145's app ratcheted its resident set endpoint after endpoint (50 to 343
@@ -28077,7 +28081,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 35,637-line library and nothing else. Every other
+  written against iyi's own 35,645-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

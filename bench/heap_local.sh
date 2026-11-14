@@ -380,6 +380,17 @@ if [ "$PART" = all ] || [ "$PART" = broken ]; then
     '{ if (sub(/elsif idle_held\?\(record\)/, "elsif false")) found = 1; print } END { if (!found) exit 3 }' \
     heap_partition.iyi
 
+  # An idle clock's turn that trusts a time read before the clock: a look
+  # whose time another worker's turn left behind wraps `now &- last`,
+  # turns the clock again at once and backwards, and the next walk's busy
+  # rule counts a moment's parks - a busy program called idle (heap_local's
+  # `busy:` flake under load, heap22 fu). No soundness check sees it, the
+  # clock check alone (`HEAP22_ONLY=clock`) does, its look held by the
+  # runtime's switch until the race has happened.
+  HEAP22_ONLY=clock prove_fails "a clock turned again with a time behind it" clockwrap "clock:" \
+    '{ if (sub(/if now > last && now &- last >= IDLE_NS && /, "if now \\&- last >= IDLE_NS \\&\\& ")) found = 1; print } END { if (!found) exit 3 }' \
+    heap_partition.iyi
+
   # A sweep that keeps its runs and drops the return stack, as the whole
   # sweep does: what the global sweep handed back there is free and on no
   # list, lost to the partition, which takes new runs round after round.

@@ -254,11 +254,19 @@ same RSS. The check counts only a try whose woken fiber asked for the
 unit's token while the takeover held it, which the runtime records
 (`IyiHeap.takeovers_asked`): under heavy load the main thread, kept off
 its core through a whole takeover, missed it busy and failed the check
-with nothing wrong. bench/heap_local's `busy` check holds a parked unit
-to four ticks only when the walks it waited through began with the
-program busy by the rule's own inputs, and parks another, eight at
-most, when they did not: under load its passing pairs, off their cores,
-parked under 256 times a tick, and the rule rightly gave two.
+with nothing wrong. An idle worker's look read the time before the
+idle clock, and another worker's turn in between left that time behind:
+`now &- last` wrapped and the clock turned again at once and backwards,
+so the next walk's busy rule counted a moment's parks, called a busy
+program idle and gave a parked unit two ticks (bench/heap_local's
+`busy` check, 1 run in 40 at Linux load 27). A turn now needs the time
+ahead of the clock, the pools' turn too, and the runtime counts any
+turn less than a period after the last (`IyiHeap.clock_turns_short`):
+heap_local's `clock` check holds a look by a test switch until the race
+has happened, and heap_verify's `clockwrap` copy pins it. The `busy`
+check holds a parked unit to four ticks only when the walks it waited
+through began busy by the rule's own inputs, parks another, eight at
+most, when they did not, prints its tries, and fails on any short turn.
 
 heap22 S6 memory return, under `-Dheap_partitions`. Inside one process
 #145's app ratcheted its resident set endpoint after endpoint (50 to 343

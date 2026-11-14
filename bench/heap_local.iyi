@@ -74,6 +74,10 @@
 #   walk that would take it is passed over, and collected within 3 s once
 #   let go, with nothing else parked to bring a walk: the walk counts it
 #   as waiting still (`IyiHeap.idle_held?`); its list reads whole after.
+# - `clock:` an idle worker's look held, having read the time, until
+#   another worker's turn of the idle clock leaves that time behind does
+#   not turn the clock again with it, and no turn of a clock comes less
+#   than its period after the last (`IyiHeap.clock_turns_short`).
 # - `busy:` while two units pass a value back and forth - thousands of
 #   parks a tick - a unit parked dirty is not collected before
 #   `IyiHeap::IDLE_BUSY_TICKS` ticks of the idle clock, by walks that
@@ -1963,6 +1967,39 @@
     IyiHeap.collect_every_park = true
   end
 
+  # ── clock ─────────────────────────────────────────────────────────────
+
+  # An idle worker's look reads the time before the idle clock: held
+  # there by the runtime's switch (`IyiHeap.hold_clock`) until another
+  # worker's turn leaves that time behind the clock, it must not turn the
+  # clock again with it - at once, and backwards. A walk asked for by
+  # hand (pending set and a worker rung, as `idle_check` stamps under
+  # `IYI_HEAP_STRESS`) brings the looks; a try whose held look saw no
+  # such turn within a second is tried again, three at most. No turn of
+  # a clock comes less than its period after the last
+  # (`IyiHeap.clock_turns_short`), here or before.
+  def clock_check : Nil
+    fail("clock: #{IyiHeap.clock_turns_short} turns of a clock came less than its period after the last, or before it, before the check") if IyiHeap.clock_turns_short != 0_u64
+    tries = 0
+    held = 0_u64
+    while held != 2_u64 && tries < 3
+      tries = tries + 1
+      IyiHeap.hold_clock
+      until_ns = IyiMark.now_ns &+ 3000000000_u64
+      held = IyiHeap.clock_hold
+      while (held == 1_u64 || held == 4_u64) && IyiMark.now_ns < until_ns
+        IyiStat.atomic(IyiStat::IDLE_PENDING).value.set(1_u64)
+        IyiWorkers.wake_one
+        sleep(5)
+        held = IyiHeap.clock_hold
+      end
+    end
+    # A switch no look took is taken back, so no later look waits on it.
+    IyiStat.atomic(IyiHeap::STAT_CLOCK_HOLD).value.compare_and_set(1_u64, 0_u64)
+    fail("clock: no held look saw another worker's turn leave its time behind the idle clock in #{tries} tries (the switch at #{held})") if held != 2_u64
+    fail("clock: a look held while another worker turned the idle clock turned it again with the time it read: #{IyiHeap.clock_turns_short} turns of a clock came less than its period after the last, or before it") if IyiHeap.clock_turns_short != 0_u64
+  end
+
   # ── busy ──────────────────────────────────────────────────────────────
 
   # A value passed back and forth between two units, every receive a
@@ -2139,11 +2176,12 @@
       sleep(300)
       # A try counts when every walk that could take its unit before
       # `IDLE_BUSY_TICKS` ticks began with the program busy by the rule's
-      # own inputs (`busy_watch`). Under load the pairs run off-core and
-      # park fewer than `IDLE_BUSY_PARKS` times a tick, the rule rightly
-      # calls the program idle, and a unit taken after two ticks is no
-      # fault (heap22 fu, Linux, 12 busy loops: 1 run in 40): another
-      # unit parks and is watched, eight at most.
+      # own inputs (`busy_watch`); one that did not is parked again,
+      # eight at most. Not for a clock that turned twice at once: such a
+      # turn gave the next walk a moment's parks, and the rule called the
+      # busy program idle (heap22 fu, Linux, 12 busy loops: 1 run in 40),
+      # so any turn shorter than its period fails the check, retried or
+      # not (`IyiHeap.clock_turns_short`, and the `clock:` check).
       busy = [] of UInt64
       tries = 0
       idle_walks = 0
@@ -2166,6 +2204,8 @@
         trips = trips &+ answer if answer.is_a?(Int64)
       end
       follows.each { |follow| follow.value }
+      print "busy check: #{tries} #{tries == 1 ? "try" : "tries"} (#{idle_walks} with a walk not busy, #{unseen} with one unseen)\n"
+      fail("busy: #{IyiHeap.clock_turns_short} turns of a clock came less than its period after the last, or before it (#{tries} tries, #{idle_walks} with a walk not busy)") if IyiHeap.clock_turns_short != 0_u64
       if busy.empty?
         fail("busy: no parked unit of #{tries} waited through walks that all began with the program busy by the rule (#{idle_walks} met one under #{IyiHeap::IDLE_BUSY_PARKS} parks a tick, #{unseen} one unseen; #{trips} round trips)")
       else
@@ -2541,7 +2581,8 @@
   # otherwise meet first; `HEAP22_ONLY=busy`, the busy check alone, for
   # the nobusy copy; `HEAP22_ONLY=giveway`, the giveway check alone, for
   # the nogiveway copy; `HEAP22_ONLY=idlehold`, the idlehold check alone,
-  # for the noidlehold copy; `HEAP22_ONLY=kept`, the kept check alone, for
+  # for the noidlehold copy; `HEAP22_ONLY=clock`, the clock check alone,
+  # for the clockwrap copy; `HEAP22_ONLY=kept`, the kept check alone, for
   # the nokeptfree copy, whose rings the parks of `abandon` and `return`
   # would hand out first, dying of a memory fault there.
   only = Program.env("HEAP22_ONLY")
@@ -2553,6 +2594,8 @@
     giveway_check(workers)
   elsif only == "idlehold"
     idlehold_check
+  elsif only == "clock"
+    clock_check
   elsif only == "kept"
     kept_check
   else
@@ -2578,6 +2621,7 @@
     construct_check
     idle_check(workers)
     idlehold_check
+    clock_check
     busy_check(workers)
     giveway_check(workers)
     spare_check

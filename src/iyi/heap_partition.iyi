@@ -433,6 +433,57 @@ class IyiHeap
     IyiStat.get(STAT_ASKED)
   end
 
+  # Turns of a clock - the idle clock (`take_over_quiet`) or the pools'
+  # (`turn_pools`) - that came less than the clock's period after the
+  # last, or before it (`clock_turned`): none, as a turn moves a clock
+  # only forward and a period on. A look reads the time before it reads
+  # the clock; another thread that turned the clock in between once left
+  # that time behind the clock's, `now &- last` wrapped, and the clock
+  # turned again at once and backwards, so the next walk's busy rule
+  # counted a moment's parks and called a busy program idle (heap22 fu,
+  # FuLead: heap_local's `busy:` flake under load). 142; 143 is the
+  # test's switch (`hold_clock`).
+  STAT_CLOCK_SHORT = 142_u64
+  STAT_CLOCK_HOLD  = 143_u64
+
+  def self.clock_turns_short : UInt64
+    IyiStat.get(STAT_CLOCK_SHORT)
+  end
+
+  # Counts a clock's turn from *last* to *now*, made by a thread that won
+  # the clock's compare-and-set, if it came less than *period* after the
+  # last or before it.
+  def self.clock_turned(last : UInt64, now : UInt64, period : UInt64) : Nil
+    IyiStat.add(STAT_CLOCK_SHORT, 1_u64) if now < last || now &- last < period
+  end
+
+  # A test's switch: the next idle worker's look that reaches the idle
+  # clock, having read the time, waits until another thread turns the
+  # clock - a second at most, or until a pause is asked - and then tries
+  # its own turn with the time it read (bench/heap_local's `clock:`
+  # check). The switch reads 4 while the look waits, then 2 if another
+  # turn left the look's time behind the clock, 3 if not.
+  def self.hold_clock : Nil
+    IyiStat.set(STAT_CLOCK_HOLD, 1_u64)
+  end
+
+  def self.clock_hold : UInt64
+    IyiStat.get(STAT_CLOCK_HOLD)
+  end
+
+  # The switch's wait, for the look that takes it, whose time is *now*:
+  # 2 or 3 as above, or 0 for a look that lost it to another.
+  def self.clock_held(turned : Pointer(Atomic(UInt64)), now : UInt64) : UInt64
+    return 0_u64 unless IyiStat.atomic(STAT_CLOCK_HOLD).value.compare_and_set(1_u64, 4_u64)[1]
+    seen = turned.value.get
+    began = IyiMark.now_ns
+    while turned.value.get == seen
+      return 3_u64 if stop_requested? || IyiMark.now_ns &- began > 1_000_000_000_u64
+      IyiMark.spin_pause
+    end
+    turned.value.get > now ? 2_u64 : 3_u64
+  end
+
   def self.detached_partitions : UInt64
     IyiStat.get(IyiStat::DETACHED)
   end
@@ -1175,7 +1226,8 @@ class IyiHeap
   def self.turn_pools(now : UInt64) : Nil
     turned = IyiStat.atomic(IyiStat::POOL_TURNED_NS)
     last = turned.value.get
-    return if now &- last < POOL_TURN_NS || !turned.value.compare_and_set(last, now)[1]
+    return if now <= last || now &- last < POOL_TURN_NS || !turned.value.compare_and_set(last, now)[1]
+    clock_turned(last, now, POOL_TURN_NS)
     index = 0
     while index < CLASSES
       line = pline(index)
@@ -3702,8 +3754,14 @@ class IyiHeap
     pending = IyiStat.atomic(IyiStat::IDLE_PENDING)
     return false if pending.value.get == 0_u64 && IyiStat.get(IyiStat::IDLE_CURSOR) == 0_u64
     turned = IyiStat.atomic(IyiStat::IDLE_TICK_NS)
+    held = IyiStat.get(STAT_CLOCK_HOLD) == 1_u64 ? clock_held(turned, now) : 0_u64
     last = turned.value.get
-    IyiStat.add(IyiStat::IDLE_TICK, 1_u64) if now &- last >= IDLE_NS && turned.value.compare_and_set(last, now)[1]
+    # *now* was read before the clock: a turn since leaves it behind.
+    if now > last && now &- last >= IDLE_NS && turned.value.compare_and_set(last, now)[1]
+      clock_turned(last, now, IDLE_NS)
+      IyiStat.add(IyiStat::IDLE_TICK, 1_u64)
+    end
+    IyiStat.set(STAT_CLOCK_HOLD, held) if held != 0_u64
     # In the stamps' terms: the tick plus one.
     tick = IyiStat.get(IyiStat::IDLE_TICK) &+ 1_u64
     # This tick's walk done: the answer the lock below would give, read

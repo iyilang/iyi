@@ -619,6 +619,165 @@ else
 fi
 
 echo
+echo "== ValueBarrier's fallback, built here in the asm's place"
+# `ValueBarrier` is an empty inline asm on x86_64 and aarch64 and a
+# volatile load on every other target, and nothing here builds for any
+# other: the LLVM this runs on carries those two back ends alone. So the
+# fallback is built on this machine, from a copy of the module whose two
+# `flag?` conditions are false. The program below reaches every barrier
+# in std through the call that uses it - X25519's ladder, Ed25519's and
+# P-256's fixed-base tables, the P-curves' variable-base lookups, ML-KEM's
+# implicit rejection both ways - and has to answer as the RFCs do, plain
+# and --release, with the module as it is and with the copy, the four
+# byte for byte alike. Then the copy's --release IR has to keep what it
+# asked for: wherever the module as it is leaves a barrier, one more
+# volatile load of a local, which LLVM may neither drop nor see through.
+cat >"$WORK/barrier.iyi" <<'IYI'
+@[Unsafe("its hex helpers read strings' bytes through to_unsafe")]
+module barrier
+
+import std/curve25519::{X25519, Ed25519}
+import std/mlkem::{MlKem768, MlKem768PrivateKey}
+import std/p256::{P256PrivateKey}
+import std/p384::{P384PrivateKey}
+import std/ecdsa::{EcdsaHash}
+import std/digest::{SHAKE256}
+
+def b(hex : String) : Array(UInt8)
+  p = hex.downcase.to_unsafe
+  Array(UInt8).new(hex.bytesize // 2) do |i|
+    hi = p[i * 2].to_i32
+    lo = p[i * 2 + 1].to_i32
+    hi = hi >= 97 ? hi - 87 : hi - 48
+    lo = lo >= 97 ? lo - 87 : lo - 48
+    (hi * 16 + lo).to_u8
+  end
+end
+
+def hex(bytes : Array(UInt8)) : String
+  String.build { |io| bytes.each { |x| io << "0123456789abcdef"[x.to_i32 >> 4] << "0123456789abcdef"[x.to_i32 & 15] } }
+end
+
+def hex(s : String) : String
+  p = s.to_unsafe
+  hex(Array(UInt8).new(s.bytesize) { |i| p[i] })
+end
+
+def answer(label : String, got : String, want : String) : Nil
+  puts "#{label} #{got}"
+  raise "ASSERTION FAILED: #{label}: #{got}, not #{want}" unless got == want
+end
+
+# RFC 7748 section 6.1's shared secret (CurveLadder.x25519) and RFC 8032
+# section 7.1's TEST 1 (CurveBaseTable.pick).
+alice = b("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a")
+bob = b("5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb")
+answer "x25519", hex(X25519.shared(alice, X25519.public_key(bob)).or_panic), "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742"
+seed = b("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60")
+answer "ed25519-public", hex(Ed25519.public_key(seed)), "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
+answer "ed25519-sign", hex(Ed25519.sign(seed, [] of UInt8)), "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b"
+
+# ML-KEM-768 from a fixed seed: what is encapsulated is what decapsulates,
+# and a ciphertext with one bit changed is answered with J(z || c).
+mseed = Array(UInt8).new(64) { |i| i.to_u8 }
+key = MlKem768PrivateKey.from_seed(mseed)
+sent = MlKem768.encapsulate(key.encapsulation_key, Array(UInt8).new(32) { |i| (255 - i).to_u8 }).or_panic
+answer "mlkem-accepted", hex(key.decapsulate(sent[0]).or_panic), hex(sent[1])
+bad = sent[0].dup
+bad[500] = bad[500] ^ 1_u8
+answer "mlkem-rejected", hex(key.decapsulate(bad).or_panic), hex(SHAKE256.new.update(mseed[32, 32]).update(bad).read(32))
+
+# RFC 6979 appendix A.2.5's P-256 key and its signature of "sample"
+# (P256BaseTable.pick and .top), and RFC 5903 section 8.1's shared value
+# (P256Point.lookup).
+p256 = P256PrivateKey.from_bytes(b("C9AFA9D845BA75166B5C215767B1D6934E50C3DB36E89B127B8A622B120F6721")).or_panic
+answer "p256-sign", hex(p256.sign(EcdsaHash::SHA256, "sample")), "3046022100efd48b2aacb6a8fd1140dd9cd45e81d69d2c877b56aaf991c34d0ea84eaf3716022100f7cb1c942d657c41d436c7a1b6e29f65f3e900dbb9aff4064dc4ab2f843acda8"
+initiator = P256PrivateKey.from_bytes(b("C88F01F510D9AC3F70A292DAA2316DE544E9AAB8AFE84049C62A9C57862D1433")).or_panic
+responder = P256PrivateKey.from_bytes(b("C6EF9C5D78AE012A011164ACB397CE2088685D8F06BF9BE0B283AB46476BEE53")).or_panic
+answer "p256-ecdh", hex(initiator.shared_secret(responder.public_point).or_panic), "d6840f6b42f6edafd13116e0e12565202fef8e9ece7dce03812464d04b9442de"
+
+# RFC 6979 appendix A.2.6's P-384 key and its signature of "sample" under
+# SHA-384; its shared value with the key d = 1, whose public point is G,
+# is its own public x (P384Point.lookup, both).
+p384 = P384PrivateKey.from_bytes(b("6B9D3DAD2E1B8C1C05B19875B6659F4DE23C3B667BF297BA9AA47740787137D896D5724E4C70A825F872C9EA60D2EDF5")).or_panic
+answer "p384-sign", hex(p384.sign(EcdsaHash::SHA384, "sample")), "306602310094edbb92a5ecb8aad4736e56c691916b3f88140666ce9fa73d64c4ea95ad133c81a648152e44acf96e36dd1e80fabe4602310099ef4aeb15f178cea1fe40db2603138f130e740a19624526203b6351d0a3a94fa329c145786e679e7b82c71a38628ac8"
+one = P384PrivateKey.from_bytes(b("0" * 95 + "1")).or_panic
+answer "p384-ecdh", hex(p384.shared_secret(one.public_point).or_panic), "ec3a4e415b4e19a4568618029f427fa5da9a8bc4ae92e02e06aae5286b300c64def8f0ea9055866064a254515480bc13"
+puts "ALL CHECKS PASSED"
+IYI
+# barrier_build <search path> <name> [flags]: the program above built
+# from <search path> into $WORK/<name> and run; 1, saying why, if it did
+# not build or did not answer as the RFCs do.
+barrier_build() {
+  local path="$1" name="$2"
+  shift 2
+  if ! IYI_PATH="$path" "$IYI" build "$@" -o "$WORK/$name" "$WORK/barrier.iyi" >"$WORK/$name.log" 2>&1; then
+    echo "  $name: did not build: $(grep -m1 -E 'Error|BUG' "$WORK/$name.log")"
+    return 1
+  fi
+  if ! "$WORK/$name" >"$WORK/$name.out" 2>&1 || ! grep -q "ALL CHECKS PASSED" "$WORK/$name.out"; then
+    echo "  $name: $(tr -d '\r' <"$WORK/$name.out" | tail -1)"
+    return 1
+  fi
+}
+# barrier_kept <asm.ll> <fallback.ll>: for each function of the IR built
+# with the inline asm that holds one (`asm "", "=r,0"`), the IR built
+# with the fallback has to hold, in the same function, as many more
+# volatile loads of a local than the first, and no such asm anywhere; a
+# line for each function that does not, and 1 if any.
+barrier_kept() {
+  awk '
+    /^define / { fn = match($0, /@("[^"]*"|[^ (]+)/) ? substr($0, RSTART, RLENGTH) : $0; fns[fn] = 1 }
+    FNR == NR && /asm "", "=r,0"/ { held[fn]++ }
+    FNR == NR && /load volatile i[0-9]+, ptr %/ { before[fn]++ }
+    FNR != NR && /asm "", "=r,0"/ { left[fn]++ }
+    FNR != NR && /load volatile i[0-9]+, ptr %/ { after[fn]++ }
+    END {
+      for (fn in held) barriers += held[fn]
+      if (!barriers) { print "the module as it is leaves no barrier in the IR to compare with"; wrong = 1 }
+      for (fn in fns) {
+        if (left[fn]) { print substr(fn, 1, 100) ": the fallback still an inline asm, " left[fn] " of them"; wrong = 1 }
+        if (after[fn] - before[fn] != held[fn]) {
+          print substr(fn, 1, 100) ": " (held[fn] + 0) " barriers, " (after[fn] - before[fn]) " more volatile loads of a local"
+          wrong = 1
+        }
+      }
+      exit wrong
+    }' "$1" "$2"
+}
+rm -rf "$WORK/fallback"
+mkdir -p "$WORK/fallback/std"
+sed 's/^    {% if flag?(:x86_64) || flag?(:aarch64) %}$/    {% if false %}/' "$REPO/src/std/digest.iyi" >"$WORK/fallback/std/digest.iyi"
+if [ "$(grep -c '^    {% if false %}$' "$WORK/fallback/std/digest.iyi")" -ne 2 ]; then
+  echo "  the copy does not take the fallback at both of ValueBarrier's methods, so this proves nothing"
+  status=1
+elif barrier_build "$IYI_PATH" barrier-asm-plain &&
+  barrier_build "$IYI_PATH" barrier-asm-release --release --emit llvm-ir &&
+  barrier_build "$WORK/fallback${PSEP}$IYI_PATH" barrier-fallback-plain &&
+  barrier_build "$WORK/fallback${PSEP}$IYI_PATH" barrier-fallback-release --release --emit llvm-ir; then
+  same=1
+  for name in barrier-asm-release barrier-fallback-plain barrier-fallback-release; do
+    if ! cmp -s "$WORK/barrier-asm-plain.out" "$WORK/$name.out"; then
+      echo "  $name does not answer as barrier-asm-plain:"
+      diff "$WORK/barrier-asm-plain.out" "$WORK/$name.out" | head -6 | sed 's/^/    /'
+      same=0
+      status=1
+    fi
+  done
+  if [ "$same" -eq 1 ]; then
+    echo "  X25519, Ed25519, ML-KEM (accepted and rejected), P-256 and P-384 signatures and ECDH: the RFCs' answers, alike with the asm and the fallback, plain and --release"
+  fi
+  if barrier_kept "$WORK/barrier-asm-release.ll" "$WORK/barrier-fallback-release.ll" >"$WORK/barrier-kept.out"; then
+    echo "  --release: in every function the asm leaves a barrier in, the fallback leaves a volatile load in its place"
+  else
+    sed 's/^/  /' "$WORK/barrier-kept.out"
+    status=1
+  fi
+else
+  status=1
+fi
+
+echo
 echo "== proving the checks can fail when the module is broken"
 # prove_broken <label> <phrase> <old> <new>: the exercise must fail on a
 # copy of the module with <old> replaced, at the check that names <phrase>.
@@ -785,6 +944,31 @@ prove_unpublished "CRC-32's tables' address stored with no ordering" 'Std::Diges
   '/^pub struct CRC32$/,/^pub struct Adler32$/s/^    @@tables.set_release(t.address)$/    @@tables.set_relaxed(t.address)/'
 prove_unpublished "CRC-64's tables' address read with no ordering" 'Std::Digest::CRC64::tables' "no acquire load of it" \
   '/^pub struct CRC64$/,/^pub class XXH64$/s/^    ready = @@tables.get_acquire$/    ready = @@tables.get_relaxed/'
+# And ValueBarrier's fallback handing back a plain `x`: every answer is
+# the same, and it is the IR that shows nothing left between a mask and
+# its use.
+rm -rf "$WORK/folded"
+mkdir -p "$WORK/folded/std"
+sed 's/^      IyiAtomic.load(pointerof(x), :not_atomic, true)$/      x/' "$WORK/fallback/std/digest.iyi" >"$WORK/folded/std/digest.iyi"
+if [ "$(grep -c 'IyiAtomic.load(pointerof(x)' "$WORK/fallback/std/digest.iyi")" -ne 2 ] ||
+  grep -q 'IyiAtomic.load(pointerof(x)' "$WORK/folded/std/digest.iyi"; then
+  echo "  a fallback folded to a plain x: the patch did not apply at both methods, so this proves nothing"
+  status=1
+elif [ ! -s "$WORK/barrier-asm-release.ll" ]; then
+  echo "  a fallback folded to a plain x: no IR of the module as it is to read it against"
+  status=1
+elif ! barrier_build "$WORK/folded${PSEP}$IYI_PATH" barrier-folded --release --emit llvm-ir; then
+  status=1
+elif barrier_kept "$WORK/barrier-asm-release.ll" "$WORK/barrier-folded.ll" >"$WORK/mut.out"; then
+  echo "  the IR of a fallback folded to a plain x was read as keeping its barriers"
+  status=1
+elif grep -qF "more volatile loads of a local" "$WORK/mut.out"; then
+  echo "  a fallback folded to a plain x is caught"
+else
+  echo "  a fallback folded to a plain x was refused, but not for what it is:"
+  sed 's/^/    /' "$WORK/mut.out"
+  status=1
+fi
 
 # The checksums' costs, against the shapes they had: CRC-32 a bit at a
 # time, Adler-32 reduced every byte.

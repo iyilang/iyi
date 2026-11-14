@@ -25,7 +25,7 @@
 # ed25519 (`Ed25519.sign`, one seed, a fixed message against random
 # ones), mlkem-ct (`decapsulate` with one key, its valid ciphertext
 # against tampered ones, which take the implicit rejection), mlkem-key
-# (a fixed key and its ciphertext against 64 other keys and theirs),
+# (one key against 64 others, each with a ciphertext of its own),
 # aes-gcm and chacha (`open` of a sealed message whose tag differs from
 # the right one in its first byte against one that differs in its last:
 # an early-exit compare is faster on the first; equal against differing
@@ -145,9 +145,29 @@ def measure(target : String, samples : Int32, pem : String?) : {Float64, Int32}
   xs = Array(BigInt).new(1024) { |_| BigInt.from_bytes(draw.bytes(256)) % modulus }
   messages = Array(Array(UInt8)).new(1024) { |_| draw.bytes(64) }
   secrets = Array(Array(UInt8)).new(1024) { |_| draw.bytes(32) }
+  # And the fixed input as 1,024 copies of itself, the one a measurement
+  # reads picked as the random class's is: one value always in the cache
+  # against 1,024 that are not times where an input lives, and not what it
+  # is (see ML-KEM's keys below, where that was measured).
+  fixed_xs = Array(BigInt).new(1024) { |_| BigInt.from_bytes((fixed_x.to_bytes(256) || raise("fixed x past 256 bytes"))) }
+  fixed_messages = Array(Array(UInt8)).new(1024) { |_| fixed_message.dup }
+  fixed_secrets = Array(Array(UInt8)).new(1024) { |_| fixed_secret.dup }
   p384_key = P384PrivateKey.from_bytes(draw.bytes(48)).or_panic
   seed = draw.bytes(32)
-  kem_keys = Array(MlKem768PrivateKey).new(target == "mlkem-key" ? 65 : 1) { |_| MlKem768PrivateKey.from_seed(draw.bytes(64)) }
+  # ML-KEM's classes are each read from as many places in memory. A key
+  # is some 15 KB and its ciphertext 1,088 bytes, and one fixed key and
+  # ciphertext against 64 others measured where they lived and not what
+  # they held: 64 copies of one key against the first copy, contents alike,
+  # gave |t| 14.9 at 200,000 samples on a quiet machine, and the same key
+  # read from 64 copies against 64 other keys gave 2.7. So the fixed
+  # key is 64 copies of itself, each with its own ciphertext, and the valid
+  # ciphertext is 1,024 copies of itself, as there are 1,024 tampered ones.
+  kem_seed = draw.bytes(64)
+  kem_keys = if target == "mlkem-key"
+               Array(MlKem768PrivateKey).new(128) { |k| MlKem768PrivateKey.from_seed(k < 64 ? kem_seed : draw.bytes(64)) }
+             else
+               [MlKem768PrivateKey.from_seed(kem_seed)]
+             end
   kem_cts = kem_keys.map do |k|
     sealed = MlKem768.encapsulate(k.encapsulation_key, draw.bytes(32))
     raise "encapsulate refused" unless sealed.is_a?(Tuple)
@@ -159,6 +179,7 @@ def measure(target : String, samples : Int32, pem : String?) : {Float64, Int32}
     t[at] = t[at] ^ 1_u8
     t
   end
+  valid = Array(Array(UInt8)).new(target == "mlkem-ct" ? 1024 : 0) { |_| kem_cts[0].dup }
   aead_key = draw.bytes(32)
   nonce = draw.bytes(12)
   gcm = AesGcm.new(aead_key)
@@ -176,9 +197,13 @@ def measure(target : String, samples : Int32, pem : String?) : {Float64, Int32}
   while i < samples + samples // 10
     c = (draw.next & 1_u64).to_i32
     pick = (draw.next & 1023_u64).to_i32
-    x = c == 0 ? fixed_x : xs[pick]
-    message = c == 0 ? fixed_message : (target == "p256-length" ? same_length[pick & 255] : (target == "p256-two" ? messages[0] : messages[pick]))
-    secret = c == 0 ? fixed_secret : secrets[pick]
+    x = c == 0 ? fixed_xs[pick] : xs[pick]
+    message = if target == "p256-two"
+                c == 0 ? fixed_message : messages[0]
+              else
+                c == 0 ? fixed_messages[pick] : (target == "p256-length" ? same_length[pick & 255] : messages[pick])
+              end
+    secret = c == 0 ? fixed_secrets[pick] : secrets[pick]
     started = Time.monotonic_nanoseconds
     case target
     when "inverse"
@@ -196,10 +221,10 @@ def measure(target : String, samples : Int32, pem : String?) : {Float64, Int32}
     when "ed25519"
       sink = sink ^ Ed25519.sign(seed, message).bytesize
     when "mlkem-ct"
-      got = kem_keys[0].decapsulate(c == 0 ? kem_cts[0] : tampered[pick])
+      got = kem_keys[0].decapsulate(c == 0 ? valid[pick] : tampered[pick])
       sink = sink ^ (got.is_a?(Array) ? got.size : 0)
     when "mlkem-key"
-      which = c == 0 ? 0 : 1 + (pick & 63)
+      which = c == 0 ? pick & 63 : 64 + (pick & 63)
       got = kem_keys[which].decapsulate(kem_cts[which])
       sink = sink ^ (got.is_a?(Array) ? got.size : 0)
     when "aes-gcm"

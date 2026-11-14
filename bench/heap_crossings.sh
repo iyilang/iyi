@@ -149,9 +149,11 @@ subst() {
 }
 # Each copy built plain, then `--release` under `RELEASE_COPIES=1`: what a
 # check keeps live across a collection is the optimiser's to keep or drop.
+# Defaulted here too: bench/heap_verify.sh sources this function without
+# the line above, under `set -u`.
 caught_both() { # label dir check-name awk-script tree file [compiler-env]
   prove_caught "$@"
-  [ "$RELEASE_COPIES" = 1 ] || return 0
+  [ "${RELEASE_COPIES:-0}" = 1 ] || return 0
   prove_caught "$1, built \`--release\`" "$2-rel" "$3" "$4" "$5" "$6" "${7:-IYI_SPAWN_BROKEN=}" release
 }
 

@@ -341,6 +341,17 @@
           collect_here
           watched.set(task.fiber.object_id)
           fail("born_shared: the new unit's answer reads wrong") unless task.value == 5
+          {% if flag?(:heap_partitions) %}
+            # Read again once the new unit has answered, so that an
+            # optimised build keeps *unit* in this frame across the wait,
+            # as a plain build does, and the verifier's first word is the
+            # new unit's waiter at its death in both. Dropped at
+            # `collect_here`, it was named there from the shared heap by
+            # the new unit's fiber or, while that unit still ran, by its
+            # worker's scheduler state, whichever the scan met first
+            # (`--release`, Linux: 1 run of 7 the scheduler's).
+            shared_made(unit.object_id, "born_shared: a new unit's object, once it answered") if unit.is_a?(IyiUnit)
+          {% end %}
         end
         0
       end

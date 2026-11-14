@@ -26,9 +26,10 @@
 # and when the run without it stops at its check's `FAIL:` line, read
 # before any collection. A copy whose loss no verifier sees is listed
 # apart (`OWN_ONLY`), with why, and caught by its `FAIL:` line alone.
-# The `holes` copy is caught built `--release` as well: what its check
-# keeps live across a park is the optimiser's to keep or drop, and an
-# optimised copy once went unseen by the verifier.
+# Every copy is caught built `--release` as well: what a check keeps live
+# across a park is the optimiser's to keep or drop, and optimised copies
+# once went unseen (`holes`) or named another word run to run
+# (`new-shared`).
 
 set -u
 
@@ -220,17 +221,22 @@ prove_caught() { # label copy check [release]
   printf '| %s (`%s`) | %s | %s |\n' "$label" "$copy" "$verifier" "$own" >>"$TABLE"
 }
 
+# Each copy built plain, then `--release`.
+caught_both() { # label copy check
+  prove_caught "$1" "$2" "$3"
+  prove_caught "$1, built \`--release\`" "$2" "$3" release
+}
+
 echo
 echo "== each mechanism turned off in the compiler, caught"
-prove_caught "C1 typed crossing context" c1 c1
-prove_caught "class-variable store publish" classvar-publish classvar
-prove_caught "trusted types born shared" new-shared born_shared
-prove_caught "pin (forced off)" pin pin
-prove_caught "pin through a @[Share] def's block (SharedProc.of binds no block)" handed handed
-prove_caught "pin through a block handed to a helper (not followed)" forwarded handed
-prove_caught "pin of a spawn(in: u) task (pinned: not passed)" pin-in pin_in
-prove_caught "union holes written as zero" holes holes
-prove_caught "union holes written as zero, built \`--release\`" holes holes release
+caught_both "C1 typed crossing context" c1 c1
+caught_both "class-variable store publish" classvar-publish classvar
+caught_both "trusted types born shared" new-shared born_shared
+caught_both "pin (forced off)" pin pin
+caught_both "pin through a @[Share] def's block (SharedProc.of binds no block)" handed handed
+caught_both "pin through a block handed to a helper (not followed)" forwarded handed
+caught_both "pin of a spawn(in: u) task (pinned: not passed)" pin-in pin_in
+caught_both "union holes written as zero" holes holes
 
 echo
 echo "Seed $SEED (IYI_CHAOS), IYI_HEAP_STRESS=1, $RUNS verifier runs each with HEAP22_PRINT_ONLY=1."

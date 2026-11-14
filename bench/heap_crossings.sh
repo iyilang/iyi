@@ -3,8 +3,7 @@
 # bench/heap_crossings.iyi built with partitions and the verifier's
 # poison-on-free, plain and optimised, every check passing; then one
 # broken copy of the runtime or std per mechanism, each removing exactly
-# that mechanism, and each caught by the check of its row, built plain
-# and `--release`.
+# that mechanism, and each caught by the check of its row.
 #
 #   bash bench/heap_crossings.sh
 #
@@ -12,7 +11,9 @@
 # collect_local`, poison under `-Dheap_verify`). `FLAGS` replaces the build
 # flags (default `-Dheap_partitions -Dheap_verify`); `FLAGS=` runs the
 # flag-off control alone, every check passing and no copy built.
-# Exits non-zero if any step fails.
+# `RELEASE_COPIES=1` builds each copy `--release` as well (Linux: the
+# gate's ~60 s become ~210-260 s; every copy caught, 3 runs each on
+# Linux, tmac and tssh at h22/fu-scrub). Exits non-zero if any step fails.
 #
 # A copy is caught when its program exits non-zero: a `FAIL: <row>` line,
 # the verifier's report at a collection (`-Dheap_verify`, exit 86), or
@@ -38,6 +39,7 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 IYI="${IYI:-$REPO/bin/iyi}"
 WORK="$(mktemp -d)"
 FLAGS="${FLAGS--Dheap_partitions -Dheap_verify}"
+RELEASE_COPIES="${RELEASE_COPIES:-0}"
 
 WINDOWS=0
 case "$(uname -s)" in
@@ -145,10 +147,11 @@ del() {
 subst() {
   printf '/%s/ { armed = 1 } armed && sub(/%s/, "%s") { armed = 0; found = 1 } { print } END { if (!found) exit 3 }' "$1" "$2" "$3"
 }
-# Each copy built plain, then `--release`: what a check keeps live across
-# a collection is the optimiser's to keep or drop.
+# Each copy built plain, then `--release` under `RELEASE_COPIES=1`: what a
+# check keeps live across a collection is the optimiser's to keep or drop.
 caught_both() { # label dir check-name awk-script tree file [compiler-env]
   prove_caught "$@"
+  [ "$RELEASE_COPIES" = 1 ] || return 0
   prove_caught "$1, built \`--release\`" "$2-rel" "$3" "$4" "$5" "$6" "${7:-IYI_SPAWN_BROKEN=}" release
 }
 

@@ -115,6 +115,23 @@
   `--release` compile of web_cores 0.96 s against 0.92 and of
   std_http_exercise 1.36 s against 1.31.
 
+- **The reuse integrity gate's straddler proof catches its defect in
+  every run.** `bench/reuse_integrity.iyi` read each round's keys only
+  when the round ended. The chunk the broken copy hands out under slot
+  0's entry is listed again by the second sweep after the pop, its link
+  and slot written over the key living in it, and in most runs that
+  sweep came after the round's keys were dropped: of 9 to 25 such chunks
+  in a Linux run the read saw 0 to 2, and the copy was caught in 14 runs
+  of 40 on Linux, 16 of 40 on macOS and 5 of 20 on Windows - on Linux
+  and macOS 21 and 13 of 40 before the union padding fix above, so not
+  its doing - and five runs on a darwin runner could all pass, as they
+  did in CI run 43400562231. Each round's keys are now read again after
+  two collections, which sweep the whole heap in their pause: caught in
+  40 runs of 40 on each, with 7 to 21 keys wrong in a run on Linux, 3 to
+  12 on macOS and 5 to 24 on Windows, and the exercise passes. The
+  program takes 0.62 s where it took 0.52 on this Linux machine, and
+  0.68 s where it took 0.55 on an Apple M2 Pro.
+
 ## 0.21.0 — 2026-11-09
 
 **A spawn has one verb and names its unit, and a plain `spawn` runs in

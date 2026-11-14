@@ -3864,6 +3864,88 @@ jobs:
           gh release create "$tag" --title "iyi ${tag#v}" --notes-file notes.md $prerelease \
             dist/*.tar.gz dist/*.zip dist/SHA256SUMS
 
+
+  selfhost:
+    needs: [plan, build]
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'selfhost') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    container:
+      image: crystallang/crystal:1.21.0-build
+    name: "The self-host gates, on Linux"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v5
+        with:
+          name: crystal
+          path: .build
+      - run: chmod +x .build/crystal
+
+      # The gates compile oracles with LibLLVM, so they need llvm-config. The
+      # samples job provisions it the same way.
+      - name: Provision llvm-config
+        run: |
+          cfg="$(src/llvm/ext/find-llvm-config.sh 2>/dev/null || true)"
+          if [ -n "$cfg" ] && [ -x "$cfg" ]; then
+            [ "$cfg" != "/usr/local/bin/llvm-config" ] && ln -sf "$cfg" /usr/local/bin/llvm-config
+            [ "$cfg" != "/usr/bin/llvm-config" ] && ln -sf "$cfg" /usr/bin/llvm-config
+            echo "LLVM_CONFIG=$cfg" >> "$GITHUB_ENV"
+          elif command -v llvm-config-20 >/dev/null 2>&1; then
+            cfg="$(command -v llvm-config-20)"
+            [ "$cfg" != "/usr/local/bin/llvm-config" ] && ln -sf "$cfg" /usr/local/bin/llvm-config
+            [ "$cfg" != "/usr/bin/llvm-config" ] && ln -sf "$cfg" /usr/bin/llvm-config
+            echo "LLVM_CONFIG=$cfg" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build `iyi` and its daemon
+        run: make -o .build/crystal iyi iyi-daemon
+
+      # One driver runs every selfhost gate (bench/selfhost_*_exercise.sh) in order,
+      # each with its own log, and exits non-zero when any of them fails.
+      - name: The self-host gates
+        run: bash bench/selfhost_gates.sh
+
+  selfhost-darwin:
+    needs: plan
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'selfhost-darwin') }}
+    # macos-15, pinned, as the darwin job is.
+    runs-on: macos-15
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "14.4"
+    timeout-minutes: 120
+    name: "The self-host gates, on darwin arm64"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install the bootstrap toolchain
+        run: |
+          sw_vers
+          xcodebuild -version
+          python3 --version
+          brew install crystal coreutils pkgconf
+          echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
+
+      - name: Restore the static LLVM
+        id: llvm-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/llvm-static
+          key: llvm-static-${{ runner.os }}-${{ runner.arch }}-macos-15-${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
+      - name: Build the static LLVM (cache miss)
+        if: steps.llvm-cache.outputs.cache-hit != 'true'
+        run: bash scripts/build-static-llvm.sh "$HOME/llvm-static"
+
+      - name: Build `iyi`, its daemon, and the tarball
+        run: make iyi-tarball LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config"
+
+      # The same driver as the Linux job. The gates read LLVM_CONFIG from the
+      # environment before they look for llvm-config on the PATH.
+      - name: The self-host gates
+        run: LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config" bash bench/selfhost_gates.sh
   # The editor client is the only artifact here that is published somewhere
   # else, so it is proven the same way as the rest: every run packages it,
   # which is the one check that the manifest parses, the files it names
@@ -3973,7 +4055,7 @@ jobs:
             darwin-std-siblings, darwin-std, windows-probe, windows-collector, windows-runtime,
             windows-native, windows-native-gates, windows-native-surfaces, windows-std,
             windows-std-platforms, windows-std-siblings, windows-gates, windows-compiler-specs,
-            wasi-run, wasm32-collector, binary, clean-room, vscode]
+            wasi-run, wasm32-collector, binary, clean-room, vscode, selfhost, selfhost-darwin]
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5

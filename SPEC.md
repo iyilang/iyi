@@ -6435,13 +6435,20 @@ and 39.4 % on tmac, short of the 40 % bound (other tmac sessions
 40.2-40.8 %); every other criterion passes on all three: gm p99 at most
 +5.6 % worst endpoint, CPU a request -0.3 % (Linux), -0.4 % (tmac),
 -9.3 % (tssh), 0 % of request units pinned, 0.91 % of allocated bytes
-published, and a C10k idle connection's partition 24.4 KiB. A known
-weakness: on tssh, under load from another guest on the same host, the
-flag-on p99 is 20-40 % above 0.21.0's (long io waits, likely behind a
-local collection on the same thread [INFERENCE]). Follow-ups: attribute
-and bound that tail (a slice cap on a local collection or an io-fiber
-handoff), a new pre-registered tmac round, a compiler write barrier for
-the published-roots walk, and the merge onto the release line.
+published, and a C10k idle connection's partition 24.4 KiB. The tssh
+tail, followed up (heap22 fu, TailFix3): uncapped, closed-loop, under
+load from another guest on the same host, the flag-on p99 stays 64 %
+(/web) and 32 % (/api) above 0.21.0's, while it serves more requests a
+second on a saturated host. The cause is saturation queueing, not the
+heap or the network (tssh, n7): TCP_NODELAY is on, a query is one send,
+at least 88 % of the database round trips over 100 ms match no slow
+PostgreSQL statement, and the machine's CPU was 99.3-99.8 %. At an
+equal fixed rate (tssh, n8: /web 1,400 and /api 900 requests a second;
+clean rounds, burn n=4, idle n=6) the flag-on p99 is 0.64 / 0.91 times
+0.21.0's under burn and 0.87 / 0.89 idle, within the pre-registered
+1.15. The K1b S6 verdict above is unchanged. Follow-ups: a new
+pre-registered tmac round, a compiler write barrier for the
+published-roots walk, and the merge onto the release line.
 
 **S6 fixes: where each lives (so no port applies one twice).**
 Flag-gated, on `h22/heap-partition` only: PauseHunt 94eb6ff9f, union

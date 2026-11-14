@@ -781,18 +781,19 @@ import std/socket::{IyiSocket, SocketError}
   # receive, beside a 50 ms hold: half must start within 1 ms, and none
   # may wait the hold out.
   #
-  # The 1 ms is a sleeping kernel thread's wake, which Linux does not owe
-  # on a machine with more runnable threads than cores: there, 12 vCPUs,
-  # at one-minute loads of 18 to 34 this step failed 74 of 80 runs, its
-  # medians 0.8 to 4.3 ms and most near 2.9, while tmac (macOS 26, 10
-  # cores) at loads of 4 to 44 failed none of 160, at 7 to 218 us. So the
-  # hand-off is also held where no clock can blur it: right after its
-  # send, the waker's worker has called an idle worker for the woken
+  # The 1 ms is a sleeping kernel thread's wake, which Linux and Windows
+  # do not owe on a machine with more runnable threads than cores: Linux
+  # on 12 vCPUs at one-minute loads of 18 to 34 failed this step in 74 of
+  # 80 runs, its medians 0.8 to 4.3 ms and most near 2.9, and Windows on
+  # 12 vCPUs beside 12 and 24 busy loops in 32 of 80, while tmac (macOS
+  # 26, 10 cores) at loads of 4 to 44 failed none of 160, at 7 to 218 us.
+  # So the hand-off is also held where no clock can blur it: right after
+  # its send, the waker's worker has called an idle worker for the woken
   # fiber (`handoff_last`, which only that worker writes and only its own
   # `pop` clears), and the woken task then runs on another worker. Those
   # hold on every machine; the median is judged unless
   # bench/parallel_exercise.sh passes `--loaded=`, its reading of a Linux
-  # load at or past the cores, and the run then says it was not judged.
+  # or Windows load at or past the cores, and the run then says so.
   @[NoInline]
   @[NoPreempt]
   def hold_np(ns : Int64) : Nil

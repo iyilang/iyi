@@ -166,20 +166,28 @@ done
 MIGRATE_STEPS="channels sockets cancel closes deep loops balance handoff backstop heldio join"
 [ "$CORES" -lt 4 ] && MIGRATE_STEPS="channels sockets cancel closes deep loops handoff backstop heldio join"
 # The handoff step's 1 ms median is a sleeping thread's wake, which Linux
-# does not owe a machine with more runnable threads than cores: 12 vCPUs
-# at one-minute loads of 18 to 34 failed it in 74 of 80 runs, the medians
-# near the kernel's 2.9 ms slice. So a Linux run whose one-minute load
-# average is at or past the cores is told so (`--loaded=`), and the step
-# holds there only what no clock blurs: an idle worker called at each
-# hand-off, the woken task run on another worker, within 40 ms. darwin
-# woke them in 7 to 218 us at loads of 4 to 44 on 10 cores (tmac, 160
-# runs), and is always judged; so is Windows, which keeps no load average.
+# and Windows do not owe a machine with more runnable threads than cores:
+# Linux on 12 vCPUs at one-minute loads of 18 to 34 failed it in 74 of 80
+# runs, the medians near its 2.9 ms slice, and Windows on 12 vCPUs
+# beside 12 and 24 busy loops in 32 of 80, at 0.1 to 6.2 ms.
+# So a run whose load is at or past the cores is told so (`--loaded=`),
+# and the step holds there only what no clock blurs: an idle worker
+# called at each hand-off, the woken task run on another worker, within
+# 40 ms. Linux's load is its one-minute average; Windows keeps none, so
+# its load is the busy share of the cores plus the ready queue over a
+# second, which read 0.1 to 1.2 idle, 6.1 to 7.3 beside 6 busy loops
+# (no run failed) and 20 to 45 beside 12 to 24. darwin woke the tasks in
+# 7 to 218 us at loads of 4 to 44 on 10 cores (tmac, 160 runs), and is
+# always judged.
 host_load() {
-  [ "$(uname -s)" = Linux ] || return 0
-  local load
-  load="$(cut -d' ' -f1 /proc/loadavg 2> /dev/null)"
+  local load=""
+  case "$(uname -s)" in
+    Linux) load="$(cut -d' ' -f1 /proc/loadavg 2> /dev/null)" ;;
+    MINGW* | MSYS* | CYGWIN* | Windows_NT)
+      load="$(powershell -NoProfile -Command '$c = (Get-Counter "\Processor(_Total)\% Processor Time","\System\Processor Queue Length" -SampleInterval 1 -MaxSamples 1).CounterSamples; [string]::Format([cultureinfo]::InvariantCulture, "{0:F1}", $c[0].CookedValue * [Environment]::ProcessorCount / 100 + $c[1].CookedValue)' 2> /dev/null | tr -d '\r')" ;;
+  esac
   [ -n "$load" ] && awk -v l="$load" -v c="$CORES" 'BEGIN { exit !(l >= c) }' &&
-    echo "a one-minute load of $load on $CORES cores"
+    echo "a load of $load on $CORES cores"
 }
 for build in plain release; do
   step "what a task keeps when it resumes on another worker, $build build"
@@ -1011,8 +1019,9 @@ else
   # task started 50.0 ms after its send in each of 20 wakes without the
   # call, beside a 50 ms hold, and 23 to 28 us with it. The step names the
   # call it finds missing before it reads a clock, so a loaded host
-  # catches the copy too: 15 of 15 runs at Linux loads of 18 to 33, and
-  # 20 of 20 on tmac at loads of 4 to 41.
+  # catches the copy too: 15 of 15 runs at Linux loads of 18 to 33, 20 of
+  # 20 on tmac at loads of 4 to 41, and 15 of 15 on Windows, 12 vCPUs,
+  # beside up to 24 busy loops.
   broken nohandoff '/^    elsif handed_on\?\(st, fiber\)$/ { print "    elsif false"; next } { print }' concurrency.iyi parallel_migrate
   caught nohandoff 'were handed over with no idle worker called' handoff
 
@@ -1020,7 +1029,10 @@ else
   # The copy keeps `handoff_last` and drops the call, so only the clock
   # can tell: the monitor calls for the fiber a look or two into the
   # hold (`look`), and its wakes waited 5.1 to 10.2 ms at the median
-  # (Linux, loads 18 to 33, 15 of 15 runs), 6.3 on tmac (20 of 20).
+  # (Linux, loads 18 to 33, 15 of 15 runs), 6.3 on tmac (20 of 20) and
+  # 1.2 to 12.5 on Windows (15 of 15), the 1.2 beside 24 busy loops; there
+  # some wakes start within 30 us even without the call (4 of 10 in one
+  # run), so the median, not the fastest, is what tells.
   broken nocall '/^        st.handoff_last = fiber.object_id$/ { print; drop = 1; next } drop && /^        wake_one$/ { drop = 0; next } { print }' concurrency.iyi parallel_migrate
   caught nocall 'handoff: tasks woken onto a worker held 50 ms' handoff
 

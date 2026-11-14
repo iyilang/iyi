@@ -163,31 +163,36 @@ done
 # ── 2. What a move keeps, twice ───────────────────────────────────────────
 # Its balance step is timed against four workers' ideal, which a machine
 # with fewer cores than that cannot keep; there the other steps run.
-MIGRATE_STEPS="channels sockets cancel closes deep loops balance handoff backstop heldio join"
-[ "$CORES" -lt 4 ] && MIGRATE_STEPS="channels sockets cancel closes deep loops handoff backstop heldio join"
-# The handoff step's 1 ms median is a sleeping thread's wake, which Linux
-# and Windows do not owe a machine with more runnable threads than cores:
-# Linux on 12 vCPUs at one-minute loads of 18 to 34 failed it in 74 of 80
-# runs, the medians near its 2.9 ms slice, and Windows on 12 vCPUs
-# beside 12 and 24 busy loops in 32 of 80, at 0.1 to 6.2 ms.
+MIGRATE_STEPS="channels sockets cancel closes deep loops balance backstop heldio join"
+[ "$CORES" -lt 4 ] && MIGRATE_STEPS="channels sockets cancel closes deep loops backstop heldio join"
+# The handoff step runs by itself after the others, its host's load read
+# the second before it. Its 1 ms median is a sleeping thread's wake,
+# which Linux and Windows do not owe a machine with more runnable threads
+# than cores: Linux on 12 vCPUs at one-minute loads of 18 to 34 failed it
+# in 74 of 80 runs, the medians near its 2.9 ms slice, and Windows on 12
+# vCPUs beside 12 and 24 busy loops in 32 of 80, at 0.1 to 6.2 ms.
 # So a run whose load is at or past the cores is told so (`--loaded=`),
 # and the step holds there only what no clock blurs: an idle worker
 # called at each hand-off, the woken task run on another worker, within
-# 40 ms. Linux's load is its one-minute average; Windows keeps none, so
-# its load is the busy share of the cores plus the ready queue over a
-# second, which read 0.1 to 1.2 idle, 6.1 to 7.3 beside 6 busy loops
-# (no run failed) and 20 to 45 beside 12 to 24. darwin woke the tasks in
-# 7 to 218 us at loads of 4 to 44 on 10 cores (tmac, 160 runs), and is
-# always judged.
+# 40 ms. Linux's load is its threads runnable, `procs_running` in
+# /proc/stat less the one reading it, ten looks over the second: the
+# one-minute average lags it, and a run begun at an average of 8.4 on
+# those 12 vCPUs failed the median. Windows keeps none, so its load is
+# the busy share of the cores plus the ready queue over the second,
+# which read 0.1 to 1.2 idle, 6.1 to 7.3 beside 6 busy loops (no run
+# failed) and 20 to 45 beside 12 to 24. darwin woke the tasks in 7 to
+# 218 us at loads of 4 to 44 on 10 cores (tmac, 160 runs), and is always
+# judged.
 host_load() {
-  local load=""
   case "$(uname -s)" in
-    Linux) load="$(cut -d' ' -f1 /proc/loadavg 2> /dev/null)" ;;
+    Linux)
+      for _ in 1 2 3 4 5 6 7 8 9 10; do
+        grep '^procs_running ' /proc/stat
+        sleep 0.1
+      done | awk '{ sum += $2 - 1 } END { if (NR) printf "%.1f\n", sum / NR }' ;;
     MINGW* | MSYS* | CYGWIN* | Windows_NT)
-      load="$(powershell -NoProfile -Command '$c = (Get-Counter "\Processor(_Total)\% Processor Time","\System\Processor Queue Length" -SampleInterval 1 -MaxSamples 1).CounterSamples; [string]::Format([cultureinfo]::InvariantCulture, "{0:F1}", $c[0].CookedValue * [Environment]::ProcessorCount / 100 + $c[1].CookedValue)' 2> /dev/null | tr -d '\r')" ;;
+      powershell -NoProfile -Command '$c = (Get-Counter "\Processor(_Total)\% Processor Time","\System\Processor Queue Length" -SampleInterval 1 -MaxSamples 1).CounterSamples; [string]::Format([cultureinfo]::InvariantCulture, "{0:F1}", $c[0].CookedValue * [Environment]::ProcessorCount / 100 + $c[1].CookedValue)' 2> /dev/null | tr -d '\r' ;;
   esac
-  [ -n "$load" ] && awk -v l="$load" -v c="$CORES" 'BEGIN { exit !(l >= c) }' &&
-    echo "a load of $load on $CORES cores"
 }
 for build in plain release; do
   step "what a task keeps when it resumes on another worker, $build build"
@@ -196,14 +201,27 @@ for build in plain release; do
   if ! "$IYI" build $flag "$REPO/bench/parallel_migrate.iyi" -o "migrate-$build" > "build-migrate-$build.log" 2>&1; then
     echo "build failed:"; tail -20 "build-migrate-$build.log"; exit 1
   fi
-  loaded="$(host_load)"
   # shellcheck disable=SC2086 # the steps are words
-  timeout -k 5 600 "./migrate-$build" $MIGRATE_STEPS ${loaded:+"--loaded=$loaded"} > "migrated-$build.txt" 2>&1
+  timeout -k 5 600 "./migrate-$build" $MIGRATE_STEPS > "migrated-$build.txt" 2>&1
   code=$?
   if [ "$code" -ne 0 ] || ! grep -q 'every property held' "migrated-$build.txt"; then
     echo "the migration exercise failed (exit $code):"; cat "migrated-$build.txt"; exit 1
   fi
   sed 's/^/  /' "migrated-$build.txt"
+  load="$(host_load)"
+  loaded=""
+  judged=""
+  if [ -n "$load" ] && awk -v l="$load" -v c="$CORES" 'BEGIN { exit !(l >= c) }'; then
+    loaded="a load of $load on $CORES cores"
+  elif [ -n "$load" ]; then
+    judged="; judged at a load of $load on $CORES cores"
+  fi
+  timeout -k 5 300 "./migrate-$build" handoff ${loaded:+"--loaded=$loaded"} > "handed-$build.txt" 2>&1
+  code=$?
+  if [ "$code" -ne 0 ] || ! grep -q 'every property held' "handed-$build.txt"; then
+    echo "the hand-off step failed${load:+ at a load of $load on $CORES cores} (exit $code):"; cat "handed-$build.txt"; exit 1
+  fi
+  grep -v 'every property held' "handed-$build.txt" | sed "s/^/  /; s/\$/$judged/"
 done
 # ── 2a. Windows' one completion port, twice ──────────────────────────────
 # bench/completions_taken.iyi at twelve workers: a task's socket answered
@@ -871,6 +889,12 @@ broken duplicate '/^          victim.pool_head = fiber.next_run$/ { next } /^   
 caught duplicate 'the pool handed one parallel task to a worker twice' steal
 
 step "failure proof: a cancel never delivered to a sleeping task's thread"
+# The copy posts no cancel to another thread, so the sleeper on a worker
+# and the task asleep on the main thread sleep their 10 s out past the
+# watchdog. The step cued its failure by a 100 ms sleep once, and beside
+# 12 busy loops on Linux's 12 vCPUs the copy passed it in 19 runs of 20,
+# the cancel finding sleeps not yet begun, which end themselves; the
+# failure now waits until each is where the step says (`cancel`).
 broken undelivered '/^    return if fiber.cancel_posted$/ { print "    return"; next } { print }'
 caught undelivered 'cancel: still waiting after 5000 ms' cancel --watch=5000
 
@@ -1156,6 +1180,11 @@ step "failure proof: a word the monitor raised for the task before preempts the 
 # processors and held to 4, on Linux here and on macOS 26.6, Apple M2
 # Pro, 10 cores (the user's machine), and the fresh step held 10 rounds
 # with no preemption, plain and release, on each.
+# The step now judges each round from the task before's end to the end
+# of the slice the give-up came in (`fresh_round`), and the copy was
+# caught at round 1 within 55 to 3075 us of that end on Linux (8 runs, 16
+# to 48 threads runnable), 64 us in a gate run beside 12 busy loops, and
+# 34 to 50 us on tmac.
 broken stale '/^        raised.value.set\(0_u64\) if raised.value.get != 0_u64$/ { next } { print }' concurrency.iyi parallel_preempt
 caught stale 'fresh: round ' fresh --workers=1
 

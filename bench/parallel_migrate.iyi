@@ -264,80 +264,102 @@ import std/socket::{IyiSocket, SocketError}
   # answer to a writer - a task of its own on the same socket, which may
   # run on another worker and, on Windows, moves the socket to that
   # worker's port while the reader's next read is posted on its own.
+  #
+  # A read moves only when another worker takes its socket's news, which
+  # a host loaded past its cores makes rarer: Linux on 12 vCPUs moved 12
+  # to 92 of the 192 reads a run, and beside 12 busy loops, at a load of
+  # 34, one run moved none. A run that moves none holds nothing of what a
+  # move keeps, so it is run again, up to SOCKET_RUNS times; one in which
+  # no read ever moves fails.
+  SOCKET_RUNS = 5
+
   def sockets(watch : Int32) : Nil
     watched("sockets", watch) do
       conns = 16
       rounds = 12
-      listener = IyiSocket.listen("127.0.0.1", 0)
-      port = listener.local_port
-      moves = Tally.new
-      answered = Tally.new
       stops = IyiThread.stops
-      group do |g|
-        g.spawn do
-          conns.times do |c|
-            client = listener.accept
-            fail("sockets: accept answered #{client}") unless client.is_a?(IyiSocket)
-            fd = client.fd
-            family = client.family
-            g.spawn(unit: :new) do
-              socket = IyiSocket.new(fd, family)
-              kept = build(2000, c.to_i64 + 100_i64)
-              answers = Channel(Int32).new(rounds)
-              group do |inner|
-                inner.spawn do
-                  rounds.times do
-                    n = answers.receive
-                    fail("sockets: the writer's channel answered #{n}") unless n.is_a?(Int32)
-                    wrote = socket.write("#{n}.")
-                    fail("sockets: a write answered #{wrote}") unless wrote.is_a?(Int32)
-                  end
-                  0
-                end
-                rounds.times do |r|
-                  os = os_thread
-                  st = IyiScheduler.state.object_id
-                  got = socket.read(64)
-                  moves.add(1_i64) if moved?("sockets", os, st)
-                  fail("sockets: connection #{c} read #{got} where request #{r} was sent") unless got == "q#{c}.#{r};"
-                  churn(3000)
-                  spin(200000_i64, r.to_u64)
-                  fail("sockets: connection #{c}'s list was not whole after request #{r}") unless whole?(kept, 2000, c.to_i64 + 100_i64)
-                  answered.add(1_i64)
-                  answers.send(r)
-                end
-              end
-              socket.close
-              0
-            end
-          end
-          0
-        end
-        clients = [] of IyiSocket
-        conns.times do
-          c = IyiSocket.connect("127.0.0.1", port, 5000)
-          fail("sockets: connect answered #{c}") unless c.is_a?(IyiSocket)
-          clients << c
-        end
-        rounds.times do |r|
-          clients.each_with_index do |client, c|
-            wrote = client.write("q#{c}.#{r};")
-            fail("sockets: a client's write answered #{wrote}") unless wrote.is_a?(Int32)
-          end
-          clients.each do |client|
-            got = client.read(16)
-            fail("sockets: a client read #{got} where the answer to #{r} was due") unless got == "#{r}."
-          end
-        end
-        clients.each(&.close)
+      runs = 0
+      moved = 0_i64
+      while moved == 0_i64 && runs < SOCKET_RUNS
+        runs += 1
+        moved = socket_run(conns, rounds)
+        break if IyiWorkers.count <= 1
       end
-      listener.close
-      fail("sockets: #{answered.count} of #{conns * rounds} requests answered") unless answered.count == (conns * rounds).to_i64
-      if IyiWorkers.count > 1 && moves.count == 0_i64
-        fail("sockets: none of #{conns * rounds} reads parked on a socket resumed on another worker")
+      if IyiWorkers.count > 1 && moved == 0_i64
+        fail("sockets: none of #{conns * rounds} reads parked on a socket resumed on another worker, in #{runs} runs")
       end
-      puts "sockets: #{conns} connections, #{rounds} requests each read and answered in order, #{moves.count} reads resumed on another worker, through #{IyiThread.stops - stops} stops"
+      again = runs > 1 ? " (run #{runs}; the #{runs - 1} before moved none)" : ""
+      puts "sockets: #{conns} connections, #{rounds} requests each read and answered in order, #{moved} reads resumed on another worker#{again}, through #{IyiThread.stops - stops} stops"
     end
+  end
+
+  # One run of the sockets step: the reads that resumed on another worker.
+  def socket_run(conns : Int32, rounds : Int32) : Int64
+    listener = IyiSocket.listen("127.0.0.1", 0)
+    port = listener.local_port
+    moves = Tally.new
+    answered = Tally.new
+    group do |g|
+      g.spawn do
+        conns.times do |c|
+          client = listener.accept
+          fail("sockets: accept answered #{client}") unless client.is_a?(IyiSocket)
+          fd = client.fd
+          family = client.family
+          g.spawn(unit: :new) do
+            socket = IyiSocket.new(fd, family)
+            kept = build(2000, c.to_i64 + 100_i64)
+            answers = Channel(Int32).new(rounds)
+            group do |inner|
+              inner.spawn do
+                rounds.times do
+                  n = answers.receive
+                  fail("sockets: the writer's channel answered #{n}") unless n.is_a?(Int32)
+                  wrote = socket.write("#{n}.")
+                  fail("sockets: a write answered #{wrote}") unless wrote.is_a?(Int32)
+                end
+                0
+              end
+              rounds.times do |r|
+                os = os_thread
+                st = IyiScheduler.state.object_id
+                got = socket.read(64)
+                moves.add(1_i64) if moved?("sockets", os, st)
+                fail("sockets: connection #{c} read #{got} where request #{r} was sent") unless got == "q#{c}.#{r};"
+                churn(3000)
+                spin(200000_i64, r.to_u64)
+                fail("sockets: connection #{c}'s list was not whole after request #{r}") unless whole?(kept, 2000, c.to_i64 + 100_i64)
+                answered.add(1_i64)
+                answers.send(r)
+              end
+            end
+            socket.close
+            0
+          end
+        end
+        0
+      end
+      clients = [] of IyiSocket
+      conns.times do
+        c = IyiSocket.connect("127.0.0.1", port, 5000)
+        fail("sockets: connect answered #{c}") unless c.is_a?(IyiSocket)
+        clients << c
+      end
+      rounds.times do |r|
+        clients.each_with_index do |client, c|
+          wrote = client.write("q#{c}.#{r};")
+          fail("sockets: a client's write answered #{wrote}") unless wrote.is_a?(Int32)
+        end
+        clients.each do |client|
+          got = client.read(16)
+          fail("sockets: a client read #{got} where the answer to #{r} was due") unless got == "#{r}."
+        end
+      end
+      clients.each(&.close)
+    end
+    listener.close
+    fail("sockets: #{answered.count} of #{conns * rounds} requests answered") unless answered.count == (conns * rounds).to_i64
+    moves.count
   end
 
   # ── cancel ───────────────────────────────────────────────────────────

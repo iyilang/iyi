@@ -450,26 +450,66 @@
     end
   end
 
+  # The failing task's wait for its cue: a spin with no back-edge check,
+  # so from its first statement to its failure the worker it is on runs
+  # nothing else and the sleeper cannot go to sleep there. Said started
+  # from inside it, where no check can give the worker up first.
+  @[NoInline]
+  @[NoPreempt]
+  def hold_for(begun : Tally, cue : Tally) : Nil
+    begun.add(1_i64)
+    while cue.count == 0_i64
+      IyiThread.spin_pause
+    end
+  end
+
   # A cancel reaches a task on another thread: asleep, parked on a
   # channel, and still waiting in the pool to start. The pool is filled
   # first: with it grown to the work instead, a copy that delivers no
   # cancel to another thread passed the step.
+  #
+  # The failure comes only once each task waits where the step says, and
+  # the main thread looks before it cues it: the sleeper listed in a
+  # worker's sleep heap (`IyiFiber#listed_on`), the waiter parked on its
+  # channel, and the local task asleep on this thread - `unit: :same`, as
+  # a plain spawn of a block that captures nothing is a parallel task now
+  # (SPEC.md III.4.15). The failing task holds its worker from before the
+  # sleeper is spawned (`hold_for`), so that heap is another thread's. Both
+  # sleeps are then ended only by a cancel posted to the thread that holds
+  # them (`post_cancel`). With a 100 ms sleep for the cue instead, a copy
+  # that posts nothing passed in 19 runs of 20 beside 12 busy loops on
+  # Linux's 12 vCPUs: the plain spawn ran on the pool, and in most runs the
+  # sleeper, it and the failing task were on one worker, whose cancel ends
+  # its own sleeps without a post.
   def cancel(watch : Int32) : Nil
     watched("cancel", watch) do
       fill_pool
       never = Channel(Int32).new
-      started = __iyi_monotonic_ns
+      begun = Tally.new
+      cue = Tally.new
+      failed = Tally.new
       slept = 0
       parked = 0
       pinned = 0
       group do |g|
-        sleeper = g.spawn(unit: :new) { sleep(10000).is_a?(Cancelled) ? 1 : 0 }
-        waiter = g.spawn(unit: :new) { never.receive.is_a?(Cancelled) ? 1 : 0 }
-        local = g.spawn { sleep(10000).is_a?(Cancelled) ? 1 : 0 }
         g.spawn(unit: :new) do
-          sleep(100)
+          hold_for(begun, cue)
+          if cue.sum.to_u64 == thread_here
+            fail("cancel: the sleeper went to sleep on the worker the failing task held")
+          end
+          failed.add(__iyi_monotonic_ns)
           Boom.new
         end
+        while begun.count == 0_i64
+          sleep(1)
+        end
+        sleeper = g.spawn(unit: :new) { sleep(10000).is_a?(Cancelled) ? 1 : 0 }
+        waiter = g.spawn(unit: :new) { never.receive.is_a?(Cancelled) ? 1 : 0 }
+        local = g.spawn(unit: :same) { sleep(10000).is_a?(Cancelled) ? 1 : 0 }
+        while sleeper.fiber.listed_on == 0_u64 || waiter.fiber.state != IyiFiberState::WaitingCh || local.fiber.state != IyiFiberState::Sleeping
+          sleep(1)
+        end
+        cue.add(sleeper.fiber.listed_on.to_i64)
         got = sleeper.value
         slept = got.is_a?(Int32) ? got : -1
         got = waiter.value
@@ -477,7 +517,7 @@
         got = local.value
         pinned = got.is_a?(Int32) ? got : -1
       end
-      took = elapsed_ms(started)
+      took = elapsed_ms(failed.sum)
       fail("cancel: a task asleep on another thread was not cancelled") unless slept == 1
       fail("cancel: a task parked on a channel on another thread was not cancelled") unless parked == 1
       fail("cancel: a task on the spawning thread was not cancelled by a parallel failure") unless pinned == 1

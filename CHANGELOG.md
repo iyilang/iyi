@@ -146,15 +146,47 @@
   none, at 15 to 163 us. The step now also holds that each hand-off
   called an idle worker (the waker's `handoff_last`, read right after
   its send) and that the woken task ran on another worker, on every
-  host; `bench/parallel_exercise.sh` passes `--loaded=` when the load is
-  at or past the cores - Linux's one-minute average, and on Windows the
-  busy share of the cores plus the ready queue over a second - and the 1
-  ms median is then not judged, said so in the output. The 40 ms bound
+  host; `bench/parallel_exercise.sh` runs the step by itself, after the
+  migration exercise's other steps, and passes `--loaded=` when the load
+  in the second before it is at or past the cores - on Linux the threads
+  runnable (`procs_running`), ten looks over the second, since the
+  one-minute average lagged the load a run met: one begun at an average
+  of 8.4 on those 12 vCPUs failed the median; on Windows the busy share
+  of the cores plus the ready queue - and the 1 ms median is then not
+  judged, said so in the output. The 40 ms bound
   on every wake and the 1 ms median elsewhere are unchanged. The broken
   copy without the call now fails at the call in 50 runs of 50 at any
   load across the three machines, and a new one that marks its call and
   rings nobody, left to the monitor, fails at the median in 50 of 50:
   5.1 to 10.2 ms on Linux, 6.3 on tmac, 1.2 to 12.5 on Windows.
+
+- **The parallel gate's cancel, fresh and sockets steps hold on a loaded
+  host, and the cancel step's broken copy is caught at any load.**
+  `bench/parallel_exercise.iyi`'s cancel step cued its failure with a 100
+  ms sleep. A plain spawn of a block that captures nothing runs on the
+  pool now (SPEC.md III.4.15), so its "task on this thread" was on a
+  worker. Beside 12 busy loops on this Linux machine's 12 vCPUs, the
+  sleeper, that task and the failing task were usually on one worker,
+  whose cancel ends its own sleeps without posting. The copy that posts
+  no cancel passed in 19 runs of 20. The failing task now holds its
+  worker with preemption off from before the sleepers are spawned. It
+  fails only once the main thread has seen three things: the sleeper
+  listed in another worker's sleep heap, the waiter parked, and a
+  `unit: :same` task asleep on the main thread. The copy is now caught in
+  39 runs of 39 on Linux, 11 of them beside 12 busy loops, and in 25 of
+  25 on tmac. `bench/parallel_preempt.iyi`'s fresh step timed a give-up
+  from the switched-in task's first statement. The monitor's 4000 us
+  floor is wall time since the switch, and a kernel that holds the
+  thread off its core spends that time too: one Linux round gave up 508
+  us in. Each round is now bracketed from both sides and fails when the
+  give-up came within 4000 us of the task before's end. A round where
+  the thread's CPU clock shows the kernel held the thread off its core
+  long enough to explain the give-up is set aside and run again. That
+  happened to 1 and 2 rounds in a gate run at a load of 35 (Linux and
+  darwin; Windows judges as before). `bench/parallel_migrate.iyi`'s
+  sockets step needs a read that moved. Its release build moved 3 to 23
+  of 192 beside 12 busy loops, and once none, so a run that moved none
+  is run again, up to five times. No bound changed.
 
 ## 0.21.0 — 2026-11-09
 

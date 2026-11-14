@@ -3943,9 +3943,11 @@ with preemption off starts on an idle worker in 23 to 28 us at the median
 of ten (Linux, 12 vCPUs, release), where it waited the 50 ms out in all
 20 wakes of two runs before. It also holds what no load blurs: each
 hand-off called an idle worker, and the woken task ran on another worker.
-On a Linux or Windows host whose load is at or past its cores the median
-is not judged, since the kernel then wakes the called thread a slice
-later: 0.8 to 4.3 ms at loads of 18 to 34 on those 12 vCPUs.
+On a Linux or Windows host whose load in the second before the step is at
+or past its cores the median is not judged, since the kernel then wakes
+the called thread a slice later: 0.8 to 4.3 ms at loads of 18 to 34 on
+those 12 vCPUs. Linux's load there is its threads runnable, which the
+one-minute average lags.
 
 What a move keeps, and what holds it: the fiber's stack is found by the
 collector on whichever thread runs it, through the fiber registry and the

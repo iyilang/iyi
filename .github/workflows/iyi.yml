@@ -1180,7 +1180,7 @@ jobs:
       # Pebble, which it builds with `go install` - and skips, saying so,
       # where there is no Go, as there was none in this container. No
       # `go.sum` here to key a cache on, so none is asked for.
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: stable
           cache: false
@@ -1718,7 +1718,7 @@ jobs:
       # collector, Boehm and Go on this runner, so darwin's numbers are in
       # every log the way Linux's are in GC_DESIGN.md. A shared runner is
       # not a machine to gate on, and this step asserts nothing.
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: stable
           # Nothing here is a Go project, so there is no `go.sum` to key a
@@ -3123,7 +3123,7 @@ jobs:
       # programs under iyi's collector, Boehm and Go on this runner. It
       # asserts no number, and refuses a row whose three arms answer
       # differently, which is a question Windows had never been asked.
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: stable
           cache: false

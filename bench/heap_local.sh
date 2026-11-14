@@ -20,7 +20,8 @@
 # same stacks unread by a collection of a unit parked dirty and owing
 # nothing, a busy program whose parked unit is taken after two ticks, an
 # idle takeover that holds its unit while a fiber of the unit woken
-# meanwhile waits, a sweep that keeps its runs and drops the return stack
+# meanwhile waits, an idle walk that drops a unit parked dirty whose token
+# was held, a sweep that keeps its runs and drops the return stack
 # or lists a free chunk again, a parked unit's spare runs left off the idle
 # workers' test, a pooled run's blocks taken as never written, a dead unit's
 # pooled run left carved for a stale word to pass the root test, a
@@ -369,6 +370,14 @@ if [ "$PART" = all ] || [ "$PART" = broken ]; then
   # check alone (`HEAP22_ONLY=giveway`) does.
   HEAP22_ONLY=giveway prove_fails "a takeover that keeps a woken fiber waiting" nogiveway "giveway:" \
     '{ if (sub(/return false unless Pointer\(Void\)\.new\(unit\)\.as\(IyiUnit\)\.waiting\?/, "return false if unit != 0_u64")) found = 1; print } END { if (!found) exit 3 }' \
+    heap_partition.iyi
+
+  # An idle walk that drops a partition old enough but passed over while
+  # its unit's token is held: once the token is let go no walk comes
+  # again in a program with nothing else to park - no soundness check
+  # sees it, the idlehold check alone (`HEAP22_ONLY=idlehold`) does.
+  HEAP22_ONLY=idlehold prove_fails "an idle walk that drops a held unit" noidlehold "idlehold:" \
+    '{ if (sub(/elsif idle_held\?\(record\)/, "elsif false")) found = 1; print } END { if (!found) exit 3 }' \
     heap_partition.iyi
 
   # A sweep that keeps its runs and drops the return stack, as the whole

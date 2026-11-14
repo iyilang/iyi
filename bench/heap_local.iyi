@@ -70,6 +70,10 @@
 # - `idle:` units parked with garbage but no debt, and no global
 #   collection: idle workers, woken by the idle clock, collect every one
 #   within 3 s, their lists whole after, and some partition holds less.
+# - `idlehold:` a unit parked dirty whose token the check holds across the
+#   walk that would take it is passed over, and collected within 3 s once
+#   let go, with nothing else parked to bring a walk: the walk counts it
+#   as waiting still (`IyiHeap.idle_held?`); its list reads whole after.
 # - `busy:` while two units pass a value back and forth - thousands of
 #   parks a tick - a unit parked dirty is not collected before
 #   `IyiHeap::IDLE_BUSY_TICKS` ticks of the idle clock, by a walk that
@@ -1880,6 +1884,82 @@
     IyiHeap.collect_every_park = true
   end
 
+  # ── idlehold ──────────────────────────────────────────────────────────
+
+  # The id the check holds a unit's token by: no worker's (a state's
+  # object id is an address), nor `IyiUnit::YIELDED`.
+  HOLD_ID = 2_u64
+
+  # A unit parked dirty whose token is held across the walk that would
+  # take it - by the worker that parked its fiber and has yet to let go,
+  # stalled under load; here by the check - is passed over by that walk
+  # and taken by a later one once let go. A walk that dropped it said
+  # nothing more was waiting, and in a program with nothing else to park
+  # no walk came again: under load the idle check saw 2 of 4 and 5 of 8
+  # units parked dirty never collected (heap22 S6 v4, Linux, tssh, tmac).
+  # Under `IYI_HEAP_STRESS` the unit parks clean and is stamped by hand,
+  # as `idle_check` does.
+  def idlehold_check : Nil
+    IyiHeap.collect_every_park = false
+    stressed = {% if flag?(:heap_verify) %} IyiHeapVerify.stress != 0_u64 {% else %} false {% end %}
+    group do |g|
+      go = Channel(Int64).new(1)
+      ready = Channel(UInt64).new(1)
+      handle = g.spawn(unit: :new) { idle_task(3_i64, go, ready) }
+      got = ready.receive
+      record = got.is_a?(UInt64) ? got : 0_u64
+      fail("idlehold: a parked unit sent no record") if record == 0_u64
+      unit = Pointer(Void).new(IyiHeap.read64(record &+ IyiHeap::REC_UNIT)).as(IyiUnit)
+      # Its token, which the worker that ran it holds until its fiber
+      # has parked, taken here once let go.
+      waited = 0
+      held = false
+      while !held && waited < 3000
+        sleep(1)
+        waited = waited + 1
+        held = unit.take(HOLD_ID)
+      end
+      fail("idlehold: the parked unit's token was never let go") unless held
+      count = IyiHeap.partition_collections(record)
+      if stressed
+        IyiHeap.write64(record &+ IyiHeap::REC_DEBT, 1_u64)
+        IyiHeap.write64(record &+ IyiHeap::REC_IDLE_TICK, IyiStat.get(IyiStat::IDLE_TICK) &+ 1_u64)
+        IyiStat.atomic(IyiStat::IDLE_PENDING).value.set(1_u64)
+        IyiWorkers.wake_one
+      end
+      stamp = IyiHeap.read64(record &+ IyiHeap::REC_IDLE_TICK)
+      # Held until a walk at the unit's ticks or later is done, and then
+      # until the walks stop, or one more is done.
+      passed = false
+      waited = 0
+      while !passed && waited < 5000
+        sleep(1)
+        waited = waited + 1
+        done = IyiStat.get(IyiStat::IDLE_DONE_TICK)
+        quiet = IyiStat.get(IyiStat::IDLE_PENDING) == 0_u64 && IyiStat.get(IyiStat::IDLE_CURSOR) == 0_u64
+        due = stamp &+ IyiStat.get(IyiHeap::STAT_IDLE_DELAY)
+        passed = stamp != 0_u64 && done >= due && (quiet || done > due)
+      end
+      taken = IyiHeap.partition_collections(record) != count
+      unit.give
+      fail("idlehold: the parked unit was never stamped") if stamp == 0_u64
+      fail("idlehold: no walk came to the parked unit in 5 s") unless passed
+      fail("idlehold: an idle worker collected a unit whose token another held") if taken
+      waited = 0
+      while IyiHeap.partition_collections(record) == count && waited < 3000
+        sleep(1)
+        waited = waited + 1
+      end
+      left = IyiHeap.partition_collections(record) == count
+      go.send(1_i64)
+      value = handle.value
+      fail("idlehold: a unit answered #{value}") unless value.is_a?(Int64)
+      fail("idlehold: #{value} nodes of a parked unit's list read wrong") if value != 0_i64
+      fail("idlehold: a parked unit dirty, passed over while its token was held, was not collected in 3 s once let go") if left
+    end
+    IyiHeap.collect_every_park = true
+  end
+
   # ── busy ──────────────────────────────────────────────────────────────
 
   # A value passed back and forth between two units, every receive a
@@ -2043,32 +2123,40 @@
   # load ran long (heap22 S6, tssh). The fiber is woken from the main
   # thread, outside the pool, the moment its record is seen busy: onto
   # the shared queue, and a worker called to it asks for the unit's
-  # token. A wake that comes after the collection's last look is a try
-  # lost, as is one the pool has no worker yet to call for, and one of
-  # eight tries must give way. Under `IYI_HEAP_STRESS`, where the unit
-  # collects itself on its way to the park and parks clean, or when its
-  # park owed, it is stamped dirty by hand, as `idle_check` does, and the
-  # worker the stamp's `wake_one` rang takes it, holding the look's token
-  # until it collects (`IyiHeap.collect_taken`; bench/heap_verify.sh's
-  # `notoken` copy).
+  # token. Only a try whose fiber asked while the takeover held the token
+  # counts, which the runtime records at the takeover's end
+  # (`IyiHeap.takeovers_asked`), not what the main thread saw: a loaded
+  # host that keeps the main thread off its core through the whole
+  # takeover, or the woken fiber's worker, loses the try, not the check
+  # (heap22 fu, IdleWake: every miss of 168 under 12 busy loops a
+  # takeover the main thread never saw busy). A takeover that came and
+  # went unseen has its unit stamped dirty again and watched once more.
+  # One of eight tries that count must give way, in at most 64 tries;
+  # none counting is a fiber woken meanwhile that never asked, called to
+  # no worker. Under `IYI_HEAP_STRESS`, where the unit collects itself on
+  # its way to the park and parks clean, or when its park owed, it is
+  # stamped dirty by hand, as `idle_check` does, and the worker the
+  # stamp's `wake_one` rang takes it, holding the look's token until it
+  # collects (`IyiHeap.collect_taken`; bench/heap_verify.sh's `notoken`
+  # copy).
   def giveway_check(workers : Int32) : Nil
     IyiHeap.collect_every_park = false
-    taken = 0
+    asked = 0
     gave = 0
     tries = 0
-    while gave == 0 && tries < 8
+    while gave == 0 && asked < 8 && tries < 64
       tries = tries + 1
       got = giveway_try(tries.to_i64)
-      taken = taken + 1 if got > 0
+      asked = asked + 1 if got > 0
       gave = gave + 1 if got > 1
     end
-    fail("giveway: no idle worker took a parked unit in #{tries} tries") if taken == 0
-    fail("giveway: a fiber woken while an idle worker collected its unit waited for the collection's end (#{taken} takeovers in #{tries} tries, none gave way)") if gave == 0
+    fail("giveway: no fiber woken while an idle worker collected its unit asked for the unit's token in #{tries} tries") if asked == 0
+    fail("giveway: a fiber woken while an idle worker collected its unit waited for the collection's end (#{asked} asked in #{tries} tries, none gave way)") if gave == 0
     IyiHeap.collect_every_park = true
   end
 
-  # One try: 0 no takeover came, 1 one came and the woken fiber waited
-  # for its end, 2 it gave way.
+  # One try: 0 no fiber asked for its unit's token while a takeover held
+  # it, 1 one asked and waited for the collection's end, 2 it gave way.
   def giveway_try(t : Int64) : Int32
     answer = 0
     group do |g|
@@ -2084,27 +2172,33 @@
         sleep(1)
         waited = waited + 1
       end
-      count = IyiHeap.partition_collections(record)
-      if IyiHeap.read64(record &+ IyiHeap::REC_IDLE_TICK) == 0_u64
-        IyiHeap.write64(record &+ IyiHeap::REC_DEBT, 1_u64)
-        IyiHeap.write64(record &+ IyiHeap::REC_IDLE_TICK, 1_u64)
-        IyiStat.atomic(IyiStat::IDLE_PENDING).value.set(1_u64)
-        IyiWorkers.wake_one
-      end
+      asked = IyiHeap.takeovers_asked
       given = IyiHeap.takeovers_given_way
+      count = IyiHeap.partition_collections(record)
       # Watched without a park, so the wake follows the take at once.
       until_ns = IyiMark.now_ns &+ 3000000000_u64
       busy = false
       while !busy && IyiMark.now_ns < until_ns
-        busy = IyiHeap.read64(record &+ IyiHeap::REC_STATE) & IyiHeap::REC_BUSY != 0_u64
-        IyiThread.park_if_requested
+        count = IyiHeap.partition_collections(record)
+        if IyiHeap.read64(record &+ IyiHeap::REC_IDLE_TICK) == 0_u64
+          IyiHeap.write64(record &+ IyiHeap::REC_DEBT, 1_u64)
+          IyiHeap.write64(record &+ IyiHeap::REC_IDLE_TICK, 1_u64)
+          IyiStat.atomic(IyiStat::IDLE_PENDING).value.set(1_u64)
+          IyiWorkers.wake_one
+        end
+        while !busy && IyiHeap.partition_collections(record) == count && IyiMark.now_ns < until_ns
+          busy = IyiHeap.read64(record &+ IyiHeap::REC_STATE) & IyiHeap::REC_BUSY != 0_u64
+          IyiThread.park_if_requested
+        end
       end
       go.send(1_i64)
       seen = saw.receive
       value = handle.value
       fail("giveway: a unit answered #{value}") unless value.is_a?(Int64)
       fail("giveway: #{value} nodes of a list read wrong after its unit's collection gave way") if value != 0_i64
-      answer = busy ? (seen == count && IyiHeap.takeovers_given_way != given ? 2 : 1) : 0
+      if IyiHeap.takeovers_asked != asked
+        answer = seen == count && IyiHeap.takeovers_given_way != given ? 2 : 1
+      end
     end
     answer
   end
@@ -2356,7 +2450,8 @@
   # bench/heap_local.sh, whose broken collection the takeover check would
   # otherwise meet first; `HEAP22_ONLY=busy`, the busy check alone, for
   # the nobusy copy; `HEAP22_ONLY=giveway`, the giveway check alone, for
-  # the nogiveway copy; `HEAP22_ONLY=kept`, the kept check alone, for
+  # the nogiveway copy; `HEAP22_ONLY=idlehold`, the idlehold check alone,
+  # for the noidlehold copy; `HEAP22_ONLY=kept`, the kept check alone, for
   # the nokeptfree copy, whose rings the parks of `abandon` and `return`
   # would hand out first, dying of a memory fault there.
   only = Program.env("HEAP22_ONLY")
@@ -2366,6 +2461,8 @@
     busy_check(workers)
   elsif only == "giveway"
     giveway_check(workers)
+  elsif only == "idlehold"
+    idlehold_check
   elsif only == "kept"
     kept_check
   else
@@ -2390,6 +2487,7 @@
     takeover_check(workers)
     construct_check
     idle_check(workers)
+    idlehold_check
     busy_check(workers)
     giveway_check(workers)
     spare_check

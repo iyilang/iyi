@@ -202,9 +202,13 @@ heap22 S6 costs, under `-Dheap_partitions`. Fresh chunks above a page
 are no longer cleared whole, and a unit parked dirty for two 100 ms
 ticks of the idle clock is collected by an idle pool worker, so an idle
 keep-alive connection's partition holds far less (bench/heap_local
-`noidle`, `nofresh`). std/http's HTTP/1.1 loop serves each request, its
-wait for the head included, in a call of its own and zeroes the stack
-under the loop before a wait nothing read already answers: the parked
+`noidle`, `nofresh`). A walk that finds such a unit's token still held -
+its worker stalled between the park and letting go - looks again at the
+next tick; it dropped the unit before, and in a program with nothing
+else to park no walk came again (bench/heap_local `noidlehold`).
+std/http's HTTP/1.1 loop serves each request, its wait for the head
+included, in a call of its own and zeroes the stack under the loop
+before a wait nothing read already answers: the parked
 fiber's stale words had kept the last request alive (Windows the answer
 and its body, Linux the request and its headers; bench/http_idle and its
 copy). With 10,000 idle keep-alive connections on 4 workers, 30 s idle,
@@ -246,7 +250,11 @@ rang no worker and the fiber waited out the whole collection.
 bench/heap_local's `giveway` check and heap_verify's `nogiveway` and
 `notoken` copies pin it; on tssh, busy4 with it and the sweep helper's
 early release took idle p99 6 and 3 % under v3's, burn no worse, at the
-same RSS.
+same RSS. The check counts only a try whose woken fiber asked for the
+unit's token while the takeover held it, which the runtime records
+(`IyiHeap.takeovers_asked`): under heavy load the main thread, kept off
+its core through a whole takeover, missed it busy and failed the check
+with nothing wrong.
 
 heap22 S6 memory return, under `-Dheap_partitions`. Inside one process
 #145's app ratcheted its resident set endpoint after endpoint (50 to 343
@@ -28073,7 +28081,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 35,612-line library and nothing else. Every other
+  written against iyi's own 35,645-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

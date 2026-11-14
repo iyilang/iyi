@@ -190,7 +190,7 @@ jobs:
       # setup-go@v5 — so it is upstream's manifest and not this file's
       # version pins. Measured by bumping all twenty-one uses and reading
       # the next run: the warning came back naming v5.
-      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: crystal
           path: .build/crystal
@@ -1424,7 +1424,7 @@ jobs:
               ../bench/tls_probe.iyi > tls_probe.link )
           cat cross/tls_probe.link
 
-      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: cross-objects
           path: cross/
@@ -1889,7 +1889,7 @@ jobs:
       - name: Stage the tarball for the release job
         run: mkdir -p dist && cp .build/iyi-*-darwin-*.tar.gz dist/
 
-      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: iyi-darwin-arm64
           path: dist/
@@ -2538,7 +2538,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item .build\iyi-*-windows-x86_64.zip -Destination dist
 
-      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: iyi-windows-x86_64
           path: dist/
@@ -3669,7 +3669,7 @@ jobs:
       - name: Stage the tarball for the release job
         run: mkdir -p dist && cp .build/iyi-*-linux-*.tar.gz dist/
 
-      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: iyi-linux-x86_64
           path: dist/
@@ -3957,7 +3957,7 @@ jobs:
           fi
           npx --no-install ovsx publish "iyi-${GITHUB_REF_NAME#editor-v}.vsix"
 
-      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: iyi-vscode
           path: editors/vscode/*.vsix

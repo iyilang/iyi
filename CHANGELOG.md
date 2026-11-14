@@ -132,6 +132,27 @@
   program takes 0.62 s where it took 0.52 on this Linux machine, and
   0.68 s where it took 0.55 on an Apple M2 Pro.
 
+- **The parallel gate's hand-off step holds the call where a loaded host
+  blurs the clock.** `bench/parallel_migrate.iyi`'s handoff step wanted
+  half of ten tasks woken onto a worker held 50 ms with preemption off
+  to start within 1 ms. That is a sleeping thread's wake, which Linux
+  does not owe a machine with more runnable threads than cores: 12 vCPUs
+  at one-minute loads of 18 to 34 failed the step in 74 runs of 80, the
+  runtime and the step unchanged, its medians 0.8 to 4.3 ms and most
+  near the kernel's 2.9 ms slice, where tmac (macOS 26, 10 cores) at
+  loads of 4 to 44 failed none of 160, at 7 to 218 us, and 45 CI runs
+  of master and the next branches none, at 15 to 163 us. The step now
+  also holds that each hand-off called an idle worker (the waker's
+  `handoff_last`, read right after its send) and that the woken task ran
+  on another worker, on every host; `bench/parallel_exercise.sh` passes
+  `--loaded=` when the Linux one-minute load is at or past the cores,
+  and the 1 ms median is then not judged, said so in the output. The
+  40 ms bound on every wake and the 1 ms median elsewhere are unchanged.
+  The broken copy without the call now fails at the call in 35 runs of
+  35 at any load, and a new one that marks its call and rings nobody,
+  left to the monitor, fails at the median: 5.1 to 10.2 ms on Linux, 6.3
+  on tmac.
+
 ## 0.21.0 — 2026-11-09
 
 **A spawn has one verb and names its unit, and a plain `spawn` runs in

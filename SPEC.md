@@ -3941,7 +3941,11 @@ on four workers, under twice the ideal. Its handoff step holds the wake a
 handed-over task brings: a task woken by a task that then computes 50 ms
 with preemption off starts on an idle worker in 23 to 28 us at the median
 of ten (Linux, 12 vCPUs, release), where it waited the 50 ms out in all
-20 wakes of two runs before.
+20 wakes of two runs before. It also holds what no load blurs: each
+hand-off called an idle worker, and the woken task ran on another worker.
+On a Linux host whose one-minute load is at or past its cores the median
+is not judged, since the kernel then wakes the called thread a slice
+later: 0.8 to 4.3 ms at loads of 18 to 34 on those 12 vCPUs.
 
 What a move keeps, and what holds it: the fiber's stack is found by the
 collector on whichever thread runs it, through the fiber registry and the

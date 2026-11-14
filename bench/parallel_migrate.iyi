@@ -776,10 +776,23 @@ import std/socket::{IyiSocket, SocketError}
   # and the waker computes on: here a `@[NoPreempt]` loop, as the
   # runtime's own code is, which no back-edge check gives up. The worker
   # comes back for the woken task only when the loop ends, so an idle
-  # worker must be called to take it then and there. Each of ten wakes is
-  # timed from the send to the woken task's first statement after its
+  # worker must be called to take it then and there. Each of ten wakes
+  # is timed from the send to the woken task's first statement after its
   # receive, beside a 50 ms hold: half must start within 1 ms, and none
   # may wait the hold out.
+  #
+  # The 1 ms is a sleeping kernel thread's wake, which Linux does not owe
+  # on a machine with more runnable threads than cores: there, 12 vCPUs,
+  # at one-minute loads of 18 to 34 this step failed 74 of 80 runs, its
+  # medians 0.8 to 4.3 ms and most near 2.9, while tmac (macOS 26, 10
+  # cores) at loads of 4 to 44 failed none of 160, at 7 to 218 us. So the
+  # hand-off is also held where no clock can blur it: right after its
+  # send, the waker's worker has called an idle worker for the woken
+  # fiber (`handoff_last`, which only that worker writes and only its own
+  # `pop` clears), and the woken task then runs on another worker. Those
+  # hold on every machine; the median is judged unless
+  # bench/parallel_exercise.sh passes `--loaded=`, its reading of a Linux
+  # load at or past the cores, and the run then says it was not judged.
   @[NoInline]
   @[NoPreempt]
   def hold_np(ns : Int64) : Nil
@@ -789,19 +802,62 @@ import std/socket::{IyiSocket, SocketError}
     end
   end
 
-  def handoff(watch : Int32) : Nil
+  # What a hand-off's two tasks saw: the woken fiber, the worker it ran
+  # on, its waker's worker and whether that worker called for it.
+  class Handed
+    @fiber : Atomic(UInt64)
+    @woken_on : Atomic(UInt64)
+    @held_on : Atomic(UInt64)
+    @called : Atomic(UInt64)
+
+    def initialize
+      @fiber = Atomic(UInt64).new(0_u64)
+      @woken_on = Atomic(UInt64).new(0_u64)
+      @held_on = Atomic(UInt64).new(0_u64)
+      @called = Atomic(UInt64).new(0_u64)
+    end
+
+    def note_fiber(id : UInt64) : Nil
+      @fiber.set(id)
+    end
+
+    def note_woken_on(worker : UInt64) : Nil
+      @woken_on.set(worker)
+    end
+
+    def note_held_on(worker : UInt64, called : UInt64) : Nil
+      @held_on.set(worker)
+      @called.set(called == @fiber.get ? 1_u64 : 0_u64)
+    end
+
+    def called? : Bool
+      @called.get == 1_u64
+    end
+
+    def stayed? : Bool
+      @woken_on.get == @held_on.get
+    end
+  end
+
+  def handoff(watch : Int32, loaded : String) : Nil
     watched("handoff", watch) do
       rounds = 10
       waits = [] of Int64
+      uncalled = 0
+      stayed = 0
       rounds.times do
         gate = Channel(Int64).new(1)
         arrived = Tally.new
+        handed = Handed.new
         sleeper = nil.as(IyiTask(Int64)?)
         group do |g|
           sleeper = g.spawn(unit: :new) do
+            handed.note_fiber(IyiScheduler.current.object_id)
             arrived.add(1_i64)
             sent = gate.receive
-            sent.is_a?(Int64) ? __iyi_monotonic_ns - sent : -1_i64
+            took = sent.is_a?(Int64) ? __iyi_monotonic_ns - sent : -1_i64
+            handed.note_woken_on(IyiScheduler.state.object_id)
+            took
           end
           g.spawn(unit: :new) do
             while arrived.count < 1_i64
@@ -809,6 +865,8 @@ import std/socket::{IyiSocket, SocketError}
             end
             sleep(5)
             gate.send(__iyi_monotonic_ns)
+            st = IyiScheduler.state
+            handed.note_held_on(st.object_id, st.handoff_last)
             hold_np(50_000_000_i64)
             0
           end
@@ -816,15 +874,24 @@ import std/socket::{IyiSocket, SocketError}
         task = sleeper
         got = task.is_a?(IyiTask(Int64)) ? task.value : -1_i64
         waits << (got.is_a?(Int64) ? got : -1_i64)
+        uncalled += 1 unless handed.called?
+        stayed += 1 if handed.stayed?
       end
       fail("handoff: a woken task answered no wait: #{waits}") if waits.any? { |w| w < 0_i64 }
+      if uncalled > 0
+        fail("handoff: #{uncalled} of #{rounds} tasks woken onto a worker held 50 ms with preemption off were handed over with no idle worker called")
+      end
       sorted = waits.sorted
+      if stayed > 0
+        fail("handoff: #{stayed} of #{rounds} tasks woken onto a worker held 50 ms with preemption off ran on that worker, after #{sorted.map { |w| w // 1000_i64 }} us")
+      end
       median = sorted[rounds // 2]
       longest = sorted[rounds - 1]
-      if median > 1_000_000_i64 || longest >= 40_000_000_i64
+      if longest >= 40_000_000_i64 || (loaded.empty? && median > 1_000_000_i64)
         fail("handoff: tasks woken onto a worker held 50 ms with preemption off started after #{sorted.map { |w| w // 1000_i64 }} us, while other workers were idle")
       end
-      puts "handoff: #{rounds} tasks woken onto a worker held 50 ms with preemption off started in #{median // 1000_i64} us at the median, #{longest // 1000_i64} us at most"
+      judged = loaded.empty? ? "" : "; the 1 ms median not judged, #{loaded}"
+      puts "handoff: #{rounds} tasks woken onto a worker held 50 ms with preemption off, each with an idle worker called and run on another, started in #{median // 1000_i64} us at the median, #{longest // 1000_i64} us at most#{judged}"
     end
   end
 
@@ -1080,10 +1147,13 @@ import std/socket::{IyiSocket, SocketError}
   STEPS = ["channels", "sockets", "cancel", "closes", "deep", "loops", "balance", "handoff", "backstop", "heldio", "join"]
 
   watch = 60000
+  loaded = ""
   chosen = [] of String
   Program.args.each do |argument|
     if argument.starts_with?("--watch=")
       watch = argument[8, argument.size - 8].to_i
+    elsif argument.starts_with?("--loaded=")
+      loaded = argument[9, argument.size - 9]
     else
       fail("no step named #{argument}") unless STEPS.includes?(argument)
       chosen << argument
@@ -1100,7 +1170,7 @@ import std/socket::{IyiSocket, SocketError}
     when "deep"     then deep_step(watch)
     when "loops"    then loops(watch)
     when "balance"  then balance(watch)
-    when "handoff"  then handoff(watch)
+    when "handoff"  then handoff(watch, loaded)
     when "backstop" then backstop(watch)
     when "heldio"   then heldio(watch)
     when "join"     then join(watch)

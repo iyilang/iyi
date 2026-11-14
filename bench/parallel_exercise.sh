@@ -26,8 +26,10 @@
 #      cancel and a close from a sibling or the main thread that find it,
 #      frames 120 KiB deep; tasks parked on one worker finish in under
 #      twice the ideal, woken from the main thread and from a worker; a
-#      task woken by a task that then computes with preemption off starts
-#      on an idle worker within 1 ms, and within 50 ms after a ping-pong
+#      task woken by a task that then computes with preemption off has an
+#      idle worker called for it, runs on another worker, and starts
+#      within 1 ms (not judged on a host loaded past its cores), and
+#      within 50 ms after a ping-pong
 #      left its waker's worker calling nobody, where the monitor calls; on
 #      Linux and darwin a connection's answer, sent while the worker its
 #      reader parked on is held 100 ms with preemption off, is read on
@@ -97,9 +99,10 @@
 #      find, a close posted to nobody, a read made on the thread that
 #      closes its socket, a pool that never steals a started task, tasks
 #      woken back onto the worker they parked on as they were before tasks
-#      moved, a hand-off that calls no idle worker, a monitor that calls
-#      nobody for a held worker's ring, a monitor that calls nobody for a
-#      held worker's poller, and a join held in the kernel; and on Windows
+#      moved, a hand-off that calls no idle worker, one that marks its call
+#      and rings nobody, a monitor that calls nobody for a held worker's
+#      ring, a monitor that calls nobody for a held worker's poller, and a
+#      join held in the kernel; and on Windows
 #      a port whose packets only the worker their task parked on runs, and
 #      a pool that leaves the priority boost on.
 #   8. Failure proof: the pool held to one worker whatever it was asked
@@ -162,6 +165,22 @@ done
 # with fewer cores than that cannot keep; there the other steps run.
 MIGRATE_STEPS="channels sockets cancel closes deep loops balance handoff backstop heldio join"
 [ "$CORES" -lt 4 ] && MIGRATE_STEPS="channels sockets cancel closes deep loops handoff backstop heldio join"
+# The handoff step's 1 ms median is a sleeping thread's wake, which Linux
+# does not owe a machine with more runnable threads than cores: 12 vCPUs
+# at one-minute loads of 18 to 34 failed it in 74 of 80 runs, the medians
+# near the kernel's 2.9 ms slice. So a Linux run whose one-minute load
+# average is at or past the cores is told so (`--loaded=`), and the step
+# holds there only what no clock blurs: an idle worker called at each
+# hand-off, the woken task run on another worker, within 40 ms. darwin
+# woke them in 7 to 218 us at loads of 4 to 44 on 10 cores (tmac, 160
+# runs), and is always judged; so is Windows, which keeps no load average.
+host_load() {
+  [ "$(uname -s)" = Linux ] || return 0
+  local load
+  load="$(cut -d' ' -f1 /proc/loadavg 2> /dev/null)"
+  [ -n "$load" ] && awk -v l="$load" -v c="$CORES" 'BEGIN { exit !(l >= c) }' &&
+    echo "a one-minute load of $load on $CORES cores"
+}
 for build in plain release; do
   step "what a task keeps when it resumes on another worker, $build build"
   flag=""
@@ -169,8 +188,9 @@ for build in plain release; do
   if ! "$IYI" build $flag "$REPO/bench/parallel_migrate.iyi" -o "migrate-$build" > "build-migrate-$build.log" 2>&1; then
     echo "build failed:"; tail -20 "build-migrate-$build.log"; exit 1
   fi
+  loaded="$(host_load)"
   # shellcheck disable=SC2086 # the steps are words
-  timeout -k 5 600 "./migrate-$build" $MIGRATE_STEPS > "migrated-$build.txt" 2>&1
+  timeout -k 5 600 "./migrate-$build" $MIGRATE_STEPS ${loaded:+"--loaded=$loaded"} > "migrated-$build.txt" 2>&1
   code=$?
   if [ "$code" -ne 0 ] || ! grep -q 'every property held' "migrated-$build.txt"; then
     echo "the migration exercise failed (exit $code):"; cat "migrated-$build.txt"; exit 1
@@ -989,9 +1009,20 @@ else
   step "failure proof: a task woken by a task that computes on waits for that computation"
   # Measured with the handoff step, Linux, 12 vCPUs, release: the woken
   # task started 50.0 ms after its send in each of 20 wakes without the
-  # call, beside a 50 ms hold, and 23 to 28 us with it.
+  # call, beside a 50 ms hold, and 23 to 28 us with it. The step names the
+  # call it finds missing before it reads a clock, so a loaded host
+  # catches the copy too: 15 of 15 runs at Linux loads of 18 to 33, and
+  # 20 of 20 on tmac at loads of 4 to 41.
   broken nohandoff '/^    elsif handed_on\?\(st, fiber\)$/ { print "    elsif false"; next } { print }' concurrency.iyi parallel_migrate
-  caught nohandoff 'handoff: tasks woken onto a worker held 50 ms' handoff
+  caught nohandoff 'were handed over with no idle worker called' handoff
+
+  step "failure proof: a hand-off that marks its call and rings nobody waits for the monitor"
+  # The copy keeps `handoff_last` and drops the call, so only the clock
+  # can tell: the monitor calls for the fiber a look or two into the
+  # hold (`look`), and its wakes waited 5.1 to 10.2 ms at the median
+  # (Linux, loads 18 to 33, 15 of 15 runs), 6.3 on tmac (20 of 20).
+  broken nocall '/^        st.handoff_last = fiber.object_id$/ { print; drop = 1; next } drop && /^        wake_one$/ { drop = 0; next } { print }' concurrency.iyi parallel_migrate
+  caught nocall 'handoff: tasks woken onto a worker held 50 ms' handoff
 
   step "failure proof: a monitor that calls nobody for a held worker's ring leaves a hand-off its back-off skipped behind the hold"
   broken nobackstop '/^    wake_one if stuck$/ { next } { print }' concurrency.iyi parallel_migrate

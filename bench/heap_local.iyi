@@ -1974,24 +1974,31 @@
   # worker's turn leaves that time behind the clock, it must not turn the
   # clock again with it - at once, and backwards. A walk asked for by
   # hand (pending set and a worker rung, as `idle_check` stamps under
-  # `IYI_HEAP_STRESS`) brings the looks; a try whose held look saw no
-  # such turn within a second is tried again, three at most. No turn of
-  # a clock comes less than its period after the last
+  # `IYI_HEAP_STRESS`) brings the held look, and an empty unit run while
+  # it is held brings the other workers' looks, as `takeover_check`'s
+  # do: a rung worker spinning, the pool rings no other, and alone
+  # (`HEAP22_ONLY=clock`) nothing had started the pool (the switch at 1,
+  # then at 3, in 10 runs of 10, Linux and tmac). A try whose held look
+  # saw no such turn within a second is tried again, three at most. No
+  # turn of a clock comes less than its period after the last
   # (`IyiHeap.clock_turns_short`), here or before.
   def clock_check : Nil
     fail("clock: #{IyiHeap.clock_turns_short} turns of a clock came less than its period after the last, or before it, before the check") if IyiHeap.clock_turns_short != 0_u64
     tries = 0
     held = 0_u64
-    while held != 2_u64 && tries < 3
-      tries = tries + 1
-      IyiHeap.hold_clock
-      until_ns = IyiMark.now_ns &+ 3000000000_u64
-      held = IyiHeap.clock_hold
-      while (held == 1_u64 || held == 4_u64) && IyiMark.now_ns < until_ns
-        IyiStat.atomic(IyiStat::IDLE_PENDING).value.set(1_u64)
-        IyiWorkers.wake_one
-        sleep(5)
+    group do |g|
+      while held != 2_u64 && tries < 3
+        tries = tries + 1
+        IyiHeap.hold_clock
+        until_ns = IyiMark.now_ns &+ 3000000000_u64
         held = IyiHeap.clock_hold
+        while (held == 1_u64 || held == 4_u64) && IyiMark.now_ns < until_ns
+          IyiStat.atomic(IyiStat::IDLE_PENDING).value.set(1_u64)
+          IyiWorkers.wake_one
+          g.spawn(unit: :new) { 0_i64 }.value
+          sleep(1)
+          held = IyiHeap.clock_hold
+        end
       end
     end
     # A switch no look took is taken back, so no later look waits on it.

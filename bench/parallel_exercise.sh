@@ -61,10 +61,12 @@
 #   3. The binary keeps the dependency floor the concurrency gate holds,
 #      plus `environ`, the C runtime's table `IYI_WORKERS` is read from.
 #   4. The speedup, measured: CPU-bound tasks on one worker and on several,
-#      release build, best of three, and the ratio held to a floor of 0.6
-#      per worker - a pool that is parallel only in name cannot pass it.
-#      The table for 1, 2, 4 and 8 workers (as far as the cores go) is
-#      printed for the record.
+#      release build, best of three. K workers must hold their tasks on
+#      0.6 x K threads at once on average, at any load; and where the host
+#      leaves K cores free, finish 0.6 x K times faster than one - a pool
+#      that is parallel only in name cannot pass either. The table for 1,
+#      2, 4 and 8 workers (as far as the cores go) is printed for the
+#      record.
 #   5. A deadlock across threads - a parallel task waiting on a channel
 #      nobody sends on - is named, not hung. And bench/panic_exit.iyi
 #      ends the process with tasks parked on the poller, on twelve
@@ -106,7 +108,7 @@
 #      a port whose packets only the worker their task parked on runs, and
 #      a pool that leaves the priority boost on.
 #   8. Failure proof: the pool held to one worker whatever it was asked
-#      for, and step 4's floor refuses the ratio that comes out.
+#      for, and step 4's floors refuse what comes out.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -624,43 +626,84 @@ esac
 # Sixteen tasks of integer work with nothing to allocate, so the ratio is
 # the scheduler's and not the collector's. Best of three, because a
 # shared machine's clock is weather.
+#
+# The wall-clock ratio is a host's as much as the pool's: Linux on 12
+# vCPUs beside 12 busy loops (`procs_running` 17) gave 4 workers 2.10x
+# one worker's time, where an idle run gives 3.4 to 3.9x, and 8 workers
+# 4.72x in the same run. So the ratio is judged only where the host has
+# the K workers' cores free - its load, read as the hand-off step reads
+# it, at most the cores less K before the runs and after them - and is
+# printed with the reason otherwise. What no load blurs is held at every
+# load: how many threads held a task at once, on average over the run
+# (`at_once` in hundredths, each task looking at its thread and the clock
+# every 65536 rounds): a thread holds its task whether or not the kernel
+# has it on a core, and a pool that runs its tasks one thread at a time
+# cannot pass 1.00, so K workers are held to 0.6 x K there too.
 TASKS=16
 ROUNDS=40000000
-best_ms() { # workers binary
-  local best="" run ms
+best_ms() { # workers binary -> "fastest_ms most_at_once"
+  local best="" most="" run line ms at
   for run in 1 2 3; do
-    ms="$(timeout -k 5 300 "./$2" speed "$1" "$TASKS" "$ROUNDS" | sed -n 's/.*wall_ms=\([0-9]*\).*/\1/p')"
-    [ -n "$ms" ] || { echo "the speed run at $1 workers printed no time" >&2; return 1; }
+    line="$(timeout -k 5 300 "./$2" speed "$1" "$TASKS" "$ROUNDS")"
+    ms="$(echo "$line" | sed -n 's/.*wall_ms=\([0-9]*\).*/\1/p')"
+    at="$(echo "$line" | sed -n 's/.*at_once=\([0-9]*\).*/\1/p')"
+    [ -n "$ms" ] && [ -n "$at" ] || { echo "the speed run at $1 workers printed no time: $line" >&2; return 1; }
     if [ -z "$best" ] || [ "$ms" -lt "$best" ]; then best="$ms"; fi
+    if [ -z "$most" ] || [ "$at" -gt "$most" ]; then most="$at"; fi
   done
-  echo "$best"
+  echo "$best $most"
 }
 # The floor: k workers must finish at least 0.6 * k times faster than one.
 holds_floor() { # one_ms k_ms k
   awk -v one="$1" -v many="$2" -v k="$3" 'BEGIN { exit !(many > 0 && one / many >= 0.6 * k) }'
 }
+# The same floor on the threads that held a task at once.
+holds_at_once() { # at_once_hundredths k
+  [ "$1" -ge $((60 * $2)) ]
+}
+at_once() { awk -v a="$1" 'BEGIN { printf "%.2f", a / 100 }'; }
 K=4
 [ "$CORES" -lt "$K" ] && K="$CORES"
 step "the speedup: $TASKS CPU-bound tasks, release build, best of three, $CORES cores here"
 if [ "$CORES" -lt 2 ]; then
   echo "  one core here: nothing to scale onto, so the ratio is not held"
 else
-  ONE="$(best_ms 1 exercise-release)" || exit 1
-  printf '  %2s worker(s): %6s ms\n' 1 "$ONE"
+  SPEED_LOAD="$(host_load)"
+  got="$(best_ms 1 exercise-release)" || exit 1
+  ONE="${got% *}"
+  printf '  %2s worker(s): %6s ms, %s at once\n' 1 "$ONE" "$(at_once "${got#* }")"
   MANY=""
+  MANY_AT=""
   for w in 2 4 8; do
     [ "$w" -gt "$CORES" ] && break
-    ms="$(best_ms "$w" exercise-release)" || exit 1
+    got="$(best_ms "$w" exercise-release)" || exit 1
+    ms="${got% *}"
     ratio="$(awk -v a="$ONE" -v b="$ms" 'BEGIN { printf "%.2f", a / b }')"
-    printf '  %2s worker(s): %6s ms, %sx one worker\n' "$w" "$ms" "$ratio"
-    [ "$w" -eq "$K" ] && MANY="$ms"
+    printf '  %2s worker(s): %6s ms, %sx one worker, %s at once\n' "$w" "$ms" "$ratio" "$(at_once "${got#* }")"
+    [ "$w" -eq "$K" ] && { MANY="$ms"; MANY_AT="${got#* }"; }
   done
-  [ -n "$MANY" ] || MANY="$(best_ms "$K" exercise-release)" || exit 1
-  if ! holds_floor "$ONE" "$MANY" "$K"; then
-    echo "$K workers took $MANY ms against one worker's $ONE ms: under 0.6 x $K, which is not parallel"
+  if [ -z "$MANY" ]; then
+    got="$(best_ms "$K" exercise-release)" || exit 1
+    MANY="${got% *}"; MANY_AT="${got#* }"
+  fi
+  after="$(host_load)"
+  [ -n "$after" ] && { [ -z "$SPEED_LOAD" ] || awk -v a="$after" -v b="$SPEED_LOAD" 'BEGIN { exit !(a > b) }'; } && SPEED_LOAD="$after"
+  if ! holds_at_once "$MANY_AT" "$K"; then
+    echo "$K workers held their tasks $(at_once "$MANY_AT") at once on average: under 0.6 x $K, which is not parallel"
     exit 1
   fi
-  echo "  $K workers: $(awk -v a="$ONE" -v b="$MANY" 'BEGIN { printf "%.2f", a / b }')x one worker, over the floor of $(awk -v k="$K" 'BEGIN { printf "%.1f", 0.6 * k }')x"
+  # Judged where the load leaves K cores free, or where none is read.
+  SPEED_JUDGED=yes
+  [ -n "$SPEED_LOAD" ] && awk -v l="$SPEED_LOAD" -v c="$CORES" -v k="$K" 'BEGIN { exit !(l > c - k) }' && SPEED_JUDGED=""
+  if [ -n "$SPEED_JUDGED" ]; then
+    if ! holds_floor "$ONE" "$MANY" "$K"; then
+      echo "$K workers took $MANY ms against one worker's $ONE ms: under 0.6 x $K, which is not parallel${SPEED_LOAD:+ (a load of $SPEED_LOAD on $CORES cores)}"
+      exit 1
+    fi
+    echo "  $K workers: $(awk -v a="$ONE" -v b="$MANY" 'BEGIN { printf "%.2f", a / b }')x one worker, over the floor of $(awk -v k="$K" 'BEGIN { printf "%.1f", 0.6 * k }')x${SPEED_LOAD:+, judged at a load of $SPEED_LOAD on $CORES cores}; $(at_once "$MANY_AT") at once"
+  else
+    echo "  $K workers: $(at_once "$MANY_AT") at once, over the floor of $(awk -v k="$K" 'BEGIN { printf "%.1f", 0.6 * k }'); the time's ratio not judged, a load of $SPEED_LOAD on $CORES cores leaving fewer than $K free"
+  fi
 fi
 
 # ── 4. A deadlock across threads is named ────────────────────────────────
@@ -1285,6 +1328,9 @@ else
 fi
 
 # ── 8. Failure proof: one worker, whatever was asked for ──────────────────
+# Refused at any load by the threads that held a task at once, which one
+# worker holds at 1.00 at most; and where step 3 judged the time's ratio,
+# by that too.
 step "failure proof: a pool held to one worker fails the speedup floor"
 if [ "$CORES" -lt 2 ]; then
   echo "  one core here: the floor is not held, so there is nothing to fail"
@@ -1297,11 +1343,16 @@ else
   if ! IYI_PATH="$WORK/oneworker${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/parallel_exercise.iyi" -o oneworker-run > build-oneworker.log 2>&1; then
     echo "the one-worker copy failed to build:"; tail -20 build-oneworker.log; exit 1
   fi
-  SLOW="$(best_ms "$K" oneworker-run)" || exit 1
-  if holds_floor "$ONE" "$SLOW" "$K"; then
+  got="$(best_ms "$K" oneworker-run)" || exit 1
+  SLOW="${got% *}"
+  SLOW_AT="${got#* }"
+  if holds_at_once "$SLOW_AT" "$K"; then
+    echo "a pool of one worker asked for $K held its tasks $(at_once "$SLOW_AT") at once and passed the floor"; exit 1
+  fi
+  if [ -n "$SPEED_JUDGED" ] && holds_floor "$ONE" "$SLOW" "$K"; then
     echo "a pool of one worker asked for $K took $SLOW ms against $ONE ms and passed the floor"; exit 1
   fi
-  echo "  asked for $K, ran on 1: $SLOW ms against $ONE ms, $(awk -v a="$ONE" -v b="$SLOW" 'BEGIN { printf "%.2f", a / b }')x, refused"
+  echo "  asked for $K, ran on 1: $(at_once "$SLOW_AT") at once, $SLOW ms against $ONE ms, $(awk -v a="$ONE" -v b="$SLOW" 'BEGIN { printf "%.2f", a / b }')x, refused"
 fi
 
 echo "parallel gate: every property held"

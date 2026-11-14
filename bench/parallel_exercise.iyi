@@ -24,9 +24,10 @@
 # never arrives is a named failure rather than a hung job.
 #
 # `speed W T N` runs T tasks of N rounds of integer arithmetic on W
-# workers and prints the wall time; bench/parallel_exercise.sh runs it at
-# one worker and at several and holds the ratio to a floor, and runs
-# broken copies of the runtime to prove each step above can fail.
+# workers and prints the wall time and how many threads held a task at
+# once on average; bench/parallel_exercise.sh runs it at one worker and at
+# several and holds both to a floor, and runs broken copies of the runtime
+# to prove each step above can fail.
 
 @[Unsafe("allocates raw blocks through Pointer.malloc in tasks, and Turns trusts @[Share] to hand its word's pointerof address to park_on and wake_on")]
 {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
@@ -165,22 +166,97 @@
   end
 
   # ── speed ────────────────────────────────────────────────────────────
+  # The rounds a timed task computes between two looks at its thread and
+  # the clock: about a tenth of a millisecond of the walk.
+  SPEED_LOOK_ROUNDS = 65536_i64
+
+  # `spin` in pieces, each followed by a look at the thread the task is on
+  # and the clock. Answers the walk's end and the task's stretches, three
+  # words each - the thread, the first look and the last look on it - a
+  # stretch ending where a look finds the task on another thread.
+  def spin_traced(rounds : Int64, seed : UInt64) : Tuple(UInt64, Array(UInt64))
+    stretches = [] of UInt64
+    x = seed
+    on = thread_here
+    from = __iyi_monotonic_ns
+    last = from
+    done = 0_i64
+    while done < rounds
+      piece = rounds - done
+      piece = SPEED_LOOK_ROUNDS if piece > SPEED_LOOK_ROUNDS
+      x = spin(piece, x)
+      done = done + piece
+      here = thread_here
+      now = __iyi_monotonic_ns
+      if here != on
+        stretches << on << from.to_u64 << last.to_u64
+        on = here
+        from = now
+      end
+      last = now
+    end
+    stretches << on << from.to_u64 << last.to_u64
+    {x, stretches}
+  end
+
+  # How many threads held a timed task at once, in hundredths, on average
+  # over the run from *started* to *ended*: each thread's stretches laid
+  # on a grid of 100 us cells, a cell held when a stretch covers it, the
+  # held cells of every thread summed over the run's cells. A thread
+  # holding a task holds it whether or not the kernel has it on a core,
+  # so a loaded host does not lower this; a pool that runs its tasks on
+  # one thread at a time cannot raise it past 100.
+  def held_at_once(stretches : Array(UInt64), started : Int64, ended : Int64) : Int64
+    cell = 100_000_i64
+    cells = (ended - started) // cell + 1_i64
+    threads = [] of UInt64
+    i = 0
+    while i < stretches.size
+      threads << stretches[i] unless threads.includes?(stretches[i])
+      i = i + 3
+    end
+    held = 0_i64
+    threads.each do |thread|
+      grid = Array(Bool).new(cells.to_i32, false)
+      j = 0
+      while j < stretches.size
+        if stretches[j] == thread
+          first = (stretches[j + 1].to_i64 - started) // cell
+          last = (stretches[j + 2].to_i64 - started) // cell
+          first = 0_i64 if first < 0_i64
+          last = cells - 1_i64 if last >= cells
+          c = first
+          while c <= last
+            grid[c.to_i32] = true
+            c = c + 1_i64
+          end
+        end
+        j = j + 3
+      end
+      grid.each { |covered| held = held + 1_i64 if covered }
+    end
+    held * 100_i64 // cells
+  end
+
   def speed(workers : Int32, tasks : Int32, rounds : Int64) : Nil
     IyiWorkers.count = workers
     started = __iyi_monotonic_ns
     total = 0_u64
+    stretches = [] of UInt64
     group do |g|
-      handles = [] of IyiTask(UInt64)
+      handles = [] of IyiTask(Tuple(UInt64, Array(UInt64)))
       tasks.times do |i|
-        handles << g.spawn(unit: :new) { spin(rounds, (i + 1).to_u64) }
+        handles << g.spawn(unit: :new) { spin_traced(rounds, (i + 1).to_u64) }
       end
       handles.each do |handle|
-        value = handle.value
-        fail("a timed task answered #{value}") unless value.is_a?(UInt64)
-        total = total ^ value
+        answer = handle.value
+        fail("a timed task answered #{answer}") unless answer.is_a?(Tuple(UInt64, Array(UInt64)))
+        total = total ^ answer[0]
+        stretches.concat(answer[1])
       end
     end
-    puts "workers=#{workers} tasks=#{tasks} rounds=#{rounds} wall_ms=#{elapsed_ms(started)} checksum=#{total}"
+    ended = __iyi_monotonic_ns
+    puts "workers=#{workers} tasks=#{tasks} rounds=#{rounds} wall_ms=#{(ended - started) // 1000000_i64} at_once=#{held_at_once(stretches, started, ended)} checksum=#{total}"
   end
 
   # ── the properties ───────────────────────────────────────────────────

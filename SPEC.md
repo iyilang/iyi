@@ -4601,8 +4601,11 @@ pool (`IyiWorkers`), the inbox, the doorbell and the scheduler's lock;
 the thread's sentences. `bench/parallel_exercise.sh` is the gate: 16
 CPU-bound tasks, release, best of three, on a 12-core Linux machine
 other jobs were sharing, took 715 ms on one worker, 360 on two (1.99x),
-185 on four (3.86x) and 103 on eight (6.94x), and four workers are held
-to 0.6 x 4 wherever the gate runs on at least four cores. The race step
+185 on four (3.86x) and 103 on eight (6.94x). Wherever the gate runs on
+at least four cores, four workers are held to 0.6 x 4 twice: their tasks
+held on 2.4 threads at once on average, at any load, and their time 0.6
+x 4 faster than one worker's where the host's load leaves four cores
+free. The race step
 is the other proof the tasks run at the same instant: eight tasks adding
 2,000,000 times each to one count lose nothing through an atomic, and
 with the add made a load and a store they lost 8,403,659 of 16,000,000,

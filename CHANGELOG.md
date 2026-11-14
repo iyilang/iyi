@@ -188,6 +188,20 @@
   of 192 beside 12 busy loops, and once none, so a run that moved none
   is run again, up to five times. No bound changed.
 
+- **The parallel gate's speedup step holds on a loaded host, and a pool
+  of one worker is refused at any load.** Beside 12 busy loops on this
+  Linux machine's 12 vCPUs, 4 workers finished 2.10x faster than one
+  where 0.6 x 4 is 2.4, and 8 workers 4.72x in the same run: the wall
+  clock measured the host. Each timed task now looks at its thread and
+  the clock every 65536 rounds, and the run reports how many threads
+  held a task at once on average. A thread holds its task whether or not
+  the kernel runs it, and one worker cannot pass 1.00, so four workers
+  are held to 2.4 at every load. The time's ratio keeps its 0.6 x 4
+  floor where the load, `procs_running` as the hand-off step reads it,
+  leaves four cores free before and after the runs; elsewhere the output
+  says it was not judged and why. The one-worker copy is refused by the
+  threads at once on every host, and by the time too where it is judged.
+
 ## 0.21.0 — 2026-11-09
 
 **A spawn has one verb and names its unit, and a plain `spawn` runs in

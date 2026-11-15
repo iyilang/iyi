@@ -15,19 +15,26 @@
 # shard with the least weight so far (the first such shard on a tie, and
 # siblings of one weight by name, so the deal is the same everywhere). A
 # weight is the seconds the sibling took on the slowest of the three
-# platforms in run 39840302846 (jobs 120039255535 to 120040655672), read
-# from the twelve shard logs by sibling_times.py, beside this script; a
-# sibling not in WEIGHTS weighs 20, about what the 69 left out took at their
-# slowest (median 22 s, mean 24 s). Shard K of N used to be every sibling
+# platforms in run 43312036289 (jobs 131510772091 to 131511616524), read
+# from its shard logs by sibling_times.py, beside this script; a sibling
+# not in WEIGHTS weighs 30, about what the 71 left out took at their
+# slowest (median 26 s, mean 37 s). It was run 39840302846's until the
+# second security review grew std/tls's, std/x509's and std/big's gates
+# and added std/p256's. Shard K of N used to be every sibling
 # whose sorted place left K divided by N: with the heaviest four of them
 # std_a* to std_w*, that put std/http, std/big, std/websocket and
 # std/autocert in shard 2, and the shard ran 60 to 80 minutes beside others
-# of 16 to 40. Added up from the same logs, the most a shard carries:
+# of 16 to 40. Added up from run 39840302846's logs, the most a shard
+# carries:
 #
 #                  interleaved   by WEIGHTS   by the platform's own
 #     Linux          4,641 s      2,580 s       2,345 s
 #     darwin         4,509 s      2,875 s       2,684 s
 #     Windows        4,019 s      2,936 s       2,724 s
+#
+# On run 43312036289's logs the weights it had dealt shards of at most
+# 3,140 s on Linux, 3,683 on darwin and 4,753 on Windows; the weights
+# above deal them at most 2,875, 3,466 and 4,460.
 #
 # One table for every platform, though the platforms disagree (std/tls took
 # 801 s on Linux and 1,864 on Windows): a deal from each platform's own
@@ -36,18 +43,16 @@
 # std/http took 29 to 45 minutes in four runs on Linux). Rerun
 # sibling_times.py on a green run's shard logs when a gate's weight changes
 # much; its `--predict 4` adds the logs up as above.
-# std/cookie's is one Windows machine's, 352 s, taken when its gate went
-# from 10 broken copies to 32 and before a CI run had timed it.
 WEIGHTS="
-  tls 1864   http 1632   big 988   xz 460   websocket 422
-  autocert 399   cookie 352   acme 343   mutex 252   zip 249
-  math 237   smtp 223   process 211   sse 199   zstd 195
-  text_scale 189   secure_dns 188   router 160   bzip2 151   x509 149
-  dir 145   compress 140   tar 140   regex 137   rsa 130
-  dns 122   yaml 121   term 116   time 103   ocsp 99
-  xml 99   p384 97   fileserver 94   toml 88   fuzz 86
-  file 84   png 84   curve25519 81   csv 77   mail 76
-  digest 71   complex 69   eiy 64
+  http 2576   tls 2322   big 871   websocket 692   autocert 649
+  x509 458   acme 427   xz 407   cookie 319   xml 314
+  sse 306   smtp 297   zip 294   math 286   p256 285
+  hpke 278   mail 249   regex 243   router 237   process 223
+  secure_dns 221   text_scale 221   curve25519 195   compress 194   tar 180
+  rsa 179   zstd 179   dns 177   mutex 173   bzip2 158
+  p384 156   yaml 156   term 148   dir 144   toml 138
+  time 126   fileserver 122   otp 122   png 122   ocsp 121
+  mlkem 112   password 112   log 104   digest 101   eiy 101
 "
 set -u
 
@@ -80,7 +85,7 @@ deal() {
     [ "$name" = "std_exercise" ] || echo "$name"
   done | awk -v table="$(echo $WEIGHTS)" '
     BEGIN { n = split(table, t); for (i = 1; i < n; i += 2) w["std_" t[i] "_exercise"] = t[i + 1] }
-    { print $1, (($1 in w) ? w[$1] : 20) }' |
+    { print $1, (($1 in w) ? w[$1] : 30) }' |
     LC_ALL=C sort -k2,2nr -k1,1 |
     awk -v n="$shards" '{
       k = 1

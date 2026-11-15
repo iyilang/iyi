@@ -48,9 +48,15 @@ files=("$REPO"/samples/iyi/*.iyi)
 [ "$#" -gt 0 ] && files=("$@")
 
 normalise() {
-  grep -vE "^(COMMENT|SPACE|NEWLINE)	" "$1" \
-    | cut -f1,4 \
-    | sed -E 's/^DELIMITER_START	DELIMITER_START$/SLASH	SLASH/; s|^/	/$|SLASH	SLASH|'
+  LC_ALL=C awk -F '\t' '
+    $1 == "COMMENT" || $1 == "SPACE" || $1 == "NEWLINE" { next }
+    NF != 4 { print "invalid token record at line " NR > "/dev/stderr"; exit 1 }
+    ($1 == "DELIMITER_START" && $4 == "DELIMITER_START") || ($1 == "/" && $4 == "/") {
+      print "SLASH\tSLASH"
+      next
+    }
+    { print $1 "\t" $4 }
+  ' "$1"
 }
 
 agree=0
@@ -69,16 +75,21 @@ for f in "${files[@]}"; do
   # nothing.
   "$WORK/lexer" "$f" > "$WORK/b.txt" 2> "$WORK/b.err"
   status=$?
-  normalise "$WORK/a.txt" > "$WORK/an.txt"
-  normalise "$WORK/b.txt" > "$WORK/bn.txt"
+  if [ "$status" -ne 0 ] || [ ! -s "$WORK/b.txt" ]; then
+    echo "  PORT FAILED $(basename "$f"): exit $status, $(head -2 "$WORK/b.err" | tr '\n' ' ' | cut -c1-150)"
+    differ=$((differ + 1))
+    continue
+  fi
+  if ! normalise "$WORK/a.txt" > "$WORK/an.txt" || ! normalise "$WORK/b.txt" > "$WORK/bn.txt"; then
+    echo "  NORMALIZATION FAILED $(basename "$f")"
+    differ=$((differ + 1))
+    continue
+  fi
   if diff -q "$WORK/an.txt" "$WORK/bn.txt" > /dev/null; then
     agree=$((agree + 1))
   else
     differ=$((differ + 1))
     echo "  DIFFERS $(basename "$f")  $(diff "$WORK/an.txt" "$WORK/bn.txt" | head -4 | tr '\n' ' ' | cut -c1-110)"
-    if [ "$status" -ne 0 ] || [ ! -s "$WORK/b.txt" ]; then
-      echo "    the port exited $status saying: $(head -2 "$WORK/b.err" | tr '\n' ' ' | cut -c1-150)"
-    fi
   fi
 done
 echo "  agree $agree, differ $differ, skipped $skipped"

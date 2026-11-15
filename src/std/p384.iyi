@@ -34,7 +34,11 @@
 # P-384 is), with no case to branch on. [k]P runs 96 windows of four bits
 # from the top, each four doublings and one addition of a table entry
 # read whole: all sixteen entries are read and the one wanted kept by
-# masks. Inversion is Fermat's, x^(m - 2), whose exponent is public.
+# masks, each mask's selector passed through std/digest's `ValueBarrier`
+# first, so that the compiler cannot work out that it is 0 or all ones
+# and make the choice a branch or a single load (`P384Point.lookup`, kept
+# out of line for bench/std_p384_exercise.sh to read its assembly).
+# Inversion is Fermat's, x^(m - 2), whose exponent is public.
 #
 # The nonce is RFC 6979's, HMAC under the hash the signature names. P-384
 # is wider than SHA-256: the candidate k is two HMAC blocks' worth, cut to
@@ -71,14 +75,15 @@
 
 # bench/ct_timing.sh, `sign` with one key, a fixed message against random
 # ones: |t| = 0.75 to 1.7 over 50,000 signatures (under 10 is no leak
-# seen). The --release assembly of `P384Point.base_mult`, its table
-# selection inlined, branches on counters alone (a jump table on the digit
-# loop's counter picks the limb) and the allocator's slow path.
+# seen). The --release assembly of `P384Point.mult` branches on counters
+# alone (a jump table on the digit loop's counter picks the limb) and the
+# allocator's slow path, and that of `P384Point.lookup`, which it calls,
+# on its own counter and the bounds of the table.
 
 module std/p384
 
 import std/int
-import std/digest::{SHA256, SHA384, SHA512}
+import std/digest::{SHA256, SHA384, SHA512, ValueBarrier}
 import std/crypto::{HMAC}
 import std/asn1::{Der, DerValue, DerTag, Asn1Error}
 import std/ecdsa::{EcdsaPublicKey, EcdsaCurve, EcdsaHash, EcdsaError}
@@ -707,14 +712,20 @@ struct P384Point
     acc
   end
 
-  # table[digit], every entry read and the one wanted kept by masks.
+  # table[digit], every entry read and the one wanted kept by masks. The
+  # selector, 1 for the entry wanted and 0 for the rest, comes from a
+  # digit of the secret scalar; it goes through the value barrier before
+  # it masks anything, so that the masks stay masks in the machine code.
+  # Out of line, so that the assembly the gate reads for this function is
+  # what `mult` runs.
+  @[NoInline]
   private def self.lookup(table : Array(P384Point), digit : UInt64) : P384Point
     x = P384Num.zero
     y = P384Num.zero
     z = P384Num.zero
     i = 0
     while i < 16
-      bit = ((i.to_u64 ^ digit) &- 1_u64).unsafe_shr(63)
+      bit = ValueBarrier.u64(((i.to_u64 ^ digit) &- 1_u64).unsafe_shr(63))
       entry = table[i]
       x = P384Num.choose(bit, entry.x, x)
       y = P384Num.choose(bit, entry.y, y)

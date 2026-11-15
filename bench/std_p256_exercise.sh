@@ -9,8 +9,10 @@
 # 1,500 keys and signatures to Python's cryptography (OpenSSL's
 # deterministic ECDSA, RFC 6979, under SHA-256, -384 and -512), byte for
 # byte; reads private keys as OpenSSL writes them, PKCS #8 and SEC 1, and
-# refuses the ones that are not P-256's; and proves on broken copies of
-# the module that the checks fail where they say.
+# refuses the ones that are not P-256's; reads in the --release assembly
+# how a table's entry is picked by a secret digit, and in the IR how the
+# fixed-base table's address reaches a second thread; and proves on broken
+# copies of the module that the checks fail where they say.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -256,6 +258,166 @@ PY
 fi
 
 echo
+echo "== how a table's entry is picked, read off the machine code"
+# A selector made from a digit of the nonce or the key is 0 or 1, and a
+# compiler that sees so may pick the entry with a conditional jump on the
+# digit, or by reading one entry's address: the same signatures, so
+# nothing above shows it, and a timing shows the first on a quiet machine
+# and never the second. The instructions do. A small program's --release
+# assembly is read for two pinned targets, whatever the host is
+# (`--cross-compile` writes the assembly and links nothing, so neither
+# target's toolchain is needed). `P256BaseTable.pick`, `P256BaseTable.top`
+# and `P256Point.lookup` each have to hold the value barriers their
+# selectors go through (an empty `#APP`/`#NO_APP` pair is what std/digest's
+# `ValueBarrier` leaves), no conditional move in them may keep one of two
+# pointers that a load then reads through, and their only conditional
+# jumps may be their loop's and their counters' checks.
+cat >"$WORK/pick.iyi" <<'IYI'
+module pick
+
+import std/p256::{P256PrivateKey}
+import std/ecdsa::{EcdsaHash, EcdsaError}
+
+def bytes_of(seed : Int32) : Array(UInt8)
+  Array(UInt8).new(32) { |i| ((i * 37 + seed * 11 + 1) & 0x7f).to_u8 }
+end
+
+key = P256PrivateKey.from_bytes(bytes_of(Program.args.size)).or_panic
+other = P256PrivateKey.from_bytes(bytes_of(Program.args.size + 1)).or_panic
+puts key.sign(EcdsaHash::SHA256, "hello").size
+shared = key.shared_secret(other.public_point)
+puts shared.is_a?(EcdsaError) ? "refused" : shared.size
+IYI
+# machine.py FILE.s FUNCTION BARRIERS [lookup]: what in FUNCTION's
+# instructions picks by a secret where a mask should, a line each.
+cat >"$WORK/machine.py" <<'PY'
+import re, sys
+path, name, need, leaf = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4:] == ["lookup"]
+body, inside = [], False
+for line in open(path, encoding="utf-8", errors="replace"):
+    line = line.rstrip("\n")
+    if not inside:
+        inside = line.startswith('"') and line.endswith('":') and name in line
+    elif line.startswith("\t.size\t"):
+        break
+    elif line.strip() and not line.startswith("\t.") and not line.startswith(".Ltmp"):
+        body.append(line.strip())
+if not body:
+    raise SystemExit(f"no function named {name} in the assembly, so nothing of it was read")
+found = []
+barriers = sum(1 for a, b in zip(body, body[1:]) if a.endswith("APP") and b.endswith("NO_APP") and not a.endswith("NO_APP"))
+if barriers < need:
+    found.append(f"{name}: not the {need} value barriers its source asks for in its machine code, but {barriers}")
+code = [l for l in body if not l.endswith("APP")]
+labels = {l[:-1]: i for i, l in enumerate(code) if l.endswith(":")}
+split = lambda l: (l.split(None, 1) + [""])[:2]
+leaves = re.compile(r"j\w+|b|bl|blr|br|b\.\w+|cbn?z|tbn?z|call|ret")
+for i, l in enumerate(code):
+    op, args = split(l)
+    # A pointer kept by a conditional move and then read through: which of
+    # the two it was is the address of that load.
+    kept = re.match(r"(r[a-z0-9]+|x\d+),", args) if re.fullmatch(r"cmov\w+|csel", op) else None
+    if kept and not re.search(r"\d[dwb]$", kept.group(1)):
+        reg = kept.group(1)
+        for later in code[i + 1:i + 13]:
+            lop, largs = split(later)
+            if later.endswith(":") or leaves.fullmatch(lop):
+                break
+            if re.search(r"\[[^\]]*\b" + reg + r"\b", largs):
+                found.append(f"{name}: `{' '.join(l.split())}` keeps one of two pointers and `{' '.join(later.split())}` reads through it")
+                break
+            first, _, rest = largs.partition(",")
+            if first == reg and not re.search(r"\b" + reg + r"\b", rest):
+                break
+    # In a lookup a conditional jump is its loop going round, or a check of
+    # a counter (an overflow, an index past the table) leaving for a panic;
+    # any other is a branch on what was looked up.
+    if leaf and re.fullmatch(r"j(?!mp)\w+|b\.\w+|cbn?z|tbn?z", op):
+        at = labels.get(args.split(",")[-1].strip(), -1)
+        block = []
+        for later in code[at + 1:at + 25] if at > i else []:
+            if later.endswith(":") or split(later)[0] in ("ret", "jmp", "b", "br"):
+                break
+            block.append(later)
+        if at > i and not any("raise" in x for x in block):
+            found.append(f"{name}: `{' '.join(l.split())}` is neither its loop nor a counter's check")
+print("\n".join(found), end="\n" if found else "")
+sys.exit(1 if found else 0)
+PY
+# machine_code <search path> <dir>: what is wrong with the picks built from
+# <search path>, a line each, and 1 if anything is.
+machine_code() {
+  local target wrong=0 name count mode
+  mkdir -p "$2"
+  for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
+    if ! IYI_PATH="$1" "$IYI" build --release --emit asm,llvm-ir --x86-asm-syntax intel --cross-compile --target "$target" \
+      -o "$2/$target" "$WORK/pick.iyi" >"$2/$target.log" 2>&1 || [ ! -s "$2/$target.s" ]; then
+      echo "$target: no assembly was written: $(grep -m1 -E 'Error|BUG' "$2/$target.log")"
+      wrong=1
+      continue
+    fi
+    while read -r name count mode; do
+      if ! "$PY" "$WORK/machine.py" "$2/$target.s" "$name" "$count" $mode >"$2/$target.read" 2>&1; then
+        sed "s/^/$target: /" "$2/$target.read"
+        wrong=1
+      fi
+    done <<'READ'
+P256BaseTable::pick< 3 lookup
+P256BaseTable::top< 1 lookup
+P256Point::lookup< 1 lookup
+READ
+  done
+  return $wrong
+}
+if [ -z "$PY" ]; then
+  echo "  no python here to read the assembly with, so the picks' machine code goes unread"
+elif machine_code "$IYI_PATH" "$WORK/machine" >"$WORK/machine.out"; then
+  echo "  x86_64 and aarch64, --release: every selector goes through its barrier, every entry is read and masked, and nothing branches but the loops"
+else
+  sed 's/^/  /' "$WORK/machine.out"
+  status=1
+fi
+
+echo
+echo "== how the table's address reaches a second thread, read off the IR"
+# The fixed-base table is worked out by the first thread that wants it,
+# and a second thread must never read it part written: a wrong multiple
+# gives a signature a wrong point under the right nonce, which beside the
+# right signature of the same message gives the key away. On x86_64 a
+# plain store of the table's address after its entries is seen in that
+# order by every thread; on a machine that orders its stores loosely it is
+# not, and no run on this one would show it. So it is read off the IR of
+# the program built above (x86_64's, the orderings being the module's
+# request and the same for every target): every read of the word the
+# address is kept in has to be an acquire load and its one write a release
+# store.
+# published <file.ll> <class variable>: what in the IR reads or writes the
+# word a table's address is kept in other than by an acquire load and a
+# release store, a line each; 1 if anything does, or if either is missing.
+# The zero the word starts from is a plain store, made before the
+# program's first line.
+published() {
+  awk -v name="$2" '
+    !(index($0, "@\"" name "\"") || index($0, "@\"" name ".")) || /^@/ || /store i64 0, ptr @/ { next }
+    / = load atomic i64, ptr @[^ ]* acquire,/ { loads++; next }
+    /store atomic i64 [^,]*, ptr @[^ ]* release,/ { stores++; next }
+    { print name ": neither an acquire load nor a release store:" $0; other++ }
+    END {
+      if (!loads) print name ": no acquire load of it"
+      if (!stores) print name ": no release store to it"
+      exit (other || !loads || !stores) ? 1 : 0
+    }' "$1"
+}
+if [ -z "$PY" ]; then
+  echo "  no python here, so the program above was not built and its IR goes unread"
+elif published "$WORK/machine/x86_64-unknown-linux-gnu.ll" 'Std::P256::P256BaseTable::table' >"$WORK/published.out"; then
+  echo "  the table's address is read by an acquire load and written, once the table is whole, by a release store"
+else
+  sed 's/^/  /' "$WORK/published.out"
+  status=1
+fi
+
+echo
 echo "== proving the checks can fail when the module is broken"
 # prove_broken <label> <phrase> <old> <new>: the exercise must fail on a
 # copy of the module with <old> replaced, at the check that names <phrase>.
@@ -313,7 +475,7 @@ prove_broken "a doubling short of its last step" "a point that is not on P256" \
 # [d]Q's window over a peer's point; [d]G has a table of its own now, so
 # it is the first shared secret that sees this one wrong.
 prove_broken "a constant-time lookup that answers the next entry" "RFC 5903's girx, from the initiator" \
-  '      bit = ((i.to_u64 ^ digit) &- 1_u64).unsafe_shr(63)' '      bit = ((i.to_u64 ^ (digit &+ 1_u64)) &- 1_u64).unsafe_shr(63)'
+  '      bit = ValueBarrier.u64(((i.to_u64 ^ digit) &- 1_u64).unsafe_shr(63))' '      bit = ValueBarrier.u64(((i.to_u64 ^ (digit &+ 1_u64)) &- 1_u64).unsafe_shr(63))'
 # The fixed-base table's three ways to go wrong. Its rows read one entry
 # along answer nothing for a digit of 8, (0, 0), which is off the curve,
 # and so is what it is added into. A digit's sign dropped, or the
@@ -321,7 +483,7 @@ prove_broken "a constant-time lookup that answers the next entry" "RFC 5903's gi
 # digit carries), still lands on the curve, so it is the key's x that
 # shows it.
 prove_broken "a fixed-base lookup that answers the next entry" "a point that is not on P256" \
-  '      bit = ((j.to_u64 ^ index) &- 1_u64).unsafe_shr(63)' '      bit = ((j.to_u64 ^ (index &+ 1_u64)) &- 1_u64).unsafe_shr(63)'
+  '      bit = ValueBarrier.u64(((j.to_u64 ^ index) &- 1_u64).unsafe_shr(63))' '      bit = ValueBarrier.u64(((j.to_u64 ^ (index &+ 1_u64)) &- 1_u64).unsafe_shr(63))'
 prove_broken "a fixed-base digit whose sign is dropped" "the key's x" \
   '    y = P256Num.choose(negative, f.sub(P256Num.zero, y), y)' '    y = P256Num.choose(0_u64, f.sub(P256Num.zero, y), y)'
 prove_broken "the fixed-base recoding's last carry left out" "the key's x" \
@@ -356,6 +518,121 @@ prove_broken "the table built from G whatever the point" "RFC 5903's girx, from 
   '      table[i] = table[i - 1] + point' '      table[i] = table[i - 1] + P256Point.base'
 prove_broken "SEC 1's curve unchecked" "an ECPrivateKey naming P-384: accepted" \
   '        return EcdsaError.new("the private key names a curve that is not prime256v1") unless oid == P256Point::CURVE_OID' ''
+# prove_unmasked <label> <phrase> <old> <new>: the exercise cannot tell a
+# pick by masks from one a compiler was left free to make a choice of, the
+# answers being the same; the reading of the machine code has to, with
+# <phrase> in what it says, for both targets.
+# patched_copy <old> <new>: a copy of the module with <old>, which it has
+# once, replaced, under $WORK/patched.
+patched_copy() {
+  rm -rf "$WORK/patched"
+  mkdir -p "$WORK/patched/std"
+  OLD="$1" NEW="$2" "$PY" - <<PY
+import os
+from pathlib import Path
+src = Path("$REPO/src/std/p256.iyi").read_text(encoding="utf-8")
+if src.count(os.environ["OLD"]) != 1:
+    raise SystemExit("patch site missing or not one")
+Path("$WORK/patched/std/p256.iyi").write_text(src.replace(os.environ["OLD"], os.environ["NEW"], 1), encoding="utf-8", newline="\n")
+PY
+}
+prove_unmasked() {
+  mutations=$((mutations + 1))
+  if [ -z "$PY" ]; then
+    echo "  no python3 on this machine, so the $1 proof is unmeasured"
+    return
+  fi
+  if ! patched_copy "$3" "$4"; then
+    echo "  the $1 patch did not apply"
+    status=1
+  elif machine_code "$WORK/patched${PSEP}$IYI_PATH" "$WORK/patched/machine" >"$WORK/mut.out"; then
+    echo "  the machine code of $1 was read as sound"
+    status=1
+  elif [ "$(grep -cF "$2" "$WORK/mut.out")" -eq 2 ]; then
+    echo "  $1 is caught, on both targets"
+  else
+    echo "  $1 was refused, but not for what it is:"
+    sed 's/^/    /' "$WORK/mut.out"
+    status=1
+  fi
+}
+prove_unmasked "a fixed-base selector the compiler can see" "P256BaseTable::pick<: not the 3 value barriers" \
+  '      bit = ValueBarrier.u64(((j.to_u64 ^ index) &- 1_u64).unsafe_shr(63))' '      bit = ((j.to_u64 ^ index) &- 1_u64).unsafe_shr(63)'
+prove_unmasked "a window selector the compiler can see" "P256Point::lookup<: not the 1 value barriers" \
+  '      bit = ValueBarrier.u64(((i.to_u64 ^ digit) &- 1_u64).unsafe_shr(63))' '      bit = ((i.to_u64 ^ digit) &- 1_u64).unsafe_shr(63)'
+prove_unmasked "the last carry's selector in the compiler's sight" "P256BaseTable::top<: not the 1 value barriers" \
+  '    carry = ValueBarrier.u64(carry)
+' ''
+# What stood in for the barrier before: each selector xored with a zero
+# read by an atomic load from a class variable. Nothing ever writes that
+# variable, so an optimising build knows the zero and the xor is gone
+# from its instructions.
+prove_unmasked "the selectors xored with a zero no one writes, as they were" "P256BaseTable::pick<: not the 3 value barriers" \
+  '  @[NoInline]
+  def self.pick(table : Pointer(P256Num), row : Int32, digit : UInt64) : P256Point
+    f = P256Modulus.field
+    negative = ValueBarrier.u64(digit.unsafe_shr(63))
+    index = (digit ^ (0_u64 &- negative)) &+ negative
+    x = P256Num.zero
+    y = P256Num.zero
+    base = table + (row * 16).to_i64
+    j = 1
+    while j <= 8
+      bit = ValueBarrier.u64(((j.to_u64 ^ index) &- 1_u64).unsafe_shr(63))
+      x = P256Num.choose(bit, base[2 * j - 2], x)
+      y = P256Num.choose(bit, base[2 * j - 1], y)
+      j = j + 1
+    end
+    y = P256Num.choose(negative, f.sub(P256Num.zero, y), y)
+    nonzero = ValueBarrier.u64((index | (0_u64 &- index)).unsafe_shr(63))' '  @@opaque = ::Atomic(UInt64).new(0_u64)
+
+  @[NoInline]
+  def self.pick(table : Pointer(P256Num), row : Int32, digit : UInt64) : P256Point
+    f = P256Modulus.field
+    zero = @@opaque.get
+    negative = digit.unsafe_shr(63) ^ zero
+    index = (digit ^ (0_u64 &- negative)) &+ negative
+    x = P256Num.zero
+    y = P256Num.zero
+    base = table + (row * 16).to_i64
+    j = 1
+    while j <= 8
+      bit = ((j.to_u64 ^ index) &- 1_u64).unsafe_shr(63) ^ zero
+      x = P256Num.choose(bit, base[2 * j - 2], x)
+      y = P256Num.choose(bit, base[2 * j - 1], y)
+      j = j + 1
+    end
+    y = P256Num.choose(negative, f.sub(P256Num.zero, y), y)
+    nonzero = (index | (0_u64 &- index)).unsafe_shr(63) ^ zero'
+# prove_unpublished <label> <phrase> <old> <new>: nor can the exercise tell
+# how the table's address reaches a second thread; the reading of the IR
+# has to refuse the copy, with <phrase> in what it says.
+prove_unpublished() {
+  mutations=$((mutations + 1))
+  if [ -z "$PY" ]; then
+    echo "  no python3 on this machine, so the $1 proof is unmeasured"
+    return
+  fi
+  if ! patched_copy "$3" "$4"; then
+    echo "  the $1 patch did not apply"
+    status=1
+  elif ! machine_code "$WORK/patched${PSEP}$IYI_PATH" "$WORK/patched/machine" >"$WORK/mut.out"; then
+    echo "  $1: its picks' machine code was refused, which is not what it breaks:"
+    sed 's/^/    /' "$WORK/mut.out"
+    status=1
+  elif published "$WORK/patched/machine/x86_64-unknown-linux-gnu.ll" 'Std::P256::P256BaseTable::table' >"$WORK/mut.out"; then
+    echo "  the IR of $1 was read as sound"
+    status=1
+  elif grep -qF "$2" "$WORK/mut.out"; then
+    echo "  $1 is caught"
+  else
+    echo "  $1 was refused, but not for what it is:"
+    sed 's/^/    /' "$WORK/mut.out"
+    status=1
+  fi
+}
+prove_unpublished "a table's address stored with no ordering" "no release store to it" \
+  '    @@table.set_release(table.address)' '    @@table.set_relaxed(table.address)'
 
 echo
 if [ "$status" -eq 0 ]; then

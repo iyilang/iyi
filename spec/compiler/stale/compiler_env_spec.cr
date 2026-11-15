@@ -320,7 +320,7 @@ describe "Iyi::Stale S3c: env-only recorder, CompilerEnvFp" do
       end
     end
 
-    it "a stale recorder records a macro's file reads as files, and no reason" do
+    it "a stale recorder records a macro's file reads as files, and no reason where files have a change time" do
       stale = Iyi::BuildInputs.new(nil, stale: true)
       Iyi::BuildInputs.current = stale
       begin
@@ -332,7 +332,14 @@ describe "Iyi::Stale S3c: env-only recorder, CompilerEnvFp" do
 
       stale.files[Iyi::BuildInputs.key("src/compiler/iyi.cr")].kind.file?.should be_true
       stale.files[Iyi::BuildInputs.key("nonexistent_spec_file.txt")].kind.absent?.should be_true
-      stale.reasons.should be_empty
+      if Iyi::Stale::FileStamp.of("src/compiler/iyi.cr").ctime > 0
+        stale.reasons.should be_empty
+      else
+        # Windows reports no change time, so the file that exists cannot be
+        # vouched for and the recorder says so. The absent one needs none.
+        stale.reasons.size.should eq(1)
+        stale.reasons.first.should contain("iyi.cr has no change time")
+      end
     end
 
     it "a stale recorder gives a macro run a reason, whether or not it declared its inputs" do

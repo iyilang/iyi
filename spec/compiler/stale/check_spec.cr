@@ -533,7 +533,7 @@ describe "Iyi::Stale inputs record (--stale-inputs)" do
     Iyi::Stale::Check.records_inputs?(no_reasons, stale).should be_false
   end
 
-  it "stale inputs leave the Build unchanged, and write the record of a reusable build" do
+  it "stale inputs leave the Build unchanged, and write the record of a reusable build everywhere but Windows" do
     program = Iyi::Program.new
     program.color = false
     parser = program.new_parser("def foo(x); x; end; a = foo(41)")
@@ -567,8 +567,13 @@ describe "Iyi::Stale inputs record (--stale-inputs)" do
           recorded.not_reusable.should be_empty
           recorded.local_build_hex.should eq(plain.local_build_hex)
           recorded.portable_build_hex.should eq(plain.portable_build_hex)
-          File.file?(inputs_path).should be_true
-          JSON.parse(File.read(inputs_path))["local_build"].as_s.should eq(recorded.local_build_hex)
+          {% if flag?(:win32) %}
+            # No change time there, so `Check.run` writes no record at all.
+            File.file?(inputs_path).should be_false
+          {% else %}
+            File.file?(inputs_path).should be_true
+            JSON.parse(File.read(inputs_path))["local_build"].as_s.should eq(recorded.local_build_hex)
+          {% end %}
         end
       end
     end

@@ -232,22 +232,40 @@ describe "Compiler" do
   # 1,000 tests, nine builds at a time, answered "does not build" for one
   # to five of them, `bc_flags.o0: No such file or directory`. The build
   # makes the directory again and takes the lock that is at the path.
+  #
+  # The claim waits on a thread of its own. Spawned beside this fiber it
+  # blocks their thread in `flock`, and the lock's holder, this fiber, only
+  # runs again if the runtime moves the scheduler to another thread. On a
+  # Linux runner it once did not: this example sat for 59 minutes, its own
+  # 30 second timeout never firing, until the job's limit ended it. Why was
+  # not found, and 2,000 rounds of the same shape on darwin never stuck.
   it "makes its cache directory again when the cleaner removed it before the lock" do
     cache = Iyi::CacheDir.instance
     source = File.join(Dir.tempdir, "claim-lost-#{Process.pid}-#{Random.rand(1_000_000)}.iyi")
     dir = cache.directory_for(source)
-    given = Channel({String, Bool, Bool}).new
+    # Room for the answer, so a claim nobody is left to hear still ends.
+    given = Channel({String, Bool, Bool}).new(1)
+    started = Channel(Nil).new(1)
+    waiter = -> do
+      started.send(nil)
+      cache.claim(source) do |claimed|
+        lock = File.join(claimed, "compiler.lock")
+        given.send({claimed, File.exists?(lock), cache.directory_in_use?(claimed)})
+      end
+    end
 
     begin
       File.open(File.join(dir, "compiler.lock"), "a") do |cleaner|
         cleaner.flock_exclusive(blocking: false)
-        spawn do
-          cache.claim(source) do |claimed|
-            lock = File.join(claimed, "compiler.lock")
-            given.send({claimed, File.exists?(lock), cache.directory_in_use?(claimed)})
-          end
-        end
-        # Long enough for the claim to have opened the lock and be waiting.
+        {% if Fiber.has_constant?(:ExecutionContext) %}
+          Fiber::ExecutionContext::Isolated.new("claim") { waiter.call }
+        {% else %}
+          spawn { waiter.call }
+        {% end %}
+        # Counted from when the waiter runs, not from when its thread was
+        # asked for: long enough for the claim to have opened the lock and be
+        # waiting.
+        started.receive
         sleep 300.milliseconds
         FileUtils.rm_rf(dir)
         Dir.exists?(dir).should be_false

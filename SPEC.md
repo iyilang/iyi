@@ -64,7 +64,7 @@ own reference accepts.
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
 | iyi's own prelude | 29,007 lines, of which 4,738 are the library held to the 4,738 ceiling (7,089 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 149,713 lines, none of it written in iyi |
+| compiler | 149,923 lines, none of it written in iyi |
 | artifact format | `.iyimod` v62, checksum per section |
 | samples | 28 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -1062,9 +1062,9 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 149,713 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 29,007-line own prelude + 128,396 in std |
-| Specs | 21,146 lines | 17,314 for iyi |
+| Compiler | 24,984 lines, **written in Crystal** | 149,923 lines, Crystal, forked |
+| Library | 8,161 lines (3,551 of it core) | 29,007-line own prelude + 129,713 in std |
+| Specs | 21,146 lines | 17,536 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
 | Own status line | *"pre-alpha: we are still designing the language"* | design largely settled, 0.2.0 released, a language written in it |
@@ -7377,10 +7377,50 @@ The decisions:
 
 **Step 2 followed, and taught one rule.** `iyi.sum` is the fact half of the
 split above: one line per requirement the build used, a tree hash of its
-checkout (`s1:` — SHA-1, spelled so nobody mistakes it for a signature,
-which III.7 reserves for distribution). A matching entry is silence, a
-mismatch is a refusal naming both hashes, a missing entry is appended —
-the tool records facts, it does not ask a person to transcribe hashes. The
+checkout (`h2:` — still not a signature, which III.7 reserves for
+distribution). The hash is taken in two steps so that no byte of one file
+can be read as part of another: each file is digested on its own, SHA-256
+of its bytes, and written as one line, `<hex digest> <kind> <relative
+path>\n` — `f` for a file, `l` for a symbolic link, whose bytes are its
+target text — and the token is the SHA-256 of those lines in path order. A
+path with a line break in it is refused, so the list reads back one way.
+**A link in a fetched package is a file holding its target's path, on
+every platform.** A repository stores a link as its target text, and
+what a checkout made of that was the machine's choice - a link on Linux
+and darwin, a plain file on Windows, where git is installed with
+`core.symlinks=false` - so with the kind in the hash one tag was two
+hashes, and an `iyi.sum` written on one platform was refused on the
+other. The fetcher checks out with `core.symlinks=false` everywhere, the
+entry is `f` everywhere, and one tag is one hash. What that costs is
+said plainly: a package that reached one of its own files through a link
+- a module under a second name, a directory shared between two places -
+does not have that file there when it is fetched, on any platform, as it
+never had on Windows; it has to hold the file. `l` stays in the hash for
+the tree that holds a real link all the same - one put where the fetched
+file was, or a checkout an earlier compiler fetched where links exist -
+so that a link never stands in for a file under the file's hash; a
+cached checkout of the second kind hashes apart from a fresh fetch until
+it is fetched again (`clear_cache`). A
+matching entry is silence, a mismatch is a refusal naming both hashes, a
+missing entry is appended — the tool records facts, it does not ask a
+person to transcribe hashes. **`s1:` is what the file held first**: SHA-1
+over `<relpath>\0<bytes>\0` for every file, with no lengths, so a tag
+could be moved to a tree in which bytes had crossed from a data file into
+the source file beside it and the line still matched. An `s1:` line is
+held to its checkout the old way once more before it goes: a checkout
+that differs is the refusal it always was, naming both `s1:` hashes, and
+one that matches has its line written again as `h2:`, with one line on
+stderr saying so - written again unread, it would have pinned whatever
+the first build after an upgrade found checked out, moved tag or not.
+The rewrite is not a condition of the build: where `iyi.sum` cannot be
+written and nothing in it is new, the lines matched and the build goes
+on under them, with stderr naming the file and the system's reason each
+time; a requirement with no line at all still has to be recorded, and a
+file that cannot take it is the failure it was.
+Under the cache's `mod/`, where nothing is written, it stays as it is
+and is compared the same way: a dependency's own `iyi.sum` saying `s1:`
+for what it requires is refused there when the checkout does not hash to
+it, as it was before `h2:`. The
 rule the build taught: **a checkout is read-only.** The first version let
 a build whose entry sat inside the module cache write a sum *into the
 checkout*, which changed the tree a user's sum pinned — the verifier
@@ -8089,6 +8129,21 @@ A `--cached` check took 3.6 to 4.8 s there, against 1.2 to 2.1 s to build and ru
 
 The cached run served exactly the tests it should in every case. Before the fast path and the parallel runner, the same suite took 117.0 s plain and 1,254.8 s under `--fresh` (load average 36 to 180), and on a second run 176.7 s and 3,526.7 s (load 70 to 400). Its cached run with nothing changed never finished: one attempt was still running after 90 minutes, and another was killed after 42 minutes, when the runner process had grown to 64 GB. A lookup then parsed every receipt of every test; what grew was not profiled. With the store per test, a runner taking all 1,000 tests through the compiler check ended in 270 s and no process of the run passed 0.9 GB. Linux was not measured.
 
+Every number above is from an unoptimized compiler (`make iyi`), which is what CI builds and not what an installed `iyi` is. On a release compiler (`make iyi release=1`), the same machine, the same 1,000 generated tests that end at once (load average 16 when it started, 360 during the run):
+
+| Case | Plain `iyi test` | `iyi test --cached` | Served | Compilers started |
+|---|---|---|---|---|
+| first run (`--fresh`) | 118.3 s | 178.1 s | 0 | 1,000 |
+| nothing changed | 87.5 s | 1.6 s | 1,000 | 0 |
+| one test edited | 85.3 s | 2.4 s | 999 | 1 |
+| one module edited (20 tests import it) | 88.5 s | 4.8 s | 980 | 20 |
+| a shared def no test reaches, edited | 81.8 s | 77.6 s | 1,000 | 1,000 |
+| a shared def every test reaches, edited | 83.4 s | 136.5 s | 0 | 1,000 |
+
+Every test passed in all twelve runs.
+
+One small test alone, warm, on a quiet machine (medians of five): a plain build and run takes 0.42 s unoptimized and 0.23 s release; a compiler check that hits takes about 0.97 s and 0.31 s. Of the release check, analysing the observed program is 0.13 s (0.06 s in a plain build), walking what the test reaches 0.006 s, and hashing it 0.09 s (0.48 s unoptimized, more than half of it the SHA-256 arithmetic itself).
+
 **Census as measured (historical, original 141-program corpus).** Measured on macOS arm64 on this machine across 141 programs (27 C2 samples/iyi, 114 C3 bench/std_*_exercise), before four std exercises became tests; not taken again on darwin since:
 - Runtime reusable on second run: 87 of 141 (61.7%). C2: 25 of 27 (92.6%). C3: 62 of 114 (54.4%).
 - Static build-key reusable: 138 of 141 (97.9%). C2: 27 of 27. C3: 111 of 114.
@@ -8570,9 +8625,9 @@ From Crystal's own *Required libraries* page, plus every `@[Link]` in this tree.
 | Library | What it is for | Reachable | iyi's answer |
 |---|---|---|---|
 | libc | everything | yes: `write`, `exit`, `memset` and the collector's `mmap`/`munmap` on darwin | keep. On Linux the prelude issues the raw syscalls instead, so the object asks libc for nothing and the executable carries only the link template's five |
-| kernel32, advapi32, the MSVC C runtime (Windows) | the platform itself | yes: `WriteFile`, `ExitProcess`, `VirtualAlloc`, `CreateThread`, the completion port, `CreateProcessW` for `std/process` — `RtlGenRandom` for `std/random`, and the registry reads (`RegOpenKeyExW`, `RegEnumKeyExW`, `RegQueryValueExW`, `RegCloseKey`) through which `std/socket`'s resolver finds the configured name servers | keep, and of the platform's own only these two. Windows has no libc of its own: the C runtime's POSIX shims are a person-installed choice of CRT and the Win32 API is the platform's contract, which is the same answer Go gives. `kernel32` is the floor; `advapi32` is the OS entropy `Random::Secure` answers and `Random.new` seeds from, for which there is no kernel32 name, and the registry, where Windows keeps the name servers that iphlpapi and dnsapi — two more DLLs — would otherwise have answered. Both ship with every Windows. The link line also carries the *dynamic* C runtime — the static one, `libcmt`, links and access-violates before `main` — so every program imports `vcruntime140.dll` and five UCRT façades (runtime, math, stdio, locale, heap) beside `kernel32`, as III.9's PE measurement counts. The façades ship with Windows 10 and later; `vcruntime140.dll` is the Visual C++ redistributable, which a clean machine is not promised, so an `.exe` iyi builds needs that one installed |
+| kernel32, advapi32, the MSVC C runtime (Windows) | the platform itself | yes: `WriteFile`, `ExitProcess`, `VirtualAlloc`, `CreateThread`, the completion port, `CreateProcessW` for `std/process` — `RtlGenRandom` for `std/random`, and the registry reads (`RegOpenKeyExW`, `RegEnumKeyExW`, `RegQueryValueExW`, `RegCloseKey`) through which `std/socket`'s resolver finds the configured name servers, and the access list `std/autocert` gives its cache's directory (`ConvertStringSecurityDescriptorToSecurityDescriptorW`, `GetSecurityDescriptorDacl`, `SetNamedSecurityInfoW`, with kernel32's `LocalFree`) | keep, and of the platform's own only these two. Windows has no libc of its own: the C runtime's POSIX shims are a person-installed choice of CRT and the Win32 API is the platform's contract, which is the same answer Go gives. `kernel32` is the floor; `advapi32` is the OS entropy `Random::Secure` answers and `Random.new` seeds from, for which there is no kernel32 name, and the registry, where Windows keeps the name servers that iphlpapi and dnsapi — two more DLLs — would otherwise have answered. Both ship with every Windows. The link line also carries the *dynamic* C runtime — the static one, `libcmt`, links and access-violates before `main` — so every program imports `vcruntime140.dll` and five UCRT façades (runtime, math, stdio, locale, heap) beside `kernel32`, as III.9's PE measurement counts. The façades ship with Windows 10 and later; `vcruntime140.dll` is the Visual C++ redistributable, which a clean machine is not promised, so an `.exe` iyi builds needs that one installed |
 | ws2_32 (Windows) | sockets | yes: `socket`, `bind`, `listen`, `recv`, `send`, `recvfrom`, `sendto`, and the posted `AcceptEx`, `ConnectEx`, `WSASend` and `WSARecvFrom` the completion port answers — `std/socket` and `std/udp`, and nothing else | keep, and only for those two. Winsock *is* Windows' network interface: there is no socket call anywhere else, not in kernel32 and not in a CRT, which is the same position `kernel32` holds for processes and files. `ws2_32.dll` ships with every Windows, so it adds nothing to what an `.exe` iyi builds needs installed. `AcceptEx` and `ConnectEx` are mswsock's exports and are reached by asking a socket for the pointer (`WSAIoctl` with `SIO_GET_EXTENSION_FUNCTION_POINTER`) rather than by linking `mswsock`, so Windows' sockets are one row here and not two |
-| crypt32 (Windows); Security and CoreFoundation (darwin) | the trusted roots | yes: `CertOpenSystemStoreW`, `CertEnumCertificatesInStore`, `CertCloseStore` on Windows; `SecTrustCopyAnchorCertificates`, `SecTrustSettingsCopyCertificates`, `SecTrustSettingsCopyTrustSettings`, `SecCertificateCopyData` and the CoreFoundation array, data, dictionary, number and string calls they answer in on darwin — `std/system_roots`, and nothing else | keep, and only for that one. **Decided by the owner** for the TLS client: a system's trusted roots - and the roots an administrator or a user added or took away - are kept behind these interfaces and no file holds them, so reading them is the platform's act the way a socket is Winsock's. Each ships with every Windows and every macOS, so an `.exe` or a darwin binary needs nothing installed. Linux keeps its roots in a bundle file, read with no binding. The alternatives were weighed and refused: files only (no roots at all on Windows, and none a darwin user added), and a bundled copy of Mozilla's roots (stale between releases, and blind to every root an operating system trusts or distrusts on its own). std/x509 itself stays pure computation; a program that brings its own roots links none of these |
+| crypt32 (Windows); Security and CoreFoundation (darwin) | the trusted roots | yes: `CertOpenSystemStoreW`, `CertEnumCertificatesInStore`, `CertGetEnhancedKeyUsage`, `CertCloseStore` on Windows; `SecTrustCopyAnchorCertificates`, `SecTrustSettingsCopyCertificates`, `SecTrustSettingsCopyTrustSettings`, `SecCertificateCopyData` and the CoreFoundation array, data, dictionary, number and string calls they answer in on darwin — `std/system_roots`, and nothing else | keep, and only for that one. **Decided by the owner** for the TLS client: a system's trusted roots - and the roots an administrator or a user added or took away - are kept behind these interfaces and no file holds them, so reading them is the platform's act the way a socket is Winsock's. Each ships with every Windows and every macOS, so an `.exe` or a darwin binary needs nothing installed. Linux keeps its roots in a bundle file, read with no binding. The alternatives were weighed and refused: files only (no roots at all on Windows, and none a darwin user added), and a bundled copy of Mozilla's roots (stale between releases, and blind to every root an operating system trusts or distrusts on its own). std/x509 itself stays pure computation; a program that brings its own roots links none of these |
 | Boehm GC | allocation | no: the default is the owned collector, arena over the platform's own `mmap`; `-Dgc_boehm` opts libgc back in, `-Dgc_none` opts out of collecting | **owned, shipped, default.** II.5 already required a precise collector for R-4; GC_DESIGN.md is the record and `bench/gc_default.py` the measurement that flipped the default. Present on the compiler only as a temporary bootstrap runtime dependency with an exit condition: leaves when the compiler stops being a Crystal program |
 | compiler-rt builtins | 128-bit divide, float conversion, overflow-checked multiply | no | **already owned**: `src/crystal/compiler_rt/` ports them to Crystal. Keep porting |
 | libunwind / libgcc | exception backtraces | no | own the walk. III.1 is what makes this cheap: errors are union members, so only a panic unwinds |
@@ -9241,7 +9296,7 @@ the runtime's aside - are marked: the compiler writes the list into the
 binary (`Crystal::IYI_UNSAFE_MODULES`), and the Windows handler prints
 it in pieces, allocating nothing.
 
-**Where the repository stands.** `src/std` has 84 marked modules of
+**Where the repository stands.** `src/std` has 85 marked modules of
 122, every reason read and rewritten by hand from `iyi fix`'s starting
 point; four of them (box, deque, static_array, weak_ref) are marked by
 hand outright, since only a program that instantiates their generic
@@ -9273,7 +9328,7 @@ warning, which keeps the set honest, and splitting raw code into a small
 module of its own, the way Rust crates isolate theirs. Counted at
 2f070a01e by reading the sources, blocks (`unsafe { }`) would have
 wrapped 2,338 runs of lines in src/std, 900 in src/iyi and 607 in bench,
-and a mark per declaration 1,535, 469 and 258 defs, against 84, 13 and
+and a mark per declaration 1,535, 469 and 258 defs, against 85, 13 and
 85 module marks.
 
 ---
@@ -11317,7 +11372,37 @@ against.
 truncated copy and a partial write; it catches nobody who wants to write a
 `.iyimod` on purpose, and the format does not pretend otherwise. R-1 already
 says a consumer trusts an artifact's declarations, so an artifact from an
-untrusted source is a decision made before the reader ever sees it.
+untrusted source is a decision made before the reader ever sees it. That
+decision is made without a flag: a `mods/` directory beside a workspace's
+root is read by `build`, `run`, `test`, `check`, `doc` and the language
+server for any module whose source is not there, so a repository that
+carries one is trusted as its source is.
+
+**What the reader does hold a file to is its own size.** Every count and
+every length in a `.iyimod` is four bytes the file states, and the reader
+allocates by none of them before comparing it with the bytes that are
+there: the table's entries have to be in the file, the sections' lengths
+together have to fit in what follows the table, and inside a section a
+count of things that take *n* bytes each has to fit in what the section
+has left. A sixteen-byte file whose table named two thousand million
+sections used to ask for 32 GiB before its first entry was read; it is
+now a sentence naming the count and the room. **And the counts of one
+section are held to its size together**, which the rule about what is
+left did not do alone: a type's declarations nest, each level was
+measured against the same remaining bytes, and a 385 KB section whose
+every level counted as many declarations as the rest could hold was
+1.9 GiB committed, every level's array alive at once, before the file
+was refused for ending early. *n* is what an element takes itself, apart
+from what its own counts claim, so the claims are of different bytes: a
+section's counts times their *n* come to no more than the section's
+length, or it is refused at the count that passes it. What a section
+makes a reader allocate is therefore no more elements than it has bytes
+for - a multiple of the file's size fixed by the reader's own records,
+not a number the file chooses. The nesting itself is held to 200 types
+inside one another, by the writer as by the reader: both recurse once a
+level, and one type inside one type twenty thousand times, a well-formed
+1.5 MB, ended the reader with the stack instead of a sentence. None of
+this is a judgement of what the file says.
 
 ### IV.3 Hashing. The part that decides whether builds are actually incremental
 

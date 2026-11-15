@@ -16,9 +16,9 @@
 # seed of a key pair (FIPS 203's d and z, the "internal" key generation of
 # Algorithm 16) and the 32-byte m of an encapsulation (Algorithm 17).
 # `Random::Secure.random_bytes` from std/random is where they come from.
-# This module imports std/digest's SHA3-256, SHA3-512, SHAKE128 and
-# SHAKE256 and nothing else, so a package that uses it is not counted as
-# reaching the operating system (`iyi mod reach`).
+# This module imports std/digest's SHA3-256, SHA3-512, SHAKE128, SHAKE256
+# and `ValueBarrier` and nothing else, so a package that uses it is not
+# counted as reaching the operating system (`iyi mod reach`).
 #
 # The arithmetic is FIPS 203's: polynomials of 256 coefficients modulo
 # q = 3329, multiplied in the NTT domain (Algorithms 9 to 12), the zetas
@@ -38,8 +38,12 @@
 # whatever the values; every loop bound is a size. Decapsulation decrypts,
 # encrypts again and compares the ciphertexts by OR-ing the XOR of every
 # byte, and the comparison's result picks between the real key and the
-# implicit-rejection key J(z || c) by masks over all 32 bytes of both:
-# FIPS 203 Algorithm 18 with no early exit. How that was checked: by
+# implicit-rejection key J(z || c) by a mask over all 32 bytes of both:
+# FIPS 203 Algorithm 18 with no early exit. The mask goes through
+# std/digest's `ValueBarrier` before it is used, so the compiler cannot
+# know it is 0 or all ones and has to read both keys' bytes and combine
+# them; without that, LLVM picked one key's address by a conditional move
+# and read that key alone (see `decapsulate`). How that was checked: by
 # reading, every `if`, `while`, `? :`, `unless` and `[]` on the paths
 # from `decapsulate` and the key generation was listed, and each depends on
 # a size, a loop counter, the ciphertext (which is public) or the
@@ -86,14 +90,19 @@
 # |t| = 2.1 to 2.4 over 50,000; one key and its ciphertext against 64
 # other keys and theirs, |t| = 5.2 to 6.3 over 50,000 (under 10 is no
 # leak seen, on a machine at load 8 to 11). The --release assembly of
-# `decapsulate` reads every ciphertext byte in the re-encryption compare
-# with no early exit and keeps K or K-bar by masks; its conditional jumps
-# compare loop counters, constants and pointer ranges.
+# `decapsulate` (x86_64 and aarch64) reads every ciphertext byte in the
+# re-encryption compare with no early exit, and for each of the 32 bytes
+# loads K's and K-bar's, xors them, ands the mask and xors K-bar's again;
+# its conditional jumps compare loop counters, constants and pointer
+# ranges. Timing cannot tell a key picked by a conditional move of its
+# address from one picked by masks, and did not: the first is what the
+# assembly showed before the mask went through the barrier, at the |t|
+# above. bench/std_mlkem_exercise.sh reads the assembly for it.
 
 @[Unsafe("keys and ciphertexts are read through raw byte pointers by the lattice arithmetic, for speed")]
 module std/mlkem
 
-import std/digest::{SHA3_256, SHA3_512, SHAKE128, SHAKE256}
+import std/digest::{SHA3_256, SHA3_512, SHAKE128, SHAKE256, ValueBarrier}
 
 # What is wrong with a key or a ciphertext from outside: `message` is the
 # sentence.
@@ -241,8 +250,14 @@ pub struct MlKem768PrivateKey
   # The 32-byte shared secret *ciphertext* carries, FIPS 203 Algorithm 18,
   # or an `MlKemError` for a ciphertext that is not 1,088 bytes. A
   # ciphertext that does not re-encrypt to itself is answered with the
-  # implicit-rejection key J(z || c), chosen by masks: the caller cannot
-  # tell the two apart, and neither can the time taken.
+  # implicit-rejection key J(z || c), chosen by a mask: the caller cannot
+  # tell the two apart, and neither can the time taken or the addresses
+  # read. Every byte of the answer is K-bar's xored with the mask's share
+  # of K's difference from it, both loaded. The mask is 0xff or 0, and a
+  # compiler that knows so may read only the key it keeps: a --release
+  # build did, `cmovle` on the two arrays and one load through the winner,
+  # which is the validity of the ciphertext in the address of a load. So
+  # the mask is passed through `ValueBarrier` first.
   def decapsulate(ciphertext : String | Array(UInt8)) : Array(UInt8) | MlKemError
     c, n = MlKemBytes.of(ciphertext)
     return MlKemError.new("ML-KEM-768: a ciphertext is 1088 bytes, not #{n}") unless n == MlKem768::CIPHERTEXT_SIZE
@@ -258,11 +273,11 @@ pub struct MlKem768PrivateKey
     end
     # 0xff when every byte matched (diff - 1 borrows only from zero), 0 if not.
     keep = ((diff &- 1_u32) >> 31).to_u8
-    keep = 0_u8 &- keep
+    keep = ValueBarrier.u8(0_u8 &- keep)
     secret = Array(UInt8).new(32, 0_u8)
     i = 0
     while i < 32
-      secret[i] = (g[i] & keep) | (rejected[i] & ~keep)
+      secret[i] = rejected[i] ^ ((g[i] ^ rejected[i]) & keep)
       i = i + 1
     end
     secret
@@ -431,7 +446,35 @@ end
 struct MlKemPoly
   ETA = 2
 
-  @@tables = Pointer(UInt32).new(0_u64)
+  # The 128 zetas, 17^BitRev7(i) mod q, then the 128 gammas,
+  # 17^(2 BitRev7(i) + 1) mod q: FIPS 203 appendix A. A constant, whole
+  # before anything reads it: filled on first use and stored with a plain
+  # store, as it was, a second thread could be shown its address before
+  # its words.
+  TABLES = [
+    1_u32, 1729_u32, 2580_u32, 3289_u32, 2642_u32, 630_u32, 1897_u32, 848_u32, 1062_u32, 1919_u32, 193_u32, 797_u32,
+    2786_u32, 3260_u32, 569_u32, 1746_u32, 296_u32, 2447_u32, 1339_u32, 1476_u32, 3046_u32, 56_u32, 2240_u32, 1333_u32,
+    1426_u32, 2094_u32, 535_u32, 2882_u32, 2393_u32, 2879_u32, 1974_u32, 821_u32, 289_u32, 331_u32, 3253_u32, 1756_u32,
+    1197_u32, 2304_u32, 2277_u32, 2055_u32, 650_u32, 1977_u32, 2513_u32, 632_u32, 2865_u32, 33_u32, 1320_u32, 1915_u32,
+    2319_u32, 1435_u32, 807_u32, 452_u32, 1438_u32, 2868_u32, 1534_u32, 2402_u32, 2647_u32, 2617_u32, 1481_u32, 648_u32,
+    2474_u32, 3110_u32, 1227_u32, 910_u32, 17_u32, 2761_u32, 583_u32, 2649_u32, 1637_u32, 723_u32, 2288_u32, 1100_u32,
+    1409_u32, 2662_u32, 3281_u32, 233_u32, 756_u32, 2156_u32, 3015_u32, 3050_u32, 1703_u32, 1651_u32, 2789_u32, 1789_u32,
+    1847_u32, 952_u32, 1461_u32, 2687_u32, 939_u32, 2308_u32, 2437_u32, 2388_u32, 733_u32, 2337_u32, 268_u32, 641_u32,
+    1584_u32, 2298_u32, 2037_u32, 3220_u32, 375_u32, 2549_u32, 2090_u32, 1645_u32, 1063_u32, 319_u32, 2773_u32, 757_u32,
+    2099_u32, 561_u32, 2466_u32, 2594_u32, 2804_u32, 1092_u32, 403_u32, 1026_u32, 1143_u32, 2150_u32, 2775_u32, 886_u32,
+    1722_u32, 1212_u32, 1874_u32, 1029_u32, 2110_u32, 2935_u32, 885_u32, 2154_u32,
+    17_u32, 3312_u32, 2761_u32, 568_u32, 583_u32, 2746_u32, 2649_u32, 680_u32, 1637_u32, 1692_u32, 723_u32, 2606_u32,
+    2288_u32, 1041_u32, 1100_u32, 2229_u32, 1409_u32, 1920_u32, 2662_u32, 667_u32, 3281_u32, 48_u32, 233_u32, 3096_u32,
+    756_u32, 2573_u32, 2156_u32, 1173_u32, 3015_u32, 314_u32, 3050_u32, 279_u32, 1703_u32, 1626_u32, 1651_u32, 1678_u32,
+    2789_u32, 540_u32, 1789_u32, 1540_u32, 1847_u32, 1482_u32, 952_u32, 2377_u32, 1461_u32, 1868_u32, 2687_u32, 642_u32,
+    939_u32, 2390_u32, 2308_u32, 1021_u32, 2437_u32, 892_u32, 2388_u32, 941_u32, 733_u32, 2596_u32, 2337_u32, 992_u32,
+    268_u32, 3061_u32, 641_u32, 2688_u32, 1584_u32, 1745_u32, 2298_u32, 1031_u32, 2037_u32, 1292_u32, 3220_u32, 109_u32,
+    375_u32, 2954_u32, 2549_u32, 780_u32, 2090_u32, 1239_u32, 1645_u32, 1684_u32, 1063_u32, 2266_u32, 319_u32, 3010_u32,
+    2773_u32, 556_u32, 757_u32, 2572_u32, 2099_u32, 1230_u32, 561_u32, 2768_u32, 2466_u32, 863_u32, 2594_u32, 735_u32,
+    2804_u32, 525_u32, 1092_u32, 2237_u32, 403_u32, 2926_u32, 1026_u32, 2303_u32, 1143_u32, 2186_u32, 2150_u32, 1179_u32,
+    2775_u32, 554_u32, 886_u32, 2443_u32, 1722_u32, 1607_u32, 1212_u32, 2117_u32, 1874_u32, 1455_u32, 1029_u32, 2300_u32,
+    2110_u32, 1219_u32, 2935_u32, 394_u32, 885_u32, 2444_u32, 2154_u32, 1175_u32,
+  ]
 
   def self.poly : Pointer(UInt32)
     Pointer(UInt32).malloc(256_u64)
@@ -441,44 +484,10 @@ struct MlKemPoly
     Pointer(UInt32).malloc(768_u64)
   end
 
-  # The 128 zetas, 17^BitRev7(i) mod q, then the 128 gammas,
-  # 17^(2 BitRev7(i) + 1) mod q: FIPS 203 appendix A.
-  private def self.tables : Pointer(UInt32)
-    return @@tables if @@tables.address != 0_u64
-    words = [
-      1_u32, 1729_u32, 2580_u32, 3289_u32, 2642_u32, 630_u32, 1897_u32, 848_u32, 1062_u32, 1919_u32, 193_u32, 797_u32,
-      2786_u32, 3260_u32, 569_u32, 1746_u32, 296_u32, 2447_u32, 1339_u32, 1476_u32, 3046_u32, 56_u32, 2240_u32, 1333_u32,
-      1426_u32, 2094_u32, 535_u32, 2882_u32, 2393_u32, 2879_u32, 1974_u32, 821_u32, 289_u32, 331_u32, 3253_u32, 1756_u32,
-      1197_u32, 2304_u32, 2277_u32, 2055_u32, 650_u32, 1977_u32, 2513_u32, 632_u32, 2865_u32, 33_u32, 1320_u32, 1915_u32,
-      2319_u32, 1435_u32, 807_u32, 452_u32, 1438_u32, 2868_u32, 1534_u32, 2402_u32, 2647_u32, 2617_u32, 1481_u32, 648_u32,
-      2474_u32, 3110_u32, 1227_u32, 910_u32, 17_u32, 2761_u32, 583_u32, 2649_u32, 1637_u32, 723_u32, 2288_u32, 1100_u32,
-      1409_u32, 2662_u32, 3281_u32, 233_u32, 756_u32, 2156_u32, 3015_u32, 3050_u32, 1703_u32, 1651_u32, 2789_u32, 1789_u32,
-      1847_u32, 952_u32, 1461_u32, 2687_u32, 939_u32, 2308_u32, 2437_u32, 2388_u32, 733_u32, 2337_u32, 268_u32, 641_u32,
-      1584_u32, 2298_u32, 2037_u32, 3220_u32, 375_u32, 2549_u32, 2090_u32, 1645_u32, 1063_u32, 319_u32, 2773_u32, 757_u32,
-      2099_u32, 561_u32, 2466_u32, 2594_u32, 2804_u32, 1092_u32, 403_u32, 1026_u32, 1143_u32, 2150_u32, 2775_u32, 886_u32,
-      1722_u32, 1212_u32, 1874_u32, 1029_u32, 2110_u32, 2935_u32, 885_u32, 2154_u32,
-      17_u32, 3312_u32, 2761_u32, 568_u32, 583_u32, 2746_u32, 2649_u32, 680_u32, 1637_u32, 1692_u32, 723_u32, 2606_u32,
-      2288_u32, 1041_u32, 1100_u32, 2229_u32, 1409_u32, 1920_u32, 2662_u32, 667_u32, 3281_u32, 48_u32, 233_u32, 3096_u32,
-      756_u32, 2573_u32, 2156_u32, 1173_u32, 3015_u32, 314_u32, 3050_u32, 279_u32, 1703_u32, 1626_u32, 1651_u32, 1678_u32,
-      2789_u32, 540_u32, 1789_u32, 1540_u32, 1847_u32, 1482_u32, 952_u32, 2377_u32, 1461_u32, 1868_u32, 2687_u32, 642_u32,
-      939_u32, 2390_u32, 2308_u32, 1021_u32, 2437_u32, 892_u32, 2388_u32, 941_u32, 733_u32, 2596_u32, 2337_u32, 992_u32,
-      268_u32, 3061_u32, 641_u32, 2688_u32, 1584_u32, 1745_u32, 2298_u32, 1031_u32, 2037_u32, 1292_u32, 3220_u32, 109_u32,
-      375_u32, 2954_u32, 2549_u32, 780_u32, 2090_u32, 1239_u32, 1645_u32, 1684_u32, 1063_u32, 2266_u32, 319_u32, 3010_u32,
-      2773_u32, 556_u32, 757_u32, 2572_u32, 2099_u32, 1230_u32, 561_u32, 2768_u32, 2466_u32, 863_u32, 2594_u32, 735_u32,
-      2804_u32, 525_u32, 1092_u32, 2237_u32, 403_u32, 2926_u32, 1026_u32, 2303_u32, 1143_u32, 2186_u32, 2150_u32, 1179_u32,
-      2775_u32, 554_u32, 886_u32, 2443_u32, 1722_u32, 1607_u32, 1212_u32, 2117_u32, 1874_u32, 1455_u32, 1029_u32, 2300_u32,
-      2110_u32, 1219_u32, 2935_u32, 394_u32, 885_u32, 2444_u32, 2154_u32, 1175_u32,
-    ]
-    table = Pointer(UInt32).malloc(256_u64)
-    table.copy_from(words.to_unsafe, 256)
-    @@tables = table
-    table
-  end
-
   # The NTT in place (Algorithm 9): seven layers of butterflies, the zeta of
   # each block taken in order from the second.
   def self.ntt(f : Pointer(UInt32)) : Nil
-    zetas = tables
+    zetas = TABLES.to_unsafe
     k = 1
     len = 128
     while len >= 2
@@ -502,7 +511,7 @@ struct MlKemPoly
   # The inverse NTT in place (Algorithm 10), then the product by
   # 128^-1 = 3303 mod q.
   def self.inverse_ntt(f : Pointer(UInt32)) : Nil
-    zetas = tables
+    zetas = TABLES.to_unsafe
     k = 127
     len = 2
     while len <= 128
@@ -532,7 +541,7 @@ struct MlKemPoly
   # in the NTT domain (Algorithms 11 and 12): a row of A for step 1 from
   # first = 3i, a column for step 3 from first = i.
   def self.dot(m : Pointer(UInt32), first : Int32, step : Int32, v : Pointer(UInt32), dst : Pointer(UInt32)) : Nil
-    gammas = tables + 128
+    gammas = TABLES.to_unsafe + 128
     i = 0
     while i < 256
       dst[i] = 0_u32

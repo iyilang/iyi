@@ -53,6 +53,14 @@ end
 
 private NO_DROP = Set(String).new
 
+# Ends an example that needs a change time where the file system reports none
+# (Windows). There a build that read a file writes no record at all
+# (`BuildInputs#looked_at_stale`), so there is no record to ask.
+private def needs_change_time(path : String) : Nil
+  return if Iyi::Stale::FileStamp.of(path).ctime > 0
+  pending!("this file system reports no change time, and a build writes no fast record on it")
+end
+
 describe Iyi::Stale::FastRecord do
   it "round trips through its store form and still describes the inputs" do
     dir = fast_dir
@@ -69,6 +77,7 @@ describe Iyi::Stale::FastRecord do
     dir = fast_dir
     file = File.join(dir, "a.iyi")
     File.write(file, "1234")
+    needs_change_time(file)
     before = Iyi::Stale::FileStamp.of(file)
     record = fast_record(fast_facts(dir), "src/x.iyi", [file])
 
@@ -85,6 +94,7 @@ describe Iyi::Stale::FastRecord do
     dir = fast_dir
     file = File.join(dir, "a.iyi")
     File.write(file, "1234")
+    needs_change_time(file)
     before = Iyi::Stale::FileStamp.of(file)
     record = fast_record(fast_facts(dir), "src/x.iyi", [file])
 

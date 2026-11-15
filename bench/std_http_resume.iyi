@@ -236,6 +236,13 @@ if mode.empty?
       config.require_staple = false
       check("staple", "#{unstapled}, #{pooled.connections_made} made, #{pooled.connections_reused} reused",
         "HTTP: tls: no OCSP response was stapled to CN=localhost, and require_staple asks for one (bad_certificate_status_response), 2 made, 1 reused", failures)
+      # An upgrade is made under the configuration a request is: its ALPN
+      # is http/1.1 alone, and `require_staple` holds for it too.
+      config.require_staple = true
+      upgraded = HTTP.upgrade(bases[2], "websocket")
+      config.require_staple = false
+      check("upgrade staple", upgraded.is_a?(HTTPError) ? upgraded.message : "the handshake held",
+        "HTTP: tls: no OCSP response was stapled to CN=localhost, and require_staple asks for one (bad_certificate_status_response)", failures)
       pooled.close
       bases.each { |base| HTTP.get(base + "stop") }
       0

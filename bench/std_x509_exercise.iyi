@@ -12,7 +12,11 @@
 # final dot or an empty label under one, a constraint with an empty
 # label), each refusal saying why. Then certificates that are not
 # certificates, PEM, and Ed25519 keys and signatures (RFC 8410), held and
-# refused. The modes the gate script drives:
+# refused, and what a search costs: chains written here, their names and
+# constraints by the hundred and their RSA keys past 8192 bits, each
+# refused before the work is done, an IPv4-mapped IPv6 address held to
+# the ranges its IPv4 address is, and chains refused at a certificate
+# given as distrusted or at its key. The modes the gate script drives:
 #   verify FILE   each line `host leaf intermediates roots`, certificates
 #                 in hex and lists joined by `,` (`-` for none), checked
 #                 at 2026-06-01: `true` or `false: <why>`;
@@ -297,6 +301,15 @@ check read.size == 2 && read[0].raw == b(CERTS[ROOT_INDEX]), "two PEM blocks amo
 check Certificate.from_pem(ROOT_PEM.lines.reject { |l| l.starts_with?("-----END") }.join("\n")).is_a?(X509Error), "a PEM block with no END refused"
 check Certificate.from_pem(ROOT_PEM.lines.map { |l| l.starts_with?("MII") ? "M*" + l[2, l.size - 2] : l }.join("\n")).is_a?(X509Error), "a PEM block that is not base64 refused, not a panic"
 check Certificate.from_pem("no certificates").or_panic.empty?, "a text with no blocks reads as none"
+# A private key's block is read strictly, by the reader that looks into no
+# table by its bytes: "QQ==" is the byte 0x41, "QR==" is that byte with
+# bits past it, which the reader for other blocks passes over.
+key_block = ->(body : String) { X509.pem("-----BEGIN PRIVATE KEY-----\n#{body}\n-----END PRIVATE KEY-----\n", "PRIVATE KEY") }
+held_key = key_block.call("QQ==")
+check !held_key.is_a?(X509Error) && held_key == [[0x41_u8]], "a private key's block read"
+loose = key_block.call("QR==")
+check loose.is_a?(X509Error) && loose.message == "x509: a PRIVATE KEY block that is not base64", "a private key's block with bits past its data refused: #{loose.is_a?(X509Error) ? loose.message : "read"}"
+check key_block.call("Q*==").is_a?(X509Error), "a private key's block that is not base64 refused, not a panic"
 
 puts "== Ed25519 (RFC 8410)"
 # Made by Python's cryptography; the malformed ones assembled by hand and
@@ -402,6 +415,259 @@ fan = X509.verify(cert(FAN_LEAF), FAN.map { |h| cert(h) }, [cert(FAN_ROOT)], "ww
 raise "ASSERTION FAILED: seven intermediates signing each other: expected a refusal" unless fan.is_a?(X509Error)
 check fan.message.includes?("within 100 signature checks"), "seven intermediates signing each other: refused with #{fan.message.inspect}"
 puts "  seven intermediates signing each other: given up within 100 signature checks"
+
+puts "== what a search costs, bounded"
+
+# Certificates written here, for what no library will sign or what would
+# be a megabyte of hex: DER by hand, signed by an Ed25519 `SigningKey`.
+def tlv(tag : Int32, content : Array(UInt8)) : Array(UInt8)
+  n = content.size
+  head = [tag.to_u8]
+  if n < 128
+    head << n.to_u8
+  elsif n < 256
+    head << 0x81_u8
+    head << n.to_u8
+  else
+    head << 0x82_u8
+    head << (n >> 8).to_u8
+    head << (n & 0xFF).to_u8
+  end
+  head + content
+end
+
+def joined(parts : Array(Array(UInt8))) : Array(UInt8)
+  all = [] of UInt8
+  parts.each { |part| all.concat(part) }
+  all
+end
+
+def seq(parts : Array(Array(UInt8))) : Array(UInt8)
+  tlv(0x30, joined(parts))
+end
+
+def ascii(text : String) : Array(UInt8)
+  Array(UInt8).new(text.bytesize) { |i| text.byte_at(i) }
+end
+
+def made_name(cn : String) : Array(UInt8)
+  seq([tlv(0x31, seq([b("0603550403"), tlv(0x0C, ascii(cn))]))])
+end
+
+def made_extension(oid : String, critical : Bool, value : Array(UInt8)) : Array(UInt8)
+  seq([b(oid)] + (critical ? [b("0101ff")] : [] of Array(UInt8)) + [tlv(0x04, value)])
+end
+
+# basicConstraints cA TRUE, critical.
+def a_ca : Array(UInt8)
+  made_extension("0603551d13", true, b("30030101ff"))
+end
+
+# subjectAltName: dNSNames, and iPAddresses in hex.
+def alt_names(dns : Array(String), ips : Array(String) = [] of String) : Array(UInt8)
+  made_extension("0603551d11", false, seq(dns.map { |d| tlv(0x82, ascii(d)) } + ips.map { |i| tlv(0x87, b(i)) }))
+end
+
+# nameConstraints: excluded dNSNames, and iPAddress ranges in hex,
+# excluded and permitted.
+def constraints(excluded_dns : Array(String), excluded_ips : Array(String) = [] of String, permitted_ips : Array(String) = [] of String) : Array(UInt8)
+  parts = [] of Array(UInt8)
+  parts << tlv(0xA0, joined(permitted_ips.map { |i| seq([tlv(0x87, b(i))]) })) unless permitted_ips.empty?
+  excluded = excluded_dns.map { |d| seq([tlv(0x82, ascii(d))]) } + excluded_ips.map { |i| seq([tlv(0x87, b(i))]) }
+  parts << tlv(0xA1, joined(excluded)) unless excluded.empty?
+  made_extension("0603551d1e", true, seq(parts))
+end
+
+# A version 3 certificate for *cn* under *issuer*, holding the key
+# *key_info* (a SubjectPublicKeyInfo) and signed by *signer*, valid
+# through 2026.
+def made_der(cn : String, issuer : String, key_info : Array(UInt8), signer : SigningKey, serial : Int32, extensions : Array(Array(UInt8))) : Array(UInt8)
+  tbs = seq([b("a003020102"), tlv(0x02, [serial.to_u8]), signer.algorithm_identifier, made_name(issuer),
+             b("301e170d3236303130313030303030305a170d3237303130313030303030305a"), made_name(cn), key_info,
+             tlv(0xA3, seq(extensions))])
+  seq([tbs, signer.algorithm_identifier, tlv(0x03, [0_u8] + signer.sign(tbs).or_panic)])
+end
+
+def made(cn : String, issuer : String, key_info : Array(UInt8), signer : SigningKey, serial : Int32, extensions : Array(Array(UInt8))) : Certificate
+  Certificate.parse(made_der(cn, issuer, key_info, signer, serial, extensions)).or_panic
+end
+
+# The SubjectPublicKeyInfo of an RSA key whose modulus is *bits* long: no
+# product of two primes, which nothing here asks of a key it only reads.
+def rsa_info(bits : Int32) : Array(UInt8)
+  size = (bits + 7) // 8
+  modulus = Array(UInt8).new(size, 0xA5_u8)
+  modulus[0] = (1 << ((bits - 1) % 8)).to_u8
+  modulus = [0_u8] + modulus if modulus[0] >= 0x80_u8
+  seq([b("300d06092a864886f70d0101010500"), tlv(0x03, [0_u8] + seq([tlv(0x02, modulus), b("0203010001")]))])
+end
+
+def made_key(n : Int32) : SigningKey
+  SigningKey.ed25519(Array(UInt8).new(32, n.to_u8)).or_panic
+end
+
+def cost_refused(answer : Array(Certificate) | X509Error, phrase : String, label : String) : Nil
+  raise "ASSERTION FAILED: #{label}: expected a refusal, got a chain" unless answer.is_a?(X509Error)
+  check answer.message.includes?(phrase), "#{label}: refused with #{answer.message.inspect}, not #{phrase.inspect}"
+end
+
+root_key = made_key(1)
+heavy_key = made_key(2)
+leaf_key = made_key(3)
+ring_key = made_key(4)
+work_root = made("Work Root", "Work Root", root_key.public_key_info, root_key, 1, [a_ca])
+SANS = (0...501).map { |i| "a#{i}.b" }
+BARS = (0...500).map { |i| "c#{i}.d" }
+
+# Every name is held to every constraint: 500 names under an issuer's 500
+# constraints are the 250,000 comparisons a search may make, and one name
+# more is past them. The leaf with 501 was held before, and in a
+# Certificate message's 64 KiB five such issuers under one name, each
+# signing the others, took 100 candidates of 6,300 names times 900
+# constraints, ten seconds of one handshake.
+heavy = made("Heavy", "Work Root", heavy_key.public_key_info, root_key, 2, [a_ca, constraints(BARS)])
+at_most = X509.verify(made("leaf 500", "Heavy", leaf_key.public_key_info, heavy_key, 3, [alt_names(SANS[0, 500])]), [heavy], [work_root], "a0.b", NOW)
+check at_most.is_a?(Array(Certificate)) && at_most.size == 3, "a leaf's 500 names under 500 constraints: #{at_most.is_a?(X509Error) ? at_most.message : ""}"
+cost_refused X509.verify(made("leaf 501", "Heavy", leaf_key.public_key_info, heavy_key, 4, [alt_names(SANS)]), [heavy], [work_root], "a0.b", NOW),
+  "CN=leaf 501's names take more than 250000 comparisons to hold to the name constraints over them", "a leaf's 501 names under 500 constraints"
+# A candidate that did not sign the leaf is anyone's to write: it is
+# refused for its signature, its constraints unread.
+cost_refused X509.verify(made("leaf forged", "Heavy", leaf_key.public_key_info, leaf_key, 5, [alt_names(SANS)]), [heavy], [work_root], "a0.b", NOW),
+  "CN=leaf forged's signature is not CN=Heavy's", "a forged leaf under an issuer of 500 constraints"
+# Five issuers under one name, each signing the others: 100 candidates
+# are weighed, and each issuer's 200 constraints are held to the leaf's
+# 200 names once, 200,000 comparisons, not once for every order of them.
+ring = (0...5).map { |i| made("Ring", "Ring", ring_key.public_key_info, ring_key, 10 + i, [a_ca, constraints(BARS[0, 200])]) }
+cost_refused X509.verify(made("ring leaf", "Ring", leaf_key.public_key_info, ring_key, 20, [alt_names(SANS[0, 200])]), ring, [work_root], "a0.b", NOW),
+  "no chain from CN=ring leaf within 100 signature checks", "five intermediates signing each other under 200 constraints each"
+# The seven intermediates above hold one key, so their 100 candidates are
+# eight signatures to check - the leaf's and each intermediate's, under
+# that key - and the rest are answered from those. Nothing counts them
+# but the clock: the search is held to 40 times one check, the quickest
+# of three against the quickest of five, where 100 checks took 100 times.
+fan_leaf = cert(FAN_LEAF)
+fan_certs = FAN.map { |h| cert(h) }
+one = 0.0
+5.times do |i|
+  started = Time.monotonic
+  fan_leaf.signed_by?(fan_certs[0])
+  took = (Time.monotonic - started).total_milliseconds
+  one = took if i == 0 || took < one
+end
+all = 0.0
+3.times do |i|
+  started = Time.monotonic
+  X509.verify(fan_leaf, fan_certs, [cert(FAN_ROOT)], "www.example.com", NOW)
+  took = (Time.monotonic - started).total_milliseconds
+  all = took if i == 0 || took < all
+end
+check all < one * 40.0, "seven intermediates under one key, answered together: the search took #{all} ms, one signature check #{one} ms"
+# An RSA key past 8192 bits, in the leaf and in an issuer; one of 8192
+# bits is held.
+cost_refused X509.verify(made("big leaf", "Work Root", rsa_info(8193), root_key, 30, [alt_names(["big.example"])]), [] of Certificate, [work_root], "big.example", NOW),
+  "CN=big leaf's RSA key is 8193 bits, past the 8192 a chain is held to", "a leaf whose key is 8193-bit RSA"
+widest = X509.verify(made("widest leaf", "Work Root", rsa_info(8192), root_key, 31, [alt_names(["big.example"])]), [] of Certificate, [work_root], "big.example", NOW)
+check widest.is_a?(Array(Certificate)), "a leaf whose key is 8192-bit RSA: #{widest.is_a?(X509Error) ? widest.message : ""}"
+big_ca = made("Big CA", "Work Root", rsa_info(8193), root_key, 32, [a_ca])
+cost_refused X509.verify(made("under big", "Big CA", leaf_key.public_key_info, leaf_key, 33, [alt_names(["big.example"])]), [big_ca], [work_root], "big.example", NOW),
+  "CN=Big CA's RSA key is 8193 bits, past the 8192 a chain is held to", "an intermediate whose key is 8193-bit RSA"
+puts "  250,000 comparisons of a name with a constraint held and one name more refused; a forged candidate refused unread; issuers judged once and keys checked once; RSA keys past 8192 bits refused"
+
+puts "== IPv4-mapped IPv6 addresses (::ffff:a.b.c.d)"
+
+# 10.0.0.1 and ::ffff:10.0.0.1 are one host to the socket that connects,
+# so a host matches an entry in either spelling, and a range holds an
+# address in both or in neither. A CA excluded from 10.0.0.0/8 certified
+# ::ffff:10.0.0.1 before.
+MAPPED_10_0_0_1 = "00000000000000000000ffff0a000001"
+check ips.matches_host?("::ffff:192.0.2.1"), "a host written as its IPv4-mapped address, against the IPv4 entry"
+check ips.matches_host?("[::FFFF:c000:201]"), "a host written as its IPv4-mapped address in hex groups and brackets, against the IPv4 entry"
+check !ips.matches_host?("::ffff:192.0.2.2"), "another address written IPv4-mapped refused"
+check !ips.matches_host?("::fffe:192.0.2.1"), "an IPv6 address that only ends in the IPv4 entry refused"
+mapped_key = made_key(5)
+mapped_leaf = made("mapped leaf", "Mapped CA", leaf_key.public_key_info, mapped_key, 41, [alt_names([] of String, [MAPPED_10_0_0_1])])
+plain_leaf = made("plain leaf", "Mapped CA", leaf_key.public_key_info, mapped_key, 42, [alt_names([] of String, ["0a000001"])])
+
+def mapped_ca(key : SigningKey, signer : SigningKey, serial : Int32, excluded : Array(String), permitted : Array(String) = [] of String) : Certificate
+  made("Mapped CA", "Work Root", key.public_key_info, signer, serial, [a_ca, constraints([] of String, excluded, permitted)])
+end
+
+excluding = mapped_ca(mapped_key, root_key, 43, ["0a000000ff000000"])
+["::ffff:10.0.0.1", "[::ffff:10.0.0.1]", "10.0.0.1"].each do |host|
+  cost_refused X509.verify(mapped_leaf, [excluding], [work_root], host, NOW),
+    "0:0:0:0:0:ffff:a00:1 is among the addresses CN=Mapped CA excludes", "an IPv4-mapped address in an excluded IPv4 range, for #{host}"
+end
+excluding_mapped = mapped_ca(mapped_key, root_key, 44, ["00000000000000000000ffff0a000000ffffffffffffffffffffffffff000000"])
+["10.0.0.1", "::ffff:10.0.0.1"].each do |host|
+  cost_refused X509.verify(plain_leaf, [excluding_mapped], [work_root], host, NOW),
+    "10.0.0.1 is among the addresses CN=Mapped CA excludes", "an IPv4 address in an excluded IPv4-mapped range, for #{host}"
+end
+# An IPv6 range wider than ::ffff:0:0/96 stands for no IPv4 range: ::/0
+# excluded holds the mapped entry out, as it did, and says nothing of an
+# IPv4 one, as Go and OpenSSL have it.
+excluding_all6 = mapped_ca(mapped_key, root_key, 45, ["0" * 64])
+cost_refused X509.verify(mapped_leaf, [excluding_all6], [work_root], "10.0.0.1", NOW),
+  "0:0:0:0:0:ffff:a00:1 is among the addresses CN=Mapped CA excludes", "an IPv4-mapped address under an excluded ::/0"
+beside = X509.verify(plain_leaf, [excluding_all6], [work_root], "::ffff:10.0.0.1", NOW)
+check beside.is_a?(Array(Certificate)), "an IPv4 address under an excluded ::/0: #{beside.is_a?(X509Error) ? beside.message : ""}"
+permitting = mapped_ca(mapped_key, root_key, 46, [] of String, ["0a000000ff000000"])
+["10.0.0.1", "::ffff:10.0.0.1"].each do |host|
+  inside = X509.verify(mapped_leaf, [permitting], [work_root], host, NOW)
+  check inside.is_a?(Array(Certificate)), "an IPv4-mapped address in a permitted IPv4 range, for #{host}: #{inside.is_a?(X509Error) ? inside.message : ""}"
+end
+# A permitted IPv6 range wider than ::ffff:0:0/96 permits no IPv4 host:
+# the mapped entry under ::/0 alone is the IPv4 address to a socket, and
+# the IPv4 entry beside it is refused there too.
+permitting_all6 = mapped_ca(mapped_key, root_key, 48, [] of String, ["0" * 64])
+["10.0.0.1", "::ffff:10.0.0.1"].each do |host|
+  cost_refused X509.verify(mapped_leaf, [permitting_all6], [work_root], host, NOW),
+    "0:0:0:0:0:ffff:a00:1 is outside the addresses CN=Mapped CA permits", "an IPv4-mapped address under a permitted ::/0 alone, for #{host}"
+end
+outside = made("mapped outside", "Mapped CA", leaf_key.public_key_info, mapped_key, 47, [alt_names([] of String, ["00000000000000000000ffff0b000001"])])
+cost_refused X509.verify(outside, [permitting], [work_root], "11.0.0.1", NOW),
+  "0:0:0:0:0:ffff:b00:1 is outside the addresses CN=Mapped CA permits", "an IPv4-mapped address outside a permitted IPv4 range"
+puts "  a host and an entry matched in either spelling; an excluded range holds either out, a permitted one permits the IPv4 address"
+
+puts "== certificates that are distrusted"
+
+# What a platform keeps as never to be trusted (Windows' Disallowed
+# store, std/system_roots) is handed to X509.verify as DER: a chain is
+# refused at any certificate that is one of them, or that holds the key
+# of one under another certificate, wherever in the chain it stands.
+ca_key = made_key(6)
+other_key = made_key(7)
+distrust_ca = made("Distrust CA", "Work Root", ca_key.public_key_info, root_key, 50, [a_ca])
+distrust_leaf = made("distrust leaf", "Distrust CA", other_key.public_key_info, ca_key, 51, [alt_names(["d.example"])])
+
+def under_distrust(leaf : Certificate, ca : Certificate, root : Certificate, distrusted : Array(Array(UInt8))?) : Array(Certificate) | X509Error
+  X509.verify(leaf, [ca], [root], "d.example", NOW, X509Purpose::Server, distrusted)
+end
+
+[nil, [] of Array(UInt8), [heavy.raw, [1_u8, 2_u8, 3_u8], [] of UInt8]].each do |others|
+  trusted = under_distrust(distrust_leaf, distrust_ca, work_root, others)
+  check trusted.is_a?(Array(Certificate)) && trusted.size == 3, "a chain none of whose certificates is distrusted: #{trusted.is_a?(X509Error) ? trusted.message : ""}"
+end
+cost_refused under_distrust(distrust_leaf, distrust_ca, work_root, [heavy.raw, distrust_leaf.raw]),
+  "CN=distrust leaf is a certificate that is distrusted", "a distrusted leaf"
+cost_refused under_distrust(distrust_leaf, distrust_ca, work_root, [distrust_ca.raw]),
+  "CN=Distrust CA is a certificate that is distrusted", "a distrusted intermediate"
+cost_refused under_distrust(distrust_leaf, distrust_ca, work_root, [work_root.raw]),
+  "CN=Work Root is a certificate that is distrusted", "a distrusted root"
+# The same keys under other certificates, from another issuer: the
+# certificates differ, the SubjectPublicKeyInfo does not.
+cost_refused under_distrust(distrust_leaf, distrust_ca, work_root, [made_der("Twin CA", "Elsewhere", ca_key.public_key_info, other_key, 52, [a_ca])]),
+  "CN=Distrust CA holds the key of a certificate that is distrusted", "an intermediate holding a distrusted certificate's key"
+cost_refused under_distrust(distrust_leaf, distrust_ca, work_root, [made_der("twin leaf", "Elsewhere", other_key.public_key_info, other_key, 53, [alt_names(["e.example"])])]),
+  "CN=distrust leaf holds the key of a certificate that is distrusted", "a leaf holding a distrusted certificate's key"
+cost_refused under_distrust(distrust_leaf, distrust_ca, work_root, [made_der("Twin Root", "Elsewhere", root_key.public_key_info, other_key, 54, [a_ca])]),
+  "CN=Work Root holds the key of a certificate that is distrusted", "a root holding a distrusted certificate's key"
+# One that is no certificate to `Certificate.parse`, an extension written
+# twice, still names its key.
+unread = made_der("Twin CA", "Elsewhere", ca_key.public_key_info, other_key, 55, [a_ca, a_ca])
+check Certificate.parse(unread).is_a?(X509Error), "a distrusted certificate with an extension written twice is not read"
+cost_refused under_distrust(distrust_leaf, distrust_ca, work_root, [unread]),
+  "CN=Distrust CA holds the key of a certificate that is distrusted", "an intermediate holding the key of a distrusted certificate that cannot be read"
+puts "  a chain refused at a distrusted leaf, intermediate and root, by its bytes and by its key"
 
 puts "== a P-256 chain checked inside a task, 100 frames down"
 

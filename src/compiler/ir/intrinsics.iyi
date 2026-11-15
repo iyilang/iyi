@@ -57,6 +57,8 @@ pub enum IntrinsicId
   X86Sse2Pause
   AArch64Hint
   WasmMemoryGrowI32
+  FPToSISat
+  FPToUISat
 end
 
 # A name the parser matched: its family and the overload types spelled in it.
@@ -83,7 +85,7 @@ pub def all_intrinsic_ids : Array(IntrinsicId)
    IntrinsicId::Donothing, IntrinsicId::Frameaddress, IntrinsicId::Returnaddress,
    IntrinsicId::Stacksave, IntrinsicId::Stackrestore, IntrinsicId::VaStart, IntrinsicId::VaEnd,
    IntrinsicId::Readcyclecounter, IntrinsicId::X86Sse2Pause, IntrinsicId::AArch64Hint,
-   IntrinsicId::WasmMemoryGrowI32]
+   IntrinsicId::WasmMemoryGrowI32, IntrinsicId::FPToSISat, IntrinsicId::FPToUISat]
 end
 
 # The LLVM name of a family after `llvm.`, without its overload suffix. Families with a fixed suffix
@@ -140,6 +142,8 @@ pub def intrinsic_stem(id : IntrinsicId) : String
   when IntrinsicId::Readcyclecounter then "readcyclecounter"
   when IntrinsicId::X86Sse2Pause     then "x86.sse2.pause"
   when IntrinsicId::AArch64Hint      then "aarch64.hint"
+  when IntrinsicId::FPToSISat        then "fptosi.sat"
+  when IntrinsicId::FPToUISat        then "fptoui.sat"
   else
     "wasm.memory.grow.i32"
   end
@@ -149,7 +153,7 @@ end
 pub def intrinsic_arity(id : IntrinsicId) : Int32
   case id
   when IntrinsicId::Memcpy, IntrinsicId::Memmove                                                                                                                                                                                                                     then 3
-  when IntrinsicId::Memset, IntrinsicId::Powi                                                                                                                                                                                                                        then 2
+  when IntrinsicId::Memset, IntrinsicId::Powi, IntrinsicId::FPToSISat, IntrinsicId::FPToUISat                                                                                                                                                                        then 2
   when IntrinsicId::ExpectI1, IntrinsicId::Assume, IntrinsicId::Trap, IntrinsicId::DebugTrap, IntrinsicId::Donothing, IntrinsicId::Returnaddress, IntrinsicId::Readcyclecounter, IntrinsicId::X86Sse2Pause, IntrinsicId::AArch64Hint, IntrinsicId::WasmMemoryGrowI32 then 0
   else
     1
@@ -208,6 +212,7 @@ pub def intrinsic_accepts?(id : IntrinsicId, overload : Array(IrType)) : Bool
   when IntrinsicId::Memcpy, IntrinsicId::Memmove                                                                              then plain_ptr?(overload[0]) && plain_ptr?(overload[1]) && wide_int?(overload[2])
   when IntrinsicId::Memset                                                                                                    then plain_ptr?(overload[0]) && wide_int?(overload[1])
   when IntrinsicId::Frameaddress, IntrinsicId::Stacksave, IntrinsicId::Stackrestore, IntrinsicId::VaStart, IntrinsicId::VaEnd then plain_ptr?(overload[0])
+  when IntrinsicId::FPToSISat, IntrinsicId::FPToUISat                                                                         then wide_int?(overload[0]) && float_type?(overload[1])
   else
     true
   end
@@ -265,6 +270,7 @@ pub def intrinsic_signature(id : IntrinsicId, overload : Array(IrType), types : 
   when IntrinsicId::Readcyclecounter                                                                then {types.int64, [] of IrType}
   when IntrinsicId::AArch64Hint                                                                     then {types.int32, [types.int32]}
   when IntrinsicId::WasmMemoryGrowI32                                                               then {types.int32, [types.int32, types.int32]}
+  when IntrinsicId::FPToSISat, IntrinsicId::FPToUISat                                               then {overload[0], [overload[1]]}
   else
     raise "no signature for #{intrinsic_stem(id)}"
   end
@@ -338,6 +344,11 @@ pub def intrinsic_candidates(id : IntrinsicId, types : TypeTable) : Array(Array(
   elsif float_family?(id)
     result << [types.float(32)]
     result << [types.double]
+  elsif id == IntrinsicId::FPToSISat || id == IntrinsicId::FPToUISat
+    intrinsic_int_widths.each do |w|
+      result << [types.int(w), types.float(32)]
+      result << [types.int(w), types.double]
+    end
   else
     result << [types.ptr(0)]
   end

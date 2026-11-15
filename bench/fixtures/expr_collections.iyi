@@ -1,0 +1,18 @@
+# Collections fixture: arrays, hashes, tuples, named tuples
+arr1 = [1, 2, 3, 4]
+arr2 = ["alpha", "beta", "gamma"]
+arr3 = [1, "mixed", :sym, true, nil]
+
+hash1 = {"key1" => "value1", "key2" => "value2"}
+hash2 = {1 => 10, 2 => 20, 3 => 30}
+
+tup1 = {1, 2, 3}
+tup2 = {"hello", :world, 42}
+
+named1 = {name: "Alice", age: 30}
+named2 = {x: 100, y: 200, z: 300}
+
+nested = [
+  {id: 1, tags: ["a", "b"]},
+  {id: 2, tags: ["c", "d"]},
+]

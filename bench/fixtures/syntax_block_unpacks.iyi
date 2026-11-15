@@ -1,0 +1,12 @@
+def closure_example
+  x = 7
+  each_pair do |(x, y)|
+    consume(-> { x })
+  end
+end
+
+items.each { |(head, (left, *middle, _), *tail), after| consume(head, left, middle, tail, after) }
+items.each do |first, *(a, _, b), last|
+  consume(first, a, b, last)
+end
+items.each { |(_, _), (a, (b, *c))| consume(a, b, c) }

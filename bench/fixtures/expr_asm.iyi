@@ -1,0 +1,31 @@
+# Inline assembly expressions, taken from the templates in src/iyi/prelude.iyi
+# and src/iyi/concurrency.iyi: a bare template with the empty-part `::` form,
+# a syscall with outputs, inputs and clobbers, and the options.
+
+def spin_hint
+  {% if flag?(:x86_64) %}
+    asm("pause" :::: "volatile")
+  {% elsif flag?(:aarch64) %}
+    asm("yield" :::: "volatile")
+  {% end %}
+end
+
+def syscall3(number : Int64, a : Int64, b : Int64, c : Int64) : Int64
+  result = uninitialized Int64
+  {% if flag?(:x86_64) %}
+    asm("syscall" : "={rax}"(result)
+                  : "{rax}"(number), "{rdi}"(a), "{rsi}"(b), "{rdx}"(c)
+                  : "rcx", "r11", "memory"
+                  : "volatile")
+  {% else %}
+    asm("svc #0" : "={x0}"(result)
+                 : "{x8}"(number), "{x0}"(a), "{x1}"(b), "{x2}"(c)
+                 : "memory"
+                 : "volatile")
+  {% end %}
+  result
+end
+
+def fence
+  asm("mfence" :::: "volatile")
+end

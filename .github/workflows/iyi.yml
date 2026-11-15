@@ -3907,6 +3907,9 @@ jobs:
       - name: The self-host gates
         run: bash bench/selfhost_gates.sh
 
+      - name: The Mach-O object reader and writer
+        run: bash bench/native_obj_exercise.sh
+
   selfhost-darwin:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'selfhost-darwin') }}
@@ -3946,6 +3949,9 @@ jobs:
       # environment before they look for llvm-config on the PATH.
       - name: The self-host gates
         run: LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config" bash bench/selfhost_gates.sh
+
+      - name: The Mach-O object reader and writer
+        run: LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config" bash bench/native_obj_exercise.sh
   # The editor client is the only artifact here that is published somewhere
   # else, so it is proven the same way as the rest: every run packages it,
   # which is the one check that the manifest parses, the files it names

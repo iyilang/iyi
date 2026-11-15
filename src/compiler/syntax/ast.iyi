@@ -1,0 +1,5606 @@
+module compiler/syntax/ast
+
+import compiler/foundation/location::{Location}
+import compiler/foundation/enums
+import compiler/syntax/token::{Keyword, TokenKind, NumberKind}
+
+pub enum Visibility : Int32
+  Public    = 0
+  Protected = 1
+  Private   = 2
+end
+
+pub enum RegexOptions : Int32
+  None         =  0
+  IGNORE_CASE  =  1
+  MULTILINE    =  6
+  DOTALL       =  2
+  EXTENDED     =  8
+  ANCHORED     = 16
+  UTF_8        = 32
+  NO_UTF_CHECK = 64
+
+  def |(other : RegexOptions) : RegexOptions
+    RegexOptions.new(value | other.value)
+  end
+
+  def &(other : RegexOptions) : RegexOptions
+    RegexOptions.new(value & other.value)
+  end
+
+  def none? : Bool
+    value == 0
+  end
+
+  def includes?(option : RegexOptions) : Bool
+    (value & option.value) == option.value
+  end
+end
+
+pub class StringBuilder
+  @parts : Array(String)
+
+  def initialize
+    @parts = [] of String
+  end
+
+  def <<(str : String) : self
+    @parts << str
+    self
+  end
+
+  def <<(ch : Char) : self
+    @parts << ch.to_s
+    self
+  end
+
+  def <<(num : Int32) : self
+    @parts << num.to_s
+    self
+  end
+
+  def <<(num : Int64) : self
+    @parts << num.to_s
+    self
+  end
+
+  def append(str : String) : self
+    @parts << str
+    self
+  end
+
+  def to_s : String
+    @parts.join("")
+  end
+
+  def empty? : Bool
+    @parts.empty?
+  end
+end
+
+# Out-of-band side map keyed by node object_id so ASTNode types are never reopened.
+#
+# The key is the node's address, so the map holds the node as well as the value. A map that kept only the address
+# let the collector free a node nothing else referred to (a discarded clone), and the next node allocated at that
+# address then found the dead node's entry: a type or a target that belonged to another node, and at a point that
+# depended on when the collector ran, so two runs of one compiler on one program could differ.
+pub class NodeMap(V)
+  @store : Hash(UInt64, V)
+  @nodes : Hash(UInt64, ASTNode)
+
+  def initialize
+    @store = Hash(UInt64, V).new
+    @nodes = Hash(UInt64, ASTNode).new
+  end
+
+  def []=(node : ASTNode, value : V) : V
+    @nodes[node.node_id] = node
+    @store[node.node_id] = value
+    value
+  end
+
+  def []?(node : ASTNode) : V?
+    @store[node.node_id]?
+  end
+
+  def [](node : ASTNode) : V
+    if val = @store[node.node_id]?
+      val
+    else
+      raise "Key not found in NodeMap"
+    end
+  end
+
+  def has_key?(node : ASTNode) : Bool
+    @store.has_key?(node.node_id)
+  end
+
+  def delete(node : ASTNode) : V?
+    @nodes.delete(node.node_id)
+    @store.delete(node.node_id)
+  end
+
+  def values : Array(V)
+    @store.values
+  end
+
+  def size : Int32
+    @store.size
+  end
+
+  def empty? : Bool
+    @store.empty?
+  end
+
+  def clear : Nil
+    @store = Hash(UInt64, V).new
+    @nodes = Hash(UInt64, ASTNode).new
+  end
+end
+
+pub abstract class ASTNode
+  property location : Location?
+  property end_location : Location?
+  property doc : String?
+  property visibility : Visibility?
+
+  def at(@location : Location?) : self
+    self
+  end
+
+  def at(node : ASTNode) : self
+    @location = node.location
+    @end_location = node.end_location
+    self
+  end
+
+  def at_end(@end_location : Location?) : self
+    self
+  end
+
+  def at_end(node : ASTNode) : self
+    @end_location = node.end_location
+    self
+  end
+
+  def node_id : UInt64
+    object_id
+  end
+
+  def clone : self
+    c = clone_without_location
+    c.location = @location
+    c.end_location = @end_location
+    c.doc = @doc
+    c.visibility = @visibility
+    c
+  end
+
+  def ==(other : ASTNode) : Bool
+    false
+  end
+
+  def hash : Int32
+    17
+  end
+
+  def !=(other : ASTNode) : Bool
+    !self.==(other)
+  end
+
+  def accept(visitor) : Nil
+    if visitor.visit_any(self)
+      if visitor.visit(self)
+        accept_children(visitor)
+      end
+      visitor.end_visit(self)
+      visitor.end_visit_any(self)
+    end
+  end
+
+  def accept_children(visitor) : Nil
+  end
+
+  def transform(transformer) : ASTNode
+    transformer.before_transform(self)
+    res = transformer.transform(self)
+    transformer.after_transform(self)
+    res
+  end
+
+  def nop? : Bool
+    false
+  end
+
+  def true_literal? : Bool
+    false
+  end
+
+  def false_literal? : Bool
+    false
+  end
+
+  abstract def to_s(sb : StringBuilder) : Nil
+
+  def to_s : String
+    sb = StringBuilder.new
+    to_s(sb)
+    sb.to_s
+  end
+end
+
+def clone_nodes(nodes : Array(T)) : Array(T) forall T
+  nodes.map { |node| node.clone.as(T) }
+end
+
+def clone_node(node : ASTNode?) : ASTNode?
+  if n = node
+    n.clone
+  else
+    nil
+  end
+end
+
+def clone_opt_nodes(nodes : Array(T)?) : Array(T)? forall T
+  if n = nodes
+    n.map { |node| node.clone.as(T) }
+  else
+    nil
+  end
+end
+
+def clone_opt_strings(strings : Array(String)?) : Array(String)?
+  if s = strings
+    s.dup
+  else
+    nil
+  end
+end
+
+# The hosted printer writes a proc type in parentheses, `(T, U -> V)`, and drops the outermost pair where the
+# surrounding syntax already delimits it: a def or fun parameter's restriction, a call argument that is a proc type
+# or a declaration of one, a call's block argument, and the only member of a union. This prints `node` in one of
+# those places.
+def print_dropping_proc_parens(node : ASTNode, sb : StringBuilder) : Nil
+  if node.is_a?(ProcNotation)
+    node.as(ProcNotation).to_s_bare(sb)
+  elsif node.is_a?(TypeDeclaration) && node.as(TypeDeclaration).declared_type.is_a?(ProcNotation)
+    decl = node.as(TypeDeclaration)
+    decl.var.to_s(sb)
+    sb << " : "
+    decl.declared_type.as(ProcNotation).to_s_bare(sb)
+    if v = decl.value
+      sb << " = "
+      v.to_s(sb)
+    end
+  else
+    node.to_s(sb)
+  end
+end
+
+def hash_val(v) : Int32
+  if val = v
+    val.hash
+  else
+    0
+  end
+end
+
+pub abstract class BinaryOp < ASTNode
+  property left : ASTNode
+  property right : ASTNode
+
+  def initialize(@left : ASTNode, @right : ASTNode)
+  end
+
+  def accept_children(visitor) : Nil
+    @left.accept(visitor)
+    @right.accept(visitor)
+  end
+
+  def ==(other : self) : Bool
+    @left == other.left && @right == other.right
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    31 &* (31 &* 17 &+ @left.hash) &+ @right.hash
+  end
+end
+
+pub abstract class UnaryExpression < ASTNode
+  property exp : ASTNode
+
+  def initialize(@exp : ASTNode)
+  end
+
+  def accept_children(visitor) : Nil
+    @exp.accept(visitor)
+  end
+
+  def ==(other : self) : Bool
+    @exp == other.exp
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    31 &* 17 &+ @exp.hash
+  end
+end
+
+pub abstract class ControlExpression < ASTNode
+  property exp : ASTNode?
+
+  def initialize(@exp : ASTNode? = nil)
+  end
+
+  def accept_children(visitor) : Nil
+    if e = @exp
+      e.accept(visitor)
+    end
+  end
+
+  def ==(other : self) : Bool
+    @exp == other.exp
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    if e = @exp
+      31 &* 17 &+ e.hash
+    else
+      17
+    end
+  end
+end
+
+pub class Nop < ASTNode
+  def initialize
+  end
+
+  def clone_without_location : self
+    Nop.new
+  end
+
+  def nop? : Bool
+    true
+  end
+
+  def ==(other : self) : Bool
+    true
+  end
+
+  def ==(other : ASTNode) : Bool
+    other.is_a?(Nop)
+  end
+
+  def hash : Int32
+    0
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+  end
+end
+
+# The body of a def declared with `@[Primitive(:name)]`: the declarations pass puts this node in place of the
+# def's own (empty) body, the main pass types it by name, and the lowering emits the operation it names. No
+# source text parses to it. The hosted compiler declares it in semantic/ast.cr; it lives with the other nodes
+# here because the visitor and the transformer dispatch over every node class.
+pub class Primitive < ASTNode
+  getter name : String
+  property extra : ASTNode?
+  # `tuple_indexer_known_index` only (hosted TupleIndexer < Primitive, semantic/ast.cr 61-74, the "fictitious
+  # node to represent a tuple indexer"): the member a literal index names, and the last member when the
+  # literal is a range (the same member otherwise). The port keeps them here rather than in a subclass:
+  # the visitor and the transformer dispatch by node class.
+  property tuple_index : Int32 = 0
+  property tuple_last : Int32 = 0
+  # Scalar (i, i) and singleton range (i, i) differ; an empty range is (0, -1).
+  property tuple_range : Bool = false
+
+  def initialize(@name : String)
+  end
+
+  # The body of the def a tuple's literal index resolves to (hosted types.cr 2855-2860).
+  def self.tuple_indexer(first : Int32, last : Int32, is_range : Bool) : Primitive
+    node = Primitive.new("tuple_indexer_known_index")
+    node.tuple_index = first
+    node.tuple_last = last
+    node.tuple_range = is_range
+    node
+  end
+
+  def clone_without_location : self
+    node = Primitive.new(@name)
+    node.tuple_index = @tuple_index
+    node.tuple_last = @tuple_last
+    node.tuple_range = @tuple_range
+    node
+  end
+
+  def ==(other : self) : Bool
+    (@name == other.name) && (@tuple_index == other.tuple_index) && (@tuple_last == other.tuple_last) && (@tuple_range == other.tuple_range)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@name)
+    h = 31 &* h &+ @tuple_index
+    h = 31 &* h &+ @tuple_last
+    h = 31 &* h &+ hash_val(@tuple_range)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "# primitive: "
+    sb << @name
+  end
+end
+
+pub class NilLiteral < ASTNode
+  def initialize
+  end
+
+  def clone_without_location : self
+    NilLiteral.new
+  end
+
+  def ==(other : self) : Bool
+    true
+  end
+
+  def ==(other : ASTNode) : Bool
+    other.is_a?(NilLiteral)
+  end
+
+  def hash : Int32
+    1
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "nil"
+  end
+end
+
+pub class BoolLiteral < ASTNode
+  property value : Bool
+
+  def initialize(@value : Bool)
+  end
+
+  def clone_without_location : self
+    BoolLiteral.new(@value)
+  end
+
+  def true_literal? : Bool
+    @value
+  end
+
+  def false_literal? : Bool
+    !@value
+  end
+
+  def ==(other : self) : Bool
+    (@value == other.value)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@value)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << (@value ? "true" : "false")
+  end
+end
+
+pub class NumberLiteral < ASTNode
+  property value : String
+  property kind : NumberKind
+
+  def initialize(@value : String, @kind : NumberKind = NumberKind::I32)
+  end
+
+  def clone_without_location : self
+    NumberLiteral.new(@value, @kind)
+  end
+
+  def ==(other : self) : Bool
+    (@value == other.value) && (@kind == other.kind)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@value)
+    h = 31 &* h &+ hash_val(@kind)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << @value
+    # Hosted syntax/to_s.cr:75-100 preserves non-default numeric kinds.
+    if @kind != NumberKind::I32
+      if @kind != NumberKind::F64 || (!@value.includes?(".") && !@value.includes?("e"))
+        sb << "_" << @kind.to_s
+      end
+    end
+  end
+end
+
+pub class CharLiteral < ASTNode
+  property value : Char
+
+  def initialize(@value : Char)
+  end
+
+  def clone_without_location : self
+    CharLiteral.new(@value)
+  end
+
+  def ==(other : self) : Bool
+    (@value == other.value)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@value)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "'" << @value << "'"
+  end
+end
+
+pub class StringLiteral < ASTNode
+  property value : String
+
+  def initialize(@value : String)
+  end
+
+  def clone_without_location : self
+    StringLiteral.new(@value)
+  end
+
+  def ==(other : self) : Bool
+    (@value == other.value)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@value)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << '"' << @value << '"'
+  end
+end
+
+pub class StringInterpolation < ASTNode
+  property expressions : Array(ASTNode)
+  property heredoc_indent : Int32
+
+  def initialize(@expressions : Array(ASTNode) = [] of ASTNode, @heredoc_indent : Int32 = 0)
+  end
+
+  def clone_without_location : self
+    StringInterpolation.new(clone_nodes(@expressions), @heredoc_indent)
+  end
+
+  def accept_children(visitor) : Nil
+    @expressions.each { |e| e.accept(visitor) }
+  end
+
+  def ==(other : self) : Bool
+    (@expressions == other.expressions) && (@heredoc_indent == other.heredoc_indent)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@expressions)
+    h = 31 &* h &+ hash_val(@heredoc_indent)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << '"'
+    @expressions.each do |e|
+      if e.is_a?(StringLiteral)
+        sb << e.value
+      else
+        sb << "#{"
+        e.to_s(sb)
+        sb << "}"
+      end
+    end
+    sb << '"'
+  end
+end
+
+pub class SymbolLiteral < ASTNode
+  property value : String
+
+  def initialize(@value : String)
+  end
+
+  def clone_without_location : self
+    SymbolLiteral.new(@value)
+  end
+
+  def ==(other : self) : Bool
+    (@value == other.value)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@value)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << ":" << @value
+  end
+end
+
+pub class ArrayLiteral < ASTNode
+  property elements : Array(ASTNode)
+  property of : ASTNode?
+  property name : ASTNode?
+
+  def initialize(@elements : Array(ASTNode) = [] of ASTNode, @of : ASTNode? = nil, @name : ASTNode? = nil)
+  end
+
+  def clone_without_location : self
+    ArrayLiteral.new(clone_nodes(@elements), clone_node(@of), clone_node(@name))
+  end
+
+  def accept_children(visitor) : Nil
+    @elements.each { |e| e.accept(visitor) }
+    if o = @of
+      o.accept(visitor)
+    end
+    if n = @name
+      n.accept(visitor)
+    end
+  end
+
+  def ==(other : self) : Bool
+    @elements == other.elements && @of == other.of && @name == other.name
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ @elements.hash
+    h = 31 &* h &+ hash_val(@of)
+    h = 31 &* h &+ hash_val(@name)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    if n = @name
+      n.to_s(sb)
+    end
+    sb << "["
+    i = 0
+    while i < @elements.size
+      sb << ", " if i > 0
+      @elements[i].to_s(sb)
+      i = i + 1
+    end
+    sb << "]"
+    if o = @of
+      sb << " of "
+      o.to_s(sb)
+    end
+  end
+end
+
+pub class HashLiteral < ASTNode
+  pub struct Entry
+    property key : ASTNode
+    property value : ASTNode
+
+    def initialize(@key : ASTNode, @value : ASTNode)
+    end
+
+    def clone : Entry
+      Entry.new(@key.clone, @value.clone)
+    end
+
+    def ==(other : Entry) : Bool
+      @key == other.key && @value == other.value
+    end
+
+    def hash : Int32
+      31 &* (31 &* 17 &+ @key.hash) &+ @value.hash
+    end
+  end
+
+  property entries : Array(Entry)
+  property of : Entry?
+  property name : ASTNode?
+
+  def initialize(@entries : Array(Entry) = [] of Entry, @of : Entry? = nil, @name : ASTNode? = nil)
+  end
+
+  def clone_without_location : self
+    cloned_entries = @entries.map { |e| e.clone }
+    cloned_of = if o = @of
+                  o.clone
+                else
+                  nil
+                end
+    HashLiteral.new(cloned_entries, cloned_of, clone_node(@name))
+  end
+
+  def accept_children(visitor) : Nil
+    @entries.each do |e|
+      e.key.accept(visitor)
+      e.value.accept(visitor)
+    end
+    if o = @of
+      o.key.accept(visitor)
+      o.value.accept(visitor)
+    end
+    if n = @name
+      n.accept(visitor)
+    end
+  end
+
+  def ==(other : self) : Bool
+    @entries == other.entries && @of == other.of && @name == other.name
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ @entries.hash
+    h = 31 &* h &+ hash_val(@of)
+    h = 31 &* h &+ hash_val(@name)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    if n = @name
+      n.to_s(sb)
+    end
+    sb << "{"
+    i = 0
+    while i < @entries.size
+      sb << ", " if i > 0
+      @entries[i].key.to_s(sb)
+      sb << " => "
+      @entries[i].value.to_s(sb)
+      i = i + 1
+    end
+    sb << "}"
+    if o = @of
+      sb << " of "
+      o.key.to_s(sb)
+      sb << " => "
+      o.value.to_s(sb)
+    end
+  end
+end
+
+pub class NamedTupleLiteral < ASTNode
+  pub struct Entry
+    property key : String
+    property value : ASTNode
+
+    def initialize(@key : String, @value : ASTNode)
+    end
+
+    def clone : Entry
+      Entry.new(@key, @value.clone)
+    end
+
+    def ==(other : Entry) : Bool
+      @key == other.key && @value == other.value
+    end
+
+    def hash : Int32
+      31 &* (31 &* 17 &+ @key.hash) &+ @value.hash
+    end
+  end
+
+  property entries : Array(Entry)
+
+  def initialize(@entries : Array(Entry) = [] of Entry)
+  end
+
+  def clone_without_location : self
+    NamedTupleLiteral.new(@entries.map { |e| e.clone })
+  end
+
+  def accept_children(visitor) : Nil
+    @entries.each { |e| e.value.accept(visitor) }
+  end
+
+  def ==(other : self) : Bool
+    (@entries == other.entries)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@entries)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "{"
+    i = 0
+    while i < @entries.size
+      sb << ", " if i > 0
+      sb << @entries[i].key << ": "
+      @entries[i].value.to_s(sb)
+      i = i + 1
+    end
+    sb << "}"
+  end
+end
+
+pub class RangeLiteral < ASTNode
+  property from : ASTNode
+  property to : ASTNode
+  property exclusive : Bool
+
+  def initialize(@from : ASTNode, @to : ASTNode, @exclusive : Bool = false)
+  end
+
+  def clone_without_location : self
+    RangeLiteral.new(@from.clone, @to.clone, @exclusive)
+  end
+
+  def accept_children(visitor) : Nil
+    @from.accept(visitor)
+    @to.accept(visitor)
+  end
+
+  def ==(other : self) : Bool
+    (@from == other.from) && (@to == other.to) && (@exclusive == other.exclusive)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@from)
+    h = 31 &* h &+ hash_val(@to)
+    h = 31 &* h &+ hash_val(@exclusive)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    @from.to_s(sb)
+    sb << (@exclusive ? "..." : "..")
+    @to.to_s(sb)
+  end
+end
+
+pub class RegexLiteral < ASTNode
+  property value : ASTNode
+  property options : RegexOptions
+
+  def initialize(@value : ASTNode, @options : RegexOptions = RegexOptions::None)
+  end
+
+  def clone_without_location : self
+    RegexLiteral.new(@value.clone, @options)
+  end
+
+  def accept_children(visitor) : Nil
+    @value.accept(visitor)
+  end
+
+  def ==(other : self) : Bool
+    (@value == other.value) && (@options == other.options)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@value)
+    h = 31 &* h &+ hash_val(@options)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "/"
+    @value.to_s(sb)
+    sb << "/"
+    sb << "i" if @options.includes?(RegexOptions::IGNORE_CASE)
+    sb << "m" if @options.includes?(RegexOptions::MULTILINE)
+  end
+end
+
+pub class TupleLiteral < ASTNode
+  property elements : Array(ASTNode)
+
+  def initialize(@elements : Array(ASTNode) = [] of ASTNode)
+  end
+
+  def clone_without_location : self
+    TupleLiteral.new(clone_nodes(@elements))
+  end
+
+  def accept_children(visitor) : Nil
+    @elements.each { |e| e.accept(visitor) }
+  end
+
+  def ==(other : self) : Bool
+    (@elements == other.elements)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@elements)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "{"
+    i = 0
+    while i < @elements.size
+      sb << ", " if i > 0
+      @elements[i].to_s(sb)
+      i = i + 1
+    end
+    sb << "}"
+  end
+end
+
+pub class MagicConstant < ASTNode
+  property name : TokenKind
+
+  def initialize(@name : TokenKind)
+  end
+
+  def clone_without_location : self
+    MagicConstant.new(@name)
+  end
+
+  # Defaults use the call's coordinates, never the declaration's location.
+  # Location currently represents source or generated-text lines, without the
+  # hosted VirtualFile's macro-expansion provenance.
+  def expand_node(location : Location?, end_location : Location?) : ASTNode
+    case @name
+    when TokenKind::MAGIC_LINE
+      NumberLiteral.new((location ? location.line_number : 0).to_s, NumberKind::I32)
+    when TokenKind::MAGIC_END_LINE
+      NumberLiteral.new((end_location ? end_location.line_number : 0).to_s, NumberKind::I32)
+    when TokenKind::MAGIC_FILE
+      StringLiteral.new(location ? location.filename : "?")
+    when TokenKind::MAGIC_DIR
+      StringLiteral.new(MagicConstant.expand_dir(location))
+    else
+      raise "BUG: unknown magic constant: #{@name}"
+    end
+  end
+
+  # Match the hosted File.dirname behavior, including repeated/trailing slashes.
+  def self.expand_dir(location : Location?) : String
+    return "?" unless location
+    name = location.filename
+    stop = name.bytesize
+    while stop > 0 && name.byte_at(stop - 1) == 47_u8
+      stop -= 1
+    end
+    return name.bytesize > 0 ? "/" : "." if stop == 0
+    cut = stop
+    while cut > 0 && name.byte_at(cut - 1) != 47_u8
+      cut -= 1
+    end
+    return "." if cut == 0
+    while cut > 0 && name.byte_at(cut - 1) == 47_u8
+      cut -= 1
+    end
+    cut == 0 ? "/" : name[0, cut]
+  end
+
+  def ==(other : self) : Bool
+    (@name == other.name)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@name)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    case @name
+    when TokenKind::MAGIC_LINE
+      sb << "__LINE__"
+    when TokenKind::MAGIC_END_LINE
+      sb << "__END_LINE__"
+    when TokenKind::MAGIC_FILE
+      sb << "__FILE__"
+    when TokenKind::MAGIC_DIR
+      sb << "__DIR__"
+    else
+      sb << @name.to_s
+    end
+  end
+end
+
+pub class Var < ASTNode
+  property name : String
+
+  def initialize(@name : String)
+  end
+
+  def clone_without_location : self
+    Var.new(@name)
+  end
+
+  def ==(other : self) : Bool
+    (@name == other.name)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@name)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << @name
+  end
+end
+
+pub class InstanceVar < ASTNode
+  property name : String
+
+  def initialize(@name : String)
+  end
+
+  def clone_without_location : self
+    InstanceVar.new(@name)
+  end
+
+  def ==(other : self) : Bool
+    (@name == other.name)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@name)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << @name
+  end
+end
+
+pub class ReadInstanceVar < ASTNode
+  property obj : ASTNode
+  property name : String
+
+  def initialize(@obj : ASTNode, @name : String)
+  end
+
+  def clone_without_location : self
+    ReadInstanceVar.new(@obj.clone, @name)
+  end
+
+  def accept_children(visitor) : Nil
+    @obj.accept(visitor)
+  end
+
+  def ==(other : self) : Bool
+    (@obj == other.obj) && (@name == other.name)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@obj)
+    h = 31 &* h &+ hash_val(@name)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    @obj.to_s(sb)
+    sb << "." << @name
+  end
+end
+
+pub class ClassVar < ASTNode
+  property name : String
+
+  def initialize(@name : String)
+  end
+
+  def clone_without_location : self
+    ClassVar.new(@name)
+  end
+
+  def ==(other : self) : Bool
+    (@name == other.name)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@name)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << @name
+  end
+end
+
+pub class Global < ASTNode
+  property name : String
+
+  def initialize(@name : String)
+  end
+
+  def clone_without_location : self
+    Global.new(@name)
+  end
+
+  def ==(other : self) : Bool
+    (@name == other.name)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@name)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << @name
+  end
+end
+
+pub class Path < ASTNode
+  property names : Array(String)
+  property global : Bool
+  property iyi_synthetic : Bool = false
+
+  def initialize(@names : Array(String) = [] of String, @global : Bool = false)
+  end
+
+  def self.new(name : String) : Path
+    new([name], false)
+  end
+
+  def self.global(names : Array(String)) : Path
+    new(names, true)
+  end
+
+  def self.global(name : String) : Path
+    new([name] of String, true)
+  end
+
+  def clone_without_location : self
+    copy = Path.new(@names.dup, @global)
+    copy.iyi_synthetic = @iyi_synthetic
+    copy
+  end
+
+  def ==(other : self) : Bool
+    (@names == other.names) && (@global == other.global)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@names)
+    h = 31 &* h &+ hash_val(@global)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "::" if @global
+    i = 0
+    while i < @names.size
+      sb << "::" if i > 0
+      sb << @names[i]
+      i = i + 1
+    end
+  end
+end
+
+pub class Generic < ASTNode
+  pub enum Suffix
+    None
+    Question
+    Bang
+  end
+
+  property name : ASTNode
+  property type_vars : Array(ASTNode)
+  property named_args : Array(NamedArgument)?
+  property suffix : Suffix
+
+  def initialize(@name : ASTNode, @type_vars : Array(ASTNode) = [] of ASTNode, @named_args : Array(NamedArgument)? = nil, @suffix : Suffix = Suffix::None)
+  end
+
+  def clone_without_location : self
+    if na = @named_args
+      cloned_named_args = na.map { |a| a.clone.as(NamedArgument) }
+    else
+      cloned_named_args = nil
+    end
+    Generic.new(@name.clone, clone_nodes(@type_vars), cloned_named_args, @suffix)
+  end
+
+  def accept_children(visitor) : Nil
+    @name.accept(visitor)
+    @type_vars.each { |tv| tv.accept(visitor) }
+    if na = @named_args
+      na.each { |a| a.accept(visitor) }
+    end
+  end
+
+  def ==(other : self) : Bool
+    (@name == other.name) && (@type_vars == other.type_vars) && (@named_args == other.named_args) && (@suffix == other.suffix)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@name)
+    h = 31 &* h &+ hash_val(@type_vars)
+    h = 31 &* h &+ hash_val(@named_args)
+    h = 31 &* h &+ hash_val(@suffix)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    @name.to_s(sb)
+    sb << "("
+    i = 0
+    while i < @type_vars.size
+      sb << ", " if i > 0
+      @type_vars[i].to_s(sb)
+      i = i + 1
+    end
+    if na = @named_args
+      j = 0
+      while j < na.size
+        sb << ", " if @type_vars.size > 0 || j > 0
+        na[j].to_s(sb)
+        j = j + 1
+      end
+    end
+    sb << ")"
+    case @suffix
+    when Suffix::Question
+      sb << "?"
+    when Suffix::Bang
+      sb << "!"
+    else
+    end
+  end
+end
+
+pub class Self < ASTNode
+  def initialize
+  end
+
+  def clone_without_location : self
+    Self.new
+  end
+
+  def ==(other : self) : Bool
+    true
+  end
+
+  def ==(other : ASTNode) : Bool
+    other.is_a?(Self)
+  end
+
+  def hash : Int32
+    42
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "self"
+  end
+end
+
+pub class Underscore < ASTNode
+  def initialize
+  end
+
+  def clone_without_location : self
+    Underscore.new
+  end
+
+  def ==(other : self) : Bool
+    true
+  end
+
+  def ==(other : ASTNode) : Bool
+    other.is_a?(Underscore)
+  end
+
+  def hash : Int32
+    43
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "_"
+  end
+end
+
+pub class ImplicitObj < ASTNode
+  def initialize
+  end
+
+  def clone_without_location : self
+    ImplicitObj.new
+  end
+
+  def ==(other : self) : Bool
+    true
+  end
+
+  def ==(other : ASTNode) : Bool
+    other.is_a?(ImplicitObj)
+  end
+
+  def hash : Int32
+    44
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+  end
+end
+
+pub class Return < ControlExpression
+  property from_propagate : Bool = false
+  # The def this returns from. Typing sets it (hosted semantic/ast.cr 697-699, main_visitor.cr 2096) and lowering
+  # runs the pending `defer` cleanups up to it (codegen.cr 1179). A clone does not carry it.
+  property target : Def? = nil
+
+  def initialize(exp : ASTNode? = nil)
+    super(exp)
+    @from_propagate = false
+  end
+
+  def clone_without_location : self
+    ret = Return.new(clone_node(@exp))
+    ret.from_propagate = @from_propagate
+    ret
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "return"
+    if e = @exp
+      sb << " "
+      e.to_s(sb)
+    end
+  end
+end
+
+pub class Break < ControlExpression
+  # What this leaves: the Call whose block it is in, or the While. Typing sets it (hosted semantic/ast.cr 689-691,
+  # main_visitor.cr 2764, 2770) and lowering runs the pending `defer` cleanups up to it (codegen.cr 1446-1456).
+  # A clone does not carry it.
+  property target : ASTNode? = nil
+
+  def initialize(exp : ASTNode? = nil)
+    super(exp)
+  end
+
+  def clone_without_location : self
+    Break.new(clone_node(@exp))
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "break"
+    if e = @exp
+      sb << " "
+      e.to_s(sb)
+    end
+  end
+end
+
+pub class Next < ControlExpression
+  # What this continues: the Block, the While, or the def of a captured block. Typing sets it (hosted
+  # semantic/ast.cr 693-695, main_visitor.cr 2796, 2803, 2810) and lowering runs the pending `defer` cleanups up
+  # to it (codegen.cr 1470-1480). A clone does not carry it.
+  property target : ASTNode? = nil
+
+  def initialize(exp : ASTNode? = nil)
+    super(exp)
+  end
+
+  def clone_without_location : self
+    Next.new(clone_node(@exp))
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "next"
+    if e = @exp
+      sb << " "
+      e.to_s(sb)
+    end
+  end
+end
+
+pub class Yield < ASTNode
+  property exps : Array(ASTNode)
+  property scope : ASTNode?
+  property has_parentheses : Bool
+
+  def initialize(@exps : Array(ASTNode) = [] of ASTNode, @scope : ASTNode? = nil, @has_parentheses : Bool = false)
+  end
+
+  def clone_without_location : self
+    Yield.new(clone_nodes(@exps), clone_node(@scope), @has_parentheses)
+  end
+
+  def accept_children(visitor) : Nil
+    @exps.each { |e| e.accept(visitor) }
+    if s = @scope
+      s.accept(visitor)
+    end
+  end
+
+  def ==(other : self) : Bool
+    (@exps == other.exps) && (@scope == other.scope) && (@has_parentheses == other.has_parentheses)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@exps)
+    h = 31 &* h &+ hash_val(@scope)
+    h = 31 &* h &+ hash_val(@has_parentheses)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    if s = @scope
+      sb << "with "
+      s.to_s(sb)
+      sb << " "
+    end
+    sb << "yield"
+    if @has_parentheses
+      sb << "("
+      i = 0
+      while i < @exps.size
+        sb << ", " if i > 0
+        @exps[i].to_s(sb)
+        i = i + 1
+      end
+      sb << ")"
+    elsif @exps.size > 0
+      sb << " "
+      i = 0
+      while i < @exps.size
+        sb << ", " if i > 0
+        @exps[i].to_s(sb)
+        i = i + 1
+      end
+    end
+  end
+end
+
+pub class Expressions < ASTNode
+  pub enum Keyword
+    None
+    Paren
+    Begin
+  end
+
+  property expressions : Array(ASTNode)
+  property keyword : Keyword
+
+  def initialize(@expressions : Array(ASTNode) = [] of ASTNode, @keyword : Keyword = Keyword::None)
+  end
+
+  # Hosted syntax/ast.cr 236-241: an unlocated sequence uses its boundary expressions.
+  def location : Location?
+    if loc = @location
+      return loc
+    end
+    return nil if @expressions.empty?
+    @expressions[0].location
+  end
+
+  def end_location : Location?
+    if loc = @end_location
+      return loc
+    end
+    return nil if @expressions.empty?
+    @expressions.last.end_location
+  end
+
+  def self.from(nodes : Array(ASTNode)) : ASTNode
+    if nodes.size == 0
+      Nop.new
+    elsif nodes.size == 1
+      nodes[0]
+    else
+      new(nodes)
+    end
+  end
+
+  def self.concat(node : ASTNode, exps : ASTNode) : ASTNode
+    if exps.is_a?(Expressions)
+      arr = [node] of ASTNode
+      exps.as(Expressions).expressions.each { |e| arr << e }
+      Expressions.new(arr)
+    elsif exps.is_a?(Nop)
+      node
+    else
+      Expressions.new([node, exps])
+    end
+  end
+
+  def clone_without_location : self
+    Expressions.new(clone_nodes(@expressions), @keyword)
+  end
+
+  def accept_children(visitor) : Nil
+    @expressions.each { |e| e.accept(visitor) }
+  end
+
+  def ==(other : self) : Bool
+    (@expressions == other.expressions) && (@keyword == other.keyword)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@expressions)
+    h = 31 &* h &+ hash_val(@keyword)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    case @keyword
+    when Keyword::Paren
+      sb << "("
+      i = 0
+      while i < @expressions.size
+        sb << "; " if i > 0
+        @expressions[i].to_s(sb)
+        i = i + 1
+      end
+      sb << ")"
+    when Keyword::Begin
+      sb << "begin
+"
+      @expressions.each do |e|
+        sb << "  "
+        e.to_s(sb)
+        sb << "
+"
+      end
+      sb << "end"
+    else
+      i = 0
+      while i < @expressions.size
+        sb << "
+" if i > 0
+        @expressions[i].to_s(sb)
+        i = i + 1
+      end
+    end
+  end
+end
+
+pub class If < ASTNode
+  property cond : ASTNode
+  property then : ASTNode
+  property else : ASTNode
+  property ternary : Bool
+  property from_and : Bool
+  property from_or : Bool
+  property truthy : Bool
+  property falsey : Bool
+  property iyi_definition_probe : Bool = false
+
+  def initialize(@cond : ASTNode, a_then : ASTNode? = nil, a_else : ASTNode? = nil, @ternary : Bool = false)
+    @then = a_then || Nop.new
+    @else = a_else || Nop.new
+    @from_and = false
+    @from_or = false
+    @truthy = false
+    @falsey = false
+  end
+
+  def clone_without_location : self
+    copy = If.new(@cond.clone, @then.clone, @else.clone, @ternary)
+    copy.from_and = @from_and
+    copy.from_or = @from_or
+    copy.truthy = @truthy
+    copy.falsey = @falsey
+    copy.iyi_definition_probe = @iyi_definition_probe
+    copy
+  end
+
+  def accept_children(visitor) : Nil
+    @cond.accept(visitor)
+    @then.accept(visitor)
+    @else.accept(visitor)
+  end
+
+  def ==(other : self) : Bool
+    @cond == other.cond && @then == other.then && @else == other.else && @ternary == other.ternary
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    31 &* (31 &* (31 &* (31 &* 17 &+ @cond.hash) &+ @then.hash) &+ @else.hash) &+ (@ternary ? 1 : 0)
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    if @ternary
+      @cond.to_s(sb)
+      sb << " ? "
+      @then.to_s(sb)
+      sb << " : "
+      @else.to_s(sb)
+    else
+      sb << "if "
+      @cond.to_s(sb)
+      sb << "
+  "
+      @then.to_s(sb)
+      unless @else.is_a?(Nop)
+        sb << "
+else
+  "
+        @else.to_s(sb)
+      end
+      sb << "
+end"
+    end
+  end
+end
+
+pub class Unless < ASTNode
+  property cond : ASTNode
+  property then : ASTNode
+  property else : ASTNode
+
+  def initialize(@cond : ASTNode, a_then : ASTNode? = nil, a_else : ASTNode? = nil)
+    @then = a_then || Nop.new
+    @else = a_else || Nop.new
+  end
+
+  def clone_without_location : self
+    Unless.new(@cond.clone, @then.clone, @else.clone)
+  end
+
+  def accept_children(visitor) : Nil
+    @cond.accept(visitor)
+    @then.accept(visitor)
+    @else.accept(visitor)
+  end
+
+  def ==(other : self) : Bool
+    @cond == other.cond && @then == other.then && @else == other.else
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    31 &* (31 &* (31 &* 17 &+ @cond.hash) &+ @then.hash) &+ @else.hash
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "unless "
+    @cond.to_s(sb)
+    sb << "
+  "
+    @then.to_s(sb)
+    unless @else.is_a?(Nop)
+      sb << "
+else
+  "
+      @else.to_s(sb)
+    end
+    sb << "
+end"
+  end
+end
+
+pub class While < ASTNode
+  property cond : ASTNode
+  property body : ASTNode
+
+  def initialize(@cond : ASTNode, body : ASTNode? = nil)
+    @body = body || Nop.new
+  end
+
+  def clone_without_location : self
+    While.new(@cond.clone, @body.clone)
+  end
+
+  def accept_children(visitor) : Nil
+    @cond.accept(visitor)
+    @body.accept(visitor)
+  end
+
+  def ==(other : self) : Bool
+    (@cond == other.cond) && (@body == other.body)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@cond)
+    h = 31 &* h &+ hash_val(@body)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "while "
+    @cond.to_s(sb)
+    sb << "
+  "
+    @body.to_s(sb)
+    sb << "
+end"
+  end
+end
+
+pub class Until < ASTNode
+  property cond : ASTNode
+  property body : ASTNode
+
+  def initialize(@cond : ASTNode, body : ASTNode? = nil)
+    @body = body || Nop.new
+  end
+
+  def clone_without_location : self
+    Until.new(@cond.clone, @body.clone)
+  end
+
+  def accept_children(visitor) : Nil
+    @cond.accept(visitor)
+    @body.accept(visitor)
+  end
+
+  def ==(other : self) : Bool
+    (@cond == other.cond) && (@body == other.body)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@cond)
+    h = 31 &* h &+ hash_val(@body)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "until "
+    @cond.to_s(sb)
+    sb << "
+  "
+    @body.to_s(sb)
+    sb << "
+end"
+  end
+end
+
+pub class When < ASTNode
+  property conds : Array(ASTNode)
+  property body : ASTNode
+  property exhaustive : Bool
+
+  def initialize(@conds : Array(ASTNode) = [] of ASTNode, body : ASTNode? = nil, @exhaustive : Bool = false)
+    @body = body || Nop.new
+  end
+
+  def clone_without_location : self
+    When.new(clone_nodes(@conds), @body.clone, @exhaustive)
+  end
+
+  def accept_children(visitor) : Nil
+    @conds.each { |c| c.accept(visitor) }
+    @body.accept(visitor)
+  end
+
+  def ==(other : self) : Bool
+    (@conds == other.conds) && (@body == other.body) && (@exhaustive == other.exhaustive)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@conds)
+    h = 31 &* h &+ hash_val(@body)
+    h = 31 &* h &+ hash_val(@exhaustive)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "when "
+    i = 0
+    while i < @conds.size
+      sb << ", " if i > 0
+      @conds[i].to_s(sb)
+      i = i + 1
+    end
+    sb << "
+  "
+    @body.to_s(sb)
+  end
+end
+
+pub class Case < ASTNode
+  property cond : ASTNode?
+  property whens : Array(When)
+  property else : ASTNode?
+  property exhaustive : Bool
+
+  def initialize(@cond : ASTNode? = nil, @whens : Array(When) = [] of When, @else : ASTNode? = nil, @exhaustive : Bool = false)
+  end
+
+  def clone_without_location : self
+    cloned_whens = @whens.map { |w| w.clone.as(When) }
+    Case.new(clone_node(@cond), cloned_whens, clone_node(@else), @exhaustive)
+  end
+
+  def accept_children(visitor) : Nil
+    if c = @cond
+      c.accept(visitor)
+    end
+    @whens.each { |w| w.accept(visitor) }
+    if e = @else
+      e.accept(visitor)
+    end
+  end
+
+  def ==(other : self) : Bool
+    @cond == other.cond && @whens == other.whens && @else == other.else && @exhaustive == other.exhaustive
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@cond)
+    h = 31 &* h &+ @whens.hash
+    h = 31 &* h &+ hash_val(@else)
+    h = 31 &* h &+ (@exhaustive ? 1 : 0)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "case"
+    if c = @cond
+      sb << " "
+      c.to_s(sb)
+    end
+    sb << "
+"
+    @whens.each do |w|
+      w.to_s(sb)
+      sb << "
+"
+    end
+    if e = @else
+      sb << "else
+  "
+      e.to_s(sb)
+      sb << "
+"
+    end
+    sb << "end"
+  end
+end
+
+pub class Select < ASTNode
+  property whens : Array(When)
+  property else : ASTNode?
+
+  def initialize(@whens : Array(When) = [] of When, @else : ASTNode? = nil)
+  end
+
+  def clone_without_location : self
+    cloned_whens = @whens.map { |w| w.clone.as(When) }
+    Select.new(cloned_whens, clone_node(@else))
+  end
+
+  def accept_children(visitor) : Nil
+    @whens.each { |w| w.accept(visitor) }
+    if e = @else
+      e.accept(visitor)
+    end
+  end
+
+  def ==(other : self) : Bool
+    @whens == other.whens && @else == other.else
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    31 &* (31 &* 17 &+ @whens.hash) &+ hash_val(@else)
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "select
+"
+    @whens.each do |w|
+      w.to_s(sb)
+      sb << "
+"
+    end
+    if e = @else
+      sb << "else
+  "
+      e.to_s(sb)
+      sb << "
+"
+    end
+    sb << "end"
+  end
+end
+
+pub class Rescue < ASTNode
+  property body : ASTNode
+  property types : Array(ASTNode)?
+  property name : String?
+
+  def initialize(body : ASTNode? = nil, @types : Array(ASTNode)? = nil, @name : String? = nil)
+    @body = body || Nop.new
+  end
+
+  def clone_without_location : self
+    cloned_types = clone_opt_nodes(@types)
+    Rescue.new(@body.clone, cloned_types, @name)
+  end
+
+  def accept_children(visitor) : Nil
+    if t = @types
+      t.each { |ty| ty.accept(visitor) }
+    end
+    @body.accept(visitor)
+  end
+
+  def ==(other : self) : Bool
+    (@body == other.body) && (@types == other.types) && (@name == other.name)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@body)
+    h = 31 &* h &+ hash_val(@types)
+    h = 31 &* h &+ hash_val(@name)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "rescue "
+    if n = @name
+      sb << n << " : "
+    end
+    if t = @types
+      i = 0
+      while i < t.size
+        sb << " | " if i > 0
+        t[i].to_s(sb)
+        i = i + 1
+      end
+    end
+    sb << "
+  "
+    @body.to_s(sb)
+  end
+end
+
+pub class ExceptionHandler < ASTNode
+  property body : ASTNode
+  property rescues : Array(Rescue)?
+  property else : ASTNode?
+  property ensure : ASTNode?
+  property suffix : Bool
+  property implicit : Bool = false
+  # The handler a `defer` is normalized to (hosted syntax/ast.cr 2967). iyi refuses a written `ensure`;
+  # this one is the defer registry's pop and is not refused.
+  property iyi_defer : Bool = false
+
+  def iyi_defer? : Bool
+    @iyi_defer
+  end
+
+  def initialize(body : ASTNode? = nil, @rescues : Array(Rescue)? = nil, @else : ASTNode? = nil, @ensure : ASTNode? = nil, @suffix : Bool = false)
+    @body = body || Nop.new
+  end
+
+  def clone_without_location : self
+    if r = @rescues
+      cloned_rescues = r.map { |x| x.clone.as(Rescue) }
+    else
+      cloned_rescues = nil
+    end
+    ex = ExceptionHandler.new(@body.clone, cloned_rescues, clone_node(@else), clone_node(@ensure), @suffix)
+    ex.implicit = @implicit
+    ex.iyi_defer = @iyi_defer
+    ex
+  end
+
+  def accept_children(visitor) : Nil
+    @body.accept(visitor)
+    if r = @rescues
+      r.each { |x| x.accept(visitor) }
+    end
+    if e = @else
+      e.accept(visitor)
+    end
+    if ens = @ensure
+      ens.accept(visitor)
+    end
+  end
+
+  def ==(other : self) : Bool
+    @body == other.body && @rescues == other.rescues && @else == other.else && @ensure == other.ensure && @suffix == other.suffix
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ @body.hash
+    h = 31 &* h &+ hash_val(@rescues)
+    h = 31 &* h &+ hash_val(@else)
+    h = 31 &* h &+ hash_val(@ensure)
+    h = 31 &* h &+ (@suffix ? 1 : 0)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "begin
+  "
+    @body.to_s(sb)
+    sb << "
+"
+    if r = @rescues
+      r.each do |res|
+        res.to_s(sb)
+        sb << "
+"
+      end
+    end
+    if el = @else
+      sb << "else
+  "
+      el.to_s(sb)
+      sb << "
+"
+    end
+    if ens = @ensure
+      sb << "ensure
+  "
+      ens.to_s(sb)
+      sb << "
+"
+    end
+    sb << "end"
+  end
+end
+
+pub class Assign < ASTNode
+  property target : ASTNode
+  property value : ASTNode
+
+  def initialize(@target : ASTNode, @value : ASTNode)
+  end
+
+  def clone_without_location : self
+    Assign.new(@target.clone, @value.clone)
+  end
+
+  def accept_children(visitor) : Nil
+    @target.accept(visitor)
+    @value.accept(visitor)
+  end
+
+  def ==(other : self) : Bool
+    (@target == other.target) && (@value == other.value)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@target)
+    h = 31 &* h &+ hash_val(@value)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    @target.to_s(sb)
+    sb << " = "
+    @value.to_s(sb)
+  end
+end
+
+pub class OpAssign < ASTNode
+  property target : ASTNode
+  property op : String
+  property value : ASTNode
+  property name_location : Location? = nil
+
+  def initialize(@target : ASTNode, @op : String, @value : ASTNode)
+  end
+
+  def clone_without_location : self
+    oa = OpAssign.new(@target.clone, @op, @value.clone)
+    oa.name_location = @name_location
+    oa
+  end
+
+  def accept_children(visitor) : Nil
+    @target.accept(visitor)
+    @value.accept(visitor)
+  end
+
+  def ==(other : self) : Bool
+    (@target == other.target) && (@op == other.op) && (@value == other.value)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@target)
+    h = 31 &* h &+ hash_val(@op)
+    h = 31 &* h &+ hash_val(@value)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    @target.to_s(sb)
+    sb << " " << @op << "= "
+    @value.to_s(sb)
+  end
+end
+
+pub class MultiAssign < ASTNode
+  property targets : Array(ASTNode)
+  property values : Array(ASTNode)
+
+  def initialize(@targets : Array(ASTNode) = [] of ASTNode, @values : Array(ASTNode) = [] of ASTNode)
+  end
+
+  def clone_without_location : self
+    MultiAssign.new(clone_nodes(@targets), clone_nodes(@values))
+  end
+
+  def accept_children(visitor) : Nil
+    @targets.each { |t| t.accept(visitor) }
+    @values.each { |v| v.accept(visitor) }
+  end
+
+  def ==(other : self) : Bool
+    (@targets == other.targets) && (@values == other.values)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@targets)
+    h = 31 &* h &+ hash_val(@values)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    i = 0
+    while i < @targets.size
+      sb << ", " if i > 0
+      @targets[i].to_s(sb)
+      i = i + 1
+    end
+    sb << " = "
+    j = 0
+    while j < @values.size
+      sb << ", " if j > 0
+      @values[j].to_s(sb)
+      j = j + 1
+    end
+  end
+end
+
+pub class And < BinaryOp
+  def initialize(left : ASTNode, right : ASTNode)
+    super(left, right)
+  end
+
+  def clone_without_location : self
+    And.new(@left.clone, @right.clone)
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    @left.to_s(sb)
+    sb << " && "
+    @right.to_s(sb)
+  end
+end
+
+pub class Or < BinaryOp
+  def initialize(left : ASTNode, right : ASTNode)
+    super(left, right)
+  end
+
+  def clone_without_location : self
+    Or.new(@left.clone, @right.clone)
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    @left.to_s(sb)
+    sb << " || "
+    @right.to_s(sb)
+  end
+end
+
+pub class Not < UnaryExpression
+  def initialize(exp : ASTNode)
+    super(exp)
+  end
+
+  def clone_without_location : self
+    Not.new(@exp.clone)
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "!"
+    @exp.to_s(sb)
+  end
+end
+
+pub class PointerOf < UnaryExpression
+  def initialize(exp : ASTNode)
+    super(exp)
+  end
+
+  def clone_without_location : self
+    PointerOf.new(@exp.clone)
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "pointerof("
+    @exp.to_s(sb)
+    sb << ")"
+  end
+end
+
+pub class SizeOf < UnaryExpression
+  def initialize(exp : ASTNode)
+    super(exp)
+  end
+
+  def clone_without_location : self
+    SizeOf.new(@exp.clone)
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "sizeof("
+    @exp.to_s(sb)
+    sb << ")"
+  end
+end
+
+pub class InstanceSizeOf < UnaryExpression
+  def initialize(exp : ASTNode)
+    super(exp)
+  end
+
+  def clone_without_location : self
+    InstanceSizeOf.new(@exp.clone)
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "instance_sizeof("
+    @exp.to_s(sb)
+    sb << ")"
+  end
+end
+
+pub class AlignOf < UnaryExpression
+  def initialize(exp : ASTNode)
+    super(exp)
+  end
+
+  def clone_without_location : self
+    AlignOf.new(@exp.clone)
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "alignof("
+    @exp.to_s(sb)
+    sb << ")"
+  end
+end
+
+pub class InstanceAlignOf < UnaryExpression
+  def initialize(exp : ASTNode)
+    super(exp)
+  end
+
+  def clone_without_location : self
+    InstanceAlignOf.new(@exp.clone)
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "instance_alignof("
+    @exp.to_s(sb)
+    sb << ")"
+  end
+end
+
+pub class Out < UnaryExpression
+  def initialize(exp : ASTNode)
+    super(exp)
+  end
+
+  def clone_without_location : self
+    Out.new(@exp.clone)
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "out "
+    @exp.to_s(sb)
+  end
+end
+
+pub class OffsetOf < ASTNode
+  property offsetof_type : ASTNode
+  property offset : ASTNode
+
+  def initialize(@offsetof_type : ASTNode, @offset : ASTNode)
+  end
+
+  def clone_without_location : self
+    OffsetOf.new(@offsetof_type.clone, @offset.clone)
+  end
+
+  def accept_children(visitor) : Nil
+    @offsetof_type.accept(visitor)
+    @offset.accept(visitor)
+  end
+
+  def ==(other : self) : Bool
+    (@offsetof_type == other.offsetof_type) && (@offset == other.offset)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@offsetof_type)
+    h = 31 &* h &+ hash_val(@offset)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "offsetof("
+    @offsetof_type.to_s(sb)
+    sb << ", "
+    @offset.to_s(sb)
+    sb << ")"
+  end
+end
+
+pub class Splat < UnaryExpression
+  def initialize(exp : ASTNode)
+    super(exp)
+  end
+
+  def clone_without_location : self
+    Splat.new(@exp.clone)
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "*"
+    @exp.to_s(sb)
+  end
+end
+
+pub class DoubleSplat < UnaryExpression
+  def initialize(exp : ASTNode)
+    super(exp)
+  end
+
+  def clone_without_location : self
+    DoubleSplat.new(@exp.clone)
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "**"
+    @exp.to_s(sb)
+  end
+end
+
+pub class Cast < ASTNode
+  property obj : ASTNode
+  property to : ASTNode
+
+  # Set by semantic analysis (hosted bindings.cr, `Cast#update`): the object's type is already within the
+  # target, so the cast widens and can never fail. Not part of the syntax: `==`, `hash` and `clone` leave it out,
+  # as the hosted node does.
+  property upcast : Bool = false
+
+  def initialize(@obj : ASTNode, @to : ASTNode)
+  end
+
+  def clone_without_location : self
+    Cast.new(@obj.clone, @to.clone)
+  end
+
+  def accept_children(visitor) : Nil
+    @obj.accept(visitor)
+    @to.accept(visitor)
+  end
+
+  def ==(other : self) : Bool
+    (@obj == other.obj) && (@to == other.to)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@obj)
+    h = 31 &* h &+ hash_val(@to)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    @obj.to_s(sb)
+    sb << ".as("
+    @to.to_s(sb)
+    sb << ")"
+  end
+end
+
+pub class NilableCast < ASTNode
+  property obj : ASTNode
+  property to : ASTNode
+
+  # Set by semantic analysis (hosted bindings.cr, `NilableCast#update`): the object's type is already within the
+  # target, so the cast widens and can never fail. Not part of the syntax: `==`, `hash` and `clone` leave it out,
+  # as the hosted node does.
+  property upcast : Bool = false
+
+  def initialize(@obj : ASTNode, @to : ASTNode)
+  end
+
+  def clone_without_location : self
+    NilableCast.new(@obj.clone, @to.clone)
+  end
+
+  def accept_children(visitor) : Nil
+    @obj.accept(visitor)
+    @to.accept(visitor)
+  end
+
+  def ==(other : self) : Bool
+    (@obj == other.obj) && (@to == other.to)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@obj)
+    h = 31 &* h &+ hash_val(@to)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    @obj.to_s(sb)
+    sb << ".as?("
+    @to.to_s(sb)
+    sb << ")"
+  end
+end
+
+pub class IsA < ASTNode
+  property obj : ASTNode
+  property const : ASTNode
+  property nil_check : Bool
+  property error_construct : String? = nil
+
+  def initialize(@obj : ASTNode, @const : ASTNode, @nil_check : Bool = false)
+  end
+
+  def clone_without_location : self
+    isa = IsA.new(@obj.clone, @const.clone, @nil_check)
+    isa.error_construct = @error_construct
+    isa
+  end
+
+  def accept_children(visitor) : Nil
+    @obj.accept(visitor)
+    @const.accept(visitor)
+  end
+
+  def ==(other : self) : Bool
+    (@obj == other.obj) && (@const == other.const) && (@nil_check == other.nil_check)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@obj)
+    h = 31 &* h &+ hash_val(@const)
+    h = 31 &* h &+ hash_val(@nil_check)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    @obj.to_s(sb)
+    sb << ".is_a?("
+    @const.to_s(sb)
+    sb << ")"
+  end
+end
+
+pub class RespondsTo < ASTNode
+  property obj : ASTNode
+  property name : String
+
+  def initialize(@obj : ASTNode, @name : String)
+  end
+
+  def clone_without_location : self
+    RespondsTo.new(@obj.clone, @name)
+  end
+
+  def accept_children(visitor) : Nil
+    @obj.accept(visitor)
+  end
+
+  def ==(other : self) : Bool
+    (@obj == other.obj) && (@name == other.name)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@obj)
+    h = 31 &* h &+ hash_val(@name)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    @obj.to_s(sb)
+    sb << ".responds_to?(" << @name.inspect << ")"
+  end
+end
+
+pub class TypeOf < ASTNode
+  property expressions : Array(ASTNode)
+
+  def initialize(@expressions : Array(ASTNode) = [] of ASTNode)
+  end
+
+  def clone_without_location : self
+    TypeOf.new(clone_nodes(@expressions))
+  end
+
+  def accept_children(visitor) : Nil
+    @expressions.each { |e| e.accept(visitor) }
+  end
+
+  def ==(other : self) : Bool
+    (@expressions == other.expressions)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@expressions)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "typeof("
+    i = 0
+    while i < @expressions.size
+      sb << ", " if i > 0
+      @expressions[i].to_s(sb)
+      i = i + 1
+    end
+    sb << ")"
+  end
+end
+
+pub class NamedArgument < ASTNode
+  property name : String
+  property value : ASTNode
+
+  def initialize(@name : String, @value : ASTNode)
+  end
+
+  def clone_without_location : self
+    NamedArgument.new(@name, @value.clone)
+  end
+
+  def accept_children(visitor) : Nil
+    @value.accept(visitor)
+  end
+
+  def ==(other : self) : Bool
+    (@name == other.name) && (@value == other.value)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@name)
+    h = 31 &* h &+ hash_val(@value)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << @name << ": "
+    @value.to_s(sb)
+  end
+end
+
+pub class Block < ASTNode
+  property args : Array(Var)
+  property body : ASTNode
+  property splat_index : Int32?
+  property unpacks : Hash(Int32, Expressions)? = nil
+  # The proc a captured block became: a ProcLiteral for a block passed to a def that uses its `&block`
+  # parameter as a value, or the call's block argument for a forwarded block (hosted semantic/ast.cr 674).
+  # The call's typing sets it; a clone does not carry it.
+  property fun_literal : ASTNode? = nil
+
+  def initialize(@args : Array(Var) = [] of Var, body : ASTNode? = nil, @splat_index : Int32? = nil, @unpacks : Hash(Int32, Expressions)? = nil)
+    @body = body || Nop.new
+  end
+
+  def clone_without_location : self
+    cloned_args = @args.map { |a| a.clone.as(Var) }
+    cloned_unpacks = if u = @unpacks
+                       cu = Hash(Int32, Expressions).new
+                       u.each { |k, v| cu[k] = v.clone.as(Expressions) }
+                       cu
+                     else
+                       nil
+                     end
+    Block.new(cloned_args, @body.clone, @splat_index, cloned_unpacks)
+  end
+
+  def accept_children(visitor) : Nil
+    @args.each { |a| a.accept(visitor) }
+    @body.accept(visitor)
+  end
+
+  def ==(other : self) : Bool
+    (@args == other.args) && (@body == other.body) && (@splat_index == other.splat_index)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@args)
+    h = 31 &* h &+ hash_val(@body)
+    h = 31 &* h &+ hash_val(@splat_index)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "do"
+    if @args.size > 0
+      sb << " |"
+      i = 0
+      while i < @args.size
+        sb << ", " if i > 0
+        sb << "*" if @splat_index == i
+        @args[i].to_s(sb)
+        i = i + 1
+      end
+      sb << "|"
+    end
+    sb << "
+  "
+    @body.to_s(sb)
+    sb << "
+end"
+  end
+end
+
+pub class Call < ASTNode
+  property obj : ASTNode?
+  property name : String
+  property args : Array(ASTNode)
+  property block : Block?
+  property block_arg : ASTNode?
+  property named_args : Array(NamedArgument)?
+  property has_parentheses : Bool = false
+  property name_location : Location? = nil
+  property global : Bool = false
+  property iyi_group : Bool = false
+  property iyi_synthetic : Bool = false
+  property expanded : ASTNode? = nil
+  property expansion : Bool = false
+
+  def initialize(
+    @obj : ASTNode? = nil,
+    @name : String = "",
+    @args : Array(ASTNode) = [] of ASTNode,
+    @block : Block? = nil,
+    @block_arg : ASTNode? = nil,
+    @named_args : Array(NamedArgument)? = nil,
+    @has_parentheses : Bool = false,
+    @name_location : Location? = nil,
+    @global : Bool = false,
+    @iyi_group : Bool = false,
+    @expanded : ASTNode? = nil,
+  )
+  end
+
+  def self.new(obj : ASTNode?, name : String, arg : ASTNode) : Call
+    new(obj, name, [arg] of ASTNode)
+  end
+
+  def self.global(name : String, arg : ASTNode? = nil) : Call
+    if a = arg
+      new(nil, name, [a] of ASTNode, nil, nil, nil, false, nil, true)
+    else
+      new(nil, name, [] of ASTNode, nil, nil, nil, false, nil, true)
+    end
+  end
+
+  def has_parentheses? : Bool
+    @has_parentheses
+  end
+
+  def super? : Bool
+    @name == "super"
+  end
+
+  def previous_def? : Bool
+    @name == "previous_def"
+  end
+
+  def iyi_group? : Bool
+    @iyi_group
+  end
+
+  def clone_without_location : self
+    if b = @block
+      cloned_block = b.clone.as(Block)
+    else
+      cloned_block = nil
+    end
+    if na = @named_args
+      cloned_named_args = na.map { |a| a.clone.as(NamedArgument) }
+    else
+      cloned_named_args = nil
+    end
+    copy = Call.new(
+      clone_node(@obj),
+      @name,
+      clone_nodes(@args),
+      cloned_block,
+      clone_node(@block_arg),
+      cloned_named_args,
+      @has_parentheses,
+      @name_location,
+      @global,
+      @iyi_group,
+      clone_node(@expanded),
+    )
+    copy.iyi_synthetic = @iyi_synthetic
+    copy.expansion = @expansion
+    copy
+  end
+
+  def accept_children(visitor) : Nil
+    if o = @obj
+      o.accept(visitor)
+    end
+    @args.each { |a| a.accept(visitor) }
+    if b = @block
+      b.accept(visitor)
+    end
+    if ba = @block_arg
+      ba.accept(visitor)
+    end
+    if na = @named_args
+      na.each { |a| a.accept(visitor) }
+    end
+  end
+
+  def ==(other : self) : Bool
+    (@obj == other.obj) && (@name == other.name) && (@args == other.args) && (@block == other.block) && (@block_arg == other.block_arg) && (@named_args == other.named_args)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@obj)
+    h = 31 &* h &+ hash_val(@name)
+    h = 31 &* h &+ hash_val(@args)
+    h = 31 &* h &+ hash_val(@block)
+    h = 31 &* h &+ hash_val(@block_arg)
+    h = 31 &* h &+ hash_val(@named_args)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    if o = @obj
+      o.to_s(sb)
+      sb << "."
+    end
+    sb << @name
+    if @args.size > 0 || @named_args || @block_arg
+      sb << "("
+      i = 0
+      while i < @args.size
+        sb << ", " if i > 0
+        print_dropping_proc_parens(@args[i], sb)
+        i = i + 1
+      end
+      if na = @named_args
+        j = 0
+        while j < na.size
+          sb << ", " if @args.size > 0 || j > 0
+          na[j].to_s(sb)
+          j = j + 1
+        end
+      end
+      if ba = @block_arg
+        has_prev = @args.size > 0
+        if na = @named_args
+          has_prev = true if na.size > 0
+        end
+        sb << ", " if has_prev
+        sb << "&"
+        print_dropping_proc_parens(ba, sb)
+      end
+      sb << ")"
+    end
+    if b = @block
+      sb << " "
+      b.to_s(sb)
+    end
+  end
+end
+
+pub class Arg < ASTNode
+  property name : String
+  property default_value : ASTNode?
+  property restriction : ASTNode?
+  # The front end resolves this once, at construction, and stores a plain
+  # String: an argument with no external name is externally its own name.
+  # A nilable field with a getter that filled the name in instead reads the
+  # same from outside and compares differently from inside, which is exactly
+  # what `==` below did: ivar on one side, getter on the other.
+  property external_name : String
+
+  def initialize(@name : String, @default_value : ASTNode? = nil, @restriction : ASTNode? = nil, external_name : String? = nil)
+    @external_name = external_name || @name
+  end
+
+  def clone_without_location : self
+    Arg.new(@name, clone_node(@default_value), clone_node(@restriction), @external_name)
+  end
+
+  def accept_children(visitor) : Nil
+    if d = @default_value
+      d.accept(visitor)
+    end
+    if r = @restriction
+      r.accept(visitor)
+    end
+  end
+
+  def ==(other : self) : Bool
+    (@name == other.name) && (@default_value == other.default_value) && (@restriction == other.restriction) && (@external_name == other.external_name)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@name)
+    h = 31 &* h &+ hash_val(@default_value)
+    h = 31 &* h &+ hash_val(@restriction)
+    h = 31 &* h &+ hash_val(@external_name)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    write_arg(sb, false)
+  end
+
+  # As a parameter of a def or a fun, where a proc restriction loses its outermost parentheses.
+  def to_s_param(sb : StringBuilder) : Nil
+    write_arg(sb, true)
+  end
+
+  def write_arg(sb : StringBuilder, drop_proc_parens : Bool) : Nil
+    if ext = @external_name
+      sb << ext << " "
+    end
+    sb << @name
+    if r = @restriction
+      sb << " : "
+      if drop_proc_parens
+        print_dropping_proc_parens(r, sb)
+      else
+        r.to_s(sb)
+      end
+    end
+    if d = @default_value
+      sb << " = "
+      d.to_s(sb)
+    end
+  end
+end
+
+pub class ProcNotation < ASTNode
+  property inputs : Array(ASTNode)?
+  property output : ASTNode?
+
+  def initialize(@inputs : Array(ASTNode)? = nil, @output : ASTNode? = nil)
+  end
+
+  def clone_without_location : self
+    cloned_inputs = clone_opt_nodes(@inputs)
+    ProcNotation.new(cloned_inputs, clone_node(@output))
+  end
+
+  def accept_children(visitor) : Nil
+    if inp = @inputs
+      inp.each { |i| i.accept(visitor) }
+    end
+    if out = @output
+      out.accept(visitor)
+    end
+  end
+
+  def ==(other : self) : Bool
+    (@inputs == other.inputs) && (@output == other.output)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@inputs)
+    h = 31 &* h &+ hash_val(@output)
+    h
+  end
+
+  # The hosted printer's form: `(T, U -> V)`, `(-> V)`, `(T ->)`.
+  def to_s(sb : StringBuilder) : Nil
+    sb << "("
+    to_s_bare(sb)
+    sb << ")"
+  end
+
+  # Without the outermost parentheses. A proc type among the inputs or as the output keeps its own.
+  def to_s_bare(sb : StringBuilder) : Nil
+    if inp = @inputs
+      i = 0
+      while i < inp.size
+        sb << ", " if i > 0
+        inp[i].to_s(sb)
+        i = i + 1
+      end
+      sb << " "
+    end
+    sb << "->"
+    if out = @output
+      sb << " "
+      out.to_s(sb)
+    end
+  end
+end
+
+pub class ProcLiteral < ASTNode
+  property def : Def
+
+  def initialize(a_def : Def? = nil)
+    @def = a_def || Def.new("->")
+  end
+
+  def clone_without_location : self
+    ProcLiteral.new(@def.clone.as(Def))
+  end
+
+  def accept_children(visitor) : Nil
+    @def.accept(visitor)
+  end
+
+  def ==(other : self) : Bool
+    @def == other.def
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    31 &* 17 &+ @def.hash
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "->"
+    if @def.args.size > 0
+      sb << "("
+      i = 0
+      while i < @def.args.size
+        sb << ", " if i > 0
+        @def.args[i].to_s(sb)
+        i = i + 1
+      end
+      sb << ")"
+    end
+    sb << " do
+  "
+    @def.body.to_s(sb)
+    sb << "
+end"
+  end
+end
+
+pub class ProcPointer < ASTNode
+  property obj : ASTNode?
+  property name : String
+  property args : Array(ASTNode)
+  property global : Bool
+
+  def initialize(@obj : ASTNode? = nil, @name : String = "", @args : Array(ASTNode) = [] of ASTNode, @global : Bool = false)
+  end
+
+  def clone_without_location : self
+    ProcPointer.new(clone_node(@obj), @name, clone_nodes(@args), @global)
+  end
+
+  def accept_children(visitor) : Nil
+    if o = @obj
+      o.accept(visitor)
+    end
+    @args.each { |a| a.accept(visitor) }
+  end
+
+  def ==(other : self) : Bool
+    (@obj == other.obj) && (@name == other.name) && (@args == other.args) && (@global == other.global)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@obj)
+    h = 31 &* h &+ hash_val(@name)
+    h = 31 &* h &+ hash_val(@args)
+    h = 31 &* h &+ hash_val(@global)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "->"
+    if o = @obj
+      o.to_s(sb)
+      sb << "."
+    elsif @global
+      sb << "::"
+    end
+    sb << @name
+    if @args.size > 0
+      sb << "("
+      i = 0
+      while i < @args.size
+        sb << ", " if i > 0
+        @args[i].to_s(sb)
+        i = i + 1
+      end
+      sb << ")"
+    end
+  end
+end
+
+pub class Def < ASTNode
+  property name : String
+  property args : Array(Arg)
+  property body : ASTNode
+  property receiver : ASTNode?
+  property block_arg : Arg?
+  property return_type : ASTNode?
+  property macro_def : Bool
+  property abstract : Bool
+  property splat_index : Int32?
+  property double_splat : Arg?
+  property free_vars : Array(String)?
+  # What the def's body does, set by the parser when the def ends (hosted syntax/ast.cr 1666-1669,
+  # parser.cr 4692-4695): it calls `super`, `initialize` or `previous_def`, or reads its block parameter.
+  property calls_super : Bool = false
+  property calls_initialize : Bool = false
+  property calls_previous_def : Bool = false
+  property uses_block_arg : Bool = false
+  property macro_yields : Bool = false
+  property no_inline : Bool = false
+  property always_inline : Bool = false
+  property share_annotated : Bool = false
+  # The def this one replaced, and the def that replaced this one.
+  # Hosted `Def#previous` is a DefWithMetadata; the port keeps the def itself.
+  property previous : Def? = nil
+  property next : Def? = nil
+  # Set on the `->` def of a captured block's literal (hosted semantic/ast.cr 151). A clone does not carry it.
+  property captured_block : Bool = false
+  # The `->` def of the proc a `defer` registers under the iyi prelude (hosted syntax/ast.cr 1658): it runs
+  # only when its frame will never resume.
+  property iyi_defer : Bool = false
+
+  def calls_super? : Bool
+    @calls_super
+  end
+
+  def calls_initialize? : Bool
+    @calls_initialize
+  end
+
+  def calls_previous_def? : Bool
+    @calls_previous_def
+  end
+
+  def uses_block_arg? : Bool
+    @uses_block_arg
+  end
+
+  def captured_block? : Bool
+    @captured_block
+  end
+
+  def iyi_defer? : Bool
+    @iyi_defer
+  end
+
+  def initialize(
+    @name : String = "",
+    @args : Array(Arg) = [] of Arg,
+    body : ASTNode? = nil,
+    @receiver : ASTNode? = nil,
+    @block_arg : Arg? = nil,
+    @return_type : ASTNode? = nil,
+    @macro_def : Bool = false,
+    @abstract : Bool = false,
+    @splat_index : Int32? = nil,
+    @double_splat : Arg? = nil,
+    @free_vars : Array(String)? = nil,
+    @uses_block_arg : Bool = false,
+  )
+    @body = body || Nop.new
+  end
+
+  def clone_without_location : self
+    cloned_args = @args.map { |a| a.clone.as(Arg) }
+    d = Def.new(
+      @name,
+      cloned_args,
+      @body.clone,
+      clone_node(@receiver),
+      (if ba = @block_arg
+        ba.clone.as(Arg)
+      else
+        nil
+      end),
+      clone_node(@return_type),
+      @macro_def,
+      @abstract,
+      @splat_index,
+      (if ds = @double_splat
+        ds.clone.as(Arg)
+      else
+        nil
+      end),
+      clone_opt_strings(@free_vars),
+    )
+    d.calls_super = @calls_super
+    d.calls_initialize = @calls_initialize
+    d.calls_previous_def = @calls_previous_def
+    d.uses_block_arg = @uses_block_arg
+    d.macro_yields = @macro_yields
+    d.no_inline = @no_inline
+    d.always_inline = @always_inline
+    d.share_annotated = @share_annotated
+    # Hosted syntax Def#clone_without_location does not copy previous or next.
+    # The semantic reopening copies previous only; iyi cannot reopen that class.
+    d.iyi_defer = @iyi_defer
+    d
+  end
+
+  def accept_children(visitor) : Nil
+    if r = @receiver
+      r.accept(visitor)
+    end
+    @args.each { |a| a.accept(visitor) }
+    if ds = @double_splat
+      ds.accept(visitor)
+    end
+    if ba = @block_arg
+      ba.accept(visitor)
+    end
+    if rt = @return_type
+      rt.accept(visitor)
+    end
+    @body.accept(visitor)
+  end
+
+  def ==(other : self) : Bool
+    @name == other.name && @args == other.args && @body == other.body &&
+      @receiver == other.receiver && @block_arg == other.block_arg &&
+      @return_type == other.return_type && @macro_def == other.macro_def &&
+      @abstract == other.abstract && @splat_index == other.splat_index &&
+      @double_splat == other.double_splat && @free_vars == other.free_vars
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ @name.hash
+    h = 31 &* h &+ @args.hash
+    h = 31 &* h &+ @body.hash
+    h = 31 &* h &+ (@abstract ? 1 : 0)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "abstract " if @abstract
+    sb << "def "
+    if r = @receiver
+      r.to_s(sb)
+      sb << "."
+    end
+    sb << @name
+    if @args.size > 0 || @double_splat || @block_arg
+      sb << "("
+      i = 0
+      while i < @args.size
+        sb << ", " if i > 0
+        sb << "*" if @splat_index == i
+        @args[i].to_s_param(sb)
+        i = i + 1
+      end
+      if ds = @double_splat
+        sb << ", " if @args.size > 0
+        sb << "**"
+        ds.to_s_param(sb)
+      end
+      if ba = @block_arg
+        sb << ", " if @args.size > 0 || @double_splat
+        sb << "&"
+        ba.to_s_param(sb)
+      end
+      sb << ")"
+    end
+    if rt = @return_type
+      sb << " : "
+      rt.to_s(sb)
+    end
+    unless @abstract
+      sb << "
+  "
+      @body.to_s(sb)
+      sb << "
+end"
+    end
+  end
+end
+
+pub class ClassDef < ASTNode
+  property name : Path
+  property body : ASTNode
+  property superclass : ASTNode?
+  property type_vars : Array(String)?
+  property abstract : Bool
+  property struct : Bool
+  property splat_index : Int32?
+
+  def initialize(
+    @name : Path = Path.new(""),
+    body : ASTNode? = nil,
+    @superclass : ASTNode? = nil,
+    @type_vars : Array(String)? = nil,
+    @abstract : Bool = false,
+    @struct : Bool = false,
+    @splat_index : Int32? = nil,
+  )
+    @body = body || Nop.new
+  end
+
+  def clone_without_location : self
+    ClassDef.new(
+      @name.clone.as(Path),
+      @body.clone,
+      clone_node(@superclass),
+      clone_opt_strings(@type_vars),
+      @abstract,
+      @struct,
+      @splat_index
+    )
+  end
+
+  def accept_children(visitor) : Nil
+    @name.accept(visitor)
+    if sc = @superclass
+      sc.accept(visitor)
+    end
+    @body.accept(visitor)
+  end
+
+  def ==(other : self) : Bool
+    @name == other.name && @body == other.body && @superclass == other.superclass &&
+      @type_vars == other.type_vars && @abstract == other.abstract &&
+      @struct == other.struct && @splat_index == other.splat_index
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ @name.hash
+    h = 31 &* h &+ @body.hash
+    h = 31 &* h &+ hash_val(@superclass)
+    h = 31 &* h &+ (@abstract ? 1 : 0)
+    h = 31 &* h &+ (@struct ? 1 : 0)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "abstract " if @abstract
+    sb << (@struct ? "struct " : "class ")
+    @name.to_s(sb)
+    if tv = @type_vars
+      sb << "("
+      i = 0
+      while i < tv.size
+        sb << ", " if i > 0
+        sb << "*" if @splat_index == i
+        sb << tv[i]
+        i = i + 1
+      end
+      sb << ")"
+    end
+    if sc = @superclass
+      sb << " < "
+      sc.to_s(sb)
+    end
+    sb << "
+  "
+    @body.to_s(sb)
+    sb << "
+end"
+  end
+end
+
+pub class ModuleDef < ASTNode
+  property name : Path
+  property body : ASTNode
+  property type_vars : Array(String)?
+  property splat_index : Int32?
+  # iyi: true for the module a `module app/x` header makes of the rest of its
+  # file. It is not in the source: the formatter writes no keyword and looks
+  # for no `end`.
+  property iyi_unit : Bool = false
+
+  def initialize(
+    @name : Path = Path.new(""),
+    body : ASTNode? = nil,
+    @type_vars : Array(String)? = nil,
+    @splat_index : Int32? = nil,
+  )
+    @body = body || Nop.new
+  end
+
+  def clone_without_location : self
+    copy = ModuleDef.new(
+      @name.clone.as(Path),
+      @body.clone,
+      clone_opt_strings(@type_vars),
+      @splat_index
+    )
+    copy.iyi_unit = @iyi_unit
+    copy
+  end
+
+  def accept_children(visitor) : Nil
+    @name.accept(visitor)
+    @body.accept(visitor)
+  end
+
+  def ==(other : self) : Bool
+    (@name == other.name) && (@body == other.body) && (@type_vars == other.type_vars) && (@splat_index == other.splat_index)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@name)
+    h = 31 &* h &+ hash_val(@body)
+    h = 31 &* h &+ hash_val(@type_vars)
+    h = 31 &* h &+ hash_val(@splat_index)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "module "
+    @name.to_s(sb)
+    if tv = @type_vars
+      sb << "("
+      i = 0
+      while i < tv.size
+        sb << ", " if i > 0
+        sb << "*" if @splat_index == i
+        sb << tv[i]
+        i = i + 1
+      end
+      sb << ")"
+    end
+    sb << "
+  "
+    @body.to_s(sb)
+    sb << "
+end"
+  end
+end
+
+pub class TraitDef < ASTNode
+  property name : Path
+  property body : ASTNode
+  property type_vars : Array(String)?
+  property assoc_types : Array(String)?
+  property supertraits : Array(ASTNode)?
+
+  def initialize(
+    @name : Path = Path.new(""),
+    body : ASTNode? = nil,
+    @type_vars : Array(String)? = nil,
+    @assoc_types : Array(String)? = nil,
+    @supertraits : Array(ASTNode)? = nil,
+  )
+    @body = body || Nop.new
+  end
+
+  def clone_without_location : self
+    cloned_supertraits = clone_opt_nodes(@supertraits)
+    TraitDef.new(
+      @name.clone.as(Path),
+      @body.clone,
+      clone_opt_strings(@type_vars),
+      clone_opt_strings(@assoc_types),
+      cloned_supertraits
+    )
+  end
+
+  def accept_children(visitor) : Nil
+    @name.accept(visitor)
+    if st = @supertraits
+      st.each { |s| s.accept(visitor) }
+    end
+    @body.accept(visitor)
+  end
+
+  def ==(other : self) : Bool
+    (@name == other.name) && (@body == other.body) && (@type_vars == other.type_vars) && (@assoc_types == other.assoc_types) && (@supertraits == other.supertraits)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@name)
+    h = 31 &* h &+ hash_val(@body)
+    h = 31 &* h &+ hash_val(@type_vars)
+    h = 31 &* h &+ hash_val(@assoc_types)
+    h = 31 &* h &+ hash_val(@supertraits)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "trait "
+    @name.to_s(sb)
+    if tv = @type_vars
+      sb << "(" << tv.join(", ") << ")"
+    end
+    sb << "
+  "
+    @body.to_s(sb)
+    sb << "
+end"
+  end
+end
+
+pub class ImplDef < ASTNode
+  property trait : Path
+  property trait_args : Array(ASTNode)?
+  property target : ASTNode
+  property body : ASTNode
+  property type_vars : Array(String)?
+  property assoc_types : Array(AssocTypeDecl)?
+
+  def initialize(
+    @trait : Path = Path.new(""),
+    target : ASTNode? = nil,
+    body : ASTNode? = nil,
+    @type_vars : Array(String)? = nil,
+    @trait_args : Array(ASTNode)? = nil,
+    @assoc_types : Array(AssocTypeDecl)? = nil,
+  )
+    @body = body || Nop.new
+    @target = target || Path.new("")
+  end
+
+  def clone_without_location : self
+    cloned_trait_args = clone_opt_nodes(@trait_args)
+    if at = @assoc_types
+      cloned_assoc_types = at.map { |a| a.clone.as(AssocTypeDecl) }
+    else
+      cloned_assoc_types = nil
+    end
+    ImplDef.new(
+      @trait.clone.as(Path),
+      @target.clone,
+      @body.clone,
+      clone_opt_strings(@type_vars),
+      cloned_trait_args,
+      cloned_assoc_types
+    )
+  end
+
+  def accept_children(visitor) : Nil
+    @trait.accept(visitor)
+    if ta = @trait_args
+      ta.each { |a| a.accept(visitor) }
+    end
+    @target.accept(visitor)
+    @body.accept(visitor)
+  end
+
+  def ==(other : self) : Bool
+    @trait == other.trait && @trait_args == other.trait_args && @target == other.target &&
+      @body == other.body && @type_vars == other.type_vars && @assoc_types == other.assoc_types
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ @trait.hash
+    h = 31 &* h &+ hash_val(@trait_args)
+    h = 31 &* h &+ @target.hash
+    h = 31 &* h &+ @body.hash
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "impl "
+    @trait.to_s(sb)
+    if ta = @trait_args
+      sb << "("
+      i = 0
+      while i < ta.size
+        sb << ", " if i > 0
+        ta[i].to_s(sb)
+        i = i + 1
+      end
+      sb << ")"
+    end
+    sb << " for "
+    @target.to_s(sb)
+    sb << "
+  "
+    @body.to_s(sb)
+    sb << "
+end"
+  end
+end
+
+pub class AssocTypeDecl < ASTNode
+  property name : String
+  property value : ASTNode?
+
+  def initialize(@name : String, @value : ASTNode? = nil)
+  end
+
+  def clone_without_location : self
+    AssocTypeDecl.new(@name, clone_node(@value))
+  end
+
+  def accept_children(visitor) : Nil
+    if v = @value
+      v.accept(visitor)
+    end
+  end
+
+  def ==(other : self) : Bool
+    (@name == other.name) && (@value == other.value)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@name)
+    h = 31 &* h &+ hash_val(@value)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "type " << @name
+    if v = @value
+      sb << " = "
+      v.to_s(sb)
+    end
+  end
+end
+
+pub class Propagate < ASTNode
+  property exp : ASTNode
+
+  def initialize(@exp : ASTNode)
+  end
+
+  def clone_without_location : self
+    Propagate.new(@exp.clone)
+  end
+
+  def accept_children(visitor) : Nil
+    @exp.accept(visitor)
+  end
+
+  def ==(other : self) : Bool
+    (@exp == other.exp)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@exp)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    @exp.to_s(sb)
+    sb << "!"
+  end
+end
+
+pub class Defer < ASTNode
+  property exp : ASTNode
+
+  def initialize(@exp : ASTNode)
+  end
+
+  def clone_without_location : self
+    Defer.new(@exp.clone)
+  end
+
+  def accept_children(visitor) : Nil
+    @exp.accept(visitor)
+  end
+
+  def ==(other : self) : Bool
+    (@exp == other.exp)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@exp)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "defer "
+    @exp.to_s(sb)
+  end
+end
+
+pub class Recover < ASTNode
+  property exp : ASTNode
+  property default : ASTNode?
+
+  def initialize(@exp : ASTNode, @default : ASTNode? = nil)
+  end
+
+  def panic? : Bool
+    @default.nil?
+  end
+
+  def clone_without_location : self
+    Recover.new(@exp.clone, clone_node(@default))
+  end
+
+  def accept_children(visitor) : Nil
+    @exp.accept(visitor)
+    if d = @default
+      d.accept(visitor)
+    end
+  end
+
+  def ==(other : self) : Bool
+    (@exp == other.exp) && (@default == other.default)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@exp)
+    h = 31 &* h &+ hash_val(@default)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "recover "
+    @exp.to_s(sb)
+    if d = @default
+      sb << " "
+      d.to_s(sb)
+    end
+  end
+end
+
+pub class ModuleHeader < ASTNode
+  property path : Array(String)
+
+  def initialize(@path : Array(String) = [] of String)
+  end
+
+  def clone_without_location : self
+    ModuleHeader.new(@path.dup)
+  end
+
+  def ==(other : self) : Bool
+    (@path == other.path)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@path)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "module " << @path.join("/")
+  end
+end
+
+pub class ImportDecl < ASTNode
+  property path : Array(String)
+  property exported : Bool
+  property names : Array(String)?
+  property name_locations : Array(Location)?
+  property glob : Bool
+
+  def initialize(@path : Array(String) = [] of String, @exported : Bool = false, @names : Array(String)? = nil, @name_locations : Array(Location)? = nil, @glob : Bool = false)
+  end
+
+  def scopes? : Bool
+    @glob || !@names.nil?
+  end
+
+  def clone_without_location : self
+    names_dup = (n = @names) ? n.dup : nil
+    name_locs_dup = (nl = @name_locations) ? nl.dup : nil
+    decl = ImportDecl.new(@path.dup, @exported, names_dup, name_locs_dup, @glob)
+    decl
+  end
+
+  def ==(other : self) : Bool
+    (@path == other.path) && (@exported == other.exported) && (@names == other.names) && (@glob == other.glob)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@path)
+    h = 31 &* h &+ hash_val(@exported)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "pub " if @exported
+    sb << "import " << @path.join("/")
+  end
+end
+
+pub class UsingDecl < ASTNode
+  property path : Array(String)
+  property names : Array(String)?
+
+  def initialize(@path : Array(String) = [] of String, @names : Array(String)? = nil)
+  end
+
+  def clone_without_location : self
+    UsingDecl.new(@path.dup, clone_opt_strings(@names))
+  end
+
+  def ==(other : self) : Bool
+    (@path == other.path) && (@names == other.names)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@path)
+    h = 31 &* h &+ hash_val(@names)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "using " << @path.join("/")
+    if n = @names
+      sb << "::{" << n.join(", ") << "}"
+    end
+  end
+end
+
+pub class Include < ASTNode
+  property name : ASTNode
+
+  def initialize(@name : ASTNode)
+  end
+
+  def clone_without_location : self
+    Include.new(@name.clone)
+  end
+
+  def accept_children(visitor) : Nil
+    @name.accept(visitor)
+  end
+
+  def ==(other : self) : Bool
+    (@name == other.name)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@name)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "include "
+    @name.to_s(sb)
+  end
+end
+
+pub class Extend < ASTNode
+  property name : ASTNode
+
+  def initialize(@name : ASTNode)
+  end
+
+  def clone_without_location : self
+    Extend.new(@name.clone)
+  end
+
+  def accept_children(visitor) : Nil
+    @name.accept(visitor)
+  end
+
+  def ==(other : self) : Bool
+    (@name == other.name)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@name)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "extend "
+    @name.to_s(sb)
+  end
+end
+
+pub class LibDef < ASTNode
+  property name : Path
+  property body : ASTNode
+
+  def initialize(@name : Path = Path.new(""), body : ASTNode? = nil)
+    @body = body || Nop.new
+  end
+
+  def clone_without_location : self
+    LibDef.new(@name.clone.as(Path), @body.clone)
+  end
+
+  def accept_children(visitor) : Nil
+    @name.accept(visitor)
+    @body.accept(visitor)
+  end
+
+  def ==(other : self) : Bool
+    (@name == other.name) && (@body == other.body)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@name)
+    h = 31 &* h &+ hash_val(@body)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "lib "
+    @name.to_s(sb)
+    sb << "
+  "
+    @body.to_s(sb)
+    sb << "
+end"
+  end
+end
+
+pub class FunDef < ASTNode
+  property name : String
+  property args : Array(Arg)
+  property return_type : ASTNode?
+  property body : ASTNode?
+  property real_name : String?
+  property varargs : Bool = false
+
+  def initialize(@name : String, @args : Array(Arg) = [] of Arg, @return_type : ASTNode? = nil, body : ASTNode? = nil, @real_name : String? = nil)
+    @body = body
+  end
+
+  def clone_without_location : self
+    cloned_args = @args.map { |a| a.clone.as(Arg) }
+    cloned = FunDef.new(@name, cloned_args, clone_node(@return_type), clone_node(@body), @real_name)
+    cloned.varargs = @varargs
+    cloned
+  end
+
+  def accept_children(visitor) : Nil
+    @args.each { |a| a.accept(visitor) }
+    if rt = @return_type
+      rt.accept(visitor)
+    end
+    if b = @body
+      b.accept(visitor)
+    end
+  end
+
+  def ==(other : self) : Bool
+    (@name == other.name) && (@args == other.args) && (@return_type == other.return_type) && (@body == other.body) && (@real_name == other.real_name)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@name)
+    h = 31 &* h &+ hash_val(@args)
+    h = 31 &* h &+ hash_val(@return_type)
+    h = 31 &* h &+ hash_val(@body)
+    h = 31 &* h &+ hash_val(@real_name)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "fun " << @name
+    if rn = @real_name
+      sb << " = " << rn
+    end
+    if @args.size > 0
+      sb << "("
+      i = 0
+      while i < @args.size
+        sb << ", " if i > 0
+        @args[i].to_s_param(sb)
+        i = i + 1
+      end
+      sb << ")"
+    end
+    if rt = @return_type
+      sb << " : "
+      rt.to_s(sb)
+    end
+    if b = @body
+      sb << "
+  "
+      b.to_s(sb)
+      sb << "
+end"
+    end
+  end
+end
+
+pub class TypeDef < ASTNode
+  property name : String
+  property type_spec : ASTNode
+
+  def initialize(@name : String, @type_spec : ASTNode)
+  end
+
+  def clone_without_location : self
+    TypeDef.new(@name, @type_spec.clone)
+  end
+
+  def accept_children(visitor) : Nil
+    @type_spec.accept(visitor)
+  end
+
+  def ==(other : self) : Bool
+    (@name == other.name) && (@type_spec == other.type_spec)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@name)
+    h = 31 &* h &+ hash_val(@type_spec)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "type " << @name << " = "
+    @type_spec.to_s(sb)
+  end
+end
+
+pub class CStructOrUnionDef < ASTNode
+  property name : String
+  property body : ASTNode
+  property union : Bool
+
+  def initialize(@name : String, body : ASTNode? = nil, @union : Bool = false)
+    @body = body || Nop.new
+  end
+
+  def clone_without_location : self
+    CStructOrUnionDef.new(@name, @body.clone, @union)
+  end
+
+  def accept_children(visitor) : Nil
+    @body.accept(visitor)
+  end
+
+  def ==(other : self) : Bool
+    @name == other.name && @body == other.body && @union == other.union
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ @name.hash
+    h = 31 &* h &+ @body.hash
+    h = 31 &* h &+ (@union ? 1 : 0)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << (@union ? "union " : "struct ") << @name << "
+  "
+    @body.to_s(sb)
+    sb << "
+end"
+  end
+end
+
+pub class EnumDef < ASTNode
+  property name : Path
+  property members : Array(ASTNode)
+  property base_type : ASTNode?
+
+  def initialize(@name : Path = Path.new(""), @members : Array(ASTNode) = [] of ASTNode, @base_type : ASTNode? = nil)
+  end
+
+  def clone_without_location : self
+    EnumDef.new(@name.clone.as(Path), clone_nodes(@members), clone_node(@base_type))
+  end
+
+  def accept_children(visitor) : Nil
+    @name.accept(visitor)
+    if bt = @base_type
+      bt.accept(visitor)
+    end
+    @members.each { |m| m.accept(visitor) }
+  end
+
+  def ==(other : self) : Bool
+    (@name == other.name) && (@members == other.members) && (@base_type == other.base_type)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@name)
+    h = 31 &* h &+ hash_val(@members)
+    h = 31 &* h &+ hash_val(@base_type)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "enum "
+    @name.to_s(sb)
+    if bt = @base_type
+      sb << " : "
+      bt.to_s(sb)
+    end
+    sb << "
+"
+    @members.each do |m|
+      sb << "  "
+      m.to_s(sb)
+      sb << "
+"
+    end
+    sb << "end"
+  end
+end
+
+pub class ExternalVar < ASTNode
+  property name : String
+  property type_spec : ASTNode
+  property real_name : String?
+
+  def initialize(@name : String, @type_spec : ASTNode, @real_name : String? = nil)
+  end
+
+  def clone_without_location : self
+    ExternalVar.new(@name, @type_spec.clone, @real_name)
+  end
+
+  def accept_children(visitor) : Nil
+    @type_spec.accept(visitor)
+  end
+
+  def ==(other : self) : Bool
+    (@name == other.name) && (@type_spec == other.type_spec) && (@real_name == other.real_name)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@name)
+    h = 31 &* h &+ hash_val(@type_spec)
+    h = 31 &* h &+ hash_val(@real_name)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "$" << @name
+    if rn = @real_name
+      sb << " = " << rn
+    end
+    sb << " : "
+    @type_spec.to_s(sb)
+  end
+end
+
+pub class Alias < ASTNode
+  property name : Path
+  property value : ASTNode
+
+  def initialize(@name : Path, @value : ASTNode)
+  end
+
+  def clone_without_location : self
+    Alias.new(@name.clone.as(Path), @value.clone)
+  end
+
+  def accept_children(visitor) : Nil
+    @name.accept(visitor)
+    @value.accept(visitor)
+  end
+
+  def ==(other : self) : Bool
+    (@name == other.name) && (@value == other.value)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@name)
+    h = 31 &* h &+ hash_val(@value)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "alias "
+    @name.to_s(sb)
+    sb << " = "
+    @value.to_s(sb)
+  end
+end
+
+pub class Metaclass < ASTNode
+  property name : ASTNode
+
+  def initialize(@name : ASTNode)
+  end
+
+  def clone_without_location : self
+    Metaclass.new(@name.clone)
+  end
+
+  def accept_children(visitor) : Nil
+    @name.accept(visitor)
+  end
+
+  def ==(other : self) : Bool
+    (@name == other.name)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@name)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    @name.to_s(sb)
+    sb << ".class"
+  end
+end
+
+pub class Annotation < ASTNode
+  property path : Path
+  property args : Array(ASTNode)
+  property named_args : Array(NamedArgument)?
+
+  def initialize(@path : Path, @args : Array(ASTNode) = [] of ASTNode, @named_args : Array(NamedArgument)? = nil)
+  end
+
+  def clone_without_location : self
+    if na = @named_args
+      cloned_named_args = na.map { |a| a.clone.as(NamedArgument) }
+    else
+      cloned_named_args = nil
+    end
+    Annotation.new(@path.clone.as(Path), clone_nodes(@args), cloned_named_args)
+  end
+
+  def accept_children(visitor) : Nil
+    @path.accept(visitor)
+    @args.each { |a| a.accept(visitor) }
+    if na = @named_args
+      na.each { |a| a.accept(visitor) }
+    end
+  end
+
+  def ==(other : self) : Bool
+    (@path == other.path) && (@args == other.args) && (@named_args == other.named_args)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@path)
+    h = 31 &* h &+ hash_val(@args)
+    h = 31 &* h &+ hash_val(@named_args)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "@["
+    @path.to_s(sb)
+    if @args.size > 0 || @named_args
+      sb << "("
+      i = 0
+      while i < @args.size
+        sb << ", " if i > 0
+        @args[i].to_s(sb)
+        i = i + 1
+      end
+      if na = @named_args
+        j = 0
+        while j < na.size
+          sb << ", " if @args.size > 0 || j > 0
+          na[j].to_s(sb)
+          j = j + 1
+        end
+      end
+      sb << ")"
+    end
+    sb << "]"
+  end
+end
+
+pub class AnnotationDef < ASTNode
+  property name : Path
+
+  def initialize(@name : Path)
+  end
+
+  def clone_without_location : self
+    AnnotationDef.new(@name.clone.as(Path))
+  end
+
+  def accept_children(visitor) : Nil
+    @name.accept(visitor)
+  end
+
+  def ==(other : self) : Bool
+    (@name == other.name)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@name)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "annotation "
+    @name.to_s(sb)
+    sb << "
+end"
+  end
+end
+
+pub class TypeDeclaration < ASTNode
+  property var : ASTNode
+  property declared_type : ASTNode
+  property value : ASTNode?
+
+  def initialize(@var : ASTNode, @declared_type : ASTNode, @value : ASTNode? = nil)
+  end
+
+  def clone_without_location : self
+    TypeDeclaration.new(@var.clone, @declared_type.clone, clone_node(@value))
+  end
+
+  def accept_children(visitor) : Nil
+    @var.accept(visitor)
+    @declared_type.accept(visitor)
+    if v = @value
+      v.accept(visitor)
+    end
+  end
+
+  def ==(other : self) : Bool
+    (@var == other.var) && (@declared_type == other.declared_type) && (@value == other.value)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@var)
+    h = 31 &* h &+ hash_val(@declared_type)
+    h = 31 &* h &+ hash_val(@value)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    @var.to_s(sb)
+    sb << " : "
+    @declared_type.to_s(sb)
+    if v = @value
+      sb << " = "
+      v.to_s(sb)
+    end
+  end
+end
+
+pub class UninitializedVar < ASTNode
+  property var : ASTNode
+  property declared_type : ASTNode
+
+  def initialize(@var : ASTNode, @declared_type : ASTNode)
+  end
+
+  def clone_without_location : self
+    UninitializedVar.new(@var.clone, @declared_type.clone)
+  end
+
+  def accept_children(visitor) : Nil
+    @var.accept(visitor)
+    @declared_type.accept(visitor)
+  end
+
+  def ==(other : self) : Bool
+    (@var == other.var) && (@declared_type == other.declared_type)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@var)
+    h = 31 &* h &+ hash_val(@declared_type)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    @var.to_s(sb)
+    sb << " = uninitialized "
+    @declared_type.to_s(sb)
+  end
+end
+
+pub class Union < ASTNode
+  property types : Array(ASTNode)
+
+  def initialize(@types : Array(ASTNode) = [] of ASTNode)
+  end
+
+  def singleton? : Bool
+    @types.size == 1
+  end
+
+  def clone_without_location : self
+    Union.new(clone_nodes(@types))
+  end
+
+  def accept_children(visitor) : Nil
+    @types.each { |t| t.accept(visitor) }
+  end
+
+  def ==(other : self) : Bool
+    (@types == other.types)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@types)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    if @types.size == 1
+      print_dropping_proc_parens(@types[0], sb)
+      return
+    end
+    i = 0
+    while i < @types.size
+      sb << " | " if i > 0
+      @types[i].to_s(sb)
+      i = i + 1
+    end
+  end
+end
+
+pub class VisibilityModifier < ASTNode
+  property modifier : Visibility
+  property exp : ASTNode
+
+  def initialize(@modifier : Visibility, @exp : ASTNode)
+  end
+
+  def clone_without_location : self
+    VisibilityModifier.new(@modifier, @exp.clone)
+  end
+
+  def accept_children(visitor) : Nil
+    @exp.accept(visitor)
+  end
+
+  def ==(other : self) : Bool
+    (@modifier == other.modifier) && (@exp == other.exp)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@modifier)
+    h = 31 &* h &+ hash_val(@exp)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    case @modifier
+    when Visibility::Public
+      sb << "pub "
+    when Visibility::Protected
+      sb << "protected "
+    when Visibility::Private
+      sb << "private "
+    end
+    @exp.to_s(sb)
+  end
+end
+
+pub class Require < ASTNode
+  property string : String
+
+  def initialize(@string : String)
+  end
+
+  def clone_without_location : self
+    Require.new(@string)
+  end
+
+  def ==(other : self) : Bool
+    (@string == other.string)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@string)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "require " << @string.inspect
+  end
+end
+
+pub class Macro < ASTNode
+  property name : String
+  property args : Array(Arg)
+  property body : ASTNode
+  property double_splat : Arg?
+  property block_arg : Arg?
+  property splat_index : Int32?
+
+  def initialize(
+    @name : String = "",
+    @args : Array(Arg) = [] of Arg,
+    body : ASTNode? = nil,
+    @double_splat : Arg? = nil,
+    @block_arg : Arg? = nil,
+    @splat_index : Int32? = nil,
+  )
+    @body = body || Nop.new
+  end
+
+  def clone_without_location : self
+    cloned_args = @args.map { |a| a.clone.as(Arg) }
+    Macro.new(
+      @name,
+      cloned_args,
+      @body.clone,
+      (if ds = @double_splat
+        ds.clone.as(Arg)
+      else
+        nil
+      end),
+      (if ba = @block_arg
+        ba.clone.as(Arg)
+      else
+        nil
+      end),
+      @splat_index
+    )
+  end
+
+  def accept_children(visitor) : Nil
+    @args.each { |a| a.accept(visitor) }
+    if ds = @double_splat
+      ds.accept(visitor)
+    end
+    if ba = @block_arg
+      ba.accept(visitor)
+    end
+    @body.accept(visitor)
+  end
+
+  def ==(other : self) : Bool
+    (@name == other.name) && (@args == other.args) && (@body == other.body) && (@double_splat == other.double_splat) && (@block_arg == other.block_arg) && (@splat_index == other.splat_index)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@name)
+    h = 31 &* h &+ hash_val(@args)
+    h = 31 &* h &+ hash_val(@body)
+    h = 31 &* h &+ hash_val(@double_splat)
+    h = 31 &* h &+ hash_val(@block_arg)
+    h = 31 &* h &+ hash_val(@splat_index)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "macro " << @name
+    if @args.size > 0 || @double_splat || @block_arg
+      sb << "("
+      i = 0
+      while i < @args.size
+        sb << ", " if i > 0
+        sb << "*" if @splat_index == i
+        @args[i].to_s(sb)
+        i = i + 1
+      end
+      if ds = @double_splat
+        sb << ", " if @args.size > 0
+        sb << "**"
+        ds.to_s(sb)
+      end
+      if ba = @block_arg
+        sb << ", " if @args.size > 0 || @double_splat
+        sb << "&"
+        ba.to_s(sb)
+      end
+      sb << ")"
+    end
+    sb << "
+  "
+    @body.to_s(sb)
+    sb << "
+end"
+  end
+end
+
+pub class MacroExpression < ASTNode
+  property exp : ASTNode
+  property output : Bool
+
+  def initialize(@exp : ASTNode, @output : Bool = true)
+  end
+
+  def clone_without_location : self
+    MacroExpression.new(@exp.clone, @output)
+  end
+
+  def accept_children(visitor) : Nil
+    @exp.accept(visitor)
+  end
+
+  def ==(other : self) : Bool
+    (@exp == other.exp) && (@output == other.output)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@exp)
+    h = 31 &* h &+ hash_val(@output)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "{{ "
+    @exp.to_s(sb)
+    sb << " }}"
+  end
+end
+
+pub class MacroLiteral < ASTNode
+  property value : String
+
+  def initialize(@value : String)
+  end
+
+  def clone_without_location : self
+    MacroLiteral.new(@value)
+  end
+
+  def ==(other : self) : Bool
+    (@value == other.value)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@value)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << @value
+  end
+end
+
+pub class MacroVerbatim < UnaryExpression
+  def initialize(exp : ASTNode)
+    super(exp)
+  end
+
+  def clone_without_location : self
+    MacroVerbatim.new(@exp.clone)
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "{% verbatim do %}"
+    @exp.to_s(sb)
+    sb << "{% end %}"
+  end
+end
+
+pub class MacroIf < ASTNode
+  property cond : ASTNode
+  property then : ASTNode
+  property else : ASTNode
+
+  def initialize(@cond : ASTNode, a_then : ASTNode? = nil, a_else : ASTNode? = nil)
+    @then = a_then || Nop.new
+    @else = a_else || Nop.new
+  end
+
+  def clone_without_location : self
+    MacroIf.new(@cond.clone, @then.clone, @else.clone)
+  end
+
+  def accept_children(visitor) : Nil
+    @cond.accept(visitor)
+    @then.accept(visitor)
+    @else.accept(visitor)
+  end
+
+  def ==(other : self) : Bool
+    @cond == other.cond && @then == other.then && @else == other.else
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    31 &* (31 &* (31 &* 17 &+ @cond.hash) &+ @then.hash) &+ @else.hash
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "{% if "
+    @cond.to_s(sb)
+    sb << " %}
+  "
+    @then.to_s(sb)
+    unless @else.is_a?(Nop)
+      sb << "
+{% else %}
+  "
+      @else.to_s(sb)
+    end
+    sb << "
+{% end %}"
+  end
+end
+
+pub class MacroFor < ASTNode
+  property vars : Array(Var)
+  property exp : ASTNode
+  property body : ASTNode
+
+  def initialize(@vars : Array(Var) = [] of Var, @exp : ASTNode = Nop.new, body : ASTNode? = nil)
+    @body = body || Nop.new
+  end
+
+  def clone_without_location : self
+    cloned_vars = @vars.map { |v| v.clone.as(Var) }
+    MacroFor.new(cloned_vars, @exp.clone, @body.clone)
+  end
+
+  def accept_children(visitor) : Nil
+    @vars.each { |v| v.accept(visitor) }
+    @exp.accept(visitor)
+    @body.accept(visitor)
+  end
+
+  def ==(other : self) : Bool
+    (@vars == other.vars) && (@exp == other.exp) && (@body == other.body)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@vars)
+    h = 31 &* h &+ hash_val(@exp)
+    h = 31 &* h &+ hash_val(@body)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "{% for "
+    i = 0
+    while i < @vars.size
+      sb << ", " if i > 0
+      @vars[i].to_s(sb)
+      i = i + 1
+    end
+    sb << " in "
+    @exp.to_s(sb)
+    sb << " %}
+  "
+    @body.to_s(sb)
+    sb << "
+{% end %}"
+  end
+end
+
+pub class MacroVar < ASTNode
+  property name : String
+  property exps : Array(ASTNode)?
+
+  def initialize(@name : String, @exps : Array(ASTNode)? = nil)
+  end
+
+  def clone_without_location : self
+    cloned_exps = clone_opt_nodes(@exps)
+    MacroVar.new(@name, cloned_exps)
+  end
+
+  def accept_children(visitor) : Nil
+    if e = @exps
+      e.each { |x| x.accept(visitor) }
+    end
+  end
+
+  def ==(other : self) : Bool
+    (@name == other.name) && (@exps == other.exps)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@name)
+    h = 31 &* h &+ hash_val(@exps)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "%" << @name
+    if e = @exps
+      sb << "{"
+      i = 0
+      while i < e.size
+        sb << ", " if i > 0
+        e[i].to_s(sb)
+        i = i + 1
+      end
+      sb << "}"
+    end
+  end
+end
+
+pub class AsmOperand < ASTNode
+  property constraint : String
+  property exp : ASTNode
+
+  def initialize(@constraint : String, @exp : ASTNode)
+  end
+
+  def clone_without_location : self
+    AsmOperand.new(@constraint, @exp.clone)
+  end
+
+  def accept_children(visitor) : Nil
+    @exp.accept(visitor)
+  end
+
+  def ==(other : self) : Bool
+    (@constraint == other.constraint) && (@exp == other.exp)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@constraint)
+    h = 31 &* h &+ hash_val(@exp)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << @constraint.inspect << "("
+    @exp.to_s(sb)
+    sb << ")"
+  end
+end
+
+pub class Asm < ASTNode
+  property text : String
+  property outputs : Array(AsmOperand)?
+  property inputs : Array(AsmOperand)?
+  property clobbers : Array(String)?
+  property volatile : Bool
+  property alignstack : Bool
+  property intel : Bool
+  property can_throw : Bool
+
+  def initialize(
+    @text : String,
+    @outputs : Array(AsmOperand)? = nil,
+    @inputs : Array(AsmOperand)? = nil,
+    @clobbers : Array(String)? = nil,
+    @volatile : Bool = false,
+    @alignstack : Bool = false,
+    @intel : Bool = false,
+    @can_throw : Bool = false,
+  )
+  end
+
+  def clone_without_location : self
+    if o = @outputs
+      cloned_outputs = o.map { |x| x.clone.as(AsmOperand) }
+    else
+      cloned_outputs = nil
+    end
+    if i = @inputs
+      cloned_inputs = i.map { |x| x.clone.as(AsmOperand) }
+    else
+      cloned_inputs = nil
+    end
+    Asm.new(
+      @text,
+      cloned_outputs,
+      cloned_inputs,
+      clone_opt_strings(@clobbers),
+      @volatile,
+      @alignstack,
+      @intel,
+      @can_throw
+    )
+  end
+
+  def accept_children(visitor) : Nil
+    if outs = @outputs
+      outs.each { |o| o.accept(visitor) }
+    end
+    if ins = @inputs
+      ins.each { |i| i.accept(visitor) }
+    end
+  end
+
+  def ==(other : self) : Bool
+    (@text == other.text) && (@outputs == other.outputs) && (@inputs == other.inputs) && (@clobbers == other.clobbers) && (@volatile == other.volatile) && (@alignstack == other.alignstack) && (@intel == other.intel) && (@can_throw == other.can_throw)
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(self)
+      self == other
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    h = 17
+    h = 31 &* h &+ hash_val(@text)
+    h = 31 &* h &+ hash_val(@outputs)
+    h = 31 &* h &+ hash_val(@inputs)
+    h = 31 &* h &+ hash_val(@clobbers)
+    h = 31 &* h &+ hash_val(@volatile)
+    h = 31 &* h &+ hash_val(@alignstack)
+    h = 31 &* h &+ hash_val(@intel)
+    h = 31 &* h &+ hash_val(@can_throw)
+    h
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << "asm(" << @text.inspect
+    if @outputs || @inputs || @clobbers
+      sb << " : "
+      if outs = @outputs
+        i = 0
+        while i < outs.size
+          sb << ", " if i > 0
+          outs[i].to_s(sb)
+          i = i + 1
+        end
+      end
+      if @inputs || @clobbers
+        sb << " : "
+        if ins = @inputs
+          j = 0
+          while j < ins.size
+            sb << ", " if j > 0
+            ins[j].to_s(sb)
+            j = j + 1
+          end
+        end
+        if clobs = @clobbers
+          sb << " : "
+          k = 0
+          while k < clobs.size
+            sb << ", " if k > 0
+            sb << clobs[k].inspect
+            k = k + 1
+          end
+        end
+      end
+    end
+    sb << ")"
+  end
+end

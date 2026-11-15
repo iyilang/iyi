@@ -1,0 +1,8 @@
+# A type list after `of` ends at its comma when the next argument is a call (`Foo.new`),
+# so the call stays a call; the hosted parser looks ahead past the path before it takes a type.
+
+def build(info, fname, ftype)
+  info.add(fname, [] of Arg, InstanceVar.new("@#{fname}"), nil, Path.new(ftype))
+  x = f(1, [] of Arg, Foo.new)
+  y = f(fname, [] of Arg, InstanceVar.new("@a"))
+end

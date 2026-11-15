@@ -1,0 +1,18 @@
+# Ranges and tuples fixture
+r1 = 1..5
+r2 = 1...5
+r3 = ..10
+r4 = ...10
+r5 = 20..
+r6 = 20...
+
+t1 = {1}
+t2 = {1, 2}
+t3 = {1, "two", 3.0}
+t4 = {x: 10, y: 20}
+t5 = {name: "test", valid: true, values: {1, 2}}
+
+# Nested in calls
+func({1, 2}, {a: 10, b: 20})
+slice[1..4]
+slice[...10]

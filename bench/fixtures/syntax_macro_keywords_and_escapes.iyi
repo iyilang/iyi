@@ -1,0 +1,34 @@
+# Keywords that open a block in iyi macro text (`impl`, `trait`, and `end!` closing a
+# block) nest as the hosted parser nests them. An escaped `\{%` is text, not a control.
+
+macro opens_impl
+  impl ::Std::Json::ToJSON for {{ declaration[:name].id }}
+    def to_json : Nil
+    end
+  end
+end
+
+macro opens_trait
+  trait Printable
+    def print_it : Nil
+    end
+  end
+end
+
+macro escapes
+  def initialize(pull)
+    \{% begin %}
+      \{% json_seen = [] of StringLiteral %}
+      {% for field in declaration[:fields] %}
+        \{% json_readable = 0 %}
+      {% end %}
+    \{% end %}
+    x = 1
+  end
+end
+
+macro bang_end
+  items.each do |x|
+    x.run
+  end!
+end

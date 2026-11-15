@@ -1,0 +1,40 @@
+private def secret_calc : Int32
+  42
+end
+
+protected def internal_hook
+  nil
+end
+
+pub def external_api : String
+  "ok"
+end
+
+pub class PublicWidget
+end
+
+pub struct PublicRecord
+end
+
+pub trait PublicTrait
+end
+
+pub enum PublicEnum
+  Active
+  Inactive
+end
+
+annotation Deprecated
+end
+
+annotation ModelBinding
+end
+
+@[Deprecated]
+def old_api
+  1
+end
+
+@[ModelBinding(table: "users", cache: true)]
+class UserModel
+end

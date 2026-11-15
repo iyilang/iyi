@@ -4,8 +4,10 @@
 #     import std/system_roots::{SystemRoots}
 #     import std/x509::{X509}
 #
-#     store = SystemRoots.load.or_panic        # certificates, unreadable, source
-#     X509.verify(leaf, intermediates, store.certificates, "example.com")
+#     store = SystemRoots.load.or_panic        # certificates, unreadable, source,
+#                                              # restricted, distrusted
+#     X509.verify(leaf, intermediates, store.certificates, "example.com",
+#       distrusted: store.distrusted)
 #
 # Each platform's own store, as Go's crypto/x509 reads it:
 #
@@ -24,11 +26,39 @@
 #   no constraint is added, and one denied, for any use, is taken away. A
 #   setting constrained to a policy, an application or a key usage is not
 #   one this can apply, so it adds nothing; a denial is honoured whatever
-#   it is constrained to, as refusing too much is the safe side.
-# - Windows: crypt32's ROOT store (`CertOpenSystemStoreW`), less what the
-#   Disallowed store holds. Windows fills the ROOT store as it meets roots
-#   it does not have yet, through its own chain building; a root it has
-#   never fetched is not there to read, and a chain to it is refused.
+#   it is constrained to, as refusing too much is the safe side. Apple's
+#   own revocations of an anchor, which are not trust settings, are not
+#   read.
+# - Windows: crypt32's ROOT store (`CertOpenSystemStoreW`), less the roots
+#   Windows keeps from authenticating a server and less what the
+#   Disallowed store holds. Windows writes the purposes it trusts a root
+#   for beside the certificate, as a property of the store and not an
+#   extension std/x509 could read (`CertGetEnhancedKeyUsage`, the property
+#   alone): a root with no such property is good for every purpose and is
+#   kept; one whose property names serverAuth or anyExtendedKeyUsage is
+#   kept; one whose property names other purposes - code signing, time
+#   stamping, mail - or none at all is left out and counted in
+#   `restricted`, as is one whose property could not be read. A root the
+#   store holds twice is left out if either copy is restricted. Not
+#   applied: the dates and purposes Windows stops trusting a root from
+#   (its "disallowed after" properties), so a root Windows trusts only for
+#   certificates issued before a day is trusted here for all of them.
+#   The ROOT store holds what `LocalMachine\AuthRoot` holds too, and
+#   Windows fills that as it meets roots it does not have yet, through its
+#   own chain building; a root it has not fetched is not there to read,
+#   and a chain to it is refused.
+#
+# These are the roots a TLS client trusts for a server's certificate, read
+# when `load` is called: a later change to the platform's store is seen by
+# the next `load`, not by a store already answered.
+#
+# `distrusted` is the DER of every certificate the platform says never to
+# trust, for `X509.verify` to refuse at any place in a chain: all of the
+# Windows Disallowed store, which holds intermediates and leaves as well
+# as roots, and on darwin the certificates a trust setting denies. It is
+# empty on Linux, whose bundles hold no denials, and when
+# `$SSL_CERT_FILE` or `$SSL_CERT_DIR` names the roots, as the platform's
+# store is not read then.
 #
 # The same certificate twice is kept once. One that std/x509 cannot read -
 # a key type it does not take, a DSA root on an old system - is counted in
@@ -82,6 +112,13 @@ import std/file::{File}
     fun CertOpenSystemStoreW(provider : Void*, name : UInt16*) : Void*
     fun CertEnumCertificatesInStore(store : Void*, previous : Void*) : Void*
     fun CertCloseStore(store : Void*, flags : UInt32) : Int32
+    fun CertGetEnhancedKeyUsage(context : Void*, flags : UInt32, usage : Void*, size : UInt32*) : Int32
+  end
+
+  # Why `CertGetEnhancedKeyUsage` answered no: a root with no purpose
+  # property and a call that failed are told apart by this alone.
+  lib LibKernel32
+    fun GetLastError : Int32
   end
 {% end %}
 
@@ -92,6 +129,12 @@ pub struct SystemRoots
   getter unreadable : Int32
   # Where they came from: files, or the platform's store by name.
   getter source : String
+  # How many roots the platform holds but keeps from authenticating a
+  # server, and so are not among `certificates`.
+  getter restricted : Int32
+  # The DER of every certificate the platform says never to trust, root
+  # or not: what `X509.verify` takes as `distrusted`.
+  getter distrusted : Array(Array(UInt8))
 
   # The Linux bundles, in the order Go's crypto/x509 tries them.
   BUNDLES = ["/etc/ssl/certs/ca-certificates.crt",
@@ -102,7 +145,8 @@ pub struct SystemRoots
              "/etc/ssl/cert.pem"]
   DIRECTORIES = ["/etc/ssl/certs", "/etc/pki/tls/certs"]
 
-  def initialize(@certificates : Array(Certificate), @unreadable : Int32, @source : String)
+  def initialize(@certificates : Array(Certificate), @unreadable : Int32, @source : String,
+                 @restricted : Int32 = 0, @distrusted : Array(Array(UInt8)) = [] of Array(UInt8))
   end
 
   # The operating system's trusted roots, or why there are none.
@@ -121,7 +165,7 @@ pub struct SystemRoots
       collected.answer("Security.framework's anchors and trust settings")
     {% elsif flag?(:win32) %}
       SystemRootsWindows.read(collected)
-      collected.answer("the Windows ROOT store, less the Disallowed store")
+      collected.answer("the Windows ROOT store, less the roots kept from server authentication and the Disallowed store")
     {% else %}
       BUNDLES.each do |bundle|
         next unless File.file?(bundle) && File.readable?(bundle)
@@ -135,11 +179,15 @@ pub struct SystemRoots
 end
 
 # Certificates gathered once each, by their DER.
-class SystemRootsCollector
+pub class SystemRootsCollector
   getter certificates : Array(Certificate) = [] of Certificate
   getter unreadable : Int32 = 0
+  getter restricted : Int32 = 0
+  getter distrusted : Array(Array(UInt8)) = [] of Array(UInt8)
   @seen : Hash(String, Int32) = {} of String => Int32
   @denied : Hash(String, Bool) = {} of String => Bool
+  @listed : Hash(String, Bool) = {} of String => Bool
+  @limited : Hash(String, Bool) = {} of String => Bool
 
   def initialize
   end
@@ -148,7 +196,7 @@ class SystemRootsCollector
     @certificates.empty?
   end
 
-  # One certificate's DER: kept, unless it was seen or denied.
+  # One certificate's DER: kept, unless it was seen, denied or restricted.
   def add(der : Array(UInt8)) : Nil
     key = SystemRootsCollector.key(der)
     return if @seen.has_key?(key) || @denied.has_key?(key)
@@ -161,10 +209,27 @@ class SystemRootsCollector
     end
   end
 
-  # A certificate the platform says not to trust: dropped if kept, and
-  # never kept after.
+  # A certificate the platform says not to trust: dropped if kept, never
+  # kept after, and held in `distrusted` once.
   def deny(der : Array(UInt8)) : Nil
     key = SystemRootsCollector.key(der)
+    @distrusted << der unless @listed.has_key?(key)
+    @listed[key] = true
+    leave_out(key)
+  end
+
+  # A root the platform trusts for other purposes than a server's
+  # certificate: dropped if kept, never kept after, and counted once. It
+  # is not distrusted - a chain may still pass through the certificate
+  # under another root.
+  def restrict(der : Array(UInt8)) : Nil
+    key = SystemRootsCollector.key(der)
+    @restricted = @restricted + 1 unless @limited.has_key?(key)
+    @limited[key] = true
+    leave_out(key)
+  end
+
+  private def leave_out(key : String) : Nil
     @denied[key] = true
     at = @seen[key]?
     return unless at
@@ -192,7 +257,7 @@ class SystemRootsCollector
 
   def answer(where : String) : SystemRoots | X509Error
     return X509Error.new("no root certificates in #{where}") if @certificates.empty?
-    SystemRoots.new(@certificates, @unreadable, where)
+    SystemRoots.new(@certificates, @unreadable, where, @restricted, @distrusted)
   end
 
   # A certificate's identity: its DER, as text a Hash can key.
@@ -294,16 +359,69 @@ end
   end
 {% elsif flag?(:win32) %}
   struct SystemRootsWindows
+    # CERT_FIND_PROP_ONLY_ENHKEY_USAGE_FLAG: the purposes the store holds
+    # for a certificate, not the ones its own extension names - those are
+    # std/x509's to read.
+    PROPERTY_ONLY = 4_u32
+    # CRYPT_E_NOT_FOUND, 0x80092004: no such property.
+    NOT_FOUND   = -2146885628
+    SERVER_AUTH = "1.3.6.1.5.5.7.3.1"
+    ANY_USE     = "2.5.29.37.0"
+
     def self.read(collected : SystemRootsCollector) : Nil
-      each_der("ROOT") { |der| collected.add(der) }
-      each_der("Disallowed") { |der| collected.deny(der) }
+      each_context("ROOT") do |context, der|
+        if serves?(context)
+          collected.add(der)
+        else
+          collected.restrict(der)
+        end
+      end
+      each_context("Disallowed") { |context, der| collected.deny(der) }
     end
 
-    # Every certificate's DER in the system store *name*. A CERT_CONTEXT
+    # Whether the store lets this root authenticate a server. Windows
+    # keeps a root's purposes beside it as a property (a CERT_ENHKEY_USAGE:
+    # { DWORD count; LPSTR* identifiers; }, the pointer at 8 on the 64-bit
+    # ABI), asked for twice - once for its size, once for its bytes. No
+    # property is every purpose; a property naming none is no purpose; and
+    # a call that fails any other way is read as no.
+    private def self.serves?(context : Void*) : Bool
+      size = 0_u32
+      if LibCrypt32.CertGetEnhancedKeyUsage(context, PROPERTY_ONLY, Pointer(Void).new(0_u64), pointerof(size)) == 0
+        return LibKernel32.GetLastError == NOT_FOUND
+      end
+      # Whole words, so the pointer inside lies where a pointer may.
+      usage = Array(UInt64).new(size.to_i32 // 8 + 2, 0_u64)
+      if LibCrypt32.CertGetEnhancedKeyUsage(context, PROPERTY_ONLY, usage.to_unsafe.as(Void*), pointerof(size)) == 0
+        return LibKernel32.GetLastError == NOT_FOUND
+      end
+      count = usage.to_unsafe.as(UInt32*)[0].to_i32
+      identifiers = (usage.to_unsafe.as(UInt8*) + 8_i64).as(Pointer(UInt8)*)[0]
+      i = 0
+      while i < count
+        identifier = identifiers.as(Pointer(UInt8)*)[i]
+        return true if names?(identifier, SERVER_AUTH) || names?(identifier, ANY_USE)
+        i = i + 1
+      end
+      false
+    end
+
+    # Whether the C string at *text* is *oid*, byte for byte.
+    private def self.names?(text : UInt8*, oid : String) : Bool
+      i = 0
+      while i < oid.bytesize
+        return false unless text[i] == oid.to_unsafe[i]
+        i = i + 1
+      end
+      text[i] == 0_u8
+    end
+
+    # Every certificate in the system store *name*: its context, for the
+    # properties the store keeps beside it, and its DER. A CERT_CONTEXT
     # is { DWORD encoding; BYTE* encoded; DWORD size; ... } on the 64-bit
     # ABI: the bytes' pointer at 8, their count at 16. The enumeration
     # frees the context it is handed, so the last one needs no release.
-    private def self.each_der(name : String, & : Array(UInt8) -> Nil) : Nil
+    private def self.each_context(name : String, & : Void*, Array(UInt8) -> Nil) : Nil
       wide = Array(UInt16).new(name.bytesize + 1, 0_u16)
       i = 0
       while i < name.bytesize
@@ -316,7 +434,7 @@ end
       until context.address == 0
         start = (context.as(UInt8*) + 8_i64).as(Pointer(UInt8)*)[0]
         size = (context.as(UInt8*) + 16_i64).as(UInt32*)[0].to_i32
-        yield Array(UInt8).new(size) { |k| start[k] }
+        yield context, Array(UInt8).new(size) { |k| start[k] }
         context = LibCrypt32.CertEnumCertificatesInStore(store, context)
       end
       LibCrypt32.CertCloseStore(store, 0_u32)

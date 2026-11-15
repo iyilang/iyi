@@ -153,7 +153,7 @@ step "a path alone is its latest release, not a later pre-release"
 "$IYI" get example.test/user/liba > get1.log 2>&1 || { fail "get failed"; cat get1.log; }
 [ "$(requires example.test/user/liba)" = "v1.1.0" ] || fail "iyi.mod requires liba at '$(requires example.test/user/liba)', not v1.1.0"
 grep -q "added example.test/user/liba v1.1.0" get1.log || fail "the addition was not said: $(cat get1.log)"
-grep -q "example.test/user/liba v1.1.0 s1:" iyi.sum 2>/dev/null || fail "iyi.sum has no entry for liba v1.1.0"
+grep -q "example.test/user/liba v1.1.0 h2:" iyi.sum 2>/dev/null || fail "iyi.sum has no entry for liba v1.1.0"
 # Everything init wrote is still there, byte for byte, with the one line
 # after it. Bytes rather than lines: init ends its manifest without a
 # newline, which `wc -l` counts one short.
@@ -352,7 +352,7 @@ cp use.iyi "$WORK/rapp/use.iyi"
 (cd "$WORK/rapp" && "$IYI" run use.iyi) > replace1.log 2>&1 || { fail "the replaced build failed"; cat replace1.log; }
 grep -q "liba from beside the app" replace1.log || fail "the replacement did not build: $(cat replace1.log)"
 grep -q "example.test/user/liba" "$WORK/rapp/iyi.sum" 2>/dev/null && fail "iyi.sum recorded the replaced module"
-grep -q "example.test/user/libb v1.0.0 s1:" "$WORK/rapp/iyi.sum" 2>/dev/null || fail "iyi.sum lost the fetched module"
+grep -q "example.test/user/libb v1.0.0 h2:" "$WORK/rapp/iyi.sum" 2>/dev/null || fail "iyi.sum lost the fetched module"
 sed -i.bak 's/beside the app/beside the app, edited/' "$WORK/liba-local/liba.iyi" && rm -f "$WORK/liba-local/liba.iyi.bak"
 (cd "$WORK/rapp" && "$IYI" run use.iyi) > replace2.log 2>&1 || { fail "an edit in the replacement was refused"; cat replace2.log; }
 grep -q "beside the app, edited" replace2.log || fail "the edit did not build: $(cat replace2.log)"
@@ -449,7 +449,7 @@ cp "$WORK/app/use.iyi" main.iyi
 mkdir -p nested && printf 'module example.test/user/nested\n' > nested/iyi.mod
 printf 'import example.test/user/libc\nputs 1\n' > nested/main.iyi
 "$IYI" build main.iyi -o main > tidy-build.log 2>&1 || { fail "the tidy fixture did not build"; cat tidy-build.log; }
-printf 'example.test/user/liba v1.0.0 s1:0000000000000000000000000000000000000000\n' >> iyi.sum
+printf 'example.test/user/liba v1.0.0 h2:0000000000000000000000000000000000000000000000000000000000000000\n' >> iyi.sum
 cp iyi.mod iyi.mod.before && cp iyi.sum iyi.sum.before
 "$IYI" mod tidy --check > tidy-check.log 2>&1
 check_status=$?
@@ -463,7 +463,7 @@ cmp -s iyi.mod iyi.mod.before && cmp -s iyi.sum iyi.sum.before || fail "--check 
 [ "$(requires example.test/user/liba)" = "v1.3.0" ] || fail "liba moved to '$(requires example.test/user/liba)'"
 [ -z "$(requires example.test/user/libc)" ] || fail "the nested module's import was taken for this one's"
 grep -q "v1.0.0" iyi.sum && fail "the stale sum entry is still there"
-grep -q "example.test/user/liba v1.3.0 s1:" iyi.sum || fail "the sum lost what builds"
+grep -q "example.test/user/liba v1.3.0 h2:" iyi.sum || fail "the sum lost what builds"
 "$IYI" mod tidy --check > tidy-clean.log 2>&1 || fail "a tidy manifest was not clean: $(cat tidy-clean.log)"
 grep -q "say what the source imports" tidy-clean.log || fail "a clean tidy did not say so"
 [ "$status" -eq 0 ] && echo "  libb removed, liba kept, the stale sum dropped; --check wrote nothing, then found nothing"
@@ -627,7 +627,7 @@ one="$(pseudo v0.0.0- HEAD)"
 "$IYI" get example.test/user/libt > pseudo1.log 2>&1 || { fail "get of an untagged repository failed"; cat pseudo1.log; }
 [ "$(requires example.test/user/libt)" = "$one" ] || fail "an untagged repository was written as '$(requires example.test/user/libt)', not $one"
 [ "$("$IYI" run main.iyi 2>&1)" = "one" ] || fail "the pseudo-version did not build its commit"
-grep -q "example.test/user/libt $one s1:" iyi.sum || fail "iyi.sum has no entry for $one"
+grep -q "example.test/user/libt $one h2:" iyi.sum || fail "iyi.sum has no entry for $one"
 sed -i.bak 's/"one"/"two"/' "$WORK/work/libt/libt.iyi" && rm -f "$WORK/work/libt/libt.iyi.bak"
 at "2026-03-02 10:00:00 +0300" commit -qam two && push_main
 two="$(pseudo v0.0.0- HEAD)"
@@ -947,8 +947,9 @@ grep -q "\`Files\` is not something a package reaches" lim4.log || fail "a word 
 [ "$status" -eq 0 ] && echo "  reaches nothing: v1.0.0 builds, v1.1.0 refused as std/dir, std/env, std/file, std/mutex, std/path, std/random, std/socket, std/system_roots, std/time, C with nothing written; widened: allowed and kept"
 
 step "a package's sum is the same on every platform"
-# SHA-1 over each file's path and committed bytes (sum.cr), so the sum is
-# the tag's and not the machine's: on Windows the path of a file in a
+# SHA-256 over a line per file - the SHA-256 of its committed bytes, `f`,
+# its path - in path order (sum.cr), so the sum is the tag's and not the
+# machine's: on Windows the path of a file in a
 # directory went in with `\`, and the bytes were the checkout's, which
 # Git for Windows' default `core.autocrlf=true` writes with CRLF - an
 # `iyi.sum` made on Linux was refused there as tampering. The package also
@@ -968,11 +969,16 @@ printf '* text=auto\n' > "$WORK/work/libn/.gitattributes"
 git -C "$WORK/work/libn" add -A && git -C "$WORK/work/libn" commit -qm one
 git init -q --bare "$WORK/mirror/example.test/user/libn"
 (cd "$WORK" && publish libn v1.0.0)
+if command -v sha256sum > /dev/null 2>&1; then
+  sha256() { sha256sum | cut -c1-64; }
+else
+  sha256() { shasum -a 256 | cut -c1-64; }
+fi
 expected="$(
   cd "$WORK/work/libn" &&
   for f in $(git ls-tree -r --name-only v1.0.0 | LC_ALL=C sort); do
-    printf '%s\0' "$f"; git show "v1.0.0:$f"; printf '\0'
-  done | sha1sum | cut -c1-40
+    printf '%s f %s\n' "$(git show "v1.0.0:$f" | sha256)" "$f"
+  done | sha256
 )"
 # Both: autocrlf for every file, eol for a `text` one (KEEP_BYTES).
 printf '[core]\n\tautocrlf = true\n\teol = crlf\n' > "$WORK/crlf.gitconfig"
@@ -980,8 +986,8 @@ mkdir -p "$WORK/napp" && cd "$WORK/napp" || exit 1
 printf 'module example.test/user/napp\n' > iyi.mod
 GIT_CONFIG_GLOBAL="$WORK/crlf.gitconfig" "$IYI" get example.test/user/libn > sum.log 2>&1 || fail "get libn failed: $(cat sum.log)"
 got="$(awk '$1 == "example.test/user/libn" { print $3 }' iyi.sum)"
-[ "$got" = "s1:$expected" ] || fail "libn's sum is $got, where the tag's bytes and paths make s1:$expected"
-[ "$status" -eq 0 ] && echo "  s1:$expected, from the tag's paths and bytes, with a CRLF-asking git"
+[ "$got" = "h2:$expected" ] || fail "libn's sum is $got, where the tag's bytes and paths make h2:$expected"
+[ "$status" -eq 0 ] && echo "  h2:$expected, from the tag's paths and bytes, with a CRLF-asking git"
 
 step "a module in a subdirectory reads the manifest at the root its header names"
 # `greet/greeter.iyi` declares `module greet/greeter`, so its root is the

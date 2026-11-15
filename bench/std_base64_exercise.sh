@@ -7,7 +7,10 @@
 # decoder is caught, and what `decode` refuses: a byte outside the alphabet, data after
 # the padding, data inside it, more `=` than the group needs, `=` with no
 # group to close, and a final group of one character - each a panic with a
-# sentence, where before the data was silently dropped.
+# sentence, where before the data was silently dropped. The exercise holds
+# `decode?` to the same sentences as values, and `encode_secret` and
+# `decode_secret` to `encode` and to the one text it writes for each byte
+# string; their breaks are among the ones proven here.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -79,7 +82,7 @@ fi
 
 echo
 echo "== every base64 section reported"
-for phrase in "== encode" "== decode"; do
+for phrase in "== encode" "== decode" "== decode?" "== secrets"; do
   if ! grep -q "$phrase" "$WORK/base64-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -154,6 +157,26 @@ broken "six bytes read in the wrong order" '(w.unsafe_shr(40) & 0xFF_u64)
 '
 broken "a character pair written backwards" 'chars[k.unsafe_shr(6)].to_i32 | chars[k & 63].to_i32.unsafe_shl(8)' 'chars[k & 63].to_i32 | chars[k.unsafe_shr(6)].to_i32.unsafe_shl(8)'
 broken "vertical tab and form feed refused again" 'next if b == 32_u8 || (b >= 9_u8 && b <= 13_u8)' 'next if b == 32_u8 || b == 10_u8 || b == 13_u8 || b == 9_u8' "base64: invalid byte 11"
+# `decode?` answers what `decode` raises: a refusal raised inside it is the
+# panic a peer's text would be.
+broken "a refusal raised where decode? answers" 'return Base64Error.new("base64: invalid byte #{b}") if v < 0' 'raise "base64: invalid byte #{b}" if v < 0' "iyi: panic: base64: invalid byte 42"
+# The paths for secrets: a character's offset, a value's mask, the bits a
+# last character has to spare, the other alphabet, padding and length.
+broken "a secret's digits written from the wrong place" 'c = c &- ((51 &- v).unsafe_shr(31) & 75)' 'c = c &- ((52 &- v).unsafe_shr(31) & 75)' "encode_secret over every byte value"
+broken "a secret's slash written as a comma" 'c = c &+ ((62 &- v).unsafe_shr(31) & 3)' 'c = c &+ 0' "encode_secret over every byte value"
+broken "a secret's last byte of two left out" 'triple = triple | src[i + 1].to_i32.unsafe_shl(8) if last == 2' 'triple = triple | 0 if last == 2' "encode_secret of 2 bytes"
+broken "a secret's lower case read as upper" '(lower & (c &- 71))' '(lower & (c &- 97))' "decode_secret of 1 bytes"
+broken "a byte outside the alphabet read as A in a secret" '    v | ((upper | lower | digit | plus | slash) ^ -1)' '    v' "the url-safe alphabet's minus refused in a secret"
+broken "bits past a secret's data dropped, a group of two" 'bad = bad | v0 | v1 | (0 &- (v1 & 15))' 'bad = bad | v0 | v1' "bits past the data in a group of two refused in a secret"
+broken "bits past a secret's data dropped, a group of three" 'bad = bad | v0 | v1 | v2 | (0 &- (v2 & 3))' 'bad = bad | v0 | v1 | v2' "bits past the data in a group of three refused in a secret"
+broken "the url-safe alphabet read in a secret" 'plus = ((c ^ 43) &- 1).unsafe_shr(31)' 'plus = ((c ^ 43) &- 1).unsafe_shr(31) | ((c ^ 45) &- 1).unsafe_shr(31)' "the url-safe alphabet's minus refused in a secret"
+broken "padding read as data inside a secret" '    v | ((upper | lower | digit | plus | slash) ^ -1)' '    v | ((upper | lower | digit | plus | slash | ((c ^ 61) &- 1).unsafe_shr(31)) ^ -1)' "padding before the end refused in a secret"
+broken "a whole group of a secret unchecked" '      bad = bad | v0 | v1 | v2 | v3
+' '      bad = bad | v0 | v1 | v2
+' "the url-safe alphabet's minus refused in a secret"
+broken "a secret of any length read" '    unless n % 4 == 0
+      return Base64Error.new("base64: #{n} characters, not a multiple of 4: a secret'"'"'s text is whole groups, padded")
+    end' '' "missing padding refused in a secret"
 # The byte loop is cheap enough on arm64 that it stays inside two and a half
 # byte sums there: darwin arm64 let it through. The check runs everywhere;
 # its proof on Linux x86_64, where the byte loop is twice the word loop.

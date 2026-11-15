@@ -16,7 +16,15 @@ end
 import std/cookie::{Cookie, CookieJar}
 import std/http::{HTTP, Response, Server}
 import std/socket::{IyiSocket}
-import std/time::{Time}
+import std/time::{Time, Span}
+
+# The cookie a `Set-Cookie` line holds.
+def cookie_of(line : String) : Cookie
+  if cookie = Cookie.parse(line)
+    return cookie
+  end
+  raise "ASSERTION FAILED: no cookie in #{line.inspect}"
+end
 
 # What `work` answers, or "refused: <why>" when it raises: run as a task,
 # whose value catches the panic.
@@ -94,6 +102,19 @@ assert_str "a=1; Path=/x; Max-Age=30; Secure; HttpOnly; SameSite=Strict", Cookie
 assert_str "b=2; Expires=Wed, 21 Oct 2037 07:28:00 GMT", Cookie.new("b", "2", expires: Time.utc(2037, 10, 21, 7, 28, 0)).to_set_cookie, "with an Expires date"
 assert_str "refused: Cookie: a has a byte a cookie value cannot hold: \"x;y\"", answer { Cookie.new("a", "x;y").to_set_cookie }, "a value with a semicolon refused"
 assert_str "refused: Cookie: not a cookie name: \"a b\"", answer { Cookie.new("a b", "1").to_set_cookie }, "a name with a space refused"
+assert_str "refused: Cookie: sid has a byte a cookie path cannot hold: \"/; Domain=evil.example; SameSite=None\"", answer { Cookie.new("sid", "abc", path: "/; Domain=evil.example; SameSite=None").to_set_cookie }, "a path with a semicolon refused"
+assert_true answer { Cookie.new("a", "1", path: "/a\tb").to_set_cookie }.starts_with?("refused: Cookie: a has a byte a cookie path cannot hold"), "a path with a control byte refused"
+assert_true answer { Cookie.new("a", "1", path: "/a\u007Fb").to_set_cookie }.starts_with?("refused: Cookie: a has a byte a cookie path cannot hold"), "a path with a delete byte refused"
+assert_true answer { Cookie.new("a", "1", path: "/caf\u00E9").to_set_cookie }.starts_with?("refused: Cookie: a has a byte a cookie path cannot hold"), "a path outside ASCII refused"
+assert_str "a=1; Path=/a b/c,d~", Cookie.new("a", "1", path: "/a b/c,d~").to_set_cookie, "a path of printable ASCII written, a space and a comma in it"
+assert_str "refused: Cookie: a has a domain that is not a host name: \"example.com; Path=/\"", answer { Cookie.new("a", "1", domain: "example.com; Path=/").to_set_cookie }, "a domain with a semicolon refused"
+assert_str "refused: Cookie: a has a domain that is not a host name: \"exa mple.com\"", answer { Cookie.new("a", "1", domain: "exa mple.com").to_set_cookie }, "a domain with a space refused"
+assert_str "refused: Cookie: a has a domain that is not a host name: \"\"", answer { Cookie.new("a", "1", domain: "").to_set_cookie }, "an empty domain refused"
+assert_str "refused: Cookie: a has a domain that is not a host name: \"..example.com\"", answer { Cookie.new("a", "1", domain: "..example.com").to_set_cookie }, "a domain with two leading dots refused"
+assert_str "a=1; Domain=.Example.com", answer { Cookie.new("a", "1", domain: ".Example.com").to_set_cookie }, "a domain's one leading dot written"
+assert_str "refused: Cookie: a has a SameSite that is not Strict, Lax or None: \"None; Domain=evil.example\"", answer { Cookie.new("a", "1", same_site: "None; Domain=evil.example").to_set_cookie }, "a SameSite with a semicolon refused"
+assert_str "refused: Cookie: a has a SameSite that is not Strict, Lax or None: \"Laxer\"", answer { Cookie.new("a", "1", same_site: "Laxer").to_set_cookie }, "a SameSite that is no SameSite refused"
+assert_str "a=1; SameSite=lax|a=1; SameSite=STRICT|a=1; SameSite=None", answer { Cookie.new("a", "1", same_site: "lax").to_set_cookie + "|" + Cookie.new("a", "1", same_site: "STRICT").to_set_cookie + "|" + Cookie.new("a", "1", same_site: "None").to_set_cookie }, "a SameSite in any case written"
 pairs = Cookie.parse_header("a=1; b=\"x y\"; a=2; junk")
 assert_true pairs.size == 2 && pairs["a"]? == "1" && pairs["b"]? == "x y", "a Cookie header's pairs, the first of a name kept"
 jar = CookieJar.new
@@ -119,6 +140,65 @@ secure_set.add_header("Set-Cookie", "plain=5")
 secure_jar.update("https://www.example.com/", secure_set)
 assert_str "safe=4; plain=5", secure_jar.header_for("https://www.example.com/") || "", "a Secure cookie from https:// goes back over https://"
 assert_str "plain=5", secure_jar.header_for("http://www.example.com/") || "", "a Secure cookie not over http"
+# RFC 6265bis §5.7: an answer over http:// leaves a Secure cookie alone.
+bank = CookieJar.new
+bank.add("https://bank.example/", cookie_of("sid=GOOD; Secure; HttpOnly; Path=/"))
+bank.add("http://bank.example/", cookie_of("sid=ATTACKER; Path=/"))
+assert_str "sid=GOOD", bank.header_for("https://bank.example/") || "", "an http answer does not overwrite a Secure cookie"
+bank.add("http://bank.example/", cookie_of("sid=; Path=/; Max-Age=0"))
+assert_str "sid=GOOD", bank.header_for("https://bank.example/") || "", "nor remove one with Max-Age=0"
+bank.add("http://bank.example/", cookie_of("sid=ATTACKER; Domain=bank.example; Path=/app"))
+assert_str "sid=GOOD", bank.header_for("https://bank.example/app/x") || "", "nor set one of a longer path to go beside it"
+bank.add("http://www.bank.example/", cookie_of("sid=ATTACKER; Path=/"))
+assert_true bank.size == 1, "nor set one from a host under its domain (#{bank.size})"
+www = CookieJar.new
+www.add("https://www.bank.example/", cookie_of("sid=GOOD; Secure; Path=/"))
+www.add("http://www.bank.example/", cookie_of("sid=ATTACKER; Domain=bank.example; Path=/"))
+assert_str "sid=GOOD", www.header_for("https://www.bank.example/") || "", "nor set one for a domain its host is under"
+bank.add("http://bank.example/", cookie_of("other=1; Path=/"))
+bank.add("http://bank.example.org/", cookie_of("sid=THEIRS; Path=/"))
+assert_str "sid=GOOD; other=1", bank.header_for("https://bank.example/") || "", "an http answer still sets a cookie of another name"
+assert_str "sid=THEIRS", bank.header_for("http://bank.example.org/") || "", "and one of that name for another site"
+bank.add("https://bank.example/", cookie_of("sid=NEXT; Secure; Path=/"))
+assert_str "other=1; sid=NEXT", bank.header_for("https://bank.example/") || "", "an https answer still replaces a Secure cookie"
+admin = CookieJar.new
+admin.add("https://bank.example/", cookie_of("sid=GOOD; Secure; Path=/admin"))
+admin.add("http://bank.example/", cookie_of("sid=PLAIN; Path=/"))
+assert_str "sid=GOOD; sid=PLAIN", admin.header_for("https://bank.example/admin/x") || "", "an http answer still sets one above a Secure cookie's path, which goes after it"
+lapsing = CookieJar.new
+lapsing.add("https://bank.example/", Cookie.new("sid", "GOOD", path: "/", expires: Time.utc + Span.milliseconds(40_i64), secure: true))
+assert_true lapsing.size == 1, "a Secure cookie about to lapse is kept"
+sleep 80
+lapsing.add("http://bank.example/", cookie_of("sid=PLAIN; Path=/"))
+assert_str "sid=PLAIN", lapsing.header_for("https://bank.example/") || "", "a Secure cookie that has lapsed guards nothing"
+# RFC 6265bis §4.1.3: what a name's prefix asks of its cookie.
+named = CookieJar.new
+named.add("https://bank.example/", cookie_of("__Secure-a=1; Path=/"))
+assert_true named.size == 0, "a __Secure- cookie needs Secure (#{named.size})"
+named.add("http://bank.example/", cookie_of("__Secure-a=1; Secure; Path=/"))
+named.add("http://www.bank.example/", cookie_of("__Secure-a=1; Domain=bank.example; Path=/"))
+assert_true named.size == 0, "and an https:// answer (#{named.size})"
+named.add("https://bank.example/", cookie_of("__Host-b=1; Path=/"))
+assert_true named.size == 0, "a __Host- cookie needs Secure (#{named.size})"
+named.add("http://bank.example/", cookie_of("__Host-b=1; Secure; Path=/"))
+named.add("http://www.bank.example/", cookie_of("__Host-b=1; Domain=bank.example; Path=/"))
+assert_true named.size == 0, "and an https:// answer too (#{named.size})"
+named.add("https://bank.example/", cookie_of("__Host-b=1; Secure; Path=/; Domain=bank.example"))
+assert_true named.size == 0, "a __Host- cookie has no Domain (#{named.size})"
+named.add("https://bank.example/", cookie_of("__Host-b=1; Secure; Path=/app"))
+assert_true named.size == 0, "a __Host- cookie has Path=/ (#{named.size})"
+named.add("https://bank.example/", cookie_of("__Host-b=1; Secure"))
+assert_true named.size == 0, "and has it written out (#{named.size})"
+named.add("https://bank.example/", cookie_of("__secure-a=1; Path=/"))
+named.add("https://bank.example/", cookie_of("__HOST-b=1; Secure; Path=/; Domain=bank.example"))
+assert_true named.size == 0, "a prefix is read in any case (#{named.size})"
+named.add("https://bank.example/", cookie_of("__Secure-a=1; Secure; Domain=bank.example; Path=/app"))
+named.add("https://bank.example/", cookie_of("__Host-b=2; Secure; Path=/"))
+assert_str "__Secure-a=1; __Host-b=2", named.header_for("https://bank.example/app/") || "", "a cookie that meets its prefix is kept"
+named.add("http://bank.example/", cookie_of("x__Host-b=3; Path=/"))
+named.add("http://bank.example/", cookie_of("__Host=4; Path=/"))
+named.add("http://bank.example/", cookie_of("__Secure=5; Path=/"))
+assert_str "x__Host-b=3; __Host=4; __Secure=5", named.header_for("http://bank.example/") || "", "a name that holds a prefix further in, or stops short of one, is any name"
 gone = Response.new(200, "")
 gone.add_header("Set-Cookie", "host=; Max-Age=0")
 jar.update("http://www.example.com/c", gone)
@@ -127,6 +207,7 @@ both = HTTP.parse_response("HTTP/1.1 200 OK\r\nSet-Cookie: a=1; Expires=Wed, 21 
 assert_true Cookie.from_response(both).size == 2 && Cookie.from_response(both)[0].name == "a" && Cookie.from_response(both)[1].name == "b", "an answer's cookies, each line its own, a date's comma and all"
 jar_l = IyiSocket.listen("127.0.0.1", 0)
 jar_base = "http://127.0.0.1:#{jar_l.local_port}"
+jar_safe = "https://127.0.0.1:#{jar_l.local_port}"
 group do |g|
   g.spawn do
     # One thread: `/stop` closes the listener, which is this thread's.
@@ -137,6 +218,7 @@ group do |g|
       elsif req.path == "/login"
         r = Response.new(302, "", {"Location" => "/home"})
         r.add_header("Set-Cookie", Cookie.new("session", "abc", path: "/").to_set_cookie)
+        r.add_header("Set-Cookie", "sid=ATTACKER; Path=/")
         r
       else
         Response.new(200, "session=#{req.cookies["session"]? || "-"}")
@@ -146,13 +228,15 @@ group do |g|
   end
   g.spawn do
     net_jar = CookieJar.new
+    net_jar.add(jar_safe + "/", cookie_of("sid=GOOD; Secure; Path=/"))
     assert_str "session=abc", HTTP.request("GET", jar_base + "/login", jar: net_jar).or_panic.body, "a cookie set by a redirect goes with the request it leads to"
     assert_str "session=abc", HTTP.request("GET", jar_base + "/again", jar: net_jar).or_panic.body, "and with the next"
+    assert_str "sid=GOOD; session=abc", net_jar.header_for(jar_safe + "/") || "", "a Secure cookie outlives an http answer that sets its name"
     assert_str "session=-", HTTP.get(jar_base + "/again").or_panic.body, "and not without the jar"
     HTTP.get(jar_base + "/stop").or_panic
     0
   end
 end
-puts "  Set-Cookie read and written, refusals, a Cookie header, a jar's domains, paths, Secure and expiry, through a redirect"
+puts "  Set-Cookie read and written, refusals, a Cookie header, a jar's domains, paths, Secure and expiry, a Secure cookie left alone by http, name prefixes, through a redirect"
 
 puts "\nALL CHECKS PASSED"

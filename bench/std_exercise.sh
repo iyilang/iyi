@@ -364,6 +364,10 @@ PLATFORM_LIBS='LibC|LibSystem|LibKernel32|LibWasi|LibLLVMMath|LibAdvapi32|LibWs2
 # Winsock is the whole of Windows' network interface and a socket call has
 # nowhere else to come from; `std/system_roots` for `crypt32` and darwin's
 # Security and CoreFoundation frameworks, the trust stores' only doors.
+# `std/autocert` for `advapi32` as well: its cache's entries are private
+# keys, a mode keeps nobody out of a file on Windows, and the access list
+# that does is set there (`SetNamedSecurityInfoW`) and nowhere in
+# kernel32.
 # Everything else in this list reaches the platform through a `lib` block
 # alone.
 PLATFORM_LINKS='@\[Link\(("(kernel32|advapi32|ws2_32|crypt32)"|framework: "(Security|CoreFoundation)")\)\]'
@@ -375,7 +379,7 @@ for source in "$REPO"/src/std/*.iyi; do
     # `std/path` folds a Windows name's case the way NTFS does, which is
     # the platform's own table (LCMapStringEx); ASCII alone called `C:\Ä`
     # and `c:\ä` two names.
-    socket|time|debug|file|dir|udp|random|signal|process|path|system|term|user|system_roots)
+    socket|time|debug|file|dir|udp|random|signal|process|path|system|term|user|system_roots|autocert)
       # Named libraries only: a `lib` block of platform bindings is the
       # exemption, an `@[Link]` to something the platform does not supply is
       # not covered by it.
@@ -393,6 +397,14 @@ for source in "$REPO"/src/std/*.iyi; do
   if [ "$name" = math ]; then
     grep -nE '^\s*(lib [A-Z]|fun [a-z_]|asm\(|@\[Link)' "$source" \
       | grep -vE 'llvm\.(sqrt|copysign|fma)\.' > "$WORK/reach.$name" || true
+  elif [ "$name" = digest ]; then
+    # `ValueBarrier`'s assembly is the empty one, `asm("" : ...)`: no
+    # instruction and no symbol, an output tied to its input so that the
+    # optimiser knows nothing of a mask that picks by a secret (the
+    # module's header says what it made of one that it knew). Any other
+    # `asm(` in std/digest is still named.
+    grep -nE '^\s*(lib [A-Z]|fun [a-z_]|asm\(|@\[Link)' "$source" \
+      | grep -vE 'asm\("" : "=r"\(x\) : "0"\(x\)\)' > "$WORK/reach.$name" || true
   else
     grep -nE '^\s*(lib [A-Z]|fun [a-z_]|asm\(|@\[Link)' "$source" > "$WORK/reach.$name" || true
   fi

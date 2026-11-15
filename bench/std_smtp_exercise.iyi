@@ -3,8 +3,8 @@
 # dot-stuffing as the server reads it, the reply codes errors carry, a
 # recipient refused and the RSET after it, replies that are not replies,
 # a server that hangs up or says nothing, STARTTLS refused and the bytes
-# after its 220, AUTH PLAIN, LOGIN and RFC 2195's CRAM-MD5 example, SIZE,
-# 8BITMIME and SMTPUTF8.
+# after its 220, AUTH PLAIN, LOGIN and RFC 2195's CRAM-MD5 example, a
+# CRAM-MD5 challenge that is not base64, SIZE, 8BITMIME and SMTPUTF8.
 #
 #     IYI_PATH=src:samples/iyi ./bin/iyi run bench/std_smtp_exercise.iyi
 #
@@ -364,6 +364,18 @@ server = serve([{"", "220 hi\r\n"}, {"EHLO", EHLO_REPLY}, {"AUTH CRAM-MD5", "334
   smtp.quit
 end
 assert_str "dGltIGI5MTNhNjAyYzdlZGE3YTQ5NWI0ZTZlNzMzNGQzODkw", server.heard[2], "RFC 2195's response to its challenge"
+# A challenge that is not base64 is the server's error, answered as one:
+# the exchange is cancelled and the session goes on.
+server = serve([{"", "220 hi\r\n"}, {"EHLO", EHLO_REPLY}, {"AUTH CRAM-MD5", "334 !!not-base64!!\r\n"},
+                {"*", "501 5.7.0 cancelled\r\n"}, {"NOOP", "250 ok\r\n"}, {"QUIT", "221 bye\r\n"}]) do |port|
+  smtp = session(port)
+  smtp.cleartext_auth = true
+  assert_str "334 SMTP: the server's CRAM-MD5 challenge is not base64: 334 !!not-base64!!", said(smtp.auth("tim", "tanstaaftanstaaf", SmtpAuth::CramMd5)), "a CRAM-MD5 challenge that is not base64"
+  noop = smtp.command("NOOP")
+  assert_true noop.is_a?(SmtpReply) && noop.code == 250, "the session goes on after a challenge that is not base64"
+  smtp.quit
+end
+assert_str "*", server.heard[2], "a challenge that is not base64 cancels the exchange"
 server = serve([{"", "220 hi\r\n"}, {"EHLO", "250-hi\r\n250 AUTH XOAUTH2\r\n"}, {"QUIT", "221 bye\r\n"}]) do |port|
   smtp = session(port)
   smtp.cleartext_auth = true
@@ -373,7 +385,7 @@ server = serve([{"", "220 hi\r\n"}, {"EHLO", "250-hi\r\n250 AUTH XOAUTH2\r\n"}, 
   assert_true !got.nil? && got.message.includes?("does not offer AUTH PLAIN"), "a mechanism not offered: #{said(got)}"
   smtp.quit
 end
-puts "  refused in the clear, PLAIN, LOGIN, RFC 2195's CRAM-MD5, 535, none in common"
+puts "  refused in the clear, PLAIN, LOGIN, RFC 2195's CRAM-MD5, a challenge that is not base64, 535, none in common"
 
 puts "== servers that misbehave"
 said_here = ""

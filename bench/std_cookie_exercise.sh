@@ -108,6 +108,12 @@ refuses "a value with a quote inside" value_quote 'Cookie: a has a byte a cookie
   'Cookie.new("a", "x\"y").to_set_cookie'
 refuses "a name with a semicolon" name_semi 'Cookie: not a cookie name: "a;b"' \
   'Cookie.new("a;b", "1").to_set_cookie'
+refuses "a path with an attribute after it" path_semi 'Cookie: sid has a byte a cookie path cannot hold: "/; Domain=evil.example"' \
+  'Cookie.new("sid", "abc", path: "/; Domain=evil.example").to_set_cookie'
+refuses "a domain with an attribute after it" domain_semi 'Cookie: a has a domain that is not a host name: "example.com; Secure"' \
+  'Cookie.new("a", "1", domain: "example.com; Secure").to_set_cookie'
+refuses "a SameSite with an attribute after it" same_semi 'Cookie: a has a SameSite that is not Strict, Lax or None: "None; Domain=evil.example"' \
+  'Cookie.new("a", "1", same_site: "None; Domain=evil.example").to_set_cookie'
 
 echo
 echo "== Python's http.cookies reads what to_set_cookie writes"
@@ -231,7 +237,7 @@ prove_broken "a cookie path matched inside a name" "a path matches at a slash" \
 prove_broken "a Secure cookie sent over http" "a Secure cookie not over http" \
   'next if cookie.secure && !secure' ''
 prove_broken "a Secure cookie taken from an http answer" "a jar keeps three of seven" \
-  'return if cookie.secure && !CookieJar.secure?(uri)' ''
+  'return if cookie.secure && !secure' ''
 prove_broken "a Secure cookie kept from https:// as well" "a Secure cookie from https:// goes back over https://" \
   'next if cookie.secure && !secure' 'next if cookie.secure'
 prove_broken "a one-label Domain kept" "a jar keeps three of seven" \
@@ -241,12 +247,58 @@ prove_broken "Expires read before Max-Age" "Max-Age wins over Expires" \
       expires" "    if (age = max_age) && expires.nil?
       expires"
 prove_broken "a lapsed cookie kept" "a jar keeps three of seven" \
-  '    return if stored.expired?(Time.utc)
+  '    return if stored.expired?(now)
 ' ''
 prove_broken "paths sent in the order they were set" "the longer path first" \
   'long_a == long_b ? (a[1] < b[1] ? -1 : (a[1] > b[1] ? 1 : 0)) : (long_a > long_b ? -1 : 1)' '(a[1] < b[1] ? -1 : (a[1] > b[1] ? 1 : 0))'
 prove_broken "a quoted value written as it is" "cookie value cannot hold" \
   'unless c == 0x21_u8 ||' 'unless true ||'
+prove_broken "a Secure cookie overwritten by an http answer" "an http answer does not overwrite a Secure cookie" \
+  '    return if !secure && secure_kept?(cookie.name, scope, path, now)
+' ''
+prove_broken "a Secure cookie shadowed from a domain above its host" "nor set one for a domain its host is under" \
+  '(CookieJar.domain_match?(scope, held) || CookieJar.domain_match?(held, scope))' 'CookieJar.domain_match?(scope, held)'
+prove_broken "a Secure cookie shadowed from a host under its domain" "nor set one from a host under its domain" \
+  '(CookieJar.domain_match?(scope, held) || CookieJar.domain_match?(held, scope))' 'CookieJar.domain_match?(held, scope)'
+prove_broken "a Secure cookie shadowed from a longer path" "nor set one of a longer path to go beside it" \
+  'CookieJar.path_match?(path, other.path || "/")' 'path == (other.path || "/")'
+prove_broken "a lapsed Secure cookie guarding its name" "a Secure cookie that has lapsed guards nothing" \
+  'other.secure && other.name == name && !other.expired?(now) &&' 'other.secure && other.name == name &&'
+prove_broken "an http answer kept from every name beside a Secure cookie" "an http answer still sets a cookie of another name" \
+  'other.secure && other.name == name &&' 'other.secure &&'
+prove_broken "an https answer kept from a Secure cookie too" "an https answer still replaces a Secure cookie" \
+  'return if !secure && secure_kept?' 'return if secure_kept?'
+prove_broken "a __Secure- cookie taken without Secure" "a __Secure- cookie needs Secure" \
+  '      return unless cookie.secure
+' ''
+prove_broken "a __Host- cookie taken without Secure" "a __Host- cookie needs Secure" \
+  'if host_only || CookieJar.prefixed?(cookie.name, "__secure-")' 'if CookieJar.prefixed?(cookie.name, "__secure-")'
+prove_broken "a __Host- cookie taken with a Domain" "a __Host- cookie has no Domain" \
+  'return if host_only && !(cookie.domain.nil? && cookie.path == "/")' 'return if host_only && !(cookie.path == "/")'
+prove_broken "a __Host- cookie taken with another Path" "a __Host- cookie has Path=/" \
+  'return if host_only && !(cookie.domain.nil? && cookie.path == "/")' 'return if host_only && !cookie.domain.nil?'
+prove_broken "a __Host- cookie taken with no Path written" "and has it written out" \
+  'return if host_only && !(cookie.domain.nil? && cookie.path == "/")' 'return if host_only && !(cookie.domain.nil? && (cookie.path || "/") == "/")'
+prove_broken "a prefix read in its usual case alone" "a prefix is read in any case" \
+  'c = c | 32_u8 if c >= 65_u8 && c <= 90_u8' 'c = c | 32_u8 if c == 72_u8 || c == 83_u8'
+prove_broken "a prefix found anywhere in a name" "a name that holds a prefix further in" \
+  'host_only = CookieJar.prefixed?(cookie.name, "__host-")' 'host_only = cookie.name.downcase.includes?("__host-")'
+prove_broken "a path written with a semicolon in it" "a path with a semicolon refused" \
+  'if c < 0x20_u8 || c == 0x3B_u8 || c >= 0x7F_u8' 'if c < 0x20_u8 || c >= 0x7F_u8'
+prove_broken "a path written with a control byte in it" "a path with a control byte refused" \
+  'if c < 0x20_u8 || c == 0x3B_u8 || c >= 0x7F_u8' 'if c == 0x3B_u8 || c >= 0x7F_u8'
+prove_broken "a path written with a delete byte in it" "a path with a delete byte refused" \
+  'if c < 0x20_u8 || c == 0x3B_u8 || c >= 0x7F_u8' 'if c < 0x20_u8 || c == 0x3B_u8 || c >= 0x80_u8'
+prove_broken "a path written with a byte outside ASCII in it" "a path outside ASCII refused" \
+  'if c < 0x20_u8 || c == 0x3B_u8 || c >= 0x7F_u8' 'if c < 0x20_u8 || c == 0x3B_u8 || c == 0x7F_u8'
+prove_broken "a domain written as it is" "a domain with a semicolon refused" \
+  'unless DnsName.valid?(host)' 'unless true'
+prove_broken "a domain's leading dot refused" "a domain's one leading dot written" \
+  'unless DnsName.valid?(host)' 'unless DnsName.valid?(domain)'
+prove_broken "a SameSite written as it is" "a SameSite with a semicolon refused" \
+  'unless HTTP.same_name?(same, "Strict") ||' 'unless true ||'
+prove_broken "a SameSite read in one case alone" "a SameSite in any case written" \
+  'HTTP.same_name?(same, "Lax")' 'same == "Lax"'
 
 echo
 if [ "$status" -eq 0 ]; then

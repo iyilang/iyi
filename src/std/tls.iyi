@@ -3004,7 +3004,7 @@ pub class TlsClient < TlsConnection
     end
     response = OcspResponse.parse(der)
     return TlsError.new("the stapled OCSP response: #{response.message}", TlsAlert::BAD_CERTIFICATE_STATUS_RESPONSE) if response.is_a?(OcspError)
-    verdict = response.verify(leaf, @peer_certificates[1], @config.now || Time.utc)
+    verdict = response.verify(leaf, @peer_certificates[1], @config.now || Time.utc, distrusted: @config.distrusted)
     return TlsError.new("the stapled OCSP response: #{verdict.message}", TlsAlert::BAD_CERTIFICATE_STATUS_RESPONSE) if verdict.is_a?(OcspError)
     @ocsp_response = response
     @ocsp_status = verdict.status

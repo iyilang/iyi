@@ -13,7 +13,8 @@
 # proves that what the module refuses is refused with the prelude's sentence
 # (`division by zero`, `modulo by zero`, `not a decimal: "12x"`), reads in
 # the assembly of a build with no optimisation that a Montgomery product's
-# carries are not branches, reads the
+# carries are not branches, and in the assembly of a --release build that
+# every mask picking by a secret holds its value barrier, reads the
 # module with `iyi doc`, checks the formatting, typechecks the exercise for
 # five targets, builds it again from `--emit-iyimod` artifacts, and proves
 # the checks can fail by patching copies of std/big.iyi through IYI_PATH.
@@ -28,8 +29,10 @@
 # low half, a carry made a comparison again, the
 # square's last-added reduction term, both window tables, the even
 # modulus' exponent bits, the binary GCD inverse's rounds, negations,
-# Montgomery step, range and GCD check, and the correction of a one-limb
-# quotient, and requires each break to be caught at a named check.
+# Montgomery step, range and GCD check, the correction of a one-limb
+# quotient, and requires each break to be caught at a named check; and it
+# takes four masks out of their value barriers, which the release
+# assembly's reading must refuse on both targets.
 #
 # Exits non-zero if any check fails.
 
@@ -651,6 +654,106 @@ else
 fi
 
 echo
+echo "== the masks that pick by a secret, read off the machine code of an optimised build"
+# A mask made from a secret is 0 or all ones, and LLVM, once it sees so,
+# may write the masked choice as a branch or as a load from one of two
+# addresses: the same answers, so nothing above shows it. Every such mask
+# in `Montgomery` goes through std/digest's `ValueBarrier`, which on these
+# two targets is an empty inline assembly, an `APP` line followed at once
+# by a `NO_APP` (`#` on x86_64, `//` on aarch64); here they are counted in
+# the --release assembly of a small program, for two pinned targets
+# whatever the host is. A --release build inlines what it reads into its
+# callers, so what is read is the functions that keep a name:
+# `BigInt#pow_mod_secret`, into which `pow_fixed` and its table scan are
+# inlined; `Montgomery#mul` and `#sqr`, each holding `reduce`'s final
+# subtraction; `BigInt#inverse_mod_secret`, into which `inverse` and its
+# helpers are inlined; and `Montgomery#into_range`, which is not. Each
+# must hold at least one barrier for each place in the source whose mask
+# ends up in it: 1 in the table scan, 1 in each of mul and sqr, 8 in the
+# inverse (keep, short, the two equal_masks, bits_of's moved, odd and the
+# two negatives) and 2 in into_range. An unrolled loop writes its barrier
+# once a pass, so a build holds more, and how many more is the compiler's:
+# 13 in the inverse for aarch64 from one LLVM and 15 from another, 4 in
+# into_range. So a broken copy below is held to the count the intact
+# module's build has on the same target, by the same compiler, and one
+# barrier fewer than that is refused.
+cat >"$WORK/secret.iyi" <<'IYI'
+import std/big::{BigInt}
+
+m = (BigInt.one << 521) - 1
+x = BigInt.from_hex(Program.args.size > 0 ? Program.args[0] : "123456789abcdef0123456789abcdef")
+puts x.pow_mod_secret(x * x + 5, m).to_s(16).size
+inverse = x.inverse_mod_secret(m)
+puts inverse.nil? ? "none" : inverse.to_s(16).size
+IYI
+# value_barriers <file.s>: for each function read, how many empty inline
+# assemblies it holds and its name, a line each. Read as bytes, as
+# `carry_branches` reads.
+value_barriers() {
+  LC_ALL=C awk '
+    /^"\*Std::Big::(BigInt#(pow_mod_secret|inverse_mod_secret)|Montgomery#(mul|sqr|into_range))<.*":$/ {
+      name = substr($0, 13); sub(/<.*/, "", name); inside = 1; count[name] += 0; last = ""; next
+    }
+    inside && /^\t\.size\t/ { inside = 0 }
+    !inside || /^\t\./ || /^\.Ltmp/ || NF == 0 { next }
+    {
+      if ($1 ~ /NO_APP$/ && last ~ /APP$/ && last !~ /NO_APP$/) count[name]++
+      last = $1
+    }
+    END { for (name in count) print count[name], name }' "$1"
+}
+# barriers <dir> [<patched> <intact>]: a line for each target where a
+# function holds fewer barriers than its masks go through - than the
+# floor below, or with <intact> given, than the intact module's reading
+# in that directory - or nothing could be read, std/big taken from
+# <patched> when it is given; 1 if there is any.
+barriers() {
+  local target wrong=0 name x86 arm need have
+  mkdir -p "$1"
+  for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
+    if ! ( [ -z "${2-}" ] || export IYI_PATH="$2${PSEP}$REPO/src"
+           "$IYI" build --release --emit asm --x86-asm-syntax intel --cross-compile --target "$target" -o "$1/$target" "$WORK/secret.iyi" ) \
+         >"$1/$target.log" 2>&1 || [ ! -s "$1/$target.s" ]; then
+      echo "$target: no assembly was written: $(grep -m1 -E 'Error|BUG' "$1/$target.log")"
+      wrong=1
+      continue
+    fi
+    value_barriers "$1/$target.s" >"$1/$target.read"
+    if [ ! -s "$1/$target.read" ]; then
+      echo "$target: the assembly could not be read"
+      wrong=1
+      continue
+    fi
+    while read -r name x86 arm; do
+      need="$x86"
+      [ "$target" = aarch64-unknown-linux-gnu ] && need="$arm"
+      [ -n "${3-}" ] && need="$(LC_ALL=C awk -v name="$name" '$2 == name { print $1 }' "$3/$target.read")"
+      have="$(LC_ALL=C awk -v name="$name" '$2 == name { print $1 }' "$1/$target.read")"
+      if [ -z "$have" ]; then
+        echo "$target: $name is not in the assembly, so nothing of it was read"
+        wrong=1
+      elif [ "$have" -lt "$need" ]; then
+        echo "$target: $name: not the $need value barriers its masks go through, but $have"
+        wrong=1
+      fi
+    done <<'READ'
+BigInt#pow_mod_secret 1 1
+Montgomery#mul 1 1
+Montgomery#sqr 1 1
+BigInt#inverse_mod_secret 8 8
+Montgomery#into_range 2 2
+READ
+  done
+  return $wrong
+}
+if barriers "$WORK/barriers" >"$WORK/barriers.out"; then
+  echo "  x86_64 and aarch64, --release: pow_mod_secret's table scan, mul's and sqr's final subtraction, inverse_mod_secret's and into_range's choices each hold their value barriers"
+else
+  sed 's/^/  FAIL: /' "$WORK/barriers.out"
+  status=1
+fi
+
+echo
 echo "== proving the checks can fail when big number operations are broken"
 
 prove_fails() {
@@ -913,11 +1016,41 @@ prove_fails "a negated a's factor left as it was" no_inverse_factor "inverse_mod
 prove_fails "u divided by 2^31 without its q m" no_inverse_q "inverse_mod_secret: 2^(len - 1), which takes every step" \
   's/^      qu = .*$/      qu = 0_i128/'
 prove_fails "a u or v of m or more kept" no_inverse_range "inverse_mod_secret: x times its inverse is 1" \
-  's/^      keep = top_less.unsafe_to_i64.unsafe_shr(63).unsafe_to_u64 ^ zero$/      keep = ~zero/'
+  's/^      keep = ValueBarrier.u64(top_less.unsafe_to_i64.unsafe_shr(63).unsafe_to_u64)$/      keep = ~0_u64/'
 prove_fails "the stand-ins' low bits one short" no_inverse_low "inverse_mod_secret: 2^(len - 1), which takes every step" \
   's/(ap\[0\] \& 0x7FFFFFFF_u64)/(ap[0] \& 0x3FFFFFFF_u64)/; s/(bp\[0\] \& 0x7FFFFFFF_u64)/(bp[0] \& 0x3FFFFFFF_u64)/'
 prove_fails "the GCD left unchecked" no_inverse_gcd "inverse_mod_secret: nil exactly when x shares a factor with the modulus" \
   's/^    return nil unless rest == 0_u64$//'
+# A mask taken out of its barrier answers the same and so passes the
+# exercise: it is the reading of the --release machine code that has to
+# refuse it, on both targets. One for each function read: the table
+# scan's mask, the final subtraction's (in both mul and sqr), a binary
+# GCD step's odd mask, and into_range's keep.
+prove_unmasked() { # prove_unmasked <label> <dir> <phrase> <sed script>
+  mkdir -p "$WORK/$2/std"
+  sed -e "$4" "$REPO/src/std/big.iyi" > "$WORK/$2/std/big.iyi"
+  if cmp -s "$REPO/src/std/big.iyi" "$WORK/$2/std/big.iyi"; then
+    echo "  $1: the patch changed nothing, so this proves nothing"
+    status=1
+  elif barriers "$WORK/$2/read" "$WORK/$2" "$WORK/barriers" >"$WORK/$2/out"; then
+    echo "  $1: its machine code was read as sound, so the reading does not test this"
+    status=1
+  elif [ "$(grep -cF "$3" "$WORK/$2/out")" -eq 2 ]; then
+    echo "  $1: refused on both targets, \"$(sed -n '1s/^[^:]*: //p' "$WORK/$2/out")\" on x86_64"
+  else
+    echo "  $1: refused, but not for what it is:"
+    sed 's/^/    /' "$WORK/$2/out"
+    status=1
+  fi
+}
+prove_unmasked "the table scan's mask in the compiler's sight" no_barrier_lookup "BigInt#pow_mod_secret: not the" \
+  's/^        mask = ValueBarrier.u64(\(.*\))$/        mask = \1/'
+prove_unmasked "the final subtraction's mask in the compiler's sight" no_barrier_reduce "Montgomery#mul: not the" \
+  's/^    below = ValueBarrier.u64(\(.*\))$/    below = \1/'
+prove_unmasked "a GCD step's odd mask in the compiler's sight" no_barrier_odd "BigInt#inverse_mod_secret: not the" \
+  's/^        odd = ValueBarrier.u64(\(.*\))$/        odd = \1/'
+prove_unmasked "into_range's keep in the compiler's sight" no_barrier_range "Montgomery#into_range: not the" \
+  's/^      keep = ValueBarrier.u64(\(.*\))$/      keep = \1/'
 
 # A one-limb quotient left at its estimate, which can be up to three
 # short: the divisor no longer taken off what is left.

@@ -66,6 +66,7 @@ module std/big
 
 import std/int
 import std/traits::{Comparable, Num, Hashable}
+import std/digest::{ValueBarrier}
 
 pub struct BigInt
   getter sign : Int32
@@ -1870,10 +1871,18 @@ end
 # A mask is not enough on its own: LLVM saw that `0 - keep` is 0 or all
 # ones, made the selection a branch and took it out of the loop, so the
 # release build of the first version here copied t only when it kept t,
-# and the table scan read only the entry it wanted. Every mask is xored
-# with `@zero`, a zero read through an atomic load, which the optimiser
-# cannot see the value of; the assembly of a --release build shows the and
-# and the or in both loops, every time.
+# and the table scan read only the entry it wanted. So every mask that
+# picks by a secret - `reduce`'s final subtraction, `pow_fixed`'s table
+# entry, and each choice of `inverse` and `into_range` - goes through
+# std/digest's `ValueBarrier` before it masks anything, which LLVM cannot
+# see the value through. What did this before, an xor with a zero read by
+# an atomic load from a field, was left in a --release build only because
+# `Montgomery.new`, `#mul` and `#sqr` stayed out of line: a struct the
+# optimiser could follow as a local would have shown it the zero, and
+# the xor would have gone, as std/p256's did.
+# bench/std_big_exercise.sh reads the barriers in the --release assembly
+# of `#mul`, `#sqr`, `#into_range`, `BigInt#pow_mod_secret` and
+# `BigInt#inverse_mod_secret`, for x86_64 and aarch64.
 struct Montgomery
   @m : Array(UInt64)
   @n : Int32
@@ -1887,8 +1896,6 @@ struct Montgomery
   # value into it (made only for a secret exponent)
   @one : Array(UInt64)
   @r2 : Array(UInt64)
-  # 0, read where it is needed by an atomic load (see above)
-  @zero : Atomic(UInt64)
   @mod : BigInt
   @secret : Bool
 
@@ -1901,7 +1908,6 @@ struct Montgomery
     @p = Array(UInt64).new(2 * @n, 0_u64)
     @one = Array(UInt64).new(@n, 0_u64)
     @r2 = Array(UInt64).new(@n, 0_u64)
-    @zero = Atomic(UInt64).new(0_u64)
     constants(Montgomery.bit_length(mod.limbs))
   end
 
@@ -2011,7 +2017,7 @@ struct Montgomery
       borrow = w.unsafe_shr(127).unsafe_to_u64
       j = j + 1
     end
-    below = (top.to_u128 &- borrow.to_u128).unsafe_shr(64).unsafe_to_u64 ^ @zero.get
+    below = ValueBarrier.u64((top.to_u128 &- borrow.to_u128).unsafe_shr(64).unsafe_to_u64)
     j = 0
     while j < n
       r[j] = (t[j] & below) | (r[j] & ~below)
@@ -2338,7 +2344,6 @@ struct Montgomery
     chosen = Array(UInt64).new(n, 0_u64)
     cp = chosen.to_unsafe
     limbs = exp.limbs
-    zero = @zero.get
     w = (width + k - 1) // k - 1
     while w >= 0
       k.times { sqr(ap, ap) }
@@ -2356,7 +2361,7 @@ struct Montgomery
       e = 0
       while e < size
         d = e.to_u64 ^ value
-        mask = ((d | (0_u64 &- d)).unsafe_shr(63_u64) &- 1_u64) ^ zero
+        mask = ValueBarrier.u64((d | (0_u64 &- d)).unsafe_shr(63_u64) &- 1_u64)
         entry = tp + (e * n).to_i64
         j = 0
         while j < n
@@ -2398,7 +2403,6 @@ struct Montgomery
   def inverse(x : BigInt) : BigInt?
     n = @n
     m = @m.to_unsafe
-    zero = @zero.get
     a = Montgomery.words(x.limbs, n)
     b = @m.dup
     u = Array(UInt64).new(n, 0_u64)
@@ -2417,13 +2421,13 @@ struct Montgomery
       j = 0
       while j < n
         c = ap[j] | bp[j]
-        keep = (0_u64 &- (c | (0_u64 &- c)).unsafe_shr(63)) ^ zero
+        keep = ValueBarrier.u64(0_u64 &- (c | (0_u64 &- c)).unsafe_shr(63))
         top = (j.to_u64 & keep) | (top & ~keep)
         word = (c & keep) | (word & ~keep)
         j = j &+ 1
       end
-      length = top.unsafe_shl(6) &+ Montgomery.bits_of(word, zero)
-      short = (0_u64 &- Montgomery.borrow_of(length, 64_u64, 0_u64)) ^ zero
+      length = top.unsafe_shl(6) &+ Montgomery.bits_of(word)
+      short = ValueBarrier.u64(0_u64 &- Montgomery.borrow_of(length, 64_u64, 0_u64))
       length = (64_u64 & short) | (length & ~short)
       at = length &- 33_u64
       shift = at & 63_u64
@@ -2434,8 +2438,8 @@ struct Montgomery
       b_high = 0_u64
       j = 0
       while j < n
-        here = Montgomery.equal_mask(j.to_u64, w, zero)
-        above = Montgomery.equal_mask(j.to_u64, w &+ 1_u64, zero)
+        here = Montgomery.equal_mask(j.to_u64, w)
+        above = Montgomery.equal_mask(j.to_u64, w &+ 1_u64)
         a_low = a_low | (ap[j] & here)
         a_high = a_high | (ap[j] & above)
         b_low = b_low | (bp[j] & here)
@@ -2450,7 +2454,7 @@ struct Montgomery
       f1 = 0_u64
       g1 = 1_u64
       31.times do
-        odd = (0_u64 &- (xa & 1_u64)) ^ zero
+        odd = ValueBarrier.u64(0_u64 &- (xa & 1_u64))
         swap = odd & (0_u64 &- Montgomery.borrow_of(xa, xb, 0_u64))
         d = (xa ^ xb) & swap
         xa = xa ^ d
@@ -2498,8 +2502,8 @@ struct Montgomery
       end
       ap[n - 1] = before_a.unsafe_shr(31_u64) | ca.unsafe_to_u64.unsafe_shl(33_u64)
       bp[n - 1] = before_b.unsafe_shr(31_u64) | cb.unsafe_to_u64.unsafe_shl(33_u64)
-      negative_a = ca.unsafe_to_i64.unsafe_shr(63).unsafe_to_u64 ^ zero
-      negative_b = cb.unsafe_to_i64.unsafe_shr(63).unsafe_to_u64 ^ zero
+      negative_a = ValueBarrier.u64(ca.unsafe_to_i64.unsafe_shr(63).unsafe_to_u64)
+      negative_b = ValueBarrier.u64(cb.unsafe_to_i64.unsafe_shr(63).unsafe_to_u64)
       Montgomery.negate(ap, n, negative_a)
       Montgomery.negate(bp, n, negative_b)
       f0 = (f0 ^ negative_a) &- negative_a
@@ -2567,9 +2571,8 @@ struct Montgomery
   private def into_range(r : Pointer(UInt64), top : UInt64) : Nil
     n = @n
     m = @m.to_unsafe
-    zero = @zero.get
     2.times do
-      negative = top.unsafe_to_i64.unsafe_shr(63).unsafe_to_u64 ^ zero
+      negative = ValueBarrier.u64(top.unsafe_to_i64.unsafe_shr(63).unsafe_to_u64)
       carry = 0_u64
       j = 0
       while j < n
@@ -2590,7 +2593,7 @@ struct Montgomery
         j = j &+ 1
       end
       top_less = top &- borrow
-      keep = top_less.unsafe_to_i64.unsafe_shr(63).unsafe_to_u64 ^ zero
+      keep = ValueBarrier.u64(top_less.unsafe_to_i64.unsafe_shr(63).unsafe_to_u64)
       j = 0
       while j < n
         r[j] = (r[j] & keep) | (t[j] & ~keep)
@@ -2620,18 +2623,18 @@ struct Montgomery
   end
 
   # All ones where x is y, else 0.
-  def self.equal_mask(x : UInt64, y : UInt64, zero : UInt64) : UInt64
+  def self.equal_mask(x : UInt64, y : UInt64) : UInt64
     d = x ^ y
-    ((d | (0_u64 &- d)).unsafe_shr(63_u64) &- 1_u64) ^ zero
+    ValueBarrier.u64((d | (0_u64 &- d)).unsafe_shr(63_u64) &- 1_u64)
   end
 
   # The bits *x* takes to write, by a search of six masked halvings.
-  def self.bits_of(x : UInt64, zero : UInt64) : UInt64
+  def self.bits_of(x : UInt64) : UInt64
     bits = 0_u64
     step = 32_u64
     while step > 0_u64
       high = x.unsafe_shr(step)
-      moved = (0_u64 &- (high | (0_u64 &- high)).unsafe_shr(63_u64)) ^ zero
+      moved = ValueBarrier.u64(0_u64 &- (high | (0_u64 &- high)).unsafe_shr(63_u64))
       bits = bits &+ (step & moved)
       x = (high & moved) | (x & ~moved)
       step = step.unsafe_shr(1_u64)

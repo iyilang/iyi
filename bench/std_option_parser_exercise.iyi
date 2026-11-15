@@ -138,4 +138,37 @@ assert_panics("option: not a flag or a command: deploy now") { late.on("deploy n
 assert_panics("option: not a flag: -") { late.on("-", "a dash") { |v| } }
 puts "  -v and --verbose are one flag, a command is the first operand, and its block registers the next level"
 
+# A driver that hands the rest of the line to a program it runs: `stop` ends
+# the parse where a handler says so, `before_each` sees every argument the
+# parser reads, and `unknown_args` is told which operands stood before `--`.
+puts "\n== stop, before_each, unknown_args"
+drv = OptionParser.new
+drv_seen = [] of String
+drv_ran = [] of String
+drv.before_each { |arg| drv_seen << arg }
+drv.on("-v", "verbose") { |v| drv_ran << "v" }
+drv.on("run", "run a program") do |c|
+  drv_ran << "run"
+  drv.stop
+end
+drv_left = drv.parse(["-v", "run", "prog", "-v", "--unknown"])
+assert_str "prog,-v,--unknown", drv_left.join(","), "after stop the rest of the line is left as it stands, flags and all"
+assert_str "v,run", drv_ran.join(","), "nothing after stop runs a handler"
+assert_str "-v,run", drv_seen.join(","), "before_each sees each argument the parser reads, and none after stop"
+assert_true !drv.stop?, "stop is spent by the parse it ended"
+split = OptionParser.new
+split_before = ""
+split_after = ""
+split.unknown_args do |before, after|
+  split_before = before.join(",")
+  split_after = after.join(",")
+end
+split.parse(["a", "x", "--", "x", "b"])
+assert_str "a,x", split_before, "the operands before --"
+assert_str "x,b", split_after, "the operands after --, one of them spelled like one before it"
+split.parse(["a", "b"])
+assert_str "a,b", split_before, "without -- every operand is before it"
+assert_str "", split_after, "and none is after"
+puts "  a handler stops the parse, every read argument is seen, operands are split at --"
+
 puts "\nALL CHECKS PASSED"

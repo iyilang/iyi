@@ -479,7 +479,7 @@ pub struct X509
     problem = leaf_error(leaf, host, now, purpose)
     return X509Error.new(problem) if problem
     search = X509Search.new(intermediates, roots, now, purpose, distrusted)
-    problem = distrusted_error(leaf, search)
+    problem = distrusted_error(leaf, search.distrusted, search.distrusted_keys)
     return X509Error.new(problem) if problem
     chain = grow([leaf], 0, search)
     return chain if chain
@@ -584,16 +584,28 @@ pub struct X509
     usages.includes?(purpose.oid) || usages.includes?(X509Oids::ANY_EXTENDED_KEY_USAGE)
   end
 
-  # Why *certificate* is among the search's distrusted certificates, by
-  # its own bytes or by its key, or nil.
-  private def self.distrusted_error(certificate : Certificate, search : X509Search) : String?
-    if search.distrusted.any? { |der| der == certificate.raw }
+  # Why *certificate* is among *distrusted* (each a certificate's DER, as
+  # `verify` takes them), by its own bytes or by its key - *keys* being
+  # `distrusted_keys(distrusted)` - or nil. std/ocsp holds a delegated
+  # responder to it.
+  def self.distrusted_error(certificate : Certificate, distrusted : Array(Array(UInt8)), keys : Array(Array(UInt8))) : String?
+    if distrusted.any? { |der| der == certificate.raw }
       return "#{certificate.subject_name} is a certificate that is distrusted"
     end
-    if search.distrusted_keys.any? { |info| info == certificate.public_key_info }
+    if keys.any? { |info| info == certificate.public_key_info }
       return "#{certificate.subject_name} holds the key of a certificate that is distrusted"
     end
     nil
+  end
+
+  # The SubjectPublicKeyInfo of each of *distrusted* that has one to find.
+  def self.distrusted_keys(distrusted : Array(Array(UInt8))) : Array(Array(UInt8))
+    keys = [] of Array(UInt8)
+    distrusted.each do |der|
+      info = X509Keys.info_of(der)
+      keys << info if info
+    end
+    keys
   end
 
   # Why *certificate*'s key is too weak to be in a chain, or too large to
@@ -657,7 +669,7 @@ pub struct X509
   private def self.issuer_error(child : Certificate, child_at : Int32, issuer : Certificate, issuer_at : Int32,
                                 chain : Array(Certificate), search : X509Search) : String?
     name = issuer.subject_name
-    distrusted = distrusted_error(issuer, search)
+    distrusted = distrusted_error(issuer, search.distrusted, search.distrusted_keys)
     return distrusted if distrusted
     now = search.now
     return "#{name} is not valid at #{now}: from #{issuer.not_before} to #{issuer.not_after}" unless issuer.valid_at?(now)
@@ -793,11 +805,7 @@ class X509Search
   def initialize(@intermediates : Array(Certificate), @roots : Array(Certificate), @now : Time, @purpose : X509Purpose,
                  distrusted : Array(Array(UInt8))?)
     @distrusted = distrusted || [] of Array(UInt8)
-    @distrusted_keys = [] of Array(UInt8)
-    @distrusted.each do |der|
-      info = X509Keys.info_of(der)
-      @distrusted_keys << info if info
-    end
+    @distrusted_keys = X509.distrusted_keys(@distrusted)
     count = 1 + @intermediates.size + @roots.size
     @failures = [] of String
     @checks = 0

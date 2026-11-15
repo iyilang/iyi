@@ -369,7 +369,7 @@ for f in bench/fixtures/ir/reject/*.ir; do
   want=$(sed -n 's/^; reject: //p' "$f" | head -n 1)
   [ -n "$want" ] || { fail "$f names no expected refusal"; continue; }
   out=$("$DRV" print "$f" 2>&1) && { fail "$f was accepted"; continue; }
-  echo "$out" | grep -q "$want" || fail "$f was refused for another reason, not '$want': $out"
+  echo "$out" | grep -Fq -- "$want" || fail "$f was refused for another reason, not '$want': $out"
 done
 [ "$count" -gt 0 ] || fail "no rejected fixtures found"
 echo "refused $count literal and intrinsic fixtures under their reasons"

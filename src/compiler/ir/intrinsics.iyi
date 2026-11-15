@@ -1,0 +1,345 @@
+module compiler/ir/intrinsics
+
+import compiler/ir/types::{IrType, TypeTable}
+
+# The intrinsics the IR knows, one member per family. A family is generic over the types its LLVM name
+# mangles (the overload): the width of an integer or the kind of a float is data, carried in the
+# IntrinsicAux overload, not a member of its own. `llvm.sadd.with.overflow.i8` and `..i128` are the same member.
+pub enum IntrinsicId
+  Memcpy
+  Memmove
+  Memset
+  SAddOverflow
+  UAddOverflow
+  SSubOverflow
+  USubOverflow
+  SMulOverflow
+  UMulOverflow
+  Sqrt
+  Fabs
+  Sin
+  Cos
+  Exp
+  Exp2
+  Log
+  Log2
+  Log10
+  Pow
+  Powi
+  Floor
+  Ceil
+  Trunc
+  Round
+  Roundeven
+  Rint
+  Fma
+  Minnum
+  Maxnum
+  Copysign
+  Ctpop
+  Ctlz
+  Cttz
+  Bswap
+  Fshl
+  Fshr
+  Trap
+  DebugTrap
+  ExpectI1
+  Assume
+  Donothing
+  Frameaddress
+  Returnaddress
+  Stacksave
+  Stackrestore
+  VaStart
+  VaEnd
+  Readcyclecounter
+  X86Sse2Pause
+  AArch64Hint
+  WasmMemoryGrowI32
+end
+
+# A name the parser matched: its family and the overload types spelled in it.
+pub class IntrinsicMatch
+  getter id : IntrinsicId
+  getter overload : Array(IrType)
+
+  def initialize(@id : IntrinsicId, @overload : Array(IrType))
+  end
+end
+
+# Every family, in declaration order.
+pub def all_intrinsic_ids : Array(IntrinsicId)
+  [IntrinsicId::Memcpy, IntrinsicId::Memmove, IntrinsicId::Memset,
+   IntrinsicId::SAddOverflow, IntrinsicId::UAddOverflow, IntrinsicId::SSubOverflow,
+   IntrinsicId::USubOverflow, IntrinsicId::SMulOverflow, IntrinsicId::UMulOverflow,
+   IntrinsicId::Sqrt, IntrinsicId::Fabs, IntrinsicId::Sin, IntrinsicId::Cos, IntrinsicId::Exp,
+   IntrinsicId::Exp2, IntrinsicId::Log, IntrinsicId::Log2, IntrinsicId::Log10, IntrinsicId::Pow,
+   IntrinsicId::Powi, IntrinsicId::Floor, IntrinsicId::Ceil, IntrinsicId::Trunc, IntrinsicId::Round,
+   IntrinsicId::Roundeven, IntrinsicId::Rint, IntrinsicId::Fma, IntrinsicId::Minnum,
+   IntrinsicId::Maxnum, IntrinsicId::Copysign, IntrinsicId::Ctpop, IntrinsicId::Ctlz,
+   IntrinsicId::Cttz, IntrinsicId::Bswap, IntrinsicId::Fshl, IntrinsicId::Fshr,
+   IntrinsicId::Trap, IntrinsicId::DebugTrap, IntrinsicId::ExpectI1, IntrinsicId::Assume,
+   IntrinsicId::Donothing, IntrinsicId::Frameaddress, IntrinsicId::Returnaddress,
+   IntrinsicId::Stacksave, IntrinsicId::Stackrestore, IntrinsicId::VaStart, IntrinsicId::VaEnd,
+   IntrinsicId::Readcyclecounter, IntrinsicId::X86Sse2Pause, IntrinsicId::AArch64Hint,
+   IntrinsicId::WasmMemoryGrowI32]
+end
+
+# The LLVM name of a family after `llvm.`, without its overload suffix. Families with a fixed suffix
+# (`expect.i1`, `wasm.memory.grow.i32`) spell it here, with no overload.
+pub def intrinsic_stem(id : IntrinsicId) : String
+  case id
+  when IntrinsicId::Memcpy           then "memcpy"
+  when IntrinsicId::Memmove          then "memmove"
+  when IntrinsicId::Memset           then "memset"
+  when IntrinsicId::SAddOverflow     then "sadd.with.overflow"
+  when IntrinsicId::UAddOverflow     then "uadd.with.overflow"
+  when IntrinsicId::SSubOverflow     then "ssub.with.overflow"
+  when IntrinsicId::USubOverflow     then "usub.with.overflow"
+  when IntrinsicId::SMulOverflow     then "smul.with.overflow"
+  when IntrinsicId::UMulOverflow     then "umul.with.overflow"
+  when IntrinsicId::Sqrt             then "sqrt"
+  when IntrinsicId::Fabs             then "fabs"
+  when IntrinsicId::Sin              then "sin"
+  when IntrinsicId::Cos              then "cos"
+  when IntrinsicId::Exp              then "exp"
+  when IntrinsicId::Exp2             then "exp2"
+  when IntrinsicId::Log              then "log"
+  when IntrinsicId::Log2             then "log2"
+  when IntrinsicId::Log10            then "log10"
+  when IntrinsicId::Pow              then "pow"
+  when IntrinsicId::Powi             then "powi"
+  when IntrinsicId::Floor            then "floor"
+  when IntrinsicId::Ceil             then "ceil"
+  when IntrinsicId::Trunc            then "trunc"
+  when IntrinsicId::Round            then "round"
+  when IntrinsicId::Roundeven        then "roundeven"
+  when IntrinsicId::Rint             then "rint"
+  when IntrinsicId::Fma              then "fma"
+  when IntrinsicId::Minnum           then "minnum"
+  when IntrinsicId::Maxnum           then "maxnum"
+  when IntrinsicId::Copysign         then "copysign"
+  when IntrinsicId::Ctpop            then "ctpop"
+  when IntrinsicId::Ctlz             then "ctlz"
+  when IntrinsicId::Cttz             then "cttz"
+  when IntrinsicId::Bswap            then "bswap"
+  when IntrinsicId::Fshl             then "fshl"
+  when IntrinsicId::Fshr             then "fshr"
+  when IntrinsicId::Trap             then "trap"
+  when IntrinsicId::DebugTrap        then "debugtrap"
+  when IntrinsicId::ExpectI1         then "expect.i1"
+  when IntrinsicId::Assume           then "assume"
+  when IntrinsicId::Donothing        then "donothing"
+  when IntrinsicId::Frameaddress     then "frameaddress"
+  when IntrinsicId::Returnaddress    then "returnaddress"
+  when IntrinsicId::Stacksave        then "stacksave"
+  when IntrinsicId::Stackrestore     then "stackrestore"
+  when IntrinsicId::VaStart          then "va_start"
+  when IntrinsicId::VaEnd            then "va_end"
+  when IntrinsicId::Readcyclecounter then "readcyclecounter"
+  when IntrinsicId::X86Sse2Pause     then "x86.sse2.pause"
+  when IntrinsicId::AArch64Hint      then "aarch64.hint"
+  else
+    "wasm.memory.grow.i32"
+  end
+end
+
+# How many overload types the family's name spells after its stem.
+pub def intrinsic_arity(id : IntrinsicId) : Int32
+  case id
+  when IntrinsicId::Memcpy, IntrinsicId::Memmove                                                                                                                                                                                                                     then 3
+  when IntrinsicId::Memset, IntrinsicId::Powi                                                                                                                                                                                                                        then 2
+  when IntrinsicId::ExpectI1, IntrinsicId::Assume, IntrinsicId::Trap, IntrinsicId::DebugTrap, IntrinsicId::Donothing, IntrinsicId::Returnaddress, IntrinsicId::Readcyclecounter, IntrinsicId::X86Sse2Pause, IntrinsicId::AArch64Hint, IntrinsicId::WasmMemoryGrowI32 then 0
+  else
+    1
+  end
+end
+
+# The integer widths the IR has, from i8 up, that an integer intrinsic accepts.
+pub def intrinsic_int_widths : Array(Int32)
+  [8, 16, 32, 64, 128]
+end
+
+def wide_int?(t : IrType) : Bool
+  t.int? && intrinsic_int_widths.includes?(t.bits)
+end
+
+def float_type?(t : IrType) : Bool
+  t.float?
+end
+
+# A pointer in address space 0: the only pointer the intrinsics name.
+def plain_ptr?(t : IrType) : Bool
+  t.pointer? && t.address_space == 0
+end
+
+# Whether the family is one the overflow intrinsics form (`llvm.*.with.overflow`).
+def overflow_family?(id : IntrinsicId) : Bool
+  case id
+  when IntrinsicId::SAddOverflow, IntrinsicId::UAddOverflow, IntrinsicId::SSubOverflow, IntrinsicId::USubOverflow, IntrinsicId::SMulOverflow, IntrinsicId::UMulOverflow then true
+  else
+    false
+  end
+end
+
+# Whether the family takes floats at the overload type (a unary, binary or ternary float operation).
+def float_family?(id : IntrinsicId) : Bool
+  case id
+  when IntrinsicId::Sqrt, IntrinsicId::Fabs, IntrinsicId::Sin, IntrinsicId::Cos, IntrinsicId::Exp, IntrinsicId::Exp2, IntrinsicId::Log, IntrinsicId::Log2, IntrinsicId::Log10, IntrinsicId::Pow, IntrinsicId::Floor, IntrinsicId::Ceil, IntrinsicId::Trunc, IntrinsicId::Round, IntrinsicId::Roundeven, IntrinsicId::Rint, IntrinsicId::Fma, IntrinsicId::Minnum, IntrinsicId::Maxnum, IntrinsicId::Copysign then true
+  else
+    false
+  end
+end
+
+# Whether the overload types are ones this family names: its arity, and each kind and width.
+pub def intrinsic_accepts?(id : IntrinsicId, overload : Array(IrType)) : Bool
+  return false unless overload.size == intrinsic_arity(id)
+  if overflow_family?(id)
+    return wide_int?(overload[0])
+  end
+  if float_family?(id)
+    return float_type?(overload[0])
+  end
+  case id
+  when IntrinsicId::Ctpop, IntrinsicId::Ctlz, IntrinsicId::Cttz, IntrinsicId::Fshl, IntrinsicId::Fshr                         then wide_int?(overload[0])
+  when IntrinsicId::Bswap                                                                                                     then wide_int?(overload[0]) && overload[0].bits >= 16
+  when IntrinsicId::Powi                                                                                                      then float_type?(overload[0]) && overload[1].int? && overload[1].bits == 32
+  when IntrinsicId::Memcpy, IntrinsicId::Memmove                                                                              then plain_ptr?(overload[0]) && plain_ptr?(overload[1]) && wide_int?(overload[2])
+  when IntrinsicId::Memset                                                                                                    then plain_ptr?(overload[0]) && wide_int?(overload[1])
+  when IntrinsicId::Frameaddress, IntrinsicId::Stacksave, IntrinsicId::Stackrestore, IntrinsicId::VaStart, IntrinsicId::VaEnd then plain_ptr?(overload[0])
+  else
+    true
+  end
+end
+
+# The spelling of one overload type in a name: `p0`, `i32`, `f64`.
+pub def intrinsic_token(t : IrType) : String
+  if t.pointer?
+    "p#{t.address_space}"
+  elsif t.float?
+    "f#{t.bits}"
+  else
+    "i#{t.bits}"
+  end
+end
+
+# The LLVM name of an intrinsic at the overload types: `llvm.sadd.with.overflow.i8`, `llvm.memcpy.p0.p0.i64`.
+pub def intrinsic_name(id : IntrinsicId, overload : Array(IrType)) : String
+  String.build do |io|
+    io << "llvm." << intrinsic_stem(id)
+    overload.each { |t| io << "." << intrinsic_token(t) }
+  end
+end
+
+# The return type and the parameter types of the intrinsic at the overload types.
+pub def intrinsic_signature(id : IntrinsicId, overload : Array(IrType), types : TypeTable) : {IrType, Array(IrType)}
+  if overflow_family?(id)
+    t = overload[0]
+    return {types.struct_of([t, types.int1]), [t, t]}
+  end
+  if float_family?(id)
+    t = overload[0]
+    case id
+    when IntrinsicId::Pow, IntrinsicId::Minnum, IntrinsicId::Maxnum, IntrinsicId::Copysign then return {t, [t, t]}
+    when IntrinsicId::Fma                                                                  then return {t, [t, t, t]}
+    else
+      return {t, [t]}
+    end
+  end
+  case id
+  when IntrinsicId::Ctpop, IntrinsicId::Bswap                                                       then {overload[0], [overload[0]]}
+  when IntrinsicId::Ctlz, IntrinsicId::Cttz                                                         then {overload[0], [overload[0], types.int1]}
+  when IntrinsicId::Fshl, IntrinsicId::Fshr                                                         then {overload[0], [overload[0], overload[0], overload[0]]}
+  when IntrinsicId::Powi                                                                            then {overload[0], [overload[0], overload[1]]}
+  when IntrinsicId::Memcpy, IntrinsicId::Memmove                                                    then {types.void, [overload[0], overload[1], overload[2], types.int1]}
+  when IntrinsicId::Memset                                                                          then {types.void, [overload[0], types.int8, overload[1], types.int1]}
+  when IntrinsicId::Frameaddress                                                                    then {overload[0], [types.int32]}
+  when IntrinsicId::Returnaddress                                                                   then {types.ptr(0), [types.int32]}
+  when IntrinsicId::Stacksave                                                                       then {overload[0], [] of IrType}
+  when IntrinsicId::Stackrestore                                                                    then {types.void, [overload[0]]}
+  when IntrinsicId::VaStart, IntrinsicId::VaEnd                                                     then {types.void, [overload[0]]}
+  when IntrinsicId::ExpectI1                                                                        then {types.int1, [types.int1, types.int1]}
+  when IntrinsicId::Assume                                                                          then {types.void, [types.int1]}
+  when IntrinsicId::Trap, IntrinsicId::DebugTrap, IntrinsicId::Donothing, IntrinsicId::X86Sse2Pause then {types.void, [] of IrType}
+  when IntrinsicId::Readcyclecounter                                                                then {types.int64, [] of IrType}
+  when IntrinsicId::AArch64Hint                                                                     then {types.int32, [types.int32]}
+  when IntrinsicId::WasmMemoryGrowI32                                                               then {types.int32, [types.int32, types.int32]}
+  else
+    raise "no signature for #{intrinsic_stem(id)}"
+  end
+end
+
+# The overload types a name spells for one token, or nil when the token is not a type the IR has.
+def token_type(tok : String, types : TypeTable) : IrType?
+  return nil if tok.bytesize < 2
+  head = tok.byte_at(0)
+  digits = tok[1, tok.bytesize - 1]
+  if width = digits.to_i?
+    if head == 112_u8
+      return types.ptr(width)
+    elsif head == 105_u8
+      return types.int(width) if intrinsic_int_widths.includes?(width) || width == 1
+    elsif head == 102_u8
+      return types.float(width) if width == 32 || width == 64
+    end
+  end
+  nil
+end
+
+# The family and overload a name spells, or nil when no family the IR accepts spells it.
+pub def intrinsic_match(name : String, types : TypeTable) : IntrinsicMatch?
+  all_intrinsic_ids.each do |id|
+    full = "llvm." + intrinsic_stem(id)
+    next unless name.starts_with?(full)
+    rest = name.bytesize == full.bytesize ? "" : name[full.bytesize, name.bytesize - full.bytesize]
+    arity = intrinsic_arity(id)
+    if arity == 0
+      next unless rest.empty?
+      return IntrinsicMatch.new(id, [] of IrType)
+    end
+    next unless rest.starts_with?(".")
+    parts = rest[1, rest.bytesize - 1].split('.')
+    next unless parts.size == arity
+    overload = [] of IrType
+    ok = true
+    parts.each do |part|
+      if parsed = token_type(part, types)
+        overload << parsed
+      else
+        ok = false
+      end
+    end
+    next unless ok
+    next unless intrinsic_accepts?(id, overload)
+    return IntrinsicMatch.new(id, overload)
+  end
+  nil
+end
+
+# The overload types of every width the family accepts, in the order the names list them.
+pub def intrinsic_candidates(id : IntrinsicId, types : TypeTable) : Array(Array(IrType))
+  result = [] of Array(IrType)
+  if intrinsic_arity(id) == 0
+    result << ([] of IrType)
+    return result
+  end
+  if overflow_family?(id) || id == IntrinsicId::Ctpop || id == IntrinsicId::Ctlz || id == IntrinsicId::Cttz || id == IntrinsicId::Fshl || id == IntrinsicId::Fshr
+    intrinsic_int_widths.each { |w| result << [types.int(w)] }
+  elsif id == IntrinsicId::Bswap
+    [16, 32, 64, 128].each { |w| result << [types.int(w)] }
+  elsif id == IntrinsicId::Powi
+    result << [types.float(32), types.int32]
+    result << [types.double, types.int32]
+  elsif id == IntrinsicId::Memcpy || id == IntrinsicId::Memmove
+    intrinsic_int_widths.each { |w| result << [types.ptr(0), types.ptr(0), types.int(w)] }
+  elsif id == IntrinsicId::Memset
+    intrinsic_int_widths.each { |w| result << [types.ptr(0), types.int(w)] }
+  elsif float_family?(id)
+    result << [types.float(32)]
+    result << [types.double]
+  else
+    result << [types.ptr(0)]
+  end
+  result
+end

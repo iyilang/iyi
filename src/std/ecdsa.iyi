@@ -51,12 +51,15 @@
 #
 # A signature that is not one is `false`, whatever the reason.
 #
-# Pure computation: std/big's arithmetic, std/digest's hashes.
+# Pure computation: std/big's arithmetic, std/digest's hashes, and
+# std/atomic for the word P-256's table of G's multiples is published
+# through.
 
 @[Unsafe("the curve arithmetic works in word buffers it allocates and indexes itself, for speed")]
 module std/ecdsa
 
 import std/asn1::{Der, DerValue, DerTag, Asn1Error}
+import std/atomic
 import std/big::{BigInt}
 import std/digest::{SHA256, SHA384, SHA512}
 
@@ -631,7 +634,8 @@ struct EcdsaP256
   Q_WIDTH = 5
   G_WIDTH = 7
 
-  @@g_table = Pointer(EcdsaP256Num).new(0_u64)
+  # `g_table`'s address once it is whole, 0 until then.
+  @@g_table = ::Atomic(UInt64).new(0_u64)
 
   # Whether u1·G + u2·Q is a point whose x is r modulo n, as
   # `EcdsaPlane#check` answers it.
@@ -700,10 +704,16 @@ struct EcdsaP256
   # G, 3G, ... 63G as affine x and y, entry j's x at 2j and y at 2j + 1
   # (so digit d's point is at d - 1 and d), worked out the first time it
   # is wanted: a doubling, 31 additions and their Z inverted together by
-  # Montgomery's trick. Two threads that reach it first both work it out
-  # and store the same table.
+  # Montgomery's trick. Two threads that reach it first both work it out,
+  # and the later store stands, the tables being the same. Its address is
+  # kept in an atomic word, stored last, by a release store, and read by
+  # an acquire load (std/atomic), so a thread that reads the address reads
+  # every entry written before it: with a plain store and load, a machine
+  # that orders its stores loosely could show a check a table part
+  # written, and a good signature would be refused.
   def self.g_table(group : EcdsaGroup) : Pointer(EcdsaP256Num)
-    return @@g_table if @@g_table.address != 0_u64
+    ready = @@g_table.get_acquire
+    return Pointer(EcdsaP256Num).new(ready) if ready != 0_u64
     count = 1 << (G_WIDTH - 2)
     g = EcdsaP256Point.new(EcdsaP256Num.enter(group.gx), EcdsaP256Num.enter(group.gy), EcdsaP256Num.one)
     twice = g.double
@@ -736,7 +746,7 @@ struct EcdsaP256
       table[2 * i + 1] = EcdsaP256Num.mul(points[i].y, EcdsaP256Num.mul(zz, zi))
       i = i - 1
     end
-    @@g_table = table
+    @@g_table.set_release(table.address)
     table
   end
 end

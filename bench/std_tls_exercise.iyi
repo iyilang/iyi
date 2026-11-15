@@ -138,6 +138,11 @@ SCENARIOS = [
   {"staple-other-cert", false, "the stapled OCSP response: ocsp: no response here is for CN=leaf, serial"},
   {"sni-ack-data", false, "a server_name acknowledgement that is not empty (decode_error)"},
   {"user-canceled", true, ""},
+  {"idle-most", true, ""},
+  {"idle-again", true, ""},
+  {"idle-over", true, "read: more than 32 records without data (unexpected_message)"},
+  {"idle-kinds", true, "read: more than 32 records without data (unexpected_message)"},
+  {"empty-handshake", true, "read: an empty handshake record (unexpected_message)"},
   {"padded-max", true, ""},
   {"padded-over", true, "read: a record of 16386 bytes of inner plaintext, past the 2^14 + 1 allowed (record_overflow)"},
   {"split-by-data", true, "read: a record of type 23 inside a handshake message split across records (unexpected_message)"},
@@ -175,6 +180,8 @@ TICKET_SCENARIOS = [
   {"ticket-many", 8, ""},
   {"ticket-huge", 0, ""},
   {"ticket-bad", 0, "a NewSessionTicket cut short (decode_error)"},
+  {"ticket-wide", 1, ""},
+  {"ticket-twice", 0, "extension 1000 twice in a NewSessionTicket (illegal_parameter)"},
 ]
 
 # A connection to the scripted server for *name*, through *session*, or
@@ -1573,7 +1580,7 @@ def binding_round(listener : IyiSocket, served : TlsServerConfig, host : String,
             got = conn.read
             conn.write("echo") unless got.is_a?(TlsError)
             conn.close
-            "resumed=#{conn.resumed? ? "yes" : "no"} early=#{heard.bytesize}"
+            "resumed=#{conn.resumed? ? "yes" : "no"} early=#{heard.bytesize}#{conn.early_declined? ? " declined" : ""}"
           end
         end
       else
@@ -1606,6 +1613,51 @@ def binding_round(listener : IyiSocket, served : TlsServerConfig, host : String,
     0
   end
   "client #{ends[0]}; server #{ends[1]}"
+end
+
+# A resumption to *listener* whose early data the server takes, and whose
+# socket is then closed under the server's connection, with the early data
+# and the client's Finished still to read: what `read_early` came to at
+# its end, and what `read` did.
+def closed_under_early(listener : IyiSocket, served : TlsServerConfig, config : TlsConfig, session : TlsSession) : String
+  port = listener.local_port
+  ends = [""]
+  group do |g|
+    server = g.spawn do
+      accepted = listener.accept
+      if accepted.is_a?(IyiSocket)
+        conn = TlsServer.over(accepted, served, 5000)
+        if conn.is_a?(TlsError)
+          accepted.close
+          conn.message
+        else
+          taken = conn.early_data?
+          accepted.close
+          early = conn.read_early
+          while early.is_a?(String) && !early.empty?
+            early = conn.read_early
+          end
+          after = conn.read
+          "taken=#{taken} read_early=#{early.is_a?(TlsError) ? early.message : "its end"} read=#{after.is_a?(TlsError) ? after.message : after.inspect}"
+        end
+      else
+        "no connection"
+      end
+    end
+    client = g.spawn do
+      socket = IyiSocket.connect("127.0.0.1", port)
+      if socket.is_a?(IyiSocket)
+        conn = TlsClient.over(socket, "fuzz.test", config, 5000, session, "early-bytes")
+        conn.is_a?(TlsError) ? socket.close : conn.abort
+      end
+      0
+    end
+    client.value
+    heard = server.value
+    ends[0] = heard.is_a?(String) ? heard : "PANIC: #{heard.message}"
+    0
+  end
+  ends[0]
 end
 
 # The client's configuration: the binding root, at a time its leaf is good.
@@ -1652,6 +1704,41 @@ check binding_round(first_listener, served, "fuzz.test", trusting, chained) == R
 renewed = newest_held(chained, first_listener.local_port, trusting)
 check renewed.received_ms > first_ticket.received_ms && renewed.authenticated_ms == first_ticket.authenticated_ms,
   "a ticket a resumed connection receives keeps its full handshake's time"
+# A resumption asks a client for no certificate, so a ticket answers to
+# what the configuration that takes it asks of a client now: `dup` shares
+# the ticket keys, and `client_roots`, `client_required` and `now` change
+# in place. Each session below holds a ticket when its round begins, so a
+# full handshake is the server's choice and not the client's.
+asking = served.dup
+asking.client_roots = [Certificate.parse(b(BINDING_ROOT)).or_panic]
+asking.now = Time.utc(2026, 6, 1)
+bare = TlsSession.new
+binding_round(first_listener, served, "fuzz.test", trusting, bare)
+said_bare = binding_round(first_listener, asking, "fuzz.test", trusting, bare)
+check said_bare.ends_with?("server tls: the client sent no certificate (certificate_required)"),
+  "a ticket sealed for a client that showed no certificate is not taken where one is required: #{said_bare}"
+asking.client_required = false
+check bare.size > 0 && binding_round(first_listener, asking, "fuzz.test", trusting, bare) == RESUMED,
+  "a ticket sealed for a client that showed no certificate is taken where none is required"
+asking.client_required = true
+carded = binding_config
+carded.identity = TlsIdentity.from_der([b(BINDING_LEAF), b(BINDING_ROOT)], b(BINDING_SEED)).or_panic
+shown = TlsSession.new
+check binding_round(first_listener, asking, "fuzz.test", carded, shown) == FULL, "a client's certificate, asked for and shown"
+check binding_round(first_listener, asking, "fuzz.test", carded, shown) == RESUMED, "a ticket whose chain these roots hold resumes"
+elsewhere = served.dup
+elsewhere.client_roots = Certificate.from_pem(ECH_ROOT_PEM).or_panic
+said_elsewhere = binding_round(first_listener, elsewhere, "fuzz.test", carded, shown)
+check said_elsewhere.includes?("server tls: the client's certificate is not trusted"),
+  "a ticket's chain is checked under the roots of the configuration that takes it: #{said_elsewhere}"
+asking.now = Time.utc(2046, 1, 1)
+said_late = shown.size > 0 ? binding_round(first_listener, asking, "fuzz.test", carded, shown) : "no ticket held"
+check said_late.includes?("server tls: the client's certificate is not trusted"),
+  "a ticket's chain is checked at the time of the handshake that takes it: #{said_late}"
+asking.now = Time.utc(2026, 6, 1)
+binding_round(first_listener, asking, "fuzz.test", carded, shown)
+check shown.size > 0 && binding_round(first_listener, served, "fuzz.test", carded, shown) == FULL,
+  "a ticket's chain is not carried to a configuration that asks for none"
 # Early data on a ticket issued under 16 KiB: taken while the server's
 # limit is unchanged; once it has come down to 100 bytes, declined - the
 # client sends it again after the handshake - rather than taken and cut
@@ -1663,8 +1750,17 @@ check binding_round(first_listener, eager, "fuzz.test", trusting, early_session)
 check binding_round(first_listener, eager, "fuzz.test", trusting, early_session, "x" * 1000) == "client resumed=yes early=Accepted; server resumed=yes early=1000",
   "early data within an unchanged limit is taken"
 eager.max_early_data = 100
-check binding_round(first_listener, eager, "fuzz.test", trusting, early_session, "x" * 1000) == "client resumed=yes early=Resent; server resumed=yes early=0",
-  "early data a ticket allows past a lowered limit is declined, and sent again"
+check binding_round(first_listener, eager, "fuzz.test", trusting, early_session, "x" * 1000) == "client resumed=yes early=Resent; server resumed=yes early=0 declined",
+  "early data a ticket allows past a lowered limit is declined, and sent again, and the server says it declined it"
+# The socket closed under a connection whose early data was taken: reading
+# for what is still behind it is the connection's end, at `read_early` and
+# at `read`, which finishes the handshake first.
+eager.max_early_data = 16384
+closing = TlsSession.new
+binding_round(first_listener, eager, "fuzz.test", trusting, closing)
+said_closed = closed_under_early(first_listener, eager, trusting, closing)
+check said_closed == "taken=true read_early=tls: the connection is closed read=tls: the connection is closed",
+  "a socket closed under taken early data ends read_early and read: #{said_closed}"
 # A server_name of 254 bytes is refused before anything is sealed with it;
 # one of 253 is taken, and the client then refuses the certificate.
 long_name = "a" * 63 + "." + "b" * 63 + "." + "c" * 63 + "." + "d" * 62
@@ -1674,8 +1770,8 @@ said_most = binding_round(first_listener, served, long_name[0, 253], trusting, T
 check said_most.ends_with?("server tls: the client sent alert bad_certificate (42)"), "a server_name of 253 bytes is taken"
 first_listener.close
 second_listener.close
-puts "  tickets held to their port and configuration, a resumption's to its full handshake's time, early data past a"
-puts "  lowered limit declined, and a server_name past 253 bytes refused"
+puts "  tickets held to their port and configuration and to what is asked of a client now, a resumption's to its full"
+puts "  handshake's time, early data past a lowered limit declined, and a server_name past 253 bytes refused"
 
 puts "== Encrypted Client Hello (RFC 9849)"
 # The configuration: written, read back, and what a client passes over.

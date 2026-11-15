@@ -14,11 +14,12 @@
 # Keys, seeds, messages and signatures are a `String`, whose bytes are
 # taken, or an `Array(UInt8)`; what comes back is a `String` of raw bytes.
 # The caller brings every secret: a private key or a seed is 32 bytes from
-# wherever the caller draws them. This module imports nothing past std/int
-# and std/digest's SHA-512, so a package that signs or agrees on a key is
-# not counted as reaching the operating system (`iyi mod reach`);
-# `Random::Secure.random_bytes(32)` from std/random is where a fresh key
-# comes from.
+# wherever the caller draws them. This module imports nothing past
+# std/int, std/atomic (the word its table is published through) and
+# std/digest's SHA-512 and `ValueBarrier`, so a package that signs or
+# agrees on a key is not counted as reaching the operating system (`iyi
+# mod reach`); `Random::Secure.random_bytes(32)` from std/random is where
+# a fresh key comes from.
 #
 # The field. An element is five 51-bit limbs in `UInt64`s, the products
 # taken in `UInt128` and folded back with 2^255 = 19 (mod p), as
@@ -27,17 +28,23 @@
 # for z^(p-2). Every operation on an element runs the same instructions
 # whatever its value: no branch and no memory index depends on a secret.
 # The two things that pick by a secret bit are a mask: the Montgomery
-# ladder's swap (`cswap`) and the window lookup in a scalar multiplication,
-# which reads all sixteen entries and keeps one with `&` and `|`.
+# ladder's swap (`cswap`) and the lookup in the fixed-base table, which
+# reads all eight entries of a row and keeps one with `&` and `|`. Each
+# of those masks is 0 or all ones, and a compiler that works that out may
+# write a branch or a load from one address in its place; so each goes
+# through std/digest's `ValueBarrier` where it is made, and the ladder
+# and the lookup are kept out of line (`CurveLadder.x25519`,
+# `CurveBaseTable.pick`), their assembly being what
+# bench/std_curve25519_exercise.sh reads.
 # bench/ct_timing.sh, `X25519.shared` with one peer key, a fixed private
 # key against random ones: |t| = 1.6 to 7.3 over 100,000 and 2.5 to 5.0
 # over 50,000 in three reruns (under 10 is no leak seen; the machine was
 # shared). `Ed25519.sign`, one seed, a fixed message against random ones:
 # |t| = 4.2 to 6.3 over 50,000 to 100,000. In the --release assembly the
-# ladder and its swaps (inlined into `X25519.shared`) and
-# `CurvePoint.base_mult`'s table reads have no cmov and no conditional
-# jump but on counters, the allocator, and the all-zero secret's
-# documented check.
+# ladder with its swaps and `CurveBaseTable.pick`'s table reads have no
+# cmov and no conditional jump but on their counters; `X25519.shared`
+# and `CurvePoint.base_mult` around them have theirs on counters, the
+# allocator, and the all-zero secret's documented check.
 #
 # X25519 is the RFC 7748 §5 ladder over the clamped scalar, 255 steps. The
 # peer's u-coordinate has its top bit masked and is otherwise taken as it
@@ -89,7 +96,8 @@
 module std/curve25519
 
 import std/int
-import std/digest::{SHA512}
+import std/atomic
+import std/digest::{SHA512, ValueBarrier}
 
 # What is wrong with a peer's key: `message` is the sentence.
 pub struct CurveError
@@ -265,8 +273,11 @@ pub struct Ed25519PublicKey
   end
 end
 
-# The Montgomery ladder of RFC 7748 §5, in the RFC's own names.
+# The Montgomery ladder of RFC 7748 §5, in the RFC's own names. The swap's
+# mask goes through the value barrier each time it is made, and the ladder
+# is out of line, one function whoever calls it.
 struct CurveLadder
+  @[NoInline]
   def self.x25519(scalar : Pointer(UInt8), x1 : CurveField) : CurveField
     clamped = uninitialized UInt8[32]
     k = pointerof(clamped).as(Pointer(UInt8))
@@ -288,7 +299,7 @@ struct CurveLadder
       # only ever a mask.
       bit = k[t >> 3].to_u64.unsafe_shr(t & 7) & 1_u64
       swap = swap ^ bit
-      mask = 0_u64 &- swap
+      mask = ValueBarrier.u64(0_u64 &- swap)
       x2, x3 = CurveField.cswap(mask, x2, x3)
       z2, z3 = CurveField.cswap(mask, z2, z3)
       swap = bit
@@ -308,7 +319,7 @@ struct CurveLadder
       z2 = e * (aa + e.mul_small(121665_u64))
       t = t - 1
     end
-    mask = 0_u64 &- swap
+    mask = ValueBarrier.u64(0_u64 &- swap)
     x2, x3 = CurveField.cswap(mask, x2, x3)
     z2, z3 = CurveField.cswap(mask, z2, z3)
     x2 * z2.invert
@@ -547,7 +558,8 @@ struct CurveField
     (r.l0 | r.l1 | r.l2 | r.l3 | r.l4) == 0_u64
   end
 
-  # *a* where *mask* is all ones, *b* where it is zero.
+  # *a* where *mask* is all ones, *b* where it is zero. A mask made from
+  # a secret has been through `ValueBarrier` before it comes here.
   def self.select(mask : UInt64, a : CurveField, b : CurveField) : CurveField
     keep = mask ^ ALL
     new((a.l0 & mask) | (b.l0 & keep),
@@ -557,7 +569,8 @@ struct CurveField
       (a.l4 & mask) | (b.l4 & keep))
   end
 
-  # The two traded where *mask* is all ones, kept where it is zero.
+  # The two traded where *mask* is all ones, kept where it is zero. The
+  # mask, as `select`'s.
   def self.cswap(mask : UInt64, a : CurveField, b : CurveField) : {CurveField, CurveField}
     t0 = mask & (a.l0 ^ b.l0)
     t1 = mask & (a.l1 ^ b.l1)
@@ -824,12 +837,21 @@ end
 # their 256 Z inverted together by Montgomery's trick (one inversion and
 # three products a point), which is about what one multiplication by the
 # old 4-bit window cost. Two threads that reach it first both work it
-# out and store the same table.
+# out, and the later store stands, the tables being the same. What a
+# thread must never read is a table part written: a wrong multiple of B
+# gives a signature a wrong R under the right nonce, and that signature
+# beside the right one for the same message gives the secret scalar away.
+# So the table's address is kept in an atomic word, stored last, by a
+# release store, and read by an acquire load (std/atomic): a thread that
+# reads the address reads every entry written before it, which a plain
+# store and load promise on x86_64 alone.
 struct CurveBaseTable
-  @@table = Pointer(CurvePrecomp).new(0_u64)
+  # The table's address once it is whole, 0 until then.
+  @@table = ::Atomic(UInt64).new(0_u64)
 
   def self.get : Pointer(CurvePrecomp)
-    return @@table if @@table.address != 0_u64
+    ready = @@table.get_acquire
+    return Pointer(CurvePrecomp).new(ready) if ready != 0_u64
     points = Pointer(CurvePoint).malloc(256_u64)
     p = CurvePoint.base
     row = 0
@@ -870,14 +892,17 @@ struct CurveBaseTable
       table[i] = CurvePrecomp.new(y + x, y - x, x * y * CurveField.d2)
       i = i - 1
     end
-    @@table = table
+    @@table.set_release(table.address)
     table
   end
 
   # Row *row*'s entry for the signed digit *digit* (-8 to 8, in two's
   # complement): every entry of the row read, and all but |digit|'s
   # masked away; the identity for zero; then negated by a mask when the
-  # digit is.
+  # digit is. Both masks, the entry's and the sign's, go through the
+  # value barrier, and the function is out of line: `P256BaseTable.pick`
+  # in std/p256 says what a compiler made of such selectors left in sight.
+  @[NoInline]
   def self.pick(table : Pointer(CurvePrecomp), row : Int32, digit : UInt64) : CurvePrecomp
     negative = digit.unsafe_shr(63)
     index = (digit ^ (0_u64 &- negative)) &+ negative
@@ -890,14 +915,14 @@ struct CurveBaseTable
       diff = j.to_u64 ^ index
       # All ones when diff is zero: (diff | -diff) has its top bit set for
       # every other value.
-      mask = (diff | (0_u64 &- diff)).unsafe_shr(63) &- 1_u64
+      mask = ValueBarrier.u64((diff | (0_u64 &- diff)).unsafe_shr(63) &- 1_u64)
       e = base[j - 1]
       ypx = CurveField.select(mask, e.ypx, ypx)
       ymx = CurveField.select(mask, e.ymx, ymx)
       xy2d = CurveField.select(mask, e.xy2d, xy2d)
       j = j + 1
     end
-    flip = 0_u64 &- negative
+    flip = ValueBarrier.u64(0_u64 &- negative)
     CurvePrecomp.new(CurveField.select(flip, ymx, ypx), CurveField.select(flip, ypx, ymx),
       CurveField.select(flip, xy2d.negate, xy2d))
   end

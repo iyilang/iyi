@@ -3071,7 +3071,7 @@ struct ProxyRoute
     return HTTPError.new("the proxy's URL names no host") unless host && host.bytesize > 0
     credential = nil.as(String?)
     if user = uri.user
-      credential = "Basic " + Base64.encode(user + ":" + (uri.password || ""))
+      credential = "Basic " + Base64.encode_secret(user + ":" + (uri.password || ""))
     end
     ProxyRoute.new(host, uri.port || 80, credential, "proxy " + written)
   end
@@ -3523,10 +3523,9 @@ pub struct HTTP
             if upgrade
               # An upgrade is HTTP/1.1's: ALPN offers that alone, as RFC
               # 8441's way over HTTP/2 (an extended CONNECT) is not here.
-              offered = TlsConfig.new
-              offered.roots = under.roots
-              offered.now = under.now
-              offered.identity = under.identity
+              # Everything else is the configuration's - `require_staple`
+              # and `ech_configs` with the roots and the identity.
+              offered = under.dup
               offered.alpn = ["http/1.1"]
             end
             # The tickets a client keeps for this origin under this

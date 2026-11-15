@@ -29,6 +29,18 @@
 # the one wanted kept by masks. Inversion is Fermat's, x^(m - 2), whose
 # exponent is public and fixed.
 #
+# A mask that picks a table's entry is made from a digit of the secret
+# scalar, and is 0 or all ones, which a compiler that works it out may
+# turn into a conditional jump or a load from one address of several.
+# So every such selector - `P256Point.lookup`'s, `P256BaseTable.pick`'s
+# three kinds and `P256BaseTable.top`'s carry - goes through std/digest's
+# `ValueBarrier` before it masks anything, and those three functions are
+# kept out of line (`@[NoInline]`), so that the instructions
+# bench/std_p256_exercise.sh reads for them are the ones every caller
+# runs. The field's own choices (a final subtraction kept or not) work on
+# values in registers, with no address to tell them apart by, and are left
+# to the compiler: a --release build writes them as conditional moves.
+#
 # [k]G, which every signature and every key's public point takes, reads a
 # fixed-base table of multiples of G instead (`P256Point.base_mult`), and
 # the field's inverse is an addition chain. Measured on one x86_64 Linux
@@ -40,7 +52,11 @@
 # bench/ct_timing.sh, `sign` with one key, a fixed message against random
 # ones: |t| = 3.8 to 6.0 over 100,000 signatures. It put this at 16 to 24
 # before `P256BaseTable.pick`'s selectors were hidden from LLVM, which had
-# made them a branch on each nonce digit (see there). Later runs on the
+# made them a branch on each nonce digit (see there). What hid them then,
+# an xor with a zero read by an atomic load, a --release build folded
+# away, the zero being a class variable nothing wrote to: the branches
+# stayed away by the optimiser's choice alone, and `ValueBarrier` is what
+# holds them off now. Later runs on the
 # same code, at load 6 to 7, put it at 10 to 19, with two fixed messages
 # at 1.2 to 1.9 and messages whose r and s match the fixed one's DER
 # lengths at 8 to 11. Timed a step at a time (100,000 samples, fixed
@@ -74,14 +90,16 @@
 # RFC 5480's id-ecPublicKey with prime256v1) or SEC 1's ECPrivateKey (RFC
 # 5915), whose public key, when it carries one, must be d's.
 #
-# Pure computation: std/digest, std/crypto's HMAC, std/asn1, and std/ecdsa
-# for the public key and its checking.
+# Pure computation: std/digest, std/crypto's HMAC, std/asn1, std/ecdsa
+# for the public key and its checking, and std/atomic for the word the
+# fixed-base table is published through.
 
 @[Unsafe("keys and points are read out of the bytes of strings through raw pointers")]
 module std/p256
 
 import std/int
-import std/digest::{SHA256, SHA384, SHA512}
+import std/atomic
+import std/digest::{SHA256, SHA384, SHA512, ValueBarrier}
 import std/crypto::{HMAC}
 import std/asn1::{Der, DerValue, DerTag, Asn1Error}
 import std/ecdsa::{EcdsaPublicKey, EcdsaCurve, EcdsaHash, EcdsaError}
@@ -727,14 +745,16 @@ struct P256Point
     acc
   end
 
-  # table[digit], every entry read and the one wanted kept by masks.
+  # table[digit], every entry read and the one wanted kept by masks, each
+  # selector through the value barrier first (see `P256BaseTable.pick`).
+  @[NoInline]
   private def self.lookup(table : Pointer(P256Point), digit : UInt64) : P256Point
     x = P256Num.zero
     y = P256Num.zero
     z = P256Num.zero
     i = 0
     while i < 16
-      bit = ((i.to_u64 ^ digit) &- 1_u64).unsafe_shr(63)
+      bit = ValueBarrier.u64(((i.to_u64 ^ digit) &- 1_u64).unsafe_shr(63))
       entry = table[i]
       x = P256Num.choose(bit, entry.x, x)
       y = P256Num.choose(bit, entry.y, y)
@@ -786,16 +806,24 @@ end
 # out once, the first time it is wanted, and kept: 224 additions and 256
 # doublings, the 257 Z inverted together by Montgomery's trick (one
 # inversion and three products a point). Two threads that reach it first
-# both work it out and store the same table.
+# both work it out, and the later store stands, the tables being the
+# same. What a thread must never read is a table part written: a wrong
+# multiple of G gives a signature a wrong r under the right nonce, and
+# that signature beside the right one for the same message gives the key
+# away. So the table's address is kept in an atomic word, stored last, by
+# a release store, and read by an acquire load (std/atomic): a thread
+# that reads the address reads every entry written before it. A plain
+# store and load promise that on x86_64 and on no machine that orders its
+# stores more loosely.
 struct P256BaseTable
   ENTRIES = 257
 
-  @@table = Pointer(P256Num).new(0_u64)
-  # 0, read by `pick` through an atomic load (see there).
-  @@opaque = Atomic(UInt64).new(0_u64)
+  # The table's address once it is whole, 0 until then.
+  @@table = ::Atomic(UInt64).new(0_u64)
 
   def self.get : Pointer(P256Num)
-    return @@table if @@table.address != 0_u64
+    ready = @@table.get_acquire
+    return Pointer(P256Num).new(ready) if ready != 0_u64
     f = P256Modulus.field
     points = Pointer(P256Point).malloc(ENTRIES.to_u64)
     p = P256Point.base
@@ -835,42 +863,48 @@ struct P256BaseTable
       table[2 * i + 1] = f.mul(point.y, zi)
       i = i - 1
     end
-    @@table = table
+    @@table.set_release(table.address)
     table
   end
 
   # Row *row*'s entry for the signed digit *digit* (-8 to 8, in two's
   # complement): every entry of the row read and all but |digit|'s masked
   # away, negated by a mask when the digit is, and the identity (0 : 1 : 0)
-  # for zero. Each selector is xored with a zero read by an atomic load,
-  # which LLVM cannot see the value of: with the selectors as they were,
-  # a --release build tested the digit against 1 to 8 with a conditional
-  # jump each (`xor`, `dec`, `js`), a branch on the nonce's digits, and
-  # bench/ct_timing.sh put P-256 signing at |t| = 16 to 24 over 100,000
-  # signatures, fixed message against random.
+  # for zero. Each selector - the digit's sign, whether an entry is
+  # |digit|'s, whether the digit is zero - is passed through std/digest's
+  # `ValueBarrier`, which LLVM cannot see the value through: with the
+  # selectors in plain sight, a --release build tested the digit against 1
+  # to 8 with a conditional jump each (`xor`, `dec`, `js`), a branch on
+  # the nonce's digits, and bench/ct_timing.sh put P-256 signing at
+  # |t| = 16 to 24 over 100,000 signatures, fixed message against random.
+  # Out of line, so that what the gate reads in this function's assembly
+  # is what `base_mult` runs, whatever calls it.
+  @[NoInline]
   def self.pick(table : Pointer(P256Num), row : Int32, digit : UInt64) : P256Point
     f = P256Modulus.field
-    zero = @@opaque.get
-    negative = digit.unsafe_shr(63) ^ zero
+    negative = ValueBarrier.u64(digit.unsafe_shr(63))
     index = (digit ^ (0_u64 &- negative)) &+ negative
     x = P256Num.zero
     y = P256Num.zero
     base = table + (row * 16).to_i64
     j = 1
     while j <= 8
-      bit = ((j.to_u64 ^ index) &- 1_u64).unsafe_shr(63) ^ zero
+      bit = ValueBarrier.u64(((j.to_u64 ^ index) &- 1_u64).unsafe_shr(63))
       x = P256Num.choose(bit, base[2 * j - 2], x)
       y = P256Num.choose(bit, base[2 * j - 1], y)
       j = j + 1
     end
     y = P256Num.choose(negative, f.sub(P256Num.zero, y), y)
-    nonzero = (index | (0_u64 &- index)).unsafe_shr(63) ^ zero
+    nonzero = ValueBarrier.u64((index | (0_u64 &- index)).unsafe_shr(63))
     P256Point.new(x, P256Num.choose(nonzero, y, f.one), P256Num.choose(nonzero, f.one, P256Num.zero))
   end
 
-  # [2^256]G when *carry* is 1, the identity when it is 0, by masks.
+  # [2^256]G when *carry* is 1, the identity when it is 0, by masks, the
+  # carry through the value barrier as `pick`'s selectors are.
+  @[NoInline]
   def self.top(table : Pointer(P256Num), carry : UInt64) : P256Point
     f = P256Modulus.field
+    carry = ValueBarrier.u64(carry)
     P256Point.new(P256Num.choose(carry, table[512], P256Num.zero), P256Num.choose(carry, table[513], f.one),
       P256Num.choose(carry, f.one, P256Num.zero))
   end

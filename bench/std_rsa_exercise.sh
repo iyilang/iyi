@@ -7,11 +7,13 @@
 # by hand that break one rule each with the digest still matching, keys
 # that are not keys, and a private key cryptography drew - read every way,
 # its PKCS #1 v1.5 signatures byte for byte cryptography's, and its
-# numbers broken one at a time and refused; this gate runs it plain and
+# numbers broken one at a time and refused, as is a key whose p is not
+# prime and a PEM body that is not base64; this gate runs it plain and
 # --release, holds 600 signatures over six key sizes, both schemes, four
 # hashes and the salt lengths PSS allows, half of them broken some way, to
 # Python's verdicts, has cryptography check 240 signatures this makes over
-# five keys it drew, refuse its keys with a parameter broken, and time a
+# five keys it drew, refuse its keys with a parameter broken or a p that
+# is two primes' product, and time a
 # 2048- and a 4096-bit signature; checks every RSA root certificate's
 # signature with its own key as Python does, shows an error value's
 # sentence through `.or_panic` and a signature over SHA-1 refused, reads
@@ -203,14 +205,15 @@ echo "== 240 signatures this makes, checked by Python's cryptography"
 # #1 and as PKCS #8; each signs random messages under both schemes and the
 # three hashes. A PSS signature must verify with a salt as long as the
 # hash, a PKCS #1 v1.5 one must be cryptography's own, byte for byte. Then
-# the 3072-bit key with each CRT parameter broken, and a 1024-bit key:
-# each refused, for its reason.
+# the 3072-bit key with each CRT parameter broken, a 2048-bit key whose p
+# is the product of two primes and whose numbers all agree, and a 1024-bit
+# key: each refused, for its reason.
 if [ -z "$PY" ] || ! "$PY" -c 'from cryptography.hazmat.primitives.asymmetric import rsa' >/dev/null 2>&1; then
   echo "  no python cryptography here, so the signatures go unchecked"
 else
   mkdir -p "$WORK/keys"
   "$PY" - "$WORK/keys" "$WORK/sign.txt" "$WORK/sign_cases.txt" <<'PY'
-import os, random, sys
+import math, os, random, sys
 from cryptography.hazmat.primitives import serialization as s
 from cryptography.hazmat.primitives.asymmetric import rsa
 out = sys.argv[1]
@@ -255,6 +258,21 @@ for name, (at, plus, why) in broken.items():
     path = os.path.join(out, f"broken-{name}.pem")
     open(path, "w").write(text)
     cases.append(f"{path}|{why}")
+# A key that agrees in every number and cannot sign: p the product of a
+# 1024-bit key's two primes, q a prime of a 2048-bit key's, and d, dp, dq
+# and qi made from them as RFC 8017 makes them.
+while True:
+    halves = rsa.generate_private_key(public_exponent=65537, key_size=1024).private_numbers()
+    p, q = halves.p * halves.q, rsa.generate_private_key(public_exponent=65537, key_size=2048).private_numbers().p
+    lam = math.lcm(p - 1, q - 1)
+    if (p * q).bit_length() == 2048 and math.gcd(65537, lam) == 1:
+        break
+d = pow(65537, -1, lam)
+der = tlv(0x30, integer(0) + b"".join(integer(x) for x in (p * q, 65537, d, p, q, d % (p - 1), d % (q - 1), pow(q, -1, p))))
+body = base64.encodebytes(der).decode().replace("\n", "")
+path = os.path.join(out, "composite-p.pem")
+open(path, "w").write("-----BEGIN RSA PRIVATE KEY-----\n" + "\n".join(body[i:i + 64] for i in range(0, len(body), 64)) + "\n-----END RSA PRIVATE KEY-----\n")
+cases.append(f"{path}|a private key that does not sign")
 small = rsa.generate_private_key(public_exponent=65537, key_size=1024)
 path = os.path.join(out, "small.pem")
 open(path, "wb").write(pem(small, s.PrivateFormat.PKCS8))
@@ -316,7 +334,7 @@ PY
       status=1
     fi
   done <"$WORK/sign_cases.txt"
-  echo "  $refusals keys cryptography wrote refused, each for its reason: a 3072-bit key with n, d, dp, dq or qi broken, a 1024-bit key"
+  echo "  $refusals keys cryptography wrote refused, each for its reason: a 3072-bit key with n, d, dp, dq or qi broken, a key whose p is not prime, a 1024-bit key"
 
   echo
   echo "== signing time, --release"
@@ -515,6 +533,10 @@ prove_broken "PSS encoded in the modulus's bits" "expected true, got false" \
   '    em_bits = @bits - 1' '    em_bits = @bits'
 prove_broken "SHA-384's DigestInfo with SHA-256's OID" "expected true, got false" \
   '"3041300d060960864801650304020205000430"' '"3041300d060960864801650304020105000430"'
+# Added to the hash's length before it is held to the encoding's, a salt
+# length near 2^31 is no `false`: the sum overflows, which is a panic.
+prove_broken "a salt's length added up before it is bounded" "arithmetic overflow" \
+  '    return false if s_len > em_len - h_len - 2' '    return false if em_len < h_len + s_len + 2'
 prove_broken "a salt of nothing when none is named" "a PSS salt as long as the hash when none is named" \
   's_len = salt_length || hash.size' 's_len = salt_length || 0'
 prove_broken "an even modulus taken" "an even modulus refused" \
@@ -541,6 +563,8 @@ prove_broken "a private key's qi unchecked" "a qi that is not q's inverse refuse
 # the d check divides by it.
 prove_broken "p and q unchecked: a p of 1 panics" "modulo by zero" \
   'unless bp > one && bq > one' 'if false'
+prove_broken "a key read without signing once" "a key whose p is not prime refused" \
+  ' unless key.signs?' ' unless true'
 prove_broken "a 1024-bit key taken for signing" "a 1024-bit key refused for signing" \
   '  MIN_BITS        = 2048' '  MIN_BITS        = 1024'
 prove_broken "a key of three primes read as two" "a key of more than two primes refused" \
@@ -553,16 +577,28 @@ prove_broken "a PKCS #8 key's parameters unchecked" "a PKCS #8 key without rsaEn
     if false'
 prove_broken "an encrypted key read as base64" "an encrypted key refused by name" \
   '    if text.includes?("-----BEGIN ENCRYPTED PRIVATE KEY-----") || text.includes?(ENCRYPTED_PKCS1)' '    if false'
-# A fault in one half of the CRT: the check before the signature goes out
-# must be what stops it, by its own sentence.
-prove_broken "a fault in the CRT's first half" "does not check against its own public key, which a fault makes" \
+# A key's PEM body through the decoder that reads loosely: a last
+# character's spare bits are dropped, and the text is taken.
+prove_broken "a key's PEM body read by the decoder for texts that are no secret" "a PEM body whose last character sets bits past the data refused" \
+  '    decoded = Base64.decode_secret(text)' '    loose = Base64.decode?(text)
+    decoded = loose.is_a?(Base64Error) ? loose : RsaBytes.of(loose)'
+# Signing that is wrong for every message: the signature a key is read by
+# does not check, and the key is refused where the exercise first reads
+# one.
+prove_broken "a fault in the CRT's first half" "a private key that does not sign" \
   '    s1 = (c % @p).pow_mod_secret(@dp, @p)' '    s1 = (c % @p).pow_mod_secret(@dp, @p) + BigInt.new(1)'
-prove_broken "the blinding left on the signature" "does not check against its own public key, which a fault makes" \
+prove_broken "the blinding left on the signature" "a private key that does not sign" \
   '    s = ((s2 + h * @q) * r_inverse) % @n' '    s = (s2 + h * @q) % @n'
-prove_broken "the blinding taken off by another number's inverse" "does not check against its own public key, which a fault makes" \
+prove_broken "the blinding taken off by another number's inverse" "a private key that does not sign" \
   '        inverse = r.inverse_mod_secret(@n)' '        inverse = (r + BigInt.new(2)).inverse_mod_secret(@n)'
-prove_broken "the CRT's recombination by p's inverse" "does not check against its own public key, which a fault makes" \
+prove_broken "the CRT's recombination by p's inverse" "a private key that does not sign" \
   '    h = (@qi * (s1 - s2)) % @p' '    h = (s1 - s2) % @p'
+# A fault after the key is read - here in every encoding but PKCS #1
+# v1.5's, which the key was read by: the check before a signature goes
+# out must be what stops it, by its own sentence - an error's now, which
+# the exercise's `.or_panic` says.
+prove_broken "a fault in the CRT's first half once the key is read" "does not check against its own public key, which a fault makes" \
+  '    s1 = (c % @p).pow_mod_secret(@dp, @p)' '    s1 = (c % @p).pow_mod_secret(@dp, @p) + BigInt.new(em[1] == 1_u8 ? 0 : 1)'
 prove_broken "PKCS #1 v1.5 signed with a block type of 2" "PKCS #1 v1.5 over SHA256 as cryptography signs it" \
   '    em[1] = 1_u8
     em[size - t.size - 1] = 0_u8' '    em[1] = 2_u8

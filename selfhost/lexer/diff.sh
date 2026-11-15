@@ -61,6 +61,7 @@ for f in "${files[@]}"; do
     | grep -v "Using compiled" > "$WORK/a.txt"
   if [ ! -s "$WORK/a.txt" ]; then
     echo "  NO ORACLE $(basename "$f")"
+    skipped=$((skipped + 1))
     continue
   fi
   # Status and stderr kept rather than dropped: a crash and a wrong

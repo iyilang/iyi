@@ -74,4 +74,4 @@ for f in "${files[@]}"; do
   fi
 done
 echo "  agree $agree, differ $differ, no oracle $no_oracle"
-[ "$differ" -eq 0 ]
+[ "$differ" -eq 0 ] && [ "$agree" -gt 0 ]

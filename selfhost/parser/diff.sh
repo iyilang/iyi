@@ -70,4 +70,4 @@ for f in "${files[@]}"; do
 done
 echo "  agree $agree, differ $differ, no oracle $no_oracle"
 [ "$no_oracle" -eq 0 ] || echo "  (a file with no oracle is the current parser refusing it, not the port)"
-[ "$differ" -eq 0 ]
+[ "$differ" -eq 0 ] && [ "$agree" -gt 0 ]

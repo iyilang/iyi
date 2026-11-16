@@ -290,6 +290,7 @@ jobs:
         run: make -o .build/crystal compiler_spec
 
       - name: Package macro path boundaries (Linux)
+        shell: bash
         run: |
           set -o pipefail
           .build/compiler_spec -e "iyi package macro boundaries" | tee macro-boundaries.txt

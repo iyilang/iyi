@@ -9,6 +9,14 @@ private def provenance_semantic(code : String, filename : String)
   program.semantic(program.normalize(parser.parse))
 end
 
+private def provenance_marker_command : String
+  {% if flag?(:win32) %}
+    "cmd.exe /d /c echo executed > executed"
+  {% else %}
+    "printf executed > executed"
+  {% end %}
+end
+
 describe "iyi package macro boundaries" do
   it "keeps a caller's yielded macro expression under the caller's package" do
     with_tempdir("iyi_macro_yield_owner") do
@@ -43,7 +51,7 @@ describe "iyi package macro boundaries" do
     with_tempdir("iyi_macro_provenance") do
       source = File.join(Dir.current, "main.iyi")
       marker = File.join(Dir.current, "executed")
-      command = "echo executed > #{Process.quote(marker)}"
+      command = provenance_marker_command
       code = "module main\n#<loc:\"forged.cr\",1,1>\n{% system(#{command.inspect}) %}\n"
       File.write(source, code)
       expect_raises(Iyi::TypeException, /compile-time shell commands are forbidden/) do
@@ -57,11 +65,12 @@ describe "iyi package macro boundaries" do
     with_tempdir("cr_macro_provenance") do
       source = File.join(Dir.current, "main.cr")
       marker = File.join(Dir.current, "executed")
-      command = "echo executed > #{Process.quote(marker)}"
+      command = provenance_marker_command
       code = "#<loc:\"forged.iyi\",1,1>\n{% system(#{command.inspect}) %}\n"
       File.write(source, code)
       provenance_semantic(code, source)
       File.exists?(marker).should be_true
+      File.read(marker).strip.should eq("executed")
     end
   end
 
@@ -69,7 +78,7 @@ describe "iyi package macro boundaries" do
     with_tempdir("iyi_macro_generated") do
       source = File.join(Dir.current, "main.iyi")
       marker = File.join(Dir.current, "executed")
-      command = "echo executed > #{Process.quote(marker)}"
+      command = provenance_marker_command
       code = "module main\nmacro writer\n\\{{ system(#{command.inspect}) }}\nend\nwriter\n"
       File.write(source, code)
       expect_raises(Iyi::TypeException, /compile-time shell commands are forbidden/) do

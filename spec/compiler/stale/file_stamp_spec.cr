@@ -58,14 +58,16 @@ describe Iyi::Stale::FileStamp do
   end
 
   {% if flag?(:unix) %}
-    it "refuses a device input instead of serving its unchanged metadata" do
-      path = "/dev/null"
-      inputs = Iyi::BuildInputs.new(nil, stale: true)
-      inputs.looked_at(path)
-      stamp = inputs.files[Iyi::BuildInputs.key(path)]
-      stamp.kind.other?.should be_true
-      inputs.reasons.any?(&.includes?("not a regular file or directory")).should be_true
-      Iyi::Stale::FastRecord.changed?(stamp, stamp, path, Set(String).new).should be_true
+    it "refuses a FIFO input instead of serving its unchanged metadata" do
+      with_tempfile("stale-input.fifo") do |path|
+        LibC.mkfifo(path, 0o600).should eq(0)
+        inputs = Iyi::BuildInputs.new(nil, stale: true)
+        inputs.looked_at(path)
+        stamp = inputs.files[Iyi::BuildInputs.key(path)]
+        stamp.kind.other?.should be_true
+        inputs.reasons.any?(&.includes?("not a regular file or directory")).should be_true
+        Iyi::Stale::FastRecord.changed?(stamp, stamp, path, Set(String).new).should be_true
+      end
     end
   {% end %}
 

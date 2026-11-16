@@ -47,10 +47,12 @@ name: iyi
 # when it touches only docs or only bench files. A push to master or to
 # mt/next, the branch a release is integrated on before it reaches master,
 # a `v*` tag, the nightly schedule and a manual dispatch run every job -
-# except a nightly run of a commit that passed the full set on master in
-# the last week, which runs none. A push to any other branch runs nothing:
-# open a pull request, or dispatch the workflow on the branch for the full
-# set.
+# except a nightly run of a commit a nightly or dispatched run passed on
+# master in the last week, which runs none. A push builds only the broken
+# copies (bench/mutations.sh) of what it touched, and on Linux alone; a tag,
+# the nightly run and a dispatch build every one, everywhere. A push to any
+# other branch runs nothing: open a pull request, or dispatch the workflow
+# on the branch for the full set.
 #
 # The free plan ran twenty jobs at once, five of them on macOS, and the
 # full set was thirty-nine jobs and about twenty runner-hours a run (runs of
@@ -110,6 +112,14 @@ jobs:
       actions: read
     outputs:
       jobs: ${{ steps.plan.outputs.jobs }}
+      # The exercises whose broken copies are built, on Linux and elsewhere
+      # (bench/mutations.sh), the siblings dealt, and each platform's shards.
+      mutations: ${{ steps.plan.outputs.mutations }}
+      mutations_elsewhere: ${{ steps.plan.outputs.mutations_elsewhere }}
+      siblings: ${{ steps.plan.outputs.siblings }}
+      linux_shards: ${{ steps.plan.outputs.linux_shards }}
+      windows_shards: ${{ steps.plan.outputs.windows_shards }}
+      darwin_shards: ${{ steps.plan.outputs.darwin_shards }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1081,6 +1091,7 @@ jobs:
         env:
           STD_SIBLINGS: "0"
           STD_PLATFORMS: "0"
+          IYI_MUTATIONS: ${{ needs.plan.outputs.mutations }}
         run: bash bench/std_exercise.sh
       # crystal-metric's port: twenty-six benchmarks that check their own
       # answers against the Crystal program's, over one program that uses
@@ -1143,8 +1154,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
-    name: "The standard library's module exercises, shard ${{ matrix.shard }} of 4"
+        shard: ${{ fromJSON(needs.plan.outputs.linux_shards) }}
+    name: "The standard library's module exercises, shard ${{ matrix.shard }} of ${{ strategy.job-total }}"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1185,12 +1196,15 @@ jobs:
           go-version: stable
           cache: false
       - name: The module exercises of this shard
-        run: bash bench/std_siblings.sh ${{ matrix.shard }} 4
+        env:
+          IYI_SIBLINGS: ${{ needs.plan.outputs.siblings }}
+          IYI_MUTATIONS: ${{ needs.plan.outputs.mutations }}
+        run: bash bench/std_siblings.sh ${{ matrix.shard }} ${{ strategy.job-total }}
       # std/tls's reads and writes against OpenSSL, each set against its
       # cipher's own rate on the same machine (bench/tls_speed.sh): a share
       # needs no shard but one.
       - name: std/tls's throughput, against its cipher's
-        if: matrix.shard == 4
+        if: matrix.shard == strategy.job-total
         run: bash bench/tls_speed.sh
 
   targets:
@@ -1896,8 +1910,9 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # Every module's own exercise on darwin, in four shards
-  # (bench/std_siblings.sh), each building its own compiler from the same
+  # Every module's own exercise on darwin, in the shards the plan deals
+  # (bench/std_siblings.sh): four when this run builds the broken copies
+  # here, two when it does not, each building its own compiler from the same
   # cached static LLVM: as one step of the job above they ran it past its
   # hundred and twenty minutes, seventy of them in that step alone. A
   # shard has a hundred and five: on integration/0.19 shard 4 was cut off
@@ -1912,8 +1927,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
-    name: "The standard library's module exercises on darwin, shard ${{ matrix.shard }} of 4"
+        shard: ${{ fromJSON(needs.plan.outputs.darwin_shards) }}
+    name: "The standard library's module exercises on darwin, shard ${{ matrix.shard }} of ${{ strategy.job-total }}"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1940,7 +1955,10 @@ jobs:
       - name: Python's cryptography and Pillow, for the oracles
         run: python3 -m pip install -q cryptography pillow
       - name: The module exercises of this shard, on darwin
-        run: bash bench/std_siblings.sh ${{ matrix.shard }} 4
+        env:
+          IYI_SIBLINGS: ${{ needs.plan.outputs.siblings }}
+          IYI_MUTATIONS: ${{ needs.plan.outputs.mutations_elsewhere }}
+        run: bash bench/std_siblings.sh ${{ matrix.shard }} ${{ strategy.job-total }}
 
   # The standard library's own gates, on the platform the darwin tarball
   # is shipped for. The std job runs all of them on Linux and nothing
@@ -2001,6 +2019,7 @@ jobs:
       - name: The native standard library's foundation
         env:
           STD_SIBLINGS: "0"
+          IYI_MUTATIONS: ${{ needs.plan.outputs.mutations_elsewhere }}
         run: bash bench/std_exercise.sh
 
   # A Windows binary, run twenty times, and every run held to the right
@@ -2835,6 +2854,7 @@ jobs:
           PYTHONUNBUFFERED: "1"
           STD_SIBLINGS: "0"
           STD_PLATFORMS: "0"
+          IYI_MUTATIONS: ${{ needs.plan.outputs.mutations_elsewhere }}
         run: bash bench/std_exercise.sh
 
   # Every std exercise read from its own artifacts for darwin, Windows,
@@ -2934,8 +2954,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
-    name: "The standard library's module exercises on Windows, shard ${{ matrix.shard }} of 4"
+        shard: ${{ fromJSON(needs.plan.outputs.windows_shards) }}
+    name: "The standard library's module exercises on Windows, shard ${{ matrix.shard }} of ${{ strategy.job-total }}"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -2991,7 +3011,9 @@ jobs:
           PYTHONUNBUFFERED: "1"
           MUT_JOBS: "2"
           SIBLING_MINUTES: "50"
-        run: bash bench/std_siblings.sh ${{ matrix.shard }} 4
+          IYI_SIBLINGS: ${{ needs.plan.outputs.siblings }}
+          IYI_MUTATIONS: ${{ needs.plan.outputs.mutations_elsewhere }}
+        run: bash bench/std_siblings.sh ${{ matrix.shard }} ${{ strategy.job-total }}
 
   # The gates the Linux job runs that no Windows job did: the runtime's
   # own exercises, the boundaries bound from Crystal's library, the floors,

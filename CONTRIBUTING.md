@@ -38,11 +38,16 @@ what the two programs print.
 
 A pull request runs the fast part of it, about half an hour, and less when it
 touches only docs or only `bench/`; `scripts/ci_plan.py` says which jobs and
-why. The whole of it, the samples round trip and every Windows and darwin job
-included, runs on every push to master and nightly, so a failure only it can
-see shows after the merge. Before merging a risky change, run the workflow on
-its branch from the Actions tab for the whole of it. A push to any other
-branch runs nothing.
+why. A pull request that changes one module exercise runs that exercise, not
+every sibling. The whole of it, the samples round trip and every Windows and
+darwin job included, runs on every push to master and nightly, so a failure
+only it can see shows after the merge. A push builds the broken copies
+(`bench/mutations.sh`) only of the modules and exercises it touched, and only
+on Linux; the nightly run, a dispatch and a tag build every one on every
+platform. By hand a gate builds all of its own: `IYI_MUTATIONS=none` skips
+them, `IYI_SIBLINGS=std_zip_exercise` narrows `bench/std_siblings.sh`. Before
+merging a risky change, run the workflow on its branch from the Actions tab
+for the whole of it. A push to any other branch runs nothing.
 
 ## What this repository expects of a change
 

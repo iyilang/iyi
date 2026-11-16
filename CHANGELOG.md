@@ -25,6 +25,20 @@
 
 ### Changed
 
+- **CI builds the exercises' broken copies where a change can move
+  them.** They were 53 to 74% of a sibling shard's minutes (run
+  43713243986). `bench/mutations.sh` gates every proof that patches a
+  module, by `IYI_MUTATIONS`; `scripts/ci_plan.py` names the exercises a
+  push or a pull request touched - its exercise, a bench file it reaches,
+  a module its proofs break - and those build theirs on Linux. The nightly
+  run, a dispatch and a tag build every one on every platform, and a
+  nightly run is skipped only after another nightly or dispatched run
+  passed. A pull request that changes one exercise deals that sibling
+  alone (`IYI_SIBLINGS`, in `bench/std_siblings.sh`); darwin's siblings
+  run in two shards without their copies, four with them. Windows' jobs
+  take the compiler and `iyi` from one `windows-build` job, and the
+  Windows and darwin setup is one composite action each
+  (`.github/actions/`).
 - **`iyi test` in a directory no longer runs other projects' tests.** It
   walks the tree as `fix` and `mod tidy` do: not into `lib` (the installed
   dependencies, whose failing test failed the run of the project that

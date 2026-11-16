@@ -107,7 +107,12 @@ end
     acl_test.write_text('''import std/autocert::{AutocertDirCache, AutocertError}
 path = Program.env("IYI_CHMOD_FAILURE_PATH") || raise "missing path"
 cache = AutocertDirCache.new(path)
-assert cache.put("example", "data").is_a?(AutocertError)
+failure = cache.put("example", "data")
+if failure.is_a?(AutocertError)
+  assert failure.message.includes?("simulated ACL refusal")
+else
+  raise "ACL test expected the simulated refusal"
+end
 ''', encoding="utf-8")
     env = os.environ.copy()
     env["IYI_CACHE_DIR"] = str(work / "cache")

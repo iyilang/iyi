@@ -791,6 +791,81 @@ rm docmods/app/twice.iyi
 diff -u twice-doc.txt mods-doc.txt > mods-diff.txt 2>&1 || {
   echo "the artifact in mods and the source answered differently:"; head -10 mods-diff.txt; exit 1; }
 
+# Package JSON is the registry's data, not a second rendering of the API.
+# The two documented modules are deliberately made in reverse path order;
+# private files, tests, lib and nested packages do not belong to the array.
+step "iyi doc --json lists the package's artifact APIs in path order"
+mkdir -p "doc package/extra" "doc package/lib" "doc package/other"
+printf 'module example.test/user/docpkg\n' > "doc package/iyi.mod"
+printf 'module first\n\n# The first answer.\npub def answer : Int32\n  42\nend\n' > "doc package/first.iyi"
+printf 'module extra/second\n\n# The second answer.\npub def answer : Int32\n  7\nend\n' > "doc package/extra/second.iyi"
+printf 'module private_only\n\ndef hidden : Int32\n  1\nend\n' > "doc package/private_only.iyi"
+printf 'module ignored_test\n\npub def ignored : Int32\n  1\nend\n' > "doc package/ignored_test.iyi"
+printf 'module foreign\n\npub def ignored : Int32\n  1\nend\n' > "doc package/lib/foreign.iyi"
+printf 'module example.test/user/other\n' > "doc package/other/iyi.mod"
+printf 'module other/foreign\n\npub def ignored : Int32\n  1\nend\n' > "doc package/other/foreign.iyi"
+printf 'import first\nimport extra/second\n' > "doc package/entry.iyi"
+
+"$IYI" doc --json "$WORK/doc package" > package-doc.json 2> package-doc.err || {
+  echo "package documentation failed:"; cat package-doc.err; exit 1; }
+(cd "doc package" && "$IYI" doc --json) > package-doc-again.json 2> package-doc-again.err || {
+  echo "documentation from the package failed:"; cat package-doc-again.err; exit 1; }
+diff -u package-doc.json package-doc-again.json > package-doc-diff.txt || {
+  echo "package documentation changed between runs:"; cat package-doc-diff.txt; exit 1; }
+(cd "doc package" && "$IYI" build --no-codegen --emit-iyimod artifacts entry.iyi) > package-emit.log 2>&1 || {
+  echo "building the comparison artifacts failed:"; cat package-emit.log; exit 1; }
+"$IYI" mod dump --json "doc package/artifacts/extra/second.iyimod" > package-second.json || exit 1
+"$IYI" mod dump --json "doc package/artifacts/first.iyimod" > package-first.json || exit 1
+
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) PYTHON=python ;;
+  *) PYTHON=python3 ;;
+esac
+cat > package-doc-check.py <<'PY'
+import json
+import sys
+
+def read(path):
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+data = read(sys.argv[1])
+assert set(data) == {"package", "compiler", "modules"}, "package schema changed"
+assert data["package"] == "example.test/user/docpkg"
+assert isinstance(data["compiler"], str) and data["compiler"]
+modules = data["modules"]
+assert [entry["module"] for entry in modules] == ["extra/second", "first"]
+for entry, filename, doc in zip(
+    modules,
+    ["package-second.json", "package-first.json"],
+    ["The second answer.", "The first answer."],
+):
+    assert set(entry) == {"module", "api"}, "module schema changed"
+    assert entry["api"] == read(filename), "API differs from mod dump"
+    assert entry["api"]["module"] == entry["module"]
+    assert entry["api"]["functions"][0]["doc"] == doc
+PY
+"$PYTHON" package-doc-check.py package-doc.json || exit 1
+"$PYTHON" -c 'import json; d=json.load(open("package-doc.json")); del d["compiler"]; json.dump(d, open("package-doc-broken.json", "w"))'
+if "$PYTHON" package-doc-check.py package-doc-broken.json > package-doc-broken.log 2>&1; then
+  echo "the schema gate accepted an object without compiler"; exit 1
+fi
+echo "schema gate refused a missing compiler key"
+
+mkdir -p doc-empty doc-no-manifest
+printf 'module example.test/user/empty\n' > doc-empty/iyi.mod
+printf 'module empty\n\ndef hidden : Int32\n  1\nend\n' > doc-empty/empty.iyi
+for dir in doc-empty doc-no-manifest; do
+  if "$IYI" doc --json "$WORK/$dir" > "$dir.out" 2>&1; then
+    echo "$dir was accepted as an exporting package"; exit 1
+  fi
+  if grep -Ei 'unhandled exception|backtrace' "$dir.out" >/dev/null; then
+    echo "$dir produced a trace:"; cat "$dir.out"; exit 1
+  fi
+done
+grep -q 'no exporting modules' doc-empty.out || { cat doc-empty.out; exit 1; }
+grep -q 'no iyi.mod' doc-no-manifest.out || { cat doc-no-manifest.out; exit 1; }
+
 echo "workdir $WORK"
 echo "packages gate: every step held"
 exit 0

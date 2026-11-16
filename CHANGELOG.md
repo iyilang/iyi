@@ -4,6 +4,12 @@
 
 ### Added
 
+- **`iyi doc --json [DIR]` prints a package's exported APIs as data.**
+  The package path and compiler identity accompany its modules, ordered by
+  path, each carrying the same API and doc comments as `iyi mod dump --json`.
+  DIR defaults to the current directory; a missing manifest or an empty
+  package is refused.
+
 - **`iyi test` runs tests at once, says what each named case came to, and
   can run some of them.** Half as many tests build and run together as the
   machine has cores, `-p N` says how many, and the report stays in file

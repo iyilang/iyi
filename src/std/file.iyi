@@ -1484,8 +1484,17 @@ class ::File
     {% end %}
   end
 
-  @[Effect(:file_write, :chmod)]
   def self.chmod(path : String | Path, mode : Int32) : Nil
+    record_chmod_attempt(path)
+    chmod_after_attempt(path, mode)
+  end
+
+  # Effect wrappers record on return. The attempt must be recorded before
+  # chmod can fail and its caller can catch the panic.
+  @[Effect(:file_write, :chmod)]; private def self.record_chmod_attempt(path : String | Path) : Nil
+  end
+
+  @[Effect(:file_write, :chmod)]; private def self.chmod_after_attempt(path : String | Path, mode : Int32) : Nil
     p = path.to_s
     {% if flag?(:darwin) || flag?(:linux) %}
       if Std::File::LibC.chmod(sys_path(p), mode) != 0

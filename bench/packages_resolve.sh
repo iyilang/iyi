@@ -792,19 +792,20 @@ diff -u twice-doc.txt mods-doc.txt > mods-diff.txt 2>&1 || {
   echo "the artifact in mods and the source answered differently:"; head -10 mods-diff.txt; exit 1; }
 
 # Package JSON is the registry's data, not a second rendering of the API.
-# The two documented modules are deliberately made in reverse path order;
+# The documented modules are made in a different order from their paths;
 # private files, tests, lib and nested packages do not belong to the array.
 step "iyi doc --json lists the package's artifact APIs in path order"
 mkdir -p "doc package/extra" "doc package/lib" "doc package/other"
-printf 'module example.test/user/docpkg\n' > "doc package/iyi.mod"
+printf 'module example.test/user/docpkg\r\n' > "doc package/iyi.mod"
 printf 'module first\n\n# The first answer.\npub def answer : Int32\n  42\nend\n' > "doc package/first.iyi"
+printf 'module a0\n\n# The zero answer.\npub def answer : Int32\n  0\nend\n' > "doc package/a0.iyi"
 printf 'module extra/second\n\n# The second answer.\npub def answer : Int32\n  7\nend\n' > "doc package/extra/second.iyi"
 printf 'module private_only\n\ndef hidden : Int32\n  1\nend\n' > "doc package/private_only.iyi"
 printf 'module ignored_test\n\npub def ignored : Int32\n  1\nend\n' > "doc package/ignored_test.iyi"
 printf 'module foreign\n\npub def ignored : Int32\n  1\nend\n' > "doc package/lib/foreign.iyi"
 printf 'module example.test/user/other\n' > "doc package/other/iyi.mod"
 printf 'module other/foreign\n\npub def ignored : Int32\n  1\nend\n' > "doc package/other/foreign.iyi"
-printf 'import first\nimport extra/second\n' > "doc package/entry.iyi"
+printf 'import first\nimport extra/second\nimport a0\n' > "doc package/entry.iyi"
 # A same-named module in the calling directory must not replace DIR's own.
 printf 'module first\n\npub def wrong : Int32\n  0\nend\n' > first.iyi
 
@@ -818,8 +819,35 @@ diff -u package-doc.json package-doc-again.json > package-doc-diff.txt || {
   echo "documentation with --json last failed:"; cat package-doc-flag-last.err; exit 1; }
 diff -u package-doc.json package-doc-flag-last.json > package-doc-flag-diff.txt || {
   echo "the position of --json changed the output:"; cat package-doc-flag-diff.txt; exit 1; }
+# A CRLF manifest and an LF manifest name the same package. The output's
+# own line ending must remain LF on every host.
+printf 'module example.test/user/docpkg\n' > "doc package/iyi.mod"
+"$IYI" doc --json "$WORK/doc package" > package-doc-lf.json 2> package-doc-lf.err || {
+  echo "documentation with an LF manifest failed:"; cat package-doc-lf.err; exit 1; }
+diff -u package-doc.json package-doc-lf.json > package-doc-line-diff.txt || {
+  echo "manifest line endings changed the output:"; cat package-doc-line-diff.txt; exit 1; }
+printf 'module example.test/user/docpkg\r\n' > "doc package/iyi.mod"
+
+# Windows paths include a drive and may be given with native backslashes.
+# POSIX hosts instead exercise a symlink to the package, including macOS's
+# /var and /private/var spelling of its temporary directory.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    native_package="$(cygpath -w "$WORK/doc package")"
+    "$IYI" doc --json "$native_package" > package-doc-alias.json 2> package-doc-alias.err || {
+      echo "documentation through a native drive path failed:"; cat package-doc-alias.err; exit 1; }
+    ;;
+  *)
+    ln -s "$WORK/doc package" "alias package" || exit 1
+    "$IYI" doc --json "$WORK/alias package" > package-doc-alias.json 2> package-doc-alias.err || {
+      echo "documentation through a symlink failed:"; cat package-doc-alias.err; exit 1; }
+    ;;
+esac
+diff -u package-doc.json package-doc-alias.json > package-doc-alias-diff.txt || {
+  echo "the package path spelling changed the output:"; cat package-doc-alias-diff.txt; exit 1; }
 (cd "doc package" && "$IYI" build --no-codegen --emit-iyimod artifacts entry.iyi) > package-emit.log 2>&1 || {
   echo "building the comparison artifacts failed:"; cat package-emit.log; exit 1; }
+"$IYI" mod dump --json "doc package/artifacts/a0.iyimod" > package-a0.json || exit 1
 "$IYI" mod dump --json "doc package/artifacts/extra/second.iyimod" > package-second.json || exit 1
 "$IYI" mod dump --json "doc package/artifacts/first.iyimod" > package-first.json || exit 1
 
@@ -829,22 +857,28 @@ case "$(uname -s)" in
 esac
 cat > package-doc-check.py <<'PY'
 import json
+import pathlib
 import sys
 
 def read(path):
     with open(path, encoding="utf-8") as f:
         return json.load(f)
 
-data = read(sys.argv[1])
+raw = pathlib.Path(sys.argv[1]).read_bytes()
+assert raw.endswith(b"\n") and b"\r" not in raw, "JSON must use LF, not CRLF"
+data = json.loads(raw)
 assert set(data) == {"package", "compiler", "modules"}, "package schema changed"
 assert data["package"] == "example.test/user/docpkg"
 assert isinstance(data["compiler"], str) and data["compiler"]
 modules = data["modules"]
-assert [entry["module"] for entry in modules] == ["extra/second", "first"]
+names = [entry["module"] for entry in modules]
+assert all("\\" not in name for name in names), "module paths must use /"
+assert names == sorted(names, key=lambda name: name.encode("utf-8")), "modules not in byte order"
+assert names == ["a0", "extra/second", "first"]
 for entry, filename, doc in zip(
     modules,
-    ["package-second.json", "package-first.json"],
-    ["The second answer.", "The first answer."],
+    ["package-a0.json", "package-second.json", "package-first.json"],
+    ["The zero answer.", "The second answer.", "The first answer."],
 ):
     assert set(entry) == {"module", "api"}, "module schema changed"
     assert entry["api"] == read(filename), "API differs from mod dump"
@@ -852,11 +886,36 @@ for entry, filename, doc in zip(
     assert entry["api"]["functions"][0]["doc"] == doc
 PY
 "$PYTHON" package-doc-check.py package-doc.json || exit 1
-"$PYTHON" -c 'import json; d=json.load(open("package-doc.json")); del d["compiler"]; json.dump(d, open("package-doc-broken.json", "w"))'
-if "$PYTHON" package-doc-check.py package-doc-broken.json > package-doc-broken.log 2>&1; then
-  echo "the schema gate accepted an object without compiler"; exit 1
-fi
-echo "schema gate refused a missing compiler key"
+"$PYTHON" - <<'PY'
+import json
+from pathlib import Path
+
+raw = Path("package-doc.json").read_bytes()
+Path("package-doc-bad-eol.json").write_bytes(raw[:-1] + b"\r\n")
+data = json.loads(raw)
+del data["compiler"]
+Path("package-doc-bad-schema.json").write_text(json.dumps(data) + "\n", encoding="utf-8", newline="\n")
+data = json.loads(raw)
+data["modules"][1]["module"] = "extra\\second"
+Path("package-doc-bad-slash.json").write_text(json.dumps(data) + "\n", encoding="utf-8", newline="\n")
+data = json.loads(raw)
+data["modules"].reverse()
+Path("package-doc-bad-order.json").write_text(json.dumps(data) + "\n", encoding="utf-8", newline="\n")
+PY
+for defect in eol schema slash order; do
+  if "$PYTHON" package-doc-check.py "package-doc-bad-$defect.json" > package-doc-broken.log 2>&1; then
+    echo "the package JSON gate accepted broken $defect"; exit 1
+  fi
+  case "$defect" in
+    eol) expected="JSON must use LF" ;;
+    schema) expected="package schema changed" ;;
+    slash) expected="module paths must use /" ;;
+    order) expected="modules not in byte order" ;;
+  esac
+  grep -Fq "$expected" package-doc-broken.log || {
+    echo "broken $defect failed for the wrong reason:"; cat package-doc-broken.log; exit 1; }
+  echo "package JSON gate refused broken $defect"
+done
 
 mkdir -p doc-empty doc-no-manifest
 printf 'module example.test/user/empty\n' > doc-empty/iyi.mod
@@ -871,6 +930,21 @@ for dir in doc-empty doc-no-manifest; do
 done
 grep -q 'no exporting modules' doc-empty.out || { cat doc-empty.out; exit 1; }
 grep -q 'no iyi.mod' doc-no-manifest.out || { cat doc-no-manifest.out; exit 1; }
+
+# A mixed-case module is outside the module grammar, including on a
+# case-insensitive filesystem. It must be refused rather than documented
+# under a differently cased path.
+mkdir -p doc-invalid-case
+printf 'module example.test/user/case\n' > doc-invalid-case/iyi.mod
+printf 'module Mixed\n\npub def answer : Int32\n  1\nend\n' > doc-invalid-case/Mixed.iyi
+if "$IYI" doc --json "$WORK/doc-invalid-case" > doc-invalid-case.out 2>&1; then
+  echo "a mixed-case module was accepted"; exit 1
+fi
+if grep -Ei 'unhandled exception|backtrace' doc-invalid-case.out >/dev/null; then
+  echo "mixed-case module produced a trace:"; cat doc-invalid-case.out; exit 1
+fi
+grep -q 'Mixed' doc-invalid-case.out || {
+  echo "the mixed-case refusal did not name the invalid path:"; cat doc-invalid-case.out; exit 1; }
 
 echo "workdir $WORK"
 echo "packages gate: every step held"

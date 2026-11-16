@@ -13,18 +13,24 @@
 set -eu
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO/bench/lib/host.sh"
+require_test_host
 IYI="$REPO/bin/iyi"
 HOSTED_COMPILER="$REPO/bin/crystal"
 . "$REPO/bench/lib/mutation.sh"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
+REPO_NATIVE="$(native_path "$REPO")"
+WORK_NATIVE="$(native_path "$WORK")"
+export IYI_PATH="$REPO_NATIVE/src"
+cd "$REPO"
 
 status=0
 diverged=0
 
 echo "== 1. Building and running selfhost lexer exercise (plain mode)"
-"$IYI" build -o "$WORK/exercise-plain" "$REPO/bench/selfhost_lexer_exercise.iyi"
-"$WORK/exercise-plain" > "$WORK/plain.out" 2>&1
+"$IYI" build -o "$WORK_NATIVE/exercise-plain$EXE" "$REPO_NATIVE/bench/selfhost_lexer_exercise.iyi"
+"$WORK/exercise-plain$EXE" > "$WORK/plain.out" 2>&1
 cat "$WORK/plain.out"
 
 echo
@@ -54,8 +60,8 @@ done
 
 echo
 echo "== 2. Building and running selfhost lexer exercise (--release mode)"
-"$IYI" build --release -o "$WORK/exercise-release" "$REPO/bench/selfhost_lexer_exercise.iyi"
-"$WORK/exercise-release" > "$WORK/release.out" 2>&1
+"$IYI" build --release -o "$WORK_NATIVE/exercise-release$EXE" "$REPO_NATIVE/bench/selfhost_lexer_exercise.iyi"
+"$WORK/exercise-release$EXE" > "$WORK/release.out" 2>&1
 cat "$WORK/release.out"
 
 if ! grep -qF "ALL SELFHOST LEXER CHECKS PASSED SUCCESSFULLY!" "$WORK/release.out"; then
@@ -207,7 +213,7 @@ tokens = tokenize_stream(source, for_fixture)
 puts tokens.join("\n")
 HOSTED_GOLDEN_SCRIPT
 
-CRYSTAL_PATH="$REPO/src" "$HOSTED_COMPILER" build -o "$WORK/dump_hosted" "$WORK/dump_hosted_tokens.cr"
+CRYSTAL_PATH="$REPO_NATIVE/src" "$HOSTED_COMPILER" build -o "$WORK_NATIVE/dump_hosted$EXE" "$WORK_NATIVE/dump_hosted_tokens.cr"
 
 fixture_count=0
 total_matched_tokens=0
@@ -252,12 +258,12 @@ for fixture in \
   "$REPO"/bench/fixtures/lexmode_string_concat_and_magic.iyi; do
   name="$(basename "$fixture")"
   rel="${fixture#$REPO/}"
-  "$WORK/dump_hosted" "$fixture" > "$WORK/golden_$name.txt"
-  "$WORK/exercise-release" "$fixture" > "$WORK/selfhost_$name.txt"
+  fixture_native="$(native_path "$fixture")"
+  "$WORK/dump_hosted$EXE" "$fixture_native" > "$WORK/golden_$name.txt"
+  "$WORK/exercise-release$EXE" "$fixture_native" > "$WORK/selfhost_$name.txt"
   if diff -u "$WORK/golden_$name.txt" "$WORK/selfhost_$name.txt" > "$WORK/diff_$name.txt"; then
     count="$(wc -l < "$WORK/selfhost_$name.txt" | tr -d ' ')"
     echo "  $rel: identical ($count normalized tokens match hosted frontend)"
-    fixture_count=$((fixture_count + 1))
     total_matched_tokens=$((total_matched_tokens + count))
   else
     echo "  ERROR: mismatch in $rel"
@@ -265,9 +271,10 @@ for fixture in \
     cat "$WORK/diff_$name.txt"
     status=1
   fi
+  fixture_count=$((fixture_count + 1))
 done
 
-echo "  Parity summary: $((fixture_count - diverged))/$fixture_count syntax fixtures match 100% ($total_matched_tokens total tokens)"
+echo "  Parity summary: $((fixture_count - diverged))/$fixture_count syntax fixtures match ($total_matched_tokens total tokens)"
 
 echo
 echo "== 4. Malformed-input and boundary rejection checks"
@@ -284,20 +291,43 @@ for bad in \
   "\"\\u{12G4}\"" \
   "1e_2" \
   "\"hello #{ 1 + 2 \""; do
-  if "$WORK/exercise-release" "$bad" >/dev/null 2>&1; then
+  printf '%s' "$bad" > "$WORK/invalid-lexer.iyi"
+  if "$WORK/exercise-release$EXE" "$WORK_NATIVE/invalid-lexer.iyi" > "$WORK/invalid-lexer.log" 2>&1; then
     echo "  ERROR: expected failure for malformed input: $bad"
     status=1
-  else
+  elif grep -qF "Syntax error" "$WORK/invalid-lexer.log"; then
     echo "  properly rejected: $bad"
+  else
+    echo "  ERROR: malformed input failed without a lexer syntax error: $bad"
+    cat "$WORK/invalid-lexer.log"
+    status=1
   fi
 done
 
 echo
 echo "== 5. Guarded mutation proofs (verify patch applies, exercise fails, revert passes)"
 
-# Each check runs the exercise on the mutated source. Non-zero (exercise failed) = caught.
+# A build or launch failure is an invalid mutant, not a caught defect.
 check_exercise_must_fail() {
-  "$IYI" run "$REPO/bench/selfhost_lexer_exercise.iyi"
+  rm -f "$WORK/mut-exercise$EXE"
+  if ! "$IYI" build -o "$WORK_NATIVE/mut-exercise$EXE" "$REPO_NATIVE/bench/selfhost_lexer_exercise.iyi" > "$WORK/mut-build.log" 2>&1; then
+    echo "INVALID MUTANT: lexer exercise failed to build"
+    cat "$WORK/mut-build.log"
+    return 0
+  fi
+  if [ ! -x "$WORK/mut-exercise$EXE" ]; then
+    echo "INVALID MUTANT: lexer exercise executable is missing"
+    return 0
+  fi
+  if "$WORK/mut-exercise$EXE" > "$WORK/mut-run.log" 2>&1; then
+    return 0
+  fi
+  if grep -qE 'Assertion failed:|Syntax error' "$WORK/mut-run.log"; then
+    return 1
+  fi
+  echo "INVALID MUTANT: lexer exercise failed without an assertion or syntax error"
+  cat "$WORK/mut-run.log"
+  return 0
 }
 
 prove_mutation "altering keyword 'pub' recognition in lexer" \
@@ -338,8 +368,10 @@ prove_mutation "altering macro control start recognition in next_macro_token" \
   "next_char(TokenKind::MACRO_EXPRESSION_START)" \
   -- check_exercise_must_fail || status=1
 echo
+echo "== Rebuilding and running restored lexer exercise"
+"$IYI" build --release -o "$WORK_NATIVE/exercise-restored$EXE" "$REPO_NATIVE/bench/selfhost_lexer_exercise.iyi"
+"$WORK/exercise-restored$EXE" >/dev/null
 echo "== Verification clean state confirmed"
-"$WORK/exercise-release" >/dev/null
 
 echo
 if [ "$status" -eq 0 ]; then

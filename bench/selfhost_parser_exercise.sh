@@ -22,19 +22,25 @@
 set -eu
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO/bench/lib/host.sh"
+require_test_host
 IYI="$REPO/bin/iyi"
 HOSTED_COMPILER="$REPO/bin/crystal"
 PARSER="$REPO/src/compiler/syntax/parser.iyi"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
+REPO_NATIVE="$(native_path "$REPO")"
+WORK_NATIVE="$(native_path "$WORK")"
+export IYI_PATH="$REPO_NATIVE/src"
 . "$REPO/bench/lib/mutation.sh"
+cd "$REPO"
 
 status=0
 diverged=0
 
 echo "== 1. Building and running selfhost parser exercise (plain mode)"
-"$IYI" build -o "$WORK/exercise-plain" "$REPO/bench/selfhost_parser_exercise.iyi"
-"$WORK/exercise-plain" > "$WORK/plain.out" 2>&1
+"$IYI" build -o "$WORK_NATIVE/exercise-plain$EXE" "$REPO_NATIVE/bench/selfhost_parser_exercise.iyi"
+"$WORK/exercise-plain$EXE" > "$WORK/plain.out" 2>&1
 cat "$WORK/plain.out"
 
 echo
@@ -58,8 +64,8 @@ done
 
 echo
 echo "== 2. Building and running selfhost parser exercise (--release mode)"
-"$IYI" build --release -o "$WORK/exercise-release" "$REPO/bench/selfhost_parser_exercise.iyi"
-"$WORK/exercise-release" > "$WORK/release.out" 2>&1
+"$IYI" build --release -o "$WORK_NATIVE/exercise-release$EXE" "$REPO_NATIVE/bench/selfhost_parser_exercise.iyi"
+"$WORK/exercise-release$EXE" > "$WORK/release.out" 2>&1
 cat "$WORK/release.out"
 
 if ! grep -qF "ALL SELFHOST PARSER CHECKS PASSED SUCCESSFULLY!" "$WORK/release.out"; then
@@ -724,7 +730,7 @@ else
 end
 HOSTED_GOLDEN_SCRIPT
 
-CRYSTAL_PATH="$REPO/src" "$HOSTED_COMPILER" build -o "$WORK/dump_hosted" "$WORK/dump_hosted_ast.cr"
+CRYSTAL_PATH="$REPO_NATIVE/src" "$HOSTED_COMPILER" build -o "$WORK_NATIVE/dump_hosted$EXE" "$WORK_NATIVE/dump_hosted_ast.cr"
 
 fixture_count=0
 total_matched_nodes=0
@@ -771,22 +777,24 @@ for fixture in \
   "$REPO"/bench/fixtures/syntax_call_spans.iyi \
   "$REPO"/bench/fixtures/syntax_begin_shorthand_and_comma_lines.iyi; do
   fixture_name="${fixture#"$REPO/"}"
-  "$WORK/exercise-plain" "$fixture" > "$WORK/iyi.ast"
-  "$WORK/dump_hosted" "$fixture" > "$WORK/hosted.ast"
+  fixture_native="$(native_path "$fixture")"
+  "$WORK/exercise-plain$EXE" "$fixture_native" > "$WORK/iyi.ast"
+  "$WORK/dump_hosted$EXE" "$fixture_native" > "$WORK/hosted.ast"
 
   if ! cmp -s "$WORK/iyi.ast" "$WORK/hosted.ast"; then
     echo "  $fixture_name: MISMATCH"
     diff -u "$WORK/hosted.ast" "$WORK/iyi.ast" | head -20
+    diverged=$((diverged + 1))
     status=1
   else
-    nodes_count=$("$WORK/dump_hosted" "$fixture" --count)
+    nodes_count=$("$WORK/dump_hosted$EXE" "$fixture_native" --count)
     echo "  $fixture_name: identical ($nodes_count normalized nodes match hosted frontend)"
     total_matched_nodes=$((total_matched_nodes + nodes_count))
   fi
   fixture_count=$((fixture_count + 1))
 done
 
-echo "  Parity summary: $((fixture_count - diverged))/$fixture_count syntax fixtures match 100% ($total_matched_nodes total nodes)"
+echo "  Parity summary: $((fixture_count - diverged))/$fixture_count syntax fixtures match ($total_matched_nodes total nodes)"
 
 echo
 echo "== 4. Malformed-input and boundary rejection checks"
@@ -802,11 +810,15 @@ for bad in \
   "x = 1 while true" \
   "x = 1 until true" \
   '$bad_global = 1'; do
-  if "$WORK/exercise-plain" -e "$bad" >/dev/null 2>&1; then
+  if "$WORK/exercise-plain$EXE" -e "$bad" > "$WORK/invalid-expr.log" 2>&1; then
     echo "  FAILED TO REJECT: $bad"
     status=1
-  else
+  elif grep -qF "Syntax error" "$WORK/invalid-expr.log"; then
     echo "  properly rejected: $bad"
+  else
+    echo "  ERROR: invalid expression failed without a parser syntax error: $bad"
+    cat "$WORK/invalid-expr.log"
+    status=1
   fi
 done
 
@@ -820,11 +832,19 @@ for bad in \
   'f { |(x, 1)| x }' \
   'f { |(x, if)| x }'; do
   printf '%s\n' "$bad" > "$WORK/invalid-block.iyi"
-  if "$WORK/exercise-plain" "$WORK/invalid-block.iyi" >/dev/null 2>&1; then
+  if "$WORK/exercise-plain$EXE" "$WORK_NATIVE/invalid-block.iyi" > "$WORK/invalid-block-port.log" 2>&1; then
     echo "  native accepted invalid: $bad"
     status=1
-  elif "$WORK/dump_hosted" "$WORK/invalid-block.iyi" >/dev/null 2>&1; then
+  elif ! grep -qF "Syntax error" "$WORK/invalid-block-port.log"; then
+    echo "  native failed without a parser syntax error: $bad"
+    cat "$WORK/invalid-block-port.log"
+    status=1
+  elif "$WORK/dump_hosted$EXE" "$WORK_NATIVE/invalid-block.iyi" > "$WORK/invalid-block-hosted.log" 2>&1; then
     echo "  hosted accepted invalid: $bad"
+    status=1
+  elif ! grep -qF "Iyi::SyntaxException" "$WORK/invalid-block-hosted.log"; then
+    echo "  hosted failed without a parser syntax exception: $bad"
+    cat "$WORK/invalid-block-hosted.log"
     status=1
   else
     echo "  both rejected: $bad"
@@ -836,11 +856,19 @@ for bad in \
   'f(value: 1, &handler, 2)' \
   'f(value: 1, &handler, extra: 2)'; do
   printf '%s\n' "$bad" > "$WORK/invalid-named-forward.iyi"
-  if "$WORK/exercise-plain" "$WORK/invalid-named-forward.iyi" >/dev/null 2>&1; then
+  if "$WORK/exercise-plain$EXE" "$WORK_NATIVE/invalid-named-forward.iyi" > "$WORK/invalid-named-port.log" 2>&1; then
     echo "  native accepted invalid: $bad"
     status=1
-  elif "$WORK/dump_hosted" "$WORK/invalid-named-forward.iyi" >/dev/null 2>&1; then
+  elif ! grep -qF "Syntax error" "$WORK/invalid-named-port.log"; then
+    echo "  native failed without a parser syntax error: $bad"
+    cat "$WORK/invalid-named-port.log"
+    status=1
+  elif "$WORK/dump_hosted$EXE" "$WORK_NATIVE/invalid-named-forward.iyi" > "$WORK/invalid-named-hosted.log" 2>&1; then
     echo "  hosted accepted invalid: $bad"
+    status=1
+  elif ! grep -qF "Iyi::SyntaxException" "$WORK/invalid-named-hosted.log"; then
+    echo "  hosted failed without a parser syntax exception: $bad"
+    cat "$WORK/invalid-named-hosted.log"
     status=1
   else
     echo "  both rejected: $bad"
@@ -850,22 +878,66 @@ done
 echo
 echo "== 5. Guarded mutation proofs (verify patch applies, exercise fails, revert passes)"
 
-# Each proof patches one parser defect and requires the exercise to fail. The
-# check is the exercise run itself: a non-zero exit means the defect was caught.
+# The mutation helper treats a nonzero check as caught, so invalid builds and
+# oracle failures must return success during a mutation and fail the proof.
+invalid_mutant() {
+  echo "INVALID MUTANT: $*"
+  [ "${_PM_ARMED:-0}" = 1 ]
+}
+
+build_mutant_exercise() {
+  rm -f "$WORK/mut-exercise$EXE"
+  if "$IYI" build -o "$WORK_NATIVE/mut-exercise$EXE" "$REPO_NATIVE/bench/selfhost_parser_exercise.iyi" > "$WORK/mut-build.log" 2>&1 &&
+     [ -x "$WORK/mut-exercise$EXE" ]; then
+    return 0
+  fi
+  cat "$WORK/mut-build.log"
+  return 1
+}
+
+check_parser_exercise() {
+  if ! build_mutant_exercise; then
+    invalid_mutant "parser exercise failed to build"
+    return $?
+  fi
+  if "$WORK/mut-exercise$EXE" > "$WORK/mut-run.log" 2>&1; then
+    return 0
+  fi
+  if grep -qE 'Assertion failed:|Syntax error' "$WORK/mut-run.log"; then
+    return 1
+  fi
+  cat "$WORK/mut-run.log"
+  invalid_mutant "parser exercise failed without an assertion or syntax error"
+}
+
 run_proof() {
-  prove_mutation "$1" "$PARSER" "$2" "$3" -- "$IYI" run "$REPO/bench/selfhost_parser_exercise.iyi" || status=1
+  prove_mutation "$1" "$PARSER" "$2" "$3" -- check_parser_exercise || status=1
 }
 
 named_forward_syntax_matches() {
-  if ! "$IYI" build -o "$WORK/named_forward_mutant" "$REPO/bench/selfhost_parser_exercise.iyi" > "$WORK/named_forward_build.log" 2>&1; then
-    cat "$WORK/named_forward_build.log"
-    echo "INVALID MUTANT: parser exercise failed to build"
-    if [ "${_PM_ARMED:-0}" = 1 ]; then return 0; fi
-    return 1
+  local rc
+  if ! build_mutant_exercise; then
+    invalid_mutant "parser exercise failed to build"
+    return $?
   fi
-  "$WORK/dump_hosted" "$REPO/bench/fixtures/syntax_named_forward_block.iyi" > "$WORK/named_forward.hosted" || return 1
-  "$WORK/named_forward_mutant" "$REPO/bench/fixtures/syntax_named_forward_block.iyi" > "$WORK/named_forward.port" || return 1
-  diff -u "$WORK/named_forward.hosted" "$WORK/named_forward.port"
+  if ! "$WORK/dump_hosted$EXE" "$REPO_NATIVE/bench/fixtures/syntax_named_forward_block.iyi" > "$WORK/named_forward.hosted"; then
+    invalid_mutant "hosted parser failed on the named-forward fixture"
+    return $?
+  fi
+  if ! "$WORK/mut-exercise$EXE" "$REPO_NATIVE/bench/fixtures/syntax_named_forward_block.iyi" > "$WORK/named_forward.port" 2> "$WORK/named_forward.err"; then
+    if grep -qF "Syntax error" "$WORK/named_forward.err"; then return 1; fi
+    cat "$WORK/named_forward.err"
+    invalid_mutant "parser exercise failed without a syntax error"
+    return $?
+  fi
+  if diff -u "$WORK/named_forward.hosted" "$WORK/named_forward.port"; then
+    return 0
+  else
+    rc=$?
+    if [ "$rc" -eq 1 ]; then return 1; fi
+    invalid_mutant "could not compare named-forward ASTs"
+    return $?
+  fi
 }
 named_forward_syntax_matches || status=1
 prove_mutation "parenthesized named arguments cannot precede a forwarded block" "$PARSER" \
@@ -884,7 +956,7 @@ run_proof "mutation 1: altering operator precedence in parse_add_or_sub" \
   'left = parse_mul_or_div' 'left = parse_prefix'
 
 run_proof_all() {
-  prove_mutation_all "$1" "$PARSER" "$2" "$3" -- "$IYI" run "$REPO/bench/selfhost_parser_exercise.iyi" || status=1
+  prove_mutation_all "$1" "$PARSER" "$2" "$3" -- check_parser_exercise || status=1
 }
 
 # Mutation 2: break operator right-associativity in parse_pow. The original sed
@@ -951,7 +1023,11 @@ run_proof "mutation 14: refusing the assignment form of a select when" \
 # The exercise run above checks only its own assertions, not the tree, so a fixture
 # proof checks the rebuilt exercise's tree against the hosted parser's, for the new fixtures.
 new_fixtures_match() {
-  "$IYI" build -o "$WORK/mut-exercise" "$REPO/bench/selfhost_parser_exercise.iyi" > /dev/null 2>&1 || return 1
+  local fixture fixture_native rc
+  if ! build_mutant_exercise; then
+    invalid_mutant "parser exercise failed to build"
+    return $?
+  fi
   for fixture in \
     "$REPO"/bench/fixtures/syntax_macro_text_splits.iyi \
     "$REPO"/bench/fixtures/syntax_macro_keywords_and_escapes.iyi \
@@ -962,9 +1038,29 @@ new_fixtures_match() {
     "$REPO"/bench/fixtures/syntax_heredoc_command_and_folds.iyi \
     "$REPO"/bench/fixtures/syntax_call_spans.iyi \
     "$REPO"/bench/fixtures/syntax_begin_shorthand_and_comma_lines.iyi; do
-    "$WORK/mut-exercise" "$fixture" > "$WORK/mut.ast" 2>/dev/null || return 1
-    "$WORK/dump_hosted" "$fixture" > "$WORK/mut_cr.ast" 2>/dev/null || return 1
-    cmp -s "$WORK/mut.ast" "$WORK/mut_cr.ast" || return 1
+    if ! fixture_native="$(native_path "$fixture")"; then
+      invalid_mutant "could not convert fixture path: $fixture"
+      return $?
+    fi
+    if ! "$WORK/dump_hosted$EXE" "$fixture_native" > "$WORK/mut_cr.ast" 2> "$WORK/mut-hosted.err"; then
+      cat "$WORK/mut-hosted.err"
+      invalid_mutant "hosted parser failed on fixture: $fixture"
+      return $?
+    fi
+    if ! "$WORK/mut-exercise$EXE" "$fixture_native" > "$WORK/mut.ast" 2> "$WORK/mut-port.err"; then
+      if grep -qF "Syntax error" "$WORK/mut-port.err"; then return 1; fi
+      cat "$WORK/mut-port.err"
+      invalid_mutant "parser exercise failed without a syntax error: $fixture"
+      return $?
+    fi
+    if cmp -s "$WORK/mut.ast" "$WORK/mut_cr.ast"; then
+      continue
+    else
+      rc=$?
+      if [ "$rc" -eq 1 ]; then return 1; fi
+      invalid_mutant "could not compare fixture ASTs: $fixture"
+      return $?
+    fi
   done
   return 0
 }
@@ -1013,8 +1109,10 @@ run_proof_in "mutation 29: discard the closing call delimiter location" "$PARSER
   'CallArgs.new(args, block, block_arg, named_args, false, nil, true)'
 
 echo
+echo "== Rebuilding and running restored parser exercise"
+"$IYI" build --release -o "$WORK_NATIVE/exercise-restored$EXE" "$REPO_NATIVE/bench/selfhost_parser_exercise.iyi"
+"$WORK/exercise-restored$EXE" >/dev/null
 echo "== Verification clean state confirmed"
-"$WORK/exercise-release" >/dev/null
 
 echo
 if [ "$status" -eq 0 ]; then

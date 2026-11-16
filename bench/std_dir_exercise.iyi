@@ -124,6 +124,15 @@ assert_true File.exists?(sample_file), "file exists on disk"
 assert_true !Dir.exists?(sample_file), "Dir.exists? returns false for a regular file"
 assert_true !Dir.delete?(sample_file), "Dir.delete? returns false for a regular file"
 
+{% if flag?(:darwin) || flag?(:linux) %}
+  unreadable = sandbox + "/unreadable_dir"
+  Dir.mkdir(unreadable)
+  File.chmod(unreadable, 0o000)
+  assert_true Dir.exists?(unreadable), "an unreadable directory still exists"
+  File.chmod(unreadable, 0o700)
+  Dir.delete(unreadable)
+{% end %}
+
 sub_created = sandbox + "/sub_created"
 Dir.mkdir(sub_created)
 assert_true Dir.exists?(sub_created), "sub_created directory exists"

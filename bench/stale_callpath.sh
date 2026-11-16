@@ -157,6 +157,7 @@ run_link() {
   if [ "$WINDOWS" -eq 1 ]; then
     echo "SKIP row 41 pkg-config invocation: the MSVC linker does not invoke pkg-config (codegen/link.cr:157-179)"
   else
+  local pkg_started=$SECONDS
   echo "  testing pkg-config shim invocation count..."
   local shim_dir="$WORK/pkg_shim"
   local shim_log="$WORK/pkg_shim.log"
@@ -195,6 +196,7 @@ print LibM.cos(0.0)
   if [ -f "$shim_log" ]; then
     count="$(wc -l < "$shim_log" | tr -d ' ')"
   fi
+  echo "  pkg-config subcheck: $((SECONDS - pkg_started)) seconds"
   if [ "$count" -eq 1 ]; then
     echo "  pkg-config shim OK: exactly 1 invocation logged (count=$count)"
   else

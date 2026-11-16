@@ -12,14 +12,19 @@
 #     iyi doc String              # a type of the prelude: what a String
 #                                 # can do, the prelude's own comments
 #     iyi doc prelude             # the prelude's types, one line each
+#     iyi doc --json [DIR]       # every exporting module of a package
 #
-# No HTML, no site, no theme. The document is text because the consumers
-# are a terminal and a model, and III.7's registry index — `Exports`
-# served as data — is where anything richer belongs.
+# No HTML, no site, no theme. A terminal can read the text output, while
+# the registry index can consume `Exports` as JSON and render it itself.
 require "file_utils"
 
 class Iyi::Command
   private def doc
+    if options.includes?("--json")
+      doc_package
+      return
+    end
+
     filename = options.shift?
     case
     when filename.nil? || filename.in?("--help", "-h") || options.any?(&.in?("--help", "-h"))
@@ -59,6 +64,103 @@ class Iyi::Command
       abort! "expected a module path (`#{Command.program_name} doc app/greeter`), " \
              "a .iyi file, a .iyimod artifact, or a type of the prelude " \
              "(`#{Command.program_name} doc String`)", :USAGE_ERROR
+    end
+  end
+
+  # The registry consumes the same artifact API as `mod dump --json`, not
+  # a second description of the declarations. Compile one synthetic entry
+  # outside the package, so documenting it does not add a source file.
+  private def doc_package : Nil
+    directory = nil
+    json_seen = false
+    while option = options.shift?
+      case option
+      when "--json"
+        abort! "doc: --json was given more than once", :USAGE_ERROR if json_seen
+        json_seen = true
+      when "--help", "-h"
+        puts doc_usage
+        return
+      when .starts_with?('-')
+        abort! "doc: unknown flag #{option}", :USAGE_ERROR
+      else
+        abort! "doc: one package directory, and '#{option}' is a second", :USAGE_ERROR if directory
+        abort! "doc: the package directory cannot be empty", :USAGE_ERROR if option.empty?
+        directory = option
+      end
+    end
+
+    package = File.expand_path(directory || Dir.current)
+    unless Dir.exists?(package)
+      abort! "doc: #{package} is not a directory", :USAGE_ERROR
+    end
+    manifest_path = File.join(package, Mod::Installer::MANIFEST)
+    unless File.file?(manifest_path)
+      abort! "doc: there is no iyi.mod in #{Iyi.relative_filename(package)}; a package is a directory with one", :USAGE_ERROR
+    end
+
+    output =
+      begin
+        manifest = Mod::ModFile.parse(File.read(manifest_path), manifest_path)
+        modules = mod_release_modules(package).sort!
+        if modules.empty?
+          raise Mod::ModError.new("#{Iyi.relative_filename(package)} has no exporting modules")
+        end
+        doc_package_json(package, manifest.path, modules)
+      rescue ex : Mod::ModError | IyiMod::Error
+        abort! "doc: #{ex.message}", :USAGE_ERROR
+      end
+    puts output
+  end
+
+  private def doc_package_json(package : String, package_path : String, modules : Array(String)) : String
+    scratch = File.tempname("iyi-doc-package", nil)
+    Dir.mkdir_p(scratch)
+    begin
+      entry = File.join(scratch, "entry.iyi")
+      File.write(entry, modules.map { |name| "import #{name}\n" }.join)
+      emit = File.join(scratch, "mods")
+      compiler = Compiler.new
+      compiler.prelude = "iyi/prelude"
+      compiler.no_codegen = true
+      compiler.emit_iyimod = emit
+      compiler.iyi_project_root = package
+      compiler.iyi_mod_table = Mod::Installer.table_for(package)
+      compiler.stdout = IO::Memory.new
+      compiler.stderr = IO::Memory.new
+      begin
+        compiler.compile(Compiler::Source.new(entry, File.read(entry)), File.join(scratch, "unused"))
+      rescue ex : Iyi::Error | Iyi::CodeError
+        deepest = Iyi.deepest_error(ex)
+        raise Mod::ModError.new("#{Iyi.relative_filename(package)} does not compile: #{deepest.message.to_s.lines.first?}")
+      end
+
+      JSON.build do |json|
+        json.object do
+          json.field "package", package_path
+          json.field "compiler", IyiMod.compiler_version
+          json.field "modules" do
+            json.array do
+              modules.each do |name|
+                path = File.join(emit, "#{name}.iyimod")
+                unless File.file?(path)
+                  raise Mod::ModError.new("compiled, but no artifact carries module '#{name}'")
+                end
+                artifact = IyiMod.read(path)
+                unless artifact.module_name == name
+                  raise Mod::ModError.new("artifact for '#{name}' carries module '#{artifact.module_name}'")
+                end
+                json.object do
+                  json.field "module", name
+                  json.field "api" { IyiMod.api_json(artifact, json) }
+                end
+              end
+            end
+          end
+        end
+      end
+    ensure
+      FileUtils.rm_rf(scratch)
     end
   end
 
@@ -464,6 +566,7 @@ class Iyi::Command
   private def doc_usage
     <<-USAGE
     Usage: #{Command.program_name} doc MODULE | FILE | TYPE
+           #{Command.program_name} doc --json [DIR]
 
     Prints a module's exported surface with its doc comments — functions,
     types, methods, impls; no bodies, nothing private. MODULE is a module
@@ -474,6 +577,10 @@ class Iyi::Command
     is a type of the prelude - `String`, `Array`, `Hash`, `Program` -
     printed the same way: what it can do, with the prelude's own comments;
     `prelude` lists them all, one line each.
+
+    With --json, read DIR's iyi.mod (the current directory by default) and
+    print the package path, compiler identity and each exporting module's
+    artifact API as JSON. Modules are ordered by path.
     USAGE
   end
 end

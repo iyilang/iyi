@@ -67,18 +67,20 @@ pub class Linker
       return arg
     end
 
-    res = "'"
+    res = String::Builder.new(arg.bytesize + 2)
+    res.write_byte(39_u8)
     i = 0
     while i < arg.bytesize
       b = arg.byte_at(i)
       if b == 39_u8
-        res = res + "'\\''"
+        res << "'\\''"
       else
-        res = res + b.unsafe_chr.to_s
+        res.write_byte(b)
       end
       i = i + 1
     end
-    res + "'"
+    res.write_byte(39_u8)
+    res.to_s
   end
 
   # Shell-quotes a list of arguments for POSIX shells.
@@ -93,11 +95,9 @@ pub class Linker
   # Shell-quotes an argument for Windows command lines.
   pub def self.quote_windows(arg : String) : String
     need_quotes = arg.empty? || arg.includes?(" ") || arg.includes?("\t")
-    if !need_quotes
-      return arg
-    end
-
-    res = "\""
+    return arg if !need_quotes && !arg.includes?("\"")
+    res = String::Builder.new(arg.bytesize + 2)
+    res.write_byte(34_u8) if need_quotes
     slashes = 0
     i = 0
     while i < arg.bytesize
@@ -107,22 +107,25 @@ pub class Linker
       elsif b == 34_u8
         k = 0
         while k <= slashes
-          res = res + "\\"
+          res.write_byte(92_u8)
           k = k + 1
         end
         slashes = 0
       else
         slashes = 0
       end
-      res = res + b.unsafe_chr.to_s
+      res.write_byte(b)
       i = i + 1
     end
-    k = 0
-    while k < slashes
-      res = res + "\\"
-      k = k + 1
+    if need_quotes
+      k = 0
+      while k < slashes
+        res.write_byte(92_u8)
+        k = k + 1
+      end
+      res.write_byte(34_u8)
     end
-    res + "\""
+    res.to_s
   end
 
   # Shell-quotes a list of arguments for Windows command lines.
@@ -132,6 +135,25 @@ pub class Linker
       res << quote_windows(a)
     end
     res.join(" ")
+  end
+
+  # Match the link.exe basename case-insensitively for either Windows separator.
+  pub def self.direct_msvc_linker?(path : String) : Bool
+    start = path.bytesize - 8
+    return false if start < 0
+    if start > 0
+      separator = path.byte_at(start - 1)
+      return false if separator != 47_u8 && separator != 92_u8
+    end
+    name = "link.exe"
+    i = 0
+    while i < 8
+      byte = path.byte_at(start + i)
+      byte = byte + 32_u8 if byte >= 65_u8 && byte <= 90_u8
+      return false if byte != name.byte_at(i)
+      i = i + 1
+    end
+    true
   end
 
   # Builds library and search path flags for linking.
@@ -198,14 +220,21 @@ pub class Linker
     cross_compiling : Bool = false,
     debug : Bool = false,
     mcpu : String = "",
+    msvc_linker : String = "cl.exe",
+    msvc_link_args : Array(String) = [] of String,
   ) : LinkCommandResult
     default_linker = "cc"
 
     if target.msvc?
-      linker = "cl.exe"
+      # Discovery belongs to the caller. The formatter only uses its result.
+      direct = direct_msvc_linker?(msvc_linker)
+      linker = quote_windows(msvc_linker)
       obj_arg = quote_windows(object_names)
-      out_arg = quote_windows("/Fe#{output_filename}")
+      out_arg = quote_windows(direct ? "/OUT:#{output_filename}" : "/Fe#{output_filename}")
       link_args = [] of String
+      msvc_link_args.each do |arg|
+        link_args << quote_windows(arg)
+      end
       if debug
         link_args << "/DEBUG:FULL /PDBALTPATH:%_PDB%"
       end
@@ -216,7 +245,9 @@ pub class Linker
       if !link_flags.empty?
         link_args << link_flags
       end
-      args = "/nologo #{obj_arg} #{out_arg} /link #{link_args.join(" ")}"
+      pass_through = direct ? "" : "/link "
+      args = "/nologo #{obj_arg} #{out_arg} #{pass_through}#{link_args.join(" ")}"
+      args = args.split('\n').join(" ") if args.includes?("\n")
       cmd = "#{linker} #{args}"
       return LinkCommandResult.new(linker, cmd, nil)
     elsif target.architecture == "wasm32"

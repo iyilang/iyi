@@ -1,25 +1,57 @@
 #!/usr/bin/env bash
 # The IR core gate (SPEC 3.2, slice B1). The iyi IR's text form round-trips, the verifier refuses each
-# malformed fixture under its named rule, the DataLayout and the struct layouts agree with the oracle hosted in Crystal
-# on all five targets, the driver links only libSystem, and mutations are each caught.
+# malformed fixture under its named rule, and five target layouts agree with LLVM. Windows computes
+# every layout locally, using the same-head Linux LLVM reference for WASI.
 #
 #   bench/native_ir_exercise.sh
-#
-# Jobs: native-darwin runs every step. native-linux runs the same steps; the linkage floor is darwin-only
-# and is printed as skipped there, not passed.
-set -u
+#   IR_ORACLE_EXPORT_DIR=/path/to/bundle bench/native_ir_exercise.sh  # Linux
+#   IR_ORACLE_DIR=/path/to/bundle bench/native_ir_exercise.sh         # Windows
+set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
+REPO=$(pwd -P)
+. "$REPO/bench/lib/host.sh" || exit 1
+require_test_host || exit 1
+[ -n "$PY" ] || { echo "FAIL: a working Python interpreter is required" >&2; exit 1; }
+export IYI_PATH="$(native_path "$REPO/src")"
+
+if [ -n "${IR_ORACLE_EXPORT_DIR:-}" ] && [ "$HOST_OS" != linux ]; then
+  echo "FAIL: IR_ORACLE_EXPORT_DIR requires Linux" >&2
+  exit 1
+fi
+if [ "$HOST_OS" = windows ] && [ -z "${IR_ORACLE_DIR:-}" ]; then
+  echo "FAIL: IR_ORACLE_DIR must name the same-head Linux oracle bundle" >&2
+  exit 1
+fi
+if [ -n "${IR_ORACLE_DIR:-}" ] && [ "$HOST_OS" != windows ]; then
+  echo "FAIL: IR_ORACLE_DIR is used only on Windows" >&2
+  exit 1
+fi
+if [ -n "${IR_ORACLE_DIR:-}${IR_ORACLE_EXPORT_DIR:-}" ]; then
+  HEAD_SHA=$(git rev-parse --verify 'HEAD^{commit}') || exit 1
+  if ! git diff --quiet HEAD -- src bench/fixtures/ir samples/iyi/hello.iyi bench/native_ir_exercise.sh; then
+    echo "FAIL: oracle inputs differ from git HEAD $HEAD_SHA" >&2
+    exit 1
+  fi
+fi
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/native-ir.XXXXXX")
 RESTORE=()
 restore_all() {
-  local pair
+  local pair file backup restore_failed=0
   for pair in ${RESTORE[@]+"${RESTORE[@]}"}; do
-    cat "${pair#*|}" > "${pair%%|*}"
+    file=${pair%%|*}
+    backup=${pair#*|}
+    if ! cat "$backup" >"$file" || ! cmp -s "$backup" "$file"; then
+      echo "FAIL: $file WAS NOT RESTORED: its backup is $backup" >&2
+      restore_failed=1
+    fi
   done
+  [ "$restore_failed" -eq 0 ] || return 1
   rm -rf "$WORK"
 }
-trap restore_all EXIT INT TERM
+trap 'restore_all || exit 2' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 failed=0
 fail() {
@@ -27,7 +59,9 @@ fail() {
   failed=1
 }
 
-DRV="$WORK/ir_core"
+DRV="$WORK/ir_core$EXE"
+MUTANT="$WORK/mutant$EXE"
+LLVM_DRV="$WORK/llvm_layout$EXE"
 
 # The five targets, as "oracle-triple our-triple": the spelling used by the oracle hosted in Crystal, then the spelling
 # the IR's DataLayout is keyed by.
@@ -40,13 +74,218 @@ TARGETS=(
 )
 
 build_driver() {
-  ./bin/iyi build -o "$1" src/compiler/tools/ir_core.iyi >"$WORK/build.log" 2>&1
+  ./bin/iyi build -o "$(native_path "$1")" src/compiler/tools/ir_core.iyi >"$WORK/build.log" 2>&1
+}
+
+# Export all five Linux reference sets, or validate the complete bundle and copy only WASI on Windows.
+oracle_bundle() {
+  local mode="$1" dir="$2"
+  "$PY" - "$mode" "$(native_path "$dir")" "$(native_path "$WORK")" "$HEAD_SHA" "$HOST_ID" \
+    "$(native_path "$REPO/bench/fixtures/ir/layout/shapes.iyi")" \
+    "$(native_path "$REPO/.build/iyi$EXE")" <<'PY'
+import hashlib
+import json
+import pathlib
+import re
+import sys
+
+mode, directory, workdir, head, host, shapes, compiler = sys.argv[1:]
+directory, workdir = pathlib.Path(directory), pathlib.Path(workdir)
+targets = {
+    "aarch64-apple-darwin": "aarch64-apple-darwin",
+    "aarch64-linux-gnu": "aarch64-unknown-linux-gnu",
+    "x86_64-linux-gnu": "x86_64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc": "x86_64-pc-windows-msvc",
+    "wasm32-wasi": "wasm32-unknown-wasi",
+}
+names = {f"{kind}-{triple}.txt" for triple in targets
+         for kind in ("layout", "oracle", "wide-oracle")}
+
+def reject(message):
+    raise ValueError(message)
+
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            reject(f"duplicate manifest key: {key}")
+        result[key] = value
+    return result
+
+def digest(data):
+    return hashlib.sha256(data).hexdigest()
+
+def validate_data(files):
+    source = pathlib.Path(shapes).read_bytes()
+    keys = re.findall(rb"^def probe_([A-Za-z0-9_]+) : Int64\r?$", source, re.M)
+    if len(keys) != 19 or len(set(keys)) != 19:
+        reject("the shapes fixture does not declare 19 distinct probes")
+    for triple in targets:
+        layout = files[f"layout-{triple}.txt"]
+        if not re.fullmatch(rb'target datalayout = "[^"\r\n]+"\n', layout):
+            reject(f"malformed datalayout for {triple}")
+        probes = files[f"oracle-{triple}.txt"]
+        rows = probes.splitlines(keepends=True)
+        matches = [re.fullmatch(rb"([A-Za-z0-9_]+) (-?[0-9]+)\n", row) for row in rows]
+        if len(rows) != 19 or any(match is None for match in matches):
+            reject(f"malformed probe rows for {triple}")
+        if {match.group(1) for match in matches} != set(keys):
+            reject(f"missing or duplicate probe names for {triple}")
+        wide = files[f"wide-oracle-{triple}.txt"].splitlines(keepends=True)
+        if len(wide) != 8:
+            reject(f"expected eight wide-layout rows for {triple}")
+        for index, row in enumerate(wide):
+            if index in (0, 4):
+                name = b"Wide" if index == 0 else b"Mid"
+                valid = re.fullmatch(rb"struct " + name + rb" size=[0-9]+ align=[0-9]+\n", row)
+            else:
+                field = (index - 1) % 4
+                valid = re.fullmatch(rb"field " + str(field).encode() +
+                                     rb" offset=[0-9]+ size=[0-9]+\n", row)
+            if not valid:
+                reject(f"malformed wide-layout row {index + 1} for {triple}")
+
+try:
+    if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", head):
+        reject("invalid git HEAD")
+    if mode == "export":
+        if not host.startswith("linux-"):
+            reject("oracle producer is not Linux")
+        files = {name: (workdir / name).read_bytes() for name in names}
+        validate_data(files)
+        identity = (workdir / "llvm-identity.txt").read_text(encoding="utf-8").splitlines()
+        if len(identity) != 3 or not all(identity):
+            reject("missing LLVM identity")
+        llvm_targets = identity[2].split(",")
+        if not {"aarch64", "x86", "webassembly"}.issubset(llvm_targets):
+            reject("Linux LLVM identity lacks a required backend")
+        producer = {
+            "host": host,
+            "llvm_runtime": identity[0],
+            "llvm_compiled": identity[1],
+            "llvm_targets": llvm_targets,
+            "iyi_version": (workdir / "iyi-version.txt").read_text(encoding="utf-8").strip(),
+            "crystal_version": (workdir / "crystal-version.txt").read_text(encoding="utf-8").strip(),
+            "iyi_sha256": digest(pathlib.Path(compiler).read_bytes()),
+        }
+        if not producer["iyi_version"] or not producer["crystal_version"]:
+            reject("missing compiler identity")
+        manifest = {"format": 1, "git_head": head, "producer": producer,
+                    "targets": targets, "sha256": {name: digest(files[name]) for name in sorted(names)}}
+        directory.mkdir(parents=True, exist_ok=True)
+        if any(directory.iterdir()):
+            reject("oracle export directory is not empty")
+        for name, data in files.items():
+            (directory / name).write_bytes(data)
+        (directory / "manifest.json").write_bytes((json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode("utf-8"))
+        print(f"exported five Linux LLVM reference sets at {head} to {directory}")
+    elif mode == "load":
+        manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"),
+                              object_pairs_hook=unique_object)
+        if set(manifest) != {"format", "git_head", "producer", "targets", "sha256"}:
+            reject("unexpected manifest fields")
+        if type(manifest["format"]) is not int or manifest["format"] != 1 or manifest["git_head"] != head or manifest["targets"] != targets:
+            reject("oracle manifest format, git HEAD, or target list differs")
+        producer = manifest["producer"]
+        fields = {"host", "llvm_runtime", "llvm_compiled", "llvm_targets",
+                  "iyi_version", "crystal_version", "iyi_sha256"}
+        if not isinstance(producer, dict) or set(producer) != fields:
+            reject("malformed producer identity")
+        if producer["host"] not in ("linux-x86_64", "linux-arm64"):
+            reject("oracle producer is not a supported Linux host")
+        if any(not isinstance(producer[k], str) or not producer[k].strip()
+               for k in ("llvm_runtime", "llvm_compiled", "iyi_version", "crystal_version")):
+            reject("incomplete compiler or LLVM identity")
+        if not isinstance(producer["llvm_targets"], list) or not all(
+                isinstance(target, str) for target in producer["llvm_targets"]) or not {
+                    "aarch64", "x86", "webassembly"}.issubset(producer["llvm_targets"]):
+            reject("incomplete LLVM backend identity")
+        if not isinstance(producer["iyi_sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", producer["iyi_sha256"]):
+            reject("invalid compiler checksum")
+        hashes = manifest["sha256"]
+        if not isinstance(hashes, dict) or set(hashes) != names:
+            reject("oracle checksum list is incomplete")
+        files = {name: (directory / name).read_bytes() for name in names}
+        if any(not isinstance(hashes[name], str) or hashes[name] != digest(files[name]) for name in names):
+            reject("oracle checksum mismatch")
+        validate_data(files)
+        for kind in ("layout", "oracle", "wide-oracle"):
+            name = f"{kind}-wasm32-wasi.txt"
+            (workdir / name).write_bytes(files[name])
+        print("Windows component execution; Linux LLVM reference: "
+              f"{producer['host']}, runtime LLVM {producer['llvm_runtime']}, "
+              f"compiled LLVM {producer['llvm_compiled']}, git {head}")
+    else:
+        reject("unknown oracle bundle operation")
+except (OSError, ValueError, TypeError, KeyError, UnicodeError) as error:
+    print(f"FAIL: oracle bundle: {error}", file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
+# Native Windows LLVM lacks WebAssembly symbols. Only the temporary probe's initializers change;
+# the four supported targets still run the same LLVM layout code locally.
+prepare_llvm_probe() {
+  "$PY" - "$(native_path "$REPO/bench/fixtures/ir/layout/llvm_layout.cr")" \
+    "$(native_path "$WORK/llvm_layout.cr")" "$HOST_OS" <<'PY'
+import pathlib
+import sys
+
+source, output, host = sys.argv[1:]
+data = pathlib.Path(source).read_bytes()
+anchor = b"triple = ARGV[0]\n"
+if data.count(anchor) != 1:
+    raise SystemExit("LLVM layout probe identity anchor changed")
+identity = b'''if ARGV[0] == "--identity"
+  puts LLVM.version
+  puts LibLLVM::VERSION
+  puts LibLLVM::BUILT_TARGETS.join(",")
+  exit
+end
+
+'''
+data = data.replace(anchor, identity + anchor, 1)
+if host == "windows":
+    all_targets = b"%w(aarch64 x86 webassembly)"
+    if data.count(all_targets) != 1:
+        raise SystemExit("LLVM layout probe target initializer changed")
+    data = data.replace(all_targets, b"%w(aarch64 x86)", 1)
+pathlib.Path(output).write_bytes(data)
+PY
+}
+
+# Normalize external LLVM/Crystal transport only; never rewrite the tested driver's output.
+normalize_oracle() {
+  "$PY" - "$(native_path "$1")" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+data = path.read_bytes().replace(b"\r\n", b"\n")
+if b"\r" in data:
+    raise SystemExit(f"invalid carriage return in oracle output: {path}")
+path.write_bytes(data)
+PY
+}
+
+extract_datalayout() {
+  "$PY" - "$(native_path "$1")" "$(native_path "$2")" <<'PY'
+import pathlib
+import re
+import sys
+
+data = pathlib.Path(sys.argv[1]).read_bytes().replace(b"\r\n", b"\n")
+lines = [line for line in data.split(b"\n") if line.startswith(b"target datalayout = ")]
+if len(lines) != 1 or not re.fullmatch(rb'target datalayout = "[^"\r\n]+"', lines[0]):
+    raise SystemExit("missing or malformed LLVM target datalayout")
+pathlib.Path(sys.argv[2]).write_bytes(lines[0] + b"\n")
+PY
 }
 
 # The oracle's folded probe constants for one target, as sorted "NAME VALUE" lines.
 oracle_values() {
   local oracle_t="$1" out="$2"
-  ./bin/iyi build --cross-compile --target "$oracle_t" --emit llvm-ir -o "$WORK/shapes-$oracle_t" bench/fixtures/ir/layout/shapes.iyi >"$WORK/shapes.log" 2>&1 || return 1
+  ./bin/iyi build --cross-compile --target "$oracle_t" --emit llvm-ir -o "$(native_path "$WORK/shapes-$oracle_t")" bench/fixtures/ir/layout/shapes.iyi >"$WORK/shapes.log" 2>&1 || return 1
   awk '
     /^define/ && /probe_/ {
       n = $0
@@ -61,7 +300,7 @@ oracle_values() {
       sub(/[^-0-9].*/, "", v)
       print pending, v
       pending = ""
-    }' "$WORK/shapes-$oracle_t.ll" | sort >"$out"
+    }' "$WORK/shapes-$oracle_t.ll" | sort >"$out" || return 1
   [ -s "$out" ]
 }
 
@@ -75,9 +314,9 @@ make_shapes_ir() {
 # Our struct layouts for one of our triples, as sorted "NAME VALUE" lines in the oracle's key format.
 ours_values() {
   local bin="$1" our_t="$2" out="$3"
-  "$bin" structs "$WORK/shapes-$our_t.ir" | awk '
+  "$bin" structs "$(native_path "$WORK/shapes-$our_t.ir")" | awk '
     /^struct/ { name = $2; v = $3; sub(/size=/, "", v); print "size_" name, v }
-    /^field/  { v = $3; sub(/offset=/, "", v); print "offset_" name "_" $2, v }' | sort >"$out"
+    /^field/  { v = $3; sub(/offset=/, "", v); print "offset_" name "_" $2, v }' | sort >"$out" || return 1
   [ -s "$out" ]
 }
 
@@ -98,7 +337,7 @@ wide_ours() {
   local bin="$1" our_t="$2" dl
   dl=$("$DRV" layout "$our_t" | sed 's/^target datalayout = "//; s/"$//') || return 1
   sed "s|@TRIPLE@|$our_t|; s|@DATALAYOUT@|$dl|" bench/fixtures/ir/layout/wide_structs.ir.in >"$WORK/wide-$our_t.ir" || return 1
-  "$bin" structs "$WORK/wide-$our_t.ir"
+  "$bin" structs "$(native_path "$WORK/wide-$our_t.ir")"
 }
 
 # Compares the wide-integer struct layouts with LLVM's DataLayout on every target. Non-zero when any line differs.
@@ -237,46 +476,54 @@ unwind_check() {
   [ "$out" = "refused: function f: block pad still holds a landingpad after its unwind edges were dropped" ]
 }
 
-# Rebuilds the driver from a mutated source and runs one check on it.
-mutant_check() {
-  local check="$1"
-  build_driver "$WORK/mutant" || return 3
-  "$check" "$WORK/mutant"
-}
-
-# Applies one mutation to `file`, runs the check that must then fail, restores the file, and reports
-# the mutation caught. The text must occur exactly once, and the mutation must change it.
+# Applies one mutation, compiles it, runs its check, and restores the original bytes.
+# A compiler failure cannot count as detecting the mutation.
 prove_mutation() {
-  local label="$1" file="$2" old="$3" new="$4" check="$5" backup count
+  local label="$1" file="$2" old="$3" new="$4" check="$5" backup count caught
   if [ "$old" = "$new" ]; then
     fail "PATCH CHANGED NOTHING: $label: this proves nothing"
     return
   fi
-  count=$(python3 -c 'import sys; print(open(sys.argv[1]).read().count(sys.argv[2]))' "$file" "$old")
+  if ! count=$("$PY" -c 'import pathlib, sys
+sys.stdout.write(str(pathlib.Path(sys.argv[1]).read_bytes().count(sys.argv[2].encode("utf-8"))))' "$(native_path "$file")" "$old"); then
+    fail "$label: could not count mutation occurrences"
+    return
+  fi
   if [ "$count" != "1" ]; then
     fail "PATCH CHANGED NOTHING: $label: the text occurs $count times, not once"
     return
   fi
+  if ! "$check" "$DRV" >"$WORK/baseline-check.log" 2>&1; then
+    fail "BASELINE FAILED: $label: the unmodified driver does not pass $check"
+    cat "$WORK/baseline-check.log"
+    return
+  fi
   backup="$WORK/$(basename "$file").orig"
-  # Contents only: on an overlay checkout darwin's cp exits 1 after copying every byte, for the
-  # extended attributes it cannot read, and says so beside the proof (see bench/lib/mutation.sh).
+  # Copy contents without depending on filesystem extended attributes.
   cat "$file" > "$backup"
   cmp -s "$file" "$backup" || { fail "$label: the backup of $file is not the file; nothing was patched"; return; }
   RESTORE+=("$file|$backup")
-  if ! python3 -c 'import sys
-path, old, new = sys.argv[1], sys.argv[2], sys.argv[3]
-with open(path) as source:
-    text = source.read()
-with open(path, "w") as source:
-    source.write(text.replace(old, new))' "$file" "$old" "$new"; then
+  if ! "$PY" -c 'import pathlib, sys
+path = pathlib.Path(sys.argv[1])
+old, new = (arg.encode("utf-8") for arg in sys.argv[2:])
+data = path.read_bytes()
+if data.count(old) != 1:
+    raise SystemExit("mutation source changed while patching")
+path.write_bytes(data.replace(old, new, 1))' "$(native_path "$file")" "$old" "$new"; then
     cat "$backup" > "$file"
     cmp -s "$backup" "$file" || { echo "FAIL: $file WAS NOT RESTORED: what it held is in $backup"; trap - EXIT INT TERM; exit 2; }
     RESTORE=()
     fail "$label: could not write the mutation"
     return
   fi
-  mutant_check "$check" >/dev/null 2>&1
-  local caught=$?
+  rm -f "$MUTANT"
+  if ! build_driver "$MUTANT"; then
+    caught=3
+  elif "$check" "$MUTANT" >"$WORK/mutant-check.log" 2>&1; then
+    caught=0
+  else
+    caught=1
+  fi
   cat "$backup" > "$file"
   cmp -s "$backup" "$file" || { echo "FAIL: $file WAS NOT RESTORED: what it held is in $backup"; trap - EXIT INT TERM; exit 2; }
   RESTORE=()
@@ -300,16 +547,24 @@ else
   exit 1
 fi
 
+if [ "$HOST_OS" = windows ]; then
+  oracle_bundle load "$IR_ORACLE_DIR" || exit 1
+fi
+
 # ---- 2. the linkage floor ----------------------------------------------------------------------
-if [ "$(uname -s)" = "Darwin" ]; then
-  echo "== 2. linkage floor: the driver links only libSystem"
-  libs=$(otool -L "$DRV" | tail -n +2 | awk '{print $1}')
-  for lib in $libs; do
-    [ "$lib" = "/usr/lib/libSystem.B.dylib" ] || fail "the driver links $lib"
-  done
-  echo "links: $libs"
+if [ "$HOST_OS" = darwin ]; then
+  echo "== 2. linkage floor: $DRV on $HOST_ID links only libSystem"
+  if libs=$(otool -L "$DRV" | tail -n +2 | awk '{print $1}'); then
+    for lib in $libs; do
+      [ "$lib" = "/usr/lib/libSystem.B.dylib" ] || fail "the driver links $lib"
+    done
+    [ -n "$libs" ] || fail "otool reported no libraries for $DRV"
+    echo "links: $libs"
+  else
+    fail "otool could not inspect $DRV on $HOST_ID"
+  fi
 else
-  echo "== 2. linkage floor: skipped here; the native-darwin job runs it (otool is darwin-only)"
+  host_limited "linkage floor for $DRV on $HOST_ID: otool is darwin-only"
 fi
 
 # ---- 3. valid fixtures -------------------------------------------------------------------------
@@ -328,9 +583,9 @@ echo "checked $count valid fixtures"
 echo "== 4. modules built with the Builder print identically after a parse"
 for name in arith memory control calls runtime intrinsics; do
   "$DRV" emit "$name" >"$WORK/$name.ir" || { fail "emit $name"; continue; }
-  out=$("$DRV" roundtrip "$WORK/$name.ir" 2>&1) || { fail "$name: $out"; continue; }
+  out=$("$DRV" roundtrip "$(native_path "$WORK/$name.ir")" 2>&1) || { fail "$name: $out"; continue; }
   [ "$out" = "identical" ] || fail "built module $name does not round-trip: $out"
-  "$DRV" verify "$WORK/$name.ir" >"$WORK/verify.out" 2>&1 || fail "built module $name does not verify: $(cat "$WORK/verify.out")"
+  "$DRV" verify "$(native_path "$WORK/$name.ir")" >"$WORK/verify.out" 2>&1 || fail "built module $name does not verify: $(cat "$WORK/verify.out")"
 done
 
 echo "== 4b. integer arithmetic folds at its IR width and retains poison-sensitive operations"
@@ -397,16 +652,27 @@ echo "== 6. DataLayout#llvm_string equals the oracle's target datalayout on all 
 for pair in "${TARGETS[@]}"; do
   oracle_t=${pair%% *}
   our_t=${pair#* }
-  if ! ./bin/iyi build --cross-compile --target "$oracle_t" --emit llvm-ir -o "$WORK/hello-$oracle_t" samples/iyi/hello.iyi >"$WORK/hello.log" 2>&1; then
-    fail "the oracle cannot emit $oracle_t: $(tail -n 3 "$WORK/hello.log")"
+  reference=""
+  if [ "$HOST_OS" = windows ] && [ "$oracle_t" = wasm32-wasi ]; then
+    reference=" (Windows component execution; Linux LLVM reference)"
+  else
+    if ! ./bin/iyi build --cross-compile --target "$oracle_t" --emit llvm-ir -o "$(native_path "$WORK/hello-$oracle_t")" samples/iyi/hello.iyi >"$WORK/hello.log" 2>&1; then
+      fail "the oracle cannot emit $oracle_t: $(tail -n 3 "$WORK/hello.log")"
+      continue
+    fi
+    if ! extract_datalayout "$WORK/hello-$oracle_t.ll" "$WORK/layout-$oracle_t.txt"; then
+      fail "the oracle reports no valid DataLayout for $oracle_t"
+      continue
+    fi
+  fi
+  if ! "$DRV" layout "$our_t" >"$WORK/layout-ours-$our_t.txt"; then
+    fail "no DataLayout for $our_t"
     continue
   fi
-  odl=$(grep '^target datalayout' "$WORK/hello-$oracle_t.ll")
-  ours=$("$DRV" layout "$our_t")
-  if [ "$odl" = "$ours" ]; then
-    echo "datalayout ok: $our_t"
+  if cmp -s "$WORK/layout-$oracle_t.txt" "$WORK/layout-ours-$our_t.txt"; then
+    echo "datalayout ok: $our_t$reference"
   else
-    fail "DataLayout for $our_t: ours [$ours] oracle [$odl]"
+    fail "DataLayout for $our_t: ours [$(cat "$WORK/layout-ours-$our_t.txt")] oracle [$(cat "$WORK/layout-$oracle_t.txt")]"
   fi
 done
 
@@ -415,7 +681,10 @@ echo "== 7. offset_of and size_of agree with the oracle hosted in Crystal on all
 for pair in "${TARGETS[@]}"; do
   oracle_t=${pair%% *}
   our_t=${pair#* }
-  if ! oracle_values "$oracle_t" "$WORK/oracle-$oracle_t.txt"; then
+  reference=""
+  if [ "$HOST_OS" = windows ] && [ "$oracle_t" = wasm32-wasi ]; then
+    reference=" (Windows component execution; Linux LLVM reference)"
+  elif ! oracle_values "$oracle_t" "$WORK/oracle-$oracle_t.txt"; then
     fail "the oracle reports no probe values for $oracle_t"
     continue
   fi
@@ -425,7 +694,7 @@ for pair in "${TARGETS[@]}"; do
   make_shapes_ir "$our_t" || { fail "no DataLayout for $our_t"; continue; }
   ours_values "$DRV" "$our_t" "$WORK/ours-$our_t.txt" || { fail "no struct output for $our_t"; continue; }
   if diff "$WORK/oracle-$oracle_t.txt" "$WORK/ours-$our_t.txt" >"$WORK/diff.txt"; then
-    echo "struct layouts ok: $our_t"
+    echo "struct layouts ok: $our_t$reference"
   else
     fail "struct layout differs for $our_t: $(cat "$WORK/diff.txt")"
   fi
@@ -433,13 +702,31 @@ done
 
 # ---- 7b. wide integers against LLVM's own DataLayout -------------------------------------------
 echo "== 7b. struct layouts with i192, i65 and i33 agree with LLVM's DataLayout on all five targets"
-if ! CRYSTAL_PATH="$PWD/src" ./bin/crystal build -o "$WORK/llvm_layout" bench/fixtures/ir/layout/llvm_layout.cr >"$WORK/llvm_layout.log" 2>&1; then
+if ! prepare_llvm_probe; then
+  fail "the LLVM layout probe could not be prepared"
+elif ! CRYSTAL_PATH="$(native_path "$REPO/src")" ./bin/crystal build -o "$(native_path "$LLVM_DRV")" "$(native_path "$WORK/llvm_layout.cr")" >"$WORK/llvm_layout.log" 2>&1; then
   fail "the LLVM layout probe does not build: $(tail -n 3 "$WORK/llvm_layout.log")"
 else
+  if "$LLVM_DRV" --identity >"$WORK/llvm-identity.txt" && normalize_oracle "$WORK/llvm-identity.txt"; then
+    echo "LLVM layout probe identity (runtime version, compiled version, built targets):"
+    cat "$WORK/llvm-identity.txt"
+  else
+    fail "the LLVM layout probe cannot report its identity"
+  fi
+  if ! ./bin/iyi --version >"$WORK/iyi-version.txt" 2>"$WORK/version.log" || ! normalize_oracle "$WORK/iyi-version.txt"; then
+    fail "the iyi oracle cannot report its version"
+  fi
+  if ! ./bin/crystal --version >"$WORK/crystal-version.txt" 2>"$WORK/version.log" || ! normalize_oracle "$WORK/crystal-version.txt"; then
+    fail "the Crystal oracle cannot report its version"
+  fi
   for pair in "${TARGETS[@]}"; do
     oracle_t=${pair%% *}
     our_t=${pair#* }
-    "$WORK/llvm_layout" "$our_t" >"$WORK/wide-oracle-$oracle_t.txt" || fail "the LLVM layout probe fails for $our_t"
+    if [ "$HOST_OS" = windows ] && [ "$oracle_t" = wasm32-wasi ]; then
+      echo "wide reference for $our_t: Windows component execution; Linux LLVM reference"
+    elif ! "$LLVM_DRV" "$our_t" >"$WORK/wide-oracle-$oracle_t.txt" || ! normalize_oracle "$WORK/wide-oracle-$oracle_t.txt"; then
+      fail "the LLVM layout probe fails for $our_t"
+    fi
   done
   if wide_check "$DRV"; then
     echo "wide struct layouts ok on all five targets"
@@ -599,6 +886,14 @@ prove_mutation "unwind: an unwinding instruction that is still reachable is acce
   'if word = unwind_only_op(inst.op)' \
   'if word = unwind_only_op(Op::Br)' \
   unwind_check
+
+if [ "$failed" -eq 0 ] && [ -n "${IR_ORACLE_EXPORT_DIR:-}" ]; then
+  if ! git diff --quiet HEAD -- src bench/fixtures/ir samples/iyi/hello.iyi bench/native_ir_exercise.sh; then
+    fail "oracle inputs changed after the baseline at git HEAD $HEAD_SHA"
+  elif ! oracle_bundle export "$IR_ORACLE_EXPORT_DIR"; then
+    fail "could not export the Linux LLVM reference bundle"
+  fi
+fi
 
 echo
 if [ "$failed" -eq 0 ]; then

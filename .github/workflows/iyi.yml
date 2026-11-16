@@ -782,6 +782,11 @@ jobs:
       - name: Packages resolve by minimal version selection
         run: bash bench/packages_resolve.sh
 
+      # The same pinned package and bytes are hashed on Linux, macOS and
+      # Windows, so the JSON can be compared across the three native hosts.
+      - name: Package doc JSON for iyilang/db v0.5.0
+        run: bash bench/doc_package_db.sh
+
       - name: iyi get writes a requirement
         run: bash bench/packages_get.sh
 
@@ -1773,6 +1778,9 @@ jobs:
           bash bench/packages_resolve.sh
           bash bench/packages_get.sh
 
+      - name: Package doc JSON for iyilang/db v0.5.0
+        run: bash bench/doc_package_db.sh
+
       - name: The test verb (III.8)
         run: bash bench/test_verb.sh
 
@@ -2692,6 +2700,10 @@ jobs:
       # consumer could not name and so never emitted. And SafeReach's
       # proof, whose refusals spelled the places they name in full on
       # Windows while the header beside them spelled them relative.
+      - name: Package doc JSON for iyilang/db v0.5.0
+        shell: bash
+        run: bash bench/doc_package_db.sh
+
       - name: The gates that carry Windows code, on Windows
         shell: bash
         run: |
@@ -3870,6 +3882,8 @@ jobs:
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'selfhost') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    env:
+      SELFHOST_HOST: linux-x86_64
     container:
       image: crystallang/crystal:1.21.0-build
     name: "The self-host gates, on Linux"
@@ -3905,23 +3919,17 @@ jobs:
       # One driver runs every selfhost gate (bench/selfhost_*_exercise.sh) in order,
       # each with its own log, and exits non-zero when any of them fails.
       - name: The self-host gates
+        env:
+          IR_ORACLE_EXPORT_DIR: ${{ runner.temp }}/selfhost-ir-oracle
         run: bash bench/selfhost_gates.sh
 
-      - name: The Mach-O object reader and writer
-        run: bash bench/native_obj_exercise.sh
-
-      - name: The x86-64 encoder and ABI
-        run: |
-          bindir="$("$LLVM_CONFIG" --bindir)"
-          LLVM_MC="$bindir/llvm-mc" LLVM_OBJDUMP="$bindir/llvm-objdump" bash bench/native_x86_64_exercise.sh
-
-      - name: The native executable linker
-        run: bash bench/native_link_exercise.sh
-
-      - name: The native IR core
-        env:
-          IYI_PATH: ${{ github.workspace }}/src
-        run: bash bench/native_ir_exercise.sh
+      - name: Preserve the same-head Linux LLVM references
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: selfhost-ir-oracle
+          path: ${{ runner.temp }}/selfhost-ir-oracle
+          if-no-files-found: error
+          retention-days: 7
 
   selfhost-darwin:
     needs: plan
@@ -3930,6 +3938,7 @@ jobs:
     runs-on: macos-15
     env:
       MACOSX_DEPLOYMENT_TARGET: "14.4"
+      SELFHOST_HOST: darwin-arm64
     timeout-minutes: 120
     name: "The self-host gates, on darwin arm64"
     steps:
@@ -3963,19 +3972,65 @@ jobs:
       - name: The self-host gates
         run: LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config" bash bench/selfhost_gates.sh
 
-      - name: The Mach-O object reader and writer
-        run: LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config" bash bench/native_obj_exercise.sh
+  selfhost-windows:
+    needs: [plan, selfhost]
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'selfhost-windows') }}
+    runs-on: windows-2025
+    timeout-minutes: 150
+    env:
+      SELFHOST_HOST: windows-x86_64
+    name: "The self-host gates, on Windows x86_64"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - name: The x86-64 encoder and ABI
-        run: LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config" LLVM_MC="$HOME/llvm-static/bin/llvm-mc" LLVM_OBJDUMP="$HOME/llvm-static/bin/llvm-objdump" bash bench/native_x86_64_exercise.sh
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
 
-      - name: The native executable linker
-        run: LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config" bash bench/native_link_exercise.sh
+      - uses: crystal-lang/install-crystal@36a22e9145188eec527c96e5a789ce4b832af587 # v1.9.5
+        with:
+          crystal: 1.21.0
 
-      - name: The native IR core
+      - name: What this machine has
+        shell: pwsh
+        run: |
+          if (-not (Get-Command make -ErrorAction SilentlyContinue)) {
+            choco install make --version 4.4.1 --no-progress -y
+            if ($LASTEXITCODE -ne 0) { throw "choco could not install make 4.4.1" }
+            $make = Join-Path $env:ChocolateyInstall 'lib\make\tools\install\bin\make.exe'
+            $hash = (Get-FileHash -Algorithm SHA256 $make).Hash.ToLower()
+            if ($hash -ne 'cc6dc291113dcbcc7735835acbfc23c52ed037e4e124ff2d7a0aeae6df563a9f') {
+              throw "Chocolatey's make.exe is not the one pinned here: $hash"
+            }
+          }
+          $lib = (crystal env CRYSTAL_LIBRARY_PATH).Trim()
+          if (-not (Test-Path "$lib\llvm_VERSION")) {
+            throw "no llvm_VERSION beside the Crystal package's libraries, at $lib"
+          }
+          $llvm = (Get-Content "$lib\llvm_VERSION")[0].Trim()
+          Write-Host "bootstrap libraries: $lib"
+          Write-Host "llvm: $llvm"
+          "CRYSTAL_LIBRARY_PATH=$lib" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "LLVM_VERSION=$llvm" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          crystal --version
+
+      - name: Build the fork's compiler, then `iyi`
+        shell: cmd
+        run: |
+          make -f Makefile.win crystal || exit /b 1
+          make -f Makefile.win iyi
+
+      - name: Download the same-head Linux LLVM references
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: selfhost-ir-oracle
+          path: ${{ runner.temp }}/selfhost-ir-oracle
+
+      - name: The self-host gates
+        shell: bash
         env:
-          IYI_PATH: ${{ github.workspace }}/src
-        run: LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config" bash bench/native_ir_exercise.sh
+          IR_ORACLE_DIR: ${{ runner.temp }}/selfhost-ir-oracle
+        run: bash bench/selfhost_gates.sh
 
   # The editor client is the only artifact here that is published somewhere
   # else, so it is proven the same way as the rest: every run packages it,
@@ -4076,17 +4131,17 @@ jobs:
           path: editors/vscode/*.vsix
           retention-days: 7
 
-  # One check for the master ruleset to require: every job this
-  # run selected passed. A job the plan left out is skipped, and passes; a
-  # failed or cancelled one does not. `scripts/ci_plan.py` refuses a
-  # workflow whose jobs this list does not name.
+  # One check requires every selected job to succeed. Only jobs the plan
+  # left out may be skipped. The planner must succeed and supply its job
+  # list; scripts/ci_plan.py also checks that needs includes every job.
   result:
     needs: [plan, docs, build, iyi, compiler-specs, stdlib-specs, lsp-positions, samples, std,
             std-platforms, std-siblings, targets, cross-objects, cross-run, darwin,
             darwin-std-siblings, darwin-std, windows-probe, windows-collector, windows-runtime,
             windows-native, windows-native-gates, windows-native-surfaces, windows-std,
             windows-std-platforms, windows-std-siblings, windows-gates, windows-compiler-specs,
-            wasi-run, wasm32-collector, binary, clean-room, vscode, selfhost, selfhost-darwin]
+            wasi-run, wasm32-collector, binary, clean-room, vscode, selfhost, selfhost-darwin,
+            selfhost-windows]
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -4098,7 +4153,11 @@ jobs:
         run: |
           printf '%s' "$RESULTS" | python3 -c '
           import json, sys
-          failed = [name for name, job in json.load(sys.stdin).items()
-                    if job["result"] in ("failure", "cancelled")]
-          print("failed or cancelled: " + ", ".join(failed) if failed else "every selected job passed")
+          results = json.load(sys.stdin)
+          selected = set(json.loads(results["plan"]["outputs"]["jobs"]))
+          failed = sorted(
+              {name for name, job in results.items() if job["result"] in ("failure", "cancelled")}
+              | {name for name in selected | {"plan"}
+                 if results.get(name, {}).get("result") != "success"})
+          print("not successful: " + ", ".join(failed) if failed else "every selected job passed")
           sys.exit(1 if failed else 0)'

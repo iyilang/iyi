@@ -1,0 +1,30 @@
+name: darwin toolchain
+description: >-
+  Crystal's compiler to bootstrap, coreutils for the gates' `timeout`,
+  pkgconf, and the static LLVM every darwin job builds `iyi` against:
+  restored from the cache, or built from scripts/build-static-llvm.sh on a
+  miss. The job's MACOSX_DEPLOYMENT_TARGET is what the LLVM is built for.
+inputs:
+  deployment-target:
+    description: The job's MACOSX_DEPLOYMENT_TARGET, part of the cache's key.
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Install the bootstrap toolchain
+      shell: bash
+      run: |
+        brew install crystal coreutils pkgconf
+        echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
+
+    - name: Restore the static LLVM
+      id: llvm-cache
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: ~/llvm-static
+        key: llvm-static-${{ runner.os }}-${{ runner.arch }}-macos-15-${{ inputs.deployment-target }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
+
+    - name: Build the static LLVM (cache miss)
+      if: steps.llvm-cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: bash scripts/build-static-llvm.sh "$HOME/llvm-static"

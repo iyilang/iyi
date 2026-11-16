@@ -1598,14 +1598,12 @@ jobs:
       # and bottle checksums are.
       # What the runner is, in every log: the jobs' times and the gates'
       # numbers are this machine's.
-      - name: Install the bootstrap toolchain
+      - name: What the runner is
         run: |
           sw_vers
           sysctl -n machdep.cpu.brand_string hw.ncpu hw.memsize
           xcodebuild -version
           python3 --version
-          brew install crystal coreutils pkgconf
-          echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
 
       # The same diet the Linux tarball went on, from the same recipe file
       # (`scripts/build-static-llvm.sh`): 0.8.0's darwin package carried
@@ -1622,15 +1620,9 @@ jobs:
       # run, 41131916587). `$HOME`
       # rather than `/tmp`: darwin's `/tmp` is a symlink into `/private`,
       # and a cache path should not depend on how a symlink is archived.
-      - name: Restore the static LLVM
-        id: llvm-cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      - uses: ./.github/actions/darwin-toolchain
         with:
-          path: ~/llvm-static
-          key: llvm-static-${{ runner.os }}-${{ runner.arch }}-macos-15-${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
-      - name: Build the static LLVM (cache miss)
-        if: steps.llvm-cache.outputs.cache-hit != 'true'
-        run: bash scripts/build-static-llvm.sh "$HOME/llvm-static"
+          deployment-target: ${{ env.MACOSX_DEPLOYMENT_TARGET }}
 
       # `iyi-tarball` builds `iyi` and its daemon in release mode, refuses an
       # unoptimised binary (`check_iyi_is_release`), and packages them — one
@@ -1933,19 +1925,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install the bootstrap toolchain
-        run: |
-          brew install crystal coreutils pkgconf
-          echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
-      - name: Restore the static LLVM
-        id: llvm-cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      - uses: ./.github/actions/darwin-toolchain
         with:
-          path: ~/llvm-static
-          key: llvm-static-${{ runner.os }}-${{ runner.arch }}-macos-15-${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
-      - name: Build the static LLVM (cache miss)
-        if: steps.llvm-cache.outputs.cache-hit != 'true'
-        run: bash scripts/build-static-llvm.sh "$HOME/llvm-static"
+          deployment-target: ${{ env.MACOSX_DEPLOYMENT_TARGET }}
       - name: Build `iyi`
         run: make iyi LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config"
       # Python 3.14, as on Linux: the oracles' modules answer as 3.14's do.
@@ -2001,19 +1983,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install the bootstrap toolchain
-        run: |
-          brew install crystal coreutils pkgconf
-          echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
-      - name: Restore the static LLVM
-        id: llvm-cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      - uses: ./.github/actions/darwin-toolchain
         with:
-          path: ~/llvm-static
-          key: llvm-static-${{ runner.os }}-${{ runner.arch }}-macos-15-${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
-      - name: Build the static LLVM (cache miss)
-        if: steps.llvm-cache.outputs.cache-hit != 'true'
-        run: bash scripts/build-static-llvm.sh "$HOME/llvm-static"
+          deployment-target: ${{ env.MACOSX_DEPLOYMENT_TARGET }}
       - name: Build `iyi`
         run: make iyi LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config"
       - name: The native standard library's foundation

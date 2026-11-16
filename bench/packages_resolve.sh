@@ -805,6 +805,8 @@ printf 'module foreign\n\npub def ignored : Int32\n  1\nend\n' > "doc package/li
 printf 'module example.test/user/other\n' > "doc package/other/iyi.mod"
 printf 'module other/foreign\n\npub def ignored : Int32\n  1\nend\n' > "doc package/other/foreign.iyi"
 printf 'import first\nimport extra/second\n' > "doc package/entry.iyi"
+# A same-named module in the calling directory must not replace DIR's own.
+printf 'module first\n\npub def wrong : Int32\n  0\nend\n' > first.iyi
 
 "$IYI" doc --json "$WORK/doc package" > package-doc.json 2> package-doc.err || {
   echo "package documentation failed:"; cat package-doc.err; exit 1; }
@@ -812,6 +814,10 @@ printf 'import first\nimport extra/second\n' > "doc package/entry.iyi"
   echo "documentation from the package failed:"; cat package-doc-again.err; exit 1; }
 diff -u package-doc.json package-doc-again.json > package-doc-diff.txt || {
   echo "package documentation changed between runs:"; cat package-doc-diff.txt; exit 1; }
+"$IYI" doc "$WORK/doc package" --json > package-doc-flag-last.json 2> package-doc-flag-last.err || {
+  echo "documentation with --json last failed:"; cat package-doc-flag-last.err; exit 1; }
+diff -u package-doc.json package-doc-flag-last.json > package-doc-flag-diff.txt || {
+  echo "the position of --json changed the output:"; cat package-doc-flag-diff.txt; exit 1; }
 (cd "doc package" && "$IYI" build --no-codegen --emit-iyimod artifacts entry.iyi) > package-emit.log 2>&1 || {
   echo "building the comparison artifacts failed:"; cat package-emit.log; exit 1; }
 "$IYI" mod dump --json "doc package/artifacts/extra/second.iyimod" > package-second.json || exit 1

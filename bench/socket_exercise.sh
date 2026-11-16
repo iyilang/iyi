@@ -410,17 +410,11 @@ else
   fi
 fi
 
-# 12. The process's one port and the record of the handles std joined to
-#     it (#151), on Windows: a copy that asks to join a socket at every
-#     wait, which the join count catches; one whose close leaves the
-#     record for the next handle with its value, which a pipe the program
-#     made takes and never completes a read on; and one that closes the
-#     port as a thread ends, the port each thread had before the process
-#     had one, which the first wait after a thread's end never completes -
-#     port_reuse's, since the first thread to end is port_stays' watcher;
-#     port_thread_ended holds the same after a thread that waited on the
-#     socket. The exercise's watcher ends a wait that never completes with
-#     the step's name.
+# 12. The process's one port and its record of handles std joined (#151).
+#     On Windows, prove the join count detects repeated socket joins and
+#     port_reuse detects a close that leaves its cache record intact.
+#     Closing the process port as a thread ends instead prevents a later
+#     wait from completing; the exercise's watcher reports the step.
 prove_port() { # prove_port <label> <dir> <phrase, a regex> <awk script>
   local label="$1" dir="$2" phrase="$3" script="$4"
   mkdir -p "$WORK/$dir/iyi"
@@ -458,7 +452,7 @@ case "$(uname -s)" in
       '{ sub(/return if word.address != 0_u64 && word.value.get == PORT_JOINED$/, "return if false"); print }'
     prove_port "the port closed as a thread ends" portclosed "port_(reuse|thread_ended): a wait had not completed" \
       '{ print } /^      __iyi_close\(state.deadline_timer\) if state.deadline_timer > 0_i64$/ { print "      __iyi_close(pollfd)" }'
-    prove_port "a close that leaves its record" portkept "port_reuse: a wait had not completed" \
+    prove_port "a close that leaves its record" portkept "port_reuse: cache_invalidation same_thread" \
       '{ sub(/word.value.set\(0_u64\) if word.address != 0_u64$/, "nil"); print }' ;;
   *)
     echo "  the port record: Windows' completion ports, proved there" ;;

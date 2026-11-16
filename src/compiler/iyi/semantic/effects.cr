@@ -286,7 +286,8 @@ module Iyi
       def initialize(@program : Program,
                      @in_runtime_file : Bool,
                      @enclosing_def : Def? = nil,
-                     @is_enclosing_def_annotated : Bool = false)
+                     @is_enclosing_def_annotated : Bool = false,
+                     @in_proc_literal : Bool = false)
         @not_reusable = [] of NotReusableReason
         @rg3_sites = [] of RG3Site
         @visited_nodes = Set(UInt64).new
@@ -338,6 +339,11 @@ module Iyi
         if target_defs = node.target_defs
           target_defs.each do |target_def|
             if target_def.is_a?(External) || target_def.owner.is_a?(LibType)
+              # A proc wrapper can call a top-level runtime fun; External also
+              # represents those definitions, not only lib declarations.
+              next if @in_proc_literal && is_rt && target_def.is_a?(External) &&
+                      (fun_def = target_def.fun_def?) && fun_def.body &&
+                      Effects.in_runtime_library_file?(@program, fun_def)
               next if target_def.is_a?(External) && target_def.real_name.starts_with?("llvm.")
 
               is_global = target_def.is_a?(External) && target_def.external_var? ||
@@ -474,7 +480,7 @@ module Iyi
           elsif node.is_a?(ProcLiteral)
             next unless visited_elements.add?(node.object_id)
             in_runtime = in_runtime_library_file?(program, node)
-            visitor = ClosureVisitor.new(program, in_runtime_file: in_runtime, enclosing_def: nil, is_enclosing_def_annotated: false)
+            visitor = ClosureVisitor.new(program, in_runtime_file: in_runtime, enclosing_def: nil, is_enclosing_def_annotated: false, in_proc_literal: true)
             node.def.body.accept(visitor)
             not_reusable.concat(visitor.not_reusable)
             rg3_sites.concat(visitor.rg3_sites) if in_runtime

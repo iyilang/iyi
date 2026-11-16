@@ -1617,11 +1617,29 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
   # if flag?(:linux) %}`, and the expansion is the only place that constant
   # exists — which is right for an artifact, whose target and flags a consumer
   # has to match anyway (IV.5).
+  #
+  # The annotations written above a constant travel with it, above the
+  # qualified assignment: `@[UnsafeReach("why")] ONE = PerThread.new` is a
+  # claim the consumer's reach rule reads (SPEC.md III.4.4), and the bare
+  # assignment arrived unclaimed and was refused. An annotation above
+  # anything else — a class variable, a `def` — is not carried here; those
+  # travel with their declarations.
   private def iyi_collect_type_constants(node : ASTNode, statements : Array(ASTNode),
                                          prefix : String) : Nil
     case node
     when Expressions
-      node.expressions.each { |child| iyi_collect_type_constants child, statements, prefix }
+      pending = [] of Annotation
+      node.expressions.each do |child|
+        if child.is_a?(Annotation)
+          pending << child
+          next
+        end
+        unless pending.empty?
+          statements.concat(pending) if iyi_type_constant?(child)
+          pending.clear
+        end
+        iyi_collect_type_constants child, statements, prefix
+      end
     when ClassDef, ModuleDef
       iyi_collect_type_constants node.body, statements, iyi_type_prefix(node, prefix)
     when VisibilityModifier
@@ -1643,6 +1661,12 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
   private def iyi_type_prefix(node : ClassDef | ModuleDef, prefix : String) : String
     name = node.name.to_s
     prefix.empty? ? name : "#{prefix}::#{name}"
+  end
+
+  # Whether *node* is a constant `iyi_collect_type_constants` carries.
+  private def iyi_type_constant?(node : ASTNode) : Bool
+    node = node.exp if node.is_a?(VisibilityModifier)
+    node.is_a?(Assign) && node.target.is_a?(Path)
   end
 
   # iyi: a type body asked what a file's top level is asked, with the two

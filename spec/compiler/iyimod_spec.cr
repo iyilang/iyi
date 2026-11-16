@@ -2142,6 +2142,90 @@ describe Iyi::IyiMod do
     end
   end
 
+  # The annotations above a type-body constant travel with it. The
+  # initialiser carried `Random::PerThread::ONE = PerThread.new` bare, so a
+  # consumer of `std/random` from artifacts read the constant unclaimed, and
+  # a `spawn(unit: :new)` that reached it through `Random.rand` was refused
+  # by the reach rule the source build had let through on `@[UnsafeReach]`
+  # (SPEC.md III.4.4). `@[SafeReach]` is carried the same way, and a
+  # `@[Share]` type declared beside them keeps its own, which travels with
+  # the type.
+  it "carries the claims above a type body's constants" do
+    with_tempdir("iyimod_type_constant_claims") do
+      Dir.mkdir_p "boot"
+      File.write "boot/gen.iyi", <<-IYI
+        @[Unsafe("claims the generator's one instance by name")]
+        module boot/gen
+
+        pub class Gen
+          @[Share]
+          pub class Seal
+            pub def answer : Int32
+              7
+            end
+          end
+
+          @value : Int32
+
+          def initialize
+            @value = 5
+          end
+
+          @[UnsafeReach("made at the module's start and never written after")]
+          ONE = Gen.new
+          @[SafeReach("made at the module's start, then only read")]
+          SEAL = Seal.new
+
+          pub def self.draw : Int32
+            ONE.value + SEAL.answer
+          end
+
+          pub def value : Int32
+            @value
+          end
+        end
+        IYI
+      File.write "main.iyi", <<-IYI
+        module main
+
+        import boot/gen
+
+        drawn = Atomic(Int32).new(0)
+        group do |g|
+          g.spawn(unit: :new) do
+            drawn.add(Boot::Gen::Gen.draw)
+            0
+          end
+        end
+        puts drawn.get
+        IYI
+
+      source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
+
+      producer = create_spec_compiler
+      producer.prelude = "iyi/prelude"
+      producer.emit_iyimod = "mods"
+      producer.compile source, File.expand_path("from-source")
+      `./from-source`.chomp.should eq "12"
+
+      artifact = Iyi::IyiMod.read(File.join("mods", "boot", "gen.iyimod"))
+      artifact.initialiser.lines.should eq [
+        %(@[UnsafeReach("made at the module's start and never written after")]),
+        "Gen::ONE = Gen.new",
+        %(@[SafeReach("made at the module's start, then only read")]),
+        "Gen::SEAL = Seal.new",
+      ]
+
+      File.delete "boot/gen.iyi"
+
+      consumer = create_spec_compiler
+      consumer.prelude = "iyi/prelude"
+      consumer.use_iyimod = "mods"
+      consumer.compile source, File.expand_path("from-artifact")
+      `./from-artifact`.chomp.should eq "12"
+    end
+  end
+
   # Two more things the check read as code, both of them declarations.
   #
   # A `lib` body is the first: a `fun` is a C prototype, a `type` names a

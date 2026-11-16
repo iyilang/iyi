@@ -6,6 +6,38 @@ require "compiler/iyi/stale/store"
 require "compiler/iyi/stale/snapshot"
 
 describe Iyi::Stale::Runner do
+  it "cannot reuse a key or inputs from an earlier compiler attempt" do
+    with_tempfile("attempt-key.json", "attempt-inputs.json") do |key_path, inputs_path|
+      hit = %({"format":"iyi-stale-key","version":1,"phase":"hit","test":{},"hit":{"mode":"local","build":"abc"}})
+      status, key = Iyi::Stale::Runner.build_attempt(key_path, inputs_path) do
+        File.write(key_path, hit)
+        File.write(inputs_path, "first attempt")
+        Process::Status[0]
+      end
+      Iyi::Stale::Runner.build_hit(status, key).not_nil!.build.should eq("abc")
+
+      status, key = Iyi::Stale::Runner.build_attempt(key_path, inputs_path) do
+        Process::Status[1] # The retry fails before the compiler writes a key.
+      end
+      status.success?.should be_false
+      key.should be_nil
+      File.exists?(key_path).should be_false
+      File.exists?(inputs_path).should be_false
+      Iyi::Stale::Runner.build_hit(status, key).should be_nil
+    end
+  end
+
+  it "does not serve a hit emitted by a failed compiler" do
+    with_tempfile("failed-key.json", "failed-inputs.json") do |key_path, inputs_path|
+      status, key = Iyi::Stale::Runner.build_attempt(key_path, inputs_path) do
+        File.write(key_path, %({"format":"iyi-stale-key","version":1,"phase":"hit","test":{},"hit":{"mode":"local","build":"abc"}}))
+        Process::Status[1]
+      end
+      key.not_nil!.hit.should_not be_nil
+      Iyi::Stale::Runner.build_hit(status, key).should be_nil
+    end
+  end
+
   it "requires --fresh when --export-index is supplied" do
     with_tempfile("runner_test") do |cache_root|
       store = Iyi::Stale::Store.new(cache_root)

@@ -97,6 +97,19 @@
   The annotations written above a constant now travel above it (no
   `.iyimod` format change: the initialiser is source text).
 
+- **std/debug's Windows backtrace reader is one per trace.** It kept
+  the PDB, its stream directory, the DBI and `/names` streams and a
+  module's stream in class variables, so two threads that panicked at
+  once shared them and one's close freed the buffers the other was
+  walking. The reach rule, which follows `raise` to the resolver from any
+  thread's block, refused the module on Windows (`@@dbi`, raw memory),
+  and with it every program that imports it there. bench/panics.sh now
+  resolves two threads' panics at once, 40 each, every frame at its own
+  line, and builds two copies for Windows that the reach rule refuses: the
+  module stream back in a class variable, and a reader kept between
+  traces. A ten-frame trace resolves in 693 µs against 666 before
+  (tssh, median of 6 interleaved runs of 300 traces, debug build).
+
 - **A finished thread's main fiber no longer stays on the scheduler's
   fiber registry**, naming a stack that is gone (0.21.0 included): the
   retiring thread asked whether the registry held its fiber without the

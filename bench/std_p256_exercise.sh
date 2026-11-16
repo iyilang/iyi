@@ -325,7 +325,7 @@ prove_broken "a fixed-base lookup that answers the next entry" "a point that is 
 prove_broken "a fixed-base digit whose sign is dropped" "the key's x" \
   '    y = P256Num.choose(negative, f.sub(P256Num.zero, y), y)' '    y = P256Num.choose(0_u64, f.sub(P256Num.zero, y), y)'
 prove_broken "the fixed-base recoding's last carry left out" "the key's x" \
-  '    acc + P256BaseTable.top(table, carry)' '    acc'
+  '    acc + P256BaseTable.top(carry)' '    acc'
 # The order's inverse is the generic one, used for s alone.
 prove_broken "an inverse to the power m - 3" "the signature of \"sample\" under SHA-256" \
   '    e = P256Num.sub_raw(@m, P256Num.new(2_u64, 0_u64, 0_u64, 0_u64))[0]' '    e = P256Num.sub_raw(@m, P256Num.new(3_u64, 0_u64, 0_u64, 0_u64))[0]'

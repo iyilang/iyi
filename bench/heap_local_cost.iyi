@@ -1,0 +1,245 @@
+# heap22 slices S1 and S1b, measured: what a partition costs a unit that
+# sits idle, and how long a unit's local collection stops it.
+#
+#   ./bin/iyi build --release -Dheap_partitions bench/heap_local_cost.iyi
+#   ./heap_local_cost idle UNITS WORKERS [shrink]
+#   ./heap_local_cost pause UNITS ROUNDS WORKERS
+#   bash bench/heap_local_cost.sh      # both, with and without partitions
+#
+# `idle` is a C10k-style test: UNITS pool units each do a connection's
+# setup - about 15 KB in 22 size classes, a third of it kept - and park
+# on a channel. The resident set is read before the units start and once
+# every one is parked and a global collection has run; the line printed
+# gives the growth per unit, and with partitions the bytes of runs the
+# partitions hold and their records, per unit: the fixed cost of section
+# 5.1 of the design, whose target is 32 KiB or less. `shrink` collects
+# each unit's partition at its park (the at-park trigger with no debt
+# floor), which gives back every run with nothing live on it.
+#
+# `pause` runs UNITS units of ROUNDS requests each: a request keeps a list
+# of 400 nodes (about 40 KB) and drops 3,000 more (about 200 KB), and
+# parks between requests. Local collections come from the partitions' own
+# triggers, in flight and at the park; the line printed gives their
+# count and the distribution of their durations (the last 65,536).
+
+@[Unsafe("the resident set is read through a C call - task_info, K32GetProcessMemoryInfo - that fills Pointer#malloc memory")]
+module bench/heap_local_cost
+
+{% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
+  {% if flag?(:win32) %}
+    lib LibResident
+      fun GetCurrentProcess : Void*
+      fun K32GetProcessMemoryInfo(process : Void*, counters : UInt64*, size : UInt32) : Int32
+    end
+
+    # PROCESS_MEMORY_COUNTERS: two DWORDs, PeakWorkingSetSize, then
+    # WorkingSetSize.
+    def resident_bytes : UInt64
+      counters = Pointer(UInt64).malloc(9_u64)
+      counters.value = 72_u64
+      return 0_u64 if LibResident.K32GetProcessMemoryInfo(LibResident.GetCurrentProcess, counters, 72_u32) == 0
+      counters[2]
+    end
+  {% elsif flag?(:darwin) %}
+    lib LibResident
+      fun task_self_trap : UInt32
+      fun task_info(task : UInt32, flavor : Int32, info : UInt64*, count : UInt32*) : Int32
+    end
+
+    # MACH_TASK_BASIC_INFO (20): the virtual size, then the resident size;
+    # twelve 32-bit words in all.
+    def resident_bytes : UInt64
+      info = Pointer(UInt64).malloc(6_u64)
+      count = Pointer(UInt32).malloc(1_u64)
+      count.value = 12_u32
+      return 0_u64 if LibResident.task_info(LibResident.task_self_trap, 20, info, count) != 0
+      info[1]
+    end
+  {% else %}
+    # /proc/self/statm: the second field, resident pages.
+    def resident_bytes : UInt64
+      fields = File.read("/proc/self/statm").split(' ')
+      fields[1].to_i.to_u64 * 4096_u64
+    end
+  {% end %}
+
+  def fail(message : String) : Nil
+    print "FAIL: #{message}\n"
+    __iyi_exit(1)
+  end
+
+  class Node
+    getter id : Int64
+    getter next : Node?
+
+    def initialize(@id : Int64, @next : Node?)
+    end
+  end
+
+  # The 22 buffer sizes a connection's setup allocates, 15,424 bytes: a
+  # tuple, which every unit may read.
+  SIZES = {8, 16, 24, 32, 48, 64, 80, 96, 128, 160, 192, 256, 320, 384, 512, 640, 768, 1024, 1536, 2048, 3072, 4096}
+
+  # A connection's setup: a buffer of every size, each third one kept.
+  # Answers what it kept.
+  def setup(t : Int64) : Array(Array(UInt8))
+    kept = [] of Array(UInt8)
+    k = 0
+    while k < SIZES.size
+      buffer = Array(UInt8).new(SIZES[k], ((t &+ k.to_i64) & 255_i64).to_u8)
+      kept << buffer if k % 3 == 0
+      k = k + 1
+    end
+    kept
+  end
+
+  def intact?(kept : Array(Array(UInt8)), t : Int64) : Bool
+    k = 0
+    while k < kept.size
+      buffer = kept[k]
+      return false if buffer.size != SIZES[k * 3] || buffer[buffer.size - 1] != ((t &+ (k * 3).to_i64) & 255_i64).to_u8
+      k = k + 1
+    end
+    true
+  end
+
+  def idle_unit(t : Int64, ready : Channel(Int64), gate : Channel(Int64)) : Int32
+    kept = setup(t)
+    ready.send(1_i64)
+    gate.receive
+    intact?(kept, t) ? 0 : 1
+  end
+
+  def idle(units : Int32, shrink : Bool) : Nil
+    {% if flag?(:heap_partitions) %}
+      IyiHeap.collect_every_park = shrink
+    {% end %}
+    # Warm: arenas, pools, the workers' stacks and caches.
+    group do |g|
+      64.times { |t| g.spawn(unit: :new) { intact?(setup(t.to_i64), t.to_i64) ? 0 : 1 } }
+    end
+    IyiMark.collect
+    sleep(100)
+    before = resident_bytes
+    ready = Channel(Int64).new(units)
+    gate = Channel(Int64).new(units)
+    held = 0_u64
+    records = 0_u64
+    after = 0_u64
+    group do |g|
+      handles = [] of IyiTask(Int32)
+      units.times { |t| handles << g.spawn(unit: :new) { idle_unit(t.to_i64, ready, gate) } }
+      units.times { ready.receive }
+      sleep(300)
+      IyiMark.collect
+      sleep(300)
+      after = resident_bytes
+      {% if flag?(:heap_partitions) %}
+        IyiHeap.each_record do |record|
+          held = held &+ IyiHeap.partition_held(record)
+          records = records &+ 1_u64
+        end
+      {% end %}
+      units.times { gate.send(1_i64) }
+      handles.each_with_index do |handle, t|
+        value = handle.value
+        fail("idle: unit #{t} answered #{value}") unless value == 0
+      end
+    end
+    grown = after > before ? after - before : 0_u64
+    {% if flag?(:heap_partitions) %}
+      fixed = records == 0 ? 0_u64 : (held &+ records &* 2048_u64) // records
+      print "idle partitions=on shrink=#{shrink} units=#{units} records=#{records} rss_before=#{before} rss_after=#{after} rss_per_unit=#{grown // units.to_u64} held_per_unit=#{records == 0 ? 0_u64 : held // records} fixed_per_unit=#{fixed} granule=#{IyiHeap.granule_bytes}\n"
+    {% else %}
+      print "idle partitions=off units=#{units} rss_before=#{before} rss_after=#{after} rss_per_unit=#{grown // units.to_u64}\n"
+    {% end %}
+  end
+
+  # One request: 400 nodes kept, 3,000 dropped. Answers a check of the
+  # kept list.
+  def request(t : Int64, round : Int32) : Int64
+    keep : Node? = nil
+    junk : Node? = nil
+    i = 0
+    while i < 3400
+      if i % 8 == 0 && i < 3200
+        keep = Node.new(t &+ i.to_i64, keep)
+      else
+        junk = Node.new(i.to_i64, i % 100 == 0 ? nil : junk)
+      end
+      i = i + 1
+    end
+    total = 0_i64
+    node = keep
+    while node.is_a?(Node)
+      total = total &+ node.id
+      node = node.next
+    end
+    total
+  end
+
+  def pause_unit(t : Int64, rounds : Int32) : Int32
+    want = 0_i64
+    i = 0
+    while i < 3200
+      want = want &+ t &+ i.to_i64 if i % 8 == 0
+      i = i + 1
+    end
+    round = 0
+    while round < rounds
+      return 1 if request(t, round) != want
+      sleep(0)
+      round = round + 1
+    end
+    0
+  end
+
+  # The value *q* thousandths of the way up a sorted, non-empty list.
+  def permille(sorted : Array(UInt64), q : Int32) : UInt64
+    sorted[((sorted.size - 1) * q) // 1000]
+  end
+
+  def pause(units : Int32, rounds : Int32) : Nil
+    started = IyiMark.now_ns
+    group do |g|
+      handles = [] of IyiTask(Int32)
+      units.times { |t| handles << g.spawn(unit: :new) { pause_unit(t.to_i64 &* 100000_i64, rounds) } }
+      handles.each_with_index do |handle, t|
+        value = handle.value
+        fail("pause: unit #{t} answered #{value}") unless value == 0
+      end
+    end
+    took = IyiMark.now_ns - started
+    {% if flag?(:heap_partitions) %}
+      count = IyiHeap.local_pauses
+      first = count > IyiHeap::PAUSE_RING ? count - IyiHeap::PAUSE_RING : 0_u64
+      pauses = [] of UInt64
+      k = first
+      while k < count
+        pauses << IyiHeap.local_pause(k)
+        k = k + 1_u64
+      end
+      pauses.sort_in_place
+      n = pauses.size
+      fail("pause: no local collection ran") if n == 0
+      print "pause partitions=on units=#{units} rounds=#{rounds} wall_ms=#{took // 1000000_u64} local=#{count} global=#{IyiMark.collections} p50_us=#{permille(pauses, 500) // 1000_u64} p90_us=#{permille(pauses, 900) // 1000_u64} p99_us=#{permille(pauses, 990) // 1000_u64} p999_us=#{permille(pauses, 999) // 1000_u64} max_us=#{pauses[n - 1] // 1000_u64} mean_us=#{IyiHeap.local_ns // count // 1000_u64} granule=#{IyiHeap.granule_bytes}\n"
+    {% else %}
+      print "pause partitions=off units=#{units} rounds=#{rounds} wall_ms=#{took // 1000000_u64} global=#{IyiMark.collections}\n"
+    {% end %}
+  end
+
+  arguments = Program.args
+  fail("usage: heap_local_cost idle UNITS WORKERS [shrink] | pause UNITS ROUNDS WORKERS") if arguments.size < 3
+  if arguments[0] == "idle"
+    IyiWorkers.count = arguments[2].to_i
+    idle(arguments[1].to_i, arguments.size > 3 && arguments[3] == "shrink")
+  elsif arguments[0] == "pause"
+    fail("usage: heap_local_cost pause UNITS ROUNDS WORKERS") if arguments.size < 4
+    IyiWorkers.count = arguments[3].to_i
+    pause(arguments[1].to_i, arguments[2].to_i)
+  else
+    fail("usage: heap_local_cost idle UNITS WORKERS [shrink] | pause UNITS ROUNDS WORKERS")
+  end
+{% else %}
+  puts "heap local cost: no collector of iyi's own here, nothing to measure"
+{% end %}

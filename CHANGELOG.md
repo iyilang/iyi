@@ -209,6 +209,319 @@
   its release build once moved none of 160, so a run that moves none is
   run again, up to five times.
 
+### Experimental: `-Dheap_partitions`
+
+**heap22, a prototype behind `-Dheap_partitions` (kept or dropped on its
+measurements).** A pool unit allocates in a partition of its own and
+collects it alone, on its own thread, while the rest of the program runs;
+what crosses to another unit - a spawn's captures, a thread's proc, a
+channel send, an answer, a `Mutex` or `Unit` block, a `List`'s elements, a
+panic's message - is published or made in the shared heap first, and
+`Box`, `GC.malloc` and `ReferenceStorage` move the unit to the shared heap.
+`-Dheap_verify` poisons what a partition frees. Without the flag a build
+is today's, except that `TlsIdentity#chain` and `TlsServerConfig#schemes`
+answer copies. A unit's local collection abandoned by a stop no longer
+leaves mark bits the next one trusts (a live list was freed under
+heap_partitions).
+
+Under `-Dheap_partitions` the compiler makes the runtime's and std's
+trusted types in the shared heap, publishes class-variable stores, gives
+crossing blocks their own typed context (C1) in which a captured struct is
+boxed in a cell of its own rather than copied, pins crossings that reach
+an owning type without `lends:`, and writes `.iyimod` v63.
+
+Under `-Dheap_partitions` a published object whose chunk straddled the
+end of its run was left local and freed at its unit's death, and a weak
+cell to such an object kept naming the freed chunk: the carve frontier is
+now tested against the chunk's head (heap_crossings' channel and spawn
+rows under simulated chaos and `IYI_HEAP_STRESS=1`, Linux: seeds 3, 6 and
+8 caught by the verifier before, seeds 1-10 clean after). A dead unit's
+fibers name nothing of its partition: `park_on`'s spare waiter, the poll
+loop's grown arrays and a close posted to another thread's poller are the
+shared heap's, and a reaped fiber lets its group and its block go
+(web_cores `parallel` under `-Dheap_verify`, tmac: 3 of 3 runs reported
+the freed group, or with the group let go the freed block, before; 3 of 3
+clean after). A unit that reads another unit's pointer answer is pinned,
+so growing the answered graph no longer frees what it adds (found by
+heap_verify_fuzz's `answer` steps). `-Dheap_verify` tests a chunk's head
+against the carve frontier and builds under LLVM 23. On Windows a thread
+stopped inside a system call lends the collector none of its volatile
+registers, whose stale `r8` had kept a 64 MB string received through a
+rendezvous alive (tssh: 5 of 5 runs kept 61 MiB before, 5 of 5 clean
+after). A unit's local collection clears the weak references to what it
+frees before it frees anything, so a weak reference never names memory
+another unit has since been given (bench/heap_verify_reach, 4 workers).
+A weak reference to a unit's large object (past the top size class) is
+cleared by the local collection that unmaps it, as one to a small object
+is: it was left naming the unmapped block, where the unit's next large
+allocation could be mapped (Linux: 7 of 8 cells in 3 of 3 runs before, 0
+after). A `Unit` task's body names the `Unit`, not its value:
+`g.spawn(in: u)`'s body closed over u's value, so a body a global mark
+kept (a stale word) while it left the handle unreached named a value the
+unit's death then freed; `-Dheap_verify` reported it after
+`bench/std_unit_exercise.sh`'s panic step in 34 of 35 tmac runs. The body
+reads the value through the handle when it runs; the exercise's `outlive`
+step and its `keptproc`/`keptbody` copies hold it.
+
+Under `-Dheap_partitions` a program that never makes a pool unit keeps the
+shared heap's budget of the build without the flag (a thread's floor per
+allocating thread) until its first partition: the shared floor alone had
+halved churn's collections and raised its peak resident set from 6.6 to
+10.8 MB (tmac). A unit that reaches its budget in flight doubles it at
+each such collection, up to 4 MiB within its share of the partitions'
+headroom, and a collection at a park or by an idle worker sets it from
+what was kept again: at twice what was kept alone, alloc_scaling's lone
+unit collected every MiB, 317 local collections where the shared heap
+runs 57, 1.17 of 0.21.0's wall time on one worker (tmac).
+
+Under `-Dheap_partitions` a sweep helper lets its walk claim go at its
+walk's end, under the class's lock alone as an allocating thread's slice
+does, before it takes the runtime lock to hand its batch over. A
+partition's local sweep waits for every claim on its class's partition
+arenas, and a helper that held one through its wait for the runtime lock
+held every such sweep with it: on the user's Windows 11 machine with 12
+logical processors, under #145's app at 99 % CPU, claims stayed held 32 to
+243 ms after walks of microseconds while 5 to 9 workers spun in that wait,
+20 of the 43 local collections past 20 ms on its cities and api tags
+endpoints. Released first, in 4 rounds interleaved with the old order on
+the same machine, helper claims held past 5 ms went from 28 to 2 (both a
+helper preempted mid-walk), the time local sweeps spent waiting on claims
+from 2,470 to 328 ms, and local collections past 20 ms from 46 to 27,
+none of them waiting on a claim. `-Dheap_verify` checks that every
+slice's walk claim outlives its walk, and bench/heap_drain.sh's claim
+mode, the helpers sweeping beside a sleeping program, catches a helper
+that lets go before its walk ends. Without the flag the helper is as it
+was (its IR differs only by a line number).
+
+heap22's verifier: the false-word injector no longer writes under a pool
+worker's parking fiber or below a Windows fiber's committed stack; reports
+name String and untyped-holder allocation sites and data-segment holders
+on Linux, macOS (atos on the .dwarf companion) and Windows
+(llvm-symbolizer and llvm-pdbutil on the .pdb); a run going to its
+class's pool is checked to hold no chunk carved and not free;
+heap_crossings' thread check waits for its unit to end, so its thread
+copy is caught on Windows too; and the crossing fuzz driver runs on
+Windows. bench/heap_verify.sh builds heap_crossings' copies the way
+heap_crossings.sh does (both trees, the compiler's `IYI_SPAWN_BROKEN`), so
+the std `Mutex` copies and the compiler-broken `Unit.new` rows are caught
+by the verifier. The verifier clears the dead stack under its whole-heap
+scans, so an idle worker that then waits in the kernel holds no stale word
+naming a live object (Windows: concurrency_exercise's 64 MB channel checks
+kept 61 MiB under `-Dheap_verify`). A unit's local collection clears the
+dead stack under it first, so a thread stopped mid-collection holds no
+stale word naming a dead 64 MB string (Linux, `IYI_HEAP_STRESS=1`: 3 of 3
+runs kept 61 MiB before, 0 of 4 after). The false-word injector picks
+arenas from a list made once per injection. Under `IYI_HEAP_STRESS`,
+concurrency_exercise cuts 16b to 10,000 messages and round trips at
+stress 1 (128,000 above it), and 16d parks every select (an idle channel
+and `timeout(1)`, 16,000 times), so a losing arm left in its queue fails
+on every seed and worker count, where the busy loop's parks were the
+schedule's (one worker, seed 1: none); each broken copy still fails and
+every bound is unchanged. `-Dheap_verify`
+reports a local mark that writes another partition's mark bits, and
+heap_local's stale check keeps its object carved to the unit's death, so
+both copies are caught every run with the dead stack cleared under local
+collections. In every build the runtime's statistics, clocks, counters,
+generations and random streams, and the runtime lock's word, live in a
+page mapped outside the heap and the image (`IyiStat`), which no root scan
+reads: `IyiHeap.local_ns` in the data segment read as a word five bytes
+into a LOCAL chunk, and `-Dheap_verify` reported the data segment holding
+it (heap_local's "verify release, 8 workers", tmac); heap_local's new copy
+puts such a counter back and is caught. concurrency_exercise's 16e builds
+its 64 MB values 64 KB at a time: a one-worker run under
+`IYI_HEAP_STRESS=1` collected at 485,000 preemptions per value. The
+concurrency matrix row passes inside its 240 s on every seed, one worker
+and four (Linux 20-30 s a seed, macOS 23-45 s).
+
+A parallel unit reaching module state that is not Share through the code
+it calls is a compile error (SPEC.md III.4.5), std's and the prelude's
+state included, where 0.21 warned; `iyi fix` adds the `@[SafeReach]` the
+compiler proves, in the file that declares the state. Each std module's
+state is proven once, over all of its code, when the build that writes its
+`.iyimod` runs, and every importer reuses that proof (Linux, release
+compiler, the proof's stage cold, median of 3: web_cores 0.148 s,
+std_http_exercise 0.150 s); an importer whose own code could reach the
+state proves the claim itself. On Windows no answer was stored for a
+state passing through a call into the prelude, so every build there
+proved those claims again (the prelude's directory ended in `/`, every
+path it was compared with in `\`). The share check's mutation scan no
+longer builds an undefined constant's suggestions for macro code it only
+probes:
+`Object#in?` cost ~6 ms per scanned type, and std_http_exercise's cleanup
+drops from 0.30 s to 0.14 s (Linux, release). Against 0.21.0, a warm
+whole compile of 16 std programs and web_cores together takes 1.01 times
+as long, of web_cores 1.02 and of std_http_exercise 1.04 (tmac, release,
+medians of 5 interleaved rounds; Linux 1.05, 1.06 and 1.04); single small
+std programs of 0.2-0.4 s take up to 1.09 on tmac and 1.17 on Linux,
+0.01-0.035 s more, most of it `Semantic (main)` and the reach proof. A
+cold one takes 1.04, 1.06 and 1.04 on tmac and 1.09, 1.11 and 1.09 on
+Linux. iyiturkiye took 0.95 warm and 0.97 cold on tmac before the
+startup change below (e60a1affe). An initialiser first
+run by a read before its declaration is born in the shared heap under
+`-Dheap_partitions`. A constant that only definition-site typing reads is
+no longer built as its module starts. std's decoded and worked-out tables
+(unicode, MIME, the digests, ML-KEM, Blowfish, and the X25519, P-256 and
+ECDSA fixed-base tables) are kept by first-call accessors (`std/lazy`),
+built in the shared heap. A program, or a server whose handlers may read
+them, starts no slower than before heap22's std changes
+(`bench/std_lazy_tables_exercise.sh`, `IYI_SPAWN_BROKEN=probeused`; Linux,
+release, median of 40 starts of a program importing std/http: 0.43 ms,
+against 0.50 ms at 50c8d34de and 1.14 ms with the tables built eagerly).
+`TlsConfig#trusted_roots` answers a copy of the system roots, and a failed
+system-root load is retried at the next handshake rather than kept.
+`Random.rand` and the other class-level draws use one PCG-32 stream per
+thread, seeded from the operating system at that thread's first draw; one
+generator shared by every thread raced, and two threads could draw the
+same number.
+
+heap22 S6 fixes, under `-Dheap_partitions`. A lend walk stops at objects
+born in the shared heap and at chunks local to another partition, and
+keeps its visited set from walk to walk; `IyiHeap.lend_in` adds a graph
+once, and `lend_out` of a graph that was never lent walks nothing, except
+under `-Dheap_verify`, where the walk reports the first local chunk it
+reaches (#145's app spent 98 % of its flag-on worker time in the walk,
+10.7-46 req/s against ~900 without the flag; on the cities endpoint it
+now serves 1,057 req/s at 1.97 ms CPU a request, against 1,009 and 1.90
+without the flag, Linux, medians of 3). The local mark follows a fiber's
+defer list through a held `Mutex`'s release node, which is born in the
+shared heap, so a local collection made while a lock is held no longer
+frees the unit's defer nodes below it (a use-after-free). A panic's, a
+cancelled task's and `exit`'s drain of a task's cleanups takes each
+node's link down, and a joined group's `outer` is cleared: a `Mutex`'s
+release node, or a group opened inside a lock block, both shared, kept
+naming a unit's chunk after the unit freed it (`-Dheap_verify` exit 86;
+bench/heap_crossings `defer_drain`, `defer_stop`, `group_outer`). The pin
+fallback now follows a block handed to a `@[Share]` def (iyi-web's router)
+and on to a helper, a `&block` forwarded to `SharedProc.of`, `Unit.new`
+or a spawn, and `g.spawn(in: u)` (which pins `u` for good); before, no
+`SharedProc.of` or `Unit.new` was ever pinned, and an app whose routes
+reached iyi-db's pool crashed at its first request (`.iyimod` v64). A
+local sweep no longer pools the runs it empties before it has swept every
+class, nor lets the next mark trust parities after it stopped part way: a
+dead object of a later class could name a chunk another unit had taken
+(#145's app, `-Dheap_verify`, stress 0: 230-1,437 such takes a run, now
+0), which a stale conservative word reviving that object would have made
+a real cross-unit pointer (bench/heap_local `nounswept`, `poolearly`,
+`deathleak`). `IyiHeap.new_shared` notes born-shared types only on the
+partitions' targets, so an x86_64-darwin cross-compile with
+`-Dheap_partitions` builds again, and bench/heap_lend waits for every
+unit of the program to die before reading what a dead unit lent.
+
+heap22 S6 costs, under `-Dheap_partitions`. Fresh chunks above a page
+are no longer cleared whole, and a unit parked dirty for two 100 ms
+ticks of the idle clock is collected by an idle pool worker, so an idle
+keep-alive connection's partition holds far less (bench/heap_local
+`noidle`, `nofresh`). A walk that finds such a unit's token still held -
+its worker stalled between the park and letting go - looks again at the
+next tick; it dropped the unit before, and in a program with nothing
+else to park no walk came again (bench/heap_local `noidlehold`).
+std/http's HTTP/1.1 loop serves each request, its wait for the head
+included, in a call of its own and zeroes the stack under the loop
+before a wait nothing read already answers: the parked
+fiber's stale words had kept the last request alive (Windows the answer
+and its body, Linux the request and its headers; bench/http_idle and its
+copy). With 10,000 idle keep-alive connections on 4 workers, 30 s idle,
+the flag-on server's resident set is now 1.18× 0.21.0's on tssh, 1.23× on
+Linux and 1.10× on tmac (was 1.53×, 1.38× and 1.12×), and an idle
+connection's partition holds 24.4 KiB on all three (was 32.7, 27.8 and
+26.4; 5 rounds each); the flag-off build is unchanged byte for byte. A
+busy unit's collection budget doubles with each
+collection it brings on in flight, up to 4 MiB within its share of the
+heap, and is worked out again from what was kept when the unit parks, so
+request-shaped units keep at least 768 KiB: alloc_scaling ran 317 local
+collections on one worker where the shared heap runs 57, and now takes
+0.84 (one worker) and 0.79 (two) of 0.21.0's time (tmac, 9 rounds). A
+program that never made a partition keeps the flag-off budget
+(bench/collect_trigger `sharedfirst`, `sharednever`).
+`IyiHeap.containing_large` is always inlined: the flag gave the mark's
+`base_of` five more callers, the inliner stopped inlining it there, and
+JsonGenerate's global collections ran 17 % longer (tmac, 143.5 ms against
+122.7); flag on and off now retire the same instructions.
+
+heap22 S6 CPU, under `-Dheap_partitions`. With the flag on, #145's app
+took 1.09 times the CPU a request of the flag off (Linux): a unit's local
+collections now keep its runs and list only what they free, a parked unit
+collects when it owes half its budget, not a quarter, and its budget is at
+least 768 KiB, not 256 KiB, so the app collects less often and pays each
+collection's walk of its published objects (40 % of a collection) less.
+It now takes 1.003 times the flag off's CPU a request at 0.57 of its steady
+RSS (96 against 169 MB; Linux, 6 rounds side by side), and 0.92 at 0.53 on
+tssh (89 against 168 MB). An idle worker's look now takes no lock and
+reads the clock once when the tick's walk is done, and a busy program
+(256 parks a tick or more) leaves a parked unit four ticks, not two, and
+none while the sweep helpers are mid-round: on tmac (k3, 6 clean rounds)
+the flag on's CPU a request went from 1.051 times the flag off's to
+0.976 (0.979 times 0.21.0's, from 1.053), at a steady RSS 0.3 % above
+the old rule's. An idle worker that takes a parked unit over gives back
+the look's token (on Windows, the port's seat) before it collects, and
+gives way to a fiber of that unit woken meanwhile: before, such a wake
+rang no worker and the fiber waited out the whole collection.
+bench/heap_local's `giveway` check and heap_verify's `nogiveway` and
+`notoken` copies pin it; on tssh, busy4 with it and the sweep helper's
+early release took idle p99 6 and 3 % under v3's, burn no worse, at the
+same RSS. The check counts only a try whose woken fiber asked for the
+unit's token while the takeover held it, which the runtime records
+(`IyiHeap.takeovers_asked`): under heavy load the main thread, kept off
+its core through a whole takeover, missed it busy and failed the check
+with nothing wrong. An idle worker's look read the time before the
+idle clock, and another worker's turn in between left that time behind:
+`now &- last` wrapped and the clock turned again at once and backwards,
+so the next walk's busy rule counted a moment's parks, called a busy
+program idle and gave a parked unit two ticks (bench/heap_local's
+`busy` check, 1 run in 40 at Linux load 27). A turn now needs the time
+ahead of the clock, the pools' turn too, and the runtime counts any
+turn less than a period after the last (`IyiHeap.clock_turns_short`):
+heap_local's `clock` check holds a look by a test switch until the race
+has happened, and heap_verify's `clockwrap` copy pins it. The `busy`
+check holds a parked unit to four ticks only when the walks it waited
+through began busy by the rule's own inputs, parks another, eight at
+most, when they did not, prints its tries, and fails on any short turn.
+
+heap22 S6 memory return, under `-Dheap_partitions`. Inside one process
+#145's app ratcheted its resident set endpoint after endpoint (50 to 343
+MB in a round, tssh): a run a dead unit handed to the shared heap was
+never allocated in again while one object on it lived, and a pooled run
+kept its pages for the program's life. A partition now takes a
+handed-over run before its pool and the frontier, the objects on it
+published there, and a run more than three quarters full waits for the
+global sweep; a pooled run nobody took for one to two seconds gives its
+pages back, with the pages it shares with pooled neighbours (darwin's 16
+KiB pages kept every run of 16 KiB or less: 5 MiB of runs cold, 2 MiB
+given back, tmac), an idle pool worker waking for it; and a partition
+whose debt passes 125 % of its budget under a global mark waits for the
+mark to end (#145's partitions had grown from 16-33 MB to 76-111 MB
+under marks). A dead unit's runs go to the shared heap only once every
+class's `LOCAL` chunks are free, and the ones a dead object may still
+name - a large object a mark kept mapped, a handed-over partition's
+garbage - only after two global sweeps: a dying unit's 192-byte chunk
+had named a 32-byte chunk another unit had taken (`-Dheap_verify`,
+#145's app). Over four cycles of the 11 endpoints in one process the app
+now averages 104, 136, 154 and 175 MB a cycle where it averaged 246,
+450, 477 and 494 (tssh, 8 s an endpoint; bench/heap_drain).
+
+The pin fallback's walk puts into words only the reason it gives. It
+spelled the path to each of the ~1,100 constants a crossing of #145's app
+reaches, and that app took 4.1 GB to build under `-Dheap_partitions`
+against 2.5 GB before the fallback; it takes 2.4 GB, with the same pins,
+notes and `.iyimod` records. An `--emit-iyimod` build spells a function's
+path only for a record it keeps (bench/web_cores with the flag: 0.9 GB,
+where 3 GiB did not suffice before).
+
+Two races older than heap22, in every build: units setting or deleting
+environment variables at once lost them (tmac, 6 units × 300 rounds at
+`IYI_WORKERS=4`: 261-301 of 1,800 reads of their own write lost); writers
+now take turns, a delete installs a new table instead of closing the
+installed one up in place, and the table is installed and read as one
+atomic word (Windows writes to the platform and lost none). And a
+`Mutex#wait_for` right after starting the thread that would answer it no
+longer panics "deadlock" on macOS, where a started thread was counted
+only once it ran. Under `iyi test --chaos` the scheduler that drops a
+spinning unit now polls the sleepers and the poller first, and a chaos
+point stands aside while the runtime's lock is held, so a test that waits
+on a timer or holds that lock no longer spins for ever on one seed
+(heap_crossings' ring check on macOS). `IYI_CHAOS_LATE_THREADS` holds a
+thread that links itself until the simulated thread is idle.
+
 ## 0.21.0 — 2026-11-09
 
 **A spawn has one verb and names its unit, and a plain `spawn` runs in
@@ -27963,7 +28276,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 29,153-line library and nothing else. Every other
+  written against iyi's own 36,072-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

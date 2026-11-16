@@ -14,11 +14,14 @@ module std/base64
 
 # A data character's value, by byte; -1 for everything else, which the
 # byte-at-a-time path sorts into whitespace, padding and refusals.
+@[SafeReach("set before the first parallel task starts, then only read")]
 DECODE_VALUES = Base64.decode_values
 
 # Two characters per twelve bits, the first in the low byte: the encoder
 # writes eight characters for every six bytes it reads, as one word.
+@[SafeReach("set before the first parallel task starts, then only read")]
 PAIRS_STD = Base64.pairs_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
+@[SafeReach("set before the first parallel task starts, then only read")]
 PAIRS_URL = Base64.pairs_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
 
 pub struct Base64

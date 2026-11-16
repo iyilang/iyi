@@ -573,8 +573,14 @@ module Iyi
         elems = Array(LLVM::Type).new(vars.size + (parent_llvm_type ? 1 : 0) + (self_type ? 1 : 0))
 
         vars.each do |var|
-          elems << llvm_type(var.type)
-          has_inner_pointers ||= var.type.has_inner_pointers?
+          if var.iyi_boxed?
+            # heap22 C1: the address of the variable's cell.
+            elems << llvm_type(var.type).pointer
+            has_inner_pointers = true
+          else
+            elems << llvm_type(var.type)
+            has_inner_pointers ||= var.type.has_inner_pointers?
+          end
         end
 
         # Make sure to copy the given LLVM::Type to this context
@@ -688,7 +694,8 @@ module Iyi
     # field, so those bytes keep whatever the slot held before, and a
     # `memcpy` of the value carries whatever its source held there. The
     # collector reads an untyped chunk (a `Pointer.malloc` buffer) word by
-    # word, so a stale pointer left in a hole is a word that retains.
+    # word, and the heap22 verifier reads it the same way, so a stale
+    # pointer left in a hole is a word that retains, or a report.
     # `CodeGenVisitor#iyi_clear_holes` writes them as zero.
     def iyi_holes(type : LLVM::Type) : Array({UInt64, UInt64})
       @iyi_holes[type] ||= begin

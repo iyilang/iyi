@@ -381,6 +381,7 @@ class Script
   @order1 : String = "pending"
   @cert_pem : String
 
+  @[SafeReach("set before the first parallel task starts, then only read")]
   NAMES = ["", "a.example", "b.example", "c.example", "d.example"]
 
   def initialize(@base : String, @cert_pem : String)

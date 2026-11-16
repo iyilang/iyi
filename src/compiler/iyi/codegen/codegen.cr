@@ -1069,9 +1069,13 @@ module Iyi
       # the same answer, and the same reason, as the callees the closure
       # already copies.
       host = @iyi_closure_host
-      the_fun = codegen_fun fun_literal_name, node.def, context.type,
-        fun_module_info: host || @main_module_info, is_fun_literal: true,
-        is_closure: is_closure, iyi_internal: !host.nil?
+      if is_closure && (c1 = iyi_c1_proc(node, fun_literal_name, host))
+        the_fun, ctx_ptr = c1
+      else
+        the_fun = codegen_fun fun_literal_name, node.def, context.type,
+          fun_module_info: host || @main_module_info, is_fun_literal: true,
+          is_closure: is_closure, iyi_internal: !host.nil?
+      end
       the_fun =
         if host
           check_mod_fun host.mod, fun_literal_name, the_fun
@@ -1081,7 +1085,9 @@ module Iyi
 
       set_current_debug_location(node) if @debug.line_numbers?
       fun_ptr = cast_to_void_pointer(the_fun.func)
-      if is_closure
+      if ctx_ptr
+        ctx_ptr = cast_to_void_pointer(ctx_ptr)
+      elsif is_closure
         ctx_ptr = cast_to_void_pointer(context.closure_ptr.not_nil!)
       else
         ctx_ptr = llvm_context.void_pointer.null
@@ -1515,7 +1521,10 @@ module Iyi
 
     def codegen_assign(target : Path, value, node)
       const = target.target_const.not_nil!
-      if const.used? && !const.simple? && !const.compile_time_value
+      # iyi: a constant only a definition-site probe read is left to its
+      # first read, if any (`Program#iyi_mark_reached_constants`).
+      reached = const.iyi_reached? || !@program.iyi_reached_marked?
+      if const.used? && reached && !const.simple? && !const.compile_time_value
         initialize_const(const)
       end
       @last = llvm_nil
@@ -1584,6 +1593,7 @@ module Iyi
       end
 
       assign ptr, target_type, value.type, llvm_value
+      iyi_publish_class_var_store(ptr, target_type, node) if target.is_a?(ClassVar)
 
       false
     end
@@ -2636,7 +2646,19 @@ module Iyi
         closure_ptr = closure_has_inner_pointers ? malloc(closure_type) : malloc_atomic(closure_type)
 
         closure_vars.each_with_index do |var, i|
-          current_context.vars[var.name] = LLVMVar.new(gep(closure_type, closure_ptr, 0, i, var.name), var.type)
+          slot = gep(closure_type, closure_ptr, 0, i, var.name)
+          if var.iyi_boxed?
+            # heap22 C1: a struct a crossing block captures lives in a cell
+            # of its own, which the block's context points at too
+            # (`MetaVar#iyi_boxed?`).
+            cell_type = llvm_type(var.type)
+            cell = var.type.has_inner_pointers? ? malloc(cell_type) : malloc_atomic(cell_type)
+            iyi_with_write_barrier(slot, @program.pointer_of(var.type)) do
+              store cell, slot
+            end
+            slot = cell
+          end
+          current_context.vars[var.name] = LLVMVar.new(slot, var.type)
         end
         closure_skip_parent = false
 
@@ -2763,8 +2785,9 @@ module Iyi
       else
         pointerful = type.is_a?(InstanceVarContainer) && !type.struct? &&
                      type.all_instance_vars.each_value.any? &.type.has_inner_pointers?
-        if @program.iyi_gc_arena? && (new_fun = iyi_new_fun)
-          # iyi: under the arena a class instance is `__iyi_new`'s: the
+        if @program.iyi_gc_arena? && (new_fun = iyi_born_shared?(type) ? iyi_new_shared_fun : iyi_new_fun)
+          # iyi: under the arena a class instance is `__iyi_new`'s - or,
+          # for a type heap22 has born shared, `__iyi_new_shared`'s: the
           # size, the type id, and whether the object carries the id in a
           # word ahead of it or in its arena's table - the class's
           # `:headed` byte, `gc_layouts.cr` - and whether it is atomic. The
@@ -3048,12 +3071,17 @@ module Iyi
     # iyi: the prelude's files that hold the runtime - the scheduler and the
     # pool (`concurrency.iyi`), kernel threads and the collector's stop
     # (`thread.iyi`), and the allocator, the collector, panics and the
-    # entry point (`prelude.iyi`). Their code never checks for preemption:
-    # a loop of theirs giving the worker up would park a fiber inside the
-    # runtime, with a worker's structures half changed or a reference to
-    # one worker's state held across a move to another. The prelude's
-    # other files are a library, and check as a program's own code does.
-    IYI_RUNTIME_FILES = {"prelude.iyi", "concurrency.iyi", "thread.iyi", "chaos.iyi"}
+    # entry point (`prelude.iyi`), and a unit's own heap - publication,
+    # local collection, a partition's death (`heap_partition.iyi`) and its
+    # verifier (`heap_verify.iyi`). Their code never checks for preemption
+    # and their `Atomic` verbs are no chaos points: a loop of theirs giving
+    # the worker up would park a fiber inside the runtime, with a worker's
+    # structures half changed or a reference to one worker's state held
+    # across a move to another, and a switch inside a publication walk or a
+    # local collection would run another fiber of the unit in the middle of
+    # it. The prelude's other files are a library, and check as a program's
+    # own code does.
+    IYI_RUNTIME_FILES = {"prelude.iyi", "concurrency.iyi", "thread.iyi", "chaos.iyi", "heap_partition.iyi", "heap_verify.iyi"}
 
     @iyi_runtime_files = {} of String => Bool
 

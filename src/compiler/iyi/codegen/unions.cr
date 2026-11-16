@@ -79,8 +79,9 @@ module Iyi
     # the arm so that a value read from the slot itself is read first.
     # Left alone they kept what the slot held before - a wider arm's
     # pointer, or a stack temporary's stale word - and an `Array(DBValue)`
-    # buffer, which the collector reads word by word, kept what such a
-    # word named alive from an `Int64` element.
+    # buffer, which the collector and the heap22 verifier read word by
+    # word, kept what such a word named alive from an `Int64` element, or
+    # named another unit's chunk.
     def store_in_union(union_type, union_pointer, value_type, value, *, fresh = false)
       struct_type = llvm_type(union_type)
       store type_id(value, value_type), union_type_id(struct_type, union_pointer)

@@ -94,6 +94,7 @@
 module std/mlkem
 
 import std/digest::{SHA3_256, SHA3_512, SHAKE128, SHAKE256}
+import std/lazy::{Lazy}
 
 # What is wrong with a key or a ciphertext from outside: `message` is the
 # sentence.
@@ -431,7 +432,14 @@ end
 struct MlKemPoly
   ETA = 2
 
-  @@tables = Pointer(UInt32).new(0_u64)
+  # `build_tables`'s zetas and gammas, built whole at the first call that
+  # reads them (std/lazy), and never written again.
+  @[UnsafeReach("built whole in the shared heap by its first reader (std/lazy), kept once and marked; read only after the mark; then only read")]
+  @@tables = Lazy(Pointer(UInt32)).new
+
+  private def self.tables : Pointer(UInt32)
+    @@tables.get { build_tables }
+  end
 
   def self.poly : Pointer(UInt32)
     Pointer(UInt32).malloc(256_u64)
@@ -443,8 +451,7 @@ struct MlKemPoly
 
   # The 128 zetas, 17^BitRev7(i) mod q, then the 128 gammas,
   # 17^(2 BitRev7(i) + 1) mod q: FIPS 203 appendix A.
-  private def self.tables : Pointer(UInt32)
-    return @@tables if @@tables.address != 0_u64
+  private def self.build_tables : Pointer(UInt32)
     words = [
       1_u32, 1729_u32, 2580_u32, 3289_u32, 2642_u32, 630_u32, 1897_u32, 848_u32, 1062_u32, 1919_u32, 193_u32, 797_u32,
       2786_u32, 3260_u32, 569_u32, 1746_u32, 296_u32, 2447_u32, 1339_u32, 1476_u32, 3046_u32, 56_u32, 2240_u32, 1333_u32,
@@ -471,7 +478,6 @@ struct MlKemPoly
     ]
     table = Pointer(UInt32).malloc(256_u64)
     table.copy_from(words.to_unsafe, 256)
-    @@tables = table
     table
   end
 

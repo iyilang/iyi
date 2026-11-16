@@ -907,22 +907,43 @@ puts "stream: ok"
 # completes. Such a wait cannot be bounded by its own deadline, whose
 # cancel completes into the same port, so each step is watched by a
 # thread of its own that ends the program with the step's name.
+# What a watched step and the threads beside it tell each other: atomics,
+# since each is written by one thread or task while another reads it.
 class PortGate
-  @@done = Pointer(Atomic(UInt64)).malloc(1_u64)
-  @@arrived = Pointer(Atomic(UInt64)).malloc(1_u64)
-  # The values of the sockets the other thread closed, for `port_reuse`.
-  @@closed = Pointer(Int64).malloc(2_u64)
+  @@done = Atomic(UInt64).new(0_u64)
+  @@arrived = Atomic(UInt64).new(0_u64)
+  # The values of the sockets the other thread closed, for `port_reuse`:
+  # stored before it sets `arrived`, read after that is seen.
+  @@closed_first = Atomic(Int64).new(-1_i64)
+  @@closed_second = Atomic(Int64).new(-1_i64)
 
-  def self.closed : Pointer(Int64)
-    @@closed
+  def self.done : UInt64
+    @@done.get
   end
 
-  def self.done : Pointer(Atomic(UInt64))
-    @@done
+  def self.done=(value : UInt64) : Nil
+    @@done.set(value)
   end
 
-  def self.arrived : Pointer(Atomic(UInt64))
-    @@arrived
+  def self.arrived : UInt64
+    @@arrived.get
+  end
+
+  def self.arrived=(value : UInt64) : Nil
+    @@arrived.set(value)
+  end
+
+  def self.arrive : Nil
+    @@arrived.add(1_u64)
+  end
+
+  def self.closed(first : Int64, second : Int64) : Nil
+    @@closed_first.set(first)
+    @@closed_second.set(second)
+  end
+
+  def self.closed?(value : Int64) : Bool
+    value == @@closed_first.get || value == @@closed_second.get
   end
 end
 
@@ -939,20 +960,20 @@ def port_joins : UInt64
 end
 
 def port_watch(name : String, ms : Int32, &block : -> Nil) : Nil
-  PortGate.done.value.set(0_u64)
+  PortGate.done = 0_u64
   watcher = IyiThread.start do
     waited = 0
-    while PortGate.done.value.get == 0_u64 && waited < ms
+    while PortGate.done == 0_u64 && waited < ms
       sleep(10)
       waited = waited + 10
     end
-    if PortGate.done.value.get == 0_u64
+    if PortGate.done == 0_u64
       puts "#{name}: a wait had not completed after #{ms} ms"
       __iyi_exit(1)
     end
   end
   block.call
-  PortGate.done.value.set(1_u64)
+  PortGate.done = 1_u64
   watcher.join
 end
 
@@ -1080,7 +1101,7 @@ puts "port_stays: ok"
 t_server = IyiSocket.listen("127.0.0.1", 0)
 t_port = t_server.local_port
 port_watch("port_reuse", 10000) do
-  PortGate.arrived.value.set(0_u64)
+  PortGate.arrived = 0_u64
   t_listen_fd = t_server.fd
   t_mask = pin_to_first_cpu
   t_thread = IyiThread.start do
@@ -1098,16 +1119,15 @@ port_watch("port_reuse", 10000) do
         0
       end
     end
-    PortGate.closed[0] = t_first.fd.to_i64
-    PortGate.closed[1] = t_second.fd.to_i64
+    PortGate.closed(t_first.fd.to_i64, t_second.fd.to_i64)
     t_first.close
     t_second.close
-    PortGate.arrived.value.set(1_u64)
-    while PortGate.arrived.value.get == 1_u64
+    PortGate.arrived = 1_u64
+    while PortGate.arrived == 1_u64
       sleep(5)
     end
   end
-  while PortGate.arrived.value.get == 0_u64
+  while PortGate.arrived == 0_u64
     sleep(5)
   end
   t_held = [] of IyiSocket
@@ -1118,10 +1138,10 @@ port_watch("port_reuse", 10000) do
     t_one = IyiSocket.connect("127.0.0.1", t_port).or_panic
     t_two = t_server.accept.or_panic
     t_held << t_one << t_two
-    if t_one.fd.to_i64 == PortGate.closed[0] || t_one.fd.to_i64 == PortGate.closed[1]
+    if PortGate.closed?(t_one.fd.to_i64)
       t_reader = t_one
       t_writer = t_two
-    elsif t_two.fd.to_i64 == PortGate.closed[0] || t_two.fd.to_i64 == PortGate.closed[1]
+    elsif PortGate.closed?(t_two.fd.to_i64)
       t_reader = t_two
       t_writer = t_one
     end
@@ -1148,7 +1168,7 @@ port_watch("port_reuse", 10000) do
     raise "port_reuse: a socket with another thread's closed socket's value read #{t_heard.inspect}" unless t_heard == "u"
   end
   t_held.each { |t_socket| t_socket.close }
-  PortGate.arrived.value.set(2_u64)
+  PortGate.arrived = 2_u64
   t_thread.join
 end
 t_server.close
@@ -1200,14 +1220,14 @@ m_conn_fd = m_conn.fd
 m_readers = [] of UInt64
 port_watch("port_migrate", 30000) do
   20.times do |m_round|
-    PortGate.arrived.value.set(0_u64)
+    PortGate.arrived = 0_u64
     group do |g|
       m_tasks = [] of IyiTask(UInt64)
       2.times do |m_index|
         m_tasks << g.spawn(unit: :new) do
-          PortGate.arrived.value.add(1_u64)
+          PortGate.arrive
           m_spun = __iyi_monotonic_ns
-          while PortGate.arrived.value.get < 2_u64
+          while PortGate.arrived < 2_u64
             raise "port_migrate: a parallel task spun 10000 ms and no second one started" if __iyi_monotonic_ns - m_spun > 10_000_000_000_i64
             IyiThread.spin_pause
           end

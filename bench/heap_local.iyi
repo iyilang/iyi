@@ -1,0 +1,2667 @@
+# heap22 slice S1, driven: pool units that allocate in partitions of their
+# own and are collected one at a time (branch h22/heap-partition).
+#
+#   ./bin/iyi build -Dheap_partitions -Dheap_verify bench/heap_local.iyi
+#   ./heap_local                 # every check, a pool of four
+#   ./heap_local W ROUNDS        # the pool and the rounds of `graphs`
+#   bash bench/heap_local.sh     # this, built three ways, and the broken copies
+#
+# Every check runs with a local collection at every park of a partitioned
+# fiber unless it says otherwise, and in a `-Dheap_verify` build every
+# chunk a partition frees reads 0xDEADDEADDEADDEAD past its two link words,
+# so a live object freed is a wrong word at its next read. Each failure
+# starts with its check's word:
+#
+# - `graphs:` units build lists of objects, parking in the middle of every
+#   one, keep a ring of them and drop the rest; every kept list reads
+#   back whole and local collections ran.
+# - `poison:` a unit drops sixteen nodes in frames of their own, scrubs
+#   its stack and collects: (verifying) every one reads poisoned, and the
+#   node it kept reads whole.
+# - `fibers:` eight fibers of one unit build lists side by side, each
+#   parking with its list half built while the others collect: every
+#   fiber's stack is a root of its partition.
+# - `answer:` units answer a list built in their partition; after the
+#   units die and the shared heap has collected, every answer reads back
+#   whole (the partition was detached and the shared heap adopted it).
+# - `adopt:` a unit joins a child unit that answered a graph holding an
+#   array, grows the array and collects: every node reads back whole
+#   (the joining unit was pinned when it read the answer).
+# - `detach:` a unit answers a list into a box of the shared heap, scrubs
+#   its stack and asks for a local collection: the list reads back whole
+#   (a detached partition is the global collection's alone).
+# - `pin:` a unit pins itself with a list alive, hands it to the shared
+#   heap, and dies; the list reads back whole after a collection.
+# - `free:` a unit asks to free a chunk of the shared heap and then
+#   allocates; the chunk still holds what the main thread wrote in it.
+# - `filter:` a unit's local collection with another unit's object
+#   address on its stack leaves that object's `OWN` byte as it was.
+# - `frontier:` a unit allocates 16-byte strings until one is the last
+#   chunk of a run off the carve frontier with its head below the run's
+#   end and its address on it; published, it is not `LOCAL` any more.
+#   Another drops four such strings, each with a weak cell, and collects:
+#   no cell names a chunk the collection freed.
+# - `stale:` a dead unit's object, on a run that went to the pool whole,
+#   is no object to a stale word: the collector's root test
+#   (`IyiRoots.base_of`) rejects its address.
+# - `fresh:` blocks of a class above a page read zero when taken: off the
+#   frontier (cleared only at their link words), off the unit's own list
+#   after a collection freed them, and off a dead unit's pooled runs.
+# - `return:` with local collections off, a unit's garbage is freed by
+#   global collections alone and comes back to it: the runs it holds stay
+#   bounded and the return stacks hand chunks back. One local collection
+#   ends the unit's task, so that `-Dheap_verify` reads its free lists.
+# - `weak:` weak cells to a hundred kept and a hundred dropped objects of
+#   a unit, one collection: every kept cell still names its object and
+#   every dropped one reads 0; in another unit, a sweep stopped once it
+#   has swept the dropped objects' class leaves no cell naming a chunk it
+#   freed; and in a third, a cell to a large object its unit holds names
+#   it across the unit's collections, and once the object is dropped no
+#   cell names it after the collection that unmapped it.
+# - `large:` objects past the top class in a partition: kept ones read
+#   back whole across local collections, dropped ones are unmapped.
+# - `takeover:` units parked with debt are collected by idle workers after
+#   a global collection, their lists whole after; under `IYI_HEAP_STRESS`,
+#   where each unit collects itself before it parks, the debt is handed
+#   to the parked units.
+# - `construct:` a unit with no fiber and no value slot - a `Unit`'s value
+#   being built by `Unit.new` on its caller's fiber - in debt after a
+#   global collection is taken by no idle worker; the list reads whole.
+# - `idle:` units parked with garbage but no debt, and no global
+#   collection: idle workers, woken by the idle clock, collect every one
+#   within 3 s, their lists whole after, and some partition holds less.
+# - `idlehold:` a unit parked dirty whose token the check holds across the
+#   walk that would take it is passed over, and collected within 3 s once
+#   let go, with nothing else parked to bring a walk: the walk counts it
+#   as waiting still (`IyiHeap.idle_held?`); its list reads whole after.
+# - `clock:` an idle worker's look held, having read the time, until
+#   another worker's turn of the idle clock leaves that time behind does
+#   not turn the clock again with it, and no turn of a clock comes less
+#   than its period after the last (`IyiHeap.clock_turns_short`).
+# - `busy:` while two units pass a value back and forth - thousands of
+#   parks a tick - a unit parked dirty is not collected before
+#   `IyiHeap::IDLE_BUSY_TICKS` ticks of the idle clock, by walks that
+#   gave it that many, whenever the walks it waited through began with
+#   the program busy by the rule's own inputs (a try where they did not,
+#   the pairs off-core under load, is tried again, eight at most); once
+#   they stop, one parked so is collected by a walk that gave it two
+#   (under `IYI_HEAP_STRESS`, where units collect themselves before they
+#   park, the parked unit is stamped by hand).
+# - `inflight:` a unit that allocates past its budget without parking is
+#   collected in flight, its live list whole.
+# - `kept:` a unit's parks collect keeping its runs, in rounds of garbage
+#   that global collections hand back on its return stack every other
+#   round: the list it keeps reads whole after 40 rounds, and it holds no
+#   more than twice what it held after five.
+# - `spare:` a unit whose park's collection kept runs with nothing live on
+#   them sits parked: an idle worker collects it whole within 3 s and it
+#   holds less after.
+# - `abandon:` a unit's local mark is abandoned 256 objects into its
+#   list, as a stop asked there abandons one; the list's far links are
+#   then each handed a new object, and after the next collection every
+#   one reads whole (the abandoned mark's parities are not trusted).
+# - `unswept:` a local sweep between two classes - held there, or
+#   stopped - leaves dead objects of the later classes carved, naming
+#   chunks of the earlier ones it freed: a dead object wearing the parity
+#   of the mark before is freed by the next whole collection; a run of
+#   `Node`'s class a whole sweep emptied stays the partition's while the
+#   sweep is held before `Far`'s class and another unit takes the pool's
+#   runs of that class and collects; a run of `Node`'s class the
+#   stopped sweep emptied stays the partition's while another unit takes
+#   the pool's runs of that class (whose `-Dheap_verify` check would
+#   read the dead object naming its chunk), and goes to the pool after
+#   the next whole sweep, or at the unit's death.
+# - `death:` every partition is gone once its unit has died.
+
+@[Unsafe("the checks read freed chunks, weak cells and large blocks through raw pointers, hand a shared-heap address to free, and zero the stack under them through pointerof and an empty asm, to see what the partitions did with them")]
+{% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
+  import std/unit::{Unit}
+
+  # `HEAP22_PRINT_ONLY=1`: a failed check prints its `FAIL:` line and the
+  # program goes on, so that bench/heap_verify.sh can show a broken copy
+  # caught by `-Dheap_verify`'s verifier alone.
+  class Checks
+    @@print_only = false
+
+    def self.print_only : Bool
+      @@print_only
+    end
+
+    def self.read_env : Nil
+      @@print_only = Program.env("HEAP22_PRINT_ONLY") == "1"
+    end
+  end
+
+  def fail(message : String) : Nil
+    print "FAIL: #{message}\n"
+    __iyi_exit(1) unless Checks.print_only
+  end
+
+  # An immutable node, so a list of them is `Share` and may be a task's
+  # answer: its id, a label made from it, a check word, the next node.
+  class Node
+    getter id : Int64
+    getter label : String
+    getter check : Int64
+    getter next : Node?
+
+    def initialize(@id : Int64, @next : Node?)
+      @label = "n#{@id}"
+      @check = @id ^ 0x5A5A5A5A_i64
+    end
+
+    # The id first, a word: a freed node reads poison or another object's
+    # word there, and nothing past it is followed then.
+    def intact?(want : Int64) : Bool
+      @id == want && @check == (want ^ 0x5A5A5A5A_i64) && @label == "n#{want}"
+    end
+  end
+
+  # *count* nodes from *base* up, linked newest first, with a park every
+  # *every* nodes (0: none).
+  def build(base : Int64, count : Int32, every : Int32) : Node?
+    head : Node? = nil
+    i = 0
+    while i < count
+      head = Node.new(base &+ i.to_i64, head)
+      sleep(0) if every > 0 && (i + 1) % every == 0
+      i = i + 1
+    end
+    head
+  end
+
+  # How many nodes of a list built by `build` read wrong, stopping at the
+  # first: its links are not followed past a node that is not whole.
+  def broken(head : Node?, base : Int64, count : Int32) : Int64
+    node = head
+    i = count - 1
+    while i >= 0
+      return (i + 1).to_i64 unless node.is_a?(Node)
+      return (i + 1).to_i64 unless node.intact?(base &+ i.to_i64)
+      node = node.next
+      i = i - 1
+    end
+    node.nil? ? 0_i64 : 1_i64
+  end
+
+  # An address kept where no scan takes it for a pointer, and given back.
+  @[NoInline]
+  def hide(address : UInt64) : UInt64
+    address ^ 0x5A5A5A5A5A5A5A5A_u64
+  end
+
+  # A node made and dropped in a frame of its own: only its hidden address
+  # outlives the call.
+  @[NoInline]
+  def dead_node(id : Int64) : UInt64
+    hide(Node.new(id, nil).object_id)
+  end
+
+  # A weak cell to a node made and dropped in a frame of its own.
+  @[NoInline]
+  def dead_cell(id : Int64) : Pointer(UInt64)
+    IyiWeak.cell(Node.new(id, nil).object_id)
+  end
+
+  @[NoInline]
+  def stack_word(address : UInt64) : UInt64
+    Pointer(UInt64).new(address).value
+  end
+
+  # 16 KiB of the stack under the caller zeroed, so no dead frame there
+  # still holds a dropped object's address when a collection scans it.
+  # Called from the frame that called the droppers: its own frame lies
+  # over theirs. The empty `asm` that takes the buffer and clobbers
+  # memory keeps the zeroing: without it a `--release` build saw a
+  # function that writes only its own frame, and dropped the call - the
+  # objdump of the verifying release build had no call between the
+  # droppers and `collect_now`, and with round 1's order of checks a
+  # word Node.new left there, in the six words of `local_collect`'s
+  # twelve-word register buffer that x86_64 does not write, kept poison's
+  # last dropped node in 10 runs of 10 (Linux x86_64, 12 vCPUs).
+  @[NoInline]
+  def scrub_stack : UInt64
+    buffer = uninitialized UInt64[2048]
+    words = Pointer(UInt64).new(pointerof(buffer).address)
+    i = 0
+    while i < 2048
+      (words + i.to_i64).value = 0_u64
+      i = i + 1
+    end
+    asm("" :: "r"(words) : "memory" : "volatile")
+    stack_word(words.address) &+ stack_word((words + 2047_i64).address)
+  end
+
+  # The running unit's partition collected now, retried past a collection
+  # that a global mark beginning aborted. Answers whether one ran. The
+  # caller scrubs first: this frame lies over the droppers' too.
+  @[NoInline]
+  def collect_now : Bool
+    record = IyiHeap.current_record
+    tries = 0
+    while tries < 100
+      scrub_stack
+      before = IyiHeap.partition_collections(record)
+      IyiHeap.collect_local(record)
+      return true if IyiHeap.partition_collections(record) != before
+      sleep(1)
+      tries = tries + 1
+    end
+    false
+  end
+
+  # A freed chunk's words past its link and index read poison: the third
+  # word of an object of three words or more is poisoned whether its chunk
+  # is headed (the object 8 bytes in) or not.
+  @[NoInline]
+  def poisoned?(address : UInt64) : Bool
+    return false if address == 0_u64
+    Pointer(UInt64).new(address &+ 16_u64).value == IyiHeap::POISON
+  end
+
+  # ── abandon ───────────────────────────────────────────────────────────
+
+  # A link of a chain whose `extra` can be handed an object after the
+  # chain is built (`Link` is the compiler's annotation).
+  class Chain
+    getter id : Int64
+    getter check : Int64
+    getter next : Chain?
+    property extra : Chain?
+
+    def initialize(@id : Int64, @next : Chain?)
+      @check = @id ^ 0x5A5A5A5A_i64
+      @extra = nil
+    end
+
+    def intact?(want : Int64) : Bool
+      @id == want && @check == (want ^ 0x5A5A5A5A_i64)
+    end
+  end
+
+  # *count* links from *base* up, newest first, in a frame of its own: no
+  # link's address but the head's is left in the caller's frame, where a
+  # mark would take it for a root.
+  @[NoInline]
+  def links(base : Int64, count : Int32) : Chain?
+    head : Chain? = nil
+    i = 0
+    while i < count
+      head = Chain.new(base &+ i.to_i64, head)
+      i = i + 1
+    end
+    head
+  end
+
+  # Every link from the *skip*th on (the head is the 0th) handed a new
+  # link of its own, its id the holder's past *offset*, in a frame of its
+  # own: nothing but its holder holds each new one.
+  @[NoInline]
+  def hang_on_far(head : Chain?, skip : Int32, offset : Int64) : Nil
+    link = head
+    k = 0
+    while link.is_a?(Chain)
+      link.extra = Chain.new(link.id &+ offset, nil) if k >= skip
+      link = link.next
+      k = k + 1
+    end
+  end
+
+  # How many of what `hang_on_far` handed out read wrong.
+  def far_wrong(head : Chain?, skip : Int32, offset : Int64) : Int64
+    wrong = 0_i64
+    link = head
+    k = 0
+    while link.is_a?(Chain)
+      if k >= skip
+        extra = link.extra
+        wrong = wrong + 1 unless extra.is_a?(Chain) && extra.intact?(link.id &+ offset)
+      end
+      link = link.next
+      k = k + 1
+    end
+    wrong
+  end
+
+  # A mark that ends whole leaves its parity on all 2,000 links; the next
+  # is abandoned 256 links in and leaves its own on those; then each link
+  # from the 300th on is handed a new object, and the next mark wears the
+  # first one's parity again. Unless the abandoned mark's bits are
+  # cleared, that mark takes the links past 256 for already reached,
+  # never opens them, and frees what they hold - all 1,700 objects but
+  # any a stale word on the stack happens to name. Answers how many read
+  # wrong, or a negative failure.
+  def abandon_task : Int64
+    record = IyiHeap.current_record
+    return -1_i64 if record == 0_u64
+    head = links(7000000000_i64, 2000)
+    return -2_i64 unless collect_now
+    IyiHeap.abandon_next_local_mark = true
+    tries = 0
+    while IyiHeap.abandon_next_local_mark && tries < 100
+      scrub_stack
+      IyiHeap.collect_local(record)
+      sleep(1) if IyiHeap.abandon_next_local_mark
+      tries = tries + 1
+    end
+    return -3_i64 if IyiHeap.abandon_next_local_mark
+    hang_on_far(head, 300, 100000000_i64)
+    scrub_stack
+    return -2_i64 unless collect_now
+    far_wrong(head, 300, 100000000_i64)
+  end
+
+  def abandon_check : Nil
+    IyiHeap.park_collections_off = true
+    group do |g|
+      handle = g.spawn(unit: :new) { abandon_task }
+      value = handle.value
+      fail("abandon: the unit answered #{value}") unless value.is_a?(Int64)
+      fail("abandon: the unit allocates in no partition") if value == -1_i64
+      fail("abandon: no local collection ran") if value == -2_i64
+      fail("abandon: no local mark was abandoned") if value == -3_i64
+      fail("abandon: #{value} of 1700 objects held only by links past an abandoned mark's reach read wrong after the next mark") if value != 0_i64
+    end
+    IyiHeap.park_collections_off = false
+  end
+
+  # ── graphs ────────────────────────────────────────────────────────────
+
+  def graphs_task(unit_no : Int64, rounds : Int32) : Int64
+    ring = Array(Node?).new(8, nil)
+    bases = Array(Int64).new(8, 0_i64)
+    round = 0
+    while round < rounds
+      base = unit_no &* 1000000000_i64 &+ round.to_i64 &* 1000_i64
+      list = build(base, 150, 16)
+      wrong = broken(list, base, 150)
+      return wrong if wrong != 0
+      slot = round % 8
+      ring[slot] = list
+      bases[slot] = base
+      list = nil
+      # A park, a collection: the list this slot held is dead now.
+      sleep(0)
+      round = round + 1
+    end
+    k = 0
+    while k < 8 && k < rounds
+      wrong = broken(ring[k], bases[k], 150)
+      return wrong if wrong != 0
+      k = k + 1
+    end
+    record = IyiHeap.current_record
+    fail("graphs: unit #{unit_no} allocates in no partition") if record == 0_u64
+    fail("graphs: unit #{unit_no} was never collected in #{rounds} rounds of parks") if IyiHeap.partition_collections(record) == 0_u64
+    0_i64
+  end
+
+  def graphs_check(workers : Int32, rounds : Int32) : Nil
+    collections = IyiHeap.local_collections
+    group do |g|
+      handles = [] of IyiTask(Int64)
+      (workers * 2).times do |t|
+        handles << g.spawn(unit: :new) { graphs_task(t.to_i64, rounds) }
+      end
+      handles.each_with_index do |handle, t|
+        value = handle.value
+        fail("graphs: unit #{t} answered #{value}") unless value.is_a?(Int64)
+        fail("graphs: unit #{t} read #{value} nodes of a kept list wrong") if value != 0_i64
+      end
+    end
+    fail("graphs: no local collection ran") if IyiHeap.local_collections == collections
+  end
+
+  # ── poison ────────────────────────────────────────────────────────────
+
+  # Sixteen nodes dropped, one kept, one collection: every dropped node
+  # reads poisoned (a verifying build) and the kept one whole. Answers a
+  # mask of the dropped nodes that did not read poisoned (bit k: node k),
+  # or a negative failure.
+  def poison_task : Int64
+    return -1_i64 if IyiHeap.current_record == 0_u64
+    kept = Node.new(77_i64, nil)
+    dead = [] of UInt64
+    i = 0
+    while i < 16
+      dead << dead_node(100_i64 &+ i.to_i64)
+      i = i + 1
+    end
+    scrub_stack
+    return -2_i64 unless collect_now
+    return -3_i64 unless kept.intact?(77_i64)
+    missed = 0_i64
+    dead.each_with_index { |hidden, k| missed = missed | 1_i64.unsafe_shl(k.to_i64) unless poisoned?(hide(hidden)) }
+    missed
+  end
+
+  def poison_check : Nil
+    group do |g|
+      handle = g.spawn(unit: :new) { poison_task }
+      value = handle.value
+      fail("poison: the unit answered #{value}") unless value.is_a?(Int64)
+      fail("poison: the unit allocates in no partition") if value == -1_i64
+      fail("poison: no local collection ran in 100 tries") if value == -2_i64
+      fail("poison: the kept node read wrong after its unit's collection") if value == -3_i64
+      {% if flag?(:heap_verify) %}
+        fail("poison: dropped nodes #{value} (a mask, bit k for node k) did not read poisoned after their unit's collection") if value != 0_i64
+      {% end %}
+    end
+  end
+
+  # ── fibers ────────────────────────────────────────────────────────────
+
+  def fibers_task(fibers : Int32) : Int64
+    wrong = Channel(Int64).new(fibers)
+    group do |g|
+      fibers.times do |f|
+        g.spawn(unit: :same) do
+          base = 7000000000_i64 &+ f.to_i64 &* 100000_i64
+          list = build(base, 400, 7)
+          wrong.send(broken(list, base, 400))
+        end
+      end
+    end
+    bad = 0_i64
+    fibers.times do
+      got = wrong.receive
+      bad = bad &+ (got.is_a?(Int64) ? got : 1_i64)
+    end
+    bad
+  end
+
+  def fibers_check : Nil
+    group do |g|
+      handle = g.spawn(unit: :new) { fibers_task(8) }
+      value = handle.value
+      fail("fibers: the unit answered #{value}") unless value.is_a?(Int64)
+      fail("fibers: #{value} nodes of eight fibers' lists read wrong") if value != 0_i64
+    end
+  end
+
+  # ── answer ────────────────────────────────────────────────────────────
+
+  def answer_check(workers : Int32) : Nil
+    answers = [] of Node?
+    detached = IyiHeap.detached_partitions
+    group do |g|
+      handles = [] of IyiTask(Node?)
+      (workers * 2).times do |t|
+        handles << g.spawn(unit: :new) { build(9000000000_i64 &+ t.to_i64 &* 1000_i64, 300, 25) }
+      end
+      handles.each do |handle|
+        value = handle.value
+        if value.is_a?(Node?)
+          answers << value
+        else
+          fail("answer: a unit answered #{value}")
+        end
+      end
+    end
+    settle("answer")
+    IyiMark.collect
+    answers.each_with_index do |list, t|
+      wrong = broken(list, 9000000000_i64 &+ t.to_i64 &* 1000_i64, 300)
+      fail("answer: #{wrong} nodes of unit #{t}'s answer read wrong after it died") if wrong != 0
+    end
+    fail("answer: no partition was detached by a pointer answer") if IyiHeap.detached_partitions == detached
+  end
+
+  # ── adopt ─────────────────────────────────────────────────────────────
+
+  # A graph a unit may grow: an object holding an array.
+  class Grown
+    getter items : Array(Node)
+
+    def initialize
+      @items = [] of Node
+    end
+  end
+
+  def adopt_child : Grown
+    grown = Grown.new
+    i = 0
+    while i < 4
+      grown.items << Node.new(7000000000_i64 &+ i.to_i64, nil)
+      i = i + 1
+    end
+    grown
+  end
+
+  # The joiner, itself a unit, reads a child unit's pointer answer - the
+  # child's partition detached, the shared heap's from its death - and
+  # grows it: the array's new buffers and nodes are made here, under a
+  # holder this unit's local mark does not read. `IyiTask#value` pins
+  # the reader first (`IyiHeap.adopt_answer`), so they are the shared
+  # heap's and a global collection keeps them; without it the local
+  # collection freed them under the answer (S4h's `answer` fuzz kind,
+  # Linux: exit 86 at seeds 1-3 of 3 with one worker, the holder a
+  # shared Hash's keys). Answers how many nodes read wrong, or a
+  # negative failure.
+  def adopt_task : Int64
+    got = 0_i64
+    group do |g|
+      value = g.spawn(unit: :new) { adopt_child }.value
+      if value.is_a?(Grown)
+        i = 0
+        while i < 200
+          value.items << Node.new(7000000004_i64 &+ i.to_i64, nil)
+          i = i + 1
+        end
+        scrub_stack
+        if IyiHeap.current_record == 0_u64
+          IyiMark.collect
+        elsif !collect_now
+          got = -2_i64
+        end
+        # Freed memory is not walked: a freed buffer or node is one
+        # `IyiRoots.base_of` answers 0 for, as `stale:` asks.
+        if got == 0_i64 && IyiRoots.base_of(value.items.to_unsafe.address) == 0_u64
+          got = -4_i64
+        elsif got == 0_i64
+          value.items.each_with_index do |node, k|
+            got = got &+ 1_i64 unless IyiRoots.base_of(node.object_id) != 0_u64 && node.intact?(7000000000_i64 &+ k.to_i64)
+          end
+          got = -3_i64 if got == 0_i64 && value.items.size != 204
+        end
+      else
+        got = -1_i64
+      end
+    end
+    got
+  end
+
+  def adopt_check : Nil
+    group do |g|
+      value = g.spawn(unit: :new) { adopt_task }.value
+      fail("adopt: the joining unit answered #{value}") unless value.is_a?(Int64)
+      fail("adopt: the child unit answered no graph") if value == -1_i64
+      fail("adopt: no local collection ran in 100 tries") if value == -2_i64
+      fail("adopt: the grown array lost nodes") if value == -3_i64
+      fail("adopt: a child unit's answer, grown by a joining unit, had its array's buffer freed under it by that unit's collection") if value == -4_i64
+      fail("adopt: #{value} nodes a joining unit added to a child unit's answer read wrong after its collection") if value != 0_i64
+    end
+  end
+
+  # ── detach ────────────────────────────────────────────────────────────
+
+  # A list built in the unit's partition and answered into a box of the
+  # shared heap, in a frame of its own: the store and the look
+  # `IyiTask#finish` takes after it (`IyiHeap.answer`), the look called by
+  # itself, so the copy that drops it from `answer` (noanswer) passes here
+  # and meets `answer:`.
+  @[NoInline]
+  def stash_answer(box : Array(Node?)) : Nil
+    box << build(3000000000_i64, 300, 0)
+    IyiHeap.answered(box.object_id, box.to_unsafe.address, 8_u64)
+  end
+
+  # The answered list is reachable only from the shared box, which no
+  # local mark reads: a local collection asked for after the answer must
+  # not free it. Answers how many nodes read wrong, or a negative failure.
+  def detach_task : Int64
+    record = IyiHeap.current_record
+    return -1_i64 if record == 0_u64
+    box = [] of Node?
+    IyiHeap.shared { box = Array(Node?).new(1) }
+    return -2_i64 if IyiHeap.owner_of(box.object_id) != 0_u64
+    detached = IyiHeap.detached_partitions
+    stash_answer(box)
+    return -3_i64 if IyiHeap.detached_partitions == detached
+    scrub_stack
+    IyiHeap.collect_local(record)
+    broken(box[0], 3000000000_i64, 300)
+  end
+
+  def detach_check : Nil
+    group do |g|
+      handle = g.spawn(unit: :new) { detach_task }
+      value = handle.value
+      fail("detach: the unit answered #{value}") unless value.is_a?(Int64)
+      fail("detach: the unit allocates in no partition") if value == -1_i64
+      fail("detach: a box made in the shared bracket is a partition's") if value == -2_i64
+      fail("detach: a pointer answer into a shared box did not detach the partition") if value == -3_i64
+      fail("detach: #{value} nodes of an answered list read wrong after its unit collected") if value != 0_i64
+    end
+  end
+
+  # Every unit's partition gone: the units are reaped a little after their
+  # joins return.
+  def settle(check : String) : Nil
+    waited = 0
+    while IyiHeap.partitions_live != 0_u64 && waited < 5000
+      sleep(1)
+      waited = waited + 1
+    end
+    fail("#{check}: #{IyiHeap.partitions_live} partitions live 5 s after every unit ended") if IyiHeap.partitions_live != 0_u64
+  end
+
+  # ── pin ───────────────────────────────────────────────────────────────
+
+  # Holders in the data segment, which `-Dheap_verify`'s scan reads word
+  # by word: `kept` a pinned unit's list (`pin`), `text` a published
+  # string (`frontier`), `word` the address of a value whose only real
+  # holder is another unit's stack, which no local mark and no verifier
+  # reads (`construct`) - a plain word, so no store publishes it.
+  class Holder
+    @@kept : Node? = nil
+    @@text : String? = nil
+    @@word : UInt64 = 0_u64
+
+    def self.kept : Node?
+      @@kept
+    end
+
+    def self.kept=(list : Node?) : Node?
+      @@kept = list
+    end
+
+    def self.text : String?
+      @@text
+    end
+
+    def self.text=(text : String?) : String?
+      @@text = text
+    end
+
+    def self.word : UInt64
+      @@word
+    end
+
+    def self.word=(address : UInt64) : UInt64
+      @@word = address
+    end
+  end
+
+  def pin_task : Int64
+    list = build(5000000000_i64, 200, 0)
+    record = IyiHeap.current_record
+    return -1_i64 if record == 0_u64
+    IyiHeap.pin
+    return -2_i64 if IyiHeap.current_record != 0_u64
+    after = Node.new(1_i64, nil)
+    return -3_i64 if IyiHeap.owner_of(after.object_id) != 0_u64
+    Holder.kept = list
+    broken(list, 5000000000_i64, 200)
+  end
+
+  def pin_check : Nil
+    pins = IyiHeap.pins
+    group do |g|
+      handle = g.spawn(unit: :new) { pin_task }
+      value = handle.value
+      fail("pin: the unit answered #{value}") unless value.is_a?(Int64)
+      fail("pin: the unit allocated in no partition before pinning") if value == -1_i64
+      fail("pin: a pinned unit still allocates in a partition") if value == -2_i64
+      fail("pin: an object made after the pin is a partition's") if value == -3_i64
+      fail("pin: #{value} nodes read wrong in the pinning unit") if value != 0_i64
+    end
+    settle("pin")
+    IyiMark.collect
+    # Partitions' chunks reused by others, to make a freed list show.
+    group do |g|
+      4.times { |t| g.spawn(unit: :new) { broken(build(t.to_i64, 2000, 0), t.to_i64, 2000) } }
+    end
+    wrong = broken(Holder.kept, 5000000000_i64, 200)
+    fail("pin: #{wrong} nodes of a pinned unit's list read wrong after it died") if wrong != 0
+    fail("pin: #{IyiHeap.pins - pins} pins counted for one") unless IyiHeap.pins == pins + 1_u64
+    Holder.kept = nil
+  end
+
+  # ── frontier ──────────────────────────────────────────────────────────
+
+  # A run taken off its class's frontier ends on a granule line and moves
+  # the frontier (`OFF_HIGH`) there, but its last chunk may straddle the
+  # line: with 40-byte chunks the head of one in five run ends lies 8
+  # bytes below it, and a headed object's address - a `String`'s - is
+  # then the line itself. The publication walk tested that address
+  # against the frontier, took the chunk for uncarved and left it `LOCAL`
+  # under its published referrer, and the unit's death freed it while
+  # another held it: heap_crossings' node 20 label read another label
+  # (HS4b, `channel channel`, simulated chaos, IYI_HEAP_STRESS=1, seeds
+  # 3, 6 and 8, Linux). Every string is kept, so the unit's runs come off
+  # the frontier and not off its own free list. The string is held from
+  # the data segment too (`Holder.text`, until the unit has died), as a
+  # published object is held from outside its unit: one left `LOCAL` is
+  # freed at the death under that slot, which `-Dheap_verify`'s death
+  # check reads - the nofrontier copy was caught by this check alone,
+  # the verifier reporting nothing (tmac, hp-s4 6122d4d63 + 3ee055f6f).
+  # Answers the allocation that met such a chunk, -1 if it stayed local,
+  # -2 if none came in a million.
+  def frontier_task : Int64
+    kept = [] of String
+    i = 0
+    while i < 1000000
+      text = "y" * 16
+      kept << text
+      address = text.object_id
+      arena = IyiHeap.arena_of(address)
+      if arena != 0_u64
+        high = IyiHeap.arena_high(arena)
+        if IyiHeap.head_of(arena, address) < high && address >= high
+          IyiHeap.publish(address)
+          Holder.text = text
+          return IyiHeap.local?(address) ? -1_i64 : i.to_i64
+        end
+      end
+      i = i + 1
+    end
+    -2_i64
+  end
+
+  # Weak cells to the first four 16-byte strings met whose chunks
+  # straddle their runs' ends, each string dropped, in a frame of their
+  # own; the strings between are kept, so the runs come off the frontier.
+  @[NoInline]
+  def straddling_cells(kept : Array(String), cells : Array(Pointer(UInt64))) : Nil
+    i = 0
+    while i < 1000000 && cells.size < 4
+      text = "z" * 16
+      address = text.object_id
+      arena = IyiHeap.arena_of(address)
+      if arena != 0_u64 && IyiHeap.head_of(arena, address) < IyiHeap.arena_high(arena) && address >= IyiHeap.arena_high(arena)
+        cells << IyiWeak.cell(address)
+      else
+        kept << text
+      end
+      i = i + 1
+    end
+  end
+
+  # The weak cell of such a string is the partition's to clear: the
+  # chunk's owner registers it (`IyiHeap.weak_registered`, through
+  # `owner_in_arena`) and the local sweep that frees the chunk clears it
+  # (`sweep_weak`). Both tested the address against the frontier before
+  # f383934c7, which would leave the cell naming the freed chunk.
+  # A cell that still names a live chunk is a string a stale word kept,
+  # which is no failure. Answers how many of the strings were freed with
+  # their cells cleared, -1 if a cell names a freed chunk, -2 if no
+  # string in a million straddled, -3 if no local collection ran.
+  def frontier_weak_task : Int64
+    kept = [] of String
+    cells = [] of Pointer(UInt64)
+    straddling_cells(kept, cells)
+    return -2_i64 if cells.empty?
+    scrub_stack
+    return -3_i64 unless collect_now
+    cleared = 0_i64
+    cells.each do |cell|
+      word = cell.value
+      return -1_i64 if word != 0_u64 && IyiRoots.base_of(word) == 0_u64
+      cleared = cleared &+ 1_i64 if word == 0_u64
+    end
+    cleared
+  end
+
+  def frontier_check : Nil
+    group do |g|
+      handle = g.spawn(unit: :new) { frontier_task }
+      value = handle.value
+      fail("frontier: the unit answered #{value}") unless value.is_a?(Int64)
+      fail("frontier: a published string whose chunk straddles its run's end, its address on the carve frontier, is still local") if value == -1_i64
+      fail("frontier: no string in a million was a run's last chunk with its address on the frontier") if value == -2_i64
+      weak = g.spawn(unit: :new) { frontier_weak_task }.value
+      fail("frontier: the weak unit answered #{weak}") unless weak.is_a?(Int64)
+      fail("frontier: a weak cell to a dropped string whose chunk straddles its run's end names the chunk its unit's collection freed") if weak == -1_i64
+      fail("frontier: no string in a million was a run's last chunk with its address on the frontier, for the weak cells") if weak == -2_i64
+      fail("frontier: no local collection ran in 100 tries, for the weak cells") if weak == -3_i64
+      fail("frontier: none of four dropped strings on the frontier was freed by their unit's collection") if weak == 0_i64
+    end
+    settle("frontier")
+    Holder.text = nil
+  end
+
+  # ── stale ─────────────────────────────────────────────────────────────
+
+  # A unit's object that dies with it, on a run with nothing published
+  # that goes to the pool whole. A stale word naming it - a register or a
+  # frame can leave one - must be no pointer to a global mark, which
+  # would read the dead object's fields and keep what they name: its
+  # chunk reads free (design section 2.3), and `IyiRoots.base_of`
+  # answers 0. A pooled chunk left carved kept a dead select's 64 MB
+  # string in bench/concurrency_exercise (tmac, tssh). An earlier form
+  # asked whether two collections freed a 4 MB string such an object
+  # held: a word naming the string itself kept it on tmac's release
+  # build with the fix in, and the copy without the fix freed it on
+  # Linux, so it tested neither; the root test is the mechanism.
+  class Wrap
+    getter text : String
+
+    def initialize(@text : String)
+    end
+  end
+
+  # The object stays carved to the unit's death, where the copy leaves it:
+  # no collection at every park here, and one while it is held pays the
+  # unit's debt, so the fiber's end (`IyiHeap.at_park`) collects nothing.
+  # Under `collect_every_park` that last collection freed the object
+  # first once a local collection cleared the dead stack under it
+  # (79c2e3e8c), and the nostale copy passed (Linux, 5 runs of 5);
+  # before, a stale word in that collection's frames kept the object.
+  def stale_task : UInt64
+    wrap = Wrap.new("stale " + "x" * 20)
+    collect_holding(wrap.object_id)
+    hide(wrap.object_id)
+  end
+
+  def stale_check : Nil
+    IyiHeap.collect_every_park = false
+    hidden = 0_u64
+    group do |g|
+      handle = g.spawn(unit: :new) { stale_task }
+      value = handle.value
+      # `fail` goes on under HEAP22_PRINT_ONLY, so it narrows nothing.
+      if value.is_a?(UInt64)
+        hidden = value
+      else
+        fail("stale: the unit answered #{value}")
+      end
+    end
+    settle("stale")
+    base = IyiRoots.base_of(hide(hidden))
+    IyiHeap.collect_every_park = true
+    fail("stale: a dead unit's object on a pooled run is still an object to a stale word (base 0x#{base.to_s(16)})") if base != 0_u64
+  end
+
+  # ── fresh ─────────────────────────────────────────────────────────────
+
+  # 20,480-byte blocks, a class above a page on every platform (darwin's
+  # is 16 KiB): how many words of *count* of them read other than zero
+  # when taken, each then filled with a pattern and kept in *kept*.
+  FRESH_WORDS = 2560
+
+  def fresh_take(count : Int32, kept : Array(Pointer(UInt64))) : Int64
+    wrong = 0_i64
+    k = 0
+    while k < count
+      block = Pointer(UInt64).malloc(FRESH_WORDS.to_u64)
+      w = 0
+      while w < FRESH_WORDS
+        wrong = wrong + 1 if block[w] != 0_u64
+        block[w] = 0x5A5A5A5A5A5A5A5A_u64
+        w = w + 1
+      end
+      kept << block
+      k = k + 1
+    end
+    wrong
+  end
+
+  # Off the frontier, then off its own list after a collection freed
+  # them: every block reads zero when taken.
+  def fresh_first : Int64
+    kept = [] of Pointer(UInt64)
+    wrong = fresh_take(4, kept)
+    kept = [] of Pointer(UInt64)
+    IyiHeap.collect_local(IyiHeap.current_record)
+    wrong + fresh_take(4, kept)
+  end
+
+  # Off the runs `fresh_first`'s death pooled, written all over.
+  def fresh_second : Int64
+    kept = [] of Pointer(UInt64)
+    fresh_take(4, kept)
+  end
+
+  def fresh_check : Nil
+    group do |g|
+      first = g.spawn(unit: :new) { fresh_first }.value
+      fail("fresh: #{first} words of blocks a unit took off the frontier or its own list read other than zero") if first != 0_i64
+      second = g.spawn(unit: :new) { fresh_second }.value
+      fail("fresh: #{second} words of blocks a unit took off a dead unit's pooled runs read other than zero") if second != 0_i64
+    end
+  end
+
+  # ── free ──────────────────────────────────────────────────────────────
+
+  def free_task(address : UInt64) : Int64
+    IyiHeap.free(Pointer(Void).new(address))
+    # A unit that churns the class of the chunk it tried to free.
+    keep = [] of Node
+    i = 0
+    while i < 4000
+      keep << Node.new(i.to_i64, nil)
+      keep = [] of Node if keep.size == 64
+      i = i + 1
+    end
+    0_i64
+  end
+
+  def free_check : Nil
+    held = Node.new(4242_i64, nil)
+    address = held.object_id
+    group do |g|
+      handle = g.spawn(unit: :new) { free_task(address) }
+      handle.value
+    end
+    fail("free: a unit freed a chunk of the shared heap, now id #{held.id}") unless held.intact?(4242_i64)
+  end
+
+  # ── filter ────────────────────────────────────────────────────────────
+
+  # Unit B's object's address, kept as an integer on unit A's stack across
+  # A's own collection: 1 once one has run. A collection steps aside while
+  # a global mark runs or when a pause comes into it, and under
+  # `IYI_HEAP_STRESS` - a collection at every chaos point, the verifier
+  # scanning every arena in each - the one try there was ran none
+  # (bench/heap_verify.sh's sound part, Linux): it is asked again, as
+  # bench/heap_crossings.iyi's `collect_here` asks.
+  @[NoInline]
+  def collect_holding(address : UInt64) : UInt64
+    record = IyiHeap.current_record
+    before = IyiHeap.partition_collections(record)
+    tries = 0
+    while IyiHeap.partition_collections(record) == before && tries < 1000
+      IyiHeap.collect_local(record)
+      tries = tries + 1
+      sleep(1) if IyiHeap.partition_collections(record) == before
+    end
+    (IyiHeap.partition_collections(record) == before ? 0_u64 : 1_u64) + (address & 0_u64)
+  end
+
+  def filter_check : Nil
+    IyiHeap.collect_every_park = false
+    to_a = Channel(UInt64).new(1)
+    to_b = Channel(UInt64).new(1)
+    group do |g|
+      b = g.spawn(unit: :new) do
+        mine = Node.new(31337_i64, nil)
+        record = IyiHeap.current_record
+        collections = IyiHeap.partition_collections(record)
+        parity = IyiHeap.read64(record + IyiHeap::REC_PARITY)
+        marking = IyiHeap.read64(record + IyiHeap::REC_MARKING)
+        before = IyiHeap.own_flags(mine.object_id)
+        to_a.send(mine.object_id)
+        to_b.receive
+        after = IyiHeap.own_flags(mine.object_id)
+        # B's own collections meanwhile - a chaos build's `IYI_HEAP_STRESS`
+        # runs one at every point - mark `mine` with B's parity: only the
+        # local-mark bits may move then. One that ends swept leaves them
+        # at B's parity. One that ended unswept - a pause came into it, or
+        # the verifier's check answered false - flipped the parity, marked
+        # part way and counted nothing, and left `REC_MARKING` set, so the
+        # next one clears its bits first: then they are whatever the last
+        # of those left, either parity or none. bench/heap_verify.sh's
+        # sound part failed here with 4001 (S4e at d467f04dc, Linux, seed
+        # 1): the bits at 4, no collection counted. B's record says which,
+        # and A's collections touch none of it.
+        rest = 0xFF_u64 ^ IyiHeap::OWN_LMARK
+        if after & rest == before & rest
+          counted = IyiHeap.partition_collections(record) != collections
+          unswept = IyiHeap.read64(record + IyiHeap::REC_MARKING) != 0_u64
+          if unswept && (counted || marking == 0_u64 || IyiHeap.read64(record + IyiHeap::REC_PARITY) != parity)
+            before = after
+          elsif counted
+            before = (before & rest) | IyiHeap.read64(record + IyiHeap::REC_PARITY)
+          end
+        end
+        mine.intact?(31337_i64) ? (after == before ? 0_i64 : after.to_i64 * 1000_i64 + before.to_i64 + 1_i64) : -1_i64
+      end
+      a = g.spawn(unit: :new) do
+        got = to_a.receive
+        address = got.is_a?(UInt64) ? got : 0_u64
+        collected = collect_holding(address)
+        to_b.send(1_u64)
+        collected.to_i64
+      end
+      ran = a.value
+      fail("filter: the holding unit answered #{ran}") unless ran.is_a?(Int64)
+      fail("filter: the holding unit's collection did not run") if ran != 1_i64
+      value = b.value
+      fail("filter: the owning unit answered #{value}") unless value.is_a?(Int64)
+      fail("filter: the owning unit's object read wrong") if value == -1_i64
+      fail("filter: another unit's collection rewrote an OWN byte (#{value})") if value != 0_i64
+    end
+    IyiHeap.collect_every_park = true
+  end
+
+  # ── return ────────────────────────────────────────────────────────────
+
+  def return_task : Int64
+    record = IyiHeap.current_record
+    keep = build(6000000000_i64, 500, 0)
+    first = 0_u64
+    round = 0
+    while round < 30
+      junk : Node? = nil
+      i = 0
+      while i < 6000
+        junk = Node.new(i.to_i64, i % 100 == 0 ? nil : junk)
+        i = i + 1
+      end
+      junk = nil
+      IyiMark.collect
+      first = IyiHeap.partition_held(record) if round == 2
+      round = round + 1
+    end
+    wrong = broken(keep, 6000000000_i64, 500)
+    held = IyiHeap.partition_held(record).to_i64 - (first * 2_u64).to_i64
+    # One local collection after the global sweeps, so that under
+    # `-Dheap_verify` the verifier's free-list pass reads what they handed
+    # back: a chunk they freed and gave nobody is lost to the partition,
+    # which no death check sees (the death frees the runs whole).
+    IyiHeap.local_collections_off = false
+    scrub_stack
+    collect_now
+    return -wrong if wrong != 0
+    held
+  end
+
+  def return_check : Nil
+    IyiHeap.local_collections_off = true
+    returned = IyiHeap.returned_chunks
+    group do |g|
+      handle = g.spawn(unit: :new) { return_task }
+      value = handle.value
+      if value.is_a?(Int64)
+        fail("return: #{-value} nodes of the kept list read wrong") if value < 0_i64 && value > -1000_i64
+        fail("return: the unit holds #{value} bytes of runs past twice what it held after three rounds") if value > 0_i64
+      else
+        fail("return: the unit answered #{value}")
+      end
+    end
+    fail("return: the global sweep handed no chunk back to a partition") if IyiHeap.returned_chunks == returned
+    IyiHeap.local_collections_off = false
+  end
+
+  # ── weak ──────────────────────────────────────────────────────────────
+
+  # The cells of *cells* whose targets' chunks do not straddle their runs'
+  # ends: those are the frontier check's (`frontier_weak_task`), and a
+  # copy that makes the weak owner test or the weak sweep's frontier test
+  # of the address must meet that check and not this one. The frontier
+  # only rises, so a chunk off it now is off it at the collection too.
+  @[NoInline]
+  def off_frontier(cells : Array(Pointer(UInt64))) : Array(Pointer(UInt64))
+    off = [] of Pointer(UInt64)
+    cells.each do |cell|
+      address = cell.value
+      arena = IyiHeap.arena_of(address)
+      high = arena != 0_u64 ? IyiHeap.arena_high(arena) : 0_u64
+      off << cell unless arena != 0_u64 && IyiHeap.head_of(arena, address) < high && address >= high
+    end
+    off
+  end
+
+  # A hundred kept nodes and a hundred dropped ones, each with a weak cell,
+  # one collection: every kept cell still names its node and every dropped
+  # one off the frontier reads 0. Answers how many dropped cells were not
+  # cleared, or a negative failure.
+  def weak_task : Int64
+    kept = [] of Node
+    kept_cells = [] of Pointer(UInt64)
+    made_cells = [] of Pointer(UInt64)
+    i = 0
+    while i < 100
+      node = Node.new(i.to_i64, nil)
+      kept << node
+      kept_cells << IyiWeak.cell(node.object_id)
+      made_cells << dead_cell(1000_i64 &+ i.to_i64)
+      i = i + 1
+    end
+    node = nil
+    dropped_cells = off_frontier(made_cells)
+    return -3_i64 if dropped_cells.empty?
+    scrub_stack
+    return -2_i64 unless collect_now
+    kept_cells.each_with_index do |cell, k|
+      return -1_i64 if cell.value != kept[k].object_id
+    end
+    left = 0_i64
+    dropped_cells.each { |cell| left = left &+ 1_i64 if cell.value != 0_u64 }
+    left
+  end
+
+  # A hundred dropped nodes, each with a weak cell, and a local sweep
+  # stopped once it has swept their class, as a stop asked before the
+  # next class stops it: the sweep freed their chunks, and the cells to
+  # them read 0 all the same. The weak pass comes before the sweep frees
+  # anything; after it, a stopped sweep left the cells naming the freed
+  # chunks, which the unit's next allocations hand out again. Answers
+  # how many cells name a freed chunk, or a negative failure.
+  def weak_stop_task : Int64
+    made = [] of Pointer(UInt64)
+    i = 0
+    while i < 100
+      made << dead_cell(2000_i64 &+ i.to_i64)
+      i = i + 1
+    end
+    cells = off_frontier(made)
+    return -3_i64 if cells.empty?
+    # The targets, hidden from the scan, to look at their chunks after.
+    targets = cells.map { |cell| hide(cell.value) }
+    arena = IyiHeap.arena_of(cells[0].value)
+    record = IyiHeap.current_record
+    IyiHeap.stop_local_sweep(record, IyiHeap.class_index(IyiHeap.arena_chunk(arena)))
+    tries = 0
+    while IyiHeap.local_sweep_stop_pending? && tries < 100
+      scrub_stack
+      IyiHeap.collect_local(record)
+      sleep(1) if IyiHeap.local_sweep_stop_pending?
+      tries = tries + 1
+    end
+    if IyiHeap.local_sweep_stop_pending?
+      IyiHeap.stop_local_sweep(0_u64, -1)
+      return -2_i64
+    end
+    {% if flag?(:heap_verify) %}
+      # The verifier's weak check, which follows only a whole sweep, read
+      # here too: a cell naming a chunk the stopped sweep freed is its
+      # report.
+      IyiHeapVerify.weak_cells(IyiHeap.read64(record &+ IyiHeap::REC_ID))
+    {% end %}
+    freed = 0_i64
+    left = 0_i64
+    cells.each_with_index do |cell, k|
+      target = hide(targets[k])
+      home = IyiHeap.arena_of(target)
+      if home != 0_u64 && IyiHeap.read8(home &+ IyiHeap::META &+ IyiHeap.chunk_index(home, target) &* IyiHeap::META_ENTRY) & IyiHeap::FREE_FLAG != 0
+        freed = freed &+ 1_i64
+        left = left &+ 1_i64 if cell.value != 0_u64
+      end
+    end
+    return -4_i64 if freed == 0_i64
+    left
+  end
+
+  # A large object made in a frame of its own, held by *held*, and a weak
+  # cell to it in *cells*.
+  @[NoInline]
+  def held_large_cell(i : Int32, held : Array(Pointer(UInt64)), cells : Array(Pointer(UInt64))) : Nil
+    block = Pointer(UInt64).malloc(262144_u64)
+    block[0] = i.to_u64
+    held << block
+    cells << IyiWeak.cell(block.address)
+  end
+
+  # Eight large objects, each with a weak cell, held through their unit's
+  # collections - each 2 MiB malloc is a slice past the unit's budget and
+  # collects first - and one more: every cell names its own block. Then
+  # the test drops them, one collection: every cell to one the collection
+  # unmapped reads 0. A large object's owner is its node's, and a cell to
+  # one went unlisted: the sweep that unmapped the block left the cell
+  # naming it. Dropped as each was made, each block was unmapped by the
+  # next one's collection and its cell cleared then, and the kernel mapped
+  # the next block at the same address (Linux, 415f169db): the check read
+  # the blocks back out of cells already 0, and a cell cleared under a
+  # live block would have passed it too. Answers how many cells name an
+  # unmapped block, or a negative failure.
+  def weak_large_task : Int64
+    held = Array(Pointer(UInt64)).new(8)
+    cells = Array(Pointer(UInt64)).new(8)
+    i = 0
+    while i < 8
+      held_large_cell(i, held, cells)
+      i = i + 1
+    end
+    scrub_stack
+    return -2_i64 unless collect_now
+    # The blocks, hidden from the scan, to ask after whether they went;
+    # the holder's words zeroed, so the drop is the test's.
+    blocks = Array(UInt64).new(8)
+    k = 0
+    while k < 8
+      return -1_i64 if cells[k].value != held[k].address || held[k][0] != k.to_u64
+      blocks << hide(held[k].address)
+      held[k] = Pointer(UInt64).new(0_u64)
+      k = k + 1
+    end
+    scrub_stack
+    return -2_i64 unless collect_now
+    unmapped = 0_i64
+    left = 0_i64
+    k = 0
+    while k < 8
+      unless IyiHeap.local?(hide(blocks[k]))
+        unmapped = unmapped &+ 1_i64
+        left = left &+ 1_i64 if cells[k].value != 0_u64
+      end
+      k = k + 1
+    end
+    return -4_i64 if unmapped == 0_i64
+    left
+  end
+
+  def weak_check : Nil
+    group do |g|
+      handle = g.spawn(unit: :new) { weak_task }
+      value = handle.value
+      fail("weak: the unit answered #{value}") unless value.is_a?(Int64)
+      fail("weak: a kept object's weak cell was cleared") if value == -1_i64
+      fail("weak: no local collection ran in 100 tries") if value == -2_i64
+      fail("weak: every dropped object's chunk straddled its run's end") if value == -3_i64
+      fail("weak: #{value} of the dropped objects' weak cells were not cleared by their unit's collection") if value != 0_i64
+      stopped = g.spawn(unit: :new) { weak_stop_task }.value
+      fail("weak: the stopped sweep's unit answered #{stopped}") unless stopped.is_a?(Int64)
+      fail("weak: no local sweep stopped by the switch in 100 tries") if stopped == -2_i64
+      fail("weak: every dropped node's chunk straddled its run's end, before the stopped sweep") if stopped == -3_i64
+      fail("weak: the stopped sweep freed none of the dropped nodes") if stopped == -4_i64
+      fail("weak: #{stopped} weak cells name chunks a stopped local sweep freed") if stopped != 0_i64
+      large = g.spawn(unit: :new) { weak_large_task }.value
+      fail("weak: the large objects' unit answered #{large}") unless large.is_a?(Int64)
+      fail("weak: a weak cell to a held large object was cleared or names another block") if large == -1_i64
+      fail("weak: no local collection ran in 100 tries, for the large objects") if large == -2_i64
+      fail("weak: the collection unmapped none of the dropped large objects") if large == -4_i64
+      fail("weak: #{large} weak cells name large objects their unit's collection unmapped") if large != 0_i64
+    end
+  end
+
+  # ── unswept ───────────────────────────────────────────────────────────
+
+  # An object of a class above `Node`'s that names one: what a sweep
+  # stopped between `Node`'s class and its own leaves carved, dead.
+  class Far
+    property held : Node?
+    @w0 : Int64 = 0_i64
+    @w1 : Int64 = 0_i64
+    @w2 : Int64 = 0_i64
+    @w3 : Int64 = 0_i64
+    @w4 : Int64 = 0_i64
+    @w5 : Int64 = 0_i64
+    @w6 : Int64 = 0_i64
+    @w7 : Int64 = 0_i64
+    @w8 : Int64 = 0_i64
+    @w9 : Int64 = 0_i64
+    @w10 : Int64 = 0_i64
+    @w11 : Int64 = 0_i64
+    @w12 : Int64 = 0_i64
+    @w13 : Int64 = 0_i64
+    @w14 : Int64 = 0_i64
+    @w15 : Int64 = 0_i64
+
+    def initialize
+      @held = nil
+    end
+  end
+
+  # The size class of the chunk at *address*.
+  def class_of(address : UInt64) : Int32
+    IyiHeap.class_index(IyiHeap.arena_chunk(IyiHeap.arena_of(address)))
+  end
+
+  # Whether the chunk at *address* is free: a sweep took it.
+  @[NoInline]
+  def chunk_free?(address : UInt64) : Bool
+    arena = IyiHeap.arena_of(address)
+    return false if arena == 0_u64
+    IyiHeap.read8(arena &+ IyiHeap::META &+ IyiHeap.chunk_index(arena, address) &* IyiHeap::META_ENTRY) & IyiHeap::FREE_FLAG != 0
+  end
+
+  # The class, the freedom and the owner of the chunk at the hidden
+  # address *hidden*, unhidden in a frame of their own: an address the
+  # caller held across a collection would be a root to its stack scan,
+  # which marks the dead object and keeps it.
+  @[NoInline]
+  def hidden_class(hidden : UInt64) : Int32
+    class_of(hide(hidden))
+  end
+
+  @[NoInline]
+  def hidden_free?(hidden : UInt64) : Bool
+    chunk_free?(hide(hidden))
+  end
+
+  @[NoInline]
+  def hidden_owner(hidden : UInt64) : UInt64
+    IyiHeap.owner_of(hide(hidden))
+  end
+
+  # Partition *record*'s next local sweep stopped once it has swept class
+  # *index*, as a stop asked before the next class stops one: whether
+  # one was.
+  @[NoInline]
+  def stopped_sweep(record : UInt64, index : Int32) : Bool
+    IyiHeap.stop_local_sweep(record, index)
+    tries = 0
+    while IyiHeap.local_sweep_stop_pending? && tries < 100
+      scrub_stack
+      IyiHeap.collect_local(record)
+      sleep(1) if IyiHeap.local_sweep_stop_pending?
+      tries = tries + 1
+    end
+    return true unless IyiHeap.local_sweep_stop_pending?
+    IyiHeap.stop_local_sweep(0_u64, -1)
+    false
+  end
+
+  # A `Far` into *box*, in a frame of its own.
+  @[NoInline]
+  def far_into(box : Array(Far?)) : Nil
+    box[0] = Far.new
+  end
+
+  # A new node hung on *box*'s `Far`, in a frame of its own: the two
+  # addresses, hidden.
+  @[NoInline]
+  def hang_node(box : Array(Far?)) : Tuple(UInt64, UInt64)
+    far = box[0]
+    return {0_u64, 0_u64} unless far.is_a?(Far)
+    node = Node.new(8000000000_i64, nil)
+    far.held = node
+    {hide(far.object_id), hide(node.object_id)}
+  end
+
+  # A mark that ends whole leaves its parity on a `Far`; the `Far` is
+  # dropped holding a node made after it, and the next local sweep is
+  # stopped once it has swept class 0, so both are left carved. The mark
+  # after wears the first one's parity again: if it trusts the bits, it
+  # takes the dead `Far` for reached, never opens it, and the sweep keeps
+  # it and frees the node under it. Answers 0 when that sweep freed the
+  # `Far`, 1 when it kept it, or a negative failure.
+  def unswept_zombie_task : Int64
+    record = IyiHeap.current_record
+    return -1_i64 if record == 0_u64
+    # Class 0 has a run, swept before `Node`'s class and `Far`'s.
+    tiny = Pointer(UInt64).malloc(1_u64)
+    first = class_of(tiny.address)
+    box = Array(Far?).new(1, nil)
+    far_into(box)
+    scrub_stack
+    return -2_i64 unless collect_now
+    hidden = hang_node(box)
+    box[0] = nil
+    return -3_i64 unless stopped_sweep(record, first)
+    return -5_i64 if hidden_class(hidden[0]) <= first || hidden_class(hidden[1]) <= first
+    return -4_i64 if hidden_free?(hidden[0]) || hidden_free?(hidden[1])
+    scrub_stack
+    return -2_i64 unless collect_now
+    tiny.value = 1_u64
+    hidden_free?(hidden[0]) ? 0_i64 : 1_i64
+  end
+
+  # 2,000 nodes made and dropped, the 1,500th hung on a `Far` in *box*,
+  # in a frame of their own: that node, its address hidden. Made after
+  # the unit's first 100, it lies on a run of `Node`'s class that holds
+  # nothing else live (the runs double, 64 KiB at most).
+  @[NoInline]
+  def far_over_nodes(box : Array(Far?)) : UInt64
+    far = Far.new
+    box[0] = far
+    hidden = 0_u64
+    i = 0
+    while i < 2000
+      node = Node.new(8200000000_i64 &+ i.to_i64, nil)
+      if i == 1500
+        far.held = node
+        hidden = hide(node.object_id)
+      end
+      i = i + 1
+    end
+    hidden
+  end
+
+  # A dead `Far` names a dead node on a run with nothing else live; the
+  # sweep is stopped once it has swept `Node`'s class, so the node is
+  # freed and its run empty while the `Far` is left carved. Answers the
+  # hidden node and whether its run stopped being the partition's then.
+  # The stack below this frame is scrubbed before the sweep: the calls
+  # that made the `Far` and read the node's class leave both addresses
+  # there, and `stopped_sweep`'s frame lies over them, its slots unwritten
+  # (win64's home area): an optimised build kept the node through them.
+  def unswept_run(record : UInt64) : Tuple(UInt64, Int64)
+    id = IyiHeap.read64(record + IyiHeap::REC_ID)
+    box = Array(Far?).new(1, nil)
+    hidden = far_over_nodes(box)
+    box[0] = nil
+    index = hidden_class(hidden)
+    scrub_stack
+    return {hidden, -3_i64} unless stopped_sweep(record, index)
+    return {hidden, -4_i64} unless hidden_free?(hidden)
+    {hidden, hidden_owner(hidden) == id ? 0_i64 : 1_i64}
+  end
+
+  # `unswept_run`, then a word at *flags* set for the caller and a wait
+  # for its second word: meanwhile another unit takes the pool's runs of
+  # `Node`'s class. After a whole collection the emptied run is the
+  # pool's. Answers 0, 1 when the run left the partition at the stopped
+  # sweep, 2 when the whole sweep did not pool it, or a negative failure.
+  # The waits read plain words: an `Atomic`'s verb is a chaos point,
+  # where `IYI_HEAP_STRESS` collects whole.
+  def unswept_pool_task(flags : UInt64) : Int64
+    record = IyiHeap.current_record
+    return -1_i64 if record == 0_u64
+    keep = build(8100000000_i64, 100, 0)
+    made = unswept_run(record)
+    Pointer(UInt64).new(flags).value = 1_u64
+    while Pointer(UInt64).new(flags + 8_u64).value == 0_u64
+      sleep(1)
+    end
+    return made[1] if made[1] != 0_i64
+    scrub_stack
+    return -2_i64 unless collect_now
+    return 2_i64 if IyiHeap.owner_of(hide(made[0])) != 0_u64
+    broken(keep, 8100000000_i64, 100) == 0_i64 ? 0_i64 : -6_i64
+  end
+
+  # Whether class *index*'s pool holds a run on any of the lists
+  # `IyiHeap.partition_take` takes from: the drained, the new, the old,
+  # the released and the cold.
+  @[NoInline]
+  def pool_holds?(index : Int32) : Bool
+    line = IyiHeap.pline(index)
+    IyiHeap.read64(line + IyiHeap::PC_DRAIN) | IyiHeap.read64(line + IyiHeap::PC_POOL) | IyiHeap.read64(line + IyiHeap::PC_OLD) | IyiHeap.read64(line + IyiHeap::PC_RELEASE) | IyiHeap.read64(line + IyiHeap::PC_COLD) != 0_u64
+  end
+
+  # Nodes made and dropped until the pool holds no run of `Node`'s class
+  # and the unit's list of that class is empty - every run the pool held
+  # is the unit's, each of its chunks allocated - then a collection: its
+  # `-Dheap_verify` check reads the other unit's dead `Far` naming a
+  # chunk of a run it took. A fixed 4,000 nodes (128 KiB) took the pool's
+  # newest runs only: with 381 KiB of the class pooled, the run the `Far`
+  # names lay below them in some runs, neither round's taker allocated
+  # its chunk, and the verifier missed poolearly (tssh 1 run of 2, Linux
+  # 4 of 26). Answers 0, -1 for no partition, -2 for no collection, -3
+  # when the pool still held a run after 200,000 nodes.
+  def unswept_taker : Int64
+    record = IyiHeap.current_record
+    return -1_i64 if record == 0_u64
+    index = hidden_class(dead_node(0_i64))
+    junk : Node? = nil
+    drained = false
+    i = 0
+    while i < 200000 && !drained
+      junk = Node.new(i.to_i64, i % 50 == 0 ? nil : junk)
+      drained = IyiHeap.read64(record &+ index.to_u64 &* 8_u64) == 0_u64 && !pool_holds?(index)
+      i = i + 1
+    end
+    junk = nil
+    return -3_i64 unless drained
+    scrub_stack
+    collect_now ? 0_i64 : -2_i64
+  end
+
+  # A dead `Far` naming a dead node on a run with nothing else live, and
+  # the unit's next sweep held once it has swept `Node`'s class, which
+  # empties that run, while `Far`'s class is still to come: a whole sweep
+  # caught between two classes. The words at *flags*: the hold's state
+  # (`IyiHeap.hold_local_sweep`; 3 when no sweep reached it), the
+  # caller's word to go on, the hidden node and the partition's id.
+  # Answers 0 or a negative failure.
+  def unswept_hold_task(flags : UInt64) : Int64
+    record = IyiHeap.current_record
+    return -1_i64 if record == 0_u64
+    keep = build(8400000000_i64, 100, 0)
+    box = Array(Far?).new(1, nil)
+    hidden = far_over_nodes(box)
+    box[0] = nil
+    words = Pointer(UInt64).new(flags)
+    words[2] = hidden
+    words[3] = IyiHeap.read64(record + IyiHeap::REC_ID)
+    IyiHeap.hold_local_sweep(record, hidden_class(hidden), flags)
+    scrub_stack
+    collected = collect_now
+    if IyiHeap.local_sweep_hold_pending?
+      IyiHeap.hold_local_sweep(0_u64, -1, 0_u64)
+      Pointer(Atomic(UInt64)).new(flags).value.set(3_u64)
+    end
+    return -2_i64 unless collected
+    broken(keep, 8400000000_i64, 100) == 0_i64 ? 0_i64 : -6_i64
+  end
+
+  # `unswept_hold_task` on a unit of its own, and while its sweep is held,
+  # the node's run read and another unit made to take the pool's runs of
+  # `Node`'s class and collect: its `-Dheap_verify` check reads the held
+  # unit's dead `Far`. Answers the hold's state, the held unit's answer,
+  # whether the run had left the partition, and the taker's answer.
+  def unswept_hold_round : Tuple(UInt64, Int64, Bool, Int64)
+    hold = Pointer(UInt64).malloc(4_u64)
+    address = hold.address
+    left = false
+    taker = 0_i64
+    state = 0_u64
+    answer = 0_i64
+    group do |g|
+      held = g.spawn(unit: :new) { unswept_hold_task(address) }
+      state_word = Pointer(Atomic(UInt64)).new(hold.address)
+      waited = 0
+      while state_word.value.get == 0_u64 && waited < 10000
+        sleep(1)
+        waited = waited + 1
+      end
+      if state_word.value.get == 1_u64
+        left = hidden_owner(hold[2]) != hold[3]
+        took = g.spawn(unit: :new) { unswept_taker }.value
+        taker = took.is_a?(Int64) ? took : -7_i64
+      end
+      Pointer(Atomic(UInt64)).new(hold.address + 8_u64).value.set(1_u64)
+      held_answer = held.value
+      answer = held_answer.is_a?(Int64) ? held_answer : -7_i64
+      state = state_word.value.get
+    end
+    {state, answer, left, taker}
+  end
+
+  # `unswept_run` and the unit's death: answers the hidden node, 0 on a
+  # failure.
+  def unswept_death_task : UInt64
+    record = IyiHeap.current_record
+    return 0_u64 if record == 0_u64
+    keep = build(8300000000_i64, 100, 0)
+    made = unswept_run(record)
+    return 0_u64 if made[1] < 0_i64
+    broken(keep, 8300000000_i64, 100) == 0_i64 ? made[0] : 0_u64
+  end
+
+  def unswept_check : Nil
+    IyiHeap.park_collections_off = true
+    flags = Pointer(UInt64).malloc(2_u64)
+    address = flags.address
+    hidden = 0_u64
+    group do |g|
+      zombie = g.spawn(unit: :new) { unswept_zombie_task }.value
+      fail("unswept: the zombie unit answered #{zombie}") unless zombie.is_a?(Int64)
+      fail("unswept: the unit allocates in no partition") if zombie == -1_i64
+      fail("unswept: no local collection ran in 100 tries") if zombie == -2_i64
+      fail("unswept: no local sweep stopped by the switch in 100 tries") if zombie == -3_i64
+      fail("unswept: the sweep stopped after class 0 freed the dead Far or its node") if zombie == -4_i64
+      fail("unswept: Far or Node is in class 0") if zombie == -5_i64
+      fail("unswept: a dead object a stopped sweep left carved outlived the next whole collection, its mark trusting the parity of the one before") if zombie == 1_i64
+    end
+    # A pause asked while the sweep is held ends the hold: tried again.
+    round = unswept_hold_round
+    tries = 1
+    while round[0] == 2_u64 && tries < 5
+      round = unswept_hold_round
+      tries = tries + 1
+    end
+    fail("unswept: no local sweep reached the hold in 100 tries") if round[0] == 3_u64
+    fail("unswept: the held sweep was let go by a pause in #{tries} tries") if round[0] == 2_u64
+    fail("unswept: the held sweep never began (state #{round[0]})") if round[0] != 1_u64
+    fail("unswept: the held unit answered #{round[1]}") if round[1] != 0_i64
+    fail("unswept: a run a sweep emptied left the partition before the sweep reached a later class's dead object naming its chunk") if round[2]
+    fail("unswept: the unit taking the pool's runs answered #{round[3]}") if round[3] != 0_i64
+    group do |g|
+      pool = g.spawn(unit: :new) { unswept_pool_task(address) }
+      waited = 0
+      while flags.value == 0_u64 && waited < 10000
+        sleep(1)
+        waited = waited + 1
+      end
+      taker = g.spawn(unit: :new) { unswept_taker }.value
+      flags[1] = 1_u64
+      fail("unswept: the taking unit answered #{taker}") unless taker == 0_i64
+      pooled = pool.value
+      fail("unswept: the pooling unit answered #{pooled}") unless pooled.is_a?(Int64)
+      fail("unswept: no local collection ran in 100 tries, for the run") if pooled == -2_i64
+      fail("unswept: no local sweep stopped by the switch in 100 tries, for the run") if pooled == -3_i64
+      fail("unswept: the sweep stopped after Node's class did not free the node") if pooled == -4_i64
+      fail("unswept: the kept nodes read wrong") if pooled == -6_i64
+      fail("unswept: a run a stopped sweep emptied went to the pool with a dead object naming its chunk left carved") if pooled == 1_i64
+      fail("unswept: a run a stopped sweep emptied was not pooled by the whole sweep after it") if pooled == 2_i64
+      died = g.spawn(unit: :new) { unswept_death_task }.value
+      if died.is_a?(UInt64) && died != 0_u64
+        hidden = died
+      else
+        fail("unswept: the dying unit answered #{died}")
+      end
+    end
+    settle("unswept")
+    owner = IyiHeap.owner_of(hide(hidden))
+    fail("unswept: a unit that died with a run its stopped sweep emptied left the run partition #{owner}'s") if owner != 0_u64
+    flags.value = 0_u64
+    IyiHeap.park_collections_off = false
+  end
+
+  # ── large ─────────────────────────────────────────────────────────────
+
+  # A large block made, written and dropped in a frame of its own.
+  @[NoInline]
+  def dead_large(i : Int32) : UInt64
+    block = Pointer(UInt64).malloc(262144_u64)
+    block[0] = i.to_u64
+    block[262143] = i.to_u64
+    hide(block.address)
+  end
+
+  # Four large blocks kept across parks and collections, eight dropped:
+  # one collection unmaps the eight. Answers how many of the eight it
+  # left, or a negative failure.
+  def large_task : Int64
+    kept = [] of Pointer(UInt64)
+    freed = IyiHeap.large_freed
+    i = 0
+    while i < 12
+      if i % 3 == 0
+        block = Pointer(UInt64).malloc(262144_u64)
+        block[0] = i.to_u64
+        block[262143] = i.to_u64 &* 7_u64
+        kept << block
+        sleep(0)
+      else
+        dead_large(i)
+      end
+      i = i + 1
+    end
+    scrub_stack
+    return -2_i64 unless collect_now
+    sleep(0)
+    kept.each_with_index do |block, k|
+      return -1_i64 if block[0] != (k * 3).to_u64 || block[262143] != (k * 3).to_u64 &* 7_u64
+    end
+    unmapped = (IyiHeap.large_freed - freed).to_i64
+    unmapped >= 8_i64 ? 0_i64 : 8_i64 - unmapped
+  end
+
+  def large_check : Nil
+    group do |g|
+      handle = g.spawn(unit: :new) { large_task }
+      value = handle.value
+      fail("large: the unit answered #{value}") unless value.is_a?(Int64)
+      fail("large: a kept large object read wrong across its unit's collections") if value == -1_i64
+      fail("large: no local collection ran in 100 tries") if value == -2_i64
+      fail("large: #{value} of 8 dropped large objects were not unmapped by their unit's collection") if value != 0_i64
+    end
+  end
+
+  # ── takeover ──────────────────────────────────────────────────────────
+
+  # The junk until half the budget is owed, whatever the floor: an idle
+  # worker takes a parked unit that owes a quarter (`IyiHeap.take_over_owing`),
+  # and 1,500 nodes owed less than that of a 512 KiB floor.
+  def takeover_task(t : Int64, go : Channel(Int64), ready : Channel(UInt64)) : Int64
+    base = 8000000000_i64 &+ t &* 10000_i64
+    keep = build(base, 300, 0)
+    record = IyiHeap.current_record
+    junk : Node? = nil
+    i = 0
+    while i < 1500 || (i < 1000000 && IyiHeap.read64(record &+ IyiHeap::REC_DEBT) &* 2_u64 < IyiHeap.budget_of(record))
+      junk = Node.new(i.to_i64, i % 50 == 0 ? nil : junk)
+      i = i + 1
+    end
+    junk = nil
+    ready.send(IyiHeap.current_record)
+    go.receive
+    broken(keep, base, 300)
+  end
+
+  def takeover_check(workers : Int32) : Nil
+    IyiHeap.park_collections_off = true
+    IyiHeap.collect_every_park = false
+    takeovers = IyiHeap.takeovers
+    stressed = {% if flag?(:heap_verify) %} IyiHeapVerify.stress != 0_u64 {% else %} false {% end %}
+    units = workers
+    go = Channel(Int64).new(units)
+    ready = Channel(UInt64).new(units)
+    group do |g|
+      handles = [] of IyiTask(Int64)
+      units.times { |t| handles << g.spawn(unit: :new) { takeover_task(t.to_i64, go, ready) } }
+      records = [] of UInt64
+      units.times do
+        got = ready.receive
+        if got.is_a?(UInt64)
+          records << got
+        else
+          fail("takeover: a parked unit sent no record")
+        end
+      end
+      sleep(50)
+      # Under `IYI_HEAP_STRESS` (bench/heap_verify.sh) each unit collects
+      # itself at every chaos point, the last on its way to the park, and
+      # owes nothing parked: no takeover came in 3 runs of 3 on Linux and
+      # on tssh (09d45a831), and bench/heap_local.sh's notakeover copy,
+      # which reads no parked stack, passed the verifier's table unseen.
+      # Each parked unit is handed the quarter of its budget a takeover
+      # asks, so one comes stressed too, and the verifier reads the parked
+      # stacks the takeover's mark should have.
+      records.each { |record| IyiHeap.write64(record &+ IyiHeap::REC_DEBT, IyiHeap.budget_of(record)) } if stressed
+      IyiMark.collect
+      # A worker woken after the collection, by a task of its own: once it
+      # has run it, the worker is idle with the takeover armed.
+      waited = 0
+      while IyiHeap.takeovers == takeovers && waited < 2000
+        g.spawn(unit: :new) { 0_i64 }.value
+        sleep(1)
+        waited = waited + 1
+      end
+      units.times { go.send(1_i64) }
+      handles.each do |handle|
+        value = handle.value
+        fail("takeover: a unit answered #{value}") unless value.is_a?(Int64)
+        fail("takeover: #{value} nodes of a parked unit's list read wrong") if value != 0_i64
+      end
+    end
+    fail("takeover: no idle worker collected a parked unit after a global collection") if IyiHeap.takeovers == takeovers
+    IyiHeap.park_collections_off = false
+    IyiHeap.collect_every_park = true
+  end
+
+  # ── construct ─────────────────────────────────────────────────────────
+
+  # Whether a local collection of partition *record* began: a new record
+  # is zeroed (`IyiHeap.partition_new`), every local mark sets its parity
+  # before it reads a root, and a sweep that reached the end counts
+  # (`IyiHeap.partition_collections`). Nothing but a local collection
+  # writes either word.
+  def constructed_collected?(record : UInt64) : Bool
+    IyiHeap.read64(record &+ IyiHeap::REC_PARITY) != 0_u64 || IyiHeap.partition_collections(record) != 0_u64
+  end
+
+  # A `Unit`'s value under construction (`Unit.new` builds it in the
+  # unit's partition with `IyiHeap.within`): this fiber is no fiber of
+  # the unit and holds no token, and its stack is the list's only root.
+  # The debt is past a quarter of the budget and a global collection arms
+  # the takeover; idle workers are woken until one takes this unit or 300
+  # tries pass. None may take it. Its partition dies by the hook
+  # `IyiScheduler.unregister` calls, as a `Unit`'s does once its handle
+  # is gone. The list's address is a plain word of the data segment too
+  # (`Holder.word`) from before the collection until the death: this
+  # stack is another unit's, read by no local mark and by no verifier,
+  # and the noconstruct copy was caught by this check alone (tmac,
+  # hp-s4 6122d4d63 + 3ee055f6f); a unit taken here is collected under
+  # that word, which `-Dheap_verify`'s check before the sweep reads.
+  #
+  # The test is of this partition alone: a local collection of it began
+  # (`constructed_collected?`), taken over or abandoned. It was the
+  # program's takeover count, which another unit's takeover moved:
+  # `takeover`'s units each still owe half their budget once they have
+  # answered, and stay takeable until their done fiber leaves the unit's
+  # list (`IyiScheduler.reap_dying`), the token given back first, so the
+  # global collection here armed a takeover of one now and then - 1 run
+  # in 3 on tssh (v4 d83fd16b0, verify release, 8 workers). With that
+  # window held 100 ms the count failed 10 runs of 10 on Linux, each
+  # unit taken one of `takeover`'s with its one fiber done, and this test
+  # none (ConstructHunt).
+  def construct_check : Nil
+    IyiHeap.park_collections_off = true
+    IyiHeap.collect_every_park = false
+    unit = IyiHeap.shared { IyiUnit.new }
+    record = unit.heap
+    fail("construct: the unit has no partition") if record == 0_u64
+    fail("construct: a new partition reads as collected already") if constructed_collected?(record)
+    base = 9000000000_i64
+    keep = IyiHeap.within(record) do
+      built = build(base, 300, 0)
+      Holder.word = built ? built.object_id : 0_u64
+      # Half the budget owed whatever the floor, past the quarter a
+      # takeover asks (`takeover_task`).
+      junk : Node? = nil
+      i = 0
+      while i < 6000 || (i < 1000000 && IyiHeap.read64(record &+ IyiHeap::REC_DEBT) &* 2_u64 < IyiHeap.budget_of(record))
+        junk = Node.new(i.to_i64, i % 50 == 0 ? nil : junk)
+        i = i + 1
+      end
+      junk = nil
+      IyiMark.collect
+      built
+    end
+    # The wait, and the test, outside the record: the copy that lets the
+    # takeover had this fiber allocate the group and its tasks in the
+    # record while the idle worker collected it, and died of a memory
+    # fault rather than reaching this check, with the count already
+    # before the walk (tssh, 933b4d005). Nothing allocates in the record
+    # once its value is built, and only the record is read before the
+    # walk: a unit taken here was collected with this stack unread.
+    waited = 0
+    group do |g|
+      while !constructed_collected?(record) && waited < 300
+        g.spawn(unit: :new) { 0_i64 }.value
+        sleep(1)
+        waited = waited + 1
+      end
+    end
+    # A takeover seen at its mark's start is waited out, its token given
+    # back (`REC_BUSY` clear), before the test fails and `Holder.word` is
+    # cleared: `-Dheap_verify`'s check before the sweep reads that word,
+    # and bench/heap_verify.sh asks the verifier to catch the noconstruct
+    # copy too. Ended at the mark's start, the wait missed it in 1 run of
+    # 2 there (Linux, 921182bad); the takeover count it replaced moved at
+    # the sweep's end.
+    waited = 0
+    while IyiHeap.read64(record &+ IyiHeap::REC_STATE) & IyiHeap::REC_BUSY != 0_u64 && waited < 10000
+      sleep(1)
+      waited = waited + 1
+    end
+    fail("construct: an idle worker took a unit with no fiber and no value slot") if constructed_collected?(record)
+    wrong = broken(keep, base, 300)
+    fail("construct: an idle worker collected a unit whose value was being built, and #{wrong} nodes of it read wrong") if wrong != 0_i64
+    Holder.word = 0_u64
+    IyiRuntimeLock.lock
+    unit.heap = 0_u64
+    IyiRuntimeLock.unlock
+    IyiHeap.unit_died(record)
+    IyiHeap.park_collections_off = false
+    IyiHeap.collect_every_park = true
+  end
+
+  # ── idle ──────────────────────────────────────────────────────────────
+
+  # Garbage in chains of fifty, in a frame of its own: the runs it fills
+  # hold nothing live once the frame is gone, but for the last chain a
+  # stale word may keep.
+  def idle_junk : Int64
+    junk : Node? = nil
+    i = 0
+    while i < 400
+      junk = Node.new(i.to_i64, i % 50 == 0 ? nil : junk)
+      i = i + 1
+    end
+    junk.is_a?(Node) ? 1_i64 : 0_i64
+  end
+
+  # A unit that drops a little garbage, then builds a list - under a
+  # slice's worth in all, so its park owes nothing - sends its record and
+  # parks. The garbage first, so the runs it filled hold none of the list
+  # and go back whole when the unit is collected: with the list first, no
+  # partition held less after its idle collection in the optimised runs
+  # (Linux, 4 and 8 workers), the plain one's did.
+  def idle_task(t : Int64, go : Channel(Int64), ready : Channel(UInt64)) : Int64
+    base = 7000000000_i64 &+ t &* 10000_i64
+    idle_junk
+    keep = build(base, 200, 0)
+    ready.send(IyiHeap.current_record)
+    go.receive
+    broken(keep, base, 200)
+  end
+
+  # Units parked dirty, owing nothing, with no global collection: idle
+  # workers, woken by the idle clock, collect their partitions, the lists
+  # whole after and the garbage's runs given back. Under
+  # `IYI_HEAP_STRESS` each unit collects itself on its way to the park
+  # and parks clean: its record is made dirty and stamped by hand.
+  def idle_check(workers : Int32) : Nil
+    IyiHeap.collect_every_park = false
+    stressed = {% if flag?(:heap_verify) %} IyiHeapVerify.stress != 0_u64 {% else %} false {% end %}
+    units = workers
+    go = Channel(Int64).new(units)
+    ready = Channel(UInt64).new(units)
+    group do |g|
+      handles = [] of IyiTask(Int64)
+      units.times { |t| handles << g.spawn(unit: :new) { idle_task(t.to_i64, go, ready) } }
+      records = [] of UInt64
+      units.times do
+        got = ready.receive
+        if got.is_a?(UInt64)
+          records << got
+        else
+          fail("idle: a parked unit sent no record")
+        end
+      end
+      sleep(20)
+      held = records.map { |record| IyiHeap.partition_held(record) }
+      counts = records.map { |record| IyiHeap.partition_collections(record) }
+      if stressed
+        records.each do |record|
+          IyiHeap.write64(record &+ IyiHeap::REC_DEBT, 1_u64)
+          IyiHeap.write64(record &+ IyiHeap::REC_IDLE_TICK, 1_u64)
+        end
+        IyiStat.atomic(IyiStat::IDLE_PENDING).value.set(1_u64)
+        # A park stamps on its own worker, whose next wait is cut to a
+        # tick; stamped by hand, every worker may already wait without
+        # a bound (bench/heap_verify.sh, Linux, every seed), so one is
+        # rung.
+        IyiWorkers.wake_one
+      end
+      waited = 0
+      left = units
+      while left > 0 && waited < 3000
+        sleep(1)
+        waited = waited + 1
+        left = 0
+        records.each_with_index { |record, k| left = left + 1 if IyiHeap.partition_collections(record) == counts[k] }
+      end
+      shrank = 0
+      records.each_with_index { |record, k| shrank = shrank + 1 if IyiHeap.partition_held(record) < held[k] }
+      units.times { go.send(1_i64) }
+      handles.each do |handle|
+        value = handle.value
+        fail("idle: a unit answered #{value}") unless value.is_a?(Int64)
+        fail("idle: #{value} nodes of a parked unit's list read wrong") if value != 0_i64
+      end
+      fail("idle: #{left} of #{units} units parked dirty were not collected by an idle worker in 3 s") if left != 0
+      fail("idle: no parked unit's partition held less after its idle collection") if !stressed && shrank == 0
+    end
+    IyiHeap.collect_every_park = true
+  end
+
+  # ── idlehold ──────────────────────────────────────────────────────────
+
+  # The id the check holds a unit's token by: no worker's (a state's
+  # object id is an address), nor `IyiUnit::YIELDED`.
+  HOLD_ID = 2_u64
+
+  # A unit parked dirty whose token is held across the walk that would
+  # take it - by the worker that parked its fiber and has yet to let go,
+  # stalled under load; here by the check - is passed over by that walk
+  # and taken by a later one once let go. A walk that dropped it said
+  # nothing more was waiting, and in a program with nothing else to park
+  # no walk came again: under load the idle check saw 2 of 4 and 5 of 8
+  # units parked dirty never collected (heap22 S6 v4, Linux, tssh, tmac).
+  # Under `IYI_HEAP_STRESS` the unit parks clean and is stamped by hand,
+  # as `idle_check` does.
+  def idlehold_check : Nil
+    IyiHeap.collect_every_park = false
+    stressed = {% if flag?(:heap_verify) %} IyiHeapVerify.stress != 0_u64 {% else %} false {% end %}
+    group do |g|
+      go = Channel(Int64).new(1)
+      ready = Channel(UInt64).new(1)
+      handle = g.spawn(unit: :new) { idle_task(3_i64, go, ready) }
+      got = ready.receive
+      record = got.is_a?(UInt64) ? got : 0_u64
+      fail("idlehold: a parked unit sent no record") if record == 0_u64
+      unit = Pointer(Void).new(IyiHeap.read64(record &+ IyiHeap::REC_UNIT)).as(IyiUnit)
+      # Its token, which the worker that ran it holds until its fiber
+      # has parked, taken here once let go.
+      waited = 0
+      held = false
+      while !held && waited < 3000
+        sleep(1)
+        waited = waited + 1
+        held = unit.take(HOLD_ID)
+      end
+      fail("idlehold: the parked unit's token was never let go") unless held
+      count = IyiHeap.partition_collections(record)
+      if stressed
+        IyiHeap.write64(record &+ IyiHeap::REC_DEBT, 1_u64)
+        IyiHeap.write64(record &+ IyiHeap::REC_IDLE_TICK, IyiStat.get(IyiStat::IDLE_TICK) &+ 1_u64)
+        IyiStat.atomic(IyiStat::IDLE_PENDING).value.set(1_u64)
+        IyiWorkers.wake_one
+      end
+      stamp = IyiHeap.read64(record &+ IyiHeap::REC_IDLE_TICK)
+      # Held until a walk at the unit's ticks or later is done, and then
+      # until the walks stop, or one more is done.
+      passed = false
+      waited = 0
+      while !passed && waited < 5000
+        sleep(1)
+        waited = waited + 1
+        done = IyiStat.get(IyiStat::IDLE_DONE_TICK)
+        quiet = IyiStat.get(IyiStat::IDLE_PENDING) == 0_u64 && IyiStat.get(IyiStat::IDLE_CURSOR) == 0_u64
+        due = stamp &+ IyiStat.get(IyiHeap::STAT_IDLE_DELAY)
+        passed = stamp != 0_u64 && done >= due && (quiet || done > due)
+      end
+      taken = IyiHeap.partition_collections(record) != count
+      unit.give
+      fail("idlehold: the parked unit was never stamped") if stamp == 0_u64
+      fail("idlehold: no walk came to the parked unit in 5 s") unless passed
+      fail("idlehold: an idle worker collected a unit whose token another held") if taken
+      waited = 0
+      while IyiHeap.partition_collections(record) == count && waited < 3000
+        sleep(1)
+        waited = waited + 1
+      end
+      left = IyiHeap.partition_collections(record) == count
+      go.send(1_i64)
+      value = handle.value
+      fail("idlehold: a unit answered #{value}") unless value.is_a?(Int64)
+      fail("idlehold: #{value} nodes of a parked unit's list read wrong") if value != 0_i64
+      fail("idlehold: a parked unit dirty, passed over while its token was held, was not collected in 3 s once let go") if left
+    end
+    IyiHeap.collect_every_park = true
+  end
+
+  # ── clock ─────────────────────────────────────────────────────────────
+
+  # An idle worker's look reads the time before the idle clock: held
+  # there by the runtime's switch (`IyiHeap.hold_clock`) until another
+  # worker's turn leaves that time behind the clock, it must not turn the
+  # clock again with it - at once, and backwards. A walk asked for by
+  # hand (pending set and a worker rung, as `idle_check` stamps under
+  # `IYI_HEAP_STRESS`) brings the held look, and an empty unit run while
+  # it is held brings the other workers' looks, as `takeover_check`'s
+  # do: a rung worker spinning, the pool rings no other, and alone
+  # (`HEAP22_ONLY=clock`) nothing had started the pool (the switch at 1,
+  # then at 3, in 10 runs of 10, Linux and tmac). A try whose held look
+  # saw no such turn within a second is tried again, three at most. No
+  # turn of a clock comes less than its period after the last
+  # (`IyiHeap.clock_turns_short`), here or before.
+  def clock_check : Nil
+    fail("clock: #{IyiHeap.clock_turns_short} turns of a clock came less than its period after the last, or before it, before the check") if IyiHeap.clock_turns_short != 0_u64
+    tries = 0
+    held = 0_u64
+    group do |g|
+      while held != 2_u64 && tries < 3
+        tries = tries + 1
+        IyiHeap.hold_clock
+        until_ns = IyiMark.now_ns &+ 3000000000_u64
+        held = IyiHeap.clock_hold
+        while (held == 1_u64 || held == 4_u64) && IyiMark.now_ns < until_ns
+          IyiStat.atomic(IyiStat::IDLE_PENDING).value.set(1_u64)
+          IyiWorkers.wake_one
+          g.spawn(unit: :new) { 0_i64 }.value
+          sleep(1)
+          held = IyiHeap.clock_hold
+        end
+      end
+    end
+    # A switch no look took is taken back, so no later look waits on it.
+    IyiStat.atomic(IyiHeap::STAT_CLOCK_HOLD).value.compare_and_set(1_u64, 0_u64)
+    fail("clock: no held look saw another worker's turn leave its time behind the idle clock in #{tries} tries (the switch at #{held})") if held != 2_u64
+    fail("clock: a look held while another worker turned the idle clock turned it again with the time it read: #{IyiHeap.clock_turns_short} turns of a clock came less than its period after the last, or before it") if IyiHeap.clock_turns_short != 0_u64
+  end
+
+  # ── busy ──────────────────────────────────────────────────────────────
+
+  # A value passed back and forth between two units, every receive a
+  # park, until *stop* holds a word; the follower is then sent -1.
+  # Answers the round trips.
+  def busy_lead(ping : Channel(Int64), pong : Channel(Int64), stop : Channel(Int64)) : Int64
+    trips = 0_i64
+    while true
+      done = false
+      select
+      when word = stop.receive
+        done = true
+      else
+      end
+      if done
+        ping.send(-1_i64)
+        return trips
+      end
+      ping.send(trips)
+      pong.receive
+      trips = trips &+ 1
+    end
+    trips
+  end
+
+  def busy_follow(ping : Channel(Int64), pong : Channel(Int64)) : Int64
+    while true
+      got = ping.receive
+      return 0_i64 unless got.is_a?(Int64) && got >= 0_i64
+      pong.send(got)
+    end
+    0_i64
+  end
+
+  # Partition *record*, whose unit parks dirty (`idle_task`), watched
+  # every millisecond until an idle worker has collected it: its stamp,
+  # the idle clock's tick read after the collection was seen - the
+  # collection's own tick or a later one - and the ticks the last walk
+  # gave a parked partition (`IyiHeap::STAT_IDLE_DELAY`). Then whether
+  # the walks that could have taken it before `IDLE_BUSY_TICKS` ticks -
+  # the stamp's tick plus two and three, those begun by the collection -
+  # began with the program busy: each walk's inputs to the busy rule
+  # (`IyiHeap.idle_delay`: the threads' parks at its tick and the tick),
+  # read under the runtime lock it sets them under, against its
+  # predecessor's. 0 every such walk seen and busy, 1 one seen not busy,
+  # 2 one or its predecessor not seen; the first ticks a busy one of them
+  # gave other than `IDLE_BUSY_TICKS`, with its tick (0 for none); and
+  # the parks the walks at the stamp plus two and three began after
+  # (0 for one not seen).
+  def busy_watch(record : UInt64, what : String) : Array(UInt64)
+    count = IyiHeap.partition_collections(record)
+    walk_ticks = [] of UInt64
+    walk_parks = [] of UInt64
+    walk_delays = [] of UInt64
+    stamp = 0_u64
+    waited = 0
+    while stamp == 0_u64 && waited < 3000
+      busy_walk_seen(walk_ticks, walk_parks, walk_delays)
+      stamp = IyiHeap.read64(record &+ IyiHeap::REC_IDLE_TICK)
+      if stamp == 0_u64
+        sleep(1)
+        waited = waited + 1
+      end
+    end
+    fail("busy: #{what}: the parked unit's partition was never stamped") if stamp == 0_u64
+    seen = 0_u64
+    collected = false
+    waited = 0
+    while !collected
+      collected = IyiHeap.partition_collections(record) != count
+      seen = IyiStat.get(IyiStat::IDLE_TICK)
+      busy_walk_seen(walk_ticks, walk_parks, walk_delays)
+      if !collected
+        # The idle clock turns only at an idle worker's look: a minute
+        # with none is a failure too.
+        if seen > stamp &+ 400_u64 || waited >= 60000
+          fail("busy: #{what}: the parked unit was not collected in #{seen &- stamp} ticks of the idle clock, #{waited} ms")
+          return [stamp, seen, 0_u64, 2_u64, 0_u64, 0_u64, 0_u64, 0_u64]
+        end
+        sleep(1)
+        waited = waited + 1
+      end
+    end
+    given = IyiStat.get(IyiHeap::STAT_IDLE_DELAY)
+    status = 0_u64
+    other = 0_u64
+    other_tick = 0_u64
+    walked = [0_u64, 0_u64]
+    last = seen &+ 1_u64 < stamp &+ 3_u64 ? seen &+ 1_u64 : stamp &+ 3_u64
+    tick = stamp &+ 2_u64
+    while tick <= last
+      found = walk_ticks.index(tick)
+      at = found.is_a?(Int32) ? found : 0
+      if at == 0 || walk_ticks[at - 1] != tick &- 1_u64
+        status = 2_u64
+      else
+        before = walk_parks[at - 1]
+        parks = walk_parks[at]
+        walked[(tick &- stamp &- 2_u64).to_i32] = parks > before ? parks &- before : 0_u64
+        if parks <= before || parks &- before < IyiHeap::IDLE_BUSY_PARKS
+          status = 1_u64 if status == 0_u64
+        elsif other_tick == 0_u64 && walk_delays[at] != IyiHeap::IDLE_BUSY_TICKS
+          other = walk_delays[at]
+          other_tick = tick
+        end
+      end
+      tick = tick &+ 1_u64
+    end
+    [stamp, seen, given, status, other, other_tick, walked[0], walked[1]]
+  end
+
+  # The busy rule's inputs and verdict of the last walk begun, appended
+  # to the walks seen when its tick is new.
+  def busy_walk_seen(ticks : Array(UInt64), parks : Array(UInt64), delays : Array(UInt64)) : Nil
+    IyiRuntimeLock.lock
+    tick = IyiStat.get(IyiHeap::STAT_IDLE_PARKS_TICK)
+    parked = IyiStat.get(IyiHeap::STAT_IDLE_PARKS)
+    delay = IyiStat.get(IyiHeap::STAT_IDLE_DELAY)
+    IyiRuntimeLock.unlock
+    if ticks.empty? || ticks[ticks.size - 1] != tick
+      ticks << tick
+      parks << parked
+      delays << delay
+    end
+  end
+
+  # One unit of group *g* (`idle_task` *t*) parked dirty and watched
+  # (`busy_watch`), then let go: its list read whole.
+  def busy_try(g : IyiGroup, t : Int64) : Array(UInt64)
+    go = Channel(Int64).new(1)
+    ready = Channel(UInt64).new(1)
+    sleeper = g.spawn(unit: :new) { idle_task(t, go, ready) }
+    got = ready.receive
+    record = got.is_a?(UInt64) ? got : 0_u64
+    fail("busy: a parked unit sent no record") if record == 0_u64
+    watched = busy_watch(record, "busy")
+    go.send(1_i64)
+    value = sleeper.value
+    fail("busy: #{value} nodes of a parked unit's list read wrong") if value != 0_i64
+    watched
+  end
+
+  # The busy rule (`IyiHeap.idle_delay`): a program whose threads park
+  # `IDLE_BUSY_PARKS` times a tick leaves a unit parked dirty for
+  # `IDLE_BUSY_TICKS` ticks - it waits mid-request on something slow -
+  # and an idle one takes it after two. A walk takes a partition stamped
+  # *s* at tick *t* (the clock plus one) once *s* + delay <= *t*: taken
+  # before its ticks, the tick seen after it plus one is below that.
+  def busy_check(workers : Int32) : Nil
+    # Under `IYI_HEAP_STRESS` (bench/heap_verify.sh) every park collects
+    # and every chaos point slows the passing: the pairs park far fewer
+    # than `IDLE_BUSY_PARKS` times a tick, the program is not busy by the
+    # rule's own measure, and the check would fail a sound runtime. The
+    # rule is a timing, not a heap word the verifier could see; it is
+    # checked outside stress, and its copy (`nobusy`) caught there.
+    {% if flag?(:heap_verify) %}
+      return if IyiHeapVerify.stress != 0_u64
+    {% end %}
+    IyiHeap.collect_every_park = false
+    group do |g|
+      # A pair for every two workers, the rest left to look idle; a pair
+      # a worker left no worker idle, and the idle clock never turned.
+      pairs = workers > 2 ? workers // 2 : 1
+      stop = Channel(Int64).new(pairs)
+      leads = [] of IyiTask(Int64)
+      follows = [] of IyiTask(Int64)
+      pairs.times do
+        ping = Channel(Int64).new
+        pong = Channel(Int64).new
+        leads << g.spawn(unit: :new) { busy_lead(ping, pong, stop) }
+        follows << g.spawn(unit: :new) { busy_follow(ping, pong) }
+      end
+      # Three ticks of passing before the unit parks.
+      sleep(300)
+      # A try counts when every walk that could take its unit before
+      # `IDLE_BUSY_TICKS` ticks began with the program busy by the rule's
+      # own inputs (`busy_watch`); one that did not is parked again,
+      # eight at most. Not for a clock that turned twice at once: such a
+      # turn gave the next walk a moment's parks, and the rule called the
+      # busy program idle (heap22 fu, Linux, 12 busy loops: 1 run in 40),
+      # so any turn shorter than its period fails the check, retried or
+      # not (`IyiHeap.clock_turns_short`, and the `clock:` check).
+      busy = [] of UInt64
+      tries = 0
+      idle_walks = 0
+      unseen = 0
+      while busy.empty? && tries < 8
+        watched = busy_try(g, tries == 0 ? 1_i64 : 2_i64 &+ tries.to_i64)
+        tries = tries + 1
+        if watched[3] == 0_u64
+          busy = watched
+        elsif watched[3] == 1_u64
+          idle_walks = idle_walks + 1
+        else
+          unseen = unseen + 1
+        end
+      end
+      pairs.times { stop.send(1_i64) }
+      trips = 0_i64
+      leads.each do |lead|
+        answer = lead.value
+        trips = trips &+ answer if answer.is_a?(Int64)
+      end
+      follows.each { |follow| follow.value }
+      print "busy check: #{tries} #{tries == 1 ? "try" : "tries"} (#{idle_walks} with a walk not busy, #{unseen} with one unseen)\n"
+      fail("busy: #{IyiHeap.clock_turns_short} turns of a clock came less than its period after the last, or before it (#{tries} tries, #{idle_walks} with a walk not busy)") if IyiHeap.clock_turns_short != 0_u64
+      if busy.empty?
+        fail("busy: no parked unit of #{tries} waited through walks that all began with the program busy by the rule (#{idle_walks} met one under #{IyiHeap::IDLE_BUSY_PARKS} parks a tick, #{unseen} one unseen; #{trips} round trips)")
+      else
+        fail("busy: a parked unit stamped #{busy[0]} was collected by tick #{busy[1]} with the program busy (#{trips} round trips, #{busy[6]} and #{busy[7]} parks at the walks it waited through, try #{tries}), before #{IyiHeap::IDLE_BUSY_TICKS} ticks") if busy[1] &+ 1_u64 < busy[0] &+ IyiHeap::IDLE_BUSY_TICKS
+        fail("busy: the walk at tick #{busy[5]} gave a parked unit #{busy[4]} ticks with the program busy (#{trips} round trips, try #{tries}), not #{IyiHeap::IDLE_BUSY_TICKS}") if busy[5] != 0_u64
+      end
+      # The passing over: the next walks count only what parks now.
+      sleep(300)
+      go_idle = Channel(Int64).new(1)
+      ready_idle = Channel(UInt64).new(1)
+      sleeper_idle = g.spawn(unit: :new) { idle_task(2_i64, go_idle, ready_idle) }
+      got_idle = ready_idle.receive
+      record_idle = got_idle.is_a?(UInt64) ? got_idle : 0_u64
+      fail("busy: a parked unit sent no record") if record_idle == 0_u64
+      idle = busy_watch(record_idle, "idle")
+      go_idle.send(1_i64)
+      value_idle = sleeper_idle.value
+      fail("busy: #{value_idle} nodes of a parked unit's list read wrong") if value_idle != 0_i64
+      fail("busy: the walk that collected a parked unit in an idle program gave it #{idle[2]} ticks, not 2") if idle[2] != 2_u64
+    end
+    IyiHeap.collect_every_park = true
+  end
+
+  # ── giveway ───────────────────────────────────────────────────────────
+
+  GIVEWAY_NODES = 50000
+
+  # A unit with a list long enough that an idle worker's collection of
+  # it takes a while, parked dirty; woken, it says how many collections
+  # its partition had seen and answers the list's wrong nodes.
+  def giveway_task(t : Int64, go : Channel(Int64), ready : Channel(UInt64), saw : Channel(UInt64)) : Int64
+    base = 9000000000_i64 &+ t &* 100000_i64
+    keep = build(base, GIVEWAY_NODES, 0)
+    idle_junk
+    ready.send(IyiHeap.current_record)
+    go.receive
+    saw.send(IyiHeap.partition_collections(IyiHeap.current_record))
+    broken(keep, base, GIVEWAY_NODES)
+  end
+
+  # An idle worker's takeover gives way to a fiber of the unit woken
+  # while it collects (`IyiHeap.give_way?`): the collection ends as a
+  # stop ends one and the fiber runs at once, its partition uncollected,
+  # rather than waiting out the collection, which under the shared host's
+  # load ran long (heap22 S6, tssh). The fiber is woken from the main
+  # thread, outside the pool, the moment its record is seen busy: onto
+  # the shared queue, and a worker called to it asks for the unit's
+  # token. Only a try whose fiber asked while the takeover held the token
+  # counts, which the runtime records at the takeover's end
+  # (`IyiHeap.takeovers_asked`), not what the main thread saw: a loaded
+  # host that keeps the main thread off its core through the whole
+  # takeover, or the woken fiber's worker, loses the try, not the check
+  # (heap22 fu, IdleWake: every miss of 168 under 12 busy loops a
+  # takeover the main thread never saw busy). A takeover that came and
+  # went unseen has its unit stamped dirty again and watched once more.
+  # One of eight tries that count must give way, in at most 64 tries;
+  # none counting is a fiber woken meanwhile that never asked, called to
+  # no worker. Under `IYI_HEAP_STRESS`, where the unit collects itself on
+  # its way to the park and parks clean, or when its park owed, it is
+  # stamped dirty by hand, as `idle_check` does, and the worker the
+  # stamp's `wake_one` rang takes it, holding the look's token until it
+  # collects (`IyiHeap.collect_taken`; bench/heap_verify.sh's `notoken`
+  # copy).
+  def giveway_check(workers : Int32) : Nil
+    IyiHeap.collect_every_park = false
+    asked = 0
+    gave = 0
+    tries = 0
+    while gave == 0 && asked < 8 && tries < 64
+      tries = tries + 1
+      got = giveway_try(tries.to_i64)
+      asked = asked + 1 if got > 0
+      gave = gave + 1 if got > 1
+    end
+    fail("giveway: no fiber woken while an idle worker collected its unit asked for the unit's token in #{tries} tries") if asked == 0
+    fail("giveway: a fiber woken while an idle worker collected its unit waited for the collection's end (#{asked} asked in #{tries} tries, none gave way)") if gave == 0
+    IyiHeap.collect_every_park = true
+  end
+
+  # One try: 0 no fiber asked for its unit's token while a takeover held
+  # it, 1 one asked and waited for the collection's end, 2 it gave way.
+  def giveway_try(t : Int64) : Int32
+    answer = 0
+    group do |g|
+      go = Channel(Int64).new(1)
+      ready = Channel(UInt64).new(1)
+      saw = Channel(UInt64).new(1)
+      handle = g.spawn(unit: :new) { giveway_task(t, go, ready, saw) }
+      got = ready.receive
+      record = got.is_a?(UInt64) ? got : 0_u64
+      fail("giveway: a parked unit sent no record") if record == 0_u64
+      waited = 0
+      while IyiHeap.read64(record &+ IyiHeap::REC_IDLE_TICK) == 0_u64 && waited < 500
+        sleep(1)
+        waited = waited + 1
+      end
+      asked = IyiHeap.takeovers_asked
+      given = IyiHeap.takeovers_given_way
+      count = IyiHeap.partition_collections(record)
+      # Watched without a park, so the wake follows the take at once.
+      until_ns = IyiMark.now_ns &+ 3000000000_u64
+      busy = false
+      while !busy && IyiMark.now_ns < until_ns
+        count = IyiHeap.partition_collections(record)
+        if IyiHeap.read64(record &+ IyiHeap::REC_IDLE_TICK) == 0_u64
+          IyiHeap.write64(record &+ IyiHeap::REC_DEBT, 1_u64)
+          IyiHeap.write64(record &+ IyiHeap::REC_IDLE_TICK, 1_u64)
+          IyiStat.atomic(IyiStat::IDLE_PENDING).value.set(1_u64)
+          IyiWorkers.wake_one
+        end
+        while !busy && IyiHeap.partition_collections(record) == count && IyiMark.now_ns < until_ns
+          busy = IyiHeap.read64(record &+ IyiHeap::REC_STATE) & IyiHeap::REC_BUSY != 0_u64
+          IyiThread.park_if_requested
+        end
+      end
+      go.send(1_i64)
+      seen = saw.receive
+      value = handle.value
+      fail("giveway: a unit answered #{value}") unless value.is_a?(Int64)
+      fail("giveway: #{value} nodes of a list read wrong after its unit's collection gave way") if value != 0_i64
+      if IyiHeap.takeovers_asked != asked
+        answer = seen == count && IyiHeap.takeovers_given_way != given ? 2 : 1
+      end
+    end
+    answer
+  end
+  # ── inflight ──────────────────────────────────────────────────────────
+
+  def inflight_task : Int64
+    record = IyiHeap.current_record
+    keep = build(4000000000_i64, 1000, 0)
+    before = IyiHeap.partition_collections(record)
+    junk : Node? = nil
+    i = 0
+    while i < 200000
+      junk = Node.new(i.to_i64, i % 64 == 0 ? nil : junk)
+      i = i + 1
+    end
+    junk = nil
+    return -1_i64 if IyiHeap.partition_collections(record) == before
+    broken(keep, 4000000000_i64, 1000)
+  end
+
+  def inflight_check : Nil
+    IyiHeap.collect_every_park = false
+    group do |g|
+      handle = g.spawn(unit: :new) { inflight_task }
+      value = handle.value
+      fail("inflight: the unit answered #{value}") unless value.is_a?(Int64)
+      fail("inflight: 200,000 objects allocated with no park and no collection") if value == -1_i64
+      fail("inflight: #{value} nodes of the live list read wrong") if value != 0_i64
+    end
+    IyiHeap.collect_every_park = true
+  end
+
+  # ── kept ──────────────────────────────────────────────────────────────
+
+  # Garbage in chains of fifty, 3,000 nodes, in a frame of its own.
+  def kept_junk : Int64
+    junk : Node? = nil
+    i = 0
+    while i < 3000
+      junk = Node.new(i.to_i64, i % 50 == 0 ? nil : junk)
+      i = i + 1
+    end
+    junk.is_a?(Node) ? 1_i64 : 0_i64
+  end
+
+  # The first class whose free list meets itself, by Floyd's two walkers,
+  # which allocate nothing (an allocation takes from the list they read);
+  # -1 when every list ends. Read by the unit's own fiber between its
+  # allocations, when nothing else writes its lists.
+  def ring_class(record : UInt64) : Int32
+    table = Pointer(UInt64).new(record)
+    index = 0
+    while index < IyiHeap::CLASSES
+      slow = table[index]
+      fast = slow
+      while fast != 0
+        fast = IyiHeap.read64(fast + IyiHeap::OFF_LINK)
+        break if fast == 0
+        fast = IyiHeap.read64(fast + IyiHeap::OFF_LINK)
+        slow = IyiHeap.read64(slow + IyiHeap::OFF_LINK)
+        return index if fast == slow && fast != 0
+      end
+      index = index + 1
+    end
+    -1
+  end
+
+  # A unit's own collections keep its runs (`IyiHeap.local_sweep`'s
+  # *keep*): each lists what it frees ahead of the list as it stands,
+  # and leaves a chunk free already - on that list, or on the return
+  # stack the global sweep pushed it onto - where it is. Rounds of
+  # garbage, 25 nodes kept a round, and every other round two global
+  # collections, so that the garbage comes back on the return stack
+  # before the park's collection. No list is a ring after a park - a
+  # sweep that listed a chunk on its list once more closed one, and the
+  # allocator, handing that chunk out twice, read an object's word for
+  # the next free chunk and died of a memory fault before any check (the
+  # nokeptfree copy, exit 139 on Linux and tmac, CpuFix3) - the kept
+  # list reads whole, and the unit holds no more after 40 rounds than
+  # twice what it held after five - a sweep that dropped the return
+  # stack, as the whole sweep does, lost what was on it. Answers the
+  # bytes held past that, or minus the nodes that read wrong.
+  def kept_task : Int64
+    record = IyiHeap.current_record
+    base = 9000000000_i64
+    keep : Node? = nil
+    count = 0
+    first = 0_u64
+    round = 0
+    while round < 40
+      kept_junk
+      i = 0
+      while i < 25
+        keep = Node.new(base &+ count.to_i64, keep)
+        count = count + 1
+        i = i + 1
+      end
+      if round % 2 == 0
+        IyiMark.collect
+        IyiMark.collect
+      end
+      # A park, a collection that keeps.
+      sleep(0)
+      ring = ring_class(record)
+      fail("kept: class #{ring}'s free list is a ring after the park of round #{round}") if ring >= 0
+      first = IyiHeap.partition_held(record) if round == 4
+      round = round + 1
+    end
+    wrong = broken(keep, base, count)
+    return -wrong if wrong != 0
+    past = IyiHeap.partition_held(record).to_i64 - (first * 2_u64).to_i64
+    past > 0_i64 ? past : 0_i64
+  end
+
+  def kept_check : Nil
+    kept = IyiHeap.local_kept_sweeps
+    returned = IyiHeap.returned_chunks
+    group do |g|
+      handle = g.spawn(unit: :new) { kept_task }
+      value = handle.value
+      if value.is_a?(Int64)
+        fail("kept: #{-value} nodes of the kept list read wrong") if value < 0_i64
+        fail("kept: the unit holds #{value} bytes of runs past twice what it held after five rounds") if value > 0_i64
+      else
+        fail("kept: the unit answered #{value}")
+      end
+    end
+    fail("kept: no local sweep kept its runs") if IyiHeap.local_kept_sweeps == kept
+    fail("kept: the global sweep handed no chunk back to a partition") if IyiHeap.returned_chunks == returned
+  end
+
+  # ── spare ─────────────────────────────────────────────────────────────
+
+  # Garbage first, so its runs hold none of the list (`idle_task`), then
+  # a list; parked, its park's collection keeps the garbage's runs. The
+  # garbage fills several runs of the largest size: a stale word keeps
+  # one chain of fifty, and a run is spare only with nothing live on it.
+  # `idle_junk`'s 400 nodes filled one run, and a stale word on it left
+  # no spare for 5 units in a row (Linux, verify release, 1 run of 16,
+  # 8 units of 24 tried without spare); with 3,000 nodes 0 of 24 runs
+  # (CpuFix4).
+  def spare_task(ready : Channel(UInt64), go : Channel(Int64)) : Int64
+    base = 9500000000_i64
+    spare_junk
+    keep = build(base, 200, 0)
+    ready.send(IyiHeap.current_record)
+    go.receive
+    broken(keep, base, 200)
+  end
+
+  # `idle_junk`'s chains of fifty, 3,000 nodes: about four 64 KiB runs.
+  def spare_junk : Int64
+    junk : Node? = nil
+    i = 0
+    while i < 3000
+      junk = Node.new(i.to_i64, i % 50 == 0 ? nil : junk)
+      i = i + 1
+    end
+    junk.is_a?(Node) ? 1_i64 : 0_i64
+  end
+
+  # A unit whose park's collection kept runs with nothing live on them
+  # (`IyiHeap.partition_spare`) is dirty to the idle workers: parked, an
+  # idle worker collects it whole, and those runs go back to the pool.
+  # Under `IYI_HEAP_STRESS` a collection at a chaos point may have given
+  # them back before the park, which then keeps none; and a park under a
+  # global mark beside the program collects nothing, leaving the unit to
+  # the idle workers' whole collection (verify release, 1 run of 1,
+  # Linux, CpuFix2): a unit that showed no spare is tried again, five
+  # times in all.
+  def spare_check : Nil
+    stressed = {% if flag?(:heap_verify) %} IyiHeapVerify.stress != 0_u64 {% else %} false {% end %}
+    attempt = 0
+    while attempt < 5
+      attempt = attempt + 1
+      spare = spare_once
+      return if spare != 0_u64 || stressed
+    end
+    fail("spare: the park's collection kept no run with nothing live on it, 5 units in a row")
+  end
+
+  # One unit of `spare_check`: the spare its park left, after the checks
+  # of its idle collection.
+  def spare_once : UInt64
+    ready = Channel(UInt64).new(1)
+    go = Channel(Int64).new(1)
+    spare = 0_u64
+    group do |g|
+      handle = g.spawn(unit: :new) { spare_task(ready, go) }
+      got = ready.receive
+      record = got.is_a?(UInt64) ? got : 0_u64
+      fail("spare: the unit sent no record") if record == 0_u64
+      waited = 0
+      while IyiHeap.partition_spare(record) == 0_u64 && waited < 3000
+        sleep(1)
+        waited = waited + 1
+      end
+      spare = IyiHeap.partition_spare(record)
+      held = IyiHeap.partition_held(record)
+      waited = 0
+      while IyiHeap.partition_spare(record) != 0_u64 && waited < 3000
+        sleep(1)
+        waited = waited + 1
+      end
+      left = IyiHeap.partition_spare(record)
+      # The sweep writes the spare before it pools the emptied runs and
+      # takes their bytes off the held ones, and a sweep a global mark
+      # left not whole pools them at the idle workers' next visit: read
+      # at the spare's zero, held was still the bytes before (tmac,
+      # verify, CpuFix4).
+      while spare != 0_u64 && left == 0_u64 && IyiHeap.partition_held(record) >= held && waited < 3000
+        sleep(1)
+        waited = waited + 1
+      end
+      after = IyiHeap.partition_held(record)
+      go.send(1_i64)
+      value = handle.value
+      fail("spare: the unit answered #{value}") unless value.is_a?(Int64)
+      fail("spare: #{value} nodes of a parked unit's list read wrong") if value != 0_i64
+      fail("spare: a parked unit kept #{left} bytes of runs with nothing live on them 3 s after its park") if left != 0_u64
+      fail("spare: the unit held #{after} bytes after its idle collection, #{held} before") if spare != 0_u64 && after >= held
+    end
+    spare
+  end
+
+  Checks.read_env
+  arguments = Program.args
+  quiet = arguments.empty?
+  fail("usage: heap_local [WORKERS ROUNDS]") unless quiet || arguments.size == 2
+  workers = quiet ? 4 : arguments[0].to_i
+  rounds = quiet ? 60 : arguments[1].to_i
+  IyiWorkers.count = workers
+  IyiHeap.collect_every_park = true
+  # In this order, so that each broken copy of bench/heap_local.sh meets
+  # its own check before any other could notice it: `abandon` first, as
+  # a real stop abandons local marks in any check that collects, then
+  # `return`, whose noreturn copy's lost chunks `kept` would see grow the
+  # unit, then `kept`, before every check whose parks collect meets a
+  # kept sweep's broken list, then `unswept`, before `weak` stops a
+  # sweep of its own;
+  # `spare` after `takeover` and `idle`, whose copies break the idle
+  # worker's collection that `spare` waits for; `detach`
+  # before `answer`, whose units hold detached partitions until they die:
+  # the nodetach copy ended at `answer:` once (Linux, 933b4d005); `weak`
+  # before `frontier`, whose weak cells are cleared by the same sweep: the
+  # noweak copy, which clears none, ended at `frontier:` (tssh,
+  # 933b4d005), and `weak` leaves the frontier's cells to `frontier`.
+  # `HEAP22_ONLY=idle`: the idle check alone, for the noidle copy of
+  # bench/heap_local.sh, whose broken collection the takeover check would
+  # otherwise meet first; `HEAP22_ONLY=busy`, the busy check alone, for
+  # the nobusy copy; `HEAP22_ONLY=giveway`, the giveway check alone, for
+  # the nogiveway copy; `HEAP22_ONLY=idlehold`, the idlehold check alone,
+  # for the noidlehold copy; `HEAP22_ONLY=clock`, the clock check alone,
+  # for the clockwrap copy; `HEAP22_ONLY=kept`, the kept check alone, for
+  # the nokeptfree copy, whose rings the parks of `abandon` and `return`
+  # would hand out first, dying of a memory fault there.
+  only = Program.env("HEAP22_ONLY")
+  if only == "idle"
+    idle_check(workers)
+  elsif only == "busy"
+    busy_check(workers)
+  elsif only == "giveway"
+    giveway_check(workers)
+  elsif only == "idlehold"
+    idlehold_check
+  elsif only == "clock"
+    clock_check
+  elsif only == "kept"
+    kept_check
+  else
+    abandon_check
+    return_check
+    kept_check
+    unswept_check
+    weak_check
+    frontier_check
+    filter_check
+    stale_check
+    fresh_check
+    free_check
+    detach_check
+    answer_check(workers)
+    adopt_check
+    pin_check
+    poison_check
+    graphs_check(workers, rounds)
+    fibers_check
+    large_check
+    takeover_check(workers)
+    construct_check
+    idle_check(workers)
+    idlehold_check
+    clock_check
+    busy_check(workers)
+    giveway_check(workers)
+    spare_check
+    inflight_check
+    settle("death")
+  end
+  if quiet
+    puts "heap local: units collect their own partitions, and every crossing check holds"
+  else
+    puts "workers=#{workers} rounds=#{rounds} local=#{IyiHeap.local_collections} freed=#{IyiHeap.local_freed} max_ns=#{IyiHeap.local_max_ns} whole=#{IyiHeap.freed_whole} shared=#{IyiHeap.handed_shared} returned=#{IyiHeap.returned_chunks} takeovers=#{IyiHeap.takeovers} aborts=#{IyiHeap.local_aborts}"
+  end
+{% else %}
+  puts "heap local: built without -Dheap_partitions, nothing to check"
+{% end %}

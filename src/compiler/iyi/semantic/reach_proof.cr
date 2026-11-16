@@ -27,7 +27,28 @@ module Iyi
     end
 
     def iyi_claim_reach(claim : ReachClaim) : Nil
-      @iyi_reach_claims << claim unless iyi_reach_claim?(claim.state)
+      return if iyi_reach_claim?(claim.state)
+      @iyi_reach_claims << claim
+      state = claim.state
+      return unless state.is_a?(MetaTypeVar)
+      @iyi_class_var_copies[state]?.try &.each do |copy|
+        copy.iyi_safe_reach = claim.reason
+        iyi_claim_reach(claim.copy_with(state: copy))
+      end
+    end
+
+    # A subclass's copies of each class variable, by the variable copied,
+    # so a claim made on it after a copy was made reaches the copy too.
+    @iyi_class_var_copies = ({} of MetaTypeVar => Array(MetaTypeVar)).compare_by_identity
+
+    # *copy* is a subclass's copy of *original*: it takes *original*'s
+    # claim, now or when one is made.
+    def iyi_inherit_reach_claim(original : MetaTypeVar, copy : MetaTypeVar) : Nil
+      (@iyi_class_var_copies[original] ||= [] of MetaTypeVar) << copy
+      if claim = iyi_reach_claim?(original)
+        copy.iyi_safe_reach = claim.reason
+        iyi_claim_reach(claim.copy_with(state: copy))
+      end
     end
   end
 
@@ -238,7 +259,7 @@ module Iyi
     @escaped = Written.new
     @state_out = {} of Int32 => Set(UInt64)
 
-    def initialize(@program : Program, @root : ASTNode)
+    def initialize(@program : Program, @root : ASTNode, @claims : Array(ReachClaim) = program.iyi_reach_claims)
     end
 
     def self.run(program : Program, root : ASTNode) : Nil
@@ -247,9 +268,38 @@ module Iyi
       new(program, root).run
     end
 
+    # The refusal a `@[SafeReach]` claim on each of *states* would meet, by
+    # the state's `object_id`; a state that is not in the answer would be
+    # proven. Asked by the refusal of a parallel unit that reaches state no
+    # claim covers (SPEC.md III.4.5): what `iyi fix` may add, and for the
+    # rest the write that breaks the claim. Only refused builds ask, so it
+    # costs a build that compiles nothing.
+    def self.provable(program : Program, root : ASTNode, states : Array(Const | MetaTypeVar)) : Hash(UInt64, String)
+      return {} of UInt64 => String if states.empty?
+      claims = states.map do |state|
+        mark = Annotation.new(Path.new("SafeReach"), [StringLiteral.new("asked by the reach rule")] of ASTNode)
+        ReachClaim.new(state, state.name, "asked by the reach rule", mark, false)
+      end
+      new(program, root, claims).verdicts
+    end
+
     def run : Nil
-      robust = @program.iyi_reach_robust
-      @program.iyi_reach_claims.each do |claim|
+      settle(@program.iyi_reach_robust, reuse: true) { |claim, refusal| claim.annotation.raise refusal }
+    end
+
+    def verdicts : Hash(UInt64, String)
+      refused = {} of UInt64 => String
+      settle(Set(UInt64).new) { |claim, refusal| refused[claim.state.object_id] = refusal }
+      refused
+    end
+
+    # Proves every claim, adding to *robust* the states whose claim holds
+    # for every importer, and yields each refused claim with its refusal.
+    # With *reuse*, a std module's claims are taken from the answer a
+    # program that proved them stored, and each module this program proves
+    # stores its own (`reach_module_proof.cr`).
+    private def settle(robust : Set(UInt64), reuse : Bool = false, & : ReachClaim, String ->) : Nil
+      @claims.each do |claim|
         # An `UnsafeReach` is the author's word, kept for a module marked
         # `@[Unsafe]` (`UnsafeCheck`), and holds wherever the module is
         # imported as it does here.
@@ -264,6 +314,10 @@ module Iyi
           robust << claim.state.object_id
           next
         end
+        if reuse && module_proven?(claim)
+          robust << claim.state.object_id
+          next
+        end
         @tracked[claim.state.object_id] = claim
       end
       return if @tracked.empty?
@@ -273,10 +327,14 @@ module Iyi
       compute_starts
       propagate_contexts
       compute_written
-      @program.iyi_reach_claims.each do |claim|
+      index_state_events
+      @claims.each do |claim|
         next unless @tracked.has_key?(claim.state.object_id)
         unless refusal = refusal_of(claim)
-          robust << claim.state.object_id if robust?(claim)
+          if robust?(claim)
+            robust << claim.state.object_id
+            @proven_by_walk << claim.state.object_id
+          end
           next
         end
         # (a), structurally: a value nothing writes once it is made. Read
@@ -288,8 +346,9 @@ module Iyi
           robust << claim.state.object_id
           next
         end
-        claim.annotation.raise refusal
+        yield claim, refusal
       end
+      record_module_proofs if reuse
     end
 
     # Whether a proven claim holds in every program that imports the
@@ -300,8 +359,11 @@ module Iyi
     # module's functions from, and another program may call them from a
     # parallel task. So: every write is a statement of the module's own
     # initialiser, before any parallel task, which runs first in every
-    # program; nothing keeps a copy; no function answers the state; and a
-    # constant is not exported, so no other module's code names it.
+    # program; nothing keeps a copy; no function answers the state, save
+    # as a value nothing can write - `StaticTable.get` answers one of
+    # std/hpack's `ENTRIES`, a struct of two strings and an enum, and its
+    # claim held for no importer until this asked the answer's structure;
+    # and a constant is not exported, so no other module's code names it.
     private def robust?(claim : ReachClaim) : Bool
       state = claim.state
       key = state.object_id
@@ -312,19 +374,19 @@ module Iyi
         namespace = state.namespace
         return false if namespace.is_a?(ModuleType) && namespace.exported_names.try(&.includes?(state.name))
       end
-      @callables.each do |callable|
-        next if callable.literal?
-        return false if callable.a_def && callable.answerer? && state_out(callable).includes?(key)
-        callable.events.each do |event|
-          next if event.root.kind.slot?
-          next unless states_of(event.root).includes?(key)
-          return false if fired?(event.cause, escapes: true)
-          next unless fired?(event.cause, escapes: false)
-          origin = event.origin
-          return false unless origin && origin.kind.top_level? && before_start?(origin.index)
-          written = event.at.try { |place| (place.expanded_location || place).filename }
-          return false unless written == file
-        end
+      @answerers.each do |callable|
+        a_def = callable.a_def.not_nil!
+        next unless state_out(callable).includes?(key)
+        answer = a_def.type?
+        return false unless answer && deep_share?(answer)
+      end
+      @state_events[key]?.try &.each do |(_, event)|
+        return false if fired?(event.cause, escapes: true)
+        next unless fired?(event.cause, escapes: false)
+        origin = event.origin
+        return false unless origin && origin.kind.top_level? && before_start?(origin.index)
+        written = event.at.try { |place| (place.expanded_location || place).filename }
+        return false unless written == file
       end
       true
     end
@@ -340,6 +402,34 @@ module Iyi
     def prelude_at?(location : Location?) : Bool
       file = location.try(&.original_filename)
       !!file && prelude_file?(file)
+    end
+
+    # Whether *type* is declared in std or the prelude.
+    def std_type?(type : Type) : Bool
+      @program.iyi_share_reach.std_at?(type.locations.try(&.first?))
+    end
+
+    # The C functions that only read the memory they are handed at the
+    # arguments listed (from 0; nil: every argument): a write out of a
+    # constant's bytes (`write`, `send`), a comparison, a path. Handing
+    # claimed state to any other is a write of it, since C may store into
+    # it. From H1's list (local://heap22-h1rescue.md), less the functions
+    # that fill the memory with bytes - `read`, `recv`, `stat`'s buffer -
+    # which race a reader as any write does.
+    C_READ_ONLY = {
+      "write" => [1], "pwrite" => [1], "writev" => [1], "send" => [1], "sendto" => [1, 4], "sendmsg" => [1],
+      "memcmp" => nil, "strlen" => nil, "strnlen" => nil, "strcmp" => nil, "strncmp" => nil, "memchr" => nil,
+      "open" => nil, "openat" => [1], "access" => nil, "unlink" => nil, "mkdir" => nil, "rmdir" => nil,
+      "rename" => nil, "chmod" => nil, "chdir" => nil, "stat" => [0], "lstat" => [0], "fstatat" => [1],
+      "realpath" => [0], "readlink" => [0], "nanosleep" => [0],
+      "inet_pton" => [1], "inet_ntop" => [1], "bind" => [1], "connect" => [1], "setsockopt" => [3],
+      "getaddrinfo" => [0, 1, 2], "memcpy" => [1], "memmove" => [1],
+    } of String => Array(Int32)?
+
+    def self.c_read_only?(name : String, index : Int32) : Bool
+      return false unless C_READ_ONLY.has_key?(name)
+      indexes = C_READ_ONLY[name]
+      indexes.nil? || indexes.includes?(index)
     end
 
     # --- the walk ---------------------------------------------------------
@@ -905,6 +995,28 @@ module Iyi
       spread(@escaped, seeds, reverse, true)
     end
 
+    # Each claimed state's events, by the state's key, in the order the
+    # callables and their events were met, and the callables that may
+    # answer claimed state: what `refusal_of` and `robust?` read of one
+    # claim. Built once; each claim read every callable's events, which
+    # grew with std's claims (33, then 80 after the trust review).
+    @state_events = {} of UInt64 => Array({Callable, Event})
+    @answerers = [] of Callable
+
+    private def index_state_events : Nil
+      @callables.each do |callable|
+        next if callable.literal?
+        @answerers << callable if callable.a_def && callable.answerer?
+        callable.events.each do |event|
+          next if event.root.kind.slot?
+          states_of(event.root).each do |key|
+            next unless @tracked.has_key?(key)
+            (@state_events[key] ||= [] of {Callable, Event}) << {callable, event}
+          end
+        end
+      end
+    end
+
     private def spread(into : Written, seeds : Array({Int32, Int32, Event}), reverse : Hash({Int32, Int32}, Array({Callable, Int32, Event})), escapes : Bool) : Nil
       queue = Deque({Int32, Int32}).new
       seeds.each do |(id, slot, event)|
@@ -1019,20 +1131,15 @@ module Iyi
     private def refusal_of(claim : ReachClaim) : String?
       key = claim.state.object_id
       writes = [] of Write
-      @callables.each do |callable|
-        next if callable.literal?
-        callable.events.each do |event|
-          next if event.root.kind.slot?
-          next unless states_of(event.root).includes?(key)
-          if fired?(event.cause, escapes: true)
-            # A copy kept out of the walk's sight may be written through
-            # anywhere, whenever: before the first task, or under a lock,
-            # the keeping proves nothing about the writes.
-            writes << Write.new(event, callable, false, true, [] of Lock, escape: true)
-          elsif fired?(event.cause, escapes: false)
-            init, free, locks = context_of(callable, event.origin)
-            writes << Write.new(event, callable, init, free, locks)
-          end
+      @state_events[key]?.try &.each do |(callable, event)|
+        if fired?(event.cause, escapes: true)
+          # A copy kept out of the walk's sight may be written through
+          # anywhere, whenever: before the first task, or under a lock,
+          # the keeping proves nothing about the writes.
+          writes << Write.new(event, callable, false, true, [] of Lock, escape: true)
+        elsif fired?(event.cause, escapes: false)
+          init, free, locks = context_of(callable, event.origin)
+          writes << Write.new(event, callable, init, free, locks)
         end
       end
       writes.sort_by! { |write| location_key(write.event.at) }
@@ -1774,7 +1881,8 @@ module Iyi
             next
           end
           if target.is_a?(External)
-            node.args.each do |arg|
+            node.args.each_with_index do |arg, index|
+              next if ReachProof.c_read_only?(target.real_name, index)
               handed = roots(arg)
               direct(handed, "hands it to the C function `#{target.real_name}`", node, at) unless handed.empty?
             end
@@ -1850,10 +1958,14 @@ module Iyi
           owner = target.owner
           if owning?(owner)
             return nil if owner.metaclass?
-            if lock = lock_of(node.obj)
+            # Only std's lock names one (SPEC.md III.4.19): a `Mutex` block
+            # runs in the shared heap with its captures published, so what
+            # it stores in the state is never a unit's; a library's owning
+            # type gives no such promise.
+            if std_owning?(owner) && (lock = lock_of(node.obj))
               return Origin.new(Origin::Kind::Locked, "behind `#{lock.name}`", lock: lock)
             end
-            return Origin.new(Origin::Kind::UnnamedLock, "behind `#{node.obj}`'s lock, which the compiler cannot name (a constant or a class variable it can)", at: at)
+            return Origin.new(Origin::Kind::UnnamedLock, "behind `#{node.obj}`'s lock, which the compiler cannot name (a std `Mutex` on a constant or a class variable it can)", at: at)
           end
         end
         return nil unless block.fun_literal
@@ -1878,6 +1990,12 @@ module Iyi
         type = owner.metaclass? ? owner.instance_type : owner
         type = type.generic_type.as(Type) if type.is_a?(GenericClassInstanceType)
         type.iyi_share_owns?
+      end
+
+      private def std_owning?(owner : Type) : Bool
+        type = owner.metaclass? ? owner.instance_type : owner
+        type = type.generic_type.as(Type) if type.is_a?(GenericClassInstanceType)
+        @proof.std_type?(type)
       end
 
       private def lock_of(obj : ASTNode?) : Lock?

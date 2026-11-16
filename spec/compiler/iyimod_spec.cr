@@ -241,6 +241,29 @@ describe Iyi::IyiMod do
     end
   end
 
+  # heap22 (v63): a spawn's pin bit and a pinned `Unit.new` or
+  # `SharedProc.of`, beside the spawns, survive the trip and the dump.
+  it "round-trips the pin bits of spawns and the pinned calls beside them" do
+    with_temporary_file do |path|
+      artifact = sample_artifact
+      artifact.spawns = [Iyi::IyiMod::SpawnRecord.new("App.run", "d1", 3, 5, true, true, "", true),
+                         Iyi::IyiMod::SpawnRecord.new("App.run", "d2", 7, 5, true, false, "")]
+      artifact.pins = [Iyi::IyiMod::PinRecord.new("Unit.new", 9, 7, "it captures `pool`")]
+      Iyi::IyiMod.write artifact, path
+      read = Iyi::IyiMod.read(path)
+      read.spawns.map(&.pinned).should eq [true, false]
+      read.pins.should eq artifact.pins
+      io = IO::Memory.new
+      Iyi::IyiMod.dump read, io
+      io.to_s.should contain "App.run 3:5 parallel (asked) (pinned)"
+      io.to_s.should contain "pins\n  Unit.new 9:7 it captures `pool`"
+
+      artifact.spawns = [] of Iyi::IyiMod::SpawnRecord
+      Iyi::IyiMod.write artifact, path
+      Iyi::IyiMod.read(path).pins.should eq artifact.pins
+    end
+  end
+
   # Atomic replacement is the property IV.1 picks a single-file container for:
   # a half-written artifact that a later build reads as valid is the worst
   # failure a cache has, because it is wrong and nothing about it looks broken.

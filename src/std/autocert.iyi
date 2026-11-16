@@ -274,7 +274,7 @@ struct AutocertFiles
   # and written over what those already there inherited; it panics, with
   # the system's error, where the list cannot be set, so that a key is
   # not written beside one that lets others read it.
-  def self.keep(dir : String) : Nil
+  @[Effect(:file_write, :chmod)]; def self.keep(dir : String) : Nil
     {% if flag?(:win32) %}
       # D:P a protected DACL; each entry allows (A) full access (FA), to
       # this object and what is made in it (OICI), to OW the owner's

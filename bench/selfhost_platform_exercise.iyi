@@ -3,6 +3,8 @@ module bench/selfhost_platform_exercise
 import compiler/platform/target::{Target, TargetError}
 import compiler/platform/flags::{PlatformFlags}
 import compiler/platform/linker::{Linker, LinkAnnotation, LinkCommandResult}
+import std/file::{File}
+import std/json::{JSON}
 
 def assert_true(cond : Bool, label : String) : Nil
   if !cond
@@ -144,11 +146,48 @@ def run_self_checks : Nil
   assert_equal(Linker.quote_posix(""), "''", "empty posix quote")
   assert_equal(Linker.quote_windows("simple"), "simple", "simple windows quote")
   assert_equal(Linker.quote_windows("my file.obj"), "\"my file.obj\"", "spaced windows quote")
+  assert_equal(Linker.quote_windows("a\"b"), "a\\\"b", "unspaced windows embedded quote")
+  assert_equal(Linker.quote_windows("dir with space\\"), "\"dir with space\\\\\"", "windows trailing slash")
+
+  puts "== 6. MSVC linker and driver command shapes"
+  direct = Linker.linker_command(
+    t3,
+    ["obj dir\\first.obj", "second.obj"],
+    "out dir\\app.exe",
+    lib_flags: "/LIBPATH:custom",
+    link_flags: "/NODEFAULTLIB:old.lib",
+    debug: true,
+    msvc_linker: "C:\\Program Files\\MSVC\\Bin\\LiNk.ExE",
+    msvc_link_args: ["/LIBPATH:C:\\Program Files\\SDK\\lib", "/DEFAULTLIB:kernel32.lib"]
+  )
+  assert_equal(direct.linker, "\"C:\\Program Files\\MSVC\\Bin\\LiNk.ExE\"", "direct linker quoted")
+  assert_equal(direct.cmd,
+    "\"C:\\Program Files\\MSVC\\Bin\\LiNk.ExE\" /nologo \"obj dir\\first.obj\" second.obj \"/OUT:out dir\\app.exe\" \"/LIBPATH:C:\\Program Files\\SDK\\lib\" /DEFAULTLIB:kernel32.lib /DEBUG:FULL /PDBALTPATH:%_PDB% /INCREMENTAL:NO /STACK:0x800000 /LIBPATH:custom /NODEFAULTLIB:old.lib",
+    "direct link.exe uses /OUT and SDK arguments without /link")
+  assert_true(direct.objects.nil?, "direct linker returns no separate objects")
+
+  driver = Linker.linker_command(
+    t3,
+    ["object dir/main.obj"],
+    "out dir/app.exe",
+    lib_flags: "/LIBPATH:custom",
+    link_flags: "/OPT:REF",
+    msvc_linker: "C:/Program Files/MSVC/cl.exe",
+    msvc_link_args: ["/LIBPATH:C:/Program Files/SDK/lib"]
+  )
+  assert_equal(driver.linker, "\"C:/Program Files/MSVC/cl.exe\"", "driver quoted")
+  assert_equal(driver.cmd,
+    "\"C:/Program Files/MSVC/cl.exe\" /nologo \"object dir/main.obj\" \"/Feout dir/app.exe\" /link \"/LIBPATH:C:/Program Files/SDK/lib\" /INCREMENTAL:NO /STACK:0x800000 /LIBPATH:custom /OPT:REF",
+    "cl.exe uses /Fe and /link with SDK arguments")
+  assert_true(driver.objects.nil?, "driver returns no separate objects")
+  assert_true(!Linker.direct_msvc_linker?("C:/tools/blink.exe"), "direct linker requires the full basename")
+  puts "  direct link.exe and cl.exe command shapes matched"
 
   puts "ALL SELFHOST PLATFORM CHECKS PASSED SUCCESSFULLY!"
 end
 
-def dump_corpus : Nil
+def dump_corpus(config_path : String) : Nil
+  config = JSON.parse(File.read(config_path))
   triples = corpus_triples
   triples.each do |t|
     tgt = Target.new(t)
@@ -157,6 +196,15 @@ def dump_corpus : Nil
     if tgt.msvc?
       lib_flags = "/LIBPATH:/opt/homebrew/opt/bdw-gc/lib"
     end
+    msvc_linker = "cl.exe"
+    msvc_link_args = [] of String
+    if tgt.msvc?
+      msvc_config = config[t]
+      msvc_linker = msvc_config["linker"].as_s
+      msvc_config["args"].as_a.each do |arg|
+        msvc_link_args << arg.as_s
+      end
+    end
 
     res = Linker.linker_command(
       tgt,
@@ -164,7 +212,9 @@ def dump_corpus : Nil
       "out_bin",
       lib_flags: lib_flags,
       cross_compiling: true,
-      debug: true
+      debug: true,
+      msvc_linker: msvc_linker,
+      msvc_link_args: msvc_link_args
     )
 
     puts "TRIPLE: #{t}"
@@ -195,7 +245,8 @@ def main
   if args.size > 0
     cmd = args[0]
     if cmd == "dump"
-      dump_corpus
+      raise "dump requires the oracle MSVC configuration path" unless args.size == 2
+      dump_corpus(args[1])
       return
     elsif cmd == "verify"
       run_self_checks
@@ -208,8 +259,6 @@ def main
   end
 
   run_self_checks
-  puts
-  dump_corpus
 end
 
 main

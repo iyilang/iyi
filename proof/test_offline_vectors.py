@@ -442,11 +442,12 @@ cmd="$1"
 shift
 if [ "$cmd" = "build" ]; then
     # A build that asks for assembly is the exercise reading what the real
-    # compiler writes (std_mlkem_exercise.sh, decapsulation's mask); nothing
-    # about it touches the network or an oracle, and a fake binary has no
-    # assembly to read, so it goes to the real compiler.
+    # compiler writes (std_mlkem_exercise.sh, decapsulation's mask). A fake
+    # binary has no assembly to read, so a test that needs the section to pass
+    # names the real compiler in IYI_REAL_COMPILER; without it the build writes
+    # nothing, as it always did, and the section reports that.
     case " $* " in
-        *" --emit "*) exec "$IYI_REAL_COMPILER" build "$@" ;;
+        *" --emit "*) [ -n "${IYI_REAL_COMPILER:-}" ] && exec "$IYI_REAL_COMPILER" build "$@" ;;
     esac
     out=""
     while [ $# -gt 0 ]; do
@@ -663,7 +664,7 @@ exit 0
         env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
         env["PYTHONPATH"] = f"{pylib}{os.pathsep}{env.get('PYTHONPATH', '')}"
         env["IYI"] = str(mock_iyi)
-        env["IYI_REAL_COMPILER"] = (REPO_ROOT / "bin" / "iyi").as_posix()
+        env.pop("IYI_REAL_COMPILER", None)
         env["PY"] = str(py_wrapper)
         env["OPENSSL"] = str(mock_openssl)
 
@@ -768,6 +769,12 @@ exit 0
         with tempfile.TemporaryDirectory() as tmpdir:
             _, env_no_crypto, canary = self._setup_safe_environment(tmpdir, enable_crypto=False, enable_openssl_mlkem=False)
             env_no_crypto.pop("IYI_PROOF_INPUTS_DIR", None)
+            # The scripts read the real compiler's assembly for decapsulation's
+            # mask and the P-384 value barriers, which a real build of each takes
+            # minutes on a Windows runner, not the 30 seconds a fake one does.
+            real_compiler = (REPO_ROOT / "bin" / "iyi").as_posix()
+            env_no_crypto["IYI_REAL_COMPILER"] = real_compiler
+            build_timeout = 1800
 
             # In ordinary mode without cryptography, scripts skip oracles without setting status=1
             res_hpke = subprocess.run([get_bash_bin(), str(REPO_ROOT / "bench" / "std_hpke_exercise.sh")], env=env_no_crypto, capture_output=True, text=True, timeout=30)
@@ -775,18 +782,19 @@ exit 0
             self.assertIn("Python HPKE goes unasked", res_hpke.stdout)
             self.assertIn("it goes unasked", res_hpke.stdout)
 
-            res_mlkem = subprocess.run([get_bash_bin(), str(REPO_ROOT / "bench" / "std_mlkem_exercise.sh")], env=env_no_crypto, capture_output=True, text=True, timeout=30)
+            res_mlkem = subprocess.run([get_bash_bin(), str(REPO_ROOT / "bench" / "std_mlkem_exercise.sh")], env=env_no_crypto, capture_output=True, text=True, timeout=build_timeout)
             self.assertEqual(res_mlkem.returncode, 0, "Ordinary mode ML-KEM must exit 0 when oracles are skipped")
             self.assertIn("OpenSSL goes unasked", res_mlkem.stdout)
 
-            res_p384 = subprocess.run([get_bash_bin(), str(REPO_ROOT / "bench" / "std_p384_exercise.sh")], env=env_no_crypto, capture_output=True, text=True, timeout=30)
+            res_p384 = subprocess.run([get_bash_bin(), str(REPO_ROOT / "bench" / "std_p384_exercise.sh")], env=env_no_crypto, capture_output=True, text=True, timeout=build_timeout)
             self.assertEqual(res_p384.returncode, 0, "Ordinary mode P-384 must exit 0 when oracles are skipped")
             self.assertIn("signatures go uncompared", res_p384.stdout)
 
             # 4. Ordinary mode with malformed openssl speed preserves success (exit 0)
             _, env_malformed_ordinary, _ = self._setup_safe_environment(tmpdir, enable_crypto=True, openssl_shape="malformed")
             env_malformed_ordinary.pop("IYI_PROOF_INPUTS_DIR", None)
-            res_p384_malformed = subprocess.run([get_bash_bin(), str(REPO_ROOT / "bench" / "std_p384_exercise.sh")], env=env_malformed_ordinary, capture_output=True, text=True, timeout=30)
+            env_malformed_ordinary["IYI_REAL_COMPILER"] = real_compiler
+            res_p384_malformed = subprocess.run([get_bash_bin(), str(REPO_ROOT / "bench" / "std_p384_exercise.sh")], env=env_malformed_ordinary, capture_output=True, text=True, timeout=build_timeout)
             self.assertEqual(res_p384_malformed.returncode, 0, "Ordinary mode P-384 must exit 0 on malformed openssl speed shape")
             self.assertIn("openssl speed answered in a shape this does not read", res_p384_malformed.stdout)
     # --- ML-KEM ---

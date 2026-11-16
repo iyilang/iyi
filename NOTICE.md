@@ -43,6 +43,14 @@ Crystal standard library uses the following libraries, which have their own lice
 - [readline][] - [GPLv3][]
 - [GMP][] - [LGPLv3][]
 
+iyi's compiler source includes:
+
+- [golang.org/x/mod v0.29.0](https://pkg.go.dev/golang.org/x/mod@v0.29.0/sumdb)
+  (`src/compiler/iyi/mod/sumdb/client.cr`, `note.cr`, and `tlog.cr`),
+  adapted from its note and transparency log packages. Copyright 2019 The
+  Go Authors - [BSD-3][]. The license is kept in
+  `src/compiler/iyi/mod/sumdb/GO_LICENSE`.
+
 iyi's own standard library includes code derived from, and its benches a
 port of:
 
@@ -61,7 +69,7 @@ port of:
   `src/std/math.iyi`, and `bench/libm_oracle/core_math/`) - [MIT][]
 - [crystal-metric][] (`bench/metric/`) - [MIT][]
 
-Its benches vendor test vectors:
+iyi's benches and compiler specs vendor test vectors:
 
 - [NIST's ACVP-Server][] (`bench/std_mlkem_fixture/`, ML-KEM-768 vectors,
   a subset) - NIST's notice for NIST-developed software, kept whole with
@@ -71,6 +79,9 @@ Its benches vendor test vectors:
   Process under BCP 78 and the IETF Trust Legal Provisions, code
   components under the Simplified BSD License; the source, its terms and
   what was changed are in `bench/std_hpke_fixture/NOTICE`
+- [Wycheproof Ed25519 vectors](https://github.com/C2SP/wycheproof/tree/65ca494727a52944c204441c860b039e6786b99b/testvectors_v1)
+  (`spec/compiler/fixtures/sumdb/wycheproof_ed25519.json`) - Copyright Google
+  LLC, [Apache-2.0][].
 
 <!-- licenses -->
 [Apache-2.0]: https://www.openssl.org/source/apache-license-2.0.txt

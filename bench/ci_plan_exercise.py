@@ -64,13 +64,21 @@ reason, jobs = planned("bench/std_base64_exercise.sh")
 check("an exercise no step names is still run, through the siblings",
       "std-siblings" in jobs and reason.startswith("only bench files changed"), f"{reason}: {sorted(jobs)}")
 
-reason, jobs = planned("selfhost/parser/parser.iyi")
-check("a change to the port selects the job that diffs it against the compiler",
-      "selfhost" in jobs and "build" in jobs, f"{reason}: {sorted(jobs)}")
+port_jobs = {"port", "port-darwin", "port-windows"}
+for path in (
+    "selfhost/parser/parser.iyi",
+    "selfhost/semantic/infer_diff.sh",
+    "selfhost/codegen/emit.iyi",
+    "selfhost/codegen/fixtures/print.iyi",
+):
+    reason, jobs = planned(path)
+    check(f"{path} selects the port on all three hosts",
+          port_jobs <= jobs and "build" in jobs,
+          f"{reason}: {sorted(jobs)}")
 
 reason, jobs = planned("src/iyi/array.iyi")
-check("and a change that is not to the port does not",
-      "selfhost" not in jobs, f"{reason}: {sorted(jobs)}")
+check("an unrelated source change does not select the frontend port jobs",
+      not (port_jobs & jobs), f"{reason}: {sorted(jobs)}")
 
 reason, jobs = planned("bench/panics.sh")
 check("a gate a job runs selects that job", "windows-native" in jobs, f"{reason}: {sorted(jobs)}")
@@ -93,6 +101,19 @@ print("== a workflow and a bench directory of this exercise's own")
 spec = importlib.util.spec_from_file_location("ci_plan_under_test", PLANNER)
 planner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(planner)
+actual_jobs = planner.parse_jobs((ROOT / ".github" / "workflows" / "iyi.yml").read_text(encoding="utf-8"))
+for job in sorted(port_jobs):
+    check(f"result requires {job}", job in actual_jobs["result"]["needs"])
+    if job in actual_jobs:
+        steps = planner.code(actual_jobs[job]["text"])
+        for gate in (
+            "selfhost/lexer/diff.sh",
+            "selfhost/parser/diff.sh",
+            "selfhost/semantic/diff.sh",
+            "selfhost/semantic/infer_diff.sh",
+            "selfhost/codegen/diff.sh",
+        ):
+            check(f"{job} runs {gate}", f"bash {gate}" in steps)
 if not hasattr(planner, "Reach"):
     check("the planner reads what runs what (`Reach`)", False, f"{PLANNER} has no Reach")
 else:

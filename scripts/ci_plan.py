@@ -30,8 +30,8 @@ Within a pull request the changed files narrow it further:
   - only `bench/` files, each run by some job: those jobs and the docs gates;
   - anything under `.github/` or this script: everything, because a change to
     how CI runs is only proven by running it;
-  - anything under `selfhost/`: the port's own job as well, which diffs it
-    against the compiler it is a port of;
+  - anything under `selfhost/`: the port's Linux, macOS and Windows jobs,
+    which compare it against the hosted compiler on each host;
   - otherwise: the fast tier, plus every job that runs a changed bench file.
 
 A job runs a bench file when one of its steps names it, or names a bench
@@ -74,6 +74,9 @@ VARIABLE = re.compile(r"\$\{[^}]*\}|\$[A-Za-z_][A-Za-z0-9_]*")
 FAST = ["build", "iyi", "compiler-specs", "stdlib-specs", "targets",
         "cross-objects", "cross-run", "windows-probe", "windows-collector",
         "windows-runtime", "docs", "vscode"]
+
+# The LLVM/clang frontend port is separate from the native-backend jobs.
+PORT = ["port", "port-darwin", "port-windows"]
 
 # Not selected by this script: `plan` is the script, `result` reads every
 # selected job's outcome, and `release` gates itself on a `v*` tag.
@@ -289,10 +292,10 @@ def plan(jobs, event, ref, files, bench):
     if not code_files:
         return close_over_needs(jobs, selected), "only docs changed"
 
-    # The port is diffed against the compiler by its own job, and no bench
-    # file names `selfhost/`: a change to it reaches nothing by `Reach`.
+    # No bench file names `selfhost/`, so Reach cannot select the port's
+    # corpus and executable codegen checks when the port itself changes.
     if any(f.startswith("selfhost/") for f in code_files):
-        selected.add("selfhost")
+        selected.update(PORT)
 
     changed_bench = [f for f in code_files if f.startswith("bench/")]
     reach = Reach(jobs, bench) if changed_bench else None
@@ -316,9 +319,9 @@ def main():
         sys.exit("ci_plan: no event: pass --event or run under GitHub Actions")
 
     jobs = parse_jobs(WORKFLOW.read_text(encoding="utf-8"))
-    missing = [name for name in FAST if name not in jobs]
+    missing = [name for name in FAST + PORT if name not in jobs]
     if missing:
-        sys.exit(f"ci_plan: FAST names jobs the workflow does not have: {', '.join(missing)}")
+        sys.exit(f"ci_plan: planned jobs the workflow does not have: {', '.join(missing)}")
     # `result` is the one check a ruleset requires, so a job it does not
     # need could fail and still let a change through.
     unread = sorted(set(jobs) - NOT_PLANNED - set(jobs["result"]["needs"]))

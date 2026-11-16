@@ -2,15 +2,9 @@
 # The iyi-written codegen slice against the current compiler, by what the
 # programs do rather than by what they emit.
 #
-# Every other slice diffs an artifact: a token stream, a tree, a
-# declaration, a type. Two independent backends do not write the same
-# LLVM IR, and diffing the text would measure spelling. So each fixture
-# ends in `__iyi_exit`, both compilers turn it into an executable, and
-# this compares the status the two processes exit with. That is the one
-# observable both can be asked for without a runtime underneath the port.
-#
-# A fixture that exits 0 either way would pass for free, so a fixture is
-# required to exit non-zero and the gate says so rather than counting it.
+# Two independent backends do not write the same LLVM IR. Each fixture
+# is built by both, run, and compared by exit status and exact stdout bytes.
+# A fixture that exits 0 and prints nothing would pass for free.
 set -u
 # Homebrew is where this laptop keeps clang and libgc. On a machine
 # without it these add nothing and, unlike replacing PATH outright,
@@ -26,22 +20,31 @@ REPO="$(cd "$HERE/../.." && pwd)"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    HERE="$(cygpath -m "$HERE")"
+    REPO="$(cygpath -m "$REPO")"
+    WORK="$(cygpath -m "$WORK")"
+    EXE=.exe
+    PATH_SEP=';'
+    WINDOWS=1
+    ;;
+  *) EXE=; PATH_SEP=:; WINDOWS=0 ;;
+esac
+export CRYSTAL_PATH="$REPO/src"
+export IYI_PATH="$REPO/src${PATH_SEP}$REPO/selfhost"
+export IYI_CONFIG_PATH="$REPO/src"
+echo "  host: $(uname -s) $(uname -m)"
+
 [ -x "$REPO/bin/iyi" ] || { echo "  no $REPO/bin/iyi: run make first"; exit 1; }
 command -v clang > /dev/null || { echo "  no clang: the emitted IR cannot be assembled"; exit 1; }
 
-IYI_CACHE_DIR="$WORK/iyi" IYI_PATH="$REPO/src:$REPO/selfhost" \
-  "$REPO/bin/iyi" build -o "$WORK/emit" "$HERE/emit.iyi" > "$WORK/build.log" 2>&1 || {
+IYI_CACHE_DIR="$WORK/iyi" \
+  "$REPO/bin/iyi" build -o "$WORK/emit$EXE" "$HERE/emit.iyi" > "$WORK/build.log" 2>&1 || {
   echo "  the port does not build:"
-  grep -aoE "Error[^\"]{0,120}" "$WORK/build.log" | head -3 | sed 's|^|    |'
+  sed -n '1,20p' "$WORK/build.log"
   exit 1
 }
-
-# The emitter reads the prelude for a program that did not require it,
-# the way the compiler does, and it finds it on `IYI_PATH`. Exported
-# rather than put in front of each run, because the port is invoked in
-# two places below and a fixture that silently found no prelude would
-# look like a fixture whose program does not need one.
-export IYI_PATH="$REPO/src:$REPO/selfhost"
 
 fixtures=("$HERE"/fixtures/*.iyi)
 [ "$#" -gt 0 ] && fixtures=("$@")
@@ -49,26 +52,36 @@ fixtures=("$HERE"/fixtures/*.iyi)
 agree=0
 differ=0
 for fixture in "${fixtures[@]}"; do
+  [ "$WINDOWS" -eq 0 ] || fixture="$(cygpath -m "$fixture")" || exit 1
   name="$(basename "$fixture")"
 
   # The oracle: the current compiler builds it and it runs.
-  IYI_CACHE_DIR="$WORK/iyi" "$REPO/bin/iyi" build -o "$WORK/oracle" "$fixture" \
+  IYI_CACHE_DIR="$WORK/iyi" "$REPO/bin/iyi" build -o "$WORK/oracle$EXE" "$fixture" \
     > "$WORK/oracle.log" 2>&1 || {
     echo "  $name: the current compiler does not build it"
+    sed -n '1,20p' "$WORK/oracle.log"
     differ=$((differ + 1)); continue
   }
-  "$WORK/oracle" > "$WORK/oracle.out" 2>/dev/null; oracle_status=$?
+  "$WORK/oracle$EXE" > "$WORK/oracle.out" 2>/dev/null; oracle_status=$?
 
   # The port: emit IR, assemble it, and run that.
-  "$WORK/emit" "$fixture" > "$WORK/out.ll" 2> "$WORK/emit.err" || {
-    echo "  $name: the port did not emit"; differ=$((differ + 1)); continue
-  }
-  clang -Wno-override-module -o "$WORK/port" "$WORK/out.ll" > "$WORK/clang.log" 2>&1 || {
-    echo "  $name: the emitted IR does not assemble:"
-    grep -aoE "error:.{0,100}" "$WORK/clang.log" | head -3 | sed 's|^|    |'
+  "$WORK/emit$EXE" "$fixture" > "$WORK/out.ll" 2> "$WORK/emit.err" || {
+    echo "  $name: the port did not emit"
+    sed -n '1,20p' "$WORK/emit.err"
     differ=$((differ + 1)); continue
   }
-  "$WORK/port" > "$WORK/port.out" 2>/dev/null; port_status=$?
+  clang_args=(-Wno-override-module)
+  if [ "$WINDOWS" -eq 1 ]; then
+    # The emitted LLVM IR does not carry the default-library directives
+    # produced by a C frontend. Link the same dynamic CRT as iyi itself.
+    clang_args+=(--target=x86_64-pc-windows-msvc -lmsvcrt -lucrt -lvcruntime -lkernel32)
+  fi
+  clang -o "$WORK/port$EXE" "$WORK/out.ll" "${clang_args[@]}" > "$WORK/clang.log" 2>&1 || {
+    echo "  $name: the emitted IR does not assemble:"
+    sed -n '1,20p' "$WORK/clang.log"
+    differ=$((differ + 1)); continue
+  }
+  "$WORK/port$EXE" > "$WORK/port.out" 2>/dev/null; port_status=$?
 
   if [ "$oracle_status" -eq 0 ] && [ ! -s "$WORK/oracle.out" ]; then
     echo "  $name: exits 0 and prints nothing, which any emitter passes"
@@ -104,10 +117,14 @@ done
 # command line is how one is looked at, and that should not drag these in.
 refused=0
 if [ "$#" -eq 0 ]; then
+  if [ ! -f "$HERE/refuses/unheld_shape.iyi" ]; then
+    echo "  DIFFERS: required refusal unheld_shape.iyi is missing"
+    differ=$((differ + 1))
+  fi
   for program in "$HERE"/refuses/*.iyi; do
     [ -e "$program" ] || continue
     name="$(basename "$program")"
-    "$WORK/emit" "$program" > /dev/null 2> "$WORK/refuse.err"; status=$?
+    "$WORK/emit$EXE" "$program" > /dev/null 2> "$WORK/refuse.err"; status=$?
     if [ "$status" -eq 0 ]; then
       echo "  DIFFERS $name: the port emitted it, and it is meant to refuse"
       differ=$((differ + 1)); continue
@@ -119,6 +136,10 @@ if [ "$#" -eq 0 ]; then
     refused=$((refused + 1))
     echo "  $name refused: exit $status, $(head -1 "$WORK/refuse.err")"
   done
+  if [ "$agree" -lt 14 ]; then
+    echo "  DIFFERS: fewer than 14 supported fixtures agreed"
+    differ=$((differ + 1))
+  fi
 fi
 
 echo "  agree $agree, differ $differ, refused $refused"

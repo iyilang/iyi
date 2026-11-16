@@ -35,10 +35,27 @@ REPO="$(cd "$HERE/../.." && pwd)"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
+# Git Bash paths are not paths a native Windows compiler can open. Keep
+# the executable suffix and both compiler search paths native as well.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    HERE="$(cygpath -m "$HERE")"
+    REPO="$(cygpath -m "$REPO")"
+    WORK="$(cygpath -m "$WORK")"
+    EXE=.exe
+    WINDOWS=1
+    ;;
+  *) EXE=; WINDOWS=0 ;;
+esac
+export CRYSTAL_PATH="$REPO/src"
+export IYI_PATH="$REPO/src"
+export IYI_CONFIG_PATH="$REPO/src"
+echo "  host: $(uname -s) $(uname -m)"
+
 [ -x "$REPO/bin/iyi" ] || { echo "  no $REPO/bin/iyi: run make first"; exit 1; }
 
-IYI_CACHE_DIR="$WORK/iyi" IYI_PATH="$REPO/src" \
-  "$REPO/bin/iyi" build -o "$WORK/lexer" "$HERE/lexer.iyi" > "$WORK/build.log" 2>&1 || {
+IYI_CACHE_DIR="$WORK/iyi" \
+  "$REPO/bin/iyi" build -o "$WORK/lexer$EXE" "$HERE/lexer.iyi" > "$WORK/build.log" 2>&1 || {
   echo "  the port does not build:"
   grep -aoE "Error[^\"]{0,120}" "$WORK/build.log" | head -3 | sed 's|^|    |'
   exit 1
@@ -63,6 +80,7 @@ agree=0
 differ=0
 skipped=0
 for f in "${files[@]}"; do
+  [ "$WINDOWS" -eq 0 ] || f="$(cygpath -m "$f")" || exit 1
   CRYSTAL_CACHE_DIR="$WORK/cr" "$REPO/bin/crystal" run --no-color "$HERE/oracle.cr" -- "$f" 2>/dev/null \
     | grep -v "Using compiled" > "$WORK/a.txt"
   if [ ! -s "$WORK/a.txt" ]; then
@@ -73,7 +91,7 @@ for f in "${files[@]}"; do
   # Status and stderr kept rather than dropped: a crash and a wrong
   # token stream otherwise print the same diff of one file against
   # nothing.
-  "$WORK/lexer" "$f" > "$WORK/b.txt" 2> "$WORK/b.err"
+  "$WORK/lexer$EXE" "$f" > "$WORK/b.txt" 2> "$WORK/b.err"
   status=$?
   if [ "$status" -ne 0 ] || [ ! -s "$WORK/b.txt" ]; then
     echo "  PORT FAILED $(basename "$f"): exit $status, $(head -2 "$WORK/b.err" | tr '\n' ' ' | cut -c1-150)"

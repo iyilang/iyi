@@ -1011,18 +1011,27 @@ pub def emit_call(node : CallNode, body : Body, known : Known, constants : Const
     when StrNode
       name = constants.add(written.value)
       reg = body.register
-      body.write("#{reg} = call i64 @write(i32 1, ptr #{name}, i64 #{written.value.bytesize})")
+      {% if flag?(:win32) %}
+        body.write("#{reg} = call i32 @_write(i32 1, ptr #{name}, i32 #{written.value.bytesize})")
+      {% else %}
+        body.write("#{reg} = call i64 @write(i32 1, ptr #{name}, i64 #{written.value.bytesize})")
+      {% end %}
       return int_val("0")
     end
     said = emit(written, body, known, constants)
     if said.shape == "String"
       count = string_field(said, 0, body)
-      wide = body.register
-      body.write("#{wide} = sext i32 #{count} to i64")
       at = body.register
       body.write("#{at} = getelementptr inbounds i8, ptr #{said.text}, i64 8")
-      reg = body.register
-      body.write("#{reg} = call i64 @write(i32 1, ptr #{at}, i64 #{wide})")
+      {% if flag?(:win32) %}
+        reg = body.register
+        body.write("#{reg} = call i32 @_write(i32 1, ptr #{at}, i32 #{count})")
+      {% else %}
+        wide = body.register
+        body.write("#{wide} = sext i32 #{count} to i64")
+        reg = body.register
+        body.write("#{reg} = call i64 @write(i32 1, ptr #{at}, i64 #{wide})")
+      {% end %}
       return int_val("0")
     end
   end
@@ -1297,6 +1306,11 @@ end
 # before the exit is part of what the program does.
 pub def emit_main(nodes : Array(Node), known : Known, constants : Constants) : String
   body = Body.new("")
+  {% if flag?(:win32) %}
+    # MSVC stdout defaults to text mode. The hosted runtime writes bytes,
+    # so the generated program must not expand newlines to CRLF.
+    body.write("call i32 @_setmode(i32 1, i32 32768)")
+  {% end %}
   answer = int_val("0")
   nodes.each do |node|
     case node
@@ -1493,11 +1507,16 @@ end
 pub def prelude_path : String
   written = ENV["IYI_PATH"]?
   return "" if written.nil?
+  {% if flag?(:win32) %}
+    delimiter = ';'
+  {% else %}
+    delimiter = ':'
+  {% end %}
   here = ""
   index = 0
   while index <= written.bytesize
-    ch = index < written.bytesize ? written[index] : ':'
-    if ch == ':'
+    ch = index < written.bytesize ? written[index] : delimiter
+    if ch == delimiter
       found = "#{here}/iyi/prelude.iyi"
       return found if here != "" && File.exists?(found)
       here = ""
@@ -1538,11 +1557,14 @@ else
   end
 
   puts "; #{path}, emitted by selfhost/codegen/emit.iyi"
-  # The one thing this slice borrows from outside the program it is
-  # compiling. The current compiler writes the syscall itself; the port
-  # calls the C library's, and what the gate compares is the bytes that
-  # reach stdout either way.
-  puts "declare i64 @write(i32, ptr, i64)"
+  # This is the LLVM/clang-backed frontend port, not the LLVM-free backend.
+  # Windows' CRT uses 32-bit counts and return values even on x86-64.
+  {% if flag?(:win32) %}
+    puts "declare i32 @_write(i32, ptr, i32)"
+    puts "declare i32 @_setmode(i32, i32)"
+  {% else %}
+    puts "declare i64 @write(i32, ptr, i64)"
+  {% end %}
   puts "declare ptr @malloc(i64)"
   puts ""
   # A generic with nothing bound has no layout yet, and a primitive has

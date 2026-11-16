@@ -25,10 +25,26 @@ REPO="$(cd "$HERE/../.." && pwd)"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    HERE="$(cygpath -m "$HERE")"
+    REPO="$(cygpath -m "$REPO")"
+    WORK="$(cygpath -m "$WORK")"
+    EXE=.exe
+    PATH_SEP=';'
+    WINDOWS=1
+    ;;
+  *) EXE=; PATH_SEP=:; WINDOWS=0 ;;
+esac
+export CRYSTAL_PATH="$REPO/src"
+export IYI_PATH="$REPO/src${PATH_SEP}$REPO/selfhost"
+export IYI_CONFIG_PATH="$REPO/src"
+echo "  host: $(uname -s) $(uname -m)"
+
 [ -x "$REPO/bin/iyi" ] || { echo "  no $REPO/bin/iyi: run make first"; exit 1; }
 
-IYI_CACHE_DIR="$WORK/iyi" IYI_PATH="$REPO/src:$REPO/selfhost" \
-  "$REPO/bin/iyi" build -o "$WORK/parser" "$HERE/main.iyi" > "$WORK/build.log" 2>&1 || {
+IYI_CACHE_DIR="$WORK/iyi" \
+  "$REPO/bin/iyi" build -o "$WORK/parser$EXE" "$HERE/main.iyi" > "$WORK/build.log" 2>&1 || {
   echo "  the port does not build:"
   grep -aoE "Error[^\"]{0,120}" "$WORK/build.log" | head -3 | sed 's|^|    |'
   exit 1
@@ -42,6 +58,7 @@ agree=0
 differ=0
 no_oracle=0
 for f in "${files[@]}"; do
+  [ "$WINDOWS" -eq 0 ] || f="$(cygpath -m "$f")" || exit 1
   CRYSTAL_CACHE_DIR="$WORK/cr" "$REPO/bin/crystal" run --no-color "$HERE/oracle.cr" -- "$f" 2>/dev/null \
     | grep -v "Using compiled" > "$WORK/a.txt"
   # An oracle that printed nothing has not agreed or disagreed with
@@ -54,7 +71,7 @@ for f in "${files[@]}"; do
   fi
   # Status and stderr kept rather than dropped: a crash, a refusal and a
   # wrong tree all print the same blank `port:` line otherwise.
-  "$WORK/parser" "$f" > "$WORK/b.txt" 2> "$WORK/b.err"
+  "$WORK/parser$EXE" "$f" > "$WORK/b.txt" 2> "$WORK/b.err"
   status=$?
   if diff -q "$WORK/a.txt" "$WORK/b.txt" > /dev/null; then
     agree=$((agree + 1))

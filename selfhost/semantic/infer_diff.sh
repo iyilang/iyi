@@ -24,10 +24,26 @@ REPO="$(cd "$HERE/../.." && pwd)"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    HERE="$(cygpath -m "$HERE")"
+    REPO="$(cygpath -m "$REPO")"
+    WORK="$(cygpath -m "$WORK")"
+    EXE=.exe
+    PATH_SEP=';'
+    WINDOWS=1
+    ;;
+  *) EXE=; PATH_SEP=:; WINDOWS=0 ;;
+esac
+export CRYSTAL_PATH="$REPO/src"
+export IYI_PATH="$REPO/src${PATH_SEP}$REPO/selfhost"
+export IYI_CONFIG_PATH="$REPO/src"
+echo "  host: $(uname -s) $(uname -m)"
+
 [ -x "$REPO/bin/iyi" ] || { echo "  no $REPO/bin/iyi: run make first"; exit 1; }
 
-IYI_CACHE_DIR="$WORK/iyi" IYI_PATH="$REPO/src:$REPO/selfhost" \
-  "$REPO/bin/iyi" build -o "$WORK/infer" "$HERE/infer.iyi" > "$WORK/build.log" 2>&1 || {
+IYI_CACHE_DIR="$WORK/iyi" \
+  "$REPO/bin/iyi" build -o "$WORK/infer$EXE" "$HERE/infer.iyi" > "$WORK/build.log" 2>&1 || {
   echo "  the port does not build:"
   grep -aoE "Error[^\"]{0,120}" "$WORK/build.log" | head -3 | sed 's|^|    |'
   exit 1
@@ -38,13 +54,14 @@ fixtures=("$HERE"/fixtures/infer*.iyi)
 
 status=0
 for fixture in "${fixtures[@]}"; do
+  [ "$WINDOWS" -eq 0 ] || fixture="$(cygpath -m "$fixture")" || exit 1
   CRYSTAL_CACHE_DIR="$WORK/cr" "$REPO/bin/crystal" run --no-color \
     "$HERE/infer_oracle.cr" -- "$fixture" 2>/dev/null \
     | grep -v "Using compiled" > "$WORK/oracle.txt"
   # Status and stderr kept rather than dropped: "port answered nothing"
   # is true of a crash and of a refusal alike, and the sentence that
   # separates them was being discarded.
-  "$WORK/infer" "$fixture" > "$WORK/port.txt" 2> "$WORK/port.err"
+  "$WORK/infer$EXE" "$fixture" > "$WORK/port.txt" 2> "$WORK/port.err"
   port_status=$?
 
   name="$(basename "$fixture")"

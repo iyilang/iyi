@@ -25,17 +25,34 @@ REPO="$(cd "$HERE/../.." && pwd)"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    HERE="$(cygpath -m "$HERE")"
+    REPO="$(cygpath -m "$REPO")"
+    WORK="$(cygpath -m "$WORK")"
+    EXE=.exe
+    PATH_SEP=';'
+    WINDOWS=1
+    ;;
+  *) EXE=; PATH_SEP=:; WINDOWS=0 ;;
+esac
+export CRYSTAL_PATH="$REPO/src"
+export IYI_PATH="$REPO/src${PATH_SEP}$REPO/selfhost"
+export IYI_CONFIG_PATH="$REPO/src"
+echo "  host: $(uname -s) $(uname -m)"
+
 [ -x "$REPO/bin/iyi" ] || { echo "  no $REPO/bin/iyi: run make first"; exit 1; }
 
-IYI_CACHE_DIR="$WORK/iyi" IYI_PATH="$REPO/src:$REPO/selfhost" \
-  "$REPO/bin/iyi" build -o "$WORK/declare" "$HERE/declare.iyi" > "$WORK/build.log" 2>&1 || {
+IYI_CACHE_DIR="$WORK/iyi" \
+  "$REPO/bin/iyi" build -o "$WORK/declare$EXE" "$HERE/declare.iyi" > "$WORK/build.log" 2>&1 || {
   echo "  the port does not build:"
   grep -aoE "Error[^\"]{0,120}" "$WORK/build.log" | head -3 | sed 's|^|    |'
   exit 1
 }
-CRYSTAL_PATH="$REPO/src" IYI_CONFIG_PATH="$REPO/src" CRYSTAL_CACHE_DIR="$WORK/cr" \
-  "$REPO/bin/crystal" build -Di_know_what_im_doing -o "$WORK/oracle" "$HERE/oracle.cr" >/dev/null 2>&1 || {
-  echo "  the oracle does not build"
+CRYSTAL_CACHE_DIR="$WORK/cr" \
+  "$REPO/bin/crystal" build -Di_know_what_im_doing -o "$WORK/oracle$EXE" "$HERE/oracle.cr" >"$WORK/oracle-build.log" 2>&1 || {
+  echo "  the oracle does not build:"
+  sed -n '1,20p' "$WORK/oracle-build.log"
   exit 1
 }
 
@@ -46,7 +63,8 @@ agree=0
 differ=0
 no_oracle=0
 for f in "${files[@]}"; do
-  IYI_PATH="$REPO/src:$REPO/selfhost" "$WORK/oracle" "$f" > "$WORK/a.txt" 2> "$WORK/a.err"
+  [ "$WINDOWS" -eq 0 ] || f="$(cygpath -m "$f")" || exit 1
+  "$WORK/oracle$EXE" "$f" > "$WORK/a.txt" 2> "$WORK/a.err"
   # An empty answer is the pass refusing the file, not a file that
   # declares nothing: every sample declares something.
   if [ ! -s "$WORK/a.txt" ] || [ -z "$(tr -d '[:space:]' < "$WORK/a.txt")" ]; then
@@ -59,7 +77,7 @@ for f in "${files[@]}"; do
   # `port:` with nothing after it: a crash, a file it refused, and a
   # genuinely wrong answer all print the same blank line, and the one
   # sentence that would have said which was being thrown away.
-  IYI_PATH="$REPO/src:$REPO/selfhost" "$WORK/declare" "$f" > "$WORK/b.txt" 2> "$WORK/b.err"
+  "$WORK/declare$EXE" "$f" > "$WORK/b.txt" 2> "$WORK/b.err"
   status=$?
   if diff -q "$WORK/a.txt" "$WORK/b.txt" > /dev/null; then
     agree=$((agree + 1))

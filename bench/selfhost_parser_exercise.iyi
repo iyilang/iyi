@@ -716,8 +716,10 @@ module BenchSelfhostParserExercise
     # `ClassDef` here, so those two are read back directly.
     def_node = exps[0].as(Def)
     assert(def_node.name == "foo", "def name")
+    assert(def_node.return_type.is_a?(Path), "def return type must be a path")
     assert(def_node.return_type.as(Path).names.join("::") == "String", "def return type")
     class_node = exps[1].as(ClassDef)
+    assert(class_node.superclass.is_a?(Path), "class superclass must be a path")
     assert(class_node.superclass.as(Path).names.join("::") == "Foo", "class superclass")
 
     # A trait implementation, whose target is a path written without a leading

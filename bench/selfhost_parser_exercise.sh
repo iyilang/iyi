@@ -974,10 +974,9 @@ run_proof_all "mutation 3: altering block recognition in parse_block" \
 run_proof "mutation 4: altering modifier if form recognition" \
   'If.new(exp, res, Nop.new)' 'Unless.new(exp, res, Nop.new)'
 
-# Mutation 5: break splat argument in parse_call_arg. The original sed replaced
-# both the Splat and the DoubleSplat site, since the second contains the first.
-run_proof_all "mutation 5: altering splat argument parsing in parse_call_arg" \
-  'Splat.new(parse_op_assign_no_control).at(location)' 'parse_op_assign_no_control'
+# Mutation 5: remove the splat wrapper without matching DoubleSplat's suffix.
+run_proof "mutation 5: altering splat argument parsing in parse_call_arg" \
+  '      Splat.new(parse_op_assign_no_control).at(location)' '      parse_op_assign_no_control'
 
 # Mutation 6: break return type parsing in parse_def_helper
 run_proof "mutation 6: altering return type parsing in parse_def_helper" \

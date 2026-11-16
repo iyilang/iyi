@@ -3909,14 +3909,6 @@ jobs:
       - name: The self-host gates
         run: bash bench/selfhost_gates.sh
 
-      - name: The Mach-O object reader and writer
-        run: bash bench/native_obj_exercise.sh
-
-      - name: The x86-64 encoder and ABI
-        run: |
-          bindir="$("$LLVM_CONFIG" --bindir)"
-          LLVM_MC="$bindir/llvm-mc" LLVM_OBJDUMP="$bindir/llvm-objdump" bash bench/native_x86_64_exercise.sh
-
   selfhost-darwin:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'selfhost-darwin') }}

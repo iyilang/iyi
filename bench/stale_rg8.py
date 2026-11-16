@@ -53,7 +53,8 @@ def compiler_env(repo: str, cache: str) -> dict[str, str]:
     env["IYI_CACHE_DIR"] = cache
     env["IYI_PATH"] = f"{repo}/src{os.pathsep}{repo}/samples/iyi"
     env["IYI_LIBRARY_PATH"] = f"{repo}/lib"
-    env.setdefault("LIBRARY_PATH", "/opt/homebrew/opt/bdw-gc/lib")
+    if sys.platform == "darwin":
+        env.setdefault("LIBRARY_PATH", "/opt/homebrew/opt/bdw-gc/lib")
     env["DUMP"] = "1"
     env["IYI_DUMP_TYPE_ID"] = "1"
     return env

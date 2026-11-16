@@ -5,15 +5,31 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-WORK="$(mktemp -d /tmp/stale_equiv.XXXXXX)"
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) WINDOWS=1; REPO="$(cygpath -m "$REPO")" ;;
+  *) WINDOWS=0 ;;
+esac
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/stale_equiv.XXXXXX")"
+[ "$WINDOWS" -eq 0 ] || WORK="$(cygpath -m "$WORK")"
 trap 'rm -rf "$WORK"' EXIT
 
 MODE="${1:-all}"
 
-IYI="${IYI:-$REPO/bin/iyi}"
+if [ "$WINDOWS" -eq 1 ]; then
+  IYI="${IYI:-$REPO/.build/iyi.exe}"
+  IYI="$(cygpath -m "$IYI")"
+else
+  IYI="${IYI:-$REPO/bin/iyi}"
+fi
 if [ ! -x "$IYI" ]; then
+  if [ "$WINDOWS" -eq 1 ]; then
+    echo "iyi compiler not found at $IYI; build .build/iyi.exe first" >&2
+    exit 1
+  fi
   echo "iyi compiler not found at $IYI. Building..." >&2
-  export LIBRARY_PATH="${LIBRARY_PATH:-/opt/homebrew/opt/bdw-gc/lib}"
+  if [ "$(uname -s)" = Darwin ]; then
+    export LIBRARY_PATH="${LIBRARY_PATH:-/opt/homebrew/opt/bdw-gc/lib}"
+  fi
   (cd "$REPO" && make -j8 && make iyi)
 fi
 
@@ -31,10 +47,13 @@ if [ -z "$PY" ]; then
 fi
 if [ -n "${IYI_PROOF_EVIDENCE_DIR:-}" ]; then
   case "$IYI_PROOF_EVIDENCE_DIR" in
-    /*) ;;
+    /*|[A-Za-z]:/*|[A-Za-z]:\\*) ;;
     *) echo "IYI_PROOF_EVIDENCE_DIR must be an absolute path: $IYI_PROOF_EVIDENCE_DIR" >&2; exit 1 ;;
   esac
   _PHYSICAL_DIR="$(cd -P "$IYI_PROOF_EVIDENCE_DIR" 2>/dev/null && pwd -P || true)"
+  if [ "$WINDOWS" -eq 1 ] && [ -n "$_PHYSICAL_DIR" ]; then
+    _PHYSICAL_DIR="$(cygpath -m "$_PHYSICAL_DIR")"
+  fi
   if [ -z "$_PHYSICAL_DIR" ] || [ ! -d "$_PHYSICAL_DIR" ]; then
     echo "IYI_PROOF_EVIDENCE_DIR must be an existing directory: $IYI_PROOF_EVIDENCE_DIR" >&2
     exit 1
@@ -151,7 +170,7 @@ def matches_outside_mask(expected, actual, mask):
 
 def check(item):
     index, program = item
-    name = os.path.relpath(program, repo)
+    name = os.path.relpath(program, repo).replace(chr(92), '/')
     timeout = timeout_for(name)
     item_dir = safe_item_dir(stage_dir, name)
     directory = os.path.join(work, str(index))
@@ -164,8 +183,9 @@ def check(item):
     observed_dir = os.path.join(directory, 'observed')
     os.makedirs(normal_dir, exist_ok=True)
     os.makedirs(observed_dir, exist_ok=True)
-    normal = os.path.join(normal_dir, stem)
-    observed = os.path.join(observed_dir, stem)
+    suffix = '.exe' if os.name == 'nt' else ''
+    normal = os.path.join(normal_dir, stem + suffix)
+    observed = os.path.join(observed_dir, stem + suffix)
     trace = os.path.join(item_dir, 'trace.bin') if item_dir else os.path.join(directory, 'trace.bin')
 
     try:
@@ -340,7 +360,7 @@ def matches_outside_mask(expected, actual, mask):
 
 def check_rg2a(item):
     index, program = item
-    name = os.path.relpath(program, repo)
+    name = os.path.relpath(program, repo).replace(chr(92), '/')
     timeout = timeout_for(name)
     item_dir = safe_item_dir(stage_dir, name)
     directory = os.path.join(work, 'rg2a_' + str(index))
@@ -348,7 +368,7 @@ def check_rg2a(item):
     cache = os.path.join(directory, 'cache')
     os.makedirs(cache, exist_ok=True)
     env = dict(os.environ, IYI_CACHE_DIR=cache)
-    normal = os.path.join(directory, 'normal.bin')
+    normal = os.path.join(directory, 'normal.exe' if os.name == 'nt' else 'normal.bin')
     empty_dir = os.path.join(directory, 'empty_dir')
     os.makedirs(empty_dir, exist_ok=True)
 
@@ -538,8 +558,8 @@ shutil.copytree(os.path.join(repo, 'src'), os.path.join(patched_lib, 'src'))
 
 for kind in kinds:
     fixture_src = os.path.join(work, f'{kind}_fixture.iyi')
-    bin_normal = os.path.join(work, f'{kind}_normal.bin')
-    bin_patched = os.path.join(work, f'{kind}_patched.bin')
+    bin_normal = os.path.join(work, f'{kind}_normal' + ('.exe' if os.name == 'nt' else '.bin'))
+    bin_patched = os.path.join(work, f'{kind}_patched' + ('.exe' if os.name == 'nt' else '.bin'))
     trace_a = os.path.join(work, f'{kind}_trace_a.bin')
     trace_b = os.path.join(work, f'{kind}_trace_b.bin')
 
@@ -701,6 +721,8 @@ SystemRoots.load
     env_a['INPUT_DIR'] = input_dir_a
     env_a['TEST_INPUT'] = 'value_alpha'
     env_a['TMPDIR'] = fixture_scratch
+    if os.name == 'nt':
+        env_a['TMP'] = env_a['TEMP'] = fixture_scratch
     subprocess.run([bin_normal], env=env_a, capture_output=True, text=True)
 
     # Run with input B
@@ -710,6 +732,8 @@ SystemRoots.load
     env_b['INPUT_DIR'] = input_dir_b
     env_b['TEST_INPUT'] = 'value_beta'
     env_b['TMPDIR'] = fixture_scratch
+    if os.name == 'nt':
+        env_b['TMP'] = env_b['TEMP'] = fixture_scratch
     subprocess.run([bin_normal], env=env_b, capture_output=True, text=True)
 
     if not os.path.exists(trace_a) or not os.path.exists(trace_b):
@@ -983,10 +1007,11 @@ def _check_probe_inner(item):
     for d in [normal_dir, observed_dir, producer_dir, artifact_dir, mods_dir]:
         os.makedirs(d, exist_ok=True)
 
-    normal_bin = os.path.join(normal_dir, name)
-    observed_bin = os.path.join(observed_dir, name)
-    producer_bin = os.path.join(producer_dir, name)
-    artifact_bin = os.path.join(artifact_dir, name)
+    suffix = '.exe' if os.name == 'nt' else ''
+    normal_bin = os.path.join(normal_dir, name + suffix)
+    observed_bin = os.path.join(observed_dir, name + suffix)
+    producer_bin = os.path.join(producer_dir, name + suffix)
+    artifact_bin = os.path.join(artifact_dir, name + suffix)
 
     # 1. normal build
     cache_n = os.path.join(directory, 'cache_n')
@@ -1132,6 +1157,8 @@ def check_probe(item):
     except CaptureError as err:
         return item[0], f'evidence capture failure: {err}'
 
+if os.name == 'nt':
+    print('NOT PROVEN on windows: backtrace frame equivalence (these probes do not import the Windows std/debug resolver)', flush=True)
 with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
     results = list(executor.map(check_probe, probes.items()))
 
@@ -1139,6 +1166,8 @@ failures = []
 for name, err in results:
     if err:
         failures.append((name, err))
+    elif os.name == 'nt':
+        print(f'  [rg2r] {name}: exit/stdout equal, stderr compared, RG9 3-way callpath match with 0 mismatch')
     else:
         print(f'  [rg2r] {name}: frames equivalent, exit/stdout equal, RG9 3-way callpath match with 0 mismatch')
 
@@ -1146,7 +1175,10 @@ if failures:
     for name, reason in failures:
         print(f'  FAILED: {name} -> {reason}', file=sys.stderr)
     sys.exit(1)
-print(f'RG2r PASSED: all {len(probes)} probes pass strict frame equivalence between normal, observed and artifact, plus RG9 artifact determinism')
+if os.name == 'nt':
+    print(f'RG2r PASSED: all {len(probes)} probes pass exit, stdout, stderr and RG9 artifact checks; frame equivalence is not proven')
+else:
+    print(f'RG2r PASSED: all {len(probes)} probes pass strict frame equivalence between normal, observed and artifact, plus RG9 artifact determinism')
 " "$REPO" "$IYI" "$WORK"
 }
 

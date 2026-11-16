@@ -197,7 +197,7 @@ def calibrate(compiler, work, env, targets):
     probe.write_module(0)
     probe.put("probe.iyi", test_source(0, (0, 0), 20_000_000, 17).replace(
         "import mods/m0000::{work_m0000}\nimport mods/m0000::{work_m0000}\n", "import mods/m0000::{work_m0000}\n"))
-    binary = os.path.join(probe.root, "probe-bin")
+    binary = os.path.join(probe.root, "probe-bin" + (".exe" if os.name == "nt" else ""))
     _, built = run(compiler, ["build", "-o", binary, "probe.iyi"], probe.root, env, timeout=600)
     if built.returncode != 0:
         sys.exit("the calibration program does not build:\n" + (built.stdout + built.stderr)[-800:])
@@ -210,7 +210,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--tests", type=int, default=1000)
     parser.add_argument("--modules", type=int, default=0, help="library modules; a tenth of --tests unless given")
-    parser.add_argument("--compiler", default=os.environ.get("IYI") or os.path.join(REPO, "bin", "iyi"))
+    parser.add_argument("--compiler", default=os.environ.get("IYI") or
+                        os.path.join(REPO, ".build", "iyi.exe") if os.name == "nt"
+                        else os.environ.get("IYI") or os.path.join(REPO, "bin", "iyi"))
     parser.add_argument("--work", default="", help="where to write the suite; a temporary directory unless given")
     parser.add_argument("--scenarios", default=",".join(SCENARIOS))
     parser.add_argument("--medium", type=float, default=0.1, help="seconds a medium test's loop should take")
@@ -251,11 +253,12 @@ def main():
     print(f"{args.tests} tests, {modules} modules, in {suite.root}")
     print(f"  loop counts: {counts[0]} tests at 0, {counts[1]} at {iterations[1]:,}, {counts[2]} at {iterations[2]:,}"
           + (f" ({per_second / 1e6:.0f} million iterations a second here)" if per_second else ""))
-    print(f"  {os.cpu_count()} cores, load average {os.getloadavg()[0]:.0f}")
+    load = os.getloadavg()[0] if hasattr(os, "getloadavg") else None
+    print(f"  {os.cpu_count()} cores" + (f", load average {load:.0f}" if load is not None else ", load average unavailable"))
     print()
 
     report = {"tests": args.tests, "modules": modules, "iterations": iterations, "cores": os.cpu_count(),
-              "load_average": os.getloadavg()[0], "compiler": compiler, "scenarios": {}}
+              "load_average": load, "compiler": compiler, "scenarios": {}}
     wrong = []
     recorded = False
     # --audit checks each fast serve against the compiler's own answer (RG10); plain runs never set it.

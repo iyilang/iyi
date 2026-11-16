@@ -732,7 +732,8 @@ describe "Iyi::Stale S6a: Store and Receipts" do
   # both helper processes from Python; POSIX can run them directly.
   {% if flag?(:win32) %}
     it "survives two concurrent processes each recording 1,000 receipts (row 21)" do
-      Process.run("bash", ["bench/stale_store_concurrency.sh"]).success?.should be_true
+      Process.run("bash", ["bench/stale_store_concurrency.sh"],
+        output: Process::Redirect::Inherit, error: Process::Redirect::Inherit).success?.should be_true
     end
   {% else %}
     it "survives two concurrent processes each recording 1,000 receipts (row 21)" do

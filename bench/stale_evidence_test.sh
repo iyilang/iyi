@@ -32,7 +32,12 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WORK="$(mktemp -d /tmp/iyi-evidence-test.XXXXXX)"
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) WINDOWS=1; REPO="$(cygpath -m "$REPO")" ;;
+  *) WINDOWS=0 ;;
+esac
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/iyi-evidence-test.XXXXXX")"
+[ "$WINDOWS" -eq 0 ] || WORK="$(cygpath -m "$WORK")"
 trap 'rm -rf "$WORK"' EXIT
 
 PYTHON="${PYTHON:-python3}"
@@ -163,7 +168,7 @@ evid_root = os.path.join(work, 'traversal_root')
 os.makedirs(evid_root, exist_ok=True)
 stage = safe_stage_dir(evid_root, 'rg2')
 
-for attempt in ['../escape', '../../etc/passwd', '/absolute/escape', 'samples/../../../escape', 'samples/\0nullbyte', '.', '']:
+for attempt in ['../escape', '../../etc/passwd', os.path.abspath(os.path.join(os.path.sep, 'absolute', 'escape')), 'samples/../../../escape', 'samples/\0nullbyte', '.', '']:
     try:
         safe_item_dir(stage, attempt)
         assert False, f'expected ValueError for traversal attempt {attempt!r}'
@@ -220,6 +225,105 @@ PYEOF
 # Step 5: Status distinction: child exit 124 vs runner timeout vs signal vs launch error
 # --------------------------------------------------------------------------
 step 5 "status distinguishes numeric exit 124, timeout with explicit flag, signal, and launch error"
+if [ "$WINDOWS" -eq 1 ]; then
+  "$PYTHON" - "$REPO" "$WORK" <<'PYEOF'
+import ctypes, msvcrt, os, subprocess, sys, time
+from ctypes import wintypes
+repo, work = sys.argv[1:]
+sys.path.insert(0, os.path.join(repo, "bench"))
+from stale_evidence import safe_stage_dir, safe_item_dir, execute_cmd
+
+k = ctypes.WinDLL("kernel32", use_last_error=True)
+k.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+k.OpenProcess.restype = wintypes.HANDLE
+k.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+k.WaitForSingleObject.restype = wintypes.DWORD
+k.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+k.CloseHandle.argtypes = [wintypes.HANDLE]
+root = os.path.join(work, "status_root")
+os.makedirs(root)
+item = safe_item_dir(safe_stage_dir(root, "rg2"), "samples/iyi/test_sample.iyi")
+res = execute_cmd([sys.executable, "-c", "import sys; sys.exit(124)"],
+                  timeout=5, item_dir=item, leg="child_124")
+assert res.returncode == 124
+assert open(os.path.join(item, "child_124.status")).read() == "EXIT:124\n"
+assert not os.path.exists(os.path.join(item, "child_124.timeout"))
+try:
+    execute_cmd([sys.executable, "-c", "import sys,time; print('partial', flush=True); time.sleep(10)"],
+                timeout=2, item_dir=item, leg="timeout_leg")
+    raise AssertionError("expected TimeoutExpired")
+except subprocess.TimeoutExpired:
+    pass
+assert open(os.path.join(item, "timeout_leg.exit")).read() == "TIMEOUT\n"
+assert open(os.path.join(item, "timeout_leg.stdout"), "rb").read().replace(b"\r\n", b"\n") == b"partial\n"
+try:
+    execute_cmd([os.path.join(work, "no-such-executable.exe")],
+                timeout=5, item_dir=item, leg="error_leg")
+    raise AssertionError("expected FileNotFoundError")
+except FileNotFoundError:
+    pass
+assert open(os.path.join(item, "error_leg.exit")).read() == "LAUNCH_ERROR\n"
+
+# Windows reports TerminateProcess as a numeric exit, not a POSIX signal.
+print("SKIP evidence step 5.C (signal sidecar): Windows has no POSIX signal exit status")
+res = execute_cmd([sys.executable, "-c", "import os; os._exit(15)"],
+                  timeout=5, item_dir=item, leg="numeric_termination")
+assert res.returncode == 15
+assert open(os.path.join(item, "numeric_termination.status")).read() == "EXIT:15\n"
+assert not os.path.exists(os.path.join(item, "numeric_termination.signal"))
+
+control_r, control_w = os.pipe()
+handle = msvcrt.get_osfhandle(control_r)
+os.set_handle_inheritable(handle, True)
+startup = subprocess.STARTUPINFO()
+startup.lpAttributeList = {"handle_list": [handle]}
+kill_dir = safe_item_dir(os.path.join(root, "rg2"), "samples/iyi/killed.iyi")
+pid_file = os.path.join(work, "killed-child.pid")
+child_code = ("import os,sys\n"
+              f"open({pid_file!r},'w').write(str(os.getpid()))\n"
+              "sys.stdout.write('streamed chunk before runner death\\n'); sys.stdout.flush()\n"
+              "os.read(0, 1)\n")
+runner_code = (f"import os,sys\nsys.path.insert(0,{os.path.join(repo, 'bench')!r})\n"
+               "from stale_evidence import execute_cmd\n"
+               f"execute_cmd([sys.executable,'-c',{child_code!r}], item_dir={kill_dir!r}, leg='kill_leg')\n")
+sentinel = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+runner = subprocess.Popen([sys.executable, "-c", runner_code], stdin=control_r,
+                          startupinfo=startup, close_fds=True)
+os.close(control_r)
+child_handle = None
+try:
+    output = os.path.join(kill_dir, "kill_leg.stdout")
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        if os.path.exists(pid_file) and os.path.exists(output) and os.path.getsize(output):
+            break
+        if runner.poll() is not None:
+            raise AssertionError(f"runner exited early: {runner.returncode}")
+        time.sleep(.05)
+    assert os.path.exists(pid_file) and os.path.exists(output)
+    child_handle = k.OpenProcess(0x00100000, False, int(open(pid_file).read()))
+    assert child_handle and k.WaitForSingleObject(child_handle, 0) == 258
+    before = open(output, "rb").read()
+    assert before.replace(b"\r\n", b"\n") == b"streamed chunk before runner death\n"
+    if not k.TerminateProcess(int(runner._handle), 137):
+        raise ctypes.WinError(ctypes.get_last_error())
+    assert runner.wait(timeout=10) == 137
+    assert k.WaitForSingleObject(child_handle, 0) == 258
+    assert open(output, "rb").read() == before
+    os.close(control_w)
+    control_w = None
+    assert k.WaitForSingleObject(child_handle, 5000) == 0, "child survived pipe EOF"
+    assert sentinel.poll() is None
+finally:
+    if control_w is not None:
+        os.close(control_w)
+    if child_handle:
+        k.CloseHandle(child_handle)
+    if runner.poll() is None:
+        runner.kill(); runner.wait()
+    sentinel.kill(); sentinel.wait()
+PYEOF
+else
 "$PYTHON" - "$REPO" "$WORK" <<'PYEOF'
 import os, sys, subprocess, signal, time
 repo, work = sys.argv[1:3]
@@ -458,11 +562,91 @@ finally:
         except Exception:
             pass
 PYEOF
+fi
 
 # --------------------------------------------------------------------------
 # Step 6: Fail-closed negative controls for real pump error and unresolved writers
 # --------------------------------------------------------------------------
 step 6 "fail-closed controls: pump error and unresolved writers force failure"
+if [ "$WINDOWS" -eq 1 ]; then
+  "$PYTHON" - "$REPO" "$WORK" <<'PYEOF'
+import ctypes, msvcrt, os, subprocess, sys, time
+from ctypes import wintypes
+repo, work = sys.argv[1:]
+sys.path.insert(0, os.path.join(repo, "bench"))
+from stale_evidence import safe_stage_dir, safe_item_dir, execute_cmd, CaptureError
+k = ctypes.WinDLL("kernel32", use_last_error=True)
+k.GetStdHandle.argtypes = [wintypes.DWORD]
+k.GetStdHandle.restype = wintypes.HANDLE
+k.SetStdHandle.argtypes = [wintypes.DWORD, wintypes.HANDLE]
+k.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+k.OpenProcess.restype = wintypes.HANDLE
+k.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+k.WaitForSingleObject.restype = wintypes.DWORD
+k.CloseHandle.argtypes = [wintypes.HANDLE]
+root = os.path.join(work, "fail_closed_root")
+os.makedirs(root)
+stage = safe_stage_dir(root, "rg2")
+item_io = safe_item_dir(stage, "samples/iyi/io_fail.iyi")
+fsync = os.fsync
+def failing_fsync(fd):
+    raise OSError(28, "No space left on device")
+os.fsync = failing_fsync
+try:
+    try:
+        execute_cmd([sys.executable, "-c", "print('hello', flush=True)"], item_dir=item_io, leg="fail_io")
+        raise AssertionError("expected CaptureError")
+    except CaptureError as e:
+        assert "No space left on device" in str(e)
+finally:
+    os.fsync = fsync
+assert open(os.path.join(item_io, "fail_io.exit")).read() == "IO_ERROR\n"
+
+def check_unresolved(name, timeout_parent):
+    item = safe_item_dir(stage, "samples/iyi/" + name + ".iyi")
+    read_fd, write_fd = os.pipe()
+    handle = msvcrt.get_osfhandle(read_fd)
+    os.set_handle_inheritable(handle, True)
+    std_input = wintypes.DWORD(-10).value
+    previous = k.GetStdHandle(std_input)
+    if not k.SetStdHandle(std_input, handle):
+        raise ctypes.WinError(ctypes.get_last_error())
+    pid_path = os.path.join(work, name + ".pid")
+    grandchild = f"import os; open({pid_path!r},'w').write(str(os.getpid())); os.read(0,1)"
+    child = ("import subprocess,sys,time\n"
+             f"subprocess.Popen([sys.executable,'-c',{grandchild!r}], stdout=sys.stdout)\n"
+             + ("time.sleep(15)\n" if timeout_parent else ""))
+    gc_handle = None
+    try:
+        try:
+            execute_cmd([sys.executable, "-c", child], timeout=2, item_dir=item, leg=name)
+            raise AssertionError("expected unresolved writer failure")
+        except CaptureError as e:
+            assert "unclosed" in str(e).lower()
+        except subprocess.TimeoutExpired:
+            raise AssertionError("timeout masked unresolved writers")
+        assert open(os.path.join(item, name + ".exit")).read() == "UNRESOLVED_WRITERS\n"
+        assert os.path.isfile(os.path.join(item, name + ".unresolved"))
+        if timeout_parent:
+            assert os.path.isfile(os.path.join(item, name + ".timeout"))
+            assert "UNRESOLVED_WRITERS:TIMEOUT" in open(os.path.join(item, name + ".status")).read()
+        assert os.path.isfile(pid_path)
+        gc_handle = k.OpenProcess(0x00100000, False, int(open(pid_path).read()))
+        assert gc_handle and k.WaitForSingleObject(gc_handle, 0) == 258
+    finally:
+        k.SetStdHandle(std_input, previous)
+        os.close(read_fd)
+        os.close(write_fd)
+    try:
+        assert k.WaitForSingleObject(gc_handle, 5000) == 0, "grandchild survived pipe EOF"
+    finally:
+        if gc_handle:
+            k.CloseHandle(gc_handle)
+
+check_unresolved("unres_leg", False)
+check_unresolved("timeout_unres", True)
+PYEOF
+else
 "$PYTHON" - "$REPO" "$WORK" <<'PYEOF'
 import os, sys, subprocess, tempfile, time
 repo, work = sys.argv[1:3]
@@ -592,6 +776,7 @@ for _ in range(40):
 else:
     assert False, 'timeout grandchild failed to terminate on pipe EOF'
 PYEOF
+fi
 
 # --------------------------------------------------------------------------
 # Step 7: End-to-end stale_equivalence.sh entry path with fake compiler
@@ -602,6 +787,69 @@ step 7 "exercising actual stale_equivalence.sh entry path against fake compiler"
 FAKE_BIN="$WORK/fake_bin"
 mkdir -p "$FAKE_BIN"
 FAKE_IYI="$FAKE_BIN/iyi"
+if [ "$WINDOWS" -eq 1 ]; then
+  FAKE_IYI="$FAKE_IYI.exe"
+  cat > "$WORK/fake_iyi.c" <<'C'
+#include <windows.h>
+#include <fcntl.h>
+#include <io.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+int main(int argc, char **argv) {
+  char self[MAX_PATH];
+  if (!GetModuleFileNameA(NULL, self, sizeof(self))) return 1;
+  if (argc > 1 && strcmp(argv[1], "build") == 0) {
+    const char *out = NULL, *key = NULL, *mods = NULL;
+    for (int i = 2; i < argc; ++i) {
+      if (!strcmp(argv[i], "-o") && i + 1 < argc) out = argv[++i];
+      else if (!strcmp(argv[i], "--stale-key") && i + 1 < argc) key = argv[++i];
+      else if (!strcmp(argv[i], "--emit-iyimod") && i + 1 < argc) mods = argv[++i];
+      else if (!strcmp(argv[i], "--use-iyimod") && i + 1 < argc) ++i;
+    }
+    if (key) {
+      FILE *f = fopen(key, "wb");
+      if (!f) return 1;
+      fputs("{\"portable\":{\"callpath\":\"cp_mock_123\"},\"reach\":{\"mismatch\":[]}}\n", f);
+      fclose(f);
+    }
+    if (mods) {
+      char path[32768];
+      snprintf(path, sizeof(path), "%s/module.iyimod", mods);
+      FILE *f = fopen(path, "wb");
+      if (!f) return 1;
+      fclose(f);
+    }
+    if (out && !CopyFileA(self, out, FALSE)) return 1;
+    return 0;
+  }
+  _setmode(_fileno(stdout), _O_BINARY);
+  _setmode(_fileno(stderr), _O_BINARY);
+  const char *trace = getenv("IYI_OBSERVE");
+  if (trace) {
+    FILE *f = fopen(trace, "wb");
+    if (!f) return 1;
+    fputs("trace_mock_data\n", f);
+    fclose(f);
+  }
+  fputs("dir: answered\nenv: answered\nrecursion: answered\ncapped: answered\n", stdout);
+  fputs("[panic] unhandled exception: probe check failure\n", stderr);
+  if (getenv("FAKE_MUTATE_FRAME") && (strstr(self, "\\artifact\\") || strstr(self, "/artifact/")))
+    fputs("0   fake_probe   0x0000000100001000 attempt_mutated@src/std/dir.iyi:10 + 16\n", stderr);
+  else
+    fputs("0   fake_probe   0x0000000100001000 attempt@src/std/dir.iyi:10 + 16\n", stderr);
+  fputs("1   fake_probe   0x0000000100002000 main + 32\n", stderr);
+  return 0;
+}
+C
+  "$PYTHON" - "$WORK" "$FAKE_IYI" <<'PYEOF'
+import os, subprocess, sys
+work, exe = sys.argv[1:]
+subprocess.run(["cl.exe", "/nologo", "/O2", "/Fe:" + exe, os.path.join(work, "fake_iyi.c")],
+               cwd=work, check=True)
+PYEOF
+else
 
 cat > "$FAKE_IYI" <<'SH'
 #!/usr/bin/env bash
@@ -693,6 +941,7 @@ fi
 exit 0
 SH
 chmod +x "$FAKE_IYI"
+fi
 
 # 7A: Run RG2r without evidence directory (no-evidence mode)
 step 7.1 "RG2r entry path in no-evidence mode passes without persisting evidence"

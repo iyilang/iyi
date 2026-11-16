@@ -28,11 +28,9 @@ fi
 cd "$REPO_DIR"
 BIN="$REPO_DIR/.build/stale_store_concurrency"
 [[ "$WINDOWS" == 0 ]] || BIN="$BIN.exe"
-if [[ ! -f "$BIN" ]]; then
-  echo "Building $BIN..."
-  bash "$REPO_DIR/bench/stale_store_concurrency.sh" --crystal build \
-    -o "$BIN" "$REPO_DIR/bench/stale_store_concurrency.cr"
-fi
+echo "Building $BIN from this checkout..."
+bash "$REPO_DIR/bench/stale_store_concurrency.sh" --crystal build \
+  -o "$BIN" "$REPO_DIR/bench/stale_store_concurrency.cr"
 
 TMP_STORE="$(mktemp -d "${TMPDIR:-/tmp}/stale_store_concurrency.XXXXXX")"
 [[ "$WINDOWS" == 0 ]] || TMP_STORE="$(cygpath -m "$TMP_STORE")"

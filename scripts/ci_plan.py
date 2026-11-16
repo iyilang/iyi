@@ -76,9 +76,8 @@ FAST = ["build", "iyi", "compiler-specs", "stdlib-specs", "targets",
 
 # The self-host gates compile and check the compiler written in iyi
 # (`src/compiler/`), and the bench files and fixtures they read. A change to
-# any of those selects both jobs, whatever else it touches. They run the
-# gates on Linux and on darwin; a job the workflow does not have is skipped.
-SELFHOST = ["selfhost", "selfhost-darwin"]
+# any of those selects all three hosts, whatever else it touches.
+SELFHOST = ["selfhost", "selfhost-darwin", "selfhost-windows"]
 # Not selected by this script: `plan` is the script, `result` reads every
 # selected job's outcome, and `release` gates itself on a `v*` tag.
 NOT_PLANNED = {"plan", "result", "release"}
@@ -199,7 +198,8 @@ def is_doc(path):
 
 def is_selfhost(path):
     return ((path.startswith("src/compiler/") and path.endswith(".iyi"))
-            or path.startswith(("bench/selfhost_", "bench/fixtures/")))
+            or path.startswith(("bench/selfhost_", "bench/native_", "bench/fixtures/"))
+            or path == "bench/lib/host.sh")
 
 def code(text):
     """*text* without its whole-line comments, in YAML, shell and Python alike."""

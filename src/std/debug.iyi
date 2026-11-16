@@ -606,7 +606,7 @@ struct DwarfResolver
       end
 
       def pdb_load(wide : Pointer(UInt16), base : Pointer(UInt8), image_size : Int64,
-                        cv : Int64) : ::Bool
+                   cv : Int64) : ::Bool
         # GENERIC_READ, every share right, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL:
         # the same four the prelude opens a file for reading with.
         handle = LibC.CreateFileW(wide, -2147483648, 7, Pointer(Void).new(0_u64), 3, 128,
@@ -671,7 +671,7 @@ struct DwarfResolver
       # sizes: the raw size is rounded up to the file's alignment and the
       # virtual size is not, and either one can be the bigger.
       def section_of_rva(base : Pointer(UInt8), image_size : Int64, rva : Int64,
-                              off_out : Pointer(Int64)) : Int32
+                         off_out : Pointer(Int64)) : Int32
         off_out.value = 0_i64
         return 0 if rva <= 0_i64 || rva >= image_size
         e_lfanew = u32_at(base, image_size, 0x3C_i64)

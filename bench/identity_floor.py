@@ -109,6 +109,7 @@ ALLOWED_PATHS: list[tuple[str, str]] = [
 ALLOWED_LINES: list[tuple[str, str]] = [
     (r"--crystal", "the compatibility mode's own flag"),
     (r"Crystal library effects are not classified", "stale testing refusal reason for crystal compatibility mode"),
+    (r"shared Crystal entrypoint for stale gates|native Crystal launcher", "the Crystal launcher (bin/crystal) a stale gate or spec must start, named as the program it runs"),
     (r"category.*['\"]crystal['\"]", "stale testing refusal category for crystal compatibility mode"),
     # `bench/std_dependency_floor.sh` fails when a standard library module
     # reaches an ancestor dependency, and the failure has to say where the

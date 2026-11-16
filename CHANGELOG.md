@@ -4,6 +4,12 @@
 
 ### Added
 
+- **`iyi doc --json [DIR]` prints a package's exported APIs as data.**
+  The package path and compiler identity accompany its modules, ordered by
+  path, each carrying the same API and doc comments as `iyi mod dump --json`.
+  DIR defaults to the current directory; a missing manifest or an empty
+  package is refused.
+
 - **`iyi test` runs tests at once, says what each named case came to, and
   can run some of them.** Half as many tests build and run together as the
   machine has cores, `-p N` says how many, and the report stays in file
@@ -28209,7 +28215,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 29,007-line library and nothing else. Every other
+  written against iyi's own 29,035-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

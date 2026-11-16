@@ -288,6 +288,7 @@ jobs:
           bash bench/stale_tests.sh
           bash bench/stale_dir_exists.sh
           bash bench/stale_win_paths.sh
+          bash bench/stale_chmod_failure.sh
 
 
       # The receipt digest and the RG8 oracle each answer to an outside
@@ -676,6 +677,7 @@ jobs:
           bash bench/stale_tests.sh
           bash bench/stale_dir_exists.sh
           bash bench/stale_win_paths.sh
+          bash bench/stale_chmod_failure.sh
       - name: Stale receipt digest, RG8 oracle, and evidence self-tests
         run: |
           bash bench/stale_sha256.sh
@@ -978,6 +980,7 @@ jobs:
           bash bench/stale_tests.sh
           bash bench/stale_dir_exists.sh
           bash bench/stale_win_paths.sh
+          bash bench/stale_chmod_failure.sh
       - name: Stale receipt digest, RG8 oracle, and evidence self-tests
         run: |
           bash bench/stale_sha256.sh
@@ -1809,6 +1812,11 @@ jobs:
       # network is not a dependency of the gate.
       - name: Packages resolve by minimal version selection
         run: bash bench/packages_resolve.sh
+
+      # The same pinned package and bytes are hashed on Linux, macOS and
+      # Windows, so the JSON can be compared across the three native hosts.
+      - name: Package doc JSON for iyilang/db v0.5.0
+        run: bash bench/doc_package_db.sh
 
       - name: iyi get writes a requirement
         run: bash bench/packages_get.sh
@@ -2806,6 +2814,9 @@ jobs:
           bash bench/packages_resolve.sh
           bash bench/packages_get.sh
 
+      - name: Package doc JSON for iyilang/db v0.5.0
+        run: bash bench/doc_package_db.sh
+
       - name: The test verb (III.8)
         run: bash bench/test_verb.sh
 
@@ -3731,6 +3742,10 @@ jobs:
       # consumer could not name and so never emitted. And SafeReach's
       # proof, whose refusals spelled the places they name in full on
       # Windows while the header beside them spelled them relative.
+      - name: Package doc JSON for iyilang/db v0.5.0
+        shell: bash
+        run: bash bench/doc_package_db.sh
+
       - name: The gates that carry Windows code, on Windows
         shell: bash
         run: |

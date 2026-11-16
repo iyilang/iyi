@@ -1149,7 +1149,7 @@ end
   # which is the number `CreateDirectoryW` documents.
   IYI_WIN_PATH_LIMIT = 248
 
-  @[Effect(:host_state)]; def __iyi_wide_path(path : UInt8*) : UInt16*
+  @[Effect(:primitive)]; private def __iyi_wide_utf16(path : UInt8*, count : Int32*) : UInt16*
     # MB_ERR_INVALID_CHARS (8) refuses text that is not UTF-8 (null): with
     # 0, each bad byte became U+FFFD, `x\xFF.txt` and `x\xFE.txt` were one
     # file, and the second write replaced the first.
@@ -1157,6 +1157,16 @@ end
     return Pointer(UInt16).new(0_u64) if needed <= 0
     wide = Pointer(UInt16).malloc(needed.to_u64)
     return Pointer(UInt16).new(0_u64) if LibC.MultiByteToWideChar(65001, 8, path, -1, wide, needed) <= 0
+    count.value = needed
+    wide
+  end
+
+  # This dispatcher stays unwrapped: an internal observation frame here
+  # would hide the host-state observation for a relative path below.
+  @[Effect(:primitive)]; def __iyi_wide_path(path : UInt8*) : UInt16*
+    needed = 0_i32
+    wide = __iyi_wide_utf16(path, pointerof(needed))
+    return wide if wide.address == 0_u64
     # `needed` counts the terminator; the length does not.
     # The limit is on the path Windows resolves, not on the text handed in:
     # `needed` measures a relative name without the current directory in
@@ -1180,11 +1190,29 @@ end
     wide[2] == 92_u16 || wide[2] == 47_u16
   end
 
-  @[Effect(:host_state)]; private def __iyi_wide_long_path(wide : UInt16*) : UInt16*
-    full_needed = LibC.GetFullPathNameW(wide, 0, Pointer(UInt16).new(0_u64), Pointer(Pointer(UInt16)).new(0_u64))
+  # A drive-absolute path cannot depend on the current directory. Leave
+  # other forms, including UNC paths, conservative until their resolution
+  # is proven for every spelling. This dispatcher stays unwrapped so the
+  # non-absolute observation is not hidden.
+  @[Effect(:primitive)]; private def __iyi_wide_full_path(wide : UInt16*, size : Int32, buffer : UInt16*) : Int32
+    first = wide[0]
+    drive = (first >= 65_u16 && first <= 90_u16) || (first >= 97_u16 && first <= 122_u16)
+    unless drive && wide[1] == 58_u16 && (wide[2] == 92_u16 || wide[2] == 47_u16)
+      return __iyi_wide_full_unproven(wide, size, buffer)
+    end
+    LibC.GetFullPathNameW(wide, size, buffer, Pointer(Pointer(UInt16)).new(0_u64))
+  end
+
+  @[Effect(:host_state)]; private def __iyi_wide_full_unproven(wide : UInt16*, size : Int32, buffer : UInt16*) : Int32
+    LibC.GetFullPathNameW(wide, size, buffer, Pointer(Pointer(UInt16)).new(0_u64))
+  end
+
+  # As with __iyi_wide_path, do not hide the conditional observation.
+  @[Effect(:primitive)]; private def __iyi_wide_long_path(wide : UInt16*) : UInt16*
+    full_needed = __iyi_wide_full_path(wide, 0, Pointer(UInt16).new(0_u64))
     return wide if full_needed <= 0
     full = Pointer(UInt16).malloc(full_needed.to_u64)
-    written = LibC.GetFullPathNameW(wide, full_needed, full, Pointer(Pointer(UInt16)).new(0_u64))
+    written = __iyi_wide_full_path(wide, full_needed, full)
     return wide if written <= 0
     # Resolved short: the path was relative and shallow, so the plain
     # relative form is the one to keep — a `\\?\` prefix may only sit on a

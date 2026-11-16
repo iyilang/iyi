@@ -546,6 +546,23 @@ on a timer or holds that lock no longer spins for ever on one seed
 (heap_crossings' ring check on macOS). `IYI_CHAOS_LATE_THREADS` holds a
 thread that links itself until the simulated thread is idle.
 
+heap22's gates run in CI, on each of its platforms: the `heap22`,
+`darwin-heap22` and `windows-heap22` jobs run heap_partition (with the
+flag and without), heap_local, heap_crossings and heap_codegen (each with
+its flag-off control), heap_verify, heap_lend, heap_drain, heap_local_cost
+at its smallest rows, and three programs of the crossings' fuzzer. None
+was named in the workflow when heap22 merged; heap_local, heap_crossings
+and heap_verify named each other, which bench/gates_reachable.py counts
+as reached. std/lazy has its own exercise (bench/std_lazy_exercise.sh),
+as bench/std_exercise.sh asks of every std module, and
+bench/heap_local_cost.iyi run bare checks rather than stopping at its
+usage line. Three older gates' broken copies were rewritten for heap22's
+code: server_load's (the buffer and the OVERLAPPED allocated inside
+`IyiCross.shared`), weak_ref's two (the prelude's lines around
+`IyiWeak.clear` and the cell's allocation) and regex's shared scratch,
+which the reach rule now refuses at build time, counted as caught only
+by that sentence.
+
 ## 0.21.0 — 2026-11-09
 
 **A spawn has one verb and names its unit, and a plain `spawn` runs in

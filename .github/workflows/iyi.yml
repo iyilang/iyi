@@ -34,6 +34,8 @@ name: iyi
 #                    exercises read for other platforms in std-platforms (and
 #                    the windows- and darwin- shards and windows-std-platforms
 #                    beside their own jobs)
+#   heap22           the partitions' gates (`-Dheap_partitions`), here and in
+#                    darwin-heap22 and windows-heap22
 #
 # Every job carries a `timeout-minutes`. The default is six hours, and these
 # jobs start daemons, listen on sockets, serve HTTP, soak an LSP and run
@@ -1188,6 +1190,57 @@ jobs:
         if: matrix.shard == 4
         run: bash bench/tls_speed.sh
 
+  # heap22's gates (`-Dheap_partitions`, SPEC.md III.4.19), on each of its
+  # three platforms: this job, `darwin-heap22` and `windows-heap22`. They
+  # held on the three machines that wrote them and were named by nothing
+  # here when heap22 merged (bench/gates_reachable.py, CI job
+  # 133281127556) - heap_local, heap_crossings and heap_verify only by each
+  # other, which the check counts as reached. Each gate builds with the
+  # flags it is about and its flag-off control where it has one; the
+  # cost's row is its smallest, since a runner's numbers measure nothing
+  # and the rows are what it checks; the fuzzer runs three programs.
+  heap22:
+    needs: [plan, build]
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'heap22') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    container:
+      image: crystallang/crystal:1.21.0-build
+    name: "heap22's partitions, their gates"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v5
+        with:
+          name: crystal
+          path: .build
+      - run: chmod +x .build/crystal
+      - name: Build iyi binary
+        run: make -o .build/crystal iyi
+      - name: The partitions' plumbing, without the flag and with it
+        run: |
+          bash bench/heap_partition.sh
+          IYI_OPTS=-Dheap_partitions bash bench/heap_partition.sh
+      - name: Local collections, crossings and the verifier
+        run: |
+          bash bench/heap_local.sh
+          bash bench/heap_crossings.sh
+          FLAGS= bash bench/heap_crossings.sh
+          bash bench/heap_verify.sh
+      - name: The compiler's side, the lend protocol and the runs given back
+        run: |
+          bash bench/heap_codegen.sh
+          FLAGS= bash bench/heap_codegen.sh
+          bash bench/heap_lend.sh
+          bash bench/heap_drain.sh
+      - name: A partition's cost, its rows
+        run: bash bench/heap_local_cost.sh 1000 2 8 40
+      - name: The crossings, fuzzed
+        env:
+          FUZZ_HEAVY: "0"
+        run: python3 bench/heap_verify_fuzz.py run --programs 3 --seeds 2 --workers 1,4 --tmp "$RUNNER_TEMP/fuzz"
+
   targets:
     needs: [plan, build]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'targets') }}
@@ -1994,6 +2047,61 @@ jobs:
           STD_SIBLINGS: "0"
         run: bash bench/std_exercise.sh
 
+  # heap22's gates on darwin arm64, as the `heap22` job runs them on Linux
+  # (its comment says why they are here). A job of its own, and a seventh
+  # on macOS, which waits for a runner while five of the other six run:
+  # the darwin job's 67 minutes of 120 in run 43610237136 leave no room
+  # for them, and darwin-std's runs reach 75.
+  darwin-heap22:
+    needs: plan
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'darwin-heap22') }}
+    runs-on: macos-15
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "14.4"
+    timeout-minutes: 105
+    name: "heap22's partitions, their gates, on darwin"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install the bootstrap toolchain
+        run: |
+          brew install crystal coreutils pkgconf
+          echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
+      - name: Restore the static LLVM
+        id: llvm-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/llvm-static
+          key: llvm-static-${{ runner.os }}-${{ runner.arch }}-macos-15-${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
+      - name: Build the static LLVM (cache miss)
+        if: steps.llvm-cache.outputs.cache-hit != 'true'
+        run: bash scripts/build-static-llvm.sh "$HOME/llvm-static"
+      - name: Build `iyi`
+        run: make iyi LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config"
+      - name: The partitions' plumbing, without the flag and with it
+        run: |
+          bash bench/heap_partition.sh
+          IYI_OPTS=-Dheap_partitions bash bench/heap_partition.sh
+      - name: Local collections, crossings and the verifier
+        run: |
+          bash bench/heap_local.sh
+          bash bench/heap_crossings.sh
+          FLAGS= bash bench/heap_crossings.sh
+          bash bench/heap_verify.sh
+      - name: The compiler's side, the lend protocol and the runs given back
+        run: |
+          bash bench/heap_codegen.sh
+          FLAGS= bash bench/heap_codegen.sh
+          bash bench/heap_lend.sh
+          bash bench/heap_drain.sh
+      - name: A partition's cost, its rows
+        run: bash bench/heap_local_cost.sh 1000 2 8 40
+      - name: The crossings, fuzzed
+        env:
+          FUZZ_HEAVY: "0"
+        run: python3 bench/heap_verify_fuzz.py run --programs 3 --seeds 2 --workers 1,4 --tmp "$RUNNER_TEMP/fuzz"
+
   # A Windows binary, run twenty times, and every run held to the right
   # answer. Three things used to happen: it printed the right answer, it
   # printed memory it was never given (`ache\w` where `HELLO, IYI!` belongs,
@@ -2675,6 +2783,78 @@ jobs:
           bash bench/chaos_exercise.sh
           bash bench/library_boundaries.sh
           bash bench/up_to_date.sh
+
+  # heap22's gates on Windows x86_64, as the `heap22` job runs them on
+  # Linux (its comment says why they are here). The same setup as
+  # `windows-native-gates`, whose 52 minutes of 75 in run 43610237136 leave
+  # no room for them.
+  windows-heap22:
+    needs: plan
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'windows-heap22') }}
+    runs-on: windows-2025
+    timeout-minutes: 90
+    name: "heap22's partitions, their gates, on Windows"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: 1.21.0
+
+      - name: What this machine has
+        shell: pwsh
+        run: |
+          if (-not (Get-Command make -ErrorAction SilentlyContinue)) {
+            choco install make --no-progress -y
+          }
+          $lib = (crystal env CRYSTAL_LIBRARY_PATH).Trim()
+          if (-not (Test-Path "$lib\llvm_VERSION")) {
+            Write-Host "no llvm_VERSION beside the Crystal package's libraries, at $lib"
+            exit 1
+          }
+          $llvm = (Get-Content "$lib\llvm_VERSION")[0].Trim()
+          Write-Host "bootstrap libraries: $lib"
+          Write-Host "llvm: $llvm"
+          "CRYSTAL_LIBRARY_PATH=$lib" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "LLVM_VERSION=$llvm" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      - name: Build the fork's compiler, then `iyi`
+        shell: cmd
+        run: |
+          make -f Makefile.win crystal || exit /b 1
+          make -f Makefile.win iyi
+
+      - name: The partitions' plumbing, without the flag and with it
+        shell: bash
+        run: |
+          bash bench/heap_partition.sh
+          IYI_OPTS=-Dheap_partitions bash bench/heap_partition.sh
+      - name: Local collections, crossings and the verifier
+        shell: bash
+        run: |
+          bash bench/heap_local.sh
+          bash bench/heap_crossings.sh
+          FLAGS= bash bench/heap_crossings.sh
+          bash bench/heap_verify.sh
+      - name: The compiler's side, the lend protocol and the runs given back
+        shell: bash
+        run: |
+          bash bench/heap_codegen.sh
+          FLAGS= bash bench/heap_codegen.sh
+          bash bench/heap_lend.sh
+          bash bench/heap_drain.sh
+      - name: A partition's cost, its rows
+        shell: bash
+        run: bash bench/heap_local_cost.sh 1000 2 8 40
+      - name: The crossings, fuzzed
+        shell: bash
+        env:
+          FUZZ_HEAVY: "0"
+        run: IYI="$(cygpath -m "$PWD")/.build/iyi.exe" python bench/heap_verify_fuzz.py run --programs 3 --seeds 2 --workers 1,4 --tmp "$(cygpath -m "$RUNNER_TEMP")/fuzz"
 
   # The editor and agent surfaces, out of `windows-native` for the same
   # reason: 28 of its 105 minutes in run 42144468184, the longest step.
@@ -3649,7 +3829,7 @@ jobs:
             wasi-run, windows-probe, windows-collector, windows-runtime, windows-native,
             windows-native-gates, windows-native-surfaces, windows-std,
             windows-std-siblings, windows-std-platforms, windows-gates, windows-compiler-specs,
-            wasm32-collector, docs]
+            wasm32-collector, docs, heap22, darwin-heap22, windows-heap22]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -3778,7 +3958,7 @@ jobs:
             darwin-std-siblings, darwin-std, windows-probe, windows-collector, windows-runtime,
             windows-native, windows-native-gates, windows-native-surfaces, windows-std,
             windows-std-platforms, windows-std-siblings, windows-gates, windows-compiler-specs,
-            wasi-run, wasm32-collector, binary, clean-room, vscode]
+            wasi-run, wasm32-collector, binary, clean-room, vscode, heap22, darwin-heap22, windows-heap22]
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5

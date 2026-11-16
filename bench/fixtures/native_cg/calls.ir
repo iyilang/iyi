@@ -1,0 +1,111 @@
+; iyi-ir 1
+module "calls"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external i32 @printf(ptr, ...)
+@fmt = private constant [12 x i8] c"%d %ld %g\0A\00"
+@fmt2 = private constant [14 x i8] c"%ld %g %ld\0A\00"
+
+; More than eight integer arguments: the last two go on the stack.
+define internal i64 @sum10(i64 %a, i64 %b, i64 %c, i64 %d, i64 %e, i64 %f, i64 %g, i64 %h, i64 %i, i64 %j) {
+entry:
+  %s1 = add i64 %a, %b
+  %s2 = add i64 %s1, %c
+  %s3 = add i64 %s2, %d
+  %s4 = add i64 %s3, %e
+  %s5 = add i64 %s4, %f
+  %s6 = add i64 %s5, %g
+  %s7 = add i64 %s6, %h
+  %s8 = add i64 %s7, %i
+  %s9 = add i64 %s8, %j
+  ret i64 %s9
+}
+
+; More than eight floating-point arguments.
+define internal double @fsum10(double %a, double %b, double %c, double %d, double %e, double %f, double %g, double %h, double %i, double %j) {
+entry:
+  %s1 = fadd double %a, %b
+  %s2 = fadd double %s1, %c
+  %s3 = fadd double %s2, %d
+  %s4 = fadd double %s3, %e
+  %s5 = fadd double %s4, %f
+  %s6 = fadd double %s5, %g
+  %s7 = fadd double %s6, %h
+  %s8 = fadd double %s7, %i
+  %s9 = fadd double %s8, %j
+  ret double %s9
+}
+
+; A two-word aggregate in registers (coerced to [2 x i64]), both as a return and as an argument.
+define internal [2 x i64] @mkpair(i64 %a, i64 %b) {
+entry:
+  %x = insertvalue [2 x i64] zeroinitializer, i64 %a, 0
+  %y = insertvalue [2 x i64] %x, i64 %b, 1
+  ret [2 x i64] %y
+}
+
+define internal i64 @addpair([2 x i64] %p) {
+entry:
+  %a = extractvalue [2 x i64] %p, 0
+  %b = extractvalue [2 x i64] %p, 1
+  %s = add i64 %a, %b
+  ret i64 %s
+}
+
+; A homogeneous floating-point aggregate: four floats in s0..s3 both ways.
+define internal [4 x float] @mkhfa(float %a, float %b, float %c, float %d) {
+entry:
+  %x = insertvalue [4 x float] zeroinitializer, float %a, 0
+  %y = insertvalue [4 x float] %x, float %b, 1
+  %z = insertvalue [4 x float] %y, float %c, 2
+  %w = insertvalue [4 x float] %z, float %d, 3
+  ret [4 x float] %w
+}
+
+define internal float @sumhfa([4 x float] %h) {
+entry:
+  %a = extractvalue [4 x float] %h, 0
+  %b = extractvalue [4 x float] %h, 1
+  %c = extractvalue [4 x float] %h, 2
+  %d = extractvalue [4 x float] %h, 3
+  %s1 = fadd float %a, %b
+  %s2 = fadd float %s1, %c
+  %s3 = fadd float %s2, %d
+  ret float %s3
+}
+
+; A large aggregate: the caller passes its address, and the callee writes through the sret pointer in x8.
+%Big = type { i64, i64, i64 }
+define internal void @fillbig(sret(%Big) ptr %out, i64 %v) {
+entry:
+  %p1 = getelementptr %Big, ptr %out, i64 0, i32 0
+  store i64 %v, ptr %p1, align 8
+  %p2 = getelementptr %Big, ptr %out, i64 0, i32 1
+  %v2 = add i64 %v, 1
+  store i64 %v2, ptr %p2, align 8
+  %p3 = getelementptr %Big, ptr %out, i64 0, i32 2
+  %v3 = add i64 %v, 2
+  store i64 %v3, ptr %p3, align 8
+  ret void
+}
+
+define i32 @main() {
+entry:
+  %total = call i64 (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) @sum10(i64 1, i64 2, i64 3, i64 4, i64 5, i64 6, i64 7, i64 8, i64 9, i64 10)
+  %ft = call double (double, double, double, double, double, double, double, double, double, double) @fsum10(double 0x3ff0000000000000, double 0x4000000000000000, double 0x4008000000000000, double 0x4010000000000000, double 0x4014000000000000, double 0x4018000000000000, double 0x401c000000000000, double 0x4020000000000000, double 0x4022000000000000, double 0x4024000000000000)
+  %pair = call [2 x i64] (i64, i64) @mkpair(i64 3, i64 4)
+  %psum = call i64 ([2 x i64]) @addpair([2 x i64] %pair)
+  %hfa = call [4 x float] (float, float, float, float) @mkhfa(float 0x3fc00000, float 0x40200000, float 0x40400000, float 0x40600000)
+  %hsum = call float ([4 x float]) @sumhfa([4 x float] %hfa)
+  %hsumd = fpext float %hsum to double
+  %buf = alloca %Big, align 8
+  call void (ptr, i64) @fillbig(sret(%Big) ptr %buf, i64 9)
+  %b0p = getelementptr %Big, ptr %buf, i64 0, i32 0
+  %b0 = load i64, ptr %b0p, align 8
+  %b2p = getelementptr %Big, ptr %buf, i64 0, i32 2
+  %b2 = load i64, ptr %b2p, align 8
+  %bsum = add i64 %b0, %b2
+  %r1 = call i32 (ptr, ...) @printf(ptr @fmt, i32 0, i64 %total, double %ft)
+  %r2 = call i32 (ptr, ...) @printf(ptr @fmt2, i64 %psum, double %hsumd, i64 %bsum)
+  ret i32 0
+}

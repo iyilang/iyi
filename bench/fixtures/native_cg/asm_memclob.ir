@@ -1,0 +1,17 @@
+; iyi-ir 1
+module "asm_memclob"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external i32 @printf(ptr, ...)
+@fmt = private constant [5 x i8] c"%ld\0A\00"
+
+; The template writes 77 through its pointer. The store before it is 5, and the load after it must read 77.
+define i32 @main() {
+entry:
+  %slot = alloca i64, align 8
+  store i64 5, ptr %slot, align 8
+  call void (ptr) asm sideeffect "mov x9, #77; str x9, [$0]", "r,~{memory},~{x9}"(ptr %slot)
+  %v = load i64, ptr %slot, align 8
+  %p = call i32 (ptr, ...) @printf(ptr @fmt, i64 %v)
+  ret i32 0
+}

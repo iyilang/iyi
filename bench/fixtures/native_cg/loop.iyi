@@ -1,0 +1,17 @@
+module loop
+
+def sum10(a : Int64, b : Int64, c : Int64, d : Int64, e : Int64, f : Int64, g : Int64, h : Int64, i : Int64, j : Int64) : Int64
+  a + b + c + d + e + f + g + h + i + j
+end
+
+def count(n : Int32) : Int32
+  i = 0
+  acc = 0
+  while i < n
+    acc = acc + i
+    i = i + 1
+  end
+  acc
+end
+
+puts "#{count(10)} #{sum10(1_i64, 2_i64, 3_i64, 4_i64, 5_i64, 6_i64, 7_i64, 8_i64, 9_i64, 10_i64)} 55"

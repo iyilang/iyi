@@ -1,0 +1,88 @@
+module compiler/native/jump_table
+
+# Jump tables (SPEC 2.2, slice C3e): a switch whose cases are dense indexes a table of block addresses instead of
+# comparing each case. This file holds the density rule and the table's object form. The selector emits the
+# branch (isel.iyi, lower_jump_table), the encoder emits the address and the indexed load, and the driver writes
+# the entries.
+#
+# The form. A switch takes a table when it has at least four cases and at least 40 percent of the values from its
+# lowest case to its highest are cases: 5 * cases >= 2 * span. Every other switch keeps the compare chain. A case
+# beyond ±2^40 keeps the chain, so the range arithmetic stays in 64 bits. A duplicated case counts twice towards the
+# density; the first occurrence fills its entry, as the chain's first match does.
+#
+# The object form. A table is 8-byte entries in `__DATA,__const`. The section is writable Mach-O data because each
+# entry is a relocated address, which the loader rebases; Mach-O rejects such a relocation in `__TEXT`. Entry k holds
+# the address of block targets[k]: an Abs64 relocation against the function's own symbol, with the block's offset
+# from the function start as its addend. The table's symbol is a local symbol of that section. The driver declares
+# it before the function is encoded, so the encoder can name it, and places the entries after the function.
+
+import compiler/native/mir::{MFunction}
+import compiler/native/emit::{SectionWriter}
+import compiler/native/obj/object::{ObjectFile, Symbol, SymbolKind, SymbolBinding, RelocKind}
+
+# The section index a table's symbols name: the driver appends `__DATA,__const` after `.bss`, which is index 4.
+pub def jump_table_section : Int32
+  4
+end
+
+pub def jump_table_section_name : String
+  "__DATA,__const"
+end
+
+# The shape of a switch that takes the table form: its lowest case and the number of values it spans.
+pub class SwitchTable
+  getter low : Int64
+  getter span : Int64
+
+  def initialize(@low : Int64, @span : Int64)
+  end
+end
+
+# The table form of a switch with these case values, or nil for the compare chain (the density rule above).
+pub def switch_table_plan(cases : Array(Int64)) : SwitchTable?
+  n = cases.size.to_i64
+  return nil if n < 4_i64
+  lo = cases[0]
+  hi = cases[0]
+  k = 1
+  while k < cases.size
+    lo = cases[k] if cases[k] < lo
+    hi = cases[k] if cases[k] > hi
+    k = k + 1
+  end
+  return nil if lo < -1099511627776_i64 || hi > 1099511627776_i64
+  span = hi - lo + 1_i64
+  return nil if 5_i64 * n < 2_i64 * span
+  SwitchTable.new(lo, span)
+end
+
+# Declares one symbol per jump table of `mf` in `obj`, and records it in the table. The symbol's value is set when
+# the entries are placed.
+pub def declare_jump_tables(obj : ObjectFile, mf : MFunction) : Nil
+  k = 0
+  while k < mf.jump_tables.size
+    t = mf.jump_tables[k]
+    t.sym = obj.symbols.size
+    size = 8_i64 * t.targets.size.to_i64
+    obj.symbols << Symbol.new("#{mf.name}.jt#{k}", SymbolKind::Object, SymbolBinding::Local, jump_table_section, 0_i64, size)
+    k = k + 1
+  end
+end
+
+# Writes the entries of every table of `mf` into `w`, the writer of the `__DATA,__const` section. Entry k is an Abs64
+# against `fn_symbol` with the block's offset as the addend. `block_offsets` is the encoder's block offset list.
+pub def place_jump_tables(obj : ObjectFile, mf : MFunction, fn_symbol : Int32, block_offsets : Array(Int64), w : SectionWriter) : Nil
+  k = 0
+  while k < mf.jump_tables.size
+    t = mf.jump_tables[k]
+    w.pad_to(8_i64)
+    obj.symbols[t.sym].value = w.offset
+    j = 0
+    while j < t.targets.size
+      w.reloc(RelocKind::Abs64, fn_symbol, block_offsets[t.targets[j]])
+      w.put_le(0_i64, 8)
+      j = j + 1
+    end
+    k = k + 1
+  end
+end

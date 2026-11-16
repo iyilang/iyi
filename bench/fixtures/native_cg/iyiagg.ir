@@ -1,0 +1,102 @@
+; iyi-ir 1
+module "iyiagg"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external i32 @printf(ptr, ...)
+@fmt = private constant [13 x i8] c"%d %d %d %d\0A\00"
+%Inner = type { i32, double }
+%Outer = type { i64, [2 x float], %Inner }
+%Big = type { i64, i64, i64 }
+
+; The internal convention splits an aggregate into scalar leaves. This struct has five: two integer and three
+; floating-point, the array's two floats among them. It is built in memory and returned by value.
+define internal iyicc %Outer @mkouter(i64 %a, float %f, double %d) {
+entry:
+  %p = alloca %Outer, align 8
+  %f0 = getelementptr %Outer, ptr %p, i64 0, i32 0
+  store i64 %a, ptr %f0, align 8
+  %e0 = getelementptr %Outer, ptr %p, i64 0, i32 1, i64 0
+  store float %f, ptr %e0, align 4
+  %e1 = getelementptr %Outer, ptr %p, i64 0, i32 1, i64 1
+  %ff = fmul float %f, %f
+  store float %ff, ptr %e1, align 4
+  %in = getelementptr %Outer, ptr %p, i64 0, i32 2
+  %in0 = getelementptr %Inner, ptr %in, i64 0, i32 0
+  %t = trunc i64 %a to i32
+  store i32 %t, ptr %in0, align 4
+  %in1 = getelementptr %Inner, ptr %in, i64 0, i32 1
+  store double %d, ptr %in1, align 8
+  %v = load %Outer, ptr %p, align 8
+  ret %Outer %v
+}
+
+; Reads every leaf of the struct back: the array and the nested struct come apart field by field.
+define internal iyicc i64 @sumouter(%Outer %o) {
+entry:
+  %a = extractvalue %Outer %o, 0
+  %arr = extractvalue %Outer %o, 1
+  %a0 = extractvalue [2 x float] %arr, 0
+  %a1 = extractvalue [2 x float] %arr, 1
+  %inn = extractvalue %Outer %o, 2
+  %i0 = extractvalue %Inner %inn, 0
+  %i1 = extractvalue %Inner %inn, 1
+  %x0 = fptosi float %a0 to i64
+  %x1 = fptosi float %a1 to i64
+  %y0 = sext i32 %i0 to i64
+  %y1 = fptosi double %i1 to i64
+  %s1 = add i64 %a, %x0
+  %s2 = add i64 %s1, %x1
+  %s3 = add i64 %s2, %y0
+  %s4 = add i64 %s3, %y1
+  ret i64 %s4
+}
+
+; A three-word struct by value: three integer registers. The C convention would pass it by reference.
+define internal iyicc i64 @sum3(%Big %b) {
+entry:
+  %b0 = extractvalue %Big %b, 0
+  %b1 = extractvalue %Big %b, 1
+  %b2 = extractvalue %Big %b, 2
+  %s1 = add i64 %b0, %b1
+  %s2 = add i64 %s1, %b2
+  ret i64 %s2
+}
+
+; Nine scalar leaves: the struct's three and six integers. Eight fit the integer registers; the sixth integer
+; is the ninth leaf and goes to the stack.
+define internal iyicc i64 @sum9(%Big %b, i64 %a1, i64 %a2, i64 %a3, i64 %a4, i64 %a5, i64 %a6) {
+entry:
+  %b0 = extractvalue %Big %b, 0
+  %b1 = extractvalue %Big %b, 1
+  %b2 = extractvalue %Big %b, 2
+  %s1 = add i64 %b0, %b1
+  %s2 = add i64 %s1, %b2
+  %s3 = add i64 %s2, %a1
+  %s4 = add i64 %s3, %a2
+  %s5 = add i64 %s4, %a3
+  %s6 = add i64 %s5, %a4
+  %s7 = add i64 %s6, %a5
+  %s8 = add i64 %s7, %a6
+  ret i64 %s8
+}
+
+define i32 @main() {
+entry:
+  %fv = fptrunc double 0x3ff8000000000000 to float
+  %o = call iyicc %Outer (i64, float, double) @mkouter(i64 7, float %fv, double 0x4004000000000000)
+  %r1 = call iyicc i64 (%Outer) @sumouter(%Outer %o)
+  %b0 = insertvalue %Big zeroinitializer, i64 10, 0
+  %b1 = insertvalue %Big %b0, i64 20, 1
+  %b2 = insertvalue %Big %b1, i64 30, 2
+  %r2 = call iyicc i64 (%Big, i64, i64, i64, i64, i64, i64) @sum9(%Big %b2, i64 1, i64 2, i64 3, i64 4, i64 5, i64 6)
+  %r3 = call iyicc i64 (%Big) @sum3(%Big %b2)
+  %inn = extractvalue %Outer %o, 2
+  %ii = extractvalue %Inner %inn, 0
+  %r4 = sext i32 %ii to i64
+  %p1 = trunc i64 %r1 to i32
+  %p2 = trunc i64 %r2 to i32
+  %p3 = trunc i64 %r3 to i32
+  %p4 = trunc i64 %r4 to i32
+  %w = call i32 (ptr, ...) @printf(ptr @fmt, i32 %p1, i32 %p2, i32 %p3, i32 %p4)
+  ret i32 0
+}

@@ -1,0 +1,460 @@
+; iyi-ir 1
+module "rt_helpers"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external i32 @printf(ptr, ...)
+declare external void @__iyi_native_memcpy(ptr, ptr, i64)
+declare external void @__iyi_native_memmove(ptr, ptr, i64)
+declare external void @__iyi_native_memset(ptr, i64, i64)
+declare external i128 @__iyi_native_divti3(i128, i128)
+declare external i128 @__iyi_native_udivti3(i128, i128)
+declare external i128 @__iyi_native_modti3(i128, i128)
+declare external i128 @__iyi_native_umodti3(i128, i128)
+@fmt_show = private constant [11 x i8] c"%lld %llu\0A\00"
+@fmt_byte = private constant [4 x i8] c"%d \00"
+@fmt_nl = private constant [2 x i8] c"\0A\00"
+
+; Prints the high half of a 128-bit value as a signed number and the low half as unsigned.
+define internal void @show(i128 %x) {
+entry:
+  %h = lshr i128 %x, 64
+  %hi = trunc i128 %h to i64
+  %lo = trunc i128 %x to i64
+  %r = call i32 (ptr, ...) @printf(ptr @fmt_show, i64 %hi, i64 %lo)
+  ret void
+}
+
+; Prints the 32 bytes at p, one per field, then a newline.
+define internal void @dump(ptr %buf) {
+entry:
+  %p0 = getelementptr i8, ptr %buf, i64 0
+  %b0 = load i8, ptr %p0, align 1
+  %w0 = zext i8 %b0 to i32
+  %r0 = call i32 (ptr, ...) @printf(ptr @fmt_byte, i32 %w0)
+  %p1 = getelementptr i8, ptr %buf, i64 1
+  %b1 = load i8, ptr %p1, align 1
+  %w1 = zext i8 %b1 to i32
+  %r1 = call i32 (ptr, ...) @printf(ptr @fmt_byte, i32 %w1)
+  %p2 = getelementptr i8, ptr %buf, i64 2
+  %b2 = load i8, ptr %p2, align 1
+  %w2 = zext i8 %b2 to i32
+  %r2 = call i32 (ptr, ...) @printf(ptr @fmt_byte, i32 %w2)
+  %p3 = getelementptr i8, ptr %buf, i64 3
+  %b3 = load i8, ptr %p3, align 1
+  %w3 = zext i8 %b3 to i32
+  %r3 = call i32 (ptr, ...) @printf(ptr @fmt_byte, i32 %w3)
+  %p4 = getelementptr i8, ptr %buf, i64 4
+  %b4 = load i8, ptr %p4, align 1
+  %w4 = zext i8 %b4 to i32
+  %r4 = call i32 (ptr, ...) @printf(ptr @fmt_byte, i32 %w4)
+  %p5 = getelementptr i8, ptr %buf, i64 5
+  %b5 = load i8, ptr %p5, align 1
+  %w5 = zext i8 %b5 to i32
+  %r5 = call i32 (ptr, ...) @printf(ptr @fmt_byte, i32 %w5)
+  %p6 = getelementptr i8, ptr %buf, i64 6
+  %b6 = load i8, ptr %p6, align 1
+  %w6 = zext i8 %b6 to i32
+  %r6 = call i32 (ptr, ...) @printf(ptr @fmt_byte, i32 %w6)
+  %p7 = getelementptr i8, ptr %buf, i64 7
+  %b7 = load i8, ptr %p7, align 1
+  %w7 = zext i8 %b7 to i32
+  %r7 = call i32 (ptr, ...) @printf(ptr @fmt_byte, i32 %w7)
+  %p8 = getelementptr i8, ptr %buf, i64 8
+  %b8 = load i8, ptr %p8, align 1
+  %w8 = zext i8 %b8 to i32
+  %r8 = call i32 (ptr, ...) @printf(ptr @fmt_byte, i32 %w8)
+  %p9 = getelementptr i8, ptr %buf, i64 9
+  %b9 = load i8, ptr %p9, align 1
+  %w9 = zext i8 %b9 to i32
+  %r9 = call i32 (ptr, ...) @printf(ptr @fmt_byte, i32 %w9)
+  %p10 = getelementptr i8, ptr %buf, i64 10
+  %b10 = load i8, ptr %p10, align 1
+  %w10 = zext i8 %b10 to i32
+  %r10 = call i32 (ptr, ...) @printf(ptr @fmt_byte, i32 %w10)
+  %p11 = getelementptr i8, ptr %buf, i64 11
+  %b11 = load i8, ptr %p11, align 1
+  %w11 = zext i8 %b11 to i32
+  %r11 = call i32 (ptr, ...) @printf(ptr @fmt_byte, i32 %w11)
+  %p12 = getelementptr i8, ptr %buf, i64 12
+  %b12 = load i8, ptr %p12, align 1
+  %w12 = zext i8 %b12 to i32
+  %r12 = call i32 (ptr, ...) @printf(ptr @fmt_byte, i32 %w12)
+  %p13 = getelementptr i8, ptr %buf, i64 13
+  %b13 = load i8, ptr %p13, align 1
+  %w13 = zext i8 %b13 to i32
+  %r13 = call i32 (ptr, ...) @printf(ptr @fmt_byte, i32 %w13)
+  %p14 = getelementptr i8, ptr %buf, i64 14
+  %b14 = load i8, ptr %p14, align 1
+  %w14 = zext i8 %b14 to i32
+  %r14 = call i32 (ptr, ...) @printf(ptr @fmt_byte, i32 %w14)
+  %p15 = getelementptr i8, ptr %buf, i64 15
+  %b15 = load i8, ptr %p15, align 1
+  %w15 = zext i8 %b15 to i32
+  %r15 = call i32 (ptr, ...) @printf(ptr @fmt_byte, i32 %w15)
+  %p16 = getelementptr i8, ptr %buf, i64 16
+  %b16 = load i8, ptr %p16, align 1
+  %w16 = zext i8 %b16 to i32
+  %r16 = call i32 (ptr, ...) @printf(ptr @fmt_byte, i32 %w16)
+  %p17 = getelementptr i8, ptr %buf, i64 17
+  %b17 = load i8, ptr %p17, align 1
+  %w17 = zext i8 %b17 to i32
+  %r17 = call i32 (ptr, ...) @printf(ptr @fmt_byte, i32 %w17)
+  %p18 = getelementptr i8, ptr %buf, i64 18
+  %b18 = load i8, ptr %p18, align 1
+  %w18 = zext i8 %b18 to i32
+  %r18 = call i32 (ptr, ...) @printf(ptr @fmt_byte, i32 %w18)
+  %p19 = getelementptr i8, ptr %buf, i64 19
+  %b19 = load i8, ptr %p19, align 1
+  %w19 = zext i8 %b19 to i32
+  %r19 = call i32 (ptr, ...) @printf(ptr @fmt_byte, i32 %w19)
+  %p20 = getelementptr i8, ptr %buf, i64 20
+  %b20 = load i8, ptr %p20, align 1
+  %w20 = zext i8 %b20 to i32
+  %r20 = call i32 (ptr, ...) @printf(ptr @fmt_byte, i32 %w20)
+  %p21 = getelementptr i8, ptr %buf, i64 21
+  %b21 = load i8, ptr %p21, align 1
+  %w21 = zext i8 %b21 to i32
+  %r21 = call i32 (ptr, ...) @printf(ptr @fmt_byte, i32 %w21)
+  %p22 = getelementptr i8, ptr %buf, i64 22
+  %b22 = load i8, ptr %p22, align 1
+  %w22 = zext i8 %b22 to i32
+  %r22 = call i32 (ptr, ...) @printf(ptr @fmt_byte, i32 %w22)
+  %p23 = getelementptr i8, ptr %buf, i64 23
+  %b23 = load i8, ptr %p23, align 1
+  %w23 = zext i8 %b23 to i32
+  %r23 = call i32 (ptr, ...) @printf(ptr @fmt_byte, i32 %w23)
+  %p24 = getelementptr i8, ptr %buf, i64 24
+  %b24 = load i8, ptr %p24, align 1
+  %w24 = zext i8 %b24 to i32
+  %r24 = call i32 (ptr, ...) @printf(ptr @fmt_byte, i32 %w24)
+  %p25 = getelementptr i8, ptr %buf, i64 25
+  %b25 = load i8, ptr %p25, align 1
+  %w25 = zext i8 %b25 to i32
+  %r25 = call i32 (ptr, ...) @printf(ptr @fmt_byte, i32 %w25)
+  %p26 = getelementptr i8, ptr %buf, i64 26
+  %b26 = load i8, ptr %p26, align 1
+  %w26 = zext i8 %b26 to i32
+  %r26 = call i32 (ptr, ...) @printf(ptr @fmt_byte, i32 %w26)
+  %p27 = getelementptr i8, ptr %buf, i64 27
+  %b27 = load i8, ptr %p27, align 1
+  %w27 = zext i8 %b27 to i32
+  %r27 = call i32 (ptr, ...) @printf(ptr @fmt_byte, i32 %w27)
+  %p28 = getelementptr i8, ptr %buf, i64 28
+  %b28 = load i8, ptr %p28, align 1
+  %w28 = zext i8 %b28 to i32
+  %r28 = call i32 (ptr, ...) @printf(ptr @fmt_byte, i32 %w28)
+  %p29 = getelementptr i8, ptr %buf, i64 29
+  %b29 = load i8, ptr %p29, align 1
+  %w29 = zext i8 %b29 to i32
+  %r29 = call i32 (ptr, ...) @printf(ptr @fmt_byte, i32 %w29)
+  %p30 = getelementptr i8, ptr %buf, i64 30
+  %b30 = load i8, ptr %p30, align 1
+  %w30 = zext i8 %b30 to i32
+  %r30 = call i32 (ptr, ...) @printf(ptr @fmt_byte, i32 %w30)
+  %p31 = getelementptr i8, ptr %buf, i64 31
+  %b31 = load i8, ptr %p31, align 1
+  %w31 = zext i8 %b31 to i32
+  %r31 = call i32 (ptr, ...) @printf(ptr @fmt_byte, i32 %w31)
+  %nl = call i32 (ptr, ...) @printf(ptr @fmt_nl)
+  ret void
+}
+
+define i32 @main() {
+entry:
+  %buf = alloca [32 x i8], align 8
+  %q0 = getelementptr i8, ptr %buf, i64 0
+  store i8 1, ptr %q0, align 1
+  %q1 = getelementptr i8, ptr %buf, i64 1
+  store i8 2, ptr %q1, align 1
+  %q2 = getelementptr i8, ptr %buf, i64 2
+  store i8 3, ptr %q2, align 1
+  %q3 = getelementptr i8, ptr %buf, i64 3
+  store i8 4, ptr %q3, align 1
+  %q4 = getelementptr i8, ptr %buf, i64 4
+  store i8 5, ptr %q4, align 1
+  %q5 = getelementptr i8, ptr %buf, i64 5
+  store i8 6, ptr %q5, align 1
+  %q6 = getelementptr i8, ptr %buf, i64 6
+  store i8 7, ptr %q6, align 1
+  %q7 = getelementptr i8, ptr %buf, i64 7
+  store i8 8, ptr %q7, align 1
+  %q8 = getelementptr i8, ptr %buf, i64 8
+  store i8 9, ptr %q8, align 1
+  %q9 = getelementptr i8, ptr %buf, i64 9
+  store i8 10, ptr %q9, align 1
+  %q10 = getelementptr i8, ptr %buf, i64 10
+  store i8 11, ptr %q10, align 1
+  %q11 = getelementptr i8, ptr %buf, i64 11
+  store i8 12, ptr %q11, align 1
+  %q12 = getelementptr i8, ptr %buf, i64 12
+  store i8 13, ptr %q12, align 1
+  %q13 = getelementptr i8, ptr %buf, i64 13
+  store i8 14, ptr %q13, align 1
+  %q14 = getelementptr i8, ptr %buf, i64 14
+  store i8 15, ptr %q14, align 1
+  %q15 = getelementptr i8, ptr %buf, i64 15
+  store i8 16, ptr %q15, align 1
+  %q16 = getelementptr i8, ptr %buf, i64 16
+  store i8 17, ptr %q16, align 1
+  %q17 = getelementptr i8, ptr %buf, i64 17
+  store i8 18, ptr %q17, align 1
+  %q18 = getelementptr i8, ptr %buf, i64 18
+  store i8 19, ptr %q18, align 1
+  %q19 = getelementptr i8, ptr %buf, i64 19
+  store i8 20, ptr %q19, align 1
+  %q20 = getelementptr i8, ptr %buf, i64 20
+  store i8 21, ptr %q20, align 1
+  %q21 = getelementptr i8, ptr %buf, i64 21
+  store i8 22, ptr %q21, align 1
+  %q22 = getelementptr i8, ptr %buf, i64 22
+  store i8 23, ptr %q22, align 1
+  %q23 = getelementptr i8, ptr %buf, i64 23
+  store i8 24, ptr %q23, align 1
+  %q24 = getelementptr i8, ptr %buf, i64 24
+  store i8 25, ptr %q24, align 1
+  %q25 = getelementptr i8, ptr %buf, i64 25
+  store i8 26, ptr %q25, align 1
+  %q26 = getelementptr i8, ptr %buf, i64 26
+  store i8 27, ptr %q26, align 1
+  %q27 = getelementptr i8, ptr %buf, i64 27
+  store i8 28, ptr %q27, align 1
+  %q28 = getelementptr i8, ptr %buf, i64 28
+  store i8 29, ptr %q28, align 1
+  %q29 = getelementptr i8, ptr %buf, i64 29
+  store i8 30, ptr %q29, align 1
+  %q30 = getelementptr i8, ptr %buf, i64 30
+  store i8 31, ptr %q30, align 1
+  %q31 = getelementptr i8, ptr %buf, i64 31
+  store i8 32, ptr %q31, align 1
+  call void (ptr) @dump(ptr %buf)
+  %da1 = getelementptr i8, ptr %buf, i64 0
+  %sa1 = getelementptr i8, ptr %buf, i64 16
+  call void (ptr, ptr, i64) @__iyi_native_memcpy(ptr %da1, ptr %sa1, i64 16)
+  call void (ptr) @dump(ptr %buf)
+  %da2 = getelementptr i8, ptr %buf, i64 0
+  %sa2 = getelementptr i8, ptr %buf, i64 0
+  call void (ptr, ptr, i64) @__iyi_native_memcpy(ptr %da2, ptr %sa2, i64 0)
+  call void (ptr) @dump(ptr %buf)
+  %da3 = getelementptr i8, ptr %buf, i64 8
+  %sa3 = getelementptr i8, ptr %buf, i64 24
+  call void (ptr, ptr, i64) @__iyi_native_memcpy(ptr %da3, ptr %sa3, i64 1)
+  call void (ptr) @dump(ptr %buf)
+  %da4 = getelementptr i8, ptr %buf, i64 2
+  %sa4 = getelementptr i8, ptr %buf, i64 20
+  call void (ptr, ptr, i64) @__iyi_native_memcpy(ptr %da4, ptr %sa4, i64 9)
+  call void (ptr) @dump(ptr %buf)
+  %da5 = getelementptr i8, ptr %buf, i64 0
+  %sa5 = getelementptr i8, ptr %buf, i64 23
+  call void (ptr, ptr, i64) @__iyi_native_memcpy(ptr %da5, ptr %sa5, i64 9)
+  call void (ptr) @dump(ptr %buf)
+  %da6 = getelementptr i8, ptr %buf, i64 5
+  %sa6 = getelementptr i8, ptr %buf, i64 0
+  call void (ptr, ptr, i64) @__iyi_native_memmove(ptr %da6, ptr %sa6, i64 20)
+  call void (ptr) @dump(ptr %buf)
+  %da7 = getelementptr i8, ptr %buf, i64 0
+  %sa7 = getelementptr i8, ptr %buf, i64 5
+  call void (ptr, ptr, i64) @__iyi_native_memmove(ptr %da7, ptr %sa7, i64 20)
+  call void (ptr) @dump(ptr %buf)
+  %da8 = getelementptr i8, ptr %buf, i64 4
+  %sa8 = getelementptr i8, ptr %buf, i64 4
+  call void (ptr, ptr, i64) @__iyi_native_memmove(ptr %da8, ptr %sa8, i64 12)
+  call void (ptr) @dump(ptr %buf)
+  %da9 = getelementptr i8, ptr %buf, i64 3
+  %sa9 = getelementptr i8, ptr %buf, i64 0
+  call void (ptr, ptr, i64) @__iyi_native_memmove(ptr %da9, ptr %sa9, i64 0)
+  call void (ptr) @dump(ptr %buf)
+  %da10 = getelementptr i8, ptr %buf, i64 1
+  %sa10 = getelementptr i8, ptr %buf, i64 0
+  call void (ptr, ptr, i64) @__iyi_native_memmove(ptr %da10, ptr %sa10, i64 31)
+  call void (ptr) @dump(ptr %buf)
+  %da11 = getelementptr i8, ptr %buf, i64 3
+  call void (ptr, i64, i64) @__iyi_native_memset(ptr %da11, i64 511, i64 9)
+  call void (ptr) @dump(ptr %buf)
+  %da12 = getelementptr i8, ptr %buf, i64 20
+  call void (ptr, i64, i64) @__iyi_native_memset(ptr %da12, i64 65, i64 0)
+  call void (ptr) @dump(ptr %buf)
+  %da13 = getelementptr i8, ptr %buf, i64 0
+  call void (ptr, i64, i64) @__iyi_native_memset(ptr %da13, i64 0, i64 32)
+  call void (ptr) @dump(ptr %buf)
+  ; pair 0
+  %sd0 = call i128 (i128, i128) @__iyi_native_divti3(i128 -170141183460469231731687303715884105728, i128 -1)
+  call void (i128) @show(i128 %sd0)
+  %ud0 = call i128 (i128, i128) @__iyi_native_udivti3(i128 -170141183460469231731687303715884105728, i128 -1)
+  call void (i128) @show(i128 %ud0)
+  %sm0 = call i128 (i128, i128) @__iyi_native_modti3(i128 -170141183460469231731687303715884105728, i128 -1)
+  call void (i128) @show(i128 %sm0)
+  %um0 = call i128 (i128, i128) @__iyi_native_umodti3(i128 -170141183460469231731687303715884105728, i128 -1)
+  call void (i128) @show(i128 %um0)
+  ; pair 1
+  %sd1 = call i128 (i128, i128) @__iyi_native_divti3(i128 -170141183460469231731687303715884105728, i128 1)
+  call void (i128) @show(i128 %sd1)
+  %ud1 = call i128 (i128, i128) @__iyi_native_udivti3(i128 -170141183460469231731687303715884105728, i128 1)
+  call void (i128) @show(i128 %ud1)
+  %sm1 = call i128 (i128, i128) @__iyi_native_modti3(i128 -170141183460469231731687303715884105728, i128 1)
+  call void (i128) @show(i128 %sm1)
+  %um1 = call i128 (i128, i128) @__iyi_native_umodti3(i128 -170141183460469231731687303715884105728, i128 1)
+  call void (i128) @show(i128 %um1)
+  ; pair 2
+  %sd2 = call i128 (i128, i128) @__iyi_native_divti3(i128 -170141183460469231731687303715884105728, i128 2)
+  call void (i128) @show(i128 %sd2)
+  %ud2 = call i128 (i128, i128) @__iyi_native_udivti3(i128 -170141183460469231731687303715884105728, i128 2)
+  call void (i128) @show(i128 %ud2)
+  %sm2 = call i128 (i128, i128) @__iyi_native_modti3(i128 -170141183460469231731687303715884105728, i128 2)
+  call void (i128) @show(i128 %sm2)
+  %um2 = call i128 (i128, i128) @__iyi_native_umodti3(i128 -170141183460469231731687303715884105728, i128 2)
+  call void (i128) @show(i128 %um2)
+  ; pair 3
+  %sd3 = call i128 (i128, i128) @__iyi_native_divti3(i128 -170141183460469231731687303715884105728, i128 -170141183460469231731687303715884105728)
+  call void (i128) @show(i128 %sd3)
+  %ud3 = call i128 (i128, i128) @__iyi_native_udivti3(i128 -170141183460469231731687303715884105728, i128 -170141183460469231731687303715884105728)
+  call void (i128) @show(i128 %ud3)
+  %sm3 = call i128 (i128, i128) @__iyi_native_modti3(i128 -170141183460469231731687303715884105728, i128 -170141183460469231731687303715884105728)
+  call void (i128) @show(i128 %sm3)
+  %um3 = call i128 (i128, i128) @__iyi_native_umodti3(i128 -170141183460469231731687303715884105728, i128 -170141183460469231731687303715884105728)
+  call void (i128) @show(i128 %um3)
+  ; pair 4
+  %sd4 = call i128 (i128, i128) @__iyi_native_divti3(i128 170141183460469231731687303715884105727, i128 -1)
+  call void (i128) @show(i128 %sd4)
+  %ud4 = call i128 (i128, i128) @__iyi_native_udivti3(i128 170141183460469231731687303715884105727, i128 -1)
+  call void (i128) @show(i128 %ud4)
+  %sm4 = call i128 (i128, i128) @__iyi_native_modti3(i128 170141183460469231731687303715884105727, i128 -1)
+  call void (i128) @show(i128 %sm4)
+  %um4 = call i128 (i128, i128) @__iyi_native_umodti3(i128 170141183460469231731687303715884105727, i128 -1)
+  call void (i128) @show(i128 %um4)
+  ; pair 5
+  %sd5 = call i128 (i128, i128) @__iyi_native_divti3(i128 170141183460469231731687303715884105727, i128 1)
+  call void (i128) @show(i128 %sd5)
+  %ud5 = call i128 (i128, i128) @__iyi_native_udivti3(i128 170141183460469231731687303715884105727, i128 1)
+  call void (i128) @show(i128 %ud5)
+  %sm5 = call i128 (i128, i128) @__iyi_native_modti3(i128 170141183460469231731687303715884105727, i128 1)
+  call void (i128) @show(i128 %sm5)
+  %um5 = call i128 (i128, i128) @__iyi_native_umodti3(i128 170141183460469231731687303715884105727, i128 1)
+  call void (i128) @show(i128 %um5)
+  ; pair 6
+  %sd6 = call i128 (i128, i128) @__iyi_native_divti3(i128 170141183460469231731687303715884105727, i128 18446744073709551616)
+  call void (i128) @show(i128 %sd6)
+  %ud6 = call i128 (i128, i128) @__iyi_native_udivti3(i128 170141183460469231731687303715884105727, i128 18446744073709551616)
+  call void (i128) @show(i128 %ud6)
+  %sm6 = call i128 (i128, i128) @__iyi_native_modti3(i128 170141183460469231731687303715884105727, i128 18446744073709551616)
+  call void (i128) @show(i128 %sm6)
+  %um6 = call i128 (i128, i128) @__iyi_native_umodti3(i128 170141183460469231731687303715884105727, i128 18446744073709551616)
+  call void (i128) @show(i128 %um6)
+  ; pair 7
+  %sd7 = call i128 (i128, i128) @__iyi_native_divti3(i128 18446744073709551616, i128 3)
+  call void (i128) @show(i128 %sd7)
+  %ud7 = call i128 (i128, i128) @__iyi_native_udivti3(i128 18446744073709551616, i128 3)
+  call void (i128) @show(i128 %ud7)
+  %sm7 = call i128 (i128, i128) @__iyi_native_modti3(i128 18446744073709551616, i128 3)
+  call void (i128) @show(i128 %sm7)
+  %um7 = call i128 (i128, i128) @__iyi_native_umodti3(i128 18446744073709551616, i128 3)
+  call void (i128) @show(i128 %um7)
+  ; pair 8
+  %sd8 = call i128 (i128, i128) @__iyi_native_divti3(i128 -7, i128 2)
+  call void (i128) @show(i128 %sd8)
+  %ud8 = call i128 (i128, i128) @__iyi_native_udivti3(i128 -7, i128 2)
+  call void (i128) @show(i128 %ud8)
+  %sm8 = call i128 (i128, i128) @__iyi_native_modti3(i128 -7, i128 2)
+  call void (i128) @show(i128 %sm8)
+  %um8 = call i128 (i128, i128) @__iyi_native_umodti3(i128 -7, i128 2)
+  call void (i128) @show(i128 %um8)
+  ; pair 9
+  %sd9 = call i128 (i128, i128) @__iyi_native_divti3(i128 7, i128 -2)
+  call void (i128) @show(i128 %sd9)
+  %ud9 = call i128 (i128, i128) @__iyi_native_udivti3(i128 7, i128 -2)
+  call void (i128) @show(i128 %ud9)
+  %sm9 = call i128 (i128, i128) @__iyi_native_modti3(i128 7, i128 -2)
+  call void (i128) @show(i128 %sm9)
+  %um9 = call i128 (i128, i128) @__iyi_native_umodti3(i128 7, i128 -2)
+  call void (i128) @show(i128 %um9)
+  ; pair 10
+  %sd10 = call i128 (i128, i128) @__iyi_native_divti3(i128 -7, i128 -2)
+  call void (i128) @show(i128 %sd10)
+  %ud10 = call i128 (i128, i128) @__iyi_native_udivti3(i128 -7, i128 -2)
+  call void (i128) @show(i128 %ud10)
+  %sm10 = call i128 (i128, i128) @__iyi_native_modti3(i128 -7, i128 -2)
+  call void (i128) @show(i128 %sm10)
+  %um10 = call i128 (i128, i128) @__iyi_native_umodti3(i128 -7, i128 -2)
+  call void (i128) @show(i128 %um10)
+  ; pair 11
+  %sd11 = call i128 (i128, i128) @__iyi_native_divti3(i128 5, i128 -1)
+  call void (i128) @show(i128 %sd11)
+  %ud11 = call i128 (i128, i128) @__iyi_native_udivti3(i128 5, i128 -1)
+  call void (i128) @show(i128 %ud11)
+  %sm11 = call i128 (i128, i128) @__iyi_native_modti3(i128 5, i128 -1)
+  call void (i128) @show(i128 %sm11)
+  %um11 = call i128 (i128, i128) @__iyi_native_umodti3(i128 5, i128 -1)
+  call void (i128) @show(i128 %um11)
+  ; pair 12
+  %sd12 = call i128 (i128, i128) @__iyi_native_divti3(i128 1, i128 -1)
+  call void (i128) @show(i128 %sd12)
+  %ud12 = call i128 (i128, i128) @__iyi_native_udivti3(i128 1, i128 -1)
+  call void (i128) @show(i128 %ud12)
+  %sm12 = call i128 (i128, i128) @__iyi_native_modti3(i128 1, i128 -1)
+  call void (i128) @show(i128 %sm12)
+  %um12 = call i128 (i128, i128) @__iyi_native_umodti3(i128 1, i128 -1)
+  call void (i128) @show(i128 %um12)
+  ; pair 13
+  %sd13 = call i128 (i128, i128) @__iyi_native_divti3(i128 0, i128 5)
+  call void (i128) @show(i128 %sd13)
+  %ud13 = call i128 (i128, i128) @__iyi_native_udivti3(i128 0, i128 5)
+  call void (i128) @show(i128 %ud13)
+  %sm13 = call i128 (i128, i128) @__iyi_native_modti3(i128 0, i128 5)
+  call void (i128) @show(i128 %sm13)
+  %um13 = call i128 (i128, i128) @__iyi_native_umodti3(i128 0, i128 5)
+  call void (i128) @show(i128 %um13)
+  ; pair 14
+  %sd14 = call i128 (i128, i128) @__iyi_native_divti3(i128 1267650600228229401496703205376, i128 8589934592)
+  call void (i128) @show(i128 %sd14)
+  %ud14 = call i128 (i128, i128) @__iyi_native_udivti3(i128 1267650600228229401496703205376, i128 8589934592)
+  call void (i128) @show(i128 %ud14)
+  %sm14 = call i128 (i128, i128) @__iyi_native_modti3(i128 1267650600228229401496703205376, i128 8589934592)
+  call void (i128) @show(i128 %sm14)
+  %um14 = call i128 (i128, i128) @__iyi_native_umodti3(i128 1267650600228229401496703205376, i128 8589934592)
+  call void (i128) @show(i128 %um14)
+  ; pair 15
+  %sd15 = call i128 (i128, i128) @__iyi_native_divti3(i128 -170141183460469231731687303715884105728, i128 9223372036854775808)
+  call void (i128) @show(i128 %sd15)
+  %ud15 = call i128 (i128, i128) @__iyi_native_udivti3(i128 -170141183460469231731687303715884105728, i128 9223372036854775808)
+  call void (i128) @show(i128 %ud15)
+  %sm15 = call i128 (i128, i128) @__iyi_native_modti3(i128 -170141183460469231731687303715884105728, i128 9223372036854775808)
+  call void (i128) @show(i128 %sm15)
+  %um15 = call i128 (i128, i128) @__iyi_native_umodti3(i128 -170141183460469231731687303715884105728, i128 9223372036854775808)
+  call void (i128) @show(i128 %um15)
+  ; pair 16
+  %sd16 = call i128 (i128, i128) @__iyi_native_divti3(i128 12345678901234567890123, i128 7)
+  call void (i128) @show(i128 %sd16)
+  %ud16 = call i128 (i128, i128) @__iyi_native_udivti3(i128 12345678901234567890123, i128 7)
+  call void (i128) @show(i128 %ud16)
+  %sm16 = call i128 (i128, i128) @__iyi_native_modti3(i128 12345678901234567890123, i128 7)
+  call void (i128) @show(i128 %sm16)
+  %um16 = call i128 (i128, i128) @__iyi_native_umodti3(i128 12345678901234567890123, i128 7)
+  call void (i128) @show(i128 %um16)
+  ; pair 17
+  %sd17 = call i128 (i128, i128) @__iyi_native_divti3(i128 -12345678901234567890123, i128 1000000007)
+  call void (i128) @show(i128 %sd17)
+  %ud17 = call i128 (i128, i128) @__iyi_native_udivti3(i128 -12345678901234567890123, i128 1000000007)
+  call void (i128) @show(i128 %ud17)
+  %sm17 = call i128 (i128, i128) @__iyi_native_modti3(i128 -12345678901234567890123, i128 1000000007)
+  call void (i128) @show(i128 %sm17)
+  %um17 = call i128 (i128, i128) @__iyi_native_umodti3(i128 -12345678901234567890123, i128 1000000007)
+  call void (i128) @show(i128 %um17)
+  ; pair 18
+  %sd18 = call i128 (i128, i128) @__iyi_native_divti3(i128 170141183460469231731687303715884105727, i128 18446744073709551615)
+  call void (i128) @show(i128 %sd18)
+  %ud18 = call i128 (i128, i128) @__iyi_native_udivti3(i128 170141183460469231731687303715884105727, i128 18446744073709551615)
+  call void (i128) @show(i128 %ud18)
+  %sm18 = call i128 (i128, i128) @__iyi_native_modti3(i128 170141183460469231731687303715884105727, i128 18446744073709551615)
+  call void (i128) @show(i128 %sm18)
+  %um18 = call i128 (i128, i128) @__iyi_native_umodti3(i128 170141183460469231731687303715884105727, i128 18446744073709551615)
+  call void (i128) @show(i128 %um18)
+  ; pair 19
+  %sd19 = call i128 (i128, i128) @__iyi_native_divti3(i128 -1, i128 -1)
+  call void (i128) @show(i128 %sd19)
+  %ud19 = call i128 (i128, i128) @__iyi_native_udivti3(i128 -1, i128 -1)
+  call void (i128) @show(i128 %ud19)
+  %sm19 = call i128 (i128, i128) @__iyi_native_modti3(i128 -1, i128 -1)
+  call void (i128) @show(i128 %sm19)
+  %um19 = call i128 (i128, i128) @__iyi_native_umodti3(i128 -1, i128 -1)
+  call void (i128) @show(i128 %um19)
+  ret i32 0
+}

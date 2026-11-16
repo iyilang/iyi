@@ -1,0 +1,10 @@
+@[Unsafe("the fixture holds an inline asm template that writes registers")]
+module asm_clobber
+
+def clobbered : Int64
+  a = 1_i64 + 100_i64
+  asm("mov x0, #99\nmov x1, #99\nmov x2, #99" ::: "x0", "x1", "x2" : "volatile")
+  a
+end
+
+puts "#{clobbered()}"

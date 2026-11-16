@@ -1,0 +1,17 @@
+; iyi-ir 1
+module "constexpr_mul"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external i32 @printf(ptr, ...)
+@fmt = private constant [4 x i8] c"%d\0A\00"
+; LLVM 20 keeps `mul` constant expressions that later LLVMs fold: the size of five i64s,
+; written as the size of one times five.
+@size = internal global i64 mul (i64 ptrtoint (ptr getelementptr (i64, ptr null, i64 1) to i64), i64 5)
+
+define i32 @main() {
+entry:
+  %v = load i64, ptr @size, align 8
+  %t = trunc i64 %v to i32
+  %r = call i32 (ptr, ...) @printf(ptr @fmt, i32 %t)
+  ret i32 0
+}

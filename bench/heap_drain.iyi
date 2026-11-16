@@ -539,7 +539,8 @@ module bench/heap_drain
   {% elsif flag?(:win32) %}
     lib LibDirResident
       fun GetCurrentProcess : Void*
-      fun K32QueryWorkingSetEx(process : Void*, info : UInt64*, size : UInt32) : Int32
+      # The DWORD size in a register of its own on x64: its low half read.
+      fun K32QueryWorkingSetEx(process : Void*, info : UInt64*, size : UInt64) : Int32
     end
   {% end %}
 
@@ -553,7 +554,7 @@ module bench/heap_drain
         info[k * 2] = address + k.to_u64 * page
         k = k + 1
       end
-      return -1_i64 if LibDirResident.K32QueryWorkingSetEx(LibDirResident.GetCurrentProcess, info, (pages.to_u64 * 16_u64).to_u32) == 0
+      return -1_i64 if LibDirResident.K32QueryWorkingSetEx(LibDirResident.GetCurrentProcess, info, pages.to_u64 * 16_u64) == 0
       count = 0_i64
       k = 0
       while k < pages

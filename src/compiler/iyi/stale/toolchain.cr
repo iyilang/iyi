@@ -17,9 +17,59 @@ module Iyi::Stale
 
   module Toolchain
     record StatKey, path : String, stamp : BuildInputs::Stamp
+    class ImageChangedError < Exception
+    end
+
+    # Capture at process startup, before a later pathname replacement can
+    # make the running image appear to be the new file.
+    @@running_image : {String, BuildInputs::Stamp}? = begin
+      if path = Process.executable_path
+        stamp = FileStamp.of(path)
+        if stamp.kind.file? && stamp.ctime > 0 &&
+           (stamp.digest || !BuildInputs.racy?(Math.max(stamp.mtime, stamp.ctime), BuildInputs.now))
+          {path, stamp}
+        end
+      end
+    rescue
+      nil
+    end
+    @@image_lock = Mutex.new
+    @@image_refusal : String? = nil
+
+    def self.running_image_refusal : String?
+      @@image_lock.synchronize do
+        return @@image_refusal if @@image_refusal
+        image = @@running_image
+        unless image
+          return @@image_refusal = "running compiler image cannot be identified"
+        end
+        path, original = image
+        current = FileStamp.of(path, with_digest: false)
+        same = original.kind.file? && original.ctime > 0 && current.kind.file? &&
+               original.size == current.size && original.mtime == current.mtime &&
+               original.ctime == current.ctime && original.dev == current.dev && original.ino == current.ino
+        if same && (digest = original.digest)
+          same = FileStamp.fingerprint(path) == digest
+          if same && !BuildInputs.racy?(Math.max(original.mtime, original.ctime), BuildInputs.now)
+            @@running_image = {path, original.copy_with(digest: nil)}
+          end
+        end
+        @@image_refusal = "running compiler image changed" unless same
+        @@image_refusal
+      end
+    rescue
+      @@image_refusal = "running compiler image cannot be identified"
+    end
+
+    private def self.check_running_image! : Nil
+      if reason = running_image_refusal
+        raise ImageChangedError.new(reason)
+      end
+    end
 
     # Digest of compiler, LLVM and linker driver metadata, cached via C4 memo.
     def self.digest(cache_root : String, executable_path : String? = nil, linker_override : String? = nil) : Digest
+      check_running_image! unless executable_path
       compiler_path = resolve_compiler_path(executable_path)
       llvm_path, llvm_is_shared = resolve_llvm_lib(compiler_path)
       linker_path = linker_override ? File.realpath(linker_override) : resolve_linker_path
@@ -45,8 +95,11 @@ module Iyi::Stale
           begin
             content = File.read(memo_file)
             if hex_val = extract_json_field(content, "toolchain")
+              check_running_image! unless executable_path
               return Stale.parse_hex(hex_val)
             end
+          rescue ex : ImageChangedError
+            raise ex
           rescue
             # Corrupt memo; fall through to recompute.
           end
@@ -85,6 +138,7 @@ module Iyi::Stale
         enc.str(linker_ver)
         enc.digest(linker_sha)
       end
+      check_running_image! unless executable_path
 
       if memo_file
         write_memo_atomic(memo_dir, memo_file, toolchain_digest, compiler_sha, llvm_path, llvm_sha, linker_path, linker_ver, linker_sha)

@@ -105,6 +105,7 @@ module Iyi::Stale
       cache_root = CacheDir.instance.dir
       roots = Stale::Roots.default(program, primary_source.filename, primary_source.code, cache_root)
       lib_flags = program.lib_flags(compiler.cross_compile?)
+      toolchain_refusal : String? = nil
 
       callpath_result, local_build, portable_build, local_mode_build, portable_mode_build = compiler.progress_tracker.stage("Hashing") do
         cpr = Stale::CallPath.compute(program, reach, roots)
@@ -122,7 +123,14 @@ module Iyi::Stale
           File.rename(tmp_dump, dump_path)
         end
 
-        toolchain_fp = Stale::Toolchain.digest(cache_root)
+        toolchain_fp = begin
+          Stale::Toolchain.digest(cache_root)
+        rescue ex : Stale::Toolchain::ImageChangedError
+          toolchain_refusal = ex.message || "running compiler image changed"
+          # This domain is never eligible for reuse: the refusal below prevents
+          # both hits and records while the ordinary compiler still runs.
+          Stale.d("unavailable-toolchain") { |enc| enc.str(toolchain_refusal.not_nil!) }
+        end
         behavior_fp = compiler.behavior_key
         link_fp = Stale::Link.fp(lib_flags, compiler.link_flags, compiler.static?, ENV)
         cenv_fp = Stale::CompilerEnv.fp
@@ -188,6 +196,11 @@ module Iyi::Stale
         {cpr, lb, pb, lmb, pmb}
       end
       not_reusable = [] of KeyFile::NotReusable
+      toolchain_refusal ||= "running compiler image changed" if Crystal::System::Env.get("IYI_STALE_PARENT_IMAGE_CHANGED") == "1"
+      if reason = toolchain_refusal
+        not_reusable << KeyFile::NotReusable.new("internal", reason, nil)
+        BuildInputs.current.try &.cannot(reason)
+      end
 
       # S2 build mode refusals
       compiler.stale_refusals.each do |r|

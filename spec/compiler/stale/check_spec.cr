@@ -526,6 +526,9 @@ describe "Iyi::Stale inputs record (--stale-inputs)" do
       data["env_enumerated"].as_bool.should be_false
       data["observed_env"].as_h.has_key?("PATH").should be_true
       data["observed_env"].as_h.has_key?("__COMPAT_LAYER").should be_true
+      %w(LD_PRELOAD GLIBC_TUNABLES DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH).each do |name|
+        data["observed_env"].as_h.has_key?(name).should be_true
+      end
       data["listings"].as_h.has_key?(Iyi::BuildInputs.key(dir)).should be_true
       data["pkg_config"].as_a[0].as_a[0].as_s.should eq("zlib")
       entry = data["files"].as_a.find { |file| file.as_a[0].as_s == Iyi::BuildInputs.key(source_path) }.not_nil!

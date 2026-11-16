@@ -48,7 +48,8 @@ module Iyi
     # variables those are documented to read are recorded whether or not this
     # build asked for them.
     CHILD_ENV = %w(PATH CC LIBRARY_PATH LD_LIBRARY_PATH LD_RUN_PATH COMPILER_PATH GCC_EXEC_PREFIX
-      SDKROOT MACOSX_DEPLOYMENT_TARGET LIB LIBPATH LINK _LINK_ __COMPAT_LAYER)
+      SDKROOT MACOSX_DEPLOYMENT_TARGET LIB LIBPATH LINK _LINK_ __COMPAT_LAYER
+      LD_PRELOAD GLIBC_TUNABLES DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH)
 
     # The compiler's own reads that happen only when it links: a warm build
     # links nothing (a cached macro `run` helper, an up-to-date program), so

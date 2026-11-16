@@ -47,9 +47,9 @@ with tempfile.TemporaryDirectory(prefix="iyi-stale-chmod-failure-") as temporary
     overlay = work / "overlay"
     observer = overlay / "std" / "observe.iyi"
     observer.parent.mkdir(parents=True)
-    original = (repo / "src" / "std" / "observe.iyi").read_text()
+    original = (repo / "src" / "std" / "observe.iyi").read_text(encoding="utf-8")
     before = 'pub def __iyi_observe_process(site : String) : Nil\n  not_reusable(36_u8, site)\nend'
-    scheduler = (repo / "src" / "iyi" / "concurrency.iyi").read_text().splitlines()
+    scheduler = (repo / "src" / "iyi" / "concurrency.iyi").read_text(encoding="utf-8").splitlines()
     matches = [line for line, text in enumerate(scheduler, 1) if "def self.resolved : Int32" in text]
     if len(matches) != 1:
         raise AssertionError("scheduler resolved fixture no longer applies")
@@ -58,15 +58,15 @@ with tempfile.TemporaryDirectory(prefix="iyi-stale-chmod-failure-") as temporary
              f'  not_reusable(36_u8, site) unless site.includes?("{site}")\nend')
     if original.count(before) != 1:
         raise AssertionError("scheduler process observer fixture no longer applies")
-    observer.write_text(original.replace(before, after))
+    observer.write_text(original.replace(before, after), encoding="utf-8")
     prelude = overlay / "iyi" / "prelude.iyi"
     prelude.parent.mkdir(parents=True)
-    prelude_source = (repo / "src" / "iyi" / "prelude.iyi").read_text()
+    prelude_source = (repo / "src" / "iyi" / "prelude.iyi").read_text(encoding="utf-8")
     if prelude_source.count('require "../std/observe"') != 1:
         raise AssertionError("observer prelude fixture no longer applies")
     runtime_path = os.path.relpath(repo / "src" / "iyi", prelude.parent).replace("\\", "/")
     prelude_source = prelude_source.replace('require "./', f'require "{runtime_path}/')
-    prelude.write_text(prelude_source)
+    prelude.write_text(prelude_source, encoding="utf-8")
     target = project / "absent"
     test = project / "chmod_failure_test.iyi"
     test.write_text('''import std/file::{File}
@@ -78,11 +78,11 @@ group do |g|
   end
   assert task.value.is_a?(Panicked)
 end
-''')
+''', encoding="utf-8")
     # Exercise the real cache/guard/keep path on POSIX too: enable only the
     # Windows keep branch and replace its OS ACL call with a forced failure.
     autocert_path = overlay / "std" / "autocert.iyi"
-    autocert = (repo / "src" / "std" / "autocert.iyi").read_text()
+    autocert = (repo / "src" / "std" / "autocert.iyi").read_text(encoding="utf-8")
     entry = '  def self.keep(dir : String) : Nil\n    {% if flag?(:win32) %}'
     helpers = '  {% if flag?(:win32) %}\n    # Effect wrappers record on return.'
     if autocert.count(entry) != 1 or autocert.count(helpers) != 1:
@@ -100,7 +100,7 @@ end
     start = autocert.index(helper) + len(helper)
     end = autocert.index('\n    end\n  {% end %}\nend', start)
     autocert = autocert[:start] + '\n      raise "simulated ACL refusal"' + autocert[end:]
-    autocert_path.write_text(autocert)
+    autocert_path.write_text(autocert, encoding="utf-8")
     acl_target = project / "acl-directory"
     acl_target.mkdir()
     acl_test = project / "acl_failure_test.iyi"
@@ -108,7 +108,7 @@ end
 path = Program.env("IYI_CHMOD_FAILURE_PATH") || raise "missing path"
 cache = AutocertDirCache.new(path)
 assert cache.put("example", "data").is_a?(AutocertError)
-''')
+''', encoding="utf-8")
     env = os.environ.copy()
     env["IYI_CACHE_DIR"] = str(work / "cache")
     base_path = env.get("IYI_PATH") or os.pathsep.join((str(repo / "src"), str(repo / "samples" / "iyi")))
@@ -118,7 +118,7 @@ assert cache.put("example", "data").is_a?(AutocertError)
     def run(label, args, extra_env=None):
         print(f"== {label}", flush=True)
         result = subprocess.run([iyi, *args], cwd=project, env=extra_env or env,
-                                capture_output=True, text=True, timeout=180)
+                                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180)
         if result.returncode:
             raise RuntimeError(f"{label}: exit {result.returncode}\n{result.stdout}\n{result.stderr}")
         return result.stdout
@@ -134,7 +134,7 @@ assert cache.put("example", "data").is_a?(AutocertError)
                              "IYI_OBSERVE": str(trace_path)})
         print(f"== {label} observed run", flush=True)
         observed = subprocess.run([str(executable)], cwd=project, env=observed_env,
-                                  capture_output=True, text=True, timeout=180)
+                                  capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180)
         if observed.returncode:
             raise RuntimeError(f"{label}: exit {observed.returncode}\n{observed.stdout}\n{observed.stderr}")
         trace = trace_path.read_bytes()

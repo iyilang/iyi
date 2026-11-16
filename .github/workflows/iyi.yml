@@ -3907,7 +3907,9 @@ jobs:
       # One driver runs every selfhost gate (bench/selfhost_*_exercise.sh) in order,
       # each with its own log, and exits non-zero when any of them fails.
       - name: The self-host gates
-        run: bash bench/selfhost_gates.sh
+        run: |
+          bindir="$("$LLVM_CONFIG" --bindir)"
+          LLVM_MC="$bindir/llvm-mc" LLVM_OBJDUMP="$bindir/llvm-objdump" bash bench/selfhost_gates.sh
 
   selfhost-darwin:
     needs: plan
@@ -3948,7 +3950,7 @@ jobs:
       # The same driver as the Linux job. The gates read LLVM_CONFIG from the
       # environment before they look for llvm-config on the PATH.
       - name: The self-host gates
-        run: LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config" bash bench/selfhost_gates.sh
+        run: LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config" LLVM_MC="$HOME/llvm-static/bin/llvm-mc" LLVM_OBJDUMP="$HOME/llvm-static/bin/llvm-objdump" bash bench/selfhost_gates.sh
 
   selfhost-windows:
     needs: plan

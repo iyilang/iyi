@@ -64,7 +64,7 @@ own reference accepts.
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
 | iyi's own prelude | 29,007 lines, of which 4,738 are the library held to the 4,738 ceiling (7,089 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 149,923 lines, none of it written in iyi |
+| compiler | 149,926 lines, none of it written in iyi |
 | artifact format | `.iyimod` v62, checksum per section |
 | samples | 28 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -1062,8 +1062,8 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 149,923 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 29,007-line own prelude + 129,713 in std |
+| Compiler | 24,984 lines, **written in Crystal** | 149,926 lines, Crystal, forked |
+| Library | 8,161 lines (3,551 of it core) | 29,007-line own prelude + 129,715 in std |
 | Specs | 21,146 lines | 17,536 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
@@ -8054,7 +8054,7 @@ Chaos mode: combining `--cached` with chaos testing (`--chaos`, `--chaos=SEED`, 
 - *Passes only:* Cached failures are never served; only passing runs write receipts.
 - *CI export restriction:* Snapshot export is restricted to CI producer contexts with an attestation flag to prevent accidental workstation export.
 - *Path sensitivity:* Cross-machine hits require identical checkout and toolchain paths because reached code carries absolute source location literals in assertions.
-- *Runner parity:* Cross-machine hits expect alike runner configurations (matching kernel release, rlimits, cgroup memory limits, and loader variables).
+- *Runner parity:* Cross-machine hits expect alike runner configurations (matching kernel release, rlimits, cgroup memory limits, and loader variables). CI's fresh runner requires matching-profile hits and differing-profile refusals, audits both against fresh execution, and separately requires hits from its own exported receipts on an emptied store.
 - *Cross-commit hits:* Hits across commits wait on RG1 compiler reproducibility in CI.
 - *Environment writes:* Environment mutations (`ENV.[]=`, `ENV.delete`, `__iyi_set_environ`) over-approximate by recording `env_all`, so any change to the runner's environment reruns a test that sets a variable. `ENV.[]=` and `ENV.delete` also name the variable, and the test reading back its own value is not an input.
 - *Windows:* Nothing on Windows is reusable yet. Its platform arms are not classified (RG3 below), so every test reaches an unclassified site and runs. macOS and Linux are classified.

@@ -5,6 +5,25 @@ require "compiler/iyi/stale/check"
 require "compiler/iyi/stale/machine_key"
 require "compiler/iyi/stale/key_file"
 
+describe "Iyi::IyiLibraryPath" do
+  it "uses the current library path on each call" do
+    previous = ENV["IYI_LIBRARY_PATH"]?
+    begin
+      ENV["IYI_LIBRARY_PATH"] = "first-library-path"
+      Iyi::IyiLibraryPath.paths.should contain("first-library-path")
+      ENV["IYI_LIBRARY_PATH"] = "second-library-path"
+      Iyi::IyiLibraryPath.paths.should contain("second-library-path")
+      Iyi::IyiLibraryPath.paths.should_not contain("first-library-path")
+    ensure
+      if previous
+        ENV["IYI_LIBRARY_PATH"] = previous
+      else
+        ENV.delete("IYI_LIBRARY_PATH")
+      end
+    end
+  end
+end
+
 describe "Iyi::Stale S3g: Check, MachineKey, KeyFile, Accept/Block" do
   describe "Iyi::Stale::MachineKey" do
     it "creates 32-byte machine key with mode 0600 under tests-v1/key" do
@@ -565,6 +584,15 @@ describe "Iyi::Stale inputs record (--stale-inputs)" do
           end
 
           recorded.not_reusable.should be_empty
+          # Said by component, because this assertion failed once, in a random
+          # order, on a Windows runner (run 43811561723, seed 44219) and not on
+          # the same commit's other run: which of the five parts of the build key
+          # moved between two checks of one program is the whole diagnosis.
+          {% for mode in ["local", "portable"] %}
+            {% for part in %w(toolchain behavior callpath link cenv) %}
+              recorded.{{ mode.id }}_mode_build.{{ part.id }}.should eq(plain.{{ mode.id }}_mode_build.{{ part.id }}), "the {{ mode.id }} build key's {{ part.id }} part differs between a plain check and one that records inputs"
+            {% end %}
+          {% end %}
           recorded.local_build_hex.should eq(plain.local_build_hex)
           recorded.portable_build_hex.should eq(plain.portable_build_hex)
           {% if flag?(:win32) %}

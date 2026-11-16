@@ -5,7 +5,7 @@
 #
 #     fetch-master                Download master snapshot through Actions API
 #     assert-export-env           Verify export step environment has no secrets
-#     assert-hits                 Verify all tests in a test run were cache hits
+#     assert-hits                 Require cache hits, or explicit profile refusals
 #     test-comparator-negatives   Verify negative comparator fixtures for CI checks
 #     test-planted-hidden-read    Prove shadow audit detects unobserved reads (row 24)
 #     git-diff-check              Verify run observations against git diff
@@ -160,17 +160,19 @@ print(f'empty-snapshot: wrote empty snapshot with identity from {from_file} to {
 " "$from_file" "$out_file"
 }
 
-# 3. assert-hits: checks that every test in cached_results.json hit from cache
+# 3. assert-hits: require imported hits, optionally allowing profile refusals
 assert_hits() {
   local json_file=""
   local snapshot_file=""
   local expected_ns=""
+  local allow_profile_refusal="false"
 
   while [ $# -gt 0 ]; do
     case "$1" in
       --json) json_file="$2"; shift 2 ;;
       --snapshot) snapshot_file="$2"; shift 2 ;;
       --namespace) expected_ns="$2"; shift 2 ;;
+      --allow-profile-refusal) allow_profile_refusal="true"; shift ;;
       *) echo "Unknown option: $1" >&2; return 1 ;;
     esac
   done
@@ -186,6 +188,7 @@ import json, sys, os
 json_file = sys.argv[1]
 snapshot_file = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] else ''
 expected_ns = sys.argv[3] if len(sys.argv) > 3 and sys.argv[3] else ''
+allow_profile_refusal = sys.argv[4] == 'true'
 
 with open(json_file) as f:
     data = json.load(f)
@@ -205,6 +208,9 @@ def extract_test_id(obj):
         return (str(obj['root']), str(obj['path']))
     return None
 
+def profile_fp(profile):
+    return profile.get('fp') if isinstance(profile, dict) else profile
+
 seen_test_ids = set()
 for t in tests:
     tid = extract_test_id(t)
@@ -217,6 +223,7 @@ for t in tests:
     seen_test_ids.add(tid)
 
 exported_ids = None
+snap_fp = {}
 snap_ns = expected_ns
 if snapshot_file and os.path.exists(snapshot_file):
     with open(snapshot_file) as f:
@@ -233,9 +240,11 @@ if snapshot_file and os.path.exists(snapshot_file):
             print(f'assert-hits FAILED: snapshot contains duplicate test identity {rid[0]}:{rid[1]}', file=sys.stderr)
             sys.exit(1)
         exported_ids.add(rid)
+        snap_fp[rid] = profile_fp(r.get('profile'))
 
 non_hits = []
 excused = []
+refused = {}
 hit_ids = set()
 
 for t in tests:
@@ -243,8 +252,14 @@ for t in tests:
     reuse = t.get('reuse', '')
     cached = t.get('cached', False)
     source = t.get('source', '')
+    r_fp = snap_fp.get(tid)
+    t_fp = t.get('profile')
+    differs = bool(r_fp and t_fp and r_fp != t_fp)
 
     if cached and reuse == 'hit':
+        if differs:
+            print(f'assert-hits FAILED: test {tid[0]}:{tid[1]} hit a receipt whose profile differs (receipt {r_fp}, runner {t_fp}): an import must refuse it', file=sys.stderr)
+            sys.exit(1)
         if snap_ns:
             if source == 'local':
                 print(f\"assert-hits FAILED: test {tid[0]}:{tid[1]} hit from local cache instead of snapshot namespace '{snap_ns}' (local hit substitution)\", file=sys.stderr)
@@ -255,11 +270,18 @@ for t in tests:
         hit_ids.add(tid)
         continue
 
+    if differs and allow_profile_refusal:
+        refused[tid] = (r_fp, t_fp)
+        continue
+
     if exported_ids is not None and reuse == 'not reusable' and tid not in exported_ids:
         excused.append((tid, t.get('reason', '')))
         continue
 
-    non_hits.append((tid, reuse, t.get('reason', '')))
+    reason = t.get('reason', '')
+    if differs:
+        reason = f'{reason} profile differs (receipt {r_fp}, runner {t_fp})'.strip()
+    non_hits.append((tid, reuse, reason))
 
 if non_hits:
     print(f'assert-hits FAILED: {len(non_hits)} tests did not hit from cache:', file=sys.stderr)
@@ -268,7 +290,7 @@ if non_hits:
     sys.exit(1)
 
 if exported_ids is not None:
-    missing = exported_ids - hit_ids
+    missing = exported_ids - hit_ids - set(refused)
     unexpected = hit_ids - exported_ids
     if missing or unexpected:
         print('assert-hits FAILED: hit identity set does not match snapshot identity set:', file=sys.stderr)
@@ -284,12 +306,16 @@ hits = len(hit_ids)
 print(f'assert-hits PASSED: {hits} of {len(tests)} tests hit from cache.')
 for tid, reason in excused:
     print(f'  not reusable, so not exported: {tid[0]}:{tid[1]}: {reason}')
-" "$json_file" "$snapshot_file" "$expected_ns"
+if refused:
+    print(f\"  {len(refused)} imported receipts refused: their profile differs from this runner's, so their hits are not exercised here; shadow-audit compares them with fresh execution.\")
+    for tid, (r_fp, t_fp) in sorted(refused.items()):
+        print(f'  {tid[0]}:{tid[1]}: receipt {r_fp}, runner {t_fp}')
+" "$json_file" "$snapshot_file" "$expected_ns" "$allow_profile_refusal"
 }
 
-# 4. shadow-audit: verifies cached hits match fresh execution. The two
-# snapshots carry the portable Build and ordered observations the runner's
-# terse result JSON intentionally omits.
+# 4. shadow-audit: compares cached hits and profile-refused receipts with fresh
+# execution. The snapshots carry the portable Build and ordered observations
+# the runner's terse result JSON intentionally omits.
 shadow_audit() {
   local cached_json=""
   local fresh_json=""
@@ -333,6 +359,12 @@ def extract_test_id(obj):
     if 'root' in obj and 'path' in obj:
         return (str(obj['root']), str(obj['path']))
     return None
+
+def profile_fp(profile):
+    return profile.get('fp') if isinstance(profile, dict) else profile
+
+def profile_parts(profile):
+    return {k: v for k, v in profile.items() if k != 'fp'} if isinstance(profile, dict) else None
 
 cached_tests = {}
 for t in cached_data.get('tests', []):
@@ -390,28 +422,48 @@ if fresh_snapshot_file and os.path.exists(fresh_snapshot_file):
 
 disagreements = []
 hits_checked = 0
+refused_checked = 0
+parity_fields = {'kernel', 'rlimits', 'cgroup_mem', 'loader_vars'}
+differences = set()
+kernel_pairs = set()
 
 for tid, c_test in cached_tests.items():
     tid_str = f\"{tid[0]}:{tid[1]}\"
-    if not (c_test.get('cached') and c_test.get('reuse') == 'hit'):
+    c_record = cached_records.get(tid)
+    producer_fp = profile_fp(c_record.get('profile')) if c_record else None
+    runner_fp = c_test.get('profile')
+    differs = bool(producer_fp and runner_fp and producer_fp != runner_fp)
+    hit = bool(c_test.get('cached') and c_test.get('reuse') == 'hit')
+    refused = bool(not hit and c_record and differs)
+    if not hit and not refused:
         continue
-    hits_checked += 1
 
-    if snap_ns:
-        source = c_test.get('source', '')
-        if source == 'local':
-            disagreements.append(f\"{tid_str}: local hit substitution (source=local, expected={snap_ns})\")
-        elif source != snap_ns:
-            disagreements.append(f\"{tid_str}: namespace substitution (source={source}, expected={snap_ns})\")
+    if hit:
+        hits_checked += 1
+        if differs:
+            disagreements.append(f'{tid_str}: hit a receipt whose profile differs (receipt {producer_fp}, runner {runner_fp})')
+        if snap_ns:
+            source = c_test.get('source', '')
+            if source == 'local':
+                disagreements.append(f\"{tid_str}: local hit substitution (source=local, expected={snap_ns})\")
+            elif source != snap_ns:
+                disagreements.append(f\"{tid_str}: namespace substitution (source={source}, expected={snap_ns})\")
+    else:
+        refused_checked += 1
+        if c_test.get('reuse') != 'miss' or c_test.get('cached') is not False:
+            disagreements.append(f'{tid_str}: profile refusal was not an uncached miss')
+        if c_test.get('reason') or c_test.get('blocked') is True:
+            disagreements.append(f\"{tid_str}: profile refusal has an execution reason or blocker ({c_test.get('reason')}, blocked={c_test.get('blocked')})\")
 
     f_test = fresh_tests.get(tid)
     if not f_test:
-        disagreements.append(f\"{tid_str}: hit in cached run but missing from fresh audit\")
+        kind = 'hit' if hit else 'refused receipt'
+        disagreements.append(f'{tid_str}: {kind} in cached run but missing from fresh audit')
         continue
 
     c_status = c_test.get('status')
     f_status = f_test.get('status')
-    if c_status != f_status:
+    if c_status != f_status or (refused and f_status != 'pass'):
         disagreements.append(f\"{tid_str}: verdict mismatch (cached={c_status}, fresh={f_status})\")
 
     c_build = c_test.get('portable_build')
@@ -419,20 +471,57 @@ for tid, c_test in cached_tests.items():
     if c_build and f_build and c_build != f_build:
         disagreements.append(f\"{tid_str}: portable Build mismatch ({c_build} != {f_build})\")
 
-    if cached_records or fresh_records:
-        c_record = cached_records.get(tid)
+    if refused or cached_records or fresh_records:
         f_record = fresh_records.get(tid)
         if not c_record or not f_record:
-            disagreements.append(f\"{tid_str}: missing portable receipt in producer or audit snapshot\")
+            message = 'refused receipt has no fresh audit receipt' if refused else 'missing portable receipt in producer or audit snapshot'
+            disagreements.append(f'{tid_str}: {message}')
             continue
+        c_profile = c_record.get('profile')
+        f_profile = f_record.get('profile')
+        fresh_fp = profile_fp(f_profile)
+        c_parts = profile_parts(c_profile)
+        f_parts = profile_parts(f_profile)
+        if producer_fp and fresh_fp and c_parts is not None and f_parts is not None:
+            if (producer_fp == fresh_fp) != (c_parts == f_parts):
+                disagreements.append(f'{tid_str}: profile fp disagrees with its components')
+
+        if refused:
+            if runner_fp != f_test.get('profile') or runner_fp != fresh_fp:
+                disagreements.append(f'{tid_str}: runner computed more than one profile')
+            if c_parts is None or f_parts is None:
+                disagreements.append(f'{tid_str}: refused receipt lacks recorded profile components')
+            else:
+                changed = {k for k in c_parts.keys() | f_parts.keys()
+                           if k not in c_parts or k not in f_parts or c_parts[k] != f_parts[k]}
+                if not changed:
+                    disagreements.append(f'{tid_str}: profile fp differs but no recorded component does')
+                outside = changed - parity_fields
+                if outside:
+                    disagreements.append(f\"{tid_str}: profile differs outside runner parity: {', '.join(sorted(outside))}\")
+                for key in changed:
+                    before = c_parts.get(key, '<missing>')
+                    after = f_parts.get(key, '<missing>')
+                    differences.add(f'{key} {before} -> {after}')
+                kernel_pairs.add((str(c_parts.get('kernel', '<missing>')), str(f_parts.get('kernel', '<missing>'))))
+        elif runner_fp and ((f_test.get('profile') and runner_fp != f_test.get('profile')) or (fresh_fp and runner_fp != fresh_fp)):
+            disagreements.append(f'{tid_str}: runner computed more than one profile')
+
         c_r_build = c_record.get('build', {})
         f_r_build = f_record.get('build', {})
         c_b_hash = c_r_build.get('build') if isinstance(c_r_build, dict) else c_r_build
         f_b_hash = f_r_build.get('build') if isinstance(f_r_build, dict) else f_r_build
-        if c_b_hash != f_b_hash:
+        if c_b_hash != f_b_hash or (refused and (not c_b_hash or not f_b_hash)):
             disagreements.append(f\"{tid_str}: portable Build mismatch in snapshots ({c_b_hash} != {f_b_hash})\")
-        if c_record.get('trace', {}).get('observations') != f_record.get('trace', {}).get('observations'):
+        if refused and ((c_build and c_build != c_b_hash) or (f_build and f_build != c_b_hash)):
+            disagreements.append(f'{tid_str}: portable Build mismatch between result and snapshot')
+        c_obs = c_record.get('trace', {}).get('observations')
+        f_obs = f_record.get('trace', {}).get('observations')
+        if c_obs != f_obs or (refused and (not isinstance(c_obs, list) or not isinstance(f_obs, list))):
             disagreements.append(f\"{tid_str}: ordered trace observation mismatch\")
+
+if hits_checked + refused_checked == 0:
+    disagreements.append('nothing audited')
 
 if disagreements:
     with open('.disagreement_marker', 'w') as f:
@@ -442,7 +531,13 @@ if disagreements:
         print(f'  {d}', file=sys.stderr)
     sys.exit(1)
 
-print(f'shadow-audit PASSED: {hits_checked} cached hits verified against fresh execution.')
+detail = f\" (differs: {'; '.join(sorted(differences))})\" if differences else ''
+print(f\"shadow-audit PASSED: {hits_checked} cached hits verified against fresh execution; {refused_checked} receipts refused for this runner's profile matched fresh execution in verdict, Build and ordered observations{detail}.\")
+if refused_checked and os.environ.get('GITHUB_ACTIONS') == 'true':
+    kernels = '; '.join(f'{before} -> {after}' for before, after in sorted(kernel_pairs)) or '<unknown> -> <unknown>'
+    notice = f'Producer kernel -> auditor kernel: {kernels}. Hits on profile-refused producer receipts were not exercised on this runner.'
+    notice = notice.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+    print(f'::notice title=Cross-machine hits not exercised::{notice}')
 " "$cached_json" "$fresh_json" "$cached_snapshot" "$fresh_snapshot" "$expected_ns"
 }
 
@@ -986,6 +1081,12 @@ for tid, t in cached_tests.items():
         if not rec:
             continue
 
+        t_prof = t.get('profile')
+        rec_prof = rec.get('profile')
+        rec_prof_fp = rec_prof.get('fp') if isinstance(rec_prof, dict) else rec_prof
+        if t_prof and rec_prof_fp and t_prof != rec_prof_fp:
+            errors.append(f'Hit test {tid_str} hit a master receipt whose profile differs (receipt {rec_prof_fp}, runner {t_prof})')
+
         for obs in rec.get('trace', {}).get('observations', []):
             if not is_file_observation(obs):
                 continue
@@ -1296,6 +1397,156 @@ if os.path.exists(os.path.join(sa_dir, '.disagreement_marker')):
 # Matching pass
 assert_positive('shadow-audit', ['--cached-json', c_fail, '--fresh-json', f_pass, '--cached-snapshot', snap_b1, '--fresh-snapshot', snap_b1], cwd=sa_dir)
 
+# Profile parity: a differing profile must be refused and audited, never hit.
+def write_fixture(name, value):
+    path = os.path.join(work, name + '.json')
+    with open(path, 'w') as f:
+        json.dump(value, f)
+    return path
+
+def changed(value, **updates):
+    result = json.loads(json.dumps(value))
+    result.update(updates)
+    return result
+
+identity = {'root': 'src', 'path': 'a.iyi'}
+profile_a = {'fp': 'pA', 'kernel': 'kA', 'argv': ['test'], 'cwd': identity,
+             'rlimits': {'open_files': 1024}, 'cgroup_mem': None, 'loader_vars': 'cleared'}
+profile_b = changed(profile_a, fp='pB', kernel='kB')
+observations = [{'path': 'one'}, {'path': 'two'}]
+producer_record = {'test': identity, 'profile': profile_a, 'build': {'build': 'hash1'},
+                   'trace': {'observations': observations}}
+audit_record = changed(producer_record, profile=profile_b)
+refusal_test = {'test': identity, 'status': 'pass', 'cached': False, 'reuse': 'miss',
+                'profile': 'pB', 'portable_build': 'hash1'}
+fresh_test = changed(refusal_test)
+profile_snapshot = write_fixture('profile_producer', {'namespace': 'run:100', 'records': [producer_record]})
+refusal_json = write_fixture('profile_refusal', {'tests': [refusal_test]})
+profile_hit = changed(refusal_test, cached=True, reuse='hit', source='run:100')
+profile_hit_json = write_fixture('profile_wrong_hit', {'tests': [profile_hit]})
+equal_miss = write_fixture('profile_equal_miss', {'tests': [changed(refusal_test, profile='pA')]})
+missing_profile_snap = write_fixture('profile_missing_snap', {'namespace': 'run:100',
+                                      'records': [{'test': identity}]})
+missing_profile_miss = write_fixture('profile_missing_miss', {'tests': [
+    {'test': identity, 'status': 'pass', 'cached': False, 'reuse': 'miss'}]})
+profile_args = ['--json', refusal_json, '--snapshot', profile_snapshot]
+assert_positive('assert-hits', profile_args + ['--allow-profile-refusal'])
+assert_negative('assert-hits', profile_args, 'did not hit')
+assert_negative('assert-hits', ['--json', profile_hit_json, '--snapshot', profile_snapshot,
+                              '--allow-profile-refusal'], 'profile differs')
+assert_negative('assert-hits', ['--json', profile_hit_json, '--snapshot', profile_snapshot], 'profile differs')
+assert_negative('assert-hits', ['--json', equal_miss, '--snapshot', profile_snapshot,
+                              '--allow-profile-refusal'], 'did not hit')
+assert_negative('assert-hits', ['--json', missing_profile_miss, '--snapshot', missing_profile_snap,
+                              '--allow-profile-refusal'], 'did not hit')
+
+# One run can contain both a valid hit and a profile refusal.
+other_identity = {'root': 'src', 'path': 'b.iyi'}
+other_record = changed(audit_record, test=other_identity)
+other_hit = changed(profile_hit, test=other_identity)
+other_fresh = changed(fresh_test, test=other_identity)
+mixed_snapshot = write_fixture('profile_mixed_snapshot', {'namespace': 'run:100',
+                               'records': [producer_record, other_record]})
+mixed_results = write_fixture('profile_mixed_results', {'tests': [refusal_test, other_hit]})
+mixed_args = ['--json', mixed_results, '--snapshot', mixed_snapshot, '--allow-profile-refusal']
+mixed_result = run_cmd('assert-hits', mixed_args)
+mixed_output = mixed_result.stdout + mixed_result.stderr
+assert mixed_result.returncode == 0, mixed_output
+assert '1 of 2 tests hit from cache' in mixed_output, mixed_output
+assert '1 imported receipts refused' in mixed_output, mixed_output
+assert_negative('assert-hits', ['--json', refusal_json, '--snapshot', mixed_snapshot,
+                              '--allow-profile-refusal'], 'Missing 1 hits')
+
+def shadow_fixture(name, cached, fresh, producer, audit):
+    return ['--cached-json', write_fixture(name + '_cached', {'tests': cached}),
+            '--fresh-json', write_fixture(name + '_fresh', {'tests': fresh}),
+            '--cached-snapshot', write_fixture(name + '_producer', {'namespace': 'run:100', 'records': producer}),
+            '--fresh-snapshot', write_fixture(name + '_audit', {'records': audit})]
+
+marker = os.path.join(sa_dir, '.disagreement_marker')
+def shadow_negative(name, cached, fresh, producer, audit, message):
+    args = shadow_fixture(name, cached, fresh, producer, audit)
+    assert_negative('shadow-audit', args, message, cwd=sa_dir)
+    assert os.path.exists(marker), f'shadow-audit {name} must write .disagreement_marker'
+    os.remove(marker)
+
+refused_args = shadow_fixture('refused_ok', [refusal_test], [fresh_test], [producer_record], [audit_record])
+assert_positive('shadow-audit', refused_args, cwd=sa_dir)
+mixed_shadow_args = shadow_fixture('mixed_profiles', [refusal_test, other_hit], [fresh_test, other_fresh],
+                                   [producer_record, other_record], [audit_record, other_record])
+mixed_shadow = run_cmd('shadow-audit', mixed_shadow_args, cwd=sa_dir)
+mixed_shadow_output = mixed_shadow.stdout + mixed_shadow.stderr
+assert mixed_shadow.returncode == 0, mixed_shadow_output
+assert '1 cached hits verified' in mixed_shadow_output, mixed_shadow_output
+assert '1 receipts refused' in mixed_shadow_output, mixed_shadow_output
+old_actions = os.environ.get('GITHUB_ACTIONS')
+try:
+    os.environ['GITHUB_ACTIONS'] = 'true'
+    notice_result = run_cmd('shadow-audit', refused_args, cwd=sa_dir)
+    notice_output = notice_result.stdout + notice_result.stderr
+    assert notice_result.returncode == 0, notice_output
+    assert notice_output.count('::notice title=Cross-machine hits not exercised::') == 1, notice_output
+    assert 'kA -> kB' in notice_output, notice_output
+finally:
+    if old_actions is None:
+        os.environ.pop('GITHUB_ACTIONS', None)
+    else:
+        os.environ['GITHUB_ACTIONS'] = old_actions
+
+same_hit = changed(profile_hit, profile='pA')
+same_fresh = changed(fresh_test, profile='pA')
+same_args = shadow_fixture('profile_hit_ok', [same_hit], [same_fresh], [producer_record], [producer_record])
+assert_positive('shadow-audit', same_args, cwd=sa_dir)
+
+bad_build = changed(audit_record, build={'build': 'hash2'})
+shadow_negative('refused_build', [refusal_test], [fresh_test], [producer_record], [bad_build],
+                'portable Build mismatch in snapshots')
+bad_observations = changed(audit_record, trace={'observations': list(reversed(observations))})
+shadow_negative('refused_observations', [refusal_test], [fresh_test], [producer_record], [bad_observations],
+                'ordered trace observation mismatch')
+shadow_negative('refused_verdict', [refusal_test], [changed(fresh_test, status='fail')],
+                [producer_record], [audit_record], 'verdict mismatch')
+shadow_negative('refused_both_fail', [changed(refusal_test, status='fail')], [changed(fresh_test, status='fail')],
+                [producer_record], [audit_record], 'verdict mismatch')
+shadow_negative('refused_tainted', [changed(refusal_test, reuse='not reusable')], [fresh_test],
+                [producer_record], [audit_record], 'profile refusal was not an uncached miss')
+shadow_negative('refused_cached_miss', [changed(refusal_test, cached=True)], [fresh_test],
+                [producer_record], [audit_record], 'profile refusal was not an uncached miss')
+shadow_negative('refused_incomplete', [changed(refusal_test, reason='trace incomplete')], [fresh_test],
+                [producer_record], [audit_record], 'profile refusal has an execution reason or blocker')
+shadow_negative('refused_blocked', [changed(refusal_test, blocked=True)], [fresh_test],
+                [producer_record], [audit_record], 'profile refusal has an execution reason or blocker')
+same_parts = changed(audit_record, profile=changed(profile_a, fp='pB'))
+shadow_negative('refused_same_parts', [refusal_test], [fresh_test], [producer_record], [same_parts],
+                'profile fp differs but no recorded component does')
+different_argv = changed(audit_record, profile=changed(profile_a, fp='pB', argv=['other']))
+shadow_negative('refused_argv', [refusal_test], [fresh_test], [producer_record], [different_argv],
+                'profile differs outside runner parity: argv')
+wrong_fresh_fp = changed(audit_record, profile=changed(profile_b, fp='pC'))
+shadow_negative('refused_fresh_fp', [refusal_test], [fresh_test], [producer_record], [wrong_fresh_fp],
+                'runner computed more than one profile')
+shadow_negative('refused_fresh_test_fp', [refusal_test], [changed(fresh_test, profile='pC')],
+                [producer_record], [audit_record], 'runner computed more than one profile')
+shadow_negative('refused_no_fresh_record', [refusal_test], [fresh_test], [producer_record], [],
+                'refused receipt has no fresh audit receipt')
+shadow_negative('refused_no_fresh_test', [refusal_test], [], [producer_record], [audit_record],
+                'missing from fresh audit')
+shadow_negative('nothing_audited', [changed(refusal_test, profile='pA')], [fresh_test],
+                [producer_record], [audit_record], 'nothing audited')
+shadow_negative('hit_wrong_profile', [profile_hit], [fresh_test], [producer_record], [audit_record],
+                'hit a receipt whose profile differs')
+equal_fp_wrong_parts = changed(audit_record, profile=changed(profile_b, fp='pA'))
+shadow_negative('hit_inconsistent_components', [same_hit], [same_fresh], [producer_record], [equal_fp_wrong_parts],
+                'profile fp disagrees with its components')
+shadow_negative('refused_missing_components', [refusal_test], [fresh_test], [producer_record],
+                [changed(audit_record, profile='pB')], 'lacks recorded profile components')
+shadow_negative('refused_result_build', [changed(refusal_test, portable_build='other')], [fresh_test],
+                [producer_record], [audit_record], 'portable Build mismatch')
+shadow_negative('refused_missing_build', [refusal_test], [fresh_test], [producer_record],
+                [changed(audit_record, build={})], 'portable Build mismatch in snapshots')
+shadow_negative('refused_missing_observations', [refusal_test], [fresh_test], [producer_record],
+                [changed(audit_record, trace={})], 'ordered trace observation mismatch')
+
 # --- 3. git-diff-check cases ---
 # ALWAYS pass --changed-files FILE (empty okay) + --repo empty dir
 snap_gd = os.path.join(work, 'snap_gd.json')
@@ -1341,6 +1592,14 @@ with open(f_gd_ns, 'w') as f:
         {'test': {'root': 'src', 'path': 'pkg/test.iyi'}, 'cached': True, 'reuse': 'hit', 'source': 'run:other'}
     ]}, f)
 assert_negative('git-diff-check', ['--master-snapshot', snap_gd, '--cached-json', f_gd_ns, '--changed-files', empty_diff, '--repo', empty_repo], 'namespace substitution')
+
+# Direction 1: A hit cannot use a receipt with a different profile.
+f_gd_wrong_profile = write_fixture('gd_wrong_profile', {'tests': [
+    {'test': {'root': 'src', 'path': 'pkg/test.iyi'}, 'cached': True, 'reuse': 'hit',
+     'source': 'master', 'profile': 'prof2'}]})
+assert_negative('git-diff-check', ['--master-snapshot', snap_gd, '--cached-json', f_gd_wrong_profile,
+                                  '--changed-files', empty_diff, '--repo', empty_repo],
+                'hit a master receipt whose profile differs')
 
 # Direction 1: Unchanged tracked input hit passes
 assert_positive('git-diff-check', ['--master-snapshot', snap_gd, '--cached-json', f_gd_hit, '--changed-files', empty_diff, '--repo', empty_repo])
@@ -2371,7 +2630,7 @@ case "$COMMAND" in
     echo "Commands:"
     echo "  fetch-master                Download master snapshot through Actions API"
     echo "  assert-export-env           Verify export step environment has no secrets"
-    echo "  assert-hits                 Verify all tests in a test run were cache hits"
+    echo "  assert-hits                 Require cache hits, or explicit profile refusals"
   echo "  test-comparator-negatives   Verify negative comparator fixtures for CI checks"
   echo "  test-planted-hidden-read    Prove shadow audit detects unobserved reads (row 24)"
   echo "  git-diff-check              Verify run observations against git diff"

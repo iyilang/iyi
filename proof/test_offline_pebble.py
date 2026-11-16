@@ -628,6 +628,11 @@ class TestOfflinePebbleContract(unittest.TestCase):
             go_bin = create_fake_go(bin_dir, log_file, fail_install=True, fail_install_msg="network down")
             env_fail = os.environ.copy()
             env_fail.pop("IYI_PROOF_INPUTS_DIR", None)
+            # The runner's own Go setup exports these (setup-go v7 sets
+            # GOTOOLCHAIN=local), and the assertions below are about what the
+            # helper adds, so the test starts from an environment without them.
+            for name in ("GOTOOLCHAIN", "GOSUMDB", "GONOPROXY"):
+                env_fail.pop(name, None)
             env_fail["PATH"] = f"{bin_dir}:{env_fail.get('PATH', '')}"
             env_fail["GO"] = str(go_bin)
             env_fail["WORK"] = str(work_dir)

@@ -20,8 +20,8 @@ describe "iyimod section bounds" do
   it "rejects an oversized section table before allocating it" do
     section_bounds_file do |path|
       File.open(path, "wb") { |file| write_section_bounds_header(file, UInt32::MAX) }
-      expect_raises(Iyi::IyiMod::Error, /ends inside the section table/) { Iyi::IyiMod.read(path) }
-      expect_raises(Iyi::IyiMod::Error, /ends inside the section table/) { Iyi::IyiMod.read_summary(path) }
+      expect_raises(Iyi::IyiMod::Error, /is truncated: its table names 4294967295 sections/) { Iyi::IyiMod.read(path) }
+      expect_raises(Iyi::IyiMod::Error, /is truncated: its table names 4294967295 sections/) { Iyi::IyiMod.read_summary(path) }
       Iyi::IyiMod.read_spawns(path).should be_nil
     end
   end
@@ -35,8 +35,8 @@ describe "iyimod section bounds" do
         file.write_bytes(1_073_741_824_u32, Iyi::IyiMod::FORMAT)
         file.write_bytes(0_u64, Iyi::IyiMod::FORMAT)
       end
-      expect_raises(Iyi::IyiMod::Error, /ends inside a section/) { Iyi::IyiMod.read(path) }
-      expect_raises(Iyi::IyiMod::Error, /ends inside a section/) { Iyi::IyiMod.read_summary(path) }
+      expect_raises(Iyi::IyiMod::Error, /is truncated: its table says its sections are 1073741824 bytes together/) { Iyi::IyiMod.read(path) }
+      expect_raises(Iyi::IyiMod::Error, /is truncated: its table says its sections are 1073741824 bytes together/) { Iyi::IyiMod.read_summary(path) }
       Iyi::IyiMod.read_spawns(path).should be_nil
     end
   end

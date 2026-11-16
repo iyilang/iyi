@@ -34,7 +34,7 @@ name: iyi
 #                    exercises read for other platforms in std-platforms (and
 #                    the windows- and darwin- shards and windows-std-platforms
 #                    beside their own jobs)
-#   stale-fresh      a fresh runner audits the producer's imported receipts
+#   stale-fresh      a fresh runner audits hits or profile refusals, then its own imports
 #   stale-callpath   the stale key's own gates: link once, RG4, the reach walk
 #                    against what codegen recorded, RG8 and RG9
 #   stale-equivalence  RG2, RG2a, RG2r and RG5: what observing a program
@@ -438,7 +438,10 @@ jobs:
 
   # A second runner gets only the producer's compiler and portable receipt
   # snapshot. No cache crosses this boundary: a hit here is evidence that the
-  # receipt is complete, rather than an accidental local-store hit.
+  # receipt is complete, rather than an accidental local-store hit. Runs
+  # 43830236826 and 43811561723 used different AWS and Azure kernel releases.
+  # Differing profiles must refuse; cross-machine hits on those receipts remain
+  # unexercised even though both receipts are compared with fresh execution.
   stale-fresh:
     needs: [plan, iyi]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'stale-fresh') }}
@@ -477,7 +480,7 @@ jobs:
           name: master-candidate-x86_64-linux-gnu.json
           path: stale-index
 
-      - name: All producer receipts hit on a fresh runner
+      - name: "Producer receipts on a fresh runner: hit on an equal profile, refused on another"
         shell: bash
         run: |
           mapfile -t tests < <(find samples/iyi -maxdepth 1 -type f -name '*.iyi' -print | sort)
@@ -485,11 +488,12 @@ jobs:
             --import-index "run:${GITHUB_RUN_ID}=stale-index/run-${GITHUB_RUN_ID}-x86_64-linux-gnu.json" \
             "${tests[@]}" > stale-index/cached.json
           bash bench/stale_ci.sh assert-hits --json stale-index/cached.json \
-            --snapshot "stale-index/run-${GITHUB_RUN_ID}-x86_64-linux-gnu.json"
+            --snapshot "stale-index/run-${GITHUB_RUN_ID}-x86_64-linux-gnu.json" \
+            --allow-profile-refusal
 
-      # This is an export step, and therefore the only stale-fresh step that
-      # carries IYI_CI_PRODUCER. Comparing portable snapshots preserves both
-      # the public Build and every ordered observation for the shadow audit.
+      # This export step alone carries IYI_CI_PRODUCER in its workflow
+      # environment. Compare the producer receipt, including its profile,
+      # Build and ordered observations, with this runner's fresh execution.
       - name: Shadow audit fresh execution and export
         id: shadow_audit
         env:
@@ -506,6 +510,22 @@ jobs:
             --fresh-json stale-index/fresh.json \
             --cached-snapshot "stale-index/run-${GITHUB_RUN_ID}-x86_64-linux-gnu.json" \
             --fresh-snapshot "stale-index/audit-${GITHUB_RUN_ID}-x86_64-linux-gnu.json"
+
+      - name: "The runner's own receipts hit on an emptied store"
+        shell: bash
+        run: |
+          cache_dir="$(.build/iyi env IYI_CACHE_DIR)"
+          if [ -z "$cache_dir" ]; then
+            echo "iyi env IYI_CACHE_DIR returned an empty path" >&2
+            exit 1
+          fi
+          rm -rf "$cache_dir/tests-v1"
+          mapfile -t tests < <(find samples/iyi -maxdepth 1 -type f -name '*.iyi' -print | sort)
+          .build/iyi test --cached --json \
+            --import-index "audit:${GITHUB_RUN_ID}=stale-index/audit-${GITHUB_RUN_ID}-x86_64-linux-gnu.json" \
+            "${tests[@]}" > stale-index/audit-cached.json
+          bash bench/stale_ci.sh assert-hits --json stale-index/audit-cached.json \
+            --snapshot "stale-index/audit-${GITHUB_RUN_ID}-x86_64-linux-gnu.json"
 
       - name: Planted hidden-read shadow-audit proof
         run: bash bench/stale_ci.sh test-planted-hidden-read

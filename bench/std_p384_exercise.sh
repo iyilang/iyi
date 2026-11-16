@@ -438,10 +438,10 @@ echo "== Wycheproof's ECDH vectors for secp384r1 (ecpoint encoding)"
 if [ "${IYI_PROOF_INPUTS_DIR+set}" = "set" ]; then
   if [ -z "$PY" ]; then
     echo "  FAIL: python is required to process IYI_PROOF_INPUTS_DIR vectors"
-    status=1
+    exit 1
   elif ! "$PY" "$REPO/proof/offline_vectors.py" wycheproof "$WORK/wycheproof.txt"; then
     echo "  FAIL IYI_PROOF_INPUTS_DIR: missing or corrupt wycheproof-p384.json"
-    status=1
+    exit 1
   elif "$WORK/p384-release" wycheproof "$WORK/wycheproof.txt" >"$WORK/wycheproof.out" 2>&1; then
     sed 's/^/  /' "$WORK/wycheproof.out"
   else

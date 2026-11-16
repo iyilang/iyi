@@ -2142,19 +2142,23 @@ describe Iyi::IyiMod do
     end
   end
 
-  # The annotations above a type-body constant travel with it. The
-  # initialiser carried `Random::PerThread::ONE = PerThread.new` bare, so a
-  # consumer of `std/random` from artifacts read the constant unclaimed, and
-  # a `spawn(unit: :new)` that reached it through `Random.rand` was refused
-  # by the reach rule the source build had let through on `@[UnsafeReach]`
-  # (SPEC.md III.4.4). `@[SafeReach]` is carried the same way, and a
-  # `@[Share]` type declared beside them keeps its own, which travels with
-  # the type.
-  it "carries the claims above a type body's constants" do
-    with_tempdir("iyimod_type_constant_claims") do
+  # The annotations above a constant travel with it, in a type body and at
+  # the top level. The initialiser carried `Random::PerThread::ONE =
+  # PerThread.new` bare, so a consumer of `std/random` from artifacts read
+  # the constant unclaimed, and a `spawn(unit: :new)` that reached it
+  # through a body that travels was refused by the reach rule the source
+  # build had let through on `@[UnsafeReach]` (SPEC.md III.4.4). A
+  # top-level `@[UnsafeReach]` constant was dropped the same way, and
+  # `@[SafeReach]` with them; a `@[Share]` type declared beside them keeps
+  # its own, which travels with the type.
+  #
+  # `draw` yields, so its body travels and the consumer's reach walk reads
+  # it; `Gen` holds an array, so it is not shareable without the claim.
+  it "carries the claims above a module's constants" do
+    with_tempdir("iyimod_constant_claims") do
       Dir.mkdir_p "boot"
       File.write "boot/gen.iyi", <<-IYI
-        @[Unsafe("claims the generator's one instance by name")]
+        @[Unsafe("claims the generator's instances by name")]
         module boot/gen
 
         pub class Gen
@@ -2165,25 +2169,28 @@ describe Iyi::IyiMod do
             end
           end
 
-          @value : Int32
+          @values : Array(Int32)
 
-          def initialize
-            @value = 5
+          def initialize(value : Int32)
+            @values = [value]
           end
 
           @[UnsafeReach("made at the module's start and never written after")]
-          ONE = Gen.new
+          ONE = Gen.new(5)
           @[SafeReach("made at the module's start, then only read")]
           SEAL = Seal.new
 
-          pub def self.draw : Int32
-            ONE.value + SEAL.answer
+          pub def self.draw(& : Int32 -> Int32) : Int32
+            yield ONE.value + SEAL.answer + TOP.value
           end
 
           pub def value : Int32
-            @value
+            @values[0]
           end
         end
+
+        @[UnsafeReach("made at the module's start and never written after")]
+        TOP = Gen.new(10)
         IYI
       File.write "main.iyi", <<-IYI
         module main
@@ -2193,7 +2200,7 @@ describe Iyi::IyiMod do
         drawn = Atomic(Int32).new(0)
         group do |g|
           g.spawn(unit: :new) do
-            drawn.add(Boot::Gen::Gen.draw)
+            drawn.add(Boot::Gen::Gen.draw { |v| v + 1 })
             0
           end
         end
@@ -2206,14 +2213,16 @@ describe Iyi::IyiMod do
       producer.prelude = "iyi/prelude"
       producer.emit_iyimod = "mods"
       producer.compile source, File.expand_path("from-source")
-      `./from-source`.chomp.should eq "12"
+      `./from-source`.chomp.should eq "23"
 
       artifact = Iyi::IyiMod.read(File.join("mods", "boot", "gen.iyimod"))
       artifact.initialiser.lines.should eq [
         %(@[UnsafeReach("made at the module's start and never written after")]),
-        "Gen::ONE = Gen.new",
+        "Gen::ONE = Gen.new(5)",
         %(@[SafeReach("made at the module's start, then only read")]),
         "Gen::SEAL = Seal.new",
+        %(@[UnsafeReach("made at the module's start and never written after")]),
+        "TOP = Gen.new(10)",
       ]
 
       File.delete "boot/gen.iyi"
@@ -2222,7 +2231,7 @@ describe Iyi::IyiMod do
       consumer.prelude = "iyi/prelude"
       consumer.use_iyimod = "mods"
       consumer.compile source, File.expand_path("from-artifact")
-      `./from-artifact`.chomp.should eq "12"
+      `./from-artifact`.chomp.should eq "23"
     end
   end
 

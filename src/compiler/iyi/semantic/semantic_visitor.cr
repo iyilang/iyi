@@ -1553,10 +1553,24 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     IyiMod.located_source(statements)
   end
 
+  # The annotations written above a constant travel above it, here as in a
+  # type body (`iyi_collect_type_constants`): `@[SafeReach("why")]` and
+  # `@[UnsafeReach("why")]` are claims the consumer's reach rule reads
+  # (SPEC.md III.4.4).
   private def iyi_collect_initialiser(node : ASTNode, statements : Array(ASTNode)) : Nil
     case node
     when Expressions
-      node.expressions.each { |child| iyi_collect_initialiser child, statements }
+      pending = [] of Annotation
+      node.expressions.each do |child|
+        if child.is_a?(Annotation)
+          pending << child
+          next
+        end
+        at = statements.size
+        iyi_collect_initialiser child, statements
+        statements.insert_all(at, pending) if statements.size > at && iyi_carried_constant?(child)
+        pending.clear
+      end
     when ModuleDef
       # The module the header desugars to *is* the file, and its body is the
       # module's own top level. A `module` written inside the file is a type
@@ -1634,11 +1648,10 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
           pending << child
           next
         end
-        unless pending.empty?
-          statements.concat(pending) if iyi_type_constant?(child)
-          pending.clear
-        end
+        at = statements.size
         iyi_collect_type_constants child, statements, prefix
+        statements.insert_all(at, pending) if statements.size > at && iyi_carried_constant?(child)
+        pending.clear
       end
     when ClassDef, ModuleDef
       iyi_collect_type_constants node.body, statements, iyi_type_prefix(node, prefix)
@@ -1663,8 +1676,9 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     prefix.empty? ? name : "#{prefix}::#{name}"
   end
 
-  # Whether *node* is a constant `iyi_collect_type_constants` carries.
-  private def iyi_type_constant?(node : ASTNode) : Bool
+  # Whether *node* is a constant assignment, the statement whose annotations
+  # the initialiser carries above it.
+  private def iyi_carried_constant?(node : ASTNode) : Bool
     node = node.exp if node.is_a?(VisibilityModifier)
     node.is_a?(Assign) && node.target.is_a?(Path)
   end

@@ -87,14 +87,15 @@
 
 ### Fixed
 
-- **A constant in a type body keeps its `@[UnsafeReach]` or
-  `@[SafeReach]` when it travels in an artifact.** The initialiser
-  carried `Random::PerThread::ONE = PerThread.new` without the
-  annotation above it, so a program that read `std/random` from
-  artifacts and drew from a `spawn(unit: :new)` was refused by the reach
-  rule the build from source let through. The annotations written above
-  a type-body constant now travel above it (no `.iyimod` format change:
-  the initialiser is source text).
+- **A constant keeps its `@[UnsafeReach]` or `@[SafeReach]` when it
+  travels in an artifact**, in a type body and at a module's top level.
+  The initialiser carried `Random::PerThread::ONE = PerThread.new`
+  without the annotation above it, so a program that read `std/random`
+  from artifacts and drew from a `spawn(unit: :new)` was refused by the
+  reach rule the build from source let through; a top-level claimed
+  constant reached through a body that travels was refused the same way.
+  The annotations written above a constant now travel above it (no
+  `.iyimod` format change: the initialiser is source text).
 
 - **A finished thread's main fiber no longer stays on the scheduler's
   fiber registry**, naming a stack that is gone (0.21.0 included): the

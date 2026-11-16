@@ -4,15 +4,19 @@
 # partition arenas flat round after round (drained runs taken again) and
 # its pooled runs' pages back after an idle wait; its mark mode, the
 # partitions held under long global marks; its claim mode, the sweep
-# helpers' rounds swept beside a sleeping program; with the verifier and
-# under chaos with a local collection at every park, no report; the
-# flag-off control; then one broken copy per mechanism: without the take
-# of drained runs or the global sweep's listing the arenas grow, without
-# the idle wake the pool stays warm, without the release the resident set
-# stays, without the hold the arenas grow under the marks (the program
-# fails), and a taken run's objects left `LOCAL` instead of published,
-# or a helper that lets its sweep claim go before its walk ends, are
-# caught by `-Dheap_verify` (exit 86).
+# helpers' rounds swept beside a sleeping program; its directory mode,
+# the arena directory left unread for words outside every arena's slot;
+# with the verifier and under chaos with a local collection at every
+# park, no report; the flag-off control; then one broken copy per
+# mechanism: without the take of drained runs or the global sweep's
+# listing the arenas grow, without the idle wake the pool stays warm,
+# without the release the resident set stays, without the hold the
+# arenas grow under the marks, without the directory's bounds its pages
+# go resident, and with bounds a large mapping does not widen a large
+# object is no heap pointer (the program fails), and a taken run's
+# objects left `LOCAL` instead of published, or a helper that lets its
+# sweep claim go before its walk ends, are caught by `-Dheap_verify`
+# (exit 86).
 #
 #   bash bench/heap_drain.sh           # every part
 #   bash bench/heap_drain.sh sound     # plain, optimised, verifier, chaos
@@ -103,6 +107,9 @@ if [ "$PART" = all ] || [ "$PART" = sound ]; then
   again "verifier" verify verify-mark mark 1000000 4 2
   echo "== the helpers' sweep rounds beside a sleeping program (claim mode)"
   again "verifier" verify verify-claim claim
+  echo "== the arena directory left unread outside the arenas' slots (directory mode)"
+  again "optimised" release release-dir dir
+  again "verifier" verify verify-dir dir
   build stress "-Dheap_partitions -Dheap_verify -Diyi_chaos" && for seed in $SEEDS; do
     env IYI_CHAOS="$seed" IYI_HEAP_STRESS=1 timeout 600 "$WORK/stress" 6 8 4 >"$WORK/stress-$seed.out" 2>"$WORK/stress-$seed.err"
     code=$?
@@ -121,6 +128,7 @@ if [ "$PART" = all ] || [ "$PART" = off ]; then
   whole "flag off" off ""
   again "flag off, mark mode" off off-mark mark
   again "flag off, claim mode" off off-claim claim
+  again "flag off, directory mode" off off-dir dir
 fi
 
 # One line deleted after a marker: `del MARKER LINE` as an awk program.
@@ -189,6 +197,16 @@ if [ "$PART" = all ] || [ "$PART" = copies ]; then
   COPY_FILE=prelude.iyi copy "a helper holds its claim to its walk's end" c7 86 \
     '/def self\.sweep_one_helper : Bool/ { armed = 1 } armed && /^          batch = sweep_slice\(arena, SWEEP_SPAN\)$/ { print "          IyiHeap.class_lock(index)"; print "          release_claim(arena, epoch)"; print "          IyiHeap.class_unlock(index)"; print; armed = 0; found = 1; next } { print } END { if (!found) exit 3 }' \
     "-Dheap_partitions -Dheap_verify" claim
+  # The arena directory's bounds (TmacRss, heap22 fu): every word below
+  # the directory's end read in it again, its pages go resident; not
+  # widened by a large mapping, an object of one outside the arenas'
+  # slots is nobody's.
+  COPY_FILE=prelude.iyi copy "the directory unread outside the bounds" c8 1 \
+    "$(subst 'def self\.dir_outside\?' 'slot < @@dir_low \|\| slot > @@dir_high' 'slot >= DIR_SLOTS')" \
+    "-Dheap_partitions --release" dir
+  COPY_FILE=prelude.iyi copy "a large mapping widens the bounds" c9 1 \
+    "$(del 'def self\.count_large' 'dir_widen\(')" \
+    "-Dheap_partitions --release" dir
 fi
 
 exit $status

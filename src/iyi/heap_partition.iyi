@@ -698,7 +698,7 @@ class IyiHeap
     arena = arena_of(address)
     return owner_in_arena(arena, address) if arena != 0
     slot = address.unsafe_shr(24_u64)
-    return 0_u64 if slot < DIR_SLOTS && Pointer(UInt8).new(arena_dir + slot).value == 0_u8
+    return 0_u64 if slot < DIR_SLOTS && (dir_outside?(slot) || Pointer(UInt8).new(arena_dir + slot).value == 0_u8)
     lock
     owner = owner_of_held(address)
     unlock
@@ -811,6 +811,7 @@ class IyiHeap
     write64(class_line(index) + CLASS_ARENAS, base)
     write64(pline(index) + PC_FRONTIER, base)
     class_unlock(index)
+    dir_widen(base.unsafe_shr(24_u64), base.unsafe_shr(24_u64))
     Pointer(UInt8).new(arena_dir + base.unsafe_shr(24_u64)).value = DIR_ARENA
     unlock
     base
@@ -2031,7 +2032,7 @@ class IyiHeap
   # meanwhile.
   def self.lend_step_large(s : UInt64, id : UInt64, word : UInt64, root : Bool) : UInt64
     slot = word.unsafe_shr(24_u64)
-    return 0_u64 if slot < DIR_SLOTS && Pointer(UInt8).new(arena_dir + slot).value == 0_u8
+    return 0_u64 if slot < DIR_SLOTS && (dir_outside?(slot) || Pointer(UInt8).new(arena_dir + slot).value == 0_u8)
     lock
     node = containing_large(Pointer(Void).new(word))
     own = node == 0 ? 0_u64 : read64(node &+ 16_u64)

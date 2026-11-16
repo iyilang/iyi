@@ -3870,12 +3870,42 @@ require "./file"
         @@arena_dir
       end
 
+      {% if flag?(:heap_partitions) %}
+        # The lowest and highest slot an arena or a large mapping ever had
+        # a byte in: widened under the runtime lock before the byte is
+        # written, never narrowed. A word outside them names no arena and
+        # no large mapping, and is answered without a read of the
+        # directory. On darwin a read of a directory page nothing wrote
+        # makes the page resident - there is no shared zero page to map -
+        # and the mark's and the lend walk's reads of words that are no
+        # pointer (a short string's last word, a float's bits) left 227-251
+        # of its 1,024 pages, 3.7-4.1 MB, resident in #145's app under load
+        # with the flag on (tmac, 16 KB pages); Linux maps its zero page
+        # for such a read, 0.2 MB (heap22 fu, TmacRss).
+        @@dir_low : UInt64 = DIR_SLOTS
+        @@dir_high : UInt64 = 0_u64
+
+        def self.dir_widen(low : UInt64, high : UInt64) : Nil
+          @@dir_low = low if low < @@dir_low
+          @@dir_high = high if high > @@dir_high
+        end
+
+        @[AlwaysInline]
+        def self.dir_outside?(slot : UInt64) : Bool
+          slot < @@dir_low || slot > @@dir_high
+        end
+      {% end %}
+
       # The arena holding `address`, or 0. One load past the arithmetic; a
       # pointer into an arena's header or past its fill cursor is the
       # caller's to refuse.
       def self.arena_of(address : UInt64) : UInt64
         slot = address.unsafe_shr(24_u64)
-        return 0_u64 if slot >= DIR_SLOTS
+        {% if flag?(:heap_partitions) %}
+          return 0_u64 if dir_outside?(slot)
+        {% else %}
+          return 0_u64 if slot >= DIR_SLOTS
+        {% end %}
         return 0_u64 if Pointer(UInt8).new(arena_dir + slot).value != DIR_ARENA
         address & (0_u64 &- MAP)
       end
@@ -4005,6 +4035,7 @@ require "./file"
         class_unlock(index)
         # The directory byte last, after the header and the link: a reader
         # that finds the byte finds an arena that is whole.
+        {% if flag?(:heap_partitions) %} dir_widen(base.unsafe_shr(24_u64), base.unsafe_shr(24_u64)) {% end %}
         Pointer(UInt8).new(arena_dir + base.unsafe_shr(24_u64)).value = DIR_ARENA
         unlock
         base
@@ -4243,6 +4274,9 @@ require "./file"
       def self.count_large(base : UInt64, mapped : UInt64, on : Bool) : Nil
         slot = base.unsafe_shr(24_u64)
         last = (base + mapped - 1_u64).unsafe_shr(24_u64)
+        {% if flag?(:heap_partitions) %}
+          dir_widen(slot, last < DIR_SLOTS ? last : DIR_SLOTS - 1_u64) if on && slot < DIR_SLOTS
+        {% end %}
         while slot <= last && slot < DIR_SLOTS
           byte = Pointer(UInt8).new(arena_dir + slot)
           byte.value = on ? byte.value &+ 1_u8 : byte.value &- 1_u8
@@ -4429,7 +4463,11 @@ require "./file"
         # A slot no large mapping touches answers without the walk
         # (`DIR_ARENA` says why).
         slot = address.unsafe_shr(24_u64)
-        return 0_u64 if slot < DIR_SLOTS && Pointer(UInt8).new(arena_dir + slot).value == 0_u8
+        {% if flag?(:heap_partitions) %}
+          return 0_u64 if slot < DIR_SLOTS && (dir_outside?(slot) || Pointer(UInt8).new(arena_dir + slot).value == 0_u8)
+        {% else %}
+          return 0_u64 if slot < DIR_SLOTS && Pointer(UInt8).new(arena_dir + slot).value == 0_u8
+        {% end %}
         node = @@large
         while node != 0
           if address >= node + LARGE_USER && address < node + read64(node + OFF_MAP)

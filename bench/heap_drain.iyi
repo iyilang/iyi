@@ -25,6 +25,7 @@
 #   ./heap_drain [ROUNDS [UNITS [WORKERS]]]     # default 12 48 4
 #   ./heap_drain mark [NODES [WORKERS [SECONDS]]]   # see mark_main
 #   ./heap_drain claim [ROUNDS [UNITS]]         # see claim_main
+#   ./heap_drain dir [LARGE]                    # see dir_main
 #   bash bench/heap_drain.sh                    # with its broken copies
 #
 # The line printed gives the bytes the partition arenas' runs span after
@@ -509,12 +510,139 @@ module bench/heap_drain
     print "claim: every walk claim held to its walk's end\n"
   end
 
+  # Directory mode (TmacRss, heap22 fu): the arena directory, a byte per
+  # 16 MiB slot of the address space (`IyiHeap.arena_of`), is read for
+  # every word the global mark meets that is in no arena, and on darwin a
+  # read of a page nothing wrote makes that page resident: #145's app kept
+  # 3.7-4.1 MB of it under load (tmac, 16 KB pages; Linux maps its zero
+  # page). Under `-Dheap_partitions` a word outside the slots any arena or
+  # large mapping ever had is answered without the read
+  # (`IyiHeap.dir_outside?`). The mode makes LARGE large objects of
+  # DIR_LARGE_BYTES, more than the hole an arena's aligned mapping leaves
+  # beside it, so that the kernel puts each past every arena's slot (2 MiB
+  # ones filled those holes on Linux, inside the bounds), each a heap
+  # pointer the moment it is made (`IyiRoots.base_of`: a mapping the
+  # bounds left out is nobody's to the mark, which would free it live),
+  # then an untyped block holding a word for every page of the directory,
+  # and collects twice. With the flag on it fails when more than
+  # DIR_RESIDENT_MAX of the directory's pages are resident after, and on
+  # every platform when a large object lost its bytes. Windows reads the
+  # pages' residency through QueryWorkingSetEx, the others mincore.
+  #   ./heap_drain dir [LARGE]                    # default 8
+  DIR_RESIDENT_MAX = 32_u64
+  DIR_LARGE_BYTES  = 41943040_u64
+
+  {% if flag?(:darwin) %}
+    lib LibDirResident
+      fun mincore(addr : Void*, len : UInt64, vec : UInt8*) : Int32
+    end
+  {% elsif flag?(:win32) %}
+    lib LibDirResident
+      fun GetCurrentProcess : Void*
+      fun K32QueryWorkingSetEx(process : Void*, info : UInt64*, size : UInt32) : Int32
+    end
+  {% end %}
+
+  # Pages of [address, address + pages * page) resident now; -1 when the
+  # platform's call failed.
+  def resident_pages(address : UInt64, pages : Int32, page : UInt64) : Int64
+    {% if flag?(:win32) %}
+      info = Pointer(UInt64).malloc(pages.to_u64 * 2_u64)
+      k = 0
+      while k < pages
+        info[k * 2] = address + k.to_u64 * page
+        k = k + 1
+      end
+      return -1_i64 if LibDirResident.K32QueryWorkingSetEx(LibDirResident.GetCurrentProcess, info, (pages * 16).to_u32) == 0
+      count = 0_i64
+      k = 0
+      while k < pages
+        count = count + 1_i64 if info[k * 2 + 1] & 1_u64 != 0
+        k = k + 1
+      end
+      count
+    {% else %}
+      length = pages.to_u64 * page
+      vec = Pointer(UInt8).malloc(pages.to_u64)
+      {% if flag?(:darwin) %}
+        return -1_i64 if LibDirResident.mincore(Pointer(Void).new(address), length, vec) != 0
+      {% else %}
+        result = uninitialized Int64
+        {% if flag?(:x86_64) %}
+          asm("syscall" : "={rax}"(result)
+                        : "{rax}"(27_i64), "{rdi}"(address), "{rsi}"(length), "{rdx}"(vec.address)
+                        : "rcx", "r11", "memory"
+                        : "volatile")
+        {% else %}
+          asm("svc #0" : "={x0}"(result)
+                       : "{x8}"(232_i64), "{x0}"(address), "{x1}"(length), "{x2}"(vec.address)
+                       : "memory"
+                       : "volatile")
+        {% end %}
+        return -1_i64 if result != 0
+      {% end %}
+      count = 0_i64
+      k = 0
+      while k < pages
+        count = count + 1_i64 if vec[k] & 1_u8 != 0
+        k = k + 1
+      end
+      count
+    {% end %}
+  end
+
+  # Whether *address* is in a chunk of the heap's, as `GC.is_heap_ptr`
+  # asks it (std/gc refuses the builds without iyi's collector that this
+  # file still compiles under).
+  def heap_pointer?(address : UInt64) : Bool
+    IyiHeap.lock
+    base = IyiRoots.base_of(address)
+    IyiHeap.unlock
+    base != 0_u64
+  end
+
+  def dir_main(arguments : Array(String)) : Nil
+    large = arguments.size > 1 ? arguments[1].to_i : 8
+    buffers = [] of Pointer(UInt8)
+    large.times do |i|
+      buffer = Pointer(UInt8).malloc(DIR_LARGE_BYTES)
+      buffer[0] = (i & 0xFF).to_u8
+      buffer[DIR_LARGE_BYTES.to_i32 - 1] = (i & 0xFF).to_u8
+      fail("dir: large object #{i} at 0x#{buffer.address.to_s(16)} is no heap pointer the moment it is made") unless heap_pointer?(buffer.address)
+      buffers << buffer
+    end
+    page = IyiHeap::PAGE
+    pages = (IyiHeap::DIR_SLOTS // page).to_i32
+    words = Pointer(Pointer(Void)).malloc(pages.to_u64)
+    k = 0
+    while k < pages
+      # Slot k * page + 7: a byte on the directory's page k.
+      words[k] = Pointer(Void).new((k.to_u64 * page + 7_u64).unsafe_shl(24_u64) | 0x123_u64)
+      k = k + 1
+    end
+    IyiMark.collect
+    IyiMark.collect
+    resident = resident_pages(IyiHeap.arena_dir, pages, page)
+    print "dir large=#{large} pages=#{pages} resident_pages=#{resident} words=0x#{words[1].address.to_s(16)}\n"
+    large.times do |i|
+      buffer = buffers[i]
+      fail("dir: large object #{i} lost its bytes over two collections") if buffer[0] != (i & 0xFF).to_u8 || buffer[DIR_LARGE_BYTES.to_i32 - 1] != (i & 0xFF).to_u8
+    end
+    fail("dir: the residency read failed") if resident < 0
+    {% if flag?(:heap_partitions) %}
+      fail("dir: #{resident} of the arena directory's #{pages} pages resident after the mark read a word for each (at most #{DIR_RESIDENT_MAX})") if resident > DIR_RESIDENT_MAX.to_i64
+      print "dir: the mark read no directory page outside the arenas' slots\n"
+    {% end %}
+  end
+
   Checks.read_env
   arguments = Program.args
   if arguments.size > 0 && arguments[0] == "mark"
     mark_main(arguments)
   elsif arguments.size > 0 && arguments[0] == "claim"
     claim_main(arguments)
+  elsif arguments.size > 0 && arguments[0] == "dir"
+    dir_main(arguments)
   else
     drain_main(arguments)
   end

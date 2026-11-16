@@ -689,7 +689,7 @@ assert ({{ env("CRYSTAL_DAEMON_SOCKET") || "unset" }}) == "unset"
 IYI
 fi
 if [ "$WINDOWS" -eq 1 ]; then
-  r28_first=RunAsInvoker; r28_second="RunAsInvoker WIN7RTM"; r28_name=__COMPAT_LAYER
+  r28_first=RunAsInvoker; r28_second="RunAsInvoker RunAsInvoker"; r28_name=__COMPAT_LAYER
 else
   r28_first=/tmp/r28_dir1; r28_second=/tmp/r28_dir2; r28_name=DYLD_LIBRARY_PATH
 fi

@@ -180,9 +180,23 @@ module Iyi
 
     def self.format_site(program : Program, location : Location?) : String
       return "src:<unknown>:0" unless location
-      loc = location.expanded_location || location
-      raw_file = loc.read_from.as?(String) || loc.filename.as?(String)
+      loc = location
       line = loc.line_number
+      # Inline macro text retains its original line even when the expansion
+      # itself is attributed to the surrounding `{% if %}`.
+      while (virtual = loc.filename).is_a?(VirtualFile)
+        outer = virtual.expanded_location
+        origin = virtual.line_origins.try &.[line]?
+        if outer && origin
+          loc = outer
+          line = origin
+        else
+          loc = loc.expanded_location || loc
+          line = loc.line_number
+          break
+        end
+      end
+      raw_file = loc.read_from.as?(String) || loc.filename.as?(String)
 
       return "src:main.iyi:#{line}" if raw_file.nil? || raw_file.empty? || raw_file == "eval"
 

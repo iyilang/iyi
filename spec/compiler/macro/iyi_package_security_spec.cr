@@ -1,7 +1,41 @@
 require "../../spec_helper"
 require "../spec_helper"
 
-private MACRO_SECURITY_WIN32 = {{ flag?(:win32) }}
+{% if flag?(:win32) %}
+  lib LibC
+    fun GetShortPathNameW(path : UInt16*, buffer : UInt16*, size : UInt32) : UInt32
+  end
+{% end %}
+
+private def package_link(target : String, link : String) : Nil
+  {% if flag?(:win32) %}
+    output = IO::Memory.new
+    result = Process.run("cmd.exe", ["/c", "mklink", "/J", link, target], output: output, error: output)
+    raise "could not create junction: #{output}" unless result.success?
+  {% else %}
+    File.symlink(target, link)
+  {% end %}
+end
+
+private MACRO_SECURITY_WINDOWS = {{ flag?(:win32) }}
+
+private def package_windows_spellings(path : String) : Array(String)
+  {% if flag?(:win32) %}
+    absolute = File.expand_path(path)
+    verbatim = if absolute.starts_with?("\\\\")
+                 "\\\\?\\UNC\\#{absolute[2..]}"
+               else
+                 "\\\\?\\#{absolute}"
+               end
+    spellings = [absolute.tr("\\", "/"), verbatim, absolute[0].to_s.downcase + absolute[1..]]
+    buffer = Slice(UInt16).new(32768)
+    size = LibC.GetShortPathNameW(Crystal::System.to_wstr(absolute), buffer, buffer.size)
+    spellings << String.from_utf16(buffer[0, size]) if 0 < size < buffer.size
+    spellings
+  {% else %}
+    [] of String
+  {% end %}
+end
 
 private def package_macro(body : String, definition : String, caller : String, root : String, dependency : String? = nil)
   program = Iyi::Program.new
@@ -113,23 +147,104 @@ describe "iyi package macro boundaries" do
     end
   end
 
-  unless MACRO_SECURITY_WIN32
-    it "refuses links outside the tree, even when the target is missing" do
-      with_tempdir("iyi_macro_symlink") do
-        root = File.expand_path("app")
-        outside = File.expand_path("outside")
-        Dir.mkdir_p(root)
-        Dir.mkdir_p(outside)
-        source = File.join(root, "main.iyi")
-        File.write(source, "")
-        File.write(File.join(outside, "secret"), "secret")
-        File.symlink(outside, File.join(root, "link"))
-        ["secret", "missing"].each do |name|
-          path = File.join(root, "link", name)
+  it "refuses a link or junction outside the tree, even for missing targets" do
+    with_tempdir("iyi_macro_symlink") do
+      root = File.expand_path("app")
+      outside = File.expand_path("outside")
+      Dir.mkdir_p(root)
+      Dir.mkdir_p(outside)
+      source = File.join(root, "main.iyi")
+      File.write(source, "")
+      File.write(File.join(outside, "secret"), "secret")
+      package_link(outside, File.join(root, "link"))
+      ["secret", "missing"].each do |name|
+        path = File.join(root, "link", name)
+        ["read_file", "read_file?", "file_exists?"].each do |method|
           expect_raises(Iyi::TypeException, /compile-time paths must stay inside/) do
-            package_macro("{{ file_exists?(#{path.inspect}) }}", source, source, root)
+            package_macro("{{ #{method}(#{path.inspect}) }}", source, source, root)
           end
         end
+      end
+      File.write(File.join(outside, "helper.cr"), "puts 123")
+      helper = File.join(root, "link", "helper.cr")
+      expect_raises(Iyi::TypeException, /compile-time paths must stay inside/) do
+        package_macro("{{ run(#{helper.inspect}) }}", source, source, root)
+      end
+    end
+  end
+
+  it "keeps a nested dependency's privileges when its root uses an alias" do
+    with_tempdir("iyi_macro_alias") do
+      real = File.expand_path("real")
+      alias_dir = File.expand_path("alias")
+      dep = File.join(real, "app", "vendor", "dep")
+      Dir.mkdir_p(dep)
+      package_link(real, alias_dir)
+      root = File.join(alias_dir, "app")
+      source = File.join(root, "vendor", "dep", "dep.iyi")
+      own = File.join(dep, "asset")
+      secret = File.join(root, "secret")
+      File.write(File.join(root, "main.iyi"), "")
+      File.write(source, "")
+      File.write(own, "inside")
+      File.write(secret, "outside")
+      package_macro("{{ read_file(#{own.inspect}) }}", source, source, root, dep).should eq(%("inside"))
+      expect_raises(Iyi::TypeException, /compile-time paths must stay inside/) do
+        package_macro("{{ read_file(#{secret.inspect}) }}", source, source, root, dep)
+      end
+      expect_raises(Iyi::TypeException, /not allowed in a dependency macro/) do
+        package_macro(%({{ env("IYI_MACRO_CANARY") }}), source, source, root, dep)
+      end
+    end
+  end
+
+  it "follows links and parent components in the platform's order" do
+    with_tempdir("iyi_macro_parent") do
+      root = File.expand_path("app")
+      inner = File.join(root, "inner")
+      nested = File.join(root, "deep", "nested")
+      Dir.mkdir_p(inner)
+      Dir.mkdir_p(nested)
+      source = File.join(root, "main.iyi")
+      File.write(source, "")
+      File.write(File.join(root, "deep", "asset"), "deep")
+      File.write(File.join(inner, "asset"), "inner")
+      package_link(nested, File.join(inner, "link"))
+      path = File.join(inner, "link", "..", "asset")
+      expected = MACRO_SECURITY_WINDOWS ? %("inner") : %("deep")
+      package_macro("{{ read_file(#{path.inspect}) }}", source, source, root).should eq(expected)
+    end
+  end
+
+  it "compares path casing according to the actual filesystem" do
+    with_tempdir("iyi_macro_case") do
+      root = File.expand_path("CaseApp")
+      Dir.mkdir_p(root)
+      source = File.join(root, "main.iyi")
+      File.write(source, "")
+      File.write(File.join(root, "asset"), "inside")
+      alternate = File.join(File.dirname(root), "CASEAPP", "asset")
+      if File.exists?(alternate)
+        package_macro("{{ read_file(#{alternate.inspect}) }}", source, source, root).should eq(%("inside"))
+      else
+        expect_raises(Iyi::TypeException, /compile-time paths must stay inside/) do
+          package_macro("{{ read_file?(#{alternate.inspect}) }}", source, source, root)
+        end
+      end
+      package_windows_spellings(File.join(root, "asset")).each do |path|
+        package_macro("{{ read_file(#{path.inspect}) }}", source, source, root).should eq(%("inside"))
+      end
+      outside = File.expand_path("outside")
+      File.write(outside, "outside")
+      package_windows_spellings(outside).each do |path|
+        expect_raises(Iyi::TypeException, /compile-time paths must stay inside/) do
+          package_macro("{{ read_file(#{path.inspect}) }}", source, source, root)
+        end
+      end
+      if MACRO_SECURITY_WINDOWS
+        unc_root = Iyi.path_key("\\\\server\\share\\pkg")
+        unc_sibling = Iyi.path_key("\\\\?\\UNC\\server\\share\\pkg-evil\\file")
+        Iyi.path_under?(unc_sibling, unc_root).should be_nil
       end
     end
   end

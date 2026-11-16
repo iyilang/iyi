@@ -28,7 +28,7 @@
 - **Compile-time macros in `.iyi` files refuse shell commands.** `system`
   and backticks fail with the source location. `read_file`, `read_file?` and
   `file_exists?` stay within the defining package and the standard library,
-  including when a path goes through a symbolic link. Only the root package
+  including paths through symbolic links or Windows junctions. Only the root package
   may read the build environment with `env`. A `run` helper must be in the
   defining package, but it still executes without a sandbox and can run
   arbitrary code. Crystal macros keep their existing behavior.

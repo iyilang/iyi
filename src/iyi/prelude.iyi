@@ -191,17 +191,17 @@ class IyiRuntimeLock
         asm("yield" :::: "volatile")
       {% end %}
     end
-    {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %} IyiThread.lock_taken if spins != 0 {% end %}
+    {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %} IyiThread.lock_taken if spins != 0{% if flag?(:heap_verify) %}; @@holding = true{% end %} {% end %}
   end
 
   # One try, no wait and no park: for a walk that must not park here.
   def self.try_lock : Bool
     word = self.word
-    ((seen = word.value.get) & 1_u64) == 0_u64 && (IyiAtomic.rmw(:or, word.as(Pointer(UInt64)), 1_u64, :sequentially_consistent, false) & 1_u64) == 0_u64
+    {% if flag?(:heap_verify) %}taken(((seen = word.value.get) & 1_u64) == 0_u64 && (IyiAtomic.rmw(:or, word.as(Pointer(UInt64)), 1_u64, :sequentially_consistent, false) & 1_u64) == 0_u64){% else %}((seen = word.value.get) & 1_u64) == 0_u64 && (IyiAtomic.rmw(:or, word.as(Pointer(UInt64)), 1_u64, :sequentially_consistent, false) & 1_u64) == 0_u64{% end %}
   end
 
   def self.unlock : Nil
-    word.value.add(0xFFFF_u64)
+    {% if flag?(:heap_verify) %}@@holding = false; word.value.add(0xFFFF_u64){% else %}word.value.add(0xFFFF_u64){% end %}
   end
 
   # Whether some thread holds it: an answer that may be old by the time it
@@ -11857,7 +11857,7 @@ end
 fun __iyi_once(flag : Bool*, initializer : Void*) : Nil
   byte = flag.as(Pointer(UInt8))
   return if IyiAtomic.load(byte, :acquire, false) != 0_u8
-  IyiOnce.run(byte, initializer)
+  {% if flag?(:heap_verify) %}IyiRuntimeLock.once_unheld; IyiOnce.run(byte, initializer){% else %}IyiOnce.run(byte, initializer){% end %}
 end
 
 class IyiOnce

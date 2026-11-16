@@ -7,7 +7,9 @@
 # living, and a freed record left on the caches list the pause strips;
 # with partitions (`-Dheap_partitions` in IYI_OPTS), a dead unit's fiber
 # still naming its partition, caught by the exercise and, with its check
-# left out, by `-Dheap_verify` at the unit's death.
+# left out, by `-Dheap_verify` at the unit's death; and the arena
+# directory's bounds read first under the runtime lock, which hangs or,
+# with `-Dheap_verify`, stops by name if they are a once again.
 #
 #   bash bench/heap_partition.sh
 #
@@ -183,6 +185,61 @@ prove_verified() { # label dir awk-script file
     "$(grep -m1 'holder 0x' "$WORK/$dir/out" | sed 's/^ *holder 0x[0-9a-f]* //')"
 }
 
+# The arena directory's bounds read first under the runtime lock
+# (`IyiHeap.dir_widen`, partitions only). A class variable whose
+# initialiser is anything but a literal is a once, and a read compiled
+# before that initialiser in the program's order goes through the once:
+# under the lock, on a thread with no scheduler state yet, the once
+# allocates to find its fiber and waits on the lock its own thread holds,
+# for ever (darwin's first allocation in `IyiStackGuard.install`, heap22
+# fu DirFix). The copy puts such a read in front on every system: an
+# initialiser in `IyiScheduler`, ahead of the heap's in the program, that
+# allocates - its first allocation maps an arena and widens the bounds
+# under the lock - and asks `arena_of`, which reads them. Built as it is
+# the program runs; with `@@dir_low` back on `DIR_SLOTS` it hangs (a
+# timeout is the catch), and with `-Dheap_verify` `__iyi_once` stops by
+# name, entered under the lock (exit 86).
+BOUNDS_EARLY='{ print } /^  @@lot_locks : Pointer\(UInt64\) = Pointer\(UInt64\)\.new\(0_u64\)$/ { print "  @@bounds_early : UInt64 = IyiHeap.arena_of(Pointer(UInt64).malloc(1_u64).address)"; found = 1 } END { if (!found) exit 3 }'
+BOUNDS_LAZY='{ if (sub(/^  @@dir_low : UInt64 = 0xFFFF_FFFF_FFFF_FFFF_u64$/, "  @@dir_low : UInt64 = DIR_SLOTS")) found = 1; print } END { if (!found) exit 3 }'
+
+bounds_case() { # label dir expect(pass|hang|named) lazy(0|1) build-flags...
+  local label="$1" dir="$2" expect="$3" lazy="$4"
+  shift 4
+  mkdir -p "$WORK/$dir/iyi"
+  cp -R "$REPO/src/iyi/." "$WORK/$dir/iyi/"
+  if ! awk "$BOUNDS_EARLY" "$REPO/src/iyi/concurrency.iyi" > "$WORK/$dir/iyi/concurrency.iyi" ||
+     { [ "$lazy" = 1 ] && ! awk "$BOUNDS_LAZY" "$REPO/src/iyi/heap_partition.iyi" > "$WORK/$dir/iyi/heap_partition.iyi"; }; then
+    echo "  $label: what the copy changes is not in the runtime any more"
+    status=1
+    return
+  fi
+  # shellcheck disable=SC2068
+  if ! IYI_PATH="$WORK/$dir${PSEP}$REPO/src" "$IYI" build $@ \
+       -o "$WORK/$dir/program" "$REPO/bench/heap_partition.iyi" \
+       >"$WORK/$dir/build.log" 2>&1; then
+    echo "  $label: the copy did not build"
+    sed -n '1,12p' "$WORK/$dir/build.log"
+    status=1
+    return
+  fi
+  timeout -k 5 60 "$WORK/$dir/program" >"$WORK/$dir/out" 2>&1
+  local code=$?
+  case "$expect:$code" in
+    pass:0) echo "  $label: runs" ;;
+    hang:124 | hang:137) echo "  $label: hangs, ended at 60 s (exit $code)" ;;
+    named:86)
+      if grep -q "^iyi: heap_verify: a once-initialised class variable or constant was first read under the runtime lock" "$WORK/$dir/out"; then
+        echo "  $label: exits 86, the once named under the lock"
+      else
+        echo "  $label: exit 86 at another check"; sed -n '1,4p' "$WORK/$dir/out"; status=1
+      fi ;;
+    *)
+      echo "  $label: expected $expect, exit $code"
+      sed -n '1,6p' "$WORK/$dir/out"
+      status=1 ;;
+  esac
+}
+
 case " ${IYI_OPTS:-} " in
   *" -Dheap_partitions "*)
     # A compiler with S3's head 2 makes `IyiWaiter` born shared in codegen
@@ -193,6 +250,13 @@ case " ${IYI_OPTS:-} " in
     IYI_SPAWN_BROKEN=new-shared prove_fails "the spare waiter in the partition" nowaiter "dead:" "$NOWAITER" concurrency.iyi
     prove_fails "a reaped fiber keeps its group" nogroup "dead:" "$NOGROUP" concurrency.iyi
     prove_fails "a reaped fiber keeps its block" noproc "dead:" "$NOPROC" concurrency.iyi
+
+    echo
+    echo "== the directory's bounds read first under the runtime lock"
+    bounds_case "bounds read first under the lock" bounds pass 0
+    bounds_case "bounds read first under the lock, -Dheap_verify" vbounds pass 0 -Dheap_verify
+    bounds_case "the bounds a once again" lazybounds hang 1
+    bounds_case "the bounds a once again, -Dheap_verify" vlazybounds named 1 -Dheap_verify
 
     echo
     echo "== the same, with -Dheap_verify and the exercise's own check left out"

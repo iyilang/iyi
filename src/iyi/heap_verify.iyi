@@ -1337,6 +1337,33 @@ end
   end
 {% end %}
 
+# Whether this thread holds the runtime lock, and `__iyi_once` stopped by
+# name when it is entered under it. A once's first step finds the calling
+# fiber (`IyiOnce.run`), which on a thread with no scheduler state yet
+# allocates one, and an allocation that carves takes the lock again and
+# spins on its own thread for ever. A class variable initialised by
+# anything but a literal is a once wherever its read is compiled before
+# its initialiser in the program's order: `@@dir_low = DIR_SLOTS`, read
+# first in `dir_widen` under the lock, hung darwin's first allocation in
+# `IyiStackGuard.install` (heap22 fu, DirFix; bench/heap_partition's
+# "bounds read first under the lock").
+class IyiRuntimeLock
+  @[ThreadLocal]
+  @@holding : Bool = false
+
+  def self.taken(taken : Bool) : Bool
+    @@holding = true if taken
+    taken
+  end
+
+  def self.once_unheld : Nil
+    return unless @@holding
+    message = "iyi: heap_verify: a once-initialised class variable or constant was first read under the runtime lock; initialise it with a literal\n"
+    __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
+    __iyi_exit(86)
+  end
+end
+
 # The return address of the allocation entry that asks (`IyiHeapVerify.
 # sited`): the program's call site.
 lib LibIyiVerify

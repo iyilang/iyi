@@ -636,7 +636,17 @@ class IyiHeap
   # 1,024 pages, 3.7-4.1 MB, resident in #145's app under load (tmac, 16
   # KB pages); Linux maps its zero page for such a read (heap22 fu,
   # TmacRss). bench/heap_drain's directory mode holds both halves.
-  @@dir_low : UInt64 = DIR_SLOTS
+  #
+  # Both start as literals, the empty pair: a literal is the global's
+  # static initializer, never a once. `= DIR_SLOTS` was a once (only a
+  # literal is not), and where the read in `dir_widen` was compiled before
+  # the class's initialiser in the program's order - darwin's
+  # `IyiStackGuard.install`, a thread's first allocation - the first
+  # widening ran it under the runtime lock: the once finds its fiber,
+  # which on a thread with no scheduler state allocates, carves and waits
+  # on the lock this thread holds, for ever (heap22 fu, DirFix).
+  # bench/heap_partition's "bounds read first under the lock" holds it.
+  @@dir_low : UInt64 = 0xFFFF_FFFF_FFFF_FFFF_u64
   @@dir_high : UInt64 = 0_u64
 
   def self.dir_widen(low : UInt64, high : UInt64) : Nil

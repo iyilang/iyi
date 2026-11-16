@@ -295,6 +295,9 @@ module Iyi
         true
       end
       return unless first
+      if stamp.kind.other?
+        cannot("#{path} is not a regular file or directory, so its contents cannot be vouched for")
+      end
       if stamp.kind.file? && stamp.ctime <= 0
         # Without a change time an edit that kept the size and the modification
         # time (`cp -p`, `touch -r`) is not seen, so no record can vouch for it.

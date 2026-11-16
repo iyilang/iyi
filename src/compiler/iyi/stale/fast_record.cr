@@ -313,6 +313,7 @@ module Iyi::Stale
     # change time, device, inode and digest out.
     def self.changed?(recorded : BuildInputs::Stamp, now : BuildInputs::Stamp, path : String, drop : Set(String)) : Bool
       return true unless now.kind == recorded.kind
+      return true if recorded.kind.other?
       return false unless recorded.kind.file?
       return true unless now.size == recorded.size && now.mtime == recorded.mtime
       return false if drop.includes?("ctime")

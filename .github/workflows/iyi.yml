@@ -287,6 +287,7 @@ jobs:
         run: |
           bash bench/stale_tests.sh
           bash bench/stale_dir_exists.sh
+          bash bench/stale_win_paths.sh
 
 
       # The receipt digest and the RG8 oracle each answer to an outside
@@ -674,6 +675,7 @@ jobs:
         run: |
           bash bench/stale_tests.sh
           bash bench/stale_dir_exists.sh
+          bash bench/stale_win_paths.sh
       - name: Stale receipt digest, RG8 oracle, and evidence self-tests
         run: |
           bash bench/stale_sha256.sh
@@ -975,6 +977,7 @@ jobs:
         run: |
           bash bench/stale_tests.sh
           bash bench/stale_dir_exists.sh
+          bash bench/stale_win_paths.sh
       - name: Stale receipt digest, RG8 oracle, and evidence self-tests
         run: |
           bash bench/stale_sha256.sh

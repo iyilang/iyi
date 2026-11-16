@@ -18,6 +18,12 @@ private def provenance_marker_command : String
 end
 
 describe "iyi package macro boundaries" do
+  after_all do
+    pending = Spec.cli.root_context.results_for(Spec::Status::Pending)
+    own_pending = pending.select { |result| Iyi.same_file?(result.file, __FILE__) }
+    raise "macro provenance examples must not be pending: #{own_pending.map(&.description).join(", ")}" unless own_pending.empty?
+  end
+
   it "keeps a caller's yielded macro expression under the caller's package" do
     with_tempdir("iyi_macro_yield_owner") do
       root = File.expand_path("app")

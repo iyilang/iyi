@@ -255,6 +255,10 @@ module Iyi
     # producer's tree is present and an honest error when it is not.
     getter iyi_artifact_source_paths = {} of String => String
 
+    # Canonical library roots used by macros. Each is checked against its
+    # current filesystem identity before reuse, including after daemon reuse.
+    getter iyi_macro_library_roots = {} of String => String
+
     # iyi: true only while a `derive`'s macro is expanding (SPEC.md R-5, II.4).
     # A derive reads the declaration it is attached to, and the types that
     # declaration names. The macro questions that answer with the whole program

@@ -64,7 +64,7 @@ own reference accepts.
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
 | iyi's own prelude | 28,880 lines, of which 4,738 are the library held to the 4,738 ceiling (7,034 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 138,506 lines, none of it written in iyi |
+| compiler | 138,516 lines, none of it written in iyi |
 | artifact format | `.iyimod` v62, checksum per section |
 | samples | 28 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -1062,7 +1062,7 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 138,506 lines, Crystal, forked |
+| Compiler | 24,984 lines, **written in Crystal** | 138,516 lines, Crystal, forked |
 | Library | 8,161 lines (3,551 of it core) | 28,880-line own prelude + 127,837 in std |
 | Specs | 21,146 lines | 17,214 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
@@ -7294,7 +7294,8 @@ then artifacts are a local cache and the registry serves source.
   own package or the standard library, and refuse environment reads from
   dependencies. `run` may execute a program from the macro's package, without
   a sandbox, so building a package can still run package-supplied code.
-  Crystal macros retain their existing behavior.
+  A macro defined and called in `.cr` keeps its existing behavior; a `.cr`
+  macro called from `.iyi` follows the same restrictions as an `.iyi` macro.
 - **No central name registry.** Identity is the path (above), so the registry is
   a cache and an index, and losing it loses discovery rather than the ability to
   build.

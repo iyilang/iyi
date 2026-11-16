@@ -289,13 +289,6 @@ jobs:
       - name: Compiler specs
         run: make -o .build/crystal compiler_spec
 
-      - name: Package macro path boundaries (Linux)
-        shell: bash
-        run: |
-          set -o pipefail
-          .build/compiler_spec -e "iyi package macro boundaries" | tee macro-boundaries.txt
-          grep -F "0 failures, 0 errors, 0 pending" macro-boundaries.txt
-
   stdlib-specs:
     needs: [plan, build]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'stdlib-specs') }}
@@ -1645,8 +1638,7 @@ jobs:
       - name: Package macro path boundaries (macOS)
         run: |
           set -o pipefail
-          make crystal LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config"
-          ./bin/crystal spec spec/compiler/macro/iyi_package_security_spec.cr spec/compiler/macro/iyi_macro_provenance_spec.cr | tee macro-boundaries.txt
+          LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config" ./bin/crystal spec spec/compiler/macro/iyi_package_security_spec.cr spec/compiler/macro/iyi_macro_provenance_spec.cr | tee macro-boundaries.txt
           grep -F "0 failures, 0 errors, 0 pending" macro-boundaries.txt
 
       - name: Samples
@@ -3298,15 +3290,6 @@ jobs:
         env:
           CRYSTAL_SPEC_COMPILER_BIN: ${{ github.workspace }}\.build\crystal.exe
         run: make -f Makefile.win compiler_spec
-
-      - name: Package macro path boundaries (Windows)
-        shell: cmd
-        run: |
-          .build\compiler_spec.exe -e "iyi package macro boundaries" > macro-boundaries.txt
-          if errorlevel 1 exit /b 1
-          type macro-boundaries.txt
-          findstr /C:"0 failures, 0 errors, 0 pending" macro-boundaries.txt
-          if errorlevel 1 exit /b 1
 
   wasi-run:
     needs: [plan, cross-objects, binary]

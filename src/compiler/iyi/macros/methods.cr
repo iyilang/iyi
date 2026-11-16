@@ -159,7 +159,13 @@ module Iyi
         next unless File.file?(File.join(base, "iyi", "prelude.iyi"))
         {"iyi", "std"}.each do |name|
           dir = File.join(base, name)
-          roots << iyi_macro_existing_path(dir) if Dir.exists?(dir)
+          next unless Dir.exists?(dir)
+          cached = @program.iyi_macro_library_roots[dir]?
+          unless cached && Iyi.same_file?(dir, cached)
+            cached = iyi_macro_existing_path(dir)
+            @program.iyi_macro_library_roots[dir] = cached
+          end
+          roots << cached
         end
       end
       roots
@@ -181,8 +187,8 @@ module Iyi
         next if prefix.starts_with?(Mod::Installer::SHORT_NAME)
         roots << directory if Dir.exists?(directory)
       end
-      roots.concat(iyi_library_roots)
       roots.map! { |root| iyi_macro_existing_path(root) }
+      roots.concat(iyi_library_roots)
       roots.select! { |root| iyi_macro_under?(resolved_source, root) }
       root = roots.max_by?(&.size)
       unless root

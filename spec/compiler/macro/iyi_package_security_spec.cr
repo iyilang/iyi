@@ -37,8 +37,7 @@ private def package_windows_spellings(path : String) : Array(String)
   {% end %}
 end
 
-private def package_macro(body : String, definition : String, caller : String, root : String, dependency : String? = nil)
-  program = Iyi::Program.new
+private def package_macro(body : String, definition : String, caller : String, root : String, dependency : String? = nil, *, program : Iyi::Program = Iyi::Program.new)
   program.filename = File.join(root, "main.iyi")
   program.iyi_root_package = {"example.test/app", root}
   if dependency
@@ -54,6 +53,12 @@ private def package_macro(body : String, definition : String, caller : String, r
 end
 
 describe "iyi package macro boundaries" do
+  after_all do
+    pending = Spec.cli.root_context.results_for(Spec::Status::Pending)
+    own_pending = pending.select { |result| Iyi.same_file?(result.file, __FILE__) }
+    raise "macro boundary examples must not be pending: #{own_pending.map(&.description).join(", ")}" unless own_pending.empty?
+  end
+
   it "refuses system and backticks in a root file and in an imported macro" do
     with_tempdir("iyi_macro_shell") do
       root = File.expand_path("app")
@@ -246,6 +251,40 @@ describe "iyi package macro boundaries" do
         unc_sibling = Iyi.path_key("\\\\?\\UNC\\server\\share\\pkg-evil\\file")
         Iyi.path_under?(unc_sibling, unc_root).should be_nil
       end
+    end
+  end
+
+  it "reuses library roots only while they still name the same directories" do
+    with_tempdir("iyi_macro_library_cache") do
+      root = File.expand_path("app")
+      library = File.expand_path("library")
+      first = File.expand_path("first")
+      second = File.expand_path("second")
+      [root, first, second, File.join(library, "iyi")].each { |dir| Dir.mkdir_p(dir) }
+      source = File.join(root, "main.iyi")
+      File.write(source, "")
+      File.write(File.join(library, "iyi", "prelude.iyi"), "")
+      File.write(File.join(first, "asset"), "first")
+      File.write(File.join(second, "asset"), "second")
+      link = File.join(library, "std")
+      package_link(first, link)
+      program = Iyi::Program.new
+      program.iyi_path = Iyi::IyiPath.new([library])
+      first_asset = File.join(first, "asset")
+      command = "{{ read_file(#{first_asset.inspect}) }}"
+      package_macro(command, source, source, root, program: program).should eq(%("first"))
+      cached = program.iyi_macro_library_roots[link]
+      package_macro(command, source, source, root, program: program).should eq(%("first"))
+      program.iyi_macro_library_roots[link].same?(cached).should be_true
+
+      File.delete(link)
+      package_link(second, link)
+      second_asset = File.join(second, "asset")
+      package_macro("{{ read_file(#{second_asset.inspect}) }}", source, source, root, program: program).should eq(%("second"))
+      expect_raises(Iyi::TypeException, /compile-time paths must stay inside/) do
+        package_macro(command, source, source, root, program: program)
+      end
+      Iyi.same_file?(program.iyi_macro_library_roots[link], second).should be_true
     end
   end
 

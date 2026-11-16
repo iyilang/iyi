@@ -89,6 +89,10 @@ case "$(uname -s)" in
     ;;
 esac
 trap 'rm -rf "$WORK"' EXIT
+# Keep fixture commits and tags independent of the operator's git signing
+# and URL rewrite settings. Individual tests can supply their own config.
+printf '[commit]\n\tgpgsign = false\n[tag]\n\tgpgsign = false\n' > "$WORK/fixture.gitconfig"
+export GIT_CONFIG_GLOBAL="$WORK/fixture.gitconfig" GIT_CONFIG_NOSYSTEM=1
 export IYI_CACHE_DIR="$WORK/cache"
 export IYI_MOD_MIRROR="$WORK/mirror"
 cd "$WORK" || exit 1
@@ -183,9 +187,41 @@ grep -q "liba 1.1.0" run1.log || fail "the program ran liba '$(cat run1.log)', n
 # written. Now `Sum.in_cache?` compares the two the way the file system
 # names them. A file written anyway is taken back out, or libb is "not
 # what it was" in every step after this one.
+checkout="$IYI_CACHE_DIR/mod/example.test/user/libb@v1.0.0"
+cached_manifest_check() { # cached_manifest_check <label> <cache spelling> <entry spelling>
+  local label="$1" cache="$2" entry="$3" manifest_hash wrong ok=1
+  manifest_hash="$(awk '$1 == "example.test/user/liba" && $2 == "v1.1.0/iyi.mod" { print $3 }' "$WORK/app/iyi.sum")"
+  if [ -z "$manifest_hash" ]; then
+    fail "the app has no liba manifest pin"
+    return
+  fi
+  # The matching manifest is checked, but the absent tree pin must not be
+  # written into the cached checkout under an alternate path spelling.
+  printf 'example.test/user/liba v1.1.0/iyi.mod %s\n' "$manifest_hash" > "$checkout/iyi.sum"
+  cp "$checkout/iyi.sum" "$WORK/cached-manifest.sum"
+  (cd "$checkout" && IYI_CACHE_DIR="$cache" "$IYI" check "$entry") > cache-native.log 2>&1 || {
+    fail "$label: the matching manifest pin failed: $(cat cache-native.log)"; ok=0;
+  }
+  cmp -s "$checkout/iyi.sum" "$WORK/cached-manifest.sum" || {
+    fail "$label: a tree pin was written into the cached checkout"; ok=0;
+  }
+  wrong="h2:0000000000000000000000000000000000000000000000000000000000000000"
+  printf 'example.test/user/liba v1.1.0/iyi.mod %s\n' "$wrong" > "$checkout/iyi.sum"
+  cp "$checkout/iyi.sum" "$WORK/cached-manifest-wrong.sum"
+  (cd "$checkout" && IYI_CACHE_DIR="$cache" "$IYI" check "$entry") > cache-native-wrong.log 2>&1
+  if [ "$?" -eq 0 ] || ! grep -qF "$wrong" cache-native-wrong.log ||
+     ! grep -qF "$manifest_hash" cache-native-wrong.log; then
+    fail "$label: a wrong manifest pin was not refused with both hashes: $(cat cache-native-wrong.log)"
+    ok=0
+  fi
+  cmp -s "$checkout/iyi.sum" "$WORK/cached-manifest-wrong.sum" || {
+    fail "$label: a refused manifest pin changed the cached checkout"; ok=0;
+  }
+  rm -f "$checkout/iyi.sum"
+  [ "$ok" -eq 0 ] || echo "  $label: matching manifest verified read-only, wrong pin refused"
+}
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
-    checkout="$IYI_CACHE_DIR/mod/example.test/user/libb@v1.0.0"
     cache_spelled() { # cache_spelled <how> <IYI_CACHE_DIR>
       (cd "$checkout" && IYI_CACHE_DIR="$2" "$IYI" check libb.iyi) > cachecase.log 2>&1 ||
         fail "check in the cached libb, IYI_CACHE_DIR in $1, failed: $(cat cachecase.log)"
@@ -202,6 +238,25 @@ case "$(uname -s)" in
       cache_spelled "its 8.3 short form" "$short"
     else
       echo "  (this volume gives $IYI_CACHE_DIR no 8.3 short form; that spelling is not asked)"
+    fi
+    native_cache="$(cygpath -w "$IYI_CACHE_DIR" | tr '[:upper:]' '[:lower:]')"
+    native_entry="$(cygpath -w "$(cd "$checkout" && pwd -P)")\\libb.iyi"
+    cached_manifest_check "native backslash cache path" "$native_cache" "$native_entry"
+    ;;
+  Darwin)
+    case "$IYI_CACHE_DIR" in
+      /private/var/* | /private/tmp/*) alias_cache="${IYI_CACHE_DIR#/private}" ;;
+      /var/* | /tmp/*) alias_cache="$IYI_CACHE_DIR" ;;
+      *) alias_cache="" ;;
+    esac
+    physical="$(cd "$checkout" && pwd -P)"
+    if [ -n "$alias_cache" ] && [ -d "$alias_cache" ]; then
+      case "$physical" in
+        "$alias_cache"/*) echo "  (this temporary directory has no distinct /private alias)" ;;
+        *) cached_manifest_check "/var or /tmp cache alias" "$alias_cache" "$physical/libb.iyi" ;;
+      esac
+    else
+      echo "  (this temporary directory is outside /var and /tmp; no alias is asked)"
     fi
     ;;
 esac

@@ -35,6 +35,10 @@ case "$(uname -s)" in
     WORK="$(cygpath -m "$WORK")"
     ;;
 esac
+# The fixture repositories must not inherit a user's signing or URL
+# rewrite configuration. Each test supplies its own config when needed.
+printf '[commit]\n\tgpgsign = false\n[tag]\n\tgpgsign = false\n' > "$WORK/fixture.gitconfig"
+export GIT_CONFIG_GLOBAL="$WORK/fixture.gitconfig" GIT_CONFIG_NOSYSTEM=1
 export IYI_CACHE_DIR="$WORK/cache"
 export IYI_MOD_MIRROR="$WORK/mirror"
 
@@ -45,7 +49,9 @@ mkrepo() { git init -q "$1" && git -C "$1" config user.email t@t && git -C "$1" 
 
 # ── The fixture: two packages, three versions, one raise ─────────────────
 mkrepo work/liba
-printf 'module example.test/user/liba\n' > work/liba/iyi.mod
+# Preserve committed CRLF bytes even when the caller's git asks for LF.
+printf 'iyi.mod -text\n' > work/liba/.gitattributes
+printf 'module example.test/user/liba\r\n' > work/liba/iyi.mod
 printf 'module liba\n\npub def greeting : String\n  "hello from liba v1.0.0"\nend\n' > work/liba/liba.iyi
 # A package module that uses the standard library: `std/file` is iyi's,
 # found where every program finds it, and never the consuming project's
@@ -81,7 +87,10 @@ IYI
 
 # ── 1. MVS: the highest of the minimums, observably ──────────────────────
 step "MVS picks the raised version"
-if ! (cd app && "$IYI" build main.iyi -o app) > build.log 2>&1; then
+# Git normally rewrites text under this configuration. The manifest in the
+# tag is explicitly binary, so its CRLF bytes must reach the hash intact.
+printf '[core]\n\tautocrlf = true\n\teol = crlf\n' > crlf.gitconfig
+if ! (cd app && GIT_CONFIG_GLOBAL="$WORK/crlf.gitconfig" "$IYI" build main.iyi -o app) > build.log 2>&1; then
   echo "build failed:"
   tail -8 build.log
   exit 1
@@ -106,7 +115,31 @@ manifest_h2() {
   printf '%s f iyi.mod\n' "$inner" | sha256 | awk '{ print "h2:" $0 }'
 }
 old_commit="$(git -C work/liba rev-parse v1.0.0)"
-old_hash="$(git -C work/liba show "$old_commit:iyi.mod" | manifest_h2)"
+git -C work/liba show "$old_commit:iyi.mod" > manifest-crlf
+tr -d '\r' < manifest-crlf > manifest-lf
+cmp -s manifest-crlf manifest-lf && { echo "the tag does not contain CRLF bytes"; exit 1; }
+old_hash="$(manifest_h2 < manifest-crlf)"
+lf_hash="$(manifest_h2 < manifest-lf)"
+[ "$old_hash" != "$lf_hash" ] || { echo "CRLF and LF have the same manifest hash"; exit 1; }
+grep -Fx "example.test/user/liba v1.0.0/iyi.mod $old_hash" app/iyi.sum > /dev/null || {
+  echo "the CRLF manifest was not recorded from its exact bytes:"; cat app/iyi.sum; exit 1;
+}
+# A falsely normalized pin must be refused, not accepted as the CRLF file.
+cp app/iyi.sum app/iyi.sum.crlf
+awk -v hash="$lf_hash" '$1 == "example.test/user/liba" && $2 == "v1.0.0/iyi.mod" { $3 = hash } { print }' app/iyi.sum.crlf > app/iyi.sum
+cp app/iyi.sum app/iyi.sum.lf
+(cd app && "$IYI" build main.iyi -o app) > normalized-manifest.log 2>&1
+if [ "$?" -eq 0 ] ||
+   ! grep -F "example.test/user/liba v1.0.0/iyi.mod is not what it was" normalized-manifest.log > /dev/null ||
+   ! grep -F "$lf_hash" normalized-manifest.log > /dev/null ||
+   ! grep -F "$old_hash" normalized-manifest.log > /dev/null; then
+  echo "a normalized manifest pin was not refused with both hashes:"
+  cat normalized-manifest.log
+  exit 1
+fi
+cmp -s app/iyi.sum app/iyi.sum.lf || { echo "a refused normalized pin changed iyi.sum"; exit 1; }
+mv app/iyi.sum.crlf app/iyi.sum
+echo "  LF pin $lf_hash refused against CRLF bytes $old_hash"
 cp app/iyi.sum app/iyi.sum.before-move
 mkrepo work/libc
 printf 'module example.test/user/libc\n' > work/libc/iyi.mod
@@ -147,6 +180,22 @@ grep -Fx "example.test/user/liba v1.0.0/iyi.mod $old_hash" app/iyi.sum > /dev/nu
 for entry in 'example.test/user/liba v1.1.0' 'example.test/user/liba v1.1.0/iyi.mod' 'example.test/user/libb v1.0.0/iyi.mod'; do
   grep -F "$entry h2:" app/iyi.sum > /dev/null || { echo "missing $entry:"; cat app/iyi.sum; exit 1; }
 done
+
+# A cache spelled as a native, mixed-case drive path must address the same
+# checkout without changing the portable module and manifest keys.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    native_cache="$(cygpath -w "$IYI_CACHE_DIR" | tr '[:upper:]' '[:lower:]')"
+    cp app/iyi.sum app/iyi.sum.before-native
+    (cd app && IYI_CACHE_DIR="$native_cache" IYI_MOD_MIRROR="$WORK/no-mirror" "$IYI" build main.iyi -o app) > native-cache.log 2>&1 || {
+      echo "a native mixed-case cache path did not reuse the checkout:"; cat native-cache.log; exit 1;
+    }
+    cmp -s app/iyi.sum app/iyi.sum.before-native || {
+      echo "a native mixed-case cache path changed portable sum keys:"; cat app/iyi.sum; exit 1;
+    }
+    echo "  native backslashes and mixed case reused the cache without changing sum keys"
+    ;;
+esac
 echo "  $old_hash -> $new_hash refused; the old graph and sum remain"
 
 step "tidy keeps an outbid manifest and --check writes nothing"

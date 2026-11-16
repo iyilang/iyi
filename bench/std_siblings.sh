@@ -6,6 +6,12 @@
 #     bash bench/std_siblings.sh 2 4      # the second of four shards
 #     bash bench/std_siblings.sh --plan 4 # which shard each goes to; runs none
 #
+# IYI_SIBLINGS narrows the set the shards are dealt from: unset or `all`
+# for every sibling, `none` for none, otherwise their names without `.sh`
+# (`std_zip_exercise std_tar_exercise`), separated by spaces. CI's planner
+# (scripts/ci_plan.py) names the siblings a pull request's bench files
+# reach, so a change to one exercise runs that exercise and not 116.
+#
 # `bench/std_exercise.sh` runs all of them after its own sections; CI runs
 # the shards side by side, because one after another they outgrew the hour
 # the job had - and the sum is the same set, which the shard header line
@@ -77,12 +83,37 @@ if [ -z "$shards" ] || [ "$shards" -lt 1 ] || [ "$shard" -lt 1 ] || [ "$shard" -
   exit 2
 fi
 
+only="${IYI_SIBLINGS:-all}"
+case " $only " in
+  " all " | " none ") ;;
+  *)
+    for name in $only; do
+      if [ "$name" = std_exercise ] || [ ! -f "$REPO/bench/$name.sh" ]; then
+        echo "FAIL: IYI_SIBLINGS names $name, which is no sibling under bench/"
+        exit 2
+      fi
+    done
+    ;;
+esac
+# chosen <name>: whether IYI_SIBLINGS asks for the sibling <name>.
+chosen() {
+  [ "$1" != std_exercise ] || return 1
+  case " $only " in
+    " all " | *" $1 "*) return 0 ;;
+  esac
+  return 1
+}
+if [ "$only" = none ]; then
+  echo "== shard $shard of $shards: IYI_SIBLINGS is none, so no sibling runs"
+  exit 0
+fi
+
 # "K WEIGHT NAME" for every sibling, in the order they are dealt.
 deal() {
   for sibling in "$REPO"/bench/std_*_exercise.sh; do
     [ -f "$sibling" ] || continue
     name="$(basename "$sibling" .sh)"
-    [ "$name" = "std_exercise" ] || echo "$name"
+    if chosen "$name"; then echo "$name"; fi
   done | awk -v table="$(echo $WEIGHTS)" '
     BEGIN { n = split(table, t); for (i = 1; i < n; i += 2) w["std_" t[i] "_exercise"] = t[i + 1] }
     { print $1, (($1 in w) ? w[$1] : 30) }' |
@@ -100,7 +131,7 @@ dealt="$(deal)"
 # not hold every sibling once is refused here, before any shard runs.
 siblings_total=0
 for sibling in "$REPO"/bench/std_*_exercise.sh; do
-  [ -f "$sibling" ] && [ "$(basename "$sibling")" != "std_exercise.sh" ] && siblings_total=$((siblings_total + 1))
+  [ -f "$sibling" ] && chosen "$(basename "$sibling" .sh)" && siblings_total=$((siblings_total + 1))
 done
 dealt_count=$(echo "$dealt" | awk 'NF == 3 && $1 >= 1' | wc -l | tr -d ' ')
 dealt_names=$(echo "$dealt" | awk 'NF == 3 { print $3 }' | LC_ALL=C sort -u | wc -l | tr -d ' ')

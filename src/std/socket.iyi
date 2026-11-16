@@ -2165,7 +2165,7 @@ pub class IyiSocket
     # anyway — the same answer Go and Rust give.
     @@winsock : ::Bool = false
 
-    def self.__sys_winsock : Nil
+    @[Effect(:network)]; def self.__sys_winsock : Nil
       return if @@winsock
       # A WSADATA is 408 bytes here and none of its fields is read; only
       # whether the call answered 0 matters.
@@ -2186,7 +2186,7 @@ pub class IyiSocket
     # shape, so nothing above learns a second convention: a negative result
     # is the failure, and the two predicates below are the only things that
     # read which failure it was.
-    def self.__sys_error : Int64
+    @[Effect(:network)]; def self.__sys_error : Int64
       -(LibWs2_32.WSAGetLastError.to_i64)
     end
 
@@ -2198,14 +2198,14 @@ pub class IyiSocket
       s.unsafe_to_i32
     end
 
-    def self.__sys_socket(family : Int32) : Int32
+    @[Effect(:network)]; def self.__sys_socket(family : Int32) : Int32
       __sys_winsock
       s = LibWs2_32.socket(family, SOCK_STREAM, __sys_protocol(family))
       return -1 if s == INVALID_SOCKET
       __sys_made(s)
     end
 
-    def self.__sys_bind(fd : Int32, addr : Pointer(UInt8), family : Int32) : Int32
+    @[Effect(:network)]; def self.__sys_bind(fd : Int32, addr : Pointer(UInt8), family : Int32) : Int32
       return __sys_error.to_i32 if LibWs2_32.bind(__sys_handle(fd), addr.as(Void*), __sys_addr_size(family)) != 0
       0
     end
@@ -2214,13 +2214,13 @@ pub class IyiSocket
     # away as refused - where Linux holds it - unless the backlog is asked
     # as SOMAXCONN_HINT(n), which is -n: 220 connects to a listener asked
     # for 256 lost 20.
-    def self.__sys_listen(fd : Int32, backlog : Int32) : Int32
+    @[Effect(:network)]; def self.__sys_listen(fd : Int32, backlog : Int32) : Int32
       hinted = backlog > 200 ? -backlog : backlog
       return __sys_error.to_i32 if LibWs2_32.listen(__sys_handle(fd), hinted) != 0
       0
     end
 
-    def self.__sys_shutdown_write(fd : Int32) : Int64
+    @[Effect(:network)]; def self.__sys_shutdown_write(fd : Int32) : Int64
       return 0_i64 if LibWs2_32.shutdown(__sys_handle(fd), 1) == 0
       __sys_error
     end
@@ -2228,7 +2228,7 @@ pub class IyiSocket
     # Winsock's address length is an `int*` where POSIX has a `socklen_t*`:
     # the same width and the same bytes, so the callers above keep one
     # signature.
-    def self.__sys_accept(fd : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32), family : Int32) : Int32
+    @[Effect(:network)]; def self.__sys_accept(fd : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32), family : Int32) : Int32
       s = __sys_handle(fd)
       client = LibWs2_32.accept(s, addr.as(Void*), addrlen.as(Pointer(Int32)))
       return __sys_made(client) if client != INVALID_SOCKET
@@ -2241,7 +2241,7 @@ pub class IyiSocket
       __sys_accept_posted(s, addr, addrlen, family)
     end
 
-    def self.__sys_accept_posted(s : UInt64, addr : Pointer(UInt8), addrlen : Pointer(UInt32), family : Int32) : Int32
+    @[Effect(:network)]; def self.__sys_accept_posted(s : UInt64, addr : Pointer(UInt8), addrlen : Pointer(UInt32), family : Int32) : Int32
       # A cancelled task must not post: nothing would wake it but the
       # completion, and a listener nobody connects to never produces one.
       # Answering "would block" sends the caller into the wait it already
@@ -2319,7 +2319,7 @@ pub class IyiSocket
     # long as the kernel's own SYN retries, and `connect_to`'s wait, which
     # holds *ms* on the POSIX arms, came after it was all over: issue #131
     # measured 21043 ms for a 2000 ms bound to an address that drops SYNs.
-    def self.__sys_connect(fd : Int32, addr : Pointer(UInt8), family : Int32, ms : Int32) : Int32
+    @[Effect(:network)]; def self.__sys_connect(fd : Int32, addr : Pointer(UInt8), family : Int32, ms : Int32) : Int32
       s = __sys_handle(fd)
       return -WSAEWOULDBLOCK if IyiScheduler.current.cancelled
       # `ConnectEx` is TCP's alone: a unix socket connects with the plain
@@ -2374,7 +2374,7 @@ pub class IyiSocket
       0
     end
 
-    def self.__sys_send(fd : Int32, buf : Pointer(UInt8), len : UInt64, ms : Int32) : Int64
+    @[Effect(:network)]; def self.__sys_send(fd : Int32, buf : Pointer(UInt8), len : UInt64, ms : Int32) : Int64
       s = __sys_handle(fd)
       # A bounded piece at a time. Winsock takes a whole buffer of any size
       # while what it holds is under the send buffer's size, so one send of
@@ -2401,7 +2401,7 @@ pub class IyiSocket
     # The send as the wait, with the write's deadline on it: a deadline
     # that comes first cancels the send, and the cancellation's completion
     # wakes this frame, so what the send did is known when it returns.
-    def self.__sys_send_posted(s : UInt64, buf : Pointer(UInt8), len : UInt64, ms : Int32) : Int64
+    @[Effect(:network)]; def self.__sys_send_posted(s : UInt64, buf : Pointer(UInt8), len : UInt64, ms : Int32) : Int64
       return -(WSAEWOULDBLOCK.to_i64) if IyiScheduler.current.cancelled
       # The buffer descriptor stays on this frame for the whole operation:
       # the kernel reads it after the post, and the fiber is parked in
@@ -2440,17 +2440,17 @@ pub class IyiSocket
       result
     end
 
-    def self.__sys_recv(fd : Int32, buf : Pointer(UInt8), len : UInt64) : Int64
+    @[Effect(:network)]; def self.__sys_recv(fd : Int32, buf : Pointer(UInt8), len : UInt64) : Int64
       n = LibWs2_32.recv(__sys_handle(fd), buf.as(Void*), len.to_i32, 0)
       return n.to_i64 if n >= 0
       __sys_error
     end
 
-    def self.__sys_getsockname(fd : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32)) : Int32
+    @[Effect(:network)]; def self.__sys_getsockname(fd : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32)) : Int32
       LibWs2_32.getsockname(__sys_handle(fd), addr.as(Void*), addrlen.as(Pointer(Int32)))
     end
 
-    def self.__sys_getpeername(fd : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32)) : Int32
+    @[Effect(:network)]; def self.__sys_getpeername(fd : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32)) : Int32
       LibWs2_32.getpeername(__sys_handle(fd), addr.as(Void*), addrlen.as(Pointer(Int32)))
     end
 
@@ -2462,14 +2462,14 @@ pub class IyiSocket
     # it the port was not the listener's either - a bind to 127.0.0.1:P went
     # through while 0.0.0.0:P listened, and the other way round, from any
     # process, and the more specific listener took the connections.
-    def self.__sys_set_reuseaddr(fd : Int32) : Int32
+    @[Effect(:network)]; def self.__sys_set_reuseaddr(fd : Int32) : Int32
       val = 1_i32
       LibWs2_32.setsockopt(__sys_handle(fd), SOL_SOCKET, -5, pointerof(val).as(Void*), 4)
     end
 
     # IPV6_V6ONLY (27) at IPPROTO_IPV6 (41). Windows' default already, and
     # said anyway: the default is a registry's, and this is the program's.
-    def self.__sys_set_v6only(fd : Int32) : Int32
+    @[Effect(:network)]; def self.__sys_set_v6only(fd : Int32) : Int32
       val = 1_i32
       LibWs2_32.setsockopt(__sys_handle(fd), 41, 27, pointerof(val).as(Void*), 4)
     end
@@ -2477,18 +2477,18 @@ pub class IyiSocket
     # TCP_NODELAY (1) at IPPROTO_TCP (6): Nagle's algorithm off when *on*.
     # Winsock may answer the option in one byte (a BOOLEAN); the rest of
     # the word is left 0, so any byte set reads as on.
-    def self.__sys_set_nodelay(fd : Int32, on : ::Bool) : Int32
+    @[Effect(:network)]; def self.__sys_set_nodelay(fd : Int32, on : ::Bool) : Int32
       val = on ? 1_i32 : 0_i32
       LibWs2_32.setsockopt(__sys_handle(fd), 6, 1, pointerof(val).as(Void*), 4)
     end
 
-    def self.__sys_nodelay?(fd : Int32) : ::Bool
+    @[Effect(:network)]; def self.__sys_nodelay?(fd : Int32) : ::Bool
       val = 0_i32
       len = 4
       LibWs2_32.getsockopt(__sys_handle(fd), 6, 1, pointerof(val).as(Void*), pointerof(len)) == 0 && val != 0
     end
 
-    def self.__sys_set_nonblock(fd : Int32) : Int32
+    @[Effect(:network)]; def self.__sys_set_nonblock(fd : Int32) : Int32
       on = 1
       LibWs2_32.ioctlsocket(__sys_handle(fd), FIONBIO, pointerof(on))
     end
@@ -2532,7 +2532,7 @@ pub class IyiSocket
     # and `wait_writable` answers `Cancelled` before it gets here. It reads
     # the option rather than guessing, so it is the truth for anything that
     # does ask.
-    def self.__sys_sock_error(fd : Int32) : Int32
+    @[Effect(:network)]; def self.__sys_sock_error(fd : Int32) : Int32
       err = 0_i32
       len = 4
       LibWs2_32.getsockopt(__sys_handle(fd), SOL_SOCKET, SO_ERROR, pointerof(err).as(Void*), pointerof(len))
@@ -2542,7 +2542,7 @@ pub class IyiSocket
     # The pointer to one of mswsock's extension functions, asked of the
     # socket that will use it. Fetched where it is used rather than cached:
     # it is one call, and both callers are about to do a TCP handshake.
-    def self.__sys_extension(s : UInt64, low : UInt64, high : UInt64) : Pointer(UInt64)
+    @[Effect(:network)]; def self.__sys_extension(s : UInt64, low : UInt64, high : UInt64) : Pointer(UInt64)
       guid = Pointer(UInt64).malloc(2_u64)
       guid[0] = low
       guid[1] = high
@@ -2564,7 +2564,7 @@ pub class IyiSocket
     # transferred nothing, and a successful `AcceptEx` or `ConnectEx` is
     # exactly that — both complete with zero bytes. Nothing waits here: the
     # completion has already arrived, which is what the 0 says.
-    def self.__sys_overlapped_result(s : UInt64, ov : Pointer(UInt8)) : Int64
+    @[Effect(:network)]; def self.__sys_overlapped_result(s : UInt64, ov : Pointer(UInt8)) : Int64
       transferred = 0_i32
       flags = 0_i32
       answered = LibWs2_32.WSAGetOverlappedResult(s, ov.as(Void*), pointerof(transferred), 0,
@@ -2604,7 +2604,7 @@ pub class IyiSocket
     # on. This one is connected to one name server, so the report says
     # that server has nothing on its port, and the next server is asked at
     # once instead of after the timeout.
-    def self.__sys_dgram_socket(family : Int32) : Int32
+    @[Effect(:network)]; def self.__sys_dgram_socket(family : Int32) : Int32
       __sys_winsock
       s = LibWs2_32.socket(family, 2, 17)
       return __sys_error.to_i32 if s == INVALID_SOCKET
@@ -2615,7 +2615,7 @@ pub class IyiSocket
 
     # The plain call, not `__sys_connect`'s `ConnectEx`, which is TCP's: a
     # datagram socket's connect records the peer and returns.
-    def self.__sys_dgram_connect(fd : Int32, addr : Pointer(UInt8), family : Int32) : Int32
+    @[Effect(:network)]; def self.__sys_dgram_connect(fd : Int32, addr : Pointer(UInt8), family : Int32) : Int32
       return __sys_error.to_i32 if LibWs2_32.connect(__sys_handle(fd), addr.as(Void*), __sys_addr_size(family)) != 0
       0
     end
@@ -2623,7 +2623,7 @@ pub class IyiSocket
     # The plain call, not `__sys_send`'s posted one: a datagram of a
     # query's size goes out whole or not at all, and there is no room to
     # wait for.
-    def self.__sys_dgram_send(fd : Int32, buf : Pointer(UInt8), len : UInt64) : Int64
+    @[Effect(:network)]; def self.__sys_dgram_send(fd : Int32, buf : Pointer(UInt8), len : UInt64) : Int64
       n = LibWs2_32.send(__sys_handle(fd), buf.as(Void*), len.to_i32, 0)
       return n.to_i64 if n >= 0
       __sys_error
@@ -2638,7 +2638,7 @@ pub class IyiSocket
     # wait at all, and the task sleeps on the scheduler between askings -
     # at Windows' timer tick, 15.6 ms, which is nothing next to a name
     # server's round trip.
-    def self.__sys_dgram_wait(fd : Int32, ms : Int32) : ::Bool | Cancelled
+    @[Effect(:network)]; def self.__sys_dgram_wait(fd : Int32, ms : Int32) : ::Bool | Cancelled
       deadline = __iyi_monotonic_ns + ms.to_i64 * 1000000_i64
       while true
         entry = LibWs2_32::PollFd.new(fd: __sys_handle(fd), events: 0x0100_i16, revents: 0_i16)
@@ -2677,7 +2677,7 @@ pub class IyiSocket
     # IPv6 servers learned from router advertisements or DHCPv6 (stored as
     # binary, not read), and per-connection suffixes. Those need
     # iphlpapi; see the `lib` above for why it is not linked.
-    def self.__sys_dns_config : ResolvConf
+    @[Effect(:network)]; def self.__sys_dns_config : ResolvConf
       servers = [] of String
       search = [] of String
       root = Pointer(Void).new(HKEY_LOCAL_MACHINE)
@@ -2697,7 +2697,7 @@ pub class IyiSocket
       ResolvConf.new(servers, search)
     end
 
-    private def self.__sys_interface_servers(root : Void*, path : String, servers : Array(String), dhcp : ::Bool) : Nil
+    @[Effect(:network)]; private def self.__sys_interface_servers(root : Void*, path : String, servers : Array(String), dhcp : ::Bool) : Nil
       interfaces = __sys_reg_open(root, path)
       return unless interfaces.is_a?(Pointer(Void))
       name = Pointer(UInt16).malloc(256_u64)
@@ -2742,7 +2742,7 @@ pub class IyiSocket
       end
     end
 
-    private def self.__sys_reg_open(parent : Void*, path : String) : Void*?
+    @[Effect(:network)]; private def self.__sys_reg_open(parent : Void*, path : String) : Void*?
       handle = Pointer(Void).new(0_u64)
       wide = __iyi_win_env_wide(path.to_unsafe, path.bytesize)
       return nil if LibAdvapi32.RegOpenKeyExW(parent, wide, 0_u32, KEY_READ, pointerof(handle)) != 0
@@ -2752,7 +2752,7 @@ pub class IyiSocket
     # A string value as text, "" when it is absent or not a string. A
     # REG_MULTI_SZ's NULs between its strings read as spaces, which is
     # what separates the words the callers split on.
-    private def self.__sys_reg_text(key : Void*, value : String) : String
+    @[Effect(:network)]; private def self.__sys_reg_text(key : Void*, value : String) : String
       wide = __iyi_win_env_wide(value.to_unsafe, value.bytesize)
       null = Pointer(Void).new(0_u64)
       type = 0_u32

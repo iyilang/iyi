@@ -4173,15 +4173,14 @@ jobs:
       - name: Every selected job passed
         env:
           RESULTS: ${{ toJSON(needs) }}
-          SELECTED: ${{ needs.plan.outputs.jobs }}
         run: |
           printf '%s' "$RESULTS" | python3 -c '
-          import json, os, sys
+          import json, sys
           results = json.load(sys.stdin)
-          selected = set(json.loads(os.environ.get("SELECTED") or "[]"))
-          failed = sorted(name for name, job in results.items()
-                          if job["result"] in ("failure", "cancelled")
-                          or (name in selected and job["result"] != "success"))
-          failed += sorted(selected - set(results))
+          selected = set(json.loads(results["plan"]["outputs"]["jobs"]))
+          failed = sorted(
+              {name for name, job in results.items() if job["result"] in ("failure", "cancelled")}
+              | {name for name in selected | {"plan"}
+                 if results.get(name, {}).get("result") != "success"})
           print("not successful: " + ", ".join(failed) if failed else "every selected job passed")
           sys.exit(1 if failed else 0)'

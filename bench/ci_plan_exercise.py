@@ -23,6 +23,7 @@ comment, a message, a `$( )` in quotes, a loop, a function and Python's
 strings, reads and subprocesses.
 """
 import importlib.util
+import json
 import os
 import subprocess
 import sys
@@ -102,18 +103,26 @@ spec = importlib.util.spec_from_file_location("ci_plan_under_test", PLANNER)
 planner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(planner)
 actual_jobs = planner.parse_jobs((ROOT / ".github" / "workflows" / "iyi.yml").read_text(encoding="utf-8"))
-for job in sorted(port_jobs):
-    check(f"result requires {job}", job in actual_jobs["result"]["needs"])
-    if job in actual_jobs:
-        steps = planner.code(actual_jobs[job]["text"])
-        for gate in (
-            "selfhost/lexer/diff.sh",
-            "selfhost/parser/diff.sh",
-            "selfhost/semantic/diff.sh",
-            "selfhost/semantic/infer_diff.sh",
-            "selfhost/codegen/diff.sh",
-        ):
-            check(f"{job} runs {gate}", f"bash {gate}" in steps)
+# Execute the workflow command instead of treating a selected job as a pass.
+result_lines = actual_jobs["result"]["text"].splitlines()
+command_lines = []
+for line in result_lines[result_lines.index("        run: |") + 1:]:
+    if line.strip() and not line.startswith("          "):
+        break
+    command_lines.append(line[10:])
+result_command = "\n".join(command_lines)
+for what, selected, verdicts, passes in [
+    ("selected success permits unselected skips", ["probe"], {"probe": "success", "unused": "skipped"}, True),
+    ("a selected skip blocks the result", ["probe"], {"probe": "skipped"}, False),
+    ("a missing selected job blocks the result", ["probe"], {}, False),
+    ("a skipped plan blocks the result", ["probe"], {"plan": "skipped", "probe": "success"}, False),
+    ("an intentionally empty plan can pass", [], {"unused": "skipped"}, True),
+]:
+    results = {name: {"result": verdict} for name, verdict in verdicts.items()}
+    results.setdefault("plan", {"result": "success"})["outputs"] = {"jobs": json.dumps(selected)}
+    ran = subprocess.run(["bash", "-c", result_command], cwd=ROOT, capture_output=True, text=True,
+                         env={**os.environ, "RESULTS": json.dumps(results)})
+    check(what, (ran.returncode == 0) == passes, ran.stdout + ran.stderr)
 if not hasattr(planner, "Reach"):
     check("the planner reads what runs what (`Reach`)", False, f"{PLANNER} has no Reach")
 else:

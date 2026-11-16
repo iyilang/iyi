@@ -1507,10 +1507,9 @@ end
 pub def prelude_path : String
   written = ENV["IYI_PATH"]?
   return "" if written.nil?
+  delimiter = ':'
   {% if flag?(:win32) %}
     delimiter = ';'
-  {% else %}
-    delimiter = ':'
   {% end %}
   here = ""
   index = 0

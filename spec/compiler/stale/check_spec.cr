@@ -565,6 +565,15 @@ describe "Iyi::Stale inputs record (--stale-inputs)" do
           end
 
           recorded.not_reusable.should be_empty
+          # Said by component, because this assertion failed once, in a random
+          # order, on a Windows runner (run 43811561723, seed 44219) and not on
+          # the same commit's other run: which of the five parts of the build key
+          # moved between two checks of one program is the whole diagnosis.
+          {% for mode in ["local", "portable"] %}
+            {% for part in %w(toolchain behavior callpath link cenv) %}
+              recorded.{{ mode.id }}_mode_build.{{ part.id }}.should eq(plain.{{ mode.id }}_mode_build.{{ part.id }}), "the {{ mode.id }} build key's {{ part.id }} part differs between a plain check and one that records inputs"
+            {% end %}
+          {% end %}
           recorded.local_build_hex.should eq(plain.local_build_hex)
           recorded.portable_build_hex.should eq(plain.portable_build_hex)
           {% if flag?(:win32) %}

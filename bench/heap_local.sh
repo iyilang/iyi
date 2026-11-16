@@ -31,6 +31,10 @@
 # counter put back in the data segment at a value that names a `LOCAL`
 # chunk the mark left unmarked, which only the verifier sees: the
 # program's checks pass, and the verifier must name the data segment.
+# Two copies of the cache page's layout must be refused by the runtime
+# itself: the pause's take sum reading partition records (stopped at the
+# first pause), and the take words moved onto a record's shared words
+# (the build fails).
 # The copies' verifier reports and goes on, so each other copy must
 # reach the program's own check. bench/http_idle.iyi runs beside it, with
 # the flag and without: an idle keep-alive connection's partition holds
@@ -188,6 +192,47 @@ prove_fails() { # label dir phrase awk-script file
   local verifier="the verifier did not report"
   grep -q "iyi: heap_verify: going on" "$WORK/$dir/out" && verifier="the verifier reported too"
   printf '  %s: exits %s at "%s" (%s)\n' "$label" "$code" "$(grep -m1 "FAIL: $phrase" "$WORK/$dir/out" | sed 's/^.*FAIL: //')" "$verifier"
+}
+
+# A copy of prelude.iyi patched by *awk-script* that the runtime or the
+# compiler must refuse with *message*: at its build (`build`) or when
+# bench/heap_local.iyi runs (`run`), every run.
+prove_layout_refused() { # label dir build|run message awk-script
+  local label="$1" dir="$2" when="$3" message="$4" script="$5"
+  mkdir -p "$WORK/$dir/iyi"
+  cp -R "$REPO/src/iyi/." "$WORK/$dir/iyi/"
+  if ! awk "$script" "$REPO/src/iyi/prelude.iyi" > "$WORK/$dir/iyi/prelude.iyi"; then
+    echo "  $label: what the copy changes is not in prelude.iyi any more"
+    status=1
+    return
+  fi
+  IYI_PATH="$WORK/$dir${PSEP}$REPO/src" "$IYI" build -Dheap_partitions \
+    -o "$WORK/$dir/program" "$REPO/bench/heap_local.iyi" >"$WORK/$dir/build.log" 2>&1
+  local code=$?
+  if [ "$when" = build ]; then
+    if [ "$code" -eq 0 ] || ! grep -q "$message" "$WORK/$dir/build.log"; then
+      echo "  $label: the build was not refused for the layout (exit $code)"
+      status=1
+      return
+    fi
+    printf '  %s: the build is refused: "%s"\n' "$label" "$(grep -m1 -o "$message.*" "$WORK/$dir/build.log" | cut -c1-120)"
+    return
+  fi
+  if [ "$code" -ne 0 ]; then
+    echo "  $label: the patched runtime did not build"
+    sed -n '1,12p' "$WORK/$dir/build.log"
+    status=1
+    return
+  fi
+  timeout 200 "$WORK/$dir/program" >"$WORK/$dir/out" 2>&1
+  code=$?
+  if [ "$code" -eq 0 ] || ! grep -q "$message" "$WORK/$dir/out"; then
+    echo "  $label: not stopped at the layout check (exit $code)"
+    sed -n '$p' "$WORK/$dir/out"
+    status=1
+    return
+  fi
+  printf '  %s: stops with exit %s: "%s"\n' "$label" "$code" "$(grep -m1 "$message" "$WORK/$dir/out")"
 }
 
 # A copy of std/http.iyi patched by *awk-script*, ahead of the tree's on
@@ -462,6 +507,25 @@ if [ "$PART" = all ] || [ "$PART" = broken ]; then
      /return false unless IyiHeapVerify\.check\(record, id, parity, running\)/ { print "    @@local_ns = unmarked_local(record, id, parity)"; found = found + 1 }
      { print } END { if (found != 3) exit 3 }' \
     heap_partition.iyi
+
+  # A cache page's take words (`IyiHeap::TAKEN`, mt's warm room per
+  # class) and a partition record's heap state share the record's bytes
+  # from `REC_LEND` up. The pause's sum of the takes zeroed every record's
+  # words there, and this program panicked in `pool_emptied` on
+  # `REC_HELD` (the heap22 merge onto mt/next-two). Two copies: the sum
+  # reading records again, which `taken_word` must stop at the first
+  # pause; and the take words moved onto the words every cache page
+  # shares with a record (`REC_ID` up), which the build must refuse.
+  prove_layout_refused "the pause's take sum reading partition records" takenrecord run \
+    "iyi: a partition record's heap words taken for a class's take" \
+    '/^      def self\.taken_of\(index : Int32\) : UInt64$/ { inside = 1 }
+     inside && /^            if read64\(page \+ REC_ID\) != 0$/ { skip = 4; found = 1 }
+     skip > 0 { skip--; next }
+     inside && /^      end$/ { inside = 0 }
+     { print } END { if (!found) exit 3 }'
+  prove_layout_refused "the take words over a record's shared words" takenonrec build \
+    "must lie past REC_FREE's word" \
+    '{ if (sub(/^      TAKEN = 176$/, "      TAKEN = 168")) found = 1; print } END { if (!found) exit 3 }'
 
   # std/http's HTTP/1.1 loop as the flag-off build has it: each request's
   # wait and work in the loop's own frame, and nothing zeroed before the

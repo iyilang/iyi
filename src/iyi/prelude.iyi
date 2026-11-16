@@ -2548,7 +2548,7 @@ require "./file"
           table[FILL + index] = 0_u64
           # The epoch's take, kept for the pause (`taken_of`), which reads
           # it under the runtime lock this holds.
-          class_word(index, CLASS_TAKEN).value.add(table[TAKEN + index])
+          class_word(index, CLASS_TAKEN).value.add(taken_word(page, index).value)
           index = index + 1
         end
         previous = 0_u64
@@ -2906,10 +2906,44 @@ require "./file"
       # Per cache, because a carve is a page's worth of chunks and an
       # atomic add per carve on a line every thread of the class writes
       # was a cost every growing heap would pay.
+      #
+      # A cache page and a partition record share one layout up to
+      # `REC_HEAP`: the tables, the `CACHE_*` words, and `REC_ID` up to
+      # `REC_FREE`, which every cache page carries (a thread's reads 0 at
+      # `REC_ID`). The takes come after it, and inside `PARTITION_BYTES`,
+      # since a record allocates through `take` like a thread's cache when
+      # the runtime has no partitions, and counts its takes in its own
+      # bytes. A record is 2,048 bytes and the takes are 536, so they
+      # cannot have bytes of their own past heap22's state: with
+      # partitions in the runtime the same bytes are the record's
+      # `REC_LEND` up (heap_partition.iyi). There a record takes runs, never
+      # through `carve`, a warm run or the centre (`take_inside`), and the
+      # shared heap's warm room is no partition's: partition arenas keep no
+      # warm pages (`sweep_partition_slice`). So nothing of a record is a
+      # take, `taken_of` passes records over, and `taken_word` refuses one.
+      # The pause's `taken_of` once zeroed a record's words there, and
+      # bench/heap_local.iyi panicked in `pool_emptied` on `REC_HELD`
+      # (bench/heap_local.sh `takenrecord`, `takenonrec`).
       TAKEN = 176
 
+      \{% if TAKEN * 8 < REC_HEAP || (TAKEN + CLASSES) * 8 > PARTITION_BYTES %}
+        \{% raise "iyi: IyiHeap::TAKEN's words (bytes #{TAKEN * 8} to #{(TAKEN + CLASSES) * 8}) must lie past REC_FREE's word (REC_HEAP, #{REC_HEAP}) and within PARTITION_BYTES (#{PARTITION_BYTES}): a cache page and a partition record share their first REC_HEAP bytes" %}
+      \{% end %}
+
+      # The take word of class `index` in cache *page*. With partitions in
+      # the runtime a record's words there are its heap state, and asking
+      # for them is a runtime bug: it stops the program rather than corrupt
+      # the record.
+      def self.taken_word(page : UInt64, index : Int32) : Pointer(UInt64)
+        {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
+          IyiRoots.fatal("iyi: a partition record's heap words taken for a class's take (IyiHeap::TAKEN)\n") if read64(page + REC_ID) != 0
+        {% end %}
+        Pointer(UInt64).new(page) + (TAKEN + index)
+      end
+
       def self.taken_add(table : Pointer(UInt64), index : Int32, bytes : UInt64) : Nil
-        table[TAKEN + index] = table[TAKEN + index] &+ bytes
+        word = taken_word(table.address, index)
+        word.value = word.value &+ bytes
       end
 
       def self.class_word(index : Int32, offset : UInt64) : Pointer(Atomic(UInt64))
@@ -2917,25 +2951,23 @@ require "./file"
       end
 
       # The epoch's take of class `index`, summed and zeroed: in the pause.
-      # With partitions in the runtime a record on the caches list takes
-      # runs, never through `carve` or the centre (`take_inside`), and its
-      # words at `TAKEN` are its own heap state (`REC_LEND` up,
-      # heap_partition.iyi): it is passed over.
+      # With partitions in the runtime a record on the caches list is
+      # passed over: its words at `TAKEN` are its heap state (see `TAKEN`).
       def self.taken_of(index : Int32) : UInt64
         word = class_line(index) &+ CLASS_TAKEN
         sum = read64(word)
         write64(word, 0_u64)
         page = @@caches
         while page != 0
-          table = Pointer(UInt64).new(page)
           {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
             if read64(page + REC_ID) != 0
               page = read64(page + CACHE_NEXT)
               next
             end
           {% end %}
-          sum = sum &+ table[TAKEN + index]
-          table[TAKEN + index] = 0_u64
+          slot = taken_word(page, index)
+          sum = sum &+ slot.value
+          slot.value = 0_u64
           page = read64(page + CACHE_NEXT)
         end
         sum

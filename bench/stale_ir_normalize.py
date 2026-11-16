@@ -19,6 +19,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -682,28 +683,30 @@ def compile_and_extract(
     """Compiles source with DUMP=1 and IYI_DUMP_TYPE_ID=1, returning (ir_text, type_id_text)."""
     compiler = compiler_path or os.environ.get("IYI")
     if not compiler:
-        default = Path(__file__).resolve().parent.parent / "bin" / "iyi"
+        root = Path(__file__).resolve().parent.parent
+        default = root / ".build" / "iyi.exe" if os.name == "nt" else root / "bin" / "iyi"
         if default.is_file() and os.access(default, os.X_OK):
             compiler = str(default)
 
     if not compiler:
         sys.exit("Error: no compiler executable found. Set $IYI or pass --compiler.")
 
-    bin_path = output_bin or f"/tmp/norm_test_{os.getpid()}"
+    with tempfile.TemporaryDirectory(prefix="iyi-ir-normalize-") as work:
+        bin_path = output_bin or os.path.join(work, "norm_test.exe" if os.name == "nt" else "norm_test")
+        env = os.environ.copy()
+        env["DUMP"] = "1"
+        env["IYI_DUMP_TYPE_ID"] = "1"
+        if sys.platform == "darwin":
+            env.setdefault("LIBRARY_PATH", "/opt/homebrew/opt/bdw-gc/lib")
+        env.setdefault("IYI_CACHE_DIR", os.path.join(work, "cache"))
 
-    env = os.environ.copy()
-    env["DUMP"] = "1"
-    env["IYI_DUMP_TYPE_ID"] = "1"
-    env.setdefault("LIBRARY_PATH", "/opt/homebrew/opt/bdw-gc/lib")
-    env.setdefault("IYI_CACHE_DIR", "/tmp/iyi-stale-s3n-cache")
+        cmd = [compiler, "build", "-o", bin_path, source_path]
+        proc = subprocess.run(cmd, env=env, capture_output=True, text=True)
+        if proc.returncode != 0:
+            sys.stderr.write(proc.stderr)
+            sys.exit(f"Compilation failed with exit code {proc.returncode}")
 
-    cmd = [compiler, "build", "-o", bin_path, source_path]
-    proc = subprocess.run(cmd, env=env, capture_output=True, text=True)
-    if proc.returncode != 0:
-        sys.stderr.write(proc.stderr)
-        sys.exit(f"Compilation failed with exit code {proc.returncode}")
-
-    return proc.stderr, proc.stdout
+        return proc.stderr, proc.stdout
 
 
 def main() -> None:

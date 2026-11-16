@@ -7,8 +7,8 @@ set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 
 case "$(uname -s)" in
-  MINGW* | MSYS* | CYGWIN* | Windows_NT) PSEP=';' ;;
-  *) PSEP=':' ;;
+  MINGW* | MSYS* | CYGWIN*) WINDOWS=1; PSEP=';'; REPO="$(cygpath -m "$REPO")" ;;
+  *) WINDOWS=0; PSEP=':' ;;
 esac
 
 PY=""
@@ -24,22 +24,33 @@ if [ -z "$PY" ]; then
   exit 1
 fi
 
-IYI="${IYI:-$REPO/bin/iyi}"
+if [ "$WINDOWS" -eq 1 ]; then
+  IYI="${IYI:-$REPO/.build/iyi.exe}"
+  IYI="$(cygpath -m "$IYI")"
+else
+  IYI="${IYI:-$REPO/bin/iyi}"
+fi
 if [ ! -x "$IYI" ]; then
+  if [ "$WINDOWS" -eq 1 ]; then
+    echo "iyi compiler not found at $IYI; build .build/iyi.exe first" >&2
+    exit 1
+  fi
   echo "iyi compiler not found at $IYI. Building..." >&2
-  export LIBRARY_PATH="${LIBRARY_PATH:-/opt/homebrew/opt/bdw-gc/lib}"
-  export IYI_CACHE_DIR="${IYI_CACHE_DIR:-/tmp/iyi-stale-s3d-cache}"
+  if [ "$(uname -s)" = Darwin ]; then
+    export LIBRARY_PATH="${LIBRARY_PATH:-/opt/homebrew/opt/bdw-gc/lib}"
+  fi
   make -C "$REPO" -j8 iyi
 fi
 
 MODE="${1:-all}"
 
 export ZERO_AR_DATE=1
-export SOURCE_DATE_EPOCH="$(/usr/bin/git -C "$REPO" show -s --format=%ct HEAD 2>/dev/null || cat "$REPO/src/SOURCE_DATE_EPOCH" 2>/dev/null || echo 0)"
+export SOURCE_DATE_EPOCH="$(git -C "$REPO" show -s --format=%ct HEAD 2>/dev/null || cat "$REPO/src/SOURCE_DATE_EPOCH" 2>/dev/null || echo 0)"
 export IYI_PATH="$REPO/src${PSEP}$REPO/samples/iyi"
 export IYI_LIBRARY_PATH="$REPO/lib"
 
 WORK="$(mktemp -d /tmp/stale-callpath-work.XXXXXX)"
+[ "$WINDOWS" -eq 0 ] || WORK="$(cygpath -m "$WORK")"
 CACHE="$WORK/cache"
 mkdir -p "$CACHE"
 export IYI_CACHE_DIR="$CACHE"
@@ -57,6 +68,30 @@ C2_SAMPLES=(
   "$REPO/samples/iyi/format.iyi"
   "$REPO/samples/iyi/shapes.iyi"
 )
+
+write_link_fixture() {
+  local fixture="$1" quoted_dir="$2"
+  mkdir -p "$quoted_dir"
+  if [ "$WINDOWS" -eq 1 ]; then
+    cat > "$fixture" <<IYI
+@[Unsafe("quoted ldflags fixture declares a Windows API")]
+@[Link("kernel32", ldflags: "/LIBPATH:\"$quoted_dir\"")]
+lib LibTest
+  fun GetCurrentProcessId : UInt32
+end
+print LibTest.GetCurrentProcessId
+IYI
+  else
+    cat > "$fixture" <<IYI
+@[Unsafe("quoted ldflags fixture declares C math")]
+@[Link(ldflags: "-L'$quoted_dir' -lm")]
+lib LibTest
+  fun cos(x : Float64) : Float64
+end
+print LibTest.cos(0.0)
+IYI
+  fi
+}
 
 run_link() {
   echo "== Running S3d: Link section (link-once, no-shell link, LinkFp, refusal) =="
@@ -90,20 +125,9 @@ run_link() {
 
   # 2. Compare normal vs stale on quoted ldflags fixture: @[Link(ldflags: "-L'/tmp/a b' -lm")]
   echo "  comparing normal vs stale build on quoted ldflags fixture..."
-  local quoted_dir="/tmp/a b"
-  mkdir -p "$quoted_dir"
+  local quoted_dir="$WORK/a b"
   local fixture="$WORK/quoted_ldflags.iyi"
-  "$PY" -c "
-with open('$fixture', 'w') as f:
-    f.write('''@[Unsafe(\"quoted ldflags fixture declares C math\")]
-@[Link(ldflags: \"-L\\'/tmp/a b\\' -lm\")]
-lib LibTest
-  fun cos(x : Float64) : Float64
-end
-
-print LibTest.cos(0.0)
-''')
-"
+  write_link_fixture "$fixture" "$quoted_dir"
   out="$WORK/prog_out"
   saved="$WORK/prog_saved"
 
@@ -130,6 +154,10 @@ print LibTest.cos(0.0)
   echo "Link cmp PASSED: all $total programs (5 C2 + quoted fixture) matched byte-for-byte at same -o"
 
   # 3. Pkg-config shim: verify exactly one invocation per stale build
+  if [ "$WINDOWS" -eq 1 ]; then
+    echo "SKIP row 41 pkg-config invocation: the MSVC linker does not invoke pkg-config (codegen/link.cr:157-179)"
+  else
+  local pkg_started=$SECONDS
   echo "  testing pkg-config shim invocation count..."
   local shim_dir="$WORK/pkg_shim"
   local shim_log="$WORK/pkg_shim.log"
@@ -168,12 +196,14 @@ print LibM.cos(0.0)
   if [ -f "$shim_log" ]; then
     count="$(wc -l < "$shim_log" | tr -d ' ')"
   fi
+  echo "  pkg-config subcheck: $((SECONDS - pkg_started)) seconds"
   if [ "$count" -eq 1 ]; then
     echo "  pkg-config shim OK: exactly 1 invocation logged (count=$count)"
   else
     echo "  pkg-config shim FAILED: expected 1 invocation, got $count" >&2
     [ -f "$shim_log" ] && cat "$shim_log" >&2
     return 1
+  fi
   fi
 
   # 4. Each refused character yields refusal
@@ -183,7 +213,7 @@ print LibM.cos(0.0)
     local res
     res="$("$PY" -c "
 import subprocess
-out = subprocess.check_output(['./bin/crystal', 'eval', '''
+out = subprocess.check_output(['bash', '$REPO/bench/stale_store_concurrency.sh', '--crystal', 'eval', '''
 require \"compiler/iyi/stale/link\"
 r = Iyi::Stale::Link.refusal(\"-L/opt/$ch/lib\", nil)
 puts r || \"nil\"
@@ -203,7 +233,7 @@ print(out)
   local fp_check
   fp_check="$("$PY" -c "
 import subprocess
-out = subprocess.check_output(['./bin/crystal', 'eval', '''
+out = subprocess.check_output(['bash', '$REPO/bench/stale_store_concurrency.sh', '--crystal', 'eval', '''
 require \"compiler/iyi/stale/link\"
 require \"compiler/iyi/stale/encoding\"
 
@@ -270,20 +300,9 @@ else:
   local total=0
 
   # Quoted ldflags fixture
-  local quoted_dir="/tmp/a b"
-  mkdir -p "$quoted_dir"
+  local quoted_dir="$WORK/a b"
   local fixture="$WORK/rg4_fixture.iyi"
-  "$PY" -c "
-with open('$fixture', 'w') as f:
-    f.write('''@[Unsafe(\"RG4 fixture declares C math\")]
-@[Link(ldflags: \"-L\\'/tmp/a b\\' -lm\")]
-lib LibTest
-  fun cos(x : Float64) : Float64
-end
-
-print LibTest.cos(0.0)
-''')
-"
+  write_link_fixture "$fixture" "$quoted_dir"
   local all_test_progs=("${C2_SAMPLES[@]}" "$fixture")
 
   for prog in "${all_test_progs[@]}"; do
@@ -300,7 +319,7 @@ print LibTest.cos(0.0)
     # Stale link with randomized non-CHILD_ENV variables
     rm -rf "$CACHE"/*
     NON_CHILD_RANDOM_1="rand_val_${RANDOM}_${$}" \
-    NON_CHILD_RANDOM_2="seed_$(date +%s%N 2>/dev/null || echo 12345)" \
+    NON_CHILD_RANDOM_2="seed_${RANDOM}_${RANDOM}" \
     BUILD_EXTRA_TAG="build_tag_${RANDOM}" \
     TEST_NON_CHILD_ENV="arbitrary_value_${RANDOM}" \
     USER_NOTE="user_note_${$}" \
@@ -619,12 +638,30 @@ print('S3g check gate: ALL ACCEPTANCE TESTS PASSED')
 
 run_rg8() {
   echo "== Running RG8: normalized IR versus CallPathFp mutations =="
+  "$PY" - "$REPO" <<'PY'
+from pathlib import PureWindowsPath
+from unittest.mock import patch
+import os, sys
+sys.path.insert(0, os.path.join(sys.argv[1], "bench"))
+from stale_rg8 import artifact_stem, relative_name
+windows_label = str(PureWindowsPath("bench", "std_example_exercise.iyi"))
+with patch("os.path.relpath", return_value=windows_label):
+    name = relative_name("ignored", "ignored")
+assert name == "bench/std_example_exercise.iyi", name
+assert artifact_stem("baseline-" + windows_label) == "baseline-bench_std_example_exercise.iyi"
+assert sorted([name, "samples/iyi/hello.iyi"], key=lambda p: (p.startswith("bench/"), p))[0] == "samples/iyi/hello.iyi"
+print("RG8 Windows path-label check PASSED")
+PY
   "$PY" "$REPO/bench/stale_mutate.py" --selftest --compiler "$IYI" --repo "$REPO"
   "$PY" "$REPO/bench/stale_rg8.py" --repo "$REPO" --compiler "$IYI" --work "$WORK/rg8"
 
   echo "  proving the def-body encoder field is load-bearing..."
   local dropped="$WORK/iyi-rg8-drop-def-body"
-  "$REPO/bin/crystal" build -D rg8_drop_def_body -o "$dropped" "$REPO/src/compiler/iyi.cr"
+  if [ "$WINDOWS" -eq 1 ]; then
+    dropped="$dropped.exe"
+    cp -p "$(dirname "$IYI")/LLVM-C.dll" "$WORK/LLVM-C.dll"
+  fi
+  bash "$REPO/bench/stale_store_concurrency.sh" --crystal build -D rg8_drop_def_body -o "$dropped" "$REPO/src/compiler/iyi.cr"
   "$PY" "$REPO/bench/stale_rg8.py" --repo "$REPO" --compiler "$dropped" \
     --work "$WORK/rg8-drop-def-body" --program "$REPO/samples/iyi/calc.iyi" \
     --kind body --expect-failure-kind body

@@ -16,6 +16,10 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) WINDOWS=1; PSEP=';'; REPO="$(cygpath -m "$REPO")" ;;
+  *) WINDOWS=0; PSEP=':' ;;
+esac
 
 PY=""
 for candidate in python3 python; do
@@ -30,18 +34,19 @@ if [ -z "$PY" ]; then
   exit 1
 fi
 
-IYI="${IYI:-$REPO/bin/iyi}"
-if [ ! -x "$IYI" ]; then
-  if [ -x "$REPO/.build/iyi" ]; then
-    IYI="$REPO/.build/iyi"
-  fi
+if [ "$WINDOWS" -eq 1 ]; then
+  IYI="${IYI:-$REPO/.build/iyi.exe}"
+  IYI="$(cygpath -m "$IYI")"
+else
+  IYI="${IYI:-$REPO/bin/iyi}"
+  [ -x "$IYI" ] || IYI="$REPO/.build/iyi"
 fi
 
 MODE="${1:-all}"
 
 export ZERO_AR_DATE=1
-export SOURCE_DATE_EPOCH="$(/usr/bin/git -C "$REPO" show -s --format=%ct HEAD 2>/dev/null || cat "$REPO/src/SOURCE_DATE_EPOCH" 2>/dev/null || echo 0)"
-export IYI_PATH="$REPO/src:$REPO/samples/iyi"
+export SOURCE_DATE_EPOCH="$(git -C "$REPO" show -s --format=%ct HEAD 2>/dev/null || cat "$REPO/src/SOURCE_DATE_EPOCH" 2>/dev/null || echo 0)"
+export IYI_PATH="$REPO/src${PSEP}$REPO/samples/iyi"
 export IYI_LIBRARY_PATH="$REPO/lib"
 
 "$PY" - "$REPO" "$IYI" "$MODE" <<'EOF'
@@ -59,7 +64,7 @@ all_progs = [('C2', p) for p in c2_files] + [('C3', p) for p in c3_files]
 # A directory of this run's own: one shared by name was removed under a
 # second census by the first one finishing.
 import tempfile
-work = tempfile.mkdtemp(prefix='stale_census.', dir='/tmp')
+work = tempfile.mkdtemp(prefix='stale_census.')
 
 OVERHEAD_NAMES = {
     'hello.iyi',
@@ -74,10 +79,9 @@ OVERHEAD_NAMES = {
 def resolve_site_effect(site):
     if not site:
         return "internal", "unknown"
-    parts = site.split(":")
-    if len(parts) >= 2:
-        file_part = parts[-2]
-        line_part = parts[-1]
+    parts = site.rsplit(":", 1)
+    if len(parts) == 2:
+        file_part, line_part = parts
         try:
             lineno = int(line_part)
         except ValueError:
@@ -179,10 +183,7 @@ def run_single_program(item):
             src_sub = os.path.join(repo, 'samples/iyi', sub)
             dst_sub = os.path.join(p_scratch, sub)
             if os.path.isdir(src_sub) and not os.path.exists(dst_sub):
-                try:
-                    os.symlink(src_sub, dst_sub)
-                except:
-                    pass
+                shutil.copytree(src_sub, dst_sub)
 
     # A C3 program sits in `bench/` as it does in the tree: std_eiy checks
     # that `Eiy.locate` finds a template in the caller's own `bench/`.
@@ -199,7 +200,7 @@ def run_single_program(item):
     env = dict(os.environ,
                IYI_CACHE_DIR=p_cache,
                CRYSTAL_CACHE_DIR=p_cache,
-               IYI_PATH=f"{repo}/src:{repo}/samples/iyi:{p_scratch}")
+               IYI_PATH=os.pathsep.join([f"{repo}/src", f"{repo}/samples/iyi", p_scratch]))
 
     # 1. Fresh test run
     t0 = time.time()
@@ -584,7 +585,7 @@ def measure_overhead(results):
     hello_path = os.path.join(repo, 'samples/iyi/hello.iyi')
     bin_def = os.path.join(work, 'hello_def')
     env_base = dict(os.environ,
-                    IYI_PATH=f"{repo}/src:{repo}/samples/iyi",
+                    IYI_PATH=os.pathsep.join([f"{repo}/src", f"{repo}/samples/iyi"]),
                     IYI_LIBRARY_PATH=f"{repo}/lib")
 
     # 1. Default Build with --stats

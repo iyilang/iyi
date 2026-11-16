@@ -7,8 +7,22 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-IYI="${IYI:-$REPO/bin/iyi}"
-WORK="$(mktemp -d /tmp/iyi-stale-tests.XXXXXX)"
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    WINDOWS=1; PSEP=';'
+    REPO="$(cygpath -m "$REPO")"
+    IYI="${IYI:-$REPO/.build/iyi.exe}"
+    ;;
+  *)
+    WINDOWS=0; PSEP=':'
+    IYI="${IYI:-$REPO/bin/iyi}"
+    ;;
+esac
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/iyi-stale-tests.XXXXXX")"
+if [ "$WINDOWS" -eq 1 ]; then
+  WORK="$(cygpath -m "$WORK")"
+  IYI="$(cygpath -m "$IYI")"
+fi
 CACHE="$WORK/cache"
 cleanup() {
   exit_status=$?
@@ -30,7 +44,19 @@ if [ ! -x "$IYI" ]; then
   exit 1
 fi
 
-step() { echo "== §12 row $1: $2 =="; }
+rows_run=0
+rows_external="9 10 11 12 14 16 17 18 20 21 22 27 32 34 36 37 38 41 42 43 45 46 47 48"
+step() {
+  echo "== §12 row $1: $2 =="
+  case "$1" in
+    *[!0-9]*|'') ;;
+    22) echo "  row 22: delegated; Check.run refusal is specified, cached compatibility mode is not proven end-to-end" ;;
+    *) case " $rows_external " in
+         *" $1 "*) echo "  row $1: delegated to the separately named spec or gate, not exercised here" ;;
+         *) rows_run=$((rows_run + 1)) ;;
+       esac ;;
+  esac
+}
 fail() { echo "stale_tests: $*" >&2; exit 1; }
 run_json() { (cd "$1" && "$IYI" test --cached --json "${@:2}"); }
 json_field() { python3 -c 'import json,sys; print(json.load(sys.stdin)[sys.argv[1]])' "$1"; }
@@ -134,6 +160,14 @@ if [ "$(printf '%s' "$second" | json_cached)" != 2 ]; then
   fi
 fi
 expect_eq "$(printf '%s' "$second" | json_cached)" 2 "unchanged run"
+if [ "$WINDOWS" -eq 1 ]; then
+  r1_unix="$(cygpath -u "$WORK/basic/other_test.iyi")"
+  r1_drive="$(cygpath -m "$WORK/basic/other_test.iyi")"
+  for spelling in "$r1_unix" "$r1_drive"; do
+    r1_spelling="$(run_json "$WORK/basic" "$spelling")"
+    expect_eq "$(printf '%s' "$r1_spelling" | json_cached)" 1 "row 1 path spelling $spelling hits"
+  done
+fi
 rm -rf "$CACHE/tests-v1"
 after_delete="$(run_json "$WORK/basic" .)"
 expect_eq "$(printf '%s' "$after_delete" | json_cached)" 0 "receipt deletion mutation"
@@ -178,9 +212,9 @@ import lib/util::{used}
 assert used(1) == 2
 IYI
 rm -rf "$CACHE/tests-v1"
-r3_record="$(IYI_PATH="$REPO/src:$WORK/r3/later" run_json "$WORK/r3" reached_test.iyi)"
+r3_record="$(IYI_PATH="$REPO/src${PSEP}$WORK/r3/later" run_json "$WORK/r3" reached_test.iyi)"
 expect_eq "$(printf '%s' "$r3_record" | json_cached)" 0 "r3 recording run"
-r3_locator="$(IYI_PATH="$WORK/r3/empty:$REPO/src:$WORK/r3/later" run_json "$WORK/r3" reached_test.iyi)"
+r3_locator="$(IYI_PATH="$WORK/r3/empty${PSEP}$REPO/src${PSEP}$WORK/r3/later" run_json "$WORK/r3" reached_test.iyi)"
 expect_eq "$(printf '%s' "$r3_locator" | json_cached)" 1 "earlier IYI_PATH entry without a candidate hits"
 cat > "$WORK/r3/earlier/lib/util.iyi" <<'IYI'
 module lib/util
@@ -189,7 +223,7 @@ pub def used(x : Int32) : Int32
 end
 IYI
 r3_explain="$WORK/r3/explain.txt"
-IYI_PATH="$WORK/r3/earlier:$REPO/src:$WORK/r3/later" run_json "$WORK/r3" --explain reached_test.iyi > "$r3_explain"
+IYI_PATH="$WORK/r3/earlier${PSEP}$REPO/src${PSEP}$WORK/r3/later" run_json "$WORK/r3" --explain reached_test.iyi > "$r3_explain"
 expect_contains "$(explained "$r3_explain" lines)" "reached_test.iyi: miss: call path (earlier/lib/util.iyi" "new import candidate named"
 expect_eq "$(explained "$r3_explain" json | json_cached)" 0 "new import candidate mutation"
 
@@ -302,9 +336,9 @@ import std/calc::{reached_fn}
 assert reached_fn(5) == 15
 IYI
 rm -rf "$CACHE/tests-v1"
-r8_run1="$(IYI_PATH="$WORK/r8:$REPO/src" run_json "$WORK/r8" r8_test.iyi)"
+r8_run1="$(IYI_PATH="$WORK/r8${PSEP}$REPO/src" run_json "$WORK/r8" r8_test.iyi)"
 expect_eq "$(printf '%s' "$r8_run1" | json_cached)" 0 "r8 recording run"
-r8_hit1="$(IYI_PATH="$WORK/r8:$REPO/src" run_json "$WORK/r8" r8_test.iyi)"
+r8_hit1="$(IYI_PATH="$WORK/r8${PSEP}$REPO/src" run_json "$WORK/r8" r8_test.iyi)"
 expect_eq "$(printf '%s' "$r8_hit1" | json_cached)" 1 "r8 unchanged hit"
 
 # Unreached std sibling edit: test remains a hit
@@ -317,7 +351,7 @@ pub def unreached_fn(x : Int32) : Int32
   x * 999
 end
 IYI
-r8_hit2="$(IYI_PATH="$WORK/r8:$REPO/src" run_json "$WORK/r8" r8_test.iyi)"
+r8_hit2="$(IYI_PATH="$WORK/r8${PSEP}$REPO/src" run_json "$WORK/r8" r8_test.iyi)"
 expect_eq "$(printf '%s' "$r8_hit2" | json_cached)" 1 "r8 unreached std sibling edit stays hit"
 
 # Reached std def edit with SAME consumer result: test misses call path on same invocation
@@ -331,12 +365,12 @@ pub def unreached_fn(x : Int32) : Int32
 end
 IYI
 r8_explain="$WORK/r8/explain.txt"
-IYI_PATH="$WORK/r8:$REPO/src" run_json "$WORK/r8" --explain r8_test.iyi > "$r8_explain"
+IYI_PATH="$WORK/r8${PSEP}$REPO/src" run_json "$WORK/r8" --explain r8_test.iyi > "$r8_explain"
 expect_contains "$(explained "$r8_explain" lines)" "miss: call path" "reached std def miss reason"
 expect_eq "$(explained "$r8_explain" json | json_cached)" 0 "zero receipts on reached std edit miss"
 
 # Subsequent run hits newly recorded receipt
-r8_hit3="$(IYI_PATH="$WORK/r8:$REPO/src" run_json "$WORK/r8" r8_test.iyi)"
+r8_hit3="$(IYI_PATH="$WORK/r8${PSEP}$REPO/src" run_json "$WORK/r8" r8_test.iyi)"
 expect_eq "$(printf '%s' "$r8_hit3" | json_cached)" 1 "subsequent run hits newly recorded receipt"
 
 # Row 9 mutation proof: stale_reproducible rebuilds from the identical input;
@@ -502,8 +536,8 @@ step 20 "invalid snapshot metadata is refused"
 step 21 "corruption and concurrent receipt writes are atomic"
 # Covered by spec/compiler/stale/store_spec.cr:590 and bench/stale_store_concurrency.sh
 step 22 "compatibility-library mode stays fresh"
-# Its test aggregate remains unchanged; cached compatibility-library mode is
-# covered by the command/runner spec because this host cannot link its specs.
+# The Check.run spec verifies the refusal, but this script does not exercise
+# cached compatibility mode end-to-end.
 
 step "test identity" "ambiguous test id runs fresh and never records receipts"
 mkdir -p "$WORK/ambig/a" "$WORK/ambig/b"
@@ -619,28 +653,47 @@ expect_eq "$(printf '%s' "$r26_run3" | json_cached)" 1 "r26 run 3 cached 1 (rest
 expect_contains "$(cat "$WORK/r26/explain.txt")" "hit from local" "r26 run 3 hit from local"
 step 27 "empty newer master snapshot disables consumption"
 # Covered by spec/compiler/stale/snapshot_spec.cr:403
-# Row 28 mutation proof: loader and daemon variables are cleared for the test child
-# while profile limits remain inputs. SIP on macOS strips DYLD_* through /bin/sh
-# wrappers, so we reach the native compiler (.build/iyi) directly. We vary
-# DYLD_LIBRARY_PATH and LD_PRELOAD (with harmless ':' and '::' empty library paths)
-# rather than LD_LIBRARY_PATH (which is a link environment input).
+# Row 28: the test child sees neither loader nor daemon variables. The compiler
+# can read loader variables while building, so changing one must invalidate the
+# build; changing only daemon socket variables must not. SIP strips DYLD_*
+# through shell wrappers, so use the native compiler directly on macOS.
 step 28 "loader and daemon variables are cleared for the test while profile limits remain inputs"
 case "$IYI" in
   */bin/iyi) r28_iyi="$(dirname "$(dirname "$IYI")")/.build/iyi" ;;   # bench/up_to_date.sh:335-339
   *) r28_iyi="$IYI" ;;
 esac
-r28_with() {
-  (export DYLD_LIBRARY_PATH="$1" LD_PRELOAD="$2" IYI_DAEMON_SOCKET="$3" CRYSTAL_DAEMON_SOCKET="$3"
-   cd "$4" && "$r28_iyi" test "${@:5}")
-}
+if [ "$WINDOWS" -eq 1 ]; then
+  r28_with() {
+    (export __COMPAT_LAYER="$1" IYI_DAEMON_SOCKET="$3" CRYSTAL_DAEMON_SOCKET="$3"
+     cd "$4" && "$r28_iyi" test "${@:5}")
+  }
+else
+  r28_with() {
+    (export DYLD_LIBRARY_PATH="$1" LD_PRELOAD="$2" IYI_DAEMON_SOCKET="$3" CRYSTAL_DAEMON_SOCKET="$3"
+     cd "$4" && "$r28_iyi" test "${@:5}")
+  }
+fi
 mkdir -p "$WORK/r28-reach"
-cat > "$WORK/r28-reach/reach_test.iyi" <<'IYI'
+if [ "$WINDOWS" -eq 1 ]; then
+  cat > "$WORK/r28-reach/reach_test.iyi" <<'IYI'
+assert ({{ env("__COMPAT_LAYER") || "unset" }}) == "RunAsInvoker"
+assert ({{ env("IYI_DAEMON_SOCKET") || "unset" }}) == "unset"
+assert ({{ env("CRYSTAL_DAEMON_SOCKET") || "unset" }}) == "unset"
+IYI
+else
+  cat > "$WORK/r28-reach/reach_test.iyi" <<'IYI'
 assert ({{ env("DYLD_LIBRARY_PATH") || "unset" }}) == "/tmp/r28_dir1"
 assert ({{ env("LD_PRELOAD") || "unset" }}) == ":"
 assert ({{ env("IYI_DAEMON_SOCKET") || "unset" }}) == "unset"
 assert ({{ env("CRYSTAL_DAEMON_SOCKET") || "unset" }}) == "unset"
 IYI
-r28_reach="$(r28_with /tmp/r28_dir1 : "$WORK/r28-none.sock" "$WORK/r28-reach" --fresh --json reach_test.iyi)"
+fi
+if [ "$WINDOWS" -eq 1 ]; then
+  r28_first=RunAsInvoker; r28_second="RunAsInvoker RunAsInvoker"; r28_name=__COMPAT_LAYER
+else
+  r28_first=/tmp/r28_dir1; r28_second=/tmp/r28_dir2; r28_name=DYLD_LIBRARY_PATH
+fi
+r28_reach="$(r28_with "$r28_first" : "$WORK/r28-none.sock" "$WORK/r28-reach" --fresh --json reach_test.iyi)"
 expect_eq "$(printf '%s' "$r28_reach" | json_failed)" 0 "the runner's build sees the loader variables and no daemon"
 mkdir -p "$WORK/r28"
 cat > "$WORK/r28/loader_test.iyi" <<'IYI'
@@ -651,37 +704,96 @@ assert Program.env("LD_LIBRARY_PATH") == nil
 assert Program.env("GLIBC_TUNABLES") == nil
 assert Program.env("DYLD_INSERT_LIBRARIES") == nil
 assert Program.env("DYLD_LIBRARY_PATH") == nil
+assert Program.env("__COMPAT_LAYER") == nil
 assert Program.env("IYI_DAEMON_SOCKET") == nil
 assert Program.env("CRYSTAL_DAEMON_SOCKET") == nil
 names = ENV.keys
 assert !names.includes?("LD_PRELOAD")
 assert !names.includes?("DYLD_LIBRARY_PATH")
+assert !names.includes?("__COMPAT_LAYER")
 assert !names.includes?("IYI_DAEMON_SOCKET")
 assert !names.includes?("CRYSTAL_DAEMON_SOCKET")
 IYI
 rm -rf "$CACHE/tests-v1"
-r28_run1="$(r28_with /tmp/r28_dir1 : "$WORK/r28-none-1.sock" "$WORK/r28" --cached --json loader_test.iyi)"
+r28_run1="$(r28_with "$r28_first" : "$WORK/r28-none-1.sock" "$WORK/r28" --cached --json loader_test.iyi)"
 expect_eq "$(printf '%s' "$r28_run1" | json_failed)" 0 "r28 run 1: the test sees no loader or daemon variable"
 expect_eq "$(printf '%s' "$r28_run1" | json_cached)" 0 "r28 run 1 recorded"
-r28_run2="$(r28_with /tmp/r28_dir2 :: "$WORK/r28-none-2.sock" "$WORK/r28" --cached --json loader_test.iyi)"
-expect_eq "$(printf '%s' "$r28_run2" | json_cached)" 1 "r28 run 2 hits with changed loader and daemon variables"
-cur_nofile=$(ulimit -S -n)
-r28_explain="$WORK/r28/explain.txt"
-(ulimit -S -n $((cur_nofile - 1)); run_json "$WORK/r28" --explain loader_test.iyi) > "$r28_explain"
-expect_contains "$(explained "$r28_explain" lines)" "miss: profile changed" "different profile reason on rlimit change"
-expect_eq "$(explained "$r28_explain" json | json_cached)" 0 "zero receipts on profile miss"
+r28_run2="$(r28_with "$r28_first" : "$WORK/r28-none-2.sock" "$WORK/r28" --cached --json loader_test.iyi)"
+expect_eq "$(printf '%s' "$r28_run2" | json_cached)" 1 "changing only daemon variables still hits"
+r28_changed_file="$WORK/r28/loader-explain.txt"
+r28_with "$r28_second" :: "$WORK/r28-none-2.sock" "$WORK/r28" --cached --json --explain loader_test.iyi > "$r28_changed_file"
+expect_contains "$(explained "$r28_changed_file" lines)" "miss: link changed" "loader change names the link input"
+r28_changed="$(explained "$r28_changed_file" json)"
+expect_eq "$(printf '%s' "$r28_changed" | json_cached)" 0 "changing the build's loader environment invalidates its receipt"
+expect_eq "$(printf '%s' "$r28_changed" | json_failed)" 0 "the changed loader is still absent from the test child"
+expect_contains "$(printf '%s' "$r28_changed" | json_test loader_test.iyi check_reason)" "environment changed: $r28_name" "the check names the loader variable"
+r28_changed_hit="$(r28_with "$r28_second" :: "$WORK/r28-none-2.sock" "$WORK/r28" --cached --json loader_test.iyi)"
+expect_eq "$(printf '%s' "$r28_changed_hit" | json_cached)" 1 "unchanged loader inputs hit"
+# Return to the ambient loader environment before changing only the limit.
+run_json "$WORK/r28" loader_test.iyi >/dev/null
+r28_limited() {
+  if [ "$WINDOWS" -eq 0 ]; then
+    (cur_nofile=$(ulimit -S -n); ulimit -S -n $((cur_nofile - 1)); run_json "$WORK/r28" "$@")
+  else
+    python3 - "$IYI" "$WORK/r28" "$@" <<'PY'
+import ctypes, subprocess, sys
+from ctypes import wintypes
 
-# Subsequent run with lowered limit hits newly recorded profile receipt
-r28_run3_hit="$( (ulimit -S -n $((cur_nofile - 1)); run_json "$WORK/r28" loader_test.iyi) )"
+class Basic(ctypes.Structure):
+    _fields_ = [("process_time", ctypes.c_int64), ("job_time", ctypes.c_int64),
+                ("flags", wintypes.DWORD), ("min_ws", ctypes.c_size_t),
+                ("max_ws", ctypes.c_size_t), ("active", wintypes.DWORD),
+                ("affinity", ctypes.c_size_t), ("priority", wintypes.DWORD),
+                ("scheduling", wintypes.DWORD)]
+class IO(ctypes.Structure):
+    _fields_ = [(name, ctypes.c_uint64) for name in
+                ("reads", "writes", "others", "read_bytes", "write_bytes", "other_bytes")]
+class Extended(ctypes.Structure):
+    _fields_ = [("basic", Basic), ("io", IO), ("process_memory", ctypes.c_size_t),
+                ("job_memory", ctypes.c_size_t), ("peak_process", ctypes.c_size_t),
+                ("peak_job", ctypes.c_size_t)]
+k = ctypes.WinDLL("kernel32", use_last_error=True)
+k.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+k.CreateJobObjectW.restype = wintypes.HANDLE
+k.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+k.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+k.GetCurrentProcess.restype = wintypes.HANDLE
+k.CloseHandle.argtypes = [wintypes.HANDLE]
+job = k.CreateJobObjectW(None, None)
+if not job:
+    raise ctypes.WinError(ctypes.get_last_error())
+limits = Extended()
+limits.basic.flags = 0x200  # JOB_OBJECT_LIMIT_JOB_MEMORY
+limits.job_memory = 16 * 1024**3
+if not k.SetInformationJobObject(job, 9, ctypes.byref(limits), ctypes.sizeof(limits)):
+    raise ctypes.WinError(ctypes.get_last_error())
+if not k.AssignProcessToJobObject(job, k.GetCurrentProcess()):
+    raise ctypes.WinError(ctypes.get_last_error())
+try:
+    sys.exit(subprocess.call([sys.argv[1], "test", "--cached", "--json", *sys.argv[3:]], cwd=sys.argv[2]))
+finally:
+    k.CloseHandle(job)
+PY
+  fi
+}
+r28_explain="$WORK/r28/explain.txt"
+r28_limited --explain loader_test.iyi > "$r28_explain"
+expect_contains "$(explained "$r28_explain" lines)" "miss: profile changed" "different profile reason on limit change"
+expect_eq "$(explained "$r28_explain" json | json_cached)" 0 "zero receipts on profile miss"
+r28_run3_hit="$(r28_limited loader_test.iyi)"
 expect_eq "$(printf '%s' "$r28_run3_hit" | json_cached)" 1 "subsequent run with lowered limit hits new profile receipt"
 
 # Row 29 mutation proof: scratch symlink resolves target outside scratch
 step 29 "scratch symlink resolves target outside scratch"
 mkdir -p "$WORK/symlink"
 printf 'target_v1' > "$WORK/symlink/outside.txt"
+python3 - "$WORK/symlink/outside.txt" "$WORK/symlink/linked.txt" <<'PY'
+import os, sys
+os.symlink(sys.argv[1], sys.argv[2])
+PY
 cat > "$WORK/symlink/link_test.iyi" <<'IYI'
 import std/file::{File}
-File.read("outside.txt")
+File.read("linked.txt")
 IYI
 rm -rf "$CACHE/tests-v1"
 run_json "$WORK/symlink" link_test.iyi >/dev/null
@@ -690,6 +802,23 @@ expect_eq "$(printf '%s' "$link_hit" | json_cached)" 1 "symlink target unchanged
 printf 'target_v2' > "$WORK/symlink/outside.txt"
 link_miss="$(run_json "$WORK/symlink" link_test.iyi)"
 expect_eq "$(printf '%s' "$link_miss" | json_cached)" 0 "symlink target mutation reruns"
+
+# A link created in scratch whose target is outside scratch is a shared write,
+# not an internal scratch write. Exercise the observed File.symlink itself.
+cat > "$WORK/symlink/scratch_escape_test.iyi" <<'IYI'
+import std/file::{File}
+import std/dir::{Dir}
+outside = File.join(__DIR__, "outside.txt")
+link = File.join(Dir.tempdir, "outside-link")
+File.symlink(outside, link)
+File.read(link)
+IYI
+rm -rf "$CACHE/tests-v1"
+escape_first="$(run_json "$WORK/symlink" scratch_escape_test.iyi)"
+expect_eq "$(printf '%s' "$escape_first" | json_cached)" 0 "scratch symlink to external target does not record a reusable receipt"
+expect_contains "$escape_first" "shared" "scratch symlink escape names shared-write"
+escape_again="$(run_json "$WORK/symlink" scratch_escape_test.iyi)"
+expect_eq "$(printf '%s' "$escape_again" | json_cached)" 0 "scratch symlink escape remains non-reusable"
 
 step "scratch alias" "symlink outside scratch targeting scratch taints shared-write"
 mkdir -p "$WORK/symlink_shared"
@@ -715,11 +844,15 @@ rm -f "$WORK/symlink_shared/shared_link"
 step 30 "hard link outside scratch taints shared-write"
 mkdir -p "$WORK/r30"
 printf 'outside content' > "$WORK/r30/outside.txt"
+python3 - "$WORK/r30/outside.txt" "$WORK/r30/alias.txt" <<'PY'
+import os, sys
+os.link(sys.argv[1], sys.argv[2])
+PY
 cat > "$WORK/r30/hardlink_test.iyi" <<'IYI'
 import std/file::{File}
 import std/dir::{Dir}
 
-outside = File.join(__DIR__, "outside.txt")
+outside = File.join(__DIR__, "alias.txt")
 hard = File.join(Dir.tempdir, "hard.txt")
 File.link(outside, hard)
 assert File.read(hard) == "outside content"
@@ -1162,15 +1295,33 @@ raise "scratch not empty" unless Dir.children(scratch).empty?
 kept = File.join(scratch, "kept")
 Dir.mkdir(kept)
 File.write(File.join(kept, "file"), "left behind")
-File.chmod(kept, 0o555)
+{% if flag?(:win32) %}
+  File.chmod(File.join(kept, "file"), 0o444)
+{% else %}
+  File.chmod(kept, 0o555)
+{% end %}
 IYI
 
 dirty_err1="$WORK/dirty-scratch/err1.txt"
 dirty_run1="$( (cd "$WORK/dirty-scratch" && "$IYI" test --cached --json dirty_test.iyi) 2> "$dirty_err1" )"
 expect_eq "$(printf '%s' "$dirty_run1" | json_failed)" 0 "dirty scratch test run 1 passes"
 
+restore_scratch_permissions() {
+  python3 - "$CACHE/tests-v1/scratch" <<'PY'
+import os, stat, sys
+for root, dirs, files in os.walk(sys.argv[1]):
+    os.chmod(root, os.stat(root).st_mode | stat.S_IWUSR)
+    for name in dirs + files:
+        path = os.path.join(root, name)
+        os.chmod(path, os.stat(path).st_mode | stat.S_IWUSR)
+PY
+}
 if [ -z "$(ls -d "$CACHE"/tests-v1/scratch/*/kept 2>/dev/null || true)" ]; then
-  echo "process profile 5 not proven here: this user removes entries of a read-only directory (root)"
+  if [ "$WINDOWS" -eq 1 ]; then
+    fail "process profile 5 (row 49): read-only file was removed on Windows"
+  fi
+  echo "SKIP row 49 process profile 5: this user can remove entries from a read-only directory"
+  platform_skips="row 49 process profile 5: current user bypasses directory permissions"
 else
   expect_contains "$(cat "$dirty_err1")" "was not removed" "cleanup warning on leftover read-only directory"
 
@@ -1182,10 +1333,10 @@ else
   expect_contains "$(cat "$dirty_err2")" "cannot empty scratch directory" "runner refuses run in uncleaned scratch"
   expect_eq "$(cat "$dirty_run2_out")" "" "refusal writes nothing to stdout"
 
-  chmod -R u+w "$CACHE"/tests-v1/scratch 2>/dev/null || true
+  restore_scratch_permissions
   dirty_run3="$(run_json "$WORK/dirty-scratch" dirty_test.iyi)"
   expect_eq "$(printf '%s' "$dirty_run3" | json_failed)" 0 "run 3 passes after permissions restored"
-  chmod -R u+w "$CACHE"/tests-v1/scratch 2>/dev/null || true
+  restore_scratch_permissions
 fi
 # Row 50 mutation proof: a test whose macro `run` helper is compiled cold on
 # the recording run hits on the next run, when the helper comes from the
@@ -1320,8 +1471,13 @@ mkdir -p "$WORK/r54"
 cat > "$WORK/r54/t_test.iyi" <<'IYI'
 assert 1 + 1 == 2
 IYI
-cp -p "$r28_iyi" "$WORK/r54/iyi-copy"
-r54_copy() { (cd "$WORK/r54" && IYI_PATH="$REPO/src" "$WORK/r54/iyi-copy" test "$@"); }
+r54_bin="$WORK/r54/iyi-copy"
+if [ "$WINDOWS" -eq 1 ]; then
+  r54_bin="$r54_bin.exe"
+  cp -p "$(dirname "$r28_iyi")/LLVM-C.dll" "$WORK/r54/LLVM-C.dll"
+fi
+cp -p "$r28_iyi" "$r54_bin"
+r54_copy() { (cd "$WORK/r54" && IYI_PATH="$REPO/src" "$r54_bin" test "$@"); }
 rm -rf "$CACHE/tests-v1"
 run_json "$WORK/r54" t_test.iyi >/dev/null
 row54_hit="$( (unset IYI_STALE_FAST_AUDIT; run_json "$WORK/r54" t_test.iyi) )"
@@ -1333,7 +1489,7 @@ row54_copy_again="$( (unset IYI_STALE_FAST_AUDIT; r54_copy --cached --json t_tes
 expect_eq "$(printf '%s' "$row54_copy_again" | json_test t_test.iyi check)" inputs "the copy's second run is served"
 run_json "$WORK/r54" t_test.iyi >/dev/null
 set +e
-row54_mutant="$( (cd "$WORK/r54" && IYI_PATH="$REPO/src" IYI_STALE_FAST_DROP=compiler IYI_STALE_FAST_AUDIT=1 "$WORK/r54/iyi-copy" test --cached --json t_test.iyi) )"
+row54_mutant="$( (cd "$WORK/r54" && IYI_PATH="$REPO/src" IYI_STALE_FAST_DROP=compiler IYI_STALE_FAST_AUDIT=1 "$r54_bin" test --cached --json t_test.iyi) )"
 row54_mutant_status=$?
 set -e
 expect_eq "$row54_mutant_status" 0 "a byte-equal copy agrees with its served verdict, so the audit passes"
@@ -1456,6 +1612,59 @@ end
 IYI
 done
 rm -rf "$CACHE/tests-v1"
+if [ "$WINDOWS" -eq 1 ]; then
+  python3 - "$IYI" "$r58" "$r58_ctl" "$CACHE" <<'PY'
+import ctypes, glob, os, signal, subprocess, sys, time
+from ctypes import wintypes
+
+iyi, root, ctl, cache = sys.argv[1:]
+env = dict(os.environ, R58_CTL=ctl)
+k = ctypes.WinDLL("kernel32", use_last_error=True)
+k.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+k.OpenProcess.restype = wintypes.HANDLE
+k.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+k.WaitForSingleObject.restype = wintypes.DWORD
+k.CloseHandle.argtypes = [wintypes.HANDLE]
+handles = []
+with open(os.path.join(root, "interrupted.json"), "wb") as out, \
+     open(os.path.join(root, "interrupted.err"), "wb") as err:
+    runner = subprocess.Popen([iyi, "test", "--fresh", "--json", "-p", "4", "."],
+                              cwd=root, env=env, stdout=out, stderr=err,
+                              creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
+    try:
+        deadline = time.monotonic() + 180
+        while time.monotonic() < deadline:
+            receipts = glob.glob(os.path.join(cache, "tests-v1", "**", "records", "*.json"), recursive=True)
+            if len(receipts) >= 2 and all(os.path.isfile(os.path.join(ctl, "started-" + n)) for n in ("slow_a", "slow_b")):
+                break
+            if runner.poll() is not None:
+                raise RuntimeError(f"runner exited before interrupt: {runner.returncode}")
+            time.sleep(.1)
+        else:
+            raise RuntimeError("runner did not start both slow tests and record both quick receipts")
+        for name in ("slow_a", "slow_b"):
+            pid = int(open(os.path.join(ctl, "pid-" + name)).read())
+            handle = k.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE
+            if not handle:
+                raise ctypes.WinError(ctypes.get_last_error())
+            handles.append((name, handle))
+            if k.WaitForSingleObject(handle, 0) != 258:
+                raise RuntimeError(f"{name} was not running before interrupt")
+        runner.send_signal(signal.CTRL_BREAK_EVENT)
+        status = runner.wait(timeout=30)
+        if status != 130:
+            raise RuntimeError(f"interrupted runner exited {status}, expected 130")
+        for name, handle in handles:
+            if k.WaitForSingleObject(handle, 5000) != 0:
+                raise RuntimeError(f"{name} survived the interrupt")
+    finally:
+        if runner.poll() is None:
+            runner.kill()
+            runner.wait()
+        for _, handle in handles:
+            k.CloseHandle(handle)
+PY
+else
 (cd "$r58" && R58_CTL="$r58_ctl" exec "$IYI" test --fresh --json -p 4 .) > "$r58/interrupted.json" 2> "$r58/interrupted.err" &
 r58_pid=$!
 r58_ready=0
@@ -1500,6 +1709,7 @@ for name in slow_a slow_b; do
   done
   expect_eq "$gone" 1 "test $name (pid $pid) is gone after the interrupt (state in /proc: '$(r58_state "$pid")')"
 done
+fi
 touch "$r58_ctl/release"
 set +e
 r58_after="$(cd "$r58" && R58_CTL="$r58_ctl" "$IYI" test --cached --json -p 4 .)"
@@ -1563,4 +1773,5 @@ expect_eq "$(printf '%s' "$row59_contradicted" | json_cached)" 0 "a contradicted
 expect_eq "$(printf '%s' "$row59_contradicted" | json_test read_test.iyi check)" compiler "a contradicted receipt is checked by the compiler"
 expect_contains "$(printf '%s' "$row59_contradicted" | json_test read_test.iyi check_reason)" "a contradicted receipt validates" "the check names the contradiction"
 
-echo "stale_tests PASSED: rows 1-59 are covered; rows 23-24 are CI-only"
+echo "stale_tests PASSED: $rows_run/59 rows executed here; separate specs or gates: $rows_external"
+echo "Platform skips: ${platform_skips:-none}"

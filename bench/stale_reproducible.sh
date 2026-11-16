@@ -7,8 +7,8 @@ set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 
 case "$(uname -s)" in
-  MINGW* | MSYS* | CYGWIN* | Windows_NT) PSEP=';' ;;
-  *) PSEP=':' ;;
+  MINGW* | MSYS* | CYGWIN*) WINDOWS=1; PSEP=';'; REPO="$(cygpath -m "$REPO")" ;;
+  *) WINDOWS=0; PSEP=':' ;;
 esac
 
 PY=""
@@ -24,28 +24,38 @@ if [ -z "$PY" ]; then
   exit 1
 fi
 
-IYI="${IYI:-$REPO/bin/iyi}"
+if [ "$WINDOWS" -eq 1 ]; then
+  IYI="${IYI:-$REPO/.build/iyi.exe}"
+  IYI="$(cygpath -m "$IYI")"
+else
+  IYI="${IYI:-$REPO/bin/iyi}"
+fi
 if [ ! -x "$IYI" ]; then
+  if [ "$WINDOWS" -eq 1 ]; then
+    echo "iyi compiler not found at $IYI; build .build/iyi.exe first" >&2
+    exit 1
+  fi
   echo "iyi compiler not found at $IYI. Building..." >&2
-  export LIBRARY_PATH="${LIBRARY_PATH:-/opt/homebrew/opt/bdw-gc/lib}"
-  export IYI_CACHE_DIR="${IYI_CACHE_DIR:-/tmp/iyi-stale-s2-cache}"
+  if [ "$(uname -s)" = Darwin ]; then
+    export LIBRARY_PATH="${LIBRARY_PATH:-/opt/homebrew/opt/bdw-gc/lib}"
+  fi
   make -C "$REPO" -j8 iyi
 fi
 
 MODE="${1:-all}"
 
 export ZERO_AR_DATE=1
-export SOURCE_DATE_EPOCH="$(/usr/bin/git -C "$REPO" show -s --format=%ct HEAD 2>/dev/null || cat "$REPO/src/SOURCE_DATE_EPOCH" 2>/dev/null || echo 0)"
+export SOURCE_DATE_EPOCH="$(git -C "$REPO" show -s --format=%ct HEAD 2>/dev/null || cat "$REPO/src/SOURCE_DATE_EPOCH" 2>/dev/null || echo 0)"
 export IYI_PATH="$REPO/src${PSEP}$REPO/samples/iyi"
 export IYI_LIBRARY_PATH="$REPO/lib"
 WORK="$(mktemp -d /tmp/stale-repro-work.XXXXXX)"
+[ "$WINDOWS" -eq 0 ] || WORK="$(cygpath -m "$WORK")"
 CACHE="$WORK/cache"
 mkdir -p "$CACHE"
 export IYI_CACHE_DIR="$CACHE"
 
 cleanup() {
   rm -rf "$WORK"
-  rm -rf /tmp/iyi-stale-s2-rg1
 }
 trap cleanup EXIT
 
@@ -58,6 +68,7 @@ run_rg7() {
     [ -f "$prog" ] || continue
     name="$(basename "$prog")"
     out="$WORK/prog_out"
+    [ "$WINDOWS" -eq 0 ] || out="$out.exe"
     saved="$WORK/prog_t1"
 
     rm -rf "$CACHE"/*
@@ -85,8 +96,7 @@ run_rg7() {
 
 run_rg1() {
   echo "== Running RG1: reproducible compiler build =="
-  local rg1_dir="/tmp/iyi-stale-s2-rg1"
-  rm -rf "$rg1_dir"
+  local rg1_dir="$WORK/rg1"
   mkdir -p "$rg1_dir"
 
   echo "  copying source tree to $rg1_dir..."
@@ -102,12 +112,12 @@ run_rg1() {
   echo "  computing build-input digests..."
   local llvm_cfg
   llvm_cfg="$("$REPO/src/llvm/ext/find-llvm-config.sh" 2>/dev/null || true)"
-  local llvm_ver=""
+  local llvm_ver="${LLVM_VERSION:-}"
   if [ -n "$llvm_cfg" ] && command -v "$llvm_cfg" >/dev/null 2>&1; then
     llvm_ver="$("$llvm_cfg" --version 2>/dev/null || true)"
   fi
   local bootstrap_compiler_ver
-  bootstrap_compiler_ver="$("$REPO/bin/crystal" env CRYSTAL_VERSION 2>/dev/null || true)"
+  bootstrap_compiler_ver="$(bash "$REPO/bench/stale_store_concurrency.sh" --crystal env CRYSTAL_VERSION 2>/dev/null || true)"
   local c1_flags="-D strict_multi_assign -D preview_overload_order -Dwithout_openssl -Dwithout_zlib -Dwithout_iconv -Dgc_none"
   local c2_flags="$c1_flags"
   if [ -n "$extra_flags" ]; then
@@ -126,14 +136,16 @@ run_rg1() {
   fi
 
   echo "  building second compiler at $rg1_dir..."
-  export LIBRARY_PATH="${LIBRARY_PATH:-/opt/homebrew/opt/bdw-gc/lib}"
+  if [ "$(uname -s)" = Darwin ]; then
+    export LIBRARY_PATH="${LIBRARY_PATH:-/opt/homebrew/opt/bdw-gc/lib}"
+  fi
   export IYI_CACHE_DIR="$rg1_dir/cache"
   # The commit compiler 1 carries, not HEAD: `make` does not rebuild the
   # compiler for a commit that touches no compiler source, so after one its
   # stamp is older than HEAD, and every program differed by the stamp alone.
   local commit
   commit="$("$IYI" --version 2>/dev/null | sed -n 's/.*\[\([0-9a-f]*\)\].*/\1/p' | head -1)"
-  [ -n "$commit" ] || commit="$(/usr/bin/git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo "")"
+  [ -n "$commit" ] || commit="$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo "")"
   # The stamp's date too: it is the day of SOURCE_DATE_EPOCH when compiler 1
   # was built, which an incremental rebuild does not renew, so a compiler built
   # yesterday stamps yesterday whatever HEAD's commit time says now.
@@ -143,9 +155,15 @@ run_rg1() {
     stamp_epoch="$("$PY" -c 'import sys,datetime; print(int(datetime.datetime.strptime(sys.argv[1], "%Y-%m-%d").replace(tzinfo=datetime.timezone.utc).timestamp()))' "$stamp_date" 2>/dev/null || true)"
     [ -z "$stamp_epoch" ] || SOURCE_DATE_EPOCH="$stamp_epoch"
   fi
-  make -C "$rg1_dir" -j8 iyi FLAGS="$extra_flags" IYI_CONFIG_BUILD_COMMIT="$commit" SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH"
-
   local c2_iyi="$rg1_dir/.build/iyi"
+  if [ "$WINDOWS" -eq 1 ]; then
+    mkdir -p "$rg1_dir/.build"
+    cp "$REPO/.build/crystal.exe" "$REPO/.build/LLVM-C.dll" "$rg1_dir/.build/"
+    make -C "$rg1_dir" -f Makefile.win iyi FLAGS="$extra_flags" IYI_CONFIG_BUILD_COMMIT="$commit" SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH"
+    c2_iyi="$c2_iyi.exe"
+  else
+    make -C "$rg1_dir" -j8 iyi FLAGS="$extra_flags" IYI_CONFIG_BUILD_COMMIT="$commit" SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH"
+  fi
   if [ ! -x "$c2_iyi" ]; then
     echo "RG1 FAILED: second compiler binary not found at $c2_iyi" >&2
     return 1
@@ -159,6 +177,7 @@ run_rg1() {
     [ -f "$prog" ] || continue
     name="$(basename "$prog")"
     out="$WORK/prog_out"
+    [ "$WINDOWS" -eq 0 ] || out="$out.exe"
     saved="$WORK/prog_c1"
 
     rm -rf "$CACHE"/*

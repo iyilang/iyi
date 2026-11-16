@@ -4,26 +4,47 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-cd "${REPO_DIR}"
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    WINDOWS=1
+    REPO_DIR="$(cygpath -m "$REPO_DIR")"
+    ;;
+  *) WINDOWS=0 ;;
+esac
 
-if [[ ! -x .build/stale_store_concurrency ]]; then
-  echo "Building .build/stale_store_concurrency..."
-  ./bin/crystal build -o .build/stale_store_concurrency bench/stale_store_concurrency.cr
+# The shared Crystal entrypoint for stale gates. The PowerShell launcher sets
+# CRYSTAL_PATH, CRYSTAL_HAS_WRAPPER and library paths before using crystal.exe.
+if [[ "${1:-}" == --crystal ]]; then
+  shift
+  if [[ "$WINDOWS" == 1 ]]; then
+    [[ -f "$REPO_DIR/.build/crystal.exe" ]] || {
+      echo "Missing $REPO_DIR/.build/crystal.exe" >&2; exit 1;
+    }
+    exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$REPO_DIR/bin/crystal.ps1" "$@"
+  fi
+  exec "$REPO_DIR/bin/crystal" "$@"
 fi
 
-TMP_STORE=$(mktemp -d /tmp/stale_store_concurrency.XXXXXX)
-trap 'rm -rf "${TMP_STORE}"' EXIT
+cd "$REPO_DIR"
+BIN="$REPO_DIR/.build/stale_store_concurrency"
+[[ "$WINDOWS" == 0 ]] || BIN="$BIN.exe"
+echo "Building $BIN from this checkout..."
+bash "$REPO_DIR/bench/stale_store_concurrency.sh" --crystal build \
+  -o "$BIN" "$REPO_DIR/bench/stale_store_concurrency.cr"
+
+TMP_STORE="$(mktemp -d "${TMPDIR:-/tmp}/stale_store_concurrency.XXXXXX")"
+[[ "$WINDOWS" == 0 ]] || TMP_STORE="$(cygpath -m "$TMP_STORE")"
+trap 'rm -rf "$TMP_STORE"' EXIT
 
 echo "Starting 2 concurrent processes each recording 1000 receipts..."
-.build/stale_store_concurrency run "${TMP_STORE}" 1 1000 &
-PID1=$!
-.build/stale_store_concurrency run "${TMP_STORE}" 2 1000 &
-PID2=$!
+python3 - "$BIN" "$TMP_STORE" <<'PY'
+import subprocess, sys
 
-wait "${PID1}"
-wait "${PID2}"
-
-echo "Verifying every record file is parseable and seq is correct..."
-.build/stale_store_concurrency verify "${TMP_STORE}" 2000
-
+binary, store = sys.argv[1:]
+children = [subprocess.Popen([binary, "run", store, str(n), "1000"]) for n in (1, 2)]
+statuses = [child.wait() for child in children]
+if statuses != [0, 0]:
+    sys.exit(f"concurrent writers failed: {statuses}")
+subprocess.run([binary, "verify", store, "2000"], check=True)
+PY
 echo "Row 21 concurrency test PASSED: 2000 parseable records, seq=2000."

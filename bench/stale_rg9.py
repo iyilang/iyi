@@ -22,7 +22,8 @@ def env_for(repo: str, cache: str, warm: bool) -> dict[str, str]:
     env["IYI_CACHE_DIR"] = cache
     env["IYI_PATH"] = f"{repo}/src{os.pathsep}{repo}/samples/iyi"
     env["IYI_LIBRARY_PATH"] = f"{repo}/lib"
-    env.setdefault("LIBRARY_PATH", "/opt/homebrew/opt/bdw-gc/lib")
+    if sys.platform == "darwin":
+        env.setdefault("LIBRARY_PATH", "/opt/homebrew/opt/bdw-gc/lib")
     if warm:
         env["IYI_WARM"] = "1"
     else:

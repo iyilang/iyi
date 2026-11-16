@@ -728,11 +728,13 @@ describe "Iyi::Stale S6a: Store and Receipts" do
     end
   end
 
-  # Builds and runs a helper through `./bin/crystal`, a shell script that
-  # Windows does not execute; the file lock it exercises is the same code the
-  # other store examples reach there.
+  # On Windows the shared gate uses the native Crystal launcher and starts
+  # both helper processes from Python; POSIX can run them directly.
   {% if flag?(:win32) %}
-    pending "survives two concurrent processes each recording 1,000 receipts (row 21)"
+    it "survives two concurrent processes each recording 1,000 receipts (row 21)" do
+      Process.run("bash", ["bench/stale_store_concurrency.sh"],
+        output: Process::Redirect::Inherit, error: Process::Redirect::Inherit).success?.should be_true
+    end
   {% else %}
     it "survives two concurrent processes each recording 1,000 receipts (row 21)" do
       with_tempfile("store_concurrency") do |cache_root|

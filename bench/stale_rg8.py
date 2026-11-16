@@ -39,13 +39,22 @@ class Build:
 class GateFailure(RuntimeError):
     pass
 
+def relative_name(path: str, root: str) -> str:
+    # Corpus labels are portable identifiers, not native filesystem paths.
+    return os.path.relpath(path, root).replace("\\", "/")
+
+
+def artifact_stem(label: str) -> str:
+    return label.replace("\\", "/").replace("/", "_").replace(" ", "_")
+
 
 def compiler_env(repo: str, cache: str) -> dict[str, str]:
     env = os.environ.copy()
     env["IYI_CACHE_DIR"] = cache
     env["IYI_PATH"] = f"{repo}/src{os.pathsep}{repo}/samples/iyi"
     env["IYI_LIBRARY_PATH"] = f"{repo}/lib"
-    env.setdefault("LIBRARY_PATH", "/opt/homebrew/opt/bdw-gc/lib")
+    if sys.platform == "darwin":
+        env.setdefault("LIBRARY_PATH", "/opt/homebrew/opt/bdw-gc/lib")
     env["DUMP"] = "1"
     env["IYI_DUMP_TYPE_ID"] = "1"
     return env
@@ -59,7 +68,7 @@ def compile_source(
     label: str,
     dump_elements: bool = False,
 ) -> tuple[Build, list[dict]]:
-    stem = label.replace("/", "_").replace(" ", "_")
+    stem = artifact_stem(label)
     key = os.path.join(work, f"{stem}.key")
     out = os.path.join(work, f"{stem}.bin")
     dump = os.path.join(work, f"{stem}.elements.jsonl")
@@ -111,7 +120,7 @@ def compile_source(
 
 def reports_for_corpus(compiler: str, repo: str, work: str, programs: list[str]) -> dict[str, tuple[Build, list[dict]]]:
     def one(prog: str) -> tuple[str, tuple[Build, list[dict]]]:
-        name = os.path.relpath(prog, repo)
+        name = relative_name(prog, repo)
         return name, compile_source(compiler, repo, work, prog, f"baseline-{name}", True)
 
     workers = min(8, os.cpu_count() or 4)
@@ -156,7 +165,7 @@ def run_mutations(
     mutation_dir = os.path.join(work, "mutations")
     os.makedirs(mutation_dir, exist_ok=True)
     for index, (source, mutation) in enumerate(mutations):
-        rel = os.path.relpath(source, repo)
+        rel = relative_name(source, repo)
         baseline, _ = reports[rel]
         mutated_source = os.path.join(mutation_dir, f"{index}-{os.path.basename(source)}")
         Path(mutated_source).write_text(mutation.mutated_source, encoding="utf-8")

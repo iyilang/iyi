@@ -894,13 +894,13 @@ raw = Path("package-doc.json").read_bytes()
 Path("package-doc-bad-eol.json").write_bytes(raw[:-1] + b"\r\n")
 data = json.loads(raw)
 del data["compiler"]
-Path("package-doc-bad-schema.json").write_text(json.dumps(data) + "\n", encoding="utf-8", newline="\n")
+Path("package-doc-bad-schema.json").write_bytes((json.dumps(data) + "\n").encode("utf-8"))
 data = json.loads(raw)
 data["modules"][1]["module"] = "extra\\second"
-Path("package-doc-bad-slash.json").write_text(json.dumps(data) + "\n", encoding="utf-8", newline="\n")
+Path("package-doc-bad-slash.json").write_bytes((json.dumps(data) + "\n").encode("utf-8"))
 data = json.loads(raw)
 data["modules"].reverse()
-Path("package-doc-bad-order.json").write_text(json.dumps(data) + "\n", encoding="utf-8", newline="\n")
+Path("package-doc-bad-order.json").write_bytes((json.dumps(data) + "\n").encode("utf-8"))
 PY
 for defect in eol schema slash order; do
   if "$PYTHON" package-doc-check.py "package-doc-bad-$defect.json" > package-doc-broken.log 2>&1; then

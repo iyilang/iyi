@@ -4101,10 +4101,9 @@ jobs:
           path: editors/vscode/*.vsix
           retention-days: 7
 
-  # One check for the master ruleset to require: every job this
-  # run selected passed. A job the plan left out is skipped, and passes; a
-  # failed or cancelled one does not. `scripts/ci_plan.py` refuses a
-  # workflow whose jobs this list does not name.
+  # One check requires every selected job to succeed. Only jobs the plan
+  # left out may be skipped. The planner must succeed and supply its job
+  # list; scripts/ci_plan.py also checks that needs includes every job.
   result:
     needs: [plan, docs, build, iyi, compiler-specs, stdlib-specs, lsp-positions, samples, std,
             std-platforms, std-siblings, targets, cross-objects, cross-run, darwin,
@@ -4124,7 +4123,11 @@ jobs:
         run: |
           printf '%s' "$RESULTS" | python3 -c '
           import json, sys
-          failed = [name for name, job in json.load(sys.stdin).items()
-                    if job["result"] in ("failure", "cancelled")]
-          print("failed or cancelled: " + ", ".join(failed) if failed else "every selected job passed")
+          results = json.load(sys.stdin)
+          selected = set(json.loads(results["plan"]["outputs"]["jobs"]))
+          failed = sorted(
+              {name for name, job in results.items() if job["result"] in ("failure", "cancelled")}
+              | {name for name in selected | {"plan"}
+                 if results.get(name, {}).get("result") != "success"})
+          print("not successful: " + ", ".join(failed) if failed else "every selected job passed")
           sys.exit(1 if failed else 0)'

@@ -30,6 +30,9 @@ node = parser.parse
 
 program = Iyi::Program.new
 program.filename = path
+# Match the compiler's new_program setup before analyzing the prelude.
+# Its Windows fault handler reads the predefined unsafe-module constant.
+program.define_crystal_constants
 node = program.normalize(node)
 program.semantic(node)
 

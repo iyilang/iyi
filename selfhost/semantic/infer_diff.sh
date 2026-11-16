@@ -55,21 +55,24 @@ fixtures=("$HERE"/fixtures/infer*.iyi)
 status=0
 for fixture in "${fixtures[@]}"; do
   [ "$WINDOWS" -eq 0 ] || fixture="$(cygpath -m "$fixture")" || exit 1
+  oracle_status=0
   CRYSTAL_CACHE_DIR="$WORK/cr" "$REPO/bin/crystal" run --no-color \
-    "$HERE/infer_oracle.cr" -- "$fixture" 2>/dev/null \
-    | grep -v "Using compiled" > "$WORK/oracle.txt"
-  # Status and stderr kept rather than dropped: "port answered nothing"
-  # is true of a crash and of a refusal alike, and the sentence that
-  # separates them was being discarded.
+    "$HERE/infer_oracle.cr" -- "$fixture" > "$WORK/oracle.raw" 2> "$WORK/oracle.err" || oracle_status=$?
+  grep -v "Using compiled" "$WORK/oracle.raw" > "$WORK/oracle.txt"
+  # Keep both commands' status and stderr. Partial output from a failed
+  # analysis is not an oracle, even when the bytes happen to agree.
   "$WORK/infer$EXE" "$fixture" > "$WORK/port.txt" 2> "$WORK/port.err"
   port_status=$?
 
   name="$(basename "$fixture")"
-  if [ ! -s "$WORK/oracle.txt" ]; then
-    echo "  $name: oracle answered nothing"; status=1; continue
+  if [ "$oracle_status" -ne 0 ] || [ ! -s "$WORK/oracle.txt" ]; then
+    echo "  $name: oracle failed or answered nothing, exiting $oracle_status"
+    cat "$WORK/oracle.err"
+    status=1; continue
   fi
-  if [ ! -s "$WORK/port.txt" ]; then
-    echo "  $name: port answered nothing, exiting $port_status: $(head -2 "$WORK/port.err" | tr '\n' ' ' | cut -c1-150)"
+  if [ "$port_status" -ne 0 ] || [ ! -s "$WORK/port.txt" ]; then
+    echo "  $name: port failed or answered nothing, exiting $port_status"
+    cat "$WORK/port.err"
     status=1; continue
   fi
   if diff -q "$WORK/oracle.txt" "$WORK/port.txt" >/dev/null; then

@@ -455,13 +455,22 @@ cp iyi.mod iyi.mod.before && cp iyi.sum iyi.sum.before
 check_status=$?
 [ "$check_status" -eq 1 ] || fail "--check answered $check_status with a change due"
 grep -q "would remove example.test/user/libb v1.0.0: nothing imports it" tidy-check.log || fail "--check did not name the unused line: $(cat tidy-check.log)"
-# Two: the version nothing builds, and libb's, which goes with its line.
-grep -q "would drop 2 iyi.sum entries" tidy-check.log || fail "--check did not name the stale sums: $(cat tidy-check.log)"
+# Four: the added stale tree, libb's tree and manifest, and the liba
+# v1.1.0 manifest that only libb's requirement caused MVS to read.
+grep -q "would drop 4 iyi.sum entries" tidy-check.log || fail "--check did not name the stale sums: $(cat tidy-check.log)"
 cmp -s iyi.mod iyi.mod.before && cmp -s iyi.sum iyi.sum.before || fail "--check wrote something"
 "$IYI" mod tidy > tidy1.log 2>&1 || { fail "tidy failed"; cat tidy1.log; }
 [ -z "$(requires example.test/user/libb)" ] || fail "libb is still required"
 [ "$(requires example.test/user/liba)" = "v1.3.0" ] || fail "liba moved to '$(requires example.test/user/liba)'"
 [ -z "$(requires example.test/user/libc)" ] || fail "the nested module's import was taken for this one's"
+for entry in \
+  'example.test/user/liba v1.0.0' \
+  'example.test/user/liba v1.1.0/iyi.mod' \
+  'example.test/user/libb v1.0.0' \
+  'example.test/user/libb v1.0.0/iyi.mod'; do
+  grep -qF "$entry h2:" iyi.sum.before || fail "the stale fixture lacked $entry"
+  grep -qF "$entry h2:" iyi.sum && fail "tidy kept stale $entry"
+done
 grep -q "v1.0.0" iyi.sum && fail "the stale sum entry is still there"
 grep -q "example.test/user/liba v1.3.0 h2:" iyi.sum || fail "the sum lost what builds"
 "$IYI" mod tidy --check > tidy-clean.log 2>&1 || fail "a tidy manifest was not clean: $(cat tidy-clean.log)"

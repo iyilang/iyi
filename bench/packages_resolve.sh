@@ -91,6 +91,91 @@ grep -q 'hello from liba v1.1.0' answers.txt || { echo "v1.1.0 never ran:"; cat 
 grep -q 'v1.0.0' answers.txt && { echo "the version MVS discarded still ran:"; cat answers.txt; exit 1; }
 grep -q 'green' answers.txt || { echo "the sub-module import lost:"; cat answers.txt; exit 1; }
 
+# The older liba manifest is read by MVS even though libb raises the
+# selected tree to v1.1.0. Move only that older tag to a manifest that
+# introduces libc, then clear the cache. Without a manifest sum the build
+# silently adds libc while the selected liba tree still matches.
+step "an outbid manifest moved to add a requirement is refused"
+if command -v sha256sum > /dev/null 2>&1; then
+  sha256() { sha256sum | cut -c1-64; }
+else
+  sha256() { shasum -a 256 | cut -c1-64; }
+fi
+manifest_h2() {
+  inner="$(sha256)"
+  printf '%s f iyi.mod\n' "$inner" | sha256 | awk '{ print "h2:" $0 }'
+}
+old_commit="$(git -C work/liba rev-parse v1.0.0)"
+old_hash="$(git -C work/liba show "$old_commit:iyi.mod" | manifest_h2)"
+cp app/iyi.sum app/iyi.sum.before-move
+mkrepo work/libc
+printf 'module example.test/user/libc\n' > work/libc/iyi.mod
+printf 'module libc\n' > work/libc/libc.iyi
+git -C work/libc add -A && git -C work/libc commit -qm one && git -C work/libc tag v1.0.0
+git clone -q --bare work/libc mirror/example.test/user/libc
+git -C work/liba checkout -q --detach "$old_commit"
+printf 'require example.test/user/libc v1.0.0\n' >> work/liba/iyi.mod
+new_hash="$(manifest_h2 < work/liba/iyi.mod)"
+[ "$old_hash" != "$new_hash" ] || { echo "the fixture did not change the manifest hash"; exit 1; }
+git -C work/liba commit -qam moved && git -C work/liba tag -f v1.0.0 > /dev/null
+git -C work/liba push -q -f "$WORK/mirror/example.test/user/liba" refs/tags/v1.0.0
+rm -rf "$IYI_CACHE_DIR"
+(cd app && "$IYI" build main.iyi -o app) > moved-manifest.log 2>&1
+moved_status=$?
+if [ "$moved_status" -eq 0 ]; then
+  echo "the moved outbid manifest was accepted:"
+  grep -F 'example.test/user/libc v1.0.0' app/iyi.sum || cat app/iyi.sum
+  exit 1
+fi
+grep -F "example.test/user/liba v1.0.0/iyi.mod is not what it was" moved-manifest.log > /dev/null &&
+  grep -F "$old_hash" moved-manifest.log > /dev/null &&
+  grep -F "$new_hash" moved-manifest.log > /dev/null || {
+  echo "the moved manifest was not refused naming both hashes:"
+  cat moved-manifest.log
+  exit 1
+}
+cmp -s app/iyi.sum app/iyi.sum.before-move || { echo "a refused build changed iyi.sum"; exit 1; }
+git -C work/liba tag -f v1.0.0 "$old_commit" > /dev/null
+git -C work/liba push -q -f "$WORK/mirror/example.test/user/liba" refs/tags/v1.0.0
+rm -rf "$IYI_CACHE_DIR"
+(cd app && "$IYI" build main.iyi -o app) > restored-manifest.log 2>&1 || {
+  echo "the restored graph failed:"; cat restored-manifest.log; exit 1;
+}
+grep -Fx "example.test/user/liba v1.0.0/iyi.mod $old_hash" app/iyi.sum > /dev/null || {
+  echo "no independently computed sum for the outbid manifest:"; cat app/iyi.sum; exit 1;
+}
+for entry in 'example.test/user/liba v1.1.0' 'example.test/user/liba v1.1.0/iyi.mod' 'example.test/user/libb v1.0.0/iyi.mod'; do
+  grep -F "$entry h2:" app/iyi.sum > /dev/null || { echo "missing $entry:"; cat app/iyi.sum; exit 1; }
+done
+echo "  $old_hash -> $new_hash refused; the old graph and sum remain"
+
+step "tidy keeps an outbid manifest and --check writes nothing"
+printf 'example.test/user/gone v1.0.0 h2:0000000000000000000000000000000000000000000000000000000000000000\n' >> app/iyi.sum
+cp app/iyi.mod app/iyi.mod.before-tidy
+cp app/iyi.sum app/iyi.sum.before-tidy
+(cd app && "$IYI" mod tidy --check) > tidy-check.log 2>&1
+[ "$?" -eq 1 ] || { echo "tidy --check did not report the stale entry:"; cat tidy-check.log; exit 1; }
+cmp -s app/iyi.mod app/iyi.mod.before-tidy && cmp -s app/iyi.sum app/iyi.sum.before-tidy || {
+  echo "tidy --check wrote to the project"; exit 1;
+}
+(cd app && "$IYI" mod tidy) > tidy.log 2>&1 || { echo "tidy failed:"; cat tidy.log; exit 1; }
+grep -Fx "example.test/user/liba v1.0.0/iyi.mod $old_hash" app/iyi.sum > /dev/null || {
+  echo "tidy dropped the outbid manifest:"; cat app/iyi.sum; exit 1;
+}
+grep -qF 'example.test/user/gone ' app/iyi.sum && { echo "tidy kept the stale entry"; exit 1; }
+cmp -s app/iyi.mod app/iyi.mod.before-tidy || { echo "tidy changed the fixture's requirements"; exit 1; }
+
+# A project predating manifest lines must get them without changing its
+# content pins. The check-only command reports the change without writing.
+cp app/iyi.sum app/iyi.sum.with-manifests
+awk '$2 !~ /\/iyi\.mod$/ { print }' app/iyi.sum.with-manifests > app/iyi.sum
+cp app/iyi.sum app/iyi.sum.old-format
+(cd app && "$IYI" mod tidy --check) > tidy-old-check.log 2>&1
+[ "$?" -eq 1 ] || { echo "tidy --check did not report missing manifests:"; cat tidy-old-check.log; exit 1; }
+cmp -s app/iyi.sum app/iyi.sum.old-format || { echo "tidy --check recorded manifests"; exit 1; }
+(cd app && "$IYI" mod tidy) > tidy-old.log 2>&1 || { echo "tidy did not record manifests:"; cat tidy-old.log; exit 1; }
+cmp -s app/iyi.sum app/iyi.sum.with-manifests || { echo "tidy changed content pins while recording manifests"; exit 1; }
+
 # ── 2. The cache is the second build's source ────────────────────────────
 step "a fetched checkout is read, not refetched"
 rm -rf mirror app/app
@@ -165,7 +250,7 @@ step "a mutated checkout is refused while iyi.sum is honest"
 # ordinary answer. Asking the sum file ties the tree this mutates to the
 # entry this expects the refusal about, whatever MVS chose. The layout is
 # the fetcher's: `<cache>/mod/<path>@v<version>`.
-pinned="$(awk '$1 == "example.test/user/liba" { print $2 }' app/iyi.sum)"
+pinned="$(awk '$1 == "example.test/user/liba" && $2 !~ /\/iyi\.mod$/ { print $2 }' app/iyi.sum)"
 [ -n "$pinned" ] || { echo "iyi.sum pins no version for liba:"; cat app/iyi.sum; exit 1; }
 checkout="$(find "$IYI_CACHE_DIR" -path "*liba@$pinned*" -name liba.iyi | head -1)"
 [ -n "$checkout" ] || { echo "no liba@$pinned checkout under $IYI_CACHE_DIR"; exit 1; }
@@ -307,7 +392,10 @@ s1_of() {
 }
 cp app/iyi.sum app/iyi.sum.good
 : > app/iyi.sum.s1
-while read -r path version _; do
+while read -r path version hash; do
+  case "$version" in
+    */iyi.mod) continue ;;
+  esac
   tree="$IYI_CACHE_DIR/mod/$path@$version"
   [ -f "$tree/iyi.mod" ] || { echo "no checkout at $tree for the line $path $version"; exit 1; }
   printf '%s %s s1:%s\n' "$path" "$version" "$(s1_of "$tree")" >> app/iyi.sum.s1
@@ -343,7 +431,7 @@ if [ $? -ne 0 ] || grep -q 's1:' restated2.log; then
   exit 1
 fi
 # And the line a checkout does not match: liba's, with one digit moved.
-liba_s1="$(awk '$1 == "example.test/user/liba" { print $3 }' app/iyi.sum.s1)"
+liba_s1="$(awk '$1 == "example.test/user/liba" && $2 == "v1.1.0" { print $3 }' app/iyi.sum.s1)"
 case "$liba_s1" in
   s1:0*) wrong_s1="s1:1${liba_s1#s1:0}" ;;
   *) wrong_s1="s1:0${liba_s1#s1:?}" ;;

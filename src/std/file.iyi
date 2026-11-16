@@ -141,8 +141,6 @@ import std/path::{Path}
     # OVERLAPPED.
     fun LockFileEx(handle : Void*, flags : UInt32, reserved : UInt32, low : UInt32, high : UInt32, overlapped : Void*) : Int32
     fun UnlockFileEx(handle : Void*, reserved : UInt32, low : UInt32, high : UInt32, overlapped : Void*) : Int32
-    # Where Windows says scratch files go, which `Dir.tempdir` asks too.
-    fun GetTempPathW(buffer_count : Int32, buffer : UInt16*) : Int32
     # What a link points at, and where a path really goes. Both were
     # missing, and both answers were made up rather than asked for:
     # `readlink` returned the empty string for every link on this
@@ -508,7 +506,7 @@ class ::File
     # than printing the placeholder. Windows ends these sentences with CRLF
     # and sometimes a trailing space, which is a line break in the middle of
     # a panic, so the tail comes off. `std/dir`'s refusals say it too.
-    def self.win_error : String
+    @[Effect(:host_state)]; def self.win_error : String
       code = Std::File::LibKernel32.GetLastError
       room = 1024
       wide = Pointer(UInt16).malloc(room.to_u64)
@@ -1146,7 +1144,7 @@ class ::File
     # refusal stands. The name is the full path, `\\?\` form past MAX_PATH:
     # FILE_RENAME_INFO is { UInt32 flags, 4 bytes padding, HANDLE root,
     # UInt32 length in bytes, UInt16 name[] } on x64.
-    private def self.rename_posix(old_wide : UInt16*, new_path : String) : Bool
+    @[Effect(:file_write, :rename)]; private def self.rename_posix(old_path : String, new_path : String, old_wide : UInt16*) : Bool
       target = __iyi_wide_path(sys_path(expand_path(new_path)))
       return false if target.address == 0_u64
       chars = 0
@@ -1230,7 +1228,7 @@ class ::File
             replaced = Std::File::LibKernel32.MoveFileExW(old_wide, new_wide, 0x3_u32) != 0
             Std::File::LibKernel32.SetFileAttributesW(new_wide, attributes) unless replaced
           end
-          replaced = replaced || rename_posix(old_wide, n)
+          replaced = replaced || rename_posix(o, n, old_wide)
         end
         raise "Cannot rename #{o} to #{n}: #{refusal}" unless replaced
       end
@@ -1929,15 +1927,7 @@ class ::File
   # user, and there the create's refusal is the guarantee and the name
   # needs only to be new. The file is the owner's alone, mode 0600.
   def self.tempfile(prefix : String = "tmp", suffix : String = "") : String
-    # Where the environment says, and the platform's own default only when
-    # it says nothing — the same order `Dir.tempdir` reads, because the two
-    # answering different directories is how a program writes a temporary
-    # file somewhere it cannot later find it. On Windows the hardcoded
-    # fallback was `C:\Windows\Temp`, which is a system directory an
-    # ordinary account cannot write to: measured, this answered
-    # `C:\Windows\Temp/wperm_0_1001` — a mixed separator and a path that
-    # only worked because the session was elevated — while `TEMP` named the
-    # per-user directory all along.
+    # The same observed environment reads and precedence as Dir.tempdir.
     tmpdir = ""
     named = Program.env("TMPDIR")
     tmpdir = named if named && !named.empty?
@@ -1951,13 +1941,7 @@ class ::File
     end
     if tmpdir.empty?
       {% if flag?(:win32) %}
-        # Windows' own answer, as `Dir.tempdir` asks it. This alone kept the
-        # literal: with TMPDIR, TEMP and TMP unset, the file was made in
-        # `C:\Windows\Temp` while `Dir.tempdir` answered `C:\Users\dogru`.
-        wide = Pointer(UInt16).malloc(4096_u64)
-        chars = Std::File::LibKernel32.GetTempPathW(4096, wide)
-        size = chars > 0 && chars <= 4096 ? __iyi_utf8_size_from_wide(wide) : 0
-        tmpdir = size > 1 ? String.new(size - 1) { |t| __iyi_utf8_bytes_from_wide(wide, t, size) } : "C:\\Windows\\Temp"
+        raise "Cannot create tempfile: TMPDIR, TEMP and TMP are unset or empty"
       {% else %}
         tmpdir = "/tmp"
       {% end %}

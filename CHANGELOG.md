@@ -4,6 +4,12 @@
 
 ### Added
 
+- **`iyi doc --json [DIR]` prints a package's exported APIs as data.**
+  The package path and compiler identity accompany its modules, ordered by
+  path, each carrying the same API and doc comments as `iyi mod dump --json`.
+  DIR defaults to the current directory; a missing manifest or an empty
+  package is refused.
+
 - **The x86-64 encoder and ABI tables are written in iyi.**
   `compiler/native/amd64` encodes instruction forms and relocations and
   supplies the System V and Win64 argument and return conventions.

@@ -441,6 +441,13 @@ sys.exit(r.returncode)
 cmd="$1"
 shift
 if [ "$cmd" = "build" ]; then
+    # A build that asks for assembly is the exercise reading what the real
+    # compiler writes (std_mlkem_exercise.sh, decapsulation's mask); nothing
+    # about it touches the network or an oracle, and a fake binary has no
+    # assembly to read, so it goes to the real compiler.
+    case " $* " in
+        *" --emit "*) exec "$IYI_REAL_COMPILER" build "$@" ;;
+    esac
     out=""
     while [ $# -gt 0 ]; do
         if [ "$1" = "-o" ]; then
@@ -656,6 +663,7 @@ exit 0
         env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
         env["PYTHONPATH"] = f"{pylib}{os.pathsep}{env.get('PYTHONPATH', '')}"
         env["IYI"] = str(mock_iyi)
+        env["IYI_REAL_COMPILER"] = (REPO_ROOT / "bin" / "iyi").as_posix()
         env["PY"] = str(py_wrapper)
         env["OPENSSL"] = str(mock_openssl)
 

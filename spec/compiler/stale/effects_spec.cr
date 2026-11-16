@@ -400,6 +400,32 @@ describe "Iyi::Stale S4a: @[Effect] annotation and closure check" do
   end
 
   describe "closure check: runtime files and RG3 reporting" do
+    it "reports the call line inside a top-level flag conditional" do
+      runtime_file = File.join(Dir.current, "src", "std", "conditional_line_test.iyi")
+      program = create_test_program
+      program.iyi_prelude_dir = File.join(Dir.current, "src", "iyi")
+      parser = program.new_parser(<<-CODE)
+        @[Unsafe("runtime conditional calls a C function")]
+        lib LibSys
+          fun getpid : Int32
+        end
+        {% if flag?(:s0_nonexistent_flag) %}
+        {% else %}
+          def runtime_conditional_call
+            LibSys.getpid
+          end
+        {% end %}
+        runtime_conditional_call
+        CODE
+      parser.filename = runtime_file
+      node = program.semantic(program.normalize(parser.parse))
+      closure = Iyi::Effects.closure_check(program, Iyi::Stale::ReachWalk.walk(program, node))
+
+      site = closure.rg3_sites.find { |entry| entry.enclosing_def == "runtime_conditional_call" }
+      site.should_not be_nil
+      site.not_nil!.site.should eq("toolchain:std/conditional_line_test.iyi:8")
+    end
+
     it "flags unclassified runtime lib fun calls outside annotated defs as RG3 sites" do
       runtime_file = File.join(Dir.current, "src", "std", "unannotated_runtime.iyi")
 

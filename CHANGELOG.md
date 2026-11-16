@@ -505,13 +505,14 @@ and leaves the unit's list only at its successor's first instruction; an
 idle worker could take the unit in between, and the death then took the
 partition off the unit while the takeover held it, so the takeover read
 the partition's unit as nothing and died of a memory fault (tssh,
-thread_exercise's `switching`: 1 run in 130, and 4 in 90 with its
-suspends moved late). The takeover now collects the unit it took under
-the runtime's lock, and a death that comes while it holds the partition
-is left to it and done once it lets go. bench/heap_local's `takendeath`
-check holds a takeover across the death by a test switch: its copies
-`noholdreg` and `nodeferdeath` stop at the check by name, and
-`rereadunit`, the runtime before, dies of the fault every run.
+thread_exercise's `switching`: 12 runs in 390, and 18 in 270 with its
+suspends moved late; none in either with the fix, side by side). The
+takeover now collects the unit it took under the runtime's lock, and a
+death that comes while it holds the partition is left to it and done
+once it lets go. bench/heap_local's `takendeath` check holds a takeover
+across the death by a test switch: its copies `noholdreg` and
+`nodeferdeath` stop at the check by name, and `rereadunit`, the runtime
+before, dies of the fault every run.
 
 The pin fallback's walk puts into words only the reason it gives. It
 spelled the path to each of the ~1,100 constants a crossing of #145's app

@@ -20,6 +20,25 @@ describe Iyi::Stale::FileStamp do
     end
   end
 
+  it "checks locality for every handle even when volume serials match" do
+    serial = 0x3141592653589793_u64
+    probes = 0
+    local = Iyi::Stale::FileStamp.volume_trusted?(serial) do
+      probes += 1
+      {"NTFS", false, 26100, 3_u32}
+    end
+    shared = Iyi::Stale::FileStamp.volume_trusted?(serial) do
+      probes += 1
+      {"NTFS", true, 26100, 4_u32}
+    end
+    local.should be_true
+    shared.should be_false
+    probes.should eq(2)
+    Iyi::Stale::FileStamp.volume_trusted?(serial) { {"NTFS", true, 26100, 3_u32} }.should be_false
+    Iyi::Stale::FileStamp.volume_trusted?(serial) { {"NTFS", false, 26100, 4_u32} }.should be_false
+    Iyi::Stale::FileStamp.volume_trusted?(serial) { {"", true, 0, 0_u32} }.should be_false
+  end
+
   it "round trips UInt64 identities in both v2 record formats and refuses v1" do
     with_tempfile("stale-stamp-inputs.json") do |path|
       stamp = Iyi::BuildInputs::Stamp.new(Iyi::BuildInputs::Kind::File, 1_i64, 2_i64, nil,

@@ -2164,6 +2164,38 @@ jobs:
             exit $LASTEXITCODE
           }
 
+  # The fork's compiler and `iyi`, built on Windows once for every Windows
+  # job that runs them, as `build` does on Linux: each of those jobs built
+  # both for itself, two and a half minutes apiece. On windows-2022, the
+  # older image: what its toolset links runs on windows-2025's runtime as
+  # well, where windows-2025's could ask for a newer runtime than 2022 has.
+  # A job downloads them after its checkout, so they are newer than every
+  # source and a make target that needs them does not build them again.
+  # `.build` is a hidden path to upload-artifact, hence include-hidden-files.
+  windows-build:
+    needs: plan
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'windows-build') }}
+    runs-on: windows-2022
+    timeout-minutes: 30
+    name: "The compiler and `iyi`, built on Windows"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/windows-toolchain
+      - name: Build the fork's compiler, then `iyi`
+        shell: cmd
+        run: |
+          make -f Makefile.win crystal || exit /b 1
+          make -f Makefile.win iyi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-build
+          path: .build/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
+
   # The compiler built on Windows by the machine that then runs what it
   # builds — the gate the three jobs above cannot be. They link objects
   # cross-compiled on Linux, so nothing in them ever compiled a program on
@@ -2186,11 +2218,12 @@ jobs:
   # of 105 minutes it was the run's critical path: everything else had
   # finished and the run still waited on it. The gates that do not feed the
   # zip are now `windows-native-gates` and `windows-native-surfaces`, beside
-  # it, each building the compiler for itself (2.5 minutes of 30 to 36).
+  # it, which built the compiler for themselves (2.5 minutes of 30 to 36)
+  # until `windows-build` built it once for every Windows job.
   # Seventy-five minutes each: the steps left here took 33 in run
   # 42144468184, the release build at its end 9 of them.
   windows-native:
-    needs: plan
+    needs: [plan, windows-build]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'windows-native') }}
     runs-on: windows-2025
     timeout-minutes: 150
@@ -2200,15 +2233,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
-
       # The action is pinned to a commit; the Crystal package it downloads
       # for 1.21.0 is not checked against a hash written here, because the
       # action takes none.
-      - uses: crystal-lang/install-crystal@36a22e9145188eec527c96e5a789ce4b832af587 # v1.9.5
-        with:
-          crystal: 1.21.0
-
+      #
       # `make` is what both makefiles are written for, and the image does
       # not promise it. The LLVM version is read rather than pinned: it is
       # whatever the Crystal package was built against, and both make's
@@ -2223,39 +2251,16 @@ jobs:
       # `tools/install/bin/make.exe` in the 407,912-byte `make.4.4.1.nupkg`
       # community.chocolatey.org served, whose own SHA-256 is
       # 8b2dec73ed4c84163c4a4f9bfe658553b1e3d1fdfa8930d2aa438e030ff21f9d.
-      - name: What this machine has
-        shell: pwsh
-        run: |
-          if (-not (Get-Command make -ErrorAction SilentlyContinue)) {
-            choco install make --version 4.4.1 --no-progress -y
-            if ($LASTEXITCODE -ne 0) { throw "choco could not install make 4.4.1" }
-            $make = Join-Path $env:ChocolateyInstall 'lib\make\tools\install\bin\make.exe'
-            $hash = (Get-FileHash -Algorithm SHA256 $make).Hash.ToLower()
-            if ($hash -ne 'cc6dc291113dcbcc7735835acbfc23c52ed037e4e124ff2d7a0aeae6df563a9f') {
-              throw "Chocolatey's make.exe is not the one pinned here: $hash"
-            }
-          }
-          $lib = (crystal env CRYSTAL_LIBRARY_PATH).Trim()
-          if (-not (Test-Path "$lib\llvm_VERSION")) {
-            Write-Host "no llvm_VERSION beside the Crystal package's libraries, at $lib"
-            exit 1
-          }
-          $llvm = (Get-Content "$lib\llvm_VERSION")[0].Trim()
-          Write-Host "bootstrap libraries: $lib"
-          Write-Host "llvm: $llvm"
-          "CRYSTAL_LIBRARY_PATH=$lib" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
-          "LLVM_VERSION=$llvm" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
-
-      - name: Build the fork's compiler
-        shell: cmd
-        run: make -f Makefile.win crystal
+      - uses: ./.github/actions/windows-toolchain
 
       # `iyi` bakes `$ORIGIN\..\src` as its path, so the binary in `.build`
       # finds this checkout's prelude with nothing set in the environment:
       # every step below runs it the way a person would.
-      - name: Build `iyi`
-        shell: cmd
-        run: make -f Makefile.win iyi
+      # Both are `windows-build`'s, built once for every Windows job.
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: windows-build
+          path: .build
 
       # A rebuild with an editor open: `iyi lsp` holds `.build\iyi.exe`, and
       # Windows will not move a file onto a running program, so Makefile.win
@@ -2540,7 +2545,7 @@ jobs:
   # `windows-native` so that they run beside it: 10, 4 and 20 minutes of
   # that job's 105 in run 42144468184. The same setup as `windows-native`.
   windows-native-gates:
-    needs: plan
+    needs: [plan, windows-build]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'windows-native-gates') }}
     runs-on: windows-2025
     timeout-minutes: 75
@@ -2550,40 +2555,12 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+      - uses: ./.github/actions/windows-toolchain
 
-      - uses: crystal-lang/install-crystal@36a22e9145188eec527c96e5a789ce4b832af587 # v1.9.5
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
-          crystal: 1.21.0
-
-      - name: What this machine has
-        shell: pwsh
-        run: |
-          if (-not (Get-Command make -ErrorAction SilentlyContinue)) {
-            choco install make --version 4.4.1 --no-progress -y
-            if ($LASTEXITCODE -ne 0) { throw "choco could not install make 4.4.1" }
-            $make = Join-Path $env:ChocolateyInstall 'lib\make\tools\install\bin\make.exe'
-            $hash = (Get-FileHash -Algorithm SHA256 $make).Hash.ToLower()
-            if ($hash -ne 'cc6dc291113dcbcc7735835acbfc23c52ed037e4e124ff2d7a0aeae6df563a9f') {
-              throw "Chocolatey's make.exe is not the one pinned here: $hash"
-            }
-          }
-          $lib = (crystal env CRYSTAL_LIBRARY_PATH).Trim()
-          if (-not (Test-Path "$lib\llvm_VERSION")) {
-            Write-Host "no llvm_VERSION beside the Crystal package's libraries, at $lib"
-            exit 1
-          }
-          $llvm = (Get-Content "$lib\llvm_VERSION")[0].Trim()
-          Write-Host "bootstrap libraries: $lib"
-          Write-Host "llvm: $llvm"
-          "CRYSTAL_LIBRARY_PATH=$lib" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
-          "LLVM_VERSION=$llvm" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
-
-      - name: Build the fork's compiler, then `iyi`
-        shell: cmd
-        run: |
-          make -f Makefile.win crystal || exit /b 1
-          make -f Makefile.win iyi
+          name: windows-build
+          path: .build
 
       # Every exercise under bench/, run by the compiler built above. The
       # exclusions are named one by one, because a list nobody has to
@@ -2704,7 +2681,7 @@ jobs:
   # The editor and agent surfaces, out of `windows-native` for the same
   # reason: 28 of its 105 minutes in run 42144468184, the longest step.
   windows-native-surfaces:
-    needs: plan
+    needs: [plan, windows-build]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'windows-native-surfaces') }}
     runs-on: windows-2025
     timeout-minutes: 75
@@ -2714,40 +2691,12 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+      - uses: ./.github/actions/windows-toolchain
 
-      - uses: crystal-lang/install-crystal@36a22e9145188eec527c96e5a789ce4b832af587 # v1.9.5
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
-          crystal: 1.21.0
-
-      - name: What this machine has
-        shell: pwsh
-        run: |
-          if (-not (Get-Command make -ErrorAction SilentlyContinue)) {
-            choco install make --version 4.4.1 --no-progress -y
-            if ($LASTEXITCODE -ne 0) { throw "choco could not install make 4.4.1" }
-            $make = Join-Path $env:ChocolateyInstall 'lib\make\tools\install\bin\make.exe'
-            $hash = (Get-FileHash -Algorithm SHA256 $make).Hash.ToLower()
-            if ($hash -ne 'cc6dc291113dcbcc7735835acbfc23c52ed037e4e124ff2d7a0aeae6df563a9f') {
-              throw "Chocolatey's make.exe is not the one pinned here: $hash"
-            }
-          }
-          $lib = (crystal env CRYSTAL_LIBRARY_PATH).Trim()
-          if (-not (Test-Path "$lib\llvm_VERSION")) {
-            Write-Host "no llvm_VERSION beside the Crystal package's libraries, at $lib"
-            exit 1
-          }
-          $llvm = (Get-Content "$lib\llvm_VERSION")[0].Trim()
-          Write-Host "bootstrap libraries: $lib"
-          Write-Host "llvm: $llvm"
-          "CRYSTAL_LIBRARY_PATH=$lib" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
-          "LLVM_VERSION=$llvm" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
-
-      - name: Build the fork's compiler, then `iyi`
-        shell: cmd
-        run: |
-          make -f Makefile.win crystal || exit /b 1
-          make -f Makefile.win iyi
+          name: windows-build
+          path: .build
 
       # And the rest of what an editor and an agent are handed. Every
       # sample again from its modules' artifacts alone (R-1), the agent
@@ -2778,7 +2727,7 @@ jobs:
   # windows-std-platforms. Keep the existing timeout until the new schedule
   # has been measured across completed runs.
   windows-std:
-    needs: plan
+    needs: [plan, windows-build]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'windows-std') }}
     runs-on: windows-2025
     timeout-minutes: 150
@@ -2788,34 +2737,12 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+      - uses: ./.github/actions/windows-toolchain
 
-      - uses: crystal-lang/install-crystal@36a22e9145188eec527c96e5a789ce4b832af587 # v1.9.5
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
-          crystal: 1.21.0
-
-      - name: What this machine has
-        shell: pwsh
-        run: |
-          if (-not (Get-Command make -ErrorAction SilentlyContinue)) {
-            choco install make --version 4.4.1 --no-progress -y
-            if ($LASTEXITCODE -ne 0) { throw "choco could not install make 4.4.1" }
-            $make = Join-Path $env:ChocolateyInstall 'lib\make\tools\install\bin\make.exe'
-            $hash = (Get-FileHash -Algorithm SHA256 $make).Hash.ToLower()
-            if ($hash -ne 'cc6dc291113dcbcc7735835acbfc23c52ed037e4e124ff2d7a0aeae6df563a9f') {
-              throw "Chocolatey's make.exe is not the one pinned here: $hash"
-            }
-          }
-          $lib = (crystal env CRYSTAL_LIBRARY_PATH).Trim()
-          $llvm = (Get-Content "$lib\llvm_VERSION")[0].Trim()
-          "CRYSTAL_LIBRARY_PATH=$lib" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
-          "LLVM_VERSION=$llvm" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
-
-      - name: Build the fork's compiler, then `iyi`
-        shell: cmd
-        run: |
-          make -f Makefile.win crystal || exit /b 1
-          make -f Makefile.win iyi
+          name: windows-build
+          path: .build
 
       # The foundation's own sections; the modules' exercises are the
       # windows-std-siblings shards below, and every exercise read for
@@ -2836,7 +2763,7 @@ jobs:
   # build 111 and 180. Ninety minutes, under twice the slow one's 50.
   # On windows-2025, where those were measured.
   windows-std-platforms:
-    needs: plan
+    needs: [plan, windows-build]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'windows-std-platforms') }}
     runs-on: windows-2025
     timeout-minutes: 90
@@ -2846,34 +2773,12 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+      - uses: ./.github/actions/windows-toolchain
 
-      - uses: crystal-lang/install-crystal@36a22e9145188eec527c96e5a789ce4b832af587 # v1.9.5
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
-          crystal: 1.21.0
-
-      - name: What this machine has
-        shell: pwsh
-        run: |
-          if (-not (Get-Command make -ErrorAction SilentlyContinue)) {
-            choco install make --version 4.4.1 --no-progress -y
-            if ($LASTEXITCODE -ne 0) { throw "choco could not install make 4.4.1" }
-            $make = Join-Path $env:ChocolateyInstall 'lib\make\tools\install\bin\make.exe'
-            $hash = (Get-FileHash -Algorithm SHA256 $make).Hash.ToLower()
-            if ($hash -ne 'cc6dc291113dcbcc7735835acbfc23c52ed037e4e124ff2d7a0aeae6df563a9f') {
-              throw "Chocolatey's make.exe is not the one pinned here: $hash"
-            }
-          }
-          $lib = (crystal env CRYSTAL_LIBRARY_PATH).Trim()
-          $llvm = (Get-Content "$lib\llvm_VERSION")[0].Trim()
-          "CRYSTAL_LIBRARY_PATH=$lib" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
-          "LLVM_VERSION=$llvm" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
-
-      - name: Build the fork's compiler, then `iyi`
-        shell: cmd
-        run: |
-          make -f Makefile.win crystal || exit /b 1
-          make -f Makefile.win iyi
+          name: windows-build
+          path: .build
 
       - name: Every std exercise, read for darwin, Windows, aarch64 and musl
         shell: bash
@@ -2919,7 +2824,7 @@ jobs:
   # - the runner's agent among them (bench/end_process.sh, which the stops
   # go through now).
   windows-std-siblings:
-    needs: plan
+    needs: [plan, windows-build]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'windows-std-siblings') }}
     runs-on: windows-2022
     timeout-minutes: 120
@@ -2933,34 +2838,12 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+      - uses: ./.github/actions/windows-toolchain
 
-      - uses: crystal-lang/install-crystal@36a22e9145188eec527c96e5a789ce4b832af587 # v1.9.5
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
-          crystal: 1.21.0
-
-      - name: What this machine has
-        shell: pwsh
-        run: |
-          if (-not (Get-Command make -ErrorAction SilentlyContinue)) {
-            choco install make --version 4.4.1 --no-progress -y
-            if ($LASTEXITCODE -ne 0) { throw "choco could not install make 4.4.1" }
-            $make = Join-Path $env:ChocolateyInstall 'lib\make\tools\install\bin\make.exe'
-            $hash = (Get-FileHash -Algorithm SHA256 $make).Hash.ToLower()
-            if ($hash -ne 'cc6dc291113dcbcc7735835acbfc23c52ed037e4e124ff2d7a0aeae6df563a9f') {
-              throw "Chocolatey's make.exe is not the one pinned here: $hash"
-            }
-          }
-          $lib = (crystal env CRYSTAL_LIBRARY_PATH).Trim()
-          $llvm = (Get-Content "$lib\llvm_VERSION")[0].Trim()
-          "CRYSTAL_LIBRARY_PATH=$lib" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
-          "LLVM_VERSION=$llvm" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
-
-      - name: Build the fork's compiler, then `iyi`
-        shell: cmd
-        run: |
-          make -f Makefile.win crystal || exit /b 1
-          make -f Makefile.win iyi
+          name: windows-build
+          path: .build
 
       # Python 3.14, as on Linux: a gate asks for `python3` first, which
       # setup-python's Windows build has beside `python`.
@@ -2995,7 +2878,7 @@ jobs:
   # not start there ran `bin/iyi`, a shell script, or named a module by
   # its Windows path, and take the exe and a `/` now.
   windows-gates:
-    needs: plan
+    needs: [plan, windows-build]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'windows-gates') }}
     runs-on: windows-2025
     timeout-minutes: 90
@@ -3005,35 +2888,13 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+      - uses: ./.github/actions/windows-toolchain
 
-      - uses: crystal-lang/install-crystal@36a22e9145188eec527c96e5a789ce4b832af587 # v1.9.5
+      - id: compiler
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
-          crystal: 1.21.0
-
-      - name: What this machine has
-        shell: pwsh
-        run: |
-          if (-not (Get-Command make -ErrorAction SilentlyContinue)) {
-            choco install make --version 4.4.1 --no-progress -y
-            if ($LASTEXITCODE -ne 0) { throw "choco could not install make 4.4.1" }
-            $make = Join-Path $env:ChocolateyInstall 'lib\make\tools\install\bin\make.exe'
-            $hash = (Get-FileHash -Algorithm SHA256 $make).Hash.ToLower()
-            if ($hash -ne 'cc6dc291113dcbcc7735835acbfc23c52ed037e4e124ff2d7a0aeae6df563a9f') {
-              throw "Chocolatey's make.exe is not the one pinned here: $hash"
-            }
-          }
-          $lib = (crystal env CRYSTAL_LIBRARY_PATH).Trim()
-          $llvm = (Get-Content "$lib\llvm_VERSION")[0].Trim()
-          "CRYSTAL_LIBRARY_PATH=$lib" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
-          "LLVM_VERSION=$llvm" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
-
-      - name: Build the fork's compiler, then `iyi`
-        id: compiler
-        shell: cmd
-        run: |
-          make -f Makefile.win crystal || exit /b 1
-          make -f Makefile.win iyi
+          name: windows-build
+          path: .build
 
       # The command surface, which the Linux job's `cli_spec` holds and no
       # Windows job ran. The daemon's examples are pending here (its server
@@ -3219,7 +3080,7 @@ jobs:
   # it was `Iyi::Loader`. A job of its own because a codegen example is a
   # program built and run, and there are fourteen thousand.
   windows-compiler-specs:
-    needs: plan
+    needs: [plan, windows-build]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'windows-compiler-specs') }}
     runs-on: windows-2025
     timeout-minutes: 180
@@ -3229,32 +3090,12 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+      - uses: ./.github/actions/windows-toolchain
 
-      - uses: crystal-lang/install-crystal@36a22e9145188eec527c96e5a789ce4b832af587 # v1.9.5
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
-          crystal: 1.21.0
-
-      - name: What this machine has
-        shell: pwsh
-        run: |
-          if (-not (Get-Command make -ErrorAction SilentlyContinue)) {
-            choco install make --version 4.4.1 --no-progress -y
-            if ($LASTEXITCODE -ne 0) { throw "choco could not install make 4.4.1" }
-            $make = Join-Path $env:ChocolateyInstall 'lib\make\tools\install\bin\make.exe'
-            $hash = (Get-FileHash -Algorithm SHA256 $make).Hash.ToLower()
-            if ($hash -ne 'cc6dc291113dcbcc7735835acbfc23c52ed037e4e124ff2d7a0aeae6df563a9f') {
-              throw "Chocolatey's make.exe is not the one pinned here: $hash"
-            }
-          }
-          $lib = (crystal env CRYSTAL_LIBRARY_PATH).Trim()
-          $llvm = (Get-Content "$lib\llvm_VERSION")[0].Trim()
-          "CRYSTAL_LIBRARY_PATH=$lib" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
-          "LLVM_VERSION=$llvm" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
-
-      - name: Build the fork's compiler
-        shell: cmd
-        run: make -f Makefile.win crystal
+          name: windows-build
+          path: .build
 
       # A spec that builds a program runs the compiler by the name below;
       # `bin/crystal` is a shell script.
@@ -3780,7 +3621,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [binary, darwin, darwin-std, darwin-std-siblings, clean-room, iyi, compiler-specs, stdlib-specs,
             samples, lsp-positions, std, std-siblings, std-platforms, targets, cross-objects, cross-run,
-            wasi-run, windows-probe, windows-collector, windows-runtime, windows-native,
+            wasi-run, windows-probe, windows-collector, windows-runtime, windows-build, windows-native,
             windows-native-gates, windows-native-surfaces, windows-std,
             windows-std-siblings, windows-std-platforms, windows-gates, windows-compiler-specs,
             wasm32-collector, docs]
@@ -3965,7 +3806,7 @@ jobs:
     needs: [plan, docs, build, iyi, compiler-specs, stdlib-specs, lsp-positions, samples, std,
             std-platforms, std-siblings, targets, cross-objects, cross-run, darwin,
             darwin-std-siblings, darwin-std, windows-probe, windows-collector, windows-runtime,
-            windows-native, windows-native-gates, windows-native-surfaces, windows-std,
+            windows-build, windows-native, windows-native-gates, windows-native-surfaces, windows-std,
             windows-std-platforms, windows-std-siblings, windows-gates, windows-compiler-specs,
             wasi-run, wasm32-collector, binary, clean-room, vscode]
     if: ${{ always() }}

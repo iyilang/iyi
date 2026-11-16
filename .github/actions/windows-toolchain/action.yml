@@ -1,0 +1,38 @@
+name: Windows toolchain
+description: >-
+  MSVC's environment, Crystal 1.21.0 to bootstrap, a pinned `make` where the
+  image has none, and `CRYSTAL_LIBRARY_PATH` and `LLVM_VERSION` for Makefile.win:
+  what every Windows job that builds or links needs before its first step.
+  Why each is pinned as it is: the comments above this action's use in the
+  `windows-native` job of .github/workflows/iyi.yml.
+runs:
+  using: composite
+  steps:
+    - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+
+    - uses: crystal-lang/install-crystal@36a22e9145188eec527c96e5a789ce4b832af587 # v1.9.5
+      with:
+        crystal: 1.21.0
+
+    - name: What this machine has
+      shell: pwsh
+      run: |
+        if (-not (Get-Command make -ErrorAction SilentlyContinue)) {
+          choco install make --version 4.4.1 --no-progress -y
+          if ($LASTEXITCODE -ne 0) { throw "choco could not install make 4.4.1" }
+          $make = Join-Path $env:ChocolateyInstall 'lib\make\tools\install\bin\make.exe'
+          $hash = (Get-FileHash -Algorithm SHA256 $make).Hash.ToLower()
+          if ($hash -ne 'cc6dc291113dcbcc7735835acbfc23c52ed037e4e124ff2d7a0aeae6df563a9f') {
+            throw "Chocolatey's make.exe is not the one pinned here: $hash"
+          }
+        }
+        $lib = (crystal env CRYSTAL_LIBRARY_PATH).Trim()
+        if (-not (Test-Path "$lib\llvm_VERSION")) {
+          Write-Host "no llvm_VERSION beside the Crystal package's libraries, at $lib"
+          exit 1
+        }
+        $llvm = (Get-Content "$lib\llvm_VERSION")[0].Trim()
+        Write-Host "bootstrap libraries: $lib"
+        Write-Host "llvm: $llvm"
+        "CRYSTAL_LIBRARY_PATH=$lib" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+        "LLVM_VERSION=$llvm" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV

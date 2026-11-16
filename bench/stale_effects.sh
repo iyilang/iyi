@@ -220,7 +220,7 @@ def run_census(repo, iyi, work, mode, progs=None, worker_count=None):
 
         reasons = [reason for reason in data['not_reusable']
                    if reason['reason'] != 'refused build mode: --cross-compile']
-        if not reasons:
+        if not reasons and not data['rg3']:
             static_eligible_programs.append(rel_prog)
 
         rg3 = data['rg3']

@@ -224,8 +224,17 @@ describe Iyi::Mod::SumDB do
         cache.observe(data["checkpoints"]["257"].as_s) { |tile| Base64.decode(data["tiles"]["257"][tile].as_s) }
         second = Iyi::Mod::SumDB::Cache.new(path, keys(data), "sum.iyi.dev")
         second.observe(data["checkpoints"]["513"].as_s) { |tile| Base64.decode(data["tiles"]["513"][tile].as_s) }
-        expect_raises(Iyi::Mod::SumDB::Error, /stale checkpoint/) do
-          cache.observe(data["checkpoints"]["300"].as_s) { |tile| Base64.decode(data["tiles"]["300"][tile].as_s) }
+        retained = cache.observe(data["checkpoints"]["300"].as_s) { |tile| Base64.decode(data["tiles"]["513"][tile].as_s) }
+        retained.size.should eq 513
+        old = Iyi::Mod::SumDB::Record.parse(data["records"]["256"].as_s)
+        client = Iyi::Mod::SumDB::Client.new(cache, keys(data), "sum.iyi.dev")
+        checked = client.verify_lookup(data["old_lookup"].as_s, old.path, old.version, old.archive_hash) do |tile|
+          value = data["tiles"]["257"].as_h[tile]? || data["tiles"]["513"].as_h[tile]
+          Base64.decode(value.as_s)
+        end
+        checked.text.should eq old.text
+        expect_raises(Iyi::Mod::SumDB::Error, /forked checkpoint/) do
+          cache.observe(data["old_fork"].as_s) { |tile| Base64.decode(data["tiles"]["513"][tile].as_s) }
         end
         cache.latest.not_nil!.size.should eq 513
       end

@@ -16,6 +16,8 @@
   "fork": "sum.iyi.dev\n513\ndzQP0LYa+OQ1p/EM2LPU6FUDocq0V2rDnh0Uf28imiU=\n\n— sum.iyi.dev xBaY6z+IO528eqqVKJY2DwjRrjVFZZttzc6tEyY0EKCmFFApdVjjdp5BPxZNH18oFqbaGVcViyr4kZkLpUG44Oi7kwc=\n",
   "go_module": "golang.org/x/mod v0.29.0",
   "lookup": "260\nexample.test/pack0260 v1.2.3 h2:775e6335b4172fe6480a74ad4e14b851dc057c07510a63f9fa100c65a2c58ee8\nexample.test/pack0260 v1.2.3/iyi.mod h2:3fe8031c9bb8fd180a090a9d23ff93fde242caae217950e3ba922b070c9587a9\n\nsum.iyi.dev\n513\nqiIJvfqiOJjEKvZuZB0OrWys9U65q8+4Z8SWwFWdXK4=\n\n— sum.iyi.dev xBaY698VqSdTJzd06kGYFDyNrICqMPjva5zBlHPjqWqGlCYMIYyCgCJTita9t9FPumfYhE8kAX5DTDUFauYzc+ZPRwU=\n",
+  "old_fork": "sum.iyi.dev\n257\ndzQP0LYa+OQ1p/EM2LPU6FUDocq0V2rDnh0Uf28imiU=\n\n— sum.iyi.dev xBaY65RAoXeeEldvi3xxRdSeWuPC07k5QZpvhGe0ya/qAWGDI+V6b7aEkxZ0nxbc2S3baHOd0g9sb6L/Dvibz6riKwU=\n",
+  "old_lookup": "256\nexample.test/pack0256 v1.2.3 h2:f1dae4dc5f6666eb2149d5c6af2ecbbe555276fb282fef85dc508ecac77590fb\nexample.test/pack0256 v1.2.3/iyi.mod h2:6de143ba32ff84fed3a851a1f98bad4e523c3fb6860c2c1cea71e61a12095d18\n\nsum.iyi.dev\n257\nDX6UN5MTDxQ9q+uvoAxfWMmWyDh/YFyMCutqEg/DPC0=\n\n— sum.iyi.dev xBaY6+ZskibveFu7L3c5WDH/f5+lynXeBYeMytOWW2jjrNU8eBLERYnQmiWBWyekEMaqb1UTTwOiZIENvmVdkbSg+gM=\n",
   "record_proofs": {
     "1": {
       "0": []

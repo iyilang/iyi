@@ -87,11 +87,17 @@ module Iyi::Mod::SumDB
           old = latest
           if old
             if incoming.size < old.size
-              raise Error.new("sumdb: stale checkpoint, cached tree is newer")
+              # Lookup responses are immutable and may carry an older
+              # checkpoint. Authenticate it against the newest cached tree
+              # without ever replacing that tree with the older one.
+              tiles = TLog::Tiles.new(old.size, old.root) { |path| fetch.call(path) }
+              tiles.verify_consistency(incoming.size, incoming.root)
+              return old
+            else
+              tiles = TLog::Tiles.new(incoming.size, incoming.root) { |path| fetch.call(path) }
+              tiles.verify_consistency(old.size, old.root)
+              return old if incoming.size == old.size
             end
-            tiles = TLog::Tiles.new(incoming.size, incoming.root) { |path| fetch.call(path) }
-            tiles.verify_consistency(old.size, old.root)
-            return old if incoming.size == old.size
           end
           staging = "#{@path}.#{Process.pid}.tmp"
           begin

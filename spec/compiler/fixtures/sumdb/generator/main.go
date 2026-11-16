@@ -118,6 +118,11 @@ func main() {
 	foreignText := fmt.Sprintf("other.example\n513\n%s\n", roots[513].String())
 	foreign, err := note.Sign(&note.Note{Text: foreignText}, signer)
 	must(err)
+	oldFramed, err := tlog.FormatRecord(256, []byte(record(256)))
+	must(err)
+	oldForkText := fmt.Sprintf("sum.iyi.dev\n257\n%s\n", forkRoot.String())
+	oldFork, err := note.Sign(&note.Note{Text: oldForkText}, signer)
+	must(err)
 	output := map[string]any{
 		"go_module": "golang.org/x/mod v0.29.0", "verifier": vkey,
 		"records": records,
@@ -126,6 +131,8 @@ func main() {
 		"lookup":         string(framed) + checkpoints[513],
 		"fork":           string(fork),
 		"foreign_origin": string(foreign),
+		"old_lookup":     string(oldFramed) + checkpoints[257],
+		"old_fork":       string(oldFork),
 	}
 	data, err := json.MarshalIndent(output, "", "  ")
 	must(err)

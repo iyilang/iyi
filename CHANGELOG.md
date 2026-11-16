@@ -4,6 +4,12 @@
 
 ### Added
 
+- **`iyi doc --json [DIR]` prints a package's exported APIs as data.**
+  The package path and compiler identity accompany its modules, ordered by
+  path, each carrying the same API and doc comments as `iyi mod dump --json`.
+  DIR defaults to the current directory; a missing manifest or an empty
+  package is refused.
+
 - **The native linker writes executables without a system linker.**
   `compiler/native/link` writes Mach-O and ELF images, resolves relocations
   and imports, and generates Mach-O code signatures. The Mach-O gate runs

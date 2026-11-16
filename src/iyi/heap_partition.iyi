@@ -622,6 +622,35 @@ class IyiHeap
     @@collect_every_park
   end
 
+  # ── The arena directory's bounds ──────────────────────────────────────
+
+  # The lowest and highest slot an arena or a large mapping ever had a
+  # byte in (`IyiHeap.arena_dir`): widened under the runtime lock before
+  # the byte is written, never narrowed. A word outside them names no
+  # arena and no large mapping, and is answered without a read of the
+  # directory (`arena_of`, `containing_large`, `owner_of`,
+  # `lend_step_large`). On darwin a read of a directory page nothing
+  # wrote makes the page resident - there is no shared zero page to map -
+  # and the mark's and the lend walk's reads of words that are no pointer
+  # (a short string's last word, a float's bits) left 227-251 of its
+  # 1,024 pages, 3.7-4.1 MB, resident in #145's app under load (tmac, 16
+  # KB pages); Linux maps its zero page for such a read (heap22 fu,
+  # TmacRss). bench/heap_drain's directory mode holds both halves.
+  @@dir_low : UInt64 = DIR_SLOTS
+  @@dir_high : UInt64 = 0_u64
+
+  def self.dir_widen(low : UInt64, high : UInt64) : Nil
+    return if low >= DIR_SLOTS
+    high = DIR_SLOTS - 1_u64 if high >= DIR_SLOTS
+    @@dir_low = low if low < @@dir_low
+    @@dir_high = high if high > @@dir_high
+  end
+
+  @[AlwaysInline]
+  def self.dir_outside?(slot : UInt64) : Bool
+    slot < @@dir_low || slot > @@dir_high
+  end
+
   # ── Arena tables ──────────────────────────────────────────────────────
 
   def self.partition_arena?(arena : UInt64) : Bool

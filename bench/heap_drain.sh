@@ -201,7 +201,7 @@ if [ "$PART" = all ] || [ "$PART" = copies ]; then
   # the directory's end read in it again, its pages go resident; not
   # widened by a large mapping, an object of one outside the arenas'
   # slots is nobody's.
-  COPY_FILE=prelude.iyi copy "the directory unread outside the bounds" c8 1 \
+  copy "the directory unread outside the bounds" c8 1 \
     "$(subst 'def self\.dir_outside\?' 'slot < @@dir_low \|\| slot > @@dir_high' 'slot >= DIR_SLOTS')" \
     "-Dheap_partitions --release" dir
   COPY_FILE=prelude.iyi copy "a large mapping widens the bounds" c9 1 \

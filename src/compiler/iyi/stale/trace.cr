@@ -103,6 +103,30 @@ module Iyi::Stale
       end
     end
 
+    # Windows File.info supplies the zero FILETIME for character devices and
+    # pipes. That one out-of-range value has a dedicated wire representation;
+    # every other unrepresentable timestamp refuses reuse.
+    def self.metadata_time_ns(value : Int128, windows_device : Bool) : Int64?
+      if windows_device
+        return value == -11644473600000000000_i128 ? Int64::MIN : nil
+      end
+      return nil if value < Int64::MIN || value > Int64::MAX
+      value.to_i64
+    end
+
+    private def self.metadata_type(info : File::Info) : UInt8
+      case info.type
+      when .file?             then 1_u8
+      when .directory?        then 2_u8
+      when .symlink?          then 3_u8
+      when .character_device? then 4_u8
+      when .block_device?     then 5_u8
+      when .pipe?             then 6_u8
+      when .socket?           then 7_u8
+      else                         0_u8
+      end
+    end
+
     private def self.resolved_path(path : String) : String
       {% if flag?(:win32) %}
         handle = LibC.CreateFileW(Crystal::System.to_wstr(path), LibC::FILE_READ_ATTRIBUTES,
@@ -289,17 +313,13 @@ module Iyi::Stale
               elsif info.nil?
                 a3_mismatches << "file missing after exit: #{real}"
               else
-                current_type = case info.type
-                               when .file?             then 1_u8
-                               when .directory?        then 2_u8
-                               when .symlink?          then 3_u8
-                               when .character_device? then 4_u8
-                               when .block_device?     then 5_u8
-                               when .pipe?             then 6_u8
-                               when .socket?           then 7_u8
-                               else                         0_u8
-                               end
-                if current_type != ftype || info.size.to_u64 != size || info.modification_time.to_unix_ns.to_i64 != mtime_ns
+                current_type = metadata_type(info)
+                device = {{ flag?(:win32) }} && (current_type == 4_u8 || current_type == 6_u8)
+                current_time = metadata_time_ns(info.modification_time.to_unix_ns, device)
+                unless current_time
+                  return TraceResult.new(complete: false, incomplete_reason: "cannot represent file timestamp #{real}")
+                end
+                if current_type != ftype || info.size.to_u64 != size || current_time != mtime_ns
                   a3_mismatches << "file metadata changed during run: #{real}"
                 end
               end
@@ -529,12 +549,7 @@ module Iyi::Stale
           if exists
             if info
               size = info.size.to_u64
-              ftype = case info.type
-                      when .file?      then 1_u8
-                      when .directory? then 2_u8
-                      when .symlink?   then 3_u8
-                      else                  0_u8
-                      end
+              ftype = metadata_type(info)
             end
             content_hash = hash_bytes(File.read(target).to_slice)
           end
@@ -565,13 +580,11 @@ module Iyi::Stale
           if exists
             if info
               size = info.size.to_u64
-              mtime_ns = info.modification_time.to_unix_ns.to_i64
-              ftype = case info.type
-                      when .file?      then 1_u8
-                      when .directory? then 2_u8
-                      when .symlink?   then 3_u8
-                      else                  0_u8
-                      end
+              ftype = metadata_type(info)
+              device = {{ flag?(:win32) }} && (ftype == 4_u8 || ftype == 6_u8)
+              current_time = metadata_time_ns(info.modification_time.to_unix_ns, device)
+              return "run: #{obs.path} timestamp cannot be represented" unless current_time
+              mtime_ns = current_time
             end
           end
 

@@ -34,6 +34,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+REAL_BUILD_TIMEOUT = 1800
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 def is_wsl_stub(path: str) -> bool:
@@ -292,6 +293,7 @@ class TestFullScriptExecutionWithNetworkSpy(unittest.TestCase):
         enable_crypto: bool = True,
         enable_openssl_mlkem: bool = True,
         openssl_shape: str = "valid",
+        real_compiler: bool = False,
     ) -> tuple[Path, dict[str, str], Path]:
         """Create mock compiler, spy curl, and controlled capability wrappers."""
         bin_dir = Path(tmpdir) / "bin"
@@ -664,7 +666,10 @@ exit 0
         env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
         env["PYTHONPATH"] = f"{pylib}{os.pathsep}{env.get('PYTHONPATH', '')}"
         env["IYI"] = str(mock_iyi)
-        env.pop("IYI_REAL_COMPILER", None)
+        if real_compiler:
+            env["IYI_REAL_COMPILER"] = (REPO_ROOT / "bin" / "iyi").as_posix()
+        else:
+            env.pop("IYI_REAL_COMPILER", None)
         env["PY"] = str(py_wrapper)
         env["OPENSSL"] = str(mock_openssl)
 
@@ -739,42 +744,37 @@ exit 0
                     shutil.copy(staged_dir / name, inputs_dir / name)
 
             # 1. OpenSSL lacking ML-KEM in ML-KEM strict mode
-            _, env_no_openssl, _ = self._setup_safe_environment(tmpdir, enable_crypto=True, enable_openssl_mlkem=False)
+            _, env_no_openssl, _ = self._setup_safe_environment(tmpdir, enable_crypto=True, enable_openssl_mlkem=False, real_compiler=True)
             env_no_openssl["IYI_PROOF_INPUTS_DIR"] = str(inputs_dir)
-            res_mlkem = subprocess.run([get_bash_bin(), str(REPO_ROOT / "bench" / "std_mlkem_exercise.sh")], env=env_no_openssl, capture_output=True, text=True, timeout=30)
+            res_mlkem = subprocess.run([get_bash_bin(), str(REPO_ROOT / "bench" / "std_mlkem_exercise.sh")], env=env_no_openssl, capture_output=True, text=True, timeout=REAL_BUILD_TIMEOUT)
             self.assertNotEqual(res_mlkem.returncode, 0)
             self.assertIn("OpenSSL goes unasked", res_mlkem.stdout)
 
             # 2. Python lacking cryptography in HPKE strict mode
-            _, env_no_crypto, _ = self._setup_safe_environment(tmpdir, enable_crypto=False, enable_openssl_mlkem=True)
+            _, env_no_crypto, _ = self._setup_safe_environment(tmpdir, enable_crypto=False, enable_openssl_mlkem=True, real_compiler=True)
             env_no_crypto["IYI_PROOF_INPUTS_DIR"] = str(inputs_dir)
             res_hpke = subprocess.run([get_bash_bin(), str(REPO_ROOT / "bench" / "std_hpke_exercise.sh")], env=env_no_crypto, capture_output=True, text=True, timeout=30)
             self.assertNotEqual(res_hpke.returncode, 0)
             self.assertIn("Python HPKE goes unasked", res_hpke.stdout)
 
             # 3. Python lacking cryptography in P-384 strict mode
-            res_p384 = subprocess.run([get_bash_bin(), str(REPO_ROOT / "bench" / "std_p384_exercise.sh")], env=env_no_crypto, capture_output=True, text=True, timeout=30)
+            res_p384 = subprocess.run([get_bash_bin(), str(REPO_ROOT / "bench" / "std_p384_exercise.sh")], env=env_no_crypto, capture_output=True, text=True, timeout=REAL_BUILD_TIMEOUT)
             self.assertNotEqual(res_p384.returncode, 0)
             self.assertIn("signatures go uncompared", res_p384.stdout)
 
             # 4. OpenSSL speed malformed output in P-384 strict mode
-            _, env_malformed_openssl, _ = self._setup_safe_environment(tmpdir, enable_crypto=True, openssl_shape="malformed")
+            _, env_malformed_openssl, _ = self._setup_safe_environment(tmpdir, enable_crypto=True, openssl_shape="malformed", real_compiler=True)
             env_malformed_openssl["IYI_PROOF_INPUTS_DIR"] = str(inputs_dir)
-            res_p384_malformed = subprocess.run([get_bash_bin(), str(REPO_ROOT / "bench" / "std_p384_exercise.sh")], env=env_malformed_openssl, capture_output=True, text=True, timeout=30)
+            res_p384_malformed = subprocess.run([get_bash_bin(), str(REPO_ROOT / "bench" / "std_p384_exercise.sh")], env=env_malformed_openssl, capture_output=True, text=True, timeout=REAL_BUILD_TIMEOUT)
             self.assertNotEqual(res_p384_malformed.returncode, 0)
             self.assertIn("openssl speed answered in a shape this does not read", res_p384_malformed.stdout)
 
     def test_ordinary_mode_preserves_successful_skip_when_oracles_unsupported(self) -> None:
         """Prove that in ordinary mode (unset IYI_PROOF_INPUTS_DIR), unsupported oracles skip without failure."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            _, env_no_crypto, canary = self._setup_safe_environment(tmpdir, enable_crypto=False, enable_openssl_mlkem=False)
+            _, env_no_crypto, canary = self._setup_safe_environment(tmpdir, enable_crypto=False, enable_openssl_mlkem=False, real_compiler=True)
             env_no_crypto.pop("IYI_PROOF_INPUTS_DIR", None)
-            # The scripts read the real compiler's assembly for decapsulation's
-            # mask and the P-384 value barriers, which a real build of each takes
-            # minutes on a Windows runner, not the 30 seconds a fake one does.
-            real_compiler = (REPO_ROOT / "bin" / "iyi").as_posix()
-            env_no_crypto["IYI_REAL_COMPILER"] = real_compiler
-            build_timeout = 1800
+            # Assembly checks use real compiler output, including on Windows.
 
             # In ordinary mode without cryptography, scripts skip oracles without setting status=1
             res_hpke = subprocess.run([get_bash_bin(), str(REPO_ROOT / "bench" / "std_hpke_exercise.sh")], env=env_no_crypto, capture_output=True, text=True, timeout=30)
@@ -782,19 +782,18 @@ exit 0
             self.assertIn("Python HPKE goes unasked", res_hpke.stdout)
             self.assertIn("it goes unasked", res_hpke.stdout)
 
-            res_mlkem = subprocess.run([get_bash_bin(), str(REPO_ROOT / "bench" / "std_mlkem_exercise.sh")], env=env_no_crypto, capture_output=True, text=True, timeout=build_timeout)
+            res_mlkem = subprocess.run([get_bash_bin(), str(REPO_ROOT / "bench" / "std_mlkem_exercise.sh")], env=env_no_crypto, capture_output=True, text=True, timeout=REAL_BUILD_TIMEOUT)
             self.assertEqual(res_mlkem.returncode, 0, "Ordinary mode ML-KEM must exit 0 when oracles are skipped")
             self.assertIn("OpenSSL goes unasked", res_mlkem.stdout)
 
-            res_p384 = subprocess.run([get_bash_bin(), str(REPO_ROOT / "bench" / "std_p384_exercise.sh")], env=env_no_crypto, capture_output=True, text=True, timeout=build_timeout)
+            res_p384 = subprocess.run([get_bash_bin(), str(REPO_ROOT / "bench" / "std_p384_exercise.sh")], env=env_no_crypto, capture_output=True, text=True, timeout=REAL_BUILD_TIMEOUT)
             self.assertEqual(res_p384.returncode, 0, "Ordinary mode P-384 must exit 0 when oracles are skipped")
             self.assertIn("signatures go uncompared", res_p384.stdout)
 
             # 4. Ordinary mode with malformed openssl speed preserves success (exit 0)
-            _, env_malformed_ordinary, _ = self._setup_safe_environment(tmpdir, enable_crypto=True, openssl_shape="malformed")
+            _, env_malformed_ordinary, _ = self._setup_safe_environment(tmpdir, enable_crypto=True, openssl_shape="malformed", real_compiler=True)
             env_malformed_ordinary.pop("IYI_PROOF_INPUTS_DIR", None)
-            env_malformed_ordinary["IYI_REAL_COMPILER"] = real_compiler
-            res_p384_malformed = subprocess.run([get_bash_bin(), str(REPO_ROOT / "bench" / "std_p384_exercise.sh")], env=env_malformed_ordinary, capture_output=True, text=True, timeout=build_timeout)
+            res_p384_malformed = subprocess.run([get_bash_bin(), str(REPO_ROOT / "bench" / "std_p384_exercise.sh")], env=env_malformed_ordinary, capture_output=True, text=True, timeout=REAL_BUILD_TIMEOUT)
             self.assertEqual(res_p384_malformed.returncode, 0, "Ordinary mode P-384 must exit 0 on malformed openssl speed shape")
             self.assertIn("openssl speed answered in a shape this does not read", res_p384_malformed.stdout)
     # --- ML-KEM ---
@@ -807,7 +806,7 @@ exit 0
                 self.fail("Authentic ML-KEM vector bundle required in strict qualification")
             self.skipTest("Authentic ML-KEM vector bundle not found via IYI_AUTHENTIC_VECTORS_DIR / IYI_PROOF_INPUTS_DIR")
         with tempfile.TemporaryDirectory() as tmpdir:
-            _, env, canary = self._setup_safe_environment(tmpdir)
+            _, env, canary = self._setup_safe_environment(tmpdir, real_compiler=True)
             inputs_dir = Path(tmpdir) / "valid_inputs"
             inputs_dir.mkdir()
             env["IYI_PROOF_INPUTS_DIR"] = str(inputs_dir)
@@ -816,7 +815,7 @@ exit 0
             shutil.copy(staged_dir / "mlkem-encdec.json", inputs_dir / "mlkem-encdec.json")
 
             script = REPO_ROOT / "bench" / "std_mlkem_exercise.sh"
-            res = subprocess.run([get_bash_bin(), str(script)], env=env, capture_output=True, text=True, timeout=30)
+            res = subprocess.run([get_bash_bin(), str(script)], env=env, capture_output=True, text=True, timeout=REAL_BUILD_TIMEOUT)
 
             self.assertEqual(res.returncode, 0, f"ML-KEM valid baseline failed:\n{res.stdout}\n{res.stderr}")
             self.assertIn("ALL CHECKS PASSED", res.stdout)
@@ -835,8 +834,10 @@ exit 0
             script = REPO_ROOT / "bench" / "std_mlkem_exercise.sh"
             res = subprocess.run([get_bash_bin(), str(script)], env=env, capture_output=True, text=True, timeout=30)
 
-            self.assertNotEqual(res.returncode, 0, "Script must exit nonzero when offline inputs are missing")
+            self.assertEqual(res.returncode, 1, "Script must exit 1 when offline inputs are missing")
             self.assertIn("FAIL IYI_PROOF_INPUTS_DIR", res.stdout + res.stderr)
+            self.assertIn("FAIL IYI_PROOF_INPUTS_DIR: missing or corrupt ML-KEM vectors", res.stdout + res.stderr)
+            self.assertNotIn("== against OpenSSL, both ways", res.stdout)
             self.assertIn("mlkem-keygen.json", res.stdout + res.stderr)
             self.assertFalse(canary.exists(), "Network must never be contacted when IYI_PROOF_INPUTS_DIR is set")
 
@@ -853,8 +854,10 @@ exit 0
             script = REPO_ROOT / "bench" / "std_mlkem_exercise.sh"
             res = subprocess.run([get_bash_bin(), str(script)], env=env, capture_output=True, text=True, timeout=30)
 
-            self.assertNotEqual(res.returncode, 0, "Script must exit nonzero when offline inputs are corrupt")
+            self.assertEqual(res.returncode, 1, "Script must exit 1 when offline inputs are corrupt")
             self.assertIn("FAIL IYI_PROOF_INPUTS_DIR", res.stdout + res.stderr)
+            self.assertIn("FAIL IYI_PROOF_INPUTS_DIR: missing or corrupt ML-KEM vectors", res.stdout + res.stderr)
+            self.assertNotIn("== against OpenSSL, both ways", res.stdout)
             self.assertIn("sha256", res.stdout + res.stderr)
             self.assertFalse(canary.exists(), "Network must never be contacted when IYI_PROOF_INPUTS_DIR is set")
 
@@ -895,8 +898,10 @@ exit 0
             script = REPO_ROOT / "bench" / "std_hpke_exercise.sh"
             res = subprocess.run([get_bash_bin(), str(script)], env=env, capture_output=True, text=True, timeout=30)
 
-            self.assertNotEqual(res.returncode, 0, "Script must exit nonzero when offline inputs are missing")
+            self.assertEqual(res.returncode, 1, "Script must exit 1 when offline inputs are missing")
             self.assertIn("FAIL IYI_PROOF_INPUTS_DIR", res.stdout + res.stderr)
+            self.assertIn("FAIL IYI_PROOF_INPUTS_DIR: missing or corrupt HPKE vectors", res.stdout + res.stderr)
+            self.assertNotIn("== the Python HPKE, held to the same vectors first", res.stdout)
             self.assertIn("hpke-vectors.json", res.stdout + res.stderr)
             self.assertFalse(canary.exists(), "Network must never be contacted when IYI_PROOF_INPUTS_DIR is set")
 
@@ -912,8 +917,10 @@ exit 0
             script = REPO_ROOT / "bench" / "std_hpke_exercise.sh"
             res = subprocess.run([get_bash_bin(), str(script)], env=env, capture_output=True, text=True, timeout=30)
 
-            self.assertNotEqual(res.returncode, 0, "Script must exit nonzero when offline inputs are corrupt")
+            self.assertEqual(res.returncode, 1, "Script must exit 1 when offline inputs are corrupt")
             self.assertIn("FAIL IYI_PROOF_INPUTS_DIR", res.stdout + res.stderr)
+            self.assertIn("FAIL IYI_PROOF_INPUTS_DIR: missing or corrupt HPKE vectors", res.stdout + res.stderr)
+            self.assertNotIn("== the Python HPKE, held to the same vectors first", res.stdout)
             self.assertIn("sha256", res.stdout + res.stderr)
             self.assertFalse(canary.exists(), "Network must never be contacted when IYI_PROOF_INPUTS_DIR is set")
 
@@ -927,7 +934,7 @@ exit 0
                 self.fail("Authentic Wycheproof vector bundle required in strict qualification")
             self.skipTest("Authentic Wycheproof vector bundle not found via IYI_AUTHENTIC_VECTORS_DIR / IYI_PROOF_INPUTS_DIR")
         with tempfile.TemporaryDirectory() as tmpdir:
-            _, env, canary = self._setup_safe_environment(tmpdir)
+            _, env, canary = self._setup_safe_environment(tmpdir, real_compiler=True)
             inputs_dir = Path(tmpdir) / "valid_inputs"
             inputs_dir.mkdir()
             env["IYI_PROOF_INPUTS_DIR"] = str(inputs_dir)
@@ -935,7 +942,7 @@ exit 0
             shutil.copy(staged_dir / "wycheproof-p384.json", inputs_dir / "wycheproof-p384.json")
 
             script = REPO_ROOT / "bench" / "std_p384_exercise.sh"
-            res = subprocess.run([get_bash_bin(), str(script)], env=env, capture_output=True, text=True, timeout=30)
+            res = subprocess.run([get_bash_bin(), str(script)], env=env, capture_output=True, text=True, timeout=REAL_BUILD_TIMEOUT)
 
             self.assertEqual(res.returncode, 0, f"P-384 valid baseline failed:\n{res.stdout}\n{res.stderr}")
             self.assertIn("ALL CHECKS PASSED", res.stdout)
@@ -953,8 +960,10 @@ exit 0
             script = REPO_ROOT / "bench" / "std_p384_exercise.sh"
             res = subprocess.run([get_bash_bin(), str(script)], env=env, capture_output=True, text=True, timeout=30)
 
-            self.assertNotEqual(res.returncode, 0, "Script must exit nonzero when offline inputs are missing")
+            self.assertEqual(res.returncode, 1, "Script must exit 1 when offline inputs are missing")
             self.assertIn("FAIL IYI_PROOF_INPUTS_DIR", res.stdout + res.stderr)
+            self.assertIn("FAIL IYI_PROOF_INPUTS_DIR: missing or corrupt wycheproof-p384.json", res.stdout + res.stderr)
+            self.assertNotIn("== how long keygen, ECDH and signing take", res.stdout)
             self.assertIn("wycheproof-p384.json", res.stdout + res.stderr)
             self.assertFalse(canary.exists(), "Network must never be contacted when IYI_PROOF_INPUTS_DIR is set")
 
@@ -970,8 +979,10 @@ exit 0
             script = REPO_ROOT / "bench" / "std_p384_exercise.sh"
             res = subprocess.run([get_bash_bin(), str(script)], env=env, capture_output=True, text=True, timeout=30)
 
-            self.assertNotEqual(res.returncode, 0, "Script must exit nonzero when offline inputs are corrupt")
+            self.assertEqual(res.returncode, 1, "Script must exit 1 when offline inputs are corrupt")
             self.assertIn("FAIL IYI_PROOF_INPUTS_DIR", res.stdout + res.stderr)
+            self.assertIn("FAIL IYI_PROOF_INPUTS_DIR: missing or corrupt wycheproof-p384.json", res.stdout + res.stderr)
+            self.assertNotIn("== how long keygen, ECDH and signing take", res.stdout)
             self.assertIn("sha256", res.stdout + res.stderr)
             self.assertFalse(canary.exists(), "Network must never be contacted when IYI_PROOF_INPUTS_DIR is set")
 

@@ -192,10 +192,10 @@ FETCHED=0
 if [ "${IYI_PROOF_INPUTS_DIR+set}" = "set" ]; then
   if [ -z "$PY" ]; then
     echo "  FAIL: python is required to process IYI_PROOF_INPUTS_DIR vectors" >&2
-    status=1
+    exit 1
   elif ! "$PY" "$REPO/proof/offline_vectors.py" hpke "$WORK/every.json" --subset-out "$WORK/subset.json" --vendored "$VECTORS"; then
     echo "  FAIL IYI_PROOF_INPUTS_DIR: missing or corrupt HPKE vectors" >&2
-    status=1
+    exit 1
   elif "$WORK/hpke-release" "data" "$WORK/every.json" >"$WORK/every.out" 2>&1; then
     FETCHED=1
     echo "  cut by the vendored rule, the file is the vendored subset, value for value"

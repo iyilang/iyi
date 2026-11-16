@@ -5,6 +5,25 @@ require "compiler/iyi/stale/check"
 require "compiler/iyi/stale/machine_key"
 require "compiler/iyi/stale/key_file"
 
+describe "Iyi::IyiLibraryPath" do
+  it "uses the current library path on each call" do
+    previous = ENV["IYI_LIBRARY_PATH"]?
+    begin
+      ENV["IYI_LIBRARY_PATH"] = "first-library-path"
+      Iyi::IyiLibraryPath.paths.should contain("first-library-path")
+      ENV["IYI_LIBRARY_PATH"] = "second-library-path"
+      Iyi::IyiLibraryPath.paths.should contain("second-library-path")
+      Iyi::IyiLibraryPath.paths.should_not contain("first-library-path")
+    ensure
+      if previous
+        ENV["IYI_LIBRARY_PATH"] = previous
+      else
+        ENV.delete("IYI_LIBRARY_PATH")
+      end
+    end
+  end
+end
+
 describe "Iyi::Stale S3g: Check, MachineKey, KeyFile, Accept/Block" do
   describe "Iyi::Stale::MachineKey" do
     it "creates 32-byte machine key with mode 0600 under tests-v1/key" do

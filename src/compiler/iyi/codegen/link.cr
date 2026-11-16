@@ -114,7 +114,10 @@ module Iyi
       default_paths.join(Process::PATH_DELIMITER)
     end
 
-    class_getter paths : Array(String) do
+    # Read the path for each link. A process-wide memo both hides these
+    # environment reads from later stale recorders and keeps an old path after
+    # the environment changes in a long-lived compiler process.
+    def self.paths : Array(String)
       default_paths
     end
   end

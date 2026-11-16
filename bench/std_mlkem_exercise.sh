@@ -184,10 +184,10 @@ PY
 if [ "${IYI_PROOF_INPUTS_DIR+set}" = "set" ]; then
   if [ -z "$PY" ]; then
     echo "  FAIL: python is required to process IYI_PROOF_INPUTS_DIR vectors" >&2
-    status=1
+    exit 1
   elif ! "$PY" "$REPO/proof/offline_vectors.py" mlkem "$WORK/acvp-all.json"; then
     echo "  FAIL IYI_PROOF_INPUTS_DIR: missing or corrupt ML-KEM vectors" >&2
-    status=1
+    exit 1
   elif "$WORK/mlkem-release" "data" "$WORK/acvp-all.json" >"$WORK/acvp-all.out" 2>&1; then
     grep '^  [0-9]' "$WORK/acvp-all.out" | sed 's/^  /  checked: /'
   else

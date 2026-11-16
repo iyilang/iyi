@@ -35,6 +35,7 @@ describe "Iyi::Stale S3c: env-only recorder, CompilerEnvFp" do
     end
 
     it "classifies excluded variables (CHILD_ENV)" do
+      Iyi::BuildInputs::CHILD_ENV.includes?("__COMPAT_LAYER").should be_true
       Iyi::BuildInputs::CHILD_ENV.each do |var|
         Iyi::Stale::CompilerEnv.variable_class(var).should eq(Iyi::Stale::CompilerEnv::VariableClass::Excluded), "expected #{var} to be excluded"
         Iyi::Stale::CompilerEnv.excluded_class?(var).should be_true

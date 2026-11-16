@@ -525,6 +525,7 @@ describe "Iyi::Stale inputs record (--stale-inputs)" do
       data["portable_build"].as_s.should eq("b" * 64)
       data["env_enumerated"].as_bool.should be_false
       data["observed_env"].as_h.has_key?("PATH").should be_true
+      data["observed_env"].as_h.has_key?("__COMPAT_LAYER").should be_true
       data["listings"].as_h.has_key?(Iyi::BuildInputs.key(dir)).should be_true
       data["pkg_config"].as_a[0].as_a[0].as_s.should eq("zlib")
       entry = data["files"].as_a.find { |file| file.as_a[0].as_s == Iyi::BuildInputs.key(source_path) }.not_nil!

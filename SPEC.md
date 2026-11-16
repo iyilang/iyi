@@ -8054,7 +8054,7 @@ Chaos mode: combining `--cached` with chaos testing (`--chaos`, `--chaos=SEED`, 
 - *Passes only:* Cached failures are never served; only passing runs write receipts.
 - *CI export restriction:* Snapshot export is restricted to CI producer contexts with an attestation flag to prevent accidental workstation export.
 - *Path sensitivity:* Cross-machine hits require identical checkout and toolchain paths because reached code carries absolute source location literals in assertions.
-- *Runner parity:* Cross-machine hits expect alike runner configurations (matching kernel release, rlimits, cgroup memory limits, and loader variables).
+- *Runner parity:* Cross-machine hits expect alike runner configurations (matching kernel release, rlimits, cgroup memory limits, and loader variables). CI's fresh runner requires matching-profile hits and differing-profile refusals, audits both against fresh execution, and separately requires hits from its own exported receipts on an emptied store.
 - *Cross-commit hits:* Hits across commits wait on RG1 compiler reproducibility in CI.
 - *Environment writes:* Environment mutations (`ENV.[]=`, `ENV.delete`, `__iyi_set_environ`) over-approximate by recording `env_all`, so any change to the runner's environment reruns a test that sets a variable. `ENV.[]=` and `ENV.delete` also name the variable, and the test reading back its own value is not an input.
 - *Windows:* Nothing on Windows is reusable yet. Its platform arms are not classified (RG3 below), so every test reaches an unclassified site and runs. macOS and Linux are classified.

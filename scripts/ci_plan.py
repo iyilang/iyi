@@ -30,6 +30,8 @@ Within a pull request the changed files narrow it further:
   - only `bench/` files, each run by some job: those jobs and the docs gates;
   - anything under `.github/` or this script: everything, because a change to
     how CI runs is only proven by running it;
+  - a stale-testing source, spec, observer or gate: the stale jobs on all
+    three native platforms, in addition to the ordinary selection;
   - otherwise: the fast tier, plus every job that runs a changed bench file.
 
 A job runs a bench file when one of its steps names it, or names a bench
@@ -69,9 +71,25 @@ VARIABLE = re.compile(r"\$\{[^}]*\}|\$[A-Za-z_][A-Za-z0-9_]*")
 # The jobs a pull request runs whatever it touches. `docs` and `vscode` take
 # seconds; the rest are the Linux build and what it feeds that finishes within
 # the compiler specs' twenty-odd minutes.
-FAST = ["build", "iyi", "compiler-specs", "stdlib-specs", "targets",
+FAST = ["build", "iyi", "stale-rg3", "compiler-specs", "stdlib-specs", "targets",
         "cross-objects", "cross-run", "windows-probe", "windows-collector",
         "windows-runtime", "docs", "vscode"]
+
+# Changes to a stale input must exercise the same acceptance, gates and
+# fresh-runner audit on each native platform, even for a bench-only PR.
+STALE_JOBS = {
+    "iyi", "compiler-specs", "stale-rg3", "stale-callpath", "stale-equivalence", "stale-fresh",
+    "stale-darwin", "stale-darwin-gates", "stale-darwin-fresh",
+    "stale-windows", "stale-windows-gates", "stale-windows-fresh",
+}
+STALE_FILES = {
+    "src/compiler/iyi/semantic/effects.cr",
+    "src/compiler/iyi/semantic/observers.cr",
+    "src/compiler/iyi/build_inputs.cr",
+    "src/compiler/iyi/command/test.cr",
+    "src/std/observe.iyi",
+}
+STALE_PREFIXES = ("src/compiler/iyi/stale/", "spec/compiler/stale/", "bench/stale_")
 
 # Not selected by this script: `plan` is the script, `result` reads every
 # selected job's outcome, and `release` gates itself on a `v*` tag.
@@ -190,6 +208,10 @@ def is_doc(path):
     return path.endswith(".md") or path.startswith(("doc/", "editors/"))
 
 
+def is_stale(path):
+    return path in STALE_FILES or path.startswith(STALE_PREFIXES)
+
+
 def code(text):
     """*text* without its whole-line comments, in YAML, shell and Python alike."""
     return "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
@@ -282,6 +304,8 @@ def plan(jobs, event, ref, files, bench):
 
     code_files = [f for f in files if not is_doc(f)]
     selected = {"docs"}
+    if any(is_stale(f) for f in files):
+        selected |= STALE_JOBS
     if any(f.startswith("editors/vscode/") for f in files):
         selected.add("vscode")
     if not code_files:

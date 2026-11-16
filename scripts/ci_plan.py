@@ -77,7 +77,7 @@ FAST = ["build", "iyi", "compiler-specs", "stdlib-specs", "targets",
 # The self-host gates compile and check the compiler written in iyi
 # (`src/compiler/`), and the bench files and fixtures they read. A change to
 # any of those selects all three hosts, whatever else it touches.
-SELFHOST = ["selfhost", "selfhost-darwin", "selfhost-windows"]
+SELFHOST = ["selfhost", "selfhost-darwin", "selfhost-windows", "selfhost-linux-arm64"]
 # Not selected by this script: `plan` is the script, `result` reads every
 # selected job's outcome, and `release` gates itself on a `v*` tag.
 NOT_PLANNED = {"plan", "result", "release"}

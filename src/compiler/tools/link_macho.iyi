@@ -24,7 +24,7 @@ import compiler/platform/target::{Target}
 import std/slice::{Slice, Bytes}
 
 module LinkMachoTool
-  HELLO_TEXT = "hello from the iyi Mach-O linker\n"
+  HELLO_TEXT     = "hello from the iyi Mach-O linker\n"
   ELF_HELLO_TEXT = "hello from the iyi ELF linker\n"
 
   # The hand-built program. Each word is an arm64 instruction; the relocations
@@ -74,6 +74,7 @@ module LinkMachoTool
     obj.symbols << Symbol.new("exit", SymbolKind::Undefined, SymbolBinding::Global)
     obj
   end
+
   # Encoded x86 relocations are relative to their instruction; the object
   # section records offsets relative to the beginning of its text instead.
   def self.append_x86(text : Array(UInt8), relocs : Array(Reloc), form : XForm) : Nil
@@ -175,7 +176,6 @@ module LinkMachoTool
     write_bytes(dest, image.executable)
     print "LINKED #{dest} #{image.executable.size}\n"
   end
-
 
   def self.write_bytes(path : String, bytes : Bytes) : Nil
     File.write(path, String.new(bytes))

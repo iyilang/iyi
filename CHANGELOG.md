@@ -355,7 +355,12 @@ page mapped outside the heap and the image (`IyiStat`), which no root scan
 reads: `IyiHeap.local_ns` in the data segment read as a word five bytes
 into a LOCAL chunk, and `-Dheap_verify` reported the data segment holding
 it (heap_local's "verify release, 8 workers", tmac); heap_local's new copy
-puts such a counter back and is caught. concurrency_exercise's 16e builds
+puts such a counter back and is caught. `fun main` maps that page before
+the program's first line, so a counter's address is a load and an add:
+mapped at the first use, every function that counted carried a call site
+to map it (190 in alloc_scaling), and the sweep's walk ran 0.8 % more
+instructions than without the page on Binarytrees (Linux, callgrind, one
+CPU); mapped first, 3.7 % fewer. concurrency_exercise's 16e builds
 its 64 MB values 64 KB at a time: a one-worker run under
 `IYI_HEAP_STRESS=1` collected at 485,000 preemptions per value. The
 concurrency matrix row passes inside its 240 s on every seed, one worker

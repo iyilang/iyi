@@ -10688,11 +10688,11 @@ require "./file"
 
 # The runtime's unscanned words: its statistics, clocks and counters - and
 # the runtime lock's word, whose high bits count releases - in a page of
-# their own, mapped at the first use and never given back, which is
-# neither the heap nor the image. A conservative scan reads the data
-# segment, the thread-local blocks and the stacks word by word
-# (`IyiRoots`, and the heap verifier at every local collection), and a
-# word there that falls inside a chunk is a holder of it, whatever the
+# their own, mapped before the program's first line and never given
+# back, which is neither the heap nor the image. A conservative scan
+# reads the data segment, the thread-local blocks and the stacks word by
+# word (`IyiRoots`, and the heap verifier at every local collection), and
+# a word there that falls inside a chunk is a holder of it, whatever the
 # word meant: `IyiHeap.local_ns`, the local collections' nanoseconds
 # summed, read 0x11c3b1a6d after 4.77 s of them on tmac, a `LOCAL` chunk
 # five bytes in, and the verifier ended heap_local's sound case "verify
@@ -10707,23 +10707,17 @@ require "./file"
 # a pointer the collector is meant to see, or a value below 65536 by
 # construction - a flag, a mode, a count of workers, helpers or
 # partitions (`PARTITIONS_MAX` is 65535) - where nothing is mapped on any
-# target and which the verifier skips. The page is mapped by whoever
-# first asks, one `compare_and_set` deciding between two who race, so a
-# stop or a collector asking first maps it without a lock; the words that
-# start other than 0 are written before it is published.
+# target and which the verifier skips. `fun main` maps the page first
+# (`open`), before anything that counts can run, and writes the words
+# that start other than 0; from then on a word's address is a load and an
+# add (`at`), with no test and no call in the code that counts.
 #
-# Per thread, `own_at` answers a word of the calling thread's page, the
-# same way, for what was a `@[ThreadLocal]` word of that kind (the
-# verifier's last epoch, the chaos scheduler's stream on a real thread):
-# the thread-local block is scanned as the data segment is. Like the
-# partition scratch page, a thread's page outlives it.
+# Per thread, `own_at` answers a word of the calling thread's own page,
+# mapped at that thread's first ask, for what was a `@[ThreadLocal]` word
+# of that kind (the verifier's last epoch, the chaos scheduler's stream on
+# a real thread): the thread-local block is scanned as the data segment
+# is. Like the partition scratch page, a thread's page outlives it.
 {% if (!flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || flag?(:darwin) || flag?(:win32))) || (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
-  {% if (flag?(:gc_none) || flag?(:gc_boehm)) && flag?(:darwin) %}
-    lib LibC
-      fun munmap(address : Void*, length : UInt64) : Int32
-    end
-  {% end %}
-
   class IyiStat
     PAGE = 4096_u64
 
@@ -10875,12 +10869,15 @@ require "./file"
     @[ThreadLocal]
     @@own : UInt64 = 0_u64
 
-    # The address of *slot*'s word.
+    # The address of *slot*'s word: the page `open` mapped, and nothing
+    # else. A lazy map here (a test, and a call to map the page) put a call
+    # site into every function that counts, the sweep's walk and the
+    # refill among them, and on x86-64 their loops kept values across it
+    # on the stack. A use before `open` reads near address 0, which no
+    # target maps, and faults.
     @[AlwaysInline]
     def self.at(slot : UInt64) : UInt64
-      page = @@page
-      page = map_shared if page == 0_u64
-      page &+ slot.unsafe_shl(3_u64)
+      @@page &+ slot.unsafe_shl(3_u64)
     end
 
     @[AlwaysInline]
@@ -10930,17 +10927,16 @@ require "./file"
       page &+ slot.unsafe_shl(3_u64)
     end
 
-    @[NoInline]
-    private def self.map_shared : UInt64
+    # The shared page mapped, and the words that start other than 0 set:
+    # once, by `fun main` before the program's first line, so every thread
+    # finds it in place.
+    def self.open : Nil
       fresh = map
       Pointer(UInt64).new(fresh &+ EPOCH.unsafe_shl(3_u64)).value = 1_u64
       Pointer(UInt64).new(fresh &+ ROUND.unsafe_shl(3_u64)).value = 1_u64
       Pointer(UInt64).new(fresh &+ GROWTH.unsafe_shl(3_u64)).value = 200_u64
       Pointer(UInt64).new(fresh &+ VERIFY_NOISE.unsafe_shl(3_u64)).value = 0x9E3779B97F4A7C15_u64
-      word = Pointer(Atomic(UInt64)).new(pointerof(@@page).address)
-      return fresh if word.value.compare_and_set(0_u64, fresh)[1]
-      unmap(fresh)
-      word.value.get
+      @@page = fresh
     end
 
     # A zeroed page from the kernel: the allocator's own mapping where
@@ -10961,20 +10957,6 @@ require "./file"
         result = __iyi_conc_syscall6(IYI_SYS_MMAP, 0_i64, PAGE.to_i64, 3_i64, 34_i64, -1_i64, 0_i64)
         failed if result < 0 && result >= -4095
         result.to_u64
-      {% end %}
-    end
-
-    private def self.unmap(page : UInt64) : Nil
-      {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
-        __iyi_munmap(page, PAGE)
-      {% elsif flag?(:win32) %}
-        LibC.VirtualFree(Pointer(Void).new(page), 0_u64, 0x8000_i32)
-      {% elsif flag?(:darwin) %}
-        LibC.munmap(Pointer(Void).new(page), PAGE)
-      {% elsif flag?(:x86_64) %}
-        __iyi_conc_syscall6(11_i64, page.to_i64, PAGE.to_i64, 0_i64, 0_i64, 0_i64, 0_i64)
-      {% else %}
-        __iyi_conc_syscall6(215_i64, page.to_i64, PAGE.to_i64, 0_i64, 0_i64, 0_i64, 0_i64)
       {% end %}
     end
 
@@ -12748,6 +12730,7 @@ end
 {% end %}
 
 fun main(argc : Int32, argv : UInt8**) : Int32
+  {% if (!flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || flag?(:darwin) || flag?(:win32))) || (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %} IyiStat.open {% end %}
   # There is nothing to start under the default allocator, and nothing missing
   # either: `gc/none.cr`'s `GC.init` sets up thread suspend and resume, and
   # 0.1.0 has one thread. Only Boehm has an `init` worth calling.

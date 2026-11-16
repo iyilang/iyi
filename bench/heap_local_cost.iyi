@@ -21,6 +21,11 @@
 # parks between requests. Local collections come from the partitions' own
 # triggers, in flight and at the park; the line printed gives their
 # count and the distribution of their durations (the last 65,536).
+#
+# With no arguments it checks rather than measures - 64 idle units, then 8
+# units of 50 requests, on two workers, every answer read back - and
+# prints a fixed line: CI runs every bench program bare, and this one
+# failed on Windows at its usage line (job 133280416737).
 
 @[Unsafe("the resident set is read through a C call - task_info, K32GetProcessMemoryInfo - that fills Pointer#malloc memory")]
 module bench/heap_local_cost
@@ -110,7 +115,7 @@ module bench/heap_local_cost
     intact?(kept, t) ? 0 : 1
   end
 
-  def idle(units : Int32, shrink : Bool) : Nil
+  def idle(units : Int32, shrink : Bool, quiet : Bool = false) : Nil
     {% if flag?(:heap_partitions) %}
       IyiHeap.collect_every_park = shrink
     {% end %}
@@ -146,6 +151,7 @@ module bench/heap_local_cost
         fail("idle: unit #{t} answered #{value}") unless value == 0
       end
     end
+    return if quiet
     grown = after > before ? after - before : 0_u64
     {% if flag?(:heap_partitions) %}
       fixed = records == 0 ? 0_u64 : (held &+ records &* 2048_u64) // records
@@ -199,7 +205,7 @@ module bench/heap_local_cost
     sorted[((sorted.size - 1) * q) // 1000]
   end
 
-  def pause(units : Int32, rounds : Int32) : Nil
+  def pause(units : Int32, rounds : Int32, quiet : Bool = false) : Nil
     started = IyiMark.now_ns
     group do |g|
       handles = [] of IyiTask(Int32)
@@ -222,15 +228,22 @@ module bench/heap_local_cost
       pauses.sort_in_place
       n = pauses.size
       fail("pause: no local collection ran") if n == 0
+      return if quiet
       print "pause partitions=on units=#{units} rounds=#{rounds} wall_ms=#{took // 1000000_u64} local=#{count} global=#{IyiMark.collections} p50_us=#{permille(pauses, 500) // 1000_u64} p90_us=#{permille(pauses, 900) // 1000_u64} p99_us=#{permille(pauses, 990) // 1000_u64} p999_us=#{permille(pauses, 999) // 1000_u64} max_us=#{pauses[n - 1] // 1000_u64} mean_us=#{IyiHeap.local_ns // count // 1000_u64} granule=#{IyiHeap.granule_bytes}\n"
     {% else %}
-      print "pause partitions=off units=#{units} rounds=#{rounds} wall_ms=#{took // 1000000_u64} global=#{IyiMark.collections}\n"
+      print "pause partitions=off units=#{units} rounds=#{rounds} wall_ms=#{took // 1000000_u64} global=#{IyiMark.collections}\n" unless quiet
     {% end %}
   end
 
   arguments = Program.args
-  fail("usage: heap_local_cost idle UNITS WORKERS [shrink] | pause UNITS ROUNDS WORKERS") if arguments.size < 3
-  if arguments[0] == "idle"
+  if arguments.empty?
+    IyiWorkers.count = 2
+    idle(64, false, true)
+    pause(8, 50, true)
+    puts "heap local cost: every idle unit's buffers and every request's kept list read back as built"
+  elsif arguments.size < 3
+    fail("usage: heap_local_cost idle UNITS WORKERS [shrink] | pause UNITS ROUNDS WORKERS")
+  elsif arguments[0] == "idle"
     IyiWorkers.count = arguments[2].to_i
     idle(arguments[1].to_i, arguments.size > 3 && arguments[3] == "shrink")
   elsif arguments[0] == "pause"

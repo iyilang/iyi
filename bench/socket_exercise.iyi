@@ -10,7 +10,7 @@
 # 4. closed peer detection (read returns empty string on EOF)
 # 5. refused connection when target port has no listener
 
-@[Unsafe("sets SO_LINGER through setsockopt in a lib, pins threads and makes pipes through Windows calls, and keeps flags in raw Pointer.malloc words")]
+@[Unsafe("sets SO_LINGER through setsockopt in a lib, makes pipes through Windows calls, and keeps flags in raw Pointer.malloc words")]
 import std/socket::{IyiSocket, SocketError, IPv6Address}
 import std/env::{ENV}
 import std/gc::{GC}
@@ -910,7 +910,7 @@ puts "stream: ok"
 class PortGate
   @@done = Pointer(Atomic(UInt64)).malloc(1_u64)
   @@arrived = Pointer(Atomic(UInt64)).malloc(1_u64)
-  # The values of the sockets the other thread closed, for `port_reuse`.
+  # The other thread publishes these socket values before it closes them.
   @@closed = Pointer(Int64).malloc(2_u64)
 
   def self.closed : Pointer(Int64)
@@ -956,22 +956,6 @@ def port_watch(name : String, ms : Int32, &block : -> Nil) : Nil
   watcher.join
 end
 
-# The running thread held to the first processor, answering where it was
-# free to run; and let go again. Nothing elsewhere.
-def pin_to_first_cpu : UInt64
-  {% if flag?(:win32) %}
-    LibC.SetThreadAffinityMask(LibC.GetCurrentThread, 1_u64)
-  {% else %}
-    0_u64
-  {% end %}
-end
-
-def unpin(mask : UInt64) : Nil
-  {% if flag?(:win32) %}
-    LibC.SetThreadAffinityMask(LibC.GetCurrentThread, mask) if mask != 0_u64
-  {% end %}
-end
-
 # Two hundred round trips between two tasks of one thread, two waits a
 # round: each socket was joined when it was made, and no wait joins it
 # again. A copy that asks at every wait asks about 400 times.
@@ -1002,17 +986,13 @@ s_server.close
 raise "port_stays: 200 round trips on sockets std made asked to join them to the port #{s_joined} times" if s_joined > 0_u64
 puts "port_stays: ok"
 
-# A socket waited on here and closed, and its value given to a handle the
-# program made itself, which nothing records: its wait has to join it to
-# the port. Windows gives a freed value to the next handle made, so the
-# pipes are made until one has a closed socket's value. A copy whose close
-# leaves the record behind skips the join, and the pipe, on no port at
-# all, never completes its read.
+# A std socket's completion-port record must be cleared by its real close,
+# whether or not Windows happens to reuse its handle value. A pipe opened
+# outside std has no joined record and must join the port on its first read.
 {% if flag?(:win32) %}
   lib LibC
     fun CreateFileA(name : UInt8*, access : Int32, share : Int32, security : Void*,
                     disposition : Int32, flags : Int32, template : Void*) : Void*
-    fun SetThreadAffinityMask(thread : Void*, mask : UInt64) : UInt64
   end
 
   def pipe_pair : {Int64, Int64}
@@ -1020,7 +1000,10 @@ puts "port_stays: ok"
     reading = LibC.CreateNamedPipeA(name, 0x40000001_i32, 0_i32, 1_i32, 4096_i32, 4096_i32, 0_i32, Pointer(Void).new(0_u64))
     raise "port_reuse: CreateNamedPipeA failed" if reading.address &+ 1_u64 == 0_u64
     writing = LibC.CreateFileA(name, 1073741824_i32, 0_i32, Pointer(Void).new(0_u64), 3_i32, 128_i32, Pointer(Void).new(0_u64))
-    raise "port_reuse: CreateFileA for the pipe failed" if writing.address &+ 1_u64 == 0_u64
+    if writing.address &+ 1_u64 == 0_u64
+      __iyi_close(reading.address.to_i64)
+      raise "port_reuse: CreateFileA for the pipe failed"
+    end
     {reading.address.to_i64, writing.address.to_i64}
   end
 
@@ -1030,7 +1013,7 @@ puts "port_stays: ok"
     r_conn = r_server.accept.or_panic
     group do |g|
       g.spawn do
-        r_conn.read(1).or_panic
+        raise "port_reuse: the first socket read the wrong byte" unless r_conn.read(1).or_panic == "r"
         0
       end
       g.spawn do
@@ -1039,57 +1022,83 @@ puts "port_stays: ok"
         0
       end
     end
-    r_values = [r_client.fd.to_i64, r_conn.fd.to_i64]
+    r_client_word = IyiScheduler.port_word(Pointer(Void).new(r_client.fd.to_u64), false)
+    r_conn_word = IyiScheduler.port_word(Pointer(Void).new(r_conn.fd.to_u64), false)
+    r_client_before = r_client_word.address == 0_u64 ? 0_u64 : r_client_word.value.get
+    r_conn_before = r_conn_word.address == 0_u64 ? 0_u64 : r_conn_word.value.get
     r_client.close
     r_conn.close
+    r_client_after = r_client_word.address == 0_u64 ? 0_u64 : r_client_word.value.get
+    r_conn_after = r_conn_word.address == 0_u64 ? 0_u64 : r_conn_word.value.get
     r_server.close
-    r_pipes = [] of Int64
-    r_pipe = {0_i64, 0_i64}
-    32.times do
-      next if r_pipe[0] != 0_i64
-      r_made = pipe_pair
-      r_pipes << r_made[0] << r_made[1]
-      r_pipe = r_made if r_values.includes?(r_made[0])
+    raise "port_reuse: cache_joined same_thread client=#{r_client_before} accepted=#{r_conn_before}" unless r_client_before == IyiScheduler::PORT_JOINED && r_conn_before == IyiScheduler::PORT_JOINED
+    raise "port_reuse: cache_invalidation same_thread client=#{r_client_after} accepted=#{r_conn_after}" unless r_client_after == 0_u64 && r_conn_after == 0_u64
+
+    r_pipe = pipe_pair
+    r_read_word = IyiScheduler.port_word(Pointer(Void).new(r_pipe[0].to_u64), false)
+    r_write_word = IyiScheduler.port_word(Pointer(Void).new(r_pipe[1].to_u64), false)
+    r_read_record = r_read_word.address == 0_u64 ? 0_u64 : r_read_word.value.get
+    r_write_record = r_write_word.address == 0_u64 ? 0_u64 : r_write_word.value.get
+    if r_read_record != 0_u64 || r_write_record != 0_u64
+      __iyi_close(r_pipe[0])
+      __iyi_close(r_pipe[1])
+      raise "port_reuse: pipe_not_untracked read=#{r_read_record} write=#{r_write_record}"
     end
-    raise "port_reuse: 32 pipes made after the close and none had a closed socket's value #{r_values}" if r_pipe[0] == 0_i64
     r_got = 0_i64
+    r_byte = 0_u8
+    r_sent = 0_i64
+    PortGate.arrived.value.set(0_u64)
+    r_joins_before = port_joins
+    # The writer cannot run after this signal until the empty-pipe read
+    # parks: both fibers stay in this unit.
     group do |g|
-      g.spawn do
-        r_buffer = Pointer(UInt8).malloc(8_u64)
+      g.spawn(unit: :same) do
+        r_buffer = Pointer(UInt8).malloc(1_u64)
+        PortGate.arrived.value.set(1_u64)
         r_read = iyi_read(r_pipe[0], r_buffer.as(Void*), 1_u64)
         r_got = r_read.is_a?(Int64) ? r_read : -1_i64
+        r_byte = r_buffer.value if r_got == 1_i64
         0
       end
-      g.spawn do
-        sleep(20)
-        __iyi_write(r_pipe[1], "p".to_unsafe.as(Void*), 1_u64)
+      g.spawn(unit: :same) do
+        while PortGate.arrived.value.get == 0_u64
+          sleep(5)
+        end
+        r_sent = __iyi_write(r_pipe[1], "p".to_unsafe.as(Void*), 1_u64)
+        __iyi_close(r_pipe[1]) unless r_sent == 1_i64
         0
       end
     end
-    r_pipes.each { |r_handle| __iyi_close(r_handle) }
-    raise "port_reuse: the pipe with a closed socket's value read #{r_got} bytes, not 1" unless r_got == 1_i64
+    r_joins = port_joins - r_joins_before
+    __iyi_close(r_pipe[0])
+    __iyi_close(r_pipe[1]) if r_sent == 1_i64
+    raise "port_reuse: pipe_write sent #{r_sent} bytes" unless r_sent == 1_i64
+    raise "port_reuse: pipe_transfer read #{r_got} bytes, first byte #{r_byte}" unless r_got == 1_i64 && r_byte == 112_u8
+    raise "port_reuse: pipe_join made no completion-port join" if r_joins == 0_u64
   end
 {% end %}
 
-# The same on another thread, which lives on: a socket waited on and closed
-# on a thread of its own, and a socket made here with its value waited on
-# here, while that thread waits for the read to be over. Both threads are
-# held to the first processor until the value is found: free to run
-# anywhere, a release build on a 4-core runner made 16 connections here and
-# none had a value the other thread had closed (job 122326556425).
+# The other thread stays alive while this one observes its two live
+# socket records, permits their close, and observes both cleared records.
+# A fresh connection then carries a byte across the same thread boundary.
 t_server = IyiSocket.listen("127.0.0.1", 0)
 t_port = t_server.local_port
+t_joined = true
+t_invalidated = true
+t_first_before = 0_u64
+t_second_before = 0_u64
+t_first_after = 0_u64
+t_second_after = 0_u64
+t_heard = ""
 port_watch("port_reuse", 10000) do
   PortGate.arrived.value.set(0_u64)
   t_listen_fd = t_server.fd
-  t_mask = pin_to_first_cpu
   t_thread = IyiThread.start do
-    pin_to_first_cpu
     t_first = IyiSocket.connect("127.0.0.1", t_port).or_panic
     t_second = IyiSocket.new(t_listen_fd).accept.or_panic
     group do |g|
       g.spawn do
-        t_second.read(1).or_panic
+        raise "port_reuse: the worker socket read the wrong byte" unless t_second.read(1).or_panic == "t"
         0
       end
       g.spawn do
@@ -1100,58 +1109,57 @@ port_watch("port_reuse", 10000) do
     end
     PortGate.closed[0] = t_first.fd.to_i64
     PortGate.closed[1] = t_second.fd.to_i64
-    t_first.close
-    t_second.close
     PortGate.arrived.value.set(1_u64)
     while PortGate.arrived.value.get == 1_u64
       sleep(5)
+    end
+    t_first.close
+    t_second.close
+    PortGate.arrived.value.set(3_u64)
+    while PortGate.arrived.value.get == 3_u64
+      sleep(5)
+    end
+    if PortGate.arrived.value.get == 4_u64
+      t_fresh = IyiSocket.new(t_listen_fd).accept.or_panic
+      t_byte = t_fresh.read(1).or_panic
+      t_fresh.write(t_byte).or_panic
+      t_fresh.close
     end
   end
   while PortGate.arrived.value.get == 0_u64
     sleep(5)
   end
-  t_held = [] of IyiSocket
-  t_reader : IyiSocket? = nil
-  t_writer : IyiSocket? = nil
-  16.times do
-    next if t_reader
-    t_one = IyiSocket.connect("127.0.0.1", t_port).or_panic
-    t_two = t_server.accept.or_panic
-    t_held << t_one << t_two
-    if t_one.fd.to_i64 == PortGate.closed[0] || t_one.fd.to_i64 == PortGate.closed[1]
-      t_reader = t_one
-      t_writer = t_two
-    elsif t_two.fd.to_i64 == PortGate.closed[0] || t_two.fd.to_i64 == PortGate.closed[1]
-      t_reader = t_two
-      t_writer = t_one
-    end
-  end
-  unpin(t_mask)
   {% if flag?(:win32) %}
-    raise "port_reuse: 16 connections made after the other thread's close and none had its sockets' values" unless t_reader
+    t_first_word = IyiScheduler.port_word(Pointer(Void).new(PortGate.closed[0].to_u64), false)
+    t_second_word = IyiScheduler.port_word(Pointer(Void).new(PortGate.closed[1].to_u64), false)
+    t_first_before = t_first_word.address == 0_u64 ? 0_u64 : t_first_word.value.get
+    t_second_before = t_second_word.address == 0_u64 ? 0_u64 : t_second_word.value.get
+    t_joined = t_first_before == IyiScheduler::PORT_JOINED && t_second_before == IyiScheduler::PORT_JOINED
   {% end %}
-  if t_reader && t_writer
-    t_reading = t_reader.as(IyiSocket)
-    t_writing = t_writer.as(IyiSocket)
-    t_heard = ""
-    group do |g|
-      g.spawn do
-        t_heard = t_reading.read(1).or_panic
-        0
-      end
-      g.spawn do
-        sleep(20)
-        t_writing.write("u").or_panic
-        0
-      end
-    end
-    raise "port_reuse: a socket with another thread's closed socket's value read #{t_heard.inspect}" unless t_heard == "u"
-  end
-  t_held.each { |t_socket| t_socket.close }
   PortGate.arrived.value.set(2_u64)
+  while PortGate.arrived.value.get == 2_u64
+    sleep(5)
+  end
+  {% if flag?(:win32) %}
+    t_first_after = t_first_word.address == 0_u64 ? 0_u64 : t_first_word.value.get
+    t_second_after = t_second_word.address == 0_u64 ? 0_u64 : t_second_word.value.get
+    t_invalidated = t_first_after == 0_u64 && t_second_after == 0_u64
+  {% end %}
+  if t_joined && t_invalidated
+    t_fresh = IyiSocket.connect("127.0.0.1", t_port).or_panic
+    PortGate.arrived.value.set(4_u64)
+    t_fresh.write("u").or_panic
+    t_heard = t_fresh.read(1).or_panic
+    t_fresh.close
+  else
+    PortGate.arrived.value.set(5_u64)
+  end
   t_thread.join
 end
 t_server.close
+raise "port_reuse: cache_joined cross_thread first=#{t_first_before} second=#{t_second_before}" unless t_joined
+raise "port_reuse: cache_invalidation cross_thread first=#{t_first_after} second=#{t_second_after}" unless t_invalidated
+raise "port_reuse: cross_thread_transfer read #{t_heard.inspect}" unless t_heard == "u"
 puts "port_reuse: ok"
 
 # A socket waited on by a thread that then ended, and waited on here. A

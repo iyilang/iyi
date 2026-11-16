@@ -84,6 +84,7 @@ check("a change to CI runs everything", reason.startswith("the change is to CI i
 for files, what in [
     (["src/compiler/codegen/codegen.iyi"], "a self-host compiler source"),
     (["bench/selfhost_lexer_exercise.sh"], "a self-host gate"),
+    (["bench/native_elf_run.sh"], "the native Linux ELF execution gate"),
     (["bench/native_ir_exercise.sh"], "a native compiler gate"),
     (["bench/lib/host.sh"], "the shared test-host helper"),
     (["bench/fixtures/compile_stdout.iyi"], "a fixture the self-host gates read"),
@@ -94,13 +95,13 @@ for files, what in [
     (["bench/fixtures/" + "ir/valid/everything.ir"], "an IR fixture"),
 ]:
     reason, jobs = planned(*files)
-    check(f"{what} selects all three self-host jobs",
-          {"selfhost", "selfhost-darwin", "selfhost-windows"} <= jobs,
+    check(f"{what} selects all three hosts and native Linux arm64 execution",
+          {"selfhost", "selfhost-darwin", "selfhost-windows", "selfhost-linux-arm64"} <= jobs,
           f"{reason}: {sorted(jobs)}")
 
 reason, jobs = planned("src/iyi/string.iyi")
 check("an ordinary prelude change does not select component-only jobs",
-      not {"selfhost", "selfhost-darwin", "selfhost-windows"} & jobs,
+      not {"selfhost", "selfhost-darwin", "selfhost-windows", "selfhost-linux-arm64"} & jobs,
       f"{reason}: {sorted(jobs)}")
 
 print()

@@ -18,13 +18,21 @@
 # requires the patch to change something: a patch whose text is absent fails
 # the gate. The relinked-program proof needs cc and runs on macOS only.
 #
-# Needs a built compiler (`make`). The selfhost job runs the round trip and
-# drop-ADDEND proof; selfhost-darwin runs every step.
+# Needs a built compiler (`make`) and Python. Every host checks the corpus
+# and the two round-trip mutants; macOS also links and runs Mach-O programs.
 
 set -u
 
 root="$(cd "$(dirname "$0")/.." && pwd)" || exit 1
 cd "$root" || exit 1
+
+. "$root/bench/lib/host.sh" || exit 1
+require_test_host || exit 1
+if [ -z "$PY" ]; then
+  echo "native_obj: a working python3 or python is required" >&2
+  exit 1
+fi
+. "$root/bench/floor_base.sh"
 
 iyi=./bin/iyi
 triple=aarch64-apple-darwin
@@ -32,6 +40,8 @@ tool_src=src/compiler/tools/obj_macho.iyi
 macho_src=src/compiler/native/obj/macho.iyi
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/native_obj.XXXXXX")" || exit 1
+tool_bin="$work/bin/obj_macho$EXE"
+good_tool="$work/bin/obj_macho.good$EXE"
 . bench/lib/native_signature.sh
 export NATIVE_SIGNATURE_FAILURE_FILE="$work/signature-failure"
 restore=""
@@ -70,13 +80,18 @@ run_program() {
 
 # build_tool: builds the driver from the current source into $work/bin/.
 build_tool() {
-  mkdir -p "$work/bin"
-  "$iyi" build -o "$work/bin/obj_macho" "$tool_src" >"$work/build-tool.log" 2>&1
+  mkdir -p "$work/bin" || return 1
+  rm -f "$tool_bin" || return 1
+  "$iyi" build -o "$(native_path "$tool_bin")" "$(native_path "$tool_src")" >"$work/build-tool.log" 2>&1 || return 1
+  if [ ! -f "$tool_bin" ]; then
+    echo "compiler returned success without producing $tool_bin" >>"$work/build-tool.log"
+    return 1
+  fi
 }
 
 # check_roundtrip NAME: the driver round-trips the corpus object for NAME.
 check_roundtrip() {
-  "$work/bin/obj_macho" "$work/corpus/$1.o" "$work/corpus/$1.rt.o" >"$work/corpus/$1.rt.log" 2>&1
+  "$tool_bin" "$(native_path "$work/corpus/$1.o")" "$(native_path "$work/corpus/$1.rt.o")" >"$work/corpus/$1.rt.log" 2>&1
   status=$?
   grep -q "^ROUNDTRIP EQUAL" "$work/corpus/$1.rt.log" && [ "$status" -eq 0 ]
 }
@@ -106,36 +121,51 @@ prove_mutation() {
   old=$3
   new=$4
   shift 4
+  # A negative proof is meaningful only if the unmodified driver passes the
+  # same check. The preceding mutant must not be left in place for this run.
+  if ! cp "$good_tool" "$tool_bin"; then
+    fail "could not restore the good driver before '$label'"
+    return 1
+  fi
+  if ! "$@" >"$work/mutation-baseline.log" 2>&1; then
+    fail "INVALID: '$label' baseline failed"
+    tail -n 20 "$work/mutation-baseline.log"
+    return 1
+  fi
   backup="$work/mutation-$RANDOM.bak"
-  cp "$file" "$backup" || return 1
+  if ! cp "$file" "$backup"; then
+    fail "could not back up the source for '$label'"
+    return 1
+  fi
   restore="$file"
-  python3 - "$file" "$old" "$new" <<'PY'
+  "$PY" - "$(native_path "$file")" "$old" "$new" <<'PY'
 import sys
-path, old, new = sys.argv[1], sys.argv[2], sys.argv[3]
-text = open(path, encoding="utf-8").read()
-if old not in text:
+from pathlib import Path
+
+path = Path(sys.argv[1])
+old, new = (value.encode("utf-8") for value in sys.argv[2:])
+data = path.read_bytes()
+if old not in data:
     sys.exit(3)
-open(path, "w", encoding="utf-8").write(text.replace(old, new, 1))
+path.write_bytes(data.replace(old, new, 1))
 PY
   patched=$?
   if [ "$patched" -eq 3 ]; then
-    cp "$backup" "$file"
-    restore=""
     fail "PATCH CHANGED NOTHING: '$label' found no text to change"
-    return 1
-  fi
-  if [ "$patched" -ne 0 ]; then
-    cp "$backup" "$file"
-    restore=""
+  elif [ "$patched" -ne 0 ]; then
     fail "could not apply '$label'"
-    return 1
-  fi
-  if "$@" >"$work/mutation-check.log" 2>&1; then
+  elif ! build_tool; then
+    fail "INVALID: '$label' mutant driver did not build"
+    tail -n 20 "$work/build-tool.log"
+  elif "$@" >"$work/mutation-check.log" 2>&1; then
     fail "NOT caught: $label"
   else
     echo "   caught: $label"
   fi
-  cp "$backup" "$file"
+  if ! cp "$backup" "$file"; then
+    fail "could not restore source after '$label'"
+    exit 1
+  fi
   restore=""
   return 0
 }
@@ -147,25 +177,102 @@ if ! build_tool; then
   echo "== SOME NATIVE_OBJ CHECKS FAILED"
   exit 1
 fi
-cp "$work/bin/obj_macho" "$work/bin/obj_macho.good"
-otool -L "$work/bin/obj_macho" >"$work/otool.log" 2>/dev/null
-if [ "$(uname -s)" = Darwin ]; then
-  echo "   otool -L $(basename "$work/bin/obj_macho"):"
-  sed 's/^/     /' "$work/otool.log"
-  libs="$(tail -n +2 "$work/otool.log" | wc -l | tr -d ' ')"
-  if [ "$libs" != 1 ] || ! grep -q "/usr/lib/libSystem.B.dylib" "$work/otool.log"; then
-    fail "the driver links more than libSystem.B.dylib"
-  fi
+if ! cp "$tool_bin" "$good_tool"; then
+  echo "   could not save the unmodified driver" >&2
+  exit 1
 fi
+echo "   driver dependency floor on $HOST_ID: $tool_bin"
+case "$HOST_OS" in
+  darwin)
+    if ! otool -L "$tool_bin" >"$work/otool.log" 2>&1; then
+      fail "otool could not inspect the driver"
+      cat "$work/otool.log"
+    else
+      echo "   otool -L $(basename "$tool_bin"):"
+      sed 's/^/     /' "$work/otool.log"
+      libs="$(tail -n +2 "$work/otool.log" | wc -l | tr -d ' ')"
+      if [ "$libs" != 1 ] || ! grep -q "/usr/lib/libSystem.B.dylib" "$work/otool.log"; then
+        fail "the driver links more than libSystem.B.dylib"
+      fi
+    fi
+    echo "   macOS undefined-symbol floor is unverified; the direct library floor is checked above"
+    ;;
+  linux)
+    if ! command -v nm >/dev/null 2>&1 || ! command -v readelf >/dev/null 2>&1; then
+      fail "nm and readelf are required to inspect the Linux driver floor"
+    elif ! nm -u "$tool_bin" >"$work/nm.log" 2>&1; then
+      fail "nm could not inspect the driver"
+      cat "$work/nm.log"
+    elif ! readelf -d "$tool_bin" >"$work/readelf.log" 2>&1; then
+      fail "readelf could not inspect the driver"
+      cat "$work/readelf.log"
+    else
+      symbols="$(sed -e 's/^ *//' -e 's/^U  *//' -e 's/@.*$//' "$work/nm.log" |
+        awk '{ print $NF }' | sed -e 's/^_//' -e 's/^_environ$/environ/' | grep -v '^$' | sort -u)"
+      libraries="$(sed -n 's/.*Shared library: \[\(.*\)\]/\1/p' "$work/readelf.log" | sort -u)"
+      extra_symbols=""
+      for symbol in $symbols; do
+        case " $FLOOR_BASE_LINUX environ " in
+          *" $symbol "*) ;;
+          *) extra_symbols="$extra_symbols $symbol" ;;
+        esac
+      done
+      extra_libraries="$(extra_dlls "libc.so ld-linux libgcc_s" "$libraries")"
+      printf '   undefined symbols: %s\n' "${symbols:-none}"
+      printf '   direct libraries: %s\n' "${libraries:-none}"
+      [ -z "$extra_symbols" ] || fail "Linux driver has symbols outside its runtime floor: $extra_symbols"
+      [ -z "$extra_libraries" ] || fail "Linux driver has libraries outside its runtime floor: $extra_libraries"
+    fi
+    ;;
+  windows)
+    DUMPBIN="$(find_dumpbin || true)"
+    if [ -z "$DUMPBIN" ]; then
+      fail "dumpbin is required to inspect the Windows driver floor"
+    elif ! "$DUMPBIN" -nologo -dependents "$(native_path "$tool_bin")" >"$work/dumpbin.log" 2>&1; then
+      fail "dumpbin could not inspect the driver"
+      cat "$work/dumpbin.log"
+    else
+      # dumpbin writes Windows line endings; normalize its text before the
+      # shared DLL parser without changing any target-program output.
+      real_dumpbin="$DUMPBIN"
+      dumpbin_lf() { "$real_dumpbin" "$@" | tr -d '\r'; }
+      DUMPBIN=dumpbin_lf
+      dlls="$(pe_dlls "$(native_path "$tool_bin")")"
+      DUMPBIN="$real_dumpbin"
+      if [ -z "$dlls" ]; then
+        fail "dumpbin read no DLL imports from the Windows driver"
+        cat "$work/dumpbin.log"
+      else
+        printf '   direct DLLs: %s\n' "$dlls"
+        extra="$(extra_dlls "$FLOOR_DLLS_RUNTIME" "$dlls")"
+        [ -z "$extra" ] || fail "Windows driver has DLLs outside its runtime floor: $extra"
+      fi
+    fi
+    echo "   Windows per-symbol import floor is unverified; the direct DLL floor is checked above"
+    ;;
+esac
 
 echo "== 2. the oracle's arm64 Mach-O object for every samples/iyi program"
 mkdir -p "$work/corpus"
 : >"$work/coverage.txt"
 names=""
+sample_count=0
+fixture_found=0
+corpus_count=0
+roundtrip_count=0
 for src in samples/iyi/*.iyi bench/fixtures/native_obj/*.iyi; do
+  if [ ! -f "$src" ]; then
+    fail "corpus source is missing: $src"
+    continue
+  fi
+  case "$src" in
+    samples/iyi/*) sample_count=$((sample_count + 1)) ;;
+    bench/fixtures/native_obj/extern_globals.iyi) fixture_found=1 ;;
+  esac
+  corpus_count=$((corpus_count + 1))
   name="$(basename "$src" .iyi)"
   obj="$work/corpus/$name.o"
-  if ! "$iyi" build --cross-compile --target "$triple" -o "$obj" "$src" \
+  if ! "$iyi" build --cross-compile --target "$triple" -o "$(native_path "$obj")" "$(native_path "$src")" \
       >"$work/corpus/$name.link" 2>"$work/corpus/$name.err"; then
     fail "the oracle does not compile $src"
     continue
@@ -177,8 +284,12 @@ for src in samples/iyi/*.iyi bench/fixtures/native_obj/*.iyi; do
     continue
   fi
   grep '^reloc ' "$work/corpus/$name.rt.log" >>"$work/coverage.txt"
+  roundtrip_count=$((roundtrip_count + 1))
   echo "   $name: round trip equal"
 done
+[ "$sample_count" -ge 28 ] || fail "expected at least 28 sample sources, found $sample_count"
+[ "$fixture_found" -eq 1 ] || fail "the external-globals fixture is missing"
+echo "   $roundtrip_count/$corpus_count corpus round trips equal ($sample_count samples, external-globals fixture $fixture_found)"
 
 echo "== 3. relocation coverage over the corpus (zero counts are listed)"
 awk '{ count[$2] += $3 } END { for (k in count) print k, count[k] }' "$work/coverage.txt" | sort |
@@ -187,7 +298,8 @@ awk '{ count[$2] += $3 } END { for (k in count) print k, count[k] }' "$work/cove
   done
 
 echo "== 4. each rewritten program matches the original (macOS only)"
-if [ "$(uname -s)" = Darwin ]; then
+relink_names=""
+if [ "$HOST_OS" = darwin ]; then
   for name in $names; do
     why="$(excluded_reason "$name")"
     if [ -n "$why" ]; then
@@ -207,6 +319,7 @@ if [ "$(uname -s)" = Darwin ]; then
       echo "   $name: excluded, the original gives different output on two runs"
       continue
     fi
+    relink_names="$relink_names $name"
     if check_relinked "$name"; then
       echo "   $name: relinked program matches (exit $orig_status)"
     else
@@ -214,34 +327,31 @@ if [ "$(uname -s)" = Darwin ]; then
     fi
   done
 else
-  echo "   not run on $(uname -s): the native-darwin job links and runs the corpus"
+  host_limited "Mach-O program linking, execution and signature verification require macOS"
 fi
 
 echo "== 5. mutation proofs"
 check_drop_addend() {
-  build_tool && check_roundtrip hello
+  check_roundtrip hello
 }
 prove_mutation "drop the ADDEND records the writer emits" "$macho_src" \
   "elsif r.addend != 0_i64" "elsif false" \
   check_drop_addend
 check_fold_without_zeroing() {
-  build_tool && check_roundtrip hello
+  check_roundtrip hello
 }
 prove_mutation "fold the in-place addend but leave the site non-zero" "$macho_src" \
   "bytes[(address + k).to_i32] = 0_u8" "bytes[(address + k).to_i32] = bytes[(address + k).to_i32]" \
   check_fold_without_zeroing
-if [ "$(uname -s)" = Darwin ]; then
+if [ "$HOST_OS" = darwin ]; then
   # The relinked program is the judge. The driver writes its output before it
   # reads that output back, so a writer or reader that drops an addend still
   # leaves an object to link, and the program must then fail to match.
   judge_by_relink() {
-    build_tool || return 1
-    for name in $names; do
-      if [ -n "$(excluded_reason "$name")" ]; then
-        continue
-      fi
+    [ -n "$relink_names" ] || return 1
+    for name in $relink_names; do
       rm -f "$work/corpus/$name.rt.o"
-      "$work/bin/obj_macho" "$work/corpus/$name.o" "$work/corpus/$name.rt.o" >/dev/null 2>&1
+      "$tool_bin" "$(native_path "$work/corpus/$name.o")" "$(native_path "$work/corpus/$name.rt.o")" >/dev/null 2>&1
       [ -f "$work/corpus/$name.rt.o" ] || return 1
       check_relinked "$name" || return 1
     done
@@ -259,10 +369,10 @@ if [ "$(uname -s)" = Darwin ]; then
     "[MachO::R_PAGE21, 1_i64, 2_i64]" "[MachO::R_PAGE21, 0_i64, 2_i64]" \
     judge_by_relink
 else
-  echo "   the relinked-program proofs need cc: the native-darwin job runs them"
+  host_limited "the three relinked-program mutants require macOS Mach-O linking and execution"
 fi
 # Restore the driver built from the unmutated source for the remaining checks.
-cp "$work/bin/obj_macho.good" "$work/bin/obj_macho"
+cp "$good_tool" "$tool_bin" || fail "could not restore the good driver"
 
 [ ! -e "$NATIVE_SIGNATURE_FAILURE_FILE" ] || fail "a native executable failed signature verification"
 if [ "$failures" -eq 0 ]; then

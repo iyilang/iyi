@@ -8,6 +8,7 @@ require "./win_version"
   require "c/fileapi"
   require "c/winbase"
   require "c/handleapi"
+  require "c/errhandlingapi"
 {% end %}
 
 module Iyi::Stale
@@ -30,6 +31,17 @@ module Iyi::Stale
     def self.volume_trusted?(_serial : UInt64, & : -> {String, Bool, Int32, UInt32}) : Bool
       filesystem, remote, build, drive_type = yield
       trusted_volume?(filesystem, remote, build, drive_type)
+    end
+
+    # Only these errors establish that the path cannot currently exist.
+    # All other failures must make the recorder refuse reuse.
+    def self.windows_open_failure(error : UInt32) : BuildInputs::Stamp
+      case error
+      when 2_u32, 3_u32, 123_u32 # FILE_NOT_FOUND, PATH_NOT_FOUND, INVALID_NAME
+        BuildInputs::ABSENT
+      else
+        BuildInputs::Stamp.new(BuildInputs::Kind::File, 0_i64, 0_i64)
+      end
     end
 
     {% if flag?(:win32) %}
@@ -108,7 +120,7 @@ module Iyi::Stale
         handle = LibC.CreateFileW(Crystal::System.to_wstr(path), LibC::FILE_READ_ATTRIBUTES,
           LibC::FILE_SHARE_READ | LibC::FILE_SHARE_WRITE | LibC::FILE_SHARE_DELETE,
           nil, LibC::OPEN_EXISTING, LibC::FILE_FLAG_BACKUP_SEMANTICS, LibC::HANDLE.null)
-        return BuildInputs::ABSENT if handle == LibC::INVALID_HANDLE_VALUE
+        return windows_open_failure(LibC.GetLastError) if handle == LibC::INVALID_HANDLE_VALUE
         begin
           return BuildInputs::Stamp.new(BuildInputs::Kind::Other, 0_i64, 0_i64) if LibC.GetFileType(handle) != LibC::FILE_TYPE_DISK
           basic = uninitialized LibC::FILE_BASIC_INFO

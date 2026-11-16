@@ -76,6 +76,16 @@ describe Iyi::Stale::FileStamp do
     record.unchanged_reason("x", facts, Set(String).new).not_nil!.should contain("no trusted change time")
   end
 
+  it "preserves a missing LLVM identity as a refusal even during an audit" do
+    reason = "loaded LLVM-C.dll cannot be identified"
+    compiler = [] of Iyi::Stale::FastEntry
+    facts = Iyi::Stale::FastFacts.new("cwd", "target", 1, compiler, {} of String => String, reason)
+    record = Iyi::Stale::FastRecord.new(Iyi::Stale::TestId.new("src", "x"), "x", "cwd", "local", "portable",
+      "target", 1, compiler, {} of String => String?, false, [] of Iyi::Stale::FastEntry,
+      {} of String => Array(String)?, [] of Iyi::Stale::FastPkgConfig)
+    record.unchanged_reason("x", facts, Set{"compiler"}).should eq(reason)
+  end
+
   {% if flag?(:unix) %}
     it "refuses a FIFO input instead of serving its unchanged metadata" do
       with_tempfile("stale-input.fifo") do |path|

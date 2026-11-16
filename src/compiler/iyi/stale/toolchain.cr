@@ -20,6 +20,17 @@ module Iyi::Stale
     class ImageChangedError < Exception
     end
 
+    # A shared MSVC build must identify the loaded DLL, not the executable's
+    # import thunk. Only a build explicitly linked static may omit the DLL.
+    def self.windows_llvm_identity(compiler_path : String, module_path : String?, static_linked : Bool) : {String, Bool}
+      return {"static", false} if static_linked
+      unless module_path && File.basename(module_path).downcase == "llvm-c.dll" &&
+             module_path.compare(compiler_path, case_insensitive: true) != 0
+        raise ImageChangedError.new("loaded LLVM-C.dll cannot be identified")
+      end
+      {module_path, true}
+    end
+
     # Capture at process startup, before a later pathname replacement can
     # make the running image appear to be the new file.
     @@running_image : {String, BuildInputs::Stamp}? = begin
@@ -33,6 +44,21 @@ module Iyi::Stale
     rescue
       nil
     end
+    {% if flag?(:win32) && !flag?(:static) %}
+      # A DLL replaced after process startup is no longer the image this
+      # process has loaded, even if its new pathname can be hashed.
+      @@running_llvm : {String, BuildInputs::Stamp}? = begin
+        compiler_path = File.realpath(Process.executable_path.not_nil!)
+        path, _ = resolve_llvm_lib(compiler_path)
+        stamp = FileStamp.of(path)
+        if stamp.kind.file? && stamp.ctime > 0 &&
+           (stamp.digest || !BuildInputs.racy?(Math.max(stamp.mtime, stamp.ctime), BuildInputs.now))
+          {path, stamp}
+        end
+      rescue
+        nil
+      end
+    {% end %}
     @@image_lock = Mutex.new
     @@image_refusal : String? = nil
 
@@ -54,8 +80,26 @@ module Iyi::Stale
             @@running_image = {path, original.copy_with(digest: nil)}
           end
         end
-        @@image_refusal = "running compiler image changed" unless same
-        @@image_refusal
+        return @@image_refusal = "running compiler image changed" unless same
+        {% if flag?(:win32) && !flag?(:static) %}
+          llvm_image = @@running_llvm
+          unless llvm_image
+            return @@image_refusal = "loaded LLVM-C.dll cannot be identified"
+          end
+          llvm_path, llvm_original = llvm_image
+          llvm_current = FileStamp.of(llvm_path, with_digest: false)
+          same_llvm = llvm_current.kind.file? && llvm_original.size == llvm_current.size &&
+                      llvm_original.mtime == llvm_current.mtime && llvm_original.ctime == llvm_current.ctime &&
+                      llvm_original.dev == llvm_current.dev && llvm_original.ino == llvm_current.ino
+          if same_llvm && (digest = llvm_original.digest)
+            same_llvm = FileStamp.fingerprint(llvm_path) == digest
+            if same_llvm && !BuildInputs.racy?(Math.max(llvm_original.mtime, llvm_original.ctime), BuildInputs.now)
+              @@running_llvm = {llvm_path, llvm_original.copy_with(digest: nil)}
+            end
+          end
+          return @@image_refusal = "loaded LLVM-C.dll changed" unless same_llvm
+        {% end %}
+        nil
       end
     rescue
       @@image_refusal = "running compiler image cannot be identified"
@@ -203,25 +247,30 @@ module Iyi::Stale
         rescue
         end
         {"static", false}
+      {% elsif flag?(:win32) && flag?(:static) %}
+        windows_llvm_identity(compiler_path, nil, true)
       {% elsif flag?(:win32) %}
-        fn = ->LibLLVM.create_context
-        flags = LibC::GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | LibC::GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT
-        if LibC.GetModuleHandleExW(flags, fn.pointer.as(LibC::LPWSTR), out module_handle) == 0
-          raise "Cannot identify the loaded LLVM module"
+        # MSVC's function address can be an import thunk in the EXE. Ask the
+        # loader for the DLL by the name used by LibLLVM instead.
+        module_handle = LibC.GetModuleHandleW(Crystal::System.to_wstr("LLVM-C.dll"))
+        filename = unless module_handle.null?
+                     Crystal::System.retry_wstr_buffer do |buffer, small_buf|
+                       len = LibC.GetModuleFileNameW(module_handle, buffer, buffer.size)
+                       if 0 < len < buffer.size
+                         break String.from_utf16(buffer[0, len])
+                       elsif small_buf && len == buffer.size
+                         next 32767
+                       else
+                         break nil
+                       end
+                     end
+                   end
+        real = begin
+          filename ? File.realpath(filename) : nil
+        rescue File::Error
+          nil
         end
-        filename = Crystal::System.retry_wstr_buffer do |buffer, small_buf|
-          len = LibC.GetModuleFileNameW(module_handle, buffer, buffer.size)
-          if 0 < len < buffer.size
-            break String.from_utf16(buffer[0, len])
-          elsif small_buf && len == buffer.size
-            next 32767
-          else
-            break nil
-          end
-        end
-        raise "Cannot identify the loaded LLVM module path" unless filename
-        real = File.realpath(filename)
-        real == compiler_path ? {"static", false} : {real, true}
+        windows_llvm_identity(compiler_path, real, false)
       {% else %}
         {"static", false}
       {% end %}

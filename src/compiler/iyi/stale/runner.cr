@@ -415,7 +415,7 @@ module Iyi::Stale
     private def fast_verdict(file : String, test_id : TestId, is_ambiguous : Bool,
                              profile : ReceiptProfile, roots : Roots, keyer : Keyer,
                              fast : FastPath) : FastVerdict
-      if reason = Toolchain.running_image_refusal
+      if reason = Toolchain.running_image_refusal || fast.facts.refusal
         return FastVerdict.new(false, reason)
       end
       return FastVerdict.new(false, "ambiguous test id") if is_ambiguous
@@ -542,7 +542,7 @@ module Iyi::Stale
         cwd: roots.map(run_cwd),
         timeout: @timeout
       )
-      image_refusal = Toolchain.running_image_refusal
+      image_refusal = Toolchain.running_image_refusal || fast.facts.refusal
       verdict = @cached && !@fresh ? fast_verdict(file, test_id, is_ambiguous, current_profile, roots, keyer_local, fast) : nil
       if verdict && verdict.served && !fast.audit && !Toolchain.running_image_refusal
         return served_outcome(file, test_id, verdict.held.not_nil!, current_profile, roots_map, entered)
@@ -635,7 +635,7 @@ module Iyi::Stale
               build_status, key_data = Runner.build_attempt(out_key_path, inputs_path) { run_build.call }
               builds += 1
 
-              if Runner.build_hit(build_status, key_data) && (image_refusal = Toolchain.running_image_refusal)
+              if Runner.build_hit(build_status, key_data) && (image_refusal ||= Toolchain.running_image_refusal)
                 # The first child may have skipped codegen before the parent
                 # noticed a replacement; rerun with no accepted receipts.
                 File.write(accept_path, "[]")
@@ -644,12 +644,12 @@ module Iyi::Stale
                 builds += 1
               end
               compiled_key = build_status.success? ? key_data : nil
-              if build_status.success? && !Toolchain.running_image_refusal
+              if build_status.success? && !image_refusal && !Toolchain.running_image_refusal
                 record_fast_inputs(test_id, file, fast.facts, inputs_path, key_data)
               end
 
               # Case 1: Cached Hit!
-              if key_data && (hit = Runner.build_hit(build_status, key_data))
+              if key_data && !image_refusal && (hit = Runner.build_hit(build_status, key_data))
                 matching_rec = candidates.find do |c|
                   c.mode == hit.mode && c.build.build.compare(hit.build, case_insensitive: true) == 0
                 end
@@ -834,7 +834,7 @@ module Iyi::Stale
               taint_reason : String? = nil
               is_not_reusable = false
 
-              if image_refusal = Toolchain.running_image_refusal
+              if image_refusal ||= Toolchain.running_image_refusal
                 is_not_reusable = true
                 taint_reason = image_refusal
               elsif !trace_res.taints.empty?

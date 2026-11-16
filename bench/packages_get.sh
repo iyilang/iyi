@@ -994,7 +994,7 @@ printf '[core]\n\tautocrlf = true\n\teol = crlf\n' > "$WORK/crlf.gitconfig"
 mkdir -p "$WORK/napp" && cd "$WORK/napp" || exit 1
 printf 'module example.test/user/napp\n' > iyi.mod
 GIT_CONFIG_GLOBAL="$WORK/crlf.gitconfig" "$IYI" get example.test/user/libn > sum.log 2>&1 || fail "get libn failed: $(cat sum.log)"
-got="$(awk '$1 == "example.test/user/libn" { print $3 }' iyi.sum)"
+got="$(awk '$1 == "example.test/user/libn" && $2 == "v1.0.0" { print $3 }' iyi.sum)"
 [ "$got" = "h2:$expected" ] || fail "libn's sum is $got, where the tag's bytes and paths make h2:$expected"
 [ "$status" -eq 0 ] && echo "  h2:$expected, from the tag's paths and bytes, with a CRLF-asking git"
 

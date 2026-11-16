@@ -284,7 +284,9 @@ jobs:
       # acceptance suite includes the local rows; stale-fresh below owns the
       # cross-run audit rows.
       - name: Stale test acceptance suite
-        run: bash bench/stale_tests.sh
+        run: |
+          bash bench/stale_tests.sh
+          bash bench/stale_dir_exists.sh
 
 
       # The receipt digest and the RG8 oracle each answer to an outside
@@ -669,7 +671,9 @@ jobs:
       - name: Stale compiler specs
         run: ./bin/crystal spec spec/compiler/stale
       - name: Stale test acceptance suite
-        run: bash bench/stale_tests.sh
+        run: |
+          bash bench/stale_tests.sh
+          bash bench/stale_dir_exists.sh
       - name: Stale receipt digest, RG8 oracle, and evidence self-tests
         run: |
           bash bench/stale_sha256.sh
@@ -968,7 +972,9 @@ jobs:
             -Dwithout_openssl -Dwithout_zlib spec/compiler/stale 2>&1 | tee stale-specs.log
           grep -E '[1-9][0-9]* examples?, 0 failures, 0 errors, 0 pending' stale-specs.log
       - name: Stale test acceptance suite
-        run: bash bench/stale_tests.sh
+        run: |
+          bash bench/stale_tests.sh
+          bash bench/stale_dir_exists.sh
       - name: Stale receipt digest, RG8 oracle, and evidence self-tests
         run: |
           bash bench/stale_sha256.sh

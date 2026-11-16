@@ -1,5 +1,7 @@
 require "./ed25519"
 
+# Note parsing and verifier key format follow golang.org/x/mod/sumdb/note.
+# Copyright 2019 The Go Authors. See GO_LICENSE.
 module Iyi::Mod::SumDB
   # A C2SP verifier key. The key ID binds the name, algorithm and key bytes.
   class Verifier

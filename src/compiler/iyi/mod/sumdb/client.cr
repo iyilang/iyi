@@ -1,5 +1,7 @@
 require "./tlog"
 
+# Checkpoint and record framing follow golang.org/x/mod/sumdb/tlog/note.go.
+# Copyright 2019 The Go Authors. See GO_LICENSE.
 module Iyi::Mod::SumDB
   class Checkpoint
     getter origin : String, size : Int64, root : Bytes, signed_note : String

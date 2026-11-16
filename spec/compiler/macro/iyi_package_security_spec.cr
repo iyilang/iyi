@@ -56,24 +56,24 @@ describe "iyi package macro boundaries" do
     end
   end
 
-  it "keeps Crystal macros able to read files outside their package" do
-    with_tempdir("crystal_macro_read") do
+  it "keeps .cr macros able to read files outside their package" do
+    with_tempdir("compat_macro_read") do
       root = File.expand_path("app")
       Dir.mkdir_p(root)
       source = File.join(root, "macro.cr")
       outside = File.expand_path("outside")
       File.write(source, "")
-      File.write(outside, "crystal compatibility")
-      package_macro("{{ read_file(#{outside.inspect}) }}", source, source, root).should eq(%("crystal compatibility"))
+      File.write(outside, "compatible")
+      package_macro("{{ read_file(#{outside.inspect}) }}", source, source, root).should eq(%("compatible"))
     end
   end
 
-  it "keeps Crystal shell macros working" do
-    with_tempdir("crystal_macro_shell") do
+  it "keeps .cr shell macros working" do
+    with_tempdir("compat_macro_shell") do
       root = Dir.current
       source = File.join(root, "macro.cr")
       File.write(source, "")
-      package_macro(%({{ system("echo crystal-compatible") }}), source, source, root).should contain("crystal-compatible")
+      package_macro(%({{ system("echo compatible") }}), source, source, root).should contain("compatible")
     end
   end
 

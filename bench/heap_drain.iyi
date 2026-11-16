@@ -553,7 +553,7 @@ module bench/heap_drain
         info[k * 2] = address + k.to_u64 * page
         k = k + 1
       end
-      return -1_i64 if LibDirResident.K32QueryWorkingSetEx(LibDirResident.GetCurrentProcess, info, (pages * 16).to_u32) == 0
+      return -1_i64 if LibDirResident.K32QueryWorkingSetEx(LibDirResident.GetCurrentProcess, info, (pages.to_u64 * 16_u64).to_u32) == 0
       count = 0_i64
       k = 0
       while k < pages

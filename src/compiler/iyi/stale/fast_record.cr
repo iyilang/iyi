@@ -24,9 +24,10 @@ module Iyi::Stale
     getter workers : Int32
     getter compiler : Array(FastEntry)
     getter env : Hash(String, String)
+    getter refusal : String?
 
     def initialize(@cwd : String, @target : String, @workers : Int32,
-                   @compiler : Array(FastEntry), @env : Hash(String, String))
+                   @compiler : Array(FastEntry), @env : Hash(String, String), @refusal : String? = nil)
       @pkg_config = {} of {String, Bool} => String?
       @pkg_config_lock = Sync::Mutex.new
     end
@@ -34,14 +35,22 @@ module Iyi::Stale
     # The facts of this run. Reads the compiler's files and the environment,
     # and makes no other call.
     def self.current(cwd : String, target : String) : FastFacts
-      compiler = Toolchain.paths.map do |path|
-        stamp = FileStamp.of(path)
-        if stamp.kind.file? && stamp.digest.nil? && BuildInputs.racy?(Math.max(stamp.mtime, stamp.ctime), BuildInputs.now)
-          stamp = stamp.copy_with(ctime: 0_i64)
+      refusal = Toolchain.running_image_refusal
+      compiler = [] of FastEntry
+      unless refusal
+        begin
+          compiler = Toolchain.paths.map do |path|
+            stamp = FileStamp.of(path)
+            if stamp.kind.file? && stamp.digest.nil? && BuildInputs.racy?(Math.max(stamp.mtime, stamp.ctime), BuildInputs.now)
+              stamp = stamp.copy_with(ctime: 0_i64)
+            end
+            FastEntry.new(path, stamp)
+          end
+        rescue ex : Toolchain::ImageChangedError
+          refusal = ex.message || "loaded LLVM-C.dll cannot be identified"
         end
-        FastEntry.new(path, stamp)
       end
-      new(cwd, target, FastRecord.default_workers, compiler, Profile.build_env)
+      new(cwd, target, FastRecord.default_workers, compiler, Profile.build_env, refusal)
     end
 
     # The answer `pkg-config` gives for *mod*, asked once for the run. Tests
@@ -256,6 +265,7 @@ module Iyi::Stale
     # ignores (`IYI_STALE_FAST_DROP`): "ctime", "env" or "compiler".
     def unchanged_reason(source : String, facts : FastFacts, drop : Set(String)) : String?
       return refused if refused
+      return facts.refusal if facts.refusal
       return "the working directory changed" unless cwd == facts.cwd
       return "the build's file argument changed" unless file == source
 

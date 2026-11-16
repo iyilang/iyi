@@ -8,6 +8,7 @@ require "./win_version"
   require "c/fileapi"
   require "c/winbase"
   require "c/handleapi"
+  require "c/errhandlingapi"
 {% end %}
 
 module Iyi::Stale
@@ -18,10 +19,6 @@ module Iyi::Stale
   #
   # Windows change times are used only on trusted local NTFS volumes.
   module FileStamp
-    {% if flag?(:win32) %}
-      @@volume_trust = {} of UInt64 => Bool
-      @@volume_lock = Mutex.new
-    {% end %}
 
     # Unknown or remote filesystems and older Windows releases cannot vouch
     # for a change while a writer still has the file open.
@@ -29,38 +26,50 @@ module Iyi::Stale
       filesystem == "NTFS" && !remote && build >= 17763 && drive_type == 3_u32
     end
 
+    # A serial is not a locality identity: the same volume may be opened
+    # through a local path and an SMB share. Probe every handle.
+    def self.volume_trusted?(_serial : UInt64, & : -> {String, Bool, Int32, UInt32}) : Bool
+      filesystem, remote, build, drive_type = yield
+      trusted_volume?(filesystem, remote, build, drive_type)
+    end
+
+    # Only these errors establish that the path cannot currently exist.
+    # All other failures must make the recorder refuse reuse.
+    def self.windows_open_failure(error : UInt32) : BuildInputs::Stamp
+      case error
+      when 2_u32, 3_u32, 123_u32 # FILE_NOT_FOUND, PATH_NOT_FOUND, INVALID_NAME
+        BuildInputs::ABSENT
+      else
+        BuildInputs::Stamp.new(BuildInputs::Kind::File, 0_i64, 0_i64)
+      end
+    end
+
     {% if flag?(:win32) %}
       private def self.trusted_volume?(handle : LibC::HANDLE, serial : UInt64) : Bool
-        @@volume_lock.synchronize do
-          return @@volume_trust[serial] if @@volume_trust.has_key?(serial)
-          @@volume_trust[serial] = begin
-            name = uninitialized UInt16[256]
-            ok = LibC.GetVolumeInformationByHandleW(handle, nil, 0, nil, nil, nil, name.to_unsafe, name.size)
-            if ok == 0
-              false
-            else
-              name_slice = name.to_slice
-              length = name_slice.index(0_u16) || name_slice.size
-              filesystem = String.from_utf16(name_slice[0, length])
-              full = uninitialized UInt16[32768]
-              root = uninitialized UInt16[32768]
-              length = LibC.GetFinalPathNameByHandleW(handle, full.to_unsafe, full.size, 0_u32)
-              drive_type = if length > 0 && length < full.size &&
-                              LibC.GetVolumePathNameW(full.to_unsafe, root.to_unsafe, root.size) != 0
-                             LibC.GetDriveTypeW(root.to_unsafe)
-                           else
-                             0_u32
-                           end
-              remote_info = LibC::FILE_REMOTE_PROTOCOL_INFO.new
-              remote_info.structureVersion = 2_u16
-              remote_info.structureSize = sizeof(LibC::FILE_REMOTE_PROTOCOL_INFO).to_u16
-              remote = LibC.GetFileInformationByHandleEx(handle, LibC::FILE_INFO_BY_HANDLE_CLASS::FileRemoteProtocolInfo,
-                pointerof(remote_info).as(Void*), sizeof(LibC::FILE_REMOTE_PROTOCOL_INFO)) != 0
-              # VHD-mounted volumes report DRIVE_FIXED. Local NTFS fast reuse
-              # remains [INFERENCE] until a Windows runner demonstrates a hit;
-              # the FAT32 VHD CI check proves refusal on an untrusted volume.
-              trusted_volume?(filesystem, remote, WinVersion.build, drive_type)
-            end
+        volume_trusted?(serial) do
+          name = uninitialized UInt16[256]
+          ok = LibC.GetVolumeInformationByHandleW(handle, nil, 0, nil, nil, nil, name.to_unsafe, name.size)
+          if ok == 0
+            {"", true, 0, 0_u32}
+          else
+            name_slice = name.to_slice
+            length = name_slice.index(0_u16) || name_slice.size
+            filesystem = String.from_utf16(name_slice[0, length])
+            full = uninitialized UInt16[32768]
+            root = uninitialized UInt16[32768]
+            length = LibC.GetFinalPathNameByHandleW(handle, full.to_unsafe, full.size, 0_u32)
+            drive_type = if length > 0 && length < full.size &&
+                            LibC.GetVolumePathNameW(full.to_unsafe, root.to_unsafe, root.size) != 0
+                           LibC.GetDriveTypeW(root.to_unsafe)
+                         else
+                           0_u32
+                         end
+            remote_info = LibC::FILE_REMOTE_PROTOCOL_INFO.new
+            remote_info.structureVersion = 2_u16
+            remote_info.structureSize = sizeof(LibC::FILE_REMOTE_PROTOCOL_INFO).to_u16
+            remote = LibC.GetFileInformationByHandleEx(handle, LibC::FILE_INFO_BY_HANDLE_CLASS::FileRemoteProtocolInfo,
+              pointerof(remote_info).as(Void*), sizeof(LibC::FILE_REMOTE_PROTOCOL_INFO)) != 0
+            {filesystem, remote, WinVersion.build, drive_type}
           end
         end
       end
@@ -111,7 +120,7 @@ module Iyi::Stale
         handle = LibC.CreateFileW(Crystal::System.to_wstr(path), LibC::FILE_READ_ATTRIBUTES,
           LibC::FILE_SHARE_READ | LibC::FILE_SHARE_WRITE | LibC::FILE_SHARE_DELETE,
           nil, LibC::OPEN_EXISTING, LibC::FILE_FLAG_BACKUP_SEMANTICS, LibC::HANDLE.null)
-        return BuildInputs::ABSENT if handle == LibC::INVALID_HANDLE_VALUE
+        return windows_open_failure(LibC.GetLastError) if handle == LibC::INVALID_HANDLE_VALUE
         begin
           return BuildInputs::Stamp.new(BuildInputs::Kind::Other, 0_i64, 0_i64) if LibC.GetFileType(handle) != LibC::FILE_TYPE_DISK
           basic = uninitialized LibC::FILE_BASIC_INFO

@@ -182,6 +182,19 @@ describe "Iyi::Stale S2: behavior key, toolchain digest, refused modes" do
   end
 
   describe "Stale::Toolchain required inputs" do
+    it "does not identify an import thunk or a missing LLVM module as static" do
+      compiler = "/app/iyi.exe"
+      dll = "/app/LLVM-C.dll"
+      Iyi::Stale::Toolchain.windows_llvm_identity(compiler, dll, false).should eq({dll, true})
+      Iyi::Stale::Toolchain.windows_llvm_identity(compiler, nil, true).should eq({"static", false})
+      expect_raises(Iyi::Stale::Toolchain::ImageChangedError, "loaded LLVM-C.dll cannot be identified") do
+        Iyi::Stale::Toolchain.windows_llvm_identity(compiler, compiler, false)
+      end
+      expect_raises(Iyi::Stale::Toolchain::ImageChangedError, "loaded LLVM-C.dll cannot be identified") do
+        Iyi::Stale::Toolchain.windows_llvm_identity(compiler, nil, false)
+      end
+    end
+
     it "does not turn an unreadable input into a digest" do
       with_tempfile("missing_toolchain_dir") do |dir|
         Dir.mkdir_p(dir)

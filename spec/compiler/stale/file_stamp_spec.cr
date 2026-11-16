@@ -20,6 +20,39 @@ describe Iyi::Stale::FileStamp do
     end
   end
 
+  it "checks locality for every handle even when volume serials match" do
+    serial = 0x3141592653589793_u64
+    probes = 0
+    local = Iyi::Stale::FileStamp.volume_trusted?(serial) do
+      probes += 1
+      {"NTFS", false, 26100, 3_u32}
+    end
+    shared = Iyi::Stale::FileStamp.volume_trusted?(serial) do
+      probes += 1
+      {"NTFS", true, 26100, 4_u32}
+    end
+    local.should be_true
+    shared.should be_false
+    probes.should eq(2)
+    Iyi::Stale::FileStamp.volume_trusted?(serial) { {"NTFS", true, 26100, 3_u32} }.should be_false
+    Iyi::Stale::FileStamp.volume_trusted?(serial) { {"NTFS", false, 26100, 4_u32} }.should be_false
+    Iyi::Stale::FileStamp.volume_trusted?(serial) { {"", true, 0, 0_u32} }.should be_false
+  end
+
+  it "treats only definite missing-path errors as absent" do
+    {2_u32, 3_u32, 123_u32}.each do |error|
+      Iyi::Stale::FileStamp.windows_open_failure(error).kind.absent?.should be_true
+    end
+    # Access denied, sharing violation, too many open files and unknown errors
+    # all need a refused stamp rather than a cached absent-path observation.
+    {5_u32, 32_u32, 4_u32, 9999_u32}.each do |error|
+      stamp = Iyi::Stale::FileStamp.windows_open_failure(error)
+      stamp.kind.file?.should be_true
+      stamp.ctime.should eq(0)
+      Iyi::Stale::FastRecord.changed?(Iyi::BuildInputs::ABSENT, stamp, "unreadable", Set(String).new).should be_true
+    end
+  end
+
   it "round trips UInt64 identities in both v2 record formats and refuses v1" do
     with_tempfile("stale-stamp-inputs.json") do |path|
       stamp = Iyi::BuildInputs::Stamp.new(Iyi::BuildInputs::Kind::File, 1_i64, 2_i64, nil,
@@ -57,6 +90,16 @@ describe Iyi::Stale::FileStamp do
     record.unchanged_reason("x", facts, Set(String).new).not_nil!.should contain("no trusted change time")
   end
 
+  it "preserves a missing LLVM identity as a refusal even during an audit" do
+    reason = "loaded LLVM-C.dll cannot be identified"
+    compiler = [] of Iyi::Stale::FastEntry
+    facts = Iyi::Stale::FastFacts.new("cwd", "target", 1, compiler, {} of String => String, reason)
+    record = Iyi::Stale::FastRecord.new(Iyi::Stale::TestId.new("src", "x"), "x", "cwd", "local", "portable",
+      "target", 1, compiler, {} of String => String?, false, [] of Iyi::Stale::FastEntry,
+      {} of String => Array(String)?, [] of Iyi::Stale::FastPkgConfig)
+    record.unchanged_reason("x", facts, Set{"compiler"}).should eq(reason)
+  end
+
   {% if flag?(:unix) %}
     it "refuses a FIFO input instead of serving its unchanged metadata" do
       with_tempfile("stale-input.fifo") do |path|
@@ -72,6 +115,25 @@ describe Iyi::Stale::FileStamp do
   {% end %}
 
   {% if flag?(:win32) %}
+    it "refuses an input held open without sharing rather than marking it absent" do
+      with_tempfile("win-locked-input.txt") do |path|
+        File.write(path, "source")
+        handle = LibC.CreateFileW(Crystal::System.to_wstr(path), LibC::GENERIC_READ, 0_u32,
+          nil, LibC::OPEN_EXISTING, LibC::FILE_ATTRIBUTE_NORMAL, LibC::HANDLE.null)
+        handle.should_not eq(LibC::INVALID_HANDLE_VALUE)
+        begin
+          stamp = Iyi::Stale::FileStamp.of(path)
+          stamp.kind.file?.should be_true
+          stamp.ctime.should eq(0)
+          inputs = Iyi::BuildInputs.new(nil, stale: true)
+          inputs.looked_at(path)
+          inputs.reasons.any?(&.includes?("no trusted change time")).should be_true
+        ensure
+          LibC.CloseHandle(handle)
+        end
+      end
+    end
+
     it "observes a write before the writer closes and not an unchanged read" do
       with_tempfile("win-open-write.txt") do |path|
         File.write(path, "aaaa")

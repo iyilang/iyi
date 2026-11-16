@@ -65,6 +65,19 @@ module Iyi::Stale
   record FastVerdict, served : Bool, reason : String? = nil, held : FastRecord? = nil
 
   class Runner
+    # A key and input record belong to exactly one compiler invocation.
+    def self.build_attempt(out_key_path : String, inputs_path : String, & : -> Process::Status)
+      File.delete?(out_key_path)
+      File.delete?(inputs_path)
+      status = yield
+      key = File.file?(out_key_path) ? (KeyFile.parse(File.read(out_key_path)) rescue nil) : nil
+      {status, key}
+    end
+
+    def self.build_hit(status : Process::Status, key : KeyFile::KeyFileData?) : KeyFile::Hit?
+      status.success? ? key.try(&.hit) : nil
+    end
+
     def initialize(
       @files : Array(String)? = nil,
       @paths : Array(String) = ["."],
@@ -402,7 +415,7 @@ module Iyi::Stale
     private def fast_verdict(file : String, test_id : TestId, is_ambiguous : Bool,
                              profile : ReceiptProfile, roots : Roots, keyer : Keyer,
                              fast : FastPath) : FastVerdict
-      if reason = Toolchain.running_image_refusal
+      if reason = Toolchain.running_image_refusal || fast.facts.refusal
         return FastVerdict.new(false, reason)
       end
       return FastVerdict.new(false, "ambiguous test id") if is_ambiguous
@@ -529,7 +542,7 @@ module Iyi::Stale
         cwd: roots.map(run_cwd),
         timeout: @timeout
       )
-      image_refusal = Toolchain.running_image_refusal
+      image_refusal = Toolchain.running_image_refusal || fast.facts.refusal
       verdict = @cached && !@fresh ? fast_verdict(file, test_id, is_ambiguous, current_profile, roots, keyer_local, fast) : nil
       if verdict && verdict.served && !fast.audit && !Toolchain.running_image_refusal
         return served_outcome(file, test_id, verdict.held.not_nil!, current_profile, roots_map, entered)
@@ -619,28 +632,24 @@ module Iyi::Stale
                   build_tree.close
                 end
               end
-              build_status = run_build.call
+              build_status, key_data = Runner.build_attempt(out_key_path, inputs_path) { run_build.call }
               builds += 1
 
-              key_data = if File.file?(out_key_path)
-                           KeyFile.parse(File.read(out_key_path)) rescue nil
-                         else
-                           nil
-                         end
-              if key_data && key_data.hit && (image_refusal = Toolchain.running_image_refusal)
+              if Runner.build_hit(build_status, key_data) && (image_refusal ||= Toolchain.running_image_refusal)
                 # The first child may have skipped codegen before the parent
                 # noticed a replacement; rerun with no accepted receipts.
                 File.write(accept_path, "[]")
                 build_env["IYI_STALE_PARENT_IMAGE_CHANGED"] = "1"
-                build_status = run_build.call
+                build_status, key_data = Runner.build_attempt(out_key_path, inputs_path) { run_build.call }
                 builds += 1
-                key_data = File.file?(out_key_path) ? (KeyFile.parse(File.read(out_key_path)) rescue nil) : nil
               end
-              compiled_key = key_data
-              record_fast_inputs(test_id, file, fast.facts, inputs_path, key_data) unless Toolchain.running_image_refusal
+              compiled_key = build_status.success? ? key_data : nil
+              if build_status.success? && !image_refusal && !Toolchain.running_image_refusal
+                record_fast_inputs(test_id, file, fast.facts, inputs_path, key_data)
+              end
 
               # Case 1: Cached Hit!
-              if key_data && (hit = key_data.hit)
+              if key_data && !image_refusal && (hit = Runner.build_hit(build_status, key_data))
                 matching_rec = candidates.find do |c|
                   c.mode == hit.mode && c.build.build.compare(hit.build, case_insensitive: true) == 0
                 end
@@ -825,7 +834,7 @@ module Iyi::Stale
               taint_reason : String? = nil
               is_not_reusable = false
 
-              if image_refusal = Toolchain.running_image_refusal
+              if image_refusal ||= Toolchain.running_image_refusal
                 is_not_reusable = true
                 taint_reason = image_refusal
               elsif !trace_res.taints.empty?

@@ -144,10 +144,14 @@ def run_self_checks : Nil
   assert_equal(Linker.quote_posix("simple"), "simple", "simple posix quote")
   assert_equal(Linker.quote_posix("my file.o"), "'my file.o'", "spaced posix quote")
   assert_equal(Linker.quote_posix(""), "''", "empty posix quote")
+  assert_equal(Linker.quote_posix("café's.o"), "'café'\\''s.o'", "posix preserves UTF-8 around escapes")
   assert_equal(Linker.quote_windows("simple"), "simple", "simple windows quote")
   assert_equal(Linker.quote_windows("my file.obj"), "\"my file.obj\"", "spaced windows quote")
   assert_equal(Linker.quote_windows("a\"b"), "a\\\"b", "unspaced windows embedded quote")
   assert_equal(Linker.quote_windows("dir with space\\"), "\"dir with space\\\\\"", "windows trailing slash")
+  assert_equal(Linker.quote_windows("café.obj"), "café.obj", "unquoted windows UTF-8")
+  assert_equal(Linker.quote_windows("用户 file.obj"), "\"用户 file.obj\"", "quoted windows UTF-8")
+  assert_equal(Linker.quote_windows("café\"中"), "café\\\"中", "windows preserves UTF-8 around escapes")
 
   puts "== 6. MSVC linker and driver command shapes"
   direct = Linker.linker_command(

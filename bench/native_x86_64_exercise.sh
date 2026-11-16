@@ -2,10 +2,10 @@
 # The x86_64 encoder and ABI gate. Sections, each checked here:
 #
 #   1. encoder: the forms listed by compiler/tools/native_amd64 are encoded by
-#      compiler/native/amd64/encode and compared with the LLVM integrated assembler
-#      for the same text: the bytes exactly, and each relocation's kind, offset and addend.
-#      The oracle is llvm-mc; llvm-objdump reads its object back at test time only, and the back end never
-#      invokes either.
+#      compiler/native/amd64/encode and compared with LLVM's assembler for the
+#      same text: bytes exactly, and each relocation's kind, offset and addend.
+#      The oracle is llvm-mc on macOS and Linux, and clang's integrated assembler
+#      on Windows. llvm-objdump reads its object back at test time only.
 #   2. ABI: the System V and Win64 register tables, the eightbyte classifier, the register-availability rule and
 #      the Win64 slots, against expected rows written from the psABI and the Microsoft x64 convention.
 #   6. mutations: each patch to the encoder or the ABI must make the check that covers it fail. A patch whose
@@ -14,19 +14,86 @@
 # Instruction selection and executable linking are separate components. This gate
 # checks encodings, relocations and ABI tables; it does not execute x86_64 output.
 #
-# Runs on any host: encoding and the ABI tables are architecture-independent, so the same results are expected on
-# macOS and on Linux. Exit 0 with "== ALL X86_64 CHECKS PASSED", or 1 with "== SOME X86_64 CHECKS FAILED".
+# Runs on macOS, Linux and Windows: encoding and ABI tables are host-independent.
+# Exit 0 with "== ALL X86_64 CHECKS PASSED", or 1 with "== SOME X86_64 CHECKS FAILED".
 
 set -u
 cd "$(dirname "$0")/.." || exit 1
+REPO=$(pwd -P)
 export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:"$PATH"
-LLVM_MC=${LLVM_MC:-llvm-mc}
-LLVM_OBJDUMP=${LLVM_OBJDUMP:-llvm-objdump}
+source "$REPO/bench/lib/host.sh" || exit 1
+require_test_host || exit 1
+if [ -z "$PY" ]; then
+  echo "a working python3 or python is required" >&2
+  exit 1
+fi
 
-work=$(mktemp -d "${TMPDIR:-/tmp}/native-x86_64.XXXXXX")
+# Honor explicit tool paths, then PATH, then the standard Windows LLVM install.
+resolve_llvm_tool() {
+  local requested=$1 default_name=$2 found="" candidate root
+  if [ "$HOST_OS" = windows ]; then
+    case "$requested" in
+      [A-Za-z]:[\\/]*) requested=$(cygpath -u "$requested") || return 1 ;;
+    esac
+  fi
+  found=$(command -v "$requested" 2>/dev/null || true)
+  if [ -z "$found" ] && [ "$HOST_OS" = windows ] && [ "$requested" = "$default_name" ]; then
+    for root in "${LLVM_PATH:-}" "${ProgramFiles:+$ProgramFiles/LLVM}" "/c/Program Files/LLVM"; do
+      [ -n "$root" ] || continue
+      case "$root" in
+        [A-Za-z]:[\\/]*) root=$(cygpath -u "$root") || continue ;;
+      esac
+      candidate="$root/bin/$default_name.exe"
+      if [ -x "$candidate" ]; then
+        found=$candidate
+        break
+      fi
+    done
+  fi
+  if [ -z "$found" ]; then
+    echo "required LLVM tool not found: $requested" >&2
+    return 1
+  fi
+  if [ "$HOST_OS" = windows ] && [ -f "$found.exe" ]; then
+    found="$found.exe"
+  fi
+  case "$found" in
+    /*) ;;
+    *) found="$(cd "$(dirname "$found")" && pwd -P)/$(basename "$found")" ;;
+  esac
+  printf '%s\n' "$found"
+}
+
+LLVM_OBJDUMP=$(resolve_llvm_tool "${LLVM_OBJDUMP:-llvm-objdump}" llvm-objdump) || exit 1
+if [ "$HOST_OS" = windows ]; then
+  LLVM_CLANG=$(resolve_llvm_tool "${LLVM_CLANG:-clang}" clang) || exit 1
+  printf 'LLVM assembler frontend: clang integrated assembler (%s)\n' "$(native_path "$LLVM_CLANG")"
+  "$LLVM_CLANG" --version || exit 1
+else
+  LLVM_MC=$(resolve_llvm_tool "${LLVM_MC:-llvm-mc}" llvm-mc) || exit 1
+  printf 'LLVM assembler frontend: llvm-mc (%s)\n' "$(native_path "$LLVM_MC")"
+  "$LLVM_MC" --version || exit 1
+fi
+printf 'LLVM objdump: %s\n' "$(native_path "$LLVM_OBJDUMP")"
+"$LLVM_OBJDUMP" --version || exit 1
+printf 'Python: %s\n' "$(command -v "$PY")"
+"$PY" --version || exit 1
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/native-x86_64.XXXXXX") || exit 1
 restore=""
 backup=""
-trap '[ -n "$restore" ] && [ -f "$backup" ] && cp "$backup" "$restore"; rm -rf "$work"' EXIT INT TERM
+cleanup() {
+  if [ -n "$restore" ] && [ -f "$backup" ]; then
+    if ! cp "$backup" "$restore"; then
+      echo "could not restore $restore; backup kept at $backup" >&2
+      return 1
+    fi
+  fi
+  rm -rf "$work"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 failed=0
 fail() {
@@ -52,7 +119,7 @@ ELF_NAME = {
 }
 
 rows = []
-for line in open(f"{work}/forms.tsv", encoding="utf-8"):
+for line in open(f"{work}/forms.tsv", encoding="utf-8", newline=""):
     parts = line.rstrip("\n").split("\t")
     if len(parts) < 2:
         continue
@@ -64,13 +131,14 @@ for line in open(f"{work}/forms.tsv", encoding="utf-8"):
             relocs.append((int(off), ELF_NAME[kind], int(addend)))
     rows.append((text, hexbytes, relocs))
 
-with open(f"{work}/forms.s", "w", encoding="utf-8") as f:
+with open(f"{work}/forms.s", "w", encoding="utf-8", newline="\n") as f:
     f.write("\t.text\n")
     for text, _, _ in rows:
         f.write(text + "\n")
 
-if not rows:
-    print("no forms were produced")
+if len(rows) != 113 or sum(len(relocs) for _, _, relocs in rows) != 11:
+    print(f"expected 113 forms with 11 relocations, got {len(rows)} forms with "
+          f"{sum(len(relocs) for _, _, relocs in rows)} relocations")
     sys.exit(1)
 
 if mode == "prepare":
@@ -135,7 +203,7 @@ for k, (text, hexbytes, ours) in enumerate(rows):
 
 print(f"compared {len(rows)} forms against the LLVM assembler: {bytes_ok} byte-identical, "
       f"{relocs_ok} with identical relocations ({reloc_count} relocations)")
-sys.exit(1 if bad else 0)
+sys.exit(10 if bad else 0)
 PY
 
 # The ABI expectations (section 2): written from the psABI and the Microsoft x64 convention, not from the tables.
@@ -192,53 +260,105 @@ rows = [
     ("target", "x86_64-linux-gnu", "indirect=7", "frame=5", "stack_align=16", "pointer_bits=64"),
     ("target", "x86_64-windows-msvc", "indirect=1", "frame=5", "stack_align=16", "pointer_bits=64"),
 ]
-for row in rows:
-    print("\t".join(row))
+sys.stdout.buffer.write("".join("\t".join(row) + "\n" for row in rows).encode("utf-8"))
 PY
 
+build_table_tool() {
+  ./bin/iyi build -o "$(native_path "$1")" "$(native_path "$REPO/src/compiler/tools/native_amd64.iyi")"
+}
+
 echo "== 0. build the x86_64 table tool"
-if ! ./bin/iyi build -o "$work/native_amd64" src/compiler/tools/native_amd64.iyi >"$work/build.log" 2>&1; then
-  awk '!/ld: warning/' "$work/build.log" | tail -n 20
+if ! build_table_tool "$work/native_amd64$EXE" >"$work/build.log" 2>&1; then
+  cat "$work/build.log"
   fail "the table tool does not build"
   echo "== SOME X86_64 CHECKS FAILED"
   exit 1
 fi
 
+# Return 0 for a match, 1 for a completed comparison that found a mismatch,
+# and 2 when the driver, oracle, parser or comparison could not run.
 check_encoder() {
-  "$work/native_amd64" forms >"$work/forms.tsv" 2>"$work/forms.err" || return 1
-  python3 "$work/check_forms.py" "$work" prepare >"$work/check.log" 2>&1 || return 1
-  "$LLVM_MC" -triple=x86_64-linux-gnu -filetype=obj -o "$work/oracle.o" "$work/forms.s" >"$work/mc.log" 2>&1 || return 1
-  "$LLVM_OBJDUMP" -dr "$work/oracle.o" >"$work/dis.txt" 2>&1 || return 1
-  python3 "$work/check_forms.py" "$work" >"$work/check.log" 2>&1
+  local result
+  : >"$work/check.log"
+  : >"$work/forms.err"
+  : >"$work/mc.log"
+  : >"$work/dis.err"
+  "$work/native_amd64$EXE" forms >"$work/forms.tsv" 2>"$work/forms.err" || return 2
+  "$PY" "$(native_path "$work/check_forms.py")" "$(native_path "$work")" prepare >"$work/check.log" 2>&1 || return 2
+  if [ "$HOST_OS" = windows ]; then
+    "$LLVM_CLANG" --target=x86_64-unknown-linux-gnu -integrated-as -x assembler -c \
+      "$(native_path "$work/forms.s")" -o "$(native_path "$work/oracle.o")" >"$work/mc.log" 2>&1 || return 2
+  else
+    "$LLVM_MC" -triple=x86_64-linux-gnu -filetype=obj -o "$(native_path "$work/oracle.o")" \
+      "$(native_path "$work/forms.s")" >"$work/mc.log" 2>&1 || return 2
+  fi
+  "$LLVM_OBJDUMP" -dr "$(native_path "$work/oracle.o")" >"$work/dis.txt" 2>"$work/dis.err" || return 2
+  "$PY" "$(native_path "$work/check_forms.py")" "$(native_path "$work")" >"$work/check.log" 2>&1
+  result=$?
+  case "$result" in
+    0) return 0 ;;
+    10) return 1 ;;
+    *) return 2 ;;
+  esac
 }
 
 check_abi() {
-  "$work/native_amd64" abi >"$work/abi.tsv" 2>"$work/abi.err" || return 1
-  python3 "$work/abi_expected.py" >"$work/abi.expected" || return 1
+  local result
+  : >"$work/abi.diff"
+  : >"$work/abi.err"
+  : >"$work/abi.expected.err"
+  "$work/native_amd64$EXE" abi >"$work/abi.tsv" 2>"$work/abi.err" || return 2
+  "$PY" "$(native_path "$work/abi_expected.py")" >"$work/abi.expected" 2>"$work/abi.expected.err" || return 2
   # The rows are keyed facts, not a sequence: both sides are compared sorted, so a row in another place is not a difference.
-  sort "$work/abi.expected" >"$work/abi.expected.sorted"
-  sort "$work/abi.tsv" >"$work/abi.tsv.sorted"
+  sort "$work/abi.expected" >"$work/abi.expected.sorted" || return 2
+  sort "$work/abi.tsv" >"$work/abi.tsv.sorted" || return 2
   diff -u "$work/abi.expected.sorted" "$work/abi.tsv.sorted" >"$work/abi.diff"
+  result=$?
+  case "$result" in
+    0) return 0 ;;
+    1) return 1 ;;
+    *) return 2 ;;
+  esac
+}
+
+show_check_failure() {
+  if [ "$1" = check_encoder ]; then
+    cat "$work/check.log" "$work/forms.err" "$work/mc.log" "$work/dis.err"
+  else
+    cat "$work/abi.diff" "$work/abi.err" "$work/abi.expected.err"
+  fi
 }
 
 echo "== 1. encoder: every form against the LLVM assembler"
-if ! command -v "$LLVM_MC" >/dev/null 2>&1; then
-  fail "llvm-mc is not on PATH: the oracle cannot run"
-elif check_encoder; then
+if check_encoder; then
   cat "$work/check.log"
 else
-  cat "$work/check.log" 2>/dev/null
-  cat "$work/forms.err" 2>/dev/null
-  fail "the encoder does not match the LLVM assembler"
+  result=$?
+  show_check_failure check_encoder
+  if [ "$result" -eq 1 ]; then
+    fail "the encoder differs from the LLVM assembler"
+  else
+    fail "the encoder or LLVM oracle could not complete the comparison"
+  fi
 fi
 
 echo "== 2. ABI: the register tables, the eightbyte classes and the Win64 slots against the psABI"
 if check_abi; then
   echo "   $(wc -l <"$work/abi.expected" | tr -d ' ') rows match the psABI's stated classes, registers and rules"
 else
-  cat "$work/abi.diff" 2>/dev/null
-  cat "$work/abi.err" 2>/dev/null
-  fail "the ABI tables or classes differ from the psABI"
+  result=$?
+  show_check_failure check_abi
+  if [ "$result" -eq 1 ]; then
+    fail "the ABI tables or classes differ from the psABI"
+  else
+    fail "the ABI comparison could not complete"
+  fi
+fi
+
+if [ "$failed" -ne 0 ]; then
+  echo "mutations require passing encoder and ABI baselines"
+  echo "== SOME X86_64 CHECKS FAILED"
+  exit 1
 fi
 
 # prove_mutation LABEL FILE OLD NEW CHECK: replaces the first OLD in FILE with NEW, rebuilds the table tool from
@@ -246,27 +366,36 @@ fi
 # text unchanged, changes nothing and is refused. The backup is taken before the patch, in the gate's work directory
 # (never beside the source, where an interrupted run left `.bak` files in the tree), and the file is restored on every
 # exit path.
+restore_source() {
+  if ! cp "$backup" "$restore"; then
+    fail "could not restore $restore; backup kept at $backup"
+    exit 1
+  fi
+  restore=""
+}
+
 prove_mutation() {
-  label=$1
-  file=$2
-  old=$3
-  new=$4
-  check=$5
+  local label=$1 file=$2 old=$3 new=$4 check=$5 patched result
   backup="$work/mutation-$RANDOM.bak"
-  cp "$file" "$backup" || return 1
+  if ! cp "$file" "$backup"; then
+    fail "could not back up $file for '$label'"
+    return 1
+  fi
   restore="$file"
-  python3 - "$file" "$old" "$new" <<'PY'
+  "$PY" - "$(native_path "$REPO/$file")" "$old" "$new" <<'PY'
+from pathlib import Path
 import sys
-path, old, new = sys.argv[1], sys.argv[2], sys.argv[3]
-text = open(path, encoding="utf-8").read()
-if old not in text or old == new:
-  sys.exit(3)
-open(path, "w", encoding="utf-8").write(text.replace(old, new, 1))
+
+path = Path(sys.argv[1])
+old, new = (s.encode("utf-8") for s in sys.argv[2:4])
+data = path.read_bytes()
+if old not in data or old == new:
+    sys.exit(3)
+path.write_bytes(data.replace(old, new, 1))
 PY
   patched=$?
   if [ "$patched" -ne 0 ]; then
-    cp "$backup" "$file"
-    restore=""
+    restore_source
     if [ "$patched" -eq 3 ]; then
       fail "PATCH CHANGED NOTHING: '$label' found no text to change"
     else
@@ -274,19 +403,30 @@ PY
     fi
     return 1
   fi
-  if ./bin/iyi build -o "$work/mutant_amd64" src/compiler/tools/native_amd64.iyi >"$work/mutant.log" 2>&1; then
-    cp "$work/mutant_amd64" "$work/native_amd64"
-    if "$check"; then
+  if build_table_tool "$work/mutant_amd64$EXE" >"$work/mutant.log" 2>&1; then
+    if ! cp "$work/mutant_amd64$EXE" "$work/native_amd64$EXE"; then
+      fail "could not install the compiled mutant: $label"
+    elif "$check"; then
       fail "NOT caught: $label"
     else
-      echo "   caught: $label"
+      result=$?
+      if [ "$result" -eq 1 ]; then
+        echo "   caught: $label"
+      else
+        show_check_failure "$check"
+        fail "the mutant comparison could not complete: $label"
+      fi
     fi
   else
+    cat "$work/mutant.log"
     fail "the mutant does not build, so it proves nothing: $label"
   fi
-  cp "$backup" "$file"
-  restore=""
-  ./bin/iyi build -o "$work/native_amd64" src/compiler/tools/native_amd64.iyi >"$work/build.log" 2>&1 || fail "the original tool does not rebuild after '$label'"
+  restore_source
+  if ! build_table_tool "$work/native_amd64$EXE" >"$work/build.log" 2>&1; then
+    cat "$work/build.log"
+    fail "the original tool does not rebuild after '$label'"
+    exit 1
+  fi
   return 0
 }
 

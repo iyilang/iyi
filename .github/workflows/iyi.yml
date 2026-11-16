@@ -3907,15 +3907,9 @@ jobs:
       # One driver runs every selfhost gate (bench/selfhost_*_exercise.sh) in order,
       # each with its own log, and exits non-zero when any of them fails.
       - name: The self-host gates
-        run: bash bench/selfhost_gates.sh
-
-      - name: The Mach-O object reader and writer
-        run: bash bench/native_obj_exercise.sh
-
-      - name: The x86-64 encoder and ABI
         run: |
           bindir="$("$LLVM_CONFIG" --bindir)"
-          LLVM_MC="$bindir/llvm-mc" LLVM_OBJDUMP="$bindir/llvm-objdump" bash bench/native_x86_64_exercise.sh
+          LLVM_MC="$bindir/llvm-mc" LLVM_OBJDUMP="$bindir/llvm-objdump" bash bench/selfhost_gates.sh
 
       - name: The native executable linker
         run: bash bench/native_link_exercise.sh
@@ -3959,7 +3953,7 @@ jobs:
       # The same driver as the Linux job. The gates read LLVM_CONFIG from the
       # environment before they look for llvm-config on the PATH.
       - name: The self-host gates
-        run: LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config" bash bench/selfhost_gates.sh
+        run: LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config" LLVM_MC="$HOME/llvm-static/bin/llvm-mc" LLVM_OBJDUMP="$HOME/llvm-static/bin/llvm-objdump" bash bench/selfhost_gates.sh
 
   selfhost-windows:
     needs: plan
@@ -4112,10 +4106,9 @@ jobs:
           path: editors/vscode/*.vsix
           retention-days: 7
 
-  # One check for the master ruleset to require: every job this
-  # run selected passed. A job the plan left out is skipped, and passes; a
-  # failed or cancelled one does not. `scripts/ci_plan.py` refuses a
-  # workflow whose jobs this list does not name.
+  # One check requires every selected job to succeed. Only jobs the plan
+  # left out may be skipped. The planner must succeed and supply its job
+  # list; scripts/ci_plan.py also checks that needs includes every job.
   result:
     needs: [plan, docs, build, iyi, compiler-specs, stdlib-specs, lsp-positions, samples, std,
             std-platforms, std-siblings, targets, cross-objects, cross-run, darwin,
@@ -4135,7 +4128,11 @@ jobs:
         run: |
           printf '%s' "$RESULTS" | python3 -c '
           import json, sys
-          failed = [name for name, job in json.load(sys.stdin).items()
-                    if job["result"] in ("failure", "cancelled")]
-          print("failed or cancelled: " + ", ".join(failed) if failed else "every selected job passed")
+          results = json.load(sys.stdin)
+          selected = set(json.loads(results["plan"]["outputs"]["jobs"]))
+          failed = sorted(
+              {name for name, job in results.items() if job["result"] in ("failure", "cancelled")}
+              | {name for name in selected | {"plan"}
+                 if results.get(name, {}).get("result") != "success"})
+          print("not successful: " + ", ".join(failed) if failed else "every selected job passed")
           sys.exit(1 if failed else 0)'

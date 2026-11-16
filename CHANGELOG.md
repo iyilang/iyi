@@ -499,6 +499,20 @@ had named a 32-byte chunk another unit had taken (`-Dheap_verify`,
 now averages 104, 136, 154 and 175 MB a cycle where it averaged 246,
 450, 477 and 494 (tssh, 8 s an endpoint; bench/heap_drain).
 
+An idle worker's takeover and its unit's death no longer race, under
+`-Dheap_partitions`. A unit's last fiber gives its token back as it dies
+and leaves the unit's list only at its successor's first instruction; an
+idle worker could take the unit in between, and the death then took the
+partition off the unit while the takeover held it, so the takeover read
+the partition's unit as nothing and died of a memory fault (tssh,
+thread_exercise's `switching`: 1 run in 130, and 4 in 90 with its
+suspends moved late). The takeover now collects the unit it took under
+the runtime's lock, and a death that comes while it holds the partition
+is left to it and done once it lets go. bench/heap_local's `takendeath`
+check holds a takeover across the death by a test switch: its copies
+`noholdreg` and `nodeferdeath` stop at the check by name, and
+`rereadunit`, the runtime before, dies of the fault every run.
+
 The pin fallback's walk puts into words only the reason it gives. It
 spelled the path to each of the ~1,100 constants a crossing of #145's app
 reaches, and that app took 4.1 GB to build under `-Dheap_partitions`
@@ -28276,7 +28290,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 36,104-line library and nothing else. Every other
+  written against iyi's own 36,255-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

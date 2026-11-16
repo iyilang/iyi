@@ -78,6 +78,11 @@
 #   another worker's turn of the idle clock leaves that time behind does
 #   not turn the clock again with it, and no turn of a clock comes less
 #   than its period after the last (`IyiHeap.clock_turns_short`).
+# - `takendeath:` an idle worker takes a unit whose last fiber, its token
+#   given back, waits at its unregister, held there and then held before
+#   it reads its unit until the unregister is done (the runtime's switch,
+#   `IyiHeap.hold_takeover`): the record is still the unit's and the unit
+#   the record's, and the partition is freed once after the takeover.
 # - `busy:` while two units pass a value back and forth - thousands of
 #   parks a tick - a unit parked dirty is not collected before
 #   `IyiHeap::IDLE_BUSY_TICKS` ticks of the idle clock, by walks that
@@ -2029,6 +2034,126 @@
     fail("clock: a look held while another worker turned the idle clock turned it again with the time it read: #{IyiHeap.clock_turns_short} turns of a clock came less than its period after the last, or before it") if IyiHeap.clock_turns_short != 0_u64
   end
 
+  # ── takendeath ────────────────────────────────────────────────────────
+
+  # A unit that builds a list, sends its record, parks, and on its word
+  # answers the list's wrong nodes and ends: its last fiber dies.
+  def takendeath_task(t : Int64, go : Channel(Int64), ready : Channel(UInt64)) : Int64
+    base = 8000000000_i64 &+ t &* 10000_i64
+    idle_junk
+    keep = build(base, 200, 0)
+    ready.send(IyiHeap.current_record)
+    go.receive
+    broken(keep, base, 200)
+  end
+
+  # A unit's last fiber gives its token back as it dies and leaves the
+  # unit's list only at its successor's first instruction: an idle worker
+  # may take the unit in between, and the fiber's unregister then comes
+  # while the takeover holds the record busy. The runtime's switch
+  # (`IyiHeap.hold_takeover`) holds the dying fiber at its unregister
+  # until an idle worker, called by a walk asked for by hand, has taken
+  # the unit, and holds that takeover before it reads its unit until the
+  # unregister is done. The record must still be the unit's then, and the
+  # unit's, and the partition must be freed, once, after the takeover
+  # lets go. Before, the unregister took the partition off the unit at
+  # once, the takeover read the record's unit as 0 and died of a memory
+  # fault reading that unit (heap22 merge, tssh, thread_exercise: 1 run
+  # in 130). A try whose dying worker kept the token - it ran a fiber of
+  # no unit next - or whose unit no takeover took in 10 s is tried again,
+  # three at most.
+  def takendeath_check : Nil
+    tries = 0
+    held = 0_u64
+    while held != 4_u64 && tries < 3
+      tries = tries + 1
+      held = takendeath_try(tries.to_i64)
+    end
+    fail("takendeath: no idle worker took a unit while its last fiber, its token given back, waited at its unregister, in #{tries} tries (the switch at #{held})") if held != 4_u64
+  end
+
+  # One try, every unit before it gone: the switch's state at its end, 4
+  # for a takeover held across the unit's death.
+  def takendeath_try(t : Int64) : UInt64
+    settle("takendeath")
+    before = IyiHeap.partitions_live
+    state = 0_u64
+    record = 0_u64
+    unit_address = 0_u64
+    named = 0_u64
+    heap = 0_u64
+    gone = false
+    group do |g|
+      go = Channel(Int64).new(1)
+      ready = Channel(UInt64).new(1)
+      handle = g.spawn(unit: :new) { takendeath_task(t, go, ready) }
+      got = ready.receive
+      record = got.is_a?(UInt64) ? got : 0_u64
+      fail("takendeath: a parked unit sent no record") if record == 0_u64
+      unit_address = IyiHeap.read64(record &+ IyiHeap::REC_UNIT)
+      unit = Pointer(Void).new(unit_address).as(IyiUnit)
+      IyiHeap.hold_takeover(record)
+      go.send(1_i64)
+      value = handle.value
+      fail("takendeath: a unit answered #{value}") unless value.is_a?(Int64)
+      fail("takendeath: #{value} nodes of a unit's list read wrong") if value != 0_i64
+      # The fiber is done; its unregister comes on its worker's next switch.
+      waited = 0
+      state = IyiHeap.take_hold
+      while state == 1_u64 && waited < 5000
+        sleep(1)
+        waited = waited + 1
+        state = IyiHeap.take_hold
+      end
+      if state == 2_u64
+        # Held at its unregister: stamped dirty and a walk asked for, as
+        # `idle_check` does under `IYI_HEAP_STRESS`.
+        IyiHeap.write64(record &+ IyiHeap::REC_DEBT, 1_u64)
+        IyiHeap.write64(record &+ IyiHeap::REC_IDLE_TICK, 1_u64)
+        waited = 0
+        while state == 2_u64 && waited < 12000
+          IyiStat.atomic(IyiStat::IDLE_PENDING).value.set(1_u64)
+          IyiWorkers.wake_one
+          sleep(1)
+          waited = waited + 1
+          state = IyiHeap.take_hold
+        end
+      end
+      if state == 3_u64
+        # The takeover held, the fiber let go: off the unit's list under
+        # the registry's lock, and the unregister done once the lock is
+        # free.
+        waited = 0
+        while unit.fibers.is_a?(IyiFiber) && waited < 5000
+          sleep(1)
+          waited = waited + 1
+        end
+        IyiRuntimeLock.lock
+        IyiRuntimeLock.unlock
+        gone = !unit.fibers.is_a?(IyiFiber)
+        named = IyiHeap.read64(record &+ IyiHeap::REC_UNIT)
+        heap = unit.heap
+        state = 4_u64 if IyiStat.atomic(IyiHeap::STAT_TAKE_HOLD).value.compare_and_set(3_u64, 4_u64)[1]
+      end
+    end
+    # Off: a hold the try gave up on, at 2 or 3, goes on at once.
+    ended = IyiHeap.take_hold
+    IyiStat.set(IyiHeap::STAT_TAKE_HOLD, 0_u64)
+    return ended if state != 4_u64
+    waited = 0
+    while IyiHeap.partitions_live != before && waited < 5000
+      sleep(1)
+      waited = waited + 1
+    end
+    sleep(20)
+    live = IyiHeap.partitions_live
+    IyiStat.set(IyiHeap::STAT_TAKE_RECORD, 0_u64)
+    fail("takendeath: the unit's last fiber was still on its list 5 s after a takeover took the unit") unless gone
+    fail("takendeath: the unit's death took its partition while a takeover held it: the record named unit #{named} and the unit partition #{heap}, not #{unit_address} and #{record}") if named != unit_address || heap != record
+    fail("takendeath: #{live} partitions live 5 s after a takeover let go of a unit that died while it held it, #{before} before the unit") if live != before
+    4_u64
+  end
+
   # ── busy ──────────────────────────────────────────────────────────────
 
   # A value passed back and forth between two units, every receive a
@@ -2611,9 +2736,11 @@
   # the nobusy copy; `HEAP22_ONLY=giveway`, the giveway check alone, for
   # the nogiveway copy; `HEAP22_ONLY=idlehold`, the idlehold check alone,
   # for the noidlehold copy; `HEAP22_ONLY=clock`, the clock check alone,
-  # for the clockwrap copy; `HEAP22_ONLY=kept`, the kept check alone, for
-  # the nokeptfree copy, whose rings the parks of `abandon` and `return`
-  # would hand out first, dying of a memory fault there.
+  # for the clockwrap copy; `HEAP22_ONLY=takendeath`, the takendeath
+  # check alone, for the noholdreg, rereadunit and nodeferdeath copies;
+  # `HEAP22_ONLY=kept`, the kept check alone, for the nokeptfree copy,
+  # whose rings the parks of `abandon` and `return` would hand out first,
+  # dying of a memory fault there.
   only = Program.env("HEAP22_ONLY")
   if only == "idle"
     idle_check(workers)
@@ -2625,6 +2752,8 @@
     idlehold_check
   elsif only == "clock"
     clock_check
+  elsif only == "takendeath"
+    takendeath_check
   elsif only == "kept"
     kept_check
   else
@@ -2651,6 +2780,7 @@
     idle_check(workers)
     idlehold_check
     clock_check
+    takendeath_check
     busy_check(workers)
     giveway_check(workers)
     spare_check

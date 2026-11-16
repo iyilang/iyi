@@ -1953,9 +1953,9 @@ class IyiScheduler
   end
 
   def self.unregister(fiber : IyiFiber) : Nil
-    {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) %}
-      dead = 0_u64
-    {% end %}
+    {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) %} dead = 0_u64 {% end %}
+    # A test's switch holds a unit's last fiber here (`IyiHeap.hold_death`).
+    {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) %} IyiHeap.hold_death(fiber) if IyiStat.get(IyiHeap::STAT_TAKE_HOLD) == 1_u64 {% end %}
     IyiRuntimeLock.lock
     following = fiber.next_fiber
     previous = fiber.prev_fiber
@@ -1994,10 +1994,10 @@ class IyiScheduler
       {% end %}
       # The unit's death (heap22 S1, design section 4.4): its last fiber
       # gone and no `Unit`'s handle holding it, nothing will allocate in
-      # its partition again. The partition is taken off the unit under the
-      # lock, so an idle worker's takeover never finds it, and freed after.
+      # its partition again. Taken off the unit under the lock and freed
+      # after, or left to a takeover holding it (`IyiHeap.taken_release`).
       {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) %}
-        if !unit.fibers.is_a?(IyiFiber) && unit.heap != 0_u64 && unit.value_slot == 0_u64
+        if !unit.fibers.is_a?(IyiFiber) && unit.heap != 0_u64 && unit.value_slot == 0_u64 && IyiHeap.read64(unit.heap + IyiHeap::REC_STATE) & IyiHeap::REC_BUSY == 0_u64
           dead = unit.heap
           unit.heap = 0_u64
           IyiHeap.write64(dead + IyiHeap::REC_UNIT, 0_u64)

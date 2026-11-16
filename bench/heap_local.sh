@@ -21,7 +21,10 @@
 # nothing, a busy program whose parked unit is taken after two ticks, an
 # idle takeover that holds its unit while a fiber of the unit woken
 # meanwhile waits, an idle walk that drops a unit parked dirty whose token
-# was held, a sweep that keeps its runs and drops the return stack
+# was held, a unit's death that takes its partition while a takeover
+# holds it, with the takeover reading its unit again (a memory fault), or
+# a takeover that drops the death left to it, a sweep that keeps its runs
+# and drops the return stack
 # or lists a free chunk again, a parked unit's spare runs left off the idle
 # workers' test, a pooled run's blocks taken as never written, a dead unit's
 # pooled run left carved for a stale word to pass the root test, a
@@ -138,12 +141,23 @@ fi
 # (HHeapLead3.GMark, Linux and tmac). Whether it reported is said beside.
 VERIFY_GOES_ON='/^  def self\.report_end : NoReturn$/ { print "  def self.report_end : Nil"; print "    say(\"iyi: heap_verify: going on (a broken copy of bench/heap_local.sh)\\n\")"; print "    @@reporting = 0_u64"; print "  end"; skip = 1; found = 1; next } skip && /^  end$/ { skip = 0; next } skip { next } { print } END { if (!found) exit 3 }'
 
-prove_fails() { # label dir phrase awk-script file
-  local label="$1" dir="$2" phrase="$3" script="$4" file="$5"
+# A copy of src/iyi patched in *file* by *awk-script*, and in *file2* by
+# *awk-script2* when given, that must fail at "FAIL: phrase", or with
+# *phrase* `memory fault` die of one: a copy that brings back a fault
+# before any check could name what it broke. Windows' handler says so;
+# elsewhere the runtime's handler leaves a fault outside a fiber's guard
+# page to the system, and the program dies of SIGSEGV or SIGBUS.
+prove_fails() { # label dir phrase awk-script file [awk-script2 file2]
+  local label="$1" dir="$2" phrase="$3" script="$4" file="$5" script2="${6:-}" file2="${7:-}"
   mkdir -p "$WORK/$dir/iyi"
   cp -R "$REPO/src/iyi/." "$WORK/$dir/iyi/"
   if ! awk "$script" "$REPO/src/iyi/$file" > "$WORK/$dir/iyi/$file"; then
     echo "  $label: what the copy changes is not in $file any more"
+    status=1
+    return
+  fi
+  if [ -n "$file2" ] && ! awk "$script2" "$REPO/src/iyi/$file2" > "$WORK/$dir/iyi/$file2"; then
+    echo "  $label: what the copy changes is not in $file2 any more"
     status=1
     return
   fi
@@ -173,6 +187,16 @@ prove_fails() { # label dir phrase awk-script file
       return
     fi
     printf '  %s: the verifier named the data segment as the holder (exit %s, %s reports)\n' "$label" "$code" "$(grep -c '^  holder: the data segment$' "$WORK/$dir/out")"
+    return
+  fi
+  if [ "$phrase" = "memory fault" ]; then
+    if [ "$code" -ne 139 ] && [ "$code" -ne 138 ] && ! grep -q "died of a memory fault" "$WORK/$dir/out"; then
+      echo "  $label: did not die of a memory fault (exit $code)"
+      sed -n '$p' "$WORK/$dir/out"
+      status=1
+      return
+    fi
+    printf '  %s: dies of a memory fault (exit %s)\n' "$label" "$code"
     return
   fi
   if [ "$code" -eq 0 ]; then
@@ -434,6 +458,34 @@ if [ "$PART" = all ] || [ "$PART" = broken ]; then
   # runtime's switch until the race has happened.
   HEAP22_ONLY=clock prove_fails "a clock turned again with a time behind it" clockwrap "clock:" \
     '{ if (sub(/if now > last && now &- last >= IDLE_NS && /, "if now \\&- last >= IDLE_NS \\&\\& ")) found = 1; print } END { if (!found) exit 3 }' \
+    heap_partition.iyi
+
+  # A unit's death at its last fiber's unregister that takes the
+  # partition off the unit while an idle worker's takeover holds the
+  # record busy: the takeover, which collects the unit `take_unit` handed
+  # it, collects a record that names no unit, and the death waits for it
+  # (heap22 merge, MGateTssh). The takendeath check alone
+  # (`HEAP22_ONLY=takendeath`), the takeover held there by the runtime's
+  # switch until the unregister is done.
+  HEAP22_ONLY=takendeath prove_fails "a death that ignores a takeover's hold" noholdreg "takendeath:" \
+    '{ if (sub(/ && IyiHeap\.read64\(unit\.heap \+ IyiHeap::REC_STATE\) & IyiHeap::REC_BUSY == 0_u64/, "")) found = 1; print } END { if (!found) exit 3 }' \
+    concurrency.iyi
+
+  # The runtime before the fix: that death, and a takeover that reads its
+  # unit from the record after the take, outside the runtime's lock - 0,
+  # once the death took it - and dies reading it, as thread_exercise did
+  # on tssh (1 run in 130). The re-read alone is no fault: while the
+  # record is busy no death takes its unit.
+  HEAP22_ONLY=takendeath prove_fails "a takeover that reads its unit again" rereadunit "memory fault" \
+    '{ if (sub(/ && IyiHeap\.read64\(unit\.heap \+ IyiHeap::REC_STATE\) & IyiHeap::REC_BUSY == 0_u64/, "")) found = 1; print } END { if (!found) exit 3 }' \
+    concurrency.iyi \
+    '{ if (sub(/taken = Pointer\(Void\)\.new\(unit\)\.as\(IyiUnit\)/, "taken = Pointer(Void).new(read64(record + REC_UNIT)).as(IyiUnit)")) found = found + 1; if (sub(/@@taken_unit = unit$/, "@@taken_unit = read64(record + REC_UNIT)")) found = found + 1; print } END { if (found != 2) exit 3 }' \
+    heap_partition.iyi
+
+  # A takeover's end that leaves undone the death its unit's unregister
+  # left to it: the partition outlives its unit for good.
+  HEAP22_ONLY=takendeath prove_fails "a takeover that drops the death left to it" nodeferdeath "takendeath:" \
+    '{ if (sub(/dead = !unit\.fibers\.is_a\?\(IyiFiber\) && unit\.value_slot == 0_u64 && unit\.heap == record/, "dead = false")) found = 1; print } END { if (!found) exit 3 }' \
     heap_partition.iyi
 
   # A sweep that keeps its runs and drops the return stack, as the whole

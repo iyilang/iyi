@@ -65,15 +65,21 @@ PY="${PYTHON:-python3}"
 # sees; an idle walk that drops a unit whose token was held never
 # collects it, which only the program's `idlehold:` check sees; an idle
 # clock turned again with a time read before another turn moves no heap
-# word, which only the program's `clock:` check sees.
-VALUE_COPIES="TlsIdentity chain copy,a death that keeps its emptied runs,spare runs left off the idle test,a parked connection that keeps its last request,a takeover that keeps a woken fiber waiting,a takeover that keeps the look's token,an idle walk that drops a held unit,a clock turned again with a time behind it"
+# word, which only the program's `clock:` check sees; a unit's death that
+# takes the partition off the unit while a takeover holds it leaves the
+# takeover a record that names no unit, and one left to the takeover and
+# dropped there a partition nobody names, which only the program's
+# `takendeath:` check sees.
+VALUE_COPIES="TlsIdentity chain copy,a death that keeps its emptied runs,spare runs left off the idle test,a parked connection that keeps its last request,a takeover that keeps a woken fiber waiting,a takeover that keeps the look's token,an idle walk that drops a held unit,a clock turned again with a time behind it,a death that ignores a takeover's hold,a takeover that drops the death left to it"
 
 # heap_local.sh's copies not run here: `nobusy` (a busy program's parked
 # unit taken after two ticks) is a timing, which no heap word shows, and
 # its check (heap_local's `busy`) is skipped under `IYI_HEAP_STRESS`,
 # where the program parks too slowly to count as busy; heap_local.sh
-# catches it outside stress.
-NOT_STRESSED="nobusy"
+# catches it outside stress. `rereadunit` (the runtime before the
+# takendeath fix, two files patched) dies of the memory fault it brings
+# back, which is no report: heap_local.sh catches it by that fault.
+NOT_RUN="nobusy,rereadunit"
 
 # heap_crossings.sh's copies, sourced below, skip what Windows lacks.
 WINDOWS=0
@@ -243,7 +249,7 @@ prove_caught() {
 prove_fails() {
   local label="$1" dir="$2" script="$4" file="$5"
   chosen "$dir" || return 0
-  [[ ",$NOT_STRESSED," == *",$dir,"* ]] && return 0
+  [[ ",$NOT_RUN," == *",$dir,"* ]] && return 0
   mkdir -p "$WORK/$dir/iyi"
   cp -R "$REPO/src/iyi/." "$WORK/$dir/iyi/"
   if ! awk "$script" "$REPO/src/iyi/$file" >"$WORK/$dir/iyi/$file"; then

@@ -3918,6 +3918,11 @@ jobs:
       - name: The native executable linker
         run: bash bench/native_link_exercise.sh
 
+      - name: The native IR core
+        env:
+          IYI_PATH: ${{ github.workspace }}/src
+        run: bash bench/native_ir_exercise.sh
+
   selfhost-darwin:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'selfhost-darwin') }}
@@ -3966,6 +3971,11 @@ jobs:
 
       - name: The native executable linker
         run: LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config" bash bench/native_link_exercise.sh
+
+      - name: The native IR core
+        env:
+          IYI_PATH: ${{ github.workspace }}/src
+        run: LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config" bash bench/native_ir_exercise.sh
 
   # The editor client is the only artifact here that is published somewhere
   # else, so it is proven the same way as the rest: every run packages it,

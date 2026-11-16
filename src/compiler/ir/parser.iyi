@@ -1,0 +1,1732 @@
+module compiler/ir/parser
+
+import compiler/ir/types::{IrType, TypeTable, valid_int_bits?}
+import compiler/ir/values::{Value, Param, int_words_parse, single_bits, double_bits, single_bits_of_double}
+import compiler/ir/inst::{Op, Inst, Block, CallConv, CallAux, AsmAux, AsmDialect, GepAux, MemAux, IntrinsicAux, Ordering, Attribute, ThreadPointerKind, DebugLoc}
+import compiler/ir/function::{Function, Global, Linkage, TlsModel, DebugSubprogram, Visibility}
+import compiler/ir/module::{Module}
+import compiler/ir/layout::{LayoutError}
+import compiler/ir/intrinsics::{intrinsic_match, intrinsic_signature}
+import compiler/platform/target::{Target}
+
+# A parse failure: the line it is on and what was wrong there.
+pub class IrParseError
+  getter line : Int32
+  getter message : String
+
+  def initialize(@line : Int32, @message : String)
+  end
+
+  def to_s : String
+    "line #{@line}: #{@message}"
+  end
+end
+
+# Parses the text form of a module (see compiler/ir/printer.iyi). Every error is returned, never raised.
+pub def parse(text : String) : Module | IrParseError
+  IrParser.new(text).run
+end
+
+enum TokKind
+  Ident
+  Local
+  Global
+  Str
+  CStr
+  Int
+  Hex
+  Decimal
+  Punct
+  Eol
+end
+
+# One lexical token. `numeric` marks a local or global whose name is all digits; `bytes` is a c"" string.
+class Tok
+  getter kind : TokKind
+  getter text : String
+  getter num : Int64
+  getter numeric : Bool
+  getter bytes : Array(Int64)
+
+  def initialize(@kind : TokKind, @text : String, @num : Int64, @numeric : Bool, @bytes : Array(Int64))
+  end
+end
+
+def eol_tok : Tok
+  Tok.new(TokKind::Eol, "", 0_i64, false, [] of Int64)
+end
+
+def tok_is_punct?(t : Tok, p : String) : Bool
+  t.kind == TokKind::Punct && t.text == p
+end
+
+def tok_is_ident?(t : Tok, word : String) : Bool
+  t.kind == TokKind::Ident && t.text == word
+end
+
+def hex_digit_value(b : UInt8) : Int64
+  return (b - 48_u8).to_i64 if b >= 48_u8 && b <= 57_u8
+  return (b - 97_u8 + 10_u8).to_i64 if b >= 97_u8 && b <= 102_u8
+  return (b - 65_u8 + 10_u8).to_i64 if b >= 65_u8 && b <= 70_u8
+  -1_i64
+end
+
+def ident_start?(b : UInt8) : Bool
+  (b >= 65_u8 && b <= 90_u8) || (b >= 97_u8 && b <= 122_u8) || b == 95_u8
+end
+
+def ident_part?(b : UInt8) : Bool
+  ident_start?(b) || (b >= 48_u8 && b <= 57_u8) || b == 36_u8 || b == 46_u8
+end
+
+def digit?(b : UInt8) : Bool
+  b >= 48_u8 && b <= 57_u8
+end
+
+# Splits one line into tokens. A `;` outside a string starts a comment.
+def tokenize(line : String) : Array(Tok)
+  toks = [] of Tok
+  i = 0
+  n = line.bytesize
+  while i < n
+    b = line.byte_at(i)
+    if b == 32_u8 || b == 9_u8 || b == 13_u8
+      i = i + 1
+    elsif b == 59_u8
+      break
+    elsif b == 34_u8
+      read = read_string(line, i + 1)
+      toks << Tok.new(TokKind::Str, read[0], 0_i64, false, [] of Int64)
+      i = read[1]
+    elsif b == 99_u8 && i + 1 < n && line.byte_at(i + 1) == 34_u8
+      read = read_cstring(line, i + 2)
+      toks << Tok.new(TokKind::CStr, "", 0_i64, false, read[0])
+      i = read[1]
+    elsif b == 37_u8 || b == 64_u8
+      kind = b == 37_u8 ? TokKind::Local : TokKind::Global
+      if i + 1 < n && line.byte_at(i + 1) == 34_u8
+        read = read_string(line, i + 2)
+        toks << Tok.new(kind, read[0], 0_i64, false, [] of Int64)
+        i = read[1]
+      else
+        j = i + 1
+        while j < n && ident_part?(line.byte_at(j))
+          j = j + 1
+        end
+        name = line[i + 1, j - i - 1]
+        numeric = name.bytesize > 0 && digit?(name.byte_at(0))
+        toks << Tok.new(kind, name, 0_i64, numeric, [] of Int64)
+        i = j
+      end
+    elsif digit?(b) || (b == 45_u8 && i + 1 < n && digit?(line.byte_at(i + 1)))
+      if b == 48_u8 && i + 1 < n && line.byte_at(i + 1) == 120_u8
+        j = i + 2
+        value = 0_i64
+        while j < n && hex_digit_value(line.byte_at(j)) >= 0_i64
+          value = (value &* 16_i64) &+ hex_digit_value(line.byte_at(j))
+          j = j + 1
+        end
+        toks << Tok.new(TokKind::Hex, line[i + 2, j - i - 2], value, false, [] of Int64)
+        i = j
+      else
+        negative = b == 45_u8
+        j = negative ? i + 1 : i
+        value = 0_i64
+        while j < n && digit?(line.byte_at(j))
+          value = (value &* 10_i64) &+ (line.byte_at(j) - 48_u8).to_i64
+          j = j + 1
+        end
+        value = 0_i64 &- value if negative
+        # A decimal floating-point constant, the form a printer uses for a value that is exact in a few
+        # digits: `1.500000e+00`. Digits, a point, digits, then an optional exponent.
+        if j + 1 < n && line.byte_at(j) == 46_u8 && digit?(line.byte_at(j + 1))
+          j = j + 1
+          while j < n && digit?(line.byte_at(j))
+            j = j + 1
+          end
+          if j < n && (line.byte_at(j) == 101_u8 || line.byte_at(j) == 69_u8)
+            k = j + 1
+            k = k + 1 if k < n && (line.byte_at(k) == 43_u8 || line.byte_at(k) == 45_u8)
+            if k < n && digit?(line.byte_at(k))
+              while k < n && digit?(line.byte_at(k))
+                k = k + 1
+              end
+              j = k
+            end
+          end
+          toks << Tok.new(TokKind::Decimal, line[i, j - i], 0_i64, false, [] of Int64)
+        else
+          toks << Tok.new(TokKind::Int, line[i, j - i], value, false, [] of Int64)
+        end
+        i = j
+      end
+    elsif ident_start?(b)
+      j = i
+      while j < n && ident_part?(line.byte_at(j))
+        j = j + 1
+      end
+      toks << Tok.new(TokKind::Ident, line[i, j - i], 0_i64, false, [] of Int64)
+      i = j
+    elsif b == 46_u8
+      toks << Tok.new(TokKind::Punct, "...", 0_i64, false, [] of Int64)
+      i = i + 3
+    else
+      toks << Tok.new(TokKind::Punct, line[i, 1], 0_i64, false, [] of Int64)
+      i = i + 1
+    end
+  end
+  toks
+end
+
+# Reads a quoted string after its opening quote: the decoded text and the index past the closing quote.
+def read_string(line : String, start : Int32) : {String, Int32}
+  # The closing quote is the first one that no backslash escapes: `\"` and `\\` are two bytes each.
+  stop = start
+  while stop < line.bytesize && line.byte_at(stop) != 34_u8
+    stop = stop + (line.byte_at(stop) == 92_u8 && stop + 1 < line.bytesize ? 2 : 1)
+  end
+  stop = line.bytesize if stop > line.bytesize
+  out = String.build do |io|
+    i = start
+    while i < stop
+      b = line.byte_at(i)
+      if b == 92_u8 && i + 1 < stop
+        if line.byte_at(i + 1) == 120_u8 && i + 3 < stop
+          code = hex_digit_value(line.byte_at(i + 2)) * 16_i64 + hex_digit_value(line.byte_at(i + 3))
+          io << code.to_i32.unsafe_chr
+          i = i + 4
+        else
+          io << line[i + 1, 1]
+          i = i + 2
+        end
+      else
+        io << line[i, 1]
+        i = i + 1
+      end
+    end
+  end
+  {out, stop + 1}
+end
+
+# Reads a `c"..."` body after its opening quote: each `\HH` is one byte, anything else is itself.
+def read_cstring(line : String, start : Int32) : {Array(Int64), Int32}
+  bytes = [] of Int64
+  i = start
+  while i < line.bytesize && line.byte_at(i) != 34_u8
+    b = line.byte_at(i)
+    if b == 92_u8 && i + 2 < line.bytesize
+      bytes << hex_digit_value(line.byte_at(i + 1)) * 16_i64 + hex_digit_value(line.byte_at(i + 2))
+      i = i + 3
+    else
+      bytes << b.to_i64
+      i = i + 1
+    end
+  end
+  {bytes, i + 1}
+end
+
+# Whether an identifier begins a type.
+def type_word?(word : String) : Bool
+  return true if word == "void" || word == "ptr" || word == "float" || word == "double"
+  return false unless word.bytesize >= 2 && word.byte_at(0) == 105_u8
+  i = 1
+  while i < word.bytesize
+    return false unless digit?(word.byte_at(i))
+    i = i + 1
+  end
+  true
+end
+
+def int_word_bits(word : String) : Int32
+  bits = 0
+  i = 1
+  while i < word.bytesize
+    bits = bits * 10 + (word.byte_at(i) - 48_u8).to_i32
+    i = i + 1
+  end
+  bits
+end
+
+# The index just past the bracket group opened at `pos`.
+def group_end(toks : Array(Tok), pos : Int32) : Int32
+  depth = 0
+  k = pos
+  while k < toks.size
+    t = toks[k]
+    if tok_is_punct?(t, "{") || tok_is_punct?(t, "[") || tok_is_punct?(t, "(")
+      depth = depth + 1
+    elsif tok_is_punct?(t, "<") && k + 1 < toks.size && tok_is_punct?(toks[k + 1], "{")
+      depth = depth + 1
+    elsif tok_is_punct?(t, "}") || tok_is_punct?(t, "]") || tok_is_punct?(t, ")")
+      depth = depth - 1
+    elsif tok_is_punct?(t, ">") && k > 0 && tok_is_punct?(toks[k - 1], "}")
+      depth = depth - 1
+    end
+    k = k + 1
+    return k if depth == 0
+  end
+  toks.size
+end
+
+# The index just past the value that starts at `pos`: one token, or a bracketed or constant-expression group.
+def value_end(toks : Array(Tok), pos : Int32) : Int32
+  return pos if pos >= toks.size
+  t = toks[pos]
+  if t.kind == TokKind::Ident && pos + 1 < toks.size && tok_is_punct?(toks[pos + 1], "(")
+    return group_end(toks, pos + 1)
+  end
+  if t.kind == TokKind::Ident && t.text == "getelementptr"
+    k = pos + 1
+    k = k + 1 if k < toks.size && tok_is_ident?(toks[k], "inbounds")
+    return group_end(toks, k) if k < toks.size && tok_is_punct?(toks[k], "(")
+    return k
+  end
+  if tok_is_punct?(t, "{") || tok_is_punct?(t, "[") || tok_is_punct?(t, "(")
+    return group_end(toks, pos)
+  end
+  if tok_is_punct?(t, "<") && pos + 1 < toks.size && tok_is_punct?(toks[pos + 1], "{")
+    return group_end(toks, pos)
+  end
+  pos + 1
+end
+
+# A token cursor over one line. The first failure is kept; after it every read returns a harmless value.
+class Cursor
+  getter toks : Array(Tok)
+  property pos : Int32
+  getter line : Int32
+  getter failure : String?
+
+  def initialize(@toks : Array(Tok), @line : Int32)
+    @pos = 0
+    @failure = nil
+  end
+
+  def peek : Tok
+    peek_at(0)
+  end
+
+  def peek_at(offset : Int32) : Tok
+    index = @pos + offset
+    return eol_tok if index >= @toks.size
+    @toks[index]
+  end
+
+  def at_end? : Bool
+    @pos >= @toks.size
+  end
+
+  def take : Tok
+    t = peek
+    @pos = @pos + 1 unless at_end?
+    t
+  end
+
+  def punct?(p : String) : Bool
+    tok_is_punct?(peek, p)
+  end
+
+  def ident?(word : String) : Bool
+    tok_is_ident?(peek, word)
+  end
+
+  def fail(message : String) : Nil
+    @failure = message if @failure.nil?
+  end
+
+  def failed? : Bool
+    !@failure.nil?
+  end
+
+  def expect_punct(p : String) : Nil
+    if punct?(p)
+      take
+    else
+      fail("expected `#{p}` but found #{describe(peek)}")
+    end
+  end
+
+  def expect_ident(word : String) : Nil
+    if ident?(word)
+      take
+    else
+      fail("expected `#{word}` but found #{describe(peek)}")
+    end
+  end
+
+  def describe(t : Tok) : String
+    case t.kind
+    when TokKind::Eol
+      "the end of the line"
+    when TokKind::Int
+      "the integer #{t.num}"
+    else
+      "`#{t.text}`"
+    end
+  end
+end
+
+# What one instruction line says, before its operand values are resolved.
+class Shape
+  property op : Op
+  property type : IrType
+  property aux_int : Int64
+  property aux : Nil | GepAux | MemAux | CallAux | AsmAux | IntrinsicAux
+  property targets : Array(Block)
+  property cases : Array(Int64)
+  property loc : DebugLoc?
+  getter args : Array(Value)
+
+  def initialize(void_type : IrType)
+    @op = Op::Unreachable
+    @type = void_type
+    @aux_int = 0_i64
+    @aux = nil
+    @targets = [] of Block
+    @cases = [] of Int64
+    @loc = nil
+    @args = [] of Value
+  end
+
+  def set(op : Op, type : IrType, aux_int : Int64, aux : Nil | GepAux | MemAux | CallAux | AsmAux | IntrinsicAux) : Nil
+    @op = op
+    @type = type
+    @aux_int = aux_int
+    @aux = aux
+  end
+end
+
+# An instruction line waiting for its operand values: the instruction, its tokens and where the operands start.
+class Pending
+  getter inst : Inst
+  getter toks : Array(Tok)
+  getter start : Int32
+  getter line : Int32
+
+  def initialize(@inst : Inst, @toks : Array(Tok), @start : Int32, @line : Int32)
+  end
+end
+
+class IrParser
+  @module : Module?
+
+  def initialize(@text : String)
+    @lines = @text.split('\n')
+    @toks = [] of Array(Tok)
+    @locals = Hash(String, Value).new
+    @unnamed = [] of Value
+    @blocks = Hash(String, Block).new
+    @module = nil
+    @pending_inits = [] of {Global, Int32}
+    @pending_inits_pos = [] of Int32
+    @pending_clause_lines = [] of Int32
+    @pending_clauses = [] of {Function, Int32}
+    @pending_defs = [] of {Function, Int32}
+  end
+
+  def run : Module | IrParseError
+    @lines.each { |l| @toks << tokenize(l) }
+    header = read_header
+    return header if header.is_a?(IrParseError)
+    mod = header.as(Module)
+    @module = mod
+    err = define_types(mod)
+    return err if err
+    err = define_globals_and_functions(mod)
+    return err if err
+    err = define_bodies(mod)
+    return err if err
+    mod
+  end
+
+  def line_number(index : Int32) : Int32
+    index + 1
+  end
+
+  # ---- header and module-level records ------------------------------------------------
+
+  def read_header : Module | IrParseError
+    name = nil
+    triple = nil
+    datalayout = nil
+    files = [] of String
+    flags = [] of {String, Int64}
+    @toks.each do |toks|
+      next if toks.empty?
+      c = Cursor.new(toks, 0)
+      if c.ident?("module")
+        c.take
+        name = c.take.text if c.peek.kind == TokKind::Str
+      elsif c.ident?("source_filename")
+        c.take
+        c.expect_punct("=")
+        name = c.take.text
+      elsif c.ident?("target")
+        c.take
+        what = c.take.text
+        c.expect_punct("=")
+        value = c.take.text
+        triple = value if what == "triple"
+        datalayout = value if what == "datalayout"
+      elsif c.ident?("file")
+        c.take
+        files << c.take.text
+      elsif c.ident?("flag")
+        c.take
+        key = c.take.text
+        c.expect_punct("=")
+        flags << {key, c.take.num}
+      end
+    end
+    name_text = name
+    triple_text = triple
+    layout_text = datalayout
+    return IrParseError.new(1, "the module has no `module` line") if name_text.nil?
+    return IrParseError.new(1, "the module has no `target triple` line") if triple_text.nil?
+    return IrParseError.new(1, "the module has no `target datalayout` line") if layout_text.nil?
+    target = Target.parse?(triple_text)
+    return IrParseError.new(1, "unknown target triple #{triple_text}") if target.nil?
+    built = Module.for_target(name_text, target)
+    return IrParseError.new(1, built.message) if built.is_a?(LayoutError)
+    mod = built.as(Module)
+    return IrParseError.new(1, "the datalayout does not match the IR's layout for #{triple_text}") unless mod.layout.llvm_string == layout_text
+    files.each { |f| mod.file_index(f) }
+    flags.each { |pair| mod.set_flag(pair[0], pair[1]) }
+    mod
+  end
+
+  def type_definition?(toks : Array(Tok)) : Bool
+    toks.size >= 3 && toks[0].kind == TokKind::Local && tok_is_punct?(toks[1], "=") && tok_is_ident?(toks[2], "type")
+  end
+
+  # Creates every named struct in text order, so their creation order (which the printer writes) is kept.
+  def define_types(mod : Module) : IrParseError?
+    @toks.each do |toks|
+      next unless type_definition?(toks)
+      mod.types.named_struct(toks[0].text)
+    end
+    @toks.each_with_index do |toks, i|
+      next unless type_definition?(toks)
+      c = Cursor.new(toks, line_number(i))
+      c.take
+      c.take
+      c.take
+      named = mod.types.named_struct(toks[0].text)
+      if c.ident?("opaque")
+        c.take
+      else
+        body = parse_struct_body(c, mod.types)
+        return IrParseError.new(c.line, (c.failure || "malformed line")) if c.failed?
+        mod.types.set_body(named, body[0], body[1])
+      end
+    end
+    nil
+  end
+
+  # `{ a, b }` or `<{ a }>` or `{}`, as field types and a packed flag.
+  def parse_struct_body(c : Cursor, types : TypeTable) : {Array(IrType), Bool}
+    packed = false
+    if c.punct?("<")
+      c.take
+      packed = true
+    end
+    c.expect_punct("{")
+    fields = [] of IrType
+    while !c.punct?("}") && !c.at_end?
+      fields << parse_type(c, types)
+      break unless c.punct?(",")
+      c.take
+    end
+    c.expect_punct("}")
+    c.expect_punct(">") if packed
+    {fields, packed}
+  end
+
+  def define_globals_and_functions(mod : Module) : IrParseError?
+    @toks.each_with_index do |toks, i|
+      next if toks.empty?
+      if toks[0].kind == TokKind::Global && toks.size > 1 && tok_is_punct?(toks[1], "=")
+        err = define_global(mod, toks, i)
+        return err if err
+      elsif tok_is_ident?(toks[0], "declare") || tok_is_ident?(toks[0], "define")
+        err = define_function(mod, toks, i)
+        return err if err
+      end
+    end
+    nil
+  end
+
+  # `@name = LINK [thread_local(M) ] (global|constant) T [init] [, align N] [section "s"] [unnamed_addr] [import "l"]`
+  def define_global(mod : Module, toks : Array(Tok), index : Int32) : IrParseError?
+    c = Cursor.new(toks, line_number(index))
+    name = c.take.text
+    c.expect_punct("=")
+    linkage = take_linkage(c)
+    dso = take_dso_local(c)
+    vis = take_visibility(c)
+    tls = TlsModel::None
+    if c.ident?("thread_local")
+      c.take
+      c.expect_punct("(")
+      tls = tls_model(c.take.text)
+      c.expect_punct(")")
+    end
+    constant = c.ident?("constant")
+    c.take
+    value_type = parse_type(c, mod.types)
+    global = mod.add_global(name, value_type)
+    global.linkage = linkage
+    global.dso_local = dso
+    global.visibility = vis
+    global.tls = tls
+    global.global_constant = constant
+    unless c.at_end? || c.punct?(",")
+      @pending_inits << {global, index}
+      @pending_inits_pos << c.pos
+      c.pos = value_end(toks, c.pos)
+    end
+    while !c.at_end?
+      c.take if c.punct?(",")
+      if c.ident?("align")
+        c.take
+        global.alignment = c.take.num.to_i32
+      elsif c.ident?("section")
+        c.take
+        global.section = c.take.text
+      elsif c.ident?("unnamed_addr")
+        c.take
+        global.unnamed_addr = true
+      elsif c.ident?("import")
+        c.take
+        global.import_library = c.take.text
+      else
+        c.fail("unknown global clause #{c.describe(c.peek)}") unless c.at_end?
+        break
+      end
+    end
+    return IrParseError.new(c.line, (c.failure || "malformed line")) if c.failed?
+    nil
+  end
+
+  # `define|declare LINK [iyicc] ATTRS RET @name(PARAMS) [FNATTRS] [clauses] [{]`
+  def define_function(mod : Module, toks : Array(Tok), index : Int32) : IrParseError?
+    line = line_number(index)
+    c = Cursor.new(toks, line)
+    is_define = c.take.text == "define"
+    linkage = take_linkage(c)
+    dso = take_dso_local(c)
+    vis = take_visibility(c)
+    cc = CallConv::C
+    if c.ident?("iyicc")
+      c.take
+      cc = CallConv::Iyi
+    end
+    ret_attrs = parse_attrs(c, mod.types)
+    ret = parse_type(c, mod.types)
+    name_tok = c.take
+    return IrParseError.new(line, "a function needs a @name") unless name_tok.kind == TokKind::Global
+    c.expect_punct("(")
+    param_types = [] of IrType
+    param_attrs = [] of Array(Attribute)
+    param_names = [] of String
+    varargs = false
+    while !c.punct?(")") && !c.at_end?
+      if c.punct?("...")
+        c.take
+        varargs = true
+        break
+      end
+      param_attrs << parse_attrs(c, mod.types)
+      param_types << parse_type(c, mod.types)
+      if is_define && c.peek.kind == TokKind::Local
+        # A parameter written `%0` has no name: its number is its place among the function's unnamed values.
+        written = c.take
+        param_names << (written.numeric ? "" : written.text)
+      else
+        param_names << ""
+      end
+      break unless c.punct?(",")
+      c.take
+    end
+    c.expect_punct(")")
+    return IrParseError.new(line, (c.failure || "malformed line")) if c.failed?
+    fn_type = mod.types.func(param_types, ret, varargs)
+    fn = mod.add_function(name_tok.text, fn_type, cc)
+    fn.linkage = linkage
+    fn.dso_local = dso
+    fn.visibility = vis
+    fn.ret_attrs = ret_attrs
+    fn.param_attrs = param_attrs
+    fn.attrs = parse_attr_list(c, mod.types) if c.punct?("[")
+    if is_define
+      param_types.each_with_index do |t, i|
+        fn.add_param_as_written(Param.new(t, param_names[i], i))
+      end
+    end
+    @pending_clauses << {fn, c.pos}
+    @pending_clause_lines << index
+    @pending_defs << {fn, index} if is_define
+    nil
+  end
+
+  def take_linkage(c : Cursor) : Linkage
+    t = c.peek
+    if t.kind == TokKind::Ident
+      word = t.text
+      if word == "external"
+        c.take
+        return Linkage::External
+      elsif word == "internal"
+        c.take
+        return Linkage::Internal
+      elsif word == "private"
+        c.take
+        return Linkage::Private
+      elsif word == "linkonce_odr"
+        c.take
+        return Linkage::LinkOnceOdr
+      elsif word == "weak"
+        c.take
+        return Linkage::Weak
+      elsif word == "extern_weak"
+        c.take
+        return Linkage::ExternalWeak
+      end
+    end
+    Linkage::External
+  end
+
+  # `dso_local` after the linkage, as LLVM writes it.
+  def take_dso_local(c : Cursor) : Bool
+    if c.ident?("dso_local")
+      c.take
+      return true
+    end
+    false
+  end
+
+  # A visibility after the linkage and dso_local. `default` is accepted and is what nothing prints.
+  def take_visibility(c : Cursor) : Visibility
+    if c.ident?("hidden")
+      c.take
+      return Visibility::Hidden
+    end
+    if c.ident?("protected")
+      c.take
+      return Visibility::Protected
+    end
+    if c.ident?("default")
+      c.take
+    end
+    Visibility::Default
+  end
+
+  def tls_model(word : String) : TlsModel
+    return TlsModel::LocalExec if word == "localexec"
+    return TlsModel::InitialExec if word == "initialexec"
+    return TlsModel::LocalDynamic if word == "localdynamic"
+    TlsModel::GeneralDynamic
+  end
+
+  # ---- bodies --------------------------------------------------------------------------
+
+  # Global initialisers, personalities and function bodies: after every name exists, so references resolve in any order.
+  def define_bodies(mod : Module) : IrParseError?
+    @pending_inits.each_with_index do |pair, k|
+      g = pair[0]
+      index = pair[1]
+      c = Cursor.new(@toks[index], line_number(index))
+      c.pos = @pending_inits_pos[k]
+      @locals = Hash(String, Value).new
+      @unnamed = [] of Value
+      init = parse_value(c, g.value_type, mod)
+      return IrParseError.new(c.line, (c.failure || "malformed line")) if c.failed?
+      g.initializer = init
+    end
+    @pending_clauses.each_with_index do |pair, k|
+      fn = pair[0]
+      index = @pending_clause_lines[k]
+      c = Cursor.new(@toks[index], line_number(index))
+      c.pos = pair[1]
+      err = parse_function_clauses(c, fn, mod)
+      return err if err
+    end
+    @pending_defs.each do |pair|
+      err = define_body(mod, pair[0], pair[1])
+      return err if err
+    end
+    nil
+  end
+
+  def parse_function_clauses(c : Cursor, fn : Function, mod : Module) : IrParseError?
+    while !c.at_end? && !c.punct?("{")
+      if c.ident?("personality")
+        c.take
+        # LLVM spells the function personality as `ptr @name`; our IR
+        # printer also accepts the original untyped `@name` spelling.
+        if c.ident?("ptr")
+          parse_type(c, mod.types)
+        end
+        fn.personality = parse_value(c, mod.types.ptr(0), mod)
+      elsif c.ident?("section")
+        c.take
+        fn.section = c.take.text
+      elsif c.ident?("align")
+        c.take
+        fn.alignment = c.take.num.to_i32
+      elsif c.ident?("import")
+        c.take
+        fn.import_library = c.take.text
+      elsif c.ident?("subprogram")
+        c.take
+        c.expect_punct("(")
+        display = c.take.text
+        c.expect_punct(",")
+        linkage_name = c.take.text
+        c.expect_punct(",")
+        file = c.take.num.to_i32
+        c.expect_punct(",")
+        line = c.take.num.to_i32
+        c.expect_punct(")")
+        fn.subprogram = DebugSubprogram.new(display, linkage_name, file, line)
+      else
+        c.take
+      end
+      return IrParseError.new(c.line, (c.failure || "malformed line")) if c.failed?
+    end
+    nil
+  end
+
+  # The body of a `define` whose header is at `header`, up to its closing `}`.
+  def define_body(mod : Module, fn : Function, header : Int32) : IrParseError?
+    @locals = Hash(String, Value).new
+    @unnamed = [] of Value
+    @blocks = Hash(String, Block).new
+    fn.params.each do |p|
+      if p.name.empty?
+        @unnamed << p
+      else
+        @locals[p.name] = p
+      end
+    end
+    stop = header + 1
+    while stop < @toks.size && !(@toks[stop].size == 1 && tok_is_punct?(@toks[stop][0], "}"))
+      stop = stop + 1
+    end
+    return IrParseError.new(line_number(header), "the body of #{fn.name} is never closed with `}`") if stop >= @toks.size
+
+    # Blocks first: a branch may name a block that comes later.
+    i = header + 1
+    while i < stop
+      toks = @toks[i]
+      if toks.size >= 2 && (toks[0].kind == TokKind::Ident || toks[0].kind == TokKind::Str) && tok_is_punct?(toks[1], ":")
+        block = fn.append_basic_block_as_written(toks[0].text)
+        @blocks[toks[0].text] = block
+        block.no_vectorize = toks.size > 3 && tok_is_ident?(toks[2 + 1], "no_vectorize")
+      end
+      i = i + 1
+    end
+
+    # Instructions: create each with its shape; operand values are resolved once every value exists.
+    pending = [] of Pending
+    current = nil
+    i = header + 1
+    while i < stop
+      toks = @toks[i]
+      i = i + 1
+      next if toks.empty?
+      if toks.size >= 2 && (toks[0].kind == TokKind::Ident || toks[0].kind == TokKind::Str) && tok_is_punct?(toks[1], ":")
+        current = @blocks[toks[0].text]
+        next
+      end
+      block = current
+      return IrParseError.new(line_number(i - 1), "an instruction is outside any block") unless block
+      c = Cursor.new(toks, line_number(i - 1))
+      result_name = ""
+      result_numeric = false
+      has_result = false
+      if toks.size >= 2 && toks[0].kind == TokKind::Local && tok_is_punct?(toks[1], "=")
+        result_name = toks[0].text
+        result_numeric = toks[0].numeric
+        has_result = true
+        c.take
+        c.take
+      end
+      op_start = c.pos
+      shape = walk(c, mod, false)
+      return IrParseError.new(c.line, (c.failure || "malformed line")) if c.failed?
+      return IrParseError.new(c.line, "unexpected #{c.describe(c.peek)} after the instruction") unless c.at_end?
+      named = has_result && !result_numeric
+      if has_result && shape.type.void?
+        return IrParseError.new(c.line, "a void instruction cannot have a result")
+      end
+      inst = Inst.new(shape.op, shape.type, [] of Value, shape.aux_int, shape.aux, shape.targets, shape.cases, named ? result_name : "")
+      if loc = shape.loc
+        inst.loc = loc
+      end
+      if has_result
+        if result_numeric
+          @unnamed << inst
+        else
+          @locals[result_name] = inst
+        end
+      elsif !shape.type.void?
+        @unnamed << inst
+      end
+      block.insts << inst
+      pending << Pending.new(inst, toks, op_start, c.line)
+    end
+
+    pending.each do |p|
+      c = Cursor.new(p.toks, p.line)
+      c.pos = p.start
+      w = walk(c, mod, true)
+      return IrParseError.new(p.line, (c.failure || "malformed line")) if c.failed?
+      w.args.each { |a| p.inst.args << a }
+    end
+    fn.relink
+    nil
+  end
+
+  # ---- instructions --------------------------------------------------------------------
+
+  # One instruction from its op keyword. The shape (type, aux, blocks, cases) comes from the text alone;
+  # with `resolve` the operand values are also built into `args`.
+  def walk(c : Cursor, mod : Module, resolve : Bool) : Shape
+    types = mod.types
+    shape = Shape.new(types.void)
+    op_word = c.take.text
+    volatile = false
+    tail = false
+    if op_word == "volatile"
+      volatile = true
+      op_word = c.take.text
+    elsif op_word == "tail"
+      tail = true
+      op_word = c.take.text
+    end
+    case op_word
+    when "alloca"
+      t = parse_type(c, types)
+      align = 0
+      if c.punct?(",")
+        c.take
+        c.expect_ident("align")
+        align = c.take.num.to_i32
+      end
+      shape.set(Op::Alloca, types.ptr(0), align.to_i64, GepAux.new(t, false))
+    when "load"
+      c.expect_ident("load") if false
+      t = parse_type(c, types)
+      c.expect_punct(",")
+      operand(c, types, resolve, shape, nil, true)
+      c.expect_punct(",")
+      c.expect_ident("align")
+      align = c.take.num.to_i32
+      mem = parse_atomic(c, MemAux.new(align, volatile, Ordering::NotAtomic, Ordering::NotAtomic, false, "", false))
+      shape.set(Op::Load, t, 0_i64, mem)
+    when "store"
+      operand(c, types, resolve, shape, nil, true)
+      c.expect_punct(",")
+      operand(c, types, resolve, shape, nil, true)
+      c.expect_punct(",")
+      c.expect_ident("align")
+      align = c.take.num.to_i32
+      mem = parse_atomic(c, MemAux.new(align, volatile, Ordering::NotAtomic, Ordering::NotAtomic, false, "", false))
+      shape.set(Op::Store, types.void, 0_i64, mem)
+    when "getelementptr"
+      inbounds = false
+      if c.ident?("inbounds")
+        c.take
+        inbounds = true
+      end
+      source = parse_type(c, types)
+      c.expect_punct(",")
+      base_type = peek_type(c, types)
+      operand(c, types, resolve, shape, nil, true)
+      while c.punct?(",")
+        c.take
+        operand(c, types, resolve, shape, nil, true)
+      end
+      shape.set(Op::Gep, base_type, 0_i64, GepAux.new(source, inbounds))
+    when "fence"
+      single = c.ident?("singlethread")
+      c.take if single
+      ordering = parse_ordering(c)
+      shape.set(Op::Fence, types.void, 0_i64, MemAux.new(0, false, ordering, Ordering::NotAtomic, single))
+    when "cmpxchg"
+      weak = c.ident?("weak")
+      c.take if weak
+      operand(c, types, resolve, shape, nil, true)
+      c.expect_punct(",")
+      cmp_type = peek_type(c, types)
+      operand(c, types, resolve, shape, nil, true)
+      c.expect_punct(",")
+      operand(c, types, resolve, shape, nil, true)
+      c.expect_punct(",")
+      c.expect_ident("align")
+      align = c.take.num.to_i32
+      success = parse_ordering(c)
+      failure = parse_ordering(c)
+      single = c.ident?("singlethread")
+      c.take if single
+      shape.set(Op::CmpXchg, types.struct_of([cmp_type, types.int1]), 0_i64, MemAux.new(align, false, success, failure, single, "", weak))
+    when "atomicrmw"
+      rmw = c.take.text
+      operand(c, types, resolve, shape, nil, true)
+      c.expect_punct(",")
+      value_type = peek_type(c, types)
+      operand(c, types, resolve, shape, nil, true)
+      c.expect_punct(",")
+      c.expect_ident("align")
+      align = c.take.num.to_i32
+      ordering = parse_ordering(c)
+      single = c.ident?("singlethread")
+      c.take if single
+      shape.set(Op::AtomicRmw, value_type, 0_i64, MemAux.new(align, false, ordering, Ordering::NotAtomic, single, rmw, false))
+    when "va_arg"
+      operand(c, types, resolve, shape, nil, true)
+      c.expect_punct(",")
+      t = parse_type(c, types)
+      shape.set(Op::VaArg, t, 0_i64, nil)
+    when "add", "sub", "mul", "sdiv", "udiv", "srem", "urem", "shl", "lshr", "ashr", "and", "or", "xor", "fadd", "fsub", "fmul", "fdiv", "frem"
+      flags = 0_i64
+      while c.ident?("nuw") || c.ident?("nsw") || c.ident?("exact")
+        word = c.take.text
+        flags = flags | 1_i64 if word == "nuw"
+        flags = flags | 2_i64 if word == "nsw"
+        flags = flags | 4_i64 if word == "exact"
+      end
+      t = peek_type(c, types)
+      operand(c, types, resolve, shape, nil, true)
+      c.expect_punct(",")
+      operand(c, types, resolve, shape, t, false)
+      shape.set(binop_op(op_word), t, flags, nil)
+    when "fneg"
+      t = peek_type(c, types)
+      operand(c, types, resolve, shape, nil, true)
+      shape.set(Op::FNeg, t, 0_i64, nil)
+    when "icmp", "fcmp"
+      pred = c.take.text
+      t = peek_type(c, types)
+      operand(c, types, resolve, shape, nil, true)
+      c.expect_punct(",")
+      operand(c, types, resolve, shape, t, false)
+      if op_word == "icmp"
+        shape.set(Op::ICmp, types.int1, int_predicate_ordinal(pred, c), nil)
+      else
+        shape.set(Op::FCmp, types.int1, real_predicate_ordinal(pred, c), nil)
+      end
+    when "trunc", "zext", "sext", "fptrunc", "fpext", "fptosi", "fptoui", "sitofp", "uitofp", "ptrtoint", "inttoptr", "bitcast", "addrspacecast"
+      operand(c, types, resolve, shape, nil, true)
+      c.expect_ident("to")
+      t = parse_type(c, types)
+      shape.set(cast_op(op_word), t, 0_i64, nil)
+    when "extractvalue"
+      agg = peek_type(c, types)
+      operand(c, types, resolve, shape, nil, true)
+      c.expect_punct(",")
+      index = c.take.num.to_i32
+      shape.set(Op::ExtractValue, aggregate_element_type(agg, index, c), index.to_i64, nil)
+    when "insertvalue"
+      agg = peek_type(c, types)
+      operand(c, types, resolve, shape, nil, true)
+      c.expect_punct(",")
+      operand(c, types, resolve, shape, nil, true)
+      c.expect_punct(",")
+      index = c.take.num.to_i32
+      shape.set(Op::InsertValue, agg, index.to_i64, nil)
+    when "select"
+      operand(c, types, resolve, shape, nil, true)
+      c.expect_punct(",")
+      t = peek_type(c, types)
+      operand(c, types, resolve, shape, nil, true)
+      c.expect_punct(",")
+      operand(c, types, resolve, shape, nil, true)
+      shape.set(Op::Select, t, 0_i64, nil)
+    when "phi"
+      t = parse_type(c, types)
+      targets = [] of Block
+      while !c.at_end? && !c.punct?("!")
+        c.expect_punct("[")
+        operand(c, types, resolve, shape, t, false)
+        c.expect_punct(",")
+        c.expect_ident("label")
+        targets << block_ref(c)
+        c.expect_punct("]")
+        break unless c.punct?(",")
+        c.take
+      end
+      shape.set(Op::Phi, t, 0_i64, nil)
+      shape.targets = targets
+    when "freeze"
+      t = peek_type(c, types)
+      operand(c, types, resolve, shape, nil, true)
+      shape.set(Op::Freeze, t, 0_i64, nil)
+    when "call"
+      walk_call(c, mod, resolve, shape, tail, false)
+    when "invoke"
+      walk_call(c, mod, resolve, shape, false, true)
+    when "intrinsic"
+      name = c.take.text
+      found = intrinsic_match(name, types)
+      unless found
+        c.fail("unknown intrinsic #{name}")
+        return shape
+      end
+      match = found
+      signature = intrinsic_signature(match.id, match.overload, types)
+      c.expect_punct("(")
+      param_attrs = [] of Array(Attribute)
+      while !c.punct?(")") && !c.at_end?
+        param_attrs << parse_attrs(c, types)
+        operand(c, types, resolve, shape, nil, true)
+        break unless c.punct?(",")
+        c.take
+      end
+      c.expect_punct(")")
+      shape.set(Op::Intrinsic, signature[0], 0_i64, IntrinsicAux.new(match.id, match.overload, param_attrs))
+    when "threadlocaladdr"
+      operand(c, types, resolve, shape, nil, true)
+      shape.set(Op::ThreadLocalAddr, types.ptr(0), 0_i64, nil)
+    when "threadpointer"
+      word = c.take.text
+      ordinal = ThreadPointerKind::Fs.value.to_i64
+      ordinal = ThreadPointerKind::Gs.value.to_i64 if word == "gs"
+      ordinal = ThreadPointerKind::TpidrEl0.value.to_i64 if word == "tpidr_el0"
+      ordinal = ThreadPointerKind::TpidrroEl0.value.to_i64 if word == "tpidrro_el0"
+      shape.set(Op::ThreadPointer, types.ptr(0), ordinal, nil)
+    when "ret"
+      if c.ident?("void")
+        c.take
+        shape.set(Op::Ret, types.void, 0_i64, nil)
+      else
+        operand(c, types, resolve, shape, nil, true)
+        shape.set(Op::Ret, types.void, 0_i64, nil)
+      end
+    when "br"
+      if c.ident?("label")
+        c.take
+        shape.set(Op::Br, types.void, 0_i64, nil)
+        shape.targets = [block_ref(c)]
+      else
+        operand(c, types, resolve, shape, nil, true)
+        c.expect_punct(",")
+        c.expect_ident("label")
+        then_block = block_ref(c)
+        c.expect_punct(",")
+        c.expect_ident("label")
+        else_block = block_ref(c)
+        shape.set(Op::CondBr, types.void, 0_i64, nil)
+        shape.targets = [then_block, else_block]
+      end
+    when "switch"
+      t = peek_type(c, types)
+      operand(c, types, resolve, shape, nil, true)
+      c.expect_punct(",")
+      c.expect_ident("label")
+      default_block = block_ref(c)
+      c.expect_punct("[")
+      targets = [default_block] of Block
+      cases = [] of Int64
+      while !c.punct?("]") && !c.at_end?
+        case_type = parse_type(c, types)
+        c.fail("a switch case must have the switch's type") unless case_type == t
+        cases << c.take.num
+        c.expect_punct(",")
+        c.expect_ident("label")
+        targets << block_ref(c)
+        break unless c.punct?(",")
+        c.take
+      end
+      c.expect_punct("]")
+      shape.set(Op::Switch, types.void, 0_i64, nil)
+      shape.targets = targets
+      shape.cases = cases
+    when "unreachable"
+      shape.set(Op::Unreachable, types.void, 0_i64, nil)
+    when "resume"
+      operand(c, types, resolve, shape, nil, true)
+      shape.set(Op::Resume, types.void, 0_i64, nil)
+    when "landingpad"
+      t = parse_type(c, types)
+      c.expect_ident("personality")
+      operand(c, types, resolve, shape, nil, true)
+      cleanup = c.ident?("cleanup")
+      c.take if cleanup
+      while c.ident?("catch")
+        c.take
+        operand(c, types, resolve, shape, nil, true)
+      end
+      shape.set(Op::LandingPad, t, cleanup ? 1_i64 : 0_i64, nil)
+    when "catchswitch"
+      c.expect_ident("within")
+      parent_operand(c, types, resolve, shape)
+      c.expect_punct("[")
+      targets = [] of Block
+      while !c.punct?("]") && !c.at_end?
+        c.expect_ident("label")
+        targets << block_ref(c)
+        break unless c.punct?(",")
+        c.take
+      end
+      c.expect_punct("]")
+      c.expect_ident("unwind")
+      flag = 0_i64
+      if c.ident?("to")
+        c.take
+        c.expect_ident("caller")
+      else
+        c.expect_ident("label")
+        targets << block_ref(c)
+        flag = 1_i64
+      end
+      shape.set(Op::CatchSwitch, types.ptr(0), flag, nil)
+      shape.targets = targets
+    when "catchpad", "cleanuppad"
+      c.expect_ident("within")
+      parent_operand(c, types, resolve, shape)
+      c.expect_punct("[")
+      while !c.punct?("]") && !c.at_end?
+        operand(c, types, resolve, shape, nil, true)
+        break unless c.punct?(",")
+        c.take
+      end
+      c.expect_punct("]")
+      op = op_word == "catchpad" ? Op::CatchPad : Op::CleanupPad
+      shape.set(op, types.ptr(0), 0_i64, nil)
+    when "catchret"
+      c.expect_ident("from")
+      operand(c, types, resolve, shape, types.ptr(0), false)
+      c.expect_ident("to")
+      c.expect_ident("label")
+      shape.set(Op::CatchRet, types.void, 0_i64, nil)
+      shape.targets = [block_ref(c)]
+    when "cleanupret"
+      c.expect_ident("from")
+      operand(c, types, resolve, shape, types.ptr(0), false)
+      c.expect_ident("unwind")
+      flag = 0_i64
+      targets = [] of Block
+      if c.ident?("to")
+        c.take
+        c.expect_ident("caller")
+      else
+        c.expect_ident("label")
+        targets << block_ref(c)
+        flag = 1_i64
+      end
+      shape.set(Op::CleanupRet, types.void, flag, nil)
+      shape.targets = targets
+    else
+      c.fail("unknown instruction #{op_word}")
+    end
+    parse_loc(c, shape)
+    shape
+  end
+
+  # The trailing `!loc(file, line, column)`, if present.
+  def parse_loc(c : Cursor, shape : Shape) : Nil
+    return unless c.punct?("!")
+    c.take
+    c.expect_ident("loc")
+    c.expect_punct("(")
+    file = c.take.num.to_i32
+    c.expect_punct(",")
+    line = c.take.num.to_i32
+    c.expect_punct(",")
+    column = c.take.num.to_i32
+    c.expect_punct(")")
+    shape.loc = DebugLoc.new(file, line, column)
+  end
+
+  def parse_atomic(c : Cursor, mem : MemAux) : MemAux
+    return mem unless c.ident?("atomic")
+    c.take
+    ordering = parse_ordering(c)
+    single = c.ident?("singlethread")
+    c.take if single
+    MemAux.new(mem.align, mem.volatile, ordering, Ordering::NotAtomic, single, mem.rmw_op, mem.weak)
+  end
+
+  def parse_ordering(c : Cursor) : Ordering
+    word = c.take.text
+    return Ordering::Unordered if word == "unordered"
+    return Ordering::Monotonic if word == "monotonic"
+    return Ordering::Acquire if word == "acquire"
+    return Ordering::Release if word == "release"
+    return Ordering::AcqRel if word == "acq_rel"
+    return Ordering::SeqCst if word == "seq_cst"
+    c.fail("unknown ordering #{word}")
+    Ordering::NotAtomic
+  end
+
+  # A call or invoke: `[iyicc ][RETATTRS]FNTYPE CALLEE(ARGS)[ [FNATTRS]]`, or with `to label .. unwind label ..`.
+  def walk_call(c : Cursor, mod : Module, resolve : Bool, shape : Shape, tail : Bool, invoke : Bool) : Nil
+    types = mod.types
+    cc = CallConv::C
+    if c.ident?("iyicc")
+      c.take
+      cc = CallConv::Iyi
+    end
+    ret_attrs = parse_attrs(c, types)
+    fn_type = parse_fn_type(c, types)
+    if c.ident?("asm")
+      inline_asm = parse_asm(c, fn_type)
+      shape.args << inline_asm if resolve
+    else
+      operand(c, types, resolve, shape, types.ptr(0), false)
+    end
+    c.expect_punct("(")
+    param_attrs = [] of Array(Attribute)
+    while !c.punct?(")") && !c.at_end?
+      param_attrs << parse_attrs(c, types)
+      operand(c, types, resolve, shape, nil, true)
+      break unless c.punct?(",")
+      c.take
+    end
+    c.expect_punct(")")
+    fn_attrs = c.punct?("[") ? parse_attr_list(c, types) : [] of Attribute
+    aux = CallAux.new(fn_type, cc, tail, fn_attrs, param_attrs, ret_attrs)
+    if invoke
+      c.expect_ident("to")
+      c.expect_ident("label")
+      normal = block_ref(c)
+      c.expect_ident("unwind")
+      c.expect_ident("label")
+      unwind = block_ref(c)
+      shape.set(Op::Invoke, fn_type.return_type, 0_i64, aux)
+      shape.targets = [normal, unwind]
+    else
+      shape.set(Op::Call, fn_type.return_type, 0_i64, aux)
+    end
+  end
+
+  # `asm [sideeffect] [alignstack] [inteldialect] [unwind] "template", "constraints"` as the callee of a call of fn_type.
+  def parse_asm(c : Cursor, fn_type : IrType) : Inst
+    c.expect_ident("asm")
+    side = false
+    align = false
+    intel = false
+    unwind = false
+    while c.ident?("sideeffect") || c.ident?("alignstack") || c.ident?("inteldialect") || c.ident?("unwind")
+      word = c.take.text
+      side = true if word == "sideeffect"
+      align = true if word == "alignstack"
+      intel = true if word == "inteldialect"
+      unwind = true if word == "unwind"
+    end
+    template = c.take.text
+    c.expect_punct(",")
+    constraints = c.take.text
+    dialect = intel ? AsmDialect::Intel : AsmDialect::Att
+    Inst.new(Op::Call, fn_type, [] of Value, 0_i64, AsmAux.new(template, constraints, side, align, dialect, unwind), [] of Block, [] of Int64)
+  end
+
+  # A pad parent: `none` (a null ptr) or a typed-by-context ptr value.
+  def parent_operand(c : Cursor, types : TypeTable, resolve : Bool, shape : Shape) : Nil
+    if c.ident?("none")
+      c.take
+      shape.args << Inst.new(Op::ConstNull, types.ptr(0), [] of Value, 0_i64, nil, [] of Block, [] of Int64) if resolve
+    else
+      operand(c, types, resolve, shape, types.ptr(0), false)
+    end
+  end
+
+  # ---- operands and values -------------------------------------------------------------
+
+  # One operand. With `typed` the type comes first and is read here; otherwise `type` is known.
+  # Without `resolve` the value is only skipped; with it the value is built into the shape's args.
+  def operand(c : Cursor, types : TypeTable, resolve : Bool, shape : Shape, type : IrType?, typed : Bool) : Nil
+    t = type
+    t = parse_type(c, types) if typed
+    t = types.void if t.nil?
+    if resolve
+      mod = @module
+      if mod
+        shape.args << parse_value(c, t, mod)
+      else
+        c.fail("internal error: no module while resolving an operand")
+      end
+    else
+      c.pos = value_end(c.toks, c.pos)
+    end
+  end
+
+  # A block reference: `%name`, after a `label` keyword.
+  def block_ref(c : Cursor) : Block
+    t = c.take
+    unless t.kind == TokKind::Local
+      c.fail("expected a block label but found #{c.describe(t)}")
+      return Block.new("")
+    end
+    block = @blocks[t.text]?
+    unless block
+      c.fail("no block named #{t.text}")
+      return Block.new("")
+    end
+    block
+  end
+
+  # The type at the cursor, without consuming it.
+  def peek_type(c : Cursor, types : TypeTable) : IrType
+    save = c.pos
+    t = parse_type(c, types)
+    c.pos = save
+    t
+  end
+
+  def aggregate_element_type(agg : IrType, index : Int32, c : Cursor) : IrType
+    if agg.struct?
+      fields = agg.struct_element_types
+      if index < 0 || index >= fields.size
+        c.fail("index #{index} is out of range for #{agg}")
+        return agg
+      end
+      return fields[index]
+    end
+    return agg.element_type if agg.array?
+    c.fail("extractvalue needs an aggregate, not #{agg}")
+    agg
+  end
+
+  # A type. Named structs are looked up by name; `iN`, `float`, `double`, `ptr`, `{...}`, `<{...}>`, `[N x T]`.
+  def parse_type(c : Cursor, types : TypeTable) : IrType
+    t = c.peek
+    if t.kind == TokKind::Ident
+      word = t.text
+      if word == "void"
+        c.take
+        return types.void
+      end
+      if word == "float"
+        c.take
+        return types.float(32)
+      end
+      if word == "double"
+        c.take
+        return types.double
+      end
+      if word == "ptr"
+        c.take
+        if c.ident?("addrspace")
+          c.take
+          c.expect_punct("(")
+          space = c.take.num.to_i32
+          c.expect_punct(")")
+          return types.ptr(space)
+        end
+        return types.ptr(0)
+      end
+      if type_word?(word)
+        c.take
+        bits = word.bytesize > 8 ? 0 : int_word_bits(word)
+        unless valid_int_bits?(bits)
+          c.fail("no integer type of #{word[1, word.bytesize - 1]} bits in the IR")
+          return types.void
+        end
+        return types.int(bits)
+      end
+      c.fail("expected a type but found `#{word}`")
+      return types.void
+    end
+    if t.kind == TokKind::Local
+      c.take
+      return types.named_struct(t.text)
+    end
+    if tok_is_punct?(t, "{") || (tok_is_punct?(t, "<") && tok_is_punct?(c.peek_at(1), "{"))
+      body = parse_struct_body(c, types)
+      return types.struct_of(body[0], body[1])
+    end
+    if tok_is_punct?(t, "[")
+      c.take
+      count = c.take.num
+      c.expect_ident("x")
+      element = parse_type(c, types)
+      c.expect_punct("]")
+      return types.array_of(element, count)
+    end
+    c.fail("expected a type but found #{c.describe(t)}")
+    types.void
+  end
+
+  # `RET (T, T, ...)`: a function type, with `...` for varargs.
+  def parse_fn_type(c : Cursor, types : TypeTable) : IrType
+    ret = parse_type(c, types)
+    c.expect_punct("(")
+    params = [] of IrType
+    varargs = false
+    while !c.punct?(")") && !c.at_end?
+      if c.punct?("...")
+        c.take
+        varargs = true
+        break
+      end
+      params << parse_type(c, types)
+      break unless c.punct?(",")
+      c.take
+    end
+    c.expect_punct(")")
+    types.func(params, ret, varargs)
+  end
+
+  # Attributes before a type: bare names, `name(int)`, `name(type)`, or `"name"="value"`.
+  def parse_attrs(c : Cursor, types : TypeTable) : Array(Attribute)
+    list = [] of Attribute
+    while true
+      t = c.peek
+      break unless t.kind == TokKind::Str || (t.kind == TokKind::Ident && !type_word?(t.text) && t.text != "iyicc" && t.text != "to" && t.text != "label" && t.text != "asm")
+      list << parse_one_attr(c, types)
+    end
+    list
+  end
+
+  # A bracketed list `[a, b]` of attributes, as function attributes are written.
+  def parse_attr_list(c : Cursor, types : TypeTable) : Array(Attribute)
+    c.expect_punct("[")
+    list = [] of Attribute
+    while !c.punct?("]") && !c.at_end?
+      list << parse_one_attr(c, types)
+      break unless c.punct?(",")
+      c.take
+    end
+    c.expect_punct("]")
+    list
+  end
+
+  def parse_one_attr(c : Cursor, types : TypeTable) : Attribute
+    name = c.take.text
+    if c.punct?("=")
+      c.take
+      value = c.take.text
+      return Attribute.new(name, 0_u64, value, nil)
+    end
+    if c.punct?("(")
+      c.take
+      if c.peek.kind == TokKind::Int
+        number = c.take.num.to_u64
+        c.expect_punct(")")
+        return Attribute.new(name, number, nil, nil)
+      end
+      if c.peek.kind == TokKind::Ident && (c.peek.text == "sync" || c.peek.text == "async")
+        kind = c.take.text
+        c.expect_punct(")")
+        return Attribute.new(name, 0_u64, kind, nil)
+      end
+      t = parse_type(c, types)
+      c.expect_punct(")")
+      return Attribute.new(name, 0_u64, nil, t)
+    end
+    Attribute.new(name, 0_u64, nil, nil)
+  end
+
+  # A value of a known type: a local, a global or function, a literal, or a constant.
+  def parse_value(c : Cursor, type : IrType, mod : Module) : Value
+    t = c.take
+    if t.kind == TokKind::Local
+      if t.numeric
+        index = t.text.to_i
+        return @unnamed[index] if index < @unnamed.size
+        c.fail("no unnamed value %#{index} in this function")
+        return dummy(type)
+      end
+      found = @locals[t.text]?
+      return found if found
+      c.fail("no value named %#{t.text}")
+      return dummy(type)
+    end
+    if t.kind == TokKind::Global
+      fn = mod.function?(t.text)
+      return fn if fn
+      g = mod.global?(t.text)
+      return g if g
+      c.fail("no global or function named @#{t.text}")
+      return dummy(type)
+    end
+    if t.kind == TokKind::Int
+      if type.int? && type.bits > 64
+        if words = int_words_parse(t.text, type.bits)
+          inst = make_const(Op::ConstInt, type, words[0])
+          inst.wide_words = words
+          return inst
+        end
+        c.fail("#{t.text} does not fit an i#{type.bits}")
+        return dummy(type)
+      end
+      return make_const(Op::ConstInt, type, t.num)
+    end
+    if t.kind == TokKind::Hex
+      # The IR writes a float as its own 32 bits (eight digits at most). LLVM writes it as the double of the
+      # same value, sixteen digits: that form is read as the float it names, or refused when no float is it.
+      if type.float32? && t.text.bytesize > 8
+        narrowed = single_bits_of_double(t.num)
+        if narrowed.nil?
+          c.fail("0x#{t.text} is not a value a float holds exactly")
+          return dummy(type)
+        end
+        return make_const(Op::ConstFloat, type, narrowed.as(Int64))
+      end
+      return make_const(Op::ConstFloat, type, t.num)
+    end
+    if t.kind == TokKind::Decimal
+      unless type.float?
+        c.fail("#{t.text} is a floating-point constant, and #{type} is not a floating-point type")
+        return dummy(type)
+      end
+      value = t.text.to_f
+      return make_const(Op::ConstFloat, type, type.float32? ? single_bits(value) : double_bits(value))
+    end
+    if t.kind == TokKind::CStr
+      return byte_constant(type, t.bytes, mod)
+    end
+    if t.kind == TokKind::Ident
+      word = t.text
+      return make_const(Op::ConstInt, type, 1_i64) if word == "true"
+      return make_const(Op::ConstInt, type, 0_i64) if word == "false"
+      return make_const(Op::ConstNull, type, 0_i64) if word == "null"
+      return make_const(Op::ConstUndef, type, 0_i64) if word == "undef"
+      return make_const(Op::ConstPoison, type, 0_i64) if word == "poison"
+      return make_const(Op::ConstZero, type, 0_i64) if word == "zeroinitializer"
+      c.pos = c.pos - 1
+      return constant_expr(c, type, mod)
+    end
+    if tok_is_punct?(t, "{") || tok_is_punct?(t, "[") || tok_is_punct?(t, "<")
+      c.pos = c.pos - 1
+      return aggregate_constant(c, type, mod)
+    end
+    c.fail("expected a value but found #{c.describe(t)}")
+    dummy(type)
+  end
+
+  def make_const(op : Op, type : IrType, payload : Int64) : Inst
+    Inst.new(op, type, [] of Value, payload, nil, [] of Block, [] of Int64)
+  end
+
+  def dummy(type : IrType) : Inst
+    make_const(Op::ConstUndef, type, 0_i64)
+  end
+
+  # `{ T v, ... }`, `<{ ... }>` or `[ T v, ... ]`.
+  def aggregate_constant(c : Cursor, type : IrType, mod : Module) : Value
+    packed = false
+    if c.punct?("<")
+      c.take
+      packed = true
+    end
+    closer = c.punct?("[") ? "]" : "}"
+    c.take
+    elements = [] of Value
+    while !c.punct?(closer) && !c.at_end?
+      et = parse_type(c, mod.types)
+      elements << parse_value(c, et, mod)
+      break unless c.punct?(",")
+      c.take
+    end
+    c.expect_punct(closer)
+    c.expect_punct(">") if packed
+    Inst.new(Op::ConstAggregate, type, elements, 0_i64, nil, [] of Block, [] of Int64)
+  end
+
+  def byte_constant(type : IrType, bytes : Array(Int64), mod : Module) : Inst
+    args = [] of Value
+    bytes.each { |b| args << make_const(Op::ConstInt, mod.types.int8, b) }
+    Inst.new(Op::ConstBytes, type, args, 0_i64, nil, [] of Block, [] of Int64)
+  end
+
+  # `getelementptr [inbounds] (T, typed...)`, `op (typed to T)`, or `add|sub|mul (typed, typed)`.
+  def constant_expr(c : Cursor, type : IrType, mod : Module) : Value
+    word = c.take.text
+    if word == "getelementptr"
+      inbounds = false
+      if c.ident?("inbounds")
+        c.take
+        inbounds = true
+      end
+      c.expect_punct("(")
+      source = parse_type(c, mod.types)
+      c.expect_punct(",")
+      args = [] of Value
+      while !c.punct?(")") && !c.at_end?
+        et = parse_type(c, mod.types)
+        args << parse_value(c, et, mod)
+        break unless c.punct?(",")
+        c.take
+      end
+      c.expect_punct(")")
+      base_type = args.empty? ? type : args[0].type
+      return Inst.new(Op::ConstExpr, base_type, args, Op::Gep.value.to_i64, GepAux.new(source, inbounds), [] of Block, [] of Int64)
+    end
+    c.expect_punct("(")
+    first_type = parse_type(c, mod.types)
+    first = parse_value(c, first_type, mod)
+    if word == "add" || word == "sub" || word == "mul"
+      c.expect_punct(",")
+      second_type = parse_type(c, mod.types)
+      second = parse_value(c, second_type, mod)
+      c.expect_punct(")")
+      ordinal = word == "add" ? Op::Add.value.to_i64 : (word == "sub" ? Op::Sub.value.to_i64 : Op::Mul.value.to_i64)
+      return Inst.new(Op::ConstExpr, first_type, [first, second] of Value, ordinal, nil, [] of Block, [] of Int64)
+    end
+    c.expect_ident("to")
+    dest = parse_type(c, mod.types)
+    c.expect_punct(")")
+    Inst.new(Op::ConstExpr, dest, [first] of Value, cast_op(word).value.to_i64, nil, [] of Block, [] of Int64)
+  end
+
+  # ---- op tables ----------------------------------------------------------------------
+
+  def binop_op(word : String) : Op
+    return Op::Add if word == "add"
+    return Op::Sub if word == "sub"
+    return Op::Mul if word == "mul"
+    return Op::SDiv if word == "sdiv"
+    return Op::UDiv if word == "udiv"
+    return Op::SRem if word == "srem"
+    return Op::URem if word == "urem"
+    return Op::Shl if word == "shl"
+    return Op::LShr if word == "lshr"
+    return Op::AShr if word == "ashr"
+    return Op::And if word == "and"
+    return Op::Or if word == "or"
+    return Op::Xor if word == "xor"
+    return Op::FAdd if word == "fadd"
+    return Op::FSub if word == "fsub"
+    return Op::FMul if word == "fmul"
+    return Op::FDiv if word == "fdiv"
+    Op::FRem
+  end
+
+  def cast_op(word : String) : Op
+    return Op::Trunc if word == "trunc"
+    return Op::ZExt if word == "zext"
+    return Op::SExt if word == "sext"
+    return Op::FPTrunc if word == "fptrunc"
+    return Op::FPExt if word == "fpext"
+    return Op::FPToSI if word == "fptosi"
+    return Op::FPToUI if word == "fptoui"
+    return Op::SIToFP if word == "sitofp"
+    return Op::UIToFP if word == "uitofp"
+    return Op::PtrToInt if word == "ptrtoint"
+    return Op::IntToPtr if word == "inttoptr"
+    return Op::BitCast if word == "bitcast"
+    Op::AddrSpaceCast
+  end
+
+  def int_predicate_ordinal(word : String, c : Cursor) : Int64
+    names = ["eq", "ne", "ugt", "uge", "ult", "ule", "sgt", "sge", "slt", "sle"]
+    names.each_with_index do |n, i|
+      return i.to_i64 if n == word
+    end
+    c.fail("unknown integer predicate #{word}")
+    0_i64
+  end
+
+  def real_predicate_ordinal(word : String, c : Cursor) : Int64
+    names = ["false", "oeq", "ogt", "oge", "olt", "ole", "one", "ord", "ueq", "ugt", "uge", "ult", "ule", "une", "uno", "true"]
+    names.each_with_index do |n, i|
+      return i.to_i64 if n == word
+    end
+    c.fail("unknown real predicate #{word}")
+    0_i64
+  end
+end

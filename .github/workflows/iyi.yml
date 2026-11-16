@@ -3870,6 +3870,8 @@ jobs:
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'selfhost') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    env:
+      SELFHOST_HOST: linux-x86_64
     container:
       image: crystallang/crystal:1.21.0-build
     name: "The self-host gates, on Linux"
@@ -3914,6 +3916,7 @@ jobs:
     runs-on: macos-15
     env:
       MACOSX_DEPLOYMENT_TARGET: "14.4"
+      SELFHOST_HOST: darwin-arm64
     timeout-minutes: 120
     name: "The self-host gates, on darwin arm64"
     steps:
@@ -3946,6 +3949,59 @@ jobs:
       # environment before they look for llvm-config on the PATH.
       - name: The self-host gates
         run: LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config" bash bench/selfhost_gates.sh
+
+  selfhost-windows:
+    needs: plan
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'selfhost-windows') }}
+    runs-on: windows-2025
+    timeout-minutes: 150
+    env:
+      SELFHOST_HOST: windows-x86_64
+    name: "The self-host gates, on Windows x86_64"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+
+      - uses: crystal-lang/install-crystal@36a22e9145188eec527c96e5a789ce4b832af587 # v1.9.5
+        with:
+          crystal: 1.21.0
+
+      - name: What this machine has
+        shell: pwsh
+        run: |
+          if (-not (Get-Command make -ErrorAction SilentlyContinue)) {
+            choco install make --version 4.4.1 --no-progress -y
+            if ($LASTEXITCODE -ne 0) { throw "choco could not install make 4.4.1" }
+            $make = Join-Path $env:ChocolateyInstall 'lib\make\tools\install\bin\make.exe'
+            $hash = (Get-FileHash -Algorithm SHA256 $make).Hash.ToLower()
+            if ($hash -ne 'cc6dc291113dcbcc7735835acbfc23c52ed037e4e124ff2d7a0aeae6df563a9f') {
+              throw "Chocolatey's make.exe is not the one pinned here: $hash"
+            }
+          }
+          $lib = (crystal env CRYSTAL_LIBRARY_PATH).Trim()
+          if (-not (Test-Path "$lib\llvm_VERSION")) {
+            throw "no llvm_VERSION beside the Crystal package's libraries, at $lib"
+          }
+          $llvm = (Get-Content "$lib\llvm_VERSION")[0].Trim()
+          Write-Host "bootstrap libraries: $lib"
+          Write-Host "llvm: $llvm"
+          "CRYSTAL_LIBRARY_PATH=$lib" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "LLVM_VERSION=$llvm" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          crystal --version
+
+      - name: Build the fork's compiler, then `iyi`
+        shell: cmd
+        run: |
+          make -f Makefile.win crystal || exit /b 1
+          make -f Makefile.win iyi
+
+      - name: The self-host gates
+        shell: bash
+        run: bash bench/selfhost_gates.sh
+
   # The editor client is the only artifact here that is published somewhere
   # else, so it is proven the same way as the rest: every run packages it,
   # which is the one check that the manifest parses, the files it names
@@ -4055,7 +4111,8 @@ jobs:
             darwin-std-siblings, darwin-std, windows-probe, windows-collector, windows-runtime,
             windows-native, windows-native-gates, windows-native-surfaces, windows-std,
             windows-std-platforms, windows-std-siblings, windows-gates, windows-compiler-specs,
-            wasi-run, wasm32-collector, binary, clean-room, vscode, selfhost, selfhost-darwin]
+            wasi-run, wasm32-collector, binary, clean-room, vscode, selfhost, selfhost-darwin,
+            selfhost-windows]
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5

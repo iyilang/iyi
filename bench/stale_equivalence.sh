@@ -246,7 +246,7 @@ def check(item):
         return 'fail', name, 'observed run wrote no trace'
     return 'pass', name, '%d masked stdout lines, %d masked stderr lines' % (len(stdout_mask), len(stderr_mask))
 
-with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+with concurrent.futures.ThreadPoolExecutor(max_workers=min(2, os.cpu_count() or 1)) as executor:
     results = list(executor.map(check, enumerate(programs)))
 
 passed = 0
@@ -428,7 +428,7 @@ def check_rg2a(item):
 
     return 'pass', name, '%d masked stdout lines, %d masked stderr lines' % (len(stdout_mask), len(stderr_mask))
 
-with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+with concurrent.futures.ThreadPoolExecutor(max_workers=min(2, os.cpu_count() or 1)) as executor:
     results = list(executor.map(check_rg2a, enumerate(programs)))
 
 passed = 0
@@ -1159,7 +1159,7 @@ def check_probe(item):
 
 if os.name == 'nt':
     print('NOT PROVEN on windows: backtrace frame equivalence (these probes do not import the Windows std/debug resolver)', flush=True)
-with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+with concurrent.futures.ThreadPoolExecutor(max_workers=min(3, os.cpu_count() or 1)) as executor:
     results = list(executor.map(check_probe, probes.items()))
 
 failures = []

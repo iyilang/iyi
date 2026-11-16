@@ -2235,6 +2235,73 @@ describe Iyi::IyiMod do
     end
   end
 
+  # A claim that travels is proven again by the build reading it, and an
+  # artifact's initialiser is its module's top level there as in the build
+  # that wrote it: a statement of `dep/l0`'s sees only the parallel tasks
+  # its own module and the ones it imports may start before it. Read as the
+  # program's own, `S0 << 1` saw `dep/l1`'s `group`, which the program's
+  # imports ran first, and the build from artifacts refused the
+  # `@[SafeReach]` both source builds proved (`bench/spawn_fuzz.py`, seed
+  # 20).
+  it "proves a travelling claim against its own module's initialiser order" do
+    with_tempdir("iyimod_claim_initialiser_order") do
+      Dir.mkdir_p "dep"
+      File.write "dep/l0.iyi", <<-IYI
+        module dep/l0
+
+        @[SafeReach("written by this module's initialiser, then only read")]
+        pub S0 = [] of Int32
+
+        pub def read0 : Int32
+          S0.size
+        end
+
+        S0 << 1
+        S0 << 1
+        IYI
+      File.write "dep/l1.iyi", <<-IYI
+        module dep/l1
+
+        pub def ready1 : Int32
+          1
+        end
+
+        group do |g|
+          g.spawn { nil }
+        end
+        IYI
+      File.write "main.iyi", <<-IYI
+        module main
+
+        import dep/l0
+        import dep/l1
+
+        seen = Atomic(Int32).new(0)
+        group do |g|
+          g.spawn { seen.add(Dep::L0.read0 + Dep::L1.ready1); nil }
+        end
+        puts seen.get
+        IYI
+
+      source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
+
+      producer = create_spec_compiler
+      producer.prelude = "iyi/prelude"
+      producer.emit_iyimod = "mods"
+      producer.compile source, File.expand_path("from-source")
+      `./from-source`.chomp.should eq "3"
+
+      File.delete "dep/l0.iyi"
+      File.delete "dep/l1.iyi"
+
+      consumer = create_spec_compiler
+      consumer.prelude = "iyi/prelude"
+      consumer.use_iyimod = "mods"
+      consumer.compile source, File.expand_path("from-artifact")
+      `./from-artifact`.chomp.should eq "3"
+    end
+  end
+
   # Two more things the check read as code, both of them declarations.
   #
   # A `lib` body is the first: a `fun` is a C prototype, a `type` names a

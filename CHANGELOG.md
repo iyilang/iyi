@@ -95,7 +95,12 @@
   reach rule the build from source let through; a top-level claimed
   constant reached through a body that travels was refused the same way.
   The annotations written above a constant now travel above it (no
-  `.iyimod` format change: the initialiser is source text).
+  `.iyimod` format change: the initialiser is source text). The build
+  reading the artifact proves a travelling claim again, and reads the
+  artifact's initialiser as its module's top level, as the build that
+  wrote it did: a write there is weighed only against the parallel tasks
+  its own module and the ones it imports may have started
+  (`bench/spawn_fuzz.py` seed 20 was refused from artifacts alone).
 
 - **std/debug's Windows backtrace reader is one per trace.** It kept
   the PDB, its stream directory, the DBI and `/names` streams and a

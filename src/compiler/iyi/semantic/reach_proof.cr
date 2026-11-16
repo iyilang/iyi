@@ -781,11 +781,20 @@ module Iyi
       settle_starts(files)
     end
 
-    # The file each top-level statement is written in.
+    # The file each top-level statement was read from: its module's source,
+    # or the `.iyimod` of a module read from an artifact, whose initialiser
+    # runs in the module's place among the others as a source module's
+    # does (`settle_starts`).
     private def statement_files : Array(String?)
       Array(String?).new(@statement_starts.size) do |index|
-        @statement_locations[index]?.try { |at| (at.expanded_location || at).filename.as?(String) }
+        @statement_locations[index]?.try(&.original_read_from)
       end
+    end
+
+    # Whether *file* is a module this build read, from source or from its
+    # artifact, other than the program's own file.
+    private def module_file?(file : String) : Bool
+      file != @program.filename && (@program.iyi_module_paths.has_key?(file) || @program.iyi_artifact_modules.has_key?(file))
     end
 
     # The callables that may start a parallel task through code a
@@ -809,13 +818,13 @@ module Iyi
     # imports it, which is what lets its artifact say so.
     private def module_starts(file : String?, callers : Hash(Int32, Array(Callable)), proc_callers : Hash(Type, Array(Callable)),
                               literal_type : Hash(Int32, Type), cache : Hash(String, Set(Int32))) : Set(Int32)?
-      return nil unless file && file != @program.filename && @program.iyi_module_paths.has_key?(file)
+      return nil unless file && module_file?(file)
       cache[file] ||= begin
         visible = imported_by(file)
         reach = @program.iyi_share_reach
         allowed = ->(callable : Callable) do
           at = callable.a_def.try(&.location) || callable.body.location
-          written = at.try { |place| (place.expanded_location || place).filename.as?(String) }
+          written = at.try(&.original_read_from)
           written.nil? || written == file || visible.includes?(written) || reach.std_at?(at)
         end
         found = Set(Int32).new
@@ -846,14 +855,18 @@ module Iyi
     # hands it some, after its initialiser. So the start that matters to a
     # statement is the first at or before it in its own module or in one it
     # imports, at any depth; a statement whose file is not a module this
-    # build read from source, the program's top level included, sees every
-    # start. Taking the program's first start for every statement refused
-    # a claim written only by its module's initialiser in a program whose
-    # imports ran an unrelated module's `LOCK = Mutex.new { 0 }` first,
-    # while the build that wrote the module's artifact, importing them the
-    # other way, proved it - and left it out of `Reaches` as holding for
-    # every importer (`robust?`), so the two builds disagreed about the same
-    # module (`bench/spawn_fuzz.py`).
+    # build read, from source or from its artifact, the program's top level
+    # included, sees every start. Taking the program's first start for every
+    # statement refused a claim written only by its module's initialiser in
+    # a program whose imports ran an unrelated module's `LOCK = Mutex.new {
+    # 0 }` first, while the build that wrote the module's artifact,
+    # importing them the other way, proved it - and left it out of
+    # `Reaches` as holding for every importer (`robust?`), so the two builds
+    # disagreed about the same module (`bench/spawn_fuzz.py`). An artifact's
+    # initialiser is its module's top level the same way, now that the
+    # claims above its constants travel with it: read as the program's own,
+    # `S0.v << 1` in one saw a sibling artifact's `group` before it and
+    # refused the `@[SafeReach]` its producer proved (seed 20).
     private def settle_starts(files : Array(String?)) : Nil
       starts = [] of Int32
       @start_before = Array.new(@statement_starts.size, Int32::MAX)
@@ -869,8 +882,7 @@ module Iyi
     # statement written in *start* started.
     private def sees?(file : String?, start : String?) : Bool
       return true if file.nil? || start.nil? || file == start
-      modules = @program.iyi_module_paths
-      return true unless modules.has_key?(file) && modules.has_key?(start) && file != @program.filename
+      return true unless module_file?(file) && module_file?(start)
       imported_by(file).includes?(start)
     end
 

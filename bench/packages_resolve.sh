@@ -224,6 +224,33 @@ cp app/iyi.sum app/iyi.sum.old-format
 cmp -s app/iyi.sum app/iyi.sum.old-format || { echo "tidy --check recorded manifests"; exit 1; }
 (cd app && "$IYI" mod tidy) > tidy-old.log 2>&1 || { echo "tidy did not record manifests:"; cat tidy-old.log; exit 1; }
 cmp -s app/iyi.sum app/iyi.sum.with-manifests || { echo "tidy changed content pins while recording manifests"; exit 1; }
+cp app/iyi.sum.old-format app/iyi.sum
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    echo "  (read-only sum permissions need a Windows ACL; covered by the checksum spec where enforced)"
+    ;;
+  *)
+    chmod a-w app/iyi.sum
+    if [ -w app/iyi.sum ]; then
+      echo "  (this user can write the read-only sum; permission refusal is not asked)"
+    else
+      (cd app && "$IYI" build main.iyi -o app) > readonly-sum.log 2>&1
+      readonly_status=$?
+      chmod u+w app/iyi.sum
+      if [ "$readonly_status" -eq 0 ] || ! grep -qi 'iyi.sum' readonly-sum.log; then
+        echo "a read-only old sum did not refuse the build:"; cat readonly-sum.log; exit 1;
+      fi
+      cmp -s app/iyi.sum app/iyi.sum.old-format || { echo "a refused build changed the read-only sum"; exit 1; }
+      echo "  a read-only old sum refuses a build that needs manifest pins"
+    fi
+    chmod u+w app/iyi.sum
+    ;;
+esac
+(cd app && "$IYI" build main.iyi -o app) > build-old.log 2>&1 || {
+  echo "a build did not upgrade the old sum:"; cat build-old.log; exit 1;
+}
+cmp -s app/iyi.sum app/iyi.sum.with-manifests || { echo "the first build did not add exactly the missing manifest pins"; exit 1; }
+echo "  old sum: tidy --check exits 1, then tidy or build records the manifest pins"
 
 # ── 2. The cache is the second build's source ────────────────────────────
 step "a fetched checkout is read, not refetched"

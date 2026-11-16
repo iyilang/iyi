@@ -79,13 +79,6 @@ module Iyi::Mod
       Checker.new(sum_path, known, in_cache?(dir), notices)
     end
 
-    # Keep the tree-only entry point for callers that already have selections.
-    def self.check(dir : String, selections : Array(Selection), notices : IO = STDERR, &checkout : Selection -> String) : Nil
-      checks = checker(dir, notices)
-      checks.trees(selections, &checkout)
-      checks.write
-    end
-
     class Checker
       getter manifests = [] of Selection
 
@@ -159,9 +152,10 @@ module Iyi::Mod
     end
 
     def self.changed(key : String, sum_path : String, expected : String, actual : String) : ModError
+      subject = key.ends_with?("/iyi.mod") ? "manifest" : "checkout"
       ModError.new(
         "#{key} is not what it was: #{sum_path} says #{expected}, " \
-        "the checkout hashes to #{actual}. Something between the tag " \
+        "the #{subject} hashes to #{actual}. Something between the tag " \
         "and this machine changed; that is the one thing this file " \
         "exists to notice (SPEC.md III.7)")
     end

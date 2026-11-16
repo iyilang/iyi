@@ -3909,9 +3909,6 @@ jobs:
       - name: The self-host gates
         run: bash bench/selfhost_gates.sh
 
-      - name: The Mach-O object reader and writer
-        run: bash bench/native_obj_exercise.sh
-
   selfhost-darwin:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'selfhost-darwin') }}

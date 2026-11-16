@@ -1,5 +1,11 @@
 require "../stale/runner"
 
+{% if flag?(:win32) %}
+  require "c/consoleapi"
+  require "c/jobapi2"
+  require "c/processthreadsapi"
+{% end %}
+
 # iyi: `iyi test` — the verify loop, with no framework to learn
 # (AI_FIRST.md §2 #4).
 #
@@ -732,7 +738,10 @@ class Iyi::Command
   private def run_built_test(binary : String, deadline : Float64, output : IO::Memory, environment : Hash(String, String)) : {String, String}
     reader, writer = IO.pipe(write_blocking: true)
     begin
-      process = Process.new(binary, env: environment, output: writer, error: writer, process_group: true)
+      process, tree = TestTree.start do |before_resume|
+        Process.new(binary, env: environment, output: writer, error: writer,
+          process_group: true, before_resume: before_resume)
+      end
     rescue ex
       reader.close
       raise ex
@@ -740,7 +749,6 @@ class Iyi::Command
       # The child has its own copies; with this one open the pipe never ends.
       writer.close
     end
-    tree = TestTree.new(process)
     begin
       done = ::Channel(Process::Status).new
       # The run ends when the program has and the pipe has: a child the test
@@ -793,35 +801,85 @@ class Iyi::Command
   # running before it exits on SIGINT, SIGTERM or SIGHUP, or a test that
   # hangs would outlive the run that started it (`TestTree.trap_endings`).
   class TestTree
-    @process : Process
+    @process : Process? = nil
     {% if flag?(:win32) %}
+      struct JobNode
+        property job : LibC::HANDLE
+        property next : Pointer(JobNode)
+
+        def initialize(@job, @next)
+        end
+      end
+
+      @@jobs = Pointer(JobNode).null
+      # SRWLOCK_INIT is a zero pointer. The console handler uses only Win32
+      # calls and this raw list, never Crystal's scheduler or a fiber mutex.
+      @@jobs_lock = Pointer(Void).null
+      @@trapped = false
       @job : LibC::HANDLE = LibC::HANDLE.null
+      @node = Pointer(JobNode).null
     {% else %}
       @@running = Set(Int64).new
       @@running_lock = Sync::Mutex.new
       @@trapped = false
     {% end %}
 
-    def initialize(@process : Process)
+    def initialize
       {% if flag?(:win32) %}
-        job = LibC.CreateJobObjectW(Pointer(LibC::SECURITY_ATTRIBUTES).null, Pointer(UInt16).null)
-        return if job.null?
-        # PROCESS_TERMINATE | PROCESS_SET_QUOTA, what assigning asks for.
-        handle = LibC.OpenProcess(0x0001_u32 | 0x0100_u32, 0, @process.pid.to_u32)
-        if handle.null?
-          LibC.CloseHandle(job)
-          return
-        end
-        assigned = LibC.AssignProcessToJobObject(job, handle)
-        LibC.CloseHandle(handle)
-        if assigned == 0
-          LibC.CloseHandle(job)
-          return
-        end
-        @job = job
-      {% else %}
         TestTree.trap_endings
-        @@running_lock.synchronize { @@running << @process.pid }
+        job = LibC.CreateJobObjectW(Pointer(LibC::SECURITY_ATTRIBUTES).null, Pointer(UInt16).null)
+        raise RuntimeError.from_winerror("CreateJobObjectW") if job.null?
+        limits = LibC::JOBOBJECT_EXTENDED_LIMIT_INFORMATION.new
+        limits.basicLimitInformation.limitFlags = LibC::JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if LibC.SetInformationJobObject(job, LibC::JOBOBJECTINFOCLASS::ExtendedLimitInformation,
+             pointerof(limits).as(Void*), sizeof(LibC::JOBOBJECT_EXTENDED_LIMIT_INFORMATION)) == 0
+          error = RuntimeError.from_winerror("SetInformationJobObject")
+          LibC.CloseHandle(job)
+          raise error
+        end
+        node = Pointer(JobNode).malloc(1)
+        LibC.AcquireSRWLockExclusive(pointerof(@@jobs_lock))
+        node.value = JobNode.new(job, @@jobs)
+        @@jobs = node
+        @job = job
+        @node = node
+        LibC.ReleaseSRWLockExclusive(pointerof(@@jobs_lock))
+      {% end %}
+    end
+
+    # Assign the suspended child before Process resumes it. A failed
+    # assignment ends the child and is an error.
+    def self.start(&)
+      tree = new
+      process : Process? = nil
+      begin
+        process = yield tree.before_resume
+        tree.attach(process)
+        {process, tree}
+      rescue ex
+        process.try { |child| child.terminate(graceful: false) rescue nil }
+        tree.close
+        raise ex
+      end
+    end
+
+    def before_resume
+      {% if flag?(:win32) %}
+        ->(handle : Void*) do
+          if LibC.AssignProcessToJobObject(@job, handle) == 0
+            raise RuntimeError.from_winerror("AssignProcessToJobObject")
+          end
+          nil
+        end
+      {% else %}
+        nil
+      {% end %}
+    end
+
+    def attach(@process : Process) : Nil
+      {% unless flag?(:win32) %}
+        TestTree.trap_endings
+        @@running_lock.synchronize { @@running << @process.not_nil!.pid }
       {% end %}
     end
 
@@ -829,31 +887,75 @@ class Iyi::Command
       {% if flag?(:win32) %}
         unless @job.null?
           LibC.TerminateJobObject(@job, 1)
-          LibC.CloseHandle(@job)
-          @job = LibC::HANDLE.null
           return
         end
       {% else %}
-        # The group's id is its leader's pid. A group that is gone already
-        # leaves the leader, which is killed as before.
-        return if LibC.kill(-@process.pid.to_i32, Signal::KILL.value) == 0
+        if process = @process
+          return if LibC.kill(-process.pid.to_i32, Signal::KILL.value) == 0
+        end
       {% end %}
-      @process.terminate(graceful: false)
+      @process.try &.terminate(graceful: false)
     end
 
-    # The job's handle, once the test is over; closing it ends nothing.
     def close : Nil
       {% if flag?(:win32) %}
-        LibC.CloseHandle(@job) unless @job.null?
-        @job = LibC::HANDLE.null
+        LibC.AcquireSRWLockExclusive(pointerof(@@jobs_lock))
+        unless @node.null?
+          previous = Pointer(JobNode).null
+          current = @@jobs
+          until current.null?
+            if current == @node
+              if previous.null?
+                @@jobs = current.value.next
+              else
+                previous.value.next = current.value.next
+              end
+              break
+            end
+            previous = current
+            current = current.value.next
+          end
+          LibC.CloseHandle(@job)
+          @job = LibC::HANDLE.null
+          @node = Pointer(JobNode).null
+        end
+        LibC.ReleaseSRWLockExclusive(pointerof(@@jobs_lock))
       {% else %}
-        @@running_lock.synchronize { @@running.delete(@process.pid) }
+        if process = @process
+          @@running_lock.synchronize { @@running.delete(process.pid) }
+        end
       {% end %}
     end
 
     {% if flag?(:win32) %}
-      # A tree on Windows ends with its job object; nothing registers them.
+      def self.console_event(event : UInt32) : Int32
+        status = case event
+                 when LibC::CTRL_C_EVENT, LibC::CTRL_BREAK_EVENT then 130_u32
+                 when LibC::CTRL_CLOSE_EVENT                    then 129_u32
+                 else                                               return 0
+                 end
+        LibC.AcquireSRWLockExclusive(pointerof(@@jobs_lock))
+        node = @@jobs
+        until node.null?
+          LibC.TerminateJobObject(node.value.job, status)
+          node = node.value.next
+        end
+        LibC.ReleaseSRWLockExclusive(pointerof(@@jobs_lock))
+        LibC.ExitProcess(status)
+      end
+
       def self.trap_endings : Nil
+        LibC.AcquireSRWLockExclusive(pointerof(@@jobs_lock))
+        begin
+          unless @@trapped
+            if LibC.SetConsoleCtrlHandler(->TestTree.console_event(UInt32), 1) == 0
+              raise RuntimeError.from_winerror("SetConsoleCtrlHandler")
+            end
+            @@trapped = true
+          end
+        ensure
+          LibC.ReleaseSRWLockExclusive(pointerof(@@jobs_lock))
+        end
       end
     {% else %}
       def self.trap_endings : Nil

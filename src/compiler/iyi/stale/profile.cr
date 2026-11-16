@@ -3,6 +3,12 @@ require "./receipt"
 require "./roots"
 require "../codegen/target"
 require "../config"
+require "./win_version"
+
+{% if flag?(:win32) %}
+  require "c/jobapi2"
+  require "c/processthreadsapi"
+{% end %}
 
 {% if flag?(:darwin) %}
   lib LibC
@@ -38,6 +44,7 @@ module Iyi::Stale::Profile
     "GLIBC_TUNABLES",
     "DYLD_INSERT_LIBRARIES",
     "DYLD_LIBRARY_PATH",
+    "__COMPAT_LAYER",
   }
   DAEMON_VARS  = {"IYI_DAEMON_SOCKET", "CRYSTAL_DAEMON_SOCKET"}
   SCRATCH_VARS = {"TMPDIR", "TEMP", "TMP"}
@@ -115,7 +122,11 @@ module Iyi::Stale::Profile
   def self.clean_child_env(scratch_dir : String, trace_file : String, base_env = ENV) : Hash(String, String)
     env = Hash(String, String).new
     base_env.each do |k, v|
-      next if LOADER_VARS.includes?(k) || DAEMON_VARS.includes?(k)
+      name = k
+      {% if flag?(:win32) %}
+        name = k.upcase
+      {% end %}
+      next if LOADER_VARS.includes?(name) || DAEMON_VARS.includes?(name)
       env[k] = v
     end
     SCRATCH_VARS.each { |k| env[k] = scratch_dir }
@@ -176,9 +187,34 @@ module Iyi::Stale::Profile
           rlimits[name] = current > Int64::MAX.to_u64 ? Int64::MAX : current.to_i64
         end
       end
+    {% elsif flag?(:win32) %}
+      if LibC.IsProcessInJob(LibC.GetCurrentProcess, LibC::HANDLE.null, out in_job) == 0
+        raise RuntimeError.from_winerror("IsProcessInJob")
+      end
+      if in_job != 0
+        limits = LibC::JOBOBJECT_EXTENDED_LIMIT_INFORMATION.new
+        if LibC.QueryInformationJobObject(LibC::HANDLE.null, LibC::JOBOBJECTINFOCLASS::ExtendedLimitInformation,
+             pointerof(limits).as(Void*), sizeof(LibC::JOBOBJECT_EXTENDED_LIMIT_INFORMATION), nil) == 0
+          raise RuntimeError.from_winerror("QueryInformationJobObject")
+        end
+        rlimits = job_limits(limits)
+      end
     {% end %}
     rlimits
   end
+
+  {% if flag?(:win32) %}
+    def self.job_limits(info : LibC::JOBOBJECT_EXTENDED_LIMIT_INFORMATION) : Hash(String, Int64)
+      limits = {} of String => Int64
+      basic = info.basicLimitInformation
+      flags = basic.limitFlags
+      limits["job_process_memory"] = info.processMemoryLimit.to_i64! if flags.bits_set?(LibC::JOB_OBJECT_LIMIT_PROCESS_MEMORY)
+      limits["job_memory"] = info.jobMemoryLimit.to_i64! if flags.bits_set?(LibC::JOB_OBJECT_LIMIT_JOB_MEMORY)
+      limits["job_active_processes"] = basic.activeProcessLimit.to_i64 if flags.bits_set?(LibC::JOB_OBJECT_LIMIT_ACTIVE_PROCESS)
+      limits["job_process_time"] = basic.perProcessUserTimeLimit if flags.bits_set?(LibC::JOB_OBJECT_LIMIT_PROCESS_TIME)
+      limits
+    end
+  {% end %}
 
   def self.current_cgroup_mem : Int64?
     {% if flag?(:linux) %}
@@ -205,8 +241,10 @@ module Iyi::Stale::Profile
       else
         "unknown"
       end
+    {% elsif flag?(:win32) %}
+      WinVersion.kernel
     {% else %}
-      "windows"
+      "unknown"
     {% end %}
   end
 end

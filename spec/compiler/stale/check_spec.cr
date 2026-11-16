@@ -520,11 +520,15 @@ describe "Iyi::Stale inputs record (--stale-inputs)" do
       File.file?(record_path).should be_true
       data = JSON.parse(File.read(record_path))
       data["format"].as_s.should eq("iyi-stale-inputs")
-      data["version"].as_i.should eq(1)
+      data["version"].as_i.should eq(2)
       data["local_build"].as_s.should eq("a" * 64)
       data["portable_build"].as_s.should eq("b" * 64)
       data["env_enumerated"].as_bool.should be_false
       data["observed_env"].as_h.has_key?("PATH").should be_true
+      data["observed_env"].as_h.has_key?("__COMPAT_LAYER").should be_true
+      %w(LD_PRELOAD GLIBC_TUNABLES DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH).each do |name|
+        data["observed_env"].as_h.has_key?(name).should be_true
+      end
       data["listings"].as_h.has_key?(Iyi::BuildInputs.key(dir)).should be_true
       data["pkg_config"].as_a[0].as_a[0].as_s.should eq("zlib")
       entry = data["files"].as_a.find { |file| file.as_a[0].as_s == Iyi::BuildInputs.key(source_path) }.not_nil!
@@ -533,7 +537,7 @@ describe "Iyi::Stale inputs record (--stale-inputs)" do
       entry[2].as_i64.should eq(1)
       {% if flag?(:unix) %}
         entry[4].as_i64.should be > 0
-        entry[6].as_i64.should be > 0
+        entry[6].as_s.to_u64.should be > 0
       {% end %}
     end
   end
@@ -552,7 +556,7 @@ describe "Iyi::Stale inputs record (--stale-inputs)" do
     Iyi::Stale::Check.records_inputs?(no_reasons, stale).should be_false
   end
 
-  it "stale inputs leave the Build unchanged, and write the record of a reusable build everywhere but Windows" do
+  it "stale inputs leave the Build unchanged and write the record of a reusable build" do
     program = Iyi::Program.new
     program.color = false
     parser = program.new_parser("def foo(x); x; end; a = foo(41)")
@@ -595,13 +599,8 @@ describe "Iyi::Stale inputs record (--stale-inputs)" do
           {% end %}
           recorded.local_build_hex.should eq(plain.local_build_hex)
           recorded.portable_build_hex.should eq(plain.portable_build_hex)
-          {% if flag?(:win32) %}
-            # No change time there, so `Check.run` writes no record at all.
-            File.file?(inputs_path).should be_false
-          {% else %}
-            File.file?(inputs_path).should be_true
-            JSON.parse(File.read(inputs_path))["local_build"].as_s.should eq(recorded.local_build_hex)
-          {% end %}
+          File.file?(inputs_path).should be_true
+          JSON.parse(File.read(inputs_path))["local_build"].as_s.should eq(recorded.local_build_hex)
         end
       end
     end

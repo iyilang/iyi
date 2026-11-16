@@ -402,6 +402,9 @@ module Iyi::Stale
     private def fast_verdict(file : String, test_id : TestId, is_ambiguous : Bool,
                              profile : ReceiptProfile, roots : Roots, keyer : Keyer,
                              fast : FastPath) : FastVerdict
+      if reason = Toolchain.running_image_refusal
+        return FastVerdict.new(false, reason)
+      end
       return FastVerdict.new(false, "ambiguous test id") if is_ambiguous
       if @store.blockers(test_id).any? { |rec| block_rule?(rec, profile, roots, keyer) }
         return FastVerdict.new(false, "a contradicted receipt validates")
@@ -526,18 +529,20 @@ module Iyi::Stale
         cwd: roots.map(run_cwd),
         timeout: @timeout
       )
+      image_refusal = Toolchain.running_image_refusal
       verdict = @cached && !@fresh ? fast_verdict(file, test_id, is_ambiguous, current_profile, roots, keyer_local, fast) : nil
-      if verdict && verdict.served && !fast.audit
+      if verdict && verdict.served && !fast.audit && !Toolchain.running_image_refusal
         return served_outcome(file, test_id, verdict.held.not_nil!, current_profile, roots_map, entered)
       end
-      check_reason = verdict && !verdict.served ? verdict.reason : nil
+      check_reason = Toolchain.running_image_refusal || (verdict && !verdict.served ? verdict.reason : nil)
+      image_refusal ||= Toolchain.running_image_refusal
 
       accept_rules = [] of KeyFile::StaleRule
       block_rules = [] of KeyFile::StaleRule
       newest_receipt : Receipt? = nil
       candidates = [] of Receipt
 
-      unless @fresh || is_ambiguous
+      unless @fresh || is_ambiguous || image_refusal
         candidates = @store.candidates(test_id, @target)
         blockers = @store.blockers(test_id)
         newest_receipt = candidates.first?
@@ -584,6 +589,9 @@ module Iyi::Stale
             builds = 0
 
             begin
+              if image_refusal ||= Toolchain.running_image_refusal
+                accept_rules.clear
+              end
               File.write(accept_path, accept_rules.to_json)
               File.write(block_path, block_rules.to_json)
               # The record is only ever the newest check's: a compiler run takes
@@ -592,40 +600,44 @@ module Iyi::Stale
 
               build_out = IO::Memory.new
 
-              # A build leads its own process group, as a run does, so an interrupt ends it too.
-              build_process = Process.new(
-                Process.executable_path.not_nil!,
-                [
-                  "build", file,
-                  "-o", binary,
-                  "-Diyi_observe",
-                  "--stale-key", out_key_path,
-                  "--stale-accept", accept_path,
-                  "--stale-block", block_path,
-                  "--stale-inputs", inputs_path,
-                ],
-                env: Profile.build_env,
-                clear_env: true,
-                input: Process::Redirect::Close,
-                output: build_out,
-                error: build_out,
-                process_group: true
-              )
-              builds += 1
-              build_tree = Command::TestTree.new(build_process)
-              build_status = begin
-                build_process.wait
-              ensure
-                build_tree.close
+              build_args = [
+                "build", file, "-o", binary, "-Diyi_observe",
+                "--stale-key", out_key_path, "--stale-accept", accept_path,
+                "--stale-block", block_path, "--stale-inputs", inputs_path,
+              ]
+              build_env = Profile.build_env
+              build_env["IYI_STALE_PARENT_IMAGE_CHANGED"] = "1" if image_refusal
+              run_build = -> do
+                process, build_tree = Command::TestTree.start do |before_resume|
+                  Process.new(Process.executable_path.not_nil!, build_args,
+                    env: build_env, clear_env: true, input: Process::Redirect::Close,
+                    output: build_out, error: build_out, process_group: true, before_resume: before_resume)
+                end
+                begin
+                  process.wait
+                ensure
+                  build_tree.close
+                end
               end
+              build_status = run_build.call
+              builds += 1
 
               key_data = if File.file?(out_key_path)
                            KeyFile.parse(File.read(out_key_path)) rescue nil
                          else
                            nil
                          end
+              if key_data && key_data.hit && (image_refusal = Toolchain.running_image_refusal)
+                # The first child may have skipped codegen before the parent
+                # noticed a replacement; rerun with no accepted receipts.
+                File.write(accept_path, "[]")
+                build_env["IYI_STALE_PARENT_IMAGE_CHANGED"] = "1"
+                build_status = run_build.call
+                builds += 1
+                key_data = File.file?(out_key_path) ? (KeyFile.parse(File.read(out_key_path)) rescue nil) : nil
+              end
               compiled_key = key_data
-              record_fast_inputs(test_id, file, fast.facts, inputs_path, key_data)
+              record_fast_inputs(test_id, file, fast.facts, inputs_path, key_data) unless Toolchain.running_image_refusal
 
               # Case 1: Cached Hit!
               if key_data && (hit = key_data.hit)
@@ -697,17 +709,19 @@ module Iyi::Stale
               run_out = IO::Memory.new
               null_io = File.open(File::NULL, "r")
 
-              process = Process.new(
-                binary,
-                args: test_argv,
-                env: child_env,
-                clear_env: true,
-                input: null_io,
-                output: run_out,
-                error: run_out,
-                process_group: true
-              )
-              tree = Command::TestTree.new(process)
+              process, tree = Command::TestTree.start do |before_resume|
+                Process.new(
+                  binary,
+                  args: test_argv,
+                  env: child_env,
+                  clear_env: true,
+                  input: null_io,
+                  output: run_out,
+                  error: run_out,
+                  process_group: true,
+                  before_resume: before_resume
+                )
+              end
 
               done = ::Channel(Process::Status).new
               spawn { done.send(process.wait) }
@@ -811,7 +825,10 @@ module Iyi::Stale
               taint_reason : String? = nil
               is_not_reusable = false
 
-              if !trace_res.taints.empty?
+              if image_refusal = Toolchain.running_image_refusal
+                is_not_reusable = true
+                taint_reason = image_refusal
+              elsif !trace_res.taints.empty?
                 is_not_reusable = true
                 taint = trace_res.taints.first
                 kind = Iyi::EffectKind.from_value?(taint.kind).try(&.to_s.underscore) || "taint #{taint.kind}"

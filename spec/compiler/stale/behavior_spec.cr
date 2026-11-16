@@ -153,17 +153,15 @@ describe "Iyi::Stale S2: behavior key, toolchain digest, refused modes" do
     it "is equal across calls and differs for a different executable" do
       with_tempfile("stale_toolchain_cache") do |cache_dir|
         Dir.mkdir_p(cache_dir)
+        # The spec executable was just linked; let its racy interval pass.
+        sleep 250.milliseconds
         d1 = Iyi::Stale::Toolchain.digest(cache_dir)
         d2 = Iyi::Stale::Toolchain.digest(cache_dir)
         d1.should eq(d2)
 
         memo_dir = File.join(cache_dir, "tests-v1", "toolchain")
-        {% if flag?(:unix) %}
-          Dir.exists?(memo_dir).should be_true
-          Dir.children(memo_dir).should_not be_empty
-        {% else %}
-          Dir.exists?(memo_dir).should be_false
-        {% end %}
+        Dir.exists?(memo_dir).should be_true
+        Dir.children(memo_dir).should_not be_empty
 
         # Different executable yields different digest
         with_tempfile("dummy_exe_1") do |exe1|
@@ -193,30 +191,34 @@ describe "Iyi::Stale S2: behavior key, toolchain digest, refused modes" do
       end
     end
 
-    {% if flag?(:win32) %}
-      it "rehashes a copied linker after a same-size edit with restored mtime" do
-        with_tempfile("stale_toolchain_cache") do |cache_dir|
-          Dir.mkdir_p(cache_dir)
-          with_tempfile("linker_original") do |original|
-            with_tempfile("linker_copy") do |linker|
-              File.write(original, "linker fixture A")
-              File.copy(original, linker)
-              timestamp = Time.utc(2020, 1, 2)
-              File.utime(timestamp, timestamp, linker)
+    it "rehashes a copied linker after a same-size edit with restored mtime" do
+      with_tempfile("stale_toolchain_cache") do |cache_dir|
+        Dir.mkdir_p(cache_dir)
+        with_tempfile("linker_original") do |original|
+          with_tempfile({{ flag?(:win32) ? "linker_copy" : "linker\\copy" }}) do |linker|
+            File.write(original, "linker fixture A")
+            File.copy(original, linker)
+            timestamp = Time.utc(2020, 1, 2)
+            File.utime(timestamp, timestamp, linker)
+            sleep 250.milliseconds
 
-              first = Iyi::Stale::Toolchain.digest(cache_dir, linker_override: linker)
-              Iyi::Stale::Toolchain.digest(cache_dir, linker_override: linker).should eq(first)
-              Dir.exists?(File.join(cache_dir, "tests-v1", "toolchain")).should be_false
+            first = Iyi::Stale::Toolchain.digest(cache_dir, linker_override: linker)
+            Iyi::Stale::Toolchain.digest(cache_dir, linker_override: linker).should eq(first)
+            memo_dir = File.join(cache_dir, "tests-v1", "toolchain")
+            memo_names = Dir.children(memo_dir)
+            memo_names.should_not be_empty
+            memo = JSON.parse(File.read(File.join(memo_dir, memo_names.first)))
+            memo["linker_path"].as_s.should eq(File.realpath(linker))
+            memo["toolchain"].as_s.should eq(Iyi::Stale.hex(first))
 
-              File.write(linker, "linker fixture B")
-              File.utime(timestamp, timestamp, linker)
-              File.info(linker).modification_time.should eq(timestamp)
-              Iyi::Stale::Toolchain.digest(cache_dir, linker_override: linker).should_not eq(first)
-            end
+            File.write(linker, "linker fixture B")
+            File.utime(timestamp, timestamp, linker)
+            File.info(linker).modification_time.should eq(timestamp)
+            Iyi::Stale::Toolchain.digest(cache_dir, linker_override: linker).should_not eq(first)
           end
         end
       end
-    {% end %}
+    end
   end
 
   describe "Config.build_inputs" do

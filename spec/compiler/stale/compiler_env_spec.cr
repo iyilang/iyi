@@ -35,6 +35,10 @@ describe "Iyi::Stale S3c: env-only recorder, CompilerEnvFp" do
     end
 
     it "classifies excluded variables (CHILD_ENV)" do
+      Iyi::BuildInputs::CHILD_ENV.includes?("__COMPAT_LAYER").should be_true
+      %w(LD_PRELOAD GLIBC_TUNABLES DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH).each do |name|
+        Iyi::BuildInputs::CHILD_ENV.includes?(name).should be_true
+      end
       Iyi::BuildInputs::CHILD_ENV.each do |var|
         Iyi::Stale::CompilerEnv.variable_class(var).should eq(Iyi::Stale::CompilerEnv::VariableClass::Excluded), "expected #{var} to be excluded"
         Iyi::Stale::CompilerEnv.excluded_class?(var).should be_true
@@ -335,10 +339,9 @@ describe "Iyi::Stale S3c: env-only recorder, CompilerEnvFp" do
       if Iyi::Stale::FileStamp.of("src/compiler/iyi.cr").ctime > 0
         stale.reasons.should be_empty
       else
-        # Windows reports no change time, so the file that exists cannot be
-        # vouched for and the recorder says so. The absent one needs none.
+        # The existing file cannot be vouched for; the absent one needs no stamp.
         stale.reasons.size.should eq(1)
-        stale.reasons.first.should contain("iyi.cr has no change time")
+        stale.reasons.first.should contain("iyi.cr has no trusted change time")
       end
     end
 

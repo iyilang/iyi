@@ -2,6 +2,11 @@ require "crystal/digest/sha256"
 require "./encoding"
 require "../config"
 require "json"
+require "./inputs_file"
+
+{% if flag?(:win32) %}
+  require "c/libloaderapi"
+{% end %}
 
 module Iyi::Stale
   # Flipped to false when RG1 is green on master CI
@@ -11,45 +16,95 @@ module Iyi::Stale
   THREADS_IN_BEHAVIOR = true
 
   module Toolchain
-    record StatKey, path : String, dev : UInt64, ino : UInt64, size : Int64, mtime : Int64, ctime : Int64
+    record StatKey, path : String, stamp : BuildInputs::Stamp
+    class ImageChangedError < Exception
+    end
+
+    # Capture at process startup, before a later pathname replacement can
+    # make the running image appear to be the new file.
+    @@running_image : {String, BuildInputs::Stamp}? = begin
+      if path = Process.executable_path
+        stamp = FileStamp.of(path)
+        if stamp.kind.file? && stamp.ctime > 0 &&
+           (stamp.digest || !BuildInputs.racy?(Math.max(stamp.mtime, stamp.ctime), BuildInputs.now))
+          {path, stamp}
+        end
+      end
+    rescue
+      nil
+    end
+    @@image_lock = Mutex.new
+    @@image_refusal : String? = nil
+
+    def self.running_image_refusal : String?
+      @@image_lock.synchronize do
+        return @@image_refusal if @@image_refusal
+        image = @@running_image
+        unless image
+          return @@image_refusal = "running compiler image cannot be identified"
+        end
+        path, original = image
+        current = FileStamp.of(path, with_digest: false)
+        same = original.kind.file? && original.ctime > 0 && current.kind.file? &&
+               original.size == current.size && original.mtime == current.mtime &&
+               original.ctime == current.ctime && original.dev == current.dev && original.ino == current.ino
+        if same && (digest = original.digest)
+          same = FileStamp.fingerprint(path) == digest
+          if same && !BuildInputs.racy?(Math.max(original.mtime, original.ctime), BuildInputs.now)
+            @@running_image = {path, original.copy_with(digest: nil)}
+          end
+        end
+        @@image_refusal = "running compiler image changed" unless same
+        @@image_refusal
+      end
+    rescue
+      @@image_refusal = "running compiler image cannot be identified"
+    end
+
+    private def self.check_running_image! : Nil
+      if reason = running_image_refusal
+        raise ImageChangedError.new(reason)
+      end
+    end
 
     # Digest of compiler, LLVM and linker driver metadata, cached via C4 memo.
     def self.digest(cache_root : String, executable_path : String? = nil, linker_override : String? = nil) : Digest
+      check_running_image! unless executable_path
       compiler_path = resolve_compiler_path(executable_path)
       llvm_path, llvm_is_shared = resolve_llvm_lib(compiler_path)
       linker_path = linker_override ? File.realpath(linker_override) : resolve_linker_path
 
-      # Windows file metadata does not provide a usable memo identity. Hash the
-      # inputs on every check rather than trusting a path or synthetic ID.
+      # Racy and untrusted stamps cannot key a memo, on any platform.
       memo_dir = File.join(cache_root, "tests-v1", "toolchain")
       memo_file = nil
-      {% if flag?(:unix) %}
-        c_stat = file_stat_key(compiler_path)
-        l_stat = llvm_is_shared ? file_stat_key(llvm_path) : nil
-        k_stat = file_stat_key(linker_path)
-        if c_stat && k_stat && (!llvm_is_shared || l_stat)
-          memo_key = Stale.d("toolchain_memo") do |enc|
-            encode_stat(enc, c_stat)
-            if l_stat
-              encode_stat(enc, l_stat)
-            else
-              enc.str("static")
-            end
-            encode_stat(enc, k_stat)
+      c_stat = file_stat_key(compiler_path)
+      l_stat = llvm_is_shared ? file_stat_key(llvm_path) : nil
+      k_stat = file_stat_key(linker_path)
+      if c_stat && k_stat && (!llvm_is_shared || l_stat)
+        memo_key = Stale.d("toolchain_memo") do |enc|
+          encode_stat(enc, c_stat)
+          if l_stat
+            encode_stat(enc, l_stat)
+          else
+            enc.str("static")
           end
-          memo_file = File.join(memo_dir, "#{Stale.hex(memo_key)}.json")
-          if File.file?(memo_file)
-            begin
-              content = File.read(memo_file)
-              if hex_val = extract_json_field(content, "toolchain")
-                return Stale.parse_hex(hex_val)
-              end
-            rescue
-              # Corrupt memo; fall through to recompute.
+          encode_stat(enc, k_stat)
+        end
+        memo_file = File.join(memo_dir, "#{Stale.hex(memo_key)}.json")
+        if File.file?(memo_file)
+          begin
+            content = File.read(memo_file)
+            if hex_val = extract_json_field(content, "toolchain")
+              check_running_image! unless executable_path
+              return Stale.parse_hex(hex_val)
             end
+          rescue ex : ImageChangedError
+            raise ex
+          rescue
+            # Corrupt memo; fall through to recompute.
           end
         end
-      {% end %}
+      end
 
       compiler_sha = file_sha256(compiler_path)
       llvm_sha = llvm_is_shared ? file_sha256(llvm_path) : nil
@@ -83,6 +138,7 @@ module Iyi::Stale
         enc.str(linker_ver)
         enc.digest(linker_sha)
       end
+      check_running_image! unless executable_path
 
       if memo_file
         write_memo_atomic(memo_dir, memo_file, toolchain_digest, compiler_sha, llvm_path, llvm_sha, linker_path, linker_ver, linker_sha)
@@ -148,7 +204,24 @@ module Iyi::Stale
         end
         {"static", false}
       {% elsif flag?(:win32) %}
-        {"static", false}
+        fn = ->LibLLVM.create_context
+        flags = LibC::GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | LibC::GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT
+        if LibC.GetModuleHandleExW(flags, fn.pointer.as(LibC::LPWSTR), out module_handle) == 0
+          raise "Cannot identify the loaded LLVM module"
+        end
+        filename = Crystal::System.retry_wstr_buffer do |buffer, small_buf|
+          len = LibC.GetModuleFileNameW(module_handle, buffer, buffer.size)
+          if 0 < len < buffer.size
+            break String.from_utf16(buffer[0, len])
+          elsif small_buf && len == buffer.size
+            next 32767
+          else
+            break nil
+          end
+        end
+        raise "Cannot identify the loaded LLVM module path" unless filename
+        real = File.realpath(filename)
+        real == compiler_path ? {"static", false} : {real, true}
       {% else %}
         {"static", false}
       {% end %}
@@ -177,34 +250,22 @@ module Iyi::Stale
     end
 
     private def self.file_stat_key(path : String) : StatKey?
-      return nil unless File.exists?(path)
-      {% if flag?(:unix) %}
-        if LibC.stat(path, out stat) == 0
-          {% if flag?(:darwin) %}
-            mtime = stat.st_mtimespec.tv_sec.to_i64
-            ctime = stat.st_ctimespec.tv_sec.to_i64
-          {% else %}
-            mtime = stat.st_mtim.tv_sec.to_i64
-            ctime = stat.st_ctim.tv_sec.to_i64
-          {% end %}
-          StatKey.new(path, stat.st_dev.to_u64, stat.st_ino.to_u64, stat.st_size.to_i64, mtime, ctime)
-        else
-          nil
-        end
-      {% else %}
-        nil
-      {% end %}
+      stamp = FileStamp.of(path, with_digest: false)
+      return nil unless stamp.kind.file? && stamp.ctime > 0
+      return nil if BuildInputs.racy?(Math.max(stamp.mtime, stamp.ctime), BuildInputs.now)
+      StatKey.new(path, stamp)
     rescue
       nil
     end
 
-    private def self.encode_stat(enc : Encoder, s : StatKey)
-      enc.str(s.path)
-      enc.uint(s.dev)
-      enc.uint(s.ino)
-      enc.int(s.size)
-      enc.int(s.mtime)
-      enc.int(s.ctime)
+    private def self.encode_stat(enc : Encoder, key : StatKey)
+      stamp = key.stamp
+      enc.str(key.path)
+      enc.uint(stamp.dev)
+      enc.uint(stamp.ino)
+      enc.int(stamp.size)
+      enc.int(stamp.mtime)
+      enc.int(stamp.ctime)
     end
 
     private def self.write_memo_atomic(memo_dir : String, memo_file : String, toolchain_digest : Digest,
@@ -212,24 +273,18 @@ module Iyi::Stale
                                        linker_path : String, linker_ver : String, linker_sha : Digest)
       Dir.mkdir_p(memo_dir)
       tmp_file = "#{memo_file}.tmp.#{Process.pid}.#{Random.rand(100000)}"
-      json_str = String.build do |io|
-        io << "{\n"
-        io << "  \"toolchain\": \"" << Stale.hex(toolchain_digest) << "\",\n"
-        io << "  \"compiler_sha256\": \"" << Stale.hex(compiler_sha) << "\",\n"
-        io << "  \"llvm_path\": \"" << llvm_path << "\",\n"
-        if llvm_sha
-          io << "  \"llvm_sha256\": \"" << Stale.hex(llvm_sha) << "\",\n"
-        else
-          io << "  \"llvm_sha256\": null,\n"
-        end
-        io << "  \"linker_path\": \"" << linker_path << "\",\n"
-        io << "  \"linker_version\": \"" << linker_ver.gsub('"', "\\\"") << "\",\n"
-        io << "  \"linker_sha256\": \"" << Stale.hex(linker_sha) << "\"\n"
-        io << "}\n"
-      end
-
       File.open(tmp_file, "w") do |f|
-        f.write(json_str.to_slice)
+        JSON.build(f) do |json|
+          json.object do
+            json.field "toolchain", Stale.hex(toolchain_digest)
+            json.field "compiler_sha256", Stale.hex(compiler_sha)
+            json.field "llvm_path", llvm_path
+            json.field "llvm_sha256", llvm_sha.try { |sha| Stale.hex(sha) }
+            json.field "linker_path", linker_path
+            json.field "linker_version", linker_ver
+            json.field "linker_sha256", Stale.hex(linker_sha)
+          end
+        end
         f.flush
         {% if flag?(:unix) %}
           f.fsync

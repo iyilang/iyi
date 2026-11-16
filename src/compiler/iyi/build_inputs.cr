@@ -48,7 +48,8 @@ module Iyi
     # variables those are documented to read are recorded whether or not this
     # build asked for them.
     CHILD_ENV = %w(PATH CC LIBRARY_PATH LD_LIBRARY_PATH LD_RUN_PATH COMPILER_PATH GCC_EXEC_PREFIX
-      SDKROOT MACOSX_DEPLOYMENT_TARGET LIB LIBPATH LINK _LINK_)
+      SDKROOT MACOSX_DEPLOYMENT_TARGET LIB LIBPATH LINK _LINK_ __COMPAT_LAYER
+      LD_PRELOAD GLIBC_TUNABLES DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH)
 
     # The compiler's own reads that happen only when it links: a warm build
     # links nothing (a cached macro `run` helper, an up-to-date program), so
@@ -295,10 +296,13 @@ module Iyi
         true
       end
       return unless first
+      if stamp.kind.other?
+        cannot("#{path} is not a regular file or directory, so its contents cannot be vouched for")
+      end
       if stamp.kind.file? && stamp.ctime <= 0
         # Without a change time an edit that kept the size and the modification
         # time (`cp -p`, `touch -r`) is not seen, so no record can vouch for it.
-        cannot("#{path} has no change time on this file system, so an edit that kept its size and time could not be seen")
+        cannot("#{path} has no trusted change time on this file system, so an edit that kept its size and time could not be seen")
       end
       if stamp.kind.file? && stamp.digest.nil? && BuildInputs.racy?(Math.max(stamp.mtime, stamp.ctime), BuildInputs.now)
         cannot("#{path} could not be read to fingerprint it")

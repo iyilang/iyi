@@ -345,6 +345,8 @@ refuse scrypt-one-byte-short "Scrypt: n = 16384, r = 8, p = 1 need 16780288 byte
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 # prove_broken <label> <phrase> <old> <new>: the exercise must fail on a
 # copy of the module with <old> replaced, at the check that names <phrase>.
 prove_broken() {
@@ -403,6 +405,7 @@ prove_broken "Salsa20 at six rounds rather than eight" "rfc 7914 case 1" \
 # same, so case 1 passes and case 2, r = 8, is where it shows.
 prove_broken "BlockMix writing its blocks in order, not even then odd" "rfc 7914 case 2" \
   '      to = (i & 1) == 0 ? half : r + half' '      to = i'
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

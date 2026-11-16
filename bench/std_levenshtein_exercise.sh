@@ -105,6 +105,8 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 
 # Mutation 1: Broken identity short-circuit
 if [ -z "$PY" ]; then
@@ -200,6 +202,7 @@ PY
   else
     echo "  a method the prelude does not have is caught"
   fi
+fi
 fi
 
 # (A fifth proof bounded the loops by `size` again, which counted bytes

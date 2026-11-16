@@ -166,6 +166,8 @@ fi
 
 echo
 echo "== proving the checks can fail when the algebra is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 # The broken copy is of std/set.iyi, or of the prelude's set.iyi when a fifth
 # argument names it: `-` is the prelude's, and the prelude is read from the
 # first entry of the search path that has one, so the whole of it is copied.
@@ -232,6 +234,7 @@ prove_fails "the prelude's - dropping members of a type the other set cannot hol
   "src.replace('unless value.is_a?(U) && other.includes?(value)', 'unless !value.is_a?(U) || other.includes?(value)')" iyi/set.iyi
 prove_fails "hash that sums the members unmixed" broken_hash "assertion failed for {1, 4} and {2, 3} hash apart" \
   "src.replace('sum = sum &+ (x ^ x.unsafe_shr(31_u64))', 'sum = sum &+ v.hash.to_i64.unsafe_to_u64')"
+fi
 
 echo
 if [ "$status" -ne 0 ]; then

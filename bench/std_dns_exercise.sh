@@ -262,6 +262,8 @@ fi
 
 echo
 echo "== the checks fail when the resolver is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 # breaks <label> <dir> <phrase> <file> <old> <new> [<file> <old> <new>]:
 # the exercise built against a copy of src/std with *old* in std/<file>
 # replaced by *new* - in each file given - must fail, and say *phrase* -
@@ -436,6 +438,7 @@ else
   else
     echo "  a failure that waits for the attempt delay: skipped, it needs IPv6 to refuse first and a refusal that is not Windows' 2 s"
   fi
+fi
 fi
 
 echo

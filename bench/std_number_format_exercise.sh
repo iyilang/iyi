@@ -277,6 +277,8 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 # patch <name> <old> <new>: a copy of std/number_format.iyi with <old>
 # replaced, under $WORK/<name>/std.
 patch() {
@@ -372,6 +374,7 @@ else
   # it was 1.0Y at places.
   misleads "a prefix from a value rounded up to a thousand" rounded_up \
     'prefix = prefix - 3 if place(lower, 0 - precision)[0].bytesize <= 3' '# the prefix kept' HP
+fi
 fi
 
 echo

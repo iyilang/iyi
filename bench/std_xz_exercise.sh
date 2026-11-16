@@ -440,9 +440,11 @@ refuses "a .lzma properties byte past 224, or_panic" props "lzma: the properties
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+mutations=0
+if mutations_wanted; then
 # Each on a copy of std/xz with one thing broken, the exercise run with
 # the fixtures, and failing at the check that names <phrase>.
-mutations=0
 mutate() { # mutate <label> <old> <new> <phrase>
   mutations=$((mutations + 1))
   local label="$1" old="$2" new="$3" phrase="$4"
@@ -543,6 +545,7 @@ mutate "a .lzma end marker taken without its range coder at zero" 'unless @code 
     return fail("lzma: the end marker comes before' 'unless true
     return fail("lzma: the end marker comes before' \
   "a .lzma whose last byte but 0 changed is refused"
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

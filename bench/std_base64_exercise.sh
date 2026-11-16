@@ -100,6 +100,8 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 # With a <phrase>, the exercise must fail at it: at the check written for
 # that break, not at an earlier one.
 mutations=0
@@ -188,6 +190,7 @@ case "$(uname -s) $(uname -m)" in
     echo "  a byte and a character at a time again: not proven here, because this processor's byte loop is too cheap for its time to show"
     ;;
 esac
+fi
 
 echo
 echo "== what decode refuses"

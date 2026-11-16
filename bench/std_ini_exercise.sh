@@ -92,6 +92,8 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 if [ -z "$PY" ]; then
   echo "  skipped: no working python3, so the broken copy could not be made"
 else
@@ -159,6 +161,7 @@ PY
 }
 broken "only space and tab skipped again" 'while offset < len && (raw[offset] == 32_u8 || (raw[offset] >= 9_u8 && raw[offset] <= 13_u8))' 'while offset < len && (raw[offset] == 32_u8 || raw[offset] == 9_u8)' "expected declaration at line 1, column 5"
 broken "a key opening with U+FEFF written again" "byte order mark\" if key.starts_with?('\\uFEFF')" 'byte order mark" if false' "ASSERTION FAILED: a key opening with U+FEFF is refused"
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

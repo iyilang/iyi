@@ -146,6 +146,8 @@ refused "a proc forwarded to spawn(unit: :new)" forward.iyi "is given a proc, \`
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 # broken <label> <file that must then build> <python: old> <python: new>...:
 # a copy of the module with each old text made new, ahead of src on the
 # search path; *file*, refused above, must build against it.
@@ -185,6 +187,7 @@ else
     "  @[Share]\n  def self.of(" "  def self.of("
   broken "a SharedProc any proc can make" new.iyi \
     "  private def initialize(" "  def initialize("
+fi
 fi
 
 echo

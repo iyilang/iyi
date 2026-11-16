@@ -165,6 +165,8 @@ done
 
 echo
 echo "== negative proof: broken leap-year rule is caught"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 if [ -z "$PY" ]; then
   echo "  skipped: no working python3, so the broken copy could not be made"
 else
@@ -310,6 +312,7 @@ format_break_caught "a Windows bias read unsigned" windows_bias \
   '(p[at + 3].to_i64 << 24)
     value >= 2147483648_i64 ? value - 4294967296_i64 : value' '(p[at + 3].to_i64 << 24)
     value'
+fi
 
 echo
 echo "== locations against the machine's own zone database"

@@ -428,6 +428,8 @@ prove_caught "a field's default is not asked for" 'missing keys keep their defau
 # values can stop the program, so tomllib sees the difference.
 echo
 echo "== proving the Python comparison can fail when \\f is read as U+000B"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 if [ -z "$PY" ]; then
   echo "  no python3 with tomllib, so the comparison could not be proven"
   status=1
@@ -445,6 +447,7 @@ else
   else
     echo "  caught: $(grep -c 'tomllib reads other data' "$WORK/broken_f.compare") records read to other data"
   fi
+fi
 fi
 
 echo

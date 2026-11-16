@@ -304,6 +304,8 @@ refuse hex-outside "base32hex: byte 9 is 'Z', which is not in the alphabet"
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 # prove_broken <label> <phrase> <old> <new>: the exercise must fail on a
 # copy of the module with <old> replaced, at the check that names <phrase>.
 prove_broken() {
@@ -353,6 +355,7 @@ prove_broken "a last group of six characters taken" "a last group of 6" \
   'if rest == 1 || rest == 3 || rest == 6' 'if rest == 1 || rest == 3'
 prove_broken "data after the padding taken" "data after padding" \
   '        return Base32Error.new("#{name}: data after the padding, at byte #{j}")' ''
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

@@ -226,6 +226,8 @@ compile_refuses "a union whose array member would be a guess" two_arrays "JSON c
   '  getter a : Array(Int32) | Array(String)'
 echo
 echo "== proving the checks can fail when a repeated key is accepted"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 if [ -z "$PY" ]; then
   echo "  skipped: no working python3, so the broken copy could not be made"
 else
@@ -363,6 +365,7 @@ broken "a union written without its enum members" "integers, a ToJSON type, a de
   '::Std::Json::JSON.write_value(self, json)' '::Std::Json::JSON.write_value(self, json) unless self.is_a?(::Enum)'
 broken "a union read without its Int32 member" "an integer into the first integer member that holds it" \
   'return read_value(pull, ::Int32) if int >= -2147483648_i64 && int <= 2147483647_i64' 'nil'
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

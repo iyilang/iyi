@@ -138,6 +138,8 @@ fi
 
 echo
 echo "== proving the checks can fail when .. is not folded"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 if [ -z "$PY" ]; then
   echo "  skipped: no working python3, so the broken copy could not be made"
 else
@@ -208,6 +210,7 @@ if [ -n "$PY" ]; then
   caught_at "a root joined onto a drive path answered by itself" \
     'return Path.new(own + part, @kind) if own && their.nil?' '# a half anchor taken whole' \
     'expands onto the base'
+fi
 fi
 
 echo

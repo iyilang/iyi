@@ -140,6 +140,8 @@ refuse pbkdf2-no-length "the key length must be at least 1 byte, not 0"
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 # prove_broken <label> <phrase> <old> <new>: the exercise must fail on a
 # copy of the module with <old> replaced, at the check that names <phrase>.
 prove_broken() {
@@ -198,6 +200,7 @@ prove_broken "PBKDF2 numbering its blocks from zero" "sha1, 1 iteration" \
     while done < length'
 prove_broken "a comparison that keeps only the last byte's difference" "first byte differs" \
   'diff = diff | (pa[i] ^ pb[i])' 'diff = pa[i] ^ pb[i]'
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

@@ -430,6 +430,8 @@ refuses "an attribute name past ASCII in a US-ASCII document" ascii_attribute "c
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 mutate() { # mutate <label> <old> <new> <phrase>
   local label="$1" old="$2" new="$3" phrase="$4"
   if [ -z "$PY" ]; then
@@ -579,6 +581,7 @@ mutate "translate() taking a character's last place" \
 mutate "a number read past what is not a digit" \
   '    return 0.0 / 0.0 if at != stop || whole_digits + fraction_digits == 0' \
   '    return 0.0 / 0.0 if whole_digits + fraction_digits == 0' "number('1e3')"
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

@@ -399,6 +399,8 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 # prove_broken <label> <phrase> <old> <new> [<other phrase>]: the exercise,
 # built against a copy of the module with <old> replaced, must fail at the
 # check that names <phrase> - or <other phrase>, where the platform decides
@@ -514,6 +516,7 @@ prove_broken "a link to a directory copied as a directory" "cp_r copies a link o
 ' '    info = File.info(from) if info.symlink? && Dir.exists?(from)
     if info.symlink?
 '
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

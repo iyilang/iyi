@@ -90,6 +90,8 @@ fi
 
 echo
 echo "== proving the checks can fail when foundation is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 
 prove_fails() {
   local label="$1" dir="$2" file="$3" phrase="$4" sed_script="$5"
@@ -216,6 +218,7 @@ prove_fails "minmax_by refuses a nil answer" nil_minmax_by "enumerable.iyi" "pan
 #     exercise asks it of a list of arrays now, and an array has no `<=>`.)
 prove_fails "includes? by hash" hash_includes "enumerable.iyi" "enum: includes? asks ==" \
   's/return true if e == value/return true if e.hash == value.hash/'
+fi
 
 echo
 echo "== one mistake, one sentence, whichever tower answers"

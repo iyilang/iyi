@@ -118,6 +118,8 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 mkdir -p "$WORK/patched/std"
 if [ -z "$PY" ]; then
   echo "  no python3 on this machine, so the broken-module proof is unmeasured"
@@ -252,6 +254,7 @@ if [ -n "$PY" ]; then
     tail -3 "$WORK/names/nomode.out" | sed 's/^/    /'
     status=1
   fi
+fi
 fi
 
 echo

@@ -99,6 +99,8 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 mkdir -p "$WORK/patched/std"
 if [ -z "$PY" ]; then
   echo "  no python3 on this machine, so the broken-module proof is unmeasured"
@@ -118,6 +120,7 @@ elif IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run
   status=1
 else
   echo "  an unexported annotation is caught"
+fi
 fi
 
 echo

@@ -179,6 +179,8 @@ prove_panic "negative_size" \
 
 echo
 echo "== proving the exercise checks can fail when slice operations are broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 
 prove_fails() {
   local label="$1" dir="$2" bad_pattern="$3" sed_script="$4"
@@ -244,5 +246,6 @@ prove_fails "a hash that clusters" "fail_hash" "hash spread: a 150 by 150 grid o
     end\
     h\
   end'
+fi
 
 exit "$status"

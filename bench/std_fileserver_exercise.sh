@@ -156,6 +156,8 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 prove_broken() { # prove_broken <label> <phrase> <old> <new>
   rm -rf "$WORK/patched"
   mkdir -p "$WORK/patched/std"
@@ -204,6 +206,7 @@ prove_broken "a range served under another version's If-Range" "under another ve
   'return named == tag || named == stamp' 'return true'
 prove_broken "a directory served without its slash" "a directory without its slash is redirected" \
   '      unless decoded.ends_with?("/")' '      if false'
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

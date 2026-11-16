@@ -304,6 +304,10 @@ fi
 
 echo
 echo "== proving the checks can fail when the modules are broken"
+. "$REPO/bench/mutations.sh"
+mutations=0
+caught=0
+if mutations_wanted; then
 # prove_broken <module> <label> <phrase> <part> <old> <new>: a copy of
 # std/<module> - or of the exercise itself, when <module> is `exercise` -
 # with <old> replaced must fail at the check that names
@@ -313,8 +317,6 @@ echo "== proving the checks can fail when the modules are broken"
 # Windows, where the reading is of access lists; `alpn`, Python's
 # handshakes with the challenge up; or Pebble's parts, by commas
 # (bench/std_autocert_client.py), which run only where Pebble does.
-mutations=0
-caught=0
 prove_broken() {
   local module="$1" label="$2" phrase="$3" part="$4"
   mutations=$((mutations + 1))
@@ -434,6 +436,7 @@ prove_broken exercise "the pool's size asked for after a spawn started it" "on f
   '  IyiWorkers.count = 4 if parallel' '  0'
 prove_broken tls "std/tls's identity source not told the time left" "without run, a handshake waiting for an order ends by its" local \
   '    return nil if @deadline_ns == 0_i64' '    return nil'
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

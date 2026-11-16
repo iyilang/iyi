@@ -322,6 +322,8 @@ PY
 
 echo
 echo "== negative proof: a broken two's complement is caught"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 patched_fails "Int64 negatives off by one" patched_bits "LE Int64 round trip of -1" \
   '0xFFFFFFFFFFFFFFFF_u64 - (-(value + 1_i64)).to_u64=>0xFFFFFFFFFFFFFFFE_u64 - (-(value + 1_i64)).to_u64'
 patched_fails "Int32 negatives off by one" patched_sign "LE Int32 round trip of -1" \
@@ -409,6 +411,7 @@ echo
 echo "== negative proof: a Sized that ignores its limit is caught"
 patched_fails "Sized reads past its limit" patched_sized "read_bytes on a Sized is cut to the limit" \
   '    take = count < @remaining ? count : @remaining=>    take = count'
+fi
 
 # ---------------------------------------------------------------------------
 # What the module refuses

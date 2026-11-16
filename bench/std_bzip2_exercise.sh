@@ -286,6 +286,8 @@ refuses "a read of no bytes" read_zero "Bzip2Reader: read wants at least one byt
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 mutations=0
 mutate() { # mutate <label> <old> <new> <phrase>
   # A binary of its own each: on Windows the last one's file can still be
@@ -365,6 +367,7 @@ mutate "RUNA and RUNB swapped" 'sym = (z & 1) == 1 ? RUNB : RUNA' 'sym = (z & 1)
   "one byte at level 1"
 mutate "each group given the table that codes it worst" 'best = t if cost[t] < cost[best]' 'best = t if cost[t] > cost[best]' \
   "against libbzip2's"
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

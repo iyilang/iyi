@@ -102,6 +102,8 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 # broken <label> <name> <old> <new>: the module with <old> made <new> still
 # builds, and the exercise fails on it.
 broken() {
@@ -137,6 +139,7 @@ else
   broken "a room check that overflows Int32" mut-room 'return nil if room < 8' 'return nil if offset + 8 > bytes.size'
   broken "a 2^62 - 1 Quarter Stream ID bound" mut-qid 'MAX_QUARTER_STREAM_ID = 1152921504606846975_u64' 'MAX_QUARTER_STREAM_ID = 4611686018427387903_u64'
   broken "Capsule-Protocol parameters left unparsed" mut-params 'while i < n && p[i] == 59_u8' 'while false && i < n && p[i] == 59_u8'
+fi
 fi
 
 echo

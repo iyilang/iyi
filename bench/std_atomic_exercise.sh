@@ -169,6 +169,8 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 prove_fails() { # prove_fails <label> <dir> <phrase> <sed script>
   local label="$1" dir="$2" phrase="$3" script="$4"
   mkdir -p "$WORK/$dir/std"
@@ -223,6 +225,7 @@ else
   echo "  the strengthened module did not build"
   tail -5 "$WORK/strong/build.log"
   status=1
+fi
 fi
 
 echo

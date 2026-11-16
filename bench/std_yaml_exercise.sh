@@ -184,6 +184,8 @@ refuse_program uint64 'the UInt64 18446744073709551615 is past 92233720368547758
 
 echo
 echo "== proving the checks can fail when a repeated key is accepted"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 if [ -z "$PY" ]; then
   echo "  skipped: no working python3, so the broken copy could not be made"
 else
@@ -435,6 +437,7 @@ else
     3) echo "  skipped: PyYAML is not installed" ;;
     *) echo "  the comparison did not catch the broken copy"; cat "$WORK/quote11.compare"; status=1 ;;
   esac
+fi
 fi
 
 echo

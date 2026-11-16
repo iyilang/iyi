@@ -566,6 +566,8 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 mutate() { # mutate <label> <old> <new> [<old2> <new2>]: math.iyi's, then the prelude's float.iyi's
   local label="$1" old="$2" new="$3" old2="${4:-}" new2="${5:-}"
   if [ -z "$PY" ]; then
@@ -721,6 +723,7 @@ mutate "min of integers answering the larger" '      b < a ? b : a' '      b < a
 mutate "max of doubles compared as integers are, blind to NaN" '{% if T == ::Float64 || T == ::Float32 %}
       ieee_max(a, b)' '{% if false %}
       ieee_max(a, b)'
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

@@ -515,6 +515,8 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 mutations=0
 mutate() { # mutate <label> <old> <new> [<phrase>] [small]
   # A binary of its own each: on Windows the last one's file can still be
@@ -595,6 +597,7 @@ mutate "a leftover without the bytes loaded ahead" 'held = @count // 8
     rest = @in_end - @in_pos' 'held = 0
     rest = @in_end - @in_pos' \
   "what is left over is what was fed past the stream"
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

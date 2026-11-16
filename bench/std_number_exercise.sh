@@ -93,6 +93,8 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 if [ -z "$PY" ]; then
   echo "  skipped: no working python3, so the broken copy could not be made"
 else
@@ -114,6 +116,7 @@ PY
   else
     echo "  a broken number is caught"
   fi
+fi
 fi
 
 echo

@@ -687,6 +687,8 @@ PY
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 # prove_broken <label> <phrase> <old> <new>: the exercise must fail on a
 # copy of the module with <old> replaced, at the check that names <phrase>.
 prove_broken() {
@@ -833,6 +835,7 @@ if [ -n "$PY" ]; then
     'offset = (hh * 60 + mm) * (c == 45_u8 ? -1 : 1)' 'offset = hh * 60 + mm' codec
   prove_oracle "a file name's space left bare in RFC 2231" "file name" \
     'if MailText.attr_char?(p[k])' 'if MailText.attr_char?(p[k]) || p[k] == 32_u8' build
+fi
 fi
 
 echo

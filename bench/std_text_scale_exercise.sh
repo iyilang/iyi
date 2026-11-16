@@ -58,6 +58,8 @@ run_case "release" optimised --release
 
 echo
 echo "== the clock catches a builder that does not double"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 mkdir -p "$WORK/stepped/iyi"
 cp -R "$REPO/src/iyi/." "$WORK/stepped/iyi/"
 sed -e 's/^      capacity = capacity \* 2$/      capacity = capacity + 16/' \
@@ -122,6 +124,7 @@ proves_slow "an rindex that stays naive" naive_rindex std "text.iyi" \
   's/^      break if spent > 4 \* (start - i) + 64$/      spent = 0/'
 proves_slow "a literal pattern compared from each position" naive_literal std "regex.iyi" \
   's/^    text.byte_index(literal, from)$/    i = from\n    while i + literal.bytesize <= text.bytesize\n      return i if text[i, literal.bytesize] == literal\n      i = i + 1\n    end\n    nil/'
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

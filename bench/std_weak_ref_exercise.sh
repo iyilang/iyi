@@ -262,6 +262,8 @@ fi
 
 echo
 echo "== proving the checks fail when the collector's side is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 # patch <dir> <old> <new>: a copy of the prelude's directory with one site
 # of prelude.iyi changed, which must be there exactly once. The directory
 # whole, because the prelude requires the files beside it.
@@ -338,6 +340,7 @@ else
     '        base = IyiRoots.base_of(address)
         return false if base == 0_u64' \
     'a literal is never cleared'
+fi
 fi
 
 echo

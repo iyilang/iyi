@@ -1089,6 +1089,8 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 # prove_broken <label> <phrase> <old> <new> [<other phrase>]: the exercise
 # must fail on a copy of the module with <old> replaced, at the check that
 # names <phrase> - or <other phrase>, where the platform decides which of
@@ -1222,6 +1224,7 @@ MUTATE=compress.iyi prove_broken "a chain's head taken past a smaller window" "a
   's - old > @reach ? 0 : old' 's - old > WSIZE ? 0 : old'
 MUTATE=compress.iyi prove_broken "a final block that ends the stream by pieces" "the window kept past a final block" \
   '@state = @pieces ? BLOCK : DONE' '@state = DONE'
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

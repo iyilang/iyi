@@ -256,6 +256,8 @@ fi
 
 echo
 echo "== the checks fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 # breaks <label> <dir> <phrase> <file> <old> <new> [<file> <old> <new>]:
 # the exercise built against a copy of src/std with *old* in std/<file>
 # replaced by *new* must fail, and say *phrase*.
@@ -366,6 +368,7 @@ breaks "HTTPS records asked in the clear despite upstreams" httpsclear "dot: a S
 breaks "HTTPS records not parsed when they came over an upstream" httpsparse "dot: a ServiceMode HTTPS record" socket.iyi \
   'record = SvcbRecord.parse(data, owner)' \
   'record = @upstreams.empty? ? SvcbRecord.parse(data, owner) : DnsMessage.malformed("an HTTPS record over an upstream, not read")'
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

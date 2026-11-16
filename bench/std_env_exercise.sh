@@ -105,6 +105,8 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 mkdir -p "$WORK/patched/std"
 if [ -z "$PY" ]; then
   echo "  no python3 on this machine, so the broken-module proof is unmeasured"
@@ -234,6 +236,7 @@ PY
     fi
     ;;
 esac
+fi
 
 echo
 echo "== what env refuses"

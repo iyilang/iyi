@@ -230,6 +230,8 @@ fi
 echo
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 # patched <name> <old> <new> [<old> <new>...]: a copy of std with the pairs
 # replaced, each exactly once.
 patched() {
@@ -451,6 +453,7 @@ else
 " ""
       ;;
   esac
+fi
 fi
 
 echo

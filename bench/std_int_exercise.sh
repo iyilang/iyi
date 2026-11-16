@@ -133,6 +133,8 @@ refuses "-Infinity to_i16" f64_ninf "arithmetic overflow" '(-1.0 / 0.0).to_i16'
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 if [ -z "$PY" ]; then
   echo "  skipped: no working python3, so the broken copy could not be made"
 else
@@ -231,6 +233,7 @@ PY
   else
     printf '  UInt8 and UInt64 without /(Float64): exits at "%s"\n' "$(grep -m1 'divided by a double' "$WORK/udiv.out" | sed 's/^iyi: panic: //')"
   fi
+fi
 fi
 
 echo

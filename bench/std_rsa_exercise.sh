@@ -479,9 +479,11 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+mutations=0
+if mutations_wanted; then
 # prove_broken <label> <phrase> <old> <new>: the exercise must fail on a
 # copy of the module with <old> replaced, at the check that names <phrase>.
-mutations=0
 prove_broken() {
   mutations=$((mutations + 1))
   rm -rf "$WORK/patched"
@@ -611,6 +613,7 @@ prove_broken "PSS's mask over the salt, not H" "a PSS signature over SHA256 chec
   '    mask = RsaBytes.mgf1(hash, h, db_len)
     masked = ' '    mask = RsaBytes.mgf1(hash, salt, db_len)
     masked = '
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

@@ -226,9 +226,11 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+mutations=0
+if mutations_wanted; then
 # prove_broken <label> <phrase> <old> <new>: the exercise must fail on a
 # copy of the module with <old> replaced, at the check that names <phrase>.
-mutations=0
 prove_broken() {
   mutations=$((mutations + 1))
   rm -rf "$WORK/patched"
@@ -305,6 +307,7 @@ if [ -n "${SYSTEM_ROOTS_ORACLE:-}" ]; then
     '        return false unless text[i] == oid.to_unsafe[i]' '        return false unless i > 14 || text[i] == oid.to_unsafe[i]'
 else
   echo "  no Windows oracle here, so the purpose property's four breaks are unmeasured"
+fi
 fi
 
 echo

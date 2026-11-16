@@ -674,6 +674,8 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 # prove_broken <label> <phrase> <where> <old> <new>: the exercise must fail
 # on a copy of the module with <old> replaced, at the check that names
 # <phrase>. <where> is `plain` for the terminal-free exercise, or the
@@ -781,6 +783,7 @@ prove_broken "rows and columns swapped" "FAIL: 37 rows by 101 columns" size \
 prove_broken "a 0 by 0 terminal given as a size" "FAIL: 0 by 0 is no size" size \
   '    return nil if rows <= 0 || columns <= 0
 ' ''
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

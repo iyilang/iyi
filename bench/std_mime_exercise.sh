@@ -220,6 +220,8 @@ then
 fi
 
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 # prove_broken <label> <phrase> <old> <new>: the exercise must fail on a
 # copy of the module with <old> replaced, at the check that names <phrase>.
 prove_broken() {
@@ -271,6 +273,7 @@ prove_broken "a parameter without its equals sign accepted" 'refuses "text/html;
       return {essence, params} if pos >= size"
 prove_broken "WOFF2 counted compressible" "font/woff2 not compressible" \
   '"font/ttf", "font/otf",' '"font/ttf", "font/otf", "font/woff2",'
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

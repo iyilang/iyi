@@ -257,6 +257,8 @@ refuses "a final backslash in double quotes, or_panic" final_backslash_dq "shlex
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 mutations=0
 prove_broken() {
   mutations=$((mutations + 1))
@@ -319,6 +321,7 @@ prove_broken "a backquote left bare" 'quote: "`"' \
 prove_broken "a single quote escaped with a backslash inside single quotes" "quote: \"it's\"" \
   "io << \"'\\\"'\\\"'\"" "io << \"\\\\'\""
 echo "  $mutations broken copies tried"
+fi
 
 echo
 echo "== doc, format, other platforms and artifacts"

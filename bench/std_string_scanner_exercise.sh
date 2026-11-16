@@ -275,6 +275,8 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 # prove_broken <label> <phrase> <old> <new>: the exercise must fail on a
 # copy of the module with <old> replaced, at the check that names <phrase>.
 prove_broken() {
@@ -344,6 +346,7 @@ prove_broken "a group past the last answered as one that took no part" "[] of a 
 prove_broken "inspect's window not held to the string" "inspect at the end" \
   '    first = total - 5 if first > total - 5
 ' ''
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

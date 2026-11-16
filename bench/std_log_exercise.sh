@@ -92,6 +92,8 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 if [ -z "$PY" ]; then
   echo "  skipped: no working python3, so the broken copy could not be made"
 else
@@ -197,6 +199,7 @@ PY
     '    raise "AsyncBackend: an entry written after close" if @closed.get != 0_u8
 ' '' \
     "the write after close" "actual: the block ended without one"
+fi
 fi
 
 # A logger is Share, and twelve workers log through one constant at once,

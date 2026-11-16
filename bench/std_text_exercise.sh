@@ -90,6 +90,8 @@ fi
 
 echo
 echo "== proving the checks can fail when text operations are broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 
 prove_fails() {
   local label="$1" dir="$2" phrase="$3" sed_script="$4"
@@ -296,6 +298,7 @@ prove_fails_prelude "padding width in bytes" no_width "utf8: ljust width" \
 # 11. And the pad written as one byte, which cut a multi-byte one in half
 prove_fails_prelude "wide pad truncated" no_wide "utf8: wide pad bytes" \
   's/^    pad_bytes = padding.bytesize$/    pad_bytes = 1/'
+fi
 
 echo
 echo "== the prelude's own String at its edges, which is a panic with a name"

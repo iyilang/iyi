@@ -164,6 +164,8 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 # mutate <label> <old> <new>: patches a copy of std/unicode.iyi and expects
 # the exercise to fail against it.
 mutate() {
@@ -226,6 +228,7 @@ mutate "regional indicators paired from the wrong one" \
   'indicators % 2 == 1' 'indicators % 2 == 0'
 mutate "CR and LF apart" \
   '    return false if left == GCB_CR && right == GCB_LF' ''
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

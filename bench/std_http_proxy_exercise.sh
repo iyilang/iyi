@@ -161,6 +161,8 @@ fi
 # for it - not at an earlier one, and not by failing to compile.
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 mutations=0
 broken() { # broken <label> <old> <new> <phrase>
   # A binary of its own each: on Windows the last one's file can still be
@@ -225,6 +227,7 @@ else
   broken "HTTPS_PROXY dropped under CGI too" 'variable("https_proxy", true)' 'variable("https_proxy", !cgi)' "ASSERTION FAILED: HTTPS_PROXY still is under CGI"
 fi
 broken "NO_PROXY not read" 'variable("no_proxy", true))' 'nil)' "ASSERTION FAILED: NO_PROXY names the host"
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

@@ -231,6 +231,8 @@ fi
 
 echo
 echo "== each fix undone in a copy of its module, caught by its regression input"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 # fix_proof <label> <module> <phrase> <old> <new>: the module's copy with
 # <old> written back as <new>, which the regression inputs must fail on
 # with <phrase> in what they say.
@@ -279,6 +281,7 @@ fix_proof "a UniversalString's code read in Int32" asn1 "out of char range" \
 # The fix in std/http: a peer's boundary of any length handed to Multipart.new.
 fix_proof "a multipart boundary of any length" http "a multipart boundary is 1 to 70 characters" \
   '    return nil unless found && found.bytesize >= 1 && found.bytesize <= 70' ''
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

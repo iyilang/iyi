@@ -352,6 +352,8 @@ two_waiters threads "two waiters on two threads" "$IYI_PATH" || status=1
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 patched() { # patched <name> <old> <new>: a copy of std with one line changed
   local name="$1" old="$2" new="$3"
   mkdir -p "$WORK/$name-std/std"
@@ -502,6 +504,7 @@ else
       status=1
     fi
   fi
+fi
 fi
 
 echo

@@ -278,9 +278,11 @@ refuse time "asn1: a UTCTime of 3 bytes, where DER writes YYMMDDHHMMSSZ at offse
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+mutations=0
+if mutations_wanted; then
 # prove_broken <label> <phrase> <old> <new>: the exercise must fail on a
 # copy of the module with <old> replaced, at the check that names <phrase>.
-mutations=0
 prove_broken() {
   mutations=$((mutations + 1))
   rm -rf "$WORK/patched"
@@ -361,6 +363,7 @@ prove_broken "the walk without its depth bound" "a value 65 deep refused" \
 prove_broken "the first two arcs split at 39" "sha256WithRSAEncryption" \
   'head = first < 40 ? "0.#{first}" : (first < 80 ? "1.#{first - 40}" : "2.#{first - 80}")' \
   'head = first < 39 ? "0.#{first}" : (first < 79 ? "1.#{first - 39}" : "2.#{first - 79}")'
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

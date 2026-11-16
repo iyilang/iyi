@@ -133,6 +133,36 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+# A copy of the library with one site replaced, in std/file, in the
+# prelude's File, or in the prelude's own intrinsics:
+# broken_copy <dir> <std|prelude|intrinsic> <old> <new>.
+broken_copy() {
+  local dir="$1" which="$2" source target
+  if [ "$which" = prelude ] || [ "$which" = intrinsic ]; then
+    mkdir -p "$WORK/$dir/iyi"
+    cp "$REPO"/src/iyi/*.iyi "$WORK/$dir/iyi/"
+    if [ "$which" = prelude ]; then
+      source="$REPO/src/iyi/file.iyi"
+      target="$WORK/$dir/iyi/file.iyi"
+    else
+      source="$REPO/src/iyi/prelude.iyi"
+      target="$WORK/$dir/iyi/prelude.iyi"
+    fi
+  else
+    mkdir -p "$WORK/$dir/std"
+    source="$REPO/src/std/file.iyi"
+    target="$WORK/$dir/std/file.iyi"
+  fi
+  OLD="$3" NEW="$4" "$PY" - "$source" "$target" <<'PY'
+import os, sys
+src = open(sys.argv[1]).read()
+if src.count(os.environ["OLD"]) != 1:
+    raise SystemExit("patch site missing: " + os.environ["OLD"])
+open(sys.argv[2], "w").write(src.replace(os.environ["OLD"], os.environ["NEW"], 1))
+PY
+}
+if mutations_wanted; then
 # The temporary name made predictable for the exercise's `plant` prefix -
 # all zeros, the name it plants a symlink at - is refused by the exclusive create a hundred times
 # and fails by name; with the create made the old test-then-write as well,
@@ -385,34 +415,6 @@ else
   status=1
 fi
 
-# A copy of the library with one site replaced, in std/file, in the
-# prelude's File, or in the prelude's own intrinsics:
-# broken_copy <dir> <std|prelude|intrinsic> <old> <new>.
-broken_copy() {
-  local dir="$1" which="$2" source target
-  if [ "$which" = prelude ] || [ "$which" = intrinsic ]; then
-    mkdir -p "$WORK/$dir/iyi"
-    cp "$REPO"/src/iyi/*.iyi "$WORK/$dir/iyi/"
-    if [ "$which" = prelude ]; then
-      source="$REPO/src/iyi/file.iyi"
-      target="$WORK/$dir/iyi/file.iyi"
-    else
-      source="$REPO/src/iyi/prelude.iyi"
-      target="$WORK/$dir/iyi/prelude.iyi"
-    fi
-  else
-    mkdir -p "$WORK/$dir/std"
-    source="$REPO/src/std/file.iyi"
-    target="$WORK/$dir/std/file.iyi"
-  fi
-  OLD="$3" NEW="$4" "$PY" - "$source" "$target" <<'PY'
-import os, sys
-src = open(sys.argv[1]).read()
-if src.count(os.environ["OLD"]) != 1:
-    raise SystemExit("patch site missing: " + os.environ["OLD"])
-open(sys.argv[2], "w").write(src.replace(os.environ["OLD"], os.environ["NEW"], 1))
-PY
-}
 # The exercise run on such a copy must fail at the check that names it:
 # exercise_broken <label> <dir> <std|prelude> <old> <new> <phrase>.
 exercise_broken() {
@@ -550,6 +552,7 @@ if [ "$unreadable_measured" -eq 1 ]; then
       '      fd = __iyi_open_read(c_path(path))' \
       "exists? of a file this user may not read"
   fi
+fi
 fi
 
 echo

@@ -2557,6 +2557,9 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+mutations=0
+if mutations_wanted; then
 # prove_broken <label> <phrase> <old> <new> [mode]: the exercise must fail
 # on a copy of the module with <old> replaced, at the check that names
 # <phrase> - over the trace; against the scripted server (`scenarios`);
@@ -2574,7 +2577,6 @@ echo "== proving the checks can fail when the module is broken"
 # (`client-hybrid`) or the server before s_client (`server-hybrid`); or
 # OCSP stapling with OpenSSL, the client before s_server -status_file
 # (`ocsp-client`) or the server before s_client -status (`ocsp-server`).
-mutations=0
 # A scenario's break is caught by the scenario failing, by name - "FAILED:
 # <scenario>: " - whether the broken client then holds a connection or
 # reads a refusal: once a break lets the client reach its Finished, which
@@ -3710,6 +3712,7 @@ mutations_report
 if [ -e "$WORK/outlived" ]; then
   echo "FAIL: a server outlived its stop (named above)"
   status=1
+fi
 fi
 echo
 if [ "$status" -eq 0 ]; then

@@ -173,6 +173,8 @@ fi
 
 echo
 echo "== proving the checks can fail when an iterator mechanism is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 
 prove_fails() {
   local label="$1" dir="$2" phrase="$3" sed_script="$4"
@@ -266,6 +268,7 @@ prove_fails "take leaves an empty pull uncounted" take_uncounted "assertion fail
 # 17. A nil element read as the end, as it was when the end was nil
 prove_fails "a nil element read as the end" nil_as_end "assertion failed for a nil element is an element" \
   's/^    until (item = self\.next)\.is_a?(Stop)$/    until (item = self.next).is_a?(Stop) || item.nil?/'
+fi
 echo
 if [ "$status" -eq 0 ]; then
   echo "Iterator: all 27 sections pass plain and release, and each check is"

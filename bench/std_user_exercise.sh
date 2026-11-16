@@ -472,6 +472,8 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 mutations=0
 # prove_broken <label> <phrase> <how> <old> <new> [<old> <new> ...]: <how>
 # is `plain` (no oracle: the fixture through the parsers), `python`
@@ -606,6 +608,7 @@ else
   prove_broken "the fallback's gid the uid" "current falls back to the kernel's ids, \$USER and \$HOME" fallback \
     'User.new(name, uid.to_s, gid.to_s, "", ENV["HOME"]? || "", "")' 'User.new(name, uid.to_s, uid.to_s, "", ENV["HOME"]? || "", "")'
   echo "  $mutations mutations"
+fi
 fi
 
 echo

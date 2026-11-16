@@ -92,6 +92,8 @@ fi
 
 echo
 echo "== proving the checks can fail when & is not escaped"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 if [ -z "$PY" ]; then
   echo "  skipped: no working python3, so the broken copy could not be made"
 else
@@ -153,6 +155,7 @@ mutate "escape to an IO drops the bytes after the last reference" \
   '    io.write(raw + run_start, len - run_start) if len > run_start' '    nil' 'escape to an IO'
 mutate "every name read without its ;" \
   'if cp >= 0 && !legacy_name?(cp) &&' 'if cp >= 0 && false &&' 'only a legacy name goes without its'
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

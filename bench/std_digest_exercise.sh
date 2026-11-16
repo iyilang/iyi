@@ -779,6 +779,8 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 # prove_broken <label> <phrase> <old> <new>: the exercise must fail on a
 # copy of the module with <old> replaced, at the check that names <phrase>.
 prove_broken() {
@@ -1035,6 +1037,7 @@ case "${no_adler_proof:-}" in
         b = (b + a) % 65521_u32'
     ;;
 esac
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

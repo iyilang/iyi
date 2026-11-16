@@ -313,9 +313,11 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+mutations=0
+if mutations_wanted; then
 # prove_broken <label> <phrase> <old> <new>: the exercise must fail on a
 # copy of the module with <old> replaced, at the check that names <phrase>.
-mutations=0
 prove_broken() {
   mutations=$((mutations + 1))
   rm -rf "$WORK/patched"
@@ -424,6 +426,7 @@ prove_unpublished() {
 }
 prove_unpublished "a table's address stored with no ordering" 'Std::Ecdsa::EcdsaP256::g_table' "no release store to it" \
   's/^    @@g_table.set_release(table.address)$/    @@g_table.set_relaxed(table.address)/'
+fi
 echo
 if [ "$status" -eq 0 ]; then
   echo "the std/ecdsa exercise holds ($mutations breaks caught)"

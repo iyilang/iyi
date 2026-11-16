@@ -789,6 +789,8 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 # prove_broken <label> <phrase> <old> <new> [corpus]: the exercise (or,
 # given `corpus`, the comparison with Python) must fail on a copy of the
 # module with <old> replaced, at the check that names <phrase>.
@@ -892,6 +894,7 @@ prove_broken "a length with leading zeros refused, as Go refuses it" "the corpus
   'return number <= bits ? number : -1 if digits' 'return (number <= bits && (text.bytesize == 1 || raw[0] != 48_u8)) ? number : -1 if digits' corpus
 prove_broken "a dotted tail allowed only after six groups" "the corpus disagrees" \
   'if find(tail, 46_u8, 0) >= 0' 'if find(tail, 46_u8, 0) >= 0 && parts.size == 7' corpus
+fi
 
 echo
 echo "== doc, format, other platforms and artifacts"

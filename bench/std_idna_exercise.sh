@@ -410,6 +410,8 @@ refuse uppercase "IDNA: label \"MÜNCHEN\" holds U+00DC, which IDNA2008 does not
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 # prove_broken <label> <phrase> <old> <new>: the exercise must fail on a
 # copy of the module with <old> replaced, at the check that names <phrase>.
 prove_broken() {
@@ -466,6 +468,7 @@ prove_broken "labels of 64 octets" "a 64-octet label" \
   'MAX_LABEL =  63' 'MAX_LABEL =  64'
 prove_broken "the ideographic full stop not a separator" "an ideographic full stop separates labels" \
   'cp == 0x2E || cp == 0x3002 ||' 'cp == 0x2E ||'
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

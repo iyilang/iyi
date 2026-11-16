@@ -154,6 +154,8 @@ run_probe "delete_at out of range" probe_delete_at_out_of_range "index -2 out of
 
 echo
 echo "== failure proofs: checks fail when Indexable is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 # Proves that the exercise checks are load-bearing by running against
 # a patched copy of src/std/indexable.iyi via IYI_PATH.
 prove_fails() {
@@ -250,6 +252,7 @@ else
       "$(grep -m1 'panic' "$WORK/probe-probe_fill_huge_count.out" | sed 's/^iyi: panic: //')"
   fi
   status=$held_status
+fi
 fi
 
 echo

@@ -790,9 +790,11 @@ refuses "not a PNG file, or_panic" not_png "png: not a PNG file: the 8-byte sign
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+mutations=0
+if mutations_wanted; then
 # prove_broken <label> <phrase> <old> <new>: the exercise must fail on a
 # copy of the module with <old> replaced, at the check that names <phrase>.
-mutations=0
 prove_broken() {
   mutations=$((mutations + 1))
   rm -rf "$WORK/patched"
@@ -870,6 +872,7 @@ prove_broken "no bound on a compressed text" "a zTXt bomb" \
   'if io.bytesize + piece.bytesize > MAX_METADATA' 'if false'
 prove_broken "tEXt's Latin-1 kept as bytes" "a Latin-1 text is a tEXt" \
   'PngText.new(name, keyword, PngBytes.latin1(PngBytes.slice(p, z + 1, limit - z - 1)))' 'PngText.new(name, keyword, PngBytes.slice(p, z + 1, limit - z - 1))'
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

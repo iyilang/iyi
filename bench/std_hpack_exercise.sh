@@ -107,6 +107,8 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 if [ -z "$PY" ]; then
   echo "  skipped: no working python3, so the broken copy could not be made"
 else
@@ -237,6 +239,7 @@ fix_proof "a Huffman size counted in Int32" fix_size_i32 \
 fix_proof "a header list counted without 32 octets a field" fix_list_overhead \
   "a header list counts 32 octets a field" "" \
   'bytesize.to_i64 + 32' 'bytesize.to_i64'
+fi
 
 echo
 echo "== what integer encoding and the codec constructors refuse"

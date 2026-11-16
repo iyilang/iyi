@@ -755,6 +755,8 @@ fi
 
 echo
 echo "== proving the checks can fail when big number operations are broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 
 prove_fails() {
   local label="$1" dir="$2" phrase="$3" sed_script="$4"
@@ -1056,6 +1058,7 @@ prove_unmasked "into_range's keep in the compiler's sight" no_barrier_range "Mon
 # short: the divisor no longer taken off what is left.
 prove_fails "a one-limb quotient left at its estimate" no_one_limb_fix "div: a one-limb quotient" \
   's/^    while BigInt.limbs_at_least(r, n, v, m)$/    while false \&\& BigInt.limbs_at_least(r, n, v, m)/'
+fi
 
 echo
 echo "== documentation, formatting and the five targets"

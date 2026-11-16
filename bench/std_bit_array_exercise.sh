@@ -114,6 +114,8 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 
 # An optional fifth argument is a mode the exercise runs by name, from a
 # release build, and a sixth the phrase the broken copy must fail with.
@@ -205,6 +207,7 @@ prove_fails "byte count rounded up by adding first" broken_bytes_round \
 prove_fails "rotation index through i + k" broken_rotate_index \
   'src_idx = i < @size - k ? i + k : i - (@size - k)' \
   'src_idx = (i + k) % @size' rotate_above_2_30 "arithmetic overflow"
+fi
 echo
 echo "== what bit_array refuses"
 

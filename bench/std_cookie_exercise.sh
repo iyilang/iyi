@@ -201,6 +201,8 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 prove_broken() { # prove_broken <label> <phrase> <old> <new>
   rm -rf "$WORK/patched"
   mkdir -p "$WORK/patched/std"
@@ -299,6 +301,7 @@ prove_broken "a SameSite written as it is" "a SameSite with a semicolon refused"
   'unless HTTP.same_name?(same, "Strict") ||' 'unless true ||'
 prove_broken "a SameSite read in one case alone" "a SameSite in any case written" \
   'HTTP.same_name?(same, "Lax")' 'same == "Lax"'
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

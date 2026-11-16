@@ -570,9 +570,11 @@ refuses "Zstandard asked of a streamed entry" streamed_zstd 'ZipWriter: "s.zst" 
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+mutations=0
+if mutations_wanted; then
 # prove_broken <label> <phrase> <old> <new>: the exercise must fail on a
 # copy of the module with <old> replaced, at the check that names <phrase>.
-mutations=0
 prove_broken() {
   mutations=$((mutations + 1))
   rm -rf "$WORK/patched"
@@ -666,6 +668,7 @@ prove_broken "Zstandard asked for and the entry bzip2" "zstd written" \
   'when ZipMethod::Zstandard then Zstd.compress(data)' 'when ZipMethod::Zstandard then Bzip2.compress(data)'
 prove_broken "a decoder's sentence dropped from its refusal" "a stored entry said to be bzip2" \
   'ZipError.new("zip: #{@entry.name.inspect}: #{got.message}")' 'ZipError.new("zip: #{@entry.name.inspect}")'
+fi
 
 echo
 echo "== doc, format, other platforms and artifacts"

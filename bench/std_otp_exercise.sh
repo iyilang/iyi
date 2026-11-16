@@ -452,6 +452,8 @@ refuse parse-short-or-panic "otpauth: the secret must be at least 16 bytes, not 
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 # prove_broken <label> <phrase> <old> <new>: the exercise must fail on a
 # copy of the module with <old> replaced, at the check that names <phrase>.
 prove_broken() {
@@ -540,6 +542,7 @@ prove_broken "U+00A0 taken for a control" "the characters beside the refused one
   'return i if src[i + 1] >= 0x80_u8 && src[i + 1] <= 0x9F_u8' 'return i if src[i + 1] >= 0x80_u8 && src[i + 1] <= 0xA0_u8'
 prove_broken "the issuer parameter not looked at" "a carriage return in the issuer parameter" \
   '      odd = OTPText.unshowable(issuer_text)' '      odd = -1'
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

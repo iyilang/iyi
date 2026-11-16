@@ -3595,6 +3595,8 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 mutations=0
 # The broken copies are built and run beside each other, MUT_JOBS at a
 # time: a run of the exercise is 21 seconds of mostly waiting on its own
@@ -4339,6 +4341,7 @@ proxy_breaks "a ws:// handshake sent to the proxy in absolute form" proxy_upgrad
 mutations_report
 judge_later
 close_breaks_report
+fi
 
 echo
 echo "== a server whose TERM is lost is stopped all the same"

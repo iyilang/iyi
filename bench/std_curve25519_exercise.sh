@@ -648,6 +648,8 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 # prove_broken <label> <phrase> <old> <new>: the exercise must fail on a
 # copy of the module with <old> replaced, at the check that names <phrase>.
 prove_broken() {
@@ -791,6 +793,7 @@ prove_unpublished() {
 }
 prove_unpublished "a table's address read with no ordering" "no acquire load of it" \
   '    ready = @@table.get_acquire' '    ready = @@table.get_relaxed'
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

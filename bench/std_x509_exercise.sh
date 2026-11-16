@@ -450,10 +450,12 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+mutations=0
+if mutations_wanted; then
 # prove_broken <label> <phrase> <old> <new> [module]: the exercise must
 # fail on a copy of the module (std/x509 unless named) with <old>
 # replaced, at the check that names <phrase>.
-mutations=0
 prove_broken() {
   mutations=$((mutations + 1))
   rm -rf "$WORK/patched"
@@ -622,6 +624,7 @@ prove_broken "a serial's length judged before its sign byte" "a 20-byte serial w
   '    if octets.size > MAX_SERIAL_OCTETS' '    if number.size > MAX_SERIAL_OCTETS'
 prove_broken "a zero serial taken" "a zero serial refused" \
   '    return X509Error.new("a serial of 0, where RFC 5280 asks a positive number") unless number.any? { |b| b != 0_u8 }' ''
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

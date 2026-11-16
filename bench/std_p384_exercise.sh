@@ -599,13 +599,15 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+mutations=0
+if mutations_wanted; then
 # prove_broken <label> <phrase> <old> <new> [<old2> <new2>]: the exercise
 # must fail on a copy of the module with <old> replaced (and <old2>, when
 # given), at the check that names <phrase>. Each <old> must be found once.
 # A wrong field or point operation is caught where the first key is made:
 # its public point fails std/ecdsa's own check of the curve's equation,
 # done in std/big's arithmetic, which shares none of this module's.
-mutations=0
 prove_broken() {
   mutations=$((mutations + 1))
   rm -rf "$WORK/patched"
@@ -757,6 +759,7 @@ PY
 }
 prove_unmasked "a window selector the compiler can see" "P384Point::lookup<: not the 1 value barriers" \
   '      bit = ValueBarrier.u64(((i.to_u64 ^ digit) &- 1_u64).unsafe_shr(63))' '      bit = ((i.to_u64 ^ digit) &- 1_u64).unsafe_shr(63)'
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

@@ -116,6 +116,8 @@ done
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 if [ -z "$PY" ]; then
   echo "  skipped: no working python3, so the broken copy could not be made"
 else
@@ -169,6 +171,7 @@ PY
     status=1
   fi
 fi
+fi
 
 echo
 echo "== what parse refuses"
@@ -207,6 +210,7 @@ refuses "a hyphen inside the first group" inside "UUID: not 32 hex digits" '"5-5
 
 echo
 echo "== proving the refusals can fail when the module is broken"
+if mutations_wanted; then
 if [ -z "$PY" ]; then
   echo "  skipped: no working python3, so the broken copy could not be made"
 else
@@ -308,6 +312,7 @@ PY
       echo "  $label: caught - $(grep -m1 'panic' "$WORK/mut-source.out" | sed 's/^iyi: panic: //' | cut -c1-110)"
     fi
   done
+fi
 fi
 
 echo

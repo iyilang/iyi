@@ -473,6 +473,8 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 prove_broken() { # prove_broken <label> <phrase> <old> <new>
   rm -rf "$WORK/patched"
   mkdir -p "$WORK/patched/std"
@@ -557,6 +559,7 @@ prove_broken "a status other than 200 read as a stream" "a 204 fails the connect
   'return SSEError.new("the server answered #{status}, not 200", status) unless status == 200' ''
 prove_broken "any Content-Type read as a stream" "text/plain fails the connection" \
   'unless type && SSE.event_stream?(type)' 'if false'
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

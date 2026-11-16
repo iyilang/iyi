@@ -203,6 +203,8 @@ deque_panics_with "a negative size" size_neg "negative size" 'Deque(Int32).new(-
 
 echo
 echo "== proving the checks can fail when the ring is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 prove_fails() { # prove_fails <label> <name> <phrase> <python replace-expression>
   local label="$1" name="$2" phrase="$3" replace="$4"
   mkdir -p "$WORK/$name/std"
@@ -266,6 +268,7 @@ prove_fails "equality restricted to its own element type again" broken_eq_type "
   "src.replace('def ==(other : Deque(U)) : Bool forall U\n    return false unless {{ T <= U || U <= T }} && ', 'def ==(other : Deque(T)) : Bool\n    return false unless ', 1)"
 prove_fails "equality across element types one way only" broken_eq_one_way "assertion failed for == of a narrower element type" \
   "src.replace('{{ T <= U || U <= T }}', '{{ T <= U }}', 1)"
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

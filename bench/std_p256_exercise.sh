@@ -419,12 +419,14 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+mutations=0
+if mutations_wanted; then
 # prove_broken <label> <phrase> <old> <new>: the exercise must fail on a
 # copy of the module with <old> replaced, at the check that names <phrase>.
 # A wrong field or point operation is caught where the first key is made:
 # its public point fails std/ecdsa's own check of the curve's equation,
 # done in std/big's arithmetic, which shares none of this module's.
-mutations=0
 prove_broken() {
   mutations=$((mutations + 1))
   rm -rf "$WORK/patched"
@@ -633,6 +635,7 @@ prove_unpublished() {
 }
 prove_unpublished "a table's address stored with no ordering" "no release store to it" \
   '    @@table.set_release(table.address)' '    @@table.set_relaxed(table.address)'
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

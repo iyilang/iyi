@@ -100,6 +100,8 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 prove_fails() { # prove_fails <label> <dir> <phrase> <old> <new>
   local label="$1" dir="$2" phrase="$3" old="$4" new="$5"
   if [ -z "$PY" ]; then
@@ -188,6 +190,7 @@ prove_fails "inspect leaves #{ to interpolate" raw_interpolation \
   "ASSERTION FAILED: inspect escapes interpolation" \
   'string.byte_at(index + 1) == 123_u8' \
   'string.byte_at(index + 1) == 0_u8'
+fi
 
 echo
 if [ "$status" -ne 0 ]; then

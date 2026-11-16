@@ -389,6 +389,8 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 # With <phrase>, the broken exercise must fail there, at the check that
 # proves the fix. With <pattern>, the fix is a refusal: the probe `refuses`
 # builds, on the broken copy, must answer <pattern> instead.
@@ -502,6 +504,7 @@ mutate "a union that drops a pattern's flags" '    pattern.to_s' '    pattern.so
 # An anchored run that still starts a thread at every later character is
 # a search: `match_at` would find `3-z` from offset 1.
 mutate "match_at that searches ahead" '      if !matched && !whole && !anchored' '      if !matched && !whole' "match_at does not search ahead"
+fi
 
 # Linear time, held to a clock: the pathological pattern built from this
 # module runs in a few milliseconds and must finish within 20 seconds. The

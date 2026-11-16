@@ -115,6 +115,8 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 # prove <label> <old> <new> [output]: the exercise, run on a copy with
 # <old> made <new>, has to fail - or, given `output`, print a column this
 # module does not measure, which only this script can see.
@@ -152,6 +154,7 @@ prove "integer seconds asked of Time" 'return Std::Time::Span.seconds(seconds.to
 prove "a fraction of a second dropped" 'return Std::Time::Span.seconds(seconds.to_i64) if seconds.is_a?(Int)' 'return Std::Time::Span.seconds(seconds.to_i64)'
 prove "zeros for the CPU time" 'Std::Format.sprintf("(  %.6f)", real)' 'Std::Format.sprintf("  0.000000   0.000000   0.000000 (  %.6f)", real)'
 prove "zeros for the bytes per call" '            item.human_compare)' '            "0B/op  " + item.human_compare)' output
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

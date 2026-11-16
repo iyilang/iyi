@@ -546,6 +546,8 @@ refuse forged-or-panic "AesGcm: the tag does not match: the sealed bytes, the ad
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 # prove_broken <label> <phrase> <old> <new>: the exercise must fail on a
 # copy of the module with <old> replaced, at the check that names <phrase>.
 prove_broken() {
@@ -652,6 +654,7 @@ prove_broken "the AEAD's two lengths swapped" "rfc 8439 2.8.2" \
   'AeadBytes.put_le64(lengths, aad_size.to_u64)
     AeadBytes.put_le64(lengths + 8_i64, size.to_u64)' 'AeadBytes.put_le64(lengths, size.to_u64)
     AeadBytes.put_le64(lengths + 8_i64, aad_size.to_u64)'
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

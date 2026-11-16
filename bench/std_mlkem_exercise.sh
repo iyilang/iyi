@@ -535,6 +535,8 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 # prove_broken <label> <phrase> <old> <new>: the exercise must fail on a
 # copy of the module with <old> replaced, at the check that names <phrase>.
 # patched_copy <old> <new>: a copy of the module with <old>, which it has once,
@@ -645,6 +647,7 @@ prove_unmasked "the pick as it was, a mask and its complement in plain sight" "k
     i = 0
     while i < 32
       secret[i] = (g[i] & keep) | (rejected[i] & ~keep)'
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

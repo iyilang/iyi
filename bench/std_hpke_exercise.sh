@@ -311,6 +311,8 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 # prove_broken <module> <label> <phrase> <old> <new>: the exercise must fail
 # on a copy of src/std/<module>.iyi with <old> replaced, at the check that
 # names <phrase>.
@@ -399,6 +401,7 @@ prove_broken hpke "a nonce limit one past 2^96 - 1" "$V0: sealing at sequence 2^
 prove_broken hpke "a P-256 public key read unvalidated" "a P-256 public key off the curve refused" \
   '      return HpkeError.new("HPKE: the #{kem.name} public key is refused: #{point.message}") if point.is_a?(EcdsaError)
 ' ''
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

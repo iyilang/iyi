@@ -190,6 +190,8 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 # prove_broken <label> <phrase> <old> <new> [argument...]: the exercise,
 # given the arguments, must fail on a copy of the module with <old>
 # replaced, at the check that names <phrase>, or, given `hangs` as the
@@ -360,6 +362,7 @@ prove_broken "a waiter that holds its worker" "while a Mutex waiter held one wor
         end
         waited = nil
 ' parks
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

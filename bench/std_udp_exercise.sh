@@ -98,6 +98,8 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 if [ -z "$PY" ]; then
   echo "  skipped: no working python3, so the broken copy could not be made"
 else
@@ -120,6 +122,7 @@ PY
   else
     echo "  a broken udp is caught"
   fi
+fi
 fi
 
 echo
@@ -466,6 +469,7 @@ fi
 
 echo
 echo "== proving a Datagram index check can fail when the module is broken"
+if mutations_wanted; then
 if [ -z "$PY" ]; then
   echo "  skipped: no working python3, so the broken copy could not be made"
 else
@@ -568,6 +572,7 @@ elif [ "$(uname -s)" = Linux ]; then
     if bound < 0" \
     "    bound = __sys_bind(fd, addr, addrlen)
     if false"
+fi
 fi
 
 echo

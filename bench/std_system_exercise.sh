@@ -304,6 +304,8 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 mutations=0
 # prove_broken <label> <phrase> <how> <old> <new> [<old> <new> ...]: <how>
 # is `python` (Python's answers, unpinned), `pinned` (held to $PIN with
@@ -375,6 +377,7 @@ else
 " "bytes = 2
 " 'return 0 if got != -22_i64' 'return 0'
   fi
+fi
 fi
 
 echo

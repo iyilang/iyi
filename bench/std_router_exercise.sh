@@ -370,6 +370,8 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 prove_broken() { # prove_broken <label> <phrase> <old> <new>
   rm -rf "$WORK/patched"
   mkdir -p "$WORK/patched/std"
@@ -433,6 +435,7 @@ prove_broken "a rest wildcard taken before the end" "the pattern \"/{x...}/a\"" 
   'return refused(text, "{#{name}...} is not at the end") if multi && stop != size' ''
 prove_broken "a pattern after the first request taken" "a pattern after the first request is refused" \
   'raise "Router: #{pattern.inspect} is registered after the router answered a request; patterns are registered before it serves" if @answering' ''
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

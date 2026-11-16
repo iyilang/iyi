@@ -114,6 +114,8 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 
 prove_fails() {
   local label="$1" dir="$2" old_pat="$3" new_pat="$4"
@@ -169,6 +171,7 @@ prove_fails "doubles subtract below zero" mut7 "use_sub = @current.is_a?(::Float
 prove_fails "NaN orders against nothing" mut8 "if unordered?(limit) || unordered?(@current) || unordered?(@step)" "if false"
 prove_fails "zero step refused" mut9 "if !at_limit && !(@step > 0)" "if false && !(@step > 0)"
 prove_fails "NaN room read as a number" mut10 "if @current.is_a?(::Float) && (unordered?(limit - @step)" "if false && (unordered?(limit - @step)"
+fi
 
 echo
 if [ "$status" -ne 0 ]; then

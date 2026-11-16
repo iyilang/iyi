@@ -363,6 +363,8 @@ prove_fails "a Buffer that writes to its target" patched_buffer "undefined metho
 # buffer of that name that no render has.
 echo
 echo "== negative proof: a substitution that leaves the placeholder is caught"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 if [ -z "$PY" ]; then
   echo "  no python3 on this machine, so this proof is unmeasured"
 else
@@ -388,6 +390,7 @@ with open('$WORK/eiy_io_broken/eiy_io.cr', 'w') as f:
     sed 's/^/    /' "$WORK/eiy_io_broken/out" | head -15
     status=1
   fi
+fi
 fi
 
 # ---------------------------------------------------------------------------

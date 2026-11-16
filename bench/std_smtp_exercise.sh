@@ -391,6 +391,8 @@ refuse or-panic "SMTP: reading from 127.0.0.1 failed: cannot read from socket: t
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 # prove_broken <label> <phrase> <old> <new> [scenario]: on a copy of the
 # module with <old> replaced, the exercise must fail at the check that
 # names <phrase> - or, given a scenario, the client against the Python
@@ -498,6 +500,7 @@ if [ -n "$SCENARIOS" ]; then
       problem = hello' '      problem = nil
       return problem if problem
       problem = hello' starttls
+fi
 fi
 
 echo

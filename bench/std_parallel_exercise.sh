@@ -249,6 +249,8 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 prove_fails() { # prove_fails <label> <dir> <phrase> <sed script>
   local label="$1" dir="$2" phrase="$3" script="$4"
   mkdir -p "$WORK/$dir/std"
@@ -309,6 +311,7 @@ elif ! grep -qF "the block spawn(unit: :new) runs in a unit of its own, on anoth
   status=1
 else
   echo "  refused only inside std/parallel, not at the call: $(grep -m1 "^Error" "$WORK/silent/build.log" | cut -c8-140)..."
+fi
 fi
 
 echo

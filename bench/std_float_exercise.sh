@@ -158,6 +158,8 @@ told "to_f64 on a Float32" told_to_f64 '`to_f64` on Float32 is in `std/float`' $
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 mkdir -p "$WORK/patched/std"
 if [ -z "$PY" ]; then
   echo "  no python3 on this machine, so the broken-module proof is unmeasured"
@@ -238,6 +240,7 @@ breaks "round(mode) without its zero" round_mode std/number.iyi \
 breaks "** Int32::MIN squared in plain doubles" pow_min iyi/float.iyi \
   'base, low = IyiFloatText.product(base, low, base, low) if count > 0' 'base, low = base * base, 0.0 if count > 0' \
   '1.0000001 ** Int32::MIN'
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

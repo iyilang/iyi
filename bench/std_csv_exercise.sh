@@ -335,6 +335,8 @@ refuse malformed-or-panic "csv: unexpected quote at line 2, column 2"
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 mkdir -p "$WORK/patched/std"
 if [ -z "$PY" ]; then
   echo "  no python3 on this machine, so the broken-module proof is unmeasured"
@@ -424,6 +426,7 @@ broken "the writer leaving a lone empty field bare" 'if @quote_all || lone || ma
 broken "the writer leaving end spaces bare" 'return true if p[0] == 32_u8 || p[0] == 9_u8 || p[n - 1] == 32_u8 || p[n - 1] == 9_u8' '' "ASSERTION FAILED: a field with spaces at its ends is quoted"
 broken "the writer leaving a leading U+FEFF bare" "marked = @rows == 0 && i == 0 && f.starts_with?('\\uFEFF')" 'marked = false' "ASSERTION FAILED: the writer quotes only the first field for its U+FEFF"
 broken "the whole stream held in memory" $'    more = io.read_bytes(CHUNK)\n    if more.bytesize == 0\n      @ended = true\n      if' $'    more = io.read_all\n    if more.bytesize == 0\n      @ended = true\n      if' "bytes alive, under 1 MiB"
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

@@ -440,10 +440,12 @@ fi
 
 echo
 echo "== proving the checks can fail when the modules are broken"
+. "$REPO/bench/mutations.sh"
+mutations=0
+if mutations_wanted; then
 # prove_broken <module> <label> <phrase> <old> <new>: the exercise must
 # fail on a copy of std/<module> with <old> replaced, at the check that
 # names <phrase>.
-mutations=0
 prove_broken() {
   mutations=$((mutations + 1))
   rm -rf "$WORK/patched"
@@ -514,6 +516,7 @@ prove_broken acme "an http:// account Location taken" "an http:// account Locati
   '    refused = AcmeClient.https(url, "newAccount'"'"'s Location")' '    refused = nil'
 prove_broken acme "an http:// order Location taken" "an http:// order Location is refused by name" \
   '    refused = AcmeClient.https(url, "newOrder'"'"'s Location")' '    refused = nil'
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

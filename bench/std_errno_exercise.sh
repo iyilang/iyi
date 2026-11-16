@@ -114,6 +114,8 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 
 prove_fails() { # prove_fails <label> <dir> <phrase> <old> <new>
   local label="$1" dir="$2" phrase="$3" old="$4" new="$5"
@@ -202,6 +204,7 @@ case "$(uname -s)" in
       '    ESOCKTNOSUPPORT =  44'
     ;;
 esac
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

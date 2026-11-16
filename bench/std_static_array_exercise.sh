@@ -111,6 +111,8 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 if [ -z "$PY" ]; then
   echo "  skipped: no working python3, so the broken copy could not be made"
 else
@@ -246,6 +248,7 @@ prove_fails "to_s into an IO written as the array's" broken_to_s_io "ASSERTION F
   '  def to_s(io : IO) : Nil
     io.write(to_s)' '  def to_s(io : IO) : Nil
     io.write(to_a.to_s)'
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

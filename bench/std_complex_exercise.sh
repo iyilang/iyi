@@ -125,6 +125,8 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 if [ -z "$PY" ]; then
   echo "  no python3 on this machine, so the broken-module proof is unmeasured"
 else
@@ -215,6 +217,7 @@ PY
       *) echo "  $label: caught, but not by its own check - $got"; status=1 ;;
     esac
   done
+fi
 fi
 
 echo

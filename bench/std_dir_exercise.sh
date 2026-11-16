@@ -117,6 +117,8 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+if mutations_wanted; then
 mkdir -p "$WORK/patched/std"
 if [ -z "$PY" ]; then
   echo "  no python3 on this machine, so the broken-module proof is unmeasured"
@@ -160,6 +162,7 @@ elif IYI_PATH="$WORK/patched_glob${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI
 else
   echo "  dead glob matcher is caught"
 fi
+fi
 
 echo
 echo "== a ** walk does not go through a link"
@@ -198,6 +201,7 @@ esac
 
 echo
 echo "== proving the other glob and walk checks can fail"
+if mutations_wanted; then
 # dir_broken <label> <name> <old> <new> <phrase>: the exercise built against
 # a copy with one change, under a clock - a freed directory buffer is a
 # walk that never ends - and it must fail at the check that names it, or,
@@ -285,6 +289,7 @@ case "$(uname -s)" in
       words = dirp.as(Int64*)
       records = Pointer(UInt8).new(words[3].to_u64)' 'across\|written over' ;;
 esac
+fi
 
 echo
 echo "== what dir operations refuse"

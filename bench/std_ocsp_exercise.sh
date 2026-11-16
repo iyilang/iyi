@@ -600,13 +600,15 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
+. "$REPO/bench/mutations.sh"
+mutations=0
+if mutations_wanted; then
 # prove_broken <label> <phrase> <old> <new> [module]: the exercise must
 # fail on a copy of the module (std/ocsp unless named) with <old>
 # replaced, at the check that names <phrase>. Each copy is built and run
 # in a subshell of its own, MUT_JOBS at a time, with a compiler cache of
 # its own, as std/tls's are; the answers are printed in order at the end.
 MUT_JOBS="${MUT_JOBS:-4}"
-mutations=0
 mutation_pids=""
 mkdir -p "$WORK/mutres"
 prove_copy() { # prove_copy <n> <dir> <label> <phrase>
@@ -745,6 +747,7 @@ while [ "$n" -le "$mutations" ]; do
   n=$((n + 1))
 done
 [ -e "$WORK/mutres/failed" ] && status=1
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

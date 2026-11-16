@@ -169,7 +169,8 @@ module Iyi
 
     private def iyi_refuse_shell(node) : Nil
       return unless iyi_macro?(node)
-      node.raise "`#{node.name}` at #{iyi_macro_site(node)} is not allowed in an .iyi macro: " \
+      method = node.name == "`" ? "a backtick" : "`system`"
+      node.raise "#{method} at #{iyi_macro_site(node)} is not allowed in an .iyi macro: " \
                  "compile-time shell commands are forbidden"
     end
 

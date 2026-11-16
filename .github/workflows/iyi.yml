@@ -3929,9 +3929,7 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: selfhost-elf-aarch64
-          path: |
-            ${{ runner.temp }}/selfhost-elf/elf-aarch64
-            ${{ runner.temp }}/selfhost-elf/elf-aarch64.json
+          path: ${{ runner.temp }}/selfhost-elf
           if-no-files-found: error
           retention-days: 7
 

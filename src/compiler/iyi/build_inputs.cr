@@ -298,7 +298,7 @@ module Iyi
       if stamp.kind.file? && stamp.ctime <= 0
         # Without a change time an edit that kept the size and the modification
         # time (`cp -p`, `touch -r`) is not seen, so no record can vouch for it.
-        cannot("#{path} has no change time on this file system, so an edit that kept its size and time could not be seen")
+        cannot("#{path} has no trusted change time on this file system, so an edit that kept its size and time could not be seen")
       end
       if stamp.kind.file? && stamp.digest.nil? && BuildInputs.racy?(Math.max(stamp.mtime, stamp.ctime), BuildInputs.now)
         cannot("#{path} could not be read to fingerprint it")

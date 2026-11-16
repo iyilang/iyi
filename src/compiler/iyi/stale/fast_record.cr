@@ -34,7 +34,13 @@ module Iyi::Stale
     # The facts of this run. Reads the compiler's files and the environment,
     # and makes no other call.
     def self.current(cwd : String, target : String) : FastFacts
-      compiler = Toolchain.paths.map { |path| FastEntry.new(path, FileStamp.of(path)) }
+      compiler = Toolchain.paths.map do |path|
+        stamp = FileStamp.of(path)
+        if stamp.kind.file? && stamp.digest.nil? && BuildInputs.racy?(Math.max(stamp.mtime, stamp.ctime), BuildInputs.now)
+          stamp = stamp.copy_with(ctime: 0_i64)
+        end
+        FastEntry.new(path, stamp)
+      end
       new(cwd, target, FastRecord.default_workers, compiler, Profile.build_env)
     end
 
@@ -60,7 +66,7 @@ module Iyi::Stale
   # the reason, so the next check can say why it compiles, and never serves.
   class FastRecord
     FORMAT  = "iyi-stale-fast"
-    VERSION = 1
+    VERSION = 2
 
     getter test : TestId
     getter file : String
@@ -259,6 +265,9 @@ module Iyi::Stale
         return "compiler changed: the set of compiler files changed" unless compiler.size == facts.compiler.size
         compiler.each_with_index do |entry, index|
           now = facts.compiler[index]
+          unless entry.stamp.kind.file? && entry.stamp.ctime > 0 && now.stamp.kind.file? && now.stamp.ctime > 0
+            return "compiler changed: #{File.basename(entry.path)} has no trusted change time"
+          end
           if now.path != entry.path || FastRecord.changed?(entry.stamp, now.stamp, now.path, drop)
             return "compiler changed: #{File.basename(entry.path)}"
           end
@@ -322,8 +331,8 @@ module Iyi::Stale
         json.number stamp.size
         json.number stamp.mtime
         json.number stamp.ctime
-        json.number stamp.dev
-        json.number stamp.ino
+        json.string stamp.dev.to_s
+        json.string stamp.ino.to_s
         if digest = stamp.digest
           json.string digest
         else
@@ -342,7 +351,7 @@ module Iyi::Stale
              else                  raise ArgumentError.new("unknown stamp kind")
              end
       stamp = BuildInputs::Stamp.new(kind, parts[2].as_i64, parts[3].as_i64, parts[7].as_s?,
-        parts[4].as_i64, parts[5].as_i64.to_u64, parts[6].as_i64.to_u64)
+        parts[4].as_i64, parts[5].as_s.to_u64, parts[6].as_s.to_u64)
       FastEntry.new(parts[0].as_s, stamp)
     end
 

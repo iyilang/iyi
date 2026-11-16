@@ -335,10 +335,9 @@ describe "Iyi::Stale S3c: env-only recorder, CompilerEnvFp" do
       if Iyi::Stale::FileStamp.of("src/compiler/iyi.cr").ctime > 0
         stale.reasons.should be_empty
       else
-        # Windows reports no change time, so the file that exists cannot be
-        # vouched for and the recorder says so. The absent one needs none.
+        # The existing file cannot be vouched for; the absent one needs no stamp.
         stale.reasons.size.should eq(1)
-        stale.reasons.first.should contain("iyi.cr has no change time")
+        stale.reasons.first.should contain("iyi.cr has no trusted change time")
       end
     end
 

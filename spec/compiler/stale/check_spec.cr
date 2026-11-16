@@ -520,7 +520,7 @@ describe "Iyi::Stale inputs record (--stale-inputs)" do
       File.file?(record_path).should be_true
       data = JSON.parse(File.read(record_path))
       data["format"].as_s.should eq("iyi-stale-inputs")
-      data["version"].as_i.should eq(1)
+      data["version"].as_i.should eq(2)
       data["local_build"].as_s.should eq("a" * 64)
       data["portable_build"].as_s.should eq("b" * 64)
       data["env_enumerated"].as_bool.should be_false
@@ -533,7 +533,7 @@ describe "Iyi::Stale inputs record (--stale-inputs)" do
       entry[2].as_i64.should eq(1)
       {% if flag?(:unix) %}
         entry[4].as_i64.should be > 0
-        entry[6].as_i64.should be > 0
+        entry[6].as_s.to_u64.should be > 0
       {% end %}
     end
   end
@@ -552,7 +552,7 @@ describe "Iyi::Stale inputs record (--stale-inputs)" do
     Iyi::Stale::Check.records_inputs?(no_reasons, stale).should be_false
   end
 
-  it "stale inputs leave the Build unchanged, and write the record of a reusable build everywhere but Windows" do
+  it "stale inputs leave the Build unchanged and write the record of a reusable build" do
     program = Iyi::Program.new
     program.color = false
     parser = program.new_parser("def foo(x); x; end; a = foo(41)")
@@ -595,13 +595,8 @@ describe "Iyi::Stale inputs record (--stale-inputs)" do
           {% end %}
           recorded.local_build_hex.should eq(plain.local_build_hex)
           recorded.portable_build_hex.should eq(plain.portable_build_hex)
-          {% if flag?(:win32) %}
-            # No change time there, so `Check.run` writes no record at all.
-            File.file?(inputs_path).should be_false
-          {% else %}
-            File.file?(inputs_path).should be_true
-            JSON.parse(File.read(inputs_path))["local_build"].as_s.should eq(recorded.local_build_hex)
-          {% end %}
+          File.file?(inputs_path).should be_true
+          JSON.parse(File.read(inputs_path))["local_build"].as_s.should eq(recorded.local_build_hex)
         end
       end
     end

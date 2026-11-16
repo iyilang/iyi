@@ -222,15 +222,13 @@ module Iyi::Stale
       # The inputs this build read, for the fast path: written only for a
       # reusable build whose recorder heard every input (`records_inputs?`).
       # Anything else leaves no record, and the next check compiles.
-      {% unless flag?(:win32) %}
-        if (inputs_path = compiler.stale_inputs) && (inputs = BuildInputs.current) && Check.records_inputs?(not_reusable, inputs)
-          begin
-            InputsFile.write(inputs_path, inputs, local_build_hex, portable_build_hex)
-          rescue IO::Error
-            # Without the record the next check compiles, which it does anyway.
-          end
+      if (inputs_path = compiler.stale_inputs) && (inputs = BuildInputs.current) && Check.records_inputs?(not_reusable, inputs)
+        begin
+          InputsFile.write(inputs_path, inputs, local_build_hex, portable_build_hex)
+        rescue IO::Error
+          # Without the record the next check compiles, which it does anyway.
         end
-      {% end %}
+      end
 
       blocked = block_rules.any? do |rule|
         (rule.mode == "local" && rule.build.compare(local_build_hex, case_insensitive: true) == 0) ||

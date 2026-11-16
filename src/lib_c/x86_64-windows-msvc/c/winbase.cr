@@ -76,6 +76,37 @@ lib LibC
     fileAttributes : DWORD
   end
 
+  struct FILE_STANDARD_INFO
+    allocationSize : LARGE_INTEGER
+    endOfFile : LARGE_INTEGER
+    numberOfLinks : DWORD
+    deletePending : BOOLEAN
+    directory : BOOLEAN
+  end
+
+  struct FILE_ID_INFO
+    volumeSerialNumber : UInt64
+    fileIdLow : UInt64
+    fileIdHigh : UInt64
+  end
+
+  struct FILE_REMOTE_PROTOCOL_INFO
+    structureVersion : USHORT
+    structureSize : USHORT
+    protocol : DWORD
+    protocolMajorVersion : USHORT
+    protocolMinorVersion : USHORT
+    protocolRevision : USHORT
+    reserved : USHORT
+    flags : DWORD
+    genericReserved : DWORD[8]
+    protocolSpecific : DWORD[16]
+  end
+
+  fun GetVolumeInformationByHandleW(hFile : HANDLE, volumeName : LPWSTR, volumeNameSize : DWORD,
+                                   volumeSerialNumber : DWORD*, maximumComponentLength : DWORD*, fileSystemFlags : DWORD*,
+                                   fileSystemName : LPWSTR, fileSystemNameSize : DWORD) : BOOL
+
   struct FILE_ATTRIBUTE_TAG_INFO
     fileAttributes : DWORD
     reparseTag : DWORD

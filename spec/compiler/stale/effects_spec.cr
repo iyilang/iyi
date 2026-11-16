@@ -426,6 +426,52 @@ describe "Iyi::Stale S4a: @[Effect] annotation and closure check" do
       site.not_nil!.site.should eq("toolchain:std/conditional_line_test.iyi:8")
     end
 
+    it "does not flag a reference to a runtime-defined fun as a lib call" do
+      runtime_file = File.join(Dir.current, "src", "std", "defined_fun_pointer.iyi")
+      program = create_test_program
+      program.iyi_prelude_dir = File.join(Dir.current, "src", "iyi")
+      parser = program.new_parser(<<-CODE)
+        @[Unsafe("runtime-defined callback")]
+        fun runtime_callback(value : Int32) : Int32
+          value
+        end
+
+        def callback_pointer
+          ->(value : Int32) { runtime_callback(value) }
+        end
+        callback_pointer
+        CODE
+      parser.filename = runtime_file
+      node = program.semantic(program.normalize(parser.parse))
+      closure = Iyi::Effects.closure_check(program, Iyi::Stale::ReachWalk.walk(program, node))
+
+      closure.rg3_sites.select { |entry| entry.detail.includes?("runtime_callback") }.should be_empty
+      closure.not_reusable.select { |reason| reason.reason == "unclassified runtime site" }.should be_empty
+    end
+
+    it "flags a reference to a real external fun as a lib call" do
+      runtime_file = File.join(Dir.current, "src", "std", "external_fun_pointer.iyi")
+      program = create_test_program
+      program.iyi_prelude_dir = File.join(Dir.current, "src", "iyi")
+      parser = program.new_parser(<<-CODE)
+        @[Unsafe("runtime callback references an external function")]
+        lib LibSys
+          fun callback(value : Int32) : Int32
+        end
+
+        def callback_pointer
+          ->(value : Int32) { LibSys.callback(value) }
+        end
+        callback_pointer
+        CODE
+      parser.filename = runtime_file
+      node = program.semantic(program.normalize(parser.parse))
+      closure = Iyi::Effects.closure_check(program, Iyi::Stale::ReachWalk.walk(program, node))
+
+      closure.rg3_sites.any? { |entry| entry.detail == "lib fun call: callback" }.should be_true
+      closure.not_reusable.any? { |reason| reason.reason == "unclassified runtime site" }.should be_true
+    end
+
     it "flags unclassified runtime lib fun calls outside annotated defs as RG3 sites" do
       runtime_file = File.join(Dir.current, "src", "std", "unannotated_runtime.iyi")
 

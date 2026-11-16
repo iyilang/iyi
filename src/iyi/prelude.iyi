@@ -828,7 +828,7 @@ end
   # GetStdHandle's constants, by their Win32 names: STD_INPUT_HANDLE (-10),
   # STD_OUTPUT_HANDLE (-11), STD_ERROR_HANDLE (-12). They are negative
   # identifiers reinterpreted as DWORD; as Int32 they spell themselves.
-  def __iyi_std_handle(fd : Int64) : Void*
+  @[Effect(:console)]; def __iyi_std_handle(fd : Int64) : Void*
     return LibC.GetStdHandle(-11) if fd == 1_i64
     return LibC.GetStdHandle(-12) if fd == 2_i64
     return LibC.GetStdHandle(-10) if fd == 0_i64
@@ -879,7 +879,7 @@ end
     @@restore_err : UInt64 = 0_u64
     @@restore_err_mode : Int32 = 0
 
-    def self.console?(fd : Int64, handle : Void*) : Bool
+    @[Effect(:console)]; def self.console?(fd : Int64, handle : Void*) : Bool
       return false if fd < 0_i64 || fd > 2_i64
       bit = 1_u64.unsafe_shl(fd.to_u64)
       if @@probed & bit == 0_u64
@@ -890,7 +890,7 @@ end
       @@console & bit != 0_u64
     end
 
-    def self.enable_vt(fd : Int64, handle : Void*) : Nil
+    @[Effect(:console)]; def self.enable_vt(fd : Int64, handle : Void*) : Nil
       bit = 1_u64.unsafe_shl(fd.to_u64)
       return if @@vt & bit != 0_u64
       @@vt = @@vt | bit
@@ -912,7 +912,7 @@ end
     # console outlives the program, and it was left with VT processing on
     # for whatever ran in it next, where the C runtime's own teardown, and
     # Crystal's, put the mode back.
-    def self.restore_vt : Nil
+    @[Effect(:primitive)]; def self.restore_vt : Nil
       LibC.SetConsoleMode(Pointer(Void).new(@@restore_err), @@restore_err_mode) if @@restore_err != 0_u64
       LibC.SetConsoleMode(Pointer(Void).new(@@restore_out), @@restore_out_mode) if @@restore_out != 0_u64
       nil
@@ -952,7 +952,7 @@ end
     # stack instead; a piece of PIECE bytes is at most PIECE UTF-16 units.
     PIECE = 1024
 
-    def self.write_handle(handle : Void*, buffer : Void*, count : UInt64, carry : UInt64*) : Int64
+    @[Effect(:stdio)]; def self.write_handle(handle : Void*, buffer : Void*, count : UInt64, carry : UInt64*) : Int64
       staged = uninitialized UInt8[PIECE]
       wide = uninitialized UInt16[PIECE]
       bytes = pointerof(staged).as(UInt8*)
@@ -1037,7 +1037,7 @@ end
     # between the two halves of a surrogate pair. Each piece was converted
     # alone, and the character past the 1,364th of a line came out as two
     # U+FFFD. The high half is carried to the front of the next read.
-    def self.read_into(handle : Void*, buffer : Void*, count : UInt64, wide : UInt16*, capacity : UInt64) : Int64
+    @[Effect(:host_state)]; def self.read_into(handle : Void*, buffer : Void*, count : UInt64, wide : UInt16*, capacity : UInt64) : Int64
       room = count // 3_u64
       room = 1_u64 if room == 0_u64
       room = capacity if room > capacity
@@ -1069,7 +1069,7 @@ end
     end
   end
 
-  def __iyi_win_write_file(handle : Void*, buffer : Void*, count : UInt64) : Int64
+  @[Effect(:stdio)]; def __iyi_win_write_file(handle : Void*, buffer : Void*, count : UInt64) : Int64
     written = uninitialized Int32
     if LibC.WriteFile(handle, buffer, count.to_i32, pointerof(written), nil) == 0
       return -1_i64
@@ -1149,7 +1149,7 @@ end
   # which is the number `CreateDirectoryW` documents.
   IYI_WIN_PATH_LIMIT = 248
 
-  def __iyi_wide_path(path : UInt8*) : UInt16*
+  @[Effect(:primitive)]; private def __iyi_wide_utf16(path : UInt8*, count : Int32*) : UInt16*
     # MB_ERR_INVALID_CHARS (8) refuses text that is not UTF-8 (null): with
     # 0, each bad byte became U+FFFD, `x\xFF.txt` and `x\xFE.txt` were one
     # file, and the second write replaced the first.
@@ -1157,6 +1157,16 @@ end
     return Pointer(UInt16).new(0_u64) if needed <= 0
     wide = Pointer(UInt16).malloc(needed.to_u64)
     return Pointer(UInt16).new(0_u64) if LibC.MultiByteToWideChar(65001, 8, path, -1, wide, needed) <= 0
+    count.value = needed
+    wide
+  end
+
+  # This dispatcher stays unwrapped: an internal observation frame here
+  # would hide the host-state observation for a relative path below.
+  @[Effect(:primitive)]; def __iyi_wide_path(path : UInt8*) : UInt16*
+    needed = 0_i32
+    wide = __iyi_wide_utf16(path, pointerof(needed))
+    return wide if wide.address == 0_u64
     # `needed` counts the terminator; the length does not.
     # The limit is on the path Windows resolves, not on the text handed in:
     # `needed` measures a relative name without the current directory in
@@ -1180,11 +1190,29 @@ end
     wide[2] == 92_u16 || wide[2] == 47_u16
   end
 
-  private def __iyi_wide_long_path(wide : UInt16*) : UInt16*
-    full_needed = LibC.GetFullPathNameW(wide, 0, Pointer(UInt16).new(0_u64), Pointer(Pointer(UInt16)).new(0_u64))
+  # A drive-absolute path cannot depend on the current directory. Leave
+  # other forms, including UNC paths, conservative until their resolution
+  # is proven for every spelling. This dispatcher stays unwrapped so the
+  # non-absolute observation is not hidden.
+  @[Effect(:primitive)]; private def __iyi_wide_full_path(wide : UInt16*, size : Int32, buffer : UInt16*) : Int32
+    first = wide[0]
+    drive = (first >= 65_u16 && first <= 90_u16) || (first >= 97_u16 && first <= 122_u16)
+    unless drive && wide[1] == 58_u16 && (wide[2] == 92_u16 || wide[2] == 47_u16)
+      return __iyi_wide_full_unproven(wide, size, buffer)
+    end
+    LibC.GetFullPathNameW(wide, size, buffer, Pointer(Pointer(UInt16)).new(0_u64))
+  end
+
+  @[Effect(:host_state)]; private def __iyi_wide_full_unproven(wide : UInt16*, size : Int32, buffer : UInt16*) : Int32
+    LibC.GetFullPathNameW(wide, size, buffer, Pointer(Pointer(UInt16)).new(0_u64))
+  end
+
+  # As with __iyi_wide_path, do not hide the conditional observation.
+  @[Effect(:primitive)]; private def __iyi_wide_long_path(wide : UInt16*) : UInt16*
+    full_needed = __iyi_wide_full_path(wide, 0, Pointer(UInt16).new(0_u64))
     return wide if full_needed <= 0
     full = Pointer(UInt16).malloc(full_needed.to_u64)
-    written = LibC.GetFullPathNameW(wide, full_needed, full, Pointer(Pointer(UInt16)).new(0_u64))
+    written = __iyi_wide_full_path(wide, full_needed, full)
     return wide if written <= 0
     # Resolved short: the path was relative and shallow, so the plain
     # relative form is the one to keep — a `\\?\` prefix may only sit on a
@@ -1233,7 +1261,7 @@ end
   # `String` is the right answer rather than a byte buffer because every
   # caller wants one. The bytes are UTF-8 (CP_UTF8, 65001), which is what an
   # iyi string is.
-  def __iyi_utf8_bytes_from_wide(wide : UInt16*, buffer : UInt8*, limit : Int32) : Int32
+  @[Effect(:primitive)]; def __iyi_utf8_bytes_from_wide(wide : UInt16*, buffer : UInt8*, limit : Int32) : Int32
     LibC.WideCharToMultiByte(65001, 0, wide, -1, buffer, limit,
       Pointer(UInt8).new(0_u64), Pointer(Int32).new(0_u64))
   end
@@ -1244,7 +1272,7 @@ end
   # named `x\uFFFDy.txt`, which does not exist, for a file named with one.
   # Text a program is handed once - its arguments, a console's input -
   # passes 0, where a refusal would lose the rest of it.
-  def __iyi_utf8_size_from_wide(wide : UInt16*, flags : Int32 = 128) : Int32
+  @[Effect(:primitive)]; def __iyi_utf8_size_from_wide(wide : UInt16*, flags : Int32 = 128) : Int32
     needed = LibC.WideCharToMultiByte(65001, flags, wide, -1, Pointer(UInt8).new(0_u64), 0,
       Pointer(UInt8).new(0_u64), Pointer(Int32).new(0_u64))
     needed > 0 ? needed : 0
@@ -1257,7 +1285,7 @@ end
   # database's lock file - refuses `GetFileAttributesW` with
   # ERROR_SHARING_VIOLATION (32), and `File.exists?` said false about a
   # file `dir` lists. Its directory entry answers without opening it.
-  def __iyi_path_attributes(path : UInt8*) : Int32
+  @[Effect(:host_state)]; def __iyi_path_attributes(path : UInt8*) : Int32
     wide = __iyi_wide_path(path)
     return -1 if wide.address == 0_u64
     attributes = LibC.GetFileAttributesW(wide)
@@ -1291,7 +1319,7 @@ end
   # Whether Windows reads *wide* as a DOS device: it resolves `NUL` or
   # `COM9` to `\\.\NUL` or `\\.\COM9`, and nothing else spelled without
   # that prefix resolves there. The longest such name is `\\.\CONOUT$`.
-  private def __iyi_dos_device?(wide : UInt16*) : Bool
+  @[Effect(:host_state)]; private def __iyi_dos_device?(wide : UInt16*) : Bool
     return false if wide[0] == 92_u16 && wide[1] == 92_u16
     full = Pointer(UInt16).malloc(16_u64)
     written = LibC.GetFullPathNameW(wide, 16, full, Pointer(Pointer(UInt16)).new(0_u64))
@@ -3633,7 +3661,7 @@ require "./file"
       # short strings 995 MiB, out of memory under a 200 MB job limit with
       # a few kilobytes live. Elsewhere an untouched page is charged
       # nothing, and this is no call.
-      def self.commit(low : UInt64, high : UInt64) : Nil
+      @[Effect(:collector)]; def self.commit(low : UInt64, high : UInt64) : Nil
         {% if flag?(:win32) %}
           IyiRoots.fatal("iyi: out of memory\n") if LibC.VirtualAlloc(Pointer(Void).new(low), high - low, 0x1000_i32, 4_i32).address == 0_u64
         {% end %}
@@ -4540,7 +4568,7 @@ require "./file"
           base
         end
 
-        def self.stack_limit : UInt64
+        @[Effect(:collector)]; def self.stack_limit : UInt64
           limit = uninitialized UInt64
           {% if flag?(:x86_64) %}
             asm("movq %gs:0x10, $0" : "=r"(limit) :: : "volatile")
@@ -4550,7 +4578,7 @@ require "./file"
           limit
         end
 
-        def self.current_teb : UInt64
+        @[Effect(:collector)]; def self.current_teb : UInt64
           teb = uninitialized UInt64
           {% if flag?(:x86_64) %}
             asm("movq %gs:0x30, $0" : "=r"(teb) :: : "volatile")
@@ -4574,7 +4602,7 @@ require "./file"
         # integer registers from Rax at 120 through Rip at 248. Rsp is not
         # spilled — it is the answer, and the range above it is the stack
         # the collector walks.
-        def self.capture_thread_registers(thread_handle : Void*, out_spill : UInt64) : UInt64
+        @[Effect(:collector)]; def self.capture_thread_registers(thread_handle : Void*, out_spill : UInt64) : UInt64
           ctx_buf = uninitialized UInt8[1280]
           addr = pointerof(ctx_buf).address + 15_u64
           ctx_addr = addr - (addr & 15_u64)
@@ -10372,7 +10400,7 @@ end
   # a dividend wider than a word printed 1554060939272 and exited 0, while
   # the same program at -O0 faulted. The word travels through an empty asm
   # here, so the divide that follows is a real one.
-  def __iyi_win_opaque_word(word : UInt64) : UInt64
+  @[Effect(:primitive)]; def __iyi_win_opaque_word(word : UInt64) : UInt64
     answer = uninitialized UInt64
     asm("" : "=r"(answer) : "r"(word) :: "volatile")
     answer
@@ -10557,7 +10585,7 @@ end
   # the stack — `movsd qword ptr [rsp + 8], xmm0` and back — and the high
   # lane went with it. These functions therefore return nothing, and the
   # register is the answer.
-  def __iyi_win_answer128(value : Void*) : Nil
+  @[Effect(:primitive)]; def __iyi_win_answer128(value : Void*) : Nil
     asm("movups ($0), %xmm0" :: "r"(value) : "xmm0" : "volatile")
     nil
   end
@@ -10688,7 +10716,7 @@ end
   # in 200 runs of `thread_exercise`'s end-under-collections step on a
   # runner, until its threads were resumed from outside. Bounded, so a
   # panic raised by the lock's own holder still ends the program.
-  def __iyi_hold_runtime_for_exit : Nil
+  @[Effect(:threads)]; def __iyi_hold_runtime_for_exit : Nil
     tries = 0
     while tries < 10_000_000 && !IyiRuntimeLock.try_lock
       {% if flag?(:x86_64) && !flag?(:gc_none) && !flag?(:gc_boehm) %}
@@ -11232,7 +11260,7 @@ end
   # Windows documents a zero count as a failed call, so the empty string is
   # answered here rather than asked about — a variable whose value is `""`
   # exists, and `ENV["X"] = ""` is a write the platform keeps.
-  def __iyi_win_env_wide(text : UInt8*, bytes : Int32) : UInt16*
+  @[Effect(:primitive)]; def __iyi_win_env_wide(text : UInt8*, bytes : Int32) : UInt16*
     if bytes == 0
       empty = Pointer(UInt16).malloc(1_u64)
       empty[0] = 0_u16
@@ -11250,7 +11278,7 @@ end
     wide
   end
 
-  def __iyi_win_env_text(wide : UInt16*, count : Int32) : String | Nil
+  @[Effect(:primitive)]; def __iyi_win_env_text(wide : UInt16*, count : Int32) : String | Nil
     return "" if count == 0
     needed = LibC.WideCharToMultiByte(65001, 128, wide, count, Pointer(UInt8).new(0_u64), 0,
       Pointer(UInt8).new(0_u64), Pointer(Int32).new(0_u64))
@@ -11260,7 +11288,7 @@ end
         Pointer(UInt8).new(0_u64), Pointer(Int32).new(0_u64))
     end
   end
-
+  @[Effect(:primitive)]; def __iyi_win_command_line : UInt16*; LibC.GetCommandLineW; end
   # ERROR_ENVVAR_NOT_FOUND, which is the one thing a zero answer from
   # `GetEnvironmentVariableW` can mean besides a value of `""`.
   IYI_WIN_ENVVAR_NOT_FOUND = 203
@@ -11399,7 +11427,7 @@ class Program
       # backslash with no quote after it is a backslash. Inside quotes,
       # `""` is a literal quote — the rule that lets a quoted argument
       # carry one.
-      line = LibC.GetCommandLineW
+      line = __iyi_win_command_line
       return [] of String if line.address == 0_u64
       result = [] of String
       # One buffer for the argument being built: an argument is never
@@ -11621,7 +11649,7 @@ end
   # landed, so `bench/panics.sh` saw it once in three runs. `TerminateProcess`
   # ends the process without unwinding anything on this stack, and the
   # exit code is the same 1.
-  def __iyi_win_fault_exit : NoReturn
+  @[Effect(:primitive)]; def __iyi_win_fault_exit : NoReturn
     IyiConsole.restore_vt
     LibC.TerminateProcess(LibC.GetCurrentProcess, 1_i32)
     # Unreachable: the process is gone. Spelled out because the type says
@@ -11723,7 +11751,7 @@ end
     0
   end
 
-  def __iyi_win_install_fault_handler : Nil
+  @[Effect(:signal)]; def __iyi_win_install_fault_handler : Nil
     LibC.SetErrorMode(3)
     guarantee = 16384_i32
     LibC.SetThreadStackGuarantee(pointerof(guarantee))

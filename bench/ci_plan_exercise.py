@@ -79,10 +79,12 @@ check("a doc selects the docs gates alone", jobs == {"docs"}, f"{reason}: {sorte
 reason, jobs = planned(".github/workflows/iyi.yml")
 check("a change to CI runs everything", reason.startswith("the change is to CI itself"), reason)
 
-# The self-host gates: a compiler source, a gate, and a fixture each select both jobs.
+# Each compiler component change selects macOS, Linux and Windows.
 for files, what in [
     (["src/compiler/codegen/codegen.iyi"], "a self-host compiler source"),
     (["bench/selfhost_lexer_exercise.sh"], "a self-host gate"),
+    (["bench/native_ir_exercise.sh"], "a native compiler gate"),
+    (["bench/lib/host.sh"], "the shared test-host helper"),
     (["bench/fixtures/compile_stdout.iyi"], "a fixture the self-host gates read"),
     (["bench/selfhost_gates.sh", "src/compiler/syntax/lexer.iyi"], "a mixed change to the self-host gates and the compiler"),
     (["src/compiler/ir/builder.iyi"], "an IR compiler source"),
@@ -91,7 +93,14 @@ for files, what in [
     (["bench/fixtures/" + "ir/valid/everything.ir"], "an IR fixture"),
 ]:
     reason, jobs = planned(*files)
-    check(f"{what} selects both self-host jobs", {"selfhost", "selfhost-darwin"} <= jobs, f"{reason}: {sorted(jobs)}")
+    check(f"{what} selects all three self-host jobs",
+          {"selfhost", "selfhost-darwin", "selfhost-windows"} <= jobs,
+          f"{reason}: {sorted(jobs)}")
+
+reason, jobs = planned("src/iyi/string.iyi")
+check("an ordinary prelude change does not select component-only jobs",
+      not {"selfhost", "selfhost-darwin", "selfhost-windows"} & jobs,
+      f"{reason}: {sorted(jobs)}")
 
 print()
 print("== a workflow and a bench directory of this exercise's own")

@@ -19,8 +19,17 @@
 #   bash bench/selfhost_platform_exercise.sh
 set -u
 status=0
-diverged=0
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO/bench/lib/host.sh" || exit 1
+require_test_host || exit 1
+if [ -z "$PY" ]; then
+  echo "  FAILED: a functional Python interpreter is required" >&2
+  exit 1
+fi
+if ! command -v perl >/dev/null 2>&1; then
+  echo "  FAILED: perl is required for the mutation proofs" >&2
+  exit 1
+fi
 IYI="$REPO/bin/iyi"
 CRYSTAL="${CRYSTAL:-crystal}"
 TARGET_IYI="$REPO/src/compiler/platform/target.iyi"
@@ -28,30 +37,41 @@ FLAGS_IYI="$REPO/src/compiler/platform/flags.iyi"
 LINKER_IYI="$REPO/src/compiler/platform/linker.iyi"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
+REPO_NATIVE="$(native_path "$REPO")" || exit 1
+WORK_NATIVE="$(native_path "$WORK")" || exit 1
+export IYI_PATH="$REPO_NATIVE/src"
 . "$REPO/bench/lib/mutation.sh"
 
 echo "== 1. Building and running the platform exercise (plain mode)"
-if ! "$IYI" build -o "$WORK/exercise" "$REPO/bench/selfhost_platform_exercise.iyi"; then
+if ! "$IYI" build -o "$WORK_NATIVE/exercise$EXE" "$REPO_NATIVE/bench/selfhost_platform_exercise.iyi"; then
   echo "  FAILED to build bench/selfhost_platform_exercise.iyi in plain mode"
   exit 1
 fi
-"$WORK/exercise" > "$WORK/plain.out" 2>&1
-cat "$WORK/plain.out" | head -n 25
-if ! grep -qF "ALL SELFHOST PLATFORM CHECKS PASSED SUCCESSFULLY!" "$WORK/plain.out"; then
+if ! "$WORK/exercise$EXE" > "$WORK/plain.out" 2>&1; then
   echo "  PLAIN EXERCISE FAILED"
-  status=1
+  cat "$WORK/plain.out"
+  exit 1
+fi
+head -n 25 "$WORK/plain.out"
+if ! grep -qF "ALL SELFHOST PLATFORM CHECKS PASSED SUCCESSFULLY!" "$WORK/plain.out"; then
+  echo "  PLAIN EXERCISE DID NOT REPORT SUCCESS"
+  exit 1
 fi
 
 echo
 echo "== 2. Building and running the platform exercise (--release mode)"
-if ! "$IYI" build --release -o "$WORK/exercise-release" "$REPO/bench/selfhost_platform_exercise.iyi"; then
+if ! "$IYI" build --release -o "$WORK_NATIVE/exercise-release$EXE" "$REPO_NATIVE/bench/selfhost_platform_exercise.iyi"; then
   echo "  FAILED to build bench/selfhost_platform_exercise.iyi in release mode"
   exit 1
 fi
-"$WORK/exercise-release" > "$WORK/release.out" 2>&1
-if ! grep -qF "ALL SELFHOST PLATFORM CHECKS PASSED SUCCESSFULLY!" "$WORK/release.out"; then
+if ! "$WORK/exercise-release$EXE" > "$WORK/release.out" 2>&1; then
   echo "  RELEASE EXERCISE FAILED"
-  status=1
+  cat "$WORK/release.out"
+  exit 1
+fi
+if ! grep -qF "ALL SELFHOST PLATFORM CHECKS PASSED SUCCESSFULLY!" "$WORK/release.out"; then
+  echo "  RELEASE EXERCISE DID NOT REPORT SUCCESS"
+  exit 1
 else
   echo "  release mode verification passed"
 fi
@@ -60,6 +80,7 @@ echo
 echo "== 3. Target and linker comparison against the front end being replaced"
 cat <<'CRYSTAL_ORACLE_SCRIPT' > "$WORK/dump_crystal_platform.cr"
 require "compiler/requires"
+require "json"
 
 class Iyi::Compiler
   def test_linker_command(program, object_names, output_filename, output_dir)
@@ -131,6 +152,9 @@ triples = [
   "aarch64-unknown-openbsd"
 ]
 
+raise "expected the MSVC configuration output path" unless ARGV.size == 1
+msvc_configs = {} of String => NamedTuple(linker: String, args: Array(String))
+
 triples.each do |t|
   target = Iyi::Codegen::Target.new(t)
   prog = Iyi::Program.new
@@ -140,6 +164,12 @@ triples.each do |t|
   compiler = Iyi::Compiler.new
   compiler.cross_compile = true
   compiler.codegen_target = target
+  if prog.has_flag?("msvc")
+    # Ask the unmodified host discovery for the same target and process state
+    # that linker_command will use. JSON preserves each argument and its bytes.
+    discovered_linker, discovered_args = prog.msvc_compiler_and_flags
+    msvc_configs[t] = {linker: discovered_linker, args: discovered_args}
+  end
 
   linker, cmd, objs = compiler.test_linker_command(prog, ["foo.o", "bar.o"], "out_bin", "/tmp")
 
@@ -159,30 +189,74 @@ triples.each do |t|
   puts "  cmd: #{normalize_paths(cmd)}"
   puts "  objects: #{objs ? objs.join(" ") : "nil"}"
 end
+File.write(ARGV[0], msvc_configs.to_json)
 CRYSTAL_ORACLE_SCRIPT
 
 if ! LLVM_CONFIG="${LLVM_CONFIG:-$(command -v llvm-config || true)}" \
-     CRYSTAL_PATH="$REPO/src" "$CRYSTAL" build -Di_know_what_im_doing \
-     -o "$WORK/oracle" "$WORK/dump_crystal_platform.cr" > "$WORK/oracle_build.log" 2>&1; then
+     CRYSTAL_PATH="$REPO_NATIVE/src" "$CRYSTAL" build -Di_know_what_im_doing \
+     -o "$WORK_NATIVE/oracle$EXE" "$WORK_NATIVE/dump_crystal_platform.cr" > "$WORK/oracle_build.log" 2>&1; then
   echo "  FAILED to build Crystal oracle:"
   cat "$WORK/oracle_build.log"
   exit 1
 fi
-"$WORK/oracle" > "$WORK/crystal.out"
-"$WORK/exercise" dump > "$WORK/iyi.out"
+if ! "$WORK/oracle$EXE" "$WORK_NATIVE/msvc-config.json" > "$WORK/crystal.out"; then
+  echo "  FAILED to run Crystal oracle" >&2
+  exit 1
+fi
+if ! "$PY" - "$WORK_NATIVE/msvc-config.json" "$HOST_OS" <<'PY'
+import json
+import ntpath
+import os
+import sys
+
+with open(sys.argv[1], encoding="utf-8", newline="") as stream:
+    configs = json.load(stream)
+triples = ("x86_64-windows-msvc", "x86_64-pc-windows-msvc")
+if set(configs) != set(triples):
+    raise SystemExit("oracle did not export both MSVC target configurations")
+for triple in triples:
+    config = configs[triple]
+    linker, args = config["linker"], config["args"]
+    if not isinstance(linker, str) or not linker or not isinstance(args, list) or not all(isinstance(arg, str) for arg in args):
+        raise SystemExit(f"invalid oracle MSVC configuration for {triple}")
+    if sys.argv[2] == "windows":
+        if sum(arg.startswith("/LIBPATH:") for arg in args) < 4:
+            raise SystemExit(f"MSVC/Windows SDK search paths unavailable for {triple}")
+        if "CC" not in os.environ and (not ntpath.isabs(linker) or ntpath.basename(linker).lower() != "link.exe"):
+            raise SystemExit(f"MSVC link.exe discovery failed for {triple}: {linker!r}")
+    print(f"  {triple} discovered linker: {linker!r}")
+    for arg in args:
+        print(f"    discovered argument: {arg!r}")
+PY
+then
+  echo "  FAILED to read the oracle MSVC configuration" >&2
+  exit 1
+fi
+if ! "$WORK/exercise$EXE" dump "$WORK_NATIVE/msvc-config.json" > "$WORK/iyi.out"; then
+  echo "  FAILED to run the iyi platform comparison" >&2
+  exit 1
+fi
+if [ "$(grep -c '^TRIPLE: ' "$WORK/crystal.out")" -ne 24 ]; then
+  echo "  FAILED: Crystal oracle did not produce 24 target rows" >&2
+  exit 1
+fi
 
 if diff -u "$WORK/crystal.out" "$WORK/iyi.out" > "$WORK/diff.log"; then
+  awk '
+    /^TRIPLE: / { msvc = /windows-msvc$/ }
+    msvc && (/^TRIPLE: / || /^  (linker|cmd): /) { print }
+  ' "$WORK/crystal.out"
   echo "  Parity summary: 24/24 target triples match 100% across normalized targets, flags, extensions, and link commands"
 else
   echo "  PARITY FAILURE: iyi platform support diverged from Crystal frontend"
   cat "$WORK/diff.log"
-  status=1
+  exit 1
 fi
 
 echo
 echo "== 4. Malformed-input and boundary rejection checks"
 for bad in "invalid" "foo" "x86_64"; do
-  if "$WORK/exercise-release" "$bad" >"$WORK/bad.out" 2>&1; then
+  if "$WORK/exercise-release$EXE" "$bad" >"$WORK/bad.out" 2>&1; then
     echo "  ERROR: expected failure for malformed input: $bad"
     status=1
   else
@@ -199,11 +273,16 @@ done
 echo
 echo "== 5. Guarded mutation proofs (verify patch applies, exercise fails, revert passes)"
 
-# The check for one mutation: non-zero (caught) when the mutated platform code no
-# longer builds, or when its dump stops matching the Crystal oracle.
+# A compiled mutant must disagree with the oracle. A build failure supplies
+# no behavioral evidence and fails the gate separately.
 check_platform_matches_oracle() {
-  "$IYI" build -o "$WORK/mut-exercise" "$REPO/bench/selfhost_platform_exercise.iyi" >/dev/null 2>&1 || return 1
-  "$WORK/mut-exercise" dump > "$WORK/mut-iyi.out" 2>&1
+  if ! "$IYI" build -o "$WORK_NATIVE/mut-exercise$EXE" "$REPO_NATIVE/bench/selfhost_platform_exercise.iyi" > "$WORK/mut-build.log" 2>&1; then
+    echo "  INVALID MUTANT: platform exercise did not build" >&2
+    cat "$WORK/mut-build.log" >&2
+    touch "$WORK/invalid-mutant"
+    return 0
+  fi
+  "$WORK/mut-exercise$EXE" dump "$WORK_NATIVE/msvc-config.json" > "$WORK/mut-iyi.out" 2>&1 || return 1
   diff -q "$WORK/crystal.out" "$WORK/mut-iyi.out" >/dev/null 2>&1
 }
 
@@ -244,6 +323,9 @@ run_proof "altering WASM32 link flag target from wasm32-wasi to wasm32-unknown" 
   '--target=wasm32-unknown'
 
 echo "  $MUTATIONS_RUN mutation proofs run"
+if [ -e "$WORK/invalid-mutant" ]; then
+  status=1
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

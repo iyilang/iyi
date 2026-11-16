@@ -3915,6 +3915,9 @@ jobs:
           bindir="$("$LLVM_CONFIG" --bindir)"
           LLVM_MC="$bindir/llvm-mc" LLVM_OBJDUMP="$bindir/llvm-objdump" bash bench/native_x86_64_exercise.sh
 
+      - name: The native executable linker
+        run: bash bench/native_link_exercise.sh
+
   selfhost-darwin:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'selfhost-darwin') }}
@@ -3960,6 +3963,9 @@ jobs:
 
       - name: The x86-64 encoder and ABI
         run: LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config" LLVM_MC="$HOME/llvm-static/bin/llvm-mc" LLVM_OBJDUMP="$HOME/llvm-static/bin/llvm-objdump" bash bench/native_x86_64_exercise.sh
+
+      - name: The native executable linker
+        run: LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config" bash bench/native_link_exercise.sh
 
   # The editor client is the only artifact here that is published somewhere
   # else, so it is proven the same way as the rest: every run packages it,

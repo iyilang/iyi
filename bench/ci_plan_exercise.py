@@ -52,6 +52,19 @@ def planned(*files):
     return lines[0], {line.strip() for line in lines[1:] if line.startswith("  ")}
 
 
+def scoped(*args):
+    """What the planner's command line says a run builds and deals, by key:
+    `mutations`, `siblings`, the platforms' `*_shards`."""
+    ran = subprocess.run([sys.executable, str(PLANNER), *args], cwd=ROOT, capture_output=True, text=True,
+                         encoding="utf-8")
+    found = {}
+    for line in ran.stdout.splitlines():
+        key, _, value = line.partition(": ")
+        if key in ("mutations", "mutations_elsewhere", "siblings") or key.endswith("_shards"):
+            found[key] = value
+    return found
+
+
 print("== this tree, as CI plans it")
 
 reason, jobs = planned("bench/std_tls_exercise.sh")
@@ -78,6 +91,36 @@ check("a doc selects the docs gates alone", jobs == {"docs"}, f"{reason}: {sorte
 
 reason, jobs = planned(".github/workflows/iyi.yml")
 check("a change to CI runs everything", reason.startswith("the change is to CI itself"), reason)
+
+print()
+print("== what a run builds and deals: the broken copies and the sibling shards")
+
+said = scoped("--event", "pull_request", "--files", "bench/std_zip_exercise.sh")
+check("one exercise changed deals that sibling alone, in one shard on each platform",
+      said.get("siblings") == "std_zip_exercise"
+      and all(said.get(f"{p}_shards") == "[1]" for p in ("linux", "windows", "darwin")), said)
+check("and builds its broken copies on Linux, and none elsewhere",
+      "std_zip_exercise" in said.get("mutations", "").split() and said.get("mutations_elsewhere") == "none", said)
+
+said = scoped("--event", "pull_request", "--files", "src/std/tls.iyi")
+mutated = said.get("mutations", "").split()
+check("a module changed builds the copies of every exercise whose proofs break it",
+      {"std_tls_exercise", "std_http_exercise"} <= set(mutated) and "std_zip_exercise" not in mutated, said)
+
+said = scoped("--event", "pull_request", "--files", "bench/std_siblings.sh")
+check("the shard runner changed deals every sibling, and breaks nothing",
+      said.get("siblings") == "all" and said.get("mutations") == "none"
+      and said.get("linux_shards") == "[1, 2, 3, 4]", said)
+
+said = scoped("--event", "push", "--ref", "refs/heads/master", "--files", "src/compiler/crystal.cr")
+check("a push of the compiler alone runs every sibling and builds no broken copy",
+      said.get("siblings") == "all" and said.get("mutations") == "none"
+      and said.get("mutations_elsewhere") == "none" and said.get("darwin_shards") == "[1, 2]", said)
+
+said = scoped("--event", "push", "--ref", "refs/tags/v9.9.9")
+check("a tag builds every broken copy everywhere, darwin in four shards",
+      said.get("mutations") == "all" and said.get("mutations_elsewhere") == "all"
+      and said.get("darwin_shards") == "[1, 2, 3, 4]", said)
 
 print()
 print("== a workflow and a bench directory of this exercise's own")
@@ -137,6 +180,26 @@ else:
     selected, reason = planner.plan(planner.parse_jobs(workflow), "pull_request", "", ["bench/std_one.eiy"], bench)
     check("a plan of one bench file is its jobs, what they need, and the docs gates",
           selected == {"alpha", "docs"} and reason.startswith("only bench files changed"), f"{reason}: {sorted(selected)}")
+
+    gated = {
+        "mutations.sh": "mutations_wanted() { :; }\n",
+        "std_one_exercise.sh": '. "$REPO/bench/mutations.sh"\nmutate "x" old new two.iyi\n# three.iyi\n',
+        "std_four_exercise.sh": 'echo "no broken copies here"\n',
+        "std_five_exercise.sh": '. "$REPO/bench/mutations.sh"\n',
+    }
+    modules = {"one", "two", "three", "four", "five"}
+    targets = planner.mutation_targets(gated, modules)
+    check("an exercise's proofs break its own module and every module its code names by file",
+          targets == {"std_one_exercise": {"one", "two"}, "std_five_exercise": {"five"}}, f"got {targets}")
+    gated_reach = planner.Reach(planner.parse_jobs(workflow), gated)
+    for files, expected, what in [
+        (["src/std/two.iyi"], "std_one_exercise", "a module another exercise's proofs patch"),
+        (["src/std/three.iyi"], "none", "a module named only in a comment"),
+        (["src/std/one/part.iyi"], "std_one_exercise", "a file under a module's directory"),
+        (["bench/mutations.sh"], "all", "the gate itself"),
+    ]:
+        found = planner.mutation_scope(files, gated, gated_reach, modules)
+        check(f"{what}: {files[0]} -> {expected}", found == expected, f"got {found}")
 
 print()
 print("== and the reach gate, which asks the stricter question: what runs it")

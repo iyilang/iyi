@@ -12,16 +12,17 @@ branch), a tag, the nightly schedule and a manual dispatch. A pull
 request does not stand in for those: a change that only the full set would
 catch shows on master after the merge, and is reverted or fixed there.
 
-The nightly run of a commit the full set already passed on master within
-`RECHECK_AFTER` selects nothing: it would answer what the last run of that
-commit answered, and it held the queue behind it - the third full run of one
-unchanged master took 44 jobs while three pull requests waited. An unchanged
+The nightly run of a commit a nightly or dispatched run already passed on
+master within `RECHECK_AFTER` selects nothing: it would answer what the last
+run of that commit answered, and it held the queue behind it - the third full
+run of one unchanged master took 44 jobs while three pull requests waited. A
+push does not count: it builds only the broken copies of what it touched (see
+below), and the nightly run is where every one of them is built. An unchanged
 master is still run again once a week, for what moves under it: the runner
-images, a tool installed at its latest. A run counts as a pass of the full
-set when a job past the plan and the verdict succeeded in it: a nightly run
-that selected nothing succeeds too, and counting it would move the week on
-every night. If the runs cannot be asked about, the nightly run runs
-everything.
+images, a tool installed at its latest. A run counts as a pass when a job past
+the plan and the verdict succeeded in it: a nightly run that selected nothing
+succeeds too, and counting it would move the week on every night. If the runs
+cannot be asked about, the nightly run runs everything.
 
 Within a pull request the changed files narrow it further:
 
@@ -41,6 +42,23 @@ once credited to whichever job the comment happened to sit in.
 A job is selected with the jobs it `needs`, so a selection never waits on a
 skipped job. The selection is printed, and written to `$GITHUB_OUTPUT` as a
 JSON list, `jobs=`, when that is set.
+
+The exercises' broken copies (bench/mutations.sh) answer for the module they
+break and the exercise that catches the break, not for the commit, and they
+were most of a sibling shard's time: 53 to 74% of four shards in run
+43713243986. So `mutations=` names the exercises whose copies this run builds
+on Linux: a nightly run, a dispatch and a tag build every one; a push and a
+pull request build those whose exercise, a bench file it reaches, or a module
+it breaks changed. `mutations_elsewhere=` is the same for the Windows and
+darwin jobs, and is `none` but where it is `all`: a proof breaks the module's
+logic, which Linux answers for, and Windows' shards lost their runners inside
+std/tls's copies.
+
+`siblings=` narrows the sibling shards to what a pull request's bench files
+reach: a change to `bench/std_zip_exercise.sh` runs that exercise and not
+all 116. `*_shards=` are the shard numbers of each platform's sibling job,
+four, or two on darwin when its copies are not built, and never more than
+there are siblings to deal.
 """
 import argparse
 import fnmatch
@@ -78,6 +96,23 @@ FAST = ["build", "iyi", "compiler-specs", "stdlib-specs", "targets",
 NOT_PLANNED = {"plan", "result", "release"}
 
 FULL_EVENTS = {"push", "schedule", "workflow_dispatch"}
+# The events that build every exercise's broken copies, on every platform;
+# a `v*` tag does too, and is a push.
+ALL_MUTATIONS_EVENTS = {"schedule", "workflow_dispatch"}
+
+# The module exercises std_siblings.sh deals into shards, and how many shards
+# each platform's job has: darwin's two when its broken copies are not built,
+# four when they are.
+SIBLINGS_SCRIPT = "std_siblings.sh"
+SHARDS = {"linux": 4, "windows": 4, "darwin": 2}
+DARWIN_SHARDS_WITH_MUTATIONS = 4
+
+# A module a changed path is part of: `src/std/http.iyi`, `src/std/http/...`
+# and `src/iyi/prelude.iyi` are `http`, `http` and `prelude`. And a module an
+# exercise's code names by its file, `tls.iyi`, which is how a proof says
+# which module it patches when that is not its own.
+CHANGED_MODULE = re.compile(r"^src/(?:std|iyi)/([A-Za-z0-9_]+)(?:\.iyi$|/)")
+MODULE_FILE = re.compile(r"\b([a-z0-9_]+)\.iyi\b")
 
 # How long a commit's passing full run stands for it at night.
 RECHECK_AFTER = timedelta(days=7)
@@ -154,6 +189,22 @@ def github_get(url, token):
         return json.load(response)
 
 
+def pushed_files(event_path, token, repository):
+    """What a push to a branch changed, from the commit before it to the one
+    it pushed, or None where that is not known: a new branch has no commit
+    before it, and past 300 files the compare API stops listing them."""
+    with open(event_path, encoding="utf-8") as f:
+        event = json.load(f)
+    before, after = event.get("before") or "", event.get("after") or ""
+    if not after or not before.strip("0"):
+        return None
+    batch = github_get(f"https://api.github.com/repos/{repository}/compare/{before}...{after}", token)["files"]
+    if len(batch) >= 300:
+        return None
+    return ([entry["filename"] for entry in batch]
+            + [entry["previous_filename"] for entry in batch if entry.get("previous_filename")])
+
+
 def job_title(job_id, jobs):
     """The name a job's runs carry: its `name:`, or its id without one."""
     found = re.search(r'^    name:\s*"?([^"\n]*?)"?\s*$', jobs[job_id]["text"], re.M)
@@ -161,13 +212,13 @@ def job_title(job_id, jobs):
 
 
 def last_full_pass(runs, ran):
-    """When the newest of *runs* that ran the full set was made, or None: an
-    event that runs it, and *ran(run)* - a job past the plan and the verdict
-    that succeeded. A nightly run that selected nothing succeeds as well, and
-    counted as a pass it moved the week on every night, so an unchanged
-    master would never have been run again."""
+    """When the newest of *runs* that built every broken copy was made, or
+    None: a nightly or dispatched run, and *ran(run)* - a job past the plan
+    and the verdict that succeeded. A nightly run that selected nothing
+    succeeds as well, and counted as a pass it moved the week on every night,
+    so an unchanged master would never have been run again."""
     for run in sorted(runs, key=lambda run: run["created_at"], reverse=True):
-        if run["event"] in FULL_EVENTS and ran(run):
+        if run["event"] in ALL_MUTATIONS_EVENTS and ran(run):
             return datetime.fromisoformat(run["created_at"].replace("Z", "+00:00"))
     return None
 
@@ -232,11 +283,12 @@ class Reach:
         self.jobs = {name: code(job["text"]) for name, job in jobs.items() if name not in NOT_PLANNED}
         self.job_files = {name: named_files(text, names) for name, text in self.jobs.items()}
 
-    def running_jobs(self, path):
-        """The jobs that run `bench/...` *path*: whose steps name it or a
-        script that reaches it, as far as the scripts go. A file in a
-        directory under bench/ - a fixture, an oracle's source - is reached by
-        the scripts whose code names that directory, and by a step that does."""
+    def reaching(self, path, stop=()):
+        """The bench scripts that reach `bench/...` *path* - the file itself,
+        and what runs, sources or finds it, as far as the scripts go, but not
+        past a script of *stop* - and, for a file in a directory under bench/
+        (a fixture, an oracle's source), the scripts whose code names that
+        directory, with a pattern for a step that names it."""
         parts = path.split("/")
         nested = None
         if len(parts) == 2 and parts[1] in self.bench:
@@ -248,12 +300,107 @@ class Reach:
         reached = set(start)
         pending = list(start)
         while pending:
-            for caller in self.called_by.get(pending.pop(), ()):
+            callee = pending.pop()
+            if callee in stop:
+                continue
+            for caller in self.called_by.get(callee, ()):
                 if caller not in reached:
                     reached.add(caller)
                     pending.append(caller)
+        return reached, nested
+
+    def running_jobs(self, path):
+        """The jobs that run `bench/...` *path*: whose steps name it or a
+        script that reaches it, or the directory it is in."""
+        reached, nested = self.reaching(path)
         return {name for name, files in self.job_files.items()
                 if files & reached or (nested is not None and nested.search(self.jobs[name]))}
+
+
+def source_modules(root=ROOT):
+    """The modules a changed path or an exercise can name: every file and
+    directory of `src/std` and every file of `src/iyi`, by name."""
+    names = set()
+    for directory in (root / "src" / "std", root / "src" / "iyi"):
+        if directory.is_dir():
+            names |= {entry.stem for entry in directory.iterdir() if entry.suffix == ".iyi"}
+            names |= {entry.name for entry in directory.iterdir() if entry.is_dir()}
+    return names
+
+
+def mutation_targets(bench, modules):
+    """Each exercise whose broken copies bench/mutations.sh gates, by name
+    without `.sh`, with the modules its proofs may break: its own, and every
+    one of *modules* its code names by file."""
+    targets = {}
+    for name, text in bench.items():
+        body = code(text)
+        if not name.endswith(".sh") or "bench/mutations.sh" not in body:
+            continue
+        stem = name[:-len(".sh")]
+        broken = {module for module in MODULE_FILE.findall(body) if module in modules}
+        if stem.startswith("std_") and stem.endswith("_exercise") and stem != "std_exercise":
+            broken.add(stem[len("std_"):-len("_exercise")])
+        targets[stem] = broken
+    return targets
+
+
+def named_set(chosen, every):
+    """`all`, `none`, or the names of *chosen*, sorted and spaced."""
+    if not chosen:
+        return "none"
+    if chosen == every:
+        return "all"
+    return " ".join(sorted(chosen))
+
+
+def mutation_scope(files, bench, reach, modules):
+    """The exercises whose broken copies *files* call for, as `named_set`
+    says them: those whose exercise or a bench file it reaches changed, and
+    those whose proofs break a changed module. std_siblings.sh runs the
+    siblings for std_exercise.sh, and a sibling's change is not one to the
+    foundation's proofs, so a reach stops there."""
+    targets = mutation_targets(bench, modules)
+    wanted = set()
+    for path in files:
+        if path.startswith("bench/"):
+            reached, _ = reach.reaching(path, stop={SIBLINGS_SCRIPT})
+            wanted |= {name[:-len(".sh")] for name in reached} & set(targets)
+        else:
+            changed = CHANGED_MODULE.match(path)
+            if changed:
+                wanted |= {name for name, broken in targets.items() if changed.group(1) in broken}
+    return named_set(wanted, set(targets))
+
+
+def sibling_subset(files, bench, reach):
+    """The module exercises a pull request's bench files reach, as
+    `named_set` says them; every one when std_siblings.sh itself changed."""
+    siblings = {name[:-len(".sh")] for name in bench
+                if fnmatch.fnmatch(name, "std_*_exercise.sh") and name != "std_exercise.sh"}
+    chosen = set()
+    for path in files:
+        if path == f"bench/{SIBLINGS_SCRIPT}":
+            return "all"
+        if path.startswith("bench/"):
+            reached, _ = reach.reaching(path)
+            chosen |= {name[:-len(".sh")] for name in reached} & siblings
+    return named_set(chosen, siblings)
+
+
+def sibling_shards(siblings, elsewhere):
+    """Each platform's shard numbers for *siblings*: its own count, darwin's
+    raised while it builds broken copies, and no more than there are
+    siblings to deal."""
+    count = {"all": None, "none": 1}.get(siblings, len(siblings.split()))
+    shards = {}
+    for platform, n in SHARDS.items():
+        if platform == "darwin" and elsewhere == "all":
+            n = DARWIN_SHARDS_WITH_MUTATIONS
+        if count is not None:
+            n = min(n, count)
+        shards[platform] = list(range(1, n + 1))
+    return shards
 
 
 def close_over_needs(jobs, selected):
@@ -298,6 +445,25 @@ def plan(jobs, event, ref, files, bench):
     return close_over_needs(jobs, selected), "the fast tier, and the jobs that run a changed bench file"
 
 
+def scopes(event, ref, files, full, jobs, bench):
+    """What the jobs this run selected build and deal: `mutations`,
+    `mutations_elsewhere`, `siblings` and each platform's `*_shards`.
+    *files* is what the push or the pull request changed, None where that is
+    not known; *full* is whether every job was selected."""
+    mutations = elsewhere = siblings = "all"
+    if event not in ALL_MUTATIONS_EVENTS and not ref.startswith("refs/tags/"):
+        elsewhere = "none"
+        if files is not None:
+            reach = Reach(jobs, bench)
+            mutations = mutation_scope(files, bench, reach, source_modules())
+            if event == "pull_request" and not full:
+                siblings = sibling_subset(files, bench, reach)
+    found = {"mutations": mutations, "mutations_elsewhere": elsewhere, "siblings": siblings}
+    for platform, shards in sibling_shards(siblings, elsewhere).items():
+        found[f"{platform}_shards"] = json.dumps(shards)
+    return found
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--event", default=os.environ.get("GITHUB_EVENT_NAME"))
@@ -322,8 +488,16 @@ def main():
     if files is None and args.event == "pull_request":
         files = pull_request_files(os.environ["GITHUB_EVENT_PATH"], os.environ["GITHUB_TOKEN"],
                                    os.environ["GITHUB_REPOSITORY"])
+    elif files is None and args.event == "push" and not args.ref.startswith("refs/tags/"):
+        try:
+            files = pushed_files(os.environ["GITHUB_EVENT_PATH"], os.environ["GITHUB_TOKEN"],
+                                 os.environ["GITHUB_REPOSITORY"])
+        except (KeyError, OSError, ValueError) as error:
+            print(f"ci_plan: could not ask what the push changed ({error}), so every broken copy is built")
 
-    selected, reason = plan(jobs, args.event, args.ref, files, bench_texts())
+    bench = bench_texts()
+    selected, reason = plan(jobs, args.event, args.ref, files, bench)
+    planned = {name for name in jobs if name not in NOT_PLANNED}
     if args.event == "schedule":
         try:
             bookkeeping = {job_title("plan", jobs), job_title("result", jobs)}
@@ -344,11 +518,15 @@ def main():
     skipped = sorted(set(jobs) - selected - NOT_PLANNED)
     if skipped:
         print(f"skipped: {', '.join(skipped)}")
+    found = scopes(args.event, args.ref, files, selected == planned, jobs, bench)
+    for key, value in found.items():
+        print(f"{key}: {value}")
 
     output = os.environ.get("GITHUB_OUTPUT")
     if output:
         with open(output, "a", encoding="utf-8") as f:
             f.write(f"jobs={json.dumps(ordered)}\n")
+            f.write("".join(f"{key}={value}\n" for key, value in found.items()))
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
         with open(summary, "a", encoding="utf-8") as f:
@@ -356,6 +534,7 @@ def main():
             f.write("".join(f"- `{name}`\n" for name in ordered))
             if skipped:
                 f.write(f"\nSkipped: {', '.join(f'`{n}`' for n in skipped)}\n")
+            f.write("\n" + "".join(f"- {key}: `{value}`\n" for key, value in found.items()))
 
 
 if __name__ == "__main__":

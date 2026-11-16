@@ -260,6 +260,51 @@ prove_fails() {
   caught "$label" "$WORK/$dir/b"
 }
 
+# heap_local.sh's interface for the layout copies: label dir build|run
+# message awk-script (src/iyi/prelude.iyi). A copy the runtime or the
+# compiler itself refuses, under the verifier's flags as under
+# heap_local's: the build fails naming *message* (`build`), or the
+# program, run stressed, stops with it (`run`). No heap word is involved.
+prove_layout_refused() {
+  local label="$1" dir="$2" when="$3" message="$4" script="$5"
+  chosen "$dir" || return 0
+  mkdir -p "$WORK/$dir/iyi"
+  cp -R "$REPO/src/iyi/." "$WORK/$dir/iyi/"
+  if ! awk "$script" "$REPO/src/iyi/prelude.iyi" >"$WORK/$dir/iyi/prelude.iyi"; then
+    echo "  $label: what the copy changes is not in prelude.iyi any more"
+    status=1
+    return
+  fi
+  build "$WORK/$dir/b" "$REPO/bench/heap_local.iyi" "$WORK/$dir${PSEP}$REPO/src"
+  local code=$?
+  if [ "$when" = build ]; then
+    # The compiler's own `Error:` line, the raise evaluated: the source
+    # line it quotes carries the message too, whatever else failed.
+    if [ "$code" -eq 0 ] || ! grep -q "^Error: .*$message" "$WORK/$dir/b/build.log"; then
+      echo "  $label: the build was not refused for the layout (exit $code)"
+      sed -n '1,12p' "$WORK/$dir/b/build.log"
+      status=1
+      return
+    fi
+    echo "  $label: the build is refused: \"$(grep -m1 "^Error: .*$message" "$WORK/$dir/b/build.log" | cut -c1-160)\""
+    return
+  fi
+  if [ "$code" -ne 0 ]; then
+    echo "  $label: the patched runtime did not build"
+    sed -n '1,12p' "$WORK/$dir/b/build.log"
+    status=1
+    return
+  fi
+  verified "$WORK/$dir/b" run1
+  if [ "$(cat "$WORK/$dir/b/run1.code")" -eq 0 ] || ! grep -q "$message" "$WORK/$dir/b/run1.out" "$WORK/$dir/b/run1.err"; then
+    echo "  $label: not stopped at the layout check (exit $(cat "$WORK/$dir/b/run1.code"))"
+    sed -n '$p' "$WORK/$dir/b/run1.out" "$WORK/$dir/b/run1.err" | sed 's/^/      /'
+    status=1
+    return
+  fi
+  echo "  $label: stops with exit $(cat "$WORK/$dir/b/run1.code"): \"$(grep -h -m1 "$message" "$WORK/$dir/b/run1.out" "$WORK/$dir/b/run1.err" | head -1)\""
+}
+
 # heap_local.sh's interface for bench/http_idle.iyi: label dir awk-script
 # (src/std/http.iyi). Both trees copied, as prove_caught does. A parked
 # connection's partition that keeps its last request holds live objects

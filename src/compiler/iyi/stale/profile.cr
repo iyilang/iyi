@@ -122,10 +122,9 @@ module Iyi::Stale::Profile
   def self.clean_child_env(scratch_dir : String, trace_file : String, base_env = ENV) : Hash(String, String)
     env = Hash(String, String).new
     base_env.each do |k, v|
+      name = k
       {% if flag?(:win32) %}
         name = k.upcase
-      {% else %}
-        name = k
       {% end %}
       next if LOADER_VARS.includes?(name) || DAEMON_VARS.includes?(name)
       env[k] = v

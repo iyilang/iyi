@@ -4,26 +4,33 @@ require "../../spec_helper"
   describe "Windows pre-resume process hook" do
     it "runs before the child can write" do
       with_tempfile("pre-resume-order.txt") do |path|
-        hook = ->(_handle : Void*) do
-          File.write(path, "before\n")
-          nil
+        File.open(path, "w") do |output|
+          hook = ->(_handle : Void*) do
+            sleep 250.milliseconds
+            output.puts("before")
+            output.flush
+            nil
+          end
+          process = Process.new("cmd.exe", ["/d", "/c", "echo", "child"], output: output, before_resume: hook)
+          process.wait.success?.should be_true
         end
-        process = Process.new("cmd.exe", ["/d", "/c", "echo child>>\"#{path}\""], before_resume: hook)
-        process.wait.success?.should be_true
         File.read(path).lines.map(&.strip).should eq(["before", "child"])
       end
     end
 
     it "does not resume the child when the hook fails" do
       with_tempfile("pre-resume-refused.txt") do |path|
-        hook = ->(_handle : Void*) do
-          raise "refused before resume"
-          nil
+        File.open(path, "w") do |output|
+          hook = ->(_handle : Void*) do
+            sleep 250.milliseconds
+            raise "refused before resume"
+            nil
+          end
+          expect_raises(Exception, "refused before resume") do
+            Process.new("cmd.exe", ["/d", "/c", "echo", "child"], output: output, before_resume: hook)
+          end
         end
-        expect_raises(Exception, "refused before resume") do
-          Process.new("cmd.exe", ["/d", "/c", "echo child>\"#{path}\""], before_resume: hook)
-        end
-        File.exists?(path).should be_false
+        File.read(path).should eq("")
       end
     end
   end

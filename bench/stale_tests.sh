@@ -50,8 +50,9 @@ step() {
   echo "== §12 row $1: $2 =="
   case "$1" in
     *[!0-9]*|'') ;;
+    22) echo "  row 22: delegated; Check.run refusal is specified, cached compatibility mode is not proven end-to-end" ;;
     *) case " $rows_external " in
-         *" $1 "*) echo "  row $1: exercised by the separately named spec or gate, not this script" ;;
+         *" $1 "*) echo "  row $1: delegated to the separately named spec or gate, not exercised here" ;;
          *) rows_run=$((rows_run + 1)) ;;
        esac ;;
   esac
@@ -535,8 +536,8 @@ step 20 "invalid snapshot metadata is refused"
 step 21 "corruption and concurrent receipt writes are atomic"
 # Covered by spec/compiler/stale/store_spec.cr:590 and bench/stale_store_concurrency.sh
 step 22 "compatibility-library mode stays fresh"
-# Its test aggregate remains unchanged; cached compatibility-library mode is
-# covered by the command/runner spec because this host cannot link its specs.
+# The Check.run spec verifies the refusal, but this script does not exercise
+# cached compatibility mode end-to-end.
 
 step "test identity" "ambiguous test id runs fresh and never records receipts"
 mkdir -p "$WORK/ambig/a" "$WORK/ambig/b"

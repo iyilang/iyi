@@ -592,27 +592,29 @@ module Iyi::Stale
 
               build_out = IO::Memory.new
 
-              # A build leads its own process group, as a run does, so an interrupt ends it too.
-              build_process = Process.new(
-                Process.executable_path.not_nil!,
-                [
-                  "build", file,
-                  "-o", binary,
-                  "-Diyi_observe",
-                  "--stale-key", out_key_path,
-                  "--stale-accept", accept_path,
-                  "--stale-block", block_path,
-                  "--stale-inputs", inputs_path,
-                ],
-                env: Profile.build_env,
-                clear_env: true,
-                input: Process::Redirect::Close,
-                output: build_out,
-                error: build_out,
-                process_group: true
-              )
+              # Build and test children are assigned before they can run.
+              build_process, build_tree = Command::TestTree.start do |before_resume|
+                Process.new(
+                  Process.executable_path.not_nil!,
+                  [
+                    "build", file,
+                    "-o", binary,
+                    "-Diyi_observe",
+                    "--stale-key", out_key_path,
+                    "--stale-accept", accept_path,
+                    "--stale-block", block_path,
+                    "--stale-inputs", inputs_path,
+                  ],
+                  env: Profile.build_env,
+                  clear_env: true,
+                  input: Process::Redirect::Close,
+                  output: build_out,
+                  error: build_out,
+                  process_group: true,
+                  before_resume: before_resume
+                )
+              end
               builds += 1
-              build_tree = Command::TestTree.new(build_process)
               build_status = begin
                 build_process.wait
               ensure
@@ -697,17 +699,19 @@ module Iyi::Stale
               run_out = IO::Memory.new
               null_io = File.open(File::NULL, "r")
 
-              process = Process.new(
-                binary,
-                args: test_argv,
-                env: child_env,
-                clear_env: true,
-                input: null_io,
-                output: run_out,
-                error: run_out,
-                process_group: true
-              )
-              tree = Command::TestTree.new(process)
+              process, tree = Command::TestTree.start do |before_resume|
+                Process.new(
+                  binary,
+                  args: test_argv,
+                  env: child_env,
+                  clear_env: true,
+                  input: null_io,
+                  output: run_out,
+                  error: run_out,
+                  process_group: true,
+                  before_resume: before_resume
+                )
+              end
 
               done = ::Channel(Process::Status).new
               spawn { done.send(process.wait) }

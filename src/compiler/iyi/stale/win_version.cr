@@ -23,8 +23,8 @@ module Iyi::Stale::WinVersion
       info = version
       # Predefined HKEYs are signed LONGs widened to pointer size on Win64.
       root = Pointer(Void).new(0xffffffff80000002_u64).as(LibC::HKEY)
-      path = Crystal::System.to_wstr("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion")
-      name = Crystal::System.to_wstr("UBR")
+      path = "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion".to_utf16
+      name = "UBR".to_utf16
       bytes = Bytes.new(4)
       result = Crystal::System::WindowsRegistry.open?(root, path) do |key|
         Crystal::System::WindowsRegistry.get_raw(key, name, bytes)

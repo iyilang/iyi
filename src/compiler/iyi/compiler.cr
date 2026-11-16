@@ -3837,10 +3837,11 @@ module Iyi
         lib_flags = expand_lib_flags(lib_flags) if expand
 
         linker, link_args = program.msvc_compiler_and_flags
-        # `link.exe` is spoken to directly; anything else in `%CC%` is taken
-        # to be a driver in `cl.exe`'s shape, which passes what follows
-        # `/link` through to the linker it starts.
-        direct = File.basename(linker).compare("link.exe", case_insensitive: true) == 0
+        # MSVC link and lld-link are spoken to directly; drivers pass what
+        # follows `/link` through to their linker.
+        linker_name = File.basename(linker).downcase
+        direct = {"link.exe", "link", "lld-link.exe", "lld-link"}.includes?(linker_name)
+        reproducible_linker = direct || {"cl.exe", "cl", "clang-cl.exe", "clang-cl"}.includes?(linker_name)
 
         object_arg = Process.quote_windows(object_names)
         output_arg = Process.quote_windows(direct ? "/OUT:#{output_filename}" : "/Fe#{output_filename}")
@@ -3849,6 +3850,7 @@ module Iyi
         link_args.map! { |arg| Process.quote_windows(arg) }
 
         link_args << "/DEBUG:FULL /PDBALTPATH:%_PDB%" unless debug.none?
+        link_args << "/Brepro" if reproducible_linker
         link_args << "/INCREMENTAL:NO /STACK:0x800000"
         link_args << lib_flags
         @link_flags.try { |flags| link_args << flags }

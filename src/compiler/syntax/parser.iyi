@@ -899,6 +899,7 @@ pub class Parser < Lexer
           next
         end
 
+        name_location = @token.location
         name = @token.value.empty? ? @token.type.to_s : @token.value
         name_end = token_end_location
         next_token
@@ -920,6 +921,7 @@ pub class Parser < Lexer
         res = Call.new(res, name, args, block, block_arg, named_args).at(location)
         res.end_location = (block ? block.end_location : nil) || (call_args ? call_args.end_location : nil) || name_end
         res.has_parentheses = has_parens
+        res.name_location = name_location
       when TokenKind::OP_BANG
         res = Propagate.new(res).at(location)
         next_token
@@ -1430,6 +1432,8 @@ pub class Parser < Lexer
 
         if named_tuple_start?
           named_args = parse_named_args(allow_newline: true)
+          # Hosted parse_call_args_named_args permits a trailing &block.
+          next if @token.type == TokenKind::OP_AMP
           check(TokenKind::OP_RPAREN)
           break
         end
@@ -1526,6 +1530,8 @@ pub class Parser < Lexer
 
       if named_tuple_start?
         named_args = parse_named_args(allow_newline: false)
+        # The unparenthesized form permits the same trailing &block.
+        next if @token.type == TokenKind::OP_AMP
         end_location = named_args.last.value.end_location || token_end_location
         break
       end

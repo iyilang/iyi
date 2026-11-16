@@ -679,6 +679,11 @@ module BenchSelfhostParserExercise
     exps = node.as(Expressions).expressions
     assert(exps[3].is_a?(Call) && !exps[3].as(Call).block.nil?, "call with block")
     assert(exps[4].is_a?(Call) && exps[4].as(Call).args[0].is_a?(Splat), "call with splat")
+    dotted = Parser.new("\"line\\n\".chomp(1)\n  .downcase").parse.as(Call)
+    assert(dotted.location.as(Location).line_number == 1 && dotted.location.as(Location).column_number == 1, "chained call retains receiver location")
+    assert(dotted.name_location.as(Location).line_number == 2 && dotted.name_location.as(Location).column_number == 4, "chained call retains method token location")
+    inner = dotted.obj.as(Call)
+    assert(inner.name_location.as(Location).line_number == 1 && inner.name_location.as(Location).column_number == 10, "escaped receiver does not shift method token location")
     puts "ok (calls and blocks verified)"
   end
 

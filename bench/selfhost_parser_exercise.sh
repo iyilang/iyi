@@ -767,6 +767,7 @@ for fixture in \
   "$REPO"/bench/fixtures/syntax_type_list_then_call.iyi \
   "$REPO"/bench/fixtures/syntax_heredoc_command_and_folds.iyi \
   "$REPO"/bench/fixtures/syntax_block_unpacks.iyi \
+  "$REPO"/bench/fixtures/syntax_named_forward_block.iyi \
   "$REPO"/bench/fixtures/syntax_call_spans.iyi \
   "$REPO"/bench/fixtures/syntax_begin_shorthand_and_comma_lines.iyi; do
   fixture_name="${fixture#"$REPO/"}"
@@ -830,6 +831,22 @@ for bad in \
   fi
 done
 
+echo "== Named and forwarded block argument rejection parity"
+for bad in \
+  'f(value: 1, &handler, 2)' \
+  'f(value: 1, &handler, extra: 2)'; do
+  printf '%s\n' "$bad" > "$WORK/invalid-named-forward.iyi"
+  if "$WORK/exercise-plain" "$WORK/invalid-named-forward.iyi" >/dev/null 2>&1; then
+    echo "  native accepted invalid: $bad"
+    status=1
+  elif "$WORK/dump_hosted" "$WORK/invalid-named-forward.iyi" >/dev/null 2>&1; then
+    echo "  hosted accepted invalid: $bad"
+    status=1
+  else
+    echo "  both rejected: $bad"
+  fi
+done
+
 echo
 echo "== 5. Guarded mutation proofs (verify patch applies, exercise fails, revert passes)"
 
@@ -838,6 +855,29 @@ echo "== 5. Guarded mutation proofs (verify patch applies, exercise fails, rever
 run_proof() {
   prove_mutation "$1" "$PARSER" "$2" "$3" -- "$IYI" run "$REPO/bench/selfhost_parser_exercise.iyi" || status=1
 }
+
+named_forward_syntax_matches() {
+  if ! "$IYI" build -o "$WORK/named_forward_mutant" "$REPO/bench/selfhost_parser_exercise.iyi" > "$WORK/named_forward_build.log" 2>&1; then
+    cat "$WORK/named_forward_build.log"
+    echo "INVALID MUTANT: parser exercise failed to build"
+    if [ "${_PM_ARMED:-0}" = 1 ]; then return 0; fi
+    return 1
+  fi
+  "$WORK/dump_hosted" "$REPO/bench/fixtures/syntax_named_forward_block.iyi" > "$WORK/named_forward.hosted" || return 1
+  "$WORK/named_forward_mutant" "$REPO/bench/fixtures/syntax_named_forward_block.iyi" > "$WORK/named_forward.port" || return 1
+  diff -u "$WORK/named_forward.hosted" "$WORK/named_forward.port"
+}
+named_forward_syntax_matches || status=1
+prove_mutation "parenthesized named arguments cannot precede a forwarded block" "$PARSER" \
+  '          # Hosted parse_call_args_named_args permits a trailing &block.
+          next if @token.type == TokenKind::OP_AMP' \
+  '          # Hosted parse_call_args_named_args permits a trailing &block.
+          nil' -- named_forward_syntax_matches || status=1
+prove_mutation "unparenthesized named arguments cannot precede a forwarded block" "$PARSER" \
+  '        # The unparenthesized form permits the same trailing &block.
+        next if @token.type == TokenKind::OP_AMP' \
+  '        # The unparenthesized form permits the same trailing &block.
+        nil' -- named_forward_syntax_matches || status=1
 
 # Mutation 1: break operator precedence in parse_add_or_sub
 run_proof "mutation 1: altering operator precedence in parse_add_or_sub" \

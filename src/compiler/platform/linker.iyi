@@ -67,18 +67,20 @@ pub class Linker
       return arg
     end
 
-    res = "'"
+    res = String::Builder.new(arg.bytesize + 2)
+    res.write_byte(39_u8)
     i = 0
     while i < arg.bytesize
       b = arg.byte_at(i)
       if b == 39_u8
-        res = res + "'\\''"
+        res << "'\\''"
       else
-        res = res + b.unsafe_chr.to_s
+        res.write_byte(b)
       end
       i = i + 1
     end
-    res + "'"
+    res.write_byte(39_u8)
+    res.to_s
   end
 
   # Shell-quotes a list of arguments for POSIX shells.
@@ -93,7 +95,9 @@ pub class Linker
   # Shell-quotes an argument for Windows command lines.
   pub def self.quote_windows(arg : String) : String
     need_quotes = arg.empty? || arg.includes?(" ") || arg.includes?("\t")
-    res = need_quotes ? "\"" : ""
+    return arg if !need_quotes && !arg.includes?("\"")
+    res = String::Builder.new(arg.bytesize + 2)
+    res.write_byte(34_u8) if need_quotes
     slashes = 0
     i = 0
     while i < arg.bytesize
@@ -103,25 +107,25 @@ pub class Linker
       elsif b == 34_u8
         k = 0
         while k <= slashes
-          res = res + "\\"
+          res.write_byte(92_u8)
           k = k + 1
         end
         slashes = 0
       else
         slashes = 0
       end
-      res = res + b.unsafe_chr.to_s
+      res.write_byte(b)
       i = i + 1
     end
     if need_quotes
       k = 0
       while k < slashes
-        res = res + "\\"
+        res.write_byte(92_u8)
         k = k + 1
       end
-      res = res + "\""
+      res.write_byte(34_u8)
     end
-    res
+    res.to_s
   end
 
   # Shell-quotes a list of arguments for Windows command lines.

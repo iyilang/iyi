@@ -146,6 +146,14 @@ describe "iyi package macro boundaries" do
       File.write(main, "")
       File.write(source, "")
       File.write(secret, "secret")
+      own_file = File.join(dep, "asset")
+      File.write(own_file, "dependency data")
+      package_macro("{{ read_file(#{own_file.inspect}) }}", source, main, root, dep).should eq(%("dependency data"))
+      standard = File.expand_path("../../../src/std/eiy.iyi", __DIR__)
+      prelude = File.expand_path("../../../src/iyi/prelude.iyi", __DIR__)
+      [standard, prelude].each do |path|
+        package_macro("{{ file_exists?(#{path.inspect}) }}", source, main, root, dep).should eq("true")
+      end
       expect_raises(Iyi::TypeException, /compile-time paths must stay inside/) do
         package_macro("{{ read_file(#{secret.inspect}) }}", source, main, root, dep)
       end

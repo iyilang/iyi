@@ -753,7 +753,7 @@ class ProcessChild
         wide
       end
       # CSTR_LESS_THAN, CSTR_EQUAL and CSTR_GREATER_THAN are 1, 2 and 3.
-      kept = kept.sorted { |one, other| LibKernel32.CompareStringOrdinal(wides[one], -1, wides[other], -1, 1) - 2 }
+      kept = kept.sorted { |one, other| compare_names(wides[one], wides[other]) - 2 }
     {% end %}
     kept.map { |index| "#{names[index]}=#{values[index]}" }
   end
@@ -769,7 +769,7 @@ class ProcessChild
       wide_other = __iyi_win_env_wide(other.to_unsafe, other.bytesize)
       return false if wide_one.address == 0_u64 || wide_other.address == 0_u64
       # CSTR_EQUAL, lengths from the terminators.
-      LibKernel32.CompareStringOrdinal(wide_one, -1, wide_other, -1, 1) == 2
+      compare_names(wide_one, wide_other) == 2
     {% else %}
       one == other
     {% end %}
@@ -778,7 +778,7 @@ class ProcessChild
   # This program's variables, as the platform holds them.
   def self.each_variable(& : String, String -> Nil) : Nil
     {% if flag?(:win32) %}
-      block = ::LibIyiEnv.GetEnvironmentStringsW
+      block = environment_strings
       return if block.address == 0_u64
       index = 0
       while block[index] != 0_u16
@@ -797,7 +797,7 @@ class ProcessChild
         end
         index = index + length + 1
       end
-      ::LibIyiEnv.FreeEnvironmentStringsW(block)
+      free_environment_strings(block)
     {% else %}
       table = __iyi_environ
       return if table.address == 0_u64
@@ -885,6 +885,18 @@ class ProcessChild
   end
 
   {% if flag?(:win32) %}
+    @[Effect(:host_state)]; private def self.compare_names(one : UInt16*, other : UInt16*) : Int32
+      LibKernel32.CompareStringOrdinal(one, -1, other, -1, 1)
+    end
+
+    @[Effect(:env_all)]; private def self.environment_strings : UInt16*
+      ::LibIyiEnv.GetEnvironmentStringsW
+    end
+
+    @[Effect(:memory)]; private def self.free_environment_strings(block : UInt16*) : Nil
+      ::LibIyiEnv.FreeEnvironmentStringsW(block)
+    end
+
     INVALID          = 0xFFFFFFFFFFFFFFFF_u64
     ERROR_IO_PENDING =                    997
     # ERROR_BROKEN_PIPE and ERROR_NO_DATA: the other end has gone.
@@ -963,7 +975,7 @@ class ProcessChild
       attributes != -1 && attributes & 0x10 != 0
     end
 
-    def self.executable : String?
+    @[Effect(:process)]; def self.executable : String?
       room = 32768
       wide = Pointer(UInt16).malloc(room.to_u64)
       size = room
@@ -1026,7 +1038,7 @@ class ProcessChild
     # synchronous, which is what a program's standard stream expects.
     # Anonymous pipes cannot be opened for overlapped I/O, so it is a named
     # one, unique to this process and this call.
-    def self.pipe(inbound : ::Bool) : {Pointer(Void), Pointer(Void)}?
+    @[Effect(:process)]; def self.pipe(inbound : ::Bool) : {Pointer(Void), Pointer(Void)}?
       serial = @@serial.add(1_u64)
       name = "\\\\.\\pipe\\iyi-process-#{LibKernel32.GetCurrentProcessId}-#{serial}"
       wide = __iyi_win_env_wide(name.to_unsafe, name.bytesize)
@@ -1050,7 +1062,7 @@ class ProcessChild
 
     # This program's own stream *which* (-10, -11, -12) as a handle the
     # child inherits, or null when this program has none.
-    def self.inherited(which : Int32) : Pointer(Void)
+    @[Effect(:process)]; def self.inherited(which : Int32) : Pointer(Void)
       own = ::LibC.GetStdHandle(which)
       return Pointer(Void).new(0_u64) if own.address == 0_u64 || own.address == INVALID
       copy = Pointer(Void).new(0_u64)
@@ -1060,7 +1072,7 @@ class ProcessChild
       copy
     end
 
-    def start(command : String, path : String, args : Array(String), chdir : String?,
+    @[Effect(:process)]; def start(command : String, path : String, args : Array(String), chdir : String?,
               input : Int32, output : Int32, error : Int32, environment : Array(String)?) : Nil | ProcessError
       line = String::Builder.new(256)
       ProcessChild.quote(command, line)
@@ -1252,7 +1264,7 @@ class ProcessChild
       block
     end
 
-    private def close_theirs(theirs : Pointer(Pointer(Void))) : Nil
+    @[Effect(:process)]; private def close_theirs(theirs : Pointer(Pointer(Void))) : Nil
       3.times do |index|
         ::LibC.CloseHandle(theirs[index]) if theirs[index].address != 0_u64
       end
@@ -1305,7 +1317,7 @@ class ProcessChild
     # All of *text* written to the child's input, parking on the port while
     # the pipe is full: true once it is all written, false when the child's
     # end closed first.
-    def send_input(text : String) : ::Bool | Cancelled
+    @[Effect(:process)]; def send_input(text : String) : ::Bool | Cancelled
       handle = @input
       offset = 0
       while offset < text.bytesize
@@ -1344,7 +1356,7 @@ class ProcessChild
       @pid
     end
 
-    def self.own_pid : Int64
+    @[Effect(:process)]; def self.own_pid : Int64
       LibKernel32.GetCurrentProcessId.to_i64
     end
 
@@ -1365,7 +1377,7 @@ class ProcessChild
     end
 
     # Whether the child has ended, asked without a wait.
-    def poll_end : ::Bool
+    @[Effect(:process)]; def poll_end : ::Bool
       return true if @ended
       return false unless ::LibC.WaitForSingleObject(@process, 0) == 0
       record_end
@@ -1374,7 +1386,7 @@ class ProcessChild
 
     # The process and its job, once the end is collected: nothing is left
     # to ask of them, and their handles are not held for the handle's life.
-    def release_process : Nil
+    @[Effect(:process)]; def release_process : Nil
       ::LibC.CloseHandle(@process) if @process.address != 0_u64
       ::LibC.CloseHandle(@job) if @job.address != 0_u64
       @process = Pointer(Void).new(0_u64)
@@ -1383,7 +1395,7 @@ class ProcessChild
 
     # This side of a pipe `pipe` made, closed, and its port record with it
     # while the value is still this pipe's (`IyiScheduler.port_closing`).
-    def self.close_pipe(handle : Pointer(Void)) : Nil
+    @[Effect(:process)]; def self.close_pipe(handle : Pointer(Void)) : Nil
       return if handle.address == 0_u64
       IyiScheduler.port_closing(handle)
       ::LibC.CloseHandle(handle)
@@ -1393,7 +1405,9 @@ class ProcessChild
     # lock, no fiber. *context* is two words, the port and the parked
     # fiber's OVERLAPPED; the second is taken, so a wait that was
     # cancelled first and took it itself is posted nothing.
-    def self.ended(context : Void*) : Nil
+    # This callback is reached only by wait_end, which has a process effect.
+    # It must remain unwrapped on the foreign thread.
+    @[Effect(:primitive)]; def self.ended(context : Void*) : Nil
       words = context.as(Pointer(UInt64))
       slot = IyiAtomic.rmw(:xchg, words + 1, 0_u64, :sequentially_consistent, false)
       if slot != 0_u64
@@ -1401,7 +1415,7 @@ class ProcessChild
       end
     end
 
-    def wait_end : Nil | Cancelled
+    @[Effect(:process)]; def wait_end : Nil | Cancelled
       fiber = IyiScheduler.current
       return Cancelled.new if fiber.cancelled
       # No handle: a cancellation's `CancelIoEx` has no operation to stop.
@@ -1447,14 +1461,14 @@ class ProcessChild
       nil
     end
 
-    private def record_end : Nil
+    @[Effect(:process)]; private def record_end : Nil
       code = 0
       LibKernel32.GetExitCodeProcess(@process, pointerof(code))
       @exit_code = code
       @ended = true
     end
 
-    def kill : Nil
+    @[Effect(:process)]; def kill : Nil
       return if @ended
       if @job.address != 0_u64
         LibKernel32.TerminateJobObject(@job, 1)
@@ -1464,12 +1478,12 @@ class ProcessChild
     end
 
     # After a kill, or a wait that could not be parked: the end is near.
-    def reap : Nil
+    @[Effect(:process)]; def reap : Nil
       ::LibC.WaitForSingleObject(@process, -1)
       record_end
     end
 
-    def close_all : Nil
+    @[Effect(:process)]; def close_all : Nil
       ProcessChild.close_pipe(@input)
       ProcessChild.close_pipe(@output)
       ProcessChild.close_pipe(@errors)

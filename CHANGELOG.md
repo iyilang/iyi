@@ -7,8 +7,10 @@
 - **Checksum database verification primitives.** The compiler source has
   Ed25519 signed-note verification, checkpoint and record parsing,
   height-8 Merkle tile proofs, and a persistent consistency-checked
-  checkpoint cache. They are not wired into package downloads yet and
-  require independent cryptographic review before production use.
+  checkpoint cache. Fixture bytes are kept unchanged across Git line-ending
+  settings, and cache writes replace an existing checkpoint through an
+  exclusive same-directory file. Package downloads do not use them yet.
+  Independent cryptographic review is required before anything depends on them.
 - **`iyi test` runs tests at once, says what each named case came to, and
   can run some of them.** Half as many tests build and run together as the
   machine has cores, `-p N` says how many, and the report stays in file

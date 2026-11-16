@@ -204,6 +204,7 @@ module Iyi::Mod::SumDB::TLog
       shift = level * 8
       hash_index = start >> shift
       tile_index = hash_index // 256
+      # Tile width and offsets are bounded by 256 before narrowing to Int32.
       width = Math.min(256_i64, (@size >> shift) - tile_index * 256).to_i
       tile = Tile.new(level, tile_index, width)
       data = tile_data(tile)

@@ -41,6 +41,7 @@ module Iyi::Mod::SumDB
     # Return text only after at least one trusted signature has verified.
     # Unknown keys are ignored; an invalid signature from a known key is not.
     def self.open(note : String, keys : Array(Verifier)) : String
+      raise Error.new("sumdb: signed note contains CR; expected LF line endings") if note.includes?('\r')
       if !note.valid_encoding? || note.each_byte.any? { |b| b < 32 && b != 10 }
         raise Error.new("sumdb: invalid signed note text")
       end

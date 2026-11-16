@@ -1,3 +1,4 @@
+require "file/tempfile"
 require "./tlog"
 
 # Checkpoint and record framing follow golang.org/x/mod/sumdb/tlog/note.go.
@@ -38,6 +39,7 @@ module Iyi::Mod::SumDB
     end
 
     def self.parse(text : String) : Record
+      raise Error.new("sumdb: record contains CR; expected LF line endings") if text.includes?('\r')
       unless text.valid_encoding? && text.ends_with?('\n') && text.each_byte.none? { |b| b < 32 && b != 10 }
         raise Error.new("sumdb: malformed record")
       end
@@ -83,7 +85,8 @@ module Iyi::Mod::SumDB
 
     def observe(note : String, &fetch : String -> Bytes) : Checkpoint
       incoming = Checkpoint.open(note, @keys, @origin)
-      Dir.mkdir_p(File.dirname(@path))
+      directory = File.dirname(@path)
+      Dir.mkdir_p(directory)
       File.open("#{@path}.lock", "a") do |lock|
         lock.flock_exclusive do
           old = latest
@@ -101,16 +104,23 @@ module Iyi::Mod::SumDB
               return old if incoming.size == old.size
             end
           end
-          staging = "#{@path}.#{Process.pid}.tmp"
+          # A unique same-directory temporary file prevents clobbering an
+          # existing path and keeps rename on the same filesystem. Crystal
+          # creates it exclusively, with 0600 permissions on POSIX.
+          staging = File.tempfile("sumdb-checkpoint-", ".tmp", dir: directory)
           begin
-            File.open(staging, "w") do |file|
-              file << note
-              file.flush
-              file.fsync
-            end
-            File.rename(staging, @path)
+            staging.write(note.to_slice)
+            staging.flush
+            staging.fsync
+            staging.close
+            File.rename(staging.path, @path)
+            # Persist the directory entry as well as the file on POSIX.
+            {% if flag?(:unix) %}
+              File.open(directory, "r") { |parent| parent.fsync }
+            {% end %}
           ensure
-            File.delete?(staging)
+            staging.close unless staging.closed?
+            File.delete?(staging.path)
           end
           incoming
         end
@@ -125,6 +135,7 @@ module Iyi::Mod::SumDB
     end
 
     def verify_lookup(response : String, path : String, version : String, actual : String, manifest : Bool = false, &fetch : String -> Bytes) : Record
+      raise Error.new("sumdb: lookup contains CR; expected LF line endings") if response.includes?('\r')
       first = response.index('\n')
       raise Error.new("sumdb: malformed lookup record ID") unless first
       id_text = response[0, first]

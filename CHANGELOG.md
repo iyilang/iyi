@@ -25,6 +25,14 @@
 
 ### Changed
 
+- **Compile-time macros in `.iyi` files refuse shell commands.** `system`
+  and backticks fail with the source location. `read_file`, `read_file?` and
+  `file_exists?` stay within the defining package and the standard library,
+  including when a path goes through a symbolic link. Only the root package
+  may read the build environment with `env`. A `run` helper must be in the
+  defining package, but it still executes without a sandbox and can run
+  arbitrary code. Crystal macros keep their existing behavior.
+
 - **`iyi test` in a directory no longer runs other projects' tests.** It
   walks the tree as `fix` and `mod tidy` do: not into `lib` (the installed
   dependencies, whose failing test failed the run of the project that

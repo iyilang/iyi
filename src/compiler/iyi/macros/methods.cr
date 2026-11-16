@@ -46,6 +46,146 @@ module Iyi
       filename
     end
 
+    # The source that owns a macro matters, not just the file that called it:
+    # an imported macro must not acquire its consumer's package privileges.
+    private def iyi_macro_source(node) : String?
+      location = @location || node.location || @call.try(&.location)
+      return nil unless location
+      read_from = location.original_read_from
+      if read_from && (source = @program.iyi_artifact_source_paths[read_from]?)
+        return source
+      end
+      location.original_filename
+    end
+
+    private def iyi_macro_location?(location : Location?) : Bool
+      return false unless location
+      return true if Lexer.iyi_source?(location.filename)
+      read_from = location.original_read_from
+      !!(read_from && Lexer.iyi_source?(@program.iyi_artifact_source_paths[read_from]?))
+    end
+
+    private def iyi_macro?(node) : Bool
+      iyi_macro_location?(@location) || iyi_macro_location?(node.location) ||
+        iyi_macro_location?(@call.try(&.location))
+    end
+
+    private def iyi_macro_site(node) : String
+      location = node.location.try(&.expanded_location) || @location.try(&.expanded_location)
+      return "an unknown location" unless location
+      "#{location.original_filename}:#{location.line_number}"
+    end
+
+    # Canonicalize the existing ancestor as well for a missing file. This
+    # makes file_exists? refuse a path through a link outside the package
+    # instead of revealing whether the target exists.
+    private def iyi_macro_realpath(path : String) : String
+      path = File.expand_path(path)
+      missing = [] of String
+      until File.exists?(path)
+        raise File::Error.new("cannot resolve a symbolic link", file: path) if File.symlink?(path)
+        parent = File.dirname(path)
+        raise File::Error.new("cannot resolve the path", file: path) if parent == path
+        missing << File.basename(path)
+        path = parent
+      end
+      real = File.realpath(path)
+      missing.reverse_each { |part| real = File.join(real, part) }
+      real
+    end
+
+    private def iyi_macro_under?(path : String, root : String) : Bool
+      path = Iyi.path_key(path)
+      root = Iyi.path_key(root)
+      path == root || !Iyi.path_under?(path, root).nil?
+    end
+
+    private def iyi_library_roots : Array(String)
+      roots = [] of String
+      @program.iyi_path.entries.each do |entry|
+        base = File.expand_path(entry, @program.iyi_path.current_dir)
+        next unless File.file?(File.join(base, "iyi", "prelude.iyi"))
+        {"iyi", "std"}.each do |name|
+          dir = File.join(base, name)
+          roots << File.realpath(dir) if Dir.exists?(dir)
+        end
+      end
+      roots
+    end
+
+    private def iyi_macro_root(node) : String
+      source = iyi_macro_source(node)
+      unless source
+        node.raise "cannot determine the package of this compile-time macro at #{iyi_macro_site(node)}"
+      end
+      expanded = File.expand_path(source)
+      roots = [] of String
+      if package = @program.iyi_root_package
+        roots << package[1]
+      elsif filename = @program.filename
+        roots << File.dirname(File.expand_path(filename))
+      end
+      @program.iyi_mod_table.each do |(_, directory)|
+        roots << directory if Dir.exists?(directory)
+      end
+      roots.concat(iyi_library_roots)
+      roots.map! { |root| File.expand_path(root) }
+      roots.select! { |root| iyi_macro_under?(expanded, root) }
+      root = roots.max_by?(&.size)
+      unless root
+        # Standalone files need no manifest. A nearby manifest, when present,
+        # is still the package boundary rather than the invocation directory.
+        root = File.dirname(expanded)
+        loop do
+          break if File.file?(File.join(root, "iyi.mod"))
+          parent = File.dirname(root)
+          break if parent == root
+          root = parent
+        end
+        root = File.dirname(expanded) unless File.file?(File.join(root, "iyi.mod"))
+      end
+      root = File.realpath(root)
+      unless iyi_macro_under?(iyi_macro_realpath(expanded), root)
+        node.raise "compile-time macro source at #{iyi_macro_site(node)} is outside its package tree"
+      end
+      root
+    rescue ex : File::Error | IO::Error
+      node.raise "cannot resolve the package of the compile-time macro at #{iyi_macro_site(node)}: #{ex.message}"
+    end
+
+    private def iyi_macro_checked_path(node, path : String, *, library : Bool) : String
+      root = iyi_macro_root(node)
+      resolved = iyi_macro_realpath(path)
+      roots = [root]
+      roots.concat(iyi_library_roots) if library
+      unless roots.any? { |allowed| iyi_macro_under?(resolved, allowed) }
+        node.raise "`#{node.name}` at #{iyi_macro_site(node)} cannot access #{path.inspect}: " \
+                   "compile-time paths must stay inside the macro's package#{library ? " or the standard library" : ""}"
+      end
+      resolved
+    rescue ex : File::Error | IO::Error
+      node.raise "cannot resolve `#{node.name}` path #{path.inspect} at #{iyi_macro_site(node)}: #{ex.message}"
+    end
+
+    private def iyi_refuse_shell(node) : Nil
+      return unless iyi_macro?(node)
+      node.raise "`#{node.name}` at #{iyi_macro_site(node)} is not allowed in an .iyi macro: " \
+                 "compile-time shell commands are forbidden"
+    end
+
+    private def iyi_refuse_dependency_env(node) : Nil
+      return unless iyi_macro?(node)
+      source_root = iyi_macro_root(node)
+      root = if package = @program.iyi_root_package
+               File.realpath(package[1])
+             elsif filename = @program.filename
+               File.realpath(File.dirname(File.expand_path(filename)))
+             end
+      return if root && Iyi.path_key(source_root) == Iyi.path_key(root)
+      node.raise "`env` at #{iyi_macro_site(node)} is not allowed in a dependency macro: " \
+                 "only the compiling package may read the build environment"
+    end
+
     delegate warnings, to: @program
 
     def interpret_top_level_call(node)
@@ -169,6 +309,7 @@ module Iyi
     end
 
     def interpret_env(node)
+      iyi_refuse_dependency_env(node)
       interpret_check_args_toplevel do |arg|
         arg.accept self
         cmd = @last.to_macro_id
@@ -277,6 +418,7 @@ module Iyi
     end
 
     def interpret_system(node)
+      iyi_refuse_shell(node)
       cmd = node.args.map do |arg|
         arg.accept self
         @last.to_macro_id
@@ -314,6 +456,7 @@ module Iyi
       interpret_check_args_toplevel do |arg|
         arg.accept self
         filename = @last.to_macro_id
+        filename = iyi_macro_checked_path(node, filename, library: true) if iyi_macro?(node)
 
         @last = BoolLiteral.new(File.exists?(filename))
       end
@@ -323,6 +466,7 @@ module Iyi
       interpret_check_args_toplevel do |arg|
         arg.accept self
         filename = @last.to_macro_id
+        filename = iyi_macro_checked_path(node, filename, library: true) if iyi_macro?(node)
 
         begin
           @last = StringLiteral.new(File.read(filename))
@@ -347,6 +491,7 @@ module Iyi
       filename = find_source_file(original_filename) do |error_message|
         node.raise "error executing macro 'run': #{error_message}"
       end
+      filename = iyi_macro_checked_path(node, filename, library: false) if iyi_macro?(node)
 
       run_args = [] of String
       node.args.each_with_index do |arg, i|

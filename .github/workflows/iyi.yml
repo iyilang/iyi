@@ -3979,7 +3979,6 @@ jobs:
     timeout-minutes: 150
     env:
       SELFHOST_HOST: windows-x86_64
-      IR_ORACLE_DIR: ${{ runner.temp }}/selfhost-ir-oracle
     name: "The self-host gates, on Windows x86_64"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -4029,6 +4028,8 @@ jobs:
 
       - name: The self-host gates
         shell: bash
+        env:
+          IR_ORACLE_DIR: ${{ runner.temp }}/selfhost-ir-oracle
         run: bash bench/selfhost_gates.sh
 
   # The editor client is the only artifact here that is published somewhere

@@ -68,6 +68,12 @@ echo "== 2. Build daemon comparison against the front end being replaced"
 cat <<'HOSTED_ORACLE_SCRIPT' > "$WORK/dump_hosted_daemon.cr"
 require "compiler/requires"
 
+{% unless flag?(:win32) %}
+  lib SavedDescriptors
+    fun dup(fd : Int32) : Int32
+  end
+{% end %}
+
 class ExitException < IO::Error
   getter status : Int32
   def initialize(@status : Int32)
@@ -218,8 +224,8 @@ module HostedDaemonOracle
       saved_out.close_on_finalize = false
       saved_err.close_on_finalize = false
     {% else %}
-      saved_out = IO::FileDescriptor.new(LibC.dup(STDOUT.fd), close_on_finalize: false)
-      saved_err = IO::FileDescriptor.new(LibC.dup(STDERR.fd), close_on_finalize: false)
+      saved_out = IO::FileDescriptor.new(SavedDescriptors.dup(STDOUT.fd), close_on_finalize: false)
+      saved_err = IO::FileDescriptor.new(SavedDescriptors.dup(STDERR.fd), close_on_finalize: false)
     {% end %}
     tmp_out = File.tempfile(dir: ARGV[0])
     tmp_err = File.tempfile(dir: ARGV[0])

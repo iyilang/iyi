@@ -362,13 +362,13 @@ if [ -s "$WORK/hosted_run.err" ]; then
   exit 1
 fi
 
-# Keep the original normalized combined comparison, then compare each
-# captured stream without option-column normalization.
+# Compare combined output with symmetric help-column normalization, then compare
+# each captured stream without option-column normalization.
 normalize_command() {
   REPO_POSIX="$REPO" REPO_NATIVE_ROOT="$REPO_NATIVE" \
-    "$PY" - "$(native_path "$1")" "$(native_path "$2")" "$3" <<'PY'
+    "$PY" - "$(native_path "$1")" "$(native_path "$2")" <<'PY'
 import os, re, sys
-src, dst, side = sys.argv[1:]
+src, dst = sys.argv[1:]
 repo, native = os.environ["REPO_POSIX"], os.environ["REPO_NATIVE_ROOT"]
 with open(src, encoding="utf-8") as source:
     text = source.read()
@@ -388,8 +388,6 @@ for index, part in enumerate(parts):
         in_stream = False
     elif not in_stream:
         part = re.sub(r'\n {20,}', '  ', part)
-        if side == "hosted":
-            part = part.replace("text|json Output", "text|json  Output")
         lines = [re.sub(r"^(\s+)(-[-a-zA-Z0-9_, =\[\]/|<>]+?)\s{2,}(\S)", r"  \2  \3", line) for line in part.splitlines()]
         parts[index] = "\n".join(lines) + ("\n" if part.endswith("\n") else "")
 text = "".join(parts)
@@ -398,8 +396,8 @@ with open(dst, "w", encoding="utf-8", newline="") as output:
 PY
 }
 
-normalize_command "$WORK/iyi_raw.out" "$WORK/iyi.out" iyi || exit 1
-normalize_command "$WORK/hosted_raw.out" "$WORK/hosted.out" hosted || exit 1
+normalize_command "$WORK/iyi_raw.out" "$WORK/iyi.out" || exit 1
+normalize_command "$WORK/hosted_raw.out" "$WORK/hosted.out" || exit 1
 if [ "$(grep -c '^=== VECTOR' "$WORK/iyi.out")" -ne 243 ] || [ "$(grep -c '^=== VECTOR' "$WORK/hosted.out")" -ne 243 ]; then
   echo "  FAILED: expected 243 command vectors from each implementation"
   exit 1
@@ -431,7 +429,7 @@ check_command_mutant() {
     return 0
   fi
   if [ "$(grep -c '^=== VECTOR' "$WORK/iyi_mut_raw.out")" -ne 243 ] ||
-     ! normalize_command "$WORK/iyi_mut_raw.out" "$WORK/iyi_mut.out" iyi; then
+     ! normalize_command "$WORK/iyi_mut_raw.out" "$WORK/iyi_mut.out"; then
     echo "  INVALID MUTANT: command exercise output was incomplete"
     touch "$WORK/invalid-mutant"
     return 0

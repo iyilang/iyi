@@ -317,7 +317,8 @@ ALLOWED_LINES: list[tuple[str, str]] = [
     # an undefined variable, ran `--version` on a directory, and reported the
     # daemon's version as empty. An allowlist entry wide enough to cover a
     # defect is not an allowlist entry.
-    (r"CRYSTAL_#\{name\}|`CRYSTAL_DAEMON(_SOCKET)?`|crystal docker image", "the fallback that keeps Crystal's env vars working"),
+    # Macro interpolation uses name.id to keep the environment key unquoted.
+    (r"CRYSTAL_#\{name(?:\.id)?\}|`CRYSTAL_DAEMON(_SOCKET)?`|crystal docker image", "the fallback that keeps Crystal's env vars working"),
     # The same fallback, in the sentence that refuses a cache directory.
     # `Config.env` reads `IYI_CACHE_DIR` and then `CRYSTAL_CACHE_DIR`, so the
     # refusal names whichever of the two is set: a sentence about

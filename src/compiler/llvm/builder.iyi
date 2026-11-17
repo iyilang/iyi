@@ -1,0 +1,354 @@
+@[Unsafe("binds LLVM's C API: its objects are raw handles this module wraps and disposes, which the compiler does not check")]
+module compiler/llvm/builder
+
+import compiler/llvm/lib_llvm::{string_from_c, string_and_dispose}
+import compiler/llvm/values::{LLVMType, LLVMValue, LLVMFunction, LLVMBasicBlock, Type, Value, Function, BasicBlock}
+import compiler/llvm/context::{Context}
+
+pub class Builder
+  getter unwrap : LibLLVM::BuilderRef
+  getter context : Context
+
+  def initialize(@unwrap : LibLLVM::BuilderRef, @context : Context)
+    @disposed = false
+  end
+
+  def self.new(context : Context) : Builder
+    b = LibLLVM.create_builder_in_context(context.to_unsafe)
+    if b.address == 0
+      raise "Could not create LLVM builder"
+    end
+    Builder.new(b, context)
+  end
+
+  def to_unsafe : LibLLVM::BuilderRef
+    @unwrap
+  end
+
+  def position_at_end(block : LLVMBasicBlock) : Nil
+    LibLLVM.position_builder_at_end(@unwrap, block.to_unsafe)
+  end
+
+  def position_before(instr : LLVMValue) : Nil
+    LibLLVM.position_builder_before(@unwrap, instr.to_unsafe)
+  end
+
+  def insert_block : LLVMBasicBlock?
+    bb = LibLLVM.get_insert_block(@unwrap)
+    if bb.address != 0
+      LLVMBasicBlock.new(bb)
+    else
+      nil
+    end
+  end
+
+  # Terminators
+  def ret_void : LLVMValue
+    LLVMValue.new(LibLLVM.build_ret_void(@unwrap))
+  end
+
+  def ret(val : LLVMValue) : LLVMValue
+    LLVMValue.new(LibLLVM.build_ret(@unwrap, val.to_unsafe))
+  end
+
+  def br(dest : LLVMBasicBlock) : LLVMValue
+    LLVMValue.new(LibLLVM.build_br(@unwrap, dest.to_unsafe))
+  end
+
+  def cond_br(cond : LLVMValue, then_block : LLVMBasicBlock, else_block : LLVMBasicBlock) : LLVMValue
+    LLVMValue.new(LibLLVM.build_cond_br(@unwrap, cond.to_unsafe, then_block.to_unsafe, else_block.to_unsafe))
+  end
+
+  def switch(val : LLVMValue, else_block : LLVMBasicBlock, cases : Array({LLVMValue, LLVMBasicBlock})) : LLVMValue
+    sw = LibLLVM.build_switch(@unwrap, val.to_unsafe, else_block.to_unsafe, cases.size)
+    i = 0
+    while i < cases.size
+      c_val, c_bb = cases[i]
+      LibLLVM.add_case(sw, c_val.to_unsafe, c_bb.to_unsafe)
+      i = i + 1
+    end
+    LLVMValue.new(sw)
+  end
+
+  def unreachable : LLVMValue
+    LLVMValue.new(LibLLVM.build_unreachable(@unwrap))
+  end
+
+  # Arithmetic
+  def add(lhs : LLVMValue, rhs : LLVMValue, name : String = "") : LLVMValue
+    LLVMValue.new(LibLLVM.build_add(@unwrap, lhs.to_unsafe, rhs.to_unsafe, name.to_unsafe))
+  end
+
+  def sub(lhs : LLVMValue, rhs : LLVMValue, name : String = "") : LLVMValue
+    LLVMValue.new(LibLLVM.build_sub(@unwrap, lhs.to_unsafe, rhs.to_unsafe, name.to_unsafe))
+  end
+
+  def mul(lhs : LLVMValue, rhs : LLVMValue, name : String = "") : LLVMValue
+    LLVMValue.new(LibLLVM.build_mul(@unwrap, lhs.to_unsafe, rhs.to_unsafe, name.to_unsafe))
+  end
+
+  def sdiv(lhs : LLVMValue, rhs : LLVMValue, name : String = "") : LLVMValue
+    LLVMValue.new(LibLLVM.build_sdiv(@unwrap, lhs.to_unsafe, rhs.to_unsafe, name.to_unsafe))
+  end
+
+  def exact_sdiv(lhs : LLVMValue, rhs : LLVMValue, name : String = "") : LLVMValue
+    LLVMValue.new(LibLLVM.build_exact_sdiv(@unwrap, lhs.to_unsafe, rhs.to_unsafe, name.to_unsafe))
+  end
+
+  def udiv(lhs : LLVMValue, rhs : LLVMValue, name : String = "") : LLVMValue
+    LLVMValue.new(LibLLVM.build_udiv(@unwrap, lhs.to_unsafe, rhs.to_unsafe, name.to_unsafe))
+  end
+
+  def srem(lhs : LLVMValue, rhs : LLVMValue, name : String = "") : LLVMValue
+    LLVMValue.new(LibLLVM.build_srem(@unwrap, lhs.to_unsafe, rhs.to_unsafe, name.to_unsafe))
+  end
+
+  def urem(lhs : LLVMValue, rhs : LLVMValue, name : String = "") : LLVMValue
+    LLVMValue.new(LibLLVM.build_urem(@unwrap, lhs.to_unsafe, rhs.to_unsafe, name.to_unsafe))
+  end
+
+  def fadd(lhs : LLVMValue, rhs : LLVMValue, name : String = "") : LLVMValue
+    LLVMValue.new(LibLLVM.build_fadd(@unwrap, lhs.to_unsafe, rhs.to_unsafe, name.to_unsafe))
+  end
+
+  def fsub(lhs : LLVMValue, rhs : LLVMValue, name : String = "") : LLVMValue
+    LLVMValue.new(LibLLVM.build_fsub(@unwrap, lhs.to_unsafe, rhs.to_unsafe, name.to_unsafe))
+  end
+
+  def fmul(lhs : LLVMValue, rhs : LLVMValue, name : String = "") : LLVMValue
+    LLVMValue.new(LibLLVM.build_fmul(@unwrap, lhs.to_unsafe, rhs.to_unsafe, name.to_unsafe))
+  end
+
+  def fdiv(lhs : LLVMValue, rhs : LLVMValue, name : String = "") : LLVMValue
+    LLVMValue.new(LibLLVM.build_fdiv(@unwrap, lhs.to_unsafe, rhs.to_unsafe, name.to_unsafe))
+  end
+
+  def frem(lhs : LLVMValue, rhs : LLVMValue, name : String = "") : LLVMValue
+    LLVMValue.new(LibLLVM.build_frem(@unwrap, lhs.to_unsafe, rhs.to_unsafe, name.to_unsafe))
+  end
+
+  def neg(val : LLVMValue, name : String = "") : LLVMValue
+    LLVMValue.new(LibLLVM.build_neg(@unwrap, val.to_unsafe, name.to_unsafe))
+  end
+
+  def fneg(val : LLVMValue, name : String = "") : LLVMValue
+    LLVMValue.new(LibLLVM.build_fneg(@unwrap, val.to_unsafe, name.to_unsafe))
+  end
+
+  # Bitwise
+  def and(lhs : LLVMValue, rhs : LLVMValue, name : String = "") : LLVMValue
+    build_and(lhs, rhs, name)
+  end
+
+  def build_and(lhs : LLVMValue, rhs : LLVMValue, name : String = "") : LLVMValue
+    LLVMValue.new(LibLLVM.build_and(@unwrap, lhs.to_unsafe, rhs.to_unsafe, name.to_unsafe))
+  end
+
+  def bitwise_and(lhs : LLVMValue, rhs : LLVMValue, name : String = "") : LLVMValue
+    build_and(lhs, rhs, name)
+  end
+
+  def build_or(lhs : LLVMValue, rhs : LLVMValue, name : String = "") : LLVMValue
+    LLVMValue.new(LibLLVM.build_or(@unwrap, lhs.to_unsafe, rhs.to_unsafe, name.to_unsafe))
+  end
+
+  def bitwise_or(lhs : LLVMValue, rhs : LLVMValue, name : String = "") : LLVMValue
+    build_or(lhs, rhs, name)
+  end
+
+  def xor(lhs : LLVMValue, rhs : LLVMValue, name : String = "") : LLVMValue
+    build_xor(lhs, rhs, name)
+  end
+
+  def build_xor(lhs : LLVMValue, rhs : LLVMValue, name : String = "") : LLVMValue
+    LLVMValue.new(LibLLVM.build_xor(@unwrap, lhs.to_unsafe, rhs.to_unsafe, name.to_unsafe))
+  end
+
+  def bitwise_xor(lhs : LLVMValue, rhs : LLVMValue, name : String = "") : LLVMValue
+    build_xor(lhs, rhs, name)
+  end
+
+  def not(val : LLVMValue, name : String = "") : LLVMValue
+    build_not(val, name)
+  end
+
+  def build_not(val : LLVMValue, name : String = "") : LLVMValue
+    LLVMValue.new(LibLLVM.build_not(@unwrap, val.to_unsafe, name.to_unsafe))
+  end
+
+  def bitwise_not(val : LLVMValue, name : String = "") : LLVMValue
+    build_not(val, name)
+  end
+
+  def shl(lhs : LLVMValue, rhs : LLVMValue, name : String = "") : LLVMValue
+    LLVMValue.new(LibLLVM.build_shl(@unwrap, lhs.to_unsafe, rhs.to_unsafe, name.to_unsafe))
+  end
+
+  def lshr(lhs : LLVMValue, rhs : LLVMValue, name : String = "") : LLVMValue
+    LLVMValue.new(LibLLVM.build_lshr(@unwrap, lhs.to_unsafe, rhs.to_unsafe, name.to_unsafe))
+  end
+
+  def ashr(lhs : LLVMValue, rhs : LLVMValue, name : String = "") : LLVMValue
+    LLVMValue.new(LibLLVM.build_ashr(@unwrap, lhs.to_unsafe, rhs.to_unsafe, name.to_unsafe))
+  end
+
+  # Memory
+  def alloca(type : LLVMType, name : String = "") : LLVMValue
+    LLVMValue.new(LibLLVM.build_alloca(@unwrap, type.to_unsafe, name.to_unsafe))
+  end
+
+  def alloca_array(type : LLVMType, count : LLVMValue, name : String = "") : LLVMValue
+    LLVMValue.new(LibLLVM.build_array_alloca(@unwrap, type.to_unsafe, count.to_unsafe, name.to_unsafe))
+  end
+
+  def load(type : LLVMType, ptr : LLVMValue, name : String = "") : LLVMValue
+    LLVMValue.new(LibLLVM.build_load2(@unwrap, type.to_unsafe, ptr.to_unsafe, name.to_unsafe))
+  end
+
+  def store(val : LLVMValue, ptr : LLVMValue) : LLVMValue
+    LLVMValue.new(LibLLVM.build_store(@unwrap, val.to_unsafe, ptr.to_unsafe))
+  end
+
+  def gep(type : LLVMType, ptr : LLVMValue, indices : Array(LLVMValue), name : String = "") : LLVMValue
+    raw_idx = indices.map { |i| i.to_unsafe }
+    ptr_idx = raw_idx.empty? ? Pointer(LibLLVM::ValueRef).new(0_u64) : raw_idx.to_unsafe
+    LLVMValue.new(LibLLVM.build_gep2(@unwrap, type.to_unsafe, ptr.to_unsafe, ptr_idx, indices.size, name.to_unsafe))
+  end
+
+  def inbounds_gep(type : LLVMType, ptr : LLVMValue, indices : Array(LLVMValue), name : String = "") : LLVMValue
+    raw_idx = indices.map { |i| i.to_unsafe }
+    ptr_idx = raw_idx.empty? ? Pointer(LibLLVM::ValueRef).new(0_u64) : raw_idx.to_unsafe
+    LLVMValue.new(LibLLVM.build_inbounds_gep2(@unwrap, type.to_unsafe, ptr.to_unsafe, ptr_idx, indices.size, name.to_unsafe))
+  end
+
+  def global_string_ptr(str : String, name : String = "") : LLVMValue
+    LLVMValue.new(LibLLVM.build_global_string_ptr(@unwrap, str.to_unsafe, name.to_unsafe))
+  end
+
+  # Casts & Conversions
+  def trunc(val : LLVMValue, dest_type : LLVMType, name : String = "") : LLVMValue
+    LLVMValue.new(LibLLVM.build_trunc(@unwrap, val.to_unsafe, dest_type.to_unsafe, name.to_unsafe))
+  end
+
+  def zext(val : LLVMValue, dest_type : LLVMType, name : String = "") : LLVMValue
+    LLVMValue.new(LibLLVM.build_zext(@unwrap, val.to_unsafe, dest_type.to_unsafe, name.to_unsafe))
+  end
+
+  def sext(val : LLVMValue, dest_type : LLVMType, name : String = "") : LLVMValue
+    LLVMValue.new(LibLLVM.build_sext(@unwrap, val.to_unsafe, dest_type.to_unsafe, name.to_unsafe))
+  end
+
+  def fp_to_ui(val : LLVMValue, dest_type : LLVMType, name : String = "") : LLVMValue
+    LLVMValue.new(LibLLVM.build_fp2ui(@unwrap, val.to_unsafe, dest_type.to_unsafe, name.to_unsafe))
+  end
+
+  def fp_to_si(val : LLVMValue, dest_type : LLVMType, name : String = "") : LLVMValue
+    LLVMValue.new(LibLLVM.build_fp2si(@unwrap, val.to_unsafe, dest_type.to_unsafe, name.to_unsafe))
+  end
+
+  def ui_to_fp(val : LLVMValue, dest_type : LLVMType, name : String = "") : LLVMValue
+    LLVMValue.new(LibLLVM.build_ui2fp(@unwrap, val.to_unsafe, dest_type.to_unsafe, name.to_unsafe))
+  end
+
+  def si_to_fp(val : LLVMValue, dest_type : LLVMType, name : String = "") : LLVMValue
+    LLVMValue.new(LibLLVM.build_si2fp(@unwrap, val.to_unsafe, dest_type.to_unsafe, name.to_unsafe))
+  end
+
+  def fp_trunc(val : LLVMValue, dest_type : LLVMType, name : String = "") : LLVMValue
+    LLVMValue.new(LibLLVM.build_fptrunc(@unwrap, val.to_unsafe, dest_type.to_unsafe, name.to_unsafe))
+  end
+
+  def fp_ext(val : LLVMValue, dest_type : LLVMType, name : String = "") : LLVMValue
+    LLVMValue.new(LibLLVM.build_fpext(@unwrap, val.to_unsafe, dest_type.to_unsafe, name.to_unsafe))
+  end
+
+  def ptr_to_int(val : LLVMValue, dest_type : LLVMType, name : String = "") : LLVMValue
+    LLVMValue.new(LibLLVM.build_ptr2int(@unwrap, val.to_unsafe, dest_type.to_unsafe, name.to_unsafe))
+  end
+
+  def int_to_ptr(val : LLVMValue, dest_type : LLVMType, name : String = "") : LLVMValue
+    LLVMValue.new(LibLLVM.build_int2ptr(@unwrap, val.to_unsafe, dest_type.to_unsafe, name.to_unsafe))
+  end
+
+  def bit_cast(val : LLVMValue, dest_type : LLVMType, name : String = "") : LLVMValue
+    LLVMValue.new(LibLLVM.build_bit_cast(@unwrap, val.to_unsafe, dest_type.to_unsafe, name.to_unsafe))
+  end
+
+  # Comparisons
+  def icmp(op : LibLLVM::IntPredicate, lhs : LLVMValue, rhs : LLVMValue, name : String = "") : LLVMValue
+    LLVMValue.new(LibLLVM.build_icmp(@unwrap, op, lhs.to_unsafe, rhs.to_unsafe, name.to_unsafe))
+  end
+
+  def fcmp(op : LibLLVM::RealPredicate, lhs : LLVMValue, rhs : LLVMValue, name : String = "") : LLVMValue
+    LLVMValue.new(LibLLVM.build_fcmp(@unwrap, op, lhs.to_unsafe, rhs.to_unsafe, name.to_unsafe))
+  end
+
+  # Control & Functions
+  def phi(type : LLVMType, name : String = "") : LLVMValue
+    LLVMValue.new(LibLLVM.build_phi(@unwrap, type.to_unsafe, name.to_unsafe))
+  end
+
+  def add_incoming(phi_node : LLVMValue, val : LLVMValue, bb : LLVMBasicBlock) : Nil
+    v = val.to_unsafe
+    b = bb.to_unsafe
+    LibLLVM.add_incoming(phi_node.to_unsafe, pointerof(v), pointerof(b), 1)
+  end
+
+  def add_incoming(phi_node : LLVMValue, vals : Array(LLVMValue), bbs : Array(LLVMBasicBlock)) : Nil
+    count = vals.size
+    return if count == 0
+    raw_vals = Pointer(LibLLVM::ValueRef).malloc(count.to_u64)
+    raw_bbs = Pointer(LibLLVM::BasicBlockRef).malloc(count.to_u64)
+    i = 0
+    while i < count
+      raw_vals[i] = vals[i].to_unsafe
+      raw_bbs[i] = bbs[i].to_unsafe
+      i = i + 1
+    end
+    LibLLVM.add_incoming(phi_node.to_unsafe, raw_vals, raw_bbs, count)
+  end
+
+  def call(func_type : LLVMType, func : LLVMValue, args : Array(LLVMValue), name : String = "") : LLVMValue
+    raw_args = args.map { |a| a.to_unsafe }
+    ptr_args = raw_args.empty? ? Pointer(LibLLVM::ValueRef).new(0_u64) : raw_args.to_unsafe
+    LLVMValue.new(LibLLVM.build_call2(@unwrap, func_type.to_unsafe, func.to_unsafe, ptr_args, args.size, name.to_unsafe))
+  end
+
+  def call(func_type : LLVMType, func : LLVMValue, arg1 : LLVMValue, name : String = "") : LLVMValue
+    call(func_type, func, [arg1], name)
+  end
+
+  def call(func_type : LLVMType, func : LLVMValue, arg1 : LLVMValue, arg2 : LLVMValue, name : String = "") : LLVMValue
+    call(func_type, func, [arg1, arg2], name)
+  end
+
+  def select(cond : LLVMValue, then_val : LLVMValue, else_val : LLVMValue, name : String = "") : LLVMValue
+    LLVMValue.new(LibLLVM.build_select(@unwrap, cond.to_unsafe, then_val.to_unsafe, else_val.to_unsafe, name.to_unsafe))
+  end
+
+  def landing_pad(type : LLVMType, personality : LLVMValue, clauses : Array(LLVMValue) = [] of LLVMValue, name : String = "") : LLVMValue
+    lpad = LibLLVM.build_landing_pad(@unwrap, type.to_unsafe, personality.to_unsafe, clauses.size, name.to_unsafe)
+    LibLLVM.set_cleanup(lpad, 1)
+    clauses.each do |c|
+      LibLLVM.add_clause(lpad, c.to_unsafe)
+    end
+    LLVMValue.new(lpad)
+  end
+
+  def invoke(func_type : LLVMType, func : LLVMValue, args : Array(LLVMValue), then_bb : LLVMBasicBlock, catch_bb : LLVMBasicBlock, name : String = "") : LLVMValue
+    raw_args = args.map { |a| a.to_unsafe }
+    ptr_args = raw_args.empty? ? Pointer(LibLLVM::ValueRef).new(0_u64) : raw_args.to_unsafe
+    LLVMValue.new(LibLLVM.build_invoke2(@unwrap, func_type.to_unsafe, func.to_unsafe, ptr_args, args.size, then_bb.to_unsafe, catch_bb.to_unsafe, name.to_unsafe))
+  end
+
+  def extract_value(agg_val : LLVMValue, index : Int32, name : String = "") : LLVMValue
+    LLVMValue.new(LibLLVM.build_extract_value(@unwrap, agg_val.to_unsafe, index, name.to_unsafe))
+  end
+
+  def dispose : Nil
+    if !@disposed && @unwrap.address != 0
+      LibLLVM.dispose_builder(@unwrap)
+      @disposed = true
+    end
+  end
+end

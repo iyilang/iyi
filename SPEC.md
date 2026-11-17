@@ -9172,7 +9172,7 @@ module of its own, the way Rust crates isolate theirs. Counted at
 2f070a01e by reading the sources, blocks (`unsafe { }`) would have
 wrapped 2,338 runs of lines in src/std, 900 in src/iyi and 607 in bench,
 and a mark per declaration 1,535, 469 and 258 defs, against 84, 13 and
-85 module marks.
+86 module marks.
 
 ---
 

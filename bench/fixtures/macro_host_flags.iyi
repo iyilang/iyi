@@ -1,0 +1,7 @@
+macro host_probe
+  {% if flag?(:darwin) %}target-darwin{% end %}
+  {% if host_flag?(:darwin) %}host-darwin{% end %}
+  {% if host_flag?(:aarch64) %}host-aarch64{% end %}
+end
+
+host_probe

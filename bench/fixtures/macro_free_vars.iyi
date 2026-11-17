@@ -1,0 +1,7 @@
+# free: T tuple Int32,Bool splat
+# free: A type Int32
+macro bound
+  {{T}}|{{T[0]}}|{% for i in 0...T.size %}{{i}}{% end %}|{% unless A == Int32 %}no{% end %}yes
+end
+
+bound

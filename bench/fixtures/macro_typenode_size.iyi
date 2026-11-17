@@ -1,0 +1,10 @@
+macro sizes
+  {% if Tuple(Int32, Bool).size == 2 %}
+    TWO = 1
+  {% end %}
+  {% if NamedTuple(a: Int32, b: Bool, c: Char).size == 3 %}
+    THREE = 1
+  {% end %}
+end
+
+sizes

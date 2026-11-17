@@ -1,0 +1,78 @@
+@[Unsafe("the darwin kernel release is asked of the platform through uname, into a buffer this file allocates")]
+module compiler/macros/target_flags
+
+import compiler/platform/target::{Target}
+import compiler/platform/flags::{PlatformFlags}
+
+{% if flag?(:darwin) %}
+  lib LibC
+    fun uname(buffer : UInt8*) : Int32
+  end
+{% end %}
+
+# The flag set a macro sees: the flags its target triple implies, then the `-D`
+# defines, as the hosted compiler builds `Program#flags` (`flags_for_target`
+# plus `program.flags << define`). `flag?(:name)` in a macro answers from this
+# set and nothing else.
+pub class MacroTargetFlags
+  # The host's triple, as the hosted `Config.host_target` gives it at run time: LLVM's default triple, which names the
+  # darwin kernel release, with the macOS version taken from MACOSX_DEPLOYMENT_TARGET when that is set. The triple comes
+  # from this compiler's platform flags and, on darwin, the kernel's own uname, so the native tool links no LLVM. Not
+  # ported: the Linux C library the hosted compiler detects with ldd, and IYI_CONFIG_TARGET.
+  # The triple this compiler was built for, from its own platform flags.
+  pub def self.compile_time_triple : String
+    {% if flag?(:darwin) %}
+      {% if flag?(:aarch64) %} "aarch64-apple-darwin" {% else %} "x86_64-apple-darwin" {% end %}
+    {% elsif flag?(:win32) %}
+      "x86_64-pc-windows-msvc"
+    {% elsif flag?(:aarch64) %}
+      "aarch64-unknown-linux-gnu"
+    {% else %}
+      # LLVM's default triple on x86-64 Linux names the vendor `pc`; on aarch64 it is `unknown`.
+      "x86_64-pc-linux-gnu"
+    {% end %}
+  end
+
+  # The darwin kernel release, as `uname -r` gives it: the third of utsname's five 256-byte fields.
+  pub def self.darwin_release : String
+    {% if flag?(:darwin) %}
+      buffer = Pointer(UInt8).malloc(1280_u64)
+      raise "MacroTargetFlags: uname refused" if LibC.uname(buffer) != 0
+      length = 0
+      while length < 256 && buffer[512 + length] != 0_u8
+        length = length + 1
+      end
+      String.new(length) { |target| target.copy_from(buffer + 512_i64, length) }
+    {% else %}
+      ""
+    {% end %}
+  end
+
+  pub def self.host_triple : String
+    target = Target.new(compile_time_triple)
+    if target.macos?
+      if min_version = ENV["MACOSX_DEPLOYMENT_TARGET"]?
+        target = Target.new("#{target.architecture}-#{target.vendor}-macosx#{min_version}")
+      else
+        target = Target.new("#{target.architecture}-#{target.vendor}-darwin#{darwin_release}")
+      end
+    end
+    target.to_s
+  end
+
+  pub def self.for_triple(triple : String, defines : Array(String)) : Array(String)
+    target = Target.new(triple)
+    flags = PlatformFlags.flags_for_target(target, "")
+    defines.each do |define|
+      if !flags.includes?(define)
+        flags << define
+      end
+    end
+    flags
+  end
+
+  # The flags of the host, with the same defines.
+  pub def self.host(defines : Array(String)) : Array(String)
+    MacroTargetFlags.for_triple(MacroTargetFlags.host_triple, defines)
+  end
+end

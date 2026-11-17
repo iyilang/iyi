@@ -1,0 +1,7 @@
+def get_banner : String
+  "#{"SYSTEM READY"}"
+end
+
+def format_message(host : String, port : Int32) : String
+  "Connecting to #{host} on port #{port}..."
+end

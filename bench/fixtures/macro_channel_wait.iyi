@@ -1,0 +1,5 @@
+macro channel_wait
+  CHANNEL_WAIT = {% if flag?(:x86_64) %}512{% else %}2048{% end %}
+end
+
+channel_wait

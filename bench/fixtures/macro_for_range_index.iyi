@@ -1,0 +1,6 @@
+macro spans(n)
+  {% for i, j in 3...6 %}{{i}}/{{j}} {% end %}
+  {% for k in 1..n %}{{k}} {% end %}
+end
+
+spans(3)

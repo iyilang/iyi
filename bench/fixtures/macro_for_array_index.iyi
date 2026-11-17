@@ -1,0 +1,6 @@
+macro listed(a)
+  {% for x, i in a %}{{i}}:{{x}} {% end %}
+  {% for x in a %}[{{x}}]{% end %}
+end
+
+listed([10, 20, 30])

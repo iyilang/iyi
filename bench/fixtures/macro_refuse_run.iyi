@@ -1,0 +1,6 @@
+# refuse: run
+macro runner
+  {{ run("./some_program") }}
+end
+
+runner

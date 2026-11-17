@@ -1,0 +1,7 @@
+macro skipper
+  before
+  {% skip_file %}
+  after {{ 1 + 1 }}
+end
+
+skipper

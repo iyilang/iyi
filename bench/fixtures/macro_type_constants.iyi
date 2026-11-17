@@ -1,0 +1,7 @@
+# fact: Red 3
+# fact: Blue 7
+macro enum_facts
+  {{ @type.constants }}|{{ @type.constant("Blue") }}|{{ @type.has_constant?("Red") }}|{{ @type.has_constant?("Missing") }}|{{ @type.constant("Missing") }}
+end
+
+enum_facts

@@ -70,7 +70,7 @@ PY="${PYTHON:-python3}"
 # unit while a takeover holds it leaves the takeover a record that names
 # no unit, and one left to the takeover and dropped there a partition
 # nobody names, which only the program's `takendeath:` check sees.
-VALUE_COPIES="TlsIdentity chain copy,a death that keeps its emptied runs,spare runs left off the idle test,a parked connection that keeps its last request,a takeover that keeps a woken fiber waiting,a takeover that keeps the look's token,an idle walk that drops a held unit,a clock turned again with a time behind it,a death that ignores a takeover's hold,a takeover that drops the death left to it"
+VALUE_COPIES="TlsIdentity chain copy,a death that keeps its emptied runs,spare runs left off the idle test,a parked connection that keeps its last request,a parked connection that keeps its last request (plain),a takeover that keeps a woken fiber waiting,a takeover that keeps the look's token,an idle walk that drops a held unit,a clock turned again with a time behind it,a death that ignores a takeover's hold,a takeover that drops the death left to it"
 
 # heap_local.sh's copies not run here: `nobusy` (a busy program's parked
 # unit taken after two ticks) is a timing, which no heap word shows, and
@@ -325,7 +325,7 @@ prove_layout_refused() {
 # requests", with the chaos or the stress alone; the release build passes
 # at seeds 1-3, TailHunt5).
 prove_http_idle_fails() {
-  local label="$1" dir="$2" script="$4"
+  local label="$1" dir="$2" script="$4" extra="${5:-}"
   chosen "$dir" || return 0
   local FLAGS="--release $FLAGS"
   local sound_dir="$WORK/sound-http_idle"
@@ -348,6 +348,12 @@ prove_http_idle_fails() {
   cp -R "$REPO/src/iyi" "$REPO/src/std" "$WORK/$dir/"
   if ! awk "$script" "$REPO/src/std/http.iyi" >"$WORK/$dir/std/http.iyi"; then
     echo "  $label: what the copy changes is not in std/http.iyi any more"
+    status=1
+    return
+  fi
+  if [ -n "$extra" ] && ! { awk -f "$extra" "$WORK/$dir/std/http.iyi" >"$WORK/$dir/std/http.next" &&
+    mv "$WORK/$dir/std/http.next" "$WORK/$dir/std/http.iyi"; }; then
+    echo "  $label: $extra found nothing to change in the copy"
     status=1
     return
   fi

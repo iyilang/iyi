@@ -118,6 +118,34 @@ run_http_idle() { # label name build-flags
   fi
 }
 
+# bench/http_idle.iyi on the tree's std/http with each request's address
+# left on the stack under the wait (bench/http_idle_residue.awk): the
+# loop's zeroing has to clear it, so this must pass as the plain row does.
+run_http_idle_residue() { # label dir build-flags
+  local label="$1" dir="$2" flags="$3"
+  mkdir -p "$WORK/$dir/std"
+  if ! awk -f "$REPO/bench/http_idle_residue.awk" "$REPO/src/std/http.iyi" > "$WORK/$dir/std/http.iyi"; then
+    echo "$label: bench/http_idle_residue.awk found no handler call in std/http.iyi"
+    status=1
+    return
+  fi
+  # shellcheck disable=SC2086
+  if ! IYI_PATH="$WORK/$dir${PSEP}$REPO/src" env -u IYI_OPTS "$IYI" build $flags \
+       -o "$WORK/$dir/program" "$REPO/bench/http_idle.iyi" >"$WORK/$dir/build.log" 2>&1; then
+    echo "$label: build failed"
+    sed -n '1,16p' "$WORK/$dir/build.log"
+    status=1
+    return
+  fi
+  timeout 300 "$WORK/$dir/program" >"$WORK/$dir/out" 2>&1
+  local code=$?
+  sed 's/^/  /' "$WORK/$dir/out"
+  if [ "$code" -ne 0 ]; then
+    echo "$label: exit $code"
+    status=1
+  fi
+}
+
 if [ "$PART" = all ] || [ "$PART" = cases ]; then
   echo "== partitions and poison-on-free, plain"
   run_case "verify" verify "-Dheap_partitions -Dheap_verify"
@@ -132,6 +160,7 @@ if [ "$PART" = all ] || [ "$PART" = cases ]; then
   echo "== an idle keep-alive connection (bench/http_idle.iyi), on and off"
   run_http_idle "http idle" httpidle "--release -Dheap_partitions"
   run_http_idle "http idle, plain" httpidleplain "-Dheap_partitions"
+  run_http_idle_residue "http idle, a request's address left under the wait" httpidleres "--release -Dheap_partitions"
   run_http_idle "http idle, no flag" httpidleoff "--release"
 fi
 
@@ -260,14 +289,21 @@ prove_layout_refused() { # label dir build|run message awk-script
   printf '  %s: stops with exit %s: "%s"\n' "$label" "$code" "$(grep -m1 "$message" "$WORK/$dir/out")"
 }
 
-# A copy of std/http.iyi patched by *awk-script*, ahead of the tree's on
+# A copy of std/http.iyi patched by *awk-script*, and then by the awk
+# program in the file *awk-file* when one is named, ahead of the tree's on
 # `IYI_PATH`, under bench/http_idle.iyi built with *build-flags*: it must
 # fail at "FAIL: phrase".
-prove_http_idle_fails() { # label dir build-flags awk-script
-  local label="$1" dir="$2" flags="$3" script="$4" phrase="idle:"
+prove_http_idle_fails() { # label dir build-flags awk-script [awk-file]
+  local label="$1" dir="$2" flags="$3" script="$4" extra="${5:-}" phrase="idle:"
   mkdir -p "$WORK/$dir/std"
   if ! awk "$script" "$REPO/src/std/http.iyi" > "$WORK/$dir/std/http.iyi"; then
     echo "  $label: what the copy changes is not in std/http.iyi any more"
+    status=1
+    return
+  fi
+  if [ -n "$extra" ] && ! { awk -f "$extra" "$WORK/$dir/std/http.iyi" > "$WORK/$dir/std/http.next" &&
+    mv "$WORK/$dir/std/http.next" "$WORK/$dir/std/http.iyi"; }; then
+    echo "  $label: $extra found nothing to change in the copy"
     status=1
     return
   fi
@@ -601,14 +637,24 @@ if [ "$PART" = all ] || [ "$PART" = broken ]; then
   # wait for the next, so the last request's objects stay in the parked
   # fiber's stack and its partition's idle collection keeps them. Both
   # halves go: the call alone frees most of it on Linux (the request; a
-  # 1 KiB buffer stays, IdleFix3's diag). Built plain, where the loop's
-  # locals keep their stack slots: since the master merge (with master's
-  # std/tls, std/rsa and std/x509 swapped into heap22's tree, and only then) a
-  # --release build of this copy on Linux left nothing of the request in
-  # the parked frames, and passed in 3 runs of 3, while the plain build
-  # fails with all 32 partitions holding their requests, and the fixed
-  # loop passes both ways (the "http idle, plain" row above).
-  prove_http_idle_fails "a parked connection that keeps its last request" httpkeeps "-Dheap_partitions" \
+  # 1 KiB buffer stays, IdleFix3's diag).
+  #
+  # Which words the loop's frames leave behind is the compiler's choice.
+  # After the master merge a --release build of the copy on Linux left
+  # none: the requests were in their partitions before the idle
+  # collections (32 hold 128) and in none after, the loop's own frame
+  # unchanged (488 bytes) and `Conn#fill`'s, which the wait runs in, grown
+  # from 1,592 to 1,880 bytes over the words heap22's tree left; the copy
+  # passed 3 runs of 3. So the --release copy has the request's address
+  # left under the wait on purpose (bench/http_idle_residue.awk), which
+  # the sound tree clears ("a request's address left under the wait"
+  # above) and this copy must keep; and the copy as it was, built plain,
+  # where the loop's locals keep their slots.
+  prove_http_idle_fails "a parked connection that keeps its last request" httpkeeps "--release -Dheap_partitions" \
+    '/^  \{% begin %\}/ { inside = 1 } inside { found = found + gsub(/flag\?\(:heap_partitions\)/, "false") } inside && /^  end\{% end %\}$/ { inside = 0 }
+     /^# `Server\.serve_h1` under `-Dheap_partitions`/ { tail = 1 } tail { if (/IyiRoots\.clear_dead_stack if conn\.available == 0$/) found = found + 1; next }
+     { print } END { if (found != 5) exit 3 }' "$REPO/bench/http_idle_residue.awk"
+  prove_http_idle_fails "a parked connection that keeps its last request (plain)" httpkeepsplain "-Dheap_partitions" \
     '/^  \{% begin %\}/ { inside = 1 } inside { found = found + gsub(/flag\?\(:heap_partitions\)/, "false") } inside && /^  end\{% end %\}$/ { inside = 0 }
      /^# `Server\.serve_h1` under `-Dheap_partitions`/ { tail = 1 } tail { if (/IyiRoots\.clear_dead_stack if conn\.available == 0$/) found = found + 1; next }
      { print } END { if (found != 5) exit 3 }'

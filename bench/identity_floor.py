@@ -111,6 +111,7 @@ ALLOWED_LINES: list[tuple[str, str]] = [
     (r"Crystal library effects are not classified", "stale testing refusal reason for crystal compatibility mode"),
     (r"shared Crystal entrypoint for stale gates|native Crystal launcher", "the Crystal launcher (bin/crystal) a stale gate or spec must start, named as the program it runs"),
     (r"CRYSTAL_CONFIG_LIBRARY_PATH", "the other toolchain's own environment variable, which its launcher sets before running its compiler"),
+    (r"CRYSTAL_LIBRARY_PATH", "the bootstrap Crystal package's own library-path variable: on Windows the RG8 def-body mutant is built by that toolchain, whose `.lib` files are in it, and the compiler prefers IYI_LIBRARY_PATH to it"),
     (r"crystal eval", "the other toolchain's `crystal eval` command, which the shared launcher runs"),
     (r"category.*['\"]crystal['\"]", "stale testing refusal category for crystal compatibility mode"),
     # `bench/std_dependency_floor.sh` fails when a standard library module

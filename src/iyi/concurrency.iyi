@@ -540,6 +540,10 @@ class IyiFiber
   property prev_fiber : IyiFiber?
   property prev_child : IyiFiber?
   property stack_top : UInt64
+  # The distance below stack_top searched by fiber_top_holding and
+  # fiber_guard_hit?: the settled mapping's size, or STACK_BYTES for a
+  # thread's own fiber.
+  getter stack_span : UInt64
 
   property deadline : Int64
   # An io wait with a deadline is in the sleep list as well, by `deadline`;
@@ -597,6 +601,8 @@ class IyiFiber
   # 256 KiB of stack and one guard page under it, so running off the end
   # is a fault at a page rather than a quiet corruption of a neighbour's
   # chunk: every frame probes its pages top down (`iyi_probe_stack`).
+  # This is the default; a program may ask for more before its first task
+  # with stack_bytes=.
   STACK_BYTES = 262144_u64
   PAGE        =   4096_u64
 
@@ -631,6 +637,31 @@ class IyiFiber
     # MiB, and at 40,000 the commit ran out and each new task panicked.
     INITIAL_COMMIT = 16384_u64
   {% end %}
+
+  # One size per process because stacks migrate between thread pools. Set
+  # it before the first task, pooled stack or second thread. Each live task
+  # holds this much address space and a pooled stack keeps its touched
+  # pages; thread and main stacks are unaffected.
+  @@stack_bytes : UInt64 = 262144_u64
+
+  def self.stack_bytes : UInt64
+    @@stack_bytes
+  end
+
+  def self.stack_bytes=(bytes : UInt64) : UInt64
+    if bytes == @@stack_bytes
+      bytes
+    else
+      if bytes < STACK_BYTES || (bytes & 0xFFFF_u64) != 0_u64
+        raise "IyiFiber.stack_bytes: a fiber stack is a whole number of 64 KiB and no smaller than 256 KiB"
+      end
+      if IyiScheduler.stack_size_fixed?
+        raise "IyiFiber.stack_bytes: the fiber stack size is fixed once a task is spawned, a stack is pooled or a second thread is started"
+      end
+      @@stack_bytes = bytes
+      bytes
+    end
+  end
 
   def initialize
     @state = IyiFiberState::Runnable
@@ -678,6 +709,7 @@ class IyiFiber
     @prev_fiber = nil
     @prev_child = nil
     @stack_top = 0_u64
+    @stack_span = STACK_BYTES
     @wait_handle = Pointer(Void).new(0_u64)
     @io_direction = 0
     # The OVERLAPPED is the kernel's 32 bytes; the word after it is the
@@ -788,8 +820,9 @@ class IyiFiber
     # `{% if %}` dies at its `{% end %}` — the file's own top-level
     # constants comment says why.
     base = 0_u64
+    bytes = @@stack_bytes
     {% if flag?(:win32) %}
-      base_ptr = LibC.VirtualAlloc(nil, STACK_BYTES, 0x2000_i32, 1_i32)
+      base_ptr = LibC.VirtualAlloc(nil, bytes, 0x2000_i32, 1_i32)
       raise "VirtualAlloc reserve failed" if base_ptr.address == 0_u64
       base = base_ptr.address
       # A stack the way Windows makes a thread's, from the top down: the
@@ -799,7 +832,7 @@ class IyiFiber
       # guard page is the kernel's to answer as for any thread: it commits
       # that page, moves the guard one down, and lowers StackLimit. Only
       # the pages a fiber reaches are ever committed.
-      top = base + STACK_BYTES
+      top = base + bytes
       committed = LibC.VirtualAlloc(Pointer(Void).new(top - INITIAL_COMMIT - PAGE), INITIAL_COMMIT + PAGE, 0x1000_i32, 4_i32)
       raise "VirtualAlloc commit failed" if committed.address == 0_u64
       old = uninitialized Int32
@@ -819,12 +852,12 @@ class IyiFiber
       # libSystem's mmap: MAP_PRIVATE|MAP_ANON is 0x1002 here rather
       # than Linux's 0x22, and failure is MAP_FAILED (every bit set)
       # rather than -errno.
-      mapped = LibC.mmap(Pointer(Void).new(0_u64), STACK_BYTES, 3, 4098, -1, 0_i64)
+      mapped = LibC.mmap(Pointer(Void).new(0_u64), bytes, 3, 4098, -1, 0_i64)
       raise "fiber stack mmap failed" if mapped.address &+ 1_u64 == 0_u64
       base = mapped.address
       LibC.mprotect(Pointer(Void).new(base), PAGE, 0)
     {% else %}
-      mapped = __iyi_conc_syscall6(IYI_SYS_MMAP, 0_i64, STACK_BYTES.to_i64, 3_i64, 34_i64, -1_i64, 0_i64)
+      mapped = __iyi_conc_syscall6(IYI_SYS_MMAP, 0_i64, bytes.to_i64, 3_i64, 34_i64, -1_i64, 0_i64)
       raise "fiber stack mmap failed" if mapped < 0 && mapped >= -4095
       base = mapped.to_u64
       __iyi_conc_syscall3(IYI_SYS_MPROTECT, base.to_i64, PAGE.to_i64, 0_i64)
@@ -836,8 +869,10 @@ class IyiFiber
   # back from the pool: every word the resume reads is written here, so a
   # reused stack starts exactly as a new one does.
   @[Effect(:scheduler)]; def settle_stack(base : UInt64) : Nil
-    top = base + STACK_BYTES
+    bytes = @@stack_bytes
+    top = base + bytes
     @stack_top = top
+    @stack_span = bytes
     {% if flag?(:win32) && flag?(:x86_64) %}
       entry_sp = top - 40_u64
       ret_slot = entry_sp - 8_u64
@@ -924,7 +959,7 @@ class IyiFiber
     {% end %}
     @stack_top = 0_u64
     @sp = 0_u64
-    IyiScheduler.give_stack(top - STACK_BYTES)
+    IyiScheduler.give_stack(top - @stack_span)
   end
 
   def sp_slot : Pointer(UInt64)
@@ -1904,14 +1939,21 @@ class IyiScheduler
     st = state
     base = st.stack_pool
     return 0_u64 if base == 0
-    st.stack_pool = Pointer(UInt64).new(base + IyiFiber::STACK_BYTES - 8_u64).value
+    st.stack_pool = Pointer(UInt64).new(base + IyiFiber.stack_bytes - 8_u64).value
     base
   end
 
   def self.give_stack(base : UInt64) : Nil
     st = state
-    Pointer(UInt64).new(base + IyiFiber::STACK_BYTES - 8_u64).value = st.stack_pool
+    Pointer(UInt64).new(base + IyiFiber.stack_bytes - 8_u64).value = st.stack_pool
     st.stack_pool = base
+  end
+
+  # Do not create a state just to decide whether the process size is fixed.
+  def self.stack_size_fixed? : Bool
+    state = @@state
+    pooled = state.is_a?(IyiSchedulerState) ? state.stack_pool != 0_u64 : false
+    pooled || shared? || makes_stacks?
   end
 
   # What a context does first once a switch has put it back on its own
@@ -2008,10 +2050,11 @@ class IyiScheduler
       __iyi_close(state.wake_fd) if state.wake_fd > 0_i64
       __iyi_close(state.deadline_timer) if state.deadline_timer > 0_i64
     {% end %}
+    bytes = IyiFiber.stack_bytes
     base = state.stack_pool
     while base != 0_u64
-      following = Pointer(UInt64).new(base + IyiFiber::STACK_BYTES - 8_u64).value
-      __iyi_munmap(base, IyiFiber::STACK_BYTES)
+      following = Pointer(UInt64).new(base + bytes - 8_u64).value
+      __iyi_munmap(base, bytes)
       base = following
     end
     state.stack_pool = 0_u64
@@ -2043,7 +2086,7 @@ class IyiScheduler
     fiber = @@all_head
     while fiber.is_a?(IyiFiber)
       top = fiber.stack_top
-      return top if top != 0 && address <= top && address > top - IyiFiber::STACK_BYTES
+      return top if top != 0 && address <= top && address > top - fiber.stack_span
       fiber = fiber.next_fiber
     end
     0_u64
@@ -2074,7 +2117,7 @@ class IyiScheduler
         if top != 0
           # Anywhere in the reservation: the pages the kernel had not grown
           # into yet as well as the wall and the slack at its bottom.
-          low = top - IyiFiber::STACK_BYTES
+          low = top - fiber.stack_span
           return true if address >= low && address < top
         end
         fiber = fiber.next_fiber

@@ -2802,8 +2802,8 @@ IYI
     step "failure proof: a fiber's top read as no fiber's, as it was"
     mkdir -p topless/iyi
     cp "$REPO"/src/iyi/*.iyi topless/iyi/
-    awk '/^      return top if top != 0 && address <= top && address > top - IyiFiber::STACK_BYTES$/ {
-        print "      return top if top != 0 && address < top && address >= top - IyiFiber::STACK_BYTES"; found = 1; next }
+    awk '/^      return top if top != 0 && address <= top && address > top - fiber\.stack_span$/ {
+        print "      return top if top != 0 && address < top && address >= top - fiber.stack_span"; found = 1; next }
       { print } END { if (!found) exit 3 }' \
       "$REPO/src/iyi/concurrency.iyi" > topless/iyi/concurrency.iyi || { echo "the fiber stack's bound is not in concurrency.iyi any more"; exit 1; }
     if ! IYI_PATH="$WORK/topless${PSEP}$REPO/src" "$IYI" build fresh.iyi -o topless-run > build-topless.log 2>&1; then

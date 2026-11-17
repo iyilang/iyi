@@ -4,6 +4,13 @@
 
 ### Added
 
+- **Programs can request larger fiber stacks before starting work.**
+  `IyiFiber.stack_bytes=` accepts whole 64 KiB multiples of at least 256 KiB,
+  retaining 256 KiB as the default. A different size is refused after a task,
+  pooled stack or second thread; setting the same size remains permitted.
+  Fibers record their spans for pooling, guard checks and stack-window lookup.
+  Thread stacks and the 4,738-line library ceiling are unchanged.
+
 - **Checksum database verification primitives.** The compiler source has
   Ed25519 signed-note verification, checkpoint and record parsing,
   height-8 Merkle tile proofs, and a persistent consistency-checked
@@ -28222,7 +28229,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 29,056-line library and nothing else. Every other
+  written against iyi's own 29,099-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

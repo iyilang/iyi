@@ -939,6 +939,195 @@ esac
 grep -q "stack overflow" "$work/wild.out" && fail "a wild pointer was called a stack overflow"
 step "the stack running out is a panic on every stack, and a wild pointer is not"
 
+# ── 10b. a program may ask for larger fiber stacks before its first task ──
+cat > "$work/stack_default.iyi" <<'EOF'
+module stack_default
+
+puts IyiFiber.stack_bytes
+EOF
+run "$work/stack_default.iyi"
+[ "$code" = 0 ] && [ "$out" = "262144" ] || fail "default fiber stack size: exit $code, $out"
+step "the default fiber stack is 256 KiB"
+
+cat > "$work/stack_deep.iyi" <<'EOF'
+module stack_deep
+
+def down(n : Int32) : Int32
+  return 0 if n == 0
+  down(n - 1) + 1
+end
+
+IyiFiber.stack_bytes = 67108864_u64
+group do |g|
+  task = g.spawn { down(200000) }
+  puts "a task 200000 calls deep came back: #{task.value}"
+end
+EOF
+run "$work/stack_deep.iyi"
+[ "$code" = 0 ] && [ "$out" = "a task 200000 calls deep came back: 200000" ] ||
+  fail "larger fiber stack: exit $code, $out"
+step "a larger fiber stack reaches 200000 calls"
+
+cat > "$work/stack_shallow.iyi" <<'EOF'
+module stack_shallow
+
+def down(n : Int32) : Int32
+  return 0 if n == 0
+  down(n - 1) + 1
+end
+
+group do |g|
+  task = g.spawn { down(200000) }
+  puts "a task 200000 calls deep came back: #{task.value}"
+end
+EOF
+overflow="iyi: panic: stack overflow: the stack ran out, which is infinite or very deep recursion"
+run "$work/stack_shallow.iyi"
+[ "$code" = 1 ] && [ "$out" = "$overflow" ] || fail "default fiber stack depth: exit $code, $out"
+step "the same depth exceeds the default stack"
+
+cat > "$work/stack_big_overflow.iyi" <<'EOF'
+module stack_big_overflow
+
+def down(n : Int32) : Int32
+  down(n + 1) + 1
+end
+
+IyiFiber.stack_bytes = 1048576_u64
+group do |g|
+  g.spawn { down(0) }
+end
+EOF
+run "$work/stack_big_overflow.iyi"
+[ "$code" = 1 ] && [ "$out" = "$overflow" ] || fail "larger fiber stack overflow: exit $code, $out"
+step "a larger fiber stack still has a guard"
+
+cat > "$work/stack_windows.iyi" <<'EOF'
+module stack_windows
+
+def held(a : UInt64) : UInt64
+  IyiRuntimeLock.lock
+  top = IyiScheduler.fiber_top_holding(a)
+  IyiRuntimeLock.unlock
+  top
+end
+
+IyiFiber.stack_bytes = 16777216_u64
+group do |g|
+  g.spawn do
+    top = IyiScheduler.current_stack_top
+    if held(top - 4194304_u64) == top
+      puts "a task's stack is its own 4 MiB down"
+    else
+      puts "a task's stack 4 MiB down is no task's"
+    end
+  end
+end
+t = IyiThread.start do
+  IyiScheduler.current
+  top = IyiScheduler.current_stack_top
+  if top != 0 && held(top - 1048576_u64) != top
+    puts "a thread's own stack kept the default window"
+  else
+    puts "a thread's window grew with the task size"
+  end
+  nil
+end
+t.join
+EOF
+run "$work/stack_windows.iyi"
+[ "$code" = 0 ] && [ "$out" = "a task's stack is its own 4 MiB down
+a thread's own stack kept the default window" ] || fail "fiber and thread stack windows: exit $code, $out"
+step "stack walks use each fiber's own span"
+
+cat > "$work/stack_late.iyi" <<'EOF'
+module stack_late
+
+group do |g|
+  g.spawn(unit: :same) { 1 }
+end
+IyiFiber.stack_bytes = IyiFiber::STACK_BYTES
+puts "the same size, asked again, is kept"
+IyiFiber.stack_bytes = 16777216_u64
+puts "a different size was taken after a task"
+EOF
+fixed="iyi: panic: IyiFiber.stack_bytes: the fiber stack size is fixed once a task is spawned, a stack is pooled or a second thread is started"
+run "$work/stack_late.iyi"
+[ "$code" = 1 ] || fail "late fiber size exited $code: $out"
+printf '%s\n' "$out" | grep -Fq "the same size, asked again, is kept" || fail "same size was refused: $out"
+printf '%s\n' "$out" | grep -Fq "$fixed" || fail "late fiber size was not refused: $out"
+if printf '%s\n' "$out" | grep -Fq "a different size was taken after a task"; then
+  fail "late fiber size was taken: $out"
+fi
+step "the same size remains allowed after a task, a different size is refused"
+
+# Exercise the pool alone: no task installs a stack maker and no second
+# thread marks the scheduler shared.
+cat > "$work/stack_pool.iyi" <<'EOF'
+module stack_pool
+
+fiber = IyiFiber.new
+fiber.prepare_stack
+fiber.release_stack
+raise "the pool-only probe has no pooled stack" if IyiScheduler.state.stack_pool == 0_u64
+raise "the pool-only probe started a task or thread" if IyiScheduler.makes_stacks? || IyiScheduler.shared?
+IyiFiber.stack_bytes = IyiFiber::STACK_BYTES
+puts "the pooled stack kept the same size"
+IyiFiber.stack_bytes = 16777216_u64
+puts "a different size was taken after a stack was pooled"
+EOF
+run "$work/stack_pool.iyi"
+[ "$code" = 1 ] || fail "fiber size after pooling exited $code: $out"
+printf '%s\n' "$out" | grep -Fq "the pooled stack kept the same size" || fail "same pooled size was refused: $out"
+printf '%s\n' "$out" | grep -Fq "$fixed" || fail "fiber size after pooling was not refused: $out"
+if printf '%s\n' "$out" | grep -Fq "a different size was taken after a stack was pooled"; then
+  fail "fiber size after pooling was taken: $out"
+fi
+step "the same size remains allowed after pooling, a different size is refused"
+
+cat > "$work/stack_thread.iyi" <<'EOF'
+module stack_thread
+
+t = IyiThread.start { nil }
+t.join
+IyiFiber.stack_bytes = 16777216_u64
+puts "a different size was taken after a thread"
+EOF
+run "$work/stack_thread.iyi"
+[ "$code" = 1 ] || fail "fiber size after thread exited $code: $out"
+printf '%s\n' "$out" | grep -Fq "$fixed" || fail "fiber size after thread was not refused: $out"
+if printf '%s\n' "$out" | grep -Fq "a different size was taken after a thread"; then
+  fail "fiber size after thread was taken: $out"
+fi
+step "a different fiber size is refused after a thread starts"
+
+for size in 300000 131072; do
+  printf 'module stack_shape\n\nIyiFiber.stack_bytes = %s_u64\n' "$size" > "$work/stack_shape_$size.iyi"
+  run "$work/stack_shape_$size.iyi"
+  [ "$code" = 1 ] || fail "fiber size $size exited $code: $out"
+  printf '%s\n' "$out" | grep -Fq "iyi: panic: IyiFiber.stack_bytes: a fiber stack is a whole number of 64 KiB and no smaller than 256 KiB" ||
+    fail "invalid fiber size $size was not refused: $out"
+done
+step "fiber sizes must be whole 64 KiB multiples of at least 256 KiB"
+
+case "$(uname -s)" in
+  Linux | Darwin)
+    mkdir -p "$work/spanless/iyi"
+    cp src/iyi/*.iyi "$work/spanless/iyi/"
+    awk '/^      return top if top != 0 && address <= top && address > top - fiber\.stack_span$/ {
+        print "      return top if top != 0 && address <= top && address > top - IyiFiber::STACK_BYTES"; found = 1; next }
+      { print } END { if (!found) exit 3 }' \
+      src/iyi/concurrency.iyi > "$work/spanless/iyi/concurrency.iyi" ||
+      fail "the fiber stack's window is not in concurrency.iyi any more"
+    IYI_PATH="$work/spanless:$PWD/src" "$IYI" build -o "$work/spanless-run" "$work/stack_windows.iyi" > "$work/spanless.log" 2>&1 ||
+      fail "the spanless probe did not build: $(cat "$work/spanless.log")"
+    out=$("$work/spanless-run" 2>&1) || fail "the spanless probe failed: $out"
+    [ "${out%%$'\n'*}" = "a task's stack 4 MiB down is no task's" ] ||
+      fail "the stack window check passed without the fiber span: $out"
+    step "the stack window check detects a default-sized task window"
+    ;;
+esac
+
 # ── 11. a panic prints backtrace frames locating the call site ─────────────
 if [ "$(uname -s)" = Darwin ]; then
   cat > "$work/trace.iyi" <<'EOF'

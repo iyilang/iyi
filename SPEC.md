@@ -63,7 +63,7 @@ own reference accepts.
 | warm full build, `hello` / 6,900-line pair | 0.07 s / 0.24 s, against `go build`'s 0.08 s / 0.09 s |
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
-| iyi's own prelude | 29,056 lines, of which 4,738 are the library held to the 4,738 ceiling (7,138 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
+| iyi's own prelude | 29,099 lines, of which 4,738 are the library held to the 4,738 ceiling (7,138 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
 | compiler | 151,503 lines, none of it written in iyi |
 | artifact format | `.iyimod` v62, checksum per section |
 | samples | 28 programs, of which 12 rebuild from artifacts with their modules' source deleted |
@@ -88,7 +88,7 @@ shape.
 > is a library and the rules are the language, so a program can keep one and
 > change the other: `--crystal` builds against Crystal's standard library, and
 > there `require` reaches the ecosystem while every rule stays where it was.
-> "No standard library worth the name" is still true of iyi's own 29,056 lines
+> "No standard library worth the name" is still true of iyi's own 29,099 lines
 > and no longer true of what a program can have. Part V item 12a is the
 > measurement, nine shards wide.
 
@@ -270,7 +270,7 @@ of binary. It is not made the default on that trade, and the middle needs the
 initialisers to run *later* rather than not at all, which is the `dlsym` table
 above, and a larger piece of work than the number it wins.
 
-**3. A deliberately tiny prelude, written in iyi. Done: 29,056 lines,
+**3. A deliberately tiny prelude, written in iyi. Done: 29,099 lines,
 primitives included, of which the library is 4,738.** Not a standard library:
 integers, booleans, a string, one sequence, one dictionary, one range, `puts`,
 and an `enum`'s surface — the member's name, an order, the members, and the
@@ -1063,7 +1063,7 @@ Checking it moved two things and left the shape alone.
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
 | Compiler | 24,984 lines, **written in Crystal** | 151,503 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 29,056-line own prelude + 129,807 in std |
+| Library | 8,161 lines (3,551 of it core) | 29,099-line own prelude + 129,807 in std |
 | Specs | 21,146 lines | 17,536 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
@@ -3749,7 +3749,7 @@ footprint Go's on churn and binary trees and a budget over it on the
 live items.
 
 **And a fiber gives its stack back, which a server is the only program
-that notices.** A fiber's stack is 256 KiB of its own mapping with a
+that notices.** A fiber's stack defaults to 256 KiB of its own mapping with a
 guard page under it, and it was mapped and never returned: "a done
 fiber's stack is never reused" was true of the fiber and got read as
 true of the mapping. Nothing in a script minds. A server is a fiber per
@@ -3767,6 +3767,13 @@ re-raise for one nobody read). Two hundred sequential connections run
 on one stack. The pool is per scheduler, which is per thread, so it
 needs no lock: a started fiber never leaves the scheduler that started
 it (III.4.13 keeps that true of parallel tasks too, on purpose).
+
+`IyiFiber.stack_bytes = bytes` lets a program request larger fiber stacks
+before its first task, pooled stack or second thread. The size must be a
+whole multiple of 64 KiB and at least 256 KiB. Setting the existing size
+remains permitted afterward; a different size is refused. Thread stacks
+stay unchanged. Each fiber records its own span for pool return, guard
+checks and stack-window lookup.
 
 **The other half of that lesson: an address is not a reference.** The
 poller's event buffer was held as `Pointer(...).malloc(...).address` in
@@ -13558,7 +13565,7 @@ Named honestly, so nobody mistakes this draft for complete.
     shards exist and none of them is written to iyi's rules, so "run them
     directly" is not a compatibility problem, it is the four rules: `require`
     against R-1, inference against R-2, monkey patching against R-3, and
-    Crystal's 8,161-line standard library against iyi's own 29,056-line prelude.
+    Crystal's 8,161-line standard library against iyi's own 29,099-line prelude.
 
     What is measurable is narrower and better than that framing suggests, and
     it was measured on **Kemal 1.12.0**, which compiles under this compiler

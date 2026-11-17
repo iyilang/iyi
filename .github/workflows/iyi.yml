@@ -1651,9 +1651,8 @@ jobs:
           # The service also carries its owner's shell flags: LDFLAGS naming
           # brew's LLVM 23 put its static libraries ahead of the recipe's in
           # the link. Every job starts with none, and the static LLVM lives
-          # in a directory of CI's own, never the machine's ~/llvm-static.
+          # in a directory of CI's own (below), never the machine's ~/llvm-static.
           for v in LDFLAGS CPPFLAGS CFLAGS CXXFLAGS LIBRARY_PATH CPATH; do echo "$v=" >> "$GITHUB_ENV"; done
-          echo "LLVM_STATIC=$HOME/iyi-ci/llvm-static" >> "$GITHUB_ENV"
           echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
 
       # The same diet the Linux tarball went on, from the same recipe file
@@ -1665,15 +1664,22 @@ jobs:
       # binaries `lib/` is empty rather than libgc alone. Built
       # on this runner because a static archive is bound to the libc++ and
       # SDK it was compiled against; built once per recipe hash, SDK and
-      # deployment target and kept on the machine (a stamp names them).
+      # deployment target and kept on the machine, in a directory those name.
+      # The Mac has three runners: one job builds it while the others wait
+      # on the lock, and a run with another recipe gets a directory of its
+      # own instead of deleting the one a running job links against. A
+      # `.stamp` is written last, so a build cut short is built again.
       - name: The static LLVM, built once per recipe and SDK on this machine
         run: |
           stamp="${{ steps.tools.outputs.sdk }}-$MACOSX_DEPLOYMENT_TARGET-${{ hashFiles('scripts/build-static-llvm.sh') }}"
-          if [ "$(cat "$LLVM_STATIC/.stamp" 2>/dev/null)" != "$stamp" ]; then
-            rm -rf "$LLVM_STATIC"
-            bash scripts/build-static-llvm.sh "$LLVM_STATIC"
-            echo "$stamp" > "$LLVM_STATIC/.stamp"
-          fi
+          dir="$HOME/iyi-ci/llvm-static-$stamp"
+          mkdir -p "$HOME/iyi-ci"
+          lockf -k "$HOME/iyi-ci/llvm-static.lock" bash -ec '
+            [ -f "$1/.stamp" ] && exit 0
+            rm -rf "$1"
+            bash scripts/build-static-llvm.sh "$1"
+            echo "$2" > "$1/.stamp"' _ "$dir" "$stamp"
+          echo "LLVM_STATIC=$dir" >> "$GITHUB_ENV"
 
       # `iyi-tarball` builds `iyi` and its daemon in release mode, refuses an
       # unoptimised binary (`check_iyi_is_release`), and packages them — one
@@ -2067,16 +2073,18 @@ jobs:
           echo "sdk=sdk$(xcrun --show-sdk-version)-$(xcodebuild -version | awk '/Build version/ {print $3}')" >> "$GITHUB_OUTPUT"
           echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
           for v in LDFLAGS CPPFLAGS CFLAGS CXXFLAGS LIBRARY_PATH CPATH; do echo "$v=" >> "$GITHUB_ENV"; done
-          echo "LLVM_STATIC=$HOME/iyi-ci/llvm-static" >> "$GITHUB_ENV"
           echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
       - name: The static LLVM, built once per recipe and SDK on this machine
         run: |
           stamp="${{ steps.tools.outputs.sdk }}-$MACOSX_DEPLOYMENT_TARGET-${{ hashFiles('scripts/build-static-llvm.sh') }}"
-          if [ "$(cat "$LLVM_STATIC/.stamp" 2>/dev/null)" != "$stamp" ]; then
-            rm -rf "$LLVM_STATIC"
-            bash scripts/build-static-llvm.sh "$LLVM_STATIC"
-            echo "$stamp" > "$LLVM_STATIC/.stamp"
-          fi
+          dir="$HOME/iyi-ci/llvm-static-$stamp"
+          mkdir -p "$HOME/iyi-ci"
+          lockf -k "$HOME/iyi-ci/llvm-static.lock" bash -ec '
+            [ -f "$1/.stamp" ] && exit 0
+            rm -rf "$1"
+            bash scripts/build-static-llvm.sh "$1"
+            echo "$2" > "$1/.stamp"' _ "$dir" "$stamp"
+          echo "LLVM_STATIC=$dir" >> "$GITHUB_ENV"
       - name: Build `iyi`
         run: make iyi LLVM_CONFIG="$LLVM_STATIC/bin/llvm-config"
       - name: The native standard library's foundation
@@ -2108,16 +2116,18 @@ jobs:
           echo "sdk=sdk$(xcrun --show-sdk-version)-$(xcodebuild -version | awk '/Build version/ {print $3}')" >> "$GITHUB_OUTPUT"
           echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
           for v in LDFLAGS CPPFLAGS CFLAGS CXXFLAGS LIBRARY_PATH CPATH; do echo "$v=" >> "$GITHUB_ENV"; done
-          echo "LLVM_STATIC=$HOME/iyi-ci/llvm-static" >> "$GITHUB_ENV"
           echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
       - name: The static LLVM, built once per recipe and SDK on this machine
         run: |
           stamp="${{ steps.tools.outputs.sdk }}-$MACOSX_DEPLOYMENT_TARGET-${{ hashFiles('scripts/build-static-llvm.sh') }}"
-          if [ "$(cat "$LLVM_STATIC/.stamp" 2>/dev/null)" != "$stamp" ]; then
-            rm -rf "$LLVM_STATIC"
-            bash scripts/build-static-llvm.sh "$LLVM_STATIC"
-            echo "$stamp" > "$LLVM_STATIC/.stamp"
-          fi
+          dir="$HOME/iyi-ci/llvm-static-$stamp"
+          mkdir -p "$HOME/iyi-ci"
+          lockf -k "$HOME/iyi-ci/llvm-static.lock" bash -ec '
+            [ -f "$1/.stamp" ] && exit 0
+            rm -rf "$1"
+            bash scripts/build-static-llvm.sh "$1"
+            echo "$2" > "$1/.stamp"' _ "$dir" "$stamp"
+          echo "LLVM_STATIC=$dir" >> "$GITHUB_ENV"
       - name: Build `iyi`
         run: make iyi LLVM_CONFIG="$LLVM_STATIC/bin/llvm-config"
       - name: The partitions' plumbing, without the flag and with it

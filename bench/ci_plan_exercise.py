@@ -166,6 +166,12 @@ else:
     reason, jobs = planned("bench/" + target)
     check("the freestanding wasm fixture still selects its own runner",
           "wasm-freestanding" in jobs, f"{reason}: {sorted(jobs)}")
+    aead_speed = "wasm_" + "aead_" + "speed.iyi"
+    check("Windows native enumeration excludes the browser AES benchmark",
+          bool(loop and gate) and aead_speed in skipped, f"skip list: {sorted(skipped)}")
+    reason, jobs = planned("bench/" + aead_speed)
+    check("the browser AES benchmark still selects its own runner",
+          "wasm-freestanding" in jobs, f"{reason}: {sorted(jobs)}")
 
 print()
 print("== and the reach gate, which asks the stricter question: what runs it")

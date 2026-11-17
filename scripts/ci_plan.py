@@ -28,8 +28,11 @@ Within a pull request the changed files narrow it further:
   - only docs (`*.md`, `doc/`, `editors/`): the docs gates, and the editor
     client's package when `editors/vscode/` changed;
   - only `bench/` files, each run by some job: those jobs and the docs gates;
-  - anything under `.github/` or this script: everything, because a change to
-    how CI runs is only proven by running it;
+  - anything under `.github/` or this script: the fast tier, and the jobs whose
+    steps differ from the base branch's workflow. A change to how CI runs is
+    proven by running what it changed, not by running everything; a change to
+    this script or to the workflow's header runs the fast tier, which starts
+    with `plan`. If the base workflow cannot be read, everything runs;
   - a stale-testing source, spec, observer or gate: the stale jobs on all
     three native platforms, in addition to the ordinary selection;
   - otherwise: the fast tier, plus every job that runs a changed bench file.
@@ -288,7 +291,39 @@ def close_over_needs(jobs, selected):
     return selected
 
 
-def plan(jobs, event, ref, files, bench):
+def touches_ci(files):
+    return any(f.startswith(".github/") or f == "scripts/ci_plan.py" for f in files)
+
+
+def base_workflow(event_path, token, repository):
+    """The workflow as the pull request's base commit has it, or None."""
+    with open(event_path, encoding="utf-8") as f:
+        base = json.load(f)["pull_request"]["base"]["sha"]
+    url = f"https://api.github.com/repos/{repository}/contents/.github/workflows/iyi.yml?ref={base}"
+    request = urllib.request.Request(url, headers={
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github.raw+json",
+    })
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return response.read().decode("utf-8")
+    except OSError:
+        return None
+
+
+def changed_ci_jobs(jobs, base_text):
+    """The jobs that are new in this workflow or whose code differs from the
+    base workflow's, a comment aside; None when the base workflow is unknown.
+    A change to the workflow's header (`on:`, `env:`, `concurrency:`) or to
+    this script adds no job: it runs the fast tier, which starts with `plan`."""
+    if base_text is None:
+        return None
+    base = parse_jobs(base_text)
+    return {name for name, job in jobs.items()
+            if name not in NOT_PLANNED and (name not in base or code(base[name]["text"]) != code(job["text"]))}
+
+
+def plan(jobs, event, ref, files, bench, ci_jobs=None):
     """The selected job ids and the reason, in one sentence."""
     every = {name for name in jobs if name not in NOT_PLANNED}
     if event == "push" and ref.startswith("refs/tags/editor-v"):
@@ -299,11 +334,14 @@ def plan(jobs, event, ref, files, bench):
         sys.exit(f"ci_plan: no tier for the event `{event}`")
     if files is None:
         return every, "the pull request changes more files than the API lists"
-    if any(f.startswith(".github/") or f == "scripts/ci_plan.py" for f in files):
-        return every, "the change is to CI itself"
+    ci_change = touches_ci(files)
+    if ci_change and ci_jobs is None:
+        return every, "the change is to CI itself, and the base branch's workflow could not be read"
 
     code_files = [f for f in files if not is_doc(f)]
     selected = {"docs"}
+    if ci_change:
+        selected |= set(FAST) | ci_jobs
     if any(is_stale(f) for f in files):
         selected |= STALE_JOBS
     if any(f.startswith("editors/vscode/") for f in files):
@@ -328,6 +366,7 @@ def main():
     parser.add_argument("--ref", default=os.environ.get("GITHUB_REF", ""))
     parser.add_argument("--files", nargs="*", help="the changed files, instead of asking the API")
     parser.add_argument("--sha", default=os.environ.get("GITHUB_SHA", ""), help="the commit a scheduled run tests")
+    parser.add_argument("--base-workflow", help="the base branch's workflow file, instead of asking the API")
     args = parser.parse_args()
     if not args.event:
         sys.exit("ci_plan: no event: pass --event or run under GitHub Actions")
@@ -347,7 +386,18 @@ def main():
         files = pull_request_files(os.environ["GITHUB_EVENT_PATH"], os.environ["GITHUB_TOKEN"],
                                    os.environ["GITHUB_REPOSITORY"])
 
-    selected, reason = plan(jobs, args.event, args.ref, files, bench_texts())
+    ci_jobs = None
+    if args.event == "pull_request" and files is not None and touches_ci(files):
+        if args.base_workflow:
+            base_text = Path(args.base_workflow).read_text(encoding="utf-8")
+        else:
+            base_text = base_workflow(os.environ["GITHUB_EVENT_PATH"], os.environ["GITHUB_TOKEN"],
+                                      os.environ["GITHUB_REPOSITORY"])
+        ci_jobs = changed_ci_jobs(jobs, base_text)
+
+    selected, reason = plan(jobs, args.event, args.ref, files, bench_texts(), ci_jobs)
+    if ci_jobs is not None:
+        reason += f"; {len(ci_jobs)} jobs differ from the base branch's workflow"
     if args.event == "schedule":
         try:
             bookkeeping = {job_title("plan", jobs), job_title("result", jobs)}

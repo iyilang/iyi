@@ -3843,7 +3843,7 @@ jobs:
             wasi-run, windows-probe, windows-collector, windows-runtime, windows-native,
             windows-native-gates, windows-native-surfaces, windows-std,
             windows-std-siblings, windows-std-platforms, windows-gates, windows-compiler-specs,
-            wasm32-collector, docs]
+            wasm32-collector, wasm-freestanding, docs]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     # `contents` to create the release; `id-token` and `attestations` for

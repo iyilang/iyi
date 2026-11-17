@@ -2,6 +2,13 @@
 import std/time::{Time}
 import std/random::{Random}
 
+{% unless flag?(:wasm32) && flag?(:unknown) && flag?(:bits32) %}
+  {% raise "freestanding wasm is missing a target flag" %}
+{% end %}
+{% if flag?(:wasi) || flag?(:unix) %}
+  {% raise "freestanding wasm must not expose wasi or unix flags" %}
+{% end %}
+
 @[Link(wasm_import_module: "contract")]
 lib ContractHost
   fun double(value : Int32) : Int32

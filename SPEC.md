@@ -8784,11 +8784,12 @@ which is the program that calls its module's surface, and reads its symbols
 and libraries into the same two sets. That leaves the case a measurement
 cannot reach: a `@[Link]` sitting in the library against the day somebody
 calls it, which is the shape a link line grows in. So the annotations are
-also read as text, across `src/iyi` and `src/std`, and the list is the three
-the library has reasons for — `kernel32` and the MSVC runtime on Windows,
-and `bdw-gc` for the opt-in collector, which on Windows also names its
-`gc.dll` so that the compiler copies it beside the program. A fourth fails
-the gate, whether or not any program reaches it.
+also read as text across `src/iyi` and `src/std`. The allowlist names each
+platform binding exactly: Windows system libraries, darwin's trust-store
+frameworks, and `bdw-gc` for the opt-in collector. The freestanding wasm host
+uses `@[Link(wasm_import_module: "iyi")]` for III.12.1's host calls; it adds
+no native library or WASI dependency. Another module name fails the gate even
+when no program reaches it.
 
 **The five on Linux are allowed by exact name.** `__libc_start_main`,
 `__gmon_start__`, `__cxa_finalize` and the two weak `_ITM_` clone-table

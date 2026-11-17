@@ -1950,7 +1950,7 @@ jobs:
       - name: Build `iyi`
         run: make iyi LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config"
       - name: Python's cryptography and Pillow, for the oracles
-        run: python3 -m pip install -q cryptography pillow
+        run: python3 -m pip install -q --break-system-packages cryptography pillow
       - name: The module exercises of this shard, on darwin
         run: bash bench/std_siblings.sh ${{ matrix.shard }} 4
 

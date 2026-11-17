@@ -6,6 +6,15 @@ https://www.w3.org/TR/2026/REC-webauthn-3-20260825/#sctn-test-vectors.
 Copyright © 2026 World Wide Web Consortium.
 https://www.w3.org/copyright/software-license-2023/
 
+Web Authentication: An API for accessing Public Key Credentials - Level 3:
+https://www.w3.org/TR/2026/REC-webauthn-3-20260825/
+
+Copyright © 2026 World Wide Web Consortium. All Rights Reserved. This work
+is distributed under the W3C® Software and Document License in the hope that
+it will be useful, but WITHOUT ANY WARRANTY; without even the implied
+warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+https://www.w3.org/Consortium/Legal/copyright-software
+
 The original hexadecimal byte strings for clientDataJSON, attestationObject,
 authenticatorData, signature, challenge, and credential ID were converted to
 unpadded base64url and packaged as WebAuthn response JSON. Names, relying

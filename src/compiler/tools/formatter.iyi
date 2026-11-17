@@ -1,0 +1,2519 @@
+@[Unsafe("FormatterBuffer is the formatter's output buffer: raw malloc'd bytes grown with realloc and filled with copy_from. The compiler does not check those pointers or their bounds, and the buffer is the point of the module.")]
+module compiler/tools/formatter
+
+import compiler/foundation/location::{Location}
+import compiler/syntax/token::{Token, TokenKind, Keyword, NumberKind, DelimiterKind, DelimiterState}
+import compiler/syntax/lexer::{Lexer}
+import compiler/syntax/ast::{ASTNode, Expressions, Nop, NilLiteral, BoolLiteral, NumberLiteral, CharLiteral, StringLiteral, StringInterpolation, SymbolLiteral, ArrayLiteral, HashLiteral, TupleLiteral, NamedTupleLiteral, RangeLiteral, RegexLiteral, Var, InstanceVar, ClassVar, Global, Path, Generic, Self, Underscore, ImplicitObj, Return, Break, Next, Yield, If, Unless, While, Until, Case, When, Assign, OpAssign, MultiAssign, And, Or, Not, Splat, DoubleSplat, Cast, NilableCast, IsA, RespondsTo, TypeOf, NamedArgument, Block, Call, Def, Arg, ClassDef, ModuleDef, EnumDef, Alias, Include, Extend, TraitDef, ImplDef, AssocTypeDecl, AnnotationDef, Annotation, TypeDeclaration, UninitializedVar, VisibilityModifier, LibDef, FunDef, TypeDef, CStructOrUnionDef, ExternalVar, ProcNotation, ProcPointer, ProcLiteral, Union, Metaclass, ModuleHeader, SizeOf, InstanceSizeOf, AlignOf, InstanceAlignOf, OffsetOf, PointerOf, Defer, Recover, ImportDecl, UsingDecl, Propagate, ExceptionHandler, Rescue, Visibility, MacroExpression}
+import compiler/syntax/visitor::{Visitor}
+import compiler/syntax/parser::{Parser}
+
+pub struct AlignInfo
+  property id : UInt64
+  property line : Int32
+  property start_column : Int32
+  property middle_column : Int32
+  property end_column : Int32
+  property number : Bool
+
+  def initialize(@id : UInt64, @line : Int32, @start_column : Int32, @middle_column : Int32, @end_column : Int32, @number : Bool)
+  end
+
+  def size : Int32
+    @end_column - @start_column
+  end
+end
+
+pub class CommentInfo
+  property start_line : Int32
+  property end_line : Int32
+  property needs_newline : Bool
+  property needs_format : Bool
+
+  def initialize(@start_line : Int32, @needs_format : Bool)
+    @end_line = @start_line
+    @needs_newline = true
+  end
+end
+
+pub struct HeredocFix
+  property start_line : Int32
+  property end_line : Int32
+  property difference : Int32
+
+  def initialize(@start_line : Int32, @end_line : Int32, @difference : Int32)
+  end
+end
+
+pub class FormatterBuffer
+  @buffer : Pointer(UInt8)
+  @capacity : Int32
+  @bytesize : Int32
+
+  def initialize(capacity : Int32 = 64)
+    cap = capacity < 64 ? 64 : capacity
+    @capacity = cap
+    @buffer = Pointer(UInt8).malloc(cap.to_u64)
+    @bytesize = 0
+  end
+
+  def bytesize : Int32
+    @bytesize
+  end
+
+  def empty? : Bool
+    @bytesize == 0
+  end
+
+  def clear : Nil
+    @bytesize = 0
+  end
+
+  def <<(str : String) : Nil
+    count = str.bytesize
+    return if count <= 0
+    ensure_capacity(@bytesize + count)
+    (@buffer + @bytesize).copy_from(str.to_unsafe, count)
+    @bytesize = @bytesize + count
+  end
+
+  def puts : Nil
+    self << "\n"
+  end
+
+  def to_s : String
+    String.new(@bytesize) do |target|
+      target.copy_from(@buffer, @bytesize)
+    end
+  end
+
+  private def ensure_capacity(needed : Int32) : Nil
+    if needed > @capacity
+      new_cap = @capacity * 2
+      while new_cap < needed
+        new_cap = new_cap * 2
+      end
+      @buffer = @buffer.realloc(new_cap.to_u64)
+      @capacity = new_cap
+    end
+  end
+end
+
+pub class Formatter < Visitor
+  @lexer : Lexer
+  @comment_columns : Array(Int32?)
+  @indent : Int32
+  @line : Int32
+  @column : Int32
+  @token : Token
+  @output : FormatterBuffer
+  @line_output : FormatterBuffer
+  @wrote_newline : Bool
+  @wrote_double_newlines : Bool
+  @wrote_comment : Bool
+  @inside_cond : Int32
+  @inside_lib : Int32
+  @inside_enum : Int32
+  @inside_struct_or_union : Int32
+  @implicit_exception_handler_indent : Int32
+  @last_write : String
+  @exp_needs_indent : Bool
+  @inside_def : Int32
+  @when_infos : Array(AlignInfo)
+  @hash_infos : Array(AlignInfo)
+  @assign_infos : Array(AlignInfo)
+  @doc_comments : Array(CommentInfo)
+  @current_doc_comment : CommentInfo?
+  @shebang : Bool
+  @heredoc_fixes : Array(HeredocFix)
+  @last_is_heredoc : Bool
+  @last_arg_is_skip : Bool
+  @string_continuation : Int32
+  @inside_call_or_assign : Int32
+  @passed_backslash_newline : Bool
+  @no_rstrip_lines : Set(Int32)
+  @filename : String
+
+  property filename : String
+  property indent : Int32
+
+  def self.format(source : String, filename : String = "") : String
+    parser = Parser.new(source, filename)
+    parser.iyi_source_only = true
+    nodes = parser.parse
+
+    formatter = Formatter.new(source)
+    formatter.filename = filename
+    formatter.skip_space_or_newline
+    nodes.accept(formatter)
+    formatter.finish
+  end
+
+  def initialize(source : String)
+    @lexer = Lexer.new(source)
+    @lexer.comments_enabled = true
+    @lexer.count_whitespace = true
+    @lexer.wants_raw = true
+    @comment_columns = [nil.as(Int32?)]
+    @indent = 0
+    @line = 0
+    @column = 0
+    @token = @lexer.next_token
+
+    @output = FormatterBuffer.new(source.bytesize)
+    @line_output = FormatterBuffer.new(128)
+    @wrote_newline = false
+    @wrote_double_newlines = false
+    @wrote_comment = false
+    @inside_cond = 0
+    @inside_lib = 0
+    @inside_enum = 0
+    @inside_struct_or_union = 0
+    @implicit_exception_handler_indent = 0
+    @last_write = ""
+    @exp_needs_indent = true
+    @inside_def = 0
+
+    @when_infos = [] of AlignInfo
+    @hash_infos = [] of AlignInfo
+    @assign_infos = [] of AlignInfo
+    @doc_comments = [] of CommentInfo
+    @current_doc_comment = nil
+    @shebang = @token.type == TokenKind::COMMENT && @token.value.starts_with?("#!")
+    @heredoc_fixes = [] of HeredocFix
+    @last_is_heredoc = false
+    @last_arg_is_skip = false
+    @string_continuation = 0
+    @inside_call_or_assign = 0
+    @passed_backslash_newline = false
+
+    @no_rstrip_lines = Set(Int32).new
+    @filename = ""
+  end
+
+  def accept(node : ASTNode) : Nil
+    node.accept(self)
+  end
+
+  def end_visit_any(node : ASTNode) : Nil
+    unless node.is_a?(StringInterpolation)
+      @last_is_heredoc = false
+    end
+  end
+
+  def visit(node : Nop) : Bool
+    false
+  end
+
+  def visit(node : NilLiteral) : Bool
+    write_keyword(Keyword::NIL)
+    false
+  end
+
+  def visit(node : BoolLiteral) : Bool
+    write_keyword(node.value ? Keyword::TRUE : Keyword::FALSE)
+    false
+  end
+
+  def visit(node : NumberLiteral) : Bool
+    write(@token.raw.empty? ? node.value : @token.raw)
+    next_token
+    false
+  end
+
+  def visit(node : CharLiteral) : Bool
+    write(@token.raw.empty? ? node.value.inspect : @token.raw)
+    next_token
+    false
+  end
+
+  def visit(node : SymbolLiteral) : Bool
+    write(@token.raw.empty? ? ":#{node.value}" : @token.raw)
+    next_token
+    false
+  end
+
+  def next_string_token : Token
+    @token = @lexer.next_string_token(@token.delimiter_state)
+  end
+
+  def visit(node : StringLiteral) : Bool
+    if @token.type == TokenKind::MAGIC_FILE || @token.type == TokenKind::MAGIC_DIR
+      write(@token.raw)
+      next_token
+      return false
+    end
+
+    if @token.type == TokenKind::DELIMITER_START
+      write(@token.raw)
+      next_string_token
+
+      while true
+        case @token.type
+        when TokenKind::STRING
+          write(@token.raw)
+          next_string_token
+        else
+          break
+        end
+      end
+
+      if @token.type == TokenKind::DELIMITER_END
+        write(@token.raw)
+        next_token
+      end
+    else
+      write(@token.raw.empty? ? node.value.inspect : @token.raw)
+      next_token
+    end
+
+    false
+  end
+
+  def visit(node : StringInterpolation) : Bool
+    if @token.type == TokenKind::DELIMITER_START
+      write(@token.raw)
+      next_string_token
+
+      node.expressions.each do |exp|
+        if exp.is_a?(StringLiteral)
+          while @token.type == TokenKind::STRING
+            write(@token.raw)
+            next_string_token
+          end
+        else
+          if @token.type == TokenKind::INTERPOLATION_START
+            write(@token.raw)
+            next_token_skip_space_or_newline
+            accept(exp)
+            skip_space_or_newline
+            check(TokenKind::OP_RCURLY)
+            write("}")
+            next_string_token
+          else
+            accept(exp)
+          end
+        end
+      end
+
+      if @token.type == TokenKind::DELIMITER_END
+        write(@token.raw)
+        next_token
+      end
+    else
+      node.expressions.each do |exp|
+        accept(exp)
+      end
+    end
+
+    false
+  end
+
+  def visit(node : RegexLiteral) : Bool
+    if @token.type == TokenKind::DELIMITER_START
+      write(@token.raw)
+      next_string_token
+      while true
+        case @token.type
+        when TokenKind::STRING
+          write(@token.raw)
+          next_string_token
+        else
+          break
+        end
+      end
+      if @token.type == TokenKind::DELIMITER_END
+        write(@token.raw)
+        next_token
+      end
+    else
+      write(@token.raw)
+      next_token
+    end
+    false
+  end
+
+  def visit(node : ArrayLiteral) : Bool
+    if @token.type == TokenKind::OP_LSQUARE_RSQUARE
+      write("[]")
+      next_token
+      if of_node = node.of
+        write_keyword(" ", Keyword::OF, " ")
+        skip_space_or_newline
+        accept(of_node)
+      end
+      return false
+    end
+    write_token(TokenKind::OP_LSQUARE)
+    skip_space_or_newline
+    node.elements.each_with_index do |elem, i|
+      accept(elem)
+      skip_space_or_newline
+      if @token.type == TokenKind::OP_COMMA
+        write(", ") unless i == node.elements.size - 1
+        next_token_skip_space_or_newline
+      end
+    end
+    skip_space_or_newline
+    write_token(TokenKind::OP_RSQUARE)
+    if of_node = node.of
+      write_keyword(" ", Keyword::OF, " ")
+      skip_space_or_newline
+      accept(of_node)
+    end
+    false
+  end
+
+  def visit(node : HashLiteral) : Bool
+    write_token(TokenKind::OP_LCURLY)
+    skip_space_or_newline
+    node.entries.each_with_index do |entry, i|
+      accept(entry.key)
+      skip_space_or_newline
+      write_token(" ", TokenKind::OP_EQ_GT, " ")
+      skip_space_or_newline
+      accept(entry.value)
+      skip_space_or_newline
+      if @token.type == TokenKind::OP_COMMA
+        write(", ") unless i == node.entries.size - 1
+        next_token_skip_space_or_newline
+      end
+    end
+    skip_space_or_newline
+    write_token(TokenKind::OP_RCURLY)
+    if of_entry = node.of
+      write_keyword(" ", Keyword::OF, " ")
+      accept(of_entry.key)
+      write_token(" ", TokenKind::OP_EQ_GT, " ")
+      skip_space_or_newline
+      accept(of_entry.value)
+    end
+    false
+  end
+
+  def visit(node : TupleLiteral) : Bool
+    write_token(TokenKind::OP_LCURLY)
+    skip_space_or_newline
+    node.elements.each_with_index do |elem, i|
+      accept(elem)
+      skip_space_or_newline
+      if @token.type == TokenKind::OP_COMMA
+        write(", ") unless i == node.elements.size - 1
+        next_token_skip_space_or_newline
+      end
+    end
+    skip_space_or_newline
+    write_token(TokenKind::OP_RCURLY)
+    false
+  end
+
+  def visit(node : NamedTupleLiteral) : Bool
+    write_token(TokenKind::OP_LCURLY)
+    skip_space_or_newline
+    node.entries.each_with_index do |entry, i|
+      write(entry.key)
+      next_token
+      write_token(TokenKind::OP_COLON, " ")
+      skip_space_or_newline
+      accept(entry.value)
+      skip_space_or_newline
+      if @token.type == TokenKind::OP_COMMA
+        write(", ") unless i == node.entries.size - 1
+        next_token_skip_space_or_newline
+      end
+    end
+    skip_space_or_newline
+    write_token(TokenKind::OP_RCURLY)
+    false
+  end
+
+  def visit(node : RangeLiteral) : Bool
+    accept(node.from)
+    skip_space
+    write_token(node.exclusive ? TokenKind::OP_PERIOD_PERIOD_PERIOD : TokenKind::OP_PERIOD_PERIOD)
+    skip_space
+    accept(node.to)
+    false
+  end
+
+  def visit(node : Var) : Bool
+    write(node.name)
+    next_token
+    false
+  end
+
+  def visit(node : InstanceVar) : Bool
+    write(node.name)
+    next_token
+    false
+  end
+
+  def visit(node : ClassVar) : Bool
+    write(node.name)
+    next_token
+    false
+  end
+
+  def visit(node : Global) : Bool
+    write(node.name)
+    next_token
+    false
+  end
+
+  def visit(node : Self) : Bool
+    write_keyword(Keyword::SELF)
+    false
+  end
+
+  def visit(node : Underscore) : Bool
+    write("_")
+    next_token
+    false
+  end
+
+  def visit(node : ImplicitObj) : Bool
+    false
+  end
+
+  def visit(node : Path) : Bool
+    skip_space
+    if node.global
+      write("::")
+      if @token.type == TokenKind::OP_COLON_COLON
+        next_token
+      end
+    end
+    node.names.each_with_index do |name, i|
+      skip_space
+      write(name)
+      next_token
+      if i < node.names.size - 1
+        write_token(TokenKind::OP_COLON_COLON)
+      end
+    end
+    false
+  end
+
+  def visit(node : Generic) : Bool
+    if node.suffix == Generic::Suffix::Question
+      accept(node.type_vars[0])
+      skip_space
+      write_token(TokenKind::OP_QUESTION)
+      return false
+    end
+    if node.suffix == Generic::Suffix::Bang
+      accept(node.type_vars[0])
+      skip_space
+      write_token(TokenKind::OP_BANG)
+      return false
+    end
+    accept(node.name)
+    if @token.type == TokenKind::OP_LPAREN
+      write_token(TokenKind::OP_LPAREN)
+      skip_space_or_newline
+      node.type_vars.each_with_index do |tv, i|
+        skip_space_or_newline
+        accept(tv)
+        skip_space_or_newline
+        if @token.type == TokenKind::OP_COMMA
+          write(", ") unless i == node.type_vars.size - 1
+          next_token_skip_space_or_newline
+        end
+      end
+      skip_space_or_newline
+      write_token(TokenKind::OP_RPAREN)
+    end
+    false
+  end
+
+  def visit(node : Expressions) : Bool
+    if node.expressions.size == 1 && @token.type == TokenKind::OP_LPAREN
+      write("(")
+      next_token_skip_space
+      if @token.type == TokenKind::NEWLINE
+        next_token_skip_space_or_newline
+        write_line
+        write_indent(@indent + 2)
+        accept(node.expressions[0])
+        skip_space_write_line
+        skip_space_or_newline
+        write_indent(@indent)
+        write_token(TokenKind::OP_RPAREN)
+        return false
+      end
+      skip_space_or_newline
+      accept(node.expressions[0])
+      skip_space
+      if @token.type == TokenKind::NEWLINE
+        skip_space_or_newline
+        write_line
+        write_indent(@indent + 2)
+      end
+      skip_space_or_newline
+      write(")")
+      next_token
+      return false
+    end
+
+    has_paren = false
+    has_begin = false
+
+    if node.keyword == Expressions::Keyword::Paren && @token.type == TokenKind::OP_LPAREN
+      write("(")
+      has_paren = true
+      next_token_skip_space
+      if @token.type == TokenKind::NEWLINE
+        @indent = @indent + 2
+        write_line
+        next_token_skip_space_or_newline
+      end
+    elsif node.keyword == Expressions::Keyword::Begin && @token.keyword?(Keyword::BEGIN)
+      write("begin")
+      @indent = @indent + 2
+      write_line
+      next_token
+      skip_space_or_newline
+    end
+
+    skip_space
+    node.expressions.each_with_index do |exp, i|
+      skip_space_or_newline
+      if @token.type == TokenKind::EOF
+        break
+      end
+      write_indent(@indent) if @line_output.empty?
+      accept(exp)
+      skip_space(consume_newline: false)
+      if @token.type == TokenKind::OP_SEMICOLON
+        next_token
+        skip_space(consume_newline: false)
+      end
+      if i == node.expressions.size - 1
+        skip_space_or_newline(last: true, at_least_one: false, next_comes_end: has_paren || has_begin)
+      else
+        next_exp = node.expressions[i + 1]
+        needs_two = needs_two_lines?(exp, next_exp)
+        if needs_two
+          if @wrote_newline
+            write_line unless @wrote_double_newlines
+          elsif !@wrote_double_newlines
+            write_line
+            write_line
+          end
+          @wrote_double_newlines = true
+          found_comment = skip_space_or_newline
+          write_line unless found_comment || @wrote_double_newlines
+        else
+          consume_newlines
+        end
+      end
+    end
+
+    if has_paren
+      skip_space_or_newline
+      @indent = @indent - 2
+      write_line if @wrote_newline
+      write_indent(@indent) if @line_output.empty?
+      write_token(TokenKind::OP_RPAREN)
+    elsif has_begin
+      skip_space_or_newline
+      @indent = @indent - 2
+      write_line
+      write_indent(@indent)
+      check_keyword(Keyword::END)
+      write_keyword(Keyword::END)
+    end
+
+    false
+  end
+
+  def needs_two_lines?(node : ASTNode, next_node : ASTNode) : Bool
+    return false if node.is_a?(Annotation)
+    return false if abstract_def?(node) && abstract_def?(next_node)
+    needs_two_lines?(node) || needs_two_lines?(next_node)
+  end
+
+  def abstract_def?(node : ASTNode) : Bool
+    case node
+    when Def
+      node.abstract
+    when VisibilityModifier
+      abstract_def?(node.exp)
+    else
+      false
+    end
+  end
+
+  def needs_two_lines?(node : ASTNode) : Bool
+    case node
+    when ModuleHeader
+      false
+    when ModuleDef
+      false
+    when Def, ClassDef, LibDef, TraitDef, EnumDef, ImplDef
+      true
+    when VisibilityModifier
+      needs_two_lines?(node.exp)
+    else
+      false
+    end
+  end
+
+  def visit(node : If) : Bool
+    if node.ternary
+      accept(node.cond)
+      skip_space_or_newline || write(" ")
+      write_token(TokenKind::OP_QUESTION)
+      skip_space_or_newline || write(" ")
+      accept(node.then)
+      skip_space_or_newline || write(" ")
+      write_token(TokenKind::OP_COLON)
+      skip_space_or_newline || write(" ")
+      accept(node.else)
+      return false
+    end
+    visit_if_or_unless(node, Keyword::IF)
+    false
+  end
+
+  def visit(node : Unless) : Bool
+    visit_if_or_unless(node, Keyword::UNLESS)
+    false
+  end
+
+  private def visit_if_or_unless(node : ASTNode, keyword : Keyword) : Nil
+    cond = node.is_a?(If) ? node.cond : node.as(Unless).cond
+    a_then = node.is_a?(If) ? node.then : node.as(Unless).then
+    a_else = node.is_a?(If) ? node.else : node.as(Unless).else
+
+    if !@token.keyword?(keyword) && a_else.is_a?(Nop)
+      # Suffix if/unless
+      accept(a_then)
+      write_keyword(" ", keyword, " ")
+      accept(cond)
+      return
+    end
+
+    write_keyword(keyword, " ")
+    format_if_at_cond(node, keyword, true)
+  end
+
+  private def format_if_at_cond(node : ASTNode, keyword : Keyword, check_end : Bool = true) : Nil
+    cond = node.is_a?(If) ? node.cond : node.as(Unless).cond
+    a_then = node.is_a?(If) ? node.then : node.as(Unless).then
+    a_else = node.is_a?(If) ? node.else : node.as(Unless).else
+
+    accept(cond)
+
+    skip_space
+    format_nested(a_then)
+
+    skip_space_or_newline
+    if @token.keyword?(Keyword::ELSE)
+      write_indent(@indent)
+      write("else")
+      next_token
+      skip_space
+      format_nested(a_else)
+    elsif a_else.is_a?(If) && @token.keyword?(Keyword::ELSIF)
+      format_elsif(a_else, keyword)
+    end
+
+    if check_end
+      format_end(@indent)
+    end
+  end
+
+  private def format_elsif(node_else : ASTNode, keyword : Keyword) : Nil
+    write_indent(@indent)
+    write("elsif ")
+    next_token_skip_space_or_newline
+    format_if_at_cond(node_else, keyword, false)
+  end
+
+  def visit(node : While) : Bool
+    format_while_or_until(node, Keyword::WHILE)
+    false
+  end
+
+  def visit(node : Until) : Bool
+    format_while_or_until(node, Keyword::UNTIL)
+    false
+  end
+
+  private def format_while_or_until(node : ASTNode, keyword : Keyword) : Nil
+    cond = node.is_a?(While) ? node.cond : node.as(Until).cond
+    body = node.is_a?(While) ? node.body : node.as(Until).body
+
+    write_keyword(keyword, " ")
+    accept(cond)
+    format_nested_with_end(body)
+  end
+
+  def visit(node : Case) : Bool
+    write_keyword(Keyword::CASE)
+    skip_space
+    if cond = node.cond
+      write(" ")
+      accept(cond)
+    end
+    write_line
+    node.whens.each do |w|
+      skip_space_or_newline
+      write_indent(@indent)
+      kw = w.exhaustive ? Keyword::IN : Keyword::WHEN
+      write_keyword(kw, " ")
+      w.conds.each_with_index do |c, i|
+        accept(c)
+        if i < w.conds.size - 1
+          write_token(TokenKind::OP_COMMA, " ")
+        end
+      end
+      skip_space
+      if @token.keyword?(Keyword::THEN)
+        write_keyword(" ", Keyword::THEN, " ")
+        accept(w.body)
+      else
+        write_line
+        @indent = @indent + 2
+        accept(w.body)
+        @indent = @indent - 2
+      end
+    end
+
+    if a_else = node.else
+      skip_space_or_newline
+      write_line unless @wrote_newline
+      write_indent(@indent)
+      write_keyword(Keyword::ELSE)
+      write_line
+      @indent = @indent + 2
+      accept(a_else)
+      @indent = @indent - 2
+    end
+
+    skip_space_or_newline
+    write_line unless @wrote_newline
+    write_indent(@indent)
+    check_keyword(Keyword::END)
+    write_keyword(Keyword::END)
+    false
+  end
+
+  def visit(node : Return) : Bool
+    format_control_keyword(Keyword::RETURN, node.exp)
+    false
+  end
+
+  def visit(node : Break) : Bool
+    format_control_keyword(Keyword::BREAK, node.exp)
+    false
+  end
+
+  def visit(node : Next) : Bool
+    format_control_keyword(Keyword::NEXT, node.exp)
+    false
+  end
+
+  private def format_control_keyword(kw : Keyword, exp : ASTNode?) : Nil
+    write_keyword(kw)
+    if exp && !exp.is_a?(Nop)
+      skip_space
+      write(" ")
+      accept(exp)
+    end
+  end
+
+  def visit(node : Yield) : Bool
+    write_keyword(Keyword::YIELD)
+    if node.has_parentheses
+      write_token(TokenKind::OP_LPAREN)
+      node.exps.each_with_index do |exp, i|
+        accept(exp)
+        if i < node.exps.size - 1
+          write_token(TokenKind::OP_COMMA, " ")
+        end
+      end
+      write_token(TokenKind::OP_RPAREN)
+    elsif !node.exps.empty?
+      skip_space
+      write(" ")
+      node.exps.each_with_index do |exp, i|
+        accept(exp)
+        if i < node.exps.size - 1
+          write_token(TokenKind::OP_COMMA, " ")
+        end
+      end
+    end
+    false
+  end
+
+  def visit(node : Assign) : Bool
+    if @token.keyword?(Keyword::PUB)
+      write_keyword(Keyword::PUB, " ")
+    end
+    accept(node.target)
+    skip_space
+    write_token(" ", TokenKind::OP_EQ, " ")
+    skip_space_or_newline
+    accept(node.value)
+    false
+  end
+
+  def visit(node : OpAssign) : Bool
+    accept(node.target)
+    skip_space
+    write(" #{node.op}= ")
+    next_token_skip_space_or_newline
+    accept(node.value)
+    false
+  end
+
+  def visit(node : MultiAssign) : Bool
+    node.targets.each_with_index do |target, i|
+      accept(target)
+      if i < node.targets.size - 1
+        write_token(TokenKind::OP_COMMA, " ")
+      end
+    end
+    skip_space
+    write_token(" ", TokenKind::OP_EQ, " ")
+    skip_space_or_newline
+    node.values.each_with_index do |val, i|
+      accept(val)
+      if i < node.values.size - 1
+        write_token(TokenKind::OP_COMMA, " ")
+      end
+    end
+    false
+  end
+
+  def visit(node : And) : Bool
+    accept(node.left)
+    skip_space_or_newline
+    write_token(" ", TokenKind::OP_AMP_AMP, " ")
+    skip_space_or_newline
+    accept(node.right)
+    false
+  end
+
+  def visit(node : Or) : Bool
+    accept(node.left)
+    skip_space_or_newline
+    write_token(" ", TokenKind::OP_BAR_BAR, " ")
+    skip_space_or_newline
+    accept(node.right)
+    false
+  end
+
+  def visit(node : Not) : Bool
+    write_token(TokenKind::OP_BANG)
+    accept(node.exp)
+    false
+  end
+
+  private def is_unary_op?(type : TokenKind) : Bool
+    type == TokenKind::OP_PLUS || type == TokenKind::OP_MINUS || type == TokenKind::OP_TILDE || type == TokenKind::OP_BANG
+  end
+
+  private def setter?(name : String) : Bool
+    name.ends_with?('=') && name != "==" && name != "!=" && name != "<=" && name != ">=" && name != "===" && name != "<=>" && name != "[]="
+  end
+
+  def visit(node : Call) : Bool
+    # Unary prefix operators
+    if obj = node.obj
+      if is_unary_op?(@token.type) && node.name == @token.type.to_s && node.args.empty? && !node.has_parentheses && node.named_args.nil? && node.block_arg.nil?
+        write(@token.type.to_s)
+        next_token_skip_space_or_newline
+        accept(obj)
+        return false
+      end
+    end
+
+    if node.obj.nil? && node.args.size == 1 && (node.name == "+" || node.name == "-" || node.name == "~" || node.name == "!")
+      write(node.name)
+      next_token
+      accept(node.args[0])
+      return false
+    end
+
+    column = @column
+    # Binary operators
+    if obj = node.obj
+      if node.args.size == 1 && is_binary_op?(node.name)
+        accept(obj)
+        @lexer.slash_is_regex = false
+        skip_space_or_newline
+        write(" ") unless @wrote_newline
+        write(node.name)
+        next_token
+        found_comment = skip_space
+        if found_comment || @token.type == TokenKind::NEWLINE
+          next_indent = column == 0 ? @indent + 2 : column
+          skip_space_write_line
+          skip_space_or_newline
+          write_indent(next_indent)
+          accept(node.args[0])
+        else
+          write(" ")
+          accept(node.args[0])
+        end
+        return false
+      elsif node.name == "[]" || node.name == "[]?"
+        accept(obj)
+        skip_space
+        write_token(TokenKind::OP_LSQUARE)
+        skip_space_or_newline
+        node.args.each_with_index do |arg, i|
+          accept(arg)
+          skip_space_or_newline
+          if @token.type == TokenKind::OP_COMMA
+            write(", ") unless i == node.args.size - 1
+            next_token_skip_space_or_newline
+          end
+        end
+        skip_space_or_newline
+        write_token(TokenKind::OP_RSQUARE)
+        if node.name == "[]?"
+          skip_space
+          if @token.type == TokenKind::OP_QUESTION
+            write("?")
+            next_token
+          end
+        end
+        return false
+      elsif node.name == "[]="
+        accept(obj)
+        skip_space
+        write_token(TokenKind::OP_LSQUARE)
+        skip_space_or_newline
+        last_idx = node.args.size - 1
+        i = 0
+        while i < last_idx
+          accept(node.args[i])
+          skip_space_or_newline
+          if @token.type == TokenKind::OP_COMMA
+            write(", ") unless i == last_idx - 1
+            next_token_skip_space_or_newline
+          end
+          i = i + 1
+        end
+        skip_space_or_newline
+        write_token(TokenKind::OP_RSQUARE)
+        skip_space
+        write_token(" ", TokenKind::OP_EQ, " ")
+        skip_space_or_newline
+        accept(node.args.last)
+        return false
+      else
+        accept(obj)
+        @lexer.slash_is_regex = false
+        skip_space
+        if @token.type == TokenKind::NEWLINE || @wrote_newline
+          skip_space_write_line
+          skip_space_or_newline
+          write_indent(@indent + 2)
+        end
+        write_token(TokenKind::OP_PERIOD)
+        skip_space_or_newline
+      end
+    end
+
+    if setter?(node.name)
+      write(node.name[0, node.name.size - 1])
+      next_token
+      skip_space
+      next_token
+      write(" =")
+      skip_space
+      if @token.type == TokenKind::NEWLINE
+        next_token_skip_space_or_newline
+        write_line
+        @indent = @indent + 2
+        accept(node.args.last)
+        @indent = @indent - 2
+      else
+        write(" ")
+        accept(node.args.last)
+      end
+      return false
+    end
+
+    write(node.name)
+    next_token
+    block_formatted = false
+    skip_space
+    has_parens = node.has_parentheses || @token.type == TokenKind::OP_LPAREN
+    if has_parens
+      write_token(TokenKind::OP_LPAREN)
+      skip_space_or_newline
+      format_args_list(node.args, node.named_args, node.block_arg)
+      if block = node.block
+        needs_space = !node.args.empty? || (node.named_args ? true : false)
+        needs_comma = false
+        if @token.type == TokenKind::OP_COMMA
+          next_token
+          skip_space_or_newline
+          needs_comma = true
+          needs_space = true
+        end
+        if @token.type == TokenKind::OP_RPAREN
+          skip_space_or_newline
+          write_token(TokenKind::OP_RPAREN)
+          format_block(block, true)
+          return false
+        else
+          format_block(block, needs_space, needs_comma)
+          block_formatted = true
+        end
+      end
+      skip_space_or_newline
+      write_token(TokenKind::OP_RPAREN)
+    elsif !node.args.empty? || node.named_args || node.block_arg
+      write(" ")
+      skip_space
+      format_args_list(node.args, node.named_args, node.block_arg)
+    end
+
+    if !block_formatted && (block = node.block)
+      format_block(block, true)
+    end
+
+    false
+  end
+
+  private def is_binary_op?(name : String) : Bool
+    name == "+" || name == "-" || name == "*" || name == "/" || name == "//" ||
+      name == "%" || name == "==" || name == "!=" || name == "<" || name == "<=" ||
+      name == ">" || name == ">=" || name == "<=>" || name == "===" ||
+      name == "<<" || name == ">>" || name == "&" || name == "|" || name == "^" ||
+      name == "**"
+  end
+
+  private def format_args_list(args : Array(ASTNode), named_args : Array(NamedArgument)?, block_arg : ASTNode? = nil) : Nil
+    total = args.size + (named_args ? named_args.size : 0) + (block_arg ? 1 : 0)
+    count = 0
+    args.each do |arg|
+      accept(arg)
+      count = count + 1
+      if count < total
+        skip_space
+        if @token.type == TokenKind::OP_COMMA
+          write(", ")
+          next_token_skip_space_or_newline
+        end
+      end
+    end
+    if n_args = named_args
+      n_args.each do |na|
+        accept(na)
+        count = count + 1
+        if count < total
+          skip_space
+          if @token.type == TokenKind::OP_COMMA
+            write(", ")
+            next_token_skip_space_or_newline
+          end
+        end
+      end
+    end
+    if ba = block_arg
+      skip_space_or_newline
+      if @token.type == TokenKind::OP_COMMA
+        write(", ")
+        next_token_skip_space_or_newline
+      end
+      skip_space_or_newline
+      write_token(TokenKind::OP_AMP)
+      skip_space_or_newline
+      accept(ba)
+    end
+  end
+
+  def visit(node : NamedArgument) : Bool
+    write(node.name)
+    next_token
+    write_token(TokenKind::OP_COLON, " ")
+    skip_space_or_newline
+    accept(node.value)
+    false
+  end
+
+  private def clear_object(node : ASTNode) : Nil
+    if node.is_a?(Call)
+      call = node.as(Call)
+      if call.obj.is_a?(Var)
+        call.obj = nil
+      elsif obj = call.obj
+        clear_object(obj)
+      end
+    end
+  end
+
+  private def format_block(block : Block, needs_space : Bool = true, needs_comma : Bool = false) : Nil
+    skip_space
+    if @token.keyword?(Keyword::DO)
+      write_keyword(" ", Keyword::DO)
+      if !block.args.empty?
+        write_token(" ", TokenKind::OP_BAR)
+        block.args.each_with_index do |arg, i|
+          skip_space_or_newline
+          write(arg.name)
+          next_token
+          if i < block.args.size - 1
+            skip_space_or_newline
+            if @token.type == TokenKind::OP_COMMA
+              next_token_skip_space_or_newline
+              write(", ")
+            end
+          end
+        end
+        skip_space_or_newline
+        write_token(TokenKind::OP_BAR)
+      end
+      format_nested_with_end(block.body)
+    elsif @token.type == TokenKind::OP_LCURLY
+      write_token(" ", TokenKind::OP_LCURLY)
+      if !block.args.empty?
+        write_token(" ", TokenKind::OP_BAR)
+        block.args.each_with_index do |arg, i|
+          skip_space_or_newline
+          write(arg.name)
+          next_token
+          if i < block.args.size - 1
+            skip_space_or_newline
+            if @token.type == TokenKind::OP_COMMA
+              next_token_skip_space_or_newline
+              write(", ")
+            end
+          end
+        end
+        skip_space_or_newline
+        write_token(TokenKind::OP_BAR, " ")
+      else
+        write(" ")
+      end
+      skip_space
+      accept(block.body)
+      skip_space_or_newline
+      write_token(" ", TokenKind::OP_RCURLY)
+    else
+      write(", ") if needs_comma
+      write(" ") if needs_space
+      write_token(TokenKind::OP_AMP)
+      skip_space_or_newline
+      write(".")
+      old_wants = @lexer.wants_def_or_macro_name
+      @lexer.wants_def_or_macro_name = true
+      next_token_skip_space_or_newline
+      @lexer.wants_def_or_macro_name = old_wants
+
+      body = block.body
+      if body.is_a?(Call)
+        call = body.as(Call)
+        clear_object(call)
+        accept(call)
+      else
+        accept(body)
+      end
+    end
+  end
+
+  def visit(node : Def) : Bool
+    if @token.keyword?(Keyword::PUB)
+      write_keyword(Keyword::PUB, " ")
+    end
+    if @token.keyword?(Keyword::ABSTRACT) || node.abstract
+      write_keyword(Keyword::ABSTRACT, " ")
+    end
+    write_keyword(Keyword::DEF, " ")
+
+    if receiver = node.receiver
+      skip_space_or_newline
+      accept(receiver)
+      skip_space_or_newline
+      write_token(TokenKind::OP_PERIOD)
+    end
+
+    old_wants = @lexer.wants_def_or_macro_name
+    @lexer.wants_def_or_macro_name = true
+    skip_space_or_newline
+    write(node.name)
+    next_token
+    @lexer.wants_def_or_macro_name = old_wants
+
+    if @token.type == TokenKind::OP_EQ && node.name.ends_with?('=')
+      next_token
+    end
+
+    to_skip = 0
+    if @token.type == TokenKind::OP_LPAREN
+      write_token(TokenKind::OP_LPAREN)
+      skip_space_or_newline
+      node.args.each_with_index do |arg, i|
+        if node.splat_index == i
+          write_token(TokenKind::OP_STAR)
+          skip_space_or_newline
+        end
+        accept(arg)
+        to_skip = to_skip + 1 if @last_arg_is_skip
+        skip_space_or_newline
+        if @token.type == TokenKind::OP_COMMA
+          write(", ") unless i == node.args.size - 1 && node.double_splat.nil? && node.block_arg.nil?
+          next_token_skip_space_or_newline
+        end
+      end
+      if double_splat = node.double_splat
+        write_token(TokenKind::OP_STAR_STAR)
+        skip_space_or_newline
+        to_skip = to_skip + 1 if at_skip?
+        accept(double_splat)
+        skip_space_or_newline
+        if @token.type == TokenKind::OP_COMMA
+          write(", ") unless node.block_arg.nil?
+          next_token_skip_space_or_newline
+        end
+      end
+      if block_arg = node.block_arg
+        write_token(TokenKind::OP_AMP)
+        skip_space_or_newline
+        to_skip = to_skip + 1 if at_skip?
+        accept(block_arg)
+        skip_space_or_newline
+      end
+      skip_space_or_newline
+      write_token(TokenKind::OP_RPAREN)
+    end
+
+    if ret_type = node.return_type
+      skip_space_or_newline
+      write_token(" ", TokenKind::OP_COLON, " ")
+      skip_space_or_newline
+      accept(ret_type)
+    end
+
+    if free_vars = node.free_vars
+      skip_space_or_newline
+      write(" forall ")
+      next_token_skip_space_or_newline
+      free_vars.each_with_index do |fv, i|
+        skip_space_or_newline
+        write(fv)
+        next_token_skip_space
+        if @token.type == TokenKind::OP_COLON
+          write(" : ")
+          next_token_skip_space_or_newline
+          while true
+            write(@token.value)
+            next_token
+            if @token.type == TokenKind::OP_COLON_COLON
+              write("::")
+              next_token
+            else
+              break
+            end
+          end
+          skip_space
+        end
+        if i < free_vars.size - 1
+          skip_space_or_newline
+          write_token(TokenKind::OP_COMMA, " ")
+        end
+      end
+    end
+
+    skip_space
+    if @token.type == TokenKind::IDENT && @token.value == "where"
+      write(" where ")
+      next_token_skip_space
+      while true
+        skip_space_or_newline
+        write(@token.value)
+        next_token_skip_space
+        write_token(" ", TokenKind::OP_COLON, " ")
+        skip_space_or_newline
+        while true
+          write(@token.value)
+          next_token
+          if @token.type == TokenKind::OP_COLON_COLON
+            write("::")
+            next_token
+          else
+            break
+          end
+        end
+        skip_space
+        if @token.type == TokenKind::OP_COMMA
+          write(", ")
+          next_token_skip_space
+        else
+          break
+        end
+      end
+    end
+
+    body = remove_to_skip(node.body, to_skip)
+    unless node.abstract
+      format_nested_with_end(body)
+    end
+
+    false
+  end
+
+  def at_skip? : Bool
+    @token.type == TokenKind::INSTANCE_VAR || @token.type == TokenKind::CLASS_VAR
+  end
+
+  def remove_to_skip(body : ASTNode, to_skip : Int32) : ASTNode
+    if to_skip > 0
+      if body.is_a?(ExceptionHandler)
+        sub_body = remove_to_skip(body.body, to_skip)
+        body.body = sub_body
+        return body
+      end
+
+      if body.is_a?(Expressions)
+        exps = body.expressions
+        if to_skip >= exps.size
+          Nop.new
+        else
+          new_exps = [] of ASTNode
+          i = to_skip
+          while i < exps.size
+            new_exps << exps[i]
+            i = i + 1
+          end
+          if new_exps.size == 0
+            Nop.new
+          elsif new_exps.size == 1
+            new_exps[0]
+          else
+            Expressions.new(new_exps)
+          end
+        end
+      else
+        Nop.new
+      end
+    else
+      body
+    end
+  end
+
+  def visit(node : Arg) : Bool
+    @last_arg_is_skip = false
+    if node.name.empty?
+      skip_space_or_newline
+    else
+      at_skip = at_skip?
+      if !at_skip && !node.external_name.empty? && node.external_name != node.name
+        if @token.type == TokenKind::UNDERSCORE
+          write("_")
+        else
+          write(@token.value)
+        end
+        write(" ")
+        next_token_skip_space_or_newline
+      end
+
+      @last_arg_is_skip = at_skip?
+
+      write(@token.value)
+      next_token
+    end
+
+    if restriction = node.restriction
+      skip_space_or_newline
+      write_token(" ", TokenKind::OP_COLON, " ")
+      skip_space_or_newline
+      accept(restriction)
+    end
+    if default_val = node.default_value
+      skip_space_or_newline
+      write_token(" ", TokenKind::OP_EQ, " ")
+      skip_space_or_newline
+      accept(default_val)
+    end
+    false
+  end
+
+  def visit(node : Splat) : Bool
+    write_token(TokenKind::OP_STAR)
+    accept(node.exp)
+    false
+  end
+
+  def visit(node : DoubleSplat) : Bool
+    write_token(TokenKind::OP_STAR_STAR)
+    accept(node.exp)
+    false
+  end
+
+  def visit(node : Union) : Bool
+    has_parens = @token.type == TokenKind::OP_LPAREN
+    write_token(TokenKind::OP_LPAREN) if has_parens
+
+    if @token.type == TokenKind::IDENT && @token.value == "self?" && node.types.size == 2 && node.types[0].is_a?(Self)
+      write("self?")
+      next_token
+      write_token(TokenKind::OP_RPAREN) if has_parens
+      return false
+    end
+
+    column = @column
+    node.types.each_with_index do |type, i|
+      if @token.type == TokenKind::OP_QUESTION
+        write_token(TokenKind::OP_QUESTION)
+        break
+      end
+
+      unless i == 0
+        skip_space_or_newline
+        write_token(" ", TokenKind::OP_BAR, " ")
+        skip_space
+
+        if @token.type == TokenKind::NEWLINE
+          write_line
+          write_indent(column)
+          next_token_skip_space_or_newline
+        end
+      end
+
+      accept(type)
+      skip_space
+    end
+
+    write_token(TokenKind::OP_RPAREN) if has_parens
+    false
+  end
+
+  def visit(node : ProcNotation) : Bool
+    has_input_parens = @token.type == TokenKind::OP_LPAREN
+    write_token(TokenKind::OP_LPAREN) if has_input_parens
+
+    if inputs = node.inputs
+      inputs.each_with_index do |input, i|
+        skip_space_or_newline
+        accept(input)
+        skip_space_or_newline
+        if @token.type == TokenKind::OP_COMMA
+          write(", ") unless i == inputs.size - 1
+          next_token_skip_space_or_newline
+        end
+      end
+      write_token(TokenKind::OP_RPAREN) if has_input_parens
+    end
+
+    skip_space_or_newline
+    write(" ") if node.inputs
+    write_token(TokenKind::OP_MINUS_GT)
+
+    if output = node.output
+      write(" ")
+      skip_space_or_newline
+      accept(output)
+    else
+      skip_space
+    end
+    false
+  end
+
+  def visit(node : ProcPointer) : Bool
+    write_token(TokenKind::OP_MINUS_GT)
+    skip_space_or_newline
+
+    if node.global
+      write_token(TokenKind::OP_COLON_COLON)
+      skip_space_or_newline
+    end
+
+    if obj = node.obj
+      accept(obj)
+      skip_space
+      write_token(TokenKind::OP_PERIOD)
+      skip_space_or_newline
+    end
+
+    write(node.name)
+    next_token_skip_space
+    next_token_skip_space if @token.type == TokenKind::OP_EQ
+
+    if @token.type == TokenKind::OP_LPAREN
+      write("(") unless node.args.empty?
+      next_token_skip_space
+      node.args.each_with_index do |arg, i|
+        accept(arg)
+        skip_space_or_newline
+        if @token.type == TokenKind::OP_COMMA
+          write(", ") unless i == node.args.size - 1
+          next_token_skip_space_or_newline
+        end
+      end
+      write(")") unless node.args.empty?
+      next_token_skip_space
+    end
+    false
+  end
+
+  def visit(node : ProcLiteral) : Bool
+    write_token(TokenKind::OP_MINUS_GT)
+    skip_space_or_newline
+    a_def = node.def
+    if @token.type == TokenKind::OP_LPAREN
+      write("(") unless a_def.args.empty?
+      next_token_skip_space_or_newline
+      a_def.args.each_with_index do |arg, i|
+        accept(arg)
+        skip_space_or_newline
+        if @token.type == TokenKind::OP_COMMA
+          write(", ") unless i == a_def.args.size - 1
+          next_token_skip_space_or_newline
+        end
+      end
+      check(TokenKind::OP_RPAREN)
+      write(")") unless a_def.args.empty?
+      next_token_skip_space_or_newline
+    end
+    if return_type = a_def.return_type
+      check(TokenKind::OP_COLON)
+      write(" : ")
+      next_token_skip_space_or_newline
+      accept(return_type)
+      skip_space_or_newline
+    end
+    write(" ")
+    if @token.keyword?(Keyword::DO)
+      write_keyword(Keyword::DO)
+    else
+      write_token(TokenKind::OP_LCURLY)
+      write(" ") if a_def.body.is_a?(Nop)
+    end
+    skip_space
+    if @token.type == TokenKind::NEWLINE
+      format_nested(a_def.body)
+    else
+      skip_space_or_newline
+      accept(a_def.body)
+      skip_space
+      write(" ") unless a_def.body.is_a?(Nop)
+      write_token(TokenKind::OP_RCURLY)
+    end
+    false
+  end
+
+  def visit(node : ClassDef) : Bool
+    if @token.keyword?(Keyword::PUB)
+      write_keyword(Keyword::PUB, " ")
+    end
+    if @token.keyword?(Keyword::ABSTRACT)
+      write_keyword(Keyword::ABSTRACT, " ")
+    end
+    kw = node.struct ? Keyword::STRUCT : Keyword::CLASS
+    write_keyword(kw, " ")
+    accept(node.name)
+
+    if type_vars = node.type_vars
+      write_token(TokenKind::OP_LPAREN)
+      type_vars.each_with_index do |tv, i|
+        skip_space_or_newline
+        write(tv)
+        next_token
+        if i < type_vars.size - 1
+          skip_space_or_newline
+          write_token(TokenKind::OP_COMMA, " ")
+        end
+      end
+      skip_space_or_newline
+      write_token(TokenKind::OP_RPAREN)
+    end
+    if superclass = node.superclass
+      skip_space_or_newline
+      write(" < ")
+      next_token_skip_space_or_newline
+      accept(superclass)
+    end
+
+    format_nested_with_end(node.body)
+    false
+  end
+
+  def visit(node : ModuleDef) : Bool
+    # iyi: a `module app/greeter` header parses as two nodes, the header and a
+    # `ModuleDef` wrapping everything under it. The header was written by the
+    # visitor below and the wrapper is not in the source at all, so there is
+    # no keyword to write here and no `end` to find.
+    if node.iyi_unit
+      # The wrapper's body opens with an `extend self` the parser wrote. It
+      # carries the header's location and is not in the source, so the one
+      # way to know it is where it always is.
+      body = node.body
+      if body.is_a?(Expressions)
+        rest = body.as(Expressions).expressions
+        first = rest.first?
+        if first && first.is_a?(Extend) && first.as(Extend).name.is_a?(Self)
+          body = Expressions.from(rest[1..])
+        end
+      elsif body.is_a?(Extend)
+        # A file with nothing under its header: `Expressions.from` gave back
+        # the single node rather than a list of one.
+        body = Nop.new if body.as(Extend).name.is_a?(Self)
+      end
+      accept(body)
+      return false
+    end
+
+    write_keyword(Keyword::MODULE, " ")
+    accept(node.name)
+    format_nested_with_end(node.body)
+    false
+  end
+
+  def visit(node : ModuleHeader) : Bool
+    write_keyword(Keyword::MODULE, " ")
+    format_module_path(node.path)
+    false
+  end
+
+  def visit(node : ImportDecl) : Bool
+    write_keyword(Keyword::PUB, " ") if node.exported
+    write_keyword(Keyword::IMPORT, " ")
+    format_module_path(node.path)
+
+    if node.glob
+      write_token(TokenKind::OP_COLON_COLON)
+      skip_space
+      write_token(TokenKind::OP_STAR)
+    elsif names = node.names
+      write_token(TokenKind::OP_COLON_COLON)
+      skip_space_or_newline
+      write_token(TokenKind::OP_LCURLY)
+      skip_space_or_newline
+      names.each_with_index do |name, i|
+        write(name)
+        next_token_skip_space_or_newline
+        if @token.type == TokenKind::OP_COMMA
+          write(", ") unless i == names.size - 1
+          next_token_skip_space_or_newline
+        end
+      end
+      write_token(TokenKind::OP_RCURLY)
+    end
+
+    false
+  end
+
+  def visit(node : UsingDecl) : Bool
+    write_keyword(Keyword::USING, " ")
+    format_module_path(node.path)
+    if names = node.names
+      write_token(TokenKind::OP_COLON_COLON)
+      skip_space_or_newline
+      write_token(TokenKind::OP_LCURLY)
+      skip_space_or_newline
+      names.each_with_index do |name, i|
+        write(name)
+        next_token_skip_space_or_newline
+        if @token.type == TokenKind::OP_COMMA
+          write(", ") unless i == names.size - 1
+          next_token_skip_space_or_newline
+        end
+      end
+      write_token(TokenKind::OP_RCURLY)
+    end
+    false
+  end
+
+  def visit(node : MacroExpression) : Bool
+    if node.output
+      check(TokenKind::OP_LCURLY_LCURLY)
+      write("{{")
+      next_token
+      skip_space
+      write(" ")
+      accept(node.exp)
+      skip_space
+      write(" ")
+      check(TokenKind::OP_RCURLY)
+      next_token
+      check(TokenKind::OP_RCURLY)
+      write("}}")
+      next_token
+    else
+      check(TokenKind::OP_LCURLY_PERCENT)
+      write("{%")
+      next_token
+      skip_space
+      write(" ")
+      accept(node.exp)
+      skip_space
+      check(TokenKind::OP_PERCENT_RCURLY)
+      write("%}")
+      next_token
+    end
+    false
+  end
+
+  private def format_module_path(path : Array(String)) : Nil
+    path.each_with_index do |seg, i|
+      if i > 0
+        write_token(TokenKind::OP_SLASH)
+      end
+      skip_space
+      write(seg)
+      @lexer.wants_regex = false
+      @lexer.slash_is_regex = false
+      next_token
+    end
+  end
+
+  def visit(node : TraitDef) : Bool
+    if @token.keyword?(Keyword::PUB)
+      write_keyword(Keyword::PUB, " ")
+    end
+    write_keyword(Keyword::TRAIT, " ")
+    accept(node.name)
+    if type_vars = node.type_vars
+      write_token(TokenKind::OP_LPAREN)
+      type_vars.each_with_index do |tv, i|
+        skip_space_or_newline
+        write(tv)
+        next_token
+        if i < type_vars.size - 1
+          skip_space_or_newline
+          write_token(TokenKind::OP_COMMA, " ")
+        end
+      end
+      skip_space_or_newline
+      write_token(TokenKind::OP_RPAREN)
+    end
+    if supertraits = node.supertraits
+      skip_space_or_newline
+      write_token(" ", TokenKind::OP_COLON, " ")
+      skip_space_or_newline
+      supertraits.each_with_index do |st, i|
+        accept(st)
+        skip_space
+        if @token.type == TokenKind::OP_COMMA
+          write(", ") unless i == supertraits.size - 1
+          next_token_skip_space_or_newline
+        end
+      end
+    end
+    format_nested_with_end(node.body)
+    false
+  end
+
+  def visit(node : ImplDef) : Bool
+    write_keyword(Keyword::IMPL, " ")
+    accept(node.trait)
+    if trait_args = node.trait_args
+      write_token(TokenKind::OP_LPAREN)
+      trait_args.each_with_index do |ta, i|
+        accept(ta)
+        if i < trait_args.size - 1
+          write_token(TokenKind::OP_COMMA, " ")
+        end
+      end
+      write_token(TokenKind::OP_RPAREN)
+    end
+    write_keyword(" ", Keyword::FOR, " ")
+    accept(node.target)
+
+    if type_vars = node.type_vars
+      skip_space_or_newline
+      write(" forall ")
+      next_token_skip_space_or_newline
+      type_vars.each_with_index do |tv, i|
+        skip_space_or_newline
+        write(tv)
+        next_token_skip_space
+        if @token.type == TokenKind::OP_COLON
+          write(" : ")
+          next_token_skip_space_or_newline
+          while true
+            write(@token.value)
+            next_token
+            if @token.type == TokenKind::OP_COLON_COLON
+              write("::")
+              next_token
+            else
+              break
+            end
+          end
+          skip_space
+        end
+        if i < type_vars.size - 1
+          skip_space_or_newline
+          write_token(TokenKind::OP_COMMA, " ")
+        end
+      end
+    end
+
+    format_nested_with_end(node.body)
+    false
+  end
+
+  def visit(node : AssocTypeDecl) : Bool
+    write_keyword(Keyword::TYPE, " ")
+    write(node.name)
+    next_token
+    if val = node.value
+      write_token(" ", TokenKind::OP_EQ, " ")
+      skip_space_or_newline
+      accept(val)
+    end
+    false
+  end
+
+  def visit(node : EnumDef) : Bool
+    if @token.keyword?(Keyword::PUB)
+      write_keyword(Keyword::PUB, " ")
+    end
+    write_keyword(Keyword::ENUM, " ")
+    accept(node.name)
+    if base = node.base_type
+      write_token(" ", TokenKind::OP_COLON, " ")
+      accept(base)
+    end
+    write_line
+    @indent = @indent + 2
+    node.members.each do |m|
+      skip_space_or_newline
+      write_indent(@indent)
+      accept(m)
+      write_line
+    end
+    @indent = @indent - 2
+    skip_space_or_newline
+    write_indent(@indent)
+    check_keyword(Keyword::END)
+    write_keyword(Keyword::END)
+    false
+  end
+
+  def visit(node : TypeDeclaration) : Bool
+    accept(node.var)
+    skip_space_or_newline
+    write(" : ")
+    next_token_skip_space_or_newline
+    accept(node.declared_type)
+    if val = node.value
+      skip_space
+      write_token(" ", TokenKind::OP_EQ, " ")
+      skip_space_or_newline
+      accept(val)
+    end
+    false
+  end
+
+  def visit(node : UninitializedVar) : Bool
+    accept(node.var)
+    skip_space_or_newline
+    write_token(" ", TokenKind::OP_EQ, " ")
+    write_keyword(Keyword::UNINITIALIZED, " ")
+    accept(node.declared_type)
+    false
+  end
+
+  def visit(node : Alias) : Bool
+    if @token.keyword?(Keyword::PUB)
+      write_keyword(Keyword::PUB, " ")
+    end
+    write_keyword(Keyword::ALIAS, " ")
+    accept(node.name)
+    write_token(" ", TokenKind::OP_EQ, " ")
+    skip_space_or_newline
+    accept(node.value)
+    false
+  end
+
+  def visit(node : AnnotationDef) : Bool
+    if @token.keyword?(Keyword::PUB)
+      write_keyword(Keyword::PUB, " ")
+    end
+    write_keyword(Keyword::ANNOTATION, " ")
+    accept(node.name)
+    format_end(@indent)
+    false
+  end
+
+  def visit(node : Annotation) : Bool
+    write_token(TokenKind::OP_AT_LSQUARE)
+    skip_space_or_newline
+    accept(node.path)
+    skip_space_or_newline
+    if @token.type == TokenKind::OP_LPAREN
+      write_token(TokenKind::OP_LPAREN)
+      skip_space_or_newline
+      format_args_list(node.args, node.named_args)
+      skip_space_or_newline
+      write_token(TokenKind::OP_RPAREN)
+    end
+    skip_space_or_newline
+    write_token(TokenKind::OP_RSQUARE)
+    false
+  end
+
+  def visit(node : Cast) : Bool
+    visit(Call.new(node.obj, "as", node.to))
+  end
+
+  def visit(node : NilableCast) : Bool
+    visit(Call.new(node.obj, "as?", node.to))
+  end
+
+  def visit(node : TypeOf) : Bool
+    visit(Call.new(nil, "typeof", node.expressions))
+  end
+
+  def visit(node : SizeOf) : Bool
+    visit(Call.new(nil, "sizeof", node.exp))
+  end
+
+  def visit(node : InstanceSizeOf) : Bool
+    visit(Call.new(nil, "instance_sizeof", node.exp))
+  end
+
+  def visit(node : AlignOf) : Bool
+    visit(Call.new(nil, "alignof", node.exp))
+  end
+
+  def visit(node : InstanceAlignOf) : Bool
+    visit(Call.new(nil, "instance_alignof", node.exp))
+  end
+
+  def visit(node : OffsetOf) : Bool
+    visit(Call.new(nil, "offsetof", [node.offsetof_type.as(ASTNode), node.offset.as(ASTNode)] of ASTNode))
+  end
+
+  def visit(node : PointerOf) : Bool
+    visit(Call.new(nil, "pointerof", node.exp))
+  end
+
+  def visit(node : IsA) : Bool
+    # `x.nil?` parses as `IsA(x, ::Nil)` with the nil check marked, as in the
+    # hosted parser: it is written back as the call it was.
+    if node.nil_check
+      visit(Call.new(node.obj, "nil?"))
+    else
+      visit(Call.new(node.obj, "is_a?", node.const))
+    end
+  end
+
+  def visit(node : RespondsTo) : Bool
+    visit(Call.new(node.obj, "responds_to?", StringLiteral.new(node.name)))
+  end
+
+  def visit(node : Include) : Bool
+    write_keyword(Keyword::INCLUDE, " ")
+    accept(node.name)
+    false
+  end
+
+  def visit(node : Extend) : Bool
+    write_keyword(Keyword::EXTEND, " ")
+    accept(node.name)
+    false
+  end
+
+  def visit(node : LibDef) : Bool
+    write_keyword(Keyword::LIB, " ")
+    accept(node.name)
+    format_nested_with_end(node.body)
+    false
+  end
+
+  def visit(node : FunDef) : Bool
+    write_keyword(Keyword::FUN, " ")
+    write(node.name)
+    next_token
+    if @token.type == TokenKind::OP_LPAREN
+      write_token(TokenKind::OP_LPAREN)
+      node.args.each_with_index do |arg, i|
+        accept(arg)
+        if i < node.args.size - 1
+          write_token(TokenKind::OP_COMMA, " ")
+        end
+      end
+      write_token(TokenKind::OP_RPAREN)
+    end
+    if ret = node.return_type
+      write_token(" ", TokenKind::OP_COLON, " ")
+      accept(ret)
+    end
+    if body = node.body
+      if !body.is_a?(Nop)
+        write_line
+        @indent = @indent + 2
+        accept(body)
+        @indent = @indent - 2
+        skip_space_or_newline
+        write_line unless @wrote_newline
+        write_indent(@indent)
+        check_keyword(Keyword::END)
+        write_keyword(Keyword::END)
+      end
+    end
+    false
+  end
+
+  def visit(node : VisibilityModifier) : Bool
+    kw = case node.modifier
+         when Visibility::Public    then Keyword::PUB
+         when Visibility::Private   then Keyword::PRIVATE
+         when Visibility::Protected then Keyword::PROTECTED
+         else                            Keyword::PUB
+         end
+    write_keyword(kw, " ")
+    accept(node.exp)
+    false
+  end
+
+  def visit(node : Propagate) : Bool
+    accept(node.exp)
+    skip_space
+    write_token(TokenKind::OP_BANG)
+    false
+  end
+
+  def visit(node : Defer) : Bool
+    write("defer ")
+    next_token_skip_space
+    accept(node.exp)
+    false
+  end
+
+  def visit(node : Recover) : Bool
+    accept(node.exp)
+    skip_space
+    write_token(TokenKind::OP_PERIOD)
+    skip_space_or_newline
+    if deflt = node.default
+      write("or")
+      next_token_skip_space
+      write_token(TokenKind::OP_LPAREN)
+      skip_space_or_newline
+      accept(deflt)
+      skip_space_or_newline
+      write_token(TokenKind::OP_RPAREN)
+    else
+      write("or_panic")
+      next_token
+      if @token.type == TokenKind::OP_LPAREN
+        write_token(TokenKind::OP_LPAREN)
+        skip_space_or_newline
+        write_token(TokenKind::OP_RPAREN)
+      end
+    end
+    false
+  end
+
+  def visit(node : ExceptionHandler) : Bool
+    write_keyword(Keyword::BEGIN)
+    write_line
+    @indent = @indent + 2
+    accept(node.body)
+    @indent = @indent - 2
+    if rescues = node.rescues
+      rescues.each do |r|
+        skip_space_or_newline
+        write_line unless @wrote_newline
+        write_indent(@indent)
+        write_keyword(Keyword::RESCUE)
+        if types = r.types
+          write(" ")
+          types.each_with_index do |t, i|
+            accept(t)
+            if i < types.size - 1
+              write_token(TokenKind::OP_BAR, " ")
+            end
+          end
+        end
+        write_line
+        @indent = @indent + 2
+        accept(r.body)
+        @indent = @indent - 2
+      end
+    end
+    if a_else = node.else
+      skip_space_or_newline
+      write_line unless @wrote_newline
+      write_indent(@indent)
+      write_keyword(Keyword::ELSE)
+      write_line
+      @indent = @indent + 2
+      accept(a_else)
+      @indent = @indent - 2
+    end
+    if a_ensure = node.ensure
+      skip_space_or_newline
+      write_line unless @wrote_newline
+      write_indent(@indent)
+      write_keyword(Keyword::ENSURE)
+      write_line
+      @indent = @indent + 2
+      accept(a_ensure)
+      @indent = @indent - 2
+    end
+    skip_space_or_newline
+    write_line unless @wrote_newline
+    write_indent(@indent)
+    check_keyword(Keyword::END)
+    write_keyword(Keyword::END)
+    false
+  end
+
+  # Token and output manipulation helpers
+
+  def next_token : Token
+    @token = @lexer.next_token
+    @token
+  end
+
+  def next_token_skip_space : Token
+    next_token
+    skip_space
+    @token
+  end
+
+  def next_token_skip_space_or_newline : Token
+    next_token
+    skip_space_or_newline
+    @token
+  end
+
+  def skip_space(consume_newline : Bool = true) : Bool
+    has_space = false
+    base_column = @column
+    while @token.type == TokenKind::SPACE
+      next_token
+      has_space = true
+    end
+    if @token.type == TokenKind::COMMENT
+      needs_space = has_space && base_column != 0
+      write(" ") if needs_space
+      write_comment(!needs_space, consume_newline)
+      true
+    else
+      false
+    end
+  end
+
+  def skip_space_or_newline(last : Bool = false, at_least_one : Bool = false, next_comes_end : Bool = false) : Bool
+    just_wrote_line = @wrote_newline
+    base_column = @column
+    has_space = false
+    newlines = 0
+    while true
+      case @token.type
+      when TokenKind::SPACE
+        has_space = true
+        next_token
+      when TokenKind::NEWLINE
+        newlines = newlines + (@token.raw.empty? ? 1 : @token.raw.bytesize)
+        next_token
+      when TokenKind::OP_SEMICOLON
+        next_token
+      else
+        break
+      end
+    end
+    if @token.type == TokenKind::COMMENT
+      needs_space = has_space && newlines == 0 && base_column != 0
+      if needs_space
+        write(" ")
+      elsif last && newlines > 0
+        if newlines > 1
+          write_line if !just_wrote_line && !@wrote_newline
+          write_line
+        elsif !@wrote_newline
+          write_line
+        elsif at_least_one
+          write_line
+        end
+      end
+      write_comment(!needs_space, true, last)
+      true
+    else
+      false
+    end
+  end
+
+  def consume_newlines(next_comes_end : Bool = false) : Nil
+    if @token.type == TokenKind::NEWLINE
+      raw_newlines = @token.raw.empty? ? 1 : @token.raw.bytesize
+      write_line unless @wrote_newline
+
+      if raw_newlines > 1 && !next_comes_end
+        write_line
+        @wrote_double_newlines = true
+      end
+
+      next_token_skip_space
+
+      if @token.type == TokenKind::NEWLINE && !next_comes_end
+        write_line
+        @wrote_double_newlines = true
+      end
+
+      skip_space_or_newline(last: next_comes_end, at_least_one: true)
+    end
+  end
+
+  def skip_space_write_line : Bool
+    found_comment = skip_space
+    write_line unless found_comment || @wrote_newline
+    found_comment
+  end
+
+  def write_comment(needs_indent : Bool = true, consume_newline : Bool = true, next_comes_end : Bool = false) : Nil
+    while @token.type == TokenKind::COMMENT
+      empty_line = @line_output.empty?
+      if empty_line && needs_indent
+        write_indent(@indent)
+      end
+
+      value = @token.value.strip
+      if value.bytesize > 1
+        raw_after = value[1, value.bytesize - 1]
+        after_val = raw_after.strip
+        if after_val.starts_with?("=>")
+          value = "# => " + after_val[2, after_val.bytesize - 2].strip
+        elsif all_whitespace_or_hash?(after_val)
+          # leave as is
+        else
+          char_1 = value[1]?
+          if char_1 && !whitespace?(char_1)
+            value = "# " + raw_after.strip
+          end
+        end
+      end
+
+      if !@last_write.empty?
+        last_b = @last_write.byte_at(@last_write.bytesize - 1)
+        if last_b != 32_u8 && last_b != 9_u8 && last_b != 10_u8 && last_b != 13_u8
+          write(" ")
+        end
+      end
+
+      @wrote_comment = true
+      write(value)
+      next_token_skip_space
+      if consume_newline
+        consume_newlines(next_comes_end)
+        skip_space_or_newline
+      end
+    end
+  end
+
+  private def whitespace?(c : Char) : Bool
+    c == ' ' || c == '\t' || c == '\n' || c == '\r'
+  end
+
+  private def all_whitespace_or_hash?(s : String) : Bool
+    i = 0
+    while i < s.bytesize
+      b = s.byte_at(i)
+      unless b == 32_u8 || b == 9_u8 || b == 10_u8 || b == 13_u8 || b == 35_u8
+        return false
+      end
+      i = i + 1
+    end
+    true
+  end
+
+  def write_indent(indent : Int32) : Nil
+    i = 0
+    while i < indent
+      write(" ")
+      i = i + 1
+    end
+  end
+
+  def write(str : String) : Nil
+    @output << str
+    @line_output << str
+    last_nl = rindex(str, '\n')
+    if last_nl
+      @column = str.bytesize - last_nl - 1
+    else
+      @column = @column + str.bytesize
+    end
+    nl_count = count(str, '\n')
+    i = 0
+    while i < nl_count
+      increment_line
+      i = i + 1
+    end
+    @wrote_newline = false
+    @wrote_double_newlines = false
+    @last_write = str
+  end
+
+  def write_line : Nil
+    @output.puts
+    @line_output.clear
+    @column = 0
+    @wrote_newline = true
+    @wrote_double_newlines = false
+    increment_line
+    @last_write = ""
+  end
+
+  def increment_line : Nil
+    @line = @line + 1
+    @comment_columns << nil.as(Int32?)
+  end
+
+  def finish : String
+    skip_space
+    write_line unless @wrote_newline
+    skip_space_or_newline
+    result = rstrip(@output.to_s)
+    if @shebang && result.starts_with?("# !")
+      result = "#!" + result[3, result.bytesize - 3]
+    end
+    result + "\n"
+  end
+
+  def write_keyword(kw : Keyword) : Nil
+    check_keyword(kw)
+    write(kw.to_s)
+    next_token
+  end
+
+  def write_keyword(kw : Keyword, after : String) : Nil
+    write_keyword(kw)
+    write(after)
+    skip_space_or_newline
+  end
+
+  def write_keyword(before : String, kw : Keyword) : Nil
+    skip_space
+    write(before)
+    write_keyword(kw)
+  end
+
+  def write_keyword(before : String, kw : Keyword, after : String) : Nil
+    skip_space
+    write(before)
+    write_keyword(kw)
+    write(after)
+    skip_space_or_newline
+  end
+
+  def write_token(type : TokenKind) : Nil
+    check(type)
+    write(type.to_s)
+    next_token
+  end
+
+  def write_token(type : TokenKind, after : String) : Nil
+    write_token(type)
+    write(after)
+  end
+
+  def write_token(before : String, type : TokenKind) : Nil
+    skip_space
+    write(before)
+    write_token(type)
+  end
+
+  def write_token(before : String, type : TokenKind, after : String) : Nil
+    skip_space
+    write(before)
+    write_token(type)
+    write(after)
+  end
+
+  def format_nested(node : ASTNode, indent : Int32 = @indent, write_end_line : Bool = true) : Nil
+    if node.is_a?(Nop)
+      skip_space_write_line
+    else
+      @indent = indent + 2
+      skip_space_write_line
+      skip_space_or_newline
+      write_indent(@indent) unless node.is_a?(Nop)
+      accept(node)
+      skip_space_write_line if write_end_line
+      @indent = indent
+    end
+  end
+
+  def format_end(column : Int32 = @indent) : Nil
+    skip_space_or_newline
+    write_line unless @wrote_newline
+    write_indent(column)
+    check_keyword(Keyword::END)
+    write_keyword(Keyword::END)
+  end
+
+  def format_nested_with_end(node : ASTNode, column : Int32 = @indent, write_end_line : Bool = true) : Nil
+    skip_space
+    if @token.type == TokenKind::OP_SEMICOLON
+      if node.is_a?(Nop)
+        next_token
+        skip_space_or_newline
+        check_keyword(Keyword::END)
+        write("; end")
+        next_token
+        return
+      else
+        next_token_skip_space
+      end
+    end
+    format_nested(node, column, write_end_line)
+    format_end(column)
+  end
+
+  def check_keyword(kw : Keyword) : Nil
+    unless @token.keyword?(kw)
+      raise "expecting keyword #{kw.to_s}, not `#{@token.type.to_s}, #{@token.value}`, at #{@token.location.to_s}"
+    end
+  end
+
+  def check(type : TokenKind) : Nil
+    unless @token.type == type
+      raise "expecting #{type.to_s}, not `#{@token.type.to_s}, #{@token.value}`, at #{@token.location.to_s}"
+    end
+  end
+
+  private def rindex(s : String, ch : Char) : Int32?
+    i = s.bytesize - 1
+    target = ch.ord.to_u8
+    while i >= 0
+      if s.byte_at(i) == target
+        return i
+      end
+      i = i - 1
+    end
+    nil
+  end
+
+  private def count(s : String, ch : Char) : Int32
+    c = 0
+    target = ch.ord.to_u8
+    i = 0
+    while i < s.bytesize
+      if s.byte_at(i) == target
+        c = c + 1
+      end
+      i = i + 1
+    end
+    c
+  end
+
+  private def rstrip(s : String) : String
+    last = s.bytesize - 1
+    while last >= 0
+      b = s.byte_at(last)
+      if b == 32_u8 || b == 9_u8 || b == 10_u8 || b == 13_u8
+        last = last - 1
+      else
+        break
+      end
+    end
+    return "" if last < 0
+    s[0, last + 1]
+  end
+end

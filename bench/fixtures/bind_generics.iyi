@@ -1,0 +1,35 @@
+module GenericShard
+  class Node(T)
+    def initialize(@value : T)
+    end
+
+    def value : T
+      @value
+    end
+
+    def transform(other : T) : T
+      other
+    end
+
+    def map_with(&block : T -> String) : String
+      yield @value
+    end
+  end
+
+  struct Pair(A, B)
+    def initialize(@first : A, @second : B)
+    end
+
+    def first : A
+      @first
+    end
+
+    def second : B
+      @second
+    end
+  end
+
+  def self.build_node(val : Int32) : Node(Int32)
+    Node(Int32).new(val)
+  end
+end

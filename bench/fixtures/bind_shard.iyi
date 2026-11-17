@@ -1,0 +1,50 @@
+module GreeterShard
+  class Config
+    def initialize(@prefix : String = "Hello", @verbose : Bool = false)
+    end
+
+    def prefix : String
+      @prefix
+    end
+
+    def verbose? : Bool
+      @verbose
+    end
+
+    def configure_with(options)
+      options
+    end
+  end
+
+  class Service
+    def initialize(@config : Config)
+    end
+
+    def greet(name : String) : String
+      "#{@config.prefix}, #{name}!"
+    end
+
+    def format_all(*names : String) : Array(String)
+      [greet("everyone")] of String
+    end
+
+    def with_timer(&block : -> Nil) : Nil
+      yield
+    end
+
+    def inspect_untyped(obj)
+      obj
+    end
+
+    private def internal_log(msg : String) : Nil
+    end
+  end
+
+  def self.version : String
+    "2.1.0"
+  end
+
+  def self.create(prefix : String = "Hi") : Service
+    Service.new(Config.new(prefix))
+  end
+end

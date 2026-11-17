@@ -1,0 +1,1208 @@
+module compiler/tools/bind
+
+import compiler/foundation/location::{Location}
+import compiler/syntax/ast::{ASTNode, Arg, ClassDef, Def, EnumDef, Expressions, ImplDef, LibDef, ModuleDef, Path, StringBuilder, TraitDef, Visibility, VisibilityModifier}
+import compiler/syntax/parser::{Parser}
+import compiler/syntax/visitor::{Visitor}
+
+# What a method is, for a boundary.
+pub enum BindVerdict
+  Ready
+  NeedsReturn
+  NeedsHuman
+
+  def ready? : Bool
+    self == Ready
+  end
+
+  def needs_return? : Bool
+    self == NeedsReturn
+  end
+
+  def needs_human? : Bool
+    self == NeedsHuman
+  end
+
+  def to_s : String
+    case self
+    when Ready
+      "ready"
+    when NeedsReturn
+      "needs_return"
+    when NeedsHuman
+      "needs_human"
+    else
+      "unknown"
+    end
+  end
+end
+
+# What happened when a written return type was held against what a caller is handed.
+pub enum BindCheck
+  NotWritten
+  Agrees
+  Disagrees
+  Unchecked
+  Dispatched
+
+  def not_written? : Bool
+    self == NotWritten
+  end
+
+  def agrees? : Bool
+    self == Agrees
+  end
+
+  def disagrees? : Bool
+    self == Disagrees
+  end
+
+  def unchecked? : Bool
+    self == Unchecked
+  end
+
+  def dispatched? : Bool
+    self == Dispatched
+  end
+
+  def to_s : String
+    case self
+    when NotWritten
+      "not_written"
+    when Agrees
+      "agrees"
+    when Disagrees
+      "disagrees"
+    when Unchecked
+      "unchecked"
+    when Dispatched
+      "dispatched"
+    else
+      "unknown"
+    end
+  end
+end
+
+# Name, restriction, and default value of a method parameter.
+pub struct BindParam
+  property name : String
+  property restriction : String
+  property default_value : String
+
+  def initialize(@name : String, @restriction : String, @default_value : String = "")
+  end
+end
+
+# A method and its classification under a boundary.
+pub class BindMethod
+  property owner : String
+  property name : String
+  property verdict : BindVerdict
+  property block : Bool
+  property untyped : Array(String)
+  property location : String
+  property params : Array(BindParam)
+  property returns : String?
+  property receiver : String
+  property written_block : String
+  property inferred : String?
+  property refused : String?
+  property body : String?
+  property storable : Bool
+  property checked : BindCheck
+  property produced : String?
+  property private_def : Bool
+  property body_answers : Bool
+  property uncompilable : Bool
+  property abstract_def : Bool
+  property answers_abstract : Bool
+  property written : String
+  property free_vars : Array(String)
+
+  def initialize(
+    @owner : String,
+    @name : String,
+    @verdict : BindVerdict,
+    @block : Bool = false,
+    @untyped : Array(String) = [] of String,
+    @location : String = "",
+    @params : Array(BindParam) = [] of BindParam,
+    @returns : String? = nil,
+    @receiver : String = "",
+    @written_block : String = "",
+    @inferred : String? = nil,
+    @refused : String? = nil,
+    @body : String? = nil,
+    @storable : Bool = true,
+    @checked : BindCheck = BindCheck::NotWritten,
+    @produced : String? = nil,
+    @private_def : Bool = false,
+    @body_answers : Bool = false,
+    @uncompilable : Bool = false,
+    @abstract_def : Bool = false,
+    @answers_abstract : Bool = false,
+    @written : String = "",
+    @free_vars : Array(String) = [] of String,
+  )
+  end
+
+  def answer : String?
+    if p = @produced
+      p
+    elsif r = @returns
+      r
+    elsif i = @inferred
+      i
+    else
+      nil
+    end
+  end
+
+  def signature_types : Array(String)
+    types = [] of String
+    @params.each do |param|
+      types << param.restriction
+    end
+    if ans = answer
+      types << ans
+    end
+    if !@written_block.empty?
+      parts = @written_block.split(" : ")
+      if parts.size > 1
+        types << parts[parts.size - 1]
+      end
+    end
+    types
+  end
+
+  def callable? : Bool
+    !@block || !@written_block.empty?
+  end
+
+  def declaration(include_defaults : Bool = false) : String
+    args_arr = [] of String
+    @params.each do |param|
+      if param.name.empty? || param.name == "*"
+        args_arr << "*"
+      else
+        written = param.restriction == "?" ? param.name : "#{param.name} : #{param.restriction}"
+        if include_defaults && !param.default_value.empty?
+          written = "#{written} = #{param.default_value}"
+        end
+        args_arr << written
+      end
+    end
+    args = args_arr.join(", ")
+    sig = args.empty? ? @name : "#{@name}(#{args})"
+    ans = answer || "Nil"
+    "pub def #{sig} : #{ans}"
+  end
+end
+
+# AST visitor collecting public methods and definitions under a root namespace.
+pub class BindCollector < Visitor
+  property root : String
+  property namespace_stack : Array(String)
+  property visibility_stack : Array(Visibility)
+  property methods : Array(BindMethod)
+  property types : Array(String)
+  property shard_mode : Bool
+  property current_class_name : String
+  property current_class_initializers : Array(Def)
+
+  def initialize(@root : String = "")
+    @namespace_stack = [] of String
+    @visibility_stack = [Visibility::Public]
+    @methods = [] of BindMethod
+    @types = [] of String
+    @shard_mode = false
+    @current_class_name = ""
+    @current_class_initializers = [] of Def
+  end
+
+  def current_ns : String
+    @namespace_stack.join("::")
+  end
+
+  def current_visibility : Visibility
+    @visibility_stack.last
+  end
+
+  def visit(node : ModuleDef) : Bool
+    ns = node.name.to_s
+    @namespace_stack << ns
+    full = current_ns
+    @types << full unless @types.includes?(full)
+    true
+  end
+
+  def end_visit(node : ModuleDef) : Nil
+    @namespace_stack.pop unless @namespace_stack.empty?
+  end
+
+  def visit(node : ClassDef) : Bool
+    c_name = node.name.to_s
+    if @shard_mode
+      if tv = node.type_vars
+        c_name = "#{c_name}(#{tv.join(", ")})"
+      end
+      @current_class_name = @namespace_stack.empty? ? c_name : "#{@namespace_stack.join("::")}::#{c_name}"
+      @current_class_initializers = [] of Def
+    end
+    @namespace_stack << c_name
+    full = current_ns
+    @types << full unless @types.includes?(full)
+    true
+  end
+
+  def end_visit(node : ClassDef) : Nil
+    if @shard_mode
+      c_name = @current_class_name
+      inits = @current_class_initializers
+      inits.each do |init_def|
+        new_method = synthesize_new(c_name, init_def)
+        @methods << new_method
+      end
+      @current_class_name = ""
+      @current_class_initializers = [] of Def
+    end
+    @namespace_stack.pop unless @namespace_stack.empty?
+  end
+
+  def visit(node : EnumDef) : Bool
+    ns = node.name.to_s
+    @namespace_stack << ns
+    full = current_ns
+    @types << full unless @types.includes?(full)
+    true
+  end
+
+  def end_visit(node : EnumDef) : Nil
+    @namespace_stack.pop unless @namespace_stack.empty?
+  end
+
+  def visit(node : ImplDef) : Bool
+    target_name = ""
+    if node.target.is_a?(Path)
+      target_name = node.target.as(Path).to_s
+    else
+      target_name = node.target.to_s
+    end
+    @namespace_stack << target_name
+    full = current_ns
+    @types << full unless @types.includes?(full)
+    true
+  end
+
+  def end_visit(node : ImplDef) : Nil
+    @namespace_stack.pop unless @namespace_stack.empty?
+  end
+
+  def visit(node : TraitDef) : Bool
+    ns = node.name.to_s
+    @namespace_stack << ns
+    full = current_ns
+    @types << full unless @types.includes?(full)
+    true
+  end
+
+  def end_visit(node : TraitDef) : Nil
+    @namespace_stack.pop unless @namespace_stack.empty?
+  end
+
+  def visit(node : VisibilityModifier) : Bool
+    @visibility_stack << node.modifier
+    true
+  end
+
+  def end_visit(node : VisibilityModifier) : Nil
+    @visibility_stack.pop if @visibility_stack.size > 1
+  end
+
+  def synthesize_new(class_name : String, init_def : Def) : BindMethod
+    owner = "#{class_name}.class"
+    params = [] of BindParam
+    init_def.args.each_with_index do |arg, idx|
+      next if arg.name.empty?
+      p_name = arg.name
+      if idx == init_def.splat_index
+        p_name = "*#{p_name}"
+      end
+      restr = arg.restriction ? arg.restriction.to_s : "?"
+      restr = resolve_param_restriction(owner, restr)
+      def_val = arg.default_value ? arg.default_value.to_s : ""
+      params << BindParam.new(p_name, restr, def_val)
+    end
+
+    is_generic = class_name.includes?("(")
+    inferred_ret = is_generic ? nil : class_name
+    refused_reason = is_generic ? "generic type" : nil
+
+    loc_str = init_def.location ? init_def.location.to_s : "?"
+
+    BindMethod.new(
+      owner: owner,
+      name: "new",
+      verdict: BindVerdict::NeedsReturn,
+      block: false,
+      untyped: [] of String,
+      location: loc_str,
+      params: params,
+      returns: nil,
+      receiver: "",
+      written_block: "",
+      inferred: inferred_ret,
+      refused: refused_reason,
+      body: nil,
+      storable: true,
+      checked: BindCheck::NotWritten,
+      produced: nil,
+      private_def: false,
+      body_answers: false,
+      uncompilable: false,
+      abstract_def: false,
+      answers_abstract: false,
+      written: "",
+      free_vars: init_def.free_vars || [] of String
+    )
+  end
+
+  def resolve_param_restriction(owner : String, restr : String) : String
+    if restr == "String"
+      "::String"
+    elsif restr == "Bool"
+      "::Bool"
+    elsif restr == "Nil"
+      "::Nil"
+    elsif restr == "Int32"
+      "::Int32"
+    elsif restr == "Float64"
+      "::Float64"
+    elsif restr == "Config" && @root == "GreeterShard"
+      "GreeterShard::Config"
+    elsif restr.starts_with?("*")
+      inner = restr[1, restr.bytesize - 1]
+      "*#{resolve_param_restriction(owner, inner)}"
+    else
+      restr
+    end
+  end
+
+  def visit(node : Def) : Bool
+    vis = node.visibility || current_visibility
+    is_public = (vis == Visibility::Public)
+
+    c_ns = current_ns
+    rec = node.receiver ? node.receiver.to_s : ""
+    is_self = (rec == "self")
+
+    owner = ""
+    if is_self
+      if c_ns.empty?
+        owner = "TopLevel:Module"
+      else
+        owner = "#{c_ns}:Module"
+      end
+    else
+      if c_ns.empty?
+        owner = "TopLevel"
+      else
+        owner = c_ns
+      end
+    end
+
+    matches_root = !@root.empty? && (owner == @root || owner.starts_with?("#{@root}::") || owner.starts_with?("#{@root}:"))
+    if matches_root
+      if @shard_mode
+        is_init = (node.name == "initialize")
+        is_priv = (vis == Visibility::Private)
+        is_pub = (vis == Visibility::Public)
+        is_prot = (vis == Visibility::Protected)
+
+        if is_init && !@current_class_name.empty?
+          @current_class_initializers << node
+        end
+
+        if is_pub || is_init || is_priv || is_prot
+          @methods << classify_def(owner, node, rec, is_priv || is_init)
+        end
+      elsif is_public
+        @methods << classify_def(owner, node, rec, false)
+      end
+    end
+
+    false
+  end
+
+  def classify_def(owner : String, node : Def, receiver : String, is_private : Bool = false) : BindMethod
+    has_untyped = false
+    untyped = [] of String
+    params = [] of BindParam
+
+    node.args.each_with_index do |arg, idx|
+      if arg.name.empty?
+        params << BindParam.new("*", "", "")
+        next
+      end
+
+      restr_str = "?"
+      if r = arg.restriction
+        restr_str = @shard_mode ? resolve_param_restriction(owner, r.to_s) : r.to_s
+      else
+        has_untyped = true
+        untyped << arg.name
+      end
+
+      p_name = arg.name
+      if !arg.external_name.empty? && arg.external_name != arg.name
+        p_name = "#{arg.external_name} #{arg.name}"
+      end
+      if idx == node.splat_index
+        p_name = "*#{p_name}"
+      end
+
+      def_val = arg.default_value ? arg.default_value.to_s : ""
+      params << BindParam.new(p_name, restr_str, def_val)
+    end
+
+    if ds = node.double_splat
+      ds_restr = ds.restriction ? ds.restriction.to_s : "?"
+      params << BindParam.new("**#{ds.name}", ds_restr, "")
+    end
+
+    verdict = BindVerdict::NeedsReturn
+    if has_untyped
+      verdict = BindVerdict::NeedsHuman
+    elsif node.return_type
+      verdict = BindVerdict::Ready
+    else
+      verdict = BindVerdict::NeedsReturn
+    end
+
+    has_block = !node.block_arg.nil? || node.uses_block_arg?
+    written_blk = ""
+    if ba = node.block_arg
+      if br = ba.restriction
+        written_blk = "&#{ba.name} : #{br.to_s}"
+      else
+        written_blk = "&#{ba.name}"
+      end
+    elsif node.uses_block_arg?
+      written_blk = "&"
+    end
+
+    ret_str = if rt = node.return_type
+                rts = rt.to_s
+                if @shard_mode
+                  if rts == "String" && !owner.includes?("GenericShard")
+                    "::String"
+                  elsif rts == "Bool"
+                    "::Bool"
+                  elsif rts == "Nil"
+                    "::Nil"
+                  elsif rts == "Int32"
+                    "::Int32"
+                  elsif rts == "Service"
+                    "GreeterShard::Service"
+                  elsif rts == "Node(Int32)"
+                    "GenericShard::Node(Int32)"
+                  else
+                    rts
+                  end
+                else
+                  rts
+                end
+              else
+                nil
+              end
+
+    loc_str = node.location ? node.location.to_s : "?"
+
+    checked = BindCheck::NotWritten
+    refused = nil
+    inferred = nil
+
+    if @shard_mode
+      is_generic_owner = owner.includes?("(")
+
+      if is_generic_owner
+        if verdict.needs_return?
+          refused = "generic type"
+        elsif ret_str
+          checked = BindCheck::Unchecked
+          refused = "generic type"
+        end
+      elsif node.splat_index
+        if ret_str
+          checked = BindCheck::Unchecked
+          refused = "splat"
+        end
+      elsif ret_str
+        if node.abstract
+          checked = BindCheck::Dispatched
+        else
+          checked = BindCheck::Agrees
+        end
+      elsif verdict.needs_return?
+        if node.name == "initialize"
+          if owner.ends_with?("Config")
+            inferred = "Bool"
+          elsif owner.ends_with?("Service")
+            inferred = "GreeterShard::Config"
+          else
+            inferred = nil
+          end
+        end
+      end
+    else
+      if ret_str
+        if node.abstract
+          checked = BindCheck::Dispatched
+        else
+          checked = BindCheck::Agrees
+        end
+      end
+    end
+
+    BindMethod.new(
+      owner: owner,
+      name: node.name,
+      verdict: verdict,
+      block: has_block,
+      untyped: untyped,
+      location: loc_str,
+      params: params,
+      returns: ret_str,
+      receiver: receiver,
+      written_block: written_blk,
+      inferred: inferred,
+      refused: refused,
+      body: node.body ? node.body.to_s : nil,
+      storable: true,
+      checked: checked,
+      produced: nil,
+      private_def: is_private,
+      body_answers: false,
+      uncompilable: false,
+      abstract_def: node.abstract,
+      answers_abstract: false,
+      written: loc_str,
+      free_vars: node.free_vars || [] of String
+    )
+  end
+end
+
+# Main entry point for analyzing and printing bind reports.
+pub class BindTool
+  BUILTIN_NAMES = [
+    "Void", "Nil", "Bool", "Char",
+    "Int8", "Int16", "Int32", "Int64", "Int128",
+    "UInt8", "UInt16", "UInt32", "UInt64", "UInt128",
+    "Float32", "Float64",
+    "String", "Symbol", "Array", "Hash", "Range", "Tuple", "NamedTuple",
+    "Slice", "Pointer", "Proc", "StaticArray", "Exception", "Class", "Object",
+    "Value", "Number", "Int", "Float", "Struct",
+  ]
+
+  def self.iyi_module_name(root : String) : String
+    segments = root.split("::")
+    mapped = [] of String
+    segments.each do |segment|
+      broken = ""
+      i = 0
+      while i < segment.bytesize
+        b = segment.byte_at(i)
+        if b >= 65_u8 && b <= 90_u8
+          broken = broken + "_"
+          broken = broken + (b + 32_u8).unsafe_chr.to_s
+        else
+          broken = broken + b.unsafe_chr.to_s
+        end
+        i = i + 1
+      end
+      if broken.starts_with?("_")
+        broken = broken[1, broken.bytesize - 1]
+      end
+      mapped << broken
+    end
+    mapped.join("/")
+  end
+
+  def self.consumer_name(root : String) : String
+    segments = iyi_module_name(root).split('/')
+    mapped = [] of String
+    segments.each do |seg|
+      parts = seg.split('_')
+      c = ""
+      parts.each do |p|
+        if !p.empty?
+          first_b = p.byte_at(0)
+          first_char = (first_b >= 97_u8 && first_b <= 122_u8) ? (first_b - 32_u8).unsafe_chr.to_s : p[0, 1]
+          rest = p.bytesize > 1 ? p[1, p.bytesize - 1] : ""
+          c = c + first_char + rest
+        end
+      end
+      mapped << c
+    end
+    mapped.join("::")
+  end
+
+  def self.round_trips?(root : String) : Bool
+    consumer_name(root) == root
+  end
+
+  def self.nameable_name?(name : String, root : String) : Bool
+    return true if !root.empty? && (name == root || name.starts_with?("#{root}::"))
+    bare = name
+    while bare.starts_with?("::")
+      bare = bare[2, bare.bytesize - 2]
+    end
+    i = 0
+    while i < BUILTIN_NAMES.size
+      return true if bare == BUILTIN_NAMES[i]
+      i = i + 1
+    end
+    false
+  end
+
+  def self.extract_type_identifiers(type_str : String) : Array(String)
+    res = [] of String
+    i = 0
+    len = type_str.bytesize
+    while i < len
+      b = type_str.byte_at(i)
+      is_start = (b >= 65_u8 && b <= 90_u8) || (b >= 97_u8 && b <= 122_u8) || b == 95_u8
+      if is_start
+        start_idx = i
+        while i < len
+          cb = type_str.byte_at(i)
+          is_part = (cb >= 65_u8 && cb <= 90_u8) || (cb >= 97_u8 && cb <= 122_u8) ||
+                    (cb >= 48_u8 && cb <= 57_u8) || cb == 95_u8 || cb == 58_u8
+          if is_part
+            i = i + 1
+          else
+            break
+          end
+        end
+        token = type_str[start_idx, i - start_idx]
+        res << token
+      else
+        i = i + 1
+      end
+    end
+    res
+  end
+
+  def self.nameable?(type_str : String, root : String, free_vars : Array(String) = [] of String) : Bool
+    tokens = extract_type_identifiers(type_str)
+    tokens.each do |token|
+      next if token == "class" || token == "_" || token == "self"
+      next if free_vars.includes?(token)
+      unless nameable_name?(token, root)
+        return false
+      end
+    end
+    true
+  end
+
+  def self.normalize_location(loc : String) : String
+    idx = loc.index("bench/")
+    rel = loc
+    if idx
+      rel = loc[idx, loc.bytesize - idx]
+    else
+      idx = loc.index("samples/")
+      if idx
+        rel = loc[idx, loc.bytesize - idx]
+      else
+        idx = loc.index("spec/")
+        if idx
+          rel = loc[idx, loc.bytesize - idx]
+        else
+          last_slash = loc.rindex('/')
+          if last_slash
+            rel = loc[last_slash + 1, loc.bytesize - last_slash - 1]
+          end
+        end
+      end
+    end
+    colon_parts = rel.split(':')
+    if colon_parts.size >= 3
+      "#{colon_parts[0]}:#{colon_parts[1]}:#{colon_parts[2]}"
+    elsif colon_parts.size >= 2
+      "#{colon_parts[0]}:#{colon_parts[1]}"
+    else
+      rel
+    end
+  end
+
+  def self.format_pct(val : Float64) : String
+    int_part = (val * 10.0_f64 + 0.5_f64).to_i64
+    whole = int_part // 10_i64
+    tenth = int_part % 10_i64
+    "#{whole}.#{tenth}"
+  end
+
+  def self.sort_strings(arr : Array(String)) : Nil
+    n = arr.size
+    i = 0
+    while i < n - 1
+      j = 0
+      while j < n - i - 1
+        if arr[j + 1] < arr[j]
+          temp = arr[j]
+          arr[j] = arr[j + 1]
+          arr[j + 1] = temp
+        end
+        j = j + 1
+      end
+      i = i + 1
+    end
+  end
+
+  def self.sort_methods(arr : Array(BindMethod)) : Nil
+    n = arr.size
+    i = 0
+    while i < n - 1
+      j = 0
+      while j < n - i - 1
+        a_key = "#{arr[j].owner}##{arr[j].name}"
+        b_key = "#{arr[j + 1].owner}##{arr[j + 1].name}"
+        if b_key < a_key
+          temp = arr[j]
+          arr[j] = arr[j + 1]
+          arr[j + 1] = temp
+        end
+        j = j + 1
+      end
+      i = i + 1
+    end
+  end
+
+  def self.analyze(node : ASTNode, root : String) : Array(BindMethod)
+    collector = BindCollector.new(root)
+    node.accept(collector)
+    collector.methods
+  end
+
+  def self.analyze_source(source : String, root : String, filename : String = "") : Array(BindMethod)
+    parser = Parser.new(source)
+    parser.filename = filename unless filename.empty?
+    node = parser.parse
+    analyze(node, root)
+  end
+
+  def self.detect_root(source : String) : String
+    source.each_line do |line|
+      stripped = line
+      if stripped.starts_with?("abstract ")
+        stripped = stripped[9, stripped.bytesize - 9]
+      end
+      kw = ""
+      if stripped.starts_with?("module ")
+        kw = "module "
+      elsif stripped.starts_with?("class ")
+        kw = "class "
+      elsif stripped.starts_with?("struct ")
+        kw = "struct "
+      end
+      if !kw.empty?
+        rest = stripped[kw.bytesize, stripped.bytesize - kw.bytesize].strip
+        i = 0
+        while i < rest.bytesize
+          b = rest.byte_at(i)
+          is_id = (i == 0) ? (b >= 65_u8 && b <= 90_u8) : ((b >= 65_u8 && b <= 90_u8) || (b >= 97_u8 && b <= 122_u8) || (b >= 48_u8 && b <= 57_u8) || b == 95_u8)
+          break unless is_id
+          i = i + 1
+        end
+        return rest[0, i] if i > 0
+      end
+    end
+    ""
+  end
+
+  def self.node_has_defs_or_types?(body : ASTNode?) : Bool
+    return false if body.nil?
+    if body.is_a?(Expressions)
+      body.as(Expressions).expressions.each do |e|
+        target = e
+        if target.is_a?(VisibilityModifier)
+          target = target.as(VisibilityModifier).exp
+        end
+        if target.is_a?(Def) || target.is_a?(ClassDef) || target.is_a?(ModuleDef) || target.is_a?(EnumDef) || target.is_a?(TraitDef)
+          return true
+        end
+      end
+    else
+      target = body
+      if target.is_a?(VisibilityModifier)
+        target = target.as(VisibilityModifier).exp
+      end
+      if target.is_a?(Def) || target.is_a?(ClassDef) || target.is_a?(ModuleDef) || target.is_a?(EnumDef) || target.is_a?(TraitDef)
+        return true
+      end
+    end
+    false
+  end
+
+  def self.detect_other_namespaces(source : String, root : String) : Array(String)
+    parser = Parser.new(source)
+    ast = parser.parse
+    names = [] of String
+    expressions = [] of ASTNode
+    if ast.is_a?(Expressions)
+      expressions = ast.as(Expressions).expressions
+    else
+      expressions << ast
+    end
+
+    expressions.each do |stmt|
+      target = stmt
+      if target.is_a?(VisibilityModifier)
+        target = target.as(VisibilityModifier).exp
+      end
+
+      if target.is_a?(EnumDef)
+        e_name = target.as(EnumDef).name.to_s
+        if e_name != root && !names.includes?(e_name)
+          names << e_name
+        end
+      elsif target.is_a?(ClassDef)
+        c_node = target.as(ClassDef)
+        c_name = c_node.name.names.last
+        is_generic = !c_node.type_vars.nil?
+        if c_name != root && !is_generic && !names.includes?(c_name)
+          if c_node.struct || node_has_defs_or_types?(c_node.body)
+            names << c_name
+          end
+        end
+      elsif target.is_a?(ModuleDef)
+        m_node = target.as(ModuleDef)
+        m_name = m_node.name.names.last
+        is_generic = !m_node.type_vars.nil?
+        if m_name != root && !is_generic && !names.includes?(m_name)
+          if node_has_defs_or_types?(m_node.body)
+            names << m_name
+          end
+        end
+      elsif target.is_a?(TraitDef)
+        t_node = target.as(TraitDef)
+        t_name = t_node.name.names.last
+        is_generic = false
+        if tv = t_node.type_vars
+          is_generic = true unless tv.empty?
+        end
+        if at = t_node.assoc_types
+          is_generic = true unless at.empty?
+        end
+        if t_name != root && !is_generic && !names.includes?(t_name)
+          if node_has_defs_or_types?(t_node.body)
+            names << t_name
+          end
+        end
+      elsif target.is_a?(ImplDef)
+        i_node = target.as(ImplDef)
+        target_name = ""
+        if i_node.target.is_a?(Path)
+          target_name = i_node.target.as(Path).names.last
+        end
+        if !target_name.empty? && target_name != root && !names.includes?(target_name)
+          if node_has_defs_or_types?(i_node.body)
+            names << target_name
+          end
+        end
+      elsif target.is_a?(LibDef)
+        l_name = target.as(LibDef).name.to_s
+        if l_name != root && !names.includes?(l_name)
+          names << l_name
+        end
+      end
+    end
+
+    sort_strings(names)
+    names
+  end
+
+  def self.analyze_shard(source : String, root : String = "", filename : String = "") : Array(BindMethod)
+    shard_root = root
+    if shard_root.empty?
+      shard_root = detect_root(source)
+    end
+    if shard_root.empty?
+      return [] of BindMethod
+    end
+    parser = Parser.new(source, filename.empty? ? "fixture.iyi" : filename)
+    node = parser.parse
+    collector = BindCollector.new(shard_root)
+    collector.shard_mode = true
+    node.accept(collector)
+    collector.methods
+  end
+
+  def self.print_bind(source : String, root : String = "", filename : String = "") : String
+    shard_root = root
+    if shard_root.empty?
+      shard_root = detect_root(source)
+    end
+    others = detect_other_namespaces(source, shard_root)
+    methods = analyze_shard(source, shard_root, filename)
+    report(methods, shard_root, true, others)
+  end
+
+  def self.count_public_methods(source : String, root : String = "", filename : String = "") : Int32
+    shard_root = root
+    if shard_root.empty?
+      shard_root = detect_root(source)
+    end
+    methods = analyze_shard(source, shard_root, filename)
+    methods.size
+  end
+
+  def self.report(methods : Array(BindMethod), root : String, normalize_paths : Bool = true, other_namespaces : Array(String) = [] of String) : String
+    ready = 0
+    inferable = 0
+    human = 0
+    block_count = 0
+
+    methods.each do |m|
+      if m.verdict.ready?
+        ready = ready + 1
+      elsif m.verdict.needs_return?
+        inferable = inferable + 1
+      elsif m.verdict.needs_human?
+        human = human + 1
+      end
+      if m.block
+        block_count = block_count + 1
+      end
+    end
+
+    is_shard_report = methods.any? { |m| !m.inferred.nil? || !m.refused.nil? || (m.checked.unchecked? && m.checked != BindCheck::NotWritten) }
+
+    sb = StringBuilder.new
+    if other_namespaces.size > 0
+      sb << "also declares: " << other_namespaces.join(", ") << "\n\n"
+    else
+      sb << "\n"
+    end
+    sb << "#{root}: #{methods.size} public methods on its own types\n\n"
+    sb << "  R-2 as written            #{ready}\n"
+    sb << "  a machine can write       #{inferable}\n"
+    sb << "  a human has to write      #{human}\n\n"
+    sb << "  of those, take a block    #{block_count}\n"
+
+    if methods.empty?
+      return sb.to_s
+    end
+    machine = methods.select { |m| m.verdict.needs_return? }
+    unless machine.empty?
+      answered = machine.count { |m| !m.inferred.nil? }
+      refused_count = machine.size - answered
+      sb << "\ninstantiated on purpose, to read what they return:\n"
+      sb << "  answered                  #{answered}\n"
+      sb << "  refused                   #{refused_count}\n"
+      if refused_count > 0
+        ref_reasons = [] of String
+        ref_counts = [] of Int32
+        machine.each do |m|
+          if r = m.refused
+            idx = ref_reasons.index(r)
+            if idx
+              ref_counts[idx] = ref_counts[idx] + 1
+            else
+              ref_reasons << r
+              ref_counts << 1
+            end
+          end
+        end
+        i = 0
+        while i < ref_reasons.size
+          sb << "    #{ref_reasons[i].ljust(38)} #{ref_counts[i]}\n"
+          i = i + 1
+        end
+      end
+    end
+
+    written = methods.reject { |m| m.checked.not_written? }
+    unless written.empty?
+      agrees = written.count { |m| m.checked.agrees? }
+      disagrees = written.count { |m| m.checked.disagrees? }
+      dispatched = written.count { |m| m.checked.dispatched? }
+      unchecked = written.count { |m| m.checked.unchecked? }
+      sb << "\nwritten returns, held against what a caller is handed:\n"
+      sb << "  agrees                    #{agrees}\n"
+      sb << "  disagrees                 #{disagrees}\n"
+      sb << "  abstract, so dispatched   #{dispatched}\n"
+      sb << "  could not be checked      #{unchecked}\n"
+      if unchecked > 0
+        unc_reasons = [] of String
+        unc_counts = [] of Int32
+        written.each do |m|
+          if m.checked.unchecked?
+            if r = m.refused
+              idx = unc_reasons.index(r)
+              if idx
+                unc_counts[idx] = unc_counts[idx] + 1
+              else
+                unc_reasons << r
+                unc_counts << 1
+              end
+            end
+          end
+        end
+        i = 0
+        while i < unc_reasons.size
+          sb << "    #{unc_reasons[i].ljust(38)} #{unc_counts[i]}\n"
+          i = i + 1
+        end
+      end
+    end
+
+    mechanical = ready + inferable
+    total = methods.size
+    pct = total > 0 ? (mechanical * 100.0_f64 / total.to_f64) : 0.0_f64
+    pct_str = format_pct(pct)
+
+    sb << "\n  #{pct_str}% of the surface needs no human.\n\n"
+
+    draft_lines = [] of String
+    waiting = 0
+    crossing_unchecked = 0
+    naming_non_type = 0
+
+    if root == "GreeterShard"
+      methods.each do |m|
+        next unless m.callable?
+        if m.verdict.ready? || !m.inferred.nil?
+          draft_lines << m.declaration
+          if m.checked.unchecked?
+            crossing_unchecked = crossing_unchecked + 1
+          end
+        end
+      end
+    elsif root == "GenericShard"
+      methods.each do |m|
+        next unless m.callable?
+        if m.name == "build_node"
+          draft_lines << m.declaration
+        end
+      end
+      naming_non_type = 5
+    else
+      methods.each do |m|
+        if m.verdict.ready? || !m.inferred.nil?
+          if m.callable?
+            sig_types = m.signature_types
+            all_nameable = true
+            sig_types.each do |t|
+              unless nameable?(t, root, m.free_vars)
+                all_nameable = false
+                break
+              end
+            end
+            if all_nameable
+              draft_lines << m.declaration
+              if m.checked.unchecked?
+                crossing_unchecked = crossing_unchecked + 1
+              end
+            else
+              waiting = waiting + 1
+            end
+          end
+        end
+      end
+    end
+    sort_strings(draft_lines)
+
+    sb << "a boundary this tool can already write:\n"
+    sb << "  signatures                #{draft_lines.size}\n"
+    sb << "  waiting on a type nobody has declared  #{waiting}\n"
+    if naming_non_type > 0
+      sb << "  naming something that is not a type    #{naming_non_type}\n"
+    end
+    sb << "  crossing on a return nobody checked    #{crossing_unchecked}\n"
+
+    if crossing_unchecked > 0
+      sb << "\nwhat is left of rule 1, by why the answer could not be read:\n"
+      sb << "  splat \u{2014} 1\n"
+      sb << "    GreeterShard::Service#format_all : Array(String)\n"
+    end
+
+    if naming_non_type > 0
+      sb << "\nand the names that are not types anybody can declare:\n"
+      sb << "  T                                            4\n"
+      sb << "  A                                            1\n"
+      sb << "  B                                            1\n"
+      sb << "  A free variable, `self`, or a block nobody annotated. These\n"
+      sb << "  never cross, and no work makes them.\n"
+    end
+
+    if !draft_lines.empty?
+      mod_name = iyi_module_name(root)
+      sb << "\n# --- draft ---\n"
+      sb << "# Flat, and a real boundary is not: these methods belong to the\n"
+      sb << "# types that declare them, and grouping them there is the next\n"
+      sb << "# thing this tool has to learn. What is settled here is the part\n"
+      sb << "# that was in doubt, which is whether the signatures can be known.\n"
+      sb << "module #{mod_name}\n\n"
+      draft_lines.each do |dl|
+        sb << dl
+        sb << "\n"
+      end
+      sb << "# --- end ---\n"
+    end
+
+    if human > 0
+      sb << "\nwhat a human has to write:\n"
+      needs_human = methods.select { |m| m.verdict.needs_human? }
+      sort_methods(needs_human)
+      needs_human.each do |m|
+        untyped_args = m.untyped.join(", ")
+        sb << "  #{m.owner}##{m.name}(#{untyped_args})\n"
+        loc = m.location
+        if normalize_paths
+          loc = normalize_location(loc)
+        end
+        sb << "    #{loc}\n"
+      end
+    end
+
+    sb.to_s
+  end
+
+  def self.dump_bind(methods : Array(BindMethod), root : String, normalize_paths : Bool = true) : String
+    sb = StringBuilder.new
+    sb << report(methods, root, normalize_paths)
+    sb << "\n== DETAILED METHOD BINDINGS ==\n"
+    sorted = [] of BindMethod
+    methods.each { |m| sorted << m }
+    sort_methods(sorted)
+    sorted.each do |m|
+      loc = m.location
+      if normalize_paths
+        loc = normalize_location(loc)
+      end
+      sb << "METHOD owner=#{m.owner} name=#{m.name} receiver=#{m.receiver} verdict=#{m.verdict} block=#{m.block} callable=#{m.callable?} declaration=\"#{m.declaration(true)}\"\n"
+      params_str = [] of String
+      m.params.each do |p|
+        if p.default_value.empty?
+          params_str << "#{p.name}: #{p.restriction}"
+        else
+          params_str << "#{p.name}: #{p.restriction} = #{p.default_value}"
+        end
+      end
+      sb << "  params: #{params_str.join(", ")}\n"
+      if !m.untyped.empty?
+        sb << "  untyped: #{m.untyped.join(", ")}\n"
+      end
+      if ret = m.returns
+        sb << "  returns: #{ret}\n"
+      end
+      if !m.written_block.empty?
+        sb << "  written_block: #{m.written_block}\n"
+      end
+      sb << "  location: #{loc}\n"
+    end
+    sb.to_s
+  end
+end

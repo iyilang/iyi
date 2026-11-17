@@ -1,0 +1,193 @@
+import compiler/foundation/location::{Location}
+import compiler/syntax/ast::{ASTNode, Visibility}
+import compiler/syntax/parser::{Parser}
+import compiler/syntax/visitor
+import compiler/tools/bind::{BindCheck, BindCollector, BindMethod, BindParam, BindTool, BindVerdict}
+
+module BenchSelfhostBindExercise
+  def self.assert(cond : Bool, msg : String)
+    unless cond
+      puts "Assertion failed: " + msg
+      raise "Assertion failed: " + msg
+    end
+  end
+
+  def self.test_verdicts
+    v_ready = BindVerdict::Ready
+    v_ret = BindVerdict::NeedsReturn
+    v_hum = BindVerdict::NeedsHuman
+
+    assert(v_ready.ready?, "Ready.ready?")
+    assert(!v_ready.needs_return?, "!Ready.needs_return?")
+    assert(!v_ready.needs_human?, "!Ready.needs_human?")
+
+    assert(v_ret.needs_return?, "NeedsReturn.needs_return?")
+    assert(v_hum.needs_human?, "NeedsHuman.needs_human?")
+
+    assert(v_ready.to_s == "ready", "Ready to_s")
+    assert(v_ret.to_s == "needs_return", "NeedsReturn to_s")
+    assert(v_hum.to_s == "needs_human", "NeedsHuman to_s")
+
+    c_nw = BindCheck::NotWritten
+    c_ag = BindCheck::Agrees
+    c_dis = BindCheck::Disagrees
+    c_unc = BindCheck::Unchecked
+    c_disp = BindCheck::Dispatched
+
+    assert(c_nw.not_written?, "NotWritten.not_written?")
+    assert(c_ag.agrees?, "Agrees.agrees?")
+    assert(c_dis.disagrees?, "Disagrees.disagrees?")
+    assert(c_unc.unchecked?, "Unchecked.unchecked?")
+    assert(c_disp.dispatched?, "Dispatched.dispatched?")
+  end
+
+  def self.test_module_naming
+    assert(BindTool.iyi_module_name("Kemal") == "kemal", "iyi_module_name Kemal")
+    assert(BindTool.consumer_name("Kemal") == "Kemal", "consumer_name Kemal")
+    assert(BindTool.round_trips?("Kemal"), "round_trips Kemal")
+
+    assert(BindTool.iyi_module_name("JSON") == "j_s_o_n", "iyi_module_name JSON")
+    assert(BindTool.consumer_name("JSON") == "JSON", "consumer_name JSON")
+    assert(BindTool.round_trips?("JSON"), "round_trips JSON")
+
+    assert(BindTool.iyi_module_name("HTTPServer") == "h_t_t_p_server", "iyi_module_name HTTPServer")
+    assert(BindTool.consumer_name("HTTPServer") == "HTTPServer", "consumer_name HTTPServer")
+    assert(BindTool.round_trips?("HTTPServer"), "round_trips HTTPServer")
+
+    assert(BindTool.iyi_module_name("MyLib") == "my_lib", "iyi_module_name MyLib")
+    assert(BindTool.consumer_name("MyLib") == "MyLib", "consumer_name MyLib")
+    assert(BindTool.round_trips?("MyLib"), "round_trips MyLib")
+
+    assert(BindTool.iyi_module_name("MyLib::SubMod") == "my_lib/sub_mod", "iyi_module_name MyLib::SubMod")
+    assert(BindTool.consumer_name("MyLib::SubMod") == "MyLib::SubMod", "consumer_name MyLib::SubMod")
+    assert(BindTool.round_trips?("MyLib::SubMod"), "round_trips MyLib::SubMod")
+  end
+
+  def self.test_nameable
+    assert(BindTool.nameable_name?("Int32", "Kemal"), "nameable Int32")
+    assert(BindTool.nameable_name?("String", "Kemal"), "nameable String")
+    assert(BindTool.nameable_name?("Kemal", "Kemal"), "nameable Kemal")
+    assert(BindTool.nameable_name?("Kemal::Route", "Kemal"), "nameable Kemal::Route")
+    assert(!BindTool.nameable_name?("UnknownShardType", "Kemal"), "!nameable UnknownShardType")
+
+    assert(BindTool.nameable?("Array(String)", "Kemal"), "nameable? Array(String)")
+    assert(BindTool.nameable?("Hash(String, Int32)", "Kemal"), "nameable? Hash(String, Int32)")
+    assert(!BindTool.nameable?("Hash(String, ForeignType)", "Kemal"), "!nameable? ForeignType")
+  end
+
+  def self.test_classification
+    code = <<-CR
+    module TestShard
+      class Widget
+        def initialize(@name : String, @count : Int32 = 0)
+        end
+
+        def ready_method(x : Int32) : String
+          "result"
+        end
+
+        def machine_method(val : Float64)
+          val * 2.0
+        end
+
+        def human_method(untyped_arg)
+          untyped_arg
+        end
+
+        def block_method(&block : Int32 -> String) : String
+          yield 1
+        end
+
+        def unannotated_block(&)
+          yield
+        end
+
+        private def private_helper : Nil
+        end
+      end
+
+      def self.root_func(msg : String) : Bool
+        true
+      end
+    end
+    CR
+
+    parser = Parser.new(code, "test.cr")
+    node = parser.parse
+    methods = BindTool.analyze(node, "TestShard")
+
+    # We expect 7 public methods:
+    # Widget#initialize (Ready)
+    # Widget#ready_method (Ready)
+    # Widget#machine_method (NeedsReturn)
+    # Widget#human_method (NeedsHuman)
+    # Widget#block_method (Ready)
+    # Widget#unannotated_block (NeedsReturn)
+    # TestShard:Module#root_func (Ready)
+    assert(methods.size == 7, "expected 7 public methods, got #{methods.size}")
+
+    ready_count = methods.count(&.verdict.ready?)
+    assert(ready_count == 3, "expected 3 ready, got #{ready_count}")
+
+    machine_count = methods.count(&.verdict.needs_return?)
+    assert(machine_count == 3, "expected 3 machine, got #{machine_count}")
+
+    human_count = methods.count(&.verdict.needs_human?)
+    assert(human_count == 1, "expected 1 human, got #{human_count}")
+
+    # Check declaration generation
+    m_ready = methods.find { |m| m.name == "ready_method" }
+    assert(!m_ready.nil?, "found ready_method")
+    if mr = m_ready
+      assert(mr.declaration == "pub def ready_method(x : Int32) : String", "declaration match: #{mr.declaration}")
+    end
+
+    # Check report output
+    rep = BindTool.report(methods, "TestShard")
+    assert(rep.includes?("TestShard: 7 public methods on its own types"), "report header")
+    assert(rep.includes?("R-2 as written            3"), "report ready count")
+    assert(rep.includes?("a machine can write       3"), "report machine count")
+    assert(rep.includes?("a human has to write      1"), "report human count")
+  end
+
+  def self.run_all
+    puts "============================================================="
+    puts "Running Selfhost Bind Verification Suite (pure iyi stage 0)"
+    puts "============================================================="
+
+    print "testing verdicts and checks... "
+    test_verdicts
+    puts "ok (verdicts and checks verified)"
+
+    print "testing module naming and round trips... "
+    test_module_naming
+    puts "ok (module naming verified)"
+
+    print "testing nameable and type recognition... "
+    test_nameable
+    puts "ok (nameable recognition verified)"
+
+    print "testing method classification and reporting... "
+    test_classification
+    puts "ok (classification and reporting verified)"
+
+    puts "============================================================="
+    puts "ALL SELFHOST BIND CHECKS PASSED SUCCESSFULLY!"
+    puts "============================================================="
+  end
+end
+
+if Program.args.size > 0
+  if Program.args.size > 1 && Program.args[1] == "--count"
+    filename = Program.args[0]
+    source = File.read(filename)
+    puts BindTool.count_public_methods(source, "", filename)
+  else
+    filename = Program.args[0]
+    root = Program.args.size > 1 ? Program.args[1] : ""
+    source = File.read(filename)
+    print BindTool.print_bind(source, root, filename)
+  end
+else
+  BenchSelfhostBindExercise.run_all
+end

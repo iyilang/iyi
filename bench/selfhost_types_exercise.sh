@@ -177,11 +177,11 @@ for fixture in "$REPO"/bench/fixtures/types_*.iyi; do
   "$WORK/dump_hosted$EXE" "$(native_path "$fixture")" > "$WORK/hosted.types"
   if diff -u "$WORK/hosted.types" "$WORK/iyi.types" > "$WORK/diff.out"; then
     matched=$("$WORK/exercise$EXE" "$(native_path "$fixture")" --count)
-    echo -n "  $fixture_name: identical ($matched types match Crystal front end)"
+    echo -n "  $fixture_name: identical ($matched types match the hosted front end)"
     fixture_count=$((fixture_count + 1))
     total_matched_types=$((total_matched_types + matched))
   else
-    echo "  $fixture_name: DIVERGED from Crystal front end"
+    echo "  $fixture_name: DIVERGED from the hosted front end"
     cat "$WORK/diff.out"
     status=1
   fi

@@ -1025,10 +1025,15 @@ puts "port_stays: ok"
 
 # A socket waited on here and closed, and its value given to a handle the
 # program made itself, which nothing records: its wait has to join it to
-# the port. Windows gives a freed value to the next handle made, so the
-# pipes are made until one has a closed socket's value. A copy whose close
-# leaves the record behind skips the join, and the pipe, on no port at
-# all, never completes its read.
+# the port. Windows gives a freed value to the next handle made on the
+# processor that freed it, so the pipes are made until one has a closed
+# socket's value, with the thread held to the first processor from the
+# sockets' making to the pipes': a handle table keeps its free values in a
+# list per processor, and on tssh (12 processors) values closed on the
+# second were in none of 64 handles made next on the first, 40 times of 40
+# (job 133648357494, free to run anywhere: 32 pipes and none had a closed
+# socket's value). A copy whose close leaves the record behind skips the
+# join, and the pipe, on no port at all, never completes its read.
 {% if flag?(:win32) %}
   lib LibC
     fun CreateFileA(name : UInt8*, access : Int32, share : Int32, security : Void*,
@@ -1046,6 +1051,7 @@ puts "port_stays: ok"
   end
 
   port_watch("port_reuse", 10000) do
+    r_mask = pin_to_first_cpu
     r_server = IyiSocket.listen("127.0.0.1", 0)
     r_client = IyiSocket.connect("127.0.0.1", r_server.local_port).or_panic
     r_conn = r_server.accept.or_panic
@@ -1072,6 +1078,7 @@ puts "port_stays: ok"
       r_pipes << r_made[0] << r_made[1]
       r_pipe = r_made if r_values.includes?(r_made[0])
     end
+    unpin(r_mask)
     raise "port_reuse: 32 pipes made after the close and none had a closed socket's value #{r_values}" if r_pipe[0] == 0_i64
     r_got = 0_i64
     group do |g|

@@ -744,6 +744,7 @@ module Iyi
 
         target_defs.each do |target_def|
           note_pool_start(target_def)
+          note_wasm_tasks(target_def)
           if @transformed.add?(target_def)
             node.bubbling_exception do
               @current_def = target_def
@@ -797,6 +798,20 @@ module Iyi
       owner = target_def.owner
       return unless target_def.name == "start" && owner.metaclass? && owner.instance_type.to_s == "IyiWorkers"
       @program.iyi_pool_reached = true
+    end
+
+    # Only paths that can park need the JSPI entry and host imports. Merely
+    # compiling the runtime's panic or collector path does not start a task.
+    private def note_wasm_tasks(target_def : Def) : Nil
+      return if @program.iyi_wasm_tasks_reached? || !@program.has_flag?("wasm32") || @program.has_flag?("wasi")
+      owner = target_def.owner
+      if target_def.name == "group" && owner.is_a?(Program)
+        @program.iyi_wasm_tasks_reached = true
+        return
+      end
+      return unless owner.metaclass? && owner.instance_type.to_s == "IyiScheduler"
+      return unless target_def.name.in?("make_stacks_with", "sleep_current", "suspend")
+      @program.iyi_wasm_tasks_reached = true
     end
 
     # iyi: a block that crosses a `Share` boundary may capture only `Share`

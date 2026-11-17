@@ -3469,6 +3469,12 @@ jobs:
           export IYI="$PWD/room/bin/iyi"
           export IYI_CHROME="$(command -v google-chrome)"
           bash bench/wasm_freestanding_exercise.sh
+      - name: Exercise freestanding tasks
+        run: |
+          export PATH="/opt/wasi-sdk/bin:$HOME/.wasmtime/bin:$PATH"
+          export IYI="$PWD/room/bin/iyi"
+          export IYI_CHROME="$(command -v google-chrome)"
+          bash bench/wasm_tasks_exercise.sh
 
   # GC Stage 10: wasm32-wasi collector exercise under wasmtime.
   #

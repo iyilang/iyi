@@ -43,12 +43,14 @@ export async function instantiate(source, options = {}) {
   const parked = new Map();
   let active = false;
   let failure = null;
+  let terminated = false;
 
   class FiberFinished extends Error {}
 
   function abort(error) {
     if (failure !== null) return;
     failure = error;
+    terminated = true;
     for (const waiter of parked.values()) waiter.reject(error);
     parked.clear();
   }
@@ -79,6 +81,7 @@ export async function instantiate(source, options = {}) {
   }
 
   function noJspi() {
+    terminated = true;
     stderr(new TextEncoder().encode("iyi: JSPI is required to park a task on wasm32-unknown-unknown\n"));
     throw new IyiExit(1);
   }
@@ -91,7 +94,9 @@ export async function instantiate(source, options = {}) {
       schedule(to, top);
     });
   }) : noJspi;
-  const idle = jspi ? new WebAssembly.Suspending(timeout => new Promise(resolve => setTimeout(resolve, timeout))) : noJspi;
+  const idle = jspi ? new WebAssembly.Suspending(timeout => new Promise(resolve => {
+    if (timeout >= 0) setTimeout(resolve, timeout);
+  })) : noJspi;
 
   function fiberExit(next, top) {
     if (!jspi) return noJspi();
@@ -146,6 +151,7 @@ export async function instantiate(source, options = {}) {
       }
     },
     exit(code) {
+      terminated = true;
       throw new IyiExit(code);
     },
     clock_ns(clock) {
@@ -185,6 +191,7 @@ export async function instantiate(source, options = {}) {
 
   let started = false;
   async function invoke(fn, args) {
+    if (terminated) throw new Error("the iyi program has exited");
     if (active) throw new Error("an iyi call is already running");
     active = true;
     failure = null;
@@ -215,6 +222,7 @@ export async function instantiate(source, options = {}) {
     },
     alloc(size) {
       if (!started) throw new Error("call start() before allocating");
+      if (terminated) throw new Error("the iyi program has exited");
       if (active) throw new Error("an iyi call is already running");
       if (!Number.isInteger(size) || size < 0 || size > 0x7fffffff) throw new RangeError("invalid allocation size");
       const ptr = exports.iyi_alloc(size) >>> 0;
@@ -223,6 +231,7 @@ export async function instantiate(source, options = {}) {
     },
     free(ptr) {
       if (!started) throw new Error("call start() before freeing");
+      if (terminated) throw new Error("the iyi program has exited");
       if (active) throw new Error("an iyi call is already running");
       exports.iyi_free(ptr);
     },

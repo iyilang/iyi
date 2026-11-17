@@ -625,7 +625,7 @@ pub class IyiSocket
     end
   end
 
-  {% if @top_level.has_constant?("IyiScheduler") %}
+  {% if @top_level.has_constant?("IyiScheduler") && !flag?(:wasm32) %}
     # *addresses*, in order, raced (see `connect`). The caller is the race:
     # each attempt is a task of a group opened here, the caller waits on a
     # channel for the next one to be in, with the time until the next
@@ -1018,7 +1018,7 @@ pub class IyiSocket
   # The waits: the runtime's poller where there is one, a blocking `poll`
   # on the one descriptor where there is not. True when the descriptor is
   # ready, false when *ms* ran out first.
-  {% if @top_level.has_constant?("IyiScheduler") %}
+  {% if @top_level.has_constant?("IyiScheduler") && !flag?(:wasm32) %}
     def self.await_readable(fd : Int32, ms : Int32 = -1) : ::Bool | Cancelled
       wait_readable(fd, ms)
     end
@@ -1118,7 +1118,7 @@ pub class IyiSocket
     if @fd >= 0
       fd = @fd
       @fd = -1
-      {% if @top_level.has_constant?("IyiScheduler") %}
+      {% if @top_level.has_constant?("IyiScheduler") && !flag?(:wasm32) %}
         # A fiber parked on this socket is woken first, and finds `@fd`
         # already gone; then the descriptor goes.
         wake_closed(fd)
@@ -3626,7 +3626,7 @@ pub class Resolver
   # to wait on either (`__sys_dgram_socket` refuses there), so nothing
   # there reads a time.
   def self.now_ms : Int64
-    {% if @top_level.has_constant?("IyiScheduler") %}
+    {% if @top_level.has_constant?("IyiScheduler") && !flag?(:wasm32) %}
       __iyi_monotonic_ns // 1000000_i64
     {% else %}
       0_i64

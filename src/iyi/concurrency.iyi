@@ -807,12 +807,12 @@ class IyiFiber
       Pointer(UInt64).new(base).value = WASM_STACK_CANARY
       @stack_top = base + STACK_BYTES
     {% else %}
-    base = IyiScheduler.take_stack
-    if base != 0
-      settle_stack(base)
-      return
-    end
-    settle_stack(map_stack)
+      base = IyiScheduler.take_stack
+      if base != 0
+        settle_stack(base)
+        return
+      end
+      settle_stack(map_stack)
     {% end %}
   end
 
@@ -972,7 +972,11 @@ class IyiFiber
     def check_stack : Nil
       base = @wasm_stack.address
       return if base == 0_u64
-      raise "iyi: fiber shadow stack overflow" if Pointer(UInt64).new(base).value != WASM_STACK_CANARY
+      if Pointer(UInt64).new(base).value != WASM_STACK_CANARY
+        message = "iyi: fiber shadow stack overflow\n"
+        __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
+        __iyi_exit(1)
+      end
     end
   {% end %}
 
@@ -2649,20 +2653,20 @@ class IyiScheduler
     parks = st.parks &+ 1_u64
     st.parks = parks
     poll_now(st) if parks % POLL_EVERY == 0_u64
-    fiber : IyiFiber? = nil
+    fiber = nil.as(IyiFiber?) if false
     {% unless flag?(:wasm32) %}
-    if st.worker
-      fiber = worker_next(st)
-      if fiber.is_a?(IyiFiber)
-        switch_to(fiber)
+      if st.worker
+        fiber = worker_next(st)
+        if fiber.is_a?(IyiFiber)
+          switch_to(fiber)
+          return
+        end
+        root = st.root
+        raise "a pool worker with no fiber of its own" unless root.is_a?(IyiFiber)
+        release_unit(st)
+        switch_to(root)
         return
       end
-      root = st.root
-      raise "a pool worker with no fiber of its own" unless root.is_a?(IyiFiber)
-      release_unit(st)
-      switch_to(root)
-      return
-    end
     {% end %}
     while true
       {% unless flag?(:wasm32) %}
@@ -2683,11 +2687,11 @@ class IyiScheduler
       {% if flag?(:wasm32) %}
         wait_for_events(true)
       {% else %}
-      if @@shared
-        wait_shared(st)
-      else
-        wait_for_events(true)
-      end
+        if @@shared
+          wait_shared(st)
+        else
+          wait_for_events(true)
+        end
       {% end %}
     end
   end
@@ -3950,19 +3954,19 @@ class IyiScheduler
     {% if flag?(:wasm32) %}
       cancel_wait(fiber) if home.is_a?(IyiSchedulerState)
     {% else %}
-    if home.is_a?(IyiSchedulerState)
-      if !@@shared
-        cancel_wait(fiber)
-      elsif fiber.unit.is_a?(IyiUnit)
-        cancel_moving(fiber)
-      elsif home.object_id == state.object_id
-        cancel_wait(fiber)
-      elsif fiber.claim_any
-        ready(fiber)
-      elsif fiber.state != IyiFiberState::Joining
-        post_cancel(home, fiber)
+      if home.is_a?(IyiSchedulerState)
+        if !@@shared
+          cancel_wait(fiber)
+        elsif fiber.unit.is_a?(IyiUnit)
+          cancel_moving(fiber)
+        elsif home.object_id == state.object_id
+          cancel_wait(fiber)
+        elsif fiber.claim_any
+          ready(fiber)
+        elsif fiber.state != IyiFiberState::Joining
+          post_cancel(home, fiber)
+        end
       end
-    end
     {% end %}
     # And it reaches what the fiber started: the tasks of every group it
     # holds open, so a join it waits in - a park no wake above ends - ends
@@ -6731,6 +6735,7 @@ end
   end
 {% end %}
 
+{% unless flag?(:wasm32) %}
 # `defer`'s runtime half on the concurrency targets: the registry is
 # the current fiber's, so interleaved tasks never share cleanups. The
 # normalizer emits the push on entry and the pop on every normal exit;
@@ -6805,6 +6810,7 @@ def exit(status : Int32 = 0) : NoReturn
   __iyi_flush_std
   __iyi_exit(status)
 end
+{% end %}
 
 # ── The public primitives ──────────────────────────────────────────────
 
@@ -7092,6 +7098,15 @@ class IyiGroup
   # `g.spawn(unit: :new) { raise "boom" }` stopped compiling.
   private def in_unit(&block : -> T) : IyiTask(T) forall T
     raise "a task spawned on a group whose block has ended: no scope is left to join it" if @ended
+    {% if flag?(:wasm32) %}
+      if IyiWasmFibers.current.is_a?(Nil)
+        IyiScheduler.current.defers = IyiDefers.take_all
+        IyiWasmFibers.install(-> { IyiScheduler.current }, -> { IyiScheduler.first_fiber })
+      end
+      if IyiPanic.fiber_handler.is_a?(Nil)
+        IyiPanic.fiber_handler = ->(message : String) { IyiScheduler.panic_current(message) }
+      end
+    {% end %}
     IyiScheduler.make_stacks_with { |fresh| fresh.prepare_stack } unless IyiScheduler.makes_stacks?
     fiber = IyiFiber.new
     fiber.home = IyiScheduler.state

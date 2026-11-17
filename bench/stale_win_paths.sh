@@ -170,6 +170,11 @@ run("long device path", "path", (device,), expected=device, host_state=True, sit
 
 print("== standard and nonstandard handles")
 run("fd 0, 1 and 2", "streams", expected="STREAMS:ok")
-run("nonstandard file handle negative control", "file", (probe_file,), expected="FILE:ok", host_state=True, site=io)
+# A disk file asks the host nothing: whether it is a console is answered by its
+# type, which the observed open and metadata already fix. A character device
+# (a console, NUL) asks the console subsystem and is host state; that arm is
+# reached only through a device path, which the prelude already refuses at its
+# unproven path resolution, so no probe reaches it separately.
+run("nonstandard disk file handle", "file", (probe_file,), expected="FILE:ok")
 print("stale_win_paths: all native trace checks passed")
 PY

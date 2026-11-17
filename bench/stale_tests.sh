@@ -111,7 +111,15 @@ json_field() { python3 -c 'import json,sys; print(json.load(sys.stdin)[sys.argv[
 json_cached() { json_field cached; }
 json_failed() { json_field failed; }
 expect_eq() { [ "$1" = "$2" ] || fail "expected $2, got $1${3:+: $3}"; }
-expect_contains() { case "$1" in *"$2"*) ;; *) fail "missing $2${3:+: $3}";; esac; }
+expect_contains() {
+  case "$1" in
+    *"$2"*) ;;
+    *)
+      if [ "$KEEP_GOING" = 1 ]; then printf '    [searched text]\n%s\n    [end]\n' "$(printf '%s' "$1" | cut -c1-1200 | head -30)" >&2; fi
+      fail "missing $2${3:+: $3}"
+      ;;
+  esac
+}
 # One test's field from a `--json` document read on stdin: `json_test NAME FIELD`.
 json_test() { python3 -c '
 import json, os, sys

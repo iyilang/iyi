@@ -381,8 +381,9 @@ out = subprocess.run(['$BASH_EXE', '$REPO/bench/stale_store_concurrency.sh', '--
 require \"compiler/iyi/stale/link\"
 r = Iyi::Stale::Link.refusal(\"-L/opt/$ch/lib\", nil)
 puts r || \"nil\"
-'''], cwd='$REPO', stdout=subprocess.PIPE, stderr=subprocess.STDOUT).stdout.decode(errors='replace').strip()
-print(out)
+'''], cwd='$REPO', stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+text = out.stdout.decode(errors='replace').strip()
+print(text if out.returncode == 0 else 'exit %d: %s %s' % (out.returncode, text, out.stderr.decode(errors='replace').strip()))
 ")"
     if [[ "$res" == *"refused link flag"* && "$res" == *"$ch"* ]]; then
       echo "  refused char '$ch' OK: '$res'"
@@ -412,8 +413,9 @@ fp4 = Iyi::Stale::Link.fp(\"-lbar\", nil, false, Hash(String, String?).new)
 raise \"shim answer did not change LinkFp\" if fp3 == fp4
 
 puts \"OK\"
-'''], cwd='$REPO', stdout=subprocess.PIPE, stderr=subprocess.STDOUT).stdout.decode(errors='replace').strip()
-print(out)
+'''], cwd='$REPO', stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+text = out.stdout.decode(errors='replace').strip()
+print(text if out.returncode == 0 else 'exit %d: %s %s' % (out.returncode, text, out.stderr.decode(errors='replace').strip()))
 ")"
   if [ "$fp_check" = "OK" ]; then
     echo "  LinkFp sensitivity OK: changes with LIBRARY_PATH and shim answer"

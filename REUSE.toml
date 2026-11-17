@@ -78,3 +78,10 @@ path = ["bench/std_hpke_fixture/**"]
 precedence = "override"
 SPDX-FileCopyrightText = "IETF Trust and the persons identified as the document authors"
 SPDX-License-Identifier = "BSD-2-Clause"
+
+# Google Cloud Storage V4 conformance cases and their public dummy key.
+[[annotations]]
+path = ["bench/std_gcs_fixture/**"]
+precedence = "override"
+SPDX-FileCopyrightText = "Google LLC"
+SPDX-License-Identifier = "Apache-2.0"

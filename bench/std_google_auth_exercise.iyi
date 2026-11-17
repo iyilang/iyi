@@ -1,0 +1,84 @@
+# The driver gives this exercise a private loopback fake and a per-run CA.
+import std/google_auth::{GoogleCredentials, GoogleAuthError}
+import std/http::{HTTPClient, HTTPError, Response}
+import std/tls::{TlsConfig}
+import std/x509::{Certificate}
+import std/json::{JSON}
+import std/file::{File}
+import std/env::{ENV}
+import std/time::{Time}
+
+def check(ok : Bool, message : String) : Nil
+  raise "FAIL: " + message unless ok
+end
+
+def counter(client : HTTPClient, origin : String, name : String) : Int64
+  response = client.get(origin + "/counts").or_panic
+  fields = JSON.parse(response.body).as_h
+  item = fields[name]?
+  item ? (item.as_i64? || 0_i64) : 0_i64
+end
+
+args = Program.args
+work = args[0]
+config = JSON.parse(File.read(work + "/config.json")).as_h
+origin = config["https"].as_s
+metadata_host = config["metadata_host"].as_s
+identity = config["email"].as_s
+tls = TlsConfig.new
+tls.roots = Certificate.from_pem(File.read(work + "/ca.pem")).or_panic
+tls.post_quantum = false
+client = HTTPClient.new(idle: 0, tls: tls, timeout_ms: 10000)
+check(client.post(origin + "/reset").or_panic.status == 200, "fake reset")
+blocked = client.get("http://example.com/")
+check(blocked.is_a?(HTTPError) && blocked.message.includes?("loopback proof"), "loopback guard")
+puts "loopback guard rejects a non-loopback request before dialing: ok"
+
+# The server's refusal is part of the check: a fake that accepts a missing
+# Metadata-Flavor header would not verify the request the client sent.
+missing = client.get("http://" + metadata_host + "/computeMetadata/v1/instance/service-accounts/default/email").or_panic
+check(missing.status == 403, "metadata header negative control")
+ENV["GCE_METADATA_HOST"] = metadata_host
+creds = GoogleCredentials.metadata(client)
+ENV.delete("GCE_METADATA_HOST")
+check(creds.email.or_panic == identity, "metadata email")
+check(creds.email.or_panic == identity, "metadata email cached")
+check(counter(client, origin, "metadata_email") == 2_i64, "metadata email request count")
+now = Time.utc.to_unix
+check(creds.access_token(now).or_panic == "metadata-token", "metadata token")
+check(creds.access_token(now).or_panic == "metadata-token", "metadata token reuse")
+check(creds.access_token(now + 3539_i64).or_panic == "metadata-token", "cache before headroom")
+check(counter(client, origin, "metadata_token") == 1_i64, "metadata cache request count")
+check(creds.access_token(now + 3540_i64).or_panic == "metadata-token", "cache at headroom")
+check(counter(client, origin, "metadata_token") == 2_i64, "cache headroom request count")
+puts "metadata email, required header, token and 60-second cache: ok"
+
+service_json = File.read(work + "/service-account.json")
+service = GoogleCredentials.service_account(service_json, client).or_panic
+check(service.email.or_panic == identity, "service account identity")
+grant = service.access_token(now)
+check(!grant.is_a?(GoogleAuthError) && grant == "service-token", "JWT grant")
+check(service.access_token(now + 3539_i64).or_panic == "service-token", "JWT token reuse")
+check(counter(client, origin, "token") == 1_i64, "JWT cache request count")
+check(service.access_token(now + 3540_i64).or_panic == "service-token", "JWT cache headroom")
+check(counter(client, origin, "token") == 2_i64, "JWT refresh request count")
+puts "RS256 JWT grant and service-account token cache: ok"
+
+local = service.signer.or_panic
+iam = creds.signer(origin).or_panic
+check(local.sign("signBlob test").or_panic == iam.sign("signBlob test").or_panic, "IAM signBlob signature")
+check(counter(client, origin, "iam") == 1_i64, "IAM request count")
+puts "IAM signBlob matches the service-account RSA signer: ok"
+
+ENV["GOOGLE_APPLICATION_CREDENTIALS"] = work + "/service-account.json"
+adc = GoogleCredentials.application_default(client).or_panic
+check(adc.email.or_panic == identity, "ADC service-account file")
+ENV.delete("GOOGLE_APPLICATION_CREDENTIALS")
+adc_metadata = GoogleCredentials.application_default(client, metadata_host: metadata_host).or_panic
+check(adc_metadata.email.or_panic == identity, "ADC metadata fallback")
+invalid = GoogleCredentials.service_account("{\"type\":\"authorized_user\"}", client)
+check(invalid.is_a?(GoogleAuthError), "authorized_user refused")
+invalid = GoogleCredentials.service_account(service_json, client, token_uri: "http://127.0.0.1/token")
+check(invalid.is_a?(GoogleAuthError), "plaintext token URI refused")
+puts "application-default selection and credential refusals: ok"
+puts "ALL CHECKS PASSED"

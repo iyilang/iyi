@@ -1,0 +1,242 @@
+# Google service-account credentials and signing. A credential reads either
+# the attached identity's metadata or a service-account JSON key. OAuth
+# tokens are cached until 60 seconds before expiry. HTTPS clients, metadata
+# host, token URI and IAM endpoint can be supplied by the caller.
+#
+# authorized_user credentials are not supported. HTTP redirects are not
+# followed on requests carrying credentials or signed assertions.
+
+@[Unsafe("signature bytes are copied between the byte arrays used by RSA and the strings used by base64")]
+module std/google_auth
+
+import std/http::{HTTPClient, HTTPError, Response}
+import std/socket::{SocketError}
+import std/env::{ENV}
+import std/file::{File}
+import std/json::{JSON, Any}
+import std/base64::{Base64, Base64Error}
+import std/rsa::{RsaPrivateKey, RsaError, RsaHash}
+import std/time::{Time}
+import std/uri::{URI}
+
+pub struct GoogleAuthError
+  getter message : String
+  getter status : Int32
+
+  def initialize(message : String, @status : Int32 = 0)
+    @message = "google_auth: " + message
+  end
+
+  def to_s : String
+    @message
+  end
+end
+
+impl Error for GoogleAuthError
+  def message : String
+    @message
+  end
+end
+
+# These helpers do not retain private keys. Google uses unpadded base64url
+# for JWTs and padded standard base64 for IAM's signBlob request and answer.
+pub struct GoogleAuthBytes
+  def self.text(data : Array(UInt8)) : String
+    String.new(data.size) { |dst| dst.copy_from(data.to_unsafe, data.size) }
+  end
+
+  def self.bytes(text : String) : Array(UInt8)
+    Array(UInt8).new(text.bytesize) { |i| text.to_unsafe[i] }
+  end
+
+  def self.base64url(text : String) : String
+    Base64.urlsafe_encode(text).rstrip('=')
+  end
+
+  def self.object(text : String, what : String) : Hash(String, Any) | GoogleAuthError
+    parsed = JSON.parse?(text)
+    return GoogleAuthError.new("#{what} is not a JSON object") unless parsed
+    fields = parsed.as_h?
+    return GoogleAuthError.new("#{what} is not a JSON object") unless fields
+    fields
+  end
+
+  def self.field(fields : Hash(String, Any), name : String) : String?
+    value = fields[name]?
+    value ? value.as_s? : nil
+  end
+
+  def self.https?(url : String) : Bool
+    uri = URI.parse?(url)
+    return false unless uri
+    host = uri.hostname
+    uri.scheme == "https" && !host.nil? && !host.empty? && uri.user.nil? && uri.fragment.nil?
+  end
+
+  def self.response(got : Response | HTTPError | SocketError | Cancelled, what : String) : Response | GoogleAuthError
+    case got
+    when Response
+      return GoogleAuthError.new("#{what} returned HTTP #{got.status}", got.status) if got.status < 200 || got.status >= 300
+      got
+    when Cancelled
+      GoogleAuthError.new("#{what} was cancelled")
+    else
+      GoogleAuthError.new("#{what} failed: #{got.message}")
+    end
+  end
+end
+
+pub class GoogleCredentials
+  DEFAULT_SCOPE = "https://www.googleapis.com/auth/devstorage.read_write"
+  METADATA_PATH = "/computeMetadata/v1/instance/service-accounts/default/"
+
+  getter client : HTTPClient
+  getter key : RsaPrivateKey?
+  getter token_uri : String
+  getter scope : String
+  @metadata_root : String
+  @email : String
+  @cached_token : String
+  @cached_until : Int64
+
+  def initialize(@client : HTTPClient, @key : RsaPrivateKey?, @email : String,
+                 @token_uri : String, @scope : String, @metadata_root : String)
+    @cached_token = ""
+    @cached_until = 0_i64
+  end
+
+  # GCE_METADATA_HOST is the authority, including an optional port. The
+  # explicit argument also accepts an http:// URL for a local metadata fake.
+  def self.metadata(client : HTTPClient = HTTPClient.new, metadata_host : String? = nil,
+                    scope : String = DEFAULT_SCOPE) : GoogleCredentials
+    host = metadata_host || ENV["GCE_METADATA_HOST"]? || "metadata.google.internal"
+    root = host.starts_with?("http://") ? host : "http://" + host
+    root = root.rstrip('/')
+    GoogleCredentials.new(client, nil, "", "", scope, root + METADATA_PATH)
+  end
+
+  def self.service_account(json : String, client : HTTPClient = HTTPClient.new,
+                           scope : String = DEFAULT_SCOPE, token_uri : String? = nil) : GoogleCredentials | GoogleAuthError
+    fields = GoogleAuthBytes.object(json, "service-account credentials")
+    return fields if fields.is_a?(GoogleAuthError)
+    kind = GoogleAuthBytes.field(fields, "type")
+    return GoogleAuthError.new("credential type #{kind || "missing"} is not service_account") unless kind == "service_account"
+    email = GoogleAuthBytes.field(fields, "client_email")
+    pem = GoogleAuthBytes.field(fields, "private_key")
+    audience = token_uri || GoogleAuthBytes.field(fields, "token_uri")
+    return GoogleAuthError.new("service account needs client_email, private_key and token_uri") unless email && !email.empty? && pem && audience
+    return GoogleAuthError.new("service-account token_uri must be https") unless GoogleAuthBytes.https?(audience)
+    return GoogleAuthError.new("service-account scope is empty") if scope.empty?
+    key = RsaPrivateKey.from_pem(pem)
+    return GoogleAuthError.new("service-account private key: #{key.message}") if key.is_a?(RsaError)
+    GoogleCredentials.new(client, key, email, audience, scope, "")
+  end
+
+  # Application default credentials are an explicitly named service-account
+  # file, otherwise the attached metadata identity. A named bad file is an
+  # error and never causes a fallback to metadata.
+  def self.application_default(client : HTTPClient = HTTPClient.new, scope : String = DEFAULT_SCOPE,
+                               metadata_host : String? = nil, token_uri : String? = nil) : GoogleCredentials | GoogleAuthError
+    path = ENV["GOOGLE_APPLICATION_CREDENTIALS"]?
+    if path
+      return GoogleAuthError.new("GOOGLE_APPLICATION_CREDENTIALS names an empty or absent file") if path.empty? || !File.exists?(path)
+      return service_account(File.read(path), client, scope, token_uri)
+    end
+    metadata(client, metadata_host, scope)
+  end
+
+  def email : String | GoogleAuthError
+    return @email unless @email.empty?
+    got = @client.request("GET", @metadata_root + "email", {"Metadata-Flavor" => "Google"}, redirects: 0)
+    response = GoogleAuthBytes.response(got, "metadata email")
+    return response if response.is_a?(GoogleAuthError)
+    value = response.body.strip
+    return GoogleAuthError.new("metadata email is empty") if value.empty?
+    @email = value
+    value
+  end
+
+  # `now` is injectable for a caller with a measured clock and for tests.
+  # The headroom applies to both metadata and service-account tokens.
+  def access_token(now : Int64 = Time.utc.to_unix) : String | GoogleAuthError
+    return @cached_token if !@cached_token.empty? && now < @cached_until
+    key = @key
+    response = if key
+                 assertion = jwt(key, now)
+                 return assertion if assertion.is_a?(GoogleAuthError)
+                 body = "grant_type=" + URI.encode_www_form("urn:ietf:params:oauth:grant-type:jwt-bearer") + "&assertion=" + URI.encode_www_form(assertion)
+                 GoogleAuthBytes.response(@client.request("POST", @token_uri, {"Content-Type" => "application/x-www-form-urlencoded"}, body, redirects: 0), "token exchange")
+               else
+                 GoogleAuthBytes.response(@client.request("GET", @metadata_root + "token", {"Metadata-Flavor" => "Google"}, redirects: 0), "metadata token")
+               end
+    return response if response.is_a?(GoogleAuthError)
+    fields = GoogleAuthBytes.object(response.body, "token response")
+    return fields if fields.is_a?(GoogleAuthError)
+    token = GoogleAuthBytes.field(fields, "access_token")
+    lifetime_value = fields["expires_in"]?
+    lifetime = lifetime_value ? lifetime_value.as_i64? : nil
+    return GoogleAuthError.new("token response needs a nonempty access_token and positive expires_in") unless token && !token.empty? && lifetime && lifetime > 0_i64
+    return GoogleAuthError.new("token expiry is out of range") if now > 0_i64 && lifetime > 9223372036854775807_i64 - now
+    @cached_token = token
+    @cached_until = now + lifetime - 60_i64
+    token
+  end
+
+  private def jwt(key : RsaPrivateKey, now : Int64) : String | GoogleAuthError
+    header = GoogleAuthBytes.base64url("{\"alg\":\"RS256\",\"typ\":\"JWT\"}")
+    payload = JSON.build do |json|
+      json.object do
+        json.field("iss", @email)
+        json.field("sub", @email)
+        json.field("aud", @token_uri)
+        json.field("scope", @scope)
+        json.field("iat", now)
+        json.field("exp", now + 3600_i64)
+      end
+    end
+    input = header + "." + GoogleAuthBytes.base64url(payload)
+    signature = key.sign_pkcs1v15(RsaHash::SHA256, input)
+    return GoogleAuthError.new("JWT signature: #{signature.message}") if signature.is_a?(RsaError)
+    input + "." + GoogleAuthBytes.base64url(GoogleAuthBytes.text(signature))
+  end
+
+  def signer(iam_endpoint : String = "https://iamcredentials.googleapis.com") : GoogleSigner | GoogleAuthError
+    identity = email
+    return identity if identity.is_a?(GoogleAuthError)
+    return GoogleAuthError.new("IAM endpoint must be https") if @key.nil? && !GoogleAuthBytes.https?(iam_endpoint)
+    GoogleSigner.new(identity, self, iam_endpoint.rstrip('/'))
+  end
+end
+
+pub class GoogleSigner
+  getter email : String
+  @credentials : GoogleCredentials
+  @iam_endpoint : String
+
+  def initialize(@email : String, @credentials : GoogleCredentials, @iam_endpoint : String)
+  end
+
+  def sign(bytes : Array(UInt8) | String) : Array(UInt8) | GoogleAuthError
+    if key = @credentials.key
+      signature = key.sign_pkcs1v15(RsaHash::SHA256, bytes)
+      return GoogleAuthError.new("RSA signature: #{signature.message}") if signature.is_a?(RsaError)
+      return signature
+    end
+    token = @credentials.access_token
+    return token if token.is_a?(GoogleAuthError)
+    raw = bytes.is_a?(String) ? bytes : GoogleAuthBytes.text(bytes)
+    payload = JSON.build { |json| json.object { json.field("payload", Base64.encode(raw)) } }
+    url = @iam_endpoint + "/v1/projects/-/serviceAccounts/" + URI.encode_path_segment(@email) + ":signBlob"
+    headers = {"Authorization" => "Bearer " + token, "Content-Type" => "application/json"}
+    got = @credentials.client.request("POST", url, headers, payload, redirects: 0)
+    response = GoogleAuthBytes.response(got, "IAM signBlob")
+    return response if response.is_a?(GoogleAuthError)
+    fields = GoogleAuthBytes.object(response.body, "IAM signBlob response")
+    return fields if fields.is_a?(GoogleAuthError)
+    blob = GoogleAuthBytes.field(fields, "signedBlob")
+    return GoogleAuthError.new("IAM signBlob response has no signedBlob") unless blob && !blob.empty?
+    decoded = Base64.decode?(blob)
+    return GoogleAuthError.new("IAM signBlob returned invalid base64") if decoded.is_a?(Base64Error)
+    GoogleAuthBytes.bytes(decoded)
+  end
+end

@@ -1,0 +1,32 @@
+Google Cloud Storage V4 conformance fixtures
+
+Source: https://github.com/googleapis/conformance-tests, commit
+bd81c3038308486dc1004e268fdab4391829ee78, storage/v1/v4_signatures.json
+(SHA-256 5da2708039e2cf17173a031838e3448509d801ba4ce1577fde79970c072178fe)
+and storage/v1/test_service_account.not-a-test.json. The repository is
+licensed under Apache-2.0; a copy is in LICENSES/Apache-2.0.txt.
+
+v4_signatures.json retains the first 17 signingV4Tests unchanged and omits
+all postPolicyV4Tests. Every retained expected canonical request, string to
+sign and complete URL is checked byte for byte. The accompanying test key
+is Google's explicitly inactive, public dummy key; only its type, client
+email and private key fields are retained. Tests provide their own local
+HTTPS token URI, and never send a request using the fixture's URL.
+
+Not included from the upstream signing file:
+Virtual Hosted Style; HTTP Bucket Bound Hostname Support; HTTPS Bucket Bound
+Hostname Support; Simple GET with hostname; Simple GET with non-default
+hostname; Simple GET with endpoint on client; Endpoint on client with scheme;
+Emulator host; Endpoint on client takes precedence over emulator; Hostname
+takes precendence over endpoint and emulator; Universe domain; Universe
+domain with virtual hosted style. The library offers path-style endpoint
+overrides; these specific hostname, precedence and virtual-host variants are
+not covered by the vendored vectors.
+
+Post-policy signing is outside this library's surface. Omitted upstream
+scenarios: POST Policy Simple; POST Policy Simple Virtual Hosted Style; POST
+Policy Simple Bucket Bound Hostname; POST Policy Simple Bucket Bound Hostname
+HTTP; POST Policy ACL matching; POST Policy Within Content-Range; POST Policy
+Cache-Control File Header; POST Policy Success With Status; POST Policy
+Success With Redirect; POST Policy Character Escaping; POST Policy With
+Additional Metadata.

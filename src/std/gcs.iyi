@@ -1,0 +1,280 @@
+# Google Cloud Storage's JSON API and V4 RSA signed URLs. Endpoint and HTTP
+# client are injectable; STORAGE_EMULATOR_HOST supplies an endpoint when
+# the caller did not. Object names and query fields are encoded as UTF-8
+# bytes under RFC 3986. Generation values stay strings, including "0".
+# A media read checks x-goog-hash's CRC32C when the response carries it.
+
+@[Unsafe("CRC32C's four bytes are copied into a string for base64 encoding")]
+module std/gcs
+
+import std/google_auth::{GoogleCredentials, GoogleSigner, GoogleAuthError, GoogleAuthBytes}
+import std/http::{HTTPClient, HTTPError, Response}
+import std/socket::{SocketError}
+import std/env::{ENV}
+import std/json::{JSON}
+import std/base64::{Base64}
+import std/digest::{SHA256}
+import std/time::{Time}
+import std/uri::{URI}
+
+pub struct GcsError
+  getter message : String
+  getter status : Int32
+
+  def initialize(message : String, @status : Int32 = 0)
+    @message = "gcs: " + message
+  end
+
+  def to_s : String
+    @message
+  end
+end
+
+impl Error for GcsError
+  def message : String
+    @message
+  end
+end
+
+pub struct GcsSignedRequest
+  getter url : String
+  getter canonical_request : String
+  getter string_to_sign : String
+  getter signed_headers : String
+
+  def initialize(@url : String, @canonical_request : String, @string_to_sign : String, @signed_headers : String)
+  end
+end
+
+pub struct GcsV4
+  ALGORITHM = "GOOG4-RSA-SHA256"
+  MAX_EXPIRY = 604800
+
+  def self.encode(value : String) : String
+    URI.encode_path_segment(value)
+  end
+
+  # A header's runs of spaces and tabs become one space, as GCS requires.
+  def self.header_value(value : String) : String
+    out = ""
+    pending = false
+    value.each_char do |c|
+      if c == ' ' || c == '\t'
+        pending = !out.empty?
+      else
+        out = out + " " if pending
+        out = out + c.to_s
+        pending = false
+      end
+    end
+    out
+  end
+
+  # The URL without its signature, and both exact strings it signs. `now`
+  # is seconds since the Unix epoch; only path-style endpoints are offered.
+  # Additional query fields and headers are included in the signature.
+  def self.prepare(method : String, endpoint : String, bucket : String, object : String?, email : String,
+                   expires : Int32, now : Int64, headers : Hash(String, String) = {} of String => String,
+                   query : Hash(String, String) = {} of String => String) : GcsSignedRequest | GcsError
+    return GcsError.new("expiry must be between 1 and #{MAX_EXPIRY} seconds") if expires <= 0 || expires > MAX_EXPIRY
+    return GcsError.new("empty bucket or signing identity") if bucket.empty? || email.empty?
+    return GcsError.new("unsupported signed URL method #{method}") unless ["GET", "PUT", "HEAD", "DELETE", "POST"].includes?(method)
+    uri = URI.parse?(endpoint)
+    return GcsError.new("invalid endpoint") unless uri
+    host = uri.host
+    scheme = uri.scheme
+    return GcsError.new("endpoint needs an http or https scheme and host") unless host && !host.empty? && scheme
+    return GcsError.new("endpoint needs an http or https scheme and host") unless scheme == "https" || scheme == "http"
+    return GcsError.new("endpoint cannot have userinfo, a query or fragment") if uri.user || uri.query || uri.fragment
+    return GcsError.new("endpoint cannot have a path") unless uri.path.empty? || uri.path == "/"
+    authority = host
+    if port = uri.port
+      authority = authority + ":#{port}" unless (scheme == "https" && port == 443) || (scheme == "http" && port == 80)
+    end
+    origin = scheme + "://" + authority
+    path = "/" + encode(bucket)
+    path = path + "/" + URI.encode_path(object) if object
+    date = Time.unix(now)
+    timestamp = date.to_s("%Y%m%dT%H%M%SZ")
+    day = date.to_s("%Y%m%d")
+    scope = day + "/auto/storage/goog4_request"
+    normalized = {"host" => authority}
+    headers.each do |name, value|
+      lower = name.downcase
+      return GcsError.new("host header must match the endpoint") if lower == "host" && header_value(value) != authority
+      if lower != "host"
+        clean = header_value(value)
+        previous = normalized[lower]?
+        normalized[lower] = previous ? previous + "," + clean : clean
+      end
+    end
+    names = normalized.keys.sorted
+    signed_headers = names.join(";")
+    canonical_headers = ""
+    names.each { |name| canonical_headers = canonical_headers + name + ":" + normalized[name] + "\n" }
+    parameters = {} of String => String
+    query.each do |name, value|
+      return GcsError.new("reserved signing query parameter #{name}") if name.downcase.starts_with?("x-goog-") && ["x-goog-algorithm", "x-goog-credential", "x-goog-date", "x-goog-expires", "x-goog-signedheaders", "x-goog-signature"].includes?(name.downcase)
+      parameters[encode(name)] = encode(value)
+    end
+    parameters["X-Goog-Algorithm"] = ALGORITHM
+    parameters["X-Goog-Credential"] = encode(email + "/" + scope)
+    parameters["X-Goog-Date"] = timestamp
+    parameters["X-Goog-Expires"] = expires.to_s
+    parameters["X-Goog-SignedHeaders"] = encode(signed_headers)
+    pairs = parameters.keys.sorted.map { |name| name + "=" + parameters[name] }
+    canonical_query = pairs.join("&")
+    payload = normalized["x-goog-content-sha256"]? || "UNSIGNED-PAYLOAD"
+    canonical = method + "\n" + path + "\n" + canonical_query + "\n" + canonical_headers + "\n" + signed_headers + "\n" + payload
+    signing = ALGORITHM + "\n" + timestamp + "\n" + scope + "\n" + SHA256.hexdigest(canonical)
+    GcsSignedRequest.new(origin + path + "?" + canonical_query, canonical, signing, signed_headers)
+  end
+
+  def self.hex(bytes : Array(UInt8)) : String
+    bytes.map { |b| (b < 16_u8 ? "0" : "") + b.to_s(16) }.join("")
+  end
+
+  def self.signed_url(method : String, endpoint : String, bucket : String, object : String?, signer : GoogleSigner,
+                      expires : Int32, now : Int64 = Time.utc.to_unix,
+                      headers : Hash(String, String) = {} of String => String,
+                      query : Hash(String, String) = {} of String => String) : String | GcsError
+    request = prepare(method, endpoint, bucket, object, signer.email, expires, now, headers, query)
+    return request if request.is_a?(GcsError)
+    signature = signer.sign(request.string_to_sign)
+    return GcsError.new(signature.message, signature.status) if signature.is_a?(GoogleAuthError)
+    request.url + "&X-Goog-Signature=" + hex(signature)
+  end
+end
+
+pub struct GcsCRC32C
+  # Castagnoli polynomial, reflected, with the standard initial/final XOR.
+  def self.base64(data : String) : String
+    crc = 0xffffffff_u64
+    p = data.to_unsafe
+    i = 0
+    while i < data.bytesize
+      crc = crc ^ p[i].to_u64
+      j = 0
+      while j < 8
+        crc = (crc >> 1) ^ ((crc & 1_u64) == 1_u64 ? 0x82f63b78_u64 : 0_u64)
+        j = j + 1
+      end
+      i = i + 1
+    end
+    crc = crc ^ 0xffffffff_u64
+    bytes = String.new(4) do |dst|
+      dst[0] = ((crc >> 24) & 255_u64).to_u8
+      dst[1] = ((crc >> 16) & 255_u64).to_u8
+      dst[2] = ((crc >> 8) & 255_u64).to_u8
+      dst[3] = (crc & 255_u64).to_u8
+    end
+    Base64.encode(bytes)
+  end
+
+  def self.in_header(header : String) : String?
+    header.split(',').each do |part|
+      item = part.strip
+      return item[7, item.bytesize - 7] if item.starts_with?("crc32c=")
+    end
+    nil
+  end
+end
+
+pub class GcsClient
+  getter bucket : String
+  getter endpoint : String
+  getter credentials : GoogleCredentials
+  @client : HTTPClient
+
+  def initialize(@bucket : String, @credentials : GoogleCredentials, endpoint : String? = nil, client : HTTPClient? = nil)
+    @endpoint = (endpoint || ENV["STORAGE_EMULATOR_HOST"]? || "https://storage.googleapis.com").rstrip('/')
+    @client = client || @credentials.client
+  end
+
+  private def query(fields : Hash(String, String)) : String
+    return "" if fields.empty?
+    "?" + fields.keys.sorted.map { |key| GcsV4.encode(key) + "=" + GcsV4.encode(fields[key]) }.join("&")
+  end
+
+  private def object_path(name : String) : String
+    "/storage/v1/b/" + GcsV4.encode(@bucket) + "/o/" + GcsV4.encode(name)
+  end
+
+  private def conditions(generation : String?, metageneration : String?) : Hash(String, String)
+    fields = {} of String => String
+    fields["ifGenerationMatch"] = generation if generation
+    fields["ifMetagenerationMatch"] = metageneration if metageneration
+    fields
+  end
+
+  private def request(method : String, path : String, fields : Hash(String, String), body : String = "",
+                      content_type : String? = nil) : Response | GcsError
+    token = @credentials.access_token
+    return GcsError.new(token.message, token.status) if token.is_a?(GoogleAuthError)
+    headers = {"Authorization" => "Bearer " + token}
+    headers["Content-Type"] = content_type if content_type
+    got = @client.request(method, @endpoint + path + query(fields), headers, body, redirects: 0, decompress: false)
+    response = GoogleAuthBytes.response(got, "#{method} object")
+    return GcsError.new(response.message, response.status) if response.is_a?(GoogleAuthError)
+    response
+  end
+
+  def stat(name : String, if_generation_match : String? = nil, if_metageneration_match : String? = nil) : Response | GcsError
+    request("GET", object_path(name), conditions(if_generation_match, if_metageneration_match))
+  end
+
+  def read(name : String, if_generation_match : String? = nil, if_metageneration_match : String? = nil) : Response | GcsError
+    fields = conditions(if_generation_match, if_metageneration_match)
+    fields["alt"] = "media"
+    response = request("GET", object_path(name), fields)
+    return response if response.is_a?(GcsError)
+    if header = response.header("x-goog-hash")
+      if expected = GcsCRC32C.in_header(header)
+        return GcsError.new("downloaded object CRC32C mismatch") unless GcsCRC32C.base64(response.body) == expected
+      end
+    end
+    response
+  end
+
+  def write(name : String, bytes : String, content_type : String = "application/octet-stream",
+            if_generation_match : String? = nil, if_metageneration_match : String? = nil) : Response | GcsError
+    fields = conditions(if_generation_match, if_metageneration_match)
+    fields["uploadType"] = "media"
+    fields["name"] = name
+    request("POST", "/upload/storage/v1/b/" + GcsV4.encode(@bucket) + "/o", fields, bytes, content_type)
+  end
+
+  def patch(name : String, content_type : String? = nil, content_encoding : String? = nil,
+            metadata : Hash(String, String)? = nil, if_generation_match : String? = nil,
+            if_metageneration_match : String? = nil, cache_control : String? = nil,
+            custom_time : String? = nil) : Response | GcsError
+    body = JSON.build do |json|
+      json.object do
+        json.field("contentType", content_type) if content_type
+        json.field("contentEncoding", content_encoding) if content_encoding
+        json.field("cacheControl", cache_control) if cache_control
+        json.field("customTime", custom_time) if custom_time
+        if metadata
+          json.field("metadata") { json.object { metadata.each { |key, value| json.field(key, value) } } }
+        end
+      end
+    end
+    request("PATCH", object_path(name), conditions(if_generation_match, if_metageneration_match), body, "application/json")
+  end
+
+  def delete(name : String, if_generation_match : String? = nil, if_metageneration_match : String? = nil) : Response | GcsError
+    request("DELETE", object_path(name), conditions(if_generation_match, if_metageneration_match))
+  end
+
+  def list(prefix : String = "", page_token : String? = nil) : Response | GcsError
+    fields = {"prefix" => prefix}
+    fields["pageToken"] = page_token if page_token
+    request("GET", "/storage/v1/b/" + GcsV4.encode(@bucket) + "/o", fields)
+  end
+
+  def signed_url(method : String, name : String, signer : GoogleSigner, expires : Int32,
+                 now : Int64 = Time.utc.to_unix, headers : Hash(String, String) = {} of String => String,
+                 query : Hash(String, String) = {} of String => String) : String | GcsError
+    GcsV4.signed_url(method, @endpoint, @bucket, name, signer, expires, now, headers, query)
+  end
+end

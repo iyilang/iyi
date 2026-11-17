@@ -1,0 +1,133 @@
+# Every network request in this exercise is to the driver's loopback fake.
+import std/google_auth::{GoogleCredentials}
+import std/gcs::{GcsClient, GcsError, GcsV4, GcsCRC32C}
+import std/http::{HTTPClient, HTTPError, Response}
+import std/tls::{TlsConfig}
+import std/x509::{Certificate}
+import std/json::{JSON, Any}
+import std/file::{File}
+import std/env::{ENV}
+import std/time::{Time}
+
+def check(ok : Bool, message : String) : Nil
+  raise "FAIL: " + message unless ok
+end
+
+def fields(value : Any?) : Hash(String, String)
+  out = {} of String => String
+  if value && (map = value.as_h?)
+    map.each { |name, item| out[name] = item.as_s }
+  end
+  out
+end
+
+def counter(client : HTTPClient, origin : String, name : String) : Int64
+  response = client.get(origin + "/counts").or_panic
+  item = JSON.parse(response.body).as_h[name]?
+  item ? (item.as_i64? || 0_i64) : 0_i64
+end
+
+def field(response : Response, name : String) : String
+  JSON.parse(response.body).as_h[name].as_s
+end
+
+args = Program.args
+work = args[0]
+fixtures = args[1]
+config = JSON.parse(File.read(work + "/config.json")).as_h
+origin = config["https"].as_s
+tls = TlsConfig.new
+tls.roots = Certificate.from_pem(File.read(work + "/ca.pem")).or_panic
+tls.post_quantum = false
+client = HTTPClient.new(idle: 0, tls: tls, timeout_ms: 10000)
+check(client.post(origin + "/reset").or_panic.status == 200, "fake reset")
+blocked = client.get("http://example.com/")
+check(blocked.is_a?(HTTPError) && blocked.message.includes?("loopback proof"), "loopback guard")
+puts "loopback guard rejects a non-loopback request before dialing: ok"
+
+# These are Google's published inactive test key and vectors. Building and
+# comparing these URLs makes no HTTP request to storage.googleapis.com.
+key_json = File.read(fixtures + "/test_service_account.not-a-test.json")
+vector_creds = GoogleCredentials.service_account(key_json, client, token_uri: origin + "/token").or_panic
+vector_signer = vector_creds.signer.or_panic
+vectors = JSON.parse(File.read(fixtures + "/v4_signatures.json")).as_h["signingV4Tests"].as_a
+check(vectors.size == 17, "all selected conformance vectors present")
+vectors.each do |vector|
+  v = vector.as_h
+  name = v["description"].as_s
+  object = v["object"]?
+  object_name = object ? object.as_s? : nil
+  timestamp = Time.parse_rfc3339(v["timestamp"].as_s).to_unix
+  method = v["method"].as_s
+  bucket = v["bucket"].as_s
+  expires = v["expiration"].as_i
+  headers = fields(v["headers"]?)
+  query = fields(v["queryParameters"]?)
+  parts = GcsV4.prepare(method, "https://storage.googleapis.com", bucket, object_name, vector_signer.email, expires, timestamp, headers, query).or_panic
+  check(parts.canonical_request == v["expectedCanonicalRequest"].as_s, "canonical vector: " + name)
+  check(parts.string_to_sign == v["expectedStringToSign"].as_s, "string-to-sign vector: " + name)
+  url = GcsV4.signed_url(method, "https://storage.googleapis.com", bucket, object_name, vector_signer, expires, timestamp, headers, query).or_panic
+  check(url == v["expectedUrl"].as_s, "signed URL vector: " + name)
+end
+puts "Google conformance: 17 canonical requests, strings-to-sign and signed URLs match byte for byte"
+
+creds = GoogleCredentials.service_account(File.read(work + "/service-account.json"), client).or_panic
+signer = creds.signer.or_panic
+gcs = GcsClient.new("test-bucket", creds, origin)
+now = Time.utc.to_unix
+check(gcs.signed_url("GET", "obj", signer, 604801, now).is_a?(GcsError), "expiry over seven days refused")
+check(GcsV4.encode("!'()* /é") == "%21%27%28%29%2A%20%2F%C3%A9", "RFC3986 reserved bytes")
+default_port = GcsV4.prepare("GET", "https://storage.googleapis.com:443", "test-bucket", "test-object", vector_signer.email, 10, Time.parse_rfc3339("2019-02-01T09:00:00Z").to_unix).or_panic
+check(default_port.canonical_request == vectors[0].as_h["expectedCanonicalRequest"].as_s, "default HTTPS port normalization")
+headers = {"content-length" => "12"}
+put_url = gcs.signed_url("PUT", "signed/a !'()*.bin", signer, 60, now, headers).or_panic
+# HTTPClient writes Content-Length from the body; it disallows setting it.
+check(client.request("PUT", put_url, {} of String => String, "signed bytes", redirects: 0).or_panic.status == 200, "signed PUT")
+get_url = gcs.signed_url("GET", "signed/a !'()*.bin", signer, 60, now).or_panic
+get = client.get(get_url).or_panic
+check(get.status == 200 && get.body == "signed bytes", "signed GET")
+head_url = gcs.signed_url("HEAD", "signed/a !'()*.bin", signer, 60, now).or_panic
+check(client.head(head_url).or_panic.status == 200, "signed HEAD")
+del_url = gcs.signed_url("DELETE", "signed/a !'()*.bin", signer, 60, now).or_panic
+check(client.delete(del_url).or_panic.status == 204, "signed DELETE")
+["PUT", "GET", "HEAD", "DELETE"].each { |m| check(counter(client, origin, "signed_" + m) == 1_i64, "fake verified signed " + m) }
+puts "V4 PUT, GET, HEAD and DELETE verified independently by the fake: ok"
+
+check(GcsCRC32C.base64("123456789") == "4waSgw==", "CRC32C check value")
+name = "m/!()*/é.json"
+written = gcs.write(name, "123456789", "text/plain", if_generation_match: "0").or_panic
+generation = field(written, "generation")
+check(field(written, "metageneration") == "1", "initial metageneration")
+collision = gcs.write(name, "wrong", if_generation_match: "0")
+check(collision.is_a?(GcsError) && collision.status == 412, "create-only precondition 412")
+check(field(gcs.stat(name, if_generation_match: generation).or_panic, "generation") == generation, "stat generation")
+read = gcs.read(name, if_generation_match: generation, if_metageneration_match: "1").or_panic
+check(read.body == "123456789", "media read body")
+check(GcsCRC32C.in_header(read.header("x-goog-hash") || "") == GcsCRC32C.base64(read.body), "media read CRC32C")
+stale = gcs.patch(name, content_type: "text/plain", if_generation_match: generation, if_metageneration_match: "9")
+check(stale.is_a?(GcsError) && stale.status == 412, "stale metageneration 412")
+patched = gcs.patch(name, content_type: "application/json", content_encoding: "gzip", metadata: {"purpose" => "test"}, if_generation_match: generation, if_metageneration_match: "1", cache_control: "no-transform").or_panic
+p = JSON.parse(patched.body).as_h
+check(p["generation"].as_s == generation && p["metageneration"].as_s == "2", "patch metageneration")
+check(p["contentType"].as_s == "application/json" && p["contentEncoding"].as_s == "gzip", "patch content fields")
+check(p["metadata"].as_h["purpose"].as_s == "test" && p["cacheControl"].as_s == "no-transform", "patch metadata fields")
+check(gcs.write("m/second", "second", if_generation_match: "0").or_panic.status == 200, "second object")
+first_page = JSON.parse(gcs.list("m/").or_panic.body).as_h
+check(first_page["items"].as_a.size == 1, "list first page")
+next_page = first_page["nextPageToken"].as_s
+second_page = JSON.parse(gcs.list("m/", next_page).or_panic.body).as_h
+check(second_page["items"].as_a.size == 1 && second_page["nextPageToken"]?.nil?, "list next page")
+first_name = first_page["items"].as_a[0].as_h["name"].as_s
+second_name = second_page["items"].as_a[0].as_h["name"].as_s
+check(first_name == name && second_name == "m/second", "pagination keeps both names")
+check(gcs.write("corrupt-crc", "hello").or_panic.status == 200, "CRC negative fixture")
+bad_crc = gcs.read("corrupt-crc")
+check(bad_crc.is_a?(GcsError) && bad_crc.message.includes?("CRC32C"), "CRC mismatch refused")
+wrong_delete = gcs.delete(name, if_generation_match: generation, if_metageneration_match: "1")
+check(wrong_delete.is_a?(GcsError) && wrong_delete.status == 412, "delete metageneration 412")
+check(gcs.delete(name, if_generation_match: generation, if_metageneration_match: "2").or_panic.status == 204, "conditional delete")
+ENV["STORAGE_EMULATOR_HOST"] = origin
+check(GcsClient.new("test-bucket", creds).endpoint == origin, "emulator endpoint")
+ENV.delete("STORAGE_EMULATOR_HOST")
+puts "JSON stat, read, write, patch, delete, pagination, preconditions and CRC32C: ok"
+puts "ALL CHECKS PASSED"

@@ -732,7 +732,15 @@ describe "Iyi::Stale S6a: Store and Receipts" do
   # both helper processes from Python; POSIX can run them directly.
   {% if flag?(:win32) %}
     it "survives two concurrent processes each recording 1,000 receipts (row 21)" do
-      Process.run("bash", ["bench/stale_store_concurrency.sh"],
+      # `bash` alone finds System32's WSL launcher first on a runner with no
+      # distribution installed; the gate is written for the Git for Windows
+      # shell, so take the first bash.exe on PATH that is not that launcher.
+      bash = ENV["PATH"].split(';').compact_map do |directory|
+        candidate = File.join(directory, "bash.exe")
+        candidate if File.file?(candidate) && !candidate.downcase.includes?("\\system32\\")
+      end.first?
+      bash.should_not be_nil
+      Process.run(bash.not_nil!, ["bench/stale_store_concurrency.sh"],
         output: Process::Redirect::Inherit, error: Process::Redirect::Inherit).success?.should be_true
     end
   {% else %}

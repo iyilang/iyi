@@ -931,8 +931,8 @@ class Iyi::Command
       def self.console_event(event : UInt32) : Int32
         status = case event
                  when LibC::CTRL_C_EVENT, LibC::CTRL_BREAK_EVENT then 130_u32
-                 when LibC::CTRL_CLOSE_EVENT                    then 129_u32
-                 else                                               return 0
+                 when LibC::CTRL_CLOSE_EVENT                     then 129_u32
+                 else                                                 return 0
                  end
         LibC.AcquireSRWLockExclusive(pointerof(@@jobs_lock))
         node = @@jobs

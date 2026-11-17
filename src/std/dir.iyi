@@ -31,6 +31,10 @@ import std/file::{File}
     fun FindFirstFileW(pattern : UInt16*, data : Void*) : Void*
     fun FindNextFileW(handle : Void*, data : Void*) : Int32
     fun FindClose(handle : Void*) : Int32
+    # Where Windows itself says a program may write scratch files, asked only
+    # when TMPDIR, TEMP and TMP name none: TMP, then TEMP, then the profile
+    # directory.
+    fun GetTempPathW(buffer_count : Int32, buffer : UInt16*) : Int32
     # What a refused removal is asked about. A directory carrying
     # FILE_ATTRIBUTE_READONLY (0x1) refuses `RemoveDirectoryW` with
     # ERROR_ACCESS_DENIED (5) where POSIX's `rmdir` asks the parent and
@@ -425,6 +429,23 @@ pub class Dir
     yield
   end
 
+  {% if flag?(:win32) %}
+    # Windows' own answer, not a literal: `C:\Windows\Temp` is a directory a
+    # standard user may not write to, and the platform keeps the question.
+    # The environment answers first and is observed; this is the answer only
+    # when it names none, so it is a host-state read. The call always ends
+    # its answer with a separator, which no other branch here does.
+    @[Effect(:host_state)]; private def self.windows_temp_path : String
+      wide = Pointer(UInt16).malloc(4096_u64)
+      chars = LibKernel32.GetTempPathW(4096, wide)
+      return "C:\\Windows\\Temp" if chars <= 0 || chars > 4096
+      size = __iyi_utf8_size_from_wide(wide)
+      return "C:\\Windows\\Temp" if size <= 1
+      answer = String.new(size - 1) { |t| __iyi_utf8_bytes_from_wide(wide, t, size) }
+      answer.ends_with?("\\") ? answer[0, answer.bytesize - 1] : answer
+    end
+  {% end %}
+
   def self.tempdir : String
     tmp = Program.env("TMPDIR")
     return without_trailing_separator(tmp) if tmp && !tmp.empty?
@@ -433,7 +454,7 @@ pub class Dir
     tmp3 = Program.env("TMP")
     return without_trailing_separator(tmp3) if tmp3 && !tmp3.empty?
     {% if flag?(:win32) %}
-      raise "Cannot find temporary directory: TMPDIR, TEMP and TMP are unset or empty"
+      windows_temp_path
     {% else %}
       "/tmp"
     {% end %}

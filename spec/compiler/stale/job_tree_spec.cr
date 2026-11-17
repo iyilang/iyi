@@ -12,7 +12,13 @@ require "../../spec_helper"
       begin
         process.exists?.should be_true
         tree.close
-        process.wait.success?.should be_false
+        # Closing the job ends the child. Windows gives such a process a
+        # success status, so it is the wait's return, not the status, that
+        # shows it ended: the `ping` would otherwise run for 60 seconds.
+        started = Time.instant
+        process.wait
+        (Time.instant - started).should be < 30.seconds
+        process.exists?.should be_false
       ensure
         tree.close
       end

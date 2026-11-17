@@ -46,9 +46,9 @@ lib LibC
   end
 
   enum FILE_INFO_BY_HANDLE_CLASS
-    FileBasicInfo          = 0
-    FileStandardInfo       = 1
-    FileAttributeTagInfo   = 9
+    FileBasicInfo          =  0
+    FileStandardInfo       =  1
+    FileAttributeTagInfo   =  9
     FileRemoteProtocolInfo = 13
     FileIdInfo             = 18
   end

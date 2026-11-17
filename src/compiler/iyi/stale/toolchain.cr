@@ -17,6 +17,7 @@ module Iyi::Stale
 
   module Toolchain
     record StatKey, path : String, stamp : BuildInputs::Stamp
+
     class ImageChangedError < Exception
     end
 
@@ -254,17 +255,17 @@ module Iyi::Stale
         # loader for the DLL by the name used by LibLLVM instead.
         module_handle = LibC.GetModuleHandleW(Crystal::System.to_wstr("LLVM-C.dll"))
         filename = unless module_handle.null?
-                     Crystal::System.retry_wstr_buffer do |buffer, small_buf|
-                       len = LibC.GetModuleFileNameW(module_handle, buffer, buffer.size)
-                       if 0 < len < buffer.size
-                         break String.from_utf16(buffer[0, len])
-                       elsif small_buf && len == buffer.size
-                         next 32767
-                       else
-                         break nil
-                       end
-                     end
-                   end
+          Crystal::System.retry_wstr_buffer do |buffer, small_buf|
+            len = LibC.GetModuleFileNameW(module_handle, buffer, buffer.size)
+            if 0 < len < buffer.size
+              break String.from_utf16(buffer[0, len])
+            elsif small_buf && len == buffer.size
+              next 32767
+            else
+              break nil
+            end
+          end
+        end
         real = begin
           filename ? File.realpath(filename) : nil
         rescue File::Error

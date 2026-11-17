@@ -960,7 +960,7 @@ pub class UdpSocket
     end
 
     @[Effect(:network)]; def self.__sys_sendto(fd : Int32, buf : Pointer(UInt8), len : UInt64, flags : Int32,
-                          addr : Pointer(UInt8), addrlen : Int32) : Int64
+                                               addr : Pointer(UInt8), addrlen : Int32) : Int64
       n = LibWs2_32.sendto(__sys_handle(fd), buf.as(Void*), len.to_i32, flags, addr.as(Void*), addrlen)
       return n.to_i64 if n >= 0
       __sys_error
@@ -969,7 +969,7 @@ pub class UdpSocket
     # Winsock's address length is an `int*` where POSIX has a `socklen_t*`:
     # the same width and the same bytes, so the callers keep one signature.
     @[Effect(:network)]; def self.__sys_recvfrom(fd : Int32, buf : Pointer(UInt8), len : UInt64, flags : Int32,
-                            addr : Pointer(UInt8), addrlen : Pointer(UInt32)) : Int64
+                                                 addr : Pointer(UInt8), addrlen : Pointer(UInt32)) : Int64
       n = LibWs2_32.recvfrom(__sys_handle(fd), buf.as(Void*), len.to_i32, flags, addr.as(Void*),
         addrlen.as(Pointer(Int32)))
       return n.to_i64 if n >= 0
@@ -982,7 +982,7 @@ pub class UdpSocket
     # operation, and the address and its length are the caller's, which
     # `receive_from` reads after this returns.
     @[Effect(:network)]; def self.__sys_recvfrom_posted(fd : Int32, buf : Pointer(UInt8), capacity : Int32,
-                                   addr : Pointer(UInt8), addrlen : Pointer(UInt32)) : Int32 | Cancelled
+                                                        addr : Pointer(UInt8), addrlen : Pointer(UInt32)) : Int32 | Cancelled
       # A cancelled task must not post: nothing would wake it but the
       # completion, and a datagram nobody sends never produces one.
       return Cancelled.new if IyiScheduler.current.cancelled

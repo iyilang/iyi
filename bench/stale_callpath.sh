@@ -93,6 +93,26 @@ IYI
   fi
 }
 
+# On a mismatch, say whether the stale build differs from the normal one or
+# whether the linker's own output is not reproducible here: build the program
+# normally once more at the same -o and compare that with the first normal
+# build. Runs only after a mismatch, so a passing run is unchanged.
+explain_link_difference() {
+  local first="$1" second="$2" source="$3"
+  {
+    echo "    sizes: $(wc -c < "$first" | tr -d ' ') (normal) vs $(wc -c < "$second" | tr -d ' ') (stale)"
+    echo "    differing bytes: $(cmp -l "$first" "$second" 2>/dev/null | wc -l | tr -d ' ')"
+    echo "    first differing offsets (1-based): $(cmp -l "$first" "$second" 2>/dev/null | head -8 | awk '{printf "%s ", $1}')"
+  } >&2
+  rm -rf "$CACHE"/*
+  "$IYI" build -o "$second" "$source" >/dev/null 2>&1 || true
+  if cmp -s "$first" "$second"; then
+    echo "    a second normal build is identical to the first: the stale build is what differs" >&2
+  else
+    echo "    a second normal build differs from the first too: this linker's output is not reproducible here" >&2
+  fi
+}
+
 run_link() {
   echo "== Running S3d: Link section (link-once, no-shell link, LinkFp, refusal) =="
 
@@ -118,6 +138,7 @@ run_link() {
       echo "  Link cmp OK: $name"
     else
       echo "  Link cmp MISMATCH: $name" >&2
+      explain_link_difference "$saved" "$out" "$prog"
       mismatches=$((mismatches + 1))
     fi
     total=$((total + 1))
@@ -142,6 +163,7 @@ run_link() {
     echo "  Link cmp OK: quoted ldflags fixture"
   else
     echo "  Link cmp MISMATCH: quoted ldflags fixture" >&2
+    explain_link_difference "$saved" "$out" "$fixture"
     mismatches=$((mismatches + 1))
   fi
   total=$((total + 1))

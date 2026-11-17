@@ -19,7 +19,6 @@ module Iyi::Stale
   #
   # Windows change times are used only on trusted local NTFS volumes.
   module FileStamp
-
     # Unknown or remote filesystems and older Windows releases cannot vouch
     # for a change while a writer still has the file open.
     def self.trusted_volume?(filesystem : String, remote : Bool, build : Int32, drive_type : UInt32) : Bool

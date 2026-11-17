@@ -21,7 +21,9 @@ def change_directory(path : String) : Nil
 end
 
 args = Program.args
-mode = args[0]
+# The Windows runtime job runs every bench program with no arguments, so no
+# mode runs the one that needs none.
+mode = args.size > 0 ? args[0] : "streams"
 
 case mode
 when "path"

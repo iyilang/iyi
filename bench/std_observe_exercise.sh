@@ -201,11 +201,26 @@ if [ "$REL_TAIL" != "0d0000007f000000000000000000000000" ]; then
   exit 1
 fi
 
+# A path that is not drive-absolute is resolved by Windows against a current
+# directory per drive, which the runtime does not yet prove for every spelling
+# (`__iyi_wide_full_unproven` in the prelude), so on Windows the observer's own
+# resolution of a relative path records a host-state taint at that helper
+# instead of a FILE record, and the program is not reusable. Elsewhere the path
+# is recorded as the FILE record it names.
+if [ "$WINDOWS" = 1 ]; then
+  REL_NEEDLE="746f6f6c636861696e3a6979692f7072656c7564652e6979693a" # toolchain:iyi/prelude.iyi:
+  REL_EXPECT="8,127"
+  REL_WHAT="refused as host state at the prelude's unproven path resolution"
+else
+  REL_NEEDLE="72656c61746976655f65786572636973655f7461726765742e747874" # relative_exercise_target.txt
+  REL_EXPECT="1,127"
+  REL_WHAT="recorded as a FILE record"
+fi
 REL_HEX="$(od -An -v -tx1 "$REL_TRACE" | tr -d ' \n')"
 case "$REL_HEX" in
-  *72656c61746976655f65786572636973655f7461726765742e747874*) ;;
+  *"$REL_NEEDLE"*) ;;
   *)
-    echo "FAIL: expected relative file target in trace, got $REL_HEX"
+    echo "FAIL: expected the relative file's $REL_WHAT in trace, got $REL_HEX"
     exit 1
     ;;
 esac
@@ -228,11 +243,12 @@ while pos < len(data):
     pos += payload_len
 if 0x05 in kinds:
     sys.exit("FAIL: unexpected CWD record (0x05) emitted during relative file observation")
-if kinds != [0x01, 0x7F]:
-    sys.exit(f"FAIL: expected records [0x01, 0x7f], got {[hex(k) for k in kinds]}")
-' "$REL_TRACE"
+expected = [int(k) for k in sys.argv[2].split(",")]
+if kinds != expected:
+    sys.exit(f"FAIL: expected records {[hex(k) for k in expected]}, got {[hex(k) for k in kinds]}")
+' "$REL_TRACE" "$REL_EXPECT"
 fi
-echo "  relative file observation wrote valid record and END(0)"
+echo "  relative file observation $REL_WHAT, with END(0)"
 
 echo "== panic writes END(1)"
 # A panic leaves through __iyi_exit(1), so the trace ends with END(1); only a

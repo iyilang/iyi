@@ -9,7 +9,7 @@ require "../spec_helper"
         executable = File.join(dir, "compiler-image")
         replacement = File.join(dir, "replacement")
         output = IO::Memory.new
-        status = Process.run("bin/crystal", ["build", "spec/compiler/stale/running_image_fixture.cr", "-o", executable],
+        status = Process.run("bin/crystal", ["build", "spec/support/stale_running_image_fixture.cr", "-o", executable],
           env: {"CRYSTAL_CACHE_DIR" => File.join(dir, "crystal-cache")}, output: output, error: output)
         status.success?.should be_true, output.to_s
         File.write(replacement, "replacement compiler bytes")

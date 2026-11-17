@@ -59,16 +59,16 @@ describe Iyi::Stale::Profile do
       host.kernel.should match(/\A\d+\.\d+\.\d+\.\d+\z/)
       info = LibC::JOBOBJECT_EXTENDED_LIMIT_INFORMATION.new
       info.basicLimitInformation.limitFlags = LibC::JOB_OBJECT_LIMIT_PROCESS_MEMORY |
-        LibC::JOB_OBJECT_LIMIT_JOB_MEMORY | LibC::JOB_OBJECT_LIMIT_ACTIVE_PROCESS | LibC::JOB_OBJECT_LIMIT_PROCESS_TIME
+                                              LibC::JOB_OBJECT_LIMIT_JOB_MEMORY | LibC::JOB_OBJECT_LIMIT_ACTIVE_PROCESS | LibC::JOB_OBJECT_LIMIT_PROCESS_TIME
       info.basicLimitInformation.activeProcessLimit = 4_u32
       info.basicLimitInformation.perProcessUserTimeLimit = 123_i64
       info.processMemoryLimit = 1024_u64
       info.jobMemoryLimit = 2048_u64
       Iyi::Stale::Profile.job_limits(info).should eq({
-        "job_process_memory" => 1024_i64,
-        "job_memory" => 2048_i64,
+        "job_process_memory"   => 1024_i64,
+        "job_memory"           => 2048_i64,
         "job_active_processes" => 4_i64,
-        "job_process_time" => 123_i64,
+        "job_process_time"     => 123_i64,
       })
       info.basicLimitInformation.limitFlags = 0_u32
       Iyi::Stale::Profile.job_limits(info).should be_empty

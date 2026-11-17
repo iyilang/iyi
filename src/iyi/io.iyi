@@ -31,7 +31,6 @@ class IyiIO
   def initialize(@fd : Int64, buffer_size : Int32 = 4096, @sync : Bool = false)
     @closed = false
     @eof = false
-
     @read_capacity = buffer_size
     @read_buffer = Pointer(UInt8).malloc(buffer_size.to_u64)
     @read_pos = 0
@@ -44,13 +43,14 @@ class IyiIO
       @console = @fd > 2_i64 && windows_console?(Pointer(Void).new(@fd.to_u64))
     {% end %}
   end
+
   {% if flag?(:win32) %}
     # A write-only console refuses a mode query; a zero-length wide write distinguishes it from NUL.
     @[Effect(:host_state)]; private def windows_console?(handle : Void*) : Bool
       mode = 0
       LibC.GetFileType(handle) == 2 &&
         (LibC.GetConsoleMode(handle, pointerof(mode)) != 0 ||
-         LibC.WriteConsoleW(handle, pointerof(mode).as(Void*), 0, pointerof(mode), Pointer(Void).new(0_u64)) != 0)
+          LibC.WriteConsoleW(handle, pointerof(mode).as(Void*), 0, pointerof(mode), Pointer(Void).new(0_u64)) != 0)
     end
   {% end %}
 

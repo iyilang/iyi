@@ -104,8 +104,8 @@ lib LibC
   end
 
   fun GetVolumeInformationByHandleW(hFile : HANDLE, volumeName : LPWSTR, volumeNameSize : DWORD,
-                                   volumeSerialNumber : DWORD*, maximumComponentLength : DWORD*, fileSystemFlags : DWORD*,
-                                   fileSystemName : LPWSTR, fileSystemNameSize : DWORD) : BOOL
+                                    volumeSerialNumber : DWORD*, maximumComponentLength : DWORD*, fileSystemFlags : DWORD*,
+                                    fileSystemName : LPWSTR, fileSystemNameSize : DWORD) : BOOL
 
   struct FILE_ATTRIBUTE_TAG_INFO
     fileAttributes : DWORD

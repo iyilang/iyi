@@ -1073,7 +1073,7 @@ class ProcessChild
     end
 
     @[Effect(:process)]; def start(command : String, path : String, args : Array(String), chdir : String?,
-              input : Int32, output : Int32, error : Int32, environment : Array(String)?) : Nil | ProcessError
+                                   input : Int32, output : Int32, error : Int32, environment : Array(String)?) : Nil | ProcessError
       line = String::Builder.new(256)
       ProcessChild.quote(command, line)
       args.each do |arg|

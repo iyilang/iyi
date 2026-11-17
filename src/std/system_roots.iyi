@@ -432,6 +432,7 @@ end
     @[Effect(:host_state)]; private def self.close_store(store : Void*) : Nil
       LibCrypt32.CertCloseStore(store, 0_u32)
     end
+
     # Every certificate in the system store *name*: its context, for the
     # properties the store keeps beside it, and its DER. A CERT_CONTEXT
     # is { DWORD encoding; BYTE* encoded; DWORD size; ... } on the 64-bit

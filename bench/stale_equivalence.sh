@@ -511,9 +511,13 @@ def has_record(data, want):
 # A kind nothing on this platform reaches: there is no observer call to
 # drop. host_state is the trust store the system keeps (Security.framework,
 # the Windows certificate store); on Linux the roots are files, and the path
-# observers answer for those. Held to having no taint of the kind at all, so
-# a site that arrives later has to bring its proof.
-NO_SITE = {'host_state'} if sys.platform.startswith('linux') else set()
+# observers answer for those. file_exists is on every platform: `Dir.exists?`
+# records a stat now, because it answers by the type the stat reports, and the
+# one remaining `file_exists` annotation is the process lookup's own
+# `executable_file?`, which runs inside the process observer's frame, where an
+# inner observer writes nothing. Held to having no taint or record of the kind
+# at all, so a site that arrives later has to bring its proof.
+NO_SITE = {'file_exists'} | ({'host_state'} if sys.platform.startswith('linux') else set())
 
 # The runtime records nothing a program reads under its scratch directory,
 # which it takes from TMPDIR and, without one, is /tmp: where this gate's
@@ -799,7 +803,8 @@ SystemRoots.load
         data_pb = open(trace_pb, 'rb').read()
         code = NOT_REUSABLE_CODES.get(kind)
         if kind in NO_SITE:
-            if code in taint_kinds(data_a):
+            want_record = RECORDS.get(kind)
+            if code in taint_kinds(data_a) or (want_record is not None and has_record(data_a, want_record)):
                 failed_kinds.append((kind, 'a site reaches this kind here, so it is no longer without one: prove it like the others'))
             else:
                 no_site_kinds.append(kind)

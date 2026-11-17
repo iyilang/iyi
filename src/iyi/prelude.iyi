@@ -11288,7 +11288,11 @@ end
         Pointer(UInt8).new(0_u64), Pointer(Int32).new(0_u64))
     end
   end
-  @[Effect(:primitive)]; def __iyi_win_command_line : UInt16*; LibC.GetCommandLineW; end
+
+  @[Effect(:primitive)]; def __iyi_win_command_line : UInt16*
+    LibC.GetCommandLineW
+  end
+
   # ERROR_ENVVAR_NOT_FOUND, which is the one thing a zero answer from
   # `GetEnvironmentVariableW` can mean besides a value of `""`.
   IYI_WIN_ENVVAR_NOT_FOUND = 203

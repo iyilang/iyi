@@ -114,8 +114,25 @@ describe Iyi::Stale::FileStamp do
     end
   {% end %}
 
+  it "marks absent only the open failures that mean the path cannot exist" do
+    # FILE_NOT_FOUND, PATH_NOT_FOUND, INVALID_NAME.
+    {2_u32, 3_u32, 123_u32}.each do |error|
+      Iyi::Stale::FileStamp.windows_open_failure(error).kind.absent?.should be_true
+    end
+    # ACCESS_DENIED, SHARING_VIOLATION, LOCK_VIOLATION, an unknown error:
+    # the path may exist, so the recorder must refuse, not record absence.
+    {5_u32, 32_u32, 33_u32, 1920_u32, 0xFFFF_u32}.each do |error|
+      stamp = Iyi::Stale::FileStamp.windows_open_failure(error)
+      stamp.kind.absent?.should be_false
+      stamp.ctime.should eq(0)
+    end
+  end
+
   {% if flag?(:win32) %}
-    it "refuses an input held open without sharing rather than marking it absent" do
+    it "reads the metadata of an input another handle holds without sharing" do
+      # The stamp opens for FILE_READ_ATTRIBUTES alone, and Windows does not
+      # apply share modes to an open that asks for attributes only, so the
+      # holder does not keep it out. What it reads is the file's real metadata.
       with_tempfile("win-locked-input.txt") do |path|
         File.write(path, "source")
         handle = LibC.CreateFileW(Crystal::System.to_wstr(path), LibC::GENERIC_READ, 0_u32,
@@ -124,10 +141,8 @@ describe Iyi::Stale::FileStamp do
         begin
           stamp = Iyi::Stale::FileStamp.of(path)
           stamp.kind.file?.should be_true
-          stamp.ctime.should eq(0)
-          inputs = Iyi::BuildInputs.new(nil, stale: true)
-          inputs.looked_at(path)
-          inputs.reasons.any?(&.includes?("no trusted change time")).should be_true
+          stamp.size.should eq(6)
+          stamp.ino.should_not eq(0)
         ensure
           LibC.CloseHandle(handle)
         end

@@ -1993,9 +1993,14 @@ jobs:
       - name: Build `iyi`
         run: make iyi LLVM_CONFIG="$LLVM_STATIC/bin/llvm-config"
       # Python 3.14, as on Linux: the oracles' modules answer as 3.14's do.
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.14"
+      # brew's, in a virtual environment of the job's own: setup-python's
+      # macOS builds install under /Users/runner, which the self-hosted Mac
+      # has not, and brew's Python refuses a pip install outside a venv.
+      - name: Python 3.14, in the job's own virtual environment
+        run: |
+          brew list --versions python@3.14 >/dev/null || brew install python@3.14
+          "$(brew --prefix python@3.14)/bin/python3.14" -m venv "$RUNNER_TEMP/py"
+          echo "$RUNNER_TEMP/py/bin" >> "$GITHUB_PATH"
       - name: Python's cryptography and Pillow, for the oracles
         run: python3 -m pip install -q cryptography pillow
       - name: The module exercises of this shard, on darwin

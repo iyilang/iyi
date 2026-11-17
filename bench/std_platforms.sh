@@ -47,7 +47,7 @@ echo "== and on the platforms this runner is not"
 # (2,189 s, job 128266194144) and 3.1 s on a slow windows-2025 runner.
 unportable=""
 for target in aarch64-darwin x86_64-windows-msvc aarch64-linux-gnu x86_64-linux-musl; do
-  for source in "$REPO"/bench/std_*_exercise.iyi; do
+  for source in "$REPO"/bench/std_*_exercise.iyi "$REPO"/bench/std_*_test.iyi; do
     name="$(basename "$source" .iyi)"
     work="$WORK/cross/$target/$name"
     mkdir -p "$work/mods"

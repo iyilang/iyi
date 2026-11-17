@@ -488,8 +488,8 @@ prove_broken acme "Retry-After ignored" "Retry-After: 2 honoured" \
 prove_broken acme "a problem document taken as success" "a problem document is an error naming its type and detail" \
   '    return nil if @status < 400' '    return nil if @status < 600'
 prove_broken x509 "the CSR signed by another key" "the CSR's signature verifies under its own key" \
-  '    X509Der.sequence([info, key.algorithm_identifier, X509Der.bit_string(key.sign(info))])' \
-  '    X509Der.sequence([info, key.algorithm_identifier, X509Der.bit_string(SigningKey.p256.sign(info))])'
+  '    X509Der.sequence([info, key.algorithm_identifier, X509Der.bit_string(key.sign(info)!)])' \
+  '    X509Der.sequence([info, key.algorithm_identifier, X509Der.bit_string(SigningKey.p256.sign(info)!)])'
 prove_broken acme "a badNonce answer not sent again" "a badNonce answer is sent again" \
   '  MAX_BAD_NONCE = 10' '  MAX_BAD_NONCE = 0'
 prove_broken acme "a wait past max_polls" "a wait stops at max_polls" \

@@ -1,0 +1,24 @@
+# Tests `std/box`: heap box holding a value.
+#
+# Run via:
+#     ./bin/iyi test bench/std_box_test.iyi
+
+@[Unsafe("it exercises std/box, whose box and unbox hand an object to C as a Void* and back")]
+module bench/std_box_test
+
+import std/box::{Box}
+
+test "new, object, box and unbox" do
+  assert_eq 41, Box(Int32).new(41).object, "stored"
+  assert_eq 41, Box(Int32).unbox(Box(Int32).box(41)), "box then unbox"
+end
+
+# A null pointer is nil for a T that admits nil, as the other library
+# answers it for `String?`: it was refused for every T, so a C callback
+# handed no data panicked "Unboxing null pointer" where nil was the answer.
+test "a null pointer is nil for a nilable T" do
+  none = Pointer(Void).new(0_u64)
+  assert_nil Box(String?).unbox(none), "a null pointer unboxed as a String?"
+  assert_nil Box(Int32?).unbox(none), "a null pointer unboxed as an Int32?"
+  assert_eq "kept", Box(String?).unbox(Box(String?).box("kept")).to_s, "a String? still unboxes to its value"
+end

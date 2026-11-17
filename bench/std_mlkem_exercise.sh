@@ -11,7 +11,8 @@
 # sets it beside OpenSSL (3.5 and later, which have ML-KEM) and Python's
 # cryptography (48 and later, on an OpenSSL that has it), each side's keys
 # encapsulated to by the other, records the time each step takes, asks the
-# refusals, checks the formatting, and proves on broken copies of the
+# refusals, reads in the --release assembly how decapsulation picks its
+# answer, checks the formatting, and proves on broken copies of the
 # module that the checks fail where they say.
 set -u
 
@@ -413,6 +414,111 @@ refuse long-seed "ML-KEM-768: a seed is 64 bytes (d, then z), not 96"
 refuse short-m "ML-KEM-768: the randomness of an encapsulation is 32 bytes, not 31"
 
 echo
+echo "== how decapsulation picks its answer, read off the machine code"
+# Whether a decapsulation kept K or the implicit rejection's K-bar is not
+# in the time it takes when a conditional move keeps one key's address and
+# a single load reads through it, so no timing shows it: it is in the
+# instructions, and they are read here. A small program's --release
+# assembly, for two pinned targets whatever the host is (`--cross-compile`
+# writes the assembly and links nothing, so neither target's toolchain is
+# needed): `decapsulate` has to hold the value barrier its mask goes
+# through (an empty `#APP`/`#NO_APP` pair is what std/digest's
+# `ValueBarrier` leaves), and nowhere in it may a conditional move keep one
+# of two pointers that a load then reads through.
+cat >"$WORK/pick.iyi" <<'IYI'
+module pick
+
+import std/mlkem::{MlKem768, MlKem768PrivateKey, MlKemError}
+
+seed = Array(UInt8).new(64) { |i| ((i * 37 + Program.args.size) & 0xff).to_u8 }
+key = MlKem768PrivateKey.from_seed(seed)
+sent = MlKem768.encapsulate(key.encapsulation_key, seed[0, 32]).or_panic
+shared = key.decapsulate(sent[0])
+puts shared.is_a?(MlKemError) ? "refused" : (shared == sent[1])
+IYI
+# machine.py FILE.s FUNCTION BARRIERS [lookup]: what in FUNCTION's
+# instructions picks by a secret where a mask should, a line each.
+cat >"$WORK/machine.py" <<'PY'
+import re, sys
+path, name, need, leaf = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4:] == ["lookup"]
+body, inside = [], False
+for line in open(path, encoding="utf-8", errors="replace"):
+    line = line.rstrip("\n")
+    if not inside:
+        inside = line.startswith('"') and line.endswith('":') and name in line
+    elif line.startswith("\t.size\t"):
+        break
+    elif line.strip() and not line.startswith("\t.") and not line.startswith(".Ltmp"):
+        body.append(line.strip())
+if not body:
+    raise SystemExit(f"no function named {name} in the assembly, so nothing of it was read")
+found = []
+barriers = sum(1 for a, b in zip(body, body[1:]) if a.endswith("APP") and b.endswith("NO_APP") and not a.endswith("NO_APP"))
+if barriers < need:
+    found.append(f"{name}: not the {need} value barriers its source asks for in its machine code, but {barriers}")
+code = [l for l in body if not l.endswith("APP")]
+labels = {l[:-1]: i for i, l in enumerate(code) if l.endswith(":")}
+split = lambda l: (l.split(None, 1) + [""])[:2]
+leaves = re.compile(r"j\w+|b|bl|blr|br|b\.\w+|cbn?z|tbn?z|call|ret")
+for i, l in enumerate(code):
+    op, args = split(l)
+    # A pointer kept by a conditional move and then read through: which of
+    # the two it was is the address of that load.
+    kept = re.match(r"(r[a-z0-9]+|x\d+),", args) if re.fullmatch(r"cmov\w+|csel", op) else None
+    if kept and not re.search(r"\d[dwb]$", kept.group(1)):
+        reg = kept.group(1)
+        for later in code[i + 1:i + 13]:
+            lop, largs = split(later)
+            if later.endswith(":") or leaves.fullmatch(lop):
+                break
+            if re.search(r"\[[^\]]*\b" + reg + r"\b", largs):
+                found.append(f"{name}: `{' '.join(l.split())}` keeps one of two pointers and `{' '.join(later.split())}` reads through it")
+                break
+            first, _, rest = largs.partition(",")
+            if first == reg and not re.search(r"\b" + reg + r"\b", rest):
+                break
+    # In a lookup a conditional jump is its loop going round, or a check of
+    # a counter (an overflow, an index past the table) leaving for a panic;
+    # any other is a branch on what was looked up.
+    if leaf and re.fullmatch(r"j(?!mp)\w+|b\.\w+|cbn?z|tbn?z", op):
+        at = labels.get(args.split(",")[-1].strip(), -1)
+        block = []
+        for later in code[at + 1:at + 25] if at > i else []:
+            if later.endswith(":") or split(later)[0] in ("ret", "jmp", "b", "br"):
+                break
+            block.append(later)
+        if at > i and not any("raise" in x for x in block):
+            found.append(f"{name}: `{' '.join(l.split())}` is neither its loop nor a counter's check")
+print("\n".join(found), end="\n" if found else "")
+sys.exit(1 if found else 0)
+PY
+# machine_code <search path> <dir>: what is wrong with `decapsulate` built
+# from <search path>, a line each, and 1 if anything is.
+machine_code() {
+  local target wrong=0
+  mkdir -p "$2"
+  for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
+    if ! IYI_PATH="$1" "$IYI" build --release --emit asm --x86-asm-syntax intel --cross-compile --target "$target" \
+      -o "$2/$target" "$WORK/pick.iyi" >"$2/$target.log" 2>&1 || [ ! -s "$2/$target.s" ]; then
+      echo "$target: no assembly was written: $(grep -m1 -E 'Error|BUG' "$2/$target.log")"
+      wrong=1
+    elif ! "$PY" "$WORK/machine.py" "$2/$target.s" 'MlKem768PrivateKey#decapsulate<' 1 >"$2/$target.read" 2>&1; then
+      sed "s/^/$target: /" "$2/$target.read"
+      wrong=1
+    fi
+  done
+  return $wrong
+}
+if [ -z "$PY" ]; then
+  echo "  no python here to read the assembly with, so the pick's machine code goes unread"
+elif machine_code "$IYI_PATH" "$WORK/machine" >"$WORK/machine.out"; then
+  echo "  x86_64 and aarch64, --release: the mask goes through its barrier, and both keys' bytes are read and combined"
+else
+  sed 's/^/  /' "$WORK/machine.out"
+  status=1
+fi
+
+echo
 echo "== doc and format"
 if "$IYI" doc "$REPO/src/std/mlkem.iyi" >"$WORK/doc.txt" 2>&1 && grep -q "decapsulate" "$WORK/doc.txt"; then
   echo "  iyi doc reads the module"
@@ -431,14 +537,12 @@ echo
 echo "== proving the checks can fail when the module is broken"
 # prove_broken <label> <phrase> <old> <new>: the exercise must fail on a
 # copy of the module with <old> replaced, at the check that names <phrase>.
-prove_broken() {
+# patched_copy <old> <new>: a copy of the module with <old>, which it has once,
+# replaced, under $WORK/patched.
+patched_copy() {
   rm -rf "$WORK/patched"
   mkdir -p "$WORK/patched/std"
-  if [ -z "$PY" ]; then
-    echo "  no python3 on this machine, so the $1 proof is unmeasured"
-    return
-  fi
-  if ! OLD="$3" NEW="$4" "$PY" - <<PY
+  OLD="$1" NEW="$2" "$PY" - <<PY
 import os
 from pathlib import Path
 src = Path("$REPO/src/std/mlkem.iyi").read_text()
@@ -446,7 +550,13 @@ if src.count(os.environ["OLD"]) != 1:
     raise SystemExit("patch site missing or not unique")
 Path("$WORK/patched/std/mlkem.iyi").write_text(src.replace(os.environ["OLD"], os.environ["NEW"], 1))
 PY
-  then
+}
+prove_broken() {
+  if [ -z "$PY" ]; then
+    echo "  no python3 on this machine, so the $1 proof is unmeasured"
+    return
+  fi
+  if ! patched_copy "$3" "$4"; then
     echo "  the $1 patch did not apply"
     status=1
   elif IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_mlkem_exercise.iyi" -- "$VECTORS" >"$WORK/mut.out" 2>&1; then
@@ -484,7 +594,7 @@ prove_broken "decompression that truncates rather than rounds" "acvp encapsulati
 prove_broken "a Barrett reduction without its last subtraction" "acvp keyGen 26: the encapsulation key" \
   '    reduce_once(a &- quotient &* Q)' '    a &- quotient &* Q'
 prove_broken "implicit rejection returning the real key" "acvp decapsulation 88 (modified ciphertext): the shared secret" \
-  'secret[i] = (g[i] & keep) | (rejected[i] & ~keep)' 'secret[i] = g[i]'
+  'secret[i] = rejected[i] ^ ((g[i] ^ rejected[i]) & keep)' 'secret[i] = g[i]'
 prove_broken "a rejection key of J(z) without the ciphertext" "acvp decapsulation 88 (modified ciphertext): the shared secret" \
   'rejected = SHAKE256.new.update(@z).update(c, n).read(32)' 'rejected = SHAKE256.new.update(@z).read(32)'
 prove_broken "a ciphertext comparison that stops short of the last byte" "acvp decapsulation 88 (modified ciphertext): the shared secret" \
@@ -502,6 +612,39 @@ prove_broken "the hash check skipped" "acvp decapsulationKeyCheck 128 (modified 
       return'
 prove_broken "a decapsulation key's s read unreduced" "a decapsulation key whose s is spelled with a coefficient past q is read as the canonical one" \
   '        v[i * 256 + j] = MlKemField.reduce_once(v[i * 256 + j])' '        v[i * 256 + j] = v[i * 256 + j]'
+# prove_unmasked <label> <phrase> <old> <new>: the exercise cannot tell a
+# pick by masks from one a compiler was left free to make a choice of, the
+# answers being the same; the reading of the machine code has to, with
+# <phrase> in what it says.
+prove_unmasked() {
+  if [ -z "$PY" ]; then
+    echo "  no python3 on this machine, so the $1 proof is unmeasured"
+  elif ! patched_copy "$3" "$4"; then
+    echo "  the $1 patch did not apply"
+    status=1
+  elif machine_code "$WORK/patched${PSEP}$IYI_PATH" "$WORK/patched/machine" >"$WORK/mut.out"; then
+    echo "  the machine code of $1 was read as sound"
+    status=1
+  elif [ "$(grep -cF "$2" "$WORK/mut.out")" -eq 2 ]; then
+    echo "  $1 is caught, on both targets"
+  else
+    echo "  $1 was refused, but not for what it is:"
+    sed 's/^/    /' "$WORK/mut.out"
+    status=1
+  fi
+}
+prove_unmasked "a pick whose mask the compiler can see" "decapsulate<: not the 1 value barriers" \
+  'keep = ValueBarrier.u8(0_u8 &- keep)' 'keep = 0_u8 &- keep'
+prove_unmasked "the pick as it was, a mask and its complement in plain sight" "keeps one of two pointers" \
+  '    keep = ValueBarrier.u8(0_u8 &- keep)
+    secret = Array(UInt8).new(32, 0_u8)
+    i = 0
+    while i < 32
+      secret[i] = rejected[i] ^ ((g[i] ^ rejected[i]) & keep)' '    keep = 0_u8 &- keep
+    secret = Array(UInt8).new(32, 0_u8)
+    i = 0
+    while i < 32
+      secret[i] = (g[i] & keep) | (rejected[i] & ~keep)'
 
 echo
 if [ "$status" -eq 0 ]; then

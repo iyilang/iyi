@@ -14,8 +14,9 @@
 # ways; reads private keys as OpenSSL writes them, PKCS #8 and SEC 1, and
 # refuses the ones that are not P-384's; runs Wycheproof's ECDH vectors
 # for secp384r1; prints how long keygen, ECDH and signing take beside
-# OpenSSL; and proves on broken copies of the module that the checks fail
-# where they say.
+# OpenSSL; reads in the --release assembly how a table's entry is picked
+# by a secret digit; and proves on broken copies of the module that the
+# checks fail where they say.
 #
 # Wycheproof's ECDSA P-384 vectors are verification tests - a signature
 # and whether it holds - which is std/ecdsa's domain, not this module's;
@@ -480,6 +481,123 @@ else
 fi
 
 echo
+echo "== how a table's entry is picked, read off the machine code"
+# A selector made from a digit of the key or the nonce is 0 or 1, and a
+# compiler that sees so may pick the entry with a conditional jump on the
+# digit, or by reading one entry's address: the same answers, so nothing
+# above shows it. The instructions do. A small program's --release
+# assembly is read for two pinned targets, whatever the host is
+# (`--cross-compile` writes the assembly and links nothing, so neither
+# target's toolchain is needed). `P384Point.lookup` has to hold the value
+# barrier its selector goes through (an empty `#APP`/`#NO_APP` pair is
+# what std/digest's `ValueBarrier` leaves), no conditional move in it may
+# keep one of two pointers that a load then reads through, and its only
+# conditional jumps may be its loop's and its counter's checks.
+cat >"$WORK/pick.iyi" <<'IYI'
+module pick
+
+import std/p384::{P384PrivateKey}
+import std/ecdsa::{EcdsaHash, EcdsaError}
+
+def bytes_of(seed : Int32) : Array(UInt8)
+  Array(UInt8).new(48) { |i| ((i * 37 + seed * 11 + 1) & 0x7f).to_u8 }
+end
+
+key = P384PrivateKey.from_bytes(bytes_of(Program.args.size)).or_panic
+other = P384PrivateKey.from_bytes(bytes_of(Program.args.size + 1)).or_panic
+puts key.sign(EcdsaHash::SHA384, "hello").size
+shared = key.shared_secret(other.public_point)
+puts shared.is_a?(EcdsaError) ? "refused" : shared.size
+IYI
+# machine.py FILE.s FUNCTION BARRIERS [lookup]: what in FUNCTION's
+# instructions picks by a secret where a mask should, a line each.
+cat >"$WORK/machine.py" <<'PY'
+import re, sys
+path, name, need, leaf = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4:] == ["lookup"]
+body, inside = [], False
+for line in open(path, encoding="utf-8", errors="replace"):
+    line = line.rstrip("\n")
+    if not inside:
+        inside = line.startswith('"') and line.endswith('":') and name in line
+    elif line.startswith("\t.size\t"):
+        break
+    elif line.strip() and not line.startswith("\t.") and not line.startswith(".Ltmp"):
+        body.append(line.strip())
+if not body:
+    raise SystemExit(f"no function named {name} in the assembly, so nothing of it was read")
+found = []
+barriers = sum(1 for a, b in zip(body, body[1:]) if a.endswith("APP") and b.endswith("NO_APP") and not a.endswith("NO_APP"))
+if barriers < need:
+    found.append(f"{name}: not the {need} value barriers its source asks for in its machine code, but {barriers}")
+code = [l for l in body if not l.endswith("APP")]
+labels = {l[:-1]: i for i, l in enumerate(code) if l.endswith(":")}
+split = lambda l: (l.split(None, 1) + [""])[:2]
+leaves = re.compile(r"j\w+|b|bl|blr|br|b\.\w+|cbn?z|tbn?z|call|ret")
+for i, l in enumerate(code):
+    op, args = split(l)
+    # A pointer kept by a conditional move and then read through: which of
+    # the two it was is the address of that load.
+    kept = re.match(r"(r[a-z0-9]+|x\d+),", args) if re.fullmatch(r"cmov\w+|csel", op) else None
+    if kept and not re.search(r"\d[dwb]$", kept.group(1)):
+        reg = kept.group(1)
+        for later in code[i + 1:i + 13]:
+            lop, largs = split(later)
+            if later.endswith(":") or leaves.fullmatch(lop):
+                break
+            if re.search(r"\[[^\]]*\b" + reg + r"\b", largs):
+                found.append(f"{name}: `{' '.join(l.split())}` keeps one of two pointers and `{' '.join(later.split())}` reads through it")
+                break
+            first, _, rest = largs.partition(",")
+            if first == reg and not re.search(r"\b" + reg + r"\b", rest):
+                break
+    # In a lookup a conditional jump is its loop going round, or a check of
+    # a counter (an overflow, an index past the table) leaving for a panic;
+    # any other is a branch on what was looked up.
+    if leaf and re.fullmatch(r"j(?!mp)\w+|b\.\w+|cbn?z|tbn?z", op):
+        at = labels.get(args.split(",")[-1].strip(), -1)
+        block = []
+        for later in code[at + 1:at + 25] if at > i else []:
+            if later.endswith(":") or split(later)[0] in ("ret", "jmp", "b", "br"):
+                break
+            block.append(later)
+        if at > i and not any("raise" in x for x in block):
+            found.append(f"{name}: `{' '.join(l.split())}` is neither its loop nor a counter's check")
+print("\n".join(found), end="\n" if found else "")
+sys.exit(1 if found else 0)
+PY
+# machine_code <search path> <dir>: what is wrong with the picks built from
+# <search path>, a line each, and 1 if anything is.
+machine_code() {
+  local target wrong=0 name count mode
+  mkdir -p "$2"
+  for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
+    if ! IYI_PATH="$1" "$IYI" build --release --emit asm --x86-asm-syntax intel --cross-compile --target "$target" \
+      -o "$2/$target" "$WORK/pick.iyi" >"$2/$target.log" 2>&1 || [ ! -s "$2/$target.s" ]; then
+      echo "$target: no assembly was written: $(grep -m1 -E 'Error|BUG' "$2/$target.log")"
+      wrong=1
+      continue
+    fi
+    while read -r name count mode; do
+      if ! "$PY" "$WORK/machine.py" "$2/$target.s" "$name" "$count" $mode >"$2/$target.read" 2>&1; then
+        sed "s/^/$target: /" "$2/$target.read"
+        wrong=1
+      fi
+    done <<'READ'
+P384Point::lookup< 1 lookup
+READ
+  done
+  return $wrong
+}
+if [ -z "$PY" ]; then
+  echo "  no python here to read the assembly with, so the picks' machine code goes unread"
+elif machine_code "$IYI_PATH" "$WORK/machine" >"$WORK/machine.out"; then
+  echo "  x86_64 and aarch64, --release: the selector goes through its barrier, every entry is read and masked, and nothing branches but the loop and the table's bounds"
+else
+  sed 's/^/  /' "$WORK/machine.out"
+  status=1
+fi
+
+echo
 echo "== proving the checks can fail when the module is broken"
 # prove_broken <label> <phrase> <old> <new> [<old2> <new2>]: the exercise
 # must fail on a copy of the module with <old> replaced (and <old2>, when
@@ -557,7 +675,7 @@ prove_broken "a doubling short of its last step" "a point that is not on P384" \
     P384Point.new(x3, y3, z3)' '    z3 = f.add(z3, z3)
     P384Point.new(x3, y3, z3)'
 prove_broken "a window lookup whose mask answers the next entry" "a point that is not on P384" \
-  '      bit = ((i.to_u64 ^ digit) &- 1_u64).unsafe_shr(63)' '      bit = ((i.to_u64 ^ (digit &+ 1_u64)) &- 1_u64).unsafe_shr(63)'
+  '      bit = ValueBarrier.u64(((i.to_u64 ^ digit) &- 1_u64).unsafe_shr(63))' '      bit = ValueBarrier.u64(((i.to_u64 ^ (digit &+ 1_u64)) &- 1_u64).unsafe_shr(63))'
 prove_broken "an inverse to the power m - 3" "a point that is not on P384" \
   '    e = P384Num.sub_raw(@m, P384Num.new(2_u64, 0_u64, 0_u64, 0_u64, 0_u64, 0_u64))[0]' \
   '    e = P384Num.sub_raw(@m, P384Num.new(3_u64, 0_u64, 0_u64, 0_u64, 0_u64, 0_u64))[0]'
@@ -603,6 +721,42 @@ prove_broken "[d]G answered for [d]Q" "NIST's CDH vector 0: ZIUT" \
   '    product = P384Point.mult(q, @d)' '    product = P384Point.base_mult(@d)'
 prove_broken "the table built from G whatever the point" "NIST's CDH vector 0: ZIUT" \
   '      table[i] = table[i - 1] + point' '      table[i] = table[i - 1] + P384Point.base'
+# prove_unmasked <label> <phrase> <old> <new>: the exercise cannot tell a
+# pick by masks from one a compiler was left free to make a choice of, the
+# answers being the same; the reading of the machine code has to, with
+# <phrase> in what it says, for both targets.
+prove_unmasked() {
+  mutations=$((mutations + 1))
+  rm -rf "$WORK/patched"
+  mkdir -p "$WORK/patched/std"
+  if [ -z "$PY" ]; then
+    echo "  no python3 on this machine, so the $1 proof is unmeasured"
+    return
+  fi
+  if ! OLD="$3" NEW="$4" "$PY" - <<PY
+import os
+from pathlib import Path
+src = Path("$REPO/src/std/p384.iyi").read_text(encoding="utf-8")
+if src.count(os.environ["OLD"]) != 1:
+    raise SystemExit("patch site missing or not one")
+Path("$WORK/patched/std/p384.iyi").write_text(src.replace(os.environ["OLD"], os.environ["NEW"], 1), encoding="utf-8", newline="\n")
+PY
+  then
+    echo "  the $1 patch did not apply"
+    status=1
+  elif machine_code "$WORK/patched${PSEP}$IYI_PATH" "$WORK/patched/machine" >"$WORK/mut.out"; then
+    echo "  the machine code of $1 was read as sound"
+    status=1
+  elif [ "$(grep -cF "$2" "$WORK/mut.out")" -eq 2 ]; then
+    echo "  $1 is caught, on both targets"
+  else
+    echo "  $1 was refused, but not for what it is:"
+    sed 's/^/    /' "$WORK/mut.out"
+    status=1
+  fi
+}
+prove_unmasked "a window selector the compiler can see" "P384Point::lookup<: not the 1 value barriers" \
+  '      bit = ValueBarrier.u64(((i.to_u64 ^ digit) &- 1_u64).unsafe_shr(63))' '      bit = ((i.to_u64 ^ digit) &- 1_u64).unsafe_shr(63)'
 
 echo
 if [ "$status" -eq 0 ]; then

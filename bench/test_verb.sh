@@ -88,6 +88,20 @@ case "$(uname -s)" in
     [ "$took" -lt 20 ] || { echo "a test hung on its child took ${took}s to be killed at 3"; exit 1; }
     rm hang_child_test.iyi
     ;;
+  *)
+    # A test leads a process group of its own (`process_group: true`), and
+    # the deadline ends the group: before it, only the test was killed and
+    # its `sleep` held the output pipe open until it ended.
+    printf 'module hang_child_test\n\nimport std/process::{Process}\n\nProcess.run("sleep", ["25"], capture: false)\n' > hang_child_test.iyi
+    started=$(date +%s)
+    timeout 60 "$IYI" test --timeout 3 . > hang_child.txt 2>&1
+    status=$?
+    took=$(( $(date +%s) - started ))
+    [ $status -eq 1 ] && grep -q 'hang_child_test.iyi: hung' hang_child.txt ||
+      { echo "a test hung on its child was not killed (exit $status):"; cat hang_child.txt; exit 1; }
+    [ "$took" -lt 20 ] || { echo "a test hung on its child took ${took}s to be killed at 3"; exit 1; }
+    rm hang_child_test.iyi
+    ;;
 esac
 
 step "the discount says when it turns itself off"
@@ -268,6 +282,123 @@ printf 'module cases_test\n\ntest "first" { assert_eq 1, 1 }\ntest "second" { as
 "$IYI" test cases_test.iyi > cases.txt 2>&1 ||
   { echo "named cases that all pass failed the run:"; cat cases.txt; exit 1; }
 rm cases_test.iyi
+
+step "each named case is data, --run picks cases by name, and skip: is a verdict"
+# The cases were lines in the output, which a harness had to scrape; the
+# verdict of each is in the report now, with the panic's message or the
+# reason to skip. And `--run` with a name no case has ran nothing and
+# passed, which is a mistyped name reading as green.
+printf 'module picked_test\n\ntest "alpha one" { assert_eq 1, 1 }\ntest "beta" { assert_eq 1, 2, "beta breaks" }\ntest "alpha two", skip: "not today" do\n  assert_eq 1, 2\nend\n' > picked_test.iyi
+"$IYI" test --json picked_test.iyi > picked.json 2>&1
+[ $? -eq 1 ] && grep -qF '{"name":"alpha one","status":"pass"}' picked.json &&
+  grep -qF '{"name":"beta","status":"fail","message":"assert_eq failed: beta breaks' picked.json &&
+  grep -qF '{"name":"alpha two","status":"skip","reason":"not today"}' picked.json ||
+  { echo "the named cases are not data:"; cat picked.json; exit 1; }
+"$IYI" test --json --run alpha picked_test.iyi > picked_run.json 2>&1
+[ $? -eq 0 ] && grep -qF '{"name":"alpha one","status":"pass"}' picked_run.json && ! grep -q '"beta"' picked_run.json ||
+  { echo "--run alpha ran another case, or failed:"; cat picked_run.json; exit 1; }
+"$IYI" test --run nothing-is-named-this picked_test.iyi > picked_none.txt 2>&1
+[ $? -eq 1 ] && grep -q "no named case's name holds 'nothing-is-named-this'" picked_none.txt ||
+  { echo "a --run that matched no case passed:"; cat picked_none.txt; exit 1; }
+rm picked_test.iyi
+
+step "a program a test starts reports its own cases to nobody, and runs all of them"
+# IYI_TEST_REPORT and IYI_TEST_RUN were in the environment a test's own
+# children inherit: a child with named cases wrote them into the test's
+# report, and ran only the cases the test's `--run` named.
+printf 'module child_cases\n\ntest "child case" { assert_eq 1, 1 }\n' > child_cases.iyi
+"$IYI" build child_cases.iyi -o child_cases > child_build.txt 2>&1 ||
+  { echo "the child did not build:"; cat child_build.txt; exit 1; }
+child="$WORK/child_cases"
+[ -f "$child.exe" ] && child="$child.exe"
+printf 'module parent_test\n\nimport std/process::{Process}\n\ntest "parent case" do\n  Process.run("%s", [] of String, capture: false)\nend\n' "$child" > parent_test.iyi
+"$IYI" test --json parent_test.iyi > parent.json 2>&1
+[ $? -eq 0 ] && grep -qF '{"name":"parent case","status":"pass"}' parent.json && ! grep -qF '"name":"child case"' parent.json ||
+  { echo "the child's case is in the test's report:"; cat parent.json; exit 1; }
+"$IYI" test -v --run parent parent_test.iyi > parent_run.txt 2>&1
+[ $? -eq 0 ] && grep -q 'ok - child case' parent_run.txt ||
+  { echo "the test's --run reached the child, which ran none of its cases:"; cat parent_run.txt; exit 1; }
+rm -f child_cases.iyi child_cases child_cases.exe child_cases.pdb parent_test.iyi
+
+step "a directory's walk leaves out lib, dot directories and other modules"
+# The walk was a `**` glob, so a project's run ran the tests of every
+# dependency installed under `lib` and failed on theirs.
+mkdir -p lib/dep .cache other
+printf 'raise "a dependency test ran"\n' > lib/dep/dep_test.iyi
+printf 'raise "a dot directory test ran"\n' > .cache/dot_test.iyi
+printf 'module example.test/other\n' > other/iyi.mod
+printf 'raise "another module test ran"\n' > other/other_test.iyi
+"$IYI" test --json . > walk.json 2>&1
+[ $? -eq 0 ] && ! grep -qE 'dep_test|dot_test|other_test' walk.json ||
+  { echo "the walk ran a test that is not this project's:"; cat walk.json; exit 1; }
+"$IYI" test other > walk_other.txt 2>&1
+[ $? -eq 1 ] && grep -q 'other_test.iyi' walk_other.txt ||
+  { echo "a directory named on the command line was not walked:"; cat walk_other.txt; exit 1; }
+rm -rf lib .cache other
+
+step "a test is built with --release and -D as asked, and -v shows a pass's output"
+# Every test was built as `build FILE -o BINARY` and nothing else, so a test
+# of a flag-gated path or of the optimised program could not be written.
+printf '{%% if flag?(:release) && flag?(:probe_flag) %%}\nputs "built as asked"\n{%% else %%}\nraise "built without the flags"\n{%% end %%}\n' > flags_test.iyi
+"$IYI" test flags_test.iyi > flags_plain.txt 2>&1
+[ $? -eq 1 ] && grep -q 'built without the flags' flags_plain.txt ||
+  { echo "the flag-gated test passed without its flags:"; cat flags_plain.txt; exit 1; }
+"$IYI" test --release -D probe_flag flags_test.iyi > flags.txt 2>&1
+[ $? -eq 0 ] && ! grep -q 'built as asked' flags.txt ||
+  { echo "--release -D probe_flag did not reach the build, or a pass printed its output:"; cat flags.txt; exit 1; }
+"$IYI" test -v --release -Dprobe_flag flags_test.iyi > flags_v.txt 2>&1
+[ $? -eq 0 ] && grep -q 'flags_test.iyi: pass' flags_v.txt && grep -q '  built as asked' flags_v.txt ||
+  { echo "-v did not show the passing test's output:"; cat flags_v.txt; exit 1; }
+"$IYI" test -D > flags_none.txt 2>&1
+[ $? -eq 1 ] && grep -q -- '-D takes a flag to define' flags_none.txt ||
+  { echo "-D with nothing after it was taken:"; cat flags_none.txt; exit 1; }
+rm flags_test.iyi
+
+step "a failed case's panic is between the verdicts around it, under load"
+# Standard output and standard error were two pipes, copied by two fibers,
+# and a test's panic landed above or below all of its stdout as the two
+# copies happened to be scheduled: sixteen of these at once, on 12 cores,
+# came back out of order in 8 of 16, and one at a time in none. One pipe
+# keeps the program's own order however busy the machine is.
+mkdir -p order
+for i in $(seq 1 16); do
+  printf 'module o%s_test\n\ntest "first" { assert_eq 1, 1 }\ntest "breaks" { assert_eq 1, 2, "the panic" }\ntest "after" { assert_eq 1, 1 }\n' "$i" > "order/o${i}_test.iyi"
+done
+"$IYI" test order > order.txt 2>&1
+# Each failing file is a line naming it, then its output indented.
+out_of_order=$(awk '
+  function check() { if (file != "" && !(f && f < p && p < v && v < a)) bad++ }
+  /^[^ ]/ { check(); file = $0; n = 0; f = p = v = a = 0; next }
+  { n++ }
+  /ok - first/ { f = n }
+  /assert_eq failed: the panic/ { p = n }
+  /FAIL - breaks/ { v = n }
+  /ok - after/ { a = n }
+  END { print bad + 0 }' order.txt)
+[ "$(grep -c '_test.iyi: fail$' order.txt)" -eq 16 ] && [ "$out_of_order" -eq 0 ] ||
+  { echo "$out_of_order of 16 tests printed out of order:"; cat order.txt; exit 1; }
+rm -rf order
+
+step "tests run at once, -p 1 runs them one at a time, and the report is in file order"
+# Two tests that each wait for the other: together they pass, one at a
+# time the first waits out its deadline. No clock is asked how long
+# anything took.
+printf 'File.write("left.flag", "")\nwhile !File.exists?("right.flag")\n  sleep 10\nend\n' > left_test.iyi
+printf 'File.write("right.flag", "")\nwhile !File.exists?("left.flag")\n  sleep 10\nend\n' > right_test.iyi
+"$IYI" test --json -p 2 --timeout 30 right_test.iyi left_test.iyi > both.json 2>&1
+[ $? -eq 0 ] || { echo "two tests that wait for each other did not run at once:"; cat both.json; exit 1; }
+[ "$(grep -oE '"file":"[^"]*"' both.json | tr '\n' ' ')" = '"file":"left_test.iyi" "file":"right_test.iyi" ' ] ||
+  { echo "the report is not in file order:"; cat both.json; exit 1; }
+rm -f left.flag right.flag
+"$IYI" test -p 1 --timeout 3 left_test.iyi right_test.iyi > serial.txt 2>&1
+[ $? -eq 1 ] && grep -q 'left_test.iyi: hung' serial.txt ||
+  { echo "-p 1 ran two tests at once:"; cat serial.txt; exit 1; }
+rm -f left.flag right.flag left_test.iyi right_test.iyi
+for p in 0 -2 many; do
+  "$IYI" test -p "$p" math_test.iyi > p.txt 2>&1
+  [ $? -eq 1 ] && grep -q -- "-p takes a number of tests to run at once, at least 1, not '$p'" p.txt ||
+    { echo "-p $p was taken as a count:"; cat p.txt; exit 1; }
+done
 
 step "a test leaves nothing in the temporary directory"
 # Each test is built to a temporary name and deleted after it runs. On

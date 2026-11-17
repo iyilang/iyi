@@ -136,10 +136,10 @@ fi
 
 # ── 5. iyi.sum: fact, written by the tool, defended by it ────────────────
 step "iyi.sum is written, and a tampered entry is a refusal"
-grep -q 'example.test/user/liba v1.1.0 s1:' app/iyi.sum || { echo "no sum entry for liba:"; cat app/iyi.sum; exit 1; }
-grep -q 'example.test/user/libb v1.0.0 s1:' app/iyi.sum || { echo "no sum entry for libb:"; cat app/iyi.sum; exit 1; }
+grep -q 'example.test/user/liba v1.1.0 h2:' app/iyi.sum || { echo "no sum entry for liba:"; cat app/iyi.sum; exit 1; }
+grep -q 'example.test/user/libb v1.0.0 h2:' app/iyi.sum || { echo "no sum entry for libb:"; cat app/iyi.sum; exit 1; }
 cp app/iyi.sum app/iyi.sum.good
-sed -i.bak 's/s1:....../s1:dead00/' app/iyi.sum && rm -f app/iyi.sum.bak
+sed -i.bak 's/h2:....../h2:dead00/' app/iyi.sum && rm -f app/iyi.sum.bak
 rm -f app/app
 (cd app && "$IYI" build main.iyi -o app) > tamper.log 2>&1
 if [ $? -eq 0 ] || ! grep -q 'is not what it was' tamper.log; then
@@ -203,27 +203,224 @@ grep -q 'the checkout hashes to' mutated.log || {
   exit 1
 }
 
-# ── 5b. A package's tree may contain a symbolic link ─────────────────────
-# The hash is over the checkout's files, and a walk that asks the *target*
-# whether it is a directory walks through a link — into the package's own
-# parent, or around a cycle. `inner/loop -> ..` ended a build with the
-# walker's accident: `Too many levels of symbolic links`, about a path
-# forty levels deep, in place of any sentence about the dependency. A link
-# is hashed as the link now, which is git's own model — the target text is
-# what a repository stores for one — so the cycle is an entry rather than a
-# descent, and retargeting the link is a change the sum notices.
-# Not on Windows: Git Bash's `ln -s` needs Developer Mode or an
-# administrator to make a real link, and without one it copies or fails —
-# so the fixture this step needs cannot be built there, and a step that
-# cannot build its fixture proves nothing. Said, not skipped in silence.
-case "$(uname -s)" in
-  MINGW* | MSYS* | CYGWIN* | Windows_NT) symlinks=no ;;
-  *) symlinks=yes ;;
-esac
-if [ "$symlinks" = no ]; then
-  step "a package with a symbolic link: not on this platform (ln -s cannot make one here)"
+# ── 5a. What the hash is of: each file, and where it ends ────────────────
+# `iyi.sum` held `s1:` first: SHA-1 over `<path>\0<bytes>\0` for every
+# file in path order, with no lengths. A file's bytes may hold a zero byte
+# and a file name, so the stream did not say where one file ended: a data
+# file could carry, after a zero byte, the name of the source file beside
+# it and another body for it. A tag moved to the tree in which those bytes
+# had changed places - the other body in the source file, the first one in
+# a data file after it - made the same stream and the same line, and the
+# build that fetched it ran the other body without a word. `h2:` digests
+# each file on its own and hashes the list of digests, kinds and paths, so
+# the two trees are two lines. The control is the step above: a plain
+# change was always refused; this is the change that was not.
+step "a tag moved to a tree whose bytes crossed a file's edge is refused"
+reviewed='module libf
+
+pub def framed : String
+  "the body that was reviewed"
+end
+'
+swapped='module libf
+
+pub def framed : String
+  "the body the moved tag carries"
+end
+'
+mkrepo work/libf
+# Byte for byte: the trick is in the bytes, and a git that rewrites line
+# ends on commit would be testing some other two trees.
+git -C work/libf config core.autocrlf false
+printf 'module example.test/user/libf\n' > work/libf/iyi.mod
+printf '%s' "$reviewed" > work/libf/libf.iyi
+{ printf 'DATA\0libf.iyi\0'; printf '%s' "$swapped"; printf '\0libf.iyz\0JUNK'; } > work/libf/libf.dat
+git -C work/libf add -A && git -C work/libf commit -qm reviewed && git -C work/libf tag v1.0.0
+mkdir -p mirror/example.test/user
+git clone -q --bare work/libf mirror/example.test/user/libf
+mkdir -p framed_app
+printf 'module example.test/user/framed_app\nrequire example.test/user/libf v1.0.0\n' > framed_app/iyi.mod
+printf 'import example.test/user/libf::{framed}\n\nputs framed\n' > framed_app/main.iyi
+if ! (cd framed_app && "$IYI" build main.iyi -o app) > framed.log 2>&1; then
+  echo "the reviewed tree did not build:"
+  tail -6 framed.log
+  exit 1
+fi
+./framed_app/app | grep -q 'the body that was reviewed' || { echo "the reviewed tree answered:"; ./framed_app/app; exit 1; }
+grep -q 'example.test/user/libf v1.0.0 h2:' framed_app/iyi.sum || { echo "no sum entry for libf:"; cat framed_app/iyi.sum; exit 1; }
+cp framed_app/iyi.sum framed_app/iyi.sum.reviewed
+# The same bytes in the same order, cut at other places.
+printf '%s' "$swapped" > work/libf/libf.iyi
+printf 'DATA' > work/libf/libf.dat
+{ printf 'JUNK\0libf.iyi\0'; printf '%s' "$reviewed"; } > work/libf/libf.iyz
+git -C work/libf add -A && git -C work/libf commit -qm moved
+# Asserted rather than assumed: the two trees are the pair `s1:` could not
+# tell apart, or this step proves only that a changed file is noticed.
+unframed() {
+  for f in $(git -C work/libf ls-tree -r --name-only "$1" | LC_ALL=C sort); do
+    printf '%s\0' "$f"; git -C work/libf show "$1:$f"; printf '\0'
+  done
+}
+unframed v1.0.0 > unframed.reviewed
+unframed HEAD > unframed.moved
+cmp -s unframed.reviewed unframed.moved || {
+  echo "the two trees are not one stream of paths and bytes, so this step proves nothing"
+  exit 1
+}
+git -C work/libf tag -f v1.0.0 > /dev/null
+git -C work/libf push -q -f "$WORK/mirror/example.test/user/libf" refs/tags/v1.0.0
+# A machine that never fetched it: the checkout goes, the sum stays.
+framed_checkout="$(find "$IYI_CACHE_DIR" -type d -name 'libf@v1.0.0' | head -1)"
+[ -n "$framed_checkout" ] || { echo "no libf@v1.0.0 checkout under $IYI_CACHE_DIR"; exit 1; }
+rm -rf "$framed_checkout" framed_app/app framed_app/app.exe
+(cd framed_app && "$IYI" build main.iyi -o app) > framed_moved.log 2>&1
+if [ $? -eq 0 ]; then
+  echo "a tag moved to another tree built under the line the first tree wrote:"
+  ./framed_app/app 2>&1 | sed 's/^/  /'
+  exit 1
+fi
+grep -q 'example.test/user/libf v1.0.0 is not what it was' framed_moved.log || {
+  echo "the moved tag was refused for some other reason:"
+  tail -6 framed_moved.log
+  exit 1
+}
+cmp -s framed_app/iyi.sum framed_app/iyi.sum.reviewed || { echo "a refused build rewrote iyi.sum:"; cat framed_app/iyi.sum; exit 1; }
+
+# An `s1:` line is one this compiler's predecessors wrote. It is not left
+# in the file, and it is not dropped unread: the checkout is hashed the
+# old way once more, a checkout that differs is refused as it always was,
+# and one that matches has its line written again as `h2:`, said once on
+# stderr. Rewritten unread, the first build after an upgrade would pin
+# whatever it found checked out - a moved tag among them.
+step "an s1: line its checkout matches is written again as h2:, and one it does not is refused"
+if command -v sha1sum > /dev/null 2>&1; then
+  sha1() { sha1sum | cut -c1-40; }
 else
-step "a package with a symbolic link is hashed, cycle and all"
+  sha1() { shasum -a 1 | cut -c1-40; }
+fi
+# What `s1:` was, from the checkout's own files: `<path>\0<bytes>\0` for
+# each in path order, under SHA-1.
+s1_of() {
+  (cd "$1" && find . -type f | sed 's#^\./##' | LC_ALL=C sort | while IFS= read -r f; do
+    printf '%s\0' "$f"; cat "$f"; printf '\0'
+  done) | sha1
+}
+cp app/iyi.sum app/iyi.sum.good
+: > app/iyi.sum.s1
+while read -r path version _; do
+  tree="$IYI_CACHE_DIR/mod/$path@$version"
+  [ -f "$tree/iyi.mod" ] || { echo "no checkout at $tree for the line $path $version"; exit 1; }
+  printf '%s %s s1:%s\n' "$path" "$version" "$(s1_of "$tree")" >> app/iyi.sum.s1
+done < app/iyi.sum.good
+cp app/iyi.sum.s1 app/iyi.sum
+if grep -q ' h2:' app/iyi.sum || [ "$(grep -c ' s1:[0-9a-f]\{40\}$' app/iyi.sum)" -ne 2 ]; then
+  echo "the fixture's sum was not turned into two s1: lines:"
+  cat app/iyi.sum
+  exit 1
+fi
+rm -f app/app
+if ! (cd app && "$IYI" build main.iyi -o app) > restated.log 2>&1; then
+  echo "a build under s1: lines its checkouts match did not build:"
+  tail -6 restated.log
+  mv app/iyi.sum.good app/iyi.sum
+  exit 1
+fi
+cmp -s app/iyi.sum app/iyi.sum.good || {
+  echo "the s1: lines were not written again as what the checkouts hash to:"
+  cat app/iyi.sum
+  mv app/iyi.sum.good app/iyi.sum
+  exit 1
+}
+grep -q '2 entries said `s1:`' restated.log || {
+  echo "the build did not say it restated the s1: lines:"
+  tail -6 restated.log
+  exit 1
+}
+(cd app && "$IYI" build main.iyi -o app) > restated2.log 2>&1
+if [ $? -ne 0 ] || grep -q 's1:' restated2.log; then
+  echo "the build after it said so again, or failed:"
+  tail -6 restated2.log
+  exit 1
+fi
+# And the line a checkout does not match: liba's, with one digit moved.
+liba_s1="$(awk '$1 == "example.test/user/liba" { print $3 }' app/iyi.sum.s1)"
+case "$liba_s1" in
+  s1:0*) wrong_s1="s1:1${liba_s1#s1:0}" ;;
+  *) wrong_s1="s1:0${liba_s1#s1:?}" ;;
+esac
+sed "s/$liba_s1/$wrong_s1/" app/iyi.sum.s1 > app/iyi.sum
+cp app/iyi.sum app/iyi.sum.wrong
+rm -f app/app
+(cd app && "$IYI" build main.iyi -o app) > unmatched.log 2>&1
+unmatched_status=$?
+cmp -s app/iyi.sum app/iyi.sum.wrong
+unmatched_written=$?
+mv app/iyi.sum.good app/iyi.sum
+rm -f app/iyi.sum.s1 app/iyi.sum.wrong
+if [ "$unmatched_status" -eq 0 ]; then
+  echo "an s1: line its checkout does not match built, and was taken for an upgrade"
+  exit 1
+fi
+grep -q "says $wrong_s1, the checkout hashes to $liba_s1" unmatched.log || {
+  echo "the unmatched s1: line was not refused naming both s1: hashes:"
+  tail -6 unmatched.log
+  exit 1
+}
+[ "$unmatched_written" -eq 0 ] || { echo "a refused build rewrote iyi.sum"; exit 1; }
+
+# The same line where it cannot be written again: a dependency's own
+# `iyi.sum`, read by a build inside its cached checkout. Nothing is
+# written under the cache's `mod/`, and for a while nothing was compared
+# there either - an `s1:` line of any forty digits passed. The file is
+# put into the cached libb for this step and taken back out, because the
+# app's sum pins that tree without it.
+step "an s1: line in a cached dependency's own iyi.sum is held to its checkout, and stays s1:"
+libb_cached="$IYI_CACHE_DIR/mod/example.test/user/libb@v1.0.0"
+[ -f "$libb_cached/libb.iyi" ] || { echo "no cached libb at $libb_cached"; exit 1; }
+printf 'example.test/user/liba v1.1.0 %s\n' "$wrong_s1" > "$libb_cached/iyi.sum"
+(cd "$libb_cached" && "$IYI" check libb.iyi) > cached_wrong.log 2>&1
+cached_wrong_status=$?
+printf 'example.test/user/liba v1.1.0 %s\n' "$liba_s1" > "$libb_cached/iyi.sum"
+cp "$libb_cached/iyi.sum" cached.sum
+(cd "$libb_cached" && "$IYI" check libb.iyi) > cached_right.log 2>&1
+cached_right_status=$?
+cmp -s "$libb_cached/iyi.sum" cached.sum
+cached_written=$?
+rm -f "$libb_cached/iyi.sum" cached.sum
+if [ "$cached_wrong_status" -eq 0 ]; then
+  echo "inside the module cache an s1: line its checkout does not match was compared with nothing"
+  exit 1
+fi
+grep -q "says $wrong_s1, the checkout hashes to $liba_s1" cached_wrong.log || {
+  echo "the cached libb's unmatched s1: line was not refused naming both s1: hashes:"
+  tail -6 cached_wrong.log
+  exit 1
+}
+if [ "$cached_right_status" -ne 0 ]; then
+  echo "inside the module cache an s1: line its checkout matches was refused:"
+  tail -6 cached_right.log
+  exit 1
+fi
+[ "$cached_written" -eq 0 ] || { echo "a check inside the module cache rewrote the cached libb's iyi.sum"; exit 1; }
+
+# ── 5b. A package's tree may contain a symbolic link ─────────────────────
+# What a repository stores for a link is its target text, and what a
+# checkout makes of that depended on the machine: a link where the file
+# system and the account allow one, and on Windows - Git for Windows sets
+# `core.symlinks=false` - a plain file holding the text. `h2:` writes each
+# entry's kind into what it hashes, so the same tag was `l` on Linux and
+# `f` on Windows, and an `iyi.sum` made on one was refused on the other.
+# The fetcher now checks out with `core.symlinks=false` everywhere: a link
+# in a fetched package is a file holding its target's path, on every
+# platform, and one tag is one hash. The hash below is that tree's, worked
+# out apart from the compiler (SHA-256 of `<sha256> f <path>\n` for the
+# four files in path order), and it is the same number on every runner.
+#
+# The entries are written into the index as git stores a link - mode
+# 120000 over a blob that is the target text - and not with `ln -s`: Git
+# Bash's needs Developer Mode or an administrator, the entry is the same
+# either way, and so this step runs on Windows too.
+step "a symbolic link in a package is fetched as a file holding its target, and hashes one way"
 mkrepo work/linked
 printf 'module example.test/user/linked
 ' > work/linked/iyi.mod
@@ -233,11 +430,16 @@ pub def linked_greeting : String
   "hello from linked"
 end
 ' > work/linked/linked.iyi
-mkdir -p work/linked/inner
-ln -s .. work/linked/inner/loop
-ln -s ../linked.iyi work/linked/inner/alias.iyi
-git -C work/linked add -A && git -C work/linked commit -qm one && git -C work/linked tag v1.0.0
-git -C work/linked ls-files -s | grep -q '^120000' || { echo "git did not store a symlink, so this step proves nothing:"; git -C work/linked ls-files -s; exit 1; }
+git -C work/linked add -A
+link_entry() { # link_entry <path in the package> <target text>
+  link_blob="$(printf '%s' "$2" | git -C work/linked hash-object -w --no-filters --stdin)" &&
+    git -C work/linked update-index --add --cacheinfo "120000,$link_blob,$1"
+}
+# `inner/loop -> ..` is the link a walk that followed links never came
+# back from; `inner/alias.iyi` names a source file.
+link_entry inner/loop .. && link_entry inner/alias.iyi ../linked.iyi || { echo "could not write the link entries"; exit 1; }
+git -C work/linked commit -qm one && git -C work/linked tag v1.0.0
+[ "$(git -C work/linked ls-files -s | grep -c '^120000')" -eq 2 ] || { echo "git did not store two symlinks, so this step proves nothing:"; git -C work/linked ls-files -s; exit 1; }
 git clone -q --bare work/linked mirror/example.test/user/linked
 mkdir -p linked_app
 printf 'module example.test/user/linked_app
@@ -254,26 +456,65 @@ if ! (cd linked_app && "$IYI" build main.iyi -o app) > linked.log 2>&1; then
   exit 1
 fi
 ./linked_app/app | grep -q 'hello from linked' || { echo "the linked package answered:"; ./linked_app/app; exit 1; }
-grep -q 'example.test/user/linked v1.0.0 s1:' linked_app/iyi.sum || { echo "no sum entry for linked:"; cat linked_app/iyi.sum; exit 1; }
-
-step "retargeting a link inside the checkout is a change"
-linked_checkout="$(find "$IYI_CACHE_DIR" -type d -name 'linked@v1.0.0' | head -1)"
-[ -n "$linked_checkout" ] || { echo "no linked@v1.0.0 checkout under $IYI_CACHE_DIR"; exit 1; }
-ln -sfn ../iyi.mod "$linked_checkout/inner/alias.iyi"
-rm -f linked_app/app
-(cd linked_app && "$IYI" build main.iyi -o app) > retarget.log 2>&1
-retarget_status=$?
-ln -sfn ../linked.iyi "$linked_checkout/inner/alias.iyi"
-if [ "$retarget_status" -eq 0 ]; then
-  echo "a retargeted link went unnoticed, so the link's target is not in the hash"
+linked_checkout="$IYI_CACHE_DIR/mod/example.test/user/linked@v1.0.0"
+[ -f "$linked_checkout/iyi.mod" ] || { echo "no linked@v1.0.0 checkout at $linked_checkout"; exit 1; }
+for entry in inner/loop inner/alias.iyi; do
+  if [ -L "$linked_checkout/$entry" ] || [ ! -f "$linked_checkout/$entry" ]; then
+    echo "$entry was not checked out as a plain file:"
+    ls -l "$linked_checkout/inner"
+    exit 1
+  fi
+done
+if [ "$(cat "$linked_checkout/inner/loop")" != ".." ] || [ "$(cat "$linked_checkout/inner/alias.iyi")" != "../linked.iyi" ]; then
+  echo "the files checked out for the links do not hold their targets' paths:"
+  head "$linked_checkout/inner/loop" "$linked_checkout/inner/alias.iyi"
   exit 1
 fi
-grep -q 'is not what it was' retarget.log || {
-  echo "the retargeted link was refused for some other reason:"
-  tail -5 retarget.log
+linked_h2="h2:b6b774d98f25e99124dcefc5643d092249ff0f3ad3fc9014a7c84f19abd0f122"
+grep -q "^example.test/user/linked v1.0.0 $linked_h2\$" linked_app/iyi.sum || {
+  echo "the linked package did not hash to $linked_h2, the hash of its four files on every platform:"
+  cat linked_app/iyi.sum
   exit 1
 }
-fi
+
+# The kind is still in the hash, for the tree the fetcher did not make: a
+# real link put where the fetched file was holds the same text and is not
+# the same entry, so it cannot stand in for the file under the file's
+# hash. And it is an entry, not a way in: `inner/loop -> ..` as a real
+# link is hashed as a link, where following it never ended.
+# Not on Windows, where this shell cannot make a link. Said, not skipped
+# in silence.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    step "a real link put where a fetched file was: not on this platform (ln -s cannot make one here)"
+    ;;
+  *)
+    step "a real link put where a fetched file was is refused, cycle and all"
+    rm -f "$linked_checkout/inner/loop" "$linked_checkout/inner/alias.iyi"
+    ln -s .. "$linked_checkout/inner/loop"
+    ln -s ../linked.iyi "$linked_checkout/inner/alias.iyi"
+    rm -f linked_app/app
+    (cd linked_app && "$IYI" build main.iyi -o app) > relinked.log 2>&1
+    relinked_status=$?
+    rm -f "$linked_checkout/inner/loop" "$linked_checkout/inner/alias.iyi"
+    printf '%s' '..' > "$linked_checkout/inner/loop"
+    printf '%s' '../linked.iyi' > "$linked_checkout/inner/alias.iyi"
+    if [ "$relinked_status" -eq 0 ]; then
+      echo "links stood in for the files the package was fetched with, under the same hash"
+      exit 1
+    fi
+    grep -q 'is not what it was' relinked.log || {
+      echo "the links were refused for some other reason:"
+      tail -5 relinked.log
+      exit 1
+    }
+    if ! (cd linked_app && "$IYI" build main.iyi -o app) > unlinked.log 2>&1; then
+      echo "the checkout put back as it was fetched did not build:"
+      tail -5 unlinked.log
+      exit 1
+    fi
+    ;;
+esac
 
 # ── 5c. What `--emit-iyimod` writes, and what it leaves to the sum ────────
 # An artifact carries what the consuming build reached, so the one this
@@ -549,6 +790,161 @@ rm docmods/app/twice.iyi
   echo "the module in mods was not documented:"; cat mods-doc.txt; exit 1; }
 diff -u twice-doc.txt mods-doc.txt > mods-diff.txt 2>&1 || {
   echo "the artifact in mods and the source answered differently:"; head -10 mods-diff.txt; exit 1; }
+
+# Package JSON is the registry's data, not a second rendering of the API.
+# The documented modules are made in a different order from their paths;
+# private files, tests, lib and nested packages do not belong to the array.
+step "iyi doc --json lists the package's artifact APIs in path order"
+mkdir -p "doc package/extra" "doc package/lib" "doc package/other"
+printf 'module example.test/user/docpkg\r\n' > "doc package/iyi.mod"
+printf 'module first\n\n# The first answer.\npub def answer : Int32\n  42\nend\n' > "doc package/first.iyi"
+printf 'module a0\n\n# The zero answer.\npub def answer : Int32\n  0\nend\n' > "doc package/a0.iyi"
+printf 'module extra/second\n\n# The second answer.\npub def answer : Int32\n  7\nend\n' > "doc package/extra/second.iyi"
+printf 'module private_only\n\ndef hidden : Int32\n  1\nend\n' > "doc package/private_only.iyi"
+printf 'module ignored_test\n\npub def ignored : Int32\n  1\nend\n' > "doc package/ignored_test.iyi"
+printf 'module foreign\n\npub def ignored : Int32\n  1\nend\n' > "doc package/lib/foreign.iyi"
+printf 'module example.test/user/other\n' > "doc package/other/iyi.mod"
+printf 'module other/foreign\n\npub def ignored : Int32\n  1\nend\n' > "doc package/other/foreign.iyi"
+printf 'import first\nimport extra/second\nimport a0\n' > "doc package/entry.iyi"
+# A same-named module in the calling directory must not replace DIR's own.
+printf 'module first\n\npub def wrong : Int32\n  0\nend\n' > first.iyi
+
+"$IYI" doc --json "$WORK/doc package" > package-doc.json 2> package-doc.err || {
+  echo "package documentation failed:"; cat package-doc.err; exit 1; }
+(cd "doc package" && "$IYI" doc --json) > package-doc-again.json 2> package-doc-again.err || {
+  echo "documentation from the package failed:"; cat package-doc-again.err; exit 1; }
+diff -u package-doc.json package-doc-again.json > package-doc-diff.txt || {
+  echo "package documentation changed between runs:"; cat package-doc-diff.txt; exit 1; }
+"$IYI" doc "$WORK/doc package" --json > package-doc-flag-last.json 2> package-doc-flag-last.err || {
+  echo "documentation with --json last failed:"; cat package-doc-flag-last.err; exit 1; }
+diff -u package-doc.json package-doc-flag-last.json > package-doc-flag-diff.txt || {
+  echo "the position of --json changed the output:"; cat package-doc-flag-diff.txt; exit 1; }
+# A CRLF manifest and an LF manifest name the same package. The output's
+# own line ending must remain LF on every host.
+printf 'module example.test/user/docpkg\n' > "doc package/iyi.mod"
+"$IYI" doc --json "$WORK/doc package" > package-doc-lf.json 2> package-doc-lf.err || {
+  echo "documentation with an LF manifest failed:"; cat package-doc-lf.err; exit 1; }
+diff -u package-doc.json package-doc-lf.json > package-doc-line-diff.txt || {
+  echo "manifest line endings changed the output:"; cat package-doc-line-diff.txt; exit 1; }
+printf 'module example.test/user/docpkg\r\n' > "doc package/iyi.mod"
+
+# Windows paths include a drive and may be given with native backslashes.
+# POSIX hosts instead exercise a symlink to the package, including macOS's
+# /var and /private/var spelling of its temporary directory.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    native_package="$(cygpath -w "$WORK/doc package")"
+    "$IYI" doc --json "$native_package" > package-doc-alias.json 2> package-doc-alias.err || {
+      echo "documentation through a native drive path failed:"; cat package-doc-alias.err; exit 1; }
+    ;;
+  *)
+    ln -s "$WORK/doc package" "alias package" || exit 1
+    "$IYI" doc --json "$WORK/alias package" > package-doc-alias.json 2> package-doc-alias.err || {
+      echo "documentation through a symlink failed:"; cat package-doc-alias.err; exit 1; }
+    ;;
+esac
+diff -u package-doc.json package-doc-alias.json > package-doc-alias-diff.txt || {
+  echo "the package path spelling changed the output:"; cat package-doc-alias-diff.txt; exit 1; }
+(cd "doc package" && "$IYI" build --no-codegen --emit-iyimod artifacts entry.iyi) > package-emit.log 2>&1 || {
+  echo "building the comparison artifacts failed:"; cat package-emit.log; exit 1; }
+"$IYI" mod dump --json "doc package/artifacts/a0.iyimod" > package-a0.json || exit 1
+"$IYI" mod dump --json "doc package/artifacts/extra/second.iyimod" > package-second.json || exit 1
+"$IYI" mod dump --json "doc package/artifacts/first.iyimod" > package-first.json || exit 1
+
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) PYTHON=python ;;
+  *) PYTHON=python3 ;;
+esac
+cat > package-doc-check.py <<'PY'
+import json
+import pathlib
+import sys
+
+def read(path):
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+raw = pathlib.Path(sys.argv[1]).read_bytes()
+assert raw.endswith(b"\n") and b"\r" not in raw, "JSON must use LF, not CRLF"
+data = json.loads(raw)
+assert set(data) == {"package", "compiler", "modules"}, "package schema changed"
+assert data["package"] == "example.test/user/docpkg"
+assert isinstance(data["compiler"], str) and data["compiler"]
+modules = data["modules"]
+names = [entry["module"] for entry in modules]
+assert all("\\" not in name for name in names), "module paths must use /"
+assert names == sorted(names, key=lambda name: name.encode("utf-8")), "modules not in byte order"
+assert names == ["a0", "extra/second", "first"]
+for entry, filename, doc in zip(
+    modules,
+    ["package-a0.json", "package-second.json", "package-first.json"],
+    ["The zero answer.", "The second answer.", "The first answer."],
+):
+    assert set(entry) == {"module", "api"}, "module schema changed"
+    assert entry["api"] == read(filename), "API differs from mod dump"
+    assert entry["api"]["module"] == entry["module"]
+    assert entry["api"]["functions"][0]["doc"] == doc
+PY
+"$PYTHON" package-doc-check.py package-doc.json || exit 1
+"$PYTHON" - <<'PY'
+import json
+from pathlib import Path
+
+raw = Path("package-doc.json").read_bytes()
+Path("package-doc-bad-eol.json").write_bytes(raw[:-1] + b"\r\n")
+data = json.loads(raw)
+del data["compiler"]
+Path("package-doc-bad-schema.json").write_bytes((json.dumps(data) + "\n").encode("utf-8"))
+data = json.loads(raw)
+data["modules"][1]["module"] = "extra\\second"
+Path("package-doc-bad-slash.json").write_bytes((json.dumps(data) + "\n").encode("utf-8"))
+data = json.loads(raw)
+data["modules"].reverse()
+Path("package-doc-bad-order.json").write_bytes((json.dumps(data) + "\n").encode("utf-8"))
+PY
+for defect in eol schema slash order; do
+  if "$PYTHON" package-doc-check.py "package-doc-bad-$defect.json" > package-doc-broken.log 2>&1; then
+    echo "the package JSON gate accepted broken $defect"; exit 1
+  fi
+  case "$defect" in
+    eol) expected="JSON must use LF" ;;
+    schema) expected="package schema changed" ;;
+    slash) expected="module paths must use /" ;;
+    order) expected="modules not in byte order" ;;
+  esac
+  grep -Fq "$expected" package-doc-broken.log || {
+    echo "broken $defect failed for the wrong reason:"; cat package-doc-broken.log; exit 1; }
+  echo "package JSON gate refused broken $defect"
+done
+
+mkdir -p doc-empty doc-no-manifest
+printf 'module example.test/user/empty\n' > doc-empty/iyi.mod
+printf 'module empty\n\ndef hidden : Int32\n  1\nend\n' > doc-empty/empty.iyi
+for dir in doc-empty doc-no-manifest; do
+  if "$IYI" doc --json "$WORK/$dir" > "$dir.out" 2>&1; then
+    echo "$dir was accepted as an exporting package"; exit 1
+  fi
+  if grep -Ei 'unhandled exception|backtrace' "$dir.out" >/dev/null; then
+    echo "$dir produced a trace:"; cat "$dir.out"; exit 1
+  fi
+done
+grep -q 'no exporting modules' doc-empty.out || { cat doc-empty.out; exit 1; }
+grep -q 'no iyi.mod' doc-no-manifest.out || { cat doc-no-manifest.out; exit 1; }
+
+# A mixed-case module is outside the module grammar, including on a
+# case-insensitive filesystem. It must be refused rather than documented
+# under a differently cased path.
+mkdir -p doc-invalid-case
+printf 'module example.test/user/case\n' > doc-invalid-case/iyi.mod
+printf 'module Mixed\n\npub def answer : Int32\n  1\nend\n' > doc-invalid-case/Mixed.iyi
+if "$IYI" doc --json "$WORK/doc-invalid-case" > doc-invalid-case.out 2>&1; then
+  echo "a mixed-case module was accepted"; exit 1
+fi
+if grep -Ei 'unhandled exception|backtrace' doc-invalid-case.out >/dev/null; then
+  echo "mixed-case module produced a trace:"; cat doc-invalid-case.out; exit 1
+fi
+grep -q 'Mixed' doc-invalid-case.out || {
+  echo "the mixed-case refusal did not name the invalid path:"; cat doc-invalid-case.out; exit 1; }
 
 echo "workdir $WORK"
 echo "packages gate: every step held"

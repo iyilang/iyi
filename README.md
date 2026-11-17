@@ -324,9 +324,14 @@ projects would import it by (`example.com/me/kemal`, or a bare `kemal`), and
 directory's name is the module: `iyi init` in `my-project` writes `module
 my-project` and `my_project.iyi`. It never writes over a file that is there.
 A test is a `*_test.iyi` beside it, a program that passes by exiting 0, run by
-`iyi test`. `iyi test --chaos` runs each test under 100 seeded schedules, so a
-test that passes only because its tasks happened to run in one order fails on
-some seed. `--chaos=SEED` runs that failing schedule again (SPEC.md III.4.17).
+`iyi test`, half as many at once as there are cores (`-p N`), and not in `lib` or
+another module's directory. `test "name" do ... end` is a named case: `--json`
+reports each one's verdict, `--run TEXT` runs only those whose name holds
+TEXT, and `skip: "why"` leaves one out. `--release` and `-D FLAG` build every
+test that way, and `-v` shows a passing test's output. `iyi test --chaos`
+runs each test under 100 seeded schedules, so a test that passes only because
+its tasks happened to run in one order fails on some seed. `--chaos=SEED`
+runs that failing schedule again (SPEC.md III.4.17).
 
 A dependency is one line in `iyi.mod`, `require example.com/someone/lib
 v1.2.0`, and `iyi get example.com/someone/lib` writes it: the latest release

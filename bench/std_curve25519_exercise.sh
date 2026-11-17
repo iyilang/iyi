@@ -491,6 +491,162 @@ refuse ed25519-empty-seed "Ed25519: a seed is 32 bytes, not 0"
 refuse ed25519-long-seed "Ed25519: a seed is 32 bytes, not 64"
 
 echo
+echo "== how the ladder swaps and a table's entry is picked, read off the machine code"
+# The ladder's swap and the fixed-base table's lookup pick by a mask made
+# from a bit or a digit of the secret, 0 or all ones, and a compiler that
+# sees so may write a conditional jump on it, or read one entry's
+# address: the same answers, so nothing above shows it. The instructions
+# do. A small program's --release assembly is read for two pinned
+# targets, whatever the host is (`--cross-compile` writes the assembly
+# and links nothing, so neither target's toolchain is needed).
+# `CurveLadder.x25519` and `CurveBaseTable.pick` each have to hold the
+# value barriers their masks go through (an empty `#APP`/`#NO_APP` pair is
+# what std/digest's `ValueBarrier` leaves), no conditional move in them
+# may keep one of two pointers that a load then reads through, and their
+# only conditional jumps may be their loop's and their counters' checks.
+cat >"$WORK/pick.iyi" <<'IYI'
+module pick
+
+import std/curve25519::{X25519, Ed25519, CurveError}
+
+def bytes_of(seed : Int32) : Array(UInt8)
+  Array(UInt8).new(32) { |i| ((i * 37 + seed * 11) & 0xff).to_u8 }
+end
+
+key = bytes_of(Program.args.size)
+shared = X25519.shared(key, X25519.public_key(bytes_of(Program.args.size + 1)))
+puts shared.is_a?(CurveError) ? "refused" : shared.bytesize
+puts Ed25519.sign(key, "hello").bytesize
+IYI
+# machine.py FILE.s FUNCTION BARRIERS [lookup]: what in FUNCTION's
+# instructions picks by a secret where a mask should, a line each.
+cat >"$WORK/machine.py" <<'PY'
+import re, sys
+path, name, need, leaf = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4:] == ["lookup"]
+body, inside = [], False
+for line in open(path, encoding="utf-8", errors="replace"):
+    line = line.rstrip("\n")
+    if not inside:
+        inside = line.startswith('"') and line.endswith('":') and name in line
+    elif line.startswith("\t.size\t"):
+        break
+    elif line.strip() and not line.startswith("\t.") and not line.startswith(".Ltmp"):
+        body.append(line.strip())
+if not body:
+    raise SystemExit(f"no function named {name} in the assembly, so nothing of it was read")
+found = []
+barriers = sum(1 for a, b in zip(body, body[1:]) if a.endswith("APP") and b.endswith("NO_APP") and not a.endswith("NO_APP"))
+if barriers < need:
+    found.append(f"{name}: not the {need} value barriers its source asks for in its machine code, but {barriers}")
+code = [l for l in body if not l.endswith("APP")]
+labels = {l[:-1]: i for i, l in enumerate(code) if l.endswith(":")}
+split = lambda l: (l.split(None, 1) + [""])[:2]
+leaves = re.compile(r"j\w+|b|bl|blr|br|b\.\w+|cbn?z|tbn?z|call|ret")
+for i, l in enumerate(code):
+    op, args = split(l)
+    # A pointer kept by a conditional move and then read through: which of
+    # the two it was is the address of that load.
+    kept = re.match(r"(r[a-z0-9]+|x\d+),", args) if re.fullmatch(r"cmov\w+|csel", op) else None
+    if kept and not re.search(r"\d[dwb]$", kept.group(1)):
+        reg = kept.group(1)
+        for later in code[i + 1:i + 13]:
+            lop, largs = split(later)
+            if later.endswith(":") or leaves.fullmatch(lop):
+                break
+            if re.search(r"\[[^\]]*\b" + reg + r"\b", largs):
+                found.append(f"{name}: `{' '.join(l.split())}` keeps one of two pointers and `{' '.join(later.split())}` reads through it")
+                break
+            first, _, rest = largs.partition(",")
+            if first == reg and not re.search(r"\b" + reg + r"\b", rest):
+                break
+    # In a lookup a conditional jump is its loop going round, or a check of
+    # a counter (an overflow, an index past the table) leaving for a panic;
+    # any other is a branch on what was looked up.
+    if leaf and re.fullmatch(r"j(?!mp)\w+|b\.\w+|cbn?z|tbn?z", op):
+        at = labels.get(args.split(",")[-1].strip(), -1)
+        block = []
+        for later in code[at + 1:at + 25] if at > i else []:
+            if later.endswith(":") or split(later)[0] in ("ret", "jmp", "b", "br"):
+                break
+            block.append(later)
+        if at > i and not any("raise" in x for x in block):
+            found.append(f"{name}: `{' '.join(l.split())}` is neither its loop nor a counter's check")
+print("\n".join(found), end="\n" if found else "")
+sys.exit(1 if found else 0)
+PY
+# machine_code <search path> <dir>: what is wrong with the picks built from
+# <search path>, a line each, and 1 if anything is.
+machine_code() {
+  local target wrong=0 name count mode
+  mkdir -p "$2"
+  for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
+    if ! IYI_PATH="$1" "$IYI" build --release --emit asm,llvm-ir --x86-asm-syntax intel --cross-compile --target "$target" \
+      -o "$2/$target" "$WORK/pick.iyi" >"$2/$target.log" 2>&1 || [ ! -s "$2/$target.s" ]; then
+      echo "$target: no assembly was written: $(grep -m1 -E 'Error|BUG' "$2/$target.log")"
+      wrong=1
+      continue
+    fi
+    while read -r name count mode; do
+      if ! "$PY" "$WORK/machine.py" "$2/$target.s" "$name" "$count" $mode >"$2/$target.read" 2>&1; then
+        sed "s/^/$target: /" "$2/$target.read"
+        wrong=1
+      fi
+    done <<'READ'
+CurveLadder::x25519< 2 lookup
+CurveBaseTable::pick< 2 lookup
+READ
+  done
+  return $wrong
+}
+if [ -z "$PY" ]; then
+  echo "  no python here to read the assembly with, so the picks' machine code goes unread"
+elif machine_code "$IYI_PATH" "$WORK/machine" >"$WORK/machine.out"; then
+  echo "  x86_64 and aarch64, --release: every mask goes through its barrier, both sides of a swap and every entry of a row are read and masked, and nothing branches but the loops"
+else
+  sed 's/^/  /' "$WORK/machine.out"
+  status=1
+fi
+
+echo
+echo "== how the table's address reaches a second thread, read off the IR"
+# The fixed-base table is worked out by the first thread that wants it,
+# and a second thread must never read it part written: a wrong multiple
+# gives a signature a wrong point under the right nonce, which beside the
+# right signature of the same message gives the key away. On x86_64 a
+# plain store of the table's address after its entries is seen in that
+# order by every thread; on a machine that orders its stores loosely it is
+# not, and no run on this one would show it. So it is read off the IR of
+# the program built above (x86_64's, the orderings being the module's
+# request and the same for every target): every read of the word the
+# address is kept in has to be an acquire load and its one write a release
+# store.
+# published <file.ll> <class variable>: what in the IR reads or writes the
+# word a table's address is kept in other than by an acquire load and a
+# release store, a line each; 1 if anything does, or if either is missing.
+# The zero the word starts from is a plain store, made before the
+# program's first line.
+published() {
+  awk -v name="$2" '
+    !(index($0, "@\"" name "\"") || index($0, "@\"" name ".")) || /^@/ || /store i64 0, ptr @/ { next }
+    / = load atomic i64, ptr @[^ ]* acquire,/ { loads++; next }
+    /store atomic i64 [^,]*, ptr @[^ ]* release,/ { stores++; next }
+    { print name ": neither an acquire load nor a release store:" $0; other++ }
+    END {
+      if (!loads) print name ": no acquire load of it"
+      if (!stores) print name ": no release store to it"
+      exit (other || !loads || !stores) ? 1 : 0
+    }' "$1"
+}
+if [ -z "$PY" ]; then
+  echo "  no python here, so the program above was not built and its IR goes unread"
+elif published "$WORK/machine/x86_64-unknown-linux-gnu.ll" 'Std::Curve25519::CurveBaseTable::table' >"$WORK/published.out"; then
+  echo "  the table's address is read by an acquire load and written, once the table is whole, by a release store"
+else
+  sed 's/^/  /' "$WORK/published.out"
+  status=1
+fi
+
+echo
 echo "== proving the checks can fail when the module is broken"
 # prove_broken <label> <phrase> <old> <new>: the exercise must fail on a
 # copy of the module with <old> replaced, at the check that names <phrase>.
@@ -526,7 +682,7 @@ PY
 prove_broken "a ladder whose a24 is 121666" "rfc 7748 section 5.2 vector 1" \
   'e.mul_small(121665_u64)' 'e.mul_small(121666_u64)'
 prove_broken "a ladder that never swaps" "rfc 7748 section 5.2 vector 1" \
-  '      mask = 0_u64 &- swap' '      mask = 0_u64'
+  '      mask = ValueBarrier.u64(0_u64 &- swap)' '      mask = ValueBarrier.u64(0_u64)'
 prove_broken "a product that folds its top carry back without the 19" "rfc 7748 section 5.2 vector 1" \
   '    carried((r0.unsafe_to_u64 & MASK) &+ c4 &* 19_u64,' '    carried((r0.unsafe_to_u64 & MASK) &+ c4,'
 prove_broken "a u whose top bit is not masked" "the top bit of u is masked" \
@@ -544,7 +700,7 @@ prove_broken "a constant-time lookup that answers the next entry" "a u of p + 9 
 # The fixed-base table's digits are signed: one whose sign is dropped adds
 # P where it should subtract it.
 prove_broken "a fixed-base digit whose sign is dropped" "a u of p + 9 is read as 9" \
-  '    flip = 0_u64 &- negative' '    flip = 0_u64'
+  '    flip = ValueBarrier.u64(0_u64 &- negative)' '    flip = ValueBarrier.u64(0_u64)'
 # An X25519 public key is the Edwards point's u, (Z + Y) / (Z - Y); the
 # inverse map's u is another curve's. The first check to ask for a public
 # key is the non-canonical u's.
@@ -564,6 +720,77 @@ prove_broken "a decoding that takes x = 0 with the sign bit set" "a public key o
 ' ''
 prove_broken "a decoding that never sets x's sign" "rfc 8032 test 1: the signature verifies" \
   '    x = x.negate unless x.parity == sign' '    x = x * CurveField.one'
+# prove_unmasked <label> <phrase> <old> <new>: the exercise cannot tell a
+# pick by masks from one a compiler was left free to make a choice of, the
+# answers being the same; the reading of the machine code has to, with
+# <phrase> in what it says, for both targets.
+# patched_copy <old> <new>: a copy of the module with <old>, which it has
+# once, replaced, under $WORK/patched.
+patched_copy() {
+  rm -rf "$WORK/patched"
+  mkdir -p "$WORK/patched/std"
+  OLD="$1" NEW="$2" "$PY" - <<PY
+import os
+from pathlib import Path
+src = Path("$REPO/src/std/curve25519.iyi").read_text(encoding="utf-8")
+if src.count(os.environ["OLD"]) != 1:
+    raise SystemExit("patch site missing or not one")
+Path("$WORK/patched/std/curve25519.iyi").write_text(src.replace(os.environ["OLD"], os.environ["NEW"], 1), encoding="utf-8", newline="\n")
+PY
+}
+prove_unmasked() {
+  if [ -z "$PY" ]; then
+    echo "  no python3 on this machine, so the $1 proof is unmeasured"
+    return
+  fi
+  if ! patched_copy "$3" "$4"; then
+    echo "  the $1 patch did not apply"
+    status=1
+  elif machine_code "$WORK/patched${PSEP}$IYI_PATH" "$WORK/patched/machine" >"$WORK/mut.out"; then
+    echo "  the machine code of $1 was read as sound"
+    status=1
+  elif [ "$(grep -cF "$2" "$WORK/mut.out")" -eq 2 ]; then
+    echo "  $1 is caught, on both targets"
+  else
+    echo "  $1 was refused, but not for what it is:"
+    sed 's/^/    /' "$WORK/mut.out"
+    status=1
+  fi
+}
+prove_unmasked "a ladder whose swap the compiler can see" "CurveLadder::x25519<: not the 2 value barriers" \
+  '      mask = ValueBarrier.u64(0_u64 &- swap)' '      mask = 0_u64 &- swap'
+prove_unmasked "a fixed-base entry's mask the compiler can see" "CurveBaseTable::pick<: not the 2 value barriers" \
+  '      mask = ValueBarrier.u64((diff | (0_u64 &- diff)).unsafe_shr(63) &- 1_u64)' '      mask = (diff | (0_u64 &- diff)).unsafe_shr(63) &- 1_u64'
+prove_unmasked "a fixed-base sign's mask the compiler can see" "CurveBaseTable::pick<: not the 2 value barriers" \
+  '    flip = ValueBarrier.u64(0_u64 &- negative)' '    flip = 0_u64 &- negative'
+# prove_unpublished <label> <phrase> <old> <new>: nor can the exercise tell
+# how the table's address reaches a second thread; the reading of the IR
+# has to refuse the copy, with <phrase> in what it says.
+prove_unpublished() {
+  if [ -z "$PY" ]; then
+    echo "  no python3 on this machine, so the $1 proof is unmeasured"
+    return
+  fi
+  if ! patched_copy "$3" "$4"; then
+    echo "  the $1 patch did not apply"
+    status=1
+  elif ! machine_code "$WORK/patched${PSEP}$IYI_PATH" "$WORK/patched/machine" >"$WORK/mut.out"; then
+    echo "  $1: its picks' machine code was refused, which is not what it breaks:"
+    sed 's/^/    /' "$WORK/mut.out"
+    status=1
+  elif published "$WORK/patched/machine/x86_64-unknown-linux-gnu.ll" 'Std::Curve25519::CurveBaseTable::table' >"$WORK/mut.out"; then
+    echo "  the IR of $1 was read as sound"
+    status=1
+  elif grep -qF "$2" "$WORK/mut.out"; then
+    echo "  $1 is caught"
+  else
+    echo "  $1 was refused, but not for what it is:"
+    sed 's/^/    /' "$WORK/mut.out"
+    status=1
+  fi
+}
+prove_unpublished "a table's address read with no ordering" "no acquire load of it" \
+  '    ready = @@table.get_acquire' '    ready = @@table.get_relaxed'
 
 echo
 if [ "$status" -eq 0 ]; then

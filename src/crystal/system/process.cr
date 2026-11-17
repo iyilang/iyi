@@ -76,8 +76,9 @@ struct Crystal::System::Process
   # def prepare_args(command : String, args : Enumerable(String)?, shell : Bool) : Args
   # def prepare_args(args : Enumerable(String)) : Args
 
-  # Launches a child process with the command + args.
-  # def self.spawn(prepared_args : Args, shell : Bool, env : Env?, clear_env : Bool, input : Stdio, output : Stdio, error : Stdio, chdir : Path | String?) : ProcessInformation
+  # Launches a child process with the command + args; with *process_group*,
+  # as the leader of a process group of its own where the platform has them.
+  # def self.spawn(prepared_args : Args, shell : Bool, env : Env?, clear_env : Bool, input : Stdio, output : Stdio, error : Stdio, chdir : Path | String?, process_group : Bool = false) : ProcessInformation
 
   # Replaces the current process with a new one.
   # def self.replace(command : String, args : Enumerable(String)?, shell : Bool, env : Env?, clear_env : Bool, input : Stdio, output : Stdio, error : Stdio, chdir : Path | String?) : NoReturn

@@ -6,10 +6,12 @@
 # The exercise reads the platform's own store - at least one root, each
 # once - and the roots `$SSL_CERT_FILE` and `$SSL_CERT_DIR` name, over
 # files it writes; this gate runs it plain and --release, holds the Linux
-# store to the bundle Python's cryptography reads, shows an error value's
-# sentence through `.or_panic`, and proves on broken copies of the module
-# that the checks fail where they say. darwin's and Windows' stores are
-# read by the exercise there; nothing on those two is an oracle for them.
+# store to the bundle Python's cryptography reads and the Windows store to
+# what Python's ssl reads of it - each root's purposes and the Disallowed
+# store - shows an error value's sentence through `.or_panic`, and proves
+# on broken copies of the module that the checks fail where they say.
+# darwin's store is read by the exercise there; nothing is an oracle for
+# it.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -51,6 +53,52 @@ trap 'rm -rf "$WORK"' EXIT
 status=0
 export IYI_PATH="$REPO/src${PSEP}$REPO/samples/iyi"
 
+# What Python's ssl reads of the Windows stores, for the exercise to hold
+# the module to: `enum_certificates` answers each certificate with True,
+# good for every purpose, or the purposes the store's property names -
+# and, where there is no property, the ones the certificate's own
+# extension names, which is std/x509's to judge and so is `either` here.
+# A root the store holds twice is dropped if either copy is.
+unset SYSTEM_ROOTS_ORACLE
+windows=no
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) windows=yes ;;
+esac
+if [ "$windows" = yes ] && [ -n "$PY" ]; then
+  if "$PY" - "$WORK/oracle.txt" <<'PY'
+import hashlib, ssl, sys
+SERVER, ANY = "1.3.6.1.5.5.7.3.1", "2.5.29.37.0"
+EXTENSION = bytes([0x06, 0x03, 0x55, 0x1D, 0x25])   # id-ce-extKeyUsage, as DER
+RANK = {"keep": 0, "either": 1, "drop": 2}
+verdicts = {}
+for der, encoding, trust in ssl.enum_certificates("ROOT"):
+    if encoding != "x509_asn":
+        continue
+    if trust is True or SERVER in trust or ANY in trust:
+        verdict = "keep"
+    elif EXTENSION in der:
+        verdict = "either"
+    else:
+        verdict = "drop"
+    f = hashlib.sha256(der).hexdigest()
+    if RANK[verdict] >= RANK[verdicts.get(f, "keep")]:
+        verdicts[f] = verdict
+distrusted = {hashlib.sha256(der).hexdigest() for der, encoding, _ in ssl.enum_certificates("Disallowed")
+              if encoding == "x509_asn"}
+with open(sys.argv[1], "w", encoding="ascii", newline="\n") as out:
+    for f, verdict in sorted(verdicts.items()):
+        out.write(f"{verdict} {f}\n")
+    for f in sorted(distrusted):
+        out.write(f"distrusted {f}\n")
+PY
+  then
+    export SYSTEM_ROOTS_ORACLE="$WORK/oracle.txt"
+  else
+    echo "Python could not read the Windows stores"
+    status=1
+  fi
+fi
+
 build_and_run() {
   local label="$1" name="$2"
   shift 2
@@ -81,7 +129,7 @@ fi
 
 echo
 echo "== every system_roots section reported"
-for phrase in "== the platform's own store" "== roots named by \$SSL_CERT_FILE and \$SSL_CERT_DIR"; do
+for phrase in "== the platform's own store" "== what the platform denies and what it restricts" "== the platform's store held to another reader of it" "== roots named by \$SSL_CERT_FILE and \$SSL_CERT_DIR"; do
   if ! grep -q "$phrase" "$WORK/roots-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -137,6 +185,20 @@ PY
   then
     status=1
   fi
+fi
+
+echo
+echo "== the Windows store held to what Python's ssl reads of it"
+if [ "$windows" = no ]; then
+  echo "  not Windows"
+elif [ -z "${SYSTEM_ROOTS_ORACLE:-}" ]; then
+  echo "  no python here, so the store goes uncompared"
+elif ! grep -q "held to the oracle" "$WORK/roots-plain.out" 2>/dev/null \
+  || ! grep -q "held to the oracle" "$WORK/roots-release.out" 2>/dev/null; then
+  echo "  the exercise did not hold the store to the oracle"
+  status=1
+else
+  grep "held to the oracle" "$WORK/roots-release.out" | sed 's/^ *held to the oracle:/  the roots Python keeps for a server, by SHA-256:/'
 fi
 
 echo
@@ -199,7 +261,12 @@ PY
 }
 prove_broken "a root kept as often as it is written" "a root written twice read 2 times" \
   '    return if @seen.has_key?(key) || @denied.has_key?(key)' '    return if @denied.has_key?(key)'
-prove_broken "an unreadable block not counted" "a broken block counted 0 times" \
+# Without the oracle, which the count answers to first on a machine whose
+# own store holds a certificate std/x509 cannot read (a hosted Windows
+# runner's has seven): there the roots the oracle keeps and this does not
+# are allowed by that count, so a count of nothing fails that comparison
+# before the broken block's own is reached.
+SYSTEM_ROOTS_ORACLE= prove_broken "an unreadable block not counted" "a broken block counted 0 times" \
   '    if certificate.is_a?(X509Error)
       @unreadable = @unreadable + 1' '    if certificate.is_a?(X509Error)'
 prove_broken "\$SSL_CERT_DIR passed over" "a file and a directory" \
@@ -210,6 +277,35 @@ prove_broken "an empty store answered as a store" "a bundle with no root refused
 # to come back empty.
 prove_broken "a bundle's certificates dropped" "no root certificates in" \
   '    blocks.each { |der| add(der) }' '    return'
+prove_broken "a denied root left where it was" "a denied root is dropped" \
+  '    @certificates = @certificates.reject { |c| SystemRootsCollector.key(c.raw) == key }' ''
+prove_broken "a denied root kept when met again" "a denied root is not kept after" \
+  '    @denied[key] = true
+    at = @seen[key]?' '    at = @seen[key]?'
+prove_broken "a denied certificate not held as distrusted" "a denied certificate is distrusted once, and was 0 times" \
+  '    @distrusted << der unless @listed.has_key?(key)' ''
+prove_broken "a denied certificate held as often as it is denied" "a denied certificate is distrusted once, and was 2 times" \
+  '    @distrusted << der unless @listed.has_key?(key)' '    @distrusted << der'
+prove_broken "the distrusted left out of the answer" "the store answers what was denied" \
+  '    SystemRoots.new(@certificates, @unreadable, where, @restricted, @distrusted)' '    SystemRoots.new(@certificates, @unreadable, where)'
+prove_broken "a root restricted counted twice" "a root restricted twice counted 2 times" \
+  '    @restricted = @restricted + 1 unless @limited.has_key?(key)' '    @restricted = @restricted + 1'
+# The Windows reader's own lines: the oracle is what catches them, so they
+# are proved where there is one.
+if [ -n "${SYSTEM_ROOTS_ORACLE:-}" ]; then
+  prove_broken "a root trusted whatever Windows keeps it for" "a root the platform keeps from server authentication is trusted" \
+    '        if serves?(context)' '        if serves?(context) || true'
+  prove_broken "a root with no purpose property left out" "a root the platform trusts for a server is missing" \
+    'Pointer(Void).new(0_u64), pointerof(size)) == 0
+        return LibKernel32.GetLastError == NOT_FOUND' 'Pointer(Void).new(0_u64), pointerof(size)) == 0
+        return false'
+  prove_broken "a root whose property names serverAuth left out" "a root the platform trusts for a server is missing" \
+    '        return true if names?(identifier, SERVER_AUTH) || names?(identifier, ANY_USE)' '        return true if names?(identifier, ANY_USE)'
+  prove_broken "a purpose read by its first bytes" "a root the platform keeps from server authentication is trusted" \
+    '        return false unless text[i] == oid.to_unsafe[i]' '        return false unless i > 14 || text[i] == oid.to_unsafe[i]'
+else
+  echo "  no Windows oracle here, so the purpose property's four breaks are unmeasured"
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

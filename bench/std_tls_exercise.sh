@@ -2849,11 +2849,15 @@ prove_broken "an empty CertificateStatus taken" "staple-empty:" \
 prove_broken "a stapled response for another certificate taken" "staple-other-cert:" \
   '    return TlsError.new("the stapled OCSP response: #{verdict.message}", TlsAlert::BAD_CERTIFICATE_STATUS_RESPONSE) if verdict.is_a?(OcspError)' '    return nil if verdict.is_a?(OcspError)' scenarios
 prove_broken "status_request twice in an entry taken" "staple-twice:" \
-  '      return TlsError.new("extension #{type} twice in a certificate entry", TlsAlert::ILLEGAL_PARAMETER) if seen.includes?(type)' '' scenarios
+  '      return TlsError.new("extension #{type} twice in a certificate entry", TlsAlert::ILLEGAL_PARAMETER) if seen.has_key?(type)' '' scenarios
 prove_broken "a server_name acknowledgement with something in it taken" "sni-ack-data:" \
   '    return TlsError.new("a server_name acknowledgement that is not empty", TlsAlert::DECODE_ERROR) unless data.empty?' '' scenarios
 prove_broken "user_canceled after the handshake taken as an end" "user-canceled:" \
-  '        next if warning' '' scenarios
+  '        if warning
+          idle = idle_record
+          return fail(idle) if idle
+          next
+        end' '' scenarios
 # Section 5.4's limit on the whole inner plaintext, padding in it, as it
 # was before SECURITY_REVIEW_TLS.md's finding, and one byte short of it -
 # which "big", 2^14 bytes of content a record, meets before "padded-max".
@@ -2866,11 +2870,11 @@ prove_broken "the inner plaintext's limit one byte short" "a record of 16385 byt
 prove_broken "application data taken inside a split handshake message" "split-by-data:" \
   '        cut = cut_message(type)
         return fail(cut) if cut
-        next if content.empty?' '        next if content.empty?' scenarios
+        if content.empty?' '        if content.empty?' scenarios
 prove_broken "close_notify taken inside a split handshake message" "split-by-close:" \
   '        cut = cut_message(type)
         return fail(cut) if cut
-        next if warning' '        next if warning' scenarios
+        if warning' '        if warning' scenarios
 # The same two rules in TLS 1.2, against the scripted server's whole 1.2
 # handshakes: the split-message rule waived for 1.2 alone, and the limit
 # on a 1.2 record's plaintext (RFC 5246 section 6.2.1) dropped.
@@ -2959,7 +2963,7 @@ prove_broken "TLS 1.2 offered by default" "FAILED: tls12: " \
   property min_version : TlsVersion = TlsVersion::TLS13' 'requires).
   property min_version : TlsVersion = TlsVersion::TLS12' scenarios
 prove_broken "a TLS 1.2 ServerHello taken from a client not asked for 1.2" "FAILED: tls12: " \
-  '    if !seen.includes?(43) && @config.min_version == TlsVersion::TLS12' '    if !seen.includes?(43)' scenarios
+  '    if !seen.has_key?(43) && @config.min_version == TlsVersion::TLS12' '    if !seen.has_key?(43)' scenarios
 prove_broken "a ClientHello offering TLS 1.2's suites unasked" "FAILED: tls12: " \
   '    TlsSuites::TLS12.each { |suite| suites = suites + TlsBytes.u16(suite) } if tls12' '    TlsSuites::TLS12.each { |suite| suites = suites + TlsBytes.u16(suite) }' scenarios
 prove_broken "the downgrade sentinel unchecked" "FAILED: tls12-downgrade: " \
@@ -3178,7 +3182,7 @@ prove_broken "the client's CertificateVerify unchecked" "FAIL mtls-bad-cv " \
 prove_broken "the client's CertificateVerify checked under the server's context string" "FAIL mtls-ok " \
   '    problem = certificate_verify(verify, chain[0], "client")' '    problem = certificate_verify(verify, chain[0], "server")' server-mtls
 prove_broken "a client certificate checked for serverAuth" "FAIL mtls-ok " \
-  '@config.now || Time.utc, X509Purpose::Client)' '@config.now || Time.utc, X509Purpose::Server)' server-mtls
+  '    verified = X509.verify(chain[0], chain[1, chain.size - 1], roots, nil, @config.now || Time.utc, X509Purpose::Client)' '    verified = X509.verify(chain[0], chain[1, chain.size - 1], roots, nil, @config.now || Time.utc, X509Purpose::Server)' server-mtls
 prove_broken "a client with no certificate let in" "FAIL mtls-none " \
   '      return TlsError.new("the client sent no certificate", @tls12 ? TlsAlert::HANDSHAKE_FAILURE : TlsAlert::CERTIFICATE_REQUIRED) if @config.client_required' '' server-mtls
 prove_broken "a client Certificate's request context unchecked" "FAIL mtls-context " \
@@ -3204,7 +3208,7 @@ prove_broken "a client certificate with no CertificateVerify after it taken" "FA
 prove_broken "a client Certificate of any length searched" "FAIL mtls-long-chain " \
   '      return TlsError.new("a client Certificate of more than #{X509::MAX_CHAIN} certificates", TlsAlert::BAD_CERTIFICATE) if chain.size == X509::MAX_CHAIN' '' server-mtls
 prove_broken "a client's chain taken as its own roots" "FAIL mtls-untrusted " \
-  'X509.verify(chain[0], chain[1, chain.size - 1], roots, nil,' 'X509.verify(chain[0], chain[1, chain.size - 1], roots + chain[1, chain.size - 1], nil,' server-mtls
+  'verified = X509.verify(chain[0], chain[1, chain.size - 1], roots, nil,' 'verified = X509.verify(chain[0], chain[1, chain.size - 1], roots + chain[1, chain.size - 1], nil,' server-mtls
 prove_broken "a PKCS #8 public key unchecked" "FAIL a version 2 key carrying another public key" \
   '        return TlsError.new("the private key: its public key is not the seed'"'"'s") unless bits.size == 33 && bits[0] == 0_u8 && bits[1, 32] == TlsBytes.of(Ed25519.public_key(seed))' '' config
 # Resumption. The key schedule's PSK half against RFC 8448's resumed
@@ -3269,6 +3273,26 @@ prove_broken "a server_name of any length taken" "a server_name past 253 bytes i
   '          if name.size > MAX_HOST_NAME' '          if false'
 prove_broken "a server_name of 253 bytes refused" "a server_name of 253 bytes is taken" \
   '          if name.size > MAX_HOST_NAME' '          if name.size >= MAX_HOST_NAME'
+prove_broken "a closed socket read for early data" "a socket closed under taken early data ends read_early and read" \
+  '    return TlsError.new("the connection is closed") if @socket.closed?' ''
+prove_broken "a ticket taken whatever is asked of a client now" "a ticket sealed for a client that showed no certificate is not taken where one is required" \
+  '      next unless client_held?(chain)' ''
+prove_broken "a ticket's chain taken unchecked" "a ticket's chain is checked under the roots of the configuration that takes it" \
+  '    !X509.verify(chain[0], chain[1, chain.size - 1], roots, nil, @config.now || Time.utc, X509Purpose::Client).is_a?(X509Error)' '    true'
+prove_broken "a ticket's chain carried to a configuration that asks for none" "a ticket's chain is not carried to a configuration that asks for none" \
+  '    return chain.empty? unless roots' '    return true unless roots'
+prove_broken "records without data read without end" "idle-over:" \
+  '    return nil if @idle_records <= MAX_IDLE_RECORDS' '    return nil' scenarios
+prove_broken "the records without data counted one short" "idle-most:" \
+  '    return nil if @idle_records <= MAX_IDLE_RECORDS' '    return nil if @idle_records < MAX_IDLE_RECORDS' scenarios
+prove_broken "a KeyUpdate not counted among the records without data" "idle-kinds:" \
+  '        problem = post_handshake(content) || idle_record' '        problem = post_handshake(content)' scenarios
+prove_broken "the count of records without data not started again by data" "idle-again:" \
+  '        @idle_records = 0
+' '' scenarios
+prove_broken "an empty handshake record taken after the handshake" "empty-handshake:" \
+  '    return TlsError.new("an empty handshake record", TlsAlert::UNEXPECTED_MESSAGE) if content.empty?
+    add_handshake(content)' '    add_handshake(content)' scenarios
 prove_broken "a binder over the whole ClientHello" "resume: refused" \
   '    binder = schedule.binder(offered.psk, prefix + hello[0, hello.size - binders.size])' '    binder = schedule.binder(offered.psk, prefix + hello)' scenarios
 prove_broken "a ticket's age sent without its age_add" "resume: refused" \
@@ -3285,6 +3309,8 @@ prove_broken "tickets kept past the session's limit" "ticket-many:" \
     end' '' scenarios
 prove_broken "a ticket past 16 KiB kept" "ticket-huge:" \
   '    return nil if lifetime == 0_i64 || ticket.size > TlsSession::MAX_TICKET' '    return nil if lifetime == 0_i64' scenarios
+prove_broken "an extension twice in a NewSessionTicket taken" "ticket-twice:" \
+  '      return TlsError.new("extension #{type} twice in a NewSessionTicket", TlsAlert::ILLEGAL_PARAMETER) if seen.has_key?(type)' '' scenarios
 prove_broken "a NewSessionTicket cut short taken" "ticket-bad:" \
   '    return TlsError.new("a NewSessionTicket cut short", TlsAlert::DECODE_ERROR) if reader.short? || !reader.done? || ticket.empty?' '' scenarios
 prove_broken "the client's resumption master secret short of its Finished" "FAIL resumed by OpenSSL's tickets, the default suites" \
@@ -3306,7 +3332,9 @@ prove_broken "a pre_shared_key without psk_key_exchange_modes taken" "FAIL resum
 prove_broken "identities and binders of other counts taken" "FAIL resume-binders " \
   '        unless identities.size == binders.size' '        if false' server
 prove_broken "a resumption's flight with the certificate in it" "FAIL resume " \
-  '    flight = flight + certificate_flight unless @resumed' '    flight = flight + certificate_flight' server
+  '    unless @resumed
+      authenticated = certificate_flight' '    unless false
+      authenticated = certificate_flight' server
 prove_broken "the server's resumption master secret short of the client's Finished" "FAIL resume " \
   '    @transcript = @transcript + message
     @resumption_secret' '    @resumption_secret' server
@@ -3329,8 +3357,17 @@ prove_broken "a replay of early data taken" "FAIL early-replay " \
   '    return false if @held.has_key?(key)' '' server
 prove_broken "early data delivered as 1-RTT data" "FAIL early-ok " \
   '        return content unless content.empty?' '        @pending = content unless content.empty?' server
+prove_broken "early records of no bytes read without end" "FAIL early-idle " \
+  '        idle = idle_record
+        return idle if idle
+' '' server
 prove_broken "early data past the ticket's max_early_data_size taken" "FAIL early-too-much " \
   '        if @early_read > @early_limit' '        if false' server
+prove_broken "early data passed over without the server saying so" "early data a ticket allows past a lowered limit is declined, and sent again" \
+  '    @early_declined = offer.early_data' '    @early_declined = false'
+prove_broken "early data taken and still said to be declined" "early data within an unchanged limit is taken" \
+  '        @early_declined = false
+' ''
 prove_broken "early data a ticket allows past a lowered limit taken" "early data a ticket allows past a lowered limit is declined, and sent again" \
   '    return false if ticket.max_early_data > @config.early_limit' ''
 prove_broken "early data declined at a limit no lower than the ticket's" "early data within an unchanged limit is taken" \
@@ -3474,7 +3511,7 @@ prove_broken "PKCS #1 v1.5 put before RSA-PSS" "FAIL 12-ok " \
 prove_broken "an RSA key that never signs under PKCS #1 v1.5" "FAIL 12-pkcs1 " \
   '    return pss if pss || @rsa.nil?' '    return pss' server12
 prove_broken "PKCS #1 v1.5 signed as RSA-PSS" "FAIL 12-pkcs1 " \
-  '      return rsa.sign_pkcs1v15([RsaHash::SHA256, RsaHash::SHA384, RsaHash::SHA512][pkcs1], content) if pkcs1' '' server12
+  '      signed = if pkcs1' '      signed = if pkcs1 && false' server12
 prove_broken "handshake bytes across the client's ChangeCipherSpec" "FAIL 12-ccs-split " \
   '    return TlsError.new("handshake bytes before #{@peer}'"'"'s ChangeCipherSpec", TlsAlert::UNEXPECTED_MESSAGE) unless handshake_left == 0' '' server12
 # And at the server, the scripted client's: half a renegotiating
@@ -3633,7 +3670,7 @@ prove_broken 'a ServerHello that does not confirm what its HelloRetryRequest did
   '        return TlsError.new("a ServerHello that does not confirm the ClientHelloInner its HelloRetryRequest took", TlsAlert::ILLEGAL_PARAMETER) if ech.hrr_accepted
 ' ''
 prove_broken 'a mandatory ECHConfig extension taken' 'mandatory extension this does not know' \
-  '      return nil if seen.includes?(extension[0]) || (extension[0] & 0x8000) != 0' '      return nil if seen.includes?(extension[0])'
+  '      return nil if seen.has_key?(extension[0]) || (extension[0] & 0x8000) != 0' '      return nil if seen.has_key?(extension[0])'
 prove_broken 'a public_name that reads as an address taken' '"1.2.3.4" is no public_name' \
   '    return false if last.all? { |c| c >= 0x30_u8 && c <= 0x39_u8 }
 ' ''

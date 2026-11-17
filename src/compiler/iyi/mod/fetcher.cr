@@ -210,7 +210,17 @@ module Iyi::Mod
     # CRLF on Windows, so that sum differed (`s1:6072c5fc...` against the
     # tag's `s1:51c6f1a1...`) until this was set. Written into the clone's
     # own config, so the checkout a whole clone makes later keeps it too.
-    KEEP_BYTES = ["--config", "core.autocrlf=false", "--config", "core.eol=lf"]
+    #
+    # And `core.symlinks=false`, for the entry that is not a file. What a
+    # repository stores for a symbolic link is its target text, and what a
+    # checkout made of it was the machine's choice: a link where the file
+    # system and the account allow one, a plain file holding the text
+    # where they do not - which is Git for Windows as installed. `h2:`
+    # hashes the kind of each entry, so one tag was two hashes. With this
+    # a link is checked out as that plain file everywhere; a fetched tree
+    # holds no link at all, and a package that reached a file of its own
+    # through one has to hold the file.
+    KEEP_BYTES = ["--config", "core.autocrlf=false", "--config", "core.eol=lf", "--config", "core.symlinks=false"]
 
     # A whole clone of *path*'s repository at *into*: a pseudo-version's
     # commit is on no tag a shallow clone could ask for, and its version

@@ -1,0 +1,21 @@
+# Tests `std/bool`: eager | & ^, to_unsafe, and a hash that tells true from false.
+#
+# Run via:
+#     ./bin/iyi test bench/std_bool_test.iyi
+
+module bench/std_bool_test
+
+import std/bool
+
+test "operators" do
+  assert_eq true, true | false, "or"
+  assert_eq false, true & false, "and"
+  assert_eq false, true ^ true, "xor"
+  assert_eq 1, true.to_unsafe, "unsafe true"
+  assert_eq 0, false.to_unsafe, "unsafe false"
+end
+
+test "hash" do
+  assert_ne false.hash, true.hash, "true and false hash apart"
+  assert_eq true.hash, true.hash, "stable true"
+end

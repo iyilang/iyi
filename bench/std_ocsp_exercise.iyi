@@ -385,6 +385,15 @@ delegated = OcspResponse.parse(b(RESP_GOOD_DELEGATED)).or_panic
 check delegated.certificates.size == 1 && delegated.certificates[0].raw == RESPONDER.raw, "the responder's certificate, carried"
 verdict = delegated.verify(GOOD, ROOT, NOW).or_panic
 check verdict.delegated && verdict.signer.subject_name == "CN=OCSP Exercise Responder" && verdict.signer.ocsp_nocheck, "signed by the responder, which carries id-pkix-ocsp-nocheck"
+same_key = RESPONDER.raw.dup
+same_key[same_key.size - 1] = same_key[same_key.size - 1] ^ 1_u8
+distrusted_text = ->(list : Array(Array(UInt8))) do
+  answer = delegated.verify(GOOD, ROOT, NOW, distrusted: list)
+  answer.is_a?(OcspError) ? answer.message : "verified"
+end
+check distrusted_text.call([RESPONDER.raw]) == "ocsp: the responder CN=OCSP Exercise Responder is a certificate that is distrusted", "a delegated responder whose certificate is distrusted: expected refused"
+check distrusted_text.call([same_key]) == "ocsp: the responder CN=OCSP Exercise Responder holds the key of a certificate that is distrusted", "a delegated responder whose key is distrusted: expected refused"
+check distrusted_text.call([GOOD.raw]) == "verified", "a delegated responder, another certificate distrusted: expected verified"
 late = OcspResponse.parse(b(RESP_TRY_LATER))
 check late.is_a?(OcspError) && late.response_status == 3, "tryLater's status, 3, on the error"
 sha256 = OcspResponse.parse(b(RESP_SHA256_CERTID)).or_panic

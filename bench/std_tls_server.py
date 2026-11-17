@@ -113,6 +113,11 @@ SCENARIOS = {
     "staple-other-cert": "a staple the issuer signed, for another certificate of its own",
     "sni-ack-data": "a server_name acknowledgement that is not empty",
     "user-canceled": "a user_canceled warning before the echo",
+    "idle-most": "32 application data records of no bytes before the echo, the most passed over",
+    "idle-over": "33 application data records of no bytes before the echo",
+    "idle-again": "20 records of no bytes, half the echo, 20 more, and the rest: never 33 in a row",
+    "idle-kinds": "33 records without data before the echo: empty ones, user_canceled warnings and KeyUpdates, 11 of each",
+    "empty-handshake": "a handshake record of no bytes before the echo",
     "padded-max": "the echo padded to 2^14 + 1 bytes of inner plaintext, the most section 5.4 allows",
     "padded-over": "the echo padded to 2^14 + 2 bytes of inner plaintext, one past section 5.4's limit",
     "split-by-data": "half a NewSessionTicket, then the echo inside it, then the rest",
@@ -130,6 +135,8 @@ SCENARIOS = {
     "ticket-many": "twenty NewSessionTickets before the echo",
     "ticket-huge": "a NewSessionTicket whose ticket is 16,385 bytes, over two records",
     "ticket-bad": "a NewSessionTicket cut short",
+    "ticket-wide": "a NewSessionTicket with 16,370 extensions of no bytes, each of another type",
+    "ticket-twice": "the same, the last extension the first's type again",
     # Early data: the first connection's ticket allows 1024 bytes (4 for
     # early-small, none for early-unoffered); the second's early data is
     # taken (early: read to EndOfEarlyData under the early keys, echoed as
@@ -793,6 +800,16 @@ class Conn:
             self.sock.sendall(writer.seal(22, message(4, struct.pack(">IIB", 3600, 1, 4) + b"tick" + b"\x00\x04abcd\x00\x00")))
         if s == "ticket-bad":
             self.sock.sendall(writer.seal(22, message(4, struct.pack(">IIB", 3600, 1, 4) + b"tick" + b"\x00\x04ab")))
+        if s in ("ticket-wide", "ticket-twice"):
+            # As many extensions as a handshake message holds, none of them
+            # early_data: each is passed over (section 4.6.1), and one that
+            # comes twice is refused however far apart the two are.
+            types = list(range(1000, 1000 + 16370))
+            if s == "ticket-twice":
+                types[-1] = types[0]
+            extensions = b"".join(struct.pack(">HH", t, 0) for t in types)
+            nst = message(4, struct.pack(">IIB", 3600, 1, 4) + b"tick" + b"\x00\x04abcd" + struct.pack(">H", len(extensions)) + extensions)
+            self.sock.sendall(b"".join(writer.seal(22, nst[k:k + 16384]) for k in range(0, len(nst), 16384)))
         if early_data:
             self.sock.sendall(writer.seal(23, b"early:" + early_data))
         if (s.startswith(("resume", "early")) and psk is None) or s in ("ticket-many", "ticket-huge"):
@@ -843,6 +860,25 @@ class Conn:
             return
         if s == "user-canceled":
             self.sock.sendall(writer.seal(21, b"\x01\x5a"))
+        if s in ("idle-most", "idle-over"):
+            # Records that bring a read nothing, one after another: 32 are
+            # passed over and the 33rd is refused.
+            self.sock.sendall(b"".join(writer.seal(23, b"") for _ in range(32 if s == "idle-most" else 33)))
+        if s == "idle-again":
+            # Data starts the count again.
+            idle = b"".join(writer.seal(23, b"") for _ in range(20))
+            self.sock.sendall(idle + writer.seal(23, b"echo:") + b"".join(writer.seal(23, b"") for _ in range(20)) +
+                              writer.seal(23, data) + writer.seal(21, b"\x01\x00"))
+            return
+        if s == "idle-kinds":
+            # The same 33 over the kinds there are; each KeyUpdate moves
+            # this side's keys.
+            for _ in range(11):
+                self.sock.sendall(writer.seal(23, b"") + writer.seal(21, b"\x01\x5a") + writer.seal(22, message(24, b"\x00")))
+                s_ap = next_key(s_ap)
+                writer = Cipher(schedule, s_ap)
+        if s == "empty-handshake":
+            self.sock.sendall(writer.seal(22, b""))
         if s == "slow-echo":
             # Past the client's read timeout: its first read times out, and
             # the same connection reads the echo after.

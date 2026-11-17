@@ -51,12 +51,15 @@
 #
 # A signature that is not one is `false`, whatever the reason.
 #
-# Pure computation: std/big's arithmetic, std/digest's hashes.
+# Pure computation: std/big's arithmetic, std/digest's hashes, and
+# std/atomic for the word P-256's table of G's multiples is published
+# through.
 
 @[Unsafe("the curve arithmetic works in word buffers it allocates and indexes itself, for speed")]
 module std/ecdsa
 
 import std/asn1::{Der, DerValue, DerTag, Asn1Error}
+import std/atomic
 import std/big::{BigInt}
 import std/digest::{SHA256, SHA384, SHA512}
 import std/lazy::{Lazy}

@@ -92,3 +92,24 @@ path = ["bench/std_cbor_fixture/**"]
 precedence = "override"
 SPDX-FileCopyrightText = "IETF Trust and the persons identified as the document authors"
 SPDX-License-Identifier = "BSD-2-Clause"
+
+# Sumdb note, checkpoint and tile verification adapted from
+# golang.org/x/mod v0.29.0. The Go license is also beside the source.
+[[annotations]]
+path = ["src/compiler/iyi/mod/sumdb/client.cr", "src/compiler/iyi/mod/sumdb/note.cr", "src/compiler/iyi/mod/sumdb/tlog.cr"]
+precedence = "override"
+SPDX-FileCopyrightText = "Copyright 2019 The Go Authors"
+SPDX-License-Identifier = "BSD-3-Clause"
+
+[[annotations]]
+path = ["src/compiler/iyi/mod/sumdb/GO_LICENSE"]
+precedence = "override"
+SPDX-FileCopyrightText = "Copyright 2009 The Go Authors"
+SPDX-License-Identifier = "BSD-3-Clause"
+
+# Unmodified Ed25519 vectors from C2SP/Wycheproof.
+[[annotations]]
+path = ["spec/compiler/fixtures/sumdb/wycheproof_ed25519.json"]
+precedence = "override"
+SPDX-FileCopyrightText = "Copyright Google LLC"
+SPDX-License-Identifier = "Apache-2.0"

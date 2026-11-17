@@ -1,0 +1,304 @@
+# Secure Enclave P-256 keys. The private key stays in the enclave; signatures
+# are ECDSA over SHA-256, encoded as an X9.62 DER SEQUENCE of r and s.
+#
+#     import std/secure_enclave::{SecureEnclave, SecureEnclaveKey}
+#     key = SecureEnclaveKey.generate.or_panic
+#     signature = key.sign("message").or_panic
+#     public_key = key.public_key
+#     handle = key.handle
+#     restored = SecureEnclaveKey.restore(handle).or_panic
+#
+# Keys are ephemeral, not keychain-persistent. User-presence prompts are not
+# offered. A handle is an opaque capability to use the key on this device:
+# protect it accordingly. It is not the private key, nor a portable export.
+# Apple can make it unusable, for example if the enclave's wrapping key is
+# reset. Restore uses the Security.framework key attribute "toid", which is
+# not declared in the SDK headers; if Apple withholds or changes it, an error
+# is returned. No fixed length or internal layout is assumed.
+#
+# An iyi key retains only copied bytes and its public key, not a CF object.
+# Each operation opens and releases its own native key, so no finalizer or
+# caller-managed close is needed. `available?` tries an ephemeral generation,
+# and may be false on a Mac whose enclave is absent or unavailable.
+
+@[Unsafe("Security.framework and CoreFoundation objects are managed through their C interfaces")]
+module std/secure_enclave
+
+{% unless flag?(:darwin) %}
+  {% raise "std/secure_enclave requires macOS and its Secure Enclave; this target is not darwin" %}
+{% end %}
+
+import std/ecdsa::{EcdsaPublicKey, EcdsaCurve, EcdsaError}
+
+@[Link(framework: "Security")]
+lib LibEnclaveSecurity
+  $kSecAttrKeyType : Void*
+  $kSecAttrKeyTypeECSECPrimeRandom : Void*
+  $kSecAttrKeySizeInBits : Void*
+  $kSecAttrTokenID : Void*
+  $kSecAttrTokenIDSecureEnclave : Void*
+  $kSecPrivateKeyAttrs : Void*
+  $kSecAttrIsPermanent : Void*
+  $kSecAttrAccessControl : Void*
+  $kSecAttrAccessibleWhenUnlockedThisDeviceOnly : Void*
+  $kSecKeyAlgorithmECDSASignatureMessageX962SHA256 : Void*
+  $kSecKeyAlgorithmECDSASignatureMessageX962SHA384 : Void*
+  fun SecAccessControlCreateWithFlags(allocator : Void*, protection : Void*, flags : UInt64, error : Void**) : Void*
+  fun SecKeyCreateRandomKey(attributes : Void*, error : Void**) : Void*
+  fun SecKeyCreateWithData(data : Void*, attributes : Void*, error : Void**) : Void*
+  fun SecKeyCopyAttributes(key : Void*) : Void*
+  fun SecKeyCopyPublicKey(key : Void*) : Void*
+  fun SecKeyCopyExternalRepresentation(key : Void*, error : Void**) : Void*
+  fun SecKeyCreateSignature(key : Void*, algorithm : Void*, data : Void*, error : Void**) : Void*
+end
+
+@[Link(framework: "CoreFoundation")]
+lib LibEnclaveCF
+  $kCFBooleanFalse : Void*
+  $kCFTypeDictionaryKeyCallBacks : UInt8
+  $kCFTypeDictionaryValueCallBacks : UInt8
+  fun CFDictionaryCreateMutable(allocator : Void*, capacity : Int64, key_callbacks : Void*, value_callbacks : Void*) : Void*
+  fun CFDictionarySetValue(dictionary : Void*, key : Void*, value : Void*) : Void
+  fun CFDictionaryGetValue(dictionary : Void*, key : Void*) : Void*
+  fun CFNumberCreate(allocator : Void*, type : Int64, value : Void*) : Void*
+  fun CFStringCreateWithCString(allocator : Void*, text : UInt8*, encoding : UInt32) : Void*
+  fun CFStringGetLength(string : Void*) : Int64
+  fun CFStringGetMaximumSizeForEncoding(length : Int64, encoding : UInt32) : Int64
+  fun CFStringGetCString(string : Void*, buffer : UInt8*, size : Int64, encoding : UInt32) : UInt8
+  fun CFDataCreate(allocator : Void*, bytes : UInt8*, length : Int64) : Void*
+  fun CFDataGetLength(data : Void*) : Int64
+  fun CFDataGetBytePtr(data : Void*) : UInt8*
+  fun CFDataGetTypeID : UInt64
+  fun CFGetTypeID(object : Void*) : UInt64
+  fun CFErrorGetCode(error : Void*) : Int64
+  fun CFErrorCopyDescription(error : Void*) : Void*
+  fun CFRelease(object : Void*) : Void
+end
+
+# A Security.framework failure. A zero code means that no CFError was
+# supplied, for example when an expected attribute is missing.
+pub struct SecureEnclaveError
+  getter message : String
+  getter code : Int64
+
+  def initialize(message : String, @code : Int64 = 0_i64)
+    @message = "secure_enclave: #{message}"
+  end
+
+  def to_s : String
+    @message
+  end
+end
+
+impl Error for SecureEnclaveError
+  def message : String
+    @message
+  end
+end
+
+pub struct SecureEnclave
+  # This checks the actual ephemeral creation path, not the CPU model.
+  def self.available? : Bool
+    !SecureEnclaveKey.generate.is_a?(SecureEnclaveError)
+  end
+end
+
+pub struct SecureEnclaveKey
+  @handle : Array(UInt8)
+  @public_bytes : Array(UInt8)
+  getter public_key : EcdsaPublicKey
+
+  private def initialize(@handle : Array(UInt8), @public_bytes : Array(UInt8), @public_key : EcdsaPublicKey)
+  end
+
+  def self.generate : SecureEnclaveKey | SecureEnclaveError
+    null = SecureEnclaveNative.null
+    error = null
+    access = LibEnclaveSecurity.SecAccessControlCreateWithFlags(null, LibEnclaveSecurity.kSecAttrAccessibleWhenUnlockedThisDeviceOnly, 1073741824_u64, pointerof(error))
+    return SecureEnclaveNative.failure("create private-key access control", error) if access.address == 0
+    bits = 256_i32
+    number = LibEnclaveCF.CFNumberCreate(null, 9_i64, pointerof(bits).as(Void*))
+    if number.address == 0
+      LibEnclaveCF.CFRelease(access)
+      return SecureEnclaveError.new("cannot allocate key size")
+    end
+    private_attrs = SecureEnclaveNative.dictionary
+    attrs = SecureEnclaveNative.dictionary
+    if private_attrs.address == 0 || attrs.address == 0
+      SecureEnclaveNative.release(private_attrs)
+      SecureEnclaveNative.release(attrs)
+      LibEnclaveCF.CFRelease(number)
+      LibEnclaveCF.CFRelease(access)
+      return SecureEnclaveError.new("cannot allocate key attributes")
+    end
+    LibEnclaveCF.CFDictionarySetValue(private_attrs, LibEnclaveSecurity.kSecAttrIsPermanent, LibEnclaveCF.kCFBooleanFalse)
+    LibEnclaveCF.CFDictionarySetValue(private_attrs, LibEnclaveSecurity.kSecAttrAccessControl, access)
+    LibEnclaveCF.CFDictionarySetValue(attrs, LibEnclaveSecurity.kSecAttrKeyType, LibEnclaveSecurity.kSecAttrKeyTypeECSECPrimeRandom)
+    LibEnclaveCF.CFDictionarySetValue(attrs, LibEnclaveSecurity.kSecAttrKeySizeInBits, number)
+    LibEnclaveCF.CFDictionarySetValue(attrs, LibEnclaveSecurity.kSecAttrTokenID, LibEnclaveSecurity.kSecAttrTokenIDSecureEnclave)
+    LibEnclaveCF.CFDictionarySetValue(attrs, LibEnclaveSecurity.kSecPrivateKeyAttrs, private_attrs)
+    key = LibEnclaveSecurity.SecKeyCreateRandomKey(attrs, pointerof(error))
+    LibEnclaveCF.CFRelease(attrs)
+    LibEnclaveCF.CFRelease(private_attrs)
+    LibEnclaveCF.CFRelease(number)
+    LibEnclaveCF.CFRelease(access)
+    return SecureEnclaveNative.failure("generate Secure Enclave key", error) if key.address == 0
+    SecureEnclaveNative.release(error)
+    from_native(key)
+  end
+
+  def self.restore(handle : Array(UInt8)) : SecureEnclaveKey | SecureEnclaveError
+    key = SecureEnclaveNative.open(handle)
+    return key if key.is_a?(SecureEnclaveError)
+    from_native(key)
+  end
+
+  private def self.from_native(key : Void*) : SecureEnclaveKey | SecureEnclaveError
+    result = SecureEnclaveNative.read_key(key)
+    return result if result.is_a?(SecureEnclaveError)
+    new(result[0], result[1], result[2])
+  end
+
+  # A copy: callers cannot change the key by changing the returned array.
+  def handle : Array(UInt8)
+    @handle.dup
+  end
+
+  # SEC 1 uncompressed point: 0x04, followed by 32-byte x and y coordinates.
+  def public_bytes : Array(UInt8)
+    @public_bytes.dup
+  end
+
+  def sign(message : Array(UInt8) | String) : Array(UInt8) | SecureEnclaveError
+    key = SecureEnclaveNative.open(@handle)
+    return key if key.is_a?(SecureEnclaveError)
+    bytes = message.is_a?(String) ? Array(UInt8).new(message.bytesize) { |i| message.to_unsafe[i] } : message
+    data = LibEnclaveCF.CFDataCreate(SecureEnclaveNative.null, bytes.to_unsafe, bytes.size.to_i64)
+    if data.address == 0
+      LibEnclaveCF.CFRelease(key)
+      return SecureEnclaveError.new("cannot allocate message data")
+    end
+    error = SecureEnclaveNative.null
+    signature = LibEnclaveSecurity.SecKeyCreateSignature(key, LibEnclaveSecurity.kSecKeyAlgorithmECDSASignatureMessageX962SHA256, data, pointerof(error))
+    LibEnclaveCF.CFRelease(data)
+    LibEnclaveCF.CFRelease(key)
+    return SecureEnclaveNative.failure("sign with Secure Enclave key", error) if signature.address == 0
+    SecureEnclaveNative.release(error)
+    result = SecureEnclaveNative.bytes(signature)
+    LibEnclaveCF.CFRelease(signature)
+    result
+  end
+end
+
+# CF Create and Copy results are owned here; Get results are borrowed and
+# copied before their owner is released. A SecKey passed to read_key is
+# consumed even on an error.
+struct SecureEnclaveNative
+  UTF8 = 0x08000100_u32
+
+  def self.null : Void*
+    Pointer(Void).new(0_u64)
+  end
+
+  def self.release(object : Void*) : Nil
+    LibEnclaveCF.CFRelease(object) unless object.address == 0
+  end
+
+  def self.dictionary : Void*
+    LibEnclaveCF.CFDictionaryCreateMutable(null, 0_i64, pointerof(LibEnclaveCF.kCFTypeDictionaryKeyCallBacks).as(Void*), pointerof(LibEnclaveCF.kCFTypeDictionaryValueCallBacks).as(Void*))
+  end
+
+  def self.failure(what : String, error : Void*) : SecureEnclaveError
+    return SecureEnclaveError.new("#{what}: no CFError supplied") if error.address == 0
+    code = LibEnclaveCF.CFErrorGetCode(error)
+    description = LibEnclaveCF.CFErrorCopyDescription(error)
+    why = description.address == 0 ? "no description" : string(description)
+    release(description)
+    LibEnclaveCF.CFRelease(error)
+    SecureEnclaveError.new("#{what}: #{why} (CFError #{code})", code)
+  end
+
+  def self.string(value : Void*) : String
+    length = LibEnclaveCF.CFStringGetLength(value)
+    capacity = LibEnclaveCF.CFStringGetMaximumSizeForEncoding(length, UTF8) + 1_i64
+    return "description unavailable" if capacity <= 0_i64
+    buffer = Pointer(UInt8).malloc(capacity.to_u64)
+    return "description unavailable" if LibEnclaveCF.CFStringGetCString(value, buffer, capacity, UTF8) == 0_u8
+    size = 0
+    while buffer[size] != 0_u8
+      size = size + 1
+    end
+    String.new(size) { |dest| dest.copy_from(buffer, size) }
+  end
+
+  def self.bytes(data : Void*) : Array(UInt8)
+    length = LibEnclaveCF.CFDataGetLength(data).to_i32
+    ptr = LibEnclaveCF.CFDataGetBytePtr(data)
+    Array(UInt8).new(length) { |i| ptr[i] }
+  end
+
+  def self.open(handle : Array(UInt8)) : Void* | SecureEnclaveError
+    return SecureEnclaveError.new("restore: empty token handle") if handle.empty?
+    token = LibEnclaveCF.CFDataCreate(null, handle.to_unsafe, handle.size.to_i64)
+    name = LibEnclaveCF.CFStringCreateWithCString(null, "toid".to_unsafe, UTF8)
+    attrs = dictionary
+    if token.address == 0 || name.address == 0 || attrs.address == 0
+      release(token)
+      release(name)
+      release(attrs)
+      return SecureEnclaveError.new("restore: cannot allocate token attributes")
+    end
+    LibEnclaveCF.CFDictionarySetValue(attrs, LibEnclaveSecurity.kSecAttrTokenID, LibEnclaveSecurity.kSecAttrTokenIDSecureEnclave)
+    LibEnclaveCF.CFDictionarySetValue(attrs, name, token)
+    empty = LibEnclaveCF.CFDataCreate(null, Pointer(UInt8).new(0_u64), 0_i64)
+    if empty.address == 0
+      LibEnclaveCF.CFRelease(attrs)
+      LibEnclaveCF.CFRelease(name)
+      LibEnclaveCF.CFRelease(token)
+      return SecureEnclaveError.new("restore: cannot allocate key data")
+    end
+    error = null
+    key = LibEnclaveSecurity.SecKeyCreateWithData(empty, attrs, pointerof(error))
+    LibEnclaveCF.CFRelease(empty)
+    LibEnclaveCF.CFRelease(attrs)
+    LibEnclaveCF.CFRelease(name)
+    LibEnclaveCF.CFRelease(token)
+    return failure("restore token handle", error) if key.address == 0
+    release(error)
+    key
+  end
+
+  def self.read_key(key : Void*) : {Array(UInt8), Array(UInt8), EcdsaPublicKey} | SecureEnclaveError
+    attrs = LibEnclaveSecurity.SecKeyCopyAttributes(key)
+    name = LibEnclaveCF.CFStringCreateWithCString(null, "toid".to_unsafe, UTF8)
+    if attrs.address == 0 || name.address == 0
+      release(attrs)
+      release(name)
+      LibEnclaveCF.CFRelease(key)
+      return SecureEnclaveError.new("key attributes or toid name unavailable")
+    end
+    token = LibEnclaveCF.CFDictionaryGetValue(attrs, name)
+    if token.address == 0 || LibEnclaveCF.CFGetTypeID(token) != LibEnclaveCF.CFDataGetTypeID
+      LibEnclaveCF.CFRelease(name)
+      LibEnclaveCF.CFRelease(attrs)
+      LibEnclaveCF.CFRelease(key)
+      return SecureEnclaveError.new("key has no toid token data")
+    end
+    handle = bytes(token)
+    LibEnclaveCF.CFRelease(name)
+    LibEnclaveCF.CFRelease(attrs)
+    public_key = LibEnclaveSecurity.SecKeyCopyPublicKey(key)
+    LibEnclaveCF.CFRelease(key)
+    return SecureEnclaveError.new("cannot copy the enclave public key") if public_key.address == 0
+    error = null
+    data = LibEnclaveSecurity.SecKeyCopyExternalRepresentation(public_key, pointerof(error))
+    LibEnclaveCF.CFRelease(public_key)
+    return failure("export public key", error) if data.address == 0
+    release(error)
+    point = bytes(data)
+    LibEnclaveCF.CFRelease(data)
+    parsed = EcdsaPublicKey.from_point(EcdsaCurve::P256, point)
+    return SecureEnclaveError.new("invalid enclave public key: #{parsed.message}") if parsed.is_a?(EcdsaError)
+    {handle, point, parsed}
+  end
+end

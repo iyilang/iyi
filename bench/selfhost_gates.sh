@@ -6,9 +6,7 @@
 #   bash bench/selfhost_gates.sh
 #
 # Each gate's full output goes to a log under $SELFHOST_GATE_LOGS (default: a
-# fresh temporary directory). A failing gate's last lines are printed: twelve
-# at a desk, where the log is a path away, and $SELFHOST_GATE_TAIL (default
-# 200) under CI, where the runner is gone and the printed lines are all there is.
+# fresh temporary directory), is printed in full, and is retained by CI.
 # Exit status is 0 only when every gate exits 0.
 set -u
 
@@ -18,6 +16,21 @@ mkdir -p "$LOGDIR"
 cd "$REPO"
 . "$REPO/bench/lib/host.sh" || exit 1
 require_test_host || exit 1
+
+head="$(git rev-parse HEAD)" || exit 1
+identity="$LOGDIR/run-${head}-${HOST_ID}-${GITHUB_RUN_ATTEMPT:-local}.txt"
+{
+  printf 'checked-out-head=%s\nhost=%s\n' "$head" "$HOST_ID"
+  if [ -n "${SELFHOST_SOURCE_SHA:-}" ]; then
+    printf 'source-head=%s\n' "$SELFHOST_SOURCE_SHA"
+  fi
+  printf 'run-id=%s\nrun-attempt=%s\n' "${GITHUB_RUN_ID:-local}" "${GITHUB_RUN_ATTEMPT:-local}"
+} > "$identity" || exit 1
+cat "$identity"
+if [ "${GITHUB_ACTIONS:-}" = true ] && [ "$head" != "${GITHUB_SHA:-}" ]; then
+  echo "checked-out HEAD differs from the workflow revision" >&2
+  exit 1
+fi
 
 gates=()
 for gate in "$REPO"/bench/selfhost_*_exercise.sh; do

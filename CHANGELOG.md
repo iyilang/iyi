@@ -15,6 +15,13 @@
   and imports, and generates Mach-O code signatures. The Mach-O gate runs
   linked sample programs, checks their signatures and library dependencies,
   and compares repeated links byte for byte. The default backend is unchanged.
+- **The native AArch64 backend selects instructions, allocates registers and emits Mach-O objects in iyi.**
+  Its component gates compare instruction bytes, object metadata, allocation
+  and spill behavior on Linux, macOS and Windows. macOS arm64 also runs the
+  emitted programs against hosted builds; other hosts name those execution
+  limits. CI retains each gate's full log with its source and checkout
+  revisions. The hosted LLVM backend remains the default, and this component
+  does not establish a stage2/stage3 fixed point or LLVM-free PE/COFF output.
 - **The x86-64 encoder and ABI tables are written in iyi.**
   `compiler/native/amd64` encodes instruction forms and relocations and
   supplies the System V and Win64 argument and return conventions.

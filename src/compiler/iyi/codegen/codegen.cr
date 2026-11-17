@@ -3342,6 +3342,7 @@ module Iyi
       llvm_value_type = llvm_type(type)
       size = size_t(llvm_typer.size_of(llvm_value_type))
       align = llvm_typer.align_of(llvm_value_type)
+      align = 8_u32 if llvm_typer.uint64x2_storage?(llvm_value_type) && align > 8
       if fresh
         memcpy(dest, src, size, align, int1(0))
       else

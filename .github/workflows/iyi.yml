@@ -2003,6 +2003,19 @@ jobs:
           echo "$RUNNER_TEMP/py/bin" >> "$GITHUB_PATH"
       - name: Python's cryptography and Pillow, for the oracles
         run: python3 -m pip install -q cryptography pillow
+      # Go, as on Linux: std/http's NO_PROXY table is held against Go's
+      # net/http, std/user's reader against Go's os/user, and std/acme and
+      # std/autocert build Pebble with it. Without this step the job took the
+      # Go on the runner's PATH, the owner's /usr/local/go at go1.25.2, whose
+      # net/url refused an IPv4-mapped IPv6 literal in brackets
+      # (golang/go#75815, put right in 1.25.4): it said "unparsed" for
+      # http://[::ffff:127.0.0.1], where proxy_for and Linux's go1.27.4 say
+      # direct (job 133974766871). It installs into the runner's own tool
+      # cache; no `go.sum` here to key a cache on.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
       - name: The module exercises of this shard, on darwin
         run: bash bench/std_siblings.sh ${{ matrix.shard }} 4
 

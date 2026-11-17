@@ -186,8 +186,8 @@ pub struct SecureEnclaveKey
     algorithm = SecureEnclaveNative.constant("kSecKeyAlgorithmECDSASignatureMessageX962SHA256")!
     key = SecureEnclaveNative.open(@handle)
     return key if key.is_a?(SecureEnclaveError)
-    bytes = message.is_a?(String) ? Array(UInt8).new(message.bytesize) { |i| message.to_unsafe[i] } : message
-    data = LibEnclaveCF.CFDataCreate(SecureEnclaveNative.null, bytes.to_unsafe, bytes.size.to_i64)
+    size = message.is_a?(String) ? message.bytesize : message.size
+    data = LibEnclaveCF.CFDataCreate(SecureEnclaveNative.null, message.to_unsafe, size.to_i64)
     if data.address == 0
       LibEnclaveCF.CFRelease(key)
       return SecureEnclaveError.new("cannot allocate message data")

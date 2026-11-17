@@ -144,6 +144,70 @@ struct Symbol
   end
 end
 
+# Two independent wrapping UInt64 lanes. Loads and stores require an
+# eight-byte-aligned pointer, not a sixteen-byte-aligned one.
+struct UInt64x2
+  @[Primitive(:uint64x2_new)]
+  def self.new(low : UInt64, high : UInt64) : UInt64x2
+  end
+
+  @[Primitive(:uint64x2_splat)]
+  def self.splat(value : UInt64) : UInt64x2
+  end
+
+  @[Primitive(:uint64x2_load)]
+  def self.load(pointer : Pointer(UInt64)) : UInt64x2
+  end
+
+  @[Primitive(:uint64x2_store)]
+  def store(pointer : Pointer(UInt64)) : Nil
+  end
+
+  @[Primitive(:uint64x2_low)]
+  def low : UInt64
+  end
+
+  @[Primitive(:uint64x2_high)]
+  def high : UInt64
+  end
+
+  @[Primitive(:uint64x2_xor)]
+  def ^(other : UInt64x2) : UInt64x2
+  end
+
+  @[Primitive(:uint64x2_and)]
+  def &(other : UInt64x2) : UInt64x2
+  end
+
+  @[Primitive(:uint64x2_or)]
+  def |(other : UInt64x2) : UInt64x2
+  end
+
+  @[Primitive(:uint64x2_not)]
+  def ~ : UInt64x2
+  end
+
+  @[Primitive(:uint64x2_shl)]
+  def unsafe_shl(amount : Int32) : UInt64x2
+  end
+
+  @[Primitive(:uint64x2_shr)]
+  def unsafe_shr(amount : Int32) : UInt64x2
+  end
+
+  @[Primitive(:uint64x2_add)]
+  def &+(other : UInt64x2) : UInt64x2
+  end
+
+  @[Primitive(:uint64x2_sub)]
+  def &-(other : UInt64x2) : UInt64x2
+  end
+
+  @[Primitive(:uint64x2_mul)]
+  def &*(other : UInt64x2) : UInt64x2
+  end
+end
+
 # A raw address: `Pointer(T).malloc(n)` is `n` elements of untyped memory,
 # `[]` and `[]=` read and write them, nothing checks the bounds.
 struct Pointer(T)

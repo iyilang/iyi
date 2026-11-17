@@ -136,6 +136,10 @@ module Iyi
       @llvm_context.int(8 * type.bytes)
     end
 
+    private def create_llvm_type(type : UInt64x2Type, wants_size)
+      @llvm_context.int64.vector(2)
+    end
+
     private def create_llvm_type(type : FloatType, wants_size)
       type.bytes == 4 ? @llvm_context.float : @llvm_context.double
     end
@@ -669,6 +673,27 @@ module Iyi
         1_u32
       else
         @layout.abi_alignment(type)
+      end
+    end
+
+    # Arena objects can start at an eight-byte boundary even when LLVM's
+    # vector ABI alignment is sixteen. Include inline aggregates: their
+    # copies can start at the same object address as a vector field.
+    def uint64x2_storage?(type : LLVM::Type) : Bool
+      case type.kind
+      when .vector?
+        type.vector_size == 2 && type.element_type.kind.integer? && type.element_type.int_width == 64
+      when .array?, .struct?
+        cache = @uint64x2_storage ||= {} of LLVM::Type => Bool
+        return cache[type] if cache.has_key?(type)
+        found = if type.kind.array?
+                  uint64x2_storage?(type.element_type)
+                else
+                  type.struct_element_types.any? { |element| uint64x2_storage?(element) }
+                end
+        cache[type] = found
+      else
+        false
       end
     end
 

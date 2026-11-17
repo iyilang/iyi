@@ -1627,6 +1627,10 @@ module Iyi
   class CharType < PrimitiveType
   end
 
+  # A two-lane integer value, lowered directly to an LLVM vector.
+  class UInt64x2Type < PrimitiveType
+  end
+
   class IntegerType < PrimitiveType
     getter rank : Int32
     getter kind : NumberKind

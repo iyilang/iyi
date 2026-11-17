@@ -608,6 +608,16 @@ each other exactly as Crystal's twelve do, so `1 + 1_i64` still works. Whether
 iyi keeps that or takes Go's line and demands an explicit conversion is open,
 and cheaper to answer now that the block is small enough to read.
 
+`UInt64x2` is a 16-byte value of two independent `UInt64` lanes. Its
+constructor, splat, eight-aligned load and store, lane accessors, bitwise
+operations, masked shifts and wrapping arithmetic lower to LLVM's
+`<2 x i64>` on each target. Its lanes do not enter heap pointer maps, though
+a stack spill can retain an object when the conservative scan finds an
+address in its bits. It is not allowed in a C `fun` or `lib` signature.
+On wasm32, `flag?(:simd128)` is set when `--mattr +simd128` enables that
+target feature. The type belongs to iyi's prelude and is unavailable to a
+`--crystal` program.
+
 Three decisions made it that small, and each is a thing 0.1.0 does not have
 rather than a trick. **There is no `IO`**: `puts` writes to fd 1 and `to_s`
 returns a `String`, which removes buffering, encodings and the class hierarchy

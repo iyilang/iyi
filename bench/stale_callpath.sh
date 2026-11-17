@@ -154,6 +154,79 @@ PYEOF
   else
     echo "    a second normal build differs from the first too: this linker's output is not reproducible here" >&2
   fi
+  if [ "${LINK_VARIATION_REPORTED:-0}" -eq 0 ]; then
+    LINK_VARIATION_REPORTED=1
+    link_variation_report "$source"
+  fi
+}
+
+# Where a linker's variation enters, said once: two normal builds at the same
+# -o with their debug databases kept, and two emitted object files. Equal
+# objects and different images put the variation in the link or its database;
+# different objects put it in codegen.
+link_variation_report() {
+  local source="$1" suffix="" objext="o"
+  if [ "$WINDOWS" -eq 1 ]; then suffix=".exe"; objext="obj"; fi
+  local dir="$WORK/variation" tag
+  rm -rf "$dir"; mkdir -p "$dir"
+  for tag in a b; do
+    rm -rf "$CACHE"/*
+    "$IYI" build -o "$dir/image$suffix" "$source" >/dev/null 2>&1 || true
+    cp "$dir/image$suffix" "$dir/image_$tag$suffix" 2>/dev/null || true
+    [ ! -f "$dir/image.pdb" ] || cp "$dir/image.pdb" "$dir/image_$tag.pdb"
+    rm -rf "$CACHE"/*
+    "$IYI" build --emit obj -o "$dir/emit" "$source" >/dev/null 2>&1 || true
+    cp "$dir/emit.$objext" "$dir/emit_$tag.$objext" 2>/dev/null || true
+  done
+  {
+    echo "    variation report, two normal builds of $(basename "$source") at one -o:"
+    if [ -f "$dir/image_a$suffix" ] && [ -f "$dir/image_b$suffix" ]; then
+      echo "      images differ in $(cmp -l "$dir/image_a$suffix" "$dir/image_b$suffix" 2>/dev/null | wc -l | tr -d ' ') bytes"
+    fi
+    if [ -f "$dir/image_a.pdb" ] && [ -f "$dir/image_b.pdb" ]; then
+      echo "      debug databases: $(wc -c < "$dir/image_a.pdb" | tr -d ' ') and $(wc -c < "$dir/image_b.pdb" | tr -d ' ') bytes, differing in $(cmp -l "$dir/image_a.pdb" "$dir/image_b.pdb" 2>/dev/null | wc -l | tr -d ' ') bytes"
+    else
+      echo "      no debug database was written beside the image"
+    fi
+    if [ -f "$dir/emit_a.$objext" ] && [ -f "$dir/emit_b.$objext" ]; then
+      echo "      emitted objects: $(wc -c < "$dir/emit_a.$objext" | tr -d ' ') bytes, differing in $(cmp -l "$dir/emit_a.$objext" "$dir/emit_b.$objext" 2>/dev/null | wc -l | tr -d ' ') bytes"
+    else
+      echo "      no object file was emitted ($(ls "$dir" | tr '\n' ' '))"
+    fi
+  } >&2
+}
+
+# Whether the stale build's image is the normal build's. Byte for byte, except
+# on Windows: there link.exe's own output varies between two normal builds of
+# one program at one -o even with /Brepro (the PE timestamp and the debug
+# directory's hash-derived fields), so the stale build is held to adding no
+# variation of its own: every byte where it differs from the first normal
+# build must also differ between two normal builds. Windows links are not
+# claimed reproducible; this claims only that the stale build changes none.
+link_images_match() {
+  local first="$1" second="$2" source="$3" status=0
+  cmp "$first" "$second" >/dev/null 2>&1 && return 0
+  [ "$WINDOWS" -eq 1 ] || return 1
+  [ ! -f "$first.exe" ] || first="$first.exe"
+  [ ! -f "$second.exe" ] || second="$second.exe"
+  cp "$second" "$WORK/stale_image.exe"
+  rm -rf "$CACHE"/*
+  "$IYI" build -o "$second" "$source" >/dev/null 2>&1 || status=1
+  if [ "$status" -eq 0 ]; then
+    "$PY" - "$first" "$second" "$WORK/stale_image.exe" >&2 <<'PYEOF' || status=1
+import sys
+normal, again, stale = (open(path, "rb").read() for path in sys.argv[1:4])
+if not (len(normal) == len(again) == len(stale)):
+    sys.exit(1)
+noise = {i for i in range(len(normal)) if normal[i] != again[i]}
+changed = [i for i in range(len(normal)) if normal[i] != stale[i]]
+extra = [i for i in changed if i not in noise]
+print(f"    link.exe varies in {len(noise)} bytes between two normal builds; the stale build differs from the first in {len(changed)}, {len(extra)} outside that variation")
+sys.exit(1 if extra else 0)
+PYEOF
+  fi
+  [ "$status" -eq 0 ] || cp "$WORK/stale_image.exe" "$second"
+  return "$status"
 }
 
 run_link() {
@@ -177,7 +250,7 @@ run_link() {
     rm -rf "$CACHE"/*
     "$IYI" build --stale-key "$WORK/stale.key" -o "$out" "$prog"
 
-    if cmp "$saved" "$out" >/dev/null 2>&1; then
+    if link_images_match "$saved" "$out" "$prog"; then
       echo "  Link cmp OK: $name"
     else
       echo "  Link cmp MISMATCH: $name" >&2
@@ -202,7 +275,7 @@ run_link() {
   rm -rf "$CACHE"/*
   "$IYI" build --stale-key "$WORK/stale.key" -o "$out" "$fixture"
 
-  if cmp "$saved" "$out" >/dev/null 2>&1; then
+  if link_images_match "$saved" "$out" "$fixture"; then
     echo "  Link cmp OK: quoted ldflags fixture"
   else
     echo "  Link cmp MISMATCH: quoted ldflags fixture" >&2
@@ -216,7 +289,11 @@ run_link() {
     echo "Link verification FAILED: $mismatches mismatches out of $total" >&2
     return 1
   fi
-  echo "Link cmp PASSED: all $total programs (5 C2 + quoted fixture) matched byte-for-byte at same -o"
+  if [ "$WINDOWS" -eq 1 ]; then
+    echo "Link cmp PASSED: all $total programs (5 C2 + quoted fixture): the stale build differs from a normal one only where link.exe differs between two normal builds"
+  else
+    echo "Link cmp PASSED: all $total programs (5 C2 + quoted fixture) matched byte-for-byte at same -o"
+  fi
 
   # 3. Pkg-config shim: verify exactly one invocation per stale build
   if [ "$WINDOWS" -eq 1 ]; then

@@ -164,12 +164,15 @@ if [ "$WINDOWS" -eq 1 ]; then
   r1_unix="$(cygpath -u "$WORK/basic/other_test.iyi")"
   r1_drive="$(cygpath -m "$WORK/basic/other_test.iyi")"
   for spelling in "$r1_unix" "$r1_drive"; do
-    r1_spelling="$(run_json "$WORK/basic" "$spelling")"
-    if [ "$(printf '%s' "$r1_spelling" | json_cached)" != 1 ]; then
-      printf 'row 1 path spelling %s details: %s\n' "$spelling" "$r1_spelling" >&2
-      (cd "$WORK/basic" && "$IYI" test --cached --explain "$spelling") >&2 || true
-    fi
-    expect_eq "$(printf '%s' "$r1_spelling" | json_cached)" 1 "row 1 path spelling $spelling hits"
+    # `--explain` is the run that is checked, so a miss prints its own reason.
+    r1_explain="$(cd "$WORK/basic" && "$IYI" test --cached --explain "$spelling" 2>&1)" || true
+    case "$r1_explain" in
+      *"other_test.iyi: hit from local"*) ;;
+      *)
+        printf 'row 1 path spelling %s did not hit:\n%s\n' "$spelling" "$r1_explain" >&2
+        fail "row 1 path spelling $spelling hits"
+        ;;
+    esac
   done
 fi
 rm -rf "$CACHE/tests-v1"

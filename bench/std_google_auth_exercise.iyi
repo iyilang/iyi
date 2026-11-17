@@ -66,8 +66,12 @@ puts "RS256 JWT grant and service-account token cache: ok"
 
 local = service.signer.or_panic
 iam = creds.signer(origin).or_panic
-check(local.sign("signBlob test").or_panic == iam.sign("signBlob test").or_panic, "IAM signBlob signature")
+remote = iam.sign("signBlob test")
+check(!remote.is_a?(GoogleAuthError) && local.sign("signBlob test").or_panic == remote, "IAM signBlob signature")
 check(counter(client, origin, "iam") == 1_i64, "IAM request count")
+wrong_path = origin + "/v1/projects/-/serviceAccounts/other%40example.com:signBlob"
+wrong = client.post(wrong_path, "{}", {"Authorization" => "Bearer metadata-token"}).or_panic
+check(wrong.status == 404 && counter(client, origin, "iam_bad_path") == 1_i64, "IAM rejects wrong signing account")
 puts "IAM signBlob matches the service-account RSA signer: ok"
 
 ENV["GOOGLE_APPLICATION_CREDENTIALS"] = work + "/service-account.json"

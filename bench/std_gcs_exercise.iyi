@@ -79,6 +79,18 @@ check(gcs.signed_url("GET", "obj", signer, 604801, now).is_a?(GcsError), "expiry
 check(GcsV4.encode("!'()* /é") == "%21%27%28%29%2A%20%2F%C3%A9", "RFC3986 reserved bytes")
 default_port = GcsV4.prepare("GET", "https://storage.googleapis.com:443", "test-bucket", "test-object", vector_signer.email, 10, Time.parse_rfc3339("2019-02-01T09:00:00Z").to_unix).or_panic
 check(default_port.canonical_request == vectors[0].as_h["expectedCanonicalRequest"].as_s, "default HTTPS port normalization")
+["GET", "PUT", "HEAD", "DELETE"].each do |method|
+  check(gcs.signed_url(method, "", signer, 60, now).is_a?(GcsError), "empty object signed " + method)
+  check(GcsV4.prepare(method, origin, "test-bucket", "", signer.email, 60, now).is_a?(GcsError), "empty canonical object " + method)
+end
+bucket_url = GcsV4.prepare("GET", origin, "test-bucket", nil, signer.email, 60, now).or_panic
+check(bucket_url.canonical_request.includes?("\n/test-bucket\n"), "nil object canonical bucket path")
+check(gcs.stat("").is_a?(GcsError), "empty stat object")
+check(gcs.read("").is_a?(GcsError), "empty read object")
+check(gcs.write("", "x").is_a?(GcsError), "empty write object")
+check(gcs.patch("").is_a?(GcsError), "empty patch object")
+check(gcs.delete("").is_a?(GcsError), "empty delete object")
+puts "empty object names refused; nil retains the explicit bucket path: ok"
 headers = {"content-length" => "12"}
 put_url = gcs.signed_url("PUT", "signed/a !'()*.bin", signer, 60, now, headers).or_panic
 # HTTPClient writes Content-Length from the body; it disallows setting it.
@@ -126,8 +138,21 @@ check(bad_crc.is_a?(GcsError) && bad_crc.message.includes?("CRC32C"), "CRC misma
 wrong_delete = gcs.delete(name, if_generation_match: generation, if_metageneration_match: "1")
 check(wrong_delete.is_a?(GcsError) && wrong_delete.status == 412, "delete metageneration 412")
 check(gcs.delete(name, if_generation_match: generation, if_metageneration_match: "2").or_panic.status == 204, "conditional delete")
+check(counter(client, origin, "anonymous") > 0_i64 && counter(client, origin, "authorized") == 0_i64, "custom endpoint omits bearer")
+check(counter(client, origin, "token") == 0_i64, "anonymous custom endpoint makes no token request")
 ENV["STORAGE_EMULATOR_HOST"] = origin
-check(GcsClient.new("test-bucket", creds).endpoint == origin, "emulator endpoint")
+emulator = GcsClient.new("test-bucket", creds)
+check(emulator.endpoint == origin, "emulator endpoint")
+check(emulator.list("m/").or_panic.status == 200, "anonymous emulator request")
 ENV.delete("STORAGE_EMULATOR_HOST")
+check(counter(client, origin, "authorized") == 0_i64 && counter(client, origin, "token") == 0_i64, "emulator omits bearer and token request")
+authenticated = GcsClient.new("test-bucket", creds, origin, authenticate_custom_endpoint: true)
+check(authenticated.list("m/").or_panic.status == 200, "custom HTTPS authentication opt-in")
+check(counter(client, origin, "authorized") == 1_i64 && counter(client, origin, "token") == 1_i64, "HTTPS opt-in sends bearer")
+insecure = GcsClient.new("test-bucket", creds, "http://" + config["metadata_host"].as_s, authenticate_custom_endpoint: true)
+refused = insecure.list
+check(refused.is_a?(GcsError) && refused.message.includes?("HTTPS"), "plaintext authenticated endpoint refused")
+check(counter(client, origin, "authorized") == 1_i64 && counter(client, origin, "token") == 1_i64, "plaintext refusal precedes network and token")
+puts "custom endpoints anonymous by default; explicit HTTPS authentication; plaintext refused: ok"
 puts "JSON stat, read, write, patch, delete, pagination, preconditions and CRC32C: ok"
 puts "ALL CHECKS PASSED"

@@ -78,4 +78,5 @@ PY
 echo '== mutation proofs'
 prove_broken 'JWT exp' 'JWT grant' 'json.field("exp", now + 3600_i64)' 'json.field("exp", now + 3599_i64)' || exit 1
 prove_broken 'cache headroom' 'cache headroom request count' 'now < @cached_until' 'now <= @cached_until' || exit 1
+prove_broken 'IAM resource path' 'IAM signBlob signature' '"/v1/projects/-/serviceAccounts/"' '"/v1/projects/-/serviceAccount/"' || exit 1
 echo 'std/google_auth exercise holds'

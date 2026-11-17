@@ -1,8 +1,10 @@
 # Google Cloud Storage's JSON API and V4 RSA signed URLs. Endpoint and HTTP
 # client are injectable; STORAGE_EMULATOR_HOST supplies an endpoint when
 # the caller did not. Object names and query fields are encoded as UTF-8
-# bytes under RFC 3986. Generation values stay strings, including "0".
-# A media read checks x-goog-hash's CRC32C when the response carries it.
+# bytes under RFC 3986. Custom endpoints are anonymous unless the caller
+# opts in to authentication; credentials are sent only over HTTPS.
+# Generation values stay strings, including "0". A media read checks
+# x-goog-hash's CRC32C when the response carries it.
 
 @[Unsafe("CRC32C's four bytes are copied into a string for base64 encoding")]
 module std/gcs
@@ -78,6 +80,7 @@ pub struct GcsV4
                    query : Hash(String, String) = {} of String => String) : GcsSignedRequest | GcsError
     return GcsError.new("expiry must be between 1 and #{MAX_EXPIRY} seconds") if expires <= 0 || expires > MAX_EXPIRY
     return GcsError.new("empty bucket or signing identity") if bucket.empty? || email.empty?
+    return GcsError.new("object name is empty") if object && object.empty?
     return GcsError.new("unsupported signed URL method #{method}") unless ["GET", "PUT", "HEAD", "DELETE", "POST"].includes?(method)
     uri = URI.parse?(endpoint)
     return GcsError.new("invalid endpoint") unless uri
@@ -185,9 +188,13 @@ pub class GcsClient
   getter endpoint : String
   getter credentials : GoogleCredentials
   @client : HTTPClient
+  @authenticate : Bool
 
-  def initialize(@bucket : String, @credentials : GoogleCredentials, endpoint : String? = nil, client : HTTPClient? = nil)
-    @endpoint = (endpoint || ENV["STORAGE_EMULATOR_HOST"]? || "https://storage.googleapis.com").rstrip('/')
+  def initialize(@bucket : String, @credentials : GoogleCredentials, endpoint : String? = nil, client : HTTPClient? = nil,
+                 authenticate_custom_endpoint : Bool = false)
+    emulator = ENV["STORAGE_EMULATOR_HOST"]?
+    @endpoint = (endpoint || emulator || "https://storage.googleapis.com").rstrip('/')
+    @authenticate = (endpoint.nil? && emulator.nil?) || authenticate_custom_endpoint
     @client = client || @credentials.client
   end
 
@@ -209,9 +216,13 @@ pub class GcsClient
 
   private def request(method : String, path : String, fields : Hash(String, String), body : String = "",
                       content_type : String? = nil) : Response | GcsError
-    token = @credentials.access_token
-    return GcsError.new(token.message, token.status) if token.is_a?(GoogleAuthError)
-    headers = {"Authorization" => "Bearer " + token}
+    headers = {} of String => String
+    if @authenticate
+      return GcsError.new("authenticated requests require an HTTPS endpoint") unless GoogleAuthBytes.https?(@endpoint)
+      token = @credentials.access_token
+      return GcsError.new(token.message, token.status) if token.is_a?(GoogleAuthError)
+      headers["Authorization"] = "Bearer " + token
+    end
     headers["Content-Type"] = content_type if content_type
     got = @client.request(method, @endpoint + path + query(fields), headers, body, redirects: 0, decompress: false)
     response = GoogleAuthBytes.response(got, "#{method} object")
@@ -220,10 +231,12 @@ pub class GcsClient
   end
 
   def stat(name : String, if_generation_match : String? = nil, if_metageneration_match : String? = nil) : Response | GcsError
+    return GcsError.new("object name is empty") if name.empty?
     request("GET", object_path(name), conditions(if_generation_match, if_metageneration_match))
   end
 
   def read(name : String, if_generation_match : String? = nil, if_metageneration_match : String? = nil) : Response | GcsError
+    return GcsError.new("object name is empty") if name.empty?
     fields = conditions(if_generation_match, if_metageneration_match)
     fields["alt"] = "media"
     response = request("GET", object_path(name), fields)
@@ -238,6 +251,7 @@ pub class GcsClient
 
   def write(name : String, bytes : String, content_type : String = "application/octet-stream",
             if_generation_match : String? = nil, if_metageneration_match : String? = nil) : Response | GcsError
+    return GcsError.new("object name is empty") if name.empty?
     fields = conditions(if_generation_match, if_metageneration_match)
     fields["uploadType"] = "media"
     fields["name"] = name
@@ -248,6 +262,7 @@ pub class GcsClient
             metadata : Hash(String, String)? = nil, if_generation_match : String? = nil,
             if_metageneration_match : String? = nil, cache_control : String? = nil,
             custom_time : String? = nil) : Response | GcsError
+    return GcsError.new("object name is empty") if name.empty?
     body = JSON.build do |json|
       json.object do
         json.field("contentType", content_type) if content_type
@@ -263,6 +278,7 @@ pub class GcsClient
   end
 
   def delete(name : String, if_generation_match : String? = nil, if_metageneration_match : String? = nil) : Response | GcsError
+    return GcsError.new("object name is empty") if name.empty?
     request("DELETE", object_path(name), conditions(if_generation_match, if_metageneration_match))
   end
 

@@ -202,6 +202,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.answer(400, "invalid JWT grant")
             return self.answer(200, {"access_token": "service-token", "expires_in": 3600})
         if path.endswith(":signBlob") and self.command == "POST":
+            expected_path = "/v1/projects/-/serviceAccounts/" + encode(EMAIL) + ":signBlob"
+            if path != expected_path:
+                counts["iam_bad_path"] = counts.get("iam_bad_path", 0) + 1
+                return self.answer(404, "unknown signing account")
             counts["iam"] = counts.get("iam", 0) + 1
             if self.headers.get("Authorization") != "Bearer metadata-token":
                 return self.answer(401)
@@ -233,8 +237,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self.answer(204)
             return self.answer(200, entry["body"], {"x-goog-hash": "crc32c=" + crc32c(entry["body"]),
                                                    "x-goog-generation": entry["generation"]})
-        if self.headers.get("Authorization") not in ("Bearer metadata-token", "Bearer service-token"):
-            return self.answer(401, "bearer required")
+        authorization = self.headers.get("Authorization")
+        if authorization is None:
+            counts["anonymous"] = counts.get("anonymous", 0) + 1
+        elif authorization in ("Bearer metadata-token", "Bearer service-token"):
+            counts["authorized"] = counts.get("authorized", 0) + 1
+        else:
+            return self.answer(401, "invalid bearer")
         match = re.fullmatch(r"/(upload/)?storage/v1/b/([^/]+)/o(?:/(.*))?", path)
         if not match:
             return self.answer(404, "unknown path")

@@ -81,4 +81,6 @@ prove_broken 'RFC3986 encoding' 'canonical vector: Simple GET' 'URI.encode_path_
 prove_broken 'scope date' 'canonical vector: Simple GET' 'scope = day + "/auto/storage/goog4_request"' 'scope = "20000101/auto/storage/goog4_request"' || exit 1
 prove_broken 'generation precondition name' 'create-only precondition 412' 'fields["ifGenerationMatch"] = generation if generation' 'fields["ifGenerationWrong"] = generation if generation' || exit 1
 prove_broken 'metageneration precondition name' 'stale metageneration 412' 'fields["ifMetagenerationMatch"] = metageneration if metageneration' 'fields["ifMetagenerationWrong"] = metageneration if metageneration' || exit 1
+prove_broken 'custom endpoint authentication' 'custom endpoint omits bearer' '@authenticate = (endpoint.nil? && emulator.nil?) || authenticate_custom_endpoint' '@authenticate = true' || exit 1
+prove_broken 'empty object capability' 'empty object signed GET' 'return GcsError.new("object name is empty") if object && object.empty?' 'return GcsError.new("object name is empty") if false' || exit 1
 echo 'std/gcs exercise holds'

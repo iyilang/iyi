@@ -106,6 +106,7 @@ ALLOWED_PATHS: list[tuple[str, str]] = [
     # flags, naming, and linker command generation against the frontend iyi is
     # still bootstrapped from.
     (r"^bench/selfhost_platform_exercise\.sh$", "the frontend the selfhost platform support is checked against"),
+    (r"^spec/compiler/stale/predefined_constants_spec\.cr$", "predefined constants in the Crystal module, tested for omission when unread"),
 ]
 
 # Lines that name Crystal legitimately inside a file that is otherwise iyi's.

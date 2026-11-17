@@ -112,6 +112,29 @@ check("an ordinary prelude change does not select component-only jobs",
       not {"selfhost", "selfhost-darwin", "selfhost-windows", "selfhost-linux-arm64"} & jobs,
       f"{reason}: {sorted(jobs)}")
 
+stale_jobs = {
+    "iyi", "compiler-specs", "stale-rg3", "stale-callpath", "stale-equivalence", "stale-fresh",
+    "stale-darwin", "stale-darwin-gates", "stale-darwin-fresh",
+    "stale-windows", "stale-windows-gates", "stale-windows-fresh",
+}
+for changed in [
+    "src/compiler/iyi/stale/check.cr",
+    "src/compiler/iyi/semantic/effects.cr",
+    "src/compiler/iyi/semantic/observers.cr",
+    "src/compiler/iyi/build_inputs.cr",
+    "src/compiler/iyi/command/test.cr",
+    "src/std/observe.iyi",
+    "spec/compiler/stale/check_spec.cr",
+    "bench/" + "stale_" + "tests.sh",
+]:
+    reason, jobs = planned(changed)
+    check(f"{changed} selects stale checks on all platforms",
+          stale_jobs <= jobs, f"{reason}: {sorted(jobs)}")
+
+reason, jobs = planned("src/compiler/iyi/parser.cr")
+check("ordinary code selects RG3 without all native stale jobs",
+      "stale-rg3" in jobs and "stale-windows" not in jobs, f"{reason}: {sorted(jobs)}")
+
 print()
 print("== a workflow and a bench directory of this exercise's own")
 

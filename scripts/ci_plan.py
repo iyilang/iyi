@@ -80,6 +80,23 @@ FAST = ["build", "iyi", "stale-rg3", "compiler-specs", "stdlib-specs", "targets"
 # (`src/compiler/`), and the bench files and fixtures they read. A change to
 # any of those selects all three hosts, whatever else it touches.
 SELFHOST = ["selfhost", "selfhost-darwin", "selfhost-windows", "selfhost-linux-arm64"]
+
+# Changes to a stale input must exercise the same acceptance, gates and
+# fresh-runner audit on each native platform, even for a bench-only PR.
+STALE_JOBS = {
+    "iyi", "compiler-specs", "stale-rg3", "stale-callpath", "stale-equivalence", "stale-fresh",
+    "stale-darwin", "stale-darwin-gates", "stale-darwin-fresh",
+    "stale-windows", "stale-windows-gates", "stale-windows-fresh",
+}
+STALE_FILES = {
+    "src/compiler/iyi/semantic/effects.cr",
+    "src/compiler/iyi/semantic/observers.cr",
+    "src/compiler/iyi/build_inputs.cr",
+    "src/compiler/iyi/command/test.cr",
+    "src/std/observe.iyi",
+}
+STALE_PREFIXES = ("src/compiler/iyi/stale/", "spec/compiler/stale/", "bench/stale_")
+
 # Not selected by this script: `plan` is the script, `result` reads every
 # selected job's outcome, and `release` gates itself on a `v*` tag.
 NOT_PLANNED = {"plan", "result", "release"}
@@ -202,6 +219,11 @@ def is_selfhost(path):
     return ((path.startswith("src/compiler/") and path.endswith((".iyi", ".ir")))
             or path.startswith(("bench/selfhost_", "bench/native_", "bench/fixtures/"))
             or path == "bench/lib/host.sh")
+
+
+def is_stale(path):
+    return path in STALE_FILES or path.startswith(STALE_PREFIXES)
+
 
 def code(text):
     """*text* without its whole-line comments, in YAML, shell and Python alike."""

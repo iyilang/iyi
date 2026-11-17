@@ -12330,11 +12330,25 @@ end
 # entries are reached through it.
 {% if !flag?(:wasm32) && !flag?(:win32) %}
   class IyiEnvironTable
-    @[UnsafeReach("written only by std/env's writes, one at a time (`ENV.writing`), each installing a whole new table made in the shared heap")]
+    @[UnsafeReach("written only by the environment's writers, one at a time (`IyiEnvironTable.writing`), each installing a whole new table made in the shared heap")]
     @@held = Pointer(UInt8*).new(0_u64)
+
+    # One writer at a time - std/env's `[]=` and `delete`, and
+    # `__iyi_env_forget` - (SPEC.md III.4.5): a write reads the table, copies
+    # it with its change and installs the copy, and two doing that at once
+    # each started from the same table, so the second install dropped the
+    # first's change.
+    WRITER = Atomic(Int32).new(0)
 
     def self.hold(entries : UInt8**) : Nil
       @@held = entries
+    end
+
+    def self.writing(&) : Nil
+      until WRITER.compare_and_set(0, 1)[1]
+      end
+      defer WRITER.set(0)
+      yield
     end
   end
 
@@ -12359,24 +12373,35 @@ def __iyi_env_forget(name : String) : Nil
   {% if flag?(:win32) %}
     __iyi_win_env_unset(name.to_unsafe, name.bytesize)
   {% elsif !flag?(:wasm32) %}
-    table = __iyi_environ
-    return if table.address == 0_u64
-    length = name.bytesize
-    bytes = name.to_unsafe
-    index = 0
-    kept = 0
-    while (entry = table[index]).address != 0_u64
-      offset = 0
-      while offset < length && entry[offset] == bytes[offset]
-        offset = offset + 1
+    IyiEnvironTable.writing do
+      IyiCross.shared do
+        table = __iyi_environ
+        unless table.address == 0_u64
+          length = name.bytesize
+          bytes = name.to_unsafe
+          count = 0
+          while table[count].address != 0_u64
+            count = count + 1
+          end
+          fresh = Pointer(UInt8*).malloc((count + 1).to_u64)
+          index = 0
+          kept = 0
+          while (entry = table[index]).address != 0_u64
+            offset = 0
+            while offset < length && entry[offset] == bytes[offset]
+              offset = offset + 1
+            end
+            unless offset == length && entry[length] == 61_u8
+              fresh[kept] = entry
+              kept = kept + 1
+            end
+            index = index + 1
+          end
+          fresh[kept] = Pointer(UInt8).new(0_u64)
+          __iyi_set_environ(fresh)
+        end
       end
-      unless offset == length && entry[length] == 61_u8
-        table[kept] = entry
-        kept = kept + 1
-      end
-      index = index + 1
     end
-    table[kept] = Pointer(UInt8).new(0_u64)
   {% end %}
 end
 

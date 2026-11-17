@@ -479,7 +479,7 @@ unmarked noinput io.iyi '/^@\[UnsafeReach\(/ { held = $0; next } held != "" { if
 if [ "$WINDOWS" = 1 ]; then
   echo "  no IyiEnvironTable on Windows: ENV[]= writes through SetEnvironmentVariableW"
 else
-  unmarked unmarked prelude.iyi '/written only by std\/env.s writes/ { next } { print }' '@@held : Pointer(Pointer(UInt8))'
+  unmarked unmarked prelude.iyi '/written only by the environment.s writers/ { next } { print }' '@@held : Pointer(Pointer(UInt8))'
 fi
 
 # ── 3. iyi fix ─────────────────────────────────────────────────────────────

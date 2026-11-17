@@ -300,10 +300,10 @@ case "$(uname -s)" in
     elif ! "$PY" - <<PY
 from pathlib import Path
 src = Path("$REPO/src/std/env.iyi").read_text()
-old = "    until WRITER.compare_and_set(0, 1)[1]\n    end\n"
+old = "    IyiEnvironTable.writing { yield }\n"
 if src.count(old) != 1:
     raise SystemExit("patch site missing")
-Path("$WORK/unturned/std/env.iyi").write_text(src.replace(old, "", 1))
+Path("$WORK/unturned/std/env.iyi").write_text(src.replace(old, "    yield\n", 1))
 PY
     then
       echo "  the writers' turn patch did not apply"

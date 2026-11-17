@@ -73,7 +73,7 @@ src/compiler/lower/call.iyi 103
 src/compiler/lower/cast.iyi 76
 src/compiler/lower/class_var.iyi 70
 src/compiler/lower/closure.iyi 31
-src/compiler/lower/cond.iyi 27
+src/compiler/lower/cond.iyi 25
 src/compiler/lower/const.iyi 66
 src/compiler/lower/context.iyi 66
 src/compiler/lower/ensure.iyi 27

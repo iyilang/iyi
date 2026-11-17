@@ -4,6 +4,14 @@
 
 ### Added
 
+- **Checksum database verification primitives.** The compiler source has
+  Ed25519 signed-note verification, checkpoint and record parsing,
+  height-8 Merkle tile proofs, and a persistent consistency-checked
+  checkpoint cache. Fixture bytes are kept unchanged across Git line-ending
+  settings, and cache writes replace an existing checkpoint through an
+  exclusive same-directory file. Package downloads do not use them yet.
+  Independent cryptographic review is required before anything depends on them.
+
 - Add the LLVM bindings and `iyi-ir` import, translation and round-trip tool in iyi.
   Same-host gates cover fixtures, refusals and mutations; the full corpus round
   trip remains unmeasured. Existing hosted commands are unchanged.

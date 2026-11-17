@@ -66,6 +66,55 @@ module Iyi
       output_dir
     end
 
+    # How many times `claim` makes the directory again after another
+    # build's rotation took it away. A loss needs ten newer directories to
+    # be made between the making and the lock, so a second one is already
+    # rare; past this many, something that is not a compiler is deleting.
+    CLAIMS = 20
+
+    # iyi: the directory for *filename*, made and locked, for as long as the
+    # block runs. The block is given the directory.
+    #
+    # The lock is what tells another build's rotation that the directory is
+    # in use, and the rotation deletes under the same lock
+    # (`remove_unless_in_use`). Making the directory and locking it are
+    # still two steps, so a rotation can remove it in between: the lock this
+    # build is then given is on a file that is no longer at its path. That
+    # is asked once the lock is held, and a directory that was lost is made
+    # again.
+    def claim(filename : String, &)
+      CLAIMS.times do
+        output_dir = directory_for(filename)
+        path = File.join(output_dir, "compiler.lock")
+        file = begin
+          File.open(path, "w")
+        rescue File::NotFoundError
+          # Removed between the making and the opening.
+          next
+        rescue ex : File::Error
+          # Or being removed right now: darwin answers "Invalid argument"
+          # for a file made in a directory that is already unlinked and not
+          # yet gone. 1,000 tests under a load average of 700 met it once,
+          # `compiler.lock: Invalid argument`, with only the case above
+          # handled. Any other error is the caller's to see.
+          raise ex unless ex.os_error == Errno::EINVAL
+          next
+        end
+        begin
+          file.flock_exclusive
+          if File.info?(path).try(&.same_file?(file.info))
+            return yield output_dir
+          end
+        ensure
+          # Closing gives the lock back.
+          file.close
+        end
+      end
+      raise Iyi::Error.new("#{Iyi.relative_filename(directory_for(filename))}, this build's directory in the " \
+                           "cache, was removed #{CLAIMS} times while the build asked for it. " \
+                           "Something that is not a compiler is deleting the cache")
+    end
+
     # iyi: the name is the source's whole path, and a path is longer than a
     # name may be. A file's path of 255 characters or more made a name no
     # file system takes, on any platform; on Windows the cache directory's
@@ -235,8 +284,50 @@ module Iyi
           .sort_by! { |dir| File.info?(dir).try(&.modification_time) || Time.unix(0) }
           .reverse!
           .skip(KEPT)
-          .each { |name| FileUtils.rm_rf(name) unless directory_in_use?(name) }
+          .each { |name| remove_unless_in_use(name) }
       end
+    end
+
+    # iyi: removes *dir* unless a compiler is working in it, holding the
+    # directory's own lock for as long as the removal takes.
+    #
+    # Asking (`directory_in_use?`) and then deleting were two steps, and a
+    # build takes its lock only once it reaches codegen: its directory is
+    # made when the build starts, so by then ten other builds may have made
+    # theirs and this one is the oldest. `iyi test` over 1,000 tests, nine
+    # builds at a time on a loaded machine, answered "does not build" for
+    # one to five of them: `Error: <cache>/<test>/bc_flags.o0: No such file
+    # or directory`, and once `Invalid argument`, a write into a directory
+    # another build's rotation was halfway through removing.
+    #
+    # So the rotation takes the lock itself and deletes under it. A build
+    # that wants the directory waits, then finds the lock it was given is no
+    # longer the file at that path and makes the directory again
+    # (`Compiler#with_cache_directory`).
+    private def remove_unless_in_use(dir : String) : Nil
+      File.open(File.join(dir, "compiler.lock"), "a") do |file|
+        begin
+          file.flock_exclusive(blocking: false)
+        rescue IO::Error
+          return
+        end
+        {% if flag?(:win32) %}
+          # Windows does not remove a directory holding a file somebody has
+          # open, and this has the lock open: everything else goes now, the
+          # lock and the directory once it is closed.
+          Dir.each_child(dir) do |name|
+            FileUtils.rm_rf(File.join(dir, name)) unless name == "compiler.lock"
+          end
+        {% else %}
+          FileUtils.rm_rf(dir)
+        {% end %}
+      end
+      {% if flag?(:win32) %}
+        FileUtils.rm_rf(dir)
+      {% end %}
+    rescue File::Error
+      # The directory answered nothing we can open. Deleting it is the one
+      # thing that can lose someone else's work, so don't.
     end
 
     # iyi: whether a compiler is working in this directory right now.
@@ -279,7 +370,7 @@ module Iyi
     # `clear_cache` still removes it. The root's files - `msvc-probe`,
     # `linker-probe`, the link templates - are not directories and the
     # rotation passes over them already.
-    NOT_BUILDS = {"mod"}
+    NOT_BUILDS = {"mod", "tests-v1"}
 
     private def gather_cache_entries(dir)
       Dir.children(dir).reject!(&.in?(NOT_BUILDS)).map! { |name| File.join(dir, name) }

@@ -144,6 +144,64 @@ for what, selected, verdicts, passes in [
 if not hasattr(planner, "Reach"):
     check("the planner reads what runs what (`Reach`)", False, f"{PLANNER} has no Reach")
 else:
+    # The native jobs deliberately run the same Bash bodies. Keep that
+    # contract when a later edit adds or changes a stale gate on one OS.
+    real_jobs = planner.parse_jobs((ROOT / ".github/workflows/iyi.yml").read_text(encoding="utf-8"))
+
+    def step_run(job, name):
+        for step in real_jobs[job]["text"].split("\n      - name: ")[1:]:
+            lines = step.splitlines()
+            if lines[0].strip('"') != name:
+                continue
+            for index, line in enumerate(lines[1:], 1):
+                if line.startswith("        run: "):
+                    value = line[len("        run: "):]
+                    if value != "|":
+                        return value
+                    body = []
+                    for body_line in lines[index + 1:]:
+                        if body_line and not body_line.startswith("          "):
+                            break
+                        body.append(body_line[10:] if body_line else "")
+                    return "\n".join(body).rstrip()
+        return None
+
+    for jobs_and_steps in [
+        (["iyi", "stale-darwin", "stale-windows"], [
+            "Stale test acceptance suite",
+            "Stale receipt digest, RG8 oracle, and evidence self-tests",
+            "Export fresh run receipts",
+        ]),
+        (["stale-callpath", "stale-darwin-gates", "stale-windows-gates"], [
+            "Link once, RG4, the reach walk, the key's phases, RG8 and RG9",
+            "Suite speed under the audit, 20 tests",
+            "Two processes record into one store",
+        ]),
+        (["stale-equivalence", "stale-darwin-gates", "stale-windows-gates"], [
+            "RG2, RG2a, RG2r and RG5, with no program excluded",
+        ]),
+        (["stale-fresh", "stale-darwin-fresh", "stale-windows-fresh"], [
+            "Producer receipts on a fresh runner: hit on an equal profile, refused on another",
+            "Shadow audit fresh execution and export",
+            "The runner's own receipts hit on an emptied store",
+            "Planted hidden-read shadow-audit proof",
+            "Master snapshot path and Actions API proof",
+            "RG1 and RG7 with the producer compiler",
+            "RG9 CallPathFp on the fresh runner",
+            "Download master snapshot for git-diff audit",
+            "Master snapshot git-diff self-check",
+            "Census and overhead measurements",
+            "Prepare audited master receipt snapshot",
+            "Prepare empty master snapshot after disagreement",
+        ]),
+    ]:
+        platforms, steps = jobs_and_steps
+        for name in steps:
+            bodies = [step_run(job, name) for job in platforms]
+            check(f"same stale step on three platforms: {name}",
+                  all(body is not None for body in bodies) and len(set(bodies)) == 1,
+                  f"{platforms}: {bodies}")
+
     workflow = """jobs:
   plan:
     runs-on: x

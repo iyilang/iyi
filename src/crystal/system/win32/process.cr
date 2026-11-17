@@ -25,15 +25,25 @@ struct Crystal::System::Process
   @@setup_interrupt_handler = Atomic(Bool).new(false)
   @@last_interrupt = ::Process::ExitReason::Interrupted
 
-  def initialize(process_info)
+  def initialize(process_info, before_resume : Proc(Void*, Nil)? = nil)
     @pid = process_info.dwProcessId
     @process_handle = process_info.hProcess
 
-    # NOTE: needed because of `CREATE_SUSPENDED` flag in `.spawn`
-    if LibC.ResumeThread(process_info.hThread) == 0xFFFFFFFF_u32
-      raise RuntimeError.from_winerror("ResumeThread")
+    # `.spawn` creates the child suspended so callers can assign a job before
+    # its code, including any child-spawning code, can run.
+    begin
+      before_resume.try &.call(@process_handle)
+      if LibC.ResumeThread(process_info.hThread) == 0xFFFFFFFF_u32
+        raise RuntimeError.from_winerror("ResumeThread")
+      end
+    rescue ex
+      LibC.TerminateProcess(@process_handle, 1)
+      close_handle(@process_handle)
+      @process_handle = LibC::HANDLE.null
+      raise ex
+    ensure
+      close_handle(process_info.hThread)
     end
-    close_handle(process_info.hThread)
   end
 
   def release

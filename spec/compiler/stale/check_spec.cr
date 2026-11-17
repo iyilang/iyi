@@ -1,0 +1,634 @@
+require "../../spec_helper"
+require "../spec_helper"
+require "compiler/iyi/compiler"
+require "compiler/iyi/stale/check"
+require "compiler/iyi/stale/machine_key"
+require "compiler/iyi/stale/key_file"
+
+describe "Iyi::IyiLibraryPath" do
+  it "uses the current library path on each call" do
+    previous = ENV["IYI_LIBRARY_PATH"]?
+    begin
+      ENV["IYI_LIBRARY_PATH"] = "first-library-path"
+      Iyi::IyiLibraryPath.paths.should contain("first-library-path")
+      ENV["IYI_LIBRARY_PATH"] = "second-library-path"
+      Iyi::IyiLibraryPath.paths.should contain("second-library-path")
+      Iyi::IyiLibraryPath.paths.should_not contain("first-library-path")
+    ensure
+      if previous
+        ENV["IYI_LIBRARY_PATH"] = previous
+      else
+        ENV.delete("IYI_LIBRARY_PATH")
+      end
+    end
+  end
+end
+
+describe "Iyi::Stale S3g: Check, MachineKey, KeyFile, Accept/Block" do
+  describe "Iyi::Stale::MachineKey" do
+    it "creates 32-byte machine key with mode 0600 under tests-v1/key" do
+      cache_tmp = File.tempname("mach_key_test")
+      Dir.mkdir_p(cache_tmp)
+      begin
+        key = Iyi::Stale::MachineKey.load_or_create(cache_tmp)
+        key.size.should eq(32)
+
+        key_file = File.join(cache_tmp, "tests-v1", "key")
+        File.file?(key_file).should be_true
+        File.read(key_file).to_slice.should eq(key)
+
+        {% if flag?(:unix) %}
+          File.info(key_file).permissions.value.to_s(8).should eq("600")
+        {% end %}
+
+        # Second load returns identical key
+        key2 = Iyi::Stale::MachineKey.load_or_create(cache_tmp)
+        key2.should eq(key)
+      ensure
+        FileUtils.rm_rf(cache_tmp)
+      end
+    end
+  end
+
+  describe "Iyi::Stale::KeyFile" do
+    it "reads accept and block rules" do
+      with_tempfile("rules.json") do |rule_path|
+        File.write(rule_path, %([{"mode": "local", "build": "abcd1234"}, {"mode": "portable", "build": "5678efaa"}]))
+        rules = Iyi::Stale::KeyFile.read_rules(rule_path)
+        rules.size.should eq(2)
+        rules[0].mode.should eq("local")
+        rules[0].build.should eq("abcd1234")
+        rules[1].mode.should eq("portable")
+        rules[1].build.should eq("5678efaa")
+      end
+    end
+
+    it "handles missing or corrupt rule files gracefully" do
+      Iyi::Stale::KeyFile.read_rules("/nonexistent/path/rules.json").should be_empty
+
+      with_tempfile("corrupt.json") do |rule_path|
+        File.write(rule_path, "not json")
+        Iyi::Stale::KeyFile.read_rules(rule_path).should be_empty
+      end
+    end
+
+    it "writes and parses valid key file format §2.4" do
+      with_tempfile("out.key") do |key_path|
+        local = Iyi::Stale::KeyFile::ModeBuild.new(
+          build: "a" * 64,
+          toolchain: "b" * 64,
+          behavior: "c" * 64,
+          callpath: "d" * 64,
+          link: "e" * 64,
+          cenv: "f" * 64,
+          explain: {"src:a.iyi" => "1" * 64, "*" => "2" * 64}
+        )
+        portable = Iyi::Stale::KeyFile::ModeBuild.new(
+          build: "1" * 64,
+          toolchain: "b" * 64,
+          behavior: "c" * 64,
+          callpath: "3" * 64,
+          link: "4" * 64,
+          cenv: "5" * 64,
+          explain: {"src:a.iyi" => "6" * 64, "*" => "7" * 64}
+        )
+        not_reusable = [
+          Iyi::Stale::KeyFile::NotReusable.new("refused build mode", "refused build mode: --no-cleanup", nil),
+        ]
+        hit = Iyi::Stale::KeyFile::Hit.new("local", "a" * 64)
+        reach = Iyi::Stale::Reach.new
+
+        Iyi::Stale::KeyFile.write_out(
+          path: key_path,
+          phase: "hit",
+          test_root: "src",
+          test_path: "rel/test.iyi",
+          local: local,
+          portable: portable,
+          not_reusable: not_reusable,
+          hit: hit,
+          blocked: false,
+          reach: reach
+        )
+
+        File.file?(key_path).should be_true
+        parsed = Iyi::Stale::KeyFile.parse(File.read(key_path))
+        parsed.format.should eq("iyi-stale-key")
+        parsed.version.should eq(1)
+        parsed.phase.should eq("hit")
+        parsed.test["root"].should eq("src")
+        parsed.test["path"].should eq("rel/test.iyi")
+        parsed.local.not_nil!.build.should eq("a" * 64)
+        parsed.portable.not_nil!.build.should eq("1" * 64)
+        parsed.not_reusable.not_nil!.size.should eq(1)
+        parsed.not_reusable.not_nil![0].category.should eq("refused build mode")
+        parsed.hit.not_nil!.mode.should eq("local")
+        parsed.blocked.should eq(false)
+        parsed.reach.not_nil!["checked"].as_bool.should eq(false)
+      end
+    end
+  end
+
+  describe "Iyi::Stale::Check" do
+    it "first check writes phase checked with valid Build" do
+      program = Iyi::Program.new
+      program.color = false
+      parser = program.new_parser("def foo(x); x; end; a = foo(41)")
+      node = program.semantic(program.normalize(parser.parse))
+
+      with_tempfile("first.key") do |key_path|
+        compiler = create_spec_compiler
+        compiler.stale_key = key_path
+        source = Iyi::Compiler::Source.new("test_bare.iyi", "def foo(x); x; end; a = foo(41)")
+
+        res = Iyi::Stale::Check.run(compiler, program, node, source)
+        res.hit?.should be_false
+        res.blocked?.should be_false
+        res.not_reusable.should be_empty
+        res.local_build_hex.size.should eq(64)
+        res.portable_build_hex.size.should eq(64)
+
+        File.file?(key_path).should be_true
+        data = Iyi::Stale::KeyFile.parse(File.read(key_path))
+        data.format.should eq("iyi-stale-key")
+        data.version.should eq(1)
+        data.phase.should eq("checked")
+        data.local.not_nil!.build.should eq(res.local_build_hex)
+        data.portable.not_nil!.build.should eq(res.portable_build_hex)
+        data.hit.should be_nil
+        data.blocked.should eq(false)
+      end
+    end
+
+    it "second check hits when --stale-accept holds local Build" do
+      program = Iyi::Program.new
+      program.color = false
+      parser = program.new_parser("def foo(x); x; end; a = foo(41)")
+      node = program.semantic(program.normalize(parser.parse))
+
+      with_tempfile("run1.key") do |key1_path|
+        compiler = create_spec_compiler
+        compiler.stale_key = key1_path
+        source = Iyi::Compiler::Source.new("test_bare.iyi", "def foo(x); x; end; a = foo(41)")
+
+        res1 = Iyi::Stale::Check.run(compiler, program, node, source)
+        local_build = res1.local_build_hex
+
+        with_tempfile("run2.key") do |key2_path|
+          with_tempfile("accept.json") do |accept_path|
+            File.write(accept_path, %([{"mode": "local", "build": "#{local_build}"}]))
+
+            compiler2 = create_spec_compiler
+            compiler2.stale_key = key2_path
+            compiler2.stale_accept = accept_path
+
+            res2 = Iyi::Stale::Check.run(compiler2, program, node, source)
+            res2.hit?.should be_true
+            res2.hit.not_nil!.mode.should eq("local")
+            res2.hit.not_nil!.build.should eq(local_build)
+
+            File.file?(key2_path).should be_true
+            data2 = Iyi::Stale::KeyFile.parse(File.read(key2_path))
+            data2.phase.should eq("hit")
+            data2.hit.not_nil!.mode.should eq("local")
+            data2.hit.not_nil!.build.should eq(local_build)
+          end
+        end
+      end
+    end
+
+    it "second check hits when --stale-accept holds portable Build" do
+      program = Iyi::Program.new
+      program.color = false
+      parser = program.new_parser("def foo(x); x; end; a = foo(41)")
+      node = program.semantic(program.normalize(parser.parse))
+
+      with_tempfile("run1.key") do |key1_path|
+        compiler = create_spec_compiler
+        compiler.stale_key = key1_path
+        source = Iyi::Compiler::Source.new("test_bare.iyi", "def foo(x); x; end; a = foo(41)")
+
+        res1 = Iyi::Stale::Check.run(compiler, program, node, source)
+        port_build = res1.portable_build_hex
+
+        with_tempfile("run2.key") do |key2_path|
+          with_tempfile("accept.json") do |accept_path|
+            File.write(accept_path, %([{"mode": "portable", "build": "#{port_build}"}]))
+
+            compiler2 = create_spec_compiler
+            compiler2.stale_key = key2_path
+            compiler2.stale_accept = accept_path
+
+            res2 = Iyi::Stale::Check.run(compiler2, program, node, source)
+            res2.hit?.should be_true
+            res2.hit.not_nil!.mode.should eq("portable")
+            res2.hit.not_nil!.build.should eq(port_build)
+
+            File.file?(key2_path).should be_true
+            data2 = Iyi::Stale::KeyFile.parse(File.read(key2_path))
+            data2.phase.should eq("hit")
+            data2.hit.not_nil!.mode.should eq("portable")
+            data2.hit.not_nil!.build.should eq(port_build)
+          end
+        end
+      end
+    end
+
+    it "matching block entry wins over accept: blocked: true, hit: nil" do
+      program = Iyi::Program.new
+      program.color = false
+      parser = program.new_parser("def foo(x); x; end; a = foo(41)")
+      node = program.semantic(program.normalize(parser.parse))
+
+      with_tempfile("run1.key") do |key1_path|
+        compiler = create_spec_compiler
+        compiler.stale_key = key1_path
+        source = Iyi::Compiler::Source.new("test_bare.iyi", "def foo(x); x; end; a = foo(41)")
+
+        res1 = Iyi::Stale::Check.run(compiler, program, node, source)
+        local_build = res1.local_build_hex
+
+        with_tempfile("run2.key") do |key2_path|
+          with_tempfile("accept.json") do |accept_path|
+            with_tempfile("block.json") do |block_path|
+              File.write(accept_path, %([{"mode": "local", "build": "#{local_build}"}]))
+              File.write(block_path, %([{"mode": "local", "build": "#{local_build}"}]))
+
+              compiler2 = create_spec_compiler
+              compiler2.stale_key = key2_path
+              compiler2.stale_accept = accept_path
+              compiler2.stale_block = block_path
+
+              res2 = Iyi::Stale::Check.run(compiler2, program, node, source)
+              res2.blocked?.should be_true
+              res2.hit?.should be_false
+
+              data2 = Iyi::Stale::KeyFile.parse(File.read(key2_path))
+              data2.blocked.should eq(true)
+              data2.phase.should eq("checked")
+              data2.hit.should be_nil
+            end
+          end
+        end
+      end
+    end
+    it "unclassified runtime site in closure check prevents a hit" do
+      program = Iyi::Program.new
+      program.color = false
+      program.iyi_prelude_dir = File.join(Dir.current, "src", "iyi")
+      parser = program.new_parser(<<-CODE)
+        @[Unsafe("unclassified runtime fixture")]
+        lib LibSysUnclassified
+          fun getpid : Int32
+        end
+
+        def runtime_unannotated_getpid
+          LibSysUnclassified.getpid
+        end
+
+        runtime_unannotated_getpid
+        CODE
+      runtime_file = File.join(Dir.current, "src", "iyi", "fixture_unclassified.iyi")
+      parser.filename = runtime_file
+      node = program.semantic(program.normalize(parser.parse))
+
+      compiler = create_spec_compiler
+      source = Iyi::Compiler::Source.new(runtime_file, "runtime_unannotated_getpid")
+
+      with_tempfile("unclass1.key") do |key1_path|
+        compiler.stale_key = key1_path
+        res1 = Iyi::Stale::Check.run(compiler, program, node, source)
+        res1.hit?.should be_false
+        res1.not_reusable.any? { |nr| nr.reason == "unclassified runtime site" }.should be_true
+        local_build = res1.local_build_hex
+
+        with_tempfile("unclass2.key") do |key2_path|
+          with_tempfile("accept.json") do |accept_path|
+            File.write(accept_path, %([{"mode": "local", "build": "#{local_build}"}]))
+            compiler2 = create_spec_compiler
+            compiler2.stale_key = key2_path
+            compiler2.stale_accept = accept_path
+
+            res2 = Iyi::Stale::Check.run(compiler2, program, node, source)
+            # Unclassified runtime site in not_reusable must prevent a hit!
+            res2.hit?.should be_false
+            res2.hit.should be_nil
+
+            data2 = Iyi::Stale::KeyFile.parse(File.read(key2_path))
+            data2.phase.should eq("checked")
+            data2.hit.should be_nil
+            data2.not_reusable.not_nil!.any? { |nr| nr.reason == "unclassified runtime site" }.should be_true
+          end
+        end
+      end
+    end
+
+    it "--no-cleanup refuses and prevents hit" do
+      program = Iyi::Program.new
+      program.color = false
+      parser = program.new_parser("def foo; 10; end; a = foo")
+      node = program.semantic(program.normalize(parser.parse))
+
+      with_tempfile("nc.key") do |key_path|
+        compiler = create_spec_compiler
+        compiler.stale_key = key_path
+        compiler.no_cleanup = true
+        source = Iyi::Compiler::Source.new("test_nc.iyi", "def foo; 10; end; a = foo")
+
+        res = Iyi::Stale::Check.run(compiler, program, node, source)
+        res.not_reusable.any? do |nr|
+          nr.category == "refused build mode" && nr.reason.includes?("--no-cleanup")
+        end.should be_true
+        res.hit?.should be_false
+      end
+    end
+
+    it "crystal_library gives category crystal reason" do
+      program = Iyi::Program.new
+      program.color = false
+      parser = program.new_parser("def foo; 20; end; a = foo")
+      node = program.semantic(program.normalize(parser.parse))
+
+      with_tempfile("cr.key") do |key_path|
+        compiler = create_spec_compiler
+        compiler.stale_key = key_path
+        compiler.crystal_library = true
+        source = Iyi::Compiler::Source.new("test_cr.iyi", "def foo; 20; end; a = foo")
+
+        res = Iyi::Stale::Check.run(compiler, program, node, source)
+        compat_reasons = res.not_reusable.select { |nr| nr.category == "crystal" }
+        compat_reasons.size.should be >= 1
+        compat_reasons[0].reason.should eq("Crystal library effects are not classified")
+        res.hit?.should be_false
+      end
+    end
+
+    it "dumps elements with --stale-dump-elements" do
+      program = Iyi::Program.new
+      program.color = false
+      parser = program.new_parser("def test_dump; 600; end; x = test_dump")
+      node = program.semantic(program.normalize(parser.parse))
+
+      with_tempfile("dump.key") do |key_path|
+        with_tempfile("dump.jsonl") do |dump_path|
+          compiler = create_spec_compiler
+          compiler.stale_key = key_path
+          compiler.stale_dump_elements = dump_path
+          source = Iyi::Compiler::Source.new("test_dump.iyi", "def test_dump; 600; end; x = test_dump")
+
+          Iyi::Stale::Check.run(compiler, program, node, source)
+
+          File.file?(dump_path).should be_true
+          lines = File.read_lines(dump_path)
+          lines.size.should be > 0
+          lines.each do |line|
+            json = JSON.parse(line)
+            json["kind"]?.should_not be_nil
+            json["key"]?.should_not be_nil
+            json["digest"]?.should_not be_nil
+          end
+        end
+      end
+    end
+  end
+
+  describe "Compiler error behavior with stale_key" do
+    it "writes no key file on semantic error and raises exception" do
+      with_tempfile("type_err.key") do |key_path|
+        compiler = create_spec_compiler
+        compiler.prelude = "iyi/prelude"
+        compiler.stale_key = key_path
+
+        code = <<-IYI
+        a = 1 + "foo"
+        IYI
+
+        source = Iyi::Compiler::Source.new("test_type_err.iyi", code)
+        bin_path = File.tempname("test_type_err", nil)
+
+        expect_raises(Iyi::TypeException) do
+          compiler.compile(source, bin_path)
+        end
+
+        File.file?(key_path).should be_false
+      end
+    end
+
+    it "leaves phase checked when link fails after check" do
+      with_tempfile("link_fail.key") do |key_path|
+        compiler = create_spec_compiler
+        compiler.prelude = "iyi/prelude"
+        compiler.stale_key = key_path
+
+        code = <<-IYI
+        @[Unsafe("intentional missing symbol for link failure test")]
+        lib MissingLib
+          fun missing_symbol_12345 : Void
+        end
+        MissingLib.missing_symbol_12345
+        IYI
+
+        source = Iyi::Compiler::Source.new("test_link_fail.iyi", code)
+        bin_path = File.tempname("test_link_fail", nil)
+
+        expect_raises(Iyi::CompilerError) do
+          compiler.compile(source, bin_path)
+        end
+
+        File.file?(key_path).should be_true
+        data = Iyi::Stale::KeyFile.parse(File.read(key_path))
+        data.phase.should eq("checked")
+        data.local.not_nil!.build.size.should eq(64)
+      end
+    end
+  end
+end
+
+describe "Iyi::Stale inputs record (--stale-inputs)" do
+  it "FileStamp takes size, times, device and inode from one stat, and digests a racy file" do
+    with_tempfile("stamp.txt") do |path|
+      File.write(path, "hello")
+      stamp = Iyi::Stale::FileStamp.of(path)
+      stamp.kind.file?.should be_true
+      stamp.size.should eq(5)
+      stamp.mtime.should be > 0
+      {% if flag?(:unix) %}
+        stamp.ctime.should be > 0
+        stamp.ino.should be > 0
+        stamp.dev.should be > 0
+        # Written just now, so its times cannot vouch for it: the digest does.
+        stamp.digest.should eq(Crystal::Digest::MD5.hexdigest("hello"))
+      {% end %}
+    end
+  end
+
+  it "a missing path is an absent stamp" do
+    Iyi::Stale::FileStamp.of("/nonexistent/iyi-spec/stamp").kind.absent?.should be_true
+  end
+
+  it "a rewrite of the same size changes the change time" do
+    with_tempfile("rewrite.txt") do |path|
+      File.write(path, "aaaa")
+      before = Iyi::Stale::FileStamp.of(path)
+      sleep 50.milliseconds
+      File.write(path, "bbbb")
+      after = Iyi::Stale::FileStamp.of(path)
+      after.size.should eq(before.size)
+      {% if flag?(:unix) %}
+        after.ctime.should_not eq(before.ctime)
+      {% end %}
+    end
+  end
+
+  it "a file replaced by rename is seen under its new inode" do
+    with_tempfile("inode.txt", "inode-new.txt") do |path, fresh|
+      File.write(path, "one")
+      before = Iyi::Stale::FileStamp.of(path)
+      File.write(fresh, "two")
+      File.rename(fresh, path)
+      after = Iyi::Stale::FileStamp.of(path)
+      {% if flag?(:unix) %}
+        after.ino.should_not eq(before.ino)
+      {% end %}
+    end
+  end
+
+  it "the recorder stamps a file it looked at with its change time and inode" do
+    with_tempfile("looked.txt") do |path|
+      File.write(path, "x")
+      inputs = Iyi::BuildInputs.new(nil, stale: true)
+      inputs.looked_at(path)
+      stamp = inputs.files[Iyi::BuildInputs.key(path)]
+      stamp.kind.file?.should be_true
+      {% if flag?(:unix) %}
+        stamp.ctime.should be > 0
+        stamp.ino.should be > 0
+      {% end %}
+    end
+  end
+
+  it "writes the inputs record in the contract's shape, with the forced environment names" do
+    with_tempfile("shape.txt", "shape.json") do |source_path, record_path|
+      File.write(source_path, "x")
+      dir = File.dirname(source_path)
+      inputs = Iyi::BuildInputs.new(nil, stale: true)
+      inputs.looked_at(source_path)
+      inputs.listed(dir)
+      inputs.pkg_config_read("zlib", false, "-lz")
+      Iyi::Stale::InputsFile.write(record_path, inputs, "a" * 64, "b" * 64)
+
+      File.file?(record_path).should be_true
+      data = JSON.parse(File.read(record_path))
+      data["format"].as_s.should eq("iyi-stale-inputs")
+      data["version"].as_i.should eq(2)
+      data["local_build"].as_s.should eq("a" * 64)
+      data["portable_build"].as_s.should eq("b" * 64)
+      data["env_enumerated"].as_bool.should be_false
+      data["observed_env"].as_h.has_key?("PATH").should be_true
+      data["observed_env"].as_h.has_key?("__COMPAT_LAYER").should be_true
+      %w(LD_PRELOAD GLIBC_TUNABLES DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH).each do |name|
+        data["observed_env"].as_h.has_key?(name).should be_true
+      end
+      data["listings"].as_h.has_key?(Iyi::BuildInputs.key(dir)).should be_true
+      data["pkg_config"].as_a[0].as_a[0].as_s.should eq("zlib")
+      entry = data["files"].as_a.find { |file| file.as_a[0].as_s == Iyi::BuildInputs.key(source_path) }.not_nil!
+      entry.as_a.size.should eq(8)
+      entry[1].as_s.should eq("file")
+      entry[2].as_i64.should eq(1)
+      {% if flag?(:unix) %}
+        entry[4].as_i64.should be > 0
+        entry[6].as_s.to_u64.should be > 0
+      {% end %}
+    end
+  end
+
+  it "records an inputs file only when the build is reusable and its recorder heard no reason" do
+    stale = Iyi::BuildInputs.new(nil, stale: true)
+    no_reasons = [] of Iyi::Stale::KeyFile::NotReusable
+    refused = [Iyi::Stale::KeyFile::NotReusable.new("refused build mode", "x", nil)]
+
+    Iyi::Stale::Check.records_inputs?(no_reasons, stale).should be_true
+    Iyi::Stale::Check.records_inputs?(refused, stale).should be_false
+    Iyi::Stale::Check.records_inputs?(no_reasons, Iyi::BuildInputs.new(nil)).should be_false
+    Iyi::Stale::Check.records_inputs?(no_reasons, nil).should be_false
+
+    stale.cannot("a macro ran a program")
+    Iyi::Stale::Check.records_inputs?(no_reasons, stale).should be_false
+  end
+
+  it "stale inputs leave the Build unchanged and write the record of a reusable build" do
+    program = Iyi::Program.new
+    program.color = false
+    parser = program.new_parser("def foo(x); x; end; a = foo(41)")
+    node = program.semantic(program.normalize(parser.parse))
+    source = Iyi::Compiler::Source.new("test_bare.iyi", "def foo(x); x; end; a = foo(41)")
+
+    with_tempfile("plain-build.key") do |plain_key|
+      with_tempfile("recorded-build.key") do |recorded_key|
+        with_tempfile("recorded-build.inputs.json") do |inputs_path|
+          plain_inputs = Iyi::BuildInputs.new(nil, stale: true)
+          Iyi::BuildInputs.current = plain_inputs
+          begin
+            plain_compiler = create_spec_compiler
+            plain_compiler.stale_key = plain_key
+            plain = Iyi::Stale::Check.run(plain_compiler, program, node, source)
+          ensure
+            Iyi::BuildInputs.current = nil
+          end
+
+          recorded_inputs = Iyi::BuildInputs.new(nil, stale: true)
+          Iyi::BuildInputs.current = recorded_inputs
+          begin
+            recorded_compiler = create_spec_compiler
+            recorded_compiler.stale_key = recorded_key
+            recorded_compiler.stale_inputs = inputs_path
+            recorded = Iyi::Stale::Check.run(recorded_compiler, program, node, source)
+          ensure
+            Iyi::BuildInputs.current = nil
+          end
+
+          recorded.not_reusable.should be_empty
+          # Said by component, because this assertion failed once, in a random
+          # order, on a Windows runner (run 43811561723, seed 44219) and not on
+          # the same commit's other run: which of the five parts of the build key
+          # moved between two checks of one program is the whole diagnosis.
+          {% for mode in ["local", "portable"] %}
+            {% for part in %w(toolchain behavior callpath link cenv) %}
+              recorded.{{ mode.id }}_mode_build.{{ part.id }}.should eq(plain.{{ mode.id }}_mode_build.{{ part.id }}), "the {{ mode.id }} build key's {{ part.id }} part differs between a plain check and one that records inputs"
+            {% end %}
+          {% end %}
+          recorded.local_build_hex.should eq(plain.local_build_hex)
+          recorded.portable_build_hex.should eq(plain.portable_build_hex)
+          File.file?(inputs_path).should be_true
+          JSON.parse(File.read(inputs_path))["local_build"].as_s.should eq(recorded.local_build_hex)
+        end
+      end
+    end
+  end
+
+  it "writes no inputs record for a build that is not reusable" do
+    program = Iyi::Program.new
+    program.color = false
+    parser = program.new_parser("def foo(x); x; end; a = foo(41)")
+    node = program.semantic(program.normalize(parser.parse))
+    source = Iyi::Compiler::Source.new("test_bare.iyi", "def foo(x); x; end; a = foo(41)")
+
+    with_tempfile("refused-build.key") do |refused_key|
+      with_tempfile("refused-build.inputs.json") do |inputs_path|
+        Iyi::BuildInputs.current = Iyi::BuildInputs.new(nil, stale: true)
+        begin
+          compiler = create_spec_compiler
+          compiler.stale_key = refused_key
+          compiler.stale_inputs = inputs_path
+          compiler.crystal_library = true
+          res = Iyi::Stale::Check.run(compiler, program, node, source)
+        ensure
+          Iyi::BuildInputs.current = nil
+        end
+
+        res.not_reusable.should_not be_empty
+        File.file?(inputs_path).should be_false
+      end
+    end
+  end
+end

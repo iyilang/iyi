@@ -553,7 +553,10 @@ class Process
   # * `Process.exec` replaces the current process.
   def initialize(command : String, args : Enumerable(String)? = nil, env : Env = nil, clear_env : Bool = false, shell : Bool = false,
                  input : Stdio = Redirect::Close, output : Stdio = Redirect::Close, error : Stdio = Redirect::Close, chdir : Path | String? = nil,
-                 process_group : Bool = false)
+                 process_group : Bool = false, before_resume : Proc(Void*, Nil)? = nil)
+    {% unless flag?(:win32) %}
+      raise ArgumentError.new("before_resume is only available on Windows") if before_resume
+    {% end %}
     begin
       fork_input = stdio_to_fd(input, for: STDIN)
       fork_output = stdio_to_fd(output, for: STDOUT)
@@ -563,7 +566,11 @@ class Process
       pid = Crystal::System::Process.spawn(prepared_args, shell, env, clear_env, fork_input, fork_output, fork_error, chdir.try &.to_s, process_group) do |error, command|
         raise ::File::Error.from_os_error("Error executing process", error, file: command)
       end
-      process_info = Crystal::System::Process.new(pid)
+      process_info = {% if flag?(:win32) %}
+                       Crystal::System::Process.new(pid, before_resume)
+                     {% else %}
+                       Crystal::System::Process.new(pid)
+                     {% end %}
     rescue exc
       close
       raise exc

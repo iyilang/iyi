@@ -269,6 +269,11 @@ class Iyi::CodeGenVisitor
   end
 
   def codegen_fun(mangled_name, target_def, self_type, is_exported_fun = false, fun_module_info = type_module(self_type), is_fun_literal = false, is_closure = false, iyi_internal = false, iyi_runtime_copy = false)
+    if (recorder = @program.stale_recorder) && !is_fun_literal
+      # A runtime copy (`iyi_runtime_copy?`) is the same def under `$runtime`:
+      # the reach walk reaches the def, not its two compilations.
+      recorder.record_def(iyi_runtime_copy ? mangled_name.chomp("$runtime") : mangled_name)
+    end
     old_position = insert_block
     old_entry_block = @entry_block
     old_alloca_block = @alloca_block

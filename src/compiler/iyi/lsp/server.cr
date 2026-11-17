@@ -1039,17 +1039,30 @@ module Iyi::Lsp
         # to a successor (`Proxy#pulled`). One file per answer at the
         # least, so every answer gets further.
         if compiled > 0 && Lsp.footprint >= Proxy::RETIRE_FOOTPRINT
+          if ENV["IYI_LSP_MEMORY_TRACE"]?
+            STDERR.puts "lsp-memory-event time_unix_ms=#{Time.utc.to_unix_ms} pid=#{Process.pid} event=workspace_partial footprint_peak_mib=#{Lsp.footprint} next_uri=#{uri.to_json}"
+            STDERR.flush
+          end
           partial = true
           break
         end
 
         # A file the server may not read has no verdict, and is left out as
         # the walk leaves out a directory it may not list.
+        if ENV["IYI_LSP_MEMORY_TRACE"]?
+          STDERR.puts "lsp-memory-event time_unix_ms=#{Time.utc.to_unix_ms} pid=#{Process.pid} event=file_start footprint_peak_mib=#{Lsp.footprint} uri=#{uri.to_json}"
+          STDERR.flush
+        end
         rows =
           begin
             compile_rows(uri, result_id)
           rescue IO::Error
             next
+          ensure
+            if ENV["IYI_LSP_MEMORY_TRACE"]?
+              STDERR.puts "lsp-memory-event time_unix_ms=#{Time.utc.to_unix_ms} pid=#{Process.pid} event=file_end footprint_peak_mib=#{Lsp.footprint} uri=#{uri.to_json}"
+              STDERR.flush
+            end
           end
         answers << {uri, result_id, rows}
         compiled += 1

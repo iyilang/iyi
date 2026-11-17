@@ -1,0 +1,55 @@
+# Native Windows probe for the path and handle observation boundaries.
+# Run by bench/stale_win_paths.sh with -Diyi_observe.
+@[Unsafe("exercises the Windows runtime's UTF-16 paths and native handles")]
+module bench/stale_win_paths
+
+lib LibPathProbe
+  fun SetCurrentDirectoryW(path : UInt16*) : Int32
+end
+
+def rendered_path(path : String) : String
+  wide = __iyi_wide_path(path.to_unsafe)
+  raise "valid path refused" if wide.address == 0_u64
+  size = __iyi_utf8_size_from_wide(wide)
+  raise "wide path conversion failed" if size <= 0
+  String.new(size - 1) { |target| __iyi_utf8_bytes_from_wide(wide, target, size) }
+end
+
+def change_directory(path : String) : Nil
+  wide = __iyi_wide_path(path.to_unsafe)
+  raise "cannot change probe directory" if wide.address == 0_u64 || LibPathProbe.SetCurrentDirectoryW(wide) == 0
+end
+
+args = Program.args
+# The Windows runtime job runs every bench program with no arguments, so no
+# mode runs the one that needs none.
+mode = args.size > 0 ? args[0] : "streams"
+
+case mode
+when "path"
+  puts "PATH:" + rendered_path(args[1])
+when "drive-change"
+  change_directory(args[1])
+  puts "FIRST:" + rendered_path(args[3])
+  change_directory(args[2])
+  puts "SECOND:" + rendered_path(args[3])
+when "invalid"
+  bytes = Pointer(UInt8).malloc(2_u64)
+  bytes[0] = 255_u8
+  bytes[1] = 0_u8
+  raise "invalid UTF-8 was accepted" if __iyi_wide_path(bytes).address != 0_u64
+  puts "INVALID:refused"
+when "streams"
+  IyiIO.new(0_i64, 16)
+  IyiIO.new(1_i64, 16)
+  IyiIO.new(2_i64, 16)
+  puts "STREAMS:ok"
+when "file"
+  fd = __iyi_open_read(args[1].to_unsafe)
+  raise "cannot open probe file as a nonstandard handle" if fd <= 2_i64
+  stream = IyiIO.new(fd, 16)
+  stream.close
+  puts "FILE:ok"
+else
+  raise "unknown probe mode"
+end

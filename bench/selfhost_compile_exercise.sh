@@ -113,7 +113,7 @@ for fixture in "${FIXTURES[@]}"; do
     echo "  $fixture: identical execution exit code (rc=$iyi_rc) and stdout"
     matched=$((matched + 1))
   else
-    echo "  FAIL: $fixture execution diverged: iyi rc=$iyi_rc, crystal rc=$cr_rc"
+    echo "  FAIL: $fixture execution diverged: iyi rc=$iyi_rc, hosted rc=$cr_rc"
     diff -u "$WORK/out_cr_${base}.txt" "$WORK/out_iyi_${base}.txt" || true
     status=1
   fi

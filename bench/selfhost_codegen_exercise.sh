@@ -79,7 +79,7 @@ fi
 
 echo
 echo "== 2. Building hosted oracle for differential codegen verification"
-cat <<'CRYSTAL_ORACLE_SCRIPT' > "$WORK/dump_crystal_cg.cr"
+cat <<'HOSTED_ORACLE_SCRIPT' > "$WORK/dump_crystal_cg.cr"
 require "compiler/requires"
 
 mode = ARGV[0]?
@@ -151,7 +151,7 @@ elsif mode == "--emit-obj"
   out_o = ARGV[2]
   program.target_machine.emit_obj_to_file(llvm_mod, out_o)
 end
-CRYSTAL_ORACLE_SCRIPT
+HOSTED_ORACLE_SCRIPT
 
 if ! LLVM_CONFIG="${LLVM_CONFIG:-$(command -v llvm-config || true)}" \
   CRYSTAL_PATH="$REPO_NATIVE/src" "$CRYSTAL" build -Di_know_what_im_doing \
@@ -392,7 +392,7 @@ fi
 "$WORK/cr_runner$EXE" > "$WORK/cr_runner.out" 2>&1 || status=1
 
 if diff -u "$WORK/cr_runner.out" "$WORK/iyi_runner.out" > "$WORK/runner.diff"; then
-  echo "  C driver output identical between Crystal and pure iyi backends:"
+  echo "  C driver output identical between hosted and pure iyi backends:"
   sed 's/^/    /' "$WORK/iyi_runner.out"
   echo "  Parity summary: C driver execution matches 100% (exit code 0, identical output)"
 else

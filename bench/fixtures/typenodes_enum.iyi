@@ -1,0 +1,7 @@
+enum Color
+  Red
+  Green
+end
+
+x = 1
+l = __LINE__

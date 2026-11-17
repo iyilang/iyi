@@ -1,0 +1,23 @@
+# Signed Int32 comparisons: `<` and `==` are the builtin primitives, and their results are branched on.
+# The status is 11: less(2, 3) is 1 and same(4, 4) is 10.
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def less(a : Int32, b : Int32) : Int32
+  if a < b
+    1
+  else
+    0
+  end
+end
+
+def same(a : Int32, b : Int32) : Int32
+  if a == b
+    10
+  else
+    0
+  end
+end
+
+LibC.exit(less(2, 3) &+ same(4, 4))

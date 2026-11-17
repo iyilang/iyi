@@ -1,0 +1,4 @@
+import lib::{Array, Hash}
+
+alias Mine = Array(Int32)
+alias MineHash = Hash(String, Int32)

@@ -1,0 +1,133 @@
+module bench/selfhost_lower_name_owner
+
+# Probes the inherited method in bench/fixtures/lower_name_owner.iyi and requires its
+# lowered name to be the hosted symbol. The program-level lower waits on the
+# inherited-call refusal in call.iyi; this probe is the name, which does not.
+
+import compiler/syntax/parser::{Parser}
+import compiler/semantic/top_level::{SemanticProgram, TopLevelVisitor, Type}
+import compiler/semantic/main_visitor::{MainVisitor, TypedInstance}
+import compiler/semantic/recursive_struct_checker::{RecursiveStructChecker}
+import compiler/semantic/normalizer::{NormalizerProgram}
+import compiler/ir/module::{Module}
+import compiler/ir/layout::{LayoutError}
+import compiler/platform/target::{Target}
+import compiler/lower/typer::{LowerTyper}
+import compiler/lower/lower::{lower_def_probe}
+import compiler/lower/fun::{mangled_name}
+import compiler/types/type_system::{TypeSystem}
+import bench/lib/primitive_stand_in::{stand_in_primitive_types}
+
+def analyse(source : String, filename : String) : MainVisitor
+  parser = Parser.new(source, filename)
+  root = parser.parse
+  normalizer = NormalizerProgram.new
+  normalizer.iyi_prelude = false
+  root = normalizer.normalize(root)
+  prog = SemanticProgram.new
+  TypeSystem.new(prog)
+  tl = TopLevelVisitor.new(prog)
+  root.accept(tl)
+  tl.finish
+  mv = MainVisitor.new(prog)
+  stand_in_primitive_types(root, prog, mv)
+  root.accept(mv)
+  RecursiveStructChecker.new(prog).run
+  mv
+end
+
+def triple_of(text : String) : String
+  text.split("\n").each do |line|
+    if line.starts_with?("target triple")
+      return line.split("\"")[1]
+    end
+  end
+  raise "the oracle module names no target triple"
+end
+
+def hosted_flag(text : String, expected : String) : String?
+  text.split("\n").each do |line|
+    return expected if line.includes?(expected)
+  end
+  nil
+end
+
+def run : Nil
+  args = Program.args
+  if args.empty?
+    puts "NAME-OWNER OK"
+    return
+  end
+  fixture = args[0]
+  oracle_text = File.read(args[1])
+  if args.size > 2 && args[2] == "block"
+    prog = SemanticProgram.new
+    ts = TypeSystem.new(prog)
+    int = prog.int32_type
+    no_args = [] of Type
+    proc0 = ts.proc_of(no_args, int)
+    proc1 = ts.proc_of([int] of Type, int)
+    names = [
+      mangled_name("run", nil, no_args, int, nil, proc0),
+      mangled_name("apply", nil, [int] of Type, int, nil, proc1),
+    ]
+    names.each do |name|
+      raise "the hosted module has no #{name}" if hosted_flag(oracle_text, name).nil?
+      puts "port #{name}"
+    end
+    puts "NAME-OWNER MATCH"
+    return
+  end
+  metaclass = args.size > 2 && args[2] == "metaclass"
+  expected = metaclass ? "*NameOwner::class_flag<Int32>:Int32" : "*Child^Base#flag<Int32>:Int32"
+  method_name = metaclass ? "class_flag" : "flag"
+  owner_name = metaclass ? "NameOwner.class" : "Child"
+  if args.size > 2 && args[2] == "return"
+    expected = "*NameReturn::write<UInt64>:Nil"
+    method_name = "write"
+    owner_name = "NameReturn.class"
+  end
+  if args.size > 2 && args[2] == "generic"
+    expected = "*Box(Int32)^Box(T)#get<Int32>:Int32"
+    method_name = "get"
+    owner_name = "Box(Int32)"
+  end
+  if args.size > 2 && args[2] == "pointer"
+    expected = "*pass_pointer<Pointer(Int32 | Nil)>:Pointer(Int32 | Nil)"
+    method_name = "pass_pointer"
+    owner_name = ""
+  end
+  hosted = hosted_flag(oracle_text, expected)
+  raise "the hosted module has no #{expected}" if hosted.nil?
+  visitor = analyse(File.read(fixture), fixture)
+  found : TypedInstance? = nil
+  visitor.typed_instances.each do |item|
+    if item.definition.name == method_name
+      st = item.self_type
+      found = item if st.nil? && owner_name.empty?
+      if st
+        if st.as(Type).full_name == owner_name
+          found = item
+        end
+      end
+    end
+  end
+  raise "no typed instance of Child#flag" if found.nil?
+  inst = found.as(TypedInstance)
+  made = Module.for_target("name_owner", Target.new(triple_of(oracle_text)))
+  raise made.as(LayoutError).to_s if made.is_a?(LayoutError)
+  m = made.as(Module)
+  typer = LowerTyper.new(m.types, m.layout, false)
+  body = visitor.type_of?(inst.definition.body)
+  raise "Child#flag has no body type" if body.nil?
+  refused = lower_def_probe(inst.definition, inst.self_type, inst.arg_types, visitor, typer, m)
+  raise refused.as(String) unless refused.nil?
+  result_type = visitor.type_of?(inst.definition) || body
+  name = mangled_name(inst.definition.name, inst.self_type, inst.arg_types, result_type.as(Type))
+  puts "port #{name}"
+  raise "name differs: port #{name}, hosted #{hosted}" unless name == hosted.as(String)
+  raise "the module has no #{name}" if m.get_function?(name).nil?
+  puts "NAME-OWNER MATCH"
+end
+
+run

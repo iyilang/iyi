@@ -1,0 +1,22 @@
+module lower_unit_module_order
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+class Trace
+  @@digits : Int32 = 0
+
+  def self.mark(step : Int32) : Nil
+    @@digits = @@digits &* 4 &+ step
+    nil
+  end
+
+  def self.digits : Int32
+    @@digits
+  end
+end
+
+Trace.mark(1)
+Trace.mark(2)
+LibC.exit(Trace.digits)

@@ -1,0 +1,161 @@
+module compiler/lower/closure
+
+import compiler/ir/inst::{CallConv, Op}
+import compiler/ir/types::{IrType}
+import compiler/ir/values::{Value}
+import compiler/lower/context::{Lowerer, LowerContext, LowerVar}
+import compiler/lower/helpers::{abi_name, load_aligned}
+import compiler/lower/cast::{assign}
+import compiler/types/types::{GenericClassInstanceType, PointerInstanceType, VirtualType}
+import compiler/lower/layouts::{has_inner_pointers?}
+import compiler/lower/instance_var::{owner_struct?, self_by_pointer?}
+import compiler/lower/pending::{refuse_port}
+import compiler/semantic/closures::{ClosureFrame}
+import compiler/semantic/top_level::{ClassType, MetaclassType, Type}
+
+# The hosted malloc_closure stores captured locals, parent and self in a
+# collector-managed context. Struct self is copied into the context at entry.
+pub def closure_self_type(context : LowerContext) : Type?
+  if self_type = context.closure_self
+    return self_type
+  end
+  if parent = context.closure_parent
+    return closure_self_type(parent)
+  end
+  nil
+end
+
+def captured_self_type(low : Lowerer, context : LowerContext) : Type
+  t = context.type
+  raise "BUG: closure over self has no frame type" if t.nil?
+  self_var = context.vars["self"]?
+  raise "BUG: closure over self has no receiver" if self_var.nil?
+  st = t.as(Type)
+  variable = self_var.as(LowerVar)
+  if variable.type.full_name != st.full_name
+    refuse_port("closure over self of #{variable.type.full_name} in a frame of #{st.full_name} (hosted malloc_closure downcasts llvm_self, not ported)")
+  end
+  reference_owner = st.is_a?(ClassType) || st.is_a?(GenericClassInstanceType) || st.is_a?(VirtualType)
+  if reference_owner && !st.is_a?(MetaclassType) && !owner_struct?(st)
+    return st
+  end
+  if self_by_pointer?(st) && !st.is_a?(VirtualType) && !low.typer.passed_indirectly?(st)
+    return st
+  end
+  refuse_port("closure over self of #{st.full_name}: only a class or a struct passed by pointer is ported (hosted malloc_closure, codegen.cr:2661-2668)")
+end
+
+pub def allocate_closure(low : Lowerer, frame : ClosureFrame, parent : LowerContext? = nil) : Nil
+  names = [] of String
+  types = [] of Type
+  pointerful = false
+  frame.closured.each do |var|
+    names << var.name
+    types << var.type
+    pointerful = true if has_inner_pointers?(var.type)
+  end
+  context = low.current_context
+  self_type = frame.self_closured ? captured_self_type(low, context) : nil
+  if names.empty? && self_type.nil?
+    if outer = parent
+      context.closure_type = outer.closure_type
+      context.closure_ptr = outer.closure_ptr
+      context.closure_names = outer.closure_names
+      context.closure_types = outer.closure_types
+      context.closure_parent = outer.closure_parent
+      context.closure_self = outer.closure_self
+    end
+    return
+  end
+  context.closure_names = names
+  context.closure_types = types
+  has_parent = !parent.nil? && !parent.closure_ptr.nil?
+  context.closure_parent = has_parent ? parent : nil
+  context.closure_self = self_type
+  if st = self_type
+    pointerful = true if has_inner_pointers?(st)
+  end
+  pointerful = true if has_parent
+  layout = low.typer.closure_context_type(types, has_parent, self_type)
+  context.closure_type = layout
+  suffix = pointerful ? "malloc64" : "malloc_atomic64"
+  allocator_name = abi_name(low, suffix)
+  allocator = low.module.get_function?(allocator_name)
+  if allocator.nil?
+    low.analysed.program.global_funs.each do |record|
+      raise "lower: premature allocation through #{allocator_name}" if record.real_name == allocator_name
+    end
+    allocator = low.module.get_function?("malloc")
+    if allocator.nil?
+      fn_type = low.module.types.func([low.module.types.int64] of IrType, low.module.types.ptr(0))
+      allocator = low.module.add_function("malloc", fn_type, CallConv::C)
+    end
+  end
+  one = low.builder.const_int(low.module.types.int32, 1_i64)
+  endpoint = low.builder.const_gep(layout, low.builder.const_null_pointer, [one] of Value)
+  size = low.builder.const_cast(Op::PtrToInt, endpoint, low.typer.size_t)
+  ptr = low.builder.call(allocator.fn_type, allocator, [size] of Value, "")
+  context.closure_ptr = ptr
+  setup_closure_vars(low, context, ptr, true, false)
+  if outer = context.closure_parent
+    zero = low.builder.const_int(low.module.types.int32, 0_i64).as(Value)
+    index = low.builder.const_int(low.module.types.int32, names.size.to_i64).as(Value)
+    parent_slot = low.builder.inbounds_gep(layout, ptr, [zero, index] of Value, "parent")
+    ptr_type = PointerInstanceType.new(low.analysed.program, low.analysed.program.nil_type)
+    assign(low, parent_slot, ptr_type, ptr_type, outer.closure_ptr.as(Value))
+  end
+  if st = self_type
+    zero = low.builder.const_int(low.module.types.int32, 0_i64).as(Value)
+    self_index = names.size + (has_parent ? 1 : 0)
+    index = low.builder.const_int(low.module.types.int32, self_index.to_i64).as(Value)
+    slot = low.builder.inbounds_gep(layout, ptr, [zero, index] of Value, "self")
+    self_var = context.vars["self"].as(LowerVar)
+    assign(low, slot, st, self_var.type, self_var.pointer)
+  end
+end
+
+pub def setup_closure_vars(low : Lowerer, source : LowerContext, ptr : Value, overwrite : Bool = true, include_parent : Bool = true, local_frame : ClosureFrame? = nil) : Nil
+  layout = source.closure_type
+  raise "BUG: missing closure layout" if layout.nil?
+  zero = low.builder.const_int(low.module.types.int32, 0_i64).as(Value)
+  i = 0
+  while i < source.closure_names.size
+    name = source.closure_names[i]
+    # Hosted fun.cr:863-870 excludes an outer capture shadowed by this
+    # function's own unclosured argument or local before emitting its GEP.
+    if own = local_frame
+      if binding = own.local?(name)
+        unless binding.captured
+          i += 1
+          next
+        end
+      end
+    end
+    index = low.builder.const_int(low.module.types.int32, i.to_i64).as(Value)
+    if overwrite || low.current_context.vars[name]?.nil?
+      slot = low.builder.inbounds_gep(layout.as(IrType), ptr, [zero, index] of Value, name)
+      var = LowerVar.new(slot, source.closure_types[i], false)
+      var.closure_slot = true
+      low.current_context.vars[name] = var
+    end
+    i += 1
+  end
+  if parent = include_parent ? source.closure_parent : nil
+    index = low.builder.const_int(low.module.types.int32, source.closure_names.size.to_i64).as(Value)
+    slot = low.builder.inbounds_gep(layout.as(IrType), ptr, [zero, index] of Value, "parent_ptr")
+    outer_ptr = load_aligned(low, low.module.types.ptr(0), slot, "parent")
+    setup_closure_vars(low, parent, outer_ptr, false, true, local_frame)
+  elsif include_parent && (st = source.closure_self)
+    if overwrite || low.current_context.vars["self"]?.nil?
+      self_index = source.closure_names.size
+      index = low.builder.const_int(low.module.types.int32, self_index.to_i64).as(Value)
+      slot = low.builder.inbounds_gep(layout.as(IrType), ptr, [zero, index] of Value, "self")
+      if self_by_pointer?(st)
+        low.current_context.vars["self"] = LowerVar.new(slot, st, false)
+      else
+        value = load_aligned(low, low.typer.llvm_type(st), slot, "")
+        low.current_context.vars["self"] = LowerVar.new(value, st, true)
+      end
+    end
+  end
+end

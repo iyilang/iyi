@@ -1,0 +1,12 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+NAN32 = 0.0_f32 / 0.0_f32
+INF64 = 1.0_f64 / 0.0_f64
+
+def check(a : Float32, b : Float64) : Int32
+  a == a ? 1 : (b > 1.0_f64 ? 7 : 2)
+end
+
+LibC.exit(check(NAN32, INF64))

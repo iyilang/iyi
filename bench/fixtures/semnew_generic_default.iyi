@@ -1,0 +1,4 @@
+class EmptyBox(T)
+end
+
+box = EmptyBox(Int32).new

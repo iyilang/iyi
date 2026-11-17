@@ -366,7 +366,7 @@ CLAIMS: list[tuple[str, str, str, int]] = [
     ("prelude", r"standard library instead of ([\d,]+)", "README.md", 1),
     ("prelude", r"iyi's own prelude \| ([\d,]+) lines", "SPEC.md", 1),
     ("prelude_library", r"of which ([\d,]+) are the library held to the", "SPEC.md", 1),
-    ("platform_floor", r"the platform floor measures \*\*([\d,]+) lines\*\*", "SPEC.md", 1),
+    ("platform_floor", r"[Tt]he platform floor measures \*\*([\d,]+) lines\*\*", "SPEC.md", 1),
     ("platform_floor", r"floor of ([\d,]+) lines", "SPEC.md", 1),
     ("library_with_floor", r"([\d,]+) with every platform's floor", "SPEC.md", 1),
     ("library_with_floor", r"pening `src/iyi/` counts ([\d,]+)", "SPEC.md", 1),
@@ -384,7 +384,7 @@ CLAIMS: list[tuple[str, str, str, int]] = [
     # one file disagreed with itself by 25,747 lines: the row above covers the
     # comparison table, this one the release's own numbers table, and only the
     # first of them existed.
-    ("compiler", r"\| ([\d,]+) lines, none of it written in iyi", "SPEC.md", 1),
+    ("compiler", r"\| hosted compiler \| ([\d,]+) lines of Crystal \|", "SPEC.md", 1),
     ("spec_iyi", r"\| ([\d,]+) for iyi \|", "SPEC.md", 1),
     # The artifact format, which drifted furthest of anything here: the
     # sentence said v19 while the compiler wrote v51.
@@ -396,7 +396,7 @@ CLAIMS: list[tuple[str, str, str, int]] = [
     ("prelude_kb", r"beside `bin/iyi` is ([\d,]+) KB", "Makefile", 1),
     ("prelude_kb", r"ships only iyi's own ([\d,]+) KB", "Makefile", 1),
     ("prelude_kb", r"its own, and it is ([\d,]+) KB", "Makefile", 1),
-    ("bang_names", r"standard library has \*\*([\d,]+) such names\*\*", "README.md", 1),
+    ("bang_names", r"standard library has \*\*([\d,]+) such names\*\*", "README.md", 2),
     ("generated", r"edit one module in a ([\d,]+)-line project", "README.md", 1),
     ("generated", r"reads all ([\d,]+) lines\s+again", "README.md", 1),
     # The same generated project, quoted seven more times in SPEC.md — the
@@ -441,11 +441,11 @@ CLAIMS: list[tuple[str, str, str, int]] = [
     ("files_bench", r"marked programs of ([\d,]+),", "SPEC.md", 1),
     ("unsafe_samples", r"and (none) of `samples/iyi`'s", "SPEC.md", 1),
     ("samples", r"of `samples/iyi`'s ([\d,]+) programs", "SPEC.md", 1),
-    # The blocks-and-declarations comparison, against the marks it names in
-    # the same order: src/std, src/iyi, bench.
-    ("unsafe_std", r"against ([\d,]+), [\d,]+ and\s+[\d,]+ module marks", "SPEC.md", 1),
-    ("unsafe_iyi", r"against [\d,]+, ([\d,]+) and\s+[\d,]+ module marks", "SPEC.md", 1),
-    ("unsafe_bench", r"against [\d,]+, [\d,]+ and\s+([\d,]+) module marks", "SPEC.md", 1),
+    # Current marks, in the order src/std, src/iyi, bench. The paragraph also
+    # preserves the historical counts at its named revision.
+    ("unsafe_std", r"current tree has\s+([\d,]+), [\d,]+ and\s+[\d,]+ module marks", "SPEC.md", 1),
+    ("unsafe_iyi", r"current tree has\s+[\d,]+, ([\d,]+) and\s+[\d,]+ module marks", "SPEC.md", 1),
+    ("unsafe_bench", r"current tree has\s+[\d,]+, [\d,]+ and\s+([\d,]+) module marks", "SPEC.md", 1),
 ]
 
 # The prose spells small numbers as words and should keep doing so, so the

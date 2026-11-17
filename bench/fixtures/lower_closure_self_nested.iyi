@@ -1,0 +1,47 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def once(value : Int32, &)
+  yield value
+end
+
+class Holder
+  def initialize(@base : Int32)
+  end
+
+  def rebase(value : Int32) : Int32
+    @base = value
+  end
+
+  def make(outer : Int32) : Proc(Int32)
+    once(5) do |inner|
+      -> { @base &+ outer &+ inner }
+    end
+  end
+
+  def make_self_only : Proc(Int32)
+    once(3) do |inner|
+      -> { @base &* inner }
+    end
+  end
+
+  def level(n : Int32) : Proc(Int32)
+    return -> { @base } if n == 0
+    below = level(n &- 1)
+    -> { below.call &+ n &+ @base }
+  end
+end
+
+holder = Holder.new(100)
+nested = holder.make(20)
+self_only = holder.make_self_only
+recursive = holder.level(3)
+LibC.exit(1) unless nested.call == 125
+LibC.exit(2) unless self_only.call == 300
+LibC.exit(3) unless recursive.call == 406
+holder.rebase(1)
+LibC.exit(4) unless nested.call == 26
+LibC.exit(5) unless self_only.call == 3
+LibC.exit(6) unless recursive.call == 10
+LibC.exit(0)

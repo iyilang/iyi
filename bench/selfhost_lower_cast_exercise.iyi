@@ -1,0 +1,249 @@
+module bench/selfhost_lower_cast_exercise
+
+# The port's side of the cast gate (bench/selfhost_lower_cast_exercise.sh): the
+# same modes as the calls gate's driver, for the fixtures that call a builtin primitive
+# (lowcast_*). The analysis runs with the lib stand-in (bench/lib/lower_gate.iyi), the
+# same as the calls gate: a lib's funs are not typed by the semantic pass yet.
+#
+#   port oracle <oracle.ll>                 the oracle module, normalised, one line each
+#   port lower <fixture.iyi> <oracle.ll>    lowers the fixture and compares it with the oracle
+#   port emit <fixture.iyi> <oracle.ll>     the port's module as text, for the native tool
+
+import bench/lib/lower_gate::{analyse, ir_module, run_emit, run_lower, run_oracle}
+import compiler/ir/function::{Function}
+import compiler/ir/inst::{Inst, Op}
+import compiler/ir/types::{IrType}
+import compiler/ir/verifier::{verify_function}
+import compiler/ir/values::{Value}
+import compiler/lower/cast::{assign, assign_mixed_union, downcast, mixed_union_type?, type_id_of_value}
+import compiler/lower/context::{Lowerer}
+import compiler/lower/typer::{LowerTyper}
+import compiler/semantic/top_level::{Type, UnionType}
+import compiler/types/types::{MixedUnionType, NamedArgumentType, NamedTupleInstanceType, TupleInstanceType}
+
+def refuse_wrong_union_member : Nil
+  analysis = analyse("nil\n", "wrong_union_member.iyi", true)
+  prog = analysis.visitor.program
+  int_type = prog.lookup_type("Int32").as(Type)
+  bool_type = prog.lookup_type("Bool").as(Type)
+  char_type = prog.lookup_type("Char").as(Type)
+  target = MixedUnionType.new(prog, [int_type, bool_type] of Type)
+  m = ir_module("arm64-apple-macosx")
+  low = Lowerer.new(m, LowerTyper.new(m.types, m.layout, analysis.iyi), analysis.visitor)
+  assign_mixed_union(low, Value.new(m.types.ptr), target, char_type, Value.new(m.types.int32))
+  raise "non-member union store was accepted"
+end
+
+def skip_noreturn_assignment : Nil
+  analysis = analyse("nil\n", "noreturn.iyi", true)
+  prog = analysis.visitor.program
+  int_type = prog.lookup_type("Int32").as(Type)
+  bool_type = prog.lookup_type("Bool").as(Type)
+  target = MixedUnionType.new(prog, [int_type, bool_type] of Type)
+  m = ir_module("arm64-apple-macosx")
+  low = Lowerer.new(m, LowerTyper.new(m.types, m.layout, analysis.iyi), analysis.visitor)
+  assign(low, Value.new(m.types.ptr), target, prog.no_return_type, Value.new(m.types.int32))
+end
+
+# Exercise both semantic union classes with a loaded aggregate, as a getter returns.
+def check_union_representations : Nil
+  analysis = analyse("nil\n", "union_representations.iyi", true)
+  prog = analysis.visitor.program
+  int_type = prog.lookup_type("Int32").as(Type)
+  bool_type = prog.lookup_type("Bool").as(Type)
+  members = [int_type, bool_type] of Type
+  plain = UnionType.new(prog, members)
+  mixed = MixedUnionType.new(prog, members)
+  reference = UnionType.new(prog, [prog.object_type, prog.nil_type] of Type)
+  raise "plain union was not classified as mixed" unless mixed_union_type?(plain)
+  raise "specialized union was not classified as mixed" unless mixed_union_type?(mixed)
+  raise "reference union was classified as mixed" if mixed_union_type?(reference)
+
+  m = ir_module("arm64-apple-macosx")
+  low = Lowerer.new(m, LowerTyper.new(m.types, m.layout, analysis.iyi), analysis.visitor)
+  low.type_ids.assign_all(prog.object_type)
+  unions = [plain.as(Type), mixed.as(Type)] of Type
+  names = ["plain", "specialized"]
+  unions.each_with_index do |union, i|
+    fn = low.begin_main_function(names[i], m.types.func([] of IrType, m.types.void), true)
+    value = low.builder.const_zero(low.typer.llvm_type(union))
+    slot = low.alloca(low.typer.llvm_type(union), "")
+    assign(low, slot, union, int_type, low.builder.const_int(m.types.int32, 12_i64))
+    tid = type_id_of_value(low, analysis.root, value, union)
+    raise "#{names[i]} union used a static type id" unless tid.is_a?(Inst) && tid.as(Inst).op == Op::Load && tid.as(Inst).args[0].is_a?(Inst) && tid.as(Inst).args[0].as(Inst).op == Op::Gep
+    downcast(low, value, int_type, union, true)
+    low.builder.ret_void
+    low.finish_main_function
+    errors = verify_function(m, fn)
+    raise "#{names[i]} union emitted invalid IR: #{errors[0].message}" unless errors.empty?
+  end
+end
+
+def alloca_count(fn : Function) : Int32
+  count = 0
+  fn.blocks.each do |block|
+    block.insts.each do |inst|
+      count += 1 if inst.op == Op::Alloca
+    end
+  end
+  count
+end
+
+def check_tuple_input(low : Lowerer, source : Type, target : Type, name : String) : Nil
+  m = low.module
+  [false, true].each do |loaded|
+    label = loaded ? "#{name}_loaded" : "#{name}_pointer"
+    fn = low.begin_main_function(label, m.types.func([] of IrType, m.types.void), true)
+    value = loaded ? low.builder.const_zero(low.typer.llvm_type(source)) : low.alloca(low.typer.llvm_type(source), "")
+    before = alloca_count(fn)
+    result = downcast(low, value, target, source, true)
+    raise "#{label}: result is not fresh stack storage" unless result.is_a?(Inst) && result.as(Inst).op == Op::Alloca && result.object_id != value.object_id
+    expected = loaded ? 2 : 1
+    actual = alloca_count(fn) - before
+    raise "#{label}: expected #{expected} new allocas, got #{actual}" unless actual == expected
+    low.builder.ret_void
+    low.finish_main_function
+    errors = verify_function(m, fn)
+    raise "#{label}: invalid IR: #{errors[0].message}" unless errors.empty?
+  end
+end
+
+def check_exact_tuple_member(low : Lowerer, member : Type, name : String) : Nil
+  m = low.module
+  prog = low.analysed.program
+  source = MixedUnionType.new(prog, [member, prog.nil_type] of Type)
+  fn = low.begin_main_function(name, m.types.func([] of IrType, m.types.void), true)
+  value = low.alloca(low.typer.llvm_type(source), "")
+  result = downcast(low, value, member, source, true)
+  raise "#{name}: exact member did not read the union payload" unless result.is_a?(Inst) && result.as(Inst).op == Op::Gep
+  low.builder.ret_void
+  low.finish_main_function
+  errors = verify_function(m, fn)
+  raise "#{name}: invalid IR: #{errors[0].message}" unless errors.empty?
+end
+
+def check_tuple_downcast_inputs : Nil
+  analysis = analyse("nil\n", "tuple_downcast_inputs.iyi", true)
+  prog = analysis.visitor.program
+  int_type = prog.lookup_type("Int32").as(Type)
+  bool_type = prog.lookup_type("Bool").as(Type)
+  mixed = MixedUnionType.new(prog, [bool_type, int_type] of Type)
+  source = TupleInstanceType.new(prog, [mixed, int_type] of Type)
+  target = TupleInstanceType.new(prog, [int_type, int_type] of Type)
+  named_source = NamedTupleInstanceType.new(prog, [NamedArgumentType.new("a", int_type), NamedArgumentType.new("b", mixed)] of NamedArgumentType)
+  named_target = NamedTupleInstanceType.new(prog, [NamedArgumentType.new("b", int_type), NamedArgumentType.new("a", int_type)] of NamedArgumentType)
+  m = ir_module("arm64-apple-macosx")
+  low = Lowerer.new(m, LowerTyper.new(m.types, m.layout, analysis.iyi), analysis.visitor)
+  check_tuple_input(low, source, target, "tuple")
+  check_tuple_input(low, named_source, named_target, "named_tuple")
+  check_exact_tuple_member(low, source, "exact_tuple_member")
+  check_exact_tuple_member(low, named_source, "exact_named_tuple_member")
+end
+
+def refuse_compatible_tuple_member(named : Bool) : Nil
+  analysis = analyse("nil\n", "tuple_compatible_member.iyi", true)
+  prog = analysis.visitor.program
+  int_type = prog.lookup_type("Int32").as(Type)
+  bool_type = prog.lookup_type("Bool").as(Type)
+  mixed = MixedUnionType.new(prog, [bool_type, int_type] of Type)
+  source : Type = TupleInstanceType.new(prog, [mixed, int_type] of Type)
+  target : Type = TupleInstanceType.new(prog, [int_type, int_type] of Type)
+  if named
+    source = NamedTupleInstanceType.new(prog, [NamedArgumentType.new("a", int_type), NamedArgumentType.new("b", mixed)] of NamedArgumentType)
+    target = NamedTupleInstanceType.new(prog, [NamedArgumentType.new("b", int_type), NamedArgumentType.new("a", int_type)] of NamedArgumentType)
+  end
+  union = MixedUnionType.new(prog, [source, prog.nil_type] of Type)
+  m = ir_module("arm64-apple-macosx")
+  low = Lowerer.new(m, LowerTyper.new(m.types, m.layout, analysis.iyi), analysis.visitor)
+  low.begin_main_function("compatible_tuple_member", m.types.func([] of IrType, m.types.void), true)
+  value = low.alloca(low.typer.llvm_type(union), "")
+  downcast(low, value, target, union, true)
+  raise "non-member compatible tuple read was accepted"
+end
+
+def refuse_indirect_tuple_element(named : Bool) : Nil
+  analysis = analyse("nil\n", "tuple_indirect_element.iyi", true)
+  prog = analysis.visitor.program
+  int_type = prog.lookup_type("Int32").as(Type)
+  int64_type = prog.lookup_type("Int64").as(Type)
+  bool_type = prog.lookup_type("Bool").as(Type)
+  elements = [] of Type
+  17.times { elements << int64_type }
+  big = TupleInstanceType.new(prog, elements)
+  mixed = MixedUnionType.new(prog, [bool_type, int_type] of Type)
+  source : Type = TupleInstanceType.new(prog, [big, mixed] of Type)
+  target : Type = TupleInstanceType.new(prog, [big, int_type] of Type)
+  if named
+    source = NamedTupleInstanceType.new(prog, [NamedArgumentType.new("a", big), NamedArgumentType.new("b", mixed)] of NamedArgumentType)
+    target = NamedTupleInstanceType.new(prog, [NamedArgumentType.new("a", big), NamedArgumentType.new("b", int_type)] of NamedArgumentType)
+  end
+  m = ir_module("arm64-apple-macosx")
+  low = Lowerer.new(m, LowerTyper.new(m.types, m.layout, analysis.iyi), analysis.visitor)
+  raise "indirect element probe has a direct element" unless low.typer.passed_indirectly?(big)
+  low.begin_main_function("indirect_tuple_element", m.types.func([] of IrType, m.types.void), true)
+  value = low.alloca(low.typer.llvm_type(source), "")
+  downcast(low, value, target, source, true)
+  raise "indirect tuple element was accepted"
+end
+
+def refuse_tuple_shape(mode : String) : Nil
+  analysis = analyse("nil\n", "tuple_shape.iyi", true)
+  prog = analysis.visitor.program
+  int_type = prog.lookup_type("Int32").as(Type)
+  bool_type = prog.lookup_type("Bool").as(Type)
+  source : Type = TupleInstanceType.new(prog, [int_type, bool_type] of Type)
+  target : Type = TupleInstanceType.new(prog, [int_type] of Type)
+  if mode == "named_tuple_size_mismatch"
+    source = NamedTupleInstanceType.new(prog, [NamedArgumentType.new("a", int_type), NamedArgumentType.new("b", bool_type)] of NamedArgumentType)
+    target = NamedTupleInstanceType.new(prog, [NamedArgumentType.new("a", int_type)] of NamedArgumentType)
+  elsif mode == "named_tuple_missing_key"
+    source = NamedTupleInstanceType.new(prog, [NamedArgumentType.new("a", int_type), NamedArgumentType.new("b", bool_type)] of NamedArgumentType)
+    target = NamedTupleInstanceType.new(prog, [NamedArgumentType.new("a", int_type), NamedArgumentType.new("c", bool_type)] of NamedArgumentType)
+  end
+  m = ir_module("arm64-apple-macosx")
+  low = Lowerer.new(m, LowerTyper.new(m.types, m.layout, analysis.iyi), analysis.visitor)
+  low.begin_main_function(mode, m.types.func([] of IrType, m.types.void), true)
+  value = low.alloca(low.typer.llvm_type(source), "")
+  downcast(low, value, target, source, true)
+  raise "incompatible tuple shape was accepted"
+end
+
+def run : Nil
+  args = Program.args
+  if args.empty?
+    # With no arguments the driver checks that the analysis with the lib stand-in runs, and exits 0.
+    analyse("nil\n", "usage_check.iyi", true)
+    puts "usage: port oracle <oracle.ll> | port lower <fixture.iyi> <oracle.ll> | port emit <fixture.iyi> <oracle.ll>"
+    return
+  end
+  mode = args[0]
+  if mode == "oracle"
+    run_oracle(args[1], "::")
+  elsif mode == "lower"
+    run_lower(args[1], args[2], "::", true)
+  elsif mode == "emit"
+    run_emit(args[1], args[2], true)
+  elsif mode == "wrong_union_member"
+    refuse_wrong_union_member
+  elsif mode == "skip_noreturn"
+    skip_noreturn_assignment
+  elsif mode == "union_representations"
+    check_union_representations
+  elsif mode == "tuple_downcast_inputs"
+    check_tuple_downcast_inputs
+  elsif mode == "tuple_compatible_member"
+    refuse_compatible_tuple_member(false)
+  elsif mode == "named_tuple_compatible_member"
+    refuse_compatible_tuple_member(true)
+  elsif mode == "tuple_indirect_element"
+    refuse_indirect_tuple_element(false)
+  elsif mode == "named_tuple_indirect_element"
+    refuse_indirect_tuple_element(true)
+  elsif mode == "tuple_size_mismatch" || mode == "named_tuple_size_mismatch" || mode == "named_tuple_missing_key"
+    refuse_tuple_shape(mode)
+  else
+    raise "unknown mode #{mode}"
+  end
+end
+
+run

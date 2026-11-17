@@ -1,0 +1,9 @@
+def dead_tail(location : String?) : Int32
+  return 0 unless location
+  if location.size > 5
+    return 1
+  end
+  location.size
+end
+
+dead_tail(nil)

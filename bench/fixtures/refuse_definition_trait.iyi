@@ -1,0 +1,9 @@
+trait Sized
+  abstract def size : Int32
+end
+
+def total(item : Sized) : Int32
+  item.length
+end
+
+0

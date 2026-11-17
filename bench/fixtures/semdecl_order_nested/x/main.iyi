@@ -1,0 +1,6 @@
+module x/main
+
+import helper::{Only}
+
+pub class Caller < Only
+end

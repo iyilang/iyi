@@ -1,0 +1,20 @@
+# Compare-exchange returns the old word and success bit in a tuple.
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+struct IyiAtomic
+  @[Primitive(:cmpxchg)]
+  def self.cmpxchg(pointer : Pointer(UInt64), expected : UInt64, desired : UInt64, success : Symbol, failure : Symbol) : Tuple(UInt64, Bool)
+  end
+end
+
+def compare(p : Pointer(UInt64), expected : UInt64, desired : UInt64) : Nil
+  IyiAtomic.cmpxchg(p, expected, desired, :sequentially_consistent, :sequentially_consistent)
+  IyiAtomic.cmpxchg(p, expected, desired, :acquire, :monotonic)
+  nil
+end
+
+x = 0_u64
+compare(pointerof(x), 0_u64, 7_u64)
+LibC.exit(7)

@@ -1,0 +1,176 @@
+import compiler/syntax/parser::{Parser}
+import compiler/syntax/ast::{ASTNode, Def, Expressions, ModuleHeader}
+import compiler/foundation/location::{Location}
+import compiler/semantic/top_level::{SemanticProgram, TopLevelVisitor, Type, ModuleType, NamedType, EnumType, dump_def, dump_program_declarations, dump_tree_declared, dir_of, normalize_path}
+import compiler/semantic/inline_macros::{InlineMacroLedger}
+import compiler/macros/site_scan::{MacroSiteScan}
+import compiler/macros/methods::{MacroMethods}
+
+# Port-side driver for bench/selfhost_semantic_inline_macros_exercise.sh.
+#
+#   selfhost_semantic_inline_macros_exercise <file.iyi>
+#   selfhost_semantic_inline_macros_exercise --ledger <file.iyi>
+#   selfhost_semantic_inline_macros_exercise --sites <file.iyi>
+#
+# The first form loads the file through the port's top-level pass, with the prelude
+# first (as the oracle does, so a prelude type the file names is declared) and the
+# closure of what the file imports and requires, and prints the declarations the
+# file makes, in the form the oracle prints: the trunk's dump of the user types, the
+# built-in types the file declares (a reopen), then each type the file does not
+# declare with the defs it declares on it, as `(reopened)` records. The second loads
+# the same way and prints how the file's own inline macro sites went: each site the
+# pass visited with its outcome and, when refused, the reason, then the counts. The
+# third prints every macro site of the file's own source, as the scan finds it (top
+# level and type bodies, not def bodies), as `site <context> <kind>`. The search path
+# is IYI_PATH.
+module BenchSelfhostInlineMacrosExercise
+  def self.search_path : Array(String)
+    text = ENV["IYI_PATH"]? || ""
+    text.split(":").select { |entry| !entry.empty? }
+  end
+
+  # The project root an import is resolved from first: the entry's directory, moved
+  # up one level for each segment of its module header's path but the last.
+  def self.project_root(node : ASTNode, entry : String) : String
+    root = dir_of(entry)
+    if node.is_a?(Expressions)
+      first = node.as(Expressions).expressions.first?
+      if first.is_a?(ModuleHeader)
+        depth = first.as(ModuleHeader).path.size - 1
+        i = 0
+        while i < depth
+          root = dir_of(root)
+          i = i + 1
+        end
+      end
+    end
+    root
+  end
+
+  def self.entry_of(path : String) : String
+    cwd = ENV["PWD"]? || "."
+    absolute = path.starts_with?("/") ? path : "#{cwd}/#{path}"
+    normalize_path(absolute)
+  end
+
+  # Whether any of a declaration's locations is in the entry file.
+  def self.located_in?(locations : Array(Location)?, entry : String) : Bool
+    return false unless locations
+    locations.any? { |loc| loc.filename == entry }
+  end
+
+  # Loads a file and its closure into a fresh program, the prelude first. Returns the
+  # program and the entry. The entry is declared once: a prelude closure that already
+  # holds it is not visited again.
+  def self.load_program(path : String) : {SemanticProgram, String}
+    entry = entry_of(path)
+    node = Parser.new(File.read(entry), entry).parse
+    prog = SemanticProgram.new
+    prog.search_path = search_path
+    prog.project_root = project_root(node, entry)
+    InlineMacroLedger.reset
+    root = search_path.first? || "."
+    prelude = normalize_path("#{root}/iyi/prelude.iyi")
+    loader = TopLevelVisitor.new(prog, prelude)
+    loader.load_file(prelude)
+    loader.finish
+    unless prog.loaded_files.includes?(entry)
+      prog.loaded_files.add(entry)
+      visitor = TopLevelVisitor.new(prog, entry)
+      node.accept(visitor)
+      visitor.finish
+    end
+    {prog, entry}
+  end
+
+  # The defs a module type holds, its own and its metaclass's (`allocate` aside, and an
+  # enum's `new`), that the entry declares.
+  def self.entry_defs(mod : ModuleType, entry : String) : Array(Def)
+    all_defs = [] of Def
+    mod.defs.each_value do |list|
+      list.each { |d| all_defs << d }
+    end
+    if meta = mod.metaclass?
+      meta.defs.each_value do |list|
+        list.each do |d|
+          next if d.name == "allocate"
+          next if d.name == "new" && mod.is_a?(EnumType)
+          all_defs << d
+        end
+      end
+    end
+    all_defs.select { |d| located_in?([d.location].compact, entry) }
+  end
+
+  # A type the entry does not declare, with the defs the entry declares on it: one
+  # record, `(reopened)`, then each def. Walks every nested type.
+  def self.dump_reopened(t : Type, sb : String::Builder, entry : String) : Nil
+    if t.is_a?(ModuleType) && !located_in?(t.locations, entry)
+      picked = entry_defs(t.as(ModuleType), entry)
+      unless picked.empty?
+        sb << "Type: " << t.full_name << " (reopened)\n"
+        picked.sorted_by { |d| "#{d.receiver ? "self." : ""}#{d.name}" }.each do |d|
+          dump_def(d, sb, "  ")
+        end
+      end
+    end
+    if t.is_a?(NamedType) && !t.is_a?(EnumType)
+      nt = t.as(NamedType)
+      nt.types.keys.sorted.each do |sname|
+        dump_reopened(nt.types[sname], sb, entry)
+      end
+    end
+  end
+
+  def self.dump_file(path : String) : String
+    prog, entry = load_program(path)
+    sb = String::Builder.new
+    sb << dump_program_declarations(prog, entry)
+    prog.types.keys.sorted.each do |name|
+      dump_reopened(prog.types[name], sb, entry)
+    end
+    sb.to_s
+  end
+
+  # The file's own inline macro sites after a load, in visiting order, then the counts.
+  def self.dump_ledger(path : String) : String
+    _prog, entry = load_program(path)
+    sb = ""
+    expanded = 0
+    refused = 0
+    InlineMacroLedger.sites.each do |site|
+      next unless site.file == entry
+      if reason = site.reason
+        refused = refused + 1
+        sb = sb + "refused #{site.kind} #{site.line}:#{site.column} #{reason}\n"
+      else
+        expanded = expanded + 1
+        sb = sb + "expanded #{site.kind} #{site.line}:#{site.column}\n"
+      end
+    end
+    sb + "expanded_total #{expanded}\nrefused_total #{refused}\n"
+  end
+
+  # Every macro site of the file as parsed, with the context the scan gives it.
+  def self.dump_sites(path : String) : String
+    entry = entry_of(path)
+    root = Parser.new(File.read(entry), entry).parse
+    sb = ""
+    MacroSiteScan.scan(root).each do |ref|
+      sb = sb + "site #{ref.context} #{MacroMethods.node_class_name(ref.node)}\n"
+    end
+    sb
+  end
+end
+
+if Program.args.empty?
+  # A self-check for `iyi run` with no arguments: a fresh ledger holds no sites.
+  InlineMacroLedger.reset
+  print "sites #{InlineMacroLedger.sites.size}\n"
+elsif Program.args[0] == "--ledger"
+  print BenchSelfhostInlineMacrosExercise.dump_ledger(Program.args[1])
+elsif Program.args[0] == "--sites"
+  print BenchSelfhostInlineMacrosExercise.dump_sites(Program.args[1])
+else
+  print BenchSelfhostInlineMacrosExercise.dump_file(Program.args[0])
+end

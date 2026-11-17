@@ -1,0 +1,130 @@
+module compiler/lower/locals
+
+import compiler/syntax/ast::{ASTNode, Assign, Block, Call, ClassDef, Def, FunDef, If, LibDef, Macro, MacroExpression, MacroFor, MacroIf, MacroVerbatim, ModuleDef, Out, Path, ProcLiteral, TypeDeclaration, UninitializedVar, Var}
+import compiler/syntax/visitor::{Visitor}
+import compiler/ir/values::{Value}
+import compiler/lower/cast::{assign}
+import compiler/lower/helpers::{llvm_nil}
+import compiler/lower/context::{Lowerer, LowerVar}
+import compiler/semantic/main_visitor::{MainVisitor}
+import compiler/semantic/top_level::{NoReturnType, Type, VoidType}
+
+# Collect locals in the order analysis first creates them, following the same
+# expansions that lowering uses while keeping nested scopes separate.
+pub class LocalOrder < Visitor
+  getter vars : Array(Var)
+  getter types : Hash(String, Type)
+  getter declared : Bool
+
+  def initialize(@analysed : MainVisitor)
+    @vars = [] of Var
+    @types = Hash(String, Type).new
+    @names = Set(String).new
+    @declared = false
+    @macro_depth = 0
+  end
+
+  def record(node : ASTNode, written_type : Type? = nil) : Nil
+    if node.is_a?(Var)
+      var = node.as(Var)
+      if type = written_type || @analysed.type_of?(var)
+        if previous = @types[var.name]?
+          @types[var.name] = @analysed.program.type_merge(previous, type)
+        else
+          @types[var.name] = type
+        end
+      end
+      unless var.name == "self" || @names.includes?(var.name)
+        @names.add(var.name)
+        @vars << var
+      end
+    end
+  end
+
+  def visit_any(node : ASTNode) : Bool
+    return false if node.is_a?(Block) || node.is_a?(Def) || node.is_a?(FunDef) || node.is_a?(ProcLiteral) || node.is_a?(ClassDef) || node.is_a?(ModuleDef) || node.is_a?(LibDef) || node.is_a?(Macro)
+    return false if node.is_a?(If) && node.as(If).iyi_definition_probe
+    return false if node.is_a?(Assign) && node.as(Assign).target.is_a?(Path)
+
+    macro_node = node.is_a?(MacroIf) || node.is_a?(MacroFor) || node.is_a?(MacroExpression) || node.is_a?(MacroVerbatim)
+    if expanded = @analysed.expansions[node]?
+      @macro_depth += 1 if macro_node
+      expanded.accept(self)
+      @macro_depth -= 1 if macro_node
+      return false
+    end
+    if node.is_a?(Call)
+      if expanded = node.as(Call).expanded
+        @macro_depth += 1
+        expanded.accept(self)
+        @macro_depth -= 1
+        return false
+      end
+    end
+
+    if node.is_a?(TypeDeclaration)
+      @declared = true if @macro_depth == 0
+      declaration = node.as(TypeDeclaration)
+      # Hosted codegen.cr:2562-2583 allocates the MetaVar's write-union,
+      # not its freeze_type. An initializer contributes its actual type.
+      written_type : Type? = nil
+      if value = declaration.value
+        written_type = @analysed.type_of?(value)
+      end
+      record(declaration.var, written_type)
+    elsif node.is_a?(UninitializedVar)
+      record(node.as(UninitializedVar).var)
+    elsif node.is_a?(Out)
+      record(node.as(Out).exp)
+    end
+    true
+  end
+
+  def end_visit(node : Assign) : Nil
+    record(node.target)
+  end
+end
+
+pub def reset_nil_slot(low : Lowerer, pointer : Value, type : Type) : Nil
+  old = low.builder.insert_block
+  low.builder.position_at_end(low.current_alloca_block)
+  assign(low, pointer, type, low.analysed.program.nil_type, llvm_nil(low))
+  if block = old
+    low.builder.position_at_end(block)
+  end
+  nil
+end
+
+# Hosted reset_nilable_vars runs at every block yield or inlined-def entry.
+pub def reset_nilable_locals(low : Lowerer) : Nil
+  if resets = low.current_context.nil_resets
+    low.current_context.vars.each do |name, var|
+      if resets.includes?(name) && var.type.nilable?
+        assign(low, var.pointer, var.type, low.analysed.program.nil_type, llvm_nil(low))
+      end
+    end
+  end
+end
+
+pub def preallocate_locals(low : Lowerer, body : ASTNode, skip : Array(String)) : Nil
+  collector = LocalOrder.new(low.analysed)
+  body.accept(collector)
+  resets = low.current_context.nil_resets
+  collector.vars.each do |var|
+    name = var.name
+    next if skip.includes?(name) || low.current_context.vars[name]?
+    t = low.analysed.type_of?(var)
+    if unions = low.current_context.var_unions
+      t = unions[name]? || t
+    end
+    # Hosted codegen.cr:2570 assigns Nil storage to a local whose type was
+    # never reached, including a synthetic binding in an unreachable branch.
+    type = t.nil? ? low.analysed.program.nil_type : t.as(Type)
+    next if type.is_a?(VoidType) || type.is_a?(NoReturnType)
+    pointer = low.alloca(low.typer.llvm_type(type), name)
+    low.current_context.vars[name] = LowerVar.new(pointer, type, false)
+    if r = resets
+      reset_nil_slot(low, pointer, type) if r.includes?(name) && type.nilable?
+    end
+  end
+end

@@ -1,0 +1,28 @@
+lib LibC
+  fun putchar(value : Int32) : Int32
+  fun exit(status : Int32) : NoReturn
+end
+
+def macro_local(values : Int32) : Int32
+  {% for ignored in [0] %}
+    values
+  {% end %}
+end
+
+def values : Int32
+  66
+end
+
+def explicit(values : Int32) : Int32
+  values()
+end
+
+def qualified(values : Int32) : Int32
+  ::values
+end
+
+LibC.putchar(macro_local(65))
+LibC.putchar(explicit(65))
+LibC.putchar(qualified(65))
+LibC.putchar(10)
+LibC.exit(0)

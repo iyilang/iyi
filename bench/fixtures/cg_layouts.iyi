@@ -1,0 +1,42 @@
+class LayoutNode
+  @id : Int32
+  @val : Int64
+  @tag : Int32
+
+  def initialize(@id : Int32, @val : Int64, @tag : Int32)
+  end
+
+  def id : Int32
+    @id
+  end
+
+  def val : Int64
+    @val
+  end
+
+  def tag : Int32
+    @tag
+  end
+end
+
+struct LayoutPoint
+  @x : Int32
+  @y : Int32
+
+  def initialize(@x : Int32, @y : Int32)
+  end
+
+  def x : Int32
+    @x
+  end
+
+  def y : Int32
+    @y
+  end
+end
+
+fun test_layout_offsets : Int32
+  p = LayoutPoint.new(15, 27)
+  n = LayoutNode.new(10, 20_i64, 30)
+  p.x &+ p.y &+ n.id &+ n.tag
+end

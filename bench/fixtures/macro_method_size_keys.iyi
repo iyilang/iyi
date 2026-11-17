@@ -1,0 +1,7 @@
+macro sizes(s, h, nt, arr)
+  {{s.size}} {{h.size}} {{nt.size}} {{arr.size}}
+  {{h.keys}} {{nt.keys}}
+  {{s.empty?}} {{h.empty?}} {{nt.empty?}} {{"".empty?}}
+end
+
+sizes("abc", {"a" => 1, "b" => 2}, {x: 1, y: 2, z: 3}, [1, 2])

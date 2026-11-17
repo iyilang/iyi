@@ -1,0 +1,67 @@
+module compiler/lower/gc_table
+
+# The collector's program-local type-id table (hosted codegen/gc_layouts.cr).
+import compiler/ir/function::{Global, Linkage}
+import compiler/ir/values::{Value}
+import compiler/lower/context::{Lowerer}
+import compiler/lower/layouts::{GcLayouts, GcLayoutRow}
+import compiler/lower/primitives::{define_headed_bytes}
+import compiler/semantic/top_level::{NonGenericClassType}
+import compiler/types/types::{GenericClassInstanceType, StaticArrayInstanceType}
+
+private class GcTableEntry
+  getter id : Int32
+  getter layout : GcLayoutRow
+
+  def initialize(@id : Int32, @layout : GcLayoutRow)
+  end
+end
+
+# This lowering emits a single module without travelling artifact objects, the
+# hosted case in which iyi_internalise? gives the table internal linkage.
+pub def define_gc_layouts(low : Lowerer) : Nil
+  define_headed_bytes(low)
+  layouts = GcLayouts.new(low.typer)
+  entries = [] of GcTableEntry
+  low.type_ids.numbered_types.each do |type|
+    next unless type.is_a?(NonGenericClassType) || type.is_a?(GenericClassInstanceType)
+    next if type.is_a?(StaticArrayInstanceType)
+    id = low.type_ids.type_id(type)
+    next if id == 0
+    entry = GcTableEntry.new(id, layouts.gc_type_layout(type))
+    index = 0
+    while index < entries.size && entries[index].id < id
+      index += 1
+    end
+    entries.insert(index, entry)
+  end
+
+  words = [] of Int64
+  offsets = [] of Int64
+  words << entries.size.to_i64
+  entries.each do |entry|
+    layout = entry.layout
+    words << entry.id.to_i64
+    words << layout.alloc_size
+    words << layout.scan_cap
+    words << layout.scan_offsets.size.to_i64
+    words << offsets.size.to_i64
+    layout.scan_offsets.each { |offset| offsets << offset }
+  end
+  offsets.each { |offset| words << offset }
+  i64 = low.module.types.int64
+  values = [] of Value
+  words.each { |word| values << low.builder.const_int(i64, word).as(Value) }
+  initializer = low.builder.const_array(i64, values)
+  table = low.module.add_global("__iyi_gc_layouts:table", initializer.type)
+  table.linkage = Linkage::Internal
+  table.global_constant = true
+  table.initializer = initializer
+
+  symbol = low.module.get_global?("__iyi_gc_layouts")
+  symbol = low.module.add_global("__iyi_gc_layouts", low.module.types.ptr(0)) if symbol.nil?
+  symbol.as(Global).initializer = table
+  marking = low.module.get_global?("__iyi_marking")
+  marking = low.module.add_global("__iyi_marking", low.module.types.int8) if marking.nil?
+  marking.as(Global).initializer = low.builder.const_int(low.module.types.int8, 0_i64)
+end

@@ -1,0 +1,418 @@
+module compiler/lower/context
+
+# The state of the typed lowering, ported from `src/compiler/iyi/codegen/context.cr`
+# (the hosted `CodeGenVisitor::Context`) and the parts of `codegen.cr` that every
+# visitor reads: the builder, the alloca block and its rule, `in_main`, and whether
+# the value of the expression being visited is wanted (`request_value`, the hosted
+# `@needs_value`).
+#
+# The hosted names are kept. Fields the first increments do not read (closures,
+# while and break phis, the debug state, the preemption and runtime flags) are not
+# declared here yet: the increment that reads one adds it, and NEEDS.md names it.
+#
+# The alloca rule (hosted `new_entry_block`, `br_from_alloca_to_entry`,
+# `in_alloca_block`): a function starts with an `alloca` block and an `entry` block.
+# Allocas go into the alloca block whatever block is current. When the function is
+# finished, an alloca block with nothing in it is removed from the function, and an
+# alloca block with allocas branches to the entry block.
+
+import compiler/ir/module::{Module}
+import compiler/foundation/location::{Location}
+import compiler/ir/function::{Function}
+import compiler/syntax/ast::{ASTNode, ExceptionHandler, FunDef}
+import compiler/ir/inst::{Block, Inst}
+import compiler/ir/values::{Value}
+import compiler/ir/types::{TypeKind}
+import compiler/ir/builder::{Builder}
+import compiler/ir/types::{IrType}
+import compiler/lower/typer::{LowerTyper}
+import compiler/semantic/main_visitor::{MainVisitor}
+import compiler/semantic/top_level::{Type}
+import compiler/lower/type_id::{LowerTypeIds}
+import compiler/semantic/closures::{ClosureFacts}
+import compiler/lower/globals::{LowerGlobals}
+import compiler/semantic/spawn_placement::{SpawnAnalysis}
+
+# A phi a branch of a block call adds its value to: the `break`, `next` and `return` of an inlined
+# block call write their values here (hosted `Phi#add`). `LowerPhi` (phi.iyi) implements it. The trait
+# lives in this module because phi.iyi imports this one. The semantic join type is nil when no value
+# is merged; passed-by-value joins merge addresses of values of that type.
+pub trait BranchPhi
+  abstract def add_branch(low : Lowerer, value : Value?, last : Bool) : Nil
+  abstract def semantic_join_type : Type?
+end
+
+# The visitor of a node, which the calls and the functions call back into when they
+# emit an argument or a body. The core's dispatch (lower.iyi) implements it, so the
+# calls and functions files need not import the dispatch: iyi refuses import cycles.
+pub trait BodyVisit
+  abstract def visit_body(low : Lowerer, node : ASTNode) : Nil
+end
+
+# A variable of the function being lowered: its address and the analysed type it
+# was declared with (the hosted `LLVMVar`).
+pub class LowerVar
+  getter pointer : Value
+  getter type : Type
+  property closure_slot : Bool = false
+  property already_loaded : Bool
+
+  def initialize(@pointer : Value, @type : Type, @already_loaded : Bool = false)
+  end
+end
+
+# The hosted `CodeGenVisitor::Context`: the function being lowered, the analysed type
+# of `self` (nil at the top level), its variables, and the type it returns.
+pub class LowerContext
+  getter fun : Function
+  getter fun_type : IrType
+  getter type : Type?
+  getter vars : Hash(String, LowerVar)
+  property return_type : Type?
+  # True for the unit that begin_main_function makes (`__crystal_main`): a return there has no def to leave.
+  property top_level : Bool
+  # The union type of each variable the function's body assigns more than one type (the analysis's
+  # `def_var_unions` for the instantiated def, keyed by name). A variable in this table is stored as its union.
+  property var_unions : Hash(String, Type)?
+  # Locals read while possibly unassigned, initialized to nil at allocation.
+  property nil_resets : Set(String)?
+  # Heap context shared by the enclosing function and its proc literals.
+  property closure_type : IrType?
+  property closure_ptr : Value?
+  property closure_names : Array(String)
+  property closure_types : Array(Type)
+  property closure_facts : ClosureFacts?
+  property closure_parent : LowerContext?
+  # The self value stored in this context's own heap block, if any.
+  property closure_self : Type?
+  # Original source location while lowering a macro expansion.
+  property macro_origin : Location?
+  # The block frame and the phis of the context (hosted Context#return_phi, break_phi, next_phi, block, block_context).
+  property return_phi : BranchPhi?
+  property break_phi : BranchPhi?
+  property next_phi : BranchPhi?
+  property block_node : ASTNode?
+  property block_context : LowerContext?
+  # AST identities mark the ensure boundary for the corresponding control exit.
+  property return_target : ASTNode?
+  property break_target : ASTNode?
+  property next_target : ASTNode?
+
+  def initialize(@fun : Function, @fun_type : IrType, @type : Type?, @vars : Hash(String, LowerVar))
+    @return_type = nil
+    @top_level = false
+    @var_unions = nil
+    @nil_resets = nil
+    @closure_type = nil
+    @closure_ptr = nil
+    @closure_names = [] of String
+    @closure_types = [] of Type
+    @closure_facts = nil
+    @closure_parent = nil
+    @closure_self = nil
+    @macro_origin = nil
+    @return_phi = nil
+    @break_phi = nil
+    @next_phi = nil
+    @block_node = nil
+    @block_context = nil
+    @return_target = nil
+    @break_target = nil
+    @next_target = nil
+  end
+
+  def copy_closure_from(other : LowerContext) : Nil
+    @closure_type = other.closure_type
+    @closure_ptr = other.closure_ptr
+    @closure_names = other.closure_names
+    @closure_types = other.closure_types
+    @closure_facts = other.closure_facts
+    @closure_parent = other.closure_parent
+    @closure_self = other.closure_self
+  end
+end
+
+# What `enter_main` saves on the way in and `leave_main` puts back on the way out.
+pub class LowerSavedState
+  getter context : LowerContext?
+  getter alloca_block : Block?
+  getter entry_block : Block?
+  getter insert_block : Block?
+  getter needs_value : Bool
+  getter in_main : Bool
+  property ensure_nodes : Array(ExceptionHandler) = [] of ExceptionHandler
+  property ensure_contexts : Array(LowerContext) = [] of LowerContext
+  property ensure_boundaries : Hash(UInt64, Int32) = Hash(UInt64, Int32).new
+
+  def initialize(@context : LowerContext?, @alloca_block : Block?, @entry_block : Block?, @insert_block : Block?, @needs_value : Bool, @in_main : Bool)
+  end
+end
+
+# The visitor's state while it lowers one unit: the IR module it writes, the builder
+# positioned in it, the analysed program it reads, and the function being lowered.
+pub class Lowerer
+  getter module : Module
+  getter typer : LowerTyper
+  getter analysed : MainVisitor
+  getter builder : Builder
+  property context : LowerContext?
+  property alloca_block : Block?
+  property entry_block : Block?
+  # The hosted `@last`: the value of the expression visited last, nil before any.
+  property last : Value?
+  # The hosted `@needs_value` (`request_value`): whether the visited expression's value is used.
+  property needs_value : Bool
+  # The hosted `@in_main`: whether code is being emitted into the main module from inside a unit.
+  property in_main : Bool
+  # The type of the program's last expression, which `__crystal_main` returns.
+  property main_ret_type : Type?
+  # The node visitor the lowering calls into from functions and calls (installed by `codegen_program`).
+  property body_visitor : BodyVisit?
+  # Whole-program kept-code placement; nil for standalone per-def probes.
+  property spawn_analysis : SpawnAnalysis?
+  # The hosted `break_phi`/`next` targets of the innermost while: the block `next` branches to, and the exit block `break` branches to (made at the first break).
+  property loop_next : Block?
+  property loop_break : Block?
+  property loop_target : ASTNode?
+  # The hosted `@strings`: the program's pointer to each literal, by text. Under iyi's
+  # layout that pointer is the object past the header word, not the global.
+  property strings : Hash(String, Value)
+  # The hosted `@symbols_by_index`: the program's symbol names in index order (a symbol literal is its index).
+  property symbol_names : Array(String)
+  # The type id of String, which its constants carry first (the hosted `llvm_id.type_id(program.string)`).
+  property string_type_id : Int32
+  # The type ids of the program (the hosted `llvm_id`), numbered by codegen_program before any function is lowered.
+  property type_ids : LowerTypeIds
+  # The hosted per-constant state (read flag, no-init flag, initialised value): see globals.iyi.
+  property globals : LowerGlobals
+  # The funs with a body already emitted, by their real name (hosted External#dead): a fun is emitted once.
+  property fun_defs_done : Hash(String, Bool)
+  # Names this lowerer is in the middle of emitting. A recursive call finds the function
+  # here. A leftover from a probe that died is not: that lowerer is gone.
+  property emitting : Hash(String, Bool)
+  # Diagnostic builds only: emitted function name to refusal and attribution.
+  property stub_defs : Hash(String, String)
+  property stubbed_defs : Hash(String, String)
+  # The funs with a body the program never calls (hosted @unused_fun_defs): each is declared at its visit and its body is
+  # emitted at the end of the module (emit_unused_fun_defs).
+  property unused_fun_defs : Array(FunDef)
+  # The hosted struct spill of a call (call.cr:707-713), read by the receiver of a call: the object_id of the call node
+  # that spilled its struct result last (0 for none), and the spill slot, whose pointer is that receiver's self.
+  property spill_node : UInt64
+  property spill_slot : Value?
+  # The object_id of the call node being lowered as a receiver, whose struct result is wanted only as its spill slot (0 for none).
+  property receiver_node : UInt64
+  # The object_id of a receiver whose value an inlined literal body never reads (0 for none): its struct result is
+  # spilled as the hosted call spills it, and no value is read back.
+  property receiver_unused : UInt64
+  # The number the last renamed global took (LLVM's `ValueSymbolTable::LastUnique`, per module): a global whose name is
+  # taken gets a dot and the next number (unique_global_name, helpers.iyi).
+  property last_unique : Int64
+  # The hosted `@proc_counts`: the literals of each name the module has lowered, so a second literal of one name is
+  # `~proc2...` (proc.iyi, proc_literal_name).
+  property proc_counts : Hash(String, Int32)
+  # Per-function ensure state. Keys use node identity, not structural AST equality.
+  property ensure_nodes : Array(ExceptionHandler)
+  property ensure_contexts : Array(LowerContext)
+  property ensure_boundaries : Hash(UInt64, Int32)
+
+  def initialize(@module : Module, @typer : LowerTyper, @analysed : MainVisitor)
+    @builder = Builder.new(@module)
+    @context = nil
+    @alloca_block = nil
+    @entry_block = nil
+    @last = nil
+    @needs_value = false
+    @in_main = false
+    @main_ret_type = nil
+    @body_visitor = nil
+    @spawn_analysis = nil
+    @loop_next = nil
+    @loop_break = nil
+    @loop_target = nil
+    @strings = Hash(String, Value).new
+    @symbol_names = [] of String
+    @string_type_id = 0
+    @type_ids = LowerTypeIds.new
+    @globals = LowerGlobals.new
+    @spill_node = 0_u64
+    @spill_slot = nil
+    @receiver_node = 0_u64
+    @receiver_unused = 0_u64
+    @last_unique = 0_i64
+    @fun_defs_done = Hash(String, Bool).new
+    @emitting = Hash(String, Bool).new
+    @stub_defs = Hash(String, String).new
+    @stubbed_defs = Hash(String, String).new
+    @unused_fun_defs = [] of FunDef
+    @proc_counts = Hash(String, Int32).new
+    @ensure_nodes = [] of ExceptionHandler
+    @ensure_contexts = [] of LowerContext
+    @ensure_boundaries = Hash(UInt64, Int32).new
+  end
+
+  # The function being lowered (the hosted `context`). Raises when none is.
+  def current_context : LowerContext
+    c = @context
+    raise "BUG: no function is being lowered (hosted codegen.cr: context)" if c.nil?
+    c.as(LowerContext)
+  end
+
+  def current_fun : Function
+    current_context.fun
+  end
+
+  # The hosted `new_block`: a block appended to the function being lowered.
+  def new_block(name : String = "") : Block
+    current_fun.append_basic_block(name)
+  end
+
+  # The hosted `new_blocks`: one block per name, appended in order.
+  def new_blocks(names : Array(String)) : Array(Block)
+    blocks = [] of Block
+    names.each do |name|
+      blocks << new_block(name)
+    end
+    blocks
+  end
+
+  # The hosted `new_entry_block`: the alloca block and the entry block, in that
+  # order, with the builder positioned at the entry block.
+  def new_entry_block : Nil
+    blocks = new_blocks(["alloca", "entry"])
+    @alloca_block = blocks[0]
+    @entry_block = blocks[1]
+    @builder.position_at_end(blocks[1])
+  end
+
+  # The hosted `alloca_block`: the block allocas go into. Raises when there is none.
+  def current_alloca_block : Block
+    b = @alloca_block
+    raise "BUG: this function has no alloca block (hosted codegen.cr: alloca_block)" if b.nil?
+    b.as(Block)
+  end
+
+  def current_entry_block : Block
+    b = @entry_block
+    raise "BUG: this function has no entry block (hosted codegen.cr: entry_block)" if b.nil?
+    b.as(Block)
+  end
+
+  # The hosted `br_block_chain`: each block branches to the next, and the builder
+  # is put back where it was.
+  def br_block_chain(blocks : Array(Block)) : Nil
+    old = @builder.insert_block
+    i = 0
+    while i < blocks.size - 1
+      @builder.position_at_end(blocks[i])
+      @builder.br(blocks[i + 1])
+      i += 1
+    end
+    if o = old
+      @builder.position_at_end(o.as(Block))
+    end
+  end
+
+  # The hosted `br_from_alloca_to_entry`: an alloca block with nothing in it is
+  # removed from the function; otherwise it branches to the entry block.
+  def br_from_alloca_to_entry : Nil
+    alloca = current_alloca_block
+    if alloca.insts.empty?
+      current_fun.blocks.delete(alloca)
+    else
+      br_block_chain([alloca, current_entry_block])
+    end
+  end
+
+  # The hosted `in_alloca_block` and `alloca`: an alloca placed in the alloca block,
+  # whatever block the builder is in, which is put back afterwards.
+  def alloca(type : IrType, name : String = "") : Inst
+    old = @builder.insert_block
+    @builder.position_at_end(current_alloca_block)
+    inst = @builder.alloca(type, name)
+    inst.alignment = alloca_alignment(type, @typer)
+    if o = old
+      @builder.position_at_end(o.as(Block))
+    end
+    inst
+  end
+
+  # The hosted `define_main_function` without its body: a function of the module with
+  # the given type, made the one being lowered. Its body is emitted after this call,
+  # and closed with `finish_main_function`. With `needs_alloca` the body starts in the
+  # alloca and entry blocks; otherwise in a plain entry block.
+  def begin_main_function(name : String, fun_type : IrType, needs_alloca : Bool) : Function
+    fn = @module.define_function(name, fun_type)
+    ctx = LowerContext.new(fn, fun_type, nil, Hash(String, LowerVar).new)
+    ctx.top_level = true
+    @context = ctx
+    @alloca_block = nil
+    @entry_block = nil
+    if needs_alloca
+      new_entry_block
+    else
+      @builder.position_at_end(new_block("entry"))
+    end
+    fn
+  end
+
+  # The end of the hosted `define_main_function`: the alloca block branches to the
+  # entry block, or is removed when it is empty.
+  def finish_main_function : Nil
+    if @alloca_block.nil?
+      return
+    end
+    br_from_alloca_to_entry
+  end
+
+  # Save and clear the handler stack when code generation enters another function.
+  def save_function_state : LowerSavedState
+    saved = LowerSavedState.new(@context, @alloca_block, @entry_block, @builder.insert_block, @needs_value, @in_main)
+    saved.ensure_nodes = @ensure_nodes
+    saved.ensure_contexts = @ensure_contexts
+    saved.ensure_boundaries = @ensure_boundaries
+    @ensure_nodes = [] of ExceptionHandler
+    @ensure_contexts = [] of LowerContext
+    @ensure_boundaries = Hash(UInt64, Int32).new
+    saved
+  end
+
+  # The hosted `in_main`, the save half: the function being lowered, its blocks, the
+  # value flags and the builder's place, to put back by `leave_main`. Code emitted
+  # between the two belongs to the main module.
+  def enter_main : LowerSavedState
+    saved = save_function_state
+    @in_main = true
+    saved
+  end
+
+  # The hosted `in_main`, the restore half. A nested `in_main` puts back the state it
+  # found, so the outer one is still in effect afterwards.
+  def leave_main(saved : LowerSavedState) : Nil
+    @context = saved.context
+    @alloca_block = saved.alloca_block
+    @entry_block = saved.entry_block
+    @needs_value = saved.needs_value
+    @in_main = saved.in_main
+    @ensure_nodes = saved.ensure_nodes
+    @ensure_contexts = saved.ensure_contexts
+    @ensure_boundaries = saved.ensure_boundaries
+    if b = saved.insert_block
+      @builder.position_at_end(b.as(Block))
+    end
+  end
+end
+
+# The alignment an alloca is emitted with. The hosted code writes none, so LLVM gives the alloca the
+# preferred alignment of its type: the same as the ABI alignment for an int, a float and a pointer. An aggregate
+# (a struct, and the Nil type, which is an empty struct) is preferred 8 bytes or its ABI alignment if that is
+# larger: the hosted module's `%Point` alloca is `align 8` with an ABI alignment of 4 (lower_ivar_struct), and the
+# empty Nil struct is `align 8` where its ABI alignment is 1 (bench/fixtures/lower_cond_nil.iyi).
+pub def alloca_alignment(type : IrType, typer : LowerTyper) : Int32
+  if type.kind == TypeKind::Struct
+    abi = typer.align_of(type)
+    return abi if abi > 8
+    return 8
+  end
+  typer.align_of(type)
+end

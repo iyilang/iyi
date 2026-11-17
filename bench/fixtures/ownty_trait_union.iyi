@@ -1,0 +1,14 @@
+trait Visit
+end
+
+class Frame
+  @phi : Visit?
+  @depth : Int32
+  @name : String?
+
+  def initialize
+    @phi = nil
+    @depth = 0
+    @name = nil
+  end
+end

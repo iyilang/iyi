@@ -1,0 +1,5 @@
+module const_ptr_table
+
+# The hosted compiler's program with the same results as const_ptr_table.ir: the second entry of a constant table
+# of two names, then the first.
+puts "two one"

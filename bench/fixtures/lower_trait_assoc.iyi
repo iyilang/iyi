@@ -1,0 +1,16 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+trait ItemSource
+  type Item
+end
+
+struct Holder
+end
+
+impl ItemSource for Holder
+  type Item = Int32
+end
+
+LibC.exit(23)

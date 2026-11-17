@@ -1,0 +1,21 @@
+fun abs_val(x : Int32) : Int32
+  if x < 0
+    0 &- x
+  else
+    x
+  end
+end
+
+fun max_val(a : Int32, b : Int32) : Int32
+  if a > b
+    a
+  else
+    b
+  end
+end
+
+fun main(argc : Int32, argv : Pointer(Pointer(UInt8))) : Int32
+  v1 = abs_val(0 &- 25)
+  v2 = max_val(17, 9)
+  v1 &+ v2
+end

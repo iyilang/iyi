@@ -1,0 +1,5 @@
+import bodies_scope_user::{Reader}
+
+r = Reader.new
+r.read
+r.again

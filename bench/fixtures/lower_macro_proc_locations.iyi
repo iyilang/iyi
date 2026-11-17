@@ -1,0 +1,20 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+macro inner_reader
+  -> { value }
+end
+
+macro outer_reader
+  inner_reader
+end
+
+def read_both
+  value = 20
+  first = outer_reader
+  second = -> { value &+ 2 }
+  first.call &+ second.call
+end
+
+LibC.exit(read_both &- 42)

@@ -1,0 +1,12 @@
+class OwnerBase
+  def inherited
+    1
+  end
+
+  def self.class_method
+    2
+  end
+end
+
+class OwnerChild < OwnerBase
+end

@@ -1,0 +1,13 @@
+module M
+  @@value : Int32 = 7
+
+  def self.value : Int32
+    @@value
+  end
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+LibC.exit(M.value)

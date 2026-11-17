@@ -1,0 +1,94 @@
+@[Unsafe("reports lexical block-local failures through the process exit status")]
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def once(value : Int32, &)
+  yield value
+end
+
+def separate_local : Int32
+  total = 3
+  once(7) do |part|
+    cleaned = part
+    total = total &+ cleaned
+    LibC.exit(1) unless cleaned == 7
+  end
+  cleaned = true
+  LibC.exit(2) unless cleaned && total == 10
+  0
+end
+
+def conditional_local(origin : Bool) : Int32
+  if origin
+    once(7) do |part|
+      cleaned = part
+      LibC.exit(3) unless cleaned == 7
+    end
+  else
+    cleaned = true
+    LibC.exit(4) unless cleaned
+  end
+  0
+end
+
+def nested_local : Int32
+  sum = 0
+  once(7) do |first|
+    once(first) do |second|
+      inner = second
+      sum = sum &+ inner
+    end
+    inner = true
+    LibC.exit(5) unless inner
+  end
+  LibC.exit(6) unless sum == 7
+  0
+end
+
+def relay(value : Int32, &)
+  once(value) do |part|
+    staged = part
+    LibC.exit(7) unless staged == value
+  end
+  staged = true
+  LibC.exit(8) unless staged
+  yield value
+end
+
+def inlined_local : Int32
+  answer = relay(8) { |value| value &+ 1 }
+  LibC.exit(9) unless answer == 9
+  0
+end
+
+def declared_local : Int32
+  once(7) do |part|
+    held : Int32 = part
+    LibC.exit(10) unless held == 7
+  end
+  held = true
+  LibC.exit(11) unless held
+  0
+end
+
+def fun_reached(seed : Int32) : Int32
+  once(seed) do |part|
+    private_value = part
+    LibC.exit(12) unless private_value == seed
+  end
+  private_value = true
+  LibC.exit(13) unless private_value
+  0
+end
+
+fun via_fun(seed : Int32) : Int32
+  once(seed) do |part|
+    if !(part == seed)
+      LibC.exit(14)
+    end
+  end
+  fun_reached(seed)
+end
+
+LibC.exit(separate_local &+ conditional_local(true) &+ conditional_local(false) &+ nested_local &+ inlined_local &+ declared_local &+ via_fun(9))

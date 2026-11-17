@@ -1,0 +1,20 @@
+module sem_bodies_unit_scope
+
+import bodies_unit_scope_helper::{imported_value}
+
+def data_base : Int32
+  7
+end
+
+def sibling(value : Int32) : Int32
+  value + data_base
+end
+
+class Writer
+  def write : Int32
+    sibling(data_base)
+  end
+end
+
+Writer.new.write
+imported_value(3)

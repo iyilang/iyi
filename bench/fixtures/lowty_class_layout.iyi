@@ -1,0 +1,13 @@
+# The same class without IyiRuntimeLock: Crystal's object layout, the type id as an i32 in
+# front of the fields (hosted Program#iyi_object_layout? is false).
+class Point
+  @x : Int32
+  @y : Bool
+
+  def initialize
+    @x = 0
+    @y = true
+  end
+end
+
+# type: Point

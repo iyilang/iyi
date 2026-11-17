@@ -1,0 +1,20 @@
+lib LibC
+  fun putchar(value : Int32) : Int32
+  fun exit(status : Int32) : NoReturn
+end
+
+def recursive_inferred_loop(n : Int32)
+  value = 0
+  while n > 0
+    if n > 1
+      recursive_inferred_loop(n &- 1)
+    end
+    value = value &+ 1
+    break
+  end
+  value
+end
+
+value = recursive_inferred_loop(3)
+LibC.putchar(value &+ 48)
+LibC.exit(value)

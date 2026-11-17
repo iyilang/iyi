@@ -1,0 +1,6 @@
+module mem
+
+# The hosted compiler's program with the same results as mem.ir. The copied and moved bytes read 1 at 0 and 4, 0 at
+# 8, and the set bytes read 9 at 12. A 100-byte overlapping move leaves 5 at index 2, and the copy of the array holds
+# 7 at index 1.
+puts "1 1 0 9 5 7"

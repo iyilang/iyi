@@ -1,0 +1,32 @@
+class Alpha
+end
+
+class Beta
+end
+
+class Gamma
+end
+
+def number(value : Alpha | Beta | Gamma) : Int32
+  case value
+  when Alpha
+    1
+  when Beta
+    2
+  else
+    3
+  end
+end
+
+def choose(n : Int32) : Int32
+  value = if n == 0
+            Alpha.new
+          elsif n == 1
+            Beta.new
+          else
+            Gamma.new
+          end
+  number(value)
+end
+
+choose(0) &+ choose(1) &+ choose(2)

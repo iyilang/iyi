@@ -1,0 +1,29 @@
+import compiler/syntax/parser::{Parser}
+import compiler/syntax/ast::{Call, Def, NilLiteral, Primitive}
+import compiler/semantic/call::{CallRecalculation}
+import compiler/semantic/top_level::{SemanticProgram, Type}
+import compiler/types/types::{TupleInstanceType}
+import compiler/types/type_system::{TypeSystem}
+
+program = SemanticProgram.new
+ts = TypeSystem.new(program)
+tuple = TupleInstanceType.new(program, [program.types["Int32"], program.types["String"]] of Type)
+scalar_call = Parser.new("x[0]", "tuple.iyi").parse.as(Call)
+range_call = Parser.new("x[0..0]", "tuple.iyi").parse.as(Call)
+empty_call = Parser.new("x[1...1]", "tuple.iyi").parse.as(Call)
+dynamic_call = Parser.new("x[i]", "tuple.iyi").parse.as(Call)
+missing_call = Parser.new("x[5]?", "tuple.iyi").parse.as(Call)
+scalar = CallRecalculation.check_tuple_indexer(tuple, scalar_call.name, scalar_call.args, ts, program).as(Def)
+range = CallRecalculation.check_tuple_indexer(tuple, range_call.name, range_call.args, ts, program).as(Def)
+empty = CallRecalculation.check_tuple_indexer(tuple, empty_call.name, empty_call.args, ts, program).as(Def)
+raise "scalar and singleton range share a target" if scalar.object_id == range.object_id
+raise "scalar marked as range" if scalar.body.as(Primitive).tuple_range
+raise "singleton range lost" unless range.body.as(Primitive).tuple_range
+empty_body = empty.body.as(Primitive)
+raise "empty range lost" unless empty_body.tuple_range && empty_body.tuple_index == 0 && empty_body.tuple_last == -1
+raise "scalar cache miss" unless CallRecalculation.check_tuple_indexer(tuple, scalar_call.name, scalar_call.args, ts, program).as(Def).object_id == scalar.object_id
+raise "range cache miss" unless CallRecalculation.check_tuple_indexer(tuple, range_call.name, range_call.args, ts, program).as(Def).object_id == range.object_id
+raise "dynamic index specialized" unless CallRecalculation.check_tuple_indexer(tuple, dynamic_call.name, dynamic_call.args, ts, program).nil?
+missing = CallRecalculation.check_tuple_indexer(tuple, missing_call.name, missing_call.args, ts, program).as(Def)
+raise "nilable out-of-bounds is not nil" unless missing.body.is_a?(NilLiteral)
+puts "tuple indexer cache: ok"

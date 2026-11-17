@@ -1,0 +1,14 @@
+def cycle_a(done : Bool) : Int32
+  return 7 if done
+  cycle_b(true)
+end
+
+def cycle_b(done : Bool) : Int32
+  cycle_a(done)
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+LibC.exit(cycle_a(false))

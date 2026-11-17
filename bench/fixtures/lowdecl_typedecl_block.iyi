@@ -1,0 +1,15 @@
+@[Unsafe("reports the block declaration")]
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def run(&)
+  yield
+end
+
+value = run do
+  item : Int32 | Nil = nil
+  item = 17
+  item
+end
+LibC.exit(value)

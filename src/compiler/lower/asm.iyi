@@ -1,0 +1,162 @@
+module compiler/lower/asm
+
+# The port of `src/compiler/iyi/codegen/asm.cr` (`visit(node : Asm)`).
+#
+# The constraint string is outputs, then inputs, then each clobber as `~{name}`,
+# the function type is the operand types (one output, a struct of them, or void),
+# and the call is `inline_asm` then `call`. Each output is stored through a
+# `pointerof` of its expression. The node's value is nil, as the hosted visitor
+# leaves `@last`.
+#
+# `output_ptrofs` is a field the hosted semantic pass adds by reopening `Asm`
+# (`semantic/ast.cr` 823). iyi cannot reopen a type from another module, and the
+# syntax node is not this slice's. The pointer the hosted pass stored is
+# `PointerOf.new(output.exp)`, so this file rebuilds that node and lowers it.
+# Only a local variable's `pointerof` is ported (`lower.iyi`); an output that is
+# not a local is refused by that visit, by name.
+#
+# The hosted compiler's other-language mode, the removed interpreter, and
+# exception typing beyond the `can_throw` flag (passed as the asm's `unwind`)
+# are not branches of the hosted method, so nothing here is skipped for them.
+
+import compiler/syntax/ast::{ASTNode, AsmOperand, PointerOf}
+
+import compiler/ir/inst::{AsmDialect}
+import compiler/ir/types::{IrType}
+import compiler/ir/values::{Value}
+import compiler/lower/context::{BodyVisit, Lowerer}
+import compiler/lower/helpers::{llvm_nil, store_aligned}
+import compiler/lower/pending::{pending_visit_node}
+import compiler/semantic/top_level::{Type}
+# The AST node is `Compiler::Syntax::Ast::Asm` because this module is itself
+# `compiler/lower/asm`, and inside it the name `Asm` means this module.
+alias SyntaxAsm = Compiler::Syntax::Ast::Asm
+
+# The hosted `visit(node : Asm)` (codegen/asm.cr 4-75).
+pub def codegen_asm(low : Lowerer, node : SyntaxAsm) : Nil
+  constraints = asm_constraints(node)
+  output_ir = asm_output_types(low, node)
+  if output_ir.size > 1
+    output_type = low.module.types.struct(output_ir)
+  elsif output_ir.size == 1
+    output_type = output_ir[0]
+  else
+    output_type = low.module.types.void
+  end
+
+  input_types = [] of IrType
+  input_values = [] of Value
+  if inputs = node.inputs
+    wants = low.needs_value
+    low.needs_value = true
+    inputs.each do |input|
+      visit_asm_node(low, input.exp)
+      value = low.last
+      raise "BUG: an asm input left no value (hosted codegen/asm.cr: accept input.exp)" if value.nil?
+      it = low.analysed.type_of?(input.exp)
+      raise "BUG: the analysed program has no type for an asm input (hosted codegen/asm.cr: llvm_type)" if it.nil?
+      input_types << low.typer.llvm_type(it.as(Type))
+      input_values << value.as(Value)
+    end
+    low.needs_value = wants
+  end
+
+  fn_type = low.module.types.func(input_types, output_type)
+  dialect = node.intel ? AsmDialect::Intel : AsmDialect::Att
+  # volatile is the hosted `sideeffect`; alignstack and can_throw are the other two flags.
+  callee = low.builder.inline_asm(fn_type, node.text, constraints, node.volatile, node.alignstack, dialect, node.can_throw)
+  asm_value = low.builder.call(fn_type, callee, input_values, "").as(Value)
+
+  if outputs = node.outputs
+    if outputs.size > 1
+      i = 0
+      while i < outputs.size
+        store_asm_output(low, outputs[i], low.builder.extract_value(asm_value, i, "").as(Value))
+        i = i + 1
+      end
+    elsif outputs.size == 1
+      store_asm_output(low, outputs[0], asm_value)
+    end
+  end
+  low.last = llvm_nil(low)
+end
+
+# Outputs, then inputs, then clobbers, as the hosted `IO::Memory` writes them.
+def asm_constraints(node : SyntaxAsm) : String
+  String.build do |io|
+    append_outputs(io, node)
+    append_inputs(io, node)
+    append_clobbers(io, node)
+  end
+end
+
+# The output constraints, in source order. A comma separates items, never leads.
+def append_outputs(io : String::Builder, node : SyntaxAsm) : Nil
+  if outputs = node.outputs
+    i = 0
+    while i < outputs.size
+      io << "," if i > 0
+      io << outputs[i].constraint
+      i = i + 1
+    end
+  end
+end
+
+# The input constraints. A comma leads when an output was already written.
+def append_inputs(io : String::Builder, node : SyntaxAsm) : Nil
+  if inputs = node.inputs
+    io << "," unless io.empty?
+    i = 0
+    while i < inputs.size
+      io << "," if i > 0
+      io << inputs[i].constraint
+      i = i + 1
+    end
+  end
+end
+
+# Each clobber as `~{name}`, the hosted wrapping (codegen/asm.cr 45-49).
+def append_clobbers(io : String::Builder, node : SyntaxAsm) : Nil
+  if clobbers = node.clobbers
+    io << "," unless io.empty?
+    i = 0
+    while i < clobbers.size
+      io << "," if i > 0
+      io << "~{"
+      io << clobbers[i]
+      io << "}"
+      i = i + 1
+    end
+  end
+end
+
+# The IR type of each output: the type of the expression, which is the element
+# type of the `pointerof` the hosted pass stored.
+def asm_output_types(low : Lowerer, node : SyntaxAsm) : Array(IrType)
+  found = [] of IrType
+  if outputs = node.outputs
+    outputs.each do |output|
+      et = low.analysed.type_of?(output.exp)
+      raise "BUG: the analysed program has no type for an asm output (hosted codegen/asm.cr: output_ptrofs)" if et.nil?
+      found << low.typer.llvm_type(et.as(Type))
+    end
+  end
+  found
+end
+
+# Stores one asm result through `pointerof` of the output expression.
+def store_asm_output(low : Lowerer, output : AsmOperand, value : Value) : Nil
+  visit_asm_node(low, PointerOf.new(output.exp))
+  pointer = low.last
+  raise "BUG: pointerof of an asm output left no pointer (hosted codegen/asm.cr: accept ptrof)" if pointer.nil?
+  store_aligned(low, value, pointer.as(Value))
+end
+
+def visit_asm_node(low : Lowerer, node : ASTNode) : Nil
+  visitor = low.body_visitor
+  if visitor.nil?
+    pending_visit_node("asm before the node visitor is installed (lower.iyi: codegen_program)")
+    return
+  end
+  visitor.as(BodyVisit).visit_body(low, node)
+end

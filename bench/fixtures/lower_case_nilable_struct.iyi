@@ -1,0 +1,28 @@
+struct Int32
+  def ===(other : Int32) : Bool
+    self == other
+  end
+end
+
+struct Point
+  def initialize(@x : Int32)
+  end
+
+  def x : Int32
+    @x
+  end
+end
+
+def choose(n : Int32) : Point?
+  case n
+  when 0
+    return nil
+  when 2
+    return
+  else
+    Point.new(7)
+  end
+end
+
+v = choose(1)
+v.nil? ? 0 : v.as(Point).x

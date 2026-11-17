@@ -1,0 +1,26 @@
+# Address-valued block joins: next and an inlined return carry a by-value union; a narrower block body is upcast. HI, status 0.
+lib LibC
+  fun putchar(value : Int32) : Int32
+end
+
+def show(value : (Int32 | Bool)) : Nil
+  local = value
+  LibC.putchar(local.is_a?(Int32) ? local : 0)
+  nil
+end
+
+def yield_union(&)
+  yield
+end
+
+def return_union(flag : Bool, &)
+  yield
+  return(flag ? 73 : false)
+end
+
+flag = true
+from_next = yield_union { next(flag ? 72 : false) if flag; 0 }
+show(from_next)
+from_return = return_union(flag) { nil }
+show(from_return)
+flag ? 74 : false

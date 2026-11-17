@@ -1,0 +1,5 @@
+def identity(value : T) : T forall T
+  value
+end
+
+puts identity(value: 42)

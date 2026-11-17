@@ -1,0 +1,9 @@
+# The `headed` mode (the `:headed` byte of the arena's `__iyi_new`, gc_layouts.cr 173-177).
+# A builtin primitive is a PrimitiveType in the hosted program, not a headed candidate, so both
+# sides answer 0, and a plain user class without virtual type or union answers 0.
+class Animal
+end
+
+# type: Int32
+# type: Bool
+# type: Animal

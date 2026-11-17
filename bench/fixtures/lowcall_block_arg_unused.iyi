@@ -1,0 +1,10 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+# A named, annotated block that is only yielded to does not need a Proc.
+def yielding(&block : -> Int32) : Int32
+  yield
+end
+
+LibC.exit(yielding { 7 })

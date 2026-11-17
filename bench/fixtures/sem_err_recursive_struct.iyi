@@ -1,0 +1,4 @@
+struct Node
+  def initialize(@next : Node)
+  end
+end

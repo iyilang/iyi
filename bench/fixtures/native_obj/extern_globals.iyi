@@ -1,0 +1,13 @@
+# A C global the linker resolves in another image, so the object reaches it
+# through the GOT, and a read of its address, so the program's exit status and
+# output depend on the relocation working. bench/native_obj_exercise.sh compiles
+# it beside samples/iyi and checks the rewritten object runs the same.
+@[Unsafe("reads the address of a C global the linker resolves")]
+module fixtures/native_obj/extern_globals
+
+lib LibExtern
+  $environ : UInt8**
+end
+
+environment_present = LibExtern.environ.address != 0_u64
+puts "environ is set: #{environment_present}"

@@ -1,0 +1,8 @@
+lib LibC
+  $optind : Int32
+  fun memcmp(left : Int32*, right : Int32*, count : UInt64) : Int32
+  fun exit(status : Int32) : NoReturn
+end
+
+p = pointerof(LibC.optind)
+LibC.exit(LibC.memcmp(p, p, 4_u64) == 0 ? 7 : 1)

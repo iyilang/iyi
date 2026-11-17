@@ -1,0 +1,39 @@
+# An inherited body reads the constant its declaring scope names. Derived's CODE
+# must not replace Outer::CODE in Base's methods, including a yielded block.
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def with_code(&)
+  yield
+end
+
+module Outer
+  CODE = 7
+
+  class Base
+    def initialize
+    end
+
+    def self.class_code : Int32
+      CODE
+    end
+
+    def code : Int32
+      CODE
+    end
+
+    def block_code : Int32
+      with_code { CODE }
+    end
+  end
+end
+
+class Derived < Outer::Base
+  CODE = 3
+end
+
+Outer::Base.new.code
+Derived.class_code
+Derived.new.block_code
+LibC.exit(Derived.new.code)

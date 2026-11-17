@@ -1,0 +1,36 @@
+struct Float32
+  MIN = -3.40282347e+38_f32
+end
+
+struct Float64
+  MAX = 1.7976931348623157e+308_f64
+end
+
+VALUE = 1.5_f64
+
+def first : Float32
+  Float32::MIN
+end
+
+def second : Float32
+  Float32::MIN
+end
+
+def biggest : Float64
+  Float64::MAX
+end
+
+def user_value : Float64
+  VALUE
+end
+
+first
+second
+biggest
+user_value
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+LibC.exit(0)

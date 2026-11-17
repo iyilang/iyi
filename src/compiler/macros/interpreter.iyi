@@ -1,0 +1,1009 @@
+module compiler/macros/interpreter
+
+import compiler/syntax/ast::{ASTNode, And, Arg, ArrayLiteral, Assign, Block, BoolLiteral, Call, CharLiteral, ClassDef, ClassVar, Def, DoubleSplat, Expressions, Generic, Global, HashLiteral, If, ImplicitObj, InstanceVar, IsA, Macro, MacroExpression, MacroFor, MacroIf, MacroLiteral, MacroVar, MacroVerbatim, MultiAssign, NamedArgument, NamedTupleLiteral, Next, NilLiteral, Nop, Not, NumberLiteral, OpAssign, Or, Path, RangeLiteral, Return, Self, Splat, StringInterpolation, StringLiteral, SymbolLiteral, TupleLiteral, Underscore, Unless, Until, Var, While, Yield, StringBuilder}
+import compiler/syntax/token::{NumberKind}
+import compiler/macros/ast::{MacroId, TypeNode}
+import compiler/macros/type_facts::{MacroTypeFacts}
+import compiler/macros/target_flags::{MacroTargetFlags}
+import compiler/macros/methods::{MacroMethods}
+import compiler/macros/answers::{MacroAnswers}
+
+# Why an expansion stopped: a `raise`, an undefined name, or a refused macro
+# method. The line and column are the node that failed, as the hosted compiler
+# reports them.
+pub class MacroFailure
+  property message : String
+  property line : Int32
+  property column : Int32
+
+  def initialize(@message : String, @line : Int32, @column : Int32)
+  end
+end
+
+# One type parameter of the instantiated owner or def, bound while a macro
+# site in that def expands. `printed` is how a plain binding prints
+# (`Int32`, `Tuple(Int32, Bool)`). `kind` is `type`, `tuple`, `named_tuple`,
+# or `union`. `members` are the printed arguments (type names, or `name:Type`
+# for a named tuple). `splat` is true when this name is the owner's splat
+# type variable. A splat tuple, named tuple, or union is a literal of type
+# nodes, as the hosted interpreter does (interpreter.cr:571-599). A plain
+# binding is a TypeNode. Body typing passes these at a def's instantiation.
+pub class MacroFreeBinding
+  property name : String
+  property printed : String
+  property kind : String
+  property members : Array(String)
+  property splat : Bool
+
+  def initialize(@name : String, @printed : String, @kind : String, @members : Array(String), @splat : Bool)
+  end
+end
+
+pub class MacroInterpreter
+  property vars : Hash(String, ASTNode)
+  property str : StringBuilder
+  property macro_vars : Hash(String, String)
+  property temp_id : Int32
+  property last : ASTNode
+  property block : Block?
+  property flags : Array(String)
+  property scope_name : String
+  property failure : MacroFailure?
+  property skipped : Bool
+  property free_bindings : Hash(String, MacroFreeBinding)
+  property type_facts : MacroTypeFacts? = nil
+
+  # `flags` is the flag set `flag?` answers from. Left out, it is the host's,
+  # as the hosted interpreter's default is. `scope_name` is what `@type` and
+  # `@top_level` name: the type the macro is expanded in.
+  def initialize(@block : Block? = nil, flags : Array(String)? = nil, scope_name : String = "<Program>")
+    @vars = Hash(String, ASTNode).new
+    @str = StringBuilder.new
+    @macro_vars = Hash(String, String).new
+    @temp_id = 0
+    @last = Nop.new
+    @scope_name = scope_name
+    @failure = nil
+    @skipped = false
+    if f = flags
+      @flags = f
+    else
+      @flags = MacroTargetFlags.host([] of String)
+    end
+    @free_bindings = Hash(String, MacroFreeBinding).new
+  end
+
+  # Binds the type parameters of the instantiated owner and def. A later path
+  # of that name resolves to the binding, not to an undefined constant.
+  def bind_free_vars(bindings : Array(MacroFreeBinding)) : Nil
+    i = 0
+    while i < bindings.size
+      b = bindings[i]
+      @free_bindings[b.name] = b
+      i = i + 1
+    end
+  end
+
+  # A splat type variable is the literal the hosted interpreter builds
+  # (interpreter.cr:589-599). Anything else is the type node of the binding.
+  def resolve_free_binding(binding : MacroFreeBinding) : ASTNode
+    if binding.splat && (binding.kind == "tuple" || binding.kind == "union")
+      elems = [] of ASTNode
+      i = 0
+      while i < binding.members.size
+        elems << TypeNode.new(binding.members[i])
+        i = i + 1
+      end
+      return TupleLiteral.new(elems)
+    end
+    if binding.splat && binding.kind == "named_tuple"
+      entries = [] of NamedTupleLiteral::Entry
+      i = 0
+      while i < binding.members.size
+        member = binding.members[i]
+        if colon = member.index(':')
+          key = member[0, colon]
+          typ = member[colon + 1, member.bytesize - (colon + 1)]
+          entries << NamedTupleLiteral::Entry.new(key, TypeNode.new(typ))
+        end
+        i = i + 1
+      end
+      return NamedTupleLiteral.new(entries)
+    end
+    sized = binding.kind == "tuple" || binding.kind == "named_tuple"
+    TypeNode.new(binding.printed, binding.members, sized)
+  end
+
+  # ArrayLiteral#find, hosted methods.cr:3357-3369. The block runs here because
+  # the method table cannot call back into the interpreter.
+  def find_in_array(arr : ArrayLiteral, block : Block) : ASTNode
+    arg_name = ""
+    if block.args.size > 0
+      arg_name = block.args[0].name
+    end
+    i = 0
+    while i < arr.elements.size
+      elem = arr.elements[i]
+      if arg_name != ""
+        @vars[arg_name] = elem
+      end
+      val = eval_block_body(block.body)
+      if MacroMethods.truthy?(val)
+        if arg_name != ""
+          @vars.delete(arg_name)
+        end
+        return elem
+      end
+      i = i + 1
+    end
+    if arg_name != ""
+      @vars.delete(arg_name)
+    end
+    NilLiteral.new
+  end
+
+  # Higher-order methods must evaluate the block in this interpreter's scope.
+  def collection_block(elements : Array(ASTNode), block : Block, method : String, tuple : Bool) : ASTNode
+    name = block.args.empty? ? "" : block.args[0].name
+    previous = name == "" ? nil : @vars[name]?
+    results = [] of ASTNode
+    any = false
+    i = 0
+    while i < elements.size && !halted?
+      @vars[name] = elements[i] unless name == ""
+      value = eval_block_body(block.body)
+      if method == "any?"
+        if MacroMethods.truthy?(value)
+          any = true
+          break
+        end
+      else
+        results << value
+      end
+      i = i + 1
+    end
+    unless name == ""
+      if old = previous
+        @vars[name] = old
+      else
+        @vars.delete(name)
+      end
+    end
+    return BoolLiteral.new(any) if method == "any?"
+    return TupleLiteral.new(results) if tuple
+    ArrayLiteral.new(results)
+  end
+
+  def collection_call(receiver : ASTNode, call : Call, block : Block) : ASTNode
+    elements = [] of ASTNode
+    tuple = false
+    if receiver.is_a?(ArrayLiteral)
+      elements = receiver.as(ArrayLiteral).elements
+    elsif receiver.is_a?(TupleLiteral)
+      elements = receiver.as(TupleLiteral).elements
+      tuple = true
+    elsif receiver.is_a?(RangeLiteral)
+      range = receiver.as(RangeLiteral)
+      first = range.from
+      last = range.to
+      if first.is_a?(NumberLiteral) && last.is_a?(NumberLiteral)
+        current = MacroMethods.eval_int(first)
+        finish = MacroMethods.eval_int(last)
+        kind = first.as(NumberLiteral).kind
+        while current < finish || (current == finish && !range.exclusive)
+          elements << NumberLiteral.new(current.to_s, kind)
+          break if current == finish
+          current = current + 1
+        end
+      elsif first.is_a?(CharLiteral) && last.is_a?(CharLiteral)
+        current = first.as(CharLiteral).value.ord
+        finish = last.as(CharLiteral).value.ord
+        while current < finish || (current == finish && !range.exclusive)
+          elements << CharLiteral.new(current.chr)
+          break if current == finish
+          current = current + 1
+        end
+      else
+        fail_at(call, "range begin and end must be both NumberLiteral or both CharLiteral")
+      end
+    end
+    collection_block(elements, block, call.name, tuple)
+  end
+
+  def eval_block_body(body : ASTNode) : ASTNode
+    if body.is_a?(Expressions)
+      exps = body.as(Expressions).expressions
+      last = Nop.new.as(ASTNode)
+      i = 0
+      while i < exps.size
+        last = evaluate(exps[i])
+        i = i + 1
+      end
+      return last
+    end
+    evaluate(body)
+  end
+
+  def to_s : String
+    @str.to_s
+  end
+
+  # Whether a `raise` or a `skip_file` has stopped the expansion. Nothing after
+  # it runs, as nothing after the hosted compiler's exception runs.
+  def halted? : Bool
+    @skipped || !@failure.nil?
+  end
+
+  # Records the first failure, at the node that failed. A later one is not
+  # reported: the expansion stopped at the first.
+  def fail_at(node : ASTNode, message : String) : Nil
+    if @failure.nil?
+      line = 0
+      column = 0
+      loc = node.location
+      loc = node.as(Call).name_location || loc if node.is_a?(Call)
+      if loc
+        line = loc.line_number
+        column = loc.column_number
+      end
+      @failure = MacroFailure.new(message, line, column)
+    end
+    @last = Nop.new
+  end
+
+  def new_temp_var_name(prefix : String = "__temp_") : String
+    @temp_id = @temp_id + 1
+    "#{prefix}#{@temp_id}"
+  end
+
+  def define_var(name : String, value : ASTNode) : Nil
+    @vars[name] = value
+  end
+
+  def var?(name : String) : Bool
+    @vars.has_key?(name)
+  end
+
+  def bind_args(a_macro : Macro, call : Call) : Nil
+    splat_idx = a_macro.splat_index
+    arg_idx = 0
+    call_idx = 0
+
+    while arg_idx < a_macro.args.size
+      macro_arg = a_macro.args[arg_idx]
+      if s_idx = splat_idx
+        if s_idx == arg_idx
+          splat_elems = [] of ASTNode
+          trailing_count = a_macro.args.size - (s_idx + 1)
+          splat_end = call.args.size - trailing_count
+          splat_end = s_idx if splat_end < s_idx
+
+          k = s_idx
+          while k < splat_end && k < call.args.size
+            splat_elems << call.args[k]
+            k = k + 1
+          end
+          call_idx = k
+          @vars[macro_arg.name] = TupleLiteral.new(splat_elems)
+        else
+          if call_idx < call.args.size
+            @vars[macro_arg.name] = call.args[call_idx]
+            call_idx = call_idx + 1
+          elsif def_val = macro_arg.default_value
+            @vars[macro_arg.name] = def_val.clone
+          end
+        end
+      else
+        if call_idx < call.args.size
+          @vars[macro_arg.name] = call.args[call_idx]
+          call_idx = call_idx + 1
+        elsif def_val = macro_arg.default_value
+          @vars[macro_arg.name] = def_val.clone
+        end
+      end
+      arg_idx = arg_idx + 1
+    end
+
+    if na = call.named_args
+      na.each do |named_arg|
+        a_macro.args.each do |ma|
+          if ma.name == named_arg.name
+            @vars[ma.name] = named_arg.value
+          end
+        end
+      end
+    end
+
+    if ds = a_macro.double_splat
+      ds_entries = [] of NamedTupleLiteral::Entry
+      if na = call.named_args
+        na.each do |named_arg|
+          matched = false
+          a_macro.args.each do |ma|
+            if ma.name == named_arg.name
+              matched = true
+            end
+          end
+          unless matched
+            ds_entries << NamedTupleLiteral::Entry.new(named_arg.name, named_arg.value)
+          end
+        end
+      end
+      @vars[ds.name] = NamedTupleLiteral.new(ds_entries)
+    end
+
+    a_macro.args.each do |ma|
+      if !@vars.has_key?(ma.name) && (dv = ma.default_value)
+        @vars[ma.name] = dv.clone
+      end
+    end
+
+    if ba = a_macro.block_arg
+      if cb = call.block
+        @vars[ba.name] = cb
+      else
+        @vars[ba.name] = Nop.new
+      end
+    end
+  end
+
+  # The arguments of a macro method, each as the text it names.
+  def macro_id_of(node : ASTNode) : String
+    MacroMethods.to_macro_id(evaluate(node))
+  end
+
+  # `raise` joins its arguments with spaces, as the hosted compiler does.
+  def raise_message(args : Array(ASTNode)) : String
+    sb = StringBuilder.new
+    i = 0
+    while i < args.size
+      if i > 0
+        sb << " "
+      end
+      sb << macro_id_of(args[i])
+      i = i + 1
+    end
+    sb.to_s
+  end
+
+  # The flag a `flag?` or `host_flag?` call names, without its colon.
+  def flag_name_of(node : Call) : String
+    if node.args.empty?
+      ""
+    else
+      macro_id_of(node.args[0]).lstrip(':')
+    end
+  end
+
+  # The macro methods a call with no receiver names. Nil for any other name,
+  # which the caller reports. `run` and `system` are refused by name: this
+  # engine does not run another program, and a macro that does is reported
+  # where it is written instead of run.
+  def top_level_call(node : Call) : ASTNode?
+    name = node.name
+
+    if name == "raise"
+      fail_at(node, raise_message(node.args))
+      return Nop.new
+    end
+
+    if name == "flag?"
+      return BoolLiteral.new(MacroMethods.has_flag?(@flags, flag_name_of(node)))
+    end
+
+    if name == "host_flag?"
+      return BoolLiteral.new(MacroMethods.has_flag?(MacroTargetFlags.host([] of String), flag_name_of(node)))
+    end
+
+    if name == "compare_versions"
+      if node.args.size != 2
+        fail_at(node, "compare_versions takes two arguments")
+        return Nop.new
+      end
+      first = evaluate(node.args[0])
+      second = evaluate(node.args[1])
+      return Nop.new if halted?
+      if !MacroMethods.text_like?(first)
+        fail_at(node.args[0], "expected first argument to 'compare_versions' to be a StringLiteral, SymbolLiteral or MacroId, not #{MacroMethods.node_class_name(first)}")
+        return Nop.new
+      end
+      if !MacroMethods.text_like?(second)
+        fail_at(node.args[1], "expected second argument to 'compare_versions' to be a StringLiteral, SymbolLiteral or MacroId, not #{MacroMethods.node_class_name(second)}")
+        return Nop.new
+      end
+      if order = MacroMethods.compare_versions(MacroMethods.to_macro_id(first), MacroMethods.to_macro_id(second))
+        return NumberLiteral.new(order.to_s, NumberKind::I32)
+      end
+      fail_at(node, "compare_versions compares MAJOR.MINOR.PATCH versions: prerelease and build forms are not ported")
+      return Nop.new
+    end
+
+    if name == "read_file" || name == "read_file?"
+      if node.args.size != 1
+        fail_at(node, "#{name} takes one argument")
+        return Nop.new
+      end
+      path_node = evaluate(node.args[0])
+      return Nop.new if halted?
+      if !MacroMethods.text_like?(path_node)
+        fail_at(node.args[0], "expected argument to '#{name}' to be a StringLiteral, SymbolLiteral or MacroId, not #{MacroMethods.node_class_name(path_node)}")
+        return Nop.new
+      end
+      path = MacroMethods.to_macro_id(path_node)
+      if !File.exists?(path)
+        if name == "read_file?"
+          return NilLiteral.new
+        end
+        fail_at(node, "Error opening file with mode 'r': '#{path}': No such file or directory")
+        return Nop.new
+      end
+      return StringLiteral.new(File.read(path))
+    end
+
+    if name == "env"
+      key = node.args.empty? ? "" : macro_id_of(node.args[0])
+      if value = ENV[key]?
+        return StringLiteral.new(value)
+      end
+      return NilLiteral.new
+    end
+
+    if name == "debug"
+      format = true
+      if node.args.size > 0
+        format = MacroMethods.truthy?(evaluate(node.args[0]))
+      end
+      if named = node.named_args
+        named.each do |named_arg|
+          if named_arg.name == "format"
+            format = MacroMethods.truthy?(evaluate(named_arg.value))
+          end
+        end
+      end
+      if format
+        # The hosted compiler prints the expansion formatted. This engine has
+        # no formatter, so a formatted debug would print different text.
+        fail_at(node, "debug with formatting is not ported: write debug(format: false)")
+        return Nop.new
+      end
+      puts @str.to_s
+      return Nop.new
+    end
+    if name == "puts" || name == "print"
+      node.args.each do |arg|
+        v = evaluate(arg)
+        text = v.is_a?(StringLiteral) ? v.as(StringLiteral).value : MacroMethods.node_stringify(v)
+        if name == "puts"
+          puts text
+        else
+          print text
+        end
+      end
+      return Nop.new
+    end
+
+    if name == "p" || name == "pp" || name == "p!" || name == "pp!"
+      fail_at(node, "macro method '#{name}' is not ported")
+      return Nop.new
+    end
+
+    if name == "skip_file"
+      @skipped = true
+      return Nop.new
+    end
+
+    if name == "system" || name == "`"
+      fail_at(node, "macro method '#{name}' is refused: it runs a command")
+      return Nop.new
+    end
+
+    if name == "run"
+      fail_at(node, "macro method 'run' is refused: it runs another program")
+      return Nop.new
+    end
+
+    nil
+  end
+
+  def evaluate(node : ASTNode) : ASTNode
+    return @last if halted?
+
+    if node.is_a?(Var)
+      v = node.as(Var)
+      if val = @vars[v.name]?
+        return val
+      end
+      fail_at(v, "undefined macro variable '#{v.name}'")
+      return Nop.new
+    end
+
+    if node.is_a?(MacroId)
+      return node
+    end
+
+    if node.is_a?(StringLiteral) || node.is_a?(NumberLiteral) || node.is_a?(CharLiteral) || node.is_a?(BoolLiteral) || node.is_a?(NilLiteral) || node.is_a?(SymbolLiteral)
+      return node
+    end
+    if node.is_a?(Path)
+      path = node.as(Path)
+      if path.names.size == 1
+        if bound = @free_bindings[path.names[0]]?
+          return resolve_free_binding(bound)
+        end
+      end
+      if facts = @type_facts
+        if annotation_name = facts.annotation_types[path.names.join("::")]?
+          return TypeNode.new(annotation_name)
+        end
+      end
+      if path.names.size == 1 && MacroAnswers.builtin_type?(path.names[0])
+        return TypeNode.new(path.names[0])
+      end
+      fail_at(path, "undefined constant #{path.names.join("::")}")
+      return Nop.new
+    end
+    if node.is_a?(Generic)
+      return evaluate_generic_type(node.as(Generic))
+    end
+
+    if node.is_a?(IsA)
+      isa = node.as(IsA)
+      rec = evaluate(isa.obj)
+      return Nop.new if halted?
+      if isa.nil_check
+        return BoolLiteral.new(MacroMethods.node_class_name(rec) == "NilLiteral")
+      end
+      const_name = isa.const.is_a?(Path) ? isa.const.as(Path).names.last : ""
+      actual = MacroMethods.node_class_name(rec)
+      return BoolLiteral.new(actual == const_name || const_name == "ASTNode")
+    end
+
+    if node.is_a?(InstanceVar)
+      iv = node.as(InstanceVar)
+      if iv.name == "@type"
+        # Inside a class, `@type` is the class's TypeNode. At the top of a file it
+        # is the program, which prints as `<Program>` (pinned by the fixture
+        # macro_instance_vars); its methods are not answered, so a call on it is
+        # refused as an undefined method on MacroId.
+        if @scope_name == "<Program>"
+          return MacroId.new("<Program>")
+        end
+        type_node = TypeNode.new(@scope_name)
+        type_node.facts = @type_facts
+        return type_node
+      end
+      if iv.name == "@top_level"
+        return MacroId.new("<Program>")
+      end
+      if iv.name == "@def"
+        return NilLiteral.new
+      end
+      fail_at(iv, "unknown macro instance var: '#{iv.name}'")
+      return Nop.new
+    end
+
+    if node.is_a?(ArrayLiteral)
+      arr = node.as(ArrayLiteral)
+      new_elems = arr.elements.map { |e| evaluate(e) }
+      return ArrayLiteral.new(new_elems)
+    end
+
+    if node.is_a?(TupleLiteral)
+      tup = node.as(TupleLiteral)
+      new_elems = tup.elements.map { |e| evaluate(e) }
+      return TupleLiteral.new(new_elems)
+    end
+
+    if node.is_a?(NamedTupleLiteral)
+      nt = node.as(NamedTupleLiteral)
+      new_entries = nt.entries.map { |e| NamedTupleLiteral::Entry.new(e.key, evaluate(e.value)) }
+      return NamedTupleLiteral.new(new_entries)
+    end
+
+    if node.is_a?(HashLiteral)
+      hl = node.as(HashLiteral)
+      new_entries = hl.entries.map { |e| HashLiteral::Entry.new(evaluate(e.key), evaluate(e.value)) }
+      return HashLiteral.new(new_entries)
+    end
+
+    if node.is_a?(RangeLiteral)
+      rng = node.as(RangeLiteral)
+      return RangeLiteral.new(evaluate(rng.from), evaluate(rng.to), rng.exclusive)
+    end
+
+    if node.is_a?(Assign)
+      asgn = node.as(Assign)
+      target = asgn.target
+      val = evaluate(asgn.value)
+      if target.is_a?(Var)
+        @vars[target.as(Var).name] = val
+      end
+      return val
+    end
+
+    if node.is_a?(Call)
+      cl = node.as(Call)
+      if cl.obj.nil? && cl.args.empty? && (v = @vars[cl.name]?)
+        return v
+      end
+      if cl.obj.nil?
+        if top = top_level_call(cl)
+          return top
+        end
+        if MacroAnswers.receiverless?(cl.name)
+          fail_at(cl, "macro method '#{cl.name}' is not ported")
+        elsif cl.args.empty?
+          fail_at(cl, "undefined macro variable '#{cl.name}'")
+        else
+          fail_at(cl, "undefined macro method: '#{cl.name}'")
+        end
+        return Nop.new
+      end
+      obj = cl.obj.as(ASTNode)
+      receiver = evaluate(obj)
+      return Nop.new if halted?
+      class_name = MacroMethods.node_class_name(receiver)
+      unless MacroAnswers.receiver?(class_name, cl.name)
+        fail_at(cl, "undefined macro method '#{class_name}##{cl.name}'")
+        return Nop.new
+      end
+      if cl.name == "find" && receiver.is_a?(ArrayLiteral) && cl.block
+        return find_in_array(receiver.as(ArrayLiteral), cl.block.as(Block))
+      end
+      if (cl.name == "map" || cl.name == "any?") && cl.args.empty? && cl.named_args.nil?
+        if block = cl.block
+          if receiver.is_a?(ArrayLiteral) || receiver.is_a?(TupleLiteral) || (cl.name == "map" && receiver.is_a?(RangeLiteral))
+            return collection_call(receiver, cl, block)
+          end
+        end
+      end
+      eval_args = cl.args.map { |a| evaluate(a) }
+      eval_named : Hash(String, ASTNode)? = nil
+      if named = cl.named_args
+        values = {} of String => ASTNode
+        named.each do |arg|
+          values[arg.name] = evaluate(arg.value)
+        end
+        eval_named = values
+      end
+      if value = MacroMethods.interpret_method(@flags, receiver, cl.name, eval_args, eval_named, cl.block)
+        return value
+      end
+      if err = MacroMethods.take_error
+        fail_at(cl, err)
+        return Nop.new
+      end
+      fail_at(cl, "macro method '#{class_name}##{cl.name}' is not ported")
+      return Nop.new
+    end
+
+    if node.is_a?(If)
+      if_node = node.as(If)
+      c = evaluate(if_node.cond)
+      if MacroMethods.truthy?(c)
+        return evaluate(if_node.then)
+      else
+        return evaluate(if_node.else)
+      end
+    end
+
+    if node.is_a?(Unless)
+      unl_node = node.as(Unless)
+      c = evaluate(unl_node.cond)
+      if MacroMethods.truthy?(c)
+        return evaluate(unl_node.else)
+      else
+        return evaluate(unl_node.then)
+      end
+    end
+
+    if node.is_a?(And)
+      and_node = node.as(And)
+      l = evaluate(and_node.left)
+      if MacroMethods.truthy?(l)
+        return evaluate(and_node.right)
+      else
+        return l
+      end
+    end
+
+    if node.is_a?(Or)
+      or_node = node.as(Or)
+      l = evaluate(or_node.left)
+      if MacroMethods.truthy?(l)
+        return l
+      else
+        return evaluate(or_node.right)
+      end
+    end
+
+    if node.is_a?(Not)
+      not_node = node.as(Not)
+      v = evaluate(not_node.exp)
+      return BoolLiteral.new(!MacroMethods.truthy?(v))
+    end
+
+    if node.is_a?(StringInterpolation)
+      si = node.as(StringInterpolation)
+      interp_sb = StringBuilder.new
+      si.expressions.each do |e|
+        if e.is_a?(StringLiteral)
+          interp_sb << e.as(StringLiteral).value
+        else
+          ev = evaluate(e)
+          if ev.is_a?(StringLiteral)
+            interp_sb << ev.as(StringLiteral).value
+          elsif ev.is_a?(MacroId)
+            interp_sb << ev.as(MacroId).value
+          else
+            ev.to_s(interp_sb)
+          end
+        end
+      end
+      return StringLiteral.new(interp_sb.to_s)
+    end
+
+    if node.is_a?(Yield)
+      if b = @block
+        return b.body.clone
+      else
+        return Nop.new
+      end
+    end
+    if node.is_a?(Expressions)
+      exps = node.as(Expressions)
+      last_val : ASTNode = Nop.new
+      exps.expressions.each do |e|
+        last_val = evaluate(e)
+      end
+      return last_val
+    end
+
+    node
+  end
+
+  # A generic built-in type (`Tuple(Int32, Bool)`, `NamedTuple(a: Int32)`,
+  # `Union(Int32, Bool)`) becomes the TypeNode the hosted interpreter would
+  # resolve. Tuple and named tuple instances keep their arguments so `size`
+  # can count them. A union prints with its members sorted, and `size` is
+  # refused on it, as the hosted interpreter refuses it.
+  def evaluate_generic_type(g : Generic) : ASTNode
+    base = generic_base_name(g.name)
+    if base.nil? || !MacroAnswers.builtin_type?(base)
+      shown = base || "type"
+      fail_at(g, "undefined constant #{shown}")
+      return Nop.new
+    end
+    args = [] of String
+    if na = g.named_args
+      na.each do |a|
+        args << "#{a.name}: #{type_arg_text(a.value)}"
+      end
+    end
+    g.type_vars.each do |tv|
+      args << type_arg_text(tv)
+    end
+    if base == "Union"
+      members = args.sorted
+      text = StringBuilder.new
+      text << "("
+      i = 0
+      while i < members.size
+        if i > 0
+          text << " | "
+        end
+        text << members[i]
+        i = i + 1
+      end
+      text << ")"
+      return TypeNode.new(text.to_s)
+    end
+    sized = base == "Tuple" || base == "NamedTuple"
+    printed = StringBuilder.new
+    printed << base
+    printed << "("
+    i = 0
+    while i < args.size
+      if i > 0
+        printed << ", "
+      end
+      printed << args[i]
+      i = i + 1
+    end
+    printed << ")"
+    TypeNode.new(printed.to_s, args, sized)
+  end
+
+  def generic_base_name(node : ASTNode) : String?
+    return nil unless node.is_a?(Path)
+    path = node.as(Path)
+    return nil unless path.names.size == 1
+    path.names[0]
+  end
+
+  def type_arg_text(node : ASTNode) : String
+    resolved = evaluate(node)
+    sb = StringBuilder.new
+    resolved.to_s(sb)
+    sb.to_s
+  end
+
+  # Runs a `for` body once per element. `firsts`, `seconds` and `thirds` hold
+  # the values of the first, second and third loop variables, in step.
+  def run_for_body(mf : MacroFor, firsts : Array(ASTNode), seconds : Array(ASTNode), thirds : Array(ASTNode)) : Nil
+    i = 0
+    while i < firsts.size && !halted?
+      @vars[mf.vars[0].name] = firsts[i]
+      if mf.vars.size > 1
+        @vars[mf.vars[1].name] = seconds[i]
+      end
+      if mf.vars.size > 2
+        @vars[mf.vars[2].name] = thirds[i]
+      end
+      interpret(mf.body)
+      i = i + 1
+    end
+    mf.vars.each do |v|
+      @vars.delete(v.name)
+    end
+  end
+
+  def interpret_for(mf : MacroFor) : ASTNode
+    exp_val = evaluate(mf.exp)
+    if halted?
+      return Nop.new
+    end
+
+    firsts = [] of ASTNode
+    seconds = [] of ASTNode
+    thirds = [] of ASTNode
+
+    if exp_val.is_a?(ArrayLiteral) || exp_val.is_a?(TupleLiteral)
+      elems = exp_val.is_a?(ArrayLiteral) ? exp_val.as(ArrayLiteral).elements : exp_val.as(TupleLiteral).elements
+      i = 0
+      while i < elems.size
+        firsts << elems[i]
+        seconds << NumberLiteral.new(i.to_s, NumberKind::I32)
+        i = i + 1
+      end
+      run_for_body(mf, firsts, seconds, thirds)
+    elsif exp_val.is_a?(HashLiteral)
+      entries = exp_val.as(HashLiteral).entries
+      i = 0
+      while i < entries.size
+        firsts << entries[i].key
+        seconds << entries[i].value
+        thirds << NumberLiteral.new(i.to_s, NumberKind::I32)
+        i = i + 1
+      end
+      run_for_body(mf, firsts, seconds, thirds)
+    elsif exp_val.is_a?(NamedTupleLiteral)
+      entries = exp_val.as(NamedTupleLiteral).entries
+      i = 0
+      while i < entries.size
+        firsts << MacroId.new(entries[i].key)
+        seconds << entries[i].value
+        thirds << NumberLiteral.new(i.to_s, NumberKind::I32)
+        i = i + 1
+      end
+      run_for_body(mf, firsts, seconds, thirds)
+    elsif exp_val.is_a?(RangeLiteral)
+      rng = exp_val.as(RangeLiteral)
+      from_v = MacroMethods.eval_int(rng.from)
+      to_v = MacroMethods.eval_int(rng.to)
+      limit = rng.exclusive ? to_v : to_v + 1
+      curr = from_v
+      idx = 0
+      while curr < limit
+        firsts << NumberLiteral.new(curr.to_s, NumberKind::I32)
+        seconds << NumberLiteral.new(idx.to_s, NumberKind::I32)
+        curr = curr + 1
+        idx = idx + 1
+      end
+      run_for_body(mf, firsts, seconds, thirds)
+    else
+      fail_at(mf.exp, "`for` expression must be an array, hash, tuple, named tuple or a range literal")
+    end
+
+    Nop.new
+  end
+
+  def interpret(node : ASTNode) : ASTNode
+    return @last if halted?
+
+    if node.is_a?(Expressions)
+      exps = node.as(Expressions)
+      i = 0
+      while i < exps.expressions.size && !halted?
+        interpret(exps.expressions[i])
+        i = i + 1
+      end
+      return @last
+    end
+
+    if node.is_a?(MacroLiteral)
+      ml = node.as(MacroLiteral)
+      @str << ml.value
+      @last = Nop.new
+      return @last
+    end
+
+    if node.is_a?(MacroExpression)
+      me = node.as(MacroExpression)
+      val = evaluate(me.exp)
+      if me.output && !halted?
+        if val.is_a?(MacroId)
+          @str << val.as(MacroId).value
+        elsif val.is_a?(Nop)
+          # nothing
+        elsif val.is_a?(StringLiteral)
+          @str << MacroMethods.string_text(val.as(StringLiteral).value)
+        elsif val.is_a?(SymbolLiteral)
+          @str << MacroMethods.symbol_text(val.as(SymbolLiteral).value)
+        else
+          if me.exp.is_a?(Yield)
+            # The hosted compiler writes a yielded block as `begin ... end`.
+            @str << "begin\n"
+            val.to_s(@str)
+            @str << " end"
+          else
+            val.to_s(@str)
+          end
+        end
+      end
+      @last = val
+      return @last
+    end
+
+    if node.is_a?(MacroIf)
+      mi = node.as(MacroIf)
+      c = evaluate(mi.cond)
+      if halted?
+        return @last
+      end
+      if MacroMethods.truthy?(c)
+        interpret(mi.then)
+      else
+        interpret(mi.else)
+      end
+      return @last
+    end
+
+    if node.is_a?(MacroFor)
+      @last = interpret_for(node.as(MacroFor))
+      return @last
+    end
+
+    if node.is_a?(MacroVar)
+      mv = node.as(MacroVar)
+      key = mv.name
+      temp_name = @macro_vars[key]?
+      unless temp_name
+        temp_name = new_temp_var_name("__temp_")
+        @macro_vars[key] = temp_name
+      end
+      @str << temp_name
+      @last = Var.new(temp_name)
+      return @last
+    end
+
+    if node.is_a?(MacroVerbatim)
+      mv = node.as(MacroVerbatim)
+      mv.exp.to_s(@str)
+      @last = Nop.new
+      return @last
+    end
+
+    if node.is_a?(Yield)
+      if b = @block
+        interpret(b.body)
+      end
+      @last = Nop.new
+      return @last
+    end
+
+    res = evaluate(node)
+    @last = res
+    @last
+  end
+end

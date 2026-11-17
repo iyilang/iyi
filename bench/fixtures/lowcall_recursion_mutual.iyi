@@ -1,0 +1,16 @@
+class R
+  def self.a(done : Bool) : Int32
+    return 7 if done
+    b(true)
+  end
+
+  def self.b(done : Bool) : Int32
+    a(done)
+  end
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+LibC.exit(R.a(false))

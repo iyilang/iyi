@@ -1,0 +1,13 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def mixed(a : Float32, b : Float64, n : Int32, u : UInt32) : Int32
+  if a + b == 6.0 && b + a == 6.0 && n + b == 6.0 && b + n == 6.0 && u.to_f64 == 2.0 && a.to_f64 == 4.0
+    7
+  else
+    0
+  end
+end
+
+LibC.exit(mixed(4.0_f32, 2.0, 4, 2_u32))

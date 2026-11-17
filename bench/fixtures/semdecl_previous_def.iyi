@@ -1,0 +1,11 @@
+# A second def of the same signature replaces the first, and the new def
+# reaches the one it replaced (hosted add_def).
+class Box
+  def value : Int32
+    1
+  end
+
+  def value : Int32
+    2
+  end
+end

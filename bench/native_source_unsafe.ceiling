@@ -1,0 +1,41 @@
+# U: fixtures whose hosted reference needs the @[Unsafe] header the hosted source checker requires for a C fun
+# (bench/native_source_exercise.sh, section 3b). The port does not require it, so these are accepted unmarked.
+# The list may only fall: a fixture the run finds that is not named here fails the gate. A name the run no longer
+# finds is printed as a ratchet, to be removed by hand in the same change that removes the header need.
+compile_arith
+compile_class
+compile_control
+compile_cross_const
+compile_diamond
+compile_exit
+compile_ivar_infer
+compile_loop
+compile_multi_import
+compile_no_top_level
+compile_order
+compile_order_a
+compile_order_b
+compile_pointers
+compile_reopen_class
+compile_stdout
+compile_struct
+compile_top_level
+cg_blocks
+cg_calls
+cg_classes
+cg_closures
+cg_comparisons
+cg_control
+cg_float_arith
+cg_generics
+cg_int_arith
+cg_layouts
+cg_nil_local
+cg_nilable
+cg_pointers
+cg_splat_loop
+cg_struct_methods
+cg_structs
+cg_undefined_raise
+cg_unless
+cg_virtual_dispatch

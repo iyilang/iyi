@@ -1,0 +1,13 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+class Exact
+end
+
+def inspect_class(x : Exact) : Int32
+  x.class
+  7
+end
+
+LibC.exit(inspect_class(Exact.new))

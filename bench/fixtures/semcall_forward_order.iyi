@@ -1,0 +1,15 @@
+class LookupValue
+end
+
+def lookup_choose(value : LookupValue) : String
+  "broad"
+end
+
+def lookup_choose(value : LookupSpecific) : Int32
+  42
+end
+
+class LookupSpecific < LookupValue
+end
+
+# call lookup_choose(instance(LookupSpecific))

@@ -1,0 +1,28 @@
+trait OptionalItemSource
+  type Elem
+
+  def min? : Elem?
+    self.first
+  end
+
+  def min : Elem
+    value = min?
+    return value unless value.nil?
+    raise "empty"
+  end
+end
+
+struct ItemList(T)
+  def initialize(@item : T)
+  end
+
+  def first : T
+    @item
+  end
+end
+
+impl OptionalItemSource for ItemList(T) forall T
+  type Elem = T
+end
+
+ItemList(Int32).new(42).min

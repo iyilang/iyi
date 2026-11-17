@@ -1,0 +1,9 @@
+def pick(flag : Bool, a : Int32, b : Int32) : Int32
+  if flag
+    a
+  else
+    b
+  end
+end
+
+pick(false, 40, 2)

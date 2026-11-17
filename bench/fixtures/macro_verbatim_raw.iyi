@@ -1,0 +1,10 @@
+# The hosted compiler re-prints a verbatim body from its parse, so the body is
+# written here in the spelling that re-prints unchanged.
+macro raw_block(x)
+  {% verbatim do %}
+    {{ x }} {% if true %}keep{% end %} {% for i in [1] %}{{ i }}{% end %}
+  {% end %}
+  after {{x}}
+end
+
+raw_block(7)

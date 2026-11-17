@@ -1,0 +1,18 @@
+# The allocate primitive for a struct: `Pair.new(2, 3)` runs the generated `new`, whose `_ = allocate`
+# is a zeroed alloca of the struct (the hosted llvm.memset, align 4), then the two-argument
+# `initialize`, then the instance method. The struct has no fields, so no instance variable is read
+# or written (those are the core's instance_var_pointer). The status is 7.
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+struct Pair
+  def initialize(a : Int32, b : Int32)
+  end
+
+  def answer : Int32
+    7
+  end
+end
+
+LibC.exit(Pair.new(2, 3).answer)

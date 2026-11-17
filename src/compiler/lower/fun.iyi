@@ -1,0 +1,664 @@
+module compiler/lower/fun
+
+# The port of the hosted function emitter, `target_def_fun` and `codegen_fun` in
+# src/compiler/iyi/codegen/fun.cr, for a def of a single-module unit: a top-level def, or a
+# method of a class or struct with a receiver. A def is compiled into a function of its own
+# where the first call that reaches it is lowered; a later call at the same argument types
+# finds that function and does not emit it again.
+#
+# Ported: the mangled name of a def (`*name<A, B>:R` for a top-level def, `*Owner#name<A, B>:R`
+# for a method, codegen/ast.cr), the function's type and signature (`self` first, when the
+# owner is passed as self), the frame (the alloca and entry blocks, the parameters read where
+# they arrive, the body, the return), and the lowering state the caller keeps (saved and put
+# back around the body).
+#
+# Not ported, and refused by name at the call that reaches them (lower/call.iyi): indirect
+# arguments and results above 128 bytes, the closure, the `@[Naked]` and `@[Raises]`
+# annotations, the debug metadata, and every
+# `in artifact`, runtime copy, preemption and closure-host branch of the hosted code: the iyi
+# artifact, runtime and preemption machinery does not apply to a single-module unit.
+#
+# The body is lowered through the dispatch the lowering installed (`BodyVisit`,
+# context.iyi), because iyi refuses an import cycle and the dispatch imports this file.
+
+import compiler/syntax/ast::{ASTNode, Arg, Assign, Call, ClassDef, Def, ModuleDef, PointerOf, ProcLiteral, Var}
+import compiler/syntax/visitor::{Visitor}
+import compiler/ir/function::{Function, Linkage}
+import compiler/ir/inst::{Attribute, Block, CallConv}
+import compiler/ir/types::{IrType}
+import compiler/ir/values::{Value, Param}
+import compiler/ir/module::{Module}
+import compiler/lower/cast::{assign, to_rhs, upcast}
+import compiler/lower/context::{BodyVisit, Lowerer, LowerContext, LowerSavedState, LowerVar}
+import compiler/lower/locals::{preallocate_locals}
+import compiler/lower/closure::{allocate_closure, closure_self_type, setup_closure_vars}
+import compiler/semantic/closures::{ClosureFacts, ClosureFrame}
+import compiler/semantic/main_visitor::{MainVisitor}
+import compiler/lower/helpers::{load_aligned, store_aligned, unique_global_name}
+import compiler/lower/instance_var::{self_by_pointer?}
+import compiler/lower/typer::{passed_by_value?}
+import compiler/types/merge::{TypeMerge}
+import compiler/types/rendering::{TypeRenderer}
+import compiler/semantic/top_level::{GenericClassType, GenericModuleType, MetaclassType, ModuleType, NilType, NoReturnType, Type, VoidType}
+import compiler/types/types::{GenericClassInstanceType, GenericInstanceType, GenericModuleInstanceType, PointerInstanceType, VirtualType}
+
+# The hosted `Def#mangled_name` (codegen/ast.cr:13-31): `*`, then for a method the receiver's
+# name, `^` and the defining owner when that owner is not the receiver, then `#` (or `::` for a
+# metaclass owner). Then the name, the argument types in `<>`, each by its full name, then `:`
+# and the return type. A def with no argument has no `<>`. The hosted escaping of a name that is
+# not a plain identifier is not ported: the caller refuses such a name. `self_type` is nil for a
+# top-level def. A caller that still passes a metaclass as `self_type` and no `class_owner` is
+# the hosted metaclass owner: the instance type and `::`, not `Owner.class#`.
+# The recorded defining owner overrides the nearest name match when it lies on the receiver's walk.
+pub def mangled_name(name : String, self_type : Type?, arg_types : Array(Type), ret : Type, class_owner : Type? = nil, block_type : Type? = nil, defining : Type? = nil) : String
+  text = "*"
+  named_self = self_type
+  named_class = class_owner
+  if named_class.nil?
+    if st = self_type
+      if st.is_a?(MetaclassType)
+        named_class = st.as(MetaclassType).instance_type
+        named_self = nil
+      end
+    end
+  end
+  if co = named_class
+    text = text + owner_segment(co, name, true, defining) + "::"
+  end
+  if st = named_self
+    text = text + owner_segment(st, name, false, defining) + "#"
+  end
+  text = text + name
+  if arg_types.size > 0 || block_type
+    names = [] of String
+    arg_types.each do |t|
+      names << symbol_type(t)
+    end
+    if bt = block_type
+      names << "&" + symbol_type(bt)
+    end
+    text = text + "<" + names.join(", ") + ">"
+  end
+  text + ":" + symbol_type(ret)
+end
+
+# The receiver's name in a symbol, then `^` and the defining owner when the hosted compiler writes
+# that segment (codegen/ast.cr: original_owner != self_type). A class method compares instance types.
+def owner_segment(receiver : Type, name : String, class_method : Bool, defining : Type? = nil) : String
+  shown = owner_spell(receiver)
+  if class_method && receiver.is_a?(ModuleType) && receiver.as(ModuleType).iyi_unit
+    if recorded = defining
+      return shown + "^" + owner_spell(recorded) if recorded.object_id == receiver.object_id
+    end
+  end
+  start = defining_walk_start(receiver, class_method)
+  return shown if start.nil?
+  found : Type? = nil
+  if recorded = defining
+    found = recorded if start.as(Type).object_id == recorded.object_id || walk_reaches?(start.as(Type), recorded, [] of UInt64)
+  end
+  found = defining_type(start.as(Type), name, [] of UInt64) if found.nil?
+  return shown if found.nil?
+  defined = found.as(Type)
+  if class_method && defined.is_a?(MetaclassType)
+    defined = defined.as(MetaclassType).instance_type
+  end
+  defined_spell = owner_spell(defined)
+  return shown if defined_spell == shown
+  shown + "^" + defined_spell
+end
+
+# The name the hosted compiler writes for an owner (llvm_name). An unbound generic is `Box(T)`,
+# which is `to_s`; `full_name` drops the type variables.
+def owner_spell(t : Type) : String
+  symbol_type(t)
+end
+
+# Hosted llvm_name omits the union's own parentheses inside Pointer(...), but keeps
+# virtual types in generic arguments, unlike the user-facing full_name.
+def symbol_type(t : Type) : String
+  if t.is_a?(PointerInstanceType)
+    element = t.as(PointerInstanceType).element_type
+    return "Pointer(#{TypeRenderer.render(element, skip_union_parens: true, codegen: true)})"
+  end
+  TypeRenderer.render(t, codegen: true)
+end
+
+# Where the walk for the defining owner starts. A generic instance's methods live on the generic
+# type, not on the instance (method_lookup.iyi lookup_receiver). Starting on the instance would
+# see the delegated defs and omit `^`.
+def defining_walk_start(receiver : Type, class_method : Bool) : Type?
+  if receiver.is_a?(VirtualType)
+    return defining_walk_start(receiver.as(VirtualType).base_type, class_method)
+  end
+  if class_method
+    if receiver.is_a?(GenericClassInstanceType)
+      generic = receiver.as(GenericClassInstanceType).generic_type
+      return nil unless generic.is_a?(ModuleType)
+      return generic.as(ModuleType).metaclass
+    end
+    if receiver.is_a?(GenericModuleInstanceType)
+      generic = receiver.as(GenericModuleInstanceType).generic_type
+      return nil unless generic.is_a?(ModuleType)
+      return generic.as(ModuleType).metaclass
+    end
+    return nil unless receiver.is_a?(ModuleType)
+    return receiver.as(ModuleType).metaclass
+  end
+  if receiver.is_a?(GenericInstanceType)
+    generic = receiver.as(GenericInstanceType).generic_type
+    return generic if generic.is_a?(ModuleType)
+    return nil
+  end
+  return receiver if receiver.is_a?(ModuleType)
+  nil
+end
+
+def walk_reaches?(start : Type, target : Type, seen : Array(UInt64)) : Bool
+  return true if start.object_id == target.object_id
+  id = start.object_id
+  return false if seen.includes?(id)
+  seen << id
+  return false unless start.is_a?(ModuleType)
+  start.as(ModuleType).parents.each do |parent|
+    return true if walk_reaches?(parent, target, seen)
+  end
+  false
+end
+
+# The first type on the parent walk whose own defs declare *name* (hosted original_owner: the type
+# the untyped def was added to). Parents are the hosted lookup order.
+def defining_type(start : Type, name : String, seen : Array(UInt64)) : Type?
+  id = start.object_id
+  i = 0
+  while i < seen.size
+    return nil if seen[i] == id
+    i += 1
+  end
+  seen << id
+  return nil unless start.is_a?(ModuleType)
+  mod = start.as(ModuleType)
+  return mod if mod.defs[name]?
+  parents = mod.parents
+  pi = 0
+  while pi < parents.size
+    found = defining_type(parents[pi], name, seen)
+    return found if found
+    pi += 1
+  end
+  nil
+end
+
+# Lowers the body of a function through the installed dispatch (hosted `accept`).
+pub def visit_node(low : Lowerer, node : ASTNode) : Nil
+  visitor = low.body_visitor
+  raise "BUG: the lowering has no node visitor installed (lower.iyi: codegen_program)" if visitor.nil?
+  visitor.as(BodyVisit).visit_body(low, node)
+end
+
+# Bodies this process finished emitting, per module. A probe that dies does not mark its
+# function, so a later probe must not reuse the leftover.
+FUN_EMISSION_DONE = Hash(UInt64, Hash(String, Bool)).new
+
+pub def fun_emission_done?(m : Module, name : String) : Bool
+  per = FUN_EMISSION_DONE[m.object_id]?
+  return false if per.nil?
+  !per.as(Hash(String, Bool))[name]?.nil?
+end
+
+pub def mark_fun_emission_done(m : Module, name : String) : Nil
+  per = FUN_EMISSION_DONE[m.object_id]?
+  if per.nil?
+    made = Hash(String, Bool).new
+    FUN_EMISSION_DONE[m.object_id] = made
+    per = made
+  end
+  per.as(Hash(String, Bool))[name] = true
+end
+
+pub def clear_fun_emission_done(m : Module, name : String) : Nil
+  per = FUN_EMISSION_DONE[m.object_id]?
+  return if per.nil?
+  per.as(Hash(String, Bool)).delete(name)
+end
+
+# Drops every function a probe added. A failed probe leaves nothing a later probe can reuse.
+pub def discard_probe_functions(m : Module, before : Array(String)) : Nil
+  prior = Set(String).new
+  before.each { |name| prior.add(name) }
+  added = [] of Function
+  m.functions.each do |fn|
+    added << fn unless prior.includes?(fn.name)
+  end
+  added.each do |fn|
+    clear_fun_emission_done(m, fn.name)
+    m.remove_function(fn)
+  end
+end
+
+# The hosted `target_def_fun` for a def at these self and argument types, and its return type: the
+# function already in the module when there is one, otherwise a new one, emitted now. A method's
+# self is the first parameter, of the owner's type (hosted `codegen_fun_signature_non_external`).
+pub def target_def_fun(low : Lowerer, target : Def, self_type : Type?, arg_types : Array(Type), ret : Type, class_owner : Type? = nil) : Function
+  # Hosted fun.cr:635-681 passes these values through memory. Refuse rather
+  # than emit a direct signature until that ABI is lowered here.
+  if low.typer.passed_indirectly?(ret)
+    raise "lower: indirect result above 128 bytes is not ported (hosted fun.cr:679)"
+  end
+  arg_types.each do |arg_type|
+    if low.typer.passed_indirectly?(arg_type)
+      raise "lower: indirect argument above 128 bytes is not ported (hosted fun.cr:644)"
+    end
+  end
+  block_type : Type? = nil
+  if target.uses_block_arg?
+    block_arg = target.block_arg
+    raise "BUG: captured block parameter is missing" if block_arg.nil?
+    block_type = low.analysed.type_of?(block_arg.as(ASTNode))
+    raise "BUG: captured block parameter has no type" if block_type.nil?
+  end
+  name = mangled_name(target.name, self_type, arg_types, ret, class_owner, block_type, low.analysed.program.def_owner(target))
+  if existing = low.module.get_function?(name)
+    expected = arg_types.size
+    expected += 1 unless self_type.nil?
+    expected += 1 unless block_type.nil?
+    if existing.as(Function).function_type.params.size != expected
+      raise "BUG: incompatible arity reusing #{name}"
+    end
+    return existing.as(Function) if fun_emission_done?(low.module, name) || low.emitting[name]?
+    low.module.remove_function(existing.as(Function))
+    clear_fun_emission_done(low.module, name)
+  end
+  params = [] of IrType
+  if st = self_type
+    if self_by_pointer?(st)
+      params << low.module.types.ptr(0)
+    else
+      params << low.typer.llvm_type(st)
+    end
+  end
+  arg_types.each do |t|
+    params << low.typer.llvm_type(t)
+  end
+  if bt = block_type
+    params << low.typer.llvm_type(bt)
+  end
+  ret_ir = low.typer.llvm_return_type(ret)
+  fn_type = low.module.types.func(params, ret_ir)
+  fn = codegen_fun(low, name, target, self_type, arg_types, fn_type, ret_ir, ret, class_owner)
+  # Hosted codegen_fun: a def whose analysed return type is NoReturn carries `noreturn` (fun.cr).
+  if ret.is_a?(NoReturnType)
+    fn.attrs << Attribute.new("noreturn", 0_u64, nil, nil)
+  end
+  fn
+end
+
+# The function a fun body goes into. A fun the program never calls was declared at its visit (hosted codegen.cr:864
+# declares it there and defines its body at the end), so its body goes into that declaration; any other name gets a new
+# function. A declaration that already has a body is a bug: a fun is emitted once (hosted External#dead).
+pub def declared_or_defined_fun(low : Lowerer, name : String, fn_type : IrType) : Function
+  declared = low.module.get_function?(name)
+  if declared.nil?
+    return low.module.define_function(name, fn_type)
+  end
+  fn = declared.as(Function)
+  if !fn.blocks.empty?
+    raise "BUG: #{name} already has a body (hosted External#dead)"
+  end
+  # A forward declaration has a signature but no parameter values yet.
+  # Deferred definitions created by define_function already have theirs.
+  if fn.param_count == 0
+    fn_type.param_types.each_with_index do |type, index|
+      fn.add_param(Param.new(type, "", index))
+    end
+  end
+  fn
+end
+
+# The calling convention of a function with a body (import.iyi convention_of, the rule the native back end
+# reads the oracle with): a def, named with a leading `*` or `~`, is `Iyi`; a `fun` and the runtime's entry
+# points (`__crystal_raise_overflow`, `main`) are `C`. The hosted code emits both as `ccc`; the IR keeps them apart.
+pub def def_convention(name : String) : CallConv
+  return CallConv::Iyi if name.starts_with?("*") || name.starts_with?("~")
+  CallConv::C
+end
+
+# The hosted `codegen_fun` (fun.cr:271), plain case. The function is declared first, so a recursive
+# call finds it. Its body is lowered in a frame of its own: the alloca and entry blocks as
+# `new_entry_block` makes them, `self` (when the owner is passed as self) and each parameter a value
+# read where it arrives (hosted `already_loaded`), the body, and the return. The caller's state is put
+# back afterwards (hosted `old_position`, `old_alloca_block`, `old_needs_value`).
+pub def codegen_fun(low : Lowerer, name : String, target : Def, self_type : Type?, arg_types : Array(Type), fn_type : IrType, ret_ir : IrType, ret : Type, class_owner : Type? = nil, closure_source : LowerContext? = nil) : Function
+  fn = declared_or_defined_fun(low, name, fn_type)
+  low.emitting[name] = true
+  fn.call_convention = def_convention(name)
+  fn.linkage = Linkage::Internal
+  add_body_attributes(fn, low.module.triple)
+  fn.attrs << Attribute.new("noinline", 0_u64, nil, nil) if target.no_inline
+  fn.attrs << Attribute.new("alwaysinline", 0_u64, nil, nil) if target.always_inline
+
+  if reason = low.stub_defs[name]?
+    emit_refused_stub(low, fn, name, reason)
+    low.emitting.delete(name)
+    mark_fun_emission_done(low.module, name)
+    return fn
+  end
+
+  # Hosted codegen_fun_signature names parameters before any block, local
+  # alloca or captured-variable GEP can claim the same name.
+  first = closure_source.nil? ? 0 : 1
+  if self_type
+    fn.name_param(fn.param(0), "self")
+    first = 1
+  end
+  i = 0
+  while i < target.args.size
+    fn.name_param(fn.param(first + i), target.args[i].name)
+    i += 1
+  end
+  if target.uses_block_arg?
+    block_arg = target.block_arg
+    raise "BUG: captured block parameter is missing" if block_arg.nil?
+    fn.name_param(fn.param(first + target.args.size), block_arg.as(Arg).name)
+  end
+
+  saved = low.save_function_state
+  ctx_type = def_context_type(self_type, class_owner)
+  if source = closure_source
+    if carried = closure_self_type(source)
+      raise "BUG: closure self has an ordinary receiver" unless self_type.nil? && class_owner.nil?
+      ctx_type = carried
+    end
+  end
+  low.context = LowerContext.new(fn, fn_type, ctx_type, Hash(String, LowerVar).new)
+  low.current_context.return_type = ret
+  low.current_context.var_unions = low.analysed.def_var_unions[target]?
+  low.current_context.nil_resets = low.analysed.def_nil_resets[target]?
+  low.alloca_block = nil
+  low.entry_block = nil
+  low.new_entry_block
+
+  facts = if source = closure_source
+            source.closure_facts.as(ClosureFacts)
+          else
+            ClosureFacts.new(low.analysed)
+          end
+  # A closure literal keeps the frame recorded by its enclosing walk.
+  found = closure_source.nil? ? facts.analyse_def(target, self_type) : facts.frame?(target)
+  raise "BUG: a closure literal has no closure frame (closures.iyi visit(ProcLiteral))" if found.nil?
+  own = found.as(ClosureFrame)
+  low.current_context.closure_facts = facts
+  if source = closure_source
+    setup_closure_vars(low, source, fn.param(0), local_frame: own)
+  end
+  if st = self_type
+    self_param = fn.param(0)
+    low.current_context.vars["self"] = LowerVar.new(self_param, st, !self_by_pointer?(st))
+  end
+  # Hosted alloca_non_closured_vars allocates the def's locals before copying
+  # arguments or emitting expressions, including temporary aggregate spills.
+  local_skip = [] of String
+  target.args.each { |arg| local_skip << arg.name }
+  if block_arg = target.block_arg
+    local_skip << block_arg.name
+  end
+  own.closured.each { |var| local_skip << var.name }
+  preallocate_locals(low, target.body, local_skip)
+  if source = closure_source
+    if own.closured.empty? && !own.self_closured
+      low.current_context.copy_closure_from(source)
+      low.current_context.closure_ptr = fn.param(0)
+    else
+      # Hosted fun.cr:472-481 reaches the parent through this function's
+      # context parameter, never through an SSA value in the enclosing function.
+      parent = LowerContext.new(fn, fn_type, source.type, Hash(String, LowerVar).new)
+      parent.copy_closure_from(source)
+      parent.closure_ptr = fn.param(0)
+      allocate_closure(low, own, parent)
+    end
+  else
+    allocate_closure(low, own)
+  end
+  assigned = collect_assigned_vars(target.body, low.analysed)
+  i = 0
+  while i < target.args.size
+    arg = target.args[i]
+    arg_type = arg_types[i]
+    param = fn.param(i + first)
+    create_local_copy_of_arg(low, arg.name, arg_type, param, assigned.includes?(arg.name))
+    i += 1
+  end
+  # A captured block is the last parameter (hosted fun.cr:626-629, 912-928).
+  if target.uses_block_arg?
+    block_arg = target.block_arg
+    raise "BUG: captured block parameter is missing" if block_arg.nil?
+    block_type = low.analysed.type_of?(block_arg.as(ASTNode))
+    raise "BUG: captured block parameter has no type" if block_type.nil?
+    param = fn.param(first + target.args.size)
+    create_local_copy_of_arg(low, block_arg.as(Arg).name, block_type.as(Type), param, assigned.includes?(block_arg.as(Arg).name))
+  end
+
+  low.needs_value = true
+  visit_node(low, target.body)
+  codegen_fun_return(low, ret_ir, target.body)
+  low.finish_main_function
+  low.leave_main(saved)
+  low.emitting.delete(name)
+  mark_fun_emission_done(low.module, name)
+  fn
+end
+
+# Emit only after the normal signature and attributes exist. No part of the
+# refused body is visited, so no partial blocks or frame state need recovery.
+def emit_refused_stub(low : Lowerer, fn : Function, name : String, reason : String) : Nil
+  m = low.module
+  b = low.builder
+  old = b.insert_block
+  text = "iyi: refused def hit at runtime: #{name}: #{reason}\n"
+  bytes = m.types.array_of(m.types.int(8), text.bytesize.to_i64)
+  data = m.add_global(unique_global_name(low, "__iyi_refused_message"), bytes)
+  data.linkage = Linkage::Private
+  data.global_constant = true
+  data.initializer = b.const_string(text, false)
+  entry = fn.append_basic_block("entry")
+  b.position_at_end(entry)
+  write_type = m.types.func([m.types.int32, m.types.ptr(0), m.types.int64] of IrType, m.types.int64)
+  write_fn = m.get_function?("write") || m.add_function("write", write_type, CallConv::C)
+  b.call(write_type, write_fn, [b.const_int(m.types.int32, 2), data.as(Value), b.const_int(m.types.int64, text.bytesize.to_i64)] of Value, "")
+  exit_type = m.types.func([m.types.int32] of IrType, m.types.void)
+  exit_fn = m.get_function?("exit") || m.add_function("exit", exit_type, CallConv::C)
+  b.call(exit_type, exit_fn, [b.const_int(m.types.int32, 70)] of Value, "")
+  b.unreachable
+  low.stubbed_defs[name] = reason
+  if block = old
+    b.position_at_end(block)
+  end
+end
+
+# Ordinary and inlined defs share the same owner context. A generic class
+# method uses its metaclass even when a probe omitted runtime self; other
+# class methods retain the instance owner used by allocation and lookup.
+pub def def_context_type(self_type : Type?, class_owner : Type?) : Type?
+  return self_type unless self_type.nil?
+  if owner = class_owner
+    if owner.is_a?(GenericClassInstanceType)
+      return owner.as(GenericClassInstanceType).metaclass
+    end
+  end
+  class_owner
+end
+
+# Whether the block the builder is in already ends (its last instruction is a terminator,
+# such as the `unreachable` after a NoReturn call). Nothing is emitted after such a block:
+# the hosted code tests `@builder.end` before it returns.
+pub def block_ended?(low : Lowerer) : Bool
+  block = low.builder.insert_block
+  return false if block.nil?
+  block.as(Block).terminated?
+end
+
+# The hosted `codegen_return(target_def.body.type?)` converts the body value to the
+# function's semantic result before returning it (fun.cr:579-604, codegen.cr:1192-1209).
+pub def codegen_fun_return(low : Lowerer, ret_ir : IrType, body : ASTNode) : Nil
+  return if block_ended?(low)
+  if ret_ir.void?
+    low.builder.ret_void
+    return
+  end
+  value = low.last
+  raise "BUG: a function returns a value but its body left none (hosted codegen.cr: codegen_return)" if value.nil?
+  body_type = low.analysed.type_of?(body)
+  raise "BUG: the function body has no analysed type (hosted codegen_return)" if body_type.nil?
+  return_type = low.current_context.return_type
+  raise "BUG: the function has no analysed return type (hosted codegen_return)" if return_type.nil?
+  converted = upcast(low, value.as(Value), body_type.as(Type), return_type.as(Type))
+  # The port's upcast may already return an SSA aggregate rather than its storage.
+  converted = to_rhs(low, converted, return_type.as(Type)) if converted.type.pointer?
+  low.builder.ret(converted)
+end
+
+# The unwind table kind of a function with a body (hosted fun.cr:437-441): sync on aarch64,
+# async elsewhere.
+pub def uwtable_kind(triple : String) : String
+  if triple.includes?("aarch64")
+    return "sync"
+  end
+  "async"
+end
+
+# Whether the target is darwin, where the hosted code asks for frame pointers (fun.cr:445).
+pub def darwin_triple?(triple : String) : Bool
+  triple.includes?("darwin") || triple.includes?("macosx")
+end
+
+# The attributes a function with a body carries (hosted codegen_fun, fun.cr:437-450): the unwind
+# table, the frame pointers on darwin, and probe-stack (hosted finish, codegen.cr:833).
+pub def add_body_attributes(fn : Function, triple : String) : Nil
+  fn.attrs << Attribute.new("uwtable", 0_u64, uwtable_kind(triple), nil)
+  if darwin_triple?(triple)
+    fn.attrs << Attribute.new("frame-pointer", 0_u64, "all", nil)
+  end
+  fn.attrs << Attribute.new("probe-stack", 0_u64, "inline-asm", nil)
+end
+
+# Whether a function already carries the attribute of this name.
+pub def has_attr?(fn : Function, name : String) : Bool
+  i = 0
+  while i < fn.attrs.size
+    return true if fn.attrs[i].name == name
+    i += 1
+  end
+  false
+end
+
+# The hosted attributes of the functions that codegen_fun does not make: the module's `main`
+# (uwtable, frame pointers, probe-stack, as hosted define_main_function) and `__crystal_main`
+# (probe-stack). Every function with a body gets probe-stack, as the hosted finish does.
+# Called once by codegen_program after `main` is defined. Defs already carry theirs.
+pub def function_attributes(m : Module) : Nil
+  m.functions.each do |fn|
+    next if fn.basic_blocks.empty?
+    if fn.name == "main"
+      fn.attrs << Attribute.new("uwtable", 0_u64, uwtable_kind(m.triple), nil) unless has_attr?(fn, "uwtable")
+      if darwin_triple?(m.triple) && !has_attr?(fn, "frame-pointer")
+        fn.attrs << Attribute.new("frame-pointer", 0_u64, "all", nil)
+      end
+    end
+    next if has_attr?(fn, "probe-stack")
+    fn.attrs << Attribute.new("probe-stack", 0_u64, "inline-asm", nil)
+  end
+end
+
+# Arguments assigned or addressed need a local slot: pointerof can mutate the
+# value through the returned pointer, just as the hosted assigned_to? does.
+private class AssignedVarCollector < Visitor
+  getter names : Set(String)
+
+  def initialize(@analysed : MainVisitor)
+    @names = Set(String).new
+  end
+
+  def visit_any(node : ASTNode) : Bool
+    return false if node.is_a?(Def) || node.is_a?(ClassDef) || node.is_a?(ModuleDef) || node.is_a?(ProcLiteral)
+    if expanded = @analysed.expansions[node]?
+      expanded.accept(self)
+      return false
+    end
+    if node.is_a?(Call)
+      if expanded = node.as(Call).expanded
+        expanded.accept(self)
+        return false
+      end
+    end
+    if node.is_a?(Assign)
+      t = node.as(Assign).target
+      if t.is_a?(Var)
+        @names.add(t.as(Var).name)
+      end
+    elsif node.is_a?(PointerOf)
+      t = node.as(PointerOf).exp
+      @names.add(t.as(Var).name) if t.is_a?(Var)
+    end
+    true
+  end
+end
+
+private def collect_assigned_vars(body : ASTNode, analysed : MainVisitor) : Set(String)
+  collector = AssignedVarCollector.new(analysed)
+  body.accept(collector)
+  collector.names
+end
+
+# The hosted `create_local_copy_of_arg` (fun.cr:945-1043) for a def parameter: allocates a local
+# slot and copies the parameter into it when assigned inside the body or passed by value (or widened
+# into a variable union); otherwise reads the parameter directly (`already_loaded = true`).
+pub def create_local_copy_of_arg(low : Lowerer, name : String, arg_type : Type, param : Value, assigned_to : Bool) : Nil
+  return if name == "_"
+  var_type = arg_type
+  if vu = low.current_context.var_unions
+    if u = vu[name]?
+      var_type = TypeMerge.merge(low.analysed.program, arg_type, u.as(Type))
+    end
+  end
+  return if var_type.is_a?(VoidType)
+  if slot = low.current_context.vars[name]?
+    value = param
+    if passed_by_value?(arg_type)
+      spill = low.alloca(low.typer.llvm_type(arg_type), "")
+      store_aligned(low, param, spill)
+      value = spill
+    end
+    assign(low, slot.pointer, slot.type, arg_type, value)
+    return
+  end
+  needs_copy = assigned_to || var_type.full_name != arg_type.full_name
+  if needs_copy
+    pointer = low.alloca(low.typer.llvm_type(var_type), name)
+    low.current_context.vars[name] = LowerVar.new(pointer, var_type, false)
+    val = param
+    if passed_by_value?(arg_type)
+      pointer2 = low.alloca(low.typer.llvm_type(arg_type), "")
+      store_aligned(low, param, pointer2)
+      val = pointer2
+    end
+    if var_type.full_name == arg_type.full_name
+      unless arg_type.is_a?(NilType)
+        if passed_by_value?(arg_type)
+          store_aligned(low, load_aligned(low, low.typer.llvm_type(arg_type), val), pointer)
+        else
+          store_aligned(low, val, pointer)
+        end
+      end
+    else
+      assign(low, pointer, var_type, arg_type, val)
+    end
+    return
+  end
+  if passed_by_value?(arg_type)
+    pointer = low.alloca(low.typer.llvm_type(var_type), name)
+    store_aligned(low, param, pointer)
+    low.current_context.vars[name] = LowerVar.new(pointer, var_type, false)
+    return
+  end
+  low.current_context.vars[name] = LowerVar.new(param, var_type, true)
+end

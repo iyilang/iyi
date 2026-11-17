@@ -1,0 +1,5 @@
+macro choose(flag, a, b)
+  {% unless flag %}{{a}}{% else %}{{b}}{% end %}
+end
+
+choose(false, "left", "right")

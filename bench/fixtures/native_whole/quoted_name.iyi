@@ -1,0 +1,9 @@
+# String constants whose text holds a quote or a backslash: the hosted compiler names each constant after its text,
+# so the IR has globals named `'"'` and `'\'`, written with escapes. bench/native_whole_program_exercise.sh.
+quote = "\""
+slash = "\\"
+both = "say \"hi\" \\ bye"
+puts quote
+puts slash
+puts both
+puts quote.bytesize + slash.bytesize + both.bytesize

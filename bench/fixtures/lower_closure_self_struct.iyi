@@ -1,0 +1,59 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+struct Cell
+  def initialize(@value : Int32)
+  end
+
+  def value : Int32
+    @value
+  end
+
+  def bump : Int32
+    @value = @value &+ 1
+  end
+
+  def snapshot_after_bump : Proc(Int32)
+    bump
+    -> { @value }
+  end
+
+  def counter : Proc(Int32)
+    -> { @value = @value &+ 10; @value }
+  end
+
+  def implicit_counter : Proc(Int32)
+    -> { bump }
+  end
+
+  def copy : Proc(Cell)
+    -> { self }
+  end
+end
+
+def make_snapshot : Proc(Int32)
+  cell = Cell.new(7)
+  cell.snapshot_after_bump
+end
+
+@[NoInline]
+def scrub(value : Int32) : Int32
+  (value &* 36) &+ 22
+end
+
+snap = make_snapshot
+LibC.exit(1) unless scrub(99) == 3586
+LibC.exit(2) unless snap.call == 7
+cell = Cell.new(1)
+counter = cell.counter
+copy = cell.copy
+implicit = cell.implicit_counter
+LibC.exit(3) unless counter.call == 11
+LibC.exit(4) unless counter.call == 21
+LibC.exit(5) unless implicit.call == 2
+LibC.exit(6) unless implicit.call == 3
+cell.bump
+LibC.exit(7) unless copy.call.value == 1
+LibC.exit(8) unless cell.value == 2
+LibC.exit(0)

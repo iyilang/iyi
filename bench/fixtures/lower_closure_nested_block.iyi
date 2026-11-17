@@ -1,0 +1,17 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def once(value : Int32, &)
+  yield value
+end
+
+def make_nested
+  outer = 30
+  once(5) do |inner|
+    -> { outer &+ inner }
+  end
+end
+
+reader = make_nested
+LibC.exit(reader.call &- 35)

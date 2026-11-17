@@ -1,0 +1,55 @@
+struct Large
+  @a : Int64
+  @b : Int64
+  @c : Int64
+  @d : Int64
+  @e : Int64
+  @f : Int64
+  @g : Int64
+  @h : Int64
+  @i : Int64
+  @j : Int64
+  @k : Int64
+  @l : Int64
+  @m : Int64
+  @n : Int64
+  @o : Int64
+  @p : Int64
+  @q : Int64
+
+  def initialize(value : Int64)
+    @a = value
+    @b = value
+    @c = value
+    @d = value
+    @e = value
+    @f = value
+    @g = value
+    @h = value
+    @i = value
+    @j = value
+    @k = value
+    @l = value
+    @m = value
+    @n = value
+    @o = value
+    @p = value
+    @q = value
+  end
+
+  def value : Int64
+    @q
+  end
+end
+
+VALUE = Large.new(7_i64)
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+if VALUE.value == 7_i64
+  LibC.exit(7)
+else
+  LibC.exit(1)
+end

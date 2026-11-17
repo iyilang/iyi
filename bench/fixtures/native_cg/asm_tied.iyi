@@ -1,0 +1,10 @@
+@[Unsafe("the fixture holds an inline asm template")]
+module asm_tied
+
+def addthree(x : Int64) : Int64
+  out = 0_i64
+  asm("add $0, $0, #3" : "=r"(out) : "0"(x))
+  out
+end
+
+puts "#{addthree(39_i64)}"

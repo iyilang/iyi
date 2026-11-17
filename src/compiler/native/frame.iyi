@@ -1,0 +1,108 @@
+module compiler/native/frame
+
+# Frame layout and the prologue and epilogue (SPEC 2.2 step 5).
+#
+# The frame record is pushed first: `stp x29, x30, [sp, #-16]!` and `x29 <- sp`, so
+# the frame pointer always names the record and darwin's backtrace walks it. Below
+# the record, sp moves down by the frame size. Every offset is from the final sp:
+#
+#   sp + 0 ............ outgoing argument area (the call's stack arguments)
+#   sp + saves ........ one 8-byte save per pinned callee-saved register
+#   sp + slots ........ allocas and spill slots, each at its alignment
+#
+# A frame over a page is entered page by page: each page is moved over and then
+# touched with `str xzr`, from the top down, before anything is written into it
+# (the stack-probe rule, SPEC 2.2 step 5; the touch is inline on every target). Each
+# epilogue restores the saves, releases the frame and pops the record.
+
+import compiler/native/mir::{MFunction, MBlock, MInst, MOp, Operand, OperandKind, Role}
+import compiler/native/target::{new_inst, is_role?}
+import compiler/native/aarch64/regs::{fp_reg}
+
+def round_up(n : Int64, to : Int64) : Int64
+  ((n + to - 1_i64) // to) * to
+end
+
+# Lays acc the frame, then inserts the prologue at the start of the entry block and an epilogue before every return.
+pub def lay_out(fn : MFunction, stack_align : Int64) : Nil
+  f = fn.frame
+  offset = round_up(f.outgoing_bytes, 8_i64)
+  f.saves_offset = offset
+  offset = offset + 8_i64 * f.callee_saved.size.to_i64
+  f.offsets = [] of Int64
+  f.slots.each do |slot|
+    align = slot[1].to_i64
+    offset = round_up(offset, align)
+    f.offsets << offset
+    offset = offset + slot[0]
+  end
+  f.frame_size = round_up(offset, stack_align)
+  insert_prologue(fn)
+  fn.blocks.each do |block|
+    insert_epilogues(fn, block)
+  end
+end
+
+def sp_adjust(isa : Int32, insts : Array(MInst), by : Int64) : Nil
+  m = new_inst(isa, Role::Adjust)
+  m.imm = by
+  insts << m
+end
+
+# The prologue: the frame record, the frame, the probes, and the saves.
+def prologue_insts(fn : MFunction) : Array(MInst)
+  f = fn.frame
+  acc = [] of MInst
+  acc << new_inst(fn.isa, Role::PushRecord)
+  acc << new_inst(fn.isa, Role::SetFramePointer)
+  remaining = f.frame_size
+  while remaining >= 4096_i64
+    sp_adjust(fn.isa, acc, -4096_i64)
+    acc << new_inst(fn.isa, Role::Probe)
+    remaining = remaining - 4096_i64
+  end
+  if remaining > 0_i64
+    sp_adjust(fn.isa, acc, -remaining)
+  end
+  i = 0
+  while i < f.callee_saved.size
+    m = new_inst(fn.isa, Role::SaveReg)
+    m.size = 64
+    m.imm = f.saves_offset + 8_i64 * i.to_i64
+    m.uses << Operand.new(OperandKind::Physical, f.callee_saved[i])
+    acc << m
+    i = i + 1
+  end
+  acc
+end
+
+def insert_prologue(fn : MFunction) : Nil
+  entry = fn.blocks[0]
+  pro = prologue_insts(fn)
+  entry.insts = pro + entry.insts
+end
+
+# The epilogue in front of each return: restore the saves, release the frame, pop the record.
+def insert_epilogues(fn : MFunction, block : MBlock) : Nil
+  f = fn.frame
+  acc = [] of MInst
+  block.insts.each do |inst|
+    if is_role?(fn.isa, inst, Role::Return)
+      i = 0
+      while i < f.callee_saved.size
+        m = new_inst(fn.isa, Role::RestoreReg)
+        m.size = 64
+        m.imm = f.saves_offset + 8_i64 * i.to_i64
+        m.defs << Operand.new(OperandKind::Physical, f.callee_saved[i])
+        acc << m
+        i = i + 1
+      end
+      if f.frame_size > 0_i64
+        sp_adjust(fn.isa, acc, f.frame_size)
+      end
+      acc << new_inst(fn.isa, Role::PopRecord)
+    end
+    acc << inst
+  end
+  block.insts = acc
+end

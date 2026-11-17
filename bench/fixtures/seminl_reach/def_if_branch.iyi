@@ -1,0 +1,14 @@
+class SeminlDefBranch
+  # An `if` branch that is one macro node: the then-branch is spliced in place.
+  def pick(flag : Bool) : Int32
+    if flag
+      {% if true %}
+        4
+      {% end %}
+    else
+      5
+    end
+  end
+end
+
+puts SeminlDefBranch.new.pick(true)

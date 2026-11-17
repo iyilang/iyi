@@ -1,0 +1,358 @@
+module compiler/semantic/default_arguments
+
+import compiler/syntax/ast::{ASTNode, Arg, Assign, Call, Def, Expressions, MagicConstant, NamedArgument, Primitive, TupleLiteral, Var}
+import compiler/semantic/match::{CallMatch}
+
+# The port of the argument side of the hosted Def#expand_default_arguments
+# (src/compiler/iyi/semantic/default_arguments.cr). The hosted expansion is a new
+# def whose body assigns each missing parameter's default and then forwards the
+# whole list to the original def. What the forwarding call passes is the argument
+# list this module returns: one node per parameter, in declaration order. A
+# positional argument fills its parameter, a named argument fills the parameter
+# whose external name it writes, and a parameter that neither reaches takes a copy
+# of its default value.
+#
+# A default that is a magic constant (`__FILE__`, `__LINE__`) comes back as its
+# node, unevaluated. The hosted expansion makes it a parameter filled from the
+# call site, so the call site's expansion of the constant is what runs.
+#
+# `supported?` and `expand` still refuse a splat or a double splat.
+# `expand_for_call` expands a splat and its named arguments into ordinary
+# parameters; a double splat stays refused. Also refused:
+# a named argument that names a parameter the positional arguments already fill,
+# or names no parameter, and a parameter with no default that no argument fills
+# (the call does not match, so there is no list to build).
+#
+# The hosted expansion keeps the def's body (rather than forwarding) when a default has a restriction, or the def
+# takes a block parameter or is a macro def, or takes a splat or a special variable. That changes where the
+# defaults are evaluated, not which values reach the parameters, so the list is the same and the port does not
+# distinguish the two. A kept body is a def of its own: it keeps the block parameter of the original, and the
+# flags its body sets.
+pub class DefaultArguments
+  # Hosted default_arguments.cr:4-35, 146-197, 258-297. Instantiate the
+  # expansion in the original def's scope, rather than visiting defaults at
+  # the call site. The caller must copy the original def's owner and file scope.
+  def self.expand_for_call(rec_def : Def, given : Int32, named_args : Array(NamedArgument)?, splat_names : Array(String) = [] of String) : Def | String
+    if rec_def.splat_index
+      return expand_splat(rec_def, given, splat_names, named_args)
+    end
+    return "not ported: splat or unmatched default arguments" unless supported_count?(rec_def, given, named_args)
+    expansion = wrapper_def(rec_def, given, named_args)
+    expansion.nil? ? rec_def : expansion.as(Def)
+  end
+
+  # A positional splat becomes ordinary parameters. The retained body rebuilds
+  # the splat local as a tuple. A primitive body stays bare for the lowerer.
+  def self.expand_splat(rec_def : Def, given : Int32, names : Array(String), named_args : Array(NamedArgument)? = nil) : Def | String
+    index = rec_def.splat_index
+    return "not ported: no splat parameter" if index.nil?
+    return "not ported: double splat arguments" if rec_def.double_splat
+    index = index.as(Int32)
+    before = given < index ? given : index
+    if rec_def.args[index].name.empty? && given > index
+      return "not ported: unmatched splat arguments"
+    end
+    if named_args
+      seen = [] of String
+      named_args.each do |named|
+        named_index = param_index(rec_def, named.name)
+        if named_index < before || named_index == index || seen.includes?(named.name)
+          return "not ported: unmatched splat arguments"
+        end
+        seen << named.name
+      end
+    end
+    k = before
+    while k < rec_def.args.size
+      if k != index && rec_def.args[k].default_value.nil? && !named_given?(named_args, rec_def.args[k].external_name)
+        return "not ported: unmatched splat arguments"
+      end
+      k += 1
+    end
+    new_args = [] of Arg
+    k = 0
+    while k < before
+      arg = rec_def.args[k].clone
+      arg.default_value = nil
+      new_args << arg
+      k += 1
+    end
+    names.each { |name| new_args << Arg.new(name) }
+    new_name = rec_def.name
+    if named_args
+      named_args.each do |named|
+        new_name = "#{new_name}:#{named.name}"
+        matching = rec_def.args[param_index(rec_def, named.name)]
+        new_args << Arg.new(matching.name, nil, copy_node(matching.restriction), named.name)
+      end
+    end
+    body = [] of ASTNode
+    k = before
+    while k < rec_def.args.size
+      if k != index && !named_given?(named_args, rec_def.args[k].external_name)
+        arg = rec_def.args[k]
+        default = arg.default_value
+        if default.is_a?(MagicConstant)
+          new_args << arg.clone
+        elsif default
+          body << Assign.new(Var.new(arg.name), default.clone)
+        end
+      end
+      k += 1
+    end
+    splat = rec_def.args[index]
+    unless splat.external_name.empty?
+      elements = [] of ASTNode
+      names.each { |name| elements << Var.new(name) }
+      body << Assign.new(Var.new(splat.name), TupleLiteral.new(elements))
+    end
+    original = rec_def.body
+    expanded_body : ASTNode = if original.is_a?(Primitive)
+      original.clone
+    else
+      body << original.clone
+      Expressions.new(body)
+    end
+    wrapper = Def.new(new_name, new_args, expanded_body, copy_node(rec_def.receiver), copy_arg(rec_def.block_arg), copy_node(rec_def.return_type), rec_def.macro_def, rec_def.abstract, nil, nil, copy_free_vars(rec_def.free_vars), rec_def.uses_block_arg)
+    wrapper.calls_super = rec_def.calls_super
+    wrapper.calls_initialize = rec_def.calls_initialize
+    wrapper.calls_previous_def = rec_def.calls_previous_def
+    wrapper.share_annotated = rec_def.share_annotated
+    wrapper
+  end
+
+  # True when *rec_def* can be expanded for a call with positional *args* and named
+  # *named_args*: no splat and no double splat, the positional arguments fit the
+  # parameters, every named argument names a parameter after them, and every
+  # parameter left over has a default value.
+  def self.supported?(rec_def : Def, args : Array(ASTNode), named_args : Array(NamedArgument)?) : Bool
+    DefaultArguments.supported_count?(rec_def, args.size, named_args)
+  end
+
+  # The same answer for a call with *given* positional arguments (the wrapper builder
+  # has the count, not the nodes).
+  def self.supported_count?(rec_def : Def, given : Int32, named_args : Array(NamedArgument)?) : Bool
+    return false if rec_def.splat_index
+    return false if rec_def.double_splat
+    count = rec_def.args.size
+    return false if given > count
+    seen = [] of Bool
+    i = 0
+    while i < count
+      seen << false
+      i += 1
+    end
+    if named_args
+      named_args.each do |named|
+        index = DefaultArguments.param_index(rec_def, named.name)
+        return false if index < given
+        return false if seen[index]
+        seen[index] = true
+      end
+    end
+    k = given
+    while k < count
+      if !seen[k] && rec_def.args[k].default_value.nil?
+        return false
+      end
+      k += 1
+    end
+    true
+  end
+
+  # The argument list the expanded def is called with: *args* first, then one node
+  # per further parameter, each the named argument for it or a copy of its default.
+  # Raises when the call is not supported (see `supported?`); the caller checks
+  # first, as the lookup has already matched the call.
+  def self.expand(rec_def : Def, args : Array(ASTNode), named_args : Array(NamedArgument)?) : Array(ASTNode)
+    if !DefaultArguments.supported?(rec_def, args, named_args)
+      raise "BUG: default arguments of #{rec_def.name} are not expanded for this call"
+    end
+    out = [] of ASTNode
+    count = rec_def.args.size
+    k = 0
+    while k < count
+      if k < args.size
+        out << args[k]
+      else
+        named = DefaultArguments.named_value(named_args, rec_def.args[k].external_name)
+        if named
+          out << named
+        else
+          default = rec_def.args[k].default_value
+          if default
+            out << default.clone
+          else
+            raise "BUG: no default for parameter #{rec_def.args[k].name} of #{rec_def.name}"
+          end
+        end
+      end
+      k += 1
+    end
+    out
+  end
+
+  # The position of the parameter whose external name is *name*, or -1.
+  def self.param_index(rec_def : Def, name : String) : Int32
+    i = 0
+    while i < rec_def.args.size
+      return i if rec_def.args[i].external_name == name
+      i += 1
+    end
+    -1
+  end
+
+  # The value of the named argument *name*, or nil when the call does not give it.
+  def self.named_value(named_args : Array(NamedArgument)?, name : String) : ASTNode?
+    return nil if named_args.nil?
+    named_args.each do |named|
+      return named.value if named.name == name
+    end
+    nil
+  end
+
+  # The wrapper the hosted expansion builds for a call (Def#expand_default_arguments): a
+  # new def the call goes to instead of *rec_def*. Its parameters are the call's positional
+  # arguments, then one per named argument, named after the named argument (`first:b`).
+  # Its body assigns each default the call does not reach and calls *rec_def* with every
+  # argument. Nil when no wrapper is needed: the named arguments already cover the
+  # defaults in order, or every default left over is a magic constant (the hosted early
+  # returns), and the call targets *rec_def* itself.
+  #
+  # One shape is not built exactly. A default with a restriction keeps the body, with the defaults as assignments
+  # before it: the hosted assignment carries the restriction check (AssignWithRestriction), which this port's
+  # syntax tree does not have, so the wrapper takes a plain assignment and the check is not made here.
+  def self.wrapper_def(rec_def : Def, given : Int32, named_args : Array(NamedArgument)?) : Def?
+    if !DefaultArguments.supported_count?(rec_def, given, named_args)
+      raise "BUG: no wrapper for #{rec_def.name}: the call is not supported"
+    end
+    count = rec_def.args.size
+    if named_args
+      if given + named_args.size == count && DefaultArguments.named_in_order?(rec_def, given, named_args)
+        return nil
+      end
+    else
+      return nil if DefaultArguments.all_magic_from?(rec_def, given)
+    end
+    retain = CallMatch.yields?(rec_def) || rec_def.macro_def
+    rec_def.args.each do |arg|
+      retain = true if arg.default_value && arg.restriction
+    end
+
+    new_name = rec_def.name
+    new_args = [] of Arg
+    k = 0
+    while k < given
+      arg = rec_def.args[k].clone
+      arg.default_value = nil
+      new_args << arg
+      k += 1
+    end
+    if named_args
+      named_args.each do |named|
+        new_name = "#{new_name}:#{named.name}"
+        matching = rec_def.args[DefaultArguments.param_index(rec_def, named.name)]
+        new_args << Arg.new(matching.name, nil, copy_node(matching.restriction), named.name)
+      end
+    end
+
+    body_list = [] of ASTNode
+    call_args = [] of ASTNode
+    k = 0
+    while k < given
+      call_args << Var.new(rec_def.args[k].name)
+      k += 1
+    end
+    k = given
+    while k < count
+      arg = rec_def.args[k]
+      if DefaultArguments.named_given?(named_args, arg.external_name)
+        call_args << Var.new(arg.name)
+      elsif arg.default_value.is_a?(MagicConstant)
+        new_args << arg.clone
+        call_args << Var.new(arg.name)
+      else
+        default = arg.default_value
+        raise "BUG: no default for parameter #{arg.name} of #{rec_def.name}" if default.nil?
+        body_list << Assign.new(Var.new(arg.name), default.clone)
+        call_args << Var.new(arg.name)
+      end
+      k += 1
+    end
+    if retain
+      body_list << rec_def.body.clone
+    else
+      forwarding = Call.new(nil, rec_def.name, call_args)
+      forwarding.expansion = true
+      body_list << forwarding
+    end
+
+    receiver = rec_def.receiver
+    return_type = rec_def.return_type
+    wrapper = Def.new(new_name, new_args, Expressions.new(body_list), DefaultArguments.copy_node(receiver), DefaultArguments.copy_arg(rec_def.block_arg), DefaultArguments.copy_node(return_type), rec_def.macro_def, false, nil, nil, nil, rec_def.uses_block_arg)
+    wrapper.free_vars = DefaultArguments.copy_free_vars(rec_def.free_vars)
+    wrapper.calls_super = rec_def.calls_super
+    wrapper.calls_initialize = rec_def.calls_initialize
+    wrapper.calls_previous_def = rec_def.calls_previous_def
+    wrapper.share_annotated = rec_def.share_annotated
+    wrapper
+  end
+
+  # Mirrors wrapper_def's decision to forward rather than retain the original body.
+  def self.forwards?(rec_def : Def, given : Int32) : Bool
+    return false if rec_def.splat_index || rec_def.double_splat || CallMatch.yields?(rec_def) || rec_def.macro_def
+    return false if given >= rec_def.args.size || !supported_count?(rec_def, given, nil)
+    return false if all_magic_from?(rec_def, given)
+    rec_def.args.each do |arg|
+      return false if arg.default_value && arg.restriction
+    end
+    true
+  end
+
+  # A copy of an optional node, or nil.
+  def self.copy_node(node : ASTNode?) : ASTNode?
+    return nil if node.nil?
+    node.clone
+  end
+
+  # A copy of an optional parameter, or nil.
+  def self.copy_arg(arg : Arg?) : Arg?
+    return nil if arg.nil?
+    arg.clone.as(Arg)
+  end
+
+  # A copy of the optional list of free variables, or nil.
+  def self.copy_free_vars(free : Array(String)?) : Array(String)?
+    return nil if free.nil?
+    free.dup
+  end
+
+  # True when a named argument of the call is *name*.
+  def self.named_given?(named_args : Array(NamedArgument)?, name : String) : Bool
+    return false if named_args.nil?
+    named_args.each do |named|
+      return true if named.name == name
+    end
+    false
+  end
+
+  # True when the named arguments are the parameters after the positional ones, in order.
+  def self.named_in_order?(rec_def : Def, given : Int32, named_args : Array(NamedArgument)) : Bool
+    i = 0
+    while i < named_args.size
+      return false if rec_def.args[given + i].external_name != named_args[i].name
+      i += 1
+    end
+    true
+  end
+
+  # True when every parameter from *given* on has a default that is a magic constant.
+  def self.all_magic_from?(rec_def : Def, given : Int32) : Bool
+    k = given
+    while k < rec_def.args.size
+      return false if !rec_def.args[k].default_value.is_a?(MagicConstant)
+      k += 1
+    end
+    true
+  end
+end

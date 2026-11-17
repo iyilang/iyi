@@ -1,0 +1,9 @@
+def pipeline_inner
+  sizeof(Int32)
+end
+
+def pipeline_outer
+  pipeline_inner
+end
+
+pipeline_outer

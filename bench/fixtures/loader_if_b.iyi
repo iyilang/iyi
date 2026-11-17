@@ -1,0 +1,9 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+  fun putchar(char : Int32) : Int32
+end
+
+def mark : Int32
+  LibC.putchar(98)
+  2
+end

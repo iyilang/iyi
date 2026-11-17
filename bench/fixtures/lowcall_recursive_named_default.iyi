@@ -1,0 +1,19 @@
+lib LibC
+  fun putchar(value : Int32) : Int32
+  fun exit(status : Int32) : NoReturn
+end
+
+def recursive_named_default(n : Int32, flag : Bool = false) : {Int32, Bool}
+  if n == 0
+    {n, flag}
+  else
+    recursive_named_default(n &- 1, flag: true)
+  end
+end
+
+result = recursive_named_default(3)
+LibC.putchar(result[0] &+ 48)
+if result[1]
+  LibC.putchar(116)
+end
+LibC.exit(result[0])

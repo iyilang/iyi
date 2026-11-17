@@ -1,0 +1,12 @@
+class Box(T)
+  def self.twice(value : Int32) : Int32
+    copy = value
+    copy
+  end
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+LibC.exit(Box(Int32).twice(7))

@@ -1,0 +1,20 @@
+# A non-generic class whose explicit instance variables are generic instances of the prelude's Array:
+# `@items : Array(Entry)` is assigned `[] of Entry` in initialize. The own-source dump must print the
+# instance's argument, `Array(Entry)`, never the unbound `Array(T)`. This is the shape of compiler.iyi's
+# `@resolved_modules : Array(ModuleInfo)`, which printed unbound until the own-source load gave the
+# declaration pass its type system (NEEDS.md row 22). `@label : String?` is a reference union, which
+# lowers to one pointer; the dump pins that too.
+class Entry
+end
+
+class Index
+  @items : Array(Entry)
+  @names : Array(String)
+  @label : String?
+
+  def initialize
+    @items = [] of Entry
+    @names = [] of String
+    @label = nil
+  end
+end

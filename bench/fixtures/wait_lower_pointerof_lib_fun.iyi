@@ -1,0 +1,5 @@
+lib LibC
+  fun getpid : Int32
+end
+
+pointerof(LibC.getpid)

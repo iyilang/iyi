@@ -1,0 +1,10 @@
+class SeminlConst
+  WAIT = {% if flag?(:x86_64) %}512{% else %}2048{% end %}
+
+  def self.wait : Int32
+    WAIT
+  end
+end
+
+x = SeminlConst::WAIT
+SeminlConst.wait

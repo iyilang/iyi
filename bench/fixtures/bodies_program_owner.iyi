@@ -1,0 +1,30 @@
+def owner_probe(value)
+  value
+end
+
+class OwnerCallerA
+  def run
+    owner_probe(1)
+  end
+end
+
+class OwnerCallerB
+  def run
+    owner_probe(2)
+    owner_probe("text")
+  end
+end
+
+class OwnerShadow
+  def owner_probe(value : Int32) : Bool
+    true
+  end
+
+  def run
+    owner_probe(3)
+  end
+end
+
+OwnerCallerA.new.run
+OwnerCallerB.new.run
+OwnerShadow.new.run

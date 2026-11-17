@@ -1,0 +1,4 @@
+# A nilable pointer keeps its element type: (Pointer(Int32) | Nil), not (Pointer | Nil).
+class Holder
+  @p : Pointer(Int32)?
+end

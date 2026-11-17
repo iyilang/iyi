@@ -1,0 +1,27 @@
+struct Point
+  def initialize(@x : Int32)
+  end
+
+  def set(x : Int32) : Nil
+    @x = x
+  end
+
+  def x : Int32
+    @x
+  end
+end
+
+def choose(flag : Bool) : Int32
+  a = Point.new(18)
+  b = Point.new(4)
+  c = if flag
+        a
+      else
+        b
+      end
+  a.set(40)
+  b.set(50)
+  c.x
+end
+
+choose(true)

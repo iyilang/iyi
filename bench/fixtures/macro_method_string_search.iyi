@@ -1,0 +1,8 @@
+macro searches(s)
+  {{s.includes?("ell")}} {{s.includes?("zz")}}
+  {{s.starts_with?("he")}} {{s.ends_with?("lo")}} {{s.starts_with?("lo")}}
+  {{s.size}} {{s.upcase}} {{s.downcase}} {{s.capitalize}}
+  {{s.id}} {{s.stringify}} {{s.symbolize}}
+end
+
+searches("hello")

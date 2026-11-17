@@ -1,0 +1,47 @@
+# Structural comparison only. The separate lowglob_cvar_lazy fixture proves
+# hosted runtime behavior and waits for the port's indirect Proc call support.
+@[Unsafe("declares the runtime entry and C entry")]
+class IyiRuntimeLock
+end
+
+fun __iyi_once(flag : Bool*, initializer : Void*) : Nil
+end
+
+lib LibIyiMain
+  fun __iyi_main(argc : Int32, argv : UInt8**)
+end
+
+fun main(argc : Int32, argv : UInt8**) : Int32
+  LibIyiMain.__iyi_main(argc, argv)
+  0
+end
+
+class K
+  def self.mk : Int32
+    9
+  end
+
+  def self.v : Int32
+    @@n
+  end
+end
+
+def f : Int32
+  K.v
+end
+
+def use(n : Int32) : Int32
+  n
+end
+
+use(f)
+
+class K
+  @@n : Int32 = K.mk
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+LibC.exit(f)

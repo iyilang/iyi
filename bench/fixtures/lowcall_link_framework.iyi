@@ -1,0 +1,10 @@
+@[Link(framework: "Security")]
+lib LibSecurity
+  fun SecRandomCopyBytes(rnd : Void*, count : Int32, bytes : Void*) : Int32
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+LibC.exit(LibSecurity.SecRandomCopyBytes(nil, 0, nil) | 42)

@@ -1,0 +1,19 @@
+def check_status(code : Int32) : String
+  unless code == 200
+    "error"
+  else
+    "ok"
+  end
+end
+
+def validate_port(port : Int32) : Int32
+  unless port > 0
+    port = 8080
+  end
+  port
+end
+
+def ensure_positive(val : Int32) : Int32
+  val = 1 unless val > 0
+  val
+end

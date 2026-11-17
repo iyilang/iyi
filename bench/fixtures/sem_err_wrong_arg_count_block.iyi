@@ -1,0 +1,9 @@
+def arity_block(a : Int32, b : Int32) : Int32
+  a + b
+end
+
+def arity_block(a : Int32, &) : Int32
+  yield a
+end
+
+arity_block(1, 2) { |x| x }

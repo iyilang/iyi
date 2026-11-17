@@ -1,0 +1,15 @@
+# pointer_set of Bool (hosted assign / store_value): store the i1 and return it. Status 1.
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def poke(p : Pointer(Bool), v : Bool) : Bool
+  p.value = v
+end
+
+def go : Int32
+  x = false
+  poke(pointerof(x), true) ? 1 : 0
+end
+
+LibC.exit(go)

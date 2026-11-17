@@ -1,0 +1,16 @@
+lib LibC
+  fun putchar(value : Int32) : Int32
+  fun exit(status : Int32) : NoReturn
+end
+
+def recursive_named_inferred(n : Int32, step : Int32 = 1)
+  if n == 0
+    0
+  else
+    recursive_named_inferred(n &- 1, step: step) &+ step
+  end
+end
+
+value = recursive_named_inferred(3, step: 2)
+LibC.putchar(value &+ 48)
+LibC.exit(value)

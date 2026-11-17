@@ -1,0 +1,16 @@
+class ReceiverOrder
+  def value : Int32
+    7
+  end
+
+  def add(value : Int32) : Int32
+    value
+  end
+
+  def check : Int32
+    (receiver = self).add(receiver.value)
+  end
+end
+
+result = ReceiverOrder.new.check
+number = (h = 7) + h

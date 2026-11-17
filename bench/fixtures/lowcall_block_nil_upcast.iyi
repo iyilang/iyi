@@ -1,0 +1,12 @@
+@[Unsafe("reports the block call result")]
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def run(&) : Nil
+  yield
+  12
+end
+
+run { 1 }
+LibC.exit(7)

@@ -1,0 +1,16 @@
+def helper(seen : UInt64) : NoReturn
+  while true
+  end
+end
+
+def helper_entry : Proc(UInt64, NoReturn)
+  ->(seen : UInt64) { helper(seen) }
+end
+
+def captured_entry(value : UInt64) : Proc(UInt64, NoReturn)
+  ->(seen : UInt64) { value; helper(seen) }
+end
+
+captured_entry(7_u64)
+
+helper_entry

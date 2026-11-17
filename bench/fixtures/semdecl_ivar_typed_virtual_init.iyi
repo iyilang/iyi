@@ -1,0 +1,24 @@
+# Instance variables guessed from initialize arguments take the argument restriction's
+# virtual type (hosted type_guess_visitor check_can_be_stored) and keep generic arguments.
+# Explicit declarations still override initialize-argument guesses for the same variable.
+abstract class Backend
+end
+
+class NativeBackend < Backend
+end
+
+class Entry
+end
+
+class InitArgHolder
+  def initialize(@backend : Backend, items : Array(Entry))
+    @items = items
+  end
+end
+
+class ExplicitWinsHolder
+  @backend : Backend
+
+  def initialize(@backend : NativeBackend)
+  end
+end

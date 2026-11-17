@@ -1,0 +1,67 @@
+@[Unsafe("observes collector colours while storing a captured reference")]
+class CapturePayload
+  getter value : Int32
+
+  def initialize(@value : Int32)
+  end
+end
+
+class CaptureChain
+  getter next : CaptureChain?
+
+  def initialize(@next : CaptureChain?)
+  end
+end
+
+def check_capture_under_mark : Int32
+  value = CapturePayload.new(0)
+  change = ->(next_value : CapturePayload) { value = next_value; value.value }
+  read = -> { value.value }
+  replacement = CapturePayload.new(42)
+  chain = CaptureChain.new(nil)
+  n = 0
+  while n < 200000
+    chain = CaptureChain.new(chain)
+    n += 1
+  end
+  IyiMark.workers = 15_u64
+  IyiMark.auto = true
+  limit = IyiMark.budget * 2_u64
+  burned = 0_u64
+  while burned < limit && !IyiMark.marking?
+    bytes = Pointer(UInt8).malloc(64_u64)
+    bytes.value = 1_u8
+    burned += 64_u64
+  end
+  under_mark = IyiMark.marking?
+  white = false
+  shaded = false
+  still_marking = false
+  if under_mark
+    address = replacement.object_id.to_u64
+    IyiMark.recolour(address, IyiMark::WHITE)
+    white = IyiMark.colour(address) == IyiMark::WHITE
+    change.call(replacement)
+    still_marking = IyiMark.marking?
+    shaded = IyiMark.colour(address) != IyiMark::WHITE
+  end
+  IyiMark.settle
+  return 2 unless under_mark
+  return 3 unless white
+  return 4 unless still_marking
+  return 5 unless shaded
+  return 6 unless read.call == 42 && chain.object_id != 0_u64
+  0
+end
+
+IyiMark.auto = false
+result = check_capture_under_mark
+if result == 0
+  puts "MARKING WHITE SHADED 42"
+elsif result == 5
+  puts "MARKING WHITE UNSHADED"
+  __iyi_exit(1)
+else
+  puts "MARKING PROOF INVALID #{result}"
+  __iyi_exit(1)
+end

@@ -1,0 +1,26 @@
+struct Large
+  @a : Int64
+  @b : Int64
+  @c : Int64
+  @d : Int64
+  @e : Int64
+  @f : Int64
+  @g : Int64
+  @h : Int64
+  @i : Int64
+  @j : Int64
+  @k : Int64
+  @l : Int64
+  @m : Int64
+  @n : Int64
+  @o : Int64
+  @p : Int64
+  @q : Int64
+end
+
+def make_large : Large
+  value = uninitialized Large
+  value
+end
+
+make_large

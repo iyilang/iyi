@@ -1,0 +1,14 @@
+@[Unsafe("reports the imported array's runtime state using exit")]
+import unit_cvar_array_module::{Inventory}
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+items = Inventory.items
+LibC.exit(1) unless items.empty?
+items << 17
+items << 31
+LibC.exit(2) unless Inventory.items.size == 2
+LibC.exit(3) unless Inventory.items[0] == 17 && Inventory.items[1] == 31
+LibC.exit(0)

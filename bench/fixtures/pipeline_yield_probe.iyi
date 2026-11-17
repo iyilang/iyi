@@ -1,0 +1,11 @@
+def emit_once(&)
+  yield 7
+end
+
+def identity(value : Int32) : Int32
+  value
+end
+
+emit_once do |value|
+  identity(value)
+end

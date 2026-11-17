@@ -1,0 +1,57 @@
+# Calls on instances reached through declared return types, inherited instance
+# methods, the exact-match cut-off across a parent, default arguments and an
+# unresolvable receiver. Read by bench/selfhost_semantic_calls_exercise.sh.
+
+class Foo
+  def bar(x : Int32) : String
+    "a"
+  end
+
+  def bar(x : String) : Int32
+    1
+  end
+
+  def qux(x : String) : Nil
+    nil
+  end
+
+  def dflt(x : Int32, y : String = "a") : Int32
+    x
+  end
+
+  def self.make(x : Int32) : Foo
+    Foo.new
+  end
+end
+
+class Bar < Foo
+  def qux(x : Int32) : Nil
+    nil
+  end
+
+  def bool(x : Bool) : Bool
+    x
+  end
+
+  def self.make2(x : Int32) : Bar
+    Bar.new
+  end
+end
+
+# call Foo.make(1).bar(1)
+# call Foo.make(1).bar("a")
+# call Foo.make(1).bar(true)
+# call Foo.make(1).dflt(1)
+# call Foo.make(1).dflt(1, "b")
+# call Foo.make(1).dflt(1, "b", 2)
+# call Foo.make(1).dflt()
+# call Foo.make(1).qux(nil)
+# call Foo.make(1).nope(1)
+# call Bar.make2(1).bar(1)
+# call Bar.make2(1).qux(1)
+# call Bar.make2(1).qux("a")
+# call Bar.make2(1).qux()
+# call Bar.make2(1).bool(true)
+# call Bar.make2(1).dflt(1)
+# call Foo.make(nil).bar(1)
+# call Foo.nope(1).bar(1)

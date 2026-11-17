@@ -1,0 +1,22 @@
+module compiler/lower/pending
+
+# The hosted functions the typed lowering has not ported yet. Each entry names the
+# hosted function it stands for and the slice that replaces it (SPEC.md 1128-1136).
+# A visit that reaches one raises a named refusal at the point the hosted generator
+# would emit that code, so the lowering never writes a silently wrong module. The
+# gate (bench/selfhost_lower_core_exercise.sh) reports a fixture that reaches one as
+# waiting, by this message.
+#
+# A slice that ports a hosted function removes its entry here and calls the port at
+# the same place. The entries are kept in the order the hosted sources define them.
+
+# The refusal every entry raises. A message always names the hosted function.
+pub def refuse_port(message : String) : Nil
+  raise message
+end
+
+# Any other node kind the core has not reached: the hosted `visit` overload for it
+# is named by the message, so the next slice knows which entry to write.
+pub def pending_visit_node(kind : String) : Nil
+  refuse_port("lower: visit(#{kind}) (hosted codegen.cr) is not ported yet")
+end

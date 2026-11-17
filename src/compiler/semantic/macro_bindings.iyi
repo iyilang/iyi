@@ -1,0 +1,188 @@
+module compiler/semantic/macro_bindings
+
+import compiler/macros/interpreter::{MacroFreeBinding}
+import compiler/macros/type_facts::{MacroAncestorFact, MacroInstanceVarFact, MacroTypeFacts}
+import compiler/semantic/top_level::{AnnotationType, EnumType, GenericClassType, GenericModuleType, MetaclassType, ModuleType, Type, UnionType}
+import compiler/types/types::{GenericClassInstanceType, GenericInstanceType, NamedTupleInstanceType, TupleInstanceType, TypeQueries}
+import compiler/syntax/ast::{Def}
+
+# The type parameters an inline macro site sees in the def being typed, as the
+# macro engine names them (interpreter.iyi MacroFreeBinding). Hosted
+# interpreter.cr resolve?(Path) 555-610: a single name is the def's free variable
+# first (`@free_vars`), then the instantiated owner's type parameter (the path
+# lookup). The owner's splat parameter (`T` of `Tuple(*T)`, `T` of a named tuple,
+# `T` of a union) is a literal of type nodes when it is bound to a tuple, a named
+# tuple or a union (hosted produce_tuple, 571-601); every other binding is the
+# type's node.
+pub class MacroBindings
+  # Hosted methods.cr:2508-2526 and 2618-2640: instance variables and
+  # enum constants keep the order in which the owning type records them.
+  def self.facts(scope : Type?) : MacroTypeFacts?
+    return nil if scope.nil?
+    owner = scope.as(Type)
+    if owner.is_a?(MetaclassType)
+      owner = owner.as(MetaclassType).instance_type
+    end
+    owner = owner.devirtualize
+    facts = MacroTypeFacts.new
+    if owner.is_a?(EnumType)
+      facts.constants_known = true
+      facts.annotations_known = true
+      if annotations = owner.annotations
+        annotations.each do |annotation_type, values|
+          if ann = values.last?
+            facts.annotations[annotation_type.full_name] = ann
+            facts.annotation_types[annotation_type.full_name] = annotation_type.full_name
+          end
+        end
+      end
+      owner.program.types.each do |name, type|
+        if type.is_a?(AnnotationType)
+          facts.annotation_types[name] = type.full_name
+        end
+      end
+      owner.as(EnumType).members.each do |name, member|
+        facts.constants[name] = member.value.to_s
+      end
+    end
+    if owner.is_a?(ModuleType)
+      facts.ancestors_known = true
+      facts.methods_known = true
+      collect_methods(owner.as(ModuleType), facts.methods)
+      collect_ancestors(owner.as(ModuleType), facts)
+      facts.instance_vars_known = true
+      owner.as(ModuleType).all_instance_vars.each do |name, var|
+        var_type = var.type?
+        facts.instance_vars << MacroInstanceVarFact.new(name[1, name.bytesize - 1], var_type ? var_type.to_s : nil)
+      end
+    elsif owner.is_a?(GenericClassInstanceType)
+      generic = owner.as(GenericClassInstanceType)
+      facts.ancestors_known = true
+      facts.methods_known = true
+      if base = generic.generic_type
+        if base.is_a?(ModuleType)
+          collect_methods(base.as(ModuleType), facts.methods)
+        end
+      end
+      generic.included_modules.each do |parent|
+        add_ancestor(parent, facts)
+      end
+      if superclass = generic.superclass
+        add_ancestor(superclass, facts)
+      end
+      facts.instance_vars_known = true
+      owner.as(GenericClassInstanceType).all_instance_vars.each do |name, var|
+        var_type = var.type?
+        facts.instance_vars << MacroInstanceVarFact.new(name[1, name.bytesize - 1], var_type ? var_type.to_s : nil)
+      end
+    end
+    facts
+  end
+
+  def self.collect_methods(owner : ModuleType, methods : Array(Def)) : Nil
+    owner.defs.each_value do |overloads|
+      overloads.each do |method|
+        methods << method
+      end
+    end
+  end
+
+  def self.collect_ancestors(owner : ModuleType, facts : MacroTypeFacts) : Nil
+    owner.parents.each do |parent|
+      add_ancestor(parent, facts)
+    end
+  end
+
+  def self.add_ancestor(parent : Type, facts : MacroTypeFacts) : Nil
+    methods = [] of Def
+    if parent.is_a?(ModuleType)
+      collect_methods(parent.as(ModuleType), methods)
+    elsif parent.is_a?(GenericClassInstanceType)
+      generic = parent.as(GenericClassInstanceType)
+      if generic.generic_type.is_a?(ModuleType)
+        collect_methods(generic.generic_type.as(ModuleType), methods)
+      end
+    end
+    facts.ancestors << MacroAncestorFact.new(parent.full_name, methods)
+    if parent.is_a?(ModuleType)
+      collect_ancestors(parent.as(ModuleType), facts)
+    elsif parent.is_a?(GenericClassInstanceType)
+      generic = parent.as(GenericClassInstanceType)
+      generic.included_modules.each { |item| add_ancestor(item, facts) }
+      if superclass = generic.superclass
+        add_ancestor(superclass, facts)
+      end
+    end
+  end
+
+  # `scope` is the receiver of the def being typed (nil at the top level) and
+  # `free` the def's free variables as the call's arguments bound them. A free
+  # variable hides an owner's parameter of the same name, as hosted looks the
+  # free variables up first.
+  def self.of(scope : Type?, free : Hash(String, Type)) : Array(MacroFreeBinding)
+    out = [] of MacroFreeBinding
+    splat_name : String? = nil
+    if receiver = scope
+      owner : Type = receiver
+      if owner.is_a?(MetaclassType)
+        owner = owner.as(MetaclassType).instance_type
+      end
+      if owner.is_a?(UnionType)
+        splat_name = "T"
+        out << binding("T", owner, true) unless free.has_key?("T")
+      elsif owner.is_a?(GenericInstanceType)
+        inst = owner.as(GenericInstanceType)
+        names = type_var_names(inst.generic_type)
+        if index = TypeQueries.splat_index(inst.generic_type)
+          splat_name = names[index] if index < names.size
+        end
+        if owner.is_a?(TupleInstanceType) || owner.is_a?(NamedTupleInstanceType)
+          # The port keeps a tuple's members on the instance, not under its type
+          # parameter, so the parameter is bound to the instance here.
+          own = splat_name || "T"
+          splat_name = own
+          out << binding(own, owner, true) unless free.has_key?(own)
+        else
+          inst.type_vars.each do |name, type|
+            out << binding(name, type, name == splat_name) unless free.has_key?(name)
+          end
+        end
+      end
+    end
+    free.each do |name, type|
+      out << binding(name, type, name == splat_name)
+    end
+    out
+  end
+
+  # One type parameter: a tuple, named tuple or union keeps its members, anything
+  # else is its printed name.
+  def self.binding(name : String, type : Type, splat : Bool) : MacroFreeBinding
+    if type.is_a?(NamedTupleInstanceType)
+      entries = [] of String
+      type.as(NamedTupleInstanceType).entries.each { |entry| entries << "#{entry.name}:#{entry.type.to_s}" }
+      return MacroFreeBinding.new(name, type.to_s, "named_tuple", entries, splat)
+    end
+    if type.is_a?(TupleInstanceType)
+      members = [] of String
+      type.as(TupleInstanceType).tuple_types.each { |member| members << member.to_s }
+      return MacroFreeBinding.new(name, type.to_s, "tuple", members, splat)
+    end
+    if type.is_a?(UnionType)
+      members = [] of String
+      type.as(UnionType).union_types.each { |member| members << member.to_s }
+      return MacroFreeBinding.new(name, type.to_s, "union", members, splat)
+    end
+    MacroFreeBinding.new(name, type.to_s, "type", [] of String, splat)
+  end
+
+  def self.type_var_names(generic : Type) : Array(String)
+    if generic.is_a?(GenericClassType)
+      return generic.as(GenericClassType).type_vars
+    end
+    if generic.is_a?(GenericModuleType)
+      return generic.as(GenericModuleType).type_vars
+    end
+    [] of String
+  end
+end

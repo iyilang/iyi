@@ -1,0 +1,11 @@
+{% if flag?(:no_such_flag) %}
+  require "./loader_if_a"
+{% else %}
+  require "./loader_if_b"
+{% end %}
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+LibC.exit(mark)

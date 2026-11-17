@@ -1,0 +1,19 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+class Parent
+end
+
+class Child < Parent
+end
+
+def choose(flag : Bool) : Parent
+  flag ? Child.new : Parent.new
+end
+
+def same_class(value : Parent) : Bool
+  value.class.crystal_type_id == Child.crystal_type_id
+end
+
+LibC.exit(same_class(choose(true)) ? 0 : 1)

@@ -1,0 +1,25 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+  fun getpid : Int32
+end
+
+def branch_read(flag : Bool) : Int32
+  if flag
+    value = 7
+  end
+  value ? value : 3
+end
+
+def loop_read(count : Int32) : Int32
+  i = 0
+  while i < count
+    last = i
+    i = i &+ 1
+  end
+  last ? last : 9
+end
+
+if LibC.getpid != -1
+  root_value = 4
+end
+LibC.exit(branch_read(true) &+ branch_read(false) &+ loop_read(0) &+ loop_read(3) &+ (root_value ? root_value : 0))

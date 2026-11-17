@@ -1,0 +1,47 @@
+@[Unsafe("reports enum call results and receiver evaluation")]
+lib LibC
+  fun exit(status : Int32) : NoReturn
+  fun putchar(value : Int32) : Int32
+end
+
+struct Choice
+  enum Kind : UInt8
+    First  = 1
+    Second = 2
+
+    def ==(other : Kind) : Bool
+      value == other.value
+    end
+
+    def self.native : Kind
+      Kind::Second
+    end
+
+    def self.forward : Kind
+      native
+    end
+
+    def self.kind_type
+      self
+    end
+  end
+
+  def initialize(@kind : Kind = Kind.native)
+  end
+
+  def kind : Kind
+    @kind
+  end
+end
+
+def evaluated_kind
+  LibC.putchar(69)
+  Choice::Kind
+end
+
+LibC.exit(1) unless Choice::Kind.native.value == 2_u8
+LibC.exit(2) unless Choice::Kind.forward.value == 2_u8
+LibC.exit(3) unless Choice.new.kind.value == 2_u8
+LibC.exit(4) unless Choice::Kind.kind_type.forward.value == 2_u8
+LibC.exit(5) unless evaluated_kind.forward.value == 2_u8
+LibC.exit(0)

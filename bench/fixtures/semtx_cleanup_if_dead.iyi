@@ -1,0 +1,16 @@
+if false
+  if true
+    1
+  end
+else
+  if nil
+    2
+  end
+end
+if true
+  x
+else
+  if false
+    3
+  end
+end

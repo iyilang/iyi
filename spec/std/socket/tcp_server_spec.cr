@@ -155,7 +155,7 @@ describe TCPServer, tags: "network" do
     it "supports IPv6 dual stack" do
       server = TCPServer.new(:inet6)
       server.ipv6_only = false
-      server.bind("::", 0)
+      server.bind("::", unused_local_tcp_port)
       server.listen
 
       TCPSocket.open("127.0.0.1", server.local_address.port) do |client|
@@ -175,7 +175,7 @@ describe TCPServer, tags: "network" do
     it "supports IPv6 only" do
       server = TCPServer.new(:inet6)
       server.ipv6_only = true
-      server.bind("::", 0)
+      server.bind("::", unused_local_tcp_port)
       server.listen
 
       expect_raises(Socket::ConnectError) do

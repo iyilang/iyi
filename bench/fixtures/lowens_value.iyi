@@ -1,0 +1,11 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def work : Int32
+  value = 7
+  defer value = 8
+  value
+end
+
+LibC.exit(work)

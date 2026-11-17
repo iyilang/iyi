@@ -1,0 +1,6 @@
+# Proc types: the value is a two-word pair, the call is a function type with or without a
+# closure context, and a value of more than 128 bytes is passed through memory.
+# type: Proc(Int32, Int32)
+# type: Proc(Int32, Nil)
+# type: Proc(Tuple(Int32, Bool), Int32)
+# type: Proc(Int32, Tuple(Int64, Int64, Int64, Int64, Int64, Int64, Int64, Int64, Int64, Int64, Int64, Int64, Int64, Int64, Int64, Int64, Int64))

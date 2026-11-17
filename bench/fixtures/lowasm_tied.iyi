@@ -1,0 +1,14 @@
+# A tied operand. The tree's tied form is `"0"(a)` on the x86 fused multiply
+# (`float.iyi`). This uses the same `"0"` tie with `mov`, which the aarch64
+# assembler encodes: the second input is copied into the tied output register.
+def tied(base : Int32, addend : Int32) : Int32
+  outv = base
+  asm("mov $0, $1" : "=r"(outv) : "0"(outv), "r"(addend))
+  outv
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+LibC.exit(tied(3, 9))

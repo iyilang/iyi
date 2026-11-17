@@ -1,0 +1,16 @@
+@[Unsafe("calls C exit to expose the annotated functions' result")]
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+@[AlwaysInline]
+def add_one(value : Int32) : Int32
+  value &+ 1
+end
+
+@[NoInline]
+def answer(value : Int32) : Int32
+  add_one(value)
+end
+
+LibC.exit(answer(41))

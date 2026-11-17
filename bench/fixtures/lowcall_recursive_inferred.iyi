@@ -1,0 +1,16 @@
+lib LibC
+  fun putchar(value : Int32) : Int32
+  fun exit(status : Int32) : NoReturn
+end
+
+def recursive_inferred_count(n : Int32)
+  if n == 0
+    0
+  else
+    recursive_inferred_count(n &- 1) &+ 1
+  end
+end
+
+value = recursive_inferred_count(3)
+LibC.putchar(value &+ 48)
+LibC.exit(value)

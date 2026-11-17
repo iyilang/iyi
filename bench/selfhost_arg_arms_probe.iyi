@@ -1,0 +1,91 @@
+import compiler/syntax/parser::{Parser}
+import compiler/syntax/ast::{Call}
+import compiler/syntax/visitor::{Visitor}
+import compiler/semantic/normalizer::{Normalizer, NormalizerProgram}
+import compiler/semantic/top_level::{SemanticProgram, TopLevelVisitor, Type}
+import compiler/semantic/main_visitor::{MainVisitor}
+import compiler/semantic/method_lookup::{ArmWalk}
+
+class InputWalk < Visitor
+  getter counts : Hash(UInt64, Int32) = Hash(UInt64, Int32).new
+
+  def visit(node : Call) : Bool
+    @counts[node.object_id] = node.args.size
+    true
+  end
+end
+
+class ArmProbe < Visitor
+  def initialize(@program : SemanticProgram, @typer : MainVisitor, @name : String, @counts : Hash(UInt64, Int32), @walk : ArmWalk)
+  end
+
+  def visit(node : Call) : Bool
+    if node.name == @name
+      receiver : Type = @program
+      if obj = node.obj
+        if typed = @typer.type_of?(obj)
+          receiver = typed
+        else
+          return true
+        end
+      end
+      if named = node.named_args
+        named.each { |arg| arg.value.accept(@typer) }
+      end
+      # The legacy visitor can expand named arguments in node.args. Preserve
+      # the positional count captured before typing for this matcher probe.
+      count = @counts[node.object_id]? || node.args.size
+      positional = node.args[0, count]
+      found = @typer.lookup_call_arms(receiver, receiver, node.name, positional, node, @walk)
+      puts "arms=#{found.matches.size} cover=#{found.cover_all?}"
+      if error = found.error
+        puts "error=#{error}"
+      end
+      found.matches.each do |match|
+        puts "#{match.defining.full_name}##{match.definition.name}:#{match.arg_types.map(&.full_name).join(",")}"
+        if Program.args.size > 4 && Program.args[4] == "signature"
+          puts "signature=#{@typer.format_overload_signature(receiver, match.definition)}"
+        end
+        if Program.args.size > 4 && Program.args[4] == "binding"
+          names = match.bound.keys.sorted
+          names.each { |name| puts "binding=#{name}:#{match.bound[name].full_name}" }
+          puts "named=#{match.named_arg_types.map { |arg| arg.type.full_name }.join(",")}"
+        end
+        if node.name == "new"
+          puts "owner=#{match.owner.full_name}"
+        end
+      end
+    end
+    true
+  end
+end
+
+path = Program.args[0]
+node = Normalizer.new(NormalizerProgram.new(false)).normalize(Parser.new(File.read(path), path).parse)
+program = SemanticProgram.new
+program.total_mode = true
+program.search_path = [Program.args[1]]
+if Program.args.size > 3 && (Program.args[3] == "prelude" || Program.args[3] == "prelude-instances")
+  prelude = TopLevelVisitor.new(program)
+  prelude.load_file("#{Program.args[1]}/iyi/prelude.iyi")
+  prelude.finish
+end
+top = TopLevelVisitor.new(program, path)
+node.accept(top)
+top.finish
+inputs = InputWalk.new
+node.accept(inputs)
+typer = MainVisitor.new(program)
+typer.total = true
+node.accept(typer)
+walk = Program.args.size > 3 && Program.args[3] == "modules" ? ArmWalk::Modules : ArmWalk::Parents
+probe = ArmProbe.new(program, typer, Program.args[2], inputs.counts, walk)
+if Program.args.size > 3 && Program.args[3] == "prelude-instances"
+  typer.typed_instances.each do |instance|
+    if instance.definition.name == "spawn"
+      instance.definition.body.accept(probe)
+    end
+  end
+else
+  node.accept(probe)
+end

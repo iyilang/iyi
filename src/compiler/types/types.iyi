@@ -1,0 +1,1173 @@
+module compiler/types/types
+
+import compiler/foundation/errors::{refuse_port}
+import compiler/foundation/location::{Location}
+import compiler/syntax/ast::{ASTNode, Def, Generic, Path, Visibility}
+import compiler/syntax/token::{NumberKind}
+import compiler/semantic/top_level::{AliasType, ClassType, Const, EnumType, GenericClassType, GenericModuleType, GenericTraitType, ImplRecord, MetaclassType, MetaTypeVar, ModuleType, NamedType, NilType, NonGenericClassType, NoReturnType, SemanticProgram, TraitType, Type, TypeException, TypeParameterType, UnionType, VoidType}
+
+pub class VirtualType < Type
+  property base_type : Type
+  @metaclass : VirtualMetaclassType?
+
+  def initialize(program : SemanticProgram, @base_type : Type)
+    super(program, nil, "#{@base_type.name}+")
+    @metaclass = nil
+  end
+
+  def virtual? : Bool
+    true
+  end
+
+  def full_name : String
+    "#{@base_type.full_name}+"
+  end
+
+  def to_s : String
+    full_name
+  end
+
+  def member_name : String
+    @base_type.full_name
+  end
+
+  def devirtualize : Type
+    return @base_type
+  end
+
+  def type_desc : String
+    "virtual"
+  end
+
+  def struct? : Bool
+    @base_type.struct?
+  end
+
+  def abstract? : Bool
+    @base_type.abstract?
+  end
+
+  def leaf? : Bool
+    false
+  end
+
+  def metaclass : VirtualMetaclassType
+    if m = @metaclass
+      m
+    else
+      m = VirtualMetaclassType.new(@program, self)
+      @metaclass = m
+      m
+    end
+  end
+
+  def subtypes : Array(Type)
+    result = [] of Type
+    collect_subtypes(@base_type, result)
+    result
+  end
+
+  private def collect_subtypes(type : Type, result : Array(Type)) : Nil
+    unless type.abstract?
+      result << type
+    end
+    if type.is_a?(ClassType)
+      type.as(ClassType).subclasses.each do |sub|
+        collect_subtypes(sub, result)
+      end
+    end
+  end
+
+  def subtype_of?(other : Type) : Bool
+    return true if self == other
+    if other.is_a?(VirtualType)
+      return @base_type.subtype_of?(other.as(VirtualType).base_type)
+    end
+    @base_type.subtype_of?(other)
+  end
+
+  def implements?(other : Type) : Bool
+    @base_type.implements?(other)
+  end
+end
+
+pub class VirtualMetaclassType < Type
+  getter instance_type : VirtualType
+
+  def initialize(program : SemanticProgram, @instance_type : VirtualType)
+    super(program, nil, "#{@instance_type.name}.class")
+  end
+
+  def full_name : String
+    "#{@instance_type.full_name}.class"
+  end
+
+  def to_s : String
+    full_name
+  end
+
+  def member_name : String
+    "#{@instance_type.base_type.full_name}.class"
+  end
+
+  # Hosted types.cr:410-415, 3958-3959: the metaclass of the virtual root.
+  def devirtualize : Type
+    base = @instance_type.base_type
+    if base.is_a?(ModuleType)
+      return base.as(ModuleType).metaclass
+    elsif base.is_a?(GenericClassInstanceType)
+      return base.as(GenericClassInstanceType).metaclass
+    end
+    self
+  end
+
+  def subtype_of?(other : Type) : Bool
+    devirtualize.subtype_of?(other)
+  end
+
+  def type_desc : String
+    "virtual_metaclass"
+  end
+
+  def metaclass : ClassType
+    @program.types["Class"].as(ClassType)
+  end
+end
+
+pub abstract class GenericInstanceType < Type
+  property generic_type : Type
+  property type_vars : Hash(String, Type)
+  property type_args : Array(Type)
+
+  def initialize(program : SemanticProgram, @generic_type : Type, @type_vars : Hash(String, Type), @type_args : Array(Type) = [] of Type)
+    super(program, @generic_type.namespace, @generic_type.name)
+  end
+
+  # Hosted types.cr:2369-2372 resolves each generic parent in this instance.
+  def parents : Array(Type)
+    result = [] of Type
+    if generic = @generic_type.as?(ModuleType)
+      generic.parents.each do |parent|
+        result << TypeQueries.replace_type_parameters(parent, @type_vars)
+      end
+    end
+    result
+  end
+
+  def generic_instance? : Bool
+    true
+  end
+
+  def full_name : String
+    args_strs = @type_args.map { |a| a.devirtualize.arg_full_name }
+    "#{@generic_type.base_full_name}(#{args_strs.join(", ")})"
+  end
+
+  def to_s : String
+    full_name
+  end
+
+  def type_desc : String
+    "generic_instance"
+  end
+end
+
+pub class GenericClassInstanceType < GenericInstanceType
+  property superclass : Type?
+  getter subclasses : Array(Type)
+  getter included_modules : Array(Type)
+  @metaclass : GenericClassInstanceMetaclassType?
+  property virtual_type_cache : Type? = nil
+
+  def register_subclass(sub : Type) : Nil
+    @subclasses << sub
+    @generic_type.register_subclass(sub)
+    nil
+  end
+
+  def initialize(program : SemanticProgram, generic_type : Type, type_vars : Hash(String, Type), type_args : Array(Type), @superclass : Type? = nil)
+    super(program, generic_type, type_vars, type_args)
+    @subclasses = [] of Type
+    @included_modules = [] of Type
+    @metaclass = nil
+    @instance_vars = Hash(String, MetaTypeVar).new
+    @copied_from = Hash(String, MetaTypeVar).new
+    if sc = @superclass
+      if sc.is_a?(ClassType)
+        sc.as(ClassType).subclasses << self
+      elsif sc.is_a?(GenericClassInstanceType)
+        sc.as(GenericClassInstanceType).subclasses << self
+      end
+    end
+  end
+
+  def class? : Bool
+    !@generic_type.struct?
+  end
+
+  def struct? : Bool
+    @generic_type.struct?
+  end
+
+  def type_desc : String
+    struct? ? "struct" : "class"
+  end
+
+  def metaclass : GenericClassInstanceMetaclassType
+    if m = @metaclass
+      m
+    else
+      m = GenericClassInstanceMetaclassType.new(@program, self)
+      @metaclass = m
+      m
+    end
+  end
+
+  def superclass_metaclass : ModuleType
+    metaclass
+  end
+
+  def subtype_of?(other : Type) : Bool
+    return true if self == other
+    target = other.devirtualize
+    return subtype_of?(target) unless target == other
+    return super if other.is_a?(UnionType)
+    if other.is_a?(GenericClassInstanceType)
+      other_gi = other.as(GenericClassInstanceType)
+      if @generic_type == other_gi.generic_type
+        if @type_args.size == other_gi.type_args.size
+          i = 0
+          while i < @type_args.size
+            return false unless @type_args[i] == other_gi.type_args[i]
+            i = i + 1
+          end
+          return true
+        end
+      end
+    elsif other.is_a?(GenericClassType)
+      return @generic_type == other
+    end
+    @included_modules.each do |inc|
+      return true if inc.subtype_of?(other)
+    end
+    if sc = @superclass
+      return sc.subtype_of?(other)
+    end
+    false
+  end
+
+  def implements?(other : Type) : Bool
+    subtype_of?(other)
+  end
+
+  # The instance variables this instance holds: the generic type's own, each with its type
+  # parameters replaced by this instance's arguments. The hosted instantiation copies them
+  # (GenericClassType#instantiate) and again when the generic declares one later
+  # (each_instantiated_type). Here each read takes the copy from the generic's current table,
+  # so a later declaration reaches every existing instance without a push to each one.
+  def instance_vars : Hash(String, MetaTypeVar)
+    generic_type = @generic_type
+    if generic_type.is_a?(ModuleType)
+      generic_type.as(ModuleType).instance_vars.each do |name, source|
+        unless (copied = @copied_from[name]?) && copied == source
+          if source_type = source.var_type
+            mv = MetaTypeVar.new(name, TypeQueries.replace_type_parameters(source_type, @type_vars))
+            mv.owner = self
+            @instance_vars[name] = mv
+            @copied_from[name] = source
+          end
+        end
+      end
+    end
+    @instance_vars
+  end
+
+  # The instance variables of this instance and of its superclass, as the hosted
+  # all_instance_vars: the superclass's first, then its own.
+  def all_instance_vars : Hash(String, MetaTypeVar)
+    all = Hash(String, MetaTypeVar).new
+    if sc = @superclass
+      if sc.is_a?(ModuleType)
+        sc.as(ModuleType).all_instance_vars.each do |k, v|
+          all[k] = v
+        end
+      elsif sc.is_a?(GenericClassInstanceType)
+        sc.as(GenericClassInstanceType).all_instance_vars.each do |k, v|
+          all[k] = v
+        end
+      end
+    end
+    @included_modules.each do |parent|
+      if parent.is_a?(ModuleType)
+        parent.as(ModuleType).all_instance_vars.each { |k, v| all[k] = v }
+      elsif vars = parent.all_instance_vars?
+        vars.each { |k, v| all[k] = v }
+      end
+    end
+    instance_vars.each do |k, v|
+      all[k] = v
+    end
+    all
+  end
+
+  def lookup_instance_var?(var_name : String) : MetaTypeVar?
+    all_instance_vars[var_name]?
+  end
+
+  def all_instance_vars? : Hash(String, MetaTypeVar)?
+    all_instance_vars
+  end
+end
+
+pub class GenericModuleInstanceType < GenericInstanceType
+  @metaclass : GenericModuleInstanceMetaclassType?
+
+  def initialize(program : SemanticProgram, generic_type : Type, type_vars : Hash(String, Type), type_args : Array(Type))
+    super(program, generic_type, type_vars, type_args)
+    @metaclass = nil
+    @instance_vars = Hash(String, MetaTypeVar).new
+    @copied_from = Hash(String, MetaTypeVar).new
+  end
+
+  def module? : Bool
+    true
+  end
+
+  def type_desc : String
+    "module"
+  end
+
+  def metaclass : GenericModuleInstanceMetaclassType
+    if m = @metaclass
+      m
+    else
+      m = GenericModuleInstanceMetaclassType.new(@program, self)
+      @metaclass = m
+      m
+    end
+  end
+
+  # A module's declared field types bind against this inclusion's arguments,
+  # not the class's type variables.
+  def instance_vars : Hash(String, MetaTypeVar)
+    generic = @generic_type.as(GenericModuleType)
+    generic.instance_vars.each do |name, source|
+      unless (copied = @copied_from[name]?) && copied == source
+        if source_type = source.var_type
+          mv = MetaTypeVar.new(name, TypeQueries.replace_type_parameters(source_type, @type_vars))
+          mv.owner = self
+          @instance_vars[name] = mv
+          @copied_from[name] = source
+        end
+      end
+    end
+    @instance_vars
+  end
+
+  def all_instance_vars : Hash(String, MetaTypeVar)
+    all = Hash(String, MetaTypeVar).new
+    parents.each do |parent|
+      if parent.is_a?(ModuleType)
+        parent.as(ModuleType).all_instance_vars.each { |k, v| all[k] = v }
+      elsif vars = parent.all_instance_vars?
+        vars.each { |k, v| all[k] = v }
+      end
+    end
+    instance_vars.each { |k, v| all[k] = v }
+    all
+  end
+
+  def all_instance_vars? : Hash(String, MetaTypeVar)?
+    all_instance_vars
+  end
+
+  def lookup_instance_var?(name : String) : MetaTypeVar?
+    all_instance_vars[name]?
+  end
+end
+
+pub class GenericTraitInstanceType < GenericInstanceType
+  def initialize(program : SemanticProgram, generic_type : Type, type_vars : Hash(String, Type), type_args : Array(Type))
+    super(program, generic_type, type_vars, type_args)
+  end
+
+  def trait? : Bool
+    true
+  end
+
+  def type_desc : String
+    "trait"
+  end
+end
+
+pub class GenericClassInstanceMetaclassType < MetaclassType
+  def initialize(program : SemanticProgram, instance_type : GenericClassInstanceType)
+    super(program, instance_type.namespace, "#{instance_type.name}:Class", instance_type)
+    # The hosted rule: an instance's metaclass is the generic type's metaclass, so the
+    # generated `new` methods the generic class has (new.iyi) are found on Box(Int32).class,
+    # and that metaclass walks on to the generic's superclass. MetaclassType gave it Class,
+    # since a generic instance is not a ClassType.
+    parents.clear
+    parents << instance_type.generic_type.as(ModuleType).metaclass
+  end
+
+  def generic_instance_type : GenericClassInstanceType
+    @instance_type.as(GenericClassInstanceType)
+  end
+
+  # The class methods of a generic instance are the generic class's own (hosted
+  # `delegate defs, macros, to: generic_type`, types.cr 3400).
+  def defs : Hash(String, Array(Def))
+    generic_instance_type.generic_type.as(GenericClassType).metaclass.defs
+  end
+
+  def full_name : String
+    "#{@instance_type.full_name}.class"
+  end
+
+  def to_s : String
+    full_name
+  end
+
+  def type_desc : String
+    "metaclass"
+  end
+end
+
+pub class GenericModuleInstanceMetaclassType < MetaclassType
+  def initialize(program : SemanticProgram, instance_type : GenericModuleInstanceType)
+    super(program, instance_type.namespace, "#{instance_type.name}:Class", instance_type)
+  end
+
+  def generic_instance_type : GenericModuleInstanceType
+    @instance_type.as(GenericModuleInstanceType)
+  end
+
+  def full_name : String
+    "#{@instance_type.full_name}.class"
+  end
+
+  def to_s : String
+    full_name
+  end
+
+  def type_desc : String
+    "metaclass"
+  end
+end
+
+pub class TupleInstanceType < GenericClassInstanceType
+  getter tuple_types : Array(Type)
+  getter tuple_indexers : Hash(String, Def) = Hash(String, Def).new
+
+  def initialize(program : SemanticProgram, @tuple_types : Array(Type))
+    super(program, program.types["Tuple"], Hash(String, Type).new, @tuple_types, program.struct_type)
+    @struct = true
+  end
+
+  def full_name : String
+    types_s = @tuple_types.map { |t| t.devirtualize.arg_full_name }
+    "Tuple(#{types_s.join(", ")})"
+  end
+
+  def to_s : String
+    full_name
+  end
+
+  def type_desc : String
+    "struct"
+  end
+
+  def struct? : Bool
+    true
+  end
+
+  def tuple? : Bool
+    true
+  end
+
+  def size : Int32
+    @tuple_types.size
+  end
+
+  def subtype_of?(other : Type) : Bool
+    return true if self == other
+    if other.is_a?(TupleInstanceType)
+      ot = other.as(TupleInstanceType)
+      return false unless @tuple_types.size == ot.tuple_types.size
+      i = 0
+      while i < @tuple_types.size
+        return false unless @tuple_types[i].subtype_of?(ot.tuple_types[i])
+        i = i + 1
+      end
+      return true
+    end
+    super
+  end
+end
+
+pub class NamedArgumentType
+  property name : String
+  property type : Type
+
+  def initialize(@name : String, @type : Type)
+  end
+
+  def to_s : String
+    "#{@name}: #{@type.to_s}"
+  end
+end
+
+pub class NamedTupleInstanceType < GenericClassInstanceType
+  getter entries : Array(NamedArgumentType)
+  getter tuple_indexers : Hash(String, Def) = Hash(String, Def).new
+
+  def initialize(program : SemanticProgram, @entries : Array(NamedArgumentType))
+    args = @entries.map(&.type)
+    super(program, program.types["NamedTuple"], Hash(String, Type).new, args, program.struct_type)
+    @struct = true
+  end
+
+  def full_name : String
+    entries_s = @entries.map { |e| "#{e.name}: #{e.type.devirtualize.arg_full_name}" }
+    "NamedTuple(#{entries_s.join(", ")})"
+  end
+
+  def to_s : String
+    full_name
+  end
+
+  def type_desc : String
+    "struct"
+  end
+
+  def struct? : Bool
+    true
+  end
+
+  def named_tuple? : Bool
+    true
+  end
+
+  def size : Int32
+    @entries.size
+  end
+
+  def name_type(name : String) : Type?
+    i = 0
+    while i < @entries.size
+      if @entries[i].name == name
+        return @entries[i].type
+      end
+      i = i + 1
+    end
+    nil
+  end
+
+  def subtype_of?(other : Type) : Bool
+    return true if self == other
+    if other.is_a?(NamedTupleInstanceType)
+      ot = other.as(NamedTupleInstanceType)
+      return false unless @entries.size == ot.entries.size
+      i = 0
+      while i < @entries.size
+        entry = @entries[i]
+        other_type = ot.name_type(entry.name)
+        return false if other_type.nil?
+        return false unless entry.type.subtype_of?(other_type)
+        i = i + 1
+      end
+      return true
+    end
+    super
+  end
+end
+
+pub class ProcInstanceType < GenericClassInstanceType
+  getter arg_types : Array(Type)
+  getter return_type : Type
+
+  def initialize(program : SemanticProgram, @arg_types : Array(Type), @return_type : Type)
+    all_args = [] of Type
+    @arg_types.each { |a| all_args << a }
+    all_args << @return_type
+    # Hosted ProcInstanceType#initialize (types.cr:2758-2765) binds the
+    # splatted arguments as T and the result as R.
+    vars = Hash(String, Type).new
+    vars["T"] = TupleInstanceType.new(program, @arg_types)
+    vars["R"] = @return_type
+    super(program, program.types["Proc"], vars, all_args, program.struct_type)
+    @struct = true
+  end
+
+  def full_name : String
+    all_parts = [] of String
+    @arg_types.each { |a| all_parts << a.devirtualize.full_name }
+    all_parts << @return_type.devirtualize.full_name
+    "Proc(#{all_parts.join(", ")})"
+  end
+
+  def to_s : String
+    full_name
+  end
+
+  def type_desc : String
+    "struct"
+  end
+
+  def struct? : Bool
+    true
+  end
+
+  def proc? : Bool
+    true
+  end
+
+  def subtype_of?(other : Type) : Bool
+    return true if self == other
+    if other.is_a?(ProcInstanceType)
+      ot = other.as(ProcInstanceType)
+      return false unless @arg_types.size == ot.arg_types.size
+      i = 0
+      while i < @arg_types.size
+        return false unless ot.arg_types[i].subtype_of?(@arg_types[i])
+        i = i + 1
+      end
+      return @return_type.subtype_of?(ot.return_type)
+    end
+    super
+  end
+end
+
+pub class PointerInstanceType < GenericClassInstanceType
+  getter element_type : Type
+
+  def initialize(program : SemanticProgram, @element_type : Type)
+    vars = Hash(String, Type).new
+    vars["T"] = @element_type
+    super(program, program.types["Pointer"], vars, [@element_type] of Type, program.struct_type)
+    @struct = true
+  end
+
+  def full_name : String
+    "Pointer(#{@element_type.full_name})"
+  end
+
+  def to_s : String
+    full_name
+  end
+
+  def type_desc : String
+    "struct"
+  end
+
+  def struct? : Bool
+    true
+  end
+end
+
+pub class StaticArrayInstanceType < GenericClassInstanceType
+  getter element_type : Type
+  getter size_int : Int64
+
+  def initialize(program : SemanticProgram, @element_type : Type, @size_int : Int64)
+    super(program, program.types["StaticArray"], Hash(String, Type).new, [@element_type] of Type, program.struct_type)
+    @struct = true
+  end
+
+  def full_name : String
+    "StaticArray(#{@element_type.devirtualize.arg_full_name}, #{@size_int})"
+  end
+
+  def to_s : String
+    full_name
+  end
+
+  def type_desc : String
+    "struct"
+  end
+
+  def struct? : Bool
+    true
+  end
+end
+
+pub class NilableType < UnionType
+  getter not_nil_type : Type
+
+  def initialize(program : SemanticProgram, @not_nil_type : Type)
+    super(program, [program.nil_type, @not_nil_type] of Type)
+  end
+
+  def nilable? : Bool
+    true
+  end
+
+  def arg_full_name : String
+    "#{@not_nil_type.full_name} | Nil"
+  end
+
+  def full_name : String
+    "(#{arg_full_name})"
+  end
+
+  def to_s : String
+    full_name
+  end
+end
+
+pub class NilableReferenceUnionType < UnionType
+  def nilable? : Bool
+    true
+  end
+end
+
+pub class ReferenceUnionType < UnionType
+  def nilable? : Bool
+    false
+  end
+end
+
+pub class NilableProcType < UnionType
+  getter proc_type : ProcInstanceType
+
+  def initialize(program : SemanticProgram, @proc_type : ProcInstanceType)
+    super(program, [program.nil_type, @proc_type] of Type)
+  end
+
+  def nilable? : Bool
+    true
+  end
+end
+
+pub class MixedUnionType < UnionType
+end
+
+pub abstract class PrimitiveType < ClassType
+  getter bytes : Int32
+
+  def initialize(program : SemanticProgram, namespace : ModuleType?, name : String, superclass : Type?, @bytes : Int32)
+    super(program, namespace, name, superclass)
+    @struct = true
+  end
+
+  def primitive? : Bool
+    true
+  end
+
+  def struct? : Bool
+    true
+  end
+end
+
+pub class IntegerType < PrimitiveType
+  getter rank : Int32
+  getter kind : NumberKind
+  getter signed : Bool
+
+  def initialize(program : SemanticProgram, namespace : ModuleType?, name : String, superclass : Type?, bytes : Int32, @rank : Int32, @kind : NumberKind, @signed : Bool)
+    super(program, namespace, name, superclass, bytes)
+  end
+end
+
+pub class FloatType < PrimitiveType
+  getter rank : Int32
+
+  def initialize(program : SemanticProgram, namespace : ModuleType?, name : String, superclass : Type?, bytes : Int32, @rank : Int32)
+    super(program, namespace, name, superclass, bytes)
+  end
+end
+
+pub class CharType < PrimitiveType
+  def initialize(program : SemanticProgram, namespace : ModuleType?, name : String, superclass : Type?)
+    super(program, namespace, name, superclass, 4)
+  end
+end
+
+pub class BoolType < PrimitiveType
+  def initialize(program : SemanticProgram, namespace : ModuleType?, name : String, superclass : Type?)
+    super(program, namespace, name, superclass, 1)
+  end
+end
+
+pub class SymbolType < PrimitiveType
+  def initialize(program : SemanticProgram, namespace : ModuleType?, name : String, superclass : Type?)
+    super(program, namespace, name, superclass, 4)
+  end
+end
+
+pub class TypeParameter < Type
+  getter param_name : String
+
+  def initialize(program : SemanticProgram, @param_name : String)
+    super(program, nil, @param_name)
+  end
+
+  def type_parameter? : Bool
+    true
+  end
+end
+
+pub class TypeSplat < Type
+  getter splatted_type : Type
+
+  def initialize(program : SemanticProgram, @splatted_type : Type)
+    super(program, nil, "*#{@splatted_type.name}")
+  end
+
+  def full_name : String
+    "*#{@splatted_type.full_name}"
+  end
+end
+
+# Queries the code generator reads from a type (CONTRACT.md rows for types.cr).
+# Each function is the hosted member of the same name in src/compiler/iyi/types.cr.
+# Hosted methods reopen classes from other files, which iyi cannot do, so the
+# port carries them as functions taking the receiver as their first argument.
+pub class TypeQueries
+  def self.pointer?(type : Type) : Bool
+    type.is_a?(PointerInstanceType)
+  end
+
+  def self.proc?(type : Type) : Bool
+    type.is_a?(ProcInstanceType)
+  end
+
+  def self.void?(type : Type) : Bool
+    type.is_a?(VoidType)
+  end
+
+  def self.no_return?(type : Type) : Bool
+    type.is_a?(NoReturnType)
+  end
+
+  def self.virtual?(type : Type) : Bool
+    type.is_a?(VirtualType)
+  end
+
+  def self.virtual_metaclass?(type : Type) : Bool
+    type.is_a?(VirtualMetaclassType)
+  end
+
+  # Hosted metaclass?: a MetaclassType of any kind, or a virtual metaclass.
+  # The generic instance metaclasses derive from MetaclassType here.
+  def self.metaclass?(type : Type) : Bool
+    type.is_a?(MetaclassType) || type.is_a?(VirtualMetaclassType)
+  end
+
+  # Hosted Type#replace_type_parameters (types.cr): the type with each type parameter replaced by the
+  # instance argument of that name, rebuilt only where something changed. A generic instance
+  # is rebuilt through the type system's hook, since its arguments may name other instances.
+  # A virtual type is not replaced: its base is the generic's own class, not an argument.
+  def self.replace_type_parameters(type : Type, tv_map : Hash(String, Type)) : Type
+    if type.is_a?(TypeParameterType)
+      if replacement = tv_map[type.name]?
+        return replacement
+      end
+      return type
+    end
+    if type.is_a?(TypeSplat)
+      original = type.as(TypeSplat).splatted_type
+      splatted = replace_type_parameters(original, tv_map)
+      return splatted if splatted.is_a?(TupleInstanceType)
+      return type if splatted == original
+      return TypeSplat.new(type.program, splatted)
+    end
+    if type.is_a?(UnionType)
+      members = [] of Type
+      changed = false
+      type.as(UnionType).union_types.each do |member|
+        replaced = replace_type_parameters(member, tv_map)
+        changed = true unless replaced == member
+        members << replaced
+      end
+      return type unless changed
+      if hook = type.program.merge_hook
+        return hook.merge_members(members)
+      end
+      return type
+    end
+    if type.is_a?(GenericClassInstanceType)
+      return replace_generic_instance(type.as(GenericClassInstanceType), tv_map)
+    end
+    if type.is_a?(GenericModuleInstanceType) || type.is_a?(GenericTraitInstanceType)
+      instance = type.as(GenericInstanceType)
+      args = replace_list(instance.type_args, tv_map)
+      return type if same_types?(args, instance.type_args)
+      if hook = type.program.merge_hook
+        return hook.instantiate_type(instance.generic_type, args)
+      end
+    end
+    type
+  end
+
+  # The arguments of a replaced list, in order.
+  def self.replace_list(types : Array(Type), tv_map : Hash(String, Type)) : Array(Type)
+    replaced = [] of Type
+    types.each do |t|
+      replaced << replace_type_parameters(t, tv_map)
+    end
+    replaced
+  end
+
+  def self.same_types?(a : Array(Type), b : Array(Type)) : Bool
+    return false unless a.size == b.size
+    i = 0
+    while i < a.size
+      return false unless a[i] == b[i]
+      i = i + 1
+    end
+    true
+  end
+
+  # A generic instance, rebuilt with its replaced arguments. The built-in instances (tuple,
+  # named tuple, proc, pointer, static array) are rebuilt by their own constructors, as the
+  # hosted replace_type_parameters of each class does.
+  def self.replace_generic_instance(inst : GenericClassInstanceType, tv_map : Hash(String, Type)) : Type
+    if inst.is_a?(TupleInstanceType)
+      tuple_types = inst.as(TupleInstanceType).tuple_types
+      replaced = replace_list(tuple_types, tv_map)
+      return inst if same_types?(replaced, tuple_types)
+      return TupleInstanceType.new(inst.program, replaced)
+    end
+    if inst.is_a?(NamedTupleInstanceType)
+      entries = inst.as(NamedTupleInstanceType).entries
+      replaced_entries = [] of NamedArgumentType
+      changed = false
+      entries.each do |entry|
+        replaced_type = replace_type_parameters(entry.type, tv_map)
+        changed = true unless replaced_type == entry.type
+        replaced_entries << NamedArgumentType.new(entry.name, replaced_type)
+      end
+      return inst unless changed
+      return NamedTupleInstanceType.new(inst.program, replaced_entries)
+    end
+    if inst.is_a?(ProcInstanceType)
+      proc_type = inst.as(ProcInstanceType)
+      args = replace_list(proc_type.arg_types, tv_map)
+      ret = replace_type_parameters(proc_type.return_type, tv_map)
+      return inst if same_types?(args, proc_type.arg_types) && ret == proc_type.return_type
+      return ProcInstanceType.new(inst.program, args, ret)
+    end
+    if inst.is_a?(PointerInstanceType)
+      element = inst.as(PointerInstanceType).element_type
+      replaced = replace_type_parameters(element, tv_map)
+      return inst if replaced == element
+      return PointerInstanceType.new(inst.program, replaced)
+    end
+    if inst.is_a?(StaticArrayInstanceType)
+      array_type = inst.as(StaticArrayInstanceType)
+      replaced = replace_type_parameters(array_type.element_type, tv_map)
+      return inst if replaced == array_type.element_type
+      return StaticArrayInstanceType.new(inst.program, replaced, array_type.size_int)
+    end
+    generic = inst.generic_type
+    if generic.is_a?(GenericClassType)
+      args = replace_list(inst.type_args, tv_map)
+      return inst if same_types?(args, inst.type_args)
+      if hook = inst.program.merge_hook
+        return hook.instantiate_type(generic, args)
+      end
+    end
+    inst
+  end
+
+  # Hosted reference_like?: a single pointer represents the value. Nil and the
+  # reference unions always do; a class does unless it is a struct; a virtual
+  # type does unless its base is a struct. Primitive classes, procs and tuples
+  # do not, even though some are classes in the port.
+  def self.reference_like?(type : Type) : Bool
+    if type.nil_type? || type.is_a?(NilableType) || type.is_a?(NilableReferenceUnionType) || type.is_a?(ReferenceUnionType)
+      return true
+    end
+    if type.is_a?(NonGenericClassType) || type.is_a?(GenericClassType) || type.is_a?(GenericClassInstanceType) || type.is_a?(VirtualType)
+      return !type.struct?
+    end
+    false
+  end
+
+  # Hosted subclasses: the direct subclasses of a class type, none otherwise.
+  def self.subclasses(type : Type) : Array(Type)
+    if type.is_a?(ClassType)
+      return type.as(ClassType).subclasses
+    end
+    if type.is_a?(GenericClassInstanceType)
+      return type.as(GenericClassInstanceType).subclasses
+    end
+    [] of Type
+  end
+
+  # Hosted all_subclasses: every descendant, depth first, direct ones in order.
+  def self.all_subclasses(type : Type) : Array(Type)
+    result = [] of Type
+    append_subclasses(type, result)
+    result
+  end
+
+  private def self.append_subclasses(type : Type, result : Array(Type)) : Nil
+    subclasses(type).each do |sub|
+      result << sub
+      append_subclasses(sub, result)
+    end
+  end
+
+  def self.leaf?(type : Type) : Bool
+    subclasses(type).size == 0
+  end
+
+  # Hosted instance_type: the type a metaclass describes. Any other type is its own.
+  def self.instance_type(type : Type) : Type
+    if type.is_a?(VirtualMetaclassType)
+      return type.as(VirtualMetaclassType).instance_type
+    end
+    if type.is_a?(MetaclassType)
+      return type.as(MetaclassType).instance_type
+    end
+    type
+  end
+
+  # Hosted virtual_type!, named virtual_type_bang because iyi names have no `!`.
+  # The virtual type over a class, made once and kept on the class (hosted
+  # `@virtual_type ||=`), so two calls give the same object. A non-generic class
+  # and a generic instance keep one, as the hosted classes that define it do.
+  def self.virtual_type_bang(type : Type) : Type
+    if type.is_a?(NonGenericClassType)
+      cls = type.as(NonGenericClassType)
+      if made = cls.virtual_type_cache
+        return made
+      end
+      fresh = VirtualType.new(type.program, type)
+      cls.virtual_type_cache = fresh
+      return fresh
+    end
+    if type.is_a?(GenericClassInstanceType)
+      inst = type.as(GenericClassInstanceType)
+      if made = inst.virtual_type_cache
+        return made
+      end
+      fresh = VirtualType.new(type.program, type)
+      inst.virtual_type_cache = fresh
+      return fresh
+    end
+    VirtualType.new(type.program, type)
+  end
+
+  # Hosted virtual_type_made?: whether a virtual type over this type was ever made.
+  # Asking does not make one.
+  def self.virtual_type_made?(type : Type) : Bool
+    if type.is_a?(NonGenericClassType)
+      return !type.as(NonGenericClassType).virtual_type_cache.nil?
+    end
+    if type.is_a?(GenericClassInstanceType)
+      return !type.as(GenericClassInstanceType).virtual_type_cache.nil?
+    end
+    false
+  end
+
+  # Hosted virtual_type: a class that is a leaf and not abstract stands for
+  # itself; an abstract struct with subclasses is its virtual type; any other
+  # struct stands for itself; any other class is its virtual type. Non-class
+  # types stand for themselves.
+  def self.virtual_type(type : Type) : Type
+    if type.is_a?(GenericClassType)
+      # A generic type stands for itself, as the hosted GenericType does.
+      return type
+    end
+    if type.is_a?(MetaclassType)
+      # The metaclass of a virtual type is the virtual metaclass (Animal+.class).
+      inst = virtual_type(type.as(MetaclassType).instance_type)
+      if inst.is_a?(VirtualType)
+        return VirtualMetaclassType.new(type.program, inst.as(VirtualType))
+      end
+      return type
+    end
+    if type.is_a?(ClassType)
+      is_leaf = leaf?(type)
+      is_abstract = type.abstract?
+      is_struct = type.struct?
+      return type if is_leaf && !is_abstract
+      return virtual_type_bang(type) if is_struct && is_abstract && !is_leaf
+      return type if is_struct
+      return virtual_type_bang(type)
+    end
+    if type.is_a?(GenericClassInstanceType)
+      is_leaf = leaf?(type.as(GenericClassInstanceType).generic_type)
+      is_abstract = type.abstract?
+      is_struct = type.struct?
+      return type if is_leaf && !is_abstract
+      return virtual_type_bang(type) if is_struct && is_abstract && !is_leaf
+      return type if is_struct
+      return virtual_type_bang(type)
+    end
+    type
+  end
+
+  # Hosted splat_index: the position of a splatted type parameter in a generic
+  # class or module, nil when there is none.
+  def self.splat_index(type : Type) : Int32?
+    if type.is_a?(GenericClassType)
+      return type.as(GenericClassType).splat_index
+    end
+    if type.is_a?(GenericModuleType)
+      return type.as(GenericModuleType).splat_index
+    end
+    nil
+  end
+
+  # Hosted unbound?: the type still holds a free type parameter. A type parameter
+  # is unbound; a generic instance, tuple, named tuple or union is unbound when one
+  # of its arguments is; a virtual type is unbound when its base is. Anything else
+  # is bound.
+  def self.unbound?(type : Type) : Bool
+    if type.is_a?(TypeParameter) || type.is_a?(TypeParameterType)
+      return true
+    end
+    if type.is_a?(VirtualType)
+      return unbound?(type.as(VirtualType).base_type)
+    end
+    if type.is_a?(NamedTupleInstanceType)
+      return any_unbound?(type.as(NamedTupleInstanceType).entries.map(&.type))
+    end
+    if type.is_a?(TupleInstanceType)
+      return any_unbound?(type.as(TupleInstanceType).tuple_types)
+    end
+    if type.is_a?(GenericInstanceType)
+      return any_unbound?(type.as(GenericInstanceType).type_vars.values)
+    end
+    if type.is_a?(UnionType)
+      return any_unbound?(type.as(UnionType).union_types)
+    end
+    false
+  end
+
+  private def self.any_unbound?(types : Array(Type)) : Bool
+    i = 0
+    while i < types.size
+      return true if unbound?(types[i])
+      i = i + 1
+    end
+    false
+  end
+
+  # Hosted extern?, extern_union? and packed?: true only for an extern C struct or
+  # union, or one marked packed. The port builds no such type: lib struct and union
+  # definitions are not visited (top_level.iyi has no CStructOrUnionDef visit), so
+  # every type answers false, as the hosted base class does.
+  def self.extern?(type : Type) : Bool
+    false
+  end
+
+  def self.extern_union?(type : Type) : Bool
+    false
+  end
+
+  def self.packed?(type : Type) : Bool
+    false
+  end
+
+  # Hosted sizeof_type is computed from layouts, which the port does not build yet.
+  # It is refused by name, so no caller receives a wrong size.
+  def self.sizeof_type(type : Type) : Int32
+    refuse_port("sizeof_type: layouts are not ported yet")
+  end
+end

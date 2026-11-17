@@ -1,0 +1,7 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+MASK = (3 | 12) & 7
+BITS = 7 ^ 2
+LibC.exit(MASK &+ BITS)

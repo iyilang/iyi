@@ -1,0 +1,22 @@
+# Base is allocated in `alloc`, which is defined before the use that makes its virtual
+# type. Child exists, and the proc later in the file takes Base, so the restriction is
+# the virtual type over Base (a subclass used through the base). The allocation loads
+# @"Base:headed"; the byte is filled after every def, not chosen at the allocation
+# (type_id.cr 138-165). A call that passes Child where Base is expected is the calls
+# lane's argument restriction (call.iyi), not this fixture.
+class Base
+  def initialize
+  end
+end
+
+class Child < Base
+  def initialize
+  end
+end
+
+def alloc : Base
+  Base.new
+end
+
+p = ->(x : Base) { x }
+alloc

@@ -1,0 +1,11 @@
+def run(&)
+  yield 7
+end
+
+value = true
+answer = run do |value|
+  value = 9
+  value
+end
+value
+answer

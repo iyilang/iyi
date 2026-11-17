@@ -1,0 +1,33 @@
+trait Lonely
+end
+
+trait Shaped
+end
+
+module Drawable
+end
+
+struct Wide
+  include Drawable
+  @a : Int64
+  @b : Int64
+  @c : Int64
+
+  def initialize(@a : Int64, @b : Int64, @c : Int64)
+  end
+end
+
+class Plain
+  include Drawable
+end
+
+impl Shaped for Wide
+end
+
+impl Shaped for Plain
+end
+
+# type: Lonely?
+# type: Shaped?
+# type: Drawable?
+# type: Drawable | Shaped

@@ -1,0 +1,33 @@
+module bench/selfhost_lower_asm_exercise
+
+# The port's side of the asm gate (bench/selfhost_lower_asm_exercise.sh).
+#
+#   port oracle <oracle.ll>                 the oracle module, normalised, one line each
+#   port lower <fixture.iyi> <oracle.ll>    lowers the fixture and compares it with the oracle
+#   port emit <fixture.iyi> <oracle.ll>     the port's module as text, for the native tool
+#
+# With no arguments the driver checks that analysis of an empty program runs, and exits 0.
+# A bare run must not read Program.args unguarded, and this file does not import the LLVM back end.
+
+import bench/lib/lower_gate::{analyse, run_emit, run_lower, run_oracle}
+
+def run : Nil
+  args = Program.args
+  if args.empty?
+    analyse("nil\n", "usage_check.iyi", false)
+    puts "usage: port oracle <oracle.ll> | port lower <fixture.iyi> <oracle.ll> | port emit <fixture.iyi> <oracle.ll>"
+    return
+  end
+  mode = args[0]
+  if mode == "oracle"
+    run_oracle(args[1], "::")
+  elsif mode == "lower"
+    run_lower(args[1], args[2], "::", false)
+  elsif mode == "emit"
+    run_emit(args[1], args[2], false)
+  else
+    raise "unknown mode #{mode}"
+  end
+end
+
+run

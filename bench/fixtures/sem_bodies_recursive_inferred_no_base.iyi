@@ -1,0 +1,5 @@
+def recursive_inferred_no_base
+  recursive_inferred_no_base
+end
+
+recursive_inferred_no_base

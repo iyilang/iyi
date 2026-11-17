@@ -1,0 +1,21 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+module Outer
+  module Inner
+    class Box
+      @@value : Int32 = 7
+
+      def self.value : Int32
+        @@value
+      end
+    end
+  end
+end
+
+# Leaving both bodies restores the program scope for the next declaration.
+class Tail
+end
+
+LibC.exit(Outer::Inner::Box.value)

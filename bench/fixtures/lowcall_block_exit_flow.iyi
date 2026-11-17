@@ -1,0 +1,84 @@
+@[Unsafe("reports flow carried by yielded blocks' next and break through the exit status")]
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def twice(&)
+  yield 1
+  yield 2
+end
+
+def typed_twice(& : Int32 -> Nil) : Nil
+  yield 1
+  yield 2
+end
+
+def each_it(n : Int32, &)
+  i = 0
+  while i < n
+    yield i
+    i = i &+ 1
+  end
+end
+
+# A write before a conditional next leaves the call with the block.
+def nexted : Int32
+  found = nil
+  twice do |v|
+    found = v &+ 3
+    next if v == 2
+    found = nil
+  end
+  found || 0
+end
+
+# A break leaves the call with its write, which no later yield reads:
+# x is Int32 where the block reads it and Int32? after the call.
+def broke : Int32
+  total = 0
+  x = 5
+  twice do |v|
+    total = total &+ x
+    if v == 1
+      x = nil
+      break
+    end
+  end
+  x.nil? ? total &+ 2 : 0
+end
+
+# A next repeats the block with its write: last is Int32? at the block's entry.
+def carried : Int32
+  last = nil
+  sum = 0
+  each_it(3) do |i|
+    if prev = last
+      sum = sum &+ prev
+    end
+    last = i &+ 1
+    next if i < 2
+    last = nil
+  end
+  sum
+end
+
+# The repeated outer block reuses the inner call's typed instance, whose
+# recorded writes include the break's.
+def nested_hit : Int32
+  count = 0
+  each_it(2) do |round|
+    found = nil
+    typed_twice do |v|
+      if v == 2
+        found = v
+        break
+      end
+    end
+    count = count &+ (found || 0)
+  end
+  count
+end
+
+LibC.exit(3) unless carried == 3
+LibC.exit(4) unless nested_hit == 4
+LibC.exit(nexted &* 10 &+ broke)

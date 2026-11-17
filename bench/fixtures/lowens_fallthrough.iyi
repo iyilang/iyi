@@ -1,0 +1,12 @@
+lib LibC
+  fun putchar(c : Int32) : Int32
+  fun exit(status : Int32) : NoReturn
+end
+
+def work(n : Int32) : Int32
+  defer LibC.putchar(100)
+  LibC.putchar(101)
+  n
+end
+
+LibC.exit(work(7))

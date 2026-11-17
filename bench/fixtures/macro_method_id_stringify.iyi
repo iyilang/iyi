@@ -1,0 +1,7 @@
+macro forms(a, b, c, d, e, f, g, h, i, j)
+  {{a.id}}|{{b.id}}|{{c.id}}|{{d.id}}|{{e.id}}|{{f.id}}|{{g.id}}|{{h.id}}|{{i.id}}|{{j.id}}
+  {{a.stringify}}|{{b.stringify}}|{{c.stringify}}|{{d.stringify}}|{{e.stringify}}|{{f.stringify}}|{{g.stringify}}|{{h.stringify}}|{{i.stringify}}|{{j.stringify}}
+  {{a.symbolize}}|{{b.symbolize}}|{{c.symbolize}}|{{d.symbolize}}|{{e.symbolize}}|{{f.symbolize}}|{{g.symbolize}}|{{h.symbolize}}|{{i.symbolize}}|{{j.symbolize}}
+end
+
+forms(foo, "str", :sym, 42, nil, true, 'c', [1, 2], {"a" => 1}, foo.bar(1))

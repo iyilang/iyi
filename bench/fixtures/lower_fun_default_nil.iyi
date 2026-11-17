@@ -1,0 +1,7 @@
+# An omitted fun return is Nil, including a well-known runtime definition.
+# The prelude's __iyi_personality has this signature.
+fun __crystal_raise_overflow
+  nil
+end
+
+1

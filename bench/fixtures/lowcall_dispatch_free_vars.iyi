@@ -1,0 +1,78 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+class Wrap(T)
+  def initialize(@value : T)
+  end
+
+  def value : T
+    @value
+  end
+end
+
+class First
+  def pick(value : T) : T forall T
+    value
+  end
+end
+
+class Second
+  def pick(value : Wrap(T)) : T forall T
+    value.value
+  end
+end
+
+def receiver(flag : Bool) : First | Second
+  flag ? First.new : Second.new
+end
+
+def tag(value : T, kind : Int32) : T forall T
+  value
+end
+
+def tag(value : Wrap(T), kind : Bool) : T forall T
+  value.value
+end
+
+def kind(flag : Bool) : Int32 | Bool
+  flag ? 1 : false
+end
+
+def code(value : Int32) : Int32
+  value
+end
+
+def code(value : Wrap(Int32)) : Int32
+  value.value &+ 10
+end
+
+class Object
+  def ==(other) : Bool
+    false
+  end
+
+  def in?(*values : *T) : Bool forall T
+    {% for index in 0...T.size %}
+      return true if self == values[{{ index }}]
+    {% end %}
+    false
+  end
+end
+
+class String
+  def ==(other : String) : Bool
+    true
+  end
+end
+
+def maybe(flag : Bool) : String | Nil
+  flag ? "a" : nil
+end
+
+wrapped = Wrap(Int32).new(5)
+total = code(receiver(true).pick(wrapped)) &+ code(receiver(false).pick(wrapped))
+total = total &+ code(tag(wrapped, kind(true))) &+ code(tag(wrapped, kind(false)))
+total = total &+ (maybe(true).in?("a", "b") ? 7 : 0)
+total = total &+ (maybe(false).in?("a", "b") ? 16 : 3)
+LibC.exit(total)

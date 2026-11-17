@@ -1,0 +1,9 @@
+module SeminlMod
+  {% if true %}
+    def self.one : Int32
+      1
+    end
+  {% end %}
+end
+
+SeminlMod.one

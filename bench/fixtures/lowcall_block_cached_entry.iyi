@@ -1,0 +1,55 @@
+@[Unsafe("reports reused yielded-block instances typed for another caller flow or storage")]
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+class Mark
+end
+
+def each_it(n : Int32, & : Int32 -> Nil) : Nil
+  i = 0
+  while i < n
+    yield i
+    i = i &+ 1
+  end
+end
+
+def once(& : -> Nil) : Nil
+  yield
+end
+
+def each_value(& : Int32 -> Nil) : Nil
+  yield 4
+end
+
+# The second typing reaches the inner call with seen widened to Mark?.
+def hits : Int32
+  seen : Mark? = nil
+  count = 0
+  each_it(3) do |i|
+    once { count = count &+ 1 unless seen.nil? }
+    seen = Mark.new
+  end
+  count
+end
+
+# Retyping the middle call creates a new block owner. The innermost block
+# must write found into that owner's storage.
+def rehomed : Int32
+  total = 0
+  mark : Mark? = nil
+  each_it(2) do |outer|
+    once do
+      total = total &+ 1 unless mark.nil?
+      found : Int32? = nil
+      each_value { |value| found = value }
+      total = total &+ (found || 0)
+    end
+    mark = Mark.new
+  end
+  total
+end
+
+LibC.exit(1) unless hits == 2
+LibC.exit(2) unless rehomed == 9
+LibC.exit(0)

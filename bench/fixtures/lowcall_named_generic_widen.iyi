@@ -1,0 +1,10 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def pair(first : T, second : T) : T forall T
+  second
+end
+
+value = pair(first: 42_i64, second: 7_i32)
+LibC.exit(value == 7_i64 ? 7 : 1)

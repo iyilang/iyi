@@ -1,0 +1,23 @@
+private TOP_VALUE = 7
+
+private def top_secret : Int32
+  TOP_VALUE
+end
+
+protected def top_protected : Int32
+  8
+end
+
+class VisibilityExample
+  private INNER_VALUE = 9
+
+  private def secret : Int32
+    INNER_VALUE
+  end
+
+  protected def guarded : Int32
+    10
+  end
+end
+
+TOP_VALUE

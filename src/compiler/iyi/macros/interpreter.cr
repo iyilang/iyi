@@ -564,6 +564,7 @@ module Iyi
       case matched_type
       when Const
         @program.check_deprecated_constant(matched_type, node)
+        @program.layout_fold_constant_read(matched_type, node)
         matched_type.value
       when Type
         matched_type = matched_type.remove_alias

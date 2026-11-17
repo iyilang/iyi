@@ -1,0 +1,1388 @@
+module compiler/native/wasm/codegen
+
+# The wasm32-wasi code generator (SPEC 2.2, slice D5). It takes the program's IR module and the native runtime's
+# module, and writes one wasm module: no register allocator, no MIR, no object file, no linker.
+#
+# The shape of the output:
+# - Every SSA value is a wasm local; an instruction loads its operands and stores its result. Phi values are
+#   assigned on the edges into their block.
+# - Control flow is a dispatch loop: `loop { block B(n-1) { ... block B0 { br_table on $pc } code0 } ... }`.
+#   Every edge sets $pc and branches to the loop. Any CFG is accepted this way, reducible or not.
+# - Stack allocations (allocas) live on a shadow stack in linear memory: the mutable global 0 is __stack_pointer,
+#   each function lowers it by its frame size on entry and raises it again before each return.
+# - Globals and their initializers sit in one data segment at DATA_BASE; their addresses are constants.
+# - Function pointers are indices into the table: element 0 is null, defined function k is element k + 1.
+# - Callees named `__wasi_<name>` and declared but not defined are imports from wasi_snapshot_preview1.
+# - Memory: 1 page minimum, grown to hold the data and the stack. Exported as "memory"; "_start" is exported.
+#
+# Refused by name, never guessed: i128 and aggregate values, inline asm, varargs, byval/sret arguments,
+# atomics, thread-local access, intrinsics, frem, undefined non-wasi externals, dynamic allocas, and
+# fptosi/fptoui of out-of-range values (wasm traps; LLVM leaves them undefined, so they are not compared).
+
+import compiler/ir/types::{IrType}
+import compiler/ir/values::{Value, Param}
+import compiler/ir/inst::{Op, Inst, Block, CallAux, GepAux, MemAux, Attribute, AsmAux, IntrinsicAux}
+import compiler/ir/intrinsics::{IntrinsicId}
+import compiler/ir/function::{Function, Global, Linkage}
+import compiler/ir/module::{Module}
+import compiler/ir/layout::{DataLayout}
+import compiler/native/wasm/leb::{uleb, sleb, uleb_i}
+import compiler/native/wasm/module::{WasmModule, wasm_body, i32_const_expr}
+
+def data_base : Int64
+  1024_i64
+end
+
+def stack_size : Int64
+  # 1 MiB, the size wasm-ld gives the stack by default. A frame of 64 KiB (frame64k) needs the room, and printf's
+  # frames sit below it.
+  1048576_i64
+end
+
+# The wasm value type of an IR type: 127 i32, 126 i64, 125 f32, 124 f64; 0 when wasm has no such value.
+pub def wasm_valtype(t : IrType) : UInt8
+  if t.int?
+    return 126_u8 if t.bits == 64
+    return 127_u8 if t.bits == 1 || t.bits == 8 || t.bits == 16 || t.bits == 32
+    return 0_u8
+  end
+  return 125_u8 if t.float32?
+  return 124_u8 if t.double?
+  return 127_u8 if t.pointer? && t.address_space == 0
+  0_u8
+end
+
+# Bytes a memory access of the IR type touches.
+pub def access_bytes(t : IrType) : Int32
+  return 1 if t.int? && t.bits <= 8
+  return 2 if t.int? && t.bits == 16
+  return 4 if t.int? && t.bits == 32
+  return 8 if t.int? && t.bits == 64
+  return 4 if t.float32? || t.pointer?
+  return 8 if t.double?
+  0
+end
+
+# The exponent of a power of two (the wasm memarg alignment).
+def log2_of(n : Int32) : Int32
+  e = 0
+  v = n
+  while v > 1
+    v = v // 2
+    e = e + 1
+  end
+  e
+end
+
+def mask_of(w : Int32) : Int64
+  return 4294967295_i64 if w >= 32
+  (1_i64 << w) - 1_i64
+end
+
+def align_up(v : Int64, a : Int64) : Int64
+  return v if a <= 1_i64
+  ((v + a - 1_i64) // a) * a
+end
+
+def int_pred_offset(p : Int64) : Int32
+  case p
+  when 0_i64
+    0
+  when 1_i64
+    1
+  when 2_i64
+    5
+  when 3_i64
+    9
+  when 4_i64
+    3
+  when 5_i64
+    7
+  when 6_i64
+    4
+  when 7_i64
+    8
+  when 8_i64
+    2
+  else
+    6
+  end
+end
+
+# The program-wide state: the output module, the layout, and the symbol tables.
+class WasmCtx
+  getter wm : WasmModule
+  getter layout : DataLayout
+  getter fn_index : Hash(String, Int32)
+  getter table_pos : Hash(String, Int32)
+  getter global_addr : Hash(String, Int64)
+  getter defined : Array(Function)
+  getter error : String?
+
+  def initialize(@wm : WasmModule, @layout : DataLayout)
+    @fn_index = Hash(String, Int32).new
+    @table_pos = Hash(String, Int32).new
+    @global_addr = Hash(String, Int64).new
+    @defined = [] of Function
+    @error = nil
+  end
+
+  def refuse(message : String) : Nil
+    @error = message unless @error
+  end
+
+  # The wasm type index of an IR function type, or -1 after refusing an unsupported signature.
+  def type_of(ft : IrType) : Int32
+    params = [] of UInt8
+    ft.param_types.each do |p|
+      v = wasm_valtype(p)
+      if v == 0_u8
+        refuse("a parameter of type #{p} has no wasm value type")
+        return -1
+      end
+      params << v
+    end
+    results = [] of UInt8
+    ret = ft.return_type
+    unless ret.void?
+      v = wasm_valtype(ret)
+      if v == 0_u8
+        refuse("a return of type #{ret} has no wasm value type")
+        return -1
+      end
+      results << v
+    end
+    @wm.type_index(params, results)
+  end
+
+  # The static address of a constant pointer operand: a global, a function's table index, or a constant
+  # getelementptr over one of those. Nil when the value is not such a constant.
+  def static_address(v : Value) : Int64?
+    if v.is_a?(Global)
+      return @global_addr[v.as(Global).name]?
+    end
+    if v.is_a?(Function)
+      pos = @table_pos[v.as(Function).name]?
+      return pos.nil? ? nil : pos.to_i64
+    end
+    if v.is_a?(Inst) && v.as(Inst).op == Op::ConstExpr && v.as(Inst).aux.is_a?(GepAux)
+      return static_gep(v.as(Inst))
+    end
+    nil
+  end
+
+  # The address a constant getelementptr names. Its indices must all be constant integers.
+  def static_gep(i : Inst) : Int64?
+    base = static_address(i.args[0])
+    return nil if base.nil?
+    g = i.aux.as(GepAux)
+    off = 0_i64
+    cur = g.source_type
+    k = 1
+    while k < i.args.size
+      ix = i.args[k]
+      return nil unless ix.is_a?(Inst) && ix.as(Inst).op == Op::ConstInt
+      n = ix.as(Inst).aux_int
+      if k == 1
+        off = off + n * @layout.alloc_size(cur)
+      elsif cur.struct?
+        off = off + @layout.offset_of(cur, n.to_i32)
+        cur = cur.struct_element_types[n.to_i32]
+      elsif cur.array?
+        off = off + n * @layout.alloc_size(cur.element_type)
+        cur = cur.element_type
+      else
+        return nil
+      end
+      k = k + 1
+    end
+    base + off
+  end
+end
+
+# Little-endian bytes of `value` written into `buf` at `off`.
+def put_le(buf : Array(UInt8), off : Int64, value : Int64, n : Int32) : Nil
+  i = 0
+  while i < n
+    buf[off.to_i32 + i] = ((value >> (i * 8)) & 255_i64).to_u8
+    i = i + 1
+  end
+end
+
+# The bytes an initializer of type `t` writes from its start: its store size, or more when a constant byte array
+# inside it is longer than its type. The aarch64 object writes every byte of such an array (write_initializer
+# appends each ConstBytes byte and the symbol keeps the type's size), so the data segment gives the global that room.
+pub def init_extent(layout : DataLayout, t : IrType, v : Value?) : Int64
+  size = layout.store_size(t)
+  return size if v.nil?
+  x = v.as(Value)
+  return size unless x.is_a?(Inst)
+  i = x.as(Inst)
+  if i.op == Op::ConstBytes
+    n = i.args.size.to_i64
+    return n > size ? n : size
+  end
+  best = size
+  if i.op == Op::ConstAggregate && t.struct?
+    k = 0
+    while k < t.struct_element_types.size && k < i.args.size
+      e = layout.offset_of(t, k) + init_extent(layout, t.struct_element_types[k], i.args[k])
+      best = e if e > best
+      k = k + 1
+    end
+  elsif i.op == Op::ConstAggregate && t.array?
+    stride = layout.alloc_size(t.element_type)
+    k = 0
+    while k < i.args.size
+      e = k.to_i64 * stride + init_extent(layout, t.element_type, i.args[k])
+      best = e if e > best
+      k = k + 1
+    end
+  end
+  best
+end
+
+# Writes an initializer of type `t` into the data buffer at `off` (offsets are from DATA_BASE).
+def write_init(ctx : WasmCtx, buf : Array(UInt8), t : IrType, v : Value?, off : Int64) : Nil
+  size = ctx.layout.store_size(t)
+  if off + size > buf.size.to_i64
+    ctx.refuse("an initializer of type #{t} runs past the data segment")
+    return
+  end
+  return if v.nil?
+  x = v.as(Value)
+  if x.is_a?(Global) || x.is_a?(Function) || (x.is_a?(Inst) && x.as(Inst).op == Op::ConstExpr)
+    addr = ctx.static_address(x)
+    if addr.nil?
+      ctx.refuse("an initializer names something with no wasm address")
+      return
+    end
+    put_le(buf, off, addr, 4)
+    return
+  end
+  return unless x.is_a?(Inst)
+  i = x.as(Inst)
+  case i.op
+  when Op::ConstInt, Op::ConstFloat
+    put_le(buf, off, i.aux_int, (t.int? && t.bits == 128) ? 8 : size.to_i32)
+    if t.int? && t.bits == 128
+      put_le(buf, off + 8_i64, i.aux_hi, 8)
+    end
+  when Op::ConstBytes
+    if off + i.args.size.to_i64 > buf.size.to_i64
+      ctx.refuse("a constant's bytes run past the data segment")
+      return
+    end
+    k = 0
+    i.args.each do |a|
+      buf[off.to_i32 + k] = a.as(Inst).aux_int.to_u8
+      k = k + 1
+    end
+  when Op::ConstAggregate
+    if t.struct?
+      fields = t.struct_element_types
+      k = 0
+      while k < fields.size
+        write_init(ctx, buf, fields[k], i.args[k], off + ctx.layout.offset_of(t, k))
+        k = k + 1
+      end
+    elsif t.array?
+      stride = ctx.layout.alloc_size(t.element_type)
+      k = 0
+      while k < i.args.size
+        write_init(ctx, buf, t.element_type, i.args[k], off + k.to_i64 * stride)
+        k = k + 1
+      end
+    else
+      ctx.refuse("a constant aggregate of type #{t} is not lowered")
+    end
+  else
+    # ConstNull, ConstUndef, ConstPoison and ConstZero are zero bytes already.
+  end
+end
+
+class FnGen
+  @pc : Int32
+  @sa32 : Int32
+  @sb32 : Int32
+  @sa64 : Int32
+  @sb64 : Int32
+  @nparams : Int32
+  @frame : Int64
+  @type_index : Int32
+  @fn : Function
+  @ctx : WasmCtx
+  @code : Array(UInt8)
+  @locals : Array(UInt8)
+  @local_of : Hash(Value, Int32)
+  @alloca_off : Hash(Value, Int64)
+  getter error : String?
+
+  def initialize(@ctx : WasmCtx, @fn : Function, @type_index : Int32)
+    @code = [] of UInt8
+    @locals = [] of UInt8
+    @local_of = Hash(Value, Int32).new
+    @alloca_off = Hash(Value, Int64).new
+    @frame = 0_i64
+    @error = nil
+    @nparams = @fn.params.size
+    @pc = new_local(127_u8)
+    @sa32 = new_local(125_u8)
+    @sb32 = new_local(125_u8)
+    @sa64 = new_local(124_u8)
+    @sb64 = new_local(124_u8)
+  end
+
+  def refuse(message : String) : Nil
+    @error = "#{@fn.name}: #{message}" unless @error
+  end
+
+  def new_local(t : UInt8) : Int32
+    @locals << t
+    @nparams + @locals.size - 1
+  end
+
+  def byte(b : UInt8) : Nil
+    @code << b
+  end
+
+  def i32c(v : Int64) : Nil
+    @code << 65_u8
+    low = v & 4294967295_i64
+    wrapped = low >= 2147483648_i64 ? low - 4294967296_i64 : low
+    sleb(@code, wrapped)
+  end
+
+  def i64c(v : Int64) : Nil
+    @code << 66_u8
+    sleb(@code, v)
+  end
+
+  def local_get(index : Int32) : Nil
+    @code << 32_u8
+    uleb_i(@code, index)
+  end
+
+  def local_set(index : Int32) : Nil
+    @code << 33_u8
+    uleb_i(@code, index)
+  end
+
+  def global_get(index : Int32) : Nil
+    @code << 35_u8
+    uleb_i(@code, index)
+  end
+
+  def global_set(index : Int32) : Nil
+    @code << 36_u8
+    uleb_i(@code, index)
+  end
+
+  def call_fn(index : Int32) : Nil
+    @code << 16_u8
+    uleb_i(@code, index)
+  end
+
+  def mask_narrow(w : Int32) : Nil
+    return if w >= 32
+    i32c(mask_of(w))
+    byte(113_u8)
+  end
+
+  # Sign-extends the i32 on top of the stack from `w` bits, for narrow integers.
+  def sext_top(w : Int32) : Nil
+    return if w >= 32
+    i32c((32 - w).to_i64)
+    byte(116_u8)
+    i32c((32 - w).to_i64)
+    byte(117_u8)
+  end
+
+  # Whether a value is a constant the code generator writes inline rather than reading from a local.
+  def const_inst?(i : Inst) : Bool
+    case i.op
+    when Op::ConstInt, Op::ConstFloat, Op::ConstNull, Op::ConstUndef, Op::ConstPoison, Op::ConstZero
+      true
+    when Op::ConstExpr
+      i.aux.is_a?(GepAux)
+    else
+      false
+    end
+  end
+
+  # Pushes an operand, canonical: narrow integers are zero-extended in their i32.
+  def push(v : Value) : Nil
+    if v.is_a?(Global) || v.is_a?(Function)
+      addr = @ctx.static_address(v)
+      if addr.nil?
+        refuse("a pointer to #{v.name} has no wasm address (an import or an unknown global)")
+        return
+      end
+      i32c(addr)
+      return
+    end
+    if v.is_a?(Param)
+      local_get(v.as(Param).index)
+      return
+    end
+    unless v.is_a?(Inst)
+      refuse("an operand of an unsupported kind")
+      return
+    end
+    i = v.as(Inst)
+    if const_inst?(i)
+      push_const(i)
+      return
+    end
+    index = @local_of[v]?
+    if index.nil?
+      refuse("a value is used before its definition (#{i.op})")
+      return
+    end
+    local_get(index)
+  end
+
+  # Pushes an integer operand sign-extended from its width, for signed operations on narrow integers.
+  def push_signed(v : Value) : Nil
+    push(v)
+    sext_top(v.type.bits)
+  end
+
+  def push_const(i : Inst) : Nil
+    t = i.type
+    case i.op
+    when Op::ConstInt
+      if t.int? && t.bits == 128
+        refuse("an i128 constant is not lowered by the wasm backend")
+        return
+      end
+      if t.bits == 64
+        i64c(i.aux_int)
+      else
+        i32c(i.aux_int & mask_of(t.bits))
+      end
+    when Op::ConstFloat
+      if t.float32?
+        byte(67_u8)
+        put_bytes(i.aux_int, 4)
+      else
+        byte(68_u8)
+        put_bytes(i.aux_int, 8)
+      end
+    when Op::ConstExpr
+      addr = @ctx.static_gep(i)
+      if addr.nil?
+        refuse("a constant getelementptr is not static")
+        return
+      end
+      i32c(addr)
+    else
+      # ConstNull, ConstUndef, ConstPoison, ConstZero: zero of the type
+      zero_of(t)
+    end
+  end
+
+  def zero_of(t : IrType) : Nil
+    if t.float32?
+      byte(67_u8)
+      put_bytes(0_i64, 4)
+    elsif t.double?
+      byte(68_u8)
+      put_bytes(0_i64, 8)
+    elsif t.int? && t.bits == 64
+      i64c(0_i64)
+    else
+      i32c(0_i64)
+    end
+  end
+
+  def put_bytes(value : Int64, n : Int32) : Nil
+    k = 0
+    while k < n
+      @code << ((value >> (k * 8)) & 255_i64).to_u8
+      k = k + 1
+    end
+  end
+
+  # Gives a result to a local, once the instruction has pushed it.
+  def store_result(i : Inst) : Nil
+    return if i.type.void?
+    local_set(@local_of[i])
+  end
+
+  def int_binop(i : Inst) : Nil
+    t = i.type
+    unless t.int? && t.bits <= 64
+      refuse("#{i.op} on #{t} is not lowered by the wasm backend")
+      return
+    end
+    w = t.bits
+    wide = w == 64
+    a = i.args[0]
+    b = i.args[1]
+    case i.op
+    when Op::Add
+      push(a)
+      push(b)
+      byte(wide ? 124_u8 : 106_u8)
+      mask_narrow(w)
+    when Op::Sub
+      push(a)
+      push(b)
+      byte(wide ? 125_u8 : 107_u8)
+      mask_narrow(w)
+    when Op::Mul
+      push(a)
+      push(b)
+      byte(wide ? 126_u8 : 108_u8)
+      mask_narrow(w)
+    when Op::And
+      push(a)
+      push(b)
+      byte(wide ? 131_u8 : 113_u8)
+    when Op::Or
+      push(a)
+      push(b)
+      byte(wide ? 132_u8 : 114_u8)
+    when Op::Xor
+      push(a)
+      push(b)
+      byte(wide ? 133_u8 : 115_u8)
+    when Op::Shl
+      push(a)
+      push_amount(b, w)
+      byte(wide ? 134_u8 : 116_u8)
+      mask_narrow(w)
+    when Op::LShr
+      push(a)
+      push_amount(b, w)
+      byte(wide ? 136_u8 : 118_u8)
+    when Op::AShr
+      push_signed(a)
+      push_amount(b, w)
+      byte(wide ? 135_u8 : 117_u8)
+      mask_narrow(w)
+    when Op::SDiv
+      push_signed(a)
+      push_signed(b)
+      byte(wide ? 127_u8 : 109_u8)
+      mask_narrow(w)
+    when Op::UDiv
+      push(a)
+      push(b)
+      byte(wide ? 128_u8 : 110_u8)
+    when Op::SRem
+      push_signed(a)
+      push_signed(b)
+      byte(wide ? 129_u8 : 111_u8)
+      mask_narrow(w)
+    when Op::URem
+      push(a)
+      push(b)
+      byte(wide ? 130_u8 : 112_u8)
+    else
+      refuse("#{i.op} is not an integer binary operation")
+    end
+  end
+
+  # A shift amount, masked to the width as hardware masks it (wasm masks i32 and i64 by itself).
+  def push_amount(b : Value, w : Int32) : Nil
+    push(b)
+    return if w >= 32
+    i32c((w - 1).to_i64)
+    byte(113_u8)
+  end
+
+  def float_binop(i : Inst) : Nil
+    is32 = i.type.float32?
+    push(i.args[0])
+    push(i.args[1])
+    case i.op
+    when Op::FAdd
+      byte(is32 ? 146_u8 : 160_u8)
+    when Op::FSub
+      byte(is32 ? 147_u8 : 161_u8)
+    when Op::FMul
+      byte(is32 ? 148_u8 : 162_u8)
+    when Op::FDiv
+      byte(is32 ? 149_u8 : 163_u8)
+    else
+      refuse("#{i.op} is not lowered by the wasm backend")
+    end
+  end
+
+  # Ordered and unordered comparisons over floats. Both operands are kept in scratch locals, so each
+  # predicate can read them more than once.
+  def fcmp(i : Inst) : Nil
+    is32 = i.args[0].type.float32?
+    sa = is32 ? @sa32 : @sa64
+    sb = is32 ? @sb32 : @sb64
+    base = is32 ? 91 : 97
+    push(i.args[0])
+    local_set(sa)
+    push(i.args[1])
+    local_set(sb)
+    p = i.aux_int
+    if p == 0_i64
+      i32c(0_i64)
+    elsif p == 15_i64
+      i32c(1_i64)
+    elsif p == 1_i64
+      cmp2(sa, sb, base, 0)
+    elsif p == 2_i64
+      cmp2(sa, sb, base, 3)
+    elsif p == 3_i64
+      cmp2(sa, sb, base, 5)
+    elsif p == 4_i64
+      cmp2(sa, sb, base, 2)
+    elsif p == 5_i64
+      cmp2(sa, sb, base, 4)
+    elsif p == 6_i64
+      cmp2(sa, sb, base, 2)
+      cmp2(sa, sb, base, 3)
+      byte(114_u8)
+    elsif p == 7_i64
+      cmp2(sa, sa, base, 0)
+      cmp2(sb, sb, base, 0)
+      byte(113_u8)
+    elsif p == 8_i64
+      cmp2(sa, sb, base, 0)
+      cmp2(sa, sa, base, 1)
+      byte(114_u8)
+      cmp2(sb, sb, base, 1)
+      byte(114_u8)
+    elsif p == 13_i64
+      cmp2(sa, sb, base, 1)
+    elsif p == 14_i64
+      cmp2(sa, sa, base, 1)
+      cmp2(sb, sb, base, 1)
+      byte(114_u8)
+    elsif p == 9_i64
+      cmp2(sa, sb, base, 4)
+      byte(69_u8)
+    elsif p == 10_i64
+      cmp2(sa, sb, base, 2)
+      byte(69_u8)
+    elsif p == 11_i64
+      cmp2(sa, sb, base, 5)
+      byte(69_u8)
+    elsif p == 12_i64
+      cmp2(sa, sb, base, 3)
+      byte(69_u8)
+    else
+      refuse("an unknown float predicate #{p}")
+    end
+  end
+
+  def cmp2(x : Int32, y : Int32, base : Int32, offset : Int32) : Nil
+    local_get(x)
+    local_get(y)
+    byte((base + offset).to_u8)
+  end
+
+  def icmp(i : Inst) : Nil
+    t = i.args[0].type
+    w = t.bits
+    p = i.aux_int
+    signed = p == 6_i64 || p == 7_i64 || p == 8_i64 || p == 9_i64
+    if signed
+      push_signed(i.args[0])
+      push_signed(i.args[1])
+    else
+      push(i.args[0])
+      push(i.args[1])
+    end
+    base = w == 64 ? 81 : 70
+    byte((base + int_pred_offset(p)).to_u8)
+  end
+
+  def convert(i : Inst) : Nil
+    src = i.args[0].type
+    dst = i.type
+    case i.op
+    when Op::Trunc
+      push(i.args[0])
+      byte(167_u8) if src.bits == 64 && dst.bits < 64
+      mask_narrow(dst.bits) if dst.bits < 32
+    when Op::ZExt
+      push(i.args[0])
+      byte(173_u8) if dst.bits == 64 && src.bits < 64
+    when Op::SExt
+      push_signed(i.args[0])
+      if dst.bits == 64
+        byte(172_u8)
+      else
+        mask_narrow(dst.bits)
+      end
+    when Op::FPTrunc
+      push(i.args[0])
+      byte(182_u8)
+    when Op::FPExt
+      push(i.args[0])
+      byte(187_u8)
+    when Op::FPToSI
+      push(i.args[0])
+      from32 = src.float32?
+      if dst.bits == 64
+        byte(from32 ? 174_u8 : 176_u8)
+      else
+        byte(from32 ? 168_u8 : 170_u8)
+        mask_narrow(dst.bits)
+      end
+    when Op::FPToUI
+      push(i.args[0])
+      from32 = src.float32?
+      if dst.bits == 64
+        byte(from32 ? 175_u8 : 177_u8)
+      else
+        byte(from32 ? 169_u8 : 171_u8)
+        mask_narrow(dst.bits)
+      end
+    when Op::SIToFP
+      push_signed(i.args[0])
+      wide = src.bits == 64
+      if dst.float32?
+        byte(wide ? 180_u8 : 178_u8)
+      else
+        byte(wide ? 185_u8 : 183_u8)
+      end
+    when Op::UIToFP
+      push(i.args[0])
+      wide = src.bits == 64
+      if dst.float32?
+        byte(wide ? 181_u8 : 179_u8)
+      else
+        byte(wide ? 186_u8 : 184_u8)
+      end
+    when Op::PtrToInt
+      push(i.args[0])
+      if dst.bits == 64
+        byte(173_u8)
+      else
+        mask_narrow(dst.bits)
+      end
+    when Op::IntToPtr
+      push(i.args[0])
+      byte(167_u8) if src.bits == 64
+    when Op::BitCast
+      push(i.args[0])
+      if src.float32? && dst.int?
+        byte(188_u8)
+      elsif src.int? && dst.float32?
+        byte(190_u8)
+      elsif src.double? && dst.int?
+        byte(189_u8)
+      elsif src.int? && dst.double?
+        byte(191_u8)
+      elsif wasm_valtype(src) != wasm_valtype(dst)
+        refuse("a bitcast from #{src} to #{dst} is not lowered")
+      end
+    when Op::Freeze
+      push(i.args[0])
+    else
+      refuse("#{i.op} is not lowered by the wasm backend")
+    end
+  end
+
+  # The address of a memory access on the stack: a pointer operand.
+  def load(i : Inst) : Nil
+    t = i.type
+    n = access_bytes(t)
+    if n == 0
+      refuse("a load of #{t} is not lowered by the wasm backend")
+      return
+    end
+    push(i.args[0])
+    byte(mem_op_load(t))
+    memarg(i, n)
+  end
+
+  def mem_op_load(t : IrType) : UInt8
+    return 40_u8 if t.pointer?
+    return 41_u8 if t.int? && t.bits == 64
+    return 42_u8 if t.float32?
+    return 43_u8 if t.double?
+    return 45_u8 if t.int? && t.bits <= 8
+    return 47_u8 if t.int? && t.bits == 16
+    40_u8
+  end
+
+  def mem_op_store(t : IrType) : UInt8
+    return 54_u8 if t.pointer?
+    return 55_u8 if t.int? && t.bits == 64
+    return 56_u8 if t.float32?
+    return 57_u8 if t.double?
+    return 58_u8 if t.int? && t.bits <= 8
+    return 59_u8 if t.int? && t.bits == 16
+    54_u8
+  end
+
+  def memarg(i : Inst, n : Int32) : Nil
+    a = i.alignment
+    a = n if a <= 0 || a > n
+    uleb_i(@code, log2_of(a))
+    uleb_i(@code, 0)
+  end
+
+  def store(i : Inst) : Nil
+    value = i.args[0]
+    t = value.type
+    n = access_bytes(t)
+    if n == 0
+      refuse("a store of #{t} is not lowered by the wasm backend")
+      return
+    end
+    push(i.args[1])
+    push(value)
+    byte(mem_op_store(t))
+    memarg(i, n)
+  end
+
+  # The address of a getelementptr: the base plus each index scaled by its stride. Constant indices fold.
+  def gep(i : Inst) : Nil
+    g = i.aux.as(GepAux)
+    push(i.args[0])
+    const_total = 0_i64
+    cur = g.source_type
+    k = 1
+    while k < i.args.size
+      ix = i.args[k]
+      stride = 0_i64
+      if k == 1
+        stride = @ctx.layout.alloc_size(cur)
+      elsif cur.struct?
+        field = ix.is_a?(Inst) && ix.as(Inst).op == Op::ConstInt ? ix.as(Inst).aux_int.to_i32 : -1
+        if field < 0
+          refuse("a struct index must be a constant")
+          return
+        end
+        const_total = const_total + @ctx.layout.offset_of(cur, field)
+        cur = cur.struct_element_types[field]
+        stride = -1_i64
+      elsif cur.array?
+        stride = @ctx.layout.alloc_size(cur.element_type)
+        cur = cur.element_type
+      else
+        refuse("a getelementptr walks into #{cur}")
+        return
+      end
+      if stride < 0_i64
+        nil
+      elsif ix.is_a?(Inst) && ix.as(Inst).op == Op::ConstInt
+        const_total = const_total + ix.as(Inst).aux_int * stride
+      else
+        push_signed(ix)
+        if ix.type.bits == 64
+          byte(167_u8)
+        end
+        i32c(stride)
+        byte(108_u8)
+        byte(106_u8)
+      end
+      k = k + 1
+    end
+    if const_total != 0_i64
+      i32c(const_total)
+      byte(106_u8)
+    end
+  end
+
+  # The variadic arguments of a call, each into its 8-byte slot in the buffer plan_frame reserved. Integers are
+  # sign-extended to 64 bits (zero-extended for i1 and pointers), floats are promoted to double.
+  def store_varargs(i : Inst, fixed : Int32) : Nil
+    base = @alloca_off[i]
+    k = fixed + 1
+    slot = 0_i64
+    while k < i.args.size
+      v = i.args[k]
+      t = v.type
+      global_get(0)
+      i32c(base + slot * 8_i64)
+      byte(106_u8)
+      if t.float32?
+        push(v)
+        byte(187_u8)
+        byte(57_u8)
+      elsif t.double?
+        push(v)
+        byte(57_u8)
+      elsif t.pointer? || (t.int? && t.bits == 1)
+        push(v)
+        byte(173_u8)
+        byte(55_u8)
+      elsif t.int? && t.bits == 64
+        push(v)
+        byte(55_u8)
+      elsif t.int? && t.bits <= 32
+        push_signed(v)
+        byte(172_u8)
+        byte(55_u8)
+      else
+        refuse("a variadic argument of type #{t} is not lowered by the wasm backend")
+        return
+      end
+      uleb_i(@code, 3)
+      uleb_i(@code, 0)
+      slot = slot + 1
+      k = k + 1
+    end
+  end
+
+  # A call. The callee is a defined or imported function, or a function pointer read as a table index.
+  def call(i : Inst) : Nil
+    callee = i.args[0]
+    aux = i.aux
+    unless aux.is_a?(CallAux)
+      refuse("a call without a signature")
+      return
+    end
+    ca = aux.as(CallAux)
+    if ca.param_attrs.any? { |pa| pa.any? { |a| a.name == "byval" || a.name == "sret" || a.name == "inalloca" } }
+      refuse("a call passes a byval or sret argument, which is not lowered")
+      return
+    end
+    if ca.fn_type.varargs?
+      unless callee.is_a?(Function)
+        refuse("an indirect variadic call is not lowered by the wasm backend")
+        return
+      end
+    end
+    if callee.is_a?(Inst) && callee.as(Inst).aux.is_a?(AsmAux)
+      refuse("inline asm is not lowered by the wasm backend")
+      return
+    end
+    fixed = ca.fn_type.param_types.size
+    k = 1
+    while k <= fixed && k < i.args.size
+      push(i.args[k])
+      k = k + 1
+    end
+    if ca.fn_type.varargs?
+      store_varargs(i, fixed)
+      global_get(0)
+      i32c(@alloca_off[i])
+      byte(106_u8)
+    end
+    if callee.is_a?(Function)
+      index = @ctx.fn_index[callee.as(Function).name]?
+      if index.nil?
+        refuse("a call to #{callee.name} has no wasm function (only __wasi_ externals are imports)")
+        return
+      end
+      call_fn(index)
+    else
+      push(callee)
+      type = @ctx.type_of(ca.fn_type)
+      return if type < 0
+      @code << 17_u8
+      uleb_i(@code, type)
+      @code << 0_u8
+    end
+    store_result(i)
+  end
+
+  # memcpy and memmove become memory.copy, memset becomes memory.fill (the bulk-memory proposal, which the
+  # wasm32-wasi row of SPEC 2.2 allows). Lengths are i32 in wasm; a wider length is wrapped.
+  def intrinsic(i : Inst) : Nil
+    aux = i.aux
+    unless aux.is_a?(IntrinsicAux)
+      refuse("an intrinsic without an id")
+      return
+    end
+    id = aux.as(IntrinsicAux).id
+    if id == IntrinsicId::Memcpy || id == IntrinsicId::Memmove
+      push(i.args[0])
+      push(i.args[1])
+      push(i.args[2])
+      byte(167_u8) if i.args[2].type.bits == 64
+      @code << 252_u8
+      @code << 10_u8
+      @code << 0_u8
+      @code << 0_u8
+    elsif id == IntrinsicId::Memset
+      push(i.args[0])
+      push(i.args[1])
+      push(i.args[2])
+      byte(167_u8) if i.args[2].type.bits == 64
+      @code << 252_u8
+      @code << 11_u8
+      @code << 0_u8
+    else
+      refuse("intrinsic #{id} is not lowered by the wasm backend")
+    end
+  end
+
+  # One non-terminator instruction.
+  def emit_inst(i : Inst) : Nil
+    case i.op
+    when Op::Alloca, Op::Phi
+      # Allocas are set in the prologue; phi values are set on the edges into their block.
+    when Op::Add, Op::Sub, Op::Mul, Op::And, Op::Or, Op::Xor, Op::Shl, Op::LShr, Op::AShr, Op::SDiv, Op::UDiv, Op::SRem, Op::URem
+      int_binop(i)
+      store_result(i)
+    when Op::FAdd, Op::FSub, Op::FMul, Op::FDiv
+      float_binop(i)
+      store_result(i)
+    when Op::FNeg
+      push(i.args[0])
+      byte(i.type.float32? ? 140_u8 : 154_u8)
+      store_result(i)
+    when Op::ICmp
+      icmp(i)
+      store_result(i)
+    when Op::FCmp
+      fcmp(i)
+      store_result(i)
+    when Op::Trunc, Op::ZExt, Op::SExt, Op::FPTrunc, Op::FPExt, Op::FPToSI, Op::FPToUI, Op::SIToFP, Op::UIToFP, Op::PtrToInt, Op::IntToPtr, Op::BitCast, Op::Freeze
+      convert(i)
+      store_result(i)
+    when Op::Select
+      push(i.args[1])
+      push(i.args[2])
+      push(i.args[0])
+      byte(27_u8)
+      store_result(i)
+    when Op::Load
+      load(i)
+      store_result(i)
+    when Op::Store
+      store(i)
+    when Op::Gep
+      gep(i)
+      store_result(i)
+    when Op::Call
+      call(i)
+    when Op::Intrinsic
+      intrinsic(i)
+    when Op::Unreachable
+      byte(0_u8)
+    else
+      refuse("#{i.op} is not lowered by the wasm backend")
+    end
+  end
+
+  # An edge from `from` into `to`: the phi values of `to` read from `from` are assigned, then $pc is set and the
+  # loop is re-entered. `depth` is the label depth of the dispatch loop from the branch's position.
+  def edge(from : Block, to : Block, depth : Int32, to_index : Int32) : Nil
+    phis = [] of Inst
+    to.insts.each do |p|
+      next unless p.op == Op::Phi
+      phis << p
+    end
+    values = [] of Value
+    phis.each do |p|
+      j = p.targets.index(from)
+      if j.nil?
+        refuse("a phi in #{to.name} has no value from #{from.name}")
+        return
+      end
+      values << p.args[j.as(Int32)]
+    end
+    values.each { |v| push(v) }
+    k = phis.size - 1
+    while k >= 0
+      local_set(@local_of[phis[k]])
+      k = k - 1
+    end
+    i32c(to_index.to_i64)
+    local_set(@pc)
+    byte(12_u8)
+    uleb_i(@code, depth)
+  end
+
+  def block_index(blocks : Array(Block), b : Block) : Int32
+    j = blocks.index(b)
+    return j.as(Int32) if j
+    -1
+  end
+
+  def epilogue : Nil
+    return if @frame == 0_i64
+    global_get(0)
+    i32c(@frame)
+    byte(106_u8)
+    global_set(0)
+  end
+
+  def terminator(b : Block, blocks : Array(Block), from_index : Int32, depth : Int32) : Nil
+    t = b.terminator
+    case t.op
+    when Op::Br
+      target = t.targets[0]
+      edge(b, target, depth, block_index(blocks, target))
+    when Op::CondBr
+      push(t.args[0])
+      byte(4_u8)
+      byte(64_u8)
+      edge(b, t.targets[0], depth + 1, block_index(blocks, t.targets[0]))
+      byte(5_u8)
+      edge(b, t.targets[1], depth + 1, block_index(blocks, t.targets[1]))
+      byte(11_u8)
+    when Op::Switch
+      v = t.args[0]
+      wide = v.type.bits == 64
+      k = 0
+      while k < t.cases.size
+        target = t.targets[k + 1]
+        push(v)
+        if wide
+          i64c(t.cases[k])
+          byte(81_u8)
+        else
+          i32c(t.cases[k] & mask_of(v.type.bits))
+          byte(70_u8)
+        end
+        byte(4_u8)
+        byte(64_u8)
+        edge(b, target, depth + 1, block_index(blocks, target))
+        byte(11_u8)
+        k = k + 1
+      end
+      edge(b, t.targets[0], depth, block_index(blocks, t.targets[0]))
+    when Op::Ret
+      if t.args.empty?
+        epilogue
+        byte(15_u8)
+      else
+        push(t.args[0])
+        epilogue
+        byte(15_u8)
+      end
+    when Op::Unreachable
+      byte(0_u8)
+    else
+      refuse("#{t.op} is not lowered by the wasm backend")
+    end
+  end
+
+  # The frame: each alloca takes its own aligned slot on the shadow stack.
+  def plan_frame : Nil
+    total = 0_i64
+    @fn.blocks.each do |b|
+      b.insts.each do |i|
+        if i.op == Op::Call && i.aux.is_a?(CallAux) && i.aux.as(CallAux).fn_type.varargs?
+          fixed = i.aux.as(CallAux).fn_type.param_types.size
+          total = align_up(total, 8_i64)
+          @alloca_off[i] = total
+          total = total + 8_i64 * (i.args.size - 1 - fixed).to_i64
+          next
+        end
+        next unless i.op == Op::Alloca
+        g = i.aux.as(GepAux)
+        count = 1_i64
+        if i.args.size > 0
+          c = i.args[0]
+          unless c.is_a?(Inst) && c.as(Inst).op == Op::ConstInt
+            refuse("a dynamic alloca is not lowered by the wasm backend")
+            return
+          end
+          count = c.as(Inst).aux_int
+        end
+        a = i.alignment
+        a = @ctx.layout.abi_align(g.source_type) if a <= 0
+        total = align_up(total, a.to_i64)
+        @alloca_off[i] = total
+        total = total + @ctx.layout.alloc_size(g.source_type) * count
+      end
+    end
+    @frame = align_up(total, 16_i64)
+  end
+
+  def generate : Nil
+    return if @fn.blocks.empty?
+    plan_frame
+    return if @error
+    @fn.blocks.each do |b|
+      b.insts.each do |i|
+        next if i.op == Op::Store || i.op == Op::Unreachable || i.op == Op::Br || i.op == Op::CondBr || i.op == Op::Switch || i.op == Op::Ret
+        next if i.type.void?
+        t = wasm_valtype(i.type)
+        if t == 0_u8
+          refuse("a value of type #{i.type} has no wasm value type")
+          return
+        end
+        @local_of[i] = new_local(t)
+      end
+    end
+    @fn.params.each do |p|
+      @local_of[p] = p.index
+    end
+    if @frame > 0_i64
+      global_get(0)
+      i32c(@frame)
+      byte(107_u8)
+      global_set(0)
+    end
+    @fn.blocks.each do |b|
+      b.insts.each do |i|
+        next unless i.op == Op::Alloca
+        global_get(0)
+        i32c(@alloca_off[i])
+        byte(106_u8)
+        local_set(@local_of[i])
+      end
+    end
+    blocks = @fn.blocks
+    n = blocks.size
+    byte(3_u8)
+    byte(64_u8)
+    k = n - 1
+    while k >= 0
+      byte(2_u8)
+      byte(64_u8)
+      k = k - 1
+    end
+    local_get(@pc)
+    byte(14_u8)
+    uleb_i(@code, n)
+    k = 0
+    while k < n
+      uleb_i(@code, k)
+      k = k + 1
+    end
+    uleb_i(@code, 0)
+    byte(11_u8)
+    i = 0
+    while i < n
+      b = blocks[i]
+      unless b.terminated?
+        refuse("block #{b.name} has no terminator")
+        return
+      end
+      b.insts.each do |inst|
+        next if inst == b.terminator
+        emit_inst(inst)
+        return if @error
+      end
+      terminator(b, blocks, i, n - 1 - i)
+      return if @error
+      byte(11_u8) if i < n - 1
+      i = i + 1
+    end
+    byte(11_u8)
+    byte(0_u8)
+  end
+
+  # The function's body: its locals and its code.
+  def body : Array(UInt8)
+    wasm_body(@locals, @code)
+  end
+end
+
+# Compiles the program module and its runtime module to one wasm module. A refusal names the function and the
+# construct. Returns the module's bytes, or the refusal as a String.
+pub def compile_wasm(program : Module, runtime : Module) : Array(UInt8) | String
+  unless program.layout.family == "wasm32-wasi" && runtime.layout.family == "wasm32-wasi"
+    return "the wasm backend takes modules for wasm32-wasi"
+  end
+  wm = WasmModule.new
+  ctx = WasmCtx.new(wm, program.layout)
+  modules = [program, runtime]
+
+  # Globals: addresses from DATA_BASE, then the initializers into one buffer.
+  addr = data_base
+  globals = [] of Global
+  modules.each do |m|
+    m.globals.each do |g|
+      if g.initializer.nil? && g.linkage == Linkage::External
+        return "global #{g.name} is external and has no definition: no wasm module supplies it"
+      end
+      a = program.layout.abi_align(g.value_type)
+      a = g.alignment if g.alignment > a
+      addr = align_up(addr, a.to_i64)
+      ctx.global_addr[g.name] = addr
+      globals << g
+      room = program.layout.alloc_size(g.value_type)
+      ext = init_extent(program.layout, g.value_type, g.initializer)
+      addr = addr + (ext > room ? ext : room)
+    end
+  end
+  data_end = addr
+  buf = [] of UInt8
+  k = data_base
+  while k < data_end
+    buf << 0_u8
+    k = k + 1_i64
+  end
+
+  # Functions: a name is defined by the first module that defines it.
+  defined_names = Hash(String, Bool).new
+  modules.each do |m|
+    m.functions.each do |f|
+      next if f.blocks.empty?
+      if defined_names[f.name]?
+        return "function #{f.name} is defined twice"
+      end
+      defined_names[f.name] = true
+      ctx.defined << f
+    end
+  end
+  imports = [] of Function
+  modules.each do |m|
+    m.functions.each do |f|
+      next unless f.blocks.empty?
+      next if defined_names[f.name]?
+      next unless f.name.starts_with?("__wasi_")
+      imports << f
+      defined_names[f.name] = true
+    end
+  end
+
+  imports.each do |f|
+    ti = ctx.type_of(f.fn_type)
+    return ctx.error.as(String) if ti < 0
+    idx = wm.add_import("wasi_snapshot_preview1", f.name[7, f.name.bytesize - 7], ti)
+    ctx.fn_index[f.name] = idx
+    wm.set_function_name(idx, f.name)
+  end
+  ctx.defined.each do |f|
+    ti = ctx.type_of(f.fn_type)
+    return ctx.error.as(String) if ti < 0
+    idx = wm.add_function(ti)
+    ctx.fn_index[f.name] = idx
+    ctx.table_pos[f.name] = ctx.defined.index(f).as(Int32) + 1
+    wm.set_function_name(idx, f.name)
+  end
+
+  # Data is written once every address is known, since initializers may name other globals and functions.
+  i = 0
+  modules.each do |m|
+    m.globals.each do |g|
+      off = ctx.global_addr[g.name].as(Int64) - data_base
+      write_init(ctx, buf, g.value_type, g.initializer, off)
+      i = i + 1
+    end
+  end
+  return ctx.error.as(String) if ctx.error
+
+  stack_top = align_up(data_end + stack_size, 16_i64)
+  pages = (stack_top + 65535_i64) // 65536_i64
+  pages = 1_i64 if pages < 1_i64
+  wm.set_memory(pages.to_i32)
+  sp = wm.add_global(127_u8, true, i32_const_expr(stack_top.to_i32))
+  if sp != 0
+    return "the stack pointer must be global 0"
+  end
+  wm.set_table(ctx.defined.size + 1)
+  elems = [] of Int32
+  ctx.defined.each { |f| elems << ctx.fn_index[f.name] }
+  wm.add_element(1, elems)
+  wm.add_data(data_base.to_i32, buf)
+  wm.add_export("memory", 2_u8, 0)
+
+  ctx.defined.each do |f|
+    gen = FnGen.new(ctx, f, ctx.type_of(f.fn_type))
+    gen.generate
+    if gen.error
+      return gen.error.as(String)
+    end
+    if ctx.error
+      return ctx.error.as(String)
+    end
+    wm.set_body(ctx.fn_index[f.name], gen.body)
+    if f.name == "_start"
+      wm.add_export("_start", 0_u8, ctx.fn_index[f.name])
+    end
+  end
+  wm.write
+end

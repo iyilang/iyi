@@ -1,0 +1,7 @@
+# Pointer types of the lowering: every pointer is one IR `ptr` whatever it points at.
+# type: Pointer(Int32)
+# type: Pointer(Void)
+# type: Pointer(Pointer(Int8))
+# type: Pointer(Nil)
+# type: Pointer(Bool)
+# type: Pointer(Float64)

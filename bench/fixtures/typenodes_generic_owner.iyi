@@ -1,0 +1,23 @@
+@[Unsafe("a generic owner resolves type nodes using its type arguments")]
+struct Pointer(T)
+  def self.malloc(size : Int32)
+    p = uninitialized Pointer(T)
+    p
+  end
+end
+
+class Box(T)
+  def run(x : T)
+    p = Pointer(T).malloc(1)
+    u = uninitialized T | Bool
+    f = uninitialized T -> Bool
+    tup = uninitialized Tuple(T, Bool)
+    sa = uninitialized StaticArray(T, 2)
+    pt = Pointer(Tuple(T, Bool)).malloc(1)
+    sp = uninitialized Proc(*Tuple(T, Bool), Bool)
+    {p, u, f, tup, sa, pt, sp}
+  end
+end
+
+b = Box(Int32).new
+b.run(1)

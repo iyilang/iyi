@@ -1,0 +1,13 @@
+# The shape of compiler.iyi CompileResult.@resolved_modules: an explicit instance
+# variable whose type is a generic instance. The hosted pass records
+# Array(ModuleInfo). Without a type system after the visit, the port recorded
+# the unbound Array(T).
+class ModuleInfo
+end
+
+class CompileResult
+  @resolved_modules : Array(ModuleInfo)
+
+  def initialize(@resolved_modules : Array(ModuleInfo))
+  end
+end

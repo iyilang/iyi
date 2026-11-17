@@ -1,0 +1,10 @@
+def note(x : Int32) : Nil
+  nil
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+note(1)
+LibC.exit(3)

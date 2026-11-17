@@ -1,0 +1,12 @@
+# A local declared in one macro block and read through pointerof in a later block.
+# The class body is one Expressions, spliced in order. The later site must be parsed
+# knowing the name the earlier expansion declared. pointerof refuses the name when
+# that scope is missing, and a class body is outside any def.
+class SeminlLater
+  {% if true %}
+    seminl_earlier = 1
+  {% end %}
+  {% if true %}
+    seminl_later_ptr = pointerof(seminl_earlier)
+  {% end %}
+end

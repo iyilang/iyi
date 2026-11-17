@@ -1,0 +1,65 @@
+# Mixed sign, signed on the left. Int64 against UInt32 widens the unsigned operand with a
+# zero extension and compares signed, after the sign check (hosted codegen_binary_op_lt,
+# the wider-signed branch). Int32 against UInt32 is the same width, so nothing is extended.
+# The status is 1 + 2 + 4 + 8 + 16 + 32 + 64 = 127.
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def eq_sl(a : Int64, b : UInt32) : Int32
+  if a == b
+    1
+  else
+    0
+  end
+end
+
+def ne_sl(a : Int64, b : UInt32) : Int32
+  if a != b
+    2
+  else
+    0
+  end
+end
+
+def lt_sl(a : Int64, b : UInt32) : Int32
+  if a < b
+    4
+  else
+    0
+  end
+end
+
+def add_sl(a : Int64, b : UInt32) : Int32
+  if (a &+ b) == 7_i64
+    8
+  else
+    0
+  end
+end
+
+def eq_same(a : Int32, b : UInt32) : Int32
+  if a == b
+    16
+  else
+    0
+  end
+end
+
+def ne_same(a : Int32, b : UInt32) : Int32
+  if a != b
+    32
+  else
+    0
+  end
+end
+
+def lt_same(a : Int32, b : UInt32) : Int32
+  if a < b
+    64
+  else
+    0
+  end
+end
+
+LibC.exit(eq_sl(4_i64, 4_u32) &+ ne_sl(5_i64, 4_u32) &+ lt_sl(1_i64, 2_u32) &+ add_sl(3_i64, 4_u32) &+ eq_same(4, 4_u32) &+ ne_same(5, 4_u32) &+ lt_same(1, 2_u32))

@@ -1,0 +1,18 @@
+class K
+  @@f : Float64 = 1.5
+
+  def self.f : Float64
+    @@f
+  end
+end
+
+def h : Int32
+  K.f
+  7
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+LibC.exit(h)

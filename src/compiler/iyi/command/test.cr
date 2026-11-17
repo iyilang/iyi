@@ -1,3 +1,11 @@
+require "../stale/runner"
+
+{% if flag?(:win32) %}
+  require "c/consoleapi"
+  require "c/jobapi2"
+  require "c/processthreadsapi"
+{% end %}
+
 # iyi: `iyi test` — the verify loop, with no framework to learn
 # (AI_FIRST.md §2 #4).
 #
@@ -75,6 +83,12 @@ class Iyi::Command
     timeout = 60.0
     paths = [] of String
     affected = [] of String
+    cached = false
+    fresh = false
+    explain = false
+    shard = nil : String?
+    import_indices = [] of String
+    export_indices = [] of String
     chaos = false
     chaos_seed : UInt64? = nil
     chaos_runs : Int32? = nil
@@ -82,7 +96,7 @@ class Iyi::Command
     # own. 24 tests on 12 logical cores took 6.3 to 7.2 s at 12 at once, 7.4
     # to 7.6 s at 6 and 9.5 to 9.9 s at 4 (a non-release compiler), so the
     # other half bought a tenth of the time for twice the memory.
-    parallel = (::System.cpu_count // 2).clamp(1, nil)
+    parallel = TestPool.default_parallel
     only : String? = nil
     verbose = false
     # What every test is built with beyond `build FILE -o BINARY`: the
@@ -116,6 +130,24 @@ class Iyi::Command
           abort! "#{value} is a directory, not a changed file", :USAGE_ERROR
         end
         affected << value
+      when "--cached"
+        cached = true
+      when "--fresh"
+        fresh = true
+      when "--explain"
+        explain = true
+      when "--shard"
+        value = options.shift?
+        abort! "--shard takes K/N", :USAGE_ERROR unless value
+        shard = value
+      when "--import-index"
+        value = options.shift?
+        abort! "--import-index takes NS=FILE", :USAGE_ERROR unless value
+        import_indices << value
+      when "--export-index"
+        value = options.shift?
+        abort! "--export-index takes NS=FILE", :USAGE_ERROR unless value
+        export_indices << value
       when "--chaos"
         chaos = true
       when .starts_with?("--chaos=")
@@ -172,6 +204,53 @@ class Iyi::Command
         paths << option
       end
     end
+    if cached && fresh
+      abort! "cannot pass both --cached and --fresh", :USAGE_ERROR
+    end
+    # The receipt runner (`--cached` and what goes with it) builds and runs each
+    # test one way: every named case, under the runner's own build, because a
+    # receipt says what one whole test did under one build. So it refuses the
+    # options that would have it run another way, as `--chaos` is refused below,
+    # rather than take them and do something else. Tests run `-p` at a time, as
+    # plain runs do.
+    receipts = if cached
+                 "--cached"
+               elsif fresh
+                 "--fresh"
+               elsif explain
+                 "--explain"
+               elsif shard
+                 "--shard"
+               elsif !import_indices.empty?
+                 "--import-index"
+               elsif !export_indices.empty?
+                 "--export-index"
+               end
+    if receipts
+      if only
+        abort! "cannot pass both --run and #{receipts}: a receipt is for a test's every named case", :USAGE_ERROR
+      elsif !build_flags.empty?
+        abort! "cannot pass both #{build_flags.first} and #{receipts}: a receipt's build is the runner's own", :USAGE_ERROR
+      elsif verbose
+        abort! "cannot pass both -v and #{receipts}: a test answered from its receipt printed nothing to show", :USAGE_ERROR
+      end
+    end
+    if chaos
+      if cached
+        abort! "cannot pass both --chaos and --cached", :USAGE_ERROR
+      elsif fresh
+        abort! "cannot pass both --chaos and --fresh", :USAGE_ERROR
+      elsif explain
+        abort! "cannot pass both --chaos and --explain", :USAGE_ERROR
+      elsif shard
+        abort! "cannot pass both --chaos and --shard", :USAGE_ERROR
+      elsif !import_indices.empty?
+        abort! "cannot pass both --chaos and --import-index", :USAGE_ERROR
+      elsif !export_indices.empty?
+        abort! "cannot pass both --chaos and --export-index", :USAGE_ERROR
+      end
+    end
+
     paths << "." if paths.empty?
 
     files = [] of String
@@ -259,6 +338,28 @@ class Iyi::Command
       end
       exit
     end
+    if receipts
+      runner = Iyi::Stale::Runner.new(
+        files: files,
+        paths: paths,
+        as_json: as_json,
+        timeout: timeout,
+        affected: affected,
+        parallel: parallel,
+        cached: cached,
+        fresh: fresh,
+        explain: explain,
+        shard: shard,
+        import_indices: import_indices,
+        export_indices: export_indices,
+        skipped: skipped,
+        discount_off: discount_off,
+        manifest_changed: manifest_changed,
+        unimported: unimported
+      )
+      runner.run
+      return
+    end
 
     # The seeds: the one asked for and those after it, or from a seed
     # drawn here, which the summary names so that the whole run can be
@@ -271,7 +372,7 @@ class Iyi::Command
       plan = {first, chaos_runs || (chaos_seed ? 1 : CHAOS_RUNS)}
     end
 
-    results = run_tests(files, parallel) { |file| run_one_test(file, timeout, plan, workers, only, build_flags, verbose) }
+    results = TestPool.run(files.size, parallel) { |index| run_one_test(files[index], timeout, plan, workers, only, build_flags, verbose) }
     failed = results.count { |result| result[:status] != "pass" }
     # `--run` with a name that matches no case ran none of them, and a run
     # that tested nothing it was asked to is not a pass: a mistyped name
@@ -494,35 +595,43 @@ class Iyi::Command
     end
   end
 
-  # Every file through *run*, *parallel* at a time, the results in the
-  # files' order. A fiber each: a test's build and its run are processes,
-  # so what is waited on is the processes, and one thread waits on all of
-  # them. An exception escaping a test is raised here, after the others
-  # have ended, as it was raised when they ran one by one.
-  private def run_tests(files : Array(String), parallel : Int32, &run : String -> TestResult) : Array(TestResult)
-    slots = Array(TestResult?).new(files.size, nil)
-    queue = ::Channel(Int32).new(files.size)
-    files.each_index { |index| queue.send(index) }
-    queue.close
-    ended = ::Channel(Exception?).new
-    runners = parallel.clamp(1, files.size)
-    runners.times do
-      spawn do
-        escaped = nil
-        begin
-          while index = queue.receive?
-            slots[index] = run.call(files[index])
-          end
-        rescue ex
-          escaped = ex
-        end
-        ended.send(escaped)
-      end
+  # The pool every run goes through, the plain one and the receipt runner
+  # alike: *size* items through *run* (given the item's index), *parallel* at
+  # a time, the results in the items' order. A fiber each: a test's build and
+  # its run are processes, so what is waited on is the processes, and one
+  # thread waits on all of them. An exception escaping an item is raised
+  # here, after the others have ended, as it was raised when they ran one by
+  # one.
+  module TestPool
+    def self.default_parallel : Int32
+      (::System.cpu_count // 2).clamp(1, nil)
     end
-    escaped = nil
-    runners.times { ended.receive.try { |ex| escaped ||= ex } }
-    escaped.try { |ex| raise ex }
-    slots.map(&.not_nil!)
+
+    def self.run(size : Int32, parallel : Int32, &run : Int32 -> T) : Array(T) forall T
+      slots = Array(T?).new(size, nil)
+      queue = ::Channel(Int32).new(size)
+      size.times { |index| queue.send(index) }
+      queue.close
+      ended = ::Channel(Exception?).new
+      runners = parallel.clamp(1, size)
+      runners.times do
+        spawn do
+          escaped = nil
+          begin
+            while index = queue.receive?
+              slots[index] = run.call(index)
+            end
+          rescue ex
+            escaped = ex
+          end
+          ended.send(escaped)
+        end
+      end
+      escaped = nil
+      runners.times { ended.receive.try { |ex| escaped ||= ex } }
+      escaped.try { |ex| raise ex }
+      slots.map(&.not_nil!)
+    end
   end
 
   # The test built once, then run once - or, under `--chaos`, once per seed
@@ -629,7 +738,10 @@ class Iyi::Command
   private def run_built_test(binary : String, deadline : Float64, output : IO::Memory, environment : Hash(String, String)) : {String, String}
     reader, writer = IO.pipe(write_blocking: true)
     begin
-      process = Process.new(binary, env: environment, output: writer, error: writer, process_group: true)
+      process, tree = TestTree.start do |before_resume|
+        Process.new(binary, env: environment, output: writer, error: writer,
+          process_group: true, before_resume: before_resume)
+      end
     rescue ex
       reader.close
       raise ex
@@ -637,7 +749,6 @@ class Iyi::Command
       # The child has its own copies; with this one open the pipe never ends.
       writer.close
     end
-    tree = TestTree.new(process)
     begin
       done = ::Channel(Process::Status).new
       # The run ends when the program has and the pipe has: a child the test
@@ -689,35 +800,86 @@ class Iyi::Command
   # reaches `iyi test` and not the tests: `iyi test` ends every group still
   # running before it exits on SIGINT, SIGTERM or SIGHUP, or a test that
   # hangs would outlive the run that started it (`TestTree.trap_endings`).
-  private class TestTree
-    @process : Process
+  class TestTree
+    @process : Process? = nil
     {% if flag?(:win32) %}
+      struct JobNode
+        property job : LibC::HANDLE
+        property next : Pointer(JobNode)
+
+        def initialize(@job, @next)
+        end
+      end
+
+      @@jobs = Pointer(JobNode).null
+      # SRWLOCK_INIT is a zero pointer. The console handler uses only Win32
+      # calls and this raw list, never Crystal's scheduler or a fiber mutex.
+      @@jobs_lock = Pointer(Void).null
+      @@trapped = false
       @job : LibC::HANDLE = LibC::HANDLE.null
+      @node = Pointer(JobNode).null
     {% else %}
       @@running = Set(Int64).new
+      @@running_lock = Sync::Mutex.new
       @@trapped = false
     {% end %}
 
-    def initialize(@process : Process)
+    def initialize
       {% if flag?(:win32) %}
-        job = LibC.CreateJobObjectW(Pointer(LibC::SECURITY_ATTRIBUTES).null, Pointer(UInt16).null)
-        return if job.null?
-        # PROCESS_TERMINATE | PROCESS_SET_QUOTA, what assigning asks for.
-        handle = LibC.OpenProcess(0x0001_u32 | 0x0100_u32, 0, @process.pid.to_u32)
-        if handle.null?
-          LibC.CloseHandle(job)
-          return
-        end
-        assigned = LibC.AssignProcessToJobObject(job, handle)
-        LibC.CloseHandle(handle)
-        if assigned == 0
-          LibC.CloseHandle(job)
-          return
-        end
-        @job = job
-      {% else %}
         TestTree.trap_endings
-        @@running << @process.pid
+        job = LibC.CreateJobObjectW(Pointer(LibC::SECURITY_ATTRIBUTES).null, Pointer(UInt16).null)
+        raise RuntimeError.from_winerror("CreateJobObjectW") if job.null?
+        limits = LibC::JOBOBJECT_EXTENDED_LIMIT_INFORMATION.new
+        limits.basicLimitInformation.limitFlags = LibC::JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if LibC.SetInformationJobObject(job, LibC::JOBOBJECTINFOCLASS::ExtendedLimitInformation,
+             pointerof(limits).as(Void*), sizeof(LibC::JOBOBJECT_EXTENDED_LIMIT_INFORMATION)) == 0
+          error = RuntimeError.from_winerror("SetInformationJobObject")
+          LibC.CloseHandle(job)
+          raise error
+        end
+        node = Pointer(JobNode).malloc(1)
+        LibC.AcquireSRWLockExclusive(pointerof(@@jobs_lock))
+        node.value = JobNode.new(job, @@jobs)
+        @@jobs = node
+        @job = job
+        @node = node
+        LibC.ReleaseSRWLockExclusive(pointerof(@@jobs_lock))
+      {% end %}
+    end
+
+    # Assign the suspended child before Process resumes it. A failed
+    # assignment ends the child and is an error.
+    def self.start(&)
+      tree = new
+      process : Process? = nil
+      begin
+        process = yield tree.before_resume
+        tree.attach(process)
+        {process, tree}
+      rescue ex
+        process.try { |child| child.terminate(graceful: false) rescue nil }
+        tree.close
+        raise ex
+      end
+    end
+
+    def before_resume
+      {% if flag?(:win32) %}
+        ->(handle : Void*) do
+          if LibC.AssignProcessToJobObject(@job, handle) == 0
+            raise RuntimeError.from_winerror("AssignProcessToJobObject")
+          end
+          nil
+        end
+      {% else %}
+        nil
+      {% end %}
+    end
+
+    def attach(@process : Process) : Nil
+      {% unless flag?(:win32) %}
+        TestTree.trap_endings
+        @@running_lock.synchronize { @@running << @process.not_nil!.pid }
       {% end %}
     end
 
@@ -725,35 +887,84 @@ class Iyi::Command
       {% if flag?(:win32) %}
         unless @job.null?
           LibC.TerminateJobObject(@job, 1)
-          LibC.CloseHandle(@job)
-          @job = LibC::HANDLE.null
           return
         end
       {% else %}
-        # The group's id is its leader's pid. A group that is gone already
-        # leaves the leader, which is killed as before.
-        return if LibC.kill(-@process.pid.to_i32, Signal::KILL.value) == 0
+        if process = @process
+          return if LibC.kill(-process.pid.to_i32, Signal::KILL.value) == 0
+        end
       {% end %}
-      @process.terminate(graceful: false)
+      @process.try &.terminate(graceful: false)
     end
 
-    # The job's handle, once the test is over; closing it ends nothing.
     def close : Nil
       {% if flag?(:win32) %}
-        LibC.CloseHandle(@job) unless @job.null?
-        @job = LibC::HANDLE.null
+        LibC.AcquireSRWLockExclusive(pointerof(@@jobs_lock))
+        unless @node.null?
+          previous = Pointer(JobNode).null
+          current = @@jobs
+          until current.null?
+            if current == @node
+              if previous.null?
+                @@jobs = current.value.next
+              else
+                previous.value.next = current.value.next
+              end
+              break
+            end
+            previous = current
+            current = current.value.next
+          end
+          LibC.CloseHandle(@job)
+          @job = LibC::HANDLE.null
+          @node = Pointer(JobNode).null
+        end
+        LibC.ReleaseSRWLockExclusive(pointerof(@@jobs_lock))
       {% else %}
-        @@running.delete(@process.pid)
+        if process = @process
+          @@running_lock.synchronize { @@running.delete(process.pid) }
+        end
       {% end %}
     end
 
-    {% unless flag?(:win32) %}
+    {% if flag?(:win32) %}
+      def self.console_event(event : UInt32) : Int32
+        status = case event
+                 when LibC::CTRL_C_EVENT, LibC::CTRL_BREAK_EVENT then 130_u32
+                 when LibC::CTRL_CLOSE_EVENT                     then 129_u32
+                 else                                                 return 0
+                 end
+        LibC.AcquireSRWLockExclusive(pointerof(@@jobs_lock))
+        node = @@jobs
+        until node.null?
+          LibC.TerminateJobObject(node.value.job, status)
+          node = node.value.next
+        end
+        LibC.ReleaseSRWLockExclusive(pointerof(@@jobs_lock))
+        LibC.ExitProcess(status)
+      end
+
+      def self.trap_endings : Nil
+        LibC.AcquireSRWLockExclusive(pointerof(@@jobs_lock))
+        begin
+          unless @@trapped
+            if LibC.SetConsoleCtrlHandler(->TestTree.console_event(UInt32), 1) == 0
+              raise RuntimeError.from_winerror("SetConsoleCtrlHandler")
+            end
+            @@trapped = true
+          end
+        ensure
+          LibC.ReleaseSRWLockExclusive(pointerof(@@jobs_lock))
+        end
+      end
+    {% else %}
       def self.trap_endings : Nil
         return if @@trapped
         @@trapped = true
         [Signal::INT, Signal::TERM, Signal::HUP].each do |signal|
           signal.trap do
-            @@running.each { |pid| LibC.kill(-pid.to_i32, Signal::KILL.value) }
+            pids = @@running_lock.synchronize { @@running.to_a }
+            pids.each { |pid| LibC.kill(-pid.to_i32, Signal::KILL.value) }
             exit 128 + signal.value
           end
         end
@@ -767,7 +978,10 @@ class Iyi::Command
 
   private def test_usage
     <<-USAGE
-    Usage: #{Command.program_name} test [--json] [-v] [--timeout SECONDS] [-p N] [--run TEXT] [--release] [-D FLAG]... [--affected FILE]... [--chaos[=SEED]] [--chaos-runs N] [paths]
+    Usage: #{Command.program_name} test [--json] [-v] [--timeout SECONDS] [-p N] [--run TEXT] [--release] [-D FLAG]...
+                                        [--affected FILE]... [--cached | --fresh] [--explain] [--shard K/N]
+                                        [--import-index NS=FILE]... [--export-index NS=FILE]...
+                                        [--chaos[=SEED]] [--chaos-runs N] [paths]
 
     Runs every `*_test.iyi` under the given paths (default: `.`), but not
     under `lib`, a dot directory or another module's directory. A test is
@@ -775,8 +989,8 @@ class Iyi::Command
     prints its own evidence. `--json` reports the run as data, each named
     case (`test "name" { }`) with its verdict.
 
-    `-p N` (`--parallel N`) builds and runs N tests at once; half as many as
-    the machine has cores unless given. The report is in file order.
+    `-p N` (`--parallel N`) builds and runs N tests at once, receipts included;
+    half as many as the machine has cores unless given. The report is in file order.
 
     `-v` (`--verbose`) shows what a passing test printed too, which is
     otherwise shown only for a failure. `--release` and `-D FLAG` build
@@ -790,10 +1004,19 @@ class Iyi::Command
     run, and says `skip - name: why`.
 
     `--affected FILE` (repeatable) runs only the tests whose transitive
-    import closure contains a named file — name every file you changed.
+    import closure contains a named file: name every file you changed.
     The closure is read by parsing, so selection costs milliseconds; a
     deleted file turns the discount off, because nothing can prove the
     tests that imported it unaffected.
+
+    `--cached` reuses passing test results when code and observed inputs match.
+    `--fresh` forces execution and records new receipts.
+    `--explain` prints decision lines explaining hits and misses.
+    `--shard K/N` runs shard K of N shards dealt round-robin.
+    `--import-index NS=FILE` imports verified test receipts for namespace NS.
+    `--export-index NS=FILE` exports test receipts for namespace NS (requires --fresh).
+    These take the runner's own build of each test, every named case, so they
+    are not taken with `--run`, `-v`, `--release` or `-D`.
 
     `--chaos` builds each test for the chaos scheduler and runs it once per
     seed, `--chaos-runs N` seeds (100 unless given) from one drawn at

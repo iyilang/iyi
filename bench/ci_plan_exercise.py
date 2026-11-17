@@ -23,9 +23,11 @@ comment, a message, a `$( )` in quotes, a loop, a function and Python's
 strings, reads and subprocesses.
 """
 import importlib.util
+import json
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -42,10 +44,14 @@ def check(what, holds, evidence=""):
             print("    " + str(evidence).replace("\n", "\n    "))
 
 
-def planned(*files):
-    """The reason and the selected jobs, from the planner's own command line."""
-    ran = subprocess.run([sys.executable, str(PLANNER), "--event", "pull_request", "--files", *files],
-                         cwd=ROOT, capture_output=True, text=True, encoding="utf-8")
+def planned(*files, base=None):
+    """The reason and the selected jobs, from the planner's own command line. *base* is the base
+    branch's workflow; with none, and none of CI's credentials in the environment, it cannot be read."""
+    command = [sys.executable, str(PLANNER), "--event", "pull_request", "--files", *files]
+    if base is not None:
+        command += ["--base-workflow", str(base)]
+    env = {k: v for k, v in os.environ.items() if k not in ("GITHUB_EVENT_PATH", "GITHUB_TOKEN", "GITHUB_REPOSITORY")}
+    ran = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, encoding="utf-8", env=env)
     lines = ran.stdout.splitlines()
     if ran.returncode != 0 or not lines:
         return f"exit {ran.returncode}: {ran.stderr.strip()}", set()
@@ -76,8 +82,77 @@ check("a file nothing runs falls back to the fast tier",
 reason, jobs = planned("README.md")
 check("a doc selects the docs gates alone", jobs == {"docs"}, f"{reason}: {sorted(jobs)}")
 
+workflow_text = (ROOT / ".github" / "workflows" / "iyi.yml").read_text(encoding="utf-8")
+with tempfile.TemporaryDirectory() as scratch:
+    same = Path(scratch) / "same.yml"
+    same.write_text(workflow_text, encoding="utf-8")
+    reason, jobs = planned(".github/workflows/iyi.yml", base=same)
+    check("a change to CI that edits no job runs the fast tier, and no darwin job",
+          reason.startswith("the fast tier") and "compiler-specs" in jobs and not any(j.startswith("darwin") for j in jobs),
+          f"{reason}: {sorted(jobs)}")
+    edited = Path(scratch) / "edited.yml"
+    edited.write_text(workflow_text.replace("\n  darwin:\n", "\n  darwin:\n    env: {BASE: x}\n", 1), encoding="utf-8")
+    reason, jobs = planned(".github/workflows/iyi.yml", base=edited)
+    check("a job the change edits runs with it, and the jobs it needs", "darwin" in jobs and "compiler-specs" in jobs,
+          f"{reason}: {sorted(jobs)}")
 reason, jobs = planned(".github/workflows/iyi.yml")
-check("a change to CI runs everything", reason.startswith("the change is to CI itself"), reason)
+check("a change to CI whose base workflow cannot be read runs everything",
+      reason.startswith("the change is to CI itself") and "darwin" in jobs, f"{reason}: {sorted(jobs)}")
+
+# Each compiler component change selects macOS, Linux and Windows.
+for files, what in [
+    (["src/compiler/codegen/codegen.iyi"], "a self-host compiler source"),
+    (["bench/selfhost_lexer_exercise.sh"], "a self-host gate"),
+    (["bench/native_elf_run.sh"], "the native Linux ELF execution gate"),
+    (["bench/native_ir_exercise.sh"], "a native compiler gate"),
+    (["bench/lib/host.sh"], "the shared test-host helper"),
+    (["bench/fixtures/compile_stdout.iyi"], "a fixture the self-host gates read"),
+    (["bench/selfhost_gates.sh", "src/compiler/syntax/lexer.iyi"], "a mixed change to the self-host gates and the compiler"),
+    (["src/compiler/ir/builder.iyi"], "an IR compiler source"),
+    (["bench/" + "native_ir" + "_exercise.sh"], "the native IR gate"),
+    (["bench/" + "selfhost_ir_fold" + "_exercise.iyi"], "the IR folding exercise"),
+    (["bench/fixtures/" + "ir/valid/everything.ir"], "an IR fixture"),
+    (["bench/" + "native_codegen" + "_exercise.sh"], "the AArch64 codegen gate"),
+    (["bench/" + "native_encode" + "_exercise.sh"], "the AArch64 encoder gate"),
+    (["bench/" + "native_regalloc" + "_exercise.sh"], "the register allocator gate"),
+    (["src/compiler/tools/native_cg.iyi"], "the native codegen driver"),
+    (["bench/fixtures/native_cg/narrow_signext.ir"], "a restored narrow codegen fixture"),
+    (["bench/fixtures/native_cg/rt_stub.c"], "the native runtime comparison stub"),
+    (["src/compiler/native/rt/builtins.ir"], "the native IR runtime"),
+    (["README.md", "src/compiler/native/rt/builtins.ir"], "a mixed documentation and native IR change"),
+]:
+    reason, jobs = planned(*files)
+    check(f"{what} selects all three hosts and native Linux arm64 execution",
+          {"selfhost", "selfhost-darwin", "selfhost-windows", "selfhost-linux-arm64"} <= jobs,
+          f"{reason}: {sorted(jobs)}")
+
+reason, jobs = planned("src/iyi/string.iyi")
+check("an ordinary prelude change does not select component-only jobs",
+      not {"selfhost", "selfhost-darwin", "selfhost-windows", "selfhost-linux-arm64"} & jobs,
+      f"{reason}: {sorted(jobs)}")
+
+stale_jobs = {
+    "iyi", "compiler-specs", "stale-rg3", "stale-callpath", "stale-equivalence", "stale-fresh",
+    "stale-darwin", "stale-darwin-gates", "stale-darwin-fresh",
+    "stale-windows", "stale-windows-gates", "stale-windows-fresh",
+}
+for changed in [
+    "src/compiler/iyi/stale/check.cr",
+    "src/compiler/iyi/semantic/effects.cr",
+    "src/compiler/iyi/semantic/observers.cr",
+    "src/compiler/iyi/build_inputs.cr",
+    "src/compiler/iyi/command/test.cr",
+    "src/std/observe.iyi",
+    "spec/compiler/stale/check_spec.cr",
+    "bench/" + "stale_" + "tests.sh",
+]:
+    reason, jobs = planned(changed)
+    check(f"{changed} selects stale checks on all platforms",
+          stale_jobs <= jobs, f"{reason}: {sorted(jobs)}")
+
+reason, jobs = planned("src/compiler/iyi/parser.cr")
+check("ordinary code selects RG3 without all native stale jobs",
+      "stale-rg3" in jobs and "stale-windows" not in jobs, f"{reason}: {sorted(jobs)}")
 
 print()
 print("== a workflow and a bench directory of this exercise's own")
@@ -85,9 +160,90 @@ print("== a workflow and a bench directory of this exercise's own")
 spec = importlib.util.spec_from_file_location("ci_plan_under_test", PLANNER)
 planner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(planner)
+
+# Execute the workflow's result command: selected jobs must have actually run.
+actual_jobs = planner.parse_jobs((ROOT / ".github" / "workflows" / "iyi.yml").read_text(encoding="utf-8"))
+result_lines = actual_jobs["result"]["text"].splitlines()
+command_lines = []
+for line in result_lines[result_lines.index("        run: |") + 1:]:
+    if line.strip() and not line.startswith("          "):
+        break
+    command_lines.append(line[10:])
+result_command = "\n".join(command_lines)
+for what, selected, verdicts, passes in [
+    ("selected success permits unselected skips", ["probe"], {"probe": "success", "unused": "skipped"}, True),
+    ("a selected skip blocks the result", ["probe"], {"probe": "skipped"}, False),
+    ("a missing selected job blocks the result", ["probe"], {}, False),
+    ("a skipped plan blocks the result", ["probe"], {"plan": "skipped", "probe": "success"}, False),
+    ("an intentionally empty plan can pass", [], {"unused": "skipped"}, True),
+]:
+    results = {name: {"result": verdict} for name, verdict in verdicts.items()}
+    results.setdefault("plan", {"result": "success"})["outputs"] = {"jobs": json.dumps(selected)}
+    ran = subprocess.run(["bash", "-c", result_command], cwd=ROOT, capture_output=True, text=True,
+                         env={**os.environ, "RESULTS": json.dumps(results)})
+    check(what, (ran.returncode == 0) == passes, ran.stdout + ran.stderr)
+
 if not hasattr(planner, "Reach"):
     check("the planner reads what runs what (`Reach`)", False, f"{PLANNER} has no Reach")
 else:
+    # The native jobs deliberately run the same Bash bodies. Keep that
+    # contract when a later edit adds or changes a stale gate on one OS.
+    real_jobs = planner.parse_jobs((ROOT / ".github/workflows/iyi.yml").read_text(encoding="utf-8"))
+
+    def step_run(job, name):
+        for step in real_jobs[job]["text"].split("\n      - name: ")[1:]:
+            lines = step.splitlines()
+            if lines[0].strip('"') != name:
+                continue
+            for index, line in enumerate(lines[1:], 1):
+                if line.startswith("        run: "):
+                    value = line[len("        run: "):]
+                    if value != "|":
+                        return value
+                    body = []
+                    for body_line in lines[index + 1:]:
+                        if body_line and not body_line.startswith("          "):
+                            break
+                        body.append(body_line[10:] if body_line else "")
+                    return "\n".join(body).rstrip()
+        return None
+
+    for jobs_and_steps in [
+        (["iyi", "stale-darwin", "stale-windows"], [
+            "Stale test acceptance suite",
+            "Stale receipt digest, RG8 oracle, and evidence self-tests",
+            "Export fresh run receipts",
+        ]),
+        (["stale-callpath", "stale-darwin-gates", "stale-windows-gates"], [
+            "Link once, RG4, the reach walk, the key's phases, RG8 and RG9",
+            "Suite speed under the audit, 20 tests",
+            "Two processes record into one store",
+        ]),
+        (["stale-equivalence", "stale-darwin-gates", "stale-windows-gates"], [
+            "RG2, RG2a, RG2r and RG5, with no program excluded",
+        ]),
+        (["stale-fresh", "stale-darwin-fresh", "stale-windows-fresh"], [
+            "Producer receipts on a fresh runner: hit on an equal profile, refused on another",
+            "Shadow audit fresh execution and export",
+            "The runner's own receipts hit on an emptied store",
+            "Planted hidden-read shadow-audit proof",
+            "Master snapshot path and Actions API proof",
+            "RG1 and RG7 with the producer compiler",
+            "RG9 CallPathFp on the fresh runner",
+            "Download master snapshot for git-diff audit",
+            "Master snapshot git-diff self-check",
+            "Census and overhead measurements",
+            "Prepare audited master receipt snapshot",
+            "Prepare empty master snapshot after disagreement",
+        ]),
+    ]:
+        platforms, steps = jobs_and_steps
+        for name in steps:
+            bodies = [step_run(job, name) for job in platforms]
+            check(f"same stale step on three platforms: {name}",
+                  all(body is not None for body in bodies) and len(set(bodies)) == 1,
+                  f"{platforms}: {bodies}")
+
     workflow = """jobs:
   plan:
     runs-on: x

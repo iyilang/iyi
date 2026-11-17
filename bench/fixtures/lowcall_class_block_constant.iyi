@@ -1,0 +1,14 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+class Factory
+  HEADER_SIZE = 7
+
+  def self.with_block(&block : -> Nil) : Int32
+    yield
+    HEADER_SIZE
+  end
+end
+
+LibC.exit(Factory.with_block { nil })

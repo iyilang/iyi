@@ -1,0 +1,14 @@
+module inhname/scanner
+
+pub class Scanner
+  def initialize
+  end
+
+  def self.code : Int32
+    7
+  end
+
+  def run : Int32
+    Scanner.code
+  end
+end

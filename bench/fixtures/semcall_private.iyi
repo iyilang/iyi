@@ -1,0 +1,27 @@
+# Calls to private defs with an explicit receiver: the hosted call pass refuses them
+# with a message that names the method and its owner. Read by
+# bench/selfhost_semantic_calls_exercise.sh; `# error` lines are compiled by the
+# hosted oracle as a whole program.
+
+class Foo
+  private def secret(x : Int32) : Int32
+    x
+  end
+
+  def open(x : Int32) : Int32
+    x
+  end
+
+  private def self.cls(x : Int32) : Int32
+    x
+  end
+
+  def self.make(x : Int32) : Foo
+    Foo.new
+  end
+end
+
+# error Foo.make(1).secret(1)
+# error Foo.make(1).open(1)
+# error Foo.cls(1)
+# error secret(1)

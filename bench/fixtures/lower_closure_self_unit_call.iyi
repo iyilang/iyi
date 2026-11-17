@@ -1,0 +1,28 @@
+@[Unsafe("declares the external process exit")]
+module fixtures/lower_closure_self_unit_call
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def scale(value : Int32) : Int32
+  value &* 3
+end
+
+class Job
+  def initialize(@base : Int32)
+  end
+
+  def local_only(n : Int32) : Proc(Int32)
+    -> { scale(n) }
+  end
+
+  def with_ivar : Proc(Int32)
+    -> { scale(@base) }
+  end
+end
+
+job = Job.new(4)
+LibC.exit(1) unless job.local_only(5).call == 15
+LibC.exit(2) unless job.with_ivar.call == 12
+LibC.exit(0)

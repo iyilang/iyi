@@ -1,0 +1,6 @@
+import diamond_a
+import diamond_b
+
+fun main(argc : Int32, argv : Pointer(Pointer(UInt8))) : Int32
+  diamond_a_val &+ diamond_b_val
+end

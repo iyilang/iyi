@@ -1,0 +1,23 @@
+struct Point
+  @x : Int32
+  @y : Int32
+
+  def initialize(x : Int32, y : Int32)
+    @x = x
+    @y = y
+  end
+
+  def set(x : Int32, y : Int32)
+    @x = x
+    @y = y
+  end
+
+  def first : Int32
+    value = @x
+    value
+  end
+end
+
+p = Point.new(1, 2)
+p.set(40, 2)
+p.first

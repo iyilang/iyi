@@ -1,0 +1,9 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def fail(code : Int32) : NoReturn
+  LibC.exit(code)
+end
+
+fail(42)

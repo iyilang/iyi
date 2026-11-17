@@ -1,0 +1,12 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+SOURCE = 1.5_f64
+ALIAS  = SOURCE
+
+def consume(value : Float64) : Int32
+  value > 1.0_f64 ? 7 : 1
+end
+
+LibC.exit(consume(ALIAS))

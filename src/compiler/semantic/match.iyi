@@ -1,0 +1,586 @@
+module compiler/semantic/match
+
+import compiler/syntax/ast::{ASTNode, Call, Def, Generic, NumberLiteral, ProcNotation, Splat, Yield}
+import compiler/syntax/visitor::{Visitor}
+import compiler/semantic/top_level::{GenericClassType, MetaclassType, ModuleType, NoReturnType, SemanticProgram, Type}
+import compiler/semantic/restrictions::{ArgRestriction, FreeBindings}
+import compiler/types/type_system::{TypeSystem}
+import compiler/types/lookup::{LookupError}
+import compiler/types/types::{GenericInstanceType, NamedArgumentType}
+
+# The name, argument types, named arguments and block of a call: the hosted
+# CallSignature (record in method_lookup.cr). It lives here, not in
+# method_lookup.iyi, because the matcher reads it and the lookup imports the
+# matcher: iyi imports form a DAG, so the shared type sits below both. *block* is
+# true when the call has a block literal. A block argument at the call site
+# (`&b`) is not ported.
+pub class CallSignature
+  getter name : String
+  getter arg_types : Array(Type)
+  getter named_args : Array(NamedArgumentType)?
+  getter block : Bool
+
+  def initialize(@name : String, @arg_types : Array(Type), @named_args : Array(NamedArgumentType)? = nil, @block : Bool = false)
+    @autocast_nodes = nil
+  end
+
+  # Set for the hosted second matching pass: the call's argument nodes, so a
+  # number literal can be told from a typed integer of the same type.
+  property autocast_nodes : Array(ASTNode)?
+  property named_autocast_nodes : Array(ASTNode)? = nil
+  property infer_class_vars : Bool = false
+end
+
+# One def that accepts a call: the hosted Match. *arg_types* are the positional
+# argument types after each restriction, with a splat parameter's elements after
+# the prefix, unrestricted; *named_arg_types* the named ones, in the order the
+# call wrote them (a double splat takes the names no parameter has); *owner* the
+# receiver's type, *defining* the type the def was found on (the scope its
+# restrictions are written in), and *exact* says every restricted type is the
+# argument's type, which the hosted matches_exactly? asks.
+pub class Match
+  getter definition : Def
+  getter arg_types : Array(Type)
+  getter named_arg_types : Array(NamedArgumentType)
+  getter owner : Type
+  getter defining : ModuleType
+  getter exact : Bool
+  getter declared : Array(Type)
+  getter bound : Hash(String, Type)
+
+  def initialize(@definition : Def, @arg_types : Array(Type), @owner : Type, @defining : ModuleType, @exact : Bool, @named_arg_types : Array(NamedArgumentType) = [] of NamedArgumentType, @declared : Array(Type) = [] of Type, @bound : Hash(String, Type) = Hash(String, Type).new)
+  end
+end
+
+# The outcome of trying one def: a match, nothing (the def does not accept the
+# call), or an error message (a restriction does not resolve, or a shape that is
+# not ported).
+pub class MatchAttempt
+  getter match : Match?
+  getter error : String?
+
+  def initialize(@match : Match?, @error : String?)
+  end
+
+  def self.none : MatchAttempt
+    MatchAttempt.new(nil, nil)
+  end
+
+  def self.failed(message : String) : MatchAttempt
+    MatchAttempt.new(nil, message)
+  end
+
+  def self.matched(match : Match) : MatchAttempt
+    MatchAttempt.new(match, nil)
+  end
+end
+
+# Finds whether a def's body yields, which the hosted DefMetadata records as
+# `yields`: a def accepts a call with a block only if it yields, and a call without
+# a block only if it does not. The walk does not enter a nested def.
+pub class YieldFinder < Visitor
+  getter found : Bool
+
+  def initialize
+    @found = false
+  end
+
+  def visit(node : Yield) : Bool
+    @found = true
+    true
+  end
+
+  def visit(node : Def) : Bool
+    false
+  end
+end
+
+# Matches one def against a call's signature: the port of CallSignature#match.
+# Positional arguments, a splat parameter (`*args`, which takes the arguments after
+# its prefix), named arguments, a double splat (`**opts`, which takes the names no
+# parameter has), free variables, and the block rule are ported. Refused by name: a
+# restricted splat parameter (the hosted pass leaves a free variable that only a
+# splat names undefined: `undefined constant T`), a parameter after the splat, and a
+# double splat with a restriction.
+pub class CallMatch
+  def self.inferable_generic(program : SemanticProgram, owner : Type, defining : ModuleType?, definition : Def, given : Int32) : GenericClassType?
+    return nil unless definition.name == "new"
+    return nil if defining.nil? || defining.as(ModuleType).object_id != owner.object_id
+    return nil unless owner.is_a?(MetaclassType)
+    instance = owner.as(MetaclassType).instance_type
+    return nil unless instance.is_a?(GenericClassType)
+    generic = instance.as(GenericClassType)
+    return nil unless generic.splat_index.nil?
+    return nil unless given == definition.args.size
+    return nil unless definition.splat_index.nil? && definition.double_splat.nil?
+    generic
+  end
+
+  def self.yields?(definition : Def) : Bool
+    return true if definition.block_arg || definition.macro_yields
+    finder = YieldFinder.new
+    definition.body.accept(finder)
+    finder.found
+  end
+
+  def self.attempt(ts : TypeSystem, signature : CallSignature, definition : Def, owner : Type, defining : ModuleType) : MatchAttempt
+    free_names = [] of String
+    if definition.free_vars
+      free_names = definition.free_vars.as(Array(String))
+    end
+    bound = Hash(String, Type).new
+    count = definition.args.size
+    splat = definition.splat_index
+    if splat
+      k = splat.as(Int32)
+      if count > k + 1 && !definition.args[k].name.empty?
+        return MatchAttempt.failed("parameters after a named splat are not ported")
+      end
+    end
+    splat_restriction = CallMatch.splat_restriction_of(definition, splat)
+    dsplat = definition.double_splat
+    if dsplat
+      return MatchAttempt.failed("a restricted double splat parameter is not ported") if dsplat.restriction
+    end
+    if CallMatch.yields?(definition) != signature.block
+      return MatchAttempt.none
+    end
+
+    given = signature.arg_types.size
+    prefix = splat ? splat.as(Int32) : count
+    return MatchAttempt.none if !splat && given > count
+    if splat && definition.args[splat.as(Int32)].name.empty? && given > prefix
+      return MatchAttempt.none
+    end
+    splat_types = [] of Type
+    if splat
+      si = prefix
+      while si < given
+        splat_types << signature.arg_types[si]
+        si += 1
+      end
+    end
+    class_vars : Array(String)? = nil
+    if signature.infer_class_vars
+      if generic = CallMatch.inferable_generic(ts.program, owner, defining, definition, given)
+        class_vars = generic.type_vars
+      end
+    end
+    match_free = free_names
+    if vars = class_vars
+      copied = false
+      vars.each do |name|
+        unless match_free.includes?(name)
+          unless copied
+            match_free = match_free.dup
+            copied = true
+          end
+          match_free << name
+        end
+      end
+    end
+    if match_free.size > 0
+      maybe_bound = FreeBindings.of_def(definition, signature.arg_types, ts, class_vars)
+      return MatchAttempt.none if maybe_bound.nil?
+      bound = maybe_bound.as(Hash(String, Type))
+      if named = signature.named_args
+        unbound = [] of String
+        named_i = 0
+        while named_i < named.size
+          named_arg = named[named_i]
+          index = named_index(definition, named_arg.name)
+          if index >= 0
+            if restriction = definition.args[index].restriction
+              unbound.clear
+              match_free.each { |name| unbound << name unless bound.has_key?(name) }
+              return MatchAttempt.none unless FreeBindings.bind(restriction, named_arg.type, unbound, bound)
+            end
+          end
+          named_i += 1
+        end
+      end
+    end
+
+    mandatory = [] of Bool
+    j = 0
+    while j < count
+      mandatory << false
+      j += 1
+    end
+
+    # The prefix parameters are filled in order; one that no argument reaches must
+    # have a default.
+    matched = [] of Type
+    declared = [] of Type
+    exact = true
+    i = 0
+    while i < given && i < prefix
+      arg = definition.args[i]
+      arg_type = signature.arg_types[i]
+      written = arg.restriction
+      if written && FreeBindings.mentions?(written.as(ASTNode), match_free)
+        answer = ArgRestriction.restrict_argument(ts, defining, written.as(ASTNode), arg_type, owner, match_free, bound)
+        if answer.error
+          return MatchAttempt.failed(answer.error.to_s)
+        end
+        return MatchAttempt.none if answer.type.nil?
+        matched << answer.type.as(Type)
+        exact = false if answer.type.as(Type) != arg_type
+        mandatory[i] = true
+        declared << answer.type.as(Type)
+        i += 1
+        next
+      end
+      restriction = ArgRestriction.of_bound(ts, defining, arg, owner, bound)
+      if restriction.error
+        return MatchAttempt.failed(restriction.error.to_s)
+      end
+      allowed = restriction.type
+      if allowed.nil?
+        matched << arg_type
+      else
+        restricted = ts.restrict(arg_type, allowed.as(Type))
+        restricted = allowed.as(Type) if arg_type.is_a?(NoReturnType)
+        # Hosted GenericInstanceType#restrict compares each type argument against
+        # its written restriction (iyi/semantic/restrictions.cr:1185-1277).
+        # The literal itself retains its inferred element type.
+        if restricted.nil? && written.is_a?(Generic) && arg_type.is_a?(GenericInstanceType)
+          generic_match = ArgRestriction.restrict_argument(ts, defining, written.as(Generic), arg_type, owner, match_free, bound)
+          return MatchAttempt.failed(generic_match.error.to_s) if generic_match.error
+          restricted = generic_match.type
+        end
+        if restricted.nil?
+          nodes = signature.autocast_nodes
+          if nodes && i < nodes.size && NumericAutocast.accepts?(nodes[i], arg_type, allowed.as(Type))
+            restricted = allowed.as(Type)
+          end
+        end
+        return MatchAttempt.none if restricted.nil?
+        matched << restricted.as(Type)
+        exact = false if restricted.as(Type) != arg_type
+      end
+      mandatory[i] = true
+      if allowed.nil?
+        declared << ts.program.types["Object"].as(Type)
+      else
+        declared << allowed.as(Type)
+      end
+      i += 1
+    end
+
+    if splat && splat_restriction && splat_restriction.is_a?(Splat)
+      splat_tuple = ts.tuple_of(splat_types)
+      found = ArgRestriction.lookup_free(ts, defining, splat_restriction.as(Splat).exp, owner, bound)
+      if found.is_a?(LookupError)
+        return MatchAttempt.failed(found.as(LookupError).message)
+      end
+      allowed = found.as(Type)
+      restricted = ts.restrict(splat_tuple, allowed)
+      return MatchAttempt.none if restricted.nil?
+      exact = false if restricted.as(Type) != splat_tuple
+    end
+    if splat
+      element_restriction = splat_restriction && !splat_restriction.is_a?(Splat)
+      while i < given
+        element = signature.arg_types[i]
+        if element_restriction
+          allowed_found = ArgRestriction.of_bound(ts, defining, definition.args[splat.as(Int32)], owner, bound)
+          if allowed_found.error
+            return MatchAttempt.failed(allowed_found.error.to_s)
+          end
+          allowed = allowed_found.type
+          if allowed
+            restricted = ts.restrict(element, allowed.as(Type))
+            if restricted.nil? && splat_restriction.is_a?(Generic) && element.is_a?(GenericInstanceType)
+              generic_match = ArgRestriction.restrict_argument(ts, defining, splat_restriction.as(Generic), element, owner, match_free, bound)
+              return MatchAttempt.failed(generic_match.error.to_s) if generic_match.error
+              restricted = generic_match.type
+            end
+            return MatchAttempt.none if restricted.nil?
+            element = restricted.as(Type)
+          end
+        end
+        matched << element
+        i += 1
+      end
+    end
+
+    named_matched = [] of NamedArgumentType
+    named_list = signature.named_args
+    if named_list
+      named_i = 0
+      while named_i < named_list.size
+        named_arg = named_list[named_i]
+        index = named_index(definition, named_arg.name)
+        if index < 0
+          return MatchAttempt.none if !dsplat
+          named_matched << NamedArgumentType.new(named_arg.name, named_arg.type)
+          named_i += 1
+          next
+        end
+        return MatchAttempt.none if splat && index == splat.as(Int32)
+        return MatchAttempt.none if mandatory[index]
+        mandatory[index] = true
+        restriction = ArgRestriction.of_bound(ts, defining, definition.args[index], owner, bound)
+        if restriction.error
+          return MatchAttempt.failed(restriction.error.to_s)
+        end
+        allowed = restriction.type
+        value = named_arg.type
+        if !allowed.nil?
+          restricted = ts.restrict(value, allowed.as(Type))
+          restricted = allowed.as(Type) if named_arg.type.is_a?(NoReturnType)
+          written_named = definition.args[index].restriction
+          if restricted.nil? && written_named.is_a?(Generic) && value.is_a?(GenericInstanceType)
+            generic_match = ArgRestriction.restrict_argument(ts, defining, written_named.as(Generic), value, owner, match_free, bound)
+            return MatchAttempt.failed(generic_match.error.to_s) if generic_match.error
+            restricted = generic_match.type
+          end
+          if restricted.nil?
+            nodes = signature.named_autocast_nodes
+            if nodes && named_i < nodes.size && NumericAutocast.accepts?(nodes[named_i], value, allowed.as(Type))
+              restricted = allowed.as(Type)
+            end
+          end
+          return MatchAttempt.none if restricted.nil?
+          value = restricted.as(Type)
+        end
+        exact = false if value != named_arg.type
+        named_matched << NamedArgumentType.new(named_arg.name, value)
+        named_i += 1
+      end
+    end
+
+    k = 0
+    while k < count
+      is_splat = splat && k == splat.as(Int32)
+      if !is_splat && !mandatory[k] && definition.args[k].default_value.nil?
+        return MatchAttempt.none
+      end
+      k += 1
+    end
+
+    # A free variable the arguments never bound is the hosted "undefined constant",
+    # and only after every written restriction matched. A generic that does not
+    # match the argument is no match, not that error (restrict returns nil).
+    if free_names.size > 0
+      j = 0
+      while j < free_names.size
+        if bound[free_names[j]]?.nil?
+          deferred = false
+          if signature.block
+            if block_arg = definition.block_arg
+              if restriction = block_arg.restriction
+                if restriction.is_a?(ProcNotation)
+                  if output = restriction.as(ProcNotation).output
+                    deferred = FreeBindings.mentions?(output, [free_names[j]])
+                  end
+                end
+              end
+            end
+          end
+          return MatchAttempt.failed("undefined constant #{free_names[j]}") unless deferred
+        end
+        j += 1
+      end
+    end
+
+    # A successful numeric autocast is a covering match: the hosted second pass
+    # treats a partial number match as compatible, which sets cover_all.
+    exact = true if signature.autocast_nodes
+    MatchAttempt.matched(Match.new(definition, matched, owner, defining, exact, named_matched, declared, bound))
+  end
+
+  # The restriction of a splat parameter, nil when it has none.
+  def self.splat_restriction_of(definition : Def, splat : Int32?) : ASTNode?
+    return nil if splat.nil?
+    definition.args[splat.as(Int32)].restriction
+  end
+
+  # The position of the def parameter a named argument refers to, or -1.
+  def self.named_index(definition : Def, name : String) : Int32
+    i = 0
+    while i < definition.args.size
+      return i if definition.args[i].name == name
+      i += 1
+    end
+    -1
+  end
+end
+
+# The hosted numeric autocast rules (semantic/ast.cr:19-35, restrictions.cr:1831-1844,
+# types.cr:1684-1687). A number literal matches a parameter when its value fits.
+# A typed integer matches when its whole range fits. Symbol autocast is not this
+# increment.
+pub class NumericAutocast
+  def self.any?(nodes : Array(ASTNode), types : Array(Type)) : Bool
+    i = 0
+    while i < nodes.size && i < types.size
+      return true if NumericAutocast.supports?(nodes[i], types[i])
+      i += 1
+    end
+    false
+  end
+
+  # A number literal always may. Other typed numeric expressions may when their
+  # integer range is supported, or when their type is Float32.
+  def self.supports?(node : ASTNode, type : Type) : Bool
+    return true if node.is_a?(NumberLiteral)
+    bits = NumericAutocast.integer_bits(type)
+    return bits > 0 && bits <= 64 if bits > 0
+    type.full_name == "Float32"
+  end
+
+  # True when *node* typed as *type* may be passed where *target* is required.
+  # The two lines the mutations patch are the literal value check and the
+  # typed-integer range check.
+  def self.accepts?(node : ASTNode, type : Type, target : Type) : Bool
+    if node.is_a?(NumberLiteral)
+      return NumericAutocast.value_fits?(node.as(NumberLiteral), target)
+    end
+    if NumericAutocast.supports?(node, type)
+      return NumericAutocast.range_subset?(type, target)
+    end
+    false
+  end
+
+  def self.integer_bits(type : Type) : Int32
+    case type.full_name
+    when "Int8", "UInt8"
+      8
+    when "Int16", "UInt16"
+      16
+    when "Int32", "UInt32"
+      32
+    when "Int64", "UInt64"
+      64
+    when "Int128", "UInt128"
+      128
+    else
+      0
+    end
+  end
+
+  def self.signed?(type : Type) : Bool
+    name = type.full_name
+    name.starts_with?("Int") && !name.starts_with?("UInt")
+  end
+
+  # IntegerType#subset_of? for a typed number: every value of *from* fits in *target*.
+  # A signed type is never a subset of an unsigned type. An unsigned type fits in a
+  # signed type only when the signed type is strictly wider.
+  def self.range_subset?(from : Type, target : Type) : Bool
+    if from.full_name == "Float32" && target.full_name == "Float64"
+      return true
+    end
+    fb = NumericAutocast.integer_bits(from)
+    tb = NumericAutocast.integer_bits(target)
+    return false if fb == 0 || tb == 0
+    from_signed = NumericAutocast.signed?(from)
+    to_signed = NumericAutocast.signed?(target)
+    return false if from_signed && !to_signed
+    if !from_signed && to_signed
+      return fb < tb
+    end
+    fb <= tb
+  end
+
+  # NumberLiteral#representable_in? for an integer or float parameter. A float
+  # literal does not match an integer parameter. An integer literal matches a
+  # float parameter. An integer literal matches an integer parameter when the
+  # written value is inside that parameter's range.
+  def self.value_fits?(literal : NumberLiteral, target : Type) : Bool
+    kind = literal.kind.to_s
+    float_literal = kind == "f32" || kind == "f64"
+    tname = target.full_name
+    if tname == "Float32" || tname == "Float64"
+      return true
+    end
+    return false if float_literal
+    return false if NumericAutocast.integer_bits(target) == 0
+    value = NumericAutocast.parse_i64(literal.value)
+    return false if value.nil?
+    return false if value < NumericAutocast.range_min(tname)
+    if tname == "UInt64" || tname == "UInt128"
+      return value >= 0_i64
+    end
+    if tname == "Int128"
+      return true
+    end
+    value <= NumericAutocast.range_max(tname)
+  end
+
+  def self.range_min(name : String) : Int64
+    case name
+    when "Int8"
+      -128_i64
+    when "Int16"
+      -32768_i64
+    when "Int32"
+      -2147483648_i64
+    when "Int64"
+      -9223372036854775808_i64
+    else
+      0_i64
+    end
+  end
+
+  def self.range_max(name : String) : Int64
+    case name
+    when "Int8"
+      127_i64
+    when "UInt8"
+      255_i64
+    when "Int16"
+      32767_i64
+    when "UInt16"
+      65535_i64
+    when "Int32"
+      2147483647_i64
+    when "UInt32"
+      4294967295_i64
+    else
+      9223372036854775807_i64
+    end
+  end
+
+  # The written integer, or nil when it does not fit in Int64. Underscores are
+  # skipped. Enough for the literals the call fixtures write.
+  def self.parse_i64(text : String) : Int64?
+    negative = false
+    i = 0
+    if text.bytesize > 0 && text.byte_at(0) == 45_u8
+      negative = true
+      i = 1
+    end
+    n = 0_i64
+    saw = false
+    while i < text.bytesize
+      b = text.byte_at(i)
+      i += 1
+      next if b == 95_u8
+      digit = NumericAutocast.digit(b)
+      return nil if digit < 0_i64
+      saw = true
+      return nil if n > 922337203685477580_i64
+      n = n * 10_i64 + digit
+    end
+    return nil if !saw
+    negative ? -n : n
+  end
+
+  def self.digit(b : UInt8) : Int64
+    return -1_i64 if b < 48_u8 || b > 57_u8
+    n = 0_i64
+    v = b
+    while v > 48_u8
+      n += 1_i64
+      v -= 1_u8
+    end
+    n
+  end
+
+  def self.ambiguity(value : String, names : Array(String)) : String
+    "ambiguous call, implicit cast of #{value} matches all of #{names.join(", ")}"
+  end
+end

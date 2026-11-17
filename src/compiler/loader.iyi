@@ -1,0 +1,519 @@
+# Module loader and dependency resolver in pure iyi.
+#
+# Resolves import directives across files, discovering dependencies
+# recursively, checking for import cycles, and producing the topological
+# resolution order required for compilation.
+#
+# Ports the behavior of Crystal's src/compiler/iyi/loader.cr and iyi_path.cr.
+
+@[Unsafe("reads source files through the C library's file calls declared in its lib, which the compiler does not check")]
+module compiler/loader
+
+import compiler/syntax/parser::{Parser}
+import compiler/syntax/ast::{ASTNode, Expressions, ImportDecl, Require, Call, StringLiteral, MacroIf, MacroFor, MacroLiteral, ClassDef, ModuleDef, TraitDef, ImplDef, VisibilityModifier}
+import compiler/macros/engine::{MacroEngine}
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+# Resolves module import paths against search paths and relative directories.
+pub class IyiPath
+  {% if flag?(:win32) %}
+    PATH_DELIMITER = ';'
+    CONFIG_PATH = {{ env("IYI_CONFIG_PATH") || "$ORIGIN/../share/iyi/src;$ORIGIN/../src" }}
+  {% else %}
+    PATH_DELIMITER = ':'
+    CONFIG_PATH = {{ env("IYI_CONFIG_PATH") || "$ORIGIN/../share/iyi/src:$ORIGIN/../src" }}
+  {% end %}
+
+  property entries : Array(String)
+
+  def initialize(entries : Array(String)? = nil, origin : String? = nil)
+    @entries = [] of String
+    if supplied = entries
+      @entries = supplied
+    elsif env_path = Program.env("IYI_PATH") || Program.env("CRYSTAL_PATH")
+      env_path.split(PATH_DELIMITER).each do |part|
+        @entries << part unless part.empty?
+      end
+    elsif origin
+      @entries = CONFIG_PATH.split(PATH_DELIMITER)
+      @entries.unshift("lib") unless @entries.includes?("lib")
+    else
+      @entries << "lib"
+    end
+
+    if base = origin
+      expanded = [] of String
+      @entries.each do |part|
+        {% if flag?(:win32) %}
+          part = part.gsub('\\', '/') if part.includes?('\\')
+        {% end %}
+        if part == "$ORIGIN"
+          expanded << Loader.clean_path(base)
+        elsif part.starts_with?("$ORIGIN/")
+          expanded << Loader.clean_path(Loader.join(base, part[8, part.size - 8]))
+        else
+          cleaned = Loader.clean_path(part)
+          expanded << cleaned unless cleaned.empty?
+        end
+      end
+      @entries = expanded
+    elsif entries.nil?
+      cleaned = [] of String
+      @entries.each do |part|
+        path = Loader.clean_path(part)
+        cleaned << path unless path.empty?
+      end
+      @entries = cleaned
+    end
+  end
+
+  # Determines the project root from an entry file header if it names one:
+  # `module calc/parser` in `/p/calc/parser.iyi` -> `/p`.
+  def self.header_root_of(path : String, text : String) : String?
+    header : String? = nil
+    lines = text.split('\n')
+    lines.each do |line|
+      trimmed = line.strip
+      next if trimmed.empty? || trimmed.starts_with?('#')
+      header = trimmed
+      break
+    end
+    if h = header
+      if h.starts_with?("module ")
+        mod_path = h[7, h.size - 7].strip
+        unless mod_path.empty? || mod_path.includes?(" ")
+          suffix = "/#{mod_path}.iyi"
+          if path.ends_with?(suffix)
+            root = path[0, path.size - suffix.size]
+            return root.empty? ? "/" : root
+          end
+        end
+      end
+    end
+    nil
+  end
+
+  # Finds a module file on disk. Searches relative directory, header root,
+  # and configured IYI_PATH search paths, preferring .iyi over .cr.
+  def find(mod_path : String, relative_to : String? = nil, header_root : String? = nil) : String?
+    candidates = [] of String
+    if mod_path.starts_with?(".")
+      if rel = relative_to
+        candidates << Loader.join(rel, "#{mod_path}.iyi")
+        candidates << Loader.join(rel, "#{mod_path}.cr")
+      else
+        candidates << "#{mod_path}.iyi"
+        candidates << "#{mod_path}.cr"
+      end
+    else
+      if rel = relative_to
+        candidates << Loader.join(rel, "#{mod_path}.iyi")
+        candidates << Loader.join(rel, "#{mod_path}.cr")
+      end
+      if hr = header_root
+        candidates << Loader.join(hr, "#{mod_path}.iyi")
+        candidates << Loader.join(hr, "#{mod_path}.cr")
+      end
+      @entries.each do |entry|
+        candidates << Loader.join(entry, "#{mod_path}.iyi")
+        candidates << Loader.join(entry, "#{mod_path}.cr")
+      end
+    end
+
+    candidates.each do |candidate|
+      cleaned = Loader.clean_path(candidate)
+      return cleaned if File.exists?(cleaned)
+    end
+    nil
+  end
+end
+
+# Metadata and parsed AST for a single loaded module.
+pub class ModuleInfo
+  property name : String
+  property filename : String
+  property source : String
+  property ast : ASTNode
+  property imports : Array(String)
+  property user_imports : Array(String)
+
+  def initialize(
+    @name : String,
+    @filename : String,
+    @source : String,
+    @ast : ASTNode,
+    @imports : Array(String) = [] of String,
+    @user_imports : Array(String) = [] of String,
+  )
+  end
+end
+
+# Traverses the import graph from a root entry file, detects cycles,
+# and produces the ordered list of modules in topological dependency order.
+pub class Loader
+  property iyi_path : IyiPath
+  property modules : Hash(String, ModuleInfo)
+  property order : Array(String)
+  property import_stack : Array(String)
+  property header_root : String?
+  property project_root : String?
+  property load_prelude : Bool
+  # Expands a file's top-level `{% if %}` and `{% for %}` sites, so that a `require` is loaded only from the
+  # branch the target's flags pick. One engine for the whole resolution: each site still gets a fresh interpreter.
+  property macro_engine : MacroEngine
+
+  def initialize(@iyi_path : IyiPath = IyiPath.new)
+    @modules = Hash(String, ModuleInfo).new
+    @order = [] of String
+    @import_stack = [] of String
+    @header_root = nil
+    @project_root = nil
+    @load_prelude = false
+    @macro_engine = MacroEngine.new
+  end
+
+  # Resolves all dependencies starting from root_file.
+  # Returns loaded modules in topological order (dependencies before dependents).
+  def resolve(root_file : String) : Array(ModuleInfo)
+    @modules = Hash(String, ModuleInfo).new
+    @order = [] of String
+    @import_stack = [] of String
+    @header_root = nil
+
+    cleaned_root = Loader.clean_path(root_file)
+    @project_root = Loader.dirname(cleaned_root)
+    # The prelude a real build loads before the program, as a dependency, so the root's names resolve as they do there.
+    # Off unless the caller asks: whole-program builds that do not need it stay as they were.
+    if @load_prelude
+      found_prelude = @iyi_path.find("iyi/prelude", Loader.dirname(cleaned_root), nil)
+      unless prelude_fn = found_prelude
+        STDERR.puts "Error: can't find the prelude 'iyi/prelude.iyi' on IYI_PATH"
+        LibC.exit(1)
+      end
+      resolve_file(Loader.clean_path(prelude_fn), nil)
+    end
+    resolve_file(cleaned_root, nil)
+
+    result = [] of ModuleInfo
+    @order.each do |fn|
+      if info = @modules[fn]?
+        result << info
+      end
+    end
+    result
+  end
+
+  def resolve_single(root_file : String) : Array(ModuleInfo)
+    cleaned_root = Loader.clean_path(root_file)
+    source = File.read(cleaned_root)
+    parser = Parser.new(source, cleaned_root)
+    ast = parser.parse
+    mod_name = module_display_name(cleaned_root)
+    [ModuleInfo.new(mod_name, cleaned_root, source, ast, [] of String)]
+  end
+
+  # Collects all top-level ImportDecl nodes from an AST.
+  def self.collect_imports(node : ASTNode, into : Array(ImportDecl)) : Nil
+    if node.is_a?(ImportDecl)
+      into << node.as(ImportDecl)
+    elsif node.is_a?(Expressions)
+      node.as(Expressions).expressions.each do |e|
+        collect_imports(e, into)
+      end
+    end
+  end
+
+  # Collects all import and require dependency paths from an AST.
+  #
+  # A top-level `{% if %}` or `{% for %}` is expanded first, as the hosted compiler expands it before it reads
+  # what is inside (top_level_visitor.cr visit(MacroIf) and visit(MacroFor), through expand_inline_macro): a
+  # `require` in a branch the target's flags do not pick is never loaded, and one in an `{% else %}` is. Taking
+  # every `{% if %}`'s first branch instead loaded `iyi/chaos` and `iyi/chaos_points` into every program
+  # (src/iyi/prelude.iyi, under `flag?(:iyi_chaos)`), and with them a second `Atomic#get` that no build without
+  # `-Diyi_chaos` has.
+  def self.collect_import_paths(node : ASTNode, into : Array(String), engine : MacroEngine, filename : String, user_imports : Array(String)) : Nil
+    if node.is_a?(ImportDecl)
+      path = node.as(ImportDecl).path.join("/")
+      into << path
+      user_imports << path
+    elsif node.is_a?(Require)
+      into << node.as(Require).string
+    elsif node.is_a?(Call)
+      call_node = node.as(Call)
+      if call_node.name == "require" && call_node.args.size == 1
+        if call_node.args[0].is_a?(StringLiteral)
+          into << call_node.args[0].as(StringLiteral).value
+        end
+      end
+    elsif node.is_a?(MacroIf) || node.is_a?(MacroFor)
+      report = engine.site_report(node)
+      if report.failure.nil? && !report.skipped
+        text = report.output
+        if text.bytesize > 0
+          collect_import_paths(Parser.new(text, filename).parse, into, engine, filename, user_imports)
+        end
+      elsif node.is_a?(MacroIf)
+        # The engine refused the site (a macro method it has not ported): what the loader did before, the
+        # first branch's text, so a file loaded until now is not dropped.
+        collect_import_paths(node.as(MacroIf).then, into, engine, filename, user_imports)
+      end
+    elsif node.is_a?(MacroLiteral)
+      ml = node.as(MacroLiteral)
+      lines = ml.value.split('\n')
+      lines.each do |line|
+        trimmed = line.strip
+        if trimmed.starts_with?("require \"") && trimmed.ends_with?("\"") && trimmed.size > 10
+          req_path = trimmed[9, trimmed.size - 10]
+          into << req_path
+        end
+      end
+    elsif node.is_a?(Expressions)
+      node.as(Expressions).expressions.each do |e|
+        collect_import_paths(e, into, engine, filename, user_imports)
+      end
+    elsif node.is_a?(ClassDef)
+      collect_import_paths(node.as(ClassDef).body, into, engine, filename, user_imports)
+    elsif node.is_a?(ModuleDef)
+      collect_import_paths(node.as(ModuleDef).body, into, engine, filename, user_imports)
+    elsif node.is_a?(TraitDef)
+      collect_import_paths(node.as(TraitDef).body, into, engine, filename, user_imports)
+    elsif node.is_a?(ImplDef)
+      collect_import_paths(node.as(ImplDef).body, into, engine, filename, user_imports)
+    elsif node.is_a?(VisibilityModifier)
+      collect_import_paths(node.as(VisibilityModifier).exp, into, engine, filename, user_imports)
+    end
+  end
+
+  # Computes a display name for diagnostics by stripping project root and extension.
+  def module_display_name(filename : String) : String
+    clean = Loader.clean_path(filename)
+    if pr = @project_root
+      prefix = pr + "/"
+      if clean.starts_with?(prefix)
+        rel = clean[prefix.size, clean.size - prefix.size]
+        return Loader.strip_extension(rel)
+      end
+    end
+    base = Loader.basename(clean)
+    Loader.strip_extension(base)
+  end
+
+  private def resolve_file(filename : String, importing_file : String?) : Nil
+    clean_fn = Loader.clean_path(filename)
+    return if @modules.has_key?(clean_fn)
+
+    if @import_stack.includes?(clean_fn)
+      cycle_start = @import_stack.index(clean_fn) || 0
+      chain = [] of String
+      i = cycle_start
+      while i < @import_stack.size
+        chain << module_display_name(@import_stack[i])
+        i = i + 1
+      end
+      chain << module_display_name(clean_fn)
+
+      STDERR.puts "Error: import cycle\n\n    #{chain.join(" -> ")}\n\n`import` forms a DAG (R-1). A cycle has no initialisation order — a module initialises after every module it imports (SPEC.md III.5 rule 1), and here each would have to go after the other — and it is what makes at most one module able to define any given impl (SPEC.md IV.4). Move what the modules in the cycle share into a module they both import."
+      LibC.exit(1)
+    end
+
+    unless File.exists?(clean_fn)
+      STDERR.puts "Error: input file does not exist: #{clean_fn}"
+      LibC.exit(1)
+    end
+
+    source = File.read(clean_fn)
+    if @header_root.nil?
+      @header_root = IyiPath.header_root_of(clean_fn, source)
+    end
+
+    @import_stack << clean_fn
+
+    parser = Parser.new(source, clean_fn)
+    ast = parser.parse
+
+    import_paths = [] of String
+    user_import_paths = [] of String
+    Loader.collect_import_paths(ast, import_paths, @macro_engine, clean_fn, user_import_paths)
+
+    imported_filenames = [] of String
+    user_imported_filenames = [] of String
+    relative_dir = Loader.dirname(clean_fn)
+
+    import_paths.each do |mod_path|
+      resolved = @iyi_path.find(mod_path, relative_dir, @header_root)
+      unless res_fn = resolved
+        STDERR.puts "Error: can't find module '#{mod_path}'. A module's path is its file's path, so this one is `#{mod_path}.iyi`, resolved from the directory of the file being built and then from `IYI_PATH`"
+        LibC.exit(1)
+      end
+      clean_res = Loader.clean_path(res_fn)
+      user_imported_filenames << clean_res if user_import_paths.includes?(mod_path)
+      imported_filenames << clean_res
+      resolve_file(clean_res, clean_fn)
+    end
+
+    @import_stack.pop
+    mod_name = module_display_name(clean_fn)
+    info = ModuleInfo.new(mod_name, clean_fn, source, ast, imported_filenames, user_imported_filenames)
+    @modules[clean_fn] = info
+    @order << clean_fn
+  end
+
+  # --- Path utility methods ---
+
+  def self.last_index_of(s : String, c : Char) : Int32?
+    i = s.size - 1
+    while i >= 0
+      return i if s[i] == c
+      i = i - 1
+    end
+    nil
+  end
+
+  def self.dirname(path : String) : String
+    idx = last_index_of(path, '/')
+    if i = idx
+      if i == 0
+        "/"
+      else
+        path[0, i]
+      end
+    else
+      "."
+    end
+  end
+
+  def self.basename(path : String) : String
+    idx = last_index_of(path, '/')
+    if i = idx
+      path[i + 1, path.size - i - 1]
+    else
+      path
+    end
+  end
+
+  def self.join(a : String, b : String) : String
+    if a.empty? || a == "."
+      b
+    elsif a.ends_with?('/')
+      a + b
+    else
+      a + "/" + b
+    end
+  end
+
+  def self.strip_extension(name : String) : String
+    if name.ends_with?(".iyi")
+      name[0, name.size - 4]
+    elsif name.ends_with?(".cr")
+      name[0, name.size - 3]
+    else
+      name
+    end
+  end
+
+  def self.clean_path(path : String) : String
+    s = path
+    {% if flag?(:win32) %}
+      s = s.gsub('\\', '/') if s.includes?('\\')
+    {% end %}
+    while s.starts_with?("./")
+      s = s[2, s.size - 2]
+    end
+    s
+  end
+
+  # The order the modules' own top-level code runs in: the oracle's debug
+  # order (SPEC.md III.5 rule 2 leaves independent modules unordered; the
+  # oracle's semantic.cr reorder_iyi_module_initialisers). Kahn's algorithm
+  # over the import edges: among the modules whose imports are all placed,
+  # the one whose path hashes lowest goes next, a tie going to the lower path.
+  # The entry file, which resolve returns last, is the program's own code and
+  # stays last. IYI_INIT_SEED salts the hash, as it does in the oracle.
+  def self.initialiser_order(modules : Array(ModuleInfo)) : Array(ModuleInfo)
+    ordered = [] of ModuleInfo
+    return ordered if modules.empty?
+    entry = modules[modules.size - 1]
+    seed = Loader.init_seed
+    by_file = {} of String => ModuleInfo
+    rank = {} of String => UInt64
+    pending = [] of String
+    i = 0
+    while i < modules.size - 1
+      info = modules[i]
+      by_file[info.filename] = info
+      rank[info.filename] = Loader.init_rank(seed, info.name)
+      pending << info.filename
+      i = i + 1
+    end
+
+    placed = {} of String => Bool
+    until pending.empty?
+      chosen = -1
+      j = 0
+      while j < pending.size
+        candidate = by_file[pending[j]]
+        if Loader.imports_placed?(candidate, by_file, placed)
+          if chosen < 0 || Loader.rank_before?(rank[candidate.filename], candidate.name, rank[pending[chosen]], by_file[pending[chosen]].name)
+            chosen = j
+          end
+        end
+        j = j + 1
+      end
+      # Cannot be empty: `import` is refused a cycle, so some module's imports
+      # are all placed.
+      chosen = 0 if chosen < 0
+      fn = pending[chosen]
+      pending.delete(fn)
+      placed[fn] = true
+      ordered << by_file[fn]
+    end
+    ordered << entry
+    ordered
+  end
+
+  def self.imports_placed?(info : ModuleInfo, by_file : Hash(String, ModuleInfo), placed : Hash(String, Bool)) : Bool
+    info.imports.all? { |dep| placed.has_key?(dep) || !by_file.has_key?(dep) }
+  end
+
+  def self.rank_before?(rank_a : UInt64, name_a : String, rank_b : UInt64, name_b : String) : Bool
+    return rank_a < rank_b if rank_a != rank_b
+    name_a < name_b
+  end
+
+  # FNV-1a over the seed's eight bytes and then the path's, finished with
+  # splitmix64's mixer, as the oracle's iyi_init_rank does.
+  def self.init_rank(seed : UInt64, path : String) : UInt64
+    hash = 0xcbf29ce484222325_u64
+    index = 0
+    while index < 8
+      hash = (hash ^ ((seed >> (8 * index)) & 0xff_u64)) &* 0x100000001b3_u64
+      index = index + 1
+    end
+    i = 0
+    while i < path.size
+      hash = (hash ^ path.to_unsafe[i].to_u64) &* 0x100000001b3_u64
+      i = i + 1
+    end
+    hash = (hash ^ (hash >> 30)) &* 0xbf58476d1ce4e5b9_u64
+    hash = (hash ^ (hash >> 27)) &* 0x94d049bb133111eb_u64
+    hash ^ (hash >> 31)
+  end
+
+  # IYI_INIT_SEED as a decimal number; anything else, or no value, is 0.
+  def self.init_seed : UInt64
+    seed = 0_u64
+    if text = Program.env("IYI_INIT_SEED")
+      i = 0
+      while i < text.size
+        c = text.to_unsafe[i]
+        return 0_u64 if c < 48_u8 || c > 57_u8
+        seed = seed &* 10_u64 &+ (c - 48_u8).to_u64
+        i = i + 1
+      end
+    end
+    seed
+  end
+end

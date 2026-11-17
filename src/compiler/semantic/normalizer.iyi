@@ -1,0 +1,783 @@
+module compiler/semantic/normalizer
+
+import compiler/syntax/ast::{ASTNode, Alias, And, Arg, ArrayLiteral, Assign, Block, BoolLiteral, Break, Call, CharLiteral, ClassVar, Def, Defer, DoubleSplat, ExceptionHandler, Expressions, Generic, Global, If, InstanceVar, IsA, Macro, MultiAssign, NamedArgument, Next, NilLiteral, Nop, Not, NumberLiteral, OpAssign, Or, Path, ProcLiteral, ProcNotation, Propagate, Recover, Return, Splat, StringInterpolation, StringLiteral, SymbolLiteral, TupleLiteral, Underscore, Union, Unless, Until, Var, While}
+import compiler/syntax/transformer::{Transformer}
+import compiler/syntax/visitor::{Visitor}
+import std/digest
+
+pub class NormalizerProgram
+  property iyi_prelude : Bool
+  # Target flags for macro expansion; nil uses the host. host_flag? stays host-bound.
+  property macro_flags : Array(String)?
+  @temp_vars : Hash(String, Int32)
+  @flags : Array(String)
+
+  def initialize(@iyi_prelude : Bool = true)
+    @temp_vars = Hash(String, Int32).new
+    @flags = [] of String
+    @macro_flags = nil
+  end
+
+  # Flags the program was built with, read the way the hosted program's
+  # `has_flag?` reads them. The port starts with none; a driver sets the ones
+  # its fixtures need.
+  def set_flag(name : String) : Nil
+    @flags << name
+  end
+
+  def has_flag?(name : String) : Bool
+    @flags.any? { |flag| flag == name }
+  end
+
+  def reset_temp_vars : Nil
+    @temp_vars.clear
+  end
+
+  def new_temp_var_name(prefix : String = "__temp_") : String
+    id = @temp_vars[prefix]? || 0
+    id = id + 1
+    @temp_vars[prefix] = id
+    "#{prefix}#{id}"
+  end
+
+  def new_temp_var_name(node : ASTNode) : String
+    prefix = "__temp_"
+    if loc = node.location
+      fn = loc.filename
+      if !fn.empty?
+        prefix = "__temp_#{Std::Digest::MD5.hexdigest(fn)[0, 8]}_"
+      end
+    end
+    new_temp_var_name(prefix)
+  end
+
+  def new_temp_var(node : ASTNode? = nil) : Var
+    if n = node
+      Var.new(new_temp_var_name(n))
+    else
+      Var.new(new_temp_var_name("__temp_"))
+    end
+  end
+
+  def new_temp_var(prefix : String) : Var
+    Var.new(new_temp_var_name(prefix))
+  end
+
+  def normalize(node : ASTNode, inside_exp : Bool = false, current_def : Def? = nil) : ASTNode
+    normalizer = Normalizer.new(self)
+    normalizer.current_def = current_def
+    node.transform(normalizer)
+  end
+end
+
+pub alias Program = NormalizerProgram
+
+pub class Normalizer < Transformer
+  getter program : NormalizerProgram
+  property current_def : Def?
+  @dead_code : Bool = false
+  @propagating_group : Bool = false
+
+  def initialize(@program : NormalizerProgram = NormalizerProgram.new)
+  end
+
+  def normalize(node : ASTNode) : ASTNode
+    node.transform(self)
+  end
+
+  def before_transform(node : ASTNode) : Nil
+    @dead_code = false
+  end
+
+  def after_transform(node : ASTNode) : Nil
+    case node
+    when Return, Break, Next
+      @dead_code = true
+    when If, Unless, Expressions, Block, Assign
+      # Skip
+    else
+      @dead_code = false
+    end
+  end
+
+  def transform(node : Expressions) : ASTNode
+    exps = [] of ASTNode
+    i = 0
+    while i < node.expressions.size
+      exp = node.expressions[i]
+      if exp.is_a?(Defer)
+        exp.exp = exp.exp.transform(self)
+        exps << exp
+        i = i + 1
+        next
+      end
+
+      new_exp = exp.transform(self)
+      if new_exp.is_a?(Expressions)
+        exps.concat(new_exp.expressions)
+      else
+        exps << new_exp
+      end
+      if @dead_code
+        break
+      end
+      i = i + 1
+    end
+    exps = apply_defers(exps)
+    if exps.empty?
+      Nop.new
+    else
+      node.expressions = exps
+      node
+    end
+  end
+
+  # iyi: `defer` cleanup that runs however the scope is left (SPEC.md III.1.4).
+  # Every ordinary exit reaches the `ensure`, which disarms the cleanup proc,
+  # pops it, and runs the deferred expression inline. A panic reaches none of
+  # them, so the proc is also registered and the panic path runs what was never
+  # popped. One `live` flag serves every `defer` of a list, and a nested
+  # `defer` arms it again after its pop.
+  private def apply_defers(exps : Array(ASTNode), live : Var? = nil) : Array(ASTNode)
+    index = -1
+    i = 0
+    while i < exps.size
+      if exps[i].is_a?(Defer)
+        index = i
+        break
+      end
+      i = i + 1
+    end
+    return exps if index < 0
+
+    deferred = exps[index].as(Defer)
+    rest_exps = [] of ASTNode
+    j = index + 1
+    while j < exps.size
+      rest_exps << exps[j]
+      j = j + 1
+    end
+
+    head = [] of ASTNode
+    k = 0
+    while k < index
+      head << exps[k]
+      k = k + 1
+    end
+
+    if @program.iyi_prelude
+      # An earlier `defer` of this list made the flag, and its proc is still
+      # registered when this one is popped.
+      outer = live
+      flag = live || Var.new(@program.new_temp_var_name).at(deferred)
+      rest = apply_defers(rest_exps, flag)
+      armed = If.new(flag.clone, deferred.exp.clone).at(deferred)
+      cleanup_body = Expressions.new([armed, NilLiteral.new.at(deferred)] of ASTNode).at(deferred)
+      cleanup = Def.new("->", [] of Arg, cleanup_body)
+      cleanup.at(deferred)
+      cleanup.iyi_defer = true
+      proc_literal = ProcLiteral.new(cleanup).at(deferred)
+      push = Call.new(nil, "__iyi_defer_push", [proc_literal] of ASTNode, nil, nil, nil, false, nil, true).at(deferred)
+      pop = Call.new(nil, "__iyi_defer_pop_run", [] of ASTNode, nil, nil, nil, false, nil, true).at(deferred)
+      disarm = Assign.new(flag.clone, BoolLiteral.new(false).at(deferred)).at(deferred)
+      ordinary_exit = [disarm, pop] of ASTNode
+      if outer
+        ordinary_exit << Assign.new(flag.clone, BoolLiteral.new(true).at(deferred)).at(deferred)
+      end
+      ordinary_exit << deferred.exp
+      head << Assign.new(flag.clone, BoolLiteral.new(true).at(deferred)).at(deferred) unless outer
+      head << push
+      head << defer_handler(Expressions.from(rest), Expressions.new(ordinary_exit).at(deferred), deferred)
+    else
+      rest = apply_defers(rest_exps)
+      head << defer_handler(Expressions.from(rest), deferred.exp, deferred)
+    end
+    head
+  end
+
+  def transform(node : Defer) : ASTNode
+    defer_handler(Nop.new, node.exp.transform(self), node)
+  end
+
+  # The handler a `defer` becomes says so (hosted normalizer.cr 186, 191, 205). iyi refuses a written
+  # `ensure`, and the typing tells the two apart by this mark.
+  private def defer_handler(body : ASTNode, cleanup : ASTNode, origin : ASTNode) : ExceptionHandler
+    handler = ExceptionHandler.new(body, nil, nil, cleanup)
+    handler.at(origin)
+    handler.iyi_defer = true
+    handler
+  end
+
+  private def expand_iyi_group(node : Call, propagated : Bool) : ASTNode?
+    block = node.block
+    return nil unless block
+    return nil if block.args.empty?
+    group_param = block.args[0]
+
+    body = block.body
+    statements = if body.is_a?(Expressions)
+                   body.expressions.dup
+                 else
+                   [body] of ASTNode
+                 end
+    return nil if statements.empty?
+    return nil unless iyi_direct_spawn(statements[statements.size - 1], group_param.name)
+
+    # Each slot reads a handle of its own (`%h1`, `%h2`), never the author's
+    # variable: one name reused for two spawns read the last task twice.
+    handles = [] of ASTNode
+    slots = [] of Bool
+    rewritten = [] of ASTNode
+
+    si = 0
+    while si < statements.size
+      statement = statements[si]
+      spawn_call = iyi_direct_spawn(statement, group_param.name)
+      if spawn_call.is_a?(Call)
+        # `%h1 = g.spawn {..}`, and the author's `x = %h1` after it.
+        handle = Var.new(@program.new_temp_var_name).at(statement)
+        handles << handle
+        discarded = statement.is_a?(Assign) && statement.target.is_a?(Underscore)
+        slots << !discarded
+        rewritten << Assign.new(handle.clone, spawn_call).at(statement)
+        if statement.is_a?(Assign) && !discarded
+          rewritten << Assign.new(statement.target, handle.clone).at(statement)
+        end
+      else
+        # Any other use of the group parameter disqualifies: the tuple's
+        # arity has to be a fact of the text.
+        return nil if iyi_uses_var?(statement, group_param.name)
+        rewritten << statement
+      end
+      si = si + 1
+    end
+
+    group_var = Var.new(group_param.name).at(node)
+    rewritten << Call.new(group_var.clone, "join").at(node) unless propagated
+
+    values = [] of ASTNode
+    tuple_elements = [] of ASTNode
+    hi = 0
+    while hi < handles.size
+      handle = handles[hi]
+      value = Var.new(@program.new_temp_var_name).at(node)
+      values << value
+      tuple_elements << value.clone if slots[hi]
+      rewritten << Assign.new(value.clone, Call.new(handle.clone, "value").at(node)).at(node)
+      hi = hi + 1
+    end
+
+    extraction = TupleLiteral.new(tuple_elements).at(node).as(ASTNode)
+    vi = values.size - 1
+    while vi >= 0
+      val = values[vi]
+      is_error = IsA.new(val.clone, Path.new(["Error"] of String, true).at(node)).at(node)
+      extraction = If.new(is_error, val.clone, extraction).at(node)
+      vi = vi - 1
+    end
+
+    if handles.size > 1
+      # The error that leaves is the one that stopped the group: the runtime's
+      # first failure, which is asked first.
+      first = Var.new(@program.new_temp_var_name).at(node)
+      rewritten << Assign.new(first.clone, Call.new(group_var.clone, "first_failure").at(node)).at(node)
+      vi = handles.size - 1
+      while vi >= 0
+        handle = handles[vi]
+        value = values[vi]
+        is_error = IsA.new(value.clone, Path.new(["Error"] of String, true).at(node)).at(node)
+        fiber_id = Call.new(Call.new(handle.clone, "fiber").at(node), "object_id").at(node)
+        stopped_the_group = Call.new(fiber_id, "==", first.clone).at(node)
+        extraction = If.new(And.new(is_error, stopped_the_group).at(node), value.clone, extraction).at(node)
+        vi = vi - 1
+      end
+    end
+    rewritten << extraction
+
+    block.body = Expressions.new(rewritten).at(node)
+    node.iyi_group = false
+    node
+  end
+
+  # The statement's own spawn, when the statement is exactly a direct one:
+  # `g.spawn { }` bare, or assigned to a variable or an underscore. The two
+  # verbs those replaced count too.
+  private def iyi_direct_spawn(statement : ASTNode, group_name : String) : Call?
+    target = statement.is_a?(Assign) ? statement.value : statement
+    return nil unless target.is_a?(Call)
+    return nil unless ["spawn", "spawn_serial", "spawn_parallel"].includes?(target.name) && target.block
+    receiver = target.obj
+    return nil unless receiver.is_a?(Var) && receiver.name == group_name
+    spawn_block = target.block
+    return nil if spawn_block && iyi_uses_var?(spawn_block, group_name)
+    target
+  end
+
+  private def iyi_uses_var?(node : ASTNode, name : String) : Bool
+    scan = IyiVarScan.new(name)
+    node.accept(scan)
+    scan.found?
+  end
+
+  class IyiVarScan < Visitor
+    getter found : Bool
+
+    def initialize(@name : String)
+      @found = false
+    end
+
+    def found? : Bool
+      @found
+    end
+
+    def visit(node : Var) : Bool
+      if node.name == @name
+        @found = true
+      end
+      true
+    end
+  end
+
+  def transform(node : Call) : ASTNode
+    if node.iyi_group?
+      propagated = @propagating_group
+      @propagating_group = false
+      expanded = expand_iyi_group(node, propagated)
+      if exp = expanded
+        return exp.transform(self)
+      end
+    end
+
+    case node
+    when Call
+      if node.super? || node.previous_def?
+        named_args = node.named_args
+        if node.args.empty? && (named_args.nil? || named_args.empty?) && !node.has_parentheses?
+          if cdef = @current_def
+            s_idx = cdef.splat_index
+            ci = 0
+            while ci < cdef.args.size
+              arg = cdef.args[ci]
+              if s_idx && ci > s_idx
+                na = node.named_args || Array(NamedArgument).new
+                na << NamedArgument.new(arg.external_name, Var.new(arg.name))
+                node.named_args = na
+              elsif s_idx && ci == s_idx
+                unless arg.external_name.empty?
+                  node.args << Splat.new(Var.new(arg.name))
+                end
+              else
+                node.args << Var.new(arg.name)
+              end
+              ci = ci + 1
+            end
+
+            if ds = cdef.double_splat
+              node.args << DoubleSplat.new(Var.new(ds.name))
+            end
+          end
+          node.has_parentheses = true
+        end
+      end
+    end
+
+    if comparison?(node.name) && (obj = node.obj) && obj.is_a?(Call) && comparison?(obj.name)
+      middle = obj.args[0]
+      case middle
+      when NumberLiteral, Var, InstanceVar
+        transform_many(node.args)
+        left = obj
+        right = Call.new(middle.clone, node.name, node.args).at(middle)
+        and_node = And.new(left, right).at(left)
+        return and_node.transform(self)
+      else
+        temp_var = @program.new_temp_var
+        temp_assign = Assign.new(temp_var.clone, middle).at(middle)
+        left = Call.new(obj.obj, obj.name, [temp_assign] of ASTNode)
+        if o = obj.obj
+          left.at(o)
+        end
+        right = Call.new(temp_var.clone, node.name, node.args).at(node)
+        and_node = And.new(left, right).at(left)
+        return and_node.transform(self)
+      end
+    end
+
+    super
+  end
+
+  def comparison?(name : String) : Bool
+    case name
+    when "<=", "<", "!=", "==", "===", ">", ">="
+      true
+    else
+      false
+    end
+  end
+
+  def transform(node : Def) : ASTNode
+    @current_def = node
+    res = super.as(Def)
+    @current_def = nil
+
+    block_arg = res.block_arg
+    if !res.uses_block_arg? && block_arg
+      block_arg_restriction = block_arg.restriction
+      if block_arg_restriction.is_a?(ProcNotation) && block_arg_restriction.inputs.nil? && block_arg_restriction.output.nil?
+        res.block_arg = nil
+      elsif block_arg_restriction.nil?
+        res.block_arg = nil
+      end
+    end
+
+    res
+  end
+
+  def transform(node : Macro) : ASTNode
+    node
+  end
+
+  def transform(node : If) : ASTNode
+    node.cond = node.cond.transform(self)
+
+    node.then = node.then.transform(self)
+    then_dead_code = @dead_code
+
+    node.else = node.else.transform(self)
+    else_dead_code = @dead_code
+
+    @dead_code = then_dead_code && else_dead_code
+    node
+  end
+
+  def transform(node : Propagate) : ASTNode
+    group = node.exp
+    if group.is_a?(Call) && group.iyi_group?
+      @propagating_group = true
+    end
+    exp = node.exp.transform(self)
+    temp_var = @program.new_temp_var
+
+    assign = Assign.new(temp_var.clone, exp).at(node)
+    check = IsA.new(temp_var.clone, Path.new(["Error"] of String, true).at(node)).at(node)
+    check.error_construct = if exp.is_a?(Call) && exp.iyi_group?
+                              "end!"
+                            else
+                              "!"
+                            end
+    returned = Return.new(temp_var.clone).at(node)
+    returned.from_propagate = true
+    propagate = If.new(check, returned).at(node)
+
+    Expressions.new([assign, propagate, temp_var.clone] of ASTNode).at(node)
+  end
+
+  def transform(node : Recover) : ASTNode
+    exp = node.exp.transform(self)
+    temp_var = @program.new_temp_var
+
+    assign = Assign.new(temp_var.clone, exp).at(node)
+    check = IsA.new(temp_var.clone, Path.new(["Error"] of String, true).at(node)).at(node)
+    check.error_construct = node.panic? ? ".or_panic" : ".or"
+
+    recovery = if d = node.default
+                 d.transform(self)
+               else
+                 msg_call = Call.new(temp_var.clone, "message").at(node)
+                 Call.new(nil, "raise", [msg_call] of ASTNode, nil, nil, nil, false, nil, true).at(node)
+               end
+
+    value = If.new(check, recovery, temp_var.clone).at(node)
+
+    Expressions.new([assign, value] of ASTNode).at(node)
+  end
+
+  def transform(node : Unless) : ASTNode
+    If.new(node.cond, node.else, node.then).transform(self).at(node)
+  end
+
+  def transform(node : Until) : ASTNode
+    node = super.as(Until)
+    not_exp = Not.new(node.cond).at(node.cond)
+    While.new(not_exp, node.body).at(node)
+  end
+
+  def transform(node : Assign) : ASTNode
+    super
+
+    if @dead_code
+      node.value
+    else
+      node
+    end
+  end
+
+  def transform(node : OpAssign) : ASTNode
+    super
+
+    target = node.target
+    if target.is_a?(Call)
+      if target.name == "[]"
+        transform_op_assign_index(node, target)
+      else
+        transform_op_assign_call(node, target)
+      end
+    else
+      transform_op_assign_simple(node, target)
+    end
+  end
+
+  def transform_op_assign_call(node : OpAssign, target : Call) : ASTNode
+    obj = target.obj
+    return node if obj.nil?
+
+    tmp : ASTNode = obj
+    assign : Assign? = nil
+
+    case obj
+    when Var, InstanceVar, ClassVar
+      tmp = obj
+    else
+      if simple_literal?(obj)
+        tmp = obj
+      else
+        tv = @program.new_temp_var
+        tmp = tv
+        assign = Assign.new(tv, obj).at(node)
+      end
+    end
+
+    call = Call.new(tmp.clone, target.name).at(node)
+    call.name_location = node.name_location
+
+    case node.op
+    when "||"
+      right = Call.new(tmp.clone, "#{target.name}=", [node.value] of ASTNode).at(node)
+      right.name_location = node.name_location
+      call = Or.new(call, right).at(node)
+    when "&&"
+      right = Call.new(tmp.clone, "#{target.name}=", [node.value] of ASTNode).at(node)
+      right.name_location = node.name_location
+      call = And.new(call, right).at(node)
+    else
+      inner = Call.new(call, node.op, [node.value] of ASTNode).at(node)
+      inner.name_location = node.name_location
+      call = Call.new(tmp.clone, "#{target.name}=", [inner] of ASTNode).at(node)
+      call.name_location = node.name_location
+    end
+
+    if a = assign
+      Expressions.new([a, call] of ASTNode).at(node)
+    else
+      call
+    end
+  end
+
+  def transform_op_assign_index(node : OpAssign, target : Call) : ASTNode
+    obj = target.obj
+    return node if obj.nil?
+    tmp_args = target.args.map { @program.new_temp_var(node).as(ASTNode) }
+    tmp = @program.new_temp_var(node)
+
+    tmp_assigns = [] of ASTNode
+    i = 0
+    while i < tmp_args.size
+      arg = target.args[i]
+      var = tmp_args[i]
+      if simple_literal?(arg)
+        tmp_args[i] = arg
+      else
+        tmp_assigns << Assign.new(var.clone, arg).at(node)
+      end
+      i = i + 1
+    end
+
+    tmp_obj : ASTNode = obj
+    case obj
+    when Var, InstanceVar, ClassVar
+      tmp_obj = obj
+    else
+      if simple_literal?(obj)
+        tmp_obj = obj
+      else
+        tmp_assigns << Assign.new(tmp, obj).at(node)
+        tmp_obj = tmp
+      end
+    end
+
+    case node.op
+    when "||"
+      call = Call.new(tmp_obj.clone, "[]?", tmp_args).at(node)
+      call.name_location = node.name_location
+
+      args = [] of ASTNode
+      ai = 0
+      while ai < tmp_args.size
+        args << tmp_args[ai].clone
+        ai = ai + 1
+      end
+      args << node.value
+      right = Call.new(tmp_obj.clone, "[]=", args).at(node)
+      right.name_location = node.name_location
+
+      call = Or.new(call, right).at(node)
+    when "&&"
+      call = Call.new(tmp_obj.clone, "[]?", tmp_args).at(node)
+      call.name_location = node.name_location
+
+      args = [] of ASTNode
+      ai = 0
+      while ai < tmp_args.size
+        args << tmp_args[ai].clone
+        ai = ai + 1
+      end
+      args << node.value
+      right = Call.new(tmp_obj.clone, "[]=", args).at(node)
+      right.name_location = node.name_location
+
+      call = And.new(call, right).at(node)
+    else
+      call = Call.new(tmp_obj.clone, "[]", tmp_args).at(node)
+      call.name_location = node.name_location
+
+      inner = Call.new(call, node.op, [node.value] of ASTNode).at(node)
+      inner.name_location = node.name_location
+
+      args = [] of ASTNode
+      ai = 0
+      while ai < tmp_args.size
+        args << tmp_args[ai].clone
+        ai = ai + 1
+      end
+      args << inner
+      call = Call.new(tmp_obj.clone, "[]=", args).at(node)
+      call.name_location = node.name_location
+    end
+
+    if tmp_assigns.empty?
+      call
+    else
+      exps = [] of ASTNode
+      tmp_assigns.each { |ta| exps << ta }
+      exps << call
+      Expressions.new(exps).at(node)
+    end
+  end
+
+  def transform_op_assign_simple(node : OpAssign, target : ASTNode) : ASTNode
+    case node.op
+    when "&&"
+      assign = Assign.new(target, node.value).at(node)
+      And.new(target.clone, assign).at(node)
+    when "||"
+      assign = Assign.new(target, node.value).at(node)
+      Or.new(target.clone, assign).at(node)
+    else
+      call = Call.new(target, node.op, [node.value] of ASTNode).at(node)
+      call.name_location = node.name_location
+      Assign.new(target.clone, call).at(node)
+    end
+  end
+
+  def transform(node : StringInterpolation) : ASTNode
+    if node.expressions.size == 1
+      first = node.expressions[0]
+      return first if first.is_a?(StringLiteral)
+    end
+
+    super
+  end
+
+  def transform(node : Block) : ASTNode
+    node = super.as(Block)
+
+    unpacks = node.unpacks
+    return node unless unpacks
+
+    any_named = false
+    unpacks.each do |index, _|
+      if index < node.args.size && !node.args[index].name.empty?
+        any_named = true
+        break
+      end
+    end
+    return node if any_named
+
+    extra_expressions = [] of ASTNode
+    next_unpacks = [] of {String, Expressions}
+
+    unpacks.each do |index, expressions|
+      temp_name = @program.new_temp_var_name
+      node.args[index] = Var.new(temp_name).at(node.args[index])
+      extra_expressions << block_unpack_multiassign(temp_name, expressions, next_unpacks)
+    end
+
+    ui = 0
+    while ui < next_unpacks.size
+      next_unpack = next_unpacks[ui]
+      ui = ui + 1
+      var_name = next_unpack[0]
+      expressions = next_unpack[1]
+      extra_expressions << block_unpack_multiassign(var_name, expressions, next_unpacks)
+    end
+
+    body = node.body
+    case body
+    when Nop
+      node.body = Expressions.new(extra_expressions).at(node.body)
+    when Expressions
+      merged = [] of ASTNode
+      extra_expressions.each { |ee| merged << ee }
+      body.expressions.each { |be| merged << be }
+      body.expressions = merged
+    else
+      extra_expressions << node.body
+      node.body = Expressions.new(extra_expressions).at(node.body)
+    end
+
+    node
+  end
+
+  private def block_unpack_multiassign(
+    var_name : String,
+    expressions : Expressions,
+    next_unpacks : Array({String, Expressions}),
+  ) : ASTNode
+    targets = [] of ASTNode
+    i = 0
+    while i < expressions.expressions.size
+      exp = expressions.expressions[i]
+      case exp
+      when Var, Underscore, Splat
+        targets << exp
+      when Expressions
+        next_temp_name = @program.new_temp_var_name
+        next_unpacks << {next_temp_name, exp}
+        targets << Var.new(next_temp_name).at(exp)
+      else
+        raise "BUG: unexpected block var #{exp}"
+      end
+      i = i + 1
+    end
+    values = [Var.new(var_name).at(expressions)] of ASTNode
+    MultiAssign.new(targets, values).at(expressions)
+  end
+
+  def transform(node : Union) : ASTNode
+    if node.singleton?
+      node.types[0]
+    else
+      super
+    end
+  end
+
+  private def simple_literal?(node : ASTNode) : Bool
+    case node
+    when Nop, NilLiteral, BoolLiteral, NumberLiteral, CharLiteral,
+         StringLiteral, SymbolLiteral
+      true
+    else
+      false
+    end
+  end
+end

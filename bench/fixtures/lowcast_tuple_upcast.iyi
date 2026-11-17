@@ -1,0 +1,22 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def pair(flag : Bool) : Tuple(Int32, String?)
+  if flag
+    return {7, "hello"}
+  end
+  {9, nil}
+end
+
+def check(flag : Bool) : Int32
+  value = pair(flag)
+  text = value[1]
+  if text.nil?
+    value[0]
+  else
+    value[0] &+ 5
+  end
+end
+
+LibC.exit(check(true) &+ check(false))

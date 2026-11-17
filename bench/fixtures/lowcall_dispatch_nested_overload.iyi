@@ -1,0 +1,35 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+abstract class Node
+end
+
+class A < Node
+  def child(flag : Bool) : Node
+    flag ? A.new : B.new
+  end
+end
+
+class B < Node
+end
+
+class Visitor
+  def visit(n : A) : Int32
+    1 &+ visit(n.child(false))
+  end
+
+  def visit(n : B) : Int32
+    2
+  end
+
+  def visit(n : Node) : Int32
+    4
+  end
+end
+
+def choose(flag : Bool) : Node
+  flag ? A.new : B.new
+end
+
+LibC.exit(Visitor.new.visit(choose(true)))

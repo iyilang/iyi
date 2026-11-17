@@ -1,0 +1,18 @@
+# Two overloads of one name whose restrictions are unrelated types (Int32 and Bool),
+# read by bench/selfhost_semantic_calls_exercise.sh. An Int32 argument takes the Int32
+# overload and a Bool argument the Bool overload; the other overload is not a match.
+# This is the shape of bench/fixtures/lowcall_types.iyi, where the port chose the Bool
+# overload for id(5).
+
+def id(x : Int32) : Int32
+  x
+end
+
+def id(x : Bool) : Bool
+  x
+end
+
+# call id(5)
+# call id(true)
+# error id(5)
+# error id(true)

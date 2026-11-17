@@ -1,0 +1,9 @@
+def only(&)
+  yield 5
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+LibC.exit(only { |v| break v })

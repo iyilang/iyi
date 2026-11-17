@@ -1,0 +1,26 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+abstract class Node
+end
+
+class A < Node
+end
+
+class B < Node
+end
+
+def show(n : A) : Int32
+  1
+end
+
+def show(n : Node) : Int32
+  2
+end
+
+def make(flag : Bool) : Node
+  flag ? A.new : B.new
+end
+
+LibC.exit(show(make(true)) &+ show(make(false)))

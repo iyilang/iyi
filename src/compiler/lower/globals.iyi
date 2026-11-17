@@ -1,0 +1,113 @@
+module compiler/lower/globals
+
+# The state the hosted code generator keeps on a constant (`Const`) and a class variable (`MetaTypeVar`) while it
+# generates code: whether it was read (`read?`, which decides between the direct and the lazy initialisation),
+# whether it needs an init flag (`no_init_flag?`), whether a literal initialiser was simple (`simple_initializer?`),
+# the value a simple constant was initialised with (`initializer`, which a later read reuses), and the IR globals and
+# the initialiser function the lowering made for it. The hosted code writes these fields on the analysed object; the
+# port keeps them in tables on the `Lowerer`, keyed by the object's full name, so the analysed program stays untouched.
+# It imports no lowering module, so the core's `Lowerer` can hold a `LowerGlobals` without an import cycle.
+
+import compiler/ir/values::{Value}
+import compiler/ir/function::{Function, Global}
+import compiler/semantic/top_level::{ModuleType}
+
+# The hosted fields `read`, `no_init_flag` and `initializer` of one constant, and the globals the
+# lowering made for it.
+pub class ConstState
+  property read : Bool
+  property no_init_flag : Bool
+  property initializer : Value?
+  # The constant's value global, made by the first assignment or read that needs it.
+  property global : Global?
+  # The initialised flag (`NAME:const_init`), declared with the value global (hosted declare_const_initialized_flag).
+  property flag : Global?
+  # The initialiser function (`~NAME:const_init`), made once per constant (hosted create_initialize_const_function).
+  property init_fn : Function?
+  # The read function (`~NAME:const_read`), made by the first read of the constant before its assignment (hosted create_read_const_function).
+  property read_fn : Function?
+
+  def initialize
+    @read = false
+    @no_init_flag = false
+    @initializer = nil
+    @global = nil
+    @flag = nil
+    @read_fn = nil
+  end
+end
+
+# The hosted fields `read`, `no_init_flag` and `simple_initializer` of one class variable, and the globals the
+# lowering made for it (hosted declare_class_var, create_initialize_class_var_function).
+pub class ClassVarState
+  property read : Bool
+  property no_init_flag : Bool
+  # The initialiser is a literal stored in the global at its declaration, with no function (hosted `simple_initializer`).
+  property simple : Bool
+  property global : Global?
+  # The initialiser function (`~Owner::name:init`), made once per class variable.
+  property init_fn : Function?
+  # The initialised flag (`Owner::name:init`), declared with the value global (hosted declare_class_var_initialized_flag).
+  property flag : Global?
+  # The read function (`~Owner::name:read`), made by the first read before the declaration (hosted create_read_class_var_function).
+  property read_fn : Function?
+
+  def initialize
+    @read = false
+    @no_init_flag = false
+    @simple = false
+    @global = nil
+    @init_fn = nil
+    @flag = nil
+    @read_fn = nil
+  end
+end
+
+# The table of constant and class variable states of one lowered program, and the class bodies being lowered
+# (innermost last), which give a class variable declared in a class body its owner. A state is created on first
+# use; the hosted generator's fields start false and nil, which is what a fresh state holds.
+pub class LowerGlobals
+  getter consts : Hash(String, ConstState)
+  getter class_vars : Hash(String, ClassVarState)
+  getter body_scopes : Array(ModuleType)
+  # An `@[ThreadLocal]` annotation was lowered and the class variable it marks is not declared yet. The declaration takes
+  # the mark (class_var.iyi take_thread_local_annotation).
+  property thread_local_pending : Bool
+
+  def initialize
+    @consts = Hash(String, ConstState).new
+    @class_vars = Hash(String, ClassVarState).new
+    @body_scopes = [] of ModuleType
+    @thread_local_pending = false
+  end
+
+  # The state of the constant with this full name, created when it is first asked for.
+  def const_state(name : String) : ConstState
+    if found = @consts[name]?
+      return found
+    end
+    fresh = ConstState.new
+    @consts[name] = fresh
+    fresh
+  end
+
+  # The state of the class variable with this key (its owner's full name and its name), created when it is first asked for.
+  def class_var_state(key : String) : ClassVarState
+    if found = @class_vars[key]?
+      return found
+    end
+    fresh = ClassVarState.new
+    @class_vars[key] = fresh
+    fresh
+  end
+
+  # Enters the body of a class: a declaration in it names its class variables in this class.
+  def enter_class_body(scope : ModuleType) : Nil
+    @body_scopes << scope
+  end
+
+  # Leaves the innermost class body entered by `enter_class_body`.
+  def leave_class_body : Nil
+    @body_scopes.pop
+  end
+end

@@ -1,0 +1,20 @@
+# The allocate primitive for a class in a bare program: `Box.new(2, 3)` runs the generated `new`,
+# whose `_ = allocate` allocates the instance with malloc (the bare program has no arena), zeroes it,
+# and stores the type id in field 0, the layout of the hosted bare build. The two-argument
+# `initialize` is empty and is inlined; the instance method returns a constant. The class has no
+# instance variables, so no field is read or written (those are the core's instance_var_pointer).
+# The status is 7.
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+class Box
+  def initialize(a : Int32, b : Int32)
+  end
+
+  def answer : Int32
+    7
+  end
+end
+
+LibC.exit(Box.new(2, 3).answer)

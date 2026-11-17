@@ -1,0 +1,10 @@
+class Box
+  def initialize(@value : Int32)
+  end
+
+  def nest : Proc(Proc(Int32))
+    -> { -> { @value } }
+  end
+end
+
+puts Box.new(4).nest.call.call

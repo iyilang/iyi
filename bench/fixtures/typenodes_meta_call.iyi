@@ -1,0 +1,7 @@
+class Box(T)
+  def self.make(x : Int32) : Int32
+    x
+  end
+end
+
+y = Box(Int32).make(1)

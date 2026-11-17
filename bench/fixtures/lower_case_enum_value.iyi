@@ -1,0 +1,26 @@
+enum Kind
+  First
+  Second
+  Third
+
+  def ==(other : Kind) : Bool
+    value == other.value
+  end
+
+  def ===(other : Kind) : Bool
+    self == other
+  end
+end
+
+def number(kind : Kind) : Int32
+  case kind
+  when Kind::First
+    1
+  when Kind::Second
+    2
+  else
+    3
+  end
+end
+
+number(Kind::First) &+ number(Kind::Second) &+ number(Kind::Third)

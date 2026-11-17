@@ -1,0 +1,5 @@
+fun __crystal_raise_overflow : Nil
+  nil
+end
+
+1

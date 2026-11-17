@@ -1,0 +1,6 @@
+def collect(*values)
+  values
+end
+
+collect
+collect(1)

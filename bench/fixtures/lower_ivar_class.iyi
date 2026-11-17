@@ -1,0 +1,15 @@
+class Counter
+  @count : Int32
+
+  def initialize(count : Int32)
+    @count = count
+  end
+
+  def count : Int32
+    value = @count
+    value
+  end
+end
+
+c = Counter.new(40)
+c.count

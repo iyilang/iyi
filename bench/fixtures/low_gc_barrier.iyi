@@ -1,0 +1,59 @@
+abstract class GcValue
+  abstract def value : Int64
+end
+
+class GcLeaf < GcValue
+  def initialize(@n : Int64)
+  end
+
+  def value : Int64
+    @n
+  end
+end
+
+class GcBranch
+  property children : Array(GcValue)
+
+  def initialize
+    @children = [] of GcValue
+  end
+end
+
+roots = [] of GcBranch
+i = 0_i64
+while i < 120_i64
+  root = GcBranch.new
+  roots << root
+  j = 0_i64
+  while j < 300_i64
+    root.children << GcLeaf.new(i * 300_i64 + j)
+    k = 0
+    while k < 20
+      s = "junk-#{i}-#{j}-#{k}"
+      k = k + 1
+    end
+    j = j + 1_i64
+  end
+  if i % 100_i64 == 0_i64
+    x = 0
+    while x < roots.size
+      node = roots[x]
+      y = 0
+      while y < node.children.size
+        expected = x.to_i64 * 300_i64 + y.to_i64
+        if node.children[y].value != expected
+          puts "CORRUPT i=#{i} x=#{x} y=#{y}"
+          exit(1)
+        end
+        y = y + 1
+      end
+      x = x + 1
+    end
+  end
+  i = i + 1_i64
+end
+if IyiMark.collections == 0_u64
+  puts "NO COLLECTIONS"
+  exit(1)
+end
+puts "OK"

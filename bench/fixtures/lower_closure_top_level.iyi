@@ -1,0 +1,8 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+value = 40
+reader = -> { value = value &+ 1; value }
+reader.call
+LibC.exit(reader.call &- 42)

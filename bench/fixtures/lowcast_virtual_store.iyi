@@ -1,0 +1,25 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+abstract class Node
+end
+
+class Leaf < Node
+end
+
+class Other < Node
+end
+
+def pick(flag : Bool)
+  item = Leaf.new
+  if flag
+    item = Other.new
+  else
+    item = Leaf.new
+  end
+  item
+end
+
+pick(true)
+LibC.exit(7)

@@ -1,0 +1,31 @@
+# is_a? on mixed union, nilable pointer union, nilable class, and union restriction.
+class Box
+  def initialize
+  end
+end
+
+def check_mixed(c : Bool) : Bool
+  x = c ? 1 : true
+  x.is_a?(Int32)
+end
+
+def check_nilable_ptr(c : Bool) : Bool
+  a = 1
+  p = c ? pointerof(a) : nil
+  p.is_a?(Nil)
+end
+
+def check_nilable_ref(c : Bool) : Bool
+  b = c ? Box.new : nil
+  b.is_a?(Box)
+end
+
+def check_union_restr(c : Bool) : Bool
+  x = c ? 1 : (c ? true : 'a')
+  x.is_a?(Int32 | Bool)
+end
+
+check_mixed(true)
+check_nilable_ptr(false)
+check_nilable_ref(false)
+check_union_restr(true)

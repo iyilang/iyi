@@ -1,0 +1,32 @@
+# Written blocks stay distinct when the callee captures them.
+def control_keep(&block : Bool -> Nil) : Nil
+  kept = block
+  nil
+end
+
+# A yielding callee types the body of every forwarded block at its yield.
+def control_yield(&block : Bool -> Nil) : Nil
+  yield true
+end
+
+# Positional and named spellings of recursion share the active def.
+def control_mixed(flag : Bool, value : Bool = false, &block : Bool -> Nil) : Nil
+  if flag
+    control_mixed(false, value: true, &block)
+  end
+  nil
+end
+
+def control_forward(&block : Bool -> Nil) : Nil
+  control_keep(&block)
+  control_keep(&block)
+  control_yield(&block)
+  control_yield(&block)
+  control_mixed(true, false, &block)
+end
+
+seen = 1
+label = "s"
+control_keep { |f| seen }
+control_keep { |f| label }
+control_forward { |f| seen }

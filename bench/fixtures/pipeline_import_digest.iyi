@@ -1,0 +1,3 @@
+import std/digest::{CRC32}
+
+raise "wrong CRC32" unless CRC32.checksum("123456789") == 0xcbf43926_u32

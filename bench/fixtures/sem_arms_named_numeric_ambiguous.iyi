@@ -1,0 +1,9 @@
+def widen(value : Int64) : Int64
+  value
+end
+
+def widen(value : UInt64) : UInt64
+  value
+end
+
+puts widen(value: 1)

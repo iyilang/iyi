@@ -1,0 +1,13 @@
+def read_port(path : String) : Int32
+  8080
+end
+
+def read_strict(path : String) : Bool
+  true
+end
+
+def read_timeout(path : String) : Int32
+  port = read_port(path).or(8080)
+  strict = read_strict(path).or_panic
+  port
+end

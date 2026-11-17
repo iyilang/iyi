@@ -1,0 +1,5 @@
+import diamond_base
+
+fun diamond_b_val : Int32
+  diamond_base_val &+ 17
+end

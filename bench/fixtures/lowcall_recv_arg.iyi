@@ -1,0 +1,11 @@
+struct Int32
+  def plus(k : Int32) : Int32
+    self &+ k
+  end
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+LibC.exit(40.plus(2))

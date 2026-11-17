@@ -1,0 +1,9 @@
+@[Unsafe("a C function is not checked by the compiler")]
+
+fun pick(p : UInt8*, q : UInt8**, r : Void*) : UInt8**
+  q
+end
+
+fun first(argc : Int32, argv : UInt8**) : UInt8**
+  argv
+end

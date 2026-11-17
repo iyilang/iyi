@@ -1,0 +1,23 @@
+@[Unsafe("minimal arena so a class allocation loads the :headed global")]
+class IyiHeap
+end
+
+class IyiRuntimeLock
+end
+
+lib LibC
+  fun malloc(size : UInt64) : Void*
+end
+
+lib LibIyiMain
+  fun __iyi_main(argc : Int32, argv : UInt8**) : Void*
+end
+
+fun __iyi_new(size : UInt64, type_id : UInt64, flags : UInt64) : Void*
+  LibC.malloc(size)
+end
+
+fun main(argc : Int32, argv : UInt8**) : Int32
+  LibIyiMain.__iyi_main(argc, argv)
+  0
+end

@@ -1,0 +1,58 @@
+module bench/selfhost_bare_splat_arity_probe
+
+import compiler/syntax/ast::{ASTNode, Arg, BoolLiteral, Def, NamedArgument, Nop, Path, Splat}
+import compiler/semantic/top_level::{SemanticProgram}
+import compiler/semantic/main_visitor::{MainVisitor}
+import compiler/semantic/default_arguments::{DefaultArguments}
+
+def check(visitor : MainVisitor, args : Array(Arg), splat : Int32?, min : Int32, max : Int32) : Nil
+  definition = Def.new("probe", args)
+  definition.splat_index = splat
+  actual = visitor.min_max_args_sizes(definition)
+  raise "wrong argument bounds" unless actual[0] == min && actual[1] == max
+  raise "wrong minimum" unless visitor.min_args_count(definition) == min
+end
+
+visitor = MainVisitor.new(SemanticProgram.new)
+required = Arg.new("required")
+optional = Arg.new("optional", Nop.new)
+bare = Arg.new("")
+variadic = Arg.new("rest")
+restricted = Arg.new("rest", nil, Path.new("Int32"))
+pack = Arg.new("rest", nil, Splat.new(Path.new("T")))
+check(visitor, [required, optional], nil, 1, 2)
+check(visitor, [required, bare, optional], 1, 1, 1)
+check(visitor, [optional, bare], 1, 0, 1)
+check(visitor, [required, variadic], 1, 1, 2147483647)
+check(visitor, [required, restricted], 1, 2, 2147483647)
+check(visitor, [optional, restricted], 1, 0, 2147483647)
+check(visitor, [required, pack], 1, 1, 2147483647)
+puts "positional argument bounds: ok"
+bare_def = Def.new("bare", [required, bare, Arg.new("flag", BoolLiteral.new(false))])
+bare_def.splat_index = 1
+omitted = DefaultArguments.expand_for_call(bare_def, 1, nil)
+raise "omitted expansion failed" if omitted.is_a?(String)
+raise "omitted expansion arity" unless omitted.as(Def).args.size == 1
+named = [NamedArgument.new("flag", BoolLiteral.new(true))]
+specified = DefaultArguments.expand_for_call(bare_def, 1, named)
+raise "named expansion failed" if specified.is_a?(String)
+raise "named expansion arity" unless specified.as(Def).args.size == 2
+raise "named expansion label" unless specified.as(Def).name == "bare:flag"
+raise "named argument overwritten by default" if specified.as(Def).body.to_s.includes?("flag = false")
+raise "missing default assignment" unless omitted.as(Def).body.to_s.includes?("flag = false")
+raise "extra positional accepted" unless DefaultArguments.expand_for_call(bare_def, 2, nil).is_a?(String)
+raise "unknown named argument accepted" unless DefaultArguments.expand_for_call(bare_def, 1, [NamedArgument.new("unknown", BoolLiteral.new(true))]).is_a?(String)
+raise "duplicate named argument accepted" unless DefaultArguments.expand_for_call(bare_def, 1, [named[0], named[0]]).is_a?(String)
+raise "duplicate positional argument accepted" unless DefaultArguments.expand_for_call(bare_def, 1, [NamedArgument.new("required", BoolLiteral.new(true))]).is_a?(String)
+
+restriction = Path.new("Bool")
+flag = Arg.new("flag", BoolLiteral.new(false), restriction)
+restricted_bare = Def.new("restricted_bare", [required, bare, flag])
+restricted_bare.splat_index = 1
+expanded = DefaultArguments.expand_splat(restricted_bare, 1, [] of String, named).as(Def)
+copied = expanded.args[1].restriction
+raise "splat named restriction lost" unless copied && copied.to_s == restriction.to_s && copied.object_id != restriction.object_id
+ordinary = Def.new("ordinary", [required, flag])
+wrapper = DefaultArguments.wrapper_def(ordinary, 0, [NamedArgument.new("flag", BoolLiteral.new(true)), NamedArgument.new("required", BoolLiteral.new(true))]).as(Def)
+copied = wrapper.args[0].restriction
+raise "wrapper named restriction lost" unless copied && copied.to_s == restriction.to_s && copied.object_id != restriction.object_id

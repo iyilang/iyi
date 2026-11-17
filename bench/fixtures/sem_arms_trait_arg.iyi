@@ -1,0 +1,28 @@
+trait Marker
+end
+
+class A
+end
+
+class B
+end
+
+impl Marker for A
+end
+
+impl Marker for B
+end
+
+def show(value : Marker) : String
+  "marker"
+end
+
+def show(value : A) : String
+  "A"
+end
+
+def pick(flag : Bool) : Marker
+  flag ? A.new : B.new
+end
+
+puts show(pick(true))

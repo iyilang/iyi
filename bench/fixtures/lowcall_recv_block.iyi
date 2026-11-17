@@ -1,0 +1,17 @@
+struct Int32
+  def below(&) : Int32
+    i = 0
+    while i < self
+      yield i
+      i = i &+ 1
+    end
+    i
+  end
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+total = 0
+LibC.exit(5.below { |v| total = total &+ v &+ 1 })

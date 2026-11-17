@@ -1,0 +1,6 @@
+module inhname/reader
+
+import inhname/scanner::{Scanner}
+
+pub class Reader < Scanner
+end

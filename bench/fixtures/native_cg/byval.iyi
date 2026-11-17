@@ -1,0 +1,9 @@
+module byval
+
+# The hosted compiler's program with the same results as byval.ir: the callee's sum is 99 + 2 + 3 = 104, and the
+# caller's first and last words stay 1 and 3, because the callee wrote to its own copy.
+def bump(b0 : Int64, b1 : Int64, b2 : Int64) : Int64
+  99_i64 + b1 + b2
+end
+
+puts "#{bump(1_i64, 2_i64, 3_i64)} #{1} #{3}"

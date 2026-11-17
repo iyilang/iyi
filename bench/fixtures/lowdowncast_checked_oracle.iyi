@@ -1,0 +1,30 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+fun __crystal_raise_cast_failed(from : Void*, to : Void*, location : Void*) : NoReturn
+  LibC.exit(9)
+end
+
+class Node
+end
+
+class First < Node
+end
+
+class Second < Node
+end
+
+def choose(n : Int32) : Node
+  if n == 0
+    First.new
+  else
+    Second.new
+  end
+end
+
+def checked(node : Node) : First
+  node.as(First)
+end
+
+checked(choose(0))

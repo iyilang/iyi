@@ -1,0 +1,22 @@
+lib LibC
+  fun putchar(value : Int32) : Int32
+  fun exit(status : Int32) : NoReturn
+end
+
+def recursive_inferred_once(&)
+  yield
+end
+
+def recursive_inferred_block(n : Int32)
+  if n == 0
+    0
+  else
+    value = 0
+    recursive_inferred_once { value = recursive_inferred_block(n &- 1) }
+    value &+ 1
+  end
+end
+
+value = recursive_inferred_block(3)
+LibC.putchar(value &+ 48)
+LibC.exit(value)

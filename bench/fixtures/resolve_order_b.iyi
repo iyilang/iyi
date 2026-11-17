@@ -1,0 +1,5 @@
+class ResolveOrderService
+  def value : Int32
+    20
+  end
+end

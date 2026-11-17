@@ -1,0 +1,19 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def fail_now : NoReturn
+  LibC.exit(9)
+end
+
+def choose(flag : Bool) : Int32
+  x = nil
+  if flag
+    x = 1
+  else
+    x = fail_now
+  end
+  7
+end
+
+LibC.exit(choose(true))

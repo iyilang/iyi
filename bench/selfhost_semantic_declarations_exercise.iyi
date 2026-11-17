@@ -1,0 +1,405 @@
+import compiler/syntax/parser::{Parser}
+import compiler/syntax/ast::{ASTNode, Def, Expressions, ModuleHeader, Path, Primitive}
+import compiler/semantic/top_level::{SemanticProgram, TopLevelVisitor, Type, ModuleType, ClassType, LibFun, LibType, GenericClassType, EnumType, AnnotationType, dump_program_declarations, dump_type, dir_of, normalize_path, declared_in?}
+import compiler/semantic/instance_vars::{declare_guessed_instance_vars}
+import compiler/semantic/type_nodes::{type_node_system}
+import compiler/types/types::{GenericClassInstanceType, VirtualType}
+
+# Port-side driver for bench/selfhost_semantic_declarations_exercise.sh.
+#
+#   selfhost_semantic_declarations_exercise <file.iyi>
+#   selfhost_semantic_declarations_exercise --initial
+#   selfhost_semantic_declarations_exercise --chain <file.iyi>
+#
+# Loads the file through the port's top-level pass, bare (no prelude), with the
+# closure of what it imports and requires: each imported file is read, parsed and
+# declared into the same program. The search path is IYI_PATH, the one the oracle
+# reads. It prints the declarations the file itself makes, the same form the oracle
+# prints for the same file. `--initial` dumps the built-in types a new program holds.
+# `--chain` prints the parent chain of a fixed list of types, to a fixed depth.
+module BenchSelfhostSemanticDeclarationsExercise
+  def self.search_path : Array(String)
+    text = ENV["IYI_PATH"]? || ""
+    text.split(":").select { |entry| !entry.empty? }
+  end
+
+  # The header root an import is resolved from after the entry's directory: the directory
+  # the entry's module header names, moved up one level for each segment of its path but the
+  # last. Nil unless the entry's path ends with that header (Compiler.header_root_of).
+  def self.project_root(node : ASTNode, entry : String) : String?
+    if node.is_a?(Expressions)
+      first = node.as(Expressions).expressions.first?
+      if first.is_a?(ModuleHeader)
+        header = first.as(ModuleHeader).path
+        if entry.ends_with?("/#{header.join("/")}.iyi")
+          root = dir_of(entry)
+          i = 0
+          while i < header.size - 1
+            root = dir_of(root)
+            i = i + 1
+          end
+          return root
+        end
+      end
+    end
+    nil
+  end
+
+  # Loads a file and its closure into a fresh program. Returns the program and the entry.
+  def self.load_program(path : String) : {SemanticProgram, String}
+    cwd = ENV["PWD"]? || "."
+    absolute = path.starts_with?("/") ? path : "#{cwd}/#{path}"
+    entry = normalize_path(absolute)
+    src = File.read(entry)
+    parser = Parser.new(src, entry)
+    node = parser.parse
+    prog = SemanticProgram.new
+    prog.loaded_files.add(entry)
+    prog.search_path = search_path
+    prog.project_root = project_root(node, entry)
+    prog.entry_dir = dir_of(entry)
+    visitor = TopLevelVisitor.new(prog, entry)
+    node.accept(visitor)
+    visitor.finish
+    declare_guessed_instance_vars(prog)
+    {prog, entry}
+  end
+
+  def self.dump_file(path : String) : String
+    prog, entry = load_program(path)
+    dump_program_declarations(prog, entry)
+  end
+
+  # The declarations pass with the type system installed (`type_node_system`, as the lib-types
+  # mode does): an explicit instance variable keeps its generic arguments and a class with
+  # subclasses its virtual type, as the hosted declaration pass gives them.
+  # Loads a file and its closure with the type system and prelude installed, in strict mode
+  # (type_node_system before the prelude, matching the hosted prelude-first declaration pass).
+  def self.load_typed_program(path : String) : {SemanticProgram, String}
+    cwd = ENV["PWD"]? || "."
+    absolute = path.starts_with?("/") ? path : "#{cwd}/#{path}"
+    entry = normalize_path(absolute)
+    src = File.read(entry)
+    parser = Parser.new(src, entry)
+    node = parser.parse
+    prog = SemanticProgram.new
+    prog.loaded_files.add(entry)
+    prog.search_path = search_path
+    prog.project_root = project_root(node, entry)
+    type_node_system(prog)
+    prelude = TopLevelVisitor.new(prog)
+    prelude_file = prelude.import_file("iyi/prelude")
+    if prelude_file
+      prelude.load_file(prelude_file.as(String))
+      # The file that reads the prelude finishes its pending instance variables, as
+      # load_file hands them up and never resolves them itself. That instantiates the
+      # prelude generics (Channel(T), IyiSendNode(T)). dump_instances then keeps only
+      # a generic declared in the entry file.
+      prelude.finish
+    end
+    prog.entry_dir = dir_of(entry)
+    visitor = TopLevelVisitor.new(prog, entry)
+    node.accept(visitor)
+    visitor.finish
+    {prog, entry}
+  end
+
+  def self.dump_file_typed(path : String) : String
+    prog, entry = load_typed_program(path)
+    type_node_system(prog)
+    declare_guessed_instance_vars(prog)
+    dump_program_declarations(prog, entry) + dump_instances(prog, entry)
+  end
+
+  # Prove re-resolution after the ordering pass by discarding the resolved
+  # types in this fixture, then asking the program to resolve its records again.
+  def self.dump_file_reresolved(path : String) : String
+    prog, entry = load_program(path)
+    prog.types.each do |name, type|
+      next if prog.initial_type_names.includes?(name)
+      if type.is_a?(ModuleType)
+        type.as(ModuleType).instance_vars.each_value { |iv| iv.var_type = prog.nil_type }
+      end
+    end
+    prog.resolve_declared_types
+    dump_program_declarations(prog, entry) + dump_instances(prog, entry)
+  end
+
+  # The instances of the program's own generic classes with their instance variables, in the
+  # typed mode only (the oracle prints the same with its --typed flag). Each instance is a record
+  # of its own, sorted by name, as the oracle prints them; the built-in types are left out.
+  # A generic the prelude or an import declared is not the entry's: the oracle's typed dump is
+  # bare, and it prints a type only when declared_in? says the entry owns it. The same test
+  # keeps Channel(T) and an imported generic's instances out of this dump.
+  def self.dump_instances(prog : SemanticProgram, entry : String) : String
+    sb = String::Builder.new
+    initial = SemanticProgram.new.types.keys.to_set
+    prog.types.keys.sorted.each do |name|
+      next if initial.includes?(name)
+      generic = prog.types[name]
+      next unless generic.is_a?(GenericClassType)
+      next unless declared_in?(generic.locations, entry)
+      insts = generic.as(GenericClassType).instantiated_types.select { |i| i.is_a?(GenericClassInstanceType) }
+      insts.sorted_by { |i| i.full_name }.each do |inst|
+        full = inst.full_name
+        sb << "Type: " << full << " (instance)\n"
+        ivars = inst.as(GenericClassInstanceType).instance_vars
+        ivars.keys.each do |ivar_name|
+          sb << "  Ivar: " << full << "#" << ivar_name << "\n"
+          sb << "    type: " << ivars[ivar_name].type.to_s << "\n"
+        end
+        unless ivars.empty?
+          names = [] of String
+          ivars.keys.each { |n| names << n }
+          sb << "  IvarOrder: [" << names.join(", ") << "]\n"
+        end
+      end
+    end
+    sb.to_s
+  end
+
+  # The whole-program load: the file and its import closure, with the prelude loaded
+  # first, in total mode (an impl of an unresolved target is carried past). It does not
+  # print a dump: it completes, or the port refuses the file.
+  def self.load_whole(path : String, typed : Bool = false) : SemanticProgram
+    cwd = ENV["PWD"]? || "."
+    absolute = path.starts_with?("/") ? path : "#{cwd}/#{path}"
+    entry = normalize_path(absolute)
+    src = File.read(entry)
+    parser = Parser.new(src, entry)
+    node = parser.parse
+    prog = SemanticProgram.new
+    prog.loaded_files.add(entry)
+    prog.search_path = search_path
+    prog.project_root = project_root(node, entry)
+    prog.total_mode = true
+    type_node_system(prog) if typed
+    prelude = TopLevelVisitor.new(prog)
+    prelude_file = prelude.import_file("iyi/prelude")
+    if prelude_file
+      prelude.load_file(prelude_file.as(String))
+    end
+    prog.entry_dir = dir_of(entry)
+    visitor = TopLevelVisitor.new(prog, entry)
+    node.accept(visitor)
+    visitor.finish
+    declare_guessed_instance_vars(prog)
+    prog
+  end
+
+  # The parent chain of one type, each parent on its own line, indented by depth.
+  def self.chain_show(t : Type, depth : Int32, indent : String) : String
+    line = indent + t.to_s + "\n"
+    if depth == 0
+      return line
+    end
+    if t.is_a?(ModuleType)
+      mod = t.as(ModuleType)
+      mod.parents.each do |p|
+        line = line + chain_show(p, depth - 1, indent + "  ")
+      end
+    end
+    line
+  end
+
+  def self.dump_chain(path : String) : String
+    prog, entry = load_program(path)
+    sb = ""
+    ["Nil", "Object", "Reference", "Value", "Int32", "String", "Mine"].each do |name|
+      t = prog.types[name]?
+      if t
+        sb = sb + chain_show(t, 4, "")
+      else
+        sb = sb + name + " missing\n"
+      end
+    end
+    ["Object", "Mine", "Int32"].each do |name|
+      t = prog.types[name]?
+      if t
+        if t.is_a?(ModuleType)
+          sb = sb + chain_show(t.as(ModuleType).metaclass, 4, "")
+        end
+      end
+    end
+    sb
+  end
+
+  def self.dump_initial : String
+    prog = SemanticProgram.new
+    sb = String::Builder.new
+    prog.types.keys.sorted.each do |name|
+      dump_type(prog.types[name], sb, "")
+    end
+    sb.to_s
+  end
+
+  # The resolved return type's name, or "nil" for a fun without one.
+  def self.return_name(f : LibFun) : String
+    if rt = f.resolved_return
+      rt.full_name
+    else
+      "nil"
+    end
+  end
+end
+
+if Program.args.empty?
+  # A self-check for `iyi run` with no arguments: the built-in types load and print.
+  print BenchSelfhostSemanticDeclarationsExercise.dump_initial
+elsif Program.args[0] == "--initial"
+  print BenchSelfhostSemanticDeclarationsExercise.dump_initial
+elsif Program.args[0] == "--chain"
+  print BenchSelfhostSemanticDeclarationsExercise.dump_chain(Program.args[1])
+elsif Program.args[0] == "--total"
+  prog = BenchSelfhostSemanticDeclarationsExercise.load_whole(Program.args[1])
+  prog.carried_refusals.each do |message|
+    print "carried: #{message}\n"
+  end
+  print "ok\n"
+elsif Program.args[0] == "--total-typed"
+  prog = BenchSelfhostSemanticDeclarationsExercise.load_whole(Program.args[1], true)
+  prog.carried_refusals.each do |message|
+    print "carried: #{message}\n"
+  end
+  if klass = prog.types["Mine"]?
+    if sc = klass.as(ClassType).superclass
+      print "superclass #{sc.full_name}\n"
+    end
+  end
+  print "ok\n"
+elsif Program.args[0] == "--scope-lookup"
+  prog = BenchSelfhostSemanticDeclarationsExercise.load_whole(Program.args[1])
+  scope = prog.types[Program.args[2]].as(ModuleType).metaclass
+  found = prog.lookup_type_path(Path.new(Program.args[3]), scope)
+  print "#{found.full_name}\n"
+elsif Program.args[0] == "--def-owner"
+  prog, _ = BenchSelfhostSemanticDeclarationsExercise.load_program(Program.args[1])
+  base = prog.types["OwnerBase"].as(ModuleType)
+  instance_def = base.defs["inherited"][0]
+  class_def = base.metaclass.defs["class_method"][0]
+  instance_owner = prog.def_owner(instance_def)
+  class_owner = prog.def_owner(class_def)
+  instance_name = instance_owner ? instance_owner.full_name : "<no owner>"
+  class_name = class_owner ? class_owner.full_name : "<no owner>"
+  print "instance #{instance_name}\n"
+  print "class #{class_name}\n"
+  copy = instance_def.clone.as(Def)
+  prog.copy_def_owner(instance_def, copy)
+  raise "definition clone lost its owner" unless prog.def_owner(copy) == instance_owner
+elsif Program.args[0] == "--virtual-subtype"
+  prog, _ = BenchSelfhostSemanticDeclarationsExercise.load_typed_program(Program.args[1])
+  base = prog.types["SubtypeNode"].as(ClassType)
+  leaf = prog.types["SubtypeLeaf"].as(ClassType)
+  other = prog.types["SubtypeOther"].as(ClassType)
+  virtual = type_node_system(prog).virtual_of(base)
+  virtual_meta = virtual.as(VirtualType).metaclass
+  print "leaf virtual #{leaf.subtype_of?(virtual)}\n"
+  print "base virtual #{base.subtype_of?(virtual)}\n"
+  print "other virtual #{other.subtype_of?(virtual)}\n"
+  print "virtual leaf #{virtual.subtype_of?(leaf)}\n"
+  print "leaf meta virtual #{leaf.metaclass.subtype_of?(virtual_meta)}\n"
+  print "other meta virtual #{other.metaclass.subtype_of?(virtual_meta)}\n"
+  print "virtual meta leaf #{virtual_meta.subtype_of?(leaf.metaclass)}\n"
+elsif Program.args[0] == "--typed"
+  print BenchSelfhostSemanticDeclarationsExercise.dump_file_typed(Program.args[1])
+elsif Program.args[0] == "--typed-reresolve"
+  print BenchSelfhostSemanticDeclarationsExercise.dump_file_reresolved(Program.args[1])
+elsif Program.args[0] == "--lib-types"
+  prog = BenchSelfhostSemanticDeclarationsExercise.load_whole(Program.args[1])
+  type_node_system(prog)
+  prog.global_funs.each do |f|
+    print "fun #{f.name}: #{f.arg_types.map(&.full_name).join(", ")} -> #{BenchSelfhostSemanticDeclarationsExercise.return_name(f)}\n"
+  end
+  prog.types.keys.sorted.each do |name|
+    t = prog.types[name]
+    if t.is_a?(LibType)
+      t.as(LibType).funs.each do |f|
+        print "lib #{name}.#{f.name}: #{f.arg_types.map(&.full_name).join(", ")} -> #{BenchSelfhostSemanticDeclarationsExercise.return_name(f)}\n"
+      end
+    end
+  end
+elsif Program.args[0] == "--classvar-generic"
+  prog, _ = BenchSelfhostSemanticDeclarationsExercise.load_program(Program.args[1])
+  type_node_system(prog)
+  holder = prog.types["ClassVarGeneric"].as(ModuleType)
+  resolver = holder.class_vars["@@resolver"].type.full_name
+  pointer = holder.class_vars["@@pointer"].type.full_name
+  maybe = holder.class_vars["@@maybe"].type.full_name
+  raise "resolver lost generic arguments: #{resolver}" unless resolver.includes?("Proc(") && resolver.includes?("Pointer(") && resolver.includes?("Int32")
+  raise "pointer lost its argument: #{pointer}" unless pointer == "Pointer(Int32)"
+  raise "nilable pointer lost its argument: #{maybe}" unless maybe.includes?("Pointer(Int32)") && maybe.includes?("Nil")
+  print "class variable generic arguments retained\n"
+elsif Program.args[0] == "--primitive-annotations"
+  prog = BenchSelfhostSemanticDeclarationsExercise.load_whole(Program.args[1])
+  arithmetic = prog.types["Arithmetic"].as(ModuleType)
+  ["first", "second", "third"].each do |name|
+    body = arithmetic.defs[name][0].body
+    if body.is_a?(Primitive)
+      print "#{name} #{body.as(Primitive).name}\n"
+    else
+      print "#{name} not-primitive\n"
+    end
+  end
+elsif Program.args[0] == "--enum-annotations"
+  prog, _ = BenchSelfhostSemanticDeclarationsExercise.load_program(Program.args[1])
+  flags = prog.types["Flags"].as(AnnotationType)
+  ["MarkedEnum", "PlainEnum"].each do |name|
+    enum_type = prog.types[name].as(EnumType)
+    print "#{name} Flags=#{!enum_type.annotation(flags).nil?}\n"
+  end
+elsif Program.args[0] == "--enum-primitives"
+  prog, _ = BenchSelfhostSemanticDeclarationsExercise.load_program(Program.args[1])
+  ["SmallEnum", "WideEnum"].each do |name|
+    enum_type = prog.types[name].as(EnumType)
+    [enum_type.defs["value"][0], enum_type.metaclass.defs["new"][0]].each do |definition|
+      primitive = definition.body.as(Primitive)
+      result = prog.primitive_return_type(definition).as(Type)
+      copy = definition.clone.as(Def)
+      prog.copy_def_owner(definition, copy)
+      raise "primitive result lost on clone" unless prog.primitive_return_type(copy) == result
+      restriction = definition.args.empty? ? "-" : definition.args[0].restriction.to_s
+      print "#{name} #{definition.name} #{primitive.name} #{result.full_name} #{restriction}\n"
+    end
+  end
+elsif Program.args[0] == "--enum-member-type"
+  prog = BenchSelfhostSemanticDeclarationsExercise.load_whole(Program.args[1])
+  member = prog.types["E"].as(EnumType).members["B"]
+  if enum_type = member.enum_value_type
+    print "E::B #{enum_type.full_name}\n"
+  else
+    print "E::B untyped\n"
+  end
+elsif Program.args[0] == "--const-facts"
+  prog = BenchSelfhostSemanticDeclarationsExercise.load_whole(Program.args[1])
+  prog.const_initializers.each do |c|
+    print "const #{c.full_name} used=#{c.used?} pointer_read=#{c.pointer_read?}\n"
+  end
+  if prog.predefined_const("ARGC_UNSAFE").nil?
+    print "predef ARGC_UNSAFE missing\n"
+  else
+    print "predef ARGC_UNSAFE present\n"
+  end
+  if prog.predefined_const("ARGV_UNSAFE").nil?
+    print "predef ARGV_UNSAFE missing\n"
+  else
+    print "predef ARGV_UNSAFE present\n"
+  end
+  if holder = prog.types["Holder"]?
+    holder.as(ModuleType).class_vars.each_value do |mv|
+      if owner = mv.owner
+        print "cvar #{mv.name} owner #{owner.full_name} thread_local=#{mv.thread_local}\n"
+      else
+        print "cvar #{mv.name} owner none thread_local=#{mv.thread_local}\n"
+      end
+    end
+  end
+elsif Program.args[0] == "--link-annotations"
+  prog = BenchSelfhostSemanticDeclarationsExercise.load_whole(Program.args[1])
+  if link_lib = prog.types["LibA"]?
+    link_lib.as(LibType).link_annotations.each do |rec|
+      print "link lib=#{rec.library || "-"} ldflags=#{rec.ldflags || "-"} static=#{rec.is_static} framework=#{rec.framework || "-"} pkg_config=#{rec.pkg_config || "-"} dll=#{rec.dll || "-"}\n"
+    end
+  end
+else
+  print BenchSelfhostSemanticDeclarationsExercise.dump_file(Program.args[0])
+end

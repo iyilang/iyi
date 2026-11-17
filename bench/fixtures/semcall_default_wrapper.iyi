@@ -1,0 +1,25 @@
+def wrap_first(a : Int32, b : Int32 = 2)
+  nil
+end
+
+def wrap_second(a : Int32, b = 2)
+  nil
+end
+
+def wrap_magic(a : Int32, line = __LINE__)
+  nil
+end
+
+def wrap_yield(a : Int32, b = 2, &)
+  yield a
+end
+
+# wrapper wrap_first(40)
+# wrapper wrap_first(40, 3)
+# wrapper wrap_second(1)
+# wrapper wrap_second(1, b: 3)
+# wrapper wrap_second(a: 1)
+# wrapper wrap_second(b: 3, a: 1)
+# wrapper wrap_yield(1) { |x| x }
+# wrapper wrap_magic(1)
+# wrapper wrap_magic(1, line: 2)

@@ -1,0 +1,19 @@
+lib LibC
+  fun putchar(value : Int32) : Int32
+  fun exit(status : Int32) : NoReturn
+end
+
+{% for value in [65, 66] %}
+  LibC.putchar({{ value }})
+{% end %}
+{% if true %}
+  LibC.putchar(67)
+{% else %}
+  LibC.putchar(88)
+{% end %}
+LibC.putchar({{ 68 }})
+{% verbatim do %}
+  LibC.putchar(69)
+{% end %}
+LibC.putchar(10)
+LibC.exit(0)

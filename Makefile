@@ -129,6 +129,7 @@ ifeq ($(shell $(check_lld)),1)
 endif
 override EXPORTS += \
   IYI_CONFIG_BUILD_COMMIT="$(IYI_CONFIG_BUILD_COMMIT)" \
+  IYI_CONFIG_BUILD_INPUTS="$(IYI_CONFIG_BUILD_INPUTS)" \
   IYI_CONFIG_PATH=$(IYI_CONFIG_PATH) \
   SOURCE_DATE_EPOCH="$(SOURCE_DATE_EPOCH)"
 override EXPORTS_BUILD += \
@@ -143,6 +144,9 @@ ifndef LLVM_CONFIG
 endif
 ifeq ($(LLVM_VERSION),)
   LLVM_VERSION := $(if $(LLVM_CONFIG),$(shell "$(LLVM_CONFIG)" --version 2> /dev/null))
+endif
+ifndef IYI_CONFIG_BUILD_INPUTS
+	IYI_CONFIG_BUILD_INPUTS := $(shell python3 scripts/build_inputs.py --llvm-version "$(LLVM_VERSION)" --crystal-version "$(BASE_CRYSTAL_VERSION)" --flags "$(FLAGS) $(COMPILER_FLAGS) $(BINARY_GC_FLAGS)" 2>/dev/null)
 endif
 
 # FIXME: Crystal docker images before 1.8 can't build a functional compiler
@@ -332,6 +336,9 @@ crystal-daemon: $(O)/$(CRYSTAL_DAEMON_BIN) ## Build the single-threaded build da
 .PHONY: iyi-daemon
 iyi-daemon: $(O)/$(IYI_DAEMON_BIN) ## iyi: build iyi's own single-threaded build daemon
 
+.PHONY: iyi-compile
+iyi-compile: $(O)/iyi-compile$(EXE) ## iyi: build the self-hosted end-to-end compiler tool
+
 .PHONY: build
 build: ## Build all files for a package install (currently the compiler and manpages)
 # bake-format off: Mbake bug with Duplicate target rule https://github.com/EbodShojaei/bake/issues/106
@@ -375,7 +382,7 @@ uninstall: uninstall_compiler uninstall_man uninstall_completions
 
 # iyi: the binary and its prelude, and nothing else — an iyi program requires
 # only the prelude and the prelude requires only itself, so what is installed
-# beside `bin/iyi` is 1,215 KB rather than a standard library.
+# beside `bin/iyi` is 1,229 KB rather than a standard library.
 .PHONY: install_iyi
 install_iyi: ## iyi: install `iyi` and its prelude at DESTDIR
 install_iyi: $(O)/iyi$(EXE) $(O)/$(IYI_DAEMON_BIN)
@@ -410,7 +417,7 @@ install_iyi: $(O)/iyi$(EXE) $(O)/$(IYI_DAEMON_BIN)
 # iyi: the other library, because `--crystal` is not a developer's switch.
 #
 # A program built with it gets Crystal's standard library, and an install that
-# ships only iyi's own 1,215 KB answers `require "json"` with "can't find file",
+# ships only iyi's own 1,229 KB answers `require "json"` with "can't find file",
 # which is the headline feature failing in the thing people download.
 #
 # `compiler/` was cut from this, on the grounds that a compiler carrying its own
@@ -432,7 +439,7 @@ install_iyi: $(O)/iyi$(EXE) $(O)/$(IYI_DAEMON_BIN)
 	cp -R -p $(if $(deref_symlinks),-L,-P) src/. "$(DESTDIR)$(DATADIR)/iyi/crystal/"
 	rm -rf "$(DESTDIR)$(DATADIR)/iyi/crystal/iyi"
 # And `std/`, for the reason it is above under its own name: nothing in
-# Crystal's library requires `std/...`, the directory's 5,047 KB is a second
+# Crystal's library requires `std/...`, the directory's 5,101 KB is a second
 # copy of a library that already shipped, and while it is there it answers
 # `import std/text` out of `share/iyi/crystal` — which is how the accident
 # looked before `src/std` was installed at all, and which would let that
@@ -600,7 +607,7 @@ $(O)/$(CRYSTAL_BIN): $(DEPS) $(SOURCES)
 # iyi: the same compiler under its own name — the commands iyi has, a usage
 # line that names them, and a version that says what it is a fork of. It links
 # what `crystal` links, because it *is* `crystal`; what differs is the surface.
-# Its prelude is its own, and it is 1,215 KB: `iyi` installed as `bin/iyi` finds
+# Its prelude is its own, and it is 1,229 KB: `iyi` installed as `bin/iyi` finds
 # `share/iyi/src/iyi/prelude.iyi` beside it and needs nothing else — no
 # `IYI_PATH`, no standard library, because an iyi program requires only the
 # prelude and the prelude requires only itself.
@@ -623,6 +630,13 @@ $(O)/$(IYI_DAEMON_BIN): $(DEPS) $(SOURCES)
 	$(EXPORTS) $(EXPORTS_BUILD) IYI_CONFIG_PATH='$$ORIGIN/../share/iyi/src:$$ORIGIN/../share/iyi/crystal:$$ORIGIN/../src' \
 	  ./bin/crystal build $(FLAGS) $(COMPILER_FLAGS) $(BINARY_GC_FLAGS) $(SELF_RPATH) -Dwithout_mt -o $@ src/compiler/iyi.cr
 	@echo "built $@ — \`iyi daemon start\` finds it beside iyi"
+
+# The self-hosted tool depends on its compiler and library sources, including
+# the runtime IR embedded by the backend.
+$(O)/iyi-compile$(EXE): $(O)/iyi$(EXE) $(shell find src -name '*.iyi' -o -name '*.ir')
+	@mkdir -p $(O)
+	$(O)/iyi$(EXE) build -o $@ src/compiler/tools/compile.iyi
+	@echo "built $@"
 
 # iyi: the front end on its own. Linking libLLVM costs 26 ms of load-time
 # initialisers whether or not anything generates code, and `--no-codegen` never

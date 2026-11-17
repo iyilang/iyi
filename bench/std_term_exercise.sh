@@ -180,14 +180,26 @@ def stty_kernel_free(text):
     # darwin ships writes gfmt1:cflag=...:iflag=...:lflag=...:..., which
     # this read as GNU's until a Mac whose PATH had no coreutils gnubin in
     # front (CI puts it there) failed with `int('lflag=200005cb', 16)`.
-    fields = text.split(":")
     if not KERNEL_LFLAG:
         return text
-    if fields[0] == "gfmt1":
-        fields = [f"lflag={int(f[6:], 16) & ~KERNEL_LFLAG:x}" if f.startswith("lflag=") else f for f in fields]
+    fields = text.split(":")
+    if fields and fields[0] == "gfmt1":
+        for i, f in enumerate(fields):
+            if f.startswith("lflag="):
+                try:
+                    name, val = f.split("=", 1)
+                    fields[i] = f"{name}={format(int(val, 16) & ~KERNEL_LFLAG, 'x')}"
+                except ValueError:
+                    pass
+                break
+        return ":".join(fields)
     elif len(fields) > 3:
-        fields[3] = format(int(fields[3], 16) & ~KERNEL_LFLAG, "x")
-    return ":".join(fields)
+        try:
+            fields[3] = format(int(fields[3], 16) & ~KERNEL_LFLAG, "x")
+        except ValueError:
+            return text
+        return ":".join(fields)
+    return text
 
 
 

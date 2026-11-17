@@ -1,0 +1,10 @@
+# The union is the local's emitted IR type when flow analysis narrows its read
+# to Int64 after this loop. The gate supplies each operand position in turn.
+def write_until_done(total : Int64) : Nil
+  written = 0_i64
+  while written < total
+    n = total
+    break if n <= 0_i64
+    written = written + n
+  end
+end

@@ -1,0 +1,81 @@
+; iyi-ir 1
+module "jump_loop"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external i32 @printf(ptr, ...)
+@fmt = private constant [4 x i8] c"%d\0A\00"
+
+; A dense switch inside a loop. The loop state lives in memory, so there are no phi nodes. The arms come before the
+; switch block in the function, so every table target is a backward edge from it. %base is read only by arm 0, and
+; arm 0 is reached again on each later iteration that takes case 0, so %base stays live across the indexed branch.
+; The values 6 and 7 are outside the table (0 through 5) and take the default.
+define internal i32 @run(i32 %count) {
+entry:
+  %acc = alloca i32, align 4
+  %i = alloca i32, align 4
+  %base = mul i32 %count, 7
+  store i32 0, ptr %acc, align 4
+  store i32 0, ptr %i, align 4
+  br label %head
+head:
+  %iv = load i32, ptr %i, align 4
+  %more = icmp slt i32 %iv, %count
+  br i1 %more, label %body, label %done
+a0:
+  %av0 = load i32, ptr %acc, align 4
+  %t0 = add i32 %av0, %base
+  %v0 = add i32 %t0, 1
+  store i32 %v0, ptr %acc, align 4
+  br label %next
+a1:
+  %av1 = load i32, ptr %acc, align 4
+  %v1 = add i32 %av1, 2
+  store i32 %v1, ptr %acc, align 4
+  br label %next
+a2:
+  %av2 = load i32, ptr %acc, align 4
+  %v2 = add i32 %av2, 3
+  store i32 %v2, ptr %acc, align 4
+  br label %next
+a3:
+  %av3 = load i32, ptr %acc, align 4
+  %v3 = add i32 %av3, 4
+  store i32 %v3, ptr %acc, align 4
+  br label %next
+a4:
+  %av4 = load i32, ptr %acc, align 4
+  %v4 = add i32 %av4, 5
+  store i32 %v4, ptr %acc, align 4
+  br label %next
+a5:
+  %av5 = load i32, ptr %acc, align 4
+  %v5 = add i32 %av5, 6
+  store i32 %v5, ptr %acc, align 4
+  br label %next
+other:
+  %ao = load i32, ptr %acc, align 4
+  %vo = sub i32 %ao, 3
+  store i32 %vo, ptr %acc, align 4
+  br label %next
+next:
+  %nv = load i32, ptr %i, align 4
+  %ni = add i32 %nv, 1
+  store i32 %ni, ptr %i, align 4
+  br label %head
+body:
+  %bv = load i32, ptr %i, align 4
+  %k = and i32 %bv, 7
+  switch i32 %k, label %other [ i32 0, label %a0, i32 1, label %a1, i32 2, label %a2, i32 3, label %a3, i32 4, label %a4, i32 5, label %a5 ]
+done:
+  %r = load i32, ptr %acc, align 4
+  ret i32 %r
+}
+
+define i32 @main() {
+entry:
+  %c = call i32 (i32) @run(i32 20)
+  %d = call i32 (i32) @run(i32 3)
+  %r = call i32 (ptr, ...) @printf(ptr @fmt, i32 %c)
+  %s = call i32 (ptr, ...) @printf(ptr @fmt, i32 %d)
+  ret i32 0
+}

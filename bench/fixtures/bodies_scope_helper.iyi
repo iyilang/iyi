@@ -1,0 +1,11 @@
+module bodies_scope_helper
+
+pub class ScopeBox
+  def value
+    7
+  end
+end
+
+pub def scope_value : Int32
+  11
+end

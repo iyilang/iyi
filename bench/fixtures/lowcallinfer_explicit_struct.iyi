@@ -1,0 +1,14 @@
+struct Cell(T)
+  def initialize(@value : T)
+  end
+
+  def value : T
+    @value
+  end
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+LibC.exit(Cell(Int32).new(7).value)

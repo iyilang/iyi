@@ -1,0 +1,11 @@
+def bool_or_break(flag : Bool, &)
+  yield
+  flag ? 2 : false
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+value = bool_or_break(true) { break 1 }
+LibC.exit(value.is_a?(Int32) ? value : 0)

@@ -1,0 +1,16 @@
+@[Unsafe("calls C exit after a nullable abstract-typed argument")]
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+abstract class Base
+end
+
+class Child < Base
+end
+
+def answer(value : Base?) : Int32
+  42
+end
+
+LibC.exit(answer(nil))

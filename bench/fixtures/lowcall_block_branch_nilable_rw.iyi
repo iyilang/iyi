@@ -1,0 +1,49 @@
+@[Unsafe("reports branch-yield local state")]
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+class Counter
+  @value : Int32
+
+  def initialize
+    @value = 0
+  end
+
+  def increment
+    @value = @value &+ 1
+  end
+
+  def value : Int32
+    @value
+  end
+end
+
+def choose(flag : Bool, &)
+  if flag
+    yield
+  else
+    i = 0
+    while i < 3
+      yield
+      i = i &+ 1
+    end
+  end
+end
+
+def collect : Int32
+  counter : Counter? = nil
+  choose(false) do
+    current = counter
+    if current
+      current.increment
+    else
+      current = Counter.new
+      current.increment
+    end
+    counter = current
+  end
+  counter.nil? ? 0 : counter.value
+end
+
+LibC.exit(collect)

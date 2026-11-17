@@ -1,0 +1,23 @@
+struct Item
+  @value : Int32
+
+  def initialize(@value : Int32)
+  end
+end
+
+class K
+  @@value : Item? = nil
+
+  def self.touch : Nil
+    @@value
+    nil
+  end
+end
+
+K.touch
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+LibC.exit(0)

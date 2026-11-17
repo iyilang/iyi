@@ -1,0 +1,29 @@
+class Node
+end
+
+class First < Node
+end
+
+class Second < Node
+end
+
+def choose(n : Int32) : Node
+  if n == 0
+    First.new
+  else
+    Second.new
+  end
+end
+
+def cast_node(node : Node) : First?
+  stored = node
+  stored.as?(First)
+end
+
+if cast_node(choose(0)).nil?
+  1
+elsif cast_node(choose(1)).nil?
+  0
+else
+  2
+end

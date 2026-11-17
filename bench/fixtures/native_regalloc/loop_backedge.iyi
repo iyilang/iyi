@@ -1,0 +1,25 @@
+module loop_backedge
+
+def loopy(n : Int64, k : Int64) : Int64
+  kk = k * 5_i64
+  kq = k + 3_i64
+  i = 0_i64
+  acc = 0_i64
+  prev = 1_i64
+  while i < n
+    t1 = i * k
+    t2 = t1 + prev
+    t3 = t2 + kk
+    acc2 = acc + t3
+    cur = t2 + kq
+    i2 = i + 1_i64
+    i = i2
+    acc = acc2
+    prev = cur
+  end
+  acc + kq
+end
+
+puts "#{loopy(10_i64, 3_i64)}"
+puts "#{loopy(0_i64, 3_i64)}"
+puts "#{loopy(25_i64, -2_i64)}"

@@ -1,0 +1,34 @@
+# A def whose result has more words than there are result registers: nine Int64 fields. The native back end
+# returns it through memory (the address in the indirect-result register). bench/native_whole_program_exercise.sh.
+struct Nine
+  getter a : Int64
+  getter b : Int64
+  getter c : Int64
+  getter d : Int64
+  getter e : Int64
+  getter f : Int64
+  getter g : Int64
+  getter h : Int64
+  getter i : Int64
+
+  def initialize(@a : Int64, @b : Int64, @c : Int64, @d : Int64, @e : Int64, @f : Int64, @g : Int64, @h : Int64, @i : Int64)
+  end
+
+  def sum : Int64
+    @a + @b + @c + @d + @e + @f + @g + @h + @i
+  end
+end
+
+def make(seed : Int64) : Nine
+  Nine.new(seed, seed + 1_i64, seed + 2_i64, seed + 3_i64, seed + 4_i64, seed + 5_i64, seed + 6_i64, seed + 7_i64, seed + 8_i64)
+end
+
+def twice(n : Nine) : Nine
+  Nine.new(n.a * 2_i64, n.b * 2_i64, n.c * 2_i64, n.d * 2_i64, n.e * 2_i64, n.f * 2_i64, n.g * 2_i64, n.h * 2_i64, n.i * 2_i64)
+end
+
+first = make(10_i64)
+second = twice(first)
+puts first.sum
+puts second.sum
+puts second.i

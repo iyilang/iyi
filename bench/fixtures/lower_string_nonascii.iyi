@@ -1,0 +1,5 @@
+def keep(s : String) : Nil
+  nil
+end
+
+keep("héllo wörld ünïcode text")

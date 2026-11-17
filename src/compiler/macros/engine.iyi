@@ -1,0 +1,156 @@
+module compiler/macros/engine
+
+import compiler/syntax/ast::{ASTNode, Call, Expressions, Macro, MacroLiteral}
+import compiler/syntax/parser::{Parser}
+import compiler/semantic/normalizer::{Normalizer, NormalizerProgram}
+import compiler/macros/ast
+import compiler/macros/methods::{MacroMethods}
+import compiler/macros/target_flags::{MacroTargetFlags}
+import compiler/macros/interpreter::{MacroInterpreter, MacroFailure, MacroFreeBinding}
+import compiler/macros/type_facts::{MacroTypeFacts}
+import compiler/macros/macro_parser::{MacroParser}
+
+# One `{% %}` or `{{ }}` site at the top of a macro body that ran to its end,
+# with the text it expanded to and where it is written.
+pub class MacroSite
+  property kind : String
+  property line : Int32
+  property column : Int32
+  property text : String
+
+  def initialize(@kind : String, @line : Int32, @column : Int32, @text : String)
+  end
+end
+
+# How one expansion went: its sites in source order, the whole output, and how
+# it ended. An expansion ends early on `skip_file` (`skipped`) or on a failure.
+pub class MacroReport
+  property sites : Array(MacroSite)
+  property output : String
+  property skipped : Bool
+  property failure : MacroFailure?
+
+  def initialize(@sites : Array(MacroSite), @output : String, @skipped : Bool, @failure : MacroFailure?)
+  end
+end
+
+pub class MacroEngine
+  property interpreter : MacroInterpreter
+  property flags : Array(String)
+
+  # `flags` is the flag set `flag?` answers from, built by `MacroTargetFlags` for
+  # the target being compiled for. Left out, it is the host's.
+  def initialize(flags : Array(String)? = nil)
+    if f = flags
+      @flags = f
+    else
+      @flags = MacroTargetFlags.host([] of String)
+    end
+    @interpreter = MacroInterpreter.new(nil, @flags)
+  end
+
+  # Expands one call of a macro and reports each top-level site with the text
+  # it expanded to. The sites share one interpreter, so variables and fresh
+  # names carry from one site to the next, as they do within one expansion.
+  def report(a_macro : Macro, call : Call) : MacroReport
+    interp = MacroInterpreter.new(call.block, @flags)
+    interp.bind_args(a_macro, call)
+
+    body = a_macro.body
+    nodes = [] of ASTNode
+    if body.is_a?(Expressions)
+      nodes = body.as(Expressions).expressions
+    else
+      nodes << body
+    end
+
+    sites = [] of MacroSite
+    i = 0
+    while i < nodes.size && !interp.halted?
+      node = nodes[i]
+      before = interp.to_s
+      interp.interpret(node)
+      if !interp.halted? && !node.is_a?(MacroLiteral)
+        after = interp.to_s
+        line = 0
+        column = 0
+        if loc = node.location
+          line = loc.line_number
+          column = loc.column_number
+        end
+        text = after[before.bytesize, after.bytesize - before.bytesize]
+        sites << MacroSite.new(MacroMethods.node_class_name(node), line, column, text)
+      end
+      i = i + 1
+    end
+
+    MacroReport.new(sites, interp.to_s, interp.skipped, interp.failure)
+  end
+
+  # Expands one top-level site as the hosted compiler expands an inline macro:
+  # with a fresh interpreter, so no variable carries from one site to the next.
+  # `scope_name` is what `@type` and `@top_level` name. `bindings` are the type
+  # parameters in scope at the site: the instantiated owner's and the free
+  # variables of the def the site is written in (hosted macros.cr 143-147:
+  # expand_macro(node, scope, path_lookup, free_vars, a_def)). None at the top
+  # level and in a type body.
+  def site_report(site : ASTNode, scope_name : String = "<Program>", bindings : Array(MacroFreeBinding)? = nil, facts : MacroTypeFacts? = nil) : MacroReport
+    interp = MacroInterpreter.new(nil, @flags, scope_name)
+    interp.type_facts = facts
+    if bound = bindings
+      interp.bind_free_vars(bound)
+    end
+    interp.interpret(site)
+
+    line = 0
+    column = 0
+    if loc = site.location
+      line = loc.line_number
+      column = loc.column_number
+    end
+    sites = [] of MacroSite
+    sites << MacroSite.new(MacroMethods.node_class_name(site), line, column, interp.to_s)
+    MacroReport.new(sites, interp.to_s, interp.skipped, interp.failure)
+  end
+
+  def expand_to_s(a_macro : Macro, call : Call) : String
+    rep = report(a_macro, call)
+    if f = rep.failure
+      raise f.message
+    end
+    rep.output
+  end
+
+  # The expansion's nodes are in the file of the call that expands them: the names that file imports
+  # are in scope for what the macro writes there (a `getter table : TypeTable` in a file that imports
+  # TypeTable). Parsed with no file name, they were in no file, and a def among them was typed with no
+  # imports at all.
+  def expand(a_macro : Macro, call : Call, normalizer : NormalizerProgram) : ASTNode
+    expanded = expand_or_failure(a_macro, call, normalizer)
+    if expanded.is_a?(MacroFailure)
+      raise expanded.message
+    end
+    expanded
+  end
+
+  # The expansion, or the failure that stopped it: a macro that raises, or one that calls a macro method this
+  # engine does not port. A caller that can refuse the call where it is written answers with this.
+  def expand_or_failure(a_macro : Macro, call : Call, normalizer : NormalizerProgram) : ASTNode | MacroFailure
+    rep = report(a_macro, call)
+    if f = rep.failure
+      return f
+    end
+    file = ""
+    if loc = call.location
+      file = loc.filename
+    end
+    parser = Parser.new(rep.output, file)
+    node = parser.parse
+    Normalizer.new(normalizer).normalize(node)
+  end
+
+  def expand(source : String) : ASTNode
+    the_macro, the_call = MacroParser.parse_fixture(source)
+    expand(the_macro, the_call, NormalizerProgram.new)
+  end
+end

@@ -1,0 +1,13 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def mark : Bool
+  true
+end
+
+def both : Bool
+  mark && mark
+end
+
+LibC.exit(both ? 7 : 1)

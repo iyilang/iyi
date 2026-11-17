@@ -1,0 +1,24 @@
+@[Unsafe("calls C exit to report the proc result")]
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+struct Proc
+  @[Primitive(:proc_call)]
+  def probe_call(*args : *T) : R
+  end
+end
+
+class Counter
+  @@base : Int32 = 40
+
+  def self.add(value : Int32) : Int32
+    @@base &+ value
+  end
+
+  def self.adder : Proc(Int32, Int32)
+    ->(value : Int32) { add(value) }
+  end
+end
+
+LibC.exit(Counter.adder.probe_call(2))

@@ -1,0 +1,9 @@
+# The declared result is Nil even though the body leaves its argument.
+class NameReturn
+  def self.write(n : UInt64) : Nil
+    value = n
+    value
+  end
+end
+
+NameReturn.write(1_u64)

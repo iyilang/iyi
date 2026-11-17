@@ -1,0 +1,57 @@
+class Item
+  def score : Int32
+    9
+  end
+end
+
+def maybe_item(flag : Bool) : Item | Nil
+  if flag
+    Item.new
+  else
+    nil
+  end
+end
+
+def check_nil(x : Item | Nil)
+  if x.nil?
+    0
+  else
+    x.score
+  end
+end
+
+def check_unless(x : Item | Nil)
+  unless x
+    0
+  else
+    x.score
+  end
+end
+
+def check_not(x : Item | Nil)
+  if !x
+    0
+  else
+    x.score
+  end
+end
+
+x = maybe_item(true)
+a = if x.nil?
+      0
+    else
+      x.score
+    end
+b = unless x
+  0
+else
+  x.score
+end
+c = if !x
+      0
+    else
+      x.score
+    end
+d = check_nil(maybe_item(false))
+e = check_unless(maybe_item(false))
+f = check_not(maybe_item(false))

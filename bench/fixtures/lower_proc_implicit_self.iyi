@@ -1,0 +1,22 @@
+@[Unsafe("calls C exit to report a capturing proc result")]
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+struct Proc
+  @[Primitive(:proc_call)]
+  def probe_call(*args : *T) : R
+  end
+end
+
+class Doubler
+  def twice(value : Int32) : Int32
+    value &* 2
+  end
+
+  def maker : Proc(Int32, Int32)
+    ->(value : Int32) { twice(value) }
+  end
+end
+
+LibC.exit(Doubler.new.maker.probe_call(3) &+ 1)

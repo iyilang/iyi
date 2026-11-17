@@ -1,0 +1,5 @@
+a = 1
+p : Pointer(Int32)? = nil
+p = pointerof(a)
+p = nil
+nil

@@ -1,0 +1,12 @@
+# A register output and a register input. The template copies the input.
+def copy(n : Int32) : Int32
+  result = 0
+  asm("mov $0, $1" : "=r"(result) : "r"(n))
+  result
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+LibC.exit(copy(7))

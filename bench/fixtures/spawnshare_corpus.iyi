@@ -1,0 +1,171 @@
+# Each annotation is checked against hosted placement before the native verdict.
+@[Unsafe("tests field addresses and a trusted mutable type")]
+module bench/spawnshare_corpus
+
+class AssignedField
+  getter n : Int32
+  def initialize(@n : Int32); end
+  def bump; @n = @n + 1; end
+end
+
+class OpAssignedField
+  getter n : Int32
+  def initialize(@n : Int32); end
+  def bump; @n += 1; end
+end
+
+class MultiAssignedField
+  getter a : Int32
+  def initialize(@a : Int32, @b : Int32); end
+  def swap; @a, @b = @b, @a; end
+end
+
+class ParameterAssignedField
+  getter n : Int32
+  def initialize(@n : Int32); end
+  def reset(@n : Int32); end
+end
+
+class AddressedField
+  getter n : Int32
+  def initialize(@n : Int32); end
+  def address; pointerof(@n); end
+end
+
+class SetterField
+  property n : Int32
+  def initialize(@n : Int32); end
+end
+
+class BlockAssignedField
+  getter n : Int32
+  def initialize(@n : Int32); end
+  def bump; 3.times { @n = @n + 1 }; end
+end
+
+class ProcAssignedField
+  getter n : Int32
+  def initialize(@n : Int32); end
+  def bump; -> { @n = @n + 1; nil }; end
+end
+
+class BaseAssignedField
+  getter n : Int32
+  def initialize(@n : Int32); end
+  def bump; @n = @n + 1; end
+end
+class DerivedAssignedField < BaseAssignedField
+end
+
+module BumpingField
+  def bump; @n = @n + 1; end
+end
+class IncludedAssignedField
+  include BumpingField
+  getter n : Int32
+  def initialize(@n : Int32); end
+end
+
+class GenericAssignedField(T)
+  getter value : T
+  def initialize(@value : T); end
+  def put(value : T); @value = value; end
+end
+
+class ClassMacroAssignedField
+  getter n : Int32
+  def initialize(@n : Int32); end
+  {% if true %}
+    def bump; @n = @n + 1; end
+  {% end %}
+end
+
+class OuterField
+  getter n : Int32
+  def initialize(@n : Int32); end
+  class Inner
+    getter n : Int32
+    def initialize(@n : Int32); end
+    def bump; @n = @n + 1; end
+  end
+end
+class NestedFieldHolder
+  getter inner : OuterField::Inner
+  def initialize(@inner : OuterField::Inner); end
+end
+
+class InitializedField
+  getter n : Int32
+  def initialize(@n : Int32); end
+end
+
+@[Share]
+class TrustedAssignedField
+  getter n : Int32
+  def initialize(@n : Int32); end
+  def bump; @n = @n + 1; end
+end
+
+class DiscardedMacroArgument
+  getter n : Int32
+  def initialize(@n : Int32); end
+  macro drop(expression)
+  end
+  def poke; drop(@n = 1); end
+end
+
+class InlineMacroGap
+  getter n : Int32
+  def initialize(@n : Int32); end
+  def poke
+    {% if true %}
+      @n = 1
+    {% end %}
+  end
+end
+
+assigned = AssignedField.new(1)
+opassigned = OpAssignedField.new(1)
+multi = MultiAssignedField.new(1, 2)
+parameter = ParameterAssignedField.new(1)
+addressed = AddressedField.new(1)
+setter = SetterField.new(1)
+block = BlockAssignedField.new(1)
+proc = ProcAssignedField.new(1)
+inherited = DerivedAssignedField.new(1)
+included = IncludedAssignedField.new(1)
+generic = GenericAssignedField(Int32).new(1)
+classmacro = ClassMacroAssignedField.new(1)
+nestedfield = NestedFieldHolder.new(OuterField::Inner.new(1))
+initialized = InitializedField.new(1)
+trusted = TrustedAssignedField.new(1)
+macrocall = DiscardedMacroArgument.new(1)
+nested = OuterField.new(1)
+text = "shareable"
+gap = InlineMacroGap.new(1)
+gap.poke
+
+group do |g|
+  g.spawn { assigned.n } # hosted: stays
+  g.spawn { opassigned.n } # hosted: stays
+  g.spawn { multi.a } # hosted: stays
+  g.spawn { parameter.n } # hosted: stays
+  g.spawn { addressed.n } # hosted: stays
+  g.spawn { setter.n } # hosted: stays
+  g.spawn { block.n } # hosted: stays
+  g.spawn { proc.n } # hosted: stays
+  g.spawn { inherited.n } # hosted: stays
+  g.spawn { included.n } # hosted: stays
+  g.spawn { generic.value } # hosted: stays
+  g.spawn { classmacro.n } # hosted: stays
+  g.spawn { nestedfield.inner.n } # hosted: stays
+  g.spawn { assigned.n.as(Int32) } # hosted: stays
+  g.spawn { assigned.n.as?(Int32) } # hosted: stays
+  g.spawn { initialized.n } # hosted: parallel
+  g.spawn { trusted.n } # hosted: parallel
+  g.spawn { macrocall.n } # hosted: parallel
+  g.spawn { nested.n } # hosted: parallel
+  g.spawn { text.size } # hosted: parallel
+  g.spawn { gap.n } # hosted: stays; gap: in-def macro
+  nil
+end

@@ -1,0 +1,14 @@
+def named_pick(a, b)
+  a
+end
+
+def named_slot(a, b = nil, c = nil)
+  c
+end
+
+first = named_pick(a: 1, b: "s")
+again = named_pick(a: 2, b: "t")
+swapped = named_pick(b: "s", a: 1)
+retyped = named_pick(a: "s", b: 1)
+by_b = named_slot(1, b: 2)
+by_c = named_slot(1, c: 2)

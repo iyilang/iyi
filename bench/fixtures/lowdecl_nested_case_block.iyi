@@ -1,0 +1,27 @@
+@[Unsafe("reports nested case bindings")]
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def run(&)
+  yield
+end
+
+def maybe(flag : Bool) : Int32?
+  flag ? 7 : nil
+end
+
+case true
+when Bool
+  answer = run do
+    case maybe(true)
+    when Int32
+      7
+    else
+      3
+    end
+  end
+else
+  answer = 1
+end
+LibC.exit(answer)

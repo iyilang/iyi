@@ -1,0 +1,25 @@
+class Holder
+  @value : Int32
+
+  def initialize(@value : Int32)
+  end
+
+  def increment : Int32
+    @value = @value &+ 1
+    @value
+  end
+end
+
+class Child < Holder
+end
+
+def update(flag : Bool) : Int32
+  object = if flag
+             Holder.new(41)
+           else
+             Child.new(41)
+           end
+  object.increment
+end
+
+update(false)

@@ -1,0 +1,15 @@
+lib LibC
+  fun putchar(value : Int32) : Int32
+  fun exit(status : Int32) : NoReturn
+end
+
+def mark(value : Int32) : Int32
+  LibC.putchar(value)
+  value
+end
+
+def where(line = __LINE__, tag : Int32 = 0, other : Int32 = 1) : Int32
+  line &+ tag &- 65
+end
+
+LibC.exit(where(other: mark(66), tag: mark(65)))

@@ -1,0 +1,31 @@
+struct Point
+  @x : Int32
+  @y : Int32
+
+  def initialize(x : Int32, y : Int32)
+    @x = x
+    @y = y
+  end
+
+  def x : Int32
+    @x
+  end
+
+  def y : Int32
+    @y
+  end
+
+  def x=(val : Int32)
+    @x = val
+  end
+
+  def sum : Int32
+    @x &+ @y
+  end
+end
+
+fun main(argc : Int32, argv : Pointer(Pointer(UInt8))) : Int32
+  p = Point.new(10, 25)
+  p.x = 17
+  p.sum
+end

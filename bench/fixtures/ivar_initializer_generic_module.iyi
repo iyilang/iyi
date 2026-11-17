@@ -1,0 +1,38 @@
+class First
+  @number : Int32 = 7
+
+  def number : Int32
+    @number
+  end
+end
+
+class Second
+  @number : Int32 = 13
+
+  def number : Int32
+    @number
+  end
+end
+
+module Mark(U)
+  @marked : U = U.new
+
+  def marked : U
+    @marked
+  end
+end
+
+# The class and its included module bind different type parameters.
+class Holder(T)
+  include Mark(First)
+  @other : T? = nil
+end
+
+class Plain
+  include Mark(Second)
+end
+
+first = Holder(Second).new.marked.number
+second = Plain.new.marked.number
+puts "first=#{first},second=#{second}"
+raise "generic module initializers used the wrong binding" unless first == 7 && second == 13

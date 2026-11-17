@@ -1,0 +1,14 @@
+struct IyiAtomic
+  @[Primitive(:cmpxchg)]
+  def self.cmpxchg(pointer : Pointer(UInt64), expected : UInt64, desired : UInt64, success : Symbol, failure : Symbol) : Tuple(UInt64, Bool)
+  end
+end
+
+def compare(p : Pointer(UInt64), expected : UInt64, desired : UInt64) : Tuple(UInt64, Bool)
+  :cmpxchg
+  IyiAtomic.cmpxchg(p, expected, desired, :sequentially_consistent, :sequentially_consistent)
+end
+
+x = 0_u64
+compare(pointerof(x), 0_u64, 7_u64)
+nil

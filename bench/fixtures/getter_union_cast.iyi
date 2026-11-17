@@ -1,0 +1,63 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+fun __crystal_raise_cast_failed(from : Void*, to : Void*, location : Void*) : NoReturn
+  LibC.exit(91)
+end
+
+struct Left
+  def initialize(@value : Int32)
+  end
+
+  def value : Int32
+    @value
+  end
+end
+
+struct Right
+  def initialize(@value : Int32)
+  end
+
+  def value : Int32
+    @value
+  end
+end
+
+alias Choice = Left | Right | Nil
+
+class Holder
+  def initialize(@aux : Choice)
+  end
+
+  def aux : Choice
+    @aux
+  end
+end
+
+def check(good : Holder, other : Holder, empty : Holder) : Int32
+  score = good.aux.as(Left).value &+ other.aux.as(Right).value
+  stored = good.aux
+  score = score &+ stored.as(Left).value
+  score = score &+ (good.aux.is_a?(Left) ? 1 : 64)
+  score = score &+ (other.aux.is_a?(Left) ? 64 : 2)
+  maybe = good.aux.as?(Left)
+  if maybe.nil?
+    score = score &+ 64
+  else
+    score = score &+ 4 &+ maybe.as(Left).value
+  end
+  score = score &+ (other.aux.as?(Left).nil? ? 8 : 64)
+  score = score &+ (empty.aux.as?(Left).nil? ? 16 : 64)
+  score = score &+ (empty.aux.is_a?(Left) ? 64 : 32)
+  score
+end
+
+good = Holder.new(Left.new(7))
+other = Holder.new(Right.new(13))
+empty = Holder.new(nil)
+if ARGC_UNSAFE > 1
+  LibC.exit(other.aux.as(Left).value)
+else
+  LibC.exit(check(good, other, empty))
+end

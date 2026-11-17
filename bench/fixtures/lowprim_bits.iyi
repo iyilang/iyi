@@ -1,0 +1,20 @@
+# The bitwise and unchecked integer operators on Int32. bits(12, 10) is 14 | 8 | 6 = 28 with wrapping
+# adds (the checked `+` needs the raise function, which a bare program does not have). divs(20, 6)
+# is 3 and 2, so 5. shifts(8, 1) is 16 and 4, so 12. The status is 28 + 5 + 12 = 45.
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def bits(a : Int32, b : Int32) : Int32
+  (a | b) &+ (a & b) &+ (a ^ b)
+end
+
+def divs(a : Int32, b : Int32) : Int32
+  a.unsafe_div(b) &+ a.unsafe_mod(b)
+end
+
+def shifts(a : Int32, b : Int32) : Int32
+  a.unsafe_shl(b) &- a.unsafe_shr(b)
+end
+
+LibC.exit(bits(12, 10) &+ divs(20, 6) &+ shifts(8, 1))

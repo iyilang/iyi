@@ -1,0 +1,16 @@
+struct Box(T)
+  def set(v : T)
+    nil
+  end
+end
+
+def make_ptr : Pointer(Box(UInt64))
+  nil
+end
+
+def make_int_ptr : Pointer(Int32)
+  nil
+end
+
+# call make_ptr.value
+# call make_int_ptr.value

@@ -1,0 +1,27 @@
+module Outer
+  {% for k in ["Left", "Right"] %}
+    class {{ k.id }}
+      {% if flag?(:darwin) %}
+        def side : String
+          "{{ k.id }}"
+        end
+      {% end %}
+
+      {% for m in ["up", "down"] %}
+        def {{ m.id }} : Int32
+          1
+        end
+      {% end %}
+    end
+  {% end %}
+end
+
+{% begin %}
+  {% for t in ["Int8", "Int16"] %}
+    struct {{ t.id }}
+      def self.zero : self
+        0
+      end
+    end
+  {% end %}
+{% end %}

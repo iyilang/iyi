@@ -1,0 +1,15 @@
+class SeminlNest
+  {% if true %}
+    {% for n in %w(a b) %}
+      def {{ n.id }}_value : Int32
+        2
+      end
+    {% end %}
+  {% else %}
+    def other : Int32
+      3
+    end
+  {% end %}
+end
+
+SeminlNest.new.a_value

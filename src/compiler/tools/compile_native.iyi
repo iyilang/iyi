@@ -1,0 +1,221 @@
+# iyi-compile-native: compiles one program to a signed arm64 Mach-O executable, with no LLVM and no host tool.
+#
+#   iyi-compile-native <program.iyi> -o <exe> [--backend native] [--target aarch64-apple-darwin]
+#   iyi-compile-native <program.ir>  -o <exe> [--target aarch64-apple-darwin]
+#   iyi-compile-native <program.ir>  -o <exe>   with <program.ir>.imports beside it: one library per line, loaded too
+#   iyi-compile-native <program.iyi> -o <exe> --probe-phase   prints the phase each stage reached, and writes no executable on a refusal
+#
+# A .iyi program is compiled from source by the compiler pipeline with the native backend (compiler/backend/native).
+# A .ir program is IR text: it is parsed and verified, then compiled by the native backend the same way. Either way the
+# object is linked with the native runtime (rt/builtins.ir) by the native linker, which writes the signature too. No
+# host tool takes part: no ld, cc, clang, codesign or LLVM. A refusal names the function, construct or symbol, and the
+# tool exits 1 with no output written.
+#
+# Pipeline phases run as tasks, and body typing nests along the call graph; this tool requests 1 GiB fiber stacks
+# through IyiFiber.stack_bytes before its first task. Other programs keep 256 KiB.
+
+@[Unsafe("declares the C library exit to set the process status; the tool handles no raw memory")]
+module compiler/tools/compile_native
+
+import compiler/ir/parser::{parse, IrParseError}
+import compiler/ir/module::{Module}
+import compiler/ir/verifier::{verify}
+import compiler/native/driver::{link_native_program}
+import compiler/native/rt/builtins_text::{builtins_ir}
+import compiler/native/rt/start_wasm32_text::{start_wasm32_ir}
+import compiler/native/wasm/codegen::{compile_wasm}
+import compiler/native/emit::{to_bytes}
+import compiler/native/link/link::{LinkedImage}
+import compiler/compiler::{Compiler, CompilerConfig}
+import compiler/loader::{Loader}
+import compiler/backend/backend::{Backend}
+import compiler/backend/native::{NativeBackend}
+import std/file
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+module CompileNative
+  TARGET = "aarch64-apple-darwin"
+  # Headroom for the compiler pipeline's nested body typing.
+  PHASE_STACK_BYTES = 1073741824_u64
+
+  def self.fail(message : String) : Nil
+    STDERR.puts "iyi-compile-native: #{message}"
+    LibC.exit(1)
+  end
+
+  # Parses an IR text and verifies it. Every rule it breaks is printed, naming its function.
+  def self.module_of(text : String, name : String) : Module
+    parsed = parse(text)
+    if parsed.is_a?(IrParseError)
+      fail("#{name}: #{parsed.to_s}")
+    end
+    mod = parsed.as(Module)
+    errors = verify(mod)
+    errors.each do |e|
+      where = e.function
+      unless where.nil?
+        STDERR.puts "iyi-compile-native: #{name}: in function #{where}: #{e.message}"
+      else
+        STDERR.puts "iyi-compile-native: #{name}: #{e.message}"
+      end
+    end
+    fail("#{name}: the IR is not well formed") unless errors.empty?
+    mod
+  end
+
+  # The libraries named beside an IR program, in `<program.ir>.imports`: one name per line, blank lines and lines
+  # that start with `#` skipped. IR written by this compiler names each import's library itself (`import "Security"`);
+  # IR bridged from the hosted compiler carries no @[Link], so what the program's lib blocks link is written beside
+  # it (SPEC 2.3). No file means no library beyond libSystem.
+  def self.sidecar_libraries(input : String) : Array(String)
+    names = [] of String
+    path = input + ".imports"
+    return names unless File.exists?(path)
+    File.read(path).split('\n').each do |line|
+      name = line.strip
+      names << name unless name.empty? || name.starts_with?("#")
+    end
+    names
+  end
+
+  def self.run : Nil
+    IyiFiber.stack_bytes = PHASE_STACK_BYTES
+    args = Program.args
+    if args.size < 3 || args[1] != "-o"
+      fail("usage: iyi-compile-native <program.iyi|program.ir> -o <exe> [--backend native] [--target #{TARGET}]")
+    end
+    input = args[0]
+    output = args[2]
+    target = TARGET
+    probe = false
+    prelude = false
+    emit_ir = false
+    print_backend = false
+    asked_llvm = false
+    typed = false
+    keep_going = false
+    stub_refused = false
+    stub_also = [] of String
+    i = 3
+    while i < args.size
+      if args[i] == "--target" && i + 1 < args.size
+        target = args[i + 1]
+        i = i + 2
+      elsif args[i] == "--backend" && i + 1 < args.size
+        # The native backend is the only backend this tool has. LLVM is refused once the arguments are read, with the
+        # message a compiler without it gives, so --target is known. Any other name is refused by name.
+        if args[i + 1] == "llvm"
+          asked_llvm = true
+        elsif args[i + 1] != "native"
+          fail("this tool has only the native backend, and #{args[i + 1]} was asked for")
+        end
+        i = i + 2
+      elsif args[i] == "--keep-going"
+        keep_going = true
+        i = i + 1
+      elsif args[i] == "--stub-refused"
+        stub_refused = true
+        i = i + 1
+      elsif args[i].starts_with?("--stub-also=")
+        stub_also << args[i]["--stub-also=".size..-1]
+        i = i + 1
+      elsif args[i] == "--probe-phase"
+        probe = true
+        i = i + 1
+      elsif args[i] == "--prelude"
+        prelude = true
+        i = i + 1
+      elsif args[i] == "--pipeline" && i + 1 < args.size
+        # `typed` builds a source program through the typed analysis and lowering (compiler/lower/program); `codegen`
+        # is the pipeline this tool has always used, and the default.
+        if args[i + 1] == "typed"
+          typed = true
+        elsif args[i + 1] != "codegen"
+          fail("the pipelines are typed and codegen, and #{args[i + 1]} was asked for")
+        end
+        i = i + 2
+      elsif args[i] == "--print-backend"
+        print_backend = true
+        i = i + 1
+      elsif args[i] == "--emit" && i + 1 < args.size && args[i + 1] == "ir"
+        emit_ir = true
+        i = i + 2
+      else
+        fail("unknown argument #{args[i]}")
+      end
+    end
+    fail("--stub-refused requires --pipeline typed") if stub_refused && !typed
+    fail("--stub-also requires --stub-refused") if !stub_also.empty? && !stub_refused
+    if asked_llvm
+      STDERR.puts(Backend.no_backend_message(target))
+      LibC.exit(1)
+    end
+    if print_backend
+      print "#{Backend.backend_for(target)}\n"
+      return nil
+    end
+    unless target == TARGET || target == "wasm32-wasi"
+      fail("the native backend builds #{TARGET} and wasm32-wasi only, and #{target} was asked for")
+    end
+    unless File.exists?(input)
+      fail("no such file: #{input}")
+    end
+    if input.ends_with?(".iyi")
+      # Source mode: the pipeline runs with the native backend, so the build links no LLVM. A refusal raises here, by
+      # name, before the output is written.
+      unless target == TARGET
+        fail("source programs build for #{TARGET} with the native backend, and #{target} was asked for")
+      end
+      config = CompilerConfig.new(output, false, nil, false, target, probe, false, false, typed)
+      config.keep_going = keep_going
+      config.stub_refused = stub_refused
+      config.stub_also = stub_also
+      loader = Loader.new
+      loader.load_prelude = prelude
+      compiler = Compiler.new(config, loader, NativeBackend.new)
+      compiler.emit_ir = emit_ir
+      compiler.compile(input)
+      refusal = compiler.refusal
+      unless refusal.nil?
+        fail(refusal.as(String))
+      end
+      print "BUILT #{output}\n" unless probe || emit_ir
+      return nil
+    end
+    fail("--pipeline typed builds a source program, and #{input} is already IR") if typed
+    fail("--emit ir writes the IR of a source program, and #{input} is already IR") if emit_ir
+    mod = module_of(File.read(input), input)
+    if target == "wasm32-wasi"
+      unless mod.target.architecture == "wasm32" && mod.target.wasi?
+        fail("#{input}: the module's target is not wasm32-wasi")
+      end
+      runtime = module_of(start_wasm32_ir, "rt/start_wasm32.ir")
+      built = compile_wasm(mod, runtime)
+      if built.is_a?(String)
+        fail("#{input}: #{built.as(String)}")
+      end
+      bytes = built.as(Array(UInt8))
+      File.write(output, String.new(to_bytes(bytes)))
+      print "BUILT #{output} #{bytes.size}\n"
+      return nil
+    end
+    unless mod.target.architecture == "aarch64" && mod.target.darwin?
+      fail("#{input}: the module's target is not #{TARGET}")
+    end
+    runtime = module_of(builtins_ir, "rt/builtins.ir")
+    parts = output.split('/')
+    result = link_native_program(mod, runtime, parts[parts.size - 1], sidecar_libraries(input))
+    if result.is_a?(String)
+      fail("#{input}: #{result.as(String)}")
+    end
+    image = result.as(LinkedImage)
+    File.write(output, String.new(image.executable))
+    File.chmod(output, 493)
+    print "BUILT #{output} #{image.executable.size}\n"
+  end
+end
+
+CompileNative.run

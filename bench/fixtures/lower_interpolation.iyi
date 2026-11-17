@@ -1,0 +1,18 @@
+class String
+  def initialize
+    @length = 1
+  end
+
+  def length : Int32
+    @length
+  end
+
+  def self.interpolation(first : String, value : Int32, last : String) : String
+    first.length
+    first
+  end
+end
+
+value = 42
+"a#{value}b"
+nil

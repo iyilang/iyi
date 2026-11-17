@@ -1,0 +1,18 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+CONFIG_PATH = {{ "$ORIGIN/../src" }}
+VALUE = 2
+
+class Left
+  VALUE = {{ 5 }}
+end
+
+class Right
+end
+
+Right::VALUE = {% if true %}7{% else %}1{% end %}
+
+CONFIG_PATH
+LibC.exit(VALUE &+ Left::VALUE &+ Right::VALUE)

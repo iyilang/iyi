@@ -1,0 +1,5 @@
+def streaming_example : Int32
+  missing_streamed_method
+end
+
+streaming_example

@@ -1,0 +1,1923 @@
+module compiler/lower/lower
+
+# The port of the entry and the expression visitor of `src/compiler/iyi/codegen/codegen.cr`:
+# `codegen` of the program, `__crystal_main` and `main`, and the dispatch over the nodes the
+# core ports. Every node the core does not port goes to `pending.iyi` by name.
+#
+# The emitted shape is the hosted one: `__crystal_main` takes `argc` and `argv`, stores them
+# in the `ARGC_UNSAFE` and `ARGV_UNSAFE` globals, lowers the program's expressions, and returns
+# the type of the last one (void for `Nil`); `main` calls it and returns 0. The hosted build
+# constants (the `::BUILD_*` globals, which the program stores on entry) are not emitted: they
+# are the compiler's identity, not the program's, and the gate leaves them out on both sides.
+#
+# Ported: the entry; `nil`, integer, boolean and char literals; sequences; `Var` (a load) and
+# `Assign` to a variable (an alloca and a store); `if`, `unless` and `&&`/`||` as branches
+# merged by a phi, with a literal `true`, `false` or `nil` condition folded as the hosted code
+# folds it; `!` as an `xor`; `while` with `break` and `next`. Dead code after a `break` or
+# `next` in the same sequence is refused by name.
+
+import compiler/syntax/ast::{ASTNode, Alias, And, Assign, BoolLiteral, Break, Cast, CharLiteral, Call, ClassDef, ClassVar, Def, Expressions, If, ImportDecl, InstanceVar, LibDef, Macro, ModuleDef, Next, Nop, Not, NilLiteral, NilableCast, NumberLiteral, Or, Path, PointerOf, Primitive, ProcLiteral, RespondsTo, Return, StringLiteral, SymbolLiteral, TypeDeclaration, Unless, UninitializedVar, Var, While, IsA, Yield}
+import compiler/syntax/ast::{VisibilityModifier, ArrayLiteral, HashLiteral, RangeLiteral, MultiAssign, Select, StringInterpolation}
+import compiler/syntax/ast::{NamedTupleLiteral, EnumDef}
+import compiler/syntax/ast::{Underscore}
+import compiler/syntax/ast::{AssocTypeDecl, ImplDef, TraitDef}
+import compiler/types/types::{NamedTupleInstanceType}
+import compiler/syntax/ast::{TupleLiteral, Splat, Generic}
+import compiler/syntax/ast::{ReadInstanceVar}
+import compiler/syntax/ast::{ExceptionHandler, Case}
+import compiler/syntax/ast::{MacroIf, MacroFor, MacroExpression, MacroVerbatim}
+import compiler/syntax/ast::{Include, Extend}
+import compiler/syntax/ast::{ModuleHeader, UsingDecl}
+import compiler/types/types::{TupleInstanceType}
+import compiler/types/types::{GenericClassInstanceMetaclassType}
+import compiler/lower/helpers::{build_string_constant}
+import compiler/lower/symbols::{SymbolCollector, emit_symbol_table, codegen_symbol}
+import compiler/lower/type_id::{LowerTypeIds}
+import compiler/ir/module::{Module}
+import compiler/ir/function::{Function, Linkage}
+import compiler/ir/inst::{Block, CallConv}
+import compiler/ir/types::{IrType}
+import compiler/ir/values::{Value}
+import compiler/lower/typer::{LowerTyper, passed_by_value?}
+import compiler/types/types::{MixedUnionType, ReferenceUnionType, NilableType, NilableReferenceUnionType, NilableProcType, PointerInstanceType, ProcInstanceType, TypeQueries, VirtualType}
+import compiler/lower/context::{BodyVisit, BranchPhi, Lowerer, LowerVar}
+import compiler/lower/locals::{preallocate_locals}
+import compiler/lower/helpers::{abi_name, int1, llvm_nil, load_aligned, store_aligned, at_terminator?, raise_overflow_name}
+import compiler/lower/cond::{cond_bool, nil_condition?}
+import compiler/lower/phi::{LowerPhi}
+import compiler/lower/pending::{refuse_port, pending_visit_node}
+import compiler/lower/call::{codegen_call_node, codegen_responds_to, responds_to_value, declare_lib_var}
+import compiler/lower/block::{branch_to_phi, lower_yield}
+import compiler/lower/ensure::{lower_exception_handler, execute_ensures_until, set_ensure_exception_handler}
+import compiler/lower/fun::{block_ended?, declared_or_defined_fun, function_attributes, target_def_fun, clear_fun_emission_done}
+import compiler/ir/verifier::{verify_function}
+import compiler/lower/primitives::{iyi_gc_arena?}
+import compiler/lower/primitives::{raise_cast_failed}
+import compiler/lower/gc_table::{define_gc_layouts}
+import compiler/lower/proc::{lower_proc_literal}
+import compiler/lower/closure::{allocate_closure}
+import compiler/semantic/closures::{ClosureFacts}
+import compiler/semantic/spawn_placement::{SpawnAnalysis, SpawnTarget, spawn_call?}
+import compiler/lower/cast::{assign, downcast, match_type_id, mixed_union_type?, pointer_of_value, to_lhs, to_rhs, type_id_of_value, type_id_value, union_temp, upcast}
+import compiler/semantic/main_visitor::{MainVisitor, node_class_name}
+import compiler/semantic/top_level::{Type, NilType, MetaclassType, UnionType, TopLevelVisitor}
+import compiler/semantic/top_level::{LibType}
+import compiler/lower/const::{codegen_path, codegen_path_assign, initialize_program_constants, path_const, literal_of_type}
+import compiler/lower/class_var::{class_body_enter, class_body_leave, module_body_enter, codegen_class_var_read, codegen_class_var_assign, codegen_pointerof_class_var, codegen_type_declaration_class_var, in_class_body?, store_class_var}
+import compiler/lower/instance_var::{read_instance_var, self_argument}
+import compiler/lower/instance_var::{codegen_instance_var_read, codegen_pointerof_instance_var, store_instance_var}
+import compiler/syntax/ast::{FunDef}
+import compiler/syntax/ast::{Annotation}
+import compiler/syntax/ast::{Asm}
+import compiler/lower/asm::{codegen_asm}
+import compiler/semantic/top_level::{LibFun}
+import compiler/ir/inst::{Attribute}
+import compiler/syntax/token::{NumberKind}
+import compiler/lower/fun::{codegen_fun}
+import compiler/semantic/top_level::{NoReturnType}
+import compiler/types/indirection::{TypeIndirection}
+import compiler/types/intersect::{TypeIntersect}
+
+# The per-def probe the typed pipeline table reads (S3Pipeline): lowers one def's function into `m` the way a call
+# that reaches it does (fun.iyi target_def_fun), for the self type and argument types the caller gives. A refusal
+# raises (iyi has no rescue); the caller runs each probe in its own task and reads the message. The
+# instantiated def's type is its result, which can differ from the body's type.
+pub def lower_def_probe(target : Def, self_type : Type?, arg_types : Array(Type), analysed : MainVisitor, typer : LowerTyper, m : Module, probe_lowerer : Lowerer? = nil, prepared_ids : LowerTypeIds? = nil) : String?
+  low = probe_lowerer || Lowerer.new(m, typer, analysed)
+  low.body_visitor = CoreBody.new
+  program = analysed.program
+  ids = prepared_ids || LowerTypeIds.new
+  ids.assign_all(program.object_type) unless prepared_ids
+  low.type_ids = ids
+  low.string_type_id = ids.type_id(program.string_type)
+  initialize_probe_constants(low)
+  body_t = analysed.type_of?(target.body)
+  raise "BUG: the analysed program has no type for the body of #{target.name} (hosted codegen_fun: return type)" if body_t.nil?
+  result_t = analysed.type_of?(target) || body_t
+  built : Function? = nil
+  if self_type.is_a?(MetaclassType) && !self_type.is_a?(GenericClassInstanceMetaclassType)
+    built = target_def_fun(low, target, nil, arg_types, result_t.as(Type), self_type.as(MetaclassType).instance_type)
+  else
+    built = target_def_fun(low, target, self_type, arg_types, result_t.as(Type))
+  end
+  fn = built.as(Function)
+  errs = verify_function(m, fn)
+  unless errs.empty?
+    err = errs[0]
+    clear_fun_emission_done(m, fn.name)
+    m.remove_function(fn)
+    raise "error[#{err.kind}]: #{err.message}"
+  end
+  nil
+end
+
+def initialize_probe_constants(low : Lowerer) : Nil
+  m = low.module
+  i32 = m.types.int32
+  ptr = m.types.ptr(0)
+  argc_global = m.get_global?("ARGC_UNSAFE") || m.add_global("ARGC_UNSAFE", i32)
+  argc_global.linkage = Linkage::Internal
+  argc_global.initializer = low.builder.const_int(i32, 0)
+  argv_global = m.get_global?("ARGV_UNSAFE") || m.add_global("ARGV_UNSAFE", ptr)
+  argv_global.linkage = Linkage::Internal
+  argv_global.initializer = low.builder.const_null(ptr)
+  argc_state = low.globals.const_state("ARGC_UNSAFE")
+  argc_state.global = argc_global
+  argc_state.no_init_flag = true
+  argv_state = low.globals.const_state("ARGV_UNSAFE")
+  argv_state.global = argv_global
+  argv_state.no_init_flag = true
+end
+
+# Whether the program's root defines a top-level `fun main`, the prelude's C entry. Its own `main` then
+# stands, and the entry is not emitted a second time.
+def root_defines_main(root : ASTNode) : Bool
+  return false unless root.is_a?(Expressions)
+  nodes = root.as(Expressions).expressions
+  i = 0
+  while i < nodes.size
+    node = nodes[i]
+    return true if node.is_a?(FunDef) && node.as(FunDef).name == "main"
+    i += 1
+  end
+  false
+end
+
+# The hosted `codegen` of a program into `m`: the entry of the unit. `root` is the program's
+# parsed tree, `analysed` the semantic pass that typed it.
+pub def codegen_program(root : ASTNode, analysed : MainVisitor, typer : LowerTyper, m : Module, stub_defs : Hash(String, String)? = nil, stubbed_defs : Hash(String, String)? = nil, context_out : Array(Lowerer)? = nil) : Nil
+  low = Lowerer.new(m, typer, analysed)
+  if contexts = context_out
+    contexts << low
+  end
+  if defs = stub_defs
+    low.stub_defs = defs
+  end
+  if emitted = stubbed_defs
+    low.stubbed_defs = emitted
+  end
+  low.body_visitor = CoreBody.new
+  low.spawn_analysis = SpawnAnalysis.analyse(analysed, root)
+  i32 = m.types.int32
+  ptr = m.types.ptr(0)
+
+  # The String type id and the symbol table come first, as the hosted constructor makes them before
+  # the module's own globals: the string constants carry the id, and the table points at them.
+  program = analysed.program
+  ids = LowerTypeIds.new
+  ids.assign_all(program.object_type)
+  low.type_ids = ids
+  low.string_type_id = ids.type_id(program.string_type)
+  collector = SymbolCollector.new
+  root.accept(collector)
+  emit_symbol_table(low, collector.names)
+
+  initialize_probe_constants(low)
+  argc_global = m.get_global?("ARGC_UNSAFE") || raise "BUG: missing ARGC_UNSAFE"
+  argv_global = m.get_global?("ARGV_UNSAFE") || raise "BUG: missing ARGV_UNSAFE"
+
+  program_type = analysed.type_of?(root)
+  raise "BUG: the analysed program has no type for its root expression (hosted codegen.cr: codegen)" if program_type.nil?
+  low.main_ret_type = program_type
+  ret_ir = typer.llvm_return_type(program_type.as(Type))
+  entry_type = m.types.func([i32, ptr] of IrType, ret_ir)
+
+  fn = low.begin_main_function(main_function_name(analysed), entry_type, true)
+  low.current_context.var_unions = analysed.var_unions
+  low.current_context.nil_resets = analysed.nil_resets
+  fn.linkage = Linkage::Internal
+  # Both program entries use the internal convention, including aggregate results.
+  fn.call_convention = CallConv::Iyi
+  fn.name_param(fn.param(0), "argc")
+  fn.name_param(fn.param(1), "argv")
+  store_aligned(low, fn.param(0), argc_global)
+  store_aligned(low, fn.param(1), argv_global)
+  initialize_program_constants(low)
+  emit_well_known_funs(low)
+  facts = ClosureFacts.new(analysed)
+  program_frame = facts.analyse_program(root)
+  low.current_context.closure_facts = facts
+  captured = [] of String
+  program_frame.closured.each { |var| captured << var.name }
+  preallocate_locals(low, root, captured)
+  allocate_closure(low, program_frame)
+  low.needs_value = true
+  codegen_node(low, root)
+  codegen_return(low, ret_ir)
+  low.finish_main_function
+  emit_unused_fun_defs(low)
+
+  # The C entry. The prelude's `fun main` is the entry when it is loaded: it starts the runtime and calls
+  # `__iyi_main`, this function, through LibIyiMain. A program with no `main` of its own gets this one.
+  unless root_defines_main(root)
+    main_fn = m.define_function("main", m.types.func([i32, ptr] of IrType, i32))
+    main_fn.call_convention = CallConv::C
+    main_fn.name_param(main_fn.param(0), "argc")
+    main_fn.name_param(main_fn.param(1), "argv")
+    main_entry = main_fn.append_basic_block("entry")
+    low.builder.position_at_end(main_entry)
+    low.builder.call(entry_type, fn, [main_fn.param(0), main_fn.param(1)] of Value, "")
+    low.builder.ret(low.builder.const_int(i32, 0))
+  end
+  # The arena's table and headed bytes are emitted together after all defs.
+  define_gc_layouts(low) if iyi_gc_arena?(low)
+  function_attributes(m)
+end
+
+# The hosted `visit(FunDef)` with a body (codegen.cr:842) for a fun the analysis recorded (lib_fun_of): its arguments and
+# return type are that record's. A fun is emitted once (`fun_defs_done`, hosted External#dead). A `fun` definition is a C
+# function (hosted External with no call_convention, call.cr:661), emitted with external linkage as a hosted External is;
+# a `__crystal_` or `__iyi_` name is internal instead, except the names asm refers to (hosted codegen_fun, fun.cr:763-781). A fun the program never calls is declared here,
+# as the hosted visit does (codegen.cr:864), and its body waits for emit_unused_fun_defs (the hosted @unused_fun_defs pass,
+# codegen.cr:747). A `well_known` fun is emitted on entry (see emit_well_known_funs).
+pub def codegen_fun_def(low : Lowerer, node : FunDef, well_known : Bool) : Nil
+  # Hosted visit(FunDef) (codegen.cr:849): a program with no pool neither calls __iyi_preempt nor carries it.
+  if node.name == "__iyi_preempt" && !pool_reached?(low)
+    return
+  end
+  rec_opt = low.analysed.program.lib_fun_of(node)
+  if rec_opt.nil?
+    pending_visit_node("visit(FunDef) #{node.name} with no record from the analysis (lib_fun_of)")
+    return
+  end
+  rec = rec_opt.as(LibFun)
+  name = rec.real_name
+  if low.fun_defs_done[name]?
+    return
+  end
+  if node.body.nil?
+    pending_visit_node("a fun #{name} with no body (hosted visit(FunDef) with an External that has no body)")
+    return
+  end
+  rt = rec.resolved_return
+  if rt.nil?
+    pending_visit_node("a fun #{name} with no resolved return type (lib_fun_of)")
+    return
+  end
+  low.fun_defs_done[name] = true
+  ret = rt.as(Type)
+  if !well_known && !rec.used
+    # The allocator can have declared __iyi_new already. Hosted codegen_fun (fun.cr:717-725)
+    # reuses that declaration before the unused-fun pass fills in its body.
+    fn = declared_or_defined_fun(low, name, fun_def_type(low, rec, ret))
+    fn.call_convention = CallConv::C
+    low.unused_fun_defs << node
+    return
+  end
+  emit_fun_def(low, node, rec, ret)
+end
+
+# The function type of a fun definition: its record's argument types and its return type, as llvm types.
+pub def fun_def_type(low : Lowerer, rec : LibFun, ret : Type) : IrType
+  params = [] of IrType
+  rec.arg_types.each do |t|
+    params << low.typer.llvm_type(t)
+  end
+  low.module.types.func(params, low.typer.llvm_return_type(ret))
+end
+
+# The body of a fun definition, lowered into its function (the hosted codegen_fun of a External).
+pub def emit_fun_def(low : Lowerer, node : FunDef, rec : LibFun, ret : Type) : Nil
+  name = rec.real_name
+  body = node.body
+  raise "BUG: fun #{name} has no body (hosted visit(FunDef))" if body.nil?
+  target = Def.new(node.name, node.args, body.as(ASTNode))
+  fn = codegen_fun(low, name, target, nil, rec.arg_types, fun_def_type(low, rec, ret), low.typer.llvm_return_type(ret), ret)
+  # Hosted fun.cr:842-855 propagates External annotations to the IR function.
+  fn.attrs << Attribute.new("naked", 0_u64, nil, nil) if rec.naked
+  fn.attrs << Attribute.new("noinline", 0_u64, nil, nil) if rec.no_inline
+  fn.attrs << Attribute.new("alwaysinline", 0_u64, nil, nil) if rec.always_inline
+  fn.attrs << Attribute.new("returns_twice", 0_u64, nil, nil) if rec.returns_twice
+  if ret.is_a?(NoReturnType)
+    fn.attrs << Attribute.new("noreturn", 0_u64, nil, nil)
+  end
+  # The hosted codegen_fun (fun.cr:763): a `__crystal_` or `__iyi_` name is internal (the optimiser may remove it), except
+  # the names asm refers to (`asm_referenced_fun?`), the personality on darwin (fun.cr:781), and `__iyi_new`, which the
+  # allocation declares and which stays external in the hosted module. Any other fun is external.
+  if name.starts_with?("__crystal_") || name.starts_with?("__iyi_")
+    if asm_referenced_fun?(name) || name == "__iyi_new" || (low.module.target.darwin? && name == abi_name(low, "personality"))
+      fn.linkage = Linkage::External
+    else
+      fn.linkage = Linkage::Internal
+    end
+  else
+    fn.linkage = Linkage::External
+  end
+end
+
+# The funs inline asm refers to by a literal name, which no pass can see (hosted fun.cr:778-780): they stay external
+# when the hosted code would internalise them. `__iyi_preempt` is the preemption check's name (codegen.cr PREEMPT_NAME).
+pub def asm_referenced_fun?(name : String) : Bool
+  name.starts_with?("__iyi_fiber_") || name.includes?("sigreturn") || name == "__iyi_preempt"
+end
+
+# The deferred pass for the funs the program never calls (hosted @unused_fun_defs, codegen.cr:747): each body is lowered
+# into the function its visit declared, once the program's own code is lowered.
+pub def emit_unused_fun_defs(low : Lowerer) : Nil
+  low.unused_fun_defs.each do |node|
+    rec_opt = low.analysed.program.lib_fun_of(node)
+    raise "BUG: unused fun #{node.name} has no record (lib_fun_of)" if rec_opt.nil?
+    rec = rec_opt.as(LibFun)
+    emit_fun_def(low, node, rec, rec.resolved_return.as(Type))
+  end
+end
+
+# The hosted codegen emits the runtime overflow function before lowering checked arithmetic.
+# The declaration may come from any unit, not just the entry root.
+pub def emit_well_known_funs(low : Lowerer, census : Bool = false) : Nil
+  if pool_reached?(low) && !census
+    if analysis = low.spawn_analysis
+      unless analysis.pool_proven
+        pending_visit_node("spawn classification of #{analysis.pool_site} is not ported (hosted cleanup_transformer.cr classify_spawn)")
+        return
+      end
+    end
+    refuse_reached_pool(low)
+    return
+  end
+  low.analysed.program.global_funs.each do |record|
+    next unless well_known_fun?(low, record.name)
+    next if record.name == "__iyi_preempt"
+    if node = record.node
+      codegen_fun_def(low, node, false)
+    end
+  end
+end
+
+# The probe module runs the same pre-visit once, before its per-def loop (program.iyi lowering_table).
+pub def emit_probe_well_known(m : Module, typer : LowerTyper, analysed : MainVisitor, census : Bool = false, analysis : SpawnAnalysis? = nil) : String?
+  low = Lowerer.new(m, typer, analysed)
+  low.body_visitor = CoreBody.new
+  low.spawn_analysis = analysis
+  example : String? = nil
+  if census
+    if analysis
+      example = analysis.pool_site
+    else
+      analysed.typed_instances.each do |inst|
+        if pool_start?(low, inst.definition, inst.self_type)
+          example = "IyiWorkers.start"
+          if loc = inst.definition.location
+            example = "#{loc.filename}:#{loc.line_number} in IyiWorkers.start"
+          end
+          break
+        end
+      end
+    end
+  end
+  emit_well_known_funs(low, census)
+  example
+end
+
+def well_known_fun?(low : Lowerer, name : String) : Bool
+  name == abi_name(low, "malloc64") || name == abi_name(low, "malloc_atomic64") || name == abi_name(low, "realloc64") || name == abi_name(low, "raise") || name == abi_name(low, "personality") || name == abi_name(low, "get_exception") || name == abi_name(low, "raise_overflow") || name == abi_name(low, "raise_cast_failed") || name == abi_name(low, "once_init") || name == abi_name(low, "once") || name == "__iyi_write_barrier_begin" || name == "__iyi_write_barrier" || name == "__iyi_preempt"
+end
+
+def refuse_reached_pool(low : Lowerer) : Nil
+  pending_visit_node("loop back-edge preemption checks are not ported (hosted iyi_preempt_on?)")
+end
+
+def pool_reached?(low : Lowerer) : Bool
+  if analysis = low.spawn_analysis
+    return analysis.reached?
+  end
+  low.analysed.typed_instances.each do |inst|
+    return true if pool_start?(low, inst.definition, inst.self_type)
+  end
+  false
+end
+
+def pool_start?(low : Lowerer, definition : Def, self_type : Type?) : Bool
+  return false unless definition.name == "start"
+  if st = self_type
+    if st.is_a?(MetaclassType) && st.as(MetaclassType).instance_type.to_s == "IyiWorkers"
+      return true
+    end
+  end
+  if owner = low.analysed.program.def_owner(definition)
+    if owner.is_a?(MetaclassType) && owner.as(MetaclassType).instance_type.to_s == "IyiWorkers"
+      return true
+    end
+  end
+  false
+end
+
+def pool_start_call?(low : Lowerer, call : Call) : Bool
+  return false unless call.name == "start"
+  obj = call.obj
+  return false unless obj
+  t = low.analysed.type_of?(obj.as(ASTNode))
+  return false unless t
+  t.is_a?(MetaclassType) && t.as(MetaclassType).instance_type.to_s == "IyiWorkers"
+end
+
+# The hosted cleanup follows expansions and constant values before folding an interpolation
+# (cleanup_transformer.cr:389-401, 418-434). Return nil for a runtime piece.
+def interpolation_literal(low : Lowerer, piece : ASTNode) : String?
+  if expanded = low.analysed.expansions[piece]?
+    return interpolation_literal(low, expanded)
+  end
+  if piece.is_a?(Path)
+    if constant = path_const(low, piece.as(Path))
+      return interpolation_literal(low, constant.value)
+    end
+  elsif piece.is_a?(StringLiteral)
+    return piece.as(StringLiteral).value
+  end
+  nil
+end
+
+def interpolation_constant(low : Lowerer, node : StringInterpolation) : String?
+  pieces = node.expressions
+  pieces.each do |piece|
+    return nil if interpolation_literal(low, piece).nil?
+  end
+  String.build do |str|
+    pieces.each do |piece|
+      str << interpolation_literal(low, piece).as(String)
+    end
+  end
+end
+
+# The hosted `codegen` visitor's dispatch over one node. A sequence visits each of its
+# expressions in order; the value of the last one is `low.last`.
+# The hosted visit(NamedTupleLiteral) allocates its aggregate and assigns entries
+# in source order to their named indices (codegen.cr:985-999).
+def codegen_named_tuple(low : Lowerer, node : NamedTupleLiteral) : Nil
+  type = low.analysed.type_of?(node)
+  raise "BUG: named tuple literal has no type" unless type.is_a?(NamedTupleInstanceType)
+  tuple_type = type.as(NamedTupleInstanceType)
+  ir_type = low.typer.llvm_type(tuple_type)
+  tuple = low.alloca(ir_type)
+  zero = low.builder.const_int(low.module.types.int32, 0).as(Value)
+  wants = low.needs_value
+  low.needs_value = true
+  node.entries.each do |entry|
+    codegen_node(low, entry.value)
+    index = tuple_type.entries.index { |field| field.name == entry.key }
+    raise "BUG: missing named tuple field #{entry.key}" if index.nil?
+    field_index = index.as(Int32)
+    ptr = low.builder.inbounds_gep(ir_type, tuple, [zero, low.builder.const_int(low.module.types.int32, field_index).as(Value)] of Value)
+    value_type = low.analysed.type_of?(entry.value)
+    raise "BUG: named tuple entry has no type" if value_type.nil?
+    assign(low, ptr, tuple_type.entries[field_index].type, value_type.as(Type), low.last.as(Value))
+  end
+  low.needs_value = wants
+  low.last = tuple
+end
+
+# The non-splat arm of visit(TupleLiteral) and allocate_tuple
+# (codegen.cr:974-979, 2812-2820). Splat typing is not yet available.
+def codegen_tuple(low : Lowerer, node : TupleLiteral) : Nil
+  type = low.analysed.type_of?(node)
+  raise "BUG: tuple literal has no type" unless type.is_a?(TupleInstanceType)
+  tuple_type = type.as(TupleInstanceType)
+  ir_type = low.typer.llvm_type(tuple_type)
+  tuple = low.alloca(ir_type)
+  zero = low.builder.const_int(low.module.types.int32, 0).as(Value)
+  wants = low.needs_value
+  low.needs_value = true
+  node.elements.each_with_index do |element, index|
+    if element.is_a?(Splat)
+      refuse_port("a splatted tuple literal (hosted visit(TupleLiteral), splat typing not ported)")
+    end
+    codegen_node(low, element)
+    ptr = low.builder.inbounds_gep(ir_type, tuple, [zero, low.builder.const_int(low.module.types.int32, index).as(Value)] of Value)
+    value_type = low.analysed.type_of?(element)
+    raise "BUG: tuple entry has no type" if value_type.nil?
+    assign(low, ptr, tuple_type.tuple_types[index], value_type.as(Type), low.last.as(Value))
+  end
+  low.needs_value = wants
+  low.last = tuple
+end
+
+pub def codegen_node(low : Lowerer, node : ASTNode) : Nil
+  # Hosted cleanup lowers the expansion already visited by body typing.
+  if node.is_a?(MacroIf) || node.is_a?(MacroFor) || node.is_a?(MacroExpression) || node.is_a?(MacroVerbatim)
+    if expanded = low.analysed.expansions[node]?
+      codegen_node(low, expanded)
+      return
+    end
+    pending_visit_node("an unexpanded #{node_class_name(node)} after body typing")
+    return
+  end
+  if node.is_a?(TupleLiteral)
+    codegen_tuple(low, node.as(TupleLiteral))
+    return
+  end
+  if node.is_a?(NamedTupleLiteral)
+    codegen_named_tuple(low, node.as(NamedTupleLiteral))
+    return
+  end
+  if node.is_a?(Case)
+    # Hosted cleanup transforms the recorded expansion (cleanup_transformer.cr:323-335).
+    # Exhaustive cases also need its unreachable replacement, not yet ported here.
+    if node.as(Case).exhaustive
+      pending_visit_node("an exhaustive case (hosted cleanup_transformer.cr: replace_unreachable_if_needed)")
+    end
+    if expanded = low.analysed.expansions[node]?
+      codegen_node(low, expanded)
+      return
+    end
+  end
+  if node.is_a?(ArrayLiteral) || node.is_a?(HashLiteral) || node.is_a?(RangeLiteral) || node.is_a?(MultiAssign) || node.is_a?(Select)
+    # Lower the expansion body typing already visited, retaining its temporaries,
+    # node identities and evaluation order.
+    if expanded = low.analysed.expansions[node]?
+      codegen_node(low, expanded)
+      return
+    end
+  end
+  if node.is_a?(StringInterpolation)
+    if constant = interpolation_constant(low, node.as(StringInterpolation))
+      low.last = build_string_constant(low, constant)
+      return
+    end
+    # The literal expander's typed result is the node the hosted cleanup lowers.
+    if expanded = low.analysed.expansions[node]?
+      codegen_node(low, expanded)
+      return
+    end
+  end
+  if node.is_a?(VisibilityModifier)
+    # The hosted fallback visits children (codegen.cr:3530-3531); the only child is exp (ast.cr:1931-1933).
+    codegen_node(low, node.as(VisibilityModifier).exp)
+    return
+  end
+  if node.is_a?(Expressions)
+    exprs = node.as(Expressions).expressions
+    wants = low.needs_value
+    i = 0
+    while i < exprs.size
+      low.needs_value = wants && i == exprs.size - 1
+      codegen_node(low, exprs[i])
+      break if at_terminator?(low)
+      i += 1
+    end
+    low.needs_value = wants
+    return
+  end
+  if node.is_a?(NilLiteral)
+    # The hosted `visit(NilLiteral)`: `@last = llvm_nil`.
+    low.last = llvm_nil(low)
+    return
+  end
+  if node.is_a?(NumberLiteral)
+    codegen_number(low, node.as(NumberLiteral))
+    return
+  end
+  if node.is_a?(BoolLiteral)
+    # The hosted `visit(BoolLiteral)`: `@last = int1(value ? 1 : 0)`.
+    low.last = int1(low, bool_bit(node.as(BoolLiteral).value))
+    return
+  end
+  if node.is_a?(CharLiteral)
+    codegen_char(low, node.as(CharLiteral))
+    return
+  end
+  if node.is_a?(Var)
+    codegen_var(low, node.as(Var))
+    return
+  end
+  if node.is_a?(InstanceVar)
+    codegen_instance_var_read(low, node.as(InstanceVar))
+    return
+  end
+  if node.is_a?(ReadInstanceVar)
+    read = node.as(ReadInstanceVar)
+    owner_opt = low.analysed.type_of?(read.obj)
+    node_type = low.analysed.type_of?(read)
+    raise "BUG: an instance variable receiver has no analysed type" if owner_opt.nil?
+    raise "BUG: an instance variable read has no analysed type" if node_type.nil?
+    owner = TypeIndirection.remove_indirection(owner_opt.as(Type))
+    if owner.is_a?(VirtualType)
+      owner = owner.as(VirtualType).base_type
+    end
+    if owner.is_a?(UnionType)
+      pending_visit_node("reading an instance variable of a union (hosted visit(ReadInstanceVar))")
+    end
+    wants = low.needs_value
+    low.needs_value = true
+    codegen_node(low, read.obj)
+    low.needs_value = wants
+    return if block_ended?(low)
+    value = low.last
+    raise "BUG: an instance variable receiver has no value" if value.nil?
+    pointer = self_argument(low, read.obj, value.as(Value), owner)
+    low.last = read_instance_var(low, node_type.as(Type), owner, read.name, pointer)
+    return
+  end
+  if node.is_a?(Path)
+    codegen_path(low, node.as(Path))
+    return
+  end
+  if node.is_a?(Generic)
+    typ = low.analysed.type_of?(node)
+    raise "BUG: the analysed program has no type for a generic expression (hosted codegen.cr: visit(Generic))" if typ.nil?
+    low.last = type_id_value(low, typ.as(Type))
+    return
+  end
+  if node.is_a?(ClassVar)
+    codegen_class_var_read(low, node.as(ClassVar))
+    return
+  end
+  if node.is_a?(Assign)
+    if node.as(Assign).target.is_a?(Path)
+      codegen_path_assign(low, node.as(Assign))
+      return
+    end
+  end
+  if node.is_a?(Assign) && node.as(Assign).target.is_a?(ClassVar)
+    if in_class_body?(low)
+      codegen_class_var_assign(low, node.as(Assign))
+    else
+      codegen_class_var_store(low, node.as(Assign))
+    end
+    return
+  end
+  if node.is_a?(Assign)
+    codegen_assign(low, node.as(Assign))
+    return
+  end
+  if node.is_a?(If)
+    codegen_if(low, node.as(If))
+    return
+  end
+  if node.is_a?(Unless)
+    codegen_unless(low, node.as(Unless))
+    return
+  end
+  if node.is_a?(And) || node.is_a?(Or)
+    lower_expanded_bool(low, node)
+    return
+  end
+  if node.is_a?(Not)
+    codegen_not(low, node.as(Not))
+    return
+  end
+  if node.is_a?(ExceptionHandler)
+    lower_exception_handler(low, node.as(ExceptionHandler))
+    return
+  end
+  if node.is_a?(While)
+    codegen_while(low, node.as(While))
+    return
+  end
+  if node.is_a?(Break)
+    codegen_break(low, node.as(Break))
+    return
+  end
+  if node.is_a?(Next)
+    codegen_next(low, node.as(Next))
+    return
+  end
+  if node.is_a?(StringLiteral)
+    # The hosted `visit(StringLiteral)`: the string constant itself, a pointer to it.
+    low.last = build_string_constant(low, node.as(StringLiteral).value)
+    return
+  end
+  if node.is_a?(SymbolLiteral)
+    codegen_symbol(low, node.as(SymbolLiteral))
+    return
+  end
+  if node.is_a?(IsA)
+    codegen_is_a(low, node.as(IsA))
+    return
+  end
+  if node.is_a?(Cast)
+    codegen_cast(low, node.as(Cast))
+    return
+  end
+  if node.is_a?(NilableCast)
+    codegen_nilable_cast(low, node.as(NilableCast))
+    return
+  end
+  if node.is_a?(Return)
+    codegen_return_node(low, node.as(Return))
+    return
+  end
+  if node.is_a?(FunDef)
+    codegen_fun_def(low, node.as(FunDef), false)
+    low.last = llvm_nil(low)
+    return
+  end
+  if node.is_a?(Def)
+    # The hosted `visit(Def)`: a def emits nothing where it stands. The call that reaches
+    # it makes its function (fun.iyi).
+    low.last = llvm_nil(low)
+    return
+  end
+  if node.is_a?(RespondsTo)
+    codegen_responds_to(low, node.as(RespondsTo))
+    return
+  end
+  if node.is_a?(Call)
+    # The hosted cleanup replaces expanded calls before codegen (call.cr:4-7).
+    # Body typing also records bare local reads that arrived as Call syntax.
+    call = node.as(Call)
+    if pool_start_call?(low, call)
+      refuse_reached_pool(low)
+      return
+    end
+    if analysis = low.spawn_analysis
+      if spawn_call?(low.analysed, call)
+        verdict = analysis.verdicts[call]?
+        if verdict.nil?
+          pending_visit_node("spawn classification of #{call.name} is not ported (hosted cleanup_transformer.cr classify_spawn)")
+          return
+        end
+        if verdict.target != SpawnTarget::AsWritten
+          pending_visit_node("spawn classification of #{verdict.placement} is not ported (hosted cleanup_transformer.cr classify_spawn): #{verdict.reason}")
+          return
+        end
+      end
+    end
+    expanded = low.analysed.expansions[call]? || call.expanded
+    if expanded
+      context = low.current_context
+      previous = context.macro_origin
+      context.macro_origin = previous || call.location
+      codegen_node(low, expanded)
+      context.macro_origin = previous
+    else
+      codegen_call_node(low, call)
+    end
+    return
+  end
+  if node.is_a?(Yield)
+    lower_yield(low, node.as(Yield))
+    return
+  end
+  if node.is_a?(ProcLiteral)
+    lower_proc_literal(low, node.as(ProcLiteral))
+    return
+  end
+  if node.is_a?(LibDef)
+    # The hosted `visit(LibDef)`: a lib declares its funs and emits nothing where it stands.
+    low.last = llvm_nil(low)
+    return
+  end
+  if node.is_a?(EnumDef)
+    # Hosted visits only assignments in an enum body (codegen.cr 1257-1265).
+    node.as(EnumDef).members.each do |member|
+      codegen_node(low, member) if member.is_a?(Assign)
+    end
+    low.last = llvm_nil(low)
+    return
+  end
+  if node.is_a?(ImportDecl)
+    # The loader orders imported units and their initializers before this unit.
+    # Hosted semantic_visitor.cr:206-210 visits the expanded import; here that
+    # expansion is already in the assembled root, so require that exact unit.
+    import_node = node.as(ImportDecl)
+    program = low.analysed.program
+    file = TopLevelVisitor.new(program).import_file(import_node.path.join("/"))
+    if file.nil? || !program.unit_trees.has_key?(file.as(String))
+      pending_visit_node("import #{import_node.path.join("/")} without its resolved unit")
+      return
+    end
+    low.last = llvm_nil(low)
+    return
+  end
+  if node.is_a?(ClassDef)
+    # The hosted `visit(ClassDef)`: the body is visited for its declarations; the definition emits nothing and its value is nil.
+    wants = low.needs_value
+    low.needs_value = false
+    entered = class_body_enter(low, node.as(ClassDef))
+    codegen_node(low, node.as(ClassDef).body)
+    class_body_leave(low, entered)
+    low.needs_value = wants
+    low.last = llvm_nil(low)
+    return
+  end
+  if node.is_a?(ModuleDef)
+    # The hosted `visit(ModuleDef)`: the same as a class.
+    wants = low.needs_value
+    low.needs_value = false
+    entered = module_body_enter(low, node.as(ModuleDef))
+    codegen_node(low, node.as(ModuleDef).body)
+    class_body_leave(low, entered)
+    low.needs_value = wants
+    low.last = llvm_nil(low)
+    return
+  end
+  # Hosted codegen.cr:1228-1234 visits the bodies, not declaration paths.
+  if node.is_a?(TraitDef)
+    wants = low.needs_value
+    low.needs_value = false
+    codegen_node(low, node.as(TraitDef).body)
+    low.needs_value = wants
+    low.last = llvm_nil(low)
+    return
+  end
+  if node.is_a?(ImplDef)
+    wants = low.needs_value
+    low.needs_value = false
+    codegen_node(low, node.as(ImplDef).body)
+    low.needs_value = wants
+    low.last = llvm_nil(low)
+    return
+  end
+  # Hosted codegen.cr:1237-1241 treats associated-type answers as declarations:
+  # they emit nothing and the expression's value is Nil.
+  if node.is_a?(AssocTypeDecl)
+    low.last = llvm_nil(low)
+    return
+  end
+  if node.is_a?(Annotation) && node.as(Annotation).path.names.last == "ThreadLocal"
+    # A `@[ThreadLocal]` annotation is lowered just before the class variable it marks, which takes the mark
+    # (class_var.iyi take_thread_local_annotation). The local-exec global (hosted class_var.cr declare_thread_local)
+    # exists only when the analysis flagged that variable, so an untyped declaration is refused there, by name.
+    low.globals.thread_local_pending = true
+    low.last = llvm_nil(low)
+    return
+  end
+  if node.is_a?(ModuleHeader) || node.is_a?(UsingDecl)
+    # A module header only describes the file's scope; the hosted parser removes it.
+    # UsingDecl only imports names, and the hosted visitor emits nothing for it.
+    # Unit initializers are separate nodes, assembled in dependency order.
+    return
+  end
+  if node.is_a?(Alias) || node.is_a?(Macro) || node.is_a?(Annotation)
+    # The hosted `visit(Alias)` and `visit(Macro)`: nothing is emitted and the value is nil. The hosted
+    # `visit(Annotation)` (codegen.cr:838) emits nothing and returns without setting `@last`; the value is
+    # nil here, which matters only where an annotation is the last node of a body, and a class or module body's
+    # value is discarded.
+    low.last = llvm_nil(low)
+    return
+  end
+  if node.is_a?(Include) || node.is_a?(Extend)
+    # Hosted visits hook expansions, then returns nil. The declarations pass
+    # refuses hooked modules, so these accepted directives have no expansions.
+    low.last = llvm_nil(low)
+    return
+  end
+  if node.is_a?(TypeDeclaration)
+    codegen_type_declaration(low, node.as(TypeDeclaration))
+    return
+  end
+  if node.is_a?(UninitializedVar)
+    codegen_uninitialized_var(low, node.as(UninitializedVar))
+    return
+  end
+  if node.is_a?(Nop)
+    # The hosted `visit(Nop)`: an empty body (an empty class or module) emits nothing and its value is nil.
+    low.last = llvm_nil(low)
+    return
+  end
+  if node.is_a?(PointerOf)
+    # The hosted `visit(PointerOf)` (codegen.cr:1001-1038): a local's pointer, an instance
+    # field address, an initialized class variable, or an external lib variable's global address.
+    exp = node.as(PointerOf).exp
+    if exp.is_a?(Var)
+      var = low.current_context.vars[exp.as(Var).name]?
+      raise "BUG: variable #{exp.as(Var).name} is read before it is assigned (hosted codegen.cr: visit(PointerOf))" if var.nil?
+      raise "BUG: pointerof argument #{exp.as(Var).name} has no addressable slot" if var.as(LowerVar).already_loaded
+      low.last = var.as(LowerVar).pointer
+      return
+    end
+    if exp.is_a?(InstanceVar)
+      codegen_pointerof_instance_var(low, exp.as(InstanceVar))
+      return
+    end
+    if exp.is_a?(ClassVar)
+      codegen_pointerof_class_var(low, exp.as(ClassVar))
+      return
+    end
+    if exp.is_a?(Call)
+      call = exp.as(Call)
+      obj = call.obj
+      if obj && call.args.empty? && call.named_args.nil? && call.block.nil? && call.block_arg.nil?
+        owner = low.analysed.type_of?(obj.as(ASTNode))
+        if owner.is_a?(LibType)
+          external = owner.as(LibType).lookup_fun(call.name)
+          if external && external.external_var && external.primitive == "external_var_get"
+            if external.resolved_return.is_a?(ProcInstanceType)
+              pending_visit_node("pointerof of the proc external variable #{external.real_name} (hosted visit(PointerOf) passes its address through check_c_fun)")
+            end
+            low.last = declare_lib_var(low, external, call).as(Value)
+            return
+          end
+        end
+      end
+    end
+    pending_visit_node("pointerof of a #{node_class_name(exp)} (hosted codegen.cr: visit(PointerOf), only a local variable is ported)")
+  end
+  if node.is_a?(Primitive)
+    # A `@[Primitive(:name)]` def's body. The hosted codegen never visits it: a call lowers the primitive at its
+    # own site (primitives.iyi). A def with this body that the probe lowers alone is refused here by name, where
+    # `node_class_name` has no name for the class and would answer the generic `ASTNode`.
+    pending_visit_node("Primitive (a def body; hosted codegen_call lowers it at the call site)")
+  end
+  # --- asm ---
+  if node.is_a?(Asm)
+    codegen_asm(low, node.as(Asm)); return
+  end
+  pending_visit_node(node_class_name(node))
+end
+
+# The hosted `visit(TypeDeclaration)` (codegen.cr:1800). A variable declaration is ported (codegen_declare_var). An
+# instance variable emits nothing, as the hosted case has no branch for it; the value is nil. A class variable's
+# initialiser (hosted initialize_class_var) is refused by name until the class-variable slice ports it.
+pub def codegen_type_declaration(low : Lowerer, node : TypeDeclaration) : Nil
+  if node.var.is_a?(InstanceVar)
+    low.last = llvm_nil(low)
+    return
+  end
+  if node.var.is_a?(Var)
+    codegen_declare_var(low, node)
+    return
+  end
+  if node.var.is_a?(ClassVar)
+    codegen_type_declaration_class_var(low, node)
+    return
+  end
+  pending_visit_node("TypeDeclaration of an unknown kind (hosted codegen.cr: visit(TypeDeclaration))")
+end
+
+# The hosted `visit(UninitializedVar)` (codegen.cr:1824): the variable is declared (hosted `declare_var`, which keeps the
+# slot a name already has), and the node's value is a load of that slot at the node's own type, or nil when that type
+# is Nil or no value is needed. A target that is not a variable has no slot and is nil. A variable of the no-return
+# type has no alloca in the hosted code, so it is refused by name here.
+pub def codegen_uninitialized_var(low : Lowerer, node : UninitializedVar) : Nil
+  var_node = node.var
+  if !var_node.is_a?(Var)
+    low.last = llvm_nil(low)
+    return
+  end
+  var = var_node.as(Var)
+  decl = low.analysed.type_of?(var)
+  raise "BUG: the analysed program has no type for an uninitialized variable (hosted codegen.cr: declare_var)" if decl.nil?
+  dt = decl.as(Type)
+  if dt.is_a?(NoReturnType)
+    refuse_port("lower: uninitialized variable #{var.name} has the no-return type (hosted declare_var: no alloca)")
+  end
+  slot_entry = low.current_context.vars[var.name]?
+  if slot_entry.nil?
+    declare_assign_var(low, var.name, dt)
+    slot_entry = low.current_context.vars[var.name]?
+  end
+  raise "BUG: uninitialized variable #{var.name} has no slot (hosted declare_var)" if slot_entry.nil?
+  slot = slot_entry.as(LowerVar)
+  refuse_port("lower: uninitialized variable #{var.name} names an argument that is already loaded (hosted declare_var)") if slot.already_loaded
+  node_type = low.analysed.type_of?(node)
+  raise "BUG: the analysed program has no type for an uninitialized value (hosted codegen.cr: visit(UninitializedVar))" if node_type.nil?
+  nt = node_type.as(Type)
+  if nt.is_a?(NilType) || !low.needs_value
+    low.last = llvm_nil(low)
+    return
+  end
+  low.last = to_lhs(low, slot.pointer, nt)
+end
+
+# The hosted declare_var keeps a slot already allocated for the name (codegen.cr:2152).
+# Def locals can be allocated before their TypeDeclaration is visited. Reuse that storage
+# and its final variable type, then evaluate and assign the initializer as codegen_assign does.
+# Without an initializer the declaration leaves nil.
+pub def codegen_declare_var(low : Lowerer, node : TypeDeclaration) : Nil
+  var_node = node.var.as(Var)
+  decl = variable_storage_type(low, var_node)
+  raise "BUG: the analysed program has no type for a declared variable (hosted codegen.cr: declare_var)" if decl.nil?
+  dt = decl.as(Type)
+  slot_entry = low.current_context.vars[var_node.name]?
+  if slot_entry.nil?
+    declare_assign_var(low, var_node.name, dt)
+    slot_entry = low.current_context.vars[var_node.name]?
+  end
+  raise "BUG: declared variable #{var_node.name} has no slot (hosted declare_var)" if slot_entry.nil?
+  slot = slot_entry.as(LowerVar)
+  value = node.value
+  if value.nil?
+    low.last = llvm_nil(low)
+    return
+  end
+  if slot.already_loaded
+    raise "BUG: Assign to already_loaded parameter #{var_node.name} (hosted fun.cr: create_local_copy_of_arg)"
+  end
+  wants = low.needs_value
+  low.needs_value = true
+  codegen_node(low, value.as(ASTNode))
+  low.needs_value = wants
+  v = low.last
+  raise "BUG: the declared value left no value (hosted codegen.cr: codegen_assign)" if v.nil?
+  vt = low.analysed.type_of?(value.as(ASTNode))
+  raise "BUG: the analysed program has no type for the declared value (hosted codegen.cr: codegen_assign)" if vt.nil?
+  unless slot.type.is_a?(NilType) && vt.as(Type).is_a?(NilType)
+    assign(low, slot.pointer, slot.type, vt.as(Type), v.as(Value))
+  end
+  low.last = v
+end
+
+# 1 for true, 0 for false: the bit a bool literal is in the IR.
+pub def bool_bit(value : Bool) : Int64
+  if value
+    return 1_i64
+  end
+  0_i64
+end
+
+# The hosted `visit(NumberLiteral)`: a constant of the analysed type. Wide integers
+# retain both words; a fractional literal is read as a float from its text.
+pub def codegen_number(low : Lowerer, node : NumberLiteral) : Nil
+  t = low.analysed.type_of?(node)
+  raise "BUG: the analysed program has no type for a number literal (hosted codegen.cr: visit(NumberLiteral))" if t.nil?
+  ir = low.typer.llvm_type(t.as(Type))
+  if node.value.includes?(".")
+    low.last = low.builder.const_float(ir, node.value.to_f)
+  elsif ir.int? && ir.bits == 128
+    wide = literal_of_type(low, node, t.as(Type), ir)
+    raise "BUG: a 128-bit number did not lower as a literal" if wide.nil?
+    low.last = wide.as(Value)
+  elsif node.kind == NumberKind::U64
+    low.last = low.builder.const_int(ir, uint64_bits(node.value.to_u64))
+  else
+    low.last = low.builder.const_int(ir, node.value.to_i64)
+  end
+end
+
+# The hosted `visit(NumberLiteral)` for a UInt64 literal (codegen.cr:924-925, `int64(node.value.to_u64)`): the
+# value's 64 bits as an Int64. A value past Int64 max is the bit pattern, so the value less 2**63 is the Int64
+# part and the top bit is the Int64 minimum added back. Checked arithmetic only; no conversion can overflow.
+pub def uint64_bits(value : UInt64) : Int64
+  half = 1_u64.unsafe_shl(63_u64)
+  if value >= half
+    rest = (value - half).to_i64
+    return rest + (0_i64 - 9223372036854775807_i64 - 1_i64)
+  end
+  value.to_i64
+end
+
+# The hosted `visit(CharLiteral)`: the code point, as an integer of the type the analysis gave
+# the literal (Char is an i32).
+pub def codegen_char(low : Lowerer, node : CharLiteral) : Nil
+  t = low.analysed.type_of?(node)
+  raise "BUG: the analysed program has no type for a char literal (hosted codegen.cr: visit(CharLiteral))" if t.nil?
+  low.last = low.builder.const_int(low.typer.llvm_type(t.as(Type)), node.value.ord.to_i64)
+end
+
+# The hosted visit(Var) treats an untyped read and a NoReturn slot as unreachable.
+pub def codegen_var(low : Lowerer, node : Var) : Nil
+  read_type = low.analysed.type_of?(node)
+  if read_type.nil?
+    low.builder.unreachable
+    low.last = nil
+    return
+  end
+  var = low.current_context.vars[node.name]?
+  if var.nil?
+    if node.name == "self"
+      rt = read_type.as(Type)
+      if TypeQueries.metaclass?(rt)
+        low.last = type_id_value(low, rt)
+      else
+        owner = low.current_context.type
+        raise "BUG: self has no enclosing type (hosted llvm_self_ptr)" if owner.nil?
+        self_ptr = type_id_value(low, owner.as(Type))
+        low.last = downcast(low, self_ptr, rt, owner.as(Type), true)
+      end
+      return
+    end
+    raise "BUG: variable #{node.name} is read before it is assigned (hosted codegen.cr: visit(Var))"
+  end
+  v = var.as(LowerVar)
+  if v.type.is_a?(NoReturnType)
+    low.builder.unreachable
+    low.last = nil
+    return
+  end
+  low.last = downcast(low, v.pointer, read_type.as(Type), v.type, v.already_loaded)
+end
+
+# The hosted `codegen_assign` for a class variable target with a type (codegen.cr:1543-1556): the value is evaluated
+# first, then stored in the variable's global (class_var.iyi `store_class_var`). The value of the assignment is the value.
+pub def codegen_class_var_store(low : Lowerer, node : Assign) : Nil
+  target = node.target.as(ClassVar)
+  wants = low.needs_value
+  low.needs_value = true
+  codegen_node(low, node.value)
+  low.needs_value = wants
+  value = low.last
+  raise "BUG: the assigned value left no value (hosted codegen.cr: codegen_assign)" if value.nil?
+  value_type = low.analysed.type_of?(node.value)
+  raise "BUG: the analysed program has no type for the assigned value (hosted codegen.cr: codegen_assign)" if value_type.nil?
+  store_class_var(low, target, value.as(Value), value_type.as(Type))
+  low.last = value
+end
+
+# The hosted `visit(Assign)` for a variable target: the value is stored in the variable's alloca,
+# which is made the first time the variable is assigned. The value of the assignment is the value
+# assigned.
+pub def codegen_assign(low : Lowerer, node : Assign) : Nil
+  # Hosted codegen.cr:1511-1513 evaluates a discarded assignment's value
+  # without allocating a variable; multi-assignment expansion can emit this.
+  if node.target.is_a?(Underscore)
+    codegen_node(low, node.value)
+    return
+  end
+  if node.target.is_a?(InstanceVar)
+    if in_class_body?(low)
+      low.last = llvm_nil(low)
+      return
+    end
+    codegen_instance_var_assign(low, node)
+    return
+  end
+  if !node.target.is_a?(Var)
+    pending_visit_node("Assign to a target that is not a variable")
+  end
+  target = node.target.as(Var)
+  if param = low.current_context.vars[target.name]?
+    if param.as(LowerVar).already_loaded
+      raise "BUG: Assign to already_loaded parameter #{target.name} (hosted fun.cr: create_local_copy_of_arg)"
+    end
+  end
+  # The hosted codegen_assign declares the variable before it visits the value, so its alloca comes first.
+  if low.current_context.vars[target.name]?.nil?
+    declared = variable_storage_type(low, target)
+    if !declared.nil? && !declared.as(Type).is_a?(NoReturnType)
+      declare_assign_var(low, target.name, declared.as(Type))
+    end
+  end
+  wants = low.needs_value
+  low.needs_value = true
+  codegen_node(low, node.value)
+  low.needs_value = wants
+  return if block_ended?(low)
+  value = low.last
+  raise "BUG: the assigned value left no value (hosted codegen.cr: codegen_assign)" if value.nil?
+  v = value.as(Value)
+  value_type = low.analysed.type_of?(node.value)
+  raise "BUG: the analysed program has no type for the assigned value (hosted codegen.cr: codegen_assign)" if value_type.nil?
+  vt = value_type.as(Type)
+  return if vt.is_a?(NoReturnType)
+  if low.current_context.vars[target.name]?.nil?
+    # The analysis gives the target no type: the variable takes the value's.
+    declare_assign_var(low, target.name, vt)
+  end
+  var = low.current_context.vars[target.name]?
+  v_var = var.as(LowerVar)
+  if v_var.closure_slot || v_var.type.full_name != vt.full_name
+    # A value of another type than the variable goes through the casts slice (the hosted upcast into a union).
+    assign(low, v_var.pointer, v_var.type, vt, v)
+  elsif !vt.is_a?(NilType)
+    # Passed-by-value aggregates can be represented by their address while
+    # visiting expressions (for example Pointer(T)#value on a mixed union).
+    # An SSA aggregate is already an RHS and must not be loaded again.
+    stored = v
+    if passed_by_value?(vt) && v.type.pointer?
+      stored = load_aligned(low, low.typer.llvm_type(vt), v)
+    end
+    store_aligned(low, stored, v_var.pointer)
+  end
+  low.last = v
+end
+
+# The hosted `codegen_assign` for an instance variable target (codegen.cr:1525): the value is evaluated
+# first, as the hosted `request_value(value)` does, then stored at the field (instance_var.iyi).
+pub def codegen_instance_var_assign(low : Lowerer, node : Assign) : Nil
+  target = node.target.as(InstanceVar)
+  value_type = low.analysed.type_of?(node.value)
+  raise "BUG: the analysed program has no type for the assigned value (hosted codegen.cr: codegen_assign)" if value_type.nil?
+  value : Value? = nil
+  if node.value.is_a?(Var)
+    if slot = low.current_context.vars[node.value.as(Var).name]?
+      if !slot.already_loaded && passed_by_value?(slot.type) && slot.type.full_name == value_type.as(Type).full_name
+        # Hosted request_value keeps a by-value local's address. The field store
+        # loads it only after computing the destination and its union tag.
+        value = slot.pointer
+      end
+    end
+  end
+  if value.nil?
+    wants = low.needs_value
+    low.needs_value = true
+    codegen_node(low, node.value)
+    low.needs_value = wants
+    value = low.last
+  end
+  raise "BUG: the assigned value left no value (hosted codegen.cr: codegen_assign)" if value.nil?
+  store_instance_var(low, target.name, value.as(Value), value_type.as(Type))
+  low.last = value
+end
+
+# The type a variable is stored as. A variable the body assigns more than one type is stored as the union the analysis
+# gave it (`def_var_unions`, the context's `var_unions`); otherwise as the analysed type of its target. Nil when the
+# analysis gives the target no type.
+pub def variable_storage_type(low : Lowerer, target : Var) : Type?
+  if table = low.current_context.var_unions
+    if u = table[target.name]?
+      return u.as(Type)
+    end
+  end
+  tgt_t = low.analysed.type_of?(target)
+  if tgt_t.nil?
+    return nil
+  end
+  tgt_t.as(Type)
+end
+
+# The hosted variable declaration for an assignment: an alloca of the type, in the alloca block, recorded as the
+# variable of the context.
+pub def declare_assign_var(low : Lowerer, name : String, t : Type) : Nil
+  pointer = low.alloca(low.typer.llvm_type(t), name)
+  low.current_context.vars[name] = LowerVar.new(pointer, t, false)
+end
+
+# The hosted `visit(If)`: a literal condition folds (the hosted `truthy?` and `falsey?`), and any
+# other is a branch merged by a phi when the if's value is wanted.
+pub def codegen_if(low : Lowerer, node : If) : Nil
+  codegen_branch(low, node, node.cond, node.then, node.else)
+end
+
+# The hosted `visit(Unless)`: the normaliser's `If` with the branches swapped.
+pub def codegen_unless(low : Lowerer, node : Unless) : Nil
+  codegen_branch(low, node, node.cond, node.else, node.then)
+end
+
+# Hosted cleanup replaces every And and Or with the typed expansion before codegen
+# (cleanup_transformer.cr:436-442). The body typer records that expansion
+# (literal_expander.iyi expand_and / expand_or): an If flagged from_and or from_or,
+# with a temp when the left side is not a plain variable. An inner And or Or is
+# replaced inside the outer expansion and has no type of its own, so lowering the
+# original operands asks for a type that was never set.
+pub def lower_expanded_bool(low : Lowerer, node : ASTNode) : Nil
+  recorded = low.analysed.expansions[node]?
+  if expanded = recorded
+    codegen_node(low, expanded)
+    return
+  end
+  refuse_port("lower: a typed && or || has no recorded expansion (hosted cleanup_transformer.cr: transform(ExpandableNode))")
+end
+
+# The hosted `visit(And)` and `visit(Or)`: the normaliser's `If`. `a && b` is `if a then b else a`,
+# and `a || b` is `if a then a else b`; the left operand is lowered again in the branch that
+# takes it, which is what the hosted code emits.
+pub def codegen_and(low : Lowerer, node : And) : Nil
+  codegen_branch(low, node, node.left, node.right, node.left)
+end
+
+pub def codegen_or(low : Lowerer, node : Or) : Nil
+  codegen_branch(low, node, node.left, node.left, node.right)
+end
+
+# The branch shared by `if`, `unless`, `&&` and `||`. `node` gives the merged type.
+pub def codegen_branch(low : Lowerer, node : ASTNode, cond_node : ASTNode, then_node : ASTNode, else_node : ASTNode) : Nil
+  if cond_node.is_a?(BoolLiteral) || cond_node.is_a?(NilLiteral)
+    # The hosted `truthy?` and `falsey?` folds: the condition emits nothing, and only the branch
+    # taken is lowered, with its value as the value.
+    taken = cond_node.is_a?(BoolLiteral) && cond_node.as(BoolLiteral).value
+    if taken
+      codegen_node(low, then_node)
+    else
+      codegen_node(low, else_node)
+    end
+    return
+  end
+  if cond_node.is_a?(RespondsTo)
+    if responds_to_value(low, cond_node.as(RespondsTo))
+      codegen_node(low, then_node)
+    else
+      codegen_node(low, else_node)
+    end
+    return
+  end
+  test_node = cond_node
+  negated = false
+  while test_node.is_a?(Not)
+    negated = !negated
+    test_node = test_node.as(Not).exp
+  end
+  if test_node.is_a?(IsA) && low.analysed.expansions[test_node]?.nil?
+    # Hosted cleanup_transformer.cr:2175-2227,2233-2276 folds the type
+    # test before selecting a branch, including under logical negation.
+    decided = static_is_a(low, test_node.as(IsA))
+    unless decided.nil?
+      folded_obj = test_node.as(IsA).obj
+      unless folded_obj.is_a?(Var) || folded_obj.is_a?(InstanceVar) || folded_obj.is_a?(ClassVar)
+        folded_wants = low.needs_value
+        low.needs_value = false
+        codegen_node(low, folded_obj)
+        low.needs_value = folded_wants
+        return if block_ended?(low)
+      end
+      taken = negated ? !decided.as(Bool) : decided.as(Bool)
+      if taken
+        codegen_node(low, then_node)
+      else
+        codegen_node(low, else_node)
+      end
+      return
+    end
+  end
+  # Hosted cleanup propagates the truthiness of expanded && and || through
+  # their temporary assignments (cleanup_transformer.cr:208-240,444-476,
+  # 2175-2227). Still evaluate the condition for its effects before taking the
+  # sole reachable branch.
+  settled = static_condition(low, cond_node)
+  unless settled.nil?
+    wants = low.needs_value
+    low.needs_value = false
+    codegen_node(low, cond_node)
+    low.needs_value = wants
+    return if block_ended?(low)
+    if settled.as(Bool)
+      codegen_node(low, then_node)
+    else
+      codegen_node(low, else_node)
+    end
+    return
+  end
+
+  wants = low.needs_value
+  if nil_condition?(low, cond_node)
+    codegen_node(low, cond_node)
+    codegen_node(low, else_node)
+    return
+  end
+  blocks = low.new_blocks(["then", "else"])
+  then_block = blocks[0]
+  else_block = blocks[1]
+
+  low.needs_value = true
+  codegen_node(low, cond_node)
+  cond_value = cond_bool(low, cond_node, low.last.as(Value))
+  low.needs_value = wants
+  low.builder.cond_br(cond_value, then_block, else_block)
+
+  merge_type : IrType? = nil
+  merged_t : Type? = nil
+  union_join = false
+  if wants
+    merged = low.analysed.type_of?(node)
+    raise "BUG: the analysed program has no type for a branch (hosted codegen.cr: visit(If))" if merged.nil?
+    merged_t = merged.as(Type)
+    union_join = joins_by_pointer?(merged_t.as(Type))
+    if union_join && low.typer.passed_indirectly?(merged_t.as(Type))
+      pending_visit_node("a join of an indirectly passed #{merged_t.as(Type).full_name} (hosted copy_value)")
+    end
+    if union_join
+      merge_type = low.module.types.ptr(0)
+    else
+      merge_type = low.typer.llvm_type(merged_t.as(Type))
+    end
+  end
+  phi = LowerPhi.new(wants, merge_type, merged_t)
+
+  low.builder.position_at_end(then_block)
+  codegen_node(low, then_node)
+  branch_value(low, phi, then_node, merged_t, union_join, false)
+
+  low.builder.position_at_end(else_block)
+  codegen_node(low, else_node)
+  branch_value(low, phi, else_node, merged_t, union_join, true)
+
+  # By-value joins stay address-valued until a consumer needs the aggregate.
+  phi.close(low)
+end
+
+# Whether the analysed types decide a type test: true when the object's type is what the test narrows it to,
+# false when nothing of it is, nil when the value decides (a union, or a virtual type with other subclasses). The
+# object and the tested type must both be typed.
+pub def static_is_a(low : Lowerer, node : IsA) : Bool?
+  obj_t = low.analysed.type_of?(node.obj)
+  const_t = low.analysed.type_of?(node.const)
+  return nil if obj_t.nil? || const_t.nil?
+  ot = TypeIndirection.remove_indirection(obj_t.as(Type))
+  ct = TypeIndirection.remove_indirection(const_t.as(Type))
+  if ct.is_a?(MetaclassType)
+    ct = ct.as(MetaclassType).instance_type
+  end
+  filtered = TypeIntersect.common_descendent(low.analysed.program, ot, ct)
+  return false if filtered.nil?
+  return true if filtered.as(Type).full_name == ot.full_name
+  nil
+end
+
+# The truthiness carried by hosted cleanup through logical expansions. Nil
+# means the expression still needs its runtime branch.
+pub def static_condition(low : Lowerer, node : ASTNode) : Bool?
+  return node.as(BoolLiteral).value if node.is_a?(BoolLiteral)
+  return false if node.is_a?(NilLiteral) || node.is_a?(Nop)
+  if node.is_a?(Not)
+    value = static_condition(low, node.as(Not).exp)
+    return nil if value.nil?
+    return !value.as(Bool)
+  end
+  if node.is_a?(IsA) && low.analysed.expansions[node]?.nil?
+    return static_is_a(low, node.as(IsA))
+  end
+  if node.is_a?(Assign)
+    return static_condition(low, node.as(Assign).value)
+  end
+  if node.is_a?(And) || node.is_a?(Or)
+    if expanded = low.analysed.expansions[node]?
+      return static_condition(low, expanded)
+    end
+  end
+  if node.is_a?(If)
+    branch = node.as(If)
+    left = static_condition(low, branch.cond)
+    if branch.from_and
+      right = static_condition(low, branch.then)
+      return false if left == false || right == false
+      return true if left == true && right == true
+    elsif branch.from_or
+      right = static_condition(low, branch.else)
+      return true if left == true || right == true
+      return false if left == false && right == false
+    end
+  end
+  if type = low.analysed.type_of?(node)
+    return false if type.nil_type?
+  end
+  nil
+end
+
+# Passed-by-value joins hold an address, including structs and tuples.
+pub def joins_by_pointer?(t : Type) : Bool
+  passed_by_value?(t)
+end
+
+# One branch's value into the join. A union value already held by pointer passes through when
+# its type matches; a real upcast or an SSA aggregate needs a temporary before the pointer phi.
+pub def branch_value(low : Lowerer, phi : LowerPhi, branch : ASTNode, merged : Type?, union_join : Bool, last : Bool) : Nil
+  if union_join && !at_terminator?(low) && !low.last.nil?
+    bt = low.analysed.type_of?(branch)
+    if bt.nil?
+      pending_visit_node("a union join of a branch with no analysed type (hosted codegen.cr: visit(If))")
+    end
+    m = merged.as(Type)
+    value = low.last.as(Value)
+    if value.type.pointer? && TypeIndirection.remove_indirection(bt.as(Type)) == TypeIndirection.remove_indirection(m)
+      phi.add(low, value, last)
+      return
+    end
+    ptr = union_temp(low, m, bt.as(Type), value)
+    phi.add(low, ptr, last)
+    return
+  end
+  if phi.needs_value && !union_join && !merged.nil? && !at_terminator?(low) && !low.last.nil?
+    bt = low.analysed.type_of?(branch)
+    m = merged.as(Type)
+    if !bt.nil? && bt.as(Type).full_name != m.full_name
+      phi.add(low, upcast(low, low.last.as(Value), bt.as(Type), m), last)
+      return
+    end
+  end
+  phi.add(low, low.last, last)
+end
+
+# The hosted `visit(Not)`: the condition's value, inverted with an `xor` against true.
+pub def codegen_not(low : Lowerer, node : Not) : Nil
+  wants = low.needs_value
+  low.needs_value = true
+  codegen_node(low, node.exp)
+  v = cond_bool(low, node.exp, low.last.as(Value))
+  low.needs_value = wants
+  low.last = low.builder.bitwise_xor(v, int1(low, 1_i64))
+end
+
+# Typing records the target by node identity. Until that pass supplies it, use
+# the lexical target; disagreement would run the wrong pending cleanups.
+pub def jump_target(node : ASTNode, lexical : ASTNode?) : ASTNode?
+  typed : ASTNode? = case node
+  when Return then node.target
+  when Break  then node.target
+  when Next   then node.target
+  else             nil
+  end
+  if typed
+    if lexical && typed.object_id != lexical.object_id
+      # An inlined yield frame sets its return target to the call (call.iyi). The
+      # typer still points the Return at the def. Those are the same jump: ensures
+      # were registered on the call, so the frame target is the one to stop at.
+      # A break whose typed and lexical targets are unrelated nodes still raises
+      # (the jump-mismatch control).
+      if node.is_a?(Return) && typed.is_a?(Def) && lexical.is_a?(Call)
+        return lexical
+      end
+      raise "lower: typed jump target disagrees with lexical target (hosted execute_ensures_until)"
+    end
+    return typed
+  end
+  lexical
+end
+
+# The hosted `visit(While)`. The `while` block tests the condition, the `body` runs and branches
+# back, and `fail` is where the loop leaves. A `break` makes the `exit` block (created at the first
+# break), which `fail` then branches to. `next` branches to the `while` block. The value of a while
+# is nil.
+pub def codegen_while(low : Lowerer, node : While) : Nil
+  set_ensure_exception_handler(low, node)
+  saved_target = low.loop_target
+  low.loop_target = node
+  saved_next = low.loop_next
+  saved_break = low.loop_break
+  cond = node.cond
+  if cond.is_a?(Expressions) && cond.as(Expressions).expressions.size == 1
+    cond = cond.as(Expressions).expressions[0]
+  end
+  if cond.is_a?(BoolLiteral) && cond.as(BoolLiteral).value
+    # Hosted codegen.cr:1374-1391 omits the conditional and fail blocks.
+    while_block = low.new_block("while")
+    low.loop_next = while_block
+    low.loop_break = nil
+    low.builder.br(while_block)
+    low.builder.position_at_end(while_block)
+    low.needs_value = false
+    codegen_node(low, node.body)
+    unless at_terminator?(low)
+      low.builder.br(while_block)
+    end
+    if exit_block = low.loop_break
+      low.builder.position_at_end(exit_block.as(Block))
+    end
+    low.last = llvm_nil(low)
+    low.loop_next = saved_next
+    low.loop_break = saved_break
+    low.loop_target = saved_target
+    return
+  end
+  blocks = low.new_blocks(["while", "body", "fail"])
+  while_block = blocks[0]
+  body_block = blocks[1]
+  fail_block = blocks[2]
+
+  low.loop_next = while_block
+  low.loop_break = nil
+
+  low.builder.br(while_block)
+  low.builder.position_at_end(while_block)
+  low.needs_value = true
+  codegen_node(low, node.cond)
+  cond_value = cond_bool(low, node.cond, low.last.as(Value))
+  low.builder.cond_br(cond_value, body_block, fail_block)
+
+  low.builder.position_at_end(body_block)
+  low.needs_value = false
+  codegen_node(low, node.body)
+  if !at_terminator?(low)
+    low.builder.br(while_block)
+  end
+
+  low.builder.position_at_end(fail_block)
+  if exit_block = low.loop_break
+    low.builder.br(exit_block.as(Block))
+    low.builder.position_at_end(exit_block.as(Block))
+  end
+  low.last = llvm_nil(low)
+
+  low.loop_next = saved_next
+  low.loop_break = saved_break
+  low.loop_target = saved_target
+end
+
+# The hosted `visit(Break)` without a value: a branch to the loop's exit block, made at the first break.
+pub def codegen_break(low : Lowerer, node : Break) : Nil
+  if low.loop_next.nil?
+    # A break outside a while leaves the block call it is written in: its value goes to the call's phi (hosted break_phi).
+    block_phi = low.current_context.break_phi
+    if block_phi.nil?
+      pending_visit_node("break outside a while or a block (hosted codegen.cr: visit(Break))")
+    end
+    branch_to_phi(low, block_phi.as(BranchPhi), node.exp, jump_target(node, low.current_context.break_target))
+    return
+  end
+  if node.exp
+    pending_visit_node("break with a value in a while (hosted codegen.cr: visit(Break))")
+  end
+  execute_ensures_until(low, jump_target(node, low.loop_target), nil)
+  return if block_ended?(low)
+  target = low.loop_break
+  if target.nil?
+    made = low.new_block("exit")
+    low.loop_break = made
+    target = made
+  end
+  low.builder.br(target.as(Block))
+  low.last = llvm_nil(low)
+end
+
+# The node visitor the calls and the functions reach this dispatch through (context.iyi, BodyVisit).
+pub class CoreBody
+  def initialize
+  end
+end
+
+impl BodyVisit for CoreBody
+  def visit_body(low : Lowerer, node : ASTNode) : Nil
+    codegen_node(low, node)
+  end
+end
+
+# Hosted visit(Next): a captured block returns; a loop or yielded block branches.
+pub def codegen_next(low : Lowerer, node : Next) : Nil
+  if node.target.is_a?(Def)
+    codegen_return_node(low, node)
+    return
+  end
+  if low.loop_next.nil?
+    # A next outside a while goes to the block's next: its value is the yield's value (hosted next_phi).
+    yield_phi = low.current_context.next_phi
+    if yield_phi.nil?
+      pending_visit_node("next outside a while or a block (hosted codegen.cr: visit(Next))")
+    end
+    branch_to_phi(low, yield_phi.as(BranchPhi), node.exp, jump_target(node, low.current_context.next_target))
+    return
+  end
+  if node.exp
+    pending_visit_node("next with a value in a while (hosted codegen.cr: visit(Next))")
+  end
+  execute_ensures_until(low, jump_target(node, low.loop_target), nil)
+  return if block_ended?(low)
+  target = low.loop_next
+  if target.nil?
+    pending_visit_node("next outside a while (hosted codegen.cr: visit(Next))")
+  end
+  low.builder.br(target.as(Block))
+  low.last = llvm_nil(low)
+end
+
+# The hosted `codegen_return`: a function returning void returns nothing; any other returns the
+# value of the expression visited last. A block that already ends (a NoReturn call's unreachable)
+# gets no return (the hosted `@builder.end`, fun.iyi `block_ended?`).
+pub def codegen_return(low : Lowerer, ret_ir : IrType) : Nil
+  return if block_ended?(low)
+  if ret_ir.void?
+    low.builder.ret_void
+    return
+  end
+  value = low.last
+  raise "BUG: the program returns a value but its last expression left none (hosted codegen.cr: codegen_return)" if value.nil?
+  v = value.as(Value)
+  v = to_rhs(low, v, low.main_ret_type.as(Type)) if v.type.pointer?
+  low.builder.ret(v)
+end
+
+# The hosted `visit(Return)` (codegen.cr:1170-1209) evaluates the control expression
+# and upcasts it to the current function's semantic return type before returning.
+# A return at the top level has no def to leave, so it is refused by name.
+pub def codegen_return_node(low : Lowerer, node : Return | Next) : Nil
+  if low.current_context.top_level
+    pending_visit_node("return at the top level (hosted codegen.cr: visit(Return), node.target is not a Def)")
+  end
+  if rp = low.current_context.return_phi
+    branch_to_phi(low, rp.as(BranchPhi), node.exp, jump_target(node, low.current_context.return_target))
+    return
+  end
+  ret_ir = low.current_context.fun_type.return_type
+  exp = node.exp
+  if exp.nil?
+    low.last = llvm_nil(low)
+    execute_ensures_until(low, jump_target(node, low.current_context.return_target), nil)
+    return if block_ended?(low)
+    if ret_ir.void?
+      low.builder.ret_void
+      return
+    end
+    ret_type = low.current_context.return_type
+    raise "BUG: the function has no analysed return type (hosted codegen_return)" if ret_type.nil?
+    nil_type = low.analysed.program.nil_type
+    returned = upcast(low, llvm_nil(low), nil_type, ret_type.as(Type))
+    returned = to_rhs(low, returned, ret_type.as(Type)) if returned.type.pointer?
+    low.builder.ret(returned)
+    return
+  end
+  wants = low.needs_value
+  low.needs_value = true
+  codegen_node(low, exp.as(ASTNode))
+  low.needs_value = wants
+  return if block_ended?(low)
+  exp_t = low.analysed.type_of?(exp.as(ASTNode))
+  raise "BUG: the analysed program has no type for a return's value (hosted codegen.cr: visit(Return))" if exp_t.nil?
+  execute_ensures_until(low, jump_target(node, low.current_context.return_target), exp_t)
+  return if block_ended?(low)
+  if ret_ir.void?
+    low.builder.ret_void
+    return
+  end
+  value = low.last
+  raise "BUG: the return's expression left no value (hosted codegen.cr: visit(Return))" if value.nil?
+  ret_type = low.current_context.return_type
+  raise "BUG: the function has no analysed return type (hosted codegen_return)" if ret_type.nil?
+  returned = upcast(low, value.as(Value), exp_t.as(Type), ret_type.as(Type))
+  returned = to_rhs(low, returned, ret_type.as(Type)) if returned.type.pointer?
+  low.builder.ret(returned)
+end
+
+# The hosted `visit(IsA)` (codegen.cr codegen_type_filter): the object is evaluated, and with its value
+# wanted the answer is an equality of type ids (hosted match_type_id). For a concrete object and a concrete
+# restriction the hosted type ids are constants, and LLVM folds the comparison to an i1 constant; the port
+# computes that constant from its own ids (type_id.iyi). Refused by name: a union or nilable object (its
+# type-id word is read from the union value, which the casts slice builds with `upcast`, S2c3), and a
+# virtual or union restriction (the hosted match_any_type_id range, not ported yet).
+pub def codegen_is_a(low : Lowerer, node : IsA) : Nil
+  if isa_expanded = low.analysed.expansions[node]?
+    codegen_node(low, isa_expanded)
+    return
+  end
+  wants = low.needs_value
+  obj_t = low.analysed.type_of?(node.obj)
+  if obj_t.nil?
+    codegen_node(low, node.obj)
+    pending_visit_node("IsA of an object with no analysed type (hosted codegen.cr: codegen_type_filter)")
+    return
+  end
+  ot = TypeIndirection.remove_indirection(obj_t.as(Type))
+  val_opt = eval_cast_operand(low, node.obj, ot)
+  return if val_opt.nil?
+  if !wants
+    return
+  end
+  obj_val = val_opt.as(Value)
+  const_t = low.analysed.type_of?(node.const)
+  if const_t.nil?
+    refuse_port("lower: is_a? of #{ot.full_name}: the restriction has no analysed type (hosted codegen.cr: codegen_type_filter)")
+  end
+  ct = TypeIndirection.remove_indirection(const_t.as(Type))
+  if ct.is_a?(MetaclassType)
+    ct = ct.as(MetaclassType).instance_type
+  end
+  ct = TypeQueries.virtual_type(ct)
+  is_union_or_virtual = mixed_union_type?(ot) || ot.is_a?(ReferenceUnionType) || ot.is_a?(NilableType) || ot.is_a?(NilableReferenceUnionType) || ot.is_a?(NilableProcType) || ot.is_a?(VirtualType)
+  if !is_union_or_virtual && !ct.is_a?(VirtualType) && !ct.is_a?(UnionType)
+    if low.type_ids.type_id(ct) == low.type_ids.type_id(ot)
+      low.last = int1(low, 1_i64)
+    else
+      low.last = int1(low, 0_i64)
+    end
+    return
+  end
+  tid = type_id_of_value(low, node.obj, obj_val, ot)
+  low.last = match_type_id(low, ot, ct, tid)
+end
+
+# Evaluates a cast's operand. For a stored by-value union variable, returns its storage pointer
+# directly without emitting an extra load, matching the hosted `visit(Var)` for aggregates.
+def eval_cast_operand(low : Lowerer, obj : ASTNode, obj_type : Type) : Value?
+  if obj.is_a?(Var) && passed_by_value?(obj_type)
+    if lv = low.current_context.vars[obj.as(Var).name]?
+      if !lv.already_loaded && TypeIndirection.remove_indirection(lv.type).full_name == obj_type.full_name
+        return lv.pointer
+      end
+    end
+  end
+  wants = low.needs_value
+  low.needs_value = true
+  codegen_node(low, obj)
+  low.needs_value = wants
+  return nil if block_ended?(low)
+  low.last
+end
+
+# The hosted `visit(Cast)` (codegen.cr:1945-1986): pointer casts, upcasts,
+# and checked downcasts using the runtime type id.
+pub def codegen_cast(low : Lowerer, node : Cast) : Nil
+  obj_t = low.analysed.type_of?(node.obj)
+  raise "BUG: Cast operand has no analysed type (hosted codegen.cr: visit(Cast))" if obj_t.nil?
+  obj_type = TypeIndirection.remove_indirection(obj_t.as(Type))
+  val_opt = eval_cast_operand(low, node.obj, obj_type)
+  return if val_opt.nil?
+  last_value = val_opt.as(Value)
+
+  to_raw = low.analysed.type_of?(node.to)
+  raise "BUG: Cast target has no analysed type (hosted codegen.cr: visit(Cast))" if to_raw.nil?
+  to_type = TypeQueries.virtual_type(TypeIndirection.remove_indirection(to_raw.as(Type)))
+
+  if to_type.is_a?(PointerInstanceType)
+    if obj_type.is_a?(NilType)
+      low.last = low.builder.const_null(low.typer.llvm_type(to_type))
+      return
+    end
+    if last_value.type == low.module.types.ptr(0)
+      low.last = last_value
+      return
+    end
+    pending_visit_node("Cast #{obj_type.full_name} to #{to_type.full_name} (hosted codegen.cr: visit(Cast) pointer cast)")
+    return
+  end
+  if obj_type.is_a?(PointerInstanceType)
+    if to_type.is_a?(NilType)
+      low.last = llvm_nil(low)
+      return
+    end
+    if low.typer.llvm_type(to_type) == low.module.types.ptr(0)
+      low.last = last_value
+      return
+    end
+    pending_visit_node("Cast #{obj_type.full_name} to #{to_type.full_name} (hosted codegen.cr: visit(Cast) from pointer)")
+    return
+  end
+
+  res_t = low.analysed.type_of?(node)
+  raise "BUG: Cast node has no analysed type (hosted codegen.cr: visit(Cast))" if res_t.nil?
+  resulting_type = TypeIndirection.remove_indirection(res_t.as(Type))
+  if node.upcast
+    if resulting_type.is_a?(MixedUnionType) && obj_type.full_name != resulting_type.full_name
+      low.last = union_temp(low, resulting_type, obj_type, last_value)
+      return
+    end
+    low.last = upcast(low, last_value, obj_type, resulting_type)
+    return
+  end
+  if obj_type.full_name != resulting_type.full_name
+    down_value = last_value
+    if mixed_union_type?(obj_type)
+      down_value = pointer_of_value(low, node.obj, last_value, obj_type)
+    end
+    tid = type_id_of_value(low, node.obj, down_value, obj_type)
+    cmp = match_type_id(low, obj_type, resulting_type, tid)
+    blocks = low.new_blocks(["matches", "doesnt_match"])
+    matches_block = blocks[0]
+    doesnt_match_block = blocks[1]
+    low.builder.cond_br(cmp, matches_block, doesnt_match_block)
+    low.builder.position_at_end(doesnt_match_block)
+    raise_cast_failed(low, tid, to_type, node)
+    low.builder.position_at_end(matches_block)
+    low.last = downcast(low, down_value, resulting_type, obj_type, true)
+    return
+  end
+  low.last = last_value
+end
+
+# The hosted `visit(NilableCast)` (codegen.cr:2011-2055): upcasts, unreachable-filter nil, and
+# runtime type-checked downcast into a Phi returning `T | Nil`.
+pub def codegen_nilable_cast(low : Lowerer, node : NilableCast) : Nil
+  obj_t = low.analysed.type_of?(node.obj)
+  raise "BUG: NilableCast operand has no analysed type (hosted codegen.cr: visit(NilableCast))" if obj_t.nil?
+  obj_type = TypeIndirection.remove_indirection(obj_t.as(Type))
+  val_opt = eval_cast_operand(low, node.obj, obj_type)
+  return if val_opt.nil?
+  last_value = val_opt.as(Value)
+
+  to_raw = low.analysed.type_of?(node.to)
+  raise "BUG: NilableCast target has no analysed type (hosted codegen.cr: visit(NilableCast))" if to_raw.nil?
+  to_type = TypeIndirection.remove_indirection(to_raw.as(Type))
+
+  res_t = low.analysed.type_of?(node)
+  raise "BUG: NilableCast node has no analysed type (hosted codegen.cr: visit(NilableCast))" if res_t.nil?
+  resulting_type = TypeIndirection.remove_indirection(res_t.as(Type))
+  nil_t = low.analysed.program.nil_type
+
+  filtered = TypeIntersect.common_descendent(low.analysed.program, obj_type, to_type)
+  if filtered.nil?
+    low.last = upcast(low, llvm_nil(low), nil_t, resulting_type)
+    return
+  end
+  result_t = node.upcast ? to_type : filtered.as(Type)
+  non_nilable_type = TypeIndirection.remove_indirection(TypeQueries.virtual_type(result_t))
+
+  if node.upcast
+    mid = upcast(low, last_value, obj_type, non_nilable_type)
+    low.last = upcast(low, mid, non_nilable_type, resulting_type)
+    return
+  end
+  if obj_type.full_name != non_nilable_type.full_name
+    down_source = last_value
+    if mixed_union_type?(obj_type)
+      down_source = pointer_of_value(low, node.obj, last_value, obj_type)
+    end
+    tid = type_id_of_value(low, node.obj, down_source, obj_type)
+    cmp = match_type_id(low, obj_type, non_nilable_type, tid)
+    wants = low.needs_value
+    union_join = wants && joins_by_pointer?(resulting_type)
+    merge_type : IrType? = nil
+    if wants
+      merge_type = union_join ? low.module.types.ptr(0) : low.typer.llvm_type(resulting_type)
+    end
+    phi = LowerPhi.new(wants, merge_type, resulting_type)
+    blocks = low.new_blocks(["matches", "doesnt_match"])
+    matches_block = blocks[0]
+    doesnt_match_block = blocks[1]
+    low.builder.cond_br(cmp, matches_block, doesnt_match_block)
+
+    low.builder.position_at_end(doesnt_match_block)
+    nil_val = llvm_nil(low)
+    if union_join
+      phi.add(low, union_temp(low, resulting_type, nil_t, nil_val), false)
+    else
+      phi.add(low, upcast(low, nil_val, nil_t, resulting_type), false)
+    end
+
+    low.builder.position_at_end(matches_block)
+    down_val = downcast(low, down_source, non_nilable_type, obj_type, true)
+    if union_join
+      phi.add(low, union_temp(low, resulting_type, non_nilable_type, down_val), true)
+    else
+      phi.add(low, upcast(low, down_val, non_nilable_type, resulting_type), true)
+    end
+
+    phi.close(low)
+    return
+  end
+  low.last = upcast(low, last_value, obj_type, resulting_type)
+end
+
+# The name of the top-level code, as the hosted `Program#abi_prefix` (program.cr:516) gives it: `__iyi_main` when the
+# iyi prelude is loaded (it declares IyiRuntimeLock), `__crystal_main` otherwise (a program with `--prelude empty`).
+pub def main_function_name(analysed : MainVisitor) : String
+  if analysed.program.lookup_type("IyiRuntimeLock").nil?
+    return "__crystal_main"
+  end
+  "__iyi_main"
+end

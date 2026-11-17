@@ -1,0 +1,13 @@
+def consume(p : Proc(Int32)) : Int32
+  0
+end
+
+def outer : Int32
+  value = 1
+  while false
+    value = 2
+  end
+  consume(-> { value })
+end
+
+outer

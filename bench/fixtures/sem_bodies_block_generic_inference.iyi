@@ -1,0 +1,15 @@
+class BlockBox(T)
+  def initialize(@value : T)
+  end
+
+  def value : T
+    @value
+  end
+
+  def self.new(size : Int32, & : Int32 -> T) : BlockBox(T)
+    BlockBox(T).new(yield size)
+  end
+end
+
+box = BlockBox.new(7) { |n| n }
+value = box.value

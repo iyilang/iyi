@@ -1,0 +1,17 @@
+# An explicit instance variable whose declared class has subclasses is typed by its virtual type
+# (hosted declare_instance_var). An initialize argument that assigns it does not replace that type.
+abstract class Base
+end
+
+class Sub < Base
+end
+
+class Holder
+  @b : Base
+  @n : Int32
+
+  def initialize(b : Base, n : Int32)
+    @b = b
+    @n = n
+  end
+end

@@ -1,0 +1,22 @@
+class CensusParent
+  def compute(&) : Int32
+    yield 7
+  end
+end
+
+class CensusDerived < CensusParent
+  def consume(value : Int32) : Int32
+    value
+  end
+
+  def compute : Int32
+    fresh = super { |value| value }
+    self.consume(fresh)
+    self.consume(value: fresh)
+  end
+end
+
+class CensusLeaf < CensusDerived
+end
+
+CensusLeaf.new.compute

@@ -1,0 +1,8 @@
+struct Slot
+  def self.count(*values : *T) : Int32 forall T
+    1
+  end
+end
+
+# call Slot.count(1, 2)
+# call Slot.count(1_u8, 2_i64)

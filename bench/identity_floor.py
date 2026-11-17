@@ -102,11 +102,22 @@ ALLOWED_PATHS: list[tuple[str, str]] = [
     (r"^bench/(machine_probe|dependency_floor|build_tool_floor|build_tool_scan)", "measures the compatibility binary, its libraries, and build tools"),
     (r"^spec/compiler/util_spec\.cr$", "specs Crystal's own util module"),
     (r"^samples/iyi/", "programs whose comments compare iyi with Crystal"),
+    # The self-hosting platform support oracle. It verifies target triple parsing,
+    # flags, naming, and linker command generation against the frontend iyi is
+    # still bootstrapped from.
+    (r"^bench/selfhost_platform_exercise\.sh$", "the frontend the selfhost platform support is checked against"),
+    (r"^spec/compiler/stale/predefined_constants_spec\.cr$", "predefined constants in the Crystal module, tested for omission when unread"),
 ]
 
 # Lines that name Crystal legitimately inside a file that is otherwise iyi's.
 ALLOWED_LINES: list[tuple[str, str]] = [
     (r"--crystal", "the compatibility mode's own flag"),
+    (r"Crystal library effects are not classified", "stale testing refusal reason for crystal compatibility mode"),
+    (r"shared Crystal entrypoint for stale gates|native Crystal launcher", "the Crystal launcher (bin/crystal) a stale gate or spec must start, named as the program it runs"),
+    (r"CRYSTAL_CONFIG_LIBRARY_PATH", "the other toolchain's own environment variable, which its launcher sets before running its compiler"),
+    (r"CRYSTAL_LIBRARY_PATH", "the bootstrap Crystal package's own library-path variable: on Windows the RG8 def-body mutant is built by that toolchain, whose `.lib` files are in it, and the compiler prefers IYI_LIBRARY_PATH to it"),
+    (r"crystal eval", "the other toolchain's `crystal eval` command, which the shared launcher runs"),
+    (r"category.*['\"]crystal['\"]", "stale testing refusal category for crystal compatibility mode"),
     # `bench/std_dependency_floor.sh` fails when a standard library module
     # reaches an ancestor dependency, and the failure has to say where the
     # reachable bindings are. They are Crystal's, under src/openssl, src/yaml,
@@ -313,17 +324,24 @@ ALLOWED_LINES: list[tuple[str, str]] = [
     # an undefined variable, ran `--version` on a directory, and reported the
     # daemon's version as empty. An allowlist entry wide enough to cover a
     # defect is not an allowlist entry.
-    (r"CRYSTAL_#\{name\}|`CRYSTAL_DAEMON(_SOCKET)?`|crystal docker image", "the fallback that keeps Crystal's env vars working"),
+    # Macro interpolation uses name.id to keep the environment key unquoted.
+    (r"CRYSTAL_#\{name(?:\.id)?\}|`CRYSTAL_DAEMON(_SOCKET)?`|crystal docker image", "the fallback that keeps Crystal's env vars working"),
     # The same fallback, in the sentence that refuses a cache directory.
     # `Config.env` reads `IYI_CACHE_DIR` and then `CRYSTAL_CACHE_DIR`, so the
     # refusal names whichever of the two is set: a sentence about
     # `IYI_CACHE_DIR` read by somebody who set the other one names a variable
     # they do not have. Backticked or quoted, by the rule above — a bare
     # `CRYSTAL_CACHE_DIR` would cover a slip as well as this.
-    (r'`CRYSTAL_CACHE_DIR`|: "CRYSTAL_CACHE_DIR"', "the variable the other command surface's author set"),
+    (r'`CRYSTAL_CACHE_DIR`|: "CRYSTAL_CACHE_DIR"|"?CRYSTAL_OPTS"?|"?CRYSTAL_CACHE_DIR"?', "the variable the other command surface's author set, or locator variables in stale/compiler_env"),
     # The bootstrap compiler's cache, set beside iyi's in the gate that reads
     # the broken copy's objects out of it: the bootstrap reads no other name.
     (r'CRYSTAL_CACHE_DIR="\$WORK/\$label-cache"', "the bootstrap compiler's cache, where bench/symbol_names.sh reads its broken copy"),
+    (r'^CRYSTAL_CACHE_DIR="\$WORK/cr" \\$',
+     "the Crystal declaration oracle's separate cache in selfhost/semantic/diff.sh"),
+    (r'"crystal_version"',
+     "the Crystal compiler identity recorded in the native IR oracle manifest"),
+    (r'^# Normalize external LLVM/Crystal transport only;',
+     "the LLVM layout oracle compiled from Crystal, not the iyi driver under test"),
     # The linker's search path, in the gate that proves the binaries build
     # with bdw-gc unreachable. `IYI_LIBRARY_PATH` is not a substitute: it adds
     # to the default search path where `CRYSTAL_LIBRARY_PATH` replaces it, and

@@ -1,0 +1,16 @@
+class Cell(T)
+  def initialize(@value : T)
+  end
+
+  def value : T
+    @value
+  end
+end
+
+class Maker
+  def make : Int32
+    Cell(Int32).new(7).value
+  end
+end
+
+Maker.new.make

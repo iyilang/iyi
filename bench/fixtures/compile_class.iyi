@@ -1,0 +1,21 @@
+class Counter
+  @count : Int32
+
+  def initialize(count : Int32)
+    @count = count
+  end
+
+  def get : Int32
+    @count
+  end
+
+  def inc(d : Int32) : Int32
+    @count = @count &+ d
+    @count
+  end
+end
+
+fun main(argc : Int32, argv : Pointer(Pointer(UInt8))) : Int32
+  c = Counter.new(10)
+  c.inc(32)
+end

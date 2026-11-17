@@ -1,0 +1,19 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+struct Float64
+  @[Primitive(:unchecked_convert)]
+  def narrow : Float32
+  end
+end
+
+def narrow_test(value : Float64) : Int32
+  if value.narrow == 2.0_f32
+    7
+  else
+    0
+  end
+end
+
+LibC.exit(narrow_test(2.0))

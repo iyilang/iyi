@@ -1,0 +1,30 @@
+abstract class Shape
+end
+
+class Circle < Shape
+end
+
+class Holder
+  @value : Shape
+
+  def initialize(@value : Shape)
+  end
+
+  def value : Shape
+    @value
+  end
+end
+
+class InitializedHolder
+  @value : Shape = Circle.new
+
+  def initialize(@value : Shape)
+  end
+
+  def value : Shape
+    @value
+  end
+end
+
+raise "wrong constructor value" unless Holder.new(Circle.new).value.is_a?(Circle)
+raise "wrong initialized value" unless InitializedHolder.new(Circle.new).value.is_a?(Circle)

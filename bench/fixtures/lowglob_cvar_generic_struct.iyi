@@ -1,0 +1,48 @@
+# The empty-prelude Atomic has the same inline word layout as the real type.
+# Its initializer must run even when the word is zero.
+struct Atomic(T)
+  @value : T
+
+  def initialize(@value : T)
+  end
+
+  def value : T
+    @value
+  end
+end
+
+struct Cell(T)
+  @value : T
+
+  def initialize(@value : T)
+  end
+
+  def value : T
+    @value
+  end
+end
+
+class Tables
+  @@calls : Int32 = 0
+  @@zero = Atomic(UInt64).new(0_u64)
+  @@cell : Cell(Int32) = Cell(Int32).new(seed)
+
+  def self.seed : Int32
+    @@calls = 21
+    @@calls
+  end
+
+  def self.result : Int32
+    return 90 unless @@zero.value == 0_u64
+    return 91 unless @@cell.value == 21
+    return 92 unless @@calls == 21
+    @@cell = Cell(Int32).new(37)
+    @@cell.value
+  end
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+LibC.exit(Tables.result)

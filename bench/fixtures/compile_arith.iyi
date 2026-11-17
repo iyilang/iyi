@@ -1,0 +1,13 @@
+fun add(a : Int32, b : Int32) : Int32
+  a &+ b
+end
+
+fun ops(a : Int32, b : Int32) : Int32
+  (a &+ b) &* (a &- b)
+end
+
+fun main(argc : Int32, argv : Pointer(Pointer(UInt8))) : Int32
+  v1 = add(15, 27)
+  v2 = ops(5, 3)
+  v1 &- v2
+end

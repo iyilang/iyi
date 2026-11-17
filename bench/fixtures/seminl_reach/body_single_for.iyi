@@ -1,0 +1,9 @@
+struct SeminlBool
+  {% for op in %w(== !=) %}
+    def {{ op.id }}(other : Int32) : Int32
+      7
+    end
+  {% end %}
+end
+
+SeminlBool.new == 3

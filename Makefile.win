@@ -93,7 +93,7 @@ IYI_CONFIG_BUILD_COMMIT     := $(shell git rev-parse --short HEAD)
 IYI_CONFIG_PATH             := $$ORIGIN\..\share\iyi\src;$$ORIGIN\..\share\iyi\crystal;$$ORIGIN\..\src
 IYI_CONFIG_LIBRARY_PATH     := $$ORIGIN\..\lib\iyi
 IYI_COMPILER_FLAGS          := -Dwithout_iconv$(if $(collector),,  -Dgc_none)
-export_iyi_vars   = $(eval export IYI_CONFIG_BUILD_COMMIT IYI_CONFIG_PATH IYI_CONFIG_LIBRARY_PATH)
+export_iyi_vars   = $(eval export IYI_CONFIG_BUILD_COMMIT IYI_CONFIG_BUILD_INPUTS IYI_CONFIG_PATH IYI_CONFIG_LIBRARY_PATH)
 
 # iyi: what a downloadable build of iyi is called. The Linux Makefile asks
 # `uname` for the two last words; here the platform is the makefile, so they
@@ -121,6 +121,12 @@ LLVM_CONFIG  ?=
 LLVM_VERSION := $(if $(LLVM_CONFIG),$(shell "$(LLVM_CONFIG)" --version))
 endif
 LLVM_HOST_TARGET ?= $(if $(LLVM_CONFIG),$(shell $(LLVM_CONFIG) --host-target))
+ifndef BASE_CRYSTAL_VERSION
+	BASE_CRYSTAL_VERSION := $(shell $(CRYSTAL) env CRYSTAL_VERSION 2>NUL)
+endif
+ifndef IYI_CONFIG_BUILD_INPUTS
+	IYI_CONFIG_BUILD_INPUTS := $(shell python scripts\build_inputs.py --llvm-version "$(LLVM_VERSION)" --crystal-version "$(BASE_CRYSTAL_VERSION)" --flags "$(FLAGS) $(COMPILER_FLAGS) $(IYI_COMPILER_FLAGS)" 2>NUL)
+endif
 
 LLVM_EXT_DIR = src\llvm\ext
 LLVM_EXT_OBJ = $(LLVM_EXT_DIR)\llvm_ext.obj
@@ -188,6 +194,9 @@ iyi: $(O)\iyi.exe ## iyi: build `iyi` itself, runnable as .build\iyi.exe
 
 .PHONY: iyi-daemon
 iyi-daemon: $(O)\iyi-daemon.exe ## iyi: build iyi's own single-threaded build daemon
+
+.PHONY: iyi-compile
+iyi-compile: $(O)\iyi-compile.exe ## iyi: build the self-hosted end-to-end compiler tool
 
 .PHONY: iyi-zip
 iyi-zip: ## iyi: build a relocatable zip at .build
@@ -391,6 +400,12 @@ $(O)\iyi.exe: $(DEPS) $(SOURCES)
 	.\bin\crystal build $(FLAGS) $(COMPILER_FLAGS) $(IYI_COMPILER_FLAGS) -o "$(O)\iyi-next.exe" src\compiler\iyi.cr --link-flags=/PDBALTPATH:iyi.pdb
 	$(call REPLACE,$(O)\iyi-next.exe,$@)
 	$(call REPLACE,$(O)\iyi-next.pdb,$(O)\iyi.pdb)
+	@echo built $@
+
+# Match the POSIX tool's source dependencies and native executable name.
+$(O)\iyi-compile.exe: $(O)\iyi.exe $(call GLOB,src\\*.iyi) $(call GLOB,src\\*.ir)
+	@$(call MKDIR,"$(O)")
+	$(O)\iyi.exe build -o "$@" src\compiler\tools\compile.iyi
 	@echo built $@
 
 $(O)\iyi-daemon.exe: $(DEPS) $(SOURCES)

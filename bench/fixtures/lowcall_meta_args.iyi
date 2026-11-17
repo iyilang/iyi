@@ -1,0 +1,11 @@
+class Sched
+  def self.twice(k : Int32) : Int32
+    k &+ k
+  end
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+LibC.exit(Sched.twice(21))

@@ -1,0 +1,23 @@
+struct Cell(T)
+  def initialize(@value : T)
+  end
+
+  def value : T
+    @value
+  end
+end
+
+class Box(A, B)
+  def initialize(@left : A, @right : B)
+  end
+
+  def left : A
+    @left
+  end
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+LibC.exit(Cell.new(Box.new(7, true).left).value)

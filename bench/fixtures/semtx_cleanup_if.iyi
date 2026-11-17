@@ -1,0 +1,24 @@
+if true
+  1
+else
+  2
+end
+if false
+  3
+else
+  4
+end
+if nil
+  5
+end
+if !true
+  6
+end
+if !nil
+  7
+else
+  8
+end
+if 9
+  10
+end

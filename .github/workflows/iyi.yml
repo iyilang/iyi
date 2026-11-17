@@ -562,6 +562,13 @@ jobs:
       - name: SafeReach is proven, not trusted (III.4.4)
         run: bash bench/safe_reach.sh
 
+      # III.4.5: a parallel unit's block may not reach module state that is
+      # not Share - followed through procs, std's and the prelude's state,
+      # and the pins heap22 adds - each refusal and its broken copy named;
+      # compiled only (`--no-codegen`).
+      - name: The reach rule (III.4.5)
+        run: bash bench/reach_rule.sh
+
       # III.13: every way out of the checked language - a Pointer however
       # it is reached, uninitialized, lib, fun, asm, @[Primitive],
       # @[Extern], a caller contract, @[Share] and @[UnsafeReach] - refused
@@ -1236,10 +1243,10 @@ jobs:
       image: crystallang/crystal:1.21.0-build
     name: "heap22's partitions, their gates"
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
           name: crystal
           path: .build
@@ -1715,7 +1722,7 @@ jobs:
       - name: Restore the static LLVM (GitHub's runner)
         if: runner.environment == 'github-hosted'
         id: llvm-cache
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/llvm-static
           key: llvm-static-${{ runner.os }}-${{ runner.arch }}-macos-15-${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
@@ -2077,7 +2084,7 @@ jobs:
       # 1.25.4): it said "unparsed" for http://[::ffff:127.0.0.1], where
       # proxy_for and Linux's go1.27.4 say direct (job 133974766871). No
       # `go.sum` here to key a cache on.
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: stable
           cache: false
@@ -2138,7 +2145,7 @@ jobs:
       - name: Restore the static LLVM (GitHub's runner)
         if: runner.environment == 'github-hosted'
         id: llvm-cache
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/llvm-static
           key: llvm-static-${{ runner.os }}-${{ runner.arch }}-macos-15-${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
@@ -2182,7 +2189,7 @@ jobs:
     timeout-minutes: 105
     name: "heap22's partitions, their gates, on darwin"
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install the bootstrap toolchain
@@ -2196,7 +2203,7 @@ jobs:
       - name: Restore the static LLVM (GitHub's runner)
         if: runner.environment == 'github-hosted'
         id: llvm-cache
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/llvm-static
           key: llvm-static-${{ runner.os }}-${{ runner.arch }}-macos-15-${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
@@ -2948,6 +2955,7 @@ jobs:
           bash bench/parallel_exercise.sh
           bash bench/spawn_eligible.sh
           bash bench/safe_reach.sh
+          bash bench/reach_rule.sh
           bash bench/unsafe.sh
           bash bench/chaos_exercise.sh
           bash bench/library_boundaries.sh
@@ -2964,13 +2972,13 @@ jobs:
     timeout-minutes: 90
     name: "heap22's partitions, their gates, on Windows"
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
 
-      - uses: crystal-lang/install-crystal@v1
+      - uses: crystal-lang/install-crystal@36a22e9145188eec527c96e5a789ce4b832af587 # v1.9.5
         with:
           crystal: 1.21.0
 

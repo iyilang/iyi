@@ -1,0 +1,361 @@
+# Dumps what the ported command driver decides for a corpus of argument
+# vectors: the command it selects, the exit code, and the text it prints.
+#
+# Compared against the shipped driver in bench/selfhost_command_exercise.sh.
+
+import compiler/command/driver::{CommandDriver, CommandResult, Exit}
+
+module BenchSelfhostCommandExercise
+  def self.corpus : Array(Array(String))
+    vectors = [] of Array(String)
+
+    # Help & version vectors
+    vectors << [] of String
+    vectors << ["--help"]
+    vectors << ["-h"]
+    vectors << ["help"]
+    vectors << ["h"]
+    vectors << ["he"]
+    vectors << ["hel"]
+    vectors << ["--version"]
+    vectors << ["-v"]
+    vectors << ["version"]
+    vectors << ["v"]
+    vectors << ["ve"]
+    vectors << ["ver"]
+
+    # Init subcommand
+    vectors << ["init", "--help"]
+
+    # Build prefix, usage and option parsing
+    vectors << ["b"]
+    vectors << ["bu"]
+    vectors << ["bui"]
+    vectors << ["buil"]
+    vectors << ["build"]
+    vectors << ["build", "--help"]
+    vectors << ["build", "-h"]
+    vectors << ["build", "--release"]
+    vectors << ["build", "--invalid-option"]
+    vectors << ["build", "-O", "invalid"]
+    vectors << ["build", "--threads", "not_a_num"]
+    vectors << ["build", "--frame-pointers", "invalid"]
+    vectors << ["build", "--x86-asm-syntax", "invalid"]
+    vectors << ["build", "--emit", "invalid"]
+    vectors << ["build", "--mcmodel", "invalid"]
+    vectors << ["build", "--warnings", "invalid"]
+    vectors << ["build", "-f", "invalid"]
+    # Each reaches a source or output refusal before the hosted compiler runs.
+    vectors << ["build", "nonexistent_source_xyz.iyi"]
+    vectors << ["run", "nonexistent_source_xyz.iyi"]
+    vectors << ["build", ""]
+    vectors << ["build", "bench"]
+    vectors << ["build", "-f", "bogus", "nonexistent_source_xyz.iyi"]
+    vectors << ["build", "-o", "missing_dir_xyz/out", "samples/iyi/hello.iyi"]
+    vectors << ["build", "-o", "samples/iyi/hello.iyi", "samples/iyi/hello.iyi"]
+
+    # Deps
+    vectors << ["deps"]
+    vectors << ["d"]
+    vectors << ["de"]
+    vectors << ["dep"]
+
+    # Env
+    vectors << ["env", "--help"]
+
+    # Eval
+    vectors << ["eval", "--help"]
+
+    # Run
+    vectors << ["run"]
+    vectors << ["run", "--help"]
+
+    # Spec
+    vectors << ["spec", "--help"]
+
+    # Doc
+    vectors << ["doc"]
+    vectors << ["doc", "--help"]
+    vectors << ["doc", "-h"]
+    vectors << ["doc", "nonexistent.iyi"]
+    vectors << ["doc", "nonexistent.iyimod"]
+
+    # Test
+    vectors << ["test", "--help"]
+    vectors << ["test", "-h"]
+    vectors << ["test", "--timeout", "not_a_num"]
+    vectors << ["test", "--timeout"]
+    vectors << ["test", "--affected"]
+    # Every vector below ends in help or a refusal before any path is walked, so
+    # the oracle never runs a test. `missing_dir_xyz` is the path that ends a
+    # vector whose flags are valid; a vector that names a real file or directory
+    # would build and run whatever it found. A flag that takes a value and is
+    # given `--help` as that value consumes it, so such a vector ends in the path.
+    vectors << ["test", "-v", "--release", "-D", "FLAG", "--help"]
+    vectors << ["test", "--json", "-v", "--release", "--help"]
+    vectors << ["test", "-DFLAG", "--help"]
+    vectors << ["test", "--timeout", "1e3", "--help"]
+    vectors << ["test", "--timeout", "+5", "--help"]
+    vectors << ["test", "--timeout", "0.5", "--help"]
+    vectors << ["test", "--timeout", "0", "--help"]
+    vectors << ["test", "--timeout", "-1"]
+    vectors << ["test", "--timeout", "nan"]
+    vectors << ["test", "--timeout", "inf"]
+    vectors << ["test", "--timeout", "1e300"]
+    vectors << ["test", "--timeout", "1e400"]
+    vectors << ["test", "--timeout", "9.3e14"]
+    vectors << ["test", "--timeout", "2x", "--help"]
+    vectors << ["test", "--timeout", "1e3", "missing_dir_xyz"]
+    vectors << ["test", "--affected", "", "missing_dir_xyz"]
+    vectors << ["test", "--affected", "--help", "missing_dir_xyz"]
+    vectors << ["test", "--affected", "bench/none.iyi", "--help"]
+    vectors << ["test", "--affected", "bench/none.iyi", "missing_dir_xyz"]
+    vectors << ["test", "--chaos", "--help"]
+    vectors << ["test", "--chaos=abc", "--help"]
+    vectors << ["test", "--chaos=", "--help"]
+    vectors << ["test", "--chaos=+5", "--help"]
+    vectors << ["test", "--chaos=18446744073709551616", "--help"]
+    vectors << ["test", "--chaos=18446744073709551615", "--help"]
+    vectors << ["test", "--chaos=0", "--help"]
+    vectors << ["test", "--chaos=42", "--chaos-runs", "0", "--help"]
+    vectors << ["test", "--chaos-runs"]
+    vectors << ["test", "--chaos-runs", "x", "--help"]
+    vectors << ["test", "--chaos-runs", "-3", "--help"]
+    vectors << ["test", "--chaos-runs", "3", "--help"]
+    vectors << ["test", "--chaos-runs", "+3", "--help"]
+    vectors << ["test", "-p", "0", "--help"]
+    vectors << ["test", "-p", "x", "--help"]
+    vectors << ["test", "--parallel"]
+    vectors << ["test", "--parallel", "-1", "--help"]
+    vectors << ["test", "-p", "2", "--help"]
+    vectors << ["test", "--parallel", "3", "missing_dir_xyz"]
+    vectors << ["test", "--run"]
+    vectors << ["test", "--run", "", "--help"]
+    vectors << ["test", "--run", "--help", "missing_dir_xyz"]
+    vectors << ["test", "--run", "case", "--help"]
+    vectors << ["test", "-D"]
+    vectors << ["test", "--define"]
+    vectors << ["test", "-D", "", "--help"]
+    vectors << ["test", "--define", "--help", "missing_dir_xyz"]
+    vectors << ["test", "-x", "--help"]
+    vectors << ["test", "--nonesuch"]
+    vectors << ["test", "-"]
+    vectors << ["test", ""]
+    vectors << ["test", "missing_dir_xyz"]
+    vectors << ["test", "missing_dir_xyz", "--help"]
+    vectors << ["test", "--json", "missing_dir_xyz"]
+    vectors << ["test", "missing_a", "missing_b"]
+    vectors << ["test", "--verbose", "--help"]
+
+    # Get. Each one refuses or prints help before it reads iyi.mod or the
+    # network: a path with no iyi.mod is never named, since the working
+    # directory may hold one.
+    vectors << ["get"]
+    vectors << ["get", "--help"]
+    vectors << ["get", "-h"]
+    vectors << ["get", "--bogus"]
+    vectors << ["get", "--as"]
+    vectors << ["get", "-u", "x"]
+    vectors << ["get", "a", "b", "--as", "w"]
+    vectors << ["get", "-u", "--as", "w"]
+
+    # Lsp and mcp: arguments refused, help printed; a server is never started.
+    vectors << ["lsp", "--bogus"]
+    vectors << ["lsp", "extra"]
+    vectors << ["lsp", "--stdio", "--help"]
+    vectors << ["lsp", "--help", "--bogus"]
+    vectors << ["mcp", "extra"]
+    vectors << ["mcp", "--bogus"]
+    vectors << ["mcp", "--help", "--bogus"]
+
+    # Check: the verb's own refusals and help; a check that would compile is
+    # not run here.
+    vectors << ["check", "--selfhost"]
+    vectors << ["check", "--parse-only", "--help"]
+    vectors << ["check", "--selfhost", "--parse-only", "--help"]
+    vectors << ["check", "--affected"]
+
+    # Help and version take a verb, or refuse an argument they do not take.
+    vectors << ["help", "build"]
+    vectors << ["help", "nonesuch"]
+    vectors << ["help", "help"]
+    vectors << ["help", "tool"]
+    vectors << ["-h", "build"]
+    vectors << ["version", "extra"]
+    vectors << ["version", "--help"]
+
+    # Not a command: the repl is not one here.
+    vectors << ["repl"]
+    vectors << ["repl", "--help"]
+
+    # Fix, migrate, bind, daemon: flags and refusals.
+    vectors << ["fix", "--json"]
+    vectors << ["fix", "--bogus"]
+    vectors << ["migrate", "--bogus"]
+    vectors << ["migrate", "-v", "--help"]
+    vectors << ["migrate", "--check", "--help"]
+    vectors << ["migrate", "--annotate", "--help"]
+    vectors << ["migrate", "--verbose", "--help"]
+    vectors << ["bind", "--bogus"]
+    # Daemon start and build are not vectored: the hosted driver answers them
+    # from this machine's compilers and sockets before it reads the flags.
+    vectors << ["mod", "dump", "--json"]
+    vectors << ["mod", "dump", "x.iyimod", "y"]
+    vectors << ["mod", "dump", "--declarations", "--json", "missing.iyimod"]
+    vectors << ["check", "--affected", "bench/none.iyi", "--bogus"]
+    vectors << ["run", "--sandbox"]
+    vectors << ["run", "--sandbox", "missing_file_xyz.iyi"]
+    vectors << ["run", "--sandbox", "a", "b"]
+    vectors << ["mod", "dump", "--selfhost", "--help"]
+    vectors << ["lsp", "--worker", "--help"]
+    vectors << ["clear_cache", "--verbose", "--help"]
+    vectors << ["build", "--force", "--help"]
+    vectors << ["migrate", "-h"]
+    vectors << ["mod", "release", "1.0.0", "--help"]
+
+    # Mod: the subcommands the corpus did not reach (tidy, reach, release) and
+    # the flags of dump, diff and context.
+    vectors << ["mod", "tidy", "--help"]
+    vectors << ["mod", "tidy", "--check", "--help"]
+    vectors << ["mod", "tidy", "--bogus"]
+    vectors << ["mod", "reach", "--help"]
+    vectors << ["mod", "reach", "--bogus"]
+    vectors << ["mod", "release", "--help"]
+    vectors << ["mod", "release", "--bogus"]
+    vectors << ["mod", "dump", "--bogus"]
+    vectors << ["mod", "diff", "--exit-code", "--help"]
+    vectors << ["mod", "context", "--budget", "1", "--help"]
+    vectors << ["mod", "context", "--json", "--help"]
+
+    # Run --sandbox prints its own help.
+    vectors << ["run", "--sandbox", "--help"]
+
+    # Vet
+    vectors << ["vet", "--help"]
+    vectors << ["vet", "-h"]
+
+    # Check
+    vectors << ["check", "--help"]
+    vectors << ["check", "-h"]
+
+    # Fix
+    vectors << ["fix"]
+    vectors << ["fix", "--help"]
+    vectors << ["fix", "-h"]
+
+    # Bind
+    vectors << ["bind", "--help"]
+    vectors << ["bind", "--mods"]
+    vectors << ["bind", "--lib"]
+
+    # Migrate
+    vectors << ["migrate"]
+    vectors << ["migrate", "--help"]
+    vectors << ["migrate", "--out"]
+
+    # LSP / MCP
+    vectors << ["lsp", "--help"]
+    vectors << ["mcp", "--help"]
+
+    # Tool
+    vectors << ["t"]
+    vectors << ["to"]
+    vectors << ["too"]
+    vectors << ["tool"]
+    vectors << ["tool", "--help"]
+    vectors << ["tool", "-h"]
+    vectors << ["tool", "c"]
+    vectors << ["tool", "context", "--help"]
+    vectors << ["tool", "format", "--help"]
+    vectors << ["tool", "e"]
+    vectors << ["tool", "expand", "--help"]
+    vectors << ["tool", "bind", "--help"]
+    vectors << ["tool", "h"]
+    vectors << ["tool", "hierarchy", "--help"]
+    vectors << ["tool", "d"]
+    vectors << ["tool", "dependencies", "--help"]
+    vectors << ["tool", "i"]
+    vectors << ["tool", "implementations", "--help"]
+    vectors << ["tool", "t"]
+    vectors << ["tool", "types", "--help"]
+    vectors << ["tool", "u"]
+    vectors << ["tool", "unreachable", "--help"]
+    vectors << ["tool", "m"]
+    vectors << ["tool", "macro_code_coverage", "--help"]
+    vectors << ["tool", "unknown_tool"]
+
+    # Clear cache
+    vectors << ["clear_cache", "--help"]
+
+    # Daemon
+    vectors << ["daemon", "--help"]
+    vectors << ["daemon", "unknown_sub"]
+
+    # Mod
+    vectors << ["m"]
+    vectors << ["mo"]
+    vectors << ["mod"]
+    vectors << ["mod", "--help"]
+    vectors << ["mod", "-h"]
+    vectors << ["mod", "dump", "--help"]
+    vectors << ["mod", "diff", "--help"]
+    vectors << ["mod", "context", "--help"]
+    vectors << ["mod", "unknown_sub"]
+
+    # Unknown commands & missing file
+    vectors << ["te"]
+    vectors << ["bi"]
+    vectors << ["da"]
+    vectors << ["mi"]
+    vectors << ["unknown_command"]
+    vectors << ["missing.cr"]
+
+    # Options the parser must refuse. Nothing above reached the abort that
+    # names an invalid flag, so the exit code it chooses was unobserved and a
+    # mutation flipping it to success changed nothing anyone could see.
+    vectors << ["build", "--bogus-flag", "main.iyi"]
+    vectors << ["build", "-Z"]
+    vectors << ["run", "--not-an-option", "main.iyi"]
+    vectors << ["check", "--nope"]
+    # `init` has its own option parser, and it is the first one in the file:
+    # a proof that patches one occurrence patches this one, so something has
+    # to reach it or that proof is about code nothing runs.
+    #
+    # Only forms that stop at the decision belong here. `init app NAME DIR`
+    # scaffolds a real directory, so running it under this gate would have the
+    # oracle write files into the checkout.
+    vectors << ["init", "--bogus-flag"]
+    # `clear_cache` owns the first of the six identical invalid-option aborts,
+    # so a proof patching one occurrence patches that one and needs a vector
+    # that reaches it.
+    vectors << ["clear_cache", "--bogus-flag"]
+    vectors << ["env", "--bogus-flag"]
+    vectors << ["docs", "--bogus-flag"]
+    vectors << ["doc", "--json", "--bogus"]
+    vectors << ["doc", "--json", "a", "b"]
+    vectors << ["doc", "--json", "--json"]
+    vectors << ["doc", "--json", ""]
+
+    vectors
+  end
+
+  def self.run
+    CommandDriver.program_name = "crystal"
+    CommandDriver.version_description = "Crystal 1.22.0-dev\n\nThe compiler was not built in release mode.\n\nLLVM: 22.1.8\nDefault target: aarch64-apple-darwin25.5.0\n"
+
+    corpus.each_with_index do |argv, idx|
+      driver = CommandDriver.new(argv)
+      result = driver.run
+      puts "=== VECTOR #{idx}: #{argv.inspect} ==="
+      print driver.format_result
+      puts "stdout:"
+      print result.stdout_output
+      puts "\nend stdout"
+      puts "stderr:"
+      print result.stderr_output
+      puts "\nend stderr"
+    end
+  end
+end
+
+BenchSelfhostCommandExercise.run

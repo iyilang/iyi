@@ -4,6 +4,10 @@
 
 ### Added
 
+- Add the command parser and build-daemon protocol in iyi, with native-host
+  comparisons over 243 argument vectors and 30 daemon scenarios.
+  The hosted CLI remains unchanged; these components add no command wiring.
+
 - **`iyi doc --json [DIR]` prints a package's exported APIs as data.**
   The package path and compiler identity accompany its modules, ordered by
   path, each carrying the same API and doc comments as `iyi mod dump --json`.

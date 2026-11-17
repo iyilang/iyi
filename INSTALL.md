@@ -147,6 +147,33 @@ imports `kernel32` (plus `advapi32` and `ws2_32` for entropy or sockets), the
 dynamic Visual C++ runtime and five UCRT façades; `--static` changes nothing
 there. A wasm32 build is one self-contained module already.
 
+## Shipping a program through npm
+
+[`samples/npm`](samples/npm) shows a launcher package with optional native
+packages for Linux x64, macOS arm64 and Windows x64. The launcher forwards
+arguments and standard streams, and reports an unsupported platform or a
+missing package. Each native package declares its `os` and `cpu`, so npm
+installs the matching binary. This recipe does not cover Linux arm64, musl,
+or other platforms.
+
+Build the program for each platform on that platform, then assemble its
+package. For example, on Linux x64:
+
+```sh
+iyi build --release -o /tmp/hello samples/iyi/hello.iyi
+node samples/npm/assemble.mjs /tmp/packages linux x64 /tmp/hello
+```
+
+Change the name, version, binary path, shim and platform dependencies together
+for your program. `bash bench/npm_recipe_exercise.sh` packs the host packages
+and installs them from local tarballs without contacting the registry.
+The example [`release.yml`](samples/npm/release.yml) builds all three
+platforms and publishes the platform packages before the launcher. Copy and
+adapt it to your repository, pin the compiler release and configure npm
+trusted publishing for each package and the protected `npm` environment.
+It requests an OIDC token and provenance, not a stored npm token. The
+publishing path has not been exercised by this recipe.
+
 ## What the compiler depends on
 
 The compiler links LLVM, the C++ runtime and libc. On the released Linux

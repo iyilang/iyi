@@ -3282,6 +3282,28 @@ jobs:
           CRYSTAL_SPEC_COMPILER_BIN: ${{ github.workspace }}\.build\crystal.exe
         run: make -f Makefile.win compiler_spec
 
+  npm-recipe:
+    needs: [plan, binary]
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'npm-recipe') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    name: "An iyi program installed from npm tarballs"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: iyi-linux-x86_64
+          path: dist/
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
+      - name: Build, pack and install offline
+        run: |
+          mkdir -p room && tar -xzf dist/*.tar.gz -C room
+          IYI="$PWD/room/bin/iyi" bash bench/npm_recipe_exercise.sh
+
   wasi-run:
     needs: [plan, cross-objects, binary]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'wasi-run') }}
@@ -3798,7 +3820,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [binary, darwin, darwin-std, darwin-std-siblings, clean-room, iyi, compiler-specs, stdlib-specs,
             samples, lsp-positions, std, std-siblings, std-platforms, targets, cross-objects, cross-run,
-            wasi-run, windows-probe, windows-collector, windows-runtime, windows-native,
+            npm-recipe, wasi-run, windows-probe, windows-collector, windows-runtime, windows-native,
             windows-native-gates, windows-native-surfaces, windows-std,
             windows-std-siblings, windows-std-platforms, windows-gates, windows-compiler-specs,
             wasm32-collector, docs]
@@ -3985,7 +4007,7 @@ jobs:
             darwin-std-siblings, darwin-std, windows-probe, windows-collector, windows-runtime,
             windows-native, windows-native-gates, windows-native-surfaces, windows-std,
             windows-std-platforms, windows-std-siblings, windows-gates, windows-compiler-specs,
-            wasi-run, wasm32-collector, binary, clean-room, vscode]
+            npm-recipe, wasi-run, wasm32-collector, binary, clean-room, vscode]
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5

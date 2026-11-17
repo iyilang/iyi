@@ -7,7 +7,7 @@ IYI="${IYI:-$REPO/bin/iyi}"
 WASI_SDK_PATH="${WASI_SDK_PATH:-/opt/wasi-sdk}"
 WASMTIME="${WASMTIME:-$HOME/.wasmtime/bin/wasmtime}"
 CLANG="$WASI_SDK_PATH/bin/clang"
-OBJDUMP="$WASI_SDK_PATH/bin/llvm-objdump"
+OBJDUMP="${LLVM_OBJDUMP:-$(command -v llvm-objdump || printf '%s' "$WASI_SDK_PATH/bin/llvm-objdump")}"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/iyi-uint64x2.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 for tool in "$IYI" "$CLANG" "$OBJDUMP" "$WASMTIME"; do
@@ -66,8 +66,15 @@ done
 for mode in native-release wasm-plain wasm-plain-simd wasm wasm-simd; do cmp "$WORK/native.out" "$WORK/$mode.out"; done
 cat "$WORK/native.out"
 
-"$OBJDUMP" -d "$WORK/wasm.wasm" >"$WORK/scalar.dis"
-"$OBJDUMP" -d "$WORK/wasm-simd.wasm" >"$WORK/simd.dis"
+# LLVM 18's wasm disassembler can loop writing invalid_type indefinitely.
+# A bounded pipe makes that failure visible instead of filling the disk.
+disassemble() {
+  if ! "$OBJDUMP" -d "$1" | head -c 4000000 >"$2"; then
+    echo "disassembly failed or exceeded 4 MB: $1" >&2; return 1
+  fi
+}
+disassemble "$WORK/wasm.wasm" "$WORK/scalar.dis"
+disassemble "$WORK/wasm-simd.wasm" "$WORK/simd.dis"
 if grep -Eq '(i64x2|v128)\.' "$WORK/scalar.dis"; then
   echo 'scalar module unexpectedly contains SIMD128 instructions' >&2; exit 1
 fi

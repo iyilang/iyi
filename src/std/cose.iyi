@@ -1,0 +1,74 @@
+# COSE public keys (RFC 9052 and RFC 9053).
+#
+#     import std/cose::{CoseKey, CoseAlg, CoseError}
+#     key = CoseKey.decode(bytes).or_panic
+#     key.verify(message, signature)
+#
+# Verification is computation on the caller's bytes; no platform or network.
+
+module std/cose
+
+import std/cbor::{Cbor, CborValue, CborError}
+import std/ecdsa::{EcdsaPublicKey}
+import std/rsa::{RsaPublicKey}
+import std/curve25519::{Ed25519PublicKey}
+
+pub struct CoseError
+  getter message : String
+
+  def initialize(message : String)
+    @message = "cose: #{message}"
+  end
+
+  def to_s : String
+    @message
+  end
+end
+
+impl Error for CoseError
+  def message : String
+    @message
+  end
+end
+
+pub enum CoseAlg
+  ES256 = -7
+  ES384 = -35
+  EdDSA = -8
+  RS256 = -257
+  PS256 = -37
+end
+
+pub struct CoseKey
+  getter kty : Int64
+  getter alg : CoseAlg
+  getter key : EcdsaPublicKey | RsaPublicKey | Ed25519PublicKey
+  @value : CborValue
+
+  def initialize(@kty : Int64, @alg : CoseAlg, @key : EcdsaPublicKey | RsaPublicKey | Ed25519PublicKey, @value : CborValue)
+  end
+
+  def self.decode(bytes : Array(UInt8)) : CoseKey | CoseError
+    CoseError.new("key decoder not yet implemented")
+  end
+
+  def self.from_cbor(value : CborValue) : CoseKey | CoseError
+    CoseError.new("key decoder not yet implemented")
+  end
+
+  def verify(message : Array(UInt8) | String, signature : Array(UInt8)) : Bool
+    false
+  end
+
+  def verify_der(message : Array(UInt8) | String, signature : Array(UInt8)) : Bool
+    false
+  end
+
+  def to_cbor : CborValue
+    @value
+  end
+
+  def encode : Array(UInt8)
+    Cbor.encode(to_cbor)
+  end
+end

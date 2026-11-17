@@ -4,8 +4,14 @@
 #     value = Cbor.decode(bytes, CborLimits.strict).or_panic
 #     wire = Cbor.encode(value)
 #
+# Decoded values retain their source and byte range; `raw` copies only when
+# asked. Constructed values have no original encoding and answer [].
+# Byte strings and text are copied; the source must not be changed while a
+# decoded value's raw bytes are still in use.
+#
 # Pure computation: no platform, clock, randomness, or network.
 
+@[Unsafe("text encoding copies the bytes of a String through its pointer")]
 module std/cbor
 
 pub struct CborError
@@ -62,11 +68,23 @@ pub struct CborValue
   alias Payload = Nil | Bool | Float64 | String | Array(UInt8) | Array(CborValue) | Array({CborValue, CborValue})
 
   getter kind : CborKind
-  getter raw : Array(UInt8)
   getter argument : UInt64
   getter payload : Payload
+  @source : Array(UInt8)?
+  @start : Int32
+  @length : Int32
 
-  def initialize(@kind : CborKind, @argument : UInt64, @payload : Payload, @raw : Array(UInt8) = [] of UInt8)
+  def initialize(@kind : CborKind, @argument : UInt64, @payload : Payload,
+                 @source : Array(UInt8)? = nil, @start : Int32 = 0, @length : Int32 = 0)
+  end
+
+  def raw : Array(UInt8)
+    source = @source
+    source ? source[@start, @length] : [] of UInt8
+  end
+
+  def with_raw(source : Array(UInt8), start : Int32, length : Int32) : CborValue
+    CborValue.new(@kind, @argument, @payload, source, start, length)
   end
 
   def self.unsigned(value : UInt64) : CborValue
@@ -102,6 +120,7 @@ pub struct CborValue
   end
 
   def self.simple(value : UInt8) : CborValue
+    raise "cbor: simple values 20 through 31 are reserved" if value >= 20_u8 && value <= 31_u8
     CborValue.new(CborKind::Simple, value.to_u64, nil)
   end
 
@@ -177,14 +196,383 @@ end
 
 pub struct Cbor
   def self.decode(bytes : Array(UInt8), limits : CborLimits = CborLimits.new) : CborValue | CborError
-    CborError.new("decoder not yet implemented", 0)
+    result = decode_one(bytes, 0, limits)!
+    return CborError.new("bytes after the value", result[1]) unless result[1] == bytes.size
+    result[0]
   end
 
   def self.decode_one(bytes : Array(UInt8), offset : Int32, limits : CborLimits = CborLimits.new) : {CborValue, Int32} | CborError
-    CborError.new("decoder not yet implemented", offset)
+    return CborError.new("offset outside the input", offset) if offset < 0 || offset > bytes.size
+    reader = CborReader.new(bytes, offset, limits)
+    value = reader.read(0)!
+    {value, reader.offset}
   end
 
   def self.encode(value : CborValue) : Array(UInt8)
-    [] of UInt8
+    bytes = [] of UInt8
+    CborWriter.write(value, bytes)
+    bytes
+  end
+end
+
+# The reader never trusts a count before checking it against the bytes
+# remaining. An indefinite item consumes its own break, never a child's.
+class CborReader
+  getter offset : Int32
+
+  def initialize(@bytes : Array(UInt8), @offset : Int32, @limits : CborLimits)
+  end
+
+  def read(depth : Int32) : CborValue | CborError
+    start = @offset
+    return CborError.new("maximum depth #{@limits.max_depth} exceeded", start) if depth > @limits.max_depth
+    return CborError.new("truncated item", start) if start >= @bytes.size
+    initial = @bytes[@offset].to_i32
+    @offset = @offset + 1
+    major = initial >> 5
+    info = initial & 31
+    if info == 31
+      return CborError.new("break outside an indefinite item", start) if major == 7
+      return CborError.new("indefinite length is invalid for major type #{major}", start) unless major >= 2 && major <= 5
+      return CborError.new("indefinite length is disabled", start) unless @limits.indefinite
+      return indefinite(major, depth, start)
+    end
+    argument = read_argument(info, start)!
+    value = case major
+            when 0 then CborValue.unsigned(argument)
+            when 1 then CborValue.negative(argument)
+            when 2, 3
+              data = read_bytes(argument, start)!
+              if major == 3
+                return CborError.new("text is not valid UTF-8", start) unless CborText.utf8?(data)
+                CborValue.text(String.new(data, 0, data.size))
+              else
+                CborValue.bytes(data)
+              end
+            when 4
+              return CborError.new("array length exceeds the remaining input", start) if argument > (@bytes.size - @offset).to_u64
+              items = [] of CborValue
+              argument.to_i32.times { items << read(depth + 1)! }
+              CborValue.array(items)
+            when 5
+              return CborError.new("map length exceeds the remaining input", start) if argument > ((@bytes.size - @offset) // 2).to_u64
+              read_map(argument.to_i32, false, depth, start)!
+            when 6
+              return CborError.new("tags are disabled", start) unless @limits.tags
+              CborValue.tag(argument, read(depth + 1)!)
+            else
+              simple(info, argument, start)!
+            end
+    value.with_raw(@bytes, start, @offset - start)
+  end
+
+  private def read_argument(info : Int32, start : Int32) : UInt64 | CborError
+    return info.to_u64 if info < 24
+    count = case info
+            when 24 then 1
+            when 25 then 2
+            when 26 then 4
+            when 27 then 8
+            else         return CborError.new("reserved additional information #{info}", start)
+            end
+    return CborError.new("truncated argument", @offset) if count > @bytes.size - @offset
+    value = 0_u64
+    count.times do
+      value = value.unsafe_shl(8_u64) | @bytes[@offset].to_u64
+      @offset = @offset + 1
+    end
+    value
+  end
+
+  private def read_bytes(length : UInt64, start : Int32) : Array(UInt8) | CborError
+    return CborError.new("string length exceeds the remaining input", start) if length > (@bytes.size - @offset).to_u64
+    size = length.to_i32
+    data = @bytes[@offset, size]
+    @offset = @offset + size
+    data
+  end
+
+  private def indefinite(major : Int32, depth : Int32, start : Int32) : CborValue | CborError
+    if major == 2 || major == 3
+      data = [] of UInt8
+      loop do
+        return CborError.new("unterminated indefinite string", @offset) if @offset >= @bytes.size
+        if @bytes[@offset] == 0xff_u8
+          @offset = @offset + 1
+          break
+        end
+        chunk_start = @offset
+        head = @bytes[@offset].to_i32
+        @offset = @offset + 1
+        unless (head >> 5) == major && (head & 31) != 31
+          return CborError.new("wrong-type or indefinite string chunk", chunk_start)
+        end
+        length = read_argument(head & 31, chunk_start)!
+        chunk = read_bytes(length, chunk_start)!
+        if major == 3 && !CborText.utf8?(chunk)
+          return CborError.new("text chunk is not valid UTF-8", chunk_start)
+        end
+        chunk.each { |byte| data << byte }
+      end
+      value = major == 2 ? CborValue.bytes(data) : CborValue.text(String.new(data, 0, data.size))
+    elsif major == 4
+      items = [] of CborValue
+      loop do
+        return CborError.new("unterminated indefinite array", @offset) if @offset >= @bytes.size
+        if @bytes[@offset] == 0xff_u8
+          @offset = @offset + 1
+          break
+        end
+        items << read(depth + 1)!
+      end
+      value = CborValue.array(items)
+    else
+      value = read_map(0, true, depth, start)!
+    end
+    value.with_raw(@bytes, start, @offset - start)
+  end
+
+  private def read_map(count : Int32, indefinite : Bool, depth : Int32, start : Int32) : CborValue | CborError
+    entries = [] of {CborValue, CborValue}
+    seen = {} of String => Bool
+    while indefinite || entries.size < count
+      return CborError.new("unterminated map", @offset) if @offset >= @bytes.size
+      if indefinite && @bytes[@offset] == 0xff_u8
+        @offset = @offset + 1
+        break
+      end
+      key_start = @offset
+      key = read(depth + 1)!
+      unless @limits.duplicate_keys
+        encoded = Cbor.encode(key)
+        identity = String.new(encoded, 0, encoded.size)
+        return CborError.new("duplicate map key", key_start) if seen[identity]?
+        seen[identity] = true
+      end
+      val = read(depth + 1)!
+      entries << {key, val}
+    end
+    CborValue.map(entries)
+  end
+
+  private def simple(info : Int32, argument : UInt64, start : Int32) : CborValue | CborError
+    return CborValue.simple(info.to_u8) if info < 20
+    return CborValue.bool(false) if info == 20
+    return CborValue.bool(true) if info == 21
+    return CborValue.null if info == 22
+    return CborValue.undefined if info == 23
+    if info == 24
+      return CborError.new("invalid extended simple value #{argument}", start) if argument < 32_u64
+      return CborValue.simple(argument.to_u8)
+    end
+    return CborError.new("floats are disabled", start) unless @limits.floats
+    CborValue.float(CborFloat.decode(argument, info))
+  end
+end
+
+# RFC 8949 section 4.2.1 sorts keys by their deterministic byte strings,
+# bytewise, not by the older length-first ordering of section 4.2.3.
+struct CborWriter
+  def self.head(major : Int32, value : UInt64, output : Array(UInt8)) : Nil
+    prefix = major << 5
+    if value < 24_u64
+      output << (prefix | value.to_i32).to_u8
+    elsif value <= 0xff_u64
+      output << (prefix | 24).to_u8
+      output << value.to_u8
+    elsif value <= 0xffff_u64
+      output << (prefix | 25).to_u8
+      fixed(value, 2, output)
+    elsif value <= 0xffffffff_u64
+      output << (prefix | 26).to_u8
+      fixed(value, 4, output)
+    else
+      output << (prefix | 27).to_u8
+      fixed(value, 8, output)
+    end
+  end
+
+  def self.fixed(value : UInt64, count : Int32, output : Array(UInt8)) : Nil
+    i = count - 1
+    while i >= 0
+      output << (value.unsafe_shr((i * 8).to_u64) & 0xff_u64).to_u8
+      i = i - 1
+    end
+  end
+
+  def self.compare(a : Array(UInt8), b : Array(UInt8)) : Int32
+    i = 0
+    while i < a.size && i < b.size
+      return -1 if a[i] < b[i]
+      return 1 if a[i] > b[i]
+      i = i + 1
+    end
+    return -1 if a.size < b.size
+    return 1 if a.size > b.size
+    0
+  end
+
+  def self.write(value : CborValue, output : Array(UInt8)) : Nil
+    case value.kind
+    when CborKind::Unsigned then head(0, value.argument, output)
+    when CborKind::Negative then head(1, value.argument, output)
+    when CborKind::Bytes
+      data = value.payload.as(Array(UInt8))
+      head(2, data.size.to_u64, output)
+      output.concat(data)
+    when CborKind::Text
+      text = value.payload.as(String)
+      head(3, text.bytesize.to_u64, output)
+      p = text.to_unsafe
+      text.bytesize.times { |i| output << p[i] }
+    when CborKind::Array
+      items = value.payload.as(Array(CborValue))
+      head(4, items.size.to_u64, output)
+      items.each { |item| write(item, output) }
+    when CborKind::Map
+      entries = value.payload.as(Array({CborValue, CborValue}))
+      keyed = [] of {Array(UInt8), CborValue}
+      entries.each { |pair| keyed << {Cbor.encode(pair[0]), pair[1]} }
+      keyed.sort_in_place { |a, b| compare(a[0], b[0]) }
+      head(5, entries.size.to_u64, output)
+      keyed.each do |pair|
+        output.concat(pair[0])
+        write(pair[1], output)
+      end
+    when CborKind::Tag
+      head(6, value.argument, output)
+      write(value.payload.as(Array(CborValue))[0], output)
+    when CborKind::Simple
+      head(7, value.argument, output)
+    when CborKind::Float
+      CborFloat.write(value.payload.as(Float64), output)
+    when CborKind::Bool
+      output << (value.payload.as(Bool) ? 0xf5_u8 : 0xf4_u8)
+    when CborKind::Null
+      output << 0xf6_u8
+    when CborKind::Undefined
+      output << 0xf7_u8
+    end
+    nil
+  end
+end
+
+# Convert IEEE binary16 and binary32 by their bits, avoiding a dependency
+# on std/float. Narrow only if the exact binary64 value is representable.
+struct CborFloat
+  def self.decode(bits : UInt64, info : Int32) : Float64
+    return IyiFloatText.from_bits(bits) if info == 27
+    width = info == 25 ? 10 : 23
+    bias = info == 25 ? 15 : 127
+    max_exp = info == 25 ? 31_u64 : 255_u64
+    sign = bits.unsafe_shr((width + (info == 25 ? 5 : 8)).to_u64).unsafe_shl(63_u64)
+    fraction = bits & (1_u64.unsafe_shl(width.to_u64) - 1_u64)
+    exponent = bits.unsafe_shr(width.to_u64) & max_exp
+    if exponent == max_exp
+      result = sign | 0x7ff0000000000000_u64 | fraction.unsafe_shl((52 - width).to_u64)
+    elsif exponent == 0_u64
+      if fraction == 0_u64
+        result = sign
+      else
+        e = 1 - bias
+        top = 1_u64.unsafe_shl(width.to_u64)
+        while fraction < top
+          fraction = fraction.unsafe_shl(1_u64)
+          e = e - 1
+        end
+        fraction = fraction - top
+        result = sign | (e + 1023).to_u64.unsafe_shl(52_u64) | fraction.unsafe_shl((52 - width).to_u64)
+      end
+    else
+      result = sign | (exponent.to_i32 - bias + 1023).to_u64.unsafe_shl(52_u64) | fraction.unsafe_shl((52 - width).to_u64)
+    end
+    IyiFloatText.from_bits(result)
+  end
+
+  def self.narrow(bits : UInt64, width : Int32, bias : Int32) : UInt64?
+    sign = bits.unsafe_shr(63_u64).unsafe_shl((width + (width == 10 ? 5 : 8)).to_u64)
+    exponent = (bits.unsafe_shr(52_u64) & 0x7ff_u64).to_i32
+    fraction = bits & 0xfffffffffffff_u64
+    max_exp = width == 10 ? 31_u64 : 255_u64
+    if exponent == 2047
+      return sign | max_exp.unsafe_shl(width.to_u64) if fraction == 0_u64
+      return max_exp.unsafe_shl(width.to_u64) | 1_u64.unsafe_shl((width - 1).to_u64)
+    end
+    return sign if exponent == 0 && fraction == 0_u64
+    e = exponent - 1023
+    if e >= 1 - bias && e <= bias
+      shift = 52 - width
+      mask = 1_u64.unsafe_shl(shift.to_u64) - 1_u64
+      return nil unless (fraction & mask) == 0_u64
+      return sign | (e + bias).to_u64.unsafe_shl(width.to_u64) | fraction.unsafe_shr(shift.to_u64)
+    end
+    min_subnormal = 1 - bias - width
+    if e >= min_subnormal && e < 1 - bias
+      shift = 52 - (e - min_subnormal)
+      significand = 1_u64.unsafe_shl(52_u64) | fraction
+      mask = 1_u64.unsafe_shl(shift.to_u64) - 1_u64
+      return nil unless (significand & mask) == 0_u64
+      return sign | significand.unsafe_shr(shift.to_u64)
+    end
+    nil
+  end
+
+  def self.write(value : Float64, output : Array(UInt8)) : Nil
+    bits = IyiFloatText.bits_of(value)
+    half = narrow(bits, 10, 15)
+    if half
+      output << 0xf9_u8
+      CborWriter.fixed(half, 2, output)
+      return
+    end
+    single = narrow(bits, 23, 127)
+    if single
+      output << 0xfa_u8
+      CborWriter.fixed(single, 4, output)
+      return
+    end
+    output << 0xfb_u8
+    CborWriter.fixed(bits, 8, output)
+  end
+end
+
+struct CborText
+  # RFC 3629: reject overlong sequences, surrogates and out-of-range code
+  # points. Each chunk of an indefinite text string stands on its own.
+  def self.utf8?(data : Array(UInt8)) : Bool
+    i = 0
+    while i < data.size
+      b = data[i]
+      if b < 0x80_u8
+        i = i + 1
+        next
+      end
+      need, low, high = if b >= 0xc2_u8 && b <= 0xdf_u8
+                          {1, 0x80_u8, 0xbf_u8}
+                        elsif b == 0xe0_u8
+                          {2, 0xa0_u8, 0xbf_u8}
+                        elsif (b >= 0xe1_u8 && b <= 0xec_u8) || b == 0xee_u8 || b == 0xef_u8
+                          {2, 0x80_u8, 0xbf_u8}
+                        elsif b == 0xed_u8
+                          {2, 0x80_u8, 0x9f_u8}
+                        elsif b == 0xf0_u8
+                          {3, 0x90_u8, 0xbf_u8}
+                        elsif b >= 0xf1_u8 && b <= 0xf3_u8
+                          {3, 0x80_u8, 0xbf_u8}
+                        elsif b == 0xf4_u8
+                          {3, 0x80_u8, 0x8f_u8}
+                        else
+                          return false
+                        end
+      return false if i + need >= data.size
+      return false unless data[i + 1] >= low && data[i + 1] <= high
+      k = 2
+      while k <= need
+        return false unless data[i + k] >= 0x80_u8 && data[i + k] <= 0xbf_u8
+        k = k + 1
+      end
+      i = i + need + 1
+    end
+    true
   end
 end

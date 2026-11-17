@@ -275,8 +275,13 @@ def touches_ci(files):
 
 def base_workflow(event_path, token, repository):
     """The workflow as the pull request's base commit has it, or None."""
-    with open(event_path, encoding="utf-8") as f:
-        base = json.load(f)["pull_request"]["base"]["sha"]
+    if not (event_path and token and repository):
+        return None
+    try:
+        with open(event_path, encoding="utf-8") as f:
+            base = json.load(f)["pull_request"]["base"]["sha"]
+    except (KeyError, OSError, ValueError):
+        return None
     url = f"https://api.github.com/repos/{repository}/contents/.github/workflows/iyi.yml?ref={base}"
     request = urllib.request.Request(url, headers={
         "Authorization": f"Bearer {token}",
@@ -367,8 +372,8 @@ def main():
         if args.base_workflow:
             base_text = Path(args.base_workflow).read_text(encoding="utf-8")
         else:
-            base_text = base_workflow(os.environ["GITHUB_EVENT_PATH"], os.environ["GITHUB_TOKEN"],
-                                      os.environ["GITHUB_REPOSITORY"])
+            base_text = base_workflow(os.environ.get("GITHUB_EVENT_PATH"), os.environ.get("GITHUB_TOKEN"),
+                                      os.environ.get("GITHUB_REPOSITORY"))
         ci_jobs = changed_ci_jobs(jobs, base_text)
 
     selected, reason = plan(jobs, args.event, args.ref, files, bench_texts(), ci_jobs)

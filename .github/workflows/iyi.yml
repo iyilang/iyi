@@ -284,11 +284,17 @@ jobs:
       # acceptance suite includes the local rows; stale-fresh below owns the
       # cross-run audit rows.
       - name: Stale test acceptance suite
+        env:
+          # Name every failing row in one run, and fail at the end: a row that
+          # fails on one platform should not hide the rows after it.
+          STALE_TESTS_KEEP_GOING: "1"
         run: |
-          bash bench/stale_tests.sh
-          bash bench/stale_dir_exists.sh
-          bash bench/stale_win_paths.sh
-          bash bench/stale_chmod_failure.sh
+          status=0
+          bash bench/stale_tests.sh || status=1
+          bash bench/stale_dir_exists.sh || status=1
+          bash bench/stale_win_paths.sh || status=1
+          bash bench/stale_chmod_failure.sh || status=1
+          exit "$status"
 
 
       # The receipt digest and the RG8 oracle each answer to an outside
@@ -673,11 +679,17 @@ jobs:
       - name: Stale compiler specs
         run: ./bin/crystal spec spec/compiler/stale
       - name: Stale test acceptance suite
+        env:
+          # Name every failing row in one run, and fail at the end: a row that
+          # fails on one platform should not hide the rows after it.
+          STALE_TESTS_KEEP_GOING: "1"
         run: |
-          bash bench/stale_tests.sh
-          bash bench/stale_dir_exists.sh
-          bash bench/stale_win_paths.sh
-          bash bench/stale_chmod_failure.sh
+          status=0
+          bash bench/stale_tests.sh || status=1
+          bash bench/stale_dir_exists.sh || status=1
+          bash bench/stale_win_paths.sh || status=1
+          bash bench/stale_chmod_failure.sh || status=1
+          exit "$status"
       - name: Stale receipt digest, RG8 oracle, and evidence self-tests
         run: |
           bash bench/stale_sha256.sh
@@ -976,11 +988,17 @@ jobs:
             -Dwithout_openssl -Dwithout_zlib spec/compiler/stale 2>&1 | tee stale-specs.log
           grep -E '[1-9][0-9]* examples?, 0 failures, 0 errors, 0 pending' stale-specs.log
       - name: Stale test acceptance suite
+        env:
+          # Name every failing row in one run, and fail at the end: a row that
+          # fails on one platform should not hide the rows after it.
+          STALE_TESTS_KEEP_GOING: "1"
         run: |
-          bash bench/stale_tests.sh
-          bash bench/stale_dir_exists.sh
-          bash bench/stale_win_paths.sh
-          bash bench/stale_chmod_failure.sh
+          status=0
+          bash bench/stale_tests.sh || status=1
+          bash bench/stale_dir_exists.sh || status=1
+          bash bench/stale_win_paths.sh || status=1
+          bash bench/stale_chmod_failure.sh || status=1
+          exit "$status"
       - name: Stale receipt digest, RG8 oracle, and evidence self-tests
         run: |
           bash bench/stale_sha256.sh

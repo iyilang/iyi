@@ -197,35 +197,51 @@ link_variation_report() {
 }
 
 # Whether the stale build's image is the normal build's. Byte for byte, except
-# on Windows: there link.exe's own output varies between two normal builds of
-# one program at one -o even with /Brepro (the PE timestamp and the debug
-# directory's hash-derived fields), so the stale build is held to adding no
-# variation of its own: every byte where it differs from the first normal
-# build must also differ between two normal builds. Windows links are not
-# claimed reproducible; this claims only that the stale build changes none.
+# on Windows: there link.exe writes hash-derived fields that vary between two
+# normal builds of one program at one -o even with /Brepro (measured: 69 bytes,
+# the PE TimeDateStamp and the debug directory's payloads, with the reproducible-
+# build entry present). Windows links are not claimed reproducible; the claim
+# is that the stale build changes nothing else, so every byte outside the PE
+# TimeDateStamp and the debug directory (its entries' timestamps and payloads)
+# must be equal.
 link_images_match() {
-  local first="$1" second="$2" source="$3" status=0
+  local first="$1" second="$2" status=0
   cmp "$first" "$second" >/dev/null 2>&1 && return 0
   [ "$WINDOWS" -eq 1 ] || return 1
   [ ! -f "$first.exe" ] || first="$first.exe"
   [ ! -f "$second.exe" ] || second="$second.exe"
-  cp "$second" "$WORK/stale_image.exe"
-  rm -rf "$CACHE"/*
-  "$IYI" build -o "$second" "$source" >/dev/null 2>&1 || status=1
-  if [ "$status" -eq 0 ]; then
-    "$PY" - "$first" "$second" "$WORK/stale_image.exe" >&2 <<'PYEOF' || status=1
-import sys
-normal, again, stale = (open(path, "rb").read() for path in sys.argv[1:4])
-if not (len(normal) == len(again) == len(stale)):
+  "$PY" - "$first" "$second" >&2 <<'PYEOF' || status=1
+import struct, sys
+a = open(sys.argv[1], "rb").read()
+b = open(sys.argv[2], "rb").read()
+if len(a) != len(b) or a[:2] != b"MZ":
     sys.exit(1)
-noise = {i for i in range(len(normal)) if normal[i] != again[i]}
-changed = [i for i in range(len(normal)) if normal[i] != stale[i]]
-extra = [i for i in changed if i not in noise]
-print(f"    link.exe varies in {len(noise)} bytes between two normal builds; the stale build differs from the first in {len(changed)}, {len(extra)} outside that variation")
-sys.exit(1 if extra else 0)
+e = struct.unpack_from("<I", a, 0x3C)[0]
+nsec, = struct.unpack_from("<H", a, e + 6)
+opt, = struct.unpack_from("<H", a, e + 20)
+magic, = struct.unpack_from("<H", a, e + 24)
+dirs = e + 24 + (112 if magic == 0x20B else 96)
+secs = []
+for i in range(nsec):
+    name, vsize, va, rsize, rptr = struct.unpack_from("<8sIII I", a, e + 24 + opt + 40 * i)
+    secs.append((name.rstrip(b"\0").decode(), va, vsize, rptr, rsize))
+allowed = set(range(e + 8, e + 12))
+rva, size = struct.unpack_from("<II", a, dirs + 6 * 8)
+for name, va, vsize, rptr, rsize in secs:
+    if va <= rva < va + max(vsize, rsize):
+        table = rptr + (rva - va)
+        for k in range(size // 28):
+            entry = table + 28 * k
+            allowed.update(range(entry + 4, entry + 8))
+            data_size, = struct.unpack_from("<I", a, entry + 16)
+            data_ptr, = struct.unpack_from("<I", a, entry + 24)
+            allowed.update(range(data_ptr, data_ptr + data_size))
+changed = [i for i in range(len(a)) if a[i] != b[i]]
+outside = [i for i in changed if i not in allowed]
+print(f"    differs in {len(changed)} bytes, {len(outside)} outside the PE timestamp and debug directory"
+      + (f", first at {outside[:6]}" if outside else ""))
+sys.exit(1 if outside else 0)
 PYEOF
-  fi
-  [ "$status" -eq 0 ] || cp "$WORK/stale_image.exe" "$second"
   return "$status"
 }
 
@@ -290,7 +306,7 @@ run_link() {
     return 1
   fi
   if [ "$WINDOWS" -eq 1 ]; then
-    echo "Link cmp PASSED: all $total programs (5 C2 + quoted fixture): the stale build differs from a normal one only where link.exe differs between two normal builds"
+    echo "Link cmp PASSED: all $total programs (5 C2 + quoted fixture): the stale build differs from a normal one only in the PE timestamp and debug directory, which link.exe varies between normal builds too"
   else
     echo "Link cmp PASSED: all $total programs (5 C2 + quoted fixture) matched byte-for-byte at same -o"
   fi

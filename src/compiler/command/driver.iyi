@@ -201,7 +201,6 @@ pub class CommandDriver
     {{ flag?(:release) }}
   end
 
-
   def self.default_target : String
     target = Target.parse?(CONFIG_TARGET)
     if target
@@ -1590,7 +1589,7 @@ pub class CommandDriver
       return
     end
 
-    @compiler_options = create_compiler("check", no_codegen: true)
+    @compiler_options = create_compiler("check", no_codegen: true, warning_options: true)
   end
 
   # check.cr `check_affected`: the changed files and the output flags. Every
@@ -2251,6 +2250,7 @@ pub class CommandDriver
     path_filter : Bool = false,
     unreachable_command : Bool = false,
     allowed_formats : Array(String) = ["text", "json"],
+    warning_options : Bool = false,
   ) : CompilerOptions
     opts = CompilerOptions.new
     opts.no_codegen = no_codegen
@@ -2401,6 +2401,7 @@ pub class CommandDriver
       target_specific_opts(parser, opts)
       setup_compiler_warning_options(parser, opts)
     end
+    setup_compiler_warning_options(parser, opts) if no_codegen && warning_options
 
     parser.on("--no-color", "Disable colored output") do
       @color = false
@@ -2614,7 +2615,6 @@ pub class CommandDriver
       opts.output_filename = output
     end
 
-
     unless allowed_formats.includes?(output_format)
       abort "You have input an invalid format: #{output_format}. Supported formats: #{allowed_formats.join(", ")}", Exit::USAGE_ERROR
       return opts
@@ -2641,7 +2641,6 @@ pub class CommandDriver
         return opts
       end
     end
-
 
     opts
   end

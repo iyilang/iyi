@@ -1,0 +1,246 @@
+module compiler/lower/layouts
+
+# The port of `src/compiler/iyi/codegen/type_layouts.cr` (Program#gc_type_layout): the
+# pointer map of a class, which the collector reads for each object it marks. The walk
+# classifies each field: a reference, a `Pointer(T)`, a proc's context word, or an inline
+# aggregate to recurse into. Where the exact shape is runtime business (a union's live
+# arm, a C union's overlap), every word the field could put a pointer in is marked.
+# Over-marking retains an object too long; under-marking loses a live one, so the walk
+# errs toward marking.
+#
+# Every byte offset is the typer's answer about the emitted struct (`LowerTyper#offset_of`),
+# never field sizes added up by hand. The type id is not in the row: the hosted id is
+# numbered differently (NEEDS.md row 16), so the row carries everything else.
+
+import compiler/ir/types::{IrType}
+import compiler/semantic/top_level::{Type, NilType, NonGenericClassType, AliasType, TypeDefType, UnionType, ClassType, MetaTypeVar, MetaclassType, LibType}
+import compiler/types/types::{PointerInstanceType, ProcInstanceType, NilableProcType, StaticArrayInstanceType, TupleInstanceType, NamedTupleInstanceType, GenericClassInstanceType, VirtualType, VirtualMetaclassType, TypeQueries}
+import compiler/semantic/top_level::{VoidType, EnumType}
+import compiler/lower/typer::{LowerTyper, primitive_kind, reference_union?}
+
+# One TypeLayout row: the struct's allocation size, the unrounded instance size, and the
+# byte offsets of the pointer words, sorted and unique.
+pub class GcLayoutRow
+  getter alloc_size : Int64
+  getter scan_cap : Int64
+  getter scan_offsets : Array(Int64)
+
+  def initialize(@alloc_size : Int64, @scan_cap : Int64, @scan_offsets : Array(Int64))
+  end
+end
+
+# The hosted `Type#has_inner_pointers?` (types.cr): whether a value of the type holds a
+# pointer anywhere inside it.
+pub def has_inner_pointers?(type : Type) : Bool
+  if type.is_a?(VoidType)
+    return true
+  end
+  if primitive_kind(type) != "" || type.is_a?(NilType) || type.is_a?(EnumType)
+    return false
+  end
+  if type.is_a?(PointerInstanceType) || type.is_a?(ProcInstanceType)
+    return true
+  end
+  if type.is_a?(StaticArrayInstanceType)
+    return has_inner_pointers?(type.as(StaticArrayInstanceType).element_type)
+  end
+  if type.is_a?(TupleInstanceType)
+    type.as(TupleInstanceType).tuple_types.each do |t|
+      return true if has_inner_pointers?(t)
+    end
+    return false
+  end
+  if type.is_a?(NamedTupleInstanceType)
+    type.as(NamedTupleInstanceType).entries.each do |entry|
+      return true if has_inner_pointers?(entry.type)
+    end
+    return false
+  end
+  if type.is_a?(UnionType)
+    type.as(UnionType).union_types.each do |t|
+      return true if has_inner_pointers?(t)
+    end
+    return false
+  end
+  if type.is_a?(AliasType)
+    aliased = type.as(AliasType).aliased_type
+    raise "BUG: has_inner_pointers? of an unresolved alias #{type.full_name}" if aliased.nil?
+    return has_inner_pointers?(aliased.as(Type))
+  end
+  if type.is_a?(TypeDefType)
+    return has_inner_pointers?(type.as(TypeDefType).typedef)
+  end
+  if type.is_a?(VirtualType)
+    raise "BUG: has_inner_pointers? of a virtual struct is not ported (hosted types.cr, subtypes)" if type.struct?
+    return true
+  end
+  if type.is_a?(NonGenericClassType)
+    return true unless type.struct?
+    type.as(ClassType).all_instance_vars.each_value do |ivar|
+      vt = ivar.var_type
+      raise "BUG: has_inner_pointers? of an untyped instance variable #{ivar.name} (NEEDS.md row 15)" if vt.nil?
+      return true if has_inner_pointers?(vt.as(Type))
+    end
+    return false
+  end
+  true
+end
+
+pub class GcLayouts
+  @typer : LowerTyper
+
+  def initialize(@typer : LowerTyper)
+  end
+
+  # The hosted `gc_type_layout`: the pointer map of a class with instance variables.
+  def gc_type_layout(type : Type) : GcLayoutRow
+    struct_type = @typer.llvm_struct_type(type)
+    scan = [] of Int64
+    gc_scan_offsets(type, struct_type, 0_i64, scan)
+    sorted = sort_unique(scan)
+    sorted.each do |offset|
+      raise "gc layout pointer offset exceeds UInt32" if offset > 4294967295_i64
+    end
+    size = @typer.size_of(struct_type)
+    cap = gc_scan_cap(type, struct_type)
+    raise "gc layout size exceeds UInt32" if size > 4294967295_i64 || cap > 4294967295_i64
+    GcLayoutRow.new(size, cap, sorted)
+  end
+
+  # The pointer words of one class's own fields, at *base* within the object.
+  def gc_scan_offsets(type : Type, struct_type : IrType, base : Int64, into : Array(Int64)) : Nil
+    index = 0
+    gc_instance_vars(type).each_value do |ivar|
+      vt = ivar.var_type
+      raise "BUG: gc layout of an untyped instance variable #{ivar.name} (NEEDS.md row 15)" if vt.nil?
+      gc_field_offsets(vt.as(Type), base + @typer.offset_of(struct_type, index), into)
+      index = index + 1
+    end
+    nil
+  end
+
+  # The pointer words inside one field of *field_type*, at *base* within the object.
+  def gc_field_offsets(field_type : Type, base : Int64, into : Array(Int64)) : Nil
+    if field_type.is_a?(AliasType)
+      aliased = field_type.as(AliasType).aliased_type
+      raise "BUG: unresolved alias in gc layout" if aliased.nil?
+      gc_field_offsets(aliased.as(Type), base, into)
+      return
+    end
+    if field_type.is_a?(TypeDefType)
+      gc_field_offsets(field_type.as(TypeDefType).typedef, base, into)
+      return
+    end
+    return if field_type.is_a?(MetaclassType) || field_type.is_a?(VirtualMetaclassType) || field_type.is_a?(LibType)
+    return if field_type.is_a?(NilType)
+    return unless has_inner_pointers?(field_type)
+    if field_type.is_a?(PointerInstanceType) || TypeQueries.reference_like?(field_type) || (field_type.is_a?(UnionType) && reference_union?(field_type.as(UnionType)))
+      into << base
+      return
+    end
+    if field_type.is_a?(ProcInstanceType) || field_type.is_a?(NilableProcType)
+      # A proc is {fun, ctx}: the context word retains a closure's captures.
+      into << base + @typer.offset_of(@typer.proc_struct, 1)
+      return
+    end
+    if field_type.is_a?(StaticArrayInstanceType)
+      static = field_type.as(StaticArrayInstanceType)
+      stride = @typer.size_of(@typer.llvm_embedded_type(static.element_type))
+      i = 0_i64
+      while i < static.size_int
+        gc_field_offsets(static.element_type, base + i * stride, into)
+        i = i + 1
+      end
+      return
+    end
+    if field_type.is_a?(TupleInstanceType)
+      llvm = @typer.llvm_type(field_type)
+      index = 0
+      field_type.as(TupleInstanceType).tuple_types.each do |element|
+        gc_field_offsets(element, base + @typer.offset_of(llvm, index), into)
+        index = index + 1
+      end
+      return
+    end
+    if field_type.is_a?(NamedTupleInstanceType)
+      llvm = @typer.llvm_type(field_type)
+      index = 0
+      field_type.as(NamedTupleInstanceType).entries.each do |entry|
+        gc_field_offsets(entry.type, base + @typer.offset_of(llvm, index), into)
+        index += 1
+      end
+      return
+    end
+    if field_type.is_a?(UnionType)
+      # A mixed union is a type id and a value area, and any arm may be live: the scan set
+      # is every arm's pointer words, each laid out where the union stores it.
+      llvm = @typer.llvm_type(field_type)
+      value = @typer.offset_of(llvm, 1)
+      field_type.as(UnionType).union_types.each do |arm|
+        gc_field_offsets(arm, base + value, into)
+      end
+      return
+    end
+    if (field_type.is_a?(NonGenericClassType) || field_type.is_a?(GenericClassInstanceType)) && field_type.struct?
+      nested = @typer.llvm_struct_type(field_type)
+      gc_scan_offsets(field_type, nested, base, into)
+      return
+    end
+    gc_conservative_words(@typer.llvm_embedded_type(field_type), base, into)
+  end
+
+  # Every aligned word of an extent, for a field whose exact shape this walk cannot say.
+  def gc_conservative_words(t : IrType, base : Int64, into : Array(Int64)) : Nil
+    size = @typer.size_of(t)
+    word = @typer.pointer_size
+    offset = base
+    while offset + word <= base + size
+      into << offset
+      offset = offset + word
+    end
+    nil
+  end
+
+  # The unrounded instance size: the end of the last field, before tail padding.
+  def gc_scan_cap(type : Type, struct_type : IrType) : Int64
+    count = gc_instance_vars(type).size
+    return 0_i64 if count == 0
+    last = count - 1
+    element = struct_type.struct_element_types[last]
+    @typer.offset_of(struct_type, last) + @typer.size_of(element)
+  end
+
+  # Instantiated generic classes carry their own substituted field types.
+  def gc_instance_vars(type : Type) : Hash(String, MetaTypeVar)
+    if type.is_a?(GenericClassInstanceType)
+      return type.as(GenericClassInstanceType).all_instance_vars
+    end
+    if type.is_a?(ClassType)
+      return type.as(ClassType).all_instance_vars
+    end
+    raise "BUG: gc layout requires a class instance, got #{type.full_name}"
+  end
+
+  # Sorted ascending, without repeats.
+  def sort_unique(values : Array(Int64)) : Array(Int64)
+    sorted = [] of Int64
+    values.each do |v|
+      placed = false
+      i = 0
+      while i < sorted.size
+        if v == sorted[i]
+          placed = true
+          break
+        end
+        if v < sorted[i]
+          sorted.insert(i, v)
+          placed = true
+          break
+        end
+        i = i + 1
+      end
+      sorted << v unless placed
+    end
+    sorted
+  end
+end

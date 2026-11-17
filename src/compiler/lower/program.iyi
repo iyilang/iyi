@@ -1,0 +1,736 @@
+module compiler/lower/program
+
+# Program assembly for the typed pipeline (SPEC 2.1, S2g and S3): the phases of one program from its
+# declarations to a linked executable, as the hosted `compiler.cr` orchestrates them for a unit.
+#
+# The compiler pipeline (compiler/compiler.iyi, `compile_typed`) calls these in order:
+#   declare_program  the declarations of every unit, each read by the semantic pass the way the declarations
+#                    gate loads a program (semantic/top_level.iyi `declare_unit`): one visitor per file, in
+#                    initialiser order, with that file's imports bound to the units already declared. Then
+#                    the guessed instance variables, the root expression of the program, and the body visitor.
+#   type_bodies      the body typer over that root, then the recursive struct check.
+#   lower_program    the typed lowering (lower/lower.iyi) into one IR module for the target.
+#   native_objects   the native back end compiles the program module and the native runtime to objects.
+#   link_program     the native linker writes the signed executable, or names the refusal.
+#
+# No LLVM and no host tool takes part. Each phase returns a refusal by name rather than raising, except
+# where a lowering or a typer raises it (the pipeline catches a raise in a spawned task and names the phase).
+#
+# With --prelude empty, selected hosted primitives are declared before source units:
+# same-type integer arithmetic (src/primitives.cr:496-546), all numeric comparisons
+# (459-476), and Bool and Char comparisons. This is not the bench's broader stand-in.
+# Cross-width integer arithmetic, float arithmetic, conversions, unsafe_chr, and the
+# Symbol, Pointer, Object and Proc primitives are not declared here. A real prelude
+# owns its declarations instead.
+
+import compiler/syntax/ast::{ASTNode, ClassDef, Def, Expressions, FunDef, LibDef, Nop, Primitive, Arg, Path, Annotation, StringLiteral, InstanceVar, And, Assign, Call, Case, ClassVar, If, Not, Or, Unless, Var, While}
+import compiler/semantic/top_level::{AliasType, LibType, MetaclassType, NamedType, NonGenericClassType, SemanticProgram, TopLevelVisitor, Type, normalize_path}
+import compiler/types/types::{GenericClassInstanceMetaclassType}
+import compiler/semantic/main_visitor::{MainVisitor, Refusal, TypedInstance, node_class_name}
+import compiler/semantic/match::{YieldFinder}
+import compiler/syntax/visitor::{Visitor}
+import compiler/semantic/recursive_struct_checker::{RecursiveStructChecker}
+import compiler/semantic/spawn_placement::{SpawnAnalysis, SpawnTarget}
+import compiler/semantic/instance_vars::{declare_guessed_instance_vars}
+import compiler/loader::{ModuleInfo}
+import compiler/ir/module::{Module}
+import compiler/ir/layout::{LayoutError}
+import compiler/platform/target::{Target}
+import compiler/lower/typer::{LowerTyper}
+import compiler/lower/context::{Lowerer}
+import compiler/lower/type_id::{LowerTypeIds}
+import compiler/lower/lower::{codegen_program, emit_probe_well_known, lower_def_probe}
+import compiler/lower/primitives::{primitive_name}
+import compiler/lower/fun::{mangled_name, discard_probe_functions}
+import compiler/native/driver::{compile_module}
+import compiler/native/obj/object::{ObjectFile}
+import compiler/native/link/link::{link, LinkOptions, LinkedImage, LinkError}
+import compiler/backend/native::{NativeBackend}
+import std/file
+import std/dir::{Dir}
+import std/path
+
+alias OutputPath = ::Std::Path::Path
+
+# The declared program: its one root expression, the semantic pass that declared its types, the body visitor
+# and the names of the libraries its `@[Link]` annotations ask for.
+pub class TypedProgram
+  getter root : ASTNode
+  getter prog : SemanticProgram
+  getter visitor : MainVisitor
+  getter links : Array(String)
+
+  def initialize(@root : ASTNode, @prog : SemanticProgram, @visitor : MainVisitor, @links : Array(String))
+  end
+end
+
+# The root expression of the program: the classes, libs, defs and funs of every unit, then the top-level code
+# in initialiser order. A program with no top-level code gets `nil` as its value, as the hosted one does.
+pub def assemble_root(classes : Array(ClassDef), libs : Array(LibDef), defs : Array(Def), funs : Array(FunDef), top_level : Array(ASTNode)) : ASTNode
+  nodes = [] of ASTNode
+  classes.each { |c| nodes << c }
+  libs.each { |l| nodes << l }
+  defs.each { |d| nodes << d }
+  funs.each { |f| nodes << f }
+  if top_level.empty?
+    nodes << Nop.new
+  else
+    top_level.each { |t| nodes << t }
+  end
+  Expressions.new(nodes)
+end
+
+# Declares one unit into the program, as the semantic pass loads a file (top_level.iyi `load_file`), but from the
+# normalised tree the pipeline already holds, so the pipeline reads each file once. The unit's imports are bound
+# to the visit, and a file already declared is not declared again. The unit is keyed by the normal path the import
+# resolver returns (`normalize_path`), so an import of it finds it declared.
+pub def declare_unit(prog : SemanticProgram, file : String, node : ASTNode) : Nil
+  key = normalize_path(file)
+  return if prog.loaded_files.includes?(key)
+  prog.loaded_files.add(key)
+  inner = TopLevelVisitor.new(prog, key)
+  saved = prog.current_imports
+  saved_defs = prog.current_import_defs
+  prog.current_imports = Hash(String, Type).new
+  prog.current_import_defs = Hash(String, Array(Def)).new
+  prog.file_imports[file] = prog.current_imports
+  prog.file_import_defs[file] = prog.current_import_defs
+  node.accept(inner)
+  inner.finish
+  prog.current_imports = saved
+  prog.current_import_defs = saved_defs
+  if unit = inner.unit
+    prog.loaded_units[key] = unit
+  end
+end
+
+# The declarations phase: every unit declared in initialiser order (dependencies first, the entry last), the
+# guessed instance variables, then the root and the body visitor. Bare primitives precede source declarations.
+pub def declare_program(classes : Array(ClassDef), libs : Array(LibDef), defs : Array(Def), funs : Array(FunDef), top_level : Array(ASTNode), links : Array(String), stand_in : Bool, prog : SemanticProgram, units : Array(ModuleInfo)) : TypedProgram
+  # Every unit's tree is registered before any unit is declared: a require that reaches a unit early reads this tree.
+  units.each do |mod_info|
+    prog.unit_trees[normalize_path(mod_info.filename)] = mod_info.ast
+  end
+  program_stand_in_primitives(prog) if stand_in
+  units.each do |mod_info|
+    declare_unit(prog, mod_info.filename, mod_info.ast)
+  end
+  declare_guessed_instance_vars(prog)
+  root = assemble_root(classes, libs, defs, funs, top_level)
+  mv = MainVisitor.new(prog)
+  TypedProgram.new(root, prog, mv, links)
+end
+
+# Strict typed programs validate every alias after declarations, including
+# aliases no expression references. Bare-file and total probes stay tolerant.
+def validate_aliases(program : SemanticProgram, root : NamedType, seen : Set(UInt64)) : Nil
+  id = root.object_id
+  return if seen.includes?(id)
+  seen.add(id)
+  root.types.each_value do |type|
+    if type.is_a?(AliasType)
+      written = type.as(AliasType)
+      saved = program.current_imports
+      if locations = written.locations
+        unless locations.empty?
+          filename = locations[0].filename
+          program.current_imports = program.file_imports[filename]? || program.file_imports[normalize_path(filename)]? || saved
+        end
+      end
+      program.remove_alias(written)
+      program.current_imports = saved
+    elsif type.is_a?(NamedType)
+      validate_aliases(program, type.as(NamedType), seen)
+    end
+  end
+end
+
+# The bodies phase: the body typer over the root, then the recursive struct check.
+pub def type_bodies(typed : TypedProgram) : Nil
+  unless typed.visitor.total || typed.prog.optional_alias_probe
+    validate_aliases(typed.prog, typed.prog, Set(UInt64).new)
+  end
+  typed.root.accept(typed.visitor)
+  RecursiveStructChecker.new(typed.prog).run
+end
+
+# Match hosted gc_layouts.cr:40-44: the iyi prelude and its runtime lock select the layout.
+private def iyi_object_layout?(prog : SemanticProgram) : Bool
+  prog.iyi_prelude? && !prog.types["IyiRuntimeLock"]?.nil?
+end
+
+# The lowering phase: the program's IR module for the target, with its entry and the rest of the program.
+pub def lower_program(typed : TypedProgram, triple : String, name : String, stub_defs : Hash(String, String)? = nil, stubbed_defs : Hash(String, String)? = nil, context_out : Array(Lowerer)? = nil) : Module
+  made = Module.for_target(name, Target.new(triple))
+  raise made.as(LayoutError).to_s if made.is_a?(LayoutError)
+  m = made.as(Module)
+  typer = LowerTyper.new(m.types, m.layout, iyi_object_layout?(typed.prog))
+  codegen_program(typed.root, typed.visitor, typer, m, stub_defs, stubbed_defs, context_out)
+  m
+end
+
+# The native phase: the program's object and the native runtime's, each compiled by the native back end.
+# A refusal is returned by name. Only aarch64-apple-darwin is built, as the native back end links no other target.
+pub def native_objects(mod : Module, triple : String) : Array(ObjectFile) | String
+  unless triple == "aarch64-apple-darwin"
+    return "the native backend builds aarch64-apple-darwin only, and #{triple} was asked for"
+  end
+  unless mod.target.architecture == "aarch64" && mod.target.darwin?
+    return "the module's target is not aarch64-apple-darwin"
+  end
+  program = compile_module(mod, true)
+  return program.as(String) if program.is_a?(String)
+  runtime = NativeBackend.runtime_module
+  return runtime.as(String) if runtime.is_a?(String)
+  rt = compile_module(runtime.as(Module), true)
+  return rt.as(String) if rt.is_a?(String)
+  [program.as(ObjectFile), rt.as(ObjectFile)] of ObjectFile
+end
+
+# The link phase: the native linker links the objects with the entry `main` and writes the signed executable.
+# A library the program names with `@[Link]` is refused by name, because the native linker links no library.
+# Returns the refusal, or nil when the executable is written. Nothing is written on a refusal.
+pub def link_program(objects : Array(ObjectFile), identifier : String, output : String, links : Array(String)) : String?
+  unless links.empty?
+    return "the program links the library #{links[0]}, and the native linker links no libraries"
+  end
+  result = link(objects, LinkOptions.new(identifier, "main", [] of String, true))
+  return result.as(LinkError).message if result.is_a?(LinkError)
+  image = result.as(LinkedImage)
+  # Create a fresh inode in the output directory. A previously executed inode
+  # cannot be rewritten safely on Darwin, and rename must stay on this volume.
+  temp_base = File.real_path(Dir.tempdir)
+  output_dir = File.real_path(File.dirname(File.expand_path(output)))
+  relative_dir = OutputPath.new(output_dir).relative_to(temp_base).to_s
+  temp = File.tempfile(File.join(relative_dir, ".iyi-link"))
+  defer File.delete(temp) if File.exists?(temp)
+  File.write(temp, String.new(image.executable))
+  File.chmod(temp, 493)
+  File.rename(temp, output)
+  nil
+end
+
+# The library names of the `@[Link("name")]` annotations among the top-level nodes of the units.
+pub def link_names(nodes : Array(ASTNode)) : Array(String)
+  names = [] of String
+  nodes.each do |node|
+    next unless node.is_a?(Annotation)
+    ann = node.as(Annotation)
+    next unless ann.path.to_s == "Link"
+    if ann.args.size > 0 && ann.args[0].is_a?(StringLiteral)
+      names << ann.args[0].as(StringLiteral).value
+    end
+  end
+  names
+end
+
+# The selected hosted primitive declarations used without a prelude. Type and operator
+# lists are built once per program, not once per owner or numeric comparison pair.
+pub def program_stand_in_primitives(prog : SemanticProgram) : Nil
+  int_names = ["Int8", "UInt8", "Int16", "UInt16", "Int32", "UInt32", "Int64", "UInt64", "Int128", "UInt128"]
+  arithmetic_ops = ["&+", "&-", "&*", "+", "-", "*", "|", "&", "^", "unsafe_shl", "unsafe_shr", "unsafe_div", "unsafe_mod"]
+  comparisons = ["==", "!=", "<", "<=", ">", ">="]
+  int_names.each do |tn|
+    owner = prog.lookup_type_node(Path.new(tn), prog).as(NonGenericClassType)
+    arithmetic_ops.each do |op|
+      owner.add_def(builtin_binary_def(op, tn, tn))
+    end
+  end
+  numeric_names = ["Int8", "Int16", "Int32", "Int64", "Int128", "UInt8", "UInt16", "UInt32", "UInt64", "UInt128", "Float32", "Float64"]
+  numeric_names.each do |tn|
+    owner = prog.lookup_type_node(Path.new(tn), prog).as(NonGenericClassType)
+    numeric_names.each do |other|
+      comparisons.each do |op|
+        owner.add_def(builtin_binary_def(op, other, "Bool"))
+      end
+    end
+  end
+  bool = prog.lookup_type_node(Path.new("Bool"), prog).as(NonGenericClassType)
+  ["==", "!="].each do |op|
+    bool.add_def(builtin_binary_def(op, "Bool", "Bool"))
+  end
+  char = prog.lookup_type_node(Path.new("Char"), prog).as(NonGenericClassType)
+  comparisons.each do |op|
+    char.add_def(builtin_binary_def(op, "Char", "Bool"))
+  end
+end
+
+# The same Primitive body the declarations pass gives a @[Primitive(:binary)] def.
+pub def builtin_binary_def(op : String, operand : String, result : String) : Def
+  Def.new(op, [Arg.new("other", nil, Path.new(operand))] of Arg, Primitive.new("binary"), nil, nil, Path.new(result))
+end
+
+# The slice that owns a refusal, from the words it carries: the table's owner column (PIPELINE.md). A reason no
+# rule names is "unassigned", so it shows in the table rather than hiding under another owner.
+pub def typed_owner(reason : String) : String
+  return "lowering core" if reason.starts_with?("a reached pool: loop back-edge preemption")
+  return "macros" if reason.includes?("macro control")
+  return "calls" if reason.includes?("undefined method") || reason.includes?("cannot resolve the call") || reason.includes?("expected argument") || reason.includes?("no target def") || reason.includes?("wrong number of arguments for 'String.interpolation'")
+  return "declarations" if reason.includes?("undefined constant") || reason.includes?("without a declared return type")
+  return "bodies" if reason.includes?("no type") || reason.includes?("cannot be typed") || reason.includes?("undefined local variable") || reason.includes?("pointerof") || reason.includes?("the body of the Proc literal was not typed")
+  return "lowering core" if reason.includes?("is not ported")
+  return "lowering" if reason.includes?("port limitation") || reason.includes?("string constant")
+  "unassigned"
+end
+
+# Collects the id of every node under the tree it visits: the visitor hook runs on each node.
+pub class NodeIds < Visitor
+  getter ids : Hash(UInt64, Bool)
+
+  def initialize
+    @ids = Hash(UInt64, Bool).new
+  end
+
+  def visit_any(node : ASTNode) : Bool
+    @ids[node.node_id] = true
+    true
+  end
+end
+
+# The same, following each node into the tree the body typer expanded it to (`a && b`, a case, a literal:
+# MainVisitor#expand_literal): the typer types that tree, and the node takes its type.
+pub class DeepNodeIds < Visitor
+  getter ids : Hash(UInt64, Bool)
+
+  def initialize(@types : MainVisitor)
+    @ids = Hash(UInt64, Bool).new
+  end
+
+  def visit_any(node : ASTNode) : Bool
+    return false if @ids.has_key?(node.node_id)
+    @ids[node.node_id] = true
+    if expanded = @types.expansions[node]?
+      expanded.accept(self)
+    end
+    true
+  end
+end
+
+# The expressions under a def body, expansions included, that the body typer left without a type, of the kinds a
+# lowering asks a type for first: a call, a variable read, an assignment, a conditional.
+pub class UntypedNodes < Visitor
+  getter nodes : Array(ASTNode)
+
+  def initialize(@types : MainVisitor)
+    @nodes = [] of ASTNode
+    @seen = Hash(UInt64, Bool).new
+  end
+
+  def visit_any(node : ASTNode) : Bool
+    return false if @seen.has_key?(node.node_id)
+    @seen[node.node_id] = true
+    if node.is_a?(Call) || node.is_a?(ClassVar) || node.is_a?(InstanceVar) || node.is_a?(Var) || node.is_a?(Assign) || node.is_a?(If) || node.is_a?(Unless) || node.is_a?(And) || node.is_a?(Or) || node.is_a?(Not) || node.is_a?(While) || node.is_a?(Case)
+      @nodes << node if @types.type_of?(node).nil?
+    end
+    if expanded = @types.expansions[node]?
+      expanded.accept(self)
+    end
+    true
+  end
+end
+
+# The name a silent row carries for its node: what was called, read or assigned.
+def silent_name(node : ASTNode) : String
+  return node.as(Call).name if node.is_a?(Call)
+  return node.as(ClassVar).name if node.is_a?(ClassVar)
+  return node.as(InstanceVar).name if node.is_a?(InstanceVar)
+  return node.as(Var).name if node.is_a?(Var)
+  return "=" if node.is_a?(Assign)
+  return "&&" if node.is_a?(And)
+  return "||" if node.is_a?(Or)
+  return "!" if node.is_a?(Not)
+  return "unless" if node.is_a?(Unless)
+  return "while" if node.is_a?(While)
+  return "case" if node.is_a?(Case)
+  "if"
+end
+
+# The silent gaps of the body typer, for the sidecar only (`silent<TAB>def<TAB>node kind<TAB>name<TAB>file:line`): an
+# expression it left without a type and without a refusal, the innermost of each such chain. The lowering meets
+# these as "the analysed program has no type for ...", which names no place; this row names the node. Some are
+# right (code after a NoReturn, a branch a type filter rules out), so this is a list to read, never a count to gate.
+def silent_rows(typed : TypedProgram, refused : Array(String)) : Nil
+  visitor = typed.visitor
+  refusals = visitor.refusals
+  seen = Hash(String, Bool).new
+  visitor.typed_instances.each do |inst|
+    d = inst.definition
+    next unless primitive_name(d.body).nil?
+    finder = UntypedNodes.new(visitor)
+    d.body.accept(finder)
+    next if finder.nodes.empty?
+    all = DeepNodeIds.new(visitor)
+    d.body.accept(all)
+    # Every node under a refused node of this def: the refusal already names that gap.
+    covered = DeepNodeIds.new(visitor)
+    refusals.each do |r|
+      r.node.accept(covered) if all.ids.has_key?(r.node.node_id)
+    end
+    finder.nodes.each do |node|
+      next if covered.ids.has_key?(node.node_id)
+      under = DeepNodeIds.new(visitor)
+      node.accept(under)
+      innermost = true
+      finder.nodes.each do |other|
+        innermost = false if other.node_id != node.node_id && under.ids.has_key?(other.node_id)
+      end
+      refusals.each do |r|
+        innermost = false if under.ids.has_key?(r.node.node_id)
+      end
+      next unless innermost
+      where = "no location"
+      if loc = node.location
+        where = "#{loc.filename}:#{loc.line_number}"
+      end
+      row = "silent\t#{lowering_example(d, inst.self_type)}\t#{node_class_name(node)}\t#{silent_name(node)}\t#{where}"
+      unless seen.has_key?(row)
+        seen[row] = true
+        refused << row
+      end
+    end
+  end
+end
+
+# The first line of a refusal's reason, so one table row stays on one line.
+def first_line(text : String) : String
+  i = 0
+  while i < text.size
+    return text[0, i] if text[i] == '\n'
+    i = i + 1
+  end
+  text
+end
+
+# The index of a reason in the list, or -1.
+def reason_index(reasons : Array(String), reason : String) : Int32
+  i = 0
+  while i < reasons.size
+    return i if reasons[i] == reason
+    i = i + 1
+  end
+  -1
+end
+
+# Where a refusal is, for one table row: its file and line, and the def that holds it.
+def refusal_example(r : Refusal) : String
+  where = "no location"
+  if f = r.file
+    where = "#{f}:#{r.line}"
+  end
+  def_label = "top level"
+  if d = r.def_name
+    def_label = d
+  end
+  "#{where} in #{def_label}"
+end
+
+# The def label of a refusal in the sidecar: its def's name, or top level.
+def refusal_label(r : Refusal) : String
+  if d = r.def_name
+    return d
+  end
+  "top level"
+end
+
+# One table row per reason, largest count first: `table: <root> <phase> <count> owner=<slice> reason=<reason> example=<where>`.
+def ranked_rows(root : String, phase : String, reasons : Array(String), counts : Array(Int32), examples : Array(String)) : Array(String)
+  rows = [] of String
+  taken = [] of Bool
+  n = 0
+  while n < reasons.size
+    taken << false
+    n += 1
+  end
+  k = 0
+  while k < reasons.size
+    best = -1
+    j = 0
+    while j < reasons.size
+      if !taken[j] && (best < 0 || counts[j] > counts[best])
+        best = j
+      end
+      j += 1
+    end
+    taken[best] = true
+    reason = reasons[best]
+    rows << "table: #{root} #{phase} #{counts[best]} owner=#{typed_owner(reason)} reason=#{reason} example=#{examples[best]}"
+    k += 1
+  end
+  rows
+end
+
+# The refusal table of a program the body typer ran over in total mode (PIPELINE.md): a summary line, then the body
+# refusals ranked by reason, largest first, each with its owner and one example. A refusal is counted once per node and
+# reason, however many instantiations of its def reached it. A def is clean when no refusal node lies under it.
+# Each refused site is also appended to refused, one line per site: `body<TAB>def<TAB>owner<TAB>reason`, and the
+# lowering column appends `lowering<TAB>def<TAB>owner<TAB>reason` for each failed def. The tool writes them to the
+# `.refusals` sidecar (compiler.iyi writes it under --keep-going).
+pub def refusal_table(typed : TypedProgram, root : String, refused : Array(String)) : Array(String)
+  lines = [] of String
+  visitor = typed.visitor
+  # A call clones the def it types. The clone's node id is new every time, so counting
+  # those ids counted the same instantiation once per call site. The label is the
+  # receiver, the name and the argument types: one instantiation, however many clones.
+  refusals = visitor.refusals
+  sites = Hash(String, Bool).new
+  reasons = [] of String
+  counts = [] of Int32
+  examples = [] of String
+  root_refusals = 0
+  refusals.each do |r|
+    key = "#{r.node.node_id}|#{r.reason}"
+    unless sites.has_key?(key)
+      sites[key] = true
+      root_refusals += 1 if r.def_name.nil?
+      reason = first_line(r.reason)
+      refused << "body\t#{refusal_label(r)}\t#{typed_owner(reason)}\t#{reason}"
+      i = reason_index(reasons, reason)
+      if i < 0
+        reasons << reason
+        counts << 1
+        examples << refusal_example(r)
+      else
+        counts[i] = counts[i] + 1
+      end
+    end
+  end
+  seen = Hash(String, Bool).new
+  dirty = Hash(String, Bool).new
+  labels = [] of String
+  visitor.typed_instances.each do |inst|
+    label = instance_label(inst.definition, inst.self_type, inst.arg_types)
+    unless seen.has_key?(label)
+      seen[label] = true
+      labels << label
+    end
+    ids = NodeIds.new
+    inst.definition.accept(ids)
+    hit = false
+    refusals.each do |r|
+      hit = true if ids.ids.has_key?(r.node.node_id)
+    end
+    dirty[label] = true if hit
+  end
+  clean = 0
+  labels.each do |label|
+    clean += 1 unless dirty.has_key?(label)
+    # The instances defs-reached counts, by name, so two trees' reach can be compared as sets (sidecar only).
+    refused << "instance\t#{label}"
+  end
+  lines << "table: #{root} defs-reached=#{labels.size} defs-typed-clean=#{clean} root-refusals=#{root_refusals} refusal-sites=#{sites.size}"
+  ranked_rows(root, "refusal", reasons, counts, examples).each { |line| lines << line }
+  silent_rows(typed, refused)
+  lines
+end
+
+# Hosted inlines a yielding def at its call site instead of emitting a standalone
+# function. Captured block functions are real functions and remain probeable.
+def noncapturing_yield?(definition : Def) : Bool
+  return false if definition.captured_block?
+  finder = YieldFinder.new
+  definition.body.accept(finder)
+  finder.found
+end
+
+# The lowering column of the table (PIPELINE.md): every reached def's instance lowered alone into one module, the way the
+# lowering reaches it (lower_def_probe). A def is lowered clean when each of its instances lowers with no refusal. A
+# lowering refusal names its def, not a node: the lowering carries no location yet.
+pub def lowering_table(typed : TypedProgram, triple : String, root : String, names : Array(String), refused : Array(String), origins : Hash(String, String)? = nil, census : Bool = false) : Array(String)
+  made = Module.for_target(root, Target.new(triple))
+  if made.is_a?(LayoutError)
+    return ["table: #{root} defs-lowered-clean=not-measured (#{made.as(LayoutError).to_s})"]
+  end
+  m = made.as(Module)
+  typer = LowerTyper.new(m.types, m.layout, iyi_object_layout?(typed.prog))
+  bad = Hash(UInt64, Bool).new
+  sites = Hash(String, Bool).new
+  reasons = [] of String
+  counts = [] of Int32
+  examples = [] of String
+  spawn_analysis = SpawnAnalysis.analyse(typed.visitor, typed.root)
+  spawn_analysis.ordered.each do |verdict|
+    placement = "unproven"
+    if verdict.target == SpawnTarget::AsWritten
+      placement = "as-written"
+    elsif verdict.target == SpawnTarget::Pooled
+      placement = "pooled"
+    elsif verdict.target == SpawnTarget::Refused
+      placement = "refused"
+    end
+    refused << "spawn\t#{verdict.site}\t#{placement}\t#{verdict.placement}\t#{verdict.reason}"
+  end
+  if example = emit_probe_well_known(m, typer, typed.visitor, census, spawn_analysis)
+    reason = if spawn_analysis.pool_proven
+               "a reached pool: loop back-edge preemption checks are not ported (hosted iyi_preempt_on?)"
+             else
+               "spawn classification is not ported (hosted cleanup_transformer.cr classify_spawn)"
+             end
+    reasons << reason
+    counts << 1
+    examples << example
+    sites["reached-pool"] = true
+    refused << "lowering\t#{example}\tlowering core\t#{reason}"
+  end
+  origin_reasons = [] of String
+  origin_counts = [] of Int32
+  origin_examples = [] of String
+  origin_probes = Hash(String, Bool).new
+  base_ids = LowerTypeIds.new
+  base_ids.assign_all(typed.prog.object_type)
+  typed.visitor.typed_instances.each do |inst|
+    d = inst.definition
+    # A Primitive-annotated def is lowered at the call site (hosted codegen_call), never as a def of its own: the table
+    # neither probes it nor counts it, so it is no refusal row and no clean def.
+    next unless primitive_name(d.body).nil?
+    next if noncapturing_yield?(d)
+    refused << "reached\t#{lowering_example(d, inst.self_type)}\t-\t-"
+    before = [] of String
+    m.functions.each { |fn| before << fn.name }
+    probe_lowerer = Lowerer.new(m, typer, typed.visitor)
+    probe_lowerer.spawn_analysis = spawn_analysis
+    outcome = group do |g|
+      task = g.spawn { lower_def_probe(d, inst.self_type, inst.arg_types, typed.visitor, typer, m, probe_lowerer, base_ids.fork) }
+      task.value
+    end
+    failed = false
+    message = ""
+    if outcome.is_a?(Panicked)
+      failed = true
+      message = outcome.as(Panicked).message
+    elsif !outcome.nil?
+      failed = true
+      message = outcome.as(String)
+    end
+    unless failed
+      # Find the same instantiated return type the probe passes to target_def_fun.
+      if body_t = typed.visitor.type_of?(d.body)
+        result_t = typed.visitor.type_of?(d) || body_t
+        # The call lowering names a metaclass receiver's method by its class (call.iyi class_owner, no self): `*Point::new`.
+        self_for = inst.self_type
+        class_owner : Type? = nil
+        if st = self_for
+          if st.is_a?(MetaclassType) && !st.is_a?(GenericClassInstanceMetaclassType)
+            class_owner = st.as(MetaclassType).instance_type
+            self_for = nil
+          end
+        end
+        name = mangled_name(d.name, self_for, inst.arg_types, result_t.as(Type), class_owner, nil, typed.visitor.program.def_owner(d))
+        # A body that is one instance variable is read where the call stands (hosted try_inline_call, call.cr 614; the
+        # port's call.iyi 207): the lowering defines its function here only to lower it alone, and no call emits it.
+        # Counted as lowered clean above, but not as a function the program defines.
+        if fn = m.get_function?(name)
+          names << name unless fn.declaration? || d.body.is_a?(InstanceVar)
+        end
+      end
+    end
+    if failed
+      discard_probe_functions(m, before)
+      bad[d.node_id] = true
+      reason = first_line(message)
+      origin = lowering_example(d, inst.self_type)
+      if ctx = probe_lowerer.context
+        origin = ctx.fun.name
+      end
+      if collected = origins
+        if ctx = probe_lowerer.context
+          # The probe can fail in an inline host or a nested callee. Record the
+          # actual IR function, not the instance whose probe reached it.
+          fn_name = ctx.fun.name
+          probe_name = probe_function_name(typed, d, inst.self_type, inst.arg_types)
+          attribution = "nested callee or inline/proc host"
+          if fn_name == probe_name
+            attribution = "probed def"
+          elsif fn_name.starts_with?("~")
+            attribution = "proc body"
+          end
+          if !collected.has_key?(fn_name) || attribution == "probed def"
+            collected[fn_name] = "#{reason}\tattribution=#{attribution}\tprobe=#{instance_label(d, inst.self_type, inst.arg_types)}"
+          end
+        end
+      end
+      pair = "#{origin} | #{reason}"
+      probe_key = "#{pair}|#{instance_label(d, inst.self_type, inst.arg_types)}"
+      unless origin_probes.has_key?(probe_key)
+        origin_probes[probe_key] = true
+        index = reason_index(origin_reasons, pair)
+        if index < 0
+          origin_reasons << pair
+          origin_counts << 1
+          origin_examples << lowering_example(d, inst.self_type)
+        else
+          origin_counts[index] = origin_counts[index] + 1
+        end
+      end
+      key = "#{d.node_id}|#{reason}"
+      unless sites.has_key?(key)
+        sites[key] = true
+        refused << "lowering\t#{lowering_example(d, inst.self_type)}\t#{typed_owner(reason)}\t#{reason}\t#{origin}"
+        i = reason_index(reasons, reason)
+        if i < 0
+          reasons << reason
+          counts << 1
+          examples << lowering_example(d, inst.self_type)
+        else
+          counts[i] = counts[i] + 1
+        end
+      end
+    end
+  end
+  seen_label = Hash(String, Bool).new
+  failed_label = Hash(String, Bool).new
+  labels = [] of String
+  typed.visitor.typed_instances.each do |inst|
+    # A Primitive-annotated def is lowered at the call site (hosted codegen_call), never as a def of its own: the table
+    # neither probes it nor counts it, so it is no refusal row and no clean def.
+    next unless primitive_name(inst.definition.body).nil?
+    next if noncapturing_yield?(inst.definition)
+    label = instance_label(inst.definition, inst.self_type, inst.arg_types)
+    unless seen_label.has_key?(label)
+      seen_label[label] = true
+      labels << label
+    end
+    failed_label[label] = true if bad.has_key?(inst.definition.node_id)
+  end
+  clean = 0
+  labels.each do |label|
+    clean += 1 unless failed_label.has_key?(label)
+  end
+  lines = [] of String
+  lines << "table: #{root} defs-lowered-clean=#{clean} lowering-refusal-sites=#{sites.size}"
+  ranked_rows(root, "lowering", reasons, counts, examples).each { |line| lines << line }
+  ranked_rows(root, "origin", origin_reasons, origin_counts, origin_examples).each { |line| lines << line }
+  lines
+end
+
+# The function name for the probed instantiation, including its captured block.
+def probe_function_name(typed : TypedProgram, d : Def, self_type : Type?, args : Array(Type)) : String
+  body_type = typed.visitor.type_of?(d.body)
+  return "" if body_type.nil?
+  ret = typed.visitor.type_of?(d) || body_type
+  block_type : Type? = nil
+  if block_arg = d.block_arg
+    block_type = typed.visitor.type_of?(block_arg.as(ASTNode)) if d.uses_block_arg?
+  end
+  mangled_name(d.name, self_type, args, ret.as(Type), nil, block_type, typed.visitor.program.def_owner(d))
+end
+
+# Where a lowering refusal is, for one table row: its def, with the receiver type it was lowered for.
+def lowering_example(d : Def, t : Type?) : String
+  if st = t
+    return "#{st.full_name}##{d.name}"
+  end
+  d.name
+end
+
+# One instantiation: receiver, name, argument types. Two clones of the same call types are one label.
+def instance_label(d : Def, self_type : Type?, arg_types : Array(Type)) : String
+  owner = ""
+  if st = self_type
+    owner = st.full_name
+  end
+  args = [] of String
+  arg_types.each do |t|
+    args << t.full_name
+  end
+  "#{owner}##{d.name}(#{args.join(",")})"
+end

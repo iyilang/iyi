@@ -1,0 +1,243 @@
+module compiler/lower/type_id
+
+# The port of `src/compiler/iyi/codegen/llvm_id.cr` (LLVMId): the type ids of a
+# program. Every class gets a pair of ids {min, max}: `min` is the smallest id among
+# its subtypes and `max` is one more than their largest, so a value's dynamic type
+# implements a type exactly when its id lies between that type's pair. The walk
+# starts at Object and visits each class's subclasses in registration order. A
+# builtin primitive is a leaf with one id. Nil is id 0. Ids count from 1.
+#
+# Metaclasses are numbered by a second walk, after every object has its ids, in the
+# order the hosted `assign_id_to_metaclass` visits them: the class, then its
+# subclasses depth first. Each metaclass takes the next id when it is first needed,
+# as `type_id(metaclass)` does in the hosted walk. A generic class takes its
+# instantiated types and its subclasses. A generic instance takes its subclasses.
+# The metaclass walk takes every subclass, generic instances included, as the hosted
+# `type.subclasses` does; the id walk leaves generic instance subclasses out
+# (`subclasses_of`), as the hosted `subclasses_of` does.
+
+import compiler/semantic/top_level::{Type, ClassType, NilType, NonGenericClassType, GenericClassType, TypeDefType}
+import compiler/types/types::{GenericInstanceType, GenericClassInstanceType, TypeQueries, VirtualType, VirtualMetaclassType}
+import compiler/lower/typer::{primitive_kind}
+
+pub class LowerTypeIds
+  @ids : Hash(String, Tuple(Int32, Int32))
+  @id_to_metaclass : Hash(Int32, Int32)
+  @next_id : Int32
+  @names : Hash(Int32, String)
+  @types : Array(Type)
+
+  def initialize
+    @ids = Hash(String, Tuple(Int32, Int32)).new
+    @id_to_metaclass = Hash(Int32, Int32).new
+    @next_id = 0
+    @names = Hash(Int32, String).new
+    @types = [] of Type
+  end
+
+  # Range pairs are immutable tuples, so copies of the map can share them.
+  def fork : LowerTypeIds
+    LowerTypeIds.new(@ids.dup, @id_to_metaclass.dup, @next_id, @names.dup, @types.dup)
+  end
+
+  def initialize(@ids : Hash(String, Tuple(Int32, Int32)), @id_to_metaclass : Hash(Int32, Int32), @next_id : Int32, @names : Hash(Int32, String), @types : Array(Type))
+  end
+
+  # The hosted `LLVMId#initialize`: number every class reachable from *root* (Object), then
+  # number the metaclasses in the same walk order.
+  def assign_all(root : Type) : Nil
+    assign_id(root)
+    assign_metaclass_id(root)
+    nil
+  end
+
+  # The hosted `min_max_type_id`: the pair of a numbered type, or nil.
+  def min_max(type : Type) : Tuple(Int32, Int32)?
+    @ids[type.full_name]?
+  end
+
+  # The hosted `type_id` (llvm_id.cr:50-66): typedefs delegate, virtual types are
+  # refused, and an unnumbered type takes a new leaf id on its first request.
+  def type_id(type : Type) : Int32
+    if type.is_a?(TypeDefType)
+      return type_id(type.as(TypeDefType).typedef)
+    end
+    if type.is_a?(VirtualType) || type.is_a?(VirtualMetaclassType)
+      raise "BUG: called type_id for #{type.full_name} (virtual type)"
+    end
+    if pair = min_max(type)
+      return pair[1]
+    end
+    id = next_id
+    put(type, id, id)
+    id
+  end
+
+  # The hosted `id_to_metaclass[type_id(type)]`: the id of the type's metaclass, or nil when the
+  # type is not a class the metaclass walk reached.
+  def metaclass_id(type : Type) : Int32?
+    @id_to_metaclass[type_id(type)]?
+  end
+
+  # The name of the type numbered *id*, or nil: the driver's table mode reads the numbering through this.
+  def name_of_id(id : Int32) : String?
+    @names[id]?
+  end
+
+  # The metaclass id of the type numbered *id*, or nil (the hosted `id_to_metaclass[id]?`).
+  def metaclass_of_id(id : Int32) : Int32?
+    @id_to_metaclass[id]?
+  end
+
+  # The largest id handed out so far (the hosted `@next_id`).
+  def last_id : Int32
+    @next_id
+  end
+
+  # Every type numbered by this walk, in the order it was added (hosted `LLVMId#each_type`).
+  pub def numbered_types : Array(Type)
+    @types
+  end
+
+  # The hosted `assign_id`: a type already numbered answers its max, otherwise the
+  # type is numbered by its own rule (`assign_id_impl`).
+  def assign_id(type : Type) : Int32
+    if pair = @ids[type.full_name]?
+      return pair[1]
+    end
+    assign_id_impl(type)
+  end
+
+  # The hosted `assign_id_impl` overloads, in their resolution order.
+  def assign_id_impl(type : Type) : Int32
+    if type.is_a?(NilType)
+      put(type, 0, 0)
+      return 0
+    end
+    if primitive_kind(type) != ""
+      id = next_id
+      put(type, id, id)
+      return id
+    end
+    # A generic class takes its bound instantiated types and its subclasses
+    # (hosted assign_id_impl(GenericClassType), llvm_id.cr:91-94).
+    if type.is_a?(GenericClassType)
+      subtypes = [] of Type
+      type.as(GenericClassType).instantiated_types.each do |instance|
+        next if TypeQueries.unbound?(instance)
+        subtypes << instance
+      end
+      subclasses_of(type).each do |sub|
+        subtypes << sub
+      end
+      return assign_id_from_subtypes(type, subtypes)
+    end
+    # A generic instance takes its subclasses (hosted `assign_id_impl(GenericClassInstanceType)`,
+    # which reads `type.subclasses` without the generic instance filter).
+    if type.is_a?(GenericClassInstanceType)
+      return assign_id_from_subtypes(type, TypeQueries.subclasses(type))
+    end
+    if type.is_a?(NonGenericClassType)
+      return assign_id_from_subtypes(type, subclasses_of(type))
+    end
+    raise "BUG: unhandled type in assign id: #{type.full_name} (hosted llvm_id.cr assign_id_impl)"
+  end
+
+  # The hosted `assign_id_from_subtypes`: a leaf takes one id; a type with subtypes takes
+  # the first non-zero minimum of its subtypes as its min and one more id as its max.
+  def assign_id_from_subtypes(type : Type, subtypes : Array(Type)) : Int32
+    if subtypes.size == 0
+      id = next_id
+      put(type, id, id)
+      return id
+    end
+    min_id = 0
+    first = true
+    subtypes.each do |sub|
+      sub_id = assign_id(sub)
+      if first && sub_id != 0
+        min_id = sub_id
+        first = false
+      end
+    end
+    id = next_id
+    put(type, min_id, id)
+    min_id
+  end
+
+  # The hosted `assign_id_to_metaclass`: the metaclass of each class, depth first from *type*,
+  # each taking the next id when it is first needed.
+  def assign_metaclass_id(type : Type) : Nil
+    # Hosted add_subclass excludes unbound instances. The port's semantic
+    # subclass lists can still hold them, so filter this traversal too.
+    return nil if TypeQueries.unbound?(type)
+    # A generic instance's metaclass is numbered like a class's (hosted
+    # `assign_id_to_metaclass(GenericClassInstanceType | PrimitiveType)`), then its subclasses.
+    if type.is_a?(GenericClassInstanceType)
+      meta = type.as(GenericClassInstanceType).metaclass
+      @id_to_metaclass[hosted_type_id(type)] = metaclass_type_id(meta)
+      TypeQueries.subclasses(type).each do |sub|
+        assign_metaclass_id(sub)
+      end
+      return nil
+    end
+    # Other generic instances (module instances) have no metaclass in this walk.
+    return nil if type.is_a?(GenericInstanceType)
+    if type.is_a?(NonGenericClassType) || type.is_a?(GenericClassType)
+      meta = type.as(ClassType).metaclass
+      @id_to_metaclass[hosted_type_id(type)] = metaclass_type_id(meta)
+      # A generic class also walks its instantiated types (hosted `assign_id_to_metaclass(GenericClassType)`).
+      if type.is_a?(GenericClassType)
+        type.as(GenericClassType).instantiated_types.each do |instance|
+          next if TypeQueries.unbound?(instance)
+          assign_metaclass_id(instance)
+        end
+      end
+      TypeQueries.subclasses(type).each do |sub|
+        assign_metaclass_id(sub)
+      end
+    end
+    nil
+  end
+
+  # The id of a metaclass, numbered as `type_id(metaclass)` does: the next id if it has none.
+  def metaclass_type_id(meta : Type) : Int32
+    pair = min_max(meta)
+    return pair[1] if pair
+    id = next_id
+    put(meta, id, id)
+    id
+  end
+
+  # The hosted `type_id(type)` as the metaclass walk calls it: a type the id walk did not reach (a generic
+  # instance among the subclasses, which the id walk leaves out) is numbered as a leaf when first asked.
+  def hosted_type_id(type : Type) : Int32
+    pair = min_max(type)
+    return pair[1] if pair
+    id = next_id
+    put(type, id, id)
+    id
+  end
+
+  # The hosted `subclasses_of`: the subclasses, without the generic instances.
+  def subclasses_of(type : Type) : Array(Type)
+    out = [] of Type
+    TypeQueries.subclasses(type).each do |sub|
+      out << sub unless sub.is_a?(GenericInstanceType)
+    end
+    out
+  end
+
+  def put(type : Type, min : Int32, max : Int32) : Nil
+    @types << type unless @ids[type.full_name]?
+    @ids[type.full_name] = {min, max}
+    @names[max] = type.full_name
+    nil
+  end
+
+  # The hosted `next_id`: the counter increments, then reads.
+  def next_id : Int32
+    @next_id = @next_id + 1
+    @next_id
+  end
+end

@@ -1,0 +1,57 @@
+# The backend seam (SPEC section 2.1 and 2.2). The pipeline verifies the IR, then hands the module to a backend
+# that writes the output. This module imports no LLVM and no host tool. Each backend extends Backend in its own
+# module: compiler/backend/llvm/backend (links LLVM in process) and compiler/backend/native (links no LLVM). The
+# tool that wants a backend passes it to Compiler.new, so a tool that does not import a backend does not link it.
+
+module compiler/backend/backend
+
+import compiler/ir/module::{Module}
+
+# What a backend is asked to write. The pipeline decides every field before the backend runs.
+pub class BuildRequest
+  getter output_filename : String
+  getter obj_path : String
+  getter keep_obj : Bool
+  getter emit_obj_only : Bool
+  getter verbose : Bool
+  getter probe_phase : Bool
+  getter triple : String
+
+  def initialize(
+    @output_filename : String,
+    @obj_path : String,
+    @keep_obj : Bool,
+    @emit_obj_only : Bool,
+    @verbose : Bool,
+    @probe_phase : Bool,
+    @triple : String,
+  )
+  end
+end
+
+# A backend writes the executable for one verified IR module. The base class has no backend: a compiler built
+# without one refuses to build, by name.
+pub class Backend
+  # The targets whose default backend is native. Empty until a target's corpus gate is green; each landing adds its triple.
+  NATIVE_TARGETS = [] of String
+
+  # The backend a target builds with by default: native for the triples above, LLVM for every other.
+  def self.backend_for(triple : String) : String
+    NATIVE_TARGETS.includes?(triple) ? "native" : "llvm"
+  end
+
+  # The refusal a compiler without the LLVM backend gives for --backend llvm, or for a target whose default is LLVM.
+  def self.no_backend_message(triple : String) : String
+    "iyi: this compiler has no LLVM backend; #{triple} has no native backend yet"
+  end
+
+  # The triple used when the configuration names none.
+  def default_triple : String
+    "none"
+  end
+
+  # Writes the output. Nil on success. A string is the refusal, and it names the construct the backend cannot lower.
+  def build(mod : Module, request : BuildRequest) : String?
+    "iyi: this compiler has no backend for #{request.triple}"
+  end
+end

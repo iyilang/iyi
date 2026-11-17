@@ -1,0 +1,1907 @@
+module compiler/lower/primitives
+
+# The port of `src/compiler/iyi/codegen/primitives.cr`: a call whose target def is a
+# primitive (`@[Primitive(:name)]`, primitives.iyi in the prelude) emits the instruction
+# the primitive names, instead of a function. The hosted `codegen_primitive` is ported
+# here, one name at a time; the names that are not ported are refused by name.
+#
+# A primitive def has a Primitive body, set by the declarations pass for annotated
+# library defs and by the prelude-free stand-ins for builtin operators.
+# `primitive_name` reads the body's name.
+#
+# Ported:
+#   - `binary` on two integers: the checked `+`, `-`, `*` (the overflow intrinsic and the
+#     raise, hosted codegen_addsub_with_overflow, codegen_mul_with_overflow), for operands of
+#     one signedness at any widths and of mixed signedness for `+` and `-` (the bias of
+#     hosted codegen_addsub_with_overflow). A checked `+` of an unsigned operand wider than
+#     the other needs the range check of the hosted codegen (refused by name).
+#   - `binary` on two integers of any widths and signedness: the wrapping `&+`, `&-`,
+#     `&*`, the bitwise `|`, `&`, `^`, the unchecked shifts and divisions (`/`, `%`,
+#     `unsafe_div`, `unsafe_mod`), and the comparisons `==`, `!=`, `<`, `<=`, `>`, `>=`.
+#     The narrower operand is widened by its own signedness (hosted codegen_binary_extend_int,
+#     primitives.cr 295-307); a mixed-sign comparison uses the hosted predicate (the sign
+#     check, then the signed or unsigned compare). An arithmetic result is truncated back
+#     to the left operand when that one was narrower (codegen_trunc_binary_op_result).
+#     Bool and Symbol equality; Char equality and order (unsigned code points).
+#   - Integer and Char conversions, integer-to-float and float-to-float conversions;
+#     floating arithmetic and comparisons, including mixed integer operands.
+#   - Runtime class lookup through the program's type-to-metaclass mapping.
+# Refused by name: float-to-integer, checked float narrowing, checked UInt128-to-Float32,
+# mixed-signed multiplication and primitives without a lowering.
+#
+# The lowering of the receiver and the arguments is the hosted prepare_call_args order:
+# the receiver first, then each argument, each requested as a value.
+
+import compiler/syntax/ast::{ASTNode, BoolLiteral, Call, Def, Generic, MacroLiteral, Primitive, RangeLiteral, SymbolLiteral, Var}
+import compiler/ir/function::{Function, Global, Linkage}
+import compiler/ir/inst::{IntPredicate, RealPredicate, Attribute, Inst, Op, CallAux, CallConv, Ordering, Block}
+import compiler/types/unification::{TypeUnification}
+import compiler/lower/cast::{assign, downcast, type_id_value, type_id_of_value, to_lhs, to_rhs, upcast}
+import compiler/lower/cast::{type_id_global}
+import compiler/ir/intrinsics::{IntrinsicId}
+import compiler/ir/types::{IrType}
+import compiler/ir/values::{Value}
+import compiler/lower/context::{Lowerer, LowerVar}
+import compiler/lower/fun::{visit_node}
+import compiler/lower/helpers::{abi_name, int1, llvm_nil, raise_overflow_name}
+import compiler/lower/helpers::{build_string_constant}
+import compiler/lower/pending::{pending_visit_node}
+import compiler/lower/typer::{primitive_kind, primitive_bytes}
+import compiler/semantic/top_level::{ClassType, GenericClassType, MetaTypeVar, MetaclassType, Type}
+import compiler/semantic/top_level::{InstanceVarInitializer}
+import compiler/types/indirection::{TypeIndirection}
+import compiler/types/types::{GenericClassInstanceType, NamedTupleInstanceType, PointerInstanceType, ProcInstanceType, TupleInstanceType, TypeQueries, VirtualType, VirtualMetaclassType}
+import compiler/lower/helpers::{store_aligned, load_aligned}
+import compiler/lower/typer::{passed_by_value?}
+import compiler/lower/headed::{headed?, headed_candidate?}
+import compiler/lower/layouts::{has_inner_pointers?}
+import compiler/lower/phi::{LowerPhi}
+import compiler/types/indirection::{TypeIndirection}
+import compiler/lower/context::{BodyVisit, LowerContext}
+import compiler/lower/fun::{block_ended?}
+import compiler/lower/instance_var::{instance_var_pointer, instance_var_type}
+import compiler/lower/locals::{preallocate_locals}
+
+# An integer operand as the hosted codegen reads it: its width in bytes, its signedness and
+# its IR type. A mixed-signedness operation biases one operand to the other signedness at the
+# same width, so the shape is built here rather than taken from the analysed type.
+pub class IntShape
+  getter bytes : Int32
+  getter signed : Bool
+  getter ir : IrType
+
+  def initialize(@bytes : Int32, @signed : Bool, @ir : IrType)
+  end
+end
+
+# The name in a Primitive node or a built-in argument constant, or nil for other nodes.
+pub def primitive_name(body : ASTNode) : String?
+  # Built-in argument constants still carry their name as MacroLiteral text.
+  if body.is_a?(Primitive)
+    return body.as(Primitive).name
+  end
+  return nil unless body.is_a?(MacroLiteral)
+  parts = body.as(MacroLiteral).value.split(": ")
+  return nil unless parts.size == 2 && parts[0] == "# primitive"
+  parts[1]
+end
+
+# The hosted `visit(Call)` for a call whose target def is a primitive: the receiver and
+# the arguments are lowered in order, then `codegen_primitive` emits the instruction. The
+# value of the call is left in `low.last`.
+pub def lower_primitive_call(low : Lowerer, node : Call, target : Def) : Nil
+  name = primitive_name(target.body)
+  raise "BUG: lower_primitive_call on a def that is not a primitive (hosted call.cr)" if name.nil?
+  if name == "load_atomic"
+    lower_atomic_load(low, node)
+    return
+  end
+  if name == "store_atomic"
+    lower_atomic_store(low, node)
+    return
+  end
+  if name == "atomicrmw"
+    lower_atomic_rmw(low, node)
+    return
+  end
+  if name == "cmpxchg"
+    lower_atomic_cmpxchg(low, node)
+    return
+  end
+  if name == "tuple_indexer_known_index"
+    lower_tuple_indexer(low, node, target)
+    return
+  end
+  if name == "enum_new"
+    # Hosted primitives.cr 68-69 returns call_args[0]; the metaclass is not an operand.
+    raise "BUG: enum_new needs one argument" unless node.args.size == 1
+    wants = low.needs_value
+    low.needs_value = true
+    visit_node(low, node.args[0])
+    low.needs_value = wants
+    raise "BUG: enum_new argument left no value" if low.last.nil?
+    return
+  end
+  if name == "pointer_malloc" || name == "pointer_new" || name == "pointer_realloc" || name == "pointer_diff" || name == "pointer_get" || name == "pointer_set" || name == "pointer_add" || name == "pointer_address"
+    lower_pointer_primitive(low, node, name.as(String))
+    return
+  end
+  obj = node.obj
+  wants = low.needs_value
+  low.needs_value = true
+  if obj.nil?
+    # Hosted prepare_call_args (call.cr 84-96): no receiver and the owner is
+    # passed as self means llvm_self. allocate with a nil receiver is handled
+    # in call.iyi before this. A class method has no self variable.
+    sv = low.current_context.vars["self"]?
+    if sv.nil? && name == "class"
+      result_type = low.analysed.type_of?(node)
+      raise "BUG: class has no analysed type" if result_type.nil?
+      low.last = type_id_value(low, result_type.as(Type))
+      low.needs_value = wants
+      return
+    end
+    raise "BUG: a primitive call has no receiver (hosted call.cr: codegen_primitive)" if sv.nil?
+    recv = sv.as(LowerVar).pointer
+    t1 = sv.as(LowerVar).type
+  else
+    visit_node(low, obj.as(ASTNode))
+    got = low.last
+    raise "BUG: the receiver of a primitive left no value (hosted call.cr: prepare_call_args)" if got.nil?
+    recv = got.as(Value)
+    t1 = receiver_type(low, obj.as(ASTNode))
+  end
+  values = [recv] of Value
+  arg_types = [] of Type
+  node.args.each do |arg_node|
+    arg_type = low.analysed.type_of?(arg_node)
+    raise "BUG: the analysed program has no type for a primitive argument (hosted call.cr: prepare_call_args)" if arg_type.nil?
+    arg_types << arg_type.as(Type)
+    visit_node(low, arg_node)
+    value = low.last
+    raise "BUG: a primitive argument left no value (hosted call.cr: prepare_call_args)" if value.nil?
+    values << value.as(Value)
+  end
+  low.needs_value = wants
+  lower_primitive_with_values(low, node, target, name.as(String), recv, t1, values, arg_types)
+end
+
+# Lower a primitive from the already evaluated operands of a dispatch arm.
+pub def lower_primitive_with_values(low : Lowerer, node : Call, target : Def, name : String, recv : Value, t1 : Type, values : Array(Value), arg_types : Array(Type)) : Nil
+  wants = low.needs_value
+  obj = node.obj
+  if name == "proc_call"
+    codegen_primitive_proc_call(low, node, t1, values, arg_types, wants)
+    return
+  end
+  if name == "enum_value"
+    # Hosted primitives.cr 68-69 returns call_args[0], the enum's underlying value.
+    low.last = values[0]
+    return
+  end
+  if name == "object_id"
+    # Hosted codegen_primitive_object_id (primitives.cr 1055-1057).
+    low.last = low.builder.ptr_to_int(values[0], low.module.types.int64)
+    return
+  end
+  if name == "object_crystal_type_id"
+    # The hosted type-id primitive returns the static metaclass id or the value's runtime id.
+    if t1.is_a?(MetaclassType) || t1.is_a?(VirtualMetaclassType)
+      low.last = recv
+    else
+      low.last = type_id_of_value(low, obj || node, values[0], t1)
+    end
+    return
+  end
+  if name == "binary"
+    if values.size != 2
+      pending_visit_node("binary primitive with #{values.size - 1} arguments (hosted codegen_primitive_binary)")
+    end
+    low.last = codegen_primitive_binary(low, target.name, t1, arg_types[0], values[0], values[1])
+    return
+  end
+  if name == "convert" || name == "unchecked_convert"
+    ret_type = low.analysed.type_of?(node)
+    raise "BUG: the analysed program has no type for a conversion (hosted codegen_primitive_convert)" if ret_type.nil?
+    low.last = codegen_primitive_convert(low, t1, ret_type.as(Type), values[0], name == "convert")
+    return
+  end
+  if name == "class"
+    if t1.is_a?(VirtualType)
+      tid = type_id_of_value(low, obj || node, recv, t1)
+      low.last = primitive_metaclass_id(low, tid)
+    else
+      meta = TypeUnification.metaclass_of(t1)
+      raise "BUG: no metaclass for #{t1.full_name}" if meta.nil?
+      low.last = type_id_value(low, meta.as(Type))
+    end
+    return
+  end
+  pending_visit_node("primitive #{name} (hosted codegen_primitive, primitives.cr)")
+end
+
+pub def primitive_metaclass_id(low : Lowerer, tid : Value) : Value
+  fn = low.module.get_function?("~metaclass")
+  if fn.nil?
+    ty = low.module.types.func([low.module.types.int32] of IrType, low.module.types.int32)
+    saved = low.enter_main
+    made = low.begin_main_function("~metaclass", ty, false)
+    made.call_convention = CallConv::Iyi
+    made.linkage = Linkage::Internal
+    entry = low.builder.insert_block
+    cases = [] of {Value, Block}
+    id = 0
+    while id <= low.type_ids.last_id
+      meta = low.type_ids.metaclass_of_id(id)
+      if !meta.nil?
+        block = low.new_block("type_#{id}")
+        cases << {low.builder.const_int(low.module.types.int32, id.to_i64).as(Value), block}
+        low.builder.position_at_end(block)
+        low.builder.ret(low.builder.const_int(low.module.types.int32, meta.as(Int32).to_i64))
+      end
+      id = id + 1
+    end
+    otherwise = low.new_block("otherwise")
+    low.builder.position_at_end(otherwise)
+    low.builder.unreachable
+    low.builder.position_at_end(entry.as(Block))
+    low.builder.switch(made.param(0), otherwise, cases)
+    low.finish_main_function
+    low.leave_main(saved)
+    fn = made
+  end
+  f = fn.as(Function)
+  low.builder.call(f.fn_type, f, [tid] of Value, "")
+end
+
+# Hosted primitives.cr 1142-1212: a proc contains its function and optional
+# closure context. The context is prepended only on the non-null branch.
+pub def codegen_primitive_proc_call(low : Lowerer, node : Call, receiver_type : Type, values : Array(Value), arg_types : Array(Type), wants : Bool) : Nil
+  unless receiver_type.is_a?(ProcInstanceType)
+    pending_visit_node("proc_call on #{receiver_type.full_name}, not a Proc")
+  end
+  proc_type = receiver_type.as(ProcInstanceType)
+  raise "BUG: proc_call argument count mismatch" unless arg_types.size == proc_type.arg_types.size
+  args = [] of Value
+  params = [] of IrType
+  arg_types.each_with_index do |arg_type, index|
+    expected = proc_type.arg_types[index]
+    arg = upcast(low, values[index + 1], arg_type, expected)
+    args << (arg.type.pointer? ? to_rhs(low, arg, expected) : arg)
+    params << low.typer.llvm_type(expected)
+  end
+  fun_ptr = low.builder.extract_value(values[0], 0)
+  ctx = low.builder.extract_value(values[0], 1)
+  null_block = low.new_block("ctx_is_null")
+  context_block = low.new_block("ctx_is_not_null")
+  is_null = low.builder.icmp(IntPredicate::EQ, ctx, low.builder.const_null_pointer)
+  low.builder.cond_br(is_null, null_block, context_block)
+  result_type = proc_type.return_type
+  ret_type = low.typer.llvm_type(result_type)
+  aggregate = passed_by_value?(result_type)
+  phi_type = aggregate ? low.module.types.ptr(0) : ret_type
+  phi = TypeQueries.no_return?(result_type) ? nil : LowerPhi.new(wants && !ret_type.void?, phi_type, result_type)
+  low.builder.position_at_end(null_block)
+  plain_type = low.module.types.func(params, ret_type)
+  plain = low.builder.call_aux(CallAux.new(plain_type, CallConv::Iyi), fun_ptr, args)
+  if merge = phi
+    plain_value : Value = plain
+    if wants && aggregate
+      slot = low.alloca(ret_type, "")
+      store_aligned(low, plain, slot)
+      plain_value = slot
+    end
+    merge.add(low, plain_value, false)
+  else
+    low.builder.unreachable
+  end
+  low.builder.position_at_end(context_block)
+  closure_params = [low.module.types.ptr] of IrType
+  params.each { |param| closure_params << param }
+  closure_args = [ctx.as(Value)] of Value
+  args.each { |arg| closure_args << arg }
+  closure_type = low.module.types.func(closure_params, ret_type)
+  closure = low.builder.call_aux(CallAux.new(closure_type, CallConv::Iyi), fun_ptr, closure_args)
+  if merge = phi
+    closure_value : Value = closure
+    if wants && aggregate
+      slot = low.alloca(ret_type, "")
+      store_aligned(low, closure, slot)
+      closure_value = slot
+    end
+    merge.add(low, closure_value, true)
+    merge.close(low)
+  else
+    low.builder.unreachable
+    low.last = llvm_nil(low)
+  end
+end
+
+# Hosted primitives.cr 1272-1317: a literal tuple index names a field; a
+# range constructs another tuple from its selected fields.
+pub def lower_tuple_indexer(low : Lowerer, node : Call, target : Def) : Nil
+  body = target.body
+  raise "BUG: tuple indexer has no Primitive body" unless body.is_a?(Primitive)
+  primitive = body.as(Primitive)
+  obj = node.obj
+  raise "BUG: tuple indexer has no receiver" if obj.nil?
+  receiver = obj.as(ASTNode)
+  typ = receiver_type(low, receiver)
+  if typ.is_a?(MetaclassType)
+    # Hosted prepare_call_args evaluates the metaclass receiver even though the
+    # tuple indexer uses only its static type.
+    if receiver.is_a?(Generic)
+      type_id_value(low, typ)
+    else
+      wants = low.needs_value
+      low.needs_value = true
+      visit_node(low, receiver)
+      low.needs_value = wants
+    end
+    result = low.analysed.type_of?(node)
+    raise "BUG: tuple metaclass index has no result type" if result.nil?
+    low.last = type_id_value(low, result.as(Type))
+    return
+  end
+  elements = [] of Type
+  if typ.is_a?(TupleInstanceType)
+    elements = typ.as(TupleInstanceType).tuple_types
+  elsif typ.is_a?(NamedTupleInstanceType)
+    typ.as(NamedTupleInstanceType).entries.each { |entry| elements << entry.type }
+  else
+    raise "BUG: unsupported tuple indexer on #{typ.full_name}"
+  end
+  value = nil.as(Value?)
+  address_receiver = receiver
+  if expanded = low.analysed.expansions[receiver]?
+    address_receiver = expanded if expanded.is_a?(Var)
+  end
+  if address_receiver.is_a?(Var)
+    variable = low.current_context.vars[address_receiver.as(Var).name]?
+    if variable && !variable.already_loaded
+      # The slot can hold a mixed union even when this read is a tuple.
+      # Match visit(Var): use the narrowed payload address, not the union tag.
+      value = downcast(low, variable.pointer, typ, variable.type, false)
+    end
+  end
+  if value.nil?
+    wants = low.needs_value
+    low.needs_value = true
+    # Hosted codegen_call leaves a passed-by-value result as its spill pointer
+    # (call.cr:707-711). Asking the call not to reload that struct keeps the gep base a pointer.
+    prev_unused = low.receiver_unused
+    if receiver.is_a?(Call)
+      low.receiver_unused = receiver.as(Call).object_id
+    end
+    visit_node(low, receiver)
+    low.receiver_unused = prev_unused
+    if receiver.is_a?(Call) && low.spill_node == receiver.as(Call).object_id
+      if slot = low.spill_slot
+        value = slot
+      end
+    end
+    if value.nil?
+      value = low.last
+    end
+    low.needs_value = wants
+  end
+  raise "BUG: tuple indexer receiver left no value" if value.nil?
+  tuple_ir = low.typer.llvm_type(typ)
+  tuple_pointer = value.as(Value)
+  unless tuple_pointer.type.pointer?
+    tuple_pointer = low.alloca(tuple_ir, "")
+    store_aligned(low, value.as(Value), tuple_pointer)
+  end
+  zero = low.builder.const_int(low.module.types.int32, 0_i64)
+  first = primitive.tuple_index
+  if node.args.size == 1 && node.args[0].is_a?(RangeLiteral)
+    result_type = low.analysed.type_of?(node)
+    raise "BUG: tuple range has no result type" if result_type.nil?
+    result_ir = low.typer.llvm_type(result_type.as(Type))
+    result = low.alloca(result_ir, "")
+    index = first
+    while index <= primitive.tuple_last
+      field = low.builder.const_int(low.module.types.int32, index.to_i64)
+      dst_index = low.builder.const_int(low.module.types.int32, (index - first).to_i64)
+      ptr = low.builder.inbounds_gep(tuple_ir, tuple_pointer, [zero, field] of Value)
+      destination = low.builder.inbounds_gep(result_ir, result, [zero, dst_index] of Value)
+      store_pointer_value(low, destination, to_lhs(low, ptr, elements[index]), elements[index])
+      index = index + 1
+    end
+    low.last = result
+    return
+  end
+  field = low.builder.const_int(low.module.types.int32, first.to_i64)
+  ptr = low.builder.inbounds_gep(tuple_ir, tuple_pointer, [zero, field] of Value)
+  low.last = to_lhs(low, ptr, elements[first])
+end
+
+# Hosted codegen_primitive_load_atomic: the class receiver is not an operand.
+pub def lower_atomic_load(low : Lowerer, node : Call) : Nil
+  raise "BUG: load_atomic needs three arguments" unless node.args.size == 3
+  ordering = atomic_ordering(node.args[1])
+  flag = node.args[2]
+  raise "BUG: atomic volatile must be a Bool literal" unless flag.is_a?(BoolLiteral)
+  pointer_type = low.analysed.type_of?(node.args[0])
+  raise "BUG: atomic pointer has no analysed type" if pointer_type.nil?
+  elem = pointer_element_of(pointer_type.as(Type))
+  wants = low.needs_value
+  low.needs_value = true
+  visit_node(low, node.args[0])
+  ptr = low.last
+  raise "BUG: atomic pointer has no value" if ptr.nil?
+  low.needs_value = wants
+  is_bool = primitive_kind(elem) == "bool"
+  ir = is_bool ? low.module.types.int8 : low.typer.llvm_type(elem)
+  value = low.builder.atomic_load(ir, ptr.as(Value), ordering, flag.as(BoolLiteral).value)
+  value.alignment = is_bool ? 1 : low.typer.align_of(ir)
+  low.last = is_bool ? low.builder.trunc(value, low.module.types.int1) : value
+end
+
+# Hosted codegen_primitive_store_atomic: store the word with the given ordering.
+pub def lower_atomic_store(low : Lowerer, node : Call) : Nil
+  raise "BUG: store_atomic needs four arguments" unless node.args.size == 4
+  ordering = atomic_ordering(node.args[2])
+  flag = node.args[3]
+  raise "BUG: atomic volatile must be a Bool literal" unless flag.is_a?(BoolLiteral)
+  pointer_type = low.analysed.type_of?(node.args[0])
+  raise "BUG: atomic pointer has no analysed type" if pointer_type.nil?
+  elem = pointer_element_of(pointer_type.as(Type))
+  wants = low.needs_value
+  low.needs_value = true
+  visit_node(low, node.args[0])
+  ptr = low.last
+  raise "BUG: atomic pointer has no value" if ptr.nil?
+  visit_node(low, node.args[1])
+  raw = low.last
+  raise "BUG: atomic store has no value" if raw.nil?
+  low.needs_value = wants
+  is_bool = primitive_kind(elem) == "bool"
+  value = is_bool ? low.builder.zext(raw.as(Value), low.module.types.int8) : raw.as(Value)
+  inst = low.builder.atomic_store(value, ptr.as(Value), ordering, flag.as(BoolLiteral).value)
+  inst.alignment = is_bool ? 1 : low.typer.align_of(value.type)
+  low.last = llvm_nil(low)
+end
+
+# Hosted codegen_primitive_atomicrmw: the operation and ordering are literal symbols.
+pub def lower_atomic_rmw(low : Lowerer, node : Call) : Nil
+  raise "BUG: atomicrmw needs five arguments" unless node.args.size == 5
+  op_node = node.args[0]
+  raise "BUG: atomicrmw operation must be a symbol literal" unless op_node.is_a?(SymbolLiteral)
+  op = op_node.as(SymbolLiteral).value
+  case op
+  when "xchg", "add", "sub", "and", "nand", "or", "xor", "max", "min", "umax", "umin", "fadd", "fsub"
+    nil
+  else
+    raise "BUG: unknown atomicrmw operation #{op}"
+  end
+  ordering = atomic_ordering(node.args[3])
+  flag = node.args[4]
+  raise "BUG: atomic singlethread must be a Bool literal" unless flag.is_a?(BoolLiteral)
+  pointer_type = low.analysed.type_of?(node.args[1])
+  raise "BUG: atomic pointer has no analysed type" if pointer_type.nil?
+  elem = pointer_element_of(pointer_type.as(Type))
+  wants = low.needs_value
+  low.needs_value = true
+  visit_node(low, node.args[1])
+  ptr = low.last
+  raise "BUG: atomic pointer has no value" if ptr.nil?
+  visit_node(low, node.args[2])
+  raw = low.last
+  raise "BUG: atomicrmw has no value" if raw.nil?
+  low.needs_value = wants
+  is_bool = primitive_kind(elem) == "bool"
+  value = is_bool ? low.builder.zext(raw.as(Value), low.module.types.int8) : raw.as(Value)
+  inst = low.builder.atomicrmw(op, ptr.as(Value), value, ordering, flag.as(BoolLiteral).value)
+  inst.alignment = is_bool ? 1 : low.typer.align_of(value.type)
+  low.last = is_bool ? low.builder.trunc(inst, low.module.types.int1) : inst
+end
+
+# Hosted codegen_primitive_cmpxchg: spill the old value and success bit to the tuple.
+pub def lower_atomic_cmpxchg(low : Lowerer, node : Call) : Nil
+  raise "BUG: cmpxchg needs five arguments" unless node.args.size == 5
+  success = atomic_ordering(node.args[3])
+  failure = atomic_ordering(node.args[4])
+  if success == Ordering::NotAtomic || success == Ordering::Unordered || failure == Ordering::NotAtomic || failure == Ordering::Unordered || failure == Ordering::Release || failure == Ordering::AcqRel
+    raise "BUG: invalid cmpxchg ordering"
+  end
+  pointer_type = low.analysed.type_of?(node.args[0])
+  raise "BUG: atomic pointer has no analysed type" if pointer_type.nil?
+  elem = pointer_element_of(pointer_type.as(Type))
+  tuple = low.analysed.type_of?(node)
+  raise "BUG: cmpxchg has no analysed result type" if tuple.nil?
+  wants = low.needs_value
+  low.needs_value = true
+  visit_node(low, node.args[0])
+  ptr = low.last
+  raise "BUG: cmpxchg pointer has no value" if ptr.nil?
+  visit_node(low, node.args[1])
+  expected = low.last
+  raise "BUG: cmpxchg expected value is missing" if expected.nil?
+  visit_node(low, node.args[2])
+  desired = low.last
+  raise "BUG: cmpxchg desired value is missing" if desired.nil?
+  low.needs_value = wants
+  is_bool = primitive_kind(elem) == "bool"
+  compare = expected.as(Value)
+  replacement = desired.as(Value)
+  if is_bool
+    compare = low.builder.zext(compare, low.module.types.int8)
+    replacement = low.builder.zext(replacement, low.module.types.int8)
+  end
+  result = low.builder.cmpxchg(ptr.as(Value), compare, replacement, success, failure)
+  result.alignment = is_bool ? 1 : low.typer.align_of(compare.type)
+  tuple_ir = low.typer.llvm_type(tuple.as(Type))
+  slot = low.alloca(tuple_ir, "")
+  zero = low.builder.const_int(low.module.types.int32, 0_i64)
+  one = low.builder.const_int(low.module.types.int32, 1_i64)
+  first = low.builder.extract_value(result, 0)
+  first_value = is_bool ? low.builder.trunc(first, low.module.types.int1) : first
+  first_ptr = low.builder.inbounds_gep(tuple_ir, slot, [zero, zero] of Value)
+  store_aligned(low, first_value, first_ptr)
+  second = low.builder.extract_value(result, 1)
+  second_ptr = low.builder.inbounds_gep(tuple_ir, slot, [zero, one] of Value)
+  store_aligned(low, second, second_ptr)
+  low.last = slot
+end
+
+pub def atomic_ordering(node : ASTNode) : Ordering
+  raise "BUG: atomic ordering must be a symbol literal" unless node.is_a?(SymbolLiteral)
+  case node.as(SymbolLiteral).value
+  when "unordered"               then Ordering::Unordered
+  when "monotonic"               then Ordering::Monotonic
+  when "acquire"                 then Ordering::Acquire
+  when "release"                 then Ordering::Release
+  when "acquire_release"         then Ordering::AcqRel
+  when "sequentially_consistent" then Ordering::SeqCst
+  else
+    raise "BUG: unknown atomic ordering"
+  end
+end
+
+# The hosted `codegen_primitive` for the `pointer_*` primitives (primitives.cr 905-965). The receiver
+# of an instance primitive (`add`, `address`, `value`, `value=`) is a value, lowered first as the hosted
+# prepare_call_args does. `pointer_new` is a class method: its call's receiver (the metaclass) is not
+# lowered, and its argument is the address. `pointer_malloc` is a class method too: its argument is the count. Ported: `pointer_address` (ptr2int to Int64), `pointer_add` (a
+# gep of the element type, `pointer_new`, `pointer_get`, and `pointer_set`.
+# `pointer_realloc` uses the program's `realloc64` or C `realloc`; `pointer_diff`
+# divides the byte difference by the embedded element size.
+pub def lower_pointer_primitive(low : Lowerer, node : Call, name : String) : Nil
+  wants = low.needs_value
+  low.needs_value = true
+  values = [] of Value
+  pt : Type? = nil
+  if name == "pointer_new" || name == "pointer_malloc"
+    if receiver = node.obj
+      if receiver.is_a?(Generic)
+        # Hosted prepare_call_args evaluates a generic metaclass receiver even
+        # when the pointer primitive uses only its statically known type.
+        type_id_value(low, receiver_type(low, receiver))
+      end
+    end
+    pt = low.analysed.type_of?(node)
+  else
+    obj = node.obj
+    raise "BUG: a pointer primitive has no receiver (hosted call.cr: codegen_primitive)" if obj.nil?
+    visit_node(low, obj.as(ASTNode))
+    recv = low.last
+    raise "BUG: the receiver of a pointer primitive left no value (hosted call.cr: prepare_call_args)" if recv.nil?
+    values << recv.as(Value)
+    pt = receiver_type(low, obj.as(ASTNode))
+  end
+  node.args.each do |arg_node|
+    visit_node(low, arg_node)
+    value = low.last
+    raise "BUG: a pointer primitive argument left no value (hosted call.cr: prepare_call_args)" if value.nil?
+    values << value.as(Value)
+  end
+  low.needs_value = wants
+  raise "BUG: the analysed program has no type for a pointer primitive (hosted call.cr: codegen_primitive)" if pt.nil?
+  ptr_type = pt.as(Type)
+  if name == "pointer_new"
+    low.last = low.builder.int_to_ptr(values[0], low.typer.llvm_type(ptr_type))
+    return
+  end
+  if name == "pointer_malloc"
+    low.last = pointer_malloc_value(low, pointer_element_of(ptr_type), values[0])
+    return
+  end
+  elem = pointer_element_of(ptr_type)
+  if name == "pointer_diff"
+    lhs = low.builder.ptr_to_int(values[0], low.typer.size_t)
+    rhs = low.builder.ptr_to_int(values[1], low.typer.size_t)
+    bytes = low.builder.sub(lhs, rhs)
+    zero = low.builder.const_null_pointer
+    one = low.builder.const_int(low.module.types.int32, 1_i64)
+    offset = low.builder.const_gep(low.typer.llvm_embedded_type(elem), zero, [one] of Value, true)
+    size = low.builder.const_cast(Op::PtrToInt, offset, low.typer.size_t)
+    low.last = low.builder.exact_sdiv(bytes, size)
+    return
+  end
+  if name == "pointer_realloc"
+    low.last = pointer_realloc_value(low, elem, values[0], values[1])
+    return
+  end
+  if name == "pointer_address"
+    low.last = low.builder.ptr_to_int(values[0], low.module.types.int64)
+    return
+  end
+  elem_kind = primitive_kind(elem)
+  if name == "pointer_add"
+    low.last = low.builder.inbounds_gep(low.typer.llvm_embedded_type(elem), values[0], [values[1]] of Value)
+    return
+  end
+  if name == "pointer_get"
+    # Hosted `to_lhs` (codegen.cr 3405-3408): a by-value aggregate is already the pointer;
+    # anything else is loaded at the embedded type. Atomic(UInt64) is a struct, so the
+    # census row `pointer_get of Atomic(UInt64)` takes the by-value branch.
+    if passed_by_value?(elem)
+      low.last = values[0]
+      return
+    end
+    low.last = load_aligned(low, low.typer.llvm_embedded_type(elem), values[0])
+    return
+  end
+  if name == "pointer_set"
+    argument_type = low.analysed.type_of?(node.args[0])
+    raise "BUG: pointer assignment argument has no analysed type" if argument_type.nil?
+    actual = argument_type.as(Type)
+    target = TypeIndirection.remove_indirection(elem)
+    # Hosted pointer_set routes pointer-bearing writes through assign, which
+    # brackets them with the concurrent collector's write barrier.
+    if target.full_name != TypeIndirection.remove_indirection(actual).full_name
+      assign(low, values[0], target, actual, values[1])
+      low.last = values[1]
+      return
+    end
+    if elem_kind == "int" || elem_kind == "char" || elem_kind == "float"
+      store_aligned(low, values[1], values[0])
+      low.last = values[1]
+      return
+    end
+    if elem_kind == "bool"
+      bool_stored = values[1]
+      store_aligned(low, bool_stored, values[0])
+      low.last = bool_stored
+      return
+    end
+    if !passed_by_value?(elem)
+      ref_stored = values[1]
+      assign(low, values[0], target, actual, ref_stored)
+      low.last = ref_stored
+      return
+    end
+    assign(low, values[0], target, actual, values[1])
+    low.last = values[1]
+    return
+  end
+  pending_visit_node("primitive #{name} (hosted codegen_primitive, primitives.cr)")
+end
+
+# Hosted store_value / copy_value (codegen.cr 3323-3349). An indirect aggregate
+# is copied without assuming the source and destination do not overlap.
+pub def store_pointer_value(low : Lowerer, dest : Value, value : Value, type : Type) : Nil
+  ir = low.typer.llvm_type(type)
+  if low.typer.passed_indirectly?(type)
+    copy_pointer_value(low, dest, value, ir, false)
+  else
+    stored = value
+    if value.type == low.module.types.ptr(0)
+      stored = load_aligned(low, low.typer.llvm_embedded_type(type), value)
+    end
+    store_aligned(low, stored, dest)
+  end
+end
+
+pub def copy_pointer_value(low : Lowerer, dest : Value, src : Value, ir : IrType, fresh : Bool) : Nil
+  size = low.builder.const_int(low.typer.size_t, low.typer.size_of(ir))
+  align = Attribute.new("align", low.typer.align_of(ir).to_u64, nil, nil)
+  attrs = [[align] of Attribute, [align] of Attribute, [] of Attribute, [] of Attribute] of Array(Attribute)
+  id = fresh ? IntrinsicId::Memcpy : IntrinsicId::Memmove
+  ptr = low.module.types.ptr(0)
+  low.builder.intrinsic_with(id, [ptr, ptr, low.typer.size_t] of IrType, [dest, src, size, int1(low, 0_i64)] of Value, attrs)
+end
+
+# The element type of a pointer's analysed type (`Pointer(T)` gives `T`).
+pub def pointer_element_of(t : Type) : Type
+  if t.is_a?(PointerInstanceType)
+    return t.as(PointerInstanceType).element_type
+  end
+  raise "BUG: a pointer primitive on #{t.full_name}, which is not a Pointer (hosted codegen_primitive_pointer_*)"
+end
+
+# The hosted `codegen_primitive_pointer_malloc` (primitives.cr 905-925) and `generic_array_malloc`
+# (codegen.cr 2884-2906): takes the element's size times the count, selects the program's
+# `malloc64` when `has_inner_pointers?(elem)` or `malloc_atomic64` otherwise (falling back to C
+# `malloc` when that entry does not exist), and zeroes the block unless a program allocator was
+# used under `iyi_gc_arena?`. The count is the UInt64 argument, which is the size type; any other
+# width is refused.
+pub def pointer_malloc_value(low : Lowerer, elem : Type, count : Value) : Value
+  if count.type != low.typer.size_t
+    pending_visit_node("Pointer#malloc with a count that is not the size type (hosted generic_array_malloc: builder.mul of the size and the count)")
+    return low.builder.const_null_pointer
+  end
+  elem_ir = low.typer.llvm_embedded_type(elem)
+  bytes = sizeof_expr(low, elem_ir)
+  size = bytes
+  if count.is_a?(Inst) && count.as(Inst).op == Op::ConstInt && count.as(Inst).aux_int == 0_i64
+    size = low.builder.const_int(low.typer.size_t, 0_i64)
+  elsif !(count.is_a?(Inst) && count.as(Inst).op == Op::ConstInt && count.as(Inst).aux_int == 1_i64)
+    size = low.builder.mul(bytes, count)
+  end
+  suffix = has_inner_pointers?(elem) ? "malloc64" : "malloc_atomic64"
+  prog_alloc = program_allocator(low, suffix)
+  callee = prog_alloc.nil? ? c_malloc_function(low) : prog_alloc.as(Function)
+  ptr = low.builder.call(callee.fn_type, callee, [size] of Value, "")
+  unless !prog_alloc.nil? && iyi_gc_arena?(low)
+    memset_size(low, ptr, size)
+  end
+  ptr
+end
+
+# The hosted `codegen_primitive_pointer_realloc` (primitives.cr 951-958) and `realloc` (codegen.cr 3352): the count times
+# the size of the element's type (`llvm_size`, the sizeof constant of `llvm_type`, which is not the embedded type), passed
+# to the program's `realloc64` when it has one, and to C `realloc` when it does not. The pointer casts of the hosted code
+# are no instructions between opaque pointers. The count is the UInt64 argument, which is the size type; any other width
+# is refused.
+pub def pointer_realloc_value(low : Lowerer, elem : Type, ptr : Value, count : Value) : Value
+  if count.type != low.typer.size_t
+    pending_visit_node("Pointer#realloc with a count that is not the size type (hosted codegen_primitive_pointer_realloc: builder.mul of the count and the size)")
+    return ptr
+  end
+  size = low.builder.mul(count, sizeof_expr(low, low.typer.llvm_type(elem)))
+  prog_alloc = program_allocator(low, "realloc64")
+  callee = prog_alloc.nil? ? c_realloc_function(low) : prog_alloc.as(Function)
+  low.builder.call(callee.fn_type, callee, [ptr, size] of Value, "")
+end
+
+# The analysed type of a receiver. A primitive's owner is the type its receiver has (the
+# builtin is never a subclass), so the receiver's type is the hosted `target_def.owner`.
+pub def receiver_type(low : Lowerer, obj : ASTNode) : Type
+  t = low.analysed.type_of?(obj)
+  raise "BUG: the analysed program has no type for a primitive receiver (hosted call.cr: codegen_primitive)" if t.nil?
+  t.as(Type)
+end
+
+# The hosted `codegen_primitive_binary`: `binary` names an operator on the receiver (`t1`)
+# and the argument (`t2`); the operator is the def's name (hosted `target_def.name`).
+pub def codegen_primitive_binary(low : Lowerer, op : String, t1 : Type, t2 : Type, p1 : Value, p2 : Value) : Value
+  codegen_binary_op(low, op, t1, t2, p1, p2)
+end
+
+# The hosted `codegen_binary_op` overloads for the types ported so far.
+pub def codegen_binary_op(low : Lowerer, op : String, t1 : Type, t2 : Type, p1 : Value, p2 : Value) : Value
+  kind = primitive_kind(t1)
+  if kind == "int" && primitive_kind(t2) == "int"
+    # Flow typing can describe an integer while the emitted local still carries a
+    # union. Refuse before emitting an instruction with incompatible operands.
+    if p1.type.key != low.typer.llvm_type(t1).key || p2.type.key != low.typer.llvm_type(t2).key
+      pending_visit_node("binary #{op} with operand IR types #{p1.type} and #{p2.type} inconsistent with #{t1.full_name} and #{t2.full_name} (hosted codegen_binary_op)")
+    end
+    return codegen_int_binary_op(low, op, t1, t2, p1, p2)
+  end
+  other_kind = primitive_kind(t2)
+  if kind == "int" && other_kind == "float"
+    return codegen_float_binary_op(low, op, t2, t2, codegen_primitive_convert(low, t1, t2, p1, false), p2)
+  end
+  if kind == "float" && other_kind == "int"
+    return codegen_float_binary_op(low, op, t1, t1, p1, codegen_primitive_convert(low, t2, t1, p2, false))
+  end
+  if kind == "float" && other_kind == "float"
+    return codegen_float_binary_op(low, op, t1, t2, p1, p2)
+  end
+  if t1.full_name != t2.full_name
+    pending_visit_node("binary #{op} on #{t1.full_name} and #{t2.full_name} (mixed operands, hosted codegen_binary_extend_int)")
+  end
+  if kind == "bool" || kind == "symbol"
+    if op == "=="
+      return low.builder.icmp(IntPredicate::EQ, p1, p2)
+    end
+    if op == "!="
+      return low.builder.icmp(IntPredicate::NE, p1, p2)
+    end
+    pending_visit_node("binary #{op} on #{t1.full_name} (hosted codegen_binary_op)")
+  end
+  if kind == "char"
+    # Char compares as an unsigned code point (hosted codegen_binary_op for CharType).
+    if op == "=="
+      return low.builder.icmp(IntPredicate::EQ, p1, p2)
+    end
+    if op == "!="
+      return low.builder.icmp(IntPredicate::NE, p1, p2)
+    end
+    if op == "<"
+      return low.builder.icmp(IntPredicate::ULT, p1, p2)
+    end
+    if op == "<="
+      return low.builder.icmp(IntPredicate::ULE, p1, p2)
+    end
+    if op == ">"
+      return low.builder.icmp(IntPredicate::UGT, p1, p2)
+    end
+    if op == ">="
+      return low.builder.icmp(IntPredicate::UGE, p1, p2)
+    end
+    pending_visit_node("binary #{op} on #{t1.full_name} (hosted codegen_binary_op)")
+  end
+  pending_visit_node("binary #{op} on #{t1.full_name} (hosted codegen_binary_op: no overload for this type yet)")
+  p1
+end
+
+pub def codegen_float_binary_op(low : Lowerer, op : String, t1 : Type, t2 : Type, p1 : Value, p2 : Value) : Value
+  left = p1
+  right = p2
+  if primitive_bytes(t1) < primitive_bytes(t2)
+    left = low.builder.fp_ext(left, low.typer.llvm_type(t2))
+  elsif primitive_bytes(t1) > primitive_bytes(t2)
+    right = low.builder.fp_ext(right, low.typer.llvm_type(t1))
+  end
+  if op == "=="
+    return low.builder.fcmp(RealPredicate::OEQ, left, right)
+  elsif op == "!="
+    return low.builder.fcmp(RealPredicate::UNE, left, right)
+  elsif op == "<"
+    return low.builder.fcmp(RealPredicate::OLT, left, right)
+  elsif op == "<="
+    return low.builder.fcmp(RealPredicate::OLE, left, right)
+  elsif op == ">"
+    return low.builder.fcmp(RealPredicate::OGT, left, right)
+  elsif op == ">="
+    return low.builder.fcmp(RealPredicate::OGE, left, right)
+  end
+  result = left
+  if op == "+"
+    result = low.builder.fadd(left, right)
+  elsif op == "-"
+    result = low.builder.fsub(left, right)
+  elsif op == "*"
+    result = low.builder.fmul(left, right)
+  elsif op == "/" || op == "fdiv"
+    result = low.builder.fdiv(left, right)
+  else
+    pending_visit_node("binary #{op} on #{t1.full_name} and #{t2.full_name} (hosted float codegen_binary_op)")
+  end
+  if primitive_bytes(t1) < primitive_bytes(t2)
+    return low.builder.fp_trunc(result, low.typer.llvm_type(t1))
+  end
+  result
+end
+
+# The hosted integer `codegen_binary_op` (primitives.cr 128-160). Checked `+`, `-` and `*`
+# stay the overflow forms. Comparisons are the lt/lte/gt/gte/eq/ne overloads, which extend
+# a same-sign pair and pick a predicate for a mixed-sign pair. Every other operator extends
+# the narrower operand, operates at that width with the left operand's signedness, and
+# truncates back when the left operand was the narrower one.
+pub def codegen_int_binary_op(low : Lowerer, op : String, t1 : Type, t2 : Type, p1 : Value, p2 : Value) : Value
+  s1 = int_shape(low, t1)
+  s2 = int_shape(low, t2)
+  if op == "+" || op == "-"
+    return addsub_with_overflow(low, op, s1, s2, p1, p2)
+  end
+  if op == "*"
+    return mul_with_overflow(low, s1, s2, p1, p2)
+  end
+  if op == "<"
+    return codegen_binary_op_lt(low, s1, s2, p1, p2)
+  end
+  if op == "<="
+    return codegen_binary_op_lte(low, s1, s2, p1, p2)
+  end
+  if op == ">"
+    return codegen_binary_op_gt(low, s1, s2, p1, p2)
+  end
+  if op == ">="
+    return codegen_binary_op_gte(low, s1, s2, p1, p2)
+  end
+  if op == "=="
+    return codegen_binary_op_eq(low, s1, s2, p1, p2)
+  end
+  if op == "!="
+    return codegen_binary_op_ne(low, s1, s2, p1, p2)
+  end
+  arith = op
+  if op == "/"
+    arith = "unsafe_div"
+  end
+  if op == "%"
+    arith = "unsafe_mod"
+  end
+  extended = codegen_binary_extend_int(low, s1, s2, p1, p2)
+  result = int_binary_op(low, arith, t1, extended.left, extended.right)
+  trunc_binary_op_result(low, s1, s2, result)
+end
+
+# The hosted integer overloads of `codegen_binary_op` for operands of one type, where the
+# result is in that type: the wrapping operators, the bitwise operators, the unchecked
+# shifts and divisions, and the comparisons with the predicate of the type's signedness.
+pub def int_binary_op(low : Lowerer, op : String, t : Type, p1 : Value, p2 : Value) : Value
+  signed = is_signed?(t)
+  if op == "&+"
+    return low.builder.add(p1, p2)
+  end
+  if op == "&-"
+    return low.builder.sub(p1, p2)
+  end
+  if op == "&*"
+    return low.builder.mul(p1, p2)
+  end
+  if op == "=="
+    return low.builder.icmp(IntPredicate::EQ, p1, p2)
+  end
+  if op == "!="
+    return low.builder.icmp(IntPredicate::NE, p1, p2)
+  end
+  if op == "<"
+    return low.builder.icmp(signed_pred(signed, IntPredicate::SLT, IntPredicate::ULT), p1, p2)
+  end
+  if op == "<="
+    return low.builder.icmp(signed_pred(signed, IntPredicate::SLE, IntPredicate::ULE), p1, p2)
+  end
+  if op == ">"
+    return low.builder.icmp(signed_pred(signed, IntPredicate::SGT, IntPredicate::UGT), p1, p2)
+  end
+  if op == ">="
+    return low.builder.icmp(signed_pred(signed, IntPredicate::SGE, IntPredicate::UGE), p1, p2)
+  end
+  if op == "|"
+    return low.builder.build_or(p1, p2)
+  end
+  if op == "&"
+    return low.builder.build_and(p1, p2)
+  end
+  if op == "^"
+    return low.builder.build_xor(p1, p2)
+  end
+  if op == "unsafe_shl"
+    return low.builder.shl(p1, p2)
+  end
+  if op == "unsafe_shr"
+    if signed
+      return low.builder.ashr(p1, p2)
+    end
+    return low.builder.lshr(p1, p2)
+  end
+  if op == "unsafe_div"
+    if signed
+      return low.builder.sdiv(p1, p2)
+    end
+    return low.builder.udiv(p1, p2)
+  end
+  if op == "unsafe_mod"
+    if signed
+      return low.builder.srem(p1, p2)
+    end
+    return low.builder.urem(p1, p2)
+  end
+  pending_visit_node("binary #{op} on #{t.full_name} (hosted codegen_binary_op)")
+  p1
+end
+
+# The shape of an integer type: its width, its signedness, and its IR type.
+pub def int_shape(low : Lowerer, t : Type) : IntShape
+  IntShape.new(primitive_bytes(t), is_signed?(t), low.typer.llvm_type(t))
+end
+
+# Whether an integer builtin is signed: every builtin integer but the `U` ones.
+pub def is_signed?(t : Type) : Bool
+  !t.full_name.starts_with?("U")
+end
+
+# The predicate for a signed or an unsigned comparison.
+pub def signed_pred(signed : Bool, signed_pred : IntPredicate, unsigned_pred : IntPredicate) : IntPredicate
+  if signed
+    signed_pred
+  else
+    unsigned_pred
+  end
+end
+
+# An integer constant of an operand's type, from its value as an Int64 bit pattern.
+pub def int_const(low : Lowerer, value : Int64, t : IntShape) : Value
+  low.builder.const_int(t.ir, value)
+end
+
+# The signed minimum of a width, as the Int64 bit pattern that is its sign bit (hosted
+# `int(sign_bit, t1)`). Computed with wrapping operations, so the 64-bit minimum is exact.
+pub def sign_bit_value(bytes : Int32) : Int64
+  0_i64 &- 1_i64.unsafe_shl((bytes * 8 - 1).to_i64)
+end
+
+# The largest unsigned value of a width, as the Int64 bit pattern of that value.
+pub def unsigned_max_value(bytes : Int32) : Int64
+  if bytes == 8
+    return 0_i64 &- 1_i64
+  end
+  1_i64.unsafe_shl((bytes * 8).to_i64) &- 1_i64
+end
+
+# The hosted `extend_int` (llvm_builder_helper.cr 187-189): a source of its own signedness,
+# widened to the target's IR type. A same-width pair (Int32 and UInt32 share an IR type) emits
+# nothing: the hosted sext or zext to the same type is not an instruction.
+pub def extend_int(low : Lowerer, from : IntShape, to : IntShape, value : Value) : Value
+  if from.bytes == to.bytes
+    return value
+  end
+  # LLVM folds extensions of constants before emitting IR.
+  if value.is_a?(Inst) && value.as(Inst).op == Op::ConstInt && from.bytes < 8
+    bits = from.bytes * 8
+    mask = unsigned_max_value(from.bytes)
+    n = value.as(Inst).aux_int & mask
+    if from.signed && (n & 1_i64.unsafe_shl((bits - 1).to_i64)) != 0_i64
+      n = n | (mask ^ -1_i64)
+    end
+    return low.builder.const_int(to.ir, n)
+  end
+  if value.is_a?(Inst) && value.as(Inst).op == Op::ConstInt && from.bytes == 8 && to.bytes == 16
+    n = value.as(Inst).aux_int
+    return low.builder.const_wide(to.ir, from.signed && n < 0_i64 ? -1_i64 : 0_i64, n)
+  end
+  if from.signed
+    return low.builder.sext(value, to.ir)
+  end
+  low.builder.zext(value, to.ir)
+end
+
+# The two operands after `codegen_binary_extend_int`, and the type the operation ran in.
+pub class ExtendedInts
+  getter tmax : IntShape
+  getter left : Value
+  getter right : Value
+
+  def initialize(@tmax : IntShape, @left : Value, @right : Value)
+  end
+end
+
+# The hosted `codegen_binary_extend_int` (primitives.cr 295-307). Equal widths (the same
+# normal_rank, signed or not) are left as they are. Otherwise the narrower operand, which
+# always has the smaller rank, is widened to the wider one by its own signedness.
+pub def codegen_binary_extend_int(low : Lowerer, t1 : IntShape, t2 : IntShape, p1 : Value, p2 : Value) : ExtendedInts
+  if t1.bytes == t2.bytes
+    return ExtendedInts.new(t1, p1, p2)
+  end
+  if t1.bytes < t2.bytes
+    return ExtendedInts.new(t2, extend_int(low, t1, t2, p1), p2)
+  end
+  ExtendedInts.new(t1, p1, extend_int(low, t2, t1, p2))
+end
+
+# The hosted `codegen_trunc_binary_op_result` (primitives.cr 312-318): the result is the
+# left operand's type when the operation ran in the wider right operand's type.
+pub def trunc_binary_op_result(low : Lowerer, t1 : IntShape, t2 : IntShape, result : Value) : Value
+  if t1.bytes != t2.bytes && t1.bytes < t2.bytes
+    return trunc_to(low, result, t1.ir)
+  end
+  result
+end
+
+# The hosted `codegen_binary_op_lt` (primitives.cr 532-568).
+pub def codegen_binary_op_lt(low : Lowerer, t1 : IntShape, t2 : IntShape, p1 : Value, p2 : Value) : Value
+  if t1.signed == t2.signed
+    extended = codegen_binary_extend_int(low, t1, t2, p1, p2)
+    return low.builder.icmp(signed_pred(t1.signed, IntPredicate::SLT, IntPredicate::ULT), extended.left, extended.right)
+  end
+  if t1.signed && !t2.signed
+    if t1.bytes > t2.bytes
+      # x < 0 || x < x.class.new(y)
+      negative = low.builder.icmp(IntPredicate::SLT, p1, int_const(low, 0_i64, t1))
+      widened = low.builder.icmp(IntPredicate::SLT, p1, extend_int(low, t2, t1, p2))
+      return low.builder.build_or(negative, widened)
+    end
+    # x < 0 || y.class.new(x) < y
+    negative = low.builder.icmp(IntPredicate::SLT, p1, int_const(low, 0_i64, t1))
+    widened = low.builder.icmp(IntPredicate::ULT, extend_int(low, t1, t2, p1), p2)
+    return low.builder.build_or(negative, widened)
+  end
+  # t1 unsigned, t2 signed
+  if t1.bytes < t2.bytes
+    # y >= 0 && y.class.new(x) < y
+    non_negative = low.builder.icmp(IntPredicate::SGE, p2, int_const(low, 0_i64, t2))
+    widened = low.builder.icmp(IntPredicate::SLT, extend_int(low, t1, t2, p1), p2)
+    return low.builder.build_and(non_negative, widened)
+  end
+  # y >= 0 && x < x.class.new(y)
+  non_negative = low.builder.icmp(IntPredicate::SGE, p2, int_const(low, 0_i64, t2))
+  widened = low.builder.icmp(IntPredicate::ULT, p1, extend_int(low, t2, t1, p2))
+  low.builder.build_and(non_negative, widened)
+end
+
+# The hosted `codegen_binary_op_lte` (primitives.cr 570-606).
+pub def codegen_binary_op_lte(low : Lowerer, t1 : IntShape, t2 : IntShape, p1 : Value, p2 : Value) : Value
+  if t1.signed == t2.signed
+    extended = codegen_binary_extend_int(low, t1, t2, p1, p2)
+    return low.builder.icmp(signed_pred(t1.signed, IntPredicate::SLE, IntPredicate::ULE), extended.left, extended.right)
+  end
+  if t1.signed && !t2.signed
+    if t1.bytes > t2.bytes
+      # x <= 0 || x <= x.class.new(y)
+      negative = low.builder.icmp(IntPredicate::SLE, p1, int_const(low, 0_i64, t1))
+      widened = low.builder.icmp(IntPredicate::SLE, p1, extend_int(low, t2, t1, p2))
+      return low.builder.build_or(negative, widened)
+    end
+    # x <= 0 || y.class.new(x) <= y
+    negative = low.builder.icmp(IntPredicate::SLE, p1, int_const(low, 0_i64, t1))
+    widened = low.builder.icmp(IntPredicate::ULE, extend_int(low, t1, t2, p1), p2)
+    return low.builder.build_or(negative, widened)
+  end
+  if t1.bytes < t2.bytes
+    # y >= 0 && y.class.new(x) <= y
+    non_negative = low.builder.icmp(IntPredicate::SGE, p2, int_const(low, 0_i64, t2))
+    widened = low.builder.icmp(IntPredicate::SLE, extend_int(low, t1, t2, p1), p2)
+    return low.builder.build_and(non_negative, widened)
+  end
+  # y >= 0 && x <= x.class.new(y)
+  non_negative = low.builder.icmp(IntPredicate::SGE, p2, int_const(low, 0_i64, t2))
+  widened = low.builder.icmp(IntPredicate::ULE, p1, extend_int(low, t2, t1, p2))
+  low.builder.build_and(non_negative, widened)
+end
+
+# The hosted `codegen_binary_op_gt` (primitives.cr 608-644).
+pub def codegen_binary_op_gt(low : Lowerer, t1 : IntShape, t2 : IntShape, p1 : Value, p2 : Value) : Value
+  if t1.signed == t2.signed
+    extended = codegen_binary_extend_int(low, t1, t2, p1, p2)
+    return low.builder.icmp(signed_pred(t1.signed, IntPredicate::SGT, IntPredicate::UGT), extended.left, extended.right)
+  end
+  if t1.signed && !t2.signed
+    if t1.bytes > t2.bytes
+      # x >= 0 && x > x.class.new(y)
+      non_negative = low.builder.icmp(IntPredicate::SGE, p1, int_const(low, 0_i64, t1))
+      widened = low.builder.icmp(IntPredicate::SGT, p1, extend_int(low, t2, t1, p2))
+      return low.builder.build_and(non_negative, widened)
+    end
+    # x >= 0 && y.class.new(x) > y
+    non_negative = low.builder.icmp(IntPredicate::SGE, p1, int_const(low, 0_i64, t1))
+    widened = low.builder.icmp(IntPredicate::UGT, extend_int(low, t1, t2, p1), p2)
+    return low.builder.build_and(non_negative, widened)
+  end
+  if t1.bytes < t2.bytes
+    # y < 0 || y.class.new(x) > y
+    negative = low.builder.icmp(IntPredicate::SLT, p2, int_const(low, 0_i64, t2))
+    widened = low.builder.icmp(IntPredicate::SGT, extend_int(low, t1, t2, p1), p2)
+    return low.builder.build_or(negative, widened)
+  end
+  # y < 0 || x > x.class.new(y)
+  negative = low.builder.icmp(IntPredicate::SLT, p2, int_const(low, 0_i64, t2))
+  widened = low.builder.icmp(IntPredicate::UGT, p1, extend_int(low, t2, t1, p2))
+  low.builder.build_or(negative, widened)
+end
+
+# The hosted `codegen_binary_op_gte` (primitives.cr 646-682).
+pub def codegen_binary_op_gte(low : Lowerer, t1 : IntShape, t2 : IntShape, p1 : Value, p2 : Value) : Value
+  if t1.signed == t2.signed
+    extended = codegen_binary_extend_int(low, t1, t2, p1, p2)
+    return low.builder.icmp(signed_pred(t1.signed, IntPredicate::SGE, IntPredicate::UGE), extended.left, extended.right)
+  end
+  if t1.signed && !t2.signed
+    if t1.bytes > t2.bytes
+      # x >= 0 && x >= x.class.new(y)
+      non_negative = low.builder.icmp(IntPredicate::SGE, p1, int_const(low, 0_i64, t1))
+      widened = low.builder.icmp(IntPredicate::SGE, p1, extend_int(low, t2, t1, p2))
+      return low.builder.build_and(non_negative, widened)
+    end
+    # x >= 0 && y.class.new(x) >= y
+    non_negative = low.builder.icmp(IntPredicate::SGE, p1, int_const(low, 0_i64, t1))
+    widened = low.builder.icmp(IntPredicate::UGE, extend_int(low, t1, t2, p1), p2)
+    return low.builder.build_and(non_negative, widened)
+  end
+  if t1.bytes < t2.bytes
+    # y <= 0 || y.class.new(x) >= y
+    negative = low.builder.icmp(IntPredicate::SLE, p2, int_const(low, 0_i64, t2))
+    widened = low.builder.icmp(IntPredicate::SGE, extend_int(low, t1, t2, p1), p2)
+    return low.builder.build_or(negative, widened)
+  end
+  # y <= 0 || x >= x.class.new(y)
+  negative = low.builder.icmp(IntPredicate::SLE, p2, int_const(low, 0_i64, t2))
+  widened = low.builder.icmp(IntPredicate::UGE, p1, extend_int(low, t2, t1, p2))
+  low.builder.build_or(negative, widened)
+end
+
+# The hosted `codegen_binary_op_eq` (primitives.cr 684-702). Equality has no signedness in
+# the instruction, so a mixed-sign pair is equal only when the signed operand is not negative.
+pub def codegen_binary_op_eq(low : Lowerer, t1 : IntShape, t2 : IntShape, p1 : Value, p2 : Value) : Value
+  extended = codegen_binary_extend_int(low, t1, t2, p1, p2)
+  left = extended.left
+  right = extended.right
+  if t1.signed == t2.signed
+    return low.builder.icmp(IntPredicate::EQ, left, right)
+  end
+  if t1.signed && !t2.signed
+    # x >= 0 && x == y
+    non_negative = low.builder.icmp(IntPredicate::SGE, left, low.builder.const_int(left.type, 0_i64))
+    same = low.builder.icmp(IntPredicate::EQ, left, right)
+    return low.builder.build_and(non_negative, same)
+  end
+  # y >= 0 && x == y
+  non_negative = low.builder.icmp(IntPredicate::SGE, right, low.builder.const_int(right.type, 0_i64))
+  same = low.builder.icmp(IntPredicate::EQ, left, right)
+  low.builder.build_and(non_negative, same)
+end
+
+# The hosted `codegen_binary_op_ne` (primitives.cr 704-722).
+pub def codegen_binary_op_ne(low : Lowerer, t1 : IntShape, t2 : IntShape, p1 : Value, p2 : Value) : Value
+  extended = codegen_binary_extend_int(low, t1, t2, p1, p2)
+  left = extended.left
+  right = extended.right
+  if t1.signed == t2.signed
+    return low.builder.icmp(IntPredicate::NE, left, right)
+  end
+  if t1.signed && !t2.signed
+    # x < 0 || x != y
+    negative = low.builder.icmp(IntPredicate::SLT, left, low.builder.const_int(left.type, 0_i64))
+    differ = low.builder.icmp(IntPredicate::NE, left, right)
+    return low.builder.build_or(negative, differ)
+  end
+  # y < 0 || x != y
+  negative = low.builder.icmp(IntPredicate::SLT, right, low.builder.const_int(right.type, 0_i64))
+  differ = low.builder.icmp(IntPredicate::NE, left, right)
+  low.builder.build_or(negative, differ)
+end
+
+# A truncation to `ir`, and the value itself when it already has that type (hosted `trunc`
+# on a value of the target type emits nothing).
+pub def trunc_to(low : Lowerer, value : Value, ir : IrType) : Value
+  if value.type == ir
+    return value
+  end
+  low.builder.trunc(value, ir)
+end
+
+# The overflow intrinsic of an operation at a signedness (hosted `call_binary_overflow_fun`).
+pub def overflow_id(op : String, signed : Bool) : IntrinsicId
+  if op == "+"
+    if signed
+      return IntrinsicId::SAddOverflow
+    end
+    return IntrinsicId::UAddOverflow
+  end
+  if op == "-"
+    if signed
+      return IntrinsicId::SSubOverflow
+    end
+    return IntrinsicId::USubOverflow
+  end
+  if signed
+    return IntrinsicId::SMulOverflow
+  end
+  IntrinsicId::UMulOverflow
+end
+
+# The hosted `call_binary_overflow_fun`: the result of the operation and its overflow flag,
+# from the overflow intrinsic at the operand's type.
+pub def call_binary_overflow(low : Lowerer, op : String, t : IntShape, p1 : Value, p2 : Value) : {Value, Value}
+  id = overflow_id(op, t.signed)
+  res = low.builder.intrinsic(id, [t.ir] of IrType, [p1, p2] of Value)
+  result = low.builder.extract_value(res, 0)
+  overflow = low.builder.extract_value(res, 1)
+  {result.as(Value), overflow.as(Value)}
+end
+
+# The hosted `codegen_raise_overflow_cond`: a branch on the overflow flag (with the expect
+# hint of the hosted codegen), to the raise, or on to the code that follows.
+pub def raise_overflow_cond(low : Lowerer, overflow : Value) : Nil
+  op_overflow = low.new_block("overflow")
+  op_normal = low.new_block("normal")
+  expected = low.builder.intrinsic(IntrinsicId::ExpectI1, [] of IrType, [overflow, int1(low, 0_i64)] of Value)
+  low.builder.cond_br(expected, op_overflow, op_normal)
+  low.builder.position_at_end(op_overflow)
+  raise_overflow(low)
+  low.builder.position_at_end(op_normal)
+end
+
+# The hosted `codegen_raise_overflow`: look up the ABI's overflow function in the main module.
+# A def probe has its own module, so declare the program's function there when it exists.
+pub def raise_overflow(low : Lowerer) : Nil
+  name = raise_overflow_name(low)
+  fn = low.module.get_function?(name)
+  if fn.nil?
+    found = false
+    low.analysed.program.global_funs.each do |record|
+      found = true if record.real_name == name
+    end
+    unless found
+      pending_visit_node("a checked operation with no #{name} in the program (hosted crystal_raise_overflow_fun)")
+      return
+    end
+    fn_type = low.module.types.func([] of IrType, low.module.types.void)
+    fn = low.module.add_function(name, fn_type, CallConv::C)
+  end
+  raise_fn = fn.as(Function)
+  low.builder.call(raise_fn.fn_type, raise_fn, [] of Value, "")
+  low.builder.unreachable
+end
+
+# Hosted type.to_s includes an unbound generic's parameters and its splat.
+def cast_type_name(type : Type) : String
+  if type.is_a?(MetaclassType)
+    return cast_type_name(type.as(MetaclassType).instance_type) + ".class"
+  end
+  if type.is_a?(GenericClassType)
+    generic = type.as(GenericClassType)
+    names = [] of String
+    i = 0
+    while i < generic.type_vars.size
+      name = generic.type_vars[i]
+      name = "*" + name if generic.splat_index == i
+      names << name
+      i = i + 1
+    end
+    return generic.full_name + "(" + names.join(", ") + ")"
+  end
+  type.full_name
+end
+
+# Hosted codegen.cr:2095-2127 builds this table on the first checked cast. The
+# runtime id indexes the same strings used for a value's dynamic class name.
+def cast_class_name(low : Lowerer, type_id : Value) : Value
+  name = abi_name(low, "type_id_to_class_name_map")
+  ptr = low.module.types.ptr(0)
+  table = low.module.get_global?(name)
+  if table.nil?
+    count = low.type_ids.last_id + 1
+    array_type = low.module.types.array_of(ptr, count.to_i64)
+    created = low.module.add_global(name, array_type)
+    created.linkage = Linkage::Internal
+    created.global_constant = true
+    values = [] of Value
+    i = 0
+    while i < count
+      values << low.builder.const_null(ptr)
+      i = i + 1
+    end
+    # The hosted hash is walked in insertion order, not id order; that order
+    # also decides the names LLVM gives the string globals.
+    types = low.type_ids.numbered_types
+    i = 0
+    while i < types.size
+      type = types[i]
+      id = low.type_ids.type_id(type)
+      values[id] = build_string_constant(low, cast_type_name(type), "str")
+      i = i + 1
+    end
+    created.initializer = low.builder.const_array(ptr, values)
+    table = created
+  end
+  index = low.builder.const_int(low.module.types.int32, 0_i64)
+  address = low.builder.inbounds_gep(table.as(Global).value_type, table.as(Global), [index, type_id] of Value)
+  load_aligned(low, ptr, address)
+end
+
+# Hosted codegen.cr:2066-2085: the prelude supplies the ABI function; a
+# prelude-free program without it still needs the hosted AST fallback.
+pub def raise_cast_failed(low : Lowerer, type_id : Value, target : Type, node : ASTNode) : Nil
+  name = abi_name(low, "raise_cast_failed")
+  fn = low.module.get_function?(name)
+  if fn.nil?
+    found = false
+    low.analysed.program.global_funs.each do |record|
+      found = true if record.real_name == name
+    end
+    unless found
+      pending_visit_node("a checked cast with no #{name} in the program (hosted type_cast_exception_call)")
+      return
+    end
+    ptr = low.module.types.ptr(0)
+    fn_type = low.module.types.func([ptr, ptr, ptr] of IrType, low.module.types.void)
+    fn = low.module.add_function(name, fn_type, CallConv::C)
+  end
+  from_name = cast_class_name(low, type_id)
+  to_name = build_string_constant(low, cast_type_name(target), "str")
+  location : Value = low.builder.const_null(low.module.types.ptr(0))
+  if loc = node.location
+    location = build_string_constant(low, loc.to_s, "str")
+  end
+  raise_fn = fn.as(Function)
+  # iyi has no rescue state; like raise_overflow, emit call after oracle unwind normalization.
+  low.builder.call(raise_fn.fn_type, raise_fn, [from_name, to_name, location] of Value, "")
+  low.builder.unreachable
+end
+
+# The hosted `codegen_addsub_with_overflow`: a checked `+` or `-` of two integers. Operands
+# of different signedness are biased by the sign bit of the first, so that one signedness
+# remains, and the result is biased back.
+pub def addsub_with_overflow(low : Lowerer, op : String, t1 : IntShape, t2 : IntShape, p1 : Value, p2 : Value) : Value
+  if t1.signed != t2.signed
+    bias = int_const(low, sign_bit_value(t1.bytes), t1)
+    p1_biased = low.builder.build_xor(p1, bias)
+    biased = IntShape.new(t1.bytes, !t1.signed, t1.ir)
+    result_biased = same_signedness_addsub(low, op, biased, t2, p1_biased, p2)
+    return low.builder.build_xor(result_biased, bias)
+  end
+  same_signedness_addsub(low, op, t1, t2, p1, p2)
+end
+
+# The hosted `codegen_addsub_same_signedness_with_overflow`. A wider second operand of an
+# unsigned type is truncated to the first's width, and a range check catches a value that
+# does not fit (hosted, after the overflow check). A wider signed operand needs the checked
+# conversion back, which is refused by name.
+pub def same_signedness_addsub(low : Lowerer, op : String, t1 : IntShape, t2 : IntShape, p1 : Value, p2 : Value) : Value
+  if t2.bytes > t1.bytes
+    if t2.signed
+      pending_visit_node("checked #{op} with a wider signed operand (hosted codegen_convert, range check)")
+      return p1
+    end
+    p2_trunc = trunc_to(low, p2, t1.ir)
+    pair = call_binary_overflow(low, op, t1, p1, p2_trunc)
+    raise_overflow_cond(low, pair[1])
+    p2_too_large = low.builder.icmp(IntPredicate::UGT, p2, int_const(low, unsigned_max_value(t1.bytes), t2))
+    raise_overflow_cond(low, p2_too_large)
+    return pair[0]
+  end
+  q2 = p2
+  if t2.bytes < t1.bytes
+    q2 = extend_int(low, t2, t1, p2)
+  end
+  pair = call_binary_overflow(low, op, t1, p1, q2)
+  raise_overflow_cond(low, pair[1])
+  pair[0]
+end
+
+# The hosted `codegen_mul_with_overflow`. A multiplication of mixed signedness is refused by
+# name (its hosted overloads read the sign of each operand and raise on the mixed case).
+pub def mul_with_overflow(low : Lowerer, t1 : IntShape, t2 : IntShape, p1 : Value, p2 : Value) : Value
+  if t1.signed != t2.signed
+    pending_visit_node("checked * of mixed signedness (hosted codegen_mul_*_signed_with_overflow)")
+    return p1
+  end
+  mul_same_signedness_with_overflow(low, t1, t2, p1, p2)
+end
+
+# The hosted `codegen_mul_same_signedness_with_overflow`: the operands are widened to the
+# larger width, multiplied with the overflow intrinsic, and the product is checked against
+# its truncation when it was computed wider than the result.
+pub def mul_same_signedness_with_overflow(low : Lowerer, t1 : IntShape, t2 : IntShape, p1 : Value, p2 : Value) : Value
+  tmax = t1
+  q1 = p1
+  q2 = p2
+  if t1.bytes < t2.bytes
+    q1 = extend_int(low, t1, t2, p1)
+    tmax = t2
+  elsif t2.bytes < t1.bytes
+    q2 = extend_int(low, t2, t1, p2)
+  end
+  pair = call_binary_overflow(low, "*", tmax, q1, q2)
+  result = pair[0]
+  overflow = pair[1]
+  if tmax.bytes > t1.bytes
+    result_trunc = trunc_to(low, result, t1.ir)
+    result_trunc_ext = extend_int(low, t1, tmax, result_trunc)
+    unequal = low.builder.icmp(IntPredicate::NE, result, result_trunc_ext)
+    overflow = low.builder.build_or(overflow, unequal)
+  end
+  raise_overflow_cond(low, overflow)
+  trunc_to(low, result, t1.ir)
+end
+
+# The hosted `codegen_primitive_convert`: `convert` is checked, `unchecked_convert` is not.
+# Char to an integer zero-extends and Symbol to an integer is the value, with or without the
+# check (their hosted overloads take no check). A checked integer conversion raises on
+# overflow and is refused by name.
+pub def codegen_primitive_convert(low : Lowerer, from : Type, to : Type, value : Value, checked : Bool) : Value
+  from_kind = primitive_kind(from)
+  to_kind = primitive_kind(to)
+  if from_kind == "char" && to_kind == "int"
+    if value.type.key == low.typer.llvm_type(to).key
+      return value
+    end
+    return low.builder.zext(value, low.typer.llvm_type(to))
+  end
+  if from_kind == "int" && to_kind == "char"
+    return codegen_convert_int(low, from, low.analysed.program.int32_type, value, checked)
+  end
+  if from_kind == "symbol" && to_kind == "int"
+    return value
+  end
+  if from_kind == "int" && to_kind == "int"
+    return codegen_convert_int(low, from, to, value, checked)
+  end
+  if from_kind == "int" && to_kind == "float"
+    if checked && from.full_name == "UInt128" && to.full_name == "Float32"
+      pending_visit_node("checked UInt128 to Float32 (hosted codegen_out_of_range)")
+    end
+    if is_signed?(from)
+      return low.builder.si_to_fp(value, low.typer.llvm_type(to))
+    end
+    return low.builder.ui_to_fp(value, low.typer.llvm_type(to))
+  end
+  if from_kind == "float" && to_kind == "float"
+    if primitive_bytes(from) < primitive_bytes(to)
+      return low.builder.fp_ext(value, low.typer.llvm_type(to))
+    end
+    if primitive_bytes(from) > primitive_bytes(to)
+      if checked
+        pending_visit_node("checked float narrowing #{from.full_name} to #{to.full_name} (hosted codegen_out_of_range)")
+      end
+      return low.builder.fp_trunc(value, low.typer.llvm_type(to))
+    end
+    return value
+  end
+  if from_kind == "float" && to_kind == "int"
+    return codegen_convert_float_int(low, from, to, value, checked)
+  end
+  pending_visit_node("convert #{from.full_name} to #{to.full_name} (hosted codegen_convert, not ported)")
+  value
+end
+
+# The hosted integer-to-integer `codegen_convert` checks the target's range before
+# an equal-width signedness change, a signed-to-unsigned widening, or truncation.
+pub def codegen_convert_int(low : Lowerer, from : Type, to : Type, value : Value, checked : Bool) : Value
+  from_bytes = primitive_bytes(from)
+  to_bytes = primitive_bytes(to)
+  to_ir = low.typer.llvm_type(to)
+  if from_bytes == to_bytes
+    if checked && from.full_name != to.full_name
+      raise_overflow_cond(low, codegen_int_out_of_range(low, from, to, value))
+    end
+    return value
+  end
+  if from_bytes < to_bytes
+    if checked && is_signed?(from) && !is_signed?(to)
+      raise_overflow_cond(low, codegen_int_out_of_range(low, from, to, value))
+    end
+    if is_signed?(from)
+      return low.builder.sext(value, to_ir)
+    end
+    return low.builder.zext(value, to_ir)
+  end
+  if checked
+    raise_overflow_cond(low, codegen_int_out_of_range(low, from, to, value))
+  end
+  low.builder.trunc(value, to_ir)
+end
+
+# Hosted codegen_out_of_range (primitives.cr 320-326): compare against both
+# bounds using the same mixed-sign comparison as ordinary integer operators.
+pub def codegen_int_out_of_range(low : Lowerer, from : Type, to : Type, value : Value) : Value
+  source = int_shape(low, from)
+  target = int_shape(low, to)
+  minimum = integer_bound(low, target, false)
+  maximum = integer_bound(low, target, true)
+  below = codegen_binary_op_lt(low, source, target, value, minimum)
+  above = codegen_binary_op_gt(low, source, target, value, maximum)
+  low.builder.build_or(below, above)
+end
+
+pub def integer_bound(low : Lowerer, shape : IntShape, maximum : Bool) : Value
+  if shape.bytes == 16
+    if shape.signed
+      hi = maximum ? 9223372036854775807_i64 : (-9223372036854775807_i64 - 1_i64)
+      lo = maximum ? -1_i64 : 0_i64
+      return low.builder.const_wide(shape.ir, hi, lo)
+    end
+    return low.builder.const_wide(shape.ir, maximum ? -1_i64 : 0_i64, maximum ? -1_i64 : 0_i64)
+  end
+  if shape.signed
+    minimum = sign_bit_value(shape.bytes)
+    return int_const(low, maximum ? (minimum ^ -1_i64) : minimum, shape)
+  end
+  int_const(low, maximum ? -1_i64 : 0_i64, shape)
+end
+
+# Hosted primitives.cr:815-839: checked truncation raises out of range;
+# unchecked conversion saturates and maps NaN to zero.
+pub def codegen_convert_float_int(low : Lowerer, from : Type, to : Type, value : Value, checked : Bool) : Value
+  to_ir = low.typer.llvm_type(to)
+  signed = is_signed?(to)
+  if checked
+    raise_overflow_cond(low, codegen_float_out_of_range(low, from, to, value))
+    return signed ? low.builder.fp_to_si(value, to_ir) : low.builder.fp_to_ui(value, to_ir)
+  end
+  id = signed ? IntrinsicId::FPToSISat : IntrinsicId::FPToUISat
+  low.builder.intrinsic(id, [to_ir, low.typer.llvm_type(from)] of IrType, [value] of Value)
+end
+
+# Hosted primitives.cr:329-418 chooses bounds for the prelude in use.
+pub def codegen_float_out_of_range(low : Lowerer, from : Type, to : Type, value : Value) : Value
+  float_ir = low.typer.llvm_type(from)
+  precision = primitive_bytes(from) == 4 ? 24 : 53
+  bits = primitive_bytes(to) * 8
+  signed = is_signed?(to)
+  past = signed ? bits - 1 : bits
+  if low.analysed.program.iyi_prelude?
+    if !signed
+      below = low.builder.fcmp(RealPredicate::ULE, value, low.builder.const_float(float_ir, -1.0))
+    elsif bits - 1 < precision
+      below = low.builder.fcmp(RealPredicate::ULE, value, low.builder.const_float(float_ir, 0.0 - pow2_f64(bits - 1) - 1.0))
+    else
+      below = low.builder.fcmp(RealPredicate::ULT, value, low.builder.const_float(float_ir, 0.0 - pow2_f64(bits - 1)))
+    end
+    if precision == 24 && past >= 128
+      above = low.builder.fcmp(RealPredicate::OGT, value, low.builder.const_float(float_ir, pow2_f64(128) - pow2_f64(104)))
+    else
+      above = low.builder.fcmp(RealPredicate::OGE, value, low.builder.const_float(float_ir, pow2_f64(past)))
+    end
+    return low.builder.build_or(below, above)
+  end
+  minimum = signed ? 0.0 - pow2_f64(bits - 1) : 0.0
+  maximum = past <= precision ? pow2_f64(past) - 1.0 : pow2_f64(past) - pow2_f64(past - precision)
+  below = low.builder.fcmp(RealPredicate::ULT, value, low.builder.const_float(float_ir, minimum))
+  above = low.builder.fcmp(RealPredicate::OGT, value, low.builder.const_float(float_ir, maximum))
+  low.builder.build_or(below, above)
+end
+
+def pow2_f64(k : Int32) : Float64
+  value = 1.0
+  i = 0
+  while i < k
+    value = value * 2.0
+    i = i + 1
+  end
+  value
+end
+
+# Allocate and clear the instance, then run its declared defaults before
+# initialize. The arena and malloc paths retain their respective id layouts.
+pub def primitive_allocate(low : Lowerer, t : Type) : Value
+  # The hosted allocate_aggregate takes the instance type. A metaclass (the class-method context of `new`) is
+  # unwrapped to its instance type here, so the class's pointerful check reads a class, not a metaclass.
+  inst = t
+  if t.is_a?(MetaclassType)
+    inst = t.as(MetaclassType).instance_type
+  end
+  if inst.is_a?(VirtualType)
+    pending_visit_node("allocate of a virtual type (hosted codegen_primitive_allocate, upcast of the instance)")
+    return low.builder.const_undef(low.typer.llvm_type(inst))
+  end
+  unless passed_by_value?(inst)
+    return allocate_class(low, inst)
+  end
+  struct_ir = low.typer.llvm_type(inst)
+  ptr = low.alloca(struct_ir, "")
+  zero_memory(low, ptr, struct_ir)
+  run_instance_vars_initializers(low, inst, ptr)
+  ptr
+end
+
+# The hosted class allocation (codegen.cr allocate_aggregate 2758-2798). The program decides it
+# (`iyi_gc_arena?`, gc_layouts.cr 48): an own-prelude build allocates through the arena's `__iyi_new`, any
+# other program through malloc. Both are ported. The arena's `:headed` byte is loaded from a global the
+# end of codegen fills (`define_headed_bytes`, gc_layouts.cr 187-196): a virtual type can be made after
+# the allocation was lowered (type_id.cr 138-144), so the byte is not a constant at the allocation.
+pub def allocate_class(low : Lowerer, t : Type) : Value
+  if iyi_gc_arena?(low)
+    return allocate_arena_class(low, t)
+  end
+  allocate_malloc_class(low, t)
+end
+
+# The arena's class allocation, as a default build emits it (codegen.cr 2766-2776): `__iyi_new(size,
+# type id, flags)`, with flags = the class's `:headed` byte, or 2 when the object is not pointerful
+# (atomic). The chunk comes back zeroed for a pointerful object (`cleared`, codegen.cr 2776), so the
+# memset is skipped then; otherwise the instance is zeroed as the hosted pre_initialize_aggregate does.
+# The arena writes no type id at field 0: the id is in the header, which the arena writes itself.
+pub def allocate_arena_class(low : Lowerer, t : Type) : Value
+  pointerful = class_pointerful?(t)
+  headed = headed_byte(low, t)
+  struct_ir = low.typer.llvm_struct_type(t)
+  flags = low.builder.zext(headed, low.module.types.int(64))
+  unless pointerful
+    flags = low.builder.build_or(flags, low.builder.const_int(low.module.types.int(64), 2_i64))
+  end
+  tid = low.builder.zext(type_id_value(low, t), low.module.types.int(64))
+  size = sizeof_expr(low, struct_ir)
+  new_fn = iyi_new_function(low)
+  ptr = low.builder.call(new_fn.fn_type, new_fn, [size, tid, flags] of Value, "")
+  zero_memory(low, ptr, struct_ir) unless pointerful
+  run_instance_vars_initializers(low, t, ptr)
+  ptr
+end
+
+# The malloc class allocation (codegen.cr 2778-2793 and 2800-2807) for a program with no arena:
+# chooses `malloc64` when `class_pointerful?(t)` or `malloc_atomic64` otherwise, falling back to C
+# `malloc` when that entry does not exist. Then the memset, then the type id (at P-4 under the
+# header layout, or in field 0 otherwise).
+pub def allocate_malloc_class(low : Lowerer, t : Type) : Value
+  suffix = class_pointerful?(t) ? "malloc64" : "malloc_atomic64"
+  prog_alloc = program_allocator(low, suffix)
+  callee = prog_alloc.nil? ? c_malloc_function(low) : prog_alloc.as(Function)
+  struct_ir = low.typer.llvm_struct_type(t)
+  ptr = low.builder.call(callee.fn_type, callee, [sizeof_expr(low, struct_ir)] of Value, "")
+  if low.typer.iyi_layout
+    # The header layout (hosted codegen.cr 2790-2793, 2797-2807 with iyi_object_layout?): the memset, then the
+    # type id a u32 at P-4 (the high half of the header word at P-8), and no store at field 0.
+    zero_memory(low, ptr, struct_ir)
+    back4 = low.builder.const_int(low.module.types.int64, -4_i64)
+    id_slot = low.builder.inbounds_gep(low.module.types.int8, ptr, [back4] of Value)
+    store_aligned(low, type_id_value(low, t), id_slot)
+    run_instance_vars_initializers(low, t, ptr)
+    return ptr
+  end
+  zero_memory(low, ptr, struct_ir)
+  run_instance_vars_initializers(low, t, ptr)
+  if block_ended?(low)
+    # The hosted allocator still declares the type-id global even when an
+    # initializer terminates before its load and store.
+    type_id_global(low, t)
+    return ptr
+  end
+  zero = low.builder.const_int(low.module.types.int32, 0_i64)
+  slot = low.builder.inbounds_gep(struct_ir, ptr, [zero, zero] of Value)
+  store_aligned(low, type_id_value(low, t), slot)
+  ptr
+end
+
+# Lower each prepared default with class-method self and fresh local storage.
+# The field store goes through assign, including its GC write barrier.
+pub def run_instance_vars_initializers(low : Lowerer, real : Type, ptr : Value) : Nil
+  low.analysed.allocation_initializer_chain(real).each do |type|
+    entries = low.analysed.instance_vars_initializers_of?(type)
+    if entries.nil?
+      raise "BUG: instance variable initializers were not prepared for #{type.full_name}"
+    end
+    entries.as(Array(InstanceVarInitializer)).each do |init|
+      saved_context = low.context
+      saved_needs_value = low.needs_value
+      saved_last = low.last
+      cur = low.current_context
+      meta = if real.is_a?(GenericClassInstanceType)
+               real.as(GenericClassInstanceType).metaclass
+             else
+               real.as(ClassType).metaclass
+             end
+      low.context = LowerContext.new(cur.fun, cur.fun_type, meta, Hash(String, LowerVar).new)
+      preallocate_locals(low, init.value, [] of String)
+      low.needs_value = true
+      low.body_visitor.as(BodyVisit).visit_body(low, init.value)
+      value = low.last
+      ended = block_ended?(low)
+      low.context = saved_context
+      low.needs_value = saved_needs_value
+      if ended
+        low.last = saved_last
+        return
+      end
+      raise "BUG: instance variable initializer #{init.name} left no value" if value.nil?
+      value_type = low.analysed.type_of?(init.value)
+      raise "BUG: instance variable initializer #{init.name} has no type" if value_type.nil?
+      assign(low, instance_var_pointer(low, real, init.name, ptr), instance_var_type(real, init.name), value_type.as(Type), value.as(Value))
+      low.last = saved_last
+    end
+  end
+  nil
+end
+
+# The hosted `iyi_gc_arena?` (gc_layouts.cr 48), the allocator the prelude selects. The port has no
+# program flags, so its ground truth is the prelude's own `IyiHeap` class, which exists exactly when the
+# prelude is loaded. The hosted predicate's gc_boehm, gc_none and platform tests are not ported.
+pub def iyi_gc_arena?(low : Lowerer) : Bool
+  !low.analysed.program.types["IyiHeap"]?.nil?
+end
+
+# The hosted `pointerful` of allocate_aggregate (codegen.cr 2764-2765): a class with an instance
+# variable that holds pointers, by the core's has_inner_pointers? (layouts.iyi). A generic class
+# instance is not a ClassType. Its declared variables live on the generic class (`Array(T)`), and
+# ones recorded on the instance are merged over them. Casting the instance to ClassType is the
+# census raise `Cast from GenericClassInstanceType to ClassType+` (primitives.iyi, root row 17).
+pub def class_pointerful?(t : Type) : Bool
+  ivars = class_instance_vars(t)
+  names = ivars.keys
+  i = 0
+  while i < names.size
+    var_type = ivars[names[i]].var_type
+    if var_type.nil?
+      raise "BUG: instance variable #{names[i]} of #{t.full_name} has no type yet (hosted allocate_aggregate)"
+    end
+    return true if has_inner_pointers?(var_type.as(Type))
+    i += 1
+  end
+  false
+end
+
+# Instance variables the pointerful check reads. A class and a generic instance both answer
+# through all_instance_vars: the instance's read copies the generic class's variables
+# (types.iyi instance_vars), so a cast to ClassType is not required.
+pub def class_instance_vars(t : Type) : Hash(String, MetaTypeVar)
+  if t.is_a?(ClassType)
+    return t.as(ClassType).all_instance_vars
+  end
+  if t.is_a?(GenericClassInstanceType)
+    return t.as(GenericClassInstanceType).all_instance_vars
+  end
+  Hash(String, MetaTypeVar).new
+end
+
+# The hosted `crystal_malloc_fun` / `crystal_malloc_atomic_fun` (codegen.cr 2908-2924): looks up
+# `abi_name(low, suffix)` in the module, where `emit_well_known_funs` declares any program
+# allocator ahead of lowering. If absent from the module yet present in `global_funs`, refuse
+# premature allocation by name rather than silently calling C `malloc`.
+pub def program_allocator(low : Lowerer, suffix : String) : Function?
+  name = abi_name(low, suffix)
+  existing = low.module.get_function?(name)
+  return existing.as(Function) unless existing.nil?
+  low.analysed.program.global_funs.each do |record|
+    if record.real_name == name
+      pending_visit_node("premature allocation through #{name} before emit_well_known_funs declared it (hosted crystal_malloc_fun)")
+      return nil
+    end
+  end
+  nil
+end
+
+# The C `malloc` the hosted `c_malloc_fun` declares (`declare ptr @malloc(i64)`), added to the module when
+# the program does not have it yet.
+pub def c_malloc_function(low : Lowerer) : Function
+  existing = low.module.get_function?("malloc")
+  return existing.as(Function) unless existing.nil?
+  fn_type = low.module.types.func([low.module.types.int(64)] of IrType, low.module.types.ptr(0))
+  low.module.add_function("malloc", fn_type, CallConv::C)
+end
+
+# The C `realloc` the hosted `c_realloc_fun` declares (`declare ptr @realloc(ptr, i64)`), added to the module when the
+# program does not have it yet.
+pub def c_realloc_function(low : Lowerer) : Function
+  existing = low.module.get_function?("realloc")
+  return existing.as(Function) unless existing.nil?
+  fn_type = low.module.types.func([low.module.types.ptr(0), low.module.types.int(64)] of IrType, low.module.types.ptr(0))
+  low.module.add_function("realloc", fn_type, CallConv::C)
+end
+
+# The hosted `iyi_headed_flag` (type_id.cr 153-165): the class's `:headed` byte, loaded from the
+# global `@"<name>:headed"`. Declared here, at the first allocation, and given its value at the end
+# of codegen (`define_headed_bytes`). A constant fixed here would be the wrong byte once a later
+# def makes the class's virtual type (type_id.cr 138-144).
+pub def headed_byte(low : Lowerer, t : Type) : Value
+  load_aligned(low, low.module.types.int8, headed_global(low, t))
+end
+
+# The global `@"<name>:headed"`, an internal constant, created on first use with no initialiser.
+# `define_headed_bytes` writes the census byte once every def is lowered.
+pub def headed_global(low : Lowerer, t : Type) : Global
+  name = "#{t.full_name}:headed"
+  existing = low.module.get_global?(name)
+  return existing.as(Global) unless existing.nil?
+  made = low.module.add_global(name, low.module.types.int8)
+  made.global_constant = true
+  made.linkage = Linkage::Internal
+  made
+end
+
+# The hosted `iyi_define_headed_bytes` (gc_layouts.cr 187-196), called once every def is lowered.
+# Every numbered class gets the byte, not only the ones this program allocated: a unit's object
+# code allocates what this build's own defs never see. The census runs here, not at the allocation,
+# so a virtual type made after the first `new` is the byte the load reads.
+pub def define_headed_bytes(low : Lowerer) : Nil
+  return unless iyi_gc_arena?(low)
+  low.type_ids.numbered_types.each do |type|
+    set_headed_initializer(low, type) if headed_candidate?(type)
+  end
+end
+
+def set_headed_initializer(low : Lowerer, t : Type) : Nil
+  answer = headed?(t, low.analysed.program, low.type_ids)
+  global = headed_global(low, t)
+  global.initializer = low.builder.const_int(low.module.types.int8, answer ? 1_i64 : 0_i64)
+end
+
+# The `__iyi_new` runtime function, declared in the module with the C convention when the program
+# does not define it yet (the hosted module has it defined by the prelude).
+pub def iyi_new_function(low : Lowerer) : Function
+  existing = low.module.get_function?("__iyi_new")
+  return existing.as(Function) unless existing.nil?
+  fn_type = low.module.types.func([low.module.types.int(64), low.module.types.int(64), low.module.types.int(64)] of IrType, low.module.types.ptr(0))
+  low.module.add_function("__iyi_new", fn_type, CallConv::C)
+end
+
+# The hosted `memset ptr, int8(0), size_t(struct_type.size)` (codegen.cr:3285): `llvm.memset` with the
+# pointer's alignment 4 (LibLLVM.set_instr_param_alignment(res, 1, 4)), a zero byte, the size as the
+# target's size type, and a false volatile flag.
+pub def zero_memory(low : Lowerer, ptr : Value, struct_ir : IrType) : Nil
+  memset_size(low, ptr, sizeof_expr(low, struct_ir))
+end
+
+# The same `llvm.memset` over a size value that is already computed (the hosted `memset pointer, int8(0), size_t(size)`
+# of generic_array_malloc, codegen.cr 2904): the byte zero, alignment 4 on the pointer, and a false volatile flag.
+pub def memset_size(low : Lowerer, ptr : Value, count : Value) : Nil
+  byte = low.builder.const_int(low.module.types.int8, 0_i64)
+  volatile = int1(low, 0_i64)
+  align_ptr = Attribute.new("align", 4_u64, nil, nil)
+  param_attrs = [[align_ptr] of Attribute, [] of Attribute, [] of Attribute, [] of Attribute] of Array(Attribute)
+  low.builder.intrinsic_with(IntrinsicId::Memset, [low.module.types.ptr(0), low.typer.size_t] of IrType, [ptr, byte, count, volatile] of Value, param_attrs)
+end
+
+# The LLVM sizeof of a struct as the size type: `ptrtoint (ptr getelementptr (T, ptr null, i32 1) to
+# i64)`, the constant expression the hosted codegen passes as size_t(struct_type.size).
+pub def sizeof_expr(low : Lowerer, struct_ir : IrType) : Value
+  null_ptr = low.builder.const_null_pointer
+  one = low.builder.const_int(low.module.types.int32, 1_i64)
+  elem = low.builder.const_gep(struct_ir, null_ptr, [one] of Value)
+  low.builder.const_cast(Op::PtrToInt, elem, low.typer.size_t)
+end

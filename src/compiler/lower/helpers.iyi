@@ -1,0 +1,148 @@
+module compiler/lower/helpers
+
+# The helpers of the hosted `src/compiler/iyi/codegen/llvm_builder_helper.cr` and
+# `iyi_llvm_builder.cr` that the core lowering uses, under their hosted names, over the
+# IR builder (`compiler/ir/builder`). A helper that emits an instruction also sets the
+# alignment the hosted helper sets (hosted `set_align`, codegen.cr), so the text of a
+# load or a store matches the hosted module's.
+#
+# Helpers the core does not call yet (the call and cast families, the string and
+# symbol constants) are not here: each is ported by the slice that reads it.
+
+import compiler/ir/inst::{Block, Inst}
+import compiler/ir/values::{Value}
+import compiler/ir/function::{Global, Linkage}
+import compiler/lower/pending::{refuse_port}
+import compiler/ir/types::{IrType}
+import compiler/lower/context::{Lowerer}
+
+# The hosted `Program#raise_overflow_name` uses the runtime ABI prefix.
+pub def raise_overflow_name(low : Lowerer) : String
+  if low.analysed.program.lookup_type("IyiRuntimeLock").nil?
+    return "__crystal_raise_overflow"
+  end
+  "__iyi_raise_overflow"
+end
+
+# The hosted Program#abi_name: __iyi_ when the prelude is loaded, __crystal_ otherwise.
+pub def abi_name(low : Lowerer, suffix : String) : String
+  if low.analysed.program.lookup_type("IyiRuntimeLock").nil?
+    return "__crystal_#{suffix}"
+  end
+  "__iyi_#{suffix}"
+end
+
+# The hosted `int1(n)`: an i1 constant of `value` (0 or 1).
+pub def int1(low : Lowerer, value : Int64) : Value
+  low.builder.const_int(low.module.types.int(1), value)
+end
+
+# The hosted `llvm_nil`: the one value of type `Nil`. The lowering keeps it only as a
+# marker: a function returning Nil returns void, and no instruction reads it.
+pub def llvm_nil(low : Lowerer) : Value
+  low.builder.const_undef(low.typer.nil_type)
+end
+
+# The hosted `set_align(value, bytes)`: the alignment an instruction is emitted with.
+pub def set_align(inst : Inst, bytes : Int32) : Nil
+  inst.alignment = bytes
+end
+
+# The hosted `store(value, ptr)`: a store aligned to the stored value's type.
+pub def store_aligned(low : Lowerer, value : Value, pointer : Value) : Inst
+  st = low.builder.store(value, pointer)
+  set_align(st, low.typer.align_of(value.type))
+  st
+end
+
+# The hosted `load(type, ptr)`: a load aligned to the type it reads.
+pub def load_aligned(low : Lowerer, type : IrType, pointer : Value, name : String = "") : Inst
+  ld = low.builder.load(type, pointer, name)
+  set_align(ld, low.typer.align_of(type))
+  ld
+end
+
+# The hosted `builder.end`: whether the block the builder is in already ends in a terminator (a
+# break, a next, a return or a branch), so nothing more may be emitted into it.
+pub def at_terminator?(low : Lowerer) : Bool
+  b = low.builder.insert_block
+  return false if b.nil?
+  b.as(Block).terminated?
+end
+
+# The first `count` characters of `text`. The hosted `name[0..18]` (codegen.cr:3463) counts characters, so a byte cut
+# could split one.
+pub def first_chars(text : String, count : Int32) : String
+  String.build do |io|
+    seen = 0
+    text.each_char do |c|
+      if seen < count
+        io << c
+      end
+      seen = seen + 1
+    end
+  end
+end
+
+# The name LLVM gives a global whose name is taken (`ValueSymbolTable::makeUniqueName`): a dot and the module's next
+# number, counted across the module (`last_unique`), repeated until the name is free. The number follows the closing quote.
+pub def unique_global_name(low : Lowerer, name : String) : String
+  candidate = name
+  while low.module.global?(candidate) || low.module.function?(candidate)
+    low.last_unique = low.last_unique + 1_i64
+    candidate = name + "." + low.last_unique.to_s
+  end
+  candidate
+end
+
+# The hosted `build_string_constant` (codegen.cr:3462-3498, llvm_typer.cr:75-103).
+# Under iyi's layout the global is `{ i64 (String id << 32), { i32 bytesize, i32 chars, [N+1 x i8] } }`
+# and the program's pointer is `getelementptr inbounds` of that global at 0, 1, eight bytes past the
+# header. Otherwise the global is Crystal's `{ i32 type_id, i32 bytesize, i32 length, [N+1 x i8] }`
+# and the pointer is the global itself. Equal texts share one pointer.
+pub def build_string_constant(low : Lowerer, str : String, global_name : String? = nil) : Value
+  if found = low.strings[str]?
+    return found
+  end
+  name_text = global_name || str
+  if name_text.bytesize > 18
+    name_text = first_chars(name_text, 19) + "..."
+  end
+  name = unique_global_name(low, "'" + name_text.split('@').join(".") + "'")
+  types = low.module.types
+  i32 = types.int32
+  bytes = types.array_of(types.int(8), str.bytesize.to_i64 + 1_i64)
+  b = low.builder
+  pointer : Value
+  if low.typer.iyi_layout
+    header = types.int64
+    body = types.struct_of([i32, i32, bytes] of IrType, false)
+    ty = types.struct_of([header, body] of IrType, false)
+    g = low.module.add_global(name, ty)
+    g.linkage = Linkage::Private
+    g.global_constant = true
+    g.initializer = b.const_struct([
+      b.const_int(header, low.string_type_id.to_i64 << 32),
+      b.const_struct([
+        b.const_int(i32, str.bytesize.to_i64),
+        b.const_int(i32, str.size.to_i64),
+        b.const_string(str),
+      ] of Value, false),
+    ] of Value, false)
+    pointer = b.const_gep(ty, g, [b.const_int(i32, 0_i64), b.const_int(i32, 1_i64)] of Value, true)
+  else
+    ty = types.struct_of([i32, i32, i32, bytes] of IrType, false)
+    g = low.module.add_global(name, ty)
+    g.linkage = Linkage::Private
+    g.global_constant = true
+    g.initializer = b.const_struct([
+      b.const_int(i32, low.string_type_id.to_i64),
+      b.const_int(i32, str.bytesize.to_i64),
+      b.const_int(i32, str.size.to_i64),
+      b.const_string(str),
+    ] of Value, false)
+    pointer = g
+  end
+  low.strings[str] = pointer
+  pointer
+end

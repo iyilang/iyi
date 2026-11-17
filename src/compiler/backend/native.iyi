@@ -1,0 +1,74 @@
+# The native backend: lowers the verified IR with the aarch64-darwin back end (compiler/native), links it with the
+# native runtime and the native linker, and writes a signed executable. No host tool takes part and no LLVM is linked:
+# a refusal names the function, construct or symbol, and the pipeline raises it.
+
+module compiler/backend/native
+
+import compiler/backend/backend::{Backend, BuildRequest}
+import compiler/ir/module::{Module}
+import compiler/ir/parser::{parse, IrParseError}
+import compiler/ir/verifier::{verify}
+import compiler/native/driver::{link_native_program}
+import compiler/native/rt/builtins_text::{builtins_ir}
+import compiler/native/link/link::{LinkedImage}
+import std/file
+
+pub class NativeBackend < Backend
+  def default_triple : String
+    "aarch64-apple-darwin"
+  end
+
+  def build(mod : Module, request : BuildRequest) : String?
+    refusal = link_image(mod, request)
+    unless request.probe_phase
+      return refusal
+    end
+    if refusal.nil?
+      puts "[phase] link: pass"
+      puts "reached: link"
+    else
+      puts "link: fail: #{refusal.as(String)}"
+      puts "reached: codegen"
+    end
+    STDOUT.flush
+    nil
+  end
+
+  # The link stage: the native runtime, the native linker and the signed executable. A refusal is returned by name.
+  def link_image(mod : Module, request : BuildRequest) : String?
+    unless request.triple == "aarch64-apple-darwin"
+      return "the native backend builds aarch64-apple-darwin only, and #{request.triple} was asked for"
+    end
+    unless mod.target.architecture == "aarch64" && mod.target.darwin?
+      return "the module's target is not aarch64-apple-darwin"
+    end
+    runtime = NativeBackend.runtime_module
+    if runtime.is_a?(String)
+      return runtime.as(String)
+    end
+    output = request.output_filename
+    parts = output.split('/')
+    result = link_native_program(mod, runtime.as(Module), parts[parts.size - 1])
+    if result.is_a?(String)
+      return result.as(String)
+    end
+    image = result.as(LinkedImage)
+    File.write(output, String.new(image.executable))
+    File.chmod(output, 493)
+    nil
+  end
+
+  # The native runtime, parsed and verified. Every rule it breaks is a refusal, so the runtime is never linked broken.
+  def self.runtime_module : Module | String
+    parsed = parse(builtins_ir)
+    if parsed.is_a?(IrParseError)
+      return "rt/builtins.ir: #{parsed.to_s}"
+    end
+    mod = parsed.as(Module)
+    errors = verify(mod)
+    unless errors.empty?
+      return "rt/builtins.ir: the IR is not well formed: #{errors[0].message}"
+    end
+    mod
+  end
+end

@@ -1,0 +1,435 @@
+module compiler/native/wasm/module
+
+# The wasm binary writer (spec section 5) for one module, and a reader that lists its sections, imports and
+# exports. The code generator fills a WasmModule: function types, imports (which take the first function
+# indices, so they are added before any defined function), defined functions and their bodies, globals,
+# one memory, one table of function references, exports, element and data segments, and function names.
+# `write` produces the bytes; nothing is linked after it.
+
+import std/slice::{Slice, Bytes}
+import compiler/native/wasm/leb::{uleb, sleb, uleb_i, read_leb}
+
+pub def wasm_name(dst : Array(UInt8), text : String) : Nil
+  uleb_i(dst, text.bytesize)
+  i = 0
+  while i < text.bytesize
+    dst << text.byte_at(i)
+    i = i + 1
+  end
+end
+
+# The bytes of `entries` as a wasm vector: a count, then each entry.
+pub def wasm_vec(entries : Array(Array(UInt8))) : Array(UInt8)
+  dst = [] of UInt8
+  uleb_i(dst, entries.size)
+  entries.each do |e|
+    e.each { |b| dst << b }
+  end
+  dst
+end
+
+# A section: its id, the byte size of its content, then the content.
+pub def wasm_section(dst : Array(UInt8), id : UInt8, content : Array(UInt8)) : Nil
+  dst << id
+  uleb_i(dst, content.size)
+  content.each { |b| dst << b }
+end
+
+# A constant expression `i32.const value` followed by `end`, as used by globals and segment offsets.
+pub def i32_const_expr(value : Int32) : Array(UInt8)
+  dst = [] of UInt8
+  dst << 65_u8
+  sleb(dst, value.to_i64)
+  dst << 11_u8
+  dst
+end
+
+# A function body: its local declarations (one group per entry of `locals`, each a count of one), the code,
+# and the closing `end`.
+pub def wasm_body(locals : Array(UInt8), code : Array(UInt8)) : Array(UInt8)
+  dst = [] of UInt8
+  uleb_i(dst, locals.size)
+  locals.each do |t|
+    uleb_i(dst, 1)
+    dst << t
+  end
+  code.each { |b| dst << b }
+  dst << 11_u8
+  dst
+end
+
+pub class WasmModule
+  getter import_count : Int32
+  getter funcs : Array(Int32)
+  getter names : Hash(Int32, String)
+
+  def initialize
+    @type_sigs = [] of Array(UInt8)
+    @type_keys = Hash(String, Int32).new
+    @imports = [] of Array(UInt8)
+    @import_count = 0
+    @funcs = [] of Int32
+    @bodies = Hash(Int32, Array(UInt8)).new
+    @names = Hash(Int32, String).new
+    @globals = [] of Array(UInt8)
+    @exports = [] of Array(UInt8)
+    @elems = [] of Array(UInt8)
+    @datas = [] of Array(UInt8)
+    @memory_pages = 0
+    @table_size = 0
+  end
+
+  # The index of the function type with these parameter and result value types, adding it on first use.
+  def type_index(params : Array(UInt8), results : Array(UInt8)) : Int32
+    key = params.map { |p| p.to_s }.join(",") + ">" + results.map { |r| r.to_s }.join(",")
+    found = @type_keys[key]?
+    return found if found
+    sig = [] of UInt8
+    sig << 96_u8
+    uleb_i(sig, params.size)
+    params.each { |p| sig << p }
+    uleb_i(sig, results.size)
+    results.each { |r| sig << r }
+    @type_sigs << sig
+    @type_keys[key] = @type_sigs.size - 1
+    @type_sigs.size - 1
+  end
+
+  # Imports a function. Imports take the first function indices, so every import precedes every defined function.
+  def add_import(module_name : String, name : String, type : Int32) : Int32
+    raise "wasm: an import must precede the defined functions" unless @funcs.empty?
+    entry = [] of UInt8
+    wasm_name(entry, module_name)
+    wasm_name(entry, name)
+    entry << 0_u8
+    uleb_i(entry, type)
+    @imports << entry
+    @import_count = @import_count + 1
+    @import_count - 1
+  end
+
+  # Declares a defined function of the given type and returns its function index.
+  def add_function(type : Int32) : Int32
+    @funcs << type
+    @import_count + @funcs.size - 1
+  end
+
+  # Gives a defined function its body: the output of `wasm_body`.
+  def set_body(index : Int32, body : Array(UInt8)) : Nil
+    @bodies[index] = body
+  end
+
+  def set_function_name(index : Int32, name : String) : Nil
+    @names[index] = name
+  end
+
+  # A global of the given value type; `init` is its constant expression, including the `end`. Returns the index.
+  def add_global(valtype : UInt8, mutable : Bool, init : Array(UInt8)) : Int32
+    entry = [] of UInt8
+    entry << valtype
+    entry << (mutable ? 1_u8 : 0_u8)
+    init.each { |b| entry << b }
+    @globals << entry
+    @globals.size - 1
+  end
+
+  # Exports an item: kind 0 function, 1 table, 2 memory, 3 global.
+  def add_export(name : String, kind : UInt8, index : Int32) : Nil
+    entry = [] of UInt8
+    wasm_name(entry, name)
+    entry << kind
+    uleb_i(entry, index)
+    @exports << entry
+  end
+
+  def set_memory(pages : Int32) : Nil
+    @memory_pages = pages
+  end
+
+  def set_table(size : Int32) : Nil
+    @table_size = size
+  end
+
+  # An active element segment: the functions `funcs` placed in table 0 from `offset`.
+  def add_element(offset : Int32, funcs : Array(Int32)) : Nil
+    entry = [] of UInt8
+    entry << 0_u8
+    i32_const_expr(offset).each { |b| entry << b }
+    uleb_i(entry, funcs.size)
+    funcs.each { |f| uleb_i(entry, f) }
+    @elems << entry
+  end
+
+  # An active data segment: `bytes` placed in memory 0 at `offset`.
+  def add_data(offset : Int32, bytes : Array(UInt8)) : Nil
+    entry = [] of UInt8
+    entry << 0_u8
+    i32_const_expr(offset).each { |b| entry << b }
+    uleb_i(entry, bytes.size)
+    bytes.each { |b| entry << b }
+    @datas << entry
+  end
+
+  # The module's bytes.
+  def write : Array(UInt8)
+    dst = [] of UInt8
+    dst << 0_u8
+    dst << 97_u8
+    dst << 115_u8
+    dst << 109_u8
+    dst << 1_u8
+    dst << 0_u8
+    dst << 0_u8
+    dst << 0_u8
+    unless @type_sigs.empty?
+      wasm_section(dst, 1_u8, wasm_vec(@type_sigs))
+    end
+    unless @imports.empty?
+      wasm_section(dst, 2_u8, wasm_vec(@imports))
+    end
+    unless @funcs.empty?
+      fn = [] of UInt8
+      uleb_i(fn, @funcs.size)
+      @funcs.each { |t| uleb_i(fn, t) }
+      wasm_section(dst, 3_u8, fn)
+    end
+    if @table_size > 0
+      tb = [] of UInt8
+      uleb_i(tb, 1)
+      tb << 112_u8
+      tb << 0_u8
+      uleb_i(tb, @table_size)
+      wasm_section(dst, 4_u8, tb)
+    end
+    if @memory_pages > 0
+      mem = [] of UInt8
+      uleb_i(mem, 1)
+      mem << 0_u8
+      uleb_i(mem, @memory_pages)
+      wasm_section(dst, 5_u8, mem)
+    end
+    unless @globals.empty?
+      wasm_section(dst, 6_u8, wasm_vec(@globals))
+    end
+    unless @exports.empty?
+      wasm_section(dst, 7_u8, wasm_vec(@exports))
+    end
+    unless @elems.empty?
+      wasm_section(dst, 9_u8, wasm_vec(@elems))
+    end
+    unless @funcs.empty?
+      bodies = [] of Array(UInt8)
+      i = 0
+      while i < @funcs.size
+        body = @bodies[@import_count + i]
+        raise "wasm: function #{@import_count + i} has no body" unless body
+        sized = [] of UInt8
+        uleb_i(sized, body.size)
+        body.each { |b| sized << b }
+        bodies << sized
+        i = i + 1
+      end
+      wasm_section(dst, 10_u8, wasm_vec(bodies))
+    end
+    unless @datas.empty?
+      wasm_section(dst, 11_u8, wasm_vec(@datas))
+    end
+    unless @names.empty?
+      sub = [] of UInt8
+      keys = @names.keys.sorted
+      uleb_i(sub, keys.size)
+      keys.each do |k|
+        uleb_i(sub, k)
+        wasm_name(sub, @names[k])
+      end
+      content = [] of UInt8
+      wasm_name(content, "name")
+      content << 1_u8
+      uleb_i(content, sub.size)
+      sub.each { |b| content << b }
+      wasm_section(dst, 0_u8, content)
+    end
+    dst
+  end
+end
+
+# What the reader found: each section, and the imports and exports it lists.
+pub class WasmSection
+  getter id : Int32
+  getter name : String
+  getter size : Int32
+
+  def initialize(@id : Int32, @name : String, @size : Int32)
+  end
+end
+
+pub class WasmImport
+  getter module_name : String
+  getter name : String
+  getter kind : Int32
+
+  def initialize(@module_name : String, @name : String, @kind : Int32)
+  end
+end
+
+pub class WasmExport
+  getter name : String
+  getter kind : Int32
+  getter index : Int32
+
+  def initialize(@name : String, @kind : Int32, @index : Int32)
+  end
+end
+
+pub class WasmInfo
+  getter sections : Array(WasmSection)
+  getter imports : Array(WasmImport)
+  getter exports : Array(WasmExport)
+  getter error : String?
+
+  def initialize
+    @sections = [] of WasmSection
+    @imports = [] of WasmImport
+    @exports = [] of WasmExport
+    @error = nil
+  end
+
+  def fail(message : String) : Nil
+    @error = message unless @error
+  end
+
+  def ok? : Bool
+    @error.nil?
+  end
+end
+
+# A read position in a module's bytes. Every read that runs off the end, or meets a malformed item, records the
+# error on the info and returns a zero value, so the reader stops at the first problem.
+class WasmCursor
+  getter pos : Int32
+
+  def initialize(@bytes : Array(UInt8), @pos : Int32, @info : WasmInfo)
+  end
+
+  def byte : Int32
+    if @pos >= @bytes.size
+      @info.fail("the module ends at byte #{@pos}")
+      return 0
+    end
+    b = @bytes[@pos].to_i32
+    @pos = @pos + 1
+    b
+  end
+
+  def uint : Int32
+    d = read_leb(@bytes, @pos, false)
+    unless d.ok
+      @info.fail("a malformed integer at byte #{@pos}")
+      @pos = @bytes.size
+      return 0
+    end
+    @pos = d.next
+    d.value.to_i32
+  end
+
+  def name : String
+    len = uint
+    if @pos + len > @bytes.size
+      @info.fail("a name runs past the end at byte #{@pos}")
+      @pos = @bytes.size
+      return ""
+    end
+    chars = [] of UInt8
+    k = 0
+    while k < len
+      chars << @bytes[@pos + k]
+      k = k + 1
+    end
+    @pos = @pos + len
+    String.new(to_slice_of(chars))
+  end
+
+  def skip_limits : Nil
+    flag = byte
+    uint
+    uint if (flag & 1) == 1
+  end
+end
+
+def to_slice_of(data : Array(UInt8)) : Bytes
+  acc = Slice(UInt8).new(data.size)
+  i = 0
+  while i < data.size
+    acc[i] = data[i]
+    i = i + 1
+  end
+  acc
+end
+
+# Reads a module's sections, imports and exports. A file that is not a wasm module, or is malformed, leaves
+# `error` set and says where.
+pub def read_wasm(bytes : Array(UInt8)) : WasmInfo
+  info = WasmInfo.new
+  if bytes.size < 8 || bytes[0] != 0_u8 || bytes[1] != 97_u8 || bytes[2] != 115_u8 || bytes[3] != 109_u8
+    info.fail("not a wasm module: no \\0asm header")
+    return info
+  end
+  if bytes[4] != 1_u8 || bytes[5] != 0_u8 || bytes[6] != 0_u8 || bytes[7] != 0_u8
+    info.fail("unsupported wasm version")
+    return info
+  end
+  cur = WasmCursor.new(bytes, 8, info)
+  while cur.pos < bytes.size && info.ok?
+    id = cur.byte
+    size = cur.uint
+    start = cur.pos
+    stop = start + size
+    if stop > bytes.size
+      info.fail("section #{id} runs past the end of the module")
+      break
+    end
+    sec_name = ""
+    if id == 0
+      sec_name = cur.name
+    end
+    info.sections << WasmSection.new(id, sec_name, size)
+    body = WasmCursor.new(bytes, cur.pos, info)
+    if id == 2
+      count = body.uint
+      k = 0
+      while k < count && info.ok?
+        mod_name = body.name
+        field = body.name
+        kind = body.byte
+        if kind == 0
+          body.uint
+        elsif kind == 1
+          body.byte
+          body.skip_limits
+        elsif kind == 2
+          body.skip_limits
+        elsif kind == 3
+          body.byte
+          body.byte
+        else
+          info.fail("an import of unknown kind #{kind}")
+        end
+        info.imports << WasmImport.new(mod_name, field, kind)
+        k = k + 1
+      end
+    elsif id == 7
+      count = body.uint
+      k = 0
+      while k < count && info.ok?
+        ex_name = body.name
+        kind = body.byte
+        index = body.uint
+        info.exports << WasmExport.new(ex_name, kind, index)
+        k = k + 1
+      end
+    end
+    info.fail("section #{id} is malformed") if body.pos > stop && info.ok?
+    cur = WasmCursor.new(bytes, stop, info)
+  end
+  info
+end

@@ -1,0 +1,107 @@
+# The LLVM backend: replays the verified IR into LLVM, emits the object with LLVM's target machine, and links it with
+# the platform linker. It is the transitional path (SPEC section 2.1) and the only backend that links LLVM. A tool
+# that does not import this module links no LLVM.
+
+@[Unsafe("runs the platform linker through C's system and declares the C calls of its lib, which the compiler does not check")]
+module compiler/backend/llvm/llvm_backend
+
+import compiler/backend/backend::{Backend, BuildRequest}
+import compiler/compiler::{Compiler}
+import compiler/ir/module::{Module}
+import compiler/llvm
+import compiler/platform/target
+import compiler/platform/linker::{Linker}
+import compiler/backend/llvm/translate::{translate, TranslateError}
+import compiler/backend/llvm/emit::{host_target_machine}
+
+alias LLVMTarget = ::Compiler::Llvm::Target::Target
+alias PlatformTarget = ::Compiler::Platform::Target::Target
+
+lib LibC
+  fun system(cmd : UInt8*) : Int32
+  fun exit(status : Int32) : NoReturn
+end
+
+pub class LlvmBackend < Backend
+  def default_triple : String
+    LLVMTarget.default_target_triple
+  end
+
+  # Writes the object, then links it. A probe run prints the phase it reached and returns nil, as the probe always has.
+  # A refusal is returned as a string for the pipeline to raise.
+  def build(mod : Module, request : BuildRequest) : String?
+    triple = request.triple
+    probe_phase = request.probe_phase
+    obj_path = request.obj_path
+    llvm_module = translate(mod)
+    if llvm_module.is_a?(TranslateError)
+      return llvm_module.as(TranslateError).message
+    end
+    llvm_ref = llvm_module.as(LibLLVM::ModuleRef)
+    tm = host_target_machine(triple)
+    emitted = group do |g|
+      task = g.spawn { tm.emit_obj_to_file(llvm_ref, obj_path) }
+      task.value
+    end
+    if emitted.is_a?(Panicked)
+      if probe_phase
+        puts "object: fail: #{emitted.message}"
+        puts "reached: codegen"
+        return nil
+      end
+      return emitted.message
+    end
+
+    if probe_phase
+      puts "[phase] object: pass"
+      STDOUT.flush
+    end
+
+    if request.emit_obj_only
+      if request.verbose
+        puts "Emitted object file: #{obj_path}"
+      end
+      if probe_phase
+        puts "reached: object"
+      end
+      return nil
+    end
+
+    # Link: construct platform linker command and link binary
+    plat_target = PlatformTarget.new(triple)
+    link_result = Linker.linker_command(plat_target, [obj_path], request.output_filename)
+
+    cmd_template = link_result.cmd
+    quoted_objs = if objs = link_result.objects
+                    Linker.quote_posix(objs)
+                  else
+                    Linker.quote_posix([obj_path])
+                  end
+
+    final_cmd = Compiler.substitute_placeholder(cmd_template, "\"${@}\"", quoted_objs)
+    status = LibC.system(final_cmd.to_unsafe)
+    if probe_phase
+      if status == 0
+        puts "[phase] link: pass"
+        puts "reached: link"
+      else
+        puts "link: fail: platform linker returned #{status}"
+        puts "reached: object"
+      end
+      if !request.keep_obj && File.exists?(obj_path)
+        File.delete(obj_path)
+      end
+      return nil
+    end
+
+    unless status == 0
+      STDERR.puts "Error: linking failed with exit code #{status}"
+      LibC.exit(1)
+    end
+    # Clean up temporary object file if not explicitly requested
+    if !request.keep_obj && File.exists?(obj_path)
+      File.delete(obj_path)
+    end
+    nil
+  end
+end

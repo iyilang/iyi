@@ -1,0 +1,24 @@
+module compiler/lower/unions
+
+# The layout arithmetic of the mixed union, the part of `unions.cr` (hosted) that
+# needs no recursion into the typer. The typer finds each member's size and
+# alignment (`LowerTyper#mixed_union_struct`) and hands the maxima here.
+#
+# A mixed union is a struct of the type id word and a value area as large as the
+# largest member, aligned to the largest member alignment and at least a pointer's.
+
+import compiler/ir/types::{IrType, TypeTable}
+
+# The body of a mixed union's struct: the i32 type id, then the value area as an
+# array of integers `max_alignment` bytes wide, enough to hold `max_size` bytes.
+pub def mixed_union_body(table : TypeTable, max_size : Int64, max_alignment : Int32) : Array(IrType)
+  value_size = (max_size + max_alignment - 1) // max_alignment
+  value_size = 1_i64 if value_size < 1
+  value_type = table.array_of(table.int(max_alignment * 8), value_size)
+  [table.int32, value_type]
+end
+
+# The value area of a mixed union's struct (hosted `union_value_type`).
+pub def mixed_union_value_area(struct_type : IrType) : IrType
+  struct_type.struct_element_types[1]
+end

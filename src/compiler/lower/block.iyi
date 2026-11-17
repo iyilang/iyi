@@ -1,0 +1,262 @@
+module compiler/lower/block
+
+# The port of the block side of a call: `visit(Yield)` (src/compiler/iyi/codegen/codegen.cr:2226),
+# the block body it runs, and the local variables a block or an inlined def owns. A call with a block
+# inlines its def (call.iyi, codegen_call_with_block); each `yield` in that body lowers the block
+# here, in the context the call made for it.
+#
+# `lower_yield` runs in the inlined def's context (the frame the call makes). That frame names the
+# block (`block_node`) and the caller's block context (`block_context`, the caller's variables plus
+# the block's own, as the call made them). The block body runs in a copy of that block context whose
+# `break` goes to the call's value (the frame's return phi, hosted `break_phi = old.return_phi`), whose
+# `next` goes to this yield's phi (hosted `next_phi = phi`), and whose `return` is the caller's.
+#
+# Ported: a yield with expressions, the assignment of each expression to a block argument (a store, or
+# the casts slice when the types differ), the block body, and the value of the yield (the phi merged by
+# `LowerPhi`, which makes no exit block for one value); a `break`, `next` or `return` with a value, into
+# a phi that merges (`branch_to_phi`); and a block or yield whose type is NoReturn, whose phi is a
+# `NoReturnPhi` (hosted `Phi#add` with a NoReturn node type: every value is `unreachable`).
+# Refused by name, at the yield that reaches them: a splat, a tuple unpacked into several block
+# arguments, a block with a splat argument, a yield with a scope (`with ... yield`), and a yield with no
+# block in scope.
+#
+# The AST `Block` is written in full: inside this module the name `Block` means the module.
+
+import compiler/syntax/ast::{ASTNode, Splat, Yield}
+import compiler/ir/values::{Value}
+import compiler/ir/types::{IrType}
+import compiler/lower/cast::{assign, union_temp, upcast}
+import compiler/lower/context::{BranchPhi, Lowerer, LowerContext, LowerVar}
+import compiler/lower/fun::{block_ended?, visit_node}
+import compiler/lower/helpers::{llvm_nil}
+import compiler/lower/pending::{pending_visit_node, refuse_port}
+import compiler/lower/phi::{LowerPhi}
+import compiler/lower/ensure::{execute_ensures_until, set_ensure_exception_handler}
+import compiler/semantic/top_level::{NilType, NoReturnType, Type, VoidType}
+import compiler/lower/typer::{passed_by_value?}
+import compiler/types/indirection::{TypeIndirection}
+import compiler/types/types::{TupleInstanceType}
+import compiler/lower/locals::{reset_nilable_locals}
+
+# The phi of a branch whose value never arrives: a block call or a yield whose type is NoReturn. The
+# hosted `Phi#add` with a NoReturn node type (phi.cr:40-55) emits `unreachable` for every value added, and
+# no branch reaches an exit block. The frame's return phi and the yield's phi are this one in that case.
+pub class NoReturnPhi
+  def initialize
+  end
+end
+
+impl BranchPhi for NoReturnPhi
+  def add_branch(low : Lowerer, value : Value?, last : Bool) : Nil
+    unless block_ended?(low)
+      low.builder.unreachable
+    end
+  end
+
+  def semantic_join_type : Type?
+    nil
+  end
+end
+
+# The hosted `alloca_non_closured_vars` for one variable: an alloca named by the variable, in the
+# function's alloca block, and the variable in the table. A void or NoReturn variable has no alloca in
+# the hosted code, and is refused here until a caller needs it.
+pub def alloca_local(low : Lowerer, vars : Hash(String, LowerVar), name : String, t : Type) : Nil
+  if t.is_a?(VoidType) || t.is_a?(NoReturnType)
+    pending_visit_node("a #{t.full_name} local #{name} (hosted alloca_non_closured_vars, no alloca)")
+  end
+  pointer = low.alloca(low.typer.llvm_type(t), name)
+  vars[name] = LowerVar.new(pointer, t, false)
+end
+
+# The hosted `assign` of a value into a variable (codegen.cr codegen_assign): stored as it is when the
+# variable has the value's type, through the casts slice when it does not. A nil value writes nothing.
+pub def store_local(low : Lowerer, var : LowerVar, value_type : Type, value : Value) : Nil
+  unless var.type.is_a?(NilType) && value_type.is_a?(NilType)
+    assign(low, var.pointer, var.type, value_type, value)
+  end
+end
+
+# Passed-by-value joins use the address of the semantic join type, as hosted Phi#add does.
+pub def join_pointer(low : Lowerer, value : Value, value_type : Type, join_type : Type) : Value
+  if value.type.pointer? && TypeIndirection.remove_indirection(value_type).full_name == TypeIndirection.remove_indirection(join_type).full_name
+    return value
+  end
+  union_temp(low, join_type, value_type, value)
+end
+
+# The hosted `visit(Yield)`. The block's arguments take the values of the yield's expressions; the
+# block body runs in a copy of the block context, and the yield's value is the body's value. A block
+# whose type is NoReturn never yields a value: its body is followed by `unreachable`, and so is the
+# yield.
+pub def lower_yield(low : Lowerer, node : Yield) : Nil
+  frame = low.current_context
+  blk = frame.block_node
+  if blk.nil?
+    pending_visit_node("yield with no block in scope (hosted codegen.cr: visit(Yield), a block of an enclosing block body)")
+  end
+  block = blk.as(ASTNode).as(Compiler::Syntax::Ast::Block)
+  caller = frame.block_context
+  if caller.nil?
+    raise "BUG: a yield's frame has no block context (hosted codegen.cr: visit(Yield))"
+  end
+  unless node.scope.nil?
+    pending_visit_node("yield with a scope (hosted codegen.cr: visit(Yield), node_scope)")
+  end
+  unless block.splat_index.nil?
+    pending_visit_node("a block with a splat argument (hosted codegen.cr: visit(Yield), splat_index)")
+  end
+
+  wants = low.needs_value
+  exp_values = [] of Value
+  exp_types = [] of Type
+  low.needs_value = true
+  node.exps.each do |exp|
+    if exp.is_a?(Splat)
+      pending_visit_node("a splat in a yield (hosted codegen.cr: visit(Yield), tuple expansion)")
+    end
+    visit_node(low, exp)
+    v = low.last
+    raise "BUG: a yield's expression left no value (hosted codegen.cr: visit(Yield))" if v.nil?
+    t = low.analysed.type_of?(exp)
+    raise "BUG: the analysed program has no type for a yield's expression (hosted codegen.cr: visit(Yield))" if t.nil?
+    exp_values << v.as(Value)
+    exp_types << t.as(Type)
+  end
+  low.needs_value = wants
+
+  if exp_types.size == 1 && exp_types[0].is_a?(TupleInstanceType) && block.args.size > 1
+    pending_visit_node("a tuple yielded to several block arguments (hosted codegen.cr: visit(Yield), tuple unpacking)")
+  end
+
+  i = 0
+  while i < exp_values.size
+    if i < block.args.size
+      arg = block.args[i]
+      if arg.name != "_"
+        var = caller.vars[arg.name]?
+        if var.nil?
+          raise "BUG: block argument #{arg.name} has no variable (hosted codegen.cr: visit(Yield), block_context.vars)"
+        end
+        store_local(low, var.as(LowerVar), exp_types[i], exp_values[i])
+      end
+    end
+    i += 1
+  end
+
+  bt = low.analysed.type_of?(block.as(ASTNode))
+  raise "BUG: the analysed program has no type for a block (hosted codegen.cr: visit(Yield))" if bt.nil?
+  noreturn = bt.as(Type).is_a?(NoReturnType)
+  merge : IrType? = nil
+  join : Type? = nil
+  if wants && !noreturn
+    join = bt.as(Type)
+    merge = passed_by_value?(bt.as(Type)) ? low.module.types.ptr(0) : low.typer.llvm_type(bt.as(Type))
+  end
+  phi = LowerPhi.new(wants && !noreturn, merge, join)
+
+  # The hosted `with_cloned_context(block_context)`: the body's context shares the block context's
+  # variables and its return; `break` is the call's value, `next` is this yield's phi.
+  body = LowerContext.new(caller.fun, caller.fun_type, caller.type, caller.vars)
+  body.top_level = caller.top_level
+  body.return_type = caller.return_type
+  body.return_phi = caller.return_phi
+  body.break_phi = frame.return_phi
+  body.return_target = caller.return_target
+  body.break_target = frame.return_target
+  body.next_target = block
+  if noreturn
+    body.next_phi = NoReturnPhi.new
+  else
+    body.next_phi = phi
+  end
+  body.block_node = caller.block_node
+  body.block_context = caller.block_context
+  body.copy_closure_from(caller)
+  body.macro_origin = caller.macro_origin
+  body.var_unions = caller.var_unions
+  body.nil_resets = caller.nil_resets
+
+  # A `while` around the call is not the target of a `break` or `next` written in the block.
+  saved_next = low.loop_next
+  saved_break = low.loop_break
+  saved_target = low.loop_target
+  low.loop_next = nil
+  low.loop_break = nil
+  low.loop_target = nil
+
+  low.context = body
+  low.needs_value = wants
+  set_ensure_exception_handler(low, block)
+  reset_nilable_locals(low)
+  visit_node(low, block.body)
+  if noreturn
+    unless block_ended?(low)
+      low.builder.unreachable
+    end
+  else
+    value = low.last
+    if phi.needs_value && !block_ended?(low) && !value.nil? && passed_by_value?(bt.as(Type))
+      body_type = low.analysed.type_of?(block.body)
+      raise "BUG: the yielded block body has no type" if body_type.nil?
+      low.last = join_pointer(low, value.as(Value), body_type.as(Type), bt.as(Type))
+    end
+    phi.add(low, low.last, true)
+  end
+  low.context = frame
+  low.loop_next = saved_next
+  low.loop_break = saved_break
+  low.loop_target = saved_target
+  low.needs_value = wants
+  if noreturn
+    low.last = llvm_nil(low)
+  else
+    phi.close(low)
+  end
+end
+
+# The hosted `break_phi.add @last, node_type`, `next_phi.add` and `return_phi.add` (codegen.cr visit(Break),
+# visit(Next), codegen_return_node): the value of the expression goes to the phi, which branches to its
+# exit. A nil or void value adds no value to the phi; a value of another type than the phi's merges is
+# refused by name (the hosted upcast). Passed-by-value joins take addresses after ensures run.
+# A NoReturn phi takes the value as `unreachable` (`NoReturnPhi`).
+pub def branch_to_phi(low : Lowerer, phi : BranchPhi, exp : ASTNode?, target : ASTNode?) : Nil
+  value : Value? = nil
+  value_type : Type? = nil
+  got : Type = low.analysed.program.nil_type
+  if e = exp
+    wants = low.needs_value
+    low.needs_value = true
+    visit_node(low, e)
+    low.needs_value = wants
+    v = low.last
+    raise "BUG: a branch's expression left no value (hosted codegen.cr: accept_control_expression)" if v.nil?
+    et = low.analysed.type_of?(e)
+    raise "BUG: the analysed program has no type for a branch's expression (hosted codegen.cr: accept_control_expression)" if et.nil?
+    et_t = et.as(Type)
+    value_type = et_t
+    unless et_t.is_a?(NilType) || et_t.is_a?(VoidType)
+      value = v.as(Value)
+      got = et_t
+    end
+  else
+    low.last = llvm_nil(low)
+  end
+  execute_ensures_until(low, target, value_type)
+  return if block_ended?(low)
+  value = low.last if !value.nil?
+  join = phi.semantic_join_type
+  if !join.nil?
+    join_t = join.as(Type)
+    unless join_t.is_a?(NilType) || join_t.is_a?(VoidType)
+      branch = value || llvm_nil(low)
+      if passed_by_value?(join_t)
+        value = join_pointer(low, branch, got, join_t)
+      else
+        value = upcast(low, branch, got, join_t)
+      end
+    end
+  end
+  phi.add_branch(low, value, false)
+  low.last = llvm_nil(low)
+end

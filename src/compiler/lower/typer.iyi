@@ -1,0 +1,681 @@
+module compiler/lower/typer
+
+# The port of `src/compiler/iyi/codegen/llvm_typer.cr` (LLVMTyper), onto the IR's
+# type table (`compiler/ir/types`) and data layout (`compiler/ir/layout`).
+#
+# The hosted typer answers, for an analysed type, the LLVM type a value of it has,
+# the type it has as an embedded field, and its size and alignment. This port
+# gives the same answers as IR types. Function by function: each hosted
+# `create_llvm_type` overload is one branch of `create_llvm_type` here, in the
+# order the hosted overloads resolve (specific types before the classes they
+# inherit from). Where a hosted overload has not been ported yet, the branch
+# raises a BUG error naming the hosted source, so no output is silently wrong.
+#
+# `wants_size` is the hosted flag that breaks cycles through unions: a class or a
+# pointer answers with a word instead of its layout. Caches are keyed by the
+# type's full name, which the port's type model keeps unique.
+
+import compiler/ir/types::{IrType, TypeTable}
+import compiler/ir/layout::{DataLayout}
+import compiler/semantic/top_level::{Type, ClassType, EnumType, LibType, MetaclassType, NilType, NonGenericClassType, NonGenericModuleType, GenericClassType, NoReturnType, VoidType, AliasType, TypeDefType, ModuleType, TraitType, UnionType}
+import compiler/types/types::{PointerInstanceType, ProcInstanceType, StaticArrayInstanceType, TupleInstanceType, NamedTupleInstanceType, GenericClassInstanceType, GenericModuleInstanceType, MixedUnionType, VirtualType, VirtualMetaclassType, NilableType, ReferenceUnionType, NilableReferenceUnionType, NilableProcType, TypeQueries}
+import compiler/types/merge::{TypeMerge}
+import compiler/lower/unions::{mixed_union_body, mixed_union_value_area}
+import compiler/types/indirection::{TypeIndirection}
+import compiler/types/intersect::{TypeIntersect}
+
+# The builtin primitives. The hosted semantic model makes them PrimitiveType
+# subclasses with a byte size, and a builtin is never a user type. The port's
+# builtins (semantic/top_level.iyi) are plain struct classes named for them, so a
+# builtin is recognised by its name and its byte size is read from the name. Until
+# the semantic port builds them as primitive classes this is the only answer, and
+# NEEDS.md records it. A user type with one of these names cannot exist: the names
+# are top-level builtins the prelude declares.
+#
+# The kind is "int", "float", "char", "bool", "symbol", or "" for anything else.
+pub def primitive_kind(type : Type) : String
+  return "" unless type.is_a?(NonGenericClassType)
+  name = type.full_name
+  if name == "Int8" || name == "UInt8" || name == "Int16" || name == "UInt16" || name == "Int32" || name == "UInt32" || name == "Int64" || name == "UInt64" || name == "Int128" || name == "UInt128"
+    return "int"
+  end
+  if name == "Float32" || name == "Float64"
+    return "float"
+  end
+  if name == "Char"
+    return "char"
+  end
+  if name == "Bool"
+    return "bool"
+  end
+  if name == "Symbol"
+    return "symbol"
+  end
+  ""
+end
+
+# The size in bytes of a builtin primitive, by its name (hosted `PrimitiveType#bytes`).
+pub def primitive_bytes(type : Type) : Int32
+  name = type.full_name
+  return 1 if name == "Bool" || name == "Int8" || name == "UInt8"
+  return 2 if name == "Int16" || name == "UInt16"
+  return 4 if name == "Char" || name == "Symbol" || name == "Float32" || name == "Int32" || name == "UInt32"
+  return 8 if name == "Float64" || name == "Int64" || name == "UInt64"
+  return 16 if name == "Int128" || name == "UInt128"
+  raise "BUG: no byte size for builtin #{name}"
+end
+
+# The hosted `Type#passed_by_value?` (types.cr): whether a value of the type travels
+# as a by-value aggregate. A primitive, a pointer or a proc is a scalar; a tuple,
+# a named tuple or a mixed union is an aggregate; a class is one only when it is
+# a struct. A module is by value when one of its including types is.
+pub def passed_by_value?(type : Type) : Bool
+  return false unless primitive_kind(type) == ""
+  if type.is_a?(NilType)
+    return false
+  end
+  if type.is_a?(PointerInstanceType) || type.is_a?(ProcInstanceType)
+    return false
+  end
+  if type.is_a?(TupleInstanceType) || type.is_a?(NamedTupleInstanceType)
+    return true
+  end
+  if type.is_a?(NilableType) || type.is_a?(ReferenceUnionType) || type.is_a?(NilableReferenceUnionType) || type.is_a?(NilableProcType)
+    return false
+  end
+  if type.is_a?(UnionType)
+    return !reference_union?(type.as(UnionType))
+  end
+  if type.is_a?(VirtualType)
+    return type.struct?
+  end
+  if type.is_a?(TraitType)
+    concrete = TypeIndirection.trait_value_type(type)
+    return passed_by_value?(concrete) unless concrete.object_id == type.object_id
+  end
+  if type.is_a?(NonGenericModuleType) || type.is_a?(TraitType)
+    # The hosted rule (codegen/types.cr; TraitType < NonGenericModuleType there): the union of the
+    # implementors is passed by value when it is a mixed union, and one implementor answers for
+    # itself (NEEDS.md row 5).
+    implementors = module_implementors(type.as(ModuleType))
+    return false if implementors.size == 0
+    return passed_by_value?(implementors[0]) if implementors.size == 1
+    implementors.each do |member|
+      return true unless TypeQueries.reference_like?(member)
+    end
+    return false
+  end
+  if type.is_a?(GenericModuleInstanceType)
+    raise "BUG: passed_by_value? of a generic module instance is not ported (hosted types.cr: including_types)"
+  end
+  if type.is_a?(GenericClassInstanceType)
+    return passed_by_value?(type.as(GenericClassInstanceType).generic_type)
+  end
+  if type.is_a?(TypeDefType)
+    return passed_by_value?(type.as(TypeDefType).typedef)
+  end
+  if type.is_a?(AliasType)
+    return passed_by_value?(TypeMerge.remove_alias(type))
+  end
+  if type.is_a?(ClassType)
+    return type.struct?
+  end
+  false
+end
+
+# The types that include a module, as the hosted `including_types` gives them. A module's own metaclass
+# includes the module (for `extend`), and that is not an implementor.
+pub def module_implementors(type : ModuleType) : Array(Type)
+  found = [] of Type
+  type.including_types.each do |t|
+    found << t unless t.is_a?(MetaclassType) || t.is_a?(VirtualMetaclassType)
+  end
+  found
+end
+
+# The hosted reference unions (ReferenceUnionType, NilableReferenceUnionType) are one pointer: a union
+# whose members other than Nil are all reference-like. The port's unification builds a MixedUnionType
+# for some of them (measured: `@doc : String?` in syntax/ast.iyi), so the typer decides from the members,
+# which is the hosted rule `types.all?(&.reference_like?)` (iyi/program.cr).
+pub def reference_union?(type : UnionType) : Bool
+  found = false
+  type.union_types.each do |member|
+    next if member.nil_type?
+    return false unless TypeQueries.reference_like?(member)
+    found = true
+  end
+  found
+end
+
+# Hosted codegen/types.cr:169-179 expands each module member separately into
+# its includers before a mixed union's value area is sized.
+pub def expand_union_types(union : UnionType) : Array(Type)
+  members = union.union_types
+  return members unless members.any? { |member| member.is_a?(NonGenericModuleType) || member.is_a?(TraitType) }
+  expanded = [] of Type
+  members.each do |member|
+    if member.is_a?(NonGenericModuleType) || member.is_a?(TraitType) || member.is_a?(GenericModuleInstanceType)
+      includers = [] of Type
+      TypeIntersect.add_including_types(member, includers)
+      if includers.empty?
+        expanded << member
+      else
+        includers.each { |includer| expanded << includer }
+      end
+    else
+      expanded << member
+    end
+  end
+  expanded
+end
+
+pub class LowerTyper
+  getter table : TypeTable
+  getter layout : DataLayout
+  # Whether the program lays objects out the iyi way: the type id is the high half
+  # of the header word under the object, not the first field (hosted
+  # `Program#iyi_object_layout?`). The driver decides it from the prelude.
+  getter iyi_layout : Bool
+
+  @cache : Hash(String, IrType)
+  @wants_size_cache : Hash(String, IrType)
+  @struct_cache : Hash(String, IrType)
+  @wants_size_struct_cache : Hash(String, IrType)
+  @structs : Hash(String, IrType)
+  @nil_type : IrType?
+  @proc_struct : IrType?
+  @closure_counter : Int32
+
+  def initialize(@table : TypeTable, @layout : DataLayout, @iyi_layout : Bool)
+    @cache = Hash(String, IrType).new
+    @wants_size_cache = Hash(String, IrType).new
+    @struct_cache = Hash(String, IrType).new
+    @wants_size_struct_cache = Hash(String, IrType).new
+    @structs = Hash(String, IrType).new
+    @nil_type = nil
+    @proc_struct = nil
+    @closure_counter = 0
+  end
+
+  # The hosted `llvm_type(type, wants_size)`: the IR type of a value of *type*.
+  def llvm_type(type : Type, wants_size : Bool = false) : IrType
+    key = type.full_name
+    if wants_size
+      if cached = @wants_size_cache[key]?
+        return cached
+      end
+      made = create_llvm_type(type, true)
+      @wants_size_cache[key] = made
+      return made
+    end
+    if cached = @cache[key]?
+      return cached
+    end
+    made = create_llvm_type(type, false)
+    @cache[key] = made
+    made
+  end
+
+  # The hosted `llvm_embedded_type`: the type a value has as a field or an element.
+  # A void or a noreturn is stored as one byte.
+  def llvm_embedded_type(type : Type, wants_size : Bool = false) : IrType
+    if type.is_a?(NoReturnType) || type.is_a?(VoidType)
+      return @table.int8
+    end
+    llvm_type(type, wants_size)
+  end
+
+  # The hosted `llvm_return_type`: a nil result is void.
+  def llvm_return_type(type : Type) : IrType
+    return @table.void if type.is_a?(NilType)
+    llvm_type(type)
+  end
+
+  # The hosted `Nil` named struct, which has no fields.
+  def nil_type : IrType
+    if cached = @nil_type
+      return cached
+    end
+    named = @table.named_struct("Nil")
+    @table.set_body(named, [] of IrType, false)
+    @nil_type = named
+    @structs["Nil"] = named
+    named
+  end
+
+  # The hosted `proc_type` with no argument: the `{fun, ctx}` pair of two words
+  # every proc value is, named `->`.
+  def proc_struct : IrType
+    if cached = @proc_struct
+      return cached
+    end
+    named = @table.named_struct("->")
+    @table.set_body(named, [@table.ptr, @table.ptr], false)
+    @proc_struct = named
+    @structs["->"] = named
+    named
+  end
+
+  # The hosted `llvm_name(type, wants_size)`: the struct's name, with the
+  # `.wants_size` suffix for the variant that breaks a cycle.
+  def llvm_name(type : Type, wants_size : Bool) : String
+    wants_size ? "#{type.full_name}.wants_size" : type.full_name
+  end
+
+  # The hosted `create_llvm_type` overloads, dispatched in their resolution order.
+  def create_llvm_type(type : Type, wants_size : Bool) : IrType
+    if type.is_a?(NoReturnType) || type.is_a?(VoidType)
+      return @table.void
+    end
+    if type.is_a?(NilType)
+      return nil_type
+    end
+    kind = primitive_kind(type)
+    if kind == "bool"
+      return @table.int1
+    end
+    if kind == "char" || kind == "symbol"
+      return @table.int32
+    end
+    if kind == "int"
+      return @table.int(8 * primitive_bytes(type))
+    end
+    if kind == "float"
+      return primitive_bytes(type) == 4 ? @table.float(32) : @table.float(64)
+    end
+    if type.is_a?(EnumType)
+      return llvm_type(type.as(EnumType).base_type)
+    end
+    if type.is_a?(MetaclassType) || type.is_a?(VirtualMetaclassType)
+      return @table.int32
+    end
+    if type.is_a?(LibType)
+      return @table.int32
+    end
+    if type.is_a?(ProcInstanceType)
+      return proc_struct
+    end
+    if type.is_a?(PointerInstanceType)
+      # The pointee is laid out for its effect on the cycle check only: an opaque
+      # pointer is one word whatever it points at.
+      if wants_size
+        return @table.ptr
+      end
+      llvm_embedded_type(type.as(PointerInstanceType).element_type, wants_size)
+      return @table.ptr
+    end
+    if type.is_a?(StaticArrayInstanceType)
+      static = type.as(StaticArrayInstanceType)
+      pointed = llvm_embedded_type(static.element_type, wants_size)
+      return @table.array_of(pointed, static.size_int)
+    end
+    if type.is_a?(TupleInstanceType)
+      elements = type.as(TupleInstanceType).tuple_types
+      return named_aggregate(type, wants_size, elements)
+    end
+    if type.is_a?(NamedTupleInstanceType)
+      elements = [] of Type
+      type.as(NamedTupleInstanceType).entries.each do |entry|
+        elements << entry.type
+      end
+      return named_aggregate(type, wants_size, elements)
+    end
+    if type.is_a?(NilableType)
+      return llvm_type(type.as(NilableType).not_nil_type, wants_size)
+    end
+    if type.is_a?(ReferenceUnionType) || type.is_a?(NilableReferenceUnionType)
+      return @table.ptr
+    end
+    if type.is_a?(NilableProcType)
+      return proc_struct
+    end
+    if type.is_a?(TypeDefType)
+      return llvm_type(type.as(TypeDefType).typedef, wants_size)
+    end
+    if type.is_a?(VirtualType)
+      return @table.ptr
+    end
+    if type.is_a?(AliasType)
+      return llvm_type(TypeMerge.remove_alias(type), wants_size)
+    end
+    if type.is_a?(UnionType)
+      return @table.ptr if reference_union?(type.as(UnionType))
+      return mixed_union_struct(type, wants_size)
+    end
+    if type.is_a?(GenericClassType)
+      # This can only be reached if the generic class has no implementors.
+      return @table.int1
+    end
+    if type.is_a?(TraitType)
+      concrete = TypeIndirection.trait_value_type(type)
+      return llvm_type(concrete, wants_size) unless concrete.object_id == type.object_id
+    end
+    if (type.is_a?(NonGenericModuleType) || type.is_a?(TraitType)) && !type.is_a?(LibType)
+      # A namespace or trait has no implementors and answers `i1`: the hosted typer's answer for a
+      # NonGenericModuleType / TraitType (codegen/llvm_typer.cr, `create_llvm_type(NonGenericModuleType | GenericClassType)`).
+      # A module with implementors is the hosted union of them (NEEDS.md row 5).
+      implementors = module_implementors(type.as(ModuleType))
+      if implementors.size == 0
+        # The file's own module (its `module a/b/c` header, an iyi unit) answers `i32`, the hosted answer
+        # measured on `Compiler::Backend::Backend` and every header module of src/compiler.
+        return @table.int32 if type.iyi_unit
+        return @table.int1
+      end
+      return module_union_struct(type, implementors, wants_size)
+    end
+    if type.is_a?(NonGenericClassType) || type.is_a?(GenericClassInstanceType)
+      # The size of a class is the size of a pointer.
+      if wants_size && !type.struct?
+        return @table.ptr
+      end
+      final_type = llvm_struct_type(type, wants_size)
+      return final_type if type.struct?
+      return @table.ptr
+    end
+    raise "BUG: create_llvm_type for #{type.full_name} is not ported yet (hosted llvm_typer.cr)"
+  end
+
+  # A tuple or a named tuple: a named struct of its element types, in order. The
+  # struct is registered before its fields are typed, so a cycle finds it.
+  def named_aggregate(type : Type, wants_size : Bool, elements : Array(Type)) : IrType
+    name = llvm_name(type, wants_size)
+    if cached = @structs[name]?
+      return cached
+    end
+    named = @table.named_struct(name)
+    @structs[name] = named
+    key = type.full_name
+    if wants_size
+      @wants_size_cache[key] = named
+    else
+      @cache[key] = named
+    end
+    fields = [] of IrType
+    elements.each do |element|
+      fields << llvm_embedded_type(element, wants_size)
+    end
+    @table.set_body(named, fields, false)
+    named
+  end
+
+  # The hosted `llvm_struct_type`: the struct a class, struct, tuple or static array
+  # is laid out as, for a class or struct with instance variables, or the same
+  # aggregate the type lowers to, for a tuple or a static array.
+  def llvm_struct_type(type : Type, wants_size : Bool = false) : IrType
+    key = type.full_name
+    if wants_size
+      if cached = @wants_size_struct_cache[key]?
+        return cached
+      end
+      made = create_llvm_struct_type(type, true)
+      @wants_size_struct_cache[key] = made
+      return made
+    end
+    if cached = @struct_cache[key]?
+      return cached
+    end
+    made = create_llvm_struct_type(type, false)
+    @struct_cache[key] = made
+    made
+  end
+
+  # The hosted `create_llvm_struct_type` overloads.
+  def create_llvm_struct_type(type : Type, wants_size : Bool) : IrType
+    if type.is_a?(StaticArrayInstanceType) || type.is_a?(TupleInstanceType) || type.is_a?(NamedTupleInstanceType)
+      return llvm_type(type, wants_size)
+    end
+    if type.is_a?(NonGenericClassType) || type.is_a?(GenericClassInstanceType)
+      return instance_var_struct(type, wants_size)
+    end
+    raise "BUG: llvm_struct_type of #{type.full_name} is not ported yet (hosted create_llvm_struct_type)"
+  end
+
+  # The hosted `create_llvm_struct_type(InstanceVarContainer)`: the class's or the
+  # struct's instance variables, in `all_instance_vars` order. Under iyi's layout a
+  # class's fields are all of its object; the type id is the header word under the
+  # object, not a field. Under Crystal's layout the id is an `i32` in front.
+  def instance_var_struct(type : Type, wants_size : Bool) : IrType
+    name = llvm_name(type, wants_size)
+    if cached = @structs[name]?
+      return cached
+    end
+    named = @table.named_struct(name)
+    @structs[name] = named
+    key = type.full_name
+    if wants_size
+      @wants_size_struct_cache[key] = named
+    else
+      @struct_cache[key] = named
+    end
+    id_in_front = !type.struct? && !@iyi_layout
+    fields = [] of IrType
+    if id_in_front
+      fields << @table.int32
+    end
+    # A generic instance's fields are its generic's, with the type parameters replaced by its arguments
+    # (`GenericClassInstanceType#all_instance_vars`, types.iyi), as the hosted instance's ivars are.
+    ivars = type.is_a?(GenericClassInstanceType) ? type.as(GenericClassInstanceType).all_instance_vars : type.as(ModuleType).all_instance_vars
+    ivars.each do |ivar_name, ivar|
+      var_type = ivar.var_type
+      raise "BUG: instance variable #{ivar_name} of #{type.full_name} has no type yet (declarations slice)" if var_type.nil?
+      fields << llvm_embedded_type(var_type.as(Type), wants_size)
+    end
+    @table.set_body(named, fields, false)
+    named
+  end
+
+  # The hosted mixed union (`create_llvm_type(MixedUnionType)`, unions.cr): a struct of
+  # the type id word and a value area as large as the largest member, aligned to the
+  # largest member alignment and at least a pointer's. A void member takes no room.
+  def mixed_union_struct(type : Type, wants_size : Bool) : IrType
+    name = llvm_name(type, wants_size)
+    if cached = @structs[name]?
+      return cached
+    end
+    named = @table.named_struct(name)
+    @structs[name] = named
+    key = type.full_name
+    if wants_size
+      @wants_size_cache[key] = named
+    else
+      @cache[key] = named
+    end
+    max_size = 0_i64
+    max_alignment = pointer_size.to_i32
+    expand_union_types(type.as(UnionType)).each do |member|
+      next if member.is_a?(VoidType) || member.is_a?(NoReturnType)
+      member_type = llvm_type(member, true)
+      size = size_of(member_type)
+      align = align_of(member_type)
+      max_size = size if size > max_size
+      max_alignment = align if align > max_alignment
+    end
+    @table.set_body(named, mixed_union_body(@table, max_size, max_alignment), false)
+    named
+  end
+
+  # The hosted union of a module's implementors: all reference types make a reference union, a pointer
+  # (`type_id_pointer`); otherwise the mixed union struct of the implementors, named by their union as the
+  # hosted llvm_name spells it. A module is named in the cache by its own full name.
+  def module_union_struct(type : Type, members : Array(Type), wants_size : Bool) : IrType
+    all_references = true
+    members.each do |member|
+      all_references = false unless TypeQueries.reference_like?(member)
+    end
+    return @table.ptr if all_references
+    name = "(#{members.map { |m| m.full_name }.join(" | ")})"
+    name = "#{name}.wants_size" if wants_size
+    if cached = @structs[name]?
+      return cached
+    end
+    named = @table.named_struct(name)
+    @structs[name] = named
+    key = type.full_name
+    if wants_size
+      @wants_size_cache[key] = named
+    else
+      @cache[key] = named
+    end
+    max_size = 0_i64
+    max_alignment = pointer_size.to_i32
+    members.each do |member|
+      member_type = llvm_type(member, true)
+      size = size_of(member_type)
+      align = align_of(member_type)
+      max_size = size if size > max_size
+      max_alignment = align if align > max_alignment
+    end
+    @table.set_body(named, mixed_union_body(@table, max_size, max_alignment), false)
+    named
+  end
+
+  # The hosted `union_value_type(MixedUnionType)`: the value area of a mixed union's struct.
+  def union_value_type(type : Type) : IrType
+    mixed_union_value_area(llvm_type(type))
+  end
+
+  # The hosted `passed_indirectly?`: a value of more than INDIRECT_ABOVE (128) bytes travels
+  # through memory, not as an aggregate (types.cr). A C type's and an extern's are not here.
+  def passed_indirectly?(type : Type) : Bool
+    return false unless passed_by_value?(type)
+    size_of(llvm_type(type)) > 128
+  end
+
+  # The hosted `function_type`: the LLVM function type of a proc's call. A closure's
+  # context pointer comes first, an indirect argument is a pointer, and an indirect result
+  # is a pointer passed last and returned as void.
+  def function_type(arg_types : Array(Type), return_type : Type, closure : Bool) : IrType
+    params = [] of IrType
+    params << @table.ptr if closure
+    arg_types.each do |arg|
+      params << (passed_indirectly?(arg) ? @table.ptr : llvm_type(arg))
+    end
+    if passed_indirectly?(return_type)
+      params << @table.ptr
+      return @table.func(params, @table.void)
+    end
+    @table.func(params, llvm_type(return_type))
+  end
+
+  # The hosted `proc_type(ProcInstanceType)`: the function a proc value calls, without a context.
+  def proc_function(type : Type) : IrType
+    proc = type.as(ProcInstanceType)
+    function_type(proc.arg_types, proc.return_type, false)
+  end
+
+  # The hosted `closure_type(ProcInstanceType)`: the function a closure calls, with its context.
+  def closure_function(type : Type) : IrType
+    proc = type.as(ProcInstanceType)
+    function_type(proc.arg_types, proc.return_type, true)
+  end
+
+  # The hosted `llvm_c_type`: the type a C function's argument of *type* has. A proc is a
+  # pointer to its function, a tuple is its struct, and a value passed by value travels behind
+  # a pointer, as the C ABI takes it. An extern's struct is not here (NEEDS.md row 4).
+  def llvm_c_type(type : Type) : IrType
+    if type.is_a?(ProcInstanceType) || type.is_a?(NilableProcType)
+      return @table.ptr
+    end
+    if type.is_a?(TupleInstanceType)
+      return llvm_struct_type(type)
+    end
+    if passed_by_value?(type)
+      return @table.ptr
+    end
+    llvm_type(type)
+  end
+
+  # The hosted `llvm_c_return_type`: a static array returns as its struct, nil as void.
+  def llvm_c_return_type(type : Type) : IrType
+    if type.is_a?(StaticArrayInstanceType)
+      return llvm_struct_type(type)
+    end
+    if type.is_a?(NilType)
+      return @table.void
+    end
+    llvm_c_type(type)
+  end
+
+  # The hosted `llvm_embedded_c_type`: a proc stored in a C struct is one function pointer.
+  def llvm_embedded_c_type(type : Type, wants_size : Bool = false) : IrType
+    if type.is_a?(ProcInstanceType)
+      return @table.ptr
+    end
+    llvm_embedded_type(type, wants_size)
+  end
+
+  # The hosted `llvm_intrinsic_return_type`: a tuple returned by an LLVM intrinsic is an
+  # unnamed struct of its element types, since LLVM 15 takes no named struct there.
+  def llvm_intrinsic_return_type(type : Type) : IrType
+    if type.is_a?(TupleInstanceType)
+      fields = [] of IrType
+      type.as(TupleInstanceType).tuple_types.each do |t|
+        fields << llvm_embedded_type(t)
+      end
+      return @table.struct_of(fields)
+    end
+    if type.is_a?(NamedTupleInstanceType)
+      fields = [] of IrType
+      type.as(NamedTupleInstanceType).entries.each do |entry|
+        fields << llvm_embedded_type(entry.type)
+      end
+      return @table.struct_of(fields)
+    end
+    llvm_return_type(type)
+  end
+
+  # The hosted `closure_context_type`: the struct a closure's captured variables live in,
+  # with the parent context pointer and the self value when there are those. The hosted
+  # name counts across every typer in the process; this one counts per typer.
+  def closure_context_type(vars : Array(Type), parent_present : Bool, self_type : Type?) : IrType
+    @closure_counter = @closure_counter + 1
+    named = @table.named_struct("closure_#{@closure_counter}")
+    fields = [] of IrType
+    vars.each do |v|
+      fields << llvm_type(v)
+    end
+    fields << @table.ptr if parent_present
+    unless self_type.nil?
+      fields << llvm_type(self_type.as(Type))
+    end
+    @table.set_body(named, fields, false)
+    named
+  end
+
+  # The hosted `size_of` (`LLVMStoreSizeOfType`): bytes a value of the type takes
+  # up, without the padding that follows it in an array. A struct is padded to its
+  # alignment, which LLVM does in its struct layout.
+  def size_of(t : IrType) : Int64
+    return 0_i64 if t.void?
+    if t.struct?
+      fields = t.struct_element_types
+      return 0_i64 if fields.empty?
+      last = fields.size - 1
+      end_offset = @layout.offset_of(t, last) + @layout.alloc_size(fields[last])
+      align = t.packed_struct? ? 1 : @layout.abi_align(t)
+      return ((end_offset + align - 1) // align) * align
+    end
+    @layout.store_size(t)
+  end
+
+  # The hosted `align_of` (`LLVMABIAlignmentOfType`): a void is one byte.
+  def align_of(t : IrType) : Int32
+    return 1 if t.void?
+    @layout.abi_align(t)
+  end
+
+  # The hosted `offset_of(type, index)`: the byte offset of element *index* of a struct.
+  def offset_of(t : IrType, index : Int32) : Int64
+    @layout.offset_of(t, index)
+  end
+
+  # The hosted `pointer_size`: a pointer's size in bytes on the target.
+  def pointer_size : Int64
+    @layout.pointer_bytes.to_i64
+  end
+
+  # The hosted `size_t`: an integer as wide as the target's size type.
+  def size_t : IrType
+    @table.int(@layout.pointer_bytes * 8)
+  end
+end

@@ -1,0 +1,7 @@
+@[Unsafe("This fixture declares exit to type a nonreturning proc")]
+lib LibProcFixture
+  fun exit(status : Int32) : NoReturn
+end
+
+p : Proc(Nil) = -> { 7 }
+q : Proc(Nil) = -> { LibProcFixture.exit(7) }

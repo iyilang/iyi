@@ -1,0 +1,29 @@
+@[Unsafe("reports the dispatch result")]
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+class Base
+  def name : Int32
+    7
+  end
+end
+
+class Left < Base
+end
+
+class Right < Base
+  def name : Int32
+    9
+  end
+end
+
+def pick(flag : Bool) : Int32
+  (flag ? Left.new : Right.new).name
+end
+
+def pick_reverse(flag : Bool) : Int32
+  (flag ? Right.new : Left.new).name
+end
+
+LibC.exit(pick(true) &+ pick_reverse(true))

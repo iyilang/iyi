@@ -1,0 +1,6 @@
+# The `headed` mode for `String`, which is headed by rule (gc_layouts.cr 174: the prelude builds one
+# from bytes and stores the type id under it itself). Both sides answer 1.
+class String
+end
+
+# type: String

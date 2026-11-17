@@ -1,0 +1,11 @@
+A = 5
+
+def f
+  A
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+LibC.exit(f)

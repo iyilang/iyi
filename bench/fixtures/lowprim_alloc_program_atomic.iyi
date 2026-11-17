@@ -1,0 +1,22 @@
+# Program-defined allocator selection for fieldless class Box:
+# both __crystal_malloc64 and __crystal_malloc_atomic64 are defined; a fieldless
+# class is atomic so Box.new must call __crystal_malloc_atomic64 (exit 3).
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+fun __crystal_malloc64(size : UInt64) : Void*
+  LibC.exit(5)
+end
+
+fun __crystal_malloc_atomic64(size : UInt64) : Void*
+  LibC.exit(3)
+end
+
+class Box
+  def initialize
+  end
+end
+
+Box.new
+LibC.exit(7)

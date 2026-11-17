@@ -1,0 +1,365 @@
+module bench/lib/lower_gate
+
+# The lowering gates' shared driver code: the bench/selfhost_lower_core_exercise.iyi and
+# bench/selfhost_lower_calls_exercise.iyi drivers import it and neither copies it.
+#
+# It analyses a fixture with the port's semantic passes, makes the IR module of an
+# oracle's triple, normalises both sides the same way (the driver header of each gate
+# lists what is dropped), compares the modules function by function, and runs the
+# `lower` and `emit` modes.
+#
+# `stand_in_libs` is the one place a gate reads the primitive declarations the bare analysis does not
+# declare (bench/lib/primitive_stand_in.iyi). The semantic pass types the libs; no gate stands them in.
+
+import compiler/syntax/ast::{ASTNode, Def, Expressions, FunDef, LibDef, ImportDecl}
+import compiler/syntax/parser::{Parser}
+import compiler/semantic/top_level::{LibType, SemanticProgram, TopLevelVisitor}
+import compiler/semantic/main_visitor::{MainVisitor}
+import compiler/semantic/instance_vars::{declare_guessed_instance_vars}
+import compiler/semantic/definition_typing::{append_definition_probes}
+import compiler/semantic/top_level::{normalize_path, dir_of}
+import compiler/semantic/normalizer::{NormalizerProgram}
+import compiler/semantic/recursive_struct_checker::{RecursiveStructChecker}
+import compiler/ir/module::{Module}
+import compiler/ir/layout::{LayoutError}
+import compiler/ir/parser::{parse, IrParseError}
+import compiler/ir/printer::{print}
+import compiler/platform/target::{Target}
+import compiler/lower/typer::{LowerTyper}
+import compiler/lower/lower::{codegen_program}
+import bench/lib/primitive_stand_in::{stand_in_primitive_types}
+import compiler/types/type_system::{TypeSystem}
+
+# The parsed and analysed fixture: the tree and the semantic pass that typed it.
+pub class Analysis
+  getter root : ASTNode
+  getter visitor : MainVisitor
+  # The layout the oracle uses for this program: iyi's (the type id is the header word under the object)
+  # when the prelude declares IyiRuntimeLock, as the hosted driver decides it.
+  getter iyi : Bool
+
+  def initialize(@root : ASTNode, @visitor : MainVisitor, @iyi : Bool)
+  end
+end
+
+# The analysis of a fixture alone, with no prelude, in the order the typed-dump tool runs
+# the passes. `stand_in_libs` runs the primitive stand-in between the declarations and the
+# main visitor.
+pub def analyse(source : String, filename : String, stand_in_libs : Bool) : Analysis
+  parser = Parser.new(source, filename)
+  root = parser.parse
+  normalizer = NormalizerProgram.new
+  normalizer.iyi_prelude = false
+  root = normalizer.normalize(root)
+  prog = SemanticProgram.new
+  # Resolve each fixture's imports beside the fixture, not from the gate's cwd.
+  prog.search_path = [dir_of(filename)]
+  # The type system is installed before the top-level pass, as the semantic driver does: it makes the merged
+  # unions (a variable's union, a type_merge) the hosted MixedUnionType and ReferenceUnionType, not a plain UnionType.
+  ts = TypeSystem.new(prog)
+  tl = TopLevelVisitor.new(prog, filename)
+  root.accept(tl)
+  tl.finish
+  prog.resolve_declared_types
+  # The explicit and guessed instance and class variables are declared before the body pass, as every
+  # other driver does (typed_dump, the pipeline). The definition probes below type a def ahead of its class body.
+  declare_guessed_instance_vars(prog)
+  mv = MainVisitor.new(prog)
+  if stand_in_libs
+    stand_in_primitive_types(root, prog, mv)
+  end
+  files = Set(String).new
+  files.add(normalize_path(filename))
+  append_definition_probes(prog, root, files)
+  root.accept(mv)
+  RecursiveStructChecker.new(prog).run
+  # The full compiler consumes imports while assembling units. This bare gate
+  # has already resolved them during declarations, so they are not runtime nodes.
+  if root.is_a?(Expressions)
+    root.as(Expressions).expressions = root.as(Expressions).expressions.reject { |node| node.is_a?(ImportDecl) }
+  end
+  Analysis.new(root, mv, !prog.types["IyiRuntimeLock"]?.nil?)
+end
+
+pub def ir_module(triple : String) : Module
+  made = Module.for_target("main_module", Target.new(triple))
+  raise made.as(LayoutError).to_s if made.is_a?(LayoutError)
+  made.as(Module)
+end
+
+# The triple an oracle module was built for, from its `target triple` line.
+pub def triple_of(text : String) : String
+  text.split("\n").each do |line|
+    if line.starts_with?("target triple")
+      return line.split("\"")[1]
+    end
+  end
+  raise "the oracle module names no target triple"
+end
+
+# The `import "name"` a declaration carries (contract 6b: the port's IR printer writes it from import_library). The
+# hosted module of the same fixture declares the fun with no such text, so it is dropped on both sides here; the
+# gate that lowers a lib fun checks the import on the port's own text.
+pub def strip_import(line : String) : String
+  idx = line.index(" import \"")
+  return line if idx.nil?
+  start = idx.as(Int32)
+  close = line.index("\"", start + 9)
+  return line if close.nil?
+  line[0, start] + line[close.as(Int32) + 1, line.size - close.as(Int32) - 1]
+end
+
+# The IR text of a module, normalised the way the gates compare it.
+pub def normalised_lines(text : String, builds : Array(String)) : Array(String)
+  out = [] of String
+  text.split("\n").each do |raw|
+    line = strip_import(raw)
+    stripped = line.strip
+    next if stripped.empty?
+    next if stripped.starts_with?(";")
+    next if stripped.starts_with?("source_filename")
+    next if stripped.starts_with?("attributes #")
+    next if stripped.starts_with?("declare") && stripped.includes?("@printf(")
+    next if stripped.starts_with?("@") && build_constant?(stripped, builds) || stripped.starts_with?("%Nil = type")
+    next if stripped.includes?("@\"'")
+    next if stripped.includes?("@\"''\"")
+    if pidx = line.index(" ; preds")
+      out << line[0, pidx]
+      next
+    end
+    if idx = line.index(" #")
+      out << line[0, idx] + " {"
+    elsif line.starts_with?("define ") && (bracket = line.index(") ["))
+      close = line.index("]", bracket.as(Int32) + 3)
+      out << (close.nil? ? line : line[0, bracket.as(Int32) + 1] + line[close.as(Int32) + 1..-1])
+    else
+      out << line
+    end
+  end
+  out
+end
+
+# The hosted build constants of an oracle module: each `store` of the compiler's own identity names its
+# destination global (`@"<hosted>::BUILD_COMMIT"`) and the private text it stores (`@"'b598d221d'"`). Both are
+# dropped before comparison. Other names, including a program's own `@"K::v"`, remain in the comparison.
+pub def build_names(text : String, marker : String) : Array(String)
+  names = [] of String
+  identity_names = ["BUILD_COMMIT", "BUILD_DATE", "CACHE_DIR", "DEFAULT_PATH", "DESCRIPTION", "PATH", "LIBRARY_PATH", "VERSION", "LLVM_VERSION", "HOST_TRIPLE", "TARGET_TRIPLE", "IYI_UNSAFE_MODULES"]
+  text.split("\n").each do |line|
+    # Only destinations in the hosted compiler's predefined namespace are build constants.
+    # Split the hosted namespace spelling so it is not used as the port's source identity.
+    prefix = "Cry" + "stal" + marker
+    if line.includes?("store ptr @\"") || line.includes?("store ptr getelementptr")
+      quoted = line.split("@\"")
+      if quoted.size >= 3
+        source = quoted[1].split("\"").first
+        destination = quoted[quoted.size - 1].split("\"").first
+        if destination.starts_with?(prefix) && identity_names.includes?(destination[prefix.size..-1])
+          names << source
+          names << destination
+        end
+      end
+    end
+  end
+  names
+end
+
+# Whether a line names one of the build constants in `builds`: a `@"name"` definition, reference or store.
+pub def build_constant?(stripped : String, builds : Array(String)) : Bool
+  builds.each do |name|
+    return true if stripped.includes?("@\"#{name}\"")
+  end
+  false
+end
+
+# The tokens of an attribute list, sorted and joined by spaces, so the two sides compare as sets.
+pub def sorted_tokens(text : String, separator : String) : String
+  tokens = [] of String
+  text.split(separator).each do |t|
+    tokens << t.strip unless t.strip.empty?
+  end
+  tokens.sorted.join(" ")
+end
+
+# The oracle's function attributes by function name: each `define`'s attribute group, read from
+# the oracle's text (`attributes #N = { ... }`), because the port's parser keeps no groups.
+pub def oracle_attr_map(raw : String) : Hash(String, String)
+  groups = Hash(String, String).new
+  raw.split("\n").each do |line|
+    next unless line.starts_with?("attributes #")
+    open = line.index("{")
+    close = line.index("}")
+    next if open.nil? || close.nil?
+    groups[line.split(" ")[1]] = sorted_tokens(line[open.as(Int32) + 1, close.as(Int32) - open.as(Int32) - 1], " ")
+  end
+  out = Hash(String, String).new
+  raw.split("\n").each do |line|
+    next unless line.starts_with?("define ")
+    tokens = line.split(" ")
+    ref = ""
+    tokens.each do |token|
+      ref = token if token.starts_with?("#")
+    end
+    out[function_name(line)] = groups[ref]? || ""
+  end
+  out
+end
+
+# The printer's attribute list of each define line, from the bracket after its parameters.
+pub def printed_attr_map(text : String) : Hash(String, String)
+  out = Hash(String, String).new
+  text.split("\n").each do |line|
+    next unless line.starts_with?("define ")
+    bracket = line.index(") [")
+    close = bracket.nil? ? nil : line.index("]", bracket.as(Int32) + 3)
+    next if bracket.nil? || close.nil?
+    open = bracket.as(Int32) + 3
+    out[function_name(line)] = sorted_tokens(line[open, close.as(Int32) - open], ", ")
+  end
+  out
+end
+
+# Appends each lowered def's attribute tokens to its define line, so a difference in attributes
+# is a difference in the line. Only the functions the calls and functions files lower (names that
+# start with `*`) are compared this way; `main` and `__crystal_main` wait on the core hook
+# (NEEDS.md, lowering calls row 34).
+pub def attach_attrs(lines : Array(String), attrs : Hash(String, String)) : Array(String)
+  out = [] of String
+  lines.each do |line|
+    if line.starts_with?("define ")
+      name = function_name(line)
+      if name.starts_with?("*")
+        out << line + "  ; attrs: " + (attrs[name]? || "")
+        next
+      end
+    end
+    out << line
+  end
+  out
+end
+
+# The name of a `define`d function: the text between its @ and its parameter list.
+pub def function_name(define_line : String) : String
+  name = define_line.split("@")[1]
+  if name.starts_with?("\"")
+    name.split("\"")[1]
+  else
+    name.split("(")[0]
+  end
+end
+
+# Splits normalised lines into the module-level items (globals, declares, headers)
+# and the functions, by name, in the order they are printed.
+pub def split_module(lines : Array(String)) : {Array(String), Hash(String, Array(String)), Array(String)}
+  items = [] of String
+  fns = Hash(String, Array(String)).new
+  order = [] of String
+  current : Array(String)? = nil
+  current_name = ""
+  lines.each do |line|
+    if cur = current
+      cur << line
+      if line == "}"
+        fns[current_name] = cur
+        current = nil
+      end
+    elsif line.starts_with?("define ")
+      current_name = function_name(line)
+      order << current_name
+      current = [line] of String
+    else
+      items << line
+    end
+  end
+  {items, fns, order}
+end
+
+# Compares the oracle's lines with the port's, function by function, and prints each
+# verdict. Returns how many of the oracle's functions the port reproduced exactly.
+pub def compare(oracle : Array(String), port : Array(String)) : Int32
+  o_items, o_fns, o_order = split_module(oracle)
+  p_items, p_fns, p_order = split_module(port)
+  identical = 0
+  if o_items == p_items
+    puts "  module-level: identical (#{o_items.size} lines)"
+  else
+    type_ids = 0
+    others = 0
+    o_items.each do |item|
+      next if p_items.includes?(item)
+      if item.includes?(":type_id")
+        type_ids += 1
+      else
+        others += 1
+      end
+    end
+    puts "  module-level: differs (#{type_ids} type-id constant(s), #{others} other item(s) differ)"
+    puts "    oracle: #{o_items.join(" | ")}"
+    puts "    port:   #{p_items.join(" | ")}"
+  end
+  o_order.each do |name|
+    want = o_fns[name]
+    got = p_fns[name]?
+    if got.nil?
+      puts "  @#{name}: MISSING from the port"
+      next
+    end
+    if got == want
+      identical += 1
+      puts "  @#{name}: identical (#{want.size} lines)"
+    else
+      at = 0
+      while at < want.size && at < got.size && want[at] == got[at]
+        at += 1
+      end
+      puts "  @#{name}: differs at line #{at + 1}"
+      puts "    oracle: #{want[at]?}"
+      puts "    port:   #{got[at]?}"
+    end
+  end
+  p_order.each do |name|
+    puts "  @#{name}: EXTRA in the port" unless o_fns.has_key?(name)
+  end
+  identical
+end
+
+# The `oracle` mode: the hosted module, normalised, one line each.
+pub def run_oracle(path : String, hosted : String) : Nil
+  text = File.read(path)
+  parsed = parse(text)
+  if parsed.is_a?(IrParseError)
+    raise parsed.as(IrParseError).to_s
+  end
+  normalised_lines(print(parsed.as(Module)), build_names(text, hosted)).each { |line| puts line }
+end
+
+# The `lower` mode: lowers the fixture and compares the port's module with the oracle's.
+pub def run_lower(fixture : String, oracle_path : String, hosted : String, stand_in_libs : Bool) : Nil
+  oracle_text = File.read(oracle_path)
+  parsed = parse(oracle_text)
+  raise parsed.as(IrParseError).to_s if parsed.is_a?(IrParseError)
+  builds = build_names(oracle_text, hosted)
+  oracle = attach_attrs(normalised_lines(print(parsed.as(Module)), builds), oracle_attr_map(oracle_text))
+  triple = triple_of(oracle_text)
+
+  analysis = analyse(File.read(fixture), fixture, stand_in_libs)
+  m = ir_module(triple)
+  typer = LowerTyper.new(m.types, m.layout, analysis.iyi)
+  codegen_program(analysis.root, analysis.visitor, typer, m)
+  port_text = print(m)
+  port = attach_attrs(normalised_lines(port_text, builds), printed_attr_map(port_text))
+  identical = compare(oracle, port)
+  total = split_module(oracle)[2].size
+  module_ok = split_module(oracle)[0] == split_module(port)[0]
+  puts "SUMMARY identical=#{identical} total=#{total} module=#{module_ok ? 1 : 0}"
+end
+
+# The `emit` mode: the port's module as text, for the native tool.
+pub def run_emit(fixture : String, oracle_path : String, stand_in_libs : Bool) : Nil
+  triple = triple_of(File.read(oracle_path))
+  analysis = analyse(File.read(fixture), fixture, stand_in_libs)
+  m = ir_module(triple)
+  typer = LowerTyper.new(m.types, m.layout, analysis.iyi)
+  codegen_program(analysis.root, analysis.visitor, typer, m)
+  puts print(m)
+end

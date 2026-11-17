@@ -1,0 +1,14 @@
+def nothing
+end
+
+def nothing_with_args(a : Int32, b : Int32)
+end
+
+lib LibC
+  fun putchar(value : Int32) : Int32
+  fun exit(status : Int32) : NoReturn
+end
+
+nothing
+nothing_with_args(LibC.putchar(65), LibC.putchar(66))
+LibC.exit(3)

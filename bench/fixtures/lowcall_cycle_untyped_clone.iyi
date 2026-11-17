@@ -1,0 +1,9 @@
+import bodies_cycle_helper::{Pair, hv}
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+p0 = Pair.new(nil)
+p1 = Pair.new(p0)
+LibC.exit(hv(p1) &- 900)

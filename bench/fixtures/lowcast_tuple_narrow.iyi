@@ -1,0 +1,70 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+class Box
+  def initialize(@value : Int32)
+  end
+
+  def value : Int32
+    @value
+  end
+end
+
+class Crate
+  def initialize(@count : Int32)
+  end
+end
+
+def reference_element(flag : Bool) : Int32
+  pair = {Crate.new(1), 3}
+  if flag
+    pair = {Box.new(4), 5}
+    return pair[0].value &* 10 &+ pair[1]
+  end
+  0
+end
+
+def mixed_element(flag : Bool) : Int32
+  pair = {true, 1}
+  if flag
+    pair = {7, 2}
+    return pair[0] &* 10 &+ pair[1]
+  end
+  0
+end
+
+def named_order(flag : Bool) : Int32
+  entry = {a: 1, b: true}
+  if flag
+    entry = {b: 5, a: 6}
+    return entry[:a] &* 10 &+ entry[:b]
+  end
+  0
+end
+
+def nested_element(flag : Bool) : Int32
+  outer = { {true, 1}, 2 }
+  if flag
+    outer = { {8, 3}, 4 }
+    inner = outer[0]
+    return inner[0] &* 100 &+ inner[1] &* 10 &+ outer[1]
+  end
+  0
+end
+
+def nil_element(flag : Bool) : Int32
+  pair = {1, 2}
+  if flag
+    pair = {nil, 3}
+    return pair[1]
+  end
+  0
+end
+
+LibC.exit(1) unless reference_element(true) == 45
+LibC.exit(2) unless mixed_element(true) == 72
+LibC.exit(3) unless named_order(true) == 65
+LibC.exit(4) unless nested_element(true) == 834
+LibC.exit(5) unless nil_element(true) == 3
+LibC.exit(0)

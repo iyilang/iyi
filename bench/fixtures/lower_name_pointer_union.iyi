@@ -1,0 +1,7 @@
+# A pointer's union element has no extra parentheses in a function symbol.
+def pass_pointer(value : Pointer(Int32 | Nil)) : Pointer(Int32 | Nil)
+  copy = value
+  copy
+end
+
+pass_pointer(Pointer(Int32 | Nil).malloc(1_u64))

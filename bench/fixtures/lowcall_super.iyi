@@ -1,0 +1,57 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+class Base
+  @code : Int32
+
+  def initialize(code : Int32)
+    @code = code
+  end
+
+  def pick(n : Int32) : Int32
+    tag(n)
+  end
+
+  def tag(n : Int32) : Int32
+    x = n
+    x
+  end
+
+  def limit : Int32
+    @code
+  end
+end
+
+class Child < Base
+  def initialize(code : Int32)
+    super(code)
+  end
+
+  def pick(n : Int32) : Int32
+    super
+  end
+
+  def limit : Int32
+    super()
+  end
+end
+
+class GrandChild < Child
+  def initialize(code : Int32)
+    super
+  end
+
+  def pick(n : Int32) : Int32
+    super
+  end
+
+  def tag(n : Int32) : Int32
+    limit
+  end
+end
+
+class Leaf < GrandChild
+end
+
+LibC.exit(Leaf.new(42).pick(7))

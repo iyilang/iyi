@@ -1,0 +1,6 @@
+@[Unsafe("a primitive splat must not reach lowering as a splat")]
+@[Primitive(:proc_call)]
+def call(*args) : Nil
+end
+
+call

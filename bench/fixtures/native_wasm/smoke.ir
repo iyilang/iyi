@@ -1,0 +1,13 @@
+; iyi-ir 1
+module "smoke"
+target triple = "wasm32-wasi"
+target datalayout = "e-m:e-p:32:32-p10:8:8-p20:8:8-i64:64-i128:128-n32:64-S128-ni:1:10:20"
+declare external void @__iyi_print_i64(i64)
+
+define external i32 @main() {
+entry:
+  %a = add i32 2, 3
+  %w = zext i32 %a to i64
+  call void (i64) @__iyi_print_i64(i64 %w)
+  ret i32 0
+}

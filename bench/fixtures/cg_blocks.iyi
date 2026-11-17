@@ -1,0 +1,41 @@
+def apply_block(x : Int32, &block : Int32 -> Int32) : Int32
+  yield x
+end
+
+def repeat_times(n : Int32, &block : Int32 ->)
+  i = 0
+  while i < n
+    yield i
+    i = i &+ 1
+  end
+end
+
+def apply_pair(a : Int32, b : Int32, &block : Int32, Int32 -> Int32) : Int32
+  yield a, b
+end
+
+fun test_block_simple(x : Int32) : Int32
+  apply_block(x) do |v|
+    v &* 2
+  end
+end
+
+fun test_block_capture(x : Int32, factor : Int32) : Int32
+  apply_block(x) do |v|
+    v &* factor
+  end
+end
+
+fun test_block_loop(n : Int32) : Int32
+  sum = 0
+  repeat_times(n) do |i|
+    sum = sum &+ i
+  end
+  sum
+end
+
+fun test_block_pair(a : Int32, b : Int32) : Int32
+  apply_pair(a, b) do |x, y|
+    (x &* 10) &+ y
+  end
+end

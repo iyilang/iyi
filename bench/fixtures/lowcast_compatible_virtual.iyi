@@ -1,0 +1,40 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+abstract class Base
+end
+
+class Sub < Base
+end
+
+struct Other
+end
+
+class Box
+  def initialize(@value : Base | Other)
+  end
+
+  def value : Base | Other
+    @value
+  end
+end
+
+def choose(flag : Bool) : Base | Other
+  if flag
+    Sub.new
+  else
+    Other.new
+  end
+end
+
+def check(value : Base | Other) : Int32
+  case value
+  when Sub
+    7
+  else
+    2
+  end
+end
+
+LibC.exit(check(Box.new(choose(true)).value) &+ check(Box.new(Sub.new).value))

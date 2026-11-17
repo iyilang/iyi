@@ -1,0 +1,42 @@
+# Modules with implementors (NEEDS.md row 5). A module lowers as the hosted union of its implementors:
+# a struct among them makes a mixed union struct named `(A | B)`, and all classes make a reference union,
+# a pointer. A module's own metaclass is not an implementor. Under iyi's object layout (IyiRuntimeLock).
+class IyiRuntimeLock
+end
+
+module Drawable
+end
+
+module Pointed
+end
+
+struct Dot
+  include Drawable
+  @x : Int32
+
+  def initialize
+    @x = 0
+  end
+end
+
+class Plain
+  include Drawable
+  @y : Int32
+
+  def initialize
+    @y = 1
+  end
+end
+
+class Aa
+  include Pointed
+end
+
+class Bb
+  include Pointed
+end
+
+# type: Drawable
+# type: Pointed
+# type: Dot
+# type: Plain

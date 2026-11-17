@@ -1,0 +1,20 @@
+lib LibC
+  fun putchar(value : Int32) : Int32
+  fun exit(status : Int32) : NoReturn
+end
+
+def pair(a : Int32, b : Int32) : Int32
+  a &* 10 &+ b
+end
+
+def slot(a : Int32, b = 0, c = 0) : Int32
+  a &+ b &* 10 &+ c
+end
+
+LibC.putchar(pair(a: 6, b: 5))
+LibC.putchar(pair(b: 6, a: 5))
+LibC.putchar(pair(b: 7, a: 6))
+LibC.putchar(slot(0, b: 7))
+LibC.putchar(slot(0, c: 71))
+LibC.putchar(slot(2, c: 70))
+LibC.exit(pair(b: 1, a: 4))

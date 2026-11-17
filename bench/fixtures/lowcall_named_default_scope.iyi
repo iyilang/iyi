@@ -1,0 +1,10 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def scoped(first : Int32, second : Int32 = first &+ 1) : Int32
+  second
+end
+
+first = 40
+LibC.exit(scoped(first: 1))

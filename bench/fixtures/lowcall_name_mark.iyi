@@ -1,0 +1,9 @@
+def first?(a : Int32) : Int32
+  a
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+LibC.exit(first?(42))

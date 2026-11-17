@@ -1,0 +1,22 @@
+@[Unsafe("calls C exit to report the dispatch result")]
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+struct Left
+  def run(&)
+    yield 1
+  end
+end
+
+struct Right
+  def run(&)
+    yield 2
+  end
+end
+
+def pick(flag : Bool) : Int32
+  (flag ? Left.new : Right.new).run { |value| value &+ 40 }
+end
+
+LibC.exit(pick(false))

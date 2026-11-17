@@ -1,0 +1,193 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+fun __crystal_raise_overflow : NoReturn
+  LibC.exit(99)
+end
+
+struct Float32
+  @[Primitive(:convert)]
+  def chk_i8 : Int8
+  end
+
+  @[Primitive(:convert)]
+  def chk_i16 : Int16
+  end
+
+  @[Primitive(:convert)]
+  def chk_i32 : Int32
+  end
+
+  @[Primitive(:convert)]
+  def chk_i64 : Int64
+  end
+
+  @[Primitive(:convert)]
+  def chk_i128 : Int128
+  end
+
+  @[Primitive(:convert)]
+  def chk_u8 : UInt8
+  end
+
+  @[Primitive(:convert)]
+  def chk_u16 : UInt16
+  end
+
+  @[Primitive(:convert)]
+  def chk_u32 : UInt32
+  end
+
+  @[Primitive(:convert)]
+  def chk_u64 : UInt64
+  end
+
+  @[Primitive(:convert)]
+  def chk_u128 : UInt128
+  end
+end
+
+struct Float64
+  @[Primitive(:convert)]
+  def chk_i8 : Int8
+  end
+
+  @[Primitive(:convert)]
+  def chk_i16 : Int16
+  end
+
+  @[Primitive(:convert)]
+  def chk_i32 : Int32
+  end
+
+  @[Primitive(:convert)]
+  def chk_i64 : Int64
+  end
+
+  @[Primitive(:convert)]
+  def chk_i128 : Int128
+  end
+
+  @[Primitive(:convert)]
+  def chk_u8 : UInt8
+  end
+
+  @[Primitive(:convert)]
+  def chk_u16 : UInt16
+  end
+
+  @[Primitive(:convert)]
+  def chk_u32 : UInt32
+  end
+
+  @[Primitive(:convert)]
+  def chk_u64 : UInt64
+  end
+
+  @[Primitive(:convert)]
+  def chk_u128 : UInt128
+  end
+end
+
+def f32_i8(x : Float32) : Int8
+  x.chk_i8
+end
+
+def f32_i16(x : Float32) : Int16
+  x.chk_i16
+end
+
+def f32_i32(x : Float32) : Int32
+  x.chk_i32
+end
+
+def f32_i64(x : Float32) : Int64
+  x.chk_i64
+end
+
+def f32_i128(x : Float32) : Int128
+  x.chk_i128
+end
+
+def f32_u8(x : Float32) : UInt8
+  x.chk_u8
+end
+
+def f32_u16(x : Float32) : UInt16
+  x.chk_u16
+end
+
+def f32_u32(x : Float32) : UInt32
+  x.chk_u32
+end
+
+def f32_u64(x : Float32) : UInt64
+  x.chk_u64
+end
+
+def f32_u128(x : Float32) : UInt128
+  x.chk_u128
+end
+
+def f64_i8(x : Float64) : Int8
+  x.chk_i8
+end
+
+def f64_i16(x : Float64) : Int16
+  x.chk_i16
+end
+
+def f64_i32(x : Float64) : Int32
+  x.chk_i32
+end
+
+def f64_i64(x : Float64) : Int64
+  x.chk_i64
+end
+
+def f64_i128(x : Float64) : Int128
+  x.chk_i128
+end
+
+def f64_u8(x : Float64) : UInt8
+  x.chk_u8
+end
+
+def f64_u16(x : Float64) : UInt16
+  x.chk_u16
+end
+
+def f64_u32(x : Float64) : UInt32
+  x.chk_u32
+end
+
+def f64_u64(x : Float64) : UInt64
+  x.chk_u64
+end
+
+def f64_u128(x : Float64) : UInt128
+  x.chk_u128
+end
+
+f32_i8(1.5_f32)
+f32_i16(1.5_f32)
+f32_i32(1.5_f32)
+f32_i64(1.5_f32)
+f32_i128(1.5_f32)
+f32_u8(1.5_f32)
+f32_u16(1.5_f32)
+f32_u32(1.5_f32)
+f32_u64(1.5_f32)
+f32_u128(1.5_f32)
+f64_i8(1.5)
+f64_i16(1.5)
+f64_i32(1.5)
+f64_i64(1.5)
+f64_i128(1.5)
+f64_u8(1.5)
+f64_u16(1.5)
+f64_u32(1.5)
+f64_u64(1.5)
+f64_u128(1.5)
+LibC.exit(f64_i32(42.5))

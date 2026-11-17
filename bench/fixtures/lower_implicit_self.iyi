@@ -1,0 +1,24 @@
+struct Point
+  @x : Int32
+  @y : Int32
+
+  def initialize(x : Int32, y : Int32)
+    @x = x
+    @y = y
+  end
+
+  def pick(v : Int32) : Int32
+    v
+  end
+
+  def first : Int32
+    pick(@x)
+  end
+
+  def second : Int32
+    first
+  end
+end
+
+p = Point.new(1, 2)
+p.second

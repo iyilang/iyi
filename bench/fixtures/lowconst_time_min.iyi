@@ -1,0 +1,13 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+module TimeConstants
+  MIN_SECOND = -9223372036854775807_i64 - 1_i64
+end
+
+def negative(value : Int64) : Int32
+  value < 0_i64 ? 7 : 1
+end
+
+LibC.exit(negative(TimeConstants::MIN_SECOND))

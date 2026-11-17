@@ -1,0 +1,38 @@
+# An inherited body resolves class names from its defining scope, while self stays the receiver.
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def with_code(&)
+  yield
+end
+
+module Scanner
+  class Scanner
+    def initialize
+    end
+
+    def self.code : Int32
+      7
+    end
+
+    def self.relay : Int32
+      Scanner.code
+    end
+
+    def direct : Int32
+      Scanner.code
+    end
+
+    def run : Int32
+      with_code { Scanner.code }
+    end
+  end
+end
+
+class Reader < Scanner::Scanner
+end
+
+Reader.relay
+Reader.new.direct
+LibC.exit(Reader.new.run)

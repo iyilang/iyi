@@ -1,0 +1,17 @@
+# A primitive call with no written receiver uses the frame's self
+# (hosted prepare_call_args, llvm_self). Status 4.
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+struct Int32
+  def shr(n : Int32) : Int32
+    unsafe_shr(n)
+  end
+end
+
+def go : Int32
+  8.shr(1)
+end
+
+LibC.exit(go)

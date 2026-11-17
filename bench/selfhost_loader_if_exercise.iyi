@@ -1,0 +1,16 @@
+import compiler/loader::{Loader}
+
+# Prints the files a top-level `{% if %}` require loaded. With no argument it
+# checks that the loader type is present and exits 0, so a bare run is quiet.
+args = Program.args
+if args.size == 0
+  loader = Loader.new
+  exit 0 if loader.load_prelude == false
+  exit 1
+end
+
+loader = Loader.new
+modules = loader.resolve(args[0])
+modules.each do |mod|
+  puts mod.filename
+end

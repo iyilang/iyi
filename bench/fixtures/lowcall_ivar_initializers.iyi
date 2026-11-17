@@ -1,0 +1,141 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+module Tagged
+  @tag : Int32 = 9
+
+  def tag : Int32
+    @tag
+  end
+end
+
+class Base
+  @base : Int32 = 5
+  @on : Bool = true
+
+  def base : Int32
+    @base
+  end
+
+  def on : Bool
+    @on
+  end
+end
+
+class Child < Base
+  include Tagged
+  @own : Int32 = -1
+
+  def own : Int32
+    @own
+  end
+end
+
+class Explicit
+  @a : Int32 = 3
+  @b : Int32 = 4
+
+  def initialize
+    @b = 40
+  end
+
+  def a : Int32
+    @a
+  end
+
+  def b : Int32
+    @b
+  end
+end
+
+class Assigned
+  @count = 7
+
+  def count : Int32
+    @count
+  end
+end
+
+
+struct Point
+  @x : Int32 = 11
+
+  def x : Int32
+    @x
+  end
+end
+
+class Box(T)
+  @size : Int32 = 2
+  @item : T? = nil
+
+  def size : Int32
+    @size
+  end
+
+  def item : T?
+    @item
+  end
+end
+
+
+
+class Order
+  @@sequence : Int32 = 0
+
+  def self.tick(n : Int32) : Int32
+    @@sequence = @@sequence &* 10 &+ n
+    n
+  end
+
+  def self.sequence : Int32
+    @@sequence
+  end
+end
+
+module OrderedModule
+  @third : Int32 = Order.tick(3)
+
+  def third : Int32
+    @third
+  end
+end
+
+class OrderedBase
+  @first : Int32 = Order.tick(1)
+  @second : Int32 = Order.tick(2)
+
+  def first : Int32
+    @first
+  end
+
+  def second : Int32
+    @second
+  end
+end
+
+class OrderedChild < OrderedBase
+  include OrderedModule
+  @fourth : Int32 = Order.tick(4)
+
+  def initialize
+    Order.tick(5)
+  end
+
+  def fourth : Int32
+    @fourth
+  end
+end
+
+child = Child.new
+explicit = Explicit.new
+box = Box(Assigned).new
+ordered = OrderedChild.new
+ok = child.base == 5 && child.on && child.tag == 9 && child.own == -1
+ok = ok && explicit.a == 3 && explicit.b == 40
+ok = ok && Assigned.new.count == 7 && Point.new.x == 11
+ok = ok && box.size == 2 && box.item.nil?
+ok = ok && ordered.first == 1 && ordered.second == 2 && ordered.third == 3 && ordered.fourth == 4
+ok = ok && Order.sequence == 12345
+LibC.exit(ok ? 0 : 1)

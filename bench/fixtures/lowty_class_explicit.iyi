@@ -1,0 +1,19 @@
+# Explicit instance variable declarations in the class body, initialised in initialize
+# (the hosted compiler refuses a declared variable that initialize does not set), under
+# iyi's object layout (the program declares IyiRuntimeLock, as the prelude does).
+class IyiRuntimeLock
+end
+
+class Point
+  @x : Int32
+  @y : Bool
+  @z : Float64
+
+  def initialize
+    @x = 0
+    @y = true
+    @z = 0.0
+  end
+end
+
+# type: Point

@@ -1,0 +1,28 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def helper(value : Int32) : Int32
+  7
+end
+
+class Base
+  def run(value : Int32) : Int32
+    helper(value)
+  end
+end
+
+class Child < Base
+  def helper(value : Int32) : Int32
+    9
+  end
+end
+
+def choose(flag : Bool) : Base
+  flag ? Base.new : Child.new
+end
+
+if choose(true).run(1) == 7
+  LibC.exit(choose(false).run(1))
+end
+LibC.exit(1)

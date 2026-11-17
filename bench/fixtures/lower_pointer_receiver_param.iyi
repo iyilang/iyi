@@ -1,0 +1,24 @@
+@[Unsafe("reads a local slot through a forwarded pointer receiver and calls C exit")]
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+struct Pointer(T)
+  @[NoInline]
+  def read_slot(offset : Int64) : T
+    (self + offset).value
+  end
+end
+
+@[NoInline]
+def inner(pointer : Pointer(Int32)) : Int32
+  pointer.read_slot(0_i64)
+end
+
+@[NoInline]
+def outer(pointer : Pointer(Int32)) : Int32
+  inner(pointer)
+end
+
+slot = 42
+LibC.exit(outer(pointerof(slot)))

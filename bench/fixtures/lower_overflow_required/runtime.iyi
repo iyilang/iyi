@@ -1,0 +1,11 @@
+@[Unsafe("the overflow runtime function calls C exit")]
+class IyiRuntimeLock
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+fun __iyi_raise_overflow : NoReturn
+  LibC.exit(99)
+end

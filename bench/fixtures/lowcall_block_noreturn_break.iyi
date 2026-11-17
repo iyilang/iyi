@@ -1,0 +1,11 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def run(&) : NoReturn
+  yield
+  LibC.exit(1)
+end
+
+value = run { break 7 }
+LibC.exit(value)

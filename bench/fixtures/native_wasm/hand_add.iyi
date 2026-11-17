@@ -1,0 +1,33 @@
+# A module built by hand with the wasm writer: one function, add(i32, i32) -> i32, exported as "add", with a
+# memory and a name section. The gate validates it and runs it under wasmtime. Usage: hand_add <out.wasm>
+
+module wasm_hand_add
+
+import compiler/native/wasm/module::{WasmModule, wasm_body, i32_const_expr}
+import compiler/native/wasm/leb::{uleb_i}
+import compiler/native/emit::{to_bytes}
+
+module HandAdd
+  def self.run : Nil
+    args = Program.args
+    wm = WasmModule.new
+    ti = wm.type_index([127_u8, 127_u8], [127_u8])
+    f = wm.add_function(ti)
+    code = [] of UInt8
+    code << 32_u8
+    uleb_i(code, 0)
+    code << 32_u8
+    uleb_i(code, 1)
+    code << 106_u8
+    wm.set_body(f, wasm_body([] of UInt8, code))
+    wm.set_function_name(f, "add")
+    wm.set_memory(1)
+    wm.add_export("add", 0_u8, f)
+    wm.add_export("memory", 2_u8, 0)
+    bytes = wm.write
+    File.write(args[0], String.new(to_bytes(bytes)))
+    print "WROTE #{args[0]} #{bytes.size}\n"
+  end
+end
+
+HandAdd.run

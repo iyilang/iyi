@@ -1,0 +1,14 @@
+def callee
+  next
+end
+
+def first
+  callee
+end
+
+def second
+  callee
+end
+
+first
+second

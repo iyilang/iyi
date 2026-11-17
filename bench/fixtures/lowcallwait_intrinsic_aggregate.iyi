@@ -1,0 +1,5 @@
+lib LibIntrinsic
+  fun sadd = "llvm.sadd.with.overflow.i32"(a : Int32, b : Int32) : {Int32, Bool}
+end
+
+LibIntrinsic.sadd(1, 2)

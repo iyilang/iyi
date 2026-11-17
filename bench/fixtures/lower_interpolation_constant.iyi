@@ -1,0 +1,9 @@
+class String
+  def self.interpolation(first : String, value : String, last : String) : String
+    first
+  end
+end
+
+WORD = "b"
+"a#{WORD}c"
+nil

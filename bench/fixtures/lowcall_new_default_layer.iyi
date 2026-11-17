@@ -1,0 +1,37 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+class Order
+  @@sequence : Int32 = 0
+
+  def self.tick(n : Int32) : Int32
+    @@sequence = @@sequence &* 10 &+ n
+    n
+  end
+
+  def self.sequence : Int32
+    @@sequence
+  end
+end
+
+class Layered
+  @first : Int32 = Order.tick(1)
+
+  def initialize(@second : Int32 = Order.tick(2), @line : Int32 = __LINE__)
+  end
+
+  def line : Int32
+    @line
+  end
+end
+
+class LayeredChild < Layered
+end
+
+a = Layered.new
+b = Layered.new(Order.tick(3))
+c = LayeredChild.new
+d = Layered.new(Order.tick(4), 9)
+ok = Order.sequence == 12311241 && a.line == b.line && b.line == c.line && d.line == 9
+LibC.exit(ok ? 0 : 1)

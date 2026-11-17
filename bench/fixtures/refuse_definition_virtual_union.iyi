@@ -1,0 +1,14 @@
+abstract class Base
+end
+
+class Leaf < Base
+end
+
+struct Box(T)
+end
+
+def bad(value : Box(Base | Int32)) : Int32
+  "wrong"
+end
+
+0

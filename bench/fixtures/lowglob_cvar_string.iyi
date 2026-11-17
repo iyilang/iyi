@@ -1,0 +1,19 @@
+class K
+  @@s : String = "hi"
+
+  def self.touch : Nil
+    @@s
+    nil
+  end
+end
+
+def h : Int32
+  K.touch
+  7
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+LibC.exit(h)

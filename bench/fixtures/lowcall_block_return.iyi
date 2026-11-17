@@ -1,0 +1,13 @@
+def last_yield(&)
+  yield 2
+end
+
+def first_value : Int32
+  last_yield { |v| return v }
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+LibC.exit(first_value)

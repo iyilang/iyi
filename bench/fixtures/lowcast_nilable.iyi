@@ -1,0 +1,14 @@
+# A variable assigned two types: `x = 1` then `x = nil` gives x the union Int32 | Nil, which is
+# a nilable value. The stores go into the union's struct (hosted assign, nilable target). The
+# value is not read back, so the status is the constant 7.
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def store(flag : Bool) : Int32
+  x = 1
+  x = nil
+  7
+end
+
+LibC.exit(store(true))

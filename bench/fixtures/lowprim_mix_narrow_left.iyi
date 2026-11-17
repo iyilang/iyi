@@ -1,0 +1,36 @@
+# Same sign, narrower left: Int32 against Int64. The left operand is sign-extended, the
+# compare runs at i64, and the wrapping add truncates the i64 sum back to Int32 (hosted
+# codegen_binary_extend_int, codegen_trunc_binary_op_result). The status is 1 + 2 + 4 + 7 = 14.
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def eq_nl(a : Int32, b : Int64) : Int32
+  if a == b
+    1
+  else
+    0
+  end
+end
+
+def ne_nl(a : Int32, b : Int64) : Int32
+  if a != b
+    2
+  else
+    0
+  end
+end
+
+def lt_nl(a : Int32, b : Int64) : Int32
+  if a < b
+    4
+  else
+    0
+  end
+end
+
+def add_nl(a : Int32, b : Int64) : Int32
+  a &+ b
+end
+
+LibC.exit(eq_nl(4, 4_i64) &+ ne_nl(2, 3_i64) &+ lt_nl(2, 9_i64) &+ add_nl(3, 4_i64))

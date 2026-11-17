@@ -1,0 +1,37 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+class A
+  def m(x : Int32) : Int32
+    1
+  end
+
+  def m(x : String) : Int32
+    2
+  end
+end
+
+class B
+  def m(x : Int32) : Int32
+    4
+  end
+
+  def m(x : String) : Int32
+    8
+  end
+end
+
+def receiver(flag : Bool) : A | B
+  flag ? A.new : B.new
+end
+
+def argument(flag : Bool) : Int32 | String
+  flag ? 3 : "three"
+end
+
+def value(a : Bool, b : Bool) : Int32
+  receiver(a).m(argument(b))
+end
+
+LibC.exit(value(true, true) &+ value(true, false) &+ value(false, true) &+ value(false, false))

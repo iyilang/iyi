@@ -1,0 +1,2 @@
+values = ["a", "b"]
+puts values.map { |value| value }.join("-")

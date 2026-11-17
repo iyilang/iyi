@@ -1,0 +1,7 @@
+class LeafItem
+  def bad : self
+    "not an item"
+  end
+end
+
+LeafItem.new

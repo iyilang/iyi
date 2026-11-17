@@ -1,0 +1,13 @@
+module Outer
+  Y = 4
+  S = "ab"
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+# Y is a literal, inlined at its read. Analysis refuses this read of a namespaced constant in an argument
+# (`undefined constant Y`, from the declarations lookup), so the lowering never sees it: waiting.
+Outer::S
+LibC.exit(Outer::Y)

@@ -1,0 +1,12 @@
+# Mixed unions: a type id word and a value area as large as the largest member,
+# aligned to the largest member alignment (and at least a pointer's).
+class Node
+end
+
+# type: Int32?
+# type: Int32 | Bool
+# type: Int32 | Node
+# type: Int8 | Int64
+# type: Int32 | Float64 | Nil
+# type: Int16 | Char
+# type: Int128 | Int8

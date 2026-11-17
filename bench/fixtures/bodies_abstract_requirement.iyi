@@ -1,0 +1,10 @@
+trait Greet
+  abstract def greet : String
+end
+
+def ask(item : Greet) : String
+  item.greet
+end
+
+item = uninitialized Greet
+ask(item)

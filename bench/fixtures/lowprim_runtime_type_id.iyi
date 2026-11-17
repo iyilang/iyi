@@ -1,0 +1,13 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def identity_type(value : Int32) : Int32
+  value.crystal_type_id
+end
+
+if identity_type(3) == identity_type(4)
+  LibC.exit(0)
+else
+  LibC.exit(1)
+end

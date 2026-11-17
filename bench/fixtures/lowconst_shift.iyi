@@ -1,0 +1,12 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+struct Int32
+  def <<(amount : Int32) : Int32
+    unsafe_shl(amount)
+  end
+end
+
+MASK = 3 << 4
+LibC.exit(MASK)

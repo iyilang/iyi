@@ -1,0 +1,23 @@
+# Atomic stores through a class method use the literal ordering.
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+struct IyiAtomic
+  @[Primitive(:store_atomic)]
+  def self.store(pointer : Pointer(UInt64), value : UInt64, ordering : Symbol, volatile : Bool) : Nil
+  end
+end
+
+def release(p : Pointer(UInt64), value : UInt64) : Nil
+  IyiAtomic.store(p, value, :release, false)
+end
+
+def sequential(p : Pointer(UInt64), value : UInt64) : Nil
+  IyiAtomic.store(p, value, :sequentially_consistent, false)
+end
+
+x = 0_u64
+release(pointerof(x), 7_u64)
+sequential(pointerof(x), 7_u64)
+LibC.exit(7)

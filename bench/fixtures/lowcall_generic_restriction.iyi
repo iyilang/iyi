@@ -1,0 +1,15 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+class Box(T)
+  def initialize
+  end
+
+  def self.take(value : T)
+    value
+  end
+end
+
+Box(Int32).new
+LibC.exit(Box(Int32).take(7))

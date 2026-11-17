@@ -1,0 +1,3 @@
+class CannotResolveImport
+  import pipeline_nonexistent_dependency
+end

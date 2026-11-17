@@ -1,0 +1,12 @@
+struct Int32
+  def self.identity(value : Int32) : Int32
+    copy = value
+    copy
+  end
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+LibC.exit(Int32.identity(7))

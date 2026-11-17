@@ -1,0 +1,5 @@
+fun unused_helper(x : Int32) : Int32
+  x
+end
+
+1

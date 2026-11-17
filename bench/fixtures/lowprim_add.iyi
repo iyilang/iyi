@@ -1,0 +1,12 @@
+# The first primitive, end to end: a wrapping add on Int32. The builtin Int32#&+ is the
+# library's own primitive (src/primitives.cr), typed bare with no prelude. The exit status
+# is the computed value.
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def add(a : Int32, b : Int32) : Int32
+  a &+ b
+end
+
+LibC.exit(add(2, 3))

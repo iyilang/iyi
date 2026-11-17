@@ -1,0 +1,26 @@
+# A splat parameter read as a tuple: `keys.size` and `keys[at]` on `*keys` are
+# valid iyi under the default prelude, and the oracle compiles this file there
+# (it prints 5). The port does not type splat parameters, so it refuses the
+# function by name and writes no IR. This is a port limitation, not a
+# refusal the oracle makes: bench/selfhost_codegen_exercise.sh (section 3c)
+# checks the port's refusal and its message, and the oracle's status is recorded
+# only for information.
+class Gather
+  def [](key : Int32) : Int32
+    key &+ 1
+  end
+
+  def run_splat(*keys : Int32) : Int32
+    total = 0
+    at = 0
+    while at < keys.size
+      total = total &+ self[keys[at]]
+      at = at + 1
+    end
+    total
+  end
+end
+
+fun test_splat_loop(a : Int32, b : Int32) : Int32
+  Gather.new.run_splat(a, b)
+end

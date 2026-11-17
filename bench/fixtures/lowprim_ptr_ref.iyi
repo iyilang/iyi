@@ -1,0 +1,21 @@
+# pointer_set of a class: store the reference and return it (hosted assign, to_rhs). Status 1.
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+class Box
+  def initialize
+  end
+end
+
+def poke(p : Pointer(Box), v : Box) : Box
+  p.value = v
+end
+
+def go : Int32
+  b = Box.new
+  poke(pointerof(b), b)
+  1
+end
+
+LibC.exit(go)

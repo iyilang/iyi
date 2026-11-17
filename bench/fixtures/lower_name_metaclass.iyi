@@ -1,0 +1,9 @@
+# A metaclass receiver is named with :: rather than .class#.
+class NameOwner
+  def self.class_flag(n : Int32) : Int32
+    x = n
+    x
+  end
+end
+
+NameOwner.class_flag(1)

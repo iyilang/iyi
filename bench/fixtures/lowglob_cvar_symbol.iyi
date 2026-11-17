@@ -1,0 +1,15 @@
+class K
+  @@value : Symbol = :ready
+
+  def self.value : Symbol
+    @@value
+  end
+end
+
+K.value
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+LibC.exit(0)

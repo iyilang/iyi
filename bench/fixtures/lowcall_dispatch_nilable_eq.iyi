@@ -1,0 +1,23 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+class Object
+  def ==(other) : Bool
+    false
+  end
+end
+
+class String
+  def ==(other : String) : Bool
+    true
+  end
+end
+
+def pick(flag : Bool) : String | Nil
+  flag ? "a" : nil
+end
+
+s = "a"
+result = (s == pick(true)) && !(s == pick(false))
+LibC.exit(result ? 7 : 0)

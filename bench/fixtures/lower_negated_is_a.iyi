@@ -1,0 +1,40 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+  fun putchar(value : Int32) : Int32
+end
+
+class ScopeBase
+  def initialize(@number : Int32)
+  end
+
+  def number : Int32
+    @number
+  end
+end
+
+class ScopeProgram < ScopeBase
+end
+
+def lookup(scope : ScopeBase, enabled : Bool) : Bool
+  if enabled && !scope.is_a?(ScopeProgram) && scope.number == 7
+    return true
+  end
+  false
+end
+
+def make_program : ScopeProgram
+  LibC.putchar(65)
+  ScopeProgram.new(7)
+end
+
+def direct_test : Bool
+  if !make_program.is_a?(ScopeProgram)
+    true
+  else
+    false
+  end
+end
+
+failed = lookup(ScopeProgram.new(7), true)
+passed = lookup(ScopeBase.new(7), true)
+LibC.exit(failed || !passed || direct_test ? 1 : 0)

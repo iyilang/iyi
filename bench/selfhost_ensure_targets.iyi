@@ -1,0 +1,132 @@
+module bench/selfhost_ensure_targets
+
+import compiler/syntax/ast::{ASTNode, Block, Break, Call, Def, Expressions, Next, ProcLiteral, Return, While}
+import compiler/syntax/parser::{Parser}
+import compiler/syntax/visitor::{Visitor}
+import compiler/semantic/top_level::{SemanticProgram, TopLevelVisitor}
+import compiler/semantic/main_visitor::{MainVisitor}
+
+class ReturnTargets < Visitor
+  getter lines : Array(String) = [] of String
+
+  def initialize(@expected : Def)
+  end
+
+  def visit(node : Return) : Bool
+    if target = node.target
+      raise "return targets a different def" unless target.node_id == @expected.node_id
+      node_line = if loc = node.location
+                    loc.line_number
+                  else
+                    0
+                  end
+      target_line = if loc = target.location
+                      loc.line_number
+                    else
+                      0
+                    end
+      @lines << "#{node_line} Return Def #{target_line}"
+    else
+      @lines << "Return missing target"
+    end
+    true
+  end
+end
+
+class LoopTargets < Visitor
+  getter lines : Array(String) = [] of String
+  getter last_next_target : ASTNode? = nil
+
+  def describe(node : ASTNode, target : ASTNode?) : String
+    line = if loc = node.location
+             loc.line_number
+           else
+             0
+           end
+    if target
+      kind = if target.is_a?(While)
+               "While"
+             elsif target.is_a?(Block)
+               "Block"
+             elsif target.is_a?(Call)
+               "Call"
+             elsif target.is_a?(Def)
+               "Def"
+             else
+               "other"
+             end
+      target_line = if loc = target.location
+                      loc.line_number
+                    else
+                      0
+                    end
+      "#{line} #{kind} #{target_line}"
+    else
+      "#{line} missing"
+    end
+  end
+
+  def visit(node : Break) : Bool
+    @lines << "Break #{describe(node, node.target)}"
+    true
+  end
+
+  def visit(node : Next) : Bool
+    @last_next_target = node.target
+    @lines << "Next #{describe(node, node.target)}"
+    true
+  end
+end
+
+source = "def answer\n  return 42\nend\nanswer\n"
+node = Parser.new(source, "targets.iyi").parse
+program = SemanticProgram.new
+declarations = TopLevelVisitor.new(program, "targets.iyi")
+node.accept(declarations)
+declarations.finish
+visitor = MainVisitor.new(program)
+visitor.total = true
+node.accept(visitor)
+lines = [] of String
+visitor.typed_instances.each do |instance|
+  if instance.definition.name == "answer"
+    walk = ReturnTargets.new(instance.definition)
+    instance.definition.accept(walk)
+    lines.concat(walk.lines)
+  end
+end
+expected = ["2 Return Def 1"]
+raise "return targets: #{lines}" unless lines == expected
+puts lines.first
+
+source = "def once\n  yield\nend\nwhile false\n  next\nend\nwhile false\n  break\nend\nonce do\n  next\nend\nonce do\n  break\nend\n"
+node = Parser.new(source, "jumps.iyi").parse
+program = SemanticProgram.new
+declarations = TopLevelVisitor.new(program, "jumps.iyi")
+node.accept(declarations)
+declarations.finish
+visitor = MainVisitor.new(program)
+visitor.total = true
+node.accept(visitor)
+walk = LoopTargets.new
+node.accept(walk)
+expected = ["Next 5 While 4", "Break 8 While 7", "Next 11 Block 10", "Break 14 Call 13"]
+raise "jump targets: #{walk.lines}" unless walk.lines == expected
+walk.lines.each { |line| puts line }
+
+source = "def capture(&block : -> Int32)\n  block\nend\ncapture do\n  next 42\nend\n"
+node = Parser.new(source, "captured.iyi").parse
+program = SemanticProgram.new
+declarations = TopLevelVisitor.new(program, "captured.iyi")
+node.accept(declarations)
+declarations.finish
+visitor = MainVisitor.new(program)
+visitor.total = true
+node.accept(visitor)
+block = node.as(Expressions).expressions.last.as(Call).block.as(Block)
+captured = block.fun_literal.as(ProcLiteral)
+walk = LoopTargets.new
+captured.def.body.accept(walk)
+raise "captured block target: #{walk.lines}" unless walk.lines == ["Next 5 Def 4"]
+raise "captured next targets another def" unless walk.last_next_target.as(Def).node_id == captured.def.node_id
+puts walk.lines.first

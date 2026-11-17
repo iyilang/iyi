@@ -1,0 +1,9 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+fun __iyi_preempt : Nil
+  LibC.exit(1)
+end
+
+LibC.exit(7)

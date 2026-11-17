@@ -1,0 +1,14 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+  fun getpid : Int32
+end
+
+def pick_tuple(flag : Bool) : Tuple(Int32, Int32)
+  if flag
+    {3, 7}
+  else
+    {5, 9}
+  end
+end
+
+LibC.exit(pick_tuple(LibC.getpid != -1)[1])

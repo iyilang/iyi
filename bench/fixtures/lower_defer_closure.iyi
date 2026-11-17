@@ -1,0 +1,34 @@
+lib LibC
+  fun malloc(size : UInt64) : Void*
+  fun free(ptr : Void*) : Nil
+  fun exit(status : Int32) : NoReturn
+end
+
+macro exception_runtime
+  fun {{ ("__cry" + "stal_personality").id }}(version : Int32, actions : Int32, exception_class : UInt64, exception_object : Void*, context : Void*) : Int32
+    0
+  end
+  fun {{ ("__cry" + "stal_get_exception").id }}(exception : Void*) : UInt64
+    0_u64
+  end
+  fun {{ ("__cry" + "stal_raise").id }}(exception : Void*) : NoReturn
+    LibC.exit(99)
+  end
+end
+
+exception_runtime
+
+def deferred(flag : Bool) : Int32
+  ptr = LibC.malloc(64_u64)
+  defer LibC.free(ptr)
+  i = 0
+  while i < 1000
+    temporary = LibC.malloc(64_u64)
+    LibC.free(temporary)
+    i = i &+ 1
+  end
+  return 11 if flag
+  11
+end
+
+LibC.exit(deferred(true) &- 11)

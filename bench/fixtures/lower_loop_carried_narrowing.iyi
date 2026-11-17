@@ -1,0 +1,85 @@
+@[Unsafe("calls C exit to report the loop-carried result")]
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+class Node
+  @next : Node?
+
+  def initialize(@value : Int32)
+    @next = nil
+  end
+
+  def value : Int32
+    @value
+  end
+
+  def next : Node?
+    @next
+  end
+
+  def next=(node : Node?) : Node?
+    @next = node
+  end
+end
+
+def link(prev : Node?, n : Node) : Int32
+  if p = prev
+    p.next = n
+    p.value
+  else
+    0
+  end
+end
+
+def bump(x, v)
+  return x &+ v if x
+  v
+end
+
+last : Node? = nil
+t : Int32? = nil
+u : Int32? = nil
+links = 0
+seen = 0
+i = 0
+while i < 3
+  if last.is_a?(Node)
+    seen = seen &+ 1
+    last.next
+  end
+  n = Node.new(i &+ 5)
+  links = links &+ link(last, n)
+  last = n
+  t = t ? t &+ n.value : n.value
+  u = bump(u, n.value)
+  i = i &+ 1
+end
+
+a : Int32? = nil
+b : Int32? = nil
+c : Int32? = nil
+i = 0
+while i < 4
+  if cc = c
+    cc &+ 1
+  end
+  c = b
+  b = a
+  a = i &+ 10
+  i = i &+ 1
+end
+
+sum = 0
+if value = t
+  sum = value
+end
+shifted = 0
+if cc = c
+  shifted = cc
+end
+bumped = 0
+if value = u
+  bumped = value
+end
+LibC.exit(links &+ seen &+ sum &+ shifted &+ (bumped &- sum))

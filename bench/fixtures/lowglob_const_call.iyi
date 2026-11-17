@@ -1,0 +1,15 @@
+def mk : Int32
+  9
+end
+
+B = mk
+
+def f
+  B
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+LibC.exit(f)

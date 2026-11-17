@@ -1,0 +1,26 @@
+# Checked Int32 arithmetic: `+`, `-` and `*` are the builtin primitives with the overflow
+# intrinsic and the raise (hosted codegen_addsub_with_overflow, codegen_mul_with_overflow). The
+# program defines `__crystal_raise_overflow` itself, as a `fun` with a body, because the hosted
+# build needs that function in the module (NEEDS.md row 25). No overflow happens here.
+# The status is 5 + 6 + 12 = 23.
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+fun __crystal_raise_overflow : NoReturn
+  LibC.exit(99)
+end
+
+def sum(a : Int32, b : Int32) : Int32
+  a + b
+end
+
+def diff(a : Int32, b : Int32) : Int32
+  a - b
+end
+
+def prod(a : Int32, b : Int32) : Int32
+  a * b
+end
+
+LibC.exit(sum(2, 3) &+ diff(10, 4) &+ prod(3, 4))

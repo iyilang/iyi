@@ -1,0 +1,3 @@
+# Empty on purpose. The require name ends in iyi/prelude, which is what makes
+# Program#iyi_prelude? true. The fixture declares IyiRuntimeLock. A prelude named
+# empty leaves that flag false, so the hosted compiler looks up the other runtime.

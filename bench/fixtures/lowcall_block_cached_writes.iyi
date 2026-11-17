@@ -1,0 +1,125 @@
+@[Unsafe("reports writes from reused yielded-block instances through the exit status")]
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+abstract class Answer
+  abstract def code : Int32
+end
+
+class Left < Answer
+  def code : Int32
+    3
+  end
+end
+
+class Right < Answer
+  def code : Int32
+    5
+  end
+end
+
+class Entry
+  def initialize(@name : Int32, @value : Answer?)
+  end
+
+  def name : Int32
+    @name
+  end
+
+  def value : Answer?
+    @value
+  end
+end
+
+# Typed block parameters keep these calls cached by their written blocks.
+def each_name(& : Int32 -> Nil) : Nil
+  yield 1
+  yield 2
+  yield 3
+end
+
+def each_entry(& : Entry -> Nil) : Nil
+  yield Entry.new(1, Left.new)
+  yield Entry.new(2, nil)
+  yield Entry.new(3, Right.new)
+end
+
+def repeat(count : Int32, & : Int32 -> Nil) : Nil
+  index = 0
+  while index < count
+    yield index
+    index = index &+ 1
+  end
+end
+
+# Each yield revisits the block; the inner call reuses its instance.
+def resolved : Int32
+  total = 0
+  each_name do |name|
+    answer : Answer? = nil
+    each_entry { |item| answer = item.value if item.name == name }
+    total = total &+ (answer.nil? ? 0 : answer.code)
+  end
+  total
+end
+
+# A loop revisits its yield, as Array#each does.
+def looped : Int32
+  total = 0
+  repeat(3) do |round|
+    found : Answer? = nil
+    each_entry { |item| found = item.value if item.name == round &+ 1 }
+    total = total &+ (found.nil? ? 0 : found.code)
+  end
+  total
+end
+
+# Three nested blocks exercise the bootstrap's resolve_impl_traits shape.
+def nested : Int32
+  total = 0
+  repeat(1) do |outer|
+    repeat(3) do |round|
+      found : Answer? = nil
+      each_entry { |item| found = item.value if item.name == round &+ outer &+ 1 }
+      total = total &+ (found.nil? ? 0 : found.code)
+    end
+  end
+  total
+end
+
+# A block that never runs leaves the caller's value nil.
+def untouched : Int32
+  misses = 0
+  each_name do |name|
+    seen : Answer? = nil
+    repeat(0) { |never| seen = Left.new }
+    misses = misses &+ 1 if seen.nil?
+  end
+  misses
+end
+
+# A block parameter shadows the caller's local of the same name.
+def shadowed : Int32
+  each_name do |name|
+    label = name == 1
+    repeat(1) { |label| label = label &+ 1 }
+    if label
+      LibC.exit(40) unless name == 1
+    end
+  end
+  0
+end
+
+picked = 0
+each_name do |name|
+  pick : Answer? = nil
+  each_entry { |item| pick = item.value if item.name == name }
+  picked = picked &+ 1 unless pick.nil?
+end
+LibC.exit(1) unless resolved == 8
+LibC.exit(2) unless looped == 8
+LibC.exit(3) unless nested == 8
+LibC.exit(4) unless untouched == 3
+LibC.exit(5) unless picked == 2
+LibC.exit(shadowed)

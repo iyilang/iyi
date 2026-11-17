@@ -1,0 +1,14 @@
+# Typing a dead branch must not cache an inferred NoReturn for a later live call.
+def broken(n : Int32)
+  n.missing_method
+end
+
+def probe(x)
+  if x.is_a?(Int32)
+    broken(1)
+  end
+  0
+end
+
+probe(nil)
+broken(2)

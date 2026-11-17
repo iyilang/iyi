@@ -1,0 +1,19 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def pick(value : Int32, amount : Int64) : Int64
+  amount
+end
+
+def pick(value : Bool, amount : Int64) : Int64
+  amount
+end
+
+def either(flag : Bool) : Int32 | Bool
+  flag ? 3 : false
+end
+
+first = pick(value: either(true), amount: 7_i32)
+second = pick(value: either(false), amount: 7_i32)
+LibC.exit(first == 7_i64 && second == 7_i64 ? 7 : 1)

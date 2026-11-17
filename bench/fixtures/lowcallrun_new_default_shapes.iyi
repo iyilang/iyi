@@ -1,0 +1,68 @@
+@[Unsafe("reports constructor evaluation order and result")]
+lib LibC
+  fun exit(status : Int32) : NoReturn
+  fun putchar(value : Int32) : Int32
+end
+
+# Checked casts in the empty-prelude oracle must fail observably.
+def raise(message : String) : NoReturn
+  LibC.exit(97)
+end
+
+def mark(value : Int32) : Int32
+  LibC.putchar(value)
+  value
+end
+
+class Named
+  @tag : Int32 = mark(65)
+
+  def initialize(@x : Int32, @y : Int32 = mark(66))
+  end
+
+  def code : Int32
+    @x &+ @y
+  end
+end
+
+class OnlyNamed
+  @tag : Int32 = mark(67)
+
+  def initialize(*, @w : Int32, @h : Int32 = mark(68))
+  end
+
+  def code : Int32
+    @w &+ @h
+  end
+end
+
+class Spread
+  @sum : Int32
+
+  def initialize(*values)
+    @sum = values[0] &+ values[1]
+  end
+
+  def code : Int32
+    @sum
+  end
+end
+
+class GBox(T)
+  @tag : Int32 = mark(69)
+
+  def initialize(@v : T, @n : Int32 = mark(70))
+  end
+
+  def code : Int32
+    @n
+  end
+end
+
+a = Named.new(y: mark(50), x: mark(49))
+b = Named.new(x: mark(51))
+c = OnlyNamed.new(w: mark(52))
+d = Spread.new(mark(53), mark(54))
+e = GBox(Int32).new(mark(55))
+total = a.code &+ b.code &+ c.code &+ d.code &+ e.code
+LibC.exit(total &- 450)

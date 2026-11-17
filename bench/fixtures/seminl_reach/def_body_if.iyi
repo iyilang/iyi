@@ -1,0 +1,12 @@
+class SeminlDefIf
+  # A def whose body is one top-level `{% if %}` node: the typer splices it (main_visitor.iyi).
+  def pick : Int32
+    {% if true %}
+      1
+    {% else %}
+      2
+    {% end %}
+  end
+end
+
+puts SeminlDefIf.new.pick

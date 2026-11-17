@@ -1,0 +1,24 @@
+@[Unsafe("helper records its own call site")]
+lib LibC
+  fun putchar(value : Int32) : Int32
+end
+
+def nested(line = __LINE__, file = __FILE__, folder = __DIR__, ending = __END_LINE__)
+  LibC.putchar(line)
+  LibC.putchar(ending)
+end
+
+def outer
+  nested(
+  )
+end
+
+def wrapped(n : Int32 = 7, line = __LINE__, file = __FILE__)
+  LibC.putchar(n)
+  LibC.putchar(line)
+end
+
+def named_magic(a = __LINE__, b = __FILE__, c = __END_LINE__)
+  LibC.putchar(a)
+  LibC.putchar(c)
+end

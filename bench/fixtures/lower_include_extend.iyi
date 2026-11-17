@@ -1,0 +1,29 @@
+lib LibC
+  fun putchar(value : Int32) : Int32
+  fun exit(status : Int32) : NoReturn
+end
+
+module Base
+  def base : Int32
+    65
+  end
+end
+
+module Bonus
+  def bonus : Int32
+    66
+  end
+end
+
+module Tools
+  extend self
+end
+
+struct Counter
+  include Base
+  extend Bonus
+end
+
+LibC.putchar(Counter.new.base)
+LibC.putchar(Counter.bonus)
+LibC.exit(7)

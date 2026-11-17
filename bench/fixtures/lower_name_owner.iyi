@@ -1,0 +1,17 @@
+# An inherited method is named after the receiver and the type that defined it
+# (hosted Def#mangled_name: *Child^Base#flag<Int32>:Int32). A literal body is
+# inlined and emits no function, so the body copies its argument. Child's own
+# new is *Child::new.
+class Base
+  def flag(n : Int32) : Int32
+    x = n
+    x
+  end
+end
+
+class Child < Base
+  def initialize
+  end
+end
+
+Child.new.flag(1)

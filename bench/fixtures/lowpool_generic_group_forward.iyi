@@ -1,0 +1,21 @@
+class Carrier(T)
+  def initialize(@value : T)
+  end
+end
+
+class Runner
+  def later(&block : -> T) : Carrier(T) forall T
+    Carrier(T).new(block.call)
+  end
+
+  def forward(*, unit : Symbol, &block : -> T) : Carrier(T) forall T
+    {% if true %}
+      return later(&block) if false
+    {% end %}
+    later(&block)
+  end
+end
+
+group do |g|
+  Runner.new.forward(unit: :same) { 7 }
+end

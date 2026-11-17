@@ -1,0 +1,11 @@
+module Outer
+  S = "ab"
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+# S is a string constant in a namespace: its global is named Outer::S (hosted llvm_name), read as a bare statement.
+Outer::S
+LibC.exit(4)

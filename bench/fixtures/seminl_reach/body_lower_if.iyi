@@ -1,0 +1,6 @@
+def macro_choice : Int32
+  {% if true %} 42 {% else %} 17 {% end %}
+end
+
+macro_choice
+nil

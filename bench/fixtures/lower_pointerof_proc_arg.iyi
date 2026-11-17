@@ -1,0 +1,14 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def address(reader : Proc(Int32)) : UInt64
+  Pointer(UInt64).new(pointerof(reader).address).value
+end
+
+reader = -> { 1 }
+if address(reader) == 0_u64
+  LibC.exit(1)
+else
+  LibC.exit(0)
+end

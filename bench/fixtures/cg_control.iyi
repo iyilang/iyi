@@ -1,0 +1,17 @@
+fun abs_val(x : Int32) : Int32
+  if x < 0
+    0 &- x
+  else
+    x
+  end
+end
+
+fun sum_up_to(n : Int32) : Int32
+  total = 0
+  i = 1
+  while i <= n
+    total = total &+ i
+    i = i &+ 1
+  end
+  total
+end

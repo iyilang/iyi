@@ -1,0 +1,34 @@
+module bench/selfhost_ensure_refusal
+
+import compiler/syntax/parser::{Parser}
+import compiler/semantic/top_level::{SemanticProgram}
+import compiler/semantic/main_visitor::{MainVisitor}
+
+def check(source : String, filename : String, prelude : Bool, expected : String) : Nil
+  program = SemanticProgram.new
+  program.iyi_prelude = prelude
+  visitor = MainVisitor.new(program)
+  visitor.total = true
+  node = Parser.new(source, filename).parse
+  node.accept(visitor)
+  found = false
+  visitor.refusals.each do |refusal|
+    found = true if refusal.reason.starts_with?(expected)
+  end
+  if expected.empty?
+    raise "unexpected refusal" unless visitor.refusals.empty?
+  else
+    raise "missing refusal: #{expected}" unless found
+  end
+end
+
+source = "begin\n  1\nensure\n  2\nend\n"
+check(source, "fixture.iyi", true, "iyi has no `ensure`")
+check(source, "fixture.iyi", false, "")
+check(source, "fixture.cr", true, "")
+check("begin\n  1\nensure\n  break\nend\n", "fixture.cr", false, "can't use break inside ensure")
+check("begin\n  1\nensure\n  next\nend\n", "fixture.cr", false, "can't use next inside ensure")
+check("begin\n  1\nensure\n  return\nend\n", "fixture.cr", false, "can't return from ensure")
+check("begin\n  1\nensure\n  while false\n    next\n  end\nend\n", "fixture.cr", false, "")
+check("begin\n  1\nensure\n  while true\n    break\n  end\nend\n", "fixture.cr", false, "")
+puts "ensure refusal and nested-loop boundary: ok"

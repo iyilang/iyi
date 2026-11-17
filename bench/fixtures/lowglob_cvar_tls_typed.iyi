@@ -1,0 +1,19 @@
+class Tls
+  @[ThreadLocal]
+  @@count : Int32 = 7
+
+  def self.count : Int32
+    @@count
+  end
+
+  def self.set(value : Int32)
+    @@count = value
+  end
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+Tls.set(9)
+LibC.exit(Tls.count)

@@ -1,0 +1,13 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def distance(p : Pointer(Int32)) : Int32
+  if (p + 2_i64) - p == 2_i64
+    7
+  else
+    0
+  end
+end
+
+LibC.exit(distance(Pointer(Int32).malloc(3_u64)))

@@ -1,0 +1,15 @@
+# Bool equality: `==` on Bool is the builtin primitive (hosted BoolType overloads).
+# The status is 7: true == true, and true == false is not taken.
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def same(a : Bool, b : Bool) : Int32
+  if a == b
+    7
+  else
+    0
+  end
+end
+
+LibC.exit(same(true, true) &+ same(true, false))

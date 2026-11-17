@@ -1,0 +1,9 @@
+# A top-level `{% if %}` that requires a file whose fun has a body, called from the root. The
+# declarations pass expands the site and reads the required file; the unit the pipeline holds for that
+# file is the one the root's fun list holds, so the root's call must find the fun's record. Gate:
+# bench/selfhost_semantic_inline_macros_exercise.sh, section 8 (pipeline reach).
+{% if true %}
+  require "./helper"
+{% end %}
+
+puts seminl_reach_value

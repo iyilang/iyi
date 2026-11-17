@@ -1,0 +1,50 @@
+import compiler/syntax/parser::{Parser}
+import compiler/syntax/ast::{Call, Var}
+import compiler/syntax/visitor::{Visitor}
+import compiler/semantic/normalizer::{Normalizer, NormalizerProgram}
+import compiler/semantic/top_level::{SemanticProgram, TopLevelVisitor}
+import compiler/semantic/main_visitor::{MainVisitor}
+
+class RequirementCallWalk < Visitor
+  def initialize(@visitor : MainVisitor)
+  end
+
+  def visit(node : Call) : Bool
+    if node.name == "greet"
+      if obj = node.obj
+        if obj.is_a?(Var) && obj.name == "item"
+          if result = @visitor.type_of?(node)
+            puts "item.greet: #{result.full_name}"
+          end
+        end
+      end
+    end
+    true
+  end
+end
+
+path = Program.args[0]
+parser = Parser.new(File.read(path), path)
+node = Normalizer.new(NormalizerProgram.new(false)).normalize(parser.parse)
+program = SemanticProgram.new
+program.total_mode = true
+program.search_path = [Program.args[1]]
+top = TopLevelVisitor.new(program, path)
+node.accept(top)
+top.finish
+visitor = MainVisitor.new(program)
+visitor.total = true
+node.accept(visitor)
+puts "refusals: #{visitor.refusals.size}"
+abstract_instances = 0
+walk = RequirementCallWalk.new(visitor)
+visitor.typed_instances.each do |instance|
+  definition = instance.definition
+  abstract_instances += 1 if definition.abstract
+  if definition.name == "ask"
+    if body = definition.body
+      body.accept(walk)
+    end
+  end
+end
+puts "abstract instances: #{abstract_instances}"

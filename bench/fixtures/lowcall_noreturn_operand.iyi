@@ -1,0 +1,28 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def stop(code : Int32)
+  LibC.exit(code)
+end
+
+def double(value : Int32)
+  value &* 2
+end
+
+def receiver_form(flag : Bool) : Int32
+  return 1 unless flag
+  stop(0) &+ 1
+end
+
+def argument_form(flag : Bool) : Int32
+  return 1 unless flag
+  double(stop(0))
+end
+
+LibC.exit(3) unless double(21) == 42
+LibC.exit(4) unless receiver_form(false) == 1
+LibC.exit(5) unless argument_form(false) == 1
+argument_form(true)
+receiver_form(true)
+LibC.exit(6)

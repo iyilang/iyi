@@ -1,0 +1,36 @@
+@[Unsafe("reports block branch values")]
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+class First
+end
+
+def invoke(flag : Bool, &)
+  yield flag
+end
+
+# Exercise pointer and immediate branch values. The lowerer's local collector
+# also merges these assignments, independently of the semantic storage table.
+def branch(flag : Bool) : Int32
+  invoke(flag) do |choice|
+    if choice
+      item = First.new
+    else
+      item = 9
+    end
+    item.is_a?(First) ? 7 : item.as(Int32)
+  end
+end
+
+def with_argument(&)
+  yield 1
+end
+
+# Argument slots use the semantic storage table rather than the local collector.
+# Reassigning to a reference must widen the yielded Int32's physical slot.
+argument = with_argument do |item|
+  item = First.new
+  item.is_a?(First) ? 7 : 9
+end
+LibC.exit(branch(true) &+ branch(false) &+ argument)

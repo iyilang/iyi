@@ -1,0 +1,5 @@
+CONST_A = 15
+
+class CrossCalc
+  FACTOR = 2
+end

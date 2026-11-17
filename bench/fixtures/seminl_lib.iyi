@@ -1,0 +1,9 @@
+lib LibDemo
+  {% for n in ["alpha", "beta"] %}
+    fun {{ n.id }} : Int32
+  {% end %}
+
+  {% if flag?(:darwin) %}
+    fun gamma(x : Int32) : Int32
+  {% end %}
+end

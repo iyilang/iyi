@@ -1,0 +1,5 @@
+def capture(value : Int32, &block : Int32 -> _) : Nil
+  block.call(value)
+end
+
+capture(7) { |item| item }

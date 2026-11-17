@@ -1,0 +1,16 @@
+class Sched
+  def self.go(value : Int32) : Int32
+    copy = value
+    copy
+  end
+end
+
+def scheduler : Sched.class
+  Sched
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+LibC.exit(scheduler.go(7))

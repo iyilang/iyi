@@ -1,0 +1,23 @@
+# A name declared before a macro block, then taken with pointerof through the block.
+# The class body is spliced in place (top_level.iyi visit(Expressions)), and the site's
+# expansion is parsed knowing seminl_prior (inline_macros.iyi). A plain read of that name
+# still types when the scope is dropped: a zero-argument call finds the local the earlier
+# assignment recorded. pointerof does not. It refuses an operand that is not a local, and
+# a class body is outside any def, so the gate's root-refusal count rises. The fun below
+# is the same shape inside a fun body (type_nodes.iyi visit_fun_def).
+class SeminlPrior
+  seminl_prior = 1
+  {% if true %}
+    seminl_prior_ptr = pointerof(seminl_prior)
+  {% end %}
+end
+
+@[Unsafe("a C function is not checked by the compiler")]
+fun probe_locals(argc : Int32) : Int32
+  x = 1
+  {% if true %}
+    y = x + 1
+  {% end %}
+  argc + y
+end
+probe_locals(0)

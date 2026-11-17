@@ -1,0 +1,20 @@
+import compiler/ir/module::{Module}
+import compiler/ir/types::{IrType}
+import compiler/ir/layout::{LayoutError}
+import compiler/platform/target::{Target}
+import compiler/lower/fun::{discard_probe_functions}
+
+made = Module.for_target("cleanup", Target.new("aarch64-apple-darwin"))
+raise "target layout unavailable" if made.is_a?(LayoutError)
+m = made.as(Module)
+fn_type = m.types.func([] of IrType, m.types.void)
+m.add_function("keep_a", fn_type)
+m.add_function("keep_b", fn_type)
+before = ["keep_a", "keep_b"]
+m.add_function("drop_a", fn_type)
+m.add_function("drop_b", fn_type)
+discard_probe_functions(m, before)
+raise "wrong survivors" unless m.functions.size == 2 && m.functions[0].name == "keep_a" && m.functions[1].name == "keep_b"
+raise "stale name index" unless m.get_function?("drop_a").nil? && m.get_function?("drop_b").nil?
+m.add_function("drop_a", fn_type)
+puts "probe cleanup keeps prior functions"

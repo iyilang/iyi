@@ -1,0 +1,13 @@
+class Svc
+  def initialize(v)
+    @v = v
+  end
+
+  def part1 : Int32
+    @v
+  end
+end
+
+fun main(argc : Int32, argv : Pointer(Pointer(UInt8))) : Int32
+  Svc.new(7).part1
+end

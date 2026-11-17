@@ -1,0 +1,14 @@
+class Sched
+end
+
+def scheduler : Sched.class
+  Sched
+end
+
+scheduler
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+LibC.exit(0)

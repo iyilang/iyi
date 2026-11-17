@@ -1,0 +1,26 @@
+# A pointer stores a by-value struct.
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+struct Pair
+  def initialize(@x : Int32)
+  end
+
+  def x : Int32
+    @x
+  end
+end
+
+def poke(p : Pointer(Pair), v : Pair) : Nil
+  p.value = v
+  nil
+end
+
+def go : Int32
+  x = Pair.new(7)
+  poke(pointerof(x), x)
+  x.x
+end
+
+LibC.exit(go)

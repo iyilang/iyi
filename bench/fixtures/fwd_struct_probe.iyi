@@ -1,0 +1,33 @@
+# Holder names Inner by value in a field, and Inner is defined after it. Its
+# LLVM struct type must exist when Holder's body is laid out, with Inner's body
+# set first, rather than read as an unset key and panic.
+struct Holder
+  @inner : Inner
+  @n : Int32
+
+  def initialize(n : Int32)
+    @inner = uninitialized Inner
+    @n = n
+  end
+
+  def n : Int32
+    @n
+  end
+end
+
+struct Inner
+  @v : Int32
+
+  def initialize(v : Int32)
+    @v = v
+  end
+
+  def v : Int32
+    @v
+  end
+end
+
+fun test_forward_struct(n : Int32) : Int32
+  h = Holder.new(n)
+  h.n
+end

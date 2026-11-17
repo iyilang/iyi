@@ -1,0 +1,14 @@
+def id(x : Int32) : Int32
+  x
+end
+
+def id(x : Bool) : Bool
+  x
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+id(true)
+LibC.exit(id(5))

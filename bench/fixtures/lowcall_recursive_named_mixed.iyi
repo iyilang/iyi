@@ -1,0 +1,15 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def recursive_named_mixed(flag : Bool, value : Bool = false) : Int32
+  if flag
+    recursive_named_mixed(false, value: true)
+  elsif value
+    7
+  else
+    1
+  end
+end
+
+LibC.exit(recursive_named_mixed(true, false))

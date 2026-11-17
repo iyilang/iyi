@@ -1,0 +1,21 @@
+class Base
+  def m(x : Int32) : Int32
+    x
+  end
+
+  def m(x : String) : Int32
+    7
+  end
+end
+
+class Child < Base
+  def m(x : Int32 | String) : Int32
+    super(x)
+  end
+end
+
+def choose(flag : Bool) : Int32 | String
+  flag ? 42 : "value"
+end
+
+Child.new.m(choose(true))

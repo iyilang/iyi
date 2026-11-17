@@ -1,0 +1,32 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def choose(n : Int32)
+  if n == 1
+    12
+  elsif n == 2
+    true
+  else
+    4_i128
+  end
+end
+
+def take(x : Int32 | Bool) : Int32
+  if x.is_a?(Int32)
+    2
+  else
+    3
+  end
+end
+
+def classify(n : Int32) : Int32
+  x = choose(n)
+  if x.is_a?(Int32 | Bool)
+    take(x)
+  else
+    4
+  end
+end
+
+LibC.exit(classify(1) &+ classify(2) &+ classify(3))

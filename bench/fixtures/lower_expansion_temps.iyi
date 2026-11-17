@@ -1,0 +1,15 @@
+# Two expansions in one scope keep temporaries of different types: the `&&` binds its
+# call operand (Bool) and the multiple assignment binds each value (Int32). Each takes a
+# name of its own from the program, as the hosted compiler names them: "AB", status 7.
+lib LibC
+  fun putchar(value : Int32) : Int32
+  fun exit(status : Int32) : NoReturn
+end
+
+count = 1
+if count == 1 && count < 2
+  left, right = 65, 66
+  LibC.putchar(left)
+  LibC.putchar(right)
+end
+LibC.exit(7)

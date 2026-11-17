@@ -1,0 +1,10 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+FOLDED = 170141183460469231731687303715884105727_u128 &+ 1_u128
+
+fun get_value : UInt128
+  FOLDED
+end
+LibC.exit(get_value == 170141183460469231731687303715884105728_u128 ? 7 : 1)

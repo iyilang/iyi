@@ -1,0 +1,18 @@
+class First
+  def run(& : Int32 -> U) forall U
+    yield 1
+    nil
+  end
+end
+
+class Second
+  def run(& : Bool -> U) forall U
+    yield true
+    nil
+  end
+end
+
+# The result changes with the block input. Discarding it in each method lets
+# hosted type the shared block after merging the two input types.
+value = ARGC_UNSAFE == 0 ? First.new : Second.new
+value.run { |x| x.is_a?(Int32) ? x : true }

@@ -1,0 +1,19 @@
+class Pairs
+  @@pair : Tuple(Int32, Int32) = {23, 5}
+
+  def self.result : Int32
+    check(@@pair)
+  end
+
+  def self.check(pair : Tuple(Int32, Int32)) : Int32
+    return 90 unless pair[0] == 23
+    return 91 unless pair[1] == 5
+    28
+  end
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+LibC.exit(Pairs.result)

@@ -1,0 +1,236 @@
+@[Unsafe("holds LLVM module handles from the C API, which the compiler does not check, to print and emit them")]
+module bench/selfhost_codegen_exercise
+
+import compiler/codegen/codegen::{compile_source_to_module}
+import compiler/syntax/ast::{ASTNode, Expressions, FunDef}
+import compiler/syntax/parser::{Parser}
+import compiler/platform/target::{Target}
+import compiler/ir/module::{Module}
+import compiler/ir/layout::{LayoutError}
+import compiler/ir/verifier::{verify}
+import compiler/backend/llvm/translate::{translate, TranslateError}
+import compiler/backend/llvm/emit::{print_llvm_module, verify_llvm_module, host_target_machine}
+import compiler/ir/builder::{Builder}
+import compiler/ir/types::{IrType}
+
+# The triple the exercise compiles for: the host's, which is the one the gate's oracle dumps and
+# writes objects for. The gate links the port's objects with the host's C compiler and runs them,
+# so an object for another system is refused by the linker (a Mach-O object on the Linux runner).
+{% if flag?(:linux) && flag?(:x86_64) %}
+  TRIPLE = "x86_64-unknown-linux-gnu"
+{% elsif flag?(:linux) && flag?(:aarch64) %}
+  TRIPLE = "aarch64-unknown-linux-gnu"
+{% else %}
+  TRIPLE = "aarch64-apple-darwin"
+{% end %}
+
+# The name of a printed LLVM function: `define internal ptr @"name"(...)` or `define i32 @name(...)`.
+def define_name(line : String) : String
+  if line.includes?("@\"")
+    line.split("\"")[1]
+  else
+    line.split("@")[1].split("(")[0]
+  end
+end
+
+# Each defined function of a printed module, normalized the way the gate compares it: its
+# attribute group dropped from the define line, and the block predecessor comments removed.
+def function_blocks(text : String) : Array({String, String})
+  blocks = [] of {String, String}
+  in_fn = false
+  name = ""
+  body = [] of String
+  text.each_line do |line|
+    stripped = line.strip
+    if !in_fn
+      if stripped.starts_with?("define ")
+        in_fn = true
+        name = define_name(stripped)
+        normalized = if idx = line.index(" #")
+                       line[0, idx] + " {"
+                     else
+                       line
+                     end
+        body = [normalized] of String
+      end
+    else
+      next if stripped.starts_with?(";")
+      clean_line = if p_idx = line.index(" ; preds =")
+                     line[0, p_idx]
+                   else
+                     line
+                   end
+      body << clean_line
+      if clean_line.strip == "}"
+        in_fn = false
+        blocks << {name, body.join("\n")}
+      end
+    end
+  end
+  blocks
+end
+
+# The module as the gate compares it, from its printed LLVM text.
+def normalized_module_text(text : String) : String
+  io = String::Builder.new
+  # 1. Module-level custom struct / class types
+  types = [] of String
+  text.each_line do |l|
+    stripped = l.strip
+    if stripped.starts_with?("%") && stripped.includes?(" = type ") && !stripped.starts_with?("%Nil")
+      types << stripped
+    end
+  end
+  types.sorted.each do |t|
+    io << t << "\n"
+  end
+
+  # 2. Module-level type ID globals
+  globals = [] of String
+  text.each_line do |l|
+    stripped = l.strip
+    if stripped.starts_with?("@\"") && stripped.includes?(":type_id\"")
+      globals << stripped
+    end
+  end
+  globals.sorted.each do |g|
+    io << g << "\n"
+  end
+
+  # 3. Module-level declarations (e.g. malloc, memset)
+  decls = [] of String
+  text.each_line do |l|
+    stripped = l.strip
+    if stripped.starts_with?("declare ") && (stripped.includes?("@malloc") || stripped.includes?("@llvm.memset"))
+      decls << stripped.split(" #")[0].strip
+    end
+  end
+  decls.sorted.each do |d|
+    io << d << "\n"
+  end
+
+  # 4. All defined functions across the module, sorted by name, __crystal_main excluded
+  blocks = function_blocks(text).reject { |b| b[0] == "__crystal_main" }
+  sorted_blocks = blocks.sorted_by { |b| b[0] }
+  first = true
+  sorted_blocks.each do |b|
+    io << "\n" unless first
+    io << b[1] << "\n"
+    first = false
+  end
+  io.to_s.strip
+end
+
+# The IR module for a fixture, verified, then replayed into LLVM and checked by LLVM's verifier.
+# Returns the LLVM module reference; the caller disposes nothing (the process ends with the exercise).
+def compile_fixture(src : String, filename : String) : LibLLVM::ModuleRef
+  ir = ir_module
+  compile_source_to_module(src, filename, ir)
+  errors = verify(ir)
+  unless errors.empty?
+    raise "IR verifier refused the module from #{filename}: #{errors[0].to_s}"
+  end
+  llvm = translate(ir)
+  if llvm.is_a?(TranslateError)
+    raise "translation refused the module from #{filename}: #{llvm.as(TranslateError).message}"
+  end
+  ref = llvm.as(LibLLVM::ModuleRef)
+  if message = verify_llvm_module(ref)
+    raise "LLVM module verification failed: #{message}"
+  end
+  ref
+end
+
+def ir_module : Module
+  target = Target.new(TRIPLE)
+  m = Module.for_target("selfhost_cg_mod", target)
+  if m.is_a?(LayoutError)
+    raise m.as(LayoutError).to_s
+  end
+  m.as(Module)
+end
+
+def compile_and_dump_ir(fixture_path : String) : String
+  src = File.read(fixture_path)
+  ref = compile_fixture(src, fixture_path)
+  normalized_module_text(print_llvm_module(ref))
+end
+
+def compile_and_emit_obj(fixture_path : String, out_obj_path : String) : Nil
+  src = File.read(fixture_path)
+  ref = compile_fixture(src, fixture_path)
+  host_target_machine(TRIPLE).emit_obj_to_file(ref, out_obj_path)
+end
+
+# Names a value and fails with the name it got when it is not the one given.
+def expect_name(what : String, got : String, want : String) : Nil
+  unless got == want
+    raise "unique names: #{what} is '#{got}', not '#{want}'"
+  end
+end
+
+# The builder claims local names the way LLVM's ValueSymbolTable does (makeUniqueName): a taken name gets the
+# function's counter appended with no separator, and the counter is shared by the whole function. Parameters,
+# blocks and placed instructions share one counter. The expected names are worked out from that rule here, by
+# hand, and the module must verify with them, since the text form refuses a repeated name.
+def check_unique_names : Nil
+  m = ir_module
+  i32 = m.types.int32
+  fn = m.define_function("uniq_names", m.types.func([i32, i32] of IrType, i32, false))
+  fn.name_param(fn.param(0), "x")
+  fn.name_param(fn.param(1), "x")
+  entry = fn.append_basic_block("entry")
+  fn.append_basic_block("exit")
+  fn.append_basic_block("exit")
+  b = Builder.new(m)
+  b.position_at_end(entry)
+  v1 = b.add(fn.param(0), fn.param(1), "x")
+  v2 = b.add(fn.param(0), fn.param(1), "x")
+  v3 = b.add(fn.param(0), fn.param(1), "")
+  v4 = b.add(v1, v2, "x")
+  b.ret(v4)
+  zero = b.const_int(i32, 0)
+  b.position_at_end(fn.basic_blocks[1])
+  b.ret(zero)
+  b.position_at_end(fn.basic_blocks[2])
+  b.ret(zero)
+  expect_name("parameter 0", fn.param(0).name, "x")
+  expect_name("parameter 1", fn.param(1).name, "x1")
+  expect_name("block 0", fn.basic_blocks[0].name, "entry")
+  expect_name("block 1", fn.basic_blocks[1].name, "exit")
+  expect_name("block 2", fn.basic_blocks[2].name, "exit2")
+  insts = entry.insts
+  expect_name("first result", insts[0].name, "x3")
+  expect_name("second result", insts[1].name, "x4")
+  expect_name("unnamed result", insts[2].name, "")
+  expect_name("last result", insts[3].name, "x5")
+  errors = verify(m)
+  unless errors.empty?
+    raise "unique names: the claimed module is refused: #{errors[0].to_s}"
+  end
+end
+
+def run_standalone_check : Nil
+  puts "Running selfhost codegen pure-iyi standalone verification..."
+  src = "fun add(a : Int32, b : Int32) : Int32\n  a &+ b\nend\n"
+  ref = compile_fixture(src, "inline.iyi")
+  text = print_llvm_module(ref)
+  unless text.includes?("add i32 %a, %b")
+    raise "Standalone verification failed: add instruction not found"
+  end
+  puts "ok (standalone codegen verified)"
+  check_unique_names
+  puts "ok (builder names are claimed as LLVM claims them)"
+  puts "ALL SELFHOST CODEGEN CHECKS PASSED SUCCESSFULLY!"
+end
+
+if Program.args.size >= 2 && Program.args[0] == "--dump-ir"
+  fixture = Program.args[1]
+  puts compile_and_dump_ir(fixture)
+elsif Program.args.size >= 3 && Program.args[0] == "--emit-obj"
+  fixture = Program.args[1]
+  out_obj = Program.args[2]
+  compile_and_emit_obj(fixture, out_obj)
+else
+  run_standalone_check
+end

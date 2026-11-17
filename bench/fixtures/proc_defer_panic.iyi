@@ -1,0 +1,18 @@
+@[Unsafe("reports the registered defer cleanup through the process exit status")]
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def keep_int(&block : Int32 -> Int32) : Proc(Int32, Int32)
+  block
+end
+
+base = 40
+value = 1000
+outer_reader = -> { value }
+panicking = keep_int do |value|
+  defer LibC.exit(base &+ value &- 42)
+  raise "a panic inside a captured callback"
+end
+panicking.call(2)
+LibC.exit(outer_reader.call == 1000 ? 9 : 10)

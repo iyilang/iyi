@@ -1,0 +1,28 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+class Base
+  def name : Int32
+    1
+  end
+end
+
+class Left < Base
+  def name : Int32
+    8
+  end
+end
+
+class Right < Base
+end
+
+def pick(flag : Bool) : Base
+  flag ? Left.new : Right.new
+end
+
+def pick_reverse(flag : Bool) : Base
+  flag ? Right.new : Left.new
+end
+
+LibC.exit((pick(true).name &+ pick(false).name &+ pick_reverse(true).name &+ pick_reverse(false).name) &- 9)

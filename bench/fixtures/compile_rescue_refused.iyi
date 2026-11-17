@@ -1,0 +1,7 @@
+fun main(argc : Int32, argv : Pointer(Pointer(UInt8))) : Int32
+  begin
+    1
+  rescue
+    2
+  end
+end

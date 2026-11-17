@@ -1,0 +1,21 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+fun unsigned_value : UInt128
+  340282366920938463463374607431768211455_u128
+end
+
+fun signed_value : Int128
+  -170141183460469231731687303715884105728_i128
+end
+
+fun accept_unsigned(value : UInt128) : UInt128
+  value
+end
+
+fun accept_signed(value : Int128) : Int128
+  value
+end
+
+LibC.exit(unsigned_value == 340282366920938463463374607431768211455_u128 && signed_value == -170141183460469231731687303715884105728_i128 && accept_unsigned(7) == 7_u128 && accept_signed(-7) == -7_i128 ? 7 : 1)

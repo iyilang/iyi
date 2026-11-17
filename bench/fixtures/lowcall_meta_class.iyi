@@ -1,0 +1,11 @@
+class Sched
+  def self.go : Int32
+    7
+  end
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+LibC.exit(Sched.go)

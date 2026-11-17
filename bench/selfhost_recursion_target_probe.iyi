@@ -1,0 +1,63 @@
+import compiler/syntax/parser::{Parser}
+import compiler/syntax/ast::{Call}
+import compiler/semantic/normalizer::{Normalizer, NormalizerProgram}
+import compiler/semantic/top_level::{SemanticProgram, TopLevelVisitor}
+import compiler/semantic/main_visitor::{MainVisitor}
+import compiler/syntax/visitor::{Visitor}
+
+class CallWalk < Visitor
+  getter calls : Array(Call)
+
+  def initialize(@visitor : MainVisitor)
+    @calls = [] of Call
+  end
+
+  def visit(node : Call) : Bool
+    @calls << node
+    true
+  end
+end
+
+path = Program.args[0]
+parser = Parser.new(File.read(path), path)
+node = Normalizer.new(NormalizerProgram.new(false)).normalize(parser.parse)
+program = SemanticProgram.new
+program.total_mode = true
+program.search_path = [Program.args[1]]
+program.search_path << Program.args[3] if Program.args.size > 3
+top = TopLevelVisitor.new(program, path)
+node.accept(top)
+top.finish
+visitor = MainVisitor.new(program)
+visitor.total = true
+node.accept(visitor)
+walk = CallWalk.new(visitor)
+visitor.typed_instances.each do |inst|
+  inst.definition.accept(walk)
+end
+walk.calls.each do |call|
+  if target = visitor.target_def?(call)
+    missing = false
+    names = [] of String
+    target.args.each do |arg|
+      if at = visitor.type_of?(arg)
+        names << at.full_name
+      else
+        missing = true
+      end
+    end
+    state = missing ? "untyped-params" : "typed-params"
+    puts "#{call.name} target=#{target.node_id} #{state} #{names.join(",")}"
+    if Program.args.size > 2 && Program.args[2] == "unit-keys" && call.name == "hv"
+      if owner = program.def_owner(target)
+        if owner.iyi_unit
+          lexical = visitor.def_instance_key(target, owner, call)
+          caller = visitor.def_instance_key(target, program, call)
+          puts "unit-key-equal=#{!lexical.nil? && lexical == caller}"
+        end
+      end
+    end
+  else
+    puts "#{call.name} target=none"
+  end
+end

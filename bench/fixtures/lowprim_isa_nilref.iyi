@@ -1,0 +1,26 @@
+# is_a? of a nilable reference union reads the id word (hosted type_id.cr 38-54).
+# The not-nil arm loads the object's id; the nil arm is the nil id. Status 0.
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+class Box
+  def initialize
+  end
+end
+
+class Bag
+  def initialize
+  end
+end
+
+def check(c : Bool) : Bool
+  b = c ? Box.new.as(Box | Bag) : nil
+  b.is_a?(Box)
+end
+
+def go : Int32
+  check(false) ? 1 : 0
+end
+
+LibC.exit(go)

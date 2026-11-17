@@ -1,0 +1,23 @@
+@[Unsafe("reports mixed-union block storage")]
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def invoke(flag : Bool, &)
+  yield flag
+end
+
+def maybe_keyword(flag : Bool) : Bool?
+  flag ? true : nil
+end
+
+result = invoke(true) do |flag|
+  if flag
+    item = true
+  else
+    item = 9
+  end
+  item = maybe_keyword(flag)
+  item.nil? ? 4 : 5
+end
+LibC.exit(result)

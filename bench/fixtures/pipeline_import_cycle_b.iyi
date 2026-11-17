@@ -1,0 +1,5 @@
+module pipeline_import_cycle_b
+
+module Inside
+  import pipeline_import_cycle_a
+end

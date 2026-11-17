@@ -1,0 +1,5 @@
+import compile_shadow
+
+fun main(argc : Int32, argv : Pointer(Pointer(UInt8))) : Int32
+  compile_shadow_value
+end

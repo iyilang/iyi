@@ -1,0 +1,36 @@
+class Svc
+  def initialize(v : Int32)
+    @v = v
+  end
+
+  def part1 : Int32
+    @v
+  end
+end
+
+class Counter
+  def initialize
+    @n = 5
+  end
+
+  def n : Int32
+    @n
+  end
+end
+
+class Holder
+  def initialize
+    @svc = Svc.new(7)
+  end
+
+  def svc : Svc
+    @svc
+  end
+end
+
+fun main(argc : Int32, argv : Pointer(Pointer(UInt8))) : Int32
+  h = Holder.new
+  s = h.svc
+  c = Counter.new
+  s.part1 &+ c.n
+end

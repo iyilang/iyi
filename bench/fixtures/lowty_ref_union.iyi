@@ -1,0 +1,10 @@
+# A union of two unrelated reference classes. The hosted program makes it one pointer, and so does the
+# port's typer. Unrelated classes, not a parent and a child: the hosted union of a parent and its child
+# is the parent, so Animal | Dog would not be a union at all. String? is a nilable type, not this case.
+class Dog
+end
+
+class Cat
+end
+
+# type: Dog | Cat

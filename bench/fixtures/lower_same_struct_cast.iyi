@@ -1,0 +1,20 @@
+struct Point
+  def initialize(@x : Int32)
+  end
+
+  def x : Int32
+    @x
+  end
+end
+
+def read(flag : Bool) : Int32
+  point = Point.new(18)
+  value = if flag
+            point.as(Point)
+          else
+            Point.new(1)
+          end
+  value.x
+end
+
+read(true)

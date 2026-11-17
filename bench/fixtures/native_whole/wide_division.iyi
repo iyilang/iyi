@@ -1,0 +1,26 @@
+import std/int
+
+def unsigned_quotient(a : UInt128, b : UInt128) : UInt128
+  a // b
+end
+
+def unsigned_remainder(a : UInt128, b : UInt128) : UInt128
+  a % b
+end
+
+def signed_quotient(a : Int128, b : Int128) : Int128
+  a // b
+end
+
+def signed_remainder(a : Int128, b : Int128) : Int128
+  a % b
+end
+
+numerator = (1_u128 << 100) + 123_u128
+denominator = 1_u128 << 64
+puts unsigned_quotient(numerator, denominator)
+puts unsigned_remainder(numerator, denominator)
+signed_numerator = -((1_i128 << 100) + 123_i128)
+signed_denominator = 1_i128 << 64
+puts signed_quotient(signed_numerator, signed_denominator)
+puts signed_remainder(signed_numerator, signed_denominator)

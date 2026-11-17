@@ -1,0 +1,112 @@
+; iyi-ir 1
+module "memory"
+target triple = "wasm32-wasi"
+target datalayout = "e-m:e-p:32:32-p10:8:8-p20:8:8-i64:64-i128:128-n32:64-S128-ni:1:10:20"
+declare external void @__iyi_print_i64(i64)
+
+%S = type { i8, i32, i64 }
+
+@arr = global [4 x i32] [i32 10, i32 20, i32 30, i32 40]
+@st = global %S { i8 1, i32 2, i64 3 }
+@ptrs = global [2 x ptr] [ptr @arr, ptr @arr]
+@cnt = global i64 0
+@zeros = global [8 x i8] zeroinitializer
+@big = global [16 x i64] zeroinitializer
+
+define internal void @bump() {
+entry:
+  %v = load i64, ptr @cnt, align 8
+  %w = add i64 %v, 1
+  store i64 %w, ptr @cnt, align 8
+  ret void
+}
+
+define internal void @fill(ptr %p, i32 %n) {
+entry:
+  br label %head
+head:
+  %i = phi i32 [ 0, label %entry ], [ %inext, label %body ]
+  %more = icmp slt i32 %i, %n
+  br i1 %more, label %body, label %done
+body:
+  %sq = mul i32 %i, %i
+  %ix = sext i32 %i to i64
+  %q = getelementptr i32, ptr %p, i64 %ix
+  store i32 %sq, ptr %q, align 4
+  %inext = add i32 %i, 1
+  br label %head
+done:
+  ret void
+}
+
+define internal i64 @sumptr(ptr %p, i32 %n) {
+entry:
+  br label %head
+head:
+  %i = phi i32 [ 0, label %entry ], [ %inext, label %body ]
+  %acc = phi i64 [ 0, label %entry ], [ %acc2, label %body ]
+  %more = icmp slt i32 %i, %n
+  br i1 %more, label %body, label %done
+body:
+  %ix = sext i32 %i to i64
+  %q = getelementptr i32, ptr %p, i64 %ix
+  %v = load i32, ptr %q, align 4
+  %vx = sext i32 %v to i64
+  %acc2 = add i64 %acc, %vx
+  %inext = add i32 %i, 1
+  br label %head
+done:
+  ret i64 %acc
+}
+
+define external i32 @main() {
+entry:
+  %p0 = getelementptr [4 x i32], ptr @arr, i32 0, i32 2
+  %v0 = load i32, ptr %p0, align 4
+  %v0x = sext i32 %v0 to i64
+  call void (i64) @__iyi_print_i64(i64 %v0x)
+  %f1 = getelementptr %S, ptr @st, i32 0, i32 1
+  %fv = load i32, ptr %f1, align 4
+  %fvx = sext i32 %fv to i64
+  call void (i64) @__iyi_print_i64(i64 %fvx)
+  %f2 = getelementptr %S, ptr @st, i32 0, i32 2
+  %fv2 = load i64, ptr %f2, align 8
+  call void (i64) @__iyi_print_i64(i64 %fv2)
+  %f0 = getelementptr %S, ptr @st, i32 0, i32 0
+  %fv0 = load i8, ptr %f0, align 1
+  %fv0x = zext i8 %fv0 to i64
+  call void (i64) @__iyi_print_i64(i64 %fv0x)
+  %pp = getelementptr [2 x ptr], ptr @ptrs, i32 0, i32 1
+  %q = load ptr, ptr %pp, align 4
+  %qv = load i32, ptr %q, align 4
+  %qvx = sext i32 %qv to i64
+  call void (i64) @__iyi_print_i64(i64 %qvx)
+  %buf = alloca [5 x i32], align 4
+  call void (ptr, i32) @fill(ptr %buf, i32 5)
+  %bs = call i64 (ptr, i32) @sumptr(ptr %buf, i32 5)
+  call void (i64) @__iyi_print_i64(i64 %bs)
+  %zp = getelementptr [8 x i8], ptr @zeros, i32 0, i32 3
+  store i8 200, ptr %zp, align 1
+  %zl = load i8, ptr %zp, align 1
+  %zz = zext i8 %zl to i64
+  call void (i64) @__iyi_print_i64(i64 %zz)
+  %zs = sext i8 %zl to i64
+  call void (i64) @__iyi_print_i64(i64 %zs)
+  %hp = getelementptr [16 x i64], ptr @big, i32 0, i32 5
+  store i64 -123456789012, ptr %hp, align 8
+  %hl = load i64, ptr %hp, align 8
+  call void (i64) @__iyi_print_i64(i64 %hl)
+  call void () @bump()
+  call void () @bump()
+  call void () @bump()
+  %c = load i64, ptr @cnt, align 8
+  call void (i64) @__iyi_print_i64(i64 %c)
+  %h16 = alloca i16, align 2
+  store i16 -2, ptr %h16, align 2
+  %h16v = load i16, ptr %h16, align 2
+  %h16z = zext i16 %h16v to i64
+  call void (i64) @__iyi_print_i64(i64 %h16z)
+  %h16s = sext i16 %h16v to i64
+  call void (i64) @__iyi_print_i64(i64 %h16s)
+  ret i32 0
+}

@@ -1,0 +1,16 @@
+@[Unsafe("reports the nested block declaration")]
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def run(&)
+  yield
+end
+
+value = run do
+  run do
+    item : Int32 | Nil = 17
+    item
+  end
+end
+LibC.exit(value)

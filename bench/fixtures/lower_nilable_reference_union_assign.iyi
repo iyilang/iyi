@@ -1,0 +1,62 @@
+# Nullable reference unions retain their pointer representation when widened.
+@[Unsafe("calls C exit to report pointer-union assignment")]
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+class Fiber
+  def initialize
+  end
+end
+
+class Waiter
+  def initialize
+  end
+end
+
+class Parked
+  def initialize
+  end
+end
+
+def waiter_or_nil(flag : Bool) : Waiter?
+  flag ? Waiter.new : nil
+end
+
+def fiber_or_waiter(flag : Bool) : Fiber | Waiter
+  flag ? Fiber.new : Waiter.new
+end
+
+def any_or_nil(kind : Int32) : Fiber | Waiter | Nil
+  if kind == 0
+    nil
+  elsif kind == 1
+    Fiber.new
+  else
+    Waiter.new
+  end
+end
+
+def held(kind : Int32) : Int32
+  slot : Fiber | Waiter | Parked | Nil = nil
+  if kind == 1
+    slot = waiter_or_nil(true)
+  elsif kind == 2
+    slot = waiter_or_nil(false)
+  elsif kind == 3
+    slot = fiber_or_waiter(true)
+  elsif kind == 4
+    slot = any_or_nil(0)
+  elsif kind == 5
+    slot = any_or_nil(2)
+  end
+  if slot.is_a?(Fiber)
+    20
+  elsif slot.is_a?(Waiter)
+    10
+  else
+    1
+  end
+end
+
+LibC.exit(held(1) &+ held(2) &+ held(3) &+ held(4) &+ held(5))

@@ -1,0 +1,23 @@
+module pipeline_import_middle
+
+module Scope
+  import pipeline_import_leaf::{Seed}
+  import pipeline_import_leaf::{Seed}
+
+  class Source
+    @@value : Int32 = Seed.value
+
+    def self.value : Int32
+      @@value
+    end
+  end
+end
+
+pub class State
+  import pipeline_import_leaf_b::{Another}
+  @@value : Int32 = Another.value + Scope::Source.value
+
+  def self.value : Int32
+    @@value
+  end
+end

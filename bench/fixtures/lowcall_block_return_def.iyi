@@ -1,0 +1,6 @@
+def yield_then_return(&)
+  yield 1
+  return 3
+end
+
+yield_then_return { |v| v }

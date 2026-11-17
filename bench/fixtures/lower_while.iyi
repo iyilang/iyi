@@ -1,0 +1,5 @@
+x = true
+while x
+  x = false
+end
+nil

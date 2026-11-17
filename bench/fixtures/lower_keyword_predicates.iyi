@@ -1,0 +1,15 @@
+@[Unsafe("calls C exit after typing an enum's generated predicates")]
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+enum Keyword
+  AS
+  END
+
+  def ==(other : Keyword) : Bool
+    value == other.value
+  end
+end
+
+LibC.exit(41 &+ Keyword::END.value)

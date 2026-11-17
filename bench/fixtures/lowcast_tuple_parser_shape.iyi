@@ -1,0 +1,30 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+class Node
+  def value : Int32
+    5
+  end
+end
+
+struct Location
+  def value : Int32
+    8
+  end
+end
+
+def pair(flag : Bool) : Tuple(Node, Location?)
+  if flag
+    return {Node.new, Location.new}
+  end
+  {Node.new, nil}
+end
+
+value = pair(true)
+location = value[1]
+if location.nil?
+  LibC.exit(1)
+else
+  LibC.exit(value[0].value &+ location.value)
+end

@@ -1,0 +1,12 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def work(flag : Bool) : (Int32 | Bool)
+  value = 0
+  defer value = 1
+  flag ? 72 : false
+end
+
+result = work(true)
+LibC.exit(result.is_a?(Int32) ? result : 3)

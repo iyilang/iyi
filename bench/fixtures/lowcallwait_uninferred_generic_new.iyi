@@ -1,0 +1,14 @@
+class Base
+  def initialize(n : Int32)
+  end
+end
+
+class Hold(T) < Base
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+Hold.new(7)
+LibC.exit(7)

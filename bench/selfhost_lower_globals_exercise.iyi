@@ -1,0 +1,46 @@
+module bench/selfhost_lower_globals_exercise
+
+# The port's side of the constants and class-variables gate (bench/selfhost_lower_globals_exercise.sh): the same
+# modes as the calls driver, for the fixtures that read or assign a constant or a class variable.
+# The analysis runs with the lib stand-in (bench/lib/lower_gate.iyi), as the calls gate does.
+#
+#   port oracle <oracle.ll>                 the oracle module, normalised, one line each
+#   port lower <fixture.iyi> <oracle.ll>    lowers the fixture and compares it with the oracle
+#   port emit <fixture.iyi> <oracle.ll>     the port's module as text, for the native tool
+
+import bench/lib/lower_gate::{analyse, build_names, normalised_lines, run_emit, run_lower, run_oracle}
+
+# A program class variable containing a string must remain in the comparison even when
+# its initialiser uses the same getelementptr form as a hosted build constant.
+def check_normalizer : Nil
+  text = %(  store ptr getelementptr (i8, ptr @"'value'", i32 0), ptr @"K::v", align 8\n@"K::v" = internal global ptr null\n)
+  names = build_names(text, "::")
+  lines = normalised_lines(text, names)
+  raise "program global stripped from comparison" unless lines.includes?(%(@"K::v" = internal global ptr null))
+end
+
+def run : Nil
+  args = Program.args
+  if args.empty?
+    # With no arguments the driver checks that the analysis runs, and exits 0.
+    analyse("nil\n", "usage_check.iyi", true)
+    puts "usage: port oracle <oracle.ll> | port lower <fixture.iyi> <oracle.ll> | port emit <fixture.iyi> <oracle.ll>"
+    return
+  end
+  mode = args[0]
+  if mode == "normalizer-check"
+    check_normalizer
+    return
+  end
+  if mode == "oracle"
+    run_oracle(args[1], "::")
+  elsif mode == "lower"
+    run_lower(args[1], args[2], "::", true)
+  elsif mode == "emit"
+    run_emit(args[1], args[2], true)
+  else
+    raise "unknown mode #{mode}"
+  end
+end
+
+run

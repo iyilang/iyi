@@ -1,0 +1,12 @@
+@[Unsafe("declares the C function main for the runtime test")]
+class Gadget
+  def label : String
+    {{ @type.name.stringify }}
+  end
+end
+
+# The macro site expands with the enclosing type as @type, so label is "Gadget" and the program exits with its length.
+fun main(argc : Int32, argv : Pointer(Pointer(UInt8))) : Int32
+  g = Gadget.new
+  g.label.bytesize
+end

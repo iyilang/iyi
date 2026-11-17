@@ -1,0 +1,12 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+class Grp
+  def spawn(&block : -> T) : T forall T
+    block.call
+  end
+end
+
+g = Grp.new
+LibC.exit(g.spawn { 7 })

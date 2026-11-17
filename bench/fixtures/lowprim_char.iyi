@@ -1,0 +1,15 @@
+# Char order: `<` on Char compares code points as unsigned values (hosted CharType overloads).
+# The status is 1: 'a' < 'b' holds.
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def before(a : Char, b : Char) : Int32
+  if a < b
+    1
+  else
+    0
+  end
+end
+
+LibC.exit(before('a', 'b'))

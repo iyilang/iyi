@@ -1,0 +1,13 @@
+@[Unsafe("tests a naked function returning from its inline assembly")]
+@[Naked]
+@[NoInline]
+fun naked_value : Int32
+  asm("mov x0, #42\nret" :::: "volatile")
+  0
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+LibC.exit(naked_value)

@@ -1,0 +1,1 @@
+p : Proc(Int32, Nil) = ->(x : String) { 7 }

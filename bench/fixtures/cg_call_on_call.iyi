@@ -1,0 +1,19 @@
+@[Unsafe("declares the C function main for the runtime test")]
+class Label
+  def text : String
+    "callresult"
+  end
+end
+
+class Holder
+  def label : Label
+    Label.new
+  end
+end
+
+# A call on a call result: h.label is a Label, its text is a String, and the String's bytesize is read from the
+# value (not a local). The program exits with the length of "callresult", which is 10.
+fun main(argc : Int32, argv : Pointer(Pointer(UInt8))) : Int32
+  h = Holder.new
+  h.label.text.bytesize
+end

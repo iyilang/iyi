@@ -1,0 +1,21 @@
+module bench/selfhost_type_lookup_probe
+
+import compiler/syntax/ast::{ASTNode, Generic, NumberLiteral, Path}
+import compiler/syntax/parser::{Parser}
+import compiler/semantic/top_level::{SemanticProgram, TopLevelVisitor}
+import compiler/semantic/main_visitor::{MainVisitor}
+import compiler/types/type_system::{TypeSystem}
+
+program = SemanticProgram.new
+TypeSystem.new(program)
+node = Parser.new("class ProbeAnimal\nend\nclass ProbeDog < ProbeAnimal\nend\n", "probe.iyi").parse
+top = TopLevelVisitor.new(program, "probe.iyi")
+node.accept(top)
+top.finish
+visitor = MainVisitor.new(program)
+animal = visitor.lookup_under(Path.new("ProbeAnimal"), nil)
+raise "written class must be virtual" unless animal.full_name == "ProbeAnimal+"
+static_array = Generic.new(Path.new("StaticArray"), [Path.new("UInt64"), NumberLiteral.new("4")] of ASTNode)
+array_type = program.lookup_type_node?(static_array, program)
+raise "static array lookup lost element or size" unless array_type && array_type.full_name == "StaticArray(UInt64, 4)"
+puts "virtual and static array lookup: ok"

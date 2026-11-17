@@ -1,0 +1,43 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+# A captured proc is forwarded down a recursion.
+def forward_count(n : Int32, &block : Int32 -> Nil) : Nil
+  if 0 < n
+    forward_count(n &- 1, &block)
+    block.call(n)
+  end
+  nil
+end
+
+# The inferred return depends on the recursive call.
+def forward_sum(n : Int32, &block : Int32 -> Nil)
+  if 0 < n
+    below = forward_sum(n &- 1, &block)
+    block.call(n)
+    below &+ n
+  else
+    0
+  end
+end
+
+def forward_entry(n : Int32, &block : Int32 -> Nil)
+  forward_count(n, &block)
+  forward_sum(n, &block)
+end
+
+# Each call captures its own mutable total through the same written block.
+def run_with(start : Int32, n : Int32) : Int32
+  total = start
+  got = forward_entry(n) { |x| total = total &+ x }
+  total &+ got
+end
+
+LibC.exit(1) unless run_with(0, 3) == 18
+LibC.exit(2) unless run_with(100, 4) == 130
+doubled = 0
+twice = forward_entry(2) { |x| doubled = doubled &+ x &+ x }
+LibC.exit(3) unless twice == 3
+LibC.exit(4) unless doubled == 12
+LibC.exit(0)

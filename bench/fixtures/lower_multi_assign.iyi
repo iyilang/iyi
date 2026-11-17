@@ -1,0 +1,10 @@
+lib LibC
+  fun putchar(value : Int32) : Int32
+  fun exit(status : Int32) : NoReturn
+end
+
+left, right = 65, 66
+left, right = right, left
+LibC.putchar(left)
+LibC.putchar(right)
+LibC.exit(7)

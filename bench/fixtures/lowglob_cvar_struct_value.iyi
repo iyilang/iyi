@@ -1,0 +1,24 @@
+struct Item
+  @value : Int32
+
+  def initialize(@value : Int32)
+  end
+
+  def value : Int32
+    @value
+  end
+end
+
+class K
+  @@value : Item = Item.new(7)
+
+  def self.value : Int32
+    @@value.value
+  end
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+LibC.exit(K.value)

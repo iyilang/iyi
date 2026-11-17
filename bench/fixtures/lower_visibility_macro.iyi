@@ -1,0 +1,21 @@
+class Box
+  macro getter(field)
+    @a : Int32
+
+    def a : Int32
+      @a
+    end
+  end
+
+  private getter a : Int32
+
+  def initialize
+    @a = 7
+  end
+
+  def read : Int32
+    @a
+  end
+end
+
+nil

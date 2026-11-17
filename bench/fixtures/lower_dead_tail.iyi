@@ -1,0 +1,73 @@
+# These non-literal terminators survive normalization. Their tails must not
+# execute, and skipping a tail must restore the caller's needs_value state.
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def endless(value : Int32) : Int32
+  while true
+    return value
+  end
+  i = 100
+  i
+end
+
+def both_break(flag : Bool) : Int32
+  hits = 1
+  while true
+    if flag
+      hits = hits &+ 4
+      break
+    else
+      hits = hits &+ 5
+      break
+    end
+    hits = hits &+ 100
+  end
+  hits
+end
+
+def give(value : Int32, &) : Int32
+  yield value
+end
+
+def both_next(flag : Bool) : Int32
+  give(3) do |value|
+    if flag
+      next value &+ 7
+    else
+      next value
+    end
+    value &+ 100
+  end
+end
+
+def both_break_value(flag : Bool) : Int32
+  give(4) do |value|
+    if flag
+      break value &+ 5
+    else
+      break value
+    end
+    value &+ 100
+  end
+end
+
+def restore(flag : Bool, other : Bool) : Int32
+  result = if flag
+             while true
+               return 8
+             end
+             99
+           else
+             other ? 21 : 22
+           end
+  result
+end
+
+def finish(status : Int32)
+  LibC.exit(status)
+  status &+ 100
+end
+
+finish(endless(6) &+ both_break(true) &+ both_break(false) &+ both_next(true) &+ both_next(false) &+ both_break_value(true) &+ both_break_value(false) &+ restore(true, true) &+ restore(false, true))

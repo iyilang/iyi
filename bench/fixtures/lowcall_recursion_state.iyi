@@ -1,0 +1,27 @@
+class S
+  def self.state(ready : Bool) : Int32
+    return 7 if ready
+    first
+  end
+
+  def self.first : Int32
+    lock
+    7
+  end
+
+  def self.lock : Int32
+    return 0 unless shared?
+    state(true)
+    0
+  end
+
+  def self.shared? : Bool
+    false
+  end
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+LibC.exit(S.state(false))

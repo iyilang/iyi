@@ -1,0 +1,8 @@
+lib LibC
+  fun abs(x : Int32) : Int32
+  fun labs(x : Int64) : Int64
+  fun exit(status : Int32) : NoReturn
+end
+
+LibC.labs(-7_i64)
+LibC.exit(LibC.abs(-42))

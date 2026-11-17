@@ -1,0 +1,14 @@
+class Maker(T)
+  def initialize(v : T)
+  end
+
+  def self.new(v : T) : Int32
+    7
+  end
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+LibC.exit(Maker.new(1))

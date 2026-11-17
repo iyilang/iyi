@@ -1,0 +1,9 @@
+class IyiWorkers
+  def self.start : Nil
+  end
+end
+
+fun __iyi_preempt : Nil
+end
+
+IyiWorkers.start

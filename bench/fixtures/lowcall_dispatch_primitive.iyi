@@ -1,0 +1,11 @@
+@[Unsafe("reports the call result")]
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def run(flag : Bool) : Int32
+  value = flag ? 42 : 42_i64
+  value == 42 ? 42 : 0
+end
+
+LibC.exit(run(true))

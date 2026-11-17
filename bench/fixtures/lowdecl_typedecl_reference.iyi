@@ -1,0 +1,60 @@
+@[Unsafe("reports typed reference storage through the process status")]
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+abstract class DeclaredBase
+  abstract def value : Int32
+end
+
+class DeclaredLeft < DeclaredBase
+  def value : Int32
+    11
+  end
+end
+
+class DeclaredRight < DeclaredBase
+  def value : Int32
+    17
+  end
+end
+
+def choose_reference(flag : Bool) : DeclaredBase
+  flag ? DeclaredLeft.new : DeclaredRight.new
+end
+
+def virtual_initializer(flag : Bool) : Int32
+  saved : DeclaredBase = choose_reference(flag)
+  saved.value
+end
+
+def concrete_initializer : Int32
+  saved : DeclaredBase = DeclaredLeft.new
+  pointerof(saved).value.value
+end
+
+def reassigned_reference(flag : Bool) : Int32
+  saved : DeclaredBase = DeclaredLeft.new
+  saved = DeclaredRight.new if flag
+  saved.value
+end
+
+def with_reference(&)
+  yield
+end
+
+def block_initializer(flag : Bool) : Int32
+  with_reference do
+    saved : DeclaredBase = choose_reference(flag)
+    saved.value
+  end
+end
+
+LibC.exit(1) unless virtual_initializer(true) == 11
+LibC.exit(2) unless virtual_initializer(false) == 17
+LibC.exit(3) unless concrete_initializer == 11
+LibC.exit(4) unless reassigned_reference(false) == 11
+LibC.exit(5) unless reassigned_reference(true) == 17
+LibC.exit(6) unless block_initializer(true) == 11
+LibC.exit(7) unless block_initializer(false) == 17
+LibC.exit(0)

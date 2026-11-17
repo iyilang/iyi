@@ -1,0 +1,15 @@
+# pointerof of an instance variable (hosted codegen.cr:1005-1006): the field address, not a load.
+class Counter
+  @count : Int32
+
+  def initialize(count : Int32)
+    @count = count
+  end
+
+  def slot : Pointer(Int32)
+    pointerof(@count)
+  end
+end
+
+c = Counter.new(40)
+c.slot

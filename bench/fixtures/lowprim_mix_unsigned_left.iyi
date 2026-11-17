@@ -1,0 +1,49 @@
+# Mixed sign, unsigned on the left: UInt64 against Int32, the census shape (`!=` and `>`
+# on UInt64 and Int32). The signed operand is sign-extended, and the compare is unsigned
+# after the sign check (hosted codegen_binary_op_ne, codegen_binary_op_gt). The status is
+# 1 + 2 + 4 + 8 + 16 = 31.
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def eq_ul(a : UInt64, b : Int32) : Int32
+  if a == b
+    1
+  else
+    0
+  end
+end
+
+def ne_ul(a : UInt64, b : Int32) : Int32
+  if a != b
+    2
+  else
+    0
+  end
+end
+
+def lt_ul(a : UInt64, b : Int32) : Int32
+  if a < b
+    4
+  else
+    0
+  end
+end
+
+def add_ul(a : UInt64, b : Int32) : Int32
+  if (a &+ b) == 7_u64
+    8
+  else
+    0
+  end
+end
+
+def gt_ul(a : UInt64, b : Int32) : Int32
+  if a > b
+    16
+  else
+    0
+  end
+end
+
+LibC.exit(eq_ul(4_u64, 4) &+ ne_ul(5_u64, 4) &+ lt_ul(1_u64, 2) &+ add_ul(3_u64, 4) &+ gt_ul(5_u64, 2))

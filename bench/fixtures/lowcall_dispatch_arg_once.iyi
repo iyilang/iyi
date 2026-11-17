@@ -1,0 +1,37 @@
+lib LibC
+  fun putchar(ch : Int32) : Int32
+  fun exit(status : Int32) : NoReturn
+end
+
+class A
+  def m(x : Int32) : Int32
+    x
+  end
+
+  def m(x : String) : Int32
+    2
+  end
+end
+
+class B
+  def m(x : Int32) : Int32
+    x
+  end
+
+  def m(x : String) : Int32
+    3
+  end
+end
+
+def receiver(flag : Bool) : A | B
+  LibC.putchar(114)
+  LibC.putchar(32)
+  flag ? A.new : B.new
+end
+
+def argument(flag : Bool) : Int32 | String
+  LibC.putchar(97)
+  flag ? 1 : "a"
+end
+
+LibC.exit(receiver(true).m(argument(true)))

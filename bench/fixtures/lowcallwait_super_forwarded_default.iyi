@@ -1,0 +1,23 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+class Base
+  @a : Int32
+
+  def initialize(a : Int32, b = 0)
+    @a = a
+  end
+
+  def a : Int32
+    @a
+  end
+end
+
+class Child < Base
+  def initialize(a : Int32, b : Int32)
+    super(a)
+  end
+end
+
+LibC.exit(Child.new(3, 4).a)

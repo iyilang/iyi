@@ -1,0 +1,30 @@
+# Cast and NilableCast: pointer casts, nil casts, upcasts into mixed unions, unreachable filter, and runtime-checked NilableCast.
+def ptr_casts : Nil
+  p = nil.as(Pointer(UInt8))
+  q = p.as(Pointer(Int32))
+  q.as(Nil)
+end
+
+def upcast_mixed(x : Int32) : Int32 | Bool
+  x.as(Int32 | Bool)
+end
+
+def nilcast_up(x : Int32) : (Int32 | Bool)?
+  x.as?(Int32 | Bool)
+end
+
+def nilcast_miss(x : Int32) : Bool?
+  x.as?(Bool)
+end
+
+def nilcast_down(c : Bool) : Int32?
+  x = c ? 1 : true
+  x.as?(Int32)
+end
+
+ptr_casts
+upcast_mixed(1)
+nilcast_up(2)
+nilcast_miss(3)
+nilcast_down(true)
+nil

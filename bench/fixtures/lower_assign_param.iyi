@@ -1,0 +1,23 @@
+# Assign to a parameter (hosted fun.cr:945-1043): non-pass-by-value parameter gets an alloca
+# copy when assigned in the body; pass-by-value parameter keeps its alloca copy.
+def bump(x : Int32) : Int32
+  x = x &+ 1
+  x
+end
+
+def reassign_if(x : Int32, c : Bool) : Int32
+  if c
+    x = 10
+  end
+  x
+end
+
+def assign_union(x : Int32 | Bool) : Int32 | Bool
+  x = true.as(Int32 | Bool)
+  x
+end
+
+bump(5)
+reassign_if(3, true)
+assign_union(1.as(Int32 | Bool))
+nil

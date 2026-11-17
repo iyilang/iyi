@@ -1,0 +1,7 @@
+# A refusal fixture. Nothing defines `raise` here, and the oracle is run with
+# --prelude=empty, where it has no `raise` to call. The port must refuse with the
+# same text and status. Checked by bench/selfhost_codegen_exercise.sh (section
+# 3b2), not compared as IR.
+fun test_undefined_raise(n : Int32) : Int32
+  raise "x"
+end

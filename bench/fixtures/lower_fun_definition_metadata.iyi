@@ -1,0 +1,28 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+class Box
+  def initialize
+  end
+end
+
+def choose(present : Bool)
+  value = nil
+  if present
+    value = Box.new
+  end
+  value
+end
+
+fun probe : Int32
+  nonnull = choose(true)
+  empty = choose(false)
+  if nonnull
+    empty ? 3 : 7
+  else
+    5
+  end
+end
+
+LibC.exit(probe())

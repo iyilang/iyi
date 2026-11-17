@@ -1,0 +1,15 @@
+@[Unsafe("reports the block declaration after reassignment")]
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def run(&)
+  yield
+end
+
+value = run do
+  item : Int32 | Nil = 17
+  item = nil
+  item || 19
+end
+LibC.exit(value)

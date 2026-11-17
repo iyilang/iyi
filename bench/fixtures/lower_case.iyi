@@ -1,0 +1,10 @@
+def choose_case(flag : Bool) : Int32
+  case
+  when flag
+    7
+  else
+    3
+  end
+end
+
+choose_case(true)

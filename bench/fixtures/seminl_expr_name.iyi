@@ -1,0 +1,29 @@
+class Widget
+  def label : String
+    "widget"
+  end
+end
+
+class Gadget
+  def label : String
+    "gadget"
+  end
+end
+
+# A loop that writes a type name with `{{ }}`, and a top-level `{{ }}` that
+# produces a declaration from a string.
+{% for n in ["Widget", "Gadget"] %}
+  class {{ n.id }}Maker
+    def make : {{ n.id }}
+      {{ n.id }}.new
+    end
+  end
+{% end %}
+
+{{ "class Extra; end".id }}
+
+class Holder
+  def kind : Gadget
+    {{ "Gadget".id }}.new
+  end
+end

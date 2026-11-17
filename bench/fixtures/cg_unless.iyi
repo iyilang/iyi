@@ -1,0 +1,12 @@
+fun test_return_unless(a : Int32, b : Int32) : Int32
+  return 0 unless a == b
+  a &+ 1
+end
+
+fun test_unless_block(x : Int32) : Int32
+  y = 0
+  unless x > 10
+    y = 1
+  end
+  y
+end

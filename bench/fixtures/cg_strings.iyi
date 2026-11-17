@@ -1,0 +1,27 @@
+lib LibC
+  fun puts(s : UInt8*) : Int32
+end
+
+class String
+  def to_unsafe : UInt8*
+    pointerof(@c)
+  end
+
+  def bytesize : Int32
+    @bytesize
+  end
+end
+
+fun test_string_literal : Int32
+  s1 = "hello from string literal"
+  s2 = "hello from string literal"
+  LibC.puts(s1.to_unsafe)
+  LibC.puts(s2.to_unsafe)
+  s1.bytesize
+end
+
+fun test_string_pool : Int32
+  s = "another string"
+  LibC.puts(s.to_unsafe)
+  0
+end

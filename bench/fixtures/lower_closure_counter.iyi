@@ -1,0 +1,21 @@
+lib LibC
+  fun malloc(size : UInt64) : Void*
+  fun free(ptr : Void*) : Nil
+  fun exit(status : Int32) : NoReturn
+end
+
+def counter : Int32
+  value = 7
+  increment = -> { value = value &+ 1; value }
+  i = 0
+  while i < 1000
+    ptr = LibC.malloc(64_u64)
+    LibC.free(ptr)
+    i = i &+ 1
+  end
+  increment.call
+  increment.call
+  value
+end
+
+LibC.exit(counter &- 9)

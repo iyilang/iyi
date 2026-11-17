@@ -1,0 +1,5 @@
+def id(x : Int32) : Int32
+  return x
+end
+
+id(41)

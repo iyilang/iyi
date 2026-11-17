@@ -1,0 +1,30 @@
+require "./magic_site/helper"
+
+def caller_line(value = __LINE__)
+  value
+end
+
+def caller_end(value = __END_LINE__)
+  value
+end
+
+def caller_file(value = __FILE__)
+  value
+end
+
+def caller_dir(value = __DIR__)
+  value
+end
+
+LibC.putchar(caller_line)
+LibC.putchar(caller_line)
+LibC.putchar(caller_line(40))
+caller_file
+caller_dir
+LibC.putchar(caller_end(
+))
+outer
+wrapped
+named_magic(a: 11)
+named_magic(c: 33, a: 12)
+named_magic(b: "kept")

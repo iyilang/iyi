@@ -1,0 +1,11 @@
+def pair(&)
+  yield 3, 4
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+total = 0
+pair { |a, b| total = b }
+LibC.exit(total)

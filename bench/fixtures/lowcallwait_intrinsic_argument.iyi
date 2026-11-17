@@ -1,0 +1,5 @@
+lib LibIntrinsic
+  fun ceil = "llvm.ceil.f64"(x : Float32) : Float64
+end
+
+LibIntrinsic.ceil(1.5_f32)

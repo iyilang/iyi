@@ -1,0 +1,15 @@
+{% if !flag?(:gc_none) %}
+  class SeminlRuntime
+    def self.bump : Int32
+      7
+    end
+  end
+{% else %}
+  class SeminlRuntime
+    def self.bump : Int32
+      0
+    end
+  end
+{% end %}
+
+SeminlRuntime.bump

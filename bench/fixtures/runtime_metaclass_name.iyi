@@ -1,0 +1,25 @@
+class LabelBase
+  def label : String
+    "#{self.class}"
+  end
+end
+
+class LabelChild < LabelBase
+end
+
+def label_one(value : LabelBase) : String
+  value.label
+end
+
+class IRLabel
+  @[NoInline]
+  def self.name_text(flag : Bool) : String
+    if flag
+      {{ @type.name.stringify }}
+    else
+      "no"
+    end
+  end
+end
+
+exit label_one(LabelChild.new) == "LabelChild" && LabelChild.to_s == "LabelChild" && IRLabel.name_text(Program.args.size == 0) == "IRLabel" ? 0 : 1

@@ -1,0 +1,28 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+class Base
+  @value : Int32
+
+  def initialize(@value : Int32)
+  end
+
+  def bump : Int32
+    @value = @value &+ 1
+    @value
+  end
+end
+
+class Child < Base
+end
+
+def run(x : Base) : Int32
+  x.bump
+end
+
+def choose(flag : Bool) : Base
+  flag ? Base.new(41) : Child.new(41)
+end
+
+LibC.exit(run(choose(false)))

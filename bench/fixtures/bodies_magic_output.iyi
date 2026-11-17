@@ -1,0 +1,17 @@
+@[Unsafe("fixture writes its results using putchar")]
+lib LibC
+  fun putchar(value : Int32) : Int32
+end
+
+def magic_line(value = __LINE__)
+  value
+end
+
+def magic_end(value = __END_LINE__)
+  value
+end
+
+LibC.putchar(magic_line(
+))
+LibC.putchar(magic_end(
+))

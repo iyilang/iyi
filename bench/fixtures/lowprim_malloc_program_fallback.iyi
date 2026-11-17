@@ -1,0 +1,14 @@
+# Per-kind fallback when only __crystal_malloc64 is defined:
+# Pointer(UInt8).malloc needs __crystal_malloc_atomic64, which does not exist,
+# so it must fall back to C malloc (not __crystal_malloc64) and reach LibC.exit(7).
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+fun __crystal_malloc64(size : UInt64) : Void*
+  LibC.exit(5)
+end
+
+p = Pointer(UInt8).malloc(2_u64)
+p.value = 1_u8
+LibC.exit(p.value == 1_u8 ? 7 : 2)

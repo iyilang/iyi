@@ -1,0 +1,10 @@
+# Reference unions: every member but Nil is a class, so the union is one pointer (the hosted
+# ReferenceUnionType and NilableReferenceUnionType), not a mixed union with a type id word.
+class Node
+end
+
+class Leaf
+end
+
+# type: Node | Leaf
+# type: Node | Leaf | Nil

@@ -1,0 +1,13 @@
+# One register output (`=r`) and no input. `mov` of an immediate is a form the
+# aarch64 assembler encodes, and the tree's fiber switch uses `mov`.
+def imm : Int32
+  result = 0
+  asm("mov $0, #7" : "=r"(result))
+  result
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+LibC.exit(imm)

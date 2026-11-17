@@ -1,0 +1,15 @@
+class Worker
+  def self.identity : Worker.class
+    self
+  end
+
+  def self.result : Int32
+    7
+  end
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+LibC.exit(Worker.identity.result)

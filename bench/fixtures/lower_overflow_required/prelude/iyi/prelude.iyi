@@ -1,0 +1,19 @@
+@[Unsafe("the minimal prelude declares a primitive and a C entry point")]
+class IyiRuntimeLock
+end
+
+struct Int32
+  @[Primitive(:binary)]
+  @[Raises]
+  def +(other : Int32) : Int32
+  end
+end
+
+lib LibIyiMain
+  fun __iyi_main(argc : Int32, argv : UInt8**) : Void*
+end
+
+fun main(argc : Int32, argv : UInt8**) : Int32
+  LibIyiMain.__iyi_main(argc, argv)
+  0
+end

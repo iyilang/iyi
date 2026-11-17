@@ -1,0 +1,12 @@
+# Unions are not reached by the Object walk. A requested union gets a leaf id,
+# and the same union keeps that id when requested again (hosted llvm_id.cr:58-66).
+class Red
+end
+
+class Blue
+end
+
+# type: Red | Blue
+# type: Red | Blue
+# type: Red?
+# type: Int32 | Nil

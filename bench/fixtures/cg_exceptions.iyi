@@ -1,0 +1,10 @@
+# A refusal fixture. iyi has no `rescue`: the oracle refuses this file, and the
+# port must refuse it with the same message and exit status. Checked by
+# bench/selfhost_codegen_exercise.sh (section 4), not compared as IR.
+fun test_rescue(x : Int32) : Int32
+  begin
+    x &+ 1
+  rescue ex : Exception
+    0
+  end
+end

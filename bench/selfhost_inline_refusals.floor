@@ -1,0 +1,12 @@
+# root-refusals ceilings for the fixtures whose class, module or lib body is one macro node, and for the constant
+# whose value is one (bench/selfhost_semantic_inline_macros_exercise.sh section 9). A ceiling may only fall. The
+# prelude's CHANNEL_WAIT (concurrency.iyi:1557) was the refusal that held these at 9 and 14; it is spliced now.
+bench/fixtures/seminl_reach/body_single_for.iyi 0
+bench/fixtures/seminl_reach/body_single_if.iyi 0
+bench/fixtures/seminl_reach/body_nested_if.iyi 0
+bench/fixtures/seminl_reach/top_if_class.iyi 0
+bench/fixtures/seminl_reach/prelude_blocks.iyi 0
+bench/fixtures/seminl_reach/const_value_if.iyi 0
+bench/fixtures/seminl_reach/fun_body_local_across.iyi 0
+bench/fixtures/seminl_reach/later_block_local.iyi 0
+bench/fixtures/seminl_reach/const_lower_if.iyi 0

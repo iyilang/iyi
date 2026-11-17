@@ -1,0 +1,36 @@
+@[Unsafe("calls C exit to report nilable proc initialization")]
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+struct Proc
+  @[Primitive(:proc_call)]
+  def probe_call(*args : *T) : R
+  end
+end
+
+class Maker
+  @@maker : Proc(Int32, Int32)?
+
+  def self.ready? : Bool
+    @@maker.is_a?(Nil) ? false : true
+  end
+
+  def self.install : Nil
+    @@maker = ->(value : Int32) { value &+ 40 }
+    nil
+  end
+
+  def self.make(value : Int32) : Int32
+    maker = @@maker
+    if maker.is_a?(Nil)
+      1
+    else
+      maker.probe_call(value)
+    end
+  end
+end
+
+first = Maker.ready? ? 50 : 0
+Maker.install
+LibC.exit(first &+ Maker.make(2))

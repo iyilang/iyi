@@ -1,0 +1,35 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+abstract class Node
+end
+
+class A < Node
+end
+
+class B < Node
+end
+
+class Other
+end
+
+def choose(n : Int32)
+  if n == 1
+    A.new
+  elsif n == 2
+    B.new
+  else
+    Other.new
+  end
+end
+
+def check(n : Int32) : Int32
+  if choose(n).is_a?(Node)
+    2
+  else
+    3
+  end
+end
+
+LibC.exit(check(1) &+ check(2) &+ check(3))

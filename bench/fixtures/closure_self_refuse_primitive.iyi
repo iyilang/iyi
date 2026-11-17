@@ -1,0 +1,7 @@
+struct Int32
+  def plus_one : Proc(Int32)
+    -> { self &+ 1 }
+  end
+end
+
+puts 4.plus_one.call

@@ -1,0 +1,9 @@
+; iyi-ir 1
+; refused: an i192 value is used in a way that is not lowered
+source_filename = "wide_int"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal iyicc i192 @id(i192 %x) {
+entry:
+  ret i192 %x
+}

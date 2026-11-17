@@ -1,0 +1,10 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def read_union(flag : Bool) : Int32
+  value = flag ? 7 : false
+  value.is_a?(Int32) ? value : 1
+end
+
+LibC.exit(read_union(true))

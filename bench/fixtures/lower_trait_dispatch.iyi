@@ -1,0 +1,49 @@
+@[Unsafe("calls C exit to report the dispatch result")]
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+trait Greet
+  abstract def greet : Int32
+end
+
+struct User
+  def initialize(@a : Int32, @b : Int32)
+  end
+end
+
+impl Greet for User
+  def greet : Int32
+    @a &+ @b
+  end
+end
+
+struct Robot
+  def initialize(@id : Int32)
+  end
+end
+
+impl Greet for Robot
+  def greet : Int32
+    @id &* 2
+  end
+end
+
+class Holder
+  def initialize(@item : Greet)
+  end
+
+  def item : Greet
+    @item
+  end
+end
+
+def describe(item : Greet) : Int32
+  item.greet
+end
+
+def either(flag : Bool) : Int32
+  (flag ? User.new(5, 6) : Robot.new(1)).greet
+end
+
+LibC.exit(describe(User.new(1, 2).as(Greet)) &+ describe(Robot.new(9).as(Greet)) &+ describe(Holder.new(User.new(3, 4)).item) &+ describe(Holder.new(Robot.new(5)).item) &+ either(true) &+ either(false))

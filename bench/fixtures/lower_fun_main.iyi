@@ -1,0 +1,6 @@
+# A program that defines its own top-level `fun main`: the C entry. The program's top-level code is
+# `__iyi_main` and must not get a second `main` from the pipeline (program assembly, lower.iyi).
+@[Unsafe("the C entry point takes argc and argv, which the compiler does not check")]
+fun main(argc : Int32, argv : UInt8**) : Int32
+  7
+end

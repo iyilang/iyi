@@ -1,0 +1,25 @@
+class Platform
+  {% if flag?(:darwin) %}
+    def self.name : String
+      "darwin"
+    end
+  {% else %}
+    def self.name : String
+      "other"
+    end
+  {% end %}
+
+  {% if flag?(:linux) %}
+    def self.linux? : Bool
+      true
+    end
+  {% end %}
+end
+
+{% if flag?(:darwin) %}
+  class OnlyDarwin
+    def self.here : Bool
+      true
+    end
+  end
+{% end %}

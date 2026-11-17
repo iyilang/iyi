@@ -1063,7 +1063,7 @@ Checking it moved two things and left the shape alone.
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
 | Compiler | 24,984 lines, **written in Crystal** | 138,295 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 28,880-line own prelude + 128,679 in std |
+| Library | 8,161 lines (3,551 of it core) | 28,880-line own prelude + 129,219 in std |
 | Specs | 21,146 lines | 17,214 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
@@ -9139,13 +9139,13 @@ the runtime's aside - are marked: the compiler writes the list into the
 binary (`Crystal::IYI_UNSAFE_MODULES`), and the Windows handler prints
 it in pieces, allocating nothing.
 
-**Where the repository stands.** `src/std` has 85 marked modules of
-123, including four generic modules (box, deque, static_array, weak_ref)
+**Where the repository stands.** `src/std` has 86 marked modules of
+124, including four generic modules (box, deque, static_array, weak_ref)
 marked by hand outright, since only a program that instantiates their
-bodies types them and `iyi fix src/std` cannot see them. The CBOR module
-was marked by hand for its text encoder. The other reasons were read and
-rewritten by hand from `iyi fix`'s starting point. bench has
-87 marked programs of 177, and none of `samples/iyi`'s 28 programs
+bodies types them and `iyi fix src/std` cannot see them. CBOR and
+WebAuthn were marked by hand for their byte adapters. The other reasons
+were read and rewritten by hand from `iyi fix`'s starting point. bench has
+88 marked programs of 178, and none of `samples/iyi`'s 28 programs
 needs one. The specs' snippets whose stand-in for the prelude or std (a
 `@[Primitive]`, a `lib`, a `Pointer` field, a `@[Share]` type,
 `uninitialized` storage) sits in the compiled module are marked as the
@@ -9172,8 +9172,8 @@ warning, which keeps the set honest, and splitting raw code into a small
 module of its own, the way Rust crates isolate theirs. Counted at
 2f070a01e by reading the sources, blocks (`unsafe { }`) would have
 wrapped 2,338 runs of lines in src/std, 900 in src/iyi and 607 in bench,
-and a mark per declaration 1,535, 469 and 258 defs, against 85, 13 and
-87 module marks.
+and a mark per declaration 1,535, 469 and 258 defs, against 86, 13 and
+88 module marks.
 
 ---
 

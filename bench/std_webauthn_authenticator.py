@@ -167,6 +167,9 @@ def negatives(key, alg, baseline, auth, att, pub, reg_client):
         auth_set(case, data[:32] + bytes([flags]) + data[33:] + tail)
 
     emit("base64url alphabet", "reg", "malformed", "encoding", lambda c: c["registration"]["response"].update(attestationObject="+"))
+    emit("base64url padding", "reg", "malformed", "encoding", lambda c: c["registration"]["response"].update(attestationObject="AA=="))
+    emit("base64url whitespace", "reg", "malformed", "encoding", lambda c: c["registration"]["response"].update(attestationObject="AA A"))
+    emit("base64url length", "reg", "malformed", "encoding", lambda c: c["registration"]["response"].update(attestationObject="A"))
     emit("response shape", "reg", "malformed", "shape", lambda c: c["registration"].update(rawId="other"))
     emit("client UTF-8", "reg", "malformed", "encoding", lambda c: reg_client_set(c, b"\xff"))
     emit("client shape", "reg", "malformed", "shape", lambda c: reg_client_set(c, b"[]"))
@@ -186,6 +189,7 @@ def negatives(key, alg, baseline, auth, att, pub, reg_client):
     emit("extension trailing byte", "reg", "malformed", "auth_data", lambda c: with_auth_flags(c, 0xc5, cbor({}) + b"\x00"))
     emit("extension is not a map", "reg", "malformed", "auth_data", lambda c: with_auth_flags(c, 0xc5, cbor([])))
     emit("unsupported algorithm", "reg", "malformed", "algorithm", lambda c: bad_key(c, {**pub, 3: -999}))
+    emit("algorithm not offered", "reg", "malformed", "algorithm", lambda c: c.update(only_rs256=True))
     weak = rsa.generate_private_key(public_exponent=65537, key_size=1024)
     weak_key = cose_key(weak, -257)
     emit("RSA under 2048 bits", "reg", "malformed", "key", lambda c: bad_key(c, weak_key))
@@ -195,6 +199,7 @@ def negatives(key, alg, baseline, auth, att, pub, reg_client):
     emit("assertion ID", "assert", "verification", "credential", lambda c: change_credential(c, "assertion"))
     emit("assertion user handle", "assert", "verification", "user_handle", lambda c: c["assertion"]["response"].update(userHandle=b64(b"somebody else")))
     emit("assertion AT set", "assert", "malformed", "auth_data", lambda c: assertion_flags(c, 0x45))
+    emit("assertion trailing byte", "assert", "malformed", "auth_data", lambda c: auth_set(c, auth_raw(c) + b"\x00"))
     emit("assertion UV", "assert", "verification", "user_verified", lambda c: assertion_flags(c, 0x01))
     emit("assertion extension trailing", "assert", "malformed", "auth_data", lambda c: assertion_flags(c, 0x85, cbor({}) + b"\x00"))
     emit("assertion counter", "assert", "verification", "counter", lambda c: c.update(stored_count=1))
@@ -223,6 +228,22 @@ def negatives(key, alg, baseline, auth, att, pub, reg_client):
     actual_client = base64.urlsafe_b64decode(encoded_client + "=" * (-len(encoded_client) % 4))
     zero["assertion"]["response"]["signature"] = b64(sign(key, alg, zero_data + hashlib.sha256(actual_client).digest()))
     print(json.dumps(zero, separators=(",", ":")))
+    extended = copy.deepcopy(baseline)
+    extended["name"] = "extension maps"
+    extended["expect_extensions"] = True
+    with_auth_flags(extended, 0xc5, cbor({"example": b"output"}))
+    extended_auth = auth_raw(extended)[:32] + b"\x85" + auth_raw(extended)[33:] + cbor({"example": b"output"})
+    auth_set(extended, extended_auth)
+    extended["assertion"]["response"]["signature"] = b64(sign(key, alg, extended_auth + hashlib.sha256(actual_client).digest()))
+    print(json.dumps(extended, separators=(",", ":")))
+    no_uv = copy.deepcopy(baseline)
+    no_uv["name"] = "user verification optional"
+    no_uv["user_verification"] = False
+    with_auth_flags(no_uv, 0x41)
+    no_uv_auth = auth_raw(no_uv)[:32] + b"\x01" + auth_raw(no_uv)[33:]
+    auth_set(no_uv, no_uv_auth)
+    no_uv["assertion"]["response"]["signature"] = b64(sign(key, alg, no_uv_auth + hashlib.sha256(actual_client).digest()))
+    print(json.dumps(no_uv, separators=(",", ":")))
     def u2f(case):
         obj = copy.deepcopy(att)
         obj["fmt"] = "fido-u2f"

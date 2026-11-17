@@ -44,15 +44,24 @@ def verify_case(row : Any, label : String, is_w3c : Bool = false) : Bool
     check_error(registration, reg_error, label)
     return true
   end
-  expected = RegistrationExpectation.new(challenge, [origin], rp, uv, [CoseAlg::ES256, CoseAlg::RS256, CoseAlg::EdDSA, CoseAlg::ES384, CoseAlg::PS256], policy)
+  allowed = [CoseAlg::ES256, CoseAlg::RS256, CoseAlg::EdDSA, CoseAlg::ES384, CoseAlg::PS256]
+  restricted = row["only_rs256"]?
+  allowed = [CoseAlg::RS256] if restricted && restricted.as_bool
+  expected = RegistrationExpectation.new(challenge, [origin], rp, uv, allowed, policy)
   credential = registration.verify(expected)
   if credential.is_a?(WebAuthnError)
     check_error(credential, reg_error, label)
+    if label == "unrecognised attestation"
+      raise "ASSERTION FAILED: #{label}: format not named" unless credential.message.includes?("fido-u2f")
+    end
     return true
   end
   require_error(reg_error, label)
   raise "ASSERTION FAILED: #{label}: registration ID not returned" unless credential.credential_id == registration.credential_id
   raise "ASSERTION FAILED: #{label}: key bytes lost" if credential.key_bytes.empty?
+  if row["expect_extensions"]?
+    raise "ASSERTION FAILED: #{label}: registration extensions missing" unless credential.extensions
+  end
   if label.includes?("packed-x5c") || (is_w3c && row["name"].as_s.starts_with?("packed-") && row["name"].as_s != "packed-self-es256")
     raise "ASSERTION FAILED: #{label}: no basic attestation chain" unless credential.attestation_type == "basic" && !credential.attestation_chain.empty?
   end
@@ -78,6 +87,9 @@ def verify_case(row : Any, label : String, is_w3c : Bool = false) : Bool
     return true
   end
   require_error(assert_error, label)
+  if row["expect_extensions"]?
+    raise "ASSERTION FAILED: #{label}: assertion extensions missing" unless result.extensions
+  end
   true
 end
 
@@ -89,7 +101,9 @@ File.read(args[0]).lines.each do |line|
   row = JSON.parse(line)
   name = row["name"].as_s
   verify_case(row, name)
-  puts "  refusal: #{name}" if name.includes?(" ") || name == "cbor"
+  reg_error = row["reg_error"].as_s
+  assert_error = row["assert_error"].as_s
+  puts "  refusal: #{name} (#{reg_error}#{assert_error})" unless reg_error.empty? && assert_error.empty?
   count = count + 1
 end
 puts "== software authenticator: #{count} cases"

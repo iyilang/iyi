@@ -13,9 +13,10 @@ party, origin, verification policy and expected refusal annotations were added.
 Sections 16.2 through 16.16 with supported credential algorithms are included;
 16.9 uses ES512 and 16.12 uses Ed448, neither supported by std/cose. TPM,
 Android Key, Apple and FIDO U2F statements are retained to exercise Ignore,
-not claimed as verified attestation formats. The cross-origin and oversized-ID
-examples are expected refusals under Relic's policy. W3C's extension examples
-are API-shape examples, not complete registration/assertion signatures.
+not claimed as verified attestation formats. The cross-origin examples are
+expected refusals under Relic's policy. Section 16.6's 1023-byte credential
+ID is valid; a separate software case checks refusal above that limit. W3C's
+extension examples are API-shape examples, not complete ceremony signatures.
 
 Chrome virtual-authenticator fixture
 

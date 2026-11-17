@@ -4,6 +4,14 @@
 
 ### Added
 
+- **Checksum database verification primitives.** The compiler source has
+  Ed25519 signed-note verification, checkpoint and record parsing,
+  height-8 Merkle tile proofs, and a persistent consistency-checked
+  checkpoint cache. Fixture bytes are kept unchanged across Git line-ending
+  settings, and cache writes replace an existing checkpoint through an
+  exclusive same-directory file. Package downloads do not use them yet.
+  Independent cryptographic review is required before anything depends on them.
+
 - Add the command parser and build-daemon protocol in iyi, with native-host
   comparisons over 250 argument vectors and 30 daemon scenarios.
   The hosted CLI remains unchanged; these components add no command wiring.

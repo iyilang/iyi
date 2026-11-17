@@ -1,0 +1,29 @@
+module bodies_digest_reach_helper
+
+pub abstract class DigestBase
+  def initialize(size : Int32)
+  end
+
+  def dup : self
+    copy = self.class.new
+    copy
+  end
+end
+
+pub class ConcreteDigest < DigestBase
+  def initialize
+    super(1)
+  end
+end
+
+pub abstract class IntermediateDigest < DigestBase
+  def initialize(size : Int32)
+    super(size)
+  end
+end
+
+pub class OtherDigest < IntermediateDigest
+  def initialize
+    super(2)
+  end
+end

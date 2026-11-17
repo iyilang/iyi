@@ -213,9 +213,9 @@ prove_mutation "union members printed by full name, not devirtualized" "$TOP_LEV
   -- check_type_queries_diverge || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
-prove_mutation "type hook bypassed in SemanticProgram lookup" "$TOP_LEVEL_FILE" \
-  "      return resolved" \
-  "      return current_type" \
+prove_mutation "generic type hook bypassed in SemanticProgram lookup" "$TOP_LEVEL_FILE" \
+  "            return hook.instantiate_type(base_type, type_args)" \
+  "            return base_type" \
   -- check_type_queries_diverge || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 

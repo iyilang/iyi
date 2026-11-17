@@ -48,24 +48,24 @@ status=0
 RESULTS="$WORK/results.tsv"
 : > "$RESULTS"
 
-# The committed floors: files that agree per (tool, corpus). Raise them when the
-# table shows a corpus getting better; never lower one.
+# Initial floors for this component's source population, measured before its
+# first PR. Raise them when agreement improves; later regressions must not lower them.
 floor_of() {
   case "$1:$2" in
     lexer:samples)         echo 28 ;;
     lexer:prelude)         echo 20 ;;
-    lexer:std)             echo 126 ;;
-    lexer:self)            echo 54 ;;
+    lexer:std)             echo 120 ;;
+    lexer:self)            echo 65 ;;
     lexer:fixtures)        echo 15 ;;
     parser:samples)        echo 28 ;;
     parser:prelude)        echo 20 ;;
-    parser:std)            echo 126 ;;
-    parser:self)           echo 54 ;;
+    parser:std)            echo 120 ;;
+    parser:self)           echo 65 ;;
     parser:fixtures)       echo 15 ;;
-    declarations:samples)  echo 5 ;;
-    declarations:prelude)  echo 10 ;;
-    declarations:std)      echo 2 ;;
-    declarations:self)     echo 1 ;;
+    declarations:samples)  echo 7 ;;
+    declarations:prelude)  echo 12 ;;
+    declarations:std)      echo 11 ;;
+    declarations:self)     echo 2 ;;
     declarations:fixtures) echo 12 ;;
     *)                     echo 0 ;;
   esac

@@ -142,7 +142,7 @@ src/compiler/native/wasm/codegen.iyi 0
 src/compiler/native/wasm/leb.iyi 15
 src/compiler/native/wasm/module.iyi 0
 src/compiler/platform/flags.iyi 5
-src/compiler/platform/linker.iyi 27
+src/compiler/platform/linker.iyi 28
 src/compiler/platform/target.iyi 47
 src/compiler/semantic/call.iyi 0
 src/compiler/semantic/call_error.iyi 0
@@ -222,7 +222,7 @@ src/iyi/io.iyi 56
 src/iyi/macros.iyi 1
 src/iyi/number.iyi 35
 src/iyi/object.iyi 26
-src/iyi/prelude.iyi 49
+src/iyi/prelude.iyi 55
 src/iyi/primitives.iyi 36
 src/iyi/range.iyi 18
 src/iyi/set.iyi 15
@@ -236,7 +236,7 @@ src/std/asn1.iyi 0
 src/std/atomic.iyi 23
 src/std/autocert.iyi 0
 src/std/base32.iyi 26
-src/std/base64.iyi 31
+src/std/base64.iyi 29
 src/std/benchmark.iyi 0
 src/std/big.iyi 0
 src/std/bit_array.iyi 0

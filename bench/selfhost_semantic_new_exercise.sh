@@ -90,9 +90,28 @@ check_new_diverge() {
     return $?
   fi
   for fixture in "$REPO"/bench/fixtures/semnew_*.iyi; do
-    if ! "$WORK/oracle$EXE" "$(native_path "$fixture")" > "$WORK/mo.txt" 2>/dev/null ||
-       ! "$WORK/port_m$EXE" "$(native_path "$fixture")" > "$WORK/mp.txt" 2>/dev/null; then
-      invalid_mutant "new-method oracle or driver failed"
+    if ! "$WORK/oracle$EXE" "$(native_path "$fixture")" > "$WORK/mo.txt" 2>"$WORK/mo.err"; then
+      cat "$WORK/mo.err"
+      invalid_mutant "new-method oracle failed on $(basename "$fixture")"
+      return $?
+    fi
+    "$WORK/port_m$EXE" "$(native_path "$fixture")" > "$WORK/mp.txt" 2>"$WORK/mp.err"
+    local mutant_status=$?
+    # A semantic rejection of a fixture accepted by both original drivers is a
+    # behavioral divergence. Panics, signals and build failures remain invalid.
+    if [ "$mutant_status" -eq 1 ] && grep -q '^Error: ' "$WORK/mp.err"; then
+      if "$WORK/port$EXE" "$(native_path "$fixture")" >"$WORK/baseline.txt" 2>"$WORK/baseline.err" &&
+         cmp -s "$WORK/mo.txt" "$WORK/baseline.txt"; then
+        printf 'semantic rejection of %s: ' "$(basename "$fixture")"
+        awk 'NR == 1 { print; exit }' "$WORK/mp.err"
+        return 1
+      fi
+      invalid_mutant "the unmutated new-method driver did not match the oracle"
+      return $?
+    fi
+    if [ "$mutant_status" -ne 0 ]; then
+      cat "$WORK/mp.err"
+      invalid_mutant "new-method driver exited $mutant_status on $(basename "$fixture")"
       return $?
     fi
     cmp -s "$WORK/mo.txt" "$WORK/mp.txt" || return 1

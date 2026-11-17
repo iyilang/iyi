@@ -136,6 +136,22 @@ module Iyi
   class Def
     include Annotatable
 
+    # iyi: Under `-Diyi_observe`, each `@[Effect]` def becomes a wrapper keeping
+    # the def's name and a renamed body `__iyi_effect_<name>`.
+    # To prevent synthetic `__iyi_effect_` frames from appearing in panics and
+    # backtraces, codegen emits the renamed body directly inside its wrapper in
+    # every build that has the body (source, producer, and consumer of a travelled body).
+    # Codegen dispatch, reach analysis, and stale call-path encoding must use
+    # this exact predicate so inlined emission, reachability, and fingerprinting
+    # agree across whole-program and artifact builds without reach mismatches.
+    def iyi_observer_body? : Bool
+      name.starts_with?("__iyi_effect_") && (iyi_observer_wrapped? || iyi_body_travelled?)
+    end
+
+    def iyi_observer_body_inlined? : Bool
+      iyi_observer_body? && !is_a?(External) && !iyi_from_artifact? && !body.is_a?(Primitive)
+    end
+
     property! owner : Type
     property! original_owner : Type
     property vars : MetaVars?

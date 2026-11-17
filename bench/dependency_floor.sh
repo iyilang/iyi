@@ -140,9 +140,11 @@ COMPILER="$REPO/.build/iyi"
 # was already on the list for the collector's helpers, and an exercise
 # that starts a thread and waits for it names the other half. Linux's
 # join is a futex.
-# `backtrace` and `backtrace_symbols_fd` joined when panics gained backtraces:
-# the panic path captures the frames and writes them directly to stderr
-# through libSystem, linking no new library.
+# `backtrace` joined when panics gained backtraces (SPEC.md III.9).
+# `dladdr` and `dprintf` replaced `backtrace_symbols_fd` with 68c53c352's
+# boundary-frame lookup at the address less one (`addr - 1`). Both are
+# libSystem's, linking no new library (note: dprintf is not documented by
+# Darwin as async-signal-safe).
 # `std/file` and `std/dir` (stat64, lstat64, rename, link, symlink, readlink,
 # realpath, truncate, opendir, readdir, closedir, rewinddir, getcwd, chdir,
 # mkdir, rmdir) and `std/udp` (sendto, recvfrom) joined the way `IyiSocket`
@@ -261,6 +263,8 @@ ALLOWED_SYMBOLS_DARWIN="$ALLOWED_SYMBOLS_DARWIN shutdown"
 # it no longer needed. LLVM offers the call on Apple targets only, so
 # Linux and Windows keep the loop.
 ALLOWED_SYMBOLS_DARWIN="$ALLOWED_SYMBOLS_DARWIN memset_pattern16"
+# `std/observe` records cwd, env, and resolved paths using Linux syscalls
+# directly, matching the floor's zero-dependency rule for std modules.
 ALLOWED_SYMBOLS_LINUX="$FLOOR_BASE_LINUX environ"
 
 # What a program may link. The platform libc only.

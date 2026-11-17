@@ -173,9 +173,7 @@ describe TCPSocket, tags: "network" do
     end
 
     it "fails when connection is refused" do
-      port = TCPServer.open("localhost", 0) do |server|
-        server.local_address.port
-      end
+      port = unused_local_tcp_port
 
       expect_raises(Socket::ConnectError, "Error connecting to 'localhost:#{port}'") do
         TCPSocket.new("localhost", port)

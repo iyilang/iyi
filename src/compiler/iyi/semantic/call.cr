@@ -931,6 +931,7 @@ class Iyi::Call
     end
 
     if arg.is_a?(NumberLiteral) && arg.kind.i32?
+      instance_type.program.layout_fold_use(arg, Iyi::LayoutFoldUseKind::Typing, self)
       index = arg.value.to_i
       index += instance_type.size if index < 0
       in_bounds = (0 <= index < instance_type.size)
@@ -944,6 +945,7 @@ class Iyi::Call
     elsif arg.is_a?(RangeLiteral)
       from = arg.from
       if from.is_a?(NumberLiteral) && from.kind.i32?
+        instance_type.program.layout_fold_use(from, Iyi::LayoutFoldUseKind::Typing, self)
         from_index = from.value.to_i
         from_index += instance_type.size if from_index < 0
         in_bounds = (0 <= from_index <= instance_type.size)
@@ -959,6 +961,7 @@ class Iyi::Call
 
       to = arg.to
       if to.is_a?(NumberLiteral) && to.kind.i32?
+        instance_type.program.layout_fold_use(to, Iyi::LayoutFoldUseKind::Typing, self)
         to_index = to.value.to_i
         to_index += instance_type.size if to_index < 0
         to_index = (to_index - (arg.exclusive? ? 1 : 0)).clamp(-1, instance_type.size - 1)

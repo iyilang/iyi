@@ -32,6 +32,21 @@ describe "`crystal build`" do
         .output.should(eq("hello world\n"))
     end
   end
+  {% if flag?(:darwin) %}
+    it "builds without linker warnings on darwin" do
+      with_temp_executable "hello-world-darwin" do |output_path|
+        with_tempfile "cache" do |cache_dir|
+          Dir.mkdir_p(cache_dir)
+          result = Process.capture_result(
+            crystal, "build", "-o", output_path, fixture_path("hello-world.cr"),
+            env: {"CRYSTAL_CACHE_DIR" => cache_dir, "IYI_CACHE_DIR" => cache_dir}
+          )
+          result.should be_success
+          result.error.should be_empty
+        end
+      end
+    end
+  {% end %}
 
   it "syntax error" do
     Process.capture_result(crystal, "build", fixture_path("syntax-error.cr.txt"))

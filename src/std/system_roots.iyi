@@ -281,6 +281,7 @@ end
     RESULT_TRUST_AS_ROOT =              2
     RESULT_DENY          =              3
 
+    @[Effect(:host_state)]
     def self.read(collected : SystemRootsCollector) : Nil
       anchors = Pointer(Void).new(0_u64)
       if LibSecurity.SecTrustCopyAnchorCertificates(pointerof(anchors)) == 0 && anchors.address != 0
@@ -306,6 +307,7 @@ end
     end
 
     # 1 trusted as a root without constraint, -1 denied, 0 neither.
+    @[Effect(:host_state)]
     private def self.verdict(certificate : Void*, domain : UInt32, result_key : Void*, constraints : Array(Void*)) : Int32
       settings = Pointer(Void).new(0_u64)
       return 0 unless LibSecurity.SecTrustSettingsCopyTrustSettings(certificate, domain, pointerof(settings)) == 0 && settings.address != 0
@@ -343,6 +345,7 @@ end
       end
     end
 
+    @[Effect(:host_state)]
     private def self.bytes(certificate : Void*) : Array(UInt8)
       data = LibSecurity.SecCertificateCopyData(certificate)
       return [] of UInt8 if data.address == 0
@@ -353,6 +356,7 @@ end
       copied
     end
 
+    @[Effect(:host_state)]
     private def self.string(text : String) : Void*
       LibCoreFoundation.CFStringCreateWithCString(Pointer(Void).new(0_u64), text.to_unsafe, UTF8)
     end
@@ -368,6 +372,7 @@ end
     SERVER_AUTH = "1.3.6.1.5.5.7.3.1"
     ANY_USE     = "2.5.29.37.0"
 
+    @[Effect(:host_state)]
     def self.read(collected : SystemRootsCollector) : Nil
       each_context("ROOT") do |context, der|
         if serves?(context)
@@ -385,7 +390,7 @@ end
     # ABI), asked for twice - once for its size, once for its bytes. No
     # property is every purpose; a property naming none is no purpose; and
     # a call that fails any other way is read as no.
-    private def self.serves?(context : Void*) : Bool
+    @[Effect(:host_state)]; private def self.serves?(context : Void*) : Bool
       size = 0_u32
       if LibCrypt32.CertGetEnhancedKeyUsage(context, PROPERTY_ONLY, Pointer(Void).new(0_u64), pointerof(size)) == 0
         return LibKernel32.GetLastError == NOT_FOUND
@@ -416,6 +421,18 @@ end
       text[i] == 0_u8
     end
 
+    @[Effect(:host_state)]; private def self.open_store(name : UInt16*) : Void*
+      LibCrypt32.CertOpenSystemStoreW(Pointer(Void).new(0_u64), name)
+    end
+
+    @[Effect(:host_state)]; private def self.next_context(store : Void*, previous : Void*) : Void*
+      LibCrypt32.CertEnumCertificatesInStore(store, previous)
+    end
+
+    @[Effect(:host_state)]; private def self.close_store(store : Void*) : Nil
+      LibCrypt32.CertCloseStore(store, 0_u32)
+    end
+
     # Every certificate in the system store *name*: its context, for the
     # properties the store keeps beside it, and its DER. A CERT_CONTEXT
     # is { DWORD encoding; BYTE* encoded; DWORD size; ... } on the 64-bit
@@ -428,16 +445,16 @@ end
         wide[i] = name.to_unsafe[i].to_u16
         i = i + 1
       end
-      store = LibCrypt32.CertOpenSystemStoreW(Pointer(Void).new(0_u64), wide.to_unsafe)
+      store = open_store(wide.to_unsafe)
       return if store.address == 0
-      context = LibCrypt32.CertEnumCertificatesInStore(store, Pointer(Void).new(0_u64))
+      context = next_context(store, Pointer(Void).new(0_u64))
       until context.address == 0
         start = (context.as(UInt8*) + 8_i64).as(Pointer(UInt8)*)[0]
         size = (context.as(UInt8*) + 16_i64).as(UInt32*)[0].to_i32
         yield context, Array(UInt8).new(size) { |k| start[k] }
-        context = LibCrypt32.CertEnumCertificatesInStore(store, context)
+        context = next_context(store, context)
       end
-      LibCrypt32.CertCloseStore(store, 0_u32)
+      close_store(store)
     end
   end
 {% end %}

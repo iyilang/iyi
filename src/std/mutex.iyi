@@ -240,6 +240,7 @@ pub class Mutex(T)
   # own release made, and counts itself out of the waiters once it stops.
   # `park_on` looks at the count again under its list's lock, and a
   # release that moves it wakes the list after, so no move is missed.
+  @[Effect(:threads)]
   private def await_change(mine : UInt64) : Nil | Cancelled
     {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
       while @changes.get == mine
@@ -386,6 +387,7 @@ pub class Mutex(T)
     IyiAtomic.load(word.as(Pointer(UInt64)), :monotonic, false)
   end
 
+  @[Effect(:threads)]
   private def release : Nil
     Mutex.relaxed_set(pointerof(@holder), 0_u64)
     Mutex.relaxed_set(pointerof(@holder_thread), 0_u64)

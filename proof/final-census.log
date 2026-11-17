@@ -1,0 +1,229 @@
+Running census over 141 programs (27 C2, 114 C3) using 8 workers...
+Completed census in 513.05s.
+
+================================================================================
+                      iyi STALE TEST CENSUS (§13)
+================================================================================
+
+## Corpus Reusability Distribution
+
+| Corpus | Total Programs | Reusable (Run 2 Hit) | Not Reusable | Static Reusable (Build Key) | Build Failed | Reusable % |
+|---|---|---|---|---|---|---|
+| C2 (samples/iyi/*.iyi) |   27 |   25 |    2 |   27 |    0 |   92.6% |
+| C3 (bench/std_*_exercise.iyi) |  114 |   62 |   52 |  111 |    0 |   54.4% |
+| **Total** | ** 141** | **  87** | **  54** | ** 138** | **   0** | **  61.7%** |
+
+## Reason Categories Breakdown
+
+| Reason Category | Total Occurrences | Description / Scope |
+|---|---|---|
+| `requested effect` |    53 | Explicit effect annotation/hook (clock, process, random, socket, etc.) |
+| `opaque program construct` |     1 | Raw pointers, assembly, or calls to unclassified/internal defs |
+| `blind/refused build` |     0 | Refused compiler or link flags, or build failure |
+| `runner` |     0 | Trace incomplete, racy run input, or shared-write |
+| `internal` |     0 | Unclassified runtime sites, ambiguous test id, or internal effect |
+
+## Top Not-Reusable Reasons and Example Sites
+
+| Category | Specific Reason | Occurrences | Example Program and Site |
+|---|---|---|---|
+| `requested effect` | `clock` |    17 | std_time.iyi at `toolchain:std/time.iyi:1248` |
+| `requested effect` | `runtime_timing` |    10 | std_csv_exercise.iyi at `toolchain:std/gc.iyi:149` |
+| `requested effect` | `entropy` |     9 | std_acme_exercise.iyi at `toolchain:std/random.iyi:442` |
+| `requested effect` | `network` |     8 | socket.iyi at `toolchain:std/socket.iyi:1526` |
+| `requested effect` | `process` |     4 | std_process_exercise.iyi at `toolchain:std/process.iyi:887` |
+| `requested effect` | `timer` |     2 | std_kernel_exercise.iyi at `toolchain:iyi/concurrency.iyi:5276` |
+| `requested effect` | `dir_stream` |     1 | std_dir_exercise.iyi at `toolchain:std/dir.iyi:241` |
+| `opaque program construct` | `pointer_new` |     1 | std_number_format_exercise.iyi at `src:std_number_format_exercise_test.iyi:50` |
+| `requested effect` | `signal` |     1 | std_signal_exercise.iyi at `toolchain:std/signal.iyi:211` |
+| `requested effect` | `host_state` |     1 | std_system_roots_exercise.iyi at `toolchain:std/system_roots.iyi:208` |
+
+## Not-Reusable Programs and First Reasons
+
+| Program | Corpus | Runtime Verdict | Runtime Reuse | First Runtime Reason | Static Build-Key Reason |
+|---|---|---|---|---|---|
+| `socket.iyi` | C2 | pass | not reusable | network at `toolchain:std/socket.iyi:1526` | reusable |
+| `std_time.iyi` | C2 | pass | not reusable | clock at `toolchain:std/time.iyi:1248` | reusable |
+| `std_acme_exercise.iyi` | C3 | pass | not reusable | entropy at `toolchain:std/random.iyi:442` | reusable |
+| `std_autocert_exercise.iyi` | C3 | pass | not reusable | entropy at `toolchain:std/random.iyi:442` | reusable |
+| `std_benchmark_exercise.iyi` | C3 | pass | not reusable | clock at `toolchain:std/time.iyi:1248` | reusable |
+| `std_big_exercise.iyi` | C3 | pass | not reusable | clock at `toolchain:iyi/concurrency.iyi:334` | reusable |
+| `std_bit_array_exercise.iyi` | C3 | pass | not reusable | clock at `toolchain:iyi/concurrency.iyi:334` | reusable |
+| `std_cookie_exercise.iyi` | C3 | pass | not reusable | clock at `toolchain:std/time.iyi:1248` | reusable |
+| `std_csv_exercise.iyi` | C3 | pass | not reusable | runtime_timing at `toolchain:std/gc.iyi:149` | reusable |
+| `std_dir_exercise.iyi` | C3 | pass | not reusable | dir_stream at `toolchain:std/dir.iyi:241` | reusable |
+| `std_dns_exercise.iyi` | C3 | pass | not reusable | network at `toolchain:std/socket.iyi:1526` | reusable |
+| `std_file_exercise.iyi` | C3 | pass | not reusable | runtime_timing at `toolchain:std/gc.iyi:149` | reusable |
+| `std_file_utils_exercise.iyi` | C3 | pass | not reusable | runtime_timing at `toolchain:std/gc.iyi:149` | reusable |
+| `std_fileserver_exercise.iyi` | C3 | pass | not reusable | entropy at `toolchain:std/random.iyi:442` | reusable |
+| `std_fuzz_exercise.iyi` | C3 | pass | not reusable | clock at `toolchain:std/time.iyi:1248` | reusable |
+| `std_gc_exercise.iyi` | C3 | pass | not reusable | runtime_timing at `toolchain:std/gc.iyi:149` | reusable |
+| `std_http_exercise.iyi` | C3 | pass | not reusable | network at `toolchain:std/socket.iyi:1526` | reusable |
+| `std_indexable_exercise.iyi` | C3 | pass | not reusable | entropy at `toolchain:std/random.iyi:442` | reusable |
+| `std_io_exercise.iyi` | C3 | pass | not reusable | runtime_timing at `toolchain:std/gc.iyi:149` | reusable |
+| `std_json_exercise.iyi` | C3 | pass | not reusable | runtime_timing at `toolchain:std/gc.iyi:149` | reusable |
+| `std_kernel_exercise.iyi` | C3 | pass | not reusable | timer at `toolchain:iyi/concurrency.iyi:5276` | reusable |
+| `std_log_exercise.iyi` | C3 | pass | not reusable | clock at `toolchain:std/time.iyi:1248` | reusable |
+| `std_mutex_exercise.iyi` | C3 | pass | not reusable | timer at `toolchain:iyi/concurrency.iyi:5276` | reusable |
+| `std_netip_exercise.iyi` | C3 | pass | not reusable | runtime_timing at `toolchain:std/gc.iyi:149` | reusable |
+| `std_number_format_exercise.iyi` | C3 | pass | not reusable | pointer_new at `src:std_number_format_exercise_test.iyi:50` | pointer_new at src:std_number_format_exercise_test.iyi:50 |
+| `std_observe_exercise.iyi` | C3 | pass | not reusable | clock at `src:test.iyi:10` | reusable |
+| `std_otp_exercise.iyi` | C3 | pass | not reusable | clock at `toolchain:std/time.iyi:1248` | reusable |
+| `std_password_exercise.iyi` | C3 | pass | not reusable | entropy at `toolchain:std/random.iyi:442` | reusable |
+| `std_png_exercise.iyi` | C3 | pass | not reusable | runtime_timing at `toolchain:std/gc.iyi:149` | reusable |
+| `std_process_exercise.iyi` | C3 | pass | not reusable | process at `toolchain:std/process.iyi:887` | reusable |
+| `std_random_exercise.iyi` | C3 | pass | not reusable | entropy at `toolchain:std/random.iyi:442` | reusable |
+| `std_router_exercise.iyi` | C3 | pass | not reusable | network at `toolchain:std/socket.iyi:1526` | reusable |
+| `std_shared_proc_exercise.iyi` | C3 | pass | not reusable | process at `toolchain:iyi/concurrency.iyi:4228` | reusable |
+| `std_signal_exercise.iyi` | C3 | pass | not reusable | signal at `toolchain:std/signal.iyi:211` | lib call at src:std_signal_exercise_test.iyi:88 |
+| `std_slice_exercise.iyi` | C3 | pass | not reusable | clock at `toolchain:iyi/concurrency.iyi:334` | reusable |
+| `std_smtp_exercise.iyi` | C3 | pass | not reusable | network at `toolchain:std/socket.iyi:1526` | reusable |
+| `std_sse_exercise.iyi` | C3 | pass | not reusable | network at `toolchain:std/socket.iyi:1526` | reusable |
+| `std_static_array_exercise.iyi` | C3 | pass | not reusable | clock at `toolchain:iyi/concurrency.iyi:334` | reusable |
+| `std_system_exercise.iyi` | C3 | pass | not reusable | process at `toolchain:std/system.iyi:129` | reusable |
+| `std_system_roots_exercise.iyi` | C3 | pass | not reusable | host_state at `toolchain:std/system_roots.iyi:208` | reusable |
+| `std_tar_exercise.iyi` | C3 | pass | not reusable | clock at `toolchain:std/file.iyi:670` | reusable |
+| `std_term_exercise.iyi` | C3 | pass | not reusable | process at `toolchain:std/process.iyi:887` | reusable |
+| `std_text_scale_exercise.iyi` | C3 | pass | not reusable | clock at `toolchain:iyi/concurrency.iyi:334` | reusable |
+| `std_time_exercise.iyi` | C3 | pass | not reusable | clock at `toolchain:std/time.iyi:1248` | reusable |
+| `std_tls_exercise.iyi` | C3 | pass | not reusable | entropy at `toolchain:std/random.iyi:442` | reusable |
+| `std_tuple_exercise.iyi` | C3 | pass | not reusable | clock at `toolchain:iyi/concurrency.iyi:334` | reusable |
+| `std_udp_exercise.iyi` | C3 | pass | not reusable | network at `toolchain:std/udp.iyi:500` | reusable |
+| `std_uri_exercise.iyi` | C3 | pass | not reusable | clock at `toolchain:iyi/concurrency.iyi:334` | reusable |
+| `std_uuid_exercise.iyi` | C3 | pass | not reusable | entropy at `toolchain:std/random.iyi:442` | reusable |
+| `std_weak_ref_exercise.iyi` | C3 | pass | not reusable | runtime_timing at `toolchain:std/gc.iyi:149` | lib call at src:std_weak_ref_exercise_test.iyi:185 |
+| `std_websocket_exercise.iyi` | C3 | pass | not reusable | network at `toolchain:std/socket.iyi:1526` | reusable |
+| `std_x509_exercise.iyi` | C3 | pass | not reusable | entropy at `toolchain:std/random.iyi:442` | reusable |
+| `std_xz_exercise.iyi` | C3 | pass | not reusable | runtime_timing at `toolchain:std/gc.iyi:149` | reusable |
+| `std_yaml_exercise.iyi` | C3 | pass | not reusable | clock at `toolchain:iyi/concurrency.iyi:334` | reusable |
+
+## Reusable Programs in C3
+
+  std_aead_exercise.iyi, std_annotations_exercise.iyi, std_asn1_exercise.iyi, std_atomic_exercise.iyi, std_base32_exercise.iyi, std_base64_exercise.iyi, std_bool_exercise.iyi, std_box_exercise.iyi, std_bzip2_exercise.iyi, std_capsule_exercise.iyi, std_colorize_exercise.iyi, std_complex_exercise.iyi, std_compress_exercise.iyi, std_crypto_exercise.iyi, std_curve25519_exercise.iyi, std_deque_exercise.iyi, std_digest_exercise.iyi, std_ecdsa_exercise.iyi, std_eiy_exercise.iyi, std_enum_exercise.iyi, std_env_exercise.iyi, std_errno_exercise.iyi, std_float_exercise.iyi, std_heap_exercise.iyi, std_hpack_exercise.iyi, std_hpke_exercise.iyi, std_html_exercise.iyi, std_http_proxy_exercise.iyi, std_idna_exercise.iyi, std_ini_exercise.iyi, std_int_exercise.iyi, std_iterator_exercise.iyi, std_levenshtein_exercise.iyi, std_mail_exercise.iyi, std_math_exercise.iyi, std_mime_exercise.iyi, std_mlkem_exercise.iyi, std_named_tuple_exercise.iyi, std_number_exercise.iyi, std_ocsp_exercise.iyi, std_option_parser_exercise.iyi, std_p256_exercise.iyi, std_p384_exercise.iyi, std_path_exercise.iyi, std_reference_storage_exercise.iyi, std_regex_exercise.iyi, std_rsa_exercise.iyi, std_secure_dns_exercise.iyi, std_semantic_version_exercise.iyi, std_set_exercise.iyi, std_shlex_exercise.iyi, std_steppable_exercise.iyi, std_string_pool_exercise.iyi, std_string_scanner_exercise.iyi, std_symbol_exercise.iyi, std_text_exercise.iyi, std_toml_exercise.iyi, std_unicode_exercise.iyi, std_user_exercise.iyi, std_xml_exercise.iyi, std_zip_exercise.iyi, std_zstd_exercise.iyi
+
+================================================================================
+                      STALE TESTING OVERHEAD MEASUREMENTS (§13)
+================================================================================
+
+| Program | Default Build+Run (s) | --fresh Time (s) | --cached Validation (s) | Reached Elements | Encoded Bytes | Trace Bytes | Receipt Bytes | Key Bytes |
+|---|---|---|---|---|---|---|---|---|
+| hello.iyi                 |  0.543s | 15.686s |  0.845s |   1610 | 2508603 B |     91 B |   7906 B |   7790 B |
+| calc.iyi                  |  0.608s | 15.721s |  0.883s |   1769 | 2830311 B |     91 B |   7902 B |   7787 B |
+| collections.iyi           |  0.682s | 15.794s |  0.892s |   1736 | 2918719 B |     91 B |   7930 B |   7808 B |
+| format.iyi                |  0.672s | 16.022s |  1.021s |   1752 | 3420701 B |     91 B |   8098 B |   7997 B |
+| shapes.iyi                |  0.547s | 16.179s |  0.883s |   1692 | 2779301 B |     91 B |   7910 B |   7793 B |
+| std_int_exercise.iyi      |  0.949s | 22.013s |  1.411s |   1800 | 3035492 B |     91 B |   8018 B |   7823 B |
+| std_bit_array_exercise.iyi |  1.130s | 19.468s |    N/A  |   1651 | 2748950 B |      0 B |      0 B |   8051 B |
+
+*Wall-clock seconds, measured while the census runs up to 8 programs at once. `--fresh` starts from an empty private cache, so it includes compiling the runtime with `-Diyi_observe`. `--cached` is the second run in that cache, validated against the first run's receipt. No warm-cache `--fresh` time was measured.*
+
+## Reached Code and RG8 Over-Approximation Attribution
+
+| Program | Reached Elements | Encoded Bytes | RG8 Over-Approximation Reruns |
+|---|---|---|---|
+| hello.iyi                 |   1610 | 2508603 B |      0 |
+| calc.iyi                  |   1769 | 2830311 B |      0 |
+| collections.iyi           |   1736 | 2918719 B |      0 |
+| format.iyi                |   1752 | 3420701 B |      0 |
+| shapes.iyi                |   1692 | 2779301 B |      0 |
+| std_int_exercise.iyi      |   1800 | 3035492 B |      0 |
+| std_bit_array_exercise.iyi |   1651 | 2748950 B |      0 |
+
+*RG8 over-approximation reruns: 0. Reached elements and encoded bytes measured via `--stale-dump-elements`. Every mutation changing normalized reached IR changes CallPathFp (§10, RG8).*
+
+## Compiler Stage Timing Breakdown (`samples/iyi/hello.iyi`) (§13)
+
+Measured with existing `--stats` progress tracker across default mode and cached-hit modes (normal vs `IYI_WARM=1` preanalysed prelude):
+
+| Stage | Default Build | Cached Hit (Normal Prelude) | Cached Hit (Preanalysed `IYI_WARM=1`) | Proof |
+|---|---|---|---|---|
+| Parse                            | 0.000s        | 0.000s                      | 0.000s                                | phase=hit/hit (exit 0/0) |
+| Top Level Semantic               | 0.128s        | 0.222s                      | 0.240s                                | phase=hit/hit (exit 0/0) |
+| Main Semantic                    | 0.043s        | 0.112s                      | 0.110s                                | phase=hit/hit (exit 0/0) |
+| Walk (Stale Reach & Effects)     | —             | 0.009s                      | 0.009s                                | phase=hit/hit (exit 0/0) |
+| Hashing (CallPath & Build Key)   | —             | 0.298s                      | 0.307s                                | phase=hit/hit (exit 0/0) |
+| Codegen (crystal)                | 0.029s        | (not run)                   | (not run)                             | phase=hit/hit, no codegen |
+| Codegen (bc+obj)                 | 0.072s        | (not run)                   | (not run)                             | phase=hit/hit, no codegen |
+| Codegen (linking)                | 0.042s        | (not run)                   | (not run)                             | phase=hit/hit, no codegen |
+
+*Honest accounting: No speedup is promised (§13, §14). Every hit type-checks: parse, top level, main semantic, walk, and hashing run on every check. Checks stop before codegen, eliminating object compilation and linking overhead. Preanalysed prelude (`IYI_WARM=1`) isolates cold prelude analysis from per-program verification.*
+
+Normal prelude proof: exit=0, phase=hit, codegen_lines=0 -> phase hit no codegen
+Preanalysed prelude proof: exit=0, phase=hit, codegen_lines=0 -> phase hit no codegen
+
+### Raw Progress Tracker Output (`--stats` Cached Hit - Normal Prelude):
+```
+Parse:
+Parse:                             00:00:00.000389666 (   26.98MB rss,   0.00s cpu,       78 page faults)
+Semantic (top level):
+Semantic (top level):              00:00:00.221567083 (   84.50MB rss,   0.22s cpu,     3673 page faults)
+Semantic (new):
+Semantic (new):                    00:00:00.000354417 (   84.92MB rss,   0.00s cpu,       26 page faults)
+Semantic (type declarations):
+Semantic (type declarations):      00:00:00.011457167 (   87.23MB rss,   0.01s cpu,      148 page faults)
+Semantic (abstract def check):
+Semantic (abstract def check):     00:00:00.001484541 (   87.88MB rss,   0.00s cpu,       41 page faults)
+Semantic (restrictions augmenter):
+Semantic (restrictions augmenter): 00:00:00.002506167 (   88.27MB rss,   0.00s cpu,       25 page faults)
+Semantic (observers):
+Semantic (observers):              00:00:00.001024167 (   88.84MB rss,   0.00s cpu,       37 page faults)
+Semantic (ivars initializers):
+Semantic (ivars initializers):     00:00:00.000627541 (   91.66MB rss,   0.00s cpu,       18 page faults)
+Semantic (cvars initializers):
+Semantic (cvars initializers):     00:00:00.000911667 (   92.86MB rss,   0.00s cpu,       77 page faults)
+Semantic (main):
+Semantic (main):                   00:00:00.112051084 (  129.67MB rss,   0.11s cpu,     2355 page faults)
+Semantic (cleanup):
+Semantic (cleanup):                00:00:00.000028459 (  129.67MB rss,   0.00s cpu,        0 page faults)
+Semantic (recursive struct check):
+Semantic (recursive struct check): 00:00:00.000131458 (  129.80MB rss,   0.00s cpu,        8 page faults)
+Walk:
+Walk:                              00:00:00.009281250 (  131.86MB rss,   0.01s cpu,      132 page faults)
+Hashing:
+Hashing:                           00:00:00.298015250 (  155.86MB rss,   0.30s cpu,     1533 page faults)
+```
+
+### Raw Progress Tracker Output (`--stats` Cached Hit - Preanalysed Prelude `IYI_WARM=1`):
+```
+Semantic (top level):
+Semantic (top level):              00:00:00.239436000 (   84.70MB rss,   0.24s cpu,     3770 page faults)
+Semantic (new):
+Semantic (new):                    00:00:00.000371791 (   85.19MB rss,   0.00s cpu,       24 page faults)
+Semantic (type declarations):
+Semantic (type declarations):      00:00:00.010770417 (   87.53MB rss,   0.01s cpu,      150 page faults)
+Semantic (abstract def check):
+Semantic (abstract def check):     00:00:00.001356875 (   88.17MB rss,   0.00s cpu,       41 page faults)
+Semantic (restrictions augmenter):
+Semantic (restrictions augmenter): 00:00:00.002664083 (   88.56MB rss,   0.00s cpu,       25 page faults)
+Semantic (observers):
+Semantic (observers):              00:00:00.000856583 (   89.03MB rss,   0.00s cpu,       30 page faults)
+Parse:
+Parse:                             00:00:00.000303791 (   89.16MB rss,   0.00s cpu,        3 page faults)
+Semantic (top level):
+Semantic (top level):              00:00:00.000167041 (   89.23MB rss,   0.00s cpu,        5 page faults)
+Semantic (new):
+Semantic (new):                    00:00:00.000099791 (   89.27MB rss,   0.00s cpu,        2 page faults)
+Semantic (type declarations):
+Semantic (type declarations):      00:00:00.001156875 (   89.66MB rss,   0.00s cpu,       24 page faults)
+Semantic (abstract def check):
+Semantic (abstract def check):     00:00:00.001165208 (   90.23MB rss,   0.00s cpu,       37 page faults)
+Semantic (restrictions augmenter):
+Semantic (restrictions augmenter): 00:00:00.000007125 (   90.25MB rss,   0.00s cpu,        1 page faults)
+Semantic (observers):
+Semantic (observers):              00:00:00.000352917 (   90.28MB rss,   0.00s cpu,        2 page faults)
+Semantic (ivars initializers):
+Semantic (ivars initializers):     00:00:00.000587250 (   93.08MB rss,   0.00s cpu,       16 page faults)
+Semantic (cvars initializers):
+Semantic (cvars initializers):     00:00:00.000788292 (   94.30MB rss,   0.00s cpu,       78 page faults)
+Semantic (main):
+Semantic (main):                   00:00:00.110115709 (  131.02MB rss,   0.11s cpu,     2350 page faults)
+Semantic (cleanup):
+Semantic (cleanup):                00:00:00.000026291 (  131.02MB rss,   0.00s cpu,        0 page faults)
+Semantic (recursive struct check):
+Semantic (recursive struct check): 00:00:00.000127542 (  131.14MB rss,   0.00s cpu,        8 page faults)
+Walk:
+Walk:                              00:00:00.009105500 (  133.17MB rss,   0.01s cpu,      130 page faults)
+Hashing:
+Hashing:                           00:00:00.306737375 (  157.64MB rss,   0.31s cpu,     1562 page faults)
+```
+

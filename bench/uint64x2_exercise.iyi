@@ -276,8 +276,8 @@ def check_union_alignment : Nil
 end
 
 class VectorRoots
-  MASK = 0x5555555555555555_u64
-  COUNT = 64
+  MASK  = 0x5555555555555555_u64
+  COUNT =                     64
   @@holder : VectorHolder? = nil
   @@first : Pointer(UInt64) = Pointer(UInt64).new(0_u64)
   @@second : Pointer(UInt64) = Pointer(UInt64).new(0_u64)

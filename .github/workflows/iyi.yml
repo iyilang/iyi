@@ -1555,7 +1555,7 @@ jobs:
     # before then (job 124229745795). The numbers that name macos-14 in
     # these comments and the documents were measured there: a three-core
     # M1 virtual machine on macOS 14.8.9, building with Xcode 15.4.
-    runs-on: macos-15
+    runs-on: namespace-profile-macos-15
     # A runner builds for its own major version, which on macos-15 is 15.0:
     # the tarball's `iyi` would refuse every Mac on 14, where 0.19.1's,
     # built on macos-14, says `minos` 14.0. 14.4 is iyi's floor, the
@@ -1921,7 +1921,7 @@ jobs:
   darwin-std-siblings:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'darwin-std-siblings') }}
-    runs-on: macos-15
+    runs-on: namespace-profile-macos-15
     env:
       MACOSX_DEPLOYMENT_TARGET: "14.4"
     timeout-minutes: 105
@@ -1990,7 +1990,7 @@ jobs:
   darwin-std:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'darwin-std') }}
-    runs-on: macos-15
+    runs-on: namespace-profile-macos-15
     env:
       MACOSX_DEPLOYMENT_TARGET: "14.4"
     timeout-minutes: 120
@@ -3969,7 +3969,7 @@ jobs:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'selfhost-darwin') }}
     # macos-15, pinned, as the darwin job is.
-    runs-on: macos-15
+    runs-on: namespace-profile-macos-15
     env:
       MACOSX_DEPLOYMENT_TARGET: "14.4"
       SELFHOST_HOST: darwin-arm64

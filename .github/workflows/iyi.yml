@@ -1646,6 +1646,12 @@ jobs:
           # longer exists (an installer's sandbox); every later step uses
           # the job's own temporary directory instead.
           echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          # The service also carries its owner's shell flags: LDFLAGS naming
+          # brew's LLVM 23 put its static libraries ahead of the recipe's in
+          # the link. Every job starts with none, and the static LLVM lives
+          # in a directory of CI's own, never the machine's ~/llvm-static.
+          for v in LDFLAGS CPPFLAGS CFLAGS CXXFLAGS LIBRARY_PATH CPATH; do echo "$v=" >> "$GITHUB_ENV"; done
+          echo "LLVM_STATIC=$HOME/iyi-ci/llvm-static" >> "$GITHUB_ENV"
           echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
 
       # The same diet the Linux tarball went on, from the same recipe file
@@ -1656,22 +1662,16 @@ jobs:
       # Now it links a static minimal LLVM, and with the collector off the
       # binaries `lib/` is empty rather than libgc alone. Built
       # on this runner because a static archive is bound to the libc++ and
-      # SDK it was compiled against; cached on the recipe's hash, the
-      # platform, the image and the deployment target, so the build is paid
-      # once per recipe or image change (28 minutes on macos-14, job
-      # 115861374075; 25 to 37 in the six darwin jobs of macos-15's first
-      # run, 41131916587). `$HOME`
-      # rather than `/tmp`: darwin's `/tmp` is a symlink into `/private`,
-      # and a cache path should not depend on how a symlink is archived.
-      - name: Restore the static LLVM
-        id: llvm-cache
-        uses: actions/cache@v4
-        with:
-          path: ~/llvm-static
-          key: llvm-static-${{ runner.os }}-${{ runner.arch }}-${{ steps.tools.outputs.sdk }}-${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
-      - name: Build the static LLVM (cache miss)
-        if: steps.llvm-cache.outputs.cache-hit != 'true'
-        run: bash scripts/build-static-llvm.sh "$HOME/llvm-static"
+      # SDK it was compiled against; built once per recipe hash, SDK and
+      # deployment target and kept on the machine (a stamp names them).
+      - name: The static LLVM, built once per recipe and SDK on this machine
+        run: |
+          stamp="${{ steps.tools.outputs.sdk }}-$MACOSX_DEPLOYMENT_TARGET-${{ hashFiles('scripts/build-static-llvm.sh') }}"
+          if [ "$(cat "$LLVM_STATIC/.stamp" 2>/dev/null)" != "$stamp" ]; then
+            rm -rf "$LLVM_STATIC"
+            bash scripts/build-static-llvm.sh "$LLVM_STATIC"
+            echo "$stamp" > "$LLVM_STATIC/.stamp"
+          fi
 
       # `iyi-tarball` builds `iyi` and its daemon in release mode, refuses an
       # unoptimised binary (`check_iyi_is_release`), and packages them — one
@@ -1681,7 +1681,7 @@ jobs:
       # libLLVM, and `otool -L` must name nothing outside the package but
       # `/usr/lib` and `/System`.
       - name: Build `iyi`, its daemon, and the tarball
-        run: make iyi-tarball LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config"
+        run: make iyi-tarball LLVM_CONFIG="$LLVM_STATIC/bin/llvm-config"
 
       - name: Samples
         run: |
@@ -1743,7 +1743,7 @@ jobs:
       # which was true and had nothing to do with the collector.
       - name: The collector-free floor (III.9)
         run: |
-          COLLECTOR_FREE_RUNS=1 LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config" \
+          COLLECTOR_FREE_RUNS=1 LLVM_CONFIG="$LLVM_STATIC/bin/llvm-config" \
             bash bench/collector_free_floor.sh
 
       # What a thread costs *this* floor, where every call is libSystem's:
@@ -1979,18 +1979,19 @@ jobs:
           for f in crystal coreutils pkgconf; do brew list --versions "$f" >/dev/null || brew install "$f"; done
           echo "sdk=sdk$(xcrun --show-sdk-version)-$(xcodebuild -version | awk '/Build version/ {print $3}')" >> "$GITHUB_OUTPUT"
           echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          for v in LDFLAGS CPPFLAGS CFLAGS CXXFLAGS LIBRARY_PATH CPATH; do echo "$v=" >> "$GITHUB_ENV"; done
+          echo "LLVM_STATIC=$HOME/iyi-ci/llvm-static" >> "$GITHUB_ENV"
           echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
-      - name: Restore the static LLVM
-        id: llvm-cache
-        uses: actions/cache@v4
-        with:
-          path: ~/llvm-static
-          key: llvm-static-${{ runner.os }}-${{ runner.arch }}-${{ steps.tools.outputs.sdk }}-${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
-      - name: Build the static LLVM (cache miss)
-        if: steps.llvm-cache.outputs.cache-hit != 'true'
-        run: bash scripts/build-static-llvm.sh "$HOME/llvm-static"
+      - name: The static LLVM, built once per recipe and SDK on this machine
+        run: |
+          stamp="${{ steps.tools.outputs.sdk }}-$MACOSX_DEPLOYMENT_TARGET-${{ hashFiles('scripts/build-static-llvm.sh') }}"
+          if [ "$(cat "$LLVM_STATIC/.stamp" 2>/dev/null)" != "$stamp" ]; then
+            rm -rf "$LLVM_STATIC"
+            bash scripts/build-static-llvm.sh "$LLVM_STATIC"
+            echo "$stamp" > "$LLVM_STATIC/.stamp"
+          fi
       - name: Build `iyi`
-        run: make iyi LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config"
+        run: make iyi LLVM_CONFIG="$LLVM_STATIC/bin/llvm-config"
       # Python 3.14, as on Linux: the oracles' modules answer as 3.14's do.
       - uses: actions/setup-python@v5
         with:
@@ -2047,18 +2048,19 @@ jobs:
           for f in crystal coreutils pkgconf; do brew list --versions "$f" >/dev/null || brew install "$f"; done
           echo "sdk=sdk$(xcrun --show-sdk-version)-$(xcodebuild -version | awk '/Build version/ {print $3}')" >> "$GITHUB_OUTPUT"
           echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          for v in LDFLAGS CPPFLAGS CFLAGS CXXFLAGS LIBRARY_PATH CPATH; do echo "$v=" >> "$GITHUB_ENV"; done
+          echo "LLVM_STATIC=$HOME/iyi-ci/llvm-static" >> "$GITHUB_ENV"
           echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
-      - name: Restore the static LLVM
-        id: llvm-cache
-        uses: actions/cache@v4
-        with:
-          path: ~/llvm-static
-          key: llvm-static-${{ runner.os }}-${{ runner.arch }}-${{ steps.tools.outputs.sdk }}-${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
-      - name: Build the static LLVM (cache miss)
-        if: steps.llvm-cache.outputs.cache-hit != 'true'
-        run: bash scripts/build-static-llvm.sh "$HOME/llvm-static"
+      - name: The static LLVM, built once per recipe and SDK on this machine
+        run: |
+          stamp="${{ steps.tools.outputs.sdk }}-$MACOSX_DEPLOYMENT_TARGET-${{ hashFiles('scripts/build-static-llvm.sh') }}"
+          if [ "$(cat "$LLVM_STATIC/.stamp" 2>/dev/null)" != "$stamp" ]; then
+            rm -rf "$LLVM_STATIC"
+            bash scripts/build-static-llvm.sh "$LLVM_STATIC"
+            echo "$stamp" > "$LLVM_STATIC/.stamp"
+          fi
       - name: Build `iyi`
-        run: make iyi LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config"
+        run: make iyi LLVM_CONFIG="$LLVM_STATIC/bin/llvm-config"
       - name: The native standard library's foundation
         env:
           STD_SIBLINGS: "0"
@@ -2087,18 +2089,19 @@ jobs:
           for f in crystal coreutils pkgconf; do brew list --versions "$f" >/dev/null || brew install "$f"; done
           echo "sdk=sdk$(xcrun --show-sdk-version)-$(xcodebuild -version | awk '/Build version/ {print $3}')" >> "$GITHUB_OUTPUT"
           echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          for v in LDFLAGS CPPFLAGS CFLAGS CXXFLAGS LIBRARY_PATH CPATH; do echo "$v=" >> "$GITHUB_ENV"; done
+          echo "LLVM_STATIC=$HOME/iyi-ci/llvm-static" >> "$GITHUB_ENV"
           echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
-      - name: Restore the static LLVM
-        id: llvm-cache
-        uses: actions/cache@v4
-        with:
-          path: ~/llvm-static
-          key: llvm-static-${{ runner.os }}-${{ runner.arch }}-${{ steps.tools.outputs.sdk }}-${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
-      - name: Build the static LLVM (cache miss)
-        if: steps.llvm-cache.outputs.cache-hit != 'true'
-        run: bash scripts/build-static-llvm.sh "$HOME/llvm-static"
+      - name: The static LLVM, built once per recipe and SDK on this machine
+        run: |
+          stamp="${{ steps.tools.outputs.sdk }}-$MACOSX_DEPLOYMENT_TARGET-${{ hashFiles('scripts/build-static-llvm.sh') }}"
+          if [ "$(cat "$LLVM_STATIC/.stamp" 2>/dev/null)" != "$stamp" ]; then
+            rm -rf "$LLVM_STATIC"
+            bash scripts/build-static-llvm.sh "$LLVM_STATIC"
+            echo "$stamp" > "$LLVM_STATIC/.stamp"
+          fi
       - name: Build `iyi`
-        run: make iyi LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config"
+        run: make iyi LLVM_CONFIG="$LLVM_STATIC/bin/llvm-config"
       - name: The partitions' plumbing, without the flag and with it
         run: |
           bash bench/heap_partition.sh

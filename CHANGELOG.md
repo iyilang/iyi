@@ -7,6 +7,9 @@
 - Add the command parser and build-daemon protocol in iyi, with native-host
   comparisons over 250 argument vectors and 30 daemon scenarios.
   The hosted CLI remains unchanged; these components add no command wiring.
+  Output suffixes follow the configured target and source diagnostics use
+  native path separators. Windows daemon identity reuses the file module's
+  Win32 metadata binding.
 
 - **`iyi doc --json [DIR]` prints a package's exported APIs as data.**
   The package path and compiler identity accompany its modules, ordered by

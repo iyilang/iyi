@@ -174,9 +174,25 @@ pub class CommandDriver
   IYI_VERSION  = {{ read_file("#{__DIR__}/../../IYI_VERSION").chomp }}
   BASE_VERSION = {{ read_file("#{__DIR__}/../../VERSION").chomp }}
 
-  # This executable uses the native backend. Its default is that backend's
-  # target, unless the compiler was built with an explicit target.
-  CONFIG_TARGET = {{ env("IYI_CONFIG_TARGET") || "aarch64-apple-darwin" }}
+  # Match the hosted target configuration without linking LLVM: an explicit
+  # target wins, otherwise use the platform this parser was compiled for.
+  CONFIG_TARGET = {% if configured = env("IYI_CONFIG_TARGET") %}
+                    {{ configured }}
+                  {% elsif flag?(:darwin) && flag?(:aarch64) %}
+                    "aarch64-apple-darwin"
+                  {% elsif flag?(:darwin) && flag?(:x86_64) %}
+                    "x86_64-apple-darwin"
+                  {% elsif flag?(:linux) && flag?(:aarch64) %}
+                    {{ flag?(:musl) ? "aarch64-unknown-linux-musl" : "aarch64-unknown-linux-gnu" }}
+                  {% elsif flag?(:linux) && flag?(:x86_64) %}
+                    {{ flag?(:musl) ? "x86_64-unknown-linux-musl" : "x86_64-unknown-linux-gnu" }}
+                  {% elsif flag?(:win32) && flag?(:x86_64) && flag?(:msvc) %}
+                    "x86_64-pc-windows-msvc"
+                  {% elsif flag?(:wasm32) && flag?(:wasi) %}
+                    "wasm32-unknown-wasi"
+                  {% else %}
+                    {% raise "Unsupported command parser platform; set IYI_CONFIG_TARGET" %}
+                  {% end %}
 
   @@program_name = "iyi"
   @@version_description : String? = nil
@@ -2235,7 +2251,8 @@ pub class CommandDriver
   private def relative_source(source : String) : String
     absolute = File.expand_path(source)
     prefix = Dir.current
-    prefix = prefix + "/" unless prefix.ends_with?("/")
+    separator = {{ flag?(:win32) ? "\\" : "/" }}
+    prefix = prefix + separator unless prefix.ends_with?(separator)
     absolute.starts_with?(prefix) ? absolute[prefix.size, absolute.size - prefix.size] : absolute
   end
 
@@ -2558,14 +2575,18 @@ pub class CommandDriver
       opts.specified_prelude = true
     end
 
+    output_extension = opts.cross_compile ? ".o" : ""
+    if target = Target.parse?(opts.target_triple || CONFIG_TARGET)
+      output_extension = opts.cross_compile ? target.object_extension : target.executable_extension
+    end
+
     if !opts.specified_output && filenames.size > 0
       first_fn = filenames[0]
       slash_idx = last_index_of(first_fn, '/')
       base_fn = slash_idx ? first_fn[slash_idx + 1, first_fn.size - slash_idx - 1] : first_fn
       dot_idx = last_index_of(base_fn, '.')
-      ext = opts.cross_compile ? ".o" : ""
       stem = dot_idx ? base_fn[0, dot_idx] : base_fn
-      opts.output_filename = "#{stem}#{ext}"
+      opts.output_filename = "#{stem}#{output_extension}"
     end
 
     if filenames.size == 0 || (cursor_command && opts.cursor_location.nil?)
@@ -2592,17 +2613,16 @@ pub class CommandDriver
 
       output = opts.output_filename || "./"
       derived = !opts.specified_output || output.ends_with?("/") || File.directory?(output)
-      extension = opts.cross_compile ? ".o" : ""
       if derived
         directory = opts.specified_output ? output : "./"
         stem = Path.new(filenames[0]).stem
-        output = Path.new(File.join(directory, "#{stem}#{extension}")).normalize.to_s
+        output = Path.new(File.join(directory, "#{stem}#{output_extension}")).normalize.to_s
         if command == "build" && !opts.no_codegen && same_source?(filenames[0], output)
           abort "compilation will overwrite source file '#{relative_source(filenames[0])}', either change its extension to '.cr' or specify an output file with '-o'", Exit::USAGE_ERROR
           return opts
         end
       else
-        output = output + extension if Path.new(output).extension.empty?
+        output = output + output_extension if Path.new(output).extension.empty?
         if command == "build" && !opts.no_codegen
           filenames.each do |filename|
             if same_source?(filename, output)

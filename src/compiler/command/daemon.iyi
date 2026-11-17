@@ -298,7 +298,6 @@ pub class BuildDaemon
       return
     {% end %}
 
-
     looked_in = candidates.map { |candidate| "    #{candidate}" }.join("\n")
     print_error "The build daemon needs a single-threaded compiler, and none was found.\n\nBuild one with:\n    make #{server_name}\n\nLooked in:\n#{looked_in}\n\nSet IYI_DAEMON to point at it directly."
     exit 1
@@ -346,14 +345,14 @@ pub class BuildDaemon
       # platform's 100-nanosecond FILETIME, including same-second rebuilds.
       wide = __iyi_wide_path(path)
       return "a deleted build" if wide.address == 0_u64
-      handle = LibWindowsFile.CreateFileW(wide, 0x80, 0x7, Pointer(Void).new(0_u64), 3, 0x2000000, Pointer(Void).new(0_u64))
+      handle = Std::File::LibKernel32.CreateFileW(wide, 0x80, 0x7, Pointer(Void).new(0_u64), 3, 0x2000000, Pointer(Void).new(0_u64))
       return "a deleted build" if handle.address == 0xFFFFFFFFFFFFFFFF_u64
-      info = uninitialized LibWindowsFile::FileInformation
-      found = LibWindowsFile.GetFileInformationByHandle(handle, pointerof(info))
-      LibWindowsFile.CloseHandle(handle)
+      info = uninitialized Std::File::LibKernel32::BY_HANDLE_FILE_INFORMATION
+      found = Std::File::LibKernel32.GetFileInformationByHandle(handle, pointerof(info))
+      Std::File::LibKernel32.CloseHandle(handle)
       return "a deleted build" if found == 0
-      size = ((info.file_size_high.to_u64 << 32) | info.file_size_low.to_u64).to_i64
-      ticks = ((info.write_time_high.to_u64 << 32) | info.write_time_low.to_u64).to_i64
+      size = ((info.nFileSizeHigh.to_u64 << 32) | info.nFileSizeLow.to_u64).to_i64
+      ticks = ((info.ftLastWriteTimeHigh.to_u64 << 32) | info.ftLastWriteTimeLow.to_u64).to_i64
       ns = (ticks - 116444736000000000_i64) * 100_i64
       "#{size}:#{ns}"
     {% else %}
@@ -671,7 +670,6 @@ pub class BuildDaemon
     end
     sb.to_s
   end
-
 end
 
 lib LibC
@@ -732,28 +730,3 @@ lib LibC
     fun close(fd : Int32) : Int32
   {% end %}
 end
-
-{% if flag?(:win32) %}
-  lib LibWindowsFile
-    struct FileInformation
-      attributes : UInt32
-      creation_time_low : UInt32
-      creation_time_high : UInt32
-      access_time_low : UInt32
-      access_time_high : UInt32
-      write_time_low : UInt32
-      write_time_high : UInt32
-      volume_serial : UInt32
-      file_size_high : UInt32
-      file_size_low : UInt32
-      number_of_links : UInt32
-      file_index_high : UInt32
-      file_index_low : UInt32
-    end
-
-    fun CreateFileW(name : UInt16*, access : Int32, share : Int32, security : Void*,
-                    disposition : Int32, flags : Int32, template : Void*) : Void*
-    fun GetFileInformationByHandle(handle : Void*, info : FileInformation*) : Int32
-    fun CloseHandle(handle : Void*) : Int32
-  end
-{% end %}

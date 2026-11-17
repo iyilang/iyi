@@ -59,10 +59,18 @@ echo 'direct build: module written by wasm-ld'
 printf 'exit(3)\n' > "$WORK/exit.iyi"
 printf 'raise "freestanding panic proof"\n' > "$WORK/panic.iyi"
 printf 'print "tail without newline"\n' > "$WORK/partial.iyi"
+printf 'File.read("/unavailable")\n' > "$WORK/file_read.iyi"
+printf 'File.write("/unavailable", "value")\n' > "$WORK/file_write.iyi"
+printf 'File.open("/unavailable")\n' > "$WORK/file_open.iyi"
+printf 'File.exists?("/unavailable")\n' > "$WORK/file_exists.iyi"
+printf 'File.delete("/unavailable")\n' > "$WORK/file_delete.iyi"
 build_wasm contract "$REPO/bench/wasm_freestanding_exercise.iyi"
 build_wasm exit "$WORK/exit.iyi"
 build_wasm panic "$WORK/panic.iyi"
 build_wasm partial "$WORK/partial.iyi"
+for name in file_read file_write file_open file_exists file_delete; do
+  build_wasm "$name" "$WORK/$name.iyi"
+done
 
 echo '== shared Node and browser contract =='
 (cd "$WORK" && node "$REPO/bench/wasm_node.mjs" "$WORK/bench/wasm_freestanding_exercise.mjs")

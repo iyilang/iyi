@@ -61,6 +61,7 @@ export async function instantiate(source, options = {}) {
     },
     read(fd, ptr, len) {
       if (fd !== 0) return -1;
+      if (len === 0) return 0;
       try {
         if (inputOffset === input.length) {
           input = stdin() ?? new Uint8Array(0);

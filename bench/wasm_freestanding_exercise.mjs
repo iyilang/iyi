@@ -59,19 +59,39 @@ export default async function run({ load, log }) {
     log(`${name}: native and wasm stdout match`);
   }
 
+  for (const [name, sentence] of [
+    ["file_read", "File is not available on wasm32-unknown-unknown"],
+    ["file_write", "File is not available on wasm32-unknown-unknown"],
+    ["file_open", "File is not available on wasm32-unknown-unknown"],
+    ["file_exists", "File.exists? is not available on wasm32-unknown-unknown"],
+    ["file_delete", "File.delete is not available on wasm32-unknown-unknown"],
+  ]) {
+    const diagnostics = [];
+    const app = await instantiate(await load(`${name}.wasm`), {
+      start: false, stdout: () => {}, stderr: bytes => diagnostics.push(bytes),
+    });
+    assert(await app.start() !== 0, `${name} unexpectedly succeeded`);
+    assert(decoder.decode(joined(diagnostics)).includes(sentence), `${name} refusal did not name the target`);
+  }
+  log("filesystem: read, write, open, exists and delete refused by name");
+
   const output = [];
   const errors = [];
+  let stdinCalls = 0;
   const program = await instantiate(await load("contract.wasm"), {
     start: false,
     imports: { contract: { double: value => value * 2 } },
     stdout: bytes => output.push(bytes),
     stderr: bytes => errors.push(bytes),
+    stdin: () => { stdinCalls++; return encoder.encode("input"); },
   });
   let refused = false;
   try { program.alloc(1); } catch { refused = true; }
   assert(refused, "allocation before start was allowed");
   assert(await program.start() === 0 && await program.start() === -1, "start must run once");
   assert(decoder.decode(joined(output)) === "contract ready\n", "stdout bytes differ");
+  assert(await program.call("contract_read_zero") === 0n && stdinCalls === 0, "zero-length read consumed stdin");
+  log("environment and working directory: absent");
 
   const message = program.put("hello, wasm");
   assert(message.ptr % 8 === 0, "allocated buffer is not 8-aligned");

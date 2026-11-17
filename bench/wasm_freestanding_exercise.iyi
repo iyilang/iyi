@@ -1,6 +1,7 @@
 @[Unsafe("the host passes pointers into linear memory and the collector is exercised directly")]
 import std/time::{Time}
 import std/random::{Random}
+import std/env::{ENV}
 
 {% unless flag?(:wasm32) && flag?(:unknown) && flag?(:bits32) %}
   {% raise "freestanding wasm is missing a target flag" %}
@@ -29,6 +30,10 @@ end
 
 fun contract_mix(a : Int32, b : Int64, c : Float64, pointer : UInt8*) : Int64
   ContractHost.double(a).to_i64 + b + c.to_i64 + pointer.value.to_i64
+end
+
+fun contract_read_zero : Int64
+  __iyi_read(0, Pointer(Void).new(0_u64), 0_u64)
 end
 
 fun contract_collect : Nil
@@ -65,4 +70,8 @@ fun contract_exit(code : Int32) : Nil
   __iyi_exit(code)
 end
 
+raise "environment should be absent" unless ENV["IYI_WASM_PROOF"]?.nil?
+ENV["IYI_WASM_PROOF"] = "value"
+raise "environment write must not persist" unless ENV["IYI_WASM_PROOF"]?.nil?
+raise "working directory should be absent" unless Program.cwd.nil?
 puts "contract ready"

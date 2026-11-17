@@ -32,6 +32,16 @@ export default async function run({ load, log }) {
   assert(await constructors.start() === -1, "constructor fixture started twice");
   assert(await constructors.call("ctor_value") === 1, "wasm constructor ran twice");
   log("sources: compiled module and promised Response; reserved imports refused; wasm constructor ran once");
+  const consoleLines = [];
+  const originalLog = console.log;
+  console.log = line => consoleLines.push(line);
+  try {
+    await instantiate(await load("partial.wasm"));
+  } finally {
+    console.log = originalLog;
+  }
+  assert(consoleLines.join("\n") === "tail without newline", "default console lost the final partial line");
+  log("default stdout: final partial line flushed");
   log(`hello imports: ${imports.join(", ")}; exports: memory, iyi_start, iyi_alloc, iyi_free`);
 
   for (const name of ["hello", "format", "io"]) {

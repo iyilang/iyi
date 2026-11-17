@@ -58,9 +58,11 @@ echo 'direct build: module written by wasm-ld'
 
 printf 'exit(3)\n' > "$WORK/exit.iyi"
 printf 'raise "freestanding panic proof"\n' > "$WORK/panic.iyi"
+printf 'print "tail without newline"\n' > "$WORK/partial.iyi"
 build_wasm contract "$REPO/bench/wasm_freestanding_exercise.iyi"
 build_wasm exit "$WORK/exit.iyi"
 build_wasm panic "$WORK/panic.iyi"
+build_wasm partial "$WORK/partial.iyi"
 
 echo '== shared Node and browser contract =='
 (cd "$WORK" && node "$REPO/bench/wasm_node.mjs" "$WORK/bench/wasm_freestanding_exercise.mjs")

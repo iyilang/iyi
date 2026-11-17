@@ -10,7 +10,7 @@ export class IyiExit extends Error {
 function consoleWriter(method) {
   const decoder = new TextDecoder();
   let pending = "";
-  return bytes => {
+  const write = bytes => {
     pending += decoder.decode(bytes, { stream: true });
     let end;
     while ((end = pending.indexOf("\n")) !== -1) {
@@ -18,14 +18,22 @@ function consoleWriter(method) {
       pending = pending.slice(end + 1);
     }
   };
+  write.flush = () => {
+    pending += decoder.decode();
+    if (pending) method(pending);
+    pending = "";
+  };
+  return write;
 }
 
 export async function instantiate(source, options = {}) {
   if (options.imports && Object.prototype.hasOwnProperty.call(options.imports, "iyi")) {
     throw new TypeError('the "iyi" import module is reserved');
   }
-  const stdout = options.stdout ?? consoleWriter(console.log.bind(console));
-  const stderr = options.stderr ?? consoleWriter(console.error.bind(console));
+  const defaultStdout = options.stdout == null ? consoleWriter(console.log.bind(console)) : null;
+  const defaultStderr = options.stderr == null ? consoleWriter(console.error.bind(console)) : null;
+  const stdout = options.stdout ?? defaultStdout;
+  const stderr = options.stderr ?? defaultStderr;
   const stdin = options.stdin ?? (() => null);
   let instance;
   let input = new Uint8Array(0);
@@ -116,6 +124,9 @@ export async function instantiate(source, options = {}) {
       } catch (error) {
         if (error instanceof IyiExit) return error.code;
         throw error;
+      } finally {
+        defaultStdout?.flush();
+        defaultStderr?.flush();
       }
     },
     alloc(size) {
@@ -147,7 +158,12 @@ export async function instantiate(source, options = {}) {
     async call(name, ...args) {
       if (!started) throw new Error("call start() before calling an export");
       if (typeof exports[name] !== "function") throw new TypeError(`unknown iyi export: ${name}`);
-      return exports[name](...args);
+      try {
+        return exports[name](...args);
+      } finally {
+        defaultStdout?.flush();
+        defaultStderr?.flush();
+      }
     },
   };
   if (options.start !== false) await iyi.start();

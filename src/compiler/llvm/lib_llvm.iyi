@@ -4,7 +4,7 @@ module compiler/llvm/lib_llvm
 {% begin %}
   {% if flag?(:win32) %}
     {% name = "LIBRARY_PATH" %}
-    {% library_path = env("IYI_#{name}") || env("CRYSTAL_#{name}") || "" %}
+    {% library_path = env("IYI_#{name.id}") || env("CRYSTAL_#{name.id}") || "" %}
     {% config = nil %}
     {% for dir in library_path.split(";") %}
       {% config ||= read_file?("#{dir.id}/llvm_VERSION") %}

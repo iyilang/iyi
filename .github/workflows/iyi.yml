@@ -641,7 +641,7 @@ jobs:
   stale-darwin:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'stale-darwin') }}
-    runs-on: namespace-profile-macos-15
+    runs-on: macos-15
     timeout-minutes: 120
     name: "Stale acceptance and receipt producer, on macOS"
     defaults:
@@ -668,6 +668,9 @@ jobs:
       - name: Build the static LLVM (cache miss)
         if: steps.llvm-cache.outputs.cache-hit != 'true'
         run: bash scripts/build-static-llvm.sh "$HOME/llvm-static"
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.14"
       - name: Build the compiler and `iyi`
         run: |
           echo "LLVM_CONFIG=$HOME/llvm-static/bin/llvm-config" >> "$GITHUB_ENV"
@@ -736,7 +739,7 @@ jobs:
   stale-darwin-gates:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'stale-darwin-gates') }}
-    runs-on: namespace-profile-macos-15
+    runs-on: macos-15
     timeout-minutes: 180
     name: "Stale key and equivalence gates, on macOS"
     defaults:
@@ -762,6 +765,9 @@ jobs:
       - name: Build the static LLVM (cache miss)
         if: steps.llvm-cache.outputs.cache-hit != 'true'
         run: bash scripts/build-static-llvm.sh "$HOME/llvm-static"
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.14"
       - name: Build the compiler and `iyi`
         run: |
           echo "LLVM_CONFIG=$HOME/llvm-static/bin/llvm-config" >> "$GITHUB_ENV"
@@ -784,7 +790,7 @@ jobs:
   stale-darwin-fresh:
     needs: [plan, stale-darwin]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'stale-darwin-fresh') }}
-    runs-on: namespace-profile-macos-15
+    runs-on: macos-15
     timeout-minutes: 180
     name: "Fresh runner receipt audit, on macOS"
     permissions:
@@ -814,6 +820,9 @@ jobs:
       - name: Build the static LLVM (cache miss)
         if: steps.llvm-cache.outputs.cache-hit != 'true'
         run: bash scripts/build-static-llvm.sh "$HOME/llvm-static"
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.14"
       - name: Build the fork's compiler
         run: |
           echo "LLVM_CONFIG=$HOME/llvm-static/bin/llvm-config" >> "$GITHUB_ENV"

@@ -358,6 +358,8 @@ def plan(jobs, event, ref, files, bench, ci_jobs=None):
 
     code_files = [f for f in files if not is_doc(f)]
     selected = {"docs"}
+    if ci_change:
+        selected |= set(FAST) | ci_jobs
     if any(is_stale(f) for f in files):
         selected |= STALE_JOBS
     if ci_change:

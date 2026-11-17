@@ -1,0 +1,108 @@
+# Registration and assertion fixtures enter through the public JSON response
+# parsers, including credential ID binding; negative cases name the check.
+@[Unsafe("the fixture reader copies decoded strings into byte arrays")]
+import std/webauthn::{WebAuthn, WebAuthnError, RegistrationResponse, AuthenticationResponse, RegistrationExpectation, AssertionExpectation, RegisteredCredential, AttestationPolicy}
+import std/cose::{CoseAlg}
+import std/base64::{Base64, Base64Error}
+import std/json::{JSON, Any}
+import std/file::{File}
+
+def check_error(error : WebAuthnError, expected : String, name : String) : Nil
+  actual = error.kind + "/" + error.check
+  raise "ASSERTION FAILED: #{name}: expected #{expected}, got #{actual}: #{error.message}" unless actual == expected
+end
+
+def require_error(expected : String, name : String) : Nil
+  raise "ASSERTION FAILED: #{name}: accepted instead of #{expected}" unless expected.empty?
+end
+
+def decoded(text : String) : Array(UInt8)
+  data = Base64.decode?(text)
+  raise "invalid fixture base64" if data.is_a?(Base64Error)
+  Array(UInt8).new(data.bytesize) { |i| data.to_unsafe[i] }
+end
+
+def verify_case(row : Any, label : String, is_w3c : Bool = false) : Bool
+  challenge = row["challenge"].as_s
+  assertion_challenge = row["assertion_challenge"].as_s
+  origin = row["origin"].as_s
+  rp = row["rp_id"].as_s
+  policy_value = row["policy"]?
+  policy = policy_value && policy_value.as_s? == "ignore" ? AttestationPolicy::Ignore : AttestationPolicy::Verify
+  uv_value = row["user_verification"]?
+  uv = uv_value ? uv_value.as_bool : !is_w3c
+  reg_error_value = row["reg_error"]?
+  reg_error = reg_error_value ? reg_error_value.as_s : ""
+  assert_error_value = row["assert_error"]?
+  assert_error = assert_error_value ? assert_error_value.as_s : ""
+  if is_w3c
+    refusal = row["refusal"].as_s
+    reg_error = refusal == "cross_origin" ? "verification/cross_origin" : (refusal == "auth_data" ? "malformed/auth_data" : "")
+  end
+  registration = WebAuthn.registration_from_json(row["registration"].to_json)
+  if registration.is_a?(WebAuthnError)
+    check_error(registration, reg_error, label)
+    return true
+  end
+  expected = RegistrationExpectation.new(challenge, [origin], rp, uv, [CoseAlg::ES256, CoseAlg::RS256, CoseAlg::EdDSA, CoseAlg::ES384, CoseAlg::PS256], policy)
+  credential = registration.verify(expected)
+  if credential.is_a?(WebAuthnError)
+    check_error(credential, reg_error, label)
+    return true
+  end
+  require_error(reg_error, label)
+  raise "ASSERTION FAILED: #{label}: registration ID not returned" unless credential.credential_id == registration.credential_id
+  raise "ASSERTION FAILED: #{label}: key bytes lost" if credential.key_bytes.empty?
+  if label.includes?("packed-x5c") || (is_w3c && row["name"].as_s.starts_with?("packed-") && row["name"].as_s != "packed-self-es256")
+    raise "ASSERTION FAILED: #{label}: no basic attestation chain" unless credential.attestation_type == "basic" && !credential.attestation_chain.empty?
+  end
+  if label.includes?("packed/") || label.ends_with?("/packed")
+    raise "ASSERTION FAILED: #{label}: self attestation type" unless credential.attestation_type == "self"
+  end
+  if label == "ignored fido-u2f"
+    raise "ASSERTION FAILED: ignored format not reported" unless credential.attestation_type == "unverified" && credential.attestation_format == "fido-u2f"
+  end
+  assertion = WebAuthn.assertion_from_json(row["assertion"].to_json)
+  if assertion.is_a?(WebAuthnError)
+    check_error(assertion, assert_error, label)
+    return true
+  end
+  handle_field = row["user_handle"]?
+  handle = handle_field ? decoded(handle_field.as_s) : nil
+  stored_count = row["stored_count"]?
+  count = stored_count ? stored_count.as_i64 : credential.sign_count
+  assertion_expectation = AssertionExpectation.new(assertion_challenge, [origin], rp, credential.credential_id, credential.key, count, handle, uv)
+  result = assertion.verify(assertion_expectation)
+  if result.is_a?(WebAuthnError)
+    check_error(result, assert_error, label)
+    return true
+  end
+  require_error(assert_error, label)
+  true
+end
+
+args = Program.args
+raise "usage: webauthn exercise cases.jsonl w3c.json chrome.json" unless args.size == 3
+count = 0
+File.read(args[0]).lines.each do |line|
+  next if line.empty?
+  row = JSON.parse(line)
+  name = row["name"].as_s
+  verify_case(row, name)
+  puts "  refusal: #{name}" if name.includes?(" ") || name == "cbor"
+  count = count + 1
+end
+puts "== software authenticator: #{count} cases"
+
+vectors = JSON.parse(File.read(args[1])).as_a
+vectors.each do |row|
+  label = "W3C " + row["section"].as_s + " " + row["name"].as_s
+  verify_case(row, label, true)
+  puts "  #{label}"
+end
+puts "== W3C vectors: #{vectors.size} cases"
+
+chrome = JSON.parse(File.read(args[2]))
+verify_case(chrome, "Chrome virtual authenticator")
+puts "== Chrome virtual authenticator: registration and assertion"
+puts "ALL CHECKS PASSED"

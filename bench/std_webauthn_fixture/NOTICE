@@ -1,0 +1,67 @@
+W3C WebAuthn Level 3 test vectors
+
+w3c.json includes material copied from or derived from Web Authentication:
+An API for accessing Public Key Credentials - Level 3, section 16,
+https://www.w3.org/TR/2026/REC-webauthn-3-20260825/#sctn-test-vectors.
+Copyright © 2026 World Wide Web Consortium.
+https://www.w3.org/copyright/software-license-2023/
+
+The original hexadecimal byte strings for clientDataJSON, attestationObject,
+authenticatorData, signature, challenge, and credential ID were converted to
+unpadded base64url and packaged as WebAuthn response JSON. Names, relying
+party, origin, verification policy and expected refusal annotations were added.
+Sections 16.2 through 16.16 with supported credential algorithms are included;
+16.9 uses ES512 and 16.12 uses Ed448, neither supported by std/cose. TPM,
+Android Key, Apple and FIDO U2F statements are retained to exercise Ignore,
+not claimed as verified attestation formats. The cross-origin and oversized-ID
+examples are expected refusals under Relic's policy. W3C's extension examples
+are API-shape examples, not complete registration/assertion signatures.
+
+Chrome virtual-authenticator fixture
+
+chrome.json was captured from HeadlessChrome/156.0.8078.4 (Playwright
+chromium_headless_shell-1248, macOS arm64). A throwaway headless shell was
+started with its own temporary user-data-dir and remote-debugging port. A
+loopback HTTP server at http://localhost:49655 served a blank page. CDP
+Target.createTarget, Target.attachToTarget, WebAuthn.enable, and
+WebAuthn.addVirtualAuthenticator enabled a CTAP2 internal authenticator with
+user verification and automatic presence. Runtime.evaluate ran
+navigator.credentials.create with ES256, attestation none and required user
+verification, then navigator.credentials.get with the returned credential and
+a separate challenge. Both responses and the supplied challenges were
+serialized as WebAuthn JSON. The shell and profile were removed afterwards.
+No browser profile, real authenticator or real user credential was used.
+
+W3C Software and Document license - 2023 version
+
+Status: This document is in effect since 1 January 2023.
+
+This work is being provided by the copyright holders under the following license.
+
+License
+
+By obtaining and/or copying this work, you (the licensee) agree that you have read, understood, and will comply with the following terms and conditions.
+
+Permission to copy, modify, and distribute this work, with or without modification, for any purpose and without fee or royalty is hereby granted, provided that you include the following on ALL copies of the work or portions thereof, including modifications:
+
+- The full text of this NOTICE in a location viewable to users of the redistributed or derivative work.
+- Any pre-existing intellectual property disclaimers, notices, or terms and conditions. If none exist, the W3C software and document short notice should be included.
+- Notice of any changes or modifications, through a copyright statement on the new code or document such as "This software or document includes material copied from or derived from [title and URI of the W3C document]. Copyright © [$year-of-document] World Wide Web Consortium. <https://www.w3.org/copyright/software-license-2023/>"
+
+Disclaimers
+
+THIS WORK IS PROVIDED "AS IS," AND COPYRIGHT HOLDERS MAKE NO REPRESENTATIONS OR WARRANTIES, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO, WARRANTIES OF MERCHANTABILITY OR FITNESS FOR ANY PARTICULAR PURPOSE OR THAT THE USE OF THE SOFTWARE OR DOCUMENT WILL NOT INFRINGE ANY THIRD PARTY PATENTS, COPYRIGHTS, TRADEMARKS OR OTHER RIGHTS.
+
+COPYRIGHT HOLDERS WILL NOT BE LIABLE FOR ANY DIRECT, INDIRECT, SPECIAL OR CONSEQUENTIAL DAMAGES ARISING OUT OF ANY USE OF THE SOFTWARE OR DOCUMENT.
+
+The name and trademarks of copyright holders may NOT be used in advertising or publicity pertaining to the work without specific, written prior permission. Title to copyright in this work will at all times remain with copyright holders.
+
+Versions
+
+- This version: https://www.w3.org/copyright/software-license-2023/
+- Latest version: https://www.w3.org/copyright/software-license/
+- Previous version: https://www.w3.org/copyright/software-license-2015/
+
+Changes since the previous document
+
+- The 2023 version updates identification of the copyright holder.

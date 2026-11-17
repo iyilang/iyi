@@ -78,3 +78,10 @@ path = ["bench/std_hpke_fixture/**"]
 precedence = "override"
 SPDX-FileCopyrightText = "IETF Trust and the persons identified as the document authors"
 SPDX-License-Identifier = "BSD-2-Clause"
+
+# WebAuthn Level 3 example values, reproduced and re-encoded as JSON.
+[[annotations]]
+path = ["bench/std_webauthn_fixture/w3c.json"]
+precedence = "override"
+SPDX-FileCopyrightText = "Copyright 2026 World Wide Web Consortium"
+SPDX-License-Identifier = "LicenseRef-W3C-2023"

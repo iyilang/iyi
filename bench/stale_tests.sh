@@ -1392,10 +1392,18 @@ PY
 }
 if [ -z "$(ls -d "$CACHE"/tests-v1/scratch/*/kept 2>/dev/null || true)" ]; then
   if [ "$WINDOWS" -eq 1 ]; then
-    fail "process profile 5 (row 49): read-only file was removed on Windows"
+    # A read-only attribute is not a permission on Windows: cleanup clears it and
+    # deletes the file, as `std/file`'s exercise shows ("a read-only file is
+    # deleted by its directory's leave"). Nothing a test can leave behind by
+    # attribute alone blocks the runner's cleanup, so the dirty-scratch refusal
+    # (cleanup warning, then refusing run 2) is not exercised here. A held open
+    # handle would block it; no row builds that yet.
+    echo "SKIP row 49 process profile 5: Windows cleanup removes a read-only file, so the dirty-scratch refusal is not exercised on Windows"
+    platform_skips="row 49 process profile 5: dirty-scratch refusal not exercised on Windows"
+  else
+    echo "SKIP row 49 process profile 5: this user can remove entries from a read-only directory"
+    platform_skips="row 49 process profile 5: current user bypasses directory permissions"
   fi
-  echo "SKIP row 49 process profile 5: this user can remove entries from a read-only directory"
-  platform_skips="row 49 process profile 5: current user bypasses directory permissions"
 else
   expect_contains "$(cat "$dirty_err1")" "was not removed" "cleanup warning on leftover read-only directory"
 
@@ -1712,6 +1720,10 @@ with open(os.path.join(root, "interrupted.json"), "wb") as out, \
             if len(receipts) >= 2 and all(os.path.isfile(os.path.join(ctl, "started-" + n)) for n in ("slow_a", "slow_b")):
                 break
             if runner.poll() is not None:
+                out.flush(); err.flush()
+                for label, path in (("stdout", "interrupted.json"), ("stderr", "interrupted.err")):
+                    text = open(os.path.join(root, path), "rb").read().decode("utf-8", errors="replace")[-3000:]
+                    print(f"  runner {label}: {text}", file=sys.stderr)
                 raise RuntimeError(f"runner exited before interrupt: {runner.returncode}")
             time.sleep(.1)
         else:

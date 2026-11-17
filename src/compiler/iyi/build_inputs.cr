@@ -223,6 +223,17 @@ module Iyi
       path
     end
 
+    # Whether the last component of *path* is a reserved DOS device name.
+    def self.dos_device?(path : String) : Bool
+      name = path
+      if cut = name.rindex('\\') || name.rindex('/')
+        name = name[(cut + 1)..]
+      end
+      stem = name.split('.', 2).first.rstrip(' ').downcase
+      return true if {"nul", "con", "prn", "aux", "conin$", "conout$"}.includes?(stem)
+      stem.size == 4 && (stem.starts_with?("com") || stem.starts_with?("lpt")) && stem[3] >= '1' && stem[3] <= '9'
+    end
+
     # Not an input: a build's own directory in the compiler cache (its
     # objects, its macro programs, the link templates), the output, and the
     # kernel's pseudo-files. A package checkout is in the cache too, under
@@ -233,6 +244,12 @@ module Iyi
       # and `key` expands it, which may ask the file system again.
       {% if flag?(:win32) %}
         return true if @ignored.includes?(path.downcase)
+        # A DOS device (`NUL`, `CON`, `COM1`, ...) is a name the kernel resolves
+        # in any directory, with or without an extension, so `<cwd>\NUL` is the
+        # null device and not a file the build read. The compiler's own process
+        # spawning opens `NUL` for a closed stream; as `/dev/null` is on POSIX,
+        # it is the kernel's, not an input.
+        return true if BuildInputs.dos_device?(path)
       {% else %}
         return true if @ignored.includes?(path)
       {% end %}

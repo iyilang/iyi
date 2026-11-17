@@ -370,6 +370,16 @@ print LibM.cos(0.0)
   fi
   fi
 
+  if [ "$WINDOWS" -eq 1 ]; then
+    # `crystal eval` cannot link its program on the Windows runner ("Cannot
+    # locate the .lib files for the following libraries: gc, iconv"), where a
+    # `build` of the same entrypoint links. These two checks call pure functions,
+    # so the compiled spec that calls the same functions covers them natively.
+    echo "SKIP refusal for shell characters and LinkFp sensitivity: crystal eval does not link on Windows; spec/compiler/stale/link_spec.cr runs the same calls natively"
+    echo "Link section PASSED (link-once, no-shell link and key comparisons; refusal and LinkFp via link_spec)"
+    return 0
+  fi
+
   # 4. Each refused character yields refusal
   echo "  testing refusal for shell characters (\` \$ * ? [ ~)..."
   local refused_chars=('`' '$' '*' '?' '[' '~')

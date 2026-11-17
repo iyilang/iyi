@@ -20,6 +20,15 @@ describe Iyi::Stale::FileStamp do
     end
   end
 
+  it "names the DOS devices the kernel resolves in any directory, and only those" do
+    %w(NUL nul C:\\work\\NUL c:/work/nul.txt CON PRN AUX COM1 com9 LPT3 CONIN$ CONOUT$ NUL.tar.gz).each do |name|
+      Iyi::BuildInputs.dos_device?(name).should be_true
+    end
+    %w(null nulls COM0 COM10 LPT0 console auxiliary C:\\work\\input.txt README).each do |name|
+      Iyi::BuildInputs.dos_device?(name).should be_false
+    end
+  end
+
   it "checks locality for every handle even when volume serials match" do
     serial = 0x3141592653589793_u64
     probes = 0

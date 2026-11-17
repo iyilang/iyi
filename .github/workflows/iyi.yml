@@ -1595,7 +1595,10 @@ jobs:
     # before then (job 124229745795). The numbers that name macos-14 in
     # these comments and the documents were measured there: a three-core
     # M1 virtual machine on macOS 14.8.9, building with Xcode 15.4.
-    runs-on: macos-15
+    # On the project's own Mac since 2026-11-17 (labels self-hosted, macOS,
+    # ARM64): one machine, so the darwin jobs below run one at a time. The
+    # static LLVM's cache is keyed on its SDK and Xcode build, not an image.
+    runs-on: [self-hosted, macOS, ARM64]
     # A runner builds for its own major version, which on macos-15 is 15.0:
     # the tarball's `iyi` would refuse every Mac on 14, where 0.19.1's,
     # built on macos-14, says `minos` 14.0. 14.4 is iyi's floor, the
@@ -1629,12 +1632,16 @@ jobs:
       # What the runner is, in every log: the jobs' times and the gates'
       # numbers are this machine's.
       - name: Install the bootstrap toolchain
+        id: tools
         run: |
           sw_vers
           sysctl -n machdep.cpu.brand_string hw.ncpu hw.memsize
           xcodebuild -version
           python3 --version
-          brew install crystal coreutils pkgconf
+          # Only what is missing: on the self-hosted Mac, `brew install` of an
+          # installed formula would upgrade the machine's own copy.
+          for f in crystal coreutils pkgconf; do brew list --versions "$f" >/dev/null || brew install "$f"; done
+          echo "sdk=sdk$(xcrun --show-sdk-version)-$(xcodebuild -version | awk '/Build version/ {print $3}')" >> "$GITHUB_OUTPUT"
           echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
 
       # The same diet the Linux tarball went on, from the same recipe file
@@ -1657,7 +1664,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/llvm-static
-          key: llvm-static-${{ runner.os }}-${{ runner.arch }}-macos-15-${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
+          key: llvm-static-${{ runner.os }}-${{ runner.arch }}-${{ steps.tools.outputs.sdk }}-${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
       - name: Build the static LLVM (cache miss)
         if: steps.llvm-cache.outputs.cache-hit != 'true'
         run: bash scripts/build-static-llvm.sh "$HOME/llvm-static"
@@ -1949,7 +1956,7 @@ jobs:
   darwin-std-siblings:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'darwin-std-siblings') }}
-    runs-on: macos-15
+    runs-on: [self-hosted, macOS, ARM64]
     env:
       MACOSX_DEPLOYMENT_TARGET: "14.4"
     timeout-minutes: 105
@@ -1963,15 +1970,17 @@ jobs:
         with:
           persist-credentials: false
       - name: Install the bootstrap toolchain
+        id: tools
         run: |
-          brew install crystal coreutils pkgconf
+          for f in crystal coreutils pkgconf; do brew list --versions "$f" >/dev/null || brew install "$f"; done
+          echo "sdk=sdk$(xcrun --show-sdk-version)-$(xcodebuild -version | awk '/Build version/ {print $3}')" >> "$GITHUB_OUTPUT"
           echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
       - name: Restore the static LLVM
         id: llvm-cache
         uses: actions/cache@v4
         with:
           path: ~/llvm-static
-          key: llvm-static-${{ runner.os }}-${{ runner.arch }}-macos-15-${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
+          key: llvm-static-${{ runner.os }}-${{ runner.arch }}-${{ steps.tools.outputs.sdk }}-${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
       - name: Build the static LLVM (cache miss)
         if: steps.llvm-cache.outputs.cache-hit != 'true'
         run: bash scripts/build-static-llvm.sh "$HOME/llvm-static"
@@ -2018,7 +2027,7 @@ jobs:
   darwin-std:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'darwin-std') }}
-    runs-on: macos-15
+    runs-on: [self-hosted, macOS, ARM64]
     env:
       MACOSX_DEPLOYMENT_TARGET: "14.4"
     timeout-minutes: 120
@@ -2028,15 +2037,17 @@ jobs:
         with:
           persist-credentials: false
       - name: Install the bootstrap toolchain
+        id: tools
         run: |
-          brew install crystal coreutils pkgconf
+          for f in crystal coreutils pkgconf; do brew list --versions "$f" >/dev/null || brew install "$f"; done
+          echo "sdk=sdk$(xcrun --show-sdk-version)-$(xcodebuild -version | awk '/Build version/ {print $3}')" >> "$GITHUB_OUTPUT"
           echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
       - name: Restore the static LLVM
         id: llvm-cache
         uses: actions/cache@v4
         with:
           path: ~/llvm-static
-          key: llvm-static-${{ runner.os }}-${{ runner.arch }}-macos-15-${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
+          key: llvm-static-${{ runner.os }}-${{ runner.arch }}-${{ steps.tools.outputs.sdk }}-${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
       - name: Build the static LLVM (cache miss)
         if: steps.llvm-cache.outputs.cache-hit != 'true'
         run: bash scripts/build-static-llvm.sh "$HOME/llvm-static"
@@ -2055,7 +2066,7 @@ jobs:
   darwin-heap22:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'darwin-heap22') }}
-    runs-on: macos-15
+    runs-on: [self-hosted, macOS, ARM64]
     env:
       MACOSX_DEPLOYMENT_TARGET: "14.4"
     timeout-minutes: 105
@@ -2065,15 +2076,17 @@ jobs:
         with:
           persist-credentials: false
       - name: Install the bootstrap toolchain
+        id: tools
         run: |
-          brew install crystal coreutils pkgconf
+          for f in crystal coreutils pkgconf; do brew list --versions "$f" >/dev/null || brew install "$f"; done
+          echo "sdk=sdk$(xcrun --show-sdk-version)-$(xcodebuild -version | awk '/Build version/ {print $3}')" >> "$GITHUB_OUTPUT"
           echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
       - name: Restore the static LLVM
         id: llvm-cache
         uses: actions/cache@v4
         with:
           path: ~/llvm-static
-          key: llvm-static-${{ runner.os }}-${{ runner.arch }}-macos-15-${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
+          key: llvm-static-${{ runner.os }}-${{ runner.arch }}-${{ steps.tools.outputs.sdk }}-${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
       - name: Build the static LLVM (cache miss)
         if: steps.llvm-cache.outputs.cache-hit != 'true'
         run: bash scripts/build-static-llvm.sh "$HOME/llvm-static"

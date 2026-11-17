@@ -1961,6 +1961,12 @@ jobs:
           echo "$SHIM" >> "$GITHUB_PATH"
           "$SHIM/python3" --version
           "$SHIM/python3" -c "import sys, zoneinfo, importlib.util as u; print(sys.version); print('zoneinfo.TZPATH', zoneinfo.TZPATH); print('tzdata package', u.find_spec('tzdata'))"
+          # What the oracles run against, for the two checks that disagree on this image.
+          sw_vers; uname -srm
+          command -v node && node --version || echo 'no node on PATH'
+          cat /usr/share/zoneinfo/+VERSION 2>/dev/null || echo 'no +VERSION in /usr/share/zoneinfo'
+          ls -l /usr/share/zoneinfo | head -3
+          tail -c 60 /usr/share/zoneinfo/Africa/Casablanca | od -c | tail -4
       - name: Python's cryptography and Pillow, for the oracles
         run: python3 -m pip install -q --break-system-packages cryptography pillow
       - name: The module exercises of this shard, on darwin

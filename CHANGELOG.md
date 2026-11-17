@@ -86,6 +86,87 @@
   `install.sh` stops where SHA256SUMS cannot be fetched, and takes an
   `IYI_RELEASE_URL` that is `https://` or `file://` and no other.
 
+- **Each size class keeps warm what it took the epoch before, and an
+  idle pool hands its warm pages back.** The sweep's warm room was a
+  budget's worth of payload, spent on whichever classes the sweep
+  reached first: issue #145's app kept 14-57 MB of warm pages idle
+  across a collection on a 40-48 MB budget. Each class now keeps as many
+  pages warm as it took whole in the last epoch: the warm pages it took
+  off its batches, the warm runs it threaded and what it carved cold
+  when those fell short. A pool whose workers have all been idle for a
+  second with no collection hands every class's warm pages back once
+  (`IyiMark.trim_idle`), so a server between bursts no longer holds the
+  last epoch's room (GC_DESIGN.md, the warm room per class).
+
+  #145's app (iyiturkiye built by 0.21.0, 11 endpoints one after
+  another on twelve workers), 6 rounds against 0.21.0 and goturkiye,
+  steady / peak / 5 s after the load:
+  - this Linux machine (12 vCPU, shared): 127 / 163 / 124 MB against 170
+    / 217 / 212 (Go 47 / 60 / 50), closing 35%, 34% and 55% of the gap
+    to Go; app CPU a request +9.9% over the six rounds, most of it one
+    round, the median round +2.7%.
+  - Windows 11, 12 logical processors (the user's machine): 123 / 158 /
+    137 MB against 166 / 228 / 225 (Go 50 / 128 / 47), closing 37%, 70%
+    and 50%; app CPU -5.9%, requests a second +9.2%, p99 -6.3%.
+  - macOS 26.6, Apple M2 Pro, 10 cores (the user's machine): 134 / 163 /
+    150 MB against 179 / 239 / 235 (Go 54 / 57 / 57), closing 36%, 41%
+    and 47%; app CPU -1.2%, requests a second +0.2%.
+
+  The collector benches, 3 interleaved rounds against 0.21.0. On Linux:
+  `bench/release_pages.iyi` 4.51-4.71M requests a second against
+  4.04-4.52M; `bench/alloc_scaling.iyi` at 8 workers 351-359 ms against
+  347-388 and peak 92-101 MB against 104-108; binary trees 0.44-0.48 s
+  against 0.43-0.47; the four JSON benches 4.45-4.93 s against
+  4.35-4.58; `bench/web_cores.iyi` on 8 workers, `order` 263-290k a
+  second against 229-274k, peak 62-63 MB against 72-79 and 38-54 MB
+  8 s after the load against 70-73. On macOS 26.6, Apple M2 Pro:
+  release_pages 3.18-3.21M against 3.16-3.19M; alloc_scaling at 8
+  workers 615-663 ms against 523-572, slower in each round; binary trees
+  1.04-1.05 s against 1.06-1.33; JSON 7.41-7.43 s against 6.82-7.60;
+  web_cores `order` 118k either way, peak 77-81 MB against 92-95 and
+  72-77 MB after the load against 93-94. On Windows 11, 12 logical
+  processors: release_pages 3.91-4.12M against 3.91-3.99M; alloc_scaling
+  at 8 workers 360-397 ms against 336-351, slower in each round, and at
+  4 workers 194-233 against 183-195; binary trees 0.53-0.61 s against
+  0.51-0.58; JSON 5.23-6.06 s against 5.33-5.50; web_cores `order`
+  110-122k against 116-125k, peak 64-66 MB against 76-79 and 40-43 MB
+  after the load against 73-77.
+
+  Those alloc_scaling rounds at 8 workers on macOS and Windows were
+  slower than 0.21.0's, and the cause was on macOS: the pause's sweep of
+  the debt before its mark handed each arena over a slice at a time, the
+  threads allocating beside the mark all took chunks of the same arena,
+  and the marks beside the program lasted 6.4 ms against 4.6. That pass
+  hands an arena over as one batch again, as 0.21.0 did; the eager sweep
+  after an explicit collection stays a batch a slice. Final run,
+  `bench/alloc_scaling.iyi` 200000 at 1 / 4 / 8 workers, 5 interleaved
+  rounds of 0.21.0, the branch before the fix and the fix, medians in
+  ms (ranges at 8). On macOS 26.6, Apple M2 Pro, 10 cores (the user's
+  machine): 220 / 306 / 541 (523-566), 221 / 305 / 625 (582-644), 221 /
+  306 / 562 (553-607); the fix keeps 4% of the 15% at 8 workers. On
+  Windows 11, 12 logical processors: 118 / 214 / 374 (332-471), 136 /
+  207 / 359 (335-407), 124 / 201 / 387 (351-413), inside the machine's
+  noise. On this Linux machine: 120 / 201 / 393 (367-410), 116 / 200 /
+  366 (366-376), 122 / 200 / 379 (357-388). The warm room was not it:
+  it starts at the first epoch's take, and a room that hands nothing
+  back ran as slowly. #145's harness, 3 rounds, with the fix: steady /
+  peak / 5 s idle 128 / 168 / 145 MB against 176 / 241 / 240 on
+  Windows 11, 135 / 165 / 153 against 179 / 236 / 234 on macOS 26.6.
+  `bench/sweep_exercise.iyi` check 12 counts the batches the pause hands
+  a held arena over in; the copy that cuts it a slice at a time fails
+  at 1 arena over as 5 batches.
+
+  The trim runs beside threads that allocate. Two refills adopting the
+  batches of adjacent sweep slices both counted off the page the slices
+  share; the arena's count of listed pages reached zero with pages still
+  listed, and the trim and the pause made idle pages under objects
+  already handed out. `IyiHeap.unlist_page` counts a page off only in
+  the refill that clears it. `bench/sweep_exercise.sh` runs
+  `bench/trim_stress.iyi` (eight threads in six classes, the trim back
+  to back), and its broken copies with the double-count window held open
+  20 µs: the old counting was caught on the first run in 20 of 20 on
+  Windows 11 and on macOS 26.6, and on run 1 on this Linux machine.
+
 ### Fixed
 
 - **std/big: every mask that picks by a secret goes through
@@ -268,12 +349,16 @@
   additions in every build, where a build without `--release` branched
   on secret limbs.
 - **No thread reads a table part written.** SHA-2's and Keccak's
-  constants, ML-KEM's, bcrypt's, and the base-point tables of P-256 and Curve25519
-  were built at first use and published by a plain store; on a machine
-  that reorders stores a second thread could read one half filled, and a
-  deterministic signature made with it gives the key beside its repeat.
-  The constants are constants now, and a table's address is stored with
-  release ordering after it is full and loaded with acquire.
+  constants, the CRCs', ML-KEM's, bcrypt's, ECDSA's and the base-point
+  tables of P-256 and Curve25519 were built at first use and published by
+  a plain store; on a machine that reorders stores a second thread could
+  read one half filled, and a deterministic signature made with it gives
+  the key beside its repeat. Each is kept by std/lazy now, built at the
+  first call that reads it in the shared heap, stored once and then marked
+  kept by a release store, and read only after an acquire load of the
+  mark. The gates of std/digest, std/p256, std/curve25519 and std/ecdsa
+  read that off the IR, and refuse a table back in a class variable filled
+  by a plain store, and std/lazy's mark read or stored with no ordering.
 - **`install.sh` does not unpack a tarball it could not check.** A
   SHA256SUMS that could not be fetched was a note and an install; it is
   a refusal now, for every release from 0.12.0, the first to publish
@@ -305,186 +390,6 @@
   second failed once on a CI runner, the 300 ms hold's file kept (job
   130589942769); the gate now prints when its reader let go and when the
   runner ended, so another such failure says which was late.
-
-### Gates
-
-- **std/digest's `ValueBarrier` fallback is built and held.** The
-  barrier is an empty inline asm on x86_64 and aarch64 and a volatile
-  load on every other target, and nothing compiled the load.
-  bench/std_digest_exercise.sh now builds it on x86_64 in the asm's
-  place: through X25519, Ed25519, ML-KEM, P-256 and P-384 it gives the
-  RFCs' answers byte for byte, plain and --release, as the asm does; its
-  --release IR keeps a volatile load for each barrier the asm leaves; and
-  a fallback folded to a plain value is refused. CI's wasm32-wasi job,
-  where the load is the real branch, builds an X25519 and ML-KEM program,
-  holds its IR to the same and runs it under wasmtime.
-- **A release tag must be the version its archives are built as.** The
-  installers ask release `v<version>` for `iyi-<version>-...` by name,
-  and the archives are named by `src/IYI_VERSION`: a trial tag on a tree
-  that said another version would have been published as the latest
-  release, whose archives no default install could find. The release job
-  stops before anything is published unless the tag is `v` and that
-  version, and a version with a pre-release part (`0.22.0-rc.1`) is
-  published as a pre-release, which `/releases/latest` passes over.
-- **`bench/ct_timing.sh` times what an input holds, not where it lives.**
-  Each check timed one fixed input against 1,024 (or 64) others, and the
-  fixed one was always in the cache: 64 copies of one ML-KEM key against
-  the first copy, contents alike, gave |t| 14.92 on a quiet machine, and
-  the tool had failed mlkem-key since the second security review for it.
-  Every fixed input is read from as many copies as the other class's now;
-  two runs put every secret path at 4.31 or under and the leaking control
-  at 330. `inverse_mod_secret` alone still moves between builds; what
-  that is, is open (SECURITY_REVIEW_TLS.md).
-- **The std siblings' shards are dealt by what the gates weigh after the
-  second security review.** On that review's last CI run the old weights
-  dealt a longest shard of 4,753 s on Windows, 3,683 on darwin and 3,140
-  on Linux; the new ones, read from that run's logs, 4,460, 3,466 and
-  2,875.
-
-- **Four module exercises are tests now.** `bench/std_bool_test.iyi`,
-  `std_box_test.iyi`, `std_heap_test.iyi` and `std_string_pool_test.iyi`
-  are named cases over the prelude's assertions, and their drivers run
-  them with `iyi test --json` and require each case's verdict by name,
-  including the one a broken module must fail. The box proof broke
-  `unbox` with a `raise`, which stopped the program building and was read
-  as the test catching it; it now hands C a null pointer, which the case
-  fails at run time. `std_exercise.sh`'s artifact round trip and
-  `std_platforms.sh` read `bench/std_*_test.iyi` beside the exercises.
-  The four drivers share `bench/module_test.sh` instead of carrying the
-  same hundred lines each, and build the release half with `iyi test
-  --release`.
-- **`spec/std/process_spec.cr` holds `process_group:`** on POSIX: the
-  child leads a group of its own, what it starts is in that group, and a
-  signal to the group ends it; without the option the child stays in this
-  process's group.
-- **`bench/test_verb.sh` proves a test's children are out of its reach**:
-  a child program with a named case of its own neither lands in the test's
-  report nor runs only the test's `--run` cases. Against a prelude that
-  leaves the two variables in place the report carried the child's case.
-- **A pull request runs the jobs that run what it changed.**
-  `scripts/ci_plan.py` credited a bench file to every job whose text held
-  its name, comments included, and a comment above a job header counted
-  for the job before it: a pull request changing only
-  `bench/std_tls_exercise.sh` ran `windows-std-platforms`, which never runs
-  it, and passed. Nor did it see a gate another script runs: 483 of the
-  590 files under bench/ were run by no job it knew of, so a change to a
-  module exercise fell to the fast tier, which runs none. It reads code
-  now, not comments, and follows what runs what - a step, a script that
-  runs, sources or finds a file by a glob or a `${VAR}` in its name, a
-  program that reads its own template, a directory a script names - so
-  two files under bench/ are run by nothing, and both are used by nothing.
-  Measured against the old planner over every bench file: the only jobs it
-  no longer chooses, for eleven files, are ones it chose from a comment.
-- **`bench/ci_plan_exercise.py`, in the docs job**, holds the planner to
-  that on this tree and on a workflow of its own. Pointed at the planner
-  before this change it fails the three checks above.
-- **`bench/gates_reachable.py` counts what is run, not what is named.** A
-  name in a comment, a message, a docstring or a list of strings was a run,
-  so thirteen measurement scripts were "reached" through
-  `measured_numbers.py`'s list of what it cannot re-measure, and three tools
-  through the gate's own list of them; and `.iyi` programs were not looked
-  at. A file is run now when a job or a Makefile runs it, or a script that
-  is itself run does - by a command on its line, a loop or variable a
-  command uses, or a function that runs one - and that covers every
-  `.sh`, `.py` and `.iyi` directly under bench/: 399 of 415 are run, and
-  the sixteen that are not are named as tools with what each is for
-  (`machine_probe.py`, and the instruments `measured_numbers.py` holds the
-  docs' quotes to). On a copy of the tree with a gate named only in a
-  comment, the gate before this counted it reached; this one does not.
-- **The nightly run skips a commit that already passed.** A scheduled run
-  of a commit that passed the full set on master in the last seven days
-  selects no job (`scripts/ci_plan.py`, `RECHECK_AFTER`): 08ce6c1cb had
-  passed it on its push and on the night after, and the third run, the
-  night after that, put 44 jobs in a queue that already held three pull
-  requests. An unchanged master still runs again once a week - a run counts
-  only if a job past the plan and the verdict succeeded in it, or a nightly
-  that selected nothing would restart the week - and a run whose history
-  cannot be read runs everything.
-
-### Changed
-
-- **Each size class keeps warm what it took the epoch before, and an
-  idle pool hands its warm pages back.** The sweep's warm room was a
-  budget's worth of payload, spent on whichever classes the sweep
-  reached first: issue #145's app kept 14-57 MB of warm pages idle
-  across a collection on a 40-48 MB budget. Each class now keeps as many
-  pages warm as it took whole in the last epoch: the warm pages it took
-  off its batches, the warm runs it threaded and what it carved cold
-  when those fell short. A pool whose workers have all been idle for a
-  second with no collection hands every class's warm pages back once
-  (`IyiMark.trim_idle`), so a server between bursts no longer holds the
-  last epoch's room (GC_DESIGN.md, the warm room per class).
-
-  #145's app (iyiturkiye built by 0.21.0, 11 endpoints one after
-  another on twelve workers), 6 rounds against 0.21.0 and goturkiye,
-  steady / peak / 5 s after the load:
-  - this Linux machine (12 vCPU, shared): 127 / 163 / 124 MB against 170
-    / 217 / 212 (Go 47 / 60 / 50), closing 35%, 34% and 55% of the gap
-    to Go; app CPU a request +9.9% over the six rounds, most of it one
-    round, the median round +2.7%.
-  - Windows 11, 12 logical processors (the user's machine): 123 / 158 /
-    137 MB against 166 / 228 / 225 (Go 50 / 128 / 47), closing 37%, 70%
-    and 50%; app CPU -5.9%, requests a second +9.2%, p99 -6.3%.
-  - macOS 26.6, Apple M2 Pro, 10 cores (the user's machine): 134 / 163 /
-    150 MB against 179 / 239 / 235 (Go 54 / 57 / 57), closing 36%, 41%
-    and 47%; app CPU -1.2%, requests a second +0.2%.
-
-  The collector benches, 3 interleaved rounds against 0.21.0. On Linux:
-  `bench/release_pages.iyi` 4.51-4.71M requests a second against
-  4.04-4.52M; `bench/alloc_scaling.iyi` at 8 workers 351-359 ms against
-  347-388 and peak 92-101 MB against 104-108; binary trees 0.44-0.48 s
-  against 0.43-0.47; the four JSON benches 4.45-4.93 s against
-  4.35-4.58; `bench/web_cores.iyi` on 8 workers, `order` 263-290k a
-  second against 229-274k, peak 62-63 MB against 72-79 and 38-54 MB
-  8 s after the load against 70-73. On macOS 26.6, Apple M2 Pro:
-  release_pages 3.18-3.21M against 3.16-3.19M; alloc_scaling at 8
-  workers 615-663 ms against 523-572, slower in each round; binary trees
-  1.04-1.05 s against 1.06-1.33; JSON 7.41-7.43 s against 6.82-7.60;
-  web_cores `order` 118k either way, peak 77-81 MB against 92-95 and
-  72-77 MB after the load against 93-94. On Windows 11, 12 logical
-  processors: release_pages 3.91-4.12M against 3.91-3.99M; alloc_scaling
-  at 8 workers 360-397 ms against 336-351, slower in each round, and at
-  4 workers 194-233 against 183-195; binary trees 0.53-0.61 s against
-  0.51-0.58; JSON 5.23-6.06 s against 5.33-5.50; web_cores `order`
-  110-122k against 116-125k, peak 64-66 MB against 76-79 and 40-43 MB
-  after the load against 73-77.
-
-  Those alloc_scaling rounds at 8 workers on macOS and Windows were
-  slower than 0.21.0's, and the cause was on macOS: the pause's sweep of
-  the debt before its mark handed each arena over a slice at a time, the
-  threads allocating beside the mark all took chunks of the same arena,
-  and the marks beside the program lasted 6.4 ms against 4.6. That pass
-  hands an arena over as one batch again, as 0.21.0 did; the eager sweep
-  after an explicit collection stays a batch a slice. Final run,
-  `bench/alloc_scaling.iyi` 200000 at 1 / 4 / 8 workers, 5 interleaved
-  rounds of 0.21.0, the branch before the fix and the fix, medians in
-  ms (ranges at 8). On macOS 26.6, Apple M2 Pro, 10 cores (the user's
-  machine): 220 / 306 / 541 (523-566), 221 / 305 / 625 (582-644), 221 /
-  306 / 562 (553-607); the fix keeps 4% of the 15% at 8 workers. On
-  Windows 11, 12 logical processors: 118 / 214 / 374 (332-471), 136 /
-  207 / 359 (335-407), 124 / 201 / 387 (351-413), inside the machine's
-  noise. On this Linux machine: 120 / 201 / 393 (367-410), 116 / 200 /
-  366 (366-376), 122 / 200 / 379 (357-388). The warm room was not it:
-  it starts at the first epoch's take, and a room that hands nothing
-  back ran as slowly. #145's harness, 3 rounds, with the fix: steady /
-  peak / 5 s idle 128 / 168 / 145 MB against 176 / 241 / 240 on
-  Windows 11, 135 / 165 / 153 against 179 / 236 / 234 on macOS 26.6.
-  `bench/sweep_exercise.iyi` check 12 counts the batches the pause hands
-  a held arena over in; the copy that cuts it a slice at a time fails
-  at 1 arena over as 5 batches.
-
-  The trim runs beside threads that allocate. Two refills adopting the
-  batches of adjacent sweep slices both counted off the page the slices
-  share; the arena's count of listed pages reached zero with pages still
-  listed, and the trim and the pause made idle pages under objects
-  already handed out. `IyiHeap.unlist_page` counts a page off only in
-  the refill that clears it. `bench/sweep_exercise.sh` runs
-  `bench/trim_stress.iyi` (eight threads in six classes, the trim back
-  to back), and its broken copies with the double-count window held open
-  20 µs: the old counting was caught on the first run in 20 of 20 on
-  Windows 11 and on macOS 26.6, and on run 1 on this Linux machine.
-
-### Fixed
 
 - **A constant keeps its `@[UnsafeReach]` or `@[SafeReach]` when it
   travels in an artifact**, in a type body and at a module's top level.
@@ -635,6 +540,101 @@
   needs a wake that moved, as the sockets step does. Beside 12 busy loops
   its release build once moved none of 160, so a run that moves none is
   run again, up to five times.
+
+### Gates
+
+- **std/digest's `ValueBarrier` fallback is built and held.** The
+  barrier is an empty inline asm on x86_64 and aarch64 and a volatile
+  load on every other target, and nothing compiled the load.
+  bench/std_digest_exercise.sh now builds it on x86_64 in the asm's
+  place: through X25519, Ed25519, ML-KEM, P-256 and P-384 it gives the
+  RFCs' answers byte for byte, plain and --release, as the asm does; its
+  --release IR keeps a volatile load for each barrier the asm leaves; and
+  a fallback folded to a plain value is refused. CI's wasm32-wasi job,
+  where the load is the real branch, builds an X25519 and ML-KEM program,
+  holds its IR to the same and runs it under wasmtime.
+- **A release tag must be the version its archives are built as.** The
+  installers ask release `v<version>` for `iyi-<version>-...` by name,
+  and the archives are named by `src/IYI_VERSION`: a trial tag on a tree
+  that said another version would have been published as the latest
+  release, whose archives no default install could find. The release job
+  stops before anything is published unless the tag is `v` and that
+  version, and a version with a pre-release part (`0.22.0-rc.1`) is
+  published as a pre-release, which `/releases/latest` passes over.
+- **`bench/ct_timing.sh` times what an input holds, not where it lives.**
+  Each check timed one fixed input against 1,024 (or 64) others, and the
+  fixed one was always in the cache: 64 copies of one ML-KEM key against
+  the first copy, contents alike, gave |t| 14.92 on a quiet machine, and
+  the tool had failed mlkem-key since the second security review for it.
+  Every fixed input is read from as many copies as the other class's now;
+  two runs put every secret path at 4.31 or under and the leaking control
+  at 330. `inverse_mod_secret` alone still moves between builds; what
+  that is, is open (SECURITY_REVIEW_TLS.md).
+- **The std siblings' shards are dealt by what the gates weigh after the
+  second security review.** On that review's last CI run the old weights
+  dealt a longest shard of 4,753 s on Windows, 3,683 on darwin and 3,140
+  on Linux; the new ones, read from that run's logs, 4,460, 3,466 and
+  2,875.
+
+- **Four module exercises are tests now.** `bench/std_bool_test.iyi`,
+  `std_box_test.iyi`, `std_heap_test.iyi` and `std_string_pool_test.iyi`
+  are named cases over the prelude's assertions, and their drivers run
+  them with `iyi test --json` and require each case's verdict by name,
+  including the one a broken module must fail. The box proof broke
+  `unbox` with a `raise`, which stopped the program building and was read
+  as the test catching it; it now hands C a null pointer, which the case
+  fails at run time. `std_exercise.sh`'s artifact round trip and
+  `std_platforms.sh` read `bench/std_*_test.iyi` beside the exercises.
+  The four drivers share `bench/module_test.sh` instead of carrying the
+  same hundred lines each, and build the release half with `iyi test
+  --release`.
+- **`spec/std/process_spec.cr` holds `process_group:`** on POSIX: the
+  child leads a group of its own, what it starts is in that group, and a
+  signal to the group ends it; without the option the child stays in this
+  process's group.
+- **`bench/test_verb.sh` proves a test's children are out of its reach**:
+  a child program with a named case of its own neither lands in the test's
+  report nor runs only the test's `--run` cases. Against a prelude that
+  leaves the two variables in place the report carried the child's case.
+- **A pull request runs the jobs that run what it changed.**
+  `scripts/ci_plan.py` credited a bench file to every job whose text held
+  its name, comments included, and a comment above a job header counted
+  for the job before it: a pull request changing only
+  `bench/std_tls_exercise.sh` ran `windows-std-platforms`, which never runs
+  it, and passed. Nor did it see a gate another script runs: 483 of the
+  590 files under bench/ were run by no job it knew of, so a change to a
+  module exercise fell to the fast tier, which runs none. It reads code
+  now, not comments, and follows what runs what - a step, a script that
+  runs, sources or finds a file by a glob or a `${VAR}` in its name, a
+  program that reads its own template, a directory a script names - so
+  two files under bench/ are run by nothing, and both are used by nothing.
+  Measured against the old planner over every bench file: the only jobs it
+  no longer chooses, for eleven files, are ones it chose from a comment.
+- **`bench/ci_plan_exercise.py`, in the docs job**, holds the planner to
+  that on this tree and on a workflow of its own. Pointed at the planner
+  before this change it fails the three checks above.
+- **`bench/gates_reachable.py` counts what is run, not what is named.** A
+  name in a comment, a message, a docstring or a list of strings was a run,
+  so thirteen measurement scripts were "reached" through
+  `measured_numbers.py`'s list of what it cannot re-measure, and three tools
+  through the gate's own list of them; and `.iyi` programs were not looked
+  at. A file is run now when a job or a Makefile runs it, or a script that
+  is itself run does - by a command on its line, a loop or variable a
+  command uses, or a function that runs one - and that covers every
+  `.sh`, `.py` and `.iyi` directly under bench/: 399 of 415 are run, and
+  the sixteen that are not are named as tools with what each is for
+  (`machine_probe.py`, and the instruments `measured_numbers.py` holds the
+  docs' quotes to). On a copy of the tree with a gate named only in a
+  comment, the gate before this counted it reached; this one does not.
+- **The nightly run skips a commit that already passed.** A scheduled run
+  of a commit that passed the full set on master in the last seven days
+  selects no job (`scripts/ci_plan.py`, `RECHECK_AFTER`): 08ce6c1cb had
+  passed it on its push and on the night after, and the third run, the
+  night after that, put 44 jobs in a queue that already held three pull
+  requests. An unchanged master still runs again once a week - a run counts
+  only if a job past the plan and the verdict succeeded in it, or a nightly
+  that selected nothing would restart the week - and a run whose history
+  cannot be read runs everything.
 
 ### Experimental: `-Dheap_partitions`
 
@@ -28744,7 +28744,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 36,300-line library and nothing else. Every other
+  written against iyi's own 36,399-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

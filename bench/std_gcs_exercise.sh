@@ -58,14 +58,19 @@ echo '== std/gcs release'
 run_exercise release --release || exit 1
 prove_broken() {
   label="$1" expected="$2" old="$3" new="$4"
-  if ! OLD="$old" NEW="$new" "$PY" - "$ROOT/src/std/gcs.iyi" "$W/mut/std/gcs.iyi" <<'PY'
+  # MSYS2 can rewrite path-shaped environment values before native Python
+  # sees them. Hex keeps mutation needles identical on every platform.
+  old_hex="$(printf '%s' "$old" | od -An -v -tx1 | tr -d ' \n')"
+  new_hex="$(printf '%s' "$new" | od -An -v -tx1 | tr -d ' \n')"
+  if ! OLD_HEX="$old_hex" NEW_HEX="$new_hex" "$PY" - "$ROOT/src/std/gcs.iyi" "$W/mut/std/gcs.iyi" <<'PY'
 import os, pathlib, sys
-source = pathlib.Path(sys.argv[1]).read_text()
-old, new = os.environ['OLD'], os.environ['NEW']
+source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+old = bytes.fromhex(os.environ['OLD_HEX']).decode('utf-8')
+new = bytes.fromhex(os.environ['NEW_HEX']).decode('utf-8')
 if source.count(old) != 1: raise SystemExit('mutation site missing or ambiguous')
 changed = source.replace(old, new, 1)
 if changed == source: raise SystemExit('mutation made no change')
-pathlib.Path(sys.argv[2]).write_text(changed)
+pathlib.Path(sys.argv[2]).write_text(changed, encoding="utf-8")
 PY
   then echo "FAIL: $label mutation setup"; return 1; fi
   if ! IYI_PATH="$W/mut${PSEP}$W/guard${PSEP}$ROOT/src${PSEP}$ROOT/samples/iyi" "$IYI" build -o "$W/gcs-mut" "$ROOT/bench/std_gcs_exercise.iyi" >"$WORK/mut-build.log" 2>&1; then
@@ -82,7 +87,7 @@ PY
 echo '== mutation proofs'
 prove_broken 'query sort' 'canonical vector: Query Parameter Encoding' 'parameters.keys.sorted.map' 'parameters.keys.map' || exit 1
 prove_broken 'RFC3986 encoding' 'canonical vector: Simple GET' 'URI.encode_path_segment(value)' 'URI.encode(value)' || exit 1
-prove_broken 'scope date' 'canonical vector: Simple GET' 'scope = day + "/auto/storage/goog4_request"' 'scope = "20000101/auto/storage/goog4_request"' || exit 1
+prove_broken 'scope date' 'canonical vector: Simple GET' 'scope = day +' 'scope = "20000101" +' || exit 1
 prove_broken 'generation precondition name' 'create-only precondition 412' 'fields["ifGenerationMatch"] = generation if generation' 'fields["ifGenerationWrong"] = generation if generation' || exit 1
 prove_broken 'metageneration precondition name' 'stale metageneration 412' 'fields["ifMetagenerationMatch"] = metageneration if metageneration' 'fields["ifMetagenerationWrong"] = metageneration if metageneration' || exit 1
 prove_broken 'custom endpoint authentication' 'custom endpoint omits bearer' '@authenticate = (endpoint.nil? && emulator.nil?) || authenticate_custom_endpoint' '@authenticate = true' || exit 1

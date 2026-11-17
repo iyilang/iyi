@@ -58,14 +58,19 @@ echo '== std/google_auth release'
 run_exercise release --release || exit 1
 prove_broken() {
   label="$1" expected="$2" old="$3" new="$4"
-  if ! OLD="$old" NEW="$new" "$PY" - "$ROOT/src/std/google_auth.iyi" "$W/mut/std/google_auth.iyi" <<'PY'
+  # MSYS2 can rewrite path-shaped environment values before native Python
+  # sees them. Hex keeps mutation needles identical on every platform.
+  old_hex="$(printf '%s' "$old" | od -An -v -tx1 | tr -d ' \n')"
+  new_hex="$(printf '%s' "$new" | od -An -v -tx1 | tr -d ' \n')"
+  if ! OLD_HEX="$old_hex" NEW_HEX="$new_hex" "$PY" - "$ROOT/src/std/google_auth.iyi" "$W/mut/std/google_auth.iyi" <<'PY'
 import os, pathlib, sys
-source = pathlib.Path(sys.argv[1]).read_text()
-old, new = os.environ['OLD'], os.environ['NEW']
+source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+old = bytes.fromhex(os.environ['OLD_HEX']).decode('utf-8')
+new = bytes.fromhex(os.environ['NEW_HEX']).decode('utf-8')
 if source.count(old) != 1: raise SystemExit('mutation site missing or ambiguous')
 changed = source.replace(old, new, 1)
 if changed == source: raise SystemExit('mutation made no change')
-pathlib.Path(sys.argv[2]).write_text(changed)
+pathlib.Path(sys.argv[2]).write_text(changed, encoding="utf-8")
 PY
   then echo "FAIL: $label mutation setup"; return 1; fi
   if ! IYI_PATH="$W/mut${PSEP}$W/guard${PSEP}$ROOT/src${PSEP}$ROOT/samples/iyi" "$IYI" build -o "$W/auth-mut" "$ROOT/bench/std_google_auth_exercise.iyi" >"$WORK/mut-build.log" 2>&1; then
@@ -82,5 +87,5 @@ PY
 echo '== mutation proofs'
 prove_broken 'JWT exp' 'JWT grant' 'json.field("exp", now + 3600_i64)' 'json.field("exp", now + 3599_i64)' || exit 1
 prove_broken 'cache headroom' 'cache headroom request count' 'now < @cached_until' 'now <= @cached_until' || exit 1
-prove_broken 'IAM resource path' 'IAM signBlob signature' '"/v1/projects/-/serviceAccounts/"' '"/v1/projects/-/serviceAccount/"' || exit 1
+prove_broken 'IAM resource path' 'IAM signBlob signature' 'serviceAccounts' 'serviceAccount' || exit 1
 echo 'std/google_auth exercise holds'

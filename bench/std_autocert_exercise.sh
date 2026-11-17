@@ -227,8 +227,14 @@ PY
           -dnsserver "127.0.0.1:$P_DNS" >"$WORK/pebble/pebble-$which.log" 2>&1 &
         PIDS="$PIDS $!"
       done
-      if ! "$PY" - "$P_A" "$P_B" "$certs/pebble.minica.pem" <<'PY'
-import ssl, sys, time, urllib.request
+      # Both Pebbles answer their directory, and challtestsrv answers a query
+      # for a name the scenarios order: Pebble resolves every validation
+      # through it, and one asked before it listens fails at once, the
+      # name then remembered as failed - on the project's Mac, three CI jobs
+      # at once, the first handshake was refused that way (job 134054737222),
+      # and a challtestsrv started 3 s late refuses it every time.
+      if ! "$PY" - "$P_A" "$P_B" "$certs/pebble.minica.pem" "$P_DNS" <<'PY'
+import socket, ssl, struct, sys, time, urllib.request
 ctx = ssl.create_default_context(cafile=sys.argv[3])
 deadline = time.time() + 30
 for port in sys.argv[1:3]:
@@ -240,10 +246,27 @@ for port in sys.argv[1:3]:
             if time.time() > deadline:
                 sys.exit(1)
             time.sleep(0.2)
+# One A query for a.autocert.example, answered with its id.
+query = struct.pack(">HHHHHH", 0x1d1, 0x0100, 1, 0, 0, 0) + b"".join(
+    bytes([len(label)]) + label.encode() for label in "a.autocert.example".split(".")) + b"\0" + struct.pack(">HH", 1, 1)
+while True:
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.settimeout(0.5)
+    try:
+        s.sendto(query, ("127.0.0.1", int(sys.argv[4])))
+        if s.recv(512)[:2] == query[:2]:
+            break
+    except OSError:
+        pass
+    finally:
+        s.close()
+    if time.time() > deadline:
+        sys.exit(1)
+    time.sleep(0.2)
 PY
       then
-        echo "  FAIL: the Pebbles did not come up in 30 s:"
-        tail -3 "$WORK/pebble/pebble-a.log" "$WORK/pebble/pebble-b.log" | sed 's/^/    /'
+        echo "  FAIL: the Pebbles or challtestsrv's DNS did not come up in 30 s:"
+        tail -3 "$WORK/pebble/pebble-a.log" "$WORK/pebble/pebble-b.log" "$WORK/pebble/challtestsrv.log" | sed 's/^/    /'
         status=1
       else
         PEBBLE=yes

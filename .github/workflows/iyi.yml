@@ -1967,8 +1967,23 @@ jobs:
           cat /usr/share/zoneinfo/+VERSION 2>/dev/null || echo 'no +VERSION in /usr/share/zoneinfo'
           ls -l /usr/share/zoneinfo | head -3
           tail -c 60 /usr/share/zoneinfo/Africa/Casablanca | od -c | tail -4
+      - name: Node 24, as the editor job has it, for the HTTP/2 oracle
+        run: |
+          brew list node@24 >/dev/null 2>&1 || brew install node@24
+          echo "$(brew --prefix node@24)/bin" >> "$GITHUB_PATH"
+          "$(brew --prefix node@24)/bin/node" --version
       - name: Python's cryptography and Pillow, for the oracles
-        run: python3 -m pip install -q --break-system-packages cryptography pillow
+        run: python3 -m pip install -q --break-system-packages cryptography pillow tzdata
+      # The image's database is tzdata 2024a, whose Morocco rule (XXX-2<+01>-1,0/0,J365/23) std/time and
+      # Python's zoneinfo read differently at the year's last hour; the GitHub image's is newer and passes.
+      # Both read one current database instead, so the check does not depend on the image's.
+      - name: One zone database for std/time and Python's zoneinfo
+        run: |
+          TZDIR="$(python3 -c 'import os, tzdata; print(os.path.join(os.path.dirname(tzdata.__file__), "zoneinfo"))')"
+          echo "ZONEINFO=$TZDIR" >> "$GITHUB_ENV"
+          echo "PYTHONTZPATH=$TZDIR" >> "$GITHUB_ENV"
+          cat "$TZDIR/+VERSION" 2>/dev/null || python3 -c "import tzdata; print('tzdata', tzdata.IANA_VERSION)"
+          tail -c 40 "$TZDIR/Africa/Casablanca" | od -c | tail -3
       - name: The module exercises of this shard, on darwin
         run: bash bench/std_siblings.sh ${{ matrix.shard }} 4
 

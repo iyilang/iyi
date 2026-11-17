@@ -1,0 +1,540 @@
+# WebAuthn registration and assertion verification, Level 3.
+#
+# RegistrationResponse#verify and AuthenticationResponse#verify bind the
+# credential's rawId to the attested or stored credential ID. The lower-level
+# byte entry points do not receive the presented ID and cannot bind it: their
+# callers MUST compare that ID themselves before accepting the result.
+#
+# Verify checks none and packed attestation statements and returns the x5c
+# certificates; the caller decides which attestation roots to trust. Ignore
+# deliberately does not verify the attestation statement, as Relic does.
+# The SHA-256 client-data hash always covers the original JSON bytes.
+
+@[Unsafe("the JSON and base64 adapters copy between strings and byte arrays")]
+module std/webauthn
+
+import std/asn1::{Der, DerTag, Asn1Error}
+import std/base64::{Base64, Base64Error}
+import std/cbor::{Cbor, CborValue, CborKind, CborLimits, CborError}
+import std/cose::{CoseKey, CoseAlg, CoseError}
+import std/curve25519::{Ed25519PublicKey}
+import std/digest::{SHA256}
+import std/ecdsa::{EcdsaPublicKey, EcdsaCurve, EcdsaHash}
+import std/json::{JSON, Any}
+import std/rsa::{RsaPublicKey, RsaHash}
+import std/x509::{Certificate, X509Error}
+
+pub struct WebAuthnError
+  getter kind : String
+  getter check : String
+  getter message : String
+
+  def initialize(@kind : String, @check : String, detail : String = "")
+    @message = "WebAuthn #{@kind}: #{@check}"
+    @message = @message + ": " + detail unless detail.empty?
+  end
+
+  def to_s : String
+    @message
+  end
+end
+
+impl Error for WebAuthnError
+  def message : String
+    @message
+  end
+end
+
+pub enum AttestationPolicy
+  Verify
+  Ignore
+end
+
+pub struct RegistrationExpectation
+  getter challenge : String
+  getter origins : Array(String)
+  getter rp_id : String
+  getter user_verification : Bool
+  getter algorithms : Array(CoseAlg)
+  getter attestation : AttestationPolicy
+
+  def initialize(@challenge : String, @origins : Array(String), @rp_id : String,
+                 @user_verification : Bool = true,
+                 @algorithms : Array(CoseAlg) = [CoseAlg::ES256, CoseAlg::RS256],
+                 @attestation : AttestationPolicy = AttestationPolicy::Verify)
+  end
+end
+
+pub struct RegisteredCredential
+  getter credential_id : Array(UInt8)
+  getter key : CoseKey
+  getter key_bytes : Array(UInt8)
+  getter sign_count : Int64
+  getter aaguid : Array(UInt8)
+  getter flags : Int32
+  getter attestation_format : String
+  getter attestation_type : String
+  getter attestation_chain : Array(Certificate)
+  getter extensions : CborValue?
+
+  def initialize(@credential_id : Array(UInt8), @key : CoseKey, @key_bytes : Array(UInt8),
+                 @sign_count : Int64, @aaguid : Array(UInt8), @flags : Int32,
+                 @attestation_format : String, @attestation_type : String,
+                 @attestation_chain : Array(Certificate), @extensions : CborValue?)
+  end
+end
+
+pub struct AssertionExpectation
+  getter challenge : String
+  getter origins : Array(String)
+  getter rp_id : String
+  getter credential_id : Array(UInt8)
+  getter key : CoseKey
+  getter sign_count : Int64
+  getter user_handle : Array(UInt8)?
+  getter user_verification : Bool
+
+  def initialize(@challenge : String, @origins : Array(String), @rp_id : String,
+                 @credential_id : Array(UInt8), @key : CoseKey, @sign_count : Int64,
+                 @user_handle : Array(UInt8)? = nil, @user_verification : Bool = true)
+  end
+end
+
+pub struct AssertionResult
+  getter sign_count : Int64
+  getter flags : Int32
+  getter user_handle : Array(UInt8)?
+  getter extensions : CborValue?
+
+  def initialize(@sign_count : Int64, @flags : Int32, @user_handle : Array(UInt8)?, @extensions : CborValue?)
+  end
+end
+
+pub struct RegistrationResponse
+  getter credential_id : Array(UInt8)
+  getter client_data_json : Array(UInt8)
+  getter attestation_object : Array(UInt8)
+  getter transports : Array(String)
+
+  def initialize(@credential_id : Array(UInt8), @client_data_json : Array(UInt8),
+                 @attestation_object : Array(UInt8), @transports : Array(String))
+  end
+
+  def verify(expected : RegistrationExpectation) : RegisteredCredential | WebAuthnError
+    result = WebAuthn.verify_registration(@client_data_json, @attestation_object, expected)
+    return result if result.is_a?(WebAuthnError)
+    return WebAuthnError.new("verification", "credential") unless result.credential_id == @credential_id
+    result
+  end
+end
+
+pub struct AuthenticationResponse
+  getter credential_id : Array(UInt8)
+  getter client_data_json : Array(UInt8)
+  getter authenticator_data : Array(UInt8)
+  getter signature : Array(UInt8)
+  getter user_handle : Array(UInt8)?
+
+  def initialize(@credential_id : Array(UInt8), @client_data_json : Array(UInt8),
+                 @authenticator_data : Array(UInt8), @signature : Array(UInt8), @user_handle : Array(UInt8)?)
+  end
+
+  def verify(expected : AssertionExpectation) : AssertionResult | WebAuthnError
+    return WebAuthnError.new("verification", "credential") unless @credential_id == expected.credential_id
+    WebAuthn.verify_assertion(@client_data_json, @authenticator_data, @signature, @user_handle, expected)
+  end
+end
+
+pub struct WebAuthn
+  def self.verify_registration(client_data_json : Array(UInt8), attestation_object : Array(UInt8), expected : RegistrationExpectation) : RegisteredCredential | WebAuthnError
+    client = WebAuthnData.client(client_data_json, "webauthn.create", expected.challenge, expected.origins)
+    return client if client.is_a?(WebAuthnError)
+    object = Cbor.decode(attestation_object, CborLimits.strict)
+    return WebAuthnData.malformed("cbor") if object.is_a?(CborError)
+    return WebAuthnData.malformed("cbor") unless object.kind == CborKind::Map
+    auth_item = object["authData"]
+    return WebAuthnData.malformed("cbor") unless auth_item
+    auth = auth_item.as_bytes?
+    return WebAuthnData.malformed("cbor") unless auth
+    header = WebAuthnData.header(auth, expected.rp_id, expected.user_verification, true)
+    return header if header.is_a?(WebAuthnError)
+    flags, count = header
+    return WebAuthnData.malformed("auth_data") if auth.size < 55
+    id_length = auth[53].to_i32 * 256 + auth[54].to_i32
+    return WebAuthnData.malformed("auth_data") if id_length > 1023 || id_length > auth.size - 55
+    id = auth[55, id_length]
+    at = 55 + id_length
+    decoded = Cbor.decode_one(auth, at, CborLimits.strict)
+    return WebAuthnData.malformed("cbor") if decoded.is_a?(CborError)
+    value, after_key = decoded
+    return WebAuthnData.malformed("cbor") unless value.kind == CborKind::Map
+    key_bytes = auth[at, after_key - at]
+    extensions = WebAuthnData.extensions(auth, after_key, flags)
+    return extensions if extensions.is_a?(WebAuthnError)
+    algorithm = value[3_i64]
+    return WebAuthnData.malformed("algorithm") unless algorithm && algorithm.as_int?
+    alg = algorithm.as_int?
+    return WebAuthnData.malformed("algorithm") unless alg == -7_i64 || alg == -257_i64 || alg == -8_i64 || alg == -35_i64 || alg == -37_i64
+    key = CoseKey.from_cbor(value)
+    return WebAuthnData.malformed("key", key.message) if key.is_a?(CoseError)
+    return WebAuthnData.malformed("algorithm") unless expected.algorithms.includes?(key.alg)
+    if key.kty == 3_i64
+      strength = WebAuthnData.rsa_credential(value, key)
+      return strength if strength.is_a?(WebAuthnError)
+    end
+    fmt_item = object["fmt"]
+    fmt = fmt_item ? fmt_item.as_text? : nil
+    format = fmt || "unknown"
+    statement = object["attStmt"]
+    attested = WebAuthnData.attestation(format, statement, auth, client_data_json, key, expected.attestation)
+    return attested if attested.is_a?(WebAuthnError)
+    kind, chain = attested
+    RegisteredCredential.new(id, key, key_bytes, count, auth[37, 16], flags, format, kind, chain, extensions)
+  end
+
+  def self.verify_assertion(client_data_json : Array(UInt8), authenticator_data : Array(UInt8), signature : Array(UInt8), user_handle : Array(UInt8)?, expected : AssertionExpectation) : AssertionResult | WebAuthnError
+    if user_handle && user_handle != expected.user_handle
+      return WebAuthnData.verification("user_handle")
+    end
+    client = WebAuthnData.client(client_data_json, "webauthn.get", expected.challenge, expected.origins)
+    return client if client.is_a?(WebAuthnError)
+    header = WebAuthnData.header(authenticator_data, expected.rp_id, expected.user_verification, false)
+    return header if header.is_a?(WebAuthnError)
+    flags, count = header
+    extensions = WebAuthnData.extensions(authenticator_data, 37, flags)
+    return extensions if extensions.is_a?(WebAuthnError)
+    if (expected.sign_count > 0 || count > 0) && count <= expected.sign_count
+      return WebAuthnData.verification("counter")
+    end
+    signed = authenticator_data + SHA256.hash_bytes(client_data_json)
+    return WebAuthnData.verification("signature") unless expected.key.verify_der(signed, signature)
+    AssertionResult.new(count, flags, user_handle, extensions)
+  end
+
+  def self.registration_from_json(text : String) : RegistrationResponse | WebAuthnError
+    object = WebAuthnData.response_object(text)
+    return object if object.is_a?(WebAuthnError)
+    id, response = object
+    client = WebAuthnData.encoded_field(response, "clientDataJSON")
+    return client if client.is_a?(WebAuthnError)
+    attestation = WebAuthnData.encoded_field(response, "attestationObject")
+    return attestation if attestation.is_a?(WebAuthnError)
+    transports = [] of String
+    if field = response["transports"]?
+      values = field.as_a?
+      return WebAuthnData.malformed("shape") unless values
+      values.each do |value|
+        text = value.as_s?
+        return WebAuthnData.malformed("shape") unless text
+        transports << text
+      end
+    end
+    RegistrationResponse.new(id, client, attestation, transports)
+  end
+
+  def self.assertion_from_json(text : String) : AuthenticationResponse | WebAuthnError
+    object = WebAuthnData.response_object(text)
+    return object if object.is_a?(WebAuthnError)
+    id, response = object
+    client = WebAuthnData.encoded_field(response, "clientDataJSON")
+    return client if client.is_a?(WebAuthnError)
+    auth = WebAuthnData.encoded_field(response, "authenticatorData")
+    return auth if auth.is_a?(WebAuthnError)
+    signature = WebAuthnData.encoded_field(response, "signature")
+    return signature if signature.is_a?(WebAuthnError)
+    handle = nil.as(Array(UInt8)?)
+    if field = response["userHandle"]?
+      unless field.raw.nil?
+        text = field.as_s?
+        return WebAuthnData.malformed("shape") unless text
+        decoded = WebAuthnData.base64url(text)
+        return decoded if decoded.is_a?(WebAuthnError)
+        handle = decoded
+      end
+    end
+    AuthenticationResponse.new(id, client, auth, signature, handle)
+  end
+end
+
+struct WebAuthnData
+  def self.malformed(check : String, detail : String = "") : WebAuthnError
+    WebAuthnError.new("malformed", check, detail)
+  end
+
+  def self.verification(check : String, detail : String = "") : WebAuthnError
+    WebAuthnError.new("verification", check, detail)
+  end
+
+  def self.bytes(text : String) : Array(UInt8)
+    Array(UInt8).new(text.bytesize) { |i| text.to_unsafe[i] }
+  end
+
+  def self.text(bytes : Array(UInt8)) : String
+    String.new(bytes.size) do |dst|
+      bytes.each_with_index { |byte, i| dst[i] = byte }
+    end
+  end
+
+  def self.base64url(text : String) : Array(UInt8) | WebAuthnError
+    return malformed("encoding") if text.bytesize % 4 == 1
+    text.bytesize.times do |i|
+      b = text.to_unsafe[i]
+      return malformed("encoding") unless (b >= 65_u8 && b <= 90_u8) || (b >= 97_u8 && b <= 122_u8) || (b >= 48_u8 && b <= 57_u8) || b == 45_u8 || b == 95_u8
+    end
+    decoded = Base64.decode?(text)
+    return malformed("encoding") if decoded.is_a?(Base64Error)
+    bytes(decoded)
+  end
+
+  def self.encoded_field(object : Hash(String, Any), name : String) : Array(UInt8) | WebAuthnError
+    value = object[name]?
+    return malformed("shape") unless value
+    text = value.as_s?
+    return malformed("shape") unless text
+    base64url(text)
+  end
+
+  def self.response_object(text : String) : {Array(UInt8), Hash(String, Any)} | WebAuthnError
+    parsed = JSON.parse?(text)
+    return malformed("shape") unless parsed
+    object = parsed.as_h?
+    return malformed("shape") unless object
+    type = object["type"]?
+    id = object["id"]?
+    raw = object["rawId"]?
+    response = object["response"]?
+    return malformed("shape") unless type && type.as_s? == "public-key" && id && raw && response
+    id_text = id.as_s?
+    raw_text = raw.as_s?
+    body = response.as_h?
+    return malformed("shape") unless id_text && raw_text && body && id_text == raw_text
+    decoded = base64url(id_text)
+    return decoded if decoded.is_a?(WebAuthnError)
+    {decoded, body}
+  end
+
+  def self.client(data : Array(UInt8), type : String, challenge : String, origins : Array(String)) : Nil | WebAuthnError
+    return malformed("encoding") unless utf8?(data)
+    parsed = JSON.parse?(text(data))
+    return malformed("shape") unless parsed
+    obj = parsed.as_h?
+    return malformed("shape") unless obj
+    t = obj["type"]?
+    c = obj["challenge"]?
+    o = obj["origin"]?
+    return malformed("shape") unless t && c && o
+    actual_type = t.as_s?
+    actual_challenge = c.as_s?
+    origin = o.as_s?
+    return malformed("shape") unless actual_type && actual_challenge && origin
+    return verification("type") unless actual_type == type
+    return verification("challenge") unless actual_challenge == challenge
+    return verification("origin") unless origins.includes?(origin)
+    if cross = obj["crossOrigin"]?
+      return verification("cross_origin") if cross.as_bool? == true
+    end
+    nil
+  end
+
+  def self.header(auth : Array(UInt8), rp_id : String, uv : Bool, registration : Bool) : {Int32, Int64} | WebAuthnError
+    return malformed("auth_data") if auth.size < 37
+    digest = SHA256.hash_bytes(rp_id)
+    diff = 0
+    32.times { |i| diff = diff | (digest[i].to_i32 ^ auth[i].to_i32) }
+    return verification("rp_id") unless diff == 0
+    flags = auth[32].to_i32
+    return verification("user_present") if flags & 1 == 0
+    return verification("user_verified") if uv && flags & 4 == 0
+    return malformed("auth_data") if ((flags & 64) != 0) != registration
+    count = 0_i64
+    4.times { |i| count = count * 256_i64 + auth[33 + i].to_i64 }
+    {flags, count}
+  end
+
+  def self.extensions(auth : Array(UInt8), offset : Int32, flags : Int32) : CborValue | Nil | WebAuthnError
+    if flags & 128 != 0
+      decoded = Cbor.decode_one(auth, offset, CborLimits.strict)
+      return malformed("cbor") if decoded.is_a?(CborError)
+      value, at = decoded
+      return malformed("auth_data") unless value.kind == CborKind::Map && at == auth.size
+      value
+    else
+      return malformed("auth_data") unless offset == auth.size
+      nil
+    end
+  end
+
+  def self.rsa_credential(value : CborValue, key : CoseKey) : Nil | WebAuthnError
+    n = value[-1_i64]
+    e = value[-2_i64]
+    return malformed("algorithm") unless n && e
+    modulus = n.as_bytes?
+    exponent = e.as_bytes?
+    return malformed("algorithm") unless modulus && exponent
+    start = 0
+    while start < exponent.size && exponent[start] == 0_u8
+      start = start + 1
+    end
+    return malformed("key") unless exponent[start, exponent.size - start] == [1_u8, 0_u8, 1_u8]
+    rsa = key.key
+    return malformed("key") unless rsa.is_a?(RsaPublicKey)
+    return malformed("key") if rsa.bits < 2048 || rsa.bits > 4096
+    nil
+  end
+
+  def self.attestation(format : String, statement : CborValue?, auth : Array(UInt8), client : Array(UInt8), key : CoseKey, policy : AttestationPolicy) : {String, Array(Certificate)} | WebAuthnError
+    chain = [] of Certificate
+    return {"unverified", chain} if policy == AttestationPolicy::Ignore
+    return malformed("attestation", "missing attStmt") unless statement && statement.kind == CborKind::Map
+    if format == "none"
+      entries = statement.as_map?
+      return malformed("attestation", "none statement is not empty") unless entries && entries.empty?
+      return {"none", chain}
+    end
+    return malformed("attestation", "unsupported format #{format}") unless format == "packed"
+    alg_value = statement["alg"]
+    sig_value = statement["sig"]
+    return malformed("attestation", "packed lacks alg or sig") unless alg_value && sig_value
+    alg = alg_value.as_int?
+    signature = sig_value.as_bytes?
+    return malformed("attestation", "packed alg or sig has the wrong type") unless alg && signature
+    signed = auth + SHA256.hash_bytes(client)
+    if x5c = statement["x5c"]
+      certs = x5c.as_array?
+      return malformed("attestation", "packed x5c is empty or not an array") unless certs && !certs.empty?
+      certs.each do |item|
+        der = item.as_bytes?
+        return malformed("attestation", "packed x5c entry is not bytes") unless der
+        cert = Certificate.parse(der)
+        return malformed("attestation", cert.message) if cert.is_a?(X509Error)
+        chain << cert
+      end
+      leaf = chain[0]
+      return malformed("attestation", "packed certificate profile") unless packed_certificate?(leaf, auth[37, 16])
+      return verification("attestation", "packed signature") unless verify_certificate_signature(leaf, alg, signed, signature)
+      {"basic", chain}
+    else
+      return malformed("attestation", "packed self algorithm differs from credential key") unless alg == key.alg.value.to_i64
+      return verification("attestation", "packed self signature") unless key.verify_der(signed, signature)
+      {"self", chain}
+    end
+  end
+
+  # The caller validates the trust path; this checks the statement's own
+  # certificate profile and the optional FIDO AAGUID binding.
+  def self.packed_certificate?(cert : Certificate, aaguid : Array(UInt8)) : Bool
+    return false unless cert.version == 3 && cert.basic_constraints && !cert.ca
+    subject = Der.parse(cert.subject)
+    return false if subject.is_a?(Asn1Error)
+    rdns = subject.sequence
+    return false if rdns.is_a?(Asn1Error)
+    seen = 0
+    rdns.each do |rdn|
+      attrs = rdn.set
+      return false if attrs.is_a?(Asn1Error)
+      attrs.each do |attr|
+        fields = attr.sequence
+        return false if fields.is_a?(Asn1Error) || fields.size != 2
+        oid = fields[0].oid
+        return false if oid.is_a?(Asn1Error)
+        value = fields[1].string
+        return false if value.is_a?(Asn1Error)
+        case oid
+        when "2.5.4.6"
+          return false unless seen & 1 == 0 && fields[1].universal?(DerTag::PRINTABLE_STRING) && value.bytesize == 2
+          seen = seen | 1
+        when "2.5.4.10"
+          return false unless seen & 2 == 0 && fields[1].universal?(DerTag::UTF8_STRING) && !value.empty?
+          seen = seen | 2
+        when "2.5.4.11"
+          return false unless seen & 4 == 0 && fields[1].universal?(DerTag::UTF8_STRING) && value == "Authenticator Attestation"
+          seen = seen | 4
+        when "2.5.4.3"
+          return false unless seen & 8 == 0 && fields[1].universal?(DerTag::UTF8_STRING) && !value.empty?
+          seen = seen | 8
+        end
+      end
+    end
+    return false unless seen == 15
+    tbs = Der.parse(cert.tbs)
+    return false if tbs.is_a?(Asn1Error)
+    fields = tbs.sequence
+    return false if fields.is_a?(Asn1Error)
+    fields.each do |field|
+      next unless field.context?(3)
+      explicit = field.explicit(3)
+      return false if explicit.is_a?(Asn1Error)
+      extensions = explicit.sequence
+      return false if extensions.is_a?(Asn1Error)
+      extensions.each do |extension|
+        values = extension.sequence
+        return false if values.is_a?(Asn1Error) || values.size < 2 || values.size > 3
+        oid = values[0].oid
+        return false if oid.is_a?(Asn1Error)
+        next unless oid == "1.3.6.1.4.1.45724.1.1.4"
+        if values.size == 3
+          critical = values[1].boolean
+          return false if critical.is_a?(Asn1Error) || critical
+        end
+        outer = values[values.size - 1].octet_string
+        return false if outer.is_a?(Asn1Error)
+        inner = Der.parse(outer)
+        return false if inner.is_a?(Asn1Error)
+        id = inner.octet_string
+        return false if id.is_a?(Asn1Error) || id != aaguid
+      end
+    end
+    true
+  end
+
+  def self.verify_certificate_signature(cert : Certificate, alg : Int64, signed : Array(UInt8), signature : Array(UInt8)) : Bool
+    key = cert.public_key
+    if key.is_a?(EcdsaPublicKey)
+      return false unless (alg == -7_i64 && key.curve == EcdsaCurve::P256) || (alg == -35_i64 && key.curve == EcdsaCurve::P384)
+      return key.verify(alg == -7_i64 ? EcdsaHash::SHA256 : EcdsaHash::SHA384, signed, signature)
+    elsif key.is_a?(RsaPublicKey)
+      return key.verify_pkcs1v15(RsaHash::SHA256, signed, signature) if alg == -257_i64
+      return key.verify_pss(RsaHash::SHA256, signed, signature) if alg == -37_i64
+    elsif key.is_a?(Ed25519PublicKey)
+      return key.verify(signed, signature) if alg == -8_i64
+    end
+    false
+  end
+
+  def self.utf8?(data : Array(UInt8)) : Bool
+    i = 0
+    while i < data.size
+      b = data[i]
+      if b < 0x80_u8
+        i = i + 1
+        next
+      end
+      need, low, high = if b >= 0xc2_u8 && b <= 0xdf_u8
+                          {1, 0x80_u8, 0xbf_u8}
+                        elsif b == 0xe0_u8
+                          {2, 0xa0_u8, 0xbf_u8}
+                        elsif (b >= 0xe1_u8 && b <= 0xec_u8) || b == 0xee_u8 || b == 0xef_u8
+                          {2, 0x80_u8, 0xbf_u8}
+                        elsif b == 0xed_u8
+                          {2, 0x80_u8, 0x9f_u8}
+                        elsif b == 0xf0_u8
+                          {3, 0x90_u8, 0xbf_u8}
+                        elsif b >= 0xf1_u8 && b <= 0xf3_u8
+                          {3, 0x80_u8, 0xbf_u8}
+                        elsif b == 0xf4_u8
+                          {3, 0x80_u8, 0x8f_u8}
+                        else
+                          return false
+                        end
+      return false if i + need >= data.size
+      return false unless data[i + 1] >= low && data[i + 1] <= high
+      k = 2
+      while k <= need
+        return false unless data[i + k] >= 0x80_u8 && data[i + k] <= 0xbf_u8
+        k = k + 1
+      end
+      i = i + need + 1
+    end
+    true
+  end
+end

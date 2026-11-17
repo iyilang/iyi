@@ -1694,8 +1694,11 @@ File.write(File.join(ctl, "pid-$name"), "#{Process.pid}")
 File.write(File.join(ctl, "started-$name"), "1")
 waited = 0
 while !File.exists?(File.join(ctl, "release"))
-  raise "never released" if waited >= 300
-  sleep(1)
+  # `sleep` takes milliseconds: 3,000 steps of 100 ms is the five minutes this
+  # guard is meant to be. At 300 steps of 1 ms the test died in a third of a
+  # second, before a slow build (Windows) had recorded the quick receipts.
+  raise "never released" if waited >= 3000
+  sleep(100)
   waited += 1
 end
 IYI

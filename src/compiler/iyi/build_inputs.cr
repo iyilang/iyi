@@ -54,8 +54,9 @@ module Iyi
     # The compiler's own reads that happen only when it links: a warm build
     # links nothing (a cached macro `run` helper, an up-to-date program), so
     # these are recorded whether or not this build links, and a key taken
-    # from a cold build and one from a warm build agree.
-    LINK_ONLY_ENV = %w(IYI_LINK_DRIVER)
+    # from a cold build and one from a warm build agree. `ProgramFiles(x86)` is
+    # where Windows' MSVC lookup starts (`Crystal::System::VisualStudio`).
+    LINK_ONLY_ENV = ["IYI_LINK_DRIVER", "ProgramFiles(x86)"]
 
     # The compiler's own reads that happen only during codegen (or release
     # partitioning): a cached test or warm build does no codegen, so these

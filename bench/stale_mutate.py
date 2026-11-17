@@ -284,8 +284,13 @@ def generate_mutations_for_source(
         )
         has_unsafe = first_stmt_idx is not None and lines[first_stmt_idx].lstrip().startswith("@[Unsafe")
 
-        decl = "@[Link(\"m\")]\nlib LibMutMath; fun cos(x : Float64) : Float64; end\n"
-        call = "\nputs LibMutMath.cos(0.0)\n"
+        if os.name == "nt":
+            # There is no libm to link on Windows: the mutation names kernel32 instead.
+            decl = "@[Link(\"kernel32\")]\nlib LibMutMath; fun GetTickCount : UInt32; end\n"
+            call = "\nputs LibMutMath.GetTickCount\n"
+        else:
+            decl = "@[Link(\"m\")]\nlib LibMutMath; fun cos(x : Float64) : Float64; end\n"
+            call = "\nputs LibMutMath.cos(0.0)\n"
 
         if has_unsafe:
             if module_end > 0:

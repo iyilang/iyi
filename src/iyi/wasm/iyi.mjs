@@ -130,8 +130,10 @@ export async function instantiate(source, options = {}) {
       exports.iyi_free(ptr);
     },
     put(value) {
-      const bytes = typeof value === "string" ? new TextEncoder().encode(value) : value;
+      let bytes = typeof value === "string" ? new TextEncoder().encode(value) : value;
       if (!(bytes instanceof Uint8Array)) throw new TypeError("put expects a string or Uint8Array");
+      // Allocation can grow memory and detach an input view into that memory.
+      if (bytes.buffer === exports.memory.buffer) bytes = new Uint8Array(bytes);
       const ptr = iyi.alloc(bytes.length);
       view(ptr, bytes.length).set(bytes);
       return { ptr, len: bytes.length };

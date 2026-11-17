@@ -32,6 +32,16 @@ for name in hello format io; do
   build_wasm "$name" "$REPO/samples/iyi/$name.iyi"
 done
 
+# A real wasm constructor checks that iyi_start invokes the linker's ctor
+# list, rather than only running iyi's own top-level code.
+cat > "$WORK/build/ctor.c" <<'C'
+static int initialized;
+__attribute__((constructor)) static void initialize(void) { initialized++; }
+__attribute__((export_name("ctor_value"))) int ctor_value(void) { return initialized; }
+C
+"${WASI_SDK_PATH:-/opt/wasi-sdk}/bin/clang" --target=wasm32-unknown-unknown -c "$WORK/build/ctor.c" -o "$WORK/build/ctor.o"
+wasm-ld "$WORK/build/hello.wasm" "$WORK/build/ctor.o" -o "$WORK/ctor.wasm" --no-entry
+
 # Link the printed command with no entry flag removed: the linker must refuse.
 link_command="$("$IYI" build --cross-compile --target wasm32-unknown-unknown -o "$WORK/build/no-entry" "$REPO/samples/iyi/hello.iyi")"
 case "$link_command" in *' --no-entry'*) ;; *) echo 'negative proof has no --no-entry to remove' >&2; exit 1 ;; esac

@@ -3464,6 +3464,7 @@ jobs:
       - name: Exercise the host contract
         run: |
           mkdir -p room && tar -xzf dist/*.tar.gz -C room
+          cmp src/iyi/wasm/iyi.mjs room/share/iyi/src/iyi/wasm/iyi.mjs
           export PATH="/opt/wasi-sdk/bin:$HOME/.wasmtime/bin:$PATH"
           export IYI="$PWD/room/bin/iyi"
           export IYI_CHROME="$(command -v google-chrome)"

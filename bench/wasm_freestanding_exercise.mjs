@@ -17,19 +17,35 @@ export default async function run({ load, log }) {
   assert(JSON.stringify(imports) === JSON.stringify(["iyi.exit", "iyi.write"]), `hello imports ${imports}`);
   const exported = WebAssembly.Module.exports(hello).map(item => item.name);
   for (const name of ["memory", "iyi_start", "iyi_alloc", "iyi_free"]) assert(exported.includes(name), `missing ${name}`);
+
+  const quiet = { start: false, stdout: () => {}, stderr: () => {} };
+  const fromModule = await instantiate(hello, quiet);
+  assert(await fromModule.start() === 0, "compiled module source");
+  const fromResponse = await instantiate(Promise.resolve(new Response(await load("hello.wasm"))), quiet);
+  assert(await fromResponse.start() === 0, "promised Response source");
+  let reserved = false;
+  try { await instantiate(hello, { imports: { iyi: {} } }); } catch { reserved = true; }
+  assert(reserved, "reserved iyi import module was accepted");
+  const constructors = await instantiate(await load("ctor.wasm"), quiet);
+  assert(await constructors.start() === 0, "constructor fixture failed to start");
+  assert(await constructors.call("ctor_value") === 1, "wasm constructor did not run exactly once");
+  assert(await constructors.start() === -1, "constructor fixture started twice");
+  assert(await constructors.call("ctor_value") === 1, "wasm constructor ran twice");
+  log("sources: compiled module and promised Response; reserved imports refused; wasm constructor ran once");
   log(`hello imports: ${imports.join(", ")}; exports: memory, iyi_start, iyi_alloc, iyi_free`);
 
   for (const name of ["hello", "format", "io"]) {
-    const output = [];
+    const output = [], errors = [];
     let remaining = name === "io" ? encoder.encode("first line\nsecond line\nthird line\n") : null;
     const iyi = await instantiate(await load(`${name}.wasm`), {
       start: false,
       stdout: bytes => output.push(bytes),
-      stderr: bytes => { throw new Error(decoder.decode(bytes)); },
+      stderr: bytes => errors.push(bytes),
       stdin: () => { const bytes = remaining; remaining = null; return bytes; },
     });
     assert(await iyi.start() === 0, `${name} exit status`);
     assert(equal(joined(output), await load(`${name}.expected`)), `${name} differs from native stdout`);
+    assert(errors.length === 0, `${name} wrote stderr`);
     log(`${name}: native and wasm stdout match`);
   }
 
@@ -48,6 +64,7 @@ export default async function run({ load, log }) {
   assert(decoder.decode(joined(output)) === "contract ready\n", "stdout bytes differ");
 
   const message = program.put("hello, wasm");
+  assert(message.ptr % 8 === 0, "allocated buffer is not 8-aligned");
   assert(program.string(message.ptr, message.len) === "hello, wasm", "UTF-8 round trip");
   const mixed = await program.call("contract_mix", 7, 9007199254740993n, 3.75, message.ptr);
   assert(mixed === 9007199254740993n + 14n + 3n + 104n, "Int32, Int64, Float64, pointer or user import mismatch");
@@ -75,6 +92,11 @@ export default async function run({ load, log }) {
   new Uint8Array(program.memory.buffer, large, length).set(written);
   await program.call("contract_collect");
   assert(equal(program.bytes(large, length), written), "16 MiB buffer changed across collection");
+  const oldView = new Uint8Array(program.memory.buffer, large, length);
+  const copied = program.put(oldView);
+  assert(oldView.byteLength === 0, "put did not grow memory in the aliasing test");
+  assert(equal(program.bytes(copied.ptr, copied.len), written), "put lost a source view when memory grew");
+  program.free(copied.ptr);
   const previousBuffer = program.memory.buffer;
   const grown = await program.call("contract_grow");
   assert(program.memory.buffer !== previousBuffer, "32 MiB export did not grow memory");
@@ -82,7 +104,7 @@ export default async function run({ load, log }) {
   assert(program.string(message.ptr, message.len) === "hello, wasm", "existing bytes changed after growth");
   program.free(large);
   program.free(message.ptr);
-  log("memory: 16 MiB round trip across collection; 32 MiB export grew memory and fresh views read it");
+  log("memory: 16 MiB round trip, put from a detached view, and fresh views after 32 MiB growth");
 
   const wall = await program.call("contract_wall_seconds");
   assert(typeof wall === "bigint" && Math.abs(Number(wall) * 1000 - Date.now()) < 5000, "wall clock differs from host");

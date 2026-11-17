@@ -27,6 +27,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -43,10 +44,14 @@ def check(what, holds, evidence=""):
             print("    " + str(evidence).replace("\n", "\n    "))
 
 
-def planned(*files):
-    """The reason and the selected jobs, from the planner's own command line."""
-    ran = subprocess.run([sys.executable, str(PLANNER), "--event", "pull_request", "--files", *files],
-                         cwd=ROOT, capture_output=True, text=True, encoding="utf-8")
+def planned(*files, base=None):
+    """The reason and the selected jobs, from the planner's own command line. *base* is the base
+    branch's workflow; with none, and none of CI's credentials in the environment, it cannot be read."""
+    command = [sys.executable, str(PLANNER), "--event", "pull_request", "--files", *files]
+    if base is not None:
+        command += ["--base-workflow", str(base)]
+    env = {k: v for k, v in os.environ.items() if k not in ("GITHUB_EVENT_PATH", "GITHUB_TOKEN", "GITHUB_REPOSITORY")}
+    ran = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, encoding="utf-8", env=env)
     lines = ran.stdout.splitlines()
     if ran.returncode != 0 or not lines:
         return f"exit {ran.returncode}: {ran.stderr.strip()}", set()
@@ -77,8 +82,22 @@ check("a file nothing runs falls back to the fast tier",
 reason, jobs = planned("README.md")
 check("a doc selects the docs gates alone", jobs == {"docs"}, f"{reason}: {sorted(jobs)}")
 
+workflow_text = (ROOT / ".github" / "workflows" / "iyi.yml").read_text(encoding="utf-8")
+with tempfile.TemporaryDirectory() as scratch:
+    same = Path(scratch) / "same.yml"
+    same.write_text(workflow_text, encoding="utf-8")
+    reason, jobs = planned(".github/workflows/iyi.yml", base=same)
+    check("a change to CI that edits no job runs the fast tier, and no darwin job",
+          reason.startswith("the fast tier") and "compiler-specs" in jobs and not any(j.startswith("darwin") for j in jobs),
+          f"{reason}: {sorted(jobs)}")
+    edited = Path(scratch) / "edited.yml"
+    edited.write_text(workflow_text.replace("\n  darwin:\n", "\n  darwin:\n    env: {BASE: x}\n", 1), encoding="utf-8")
+    reason, jobs = planned(".github/workflows/iyi.yml", base=edited)
+    check("a job the change edits runs with it, and the jobs it needs", "darwin" in jobs and "compiler-specs" in jobs,
+          f"{reason}: {sorted(jobs)}")
 reason, jobs = planned(".github/workflows/iyi.yml")
-check("a change to CI runs everything", reason.startswith("the change is to CI itself"), reason)
+check("a change to CI whose base workflow cannot be read runs everything",
+      reason.startswith("the change is to CI itself") and "darwin" in jobs, f"{reason}: {sorted(jobs)}")
 
 # Each compiler component change selects macOS, Linux and Windows.
 for files, what in [

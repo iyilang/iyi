@@ -63,6 +63,14 @@ on:
     tags: ["v*", "editor-v*"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      # The darwin jobs that run on the project's Mac (darwin, darwin-std,
+      # darwin-heap22) on GitHub's macos-15 instead: for a Mac that is off,
+      # and to exercise the path a fork's pull request takes.
+      darwin_github_hosted:
+        description: "darwin, darwin-std and darwin-heap22 on GitHub's macos-15, not the project's Mac"
+        type: boolean
+        default: false
   schedule:
     # 02:17 UTC: off the hour, when every other scheduled workflow starts.
     - cron: "17 2 * * *"
@@ -1600,7 +1608,13 @@ jobs:
     # the three take the Mac in one wave, while the four darwin-std-siblings
     # shards run on GitHub's macos-15 (their comment says why). The static
     # LLVM there is keyed on its SDK and Xcode build, not an image.
-    runs-on: [self-hosted, macOS, ARM64]
+    # A pull request from a fork runs here on GitHub's macos-15 instead: the
+    # Mac is the owner's own machine, and a fork's code does not run on it
+    # (the repository also holds every outside contributor's run for
+    # approval, so a fork cannot edit this line back unseen). A dispatch
+    # with darwin_github_hosted does the same. The steps that differ read
+    # runner.environment.
+    runs-on: ${{ ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) || inputs.darwin_github_hosted) && 'macos-15' || fromJSON('["self-hosted","macOS","ARM64"]') }}
     # A runner builds for its own major version, which on macos-15 is 15.0:
     # the tarball's `iyi` would refuse every Mac on 14, where 0.19.1's,
     # built on macos-14, says `minos` 14.0. 14.4 is iyi's floor, the
@@ -1669,7 +1683,20 @@ jobs:
       # on the lock, and a run with another recipe gets a directory of its
       # own instead of deleting the one a running job links against. A
       # `.stamp` is written last, so a build cut short is built again.
+      - name: Restore the static LLVM (GitHub's runner)
+        if: runner.environment == 'github-hosted'
+        id: llvm-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/llvm-static
+          key: llvm-static-${{ runner.os }}-${{ runner.arch }}-macos-15-${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
+      - name: The static LLVM on GitHub's runner, built on a cache miss
+        if: runner.environment == 'github-hosted'
+        run: |
+          [ "${{ steps.llvm-cache.outputs.cache-hit }}" = true ] || bash scripts/build-static-llvm.sh "$HOME/llvm-static"
+          echo "LLVM_STATIC=$HOME/llvm-static" >> "$GITHUB_ENV"
       - name: The static LLVM, built once per recipe and SDK on this machine
+        if: runner.environment == 'self-hosted'
         run: |
           stamp="${{ steps.tools.outputs.sdk }}-$MACOSX_DEPLOYMENT_TARGET-${{ hashFiles('scripts/build-static-llvm.sh') }}"
           dir="$HOME/iyi-ci/llvm-static-$stamp"
@@ -2057,7 +2084,9 @@ jobs:
   darwin-std:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'darwin-std') }}
-    runs-on: [self-hosted, macOS, ARM64]
+    # A fork's pull request, or darwin_github_hosted: GitHub's macos-15 (the
+    # darwin job's comment says why).
+    runs-on: ${{ ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) || inputs.darwin_github_hosted) && 'macos-15' || fromJSON('["self-hosted","macOS","ARM64"]') }}
     env:
       MACOSX_DEPLOYMENT_TARGET: "14.4"
     timeout-minutes: 120
@@ -2074,7 +2103,20 @@ jobs:
           echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
           for v in LDFLAGS CPPFLAGS CFLAGS CXXFLAGS LIBRARY_PATH CPATH; do echo "$v=" >> "$GITHUB_ENV"; done
           echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
+      - name: Restore the static LLVM (GitHub's runner)
+        if: runner.environment == 'github-hosted'
+        id: llvm-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/llvm-static
+          key: llvm-static-${{ runner.os }}-${{ runner.arch }}-macos-15-${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
+      - name: The static LLVM on GitHub's runner, built on a cache miss
+        if: runner.environment == 'github-hosted'
+        run: |
+          [ "${{ steps.llvm-cache.outputs.cache-hit }}" = true ] || bash scripts/build-static-llvm.sh "$HOME/llvm-static"
+          echo "LLVM_STATIC=$HOME/llvm-static" >> "$GITHUB_ENV"
       - name: The static LLVM, built once per recipe and SDK on this machine
+        if: runner.environment == 'self-hosted'
         run: |
           stamp="${{ steps.tools.outputs.sdk }}-$MACOSX_DEPLOYMENT_TARGET-${{ hashFiles('scripts/build-static-llvm.sh') }}"
           dir="$HOME/iyi-ci/llvm-static-$stamp"
@@ -2100,7 +2142,9 @@ jobs:
   darwin-heap22:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'darwin-heap22') }}
-    runs-on: [self-hosted, macOS, ARM64]
+    # A fork's pull request, or darwin_github_hosted: GitHub's macos-15 (the
+    # darwin job's comment says why).
+    runs-on: ${{ ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) || inputs.darwin_github_hosted) && 'macos-15' || fromJSON('["self-hosted","macOS","ARM64"]') }}
     env:
       MACOSX_DEPLOYMENT_TARGET: "14.4"
     timeout-minutes: 105
@@ -2117,7 +2161,20 @@ jobs:
           echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
           for v in LDFLAGS CPPFLAGS CFLAGS CXXFLAGS LIBRARY_PATH CPATH; do echo "$v=" >> "$GITHUB_ENV"; done
           echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
+      - name: Restore the static LLVM (GitHub's runner)
+        if: runner.environment == 'github-hosted'
+        id: llvm-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/llvm-static
+          key: llvm-static-${{ runner.os }}-${{ runner.arch }}-macos-15-${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
+      - name: The static LLVM on GitHub's runner, built on a cache miss
+        if: runner.environment == 'github-hosted'
+        run: |
+          [ "${{ steps.llvm-cache.outputs.cache-hit }}" = true ] || bash scripts/build-static-llvm.sh "$HOME/llvm-static"
+          echo "LLVM_STATIC=$HOME/llvm-static" >> "$GITHUB_ENV"
       - name: The static LLVM, built once per recipe and SDK on this machine
+        if: runner.environment == 'self-hosted'
         run: |
           stamp="${{ steps.tools.outputs.sdk }}-$MACOSX_DEPLOYMENT_TARGET-${{ hashFiles('scripts/build-static-llvm.sh') }}"
           dir="$HOME/iyi-ci/llvm-static-$stamp"

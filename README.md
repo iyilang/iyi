@@ -24,7 +24,7 @@ interface without a repository, and a person waits less.
 |---|---|
 | **Developer experience** | edit one module in a 7,207-line project and rebuild: **0.13 s**, against Crystal's 1.17 s and `go build`'s 0.16 s |
 | **Agentic experience** | `iyi mod context` hands an edit the exact surface of every import at **52–59%** of the sources' size, and a model writing against it spent **31–43% fewer prompt tokens** (`bench/context_pack.py`, AI_FIRST.md §5) |
-| **Portability** | an iyi program compiles for **nine targets** and is **run** on five of them every build: x86-64 glibc, x86-64 musl, aarch64 under emulation, wasm32-wasi under wasmtime, and aarch64-darwin natively |
+| **Portability** | an iyi program compiles for **ten targets**; CI runs x86-64 glibc, x86-64 musl, aarch64 under emulation, wasm32-wasi under wasmtime, freestanding wasm in Node and Chrome, and aarch64-darwin natively |
 | **Performance** | native code through LLVM, and a front end that answers `hello` in **0.034 s**. At run time, within noise of Crystal's library wherever both do the same work |
 | **Efficiency** | that `hello` is a **36 KB** binary that starts in **1.6 ms**; the same program with Crystal's library is 1,553 KB and 3.2 ms |
 
@@ -281,13 +281,13 @@ The token figures are the model's, over the runs written up in AI_FIRST.md §5:
 31–43% fewer prompt tokens, with rounds to green tied three times and lost
 three.
 
-**Portability — compiles for nine, runs on five.** CI type-checks the library
-for all nine targets every build, runs a program on five and compares what it
-prints with what it printed on the machine that compiled it. Windows x86-64 is
-not one of the five, but it is built and tested natively: eight CI jobs run on
-Windows, and a failure in any of them stops a release. On Linux,
-`iyi build --static` gives a binary with no dynamic loader at all.
-[INSTALL.md](INSTALL.md#targets) lists the nine and what each is held to.
+**Portability: ten compilation targets.** CI type-checks Crystal's library for
+nine targets and audits iyi's own prelude for eight, including freestanding
+wasm. It also runs programs on six target configurations, comparing their
+output with the native build. Windows x86-64 is built and tested natively:
+eight CI jobs run on Windows, and a failure in any of them stops a release.
+On Linux, `iyi build --static` gives a binary with no dynamic loader.
+[INSTALL.md](INSTALL.md#targets) lists the targets and their checks.
 
 **Performance.** Native code through LLVM. At run time iyi's library is within
 noise of Crystal's where the two do the same work, ahead on `Hash` and behind
@@ -636,8 +636,8 @@ not the library.
   and `File.open(path, mode)`. Its collections carry a method because a
   program in this repository needed it, so much of what you reach for is in
   `src/std/` instead (`std/enumerable` as trait defaults) or under `--crystal`.
-- **wasm32 has no concurrency runtime.** A `group` there fails to compile
-  rather than run sequentially.
+- **wasm32 has no concurrency runtime.** `group` and `sleep` fail to compile
+  on WASI and freestanding wasm rather than run sequentially.
 - **Only the threads and parallel tasks are gated by `Share`.** A block passed
   to `IyiThread.start`, `spawn(unit: :new)` or a def marked `@[Share]` (std/http's
   `Server.serve`, unless given `workers: 1`) may capture only `Share` values;

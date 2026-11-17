@@ -67,6 +67,16 @@ check("an exercise no step names is still run, through the siblings",
 reason, jobs = planned("bench/panics.sh")
 check("a gate a job runs selects that job", "windows-native" in jobs, f"{reason}: {sorted(jobs)}")
 
+# Split the names so this planner test does not claim to run the files.
+for name in ("wasm_browser", "wasm_node", "wasm_freestanding_exercise"):
+    reason, jobs = planned("bench/" + name + ".mjs")
+    check(f"{name}.mjs selects the freestanding wasm job",
+          "wasm-freestanding" in jobs, f"{reason}: {sorted(jobs)}")
+
+reason, jobs = planned("bench/" + "std_tls_exercise" + ".sh")
+check("an unrelated exercise does not select freestanding wasm",
+      "wasm-freestanding" not in jobs, f"{reason}: {sorted(jobs)}")
+
 # Spelled in two pieces: this file runs in the docs job, and a name written
 # whole in its code would be a file the docs job runs.
 reason, jobs = planned("bench/" + "share_count" + ".cr")

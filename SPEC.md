@@ -9017,6 +9017,54 @@ capability system. When the wasm32 arm grows real IO it will grow it
 through WASI's preopens, and this section is where that negotiation gets
 designed before it gets built.
 
+#### III.12.1 The freestanding wasm32 target: the host contract
+
+`wasm32-unknown-unknown` is a freestanding WebAssembly module. Its flags are
+`wasm32`, `unknown` and `bits32`, without `wasi` or `unix`. The link command
+uses `wasm-ld --no-entry` and carries no libc, WASI runtime, startup object or
+compiler-rt. Only referenced host functions are imported, all from module
+`iyi`:
+
+| Import | Contract |
+| --- | --- |
+| `write(fd: i32, ptr: i32, len: i32) -> i32` | Write bytes to fd 1 (stdout) or 2 (stderr); return the count or -1. |
+| `read(fd: i32, ptr: i32, len: i32) -> i32` | Read fd 0 (stdin); return the count, 0 at end of input, or -1 on error. |
+| `exit(code: i32)` | Stop execution without returning. |
+| `clock_ns(clock: i32) -> i64` | Clock 0 is nanoseconds since the Unix epoch; clock 1 is monotonic nanoseconds. |
+| `random(ptr: i32, len: i32) -> i32` | Fill bytes from a cryptographically secure source; return 0 or -1 on error. |
+
+The module exports `memory`, `iyi_start() -> i32`, `iyi_alloc(size: i32) ->
+i32`, and `iyi_free(ptr: i32)`. The host calls `iyi_start` before any other
+export. It runs initialization and top-level code once, with argc 0 and an
+empty argv, flushes the standard streams and returns the program's status.
+Another call returns -1 and runs nothing. `iyi_alloc` returns an 8-aligned
+atomic byte buffer pinned across collections; `iyi_free` unpins it. Unknown
+and repeated pointers are ignored. Linear memory can grow on any call, so
+the host takes a fresh view after each call.
+
+The prefixes `iyi_` and `__` are reserved. A module may declare additional
+host functions with `@[Link(wasm_import_module: "name")]`, and top-level
+`fun` declarations are exports. Boundary values are `Int32`, `Int64`,
+`Float64` and pointers; JavaScript represents `Int64` as `BigInt` and
+pointers as 32-bit offsets. A module that uses these raw operations carries
+`@[Unsafe("reason")]` first, as III.13 requires.
+
+The installed `src/iyi/wasm/iyi.mjs` exports `instantiate` and `IyiExit`.
+It accepts bytes, a `Response`, a promise of one, or a compiled module; user
+imports occupy modules other than the reserved `iyi`. Options provide byte
+callbacks for stdout and stderr, a stdin supplier, and whether to start
+immediately. Its returned object exposes the instance, module, exports,
+memory, `start`, `alloc`, `free`, `put`, `bytes`, `string`, and `call`.
+`start` returns an exit status; a host `exit` raises `IyiExit` with `code`.
+The loader uses the host's cryptographic random source and never substitutes
+guessable bytes.
+
+File operations have no filesystem, environment reads are empty and there is
+no current directory. `group`, `sleep` and `-Diyi_chaos` are compile errors
+on this target until it has a scheduler. `bench/wasm_freestanding_exercise.sh`
+runs the contract in Node and isolated headless Chrome and compares the
+sample programs with native output.
+
 ### III.13 Unsafe code: **BUILT — a module that handles raw memory says so with `@[Unsafe("why")]` above its header, and the typed check refuses every unchecked operation anywhere else; held by `bench/unsafe.sh`**
 
 Before this, nothing decided who could use `Pointer`. A string's

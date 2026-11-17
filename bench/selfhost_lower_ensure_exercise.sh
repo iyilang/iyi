@@ -6,8 +6,17 @@
 # and first occurrence so their suffixes do not hide instruction differences.
 set -uo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO/bench/lib/host.sh" || exit 1
+require_test_host || exit 1
+if [ -z "$PY" ]; then
+  echo 'FAIL: a functional Python interpreter is required' >&2
+  exit 1
+fi
+REPO_NATIVE="$(native_path "$REPO")" || exit 1
+export IYI_PATH="$REPO_NATIVE/src"
 IYI="$REPO/bin/iyi"
 WORK="$(mktemp -d)"
+WORK_NATIVE="$(native_path "$WORK")" || exit 1
 trap 'rm -rf "$WORK"' EXIT
 . "$REPO/bench/lib/mutation.sh"
 . "$REPO/bench/lib/lower_oracle.sh"
@@ -27,14 +36,14 @@ awk '{print} END {
 }' "$REPO/bench/fixtures/lowens_prelude/prelude.iyi" > "$WORK/prelude/prelude.iyi"
 
 build_port() {
-  "$IYI" build -o "$WORK/port" "$REPO/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/port.log" 2>&1
+  "$IYI" build -o "$WORK_NATIVE/port$EXE" "$REPO_NATIVE/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/port.log" 2>&1
 }
 
 # Fixture functions reference no globals. As in the core headed fixture, compare
 # the complete function body without the prelude-dependent signature attributes.
 extract_work() {
   awk '/^define / && index($0, "*work") { active = 1; next } active { print } active && /^}$/ { found = 1; exit } END { if (!found) exit 1 }' "$1" |
-    python3 -c '
+    "$PY" -c '
 import re, sys
 names = {}
 counts = {}
@@ -64,7 +73,11 @@ normalization_negative() {
 
 check_fixture() {
   local name="$1" expected_code actual_code
-  "$WORK/port" emit "$REPO/bench/fixtures/lowens_${name}.iyi" "$WORK/${name}.ll" > "$WORK/${name}.port.ir" 2> "$WORK/${name}.port.err" || return 1
+  if ! "$WORK/port$EXE" emit "$REPO_NATIVE/bench/fixtures/lowens_${name}.iyi" "$WORK_NATIVE/${name}.ll" > "$WORK/${name}.port.ir" 2> "$WORK/${name}.port.err"; then
+    echo "INVALID: $name did not emit IR"
+    cat "$WORK/${name}.port.err"
+    return 2
+  fi
   awk '/^define / && index($0, "*work") { found = 1; if (index($0, "personality")) exit 1 } END { if (!found) exit 1 }' "$WORK/${name}.port.ir" || return 1
   extract_work "$WORK/${name}.host.ir" "$WORK/${name}.host.work" || return 1
   extract_work "$WORK/${name}.port.ir" "$WORK/${name}.port.work" || return 1
@@ -72,8 +85,15 @@ check_fixture() {
     diff -u "$WORK/${name}.host.work" "$WORK/${name}.port.work" || true
     return 1
   fi
-  "$WORK/native" "$WORK/${name}.port.ir" -o "$WORK/${name}.native" > "$WORK/${name}.native.log" 2>&1 || return 1
-  timeout 30 "$WORK/${name}.host" > "$WORK/${name}.host.out" 2>&1
+  if ! "$WORK/native$EXE" "$WORK_NATIVE/${name}.port.ir" -o "$WORK_NATIVE/${name}.native" > "$WORK/${name}.native.log" 2>&1; then
+    echo "INVALID: $name native executable did not build"
+    cat "$WORK/${name}.native.log"
+    return 2
+  fi
+  if [ "$HOST_ID" != darwin-arm64 ]; then
+    return 0
+  fi
+  timeout 30 "$WORK/${name}$EXE" > "$WORK/${name}.host.out" 2>&1
   expected_code=$?
   timeout 30 "$WORK/${name}.native" > "$WORK/${name}.native.out" 2>&1
   actual_code=$?
@@ -81,30 +101,46 @@ check_fixture() {
 }
 
 mutation_check() {
-  build_port && check_fixture "$1"
+  if ! build_port; then
+    echo 'INVALID: mutated comparison driver did not build'
+    cat "$WORK/port.log"
+    return 2
+  fi
+  check_fixture "$1"
 }
 
 echo '== 1. Building comparison and native tools'
-if ! build_port || ! "$IYI" build -o "$WORK/bridge" "$REPO/src/compiler/tools/ir.iyi" > "$WORK/bridge.log" 2>&1 || ! "$IYI" build -o "$WORK/native" "$REPO/src/compiler/tools/compile_native.iyi" > "$WORK/native.log" 2>&1; then
+if ! build_port || ! "$IYI" build -o "$WORK_NATIVE/bridge$EXE" "$REPO_NATIVE/src/compiler/tools/ir.iyi" > "$WORK/bridge.log" 2>&1 || ! "$IYI" build -o "$WORK_NATIVE/native$EXE" "$REPO_NATIVE/src/compiler/tools/compile_native.iyi" > "$WORK/native.log" 2>&1; then
   echo '  FAIL: tool build failed'
   for log in "$WORK/port.log" "$WORK/bridge.log" "$WORK/native.log"; do
     [ ! -f "$log" ] || awk 'NR <= 12 { print }' "$log"
   done
   exit 1
 fi
+if [ "$HOST_ID" != darwin-arm64 ]; then
+  host_limited "lower ensure: running AArch64 Mach-O fixtures requires macOS arm64 ($HOST_ID compares IR and emits Mach-O)"
+fi
 
 echo '== 2. Hosted and port function bodies and native executions'
 passed=0
 failed_names=""
 for name in fallthrough value return break next block_break block_next boundary nested_loops around_yield nested nested_return invoke union block_union; do
-  if ! IYI_PATH="$WORK/prelude" "$IYI" build --prelude prelude --emit llvm-ir --no-debug -o "$WORK/${name}.host" "$REPO/bench/fixtures/lowens_${name}.iyi" > "$WORK/${name}.host.log" 2>&1; then
+  if ! IYI_PATH="$WORK_NATIVE/prelude" "$IYI" build --prelude prelude --emit llvm-ir --no-debug -o "$WORK_NATIVE/${name}$EXE" "$REPO_NATIVE/bench/fixtures/lowens_${name}.iyi" > "$WORK/${name}.host.log" 2>&1; then
     echo "  FAIL: $name hosted compilation"
     awk 'NR <= 8 { print }' "$WORK/${name}.host.log"
     failed_names="$failed_names $name"
     status=1
     continue
   fi
-  if ! "$WORK/bridge" drop-unwind "$WORK/${name}.ll" > "$WORK/${name}.host.ir" 2> "$WORK/${name}.bridge.log"; then
+  if [ "$HOST_ID" != darwin-arm64 ] &&
+     ! IYI_PATH="$WORK_NATIVE/prelude" "$IYI" build --cross-compile --target aarch64-apple-darwin --prelude prelude --emit llvm-ir --no-debug -o "$WORK_NATIVE/${name}.o" "$REPO_NATIVE/bench/fixtures/lowens_${name}.iyi" > "$WORK/${name}.cross.log" 2>&1; then
+    echo "  FAIL: $name Darwin-target hosted IR"
+    cat "$WORK/${name}.cross.log"
+    failed_names="$failed_names $name"
+    status=1
+    continue
+  fi
+  if ! "$WORK/bridge$EXE" drop-unwind "$WORK_NATIVE/${name}.ll" > "$WORK/${name}.host.ir" 2> "$WORK/${name}.bridge.log"; then
     echo "  FAIL: $name unwind legalization"
     awk 'NR <= 8 { print }' "$WORK/${name}.bridge.log"
     failed_names="$failed_names $name"
@@ -112,7 +148,11 @@ for name in fallthrough value return break next block_break block_next boundary 
     continue
   fi
   if check_fixture "$name"; then
-    echo "  $name: identical and native output/status match"
+    if [ "$HOST_ID" = darwin-arm64 ]; then
+      echo "  $name: identical and native output/status match"
+    else
+      echo "  $name: identical IR"
+    fi
     passed=$((passed + 1))
   else
     echo "  FAIL: $name differs or cannot run"

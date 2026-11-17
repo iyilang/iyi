@@ -42,23 +42,29 @@ set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO" || exit 1
+. "$REPO/bench/lib/host.sh" || exit 1
+require_test_host || exit 1
+REPO_NATIVE="$(native_path "$REPO")" || exit 1
 export PWD="$REPO"
-IYI="$REPO/bin/iyi"
-CRYSTAL="$REPO/bin/crystal"
+IYI="${IYI_COMPILER:-$REPO/bin/iyi}"
+CRYSTAL="${CRYSTAL:-$REPO/bin/crystal}"
 FLOOR_FILE="${SEMINL_FLOOR:-$REPO/bench/selfhost_semantic_inline_macros.floor}"
 RAISE="${SEMINL_RAISE:-0}"
 FILES_LIST="${SEMINL_FILES:-}"
 WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT INT TERM
+WORK_NATIVE="$(native_path "$WORK")" || exit 1
 LC_ALL=C
 export LC_ALL
-export IYI_CACHE_DIR="$WORK/cache"
-export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
-export LIBRARY_PATH="/opt/homebrew/opt/bdw-gc/lib:${LIBRARY_PATH:-}"
-export IYI_PATH="$REPO/src"
-trap 'rm -rf "$WORK"' EXIT INT TERM
+export IYI_CACHE_DIR="$WORK_NATIVE/cache"
+if [ "$HOST_OS" = darwin ]; then
+  export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+  export LIBRARY_PATH="/opt/homebrew/opt/bdw-gc/lib:${LIBRARY_PATH:-}"
+fi
+export IYI_PATH="$REPO_NATIVE/src"
 
-ORACLE="$WORK/oracle"
-PORT="$WORK/port"
+ORACLE="$WORK/oracle$EXE"
+PORT="$WORK/port$EXE"
 RESULTS="$WORK/results.tsv"
 REFUSALS="$WORK/refusals.tsv"
 VERDICTS="$WORK/verdicts.tsv"
@@ -87,10 +93,10 @@ agreeing() {
 }
 
 echo "== 1. Building the hosted declaration oracle and the port's driver"
-CRYSTAL_PATH="$REPO/src" "$CRYSTAL" build -Di_know_what_im_doing \
-  -o "$ORACLE" "$REPO/bench/selfhost_semantic_inline_macros_oracle.cr" > "$WORK/oracle_build.log" 2>&1 \
+CRYSTAL_PATH="$REPO_NATIVE/src" "$CRYSTAL" build -Di_know_what_im_doing \
+  -o "$WORK_NATIVE/oracle$EXE" "$REPO_NATIVE/bench/selfhost_semantic_inline_macros_oracle.cr" > "$WORK/oracle_build.log" 2>&1 \
   || { cat "$WORK/oracle_build.log"; echo "FAILED to build the oracle"; exit 1; }
-"$IYI" build -o "$PORT" "$REPO/bench/selfhost_semantic_inline_macros_exercise.iyi" > "$WORK/port_build.log" 2>&1 \
+"$IYI" build -o "$WORK_NATIVE/port$EXE" "$REPO_NATIVE/bench/selfhost_semantic_inline_macros_exercise.iyi" > "$WORK/port_build.log" 2>&1 \
   || { cat "$WORK/port_build.log"; echo "FAILED to build the port's driver"; exit 1; }
 echo "  built: oracle, port driver"
 
@@ -102,15 +108,15 @@ total_matched=0
 for fixture in "$REPO"/bench/fixtures/seminl_*.iyi; do
   rel="bench/fixtures/$(basename "$fixture")"
   fixture_count=$((fixture_count + 1))
-  if ! "$ORACLE" "$REPO/$rel" > "$WORK/fx_o.txt" 2> "$WORK/fx_oe.txt"; then
+  if ! "$ORACLE" "$REPO_NATIVE/$rel" > "$WORK/fx_o.txt" 2> "$WORK/fx_oe.txt"; then
     echo "  $rel: ORACLE REJECTS: $(head -n 1 "$WORK/fx_oe.txt")"
     fixture_bad=$((fixture_bad + 1)); status=1; continue
   fi
-  if ! "$PORT" "$REPO/$rel" > "$WORK/fx_p.txt" 2> "$WORK/fx_pe.txt"; then
+  if ! "$PORT" "$REPO_NATIVE/$rel" > "$WORK/fx_p.txt" 2> "$WORK/fx_pe.txt"; then
     echo "  $rel: PORT REJECTS: $(head -n 1 "$WORK/fx_pe.txt")"
     fixture_bad=$((fixture_bad + 1)); status=1; continue
   fi
-  if ! "$PORT" --ledger "$REPO/$rel" > "$WORK/fx_l.txt" 2> "$WORK/fx_le.txt"; then
+  if ! "$PORT" --ledger "$REPO_NATIVE/$rel" > "$WORK/fx_l.txt" 2> "$WORK/fx_le.txt"; then
     echo "  $rel: PORT LEDGER REJECTS: $(head -n 1 "$WORK/fx_le.txt")"
     fixture_bad=$((fixture_bad + 1)); status=1; continue
   fi
@@ -137,7 +143,7 @@ echo "  Parity summary: $((fixture_count - fixture_bad))/$fixture_count fixtures
 measure() {
   corpus="$1"
   rel="$2"
-  abs="$REPO/$2"
+  abs="$REPO_NATIVE/$2"
   sites=0; expanded=0; refused=0; not_reached=0
   if "$PORT" --sites "$abs" > "$WORK/s.txt" 2> "$WORK/s.err"; then
     sites=$(awk '$1 == "site" && ($2 == "top" || $2 == "class") { n++ } END { print n + 0 }' "$WORK/s.txt")
@@ -292,23 +298,64 @@ else
 fi
 
 check_inline_fixtures_diverge() {
-  # A failed build is an invalid mutation, not evidence the fixture caught it.
-  local probe="$WORK/mut_port"
-  if ! "$IYI" build -o "$probe" "$REPO/bench/selfhost_semantic_inline_macros_exercise.iyi" > "$WORK/mut_build.log" 2>&1; then
+  local probe="$WORK/mut_port$EXE" fixture rel rc refused baseline_refused died=0
+  if ! "$IYI" build -o "$WORK_NATIVE/mut_port$EXE" "$REPO_NATIVE/bench/selfhost_semantic_inline_macros_exercise.iyi" > "$WORK/mut_build.log" 2>&1; then
     local saved
-    saved=$(mktemp "${SEMINL_ARTIFACT_DIR:-$WORK}/invalid-inline-build.XXXXXX")
-    cp "$WORK/mut_build.log" "$saved"
-    echo "INVALID MUTATION: driver build failed; compiler output: $saved"
+    saved=$(mktemp "${SEMINL_ARTIFACT_DIR:-$WORK}/invalid-inline-build.XXXXXX") || saved=""
+    if [ -n "$saved" ]; then cp "$WORK/mut_build.log" "$saved"; fi
+    echo "INVALID MUTATION: inline driver build failed${saved:+; compiler output: $saved}"
     cat "$WORK/mut_build.log"
-    return 0
+    return 2
   fi
   for fixture in "$REPO"/bench/fixtures/seminl_*.iyi; do
     rel="bench/fixtures/$(basename "$fixture")"
-    "$ORACLE" "$REPO/$rel" > "$WORK/mut_o.txt" 2>/dev/null || return 1
-    "$probe" "$REPO/$rel" > "$WORK/mut_p.txt" 2>/dev/null || return 1
-    cmp -s "$WORK/mut_o.txt" "$WORK/mut_p.txt" || return 1
-    "$probe" --ledger "$REPO/$rel" 2>/dev/null | awk '$1 == "refused_total" && $2 != 0 { bad = 1 } END { exit bad }' || return 1
+    if ! "$ORACLE" "$REPO_NATIVE/$rel" > "$WORK/mut_o.txt" 2>"$WORK/mut_o.err" ||
+       ! "$PORT" "$REPO_NATIVE/$rel" > "$WORK/base_p.txt" 2>"$WORK/base_p.err" ||
+       ! cmp -s "$WORK/mut_o.txt" "$WORK/base_p.txt"; then
+      echo "INVALID MUTATION: unmutated driver does not agree with the oracle for $rel"
+      cat "$WORK/mut_o.err" "$WORK/base_p.err"
+      return 2
+    fi
+    if ! "$PORT" --ledger "$REPO_NATIVE/$rel" > "$WORK/base_l.txt" 2>"$WORK/base_l.err"; then
+      echo "INVALID MUTATION: baseline ledger failed for $rel"
+      cat "$WORK/base_l.err"
+      return 2
+    fi
+    baseline_refused=$(awk '$1 == "refused_total" { count++; value=$2 } END { if (count == 1) print value }' "$WORK/base_l.txt")
+    if [ "$baseline_refused" != 0 ]; then
+      echo "INVALID MUTATION: baseline ledger does not report zero refusals for $rel"
+      return 2
+    fi
+    rc=0
+    "$probe" "$REPO_NATIVE/$rel" > "$WORK/mut_p.txt" 2>"$WORK/mut_p.err" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      if [ "$#" -eq 2 ] && expected_refusal "$rc" "$WORK/mut_p.err" "$1" "$2"; then
+        echo "decisive: $rel: expected refusal after baseline oracle agreement: $(refusal_note "$rc" "$WORK/mut_p.err")"
+        return 1
+      fi
+      echo "INVALID OBSERVATION: inline driver exited $rc for $rel"
+      cat "$WORK/mut_p.err"
+      died=1
+      continue
+    fi
+    if ! cmp -s "$WORK/mut_o.txt" "$WORK/mut_p.txt"; then
+      echo "decisive: $rel: declarations differ from the oracle"
+      return 1
+    fi
+    if ! "$probe" --ledger "$REPO_NATIVE/$rel" > "$WORK/mut_l.txt" 2>"$WORK/mut_l.err"; then
+      echo "INVALID OBSERVATION: inline ledger failed for $rel"
+      cat "$WORK/mut_l.err"
+      died=1
+      continue
+    fi
+    refused=$(awk '$1 == "refused_total" { count++; value=$2 } END { if (count == 1) print value }' "$WORK/mut_l.txt")
+    case "$refused" in
+      ""|*[!0-9]*) echo "INVALID OBSERVATION: malformed refusal count for $rel"; died=1; continue ;;
+      0) ;;
+      *) echo "decisive: $rel: the mutant refused $refused inline site(s)"; return 1 ;;
+    esac
   done
+  if [ "$died" -eq 1 ]; then return 2; fi
   return 0
 }
 
@@ -351,54 +398,106 @@ MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 prove_mutation "a site inside a lib body is parsed as an ordinary body" "$MUT_INL" \
   "parsed = in_lib ? parser.parse_lib_body : parser.parse" \
   "parsed = parser.parse" \
-  -- check_inline_fixtures_diverge || status=1
+  -- check_inline_fixtures_diverge src/compiler/syntax/parser.iyi \
+  "^Syntax error in .*seminl_lib\\.iyi:[0-9]+:[0-9]+: expecting keyword 'end', not 'EOF'$" || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
 echo
 echo "== 8. Pipeline reach: each root through the pipeline tool with the prelude, against bench/selfhost_inline_reach.floor"
 REACH_FLOOR="$REPO/bench/selfhost_inline_reach.floor"
 MUT_PROG="$REPO/src/compiler/lower/program.iyi"
-PLATFORM="$(uname -s -m)"
-COMPARE_REACH=0
-if [ "$PLATFORM" = "Darwin arm64" ]; then
-  COMPARE_REACH=1
-else
-  echo "  reach floors are measured on Darwin arm64: not compared on $PLATFORM"
-fi
+# Both reports use the compiler's existing aarch64-darwin target on every
+# host. IR emission runs the same typing and lowering without executing Mach-O.
+run_typed_report() {
+  local tool="$1" root="$2" kind="$3" tag="$4"
+  local log="$WORK/${kind}_${tag}.log" output="$WORK/${kind}_${tag}.ir" rc=0 failure=""
+  rm -f "$output"
+  "$tool" "$REPO_NATIVE/$root" -o "$WORK_NATIVE/${kind}_${tag}.ir" \
+    --pipeline typed --prelude --probe-phase --keep-going --emit ir > "$log" 2>&1 || rc=$?
+  if ! grep -Fxq '[phase] bodies: pass' "$log" || ! grep -Fxq '[phase] lower: start' "$log"; then
+    echo "INVALID: $kind report did not finish body typing for $root (status $rc)"
+    cat "$log"
+    return 2
+  fi
+  if [ "$rc" -eq 0 ]; then
+    if [ ! -s "$output" ] || ! grep -Fxq '[phase] verify: pass' "$log"; then
+      echo "INVALID: $kind report did not produce verified IR for $root"
+      cat "$log"
+      return 2
+    fi
+  elif [ "$rc" -eq 1 ]; then
+    if grep -Fxq 'reached: bodies' "$log"; then
+      failure=$(awk '/^lower: fail: / { print; exit }' "$log")
+    elif grep -Fxq 'reached: lower' "$log"; then
+      failure=$(awk '/^verify: fail: / { print; exit }' "$log")
+    fi
+    if [ -z "$failure" ]; then
+      echo "INVALID: $kind report exited without a named lowering or verifier refusal for $root"
+      cat "$log"
+      return 2
+    fi
+    if [ "${_PM_ARMED:-0}" = 1 ] &&
+       { [ ! -f "$WORK/base_${kind}_${tag}.failure" ] ||
+         [ "$failure" != "$(cat "$WORK/base_${kind}_${tag}.failure")" ]; }; then
+      echo "INVALID MUTATION: $kind report changed its baseline compiler refusal for $root"
+      cat "$log"
+      return 2
+    fi
+  else
+    echo "INVALID: $kind report exited $rc for $root"
+    cat "$log"
+    return 2
+  fi
+  if [ "${_PM_ARMED:-0}" != 1 ]; then
+    printf '%s' "$failure" > "$WORK/base_${kind}_${tag}.failure"
+  fi
+}
 
-# Prints "<defs-reached> <no-record rows>" for the root $1 (repo-relative), run by the pipeline tool $2, output tagged $3.
+# Prints "<defs-reached> <no-record rows>" for a repo-relative root and tool.
 reach_of() {
-  local root="$1" tool="$2" tag="$3" log="$WORK/reach_$3.log"
-  (cd "$REPO" && IYI_PATH="$REPO/src" "$tool" "$root" -o "$WORK/reach_exe_$tag" --pipeline typed --prelude --probe-phase --keep-going > "$log" 2>&1)
-  awk '
-    /^table: .* defs-reached=/ { sub(/.*defs-reached=/, ""); reach = $1 }
-    /no record from the declarations pass/ { missing++ }
-    END { print (reach == "" ? 0 : reach), missing + 0 }' "$log"
+  local root="$1" tool="$2" tag="$3" log="$WORK/reach_$3.log" reach missing
+  run_typed_report "$tool" "$root" reach "$tag" || return $?
+  reach=$(awk '/^table: .* defs-reached=/ { sub(/.*defs-reached=/, ""); print $1; exit }' "$log")
+  case "$reach" in
+    ""|*[!0-9]*) echo "INVALID: missing defs-reached for $root"; cat "$log"; return 2 ;;
+  esac
+  missing=$(awk '/no record from the declarations pass/ { n++ } END { print n + 0 }' "$log")
+  printf '%s %s\n' "$reach" "$missing"
 }
 
 # Checks each floor row (or only the root $2) against the pipeline tool $1. A root below its floor or with a fun that has
 # no record fails. A floor below the measured count fails too, unless SEMINL_RAISE=1 writes the count up (never down).
 check_reach() {
-  local tool="$1" only="${2:-}" fail=0 root floor reach missing tag
+  local tool="$1" only="${2:-}" fail=0 root floor reach missing tag values row_ok
   while read -r root floor; do
     case "$root" in ""|\#*) continue ;; esac
     if [ -n "$only" ] && [ "$root" != "$only" ]; then continue; fi
     tag=$(basename "$root" .iyi)
-    set -- $(reach_of "$root" "$tool" "$tag")
+    if [ "${_PM_ARMED:-0}" = 1 ] && [ ! -f "$WORK/base_reach_${tag}.ok" ]; then
+      echo "INVALID MUTATION: no passing reach baseline for $root"
+      return 2
+    fi
+    values="$(reach_of "$root" "$tool" "$tag")" || { echo "$values"; return 2; }
+    set -- $values
     reach=$1
     missing=$2
     echo "  $root: defs-reached $reach (floor $floor), no-record rows $missing"
-    if [ "$COMPARE_REACH" -eq 0 ]; then continue; fi
+    row_ok=1
     if [ "$missing" -ne 0 ] || [ "$reach" -lt "$floor" ]; then
-      echo "  BELOW FLOOR: $root. A regression: restore the declaration or lower nothing."
+      echo "decisive: $root is below its reach floor or has missing declaration records"
+      row_ok=0
       fail=1
     elif [ "$reach" -gt "$floor" ]; then
       if [ "$RAISE" = 1 ]; then
         awk -v r="$root" -v n="$reach" '$1 == r { $2 = n } { print }' "$REACH_FLOOR" > "$WORK/reach.floor.tmp" && mv "$WORK/reach.floor.tmp" "$REACH_FLOOR"
       else
-        echo "  RAISE THE FLOOR: $root reaches $reach, floor $floor (SEMINL_RAISE=1)."
+        echo "decisive: $root reaches $reach, floor $floor (SEMINL_RAISE=1)"
+        row_ok=0
         fail=1
       fi
+    fi
+    if [ "${_PM_ARMED:-0}" != 1 ] && [ "$row_ok" -eq 1 ]; then
+      : > "$WORK/base_reach_${tag}.ok"
     fi
   done < "$REACH_FLOOR"
   return "$fail"
@@ -406,27 +505,27 @@ check_reach() {
 
 # The check the reach mutations must fail: the reach fixture's root through a pipeline tool built from the tree as it is.
 check_reach_fixture() {
-  local RAISE=0 probe="$WORK/mut_reach_tool"
-  if ! "$IYI" build -o "$probe" "$REPO/src/compiler/tools/compile_native.iyi" > "$WORK/mut_reach_build.log" 2>&1; then
+  local RAISE=0 probe="$WORK/mut_reach_tool$EXE"
+  if ! "$IYI" build -o "$WORK_NATIVE/mut_reach_tool$EXE" "$REPO_NATIVE/src/compiler/tools/compile_native.iyi" > "$WORK/mut_reach_build.log" 2>&1; then
     local saved
-    saved=$(mktemp "${SEMINL_ARTIFACT_DIR:-$WORK}/invalid-reach-build.XXXXXX")
-    cp "$WORK/mut_reach_build.log" "$saved"
-    echo "INVALID MUTATION: reach tool build failed; compiler output: $saved"
+    saved=$(mktemp "${SEMINL_ARTIFACT_DIR:-$WORK}/invalid-reach-build.XXXXXX") || saved=""
+    if [ -n "$saved" ]; then cp "$WORK/mut_reach_build.log" "$saved"; fi
+    echo "INVALID MUTATION: reach tool build failed${saved:+; compiler output: $saved}"
     cat "$WORK/mut_reach_build.log"
-    return 0
+    return 2
   fi
-  check_reach "$probe" bench/fixtures/seminl_reach/root.iyi > "$WORK/mut_reach.txt" 2>&1
+  check_reach "$probe" bench/fixtures/seminl_reach/root.iyi
 }
 
 echo "  building the pipeline tool"
-if "$IYI" build -o "$WORK/reach_tool" "$REPO/src/compiler/tools/compile_native.iyi" > "$WORK/reach_build.log" 2>&1; then
-  check_reach "$WORK/reach_tool" || status=1
+if "$IYI" build -o "$WORK_NATIVE/reach_tool$EXE" "$REPO_NATIVE/src/compiler/tools/compile_native.iyi" > "$WORK/reach_build.log" 2>&1; then
+  check_reach "$WORK/reach_tool$EXE" || status=1
 else
   echo "FAILED to build the pipeline tool"
+  cat "$WORK/reach_build.log"
   status=1
 fi
 
-if [ "$COMPARE_REACH" -eq 1 ]; then
 prove_mutation "the fixture's required file is parsed again instead of read from the pipeline's own tree" "$MUT_SEM" \
   "nodes = @program.unit_tree_or_parse(file)" \
   "nodes = Parser.new(File.read(file), file).parse" \
@@ -444,7 +543,6 @@ prove_mutation "a require looks up the pipeline's tree under a key that is never
   "if tree = @unit_trees[file + \"~\"]?" \
   -- check_reach_fixture || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
-fi
 
 # 9. Single-macro-node bodies: a class, module or lib body that is one macro node is spliced, so the typer never refuses its
 # macro node. Each fixture's top-level refusal count (root-refusals) stays at or below its ceiling in
@@ -456,39 +554,83 @@ MUT_MAIN="$REPO/src/compiler/semantic/main_visitor.iyi"
 MUT_TYPE="$REPO/src/compiler/semantic/type_nodes.iyi"
 
 check_refusals() {
-  local tool="$1" fail=0 root ceiling tag log refusals
+  local tool="$1" fail=0 invalid=0 report_rc root ceiling tag log refusals row_ok
   while read -r root ceiling; do
     case "$root" in ""|\#*) continue ;; esac
     tag=$(basename "$root" .iyi)
-    log="$WORK/refusals_$tag.log"
-    (cd "$REPO" && IYI_PATH="$REPO/src" "$tool" "$root" -o "$WORK/refusals_exe_$tag" --pipeline typed --prelude --probe-phase --keep-going > "$log" 2>&1)
-    refusals=$(awk '/^table: .* root-refusals=/ { sub(/.*root-refusals=/, ""); print $1 }' "$log")
-    echo "  $root: root-refusals ${refusals:-none} (ceiling $ceiling)"
-    if [ "$COMPARE_REACH" -eq 0 ]; then continue; fi
-    if [ -z "$refusals" ] || [ "$refusals" -gt "$ceiling" ]; then
-      echo "  ABOVE CEILING: $root. A single macro node body is refused again: restore its splice."
+    if [ "${_PM_ARMED:-0}" = 1 ] && [ ! -f "$WORK/base_refusals_${tag}.ok" ]; then
+      echo "INVALID MUTATION: no passing refusal baseline for $root"
+      return 2
+    fi
+    report_rc=0
+    run_typed_report "$tool" "$root" refusals "$tag" || report_rc=$?
+    if [ "$report_rc" -ne 0 ]; then
+      if [ "${_PM_ARMED:-0}" = 1 ]; then invalid=1; continue; fi
+      return 2
+    fi
+    log="$WORK/refusals_${tag}.log"
+    refusals=$(awk '/^table: .* root-refusals=/ { sub(/.*root-refusals=/, ""); print $1; exit }' "$log")
+    case "$refusals" in
+      ""|*[!0-9]*) echo "INVALID: missing root-refusals for $root"; cat "$log"; return 2 ;;
+    esac
+    echo "  $root: root-refusals $refusals (ceiling $ceiling)"
+    row_ok=1
+    if [ "$refusals" -gt "$ceiling" ]; then
+      echo "decisive: $root exceeds its root-refusals ceiling"
+      row_ok=0
       fail=1
     elif [ "$refusals" -lt "$ceiling" ]; then
       if [ "$RAISE" = 1 ]; then
         awk -v r="$root" -v n="$refusals" '$1 == r { $2 = n } { print }' "$REFUSAL_FLOOR" > "$WORK/refusal.floor.tmp" && mv "$WORK/refusal.floor.tmp" "$REFUSAL_FLOOR"
       else
-        echo "  LOWER THE CEILING: $root refuses $refusals, ceiling $ceiling (SEMINL_RAISE=1)."
+        echo "decisive: $root refuses $refusals, ceiling $ceiling (SEMINL_RAISE=1)"
+        row_ok=0
         fail=1
       fi
     fi
+    if [ "${_PM_ARMED:-0}" = 1 ] && [ "$row_ok" -eq 0 ]; then
+      return 1
+    fi
+    if [ "${_PM_ARMED:-0}" != 1 ] && [ "$row_ok" -eq 1 ]; then
+      : > "$WORK/base_refusals_${tag}.ok"
+    fi
   done < "$REFUSAL_FLOOR"
+  if [ "$invalid" -eq 1 ]; then return 2; fi
   return "$fail"
 }
 
 check_body_lowering() {
-  local tool="$1" output="$WORK/body_lower"
-  rm -f "$output"
-  "$tool" "$REPO/bench/fixtures/seminl_reach/body_lower_if.iyi" -o "$output" --pipeline typed --probe-phase > "$WORK/body_lower.log" 2>&1 || return 1
-  [ -x "$output" ] && "$output" > "$WORK/body_lower.out" 2>&1
+  local tool="$1" output="$WORK/body_lower$EXE" rc=0
+  rm -f "$WORK/body_lower.ir" "$output"
+  "$tool" "$REPO_NATIVE/bench/fixtures/seminl_reach/body_lower_if.iyi" \
+    -o "$WORK_NATIVE/body_lower.ir" --pipeline typed --probe-phase --emit ir > "$WORK/body_lower.log" 2>&1 || rc=$?
+  if [ "$rc" -ne 0 ] || [ ! -s "$WORK/body_lower.ir" ] ||
+     ! grep -Fxq '[phase] verify: pass' "$WORK/body_lower.log"; then
+    echo "INVALID: single macro body did not produce verified IR (status $rc)"
+    cat "$WORK/body_lower.log"
+    return 2
+  fi
+  if [ "$HOST_ID" = darwin-arm64 ]; then
+    rc=0
+    "$tool" "$REPO_NATIVE/bench/fixtures/seminl_reach/body_lower_if.iyi" \
+      -o "$WORK_NATIVE/body_lower$EXE" --pipeline typed --probe-phase > "$WORK/body_lower_native.log" 2>&1 || rc=$?
+    if [ "$rc" -ne 0 ] || [ ! -x "$output" ]; then
+      echo "INVALID: single macro body native build failed (status $rc)"
+      cat "$WORK/body_lower_native.log"
+      return 2
+    fi
+    "$output" > "$WORK/body_lower.out" 2>&1 || {
+      echo "INVALID: single macro body execution failed"
+      cat "$WORK/body_lower.out"
+      return 2
+    }
+  else
+    host_limited "inline macros: single-body native linking and execution require Darwin arm64"
+  fi
 }
 
 check_macro_mixed_temps() {
-  local tool="$1" src="$WORK/mixed_macro_temps.iyi" exe="$WORK/mixed_macro_temps" hosted="$WORK/mixed_macro_temps.hosted"
+  local tool="$1" src="$WORK/mixed_macro_temps.iyi" exe="$WORK/mixed_macro_temps$EXE" hosted="$WORK/mixed_macro_temps.hosted$EXE" rc=0 tstat hstat
   cat <<'IYI' > "$src"
 lib LibC
   fun putchar(value : Int32) : Int32
@@ -534,37 +676,52 @@ if count == 1 && count < 2
 end
 LibC.exit(with_macro_defer)
 IYI
-  "$tool" "$src" -o "$exe" --pipeline typed --probe-phase > "$WORK/mixed_macro_temps.probe" 2>&1 || { cat "$WORK/mixed_macro_temps.probe"; return 1; }
-  "$IYI" build --prelude empty -o "$hosted" "$src" > "$WORK/mixed_macro_temps.hosted.log" 2>&1 || { cat "$WORK/mixed_macro_temps.hosted.log"; return 1; }
-  "$exe" > "$WORK/mixed_macro_temps.typed.out" 2>&1; tstat=$?
+  "$tool" "$WORK_NATIVE/mixed_macro_temps.iyi" -o "$WORK_NATIVE/mixed_macro_temps.ir" \
+    --pipeline typed --probe-phase --emit ir > "$WORK/mixed_macro_temps.probe" 2>&1 || rc=$?
+  if [ "$rc" -ne 0 ] || [ ! -s "$WORK/mixed_macro_temps.ir" ] ||
+     ! grep -Fxq '[phase] verify: pass' "$WORK/mixed_macro_temps.probe"; then
+    cat "$WORK/mixed_macro_temps.probe"
+    return 1
+  fi
+  "$IYI" build --prelude empty -o "$WORK_NATIVE/mixed_macro_temps.hosted$EXE" "$WORK_NATIVE/mixed_macro_temps.iyi" > "$WORK/mixed_macro_temps.hosted.log" 2>&1 || { cat "$WORK/mixed_macro_temps.hosted.log"; return 1; }
   "$hosted" > "$WORK/mixed_macro_temps.hosted.out" 2>&1; hstat=$?
-  [ "$tstat" = "$hstat" ] && [ "$tstat" = "7" ] && cmp -s "$WORK/mixed_macro_temps.typed.out" "$WORK/mixed_macro_temps.hosted.out" && [ "$(cat "$WORK/mixed_macro_temps.typed.out")" = "ACDB" ]
+  if [ "$hstat" != 7 ] || [ "$(cat "$WORK/mixed_macro_temps.hosted.out")" != ACDB ]; then
+    cat "$WORK/mixed_macro_temps.hosted.out"
+    return 1
+  fi
+  if [ "$HOST_ID" = darwin-arm64 ]; then
+    "$tool" "$WORK_NATIVE/mixed_macro_temps.iyi" -o "$WORK_NATIVE/mixed_macro_temps$EXE" \
+      --pipeline typed --probe-phase > "$WORK/mixed_macro_temps.native.log" 2>&1 || { cat "$WORK/mixed_macro_temps.native.log"; return 1; }
+    "$exe" > "$WORK/mixed_macro_temps.typed.out" 2>&1; tstat=$?
+    [ "$tstat" = "$hstat" ] && cmp -s "$WORK/mixed_macro_temps.typed.out" "$WORK/mixed_macro_temps.hosted.out"
+  else
+    host_limited "inline macros: mixed-temp native linking and execution require Darwin arm64"
+  fi
 }
 
 # The check the single-node mutations must fail: the refusal ceilings through a pipeline tool built from the tree as it is.
 check_body_fixture() {
-  local RAISE=0 probe="$WORK/mut_body_tool"
-  if ! "$IYI" build -o "$probe" "$REPO/src/compiler/tools/compile_native.iyi" > "$WORK/mut_body_build.log" 2>&1; then
+  local RAISE=0 probe="$WORK/mut_body_tool$EXE"
+  if ! "$IYI" build -o "$WORK_NATIVE/mut_body_tool$EXE" "$REPO_NATIVE/src/compiler/tools/compile_native.iyi" > "$WORK/mut_body_build.log" 2>&1; then
     local saved
-    saved=$(mktemp "${SEMINL_ARTIFACT_DIR:-$WORK}/invalid-body-build.XXXXXX")
-    cp "$WORK/mut_body_build.log" "$saved"
-    echo "INVALID MUTATION: body tool build failed; compiler output: $saved"
+    saved=$(mktemp "${SEMINL_ARTIFACT_DIR:-$WORK}/invalid-body-build.XXXXXX") || saved=""
+    if [ -n "$saved" ]; then cp "$WORK/mut_body_build.log" "$saved"; fi
+    echo "INVALID MUTATION: body tool build failed${saved:+; compiler output: $saved}"
     cat "$WORK/mut_body_build.log"
-    return 0
+    return 2
   fi
-  check_refusals "$probe" > "$WORK/mut_body.txt" 2>&1 || return 1
+  check_refusals "$probe" || return $?
   check_body_lowering "$probe"
 }
 
-if [ -x "$WORK/reach_tool" ]; then
-  check_refusals "$WORK/reach_tool" || status=1
-  check_body_lowering "$WORK/reach_tool" || { echo "  FAIL: single macro body did not lower and run"; status=1; }
-  check_macro_mixed_temps "$WORK/reach_tool" || { echo "  FAIL: macro mixed-temp and prelude regression failed"; status=1; }
+if [ -x "$WORK/reach_tool$EXE" ]; then
+  check_refusals "$WORK/reach_tool$EXE" || status=1
+  check_body_lowering "$WORK/reach_tool$EXE" || { echo "  FAIL: single macro body did not lower and run"; status=1; }
+  check_macro_mixed_temps "$WORK/reach_tool$EXE" || { echo "  FAIL: macro mixed-temp and prelude regression failed"; status=1; }
 else
   status=1
 fi
 
-if [ "$COMPARE_REACH" -eq 1 ]; then
 prove_mutation "a single macro node body is left unspliced and cannot be lowered" "$MUT_INL" \
   "return body unless body.is_a?(MacroIf) || body.is_a?(MacroFor) || body.is_a?(MacroExpression)" \
   "return body" -- check_body_fixture || status=1
@@ -598,7 +755,6 @@ prove_mutation "a recursive splice drops names an earlier expansion declared, so
   "out.concat(splice_inline_sites(inner, scope_name, filename, in_lib, normalizer, locals, bindings, facts, keep_empty))" \
   "out.concat(splice_inline_sites(inner, scope_name, filename, in_lib, normalizer, locals.dup, bindings, facts, keep_empty))" -- check_body_fixture || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
-fi
 
 echo "  $MUTATIONS_RUN mutation proofs run"
 

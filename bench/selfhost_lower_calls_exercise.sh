@@ -24,10 +24,15 @@
 set -u
 status=0
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO/bench/lib/host.sh" || exit 1
+require_test_host || exit 1
+REPO_NATIVE="$(native_path "$REPO")" || exit 1
+export IYI_PATH="$REPO_NATIVE/src"
 IYI="${IYI_COMPILER:-$REPO/bin/iyi}"
 . "$REPO/bench/lib/mutation.sh"
 . "$REPO/bench/lib/lower_oracle.sh"
 WORK="$(mktemp -d)"
+WORK_NATIVE="$(native_path "$WORK")" || exit 1
 
 normalize_switches() {
   awk '
@@ -102,13 +107,13 @@ waiting_reason() {
 trap 'rm -rf "$WORK"' EXIT
 
 echo "== 1. Building the port driver"
-if ! "$IYI" build -o "$WORK/port" "$REPO/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/port.build.log" 2>&1; then
+if ! "$IYI" build -o "$WORK_NATIVE/port$EXE" "$REPO_NATIVE/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/port.build.log" 2>&1; then
   echo "the port driver failed to build:"
   awk '!/^ld: warning/ && NR<=20' "$WORK/port.build.log"
   exit 1
 fi
 echo "  driver built"
-if ! "$WORK/port" triple; then
+if ! "$WORK/port$EXE" triple; then
   echo "  FAIL: target triple frame-pointer classification"
   status=1
 fi
@@ -121,7 +126,13 @@ e2e=""
 diverged=0
 for fixture in "$REPO"/bench/fixtures/lowcall_*.iyi "$REPO"/bench/fixtures/lowdecl_*.iyi; do
   name="$(basename "$fixture" .iyi)"
-  if ! "$IYI" build --prelude empty --emit llvm-ir --no-debug -o "$WORK/$name" "$fixture" > "$WORK/$name.oracle.log" 2>&1 || [ ! -s "$WORK/$name.ll" ]; then
+  oracle_target=()
+  oracle_output="$WORK_NATIVE/$name$EXE"
+  if [ "$HOST_ID" != darwin-arm64 ]; then
+    oracle_target=(--cross-compile --target aarch64-apple-darwin)
+    oracle_output="$WORK_NATIVE/$name.o"
+  fi
+  if ! "$IYI" build "${oracle_target[@]}" --prelude empty --emit llvm-ir --no-debug -o "$oracle_output" "$(native_path "$fixture")" > "$WORK/$name.oracle.log" 2>&1 || [ ! -s "$WORK/$name.ll" ]; then
     echo "  $name: the hosted compiler did not emit its module (see $WORK/$name.oracle.log)"
     diverged=$((diverged + 1))
     continue
@@ -133,7 +144,7 @@ for fixture in "$REPO"/bench/fixtures/lowcall_*.iyi "$REPO"/bench/fixtures/lowde
     continue
   fi
 
-  if ! "$WORK/port" lower "$fixture" "$WORK/$name.oracle.ll" > "$WORK/$name.port.out" 2> "$WORK/$name.port.err"; then
+  if ! "$WORK/port$EXE" lower "$(native_path "$fixture")" "$WORK_NATIVE/$name.oracle.ll" > "$WORK/$name.port.out" 2> "$WORK/$name.port.err"; then
     reason="$(awk 'NR==1' "$WORK/$name.port.err")"
     expected="$(waiting_reason "$name")"
     if [ -n "$expected" ]; then
@@ -178,7 +189,7 @@ if [ "$diverged" -gt 0 ] || [ "$passed" -eq 0 ]; then
 fi
 
 printf '%s\n' 'import no_such_cycle_unit::{Missing}' > "$WORK/missing_import.iyi"
-if "$WORK/port" lower "$WORK/missing_import.iyi" "$WORK/lowcall_empty_body.oracle.ll" > "$WORK/missing_import.out" 2> "$WORK/missing_import.err" ||
+if "$WORK/port$EXE" lower "$WORK_NATIVE/missing_import.iyi" "$WORK_NATIVE/lowcall_empty_body.oracle.ll" > "$WORK/missing_import.out" 2> "$WORK/missing_import.err" ||
    ! grep -Fq "can't find module 'no_such_cycle_unit'" "$WORK/missing_import.err"; then
   echo "  FAIL: missing fixture import was not rejected by name"
   status=1
@@ -187,7 +198,7 @@ fi
 super_refusal_checks() {
   local driver="$1" fixture line rc
   fixture="$REPO/bench/fixtures/lowcallwait_super_missing.iyi"
-  if "$IYI" build --prelude empty --emit llvm-ir --no-debug -o "$WORK/super_missing" "$fixture" > "$WORK/super_missing.log" 2>&1; then
+  if "$IYI" build --prelude empty --emit llvm-ir --no-debug -o "$WORK_NATIVE/super_missing$EXE" "$(native_path "$fixture")" > "$WORK/super_missing.log" 2>&1; then
     echo "  super missing: hosted unexpectedly accepted"
     return 1
   fi
@@ -196,36 +207,40 @@ super_refusal_checks() {
     *"undefined method 'greet'"*) ;;
     *) echo "  super missing: unexpected hosted error: $line"; return 1 ;;
   esac
-  if "$driver" emit "$fixture" "$WORK/lowcall_super.oracle.ll" > "$WORK/super_missing.out" 2> "$WORK/super_missing.err"; then
+  if "$driver" emit "$(native_path "$fixture")" "$WORK_NATIVE/lowcall_super.oracle.ll" > "$WORK/super_missing.out" 2> "$WORK/super_missing.err"; then
     echo "  super missing: port unexpectedly accepted"
     return 1
   fi
   grep -Fq -- "$line" "$WORK/super_missing.err" || return 1
 
   fixture="$REPO/bench/fixtures/lowcallwait_super_forwarded_default.iyi"
-  "$IYI" build --prelude empty --emit llvm-ir --no-debug -o "$WORK/super_default" "$fixture" > "$WORK/super_default.log" 2>&1 || return 1
-  "$WORK/super_default" > "$WORK/super_default.run" 2>&1
+  "$IYI" build --prelude empty --emit llvm-ir --no-debug -o "$WORK_NATIVE/super_default$EXE" "$(native_path "$fixture")" > "$WORK/super_default.log" 2>&1 || return 1
+  "$WORK/super_default$EXE" > "$WORK/super_default.run" 2>&1
   rc=$?
   [ "$rc" -eq 3 ] || return 1
+  if [ "$HOST_ID" != darwin-arm64 ]; then
+    "$IYI" build --cross-compile --target aarch64-apple-darwin --prelude empty --emit llvm-ir --no-debug \
+      -o "$WORK_NATIVE/super_default.o" "$(native_path "$fixture")" > "$WORK/super_default.cross.log" 2>&1 || { cat "$WORK/super_default.cross.log"; return 2; }
+  fi
   awk "$CALL_TYPES" "$WORK/super_default.ll" | normalize_switches > "$WORK/super_default.oracle.ll" || return 1
-  "$driver" lower "$fixture" "$WORK/super_default.oracle.ll" > "$WORK/super_default.out" 2> "$WORK/super_default.err" || return 1
+  "$driver" lower "$(native_path "$fixture")" "$WORK_NATIVE/super_default.oracle.ll" > "$WORK/super_default.out" 2> "$WORK/super_default.err" || return 1
   awk '/^SUMMARY identical=[0-9]+ total=[0-9]+ module=[01]$/ { split($2,a,"="); split($3,b,"="); split($4,c,"="); if (a[2] != b[2] || b[2] == 0 || c[2] != 1) bad=1; n++ } END { exit (bad || n == 0) }' "$WORK/super_default.out" || return 1
 
   fixture="$REPO/bench/fixtures/lowcallwait_previous_def_refused.iyi"
-  if "$driver" emit "$fixture" "$WORK/lowcall_super.oracle.ll" > "$WORK/previous_def.out" 2> "$WORK/previous_def.err"; then
+  if "$driver" emit "$(native_path "$fixture")" "$WORK_NATIVE/lowcall_super.oracle.ll" > "$WORK/previous_def.out" 2> "$WORK/previous_def.err"; then
     echo "  previous_def: port unexpectedly accepted"
     return 1
   fi
   grep -Fq "previous_def" "$WORK/previous_def.err" || return 1
 
   fixture="$REPO/bench/fixtures/lowcallwait_super_argument_dispatch.iyi"
-  if "$driver" emit "$fixture" "$WORK/lowcall_super.oracle.ll" > "$WORK/super_args.out" 2> "$WORK/super_args.err"; then
+  if "$driver" emit "$(native_path "$fixture")" "$WORK_NATIVE/lowcall_super.oracle.ll" > "$WORK/super_args.out" 2> "$WORK/super_args.err"; then
     echo "  super argument dispatch: port unexpectedly accepted"
     return 1
   fi
   grep -Fq 'not ported: super with an argument dispatch (hosted codegen/call.cr:473-475)' "$WORK/super_args.err" || return 1
 }
-if ! super_refusal_checks "$WORK/port"; then
+if ! super_refusal_checks "$WORK/port$EXE"; then
   echo "  super refusal checks failed"
   status=1
 fi
@@ -241,7 +256,7 @@ intrinsic_refusal_checks() {
     "aggregate|the lib fun sadd binds the LLVM intrinsic llvm.sadd.with.overflow.i32 with the aggregate result"; do
     name="lowcallwait_intrinsic_${pair%%|*}"
     expected="${pair#*|}"
-    if "$driver" emit "$REPO/bench/fixtures/$name.iyi" "$WORK/lowcall_clib_intrinsics.oracle.ll" > "$WORK/$name.out" 2> "$WORK/$name.err"; then
+    if "$driver" emit "$REPO_NATIVE/bench/fixtures/$name.iyi" "$WORK_NATIVE/lowcall_clib_intrinsics.oracle.ll" > "$WORK/$name.out" 2> "$WORK/$name.err"; then
       echo "  $name: port unexpectedly accepted"
       return 1
     fi
@@ -251,7 +266,7 @@ intrinsic_refusal_checks() {
     fi
   done
 }
-if intrinsic_refusal_checks "$WORK/port"; then
+if intrinsic_refusal_checks "$WORK/port$EXE"; then
   echo "  LLVM intrinsic bindings: five malformed or unsupported bindings refused by name"
 else
   echo "  FAIL: LLVM intrinsic binding refusals"
@@ -262,9 +277,9 @@ fi
 # An uninstantiated generic receiver is a typing gap, not an owner that lowering
 # may guess. The hosted compiler still accepts the source and emits its module.
 generic_fixture="$REPO/bench/fixtures/lowcallwait_uninstantiated_generic.iyi"
-if "$IYI" build --prelude empty --emit llvm-ir --no-debug -o "$WORK/uninstantiated" "$generic_fixture" > "$WORK/uninstantiated.oracle.log" 2>&1; then
+if "$IYI" build --prelude empty --emit llvm-ir --no-debug -o "$WORK_NATIVE/uninstantiated$EXE" "$(native_path "$generic_fixture")" > "$WORK/uninstantiated.oracle.log" 2>&1; then
   awk "$CALL_TYPES" "$WORK/uninstantiated.ll" > "$WORK/uninstantiated.oracle.ll"
-  if "$WORK/port" lower "$generic_fixture" "$WORK/uninstantiated.oracle.ll" > "$WORK/uninstantiated.out" 2> "$WORK/uninstantiated.err"; then
+  if "$WORK/port$EXE" lower "$(native_path "$generic_fixture")" "$WORK_NATIVE/uninstantiated.oracle.ll" > "$WORK/uninstantiated.out" 2> "$WORK/uninstantiated.err"; then
     echo "  uninstantiated generic: unexpectedly lowered"
     status=1
   elif awk 'index($0, "the receiver of probe is the uninstantiated generic Range(B, E).class: typing has not instantiated the owner") { found = 1 } END { exit !found }' "$WORK/uninstantiated.err"; then
@@ -280,24 +295,29 @@ fi
 
 uncovered_check() {
   local driver="$1" fixture="$REPO/bench/fixtures/lowcallwait_dispatch_uncovered.iyi"
-  if "$driver" emit "$fixture" "$WORK/lowcall_super.oracle.ll" > "$WORK/uncovered.out" 2> "$WORK/uncovered.err"; then
+  "$driver" emit "$(native_path "$fixture")" "$WORK_NATIVE/lowcall_super.oracle.ll" > "$WORK/uncovered.out" 2> "$WORK/uncovered.err"
+  local result=$?
+  if [ "$result" -eq 0 ]; then
     echo "  uncovered union: port unexpectedly accepted"
     return 1
   fi
-  grep -Fq "expected argument #1 to 'consume'" "$WORK/uncovered.err"
+  if port_refusal "$result" "$WORK/uncovered.err" && grep -Fq "expected argument #1 to 'consume'" "$WORK/uncovered.err"; then return 0; fi
+  echo 'INVALID: uncovered union did not reach its named semantic refusal'
+  cat "$WORK/uncovered.err"
+  return 2
 }
-if "$IYI" build --prelude empty -o "$WORK/uncovered.hosted" "$REPO/bench/fixtures/lowcallwait_dispatch_uncovered.iyi" > "$WORK/uncovered.hosted.log" 2>&1; then
+if "$IYI" build --prelude empty -o "$WORK_NATIVE/uncovered.hosted$EXE" "$REPO_NATIVE/bench/fixtures/lowcallwait_dispatch_uncovered.iyi" > "$WORK/uncovered.hosted.log" 2>&1; then
   echo "  uncovered union: hosted compiler unexpectedly accepted"
   status=1
-elif ! grep -Fq "expected argument #1 to 'consume'" "$WORK/uncovered.hosted.log" || ! uncovered_check "$WORK/port"; then
+elif ! grep -Fq "expected argument #1 to 'consume'" "$WORK/uncovered.hosted.log" || ! uncovered_check "$WORK/port$EXE"; then
   echo "  uncovered union: expected argument diagnostic missing"
   status=1
 fi
 free_dispatch="$REPO/bench/fixtures/lowcallwait_dispatch_free_vars_block.iyi"
-if ! "$IYI" build --prelude empty -o "$WORK/free_dispatch.hosted" "$free_dispatch" > "$WORK/free_dispatch.hosted.log" 2>&1; then
+if ! "$IYI" build --prelude empty -o "$WORK_NATIVE/free_dispatch.hosted$EXE" "$(native_path "$free_dispatch")" > "$WORK/free_dispatch.hosted.log" 2>&1; then
   echo "  block-bound free-variable dispatch: hosted compiler unexpectedly refused"
   status=1
-elif "$WORK/port" emit "$free_dispatch" "$WORK/lowcall_super.oracle.ll" > "$WORK/free_dispatch.out" 2> "$WORK/free_dispatch.err"; then
+elif "$WORK/port$EXE" emit "$(native_path "$free_dispatch")" "$WORK_NATIVE/lowcall_super.oracle.ll" > "$WORK/free_dispatch.out" 2> "$WORK/free_dispatch.err"; then
   echo "  block-bound free-variable dispatch: port unexpectedly accepted"
   status=1
 elif ! grep -Fq 'not ported: a dispatch whose arms bind free variables from the block they share (hosted semantic/call.cr match_block_arg binds them per match from the merged block)' "$WORK/free_dispatch.err"; then
@@ -312,17 +332,24 @@ echo
 echo "== 3. End to end: each fixture the port lowers identically, built natively and run"
 e2e_pass=0
 e2e_fail=0
-if "$IYI" build -o "$WORK/compile_native" "$REPO/src/compiler/tools/compile_native.iyi" > "$WORK/tool.build.log" 2>&1; then
+if [ "$HOST_ID" != darwin-arm64 ]; then
+  host_limited "lower calls: AArch64 Mach-O signature and execution require macOS arm64; $HOST_ID compares and emits Darwin-target IR"
+fi
+if "$IYI" build -o "$WORK_NATIVE/compile_native$EXE" "$REPO_NATIVE/src/compiler/tools/compile_native.iyi" > "$WORK/tool.build.log" 2>&1; then
   for name in $e2e; do
-    fixture="$REPO/bench/fixtures/$name.iyi"
-    if ! "$WORK/port" emit "$fixture" "$WORK/$name.oracle.ll" > "$WORK/$name.port.ir" 2> "$WORK/$name.emit.err"; then
+    fixture="$REPO_NATIVE/bench/fixtures/$name.iyi"
+    if ! "$WORK/port$EXE" emit "$fixture" "$WORK_NATIVE/$name.oracle.ll" > "$WORK/$name.port.ir" 2> "$WORK/$name.emit.err"; then
       echo "  $name: the port writes no module: $(awk 'NR==1' "$WORK/$name.emit.err")"
       e2e_fail=$((e2e_fail + 1))
       continue
     fi
-    if ! "$WORK/compile_native" "$WORK/$name.port.ir" -o "$WORK/$name.native" > "$WORK/$name.native.log" 2>&1; then
+    if ! "$WORK/compile_native$EXE" "$WORK_NATIVE/$name.port.ir" -o "$WORK_NATIVE/$name.native" > "$WORK/$name.native.log" 2>&1; then
       echo "  $name: the native tool refuses the port's module: $(awk 'NR==1' "$WORK/$name.native.log")"
       e2e_fail=$((e2e_fail + 1))
+      continue
+    fi
+    if [ "$HOST_ID" != darwin-arm64 ]; then
+      echo "  $name: AArch64 Mach-O emitted; native execution is host-limited"
       continue
     fi
     if [ "$(uname -s)" = Darwin ] && ! codesign -v --strict "$WORK/$name.native"; then
@@ -331,7 +358,7 @@ if "$IYI" build -o "$WORK/compile_native" "$REPO/src/compiler/tools/compile_nati
       continue
     fi
     timeout 30 "$WORK/$name.native" > "$WORK/$name.native.out" 2>&1; ns=$?
-    timeout 30 "$WORK/$name" > "$WORK/$name.hosted.out" 2>&1; hs=$?
+    timeout 30 "$WORK/$name$EXE" > "$WORK/$name.hosted.out" 2>&1; hs=$?
     if [ "$name" = lowcall_super ] && [ "$hs" -ne 42 ]; then
       echo "  $name: hosted status $hs, expected 42"
       e2e_fail=$((e2e_fail + 1))
@@ -346,73 +373,62 @@ if "$IYI" build -o "$WORK/compile_native" "$REPO/src/compiler/tools/compile_nati
     fi
   done
 else
-  echo "  the native tool does not build (see $WORK/tool.build.log)"
+  echo "  the native tool does not build"
+  cat "$WORK/tool.build.log"
   e2e_fail=1
 fi
 echo "  end to end: $e2e_pass fixture(s) run to the hosted result, $e2e_fail failed"
-if [ "$e2e_fail" -gt 0 ] || [ "$e2e_pass" -eq 0 ]; then
+if [ "$e2e_fail" -gt 0 ] || { [ "$HOST_ID" = darwin-arm64 ] && [ "$e2e_pass" -eq 0 ]; }; then
   status=1
 fi
 # Array#map and its block-output type variable require the real prelude. This
 # fixture must not run through the empty-prelude IR comparison above.
-map_fixture="$REPO/bench/fixtures/lowcallrun_block_map_u.iyi"
-if ! "$IYI" build --no-debug -o "$WORK/block_map.hosted" "$map_fixture" > "$WORK/block_map.hosted.log" 2>&1 ||
-   ! IYI_PATH="$REPO/src" "$WORK/compile_native" "$map_fixture" -o "$WORK/block_map.native" --pipeline typed --prelude > "$WORK/block_map.native.log" 2>&1; then
-  echo "  block map: hosted or native source build failed"
-  status=1
-elif [ "$(uname -s)" = Darwin ] && { ! codesign -v --strict "$WORK/block_map.hosted" || ! codesign -v --strict "$WORK/block_map.native"; }; then
-  echo "  block map: signature verification failed"
-  status=1
-else
-  timeout 30 "$WORK/block_map.hosted" > "$WORK/block_map.hosted.out" 2>&1; hs=$?
-  timeout 30 "$WORK/block_map.native" > "$WORK/block_map.native.out" 2>&1; ns=$?
-  if [ "$hs" -ne 0 ] || [ "$ns" -ne "$hs" ] || ! cmp -s "$WORK/block_map.hosted.out" "$WORK/block_map.native.out" || [ "$(< "$WORK/block_map.native.out")" != "a-b" ]; then
-    echo "  block map: hosted and native output or exit status differs"
-    status=1
-  else
-    echo "  block map: real-prelude native matches hosted output a-b"
+real_fixture_check() {
+  local name="$1" fixture="$2" expected="$3" hs ns
+  if ! "$IYI" build --no-debug -o "$WORK_NATIVE/$name.hosted$EXE" "$fixture" > "$WORK/$name.hosted.log" 2>&1; then
+    echo "  $name: hosted build failed"
+    cat "$WORK/$name.hosted.log"
+    return 1
   fi
-fi
-# Cached typed blocks must keep both caller flow and storage through Array#each
-# and Array#map's scratch pre-typing.
-cached_flow_fixture="$REPO/bench/fixtures/lowcallrun_block_cached_flow.iyi"
-if ! "$IYI" build --no-debug -o "$WORK/cached_flow.hosted" "$cached_flow_fixture" > "$WORK/cached_flow.hosted.log" 2>&1 ||
-   ! IYI_PATH="$REPO/src" "$WORK/compile_native" "$cached_flow_fixture" -o "$WORK/cached_flow.native" --pipeline typed --prelude > "$WORK/cached_flow.native.log" 2>&1; then
-  echo "  cached block flow: hosted or native source build failed"
-  status=1
-elif [ "$(uname -s)" = Darwin ] && { ! codesign -v --strict "$WORK/cached_flow.hosted" || ! codesign -v --strict "$WORK/cached_flow.native"; }; then
-  echo "  cached block flow: signature verification failed"
-  status=1
-else
-  timeout 30 "$WORK/cached_flow.hosted" > "$WORK/cached_flow.hosted.out" 2>&1; hs=$?
-  timeout 30 "$WORK/cached_flow.native" > "$WORK/cached_flow.native.out" 2>&1; ns=$?
-  if [ "$hs" -ne 0 ] || [ "$ns" -ne "$hs" ] || ! cmp -s "$WORK/cached_flow.hosted.out" "$WORK/cached_flow.native.out" || [ "$(< "$WORK/cached_flow.native.out")" != "$(printf '7\n4')" ]; then
-    echo "  cached block flow: hosted and native output or exit status differs"
-    status=1
-  else
-    echo "  cached block flow: real-prelude native matches hosted output 7 then 4"
+  if ! "$WORK/compile_native$EXE" "$fixture" -o "$WORK_NATIVE/$name.ir" --pipeline typed --prelude --emit ir > "$WORK/$name.native.log" 2>&1; then
+    echo "  $name: typed IR emission failed"
+    cat "$WORK/$name.native.log"
+    return 1
   fi
-fi
-# A class value displays its instance name, including when reached through a
-# virtual metaclass (hosted macros/interpreter.cr:735-737).
-meta_name_fixture="$REPO/bench/fixtures/runtime_metaclass_name.iyi"
-if ! "$IYI" build --no-debug -o "$WORK/meta_name.hosted" "$meta_name_fixture" > "$WORK/meta_name.hosted.log" 2>&1 ||
-   ! IYI_PATH="$REPO/src" "$WORK/compile_native" "$meta_name_fixture" -o "$WORK/meta_name.native" --pipeline typed --prelude > "$WORK/meta_name.native.log" 2>&1; then
-  echo "  metaclass name: hosted or native build failed"
-  status=1
-elif [ "$(uname -s)" = Darwin ] && { ! codesign -v --strict "$WORK/meta_name.hosted" || ! codesign -v --strict "$WORK/meta_name.native"; }; then
-  echo "  metaclass name: signature verification failed"
-  status=1
-else
-  "$WORK/meta_name.hosted" > "$WORK/meta_name.hosted.out" 2>&1; hs=$?
-  "$WORK/meta_name.native" > "$WORK/meta_name.native.out" 2>&1; ns=$?
-  if [ "$hs" -ne 0 ] || [ "$ns" -ne "$hs" ] || ! cmp -s "$WORK/meta_name.hosted.out" "$WORK/meta_name.native.out"; then
-    echo "  metaclass name: hosted status $hs, native status $ns, or output differs"
-    status=1
-  else
-    echo "  metaclass name: hosted and native agree"
+  timeout 30 "$WORK/$name.hosted$EXE" > "$WORK/$name.hosted.out" 2>&1; hs=$?
+  if [ "$hs" -ne 0 ] || { [ -n "$expected" ] && [ "$(< "$WORK/$name.hosted.out")" != "$expected" ]; }; then
+    echo "  $name: hosted status or output differs"
+    cat "$WORK/$name.hosted.out"
+    return 1
   fi
-fi
+  if ! "$WORK/compile_native$EXE" "$fixture" -o "$WORK_NATIVE/$name.native" --pipeline typed --prelude >> "$WORK/$name.native.log" 2>&1; then
+    echo "  $name: Mach-O emission failed"
+    cat "$WORK/$name.native.log"
+    return 1
+  fi
+  if [ "$HOST_ID" != darwin-arm64 ]; then
+    host_limited "$name: AArch64 Mach-O signature and execution require macOS arm64; hosted output, typed IR and Mach-O emission checked"
+    return 0
+  fi
+  if ! codesign -v --strict "$WORK/$name.hosted$EXE" ||
+     ! codesign -v --strict "$WORK/$name.native"; then
+    echo "  $name: native build or signature verification failed"
+    cat "$WORK/$name.native.log"
+    return 1
+  fi
+  timeout 30 "$WORK/$name.native" > "$WORK/$name.native.out" 2>&1; ns=$?
+  if [ "$ns" -ne "$hs" ] || ! cmp -s "$WORK/$name.hosted.out" "$WORK/$name.native.out"; then
+    echo "  $name: hosted status $hs, native status $ns, or output differs"
+    return 1
+  fi
+  echo "  $name: hosted and signed native output agree"
+}
+map_fixture="$REPO_NATIVE/bench/fixtures/lowcallrun_block_map_u.iyi"
+cached_flow_fixture="$REPO_NATIVE/bench/fixtures/lowcallrun_block_cached_flow.iyi"
+meta_name_fixture="$REPO_NATIVE/bench/fixtures/runtime_metaclass_name.iyi"
+real_fixture_check block_map "$map_fixture" 'a-b' || status=1
+real_fixture_check cached_flow "$cached_flow_fixture" "$(printf '7\n4')" || status=1
+real_fixture_check meta_name "$meta_name_fixture" '' || status=1
 # Compare the named macro-bearing method. The two IR printers differ only in
 # signature attributes, label comments, and phi label spelling here.
 meta_name_body() {
@@ -423,8 +439,14 @@ meta_name_body() {
     END { if (!found) exit 1 }
   ' "$1"
 }
-if ! "$IYI" build --single-module --emit llvm-ir --no-debug -o "$WORK/meta_name_ir" "$meta_name_fixture" > "$WORK/meta_name.ir-hosted.log" 2>&1 ||
-   ! IYI_PATH="$REPO/src" "$WORK/compile_native" "$meta_name_fixture" -o "$WORK/meta_name.ir-port" --pipeline typed --prelude --emit ir > "$WORK/meta_name.ir-port.log" 2>&1 ||
+meta_target=()
+meta_output="$WORK_NATIVE/meta_name_ir$EXE"
+if [ "$HOST_ID" != darwin-arm64 ]; then
+  meta_target=(--cross-compile --target aarch64-apple-darwin)
+  meta_output="$WORK_NATIVE/meta_name_ir.o"
+fi
+if ! "$IYI" build "${meta_target[@]}" --single-module --emit llvm-ir --no-debug -o "$meta_output" "$meta_name_fixture" > "$WORK/meta_name.ir-hosted.log" 2>&1 ||
+   ! "$WORK/compile_native$EXE" "$meta_name_fixture" -o "$WORK_NATIVE/meta_name.ir-port" --pipeline typed --prelude --emit ir > "$WORK/meta_name.ir-port.log" 2>&1 ||
    ! meta_name_body "$WORK/meta_name_ir.ll" > "$WORK/meta_name.hosted.body" ||
    ! meta_name_body "$WORK/meta_name.ir-port" > "$WORK/meta_name.port.body" ||
    ! diff -u "$WORK/meta_name.hosted.body" "$WORK/meta_name.port.body"; then
@@ -434,20 +456,35 @@ else
   echo "  metaclass name: macro-bearing method IR matches hosted"
 fi
 meta_name_mutation_check() {
-  if ! "$IYI" build -o "$WORK/meta_name.mutant" "$REPO/src/compiler/tools/compile_native.iyi" > "$WORK/meta_name.mutant.build.log" 2>&1; then
+  if ! "$IYI" build -o "$WORK_NATIVE/meta_name.mutant$EXE" "$REPO_NATIVE/src/compiler/tools/compile_native.iyi" > "$WORK/meta_name.mutant.build.log" 2>&1; then
     echo "  INVALID MUTANT: compiler did not build" >&2
-    return 0
+    cat "$WORK/meta_name.mutant.build.log" >&2
+    return 2
   fi
-  if [ "$(uname -s)" = Darwin ] && ! codesign -v --strict "$WORK/meta_name.mutant"; then
-    return 0
+  if ! "$WORK/meta_name.mutant$EXE" "$meta_name_fixture" -o "$WORK_NATIVE/meta_name.mutant.ir" --pipeline typed --prelude --emit ir > "$WORK/meta_name.mutant.log" 2>&1; then
+    echo '  INVALID MUTANT: typed IR emission failed'
+    cat "$WORK/meta_name.mutant.log"
+    return 2
   fi
-  if ! IYI_PATH="$REPO/src" "$WORK/meta_name.mutant" "$meta_name_fixture" -o "$WORK/meta_name.mutant.native" --pipeline typed --prelude > "$WORK/meta_name.mutant.log" 2>&1; then
-    return 1
+  if [ "$HOST_ID" != darwin-arm64 ]; then
+    meta_name_body "$WORK/meta_name.mutant.ir" > "$WORK/meta_name.mutant.body" || return 2
+    cmp -s "$WORK/meta_name.port.body" "$WORK/meta_name.mutant.body"
+    return $?
   fi
-  if [ "$(uname -s)" = Darwin ] && ! codesign -v --strict "$WORK/meta_name.mutant.native"; then
-    return 0
+  if ! codesign -v --strict "$WORK/meta_name.mutant$EXE" ||
+     ! "$WORK/meta_name.mutant$EXE" "$meta_name_fixture" -o "$WORK_NATIVE/meta_name.mutant.native" --pipeline typed --prelude > "$WORK/meta_name.mutant.log" 2>&1 ||
+     ! codesign -v --strict "$WORK/meta_name.mutant.native"; then
+    echo '  INVALID MUTANT: native build or signature failed'
+    cat "$WORK/meta_name.mutant.log"
+    return 2
   fi
   "$WORK/meta_name.mutant.native" > "$WORK/meta_name.mutant.out" 2>&1
+  local result=$?
+  if [ "$result" -eq 0 ]; then return 0; fi
+  if [ "$result" -eq 1 ] && [ ! -s "$WORK/meta_name.mutant.out" ]; then return 1; fi
+  echo 'INVALID: metaclass mutant did not reach the fixture assertion'
+  cat "$WORK/meta_name.mutant.out"
+  return 2
 }
 prove_mutation "metaclass macro scope uses its instance type" "$REPO/src/compiler/semantic/main_visitor.iyi" \
   "      return TypeQueries.instance_type(scope).devirtualize.full_name" \
@@ -457,21 +494,34 @@ prove_mutation "metaclass macro scope uses its instance type" "$REPO/src/compile
 echo
 echo "== 3a. Generic constructor inference and refusal boundaries"
 for name in lowcallinfer_generic_new lowcallinfer_explicit_struct lowcallwait_generic_handwritten_new; do
-  fixture="$REPO/bench/fixtures/$name.iyi"
-  if ! "$IYI" build --prelude empty --no-debug -o "$WORK/$name.hosted" "$fixture" > "$WORK/$name.hosted.log" 2>&1 ||
-     ! IYI_PATH="$REPO/src" "$WORK/compile_native" "$fixture" -o "$WORK/$name.native" --pipeline typed > "$WORK/$name.native.log" 2>&1; then
-    echo "  $name: compilation failed"
+  fixture="$REPO_NATIVE/bench/fixtures/$name.iyi"
+  if ! "$IYI" build --prelude empty --no-debug -o "$WORK_NATIVE/$name.hosted$EXE" "$fixture" > "$WORK/$name.hosted.log" 2>&1 ||
+     ! "$WORK/compile_native$EXE" "$fixture" -o "$WORK_NATIVE/$name.baseline.ir" --pipeline typed --emit ir > "$WORK/$name.native.log" 2>&1; then
+    echo "  $name: hosted build or typed IR emission failed"
+    cat "$WORK/$name.hosted.log" "$WORK/$name.native.log"
     status=1
     continue
   fi
-  timeout 30 "$WORK/$name.hosted" > "$WORK/$name.hosted.out" 2>&1; hs=$?
-  if [ "$(uname -s)" = Darwin ] && ! codesign -v --strict "$WORK/$name.native"; then
-    echo "  $name: native signature verification failed"
+  timeout 30 "$WORK/$name.hosted$EXE" > "$WORK/$name.hosted.out" 2>&1; hs=$?
+  if [ "$hs" -ne 7 ]; then echo "  $name: hosted status $hs, expected 7"; status=1; continue; fi
+  if ! "$WORK/compile_native$EXE" "$fixture" -o "$WORK_NATIVE/$name.native" --pipeline typed > "$WORK/$name.native.log" 2>&1; then
+    echo "  $name: Mach-O emission failed"
+    cat "$WORK/$name.native.log"
+    status=1
+    continue
+  fi
+  if [ "$HOST_ID" != darwin-arm64 ]; then
+    host_limited "$name: AArch64 Mach-O signature and execution require macOS arm64"
+    continue
+  fi
+  if ! codesign -v --strict "$WORK/$name.native"; then
+    echo "  $name: native compilation or signature verification failed"
+    cat "$WORK/$name.native.log"
     status=1
     continue
   fi
   timeout 30 "$WORK/$name.native" > "$WORK/$name.native.out" 2>&1; ns=$?
-  if [ "$hs" -ne 7 ] || [ "$ns" -ne "$hs" ] || ! cmp -s "$WORK/$name.hosted.out" "$WORK/$name.native.out"; then
+  if [ "$ns" -ne "$hs" ] || ! cmp -s "$WORK/$name.hosted.out" "$WORK/$name.native.out"; then
     echo "  $name: hosted status $hs, native status $ns, or output differs"
     status=1
   else
@@ -485,9 +535,9 @@ generic_wait_reason() {
   esac
 }
 for name in lowcallwait_uninferred_generic_new lowcallwait_generic_handwritten_make lowcallwait_generic_default_new; do
-  fixture="$REPO/bench/fixtures/$name.iyi"
+  fixture="$REPO_NATIVE/bench/fixtures/$name.iyi"
   rm -f "$WORK/$name.native"
-  if IYI_PATH="$REPO/src" "$WORK/compile_native" "$fixture" -o "$WORK/$name.native" --pipeline typed > "$WORK/$name.native.log" 2>&1 || [ -e "$WORK/$name.native" ]; then
+  if "$WORK/compile_native$EXE" "$fixture" -o "$WORK_NATIVE/$name.native" --pipeline typed --emit ir > "$WORK/$name.native.log" 2>&1 || [ -e "$WORK/$name.native" ]; then
     echo "  $name: expected refusal without an executable"
     status=1
   elif [ "$name" = lowcallwait_uninferred_generic_new ]; then
@@ -507,7 +557,7 @@ for name in lowcallwait_uninferred_generic_new lowcallwait_generic_handwritten_m
     echo "  $name: hosted accepted; port refuses unbound generic T"
   fi
 done
-if "$IYI" build --prelude empty -o "$WORK/uninferred.hosted" "$REPO/bench/fixtures/lowcallwait_uninferred_generic_new.iyi" > "$WORK/uninferred.hosted.log" 2>&1; then
+if "$IYI" build --prelude empty -o "$WORK_NATIVE/uninferred.hosted$EXE" "$REPO_NATIVE/bench/fixtures/lowcallwait_uninferred_generic_new.iyi" > "$WORK/uninferred.hosted.log" 2>&1; then
   echo "  uninferred generic: hosted compiler unexpectedly accepted"
   status=1
 elif ! grep -Fq 'can'"'"'t infer `T`' "$WORK/uninferred.hosted.log" && ! grep -Fq "can't infer the type parameter T" "$WORK/uninferred.hosted.log"; then
@@ -524,35 +574,56 @@ for name in lowcallrun_named_new lowcallrun_new_default_shapes lowcallrun_new_ov
     lowcallrun_new_default_shapes) want_status=63; want_output=21A3AB4CD567EF ;;
     lowcallrun_new_overload_dispatch) want_status=3; want_output="" ;;
   esac
-  fixture="$REPO/bench/fixtures/$name.iyi"
-  if ! "$IYI" build --prelude empty --no-debug -o "$WORK/$name.hosted" "$fixture" > "$WORK/$name.hosted.log" 2>&1 ||
-     ! IYI_PATH="$REPO/src" "$WORK/compile_native" "$fixture" -o "$WORK/$name.native" --pipeline typed > "$WORK/$name.native.log" 2>&1; then
-    echo "  $name: compilation failed"
+  fixture="$REPO_NATIVE/bench/fixtures/$name.iyi"
+  if ! "$IYI" build --prelude empty --no-debug -o "$WORK_NATIVE/$name.hosted$EXE" "$fixture" > "$WORK/$name.hosted.log" 2>&1 ||
+     ! "$WORK/compile_native$EXE" "$fixture" -o "$WORK_NATIVE/$name.ir" --pipeline typed --emit ir > "$WORK/$name.native.log" 2>&1; then
+    echo "  $name: hosted build or typed IR emission failed"
+    cat "$WORK/$name.hosted.log" "$WORK/$name.native.log"
+    status=1
+    continue
+  fi
+  timeout 30 "$WORK/$name.hosted$EXE" > "$WORK/$name.hosted.out" 2>&1; hs=$?
+  if [ $((hs & 255)) -ne "$want_status" ] || [ "$(< "$WORK/$name.hosted.out")" != "$want_output" ]; then
+    echo "  $name: hosted status or output differs"
+    status=1
+    continue
+  fi
+  if ! "$WORK/compile_native$EXE" "$fixture" -o "$WORK_NATIVE/$name.native" --pipeline typed > "$WORK/$name.native.log" 2>&1; then
+    echo "  $name: Mach-O emission failed"
+    cat "$WORK/$name.native.log"
+    status=1
+    continue
+  fi
+  if [ "$HOST_ID" != darwin-arm64 ]; then
+    host_limited "$name: AArch64 Mach-O signature and execution require macOS arm64"
+    continue
+  fi
+  if ! codesign -v --strict "$WORK/$name.native"; then
+    echo "  $name: native compilation or signature verification failed"
+    cat "$WORK/$name.native.log"
+    status=1
+    continue
+  fi
+  timeout 30 "$WORK/$name.native" > "$WORK/$name.native.out" 2>&1; ns=$?
+  if [ "$ns" -ne "$hs" ] || ! cmp -s "$WORK/$name.hosted.out" "$WORK/$name.native.out"; then
+    echo "  $name: hosted/native status or output differs"
     status=1
   else
-    timeout 30 "$WORK/$name.hosted" > "$WORK/$name.hosted.out" 2>&1; hs=$?
-    if [ "$(uname -s)" = Darwin ] && ! codesign -v --strict "$WORK/$name.native"; then
-      echo "  $name: native signature verification failed"
-      status=1
-    else
-      timeout 30 "$WORK/$name.native" > "$WORK/$name.native.out" 2>&1; ns=$?
-      if [ "$ns" -ne "$hs" ] || [ $((hs & 255)) -ne "$want_status" ] ||
-         ! cmp -s "$WORK/$name.hosted.out" "$WORK/$name.native.out" ||
-         [ "$(< "$WORK/$name.hosted.out")" != "$want_output" ]; then
-        echo "  $name: hosted/native status or output differs"
-        status=1
-      else
-        echo "  $name: hosted and native output '$want_output', status $want_status"
-      fi
-    fi
+    echo "  $name: hosted and native output '$want_output', status $want_status"
   fi
 done
 
-fixture="$REPO/bench/fixtures/lowcallwait_super_forwarded_default.iyi"
-if ! IYI_PATH="$REPO/src" "$WORK/compile_native" "$fixture" -o "$WORK/super_default.native" --pipeline typed > "$WORK/super_default.native.log" 2>&1; then
+fixture="$REPO_NATIVE/bench/fixtures/lowcallwait_super_forwarded_default.iyi"
+if ! "$WORK/compile_native$EXE" "$fixture" -o "$WORK_NATIVE/super_default.ir" --pipeline typed --emit ir > "$WORK/super_default.native.log" 2>&1; then
+  echo "  super forwarded default: typed IR emission failed"
+  cat "$WORK/super_default.native.log"
+  status=1
+elif ! "$WORK/compile_native$EXE" "$fixture" -o "$WORK_NATIVE/super_default.native" --pipeline typed > "$WORK/super_default.native.log" 2>&1; then
   echo "  super forwarded default: native compilation failed"
   status=1
-elif [ "$(uname -s)" = Darwin ] && ! codesign -v --strict "$WORK/super_default.native"; then
+elif [ "$HOST_ID" != darwin-arm64 ]; then
+  host_limited 'super forwarded default: AArch64 Mach-O signature and execution require macOS arm64'
+elif ! codesign -v --strict "$WORK/super_default.native"; then
   echo "  super forwarded default: native signature verification failed"
   status=1
 else
@@ -569,30 +640,46 @@ fi
 # crosses the mutation helper's subprocess boundary and makes that case red.
 generic_constructor_check() {
   local name fixture result
-  if ! "$IYI" build -o "$WORK/constructor.check.tool" "$REPO/src/compiler/tools/compile_native.iyi" > "$WORK/constructor.check.build.log" 2>&1; then
-    : > "$WORK/constructor.invalid"
+  if ! "$IYI" build -o "$WORK_NATIVE/constructor.check.tool$EXE" "$REPO_NATIVE/src/compiler/tools/compile_native.iyi" > "$WORK/constructor.check.build.log" 2>&1; then
     echo "INVALID MUTANT: constructor compiler did not build"
-    return 0
+    cat "$WORK/constructor.check.build.log"
+    return 2
   fi
   for name in lowcallinfer_generic_new lowcallinfer_explicit_struct lowcallwait_generic_handwritten_new; do
-    fixture="$REPO/bench/fixtures/$name.iyi"
-    rm -f "$WORK/constructor.check.exe"
-    IYI_PATH="$REPO/src" "$WORK/constructor.check.tool" "$fixture" -o "$WORK/constructor.check.exe" --pipeline typed > "$WORK/constructor.check.log" 2>&1 || return 1
-    if [ "$(uname -s)" = Darwin ] && ! codesign -v --strict "$WORK/constructor.check.exe"; then
-      touch "$WORK/constructor.invalid"
-      return 1
+    fixture="$REPO_NATIVE/bench/fixtures/$name.iyi"
+    if ! "$WORK/constructor.check.tool$EXE" "$fixture" -o "$WORK_NATIVE/constructor.check.ir" --pipeline typed --emit ir > "$WORK/constructor.check.log" 2>&1; then
+      echo "INVALID MUTANT: constructor $name did not emit IR"
+      cat "$WORK/constructor.check.log"
+      return 2
+    fi
+    if ! "$WORK/constructor.check.tool$EXE" "$fixture" -o "$WORK_NATIVE/constructor.check.exe" --pipeline typed > "$WORK/constructor.check.log" 2>&1; then
+      echo "INVALID MUTANT: constructor $name did not emit Mach-O"
+      cat "$WORK/constructor.check.log"
+      return 2
+    fi
+    if [ "$HOST_ID" != darwin-arm64 ]; then
+      cmp -s "$WORK/$name.baseline.ir" "$WORK/constructor.check.ir" || return 1
+      continue
+    fi
+    if ! codesign -v --strict "$WORK/constructor.check.exe"; then
+      echo "INVALID MUTANT: constructor $name did not link or sign"
+      cat "$WORK/constructor.check.log"
+      return 2
     fi
     timeout 30 "$WORK/constructor.check.exe" > "$WORK/constructor.check.out" 2>&1; result=$?
     [ "$result" -eq 7 ] && cmp -s "$WORK/constructor.check.out" "$WORK/$name.hosted.out" || return 1
   done
   for name in lowcallwait_generic_handwritten_make lowcallwait_generic_default_new; do
-    fixture="$REPO/bench/fixtures/$name.iyi"
-    rm -f "$WORK/constructor.check.exe"
-    if IYI_PATH="$REPO/src" "$WORK/constructor.check.tool" "$fixture" -o "$WORK/constructor.check.exe" --pipeline typed > "$WORK/constructor.check.log" 2>&1; then
-      return 1
+    fixture="$REPO_NATIVE/bench/fixtures/$name.iyi"
+    rm -f "$WORK/constructor.check.ir"
+    "$WORK/constructor.check.tool$EXE" "$fixture" -o "$WORK_NATIVE/constructor.check.ir" --pipeline typed --emit ir > "$WORK/constructor.check.log" 2>&1
+    result=$?
+    if [ "$result" -eq 0 ] && [ -s "$WORK/constructor.check.ir" ]; then return 1; fi
+    if [ "$result" -ne 1 ] || [ -e "$WORK/constructor.check.ir" ] || ! grep -Fq "$(generic_wait_reason "$name")" "$WORK/constructor.check.log"; then
+      echo "INVALID MUTANT: $name did not reach its named refusal"
+      cat "$WORK/constructor.check.log"
+      return 2
     fi
-    [ ! -e "$WORK/constructor.check.exe" ] || return 1
-    grep -Fq "$(generic_wait_reason "$name")" "$WORK/constructor.check.log" || return 1
   done
 }
 
@@ -628,10 +715,17 @@ fi
 
 echo
 echo "== 3b. A recursive call targets the instance still being typed"
-if [ -x "$WORK/compile_native" ]; then
+if [ -x "$WORK/compile_native$EXE" ]; then
   for fixture in "$REPO"/bench/fixtures/sem_bodies_recursion_mutual.iyi "$REPO"/bench/fixtures/sem_bodies_recursion_state.iyi "$REPO"/bench/fixtures/sem_bodies_recursive_helper.iyi; do
     name="$(basename "$fixture" .iyi)"
-    IYI_PATH="$REPO/src" "$WORK/compile_native" "$fixture" -o "$WORK/$name.probe.exe" --pipeline typed --probe-phase --keep-going > "$WORK/$name.probe" 2>&1 || true
+    "$WORK/compile_native$EXE" "$(native_path "$fixture")" -o "$WORK_NATIVE/$name.probe" --pipeline typed --probe-phase --keep-going > "$WORK/$name.probe" 2>&1
+    probe_status=$?
+    if [ "$probe_status" -gt 1 ]; then
+      echo "  $name: invalid probe exit $probe_status"
+      cat "$WORK/$name.probe"
+      status=1
+      continue
+    fi
     if grep -E 'untyped instantiated parameter|no type for the call' "$WORK/$name.probe"; then
       echo "  $name: a cycle call targets an untyped clone"
       status=1
@@ -649,26 +743,32 @@ fi
 
 echo
 echo "== 3c. Top-level imports and inherited names across units"
-unit_fixture="$REPO/bench/fixtures/inherited_unit_name/main.iyi"
-if [ -x "$WORK/compile_native" ] && \
-   "$IYI" build --prelude empty --no-debug -o "$WORK/unit_name.hosted" "$unit_fixture" > "$WORK/unit_name.hosted.log" 2>&1 && \
-   IYI_PATH="$REPO/src" "$WORK/compile_native" "$unit_fixture" -o "$WORK/unit_name.native" --pipeline typed > "$WORK/unit_name.native.log" 2>&1; then
-  timeout 30 "$WORK/unit_name.hosted" > "$WORK/unit_name.hosted.out" 2>&1; hs=$?
-  if [ "$(uname -s)" = Darwin ] && ! codesign -v --strict "$WORK/unit_name.native"; then
-    echo "  FAIL: inherited unit name native signature verification failed"
+unit_fixture="$REPO_NATIVE/bench/fixtures/inherited_unit_name/main.iyi"
+if [ -x "$WORK/compile_native$EXE" ] &&
+   "$IYI" build --prelude empty --no-debug -o "$WORK_NATIVE/unit_name.hosted$EXE" "$unit_fixture" > "$WORK/unit_name.hosted.log" 2>&1 &&
+   "$WORK/compile_native$EXE" "$unit_fixture" -o "$WORK_NATIVE/unit_name.ir" --pipeline typed --emit ir > "$WORK/unit_name.native.log" 2>&1 &&
+   "$WORK/compile_native$EXE" "$unit_fixture" -o "$WORK_NATIVE/unit_name.native" --pipeline typed >> "$WORK/unit_name.native.log" 2>&1; then
+  timeout 30 "$WORK/unit_name.hosted$EXE" > "$WORK/unit_name.hosted.out" 2>&1; hs=$?
+  if [ "$hs" -ne 7 ]; then
+    echo "  FAIL: inherited unit name hosted status $hs, expected 7"
     status=1
-    ns=1
+  elif [ "$HOST_ID" != darwin-arm64 ]; then
+    host_limited 'inherited unit name: AArch64 Mach-O signature and execution require macOS arm64'
+  elif ! codesign -v --strict "$WORK/unit_name.native"; then
+    echo "  FAIL: inherited unit name native build or signature verification failed"
+    cat "$WORK/unit_name.native.log"
+    status=1
   else
     timeout 30 "$WORK/unit_name.native" > "$WORK/unit_name.native.out" 2>&1; ns=$?
-  fi
-  if [ "$hs" -eq 7 ] && [ "$ns" -eq "$hs" ] && cmp -s "$WORK/unit_name.hosted.out" "$WORK/unit_name.native.out"; then
-    echo "  inherited unit name: native executable runs to the hosted result (status 7, stdout identical)"
-  else
-    echo "  FAIL: inherited unit name: native status $ns, hosted $hs; expected 7 with identical stdout"
-    status=1
+    if [ "$ns" -eq "$hs" ] && cmp -s "$WORK/unit_name.hosted.out" "$WORK/unit_name.native.out"; then
+      echo "  inherited unit name: native executable runs to the hosted result (status 7, stdout identical)"
+    else
+      echo "  FAIL: inherited unit name: native status $ns, hosted $hs"
+      status=1
+    fi
   fi
 else
-  echo "  FAIL: inherited unit name: hosted or native source build failed"
+  echo "  FAIL: inherited unit name: hosted build or typed IR emission failed"
   for log in "$WORK/unit_name.hosted.log" "$WORK/unit_name.native.log"; do
     if [ -f "$log" ]; then cat "$log"; fi
   done
@@ -683,23 +783,43 @@ echo "== 4. Mutation proofs: the gate must catch each patch to the ported code"
 # while a failed baseline must still return nonzero to its caller.
 invalid_mutation() {
   { echo "INVALID MUTANT: $1"; cat "$1"; } | tee -a "$WORK/general-mutation.invalid" >&2
-  [ "${_PM_ARMED:-0}" = 1 ]
+  return 2
+}
+driver_assertion_result() {
+  local file="$1" result="$2" message="$3" line="$4"
+  if [ "$result" -eq 0 ]; then return 0; fi
+  if [ "$result" -eq 1 ] &&
+     grep -Fxq "iyi: panic: $message" "$file" &&
+     tr '\\' '/' < "$file" | grep -Fq "bench/selfhost_lower_calls_exercise.iyi:$line"; then
+    return 1
+  fi
+  echo "INVALID: driver did not reach its expected assertion"
+  cat "$file"
+  return 2
 }
 
 lower_calls_check() {
-  if ! "$IYI" build -o "$WORK/mut" "$REPO/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/mut.build.log" 2>&1; then
+  local expected_mutant_refusal="${1:-}" result
+  if ! "$IYI" build -o "$WORK_NATIVE/mut$EXE" "$REPO_NATIVE/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/mut.build.log" 2>&1; then
     invalid_mutation "$WORK/mut.build.log"
     return $?
   fi
   for fixture in "$REPO"/bench/fixtures/lowcall_*.iyi; do
     name="$(basename "$fixture" .iyi)"
     if [ -n "$(waiting_reason "$name")" ]; then
-      "$WORK/mut" lower "$fixture" "$WORK/$name.oracle.ll" > "$WORK/mut.out" 2> "$WORK/mut.err" && return 1
+      "$WORK/mut$EXE" lower "$(native_path "$fixture")" "$WORK_NATIVE/$name.oracle.ll" > "$WORK/mut.out" 2> "$WORK/mut.err" && return 1
       expected="$(waiting_reason "$name")"
       awk -v expected="$expected" 'index($0, expected) { found = 1 } END { exit !found }' "$WORK/mut.err" || return 1
       continue
     fi
-    "$WORK/mut" lower "$fixture" "$WORK/$name.oracle.ll" > "$WORK/mut.out" 2>/dev/null || return 1
+    "$WORK/mut$EXE" lower "$(native_path "$fixture")" "$WORK_NATIVE/$name.oracle.ll" > "$WORK/mut.out" 2>"$WORK/mut.err"
+    result=$?
+    if [ "$result" -ne 0 ]; then
+      if [ -n "$expected_mutant_refusal" ] && expected_refusal "$result" "$WORK/mut.err" src/compiler/lower/pending.iyi "$expected_mutant_refusal"; then return 1; fi
+      echo "INVALID: calls mutant failed outside its expected comparison"
+      cat "$WORK/mut.err"
+      return 2
+    fi
     awk '/^SUMMARY identical=[0-9]+ total=[0-9]+ module=[01]$/ { split($2, a, "="); split($3, b, "="); split($4, c, "="); if (a[2] != b[2] || b[2] == 0 || c[2] != 1) bad = 1; n++ } END { exit (bad || n == 0) }' "$WORK/mut.out" || return 1
   done
   return 0
@@ -712,15 +832,24 @@ prove_mutation "a forwarded initialize loses its definition location" "$REPO/src
   '    init.at(anchor)' '    anchor' -- lower_calls_check || status=1
 
 overload_dispatch_check() {
-  if ! "$IYI" build -o "$WORK/overload.check.tool" "$REPO/src/compiler/tools/compile_native.iyi" > "$WORK/overload.check.build.log" 2>&1; then
+  if ! "$IYI" build -o "$WORK_NATIVE/overload.check.tool$EXE" "$REPO_NATIVE/src/compiler/tools/compile_native.iyi" > "$WORK/overload.check.build.log" 2>&1; then
     invalid_mutation "$WORK/overload.check.build.log"
+    return 2
+  fi
+  if ! "$WORK/overload.check.tool$EXE" "$REPO_NATIVE/bench/fixtures/lowcallrun_new_overload_dispatch.iyi" -o "$WORK_NATIVE/overload.check.ir" --pipeline typed --emit ir > "$WORK/overload.check.log" 2>&1; then
+    echo 'INVALID MUTANT: overload fixture did not emit IR'
+    cat "$WORK/overload.check.log"
+    return 2
+  fi
+  if [ "$HOST_ID" != darwin-arm64 ]; then
+    cmp -s "$WORK/lowcallrun_new_overload_dispatch.ir" "$WORK/overload.check.ir"
     return $?
   fi
-  rm -f "$WORK/overload.check.exe"
-  IYI_PATH="$REPO/src" "$WORK/overload.check.tool" "$REPO/bench/fixtures/lowcallrun_new_overload_dispatch.iyi" -o "$WORK/overload.check.exe" --pipeline typed > "$WORK/overload.check.log" 2>&1 || return 1
-  if [ "$(uname -s)" = Darwin ] && ! codesign -v --strict "$WORK/overload.check.exe" > "$WORK/overload.signature.log" 2>&1; then
-    invalid_mutation "$WORK/overload.signature.log"
-    return $?
+  if ! "$WORK/overload.check.tool$EXE" "$REPO_NATIVE/bench/fixtures/lowcallrun_new_overload_dispatch.iyi" -o "$WORK_NATIVE/overload.check.exe" --pipeline typed > "$WORK/overload.check.log" 2>&1 ||
+     ! codesign -v --strict "$WORK/overload.check.exe" > "$WORK/overload.signature.log" 2>&1; then
+    echo 'INVALID MUTANT: overload fixture did not link or sign'
+    cat "$WORK/overload.check.log" "$WORK/overload.signature.log"
+    return 2
   fi
   local result
   timeout 30 "$WORK/overload.check.exe" > "$WORK/overload.check.out" 2>&1; result=$?
@@ -729,13 +858,21 @@ overload_dispatch_check() {
 prove_mutation "constructor overload wrappers share a typing frame" "$REPO/src/compiler/semantic/new.iyi" \
   '    return restriction.clone' '    return nil' -- overload_dispatch_check || status=1
 cleanup_probe_ok() {
-  if ! "$IYI" build -o "$WORK/cleanup_probe" "$REPO/bench/selfhost_probe_cleanup.iyi" > "$WORK/cleanup_probe.build.log" 2>&1; then
+  if ! "$IYI" build -o "$WORK_NATIVE/cleanup_probe$EXE" "$REPO_NATIVE/bench/selfhost_probe_cleanup.iyi" > "$WORK/cleanup_probe.build.log" 2>&1; then
     echo "INVALID MUTANT: cleanup probe failed to build" >&2
-    if [ "${_PM_ARMED:-0}" = 1 ]; then return 0; fi
-    return 1
+    cat "$WORK/cleanup_probe.build.log" >&2
+    return 2
   fi
-  if [ "$(uname -s)" = Darwin ] && ! codesign -v --strict "$WORK/cleanup_probe"; then return 0; fi
-  "$WORK/cleanup_probe" > "$WORK/cleanup_probe.out" 2>&1
+  if [ "$HOST_OS" = darwin ] && ! codesign -v --strict "$WORK/cleanup_probe$EXE"; then return 2; fi
+  "$WORK/cleanup_probe$EXE" > "$WORK/cleanup_probe.out" 2>&1
+  local result=$?
+  if [ "$result" -eq 0 ]; then return 0; fi
+  if [ "$result" -eq 1 ] &&
+     grep -Fxq 'iyi: panic: wrong survivors' "$WORK/cleanup_probe.out" &&
+     tr '\\' '/' < "$WORK/cleanup_probe.out" | grep -Fq 'bench/selfhost_probe_cleanup.iyi:17'; then return 1; fi
+  echo 'INVALID: cleanup probe failed outside its expected assertion'
+  cat "$WORK/cleanup_probe.out"
+  return 2
 }
 if cleanup_probe_ok; then
   prove_mutation "failed probe cleanup removes prior functions" "$REPO/src/compiler/lower/fun.iyi" \
@@ -746,34 +883,34 @@ else
 fi
 
 recursive_inferred_check() {
-  if ! "$IYI" build -o "$WORK/recursive-mut" "$REPO/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/recursive-mut.build.log" 2>&1; then
+  if ! "$IYI" build -o "$WORK_NATIVE/recursive-mut$EXE" "$REPO_NATIVE/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/recursive-mut.build.log" 2>&1; then
     invalid_mutation "$WORK/recursive-mut.build.log"
     return $?
   fi
-  "$WORK/recursive-mut" lower "$REPO/bench/fixtures/lowcall_recursive_inferred.iyi" "$WORK/lowcall_recursive_inferred.oracle.ll" > "$WORK/recursive-mut.out" 2>/dev/null || return 1
+  "$WORK/recursive-mut$EXE" lower "$REPO_NATIVE/bench/fixtures/lowcall_recursive_inferred.iyi" "$WORK_NATIVE/lowcall_recursive_inferred.oracle.ll" > "$WORK/recursive-mut.out" 2>"$WORK/recursive-mut.err" || { cat "$WORK/recursive-mut.err"; return 2; }
   awk '/^SUMMARY identical=[0-9]+ total=[0-9]+ module=[01]$/ { split($2,a,"="); split($3,b,"="); split($4,c,"="); if (a[2] != b[2] || b[2] == 0 || c[2] != 1) bad=1; n++ } END { exit (bad || n == 0) }' "$WORK/recursive-mut.out"
 }
 prove_mutation "an inferred recursive body is not retyped" "$REPO/src/compiler/semantic/main_visitor.iyi" \
   '    if recursive_frame.cyclic' '    if false && recursive_frame.cyclic' -- recursive_inferred_check || status=1
 
 underscore_check() {
-  if ! "$IYI" build -o "$WORK/underscore-mut" "$REPO/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/underscore-mut.build.log" 2>&1; then
+  if ! "$IYI" build -o "$WORK_NATIVE/underscore-mut$EXE" "$REPO_NATIVE/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/underscore-mut.build.log" 2>&1; then
     invalid_mutation "$WORK/underscore-mut.build.log"
     return $?
   fi
-  "$WORK/underscore-mut" lower "$REPO/bench/fixtures/lowdecl_multi_assign_underscore.iyi" "$WORK/lowdecl_multi_assign_underscore.oracle.ll" > "$WORK/underscore-mut.out" 2>/dev/null || return 1
+  "$WORK/underscore-mut$EXE" lower "$REPO_NATIVE/bench/fixtures/lowdecl_multi_assign_underscore.iyi" "$WORK_NATIVE/lowdecl_multi_assign_underscore.oracle.ll" > "$WORK/underscore-mut.out" 2>"$WORK/underscore-mut.err" || { cat "$WORK/underscore-mut.err"; return 2; }
   awk '/^SUMMARY identical=[0-9]+ total=[0-9]+ module=[01]$/ { split($2,a,"="); split($3,b,"="); split($4,c,"="); if (a[2] != b[2] || b[2] == 0 || c[2] != 1) bad=1; n++ } END { exit (bad || n == 0) }' "$WORK/underscore-mut.out"
 }
 prove_mutation "underscore assignment is refused" "$REPO/src/compiler/lower/lower.iyi" \
   '  if node.target.is_a?(Underscore)' '  if false && node.target.is_a?(Underscore)' -- underscore_check || status=1
 
 block_decl_check() {
-  if ! "$IYI" build -o "$WORK/block-decl-mut" "$REPO/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/block-decl-mut.build.log" 2>&1; then
+  if ! "$IYI" build -o "$WORK_NATIVE/block-decl-mut$EXE" "$REPO_NATIVE/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/block-decl-mut.build.log" 2>&1; then
     invalid_mutation "$WORK/block-decl-mut.build.log"
     return $?
   fi
   for name in lowdecl_typedecl_block lowdecl_typedecl_block_widen lowdecl_typedecl_block_nested lowdecl_typedecl_block_later_nil lowdecl_typedecl_reference; do
-    "$WORK/block-decl-mut" lower "$REPO/bench/fixtures/$name.iyi" "$WORK/$name.oracle.ll" > "$WORK/block-decl-mut.out" 2>/dev/null || return 1
+    "$WORK/block-decl-mut$EXE" lower "$REPO_NATIVE/bench/fixtures/$name.iyi" "$WORK_NATIVE/$name.oracle.ll" > "$WORK/block-decl-mut.out" 2>"$WORK/block-decl-mut.err" || { cat "$WORK/block-decl-mut.err"; return 2; }
     awk '/^SUMMARY identical=[0-9]+ total=[0-9]+ module=[01]$/ { split($2,a,"="); split($3,b,"="); split($4,c,"="); if (a[2] != b[2] || b[2] == 0 || c[2] != 1) bad=1; n++ } END { exit (bad || n == 0) }' "$WORK/block-decl-mut.out" || return 1
   done
 }
@@ -782,11 +919,11 @@ prove_mutation "a typed local keeps its initializer's storage type" "$REPO/src/c
   '        stored = decl_type' -- block_decl_check || status=1
 
 block_storage_check() {
-  if ! "$IYI" build -o "$WORK/block-storage-mut" "$REPO/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/block-storage-mut.build.log" 2>&1; then
+  if ! "$IYI" build -o "$WORK_NATIVE/block-storage-mut$EXE" "$REPO_NATIVE/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/block-storage-mut.build.log" 2>&1; then
     invalid_mutation "$WORK/block-storage-mut.build.log"
     return $?
   fi
-  "$WORK/block-storage-mut" lower "$REPO/bench/fixtures/lowdecl_block_branch_storage.iyi" "$WORK/lowdecl_block_branch_storage.oracle.ll" > "$WORK/block-storage-mut.out" 2>/dev/null || return 1
+  "$WORK/block-storage-mut$EXE" lower "$REPO_NATIVE/bench/fixtures/lowdecl_block_branch_storage.iyi" "$WORK_NATIVE/lowdecl_block_branch_storage.oracle.ll" > "$WORK/block-storage-mut.out" 2>"$WORK/block-storage-mut.err" || { cat "$WORK/block-storage-mut.err"; return 2; }
   awk '/^SUMMARY identical=[0-9]+ total=[0-9]+ module=[01]$/ { split($2,a,"="); split($3,b,"="); split($4,c,"="); if (a[2] != b[2] || b[2] == 0 || c[2] != 1) bad=1; n++ } END { exit (bad || n == 0) }' "$WORK/block-storage-mut.out"
 }
 prove_mutation "block locals retain only the first assignment type" "$REPO/src/compiler/semantic/main_visitor.iyi" \
@@ -794,33 +931,33 @@ prove_mutation "block locals retain only the first assignment type" "$REPO/src/c
   '      unions[name] = previous' -- block_storage_check || status=1
 
 block_loop_rw_check() {
-  if ! "$IYI" build -o "$WORK/block-loop-rw-mut" "$REPO/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/block-loop-rw-mut.build.log" 2>&1; then
+  if ! "$IYI" build -o "$WORK_NATIVE/block-loop-rw-mut$EXE" "$REPO_NATIVE/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/block-loop-rw-mut.build.log" 2>&1; then
     invalid_mutation "$WORK/block-loop-rw-mut.build.log"
     return $?
   fi
-  "$WORK/block-loop-rw-mut" lower "$REPO/bench/fixtures/lowcall_block_nilable_rw.iyi" "$WORK/lowcall_block_nilable_rw.oracle.ll" > "$WORK/block-loop-rw-mut.out" 2>/dev/null || return 1
+  "$WORK/block-loop-rw-mut$EXE" lower "$REPO_NATIVE/bench/fixtures/lowcall_block_nilable_rw.iyi" "$WORK_NATIVE/lowcall_block_nilable_rw.oracle.ll" > "$WORK/block-loop-rw-mut.out" 2>"$WORK/block-loop-rw-mut.err" || { cat "$WORK/block-loop-rw-mut.err"; return 2; }
   awk '/^SUMMARY identical=[0-9]+ total=[0-9]+ module=[01]$/ { split($2,a,"="); split($3,b,"="); split($4,c,"="); if (a[2] != b[2] || b[2] == 0 || c[2] != 1) bad=1; n++ } END { exit (bad || n == 0) }' "$WORK/block-loop-rw-mut.out"
 }
 prove_mutation "a loop yield sees only the first block invocation" "$REPO/src/compiler/semantic/main_visitor.iyi" \
   '      if @block_may_repeat' '      if false && @block_may_repeat' -- block_loop_rw_check || status=1
 
 block_branch_rw_check() {
-  if ! "$IYI" build -o "$WORK/block-branch-rw-mut" "$REPO/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/block-branch-rw-mut.build.log" 2>&1; then
+  if ! "$IYI" build -o "$WORK_NATIVE/block-branch-rw-mut$EXE" "$REPO_NATIVE/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/block-branch-rw-mut.build.log" 2>&1; then
     invalid_mutation "$WORK/block-branch-rw-mut.build.log"
     return $?
   fi
-  "$WORK/block-branch-rw-mut" lower "$REPO/bench/fixtures/lowcall_block_branch_nilable_rw.iyi" "$WORK/lowcall_block_branch_nilable_rw.oracle.ll" > "$WORK/block-branch-rw-mut.out" 2>/dev/null || return 1
+  "$WORK/block-branch-rw-mut$EXE" lower "$REPO_NATIVE/bench/fixtures/lowcall_block_branch_nilable_rw.iyi" "$WORK_NATIVE/lowcall_block_branch_nilable_rw.oracle.ll" > "$WORK/block-branch-rw-mut.out" 2>"$WORK/block-branch-rw-mut.err" || { cat "$WORK/block-branch-rw-mut.err"; return 2; }
   awk '/^SUMMARY identical=[0-9]+ total=[0-9]+ module=[01]$/ { split($2,a,"="); split($3,b,"="); split($4,c,"="); if (a[2] != b[2] || b[2] == 0 || c[2] != 1) bad=1; n++ } END { exit (bad || n == 0) }' "$WORK/block-branch-rw-mut.out"
 }
 prove_mutation "one yield overwrites another yield's entry flow" "$REPO/src/compiler/semantic/main_visitor.iyi" \
   '            ctx[k] = @program.type_merge(ctx[k], new_v)' '            ctx[k] = new_v' -- block_branch_rw_check || status=1
 
 block_lexical_locals_check() {
-  if ! "$IYI" build -o "$WORK/block-lexical-mut" "$REPO/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/block-lexical-mut.build.log" 2>&1; then
+  if ! "$IYI" build -o "$WORK_NATIVE/block-lexical-mut$EXE" "$REPO_NATIVE/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/block-lexical-mut.build.log" 2>&1; then
     invalid_mutation "$WORK/block-lexical-mut.build.log"
     return $?
   fi
-  "$WORK/block-lexical-mut" lower "$REPO/bench/fixtures/lowcall_block_lexical_locals.iyi" "$WORK/lowcall_block_lexical_locals.oracle.ll" > "$WORK/block-lexical-mut.out" 2> "$WORK/block-lexical-mut.err" || return 1
+  "$WORK/block-lexical-mut$EXE" lower "$REPO_NATIVE/bench/fixtures/lowcall_block_lexical_locals.iyi" "$WORK_NATIVE/lowcall_block_lexical_locals.oracle.ll" > "$WORK/block-lexical-mut.out" 2> "$WORK/block-lexical-mut.err" || { cat "$WORK/block-lexical-mut.err"; return 2; }
   awk '/^SUMMARY identical=[0-9]+ total=[0-9]+ module=[01]$/ { split($2,a,"="); split($3,b,"="); split($4,c,"="); if (a[2] != b[2] || b[2] == 0 || c[2] != 1) bad=1; n++ } END { exit (bad || n == 0) }' "$WORK/block-lexical-mut.out"
 }
 prove_mutation "a block inherits later caller locals" "$REPO/src/compiler/lower/call.iyi" \
@@ -831,11 +968,11 @@ prove_mutation "a fun visitor loses block writer ownership" "$REPO/src/compiler/
   '    inner.block_owners = NodeMap(BlockOwner).new' -- block_lexical_locals_check || status=1
 
 block_nested_storage_check() {
-  if ! "$IYI" build -o "$WORK/block-nested-mut" "$REPO/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/block-nested-mut.build.log" 2>&1; then
+  if ! "$IYI" build -o "$WORK_NATIVE/block-nested-mut$EXE" "$REPO_NATIVE/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/block-nested-mut.build.log" 2>&1; then
     invalid_mutation "$WORK/block-nested-mut.build.log"
     return $?
   fi
-  "$WORK/block-nested-mut" lower "$REPO/bench/fixtures/lowcall_block_nested_local_writes.iyi" "$WORK/lowcall_block_nested_local_writes.oracle.ll" > "$WORK/block-nested-mut.out" 2> "$WORK/block-nested-mut.err" || return 1
+  "$WORK/block-nested-mut$EXE" lower "$REPO_NATIVE/bench/fixtures/lowcall_block_nested_local_writes.iyi" "$WORK_NATIVE/lowcall_block_nested_local_writes.oracle.ll" > "$WORK/block-nested-mut.out" 2> "$WORK/block-nested-mut.err" || { cat "$WORK/block-nested-mut.err"; return 2; }
   awk '/^SUMMARY identical=[0-9]+ total=[0-9]+ module=[01]$/ { split($2,a,"="); split($3,b,"="); split($4,c,"="); if (a[2] != b[2] || b[2] == 0 || c[2] != 1) bad=1; n++ } END { exit (bad || n == 0) }' "$WORK/block-nested-mut.out"
 }
 prove_mutation "a block local misses its nested blocks' writes" "$REPO/src/compiler/lower/call.iyi" \
@@ -847,11 +984,11 @@ prove_mutation "a nested block writes into its yielding def's storage" "$REPO/sr
 
 block_cache_check() {
   local name="$1"
-  if ! "$IYI" build -o "$WORK/block-cache-mut" "$REPO/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/block-cache-mut.build.log" 2>&1; then
+  if ! "$IYI" build -o "$WORK_NATIVE/block-cache-mut$EXE" "$REPO_NATIVE/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/block-cache-mut.build.log" 2>&1; then
     invalid_mutation "$WORK/block-cache-mut.build.log"
     return $?
   fi
-  "$WORK/block-cache-mut" lower "$REPO/bench/fixtures/$name.iyi" "$WORK/$name.oracle.ll" > "$WORK/block-cache-mut.out" 2> "$WORK/block-cache-mut.err" || return 1
+  "$WORK/block-cache-mut$EXE" lower "$REPO_NATIVE/bench/fixtures/$name.iyi" "$WORK_NATIVE/$name.oracle.ll" > "$WORK/block-cache-mut.out" 2> "$WORK/block-cache-mut.err" || { cat "$WORK/block-cache-mut.err"; return 2; }
   awk '/^SUMMARY identical=[0-9]+ total=[0-9]+ module=[01]$/ { split($2,a,"="); split($3,b,"="); split($4,c,"="); if (a[2] != b[2] || b[2] == 0 || c[2] != 1) bad=1; n++ } END { exit (bad || n == 0) }' "$WORK/block-cache-mut.out"
 }
 prove_mutation "a reused block instance drops its writes" "$REPO/src/compiler/semantic/main_visitor.iyi" \
@@ -871,13 +1008,14 @@ prove_mutation "a block break carries no flow" "$REPO/src/compiler/semantic/main
   '          exit_owner.exits.each { |state| merge_block_exit(ctx_vars, state, blk) }' '          exit_owner.exits' -- block_cache_check lowcall_block_exit_flow || status=1
 
 uncovered_mutation_check() {
-  if ! "$IYI" build -o "$WORK/uncovered-mut" "$REPO/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/uncovered-mut.build.log" 2>&1; then
+  if ! "$IYI" build -o "$WORK_NATIVE/uncovered-mut$EXE" "$REPO_NATIVE/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/uncovered-mut.build.log" 2>&1; then
+    cat "$WORK/uncovered-mut.build.log"
     touch "$WORK/uncovered.invalid"
-    return 1
+    return 2
   fi
-  uncovered_check "$WORK/uncovered-mut"
+  uncovered_check "$WORK/uncovered-mut$EXE"
 }
-if uncovered_check "$WORK/port"; then
+if uncovered_check "$WORK/port$EXE"; then
   prove_mutation "uncovered argument combinations are accepted" "$REPO/src/compiler/semantic/main_visitor.iyi" \
     '    found = lookup_call_arms(receiver, receiver, node.name, node.args, node, ArmWalk::Parents, infer_class_vars)
     trace_arg_dispatch(receiver, node.name, node.args, node, found, nil)
@@ -895,17 +1033,18 @@ if [ -e "$WORK/uncovered.invalid" ]; then
 fi
 
 triple_check() {
-  "$IYI" build -o "$WORK/triple-mut" "$REPO/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/triple-mut.build.log" 2>&1 || { invalid_mutation "$WORK/triple-mut.build.log"; return $?; }
-  "$WORK/triple-mut" triple > "$WORK/triple-mut.out" 2>&1
+  "$IYI" build -o "$WORK_NATIVE/triple-mut$EXE" "$REPO_NATIVE/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/triple-mut.build.log" 2>&1 || { invalid_mutation "$WORK/triple-mut.build.log"; return 2; }
+  "$WORK/triple-mut$EXE" triple > "$WORK/triple-mut.out" 2>&1
+  driver_assertion_result "$WORK/triple-mut.out" "$?" 'macOS target lacks frame pointers' 35
 }
 
 free_dispatch_check() {
   local label="${1:-baseline}"
-  if ! "$IYI" build -o "$WORK/free-mut" "$REPO/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/free-mut-$label.build.log" 2>&1; then
-    cat "$WORK/free-mut-$label.build.log" > "$WORK/free-dispatch.invalid"
-    return 1
+  if ! "$IYI" build -o "$WORK_NATIVE/free-mut$EXE" "$REPO_NATIVE/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/free-mut-$label.build.log" 2>&1; then
+    cat "$WORK/free-mut-$label.build.log" | tee "$WORK/free-dispatch.invalid"
+    return 2
   fi
-  "$WORK/free-mut" lower "$REPO/bench/fixtures/lowcall_dispatch_free_vars.iyi" "$WORK/lowcall_dispatch_free_vars.oracle.ll" > "$WORK/free-mut-$label.out" 2> "$WORK/free-mut-$label.err" || return 1
+  "$WORK/free-mut$EXE" lower "$REPO_NATIVE/bench/fixtures/lowcall_dispatch_free_vars.iyi" "$WORK_NATIVE/lowcall_dispatch_free_vars.oracle.ll" > "$WORK/free-mut-$label.out" 2> "$WORK/free-mut-$label.err" || { cat "$WORK/free-mut-$label.err"; return 2; }
   awk '/^SUMMARY identical=[0-9]+ total=[0-9]+ module=[01]$/ { split($2,a,"="); split($3,b,"="); split($4,c,"="); if (a[2] != b[2] || b[2] == 0 || c[2] != 1) bad=1; n++ } END { exit (bad || n == 0) }' "$WORK/free-mut-$label.out"
 }
 if free_dispatch_check; then
@@ -926,13 +1065,13 @@ if [ -e "$WORK/free-dispatch.invalid" ]; then
 fi
 
 super_check() {
-  if ! "$IYI" build -o "$WORK/super_mut" "$REPO/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/super_mut.build.log" 2>&1; then
-    cat "$WORK/super_mut.build.log" > "$WORK/super.invalid"
-    return 1
+  if ! "$IYI" build -o "$WORK_NATIVE/super_mut$EXE" "$REPO_NATIVE/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/super_mut.build.log" 2>&1; then
+    cat "$WORK/super_mut.build.log" | tee "$WORK/super.invalid"
+    return 2
   fi
-  "$WORK/super_mut" lower "$REPO/bench/fixtures/lowcall_super.iyi" "$WORK/lowcall_super.oracle.ll" > "$WORK/super_mut.out" 2> "$WORK/super_mut.err" || return 1
+  "$WORK/super_mut$EXE" lower "$REPO_NATIVE/bench/fixtures/lowcall_super.iyi" "$WORK_NATIVE/lowcall_super.oracle.ll" > "$WORK/super_mut.out" 2> "$WORK/super_mut.err" || { cat "$WORK/super_mut.err"; return 2; }
   awk '/^SUMMARY identical=[0-9]+ total=[0-9]+ module=[01]$/ { split($2,a,"="); split($3,b,"="); split($4,c,"="); if (a[2] != b[2] || b[2] == 0 || c[2] != 1) bad=1; n++ } END { exit (bad || n == 0) }' "$WORK/super_mut.out" || return 1
-  super_refusal_checks "$WORK/super_mut"
+  super_refusal_checks "$WORK/super_mut$EXE"
 }
 if ! super_check; then
   echo "  super baseline failed; mutations cannot prove coverage"
@@ -966,11 +1105,11 @@ if [ -e "$WORK/super.invalid" ]; then
 fi
 
 block_nil_if_read_check() {
-  if ! "$IYI" build -o "$WORK/block-nil" "$REPO/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/block-nil.build.log" 2>&1; then
-    cat "$WORK/block-nil.build.log" > "$WORK/block-nil.invalid"
-    return 1
+  if ! "$IYI" build -o "$WORK_NATIVE/block-nil$EXE" "$REPO_NATIVE/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/block-nil.build.log" 2>&1; then
+    cat "$WORK/block-nil.build.log" | tee "$WORK/block-nil.invalid"
+    return 2
   fi
-  "$WORK/block-nil" lower "$REPO/bench/fixtures/lowcall_block_nil_if_read.iyi" "$WORK/lowcall_block_nil_if_read.oracle.ll" > "$WORK/block-nil.out" 2> "$WORK/block-nil.err" || return 1
+  "$WORK/block-nil$EXE" lower "$REPO_NATIVE/bench/fixtures/lowcall_block_nil_if_read.iyi" "$WORK_NATIVE/lowcall_block_nil_if_read.oracle.ll" > "$WORK/block-nil.out" 2> "$WORK/block-nil.err" || { cat "$WORK/block-nil.err"; return 2; }
   awk '/^SUMMARY identical=[0-9]+ total=[0-9]+ module=[01]$/ { split($2,a,"="); split($3,b,"="); split($4,c,"="); if (a[2] != b[2] || b[2] == 0 || c[2] != 1) bad=1; n++ } END { exit (bad || n == 0) }' "$WORK/block-nil.out"
 }
 if block_nil_if_read_check; then
@@ -988,11 +1127,11 @@ fi
 
 
 lexical_owner_check() {
-  if ! "$IYI" build -o "$WORK/lexical-mut" "$REPO/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/lexical-mut.build.log" 2>&1; then
-    cat "$WORK/lexical-mut.build.log" > "$WORK/lexical.invalid"
-    return 1
+  if ! "$IYI" build -o "$WORK_NATIVE/lexical-mut$EXE" "$REPO_NATIVE/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/lexical-mut.build.log" 2>&1; then
+    cat "$WORK/lexical-mut.build.log" | tee "$WORK/lexical.invalid"
+    return 2
   fi
-  "$WORK/lexical-mut" lower "$REPO/bench/fixtures/lowcall_inherited_lexical_owner.iyi" "$WORK/lowcall_inherited_lexical_owner.oracle.ll" > "$WORK/lexical-mut.out" 2> "$WORK/lexical-mut.err" || return 1
+  "$WORK/lexical-mut$EXE" lower "$REPO_NATIVE/bench/fixtures/lowcall_inherited_lexical_owner.iyi" "$WORK_NATIVE/lowcall_inherited_lexical_owner.oracle.ll" > "$WORK/lexical-mut.out" 2> "$WORK/lexical-mut.err" || { cat "$WORK/lexical-mut.err"; return 2; }
   awk '/^SUMMARY identical=[0-9]+ total=[0-9]+ module=[01]$/ { split($2,a,"="); split($3,b,"="); split($4,c,"="); if (a[2] != b[2] || b[2] == 0 || c[2] != 1) bad=1; n++ } END { exit (bad || n == 0) }' "$WORK/lexical-mut.out"
 }
 if lexical_owner_check; then
@@ -1005,11 +1144,11 @@ else
 fi
 
 shadowed_const_check() {
-  if ! "$IYI" build -o "$WORK/shadow-mut" "$REPO/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/shadow-mut.build.log" 2>&1; then
-    cat "$WORK/shadow-mut.build.log" > "$WORK/shadow.invalid"
-    return 1
+  if ! "$IYI" build -o "$WORK_NATIVE/shadow-mut$EXE" "$REPO_NATIVE/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/shadow-mut.build.log" 2>&1; then
+    cat "$WORK/shadow-mut.build.log" | tee "$WORK/shadow.invalid"
+    return 2
   fi
-  "$WORK/shadow-mut" lower "$REPO/bench/fixtures/lowcall_inherited_shadowed_const.iyi" "$WORK/lowcall_inherited_shadowed_const.oracle.ll" > "$WORK/shadow-mut.out" 2> "$WORK/shadow-mut.err" || return 1
+  "$WORK/shadow-mut$EXE" lower "$REPO_NATIVE/bench/fixtures/lowcall_inherited_shadowed_const.iyi" "$WORK_NATIVE/lowcall_inherited_shadowed_const.oracle.ll" > "$WORK/shadow-mut.out" 2> "$WORK/shadow-mut.err" || { cat "$WORK/shadow-mut.err"; return 2; }
   awk '/^SUMMARY identical=[0-9]+ total=[0-9]+ module=[01]$/ { split($2,a,"="); split($3,b,"="); split($4,c,"="); if (a[2] != b[2] || b[2] == 0 || c[2] != 1) bad=1; n++ } END { exit (bad || n == 0) }' "$WORK/shadow-mut.out"
 }
 if shadowed_const_check; then
@@ -1033,11 +1172,14 @@ if ! lower_calls_check; then
   exit 1
 fi
 generic_gap_check() {
-  "$IYI" build -o "$WORK/mut" "$REPO/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/mut.build.log" 2>&1 || { invalid_mutation "$WORK/mut.build.log"; return $?; }
-  if "$WORK/mut" lower "$generic_fixture" "$WORK/uninstantiated.oracle.ll" > "$WORK/generic.mut.out" 2> "$WORK/generic.mut.err"; then
-    return 1
-  fi
-  awk 'index($0, "the receiver of probe is the uninstantiated generic Range(B, E).class: typing has not instantiated the owner") { found = 1 } END { exit !found }' "$WORK/generic.mut.err"
+  "$IYI" build -o "$WORK_NATIVE/mut$EXE" "$REPO_NATIVE/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/mut.build.log" 2>&1 || { invalid_mutation "$WORK/mut.build.log"; return 2; }
+  "$WORK/mut$EXE" lower "$(native_path "$generic_fixture")" "$WORK_NATIVE/uninstantiated.oracle.ll" > "$WORK/generic.mut.out" 2> "$WORK/generic.mut.err"
+  local result=$?
+  if [ "$result" -eq 0 ]; then return 1; fi
+  if expected_refusal "$result" "$WORK/generic.mut.err" src/compiler/lower/pending.iyi 'the receiver of probe is the uninstantiated generic Range\(B, E\).class: typing has not instantiated the owner'; then return 0; fi
+  echo 'INVALID: uninstantiated generic did not reach its named refusal'
+  cat "$WORK/generic.mut.err"
+  return 2
 }
 if ! generic_gap_check; then
   echo "  baseline: uninstantiated generic diagnostic did not match"
@@ -1049,8 +1191,8 @@ prove_mutation "an uninstantiated generic loses its typing-gap diagnostic" "$REP
 # comparison above drops the `import` text on both sides (lower_gate.iyi strip_import), so this check is the one
 # that proves it. It rebuilds the driver from the current source, so a mutation of the import is what it tests.
 link_import_check() {
-  "$IYI" build -o "$WORK/mut" "$REPO/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/mut.build.log" 2>&1 || { invalid_mutation "$WORK/mut.build.log"; return $?; }
-  "$WORK/mut" emit "$REPO/bench/fixtures/lowcall_link_framework.iyi" "$WORK/lowcall_link_framework.oracle.ll" > "$WORK/mut.import.ir" 2>/dev/null || return 1
+  "$IYI" build -o "$WORK_NATIVE/mut$EXE" "$REPO_NATIVE/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/mut.build.log" 2>&1 || { invalid_mutation "$WORK/mut.build.log"; return 2; }
+  "$WORK/mut$EXE" emit "$REPO_NATIVE/bench/fixtures/lowcall_link_framework.iyi" "$WORK_NATIVE/lowcall_link_framework.oracle.ll" > "$WORK/mut.import.ir" 2>"$WORK/mut.import.err" || { cat "$WORK/mut.import.err"; return 2; }
   awk '/^declare / && /@SecRandomCopyBytes\(/ && / import "Security"/ { ok = 1 } END { exit !ok }' "$WORK/mut.import.ir"
 }
 echo "  the lib fun is imported from its framework (contract 6b):"
@@ -1124,13 +1266,13 @@ prove_mutation "a lib call's result is declared as an integer (a pointer result 
   'fn_type = low.module.types.func(params, low.typer.llvm_return_type(ret), lib_fun.varargs?)' 'fn_type = low.module.types.func(params, low.module.types.int32, lib_fun.varargs?)' -- lower_calls_check || status=1
 
 intrinsic_check() {
-  if ! "$IYI" build -o "$WORK/intrinsic_mut" "$REPO/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/intrinsic_mut.build.log" 2>&1; then
-    cat "$WORK/intrinsic_mut.build.log" > "$WORK/intrinsic.invalid"
-    return 1
+  if ! "$IYI" build -o "$WORK_NATIVE/intrinsic_mut$EXE" "$REPO_NATIVE/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/intrinsic_mut.build.log" 2>&1; then
+    cat "$WORK/intrinsic_mut.build.log" | tee "$WORK/intrinsic.invalid"
+    return 2
   fi
-  "$WORK/intrinsic_mut" lower "$REPO/bench/fixtures/lowcall_clib_intrinsics.iyi" "$WORK/lowcall_clib_intrinsics.oracle.ll" > "$WORK/intrinsic_mut.out" 2> "$WORK/intrinsic_mut.err" || return 1
+  "$WORK/intrinsic_mut$EXE" lower "$REPO_NATIVE/bench/fixtures/lowcall_clib_intrinsics.iyi" "$WORK_NATIVE/lowcall_clib_intrinsics.oracle.ll" > "$WORK/intrinsic_mut.out" 2> "$WORK/intrinsic_mut.err" || { cat "$WORK/intrinsic_mut.err"; return 2; }
   awk '/^SUMMARY identical=[0-9]+ total=[0-9]+ module=[01]$/ { split($2,a,"="); split($3,b,"="); split($4,c,"="); if (a[2] != b[2] || b[2] == 0 || c[2] != 1) bad=1; n++ } END { exit (bad || n == 0) }' "$WORK/intrinsic_mut.out" || return 1
-  intrinsic_refusal_checks "$WORK/intrinsic_mut" > /dev/null
+  intrinsic_refusal_checks "$WORK/intrinsic_mut$EXE" > /dev/null
 }
 if ! intrinsic_check; then
   echo "  LLVM intrinsic baseline failed; mutations cannot prove coverage"
@@ -1164,15 +1306,16 @@ prove_mutation "a struct call result is returned as the aggregate, not its spill
 prove_mutation "a module-level build constant is kept in the module (the module check catches it)" "$REPO/bench/lib/lower_gate.iyi" \
   'next if stripped.starts_with?("@") && build_constant?(stripped, builds) || stripped.starts_with?("%Nil = type")' 'next if stripped.starts_with?("%Nil = type")' -- lower_calls_check || status=1
 noreturn_phi_check() {
-  if ! "$IYI" build -o "$WORK/noreturn_phi" "$REPO/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/noreturn_phi.build.log" 2>&1; then
+  if ! "$IYI" build -o "$WORK_NATIVE/noreturn_phi$EXE" "$REPO_NATIVE/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/noreturn_phi.build.log" 2>&1; then
     invalid_mutation "$WORK/noreturn_phi.build.log"
     return $?
   fi
-  if [ "$(uname -s)" = Darwin ] && ! codesign -v --strict "$WORK/noreturn_phi" > "$WORK/noreturn_phi.signature.log" 2>&1; then
+  if [ "$HOST_OS" = darwin ] && ! codesign -v --strict "$WORK/noreturn_phi$EXE" > "$WORK/noreturn_phi.signature.log" 2>&1; then
     invalid_mutation "$WORK/noreturn_phi.signature.log"
     return $?
   fi
-  "$WORK/noreturn_phi" noreturn-phi > "$WORK/noreturn_phi.out" 2>&1
+  "$WORK/noreturn_phi$EXE" noreturn-phi > "$WORK/noreturn_phi.out" 2>&1
+  driver_assertion_result "$WORK/noreturn_phi.out" "$?" 'NoReturn body left an open block' 64
 }
 if noreturn_phi_check; then
   prove_mutation "a NoReturn body leaves an open block" "$REPO/src/compiler/lower/call.iyi" \
@@ -1205,19 +1348,20 @@ prove_mutation "a yielded block loses its writer's narrowed-out locals" "$REPO/s
 prove_mutation "a repeated block loses its narrowed-out entry locals" "$REPO/src/compiler/semantic/main_visitor.iyi" \
   '@untyped_locals = entry_untyped_locals.dup' '@untyped_locals = Hash(String, String).new' -- lower_calls_check || status=1
 prove_mutation "a nil receiver is not accepted" "$REPO/src/compiler/lower/call.iyi" \
-  '  return owner if owner.is_a?(NilType)' '  pending_visit_node("nil receiver") if owner.is_a?(NilType)' -- lower_calls_check || status=1
+  '  return owner if owner.is_a?(NilType)' '  pending_visit_node("nil receiver") if owner.is_a?(NilType)' -- lower_calls_check 'nil receiver' || status=1
 prove_mutation "an aggregate dispatch argument remains a pointer" "$REPO/src/compiler/lower/call.iyi" \
   '      passed = to_rhs(low, passed, params[i]) if passed_by_value?(params[i]) && passed.type.pointer?' '      passed = values[i]' -- lower_calls_check || status=1
 nil_phi_check() {
-  if ! "$IYI" build -o "$WORK/nil_phi" "$REPO/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/nil_phi.build.log" 2>&1; then
+  if ! "$IYI" build -o "$WORK_NATIVE/nil_phi$EXE" "$REPO_NATIVE/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/nil_phi.build.log" 2>&1; then
     invalid_mutation "$WORK/nil_phi.build.log"
     return $?
   fi
-  if [ "$(uname -s)" = Darwin ] && ! codesign -v --strict "$WORK/nil_phi" > "$WORK/nil_phi.signature.log" 2>&1; then
+  if [ "$HOST_OS" = darwin ] && ! codesign -v --strict "$WORK/nil_phi$EXE" > "$WORK/nil_phi.signature.log" 2>&1; then
     invalid_mutation "$WORK/nil_phi.signature.log"
     return $?
   fi
-  "$WORK/nil_phi" nil-phi > "$WORK/nil_phi.out" 2>&1
+  "$WORK/nil_phi$EXE" nil-phi > "$WORK/nil_phi.out" 2>&1
+  driver_assertion_result "$WORK/nil_phi.out" "$?" 'nil phi collected a value' 47
 }
 if nil_phi_check; then
   prove_mutation "a nil block call collects its body value" "$REPO/src/compiler/lower/phi.iyi" \
@@ -1232,7 +1376,7 @@ prove_mutation "a typed block declaration is refused" "$REPO/src/compiler/lower/
   '  block.body.accept(collector)' '  block.body.accept(collector)
   if collector.declared
     pending_visit_node("typed block declaration")
-  end' -- lower_calls_check || status=1
+  end' -- lower_calls_check 'typed block declaration' || status=1
 prove_mutation "primitive dispatch loses its receiver" "$REPO/src/compiler/lower/call.iyi" \
   '      prim_values = [self_value.as(Value)] of Value' '      prim_values = [] of Value' -- lower_calls_check || status=1
 prove_mutation "enum dispatch receivers are refused" "$REPO/src/compiler/lower/call.iyi" \
@@ -1305,31 +1449,29 @@ prove_mutation "a computed metaclass receiver is not evaluated" "$REPO/src/compi
 prove_mutation "a captured block precedes self in the call" "$REPO/src/compiler/lower/call.iyi" \
   '      emit_def_call(low, node, func, self_value, values, ret)' '      emit_def_call(low, node, func, nil, call_arguments(self_value, values).reversed, ret)' -- lower_calls_check || status=1
 recursion_owner_check() {
-  if ! "$IYI" build -o "$WORK/recursion_mut" "$REPO/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/recursion_mut.build.log" 2>&1; then
+  if ! "$IYI" build -o "$WORK_NATIVE/recursion_mut$EXE" "$REPO_NATIVE/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/recursion_mut.build.log" 2>&1; then
     echo "INVALID MUTANT: recursion driver failed to build" >&2
     cat "$WORK/recursion_mut.build.log" >&2
-    if [ "${_PM_ARMED:-0}" = 1 ]; then return 0; fi
-    return 1
+    return 2
   fi
   local fixture name
   for fixture in "$REPO"/bench/fixtures/lowcall_recursion_*.iyi; do
     name="$(basename "$fixture" .iyi)"
-    if ! "$WORK/recursion_mut" lower "$fixture" "$WORK/$name.oracle.ll" > "$WORK/recursion_mut.out" 2> "$WORK/recursion_mut.err"; then
-      return 1
+    if ! "$WORK/recursion_mut$EXE" lower "$(native_path "$fixture")" "$WORK_NATIVE/$name.oracle.ll" > "$WORK/recursion_mut.out" 2> "$WORK/recursion_mut.err"; then
+      cat "$WORK/recursion_mut.err"
+      return 2
     fi
     awk '/^SUMMARY identical=[0-9]+ total=[0-9]+ module=[01]$/ { split($2, a, "="); split($3, b, "="); split($4, c, "="); if (a[2] != b[2] || b[2] == 0 || c[2] != 1) bad = 1; n++ } END { exit (bad || n == 0) }' "$WORK/recursion_mut.out" || return 1
   done
-  if ! "$IYI" build -o "$WORK/recursion_target_mut" "$REPO/bench/selfhost_recursion_target_probe.iyi" > "$WORK/recursion_target_mut.build.log" 2>&1; then
+  if ! "$IYI" build -o "$WORK_NATIVE/recursion_target_mut$EXE" "$REPO_NATIVE/bench/selfhost_recursion_target_probe.iyi" > "$WORK/recursion_target_mut.build.log" 2>&1; then
     echo "INVALID MUTANT: recursion target probe failed to build" >&2
     cat "$WORK/recursion_target_mut.build.log" >&2
-    if [ "${_PM_ARMED:-0}" = 1 ]; then return 0; fi
-    return 1
+    return 2
   fi
-  if ! "$WORK/recursion_target_mut" "$REPO/bench/fixtures/lowcall_recursion_top.iyi" "$REPO/src" > "$WORK/recursion_target_mut.out" 2>"$WORK/recursion_target_mut.err"; then
+  if ! "$WORK/recursion_target_mut$EXE" "$REPO_NATIVE/bench/fixtures/lowcall_recursion_top.iyi" "$REPO_NATIVE/src" > "$WORK/recursion_target_mut.out" 2>"$WORK/recursion_target_mut.err"; then
     echo "INVALID MUTANT: recursion target probe failed to run" >&2
     cat "$WORK/recursion_target_mut.err" >&2
-    if [ "${_PM_ARMED:-0}" = 1 ]; then return 0; fi
-    return 1
+    return 2
   fi
   if grep -q '^cycle_a target=.* untyped-params' "$WORK/recursion_target_mut.out"; then return 1; fi
   return 0
@@ -1343,15 +1485,16 @@ prove_mutation "a recursive call targets a fresh clone" "$REPO/src/compiler/sema
       @call_target_defs[node] = instantiated_def' -- recursion_owner_check || status=1
 
 generic_frame_owner_check() {
-  if ! "$IYI" build -o "$WORK/frame_owner" "$REPO/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/frame_owner.build.log" 2>&1; then
+  if ! "$IYI" build -o "$WORK_NATIVE/frame_owner$EXE" "$REPO_NATIVE/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/frame_owner.build.log" 2>&1; then
     invalid_mutation "$WORK/frame_owner.build.log"
     return $?
   fi
-  if [ "$(uname -s)" = Darwin ] && ! codesign -v --strict "$WORK/frame_owner" > "$WORK/frame_owner.signature.log" 2>&1; then
+  if [ "$HOST_OS" = darwin ] && ! codesign -v --strict "$WORK/frame_owner$EXE" > "$WORK/frame_owner.signature.log" 2>&1; then
     invalid_mutation "$WORK/frame_owner.signature.log"
     return $?
   fi
-  "$WORK/frame_owner" generic-frame "$REPO/bench/fixtures/lowcall_generic_self_new.iyi" > "$WORK/frame_owner.out" 2>&1
+  "$WORK/frame_owner$EXE" generic-frame "$REPO_NATIVE/bench/fixtures/lowcall_generic_self_new.iyi" > "$WORK/frame_owner.out" 2>&1
+  driver_assertion_result "$WORK/frame_owner.out" "$?" 'generic owner lost its metaclass context' 89
 }
 if ! generic_frame_owner_check; then
   echo "  baseline: generic owner lost its metaclass context"
@@ -1366,20 +1509,22 @@ fi
 # it) must still lower a receiverless new. Hosted fun.cr:289 keeps the metaclass
 # as context; call.cr:95 passes that type id as self.
 generic_frame_check() {
-  if ! "$IYI" build -o "$WORK/frame_lower" "$REPO/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/frame_lower.build.log" 2>&1; then
+  if ! "$IYI" build -o "$WORK_NATIVE/frame_lower$EXE" "$REPO_NATIVE/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/frame_lower.build.log" 2>&1; then
     invalid_mutation "$WORK/frame_lower.build.log"
     return $?
   fi
-  if [ "$(uname -s)" = Darwin ] && ! codesign -v --strict "$WORK/frame_lower" > "$WORK/frame_lower.signature.log" 2>&1; then
+  if [ "$HOST_OS" = darwin ] && ! codesign -v --strict "$WORK/frame_lower$EXE" > "$WORK/frame_lower.signature.log" 2>&1; then
     invalid_mutation "$WORK/frame_lower.signature.log"
     return $?
   fi
-  "$WORK/frame_lower" generic-frame-lower "$REPO/bench/fixtures/lowcall_generic_self_new.iyi" > "$WORK/frame_lower.out" 2>&1 || return 1
-  if ! "$IYI" build -o "$WORK/frame_native" "$REPO/src/compiler/tools/compile_native.iyi" > "$WORK/frame_native.build.log" 2>&1; then
+  "$WORK/frame_lower$EXE" generic-frame-lower "$REPO_NATIVE/bench/fixtures/lowcall_generic_self_new.iyi" > "$WORK/frame_lower.out" 2>&1 || { cat "$WORK/frame_lower.out"; return 2; }
+  if ! "$IYI" build -o "$WORK_NATIVE/frame_native$EXE" "$REPO_NATIVE/src/compiler/tools/compile_native.iyi" > "$WORK/frame_native.build.log" 2>&1; then
     invalid_mutation "$WORK/frame_native.build.log"
     return $?
   fi
-  IYI_PATH="$REPO/src" "$WORK/frame_native" "$REPO/bench/fixtures/lowcall_generic_self_new.iyi" -o "$WORK/frame.probe.exe" --pipeline typed --probe-phase --keep-going > "$WORK/frame.probe" 2>&1 || true
+  "$WORK/frame_native$EXE" "$REPO_NATIVE/bench/fixtures/lowcall_generic_self_new.iyi" -o "$WORK_NATIVE/frame.probe" --pipeline typed --probe-phase --keep-going > "$WORK/frame.probe" 2>&1
+  local result=$?
+  if [ "$result" -gt 1 ]; then echo "INVALID: generic frame probe exited $result"; cat "$WORK/frame.probe"; return 2; fi
   if grep -E 'no receiver inside a generic or builtin class method|no receiver inside a class method' "$WORK/frame.probe"; then
     echo "  generic frame: receiverless new was refused" >&2
     return 1

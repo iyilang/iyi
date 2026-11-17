@@ -195,6 +195,9 @@ iyi: $(O)\iyi.exe ## iyi: build `iyi` itself, runnable as .build\iyi.exe
 .PHONY: iyi-daemon
 iyi-daemon: $(O)\iyi-daemon.exe ## iyi: build iyi's own single-threaded build daemon
 
+.PHONY: iyi-compile
+iyi-compile: $(O)\iyi-compile.exe ## iyi: build the self-hosted end-to-end compiler tool
+
 .PHONY: iyi-zip
 iyi-zip: ## iyi: build a relocatable zip at .build
 # bake-format off: Mbake bug with Duplicate target rule https://github.com/EbodShojaei/bake/issues/106
@@ -397,6 +400,12 @@ $(O)\iyi.exe: $(DEPS) $(SOURCES)
 	.\bin\crystal build $(FLAGS) $(COMPILER_FLAGS) $(IYI_COMPILER_FLAGS) -o "$(O)\iyi-next.exe" src\compiler\iyi.cr --link-flags=/PDBALTPATH:iyi.pdb
 	$(call REPLACE,$(O)\iyi-next.exe,$@)
 	$(call REPLACE,$(O)\iyi-next.pdb,$(O)\iyi.pdb)
+	@echo built $@
+
+# Match the POSIX tool's source dependencies and native executable name.
+$(O)\iyi-compile.exe: $(O)\iyi.exe $(call GLOB,src\\*.iyi) $(call GLOB,src\\*.ir)
+	@$(call MKDIR,"$(O)")
+	$(O)\iyi.exe build -o "$@" src\compiler\tools\compile.iyi
 	@echo built $@
 
 $(O)\iyi-daemon.exe: $(DEPS) $(SOURCES)

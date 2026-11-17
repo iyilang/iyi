@@ -4950,11 +4950,16 @@ jobs:
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'selfhost') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     env:
       SELFHOST_HOST: linux-x86_64
+      SELFHOST_GATE_SHARD: ${{ matrix.shard }}/8
     container:
       image: crystallang/crystal:1.21.0-build
-    name: "The self-host gates, on Linux"
+    name: "The self-host gates, on Linux (${{ matrix.shard }}/8)"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -4984,8 +4989,7 @@ jobs:
       - name: Build `iyi` and its daemon
         run: make -o .build/crystal iyi iyi-daemon
 
-      # One driver runs every selfhost and native component gate in order,
-      # preserving complete logs and failing if any gate fails.
+      # Each shard runs its gates sequentially and preserves complete logs.
       - name: The self-host gates
         env:
           IR_ORACLE_EXPORT_DIR: ${{ runner.temp }}/selfhost-ir-oracle
@@ -4996,7 +5000,18 @@ jobs:
           bindir="$("$LLVM_CONFIG" --bindir)"
           LLVM_MC="$bindir/llvm-mc" LLVM_OBJDUMP="$bindir/llvm-objdump" bash bench/selfhost_gates.sh
 
+      - name: Identify this shard's exported references
+        id: references
+        run: |
+          if [ -d "${{ runner.temp }}/selfhost-ir-oracle" ]; then
+            echo "oracle=true" >> "$GITHUB_OUTPUT"
+          fi
+          if [ -d "${{ runner.temp }}/selfhost-elf" ]; then
+            echo "elf=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Preserve the same-head Linux LLVM references
+        if: steps.references.outputs.oracle == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: selfhost-ir-oracle
@@ -5005,6 +5020,7 @@ jobs:
           retention-days: 7
 
       - name: Preserve the AArch64 ELF image and provenance
+        if: steps.references.outputs.elf == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: selfhost-elf-aarch64
@@ -5016,7 +5032,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: selfhost-gates-${{ env.SELFHOST_HOST }}-${{ github.sha }}-${{ github.run_attempt }}
+          name: selfhost-gates-${{ env.SELFHOST_HOST }}-${{ matrix.shard }}-${{ github.sha }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/selfhost-gate-logs
           if-no-files-found: error
           retention-days: 7
@@ -5029,8 +5045,13 @@ jobs:
     env:
       MACOSX_DEPLOYMENT_TARGET: "14.4"
       SELFHOST_HOST: darwin-arm64
+      SELFHOST_GATE_SHARD: ${{ matrix.shard }}/5
     timeout-minutes: 120
-    name: "The self-host gates, on darwin arm64"
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5]
+    name: "The self-host gates, on darwin arm64 (${{ matrix.shard }}/5)"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -5069,7 +5090,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: selfhost-gates-${{ env.SELFHOST_HOST }}-${{ github.sha }}-${{ github.run_attempt }}
+          name: selfhost-gates-${{ env.SELFHOST_HOST }}-${{ matrix.shard }}-${{ github.sha }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/selfhost-gate-logs
           if-no-files-found: error
           retention-days: 7
@@ -5079,9 +5100,14 @@ jobs:
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'selfhost-windows') }}
     runs-on: windows-2025
     timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     env:
       SELFHOST_HOST: windows-x86_64
-    name: "The self-host gates, on Windows x86_64"
+      SELFHOST_GATE_SHARD: ${{ matrix.shard }}/8
+    name: "The self-host gates, on Windows x86_64 (${{ matrix.shard }}/8)"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -5140,7 +5166,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: selfhost-gates-${{ env.SELFHOST_HOST }}-${{ github.sha }}-${{ github.run_attempt }}
+          name: selfhost-gates-${{ env.SELFHOST_HOST }}-${{ matrix.shard }}-${{ github.sha }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/selfhost-gate-logs
           if-no-files-found: error
           retention-days: 7

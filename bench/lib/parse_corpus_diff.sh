@@ -7,23 +7,52 @@ if [ "$#" -ne 2 ]; then
   exit 2
 fi
 root="$(cd "$(dirname "$0")/../.." && pwd)" || exit 2
-case "$1" in /*) hosted="$1" ;; *) hosted="$PWD/$1" ;; esac
-case "$2" in /*) candidate="$2" ;; *) candidate="$PWD/$2" ;; esac
+. "$root/bench/lib/host.sh" || exit 2
+require_test_host || exit 2
+if [ -z "$PY" ]; then
+  echo 'a functional Python interpreter is required for timed corpus comparisons' >&2
+  exit 2
+fi
+case "$1" in
+  [A-Za-z]:[\\/]*) hosted="$(cygpath -u "$1")" || exit 2 ;;
+  /*) hosted="$1" ;;
+  *) hosted="$PWD/$1" ;;
+esac
+case "$2" in
+  [A-Za-z]:[\\/]*) candidate="$(cygpath -u "$2")" || exit 2 ;;
+  /*) candidate="$2" ;;
+  *) candidate="$PWD/$2" ;;
+esac
 if [ ! -x "$hosted" ] || [ ! -x "$candidate" ]; then
   echo "both arguments must be executable files" >&2
   exit 2
 fi
+hosted_native="$(native_path "$hosted")" || exit 2
+candidate_native="$(native_path "$candidate")" || exit 2
 work="$(mktemp -d "${TMPDIR:-/tmp}/parse_corpus_diff.XXXXXX")" || exit 2
 trap 'rm -rf "$work"' EXIT
 cd "$root" || exit 2
 agree=0
 differ=0
+run_timed() {
+  "$PY" - "$@" <<'PY'
+import subprocess, sys
+try:
+    result = subprocess.run(sys.argv[1:], stdin=subprocess.DEVNULL, timeout=30)
+except subprocess.TimeoutExpired:
+    sys.exit(142)
+except OSError as error:
+    print(error, file=sys.stderr)
+    sys.exit(127)
+sys.exit(result.returncode if result.returncode >= 0 else 128 - result.returncode)
+PY
+}
 compare() {
   local label="$1" hs cs
   shift
-  perl -e 'alarm 30; exec @ARGV or exit 127' -- "$hosted" "$@" </dev/null >"$work/hosted.out" 2>"$work/hosted.err"
+  run_timed "$hosted_native" "$@" >"$work/hosted.out" 2>"$work/hosted.err"
   hs=$?
-  perl -e 'alarm 30; exec @ARGV or exit 127' -- "$candidate" "$@" </dev/null >"$work/candidate.out" 2>"$work/candidate.err"
+  run_timed "$candidate_native" "$@" >"$work/candidate.out" 2>"$work/candidate.err"
   cs=$?
   if [ "$hs" -ne 142 ] && [ "$cs" -ne 142 ] && [ "$hs" -eq "$cs" ] && cmp -s "$work/hosted.out" "$work/candidate.out" && cmp -s "$work/hosted.err" "$work/candidate.err"; then
     printf 'agree %s\n' "$label"
@@ -47,7 +76,7 @@ compare() {
 }
 compare '<no argument>'
 while IFS= read -r -d '' file; do
-  compare "$file" "$file"
+  compare "$file" "$(native_path "$root/$file")"
 done < <(find src samples/iyi bench/fixtures -type f -name '*.iyi' -print0)
 printf 'summary: %s agree, %s differ\n' "$agree" "$differ"
 [ "$differ" -eq 0 ]

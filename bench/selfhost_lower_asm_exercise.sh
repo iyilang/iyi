@@ -23,10 +23,15 @@
 set -u
 status=0
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO/bench/lib/host.sh" || exit 1
+require_test_host || exit 1
+REPO_NATIVE="$(native_path "$REPO")" || exit 1
+export IYI_PATH="$REPO_NATIVE/src"
 IYI="$REPO/bin/iyi"
 . "$REPO/bench/lib/mutation.sh"
 . "$REPO/bench/lib/lower_oracle.sh"
 WORK="$(mktemp -d)"
+WORK_NATIVE="$(native_path "$WORK")" || exit 1
 
 trap 'rm -rf "$WORK"' EXIT
 
@@ -93,8 +98,9 @@ function rewrite_asm(line,   p, types) {
 '
 
 echo "== 1. Building the port driver"
-if ! "$IYI" build -o "$WORK/port" "$REPO/bench/selfhost_lower_asm_exercise.iyi" > "$WORK/port.build.log" 2>&1; then
-  echo "  the port driver did not build (see $WORK/port.build.log)"
+if ! "$IYI" build -o "$WORK_NATIVE/port$EXE" "$REPO_NATIVE/bench/selfhost_lower_asm_exercise.iyi" > "$WORK/port.build.log" 2>&1; then
+  echo "  the port driver did not build"
+  cat "$WORK/port.build.log"
   exit 1
 fi
 echo "  driver built"
@@ -106,14 +112,20 @@ e2e=""
 diverged=0
 for fixture in "$REPO"/bench/fixtures/lowasm_*.iyi; do
   name="$(basename "$fixture" .iyi)"
-  if ! "$IYI" build --prelude empty --emit llvm-ir --no-debug -o "$WORK/$name" "$fixture" > "$WORK/$name.oracle.log" 2>&1 || [ ! -s "$WORK/$name.ll" ]; then
+  oracle_target=()
+  oracle_output="$WORK_NATIVE/$name$EXE"
+  if [ "$HOST_ID" != darwin-arm64 ]; then
+    oracle_target=(--cross-compile --target aarch64-apple-darwin)
+    oracle_output="$WORK_NATIVE/$name.o"
+  fi
+  if ! "$IYI" build "${oracle_target[@]}" --prelude empty --emit llvm-ir --no-debug -o "$oracle_output" "$(native_path "$fixture")" > "$WORK/$name.oracle.log" 2>&1 || [ ! -s "$WORK/$name.ll" ]; then
     echo "  $name: the hosted compiler did not emit its module (see $WORK/$name.oracle.log)"
     diverged=$((diverged + 1))
     continue
   fi
   awk "$ASM_TYPES" "$WORK/$name.ll" | awk "$CALL_TYPES" > "$WORK/$name.oracle.ll"
 
-  if ! "$WORK/port" lower "$fixture" "$WORK/$name.oracle.ll" > "$WORK/$name.port.out" 2> "$WORK/$name.port.err"; then
+  if ! "$WORK/port$EXE" lower "$(native_path "$fixture")" "$WORK_NATIVE/$name.oracle.ll" > "$WORK/$name.port.out" 2> "$WORK/$name.port.err"; then
     echo "  $name: REFUSED: $(awk 'NR==1' "$WORK/$name.port.err")"
     diverged=$((diverged + 1))
     continue
@@ -144,17 +156,25 @@ echo "  IR-only: lowasm_svc (the template is svc #0, a supervisor call; not exec
 e2e_pass=0
 e2e_fail=0
 ir_only=0
-if "$IYI" build -o "$WORK/compile_native" "$REPO/src/compiler/tools/compile_native.iyi" > "$WORK/tool.build.log" 2>&1; then
+if [ "$HOST_ID" != darwin-arm64 ]; then
+  host_limited "inline asm: AArch64 Mach-O execution requires macOS arm64 ($HOST_ID compares and emits Darwin-target IR)"
+fi
+if "$IYI" build -o "$WORK_NATIVE/compile_native$EXE" "$REPO_NATIVE/src/compiler/tools/compile_native.iyi" > "$WORK/tool.build.log" 2>&1; then
   for name in $e2e; do
-    fixture="$REPO/bench/fixtures/$name.iyi"
-    if ! "$WORK/port" emit "$fixture" "$WORK/$name.oracle.ll" > "$WORK/$name.port.ir" 2> "$WORK/$name.emit.err"; then
+    fixture="$REPO_NATIVE/bench/fixtures/$name.iyi"
+    if ! "$WORK/port$EXE" emit "$fixture" "$WORK_NATIVE/$name.oracle.ll" > "$WORK/$name.port.ir" 2> "$WORK/$name.emit.err"; then
       echo "  $name: the port writes no module: $(awk 'NR==1' "$WORK/$name.emit.err")"
       e2e_fail=$((e2e_fail + 1))
       continue
     fi
-    if ! "$WORK/compile_native" "$WORK/$name.port.ir" -o "$WORK/$name.native" > "$WORK/$name.native.log" 2>&1; then
-      reason="$(awk 'NR==1' "$WORK/$name.native.log")"
-      echo "  $name: IR-only. The native tool refuses the template: $reason"
+    if ! "$WORK/compile_native$EXE" "$WORK_NATIVE/$name.port.ir" -o "$WORK_NATIVE/$name.native" > "$WORK/$name.native.log" 2>&1; then
+      echo "  $name: FAIL, the native tool could not emit its Mach-O executable"
+      cat "$WORK/$name.native.log"
+      e2e_fail=$((e2e_fail + 1))
+      continue
+    fi
+    if [ "$HOST_ID" != darwin-arm64 ]; then
+      echo "  $name: AArch64 Mach-O emitted; execution is host-limited"
       ir_only=$((ir_only + 1))
       continue
     fi
@@ -164,7 +184,7 @@ if "$IYI" build -o "$WORK/compile_native" "$REPO/src/compiler/tools/compile_nati
       continue
     fi
     timeout 30 "$WORK/$name.native" > "$WORK/$name.native.out" 2>&1; ns=$?
-    timeout 30 "$WORK/$name" > "$WORK/$name.hosted.out" 2>&1; hs=$?
+    timeout 30 "$WORK/$name$EXE" > "$WORK/$name.hosted.out" 2>&1; hs=$?
     if [ "$ns" = "$hs" ] && cmp -s "$WORK/$name.native.out" "$WORK/$name.hosted.out"; then
       echo "  $name: native executable runs to the hosted result (status $hs, stdout identical)"
       e2e_pass=$((e2e_pass + 1))
@@ -174,11 +194,12 @@ if "$IYI" build -o "$WORK/compile_native" "$REPO/src/compiler/tools/compile_nati
     fi
   done
 else
-  echo "  the native tool does not build (see $WORK/tool.build.log)"
+  echo "  the native tool does not build"
+  cat "$WORK/tool.build.log"
   e2e_fail=1
 fi
 echo "  end to end: $e2e_pass fixture(s) run to the hosted result, $e2e_fail failed, $ir_only IR-only"
-if [ "$e2e_fail" -gt 0 ] || [ "$e2e_pass" -eq 0 ]; then
+if [ "$e2e_fail" -gt 0 ] || { [ "$HOST_ID" = darwin-arm64 ] && [ "$e2e_pass" -eq 0 ]; }; then
   status=1
 fi
 
@@ -186,8 +207,21 @@ echo
 echo "== 4. Mutation proofs: the gate must catch each patch to the ported code"
 asm_one() {
   name="$1"
-  "$IYI" build -o "$WORK/mut" "$REPO/bench/selfhost_lower_asm_exercise.iyi" > "$WORK/mut.build.log" 2>&1 || return 1
-  "$WORK/mut" lower "$REPO/bench/fixtures/$name.iyi" "$WORK/$name.oracle.ll" > "$WORK/mut.out" 2>/dev/null || return 1
+  if ! "$IYI" build -o "$WORK_NATIVE/mut$EXE" "$REPO_NATIVE/bench/selfhost_lower_asm_exercise.iyi" > "$WORK/mut.build.log" 2>&1; then
+    echo 'INVALID: asm mutant driver did not build'
+    cat "$WORK/mut.build.log"
+    return 2
+  fi
+  if ! "$WORK/mut$EXE" lower "$REPO_NATIVE/bench/fixtures/$name.iyi" "$WORK_NATIVE/$name.oracle.ll" > "$WORK/mut.out" 2>"$WORK/mut.err"; then
+    echo "INVALID: asm mutant could not lower $name"
+    cat "$WORK/mut.err"
+    return 2
+  fi
+  if ! grep -Eq '^SUMMARY identical=[0-9]+ total=[0-9]+ module=[01]$' "$WORK/mut.out"; then
+    echo "INVALID: asm mutant produced no comparison for $name"
+    cat "$WORK/mut.out"
+    return 2
+  fi
   awk '/^SUMMARY identical=[0-9]+ total=[0-9]+ module=[01]$/ { split($2, a, "="); split($3, b, "="); split($4, c, "="); if (a[2] != b[2] || b[2] == 0 || c[2] != 1) bad = 1; n++ } END { exit (bad || n == 0) }' "$WORK/mut.out"
 }
 if ! asm_one lowasm_yield || ! asm_one lowasm_reg_out || ! asm_one lowasm_fixed || ! asm_one lowasm_reg_io; then
@@ -203,7 +237,7 @@ prove_mutation "outputs are written after inputs (constraint order)" "$REPO/src/
 echo "  lowasm_reg_out catches an output that is not stored:"
 prove_mutation "an asm output is not stored" "$REPO/src/compiler/lower/asm.iyi" \
   "  store_aligned(low, value, pointer.as(Value))" \
-  "  low.last = value" -- asm_one lowasm_reg_out || status=1
+  "  nil" -- asm_one lowasm_reg_out || status=1
 echo "  lowasm_yield catches a dropped volatile:"
 prove_mutation "volatile is dropped from the asm call" "$REPO/src/compiler/lower/asm.iyi" \
   "node.volatile, node.alignstack, dialect, node.can_throw" \
@@ -211,7 +245,7 @@ prove_mutation "volatile is dropped from the asm call" "$REPO/src/compiler/lower
 echo "  lowasm_fixed catches a dropped clobber:"
 prove_mutation "a clobber is dropped from the constraint string" "$REPO/src/compiler/lower/asm.iyi" \
   "    append_clobbers(io, node)" \
-  "    io << io" -- asm_one lowasm_fixed || status=1
+  "    nil" -- asm_one lowasm_fixed || status=1
 
 echo
 if [ "$status" -eq 0 ]; then

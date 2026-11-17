@@ -336,6 +336,9 @@ crystal-daemon: $(O)/$(CRYSTAL_DAEMON_BIN) ## Build the single-threaded build da
 .PHONY: iyi-daemon
 iyi-daemon: $(O)/$(IYI_DAEMON_BIN) ## iyi: build iyi's own single-threaded build daemon
 
+.PHONY: iyi-compile
+iyi-compile: $(O)/iyi-compile$(EXE) ## iyi: build the self-hosted end-to-end compiler tool
+
 .PHONY: build
 build: ## Build all files for a package install (currently the compiler and manpages)
 # bake-format off: Mbake bug with Duplicate target rule https://github.com/EbodShojaei/bake/issues/106
@@ -627,6 +630,13 @@ $(O)/$(IYI_DAEMON_BIN): $(DEPS) $(SOURCES)
 	$(EXPORTS) $(EXPORTS_BUILD) IYI_CONFIG_PATH='$$ORIGIN/../share/iyi/src:$$ORIGIN/../share/iyi/crystal:$$ORIGIN/../src' \
 	  ./bin/crystal build $(FLAGS) $(COMPILER_FLAGS) $(BINARY_GC_FLAGS) $(SELF_RPATH) -Dwithout_mt -o $@ src/compiler/iyi.cr
 	@echo "built $@ — \`iyi daemon start\` finds it beside iyi"
+
+# The self-hosted tool depends on its compiler and library sources, including
+# the runtime IR embedded by the backend.
+$(O)/iyi-compile$(EXE): $(O)/iyi$(EXE) $(shell find src -name '*.iyi' -o -name '*.ir')
+	@mkdir -p $(O)
+	$(O)/iyi$(EXE) build -o $@ src/compiler/tools/compile.iyi
+	@echo "built $@"
 
 # iyi: the front end on its own. Linking libLLVM costs 26 ms of load-time
 # initialisers whether or not anything generates code, and `--no-codegen` never

@@ -18,15 +18,20 @@
 set -u
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$REPO/bench/lib/host.sh" || exit 1
+require_test_host || exit 1
+REPO_NATIVE="$(native_path "$REPO")" || exit 1
+export IYI_PATH="$REPO_NATIVE/src"
 IYI="$REPO/bin/iyi"
 TOOL_SRC="$REPO/src/compiler/tools/compile_native.iyi"
 FLOOR="$REPO/bench/native_selfcompile.floor"
 . "$REPO/bench/lib/mutation.sh"
 
-WORK="$(mktemp -d /tmp/iyi-selfcompile.XXXXXX)"
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/iyi-selfcompile.XXXXXX")" || exit 1
+WORK_NATIVE="$(native_path "$WORK")" || exit 1
 trap 'rm -rf "$WORK"' EXIT
 mkdir -p "$WORK/bin" "$WORK/probe" "$WORK/exe"
-tool="$WORK/bin/iyi-compile-native"
+tool="$WORK/bin/iyi-compile-native$EXE"
 status=0
 
 rank_of() {
@@ -58,8 +63,11 @@ normalise() {
 # probe_one FILE NAME: sets REACHED, REFUSED_IN and REFUSAL for one file, probed alone with --probe-phase.
 probe_one() {
   local target="$1" name="$2" log="$WORK/probe/$2.log" rc fail_line
-  (cd "$WORK" && IYI_PATH="$REPO/src" "$tool" "$target" -o "$WORK/exe/$name" --probe-phase --prelude >"$log" 2>&1)
+  local args=()
+  if [ "$HOST_ID" != darwin-arm64 ]; then args=(--emit ir); fi
+  (cd "$WORK" && "$tool" "$(native_path "$target")" -o "$WORK_NATIVE/exe/$name$EXE" --probe-phase --prelude "${args[@]}" >"$log" 2>&1)
   rc=$?
+  PROBE_RC=$rc
   REACHED=$(awk '/^\[phase\] (parse|semantic|codegen|link): pass/ { r = $2; sub(":", "", r) } END { print (r == "" ? "none" : r) }' "$log")
   REFUSED_IN=""
   REFUSAL=""
@@ -81,18 +89,23 @@ probe_one() {
 }
 
 echo "== 1. build iyi-compile-native from its source with ./bin/iyi"
-if ! "$IYI" build -o "$tool" "$TOOL_SRC" >"$WORK/build.log" 2>&1; then
+if ! "$IYI" build -o "$WORK_NATIVE/bin/iyi-compile-native$EXE" "$REPO_NATIVE/src/compiler/tools/compile_native.iyi" >"$WORK/build.log" 2>&1; then
   echo "FAIL: ./bin/iyi could not build $TOOL_SRC"
-  awk '/^Error/ { print; exit }' "$WORK/build.log"
+  cat "$WORK/build.log"
   exit 1
 fi
 echo "   built iyi-compile-native from $TOOL_SRC"
-tool_libs=$(otool -L "$tool" | awk 'NR > 1 { print $1 }')
-if [ "$tool_libs" = "/usr/lib/libSystem.B.dylib" ]; then
-  echo "   links only /usr/lib/libSystem.B.dylib"
+if [ "$HOST_OS" = darwin ]; then
+  tool_libs=$(otool -L "$tool" | awk 'NR > 1 { print $1 }')
+  if [ "$tool_libs" = "/usr/lib/libSystem.B.dylib" ]; then
+    echo "   links only /usr/lib/libSystem.B.dylib"
+  else
+    echo "FAIL: iyi-compile-native links more than libSystem: $tool_libs"
+    exit 1
+  fi
 else
-  echo "FAIL: iyi-compile-native links more than libSystem: $tool_libs"
-  exit 1
+  host_limited "selfcompile: libSystem dependency inspection requires macOS otool"
+  host_limited "selfcompile: probes stop after verified IR; Darwin Mach-O link requires macOS arm64"
 fi
 
 echo "== 2. every src/iyi/*.iyi and src/compiler/**/*.iyi, probed alone with the native back end"
@@ -111,8 +124,10 @@ echo "   probed $(awk 'END { print NR }' "$results") files"
 echo "== 3. whole programs, built to an executable (not probed)"
 for rel in src/compiler/tools/compile_native.iyi src/compiler/stage1.iyi; do
   base=$(basename "$rel" .iyi)
-  if (cd "$WORK" && IYI_PATH="$REPO/src" "$tool" "$REPO/$rel" -o "$WORK/exe/whole_$base" --prelude >"$WORK/whole_$base.log" 2>&1); then
-    outcome="built"
+  args=()
+  if [ "$HOST_ID" != darwin-arm64 ]; then args=(--emit ir); fi
+  if (cd "$WORK" && "$tool" "$REPO_NATIVE/$rel" -o "$WORK_NATIVE/exe/whole_$base$EXE" --prelude "${args[@]}" >"$WORK/whole_$base.log" 2>&1); then
+    if [ "$HOST_ID" = darwin-arm64 ]; then outcome="built"; else outcome="verified IR emitted"; fi
   else
     outcome="refused: $(awk '/^((parse|semantic|codegen|link): fail: |Error:|iyi-compile-native:|iyi: panic:)/ { print; exit }' "$WORK/whole_$base.log" | normalise)"
   fi
@@ -227,7 +242,13 @@ else
   echo "  mutating $mut_rel (floor $mut_floor): $mut_line"
   mutant_check() {
     probe_one "$REPO/$mut_rel" mutant_probe
-    [ "$(rank_of "$REACHED")" -ge "$(rank_of "$mut_floor")" ]
+    if [ "$PROBE_RC" -ne 0 ] || ! grep -E '^(semantic|codegen): fail: .*UndefinedMutantType12345' "$WORK/probe/mutant_probe.log" >/dev/null; then
+      cat "$WORK/probe/mutant_probe.log"
+      return 2
+    fi
+    if [ "$(rank_of "$REACHED")" -ge "$(rank_of "$mut_floor")" ]; then return 0; fi
+    echo "decisive: undefined instance variable type fell below $mut_floor"
+    return 1
   }
   mut_run=$((mut_run + 1))
   if prove_mutation "an undefined instance variable type falls below the floor" "$REPO/$mut_rel" \
@@ -237,8 +258,7 @@ else
     status=1
   fi
 fi
-mut_run=$((mut_run + 1))
-( prove_mutation "a patch that changes nothing" "$REPO/$mut_rel" "$mut_line" "$mut_line" -- true ) >"$WORK/noop.log" 2>&1
+( prove_mutation "a patch that changes nothing" "$TOOL_SRC" "CompileNative.run" "CompileNative.run" -- true ) >"$WORK/noop.log" 2>&1
 noop_rc=$?
 if [ "$noop_rc" = 3 ]; then
   echo "  refused: a patch that changes nothing (exit 3, not counted)"
@@ -246,8 +266,7 @@ else
   echo "  FAIL: a patch that changes nothing was not refused (exit $noop_rc)"
   status=1
 fi
-mut_run=$((mut_run - 1))
-echo "  Mutation summary: $mut_caught/$mut_run source mutations caught (undefined instance variable type in $mut_rel)"
+echo "  Mutation summary: $mut_caught/$mut_run attempted caught; 0 host-limited; no-op patch checked separately"
 if [ "$mut_caught" -ne "$mut_run" ]; then status=1; fi
 
 echo

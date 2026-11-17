@@ -2,8 +2,12 @@
 # Compare hosted placement notes with the native non-Share witness sidecar.
 set -u
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO/bench/lib/host.sh" || exit 1
+require_test_host || exit 1
+if [ -z "$PY" ]; then echo 'a functional Python interpreter is required' >&2; exit 1; fi
 IYI="${IYI_COMPILER:-$REPO/bin/iyi}"
-export IYI_PATH="$REPO/src"
+REPO_NATIVE="$(native_path "$REPO")" || exit 1
+export IYI_PATH="$REPO_NATIVE/src"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 . "$REPO/bench/lib/mutation.sh"
@@ -21,15 +25,15 @@ run_monitored() {
 
 native_probe() {
   local compiler="$1" source="$2" output="$3"
-  run_monitored "$compiler" "$source" -o "$output" --pipeline typed --prelude --probe-phase --keep-going
+  run_monitored "$compiler" "$(native_path "$source")" -o "$(native_path "$output")" --pipeline typed --prelude --probe-phase --keep-going
 }
 
 build_compiler() {
-  run_monitored "$IYI" build -o "$1" "$REPO/src/compiler/tools/compile_native.iyi" > "$2" 2>&1
+  run_monitored "$IYI" build -o "$(native_path "$1")" "$REPO_NATIVE/src/compiler/tools/compile_native.iyi" > "$2" 2>&1
 }
 
 compare_sites() {
-  python3 - "$1" "$2" "$3" "$4" <<'PY'
+  "$PY" - "$(native_path "$1")" "$(native_path "$2")" "$(native_path "$3")" "$4" <<'PY'
 import pathlib, re, sys
 source, hosted_path, native_path, kind = map(pathlib.Path, sys.argv[1:])
 kind = str(kind)
@@ -92,11 +96,16 @@ PY
 
 check_fixture() {
   local fixture="$1" source="$2" label="$3"
-  if ! run_monitored "$IYI" check --explain-spawn-std "$fixture" > "$WORK/$label.hosted" 2>&1; then
+  if ! run_monitored "$IYI" check --explain-spawn-std "$(native_path "$fixture")" > "$WORK/$label.hosted" 2>&1; then
     echo "FAIL: hosted check ($label)"; cat "$WORK/$label.hosted"; return 1
   fi
-  native_probe "$WORK/compiler" "$fixture" "$WORK/$label" > "$WORK/$label.native" 2>&1
+  native_probe "$WORK/compiler$EXE" "$fixture" "$WORK/$label" > "$WORK/$label.native" 2>&1
   local rc=$?
+  if [ "$rc" -gt 1 ]; then
+    echo "FAIL: native probe crashed ($label, exit $rc)"
+    cat "$WORK/$label.native"
+    return 1
+  fi
   # The keep-going compiler may refuse later lowering, but a completed table
   # writes both sidecars. A stream left by an interrupted run is not a table.
   if [ ! -f "$WORK/$label.names" ] || [ ! -f "$WORK/$label.refusals" ]; then
@@ -113,7 +122,7 @@ check_fixture() {
 
 # The sidecar's lowering row is the site the pool reach walk actually reports.
 reach_is() {
-  python3 - "$branch" "$1" "$2" <<'PY'
+  "$PY" - "$(native_path "$branch")" "$(native_path "$1")" "$2" <<'PY'
 import pathlib, re, sys
 source, sidecar = map(pathlib.Path, sys.argv[1:3])
 label = sys.argv[3]
@@ -136,7 +145,7 @@ print(f'pool reach: {label} at {source.name}:{sites[0]}')
 PY
 }
 
-if ! build_compiler "$WORK/compiler" "$WORK/compiler.log"; then
+if ! build_compiler "$WORK/compiler$EXE" "$WORK/compiler.log"; then
   echo 'FAIL: native compiler tool did not build'; cat "$WORK/compiler.log"; exit 1
 fi
 check_fixture "$corpus" "$corpus" corpus || exit 1
@@ -147,14 +156,15 @@ reach_is "$WORK/branch.refusals" live_else || exit 1
 # The check returns nonzero only after the mutant compiled and the exact Assign
 # site's placement changed from the already-checked as-written to unproven.
 check_assign_mutation() {
-  if ! build_compiler "$WORK/mutant" "$WORK/mutant.build"; then
-    echo 'INVALID: mutant compiler did not build'; cat "$WORK/mutant.build"; return 0
+  if ! build_compiler "$WORK/mutant$EXE" "$WORK/mutant.build"; then
+    echo 'INVALID: mutant compiler did not build'; cat "$WORK/mutant.build"; return 2
   fi
-  native_probe "$WORK/mutant" "$corpus" "$WORK/mutant-result" > "$WORK/mutant.log" 2>&1
-  if [ ! -f "$WORK/mutant-result.names" ] || [ ! -f "$WORK/mutant-result.refusals" ]; then
-    echo 'INVALID: mutant did not produce a complete sidecar'; tail -n 30 "$WORK/mutant.log"; return 0
+  local rc=0
+  native_probe "$WORK/mutant$EXE" "$corpus" "$WORK/mutant-result" > "$WORK/mutant.log" 2>&1 || rc=$?
+  if [ "$rc" -gt 1 ] || [ ! -f "$WORK/mutant-result.names" ] || [ ! -f "$WORK/mutant-result.refusals" ]; then
+    echo 'INVALID: mutant crashed or did not produce a complete sidecar'; tail -n 30 "$WORK/mutant.log"; return 2
   fi
-  if python3 - "$corpus" "$WORK/mutant-result.refusals" <<'PY'
+  if "$PY" - "$(native_path "$corpus")" "$(native_path "$WORK/mutant-result.refusals")" <<'PY'
 import pathlib, re, sys
 source, refusals = map(pathlib.Path, sys.argv[1:])
 lines = source.read_text().splitlines()
@@ -186,12 +196,13 @@ prove_mutation 'instance assignment witness removed' "$REPO/src/compiler/semanti
 # the reported reach moves to the exact site predicted by that mutation.
 check_reach_mutation() {
   local wanted="$1" tag="$2"
-  if ! build_compiler "$WORK/$tag-compiler" "$WORK/$tag.build"; then
-    echo "INVALID: $tag compiler did not build"; cat "$WORK/$tag.build"; return 0
+  if ! build_compiler "$WORK/$tag-compiler$EXE" "$WORK/$tag.build"; then
+    echo "INVALID: $tag compiler did not build"; cat "$WORK/$tag.build"; return 2
   fi
-  native_probe "$WORK/$tag-compiler" "$branch" "$WORK/$tag" > "$WORK/$tag.log" 2>&1
-  if [ ! -f "$WORK/$tag.names" ] || [ ! -f "$WORK/$tag.refusals" ]; then
-    echo "INVALID: $tag did not produce a complete sidecar"; tail -n 30 "$WORK/$tag.log"; return 0
+  local rc=0
+  native_probe "$WORK/$tag-compiler$EXE" "$branch" "$WORK/$tag" > "$WORK/$tag.log" 2>&1 || rc=$?
+  if [ "$rc" -gt 1 ] || [ ! -f "$WORK/$tag.names" ] || [ ! -f "$WORK/$tag.refusals" ]; then
+    echo "INVALID: $tag crashed or did not produce a complete sidecar"; tail -n 30 "$WORK/$tag.log"; return 2
   fi
   if reach_is "$WORK/$tag.refusals" "$wanted"; then
     echo "compiled $tag mutant moved reach to $wanted"

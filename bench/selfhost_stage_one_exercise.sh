@@ -16,22 +16,36 @@
 set -u
 status=0
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO/bench/lib/host.sh" || exit 1
+require_test_host || exit 1
+. "$REPO/bench/floor_base.sh" || exit 1
+REPO_NATIVE="$(native_path "$REPO")" || exit 1
 BOOTSTRAP="$REPO/bin/iyi"
 ENTRY="$REPO/src/compiler/stage1.iyi"
 MUT_TARGET="$REPO/src/compiler/command/driver.iyi"
 WORK="$(mktemp -d)"
+WORK_NATIVE="$(native_path "$WORK")" || exit 1
+export IYI_PATH="$REPO_NATIVE/src"
 . "$REPO/bench/lib/mutation.sh"
 . "$REPO/bench/lib/tripwire.sh"
 . "$REPO/bench/lib/native_signature.sh"
-STAGE1="$REPO/.build/iyi-stage1"
-MUT_BINARY="$REPO/.build/iyi-stage1-mut-$$"
+STAGE1="$REPO/.build/iyi-stage1$EXE"
+MUT_BINARY="$REPO/.build/iyi-stage1-mut-$$$EXE"
 ORIGINAL_PATH="$PATH"
 mkdir -p "$WORK/tmp" "$WORK/out" "$WORK/out2" "$WORK/dir"
 tripwire_setup "$WORK/tripwire" "$WORK/tripwire.log" || exit 1
 
 run_stage1() {
+  local arg
+  local -a native_args=()
+  for arg in "$@"; do
+    case "$arg" in
+      "$REPO"/*|"$WORK"/*) arg="$(native_path "$arg")" || return 2 ;;
+    esac
+    native_args+=("$arg")
+  done
   env -u IYI_PATH -u CRYSTAL_PATH -u IYI_OPTS \
-    TMPDIR="$WORK/tmp" PATH="$TRIPWIRE_PATH:$ORIGINAL_PATH" "$STAGE1" "$@"
+    TMPDIR="$WORK_NATIVE/tmp" PATH="$TRIPWIRE_PATH:$ORIGINAL_PATH" "$STAGE1" "${native_args[@]}"
 }
 
 invoke_stage1() {
@@ -72,34 +86,33 @@ cleanup() {
   rm -f "$MUT_BINARY"
 }
 trap cleanup EXIT
-if command -v brew >/dev/null 2>&1; then LIBRARY_PATH="$(brew --prefix bdw-gc)/lib${LIBRARY_PATH:+:$LIBRARY_PATH}"; export LIBRARY_PATH; fi
-export IYI_CACHE_DIR="${IYI_CACHE_DIR:-${TMPDIR:-/tmp}/iyi-s1e-cache}"
+if [ "$HOST_OS" = darwin ] && command -v brew >/dev/null 2>&1; then LIBRARY_PATH="$(brew --prefix bdw-gc)/lib${LIBRARY_PATH:+:$LIBRARY_PATH}"; export LIBRARY_PATH; fi
+export IYI_CACHE_DIR="${IYI_CACHE_DIR:-$WORK_NATIVE/cache}"
 
 echo "== 1. Building the stage-one executable from src/compiler/stage1.iyi"
 cd "$REPO"
-rm -f "$REPO/.build/iyi-stage1"
-if ! LLVM_CONFIG="$TRIPWIRE_PATH/llvm-config" "$BOOTSTRAP" build -o "$REPO/.build/iyi-stage1" "$ENTRY" > "$WORK/build.log" 2>&1; then
+rm -f "$STAGE1"
+if ! LLVM_CONFIG="$(native_path "$TRIPWIRE_PATH/llvm-config")" "$BOOTSTRAP" build -o "$(native_path "$STAGE1")" "$(native_path "$ENTRY")" > "$WORK/build.log" 2>&1; then
   echo "  stage-one build failed:"
-  sed -n '1,20p' "$WORK/build.log"
+  cat "$WORK/build.log"
   exit 1
 fi
-if [ ! -x "$REPO/.build/iyi-stage1" ]; then
-  echo "  ERROR: .build/iyi-stage1 was not built"
+if [ ! -x "$STAGE1" ]; then
+  echo "  ERROR: .build/iyi-stage1$EXE was not built"
   exit 1
 fi
-echo "  built .build/iyi-stage1 successfully"
+echo "  built .build/iyi-stage1$EXE successfully"
 
 echo
 echo "== 2. Dependency floor on the stage-one binary itself"
-# Darwin lists links with otool -L; Linux lists NEEDED entries with readelf -d.
-# Any other system has no dependency reader here, so the gate fails.
-case "$(uname -s)" in
-  Darwin)
+# Inspect the host executable's dependency floor with the native platform tool.
+case "$HOST_OS" in
+  darwin)
     if ! command -v otool >/dev/null 2>&1; then
       echo "  ERROR: otool not found; the Darwin dependency floor needs otool -L"
       exit 1
     fi
-    libs="$(otool -L "$REPO/.build/iyi-stage1" 2>/dev/null | awk 'NR>1 {print $1}' | grep -v '^$')"
+    libs="$(otool -L "$STAGE1" 2>/dev/null | awk 'NR>1 {print $1}' | grep -v '^$')"
     echo "$libs" | sed 's/^/    /'
     if [ -z "$libs" ] || echo "$libs" | grep -qv '/usr/lib/libSystem.B.dylib'; then
       echo "  FLOOR BROKEN: the stage-one binary links more than the platform libc"
@@ -108,13 +121,13 @@ case "$(uname -s)" in
       echo "  stage-one binary links only the platform libc"
     fi
     ;;
-  Linux)
+  linux)
     if ! command -v readelf >/dev/null 2>&1; then
       echo "  ERROR: readelf not found; the Linux dependency floor needs readelf -d"
       exit 1
     fi
     # NEEDED entries print as "Shared library: [name]" in readelf -d output.
-    libs="$(readelf -d "$REPO/.build/iyi-stage1" 2>/dev/null | sed -n 's/.*Shared library: \[\(.*\)\]/\1/p' | sort -u)"
+    libs="$(readelf -d "$STAGE1" 2>/dev/null | sed -n 's/.*Shared library: \[\(.*\)\]/\1/p' | sort -u)"
     echo "$libs" | sed 's/^/    /'
     bad="$(echo "$libs" | grep -v -E '^(libc\.so|ld-linux|libgcc_s)' || true)"
     if [ -z "$libs" ] || [ -n "$bad" ]; then
@@ -124,12 +137,29 @@ case "$(uname -s)" in
       echo "  stage-one binary links only the platform libc"
     fi
     ;;
-  *)
-    echo "  ERROR: unsupported system $(uname -s): no dependency reader for the floor (Darwin uses otool -L, Linux uses readelf -d)"
-    exit 1
+  windows)
+    DUMPBIN="$(find_dumpbin || true)"
+    if [ -z "$DUMPBIN" ] || ! "$DUMPBIN" -nologo -dependents "$(native_path "$STAGE1")" >"$WORK/stage1.dlls" 2>&1; then
+      echo "  ERROR: dumpbin could not inspect the stage-one dependency floor"
+      [ ! -f "$WORK/stage1.dlls" ] || cat "$WORK/stage1.dlls"
+      exit 1
+    fi
+    real_dumpbin="$DUMPBIN"
+    dumpbin_lf() { tr -d '\r' <"$WORK/stage1.dlls"; }
+    DUMPBIN=dumpbin_lf
+    libs="$(pe_dlls "$(native_path "$STAGE1")")"
+    DUMPBIN="$real_dumpbin"
+    bad="$(extra_dlls "$FLOOR_DLLS_RUNTIME" "$libs")"
+    printf '    %s\n' "$libs"
+    if [ -z "$libs" ] || [ -n "$bad" ]; then
+      echo "  FLOOR BROKEN: the stage-one binary has unexpected DLL dependencies: $bad"
+      status=1
+    else
+      echo "  stage-one binary links only the platform runtime"
+    fi
     ;;
 esac
-if [ "$(uname -s)" = Darwin ] && ! check_native "$STAGE1"; then
+if [ "$HOST_OS" = darwin ] && ! check_native "$STAGE1"; then
   echo "  ERROR: refusing to execute an invalid stage-one binary"
   exit 1
 fi
@@ -140,7 +170,7 @@ echo "== 3. Measuring the stage-one phase against the committed floor"
 # Native build and run are available on Darwin arm64. Other hosts must
 # dispatch and refuse both verbs without writing an output.
 STAGE1_FLOOR="dispatch"
-if [ "$(uname -s) $(uname -m)" = "Darwin arm64" ]; then
+if [ "$HOST_ID" = darwin-arm64 ]; then
   STAGE1_FLOOR="run"
 fi
 
@@ -162,7 +192,17 @@ probe_stage1() {
   run_stage1 version > "$out" 2>&1 || ok=0
   expected_version="iyi $(tr -d ' \r\n' < "$REPO/src/IYI_VERSION")"
   grep -qF "$expected_version" "$out" || ok=0
-  local expected_target="${IYI_CONFIG_TARGET:-aarch64-apple-darwin}"
+  local expected_target="${IYI_CONFIG_TARGET:-}"
+  if [ -z "$expected_target" ]; then
+    case "$HOST_ID" in
+      darwin-arm64) expected_target=aarch64-apple-darwin ;;
+      darwin-x86_64) expected_target=x86_64-apple-darwin ;;
+      linux-arm64) expected_target=aarch64-unknown-linux-gnu ;;
+      linux-x86_64) expected_target=x86_64-unknown-linux-gnu ;;
+      windows-x86_64) expected_target=x86_64-pc-windows-msvc ;;
+      *) echo "unsupported stage-one target: $HOST_ID" >&2; return 1 ;;
+    esac
+  fi
   case "$expected_target" in arm64-*) expected_target="aarch64-${expected_target#arm64-}" ;; esac
   grep -Fq "Default target: $expected_target" "$out" || ok=0
   if grep -q '^LLVM:' "$out"; then ok=0; fi
@@ -424,9 +464,9 @@ IYI
 check_other_host() {
   local verb
   for verb in build run; do
-    rm -f "$WORK/out/other"
-    invoke_stage1 "$verb" -o "$WORK/out/other" "$REPO/samples/iyi/hello.iyi"
-    [ "$RC" -eq 1 ] && [ ! -e "$WORK/out/other" ] &&
+    rm -f "$WORK/out/other$EXE"
+    invoke_stage1 "$verb" -o "$WORK/out/other$EXE" "$REPO/samples/iyi/hello.iyi"
+    [ "$RC" -eq 1 ] && [ ! -e "$WORK/out/other$EXE" ] &&
       grep -Fq 'this host is not one' "$WORK/stderr" ||
       { show_failure "$verb did not refuse on this host"; return 1; }
   done
@@ -463,6 +503,7 @@ if [ "$STAGE1_FLOOR" = run ]; then
   case_run "resolved source identity protection" check_source_protection
   case_run "library annotations" check_link_annotation
 else
+  host_limited 'stage-one native builds, runs, and build/run mutation probes require the Darwin arm64 kernel'
   case_run "build and run refuse this host" check_other_host
 fi
 case_run "unsupported commands" check_unsupported_verb
@@ -470,6 +511,8 @@ if tripwire_fired "$WORK/tripwire.log"; then
   echo "  FAIL: an LLVM or external tool was invoked:"
   cat "$WORK/tripwire.log"
   status=1
+elif [ "$HOST_OS" = windows ]; then
+  host_limited 'stage-one external-tool tripwire uses POSIX shell shims and cannot establish interception of native Windows process launches'
 else
   echo "  PASS: no LLVM or external build tool was invoked"
 fi
@@ -498,13 +541,13 @@ mutations_run=0
 
 build_mutant() {
   rm -f "$MUT_BINARY"
-  if ! LLVM_CONFIG="$TRIPWIRE_PATH/llvm-config" "$BOOTSTRAP" build -o "$MUT_BINARY" "$ENTRY" >"$WORK/mut_build.log" 2>&1; then
+  if ! LLVM_CONFIG="$(native_path "$TRIPWIRE_PATH/llvm-config")" "$BOOTSTRAP" build -o "$(native_path "$MUT_BINARY")" "$(native_path "$ENTRY")" >"$WORK/mut_build.log" 2>&1; then
     echo "  mutant did not compile; it cannot count as caught"
     cat "$WORK/mut_build.log"
-    return 1
+    return 2
   fi
-  if [ "$(uname -s)" = Darwin ]; then
-    check_native "$MUT_BINARY" || return 1
+  if [ "$HOST_OS" = darwin ]; then
+    check_native "$MUT_BINARY" || return 2
   fi
   STAGE1="$MUT_BINARY"
 }
@@ -512,16 +555,16 @@ build_mutant() {
 # A failed mutant compilation is not a caught regression. Each check returns
 # nonzero only for the particular wrong behaviour the mutation introduces.
 check_dispatch_regresses() {
-  build_mutant || return 0
-  [ "$(phase_rank "$measured_phase")" -ge 2 ] || return 0
+  build_mutant || return 2
+  [ "$(phase_rank "$measured_phase")" -ge 2 ] || return 2
   invoke_stage1 version
   if [ "$RC" -eq 0 ] && grep -qx 'mutated' "$WORK/stdout"; then return 1; fi
   return 0
 }
 
 check_build_regresses() {
-  build_mutant || return 0
-  [ "$primary_ok" -eq 1 ] || { echo "  hello baseline failed; mutation detection is unproven"; return 0; }
+  build_mutant || return 2
+  [ "$primary_ok" -eq 1 ] || { echo "  hello baseline failed; mutation detection is unproven"; return 2; }
   rm -f "$WORK/out/mut-build"
   invoke_stage1 build "$REPO/samples/iyi/hello.iyi" -o "$WORK/out/mut-build"
   if [ "$RC" -eq 0 ] && [ ! -e "$WORK/out/mut-build" ]; then return 1; fi
@@ -529,8 +572,8 @@ check_build_regresses() {
 }
 
 check_run_regresses() {
-  build_mutant || return 0
-  [ "$run_ok" -eq 1 ] || { echo "  run baseline failed; mutation detection is unproven"; return 0; }
+  build_mutant || return 2
+  [ "$run_ok" -eq 1 ] || { echo "  run baseline failed; mutation detection is unproven"; return 2; }
   invoke_stage1 run "$WORK/probe.iyi" -- alpha beta
   if [ "$RC" -eq 0 ] && cmp -s "$WORK/probe.expected" "$WORK/stdout"; then return 1; fi
   return 0

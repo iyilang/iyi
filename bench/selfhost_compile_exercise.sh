@@ -15,32 +15,43 @@ set -u
 status=0
 diverged=0
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-IYI="$REPO/bin/iyi"
+. "$REPO/bench/lib/host.sh" || exit 1
+require_test_host || exit 1
+REPO_NATIVE="$(native_path "$REPO")" || exit 1
+IYI="${IYI_COMPILER:-$REPO/bin/iyi}"
 COMPILE_TOOL_SRC="$REPO/src/compiler/tools/compile.iyi"
 COMPILER_SRC="$REPO/src/compiler/compiler.iyi"
 LLVM_BACKEND_SRC="$REPO/src/compiler/backend/llvm/llvm_backend.iyi"
 LOADER_SRC="$REPO/src/compiler/loader.iyi"
 CODEGEN_SRC="$REPO/src/compiler/codegen/codegen.iyi"
 WORK="$(mktemp -d)"
+WORK_NATIVE="$(native_path "$WORK")" || exit 1
+export IYI_PATH="$REPO_NATIVE/src"
+COMPILE="$REPO/.build/iyi-compile$EXE"
+MAKE_ARGS=()
+if [ "$HOST_OS" = windows ]; then MAKE_ARGS=(-f Makefile.win); fi
 trap 'rm -rf "$WORK"' EXIT
 . "$REPO/bench/lib/mutation.sh"
+exec 9>&1
 
 if command -v brew >/dev/null 2>&1; then
   LIBRARY_PATH="$(brew --prefix bdw-gc 2>/dev/null)/lib${LIBRARY_PATH:+:$LIBRARY_PATH}"
   export LIBRARY_PATH
 fi
-export CRYSTAL_CACHE_DIR="${TMPDIR:-/tmp}/iyi-s2-cache"
+export CRYSTAL_CACHE_DIR="$WORK_NATIVE/cache"
 
 echo "== 1. Building self-host compile tool"
-cd "$REPO"
-rm -f "$REPO/.build/iyi-compile"
-make iyi-compile
-
-if [ ! -x "$REPO/.build/iyi-compile" ]; then
-  echo "  ERROR: .build/iyi-compile was not built"
+cd "$REPO" || exit 1
+rm -f "$COMPILE"
+if ! make "${MAKE_ARGS[@]}" iyi-compile > "$WORK/compile_tool.build.log" 2>&1; then
+  cat "$WORK/compile_tool.build.log"
   exit 1
 fi
-echo "  built .build/iyi-compile successfully"
+if [ ! -x "$COMPILE" ]; then
+  echo "  ERROR: .build/iyi-compile$EXE was not built"
+  exit 1
+fi
+echo "  built .build/iyi-compile$EXE successfully"
 
 echo
 echo "== 2. Whole program execution parity: pure iyi compiler vs shipped compiler"
@@ -74,17 +85,17 @@ total=${#FIXTURES[@]}
 
 for fixture in "${FIXTURES[@]}"; do
   base="$(basename "$fixture" .iyi)"
-  iyi_bin="$WORK/iyi_${base}"
-  cr_bin="$WORK/cr_${base}"
+  iyi_bin="$WORK/iyi_${base}$EXE"
+  cr_bin="$WORK/cr_${base}$EXE"
 
-  if ! "$REPO/.build/iyi-compile" -o "$iyi_bin" "$fixture" > "$WORK/compile_iyi_${base}.log" 2>&1; then
+  if ! "$COMPILE" -o "$WORK_NATIVE/iyi_${base}$EXE" "$REPO_NATIVE/$fixture" > "$WORK/compile_iyi_${base}.log" 2>&1; then
     echo "  FAIL: pure iyi compiler failed to compile $fixture"
     cat "$WORK/compile_iyi_${base}.log"
     status=1
     continue
   fi
 
-  if ! "$IYI" build --prelude=empty -o "$cr_bin" "$fixture" > "$WORK/compile_cr_${base}.log" 2>&1; then
+  if ! "$IYI" build --prelude=empty -o "$WORK_NATIVE/cr_${base}$EXE" "$REPO_NATIVE/$fixture" > "$WORK/compile_cr_${base}.log" 2>&1; then
     echo "  FAIL: shipped compiler failed to compile $fixture"
     cat "$WORK/compile_cr_${base}.log"
     status=1
@@ -108,7 +119,10 @@ for fixture in "${FIXTURES[@]}"; do
   fi
 done
 # The shipped compiler's stdout for compile_stdout is the oracle for the stdout proof.
-cp "$WORK/out_cr_compile_stdout.txt" "$WORK/oracle_stdout.txt" 2>/dev/null || touch "$WORK/oracle_stdout.txt"
+if ! cp "$WORK/out_cr_compile_stdout.txt" "$WORK/oracle_stdout.txt"; then
+  echo "  FAIL: the hosted stdout oracle is unavailable"
+  status=1
+fi
 echo "  Parity summary: $matched/$total compile fixtures match 100% across execution"
 
 echo
@@ -116,15 +130,16 @@ echo "== 2b. Module search order: the first search root that holds a module wins
 # Two search roots both hold compile_shadow.iyi. The shipped compiler and the
 # pure compiler must both take the first root's module (exit 11, not 22).
 # src holds the oracle's empty prelude (src/empty.cr); IYI_PATH replaces its default path.
-SEARCH_PATH="$REPO/bench/fixtures/compile_search_roots/a:$REPO/bench/fixtures/compile_search_roots/b:$REPO/src"
+if [ "$HOST_OS" = windows ]; then path_separator=';'; else path_separator=':'; fi
+SEARCH_PATH="$REPO_NATIVE/bench/fixtures/compile_search_roots/a${path_separator}$REPO_NATIVE/bench/fixtures/compile_search_roots/b${path_separator}$REPO_NATIVE/src"
 set +e
-IYI_PATH="$SEARCH_PATH" "$IYI" build --prelude=empty -o "$WORK/shipped_search" "$REPO/bench/fixtures/compile_search.iyi" > "$WORK/shipped_search.log" 2>&1
+IYI_PATH="$SEARCH_PATH" "$IYI" build --prelude=empty -o "$WORK_NATIVE/shipped_search$EXE" "$REPO_NATIVE/bench/fixtures/compile_search.iyi" > "$WORK/shipped_search.log" 2>&1
 shipped_search_build=$?
-IYI_PATH="$SEARCH_PATH" "$REPO/.build/iyi-compile" -o "$WORK/selfhost_search" "$REPO/bench/fixtures/compile_search.iyi" > "$WORK/selfhost_search.log" 2>&1
+IYI_PATH="$SEARCH_PATH" "$COMPILE" -o "$WORK_NATIVE/selfhost_search$EXE" "$REPO_NATIVE/bench/fixtures/compile_search.iyi" > "$WORK/selfhost_search.log" 2>&1
 selfhost_search_build=$?
-"$WORK/shipped_search" > /dev/null 2>&1
+"$WORK/shipped_search$EXE" > /dev/null 2>&1
 shipped_search_rc=$?
-"$WORK/selfhost_search" > /dev/null 2>&1
+"$WORK/selfhost_search$EXE" > /dev/null 2>&1
 selfhost_search_rc=$?
 set -e
 if [ "$shipped_search_build" -eq 0 ] && [ "$selfhost_search_build" -eq 0 ] && \
@@ -140,12 +155,12 @@ echo "== 3. Dependency floor verification: pure iyi compiler produces dependency
 floor_matched=0
 for fixture in "${FIXTURES[@]}"; do
   base="$(basename "$fixture" .iyi)"
-  iyi_bin="$WORK/iyi_${base}"
+  iyi_bin="$WORK/iyi_${base}$EXE"
   [ -x "$iyi_bin" ] || continue
 
   # Verify binary does not link libgc, and links the platform C library.
-  case "$(uname -s)" in
-    Darwin)
+  case "$HOST_OS" in
+    darwin)
       if ! command -v otool >/dev/null 2>&1; then
         echo "  FAIL: otool not found; the dependency floor of $base cannot be measured"
         status=1
@@ -163,7 +178,7 @@ for fixture in "${FIXTURES[@]}"; do
         continue
       fi
       ;;
-    Linux)
+    linux)
       if ! command -v readelf >/dev/null 2>&1; then
         echo "  FAIL: readelf not found; the dependency floor of $base cannot be measured"
         status=1
@@ -181,6 +196,31 @@ for fixture in "${FIXTURES[@]}"; do
         continue
       fi
       ;;
+    windows)
+      if command -v llvm-readobj >/dev/null 2>&1; then
+        needed="$(llvm-readobj --coff-imports "$(native_path "$iyi_bin")" 2>"$WORK/imports.err")" || {
+          cat "$WORK/imports.err"; status=1; continue;
+        }
+      elif command -v objdump >/dev/null 2>&1; then
+        needed="$(objdump -p "$(native_path "$iyi_bin")" 2>"$WORK/imports.err")" || {
+          cat "$WORK/imports.err"; status=1; continue;
+        }
+      else
+        echo "  FAIL: llvm-readobj or objdump is required to measure the PE dependency floor"
+        status=1
+        continue
+      fi
+      if printf '%s\n' "$needed" | grep -iE '(^|[/\\[:space:]])(lib)?gc([-.]|\.dll)' >/dev/null; then
+        echo "  FAIL: $base links libgc: $needed"
+        status=1
+        continue
+      fi
+      if ! printf '%s\n' "$needed" | grep -iE '(msvcrt|ucrtbase|api-ms-win-crt-runtime)[^[:space:]]*\.dll' >/dev/null; then
+        echo "  FAIL: $base does not import the Windows C runtime: $needed"
+        status=1
+        continue
+      fi
+      ;;
     *)
       echo "  FAIL: the dependency floor is measured on Darwin and Linux only, not on $(uname -s)"
       status=1
@@ -193,7 +233,7 @@ echo "  Dependency floor summary: $floor_matched/$total binaries link only platf
 
 echo
 echo "== 4. Object emission without linking (--emit-obj)"
-"$REPO/.build/iyi-compile" --emit-obj "$WORK/test_emit.o" "$REPO/bench/fixtures/compile_exit.iyi" > "$WORK/emit_obj.log" 2>&1
+"$COMPILE" --emit-obj "$WORK_NATIVE/test_emit.o" "$REPO_NATIVE/bench/fixtures/compile_exit.iyi" > "$WORK/emit_obj.log" 2>&1 || { cat "$WORK/emit_obj.log"; status=1; }
 if [ -f "$WORK/test_emit.o" ] && [ -s "$WORK/test_emit.o" ]; then
   echo "  --emit-obj successfully wrote object file: $WORK/test_emit.o"
 else
@@ -206,7 +246,8 @@ echo "== 5. Malformed input and error refusal checks"
 refusals=0
 # 1. Syntax error properly refused
 set +e
-"$REPO/.build/iyi-compile" -o "$WORK/bad1" <(echo "fun main : Int32; (1 + ; end") > "$WORK/err1.log" 2>&1
+printf '%s\n' "fun main : Int32; (1 + ; end" > "$WORK/bad_syntax.iyi"
+"$COMPILE" -o "$WORK_NATIVE/bad1$EXE" "$WORK_NATIVE/bad_syntax.iyi" > "$WORK/err1.log" 2>&1
 rc1=$?
 set -e
 if [ "$rc1" -ne 0 ]; then
@@ -219,7 +260,7 @@ fi
 
 # 2. Missing input file properly refused
 set +e
-"$REPO/.build/iyi-compile" -o "$WORK/bad2" "non_existent_file_12345.iyi" > "$WORK/err2.log" 2>&1
+"$COMPILE" -o "$WORK_NATIVE/bad2$EXE" "$WORK_NATIVE/non_existent_file_12345.iyi" > "$WORK/err2.log" 2>&1
 rc2=$?
 set -e
 if [ "$rc2" -ne 0 ]; then
@@ -232,9 +273,9 @@ fi
 
 # 3. Missing import properly refused with identical message and exit code to shipped compiler
 set +e
-"$IYI" build --prelude=empty -o "$WORK/shipped_bad3" "$REPO/bench/fixtures/compile_missing_import.iyi" > "$WORK/shipped_missing.log" 2>&1
+"$IYI" build --prelude=empty -o "$WORK_NATIVE/shipped_bad3$EXE" "$REPO_NATIVE/bench/fixtures/compile_missing_import.iyi" > "$WORK/shipped_missing.log" 2>&1
 shipped_rc=$?
-"$REPO/.build/iyi-compile" -o "$WORK/bad3" "$REPO/bench/fixtures/compile_missing_import.iyi" > "$WORK/selfhost_missing.log" 2>&1
+"$COMPILE" -o "$WORK_NATIVE/bad3$EXE" "$REPO_NATIVE/bench/fixtures/compile_missing_import.iyi" > "$WORK/selfhost_missing.log" 2>&1
 selfhost_rc=$?
 set -e
 if [ "$selfhost_rc" -eq "$shipped_rc" ] && [ "$selfhost_rc" -ne 0 ] && \
@@ -251,9 +292,9 @@ fi
 # A pass that skipped generic classes made this compile cleanly while the shipped
 # compiler rejected it, so the refusal is compared rather than assumed.
 set +e
-"$IYI" build --no-codegen "$REPO/bench/fixtures/compile_undefined_type.iyi" > "$WORK/shipped_undef.log" 2>&1
+"$IYI" build --no-codegen "$REPO_NATIVE/bench/fixtures/compile_undefined_type.iyi" > "$WORK/shipped_undef.log" 2>&1
 shipped_undef_rc=$?
-"$REPO/.build/iyi-compile" -o "$WORK/bad4" "$REPO/bench/fixtures/compile_undefined_type.iyi" > "$WORK/selfhost_undef.log" 2>&1
+"$COMPILE" -o "$WORK_NATIVE/bad4$EXE" "$REPO_NATIVE/bench/fixtures/compile_undefined_type.iyi" > "$WORK/selfhost_undef.log" 2>&1
 selfhost_undef_rc=$?
 set -e
 if [ "$selfhost_undef_rc" -ne 0 ] && [ "$shipped_undef_rc" -ne 0 ] && \
@@ -269,9 +310,9 @@ fi
 # refuses it with the message compared here; the pure compiler must say the same
 # and exit the same way.
 set +e
-"$IYI" build --prelude=empty -o "$WORK/shipped_raise" "$REPO/bench/fixtures/compile_raise_norescue.iyi" > "$WORK/shipped_raise.log" 2>&1
+"$IYI" build --prelude=empty -o "$WORK_NATIVE/shipped_raise$EXE" "$REPO_NATIVE/bench/fixtures/compile_raise_norescue.iyi" > "$WORK/shipped_raise.log" 2>&1
 shipped_raise_rc=$?
-"$REPO/.build/iyi-compile" -o "$WORK/bad5" "$REPO/bench/fixtures/compile_raise_norescue.iyi" > "$WORK/selfhost_raise.log" 2>&1
+"$COMPILE" -o "$WORK_NATIVE/bad5$EXE" "$REPO_NATIVE/bench/fixtures/compile_raise_norescue.iyi" > "$WORK/selfhost_raise.log" 2>&1
 selfhost_raise_rc=$?
 set -e
 if [ "$selfhost_raise_rc" -eq "$shipped_raise_rc" ] && [ "$selfhost_raise_rc" -ne 0 ] && \
@@ -290,9 +331,9 @@ fi
 # pipeline no longer supplies. The shipped compiler refuses the undefined call;
 # the pure compiler must refuse it with the same message and exit status.
 set +e
-"$IYI" build --prelude=empty -o "$WORK/shipped_implicit" "$REPO/bench/fixtures/compile_implicit_raise.iyi" > "$WORK/shipped_implicit.log" 2>&1
+"$IYI" build --prelude=empty -o "$WORK_NATIVE/shipped_implicit$EXE" "$REPO_NATIVE/bench/fixtures/compile_implicit_raise.iyi" > "$WORK/shipped_implicit.log" 2>&1
 shipped_implicit_rc=$?
-"$REPO/.build/iyi-compile" -o "$WORK/bad6" "$REPO/bench/fixtures/compile_implicit_raise.iyi" > "$WORK/selfhost_implicit.log" 2>&1
+"$COMPILE" -o "$WORK_NATIVE/bad6$EXE" "$REPO_NATIVE/bench/fixtures/compile_implicit_raise.iyi" > "$WORK/selfhost_implicit.log" 2>&1
 selfhost_implicit_rc=$?
 set -e
 if [ "$selfhost_implicit_rc" -eq "$shipped_implicit_rc" ] && [ "$selfhost_implicit_rc" -ne 0 ] && \
@@ -311,9 +352,9 @@ fi
 # shipped compiler refuses it; the pure compiler must refuse it with the same first
 # error line and exit the same way.
 set +e
-"$IYI" build -o "$WORK/shipped_rescue" "$REPO/bench/fixtures/compile_rescue_refused.iyi" > "$WORK/shipped_rescue.log" 2>&1
+"$IYI" build -o "$WORK_NATIVE/shipped_rescue$EXE" "$REPO_NATIVE/bench/fixtures/compile_rescue_refused.iyi" > "$WORK/shipped_rescue.log" 2>&1
 shipped_rescue_rc=$?
-"$REPO/.build/iyi-compile" -o "$WORK/bad7" "$REPO/bench/fixtures/compile_rescue_refused.iyi" > "$WORK/selfhost_rescue.log" 2>&1
+"$COMPILE" -o "$WORK_NATIVE/bad7$EXE" "$REPO_NATIVE/bench/fixtures/compile_rescue_refused.iyi" > "$WORK/selfhost_rescue.log" 2>&1
 selfhost_rescue_rc=$?
 set -e
 shipped_rescue_msg=$(grep -m1 '^Error: ' "$WORK/shipped_rescue.log" || true)
@@ -334,7 +375,7 @@ fi
 # port refuses the store by name rather than dropping it. Not compared with the shipped
 # compiler (it accepts this program), and not counted in the refusal summary.
 set +e
-"$REPO/.build/iyi-compile" -o "$WORK/bad8" "$REPO/bench/fixtures/compile_ivar_untyped_refused.iyi" > "$WORK/selfhost_ivar.log" 2>&1
+"$COMPILE" -o "$WORK_NATIVE/bad8$EXE" "$REPO_NATIVE/bench/fixtures/compile_ivar_untyped_refused.iyi" > "$WORK/selfhost_ivar.log" 2>&1
 selfhost_ivar_rc=$?
 set -e
 if [ "$selfhost_ivar_rc" -ne 0 ] && grep -q "instance variable @v has no type the port can read" "$WORK/selfhost_ivar.log"; then
@@ -347,39 +388,60 @@ fi
 
 echo
 echo "== 6. Guarded mutation proofs"
-echo "  Each mutation is caught only by a failing check. A check that fails because the"
-echo "  mutated compiler does not build or refuses the fixture counts as caught only when"
-echo "  the clean compiler builds and runs that fixture as expected; the verdict says which."
+echo "  Build failures and crashes invalidate a proof; only observed semantic differences count."
 
 # A check writes its reason here; mutate_compiler_source prints it after the verdict.
 set_why() { printf '%s\n' "$*" > "$WORK/why"; }
 
 # Rebuilds the pure compiler from the sources as they are now.
 rebuild_mutated_compile() {
-  rm -f "$REPO/.build/iyi-compile"
-  make -C "$REPO" iyi-compile >/dev/null 2>&1
+  rm -f "$COMPILE"
+  if ! make -C "$REPO" "${MAKE_ARGS[@]}" iyi-compile > "$WORK/mut_compiler.build.log" 2>&1; then
+    cat "$WORK/mut_compiler.build.log" >&9
+    return 2
+  fi
 }
 
 # Rebuilds the pure compiler from the sources as they are now, then compiles the
 # fixture and requires the program's exit code to equal the expected one.
 check_compile_rc() {
   local fixture="$1" expected="$2" mut_rc=0
-  rm -f "$WORK/mut_bin"
+  rm -f "$WORK/mut_bin$EXE"
   if ! rebuild_mutated_compile; then
-    set_why "the mutated compiler does not build (the clean compiler does)"
-    return 1
+    set_why "the mutated compiler did not build"
+    return 2
   fi
   local build_rc=0
-  "$REPO/.build/iyi-compile" -o "$WORK/mut_bin" "$fixture" > "$WORK/mut_compile.log" 2>&1 || build_rc=$?
+  "$COMPILE" -o "$WORK_NATIVE/mut_bin$EXE" "$(native_path "$fixture")" > "$WORK/mut_compile.log" 2>&1 || build_rc=$?
+  if [ "$build_rc" -ne 0 ] && [ "${_PM_ARMED:-0}" = 1 ] &&
+     [ "$(basename "$fixture")" = compile_ivar_infer.iyi ]; then
+    grep '^Error: ' "$WORK/mut_compile.log" | tail -n 1 > "$WORK/mut_compile.message"
+    if grep -Eq 'compile_ivar_infer\.iyi:(3|13|23):' "$WORK/mut_compile.log" &&
+       expected_refusal "$build_rc" "$WORK/mut_compile.message" refuse_port '^instance variable @(v|n|svc) has no type the port can read:'; then
+      set_why "ivar inference refusal identified at the expected store"
+      return 1
+    fi
+  fi
+  if [ "$build_rc" -ne 0 ] && [ "${_PM_ARMED:-0}" = 1 ] &&
+     [ "$(basename "$fixture")" = compile_diamond.iyi ]; then
+    grep '^Error: ' "$WORK/mut_compile.log" | tail -n 1 > "$WORK/mut_compile.message"
+    if grep -Eq 'compile_diamond\.iyi:5:' "$WORK/mut_compile.log" &&
+       expected_refusal "$build_rc" "$WORK/mut_compile.message" refuse_port "^undefined method 'diamond_a_val' for top-level$"; then
+      set_why "missing diamond import was refused at its call site"
+      return 1
+    fi
+  fi
   if [ "$build_rc" -ne 0 ]; then
-    set_why "the mutated compiler exits $build_rc on $(basename "$fixture"); the clean compiler compiles it"
-    return 1
+    echo "INVALID MUTANT: fixture compilation exited $build_rc" >&2
+    cat "$WORK/mut_compile.log" >&2
+    return 2
   fi
-  if [ ! -x "$WORK/mut_bin" ]; then
-    set_why "the mutated compiler exits 0 but writes no binary for $(basename "$fixture")"
-    return 1
+  if [ ! -x "$WORK/mut_bin$EXE" ]; then
+    echo "INVALID MUTANT: compiler wrote no executable" >&2
+    return 2
   fi
-  "$WORK/mut_bin" >/dev/null 2>&1 || mut_rc=$?
+  "$WORK/mut_bin$EXE" >"$WORK/mut_bin.run.log" 2>&1 || mut_rc=$?
+  if [ "$mut_rc" -ge 128 ]; then cat "$WORK/mut_bin.run.log" >&2; return 2; fi
   if [ "$mut_rc" -eq "$expected" ]; then
     return 0
   fi
@@ -391,18 +453,20 @@ check_compile_rc() {
 # program's exit code to equal the expected one.
 check_fixture_rc() {
   local fixture="$1" expected="$2" mut_rc=0
-  rm -f "$WORK/mut_bin_fx"
+  rm -f "$WORK/mut_bin_fx$EXE"
   local build_rc=0
-  "$REPO/.build/iyi-compile" -o "$WORK/mut_bin_fx" "$fixture" > "$WORK/mut_fx_compile.log" 2>&1 || build_rc=$?
+  "$COMPILE" -o "$WORK_NATIVE/mut_bin_fx$EXE" "$(native_path "$fixture")" > "$WORK/mut_fx_compile.log" 2>&1 || build_rc=$?
   if [ "$build_rc" -ne 0 ]; then
-    set_why "the compiler exits $build_rc on the mutated $(basename "$fixture"); the clean fixture compiles"
-    return 1
+    echo "INVALID MUTANT: fixture compilation exited $build_rc" >&2
+    cat "$WORK/mut_fx_compile.log" >&2
+    return 2
   fi
-  if [ ! -x "$WORK/mut_bin_fx" ]; then
-    set_why "the compiler exits 0 but writes no binary for the mutated $(basename "$fixture")"
-    return 1
+  if [ ! -x "$WORK/mut_bin_fx$EXE" ]; then
+    echo "INVALID MUTANT: compiler wrote no executable" >&2
+    return 2
   fi
-  "$WORK/mut_bin_fx" >/dev/null 2>&1 || mut_rc=$?
+  "$WORK/mut_bin_fx$EXE" >"$WORK/mut_bin_fx.run.log" 2>&1 || mut_rc=$?
+  if [ "$mut_rc" -ge 128 ]; then cat "$WORK/mut_bin_fx.run.log" >&2; return 2; fi
   if [ "$mut_rc" -eq "$expected" ]; then
     return 0
   fi
@@ -414,22 +478,24 @@ check_fixture_rc() {
 # under the search roots and requires the program's exit code to equal 11.
 check_search_rc() {
   local fixture="$1" expected="$2" mut_rc=0
-  rm -f "$WORK/mut_bin_search"
+  rm -f "$WORK/mut_bin_search$EXE"
   if ! rebuild_mutated_compile; then
-    set_why "the mutated compiler does not build (the clean compiler does)"
-    return 1
+    set_why "the mutated compiler did not build"
+    return 2
   fi
   local build_rc=0
-  IYI_PATH="$SEARCH_PATH" "$REPO/.build/iyi-compile" -o "$WORK/mut_bin_search" "$fixture" > "$WORK/mut_search_compile.log" 2>&1 || build_rc=$?
+  IYI_PATH="$SEARCH_PATH" "$COMPILE" -o "$WORK_NATIVE/mut_bin_search$EXE" "$(native_path "$fixture")" > "$WORK/mut_search_compile.log" 2>&1 || build_rc=$?
   if [ "$build_rc" -ne 0 ]; then
-    set_why "the mutated compiler exits $build_rc on $(basename "$fixture") under the search roots"
-    return 1
+    echo "INVALID MUTANT: search fixture compilation exited $build_rc" >&2
+    cat "$WORK/mut_search_compile.log" >&2
+    return 2
   fi
-  if [ ! -x "$WORK/mut_bin_search" ]; then
-    set_why "the mutated compiler exits 0 but writes no binary under the search roots"
-    return 1
+  if [ ! -x "$WORK/mut_bin_search$EXE" ]; then
+    echo "INVALID MUTANT: compiler wrote no executable" >&2
+    return 2
   fi
-  "$WORK/mut_bin_search" >/dev/null 2>&1 || mut_rc=$?
+  "$WORK/mut_bin_search$EXE" >"$WORK/mut_bin_search.run.log" 2>&1 || mut_rc=$?
+  if [ "$mut_rc" -ge 128 ]; then cat "$WORK/mut_bin_search.run.log" >&2; return 2; fi
   if [ "$mut_rc" -eq "$expected" ]; then
     return 0
   fi
@@ -441,22 +507,23 @@ check_search_rc() {
 # requires its stdout to equal the oracle file.
 check_compiler_stdout() {
   local fixture="$1" oracle="$2"
-  rm -f "$WORK/mut_bin_cout"
+  local mut_rc=0
+  rm -f "$WORK/mut_bin_cout$EXE"
   if ! rebuild_mutated_compile; then
-    set_why "the mutated compiler does not build (the clean compiler does)"
-    return 1
+    set_why "the mutated compiler did not build"
+    return 2
   fi
-  local build_rc=0
-  "$REPO/.build/iyi-compile" -o "$WORK/mut_bin_cout" "$fixture" > "$WORK/mut_cout_compile.log" 2>&1 || build_rc=$?
-  if [ "$build_rc" -ne 0 ]; then
-    set_why "the mutated compiler exits $build_rc on $(basename "$fixture"); the clean compiler compiles it"
-    return 1
+  if ! "$COMPILE" -o "$WORK_NATIVE/mut_bin_cout$EXE" "$(native_path "$fixture")" > "$WORK/mut_cout_compile.log" 2>&1; then
+    echo "INVALID MUTANT: fixture compilation failed" >&2
+    cat "$WORK/mut_cout_compile.log" >&2
+    return 2
   fi
-  if [ ! -x "$WORK/mut_bin_cout" ]; then
-    set_why "the mutated compiler exits 0 but writes no binary for $(basename "$fixture")"
-    return 1
+  if [ ! -x "$WORK/mut_bin_cout$EXE" ]; then
+    echo "INVALID MUTANT: compiler wrote no executable" >&2
+    return 2
   fi
-  "$WORK/mut_bin_cout" > "$WORK/mut_cout.txt" 2>/dev/null || true
+  "$WORK/mut_bin_cout$EXE" > "$WORK/mut_cout.txt" 2>"$WORK/mut_cout.err" || mut_rc=$?
+  if [ "$mut_rc" -ge 128 ]; then cat "$WORK/mut_cout.err" >&2; return 2; fi
   if cmp -s "$WORK/mut_cout.txt" "$oracle"; then
     return 0
   fi
@@ -468,14 +535,16 @@ check_compiler_stdout() {
 # shipped compiler's binary printed for the unmutated fixture.
 check_stdout_parity() {
   local fixture="$1" oracle="$2"
-  rm -f "$WORK/mut_bin_out"
-  local build_rc=0
-  "$REPO/.build/iyi-compile" -o "$WORK/mut_bin_out" "$fixture" > "$WORK/mut_out_compile.log" 2>&1 || build_rc=$?
-  if [ "$build_rc" -ne 0 ]; then
-    set_why "the mutated compiler exits $build_rc on $(basename "$fixture"); the clean compiler compiles it"
-    return 1
+  local mut_rc=0
+  rm -f "$WORK/mut_bin_out$EXE"
+  if ! "$COMPILE" -o "$WORK_NATIVE/mut_bin_out$EXE" "$(native_path "$fixture")" > "$WORK/mut_out_compile.log" 2>&1; then
+    echo "INVALID MUTANT: fixture compilation failed" >&2
+    cat "$WORK/mut_out_compile.log" >&2
+    return 2
   fi
-  "$WORK/mut_bin_out" > "$WORK/mut_stdout.txt" 2>/dev/null || true
+  [ -x "$WORK/mut_bin_out$EXE" ] || { echo "INVALID MUTANT: compiler wrote no executable" >&2; return 2; }
+  "$WORK/mut_bin_out$EXE" > "$WORK/mut_stdout.txt" 2>"$WORK/mut_stdout.err" || mut_rc=$?
+  if [ "$mut_rc" -ge 128 ]; then cat "$WORK/mut_stdout.err" >&2; return 2; fi
   if cmp -s "$WORK/mut_stdout.txt" "$oracle"; then
     return 0
   fi
@@ -483,19 +552,65 @@ check_stdout_parity() {
   return 1
 }
 
+# --emit-obj must honor the caller's output path. A mutant that writes a
+# different object is a semantic difference, not a failed compiler build.
+check_object_path() {
+  rm -f "$WORK/requested.o" "$WORK/a.out.o"
+  if ! rebuild_mutated_compile; then return 2; fi
+  if ! (cd "$WORK" && "$COMPILE" --emit-obj "$WORK_NATIVE/requested.o" "$REPO_NATIVE/bench/fixtures/compile_exit.iyi") > "$WORK/mut_object.log" 2>&1; then
+    echo "INVALID MUTANT: object emission failed" >&2
+    cat "$WORK/mut_object.log" >&2
+    return 2
+  fi
+  [ -s "$WORK/requested.o" ] && return 0
+  if [ -s "$WORK/a.out.o" ]; then
+    set_why "the object was emitted at a.out.o instead of the requested path"
+    return 1
+  fi
+  echo "INVALID MUTANT: no object was emitted" >&2
+  return 2
+}
+
 # The fixture must be refused with the given message; the check passes (not caught)
 # when the message is there.
 check_refusal() {
-  local fixture="$1" phrase="$2"
-  if "$REPO/.build/iyi-compile" -o "$WORK/mut_refusal" "$fixture" > "$WORK/mut_refusal.log" 2>&1; then
-    set_why "the compiler accepts the mutated $(basename "$fixture")"
+  local fixture="$1" phrase="$2" rc=0 alternate="" expected="" site=""
+  rm -f "$WORK/mut_refusal$EXE"
+  "$COMPILE" -o "$WORK_NATIVE/mut_refusal$EXE" "$(native_path "$fixture")" > "$WORK/mut_refusal.log" 2>&1 || rc=$?
+  if [ "$rc" -eq 0 ] && [ -x "$WORK/mut_refusal$EXE" ]; then
+    set_why "the compiler accepts the fixture"
     return 1
   fi
-  if grep -q "$phrase" "$WORK/mut_refusal.log"; then
-    return 0
+  case "$(basename "$fixture")" in
+    compile_rescue_refused.iyi)
+      site='compile_rescue_refused\.iyi:4:'
+      expected="iyi has no exceptions to rescue: an error is a value the caller handles (SPEC.md III.1), and a panic is caught at a task boundary (III.1.4), never here - this \`rescue\` would not run. Return the error, or read the task's \`value\`"
+      alternate='iyi has no `ensure`: a panic unwinds by registry and skips it (SPEC.md III.1.4). Write `defer`, which runs on return, on `!` and on a panic'
+      ;;
+    compile_raise_norescue.iyi)
+      site='compile_raise_norescue\.iyi:8:'
+      expected="undefined method 'raise' for top-level"
+      alternate="undefined method 'raisx' for top-level"
+      ;;
+    compile_ivar_untyped_refused.iyi)
+      site='compile_ivar_untyped_refused\.iyi:3:'
+      expected='instance variable @v has no type the port can read: declare it in the class body (`@v : Type`)'
+      ;;
+    *) echo "INVALID PROOF: unknown refusal fixture" >&2; return 2 ;;
+  esac
+  grep '^Error: ' "$WORK/mut_refusal.log" | tail -n 1 > "$WORK/mut_refusal.message"
+  if grep -Eq "$site" "$WORK/mut_refusal.log" &&
+     grep -Fxq "Error: $expected" "$WORK/mut_refusal.message" &&
+     expected_refusal "$rc" "$WORK/mut_refusal.message" refuse_port "^$phrase"; then return 0; fi
+  if [ -n "$alternate" ] && grep -Eq "$site" "$WORK/mut_refusal.log" &&
+     grep -Fxq "Error: $alternate" "$WORK/mut_refusal.message" &&
+     expected_refusal "$rc" "$WORK/mut_refusal.message" refuse_port '^'; then
+    set_why "the fixture is refused with the expected changed diagnostic"
+    return 1
   fi
-  set_why "the mutated $(basename "$fixture") is refused with another message"
-  return 1
+  echo "INVALID MUTANT: unexpected refusal or crash" >&2
+  cat "$WORK/mut_refusal.log" >&2
+  return 2
 }
 
 # Rebuilds the pure compiler from the sources as they are now, then requires it to refuse
@@ -504,8 +619,8 @@ check_refusal() {
 check_refusal_rebuilt() {
   local fixture="$1" phrase="$2"
   if ! rebuild_mutated_compile; then
-    set_why "the mutated compiler does not build (the clean compiler does)"
-    return 1
+    set_why "the mutated compiler did not build"
+    return 2
   fi
   check_refusal "$fixture" "$phrase"
 }
@@ -513,9 +628,10 @@ check_refusal_rebuilt() {
 # A mutation of a compiler source leaves .build/iyi-compile built from the mutated
 # source, so rebuild it from the restored source before any later check uses it.
 rebuild_clean_compile() {
-  rm -f "$REPO/.build/iyi-compile"
-  if ! make -C "$REPO" iyi-compile >/dev/null 2>&1; then
+  rm -f "$COMPILE"
+  if ! make -C "$REPO" "${MAKE_ARGS[@]}" iyi-compile > "$WORK/clean_compiler.build.log" 2>&1; then
     echo "  ERROR: could not rebuild the clean compiler after a mutation"
+    cat "$WORK/clean_compiler.build.log"
     status=1
   fi
 }
@@ -533,6 +649,7 @@ mutate_compiler_source() {
 # The clean compiler must pass every check a mutation below relies on, or a
 # failure under mutation would be caught for the wrong reason.
 clean_must_pass() {
+  :
   local label="$1"
   shift
   rm -f "$WORK/why"
@@ -540,10 +657,18 @@ clean_must_pass() {
     echo "  clean baseline ok: $label"
   else
     echo "  ERROR: clean baseline fails for $label ($(cat "$WORK/why" 2>/dev/null)); a mutation of it would not count"
+    baseline_ok=0
     status=1
   fi
 }
 
+baseline_ok=1
+if ! "$COMPILE" --emit-obj "$WORK_NATIVE/mut_other.o" "$REPO_NATIVE/bench/fixtures/compile_exit.iyi" > "$WORK/mut_other.log" 2>&1 || [ ! -s "$WORK/mut_other.o" ]; then
+  echo "  ERROR: could not prepare the alternate linker object"
+  cat "$WORK/mut_other.log"
+  baseline_ok=0
+  status=1
+fi
 clean_must_pass "compile_arith expects 26" check_compile_rc "$REPO/bench/fixtures/compile_arith.iyi" 26
 clean_must_pass "compile_top_level expects 42" check_compile_rc "$REPO/bench/fixtures/compile_top_level.iyi" 42
 clean_must_pass "compile_no_top_level expects 0" check_compile_rc "$REPO/bench/fixtures/compile_no_top_level.iyi" 0
@@ -551,18 +676,36 @@ clean_must_pass "compile_search expects 11 under the search roots" check_search_
 clean_must_pass "compile_order prints the shipped order" check_compiler_stdout "$REPO/bench/fixtures/compile_order.iyi" "$WORK/out_cr_compile_order.txt"
 clean_must_pass "compile_resolve_order expects 20 under the load order" check_compile_rc "$REPO/bench/fixtures/compile_resolve_order.iyi" 20
 clean_must_pass "compile_ivar_infer expects 12" check_compile_rc "$REPO/bench/fixtures/compile_ivar_infer.iyi" 12
+clean_must_pass "compile_diamond expects 52" check_compile_rc "$REPO/bench/fixtures/compile_diamond.iyi" 52
+clean_must_pass "fixture arithmetic expects 26" check_fixture_rc "$REPO/bench/fixtures/compile_arith.iyi" 26
+clean_must_pass "stdout fixture matches hosted" check_stdout_parity "$REPO/bench/fixtures/compile_stdout.iyi" "$WORK/oracle_stdout.txt"
+clean_must_pass "object emission honors its path" check_object_path
+clean_must_pass "rescue refusal" check_refusal "$REPO/bench/fixtures/compile_rescue_refused.iyi" "iyi has no exceptions to rescue"
+clean_must_pass "raise refusal" check_refusal "$REPO/bench/fixtures/compile_raise_norescue.iyi" "undefined method 'raise' for top-level"
+clean_must_pass "untyped ivar refusal" check_refusal_rebuilt "$REPO/bench/fixtures/compile_ivar_untyped_refused.iyi" "instance variable @v has no type the port can read"
 
-mutate_compiler_source "corrupt linker placeholder substitution" \
-  "$LLVM_BACKEND_SRC" \
-  '"\"${@}\""' \
-  '"__WRONG_PLACEHOLDER__"' \
-  -- check_compile_rc "$REPO/bench/fixtures/compile_arith.iyi" 26
+if [ "$baseline_ok" -eq 1 ]; then
+
+if [ "$HOST_OS" = windows ]; then
+  # Windows embeds the object directly instead of using a shell placeholder.
+  mutate_compiler_source "linker is given the wrong object" \
+    "$LLVM_BACKEND_SRC" \
+    'link_result = Linker.linker_command(plat_target, [obj_path], request.output_filename)' \
+    'link_result = Linker.linker_command(plat_target, ["'"$WORK_NATIVE"'/mut_other.o"], request.output_filename)' \
+    -- check_compile_rc "$REPO/bench/fixtures/compile_arith.iyi" 26
+else
+  mutate_compiler_source "corrupt linker placeholder substitution" \
+    "$LLVM_BACKEND_SRC" \
+    'final_cmd = Compiler.substitute_placeholder(cmd_template, "\"${@}\"", quoted_objs)' \
+    'final_cmd = Compiler.substitute_placeholder(cmd_template, "\"${@}\"", Linker.quote_posix("'"$WORK_NATIVE"'/mut_other.o"))' \
+    -- check_compile_rc "$REPO/bench/fixtures/compile_arith.iyi" 26
+fi
 
 mutate_compiler_source "corrupt object file output path" \
   "$COMPILER_SRC" \
   'obj_path = @config.obj_output_filename || (@config.output_filename + ".o")' \
-  'obj_path = @config.obj_output_filename || "/nonexistent/dir/out.o"' \
-  -- check_compile_rc "$REPO/bench/fixtures/compile_arith.iyi" 26
+  'obj_path = @config.output_filename + ".o"' \
+  -- check_object_path
 
 prove_mutation "corrupt arithmetic operation in test fixture" \
   "$REPO/bench/fixtures/compile_arith.iyi" \
@@ -605,22 +748,24 @@ mutate_compiler_source "missed import in resolver" \
   '# resolve_file(clean_res, clean_fn)' \
   -- check_compile_rc "$REPO/bench/fixtures/compile_diamond.iyi" 52
 
-mutate_compiler_source "omitting entry point wrapper for top-level code" \
+mutate_compiler_source "entry point wrapper drops top-level side effects" \
   "$CODEGEN_SRC" \
-  '  return if top_level_stmts.empty?' \
-  '  return if true' \
+  'init_stmts = top_level_stmts.empty? ? [Nop.new] of ASTNode : top_level_stmts' \
+  'init_stmts = [Nop.new] of ASTNode' \
   -- check_compile_rc "$REPO/bench/fixtures/compile_top_level.iyi" 42
 
 mutate_compiler_source "pipeline drops top-level statements" \
   "$COMPILER_SRC" \
   'append_entry_point(funs, top_level)' \
-  '# append_entry_point(funs, top_level)' \
+  'append_entry_point(funs, [Nop.new] of ASTNode)' \
   -- check_compile_rc "$REPO/bench/fixtures/compile_top_level.iyi" 42
 
-mutate_compiler_source "pipeline drops default entry point for declaration-only program" \
-  "$COMPILER_SRC" \
-  'top_level << Nop.new' \
-  '# top_level << Nop.new' \
+mutate_compiler_source "default entry point returns the wrong exit status" \
+  "$CODEGEN_SRC" \
+  'NumberLiteral.new("0", NumberKind::I32),
+      ] of ASTNode)' \
+  'NumberLiteral.new("1", NumberKind::I32),
+      ] of ASTNode)' \
   -- check_compile_rc "$REPO/bench/fixtures/compile_no_top_level.iyi" 0
 
 # compile_raise.iyi left the parity set (see the note at the fixture list), so its
@@ -664,6 +809,10 @@ prove_mutation "a stdout difference fails the stdout parity check" \
   'LibC.putchar(107)' \
   'LibC.putchar(108)' \
   -- check_stdout_parity "$REPO/bench/fixtures/compile_stdout.iyi" "$WORK/oracle_stdout.txt" || status=1
+else
+  echo "  FAIL: mutation proofs require their clean baselines"
+  status=1
+fi
 echo
 if [ "$status" -eq 0 ]; then
   echo "ALL SELFHOST COMPILE CHECKS PASSED!"

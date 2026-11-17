@@ -20,8 +20,12 @@ import compiler/ir/types::{IrType}
   TRIPLE = "x86_64-unknown-linux-gnu"
 {% elsif flag?(:linux) && flag?(:aarch64) %}
   TRIPLE = "aarch64-unknown-linux-gnu"
-{% else %}
+{% elsif flag?(:win32) && flag?(:x86_64) && flag?(:msvc) %}
+  TRIPLE = "x86_64-pc-windows-msvc"
+{% elsif flag?(:darwin) && flag?(:aarch64) %}
   TRIPLE = "aarch64-apple-darwin"
+{% else %}
+  {% raise "unsupported host target for the codegen oracle exercise" %}
 {% end %}
 
 # The name of a printed LLVM function: `define internal ptr @"name"(...)` or `define i32 @name(...)`.

@@ -33,6 +33,8 @@ Within a pull request the changed files narrow it further:
     proven by running what it changed, not by running everything; a change to
     this script or to the workflow's header runs the fast tier, which starts
     with `plan`. If the base workflow cannot be read, everything runs;
+  - a stale-testing source, spec, observer or gate: the stale jobs on all
+    three native platforms, in addition to the ordinary selection;
   - otherwise: the fast tier, plus every job that runs a changed bench file.
 
 A job runs a bench file when one of its steps names it, or names a bench
@@ -351,6 +353,8 @@ def plan(jobs, event, ref, files, bench, ci_jobs=None):
 
     code_files = [f for f in files if not is_doc(f)]
     selected = {"docs"}
+    if any(is_stale(f) for f in files):
+        selected |= STALE_JOBS
     if ci_change:
         selected |= set(FAST) | ci_jobs
     if any(f.startswith("editors/vscode/") for f in files):

@@ -21,10 +21,15 @@
 set -u
 status=0
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO/bench/lib/host.sh" || exit 1
+require_test_host || exit 1
+REPO_NATIVE="$(native_path "$REPO")" || exit 1
+export IYI_PATH="$REPO_NATIVE/src"
 IYI="$REPO/bin/iyi"
 . "$REPO/bench/lib/mutation.sh"
 . "$REPO/bench/lib/lower_oracle.sh"
 WORK="$(mktemp -d)"
+WORK_NATIVE="$(native_path "$WORK")" || exit 1
 
 trap 'rm -rf "$WORK"' EXIT
 # LLVM writes switch cases on separate lines without separators; the IR reader
@@ -54,7 +59,7 @@ fi
 
 
 echo "== 1. Building the port driver"
-if ! "$IYI" build -o "$WORK/port" "$REPO/bench/selfhost_lower_primitives_exercise.iyi" > "$WORK/port.build.log" 2>&1; then
+if ! "$IYI" build -o "$WORK_NATIVE/port$EXE" "$REPO_NATIVE/bench/selfhost_lower_primitives_exercise.iyi" > "$WORK/port.build.log" 2>&1; then
   echo "the port driver failed to build:"
   awk '!/^ld: warning/ && NR<=20' "$WORK/port.build.log"
   exit 1
@@ -90,12 +95,17 @@ e2e_waiting_on() {
 for fixture in "$REPO"/bench/fixtures/lowprim_*.iyi; do
   name="$(basename "$fixture" .iyi)"
   oracle_options=(--prelude empty)
+  oracle_output="$WORK_NATIVE/$name$EXE"
+  if [ "$HOST_ID" != darwin-arm64 ]; then
+    oracle_options+=(--cross-compile --target aarch64-apple-darwin)
+    oracle_output="$WORK_NATIVE/$name.o"
+  fi
   if [ "$name" = "lowprim_atomic_rmw" ]; then
     # Otherwise the hosted module is printed after LLVM has expanded atomicrmw to a cmpxchg loop.
     oracle_options+=(--mattr +lse)
     echo "  $name: oracle uses --mattr +lse to preserve atomicrmw in the emitted module"
   fi
-  if ! "$IYI" build "${oracle_options[@]}" --emit llvm-ir --no-debug -o "$WORK/$name" "$fixture" > "$WORK/$name.oracle.log" 2>&1 || [ ! -s "$WORK/$name.ll" ]; then
+  if ! "$IYI" build "${oracle_options[@]}" --emit llvm-ir --no-debug -o "$oracle_output" "$(native_path "$fixture")" > "$WORK/$name.oracle.log" 2>&1 || [ ! -s "$WORK/$name.ll" ]; then
     echo "  $name: the hosted compiler did not emit its module (see $WORK/$name.oracle.log)"
     diverged=$((diverged + 1))
     continue
@@ -106,7 +116,7 @@ for fixture in "$REPO"/bench/fixtures/lowprim_*.iyi; do
     continue
   fi
 
-  if ! "$WORK/port" lower "$fixture" "$WORK/$name.oracle.ll" > "$WORK/$name.port.out" 2> "$WORK/$name.port.err"; then
+  if ! "$WORK/port$EXE" lower "$(native_path "$fixture")" "$WORK_NATIVE/$name.oracle.ll" > "$WORK/$name.port.out" 2> "$WORK/$name.port.err"; then
     if [ -n "$(waiting_on "$name")" ]; then
       echo "  $name: WAITING, $(waiting_on "$name"): $(awk 'NR==1' "$WORK/$name.port.err")"
       waiting=$((waiting + 1))
@@ -149,15 +159,18 @@ echo "== 3. End to end: each fixture the port lowers identically, built natively
 e2e_pass=0
 e2e_fail=0
 e2e_waiting=0
-if "$IYI" build -o "$WORK/compile_native" "$REPO/src/compiler/tools/compile_native.iyi" > "$WORK/tool.build.log" 2>&1; then
+if [ "$HOST_ID" != darwin-arm64 ]; then
+  host_limited "primitives: AArch64 Mach-O signing and execution require macOS arm64 ($HOST_ID compares Darwin-target IR and emits Mach-O)"
+fi
+if "$IYI" build -o "$WORK_NATIVE/compile_native$EXE" "$REPO_NATIVE/src/compiler/tools/compile_native.iyi" > "$WORK/tool.build.log" 2>&1; then
   for name in $e2e; do
-    fixture="$REPO/bench/fixtures/$name.iyi"
-    if ! "$WORK/port" emit "$fixture" "$WORK/$name.oracle.ll" > "$WORK/$name.port.ir" 2> "$WORK/$name.emit.err"; then
+    fixture="$REPO_NATIVE/bench/fixtures/$name.iyi"
+    if ! "$WORK/port$EXE" emit "$fixture" "$WORK_NATIVE/$name.oracle.ll" > "$WORK/$name.port.ir" 2> "$WORK/$name.emit.err"; then
       echo "  $name: the port writes no module: $(awk 'NR==1' "$WORK/$name.emit.err")"
       e2e_fail=$((e2e_fail + 1))
       continue
     fi
-    if ! "$WORK/compile_native" "$WORK/$name.port.ir" -o "$WORK/$name.native" > "$WORK/$name.native.log" 2>&1; then
+    if ! "$WORK/compile_native$EXE" "$WORK_NATIVE/$name.port.ir" -o "$WORK_NATIVE/$name.native" > "$WORK/$name.native.log" 2>&1; then
       if [ -n "$(e2e_waiting_on "$name")" ]; then
         echo "  $name: WAITING, $(e2e_waiting_on "$name"): $(awk 'NR==1' "$WORK/$name.native.log")"
         e2e_waiting=$((e2e_waiting + 1))
@@ -167,13 +180,17 @@ if "$IYI" build -o "$WORK/compile_native" "$REPO/src/compiler/tools/compile_nati
       e2e_fail=$((e2e_fail + 1))
       continue
     fi
+    if [ "$HOST_ID" != darwin-arm64 ]; then
+      echo "  $name: AArch64 Mach-O emitted; native execution is host-limited"
+      continue
+    fi
     if ! codesign -v --strict "$WORK/$name.native"; then
       echo "  $name: native executable failed strict signature verification"
       e2e_fail=$((e2e_fail + 1))
       continue
     fi
     timeout 30 "$WORK/$name.native" > "$WORK/$name.native.out" 2>&1; ns=$?
-    timeout 30 "$WORK/$name" > "$WORK/$name.hosted.out" 2>&1; hs=$?
+    timeout 30 "$WORK/$name$EXE" > "$WORK/$name.hosted.out" 2>&1; hs=$?
     if [ "$ns" = "$hs" ] && cmp -s "$WORK/$name.native.out" "$WORK/$name.hosted.out"; then
       echo "  $name: native executable runs to the hosted result (status $hs, stdout identical)"
       e2e_pass=$((e2e_pass + 1))
@@ -187,18 +204,19 @@ if "$IYI" build -o "$WORK/compile_native" "$REPO/src/compiler/tools/compile_nati
     fi
   done
 else
-  echo "  the native tool does not build (see $WORK/tool.build.log)"
+  echo "  the native tool does not build"
+  cat "$WORK/tool.build.log"
   e2e_fail=1
 fi
   echo "  end to end: $e2e_pass fixture(s) run to the hosted result, $e2e_waiting waiting by name, $e2e_fail failed"
-if [ "$e2e_fail" -gt 0 ] || [ "$e2e_pass" -eq 0 ]; then
+if [ "$e2e_fail" -gt 0 ] || { [ "$HOST_ID" = darwin-arm64 ] && [ "$e2e_pass" -eq 0 ]; }; then
   status=1
 fi
 
 echo
 binary_union_check() {
   for side in left right; do
-    if "$1" binary_union "$REPO/bench/fixtures/prim_refuse_union.iyi" "$side" > "$WORK/union.out" 2> "$WORK/union.err"; then
+    if "$1" binary_union "$REPO_NATIVE/bench/fixtures/prim_refuse_union.iyi" "$side" > "$WORK/union.out" 2> "$WORK/union.err"; then
       return 1
     fi
     awk '/lower: visit\(binary <= with operand IR types .* inconsistent with Int64 and Int64 \(hosted codegen_binary_op\)\)/ { found = 1 } END { exit !found }' "$WORK/union.err" || return 1
@@ -216,13 +234,13 @@ convert_refusal_check() {
     awk -v reason="$*" 'index($0, reason) { found=1 } END { exit !found }' "$WORK/refuse.err" || return 1
   done
 }
-if binary_union_check "$WORK/port"; then
+if binary_union_check "$WORK/port$EXE"; then
   echo "  union comparison: both operand positions refused by name"
 else
   echo "  union comparison: missing named refusal"
   status=1
 fi
-if ! convert_refusal_check "$WORK/port"; then
+if ! convert_refusal_check "$WORK/port$EXE"; then
   echo "  conversion: missing named refusal"
   status=1
 fi
@@ -231,25 +249,41 @@ echo "== 4. Mutation proofs: the gate must catch each patch to the ported code"
 # The check rebuilds the driver from the patched source and requires every primitive fixture
 # to match the hosted module exactly. It returns 0 only on the unmutated behaviour.
 lower_primitives_check() {
-  "$IYI" build -o "$WORK/mut" "$REPO/bench/selfhost_lower_primitives_exercise.iyi" > "$WORK/mut.build.log" 2>&1 || { touch "$WORK/mutation-build-failed"; return 1; }
+  if ! "$IYI" build -o "$WORK_NATIVE/mut$EXE" "$REPO_NATIVE/bench/selfhost_lower_primitives_exercise.iyi" > "$WORK/mut.build.log" 2>&1; then
+    echo 'INVALID: primitive mutant driver failed to build'
+    cat "$WORK/mut.build.log"
+    return 2
+  fi
   for fixture in "$REPO"/bench/fixtures/lowprim_*.iyi; do
     name="$(basename "$fixture" .iyi)"
     # A fixture waiting by name cannot pass the check; the check covers the rest.
     [ -n "$(waiting_on "$name")" ] && continue
     [ -n "$(known_divergence "$name")" ] && continue
-    "$WORK/mut" lower "$fixture" "$WORK/$name.oracle.ll" > "$WORK/mut.out" 2>/dev/null || return 1
+    if ! "$WORK/mut$EXE" lower "$(native_path "$fixture")" "$WORK_NATIVE/$name.oracle.ll" > "$WORK/mut.out" 2>"$WORK/mut.err"; then
+      echo "INVALID: primitive mutant could not compare $name"
+      cat "$WORK/mut.err"
+      return 2
+    fi
     awk '/^SUMMARY identical=[0-9]+ total=[0-9]+ module=[01]$/ { split($2, a, "="); split($3, b, "="); if (a[2] != b[2] || b[2] == 0) bad = 1; n++ } END { exit (bad || n == 0) }' "$WORK/mut.out" || return 1
   done
-  "$WORK/mut" generic_pointerful > "$WORK/mut.pointerful" 2>"$WORK/mut.pointerful.err" || return 1
+  "$WORK/mut$EXE" generic_pointerful > "$WORK/mut.pointerful" 2>"$WORK/mut.pointerful.err" || { echo 'INVALID: generic-pointerful mutant did not run'; cat "$WORK/mut.pointerful.err"; return 2; }
   awk '/^generic_pointerful=1$/ { found = 1 } END { exit !found }' "$WORK/mut.pointerful" || return 1
-  binary_union_check "$WORK/mut" || return 1
-  convert_refusal_check "$WORK/mut" || return 1
+  binary_union_check "$WORK/mut$EXE" || return 1
+  convert_refusal_check "$WORK/mut$EXE" || return 1
   return 0
 }
 pointer_check() {
-  "$IYI" build -o "$WORK/pointer_mut" "$REPO/bench/selfhost_lower_primitives_exercise.iyi" > "$WORK/pointer_mut.build.log" 2>&1 || return 1
+  if ! "$IYI" build -o "$WORK_NATIVE/pointer_mut$EXE" "$REPO_NATIVE/bench/selfhost_lower_primitives_exercise.iyi" > "$WORK/pointer_mut.build.log" 2>&1; then
+    echo 'INVALID: pointer mutant driver failed to build'
+    cat "$WORK/pointer_mut.build.log"
+    return 2
+  fi
   : > "$WORK/pointer_mut_built"
-  "$WORK/pointer_mut" lower "$REPO/bench/fixtures/lowprim_ptr.iyi" "$WORK/lowprim_ptr.oracle.ll" > "$WORK/pointer_mut.out" 2> "$WORK/pointer_mut.err" || return 1
+  if ! "$WORK/pointer_mut$EXE" lower "$REPO_NATIVE/bench/fixtures/lowprim_ptr.iyi" "$WORK_NATIVE/lowprim_ptr.oracle.ll" > "$WORK/pointer_mut.out" 2> "$WORK/pointer_mut.err"; then
+    echo 'INVALID: pointer mutant could not compare fixture'
+    cat "$WORK/pointer_mut.err"
+    return 2
+  fi
   awk '/^SUMMARY/ { split($2, a, "="); split($3, b, "="); split($4, c, "="); exit !(a[2] == b[2] && a[2] > 0 && c[2] == 1) }' "$WORK/pointer_mut.out"
 }
 pointer_check || { echo "  baseline: pointer fixture differs"; status=1; }
@@ -262,10 +296,18 @@ prove_mutation "pointer addition loses inbounds" "$REPO/src/compiler/lower/primi
   '    low.last = low.builder.inbounds_gep(low.typer.llvm_embedded_type(elem), values[0], [values[1]] of Value)' '    low.last = low.builder.gep(low.typer.llvm_embedded_type(elem), values[0], [values[1]] of Value)' -- pointer_check || status=1
 if [ ! -f "$WORK/pointer_mut_built" ]; then echo "  NOT PROVEN: pointer addition mutant failed to build"; status=1; fi
 program_allocator_check() {
-  "$IYI" build -o "$WORK/alloc_mut" "$REPO/bench/selfhost_lower_primitives_exercise.iyi" > "$WORK/alloc_mut.build.log" 2>&1 || return 1
+  if ! "$IYI" build -o "$WORK_NATIVE/alloc_mut$EXE" "$REPO_NATIVE/bench/selfhost_lower_primitives_exercise.iyi" > "$WORK/alloc_mut.build.log" 2>&1; then
+    echo 'INVALID: allocator mutant driver failed to build'
+    cat "$WORK/alloc_mut.build.log"
+    return 2
+  fi
   : > "$WORK/alloc_mut_built"
   for name in lowprim_malloc_program_atomic lowprim_malloc_program_full lowprim_alloc_program_atomic lowprim_malloc_program_fallback; do
-    "$WORK/alloc_mut" lower "$REPO/bench/fixtures/$name.iyi" "$WORK/$name.oracle.ll" > "$WORK/alloc_mut.out" 2> "$WORK/alloc_mut.err" || return 1
+    if ! "$WORK/alloc_mut$EXE" lower "$REPO_NATIVE/bench/fixtures/$name.iyi" "$WORK_NATIVE/$name.oracle.ll" > "$WORK/alloc_mut.out" 2> "$WORK/alloc_mut.err"; then
+      echo "INVALID: allocator mutant could not compare $name"
+      cat "$WORK/alloc_mut.err"
+      return 2
+    fi
     awk '/^SUMMARY identical=[0-9]+ total=[0-9]+ module=[01]$/ { split($2, a, "="); split($3, b, "="); split($4, c, "="); if (a[2] != b[2] || b[2] == 0 || c[2] != 1) bad = 1; n++ } END { exit (bad || n == 0) }' "$WORK/alloc_mut.out" || return 1
   done
   return 0
@@ -430,9 +472,9 @@ prove_mutation "the other library upper float bound is rounded" "$REPO/src/compi
 echo
 echo "== 5. Checked arithmetic in an isolated def from a required runtime"
 required="$REPO/bench/fixtures/lower_overflow_required"
-if IYI_PATH="$required/prelude" "$IYI" build --emit llvm-ir --no-debug -o "$WORK/required-oracle" "$required/main.iyi" > "$WORK/required-oracle.log" 2>&1; then
+if IYI_PATH="$(native_path "$required/prelude")" "$IYI" build --emit llvm-ir --no-debug -o "$WORK_NATIVE/required-oracle$EXE" "$(native_path "$required/main.iyi")" > "$WORK/required-oracle.log" 2>&1; then
   awk "$CALL_TYPES" "$WORK/required-oracle.ll" > "$WORK/required-oracle.normal.ll"
-  "$WORK/port" oracle "$WORK/required-oracle.normal.ll" > "$WORK/required-host.txt" 2> "$WORK/required-host.err" || status=1
+  "$WORK/port$EXE" oracle "$WORK_NATIVE/required-oracle.normal.ll" > "$WORK/required-host.txt" 2> "$WORK/required-host.err" || status=1
   awk '/^define .*checked_sum/{p=1; n++} p{print} p && /^}/{p=0} END {if (n != 1) exit 1}' "$WORK/required-host.txt" > "$WORK/required-host.fn" || status=1
 else
   echo "  required-unit oracle failed:"
@@ -440,10 +482,18 @@ else
   status=1
 fi
 required_overflow_check() {
-  "$IYI" build -o "$WORK/required-port" "$REPO/bench/selfhost_lower_core_exercise.iyi" > "$WORK/required-build.log" 2>&1 || { touch "$WORK/mutation-build-failed"; return 1; }
-  (cd "$required" && "$WORK/required-port" probe-required runtime.iyi main.iyi "$WORK/required-oracle.normal.ll") > "$WORK/required.ir" 2> "$WORK/required.err" || return 1
+  if ! "$IYI" build -o "$WORK_NATIVE/required-port$EXE" "$REPO_NATIVE/bench/selfhost_lower_core_exercise.iyi" > "$WORK/required-build.log" 2>&1; then
+    echo 'INVALID: required-unit mutant driver failed to build'
+    cat "$WORK/required-build.log"
+    return 2
+  fi
+  if ! (cd "$required" && "$WORK/required-port$EXE" probe-required "$(native_path "$required/runtime.iyi")" "$(native_path "$required/main.iyi")" "$WORK_NATIVE/required-oracle.normal.ll") > "$WORK/required.ir" 2> "$WORK/required.err"; then
+    echo 'INVALID: required-unit mutant did not emit IR'
+    cat "$WORK/required.err"
+    return 2
+  fi
   awk '/^declare external void @__iyi_raise_overflow/ {found=1} END {exit !found}' "$WORK/required.ir" || return 1
-  "$WORK/port" oracle "$WORK/required.ir" > "$WORK/required-port.txt" 2> "$WORK/required-port.err" || return 1
+  "$WORK/port$EXE" oracle "$WORK_NATIVE/required.ir" > "$WORK/required-port.txt" 2> "$WORK/required-port.err" || { cat "$WORK/required-port.err"; return 2; }
   awk '/^define .*checked_sum/{p=1; n++} p{print} p && /^}/{p=0} END {if (n != 1) exit 1}' "$WORK/required-port.txt" > "$WORK/required-port.fn" || return 1
   cmp -s "$WORK/required-host.fn" "$WORK/required-port.fn"
 }
@@ -460,9 +510,9 @@ prove_mutation "the required overflow function has the wrong name" "$REPO/src/co
 echo
 echo "== 6. Checked float conversions under the iyi prelude, in isolated defs from a required runtime"
 float_names="f32_i8 f32_i16 f32_i32 f32_i64 f32_i128 f32_u8 f32_u16 f32_u32 f32_u64 f32_u128 f64_i8 f64_i16 f64_i32 f64_i64 f64_i128 f64_u8 f64_u16 f64_u32 f64_u64 f64_u128"
-if IYI_PATH="$required/prelude" "$IYI" build --emit llvm-ir --no-debug -o "$WORK/float-oracle" "$required/float_int.iyi" > "$WORK/float-oracle.log" 2>&1; then
+if IYI_PATH="$(native_path "$required/prelude")" "$IYI" build --emit llvm-ir --no-debug -o "$WORK_NATIVE/float-oracle$EXE" "$(native_path "$required/float_int.iyi")" > "$WORK/float-oracle.log" 2>&1; then
   awk "$CALL_TYPES" "$WORK/float-oracle.ll" > "$WORK/float-oracle.normal.ll"
-  "$WORK/port" oracle "$WORK/float-oracle.normal.ll" > "$WORK/float-host.txt" 2> "$WORK/float-host.err" || status=1
+  "$WORK/port$EXE" oracle "$WORK_NATIVE/float-oracle.normal.ll" > "$WORK/float-host.txt" 2> "$WORK/float-host.err" || status=1
 else
   echo "  float-conversion oracle failed:"
   awk 'NR<=15' "$WORK/float-oracle.log"
@@ -473,9 +523,17 @@ one_def() {
   awk -v n="@\"*$1<" 'index($0, "define ") == 1 && index($0, n) { p = 1; c++ } p { print } p && /^}/ { p = 0 } END { exit c != 1 }' "$2"
 }
 float_iyi_check() {
-  "$IYI" build -o "$WORK/float-port" "$REPO/bench/selfhost_lower_core_exercise.iyi" > "$WORK/float-build.log" 2>&1 || { touch "$WORK/mutation-build-failed"; return 1; }
-  (cd "$required" && "$WORK/float-port" probe-iyi runtime.iyi float_int.iyi "$WORK/float-oracle.normal.ll" $float_names) > "$WORK/float.ir" 2> "$WORK/float.err" || return 1
-  "$WORK/port" oracle "$WORK/float.ir" > "$WORK/float-port.txt" 2> "$WORK/float-port.err" || return 1
+  if ! "$IYI" build -o "$WORK_NATIVE/float-port$EXE" "$REPO_NATIVE/bench/selfhost_lower_core_exercise.iyi" > "$WORK/float-build.log" 2>&1; then
+    echo 'INVALID: float mutant driver failed to build'
+    cat "$WORK/float-build.log"
+    return 2
+  fi
+  if ! (cd "$required" && "$WORK/float-port$EXE" probe-iyi "$(native_path "$required/runtime.iyi")" "$(native_path "$required/float_int.iyi")" "$WORK_NATIVE/float-oracle.normal.ll" $float_names) > "$WORK/float.ir" 2> "$WORK/float.err"; then
+    echo 'INVALID: float mutant did not emit IR'
+    cat "$WORK/float.err"
+    return 2
+  fi
+  "$WORK/port$EXE" oracle "$WORK_NATIVE/float.ir" > "$WORK/float-port.txt" 2> "$WORK/float-port.err" || { cat "$WORK/float-port.err"; return 2; }
   for name in $float_names; do
     one_def "$name" "$WORK/float-host.txt" > "$WORK/float-host.fn" || return 1
     one_def "$name" "$WORK/float-port.txt" > "$WORK/float-port.fn" || return 1

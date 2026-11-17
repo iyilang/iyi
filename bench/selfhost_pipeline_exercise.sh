@@ -24,14 +24,26 @@
 set -u
 status=0
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO/bench/lib/host.sh" || exit 1
+require_test_host || exit 1
+REPO_NATIVE="$(native_path "$REPO")" || exit 1
+export IYI_PATH="$REPO_NATIVE/src"
+. "$REPO/bench/floor_base.sh" || exit 1
 IYI="$REPO/bin/iyi"
 . "$REPO/bench/lib/mutation.sh"
 . "$REPO/bench/lib/pipeline_report.sh"
-WORK="$(mktemp -d /tmp/iyi-pipeline.XXXXXX)"
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/iyi-pipeline.XXXXXX")" || exit 1
 ARTIFACT_DIR="${PIPELINE_ARTIFACT_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/iyi-pipeline-artifacts.XXXXXX")}"
 mkdir -p "$ARTIFACT_DIR"
 echo "  table sidecars: $ARTIFACT_DIR"
 trap 'rm -rf "$WORK"' EXIT
+WORK_NATIVE="$(native_path "$WORK")" || exit 1
+CAN_RUN_MACHO=0
+if [ "$HOST_OS" = darwin ] && [ "$HOST_ARCH" = arm64 ]; then
+  CAN_RUN_MACHO=1
+else
+  host_limited "selfhost_pipeline: arm64 Mach-O execution, signature checks, and run-equal floors require macOS arm64; cross-host emission and IR checks remain enabled"
+fi
 FLOOR="$REPO/bench/selfhost_pipeline.floor"
 TOOL_SRC="$REPO/src/compiler/tools/compile_native.iyi"
 PROGRAM_SRC="$REPO/src/compiler/lower/program.iyi"
@@ -45,8 +57,10 @@ ROOTS="samples/iyi/hello.iyi src/compiler/tools/parse.iyi src/compiler/tools/com
 ROOT_MIN_GB="${SELFHOST_PIPELINE_ROOT_MIN_GB:-96}"
 if [ -n "${SELFHOST_PIPELINE_HOST_GB:-}" ]; then
   HOST_GB="$SELFHOST_PIPELINE_HOST_GB"
-elif [ "$(uname -s)" = Darwin ]; then
+elif [ "$HOST_OS" = darwin ]; then
   HOST_GB="$({ /usr/sbin/sysctl -n hw.memsize 2>/dev/null || sysctl -n hw.memsize; } | awk '{printf "%.0f", int($1 / 1073741824)}')"
+elif [ "$HOST_OS" = windows ]; then
+  HOST_GB="$(powershell.exe -NoProfile -NonInteractive -Command '[math]::Floor((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB)' | tr -d '\r\n')"
 else
   HOST_GB="$(awk '/^MemTotal:/ {printf "%.0f", int($2 / 1048576); found=1} END {if (!found) exit 1}' /proc/meminfo)"
 fi
@@ -70,25 +84,43 @@ probe_phase() {
   awk '/^reached:/ { r = $2; found = 1 } /^\[phase\] [a-z]+: pass$/ { p = $2; sub(":", "", p) } END { if (found) print r; else print p }' "$1"
 }
 
-# Builds the tool from the given source, with the hosted compiler, into $2.
+# Builds the host executable at $2$EXE. A failed hosted build is never a
+# caught mutation; keep the actual compiler diagnostics.
 build_tool() {
-  "$IYI" build -o "$2" "$1" > "$2.build.log" 2>&1
+  if ! "$IYI" build -o "$(native_path "$2$EXE")" "$(native_path "$1")" > "$2.build.log" 2>&1; then
+    echo "  INVALID: hosted build failed for $1" >&2
+    cat "$2.build.log" >&2
+    return 2
+  fi
 }
 
 echo "== 1. The tool builds from source with bin/iyi and links no LLVM"
 if ! build_tool "$TOOL_SRC" "$WORK/tool"; then
-  echo "  FAIL: the tool does not build (see $WORK/tool.build.log)"
   exit 1
 fi
-if otool -L "$WORK/tool" | awk '/LLVM|llvm/ { found = 1 } END { exit !found }'; then
+case "$HOST_OS" in
+  darwin) otool -L "$WORK/tool$EXE" >"$WORK/dependencies.log" 2>&1 || { cat "$WORK/dependencies.log" >&2; exit 1; } ;;
+  linux) readelf -d "$WORK/tool$EXE" >"$WORK/dependencies.log" 2>&1 || { cat "$WORK/dependencies.log" >&2; exit 1; } ;;
+  windows)
+    DUMPBIN="$(find_dumpbin || true)"
+    [ -n "$DUMPBIN" ] || { echo "  FAIL: dumpbin is required for the dependency check" >&2; exit 1; }
+    "$DUMPBIN" -nologo -dependents "$(native_path "$WORK/tool$EXE")" >"$WORK/dependencies.log" 2>&1 || { cat "$WORK/dependencies.log" >&2; exit 1; }
+    ;;
+esac
+if grep -qi llvm "$WORK/dependencies.log"; then
   echo "  FAIL: the tool links LLVM"
+  cat "$WORK/dependencies.log"
   exit 1
 fi
 echo "  the tool builds and links no LLVM"
 
 echo
 echo "== 2. Each fixture: the typed pipeline against the hosted executable"
-declare -A measured
+: >"$WORK/measured"
+record_phase() { printf '%s %s\n' "$1" "$2" >>"$WORK/measured"; }
+measured_phase() {
+  awk -v key="$1" '$1 == key { print $2; found=1; exit } END { if (!found) print "missing" }' "$WORK/measured"
+}
 run_equal=0
 refused=0
 failed=0
@@ -104,42 +136,51 @@ for fixture in $fixtures; do
   name="$(basename "$fixture" .iyi)"
   rel="bench/fixtures/$name.iyi"
   total=$((total + 1))
-  out="$WORK/$name"
-  "$WORK/tool" "$fixture" -o "$out" --pipeline typed --probe-phase > "$WORK/$name.probe" 2> "$WORK/$name.err"
+  out="$WORK/$name$EXE"
+  "$WORK/tool$EXE" "$(native_path "$fixture")" -o "$WORK_NATIVE/$name$EXE" --pipeline typed --probe-phase > "$WORK/$name.probe" 2> "$WORK/$name.err"
   ts=$?
   reached="$(probe_phase "$WORK/$name.probe")"
-  if [ "$ts" -eq 0 ] && [ "$reached" = "link" ]; then
+  if [ "$ts" -eq 0 ] && [ "$reached" = "link" ] && [ -f "$out" ]; then
     prelude=empty
-    hosted_path="$REPO/src"
+    hosted_path="$REPO_NATIVE/src"
     if [ "$name" = lowglob_cvar_lazy ] || [ "$name" = lowglob_cvar_lazy_aggregate ]; then
       prelude=iyi/prelude
-      hosted_path="$REPO/bench/fixtures/lowglob_abi:$hosted_path"
+      path_sep=:
+      [ "$HOST_OS" = windows ] && path_sep=';'
+      hosted_path="$REPO_NATIVE/bench/fixtures/lowglob_abi$path_sep$hosted_path"
     fi
-    if ! IYI_PATH="$hosted_path" "$IYI" build --prelude "$prelude" -o "$WORK/$name.hosted" "$fixture" > "$WORK/$name.hosted.log" 2>&1; then
+    if ! IYI_PATH="$hosted_path" "$IYI" build --prelude "$prelude" -o "$WORK_NATIVE/$name.hosted$EXE" "$(native_path "$fixture")" > "$WORK/$name.hosted.log" 2>&1; then
       echo "  $name: FAILED, the hosted compiler does not build the fixture"
-      failed=$((failed + 1)); measured[$rel]="link"; continue
+      cat "$WORK/$name.hosted.log"
+      failed=$((failed + 1)); record_phase "$rel" link; continue
+    fi
+    if [ "$CAN_RUN_MACHO" -eq 0 ]; then
+      echo "  $name: link (arm64 Mach-O execution not available on $HOST_ID)"
+      record_phase "$rel" link; continue
     fi
     if ! codesign -v --strict "$out" > /dev/null 2>&1; then
       echo "  $name: FAILED, native signature invalid"
-      failed=$((failed + 1)); measured[$rel]="link"; continue
+      failed=$((failed + 1)); record_phase "$rel" link; continue
     fi
     timeout 30 "$out" > "$WORK/$name.typed.out" 2>&1; tstat=$?
-    timeout 30 "$WORK/$name.hosted" > "$WORK/$name.hosted.out" 2>&1; hstat=$?
-    if [ "$tstat" = "$hstat" ] && cmp -s "$WORK/$name.typed.out" "$WORK/$name.hosted.out"; then
+    timeout 30 "$WORK/$name.hosted$EXE" > "$WORK/$name.hosted.out" 2>&1; hstat=$?
+    if [ "$tstat" -lt 124 ] && [ "$hstat" -lt 124 ] && [ "$tstat" = "$hstat" ] && cmp -s "$WORK/$name.typed.out" "$WORK/$name.hosted.out"; then
       echo "  $name: run-equal (status $hstat, stdout identical)"
-      run_equal=$((run_equal + 1)); measured[$rel]="run-equal"
+      run_equal=$((run_equal + 1)); record_phase "$rel" run-equal
     else
       echo "  $name: FAILED, the typed executable exits $tstat, the hosted $hstat, or the stdout differs"
-      failed=$((failed + 1)); measured[$rel]="link"
+      failed=$((failed + 1)); record_phase "$rel" link
     fi
-  elif [ "$ts" -ne 0 ] && [ "$reached" != "link" ] && [ ! -e "$out" ]; then
+  elif [ "$ts" -eq 1 ] && [ "$reached" != "link" ] && [ ! -e "$out" ] &&
+       { grep -q '^iyi-compile-native: ' "$WORK/$name.err" || port_refusal "$ts" "$WORK/$name.err"; }; then
     refusal="$(awk '/: fail: / { print; exit }' "$WORK/$name.probe" | cut -c1-140)"
     [ -z "$refusal" ] && refusal="$(awk 'NR==1' "$WORK/$name.err" | cut -c1-140)"
     echo "  $name: refused after $reached, exit $ts, no output: $refusal"
-    refused=$((refused + 1)); measured[$rel]="$reached"
+    refused=$((refused + 1)); record_phase "$rel" "${reached:-none}"
   else
     echo "  $name: FAILED, exit $ts, reached $reached, output file present: $([ -e "$out" ] && echo yes || echo no)"
-    failed=$((failed + 1)); measured[$rel]="${reached:-none}"
+    cat "$WORK/$name.probe" "$WORK/$name.err"
+    failed=$((failed + 1)); record_phase "$rel" "${reached:-none}"
   fi
 done
 echo "  fixtures: $run_equal run-equal of $total, $refused refused with no output, $failed failed"
@@ -153,23 +194,26 @@ for root in $ROOTS; do
   fi
   rel="$root"
   name="$(basename "$root" .iyi)"
-  IYI_PATH="$REPO/src" "$WORK/tool" "$REPO/$root" -o "$WORK/$name.root" --pipeline typed --prelude --probe-phase > "$WORK/$name.root.probe" 2> "$WORK/$name.root.err"
+  "$WORK/tool$EXE" "$REPO_NATIVE/$root" -o "$WORK_NATIVE/$name.root$EXE" --pipeline typed --prelude --probe-phase > "$WORK/$name.root.probe" 2> "$WORK/$name.root.err"
   root_status=$?
   rphase="$(probe_phase "$WORK/$name.root.probe")"
   refusal="$(pipeline_first_refusal "$WORK/$name.root.probe")"
   [ -n "$refusal" ] || refusal="$(awk 'NR==1 { print; exit }' "$WORK/$name.root.err")"
   echo "  $name strict: reached ${rphase:-none}: ${refusal:-no refusal}"
-  if [ "$root_status" -eq 0 ] && [ "$rphase" = "link" ] && [ -e "$WORK/$name.root" ]; then
-    if ! IYI_PATH="$REPO/src" "$IYI" build -o "$WORK/$name.root.hosted" "$REPO/$root" > "$WORK/$name.root.hosted.log" 2>&1; then
+  if [ "$root_status" -eq 0 ] && [ "$rphase" = "link" ] && [ -e "$WORK/$name.root$EXE" ]; then
+    if ! "$IYI" build -o "$WORK_NATIVE/$name.root.hosted$EXE" "$REPO_NATIVE/$root" > "$WORK/$name.root.hosted.log" 2>&1; then
       echo "  $root: FAILED, the hosted compiler does not build the root"
+      cat "$WORK/$name.root.hosted.log"
       failed=$((failed + 1))
-    elif ! codesign -v --strict "$WORK/$name.root" > /dev/null 2>&1; then
+    elif [ "$CAN_RUN_MACHO" -eq 0 ]; then
+      echo "  $root: link (arm64 Mach-O execution not available on $HOST_ID)"
+    elif ! codesign -v --strict "$WORK/$name.root$EXE" > /dev/null 2>&1; then
       echo "  $root: FAILED, native signature invalid"
       failed=$((failed + 1))
     else
-      timeout 30 "$WORK/$name.root" > "$WORK/$name.root.typed.out" 2>&1; tstat=$?
-      timeout 30 "$WORK/$name.root.hosted" > "$WORK/$name.root.hosted.out" 2>&1; hstat=$?
-      if pipeline_outputs_equal "$tstat" "$hstat" "$WORK/$name.root.typed.out" "$WORK/$name.root.hosted.out"; then
+      timeout 30 "$WORK/$name.root$EXE" > "$WORK/$name.root.typed.out" 2>&1; tstat=$?
+      timeout 30 "$WORK/$name.root.hosted$EXE" > "$WORK/$name.root.hosted.out" 2>&1; hstat=$?
+      if [ "$tstat" -lt 124 ] && [ "$hstat" -lt 124 ] && pipeline_outputs_equal "$tstat" "$hstat" "$WORK/$name.root.typed.out" "$WORK/$name.root.hosted.out"; then
         rphase="run-equal"
         echo "  $root: run-equal (status $hstat, stdout identical)"
       else
@@ -177,11 +221,13 @@ for root in $ROOTS; do
         failed=$((failed + 1))
       fi
     fi
-  elif [ "$root_status" -eq 0 ] || [ "$rphase" = "link" ] || [ -e "$WORK/$name.root" ]; then
+  elif [ "$root_status" -ne 1 ] || [ "$rphase" = "link" ] || [ -e "$WORK/$name.root$EXE" ] ||
+       { ! grep -q '^iyi-compile-native: ' "$WORK/$name.root.err" && ! port_refusal "$root_status" "$WORK/$name.root.err"; }; then
     echo "  $root: FAILED, exit $root_status, reached ${rphase:-none}, or unexpected output"
+    cat "$WORK/$name.root.probe" "$WORK/$name.root.err"
     failed=$((failed + 1))
   fi
-  measured[$rel]="${rphase:-none}"
+  record_phase "$rel" "${rphase:-none}"
 done
 
 echo
@@ -190,29 +236,28 @@ if [ "${SELFHOST_PIPELINE_RAISE:-0}" = "1" ]; then
   : > "$FLOOR.new"
   echo "# selfhost pipeline floor: <repo file> <phase reached>. A phase may only rise." >> "$FLOOR.new"
   echo "# Raise with SELFHOST_PIPELINE_RAISE=1 bash bench/selfhost_pipeline_exercise.sh (keeps the higher phase)." >> "$FLOOR.new"
-  floor_keys=("${!measured[@]}")
-  if [ "$SKIP_COMPILE_NATIVE" -eq 1 ] && awk -v root="$COMPILE_NATIVE_ROOT" '$1 == root {found=1} END {exit !found}' "$FLOOR"; then
-    floor_keys+=("$COMPILE_NATIVE_ROOT")
+  cp "$WORK/measured" "$WORK/floor.rows"
+  if [ "$SKIP_COMPILE_NATIVE" -eq 1 ]; then
+    awk -v root="$COMPILE_NATIVE_ROOT" '$1 == root {print}' "$FLOOR" >>"$WORK/floor.rows"
   fi
-  for k in $(printf '%s\n' "${floor_keys[@]}" | sort); do
-    if [ "$SKIP_COMPILE_NATIVE" -eq 1 ] && [ "$k" = "$COMPILE_NATIVE_ROOT" ]; then
-      awk -v root="$COMPILE_NATIVE_ROOT" '$1 == root {print}' "$FLOOR" >> "$FLOOR.new"
-      continue
-    fi
-    keep="${measured[$k]}"
+  sort "$WORK/floor.rows" >"$WORK/floor.sorted"
+  while read -r k keep; do
     prev="$(awk -v k="$k" '$1 == k { print $2 }' "$FLOOR" 2>/dev/null)"
     if [ -n "$prev" ] && [ "$(rank "$prev")" -gt "$(rank "$keep")" ]; then keep="$prev"; fi
     echo "$k $keep" >> "$FLOOR.new"
-  done
+  done <"$WORK/floor.sorted"
   mv "$FLOOR.new" "$FLOOR"
-  echo "  floor written: $(printf '%s\n' "${!measured[@]}" | wc -l | awk '{print $1}') rows"
+  echo "  floor written: $(wc -l <"$WORK/measured" | awk '{print $1}') rows"
 fi
 floor_bad=0
 while read -r key phase; do
   case "$key" in ""|\#*) continue ;; esac
   if [ "$SKIP_COMPILE_NATIVE" -eq 1 ] && [ "$key" = "$COMPILE_NATIVE_ROOT" ]; then continue; fi
   want=$(rank "$phase")
-  got_phase="${measured[$key]:-missing}"
+  # The recorded run-equal floor remains intact; on other kernels only its
+  # link prerequisite is observable.
+  if [ "$CAN_RUN_MACHO" -eq 0 ] && [ "$phase" = run-equal ]; then want=$(rank link); fi
+  got_phase="$(measured_phase "$key")"
   got=$(rank "$got_phase")
   if [ "$got" -lt "$want" ]; then
     echo "  $key: FALLS below the floor ($got_phase < $phase)"
@@ -222,15 +267,15 @@ done < "$FLOOR"
 if [ "$floor_bad" -gt 0 ]; then
   status=1
 else
-  echo "  every measured phase is at or above the floor"
+  echo "  every host-applicable measured phase is at or above its floor"
 fi
-for k in "${!measured[@]}"; do
-  if [ "$(rank "${measured[$k]}")" -ge 0 ] && ! awk -v k="$k" '$1 == k { found = 1 } END { exit !found }' "$FLOOR" 2>/dev/null; then
+while read -r k measured_value; do
+  if [ "$(rank "$measured_value")" -ge 0 ] && ! awk -v k="$k" '$1 == k { found = 1 } END { exit !found }' "$FLOOR" 2>/dev/null; then
     echo "  $k: not in the floor (raise the floor with SELFHOST_PIPELINE_RAISE=1)"
     status=1
   fi
-done
-if [ "$failed" -gt 0 ] || [ "$run_equal" -eq 0 ]; then
+done <"$WORK/measured"
+if [ "$failed" -gt 0 ] || { [ "$CAN_RUN_MACHO" -eq 1 ] && [ "$run_equal" -eq 0 ]; }; then
   echo "  FAIL: $failed fixture(s) failed, $run_equal run-equal"
   status=1
 fi
@@ -251,9 +296,15 @@ for root in $ROOTS; do
     continue
   fi
   name="$(basename "$root" .iyi)"
-  IYI_PATH="$REPO/src" "$WORK/tool" "$REPO/$root" -o "$WORK/$name.table" --pipeline typed --prelude --probe-phase --keep-going > "$WORK/$name.table.probe" 2> /dev/null
-  for sidecar in names refusals; do [ ! -f "$WORK/$name.table.$sidecar" ] || cp "$WORK/$name.table.$sidecar" "$ARTIFACT_DIR/"; done
-  if [ -f "$WORK/$name.table.refusals" ]; then
+  "$WORK/tool$EXE" "$REPO_NATIVE/$root" -o "$WORK_NATIVE/$name.table$EXE" --pipeline typed --prelude --probe-phase --keep-going > "$WORK/$name.table.probe" 2> "$WORK/$name.table.err"
+  table_rc=$?
+  if [ "$table_rc" -ge 126 ]; then
+    echo "  $root: table probe crashed (exit $table_rc)"
+    cat "$WORK/$name.table.err"
+    table_ok=0
+  fi
+  for sidecar in names refusals; do [ ! -f "$WORK/$name.table$EXE.$sidecar" ] || cp "$WORK/$name.table$EXE.$sidecar" "$ARTIFACT_DIR/"; done
+  if [ -f "$WORK/$name.table$EXE.refusals" ]; then
     awk -F '\t' -v name="$name" '
       ($1 == "body" || $1 == "lowering") {
         rows++
@@ -263,9 +314,9 @@ for root in $ROOTS; do
         for (d in defs) ndefs++
         printf "  %s keep-going: %d rows in %d defs, %d root sites\n", name, rows, ndefs, root
         for (owner in owners) printf "    root owner=%s sites=%d\n", owner, owners[owner]
-      }' "$WORK/$name.table.refusals"
+      }' "$WORK/$name.table$EXE.refusals"
   fi
-  awk '/^table:/' "$WORK/$name.table.probe" | sed "s#$REPO/##g" >> "$WORK/table.lines"
+  awk '/^table:/' "$WORK/$name.table.probe" | sed "s#$REPO_NATIVE/##g" >> "$WORK/table.lines"
   if [ -z "$(table_value "$name" defs-reached)" ]; then
     echo "  $root: no table summary line (see $WORK/$name.table.probe)"
     table_ok=0
@@ -348,67 +399,107 @@ else
 fi
 echo
 echo "== 4b. Imported unit class-variable array"
-imported_array_check() {
-  local tool="$1"
-  local fixture="$REPO/bench/fixtures/pipeline_unit_cvar_array.iyi"
-  rm -f "$WORK/unit_array"
-  IYI_PATH="$REPO/src" "$tool" "$fixture" -o "$WORK/unit_array" --pipeline typed --prelude --probe-phase > "$WORK/unit_array.log" 2>&1 || return 1
-  codesign -v --strict "$WORK/unit_array" > /dev/null 2>&1 || return 1
-  timeout 30 "$WORK/unit_array" > "$WORK/unit_array.out" 2>&1
+target_fixture_check() {
+  local tool="$1" fixture="$2" stem="$3" expected_refusal_message="${4:-}" rc=0
+  rm -f "$WORK/$stem$EXE"
+  "$tool" "$REPO_NATIVE/bench/fixtures/$fixture.iyi" -o "$WORK_NATIVE/$stem$EXE" --pipeline typed --prelude --probe-phase >"$WORK/$stem.log" 2>"$WORK/$stem.err" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    if [ "${_PM_ARMED:-0}" = 1 ] && [ -n "$expected_refusal_message" ] && [ ! -e "$WORK/$stem$EXE" ] &&
+       expected_refusal "$rc" "$WORK/$stem.err" refuse_port "$expected_refusal_message"; then
+      echo "decisive: compiler produced the expected injected refusal"
+      return 1
+    fi
+    echo "  INVALID: compiler could not build $fixture (exit $rc)" >&2
+    cat "$WORK/$stem.log" "$WORK/$stem.err" >&2
+    return 2
+  fi
+  if [ ! -f "$WORK/$stem$EXE" ]; then
+    echo "  FAIL: $fixture reported success without an executable" >&2
+    return 1
+  fi
+  [ "$CAN_RUN_MACHO" -eq 1 ] || return 0
+  if ! codesign -v --strict "$WORK/$stem$EXE" >/dev/null 2>&1; then
+    echo "  INVALID: $fixture has an invalid native signature" >&2
+    return 2
+  fi
+  rc=0
+  timeout 30 "$WORK/$stem$EXE" >"$WORK/$stem.out" 2>&1 || rc=$?
+  [ "$rc" -eq 0 ] && return 0
+  if [ "$rc" -ge 124 ]; then
+    echo "  INVALID: $fixture crashed or timed out (exit $rc)" >&2
+    cat "$WORK/$stem.out" >&2
+    return 2
+  fi
+  case "$stem:$rc" in
+    unit_array:1|unit_array:2|unit_array:3)
+      if [ ! -s "$WORK/$stem.out" ]; then
+        echo "decisive: imported array assertion exited $rc"
+        return 1
+      fi ;;
+    virtual_ivar:*)
+      if grep -Eq 'wrong constructor value|wrong initialized value' "$WORK/$stem.out"; then
+        echo "decisive: virtual instance-variable assertion failed"
+        return 1
+      fi ;;
+    nested_import:*)
+      if grep -Fq 'wrong imported initializer' "$WORK/$stem.out"; then
+        echo "decisive: nested import initializer assertion failed"
+        return 1
+      fi ;;
+  esac
+  echo "  INVALID: $fixture failed without its expected assertion (exit $rc)" >&2
+  cat "$WORK/$stem.out" >&2
+  return 2
 }
-if imported_array_check "$WORK/tool"; then
-  echo "  imported array initializes and retains its contents"
+imported_array_check() { target_fixture_check "$1" pipeline_unit_cvar_array unit_array; }
+virtual_ivar_check() { target_fixture_check "$1" pipeline_virtual_ivar virtual_ivar; }
+nested_import_check() { target_fixture_check "$1" pipeline_import_nested nested_import "${2:-}"; }
+array_baseline=0
+virtual_baseline=0
+nested_baseline=0
+
+if imported_array_check "$WORK/tool$EXE"; then
+  array_baseline=1
+  if [ "$CAN_RUN_MACHO" -eq 1 ]; then echo "  imported array initializes and retains its contents"; else echo "  imported array emitted as arm64 Mach-O"; fi
 else
-  echo "  FAIL: imported class-variable array did not run"
+  echo "  FAIL: imported class-variable array"
   status=1
 fi
 
-virtual_ivar_check() {
-  local tool="$1"
-  local fixture="$REPO/bench/fixtures/pipeline_virtual_ivar.iyi"
-  rm -f "$WORK/virtual_ivar"
-  IYI_PATH="$REPO/src" "$tool" "$fixture" -o "$WORK/virtual_ivar" --pipeline typed --prelude --probe-phase > "$WORK/virtual_ivar.log" 2>&1 || return 1
-  codesign -v --strict "$WORK/virtual_ivar" > /dev/null 2>&1 || return 1
-  timeout 30 "$WORK/virtual_ivar" > "$WORK/virtual_ivar.out" 2>&1
-}
-if IYI_PATH="$REPO/src" "$IYI" run "$REPO/bench/fixtures/pipeline_virtual_ivar.iyi" > "$WORK/virtual_ivar.hosted" 2>&1 && virtual_ivar_check "$WORK/tool"; then
-  echo "  virtual instance-variable declarations run on hosted and native"
+if "$IYI" run "$REPO_NATIVE/bench/fixtures/pipeline_virtual_ivar.iyi" > "$WORK/virtual_ivar.hosted" 2>&1 && virtual_ivar_check "$WORK/tool$EXE"; then
+  virtual_baseline=1
+  if [ "$CAN_RUN_MACHO" -eq 1 ]; then echo "  virtual instance-variable declarations run on hosted and native"; else echo "  hosted virtual instance variables run; native target emitted"; fi
 else
   echo "  FAIL: virtual instance-variable declaration"
+  cat "$WORK/virtual_ivar.hosted"
   status=1
 fi
 
 echo "== 4c. Imported digest's atomic class variable"
-if IYI_PATH="$REPO/src" "$IYI" run "$REPO/bench/fixtures/pipeline_import_digest.iyi" > "$WORK/digest.hosted" 2>&1 &&
-   IYI_PATH="$REPO/src" "$WORK/tool" "$REPO/bench/fixtures/pipeline_import_digest.iyi" -o "$WORK/digest" --pipeline typed --prelude --probe-phase > "$WORK/digest.log" 2>&1 &&
-   codesign -v --strict "$WORK/digest" > /dev/null 2>&1 &&
-   timeout 30 "$WORK/digest" > "$WORK/digest.out" 2>&1; then
-  echo "  imported digest initializer runs on hosted and native"
+if "$IYI" run "$REPO_NATIVE/bench/fixtures/pipeline_import_digest.iyi" > "$WORK/digest.hosted" 2>&1 &&
+   target_fixture_check "$WORK/tool$EXE" pipeline_import_digest digest; then
+  if [ "$CAN_RUN_MACHO" -eq 1 ]; then echo "  imported digest initializer runs on hosted and native"; else echo "  hosted digest runs; native target emitted"; fi
 else
   echo "  FAIL: imported digest initializer"
+  cat "$WORK/digest.hosted"
   status=1
 fi
 
 echo "== 4d. Nested imports preserve dependency initialization"
-nested_import_check() {
-  local tool="$1"
-  rm -f "$WORK/nested_import"
-  IYI_PATH="$REPO/src" "$tool" "$REPO/bench/fixtures/pipeline_import_nested.iyi" -o "$WORK/nested_import" --pipeline typed --prelude --probe-phase > "$WORK/nested_import.log" 2>&1 || return 1
-  codesign -v --strict "$WORK/nested_import" > /dev/null 2>&1 || return 1
-  timeout 30 "$WORK/nested_import" > "$WORK/nested_import.out" 2>&1
-}
-if IYI_PATH="$REPO/src" "$IYI" run "$REPO/bench/fixtures/pipeline_import_nested.iyi" > "$WORK/nested_import.hosted" 2>&1 && nested_import_check "$WORK/tool"; then
-  echo "  nested class and module imports initialize their shared dependency"
+if "$IYI" run "$REPO_NATIVE/bench/fixtures/pipeline_import_nested.iyi" > "$WORK/nested_import.hosted" 2>&1 && nested_import_check "$WORK/tool$EXE"; then
+  nested_baseline=1
+  if [ "$CAN_RUN_MACHO" -eq 1 ]; then echo "  nested class and module imports initialize their shared dependency"; else echo "  hosted nested imports run; native target emitted"; fi
 else
   echo "  FAIL: nested import initializer"
+  cat "$WORK/nested_import.hosted"
   status=1
 fi
 for bad in pipeline_import_cycle pipeline_import_missing; do
-  rm -f "$WORK/$bad"
-  IYI_PATH="$REPO/src" "$IYI" run "$REPO/bench/fixtures/$bad.iyi" > "$WORK/$bad.hosted" 2>&1; hs=$?
-  IYI_PATH="$REPO/src" "$WORK/tool" "$REPO/bench/fixtures/$bad.iyi" -o "$WORK/$bad" --pipeline typed --prelude --probe-phase > "$WORK/$bad.native" 2>&1; ns=$?
+  rm -f "$WORK/$bad$EXE"
+  "$IYI" run "$REPO_NATIVE/bench/fixtures/$bad.iyi" > "$WORK/$bad.hosted" 2>&1; hs=$?
+  "$WORK/tool$EXE" "$REPO_NATIVE/bench/fixtures/$bad.iyi" -o "$WORK_NATIVE/$bad$EXE" --pipeline typed --prelude --probe-phase > "$WORK/$bad.native" 2>&1; ns=$?
   if [ "$bad" = pipeline_import_cycle ]; then expected="import cycle"; else expected="can't find module 'pipeline_nonexistent_dependency'"; fi
-  if [ "$hs" -eq 0 ] || [ "$ns" -eq 0 ] || [ -e "$WORK/$bad" ] || ! grep -Fq "$expected" "$WORK/$bad.hosted" || ! grep -Fq "$expected" "$WORK/$bad.native"; then
+  if [ "$hs" -eq 0 ] || [ "$hs" -ge 126 ] || [ "$ns" -ne 1 ] || [ -e "$WORK/$bad$EXE" ] || ! grep -Fq "$expected" "$WORK/$bad.hosted" || ! grep -Fq "$expected" "$WORK/$bad.native"; then
     echo "  FAIL: $bad did not reject on both compilers"
     status=1
   else
@@ -422,137 +513,271 @@ echo "== 5. Mutation proofs: the gate must catch each patch"
 # fixture that must exit nonzero and write nothing (the refusal), and the typed build of a program with its
 # top-level code. It returns 0 only on the unmutated behaviour.
 pipeline_check() {
-  if ! build_tool "$TOOL_SRC" "$WORK/mut_tool"; then return 1; fi
-  local a="$REPO/bench/fixtures/lower_exit.iyi"
-  local b="$REPO/bench/fixtures/lower_instance_sizeof.iyi"
-  rm -f "$WORK/mut_a" "$WORK/mut_b"
-  "$WORK/mut_tool" "$a" -o "$WORK/mut_a" --pipeline typed > /dev/null 2>&1; local sa=$?
-  [ "$sa" -eq 0 ] || return 1
-  codesign -v --strict "$WORK/mut_a" > /dev/null 2>&1 || { echo "  lower_exit: FAIL, native signature invalid"; [ "${_PM_ARMED:-0}" = 1 ] && return 0; return 1; }
-  timeout 30 "$WORK/mut_a" > /dev/null 2>&1; [ "$?" -eq 42 ] || return 1
-  "$WORK/mut_tool" "$b" -o "$WORK/mut_b" --pipeline typed > /dev/null 2>&1; local sb=$?
-  [ "$sb" -ne 0 ] || return 1
-  [ ! -e "$WORK/mut_b" ] || return 1
-  return 0
+  build_tool "$TOOL_SRC" "$WORK/mut_tool" || return 2
+  local sa=0 sb=0 run_status=0 refusal expected
+  rm -f "$WORK/mut_a$EXE" "$WORK/mut_b$EXE"
+  "$WORK/mut_tool$EXE" "$REPO_NATIVE/bench/fixtures/lower_exit.iyi" -o "$WORK_NATIVE/mut_a$EXE" --pipeline typed --probe-phase >"$WORK/mut_a.log" 2>"$WORK/mut_a.err" || sa=$?
+  if [ "$sa" -ne 0 ]; then
+    echo "  INVALID: compiler failed to build lower_exit (exit $sa)" >&2
+    cat "$WORK/mut_a.log" "$WORK/mut_a.err" >&2
+    return 2
+  fi
+  if [ ! -f "$WORK/mut_a$EXE" ]; then
+    echo "decisive: lower_exit reported success without an executable"
+    return 1
+  fi
+  if [ "$CAN_RUN_MACHO" -eq 1 ]; then
+    if ! codesign -v --strict "$WORK/mut_a$EXE" >/dev/null 2>&1; then
+      echo "  INVALID: lower_exit has an invalid signature" >&2
+      return 2
+    fi
+    timeout 30 "$WORK/mut_a$EXE" >"$WORK/mut_a.out" 2>&1 || run_status=$?
+    if [ "$run_status" -ge 124 ] || grep -Eqi 'panic|segmentation fault|abort trap' "$WORK/mut_a.out"; then
+      echo "  INVALID: lower_exit crashed or timed out (exit $run_status)" >&2
+      cat "$WORK/mut_a.out" >&2
+      return 2
+    fi
+    if [ "$run_status" -ne 42 ]; then
+      echo "decisive: lower_exit returned $run_status instead of 42"
+      return 1
+    fi
+  fi
+  "$WORK/mut_tool$EXE" "$REPO_NATIVE/bench/fixtures/lower_instance_sizeof.iyi" -o "$WORK_NATIVE/mut_b$EXE" --pipeline typed --probe-phase >"$WORK/mut_b.log" 2>"$WORK/mut_b.err" || sb=$?
+  refusal="$(pipeline_first_refusal "$WORK/mut_b.log")"
+  if [ "${_PM_ARMED:-0}" = 0 ]; then
+    case "$refusal" in 'lower: fail: '*InstanceSizeOf*) ;; *) echo "  INVALID: baseline did not reach the expected InstanceSizeOf refusal" >&2; cat "$WORK/mut_b.log" "$WORK/mut_b.err" >&2; return 2 ;; esac
+    expected="iyi-compile-native: lower: ${refusal#lower: fail: }"
+    if [ "$sb" -ne 1 ] || [ -e "$WORK/mut_b$EXE" ] || ! grep -Fxq "$expected" "$WORK/mut_b.err"; then
+      echo "  INVALID: baseline InstanceSizeOf refusal did not match its exact compiler diagnostic" >&2
+      cat "$WORK/mut_b.log" "$WORK/mut_b.err" >&2
+      return 2
+    fi
+    printf '%s\n' "$expected" >"$WORK/pipeline.expected-refusal"
+    printf '%s\n' "$refusal" >"$WORK/pipeline.expected-phase"
+    return 0
+  fi
+  [ -f "$WORK/pipeline.expected-refusal" ] || { echo "  INVALID: missing refusal baseline" >&2; return 2; }
+  expected="$(cat "$WORK/pipeline.expected-refusal")"
+  if [ "$sb" -eq 1 ] && [ ! -e "$WORK/mut_b$EXE" ] && grep -Fxq "$expected" "$WORK/mut_b.err"; then
+    return 0
+  fi
+  if [ "$sb" -eq 0 ] && { [ -e "$WORK/mut_b$EXE" ] || [ "$refusal" = "$(cat "$WORK/pipeline.expected-phase")" ]; }; then
+    echo "decisive: InstanceSizeOf refusal exited successfully or produced an executable"
+    return 1
+  fi
+  echo "  INVALID: mutated refusal did not match the baseline (exit $sb)" >&2
+  cat "$WORK/mut_b.log" "$WORK/mut_b.err" >&2
+  return 2
 }
 
 imported_array_mutation_check() {
-  build_tool "$TOOL_SRC" "$WORK/unit_array_tool" || { [ "${_PM_ARMED:-0}" = 1 ] && return 0; return 1; }
-  imported_array_check "$WORK/unit_array_tool"
+  build_tool "$TOOL_SRC" "$WORK/unit_array_tool" || return 2
+  imported_array_check "$WORK/unit_array_tool$EXE"
 }
-prove_mutation "an existing allocator declaration is defined a second time" "$LOWER_SRC" \
-  'fn = declared_or_defined_fun(low, name, fun_def_type(low, rec, ret))' \
-  'fn = low.module.define_function(name, fun_def_type(low, rec, ret))' -- imported_array_mutation_check || status=1
-prove_mutation "a unit module wrapper does not type its class-variable initializer" "$REPO/src/compiler/semantic/main_visitor.iyi" \
-  $'    # semantic_visitor.cr:1811-1828 visits either resolved module body.\n    if t && t.is_a?(ModuleType)' \
-  $'    # semantic_visitor.cr:1811-1828 visits either resolved module body.\n    if t && t.is_a?(ClassType)' -- imported_array_mutation_check || status=1
-
 virtual_ivar_mutation_check() {
-  build_tool "$TOOL_SRC" "$WORK/virtual_ivar_tool" || { [ "${_PM_ARMED:-0}" = 1 ] && return 0; return 1; }
-  virtual_ivar_check "$WORK/virtual_ivar_tool"
+  build_tool "$TOOL_SRC" "$WORK/virtual_ivar_tool" || return 2
+  virtual_ivar_check "$WORK/virtual_ivar_tool$EXE"
 }
-prove_mutation "an initialized instance variable loses its virtual type" "$REPO/src/compiler/semantic/main_visitor.iyi" \
-  $'          # including its virtual type; visiting its initializer must retain it.\n          ivar = mod_type.instance_vars[ivar_node.name]?' \
-  $'          # including its virtual type; visiting its initializer must retain it.\n          ivar = nil' -- virtual_ivar_mutation_check || status=1
-prove_mutation "an uninitialized instance variable loses its virtual type" "$REPO/src/compiler/semantic/main_visitor.iyi" \
-  $'          # Preserve the declaration pass\047s virtualized field type and metadata.\n          ivar = mod_type.instance_vars[ivar_node.name]?' \
-  $'          # Preserve the declaration pass\047s virtualized field type and metadata.\n          ivar = nil' -- virtual_ivar_mutation_check || status=1
-
 nested_import_mutation_check() {
-  build_tool "$TOOL_SRC" "$WORK/nested_import_tool" || { [ "${_PM_ARMED:-0}" = 1 ] && return 0; return 1; }
-  nested_import_check "$WORK/nested_import_tool"
+  build_tool "$TOOL_SRC" "$WORK/nested_import_tool" || return 2
+  nested_import_check "$WORK/nested_import_tool$EXE" "${1:-}"
 }
-prove_mutation "the loader omits class-scoped imports" "$REPO/src/compiler/loader.iyi" \
-  'collect_import_paths(node.as(ClassDef).body, into, engine, filename, user_imports)' \
-  'nil' -- nested_import_mutation_check || status=1
-prove_mutation "the loader omits module-scoped imports" "$REPO/src/compiler/loader.iyi" \
-  'collect_import_paths(node.as(ModuleDef).body, into, engine, filename, user_imports)' \
-  'nil' -- nested_import_mutation_check || status=1
-prove_mutation "a resolved import is refused during lowering" "$LOWER_SRC" \
-  'if node.is_a?(ImportDecl)' 'if false && node.is_a?(ImportDecl)' -- nested_import_mutation_check || status=1
+if [ "$CAN_RUN_MACHO" -eq 1 ]; then
+  if [ "$array_baseline" -eq 1 ]; then
+    prove_mutation "an existing allocator declaration is defined a second time" "$LOWER_SRC" \
+      'fn = declared_or_defined_fun(low, name, fun_def_type(low, rec, ret))' \
+      'fn = low.module.define_function(name, fun_def_type(low, rec, ret))' -- imported_array_mutation_check || status=1
+    prove_mutation "a unit module wrapper does not type its class-variable initializer" "$REPO/src/compiler/semantic/main_visitor.iyi" \
+      $'    # semantic_visitor.cr:1811-1828 visits either resolved module body.\n    if t && t.is_a?(ModuleType)' \
+      $'    # semantic_visitor.cr:1811-1828 visits either resolved module body.\n    if t && t.is_a?(ClassType)' -- imported_array_mutation_check || status=1
+  else
+    echo "  INVALID: imported array mutations have no passing baseline" >&2; status=1
+  fi
+  if [ "$virtual_baseline" -eq 1 ]; then
+    prove_mutation "an initialized instance variable loses its virtual type" "$REPO/src/compiler/semantic/main_visitor.iyi" \
+      $'          # including its virtual type; visiting its initializer must retain it.\n          ivar = mod_type.instance_vars[ivar_node.name]?' \
+      $'          # including its virtual type; visiting its initializer must retain it.\n          ivar = nil' -- virtual_ivar_mutation_check || status=1
+    prove_mutation "an uninitialized instance variable loses its virtual type" "$REPO/src/compiler/semantic/main_visitor.iyi" \
+      $'          # Preserve the declaration pass\047s virtualized field type and metadata.\n          ivar = mod_type.instance_vars[ivar_node.name]?' \
+      $'          # Preserve the declaration pass\047s virtualized field type and metadata.\n          ivar = nil' -- virtual_ivar_mutation_check || status=1
+  else
+    echo "  INVALID: virtual ivar mutations have no passing baseline" >&2; status=1
+  fi
+  if [ "$nested_baseline" -eq 1 ]; then
+    prove_mutation "the loader omits class-scoped imports" "$REPO/src/compiler/loader.iyi" \
+      'collect_import_paths(node.as(ClassDef).body, into, engine, filename, user_imports)' \
+      'nil' -- nested_import_mutation_check || status=1
+    prove_mutation "the loader omits module-scoped imports" "$REPO/src/compiler/loader.iyi" \
+      'collect_import_paths(node.as(ModuleDef).body, into, engine, filename, user_imports)' \
+      'nil' -- nested_import_mutation_check || status=1
+  else
+    echo "  INVALID: nested import mutations have no passing baseline" >&2; status=1
+  fi
+else
+  host_limited "selfhost_pipeline: imported array, virtual ivar, and nested import runtime mutation assertions require macOS arm64"
+fi
+if [ "$nested_baseline" -eq 1 ]; then
+  prove_mutation "a resolved import is refused during lowering" "$LOWER_SRC" \
+    'if node.is_a?(ImportDecl)' 'if false && node.is_a?(ImportDecl)' -- nested_import_mutation_check \
+    '^lower: visit\(ImportDecl\) \(hosted codegen\.cr\) is not ported yet$' || status=1
+else
+  echo "  INVALID: import-refusal mutation has no passing baseline" >&2
+  status=1
+fi
 
 # The lowering table names and counts no Primitive-annotated def. The hosted compiler lowers a primitive at its call
 # site, so a probe of such a def's body is a refusal row for a def that is never a function of its own. The hello
 # root with its prelude reaches them; the table must name none. Prelude-free fixtures reach only the stand-in's
 # binary operators (lower/program.iyi), so this check runs the root.
+# Table probes may end in the same named refusal after writing their table.
+# A different failure or a crash is not a table comparison.
+run_table_probe() {
+  local tool="$1" input="$2" stem="$3" with_prelude="$4" rc=0
+  rm -f "$WORK/$stem$EXE" "$WORK/$stem$EXE.refusals" "$WORK/$stem$EXE.names"
+  if [ "$with_prelude" = yes ]; then
+    "$tool" "$input" -o "$WORK_NATIVE/$stem$EXE" --pipeline typed --prelude --probe-phase --keep-going >"$WORK/$stem.log" 2>"$WORK/$stem.err" || rc=$?
+  else
+    "$tool" "$input" -o "$WORK_NATIVE/$stem$EXE" --pipeline typed --probe-phase --keep-going >"$WORK/$stem.log" 2>"$WORK/$stem.err" || rc=$?
+  fi
+  if [ "$rc" -eq 0 ]; then
+    return 0
+  fi
+  if [ "$rc" -eq 1 ] && { expected_refusal "$rc" "$WORK/$stem.err" refuse_port '^.+$' || grep -q '^iyi-compile-native: ' "$WORK/$stem.err"; }; then
+    if [ "${_PM_ARMED:-0}" = 0 ]; then
+      cp "$WORK/$stem.err" "$WORK/$stem.baseline-refusal"
+      return 0
+    elif [ -f "$WORK/$stem.baseline-refusal" ] && cmp -s "$WORK/$stem.err" "$WORK/$stem.baseline-refusal"; then
+      return 0
+    fi
+  fi
+  echo "  INVALID: $stem table probe failed without the baseline refusal (exit $rc)" >&2
+  cat "$WORK/$stem.log" "$WORK/$stem.err" >&2
+  return 2
+}
 primitive_table_check() {
-  if ! build_tool "$TOOL_SRC" "$WORK/prim_tool"; then return 1; fi
-  IYI_PATH="$REPO/src" "$WORK/prim_tool" "$REPO/samples/iyi/hello.iyi" -o "$WORK/prim_hello" --pipeline typed --prelude --probe-phase --keep-going > "$WORK/prim_hello.probe" 2> /dev/null
-  awk '/^table: hello defs-lowered-clean=/ { ok = 1 } END { exit !ok }' "$WORK/prim_hello.probe" || return 1
-  awk '/^table: hello lowering .*visit\(Primitive/ { bad = 1 } END { exit bad }' "$WORK/prim_hello.probe"
+  build_tool "$TOOL_SRC" "$WORK/prim_tool" || return 2
+  run_table_probe "$WORK/prim_tool$EXE" "$REPO_NATIVE/samples/iyi/hello.iyi" prim_hello yes || return 2
+  if ! awk '/^table: hello defs-lowered-clean=/ { ok = 1 } END { exit !ok }' "$WORK/prim_hello.log"; then
+    echo "  INVALID: primitive table probe emitted no summary" >&2
+    cat "$WORK/prim_hello.log" "$WORK/prim_hello.err" >&2
+    return 2
+  fi
+  awk '/^table: hello lowering .*visit\(Primitive/ { bad = 1 } END { exit bad }' "$WORK/prim_hello.log"
 }
 
 # A yielding def without a captured block is inlined by the hosted compiler, not
 # emitted as a standalone function. Its caller and ordinary defs remain probeable.
 yield_table_check() {
-  if ! build_tool "$TOOL_SRC" "$WORK/yield_tool"; then return 1; fi
-  "$WORK/yield_tool" "$REPO/bench/fixtures/pipeline_yield_probe.iyi" -o "$WORK/yield_probe" --pipeline typed --probe-phase --keep-going > "$WORK/yield_probe.log" 2>&1
-  [ -f "$WORK/yield_probe.refusals" ] || return 1
+  build_tool "$TOOL_SRC" "$WORK/yield_tool" || return 2
+  run_table_probe "$WORK/yield_tool$EXE" "$REPO_NATIVE/bench/fixtures/pipeline_yield_probe.iyi" yield_probe no || return 2
+  if [ ! -f "$WORK/yield_probe$EXE.refusals" ]; then
+    echo "  INVALID: yielding probe did not write its table" >&2
+    return 2
+  fi
   awk -F '\t' '
     $1 == "reached" && $2 ~ /identity$/ { ordinary = 1 }
     $1 == "reached" && $2 ~ /emit_once$/ { yielding = 1 }
     END { exit !(ordinary && !yielding) }
-  ' "$WORK/yield_probe.refusals"
+  ' "$WORK/yield_probe$EXE.refusals"
 }
 echo "  the yielding-def table check passes on the unmutated code:"
 if yield_table_check; then
   echo "    unmutated: pass"
+  prove_mutation "the table probes a noncapturing yielding def" "$PROGRAM_SRC" \
+    'next if noncapturing_yield?(d)' 'next if false' -- yield_table_check || status=1
 else
   echo "    unmutated: FAIL"
   status=1
 fi
-prove_mutation "the table probes a noncapturing yielding def" "$PROGRAM_SRC" \
-  'next if noncapturing_yield?(d)' 'next if false' -- yield_table_check || status=1
 
 # The recorded origin is the function being emitted, not necessarily an inlined
 # callee. A nested refusal must identify the emitted inner function, not the probe.
 origin_table_check() {
-  if ! build_tool "$TOOL_SRC" "$WORK/origin_tool"; then return 1; fi
-  "$WORK/origin_tool" "$REPO/bench/fixtures/pipeline_refusal_origin.iyi" -o "$WORK/origin_probe" --pipeline typed --probe-phase --keep-going > "$WORK/origin_probe.log" 2>&1
-  [ -f "$WORK/origin_probe.refusals" ] || return 1
-  awk -F '\t' '$1 == "lowering" && $2 ~ /pipeline_outer$/ && $5 ~ /pipeline_inner/ { found = 1 } END { exit !found }' "$WORK/origin_probe.refusals"
+  build_tool "$TOOL_SRC" "$WORK/origin_tool" || return 2
+  run_table_probe "$WORK/origin_tool$EXE" "$REPO_NATIVE/bench/fixtures/pipeline_refusal_origin.iyi" origin_probe no || return 2
+  if [ ! -f "$WORK/origin_probe$EXE.refusals" ]; then
+    echo "  INVALID: origin probe did not write its table" >&2
+    return 2
+  fi
+  awk -F '\t' '$1 == "lowering" && $2 ~ /pipeline_outer$/ && $5 ~ /pipeline_inner/ { found = 1 } END { exit !found }' "$WORK/origin_probe$EXE.refusals"
 }
 echo "  the refusal-origin check passes on the unmutated code:"
 if origin_table_check; then
   echo "    unmutated: pass"
+  prove_mutation "a refusal is attributed to the probe instead of the emitted function" "$PROGRAM_SRC" \
+    'origin = ctx.fun.name' 'origin = lowering_example(d, inst.self_type)' -- origin_table_check || status=1
 else
   echo "    unmutated: FAIL"
   status=1
 fi
-prove_mutation "a refusal is attributed to the probe instead of the emitted function" "$PROGRAM_SRC" \
-  'origin = ctx.fun.name' 'origin = lowering_example(d, inst.self_type)' -- origin_table_check || status=1
 
 # Promote the prelude-free exit fixture to a root and compare the two actual
 # executables through the same helper the root loop uses.
 root_comparison_check() {
-  if ! build_tool "$TOOL_SRC" "$WORK/root_tool"; then return 1; fi
-  local fixture="$REPO/bench/fixtures/lower_exit.iyi"
-  "$WORK/root_tool" "$fixture" -o "$WORK/root_test" --pipeline typed --probe-phase > "$WORK/root_test.log" 2>&1 || return 1
-  [ "$(probe_phase "$WORK/root_test.log")" = "link" ] || return 1
-  "$IYI" build --prelude empty -o "$WORK/root_hosted" "$fixture" > "$WORK/root_hosted.log" 2>&1 || return 1
-  codesign -v --strict "$WORK/root_test" > /dev/null 2>&1 || { echo "  lower_exit root: FAIL, native signature invalid"; [ "${_PM_ARMED:-0}" = 1 ] && return 0; return 1; }
-  "$WORK/root_test" > "$WORK/root_test.out" 2>&1; local ts=$?
-  "$WORK/root_hosted" > "$WORK/root_hosted.out" 2>&1; local hs=$?
-  bash -c '. "$1"; pipeline_outputs_equal "$2" "$3" "$4" "$5"' _ "$REPO/bench/lib/pipeline_report.sh" "$ts" "$hs" "$WORK/root_test.out" "$WORK/root_hosted.out" || return 1
-  ! bash -c '. "$1"; pipeline_outputs_equal "$2" 43 "$3" "$4"' _ "$REPO/bench/lib/pipeline_report.sh" "$ts" "$WORK/root_test.out" "$WORK/root_hosted.out"
+  local ts=0 hs=0
+  build_tool "$TOOL_SRC" "$WORK/root_tool" || return 2
+  if ! "$WORK/root_tool$EXE" "$REPO_NATIVE/bench/fixtures/lower_exit.iyi" -o "$WORK_NATIVE/root_test$EXE" --pipeline typed --probe-phase > "$WORK/root_test.log" 2>&1; then
+    echo "  INVALID: native root did not build" >&2; cat "$WORK/root_test.log" >&2; return 2
+  fi
+  [ "$(probe_phase "$WORK/root_test.log")" = "link" ] || { echo "  INVALID: native root did not reach link" >&2; return 2; }
+  if ! "$IYI" build --prelude empty -o "$WORK_NATIVE/root_hosted$EXE" "$REPO_NATIVE/bench/fixtures/lower_exit.iyi" > "$WORK/root_hosted.log" 2>&1; then
+    echo "  INVALID: hosted root did not build" >&2; cat "$WORK/root_hosted.log" >&2; return 2
+  fi
+  if [ "$CAN_RUN_MACHO" -eq 1 ]; then
+    codesign -v --strict "$WORK/root_test$EXE" > /dev/null 2>&1 || { echo "  INVALID: native signature" >&2; return 2; }
+    timeout 30 "$WORK/root_test$EXE" > "$WORK/root_test.out" 2>&1 || ts=$?
+    timeout 30 "$WORK/root_hosted$EXE" > "$WORK/root_hosted.out" 2>&1 || hs=$?
+    if [ "$ts" -ge 124 ] || [ "$hs" -ge 124 ]; then
+      echo "  INVALID: root execution crashed or timed out (typed $ts, hosted $hs)" >&2
+      cat "$WORK/root_test.out" "$WORK/root_hosted.out" >&2
+      return 2
+    fi
+  else
+    # lower_exit specifies exit 42 and no stdout. This checks only the helper,
+    # not target execution or run-equal parity.
+    ts=42; hs=42
+    : >"$WORK/root_test.out"; : >"$WORK/root_hosted.out"
+  fi
+  local cmp_status=0
+  bash -c '. "$1"; pipeline_outputs_equal "$2" "$3" "$4" "$5"' _ "$REPO/bench/lib/pipeline_report.sh" "$ts" "$hs" "$WORK/root_test.out" "$WORK/root_hosted.out" || cmp_status=$?
+  [ "$cmp_status" -eq 1 ] && return 1
+  [ "$cmp_status" -eq 0 ] || { echo "  INVALID: comparison helper exited $cmp_status" >&2; return 2; }
+  cmp_status=0
+  bash -c '. "$1"; pipeline_outputs_equal "$2" 43 "$3" "$4"' _ "$REPO/bench/lib/pipeline_report.sh" "$ts" "$WORK/root_test.out" "$WORK/root_hosted.out" || cmp_status=$?
+  [ "$cmp_status" -eq 1 ] && return 0
+  [ "$cmp_status" -eq 0 ] && return 1
+  echo "  INVALID: comparison helper exited $cmp_status" >&2
+  return 2
 }
-echo "  the linked-root comparison passes on the unmutated code:"
+if [ "$CAN_RUN_MACHO" -eq 0 ]; then
+  host_limited "selfhost_pipeline: root execution parity requires macOS arm64; the comparison helper is checked with lower_exit's specified result"
+fi
+echo "  the root comparison helper passes on the unmutated code:"
 if root_comparison_check; then
   echo "    unmutated: pass"
+  prove_mutation "the linked-root comparison rejects equal statuses" "$REPO/bench/lib/pipeline_report.sh" \
+    '[ "$typed_status" = "$hosted_status" ]' '[ "$typed_status" != "$hosted_status" ]' -- root_comparison_check || status=1
 else
   echo "    unmutated: FAIL"
   status=1
 fi
-prove_mutation "the linked-root comparison rejects equal statuses" "$REPO/bench/lib/pipeline_report.sh" \
-  '[ "$typed_status" = "$hosted_status" ]' '[ "$typed_status" != "$hosted_status" ]' -- root_comparison_check || status=1
 
 # The headline must carry the first real refusal, not a phase pass or a later line.
 headline_check() {
-  if ! build_tool "$TOOL_SRC" "$WORK/headline_tool"; then return 1; fi
-  "$WORK/headline_tool" "$REPO/bench/fixtures/lower_instance_sizeof.iyi" -o "$WORK/headline_test" --pipeline typed --probe-phase > "$WORK/headline_test.log" 2>&1
-  local line
+  local line actual rc=0 expected
+  build_tool "$TOOL_SRC" "$WORK/headline_tool" || return 2
+  rm -f "$WORK/headline_test$EXE"
+  "$WORK/headline_tool$EXE" "$REPO_NATIVE/bench/fixtures/lower_instance_sizeof.iyi" -o "$WORK_NATIVE/headline_test$EXE" --pipeline typed --probe-phase >"$WORK/headline_test.log" 2>"$WORK/headline_test.err" || rc=$?
+  actual="$(pipeline_first_refusal "$WORK/headline_test.log")"
+  case "$actual" in 'lower: fail: '*InstanceSizeOf*) ;; *) echo "  INVALID: expected InstanceSizeOf refusal absent" >&2; cat "$WORK/headline_test.log" "$WORK/headline_test.err" >&2; return 2 ;; esac
+  expected="iyi-compile-native: lower: ${actual#lower: fail: }"
+  if [ "$rc" -ne 1 ] || [ -e "$WORK/headline_test$EXE" ] || ! grep -Fxq "$expected" "$WORK/headline_test.err"; then
+    echo "  INVALID: headline probe did not produce its exact refusal" >&2
+    cat "$WORK/headline_test.log" "$WORK/headline_test.err" >&2
+    return 2
+  fi
   line="$(bash -c '. "$1"; pipeline_first_refusal "$2"' _ "$REPO/bench/lib/pipeline_report.sh" "$WORK/headline_test.log")"
-  case "$line" in *"lower: fail:"*"InstanceSizeOf"*) return 0 ;; *) return 1 ;; esac
+  [ "$line" = "$actual" ]
 }
 echo "  the refusal headline check passes on the unmutated code:"
 if headline_check; then
@@ -568,9 +793,15 @@ prove_mutation "the headline reports a pass instead of a refusal" "$REPO/bench/l
 # emitted once, by the pipeline only when the program has no `fun main` of its own. Checked on IR text from --emit ir, on two
 # prelude-free fixtures (no main, and one with its own main). The check returns 0 only on the unmutated behaviour.
 entry_check() {
-  if ! build_tool "$TOOL_SRC" "$WORK/entry_tool"; then return 1; fi
-  "$WORK/entry_tool" "$REPO/bench/fixtures/lower_exit.iyi" -o "$WORK/entry_exit.ll" --pipeline typed --emit ir > /dev/null 2>&1 || return 1
-  "$WORK/entry_tool" "$REPO/bench/fixtures/lower_fun_main.iyi" -o "$WORK/entry_fm.ll" --pipeline typed --emit ir > /dev/null 2>&1 || return 1
+  build_tool "$TOOL_SRC" "$WORK/entry_tool" || return 2
+  rm -f "$WORK/entry_exit.ll" "$WORK/entry_fm.ll"
+  if ! "$WORK/entry_tool$EXE" "$REPO_NATIVE/bench/fixtures/lower_exit.iyi" -o "$WORK_NATIVE/entry_exit.ll" --pipeline typed --emit ir >"$WORK/entry_exit.log" 2>&1; then
+    echo "  INVALID: entry exit IR did not compile" >&2; cat "$WORK/entry_exit.log" >&2; return 2
+  fi
+  if ! "$WORK/entry_tool$EXE" "$REPO_NATIVE/bench/fixtures/lower_fun_main.iyi" -o "$WORK_NATIVE/entry_fm.ll" --pipeline typed --emit ir >"$WORK/entry_fm.log" 2>&1; then
+    echo "  INVALID: entry main IR did not compile" >&2; cat "$WORK/entry_fm.log" >&2; return 2
+  fi
+  [ -f "$WORK/entry_exit.ll" ] && [ -f "$WORK/entry_fm.ll" ] || { echo "  INVALID: entry IR was not written" >&2; return 2; }
   local f
   for f in "$WORK/entry_exit.ll" "$WORK/entry_fm.ll"; do
     awk '/^define .*@__crystal_main\(/ { m = 1 } END { exit !m }' "$f" || return 1
@@ -582,36 +813,39 @@ entry_check() {
 echo "  the mutation check passes on the unmutated code:"
 if pipeline_check; then
   echo "    unmutated: pass"
+  prove_mutation "a refusal exits 0 and writes nothing" "$COMPILER_SRC" \
+    '@refusal = "#{phase}: #{message}"' '@refusal = nil' -- pipeline_check || status=1
+  if [ "$CAN_RUN_MACHO" -eq 1 ]; then
+    prove_mutation "the program's top-level code is dropped" "$PROGRAM_SRC" \
+      "top_level.each { |t| nodes << t }" "nodes << Nop.new" -- pipeline_check || status=1
+  else
+    host_limited "selfhost_pipeline: detecting dropped top-level runtime code requires macOS arm64"
+  fi
+  prove_mutation "the tool falls back to the codegen pipeline when the typed one refuses" "$TOOL_SRC" \
+    "fail(refusal.as(String))" "compiler.config.typed_pipeline = false; compiler.refusal = nil; compiler.compile(input)" -- pipeline_check || status=1
 else
   echo "    unmutated: FAIL (the mutation check cannot prove anything)"
   status=1
 fi
-prove_mutation "a refusal exits 0 and writes nothing" "$COMPILER_SRC" \
-  '@refusal = "#{phase}: #{message}"' '@refusal = nil' -- pipeline_check || status=1
-prove_mutation "the program's top-level code is dropped" "$PROGRAM_SRC" \
-  "top_level.each { |t| nodes << t }" "nodes << Nop.new" -- pipeline_check || status=1
-prove_mutation "the tool falls back to the codegen pipeline when the typed one refuses" "$TOOL_SRC" \
-  "fail(refusal.as(String))" "compiler.config.typed_pipeline = false; compiler.refusal = nil; compiler.compile(input)" -- pipeline_check || status=1
 echo "  the table check passes on the unmutated code:"
 if primitive_table_check; then
   echo "    unmutated: pass"
+  prove_mutation "the lowering table probes a Primitive-annotated def" "$PROGRAM_SRC" \
+    $'next unless primitive_name(d.body).nil?\n    next if noncapturing_yield?(d)' $'next if false\n    next if noncapturing_yield?(d)' -- primitive_table_check || status=1
 else
   echo "    unmutated: FAIL (the table check cannot prove anything)"
   status=1
 fi
-prove_mutation "the lowering table probes a Primitive-annotated def" "$PROGRAM_SRC" \
-  $'next unless primitive_name(d.body).nil?\n    next if noncapturing_yield?(d)' $'next if false\n    next if noncapturing_yield?(d)' -- primitive_table_check || status=1
-prove_mutation "a prelude-free program's top-level code is named __iyi_main" "$LOWER_SRC" \
-  'return "__crystal_main"' 'return "__iyi_main"' -- entry_check || status=1
-# The prelude branch of main_function_name has no proof yet: the prelude does not reach IR in the typed pipeline (strict
-# mode raises at main_visitor.iyi:214 on the prelude's macro control, concurrency.iyi:1557), so no fixture can show its name.
-prove_mutation "a program that defines its own main gets a second main" "$LOWER_SRC" \
-  "unless root_defines_main(root)" "unless false" -- entry_check || status=1
-prove_mutation "a program with no main of its own gets no main" "$LOWER_SRC" \
-  "unless root_defines_main(root)" "if false" -- entry_check || status=1
 echo "  the entry check passes on the unmutated code:"
 if entry_check; then
   echo "    unmutated: pass"
+  prove_mutation "a prelude-free program's top-level code is named __iyi_main" "$LOWER_SRC" \
+    'return "__crystal_main"' 'return "__iyi_main"' -- entry_check || status=1
+  # The prelude branch cannot reach IR in the current typed pipeline.
+  prove_mutation "a program that defines its own main gets a second main" "$LOWER_SRC" \
+    "unless root_defines_main(root)" "unless false" -- entry_check || status=1
+  prove_mutation "a program with no main of its own gets no main" "$LOWER_SRC" \
+    "unless root_defines_main(root)" "if false" -- entry_check || status=1
 else
   echo "    unmutated: FAIL (the entry check cannot prove anything)"
   status=1
@@ -620,9 +854,15 @@ fi
 # A prelude-free program is Crystal's layout: the class id is field 0, and a string literal
 # is the four-field struct. Forcing iyi layout (the old hard-coded true) fails this check.
 layout_check() {
-  if ! build_tool "$TOOL_SRC" "$WORK/layout_tool"; then return 1; fi
-  "$WORK/layout_tool" "$REPO/bench/fixtures/lower_class_new.iyi" -o "$WORK/layout_box.ll" --pipeline typed --emit ir > /dev/null 2>&1 || return 1
-  "$WORK/layout_tool" "$REPO/bench/fixtures/lower_string_fields.iyi" -o "$WORK/layout_str.ll" --pipeline typed --emit ir > /dev/null 2>&1 || return 1
+  build_tool "$TOOL_SRC" "$WORK/layout_tool" || return 2
+  rm -f "$WORK/layout_box.ll" "$WORK/layout_str.ll"
+  if ! "$WORK/layout_tool$EXE" "$REPO_NATIVE/bench/fixtures/lower_class_new.iyi" -o "$WORK_NATIVE/layout_box.ll" --pipeline typed --emit ir >"$WORK/layout_box.log" 2>&1; then
+    echo "  INVALID: class layout IR did not compile" >&2; cat "$WORK/layout_box.log" >&2; return 2
+  fi
+  if ! "$WORK/layout_tool$EXE" "$REPO_NATIVE/bench/fixtures/lower_string_fields.iyi" -o "$WORK_NATIVE/layout_str.ll" --pipeline typed --emit ir >"$WORK/layout_str.log" 2>&1; then
+    echo "  INVALID: string layout IR did not compile" >&2; cat "$WORK/layout_str.log" >&2; return 2
+  fi
+  [ -f "$WORK/layout_box.ll" ] && [ -f "$WORK/layout_str.ll" ] || { echo "  INVALID: layout IR was not written" >&2; return 2; }
   awk '/i64 -4/ { bad = 1 } /^%Tool = type \{ i32, i32 \}/ { shape = 1 } /getelementptr inbounds %Tool, ptr .*i32 0, i32 0/ { field = 1 } /load i32, ptr @"Tool:type_id"/ { id = 1 } /store i32 .*ptr/ { stored = 1 } END { exit !(shape && field && id && stored && !bad) }' "$WORK/layout_box.ll" || return 1
   awk '/private constant \{ i32,/ { hosted = 1 } /private constant \{ i64,/ { iyi = 1 } END { exit !(hosted && !iyi) }' "$WORK/layout_str.ll"
 }
@@ -642,40 +882,60 @@ fi
 # output names loader_if_b and not loader_if_a. The mutation makes the loader read every
 # `{% if %}`'s first branch, so the same output names a and the check fails.
 loader_if_check() {
-  if ! "$IYI" build -o "$WORK/loader_if_drv" "$REPO/bench/selfhost_loader_if_exercise.iyi" > "$WORK/loader_if_drv.build" 2>&1; then
-    return 1
+  local rc=0
+  build_tool "$REPO/bench/selfhost_loader_if_exercise.iyi" "$WORK/loader_if_drv" || return 2
+  "$WORK/loader_if_drv$EXE" "$REPO_NATIVE/bench/fixtures/loader_if_entry.iyi" > "$WORK/loader_if.out" 2> "$WORK/loader_if.err" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "  INVALID: loader driver exited $rc" >&2
+    cat "$WORK/loader_if.out" "$WORK/loader_if.err" >&2
+    return 2
   fi
-  "$WORK/loader_if_drv" "$REPO/bench/fixtures/loader_if_entry.iyi" > "$WORK/loader_if.out" 2> "$WORK/loader_if.err" || return 1
   awk '/loader_if_b/ { b = 1 } /loader_if_a/ { a = 1 } END { exit !(b && !a) }' "$WORK/loader_if.out"
 }
 echo "  the loader if-require check passes on the unmutated code:"
 if loader_if_check; then
   echo "    unmutated: pass"
+  prove_mutation "the loader reads the first branch of every {% if %}" "$LOADER_SRC" \
+    'if report.failure.nil? && !report.skipped' 'if false' -- loader_if_check || status=1
 else
   echo "    unmutated: FAIL (the loader if-require check cannot prove anything)"
   status=1
 fi
-prove_mutation "the loader reads the first branch of every {% if %}" "$LOADER_SRC" \
-  'if report.failure.nil? && !report.skipped' 'if false' -- loader_if_check || status=1
 
 # The same entry must run the selected branch through declarations, lowering and the linker.
 pipeline_loader_if_check() {
-  if ! build_tool "$TOOL_SRC" "$WORK/loader_pipeline_tool"; then return 1; fi
-  "$WORK/loader_pipeline_tool" "$REPO/bench/fixtures/loader_if_entry.iyi" -o "$WORK/loader_entry" --pipeline typed > "$WORK/loader_entry.build" 2>&1 || return 1
-  codesign -v --strict "$WORK/loader_entry" > /dev/null 2>&1 || { echo "  loader_entry: FAIL, native signature invalid"; [ "${_PM_ARMED:-0}" = 1 ] && return 0; return 1; }
-  "$WORK/loader_entry" > "$WORK/loader_entry.out" 2>&1
-  [ "$?" -eq 2 ] || return 1
-  [ "$(awk '1' "$WORK/loader_entry.out")" = "b" ]
+  local rc=0
+  build_tool "$TOOL_SRC" "$WORK/loader_pipeline_tool" || return 2
+  rm -f "$WORK/loader_entry$EXE"
+  if ! "$WORK/loader_pipeline_tool$EXE" "$REPO_NATIVE/bench/fixtures/loader_if_entry.iyi" -o "$WORK_NATIVE/loader_entry$EXE" --pipeline typed > "$WORK/loader_entry.build" 2>&1; then
+    echo "  INVALID: loader entry did not compile" >&2
+    cat "$WORK/loader_entry.build" >&2
+    return 2
+  fi
+  [ -f "$WORK/loader_entry$EXE" ] || { echo "  INVALID: loader entry was not written" >&2; return 2; }
+  [ "$CAN_RUN_MACHO" -eq 1 ] || return 0
+  codesign -v --strict "$WORK/loader_entry$EXE" > /dev/null 2>&1 || { echo "  INVALID: loader entry signature" >&2; return 2; }
+  timeout 30 "$WORK/loader_entry$EXE" > "$WORK/loader_entry.out" 2>&1 || rc=$?
+  if [ "$rc" -ge 124 ] || grep -Eqi 'panic|segmentation fault|abort trap' "$WORK/loader_entry.out"; then
+    echo "  INVALID: loader entry crashed or timed out (exit $rc)" >&2
+    cat "$WORK/loader_entry.out" >&2
+    return 2
+  fi
+  [ "$rc" -eq 2 ] && [ "$(awk '1' "$WORK/loader_entry.out")" = "b" ]
 }
-echo "  the selected loader branch runs through the typed pipeline:"
+echo "  the selected loader branch compiles through the typed pipeline:"
 if pipeline_loader_if_check; then
   echo "    unmutated: pass"
+  if [ "$CAN_RUN_MACHO" -eq 1 ]; then
+    prove_mutation "post-splice runtime code is dropped" "$COMPILER_SRC" \
+      'top_level.concat(runtime_by_unit[mod_info.filename])' 'top_level.concat([] of ASTNode)' -- pipeline_loader_if_check || status=1
+  else
+    host_limited "selfhost_pipeline: post-splice runtime mutation requires macOS arm64"
+  fi
 else
   echo "    unmutated: FAIL"
   status=1
 fi
-prove_mutation "post-splice runtime code is dropped" "$COMPILER_SRC" \
-  'top_level.concat(runtime_by_unit[mod_info.filename])' 'top_level.concat([] of ASTNode)' -- pipeline_loader_if_check || status=1
 
 echo
 if [ "$status" -eq 0 ]; then

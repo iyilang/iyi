@@ -19,16 +19,26 @@
 set -u
 status=0
 readonly REPO="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO/bench/lib/host.sh" || exit 1
+require_test_host || exit 1
+if [ -z "$PY" ]; then echo 'FAIL: a functional Python interpreter is required' >&2; exit 1; fi
+REPO_NATIVE="$(native_path "$REPO")" || exit 1
+export IYI_PATH="$REPO_NATIVE/src"
 IYI="$REPO/bin/iyi"
 . "$REPO/bench/lib/mutation.sh"
 . "$REPO/bench/lib/lower_oracle.sh"
 WORK="$(mktemp -d)"
+WORK_NATIVE="$(native_path "$WORK")" || exit 1
 
 trap 'rm -rf "$WORK"' EXIT
 
 # A failed compiler build is an invalid mutation proof, not a detected mutant.
 cast_build() {
-  "$IYI" build "$@" || { : > "$WORK/cast-mutant-build-failed"; return 1; }
+  if ! "$IYI" build "$@" > "$WORK/cast-build.log" 2>&1; then
+    : > "$WORK/cast-mutant-build-failed"
+    cat "$WORK/cast-build.log"
+    return 2
+  fi
 }
 
 cast_prove_mutation() {
@@ -38,6 +48,8 @@ cast_prove_mutation() {
   _prove_mutation_run "$mode" "$@" > "$WORK/cast-mutation.out" 2>&1 || rc=$?
   if [ -f "$WORK/cast-mutant-build-failed" ]; then
     echo "    NOT PROVEN: $label did not produce a valid mutant result"
+    cat "$WORK/cast-mutation.out"
+    [ ! -f "$WORK/cast-build.log" ] || cat "$WORK/cast-build.log"
     return 1
   fi
   cat "$WORK/cast-mutation.out"
@@ -47,12 +59,13 @@ prove_mutation() { cast_prove_mutation first "$@"; }
 prove_mutation_all() { cast_prove_mutation all "$@"; }
 
 echo "== 1. Building the port driver"
-if ! "$IYI" build -o "$WORK/port" "$REPO/bench/selfhost_lower_cast_exercise.iyi" > "$WORK/port.build.log" 2>&1; then
-  echo "  the port driver does not build (see $WORK/port.build.log)"
+if ! "$IYI" build -o "$WORK_NATIVE/port$EXE" "$REPO_NATIVE/bench/selfhost_lower_cast_exercise.iyi" > "$WORK/port.build.log" 2>&1; then
+  echo "  the port driver does not build"
+  cat "$WORK/port.build.log"
   exit 1
 fi
 echo "  driver built"
-if "$WORK/port" wrong_union_member > "$WORK/wrong_union.out" 2> "$WORK/wrong_union.err"; then
+if "$WORK/port$EXE" wrong_union_member > "$WORK/wrong_union.out" 2> "$WORK/wrong_union.err"; then
   echo "  FAIL: mixed union accepted a non-member"
   status=1
 elif grep -Fq 'Char to (Bool | Int32): not a member' "$WORK/wrong_union.err"; then
@@ -61,14 +74,14 @@ else
   echo "  FAIL: non-member store did not reach the membership refusal"
   status=1
 fi
-if "$WORK/port" union_representations > "$WORK/union-representations.out" 2> "$WORK/union-representations.err"; then
+if "$WORK/port$EXE" union_representations > "$WORK/union-representations.out" 2> "$WORK/union-representations.err"; then
   echo "  plain and specialized mixed union aggregates produce valid IR and dynamic tags"
 else
   echo "  FAIL: union representation probe"
   cat "$WORK/union-representations.err"
   status=1
 fi
-if "$WORK/port" tuple_downcast_inputs > "$WORK/tuple-inputs.out" 2> "$WORK/tuple-inputs.err"; then
+if "$WORK/port$EXE" tuple_downcast_inputs > "$WORK/tuple-inputs.out" 2> "$WORK/tuple-inputs.err"; then
   echo "  tuple and named-tuple inputs use fresh storage without extra copies; exact union members are readable"
 else
   echo "  FAIL: tuple downcast input probe"
@@ -80,7 +93,7 @@ for mode in tuple_compatible_member named_tuple_compatible_member; do
     tuple_compatible_member) expected='to Tuple(Int32, Int32) (hosted downcast_distinct, compatible tuple member)' ;;
     named_tuple_compatible_member) expected='to NamedTuple(b: Int32, a: Int32) (hosted downcast_distinct, compatible tuple member)' ;;
   esac
-  if "$WORK/port" "$mode" > "$WORK/$mode.out" 2> "$WORK/$mode.err"; then
+  if "$WORK/port$EXE" "$mode" > "$WORK/$mode.out" 2> "$WORK/$mode.err"; then
     echo "  FAIL: $mode accepted a non-member"
     status=1
   elif grep -Fq "$expected" "$WORK/$mode.err"; then
@@ -92,7 +105,7 @@ for mode in tuple_compatible_member named_tuple_compatible_member; do
   fi
 done
 for mode in tuple_indirect_element named_tuple_indirect_element; do
-  if "$WORK/port" "$mode" > "$WORK/$mode.out" 2> "$WORK/$mode.err"; then
+  if "$WORK/port$EXE" "$mode" > "$WORK/$mode.out" 2> "$WORK/$mode.err"; then
     echo "  FAIL: $mode accepted an indirectly passed element"
     status=1
   elif grep -Fq 'downcast element Tuple(Int64, Int64' "$WORK/$mode.err" &&
@@ -110,7 +123,7 @@ for mode in tuple_size_mismatch named_tuple_size_mismatch named_tuple_missing_ke
     named_tuple_size_mismatch) expected='BUG: named tuple sizes differ in downcast' ;;
     named_tuple_missing_key) expected='BUG: named tuple key missing' ;;
   esac
-  if "$WORK/port" "$mode" > "$WORK/$mode.out" 2> "$WORK/$mode.err"; then
+  if "$WORK/port$EXE" "$mode" > "$WORK/$mode.out" 2> "$WORK/$mode.err"; then
     echo "  FAIL: $mode accepted an incompatible shape"
     status=1
   elif grep -Fq "$expected" "$WORK/$mode.err"; then
@@ -138,14 +151,20 @@ diverged=0
 waiting=0
 for fixture in "$REPO"/bench/fixtures/lowcast_*.iyi "$REPO"/bench/fixtures/lowdowncast_nilable_as.iyi "$REPO"/bench/fixtures/lowdowncast_checked_oracle.iyi; do
   name="$(basename "$fixture" .iyi)"
-  if ! "$IYI" build --prelude empty --emit llvm-ir --no-debug -o "$WORK/$name" "$fixture" > "$WORK/$name.oracle.log" 2>&1 || [ ! -s "$WORK/$name.ll" ]; then
+  oracle_target=()
+  oracle_output="$WORK_NATIVE/$name$EXE"
+  if [ "$HOST_ID" != darwin-arm64 ]; then
+    oracle_target=(--cross-compile --target aarch64-apple-darwin)
+    oracle_output="$WORK_NATIVE/$name.o"
+  fi
+  if ! "$IYI" build "${oracle_target[@]}" --prelude empty --emit llvm-ir --no-debug -o "$oracle_output" "$(native_path "$fixture")" > "$WORK/$name.oracle.log" 2>&1 || [ ! -s "$WORK/$name.ll" ]; then
     echo "  $name: the hosted compiler did not emit its module (see $WORK/$name.oracle.log)"
     diverged=$((diverged + 1))
     continue
   fi
   awk "$CALL_TYPES" "$WORK/$name.ll" > "$WORK/$name.oracle.ll"
 
-  if ! "$WORK/port" lower "$fixture" "$WORK/$name.oracle.ll" > "$WORK/$name.port.out" 2> "$WORK/$name.port.err"; then
+  if ! "$WORK/port$EXE" lower "$(native_path "$fixture")" "$WORK_NATIVE/$name.oracle.ll" > "$WORK/$name.port.out" 2> "$WORK/$name.port.err"; then
     if [ -n "$(waiting_on "$name")" ]; then
       if ! grep -Fq 'expected type Proc(Nil), got Proc(Int32)' "$WORK/$name.port.err"; then
         echo "  $name: stopped refusing by the named typing error: $(awk 'NR==1' "$WORK/$name.port.err")"
@@ -190,24 +209,34 @@ echo
 echo "== 3. End to end: each fixture the port lowers identically, built natively and run"
 e2e_pass=0
 e2e_fail=0
-if "$IYI" build -o "$WORK/compile_native" "$REPO/src/compiler/tools/compile_native.iyi" > "$WORK/tool.build.log" 2>&1; then
+if [ "$HOST_ID" != darwin-arm64 ]; then
+  host_limited "casts: AArch64 Mach-O signing and native execution require macOS arm64; $HOST_ID compares IR and emits Mach-O"
+fi
+if "$IYI" build -o "$WORK_NATIVE/compile_native$EXE" "$REPO_NATIVE/src/compiler/tools/compile_native.iyi" > "$WORK/tool.build.log" 2>&1; then
   for name in $e2e; do
-    fixture="$REPO/bench/fixtures/$name.iyi"
-    if ! "$IYI" build --prelude empty --no-debug -o "$WORK/$name.hosted" "$fixture" > "$WORK/$name.hosted.log" 2>&1; then
-      echo "  $name: the hosted compiler cannot build it (see $WORK/$name.hosted.log)"
-      e2e_fail=$((e2e_fail + 1))
-      continue
+    fixture="$REPO_NATIVE/bench/fixtures/$name.iyi"
+    if [ "$HOST_ID" = darwin-arm64 ]; then
+      if ! "$IYI" build --prelude empty --no-debug -o "$WORK_NATIVE/$name.hosted$EXE" "$fixture" > "$WORK/$name.hosted.log" 2>&1; then
+        echo "  $name: the hosted compiler cannot build it"
+        cat "$WORK/$name.hosted.log"
+        e2e_fail=$((e2e_fail + 1))
+        continue
+      fi
+      "$WORK/$name.hosted$EXE" > "$WORK/$name.hosted.out" 2>&1
+      hs=$?
     fi
-    "$WORK/$name.hosted" > "$WORK/$name.hosted.out" 2>&1
-    hs=$?
-    if ! "$WORK/port" emit "$fixture" "$WORK/$name.oracle.ll" > "$WORK/$name.port.ll" 2> "$WORK/$name.emit.err"; then
+    if ! "$WORK/port$EXE" emit "$fixture" "$WORK_NATIVE/$name.oracle.ll" > "$WORK/$name.port.ll" 2> "$WORK/$name.emit.err"; then
       echo "  $name: the port writes no module: $(awk 'NR==1' "$WORK/$name.emit.err")"
       e2e_fail=$((e2e_fail + 1))
       continue
     fi
-    if ! "$WORK/compile_native" "$WORK/$name.port.ll" -o "$WORK/$name.native" > "$WORK/$name.native.log" 2>&1; then
+    if ! "$WORK/compile_native$EXE" "$WORK_NATIVE/$name.port.ll" -o "$WORK_NATIVE/$name.native" > "$WORK/$name.native.log" 2>&1; then
       echo "  $name: the native tool refuses it: $(awk 'NR==1' "$WORK/$name.native.log")"
       e2e_fail=$((e2e_fail + 1))
+      continue
+    fi
+    if [ "$HOST_ID" != darwin-arm64 ]; then
+      echo "  $name: AArch64 Mach-O emitted; native execution is host-limited"
       continue
     fi
     if ! codesign -v --strict "$WORK/$name.native"; then
@@ -226,21 +255,22 @@ if "$IYI" build -o "$WORK/compile_native" "$REPO/src/compiler/tools/compile_nati
     fi
   done
 else
-  echo "  the native tool does not build (see $WORK/tool.build.log)"
+  echo "  the native tool does not build"
+  cat "$WORK/tool.build.log"
   e2e_fail=1
 fi
 echo "  end to end: $e2e_pass fixture(s) run to the hosted result, $e2e_fail failed"
-if [ "$e2e_fail" -gt 0 ] || [ "$e2e_pass" -eq 0 ]; then
+if [ "$e2e_fail" -gt 0 ] || { [ "$HOST_ID" = darwin-arm64 ] && [ "$e2e_pass" -eq 0 ]; }; then
   status=1
 fi
 
 echo
 echo "== Getter union casts: typed source to native against hosted"
-getter_fixture="$REPO/bench/fixtures/getter_union_cast.iyi"
+getter_fixture="$REPO_NATIVE/bench/fixtures/getter_union_cast.iyi"
 getter_ready=0
-if "$IYI" build --prelude empty --no-debug -o "$WORK/getter.hosted" "$getter_fixture" > "$WORK/getter.hosted.log" 2>&1; then
-  "$WORK/getter.hosted" > "$WORK/getter.hosted.out" 2>&1; getter_hosted=$?
-  "$WORK/getter.hosted" wrong > "$WORK/getter.hosted-wrong.out" 2>&1; getter_hosted_wrong=$?
+if "$IYI" build --prelude empty --no-debug -o "$WORK_NATIVE/getter.hosted$EXE" "$getter_fixture" > "$WORK/getter.hosted.log" 2>&1; then
+  "$WORK/getter.hosted$EXE" > "$WORK/getter.hosted.out" 2>&1; getter_hosted=$?
+  "$WORK/getter.hosted$EXE" wrong > "$WORK/getter.hosted-wrong.out" 2>&1; getter_hosted_wrong=$?
   if [ "$getter_hosted" -eq 97 ] && [ "$getter_hosted_wrong" -eq 91 ]; then
     getter_ready=1
   else
@@ -255,14 +285,30 @@ fi
 
 getter_native_check() {
   local tool="$1" result wrong
-  rm -f "$WORK/getter.native"
-  if ! "$tool" "$getter_fixture" -o "$WORK/getter.native" --pipeline typed --probe-phase > "$WORK/getter.native.log" 2>&1; then
+  if ! "$tool" "$getter_fixture" -o "$WORK_NATIVE/getter.ir" --pipeline typed --probe-phase --emit ir > "$WORK/getter.ir.log" 2>&1; then
+    echo 'INVALID: getter fixture did not emit IR'
+    cat "$WORK/getter.ir.log"
     : > "$WORK/cast-mutant-build-failed"
-    return 1
+    return 2
+  fi
+  rm -f "$WORK/getter.native"
+  if ! "$tool" "$getter_fixture" -o "$WORK_NATIVE/getter.native" --pipeline typed --probe-phase > "$WORK/getter.native.log" 2>&1; then
+    echo 'INVALID: getter fixture did not emit Mach-O'
+    cat "$WORK/getter.native.log"
+    : > "$WORK/cast-mutant-build-failed"
+    return 2
+  fi
+  if [ "$HOST_ID" != darwin-arm64 ]; then
+    if [ ! -f "$WORK/getter.baseline.ir" ]; then
+      cp "$WORK/getter.ir" "$WORK/getter.baseline.ir"
+      return 0
+    fi
+    cmp -s "$WORK/getter.baseline.ir" "$WORK/getter.ir"
+    return $?
   fi
   if ! codesign -v --strict "$WORK/getter.native"; then
     : > "$WORK/cast-mutant-build-failed"
-    return 1
+    return 2
   fi
   "$WORK/getter.native" > "$WORK/getter.native.out" 2>&1; result=$?
   "$WORK/getter.native" wrong > "$WORK/getter.native-wrong.out" 2>&1; wrong=$?
@@ -272,8 +318,12 @@ getter_native_check() {
     cmp -s "$WORK/getter.hosted-wrong.out" "$WORK/getter.native-wrong.out"
 }
 
-if [ "$getter_ready" -eq 1 ] && getter_native_check "$WORK/compile_native"; then
-  echo "  getter casts, nilable casts, is_a? and local union agree: success 97, wrong cast 91"
+if [ "$getter_ready" -eq 1 ] && getter_native_check "$WORK/compile_native$EXE"; then
+  if [ "$HOST_ID" = darwin-arm64 ]; then
+    echo "  getter casts, nilable casts, is_a? and local union agree: success 97, wrong cast 91"
+  else
+    echo "  hosted getter returned 97 and 91; typed AArch64 IR emitted"
+  fi
 else
   echo "  FAIL: getter union native result differs or did not build"
   [ ! -f "$WORK/getter.native.log" ] || tail -n 20 "$WORK/getter.native.log"
@@ -286,66 +336,72 @@ echo "== 4. Mutation proofs: the gate must catch each patch to the ported code"
 # The check rebuilds the driver from the patched source and requires the mixed-union fixture
 # to be identical to the hosted module, which holds only when the store helpers are right.
 getter_mutation_check() {
-  cast_build -o "$WORK/getter-mutant" "$REPO/src/compiler/tools/compile_native.iyi" > "$WORK/getter-mutant.build.log" 2>&1 || return 1
-  getter_native_check "$WORK/getter-mutant"
+  cast_build -o "$WORK_NATIVE/getter-mutant$EXE" "$REPO_NATIVE/src/compiler/tools/compile_native.iyi" > "$WORK/getter-mutant.build.log" 2>&1 || return 2
+  getter_native_check "$WORK/getter-mutant$EXE"
 }
 if [ "$getter_ready" -eq 1 ]; then
   rm -f "$WORK/getter.native.status"
   prove_mutation "getter unions lose their runtime type tag" "$REPO/src/compiler/lower/cast.iyi" \
     '  if mixed_union_type?(rt)' '  if false' -- getter_mutation_check || status=1
-  if [ ! -f "$WORK/getter.native.status" ] || [ "$(cat "$WORK/getter.native.status")" != "91 91" ]; then
+  if [ "$HOST_ID" = darwin-arm64 ] && { [ ! -f "$WORK/getter.native.status" ] || [ "$(cat "$WORK/getter.native.status")" != "91 91" ]; }; then
     echo "  NOT PROVEN: the getter mutant did not build and reject the valid cast"
     status=1
   fi
 fi
 cast_check() {
-  cast_build -o "$WORK/mut" "$REPO/bench/selfhost_lower_cast_exercise.iyi" > "$WORK/mut.build.log" 2>&1 || return 1
-  "$WORK/mut" lower "$REPO/bench/fixtures/lowcast_mixed.iyi" "$WORK/lowcast_mixed.oracle.ll" > "$WORK/mut.out" 2> "$WORK/mut.err" || return 1
+  cast_build -o "$WORK_NATIVE/mut$EXE" "$REPO_NATIVE/bench/selfhost_lower_cast_exercise.iyi" > "$WORK/mut.build.log" 2>&1 || return 2
+  "$WORK/mut$EXE" lower "$REPO_NATIVE/bench/fixtures/lowcast_mixed.iyi" "$WORK_NATIVE/lowcast_mixed.oracle.ll" > "$WORK/mut.out" 2> "$WORK/mut.err" || { cat "$WORK/mut.err"; return 2; }
   awk '/^SUMMARY/ { split($2, a, "="); split($3, b, "="); exit !(a[2] == b[2] && a[2] > 0) }' "$WORK/mut.out" && return 0
   return 1
 }
 
 new_cast_check() {
-  cast_build -o "$WORK/mut" "$REPO/bench/selfhost_lower_cast_exercise.iyi" > "$WORK/mut.build.log" 2>&1 || return 1
-  "$WORK/mut" lower "$REPO/bench/fixtures/lowcast_$cast_fixture.iyi" "$WORK/lowcast_$cast_fixture.oracle.ll" > "$WORK/mut.out" 2> "$WORK/mut.err" || return 1
+  cast_build -o "$WORK_NATIVE/mut$EXE" "$REPO_NATIVE/bench/selfhost_lower_cast_exercise.iyi" > "$WORK/mut.build.log" 2>&1 || return 2
+  "$WORK/mut$EXE" lower "$REPO_NATIVE/bench/fixtures/lowcast_$cast_fixture.iyi" "$WORK_NATIVE/lowcast_$cast_fixture.oracle.ll" > "$WORK/mut.out" 2> "$WORK/mut.err" || { cat "$WORK/mut.err"; return 2; }
   awk '/^SUMMARY/ { split($2, a, "="); split($3, b, "="); exit !(a[2] == b[2] && a[2] > 0) }' "$WORK/mut.out"
 }
 
 checked_downcast_check() {
-  cast_build -o "$WORK/mut" "$REPO/bench/selfhost_lower_cast_exercise.iyi" > "$WORK/mut.build.log" 2>&1 || return 1
-  "$WORK/mut" lower "$REPO/bench/fixtures/lowdowncast_checked_oracle.iyi" "$WORK/lowdowncast_checked_oracle.oracle.ll" > "$WORK/mut.out" 2> "$WORK/mut.err" || return 1
+  cast_build -o "$WORK_NATIVE/mut$EXE" "$REPO_NATIVE/bench/selfhost_lower_cast_exercise.iyi" > "$WORK/mut.build.log" 2>&1 || return 2
+  "$WORK/mut$EXE" lower "$REPO_NATIVE/bench/fixtures/lowdowncast_checked_oracle.iyi" "$WORK_NATIVE/lowdowncast_checked_oracle.oracle.ll" > "$WORK/mut.out" 2> "$WORK/mut.err" || { cat "$WORK/mut.err"; return 2; }
   awk '/^SUMMARY/ { split($2,a,"="); split($3,b,"="); split($4,c,"="); exit !(a[2] == b[2] && a[2] > 0 && c[2] == 1) }' "$WORK/mut.out" || return 1
-  "$WORK/mut" emit "$REPO/bench/fixtures/lowdowncast_checked_oracle.iyi" "$WORK/lowdowncast_checked_oracle.oracle.ll" > "$WORK/checked-port.ir" 2> "$WORK/mut.err" || return 1
-  python3 "$REPO/bench/compare_downcast_metadata.py" "$WORK/lowdowncast_checked_oracle.ll" "$WORK/checked-port.ir"
+  "$WORK/mut$EXE" emit "$REPO_NATIVE/bench/fixtures/lowdowncast_checked_oracle.iyi" "$WORK_NATIVE/lowdowncast_checked_oracle.oracle.ll" > "$WORK/checked-port.ir" 2> "$WORK/mut.err" || { cat "$WORK/mut.err"; return 2; }
+  "$PY" "$REPO_NATIVE/bench/compare_downcast_metadata.py" "$WORK_NATIVE/lowdowncast_checked_oracle.ll" "$WORK_NATIVE/checked-port.ir"
 }
 checked_downcast_check || { echo "  baseline: checked cast metadata differs"; status=1; }
 prove_mutation "checked cast swaps target and location" "$REPO/src/compiler/lower/primitives.iyi" \
   '  low.builder.call(raise_fn.fn_type, raise_fn, [from_name, to_name, location] of Value, "")' '  low.builder.call(raise_fn.fn_type, raise_fn, [from_name, location, to_name] of Value, "")' -- checked_downcast_check || status=1
 
 nilable_downcast_check() {
-  cast_build -o "$WORK/mut" "$REPO/bench/selfhost_lower_cast_exercise.iyi" > "$WORK/mut.build.log" 2>&1 || return 1
-  "$WORK/mut" lower "$REPO/bench/fixtures/lowdowncast_nilable_as.iyi" "$WORK/lowdowncast_nilable_as.oracle.ll" > "$WORK/mut.out" 2> "$WORK/mut.err" || return 1
+  cast_build -o "$WORK_NATIVE/mut$EXE" "$REPO_NATIVE/bench/selfhost_lower_cast_exercise.iyi" > "$WORK/mut.build.log" 2>&1 || return 2
+  "$WORK/mut$EXE" lower "$REPO_NATIVE/bench/fixtures/lowdowncast_nilable_as.iyi" "$WORK_NATIVE/lowdowncast_nilable_as.oracle.ll" > "$WORK/mut.out" 2> "$WORK/mut.err" || { cat "$WORK/mut.err"; return 2; }
   awk '/^SUMMARY/ { split($2, a, "="); split($3, b, "="); exit !(a[2] == b[2] && a[2] > 0) }' "$WORK/mut.out"
 }
 nilable_downcast_check || { echo "  baseline: nilable reference downcast differs"; status=1; }
 prove_mutation "nilable reference downcast reads the local slot instead of its value" "$REPO/src/compiler/lower/lower.iyi" \
   '    down_source = last_value' '    down_source = low.current_context.vars[node.obj.as(Var).name].pointer' -- nilable_downcast_check || status=1
 alias_union_native_check() {
-  cast_build -o "$WORK/alias-stage1" "$REPO/src/compiler/tools/compile_native.iyi" > "$WORK/alias-build.log" 2>&1 || return 1
-  codesign -v --strict "$WORK/alias-stage1" || return 1
-  IYI_PATH="$REPO/src" "$WORK/alias-stage1" "$REPO/bench/fixtures/lowcast_struct_union_nil.iyi" -o "$WORK/alias-native" --pipeline typed --prelude > "$WORK/alias-native.log" 2>&1 || { : > "$WORK/cast-mutant-build-failed"; return 1; }
+  cast_build -o "$WORK_NATIVE/alias-stage1$EXE" "$REPO_NATIVE/src/compiler/tools/compile_native.iyi" > "$WORK/alias-build.log" 2>&1 || return 2
+  if ! "$WORK/alias-stage1$EXE" "$REPO_NATIVE/bench/fixtures/lowcast_struct_union_nil.iyi" -o "$WORK_NATIVE/alias.ir" --pipeline typed --prelude --emit ir > "$WORK/alias-native.log" 2>&1; then
+    cat "$WORK/alias-native.log"
+    return 2
+  fi
+  "$WORK/alias-stage1$EXE" "$REPO_NATIVE/bench/fixtures/lowcast_struct_union_nil.iyi" -o "$WORK_NATIVE/alias-native" --pipeline typed --prelude > "$WORK/alias-native.log" 2>&1 || { cat "$WORK/alias-native.log"; return 2; }
+  if [ "$HOST_ID" != darwin-arm64 ]; then return 0; fi
+  codesign -v --strict "$WORK/alias-stage1$EXE" || return 2
   codesign -v --strict "$WORK/alias-native" || return 1
   "$WORK/alias-native"
   [ "$?" -eq 10 ]
 }
 representation_mutation_check() {
-  cast_build -o "$WORK/representation-mutant" "$REPO/bench/selfhost_lower_cast_exercise.iyi" > "$WORK/representation-mutant.build.log" 2>&1 || return 1
-  "$WORK/representation-mutant" union_representations > "$WORK/representation-mutant.out" 2> "$WORK/representation-mutant.err"
+  cast_build -o "$WORK_NATIVE/representation-mutant$EXE" "$REPO_NATIVE/bench/selfhost_lower_cast_exercise.iyi" > "$WORK/representation-mutant.build.log" 2>&1 || return 2
+  "$WORK/representation-mutant$EXE" union_representations > "$WORK/representation-mutant.out" 2> "$WORK/representation-mutant.err"
   local result=$?
-  if [ "$result" -ne 0 ] && ! grep -Fq 'assign Int32 to (Bool | Int32)' "$WORK/representation-mutant.err"; then
-    : > "$WORK/cast-mutant-build-failed"
-  fi
-  return "$result"
+  if [ "$result" -eq 0 ]; then return 0; fi
+  if expected_refusal "$result" "$WORK/representation-mutant.err" src/compiler/lower/pending.iyi 'assign Int32 to \(Bool \| Int32\)'; then return 1; fi
+  echo 'INVALID: representation mutant did not reach its named assignment refusal'
+  cat "$WORK/representation-mutant.err"
+  return 2
 }
 alias_union_native_check || { echo "  baseline: native aliased struct union differs"; status=1; }
 prove_mutation "plain union loses mixed specialization" "$REPO/src/compiler/lower/cast.iyi" \
@@ -418,13 +474,19 @@ prove_mutation "an IsA restriction loses its virtual range" "$REPO/src/compiler/
 prove_mutation "virtual range excludes its first type id" "$REPO/src/compiler/lower/cast.iyi" \
   '      lower = low.builder.icmp(IntPredicate::SGE, param_tid, min_id)' '      lower = low.builder.icmp(IntPredicate::SGT, param_tid, min_id)' -- new_cast_check || status=1
 no_return_check() {
-  cast_build -o "$WORK/mut" "$REPO/bench/selfhost_lower_cast_exercise.iyi" > "$WORK/mut.build.log" 2>&1 || return 1
-  "$WORK/mut" skip_noreturn > "$WORK/mut.out" 2> "$WORK/mut.err"
+  cast_build -o "$WORK_NATIVE/mut$EXE" "$REPO_NATIVE/bench/selfhost_lower_cast_exercise.iyi" > "$WORK/mut.build.log" 2>&1 || return 2
+  "$WORK/mut$EXE" skip_noreturn > "$WORK/mut.out" 2> "$WORK/mut.err"
+  local result=$?
+  if [ "$result" -eq 0 ]; then return 0; fi
+  if expected_refusal "$result" "$WORK/mut.err" src/compiler/lower/pending.iyi 'assign NoReturn to \(Bool \| Int32\): not a member'; then return 1; fi
+  echo 'INVALID: NoReturn mutant did not reach its named union-member refusal'
+  cat "$WORK/mut.err"
+  return 2
 }
 struct_union_check() {
-  cast_build -o "$WORK/mut" "$REPO/bench/selfhost_lower_cast_exercise.iyi" > "$WORK/mut.build.log" 2>&1 || return 1
+  cast_build -o "$WORK_NATIVE/mut$EXE" "$REPO_NATIVE/bench/selfhost_lower_cast_exercise.iyi" > "$WORK/mut.build.log" 2>&1 || return 2
   : > "$WORK/struct_mutant_built"
-  "$WORK/mut" lower "$REPO/bench/fixtures/lowcast_struct_union.iyi" "$WORK/lowcast_struct_union.oracle.ll" > "$WORK/mut.out" 2> "$WORK/mut.err" || return 1
+  "$WORK/mut$EXE" lower "$REPO_NATIVE/bench/fixtures/lowcast_struct_union.iyi" "$WORK_NATIVE/lowcast_struct_union.oracle.ll" > "$WORK/mut.out" 2> "$WORK/mut.err" || { cat "$WORK/mut.err"; return 2; }
   awk '/^SUMMARY/ { split($2, a, "="); split($3, b, "="); exit !(a[2] == b[2] && a[2] > 0) }' "$WORK/mut.out"
 }
 if [ -n "$(waiting_on lowcast_struct_union)" ]; then
@@ -445,10 +507,15 @@ else
   fi
 fi
 aggregate_behavior_check() {
-  cast_build -o "$WORK/aggregate_mut" "$REPO/bench/selfhost_lower_cast_exercise.iyi" > "$WORK/aggregate_mut.build.log" 2>&1 || return 1
-  "$WORK/aggregate_mut" emit "$REPO/bench/fixtures/lowcast_struct_union.iyi" "$WORK/lowcast_struct_union.oracle.ll" > "$WORK/aggregate_mut.ll" 2> "$WORK/aggregate_mut.emit.log" || return 1
-  "$WORK/compile_native" "$WORK/aggregate_mut.ll" -o "$WORK/aggregate_mut.native" > "$WORK/aggregate_mut.native.log" 2>&1 || return 1
-  codesign -v --strict "$WORK/aggregate_mut.native" || return 1
+  cast_build -o "$WORK_NATIVE/aggregate_mut$EXE" "$REPO_NATIVE/bench/selfhost_lower_cast_exercise.iyi" > "$WORK/aggregate_mut.build.log" 2>&1 || return 2
+  "$WORK/aggregate_mut$EXE" emit "$REPO_NATIVE/bench/fixtures/lowcast_struct_union.iyi" "$WORK_NATIVE/lowcast_struct_union.oracle.ll" > "$WORK/aggregate_mut.ll" 2> "$WORK/aggregate_mut.emit.log" || { cat "$WORK/aggregate_mut.emit.log"; return 2; }
+  "$WORK/compile_native$EXE" "$WORK_NATIVE/aggregate_mut.ll" -o "$WORK_NATIVE/aggregate_mut.native" > "$WORK/aggregate_mut.native.log" 2>&1 || { cat "$WORK/aggregate_mut.native.log"; return 2; }
+  if [ "$HOST_ID" != darwin-arm64 ]; then
+    if [ ! -f "$WORK/aggregate-baseline.ll" ]; then cp "$WORK/aggregate_mut.ll" "$WORK/aggregate-baseline.ll"; return 0; fi
+    cmp -s "$WORK/aggregate-baseline.ll" "$WORK/aggregate_mut.ll"
+    return $?
+  fi
+  codesign -v --strict "$WORK/aggregate_mut.native" || { echo 'INVALID: aggregate mutant signature failed'; return 2; }
   "$WORK/aggregate_mut.native" > "$WORK/aggregate_mut.out" 2>&1
   local result=$?
   echo "$result" > "$WORK/aggregate_mut.exit"
@@ -458,14 +525,14 @@ aggregate_behavior_check || { echo "  baseline: struct union native result diffe
 rm -f "$WORK/aggregate_mut.exit"
 prove_mutation "a union local receives a zero aggregate" "$REPO/src/compiler/lower/lower.iyi" \
   '      stored = load_aligned(low, low.typer.llvm_type(vt), v)' '      stored = low.builder.const_zero(low.typer.llvm_type(vt))' -- aggregate_behavior_check || status=1
-if [ ! -f "$WORK/aggregate_mut.exit" ] || [ "$(cat "$WORK/aggregate_mut.exit")" != 200 ]; then
+if [ "$HOST_ID" = darwin-arm64 ] && { [ ! -f "$WORK/aggregate_mut.exit" ] || [ "$(cat "$WORK/aggregate_mut.exit")" != 200 ]; }; then
   echo "  NOT PROVEN: aggregate mutant did not build, link and exit 200"
   status=1
 fi
 proc_result_check() {
-  cast_build -o "$WORK/mut" "$REPO/bench/selfhost_lower_cast_exercise.iyi" > "$WORK/mut.build.log" 2>&1 || return 1
+  cast_build -o "$WORK_NATIVE/mut$EXE" "$REPO_NATIVE/bench/selfhost_lower_cast_exercise.iyi" > "$WORK/mut.build.log" 2>&1 || return 2
   : > "$WORK/proc_mutant_built"
-  "$WORK/mut" lower "$REPO/bench/fixtures/lowcast_proc_result.iyi" "$WORK/lowcast_proc_result.oracle.ll" > "$WORK/mut.out" 2> "$WORK/mut.err" || return 1
+  "$WORK/mut$EXE" lower "$REPO_NATIVE/bench/fixtures/lowcast_proc_result.iyi" "$WORK_NATIVE/lowcast_proc_result.oracle.ll" > "$WORK/mut.out" 2> "$WORK/mut.err" || { cat "$WORK/mut.err"; return 2; }
   awk '/^SUMMARY/ { split($2, a, "="); split($3, b, "="); exit !(a[2] == b[2] && a[2] > 0) }' "$WORK/mut.out"
 }
 if [ -n "$(waiting_on lowcast_proc_result)" ]; then
@@ -486,9 +553,9 @@ else
   fi
 fi
 nil_proc_check() {
-  cast_build -o "$WORK/mut" "$REPO/bench/selfhost_lower_cast_exercise.iyi" > "$WORK/mut.build.log" 2>&1 || return 1
+  cast_build -o "$WORK_NATIVE/mut$EXE" "$REPO_NATIVE/bench/selfhost_lower_cast_exercise.iyi" > "$WORK/mut.build.log" 2>&1 || return 2
   : > "$WORK/nil_proc_mutant_built"
-  "$WORK/mut" lower "$REPO/bench/fixtures/lowcast_nil_proc.iyi" "$WORK/lowcast_nil_proc.oracle.ll" > "$WORK/mut.out" 2> "$WORK/mut.err" || return 1
+  "$WORK/mut$EXE" lower "$REPO_NATIVE/bench/fixtures/lowcast_nil_proc.iyi" "$WORK_NATIVE/lowcast_nil_proc.oracle.ll" > "$WORK/mut.out" 2> "$WORK/mut.err" || { cat "$WORK/mut.err"; return 2; }
   awk '/^SUMMARY/ { split($2, a, "="); split($3, b, "="); exit !(a[2] == b[2] && a[2] > 0) }' "$WORK/mut.out"
 }
 nil_proc_check || { echo "  baseline: nilable proc assignment fixture differs"; status=1; }

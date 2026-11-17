@@ -8,6 +8,10 @@
 # 4. Mutation: a triple added to NATIVE_TARGETS changes that target's print from llvm to native, and the gate goes red.
 set -u
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$REPO/bench/lib/host.sh" || exit 1
+require_test_host || exit 1
+REPO_NATIVE="$(native_path "$REPO")" || exit 1
+export IYI_PATH="$REPO_NATIVE/src"
 IYI="$REPO/bin/iyi"
 TOOL_SRC="$REPO/src/compiler/tools/compile_native.iyi"
 BACKEND_SRC="$REPO/src/compiler/backend/backend.iyi"
@@ -15,21 +19,23 @@ FIXTURE="$REPO/bench/fixtures/backend_select_exit.iyi"
 . "$REPO/bench/lib/mutation.sh"
 . "$REPO/bench/lib/native_signature.sh"
 
-WORK="$(mktemp -d /tmp/iyi-backend-select.XXXXXX)"
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/iyi-backend-select.XXXXXX")" || exit 1
+WORK_NATIVE="$(native_path "$WORK")" || exit 1
 trap 'rm -rf "$WORK"' EXIT
 status=0
 TARGETS="aarch64-apple-darwin x86_64-linux-gnu aarch64-linux-gnu x86_64-pc-windows-msvc wasm32-wasi"
 
 echo "== 1. build the native tool from its source with ./bin/iyi"
-if ! "$IYI" build -o "$WORK/tool" "$TOOL_SRC" >"$WORK/tool.build.log" 2>&1; then
+if ! "$IYI" build -o "$WORK_NATIVE/tool$EXE" "$REPO_NATIVE/src/compiler/tools/compile_native.iyi" >"$WORK/tool.build.log" 2>&1; then
   echo "FAIL: ./bin/iyi could not build $TOOL_SRC"
+  cat "$WORK/tool.build.log"
   exit 1
 fi
 echo "   built the native tool"
 
 echo "== 2. --print-backend for the five targets: llvm while NATIVE_TARGETS is empty"
 for t in $TARGETS; do
-  got=$("$WORK/tool" "$FIXTURE" -o "$WORK/print_out" --print-backend --target "$t" 2>/dev/null)
+  got=$("$WORK/tool$EXE" "$REPO_NATIVE/bench/fixtures/backend_select_exit.iyi" -o "$WORK_NATIVE/print_out" --print-backend --target "$t" 2>/dev/null)
   if [ "$got" = "llvm" ]; then
     echo "   $t: llvm"
   else
@@ -41,7 +47,7 @@ done
 echo "== 3. --backend llvm is refused by name: exit 1, the message verbatim, no output"
 for t in $TARGETS; do
   rm -f "$WORK/llvm_out"
-  "$WORK/tool" "$FIXTURE" -o "$WORK/llvm_out" --backend llvm --target "$t" >"$WORK/llvm.out" 2>"$WORK/llvm.err"
+  "$WORK/tool$EXE" "$REPO_NATIVE/bench/fixtures/backend_select_exit.iyi" -o "$WORK_NATIVE/llvm_out" --backend llvm --target "$t" >"$WORK/llvm.out" 2>"$WORK/llvm.err"
   rc=$?
   want="iyi: this compiler has no LLVM backend; $t has no native backend yet"
   got=$(cat "$WORK/llvm.err")
@@ -54,15 +60,18 @@ for t in $TARGETS; do
 done
 
 echo "== 4. --emit ir: the IR parses and verifies, and the tool rebuilds it to the hosted build's exit"
-if ! "$IYI" build -o "$WORK/hosted" "$FIXTURE" >"$WORK/hosted.log" 2>&1; then
+if ! "$IYI" build -o "$WORK_NATIVE/hosted$EXE" "$REPO_NATIVE/bench/fixtures/backend_select_exit.iyi" >"$WORK/hosted.log" 2>&1; then
   echo "FAIL: the hosted compiler could not build $FIXTURE"
+  cat "$WORK/hosted.log"
   exit 1
 fi
-"$WORK/hosted" >/dev/null 2>&1
+"$WORK/hosted$EXE" >/dev/null 2>&1
 hosted_rc=$?
-if "$WORK/tool" "$FIXTURE" -o "$WORK/prog.ir" --emit ir >"$WORK/emit.log" 2>&1 && [ -s "$WORK/prog.ir" ]; then
+if "$WORK/tool$EXE" "$REPO_NATIVE/bench/fixtures/backend_select_exit.iyi" -o "$WORK_NATIVE/prog.ir" --emit ir >"$WORK/emit.log" 2>&1 && [ -s "$WORK/prog.ir" ]; then
   echo "   wrote $(wc -l <"$WORK/prog.ir" | tr -d ' ') lines of IR"
-  if "$WORK/tool" "$WORK/prog.ir" -o "$WORK/from_ir" >"$WORK/from_ir.log" 2>&1 && native_signature_ok "$WORK/from_ir"; then
+  if [ "$HOST_ID" != darwin-arm64 ]; then
+    host_limited "backend selection: rebuilding and executing the emitted IR requires macOS arm64 Mach-O"
+  elif "$WORK/tool$EXE" "$WORK_NATIVE/prog.ir" -o "$WORK_NATIVE/from_ir" >"$WORK/from_ir.log" 2>&1 && native_signature_ok "$WORK/from_ir"; then
     "$WORK/from_ir" >/dev/null 2>&1
     ir_rc=$?
     if [ "$ir_rc" = "$hosted_rc" ]; then
@@ -83,9 +92,19 @@ fi
 echo "== 5. mutation: a triple in NATIVE_TARGETS must turn its print from llvm to native"
 # The check fails (is caught) when the mutated tool prints native for x86_64-linux-gnu.
 check_native_mutant() {
-  "$IYI" build -o "$WORK/mut_tool" "$TOOL_SRC" >"$WORK/mut.log" 2>&1 || return 1
-  got=$("$WORK/mut_tool" "$FIXTURE" -o "$WORK/mut_out" --print-backend --target x86_64-linux-gnu 2>/dev/null)
-  [ "$got" = "llvm" ]
+  if ! "$IYI" build -o "$WORK_NATIVE/mut_tool$EXE" "$REPO_NATIVE/src/compiler/tools/compile_native.iyi" >"$WORK/mut.log" 2>&1; then
+    cat "$WORK/mut.log"
+    return 2
+  fi
+  if ! got=$("$WORK/mut_tool$EXE" "$REPO_NATIVE/bench/fixtures/backend_select_exit.iyi" -o "$WORK_NATIVE/mut_out" --print-backend --target x86_64-linux-gnu 2>"$WORK/mut.err"); then
+    cat "$WORK/mut.err"
+    return 2
+  fi
+  case "$got" in
+    llvm) return 0 ;;
+    native) echo "decisive: x86_64-linux-gnu selected native"; return 1 ;;
+    *) echo "unexpected backend '$got'"; return 2 ;;
+  esac
 }
 mut_run=1
 mut_caught=0
@@ -98,7 +117,7 @@ else
   status=1
   echo "FAIL: the mutation was not caught"
 fi
-echo "  Mutation summary: $mut_caught/$mut_run source mutations caught"
+echo "  Mutation summary: $mut_caught/$mut_run attempted caught; 0 host-limited"
 
 echo
 if [ "$status" -eq 0 ]; then

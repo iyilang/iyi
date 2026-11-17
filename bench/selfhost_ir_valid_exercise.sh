@@ -14,17 +14,22 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO/bench/lib/host.sh" || exit 1
+require_test_host || exit 1
+REPO_NATIVE="$(native_path "$REPO")" || exit 1
+export IYI_PATH="$REPO_NATIVE/src"
+TOOL="$REPO/.build/iyi-compile$EXE"
 IYI="$REPO/bin/iyi"
-COMPILE_TOOL_SRC="$REPO/src/compiler/tools/compile.iyi"
 CODEGEN_SRC="$REPO/src/compiler/codegen/codegen.iyi"
 . "$REPO/bench/lib/mutation.sh"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
+WORK_NATIVE="$(native_path "$WORK")" || exit 1
 
 if command -v brew >/dev/null 2>&1; then
   LIBRARY_PATH="$(brew --prefix bdw-gc)/lib${LIBRARY_PATH:+:$LIBRARY_PATH}"; export LIBRARY_PATH
 fi
-export CRYSTAL_CACHE_DIR="${TMPDIR:-/tmp}/iyi-irvalid-cache"
+export CRYSTAL_CACHE_DIR="$(native_path "${TMPDIR:-/tmp}/iyi-irvalid-cache")"
 
 status=0
 
@@ -53,24 +58,30 @@ expected_verify() {
 }
 
 echo "== 1. Building self-host compile tool"
-if ! "$IYI" build -o "$REPO/.build/iyi-compile" "$COMPILE_TOOL_SRC" >/dev/null 2>&1; then
-  echo "  FAILED: could not build the compile tool"
+if ! "$IYI" build -o "$REPO_NATIVE/.build/iyi-compile$EXE" "$REPO_NATIVE/src/compiler/tools/compile.iyi" >"$WORK/build.log" 2>&1; then
+  echo "  FAILED: could not build the compile tool" >&2
+  cat "$WORK/build.log" >&2
   exit 1
 fi
-echo "  built .build/iyi-compile successfully"
+echo "  built .build/iyi-compile$EXE successfully"
 
 # Reports "pass", "refused: <port message>", "fail: <verifier message>", or
 # "absent" when codegen never ran.
 verify_one() {
-  local src="$1"
-  local out
-  out="$("$REPO/.build/iyi-compile" --probe-verify -o "$WORK/out" "$src" 2>&1 | tr -d '\0' || true)"
-  if printf '%s' "$out" | grep -q '\[verify\] pass'; then
+  local src="$1" rc=0 out
+  "$TOOL" --probe-verify -o "$WORK_NATIVE/out$EXE" "$(native_path "$src")" >"$WORK/verify.out" 2>"$WORK/verify.err" || rc=$?
+  if [ "$rc" -ne 0 ] && ! port_refusal "$rc" "$WORK/verify.err"; then
+    echo "  INVALID: verifier probe crashed or failed unexpectedly for $src (exit $rc)" >&2
+    cat "$WORK/verify.out" "$WORK/verify.err" >&2
+    return 2
+  fi
+  out="$(tr -d '\0' < "$WORK/verify.out")"
+  if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q '\[verify\] pass'; then
     echo "pass"
-  elif printf '%s' "$out" | grep -q '\[verify\] fail'; then
+  elif [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q '\[verify\] fail'; then
     printf 'fail: %s\n' "$(printf '%s' "$out" | sed -n 's/.*\[verify\] fail: //p' | head -1)"
-  elif printf '%s' "$out" | grep -q '^Error: port limitation'; then
-    printf 'refused: %s\n' "$(printf '%s' "$out" | grep '^Error: ' | head -1 | sed 's/^Error: //')"
+  elif grep -q '^Error: port limitation' "$WORK/verify.err"; then
+    printf 'refused: %s\n' "$(grep '^Error: ' "$WORK/verify.err" | head -1 | sed 's/^Error: //')"
   else
     echo "absent"
   fi
@@ -107,10 +118,11 @@ for src in "$REPO"/src/iyi/*.iyi; do
       esac
       ;;
     *)
-      # known-fail: passing is an improvement worth surfacing, never a failure.
-      held=$((held + 1))
+      # A known verifier failure may improve, but an absent probe is not proof.
       case "$got" in
-        pass) note="IMPROVED: raise this floor" ;;
+        fail:*) held=$((held + 1)) ;;
+        pass) held=$((held + 1)); note="IMPROVED: raise this floor" ;;
+        *) note="REGRESSION"; status=1 ;;
       esac
       ;;
   esac
@@ -163,19 +175,42 @@ echo "== 4. Guarded mutation proofs: the gate must go red on invalid IR"
 mut_run=0
 mut_caught=0
 
-# Checks the mutated backend. Returns zero only while the probe still verifies (not caught);
-# a mutant that stops the backend building, or emits IR that fails verification, returns
-# non-zero (caught). MUT_PROBE names the probe file for this mutation.
+# Only a successfully built compiler that reports a verifier failure catches
+# this mutation. A build error, crash, or refusal is an invalid proof.
 check_ir_still_verifies() {
-  "$IYI" build -o "$WORK/mut-compile" "$COMPILE_TOOL_SRC" >/dev/null 2>&1 || return 1
-  local out
-  out="$("$WORK/mut-compile" --probe-verify -o "$WORK/mut_out" "$MUT_PROBE" 2>&1 | tr -d '\0' || true)"
-  printf '%s' "$out" | grep -q '\[verify\] pass'
+  local rc=0
+  if ! "$IYI" build -o "$WORK_NATIVE/mut-compile$EXE" "$REPO_NATIVE/src/compiler/tools/compile.iyi" >"$WORK/mut-build.log" 2>&1; then
+    echo "  INVALID: mutated compile tool did not build" >&2
+    cat "$WORK/mut-build.log" >&2
+    return 2
+  fi
+  "$WORK/mut-compile$EXE" --probe-verify -o "$WORK_NATIVE/mut_out$EXE" "$(native_path "$MUT_PROBE")" >"$WORK/mut-verify.out" 2>"$WORK/mut-verify.err" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "  INVALID: mutated verifier probe exited $rc" >&2
+    cat "$WORK/mut-verify.out" "$WORK/mut-verify.err" >&2
+    return 2
+  fi
+  if grep -q '\[verify\] pass' "$WORK/mut-verify.out"; then
+    return 0
+  fi
+  if grep -q '\[verify\] fail: ' "$WORK/mut-verify.out"; then
+    grep -m1 '\[verify\] fail: ' "$WORK/mut-verify.out" | sed 's/^/decisive: /'
+    return 1
+  fi
+  echo "  INVALID: mutated compiler produced no verifier verdict" >&2
+  cat "$WORK/mut-verify.out" "$WORK/mut-verify.err" >&2
+  return 2
 }
 
 prove_invalid() {
-  local label="$1" target="$2" old="$3" new="$4" probe="$5"
+  local label="$1" target="$2" old="$3" new="$4" probe="$5" baseline
   mut_run=$((mut_run + 1))
+  baseline="$(verify_one "$probe")" || { status=1; return; }
+  if [ "$baseline" != pass ]; then
+    echo "  INVALID: unmutated probe does not verify: $probe ($baseline)" >&2
+    status=1
+    return
+  fi
   MUT_PROBE="$probe"
   if prove_mutation "$label" "$target" "$old" "$new" -- check_ir_still_verifies; then
     mut_caught=$((mut_caught + 1))
@@ -206,9 +241,6 @@ prove_invalid "declare a dispatched call with the wrong return type" \
   "$REPO/bench/fixtures/cg_virtual_dispatch.iyi"
 
 echo "  Mutation summary: $mut_caught/$mut_run invalid-IR mutations caught"
-
-# Rebuild the tool from clean source so a later gate does not inherit a mutant.
-"$IYI" build -o "$REPO/.build/iyi-compile" "$COMPILE_TOOL_SRC" >/dev/null 2>&1 || true
 
 echo
 if [ "$status" -eq 0 ]; then

@@ -17,7 +17,14 @@
 set -u
 status=0
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-export IYI_PATH="$REPO/src"
+. "$REPO/bench/lib/host.sh" || exit 1
+require_test_host || exit 1
+if [ -z "$PY" ]; then
+  echo 'FAIL: a functional Python interpreter is required' >&2
+  exit 1
+fi
+REPO_NATIVE="$(native_path "$REPO")" || exit 1
+export IYI_PATH="$REPO_NATIVE/src"
 IYI="${IYI_COMPILER:-$REPO/bin/iyi}"
 CRYSTAL="${CRYSTAL:-crystal}"
 TYPER_FILE="$REPO/src/compiler/lower/typer.iyi"
@@ -26,6 +33,7 @@ LAYOUTS_FILE="$REPO/src/compiler/lower/layouts.iyi"
 UNIONS_FILE="$REPO/src/compiler/lower/unions.iyi"
 HEADED_FILE="$REPO/src/compiler/lower/headed.iyi"
 WORK="$(mktemp -d)"
+WORK_NATIVE="$(native_path "$WORK")" || exit 1
 trap 'rm -rf "$WORK"' EXIT
 
 . "$REPO/bench/lib/mutation.sh"
@@ -35,30 +43,43 @@ trap 'rm -rf "$WORK"' EXIT
 if [ -n "${LOWER_TYPES_TARGET:-}" ]; then
   TRIPLE="$LOWER_TYPES_TARGET"
 else
-  case "$(uname -s)-$(uname -m)" in
-    Darwin-arm64)  TRIPLE="aarch64-apple-darwin" ;;
-    Linux-x86_64)  TRIPLE="x86_64-unknown-linux-gnu" ;;
-    Linux-aarch64) TRIPLE="aarch64-unknown-linux-gnu" ;;
-    *) echo "no lowering target for $(uname -s)-$(uname -m); set LOWER_TYPES_TARGET"; exit 1 ;;
+  case "$HOST_ID" in
+    darwin-arm64)   TRIPLE="aarch64-apple-darwin" ;;
+    darwin-x86_64)  TRIPLE="x86_64-apple-darwin" ;;
+    linux-x86_64)   TRIPLE="x86_64-unknown-linux-gnu" ;;
+    linux-arm64)    TRIPLE="aarch64-unknown-linux-gnu" ;;
+    windows-x86_64) TRIPLE="x86_64-pc-windows-msvc" ;;
+    windows-arm64)  TRIPLE="aarch64-pc-windows-msvc" ;;
+    *) echo "no lowering target for $HOST_ID; set LOWER_TYPES_TARGET"; exit 1 ;;
   esac
 fi
 
 echo "== 1. Building the hosted oracle and the port driver ($TRIPLE)"
 LLVM_CONFIG="${LLVM_CONFIG:-$(command -v llvm-config || true)}" \
-  CRYSTAL_PATH="$REPO/src" "$CRYSTAL" build -Di_know_what_im_doing \
-    -o "$WORK/oracle" "$REPO/bench/selfhost_lower_types_oracle.cr" >/dev/null 2>&1 || { echo "oracle build failed"; exit 1; }
-"$IYI" build -o "$WORK/port" "$REPO/bench/selfhost_lower_types_exercise.iyi" || { echo "port driver build failed"; exit 1; }
+  CRYSTAL_PATH="$REPO_NATIVE/src" "$CRYSTAL" build -Di_know_what_im_doing \
+    -o "$WORK_NATIVE/oracle$EXE" "$REPO_NATIVE/bench/selfhost_lower_types_oracle.cr" >"$WORK/oracle.build.log" 2>&1 || { echo "oracle build failed"; cat "$WORK/oracle.build.log"; exit 1; }
+"$IYI" build -o "$WORK_NATIVE/port$EXE" "$REPO_NATIVE/bench/selfhost_lower_types_exercise.iyi" || { echo "port driver build failed"; exit 1; }
 type_id_fork_ok() {
-  if ! "$IYI" build -o "$WORK/fork_probe" "$REPO/bench/selfhost_type_id_fork_probe.iyi" > "$WORK/fork_probe.build.log" 2>&1; then
+  if ! "$IYI" build -o "$WORK_NATIVE/fork_probe$EXE" "$REPO_NATIVE/bench/selfhost_type_id_fork_probe.iyi" > "$WORK/fork_probe.build.log" 2>&1; then
     echo "INVALID MUTANT: type-id fork probe failed to build" >&2
-    if [ "${_PM_ARMED:-0}" = 1 ]; then return 0; fi
+    cat "$WORK/fork_probe.build.log" >&2
+    return 2
+  fi
+  if [ "$HOST_OS" = darwin ] && ! codesign -v --strict "$WORK/fork_probe$EXE"; then
+    echo "INVALID MUTANT: type-id fork probe failed signature verification" >&2
+    return 2
+  fi
+  "$WORK/fork_probe$EXE" > "$WORK/fork_probe.out" 2>&1
+  local result=$?
+  [ "$result" -eq 0 ] && return 0
+  if [ "$result" -eq 1 ] &&
+     grep -Fxq 'iyi: panic: fork mutated baseline range' "$WORK/fork_probe.out" &&
+     tr '\\' '/' < "$WORK/fork_probe.out" | grep -Fq 'bench/selfhost_type_id_fork_probe.iyi:11'; then
     return 1
   fi
-  if [ "$(uname -s)" = Darwin ] && ! codesign -v --strict "$WORK/fork_probe"; then
-    echo "INVALID MUTANT: type-id fork probe failed signature verification" >&2
-    return 0
-  fi
-  "$WORK/fork_probe" > "$WORK/fork_probe.out" 2>&1
+  echo 'INVALID: type-id fork probe failed outside the expected assertion'
+  cat "$WORK/fork_probe.out"
+  return 2
 }
 if type_id_fork_ok; then
   prove_mutation "type-id probe forks share the baseline map" "$TYPE_ID_FILE" \
@@ -68,7 +89,7 @@ else
   echo "  FAIL: type-id fork baseline failed"
   status=1
 fi
-if "$IYI" build --no-codegen "$REPO/bench/fixtures/refuse_type_id_tuple_write.iyi" > "$WORK/tuple_write.log" 2>&1 ||
+if "$IYI" build --no-codegen "$REPO_NATIVE/bench/fixtures/refuse_type_id_tuple_write.iyi" > "$WORK/tuple_write.log" 2>&1 ||
    ! grep -Fq "undefined method '[]=' for Tuple(Int32, Int32)" "$WORK/tuple_write.log"; then
   echo "  FAIL: tuple element assignment was not rejected"
   status=1
@@ -100,12 +121,12 @@ block_count=0
 diverged=0
 for fixture in "$REPO"/bench/fixtures/lowty_*.iyi; do
   name="$(basename "$fixture" .iyi)"
-  if ! "$WORK/oracle" "$fixture" "$TRIPLE" > "$WORK/$name.oracle" 2> "$WORK/$name.oracle.err"; then
+  if ! "$WORK/oracle$EXE" "$(native_path "$fixture")" "$TRIPLE" > "$WORK/$name.oracle" 2> "$WORK/$name.oracle.err"; then
     echo "  $name: oracle failed: $(cat "$WORK/$name.oracle.err")"
     diverged=$((diverged + 1))
     continue
   fi
-  if ! "$WORK/port" "$fixture" "$TRIPLE" > "$WORK/$name.port" 2> "$WORK/$name.port.err"; then
+  if ! "$WORK/port$EXE" "$(native_path "$fixture")" "$TRIPLE" > "$WORK/$name.port" 2> "$WORK/$name.port.err"; then
     echo "  $name: port driver failed: $(head -n 2 "$WORK/$name.port.err")"
     diverged=$((diverged + 1))
     continue
@@ -124,8 +145,8 @@ echo "  Parity summary: $fixture_count fixtures identical ($block_count types co
 ids_count=0
 for fixture in "$REPO"/bench/fixtures/lowtyid_*.iyi; do
   name="$(basename "$fixture" .iyi)"
-  "$WORK/oracle" "$fixture" "$TRIPLE" ids > "$WORK/$name.ids_oracle" 2>"$WORK/$name.oracle.err" || { echo "  $name: oracle failed"; diverged=$((diverged + 1)); continue; }
-  "$WORK/port" "$fixture" "$TRIPLE" ids > "$WORK/$name.ids_port" 2>"$WORK/$name.port.err" || { echo "  $name: port driver failed: $(head -n 2 "$WORK/$name.port.err")"; diverged=$((diverged + 1)); continue; }
+  "$WORK/oracle$EXE" "$(native_path "$fixture")" "$TRIPLE" ids > "$WORK/$name.ids_oracle" 2>"$WORK/$name.oracle.err" || { echo "  $name: oracle failed"; diverged=$((diverged + 1)); continue; }
+  "$WORK/port$EXE" "$(native_path "$fixture")" "$TRIPLE" ids > "$WORK/$name.ids_port" 2>"$WORK/$name.port.err" || { echo "  $name: port driver failed: $(head -n 2 "$WORK/$name.port.err")"; diverged=$((diverged + 1)); continue; }
   if shift=$(ids_shape "$WORK/$name.ids_oracle" "$WORK/$name.ids_port"); then
     ids_count=$((ids_count + 1))
     echo "  $name: type ids agree in shape with the hosted numbering (port = hosted + $shift)"
@@ -142,8 +163,8 @@ fi
 headed_count=0
 for fixture in "$REPO"/bench/fixtures/lowhead_*.iyi; do
   name="$(basename "$fixture" .iyi)"
-  "$WORK/oracle" "$fixture" "$TRIPLE" headed > "$WORK/$name.headed_oracle" 2>"$WORK/$name.oracle.err" || { echo "  $name: oracle failed"; diverged=$((diverged + 1)); continue; }
-  "$WORK/port" "$fixture" "$TRIPLE" headed > "$WORK/$name.headed_port" 2>"$WORK/$name.port.err" || { echo "  $name: port driver failed: $(head -n 2 "$WORK/$name.port.err")"; diverged=$((diverged + 1)); continue; }
+  "$WORK/oracle$EXE" "$(native_path "$fixture")" "$TRIPLE" headed > "$WORK/$name.headed_oracle" 2>"$WORK/$name.oracle.err" || { echo "  $name: oracle failed"; diverged=$((diverged + 1)); continue; }
+  "$WORK/port$EXE" "$(native_path "$fixture")" "$TRIPLE" headed > "$WORK/$name.headed_port" 2>"$WORK/$name.port.err" || { echo "  $name: port driver failed: $(head -n 2 "$WORK/$name.port.err")"; diverged=$((diverged + 1)); continue; }
   if cmp -s "$WORK/$name.headed_oracle" "$WORK/$name.headed_port"; then
     headed_count=$((headed_count + 1))
     echo "  $name: headed bytes agree with the hosted census"
@@ -181,9 +202,9 @@ own_reasons="$WORK/own_reasons.tsv"
 while IFS= read -r file; do
   [ -n "$file" ] || continue
   id=$(printf '%s' "$file" | tr '/' '_')
-  timeout 900 "$WORK/oracle" --own "$REPO/$file" "$TRIPLE" > "$WORK/$id.o" 2> "$WORK/$id.oe"
+  timeout 900 "$WORK/oracle$EXE" --own "$REPO_NATIVE/$file" "$TRIPLE" > "$WORK/$id.o" 2> "$WORK/$id.oe"
   oracle_status=$?
-  timeout 900 "$WORK/port" --own "$REPO/$file" "$TRIPLE" > "$WORK/$id.p" 2> "$WORK/$id.pe"
+  timeout 900 "$WORK/port$EXE" --own "$REPO_NATIVE/$file" "$TRIPLE" > "$WORK/$id.p" 2> "$WORK/$id.pe"
   port_status=$?
   declared=$(awk '/^== /{n++} END{print n+0}' "$WORK/$id.o")
   if [ "$oracle_status" -ne 0 ]; then
@@ -194,7 +215,7 @@ while IFS= read -r file; do
     printf '%s\tPORT\t%s\t0\t0\t0\t0\t%s\n' "$file" "$declared" "$(awk 'NR==1' "$WORK/$id.pe" | tr -d '\t')" >> "$own_results"
     continue
   fi
-  python3 "$REPO/bench/lib/lower_types_compare.py" "$WORK/$id.o" "$WORK/$id.p" > "$WORK/$id.cmp"
+  "$PY" "$REPO_NATIVE/bench/lib/lower_types_compare.py" "$WORK_NATIVE/$id.o" "$WORK_NATIVE/$id.p" > "$WORK/$id.cmp" || { echo "  FAIL: comparator failed for $file"; status=1; continue; }
   read -r declared identical failed missing differs < <(awk 'NR==1' "$WORK/$id.cmp")
   awk -v f="$file" '/^(REASON|EXAMPLE) / {print f "\t" $0}' "$WORK/$id.cmp" >> "$own_reasons"
   printf '%s\tOK\t%s\t%s\t%s\t%s\t%s\t\n' "$file" "$declared" "$identical" "$failed" "$missing" "$differs" >> "$own_results"
@@ -266,10 +287,18 @@ MUTATIONS_RUN=0
 # it fails on a fixture, or any fixture's blocks differ from the hosted oracle's.
 # It returns 0 only when every fixture still matches, which is the unmutated behaviour.
 check_lowering_diverges() {
-  "$IYI" build -o "$WORK/mut_port" "$REPO/bench/selfhost_lower_types_exercise.iyi" >/dev/null 2>&1 || return 1
+  if ! "$IYI" build -o "$WORK_NATIVE/mut_port$EXE" "$REPO_NATIVE/bench/selfhost_lower_types_exercise.iyi" >"$WORK/mut_port.build.log" 2>&1; then
+    echo 'INVALID: type mutant driver failed to build'
+    cat "$WORK/mut_port.build.log"
+    return 2
+  fi
   for fixture in "$REPO"/bench/fixtures/lowty_*.iyi; do
     name="$(basename "$fixture" .iyi)"
-    "$WORK/mut_port" "$fixture" "$TRIPLE" > "$WORK/mut.out" 2>/dev/null || return 1
+    if ! "$WORK/mut_port$EXE" "$(native_path "$fixture")" "$TRIPLE" > "$WORK/mut.out" 2>"$WORK/mut.err"; then
+      echo "INVALID: type mutant driver did not complete $name"
+      cat "$WORK/mut.err"
+      return 2
+    fi
     cmp -s "$WORK/$name.oracle" "$WORK/mut.out" || return 1
   done
   return 0
@@ -299,9 +328,9 @@ prove_mutation "enum lowered to Int64 whatever its base" "$TYPER_FILE" \
   -- check_lowering_diverges || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
-prove_mutation "metaclass branch bypassed (metaclasses fall through to the raise)" "$TYPER_FILE" \
+prove_mutation "metaclasses are lowered to i64 instead of i32" "$TYPER_FILE" \
   "    if type.is_a?(MetaclassType) || type.is_a?(VirtualMetaclassType)" \
-  "    if false" \
+  $'    if type.is_a?(MetaclassType) || type.is_a?(VirtualMetaclassType)\n      return @table.int64\n    end\n    if false' \
   -- check_lowering_diverges || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
@@ -361,20 +390,36 @@ prove_mutation "indirect result returned as int32, not void" "$TYPER_FILE" \
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
 check_ids_diverge() {
-  "$IYI" build -o "$WORK/mut_port" "$REPO/bench/selfhost_lower_types_exercise.iyi" >/dev/null 2>&1 || return 1
+  if ! "$IYI" build -o "$WORK_NATIVE/mut_port$EXE" "$REPO_NATIVE/bench/selfhost_lower_types_exercise.iyi" >"$WORK/mut_port.build.log" 2>&1; then
+    echo 'INVALID: type-id mutant driver failed to build'
+    cat "$WORK/mut_port.build.log"
+    return 2
+  fi
   for fixture in "$REPO"/bench/fixtures/lowtyid_*.iyi; do
     name="$(basename "$fixture" .iyi)"
-    "$WORK/mut_port" "$fixture" "$TRIPLE" ids > "$WORK/mut_ids.out" 2>/dev/null || return 1
+    if ! "$WORK/mut_port$EXE" "$(native_path "$fixture")" "$TRIPLE" ids > "$WORK/mut_ids.out" 2>"$WORK/mut_ids.err"; then
+      echo "INVALID: type-id mutant driver did not complete $name"
+      cat "$WORK/mut_ids.err"
+      return 2
+    fi
     ids_shape "$WORK/$name.ids_oracle" "$WORK/mut_ids.out" >/dev/null || return 1
   done
   return 0
 }
 
 check_headed_diverges() {
-  "$IYI" build -o "$WORK/mut_port" "$REPO/bench/selfhost_lower_types_exercise.iyi" >/dev/null 2>&1 || return 1
+  if ! "$IYI" build -o "$WORK_NATIVE/mut_port$EXE" "$REPO_NATIVE/bench/selfhost_lower_types_exercise.iyi" >"$WORK/mut_port.build.log" 2>&1; then
+    echo 'INVALID: headed mutant driver failed to build'
+    cat "$WORK/mut_port.build.log"
+    return 2
+  fi
   for fixture in "$REPO"/bench/fixtures/lowhead_*.iyi; do
     name="$(basename "$fixture" .iyi)"
-    "$WORK/mut_port" "$fixture" "$TRIPLE" headed > "$WORK/mut_headed.out" 2>/dev/null || return 1
+    if ! "$WORK/mut_port$EXE" "$(native_path "$fixture")" "$TRIPLE" headed > "$WORK/mut_headed.out" 2>"$WORK/mut_headed.err"; then
+      echo "INVALID: headed mutant driver did not complete $name"
+      cat "$WORK/mut_headed.err"
+      return 2
+    fi
     cmp -s "$WORK/$name.headed_oracle" "$WORK/mut_headed.out" || return 1
   done
   return 0
@@ -417,7 +462,7 @@ prove_mutation "unnumbered types do not get a lazy id" "$TYPE_ID_FILE" \
   end
 
   # The hosted `id_to_metaclass' \
-  '    raise "BUG: no lazy id"
+  '    0_i32
   end
 
   # The hosted `id_to_metaclass' \
@@ -514,12 +559,25 @@ MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 # floor, when the mutated driver does not build, or when the port fails the file.
 OWN_PROBES="src/compiler/foundation/location.iyi src/compiler/platform/target.iyi src/compiler/syntax/ast.iyi src/compiler/lower/type_id.iyi"
 check_own_diverges() {
-  "$IYI" build -o "$WORK/mut_port" "$REPO/bench/selfhost_lower_types_exercise.iyi" > /dev/null 2>&1 || return 1
+  if ! "$IYI" build -o "$WORK_NATIVE/mut_port$EXE" "$REPO_NATIVE/bench/selfhost_lower_types_exercise.iyi" >"$WORK/mut_port.build.log" 2>&1; then
+    echo 'INVALID: own-source mutant driver failed to build'
+    cat "$WORK/mut_port.build.log"
+    return 2
+  fi
   for probe in $OWN_PROBES; do
     id=$(printf '%s' "$probe" | tr '/' '_')
-    timeout 900 "$WORK/oracle" --own "$REPO/$probe" "$TRIPLE" > "$WORK/mut_$id.o" 2> /dev/null || return 1
-    timeout 900 "$WORK/mut_port" --own "$REPO/$probe" "$TRIPLE" > "$WORK/mut_$id.p" 2> /dev/null || return 1
-    got=$(python3 "$REPO/bench/lib/lower_types_compare.py" "$WORK/mut_$id.o" "$WORK/mut_$id.p" | awk 'NR==1 { print $2 }')
+    if ! timeout 900 "$WORK/oracle$EXE" --own "$REPO_NATIVE/$probe" "$TRIPLE" > "$WORK/mut_$id.o" 2> "$WORK/mut_$id.oe"; then
+      echo "INVALID: own-source oracle failed on $probe"
+      cat "$WORK/mut_$id.oe"
+      return 2
+    fi
+    if ! timeout 900 "$WORK/mut_port$EXE" --own "$REPO_NATIVE/$probe" "$TRIPLE" > "$WORK/mut_$id.p" 2> "$WORK/mut_$id.pe"; then
+      echo "INVALID: own-source mutant failed on $probe"
+      cat "$WORK/mut_$id.pe"
+      return 2
+    fi
+    "$PY" "$REPO_NATIVE/bench/lib/lower_types_compare.py" "$WORK_NATIVE/mut_$id.o" "$WORK_NATIVE/mut_$id.p" > "$WORK/mut_$id.cmp" || return 2
+    got=$(awk 'NR==1 { print $2 }' "$WORK/mut_$id.cmp")
     want=$(awk -v f="$probe" '$1 == f { print $2 }' "$own_floor")
     [ "${want:-0}" -gt 0 ] || return 0
     [ "${got:-0}" -ge "$want" ] || return 1
@@ -534,12 +592,12 @@ own_fixture_count=0
 for fixture in "$REPO"/bench/fixtures/ownty_*.iyi; do
   own_fixture_count=$((own_fixture_count + 1))
   name="$(basename "$fixture" .iyi)"
-  if ! timeout 900 "$WORK/oracle" --own "$fixture" "$TRIPLE" > "$WORK/$name.own_o" 2> "$WORK/$name.own_oe"; then
+  if ! timeout 900 "$WORK/oracle$EXE" --own "$(native_path "$fixture")" "$TRIPLE" > "$WORK/$name.own_o" 2> "$WORK/$name.own_oe"; then
     echo "  $name: oracle failed: $(head -n 1 "$WORK/$name.own_oe")"
     own_fixture_bad=$((own_fixture_bad + 1))
     continue
   fi
-  if ! timeout 900 "$WORK/port" --own "$fixture" "$TRIPLE" > "$WORK/$name.own_p" 2> "$WORK/$name.own_pe"; then
+  if ! timeout 900 "$WORK/port$EXE" --own "$(native_path "$fixture")" "$TRIPLE" > "$WORK/$name.own_p" 2> "$WORK/$name.own_pe"; then
     echo "  $name: port failed: $(head -n 1 "$WORK/$name.own_pe")"
     own_fixture_bad=$((own_fixture_bad + 1))
     continue
@@ -565,9 +623,9 @@ if ! check_own_diverges; then
   status=1
 fi
 
-prove_mutation "a namespace module's branch bypassed (namespaces fall through to the raise)" "$TYPER_FILE" \
+prove_mutation "a namespace module is lowered as i64" "$TYPER_FILE" \
   "    if (type.is_a?(NonGenericModuleType) || type.is_a?(TraitType)) && !type.is_a?(LibType)" \
-  "    if false" \
+  $'    if type.is_a?(NonGenericModuleType) && !type.is_a?(LibType)\n      return @table.int64\n    end\n    if (type.is_a?(NonGenericModuleType) || type.is_a?(TraitType)) && !type.is_a?(LibType)' \
   -- check_own_diverges || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
@@ -646,9 +704,9 @@ prove_mutation_all "an unheaded candidate answers headed" "$HEADED_FILE" \
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
 
-prove_mutation "traits bypassed in create_llvm_type (fall through to BUG raise)" "$TYPER_FILE" \
+prove_mutation "a trait is lowered as i64" "$TYPER_FILE" \
   '    if (type.is_a?(NonGenericModuleType) || type.is_a?(TraitType)) && !type.is_a?(LibType)' \
-  '    if type.is_a?(NonGenericModuleType) && !type.is_a?(LibType)' \
+  $'    if type.is_a?(TraitType)\n      return @table.int64\n    end\n    if (type.is_a?(NonGenericModuleType) || type.is_a?(TraitType)) && !type.is_a?(LibType)' \
   -- check_lowering_diverges || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 

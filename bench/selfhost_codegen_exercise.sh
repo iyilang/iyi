@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Fails when the pure-iyi code generation pass stops agreeing with the
-# Crystal front end backend it replaces.
+# hosted front end backend it replaces.
 #
 # Every fixture is compiled by both backends, dumped in normalized LLVM IR,
 # and required byte-identical. In addition, emitted native object files from
@@ -16,12 +16,22 @@ set -u
 status=0
 diverged=0
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO/bench/lib/host.sh" || exit 1
+require_test_host || exit 1
+if [ -z "$PY" ]; then
+  echo "FAILED: a functional Python interpreter is required" >&2
+  exit 1
+fi
 . "$REPO/bench/lib/mutation.sh"
-IYI="$REPO/bin/iyi"
+IYI="${IYI_COMPILER:-$REPO/bin/iyi}"
 CRYSTAL="${CRYSTAL:-crystal}"
 CG_SRC="$REPO/src/compiler/codegen/codegen.iyi"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
+REPO_NATIVE="$(native_path "$REPO")" || exit 1
+WORK_NATIVE="$(native_path "$WORK")" || exit 1
+export IYI_PATH="$REPO_NATIVE/src"
+exec 9>&1
 
 # Refusal fixtures: iyi refuses these programs, so they have no IR to compare.
 # Each list names the oracle it is compared with, in sections 3b, 3b2 and 3c.
@@ -49,12 +59,18 @@ if command -v brew >/dev/null 2>&1; then
   LIBRARY_PATH="$(brew --prefix bdw-gc)/lib${LIBRARY_PATH:+:$LIBRARY_PATH}"
   export LIBRARY_PATH
 fi
-export CRYSTAL_CACHE_DIR="${TMPDIR:-/tmp}/iyi-cg-cache"
-export CRYSTAL_PATH="$REPO/src"
+export CRYSTAL_CACHE_DIR="$WORK_NATIVE/cache"
+export CRYSTAL_PATH="$REPO_NATIVE/src"
 
 echo "== 1. Building and running pure iyi codegen standalone check"
-"$IYI" build -o "$WORK/exercise" "$REPO/bench/selfhost_codegen_exercise.iyi"
-"$WORK/exercise" > "$WORK/plain.out" 2>&1
+if ! "$IYI" build -o "$WORK_NATIVE/exercise$EXE" "$REPO_NATIVE/bench/selfhost_codegen_exercise.iyi" > "$WORK/exercise.build.log" 2>&1; then
+  cat "$WORK/exercise.build.log"
+  exit 1
+fi
+if ! "$WORK/exercise$EXE" > "$WORK/plain.out" 2>&1; then
+  cat "$WORK/plain.out"
+  exit 1
+fi
 cat "$WORK/plain.out"
 if ! grep -qF "ALL SELFHOST CODEGEN CHECKS PASSED SUCCESSFULLY!" "$WORK/plain.out"; then
   echo "FAIL: standalone codegen verification failed"
@@ -62,7 +78,7 @@ if ! grep -qF "ALL SELFHOST CODEGEN CHECKS PASSED SUCCESSFULLY!" "$WORK/plain.ou
 fi
 
 echo
-echo "== 2. Building Crystal oracle for differential codegen verification"
+echo "== 2. Building hosted oracle for differential codegen verification"
 cat <<'CRYSTAL_ORACLE_SCRIPT' > "$WORK/dump_crystal_cg.cr"
 require "compiler/requires"
 
@@ -137,12 +153,15 @@ elsif mode == "--emit-obj"
 end
 CRYSTAL_ORACLE_SCRIPT
 
-LLVM_CONFIG="${LLVM_CONFIG:-$(command -v llvm-config || true)}" \
-  CRYSTAL_PATH="$REPO/src" "$CRYSTAL" build -Di_know_what_im_doing \
-    -o "$WORK/dump_crystal_cg" "$WORK/dump_crystal_cg.cr"
+if ! LLVM_CONFIG="${LLVM_CONFIG:-$(command -v llvm-config || true)}" \
+  CRYSTAL_PATH="$REPO_NATIVE/src" "$CRYSTAL" build -Di_know_what_im_doing \
+    -o "$WORK_NATIVE/dump_crystal_cg$EXE" "$WORK_NATIVE/dump_crystal_cg.cr" > "$WORK/oracle.build.log" 2>&1; then
+  cat "$WORK/oracle.build.log"
+  exit 1
+fi
 
 normalize_ir() {
-  python3 - "$1" <<'PY'
+  "$PY" - "$(native_path "$1")" <<'PY'
 import sys, re
 
 def norm(raw):
@@ -187,7 +206,7 @@ echo
 #   3. External allocator declarations (@malloc, @llvm.memset)
 #   4. All defined functions across the module: top-level funs, constructors
 #      (*Type::new), initializers (*Type#initialize), and methods (*Type#method).
-echo "== 3. Textual LLVM IR comparison against the Crystal backend being replaced"
+echo "== 3. Textual LLVM IR comparison against the hosted backend being replaced"
 fixture_count=0
 total_functions=0
 
@@ -197,16 +216,23 @@ for fixture in "$REPO"/bench/fixtures/cg_*.iyi; do
   is_refusal "$base" && continue
   fixture_count=$((fixture_count + 1))
 
-  "$WORK/exercise" --dump-ir "$fixture" > "$WORK/iyi_${base}.raw"
-  "$WORK/dump_crystal_cg" --dump-ir "$fixture" > "$WORK/cr_${base}.raw"
-
-  normalize_ir "$WORK/iyi_${base}.raw" > "$WORK/iyi_${base}.norm"
-  normalize_ir "$WORK/cr_${base}.raw" > "$WORK/cr_${base}.norm"
+  fixture_native="$(native_path "$fixture")" || exit 1
+  if ! "$WORK/exercise$EXE" --dump-ir "$fixture_native" > "$WORK/iyi_${base}.raw" 2>"$WORK/iyi_${base}.err" ||
+     ! "$WORK/dump_crystal_cg$EXE" --dump-ir "$fixture_native" > "$WORK/cr_${base}.raw" 2>"$WORK/cr_${base}.err" ||
+     ! normalize_ir "$WORK/iyi_${base}.raw" > "$WORK/iyi_${base}.norm" ||
+     ! normalize_ir "$WORK/cr_${base}.raw" > "$WORK/cr_${base}.norm"; then
+    echo "  FAIL: could not generate or normalize IR for $fixture"
+    cat "$WORK/iyi_${base}.err" "$WORK/cr_${base}.err" 2>/dev/null
+    diverged=$((diverged + 1))
+    status=1
+    continue
+  fi
 
   fn_count=$(grep -c "^define " "$WORK/iyi_${base}.norm" || true)
   total_functions=$((total_functions + fn_count))
 
   if diff -u "$WORK/cr_${base}.norm" "$WORK/iyi_${base}.norm" > "$WORK/diff_${base}.patch"; then
+    touch "$WORK/ir_baseline_$base"
     echo "  $fixture: identical ($fn_count functions match front end)"
   else
     echo "  FAIL: $fixture diverged from front end:"
@@ -223,14 +249,15 @@ echo "  Parity summary: $((fixture_count - diverged))/$fixture_count codegen fix
 # $2 the oracle's extra flags. The oracle's text is kept for check_refusal_mutant.
 refusal_check() {
   local name="$1" flags="$2" oracle_out oracle_status port_out port_status
-  local rel="bench/fixtures/$name"
-  oracle_out="$(cd "$REPO" && "$IYI" build $flags -o "$WORK/oracle_refusal_$name" "$rel" 2>&1)"
+  local fixture="$REPO_NATIVE/bench/fixtures/$name"
+  oracle_out="$(cd "$REPO" && "$IYI" build $flags -o "$WORK_NATIVE/oracle_refusal_$name$EXE" "$fixture" 2>&1)"
   oracle_status=$?
   printf '%s\n' "$oracle_out" > "$WORK/oracle_refusal_$name.txt"
   printf '%s\n' "$oracle_status" > "$WORK/oracle_refusal_$name.status"
-  port_out="$(cd "$REPO" && "$WORK/exercise" --dump-ir "$rel" 2>&1)"
+  port_out="$(cd "$REPO" && "$WORK/exercise$EXE" --dump-ir "$fixture" 2>&1)"
   port_status=$?
   if [ "$oracle_status" -ne 0 ] && [ "$oracle_status" -eq "$port_status" ] && [ "$oracle_out" = "$port_out" ]; then
+    touch "$WORK/refusal_baseline_$name"
     echo "  $name: refused with the oracle's text and exit $port_status"
     return 0
   fi
@@ -268,9 +295,11 @@ limit_count=0
 limit_diverged=0
 for name in $PORT_LIMIT_FIXTURES; do
   limit_count=$((limit_count + 1))
-  port_out="$(cd "$REPO" && "$WORK/exercise" --dump-ir "bench/fixtures/$name" 2>&1)"
+  port_out="$(cd "$REPO" && "$WORK/exercise$EXE" --dump-ir "$REPO_NATIVE/bench/fixtures/$name" 2>&1)"
   port_status=$?
-  if [ "$port_status" -ne 0 ] && printf '%s\n' "$port_out" | grep -q '^Error: port limitation: the port cannot '; then
+  printf '%s\n' "$port_out" > "$WORK/limit_baseline_$name.log"
+  if expected_refusal "$port_status" "$WORK/limit_baseline_$name.log" refuse_port "^port limitation: the port cannot resolve the call '.*' in '.*', so it refuses instead of leaving the call out of the IR \\(no IR is written\\)$"; then
+    touch "$WORK/limit_baseline_$name"
     echo "  $name: port limitation, refused by name (exit $port_status): $(printf '%s\n' "$port_out" | grep '^Error: ' | head -1)"
   else
     echo "  FAIL: $name: the port did not refuse by name (exit $port_status): $port_out"
@@ -283,7 +312,9 @@ echo "  Port-limitation summary: $((limit_count - limit_diverged))/$limit_count 
 echo "== 3d. Forward references: a struct field may name a type defined later, with no panic"
 echo "   (a probe, not a parity fixture: the port emits every method of a type, while the oracle emits the reachable ones)"
 probe_status=0
-if (cd "$REPO" && "$WORK/exercise" --dump-ir "bench/fixtures/fwd_struct_probe.iyi" >/dev/null 2>&1); then
+if (cd "$REPO" && "$WORK/exercise$EXE" --dump-ir "$REPO_NATIVE/bench/fixtures/fwd_struct_probe.iyi" >"$WORK/forward.baseline" 2>"$WORK/forward.err") &&
+   grep -q 'Holder' "$WORK/forward.baseline" && grep -q 'Inner' "$WORK/forward.baseline"; then
+  touch "$WORK/forward.baseline.ok"
   echo "  fwd_struct_probe.iyi: compiles, the field's struct type is laid out before its use"
 else
   echo "  FAIL: fwd_struct_probe.iyi did not compile"
@@ -294,8 +325,9 @@ echo
 echo "== 3e. Program fixtures: whole programs compared by exit status"
 echo "    No IR or C-runner comparison: the oracle refuses their @[Unsafe] header, and each defines fun main."
 port_built=1
-if ! "$IYI" build -o "$WORK/port" "$REPO/src/compiler/tools/compile.iyi" > "$WORK/port.build.log" 2>&1; then
+if ! "$IYI" build -o "$WORK_NATIVE/port$EXE" "$REPO_NATIVE/src/compiler/tools/compile.iyi" > "$WORK/port.build.log" 2>&1; then
   echo "  FAIL: the port did not build"
+  cat "$WORK/port.build.log"
   status=1
   port_built=0
 fi
@@ -304,16 +336,19 @@ for base in $PROGRAM_FIXTURES; do
   stem="${base%.iyi}"
   hosted_rc="missing"
   port_rc="missing"
-  if "$IYI" build -o "$WORK/prog_hosted_$stem" "$fixture" > "$WORK/prog_hosted_$stem.log" 2>&1; then
-    "$WORK/prog_hosted_$stem" > /dev/null 2>&1
+  if "$IYI" build -o "$WORK_NATIVE/prog_hosted_$stem$EXE" "$(native_path "$fixture")" > "$WORK/prog_hosted_$stem.log" 2>&1; then
+    "$WORK/prog_hosted_$stem$EXE" > /dev/null 2>&1
     hosted_rc=$?
   fi
-  if [ "$port_built" = 1 ] && "$WORK/port" "$fixture" -o "$WORK/prog_port_$stem" > "$WORK/prog_port_$stem.log" 2>&1; then
-    "$WORK/prog_port_$stem" > /dev/null 2>&1
+  if [ "$port_built" = 1 ] && "$WORK/port$EXE" "$(native_path "$fixture")" -o "$WORK_NATIVE/prog_port_$stem$EXE" > "$WORK/prog_port_$stem.log" 2>&1; then
+    "$WORK/prog_port_$stem$EXE" > /dev/null 2>&1
     port_rc=$?
   fi
-  if [ "$hosted_rc" != "missing" ] && [ "$port_rc" = "$hosted_rc" ]; then
+  if [ "$hosted_rc" != "missing" ] && [ "$hosted_rc" -lt 128 ] && [ "$port_rc" = "$hosted_rc" ]; then
     echo "  $base: the port's exit $port_rc equals the hosted build's exit $hosted_rc"
+    if [ "$base" = cg_call_on_call.iyi ] && [ "$hosted_rc" -eq 10 ]; then
+      touch "$WORK/call_result.baseline.ok"
+    fi
   else
     echo "  FAIL: $base: hosted exit $hosted_rc, port exit $port_rc"
     status=1
@@ -325,24 +360,36 @@ for fixture in "$REPO"/bench/fixtures/cg_*.iyi; do
   [ -f "$fixture" ] || continue
   is_refusal "$(basename "$fixture")" && continue
   base="$(basename "$fixture" .iyi)"
-  "$WORK/exercise" --emit-obj "$fixture" "$WORK/iyi_${base}.o"
-  "$WORK/dump_crystal_cg" --emit-obj "$fixture" "$WORK/cr_${base}.o"
+  if ! "$WORK/exercise$EXE" --emit-obj "$(native_path "$fixture")" "$WORK_NATIVE/iyi_${base}.o" > "$WORK/iyi_obj.log" 2>&1 ||
+     ! "$WORK/dump_crystal_cg$EXE" --emit-obj "$(native_path "$fixture")" "$WORK_NATIVE/cr_${base}.o" > "$WORK/cr_obj.log" 2>&1; then
+    echo "  FAIL: object emission for $fixture"
+    cat "$WORK/iyi_obj.log" "$WORK/cr_obj.log" 2>/dev/null
+    status=1
+  fi
 done
 
-CC="${CC:-$(command -v clang || command -v cc || command -v gcc)}"
-if ! $CC "$REPO/bench/fixtures/cg_runner.c" "$WORK"/iyi_*.o -o "$WORK/iyi_runner" > "$WORK/iyi_runner.build.log" 2>&1 || [ ! -x "$WORK/iyi_runner" ]; then
-  echo "  FAIL: failed to build pure iyi C runner:"
-  cat "$WORK/iyi_runner.build.log"
+CC="${CC:-$(command -v clang || command -v cc || command -v gcc || true)}"
+if [ -z "$CC" ]; then
+  echo "  FAIL: no host C compiler available"
   status=1
+else
+  iyi_objects=()
+  cr_objects=()
+  for object in "$WORK"/iyi_*.o; do [ -f "$object" ] && iyi_objects+=("$(native_path "$object")"); done
+  for object in "$WORK"/cr_*.o; do [ -f "$object" ] && cr_objects+=("$(native_path "$object")"); done
+  if ! "$CC" "$REPO_NATIVE/bench/fixtures/cg_runner.c" "${iyi_objects[@]}" -o "$WORK_NATIVE/iyi_runner$EXE" > "$WORK/iyi_runner.build.log" 2>&1; then
+    echo "  FAIL: failed to build pure iyi C runner:"
+    cat "$WORK/iyi_runner.build.log"
+    status=1
+  fi
+  if ! "$CC" "$REPO_NATIVE/bench/fixtures/cg_runner.c" "${cr_objects[@]}" -o "$WORK_NATIVE/cr_runner$EXE" > "$WORK/cr_runner.build.log" 2>&1; then
+    echo "  FAIL: failed to build hosted oracle C runner:"
+    cat "$WORK/cr_runner.build.log"
+    status=1
+  fi
 fi
-if ! $CC "$REPO/bench/fixtures/cg_runner.c" "$WORK"/cr_*.o -o "$WORK/cr_runner" > "$WORK/cr_runner.build.log" 2>&1 || [ ! -x "$WORK/cr_runner" ]; then
-  echo "  FAIL: failed to build Crystal oracle C runner:"
-  cat "$WORK/cr_runner.build.log"
-  status=1
-fi
-
-"$WORK/iyi_runner" > "$WORK/iyi_runner.out" 2>&1 || status=1
-"$WORK/cr_runner" > "$WORK/cr_runner.out" 2>&1 || status=1
+"$WORK/iyi_runner$EXE" > "$WORK/iyi_runner.out" 2>&1 || status=1
+"$WORK/cr_runner$EXE" > "$WORK/cr_runner.out" 2>&1 || status=1
 
 if diff -u "$WORK/cr_runner.out" "$WORK/iyi_runner.out" > "$WORK/runner.diff"; then
   echo "  C driver output identical between Crystal and pure iyi backends:"
@@ -357,38 +404,84 @@ fi
 echo
 echo "== 5. Guarded mutation proofs"
 
+build_codegen_mutant() {
+  if ! "$IYI" build -o "$WORK_NATIVE/mut_exercise$EXE" "$REPO_NATIVE/bench/selfhost_codegen_exercise.iyi" > "$WORK/mut_build.log" 2>&1; then
+    echo "INVALID MUTANT: codegen driver did not build" >&2
+    cat "$WORK/mut_build.log" >&9
+    return 2
+  fi
+}
+
 check_cg_mutant() {
   local fixture="$1"
-  "$IYI" build -o "$WORK/mut_exercise" "$REPO/bench/selfhost_codegen_exercise.iyi" >/dev/null 2>&1 || return 1
-  "$WORK/mut_exercise" --dump-ir "$REPO/bench/fixtures/$fixture" > "$WORK/mut_iyi.raw" 2>&1 || true
-  normalize_ir "$WORK/mut_iyi.raw" > "$WORK/mut_iyi.norm" 2>/dev/null || true
-  diff -q "$WORK/cr_${fixture}.norm" "$WORK/mut_iyi.norm" >/dev/null 2>&1
+  [ -f "$WORK/ir_baseline_$fixture" ] || { echo "INVALID PROOF: IR baseline did not agree" >&2; return 2; }
+  build_codegen_mutant || return 2
+  if ! "$WORK/mut_exercise$EXE" --dump-ir "$REPO_NATIVE/bench/fixtures/$fixture" > "$WORK/mut_iyi.raw" 2>"$WORK/mut_iyi.err"; then
+    echo "INVALID MUTANT: IR generation failed" >&2
+    cat "$WORK/mut_iyi.err" >&2
+    return 2
+  fi
+  normalize_ir "$WORK/mut_iyi.raw" > "$WORK/mut_iyi.norm" || return 2
+  [ -s "$WORK/cr_${fixture}.norm" ] && [ -s "$WORK/mut_iyi.norm" ] || return 2
+  diff -q "$WORK/cr_${fixture}.norm" "$WORK/mut_iyi.norm" >/dev/null
 }
 
-# Rebuilds the port with a mutated backend and asks it to refuse the fixture. The
-# check passes, meaning not caught, only while the refusal still matches the
-# oracle's whole text and exit status recorded in section 3b or 3b2.
+# A changed refusal is evidence only if it is the particular diagnostic under
+# test, or the original diagnostic with the deliberately changed exit status.
 check_refusal_mutant() {
-  local name="$1" got got_status
-  "$IYI" build -o "$WORK/mut_exercise" "$REPO/bench/selfhost_codegen_exercise.iyi" >/dev/null 2>&1 || return 1
-  got="$(cd "$REPO" && "$WORK/mut_exercise" --dump-ir "bench/fixtures/$name" 2>&1)"
-  got_status=$?
-  [ "$got_status" = "$(cat "$WORK/oracle_refusal_$name.status")" ] && [ "$got" = "$(cat "$WORK/oracle_refusal_$name.txt")" ]
+  local name="$1" got_status=0 changed baseline_error
+  [ -f "$WORK/refusal_baseline_$name" ] || { echo "INVALID PROOF: refusal baseline did not agree" >&2; return 2; }
+  build_codegen_mutant || return 2
+  "$WORK/mut_exercise$EXE" --dump-ir "$REPO_NATIVE/bench/fixtures/$name" > "$WORK/mut_refusal.log" 2>&1 || got_status=$?
+  if [ "$got_status" = "$(cat "$WORK/oracle_refusal_$name.status")" ] &&
+     cmp -s "$WORK/mut_refusal.log" "$WORK/oracle_refusal_$name.txt"; then
+    return 0
+  fi
+  [ "$got_status" -lt 128 ] || { cat "$WORK/mut_refusal.log" >&2; return 2; }
+  baseline_error="$(grep '^Error: ' "$WORK/oracle_refusal_$name.txt" | tail -n 1)"
+  case "$name" in
+    cg_exceptions.iyi) changed="${baseline_error/exceptions to rescue/exceptions to catch}" ;;
+    cg_raise.iyi) changed="${baseline_error/iyi has no \`ensure\`/iyi has no ensure}" ;;
+    cg_undefined_raise.iyi) changed="${baseline_error/for top-level/for toplevel}" ;;
+    *) return 2 ;;
+  esac
+  [ "$changed" != "$baseline_error" ] || return 2
+  printf '%s\n' "$changed" > "$WORK/mut_refusal.expected"
+  grep '^Error: ' "$WORK/mut_refusal.log" | tail -n 1 > "$WORK/mut_refusal.message"
+  if grep -Fq "$name:" "$WORK/mut_refusal.log" &&
+     cmp -s "$WORK/mut_refusal.expected" "$WORK/mut_refusal.message" &&
+     expected_refusal "$got_status" "$WORK/mut_refusal.message" refuse_port '^'; then return 1; fi
+  if [ "$got_status" -eq 0 ] && cmp -s "$WORK/mut_refusal.log" "$WORK/oracle_refusal_$name.txt"; then return 1; fi
+  echo "INVALID MUTANT: unexpected refusal output" >&2
+  cat "$WORK/mut_refusal.log" >&2
+  return 2
 }
-# Rebuilds the port with a mutated backend and runs it on a forward-reference probe.
-# The probe compiles only while the port lays out the struct before its use, so a
-# panic or a refusal is detected. Returns zero (not caught) while it compiles.
+
 check_probe_mutant() {
   local name="$1"
-  "$IYI" build -o "$WORK/mut_exercise" "$REPO/bench/selfhost_codegen_exercise.iyi" >/dev/null 2>&1 || return 1
-  (cd "$REPO" && "$WORK/mut_exercise" --dump-ir "bench/fixtures/$name" >/dev/null 2>&1)
+  [ -f "$WORK/forward.baseline.ok" ] || { echo "INVALID PROOF: forward baseline is unavailable" >&2; return 2; }
+  build_codegen_mutant || return 2
+  if ! "$WORK/mut_exercise$EXE" --dump-ir "$REPO_NATIVE/bench/fixtures/$name" > "$WORK/mut_probe.log" 2>&1; then
+    echo "INVALID MUTANT: forward-reference probe failed" >&2
+    cat "$WORK/mut_probe.log" >&2
+    return 2
+  fi
+  diff -q "$WORK/forward.baseline" "$WORK/mut_probe.log" >/dev/null
 }
 
-# Rebuilds the port with a mutated IR and runs the standalone check, which proves the builder's name claims.
-# Returns zero (not caught) only while the check still prints its passing line.
 check_standalone_mutant() {
-  "$IYI" build -o "$WORK/mut_exercise" "$REPO/bench/selfhost_codegen_exercise.iyi" >/dev/null 2>&1 || return 1
-  "$WORK/mut_exercise" 2>&1 | grep -qF "ALL SELFHOST CODEGEN CHECKS PASSED SUCCESSFULLY!"
+  local rc=0
+  build_codegen_mutant || return 2
+  "$WORK/mut_exercise$EXE" > "$WORK/mut_standalone.log" 2>&1 || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    grep -qF "ALL SELFHOST CODEGEN CHECKS PASSED SUCCESSFULLY!" "$WORK/mut_standalone.log" && return 0
+  elif [ "$rc" -eq 1 ] && grep -q '^iyi: panic: unique names: ' "$WORK/mut_standalone.log" &&
+       grep -Eq 'bench/selfhost_codegen_exercise\.iyi:(172|213)' "$WORK/mut_standalone.log"; then
+    return 1
+  fi
+  echo "INVALID MUTANT: standalone probe failed unexpectedly" >&2
+  cat "$WORK/mut_standalone.log" >&2
+  return 2
 }
 
 # Rebuilds the port with the unresolved-call refusal silenced too, and asks it to
@@ -398,9 +491,10 @@ check_standalone_mutant() {
 # silences the call. It passes, meaning not caught, only while the fixture is
 # still refused by name, and the caller's copy of the source is restored.
 check_port_limit_mutant() {
-  local name="$1" keep="$WORK/cg_first_mutant.iyi" built out got_status
-  cp "$CG_SRC" "$keep" || return 1
-  python3 - "$CG_SRC" <<'PY' || { cp "$keep" "$CG_SRC"; return 1; }
+  local name="$1" keep="$WORK/cg_first_mutant.iyi" built got_status=0
+  [ -f "$WORK/limit_baseline_$name" ] || { echo "INVALID PROOF: limitation baseline did not agree" >&2; return 2; }
+  cp "$CG_SRC" "$keep" || return 2
+  "$PY" - "$(native_path "$CG_SRC")" <<'PY' || { cp "$keep" "$CG_SRC"; return 2; }
 import sys
 p = sys.argv[1]
 s = open(p).read()
@@ -409,13 +503,21 @@ if s.count(call) != 1:
     sys.exit(1)
 open(p, "w").write(s.replace(call, "nil", 1))
 PY
-  "$IYI" build -o "$WORK/mut_limit" "$REPO/bench/selfhost_codegen_exercise.iyi" >/dev/null 2>&1
+  "$IYI" build -o "$WORK_NATIVE/mut_limit$EXE" "$REPO_NATIVE/bench/selfhost_codegen_exercise.iyi" > "$WORK/mut_limit.build.log" 2>&1
   built=$?
-  cp "$keep" "$CG_SRC"
-  [ "$built" -eq 0 ] || return 1
-  out="$(cd "$REPO" && "$WORK/mut_limit" --dump-ir "bench/fixtures/$name" 2>&1)"
-  got_status=$?
-  [ "$got_status" -ne 0 ] && printf '%s\n' "$out" | grep -q '^Error: port limitation: the port cannot '
+  cp "$keep" "$CG_SRC" || return 2
+  if [ "$built" -ne 0 ]; then
+    echo "INVALID MUTANT: codegen driver did not build" >&2
+    cat "$WORK/mut_limit.build.log" >&9
+    return 2
+  fi
+  "$WORK/mut_limit$EXE" --dump-ir "$REPO_NATIVE/bench/fixtures/$name" > "$WORK/mut_limit.log" 2>&1 || got_status=$?
+  if cmp -s "$WORK/limit_baseline_$name.log" "$WORK/mut_limit.log" &&
+     expected_refusal "$got_status" "$WORK/mut_limit.log" refuse_port '^port limitation: the port cannot '; then return 0; fi
+  if [ "$got_status" -eq 0 ] && grep -q '^define ' "$WORK/mut_limit.log"; then return 1; fi
+  echo "INVALID MUTANT: unexpected port-limit result" >&2
+  cat "$WORK/mut_limit.log" >&2
+  return 2
 }
 
 MUTATIONS_RUN=0
@@ -478,15 +580,15 @@ prove_mutation "corrupt nilable null check predicate" "$CG_SRC" \
   -- check_cg_mutant cg_nilable.iyi || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
-prove_mutation "corrupt block body evaluation during yield" "$CG_SRC" \
-  'inlined.block_body.accept(self)' \
-  '# inlined.block_body.accept(self)' \
+prove_mutation "corrupt the block argument evaluated by yield" "$CG_SRC" \
+  's_inst = @builder.store(val, ptr)' \
+  's_inst = @builder.store(@builder.const_int(val.type, 0), ptr)' \
   -- check_cg_mutant cg_blocks.iyi || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
 prove_mutation "corrupt closure environment store" "$CG_SRC" \
   'st = @builder.store(cval, slot)' \
-  '# st = @builder.store(cval, slot)' \
+  'st = @builder.store(@builder.const_int(@types.int32, 0), slot)' \
   -- check_cg_mutant cg_closures.iyi || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
@@ -551,11 +653,17 @@ MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 # check holds only while the port still refuses it by name with a status that
 # is not zero, which is what section 3c requires.
 check_port_limit_status() {
-  local name="$1" got got_status
-  "$IYI" build -o "$WORK/mut_exercise" "$REPO/bench/selfhost_codegen_exercise.iyi" >/dev/null 2>&1 || return 1
-  got="$(cd "$REPO" && "$WORK/mut_exercise" --dump-ir "bench/fixtures/$name" 2>&1)"
-  got_status=$?
-  [ "$got_status" -ne 0 ] && printf '%s\n' "$got" | grep -q '^Error: port limitation: the port cannot '
+  local name="$1" got_status=0
+  [ -f "$WORK/limit_baseline_$name" ] || { echo "INVALID PROOF: limitation baseline did not agree" >&2; return 2; }
+  build_codegen_mutant || return 2
+  "$WORK/mut_exercise$EXE" --dump-ir "$REPO_NATIVE/bench/fixtures/$name" > "$WORK/mut_limit_status.log" 2>&1 || got_status=$?
+  if cmp -s "$WORK/limit_baseline_$name.log" "$WORK/mut_limit_status.log"; then
+    if expected_refusal "$got_status" "$WORK/mut_limit_status.log" refuse_port '^port limitation: the port cannot '; then return 0; fi
+    if [ "$got_status" -eq 0 ]; then return 1; fi
+  fi
+  echo "INVALID MUTANT: unexpected port-limit result" >&2
+  cat "$WORK/mut_limit_status.log" >&2
+  return 2
 }
 prove_mutation_all "corrupt refuse_port's exit status" "$REPO/src/compiler/foundation/errors.iyi" \
   '  exit(1)' \
@@ -563,22 +671,19 @@ prove_mutation_all "corrupt refuse_port's exit status" "$REPO/src/compiler/found
   -- check_port_limit_status cg_splat_loop.iyi || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
-prove_mutation "drop the exit block of a statement if with no else" "$CG_SRC" \
-  '        exit_bb = fn.append_basic_block("exit")
-        @builder.br(exit_bb)
-      end
-
-      # The false edge' \
-  '        exit_bb = nil
-      end
-
-      # The false edge' \
+prove_mutation "route a no-else false edge through the then block" "$CG_SRC" \
+  '      if eb = exit_bb
+        @builder.br(eb)
+        @builder.position_at_end(eb)' \
+  '      if eb = exit_bb
+        @builder.br(then_bb)
+        @builder.position_at_end(eb)' \
   -- check_cg_mutant cg_nil_local.iyi || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
-prove_mutation "read a named struct type before it is created" "$CG_SRC" \
+prove_mutation "a forward-referenced type is emitted under the wrong LLVM name" "$CG_SRC" \
   '    st = @types.struct_named(name)' \
-  '    st = @llvm_struct_types[name]' \
+  '    st = @types.struct_named(name + "_wrong")' \
   -- check_probe_mutant fwd_struct_probe.iyi || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
@@ -613,10 +718,21 @@ prove_mutation "a placed instruction's name is not claimed" "$REPO/src/compiler/
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 # cg_call_on_call.iyi reads its String result's bytesize from the field's slot. Read the type id slot instead and the exit moves.
 check_call_result_mutant() {
-  "$IYI" build -o "$WORK/mut_port" "$REPO/src/compiler/tools/compile.iyi" > "$WORK/mut_port.log" 2>&1 || return 1
-  "$WORK/mut_port" "$REPO/bench/fixtures/cg_call_on_call.iyi" -o "$WORK/mut_exe" > "$WORK/mut_exe.log" 2>&1 || return 1
-  "$WORK/mut_exe" > /dev/null 2>&1
-  [ "$?" -eq 10 ]
+  local rc=0
+  [ -f "$WORK/call_result.baseline.ok" ] || { echo "INVALID PROOF: call-result baseline did not exit 10" >&2; return 2; }
+  if ! "$IYI" build -o "$WORK_NATIVE/mut_port$EXE" "$REPO_NATIVE/src/compiler/tools/compile.iyi" > "$WORK/mut_port.log" 2>&1; then
+    echo "INVALID MUTANT: compiler did not build" >&2
+    cat "$WORK/mut_port.log" >&9
+    return 2
+  fi
+  if ! "$WORK/mut_port$EXE" "$REPO_NATIVE/bench/fixtures/cg_call_on_call.iyi" -o "$WORK_NATIVE/mut_exe$EXE" > "$WORK/mut_exe.log" 2>&1; then
+    echo "INVALID MUTANT: fixture did not build" >&2
+    cat "$WORK/mut_exe.log" >&2
+    return 2
+  fi
+  "$WORK/mut_exe$EXE" > "$WORK/mut_exe.run.log" 2>&1 || rc=$?
+  if [ "$rc" -ge 128 ]; then cat "$WORK/mut_exe.run.log" >&2; return 2; fi
+  [ "$rc" -eq 10 ]
 }
 prove_mutation "a field of a call result is read from the type id slot" "$CG_SRC" \
   'r_info.fields[node.name] + 1)])' \

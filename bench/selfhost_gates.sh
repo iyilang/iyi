@@ -4,6 +4,10 @@
 # and rebuild the compiler), so they never run in parallel.
 #
 #   bash bench/selfhost_gates.sh
+#   SELFHOST_GATE_SHARD=2/8 bash bench/selfhost_gates.sh
+#
+# A shard i/n runs every n-th gate, starting with the i-th. Each CI shard has
+# its own checkout; source-mutating gates still run sequentially within it.
 #
 # Each gate's full output goes to a log under $SELFHOST_GATE_LOGS (default: a
 # fresh temporary directory), is printed in full, and is retained by CI.
@@ -21,6 +25,7 @@ head="$(git rev-parse HEAD)" || exit 1
 identity="$LOGDIR/run-${head}-${HOST_ID}-${GITHUB_RUN_ATTEMPT:-local}.txt"
 {
   printf 'checked-out-head=%s\nhost=%s\n' "$head" "$HOST_ID"
+  printf 'shard=%s\n' "${SELFHOST_GATE_SHARD:-all}"
   if [ -n "${SELFHOST_SOURCE_SHA:-}" ]; then
     printf 'source-head=%s\n' "$SELFHOST_SOURCE_SHA"
   fi
@@ -45,7 +50,38 @@ if [ "${#gates[@]}" -eq 0 ]; then
   exit 1
 fi
 
-echo "== 1. Running ${#gates[@]} selfhost gates in order (logs: $LOGDIR)"
+total="${#gates[@]}"
+shard="${SELFHOST_GATE_SHARD:-}"
+if [ -n "$shard" ]; then
+  index="${shard%%/*}"
+  count="${shard##*/}"
+  case "$index$count" in
+    ''|*[!0-9]*)
+      echo "SELFHOST_GATE_SHARD must be i/n, got '$shard'" >&2
+      exit 1
+      ;;
+  esac
+  if [ "$shard" != "$index/$count" ] || [ "$count" -lt 1 ] || [ "$index" -lt 1 ] || [ "$index" -gt "$count" ]; then
+    echo "SELFHOST_GATE_SHARD requires 1 <= i <= n, got '$shard'" >&2
+    exit 1
+  fi
+  kept=()
+  position=0
+  for candidate in "${gates[@]}"; do
+    if [ $(( position % count )) -eq $(( index - 1 )) ]; then
+      kept+=("$candidate")
+    fi
+    position=$(( position + 1 ))
+  done
+  if [ "${#kept[@]}" -eq 0 ]; then
+    echo "shard $shard holds none of the $total gates" >&2
+    exit 1
+  fi
+  gates=("${kept[@]}")
+  echo "== 1. Running shard $shard: ${#gates[@]} of $total selfhost gates in order (logs: $LOGDIR)"
+else
+  echo "== 1. Running ${#gates[@]} selfhost gates in order (logs: $LOGDIR)"
+fi
 printf 'gate: %s\n' "${gates[@]##*/}"
 status=0
 failed=()

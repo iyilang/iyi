@@ -20,6 +20,10 @@
 set -u
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$REPO/bench/lib/host.sh" || exit 1
+require_test_host || exit 1
+REPO_NATIVE="$(native_path "$REPO")" || exit 1
+export IYI_PATH="$REPO_NATIVE/src"
 IYI="$REPO/bin/iyi"
 TOOL_SRC="$REPO/src/compiler/tools/compile_native.iyi"
 PORT_SRC="$REPO/src/compiler/tools/compile.iyi"
@@ -28,7 +32,8 @@ FIXTURES="$REPO/bench/fixtures"
 . "$REPO/bench/lib/mutation.sh"
 . "$REPO/bench/lib/native_signature.sh"
 
-WORK="$(mktemp -d /tmp/iyi-native-source.XXXXXX)"
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/iyi-native-source.XXXXXX")" || exit 1
+WORK_NATIVE="$(native_path "$WORK")" || exit 1
 export NATIVE_SIGNATURE_FAILURE_FILE="$WORK/signature-failure"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -36,32 +41,53 @@ status=0
 
 echo "== 1. build the tools from source"
 mkdir -p "$WORK/bin" "$WORK/ref" "$WORK/port" "$WORK/nat"
-tool="$WORK/bin/iyi-compile-native"
+tool="$WORK/bin/iyi-compile-native$EXE"
 # build_failed LABEL LOG: the log is under $WORK, which is removed on exit, so what the build said is printed here.
 build_failed() {
   echo "FAIL: $1 does not build; the build said:"
   grep -v '^ld: warning' "$2" | tail -n 25 | sed 's/^/    /'
   exit 1
 }
-if ! "$IYI" build -o "$tool" "$TOOL_SRC" >"$WORK/build.tool.log" 2>&1; then
+if ! "$IYI" build -o "$WORK_NATIVE/bin/iyi-compile-native$EXE" "$REPO_NATIVE/src/compiler/tools/compile_native.iyi" >"$WORK/build.tool.log" 2>&1; then
   build_failed "iyi-compile-native" "$WORK/build.tool.log"
 fi
 echo "   built iyi-compile-native (native backend) from $TOOL_SRC"
-port="$WORK/bin/iyi-compile-port-llvm"
-if ! "$IYI" build -o "$port" "$PORT_SRC" >"$WORK/build.port.log" 2>&1; then
+port="$WORK/bin/iyi-compile-port-llvm$EXE"
+if ! "$IYI" build -o "$WORK_NATIVE/bin/iyi-compile-port-llvm$EXE" "$REPO_NATIVE/src/compiler/tools/compile.iyi" >"$WORK/build.port.log" 2>&1; then
   build_failed "the port+LLVM build" "$WORK/build.port.log"
 fi
 echo "   built iyi-compile-port-llvm (port pipeline, LLVM backend) from $PORT_SRC"
 
 echo "== 2. the native tool links libSystem alone and carries no LLVM symbol"
-tool_libs=$(otool -L "$tool" | awk 'NR > 1 { print $1 }')
-if [ "$tool_libs" = "/usr/lib/libSystem.B.dylib" ]; then
-  echo "   only /usr/lib/libSystem.B.dylib"
+if [ "$HOST_OS" = darwin ]; then
+  tool_libs=$(otool -L "$tool" | awk 'NR > 1 { print $1 }')
+  if [ "$tool_libs" = "/usr/lib/libSystem.B.dylib" ]; then
+    echo "   only /usr/lib/libSystem.B.dylib"
+  else
+    echo "FAIL: the native tool links: $tool_libs"
+    status=1
+  fi
 else
-  echo "FAIL: the native tool links: $tool_libs"
+  host_limited "native source: the libSystem dependency assertion requires macOS otool"
+fi
+nm_tool="${NM:-nm}"
+if [ "$HOST_OS" = windows ] && [ -z "${NM:-}" ]; then
+  nm_tool=$(command -v llvm-nm 2>/dev/null || true)
+  if [ -z "$nm_tool" ]; then
+    for llvm_root in "${LLVM_PATH:-}" "${ProgramFiles:+$ProgramFiles/LLVM}" "/c/Program Files/LLVM"; do
+      [ -n "$llvm_root" ] || continue
+      case "$llvm_root" in [A-Za-z]:[\\/]*) llvm_root=$(cygpath -u "$llvm_root") || continue ;; esac
+      if [ -x "$llvm_root/bin/llvm-nm.exe" ]; then nm_tool="$llvm_root/bin/llvm-nm.exe"; break; fi
+    done
+  fi
+  if [ -z "$nm_tool" ]; then echo "FAIL: llvm-nm is required to inspect the Windows driver" >&2; exit 1; fi
+fi
+if ! "$nm_tool" "$(native_path "$tool")" >"$WORK/tool.symbols" 2>"$WORK/tool.nm.err"; then
+  cat "$WORK/tool.nm.err"
+  echo "FAIL: cannot inspect native tool symbols with $nm_tool"
   status=1
 fi
-llvm_syms=$(nm "$tool" 2>/dev/null | awk '/ _LLVM[A-Za-z]|LibLLVM|Compiler::Llvm/ { n++ } END { print n + 0 }')
+llvm_syms=$(awk '/_?LLVM[A-Za-z]|LibLLVM|Compiler::Llvm/ { n++ } END { print n + 0 }' "$WORK/tool.symbols")
 if [ "$llvm_syms" = "0" ]; then
   echo "   no LLVM C-API or Compiler::Llvm symbol in the native tool"
 else
@@ -73,21 +99,25 @@ fi
 # executable a valid signature and libSystem alone. Prints one line naming what was compared. Returns 0 only on a match.
 compare_run() {
   local ref="$1" exe="$2" label="$3" name="$4" ref_out exe_out ref_rc exe_rc problems libs
-  ref_out=$(timeout 30 "$ref" </dev/null 2>/dev/null)
+  ref_out=$(perl -e 'alarm 30; exec @ARGV or exit 127' -- "$ref" </dev/null 2>/dev/null)
   ref_rc=$?
-  native_signature_ok "${5:-$exe}" || return 1
-  exe_out=$(timeout 30 "$exe" </dev/null 2>/dev/null)
+  if [ "$HOST_OS" = darwin ]; then native_signature_ok "${5:-$exe}" || return 1; fi
+  if [ "$HOST_OS" = windows ] && { [ "$exe" = "$WORK/selfcheck_status" ] || [ "$exe" = "$WORK/selfcheck_stdout" ]; }; then
+    exe_out=$(perl -e 'alarm 30; exec @ARGV or exit 127' -- bash "$exe" </dev/null 2>/dev/null)
+  else
+    exe_out=$(perl -e 'alarm 30; exec @ARGV or exit 127' -- "$exe" </dev/null 2>/dev/null)
+  fi
   exe_rc=$?
   if [ "$ref_out" != "$exe_out" ] || [ "$ref_rc" != "$exe_rc" ]; then
     echo "FAIL: $name: $label run diverged from the hosted build (exit $exe_rc vs hosted $ref_rc)"
     return 1
   fi
   problems=""
-  if [ "$(uname -s)" = Darwin ]; then
+  if [ "$HOST_OS" = darwin ]; then
     native_signature_ok "${5:-$exe}" || problems="$problems codesign;"
+    libs=$(otool -L "$exe" | awk 'NR > 1 { print $1 }')
+    if [ "$libs" != "/usr/lib/libSystem.B.dylib" ]; then problems="$problems libs=$libs;"; fi
   fi
-  libs=$(otool -L "$exe" | awk 'NR > 1 { print $1 }')
-  if [ "$libs" != "/usr/lib/libSystem.B.dylib" ]; then problems="$problems libs=$libs;"; fi
   if [ -n "$problems" ]; then
     echo "FAIL: $name: $label executable:$problems"
     return 1
@@ -110,13 +140,20 @@ check_ceiling() {
     echo "  FAIL: $label: a fixture the ceiling does not name (above); the ceiling may only fall"
     return 1
   fi
-  awk 'NR == FNR { if (NF) seen[$1] = 1; next } !/^#/ && NF && !($1 in seen) { print "   ratchet: " $1 " no longer occurs; remove it from " FILENAME }' "$measured" "$ceiling"
+  if [ "$HOST_ID" = darwin-arm64 ] || [ "$label" != P ]; then
+    awk 'NR == FNR { if (NF) seen[$1] = 1; next } !/^#/ && NF && !($1 in seen) { print "   ratchet: " $1 " no longer occurs; remove it from " FILENAME }' "$measured" "$ceiling"
+  fi
   return 0
 }
 
 echo "== 3. every fixture: the hosted reference, then the port+LLVM column and the native column"
 tripwire_setup "$WORK/tripwire" "$WORK/tripwire.log" || { echo "FAIL: tripwire setup"; exit 1; }
 FIX="${NATIVE_SOURCE_FIXTURES:-$FIXTURES}"
+if [ "$HOST_ID" != darwin-arm64 ]; then
+  host_limited "native source: Mach-O linking, signatures, execution and native-only classification require macOS arm64; verified source IR is still emitted"
+fi
+path_sep=:
+if [ "$HOST_OS" = windows ]; then path_sep=';'; fi
 total=0
 marked_refs=0
 n_equal=0
@@ -145,13 +182,13 @@ for f in "$FIX"/compile_*.iyi "$FIX"/cg_*.iyi; do
   [ -f "$f" ] || continue
   n=$(basename "$f" .iyi)
   total=$((total + 1))
-  ref="$WORK/ref/$n"
-  pexe="$WORK/port/$n"
+  ref="$WORK/ref/$n$EXE"
+  pexe="$WORK/port/$n$EXE"
   nexe="$WORK/nat/$n"
   ref_how="as written"
-  if "$IYI" build -o "$ref" "$f" >"$WORK/ref/$n.log" 2>&1; then
+  if "$IYI" build -o "$(native_path "$ref")" "$(native_path "$f")" >"$WORK/ref/$n.log" 2>&1; then
     ref_ok=1
-  elif IYI_PATH="$REPO/src:$FIX" "$IYI" build -o "$ref" "$WORK/marked/$n.iyi" >"$WORK/ref/$n.marked.log" 2>&1; then
+  elif IYI_PATH="$REPO_NATIVE/src$path_sep$(native_path "$FIX")" "$IYI" build -o "$(native_path "$ref")" "$WORK_NATIVE/marked/$n.iyi" >"$WORK/ref/$n.marked.log" 2>&1; then
     ref_ok=1
     ref_how="copy with @[Unsafe] header"
     marked_refs=$((marked_refs + 1))
@@ -160,8 +197,17 @@ for f in "$FIX"/compile_*.iyi "$FIX"/cg_*.iyi; do
   else
     ref_ok=0
   fi
-  if "$port" "$f" -o "$pexe" >"$WORK/port/$n.log" 2>&1; then port_ok=1; else port_ok=0; fi
-  if PATH="$TRIPWIRE_PATH:$PATH" "$tool" "$f" -o "$nexe" >"$WORK/nat/$n.log" 2>&1; then nat_ok=1; else nat_ok=0; fi
+  if "$port" "$(native_path "$f")" -o "$(native_path "$pexe")" >"$WORK/port/$n.log" 2>&1; then port_ok=1; else port_ok=0; fi
+  if [ "$HOST_ID" = darwin-arm64 ]; then
+    if PATH="$TRIPWIRE_PATH:$PATH" "$tool" "$(native_path "$f")" -o "$(native_path "$nexe")" >"$WORK/nat/$n.log" 2>&1; then nat_ok=1; else nat_ok=0; fi
+  else
+    nat_ok=0
+    if "$tool" "$(native_path "$f")" -o "$WORK_NATIVE/nat/$n.ir" --emit ir >"$WORK/nat/$n.log" 2>&1 && [ -s "$WORK/nat/$n.ir" ]; then
+      echo "   IR verified: $n"
+    else
+      echo "   IR refused: $n: $(hosted_error "$WORK/nat/$n.log")"
+    fi
+  fi
 
   if [ "$ref_ok" = 0 ]; then
     # The hosted compiler refuses this even with the header. A fixture the port or the native back end accepts is
@@ -174,8 +220,12 @@ for f in "$FIX"/compile_*.iyi "$FIX"/cg_*.iyi; do
       echo "$n $err" >>"$WORK/p_measured.txt"
       echo "   P port accepts what the hosted compiler refuses (port+LLVM $port_ok, native $nat_ok): $n: $err"
     else
-      s_shared=$((s_shared + 1))
-      echo "   S refused by the hosted compiler, the port and the native back end: $n: $err"
+      if [ "$HOST_ID" = darwin-arm64 ]; then
+        s_shared=$((s_shared + 1))
+        echo "   S refused by the hosted compiler, the port and the native back end: $n: $err"
+      else
+        echo "   hosted and port refused $n; native link acceptance is host-limited: $err"
+      fi
     fi
     continue
   fi
@@ -192,6 +242,7 @@ for f in "$FIX"/compile_*.iyi "$FIX"/cg_*.iyi; do
   else
     port_refused=$((port_refused + 1))
   fi
+  if [ "$HOST_ID" != darwin-arm64 ]; then continue; fi
   if [ "$nat_ok" = 1 ]; then
     if compare_run "$ref" "$nexe" "native" "$n"; then
       n_equal=$((n_equal + 1))
@@ -207,16 +258,25 @@ for f in "$FIX"/compile_*.iyi "$FIX"/cg_*.iyi; do
   fi
 done
 
-if tripwire_fired "$WORK/tripwire.log"; then
+if [ "$HOST_ID" != darwin-arm64 ]; then
+  host_limited "native source tripwire: Mach-O fixture linking was not run; POSIX shims do not intercept native Windows launches"
+elif tripwire_fired "$WORK/tripwire.log"; then
   echo "FAIL: a host tool started during a native build:"
   awk '{ print }' "$WORK/tripwire.log"
   status=1
 fi
 if [ "$f_failed" -ne 0 ]; then status=1; fi
 echo "  port+LLVM column: $port_equal equal to hosted, $port_differs differ, $port_refused refused"
-echo "  Native source summary: $n_equal of $total run equal to the hosted compiler's build (native vs hosted); $g_gaps port gaps; $r_native_only refused by the native back end only; $s_shared refused by the hosted compiler too; $p_accepts port accepts what the hosted compiler refuses (P); $f_failed failed; $marked_refs need the @[Unsafe] header in the hosted reference (U)"
+if [ "$HOST_ID" = darwin-arm64 ]; then
+  echo "  Native source summary: $n_equal of $total run equal to the hosted compiler's build (native vs hosted); $g_gaps port gaps; $r_native_only refused by the native back end only; $s_shared refused by the hosted compiler too; $p_accepts port accepts what the hosted compiler refuses (P); $f_failed failed; $marked_refs need the @[Unsafe] header in the hosted reference (U)"
+else
+  echo "  Native source: $total fixtures processed; native execution and backend classifications are host-limited; $p_accepts observed port acceptances (P), $f_failed failed, $marked_refs need the @[Unsafe] header (U)"
+fi
 
 echo "== 3b. ceilings: a count may only fall (P: the port accepts what the hosted compiler refuses; U: the hosted reference needs the @[Unsafe] header)"
+if [ "$HOST_ID" != darwin-arm64 ]; then
+  host_limited "native source: P ceiling is checked for port acceptances; native-only acceptances require macOS arm64"
+fi
 check_ceiling "$WORK/p_measured.txt" "$REPO/bench/native_source.ceiling" "P" || status=1
 check_ceiling "$WORK/u_measured.txt" "$REPO/bench/native_source_unsafe.ceiling" "U" || status=1
 if [ -n "${NATIVE_SOURCE_NO_SELFCHECK:-}" ]; then exit "$status"; fi
@@ -224,18 +284,28 @@ if [ -n "${NATIVE_SOURCE_NO_SELFCHECK:-}" ]; then exit "$status"; fi
 echo "== 4. source mutations: each must be caught by a check that fails on the mutated source"
 mut_run=0
 mut_caught=0
-ref_arith="$WORK/ref/compile_arith"
-ref_arith_out=$(timeout 30 "$ref_arith" </dev/null 2>/dev/null)
+mut_limited=0
+ref_arith="$WORK/ref/compile_arith$EXE"
+ref_arith_out=$(perl -e 'alarm 30; exec @ARGV or exit 127' -- "$ref_arith" </dev/null 2>/dev/null)
 ref_arith_rc=$?
 
 # (a) the native backend hands linking to cc: a real build must trip the wire.
 check_cc_in_native_build() {
-  "$IYI" build -o "$WORK/mut-a-tool" "$TOOL_SRC" >/dev/null 2>&1 || return 0
+  if ! "$IYI" build -o "$WORK_NATIVE/mut-a-tool$EXE" "$REPO_NATIVE/src/compiler/tools/compile_native.iyi" >"$WORK/mut-a.build.log" 2>&1; then
+    cat "$WORK/mut-a.build.log"
+    return 2
+  fi
   : >"$WORK/tripwire.log"
-  PATH="$TRIPWIRE_PATH:$PATH" "$WORK/mut-a-tool" "$FIXTURES/compile_arith.iyi" -o "$WORK/mut-a-exe" >/dev/null 2>&1
-  if tripwire_fired "$WORK/tripwire.log"; then return 1; fi
+  local args=()
+  if [ "$HOST_ID" != darwin-arm64 ]; then args=(--emit ir); fi
+  if ! PATH="$TRIPWIRE_PATH:$PATH" "$WORK/mut-a-tool$EXE" "$REPO_NATIVE/bench/fixtures/compile_arith.iyi" -o "$WORK_NATIVE/mut-a-exe" "${args[@]}" >"$WORK/mut-a.run.log" 2>&1; then
+    cat "$WORK/mut-a.run.log"
+    return 2
+  fi
+  if tripwire_fired "$WORK/tripwire.log"; then echo "decisive: native backend invoked cc"; return 1; fi
   return 0
 }
+if [ "$HOST_OS" != windows ]; then
 mut_run=$((mut_run + 1))
 if prove_mutation "backend hands linking to cc" \
   "$REPO/src/compiler/backend/native.iyi" \
@@ -253,18 +323,37 @@ LibC.system(\"cc -v >/dev/null 2>&1\")" \
 else
   status=1
 fi
+else
+  mut_limited=$((mut_limited + 1))
+  host_limited "native source: the cc tripwire mutation needs POSIX shell command lookup; native Windows uses cmd.exe"
+fi
 
 # (b) the subtraction operands swapped where codegen emits integer subtraction. compile_arith exits with v1 &- v2 and
 # ops(5, 3) = (8) &* (5 &- 3), so the exit status moves from 26 to 58 under the swap: the status must change.
 check_subtraction_output() {
-  "$IYI" build -o "$WORK/mut-b-tool" "$TOOL_SRC" >/dev/null 2>&1 || return 0
-  "$WORK/mut-b-tool" "$FIXTURES/compile_arith.iyi" -o "$WORK/mut-b-exe" >/dev/null 2>&1 || return 0
-  native_signature_ok "$WORK/mut-b-exe" || return 1
-  local out rc
-  out=$(timeout 30 "$WORK/mut-b-exe" </dev/null 2>/dev/null)
+  local src="$REPO_NATIVE/src/compiler/tools/compile_native.iyi" out rc
+  local result="$WORK/mut-b-exe"
+  if [ "$HOST_ID" != darwin-arm64 ]; then
+    src="$REPO_NATIVE/src/compiler/tools/compile.iyi"
+    result="$WORK/mut-b-exe$EXE"
+  fi
+  if ! "$IYI" build -o "$WORK_NATIVE/mut-b-tool$EXE" "$src" >"$WORK/mut-b.build.log" 2>&1; then
+    cat "$WORK/mut-b.build.log"; return 2
+  fi
+  if ! "$WORK/mut-b-tool$EXE" "$REPO_NATIVE/bench/fixtures/compile_arith.iyi" -o "$(native_path "$result")" >"$WORK/mut-b.run.log" 2>&1; then
+    cat "$WORK/mut-b.run.log"; return 2
+  fi
+  if [ "$HOST_ID" = darwin-arm64 ]; then native_signature_ok "$result" || return 2; fi
+  out=$(perl -e 'alarm 30; exec @ARGV or exit 127' -- "$result" </dev/null 2>/dev/null)
   rc=$?
-  if [ "$out" != "$ref_arith_out" ] || [ "$rc" != "$ref_arith_rc" ]; then return 1; fi
-  return 0
+  [ "$rc" -lt 128 ] || return 2
+  if [ "$out" = "$ref_arith_out" ] && [ "$rc" = "$ref_arith_rc" ]; then return 0; fi
+  if [ "$ref_arith_rc" = 26 ] && [ "$rc" = 58 ] && [ "$out" = "$ref_arith_out" ]; then
+    echo "decisive: subtraction exits 58 instead of 26"
+    return 1
+  fi
+  echo "unexpected subtraction mutation result: exit $rc"
+  return 2
 }
 mut_run=$((mut_run + 1))
 if prove_mutation "codegen swaps subtraction operands" \
@@ -279,11 +368,12 @@ fi
 
 # (c) the native linker writes no code signature: codesign must reject the executable it builds.
 check_unsigned_executable() {
-  "$IYI" build -o "$WORK/mut-c-tool" "$TOOL_SRC" >/dev/null 2>&1 || return 0
-  "$WORK/mut-c-tool" "$FIXTURES/compile_arith.iyi" -o "$WORK/mut-c-exe" >/dev/null 2>&1 || return 0
+  if ! "$IYI" build -o "$WORK_NATIVE/mut-c-tool$EXE" "$REPO_NATIVE/src/compiler/tools/compile_native.iyi" >"$WORK/mut-c.build.log" 2>&1; then cat "$WORK/mut-c.build.log"; return 2; fi
+  if ! "$WORK/mut-c-tool$EXE" "$REPO_NATIVE/bench/fixtures/compile_arith.iyi" -o "$WORK_NATIVE/mut-c-exe" >"$WORK/mut-c.run.log" 2>&1; then cat "$WORK/mut-c.run.log"; return 2; fi
   if codesign -v --strict "$WORK/mut-c-exe" >/dev/null 2>&1; then return 0; fi
   return 1
 }
+if [ "$HOST_ID" = darwin-arm64 ]; then
 mut_run=$((mut_run + 1))
 if prove_mutation "native linker drops the code signature" \
   "$REPO/src/compiler/native/link/macho_exe.iyi" \
@@ -294,15 +384,17 @@ if prove_mutation "native linker drops the code signature" \
 else
   status=1
 fi
+else
+  mut_limited=$((mut_limited + 1))
+  host_limited "native source: unsigned executable mutation requires macOS codesign and Mach-O linking"
+fi
 
 # (d) a patch that changes nothing is refused by name, with exit 3, and does not count.
-mut_run=$((mut_run + 1))
 ( prove_mutation "a patch that changes nothing" \
     "$REPO/src/compiler/tools/compile_native.iyi" \
     "CompileNative.run" "CompileNative.run" -- true ) >"$WORK/noop.log" 2>&1
 noop_rc=$?
 if [ "$noop_rc" = 3 ]; then
-  mut_caught=$((mut_caught + 1))
   echo "    refused: a patch that changes nothing (exit 3)"
 else
   status=1
@@ -311,10 +403,25 @@ fi
 
 # Self-check of compare_run, not a compiler mutation: a native exit status off by one and extra stdout must diverge.
 echo "  self-check of compare_run (not a compiler mutation):"
-sample_exe="$WORK/nat/compile_arith"
+if [ "$HOST_ID" = darwin-arm64 ]; then
+  sample_exe="$WORK/nat/compile_arith"
+else
+  sample_exe="$WORK/port/compile_arith$EXE"
+fi
+if ! compare_run "$ref_arith" "$sample_exe" "self-check baseline" "compile_arith" >/dev/null; then
+  echo "FAIL: compare_run self-check baseline did not run equal"
+  status=1
+fi
+"$sample_exe" >"$WORK/selfcheck_sample.out" 2>"$WORK/selfcheck_sample.err"
+sample_rc=$?
 printf '#!/bin/sh\n"%s"\nrc=$?\nexit $((rc + 1))\n' "$sample_exe" >"$WORK/selfcheck_status"
 chmod +x "$WORK/selfcheck_status"
-if compare_run "$WORK/ref/compile_arith" "$WORK/selfcheck_status" "self-check" "exit off by one" "$sample_exe" >/dev/null 2>&1; then
+bash "$WORK/selfcheck_status" >"$WORK/selfcheck_status.out" 2>"$WORK/selfcheck_status.err"
+wrapper_rc=$?
+if [ "$wrapper_rc" -ne "$((sample_rc + 1))" ] || ! cmp -s "$WORK/selfcheck_status.out" "$WORK/selfcheck_sample.out"; then
+  status=1
+  echo "FAIL: exit self-check wrapper did not produce the intended difference"
+elif compare_run "$ref_arith" "$WORK/selfcheck_status" "self-check" "exit off by one" "$sample_exe" >/dev/null 2>&1; then
   status=1
   echo "FAIL: compare_run accepted an exit status off by one"
 else
@@ -322,14 +429,20 @@ else
 fi
 printf '#!/bin/sh\n"%s"\nrc=$?\necho extra-line\nexit $rc\n' "$sample_exe" >"$WORK/selfcheck_stdout"
 chmod +x "$WORK/selfcheck_stdout"
-if compare_run "$WORK/ref/compile_arith" "$WORK/selfcheck_stdout" "self-check" "extra stdout" "$sample_exe" >/dev/null 2>&1; then
+{ cat "$WORK/selfcheck_sample.out"; printf 'extra-line\n'; } >"$WORK/selfcheck_expected.out"
+bash "$WORK/selfcheck_stdout" >"$WORK/selfcheck_actual.out" 2>"$WORK/selfcheck_stdout.err"
+wrapper_rc=$?
+if [ "$wrapper_rc" -ne "$sample_rc" ] || ! cmp -s "$WORK/selfcheck_expected.out" "$WORK/selfcheck_actual.out"; then
+  status=1
+  echo "FAIL: stdout self-check wrapper did not produce the intended difference"
+elif compare_run "$ref_arith" "$WORK/selfcheck_stdout" "self-check" "extra stdout" "$sample_exe" >/dev/null 2>&1; then
   status=1
   echo "FAIL: compare_run accepted extra stdout"
 else
   echo "   compare_run diverges on extra stdout"
 fi
 
-echo "  Mutation summary: $mut_caught/$mut_run source mutations caught (a: cc in native build, b: subtraction operands, c: unsigned executable, d: no-op patch refused)"
+echo "  Mutation summary: $mut_caught/$mut_run attempted caught; $mut_limited host-limited; no-op patch checked separately"
 if [ "$mut_caught" -ne "$mut_run" ]; then status=1; fi
 
 if [ -z "${NATIVE_SOURCE_NO_SELFCHECK:-}" ]; then

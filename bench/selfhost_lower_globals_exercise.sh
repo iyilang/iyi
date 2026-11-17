@@ -25,10 +25,15 @@
 set -u
 status=0
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO/bench/lib/host.sh" || exit 1
+require_test_host || exit 1
+REPO_NATIVE="$(native_path "$REPO")" || exit 1
+export IYI_PATH="$REPO_NATIVE/src"
 IYI="$REPO/bin/iyi"
 . "$REPO/bench/lib/mutation.sh"
 . "$REPO/bench/lib/lower_oracle.sh"
 WORK="$(mktemp -d)"
+WORK_NATIVE="$(native_path "$WORK")" || exit 1
 
 # The shared comparator (bench/lib/lower_gate.iyi) counts only the functions it reproduces: a module-level item (a global,
 # a declaration) that differs is reported but not counted. This gate also requires the module-level items to match.
@@ -45,12 +50,12 @@ echo "  wait_lowglob_const_large_struct: WAITING, a value above 128 bytes travel
 
 
 echo "== 1. Building the port driver"
-if ! "$IYI" build -o "$WORK/port" "$REPO/bench/selfhost_lower_globals_exercise.iyi" > "$WORK/port.build.log" 2>&1; then
-  echo "  the driver does not build (see $WORK/port.build.log)"
+if ! "$IYI" build -o "$WORK_NATIVE/port$EXE" "$REPO_NATIVE/bench/selfhost_lower_globals_exercise.iyi" > "$WORK/port.build.log" 2>&1; then
+  echo "  the driver does not build"
   awk 'NR<=5' "$WORK/port.build.log"
   exit 1
 fi
-if "$WORK/port" > "$WORK/usage.out" 2>&1; then
+if "$WORK/port$EXE" > "$WORK/usage.out" 2>&1; then
   echo "  driver built, bare run exits 0"
 else
   echo "  the driver's bare run fails (see $WORK/usage.out)"
@@ -61,13 +66,13 @@ fi
 # but must not guess the type of an aggregate argument.
 oracle_call_checks() {
   awk "$CALL_TYPES" "$REPO/bench/fixtures/lowglob_indirect.ll" > "$WORK/indirect.ir"
-  "$1" oracle "$WORK/indirect.ir" > "$WORK/indirect.out" 2>&1 || return 1
+  "$1" oracle "$WORK_NATIVE/indirect.ir" > "$WORK/indirect.out" 2>&1 || return 1
   awk "$CALL_TYPES" "$REPO/bench/fixtures/lowglob_indirect_aggregate.ll" > "$WORK/aggregate.ir"
   cmp -s "$REPO/bench/fixtures/lowglob_indirect_aggregate.ll" "$WORK/aggregate.ir" || return 1
-  "$1" oracle "$WORK/aggregate.ir" > "$WORK/aggregate.out" 2>&1 && return 1
+  "$1" oracle "$WORK_NATIVE/aggregate.ir" > "$WORK/aggregate.out" 2>&1 && return 1
   awk '/expected `\(` but found/ { found = 1 } END { exit !found }' "$WORK/aggregate.out"
 }
-if oracle_call_checks "$WORK/port"; then
+if oracle_call_checks "$WORK/port$EXE"; then
   echo "  indirect oracle call parses; multiword argument is unchanged and refused"
 else
   echo "  FAIL: indirect oracle normalization"
@@ -79,25 +84,38 @@ fi
 # named empty leaves iyi_prelude? false, so that fixture is built against a prelude whose require
 # name ends in iyi/prelude (bench/fixtures/lowglob_abi). The fixture declares IyiRuntimeLock.
 hosted_module() {
-  name="$1"
-  fixture="$2"
-  out="$3"
-  log="$4"
+  local name="$1" fixture="$2" out="$3" log="$4" built_in path_sep
+  local target=() output="$out$EXE"
+  if [ "$HOST_ID" != darwin-arm64 ] && [ "${5:-oracle}" != native ]; then
+    target=(--cross-compile --target aarch64-apple-darwin)
+    output="$out.o"
+  fi
   case "$name" in
     lowglob_cvar_lazy*)
       built_in=$("$IYI" env | awk -F= '/^IYI_PATH=/ { print substr($0, index($0, "=") + 1); exit }')
-      IYI_PATH="$REPO/bench/fixtures/lowglob_abi:${built_in}" "$IYI" build --prelude iyi/prelude --emit llvm-ir --no-debug -o "$out" "$fixture" > "$log" 2>&1
+      if [ "$HOST_OS" = windows ]; then path_sep=';'; else path_sep=':'; fi
+      IYI_PATH="$REPO_NATIVE/bench/fixtures/lowglob_abi${path_sep}${built_in}" "$IYI" build "${target[@]}" --prelude iyi/prelude --emit llvm-ir --no-debug -o "$(native_path "$output")" "$(native_path "$fixture")" > "$log" 2>&1
       ;;
-    *) "$IYI" build --prelude empty --emit llvm-ir --no-debug -o "$out" "$fixture" > "$log" 2>&1 ;;
+    *) "$IYI" build "${target[@]}" --prelude empty --emit llvm-ir --no-debug -o "$(native_path "$output")" "$(native_path "$fixture")" > "$log" 2>&1 ;;
   esac
 }
 
 # Exit 1 means the initializer's side effect happened exactly once. A dropped flag
 # check makes the counter 2, even if the value global itself happens to look right.
 hosted_once_check() {
-  hosted_module lowglob_cvar_lazy "$REPO/bench/fixtures/lowglob_cvar_lazy.iyi" "$WORK/once_check" "$WORK/once_check.log" || return 1
-  timeout 30 "$WORK/once_check" > "$WORK/once_check.out" 2>&1
-  [ "$?" -eq 1 ]
+  if ! hosted_module lowglob_cvar_lazy "$REPO/bench/fixtures/lowglob_cvar_lazy.iyi" "$WORK/once_check" "$WORK/once_check.log" native; then
+    echo 'INVALID: hosted once fixture failed to build'
+    cat "$WORK/once_check.log"
+    return 2
+  fi
+  timeout 30 "$WORK/once_check$EXE" > "$WORK/once_check.out" 2>&1
+  local result=$?
+  if [ "$result" -eq 124 ] || [ "$result" -ge 128 ]; then
+    echo 'INVALID: hosted once fixture timed out or terminated by signal'
+    cat "$WORK/once_check.out"
+    return 2
+  fi
+  [ "$result" -eq 1 ]
 }
 
 echo
@@ -115,7 +133,7 @@ for fixture in "$REPO"/bench/fixtures/lowglob_*.iyi; do
     continue
   fi
   awk "$CALL_TYPES" "$WORK/$name.ll" > "$WORK/$name.oracle.ll"
-  if ! "$WORK/port" oracle "$WORK/$name.oracle.ll" > "$WORK/$name.oracle.txt" 2> "$WORK/$name.oracle.err"; then
+  if ! "$WORK/port$EXE" oracle "$WORK_NATIVE/$name.oracle.ll" > "$WORK/$name.oracle.txt" 2> "$WORK/$name.oracle.err"; then
     echo "  $name: the port's IR parser refuses the hosted module: $(awk 'NR==1' "$WORK/$name.oracle.err")"
     diverged=$((diverged + 1))
     continue
@@ -124,7 +142,7 @@ for fixture in "$REPO"/bench/fixtures/lowglob_*.iyi; do
   case " $WAITING_FIXTURES " in
     *" $name "*) named=1 ;;
   esac
-  if ! "$WORK/port" lower "$fixture" "$WORK/$name.oracle.ll" > "$WORK/$name.port.out" 2> "$WORK/$name.port.err"; then
+  if ! "$WORK/port$EXE" lower "$(native_path "$fixture")" "$WORK_NATIVE/$name.oracle.ll" > "$WORK/$name.port.out" 2> "$WORK/$name.port.err"; then
     reason="$(awk 'NR==1' "$WORK/$name.port.err")"
     if [ "$named" = 1 ]; then
       echo "  $name: WAITING, named: $reason"
@@ -153,7 +171,16 @@ for fixture in "$REPO"/bench/fixtures/lowglob_*.iyi; do
     diverged=$((diverged + 1))
   fi
 done
-timeout 30 "$WORK/lowglob_cvar_lazy" > "$WORK/lazy-hosted.out" 2>&1
+lazy_host="$WORK/lowglob_cvar_lazy$EXE"
+if [ "$HOST_ID" != darwin-arm64 ]; then
+  if ! hosted_module lowglob_cvar_lazy "$REPO/bench/fixtures/lowglob_cvar_lazy.iyi" "$WORK/lazy-runtime" "$WORK/lazy-runtime.log" native; then
+    echo 'FAIL: hosted lazy fixture did not build for this host'
+    cat "$WORK/lazy-runtime.log"
+    exit 1
+  fi
+  lazy_host="$WORK/lazy-runtime$EXE"
+fi
+timeout 30 "$lazy_host" > "$WORK/lazy-hosted.out" 2>&1
 lazy_status=$?
 if [ "$lazy_status" -eq 1 ]; then
   echo "  hosted lazy initialization: side effect occurred exactly once (status 1)"
@@ -170,17 +197,24 @@ echo
 echo "== 3. End to end: each fixture the port lowers identically, built to a native executable and run"
 e2e_pass=0
 e2e_fail=0
-if "$IYI" build -o "$WORK/compile_native" "$REPO/src/compiler/tools/compile_native.iyi" > "$WORK/tool.build.log" 2>&1; then
+if [ "$HOST_ID" != darwin-arm64 ]; then
+  host_limited "globals: AArch64 Mach-O execution and codesign require macOS arm64 ($HOST_ID checks and emits IR)"
+fi
+if "$IYI" build -o "$WORK_NATIVE/compile_native$EXE" "$REPO_NATIVE/src/compiler/tools/compile_native.iyi" > "$WORK/tool.build.log" 2>&1; then
   for name in $e2e; do
-    fixture="$REPO/bench/fixtures/$name.iyi"
-    if ! "$WORK/port" emit "$fixture" "$WORK/$name.oracle.ll" > "$WORK/$name.port.ir" 2> "$WORK/$name.emit.err"; then
+    fixture="$REPO_NATIVE/bench/fixtures/$name.iyi"
+    if ! "$WORK/port$EXE" emit "$fixture" "$WORK_NATIVE/$name.oracle.ll" > "$WORK/$name.port.ir" 2> "$WORK/$name.emit.err"; then
       echo "  $name: the port writes no module: $(awk 'NR==1' "$WORK/$name.emit.err")"
       e2e_fail=$((e2e_fail + 1))
       continue
     fi
-    if ! "$WORK/compile_native" "$WORK/$name.port.ir" -o "$WORK/$name.native" > "$WORK/$name.native.log" 2>&1; then
+    if ! "$WORK/compile_native$EXE" "$WORK_NATIVE/$name.port.ir" -o "$WORK_NATIVE/$name.native" > "$WORK/$name.native.log" 2>&1; then
       echo "  $name: the native tool refuses the port's module: $(awk 'NR==1' "$WORK/$name.native.log")"
       e2e_fail=$((e2e_fail + 1))
+      continue
+    fi
+    if [ "$HOST_ID" != darwin-arm64 ]; then
+      echo "  $name: AArch64 Mach-O emitted; native execution is host-limited"
       continue
     fi
     if ! codesign -v --strict "$WORK/$name.native" > "$WORK/$name.signature.log" 2>&1; then
@@ -189,7 +223,7 @@ if "$IYI" build -o "$WORK/compile_native" "$REPO/src/compiler/tools/compile_nati
       continue
     fi
     timeout 30 "$WORK/$name.native" > "$WORK/$name.native.out" 2>&1; ns=$?
-    timeout 30 "$WORK/$name" > "$WORK/$name.hosted.out" 2>&1; hs=$?
+    timeout 30 "$WORK/$name$EXE" > "$WORK/$name.hosted.out" 2>&1; hs=$?
     expected="$hs"
     case "$name" in
       lowglob_cvar_generic_struct) expected=37 ;;
@@ -205,32 +239,41 @@ if "$IYI" build -o "$WORK/compile_native" "$REPO/src/compiler/tools/compile_nati
     fi
   done
 else
-  echo "  the native tool does not build (see $WORK/tool.build.log)"
+  echo "  the native tool does not build"
+  cat "$WORK/tool.build.log"
   e2e_fail=1
 fi
 echo "  end to end: $e2e_pass fixture(s) run to the hosted result, $e2e_fail failed"
-if [ "$e2e_fail" -gt 0 ] || [ "$e2e_pass" -eq 0 ]; then
+if [ "$e2e_fail" -gt 0 ] || { [ "$HOST_ID" = darwin-arm64 ] && [ "$e2e_pass" -eq 0 ]; }; then
   status=1
 fi
 
 # This uses the real prelude's Atomic rather than the empty-prelude stand-in.
 # Compile from source through the typed native pipeline, then run both binaries.
 echo "== 3b. Real prelude Atomic class variable"
-atomic_fixture="$REPO/bench/fixtures/aggregate_cvar_atomic.iyi"
-if codesign -v --strict "$WORK/compile_native" > "$WORK/atomic-signature.log" 2>&1 &&
-   "$IYI" build -o "$WORK/atomic-hosted" "$atomic_fixture" > "$WORK/atomic-hosted.log" 2>&1 &&
-   IYI_PATH="$REPO/src" "$WORK/compile_native" "$atomic_fixture" -o "$WORK/atomic-native" --pipeline typed --prelude > "$WORK/atomic-native.log" 2>&1 &&
-   codesign -v --strict "$WORK/atomic-native" >> "$WORK/atomic-signature.log" 2>&1; then
-  timeout 30 "$WORK/atomic-hosted" > "$WORK/atomic-hosted.out" 2>&1; hs=$?
-  timeout 30 "$WORK/atomic-native" > "$WORK/atomic-native.out" 2>&1; ns=$?
-  if [ "$hs" -eq 0 ] && [ "$ns" -eq 0 ] &&
-     grep -Fxq "atomic class variable: zero then nine" "$WORK/atomic-hosted.out" &&
-     cmp -s "$WORK/atomic-hosted.out" "$WORK/atomic-native.out"; then
-    echo "  hosted and signed native: $(cat "$WORK/atomic-native.out") (status 0)"
-  else
-    echo "  FAIL: atomic class variable, hosted status $hs, native status $ns"
-    cat "$WORK/atomic-hosted.out" "$WORK/atomic-native.out"
+atomic_fixture="$REPO_NATIVE/bench/fixtures/aggregate_cvar_atomic.iyi"
+if "$IYI" build -o "$WORK_NATIVE/atomic-hosted$EXE" "$atomic_fixture" > "$WORK/atomic-hosted.log" 2>&1 &&
+   "$WORK/compile_native$EXE" "$atomic_fixture" -o "$WORK_NATIVE/atomic.ir" --pipeline typed --prelude --emit ir > "$WORK/atomic-native.log" 2>&1 &&
+   { [ "$HOST_ID" != darwin-arm64 ] ||
+     { codesign -v --strict "$WORK/compile_native$EXE" > "$WORK/atomic-signature.log" 2>&1 &&
+       "$WORK/compile_native$EXE" "$atomic_fixture" -o "$WORK_NATIVE/atomic-native" --pipeline typed --prelude >> "$WORK/atomic-native.log" 2>&1 &&
+       codesign -v --strict "$WORK/atomic-native" >> "$WORK/atomic-signature.log" 2>&1; }; }; then
+  timeout 30 "$WORK/atomic-hosted$EXE" > "$WORK/atomic-hosted.out" 2>&1; hs=$?
+  if [ "$hs" -ne 0 ] || ! grep -Fxq "atomic class variable: zero then nine" "$WORK/atomic-hosted.out"; then
+    echo "  FAIL: hosted atomic class variable returned $hs or unexpected output"
+    cat "$WORK/atomic-hosted.out"
     status=1
+  elif [ "$HOST_ID" = darwin-arm64 ]; then
+    timeout 30 "$WORK/atomic-native" > "$WORK/atomic-native.out" 2>&1; ns=$?
+    if [ "$ns" -eq 0 ] && cmp -s "$WORK/atomic-hosted.out" "$WORK/atomic-native.out"; then
+      echo "  hosted and signed native: $(cat "$WORK/atomic-native.out") (status 0)"
+    else
+      echo "  FAIL: atomic class variable native status $ns or output differs"
+      cat "$WORK/atomic-native.out"
+      status=1
+    fi
+  else
+    echo "  hosted atomic class variable passed; typed AArch64 IR emitted"
   fi
 else
   echo "  FAIL: real prelude Atomic source proof did not build or sign"
@@ -245,18 +288,42 @@ echo "== 4. Mutation proofs: the gate must catch each patch to the ported code"
 # The check rebuilds the driver from the patched source and requires every fixture to match the
 # hosted module exactly. A build failure marks the gate invalid and cannot count as a caught mutation.
 lowglob_check() {
-  if ! "$IYI" build -o "$WORK/port_m" "$REPO/bench/selfhost_lower_globals_exercise.iyi" > "$WORK/port_m.build.log" 2>&1; then
+  if ! "$IYI" build -o "$WORK_NATIVE/port_m$EXE" "$REPO_NATIVE/bench/selfhost_lower_globals_exercise.iyi" > "$WORK/port_m.build.log" 2>&1; then
     echo "INVALID PROOF: global-lowering driver did not compile"
     cat "$WORK/port_m.build.log"
-    : > "$WORK/invalid-build"
-    return 0
+    return 2
   fi
-  "$WORK/port_m" normalizer-check > /dev/null 2>&1 || return 1
-  ( . "$REPO/bench/lib/lower_oracle.sh"; oracle_call_checks "$WORK/port_m" ) || return 1
+  "$WORK/port_m$EXE" normalizer-check > "$WORK/normalizer-mut.out" 2>&1
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    if [ "$rc" -eq 1 ] &&
+       grep -Fxq 'iyi: panic: program global stripped from comparison' "$WORK/normalizer-mut.out" &&
+       tr '\\' '/' < "$WORK/normalizer-mut.out" | grep -Fq 'bench/selfhost_lower_globals_exercise.iyi:19'; then
+      return 1
+    fi
+    echo 'INVALID: normalizer check failed outside its expected assertion'
+    cat "$WORK/normalizer-mut.out"
+    return 2
+  fi
+  ( . "$REPO/bench/lib/lower_oracle.sh"; oracle_call_checks "$WORK/port_m$EXE" ) || return 1
   for fixture in "$REPO"/bench/fixtures/lowglob_*.iyi; do
     name="$(basename "$fixture" .iyi)"
-    case " $WAITING_FIXTURES " in *" $name "*) "$WORK/port_m" lower "$fixture" "$WORK/$name.oracle.ll" > /dev/null 2>&1 && return 1; continue ;; esac
-    "$WORK/port_m" lower "$fixture" "$WORK/$name.oracle.ll" > "$WORK/m.out" 2>&1 || return 1
+    case " $WAITING_FIXTURES " in
+      *" $name "*)
+        "$WORK/port_m$EXE" lower "$(native_path "$fixture")" "$WORK_NATIVE/$name.oracle.ll" > "$WORK/m.out" 2> "$WORK/m.err"
+        rc=$?
+        if [ "$rc" -eq 0 ]; then return 1; fi
+        if expected_refusal "$rc" "$WORK/m.err" src/compiler/lower/pending.iyi 'lower: @\[ThreadLocal\] on class variable .*the body pass does not flag an untyped declaration'; then continue; fi
+        echo "INVALID: $name did not reach its named ThreadLocal refusal"
+        cat "$WORK/m.err"
+        return 2
+        ;;
+    esac
+    if ! "$WORK/port_m$EXE" lower "$(native_path "$fixture")" "$WORK_NATIVE/$name.oracle.ll" > "$WORK/m.out" 2>&1; then
+      echo "INVALID: $name mutant did not produce a comparison"
+      cat "$WORK/m.out"
+      return 2
+    fi
     summary="$(awk '/^SUMMARY/ { print }' "$WORK/m.out")"
     identical="$(echo "$summary" | awk '{ split($2, a, "="); print a[2] }')"
     total="$(echo "$summary" | awk '{ split($3, a, "="); print a[2] }')"

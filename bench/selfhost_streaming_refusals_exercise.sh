@@ -2,12 +2,11 @@
 # Prove refusal rows reach the sidecar while body typing is still running.
 set -eu
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-if [ "$(uname -s)" != Darwin ] || [ "$(uname -m)" != arm64 ]; then
-  echo 'SKIP: the native executable is a Darwin arm64 Mach-O'
-  exit 0
-fi
+. "$REPO/bench/lib/host.sh" || exit 1
+require_test_host || exit 1
 cd "$REPO"
-export IYI_PATH="$REPO/src"
+REPO_NATIVE="$(native_path "$REPO")" || exit 1
+export IYI_PATH="$REPO_NATIVE/src"
 unset IYI_TEST_RECORD_FLUSH IYI_TEST_RECORD_BARRIER
 IYI="${IYI_COMPILER:-$REPO/bin/iyi}"
 WORK="$(mktemp -d)"
@@ -31,27 +30,27 @@ fixture="$REPO/bench/fixtures/pipeline_streamed_refusal.iyi"
 
 build_compiler() {
   local output="$1" log="$2"
-  if ! "$IYI" build -o "$output" "$REPO/src/compiler/tools/compile_native.iyi" >"$log" 2>&1; then
+  if ! "$IYI" build -o "$(native_path "$output")" "$REPO_NATIVE/src/compiler/tools/compile_native.iyi" >"$log" 2>&1; then
     echo 'native compiler build failed' >&2
     cat "$log" >&2
     return 1
   fi
-  if [ "$(uname -s)" = Darwin ]; then
+  if [ "$HOST_OS" = darwin ]; then
     codesign -v --strict "$output" || return 1
   fi
 }
 
 if [ -n "${STREAM_COMPILER:-}" ]; then
   compiler="$STREAM_COMPILER"
-  codesign -v --strict "$compiler"
+  if [ "$HOST_OS" = darwin ]; then codesign -v --strict "$compiler"; fi
 else
-  compiler="$WORK/compile_native"
+  compiler="$WORK/compile_native$EXE"
   build_compiler "$compiler" "$WORK/compiler-build.log"
 fi
 if [ -n "${STREAM_BASELINE:-}" ]; then
   baseline="$STREAM_BASELINE"
   baseline_off=0
-  codesign -v --strict "$baseline"
+  if [ "$HOST_OS" = darwin ]; then codesign -v --strict "$baseline"; fi
 else
   baseline="$compiler"
   baseline_off=1
@@ -60,13 +59,19 @@ fi
 # Exit 1 only for different final sidecars; exit 2 for an invalid comparison.
 compare_completed() {
   local current="$1" reference="$2" reference_off="$3" prefix="$4"
-  local kind bin stream_off
+  local kind bin stream_off rc
   for kind in baseline current; do
     bin="$reference"
     stream_off="$reference_off"
     if [ "$kind" = current ]; then bin="$current"; stream_off=0; fi
-    env IYI_NO_REFUSAL_STREAM="$stream_off" "$bin" "$fixture" -o "$prefix.$kind" \
-      --pipeline typed --prelude --probe-phase --keep-going >"$prefix.$kind.log" 2>&1 || true
+    rc=0
+    env IYI_NO_REFUSAL_STREAM="$stream_off" "$bin" "$(native_path "$fixture")" -o "$(native_path "$prefix.$kind")" \
+      --pipeline typed --prelude --probe-phase --keep-going >"$prefix.$kind.log" 2>&1 || rc=$?
+    if [ "$rc" -gt 1 ]; then
+      echo "invalid $kind comparison: compiler exited $rc" >&2
+      cat "$prefix.$kind.log" >&2
+      return 2
+    fi
     awk '/^table: / {print}' "$prefix.$kind.log" >"$prefix.$kind.table"
     if ! grep -q '^\[phase\] bodies: pass$' "$prefix.$kind.log" ||
        [ ! -s "$prefix.$kind.table" ] || [ ! -s "$prefix.$kind.refusals" ] ||
@@ -106,7 +111,7 @@ check_stream() {
   local output="$directory/stream"
   rm -f "$output.refusals" "$output.log" "$directory/snapshot"
   started=$SECONDS
-  env IYI_NO_REFUSAL_STREAM=0 "$bin" "$directory/stream_tail.iyi" -o "$output" \
+  env IYI_NO_REFUSAL_STREAM=0 "$bin" "$(native_path "$directory/stream_tail.iyi")" -o "$(native_path "$output")" \
     --pipeline typed --prelude --probe-phase --keep-going >"$output.log" 2>&1 &
   child=$!
   while [ "$((SECONDS - started))" -lt "$deadline" ]; do
@@ -162,20 +167,20 @@ make_tail "$WORK/full" 12000
 check_stream "$compiler" "$WORK/full" 900
 
 # At the mutant's checkpoint, the compiler has buffered the target record and
-# blocks opening a FIFO. The same binary is run once with the flush enabled and
-# once without it, so a later rollback or buffer overflow cannot mask the loss.
+# waits for an absent sentinel. The same binary is run with the flush enabled
+# and disabled, so a later rollback or buffer overflow cannot mask the loss.
 check_flush_checkpoint() {
   local bin="$1" directory="$2" flush="$3" started rc
   local output="$directory/stream"
   make_tail "$directory" 0 || return 2
-  mkfifo "$directory/checkpoint" || return 2
+  rm -f "$directory/checkpoint"
   started=$SECONDS
   env IYI_NO_REFUSAL_STREAM=0 IYI_TEST_RECORD_FLUSH="$flush" \
-    IYI_TEST_RECORD_BARRIER="$directory/checkpoint" "$bin" "$directory/stream_tail.iyi" \
-    -o "$output" --pipeline typed --prelude --probe-phase --keep-going >"$output.log" 2>&1 &
+    IYI_TEST_RECORD_BARRIER="$(native_path "$directory/checkpoint")" "$bin" "$(native_path "$directory/stream_tail.iyi")" \
+    -o "$(native_path "$output")" --pipeline typed --prelude --probe-phase --keep-going >"$output.log" 2>&1 &
   child=$!
   while [ "$((SECONDS - started))" -lt 900 ]; do
-    if grep -Fq "MUTATION_STREAM_RECORD_BUFFERED	$directory/stream_tail.iyi:2:3" "$output.log"; then
+    if grep -Fq "MUTATION_STREAM_RECORD_BUFFERED	$(native_path "$directory/stream_tail.iyi"):2:3" "$output.log"; then
       if ! kill -0 "$child" 2>/dev/null ||
          ! grep -q '^\[phase\] bodies: start$' "$output.log" ||
          grep -q '^\[phase\] bodies: pass$' "$output.log"; then
@@ -208,15 +213,15 @@ check_flush_checkpoint() {
 
 check_missing_flush_mutation() {
   local rc
-  if ! build_compiler "$WORK/mutant-flush" "$WORK/mutant-flush.build.log" ||
-     ! compare_completed "$WORK/mutant-flush" "$WORK/mutant-flush" 1 "$WORK/mutant-flush.completed"; then
-    return 0
+  if ! build_compiler "$WORK/mutant-flush$EXE" "$WORK/mutant-flush.build.log" ||
+     ! compare_completed "$WORK/mutant-flush$EXE" "$WORK/mutant-flush$EXE" 1 "$WORK/mutant-flush.completed"; then
+    return 2
   fi
-  if ! check_flush_checkpoint "$WORK/mutant-flush" "$WORK/flush-control" 1; then
+  if ! check_flush_checkpoint "$WORK/mutant-flush$EXE" "$WORK/flush-control" 1; then
     echo 'the flush-enabled checkpoint did not expose the record' >&2
-    return 0
+    return 2
   fi
-  if check_flush_checkpoint "$WORK/mutant-flush" "$WORK/flush-removed" 0; then
+  if check_flush_checkpoint "$WORK/mutant-flush$EXE" "$WORK/flush-removed" 0; then
     echo 'the unflushed record was unexpectedly visible' >&2
     return 0
   else
@@ -224,15 +229,15 @@ check_missing_flush_mutation() {
   fi
   if [ "$rc" -eq 1 ]; then return 1; fi
   echo 'mutation did not reach a valid missing-flush observation' >&2
-  return 0
+  return 2
 }
 
 check_final_sidecar_mutation() {
   local rc
-  if ! build_compiler "$WORK/mutant-sidecar" "$WORK/mutant-sidecar.build.log"; then
-    return 0
+  if ! build_compiler "$WORK/mutant-sidecar$EXE" "$WORK/mutant-sidecar.build.log"; then
+    return 2
   fi
-  if compare_completed "$WORK/mutant-sidecar" "$WORK/mutant-sidecar" 1 "$WORK/mutant-sidecar.completed"; then
+  if compare_completed "$WORK/mutant-sidecar$EXE" "$WORK/mutant-sidecar$EXE" 1 "$WORK/mutant-sidecar.completed"; then
     return 0
   else
     rc=$?
@@ -242,7 +247,7 @@ check_final_sidecar_mutation() {
     return 1
   fi
   echo 'mutation did not reach a valid final-sidecar comparison' >&2
-  return 0
+  return 2
 }
 
 prove_mutation 'record flush makes refusals visible during typing' "$REPO/src/compiler/semantic/main_visitor.iyi" \
@@ -257,7 +262,9 @@ prove_mutation 'record flush makes refusals visible during typing' "$REPO/src/co
       if checkpoint = ENV["IYI_TEST_RECORD_BARRIER"]?
         STDERR.puts("MUTATION_STREAM_RECORD_BUFFERED\t#{site}")
         STDERR.flush
-        File.read(checkpoint)
+        until File.exists?(checkpoint)
+          sleep(1)
+        end
       end
     end
     @refusals <<' -- check_missing_flush_mutation

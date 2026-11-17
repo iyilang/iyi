@@ -12,6 +12,40 @@ mkdir -p "$WORK/build" "$WORK/bench" "$WORK/src/iyi/wasm"
 cp "$REPO/bench/wasm_freestanding_exercise.mjs" "$WORK/bench/"
 cp "$REPO/src/iyi/wasm/iyi.mjs" "$WORK/src/iyi/wasm/"
 
+echo '== headless browser ownership and version checks =='
+node --input-type=module - "$REPO/bench/wasm_browser.mjs" <<'JS'
+import { pathToFileURL } from "node:url";
+const { isOwnedHeadless } = await import(pathToFileURL(process.argv[2]).href);
+const profile = "/owned/profile";
+const owned = { pid: 123, exitCode: null, signalCode: null,
+  spawnargs: ["chrome", "--headless=new", "--remote-debugging-port=0", `--user-data-dir=${profile}`] };
+const shell = {
+  product: "HeadlessChrome/156.0.8078.4",
+  userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/156.0.8078.4 Safari/537.36",
+};
+// The product is from the CI failure; this UA models a full Chrome that
+// reports a HeadlessChrome token. CI prints the actual payload as well.
+const fullHeadless = {
+  product: "Chrome/157.0.8103.50",
+  userAgent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/157.0.0.0 Safari/537.36",
+};
+const headed = { product: fullHeadless.product,
+  userAgent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36" };
+const headedChild = { ...owned, spawnargs: ["chrome", "--remote-debugging-port=0", `--user-data-dir=${profile}`] };
+const deadChild = { ...owned, exitCode: 0 };
+const check = (condition, message) => { if (!condition) throw new Error(message); };
+check(isOwnedHeadless(shell, owned, profile), "owned headless shell was refused");
+check(isOwnedHeadless(fullHeadless, owned, profile), "owned Chrome with headless UA was refused");
+check(!isOwnedHeadless(headed, owned, profile), "Chrome without headless UA was accepted");
+check(!isOwnedHeadless(fullHeadless, null, profile), "unspawned Chrome was accepted");
+check(!isOwnedHeadless(fullHeadless, headedChild, profile), "headed Chrome was accepted");
+check(!isOwnedHeadless(shell, headedChild, profile), "headed shell was accepted");
+check(!isOwnedHeadless(fullHeadless, deadChild, profile), "exited child was accepted");
+check(!isOwnedHeadless(fullHeadless, owned, "/other/profile"), "unowned profile was accepted");
+check(!isOwnedHeadless({ ...fullHeadless, userAgent: "NotHeadlessChrome/157.0" }, owned, profile), "partial UA token was accepted");
+console.log("headless ownership: shell and Chrome headless UA accepted; headed and unowned cases refused");
+JS
+
 build_wasm() {
   local name="$1" source="$2" command
   command="$("$IYI" build --cross-compile --target wasm32-unknown-unknown -o "$WORK/build/$name" "$source")"

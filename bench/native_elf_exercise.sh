@@ -27,6 +27,7 @@ obj_src=src/compiler/tools/obj_elf.iyi
 link_src=src/compiler/tools/link_elf.iyi
 elf_src=src/compiler/native/obj/elf.iyi
 exe_src=src/compiler/native/link/elf_exe.iyi
+isel_src=src/compiler/native/aarch64/isel.iyi
 check=bench/fixtures/native_elf/check_exe.py
 start_a64_ir=src/compiler/native/rt/start_linux_aarch64.ir
 start_x86_ir=src/compiler/native/rt/start_linux_x86_64.ir
@@ -158,6 +159,19 @@ build_tools() {
 filtered_listing() {
   "$readelf_tool" -S -s -r -W "$(native_path "$1")" 2>&1 |
     awk '!/section headers, starting at offset/ && !/ \.strtab /'
+}
+
+# The relocation loop must reach its image base and bounds without an unrebased GOT.
+bootstrap_direct() {
+  "$readelf_tool" -r -W "$(native_path "$1")" |
+    awk '($5 == "__ehdr_start" || $5 == "__iyi_rela_start" || $5 == "__iyi_rela_end") {
+           if (!seen[$5]++) count++
+           if ($3 ~ /GOT/) { print $3, $5; bad = 1 }
+         }
+         END {
+           if (count != 3) print "bootstrap symbol relocations: found", count + 0, "of 3"
+           exit (bad || count != 3)
+         }'
 }
 
 # A check may count a mutation as caught only after the mutated drivers build.
@@ -329,6 +343,21 @@ else
   fail "baseline AArch64 hello link or structural check failed; relocation mutation was not run"
 fi
 restore_tools || exit 1
+check_start_direct() {
+  "$work/bin/link_elf$EXE" start "$(native_path "$root/$start_a64_ir")" "$(native_path "$work/mut_start.o")" >"$work/mut-start.log" 2>&1 &&
+    bootstrap_direct "$work/mut_start.o"
+}
+if [ -n "$readelf_tool" ]; then
+  if check_start_direct; then
+    prove_mutation "reach a hidden declaration through the GOT" "$isel_src" \
+      "visibility == Visibility::Default && !dso_local" "true" check_start_direct
+  else
+    fail "baseline AArch64 bootstrap addressing failed; visibility mutation was not run"
+  fi
+else
+  echo "   start-code addressing mutation not run: llvm-readelf unavailable"
+fi
+restore_tools || exit 1
 echo "   TLS variant offsets and the start-code relocation loop need runtime coverage"
 
 echo "== 4. start code"
@@ -346,6 +375,14 @@ else
   fail "the aarch64 start code does not compile:"
   tail -n 5 "$work/start.log"
 fi
+if [ -n "$readelf_tool" ]; then
+  if bootstrap_direct "$work/start_a64.o" >"$work/start-direct.log" 2>&1; then
+    echo "   aarch64 native start code: bootstrap symbols use direct addressing"
+  else
+    fail "aarch64 native start code has unsafe bootstrap addressing:"
+    cat "$work/start-direct.log"
+  fi
+fi
 iyi_ir="$work/bin/iyi-ir$EXE"
 if ! "$HOSTED_COMPILER" build -o "$(native_path "$iyi_ir")" "$(native_path "$root/src/compiler/tools/ir.iyi")" >"$work/iyi-ir.build" 2>&1; then
   fail "iyi-ir does not build, the LLVM bridge that translates the start code; its log ends:"
@@ -360,6 +397,11 @@ bridge_check() {
   local arch="$1" ir="$2" object="$3" exe="$work/hello_bridged_$1"
   if ! bridge_start "$ir" "$object"; then
     fail "$arch start code: LLVM bridge or llc failed: $(head -n 3 "$object.translate" "$object.llc" 2>/dev/null | tr '\n' ' ')"
+    return 1
+  fi
+  if [ -n "$readelf_tool" ] && ! bootstrap_direct "$object" >"$object.direct" 2>&1; then
+    fail "$arch bridged start code has unsafe bootstrap addressing:"
+    cat "$object.direct"
     return 1
   fi
   if "$work/bin/link_elf$EXE" link "$(native_path "$exe")" _start "$(native_path "$object")" \

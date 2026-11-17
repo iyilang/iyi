@@ -5,10 +5,12 @@ target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i8:8:32-i16:16:32-i6
 
 ; The Linux start code of the static-PIE executable (SPEC 2.2 and 3.7, slice D3). The linker lays out the image
 ; from base 0 and defines the symbols this file reads. `_start` is naked: it takes the initial stack pointer, which
-; holds argc, then argv, then a NULL, then envp, and hands it to __iyi_start_c, which sets `environ`, applies the
-; relative relocations, makes the RELRO region read-only, maps and fills the main thread's TLS block (variant I:
-; tpidr_el0 points at the 16-byte TCB, and the block lies at its alignment above it), calls main, and exits with
-; main's result through exit_group.
+; holds argc, then argv, then a NULL, then envp, and hands it to __iyi_start_c. That applies the relative
+; relocations, sets environ, makes the RELRO region read-only, maps and fills the main thread's TLS block
+; (variant I: tpidr_el0 points at the 16-byte TCB, and the block lies at its alignment above it), calls main,
+; and exits with main's result through exit_group.
+; The linker-defined symbols are hidden so the relocation loop reaches them directly, without reading a GOT
+; slot that still holds a link-time address. Set environ only after the loop has rebased the GOT.
 ;
 ; Absolute symbols the linker defines as constants (__iyi_tls_memsz, __iyi_tls_align) are not read here: the TLS
 ; size and alignment come from the PT_TLS program header, which sits in the image at __ehdr_start.
@@ -16,13 +18,13 @@ target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i8:8:32-i16:16:32-i6
 declare external i32 @main(i32, ptr)
 
 @environ = global ptr null, align 8
-@__ehdr_start = external global i8
-@__iyi_rela_start = external global i8
-@__iyi_rela_end = external global i8
-@__iyi_relro_start = external global i8
-@__iyi_relro_end = external global i8
-@__iyi_tdata_start = external global i8
-@__iyi_tdata_end = external global i8
+@__ehdr_start = external hidden global i8
+@__iyi_rela_start = external hidden global i8
+@__iyi_rela_end = external hidden global i8
+@__iyi_relro_start = external hidden global i8
+@__iyi_relro_end = external hidden global i8
+@__iyi_tdata_start = external hidden global i8
+@__iyi_tdata_end = external hidden global i8
 
 ; The raw system call: number in x8, arguments in x0..x5, result in x0.
 define internal i64 @iyi_syscall(i64 %nr, i64 %a0, i64 %a1, i64 %a2, i64 %a3, i64 %a4, i64 %a5) {
@@ -160,8 +162,8 @@ entry:
   %n1 = add i64 %argc, 1
   %off = shl i64 %n1, 3
   %envp = getelementptr i8, ptr %argv, i64 %off
-  store ptr %envp, ptr @environ, align 8
   call void () @iyi_apply_relocations()
+  store ptr %envp, ptr @environ, align 8
   call void () @iyi_relro_protect()
   call void () @iyi_setup_tls()
   %argc32 = trunc i64 %argc to i32

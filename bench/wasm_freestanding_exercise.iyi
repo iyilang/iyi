@@ -41,7 +41,7 @@ fun contract_wall_seconds : Int64
 end
 
 fun contract_monotonic_ns : Int64
-  Time.monotonic.total_nanoseconds
+  Time.monotonic.total_nanoseconds.to_i64
 end
 
 fun contract_random(buffer : UInt8*, count : Int32) : Nil

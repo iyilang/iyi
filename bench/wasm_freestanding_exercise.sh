@@ -23,7 +23,11 @@ build_wasm() {
 
 echo '== native and cross-compiled sample programs =='
 for name in hello format io; do
-  "$IYI" build -o "$WORK/build/$name.native" "$REPO/samples/iyi/$name.iyi"
+  # wasi-sdk also ships a host linker; keep it off the native compiler's PATH.
+  if ! PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" "$IYI" build -o "$WORK/build/$name.native" "$REPO/samples/iyi/$name.iyi" >"$WORK/build/$name.native.log" 2>&1; then
+    cat "$WORK/build/$name.native.log"
+    exit 1
+  fi
   printf 'first line\nsecond line\nthird line\n' | "$WORK/build/$name.native" > "$WORK/$name.expected"
   build_wasm "$name" "$REPO/samples/iyi/$name.iyi"
 done

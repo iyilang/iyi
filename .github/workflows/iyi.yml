@@ -3465,7 +3465,9 @@ jobs:
         run: |
           mkdir -p room && tar -xzf dist/*.tar.gz -C room
           export PATH="/opt/wasi-sdk/bin:$HOME/.wasmtime/bin:$PATH"
-          IYI="$PWD/room/bin/iyi" IYI_CHROME="$(command -v google-chrome)" bash bench/wasm_freestanding_exercise.sh
+          export IYI="$PWD/room/bin/iyi"
+          export IYI_CHROME="$(command -v google-chrome)"
+          bash bench/wasm_freestanding_exercise.sh
 
   # GC Stage 10: wasm32-wasi collector exercise under wasmtime.
   #

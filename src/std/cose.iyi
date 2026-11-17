@@ -4,14 +4,22 @@
 #     key = CoseKey.decode(bytes).or_panic
 #     key.verify(message, signature)
 #
+# EC2 accepts P-256/ES256 and P-384/ES384, OKP accepts Ed25519/EdDSA,
+# and RSA accepts RS256 and PS256. Private key parameters are refused.
+# `verify` takes the COSE ECDSA form r || s; `verify_der` takes DER, as
+# WebAuthn uses it. Other algorithms take the same signature in both.
+# An Ed25519 key of small order is refused: std/curve25519 deliberately
+# accepts those RFC 8032 points, including the identity, but they cannot
+# authenticate a message.
+#
 # Verification is computation on the caller's bytes; no platform or network.
 
 module std/cose
 
-import std/cbor::{Cbor, CborValue, CborError}
-import std/ecdsa::{EcdsaPublicKey}
-import std/rsa::{RsaPublicKey}
-import std/curve25519::{Ed25519PublicKey}
+import std/cbor::{Cbor, CborValue, CborKind, CborError}
+import std/ecdsa::{EcdsaPublicKey, EcdsaCurve, EcdsaHash, EcdsaError}
+import std/rsa::{RsaPublicKey, RsaHash, RsaError}
+import std/curve25519::{Ed25519PublicKey, CurveError}
 
 pub struct CoseError
   getter message : String
@@ -32,11 +40,11 @@ impl Error for CoseError
 end
 
 pub enum CoseAlg
-  ES256 = -7
-  ES384 = -35
-  EdDSA = -8
+  ES256 =   -7
+  ES384 =  -35
+  EdDSA =   -8
   RS256 = -257
-  PS256 = -37
+  PS256 =  -37
 end
 
 pub struct CoseKey
@@ -49,26 +57,208 @@ pub struct CoseKey
   end
 
   def self.decode(bytes : Array(UInt8)) : CoseKey | CoseError
-    CoseError.new("key decoder not yet implemented")
+    value = Cbor.decode(bytes)
+    return CoseError.new(value.message) if value.is_a?(CborError)
+    from_cbor(value)
   end
 
   def self.from_cbor(value : CborValue) : CoseKey | CoseError
-    CoseError.new("key decoder not yet implemented")
+    pairs = value.as_map?
+    return CoseError.new("key is not a CBOR map") unless pairs
+    # from_cbor can receive a map constructed by the caller, not just one
+    # the CBOR reader already checked. Refuse duplicate labels either way.
+    seen = {} of String => Bool
+    pairs.each do |pair|
+      kind = pair[0].kind
+      unless kind == CborKind::Unsigned || kind == CborKind::Negative || kind == CborKind::Text
+        return CoseError.new("key label is not an integer or text")
+      end
+      if (kind == CborKind::Unsigned || kind == CborKind::Negative) && pair[0].as_int?.nil?
+        return CoseError.new("integer key label outside Int64")
+      end
+      encoded = Cbor.encode(pair[0])
+      label = String.new(encoded, 0, encoded.size)
+      return CoseError.new("duplicate key label") if seen[label]?
+      seen[label] = true
+    end
+    kty = integer(value, 1_i64, "kty")!
+    alg_number = integer(value, 3_i64, "alg")!
+    algorithm = case alg_number
+                when   -7_i64 then CoseAlg::ES256
+                when  -35_i64 then CoseAlg::ES384
+                when   -8_i64 then CoseAlg::EdDSA
+                when -257_i64 then CoseAlg::RS256
+                when  -37_i64 then CoseAlg::PS256
+                else               return CoseError.new("unsupported alg #{alg_number}")
+                end
+    allowed = case kty
+              when 1_i64 then -2_i64
+              when 2_i64 then -3_i64
+              when 3_i64 then -2_i64
+              else            return CoseError.new("unsupported kty #{kty}")
+              end
+    pairs.each do |pair|
+      label = pair[0].as_int?
+      if !label.nil? && label < allowed
+        return CoseError.new("private or unsupported parameter #{label} for kty #{kty}")
+      end
+    end
+    ops = value[4_i64]
+    if ops
+      list = ops.as_array?
+      return CoseError.new("key_ops is not an array") unless list
+      verify_allowed = false
+      list.each do |item|
+        op = item.as_int?
+        return CoseError.new("key_ops contains a non-integer operation") if op.nil?
+        verify_allowed = true if op == 2_i64
+      end
+      return CoseError.new("key_ops does not permit verify") unless verify_allowed
+    end
+    if kty == 2_i64
+      unless algorithm == CoseAlg::ES256 || algorithm == CoseAlg::ES384
+        return CoseError.new("kty EC2 is incompatible with alg #{alg_number}")
+      end
+      curve_number = integer(value, -1_i64, "crv")!
+      expected = algorithm == CoseAlg::ES256 ? 1_i64 : 2_i64
+      return CoseError.new("crv #{curve_number} is incompatible with alg #{alg_number}") unless curve_number == expected
+      curve = curve_number == 1_i64 ? EcdsaCurve::P256 : EcdsaCurve::P384
+      x = byte_string(value, -2_i64, "x")!
+      y = byte_string(value, -3_i64, "y")!
+      unless x.size == curve.size && y.size == curve.size
+        return CoseError.new("EC2 coordinate lengths #{x.size} and #{y.size}, expected #{curve.size}")
+      end
+      point = [4_u8]
+      point.concat(x)
+      point.concat(y)
+      key = EcdsaPublicKey.from_point(curve, point)
+      return CoseError.new(key.message) if key.is_a?(EcdsaError)
+    elsif kty == 1_i64
+      return CoseError.new("kty OKP is incompatible with alg #{alg_number}") unless algorithm == CoseAlg::EdDSA
+      curve_number = integer(value, -1_i64, "crv")!
+      return CoseError.new("unsupported OKP crv #{curve_number}") unless curve_number == 6_i64
+      x = byte_string(value, -2_i64, "x")!
+      return CoseError.new("Ed25519 x length #{x.size}, expected 32") unless x.size == 32
+      key = Ed25519PublicKey.from_bytes(x)
+      return CoseError.new(key.message) if key.is_a?(CurveError)
+      return CoseError.new("Ed25519 public key has small order") if CoseEd.small_order?(x)
+    else
+      unless algorithm == CoseAlg::RS256 || algorithm == CoseAlg::PS256
+        return CoseError.new("kty RSA is incompatible with alg #{alg_number}")
+      end
+      n = byte_string(value, -1_i64, "n")!
+      e = byte_string(value, -2_i64, "e")!
+      key = RsaPublicKey.new(n, e)
+      return CoseError.new(key.message) if key.is_a?(RsaError)
+    end
+    # Keep an independent snapshot: the caller may mutate its map or bytes.
+    snapshot = Cbor.decode(Cbor.encode(value))
+    return CoseError.new(snapshot.message) if snapshot.is_a?(CborError)
+    CoseKey.new(kty, algorithm, key, snapshot)
+  end
+
+  private def self.integer(value : CborValue, label : Int64, name : String) : Int64 | CoseError
+    field = value[label]
+    return CoseError.new("missing #{name} (#{label})") unless field
+    number = field.as_int?
+    return CoseError.new("#{name} (#{label}) is not an Int64") if number.nil?
+    number
+  end
+
+  private def self.byte_string(value : CborValue, label : Int64, name : String) : Array(UInt8) | CoseError
+    field = value[label]
+    return CoseError.new("missing #{name} (#{label})") unless field
+    bytes = field.as_bytes?
+    return CoseError.new("#{name} (#{label}) is not a byte string") unless bytes
+    bytes
   end
 
   def verify(message : Array(UInt8) | String, signature : Array(UInt8)) : Bool
-    false
+    if @alg == CoseAlg::ES256 || @alg == CoseAlg::ES384
+      width = @alg == CoseAlg::ES256 ? 32 : 48
+      return false unless signature.size == 2 * width
+      der = CoseSignature.ecdsa_der(signature, width)
+      return verify_der(message, der)
+    end
+    verify_der(message, signature)
   end
 
   def verify_der(message : Array(UInt8) | String, signature : Array(UInt8)) : Bool
+    key = @key
+    if key.is_a?(EcdsaPublicKey)
+      return key.verify(EcdsaHash::SHA256, message, signature) if @alg == CoseAlg::ES256 && key.curve == EcdsaCurve::P256
+      return key.verify(EcdsaHash::SHA384, message, signature) if @alg == CoseAlg::ES384 && key.curve == EcdsaCurve::P384
+    elsif key.is_a?(Ed25519PublicKey)
+      return key.verify(message, signature) if @alg == CoseAlg::EdDSA
+    elsif key.is_a?(RsaPublicKey)
+      return key.verify_pkcs1v15(RsaHash::SHA256, message, signature) if @alg == CoseAlg::RS256
+      return key.verify_pss(RsaHash::SHA256, message, signature) if @alg == CoseAlg::PS256
+    end
     false
   end
 
   def to_cbor : CborValue
-    @value
+    Cbor.decode(Cbor.encode(@value)).or_panic
   end
 
   def encode : Array(UInt8)
-    Cbor.encode(to_cbor)
+    Cbor.encode(@value)
+  end
+end
+
+# SEC 1 r and s are fixed-width unsigned numbers in COSE and shortest
+# positive INTEGERs in DER. Width is 32 or 48, so lengths fit one octet.
+struct CoseSignature
+  def self.integer(bytes : Array(UInt8), start : Int32, width : Int32) : Array(UInt8)
+    at = start
+    stop = start + width
+    while at < stop - 1 && bytes[at] == 0_u8
+      at = at + 1
+    end
+    leading = bytes[at] >= 0x80_u8
+    result = [2_u8, (stop - at + (leading ? 1 : 0)).to_u8]
+    result << 0_u8 if leading
+    while at < stop
+      result << bytes[at]
+      at = at + 1
+    end
+    result
+  end
+
+  def self.ecdsa_der(bytes : Array(UInt8), width : Int32) : Array(UInt8)
+    r = integer(bytes, 0, width)
+    s = integer(bytes, width, width)
+    result = [0x30_u8, (r.size + s.size).to_u8]
+    result.concat(r)
+    result.concat(s)
+    result
+  end
+end
+
+# The eight points whose order divides eight have five different encoded
+# y-coordinates; the high bit is x's sign. All other encodings have already
+# passed Ed25519PublicKey.from_bytes' canonical point check. Test the four
+# little-endian words without allocating another copy of the public key.
+struct CoseEd
+  def self.word(bytes : Array(UInt8), start : Int32) : UInt64
+    value = 0_u64
+    8.times do |i|
+      value = value | bytes[start + i].to_u64.unsafe_shl((8 * i).to_u64)
+    end
+    value
+  end
+
+  def self.small_order?(bytes : Array(UInt8)) : Bool
+    a = word(bytes, 0)
+    b = word(bytes, 8)
+    c = word(bytes, 16)
+    d = word(bytes, 24) & 0x7fffffffffffffff_u64
+    return true if (a == 0_u64 || a == 1_u64) && b == 0_u64 && c == 0_u64 && d == 0_u64
+    return true if a == 0xffffffffffffffec_u64 && b == 0xffffffffffffffff_u64 &&
+                   c == 0xffffffffffffffff_u64 && d == 0x7fffffffffffffff_u64
+    return true if a == 0xb027b2c28f95e826_u64 && b == 0xf098eff289f4c345_u64 &&
+                   c == 0x3933c6d305acdfd5_u64 && d == 0x05fc536d880238b1_u64
+    a == 0x4fd84d3d706a17c7_u64 && b == 0x0f67100d760b3cba_u64 &&
+      c == 0xc6cc392cfa53202a_u64 && d == 0x7a03ac9277fdc74e_u64
   end
 end

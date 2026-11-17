@@ -1,0 +1,11 @@
+appendix_a.txt contains every encoded example in RFC 8949, Appendix A,
+https://www.rfc-editor.org/rfc/rfc8949.html#appendix-A, as hexadecimal.
+The second column is the deterministic encoding expected by this exercise;
+it is added by the iyi project and is not copied from the RFC. The original
+examples include alternative float widths and indefinite-length items.
+
+RFC 8949: Copyright (c) 2020 IETF Trust and the persons identified as the
+document authors (Carsten Bormann and Paul Hoffman). All rights reserved.
+The RFC is subject to BCP 78 and the IETF Trust's Legal Provisions Relating
+to IETF Documents. Code components are under the Simplified BSD License.
+https://trustee.ietf.org/license-info/

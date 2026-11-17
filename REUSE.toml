@@ -78,3 +78,10 @@ path = ["bench/std_hpke_fixture/**"]
 precedence = "override"
 SPDX-FileCopyrightText = "IETF Trust and the persons identified as the document authors"
 SPDX-License-Identifier = "BSD-2-Clause"
+
+# RFC 8949 Appendix A's CBOR examples; source and terms are in NOTICE.
+[[annotations]]
+path = ["bench/std_cbor_fixture/**"]
+precedence = "override"
+SPDX-FileCopyrightText = "IETF Trust and the persons identified as the document authors"
+SPDX-License-Identifier = "BSD-2-Clause"

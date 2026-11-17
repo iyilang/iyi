@@ -1947,15 +1947,19 @@ jobs:
       # programs — iyi's own prelude with its kqueue runtime, `--crystal` with
       # Crystal's library, and the daemon serving builds. Nothing here may
       # need this checkout, a IYI_PATH, or a Crystal on the machine.
+      # Somewhere else is the job's own temporary directory, not /tmp: the
+      # project's Mac keeps /tmp between jobs, and three runners share it -
+      # a socket a cancelled job left at /tmp/iyi.sock passed the wait below
+      # before this job's daemon listened (job 134256482927).
       - name: Unpack the tarball somewhere else and run from it
         run: |
-          mkdir -p /tmp/unpacked
-          tar -xzf .build/iyi-*-darwin-*.tar.gz -C /tmp/unpacked
-          cd /tmp
-          env -u IYI_PATH -u CRYSTAL_PATH /tmp/unpacked/bin/iyi run /tmp/unpacked/share/iyi/samples/hello.iyi
-          env -u IYI_PATH -u CRYSTAL_PATH /tmp/unpacked/bin/iyi version
+          mkdir -p "$RUNNER_TEMP/unpacked"
+          tar -xzf .build/iyi-*-darwin-*.tar.gz -C "$RUNNER_TEMP/unpacked"
+          cd "$RUNNER_TEMP"
+          env -u IYI_PATH -u CRYSTAL_PATH "$RUNNER_TEMP/unpacked/bin/iyi" run "$RUNNER_TEMP/unpacked/share/iyi/samples/hello.iyi"
+          env -u IYI_PATH -u CRYSTAL_PATH "$RUNNER_TEMP/unpacked/bin/iyi" version
           printf 'order = ""\nch = Channel(Int32).new\ngroup do |g|\n  g.spawn do\n    value = ch.receive\n    order = order + (value.is_a?(Int32) ? value.to_s : "?")\n    0\n  end\n  g.spawn do\n    sleep(10)\n    order = order + "a"\n    ch.send(7)\n    0\n  end\nend\nputs order\n' > conc.iyi
-          test "$(env -u IYI_PATH -u CRYSTAL_PATH /tmp/unpacked/bin/iyi run conc.iyi)" = "a7"
+          test "$(env -u IYI_PATH -u CRYSTAL_PATH "$RUNNER_TEMP/unpacked/bin/iyi" run conc.iyi)" = "a7"
           echo "the kqueue runtime runs out of the tarball"
 
       # Built for the floor, and the check has its broken copy: the same
@@ -1965,14 +1969,14 @@ jobs:
         run: |
           minos() { otool -l "$1" | awk '$1 == "minos" { print $2; exit }'; }
           for bin in iyi iyi-daemon; do
-            got=$(minos "/tmp/unpacked/bin/$bin")
+            got=$(minos "$RUNNER_TEMP/unpacked/bin/$bin")
             [ "$got" = "$MACOSX_DEPLOYMENT_TARGET" ] || { echo "bin/$bin says minos '$got', not $MACOSX_DEPLOYMENT_TARGET"; exit 1; }
             echo "bin/$bin runs on macOS $got and later"
           done
-          cd /tmp
+          cd "$RUNNER_TEMP"
           env -u MACOSX_DEPLOYMENT_TARGET -u IYI_PATH -u CRYSTAL_PATH \
-            /tmp/unpacked/bin/iyi build -o /tmp/host_minos /tmp/unpacked/share/iyi/samples/hello.iyi
-          got=$(minos /tmp/host_minos)
+            "$RUNNER_TEMP/unpacked/bin/iyi" build -o "$RUNNER_TEMP/host_minos" "$RUNNER_TEMP/unpacked/share/iyi/samples/hello.iyi"
+          got=$(minos "$RUNNER_TEMP/host_minos")
           [ -n "$got" ] && [ "$got" != "$MACOSX_DEPLOYMENT_TARGET" ] || { echo "a build without the target says minos '$got': the check above tells nothing apart"; exit 1; }
           echo "a build without the target says minos $got, which the check refuses"
 
@@ -1984,12 +1988,12 @@ jobs:
       # aside and requires the failure, so a package that carries std twice
       # cannot pass by accident.
       - name: The native standard library, out of the tarball
-        run: bash bench/tarball_std.sh /tmp/unpacked
+        run: bash bench/tarball_std.sh "$RUNNER_TEMP/unpacked"
 
       - name: The other library, out of the tarball
         run: |
-          env -u IYI_PATH -u CRYSTAL_PATH /tmp/unpacked/bin/iyi run --crystal \
-            /tmp/unpacked/share/iyi/samples/crystal/stdlib.iyi
+          env -u IYI_PATH -u CRYSTAL_PATH "$RUNNER_TEMP/unpacked/bin/iyi" run --crystal \
+            "$RUNNER_TEMP/unpacked/share/iyi/samples/crystal/stdlib.iyi"
 
       # The daemon, out of the same tarball, serving two builds from another
       # directory — the shape everything broken about it was about (IV.1d),
@@ -1997,19 +2001,19 @@ jobs:
       # port supplied it.
       - name: The daemon, out of the tarball
         run: |
-          cd /tmp/unpacked
-          env -u CRYSTAL_PATH ./bin/iyi daemon start --socket /tmp/iyi.sock &
-          for _ in $(seq 1 120); do [ -S /tmp/iyi.sock ] && break; sleep 1; done
-          mkdir -p /tmp/app && cd /tmp/app
-          cp /tmp/unpacked/share/iyi/samples/hello.iyi .
-          env -u CRYSTAL_PATH /tmp/unpacked/bin/iyi daemon build \
-            --socket /tmp/iyi.sock -o served hello.iyi
+          cd "$RUNNER_TEMP/unpacked"
+          env -u CRYSTAL_PATH ./bin/iyi daemon start --socket "$RUNNER_TEMP/iyi.sock" &
+          for _ in $(seq 1 120); do [ -S "$RUNNER_TEMP/iyi.sock" ] && break; sleep 1; done
+          mkdir -p "$RUNNER_TEMP/app" && cd "$RUNNER_TEMP/app"
+          cp "$RUNNER_TEMP/unpacked/share/iyi/samples/hello.iyi" .
+          env -u CRYSTAL_PATH "$RUNNER_TEMP/unpacked/bin/iyi" daemon build \
+            --socket "$RUNNER_TEMP/iyi.sock" -o served hello.iyi
           ./served > served.txt
-          env -u CRYSTAL_PATH /tmp/unpacked/bin/iyi build -o normal hello.iyi
+          env -u CRYSTAL_PATH "$RUNNER_TEMP/unpacked/bin/iyi" build -o normal hello.iyi
           ./normal > normal.txt
           diff normal.txt served.txt
-          env -u CRYSTAL_PATH /tmp/unpacked/bin/iyi daemon build \
-            --socket /tmp/iyi.sock -o served2 hello.iyi
+          env -u CRYSTAL_PATH "$RUNNER_TEMP/unpacked/bin/iyi" daemon build \
+            --socket "$RUNNER_TEMP/iyi.sock" -o served2 hello.iyi
           echo "the daemon served two builds from another directory"
 
       # Staged out of `.build` for the reason the linux job's own copy

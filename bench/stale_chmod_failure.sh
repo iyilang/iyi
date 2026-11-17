@@ -35,7 +35,13 @@ import tempfile
 
 repo = Path(sys.argv[1])
 iyi = sys.argv[2]
-with tempfile.TemporaryDirectory(prefix="iyi-stale-chmod-failure-") as temporary:
+# The overlay's prelude reaches the runtime by a relative path, and a relative
+# path does not exist between two drives (the Windows runner's temp is on C: and
+# the checkout on D:). Put the work directory on the checkout's drive then.
+temp_parent = None
+if os.path.splitdrive(str(repo))[0].lower() != os.path.splitdrive(tempfile.gettempdir())[0].lower():
+    temp_parent = str(repo.parent)
+with tempfile.TemporaryDirectory(prefix="iyi-stale-chmod-failure-", dir=temp_parent) as temporary:
     work = Path(temporary)
     project = work / "project"
     project.mkdir()

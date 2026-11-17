@@ -38,6 +38,66 @@ export async function instantiate(source, options = {}) {
   let instance;
   let input = null;
   let inputOffset = 0;
+  const jspi = options.jspi !== false &&
+    typeof WebAssembly.Suspending === "function" && typeof WebAssembly.promising === "function";
+  const parked = new Map();
+  let active = false;
+  let failure = null;
+
+  class FiberFinished extends Error {}
+
+  function abort(error) {
+    if (failure !== null) return;
+    failure = error;
+    for (const waiter of parked.values()) waiter.reject(error);
+    parked.clear();
+  }
+
+  function schedule(fiber, top) {
+    queueMicrotask(() => {
+      if (failure !== null) return;
+      try {
+        const stack = instance.exports.__stack_pointer;
+        if (!(stack instanceof WebAssembly.Global)) throw new Error("iyi task runtime needs __stack_pointer");
+        const waiter = parked.get(fiber);
+        if (waiter) {
+          parked.delete(fiber);
+          stack.value = waiter.sp;
+          waiter.resolve();
+        } else {
+          stack.value = top;
+          const enter = WebAssembly.promising(instance.exports.iyi_fiber_entry);
+          enter(fiber).then(
+            () => abort(new Error("iyi fiber returned without exiting")),
+            error => { if (!(error instanceof FiberFinished)) abort(error); },
+          );
+        }
+      } catch (error) {
+        abort(error);
+      }
+    });
+  }
+
+  function noJspi() {
+    stderr(new TextEncoder().encode("iyi: JSPI is required to park a task on wasm32-unknown-unknown\n"));
+    throw new IyiExit(1);
+  }
+
+  const swap = jspi ? new WebAssembly.Suspending((from, to, top) => {
+    const sp = instance.exports.__stack_pointer.value;
+    new DataView(instance.exports.memory.buffer).setBigUint64(from >>> 0, BigInt(sp >>> 0), true);
+    return new Promise((resolve, reject) => {
+      parked.set(from, { sp, resolve, reject });
+      schedule(to, top);
+    });
+  }) : noJspi;
+  const idle = jspi ? new WebAssembly.Suspending(timeout => new Promise(resolve => setTimeout(resolve, timeout))) : noJspi;
+
+  function fiberExit(next, top) {
+    if (!jspi) return noJspi();
+    schedule(next, top);
+    throw new FiberFinished();
+  }
 
   function view(ptr, len) {
     const start = ptr >>> 0;
@@ -104,6 +164,9 @@ export async function instantiate(source, options = {}) {
         return -1;
       }
     },
+    swap,
+    idle,
+    fiber_exit: fiberExit,
   };
 
   source = await source;
@@ -121,6 +184,17 @@ export async function instantiate(source, options = {}) {
   }
 
   let started = false;
+  async function invoke(fn, args) {
+    if (active) throw new Error("an iyi call is already running");
+    active = true;
+    failure = null;
+    try {
+      return await (jspi ? WebAssembly.promising(fn)(...args) : fn(...args));
+    } finally {
+      if (parked.size) abort(new Error("iyi call ended with parked fibers"));
+      active = false;
+    }
+  }
   const iyi = {
     instance,
     module,
@@ -130,7 +204,7 @@ export async function instantiate(source, options = {}) {
       if (started) return -1;
       started = true;
       try {
-        return exports.iyi_start();
+        return await invoke(exports.iyi_start, []);
       } catch (error) {
         if (error instanceof IyiExit) return error.code;
         throw error;
@@ -141,6 +215,7 @@ export async function instantiate(source, options = {}) {
     },
     alloc(size) {
       if (!started) throw new Error("call start() before allocating");
+      if (active) throw new Error("an iyi call is already running");
       if (!Number.isInteger(size) || size < 0 || size > 0x7fffffff) throw new RangeError("invalid allocation size");
       const ptr = exports.iyi_alloc(size) >>> 0;
       if (ptr === 0) throw new Error("iyi allocation failed");
@@ -148,6 +223,7 @@ export async function instantiate(source, options = {}) {
     },
     free(ptr) {
       if (!started) throw new Error("call start() before freeing");
+      if (active) throw new Error("an iyi call is already running");
       exports.iyi_free(ptr);
     },
     put(value) {
@@ -169,7 +245,7 @@ export async function instantiate(source, options = {}) {
       if (!started) throw new Error("call start() before calling an export");
       if (typeof exports[name] !== "function") throw new TypeError(`unknown iyi export: ${name}`);
       try {
-        return exports[name](...args);
+        return await invoke(exports[name], args);
       } finally {
         defaultStdout?.flush();
         defaultStderr?.flush();

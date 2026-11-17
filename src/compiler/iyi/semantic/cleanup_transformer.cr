@@ -1059,6 +1059,9 @@ module Iyi
         when "same"
           return
         when "new"
+          if @program.has_flag?("wasm32") && !@program.has_flag?("wasi")
+            value.raise "`unit: :new` is not available on wasm32-unknown-unknown: it needs threads, and this target runs tasks on one thread (SPEC.md III.4.12a)"
+          end
           return unless @program.has_flag?("gc_none") || @program.has_flag?("gc_boehm")
           value.raise "`unit: :new` needs threads, and a build under -Dgc_none or -Dgc_boehm has none: a thread would race the bump pointer, or be one Boehm never heard of (SPEC.md III.4.13)"
         end

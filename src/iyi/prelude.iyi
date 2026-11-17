@@ -80,13 +80,7 @@ require "./atomic"
     {% raise "-Diyi_chaos is not available on wasm32-wasi: there is no scheduler here for it to drive (SPEC.md III.4.17)" %}
   {% end %}
 {% elsif flag?(:wasm32) %}
-  macro group(*args, **kwargs)
-    \{% raise "group is not available on wasm32-unknown-unknown: this target has no task scheduler (SPEC.md III.4)" %}
-  end
-
-  macro sleep(*args, **kwargs)
-    \{% raise "sleep is not available on wasm32-unknown-unknown: this target has no task scheduler (SPEC.md III.4)" %}
-  end
+  require "./concurrency"
 
   {% if flag?(:iyi_chaos) %}
     {% raise "-Diyi_chaos is not available on wasm32-unknown-unknown: this target has no task scheduler (SPEC.md III.4.17)" %}
@@ -9626,11 +9620,24 @@ require "./file"
         def self.each_root(visit : Proc(UInt64, Nil)) : Nil
           scan_stack(visit)
           scan_globals(visit)
+          {% unless flag?(:wasi) %}
+            fiber = IyiScheduler.first_fiber
+            while fiber.is_a?(IyiFiber)
+              if fiber.state != IyiFiberState::Running && fiber.state != IyiFiberState::Done && fiber.saved_sp != 0_u64
+                scan_range(fiber.saved_sp, fiber.stack_top, visit)
+              end
+              fiber = fiber.next_fiber
+            end
+          {% end %}
         end
 
         def self.scan_stack(visit : Proc(UInt64, Nil)) : Nil
           sp = LibWasmIntrinsics.stacksave.address
           stack_base = pointerof(LibSymbols.__heap_base).address
+          {% unless flag?(:wasi) %}
+            top = IyiScheduler.current_stack_top
+            stack_base = top if top != 0_u64
+          {% end %}
           scan_range(sp, stack_base, visit)
         end
 
@@ -10934,7 +10941,7 @@ class IyiDeferNode
   end
 end
 
-{% unless (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
+{% unless (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) || (flag?(:wasm32) && !flag?(:wasi)) %}
   # No fibers on this target, so one global stack is exact.
   class IyiDefers
     @@head : IyiDeferNode?
@@ -11121,7 +11128,7 @@ def raise(message : String, file : String = __FILE__, line : Int32 = __LINE__) :
       end
     end
   {% end %}
-  {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
+  {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) || (flag?(:wasm32) && !flag?(:wasi)) %}
     IyiScheduler.panic_current(message)
   {% else %}
     IyiDefers.drain

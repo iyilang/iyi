@@ -1,0 +1,46 @@
+# JSPI gate: the host parks two iyi calls and traces their shadow stacks.
+@[Unsafe("the probe scans host-supplied shadow-stack bounds during a forced collection")]
+
+@[Link(wasm_import_module: "jspi_probe")]
+lib JspiProbeHost
+  fun park(id : Int32) : Void
+end
+
+class JspiProbeBox
+  getter value : Int32
+
+  def initialize(@value : Int32)
+  end
+end
+
+fun jspi_probe_fiber(id : Int32) : Int32
+  box = JspiProbeBox.new(1701 + id)
+  frame = uninitialized Int32[256]
+  words = pointerof(frame).as(Pointer(Int32))
+  index = 0
+  while index < 256
+    words[index] = id * 1000 + index
+    index = index + 1
+  end
+  JspiProbeHost.park(id)
+  index = 0
+  while index < 256
+    return -2 if words[index] != id * 1000 + index
+    index = index + 1
+  end
+  address = box.as(Pointer(Void)).address
+  return -1 if IyiHeap.base_of(address) == 0_u64
+  box.value
+end
+
+fun jspi_probe_collect(first_sp : Int32, first_top : Int32, second_sp : Int32, second_top : Int32, scan : Int32) : Nil
+  if scan != 0
+    visit = ->(base : UInt64) { IyiMark.shade(base) }
+    IyiRoots.scan_range(first_sp.to_u64, first_top.to_u64, visit)
+    IyiRoots.scan_range(second_sp.to_u64, second_top.to_u64, visit)
+    IyiMark.drain
+  end
+  IyiMark.collect
+end
+
+IyiMark.auto = false

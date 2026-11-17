@@ -215,18 +215,27 @@ module HostedDaemonOracle
     end
   end
 
+  def self.saved_stdio(fd : Int32) : IO::FileDescriptor
+    {% if flag?(:win32) %}
+      io = IO::FileDescriptor.from_stdio(fd)
+      io.close_on_finalize = false
+      io
+    {% else %}
+      IO::FileDescriptor.new(SavedDescriptors.dup(fd), close_on_finalize: false)
+    {% end %}
+  end
+
+  def self.release_saved(io : IO::FileDescriptor) : Nil
+    {% unless flag?(:win32) %}
+      io.close
+    {% end %}
+  end
+
   def self.capture_run(&block : -> Nil) : Tuple(Int32?, String)
     STDOUT.flush
     STDERR.flush
-    {% if flag?(:win32) %}
-      saved_out = IO::FileDescriptor.from_stdio(1)
-      saved_err = IO::FileDescriptor.from_stdio(2)
-      saved_out.close_on_finalize = false
-      saved_err.close_on_finalize = false
-    {% else %}
-      saved_out = IO::FileDescriptor.new(SavedDescriptors.dup(STDOUT.fd), close_on_finalize: false)
-      saved_err = IO::FileDescriptor.new(SavedDescriptors.dup(STDERR.fd), close_on_finalize: false)
-    {% end %}
+    saved_out = saved_stdio(1)
+    saved_err = saved_stdio(2)
     tmp_out = File.tempfile(dir: ARGV[0])
     tmp_err = File.tempfile(dir: ARGV[0])
     STDOUT.reopen(tmp_out)
@@ -248,10 +257,8 @@ module HostedDaemonOracle
       STDERR.flush
       STDOUT.reopen(saved_out)
       STDERR.reopen(saved_err)
-      {% unless flag?(:win32) %}
-        saved_out.close
-        saved_err.close
-      {% end %}
+      release_saved(saved_out)
+      release_saved(saved_err)
     end
 
     tmp_out.rewind

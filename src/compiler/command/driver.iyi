@@ -1089,11 +1089,13 @@ pub class CommandDriver
     # with the usage attached, not as an invalid option, and this parser has
     # to hand it over rather than refuse it.
     rest = [] of String
-    parser.invalid_option do |flag|
-      rest << flag
+    current = ""
+    parser.before_each do |arg|
+      current = arg
+      rest << arg unless arg == "--" || (arg.starts_with?("-") && arg.bytesize >= 2)
     end
-    parser.unknown_args do |before, after|
-      before.each { |a| rest << a }
+    parser.invalid_option do |_flag|
+      rest << current
     end
     parser.parse(@options)
     return if @exit_code
@@ -1132,7 +1134,8 @@ pub class CommandDriver
     link_flags = [] of String
     parser = OptionParser.new
     parser.banner = "Usage: #{CommandDriver.program_name} spec [options] [files] [-- runtime_options]\n\nOptions:"
-    setup_simple_compiler_options(parser, compiler_opts)
+    remaining = [] of String
+    setup_simple_compiler_options(parser, compiler_opts, remaining)
     parser.on("-h", "--help", "Show this message") do
       puts parser
       puts ""
@@ -1158,7 +1161,7 @@ pub class CommandDriver
     parser.on("--link-flags FLAGS", "Additional flags to pass to the linker") do |some_link_flags|
       link_flags << some_link_flags
     end
-    remaining = parser.parse(@options)
+    parser.parse(@options)
     return if @exit_code
     compiler_opts.link_flags = link_flags.join(" ") unless link_flags.empty?
     compiler_opts.filenames = remaining
@@ -1803,9 +1806,14 @@ pub class CommandDriver
     verbose = false
     parser = OptionParser.new
     parser.banner = CommandDriver.clear_cache_usage
-    parser.invalid_option do |flag|
-      abort "clear_cache takes no arguments, and '#{flag}' is one", Exit::USAGE_ERROR
-      parser.stop
+    left = [] of String
+    current = ""
+    parser.before_each do |arg|
+      current = arg
+      left << arg unless arg == "--" || (arg.starts_with?("-") && arg.bytesize >= 2)
+    end
+    parser.invalid_option do |_flag|
+      left << current
     end
     parser.missing_option do |flag|
       abort "Missing option: #{flag}", Exit::USAGE_ERROR
@@ -1821,7 +1829,7 @@ pub class CommandDriver
     end
     parser.unknown_args do |before, after|
       next if @exit_code != nil
-      extra = before + after
+      extra = left + after
       unless extra.empty?
         abort "clear_cache takes no arguments, and '#{extra.first}' is one", Exit::USAGE_ERROR
       end
@@ -2074,9 +2082,11 @@ pub class CommandDriver
     var_names = [] of String
     parser = OptionParser.new
     parser.banner = CommandDriver.env_usage
-    parser.invalid_option do |flag|
-      abort "Invalid option: #{flag}", Exit::USAGE_ERROR
-      parser.stop
+    current = ""
+    first_unrecognised = nil
+    parser.before_each { |arg| current = arg }
+    parser.invalid_option do |_flag|
+      first_unrecognised ||= current
     end
     parser.missing_option do |flag|
       abort "Missing option: #{flag}", Exit::USAGE_ERROR
@@ -2091,6 +2101,11 @@ pub class CommandDriver
       var_names = before
     end
     parser.parse(@options)
+    return if @exit_code
+    if flag = first_unrecognised
+      abort "Invalid option: #{flag}", Exit::USAGE_ERROR
+      return
+    end
     @subcommand_options["vars"] = var_names.join(",") unless var_names.empty?
   end
 
@@ -2099,9 +2114,10 @@ pub class CommandDriver
     compiler_opts = CompilerOptions.new
     parser = OptionParser.new
     parser.banner = "Usage: #{CommandDriver.program_name} eval [options] [source]\n\nOptions:"
-    setup_simple_compiler_options(parser, compiler_opts)
-    parser.unknown_args do |before_dash, after_dash|
-      compiler_opts.filenames = before_dash unless before_dash.empty?
+    left = [] of String
+    setup_simple_compiler_options(parser, compiler_opts, left)
+    parser.unknown_args do |_before_dash, after_dash|
+      compiler_opts.filenames = left unless left.empty?
       compiler_opts.arguments = after_dash
     end
     parser.parse(@options)
@@ -2120,9 +2136,11 @@ pub class CommandDriver
     check = false
     parser = OptionParser.new
     parser.banner = CommandDriver.format_usage
-    parser.invalid_option do |flag|
-      abort "Invalid option: #{flag}", Exit::USAGE_ERROR
-      parser.stop
+    current = ""
+    first_unrecognised = nil
+    parser.before_each { |arg| current = arg }
+    parser.invalid_option do |_flag|
+      first_unrecognised ||= current
     end
     parser.missing_option do |flag|
       abort "Missing option: #{flag}", Exit::USAGE_ERROR
@@ -2153,6 +2171,10 @@ pub class CommandDriver
     end
     files = parser.parse(@options)
     return if @exit_code
+    if flag = first_unrecognised
+      abort "Invalid option: #{flag}", Exit::USAGE_ERROR
+      return
+    end
     @subcommand_options["check"] = check.to_s
     @subcommand_options["includes"] = includes.join(",") unless includes.empty?
     @subcommand_options["excludes"] = excludes.join(",") unless excludes.empty?
@@ -2244,9 +2266,10 @@ pub class CommandDriver
     parser = OptionParser.new
     parser.banner = "Usage: #{CommandDriver.program_name} #{command} [options] [programfile] [--] [arguments]\n\nOptions:"
 
-    parser.invalid_option do |flag|
-      abort "Invalid option: #{flag}", Exit::USAGE_ERROR
-      parser.stop
+    current = ""
+    first_unrecognised = nil
+    parser.invalid_option do |_flag|
+      first_unrecognised ||= current
     end
 
     parser.missing_option do |flag|
@@ -2485,8 +2508,10 @@ pub class CommandDriver
       opts.stdin_filename = stdin_filename
     end
 
-    if single_file
-      parser.before_each do |arg|
+    # Recognised handlers, including help, run before unknown flags are refused.
+    parser.before_each do |arg|
+      current = arg
+      if single_file
         parser.stop if !arg.starts_with?('-') && arg.ends_with?(".cr")
         parser.stop if File.exists?(arg)
       end
@@ -2499,6 +2524,10 @@ pub class CommandDriver
 
     parser.parse(@options)
     return opts if @exit_code
+    if flag = first_unrecognised
+      abort "Invalid option: #{flag}", Exit::USAGE_ERROR
+      return opts
+    end
 
     opts.link_flags = link_flags.join(" ") unless link_flags.empty?
     opt_filenames.each do |f|
@@ -2617,10 +2646,14 @@ pub class CommandDriver
     opts
   end
 
-  private def setup_simple_compiler_options(opts : OptionParser, compiler_opts : CompilerOptions) : Nil
-    opts.invalid_option do |flag|
-      abort "Invalid option: #{flag}", Exit::USAGE_ERROR
-      opts.stop
+  private def setup_simple_compiler_options(opts : OptionParser, compiler_opts : CompilerOptions, left : Array(String)) : Nil
+    current = ""
+    opts.before_each do |arg|
+      current = arg
+      left << arg unless arg == "--" || (arg.starts_with?("-") && arg.bytesize >= 2)
+    end
+    opts.invalid_option do |_flag|
+      left << current
     end
     opts.missing_option do |flag|
       abort "Missing option: #{flag}", Exit::USAGE_ERROR

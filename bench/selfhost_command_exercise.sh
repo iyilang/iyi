@@ -321,7 +321,7 @@ if ! CRYSTAL_PATH="$REPO_NATIVE/src" "$CRYSTAL" build -Di_know_what_im_doing \
   exit 1
 fi
 
-# Extract the literal corpus, including concatenated pieces of flag names.
+# Extract the literal corpus without changing its argument order.
 if ! "$PY" - "$REPO_NATIVE/bench/selfhost_command_exercise.iyi" "$WORK_NATIVE/vectors.json" <<'PY'
 import ast, json, sys
 
@@ -330,8 +330,6 @@ def literal(node):
         return [literal(item) for item in node.elts]
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return node.value
-    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
-        return literal(node.left) + literal(node.right)
     raise ValueError(f"unexpected corpus expression: {ast.dump(node)}")
 
 vectors = []
@@ -341,8 +339,8 @@ with open(sys.argv[1], encoding="utf-8") as source:
         if line.startswith("vectors <<"):
             expr = line[len("vectors <<"):].strip()
             vectors.append([] if expr == "[] of String" else literal(ast.parse(expr, mode="eval").body))
-if len(vectors) != 243:
-    raise ValueError(f"expected 243 vectors, found {len(vectors)}")
+if len(vectors) != 250:
+    raise ValueError(f"expected 250 vectors, found {len(vectors)}")
 with open(sys.argv[2], "w", encoding="utf-8") as output:
     json.dump(vectors, output)
 PY
@@ -398,8 +396,8 @@ PY
 
 normalize_command "$WORK/iyi_raw.out" "$WORK/iyi.out" || exit 1
 normalize_command "$WORK/hosted_raw.out" "$WORK/hosted.out" || exit 1
-if [ "$(grep -c '^=== VECTOR' "$WORK/iyi.out")" -ne 243 ] || [ "$(grep -c '^=== VECTOR' "$WORK/hosted.out")" -ne 243 ]; then
-  echo "  FAILED: expected 243 command vectors from each implementation"
+if [ "$(grep -c '^=== VECTOR' "$WORK/iyi.out")" -ne 250 ] || [ "$(grep -c '^=== VECTOR' "$WORK/hosted.out")" -ne 250 ]; then
+  echo "  FAILED: expected 250 command vectors from each implementation"
   exit 1
 fi
 
@@ -408,7 +406,7 @@ if ! cmp -s "$WORK/iyi.out" "$WORK/hosted.out"; then
   diff -u "$WORK/hosted.out" "$WORK/iyi.out" | head -30
   status=1
 else
-  echo "  Parity summary: 243/243 vectors match identically against the front end"
+  echo "  Parity summary: 250/250 vectors match identically against the front end"
 fi
 
 echo
@@ -428,7 +426,7 @@ check_command_mutant() {
     touch "$WORK/invalid-mutant"
     return 0
   fi
-  if [ "$(grep -c '^=== VECTOR' "$WORK/iyi_mut_raw.out")" -ne 243 ] ||
+  if [ "$(grep -c '^=== VECTOR' "$WORK/iyi_mut_raw.out")" -ne 250 ] ||
      ! normalize_command "$WORK/iyi_mut_raw.out" "$WORK/iyi_mut.out"; then
     echo "  INVALID MUTANT: command exercise output was incomplete"
     touch "$WORK/invalid-mutant"
@@ -462,13 +460,11 @@ prove_mutation "format option description changes" "$DRIVER" \
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
 prove_mutation "invalid option exit code changes from failure to success" "$DRIVER" \
-  '    parser.banner = "Usage: #{CommandDriver.program_name} #{command} [options] [programfile] [--] [arguments]\n\nOptions:"
-
-    parser.invalid_option do |flag|
+  '    return opts if @exit_code
+    if flag = first_unrecognised
       abort "Invalid option: #{flag}", Exit::USAGE_ERROR' \
-  '    parser.banner = "Usage: #{CommandDriver.program_name} #{command} [options] [programfile] [--] [arguments]\n\nOptions:"
-
-    parser.invalid_option do |flag|
+  '    return opts if @exit_code
+    if flag = first_unrecognised
       abort "Invalid option: #{flag}", Exit::OK' \
   -- check_command_mutant || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))

@@ -317,17 +317,10 @@ module BenchSelfhostCommandExercise
     vectors << ["build", "-Z"]
     vectors << ["run", "--not-an-option", "main.iyi"]
     vectors << ["check", "--nope"]
-    # `init` has its own option parser, and it is the first one in the file:
-    # a proof that patches one occurrence patches this one, so something has
-    # to reach it or that proof is about code nothing runs.
-    #
     # Only forms that stop at the decision belong here. `init app NAME DIR`
     # scaffolds a real directory, so running it under this gate would have the
     # oracle write files into the checkout.
     vectors << ["init", "--bogus-flag"]
-    # `clear_cache` owns the first of the six identical invalid-option aborts,
-    # so a proof patching one occurrence patches that one and needs a vector
-    # that reaches it.
     vectors << ["clear_cache", "--bogus-flag"]
     vectors << ["env", "--bogus-flag"]
     vectors << ["docs", "--bogus-flag"]
@@ -335,6 +328,15 @@ module BenchSelfhostCommandExercise
     vectors << ["doc", "--json", "a", "b"]
     vectors << ["doc", "--json", "--json"]
     vectors << ["doc", "--json", ""]
+
+    # Known handlers precede unknown-option errors; leftovers keep their order.
+    vectors << ["env", "--bogus-flag", "--help"]
+    vectors << ["tool", "format", "--bogus-flag", "--help"]
+    vectors << ["clear_cache", "--bogus-flag", "--help"]
+    vectors << ["clear_cache", "stray", "--bogus-flag"]
+    vectors << ["init", "bogus", "--bogus-flag"]
+    vectors << ["eval", "--bogus-flag", "--help"]
+    vectors << ["spec", "--bogus-flag", "--help"]
 
     vectors
   end

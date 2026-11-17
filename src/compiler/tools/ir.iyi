@@ -1,0 +1,513 @@
+# iyi-ir: the transitional LLVM bridge for the IR of SPEC 3.2. It links LLVM by design; the native
+# backend does not need it.
+#
+#   iyi-ir import FILE.ll       read LLVM IR and print it as the iyi IR's text form, or refuse by name
+#   iyi-ir print FILE           parse the iyi IR's text form and print it again
+#   iyi-ir verify FILE          parse the iyi IR's text form and report every rule it breaks
+#   iyi-ir translate FILE.ir    parse the iyi IR's text form and print the LLVM module it replays to
+#   iyi-ir drop-unwind FILE.ll  read LLVM IR, drop every unwind edge (Module#drop_unwind_edges) and print it as
+#                               the iyi IR's text form: the oracle's module as iyi lowers it, with no unwinding
+#   iyi-ir roundtrip FILE.ll    import, translate and print both sides; print `identical` or the first
+#                               difference (locations are compared separately, debug info is stripped)
+#   iyi-ir coverage FILES...    count every opcode, intrinsic, attribute, convention, linkage, TLS mode,
+#                               ordering, inline-asm template, value kind and type kind seen, and say
+#                               whether the IR has it
+#   iyi-ir version              the linked LLVM's version, MAJOR.MINOR.PATCH, read through the C API
+
+@[Unsafe("drives LLVM through the bridge's raw handles and exits the process with a status")]
+module compiler/tools/ir
+
+import compiler/ir/printer::{print}
+import compiler/ir/parser::{parse, IrParseError}
+import compiler/ir/verifier::{verify, IrError}
+import compiler/ir/module::{Module}
+import compiler/ir/inst::{Op, Inst, Block, CallAux, AsmAux, IntrinsicAux}
+import compiler/ir/function::{Function, Global}
+import compiler/ir/intrinsics::{intrinsic_match}
+import compiler/ir/types::{TypeTable}
+import compiler/llvm/lib_llvm::{string_from_c, string_and_dispose, to_c_str}
+import compiler/backend/llvm/emit::{read_ll_file, LlFileError, print_llvm_module, strip_llvm_debug_info, verify_llvm_module, function_of_line}
+import compiler/backend/llvm/import::{import_llvm_module, ImportError, ir_enum_attribute_names, ir_string_attribute_names, ir_module_flag_behavior, llvm_opcode_name, vk_inline_asm, llvm_value_kind, llvm_linkage, llvm_calling_convention}
+import compiler/backend/llvm/translate::{translate, TranslateError}
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+module IrTool
+  def self.run : Nil
+    args = Program.args
+    if args.size == 1 && args[0] == "version"
+      print_version
+      LibC.exit(0)
+    end
+    if args.size < 2
+      STDERR.puts "usage: iyi-ir import|print|verify|translate|drop-unwind|roundtrip FILE | coverage FILES... | version"
+      LibC.exit(2)
+    end
+    command = args[0]
+    if command == "coverage"
+      coverage(args[1..-1])
+    elsif command == "import"
+      import_file(args[1])
+    elsif command == "print"
+      print_file(args[1])
+    elsif command == "verify"
+      verify_file(args[1])
+    elsif command == "translate"
+      translate_file(args[1])
+    elsif command == "drop-unwind"
+      drop_unwind_file(args[1])
+    elsif command == "roundtrip"
+      roundtrip_file(args[1])
+    else
+      STDERR.puts "iyi-ir: unknown command #{command}"
+      LibC.exit(2)
+    end
+  end
+
+  # The linked LLVM's version, read through the C API. The gate reads its major version from here.
+  def self.print_version : Nil
+    major = 0
+    minor = 0
+    patch = 0
+    LibLLVM.get_version(pointerof(major), pointerof(minor), pointerof(patch))
+    STDOUT.puts "#{major}.#{minor}.#{patch}"
+  end
+
+  def self.read_text(path : String) : String
+    unless File.exists?(path)
+      STDERR.puts "iyi-ir: no such file: #{path}"
+      LibC.exit(2)
+    end
+    File.read(path)
+  end
+
+  def self.parsed_module(path : String) : Module
+    parsed = parse(read_text(path))
+    if parsed.is_a?(IrParseError)
+      STDERR.puts "iyi-ir: #{path}: #{parsed.to_s}"
+      LibC.exit(1)
+    end
+    parsed.as(Module)
+  end
+
+  def self.llvm_module(path : String) : LibLLVM::ModuleRef
+    read = read_ll_file(path)
+    if read.is_a?(LlFileError)
+      STDERR.puts "iyi-ir: #{path}: #{read.to_s}"
+      LibC.exit(2)
+    end
+    read.as(LibLLVM::ModuleRef)
+  end
+
+  def self.import_file(path : String) : Nil
+    llvm = llvm_module(path)
+    imported = import_llvm_module(llvm)
+    if imported.is_a?(ImportError)
+      STDOUT.puts "refused: #{imported.to_s}"
+      LibC.exit(1)
+    end
+    STDOUT.print(print(imported.as(Module)))
+  end
+
+  def self.drop_unwind_file(path : String) : Nil
+    llvm = llvm_module(path)
+    imported = import_llvm_module(llvm)
+    if imported.is_a?(ImportError)
+      STDOUT.puts "refused: #{imported.to_s}"
+      LibC.exit(1)
+    end
+    mod = imported.as(Module)
+    if reason = mod.drop_unwind_edges
+      STDOUT.puts "refused: #{reason}"
+      LibC.exit(1)
+    end
+    STDOUT.print(print(mod))
+  end
+
+  def self.print_file(path : String) : Nil
+    STDOUT.print(print(parsed_module(path)))
+  end
+
+  def self.verify_file(path : String) : Nil
+    errors = verify(parsed_module(path))
+    errors.each { |e| STDOUT.puts e.to_s }
+    LibC.exit(1) unless errors.empty?
+    STDOUT.puts "verified"
+  end
+
+  def self.translate_file(path : String) : Nil
+    translated = translate(parsed_module(path))
+    if translated.is_a?(TranslateError)
+      STDOUT.puts "refused: #{translated.to_s}"
+      LibC.exit(1)
+    end
+    llvm = translated.as(LibLLVM::ModuleRef)
+    problem = verify_llvm_module(llvm)
+    if problem
+      STDOUT.puts "invalid: #{problem}"
+      LibC.exit(1)
+    end
+    STDOUT.print(print_llvm_module(llvm))
+  end
+
+  # Every debug location of an LLVM module's instructions, as (function, index, file, line) lines.
+  def self.llvm_locations(llvm : LibLLVM::ModuleRef) : Array(String)
+    lines = [] of String
+    fn = LibLLVM.get_first_function(llvm)
+    while fn.address != 0
+      name = string_from_c(LibLLVM.get_value_name(fn))
+      index = 0
+      bb = LibLLVM.get_first_basic_block(fn)
+      while bb.address != 0
+        inst = LibLLVM.get_first_instruction(bb)
+        while inst.address != 0
+          if LibLLVM.instruction_get_debug_loc(inst).address != 0
+            flen = 0
+            fptr = LibLLVM.get_debug_loc_filename(inst, pointerof(flen))
+            file = flen > 0 ? String.new(flen) { |b| b.copy_from(fptr, flen) } : ""
+            lines << "#{name}\t#{index}\t#{file}\t#{LibLLVM.get_debug_loc_line(inst)}"
+          end
+          index = index + 1
+          inst = LibLLVM.get_next_instruction(inst)
+        end
+        bb = LibLLVM.get_next_basic_block(bb)
+      end
+      fn = LibLLVM.get_next_function(fn)
+    end
+    lines
+  end
+
+  # The same locations, read from the imported IR.
+  def self.ir_locations(ir : Module) : Array(String)
+    lines = [] of String
+    ir.functions.each do |f|
+      index = 0
+      f.blocks.each do |b|
+        b.insts.each do |inst|
+          if loc = inst.loc
+            lines << "#{f.name}\t#{index}\t#{ir.files[loc.file]}\t#{loc.line}"
+          end
+          index = index + 1
+        end
+      end
+    end
+    lines
+  end
+
+  # Import, strip debug information on both sides, translate back, and compare what LLVM prints.
+  def self.roundtrip_file(path : String) : Nil
+    llvm = llvm_module(path)
+    located = llvm_locations(llvm)
+    imported = import_llvm_module(llvm)
+    if imported.is_a?(ImportError)
+      STDOUT.puts "refused: #{imported.to_s}"
+      LibC.exit(1)
+    end
+    ir = imported.as(Module)
+    imported_locations = ir_locations(ir)
+    i = 0
+    while i < located.size || i < imported_locations.size
+      left = i < located.size ? located[i] : "<none>"
+      right = i < imported_locations.size ? imported_locations[i] : "<none>"
+      if left != right
+        STDOUT.puts "locations differ at location #{i}: LLVM #{left.split('\t').join(" ")} / IR #{right.split('\t').join(" ")}"
+        LibC.exit(1)
+      end
+      i = i + 1
+    end
+    # The parser names a module after its file and ignores the `; ModuleID` comment, so the original's
+    # identifier is set to the IR's name (its source_filename) before the two sides are printed.
+    LibLLVM.set_module_identifier(llvm, to_c_str(ir.name), ir.name.bytesize.to_u64)
+    strip_llvm_debug_info(llvm)
+    original = print_llvm_module(llvm)
+    translated = translate(ir)
+    if translated.is_a?(TranslateError)
+      STDOUT.puts "refused by the translator: #{translated.to_s}"
+      LibC.exit(1)
+    end
+    printed = print_llvm_module(translated.as(LibLLVM::ModuleRef))
+    if original == printed
+      STDOUT.puts "identical"
+      return
+    end
+    left_lines = original.split('\n')
+    right_lines = printed.split('\n')
+    j = 0
+    while j < left_lines.size || j < right_lines.size
+      left = j < left_lines.size ? left_lines[j] : "<end of module>"
+      right = j < right_lines.size ? right_lines[j] : "<end of module>"
+      if left != right
+        STDOUT.puts "differs in #{function_of_line(left_lines, j)} at line #{j + 1}"
+        STDOUT.puts "  LLVM: #{left}"
+        STDOUT.puts "  IR:   #{right}"
+        LibC.exit(1)
+      end
+      j = j + 1
+    end
+    STDOUT.puts "differs"
+    LibC.exit(1)
+  end
+
+  def self.coverage(paths : Array(String)) : Nil
+    tally = Coverage.new
+    paths.each do |path|
+      llvm = llvm_module(path)
+      tally.add_module(llvm)
+    end
+    tally.report
+  end
+end
+
+# The coverage inventory: each (category, name) with its count and whether the IR has it.
+class Coverage
+  def initialize
+    @counts = Hash(String, Int32).new
+    @in_ir = Hash(String, Bool).new
+    @names = Hash(Int32, String).new
+  end
+
+  def note(category : String, name : String, in_ir : Bool) : Nil
+    key = "#{category}\t#{name}"
+    @counts[key] = (@counts[key]? || 0) + 1
+    @in_ir[key] = in_ir
+  end
+
+  # Known LLVM attribute names, looked up for their kinds. Kinds not in this list print as kind#N.
+  def attribute_name(kind : Int32) : String
+    if @names.empty?
+      ["align", "alignstack", "allocalign", "allocptr", "alwaysinline", "builtin", "byval", "cold", "convergent", "dereferenceable", "dereferenceable_or_null", "frame-pointer", "hot", "immarg", "inalloca", "inlinehint", "inreg", "jumptable", "memory", "minsize", "naked", "nest", "noalias", "nobuiltin", "nocallback", "nocapture", "nocf_check", "nocreateundeforpoison", "nodivergencesource", "noduplicate", "noimplicitfloat", "noinline", "nomerge", "nonlazybind", "nonnull", "noprofile", "norecurse", "noredzone", "noreturn", "nosync", "noundef", "nounwind", "nonnull", "null_pointer_is_valid", "optdebug", "optnone", "optsize", "returned", "readnone", "readonly", "safestack", "sanitize_address", "sanitize_memory", "sanitize_thread", "shadowcallstack", "signext", "speculatable", "speculative_load_hardening", "sret", "ssp", "sspreq", "sspstrong", "strictfp", "uwtable", "vscale_range", "willreturn", "writeonly", "zeroext", "captures", "uninitialized", "preallocated", "swiftself", "swifterror", "swiftasync", "noalias", "writable", "dead_on_unwind", "initializes", "nofpclass", "range", "stackalignment", "trap-func-name", "tune-cpu", "target-cpu", "target-features", "probe-stack", "stack-protector-buffer-size", "no-builtins", "prefer-vector-width"].each do |n|
+        kind = LibLLVM.get_enum_attribute_kind_for_name(to_c_str(n), n.bytesize.to_u64)
+        @names[kind] = n if kind != 0
+      end
+    end
+    @names[kind]? || "kind##{kind}"
+  end
+
+  def attribute_in_ir?(name : String) : Bool
+    ir_enum_attribute_names.includes?(name) || ir_string_attribute_names.includes?(name)
+  end
+
+  def add_attributes(value : LibLLVM::ValueRef, index : Int32, callsite : Bool) : Nil
+    count = callsite ? LibLLVM.get_callsite_attribute_count(value, index) : LibLLVM.get_attribute_count_at_index(value, index)
+    return if count == 0
+    buffer = Pointer(LibLLVM::AttributeRef).malloc(count.to_u64)
+    if callsite
+      LibLLVM.get_callsite_attributes(value, index, buffer)
+    else
+      LibLLVM.get_attributes_at_index(value, index, buffer)
+    end
+    i = 0
+    while i < count
+      attr = buffer[i]
+      if LibLLVM.is_string_attribute(attr) != 0
+        klen = 0
+        kptr = LibLLVM.get_string_attribute_kind(attr, pointerof(klen))
+        key = klen > 0 ? String.new(klen) { |b| b.copy_from(kptr, klen) } : ""
+        note("attribute", key, attribute_in_ir?(key))
+      else
+        name = attribute_name(LibLLVM.get_enum_attribute_kind(attr))
+        note("attribute", name, attribute_in_ir?(name))
+      end
+      i = i + 1
+    end
+  end
+
+  def add_module(llvm : LibLLVM::ModuleRef) : Nil
+    note("triple", string_from_c(LibLLVM.get_target(llvm)), true)
+    add_flags(llvm)
+    g = LibLLVM.get_first_global(llvm)
+    while g.address != 0
+      note("linkage", linkage_name(llvm_linkage(g)), linkage_in_ir?(llvm_linkage(g)))
+      note("tls", tls_name(LibLLVM.get_thread_local_mode(g)), true)
+      note("visibility", visibility_name(LibLLVM.get_visibility_int(g)), LibLLVM.get_visibility_int(g) <= 2)
+      note("unnamed_addr", unnamed_name(LibLLVM.get_unnamed_address(g)), LibLLVM.get_unnamed_address(g) != 2)
+      note("value", "global variable", true)
+      g = LibLLVM.get_next_global(g)
+    end
+    f = LibLLVM.get_first_function(llvm)
+    while f.address != 0
+      add_function(f)
+      f = LibLLVM.get_next_function(f)
+    end
+    if LibLLVM.get_first_global_alias(llvm).address != 0
+      note("value", "global alias", false)
+    end
+  end
+
+  def add_flags(llvm : LibLLVM::ModuleRef) : Nil
+    name = to_c_str("llvm.module.flags")
+    count = LibLLVM.get_named_metadata_num_operands(llvm, name)
+    return if count == 0
+    nodes = Pointer(LibLLVM::ValueRef).malloc(count.to_u64)
+    LibLLVM.get_named_metadata_operands(llvm, name, nodes)
+    i = 0
+    while i < count
+      ops = Pointer(LibLLVM::ValueRef).malloc(3_u64)
+      LibLLVM.get_md_node_operands(nodes[i], ops)
+      klen = 0
+      kptr = LibLLVM.get_md_string(ops[1], pointerof(klen))
+      key = klen > 0 ? String.new(klen) { |b| b.copy_from(kptr, klen) } : ""
+      note("module flag", key, ir_module_flag_behavior(key) >= 0)
+      i = i + 1
+    end
+  end
+
+  def add_function(f : LibLLVM::ValueRef) : Nil
+    name = string_from_c(LibLLVM.get_value_name(f))
+    note("calling convention", cc_name(llvm_calling_convention(f)), llvm_calling_convention(f) == 0)
+    note("linkage", linkage_name(llvm_linkage(f)), linkage_in_ir?(llvm_linkage(f)))
+    note("visibility", visibility_name(LibLLVM.get_visibility_int(f)), LibLLVM.get_visibility_int(f) <= 2)
+    note("value", "function", true)
+    pers = LibLLVM.has_personality_fn(f) != 0 ? LibLLVM.get_personality_fn(f) : Pointer(Void).new(0_u64)
+    if pers.address != 0
+      note("personality", "present", true)
+    end
+    add_attributes(f, -1, false)
+    add_attributes(f, 0, false)
+    param_count = LibLLVM.count_params(f)
+    i = 0
+    while i < param_count
+      add_attributes(f, i + 1, false)
+      i = i + 1
+    end
+    bb = LibLLVM.get_first_basic_block(f)
+    while bb.address != 0
+      note("value", "basic block", true)
+      inst = LibLLVM.get_first_instruction(bb)
+      while inst.address != 0
+        add_instruction(inst)
+        inst = LibLLVM.get_next_instruction(inst)
+      end
+      bb = LibLLVM.get_next_basic_block(bb)
+    end
+  end
+
+  # Whether the LLVM-C builder folds this instruction when the translator rebuilds it: an arithmetic,
+  # conversion, comparison, select, GEP or aggregate op whose every operand is a plain constant (an
+  # undef, an integer, a float or a null). Constant expressions and globals are not plain, and the
+  # folder leaves them alone.
+  def would_fold?(inst : LibLLVM::ValueRef) : Bool
+    opcode = LibLLVM.get_instruction_opcode(inst)
+    foldable = (opcode >= 8 && opcode <= 25) || (opcode >= 29 && opcode <= 43) || opcode == 46 || opcode == 53 || opcode == 54
+    return false unless foldable
+    count = LibLLVM.get_num_operands(inst)
+    i = 0
+    while i < count
+      kind = llvm_value_kind(LibLLVM.get_operand(inst, i))
+      return false unless kind == 14 || kind == 18 || kind == 19 || kind == 20
+      i = i + 1
+    end
+    count > 0
+  end
+
+  def add_instruction(inst : LibLLVM::ValueRef) : Nil
+    opcode = LibLLVM.get_instruction_opcode(inst)
+    note("opcode", llvm_opcode_name(opcode), opcode_in_ir?(opcode))
+    note("would fold", llvm_opcode_name(opcode), true) if would_fold?(inst)
+    if opcode == 45 || opcode == 5
+      callee = LibLLVM.get_called_value(inst)
+      if llvm_value_kind(callee) == vk_inline_asm
+        len = 0_u64
+        template = LibLLVM.get_inline_asm_string(callee, pointerof(len))
+        text = len > 0_u64 ? String.new(len.to_i32) { |b| b.copy_from(template, len.to_i32) } : ""
+        note("inline asm template", text, true)
+      elsif LibLLVM.get_intrinsic_id(callee) != 0
+        intrinsic = string_from_c(LibLLVM.get_value_name(callee))
+        note("intrinsic", intrinsic, intrinsic_match(intrinsic, TypeTable.new) != nil)
+      end
+      note("calling convention", cc_name(LibLLVM.get_instruction_call_conv(inst)), LibLLVM.get_instruction_call_conv(inst) == 0)
+      tail = LibLLVM.get_tail_call_kind(inst)
+      note("tail call", ["none", "tail", "musttail", "notail"][tail], tail == 0 || tail == 1) if tail >= 0 && tail <= 3
+      add_attributes(inst, -1, true)
+      add_attributes(inst, 0, true)
+    end
+    if opcode == 27 || opcode == 28 || opcode == 55 || opcode == 56 || opcode == 57
+      note("ordering", ordering_name(LibLLVM.get_ordering_int(inst)), true)
+    end
+    if opcode == 57
+      note("atomicrmw operation", LibLLVM.get_atomic_rmw_bin_op_int(inst).to_s, LibLLVM.get_atomic_rmw_bin_op_int(inst) <= 18)
+    end
+    if opcode == 42
+      note("icmp predicate", LibLLVM.get_icmp_predicate(inst).to_s, LibLLVM.get_icmp_predicate(inst) >= 32 && LibLLVM.get_icmp_predicate(inst) <= 41)
+    end
+    if opcode == 29
+      note("gep source type", "#{LibLLVM.get_gep_source_element_type(inst).address != 0}", true)
+    end
+    if opcode == 45 && llvm_value_kind(LibLLVM.get_called_value(inst)) == vk_inline_asm
+      note("value", "inline asm", true)
+    end
+  end
+
+  def opcode_in_ir?(opcode : Int32) : Bool
+    [1, 2, 3, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 49, 53, 54, 55, 56, 57, 58, 59, 60, 66, 68].includes?(opcode)
+  end
+
+  def linkage_in_ir?(value : Int32) : Bool
+    value == 0 || value == 3 || value == 5 || value == 8 || value == 9 || value == 12
+  end
+
+  def linkage_name(value : Int32) : String
+    names = Hash(Int32, String).new
+    names[0] = "external"
+    names[1] = "available_externally"
+    names[2] = "linkonce"
+    names[3] = "linkonce_odr"
+    names[4] = "linkonce_odr_autohide"
+    names[5] = "weak"
+    names[6] = "weak_odr"
+    names[7] = "appending"
+    names[8] = "internal"
+    names[9] = "private"
+    names[10] = "dllimport"
+    names[11] = "dllexport"
+    names[12] = "extern_weak"
+    names[13] = "ghost"
+    names[14] = "common"
+    names[15] = "linker_private"
+    names[16] = "linker_private_weak"
+    names[value]? || "linkage##{value}"
+  end
+
+  def tls_name(value : Int32) : String
+    ["not_thread_local", "generaldynamic", "localdynamic", "initialexec", "localexec"][value]? || "tls##{value}"
+  end
+
+  def visibility_name(value : Int32) : String
+    ["default", "hidden", "protected"][value]? || "visibility##{value}"
+  end
+
+  def unnamed_name(value : Int32) : String
+    ["none", "unnamed_addr", "local_unnamed_addr"][value]? || "unnamed##{value}"
+  end
+
+  def cc_name(value : Int32) : String
+    if value == 0
+      "ccc"
+    elsif value == 8
+      "fastcc"
+    elsif value == 9
+      "coldcc"
+    else
+      "cc##{value}"
+    end
+  end
+
+  def ordering_name(value : Int32) : String
+    ["notatomic", "unordered", "monotonic", "ordering3", "acquire", "release", "acq_rel", "seq_cst"][value]? || "ordering##{value}"
+  end
+
+  def report : Nil
+    STDOUT.puts "category\tname\tcount\tin_iyi_ir"
+    missing = 0
+    @counts.keys.sorted.each do |key|
+      flag = @in_ir[key] ? "yes" : "no"
+      missing = missing + 1 unless @in_ir[key]
+      STDOUT.puts "#{key}\t#{@counts[key]}\t#{flag}"
+    end
+    STDOUT.puts "entries_not_in_ir\t#{missing}"
+  end
+end
+
+IrTool.run

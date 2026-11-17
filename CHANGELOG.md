@@ -4,6 +4,12 @@
 
 ### Added
 
+- **The inline-assembly inventory and driver are written in iyi.**
+  The component accounts for assembly expressions per target and compares
+  AArch64 bytes and relocations with hosted cross-compilation on Darwin and
+  Linux targets. Constraint refusals and mutation checks guard those comparisons.
+  The hosted backend remains the default.
+
 - **`iyi doc --json [DIR]` prints a package's exported APIs as data.**
   The package path and compiler identity accompany its modules, ordered by
   path, each carrying the same API and doc comments as `iyi mod dump --json`.

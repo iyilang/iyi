@@ -906,8 +906,10 @@ prove_mutation "range for loop drops its inclusive end" "$INTERP" \
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
 prove_mutation "raise location moved to the brace" "$PARSER" \
-  "exp.location = tag_loc" \
-  "exp.location = open_loc" \
+  "parser.line_number = tag_loc.line_number
+          parser.column_number = tag_loc.column_number" \
+  "parser.line_number = open_loc.line_number
+          parser.column_number = open_loc.column_number" \
   -- check_macros_still_match || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
@@ -919,7 +921,7 @@ MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
 prove_mutation "symbols print bare whatever their text" "$METHODS" \
   "plain = false" \
-  "plain = plain" \
+  "plain = true" \
   -- check_macros_still_match || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 

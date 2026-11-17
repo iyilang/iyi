@@ -1103,16 +1103,16 @@ pub class CommandDriver
     # the usage after it and no `Error:` in front, so this cannot go through
     # the driver's own error printer.
     if rest.empty?
-      puts "Cannot initialize #{CommandDriver.language_name} project: Argument TYPE is missing"
-      puts parser
+      @stderr.puts "Cannot initialize #{CommandDriver.language_name} project: Argument TYPE is missing"
+      @stderr.puts format_option_help(parser)
       exit(1)
       return
     end
 
     skeleton = rest[0]
     if skeleton != "lib" && skeleton != "app"
-      puts "Cannot initialize #{CommandDriver.language_name} project: Invalid TYPE value: #{skeleton}"
-      puts parser
+      @stderr.puts "Cannot initialize #{CommandDriver.language_name} project: Invalid TYPE value: #{skeleton}"
+      @stderr.puts format_option_help(parser)
       exit(1)
     end
   end

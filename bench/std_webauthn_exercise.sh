@@ -18,11 +18,14 @@ if [ -z "$PY" ]; then
   echo 'FAIL: Python cryptography is required for the WebAuthn software authenticator'
   exit 1
 fi
-BASE="${TMPDIR:-${TEMP:-}}"
+BASE="${TMPDIR:-${RUNNER_TEMP:-${TEMP:-}}}"
 if [ -z "$BASE" ]; then
-  echo 'FAIL: TMPDIR or TEMP is required for WebAuthn scratch files'
+  echo 'FAIL: TMPDIR, RUNNER_TEMP or TEMP is required for WebAuthn scratch files'
   exit 1
 fi
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) BASE="$(cygpath -u "$BASE")" ;;
+esac
 WORK="$(mktemp -d "${BASE%/}/iyi-webauthn.XXXXXX")" || exit 1
 trap 'rm -rf "$WORK"' EXIT
 case "$(uname -s)" in
@@ -54,10 +57,10 @@ print('  900 registrations, 900 assertions, plus named negative cases')
 PY
 
 for mode in plain release; do
-  opt=()
-  [ "$mode" = release ] && opt=(--release)
+  set --
+  [ "$mode" = release ] && set -- --release
   echo "== $mode build"
-  if ! "$IYI" build "${opt[@]}" -o "$WORK/exercise-$mode" "$REPO/bench/std_webauthn_exercise.iyi" >"$WORK/build-$mode.log" 2>&1; then
+  if ! "$IYI" build "$@" -o "$WORK/exercise-$mode" "$REPO/bench/std_webauthn_exercise.iyi" >"$WORK/build-$mode.log" 2>&1; then
     echo "FAIL: $mode build"; tail -30 "$WORK/build-$mode.log"; exit 1
   fi
   if ! "$WORK/exercise-$mode" "$WORK/cases.jsonl" "$W3C" "$CHROME" >"$WORK/$mode.out" 2>&1; then

@@ -284,6 +284,9 @@ jobs:
           path: .build
       - run: chmod +x .build/crystal
 
+      - name: Sumdb vectors, on Linux
+        run: ./bin/crystal spec -Dwithout_openssl -Dwithout_zlib -Dwithout_iconv spec/compiler/mod_sumdb_spec.cr
+
       # `-o .build/crystal` is make's "take this as up to date": the compiler
       # came from the job above and its timestamp is younger than the checkout.
       - name: Compiler specs
@@ -1597,6 +1600,11 @@ jobs:
           python3 --version
           brew install crystal coreutils pkgconf
           echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
+
+      # Run these compiler primitives on macOS itself; the other compiler
+      # spec jobs run on Linux and Windows.
+      - name: Sumdb vectors, on macOS
+        run: CRYSTAL_PATH="lib:$PWD/src" crystal spec -Dwithout_openssl -Dwithout_zlib -Dwithout_iconv spec/compiler/mod_sumdb_spec.cr
 
       # The same diet the Linux tarball went on, from the same recipe file
       # (`scripts/build-static-llvm.sh`): 0.8.0's darwin package carried
@@ -3277,6 +3285,10 @@ jobs:
       - name: Build the fork's compiler
         shell: cmd
         run: make -f Makefile.win crystal
+
+      - name: Sumdb vectors, on Windows
+        shell: cmd
+        run: .\bin\crystal.bat spec -Dwithout_openssl -Dwithout_zlib -Dwithout_iconv spec\compiler\mod_sumdb_spec.cr
 
       # A spec that builds a program runs the compiler by the name below;
       # `bin/crystal` is a shell script.

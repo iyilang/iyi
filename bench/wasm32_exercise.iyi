@@ -466,8 +466,8 @@ puts "locals: a top-level array, an array in a function, a call's arguments, a c
 # === 8. Large objects ===
 puts "== large objects =="
 
-LARGE_STRING_BYTES = 1_048_592
-LARGE_INTERIOR_BYTES = 200_000_u64
+LARGE_STRING_BYTES    =   1_048_592
+LARGE_INTERIOR_BYTES  = 200_000_u64
 LARGE_INTERIOR_OFFSET = 131_200_u64
 
 def large_string(seed : Int32) : String

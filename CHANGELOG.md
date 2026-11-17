@@ -17,7 +17,8 @@
   The hosted CLI remains unchanged; these components add no command wiring.
   Output suffixes follow the configured target and source diagnostics use
   native path separators. Windows daemon identity reuses the file module's
-  Win32 metadata binding.
+  Win32 metadata binding. The hosted daemon oracle passes standard-stream
+  selectors using Windows' native handle width.
 
 - **`iyi doc --json [DIR]` prints a package's exported APIs as data.**
   The package path and compiler identity accompany its modules, ordered by

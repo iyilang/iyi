@@ -217,7 +217,7 @@ module HostedDaemonOracle
 
   def self.saved_stdio(fd : Int32) : IO::FileDescriptor
     {% if flag?(:win32) %}
-      io = IO::FileDescriptor.from_stdio(fd)
+      io = IO::FileDescriptor.from_stdio(fd.to_u64)
       io.close_on_finalize = false
       io
     {% else %}

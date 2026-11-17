@@ -4,6 +4,12 @@
 
 ### Added
 
+- **ELF object inspection, rewriting and linker tools are written in iyi.**
+  The component includes Linux startup IR for x86-64 and AArch64, object
+  round trips, relocation and executable checks, and bounded execution
+  comparisons on matching Linux hosts. Other hosts report the execution
+  limits. The hosted backend remains the default.
+
 - Add the LLVM bindings and `iyi-ir` import, translation and round-trip tool in iyi.
   Same-host gates cover fixtures, refusals and mutations; the full corpus round
   trip remains unmeasured. Existing hosted commands are unchanged.

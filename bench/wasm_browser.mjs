@@ -3,7 +3,63 @@ import { spawn } from "node:child_process";
 import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { extname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { pathToFileURL } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
+
+// Only this runner's live child, started in headless mode with its private
+// profile, can be a proof browser. A Chrome/ product also needs the
+// HeadlessChrome user-agent token.
+// CI job 134001438359: product Chrome/157.0.8103.50, user agent
+// Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko)
+// HeadlessChrome/157.0.0.0 Safari/537.36.
+export function isOwnedHeadless(version, child, profile) {
+  if (!Number.isInteger(child?.pid) || child.pid <= 0 ||
+      child.exitCode !== null || child.signalCode !== null ||
+      !profile || !child.spawnargs?.includes(`--user-data-dir=${profile}`) ||
+      !child.spawnargs?.includes("--remote-debugging-port=0") ||
+      !child.spawnargs?.includes("--headless=new")) return false;
+  if (typeof version?.product !== "string") return false;
+  if (version.product.startsWith("HeadlessChrome/")) return true;
+  return version.product.startsWith("Chrome/") &&
+    typeof version.userAgent === "string" &&
+    /(?:^|\s)HeadlessChrome\/\d[\d.]*(?:\s|$)/.test(version.userAgent);
+}
+
+function hasExited(child) {
+  return child.exitCode !== null || child.signalCode !== null;
+}
+
+function waitForExit(child, timeout) {
+  if (hasExited(child)) return Promise.resolve(true);
+  return new Promise(resolve => {
+    const finish = exited => {
+      clearTimeout(timer);
+      child.off("exit", onExit);
+      resolve(exited);
+    };
+    const onExit = () => finish(true);
+    const timer = setTimeout(() => finish(hasExited(child)), timeout);
+    child.once("exit", onExit);
+    if (hasExited(child)) finish(true);
+  });
+}
+
+// child and profile are the process and mkdtemp directory this runner made.
+// A cleanup warning must not replace the result of the proof itself.
+export async function cleanupOwnedBrowser(child, profile, remove = rm) {
+  try {
+    if (child?.pid && !hasExited(child)) {
+      child.kill("SIGTERM");
+      if (!await waitForExit(child, 2000)) {
+        child.kill("SIGKILL");
+        if (!await waitForExit(child, 2000)) throw new Error("child did not exit after SIGKILL");
+      }
+    }
+    await remove(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+  } catch (error) {
+    console.warn(`warning: unable to clean up owned browser profile: ${error?.message ?? String(error)}`);
+  }
+}
 
 function argumentsOf(args) {
   const values = {};
@@ -118,7 +174,9 @@ async function main() {
       const cdp = new CDP(socket);
       const version = await cdp.send("Browser.getVersion");
       console.log(`Browser ${version.product}`);
-      if (!version.product?.startsWith("HeadlessChrome/")) throw new Error("refusing a non-headless browser");
+      console.log(`Browser.getVersion ${JSON.stringify(version)}`);
+      console.log(`Browser argv ${JSON.stringify(child.spawnargs)}`);
+      if (!isOwnedHeadless(version, child, profile)) throw new Error("refusing a non-headless browser or an unowned browser");
       const { targetId } = await cdp.send("Target.createTarget", { url: "about:blank" });
       const { sessionId } = await cdp.send("Target.attachToTarget", { targetId, flatten: true });
       await cdp.send("Runtime.enable", {}, sessionId);
@@ -150,23 +208,16 @@ async function main() {
   } finally {
     clearTimeout(timer);
     socket?.close();
-    if (child?.pid && child.exitCode === null && child.signalCode === null) {
-      const exited = new Promise(resolve => child.once("exit", resolve));
-      child.kill();
-      await Promise.race([exited, sleep(2000)]);
-      if (child.exitCode === null && child.signalCode === null) {
-        child.kill("SIGKILL");
-        await exited;
-      }
-    }
+    await cleanupOwnedBrowser(child, profile);
     await new Promise(resolve => server.close(resolve));
-    await rm(profile, { recursive: true, force: true });
   }
 }
 
-try {
-  await main();
-} catch (error) {
-  console.error(error?.stack ?? String(error));
-  process.exitCode = 1;
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  try {
+    await main();
+  } catch (error) {
+    console.error(error?.stack ?? String(error));
+    process.exitCode = 1;
+  }
 }

@@ -1642,6 +1642,10 @@ jobs:
           # installed formula would upgrade the machine's own copy.
           for f in crystal coreutils pkgconf; do brew list --versions "$f" >/dev/null || brew install "$f"; done
           echo "sdk=sdk$(xcrun --show-sdk-version)-$(xcodebuild -version | awk '/Build version/ {print $3}')" >> "$GITHUB_OUTPUT"
+          # The self-hosted runner's service can inherit a TMPDIR that no
+          # longer exists (an installer's sandbox); every later step uses
+          # the job's own temporary directory instead.
+          echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
           echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
 
       # The same diet the Linux tarball went on, from the same recipe file
@@ -1974,6 +1978,7 @@ jobs:
         run: |
           for f in crystal coreutils pkgconf; do brew list --versions "$f" >/dev/null || brew install "$f"; done
           echo "sdk=sdk$(xcrun --show-sdk-version)-$(xcodebuild -version | awk '/Build version/ {print $3}')" >> "$GITHUB_OUTPUT"
+          echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
           echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
       - name: Restore the static LLVM
         id: llvm-cache
@@ -2041,6 +2046,7 @@ jobs:
         run: |
           for f in crystal coreutils pkgconf; do brew list --versions "$f" >/dev/null || brew install "$f"; done
           echo "sdk=sdk$(xcrun --show-sdk-version)-$(xcodebuild -version | awk '/Build version/ {print $3}')" >> "$GITHUB_OUTPUT"
+          echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
           echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
       - name: Restore the static LLVM
         id: llvm-cache
@@ -2080,6 +2086,7 @@ jobs:
         run: |
           for f in crystal coreutils pkgconf; do brew list --versions "$f" >/dev/null || brew install "$f"; done
           echo "sdk=sdk$(xcrun --show-sdk-version)-$(xcodebuild -version | awk '/Build version/ {print $3}')" >> "$GITHUB_OUTPUT"
+          echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
           echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
       - name: Restore the static LLVM
         id: llvm-cache

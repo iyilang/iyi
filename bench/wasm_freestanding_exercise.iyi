@@ -36,6 +36,10 @@ fun contract_read_zero : Int64
   __iyi_read(0, Pointer(Void).new(0_u64), 0_u64)
 end
 
+fun contract_read(buffer : UInt8*, count : Int32) : Int64
+  __iyi_read(0, buffer.as(Void*), count.to_u64)
+end
+
 fun contract_collect : Nil
   IyiMark.collect
 end

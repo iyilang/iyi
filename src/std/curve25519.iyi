@@ -15,7 +15,7 @@
 # taken, or an `Array(UInt8)`; what comes back is a `String` of raw bytes.
 # The caller brings every secret: a private key or a seed is 32 bytes from
 # wherever the caller draws them. This module imports nothing past
-# std/int, std/atomic (the word its table is published through) and
+# std/int, std/lazy (which keeps its table) and
 # std/digest's SHA-512 and `ValueBarrier`, so a package that signs or
 # agrees on a key is not counted as reaching the operating system (`iyi
 # mod reach`); `Random::Secure.random_bytes(32)` from std/random is where
@@ -704,6 +704,7 @@ struct CurvePoint
   # adds the identity like any other. This is ref10's
   # `ge_scalarmult_base` (Bernstein, Duif, Lange, Schwabe and Yang).
   def self.base_mult(k : Pointer(UInt8)) : CurvePoint
+    table = CurveBaseTable.precomputed
     digits = uninitialized UInt64[64]
     e = pointerof(digits).as(Pointer(UInt64))
     i = 0
@@ -727,13 +728,13 @@ struct CurvePoint
     q = identity
     i = 1
     while i < 64
-      q = q.madd(CurveBaseTable.pick(i >> 1, e[i]))
+      q = q.madd(CurveBaseTable.pick(table, i >> 1, e[i]))
       i = i + 2
     end
     q = q.double.double.double.double
     i = 0
     while i < 64
-      q = q.madd(CurveBaseTable.pick(i >> 1, e[i]))
+      q = q.madd(CurveBaseTable.pick(table, i >> 1, e[i]))
       i = i + 2
     end
     q
@@ -908,7 +909,7 @@ struct CurveBaseTable
     ypx = CurveField.one
     ymx = CurveField.one
     xy2d = CurveField.zero
-    base = precomputed + (row * 8).to_i64
+    base = table + (row * 8).to_i64
     j = 1
     while j <= 8
       diff = j.to_u64 ^ index

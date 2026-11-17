@@ -91,14 +91,13 @@
 # 5915), whose public key, when it carries one, must be d's.
 #
 # Pure computation: std/digest, std/crypto's HMAC, std/asn1, std/ecdsa
-# for the public key and its checking, and std/atomic for the word the
-# fixed-base table is published through.
+# for the public key and its checking, and std/lazy, which keeps the
+# fixed-base table.
 
 @[Unsafe("keys and points are read out of the bytes of strings through raw pointers")]
 module std/p256
 
 import std/int
-import std/atomic
 import std/digest::{SHA256, SHA384, SHA512, ValueBarrier}
 import std/crypto::{HMAC}
 import std/asn1::{Der, DerValue, DerTag, Asn1Error}
@@ -693,6 +692,7 @@ struct P256Point
   # from its row by masks, all eight touched, its sign applied by a mask;
   # a zero digit adds the identity, as the complete formulas allow.
   def self.base_mult(k : P256Num) : P256Point
+    table = P256BaseTable.precomputed
     digits = uninitialized UInt64[64]
     e = pointerof(digits).as(Pointer(UInt64))
     # A nibble is 0 to 15 and the carry in 0 or 1, so nibble + 8 is never
@@ -710,16 +710,16 @@ struct P256Point
     acc = P256Point.identity
     i = 1
     while i < 64
-      acc = acc + P256BaseTable.pick(i >> 1, e[i])
+      acc = acc + P256BaseTable.pick(table, i >> 1, e[i])
       i = i + 2
     end
     acc = acc.double.double.double.double
     i = 0
     while i < 64
-      acc = acc + P256BaseTable.pick(i >> 1, e[i])
+      acc = acc + P256BaseTable.pick(table, i >> 1, e[i])
       i = i + 2
     end
-    acc + P256BaseTable.top(carry)
+    acc + P256BaseTable.top(table, carry)
   end
 
   # [k]P for a secret k below n: 64 windows of four bits from the top,
@@ -887,7 +887,7 @@ struct P256BaseTable
     index = (digit ^ (0_u64 &- negative)) &+ negative
     x = P256Num.zero
     y = P256Num.zero
-    base = precomputed + (row * 16).to_i64
+    base = table + (row * 16).to_i64
     j = 1
     while j <= 8
       bit = ValueBarrier.u64(((j.to_u64 ^ index) &- 1_u64).unsafe_shr(63))

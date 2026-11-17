@@ -252,12 +252,13 @@ echo
 echo "== how a table's address reaches a second thread, read off the IR"
 # P-256's table of G's odd multiples is worked out by the first check that
 # wants it, and a second thread must never read it part written: a good
-# signature would be refused. On x86_64 a plain store of the table's
-# address after its entries is seen in that order by every thread; on a
-# machine that orders its stores loosely it is not, and no run on this one
-# would show it. So it is read off the IR of a small program: every read
-# of the word the address is kept in has to be an acquire load and its one
-# write a release store.
+# signature would be refused. On x86_64 a plain store of the table after
+# its entries is seen in that order by every thread; on a machine that
+# orders its stores loosely it is not, and no run on this one would show
+# it. So it is read off the IR of a small program: the table is kept by
+# std/lazy, whose mark is the class variable's first word, and every read
+# of the mark has to be an acquire load, its claim an exchange and its one
+# write the release store that comes after the table's.
 cat >"$WORK/published.iyi" <<'IYI'
 module published
 
@@ -276,20 +277,28 @@ key = EcdsaPublicKey.from_point(EcdsaCurve::P256, g).or_panic
 puts key.verify(EcdsaHash::SHA256, "hello", [0x30_u8, 6_u8, 2_u8, 1_u8, 1_u8, 2_u8, 1_u8, 1_u8])
 IYI
 # published <file.ll> <class variable>: what in the IR reads or writes the
-# word a table's address is kept in other than by an acquire load and a
-# release store, a line each; 1 if anything does, or if either is missing.
-# The zero the word starts from is a plain store, made before the
-# program's first line.
+# mark of the `Lazy` the table is kept in other than by an acquire load,
+# the claim's exchange and a release store, a line each; 1 if anything
+# does, or if any of the three is missing. The value past the mark (an
+# offset into the variable) is read and written only behind it; the
+# zeroing before the program's first line and the collector's write
+# barrier name the variable without reading it.
 published() {
   awk -v name="$2" '
-    !(index($0, "@\"" name "\"") || index($0, "@\"" name ".")) || /^@/ || /store i64 0, ptr @/ { next }
-    / = load atomic i64, ptr @[^ ]* acquire,/ { loads++; next }
-    /store atomic i64 [^,]*, ptr @[^ ]* release,/ { stores++; next }
-    { print name ": neither an acquire load nor a release store:" $0; other++ }
+    {
+      s = $0
+      gsub(/getelementptr inbounds (nuw )?\(i8, ptr @"[^"]*", i64 [1-9][0-9]*\)/, "", s)
+    }
+    !index(s, "@\"" name "\"") || /^@/ || /@llvm\.memset/ || /IyiMark::barrier/ { next }
+    / = load atomic i32, ptr @[^ ]* acquire,/ { loads++; next }
+    / = cmpxchg ptr @[^ ]*, i32 0, i32 1 acquire monotonic,/ { claims++; next }
+    /store atomic i32 2, ptr @[^ ]* release,/ { stores++; next }
+    { print name ": neither the mark'"'"'s acquire load, its claim nor its release store:" $0; other++ }
     END {
       if (!loads) print name ": no acquire load of it"
+      if (!claims) print name ": no claim of it"
       if (!stores) print name ": no release store to it"
-      exit (other || !loads || !stores) ? 1 : 0
+      exit (other || !loads || !claims || !stores) ? 1 : 0
     }' "$1"
 }
 # The IR is one pinned target's whatever the host is: the orderings are
@@ -305,7 +314,7 @@ if ! published_ir "$IYI_PATH" "$WORK/published"; then
   echo "  no IR was written: $(grep -m1 -E 'Error|BUG' "$WORK/published.log")"
   status=1
 elif published "$WORK/published.ll" 'Std::Ecdsa::EcdsaP256::g_table' >>"$WORK/published.out"; then
-  echo "  the table's address is read by an acquire load and written, once the table is whole, by a release store"
+  echo "  the table is kept by std/lazy: its mark is read by an acquire load and written, once the table is whole, by a release store"
 else
   sed 's/^/  /' "$WORK/published.out"
   status=1
@@ -422,8 +431,8 @@ prove_unpublished() {
     status=1
   fi
 }
-prove_unpublished "a table's address stored with no ordering" 'Std::Ecdsa::EcdsaP256::g_table' "no release store to it" \
-  's/^    @@g_table.set_release(table.address)$/    @@g_table.set_relaxed(table.address)/'
+prove_unpublished "the table in a class variable filled by a plain store, as before std/lazy" 'Std::Ecdsa::EcdsaP256::g_table' "no release store to it" \
+  's/^  @@g_table = Lazy(Pointer(EcdsaP256Num)).new$/  @@g_table = Pointer(EcdsaP256Num).new(0_u64)/;s/^    @@g_table.get { build_g_table(EcdsaGroup.of(EcdsaCurve::P256)) }$/    @@g_table.address == 0_u64 ? (@@g_table = build_g_table(EcdsaGroup.of(EcdsaCurve::P256))) : @@g_table/'
 echo
 if [ "$status" -eq 0 ]; then
   echo "the std/ecdsa exercise holds ($mutations breaks caught)"

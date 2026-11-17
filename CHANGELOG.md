@@ -4,6 +4,10 @@
 
 ### Added
 
+- Add the artifact reader/writer and a standalone `iyi-mod` driver in iyi.
+  Same-host gates compare binary output, refusals, declarations and JSON
+  against the hosted implementation. Existing hosted commands are unchanged.
+
 - **`iyi doc --json [DIR]` prints a package's exported APIs as data.**
   The package path and compiler identity accompany its modules, ordered by
   path, each carrying the same API and doc comments as `iyi mod dump --json`.

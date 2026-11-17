@@ -300,6 +300,26 @@ r3_explain="$WORK/r3/explain.txt"
 IYI_PATH="$WORK/r3/earlier${PSEP}$REPO/src${PSEP}$WORK/r3/later" run_json "$WORK/r3" --explain reached_test.iyi > "$r3_explain"
 expect_contains "$(explained "$r3_explain" lines)" "reached_test.iyi: miss: call path (earlier/lib/util.iyi" "new import candidate named"
 expect_eq "$(explained "$r3_explain" json | json_cached)" 0 "new import candidate mutation"
+if [ "${STALE_TESTS_KEEP_GOING:-0}" = 1 ]; then
+  # Row 3 on Windows names no changed file (`call path ()`): the element that
+  # changed was attributed to no root. Print where the reached elements say
+  # they live, as the compiler wrote them, so the mapping can be read.
+  echo "  [row 3 diagnostic: the files the reached elements are located in]"
+  (cd "$WORK/r3" && IYI_PATH="$WORK/r3/earlier${PSEP}$REPO/src${PSEP}$WORK/r3/later" \
+    "$IYI" build -Diyi_observe --stale-dump-elements "$WORK/r3/elements.jsonl" -o "$WORK/r3/diag-bin" reached_test.iyi >/dev/null 2>&1 || true)
+  python3 - "$WORK/r3/elements.jsonl" "$WORK/r3" <<'PY' || true
+import json, sys
+seen = {}
+for line in open(sys.argv[1]):
+    row = json.loads(line)
+    file = row.get("file") or "(none)"
+    if file.endswith("util.iyi") or "r3" in file or file == "(none)":
+        seen[file] = seen.get(file, 0) + 1
+for file, count in sorted(seen.items()):
+    print(f"    {count:4d}  {file}")
+print(f"    work dir: {sys.argv[2]}")
+PY
+fi
 
 # Row 4 mutation proof: adding an entry to an observed directory changes a
 # directory observation; an unrelated directory would leave this assertion hit.
@@ -1833,7 +1853,13 @@ expect_eq "$(printf '%s' "$r58_after" | json_failed)" 0 "the released tests pass
 step 59 "a contradicted receipt that validates is not served by the fast path"
 r59="$WORK/r59"
 mkdir -p "$r59/runtime"
-cp -R "$REPO/src" "$r59/runtime/src"
+# `cp -R` recreates src/lib_c's symlinks, which MSYS cannot create on the
+# runner (cp: cannot create symbolic link ...); copy what they point to there.
+if [ "$WINDOWS" -eq 1 ]; then
+  python3 -c 'import shutil, sys; shutil.copytree(sys.argv[1], sys.argv[2], symlinks=False, ignore_dangling_symlinks=True)' "$REPO/src" "$r59/runtime/src"
+else
+  cp -R "$REPO/src" "$r59/runtime/src"
+fi
 python3 - "$r59/runtime/src/std/observe.iyi" <<'PY'
 import sys
 path = sys.argv[1]

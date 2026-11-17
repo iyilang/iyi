@@ -34,6 +34,14 @@ if [ -z "$PY" ]; then
   exit 1
 fi
 
+# The embedded python runs this script again. A bare `bash` there finds
+# System32's WSL launcher first on a Windows runner (no distribution is
+# installed, so it prints an install message and fails); give it the bash that
+# is running this script, as a path python can start.
+STALE_BASH="${BASH:-bash}"
+[ "$WINDOWS" -eq 1 ] && STALE_BASH="$(cygpath -m "$STALE_BASH")"
+export STALE_BASH
+
 if [ "$WINDOWS" -eq 1 ]; then
   IYI="${IYI:-$REPO/.build/iyi.exe}"
   IYI="$(cygpath -m "$IYI")"
@@ -561,7 +569,14 @@ test_planted_hidden_read() {
   trap 'if [ "$failed" -eq 0 ]; then rm -rf "$work"; else echo "Preserving diagnostics workdir at $work" >&2; fi' RETURN
   local e2e_lib="$work/runtime"
   mkdir -p "$e2e_lib"
-  cp -R "$REPO/src" "$e2e_lib/src"
+  # `cp -R` recreates src/lib_c's symlinks, and MSYS cannot create those on the
+  # runner (cp: cannot create symbolic link ...: No such file or directory).
+  # Their targets are C headers no test here reads: copy what they point to.
+  if [ "$WINDOWS" -eq 1 ]; then
+    "$PY" -c 'import shutil, sys; shutil.copytree(sys.argv[1], sys.argv[2], symlinks=False, ignore_dangling_symlinks=True)' "$REPO/src" "$e2e_lib/src"
+  else
+    cp -R "$REPO/src" "$e2e_lib/src"
+  fi
 
   local e2e_observe="$e2e_lib/src/std/observe.iyi"
   # Patch __iyi_observe_file_read to return immediately (hiding the file read)
@@ -1173,7 +1188,7 @@ with open(empty_diff, 'w') as f:
     pass
 
 def run_cmd(subcmd, args, cwd=None):
-    cmd = ['bash', stale_ci, subcmd] + args
+    cmd = [os.environ.get('STALE_BASH', 'bash'), stale_ci, subcmd] + args
     return subprocess.run(cmd, cwd=cwd or work, capture_output=True, text=True)
 
 def assert_negative(subcmd, args, expected_msg, cwd=None):
@@ -2193,7 +2208,7 @@ try:
     fetch_env = os.environ.copy()
     fetch_env['GITHUB_API_URL'] = api_url
 
-    res_fetch = subprocess.run(['bash', stale_ci, 'fetch-master',
+    res_fetch = subprocess.run([os.environ.get('STALE_BASH', 'bash'), stale_ci, 'fetch-master',
                                 '--out', fetched_out,
                                 '--target', LABEL,
                                 '--repo', REPO,
@@ -2249,7 +2264,7 @@ try:
     # 5.1 candidate_only -> exit 0, 'valid absent', no file
     with open(mode_file, 'w') as f: json.dump({'mode': 'candidate_only'}, f)
     cand_only_out = os.path.join(work, 'cand-only.json')
-    res = subprocess.run(['bash', stale_ci, 'fetch-master', '--out', cand_only_out, '--target', LABEL, '--repo', REPO, '--token', 'mock-token-xyz'], cwd=CWD, env=fetch_env, capture_output=True, text=True)
+    res = subprocess.run([os.environ.get('STALE_BASH', 'bash'), stale_ci, 'fetch-master', '--out', cand_only_out, '--target', LABEL, '--repo', REPO, '--token', 'mock-token-xyz'], cwd=CWD, env=fetch_env, capture_output=True, text=True)
     if res.returncode != 0 or 'valid absent' not in (res.stdout + res.stderr) or os.path.exists(cand_only_out):
         print(f'test-master-path FAILED: candidate_only negative check failed (code {res.returncode}):\n{res.stdout}\n{res.stderr}', file=sys.stderr)
         sys.exit(1)
@@ -2257,55 +2272,55 @@ try:
     # 5.2 no_runs -> exit 0, 'no completed master push run found', no file
     with open(mode_file, 'w') as f: json.dump({'mode': 'no_runs'}, f)
     no_runs_out = os.path.join(work, 'no-runs.json')
-    res = subprocess.run(['bash', stale_ci, 'fetch-master', '--out', no_runs_out, '--target', LABEL, '--repo', REPO, '--token', 'mock-token-xyz'], cwd=CWD, env=fetch_env, capture_output=True, text=True)
+    res = subprocess.run([os.environ.get('STALE_BASH', 'bash'), stale_ci, 'fetch-master', '--out', no_runs_out, '--target', LABEL, '--repo', REPO, '--token', 'mock-token-xyz'], cwd=CWD, env=fetch_env, capture_output=True, text=True)
     if res.returncode != 0 or 'no completed master push run found' not in (res.stdout + res.stderr) or os.path.exists(no_runs_out):
         print(f'test-master-path FAILED: no_runs negative check failed (code {res.returncode}):\n{res.stdout}\n{res.stderr}', file=sys.stderr)
         sys.exit(1)
 
     # 5.3 path_mismatch -> exit 1, 'run path'
     with open(mode_file, 'w') as f: json.dump({'mode': 'path_mismatch'}, f)
-    res = subprocess.run(['bash', stale_ci, 'fetch-master', '--out', os.path.join(work, 'pm.json'), '--target', LABEL, '--repo', REPO, '--token', 'mock-token-xyz'], cwd=CWD, env=fetch_env, capture_output=True, text=True)
+    res = subprocess.run([os.environ.get('STALE_BASH', 'bash'), stale_ci, 'fetch-master', '--out', os.path.join(work, 'pm.json'), '--target', LABEL, '--repo', REPO, '--token', 'mock-token-xyz'], cwd=CWD, env=fetch_env, capture_output=True, text=True)
     if res.returncode != 1 or 'run path' not in (res.stdout + res.stderr):
         print(f'test-master-path FAILED: path_mismatch negative check failed (code {res.returncode}):\n{res.stdout}\n{res.stderr}', file=sys.stderr)
         sys.exit(1)
 
     # 5.4 missing digest -> exit 1, 'has no digest'
     with open(mode_file, 'w') as f: json.dump({'mode': 'missing_digest'}, f)
-    res = subprocess.run(['bash', stale_ci, 'fetch-master', '--out', os.path.join(work, 'md.json'), '--target', LABEL, '--repo', REPO, '--token', 'mock-token-xyz'], cwd=CWD, env=fetch_env, capture_output=True, text=True)
+    res = subprocess.run([os.environ.get('STALE_BASH', 'bash'), stale_ci, 'fetch-master', '--out', os.path.join(work, 'md.json'), '--target', LABEL, '--repo', REPO, '--token', 'mock-token-xyz'], cwd=CWD, env=fetch_env, capture_output=True, text=True)
     if res.returncode != 1 or 'has no digest' not in (res.stdout + res.stderr):
         print(f'test-master-path FAILED: missing_digest negative check failed (code {res.returncode}):\n{res.stdout}\n{res.stderr}', file=sys.stderr)
         sys.exit(1)
 
     # 5.5 wrong digest -> exit 1, 'sha256 mismatch'
     with open(mode_file, 'w') as f: json.dump({'mode': 'wrong_digest'}, f)
-    res = subprocess.run(['bash', stale_ci, 'fetch-master', '--out', os.path.join(work, 'wd.json'), '--target', LABEL, '--repo', REPO, '--token', 'mock-token-xyz'], cwd=CWD, env=fetch_env, capture_output=True, text=True)
+    res = subprocess.run([os.environ.get('STALE_BASH', 'bash'), stale_ci, 'fetch-master', '--out', os.path.join(work, 'wd.json'), '--target', LABEL, '--repo', REPO, '--token', 'mock-token-xyz'], cwd=CWD, env=fetch_env, capture_output=True, text=True)
     if res.returncode != 1 or 'sha256 mismatch' not in (res.stdout + res.stderr):
         print(f'test-master-path FAILED: wrong_digest negative check failed (code {res.returncode}):\n{res.stdout}\n{res.stderr}', file=sys.stderr)
         sys.exit(1)
 
     # 5.6 zip payload -> exit 1, 'received ZIP payload'
     with open(mode_file, 'w') as f: json.dump({'mode': 'zip_payload'}, f)
-    res = subprocess.run(['bash', stale_ci, 'fetch-master', '--out', os.path.join(work, 'zip.json'), '--target', LABEL, '--repo', REPO, '--token', 'mock-token-xyz'], cwd=CWD, env=fetch_env, capture_output=True, text=True)
+    res = subprocess.run([os.environ.get('STALE_BASH', 'bash'), stale_ci, 'fetch-master', '--out', os.path.join(work, 'zip.json'), '--target', LABEL, '--repo', REPO, '--token', 'mock-token-xyz'], cwd=CWD, env=fetch_env, capture_output=True, text=True)
     if res.returncode != 1 or 'received ZIP payload' not in (res.stdout + res.stderr):
         print(f'test-master-path FAILED: zip_payload negative check failed (code {res.returncode}):\n{res.stdout}\n{res.stderr}', file=sys.stderr)
         sys.exit(1)
 
     # 5.7 two exact matches -> exit 1, 'multiple (2) artifacts'
     with open(mode_file, 'w') as f: json.dump({'mode': 'two_exact'}, f)
-    res = subprocess.run(['bash', stale_ci, 'fetch-master', '--out', os.path.join(work, 'two.json'), '--target', LABEL, '--repo', REPO, '--token', 'mock-token-xyz'], cwd=CWD, env=fetch_env, capture_output=True, text=True)
+    res = subprocess.run([os.environ.get('STALE_BASH', 'bash'), stale_ci, 'fetch-master', '--out', os.path.join(work, 'two.json'), '--target', LABEL, '--repo', REPO, '--token', 'mock-token-xyz'], cwd=CWD, env=fetch_env, capture_output=True, text=True)
     if res.returncode != 1 or 'multiple (2) artifacts' not in (res.stdout + res.stderr):
         print(f'test-master-path FAILED: two_exact negative check failed (code {res.returncode}):\n{res.stdout}\n{res.stderr}', file=sys.stderr)
         sys.exit(1)
 
     # 5.8 runs endpoint 500 -> exit 1, 'query runs failed'
     with open(mode_file, 'w') as f: json.dump({'mode': 'runs_500'}, f)
-    res = subprocess.run(['bash', stale_ci, 'fetch-master', '--out', os.path.join(work, '500.json'), '--target', LABEL, '--repo', REPO, '--token', 'mock-token-xyz'], cwd=CWD, env=fetch_env, capture_output=True, text=True)
+    res = subprocess.run([os.environ.get('STALE_BASH', 'bash'), stale_ci, 'fetch-master', '--out', os.path.join(work, '500.json'), '--target', LABEL, '--repo', REPO, '--token', 'mock-token-xyz'], cwd=CWD, env=fetch_env, capture_output=True, text=True)
     if res.returncode != 1 or 'query runs failed' not in (res.stdout + res.stderr):
         print(f'test-master-path FAILED: runs_500 negative check failed (code {res.returncode}):\n{res.stdout}\n{res.stderr}', file=sys.stderr)
         sys.exit(1)
 
     # 5.9 no token -> exit 1, 'token is required'
-    res = subprocess.run(['bash', stale_ci, 'fetch-master', '--out', os.path.join(work, 'notoken.json'), '--target', LABEL, '--repo', REPO, '--token', ''], cwd=CWD, env={k: v for k, v in fetch_env.items() if 'TOKEN' not in k}, capture_output=True, text=True)
+    res = subprocess.run([os.environ.get('STALE_BASH', 'bash'), stale_ci, 'fetch-master', '--out', os.path.join(work, 'notoken.json'), '--target', LABEL, '--repo', REPO, '--token', ''], cwd=CWD, env={k: v for k, v in fetch_env.items() if 'TOKEN' not in k}, capture_output=True, text=True)
     if res.returncode != 1 or 'token is required' not in (res.stdout + res.stderr):
         print(f'test-master-path FAILED: no_token negative check failed (code {res.returncode}):\n{res.stdout}\n{res.stderr}', file=sys.stderr)
         sys.exit(1)
@@ -2318,7 +2333,7 @@ try:
         json.dump({'mode': 'default'}, f)
 
     phase6_master = os.path.join(work, f'phase6-master-{LABEL}.json')
-    res_p6_fetch = subprocess.run(['bash', stale_ci, 'fetch-master',
+    res_p6_fetch = subprocess.run([os.environ.get('STALE_BASH', 'bash'), stale_ci, 'fetch-master',
                                    '--out', phase6_master,
                                    '--target', LABEL,
                                    '--repo', REPO,
@@ -2366,7 +2381,7 @@ try:
     with open(unwiped_json_path, 'w', encoding='utf-8') as f:
         f.write(res_unwiped.stdout)
 
-    res_gdc = subprocess.run(['bash', stale_ci, 'git-diff-check',
+    res_gdc = subprocess.run([os.environ.get('STALE_BASH', 'bash'), stale_ci, 'git-diff-check',
                               '--master-snapshot', phase6_master,
                               '--cached-json', unwiped_json_path,
                               '--repo', CWD],
@@ -2379,7 +2394,7 @@ try:
 
     # 6.3 With master-self-check (which performs cache wipe before importing):
     check_out = os.path.join(work, 'check-out.json')
-    res_check = subprocess.run(['bash', stale_ci, 'master-self-check',
+    res_check = subprocess.run([os.environ.get('STALE_BASH', 'bash'), stale_ci, 'master-self-check',
                                 '--snapshot', phase6_master,
                                 '--out-json', check_out,
                                 '--repo', CWD,
@@ -2406,7 +2421,7 @@ try:
     # 7. Empty snapshot tests per Item 6
     print('Phase 7: Testing empty snapshot handling, RG6 wholesale replacement, and refusal of forged run_id...')
     empty_out = os.path.join(work, 'empty.json')
-    res_empty_create = subprocess.run(['bash', stale_ci, 'empty-snapshot',
+    res_empty_create = subprocess.run([os.environ.get('STALE_BASH', 'bash'), stale_ci, 'empty-snapshot',
                                        '--from', cand_export_path,
                                        '--out', empty_out],
                                       cwd=CWD, capture_output=True, text=True)
@@ -2440,7 +2455,7 @@ try:
         json.dump({'mode': 'empty', 'empty_sha': empty_sha, 'empty_size': len(empty_bytes)}, f)
 
     phase7_fetched = os.path.join(work, f'phase7-fetched-master-{LABEL}.json')
-    res_p7_fetch = subprocess.run(['bash', stale_ci, 'fetch-master',
+    res_p7_fetch = subprocess.run([os.environ.get('STALE_BASH', 'bash'), stale_ci, 'fetch-master',
                                    '--out', phase7_fetched,
                                    '--target', LABEL,
                                    '--repo', REPO,
@@ -2513,7 +2528,7 @@ try:
 
     # Negatives per Item 6:
     # 1. empty-snapshot with no --from exits 1
-    res = subprocess.run(['bash', stale_ci, 'empty-snapshot', '--out', os.path.join(work, 'nofrom.json')],
+    res = subprocess.run([os.environ.get('STALE_BASH', 'bash'), stale_ci, 'empty-snapshot', '--out', os.path.join(work, 'nofrom.json')],
                          cwd=CWD, capture_output=True, text=True)
     if res.returncode != 1 or '--from is required' not in (res.stderr + res.stdout):
         print(f'test-master-path FAILED: empty-snapshot with no --from should exit 1 with \"--from is required\", got {res.returncode}:\n{res.stderr}\n{res.stdout}', file=sys.stderr)
@@ -2525,7 +2540,7 @@ try:
     bad_ns_data['namespace'] = f'run:{RUN_ID}'
     with open(bad_ns_file, 'w', encoding='utf-8') as f:
         json.dump(bad_ns_data, f, indent=2)
-    res = subprocess.run(['bash', stale_ci, 'empty-snapshot', '--from', bad_ns_file, '--out', os.path.join(work, 'out_bad_ns.json')],
+    res = subprocess.run([os.environ.get('STALE_BASH', 'bash'), stale_ci, 'empty-snapshot', '--from', bad_ns_file, '--out', os.path.join(work, 'out_bad_ns.json')],
                          cwd=CWD, capture_output=True, text=True)
     if res.returncode != 1 or 'namespace must be' not in (res.stderr + res.stdout):
         print(f'test-master-path FAILED: empty-snapshot with namespace run:7777 should exit 1 with \"namespace must be\", got {res.returncode}:\n{res.stderr}\n{res.stdout}', file=sys.stderr)
@@ -2537,7 +2552,7 @@ try:
     bad_rid_data['producer']['run_id'] = 0
     with open(bad_rid_file, 'w', encoding='utf-8') as f:
         json.dump(bad_rid_data, f, indent=2)
-    res = subprocess.run(['bash', stale_ci, 'empty-snapshot', '--from', bad_rid_file, '--out', os.path.join(work, 'out_bad_rid.json')],
+    res = subprocess.run([os.environ.get('STALE_BASH', 'bash'), stale_ci, 'empty-snapshot', '--from', bad_rid_file, '--out', os.path.join(work, 'out_bad_rid.json')],
                          cwd=CWD, capture_output=True, text=True)
     if res.returncode != 1 or 'run_id must be a positive integer' not in (res.stderr + res.stdout):
         print(f'test-master-path FAILED: empty-snapshot with producer.run_id 0 should exit 1 with \"run_id must be a positive integer\", got {res.returncode}:\n{res.stderr}\n{res.stdout}', file=sys.stderr)
@@ -2549,7 +2564,7 @@ try:
     del bad_target_data['target']
     with open(bad_target_file, 'w', encoding='utf-8') as f:
         json.dump(bad_target_data, f, indent=2)
-    res = subprocess.run(['bash', stale_ci, 'empty-snapshot', '--from', bad_target_file, '--out', os.path.join(work, 'out_bad_target.json')],
+    res = subprocess.run([os.environ.get('STALE_BASH', 'bash'), stale_ci, 'empty-snapshot', '--from', bad_target_file, '--out', os.path.join(work, 'out_bad_target.json')],
                          cwd=CWD, capture_output=True, text=True)
     if res.returncode != 1 or 'missing target' not in (res.stderr + res.stdout):
         print(f'test-master-path FAILED: empty-snapshot with missing target should exit 1 with \"missing target\", got {res.returncode}:\n{res.stderr}\n{res.stdout}', file=sys.stderr)

@@ -1,135 +1,316 @@
 #!/usr/bin/env bash
-# The aarch64 code generation gate (SPEC 2.2, 3.3, 3.5; slice C3). Each IR fixture under
-# bench/fixtures/native_cg/ is compiled by the native backend to an object, linked with cc on this
-# machine, and run; its exit status and stdout must equal those of the equivalent .iyi program built by the
-# hosted compiler. Also checked: the driver links only libSystem, the 64 KiB frame's MIR dump shows
-# page-by-page probes, the Linux variant of every fixture encodes (not executed here), and mutations of the
-# backend are each caught.
-#
-#   bench/native_codegen_exercise.sh
-#
-# Jobs: native-darwin runs every step. The Linux variant is encoded on every host and is never executed by
-# this gate; the native-linux job runs the encoder gate (bench/native_encode_exercise.sh) instead.
+# AArch64 code generation gate. Every host emits and inspects Darwin Mach-O
+# objects, compares the naked bodies with the hosted LLVM oracle, and encodes
+# Linux variants in memory. Only macOS arm64 links and executes the objects.
 set -u
 cd "$(dirname "$0")/.." || exit 1
+REPO=$(pwd -P)
+source "$REPO/bench/lib/host.sh" || exit 1
+require_test_host || exit 1
+if [ -z "$PY" ]; then
+  echo "a working python3 or python is required" >&2
+  exit 1
+fi
+source "$REPO/bench/floor_base.sh" || exit 1
+if [ "$HOST_OS" = darwin ]; then
+  export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:"$PATH"
+  export LIBRARY_PATH=${LIBRARY_PATH:-/opt/homebrew/opt/bdw-gc/lib}
+fi
+if [ "$HOST_OS" = windows ]; then
+  host_limited "Windows runs a hosted-built PE driver; this gate does not produce LLVM-free PE/COFF output"
+fi
 
-WORK=$(mktemp -d "${TMPDIR:-/tmp}/native-codegen.XXXXXX")
-RESTORE=()
+# Match the x86_64 gate's explicit path, PATH, and Windows LLVM lookup order.
+resolve_llvm_tool() {
+  local requested=$1 default_name=$2 found="" candidate root
+  if [ "$HOST_OS" = windows ]; then
+    case "$requested" in
+      [A-Za-z]:[\\/]*) requested=$(cygpath -u "$requested") || return 1 ;;
+    esac
+  fi
+  found=$(command -v "$requested" 2>/dev/null || true)
+  if [ -z "$found" ] && [ "$HOST_OS" = windows ] && [ "$requested" = "$default_name" ]; then
+    for root in "${LLVM_PATH:-}" "${ProgramFiles:+$ProgramFiles/LLVM}" "/c/Program Files/LLVM"; do
+      [ -n "$root" ] || continue
+      case "$root" in
+        [A-Za-z]:[\\/]*) root=$(cygpath -u "$root") || continue ;;
+      esac
+      candidate="$root/bin/$default_name.exe"
+      if [ -x "$candidate" ]; then found=$candidate; break; fi
+    done
+  fi
+  if [ -z "$found" ]; then
+    echo "required LLVM tool not found: $requested" >&2
+    return 1
+  fi
+  if [ "$HOST_OS" = windows ] && [ -f "$found.exe" ]; then found="$found.exe"; fi
+  case "$found" in
+    /*) ;;
+    *) found="$(cd "$(dirname "$found")" && pwd -P)/$(basename "$found")" ;;
+  esac
+  printf '%s\n' "$found"
+}
+LLVM_OBJDUMP=$(resolve_llvm_tool "${LLVM_OBJDUMP:-llvm-objdump}" llvm-objdump) || exit 1
+printf 'LLVM objdump: %s\n' "$(native_path "$LLVM_OBJDUMP")"
+"$LLVM_OBJDUMP" --version || exit 1
+printf 'Python: %s\n' "$(command -v "$PY")"
+"$PY" --version || exit 1
+
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/native-codegen.XXXXXX") || exit 1
+RESTORE_FILE=""
+RESTORE_BACKUP=""
 restore_all() {
-  for entry in "${RESTORE[@]+"${RESTORE[@]}"}"; do
-    cp "${entry%%|*}" "${entry#*|}" 2>/dev/null
-  done
+  if [ -n "$RESTORE_FILE" ] && ! cp "$RESTORE_BACKUP" "$RESTORE_FILE"; then
+    echo "could not restore $RESTORE_FILE; backup kept at $RESTORE_BACKUP" >&2
+    return 1
+  fi
   rm -rf "$WORK"
 }
-trap restore_all EXIT INT TERM
+trap restore_all EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 failed=0
 fail() { echo "FAIL: $*"; failed=1; }
+FIX="$REPO/bench/fixtures/native_cg"
+IYI="$REPO/bin/iyi"
+if [ -x "$REPO/.build/iyi.exe" ]; then
+  IYI_BINARY="$REPO/.build/iyi.exe"
+elif [ -x "$REPO/.build/iyi" ]; then
+  IYI_BINARY="$REPO/.build/iyi"
+else
+  echo "the hosted compiler is not built in .build" >&2
+  exit 1
+fi
+DRV="$WORK/native_cg$EXE"
+revision=$(git rev-parse HEAD) || exit 1
+printf 'revision: %s\nhosted compiler launcher: %s\nhosted compiler binary: %s\n' \
+  "$revision" "$(native_path "$IYI")" "$(native_path "$IYI_BINARY")"
+if ! "$PY" - "$(native_path "$IYI_BINARY")" <<'PY'
+import hashlib, sys
+from pathlib import Path
+print(f"hosted compiler sha256: {hashlib.sha256(Path(sys.argv[1]).read_bytes()).hexdigest()}")
+PY
+then
+  echo "cannot identify the hosted compiler" >&2
+  exit 1
+fi
 
-export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:"$PATH"
-export LIBRARY_PATH=${LIBRARY_PATH:-/opt/homebrew/opt/bdw-gc/lib}
+build_driver() {
+  local output=$1
+  "$IYI" build -o "$(native_path "$output")" "$(native_path "$REPO/src/compiler/tools/native_cg.iyi")" >"$WORK/build.$(basename "$output").log" 2>&1 \
+    && [ -f "$output" ]
+}
 
-FIX=bench/fixtures/native_cg
-DRV="$WORK/native_cg"
-
-build_driver() { ./bin/iyi build -o "$1" src/compiler/tools/native_cg.iyi >"$WORK/build.$(basename "$1").log" 2>&1; }
-
-# ---- 1. the driver -----------------------------------------------------------------------------
 echo "== 1. build the driver with the hosted compiler"
 if ! build_driver "$DRV"; then
-  grep -v 'ld: warning' "$WORK/build.native_cg.log" | tail -20
+  tail -20 "$WORK/build.$(basename "$DRV").log"
   fail "the driver does not build"
   exit 1
 fi
 
-# ---- 2. the linkage floor ----------------------------------------------------------------------
-echo "== 2. the driver links only libSystem"
-if [ "$(uname -s)" = "Darwin" ]; then
-  if [ "$(otool -L "$DRV" | tail -n +2 | wc -l | tr -d ' ')" = "1" ] && otool -L "$DRV" | grep -q '/usr/lib/libSystem.B.dylib'; then
-    echo "libSystem only"
-  else
-    otool -L "$DRV"
-    fail "the driver links more than libSystem"
-  fi
-else
-  echo "skipped: not darwin"
-fi
+echo "== 2. native driver dependency floor on $HOST_ID: $(native_path "$DRV")"
+case "$HOST_OS" in
+  darwin)
+    if ! otool -L "$DRV" >"$WORK/otool.log" 2>&1; then
+      cat "$WORK/otool.log"
+      fail "otool could not inspect the driver"
+    else
+      cat "$WORK/otool.log"
+      if [ "$(tail -n +2 "$WORK/otool.log" | wc -l | tr -d ' ')" != 1 ] || ! grep -q '/usr/lib/libSystem.B.dylib' "$WORK/otool.log"; then
+        fail "the driver links more than libSystem"
+      fi
+    fi
+    ;;
+  linux)
+    if ! command -v nm >/dev/null 2>&1 || ! command -v readelf >/dev/null 2>&1; then
+      fail "nm and readelf are required to inspect the Linux driver floor"
+    elif ! nm -u "$DRV" >"$WORK/nm.log" 2>&1 || ! readelf -d "$DRV" >"$WORK/readelf.log" 2>&1; then
+      cat "$WORK/nm.log" "$WORK/readelf.log" 2>/dev/null
+      fail "nm or readelf could not inspect the driver"
+    else
+      symbols="$(sed -e 's/^ *//' -e 's/^U  *//' -e 's/@.*$//' "$WORK/nm.log" |
+        awk '{ print $NF }' | sed -e 's/^_//' -e 's/^_environ$/environ/' | grep -v '^$' | sort -u)"
+      libraries="$(sed -n 's/.*Shared library: \[\(.*\)\]/\1/p' "$WORK/readelf.log" | sort -u)"
+      extra_symbols=""
+      for symbol in $symbols; do
+        case " $FLOOR_BASE_LINUX environ exit " in
+          *" $symbol "*) ;;
+          *) extra_symbols="$extra_symbols $symbol" ;;
+        esac
+      done
+      extra_libraries="$(extra_dlls "libc.so ld-linux libgcc_s" "$libraries")"
+      printf 'undefined symbols: %s\ndirect libraries: %s\n' "${symbols:-none}" "${libraries:-none}"
+      [ -z "$extra_symbols" ] || fail "Linux driver has symbols outside its runtime floor:$extra_symbols"
+      [ -z "$extra_libraries" ] || fail "Linux driver has libraries outside its runtime floor: $extra_libraries"
+    fi
+    ;;
+  windows)
+    DUMPBIN="$(find_dumpbin || true)"
+    if [ -z "$DUMPBIN" ]; then
+      fail "dumpbin is required to inspect the Windows driver floor"
+    elif ! "$DUMPBIN" -nologo -dependents "$(native_path "$DRV")" >"$WORK/dumpbin.log" 2>&1; then
+      cat "$WORK/dumpbin.log"
+      fail "dumpbin could not inspect the driver"
+    else
+      real_dumpbin="$DUMPBIN"
+      dumpbin_lf() { tr -d '\r' <"$WORK/dumpbin.log"; }
+      DUMPBIN=dumpbin_lf
+      dlls="$(pe_dlls "$(native_path "$DRV")")"
+      DUMPBIN="$real_dumpbin"
+      if [ -z "$dlls" ]; then
+        cat "$WORK/dumpbin.log"
+        fail "dumpbin read no DLL imports from the Windows driver"
+      else
+        printf 'direct DLLs: %s\n' "$dlls"
+        extra="$(extra_dlls "$FLOOR_DLLS_RUNTIME" "$dlls")"
+        [ -z "$extra" ] || fail "Windows driver has DLLs outside its runtime floor: $extra"
+      fi
+    fi
+    echo "Windows per-symbol import floor is unverified"
+    ;;
+esac
 
-# ---- 3. fixtures: native object, linked with cc and run, equal to the hosted compiler's program ---
-echo "== 3. every fixture runs as the hosted compiler's program does"
-count=0
+# Record the actual arm64 executable and reject signature or inspection errors.
+record_executable() {
+  local executable=$1 arch
+  if ! codesign -v --strict "$executable" 2>"$executable.signature.log"; then
+    cat "$executable.signature.log" >&2
+    return 125
+  fi
+  arch=$(lipo -archs "$executable") || return 124
+  case " $arch " in *" arm64 "*) ;; *) echo "not arm64: $arch" >&2; return 124 ;; esac
+  printf 'signed executable: %s; architectures: %s\n' "$executable" "$arch"
+  file "$executable" || return 124
+  shasum -a 256 "$executable" || return 124
+}
+
+# Emit the complete corpus before any runtime-only branch.
+echo "== 3. emit every Darwin-target fixture"
+for base in narrow_signext narrow_argext narrow_asm narrow_cmpxchg narrow_switch narrow_call narrow_i1 narrow_param; do
+  [ -f "$FIX/$base.ir" ] && [ -f "$FIX/$base.iyi" ] || fail "$base: required fixture pair is missing"
+done
+fixture_total=0
+emitted=0
 for ir in "$FIX"/*.ir; do
+  [ -f "$ir" ] || continue
+  fixture_total=$((fixture_total + 1))
   base=$(basename "$ir" .ir)
-  iy="$FIX/$base.iyi"
-  if [ ! -f "$iy" ]; then
-    fail "$base.ir has no equivalent $base.iyi"
-    continue
-  fi
-  if ! "$DRV" obj "$ir" "$WORK/$base.o" >"$WORK/$base.obj.log" 2>&1; then
-    cat "$WORK/$base.obj.log"
-    fail "$base: the native backend refused the fixture"
-    continue
-  fi
-  if ! cc "$WORK/$base.o" "$FIX/rt_stub.c" -o "$WORK/$base.native" >"$WORK/$base.link.log" 2>&1; then
-    fail "$base: cc did not link the native object"
-    continue
-  fi
-  if ! codesign -v --strict "$WORK/$base.native"; then
-    fail "$base: native executable failed codesign"
-    continue
-  fi
-  "$WORK/$base.native" >"$WORK/$base.native.out" 2>/dev/null
-  echo $? >"$WORK/$base.native.status"
-  if ! ./bin/iyi build -o "$WORK/$base.hosted" "$iy" >"$WORK/$base.hosted.log" 2>&1; then
-    grep -v 'ld: warning' "$WORK/$base.hosted.log" | tail -5
-    fail "$base: the hosted compiler does not build $base.iyi"
-    continue
-  fi
-  "$WORK/$base.hosted" >"$WORK/$base.hosted.out" 2>/dev/null
-  echo $? >"$WORK/$base.hosted.status"
-  if cmp -s "$WORK/$base.native.out" "$WORK/$base.hosted.out" && cmp -s "$WORK/$base.native.status" "$WORK/$base.hosted.status"; then
-    echo "$base: stdout and status equal ($(tr -d '\n' <"$WORK/$base.native.status") exit)"
-    count=$((count + 1))
+  [ -f "$FIX/$base.iyi" ] || fail "$base.ir has no equivalent $base.iyi"
+  if "$DRV" obj "$(native_path "$ir")" "$(native_path "$WORK/$base.o")" >"$WORK/$base.obj.log" 2>&1 \
+      && [ -s "$WORK/$base.o" ]; then
+    emitted=$((emitted + 1))
   else
-    echo "--- native $base"; cat "$WORK/$base.native.out"; echo "--- hosted $base"; cat "$WORK/$base.hosted.out"
-    fail "$base: the native program differs from the hosted compiler's"
+    cat "$WORK/$base.obj.log"
+    fail "$base: the native backend did not emit an object"
   fi
 done
-[ "$count" -gt 0 ] || fail "no fixture ran"
-echo "ran $count fixtures against the hosted compiler"
+[ "$fixture_total" -gt 0 ] || fail "no codegen fixtures found"
+[ "$emitted" -eq "$fixture_total" ] || fail "not every fixture produced a Darwin object"
+echo "emitted $emitted of $fixture_total Darwin-target fixture objects"
 
-# ---- 3c. the thread pointer: the masked tpidrro_el0 read is non-zero, 8-aligned and the same on each read -----
-echo "== 3c. the thread pointer read on this thread is non-zero, 8-aligned and stable"
-if ! "$DRV" obj bench/fixtures/native_tp/threadpointer.ir "$WORK/tp.o" >"$WORK/tp.obj.log" 2>&1; then
+RTF="$REPO/bench/fixtures/native_first_light"
+if ! "$DRV" obj "$(native_path "$REPO/bench/fixtures/native_tp/threadpointer.ir")" "$(native_path "$WORK/tp.o")" >"$WORK/tp.obj.log" 2>&1 \
+    || [ ! -s "$WORK/tp.o" ]; then
   cat "$WORK/tp.obj.log"
-  fail "threadpointer: the native backend refused the fixture"
-elif ! cc "$WORK/tp.o" bench/fixtures/native_tp/tp_main.c -o "$WORK/tp.bin" >"$WORK/tp.link.log" 2>&1; then
-  fail "threadpointer: cc did not link the native object"
-elif ! codesign -v --strict "$WORK/tp.bin"; then
-  fail "threadpointer: native executable failed codesign"
-elif ! "$WORK/tp.bin"; then
-  fail "threadpointer: the masked thread pointer is zero, unaligned, or differs between reads"
+  fail "threadpointer: the native backend did not emit an object"
+fi
+for pair in "$RTF/rt_helpers.ir:rth" "$REPO/src/compiler/native/rt/builtins.ir:rt_native"; do
+  ir=${pair%:*}
+  base=${pair##*:}
+  if ! "$DRV" obj "$(native_path "$ir")" "$(native_path "$WORK/$base.o")" >"$WORK/$base.obj.log" 2>&1 \
+      || [ ! -s "$WORK/$base.o" ]; then
+    cat "$WORK/$base.obj.log"
+    fail "$base: the native backend did not emit an object"
+  fi
+done
+
+if [ "$HOST_ID" = darwin-arm64 ]; then
+  echo "== 3a. compare every native fixture with its hosted twin"
+  count=0
+  for ir in "$FIX"/*.ir; do
+    [ -f "$ir" ] || continue
+    base=$(basename "$ir" .ir)
+    iy="$FIX/$base.iyi"
+    if [ ! -s "$WORK/$base.o" ] || [ ! -f "$iy" ]; then
+      fail "$base: missing emitted object or hosted fixture"
+      continue
+    fi
+    if ! cc "$WORK/$base.o" "$FIX/rt_stub.c" -o "$WORK/$base.native" >"$WORK/$base.link.log" 2>&1; then
+      cat "$WORK/$base.link.log"
+      fail "$base: cc did not link the native object"
+      continue
+    fi
+    if ! record_executable "$WORK/$base.native"; then
+      fail "$base: native signature or executable identity failed"
+      continue
+    fi
+    "$WORK/$base.native" >"$WORK/$base.native.out" 2>"$WORK/$base.native.err"
+    echo $? >"$WORK/$base.native.status"
+    if ! "$IYI" build -o "$(native_path "$WORK/$base.hosted$EXE")" "$(native_path "$iy")" >"$WORK/$base.hosted.log" 2>&1; then
+      tail -20 "$WORK/$base.hosted.log"
+      fail "$base: the hosted compiler does not build $base.iyi"
+      continue
+    fi
+    "$WORK/$base.hosted$EXE" >"$WORK/$base.hosted.out" 2>"$WORK/$base.hosted.err"
+    echo $? >"$WORK/$base.hosted.status"
+    printf '%s native stdout:\n' "$base"; cat "$WORK/$base.native.out"
+    printf '%s native stderr:\n' "$base"; cat "$WORK/$base.native.err"
+    printf '%s hosted stderr:\n' "$base"; cat "$WORK/$base.hosted.err"
+    if cmp -s "$WORK/$base.native.out" "$WORK/$base.hosted.out" && cmp -s "$WORK/$base.native.status" "$WORK/$base.hosted.status"; then
+      echo "$base: stdout and status equal ($(cat "$WORK/$base.native.status") exit)"
+      count=$((count + 1))
+    else
+      printf '%s hosted stdout:\n' "$base"; cat "$WORK/$base.hosted.out"
+      printf '%s native/hosted statuses: %s / %s\n' "$base" "$(cat "$WORK/$base.native.status")" "$(cat "$WORK/$base.hosted.status")"
+      fail "$base: the native program differs from the hosted compiler's"
+    fi
+  done
+  [ "$count" -eq "$fixture_total" ] || fail "not every fixture matched its hosted twin"
+  echo "compared $count of $fixture_total fixtures against the hosted compiler"
+
+  echo "== 3c. thread pointer is non-zero, aligned and stable"
+  if [ ! -s "$WORK/tp.o" ] || ! cc "$WORK/tp.o" "$REPO/bench/fixtures/native_tp/tp_main.c" -o "$WORK/tp.bin" >"$WORK/tp.link.log" 2>&1; then
+    fail "threadpointer: cc did not link the native object"
+  elif ! record_executable "$WORK/tp.bin"; then
+    fail "threadpointer: native signature or executable identity failed"
+  elif ! "$WORK/tp.bin" >"$WORK/tp.out" 2>"$WORK/tp.err"; then
+    cat "$WORK/tp.out" "$WORK/tp.err"
+    fail "threadpointer: the masked thread pointer is zero, unaligned, or differs between reads"
+  else
+    cat "$WORK/tp.out" "$WORK/tp.err"
+    echo "threadpointer: non-zero, 8-aligned and equal on both reads"
+  fi
 else
-  echo "threadpointer: non-zero, 8-aligned and equal on both reads"
+  host_limited "Darwin Mach-O fixture execution and hosted-twin comparisons require macOS arm64; objects were not executed"
+  host_limited "Darwin threadpointer runtime requires macOS arm64"
 fi
 # ---- 3b. naked bodies: the function's bytes and relocations equal the hosted compiler's naked function --------
 # The hosted compiler's LLVM may append a return to a naked body, so the oracle may hold the native body followed by one
 # trailing `ret`, and nothing else. Relocations are compared by offset within the body and by kind.
 echo "== 3b. each naked fixture's body equals the hosted compiler's naked function, bytes and relocations"
+naked_count=0
+naked_total=0
 for pair in asm_naked_const:const42 asm_naked_addimm:addimm asm_naked_pair:pair; do
+  naked_total=$((naked_total + 1))
   base=${pair%%:*}
   fn=${pair#*:}
-  if ! "$DRV" obj "$FIX/$base.ir" "$WORK/$base.nat.o" >"$WORK/$base.nat.log" 2>&1; then
-    fail "$base: the native backend refused the naked fixture"
+  if [ ! -s "$WORK/$base.o" ]; then
+    fail "$base: the native naked fixture object is missing"
     continue
   fi
-  if ! ./bin/iyi build --cross-compile --target aarch64-apple-darwin -o "$WORK/$base.oracle.o" "$FIX/$base.iyi" >"$WORK/$base.oracle.log" 2>&1; then
+  if ! "$IYI" build --cross-compile --target aarch64-apple-darwin -o "$(native_path "$WORK/$base.oracle.o")" "$(native_path "$FIX/$base.iyi")" >"$WORK/$base.oracle.log" 2>&1; then
+    cat "$WORK/$base.oracle.log"
     fail "$base: the hosted compiler does not build the oracle"
     continue
   fi
-  "$DRV" bytes "$WORK/$base.nat.o" >"$WORK/$base.nat.bytes" 2>/dev/null
-  "$DRV" bytes "$WORK/$base.oracle.o" >"$WORK/$base.oracle.bytes" 2>/dev/null
-  if python3 - "$WORK/$base.nat.bytes" "$WORK/$base.oracle.bytes" "$fn" <<'PY'
+  if ! "$DRV" bytes "$(native_path "$WORK/$base.o")" >"$WORK/$base.nat.bytes" 2>"$WORK/$base.nat.bytes.err" \
+      || ! "$DRV" bytes "$(native_path "$WORK/$base.oracle.o")" >"$WORK/$base.oracle.bytes" 2>"$WORK/$base.oracle.bytes.err"; then
+    cat "$WORK/$base.nat.bytes.err" "$WORK/$base.oracle.bytes.err" 2>/dev/null
+    fail "$base: object inspection failed"
+    continue
+  fi
+  if "$PY" - "$(native_path "$WORK/$base.nat.bytes")" "$(native_path "$WORK/$base.oracle.bytes")" "$fn" <<'PY'
 import sys
 RET = bytes.fromhex("c0035fd6")
 def load(path):
@@ -171,48 +352,61 @@ if ob != nb and ob != nb + RET:
 print(f"{sys.argv[3]}: {len(nb)} bytes, {len(nr)} relocations, equal to the hosted compiler's naked function")
 PY
   then
-    :
+    naked_count=$((naked_count + 1))
   else
     fail "$base: the naked body differs from the hosted compiler's"
   fi
 done
+echo "compared $naked_count of $naked_total naked bodies"
 
-# ---- 3d. runtime helpers: builtins.ir compiled natively links and behaves as the C stand-ins and the hosted twin --
-# The fixture calls every helper over boundary values (zero lengths, overlapping moves both ways, the signed minimum,
-# powers of two, maximum values, division by one and by minus one). Linked with the native runtime, with rt_stub.c, and
-# built by the hosted compiler, the three print the same output and exit 0.
-echo "== 3d. the runtime helpers, compiled natively from builtins.ir, match the C stand-ins and the hosted twin"
-RTF=bench/fixtures/native_first_light
-if "$DRV" obj "$RTF/rt_helpers.ir" "$WORK/rth.o" >"$WORK/rth.obj.log" 2>&1 \
-   && "$DRV" obj src/compiler/native/rt/builtins.ir "$WORK/rt_native.o" >"$WORK/rt_native.log" 2>&1 \
-   && cc "$WORK/rth.o" "$WORK/rt_native.o" -o "$WORK/rth_native" \
-   && cc -c "$FIX/rt_stub.c" -o "$WORK/rt_stub.o" \
-   && cc "$WORK/rth.o" "$WORK/rt_stub.o" -o "$WORK/rth_stub" \
-   && ./bin/iyi build -o "$WORK/rth_hosted" "$RTF/rt_helpers.iyi" >"$WORK/rth_hosted.log" 2>&1 \
-   && codesign -v --strict "$WORK/rth_native" && codesign -v --strict "$WORK/rth_stub"; then
-  "$WORK/rth_native" >"$WORK/rth_native.out"; s1=$?
-  "$WORK/rth_stub" >"$WORK/rth_stub.out"; s2=$?
-  "$WORK/rth_hosted" >"$WORK/rth_hosted.out"; s3=$?
-  if [ "$s1" -ne 0 ] || [ "$s2" -ne 0 ] || [ "$s3" -ne 0 ]; then
-    fail "rt_helpers: exit statuses $s1 $s2 $s3 (native, stub, hosted)"
-  elif ! cmp -s "$WORK/rth_native.out" "$WORK/rth_stub.out"; then
-    fail "rt_helpers: the native runtime prints differently from rt_stub.c"
-  elif ! cmp -s "$WORK/rth_native.out" "$WORK/rth_hosted.out"; then
-    fail "rt_helpers: the native runtime prints differently from the hosted twin"
+# The helper objects were emitted on every host above. Execution needs macOS.
+if [ "$HOST_ID" = darwin-arm64 ]; then
+  echo "== 3d. native runtime, C stand-ins and hosted helper agree"
+  if [ -s "$WORK/rth.o" ] && [ -s "$WORK/rt_native.o" ] \
+     && cc "$WORK/rth.o" "$WORK/rt_native.o" -o "$WORK/rth_native" >"$WORK/rth_native.link.log" 2>&1 \
+     && cc -c "$FIX/rt_stub.c" -o "$WORK/rt_stub.o" >"$WORK/rt_stub.log" 2>&1 \
+     && cc "$WORK/rth.o" "$WORK/rt_stub.o" -o "$WORK/rth_stub" >"$WORK/rth_stub.link.log" 2>&1 \
+     && "$IYI" build -o "$(native_path "$WORK/rth_hosted$EXE")" "$(native_path "$RTF/rt_helpers.iyi")" >"$WORK/rth_hosted.log" 2>&1 \
+     && record_executable "$WORK/rth_native" && record_executable "$WORK/rth_stub"; then
+    "$WORK/rth_native" >"$WORK/rth_native.out" 2>"$WORK/rth_native.err"; s1=$?
+    "$WORK/rth_stub" >"$WORK/rth_stub.out" 2>"$WORK/rth_stub.err"; s2=$?
+    "$WORK/rth_hosted$EXE" >"$WORK/rth_hosted.out" 2>"$WORK/rth_hosted.err"; s3=$?
+    printf 'rt_helpers native stdout:\n'; cat "$WORK/rth_native.out"
+    for variant in native stub hosted; do
+      printf 'rt_helpers %s stderr:\n' "$variant"
+      cat "$WORK/rth_$variant.err"
+    done
+    if [ "$s1" -ne 0 ] || [ "$s2" -ne 0 ] || [ "$s3" -ne 0 ]; then
+      fail "rt_helpers: exit statuses $s1 $s2 $s3 (native, stub, hosted)"
+    elif ! cmp -s "$WORK/rth_native.out" "$WORK/rth_stub.out"; then
+      cat "$WORK/rth_stub.out"
+      fail "rt_helpers: the native runtime prints differently from rt_stub.c"
+    elif ! cmp -s "$WORK/rth_native.out" "$WORK/rth_hosted.out"; then
+      cat "$WORK/rth_hosted.out"
+      fail "rt_helpers: the native runtime prints differently from the hosted twin"
+    else
+      echo "rt_helpers: statuses $s1 $s2 $s3; $(wc -l <"$WORK/rth_native.out" | tr -d ' ') lines identical"
+    fi
   else
-    echo "   $(wc -l <"$WORK/rth_native.out" | tr -d ' ') lines identical across native runtime, rt_stub.c and the hosted twin"
+    cat "$WORK/rth_native.link.log" "$WORK/rt_stub.log" "$WORK/rth_stub.link.log" "$WORK/rth_hosted.log" 2>/dev/null
+    fail "rt_helpers: parity build, signature, or executable identity failed"
   fi
 else
-  fail "rt_helpers: the parity build failed (see $WORK/rth.obj.log, $WORK/rt_native.log, $WORK/rth_hosted.log)"
+  host_limited "Darwin runtime-helper, C stand-in and hosted three-way execution requires macOS arm64"
 fi
 
 # ---- 4. the 64 KiB frame: the MIR dump shows the probe page by page ----------------------------
 echo "== 4. the 64 KiB frame is entered page by page"
-probes=$("$DRV" mir "$FIX/frame64k.ir" big | grep -c 'ZeroSp')
-if [ "$probes" -ge 16 ]; then
-  echo "probes in the dump: $probes"
+if "$DRV" mir "$(native_path "$FIX/frame64k.ir")" big >"$WORK/frame64k.mir" 2>"$WORK/frame64k.mir.err" && [ -s "$WORK/frame64k.mir" ]; then
+  probes=$(grep -c 'ZeroSp' "$WORK/frame64k.mir" || true)
+  if [ "$probes" -ge 16 ]; then
+    echo "probes in the dump: $probes"
+  else
+    fail "the frame dump shows $probes probes; a 65 KiB frame needs 16"
+  fi
 else
-  fail "the frame dump shows $probes probes; a 65 KiB frame needs 16"
+  cat "$WORK/frame64k.mir.err"
+  fail "the frame MIR could not be produced"
 fi
 
 # ---- 4b. each ordering selects its own exclusive pair: acquire on the load for acquire and seq_cst, release on
@@ -222,7 +416,11 @@ expect_ord() {
   local fn=$1 load=$2 store=$3 mir oload=Ldaxr ostore=Stlxr
   [ "$load" = Ldaxr ] && oload=Ldxr
   [ "$store" = Stlxr ] && ostore=Stxr
-  mir=$("$DRV" mir "$FIX/rmw.ir" "$fn" | tail -n +2)
+  if ! mir=$("$DRV" mir "$(native_path "$FIX/rmw.ir")" "$fn"); then
+    fail "$fn: could not produce MIR"
+    return
+  fi
+  mir=$(printf '%s\n' "$mir" | tail -n +2)
   if echo "$mir" | grep -qw "$load" && echo "$mir" | grep -qw "$store" && ! echo "$mir" | grep -qw "$oload" && ! echo "$mir" | grep -qw "$ostore"; then
     echo "$fn: $load and $store"
   else
@@ -241,8 +439,18 @@ expect_ord ord_cas_seq Ldaxr Stlxr
 
 # ---- 4c. switch forms: a dense switch indexes a jump table, a sparse one and one with no cases keep the compare
 # chain. The MIR dump names each table with its entry count and lowest case. ----------------------------------
-expect_table() { "$DRV" mir "$FIX/$1.ir" "$2" | grep -qF "jump table 0 entries=$3 low=$4 "; }
-expect_chain() { ! "$DRV" mir "$FIX/$1.ir" "$2" | grep -qE 'jump table|BrTable'; }
+expect_table() {
+  local mir
+  mir=$("$DRV" mir "$(native_path "$FIX/$1.ir")" "$2") || return 1
+  [ -n "$mir" ] && printf '%s\n' "$mir" | grep -qF "jump table 0 entries=$3 low=$4 " || return 1
+  echo "$1/$2: jump table has $3 entries at $4"
+}
+expect_chain() {
+  local mir
+  mir=$("$DRV" mir "$(native_path "$FIX/$1.ir")" "$2") || return 1
+  [ -n "$mir" ] && ! printf '%s\n' "$mir" | grep -qE 'jump table|BrTable' || return 1
+  echo "$1/$2: compare chain, no jump table"
+}
 echo "== 4c. dense switches take a jump table; sparse and empty switches keep the compare chain"
 expect_table jump_dense dense 10 0 || fail "jump_dense: dense is not a 10-entry table at 0"
 expect_table jump_holes holes 11 0 || fail "jump_holes: holes is not an 11-entry table at 0"
@@ -257,55 +465,80 @@ expect_chain jump_sparse none || fail "jump_sparse: a switch with no cases took 
 # ---- 4d. thread-local access: the descriptor sequence, the Linux local-exec form, and the sections' flags and
 # placement, as the oracle's object has them -------------------------------------------------------------------
 echo "== 4d. thread-local access lowers as the oracle's sequences; section flags and placement match its object"
-tls_mir=$("$DRV" mir "$FIX/tls_loop.ir" main)
-descs=$(printf '%s\n' "$tls_mir" | grep -c 'LoadTlvp/64')
-thunks=$(printf '%s\n' "$tls_mir" | grep -c 'Blr/64 .*clobbers=x0,x16,x17,x30')
-if [ "$descs" -eq 2 ] && [ "$thunks" -eq 2 ]; then
-  echo "tls_loop main: $descs descriptor loads, each followed by a thunk call that clobbers x0,x16,x17,x30"
+if tls_mir=$("$DRV" mir "$(native_path "$FIX/tls_loop.ir")" main) && [ -n "$tls_mir" ]; then
+  descs=$(printf '%s\n' "$tls_mir" | grep -c 'LoadTlvp/64' || true)
+  thunks=$(printf '%s\n' "$tls_mir" | grep -c 'Blr/64 .*clobbers=x0,x16,x17,x30' || true)
+  if [ "$descs" -eq 2 ] && [ "$thunks" -eq 2 ]; then
+    echo "tls_loop main: $descs descriptor loads, each followed by a thunk call that clobbers x0,x16,x17,x30"
+  else
+    fail "tls_loop main: $descs descriptor loads and $thunks thunk calls, expected 2 and 2"
+  fi
 else
-  fail "tls_loop main: $descs descriptor loads and $thunks thunk calls, expected 2 and 2"
+  fail "tls_loop main: could not produce MIR"
 fi
 sed -e 's/^target triple = .*/target triple = "aarch64-unknown-linux-gnu"/' \
     -e 's/^target datalayout = .*/target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128-Fn32"/' \
     "$FIX/tls_loop.ir" >"$WORK/tls_loop.linux.ir"
-linux_mir=$("$DRV" mir "$WORK/tls_loop.linux.ir" bump)
-if printf '%s\n' "$linux_mir" | grep -q 'Mrs/64 x[0-9]*$' && printf '%s\n' "$linux_mir" | grep -q 'AddTprelHi/64' \
+if linux_mir=$("$DRV" mir "$(native_path "$WORK/tls_loop.linux.ir")" bump) && [ -n "$linux_mir" ] \
+    && printf '%s\n' "$linux_mir" | grep -q 'Mrs/64 x[0-9]*$' && printf '%s\n' "$linux_mir" | grep -q 'AddTprelHi/64' \
     && printf '%s\n' "$linux_mir" | grep -q 'AddTprelLo/64' && ! printf '%s\n' "$linux_mir" | grep -q 'Blr'; then
   echo "linux bump: mrs tpidr_el0, then the two local-exec adds, and no thunk call"
 else
-  fail "linux bump: the local-exec sequence is not as expected"
+  fail "linux bump: MIR failed or the local-exec sequence is not as expected"
 fi
 section_flags() {
-  otool -l "$1" | awk -v s="$2" '$1=="sectname" {n=$2} $1=="flags" && n==s {print $2; exit}'
+  local object=$1 section=$2 headers raw
+  if [ "$HOST_OS" = darwin ]; then
+    headers=$(otool -l "$object") || return 1
+  else
+    headers=$("$LLVM_OBJDUMP" --macho --private-headers --non-verbose "$(native_path "$object")") || return 1
+  fi
+  # Only tool metadata is normalized; executable output remains byte-exact.
+  raw=$(printf '%s\n' "$headers" | tr -d '\r' | awk -v s="$section" '
+    $1=="sectname" {n=$2}
+    $1=="flags" && n==s {value=$2; count++}
+    END {if (count!=1) exit 1; print value}
+  ') || return 1
+  [[ "$raw" =~ ^0x[0-9a-fA-F]+$ ]] || return 1
+  printf '0x%02x\n' "$((raw))"
 }
 section_size() {
-  llvm-objdump --macho --section-headers "$1" | awk -v s="$2" '$2==s {print $3}'
+  local object=$1 section=$2 headers
+  headers=$("$LLVM_OBJDUMP" --macho --section-headers "$(native_path "$object")") || return 1
+  printf '%s\n' "$headers" | tr -d '\r' | awk -v s="$section" '
+    $2==s {value=$3; count++}
+    END {if (count!=1 || value !~ /^[0-9a-fA-F]+$/) exit 1; print value}
+  '
 }
 ti="$WORK/tls_init.o"
 tz="$WORK/tls_zero.o"
-if [ "$(section_flags "$ti" __thread_data)" = 0x00000011 ] && [ "$(section_flags "$ti" __thread_bss)" = 0x00000012 ] \
-    && [ "$(section_flags "$ti" __thread_vars)" = 0x00000013 ]; then
-  echo "sections: __thread_data 0x11, __thread_bss 0x12 and __thread_vars 0x13, as the oracle's object has them"
+if data_flags=$(section_flags "$ti" __thread_data) && bss_flags=$(section_flags "$ti" __thread_bss) \
+    && vars_flags=$(section_flags "$ti" __thread_vars) \
+    && [ "$data_flags" = 0x11 ] && [ "$bss_flags" = 0x12 ] && [ "$vars_flags" = 0x13 ]; then
+  echo "sections: __thread_data $data_flags, __thread_bss $bss_flags and __thread_vars $vars_flags"
 else
-  fail "sections: the thread-local section flags differ from the oracle's object"
+  fail "sections: missing, undecodable, or incorrect thread-local section flags"
 fi
-if [ "$(section_size "$tz" __thread_bss)" = 00000008 ] && [ "$(section_size "$tz" __thread_data)" = 00000000 ] \
-    && [ "$(section_size "$ti" __thread_data)" = 00000008 ]; then
-  echo "placement: a zero initialiser is in __thread_bss, an initialised one in __thread_data"
+if zero_bss=$(section_size "$tz" __thread_bss) && zero_data=$(section_size "$tz" __thread_data) \
+    && init_data=$(section_size "$ti" __thread_data) \
+    && [ "$zero_bss" = 00000008 ] && [ "$zero_data" = 00000000 ] && [ "$init_data" = 00000008 ]; then
+  echo "placement: zero __thread_bss=$zero_bss, zero __thread_data=$zero_data, initialised __thread_data=$init_data"
 else
-  fail "placement: zero and initialised thread-locals are not in __thread_bss and __thread_data"
+  fail "placement: missing, undecodable, or incorrect thread-local section sizes"
 fi
-if llvm-objdump --macho --reloc "$ti" | grep -q 'TLVLDP  ' && llvm-objdump --macho --reloc "$ti" | grep -q 'TLVLDPOFF'; then
+if "$LLVM_OBJDUMP" --macho --reloc "$(native_path "$ti")" >"$WORK/tls_init.relocs" 2>"$WORK/tls_init.relocs.err" \
+    && grep -q 'TLVLDP  ' "$WORK/tls_init.relocs" && grep -q 'TLVLDPOFF' "$WORK/tls_init.relocs"; then
   echo "relocations: the descriptor is reached through TLVLDP and TLVLDPOFF, as in the oracle's object"
 else
-  fail "relocations: the descriptor is not reached through the TLVP relocations"
+  cat "$WORK/tls_init.relocs.err"
+  fail "relocations: missing, undecodable, or incorrect TLVP relocations"
 fi
 # A thread-local model other than local-exec is refused on Linux by name; a plain global is refused on any target.
 lin_general="$WORK/tls_general.linux.ir"
 sed -e 's/^target triple = .*/target triple = "aarch64-unknown-linux-gnu"/' \
     -e 's/^target datalayout = .*/target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128-Fn32"/' \
     -e 's/thread_local(localexec)/thread_local(generaldynamic)/' "$FIX/tls_init.ir" >"$lin_general"
-if "$DRV" obj "$lin_general" "$WORK/tls_general.o" >"$WORK/tls_general.log" 2>&1; then
+if "$DRV" obj "$(native_path "$lin_general")" "$(native_path "$WORK/tls_general.o")" >"$WORK/tls_general.log" 2>&1; then
   fail "refusal: a generaldynamic thread-local on Linux was lowered"
 elif grep -q 'Linux lowers only the local-exec model' "$WORK/tls_general.log"; then
   echo "refusal: a generaldynamic thread-local on Linux is refused by name"
@@ -314,7 +547,7 @@ else
 fi
 plain="$WORK/tls_plain.ir"
 sed -e 's/internal thread_local(localexec) global/internal global/' "$FIX/tls_init.ir" >"$plain"
-if "$DRV" obj "$plain" "$WORK/tls_plain.o" >"$WORK/tls_plain.log" 2>&1; then
+if "$DRV" obj "$(native_path "$plain")" "$(native_path "$WORK/tls_plain.o")" >"$WORK/tls_plain.log" 2>&1; then
   fail "refusal: threadlocaladdr of a plain global was lowered"
 elif grep -q 'is not a thread-local global' "$WORK/tls_plain.log"; then
   echo "refusal: threadlocaladdr of a plain global is refused by name"
@@ -323,70 +556,143 @@ else
 fi
 
 
-# ---- 5. the Linux variant encodes; it is not executed here -------------------------------------
-echo "== 5. aarch64-linux-gnu variant of each fixture encodes (not executed)"
+# Linux target encoding is in memory only. No ELF object is written or run.
+echo "== 5. aarch64-linux-gnu variant of each fixture encodes in memory"
 linux_count=0
 for ir in "$FIX"/*.ir; do
+  [ -f "$ir" ] || continue
   base=$(basename "$ir" .ir)
   sed -e 's/^target triple = .*/target triple = "aarch64-unknown-linux-gnu"/' \
       -e 's/^target datalayout = .*/target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128-Fn32"/' \
       "$ir" >"$WORK/$base.linux.ir"
-  if "$DRV" obj "$WORK/$base.linux.ir" "$WORK/$base.linux.o" >"$WORK/$base.linux.log" 2>&1; then
+  if "$DRV" obj "$(native_path "$WORK/$base.linux.ir")" "$(native_path "$WORK/$base.linux.o")" >"$WORK/$base.linux.log" 2>&1 \
+      && grep -q 'not written: the ELF writer is a later slice' "$WORK/$base.linux.log" \
+      && [ ! -e "$WORK/$base.linux.o" ]; then
     linux_count=$((linux_count + 1))
   else
     cat "$WORK/$base.linux.log"
-    fail "$base: the Linux variant does not encode"
+    fail "$base: the Linux variant did not encode in memory as expected"
   fi
 done
-echo "encoded $linux_count Linux variants; ELF writing is a later slice, so none was written or executed"
+[ "$linux_count" -eq "$fixture_total" ] || fail "not every Linux variant encoded in memory"
+echo "encoded $linux_count of $fixture_total Linux variants in memory; no ELF file was written or executed"
 
-# ---- 6. mutation proofs ------------------------------------------------------------------------
-# Applies one mutation to `file`, builds the driver from the mutated source, runs the check that must then
-# fail, and restores the file. The text must occur exactly once, and the mutation must change it.
+# A detector returns 0 for a match, 1 for a real mismatch, 124 for an
+# invalid setup or inspection, and 125 for a failed executable signature.
+mutation_total=0
+mutation_checked=0
+mutation_caught=0
+mutation_limited=0
 prove_mutation() {
-  local name=$1 file=$2 old=$3 new=$4 check=$5
-  local hits
-  hits=$(python3 -c 'import sys; print(open(sys.argv[1]).read().count(sys.argv[2]))' "$file" "$old")
-  if [ "$hits" != "1" ]; then
-    fail "mutation $name: the text must occur exactly once (found $hits)"
-    return
-  fi
+  local name=$1 file="$REPO/$2" old=$3 new=$4 check=$5
+  local backup mut patch_status check_status
   if [ "$old" = "$new" ]; then
     echo "PATCH CHANGED NOTHING: this proves nothing"
-    fail "mutation $name: the mutation changes nothing"
-    return
+    return 2
   fi
-  local backup="$WORK/backup.$RANDOM"
-  cp "$file" "$backup"
-  RESTORE+=("$file|$backup")
-  python3 -c 'import sys; p,o,n=sys.argv[1:4]; s=open(p).read(); open(p,"w").write(s.replace(o,n,1))' "$file" "$old" "$new"
-  local mut="$WORK/mutant.$RANDOM"
-  if ! build_driver "$mut"; then
-    cp "$backup" "$file"
-    fail "mutation $name: the mutant does not build, so it proves nothing"
-    return
+  mutation_total=$((mutation_total + 1))
+  case "$check" in
+    check_probe|check_mono_pair|check_tlvp_kind|check_tls_clobbers|check_tbss_placed|check_tp_mask) ;;
+    *)
+      if [ "$HOST_ID" != darwin-arm64 ]; then
+        host_limited "mutation $name: its original runtime detector requires macOS arm64"
+        mutation_limited=$((mutation_limited + 1))
+        return 0
+      fi
+      ;;
+  esac
+  mutation_checked=$((mutation_checked + 1))
+  "$check" "$DRV" >"$WORK/mutation-baseline.log" 2>&1
+  check_status=$?
+  if [ "$check_status" -ne 0 ]; then
+    cat "$WORK/mutation-baseline.log"
+    fail "mutation $name: INVALID pristine detector (status $check_status)"
+    return 1
   fi
-  "$check" "$mut" >/dev/null 2>&1
-  local check_status=$?
-  cp "$backup" "$file"
-  if [ "$check_status" -eq 125 ]; then
-    fail "mutation $name: native executable failed codesign"
-  elif [ "$check_status" -eq 0 ]; then
-    fail "mutation $name: NOT caught"
+  echo "pristine predicate passed: $name"
+  backup="$WORK/backup.$mutation_total.$RANDOM"
+  if ! cp "$file" "$backup"; then
+    fail "mutation $name: cannot back up $file"
+    return 1
+  fi
+  RESTORE_FILE=$file
+  RESTORE_BACKUP=$backup
+  "$PY" - "$(native_path "$file")" "$old" "$new" <<'PY'
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+old, new = (value.encode("utf-8") for value in sys.argv[2:])
+data = path.read_bytes()
+count = data.count(old)
+if count != 1:
+    print(f"mutation text must occur exactly once, found {count}", file=sys.stderr)
+    sys.exit(3)
+if old == new:
+    print("PATCH CHANGED NOTHING", file=sys.stderr)
+    sys.exit(4)
+path.write_bytes(data.replace(old, new, 1))
+PY
+  patch_status=$?
+  mut="$WORK/mutant.$mutation_total.$RANDOM$EXE"
+  if [ "$patch_status" -ne 0 ]; then
+    fail "mutation $name: INVALID patch (status $patch_status)"
+  elif ! build_driver "$mut"; then
+    tail -20 "$WORK/build.$(basename "$mut").log"
+    fail "mutation $name: INVALID mutant driver build"
   else
-    echo "caught: $name"
+    "$check" "$mut" >"$WORK/mutation-check.log" 2>&1
+    check_status=$?
+    case "$check_status" in
+      0) fail "mutation $name: NOT caught" ;;
+      1)
+        mutation_caught=$((mutation_caught + 1))
+        echo "caught: $name"
+        cat "$WORK/mutation-check.log"
+        ;;
+      125)
+        cat "$WORK/mutation-check.log"
+        fail "mutation $name: INVALID native executable signature"
+        ;;
+      *)
+        cat "$WORK/mutation-check.log"
+        fail "mutation $name: INVALID detector setup or inspection (status $check_status)"
+        ;;
+    esac
   fi
+  if ! cp "$RESTORE_BACKUP" "$RESTORE_FILE"; then
+    echo "could not restore $RESTORE_FILE; backup kept at $RESTORE_BACKUP" >&2
+    exit 1
+  fi
+  RESTORE_FILE=""
+  RESTORE_BACKUP=""
 }
 
-# Checks against the expected outputs from step 3. Each returns non-zero when the driver's output differs.
+# Compare only a successfully emitted, linked and signed program.
 check_fixture() {
-  local drv=$1 base=$2
-  "$drv" obj "$FIX/$base.ir" "$WORK/m.$base.o" >/dev/null 2>&1 || return 1
-  cc "$WORK/m.$base.o" "$FIX/rt_stub.c" -o "$WORK/m.$base.bin" >/dev/null 2>&1 || return 1
-  codesign -v --strict "$WORK/m.$base.bin" || return 125
-  "$WORK/m.$base.bin" >"$WORK/m.$base.out" 2>/dev/null
-  local status=$?
-  cmp -s "$WORK/m.$base.out" "$WORK/$base.hosted.out" && [ "$status" = "$(tr -d '\n' <"$WORK/$base.hosted.status")" ]
+  local drv=$1 base=$2 status expected identity_status
+  [ -f "$FIX/$base.ir" ] && [ -f "$FIX/$base.iyi" ] \
+    && [ -f "$WORK/$base.hosted.out" ] && [ -f "$WORK/$base.hosted.status" ] || return 124
+  rm -f "$WORK/m.$base.o" "$WORK/m.$base.bin" || return 124
+  if ! "$drv" obj "$(native_path "$FIX/$base.ir")" "$(native_path "$WORK/m.$base.o")" \
+      >"$WORK/m.$base.obj.log" 2>&1 || [ ! -s "$WORK/m.$base.o" ]; then
+    cat "$WORK/m.$base.obj.log"
+    return 124
+  fi
+  if ! cc "$WORK/m.$base.o" "$FIX/rt_stub.c" -o "$WORK/m.$base.bin" >"$WORK/m.$base.link.log" 2>&1; then
+    cat "$WORK/m.$base.link.log"
+    return 124
+  fi
+  record_executable "$WORK/m.$base.bin"
+  identity_status=$?
+  [ "$identity_status" -eq 0 ] || return "$identity_status"
+  "$WORK/m.$base.bin" >"$WORK/m.$base.out" 2>"$WORK/m.$base.err"
+  status=$?
+  expected=$(cat "$WORK/$base.hosted.status") || return 124
+  printf '%s detector status %s, hosted status %s; stdout:\n' "$base" "$status" "$expected"
+  cat "$WORK/m.$base.out"
+  printf '%s detector stderr:\n' "$base"
+  cat "$WORK/m.$base.err"
+  cmp -s "$WORK/m.$base.out" "$WORK/$base.hosted.out" && [ "$status" = "$expected" ]
 }
 check_arith() { check_fixture "$1" arith; }
 check_recursion() { check_fixture "$1" control; }
@@ -395,28 +701,55 @@ check_byval() { check_fixture "$1" byval; }
 check_rmw() { check_fixture "$1" rmw; }
 check_mem() { check_fixture "$1" mem; }
 check_wide() { check_fixture "$1" wide; }
-check_mono_pair() { "$1" mir "$FIX/rmw.ir" ord_mono | grep -qw Ldxr; }
+check_mono_pair() {
+  local mir
+  mir=$("$1" mir "$(native_path "$FIX/rmw.ir")" ord_mono) || return 124
+  [ -n "$mir" ] || return 124
+  printf '%s\n' "$mir" | grep -qw Ldxr
+}
 check_jump_dense() { check_fixture "$1" jump_dense; }
-# The successor mutation exists only in linear scan, which is the one that reads the control-flow graph, so its check
-# always runs linear, whatever allocator the gate was started with.
+# This mutation is specific to linear-scan control-flow successors.
 check_jump_loop() { IYI_NATIVE_REGALLOC=linear check_fixture "$1" jump_loop; }
 check_probe() {
-  local n
-  n=$("$1" mir "$FIX/frame64k.ir" big | grep -c 'ZeroSp')
+  local mir n
+  mir=$("$1" mir "$(native_path "$FIX/frame64k.ir")" big) || return 124
+  [ -n "$mir" ] || return 124
+  n=$(printf '%s\n' "$mir" | grep -c 'ZeroSp' || true)
+  echo "stack probes: $n"
   [ "$n" -ge 16 ]
 }
 check_tls_init() { check_fixture "$1" tls_init; }
 check_constmul() { check_fixture "$1" constexpr_mul; }
 check_tlvp_kind() {
-  "$1" obj "$FIX/tls_init.ir" "$WORK/m.kind.o" >/dev/null 2>&1 || return 1
-  llvm-objdump --macho --reloc "$WORK/m.kind.o" | grep -q 'TLVLDP  '
+  rm -f "$WORK/m.kind.o" || return 124
+  "$1" obj "$(native_path "$FIX/tls_init.ir")" "$(native_path "$WORK/m.kind.o")" || return 124
+  [ -s "$WORK/m.kind.o" ] || return 124
+  "$LLVM_OBJDUMP" --macho --reloc "$(native_path "$WORK/m.kind.o")" >"$WORK/m.kind.relocs" || return 124
+  grep -q 'TLVLDPOFF' "$WORK/m.kind.relocs" || return 124
+  cat "$WORK/m.kind.relocs"
+  grep -q 'TLVLDP  ' "$WORK/m.kind.relocs"
 }
-check_tls_clobbers() { "$1" mir "$FIX/tls_loop.ir" bump | grep -q 'clobbers=x0,x16,x17,x30'; }
+check_tls_clobbers() {
+  local mir
+  mir=$("$1" mir "$(native_path "$FIX/tls_loop.ir")" bump) || return 124
+  [ -n "$mir" ] || return 124
+  printf '%s\n' "$mir" | grep -q 'clobbers=x0,x16,x17,x30'
+}
 check_tbss_placed() {
-  "$1" obj "$FIX/tls_zero.ir" "$WORK/m.tbss.o" >/dev/null 2>&1 || return 1
-  [ "$(section_size "$WORK/m.tbss.o" __thread_bss)" = 00000008 ]
+  local size
+  rm -f "$WORK/m.tbss.o" || return 124
+  "$1" obj "$(native_path "$FIX/tls_zero.ir")" "$(native_path "$WORK/m.tbss.o")" || return 124
+  [ -s "$WORK/m.tbss.o" ] || return 124
+  size=$(section_size "$WORK/m.tbss.o" __thread_bss) || return 124
+  echo "__thread_bss size: $size"
+  [ "$size" = 00000008 ]
 }
-check_tp_mask() { "$1" mir bench/fixtures/native_tp/threadpointer.ir tp_word | grep -q 'AndImm/64 .*#imm=-8'; }
+check_tp_mask() {
+  local mir
+  mir=$("$1" mir "$(native_path "$REPO/bench/fixtures/native_tp/threadpointer.ir")" tp_word) || return 124
+  [ -n "$mir" ] || return 124
+  printf '%s\n' "$mir" | grep -q 'AndImm/64 .*#imm=-8'
+}
 
 check_naked() { check_fixture "$1" asm_naked_const; }
 check_bind() { check_fixture "$1" asm_addone; }
@@ -608,15 +941,30 @@ prove_mutation "constant expression: a product is reduced as a sum" \
   '    return ConstAddress.new(nil, wrap_to_bits(a.offset + b.offset, i.type.int? ? i.type.bits : 64))' \
   check_constmul
 echo "a mutation that changes nothing is refused by the proof helper:"
-if prove_mutation "no-op: the same text on both sides" \
+noop_output=$(prove_mutation "no-op: the same text on both sides" \
     src/compiler/native/frame.iyi \
     '    m = new_inst(fn.isa, Role::SaveReg)' \
     '    m = new_inst(fn.isa, Role::SaveReg)' \
-    check_probe | grep -q 'PATCH CHANGED NOTHING'; then
+    check_probe 2>&1)
+noop_status=$?
+if [ "$noop_status" -ne 0 ] && printf '%s\n' "$noop_output" | grep -q 'PATCH CHANGED NOTHING'; then
   echo "refused: the no-op proof does not pass"
 else
   fail "the proof helper accepted a mutation that changes nothing"
 fi
+if [ "$HOST_ID" = darwin-arm64 ]; then
+  expected_checked=32
+  expected_limited=0
+else
+  expected_checked=6
+  expected_limited=26
+fi
+printf 'mutations: %s total, %s checked, %s caught, %s host-limited\n' \
+  "$mutation_total" "$mutation_checked" "$mutation_caught" "$mutation_limited"
+[ "$mutation_total" -eq 32 ] || fail "the mutation inventory is not 32"
+[ "$mutation_checked" -eq "$expected_checked" ] || fail "the expected mutations were not all checked"
+[ "$mutation_caught" -eq "$expected_checked" ] || fail "not every checked mutation was caught"
+[ "$mutation_limited" -eq "$expected_limited" ] || fail "the host-limited mutation inventory is incomplete"
 
 echo
 if [ "$failed" -eq 0 ]; then

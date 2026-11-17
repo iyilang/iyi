@@ -11,36 +11,71 @@
 # bytes must appear at the cursor, and its relocations must match by offset and kind. The `ret` form is
 # checked against the return word directly, since a naked body cannot end before its last form.
 #
-# Built with `./bin/iyi build --cross-compile --target aarch64-apple-darwin`. Encoding is architecture-only, so
-# the same bytes are expected on any host; the native-linux job runs this gate.
+# Built with the hosted compiler's AArch64-Darwin cross target on each native host.
 set -u
 cd "$(dirname "$0")/.." || exit 1
-
-WORK=$(mktemp -d "${TMPDIR:-/tmp}/native-encode.XXXXXX")
-trap 'rm -rf "$WORK"' EXIT INT TERM
+REPO=$(pwd -P)
+source "$REPO/bench/lib/host.sh" || exit 1
+require_test_host || exit 1
+if [ -z "$PY" ]; then
+  echo "a working python3 or python is required" >&2
+  exit 1
+fi
+if [ "$HOST_OS" = darwin ]; then
+  export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:"$PATH"
+  export LIBRARY_PATH=${LIBRARY_PATH:-/opt/homebrew/opt/bdw-gc/lib}
+fi
+IYI="$REPO/bin/iyi"
+if [ -x "$REPO/.build/iyi.exe" ]; then
+  IYI_BINARY="$REPO/.build/iyi.exe"
+elif [ -x "$REPO/.build/iyi" ]; then
+  IYI_BINARY="$REPO/.build/iyi"
+else
+  echo "the hosted compiler is not built in .build" >&2
+  exit 1
+fi
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/native-encode.XXXXXX") || exit 1
+trap 'rm -rf "$WORK"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+DRV="$WORK/native_cg$EXE"
+revision=$(git rev-parse HEAD) || exit 1
+printf 'revision: %s\nhosted compiler launcher: %s\nhosted compiler binary: %s\n' \
+  "$revision" "$(native_path "$IYI")" "$(native_path "$IYI_BINARY")"
+if ! "$PY" - "$(native_path "$IYI_BINARY")" <<'PY'
+import hashlib, sys
+from pathlib import Path
+print(f"hosted compiler sha256: {hashlib.sha256(Path(sys.argv[1]).read_bytes()).hexdigest()}")
+PY
+then
+  echo "cannot identify the hosted compiler" >&2
+  exit 1
+fi
+printf 'Python: %s\n' "$(command -v "$PY")"
+"$PY" --version || exit 1
 
 failed=0
 fail() { echo "FAIL: $*"; failed=1; }
 
-export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:"$PATH"
-export LIBRARY_PATH=${LIBRARY_PATH:-/opt/homebrew/opt/bdw-gc/lib}
-
 echo "== 1. build the driver with the hosted compiler"
-if ! ./bin/iyi build -o "$WORK/native_cg" src/compiler/tools/native_cg.iyi >"$WORK/build.log" 2>&1; then
-  grep -v 'ld: warning' "$WORK/build.log" | tail -20
+if ! "$IYI" build -o "$(native_path "$DRV")" "$(native_path "$REPO/src/compiler/tools/native_cg.iyi")" >"$WORK/build.log" 2>&1 || [ ! -f "$DRV" ]; then
+  tail -20 "$WORK/build.log"
   fail "the driver does not build"
   exit 1
 fi
 
 echo "== 2. the encoder's table of forms"
-"$WORK/native_cg" forms >"$WORK/forms.tsv" || fail "native_cg forms failed"
+if ! "$DRV" forms >"$WORK/forms.tsv" || [ ! -s "$WORK/forms.tsv" ]; then
+  fail "native_cg forms failed or returned an empty table"
+  exit 1
+fi
 echo "forms: $(wc -l <"$WORK/forms.tsv" | tr -d ' ')"
 
 echo "== 3. the oracle: every form in one naked function, built by the hosted compiler"
-python3 - "$WORK" <<'PY'
+if ! "$PY" - "$(native_path "$WORK")" <<'PY'
 import sys
 work = sys.argv[1]
-with open(f"{work}/forms.tsv") as f:
+with open(f"{work}/forms.tsv", encoding="utf-8") as f:
     rows = [line.rstrip("\n").split("\t") for line in f if line.strip()]
 body = ["brk #0x7e7e"]
 for row in rows:
@@ -52,17 +87,25 @@ lines = ['@[Unsafe("the oracle: one naked function holds every encoded form, for
          "module encode_oracle", "", "@[Naked]", "def oracle_forms : Nil",
          "  asm(\"" + "\n       ".join(body) + "\" :::: \"volatile\")", "end", "",
          "oracle_forms"]
-open(f"{work}/oracle.iyi", "w").write("\n".join(lines) + "\n")
+with open(f"{work}/oracle.iyi", "w", encoding="utf-8", newline="\n") as f:
+    f.write("\n".join(lines) + "\n")
 PY
-if ! ./bin/iyi build --cross-compile --target aarch64-apple-darwin -o "$WORK/oracle.o" "$WORK/oracle.iyi" >"$WORK/oracle.log" 2>&1; then
-  grep -v 'ld: warning' "$WORK/oracle.log" | tail -20
+then
+  fail "cannot generate the encoder oracle"
+  exit 1
+fi
+if ! "$IYI" build --cross-compile --target aarch64-apple-darwin -o "$(native_path "$WORK/oracle.o")" "$(native_path "$WORK/oracle.iyi")" >"$WORK/oracle.log" 2>&1; then
+  tail -20 "$WORK/oracle.log"
   fail "the oracle does not build"
   exit 1
 fi
 
 echo "== 4. read the oracle's bytes and relocations back, then compare"
-"$WORK/native_cg" bytes "$WORK/oracle.o" >"$WORK/oracle.tsv" || fail "native_cg bytes failed"
-python3 - "$WORK" <<'PY' || failed=1
+if ! "$DRV" bytes "$(native_path "$WORK/oracle.o")" >"$WORK/oracle.tsv"; then
+  fail "native_cg bytes failed"
+  exit 1
+fi
+"$PY" - "$(native_path "$WORK")" <<'PY' || failed=1
 import sys
 work = sys.argv[1]
 MARKER = "c0cf2fd4"   # brk #0x7e7e
@@ -120,7 +163,7 @@ for row in rows:
     compared += 1
 
 print(f"compared {compared} of {len(rows)} forms against the oracle")
-if bad:
+if bad or not rows or compared != len(rows):
     sys.exit(1)
 PY
 

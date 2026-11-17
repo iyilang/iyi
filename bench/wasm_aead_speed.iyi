@@ -1,0 +1,81 @@
+@[Unsafe("the host supplies benchmark buffers in wasm linear memory")]
+import std/aead::{AesGcm, AeadError}
+
+class AeadBenchmark
+  @@box = AesGcm.new("0123456789abcdef0123456789abcdef")
+  @@nonce = "abcdefghijkl"
+  @@aad = ""
+  @@plain = ""
+  @@sealed = ""
+  @@bad = ""
+  @@result = ""
+
+  def self.copy(source : UInt8*, size : Int32) : String
+    String.new(size) { |dst| dst.copy_from(source, size) }
+  end
+
+  def self.setup(key : UInt8*, nonce : UInt8*, aad : UInt8*, aad_size : Int32, plain : UInt8*, size : Int32, sealed : UInt8*) : Nil
+    @@box = AesGcm.new(copy(key, 32))
+    @@nonce = copy(nonce, 12)
+    @@aad = copy(aad, aad_size)
+    @@plain = copy(plain, size)
+    @@sealed = copy(sealed, size + 16)
+    @@bad = String.new(size + 16) do |dst|
+      dst.copy_from(sealed, size + 16)
+      dst[size + 15] = dst[size + 15] ^ 1_u8
+    end
+    @@result = ""
+  end
+
+  def self.seal : UInt8*
+    @@result = @@box.seal(@@nonce, @@plain, @@aad)
+    @@result.to_unsafe
+  end
+
+  def self.open : UInt8*
+    result = @@box.open(@@nonce, @@sealed, @@aad)
+    return Pointer(UInt8).new(0_u64) if result.is_a?(AeadError)
+    @@result = result
+    @@result.to_unsafe
+  end
+
+  def self.refuses_bad? : Bool
+    @@box.open(@@nonce, @@bad, @@aad).is_a?(AeadError)
+  end
+
+  def self.ctr(dst : UInt8*) : Nil
+    @@box.measure_ctr(@@nonce, @@plain, dst)
+  end
+
+  def self.ghash(dst : UInt64*) : Nil
+    @@box.measure_ghash(@@sealed, @@plain.bytesize, dst)
+  end
+end
+
+fun aead_setup(key : UInt8*, nonce : UInt8*, aad : UInt8*, aad_size : Int32, plain : UInt8*, size : Int32, sealed : UInt8*) : Nil
+  AeadBenchmark.setup(key, nonce, aad, aad_size, plain, size, sealed)
+end
+
+fun aead_seal : UInt8*
+  AeadBenchmark.seal
+end
+
+fun aead_open : UInt8*
+  AeadBenchmark.open
+end
+
+fun aead_bad_tag_refused : Int32
+  AeadBenchmark.refuses_bad? ? 1 : 0
+end
+
+fun aead_ctr(dst : UInt8*) : Nil
+  AeadBenchmark.ctr(dst)
+end
+
+fun aead_ghash(dst : UInt64*) : Nil
+  AeadBenchmark.ghash(dst)
+end
+
+fun aead_collect : Nil
+  IyiMark.collect
+end

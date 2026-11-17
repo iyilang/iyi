@@ -66,6 +66,17 @@ async function canary(bytes) {
   }
 }
 
+async function boundedStacks(bytes, rounds) {
+  const run = await program(bytes, { gate: true });
+  if (run.status !== 0) throw new Error("stack-pool fixture did not start");
+  if (await run.iyi.call("task_sequential_fibers", 8) !== 8) throw new Error("stack-pool warmup failed");
+  const before = run.iyi.memory.buffer.byteLength / 65536;
+  if (await run.iyi.call("task_sequential_fibers", rounds) !== rounds) throw new Error("sequential fibers did not finish");
+  const after = run.iyi.memory.buffer.byteLength / 65536;
+  if (after > before + 8) throw new Error(`fiber stack pool grew ${after - before} pages beyond bound 8`);
+  return { run, before, after };
+}
+
 export default async function ({ load, log }) {
   if (typeof WebAssembly.Suspending !== "function" || typeof WebAssembly.promising !== "function") {
     throw new Error("JSPI is unavailable");
@@ -97,6 +108,23 @@ export default async function ({ load, log }) {
   const elapsed = performance.now() - began;
   if (rounds !== 100000) throw new Error(`channel round trips returned ${rounds}`);
   log(`100000 channel round trips: ${elapsed.toFixed(1)} ms`);
+
+  const pooled = await boundedStacks(bytes, 2000);
+  log(`2000 sequential fibers with collections: ${pooled.before} -> ${pooled.after} pages`);
+  const cached = await pooled.run.iyi.call("task_fill_stack_pool", 32);
+  if (cached !== 32) throw new Error(`stack pool retained ${cached} of 32 simultaneous fibers`);
+  if (await pooled.run.iyi.call("task_stack_pool_limit") !== 13107) throw new Error("unexpected stack pool limit");
+  const peak = pooled.run.iyi.memory.buffer.byteLength / 65536;
+  if (await pooled.run.iyi.call("task_fill_stack_pool", 32) !== 32) throw new Error("second fiber burst did not return its stacks");
+  const repeated = pooled.run.iyi.memory.buffer.byteLength / 65536;
+  if (repeated > peak + 8) throw new Error(`repeated fiber burst grew ${repeated - peak} pages beyond bound 8`);
+  if (await pooled.run.iyi.call("task_pool_not_scanned") !== 1) throw new Error("pooled stack contents kept a dead object alive");
+  log(`32-fiber bursts: ${peak} -> ${repeated} pages; pool limit 13107; idle stacks not scanned`);
+  let mutation;
+  try { await boundedStacks(await load("bad-pool.wasm"), 48); }
+  catch (error) { mutation = error; }
+  if (!String(mutation).includes("fiber stack pool grew")) throw new Error(`disabled stack reuse was not detected: ${mutation}`);
+  log(`disabled stack reuse: ${mutation.message}`);
 
   const disabled = await program(bytes, { jspi: false });
   if (disabled.status !== 1 || !disabled.stderr.includes("JSPI is required to park a task")) {

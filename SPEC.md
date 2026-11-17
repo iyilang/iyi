@@ -63,7 +63,7 @@ own reference accepts.
 | warm full build, `hello` / 6,900-line pair | 0.07 s / 0.24 s, against `go build`'s 0.08 s / 0.09 s |
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
-| iyi's own prelude | 29,256 lines, of which 4,738 are the library held to the 4,738 ceiling (7,254 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
+| iyi's own prelude | 29,300 lines, of which 4,738 are the library held to the 4,738 ceiling (7,254 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
 | compiler | 138,330 lines, none of it written in iyi |
 | artifact format | `.iyimod` v62, checksum per section |
 | samples | 28 programs, of which 12 rebuild from artifacts with their modules' source deleted |
@@ -88,7 +88,7 @@ shape.
 > is a library and the rules are the language, so a program can keep one and
 > change the other: `--crystal` builds against Crystal's standard library, and
 > there `require` reaches the ecosystem while every rule stays where it was.
-> "No standard library worth the name" is still true of iyi's own 29,256 lines
+> "No standard library worth the name" is still true of iyi's own 29,300 lines
 > and no longer true of what a program can have. Part V item 12a is the
 > measurement, nine shards wide.
 
@@ -270,7 +270,7 @@ of binary. It is not made the default on that trade, and the middle needs the
 initialisers to run *later* rather than not at all, which is the `dlsym` table
 above, and a larger piece of work than the number it wins.
 
-**3. A deliberately tiny prelude, written in iyi. Done: 29,256 lines,
+**3. A deliberately tiny prelude, written in iyi. Done: 29,300 lines,
 primitives included, of which the library is 4,738.** Not a standard library:
 integers, booleans, a string, one sequence, one dictionary, one range, `puts`,
 and an `enum`'s surface — the member's name, an order, the members, and the
@@ -1063,7 +1063,7 @@ Checking it moved two things and left the shape alone.
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
 | Compiler | 24,984 lines, **written in Crystal** | 138,330 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 29,256-line own prelude + 127,854 in std |
+| Library | 8,161 lines (3,551 of it core) | 29,300-line own prelude + 127,854 in std |
 | Specs | 21,146 lines | 17,214 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
@@ -3914,6 +3914,13 @@ survives collection. A corrupted canary reports `iyi: fiber shadow stack
 overflow` and ends the program. A frame that writes beyond its stack can
 corrupt memory or trap before the next switch; the canary is not a guard page.
 
+Completed fibers return their atomic shadow stacks to a pool that grows with
+the number needed at once. It holds at most 13,107: wasm32 has at most 65,536
+pages, and each stack and its header take five. The next fiber takes a pooled
+stack before growing memory and resets its canary. Idle pooled stacks are not
+scanned for roots. For other large allocations, wasm32's collector marks dead
+objects free but does not return or reuse their linear-memory pages.
+
 The loader starts and calls task-capable exports through JSPI. A host without
 JSPI can still run code that never parks; the first park reports `iyi: JSPI is
 required to park a task on wasm32-unknown-unknown` and ends the program.
@@ -3931,11 +3938,13 @@ stack scan returned `-1,-1`; sharing one shadow stack returned `-2,1702`.
 
 `bench/wasm_tasks_exercise.sh` compares the portable task exercise with
 native output in plain and release builds. One run on this Mac measured
-100,000 channel round trips at 75.4 ms plain and 75.0 ms release in Node,
-and 108.2 ms plain and 95.4 ms release in headless Chrome. In the same
-cross-compile/link mode, `hello` was 69,239 bytes without a task path and
-117,200 bytes with `sleep(0)` added. The measurements describe these builds,
-not a throughput guarantee.
+100,000 channel round trips at 69.3 ms plain and 59.1 ms release in Node,
+and 100.9 ms plain and 85.2 ms release in headless Chrome. In the same
+cross-compile/link mode, `hello` was 69,578 bytes without a task path and
+119,705 bytes with `sleep(0)` added. With forced collections, 2,000 sequential
+fibers kept memory at 15 pages, and a repeated 32-fiber burst kept it at 171
+pages in both hosts. Disabling stack reuse grew memory by 241 pages over 48
+fibers. The measurements describe these builds, not a throughput guarantee.
 
 
 #### III.4.13 Tasks across cores: **BUILT — `spawn(unit: :new)`, a pool of workers that steal started tasks from each other; `Share` gates its block**
@@ -13480,7 +13489,7 @@ Named honestly, so nobody mistakes this draft for complete.
     shards exist and none of them is written to iyi's rules, so "run them
     directly" is not a compatibility problem, it is the four rules: `require`
     against R-1, inference against R-2, monkey patching against R-3, and
-    Crystal's 8,161-line standard library against iyi's own 29,256-line prelude.
+    Crystal's 8,161-line standard library against iyi's own 29,300-line prelude.
 
     What is measurable is narrower and better than that framing suggests, and
     it was measured on **Kemal 1.12.0**, which compiles under this compiler

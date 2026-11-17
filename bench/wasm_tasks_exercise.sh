@@ -12,12 +12,13 @@ cp "$REPO/bench/wasm_tasks_exercise.mjs" "$WORK/bench/"
 cp "$REPO/src/iyi/wasm/iyi.mjs" "$WORK/src/iyi/wasm/"
 
 # Give the broken builds a single modified source file and the real remainder.
-for variant in bad-roots bad-canary; do
+for variant in bad-roots bad-canary bad-pool; do
   mkdir -p "$WORK/src-$variant/iyi"
   for source in "$REPO"/src/iyi/*; do
     name="${source##*/}"
     if [[ "$variant:$name" == bad-roots:prelude.iyi ||
-          "$variant:$name" == bad-canary:concurrency.iyi ]]; then
+          "$variant:$name" == bad-canary:concurrency.iyi ||
+          "$variant:$name" == bad-pool:concurrency.iyi ]]; then
       continue
     fi
     ln -s "$source" "$WORK/src-$variant/iyi/$name"
@@ -33,6 +34,11 @@ awk '
   { print }
   END { if (changed != 1) exit 1 }
 ' "$REPO/src/iyi/concurrency.iyi" > "$WORK/src-bad-canary/iyi/concurrency.iyi"
+awk '
+  /stack = IyiWasmStackPool.take/ { sub(/IyiWasmStackPool.take/, "Pointer(UInt8).new(0_u64)"); changed++ }
+  { print }
+  END { if (changed != 1) exit 1 }
+' "$REPO/src/iyi/concurrency.iyi" > "$WORK/src-bad-pool/iyi/concurrency.iyi"
 
 build_wasm() {
   local name="$1" source="$2" path="$3" command
@@ -67,6 +73,7 @@ for mode in plain release; do
   build_wasm tasks "$REPO/bench/wasm_tasks_exercise.iyi" "$REPO/src"
   build_wasm bad-roots "$REPO/bench/wasm_tasks_exercise.iyi" "$WORK/src-bad-roots:$REPO/src"
   build_wasm bad-canary "$REPO/bench/wasm_tasks_exercise.iyi" "$WORK/src-bad-canary:$REPO/src"
+  build_wasm bad-pool "$REPO/bench/wasm_tasks_exercise.iyi" "$WORK/src-bad-pool:$REPO/src"
   echo "== tasks: $mode, Node =="
   (cd "$WORK" && node "$REPO/bench/wasm_node.mjs" "$WORK/bench/wasm_tasks_exercise.mjs")
   echo "== tasks: $mode, Chrome =="

@@ -448,6 +448,47 @@ enum IyiFiberState : Int32
   Pooled    = 7 # a pool worker's own fiber, which waits for nothing
 end
 
+{% if flag?(:wasm32) %}
+  # Pooled stacks remain atomic heap objects. The scanned slot buffer roots
+  # them without treating stale stack contents as roots. Each stack takes
+  # five 64 KiB pages, so wasm32 can hold at most 65,536 / 5 of them.
+  class IyiWasmStackPool
+    MAX_CAPACITY = 13107
+    @@slots : Pointer(Pointer(UInt8)) = Pointer(Pointer(UInt8)).new(0_u64)
+    @@count : Int32 = 0
+    @@capacity : Int32 = 0
+
+    def self.size : Int32
+      @@count
+    end
+
+    def self.take : Pointer(UInt8)
+      return Pointer(UInt8).new(0_u64) if @@count == 0
+      index = @@count - 1
+      stack = @@slots[index]
+      @@slots[index] = Pointer(UInt8).new(0_u64)
+      @@count = index
+      stack
+    end
+
+    def self.put(stack : Pointer(UInt8)) : Nil
+      return if stack.address == 0_u64 || @@count >= MAX_CAPACITY
+      if @@count == @@capacity
+        capacity = @@capacity == 0 ? 16 : @@capacity * 2
+        capacity = MAX_CAPACITY if capacity > MAX_CAPACITY
+        if @@slots.address == 0_u64
+          @@slots = Pointer(Pointer(UInt8)).malloc(capacity.to_u64)
+        else
+          @@slots = @@slots.realloc(capacity.to_u64)
+        end
+        @@capacity = capacity
+      end
+      @@slots[@@count] = stack
+      @@count = @@count + 1
+    end
+  end
+{% end %}
+
 class IyiFiber
   property state : IyiFiberState
   property cancelled : Bool
@@ -802,7 +843,9 @@ class IyiFiber
   # it is standing on.
   def prepare_stack : Nil
     {% if flag?(:wasm32) %}
-      @wasm_stack = IyiHeap.alloc_atomic(STACK_BYTES).as(Pointer(UInt8))
+      stack = IyiWasmStackPool.take
+      stack = IyiHeap.alloc_atomic(STACK_BYTES).as(Pointer(UInt8)) if stack.address == 0_u64
+      @wasm_stack = stack
       base = @wasm_stack.address
       Pointer(UInt64).new(base).value = WASM_STACK_CANARY
       @stack_top = base + STACK_BYTES
@@ -962,6 +1005,7 @@ class IyiFiber
     @stack_top = 0_u64
     @sp = 0_u64
     {% if flag?(:wasm32) %}
+      IyiWasmStackPool.put(@wasm_stack)
       @wasm_stack = Pointer(UInt8).new(0_u64)
     {% else %}
       IyiScheduler.give_stack(top - STACK_BYTES)

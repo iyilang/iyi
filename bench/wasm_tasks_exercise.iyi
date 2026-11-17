@@ -163,6 +163,66 @@ end
       end
     end
   end
+
+  fun task_sequential_fibers(rounds : Int32) : Int32
+    IyiMark.auto = true
+    completed = 0
+    while completed < rounds
+      group do |g|
+        task = g.spawn(unit: :same) { 42 }
+        value = task.value
+        task_check(value.is_a?(Int32) && value == 42, "sequential task did not join")
+      end
+      IyiMark.collect
+      completed = completed + 1
+    end
+    completed
+  end
+
+  fun task_fill_stack_pool(rounds : Int32) : Int32
+    group do |g|
+      index = 0
+      while index < rounds
+        g.spawn(unit: :same) { sleep(5) }
+        index = index + 1
+      end
+    end
+    IyiMark.collect
+    IyiWasmStackPool.size
+  end
+
+  fun task_stack_pool_limit : Int32
+    IyiWasmStackPool::MAX_CAPACITY
+  end
+
+  class TaskPoolProbe
+    @@hidden : UInt64 = 0_u64
+
+    def self.remember(address : UInt64) : Nil
+      @@hidden = address ^ 0x5555555555555555_u64
+    end
+
+    def self.address : UInt64
+      @@hidden ^ 0x5555555555555555_u64
+    end
+  end
+
+  @[NoInline]
+  def task_leave_pool_decoy : Nil
+    box = TaskExerciseBox.new(719)
+    address = box.as(Pointer(Void)).address
+    TaskPoolProbe.remember(address)
+    base = IyiScheduler.current.stack_top - IyiFiber::STACK_BYTES
+    Pointer(Int32).new(base + 16_u64).value = address.unsafe_to_i32
+  end
+
+  fun task_pool_not_scanned : Int32
+    group do |g|
+      g.spawn(unit: :same) { task_leave_pool_decoy }
+    end
+    IyiMark.collect
+    IyiRoots.base_of(TaskPoolProbe.address) == 0_u64 ? 1 : 0
+  end
 {% end %}
 
 def task_exercise : Nil

@@ -104,6 +104,44 @@ explain_link_difference() {
     echo "    differing bytes: $(cmp -l "$first" "$second" 2>/dev/null | wc -l | tr -d ' ')"
     echo "    first differing offsets (1-based): $(cmp -l "$first" "$second" 2>/dev/null | head -8 | awk '{printf "%s ", $1}')"
   } >&2
+  "$PY" - "$first" "$second" >&2 <<'PYEOF' || true
+import struct, sys
+a = open(sys.argv[1], "rb").read()
+b = open(sys.argv[2], "rb").read()
+if a[:2] != b"MZ" or len(a) != len(b):
+    sys.exit(0)  # not a same-size PE image: the byte counts above are all there is
+e = struct.unpack_from("<I", a, 0x3C)[0]
+nsec, = struct.unpack_from("<H", a, e + 6)
+opt, = struct.unpack_from("<H", a, e + 20)
+magic, = struct.unpack_from("<H", a, e + 24)
+dirs = e + 24 + (112 if magic == 0x20B else 96)
+secs = []
+for i in range(nsec):
+    name, vsize, va, rsize, rptr = struct.unpack_from("<8sIII I", a, e + 24 + opt + 40 * i)
+    secs.append((name.rstrip(b"\0").decode(), va, vsize, rptr, rsize))
+def region(off):
+    if e + 8 <= off < e + 12:
+        return "PE TimeDateStamp"
+    if off < secs[0][3]:
+        return "headers"
+    for name, va, vsize, rptr, rsize in secs:
+        if rptr <= off < rptr + rsize:
+            return name
+    return "after the last section"
+counts = {}
+for off in range(len(a)):
+    if a[off] != b[off]:
+        counts[region(off)] = counts.get(region(off), 0) + 1
+print("    differing bytes by region: " + ", ".join(f"{k}: {v}" for k, v in sorted(counts.items())))
+rva, size = struct.unpack_from("<II", a, dirs + 6 * 8)
+types = []
+for name, va, vsize, rptr, rsize in secs:
+    if va <= rva < va + max(vsize, rsize):
+        base = rptr + (rva - va)
+        for k in range(size // 28):
+            types.append(struct.unpack_from("<I", a, base + 28 * k + 12)[0])
+print(f"    debug directory entry types: {types} (2 is CodeView, 16 is the reproducible-build entry /Brepro adds)")
+PYEOF
   rm -rf "$CACHE"/*
   "$IYI" build -o "$second" "$source" >/dev/null 2>&1 || true
   if cmp -s "$first" "$second"; then

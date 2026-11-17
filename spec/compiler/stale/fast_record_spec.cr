@@ -51,6 +51,16 @@ private def restore_mtime(path : String, nanoseconds : Int64) : Nil
   File.utime(time, time, path)
 end
 
+# Windows takes a file's change time from a clock that moves about every
+# 15 ms, so a rewrite straight after a stamp can carry the same change time.
+# That window is what the racy digest covers; a spec that asserts the change
+# time moved waits it out first.
+private def wait_for_clock_tick : Nil
+  {% if flag?(:win32) %}
+    sleep 250.milliseconds
+  {% end %}
+end
+
 private NO_DROP = Set(String).new
 
 # Ends an example that needs a change time where the file system reports none.
@@ -79,6 +89,7 @@ describe Iyi::Stale::FastRecord do
     before = Iyi::Stale::FileStamp.of(file)
     record = fast_record(fast_facts(dir), "src/x.iyi", [file])
 
+    wait_for_clock_tick
     File.write(file, "5678")
     restore_mtime(file, before.mtime)
     after = Iyi::Stale::FileStamp.of(file)

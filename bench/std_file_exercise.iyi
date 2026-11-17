@@ -40,17 +40,6 @@ def assert_temp_directory(expected : String, label : String) : Nil
   File.delete(path)
 end
 
-def refusal_of(&work : -> Nil) : String
-  said = "done"
-  group do |g|
-    task = g.spawn { work.call; 0 }
-    outcome = task.value
-    said = outcome.message.to_s if outcome.is_a?(Panicked)
-    0
-  end
-  said
-end
-
 # The sandbox is the argument, then IYI_FILE_SANDBOX, then the platform's
 # own temporary directory. `bench/std_exercise.sh` sets IYI_FILE_SANDBOX to
 # an empty sandbox directory before each of the source and artifact runs
@@ -428,10 +417,13 @@ ENV["TEMP"] = nil
 assert_temp_directory(temp_dirs[2], "TMP supplies the directory")
 ENV["TMP"] = nil
 {% if flag?(:win32) %}
-  dir_refusal = refusal_of { Dir.tempdir; nil }
-  file_refusal = refusal_of { File.tempfile; nil }
-  assert_true dir_refusal.includes?("TMPDIR, TEMP and TMP are unset or empty"), "Dir.tempdir refuses an unknown Windows temp directory"
-  assert_true file_refusal.includes?("TMPDIR, TEMP and TMP are unset or empty"), "File.tempfile refuses an unknown Windows temp directory"
+  # With TMPDIR, TEMP and TMP all unset, both ask Windows (GetTempPathW):
+  # `tempfile` alone kept the literal `C:\Windows\Temp`, beside a
+  # `Dir.tempdir` in the user's profile.
+  bare = File.tempfile("std_file_ex")
+  bare_dir = Dir.tempdir
+  File.delete(bare)
+  assert_str bare_dir, File.dirname(bare), "with no TMPDIR, TEMP or TMP, tempfile makes its file in Dir.tempdir"
 {% else %}
   assert_temp_directory("/tmp", "no temporary variables uses /tmp")
 {% end %}

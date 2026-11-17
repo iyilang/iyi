@@ -12,15 +12,20 @@ case "$(uname -s)" in
   *) WINDOWS=0 ;;
 esac
 
-# The shared Crystal entrypoint for stale gates. The PowerShell launcher sets
-# CRYSTAL_PATH, CRYSTAL_HAS_WRAPPER and library paths before using crystal.exe.
+# The shared Crystal entrypoint for stale gates. On Windows bin/crystal.ps1
+# only sets CRYSTAL_PATH, CRYSTAL_HAS_WRAPPER and the library path before it
+# runs .build/crystal.exe; called through `powershell -File` it also reads
+# `-o` as an abbreviation of -OutVariable and -OutBuffer and refuses the
+# build, so the same environment is set here and the executable is run.
 if [[ "${1:-}" == --crystal ]]; then
   shift
   if [[ "$WINDOWS" == 1 ]]; then
     [[ -f "$REPO_DIR/.build/crystal.exe" ]] || {
       echo "Missing $REPO_DIR/.build/crystal.exe" >&2; exit 1;
     }
-    exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$REPO_DIR/bin/crystal.ps1" "$@"
+    exec env CRYSTAL_PATH="${CRYSTAL_PATH:-lib;$REPO_DIR/src}" CRYSTAL_HAS_WRAPPER=true \
+      CRYSTAL_CONFIG_LIBRARY_PATH="${CRYSTAL_CONFIG_LIBRARY_PATH:-${CRYSTAL_LIBRARY_PATH:-}}" \
+      "$REPO_DIR/.build/crystal.exe" "$@"
   fi
   exec "$REPO_DIR/bin/crystal" "$@"
 fi

@@ -377,11 +377,11 @@ print LibM.cos(0.0)
     local res
     res="$("$PY" -c "
 import subprocess
-out = subprocess.check_output(['$BASH_EXE', '$REPO/bench/stale_store_concurrency.sh', '--crystal', 'eval', '''
+out = subprocess.run(['$BASH_EXE', '$REPO/bench/stale_store_concurrency.sh', '--crystal', 'eval', '''
 require \"compiler/iyi/stale/link\"
 r = Iyi::Stale::Link.refusal(\"-L/opt/$ch/lib\", nil)
 puts r || \"nil\"
-'''], cwd='$REPO').decode().strip()
+'''], cwd='$REPO', stdout=subprocess.PIPE, stderr=subprocess.STDOUT).stdout.decode(errors='replace').strip()
 print(out)
 ")"
     if [[ "$res" == *"refused link flag"* && "$res" == *"$ch"* ]]; then
@@ -397,7 +397,7 @@ print(out)
   local fp_check
   fp_check="$("$PY" -c "
 import subprocess
-out = subprocess.check_output(['$BASH_EXE', '$REPO/bench/stale_store_concurrency.sh', '--crystal', 'eval', '''
+out = subprocess.run(['$BASH_EXE', '$REPO/bench/stale_store_concurrency.sh', '--crystal', 'eval', '''
 require \"compiler/iyi/stale/link\"
 require \"compiler/iyi/stale/encoding\"
 
@@ -412,7 +412,7 @@ fp4 = Iyi::Stale::Link.fp(\"-lbar\", nil, false, Hash(String, String?).new)
 raise \"shim answer did not change LinkFp\" if fp3 == fp4
 
 puts \"OK\"
-'''], cwd='$REPO').decode().strip()
+'''], cwd='$REPO', stdout=subprocess.PIPE, stderr=subprocess.STDOUT).stdout.decode(errors='replace').strip()
 print(out)
 ")"
   if [ "$fp_check" = "OK" ]; then

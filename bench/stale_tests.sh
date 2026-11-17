@@ -81,7 +81,32 @@ fail() {
   fi
   exit 1
 }
-run_json() { (cd "$1" && "$IYI" test --cached --json "${@:2}"); }
+# In keep-going mode every run also says, on stderr, why each test that was not
+# served from a receipt was not: the fields `--json` already carries.
+show_misses() {
+  python3 -c '
+import json, os, sys
+try:
+    doc = json.load(sys.stdin)
+except ValueError:
+    sys.exit(0)
+for test in doc.get("tests", []):
+    if test.get("cached"):
+        continue
+    keep = {k: test[k] for k in ("status", "reuse", "reason", "check", "check_reason") if test.get(k) not in (None, "")}
+    print("    [miss] %s: %s" % (os.path.basename(test.get("file", "?")), json.dumps(keep, sort_keys=True)), file=sys.stderr)
+' || true
+}
+run_json() {
+  local out status=0
+  out="$(cd "$1" && "$IYI" test --cached --json "${@:2}")" || status=$?
+  printf '%s\n' "$out"
+  if [ "$KEEP_GOING" = 1 ]; then
+    printf '  run_json in %s %s\n' "$(basename "$1")" "${*:2}" >&2
+    printf '%s' "$out" | show_misses
+  fi
+  return "$status"
+}
 json_field() { python3 -c 'import json,sys; print(json.load(sys.stdin)[sys.argv[1]])' "$1"; }
 json_cached() { json_field cached; }
 json_failed() { json_field failed; }

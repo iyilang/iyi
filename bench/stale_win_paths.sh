@@ -150,7 +150,9 @@ run("invalid UTF-8", "invalid", expected="INVALID:refused")
 
 print("== cwd-dependent and conservative paths")
 run("short relative negative control", "path", ("relative.txt",), expected="relative.txt", host_state=True, site=prelude)
-relative = drive + ":" + tail
+# `splitdrive` returns the drive with its colon already: `C:` + tail is the
+# drive-relative `C:longcomponent\...`, and adding another colon made `C::...`.
+relative = drive + tail
 expected_first = "\\\\?\\" + ntpath.normpath(ntpath.join(first, tail))
 expected_second = "\\\\?\\" + ntpath.normpath(ntpath.join(second, tail))
 if ntpath.normcase(expected_first) == ntpath.normcase(expected_second):

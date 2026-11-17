@@ -218,9 +218,9 @@ struct SecureEnclaveNative
     LibEnclaveCF.CFRelease(object) unless object.address == 0
   end
 
-  # .iyimod does not preserve extern globals in a framework lib. Resolve the
-  # exported symbols from the already-linked frameworks instead; report a
-  # missing symbol before allocating any CF object.
+  # Directly reading this module's framework globals failed an .iyimod
+  # round trip. Resolve them from the already-linked frameworks instead;
+  # report a missing symbol before allocating any CF object.
   def self.symbol(name : String) : Void* | SecureEnclaveError
     # macOS dlfcn.h: RTLD_DEFAULT is (void *)-2.
     address = LibEnclaveCF.dlsym(Pointer(Void).new(0xfffffffffffffffe_u64), name.to_unsafe)

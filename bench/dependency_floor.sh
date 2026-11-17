@@ -235,9 +235,9 @@ ALLOWED_SYMBOLS_DARWIN="$FLOOR_BASE_DARWIN __divti3 __modti3 __udivti3 __umodti3
 # copy. Linux reads a bundle file instead; Windows asks crypt32.
 ALLOWED_SYMBOLS_DARWIN="$ALLOWED_SYMBOLS_DARWIN SecTrustCopyAnchorCertificates SecTrustSettingsCopyCertificates SecTrustSettingsCopyTrustSettings SecCertificateCopyData CFArrayGetCount CFArrayGetValueAtIndex CFDataGetBytePtr CFDataGetLength CFDictionaryGetValue CFNumberGetValue CFRelease CFStringCreateWithCString"
 # `std/secure_enclave` creates and uses ephemeral keys in Security.framework.
-# dlsym is libSystem's lookup of framework constants (extern globals do not
-# survive a .iyimod round trip). The other names create and inspect the
-# Security/CoreFoundation objects which are released by the module.
+# dlsym is libSystem's lookup of framework constants (this module's direct
+# global references failed an .iyimod round trip). The other names create
+# and inspect the Security/CoreFoundation objects it releases.
 ALLOWED_SYMBOLS_DARWIN="$ALLOWED_SYMBOLS_DARWIN dlsym CFDataCreate CFDataGetTypeID CFDictionaryCreateMutable CFDictionarySetValue CFErrorCopyDescription CFErrorGetCode CFGetTypeID CFNumberCreate CFStringGetCString CFStringGetLength CFStringGetMaximumSizeForEncoding SecAccessControlCreateWithFlags SecKeyCopyAttributes SecKeyCopyExternalRepresentation SecKeyCopyPublicKey SecKeyCreateRandomKey SecKeyCreateSignature SecKeyCreateWithData"
 # The exercise's independent Security.framework verifier imports its own
 # public key and constants; proc_pidinfo reads its resident-memory samples.

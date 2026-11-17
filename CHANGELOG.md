@@ -18,6 +18,12 @@
   census measures this component's source population. Hosted commands remain
   unchanged.
 
+- **The semantic analyzer and type system are written in iyi.**
+  This component adds declaration and call resolution, typed syntax,
+  closure analysis, literal expansion and type operations. Its gates compare
+  fixtures and the checkout's source corpus with the hosted compiler.
+  Hosted commands remain unchanged.
+
 - **`iyi doc --json [DIR]` prints a package's exported APIs as data.**
   The package path and compiler identity accompany its modules, ordered by
   path, each carrying the same API and doc comments as `iyi mod dump --json`.

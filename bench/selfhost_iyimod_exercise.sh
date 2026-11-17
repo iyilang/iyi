@@ -335,6 +335,44 @@ if [ "$driver_count" -ne "${#CORPUS_FILES[@]}" ]; then
   status=1
 fi
 
+# The corpus has module macros; this artifact also exercises type-owned macros,
+# omitted docs and a non-public module macro that must stay out of the API.
+macro_ready=0
+if [ "$driver_ready" -eq 1 ]; then
+  if ! "$WORK/exercise$EXE" write-macros "$WORK_NATIVE/macros.iyimod" > "$WORK/macros-build.log" 2>&1; then
+    echo "  FAILED to write the macro artifact"
+    cat "$WORK/macros-build.log"
+    status=1
+  else
+    macro_ready=1
+    for action in dump declarations json; do
+      if ! "$WORK/iyi-mod$EXE" "$action" "$WORK_NATIVE/macros.iyimod" > "$WORK/macros-driver-$action.out" 2> "$WORK/macros-driver.err"; then
+        echo "  macro artifact: IYI-MOD $action FAILED"
+        cat "$WORK/macros-driver.err"
+        macro_ready=0
+        status=1
+        continue
+      fi
+      if ! "$WORK/oracle$EXE" "$action" "$WORK_NATIVE/macros.iyimod" > "$WORK/macros-hosted-$action.out" 2> "$WORK/macros-hosted.err"; then
+        echo "  macro artifact: HOSTED $action FAILED"
+        cat "$WORK/macros-hosted.err"
+        macro_ready=0
+        status=1
+        continue
+      fi
+      if ! cmp -s "$WORK/macros-hosted-$action.out" "$WORK/macros-driver-$action.out"; then
+        echo "  macro artifact: IYI-MOD $action DIFFERENCE"
+        diff -u "$WORK/macros-hosted-$action.out" "$WORK/macros-driver-$action.out" || true
+        macro_ready=0
+        status=1
+      fi
+    done
+    if [ "$macro_ready" -eq 1 ]; then
+      echo "  iyi-mod: module and type macro artifact matches hosted dump, declarations and json"
+    fi
+  fi
+fi
+
 echo
 echo "== 8. Refusal checks: damaged/corrupted artifacts refused with identical verdict"
 REFUSAL_DIR="$WORK/refusal"
@@ -576,6 +614,29 @@ run_mutation "writing format v61 is refused by the hosted reader" "$IYIMOD" \
   'w.write_u32_le(61_u32)' \
   -- check_oracle_refuses_written_version
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+check_macro_type_projection() {
+  rm -f "$WORK/mut-iyi-mod$EXE"
+  if ! "$IYI" build -o "$WORK_NATIVE/mut-iyi-mod$EXE" "$REPO_NATIVE/src/compiler/tools/mod.iyi" > "$WORK/mut-build.log" 2>&1; then
+    echo "INVALID MUTANT: iyi-mod failed to build" > "$WORK/invalid-mutant"
+    return 0
+  fi
+  if [ ! -x "$WORK/mut-iyi-mod$EXE" ]; then
+    echo "INVALID MUTANT: iyi-mod executable is missing" > "$WORK/invalid-mutant"
+    return 0
+  fi
+  "$WORK/mut-iyi-mod$EXE" json "$WORK_NATIVE/macros.iyimod" > "$WORK/macros-mutant.out" 2> "$WORK/macros-mutant.err" || return 1
+  cmp -s "$WORK/macros-hosted-json.out" "$WORK/macros-mutant.out"
+}
+if [ "$macro_ready" -eq 1 ]; then
+  run_mutation "type-owned macros are missing from JSON" "$IYIMOD" \
+    'api_macros(decl.macros, json)' 'api_macros([] of String, json)' \
+    -- check_macro_type_projection
+  MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+else
+  echo "  FAIL: macro projection baseline failed; its mutation proof cannot run"
+  status=1
+fi
 
 echo "  $MUTATIONS_RUN mutation proofs run"
 

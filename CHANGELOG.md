@@ -7,6 +7,8 @@
 - Add the artifact reader/writer and a standalone `iyi-mod` driver in iyi.
   Same-host gates compare binary output, refusals, declarations and JSON
   against the hosted implementation. Existing hosted commands are unchanged.
+  JSON includes exported module macros and type-owned macros with their docs
+  and rendered signatures.
 
 - **`iyi doc --json [DIR]` prints a package's exported APIs as data.**
   The package path and compiler identity accompany its modules, ordered by

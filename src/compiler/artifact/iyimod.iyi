@@ -1961,6 +1961,17 @@ pub class IyiMod
     source[0, doc] + "pub " + source[doc, source.bytesize - doc]
   end
 
+  def self.exported_macros(artifact : Artifact) : Array(String)
+    sources = [] of String
+    i = 0
+    while i < artifact.macro_bodies.size
+      source = artifact.macro_bodies[i]
+      sources << source if macro_line(source).starts_with?("pub macro ")
+      i = i + 1
+    end
+    sources
+  end
+
   # A carried macro's first line, `pub macro twice(x)`, past its doc.
   def self.macro_line(source : String) : String
     lines = source.lines
@@ -3107,6 +3118,22 @@ pub class IyiMod
     end
   end
 
+  def self.api_macros(sources : Array(String), json : Builder) : Nil
+    json.array do
+      i = 0
+      while i < sources.size
+        source = sources[i]
+        json.object do
+          json.field("name", macro_name(source))
+          doc = macro_doc(source)
+          json.field("doc", doc) unless doc.empty?
+          json.field("rendered", macro_line(source))
+        end
+        i = i + 1
+      end
+    end
+  end
+
   def self.api_type(decl : TypeDecl, json : Builder) : Nil
     json.object do
       json.field("name", decl.name)
@@ -3189,6 +3216,9 @@ pub class IyiMod
           end
         end
       end
+      unless decl.macros.empty?
+        json.field("macros") { api_macros(decl.macros, json) }
+      end
       unless decl.types.empty?
         json.field("types") do
           json.array do
@@ -3224,6 +3254,10 @@ pub class IyiMod
             i = i + 1
           end
         end
+      end
+      macros = exported_macros(artifact)
+      unless macros.empty?
+        json.field("macros") { api_macros(macros, json) }
       end
       json.field("impls") do
         json.array do

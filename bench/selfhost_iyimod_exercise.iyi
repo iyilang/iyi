@@ -207,6 +207,20 @@ elsif Program.args[0] == "declarations" && Program.args.size > 1
 elsif Program.args[0] == "json" && Program.args.size > 1
   art = IyiMod.read(Program.args[1], true)
   puts IyiMod.to_json(art)
+elsif Program.args[0] == "write-macros" && Program.args.size > 1
+  decl = TypeDecl.new("Owner", "struct")
+  decl.macros = [
+    "# A type macro.\nmacro field(value)\n  {{ value }}\nend",
+    "macro plain\nend",
+  ]
+  art = Artifact.new("synthetic/macros", "", "", "", [] of String)
+  art.exports = Exports.new([] of Signature, [decl])
+  art.macro_bodies = [
+    "# First line.\n# Second line.\npub macro documented(value)\n  {{ value }}\nend",
+    "pub macro plain\nend",
+    "macro hidden\nend",
+  ]
+  IyiMod.write(art, Program.args[1])
 elsif Program.args[0] == "write-deep" && Program.args.size > 1
   types = [] of TypeDecl
   i = 0

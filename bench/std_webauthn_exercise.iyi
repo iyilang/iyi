@@ -114,6 +114,54 @@ def verify_case(row : Any, label : String, is_w3c : Bool = false) : Bool
 end
 
 args = Program.args
+if args.empty?
+  # The recorded Chrome virtual authenticator, also in the fixture file.
+  # This path reads no files and works when a platform's generic exercise
+  # runner invokes the binary without arguments.
+  fixture = <<-JSON
+    {
+      "challenge": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA",
+      "assertion_challenge": "__79_Pv6-fj39vX08_Lx8O_u7ezr6uno5-bl5OPi4eA",
+      "origin": "http://localhost:49655",
+      "rp_id": "localhost",
+      "registration_count": 1,
+      "assertion_count": 2,
+      "check_replay": true,
+      "registration": {
+        "id": "5XDgMCNbVP6euI8_rUvikiUDJ4OUq1AC1gsVjihsWvI",
+        "rawId": "5XDgMCNbVP6euI8_rUvikiUDJ4OUq1AC1gsVjihsWvI",
+        "type": "public-key",
+        "response": {
+          "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uY3JlYXRlIiwiY2hhbGxlbmdlIjoiQVFJREJBVUdCd2dKQ2dzTURRNFBFQkVTRXhRVkZoY1lHUm9iSEIwZUh5QSIsIm9yaWdpbiI6Imh0dHA6Ly9sb2NhbGhvc3Q6NDk2NTUiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
+          "attestationObject": "o2NmbXRkbm9uZWdhdHRTdG10oGhhdXRoRGF0YVikSZYN5YgOjGh0NBcPZHZgW4_krrmihjLHmVzzuoMdl2NFAAAAAQECAwQFBgcIAQIDBAUGBwgAIOVw4DAjW1T-nriPP61L4pIlAyeDlKtQAtYLFY4obFrypQECAyYgASFYIH5uBvlcXjG5SDOYzo3sn3FcCHX6mCnt5ujPM7o_QgbMIlggQ_mCdgwg4D_fykocex0MfK-gRpBstEVo1zXjyPt6uYg"
+        }
+      },
+      "assertion": {
+        "id": "5XDgMCNbVP6euI8_rUvikiUDJ4OUq1AC1gsVjihsWvI",
+        "rawId": "5XDgMCNbVP6euI8_rUvikiUDJ4OUq1AC1gsVjihsWvI",
+        "type": "public-key",
+        "response": {
+          "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiX183OV9QdjYtZmozOXZYMDhfTHg4T191N2V6cjZ1bm81LWJsNU9QaTRlQSIsIm9yaWdpbiI6Imh0dHA6Ly9sb2NhbGhvc3Q6NDk2NTUiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
+          "authenticatorData": "SZYN5YgOjGh0NBcPZHZgW4_krrmihjLHmVzzuoMdl2MFAAAAAg",
+          "signature": "MEUCIHmPRCOEJp1yVcdZ-dr0JK1skWdiG2nT04Av1AGX670YAiEA_P26PiiNOpbavhcV_8qAjk2LLp_ayVqll5hxqRRSGco",
+          "userHandle": null
+        }
+      }
+    }
+    JSON
+  puts "== WebAuthn offline Chrome registration and assertion"
+  verify_case(JSON.parse(fixture), "offline Chrome")
+  bad_challenge = JSON.parse(fixture)
+  bad_challenge.as_h["challenge"] = Any.new("wrong")
+  bad_challenge.as_h["reg_error"] = Any.new("verification/challenge")
+  verify_case(bad_challenge, "offline wrong challenge")
+  bad_signature = JSON.parse(fixture)
+  bad_signature["assertion"]["response"].as_h["signature"] = Any.new("AA")
+  bad_signature.as_h["assert_error"] = Any.new("verification/signature")
+  verify_case(bad_signature, "offline wrong signature")
+  puts "WEBAUTHN OFFLINE CHECKS PASSED"
+  exit 0
+end
 raise "usage: webauthn exercise cases.jsonl w3c.json chrome.json" unless args.size == 3
 count = 0
 File.read(args[0]).lines.each do |line|

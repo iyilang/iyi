@@ -63,6 +63,11 @@ for mode in plain release; do
   if ! "$IYI" build "$@" -o "$WORK/exercise-$mode" "$REPO/bench/std_webauthn_exercise.iyi" >"$WORK/build-$mode.log" 2>&1; then
     echo "FAIL: $mode build"; tail -30 "$WORK/build-$mode.log"; exit 1
   fi
+  if ! (cd "$WORK" && "$WORK/exercise-$mode") >"$WORK/offline-$mode.out" 2>&1 ||
+     ! grep -qx 'WEBAUTHN OFFLINE CHECKS PASSED' "$WORK/offline-$mode.out"; then
+    echo "FAIL: $mode no-argument exercise"; tail -20 "$WORK/offline-$mode.out"; exit 1
+  fi
+  echo "  $mode: no-argument offline checks passed"
   if ! "$WORK/exercise-$mode" "$WORK/cases.jsonl" "$W3C" "$CHROME" >"$WORK/$mode.out" 2>&1; then
     echo "FAIL: $mode exercise"; tail -35 "$WORK/$mode.out"; exit 1
   fi

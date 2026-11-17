@@ -21,6 +21,11 @@ build_run() {
   if ! "$IYI" build "$@" -o "$WORK/$name" "$REPO/bench/std_cbor_exercise.iyi" >"$WORK/$name.build" 2>&1; then
     echo "$name: build failed"; tail -30 "$WORK/$name.build"; status=1; return 1
   fi
+  if ! (cd "$WORK" && "$WORK/$name") >"$WORK/$name.offline" 2>&1 ||
+     ! grep -qx 'CBOR OFFLINE CHECKS PASSED' "$WORK/$name.offline"; then
+    echo "$name: no-argument exercise failed"; tail -20 "$WORK/$name.offline"; status=1; return 1
+  fi
+  echo "  $name: no-argument offline checks passed"
   if ! "$WORK/$name" "$FIXTURE" >"$WORK/$name.out" 2>&1; then
     echo "$name: exercise failed"; tail -20 "$WORK/$name.out"; status=1; return 1
   fi

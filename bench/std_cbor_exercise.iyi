@@ -100,6 +100,23 @@ class CborRandom
 end
 
 args = Program.args
+if args.empty?
+  puts "== CBOR offline RFC 8949 values"
+  ["00", "1818", "20", "f93e00", "4401020304", "83010203", "a26161016162820203"].each do |source|
+    value = decoded(source)
+    check hex(Cbor.encode(value)) == source, "#{source}: offline round trip"
+  end
+  check decoded("1818").as_uint? == 24_u64, "offline unsigned integer"
+  check decoded("20").as_int? == -1_i64, "offline negative integer"
+  check decoded("f93e00").as_float? == 1.5, "offline float"
+  check decoded("4401020304").as_bytes? == bytes("01020304"), "offline byte string"
+  check decoded("a26161016162820203")["a"].as(CborValue).as_int? == 1_i64, "offline map lookup"
+  check decoded("5f42010243030405ff").as_bytes? == bytes("0102030405"), "offline indefinite string"
+  refuse("ff", "break outside", 0)
+  refuse("9fff", "disabled", 0, CborLimits.strict)
+  puts "CBOR OFFLINE CHECKS PASSED"
+  exit 0
+end
 fixture = args[0]
 if args.size > 1 && args[1] == "shapes"
   File.read(fixture).lines.each do |line|

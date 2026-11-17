@@ -60,16 +60,16 @@ PY="${PYTHON:-python3}"
 # the unit's held bytes show (heap_local's `unswept`, `spare`); a parked
 # connection's partition that keeps its last request holds what the
 # program still names, which http_idle's `idle:` count shows; a takeover
-# that keeps a woken fiber waiting, or the look's token that would call a
-# worker to it, loses time, which only the program's `giveway:` check
-# sees; an idle walk that drops a unit whose token was held never
-# collects it, which only the program's `idlehold:` check sees; an idle
-# clock turned again with a time read before another turn moves no heap
-# word, which only the program's `clock:` check sees; a unit's death that
-# takes the partition off the unit while a takeover holds it leaves the
-# takeover a record that names no unit, and one left to the takeover and
-# dropped there a partition nobody names, which only the program's
-# `takendeath:` check sees.
+# that keeps a woken fiber waiting loses time, which only the program's
+# `giveway:` check sees, and one that keeps the look's token that would
+# call a worker to it, only its `look:` check; an idle walk that drops a
+# unit whose token was held never collects it, which only the program's
+# `idlehold:` check sees; an idle clock turned again with a time read
+# before another turn moves no heap word, which only the program's
+# `clock:` check sees; a unit's death that takes the partition off the
+# unit while a takeover holds it leaves the takeover a record that names
+# no unit, and one left to the takeover and dropped there a partition
+# nobody names, which only the program's `takendeath:` check sees.
 VALUE_COPIES="TlsIdentity chain copy,a death that keeps its emptied runs,spare runs left off the idle test,a parked connection that keeps its last request,a takeover that keeps a woken fiber waiting,a takeover that keeps the look's token,an idle walk that drops a held unit,a clock turned again with a time behind it,a death that ignores a takeover's hold,a takeover that drops the death left to it"
 
 # heap_local.sh's copies not run here: `nobusy` (a busy program's parked
@@ -547,20 +547,6 @@ if [ "$PART" = all ] || [ "$PART" = local ]; then
   echo "== bench/heap_local.sh's copies, caught by the verifier"
   awk '/== the checks fail when a mechanism is broken/ { on = 1; next } on && /^fi$/ { exit } on { print }' "$REPO/bench/heap_local.sh" >"$WORK/local-copies.sh"
   source_copies "$WORK/local-copies.sh"
-  # A copy the giveway check sees under the stress alone, so heap_local.sh
-  # has it not: a takeover that keeps the look's token while it collects
-  # (`IyiHeap.collect_taken`), whose woken fiber, called to no worker,
-  # waits out the collection. Stressed, every try's unit collects itself
-  # at a chaos point on its way to the park, parks clean and is stamped
-  # by hand, and the worker the check's `wake_one` rang, holding the
-  # token, takes it; unstressed, a worker its idle clock woke, holding
-  # none, does. On Windows the takeover also gives back the port's seat
-  # (`IyiScheduler.left_idle`), whose sitter, called in its place, serves
-  # the woken fiber as well, so the copy keeps both (tssh: the token alone
-  # kept was never caught, 2 of 2 runs).
-  HEAP22_ONLY=giveway prove_fails "a takeover that keeps the look's token" notoken "giveway:" \
-    "BEGIN { win = $WINDOWS } "'{ if (sub(/IyiWorkers\.stop_spinning\(st, true\)/, "")) found = 1; if (win && sub(/IyiScheduler\.left_idle\(st\)/, "")) seat = 1; print } END { if (!found || (win && !seat)) exit 3 }' \
-    heap_partition.iyi
 fi
 
 if [ "$PART" = all ] || [ "$PART" = own ]; then

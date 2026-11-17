@@ -489,12 +489,16 @@ the old rule's. An idle worker that takes a parked unit over gives back
 the look's token (on Windows, the port's seat) before it collects, and
 gives way to a fiber of that unit woken meanwhile: before, such a wake
 rang no worker and the fiber waited out the whole collection.
-bench/heap_local's `giveway` check and heap_verify's `nogiveway` and
+bench/heap_local's `giveway` and `look` checks and its `nogiveway` and
 `notoken` copies pin it; on tssh, busy4 with it and the sweep helper's
 early release took idle p99 6 and 3 % under v3's, burn no worse, at the
-same RSS. The check counts only a try whose woken fiber asked for the
-unit's token while the takeover held it, which the runtime records
-(`IyiHeap.takeovers_asked`): under heavy load the main thread, kept off
+same RSS. The `look` check holds a takeover by a test switch, entered
+holding the token as the worker a push rang does, and reads what it
+kept: the giveway check, which has no switch, let the `notoken` copy
+pass on a darwin CI runner. The giveway check counts only a try whose
+woken fiber asked for the unit's token while the takeover held it,
+which the runtime records (`IyiHeap.takeovers_asked`): under heavy
+load the main thread, kept off
 its core through a whole takeover, missed it busy and failed the check
 with nothing wrong. An idle worker's look read the time before the
 idle clock, and another worker's turn in between left that time behind:
@@ -28341,7 +28345,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 36,238-line library and nothing else. Every other
+  written against iyi's own 36,300-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

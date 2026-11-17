@@ -92,6 +92,11 @@
 #   they stop, one parked so is collected by a walk that gave it two
 #   (under `IYI_HEAP_STRESS`, where units collect themselves before they
 #   park, the parked unit is stamped by hand).
+# - `look:` an idle worker's takeover, entered holding the look's token
+#   and held before it collects (the runtime's switch,
+#   `IyiHeap.hold_look`), holds it no more: a fiber of its unit woken
+#   from outside the pool reaches a worker and asks for the unit's token
+#   within 5 s, and the collection, let go, gives way to it.
 # - `inflight:` a unit that allocates past its budget without parking is
 #   collected in flight, its live list whole.
 # - `kept:` a unit's parks collect keeping its runs, in rounds of garbage
@@ -2420,9 +2425,9 @@
   # no worker. Under `IYI_HEAP_STRESS`, where the unit collects itself on
   # its way to the park and parks clean, or when its park owed, it is
   # stamped dirty by hand, as `idle_check` does, and the worker the
-  # stamp's `wake_one` rang takes it, holding the look's token until it
-  # collects (`IyiHeap.collect_taken`; bench/heap_verify.sh's `notoken`
-  # copy).
+  # stamp's `wake_one` rang may take it holding the look's token, which
+  # the takeover gives up before it collects (`IyiHeap.collect_taken`):
+  # a takeover that keeps it is the look check's to catch, every run.
   def giveway_check(workers : Int32) : Nil
     IyiHeap.collect_every_park = false
     asked = 0
@@ -2485,6 +2490,110 @@
       end
     end
     answer
+  end
+
+  # ── look ──────────────────────────────────────────────────────────────
+
+  # A unit that computes a tenth of a second and never parks.
+  def look_spin : Int64
+    until_ns = IyiMark.now_ns &+ 100000000_u64
+    turns = 0_i64
+    while IyiMark.now_ns < until_ns
+      turns = turns &+ 1_i64
+    end
+    turns
+  end
+
+  # An idle worker's takeover leaves its look for work while it collects,
+  # so it first gives up what a worker out looking holds for the others
+  # (`IyiHeap.collect_taken`): the look's token - a push that finds it
+  # taken calls nobody, since its holder looks after the push - and on
+  # Windows the port's seat. Kept, a fiber of the taken unit woken from
+  # outside the pool is called to no worker, and reaches one only when an
+  # idle worker's timed wait ends: 91 ms after its wake, against 1 ms
+  # with the token given back (Linux, 6 runs each). Run without a switch,
+  # the giveway check sees that only where the takeover's worker held the
+  # token - the one the stamp's `wake_one` rang, not one its timed wait
+  # woke - and no idle worker's wait ended within the collection: on a
+  # darwin CI runner the copy that keeps the token passed it (heap22
+  # merge, job 133648357561), where Linux and tmac caught it in 40 runs
+  # of 40. So the runtime's switch (`IyiHeap.hold_look`) makes the next
+  # takeover of a parked unit, its walk asked for by hand as `takendeath`
+  # asks, enter holding the token, as the rung worker does, and holds it
+  # before it collects: there it must hold neither, and a fiber of the
+  # unit woken from the main thread onto the shared queue must reach a
+  # worker and ask for the unit's token within 5 s, and the collection,
+  # let go, give way to it (`IyiHeap.give_way?`). What the takeover kept
+  # is read, not timed, so no load and no worker's wait decides it. The
+  # pool is grown first, every spawn finding every worker computing:
+  # with the takeover's worker the only one, a push from outside the
+  # pool, under the scheduler's lock, owes the start of another
+  # (`IyiWorkers.grow`), and none comes to the fiber.
+  def look_check(workers : Int32) : Nil
+    IyiHeap.collect_every_park = false
+    group do |g|
+      handles = [] of IyiTask(Int64)
+      workers.times { handles << g.spawn(unit: :new) { look_spin } }
+      handles.each { |handle| handle.value }
+    end
+    launched = IyiWorkers.launched
+    fail("look: the pool started #{launched} worker of #{workers}, none to call while it takes a unit over") if launched < 2
+    held = 0_u64
+    asked = false
+    given = false
+    group do |g|
+      go = Channel(Int64).new(1)
+      ready = Channel(UInt64).new(1)
+      saw = Channel(UInt64).new(1)
+      handle = g.spawn(unit: :new) { giveway_task(0_i64, go, ready, saw) }
+      got = ready.receive
+      record = got.is_a?(UInt64) ? got : 0_u64
+      fail("look: a parked unit sent no record") if record == 0_u64
+      unit = Pointer(Void).new(IyiHeap.read64(record &+ IyiHeap::REC_UNIT)).as(IyiUnit)
+      ways = IyiHeap.takeovers_given_way
+      IyiHeap.hold_look(record)
+      waited = 0
+      held = IyiHeap.look_hold
+      while held < 3_u64 && waited < 10000
+        # Stamped dirty again once a takeover the switch missed - one
+        # under way when it was set - has collected it.
+        if IyiHeap.read64(record &+ IyiHeap::REC_IDLE_TICK) == 0_u64
+          IyiHeap.write64(record &+ IyiHeap::REC_DEBT, 1_u64)
+          IyiHeap.write64(record &+ IyiHeap::REC_IDLE_TICK, 1_u64)
+        end
+        IyiStat.atomic(IyiStat::IDLE_PENDING).value.set(1_u64)
+        IyiWorkers.wake_one
+        sleep(1)
+        waited = waited + 1
+        held = IyiHeap.look_hold
+      end
+      woke = held == 3_u64 || held == 5_u64 || held == 6_u64
+      if woke
+        go.send(1_i64)
+        waited = 0
+        while !unit.waiting? && waited < 5000
+          sleep(1)
+          waited = waited + 1
+        end
+        asked = unit.waiting?
+        IyiStat.atomic(IyiHeap::STAT_LOOK_HOLD).value.compare_and_set(held, 4_u64)
+      end
+      # Off: a takeover the switch has not held yet goes on at once.
+      IyiStat.set(IyiHeap::STAT_LOOK_HOLD, 0_u64)
+      IyiStat.set(IyiHeap::STAT_LOOK_RECORD, 0_u64)
+      go.send(1_i64) unless woke
+      saw.receive
+      value = handle.value
+      given = IyiHeap.takeovers_given_way != ways
+      fail("look: a unit answered #{value}") unless value.is_a?(Int64)
+      fail("look: #{value} nodes of a list read wrong after its unit's collection gave way") if value != 0_i64
+    end
+    IyiHeap.collect_every_park = true
+    fail("look: no idle worker took a parked unit over, stamped dirty and a walk asked for, in 10 s (the switch at #{held})") unless held == 3_u64 || held == 5_u64 || held == 6_u64
+    fail("look: a takeover that entered holding the look's token held it still as it collected, so a fiber of its unit woken from outside the pool was called to no worker") if held == 5_u64
+    fail("look: a takeover that held the port's seat held it still as it collected, so no sitter was called in its place") if held == 6_u64
+    fail("look: a fiber of a unit taken over, woken from outside the pool, did not ask for the unit's token in 5 s") if held == 3_u64 && !asked
+    fail("look: a takeover let go with a fiber of its unit waiting for the unit's token did not give way to it") if asked && !given
   end
   # ── inflight ──────────────────────────────────────────────────────────
 
@@ -2734,7 +2843,8 @@
   # bench/heap_local.sh, whose broken collection the takeover check would
   # otherwise meet first; `HEAP22_ONLY=busy`, the busy check alone, for
   # the nobusy copy; `HEAP22_ONLY=giveway`, the giveway check alone, for
-  # the nogiveway copy; `HEAP22_ONLY=idlehold`, the idlehold check alone,
+  # the nogiveway copy; `HEAP22_ONLY=look`, the look check alone, for the
+  # notoken copy; `HEAP22_ONLY=idlehold`, the idlehold check alone,
   # for the noidlehold copy; `HEAP22_ONLY=clock`, the clock check alone,
   # for the clockwrap copy; `HEAP22_ONLY=takendeath`, the takendeath
   # check alone, for the noholdreg, rereadunit and nodeferdeath copies;
@@ -2748,6 +2858,8 @@
     busy_check(workers)
   elsif only == "giveway"
     giveway_check(workers)
+  elsif only == "look"
+    look_check(workers)
   elsif only == "idlehold"
     idlehold_check
   elsif only == "clock"
@@ -2783,6 +2895,7 @@
     takendeath_check
     busy_check(workers)
     giveway_check(workers)
+    look_check(workers)
     spare_check
     inflight_check
     settle("death")

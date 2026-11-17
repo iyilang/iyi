@@ -539,6 +539,64 @@ class IyiHeap
     end
   end
 
+  # A test's switch (bench/heap_local's `look:` check): the next takeover
+  # of one record (`hold_look`) enters holding the look's token, as the
+  # worker a push's `wake_one` rang does (`look_entered`), and is held,
+  # the unit taken and the record busy, once it has given up what a
+  # worker out looking holds and before it collects (`look_held`), while
+  # the test wakes a fiber of the unit from outside the pool. What it
+  # kept is read there, not timed: kept, the token leaves the push
+  # ringing nobody, but the fiber still reaches a worker whose timed
+  # wait ends - 91 ms after the wake against 1 ms given back (Linux, 6
+  # runs each) - and the giveway check, which has no switch, let a copy
+  # that keeps it pass on a darwin CI runner (heap22 merge, job
+  # 133648357561). Armed at 1, 2 once the takeover has entered; then
+  # held at 3 having given everything up, 5 still holding the look's
+  # token, 6 (Windows) the port's seat or a sitter's duty; 4 once the
+  # test lets it go, 7 if it never did in 10 s. 146 and 147: the switch
+  # and its record.
+  STAT_LOOK_HOLD   = 146_u64
+  STAT_LOOK_RECORD = 147_u64
+
+  def self.hold_look(record : UInt64) : Nil
+    IyiStat.set(STAT_LOOK_RECORD, record)
+    IyiStat.set(STAT_LOOK_HOLD, 1_u64)
+  end
+
+  def self.look_hold : UInt64
+    IyiStat.get(STAT_LOOK_HOLD)
+  end
+
+  # The switch at the takeover of *record* by worker *st*, before it
+  # gives anything up: from here it holds the look's token if it held
+  # none, as a worker out looking does (`IyiWorkers.spin_again`).
+  def self.look_entered(st : IyiSchedulerState, record : UInt64) : Nil
+    return unless record == IyiStat.get(STAT_LOOK_RECORD)
+    return unless IyiStat.atomic(STAT_LOOK_HOLD).value.compare_and_set(1_u64, 2_u64)[1]
+    return if st.spinning
+    IyiSchedLock.lock
+    IyiWorkers.spin_again(st)
+    IyiSchedLock.unlock
+  end
+
+  # The switch's hold in that takeover, once it has given up what a
+  # worker out looking holds: what it kept, said, and a wait until the
+  # test lets it go.
+  def self.look_held(st : IyiSchedulerState, record : UInt64) : Nil
+    return unless record == IyiStat.get(STAT_LOOK_RECORD)
+    held = st.spinning ? 5_u64 : 3_u64
+    {% if flag?(:win32) %}
+      held = 6_u64 if held == 3_u64 && (st.held_seat || st.seat_duty)
+    {% end %}
+    hold = IyiStat.atomic(STAT_LOOK_HOLD)
+    return unless hold.value.compare_and_set(2_u64, held)[1]
+    began = IyiMark.now_ns
+    while hold.value.get == held
+      return if IyiMark.now_ns &- began > 10_000_000_000_u64 && hold.value.compare_and_set(held, 7_u64)[1]
+      IyiMark.spin_pause
+    end
+  end
+
   def self.detached_partitions : UInt64
     IyiStat.get(IyiStat::DETACHED)
   end
@@ -4009,6 +4067,8 @@ class IyiHeap
   # by the worker its `wake_one` rang, saw 8 takeovers in 8 tries and
   # none give way (seeds 1-3, Linux, TailHunt4); and a reply that came on
   # the port while the seat's holder collected waited the same.
+  # heap_local's look check holds a takeover here, entered holding the
+  # token, by the runtime's switch (`hold_look`), and reads what it kept.
   #
   # The unit's last fiber may leave the unit's list meanwhile: it gave
   # its token back, which `take_unit` took, and leaves at its successor's
@@ -4022,10 +4082,12 @@ class IyiHeap
   # `switching` with `-Dheap_partitions`, 1 run in 130, and 4 in 90 with
   # its suspends moved late (heap22 merge, MGateTssh).
   def self.collect_taken(st : IyiSchedulerState, record : UInt64, unit : UInt64, takeover : Bool) : Nil
+    look_entered(st, record) if IyiStat.get(STAT_LOOK_HOLD) == 1_u64
     IyiWorkers.stop_spinning(st, true)
     {% if flag?(:win32) %}
       IyiScheduler.left_idle(st)
     {% end %}
+    look_held(st, record) if IyiStat.get(STAT_LOOK_HOLD) == 2_u64
     takeover_held(record) if IyiStat.get(STAT_TAKE_HOLD) == 2_u64
     taken = Pointer(Void).new(unit).as(IyiUnit)
     st.unit = taken

@@ -441,6 +441,20 @@ if [ "$PART" = all ] || [ "$PART" = broken ]; then
     '{ if (sub(/return false unless Pointer\(Void\)\.new\(unit\)\.as\(IyiUnit\)\.waiting\?/, "return false if unit != 0_u64")) found = 1; print } END { if (!found) exit 3 }' \
     heap_partition.iyi
 
+  # An idle worker's takeover that keeps what a worker out looking holds
+  # - the look's token, and on Windows the port's seat - while it
+  # collects (`IyiHeap.collect_taken`): a push from outside the pool
+  # meanwhile calls no worker to a fiber of the taken unit, which waits
+  # out the collection unless another worker comes to look on its own.
+  # The look check alone (`HEAP22_ONLY=look`), whose takeover the
+  # runtime's switch makes enter holding the token and holds where it
+  # must hold it no more; the giveway check, which has no switch, missed
+  # this copy on a darwin CI runner. The seat's line sits in a win32
+  # block, so elsewhere its removal changes nothing.
+  HEAP22_ONLY=look prove_fails "a takeover that keeps the look's token" notoken "look:" \
+    '{ if (sub(/IyiWorkers\.stop_spinning\(st, true\)/, "")) found = 1; if (sub(/IyiScheduler\.left_idle\(st\)/, "")) seat = 1; print } END { if (!found || !seat) exit 3 }' \
+    heap_partition.iyi
+
   # An idle walk that drops a partition old enough but passed over while
   # its unit's token is held: once the token is let go no walk comes
   # again in a program with nothing else to park - no soundness check

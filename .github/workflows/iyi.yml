@@ -1949,6 +1949,12 @@ jobs:
         run: bash scripts/build-static-llvm.sh "$HOME/llvm-static"
       - name: Build `iyi`
         run: make iyi LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config"
+      - name: Python 3.14 from Homebrew, as on Linux, for the oracles
+        run: |
+          brew list python@3.14 >/dev/null 2>&1 || brew install python@3.14
+          PY314="$(brew --prefix python@3.14)/libexec/bin"
+          echo "$PY314" >> "$GITHUB_PATH"
+          "$PY314/python3" --version
       - name: Python's cryptography and Pillow, for the oracles
         run: python3 -m pip install -q --break-system-packages cryptography pillow
       - name: The module exercises of this shard, on darwin

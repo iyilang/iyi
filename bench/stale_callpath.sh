@@ -837,11 +837,16 @@ PY
 
   echo "  proving the def-body encoder field is load-bearing..."
   local dropped="$WORK/iyi-rg8-drop-def-body"
+  # The flags Makefile.win builds `iyi.exe` with, on Windows: the runner has no
+  # gc.lib or iconv.lib (`Cannot locate the .lib files for ... gc, iconv`), and
+  # `make iyi` builds without the collector and without iconv for that reason.
+  local build_flags=()
   if [ "$WINDOWS" -eq 1 ]; then
     dropped="$dropped.exe"
     cp -p "$(dirname "$IYI")/LLVM-C.dll" "$WORK/LLVM-C.dll"
+    build_flags=(-D strict_multi_assign -D preview_overload_order -Dwithout_openssl -Dwithout_zlib -Dwithout_iconv -Dgc_none)
   fi
-  "$BASH" "$REPO/bench/stale_store_concurrency.sh" --crystal build -D rg8_drop_def_body -o "$dropped" "$REPO/src/compiler/iyi.cr"
+  "$BASH" "$REPO/bench/stale_store_concurrency.sh" --crystal build ${build_flags[@]+"${build_flags[@]}"} -D rg8_drop_def_body -o "$dropped" "$REPO/src/compiler/iyi.cr"
   "$PY" "$REPO/bench/stale_rg8.py" --repo "$REPO" --compiler "$dropped" \
     --work "$WORK/rg8-drop-def-body" --program "$REPO/samples/iyi/calc.iyi" \
     --kind body --expect-failure-kind body

@@ -43,6 +43,9 @@
 # std/http took 29 to 45 minutes in four runs on Linux). Rerun
 # sibling_times.py on a green run's shard logs when a gate's weight changes
 # much; its `--predict 4` adds the logs up as above.
+# Run 44047485827 on Windows: gcs took 102.3 s. google_auth stopped at
+# 46.4 s before its third mutation; its first two each took about 4 s.
+# 105 rounds gcs up; 55 projects the missing mutation and rounds up.
 WEIGHTS="
   http 2576   tls 2322   big 871   websocket 692   autocert 649
   x509 458   acme 427   xz 407   cookie 319   xml 314
@@ -53,6 +56,7 @@ WEIGHTS="
   p384 156   yaml 156   term 148   dir 144   toml 138
   time 126   fileserver 122   otp 122   png 122   ocsp 121
   mlkem 112   password 112   log 104   digest 101   eiy 101
+  gcs 105   google_auth 55
 "
 set -u
 

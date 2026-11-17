@@ -65,5 +65,8 @@ jobs:
       - name: Publish platform packages before the launcher
         shell: bash
         run: |
+          # Artifact download does not preserve executable permissions.
+          chmod +x packages/packages-{darwin-arm64,linux-x64}/hello-*/bin/hello
+          chmod +x packages/packages-linux-x64/hello/bin/hello.js
           for dir in packages/packages-*/hello-*; do npm publish "$dir" --provenance --access public; done
           npm publish packages/packages-linux-x64/hello --provenance --access public

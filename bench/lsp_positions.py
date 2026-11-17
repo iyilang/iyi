@@ -110,32 +110,34 @@ ASSIGNMENT = re.compile(r"^\s*[\w, ]+ = [^=]")
 # modules of one weight by name, so every shard computes the same deal).
 #
 # A weight is the seconds the module's sweep took at stride 200 on GitHub's
-# ubuntu-24.04 runners, read from the per-module lines of 39 green shard
-# jobs, 13 master runs of 2026-10-26 to 10-30 (a98f03fe6 to 1ae9e94db).
-# The runners differ in speed by a factor, the same for every module of a
-# job (0.57 to 1.24 of the median job), so each job's seconds are divided
-# by its factor first and the weight is the median of what is left: the
-# seconds on a median runner, 4,286 for all 118 modules, std/http 442 of
-# them. A module not here weighs 7, the mean of the 54 under 15 s (1.1 to
-# 14.7). Dealt four ways, the shards hold 1,079, 1,072, 1,072 and 1,078 s
-# by these weights and 1,079, 1,069, 1,063 and 1,075 by every module's own.
-# The weights before these were one Linux workstation's (eab791d5b, std/http
-# 258 s), and its ratio to a runner is not one number: 1.7 for std/http,
-# 2.0 for std/autocert.
+# ubuntu-24.04 runners, read from the per-module lines of 27 green shard
+# jobs, 7 runs of 2026-11-14 to 11-17 on master, mt/next-two and the merge
+# of the two (928f85565 to 4fa41885b). The runners differ in speed by a
+# factor, the same for every module of a job (0.67 to 1.67 of the median
+# job), so each job's seconds are divided by its factor first and the
+# weight is the median of what is left: the seconds on a median runner,
+# 4,874 for all 121 modules, std/autocert 910 of them. A module not here
+# weighs 7, the mean of the 66 under 15 s (0.9 to 15.0). Dealt four ways,
+# the shards hold 1,220, 1,222, 1,222 and 1,221 s by these weights and
+# 1,222, 1,220, 1,238 and 1,194 by every module's own.
+# The weights before these (13 master runs of 2026-10-26 to 10-30) had
+# std/autocert at 158 s, and its sweep had grown to 880 to 1,400: the
+# shard it was dealt to took 30 to 34 minutes against the others' 14 to
+# 27, and on the merge's first run it was cut off at its 45 (job
+# 134257615300, std/autocert 1,404 s of it on a runner at 1.4).
 WEIGHTS = {
-    "http": 442, "math": 302, "tls": 286, "websocket": 168, "autocert": 158,
-    "big": 148, "socket": 135, "xml": 122, "json": 105, "acme": 100,
-    "time": 93, "file": 77, "mail": 75, "unicode": 68, "router": 62,
-    "secure_dns": 61, "yaml": 61, "debug": 60, "process": 58, "zstd": 58,
-    "sse": 51, "regex": 50, "compress": 47, "cookie": 47, "udp": 44,
-    "x509": 43, "aead": 42, "tar": 42, "dir": 40, "p256": 39, "toml": 39,
-    "bzip2": 36, "digest": 36, "smtp": 36, "ecdsa": 34, "zip": 34, "dns": 33,
-    "curve25519": 29, "format": 29, "text": 29, "xz": 29, "ocsp": 27,
-    "png": 26, "system_roots": 26, "user": 25, "http_proxy": 24, "netip": 24,
-    "p384": 23, "float": 22, "hpack": 22, "fileserver": 21, "int": 21,
-    "mlkem": 21, "password": 21, "uri": 20, "io": 19, "path": 19,
-    "enumerable": 17, "random": 17, "term": 17, "asn1": 16, "csv": 16,
-    "system": 16, "hpke": 15,
+    "autocert": 910, "http": 647, "tls": 293, "websocket": 201, "math": 193,
+    "big": 158, "acme": 111, "xml": 97, "json": 94, "socket": 84,
+    "router": 79, "time": 75, "secure_dns": 73, "sse": 73, "file": 70,
+    "cookie": 69, "mail": 62, "compress": 59, "zstd": 54, "unicode": 53,
+    "x509": 52, "debug": 46, "process": 44, "smtp": 42, "yaml": 37,
+    "ecdsa": 34, "p256": 34, "zip": 34, "udp": 33, "dir": 32,
+    "http_proxy": 31, "regex": 31, "aead": 29, "png": 29, "toml": 29,
+    "xz": 29, "curve25519": 27, "digest": 26, "tar": 26, "dns": 25,
+    "user": 25, "fileserver": 24, "bzip2": 23, "format": 23,
+    "system_roots": 22, "text": 22, "ocsp": 21, "int": 19, "p384": 19,
+    "float": 17, "hpack": 17, "password": 17, "term": 17, "uri": 17,
+    "log": 15,
 }
 UNWEIGHED = 7
 

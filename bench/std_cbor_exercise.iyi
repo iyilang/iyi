@@ -1,0 +1,194 @@
+# CBOR vectors, malformed inputs, limits, deterministic encoding and random values.
+@[Unsafe("the exercise's hex helpers read String bytes")]
+import std/cbor::{Cbor, CborValue, CborKind, CborLimits, CborError}
+import std/file::{File}
+
+def check(ok : Bool, label : String) : Nil
+  raise "ASSERTION FAILED: #{label}" unless ok
+end
+
+def bytes(text : String) : Array(UInt8)
+  p = text.to_unsafe
+  Array(UInt8).new(text.bytesize // 2) do |i|
+    a = p[2 * i].to_i32
+    b = p[2 * i + 1].to_i32
+    ((a >= 97 ? a - 87 : a - 48) * 16 + (b >= 97 ? b - 87 : b - 48)).to_u8
+  end
+end
+
+def hex(data : Array(UInt8)) : String
+  digits = "0123456789abcdef"
+  String.build do |io|
+    data.each { |b| io << digits[b.to_i32 >> 4] << digits[b.to_i32 & 15] }
+  end
+end
+
+def shape(value : CborValue) : String
+  case value.kind
+  when CborKind::Unsigned then "u:#{value.argument}"
+  when CborKind::Negative then "n:#{value.argument}"
+  when CborKind::Simple   then "s:#{value.argument}"
+  when CborKind::Bytes    then "b:#{hex(value.as_bytes?.as(Array(UInt8)))}"
+  when CborKind::Text
+    text = value.as_text?.as(String)
+    "t:#{hex(Array(UInt8).new(text.bytesize) { |i| text.to_unsafe[i] })}"
+  when CborKind::Float
+    f = value.as_float?.as(Float64)
+    f != f ? "f:nan" : "f:#{IyiFloatText.bits_of(f).to_s(16)}"
+  when CborKind::Bool      then value.as_bool? ? "true" : "false"
+  when CborKind::Null      then "null"
+  when CborKind::Undefined then "undefined"
+  when CborKind::Array
+    parts = [] of String
+    value.as_array?.as(Array(CborValue)).each { |v| parts << shape(v) }
+    "[#{parts.join(",")}]"
+  when CborKind::Map
+    parts = [] of String
+    value.as_map?.as(Array({CborValue, CborValue})).each { |pair| parts << "#{shape(pair[0])}=#{shape(pair[1])}" }
+    "{#{parts.join(",")}}"
+  else
+    pair = value.tag?.as({UInt64, CborValue})
+    "tag:#{pair[0]}(#{shape(pair[1])})"
+  end
+end
+
+def decoded(hex_text : String, limits : CborLimits = CborLimits.new) : CborValue
+  value = Cbor.decode(bytes(hex_text), limits)
+  raise "ASSERTION FAILED: #{hex_text}: #{value.message}" if value.is_a?(CborError)
+  value
+end
+
+def refuse(hex_text : String, phrase : String, offset : Int32, limits : CborLimits = CborLimits.new) : Nil
+  result = Cbor.decode(bytes(hex_text), limits)
+  raise "ASSERTION FAILED: #{hex_text} was accepted" unless result.is_a?(CborError)
+  check result.message.includes?(phrase), "#{hex_text}: #{result.message} does not name #{phrase}"
+  check result.offset == offset, "#{hex_text}: offset #{result.offset}, not #{offset}"
+end
+
+class CborRandom
+  def initialize
+    @state = 0x53175247_u64
+  end
+
+  def next_number : UInt64
+    @state = (@state &* 6364136223846793005_u64) &+ 1442695040888963407_u64
+    @state
+  end
+
+  def value(depth : Int32) : CborValue
+    kind = (next_number % (depth > 0 ? 10_u64 : 7_u64)).to_i32
+    case kind
+    when 0 then CborValue.unsigned(next_number)
+    when 1 then CborValue.negative(next_number)
+    when 2 then CborValue.bytes(Array(UInt8).new((next_number % 20_u64).to_i32) { (next_number & 255_u64).to_u8 })
+    when 3 then CborValue.text("text#{next_number % 100000_u64}")
+    when 4 then CborValue.bool((next_number & 1_u64) == 1_u64)
+    when 5 then CborValue.null
+    when 6 then CborValue.float((next_number % 100000_u64).to_i32.to_f64 / 8.0)
+    when 7
+      items = [] of CborValue
+      (next_number % 5_u64).to_i32.times { items << value(depth - 1) }
+      CborValue.array(items)
+    when 8
+      pairs = [] of {CborValue, CborValue}
+      (next_number % 5_u64).to_i32.times { |i| pairs << {CborValue.int(i.to_i64), value(depth - 1)} }
+      CborValue.map(pairs)
+    else
+      CborValue.tag(next_number % 100_u64, value(depth - 1))
+    end
+  end
+end
+
+args = Program.args
+fixture = args[0]
+if args.size > 1 && args[1] == "shapes"
+  File.read(fixture).lines.each do |line|
+    line = line.strip
+    next if line.empty? || line.starts_with?("#")
+    source = line.split('|')[0]
+    puts "#{source}|#{shape(decoded(source))}"
+  end
+  exit 0
+end
+
+puts "== RFC 8949 Appendix A"
+count = 0
+File.read(fixture).lines.each do |line|
+  line = line.strip
+  next if line.empty? || line.starts_with?("#")
+  columns = line.split('|')
+  source = columns[0]
+  expected = columns[1]
+  value = decoded(source)
+  check hex(value.raw) == source, "#{source}: raw"
+  check hex(Cbor.encode(value)) == expected, "#{source}: deterministic encoding"
+  check hex(Cbor.encode(decoded(expected))) == expected, "#{source}: deterministic stability"
+  wrapped = [0xee_u8, 0xee_u8] + bytes(source) + [0xff_u8]
+  result = Cbor.decode_one(wrapped, 2)
+  raise "ASSERTION FAILED: #{source}: decode_one" if result.is_a?(CborError)
+  check result[1] == wrapped.size - 1 && hex(result[0].raw) == source, "#{source}: decode_one offset"
+  count = count + 1
+end
+puts "  #{count} examples"
+
+puts "== value accessors and deterministic map order"
+check decoded("1bffffffffffffffff").as_uint? == 18446744073709551615_u64, "maximum unsigned"
+check decoded("3b7fffffffffffffff").as_int? == -9223372036854775807_i64 - 1_i64, "minimum signed"
+check decoded("3bffffffffffffffff").as_int?.nil?, "negative outside Int64"
+check decoded("62c3bc").as_text? == "ü", "UTF-8 text"
+check decoded("5f42010243030405ff").as_bytes? == bytes("0102030405"), "indefinite bytes"
+check decoded("7f657374726561646d696e67ff").as_text? == "streaming", "indefinite text"
+check decoded("9f010203ff").as_array?.as(Array(CborValue)).size == 3, "indefinite array"
+map = CborValue.map([{CborValue.int(-1_i64), CborValue.int(1_i64)}, {CborValue.int(24_i64), CborValue.int(2_i64)}])
+check hex(Cbor.encode(map)) == "a21818022001", "key sort is bytewise, not length-first"
+check decoded("a201020304")[1_i64].as(CborValue).as_int? == 2_i64, "integer map lookup"
+check decoded("a1616101")["a"].as(CborValue).as_int? == 1_i64, "text map lookup"
+
+puts "== malformed CBOR and limits"
+refuse("", "truncated", 0)
+refuse("18", "truncated argument", 1)
+refuse("1c", "reserved", 0)
+refuse("1d", "reserved", 0)
+refuse("1e", "reserved", 0)
+refuse("ff", "break outside", 0)
+refuse("1f", "indefinite length is invalid", 0)
+refuse("5f6161ff", "wrong-type", 1)
+refuse("5f5fff", "wrong-type", 1)
+refuse("5f4100", "unterminated", 3)
+refuse("bf01ff", "break outside", 2)
+refuse("f818", "invalid extended", 0)
+refuse("61ff", "UTF-8", 0)
+refuse("7f61c26180ff", "UTF-8", 1)
+refuse("0001", "bytes after", 1)
+refuse("5bffffffffffffffff", "length exceeds", 0)
+refuse("a201020103", "duplicate", 3)
+refuse("a20102180103", "duplicate", 3)
+refuse("9fff", "disabled", 0, CborLimits.strict)
+refuse("c000", "tags", 0, CborLimits.strict)
+refuse("f90000", "floats", 0, CborLimits.strict)
+refuse("818100", "maximum depth", 2, CborLimits.new(max_depth: 1))
+check !Cbor.decode(bytes("a201020103"), CborLimits.new(duplicate_keys: true)).is_a?(CborError), "duplicate limit opt-in"
+puts "  malformed forms, offsets and all limits refused"
+
+puts "== all binary16 bit patterns"
+65536.times do |bits|
+  input = [0xf9_u8, (bits >> 8).to_u8, (bits & 255).to_u8]
+  item = Cbor.decode(input)
+  raise "ASSERTION FAILED: binary16 #{bits} refused" if item.is_a?(CborError)
+  encoded = Cbor.encode(item)
+  nan = (bits & 0x7c00) == 0x7c00 && (bits & 0x03ff) != 0
+  expected = nan ? [0xf9_u8, 0x7e_u8, 0_u8] : input
+  check encoded == expected, "binary16 #{bits}"
+end
+puts "  65536 binary16 encodings retain their value, NaNs canonicalized"
+
+puts "== 10000 deterministic random values"
+rng = CborRandom.new
+10000.times do |i|
+  original = Cbor.encode(rng.value(3))
+  result = Cbor.decode(original)
+  raise "ASSERTION FAILED: random #{i}: #{result.message}" if result.is_a?(CborError)
+  check Cbor.encode(result) == original, "random #{i}: round trip"
+end
+puts "  10000 values round-trip"
+puts "ALL CHECKS PASSED"

@@ -1,0 +1,149 @@
+# Independent cryptography-generated keys and signatures plus key refusals.
+@[Unsafe("the exercise's hex helpers read String bytes")]
+import std/cbor::{Cbor, CborValue, CborError}
+import std/cose::{CoseKey, CoseAlg, CoseError}
+import std/file::{File}
+
+def check(ok : Bool, label : String) : Nil
+  raise "ASSERTION FAILED: #{label}" unless ok
+end
+
+def bytes(text : String) : Array(UInt8)
+  p = text.to_unsafe
+  Array(UInt8).new(text.bytesize // 2) do |i|
+    a = p[2 * i].to_i32
+    b = p[2 * i + 1].to_i32
+    ((a >= 97 ? a - 87 : a - 48) * 16 + (b >= 97 ? b - 87 : b - 48)).to_u8
+  end
+end
+
+def refuse(input : Array(UInt8), phrase : String) : Nil
+  answer = CoseKey.decode(input)
+  raise "ASSERTION FAILED: malformed key was accepted" unless answer.is_a?(CoseError)
+  check answer.message.includes?(phrase), "expected #{phrase}, got #{answer.message}"
+end
+
+# RFC 8032 test 1, also carried by the std/curve25519 exercise.
+fixed_map = CborValue.map([{CborValue.int(1_i64), CborValue.int(1_i64)},
+                           {CborValue.int(3_i64), CborValue.int(-8_i64)},
+                           {CborValue.int(-1_i64), CborValue.int(6_i64)},
+                           {CborValue.int(-2_i64), CborValue.bytes(bytes("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"))}])
+fixed_key = CoseKey.from_cbor(fixed_map)
+raise "ASSERTION FAILED: fixed Ed25519 key: #{fixed_key.message}" if fixed_key.is_a?(CoseError)
+fixed_signature = bytes("e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b")
+check fixed_key.verify([] of UInt8, fixed_signature), "fixed Ed25519 signature"
+check !fixed_key.verify([0_u8], fixed_signature), "fixed Ed25519 altered message"
+puts "  RFC 8032 Ed25519 signature verified and altered message refused"
+original_encoding = fixed_key.encode
+original_bytes = fixed_map[-2_i64].as(CborValue).as_bytes?.as(Array(UInt8))
+original_bytes[0] = original_bytes[0] ^ 1_u8
+check fixed_key.encode == original_encoding && fixed_key.verify([] of UInt8, fixed_signature), "input mutation does not change the key"
+copy = fixed_key.to_cbor
+copy_bytes = copy[-2_i64].as(CborValue).as_bytes?.as(Array(UInt8))
+copy_bytes[0] = copy_bytes[0] ^ 1_u8
+check fixed_key.encode == original_encoding, "to_cbor returns independent data"
+
+ops_map = fixed_key.to_cbor
+ops_pairs = ops_map.as_map?.as(Array({CborValue, CborValue}))
+ops_pairs << {CborValue.int(4_i64), CborValue.array([CborValue.int(1_i64)])}
+ops_result = CoseKey.from_cbor(ops_map)
+check ops_result.is_a?(CoseError), "key_ops without verify refused"
+ops_pairs[ops_pairs.size - 1] = {CborValue.int(4_i64), CborValue.array([CborValue.int(2_i64)])}
+check !CoseKey.from_cbor(ops_map).is_a?(CoseError), "key_ops verify accepted"
+bad_label = CborValue.map([{CborValue.bool(true), CborValue.null}])
+bad_result = CoseKey.from_cbor(bad_label)
+check bad_result.is_a?(CoseError), "non-integer, non-text label refused"
+if bad_result.is_a?(CoseError)
+  check bad_result.message.includes?("label"), "invalid label named"
+end
+large_label = CborValue.map([{CborValue.negative(18446744073709551615_u64), CborValue.null}])
+large_result = CoseKey.from_cbor(large_label)
+check large_result.is_a?(CoseError), "out-of-range integer label refused"
+puts "  mutation isolation, key_ops and invalid labels checked"
+
+# Every canonical point of order dividing eight. With the identity as key,
+# R = identity and S = 0 verifies for any message in the underlying generic
+# Ed25519 implementation, so accepting it here would admit a forged key.
+small_order = [
+  "0100000000000000000000000000000000000000000000000000000000000000",
+  "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+  "0000000000000000000000000000000000000000000000000000000000000080",
+  "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+  "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+  "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
+  "0000000000000000000000000000000000000000000000000000000000000000",
+  "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
+]
+small_order.each do |encoded|
+  small_map = CborValue.map([{CborValue.int(1_i64), CborValue.int(1_i64)},
+                             {CborValue.int(3_i64), CborValue.int(-8_i64)},
+                             {CborValue.int(-1_i64), CborValue.int(6_i64)},
+                             {CborValue.int(-2_i64), CborValue.bytes(bytes(encoded))}])
+  rejected = CoseKey.from_cbor(small_map)
+  check rejected.is_a?(CoseError), "small-order Ed25519 key #{encoded} refused"
+  if rejected.is_a?(CoseError)
+    check rejected.message.includes?("small order"), "small-order key named"
+  end
+end
+puts "  all eight small-order Ed25519 points refused"
+
+args = Program.args
+if args.size > 0
+  vectors = File.read(args[0]).lines
+  counts = {} of String => Int32
+  refused = 0
+  vectors.each do |line|
+    line = line.strip
+    next if line.empty?
+    parts = line.split('|')
+    if parts[0] == "R"
+      refuse(bytes(parts[1]), parts[2])
+      refused = refused + 1
+      next
+    end
+    name = parts[1]
+    key_bytes = bytes(parts[2])
+    message = bytes(parts[3])
+    raw = bytes(parts[4])
+    der = bytes(parts[5])
+    key = CoseKey.decode(key_bytes)
+    raise "ASSERTION FAILED: #{name}: #{key.message}" if key.is_a?(CoseError)
+    check key.verify(message, raw), "#{name} valid COSE signature"
+    check key.verify_der(message, der), "#{name} valid DER signature"
+    changed_message = message.dup
+    changed_message[0] = changed_message[0] ^ 1_u8
+    check !key.verify(changed_message, raw), "#{name} altered message COSE"
+    check !key.verify_der(changed_message, der), "#{name} altered message DER"
+    changed_raw = raw.dup
+    changed_raw[0] = changed_raw[0] ^ 1_u8
+    check !key.verify(message, changed_raw), "#{name} altered COSE signature"
+    changed_der = der.dup
+    changed_der[changed_der.size - 1] = changed_der[changed_der.size - 1] ^ 1_u8
+    check !key.verify_der(message, changed_der), "#{name} altered DER signature"
+    canonical = key.encode
+    again = CoseKey.decode(canonical)
+    raise "ASSERTION FAILED: #{name}: encoded key refused: #{again.message}" if again.is_a?(CoseError)
+    check again.encode == canonical && Cbor.encode(key.to_cbor) == canonical, "#{name} stable encoding"
+    counts[name] = (counts[name]? || 0) + 1
+  end
+  ["ES256", "ES384", "EdDSA", "RS256", "PS256"].each do |name|
+    check (counts[name]? || 0) == 200, "#{name}: 200 oracle keys"
+    puts "  #{name}: 200 keys, valid COSE/DER and altered messages/signatures"
+  end
+  check refused == 13, "all malformed-key cases"
+  puts "  #{refused} malformed keys refused by name"
+end
+
+# A caller-constructed map did not pass through the CBOR decoder, so its
+# labels must be checked here, including when their encodings would differ.
+duplicate = CborValue.map([{CborValue.int(1_i64), CborValue.int(1_i64)},
+                           {CborValue.int(1_i64), CborValue.int(2_i64)},
+                           {CborValue.int(3_i64), CborValue.int(-7_i64)}])
+result = CoseKey.from_cbor(duplicate)
+check result.is_a?(CoseError), "caller-constructed duplicate labels refused"
+if result.is_a?(CoseError)
+  check result.message.includes?("duplicate"), "duplicate label named"
+end
+refuse(bytes("a3010101010326"), "duplicate")
+puts "  duplicate labels refused through decode and from_cbor"
+puts "ALL CHECKS PASSED"

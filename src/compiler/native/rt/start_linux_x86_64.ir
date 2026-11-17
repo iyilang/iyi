@@ -1,0 +1,169 @@
+; iyi-ir 1
+source_filename = "start_linux_x86_64"
+target triple = "x86_64-linux-gnu"
+target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128"
+
+; The Linux start code of the static-PIE executable (SPEC 2.2 and 3.7, slice D3), for x86_64. It is the aarch64 file's
+; twin: the same steps, with the x86_64 system call convention, and the variant II TLS block. The block ends at the
+; thread pointer, %fs, and the TCB's first word holds the thread pointer itself. Nothing here is compiled until the
+; x86_64 code generator (slice D2) lands; until then the IR verifier checks it.
+
+declare external i32 @main(i32, ptr)
+
+@environ = global ptr null, align 8
+@__ehdr_start = external global i8
+@__iyi_rela_start = external global i8
+@__iyi_rela_end = external global i8
+@__iyi_relro_start = external global i8
+@__iyi_relro_end = external global i8
+@__iyi_tdata_start = external global i8
+@__iyi_tdata_end = external global i8
+
+; The raw system call: number in rax, arguments in rdi, rsi, rdx, r10, r8, r9, result in rax.
+define internal i64 @iyi_syscall(i64 %nr, i64 %a0, i64 %a1, i64 %a2, i64 %a3, i64 %a4, i64 %a5) {
+entry:
+  %r = call i64 (i64, i64, i64, i64, i64, i64, i64) asm sideeffect "syscall", "={rax},0,{rdi},{rsi},{rdx},{r10},{r8},{r9},~{rcx},~{r11},~{memory}"(i64 %nr, i64 %a0, i64 %a1, i64 %a2, i64 %a3, i64 %a4, i64 %a5)
+  ret i64 %r
+}
+
+define internal void @iyi_exit(i64 %status) {
+entry:
+  %r = call i64 (i64, i64, i64, i64, i64, i64, i64) @iyi_syscall(i64 231, i64 %status, i64 0, i64 0, i64 0, i64 0, i64 0)
+  unreachable
+}
+
+define internal void @iyi_apply_relocations() {
+entry:
+  %base = ptrtoint ptr @__ehdr_start to i64
+  %start = ptrtoint ptr @__iyi_rela_start to i64
+  %end = ptrtoint ptr @__iyi_rela_end to i64
+  br label %head
+head:
+  %p = phi i64 [ %start, label %entry ], [ %p2, label %body ]
+  %more = icmp ult i64 %p, %end
+  br i1 %more, label %body, label %done
+body:
+  %pp = inttoptr i64 %p to ptr
+  %off = load i64, ptr %pp, align 8
+  %site = add i64 %off, %base
+  %sp = inttoptr i64 %site to ptr
+  %w = load i64, ptr %sp, align 8
+  %nw = add i64 %w, %base
+  store i64 %nw, ptr %sp, align 8
+  %p2 = add i64 %p, 8
+  br label %head
+done:
+  ret void
+}
+
+define internal void @iyi_relro_protect() {
+entry:
+  %s = ptrtoint ptr @__iyi_relro_start to i64
+  %e = ptrtoint ptr @__iyi_relro_end to i64
+  %len = sub i64 %e, %s
+  %r = call i64 (i64, i64, i64, i64, i64, i64, i64) @iyi_syscall(i64 10, i64 %s, i64 %len, i64 1, i64 0, i64 0, i64 0)
+  ret void
+}
+
+; Variant II: the block of memsz bytes, rounded up to its alignment, ends at the thread pointer. The thread pointer
+; is set with arch_prctl(ARCH_SET_FS).
+define internal void @iyi_setup_tls() {
+entry:
+  %ehdr = ptrtoint ptr @__ehdr_start to i64
+  %phoffp = add i64 %ehdr, 32
+  %phoffpp = inttoptr i64 %phoffp to ptr
+  %phoff = load i64, ptr %phoffpp, align 8
+  %phnump = add i64 %ehdr, 56
+  %phnumpp = inttoptr i64 %phnump to ptr
+  %phnum16 = load i16, ptr %phnumpp, align 2
+  %phnum = zext i16 %phnum16 to i64
+  %phdr0 = add i64 %ehdr, %phoff
+  br label %loop
+loop:
+  %i = phi i64 [ 0, label %entry ], [ %i2, label %loopbody ]
+  %memsz = phi i64 [ 0, label %entry ], [ %memsz2, label %loopbody ]
+  %align = phi i64 [ 1, label %entry ], [ %align2, label %loopbody ]
+  %more = icmp ult i64 %i, %phnum
+  br i1 %more, label %loopbody, label %found
+loopbody:
+  %scaled = mul i64 %i, 56
+  %ph = add i64 %phdr0, %scaled
+  %phpp = inttoptr i64 %ph to ptr
+  %type = load i32, ptr %phpp, align 4
+  %is_tls = icmp eq i32 %type, 7
+  %mempp = add i64 %ph, 40
+  %memptr = inttoptr i64 %mempp to ptr
+  %mem_here = load i64, ptr %memptr, align 8
+  %alpp = add i64 %ph, 48
+  %alptr = inttoptr i64 %alpp to ptr
+  %al_here = load i64, ptr %alptr, align 8
+  %memsz2 = select i1 %is_tls, i64 %mem_here, i64 %memsz
+  %align2 = select i1 %is_tls, i64 %al_here, i64 %align
+  %i2 = add i64 %i, 1
+  br label %loop
+found:
+  %a1 = sub i64 %align, 1
+  %neg = sub i64 0, %align
+  %asize0 = add i64 %memsz, %a1
+  %asize = and i64 %asize0, %neg
+  %region0 = add i64 %asize, %align
+  %regionp = add i64 %region0, 4159
+  %size = and i64 %regionp, -4096
+  %m = call i64 (i64, i64, i64, i64, i64, i64, i64) @iyi_syscall(i64 9, i64 0, i64 %size, i64 3, i64 34, i64 -1, i64 0)
+  %bad = icmp ugt i64 %m, -4096
+  br i1 %bad, label %nomem, label %mapped
+nomem:
+  call void (i64) @iyi_exit(i64 1)
+  unreachable
+mapped:
+  %b0 = add i64 %m, %a1
+  %block = and i64 %b0, %neg
+  %tp = add i64 %block, %asize
+  %tpp = inttoptr i64 %tp to ptr
+  store i64 %tp, ptr %tpp, align 8
+  %src = ptrtoint ptr @__iyi_tdata_start to i64
+  %srce = ptrtoint ptr @__iyi_tdata_end to i64
+  %fsz = sub i64 %srce, %src
+  br label %copyhead
+copyhead:
+  %k = phi i64 [ 0, label %mapped ], [ %k2, label %copybody ]
+  %kmore = icmp ult i64 %k, %fsz
+  br i1 %kmore, label %copybody, label %copydone
+copybody:
+  %sk = add i64 %src, %k
+  %skp = inttoptr i64 %sk to ptr
+  %v = load i8, ptr %skp, align 1
+  %dk = add i64 %block, %k
+  %dkp = inttoptr i64 %dk to ptr
+  store i8 %v, ptr %dkp, align 1
+  %k2 = add i64 %k, 1
+  br label %copyhead
+copydone:
+  %ar = call i64 (i64, i64, i64, i64, i64, i64, i64) @iyi_syscall(i64 158, i64 4098, i64 %tp, i64 0, i64 0, i64 0, i64 0)
+  ret void
+}
+
+define internal void @__iyi_start_c(ptr %sp) {
+entry:
+  %argc = load i64, ptr %sp, align 8
+  %argv = getelementptr i8, ptr %sp, i64 8
+  %n1 = add i64 %argc, 1
+  %off = shl i64 %n1, 3
+  %envp = getelementptr i8, ptr %argv, i64 %off
+  store ptr %envp, ptr @environ, align 8
+  call void () @iyi_apply_relocations()
+  call void () @iyi_relro_protect()
+  call void () @iyi_setup_tls()
+  %argc32 = trunc i64 %argc to i32
+  %r = call i32 (i32, ptr) @main(i32 %argc32, ptr %argv)
+  %st = zext i32 %r to i64
+  call void (i64) @iyi_exit(i64 %st)
+  unreachable
+}
+
+; The entry point. Naked: the initial stack pointer is read before any prologue moves it.
+define void @_start() [naked] {
+entry:
+  call void () asm sideeffect "movq %rsp, %rdi; call __iyi_start_c", "~{rdi},~{memory}"()
+  unreachable
+}

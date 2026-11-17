@@ -88,14 +88,36 @@ check_calls_diverge() {
     cat "$WORK/mutation-build.log"
     return 0
   fi
-  local fixture
+  local fixture rc
   for fixture in "$REPO"/bench/fixtures/semcall_*.iyi; do
     if [ "$#" -gt 0 ] && [ "$fixture" != "$REPO/$1" ]; then
       continue
     fi
-    "$WORK/port_m$EXE" "$(native_path "$fixture")" > "$WORK/pm.out" 2>/dev/null || { echo "INVALID MUTANT: call oracle or driver failed"; return 0; }
-    "$WORK/oracle$EXE" "$(native_path "$fixture")" > "$WORK/om.out" 2>/dev/null || { echo "INVALID MUTANT: call oracle or driver failed"; return 0; }
-    diff -q "$WORK/pm.out" "$WORK/om.out" >/dev/null || return 1
+    "$WORK/port_m$EXE" "$(native_path "$fixture")" > "$WORK/pm.out" 2>"$WORK/pm.err"
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+      echo "INVALID MUTANT: call driver died on $(basename "$fixture"): $(refusal_note "$rc" "$WORK/pm.err")"
+      return 0
+    fi
+    "$WORK/oracle$EXE" "$(native_path "$fixture")" > "$WORK/om.out" 2>"$WORK/om.err"
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+      echo "INVALID MUTANT: call oracle failed on $(basename "$fixture"): $(refusal_note "$rc" "$WORK/om.err")"
+      return 0
+    fi
+    cmp -s "$WORK/pm.out" "$WORK/om.out"
+    rc=$?
+    case "$rc" in
+      0) ;;
+      1)
+        echo "decisive: $(basename "$fixture"): the call sites differ from the oracle's"
+        return 1
+        ;;
+      *)
+        echo "INVALID MUTANT: call output comparison failed on $(basename "$fixture") (exit $rc)"
+        return 0
+        ;;
+    esac
   done
   return 0
 }
@@ -339,14 +361,14 @@ MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
 prove_mutation "a missing parameter takes the first argument, not its default" "$DEFAULT_FILE" \
   "out << default.clone" \
-  "out << args[0]" \
-  -- check_calls_diverge || status=1
+  "out << (args.empty? ? default.clone : args[0])" \
+  -- check_calls_diverge bench/fixtures/semcall_default.iyi || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
 prove_mutation "a named argument is ignored when a default is expanded" "$DEFAULT_FILE" \
-  "DefaultArguments.named_value(named_args, " \
-  "DefaultArguments.named_value(nil, " \
-  -- check_calls_diverge || status=1
+  "named = DefaultArguments.named_value(named_args, rec_def.args[k].external_name)" \
+  "named = rec_def.args[k].default_value ? nil : DefaultArguments.named_value(named_args, rec_def.args[k].external_name)" \
+  -- check_calls_diverge bench/fixtures/semcall_default.iyi || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
 prove_mutation "a given positional argument is replaced by its default" "$DEFAULT_FILE" \

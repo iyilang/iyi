@@ -97,13 +97,12 @@ check_new_diverge() {
     fi
     "$WORK/port_m$EXE" "$(native_path "$fixture")" > "$WORK/mp.txt" 2>"$WORK/mp.err"
     local mutant_status=$?
-    # A semantic rejection of a fixture accepted by both original drivers is a
-    # behavioral divergence. Panics, signals and build failures remain invalid.
-    if [ "$mutant_status" -eq 1 ] && grep -q '^Error: ' "$WORK/mp.err"; then
+    # Count the port's own refusal only when the unmutated driver agrees with
+    # the oracle. Signals, unrelated panics and build failures stay invalid.
+    if port_refusal "$mutant_status" "$WORK/mp.err"; then
       if "$WORK/port$EXE" "$(native_path "$fixture")" >"$WORK/baseline.txt" 2>"$WORK/baseline.err" &&
          cmp -s "$WORK/mo.txt" "$WORK/baseline.txt"; then
-        printf 'semantic rejection of %s: ' "$(basename "$fixture")"
-        awk 'NR == 1 { print; exit }' "$WORK/mp.err"
+        echo "decisive: $(basename "$fixture"): refused, and the unmutated driver matches the oracle: $(refusal_note "$mutant_status" "$WORK/mp.err")"
         return 1
       fi
       invalid_mutant "the unmutated new-method driver did not match the oracle"
@@ -114,7 +113,7 @@ check_new_diverge() {
       invalid_mutant "new-method driver exited $mutant_status on $(basename "$fixture")"
       return $?
     fi
-    cmp -s "$WORK/mo.txt" "$WORK/mp.txt" || return 1
+    cmp -s "$WORK/mo.txt" "$WORK/mp.txt" || { echo "decisive: $(basename "$fixture"): the new methods differ from the oracle's"; return 1; }
   done
   return 0
 }

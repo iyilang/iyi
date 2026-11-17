@@ -315,11 +315,38 @@ echo "  Parity summary: literal $((lit_count - lit_diverged))/$lit_count fixture
 # the port driver made at the start is rebuilt from the patched module and
 # walked over every literal fixture; a runnable mutant must produce a difference.
 check_literals_agree() {
-  "$IYI" build -o "$WORK_NATIVE/lit_mut_port$EXE" "$WORK_NATIVE/semtx_port.iyi" > /dev/null 2>&1 || { echo "INVALID MUTANT: transform driver did not build"; return 0; }
+  local fixture rc
+  "$IYI" build -o "$WORK_NATIVE/lit_mut_port$EXE" "$WORK_NATIVE/semtx_port.iyi" > "$WORK/lit_mut_build.log" 2>&1 || {
+    echo "INVALID MUTANT: transform driver did not build"
+    cat "$WORK/lit_mut_build.log"
+    return 0
+  }
   for fixture in "$REPO"/bench/fixtures/semtx_lit_*.iyi; do
-    "$WORK/lit_mut_port$EXE" "$(native_path "$fixture")" "$(lit_mode "$(native_path "$fixture")")" > "$WORK/lit_mut.ast" 2> /dev/null || { echo "INVALID MUTANT: transform driver or oracle failed"; return 0; }
-    IYI_PATH="$REPO_NATIVE/src" "$WORK/dump_hosted$EXE" "$(native_path "$fixture")" "$(lit_mode "$(native_path "$fixture")")" > "$WORK/lit_mut_oracle.ast" || { echo "INVALID MUTANT: transform driver or oracle failed"; return 0; }
-    cmp -s "$WORK/lit_mut.ast" "$WORK/lit_mut_oracle.ast" || return 1
+    "$WORK/lit_mut_port$EXE" "$(native_path "$fixture")" "$(lit_mode "$(native_path "$fixture")")" > "$WORK/lit_mut.ast" 2>"$WORK/lit_mut.err"
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+      echo "INVALID MUTANT: transform driver died on $(basename "$fixture"): $(refusal_note "$rc" "$WORK/lit_mut.err")"
+      return 0
+    fi
+    IYI_PATH="$REPO_NATIVE/src" "$WORK/dump_hosted$EXE" "$(native_path "$fixture")" "$(lit_mode "$(native_path "$fixture")")" > "$WORK/lit_mut_oracle.ast" 2>"$WORK/lit_mut_oracle.err"
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+      echo "INVALID MUTANT: transform oracle failed on $(basename "$fixture"): $(refusal_note "$rc" "$WORK/lit_mut_oracle.err")"
+      return 0
+    fi
+    cmp -s "$WORK/lit_mut.ast" "$WORK/lit_mut_oracle.ast"
+    rc=$?
+    case "$rc" in
+      0) ;;
+      1)
+        echo "decisive: $(basename "$fixture"): the lowered trees differ from the hosted walk"
+        return 1
+        ;;
+      *)
+        echo "INVALID MUTANT: transform comparison failed on $(basename "$fixture") (exit $rc)"
+        return 0
+        ;;
+    esac
   done
   return 0
 }
@@ -401,7 +428,7 @@ prove_mutation "an and binds a temporary and runs the right side on false" "$LIT
 LIT_MUTATIONS=$((LIT_MUTATIONS + 1))
 prove_mutation "an or binds a temporary and runs the right side on true" "$LITERAL" 'If.new(Assign.new(temp.clone, left), temp.clone, node.right)' 'If.new(Assign.new(temp.clone, left), node.right, temp.clone)' -- check_literals_agree || status=1
 LIT_MUTATIONS=$((LIT_MUTATIONS + 1))
-prove_mutation "an or is expanded as an and" "$LITERAL" 'expanded = expand_or(node)' 'expanded = expand_and(node)' -- check_literals_agree || status=1
+prove_mutation "an or is expanded as an and" "$LITERAL" 'expanded = expand_or(node)' 'expanded = expand_and(And.new(node.left, node.right))' -- check_literals_agree || status=1
 LIT_MUTATIONS=$((LIT_MUTATIONS + 1))
 prove_mutation "an and is not marked as an and" "$LITERAL" 'a_if.from_and = true' 'a_if.from_and = false' -- check_literals_agree || status=1
 LIT_MUTATIONS=$((LIT_MUTATIONS + 1))

@@ -23,8 +23,8 @@
   closure analysis, literal expansion and type operations. Its gates compare
   fixtures, their import closures and the checkout's source corpus with the
   hosted compiler. Initial corpus floors cover this component's source
-  population; unchanged per-file floors are retained. Constructor mutation
-  checks distinguish semantic refusals from driver crashes.
+  population; unchanged per-file floors are retained. Mutation checks count
+  refusals through the port's own refusal paths, keeping driver crashes invalid.
   Hosted commands remain unchanged.
 
 - **`iyi doc --json [DIR]` prints a package's exported APIs as data.**

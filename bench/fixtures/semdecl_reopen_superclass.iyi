@@ -1,0 +1,12 @@
+# Reopening a class without a superclass keeps its declared superclass.
+class ReopenBase
+end
+
+class ReopenChild < ReopenBase
+end
+
+class ReopenChild
+  def reopened : Int32
+    1
+  end
+end

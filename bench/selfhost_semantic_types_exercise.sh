@@ -41,15 +41,39 @@ LLVM_CONFIG="${LLVM_CONFIG:-$(command -v llvm-config || true)}" \
 echo
 echo "== 2. Each fixture's operations, hosted oracle against the port"
 compare_all() {
-  local port_bin="$1"
-  local fixture
+  local port_bin="$1" fixture rc first_difference=""
   local out_status=0
   for fixture in "$REPO"/bench/fixtures/semty_*.iyi; do
-    "$port_bin" "$(native_path "$fixture")" > "$WORK/port.out" 2>/dev/null || return 2
-    "$WORK/oracle$EXE" "$(native_path "$fixture")" > "$WORK/oracle.out" 2>/dev/null || return 2
-    diff -q "$WORK/port.out" "$WORK/oracle.out" >/dev/null || out_status=1
+    "$port_bin" "$(native_path "$fixture")" > "$WORK/port.out" 2>"$WORK/port.err"
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+      echo "type query driver died on $(basename "$fixture"): $(refusal_note "$rc" "$WORK/port.err")"
+      return 2
+    fi
+    "$WORK/oracle$EXE" "$(native_path "$fixture")" > "$WORK/oracle.out" 2>"$WORK/oracle.err"
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+      echo "type query oracle died on $(basename "$fixture"): $(refusal_note "$rc" "$WORK/oracle.err")"
+      return 2
+    fi
+    cmp -s "$WORK/port.out" "$WORK/oracle.out"
+    rc=$?
+    case "$rc" in
+      0) ;;
+      1)
+        [ -n "$first_difference" ] || first_difference="$(basename "$fixture")"
+        out_status=1
+        ;;
+      *)
+        echo "type query comparison failed on $(basename "$fixture") (exit $rc)"
+        return 2
+        ;;
+    esac
   done
-  return $out_status
+  if [ -n "$first_difference" ]; then
+    echo "decisive: $first_difference: type query output differs from the hosted oracle"
+  fi
+  return "$out_status"
 }
 
 fixture_count=0
@@ -214,8 +238,8 @@ prove_mutation "union members printed by full name, not devirtualized" "$TOP_LEV
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
 prove_mutation "generic type hook bypassed in SemanticProgram lookup" "$TOP_LEVEL_FILE" \
-  "            return hook.instantiate_type(base_type, type_args)" \
-  "            return base_type" \
+  $'            type_args = g.type_vars.map { |t| lookup_type_node(t, current_type) }\n            return hook.instantiate_type(base_type, type_args)' \
+  $'            type_args = g.type_vars.map { |t| lookup_type_node(t, current_type) }\n            return base_type' \
   -- check_type_queries_diverge || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 

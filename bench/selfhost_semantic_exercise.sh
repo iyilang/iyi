@@ -302,23 +302,46 @@ compare_all() {
   return $out_status
 }
 
+# Return the first behavioral divergence (1). A failed oracle or a mutant
+# that only crashes is invalid (2); a matching mutant returns 0.
 compare_expr_all() {
-  out_status=0
+  local fixture err_fixture name rc died=""
   for fixture in "$REPO"/bench/fixtures/sem_expr_*.iyi; do
-    "$1" "$(native_path "$fixture")" --expr > "$WORK/a_expr.ast" 2>/dev/null || return 2
-    "$WORK/dump_hosted$EXE" "$(native_path "$fixture")" --expr > "$WORK/b_expr.ast" || return 2
-    diff -q "$WORK/a_expr.ast" "$WORK/b_expr.ast" >/dev/null || out_status=1
+    name="$(basename "$fixture")"
+    if ! "$WORK/dump_hosted$EXE" "$(native_path "$fixture")" --expr > "$WORK/b_expr.ast" 2> "$WORK/b_expr.err"; then
+      echo "hosted dump failed on $name: $(awk 'NR == 1 { print; exit }' "$WORK/b_expr.err")"
+      return 2
+    fi
+    "$1" "$(native_path "$fixture")" --expr > "$WORK/a_expr.ast" 2> "$WORK/a_expr.err"
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+      cmp -s "$WORK/a_expr.ast" "$WORK/b_expr.ast" && continue
+      echo "decisive: $name: the typed trees differ from the hosted dump"
+      return 1
+    fi
+    if port_refusal "$rc" "$WORK/a_expr.err" &&
+       "$WORK/exercise$EXE" "$(native_path "$fixture")" --expr > "$WORK/base_expr.ast" 2>/dev/null &&
+       cmp -s "$WORK/base_expr.ast" "$WORK/b_expr.ast"; then
+      echo "decisive: $name: refused, and the unmutated driver matches the hosted dump: $(refusal_note "$rc" "$WORK/a_expr.err")"
+      return 1
+    fi
+    [ -n "$died" ] || died="$name: $(refusal_note "$rc" "$WORK/a_expr.err")"
   done
   for err_fixture in "$REPO"/bench/fixtures/sem_err_*.iyi; do
     case "$(basename "$err_fixture")" in
       sem_err_wrong_arg_count*|sem_err_type_mismatch*|sem_err_undefined_method*|sem_err_cvar_*|sem_err_recursive_*|sem_err_ivar_*|sem_err_top_level_*|sem_err_ambiguous_call*|sem_err_no_overload_matches*|sem_err_class_nil*|sem_err_class_symbol*)
         if "$1" "$(native_path "$err_fixture")" --expr >/dev/null 2>&1; then
-          out_status=1
+          echo "decisive: $(basename "$err_fixture"): the mutant accepts a program the port rejects"
+          return 1
         fi
         ;;
     esac
   done
-  return $out_status
+  if [ -n "$died" ]; then
+    echo "not evidence: the mutant died on $died"
+    return 2
+  fi
+  return 0
 }
 
 fixture_count=0

@@ -277,11 +277,15 @@ elsif Program.args[0] == "--def-owner"
   base = prog.types["OwnerBase"].as(ModuleType)
   instance_def = base.defs["inherited"][0]
   class_def = base.metaclass.defs["class_method"][0]
-  print "instance #{prog.def_owner(instance_def).as(ModuleType).full_name}\n"
-  print "class #{prog.def_owner(class_def).as(ModuleType).full_name}\n"
+  instance_owner = prog.def_owner(instance_def)
+  class_owner = prog.def_owner(class_def)
+  instance_name = instance_owner ? instance_owner.full_name : "<no owner>"
+  class_name = class_owner ? class_owner.full_name : "<no owner>"
+  print "instance #{instance_name}\n"
+  print "class #{class_name}\n"
   copy = instance_def.clone.as(Def)
   prog.copy_def_owner(instance_def, copy)
-  raise "definition clone lost its owner" unless prog.def_owner(copy) == base
+  raise "definition clone lost its owner" unless prog.def_owner(copy) == instance_owner
 elsif Program.args[0] == "--virtual-subtype"
   prog, _ = BenchSelfhostSemanticDeclarationsExercise.load_typed_program(Program.args[1])
   base = prog.types["SubtypeNode"].as(ClassType)

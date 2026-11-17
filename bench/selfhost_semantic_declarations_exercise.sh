@@ -213,6 +213,7 @@ fi
 echo "== 2b''. Link annotations once the program is declared: a lib's @[Link] records, in declaration order, positional and named"
 echo "  (a port-side pin: the expected lines are written by hand; the oracle's own dump of the same fixture must agree with them)"
 link_annotations_expected="$REPO/bench/selfhost_semantic_declarations_link_annotations.expected"
+link_oracle_ok=0
 if ! "$PORT" --link-annotations "$REPO_NATIVE/bench/fixtures/semdecl_link_annotations.iyi" > "$WORK/la_p.txt" 2> "$WORK/la_pe.txt"; then
   echo "  PORT REJECTS: $(head -n 1 "$WORK/la_pe.txt")"; status=1
 else
@@ -224,6 +225,7 @@ else
     diff "$link_annotations_expected" "$WORK/la_o.txt" | head -n 20
     status=1
   elif cmp -s "$WORK/la_pin.txt" "$link_annotations_expected"; then
+    link_oracle_ok=1
     echo "  semdecl_link_annotations.iyi: $(awk 'END{print NR}' "$WORK/la_pin.txt") link records pinned, and the oracle agrees"
   else
     echo "  semdecl_link_annotations.iyi: PIN DIFFERS"
@@ -488,9 +490,35 @@ awk -F'\t' '
       "ALL", total_files, total_oracle + 0, total_port + 0, total_nodes, total_matched, (total_nodes ? 100 * total_matched / total_nodes : 0)
   }' "$RESULTS"
 
+_decl_difference() {
+  diff -u "$1" "$2" | awk '
+    NR > 2 && /^-/ && !a { oracle = substr($0, 2); a = 1 }
+    NR > 2 && /^\+/ && !b { mutant = substr($0, 2); b = 1 }
+    END { printf "oracle [%s]; mutant [%s]", a ? oracle : "<absent>", b ? mutant : "<absent>" }
+  '
+}
+
+# The precondition establishes baseline parity for each input in this scan.
+# _decl_outcome <input> <oracle> <status> <output> <stderr> [<via> <message-ERE>]
+# A difference or named refusal returns 1; other deaths are remembered, not caught.
+DECL_DIED=""
+_decl_outcome() {
+  if [ "$3" -eq 0 ]; then
+    cmp -s "$2" "$4" && return 0
+    echo "decisive: $1: the declarations differ from the oracle's: $(_decl_difference "$2" "$4")"
+    return 1
+  fi
+  if port_refusal "$3" "$5" || { [ -n "${6:-}" ] && expected_refusal "$3" "$5" "$6" "${7:-}"; }; then
+    echo "decisive: $1: refused, though the unmutated driver dumps it as the oracle does: $(refusal_note "$3" "$5")"
+    return 1
+  fi
+  [ -n "$DECL_DIED" ] || DECL_DIED="$1: $(refusal_note "$3" "$5")"
+  return 0
+}
+
 check_decl_fixtures_diverge() {
-  # Only a successfully built driver and a fixture divergence prove a catch.
-  local probe="$WORK/mut_port$EXE"
+  local probe="$WORK/mut_port$EXE" rc fixture rel oracle_mode port_mode
+  DECL_DIED=""
   "$IYI" build -o "$(native_path "$probe")" "$REPO_NATIVE/bench/selfhost_semantic_declarations_exercise.iyi" > "$WORK/mut_build.log" 2>&1 || { echo "INVALID MUTANT: declaration driver did not build"; cat "$WORK/mut_build.log"; return 0; }
   for fixture in "$REPO"/bench/fixtures/semdecl_*.iyi "$REPO"/bench/fixtures/semdecl_*/*.iyi "$REPO"/bench/fixtures/semdecl_*/*/*.iyi; do
     rel="${fixture#$REPO/}"
@@ -499,13 +527,29 @@ check_decl_fixtures_diverge() {
     case "$(basename "$fixture")" in
       semdecl_ivar_typed_*) oracle_mode="--typed"; port_mode="--typed" ;;
     esac
-    "$ORACLE" $oracle_mode "$REPO_NATIVE/$rel" > "$WORK/mut_o.txt" 2>/dev/null || { echo "INVALID MUTANT: declaration oracle or driver failed"; return 0; }
-    "$probe" $port_mode "$REPO_NATIVE/$rel" > "$WORK/mut_p.txt" 2>/dev/null || { echo "INVALID MUTANT: declaration oracle or driver failed"; return 0; }
-    cmp -s "$WORK/mut_o.txt" "$WORK/mut_p.txt" || return 1
+    "$ORACLE" $oracle_mode "$REPO_NATIVE/$rel" > "$WORK/mut_o.txt" 2>/dev/null || { echo "INVALID MUTANT: declaration oracle failed on $rel"; return 0; }
+    "$probe" $port_mode "$REPO_NATIVE/$rel" > "$WORK/mut_p.txt" 2> "$WORK/mut_p.err"
+    rc=$?
+    _decl_outcome "$rel" "$WORK/mut_o.txt" "$rc" "$WORK/mut_p.txt" "$WORK/mut_p.err" "$@" || return 1
   done
-  "$ORACLE" --chain "$REPO_NATIVE/bench/fixtures/semdecl_prelude_chain.iyi" > "$WORK/mut_co.txt" 2>/dev/null || { echo "INVALID MUTANT: declaration oracle or driver failed"; return 0; }
-  "$probe" --chain "$REPO_NATIVE/bench/fixtures/semdecl_prelude_chain.iyi" > "$WORK/mut_cp.txt" 2>/dev/null || { echo "INVALID MUTANT: declaration oracle or driver failed"; return 0; }
-  cmp -s "$WORK/mut_co.txt" "$WORK/mut_cp.txt" || return 1
+  "$ORACLE" --chain "$REPO_NATIVE/bench/fixtures/semdecl_prelude_chain.iyi" > "$WORK/mut_co.txt" 2>/dev/null || { echo "INVALID MUTANT: declaration oracle failed on the prelude chain"; return 0; }
+  "$probe" --chain "$REPO_NATIVE/bench/fixtures/semdecl_prelude_chain.iyi" > "$WORK/mut_cp.txt" 2> "$WORK/mut_cp.err"
+  rc=$?
+  _decl_outcome "the prelude chain" "$WORK/mut_co.txt" "$rc" "$WORK/mut_cp.txt" "$WORK/mut_cp.err" "$@" || return 1
+  [ -z "$DECL_DIED" ] || echo "INVALID MUTANT: no input told the mutant apart, and it died on $DECL_DIED"
+  return 0
+}
+
+# This fixture is also covered by the baseline parity precondition.
+check_reopen_superclass_diverge() {
+  local probe="$WORK/mut_reopen_port$EXE" rel="bench/fixtures/semdecl_reopen_superclass.iyi" rc
+  "$IYI" build -o "$(native_path "$probe")" "$REPO_NATIVE/bench/selfhost_semantic_declarations_exercise.iyi" > "$WORK/mut_build.log" 2>&1 || { echo "INVALID MUTANT: declaration driver did not build"; cat "$WORK/mut_build.log"; return 0; }
+  "$ORACLE" "$REPO_NATIVE/$rel" > "$WORK/mut_ro.txt" 2>/dev/null || { echo "INVALID MUTANT: declaration oracle failed on $rel"; return 0; }
+  "$probe" "$REPO_NATIVE/$rel" > "$WORK/mut_rp.txt" 2> "$WORK/mut_rp.err"
+  rc=$?
+  DECL_DIED=""
+  _decl_outcome "$rel" "$WORK/mut_ro.txt" "$rc" "$WORK/mut_rp.txt" "$WORK/mut_rp.err" || return 1
+  [ -z "$DECL_DIED" ] || echo "INVALID MUTANT: the mutant died on $DECL_DIED"
   return 0
 }
 
@@ -569,10 +613,16 @@ check_virtual_subtype_diverge() {
   cmp -s "$WORK/mut_virtual" "$WORK/virtual_oracle"
 }
 check_def_owner_diverge() {
-  local probe="$WORK/mut_owner_port$EXE"
+  local probe="$WORK/mut_owner_port$EXE" rc
   "$IYI" build -o "$(native_path "$probe")" "$REPO_NATIVE/bench/selfhost_semantic_declarations_exercise.iyi" > "$WORK/mut_build.log" 2>&1 || { echo "INVALID MUTANT: declaration driver did not build"; cat "$WORK/mut_build.log"; return 0; }
-  "$probe" --def-owner "$REPO_NATIVE/bench/fixtures/semdecl_def_owner.iyi" > "$WORK/mut_owner" 2>/dev/null || { echo "INVALID MUTANT: declaration oracle or driver failed"; return 0; }
-  cmp -s "$WORK/mut_owner" "$WORK/owner_oracle"
+  "$probe" --def-owner "$REPO_NATIVE/bench/fixtures/semdecl_def_owner.iyi" > "$WORK/mut_owner" 2> "$WORK/mut_owner.err"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "INVALID MUTANT: definition owner driver failed: $(refusal_note "$rc" "$WORK/mut_owner.err")"
+    return 0
+  fi
+  cmp -s "$WORK/mut_owner" "$WORK/owner_oracle" || { echo "decisive: semdecl_def_owner.iyi: the definition owners differ: $(_decl_difference "$WORK/owner_oracle" "$WORK/mut_owner")"; return 1; }
+  return 0
 }
 
 
@@ -587,23 +637,44 @@ check_const_facts_diverge() {
 }
 
 check_pins_diverge() {
-  # Compare total-mode and metaclass-scope pins after a successful build.
-  local probe="$WORK/mut_pin_port$EXE"
+  local probe="$WORK/mut_pin_port$EXE" rc
   "$IYI" build -o "$(native_path "$probe")" "$REPO_NATIVE/bench/selfhost_semantic_declarations_exercise.iyi" > "$WORK/mut_build.log" 2>&1 || { echo "INVALID MUTANT: declaration driver did not build"; cat "$WORK/mut_build.log"; return 0; }
-  "$probe" --total-typed "$REPO_NATIVE/bench/fixtures/total_unresolved_superclass.iyi" > "$WORK/mut_tt.txt" 2>/dev/null || { echo "INVALID MUTANT: declaration oracle or driver failed"; return 0; }
-  cmp -s "$WORK/mut_tt.txt" "$total_typed_expected" || return 1
-  "$probe" --scope-lookup "$REPO_NATIVE/bench/fixtures/semdecl_metaclass_scope.iyi" Lock HELD > "$WORK/mut_sl.txt" 2>/dev/null || { echo "INVALID MUTANT: declaration oracle or driver failed"; return 0; }
-  cmp -s "$WORK/mut_sl.txt" "$scope_expected" || return 1
+  "$probe" --total-typed "$REPO_NATIVE/bench/fixtures/total_unresolved_superclass.iyi" > "$WORK/mut_tt.txt" 2> "$WORK/mut_tt.err"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    if [ "$#" -eq 2 ] && expected_refusal "$rc" "$WORK/mut_tt.err" "$1" "$2"; then
+      echo "decisive: total_unresolved_superclass.iyi: the total-mode load refused: $(refusal_note "$rc" "$WORK/mut_tt.err")"
+      return 1
+    fi
+    echo "INVALID MUTANT: the total-mode load died: $(refusal_note "$rc" "$WORK/mut_tt.err")"
+    return 0
+  fi
+  cmp -s "$WORK/mut_tt.txt" "$total_typed_expected" || { echo "decisive: total_unresolved_superclass.iyi: the total-mode output differs from the pin"; return 1; }
+  "$probe" --scope-lookup "$REPO_NATIVE/bench/fixtures/semdecl_metaclass_scope.iyi" Lock HELD > "$WORK/mut_sl.txt" 2> "$WORK/mut_sl.err"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "INVALID MUTANT: the metaclass scope lookup died: $(refusal_note "$rc" "$WORK/mut_sl.err")"
+    return 0
+  fi
+  cmp -s "$WORK/mut_sl.txt" "$scope_expected" || { echo "decisive: semdecl_metaclass_scope.iyi: the metaclass scope lookup differs from the pin"; return 1; }
   return 0
 }
 
 check_link_annotations_diverge() {
-  # Compare the link annotation pin after a successful mutant build.
-  local probe="$WORK/mut_link_port$EXE"
+  local probe="$WORK/mut_link_port$EXE" rc
   "$IYI" build -o "$(native_path "$probe")" "$REPO_NATIVE/bench/selfhost_semantic_declarations_exercise.iyi" > "$WORK/mut_build.log" 2>&1 || { echo "INVALID MUTANT: declaration driver did not build"; cat "$WORK/mut_build.log"; return 0; }
-  "$probe" --link-annotations "$REPO_NATIVE/bench/fixtures/semdecl_link_annotations.iyi" > "$WORK/mut_la_all.txt" 2>/dev/null || { echo "INVALID MUTANT: declaration driver failed"; return 0; }
+  "$probe" --link-annotations "$REPO_NATIVE/bench/fixtures/semdecl_link_annotations.iyi" > "$WORK/mut_la_all.txt" 2> "$WORK/mut_la.err"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    if [ "$#" -eq 2 ] && expected_refusal "$rc" "$WORK/mut_la.err" "$1" "$2"; then
+      echo "decisive: semdecl_link_annotations.iyi: the link annotation load refused: $(refusal_note "$rc" "$WORK/mut_la.err")"
+      return 1
+    fi
+    echo "INVALID MUTANT: the link annotation load died: $(refusal_note "$rc" "$WORK/mut_la.err")"
+    return 0
+  fi
   awk '/^link /' "$WORK/mut_la_all.txt" > "$WORK/mut_la.txt"
-  cmp -s "$WORK/mut_la.txt" "$link_annotations_expected" || return 1
+  cmp -s "$WORK/mut_la.txt" "$link_annotations_expected" || { echo "decisive: semdecl_link_annotations.iyi: the link records differ from the pin"; return 1; }
   return 0
 }
 check_reresolve_diverge() {
@@ -623,7 +694,7 @@ MUTATIONS_RUN=0
 # A mutation proof means something only against a baseline the fixtures and the prelude
 # chains already agree on: a fixture the oracle rejects fails every patched run and would
 # count as a catch.
-if [ "$fixture_bad" -ne 0 ] || ! grep -qx 'class variable generic arguments retained' "$WORK/classvar_result" || ! cmp -s "$WORK/enum_primitive_oracle" "$WORK/enum_primitive_port" || ! cmp -s "$WORK/owner_oracle" "$WORK/owner_port" || ! cmp -s "$WORK/virtual_oracle" "$WORK/virtual_port" || ! cmp -s "$WORK/primitive_actual" "$WORK/primitive_expected" || ! cmp -s "$WORK/enum_type_actual" "$enum_type_expected" || ! cmp -s "$WORK/chain_o.txt" "$WORK/chain_p.txt" || [ ! -s "$WORK/chain_o.txt" ] || ! cmp -s "$WORK/lt_pin.txt" "$lib_types_expected" || ! cmp -s "$WORK/cf_pin.txt" "$const_facts_expected" || ! cmp -s "$WORK/la_pin.txt" "$link_annotations_expected" || ! cmp -s "$WORK/tt_p.txt" "$total_typed_expected" || ! cmp -s "$WORK/sl_p.txt" "$scope_expected" || ! cmp -s "$WORK/rr_o.txt" "$WORK/rr_p.txt"; then
+if [ "$fixture_bad" -ne 0 ] || [ "$link_oracle_ok" -ne 1 ] || ! grep -qx 'class variable generic arguments retained' "$WORK/classvar_result" || ! cmp -s "$WORK/enum_primitive_oracle" "$WORK/enum_primitive_port" || ! cmp -s "$WORK/owner_oracle" "$WORK/owner_port" || ! cmp -s "$WORK/virtual_oracle" "$WORK/virtual_port" || ! cmp -s "$WORK/primitive_actual" "$WORK/primitive_expected" || ! cmp -s "$WORK/enum_type_actual" "$enum_type_expected" || ! cmp -s "$WORK/chain_o.txt" "$WORK/chain_p.txt" || [ ! -s "$WORK/chain_o.txt" ] || ! cmp -s "$WORK/lt_pin.txt" "$lib_types_expected" || ! cmp -s "$WORK/cf_pin.txt" "$const_facts_expected" || ! cmp -s "$WORK/la_pin.txt" "$link_annotations_expected" || ! cmp -s "$WORK/tt_p.txt" "$total_typed_expected" || ! cmp -s "$WORK/sl_p.txt" "$scope_expected" || ! cmp -s "$WORK/rr_o.txt" "$WORK/rr_p.txt"; then
   echo "  mutation proofs not run: the fixtures or the prelude chains do not agree with the oracle"
   status=1
 else
@@ -631,7 +702,7 @@ else
 prove_mutation_all "struct default superclass switches to Reference" "$MUT_SEM" \
   "superclass = node.struct ? @program.struct_type : @program.reference_type" \
   "superclass = @program.reference_type" \
-  -- check_decl_fixtures_diverge || status=1
+  -- check_decl_fixtures_diverge src/compiler/semantic/top_level.iyi "^can't make struct '[^']*' inherit class 'Reference'\$" || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
 prove_mutation "enum members start numbering at one instead of zero" "$MUT_SEM" \
@@ -694,9 +765,9 @@ prove_mutation "lib struct takes Reference as its superclass" "$MUT_SEM" \
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
 prove_mutation "a class reopened without a superclass takes the reference superclass" "$MUT_SEM" \
-  "    elsif created_new_type" \
-  "    else" \
-  -- check_decl_fixtures_diverge || status=1
+  $'      type = cls\n    else\n      created_new_type = true' \
+  $'      type = cls\n      created_new_type = node.superclass.nil?\n    else\n      created_new_type = true' \
+  -- check_reopen_superclass_diverge || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 prove_mutation "a metaclass takes Class as its parent even when its superclass has a metaclass" "$MUT_SEM" \
   "        @parents << meta_sc" \
@@ -746,10 +817,8 @@ prove_mutation "an initialize argument instance variable is recorded ahead of th
   "@pending_ivars.unshift(PendingIvar.new(@current_type, ivar_name, r, nil, true))" \
   -- check_decl_fixtures_diverge || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
-# Re-claimed from "an instance variable assigned from a typed argument is dropped". Measured: the pending
-# record (finish) and the guessed-ivar fallback (instance_vars.iyi, skipped when the ivar already exists)
-# each declare that ivar, and the pending one wins. Dropping either alone is not observable (probes: same
-# output), so the drop is not expressible on one file. This mutation is the pending path's type claim.
+# Pending and guessed declarations cover for each other, so dropping either
+# is unobservable. Mutate the pending declaration's type instead.
 prove_mutation "a typed argument's instance variable takes its restriction type" "$MUT_IVARS" \
   "mv = MetaTypeVar.new(pi.name, arg_type, pi.initializer)" \
   "mv = MetaTypeVar.new(pi.name, program.nil_type, pi.initializer)" \
@@ -787,7 +856,7 @@ prove_mutation "array literal elements do not infer instance variable types" "$M
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 prove_mutation "generic new calls do not infer instance variable types" "$MUT_IVARS" \
   '    if node.name == "new" && obj.is_a?(Generic)' \
-  '    if false' \
+  '    if node.name == "never" && obj.is_a?(Generic)' \
   -- check_decl_fixtures_diverge || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 prove_mutation "a generic class's guessed instance variables are not declared on the generic" "$MUT_IVARS" \
@@ -854,12 +923,12 @@ MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 prove_mutation "a named framework argument of a link annotation is refused" "$MUT_SEM" \
   "          elsif na.name == \"framework\"" \
   "          elsif na.name == \"frameworkX\"" \
-  -- check_link_annotations_diverge || status=1
+  -- check_link_annotations_diverge src/compiler/semantic/top_level.iyi "^unknown link argument: 'framework'\$" || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 prove_mutation "a positional ldflags argument of a link annotation is refused" "$MUT_SEM" \
   "          elsif i == 1" \
   "          elsif i == 9" \
-  -- check_link_annotations_diverge || status=1
+  -- check_link_annotations_diverge src/compiler/semantic/top_level.iyi "^too many link arguments\$" || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 prove_mutation "a lib records only its first link annotation" "$MUT_SEM" \
   "      if ann.path.names.last == \"Link\"" \
@@ -869,12 +938,12 @@ MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 prove_mutation "an unresolvable written type raises once the type system is installed, even in total mode" "$MUT_TS" \
   "      raise(message) unless @program.total_mode" \
   "      raise(message)" \
-  -- check_pins_diverge || status=1
+  -- check_pins_diverge src/compiler/types/type_system.iyi "." || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 prove_mutation "total mode raises on an unresolved superclass instead of carrying it past" "$MUT_SEM" \
   "      if superclass.is_a?(UnresolvedType) && @program.total_mode" \
   "      if superclass.is_a?(UnresolvedType) && !@program.total_mode" \
-  -- check_pins_diverge || status=1
+  -- check_pins_diverge src/compiler/semantic/top_level.iyi "^<unresolved [^>]*> is not a class, it's a unresolved\$" || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 prove_mutation "a metaclass scope does not look names up in its instance type" "$MUT_SEM" \
   "        return lookup_type_path?(path, instance.as(ModuleType))" \

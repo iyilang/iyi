@@ -1,0 +1,190 @@
+# CBOR values and deterministic encoding (RFC 8949).
+#
+#     import std/cbor::{Cbor, CborValue, CborLimits, CborError}
+#     value = Cbor.decode(bytes, CborLimits.strict).or_panic
+#     wire = Cbor.encode(value)
+#
+# Pure computation: no platform, clock, randomness, or network.
+
+module std/cbor
+
+pub struct CborError
+  getter message : String
+  getter offset : Int32
+
+  def initialize(message : String, @offset : Int32)
+    @message = "cbor: #{message} at offset #{@offset}"
+  end
+
+  def to_s : String
+    @message
+  end
+end
+
+impl Error for CborError
+  def message : String
+    @message
+  end
+end
+
+pub enum CborKind
+  Unsigned
+  Negative
+  Bytes
+  Text
+  Array
+  Map
+  Tag
+  Simple
+  Float
+  Bool
+  Null
+  Undefined
+end
+
+pub struct CborLimits
+  getter max_depth : Int32
+  getter indefinite : Bool
+  getter tags : Bool
+  getter floats : Bool
+  getter duplicate_keys : Bool
+
+  def initialize(@max_depth : Int32 = 64, @indefinite : Bool = true, @tags : Bool = true,
+                 @floats : Bool = true, @duplicate_keys : Bool = false)
+  end
+
+  def self.strict : CborLimits
+    CborLimits.new(max_depth: 16, indefinite: false, tags: false, floats: false, duplicate_keys: false)
+  end
+end
+
+pub struct CborValue
+  alias Payload = Nil | Bool | Float64 | String | Array(UInt8) | Array(CborValue) | Array({CborValue, CborValue})
+
+  getter kind : CborKind
+  getter raw : Array(UInt8)
+  getter argument : UInt64
+  getter payload : Payload
+
+  def initialize(@kind : CborKind, @argument : UInt64, @payload : Payload, @raw : Array(UInt8) = [] of UInt8)
+  end
+
+  def self.unsigned(value : UInt64) : CborValue
+    CborValue.new(CborKind::Unsigned, value, nil)
+  end
+
+  def self.negative(value : UInt64) : CborValue
+    CborValue.new(CborKind::Negative, value, nil)
+  end
+
+  def self.int(value : Int64) : CborValue
+    value < 0 ? negative((-1_i64 - value).to_u64) : unsigned(value.to_u64)
+  end
+
+  def self.bytes(value : Array(UInt8)) : CborValue
+    CborValue.new(CborKind::Bytes, 0_u64, value)
+  end
+
+  def self.text(value : String) : CborValue
+    CborValue.new(CborKind::Text, 0_u64, value)
+  end
+
+  def self.array(value : Array(CborValue)) : CborValue
+    CborValue.new(CborKind::Array, 0_u64, value)
+  end
+
+  def self.map(value : Array({CborValue, CborValue})) : CborValue
+    CborValue.new(CborKind::Map, 0_u64, value)
+  end
+
+  def self.tag(number : UInt64, value : CborValue) : CborValue
+    CborValue.new(CborKind::Tag, number, [value])
+  end
+
+  def self.simple(value : UInt8) : CborValue
+    CborValue.new(CborKind::Simple, value.to_u64, nil)
+  end
+
+  def self.float(value : Float64) : CborValue
+    CborValue.new(CborKind::Float, 0_u64, value)
+  end
+
+  def self.bool(value : Bool) : CborValue
+    CborValue.new(CborKind::Bool, 0_u64, value)
+  end
+
+  def self.null : CborValue
+    CborValue.new(CborKind::Null, 0_u64, nil)
+  end
+
+  def self.undefined : CborValue
+    CborValue.new(CborKind::Undefined, 0_u64, nil)
+  end
+
+  def as_int? : Int64?
+    return nil if @argument > 9223372036854775807_u64
+    return @argument.to_i64 if @kind == CborKind::Unsigned
+    return -1_i64 - @argument.to_i64 if @kind == CborKind::Negative
+    nil
+  end
+
+  def as_uint? : UInt64?
+    @kind == CborKind::Unsigned ? @argument : nil
+  end
+
+  def as_bytes? : Array(UInt8)?
+    @kind == CborKind::Bytes ? @payload.as(Array(UInt8)) : nil
+  end
+
+  def as_text? : String?
+    @kind == CborKind::Text ? @payload.as(String) : nil
+  end
+
+  def as_array? : Array(CborValue)?
+    @kind == CborKind::Array ? @payload.as(Array(CborValue)) : nil
+  end
+
+  def as_map? : Array({CborValue, CborValue})?
+    @kind == CborKind::Map ? @payload.as(Array({CborValue, CborValue})) : nil
+  end
+
+  def tag? : {UInt64, CborValue}?
+    @kind == CborKind::Tag ? {@argument, @payload.as(Array(CborValue))[0]} : nil
+  end
+
+  def as_float? : Float64?
+    @kind == CborKind::Float ? @payload.as(Float64) : nil
+  end
+
+  def as_bool? : Bool?
+    @kind == CborKind::Bool ? @payload.as(Bool) : nil
+  end
+
+  def [](key : Int64) : CborValue?
+    entries = as_map?
+    return nil unless entries
+    entries.each { |pair| return pair[1] if pair[0].as_int? == key }
+    nil
+  end
+
+  def [](key : String) : CborValue?
+    entries = as_map?
+    return nil unless entries
+    entries.each { |pair| return pair[1] if pair[0].as_text? == key }
+    nil
+  end
+end
+
+pub struct Cbor
+  def self.decode(bytes : Array(UInt8), limits : CborLimits = CborLimits.new) : CborValue | CborError
+    CborError.new("decoder not yet implemented", 0)
+  end
+
+  def self.decode_one(bytes : Array(UInt8), offset : Int32, limits : CborLimits = CborLimits.new) : {CborValue, Int32} | CborError
+    CborError.new("decoder not yet implemented", offset)
+  end
+
+  def self.encode(value : CborValue) : Array(UInt8)
+    [] of UInt8
+  end
+end

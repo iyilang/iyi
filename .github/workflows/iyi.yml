@@ -1952,9 +1952,15 @@ jobs:
       - name: Python 3.14 from Homebrew, as on Linux, for the oracles
         run: |
           brew list python@3.14 >/dev/null 2>&1 || brew install python@3.14
-          PY314="$(brew --prefix python@3.14)/libexec/bin"
-          echo "$PY314" >> "$GITHUB_PATH"
-          "$PY314/python3" --version
+          PY="$(brew --prefix python@3.14)/bin/python3.14"
+          [ -x "$PY" ] || { brew reinstall python@3.14; PY="$(brew --prefix python@3.14)/bin/python3.14"; }
+          SHIM="$RUNNER_TEMP/py314/bin"
+          mkdir -p "$SHIM"
+          ln -sf "$PY" "$SHIM/python3"
+          ln -sf "$PY" "$SHIM/python"
+          echo "$SHIM" >> "$GITHUB_PATH"
+          "$SHIM/python3" --version
+          "$SHIM/python3" -c "import sys, zoneinfo, importlib.util as u; print(sys.version); print('zoneinfo.TZPATH', zoneinfo.TZPATH); print('tzdata package', u.find_spec('tzdata'))"
       - name: Python's cryptography and Pillow, for the oracles
         run: python3 -m pip install -q --break-system-packages cryptography pillow
       - name: The module exercises of this shard, on darwin

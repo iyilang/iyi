@@ -32,6 +32,18 @@ def field(response : Response, name : String) : String
 end
 
 args = Program.args
+if args.empty?
+  check(GcsCRC32C.base64("123456789") == "4waSgw==", "offline CRC32C")
+  time = Time.utc(2019, 2, 1, 9).to_unix
+  email = "test-iam-credentials@dummy-project-id.iam.gserviceaccount.com"
+  prepared = GcsV4.prepare("GET", "https://storage.googleapis.com", "test-bucket", "test-object", email, 10, time).or_panic
+  expected = "GOOG4-RSA-SHA256\n20190201T090000Z\n20190201/auto/storage/goog4_request\n00e2fb794ea93d7adb703edaebdd509821fcc7d4f1a79ac5c8d2b394df109320"
+  check(prepared.string_to_sign == expected, "offline Google V4 vector")
+  check(GcsV4.prepare("GET", "https://storage.googleapis.com", "test-bucket", "", email, 10, time).is_a?(GcsError), "offline empty object refusal")
+  puts "offline GCS checks passed; fake-backed checks run through bench/std_gcs_exercise.sh"
+  exit(0)
+end
+raise "gcs exercise: expected a fake directory and fixture directory" unless args.size == 2
 work = args[0]
 fixtures = args[1]
 config = JSON.parse(File.read(work + "/config.json")).as_h

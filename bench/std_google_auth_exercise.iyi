@@ -1,5 +1,5 @@
 # The driver gives this exercise a private loopback fake and a per-run CA.
-import std/google_auth::{GoogleCredentials, GoogleAuthError}
+import std/google_auth::{GoogleCredentials, GoogleAuthError, GoogleAuthBytes}
 import std/http::{HTTPClient, HTTPError, Response}
 import std/tls::{TlsConfig}
 import std/x509::{Certificate}
@@ -20,6 +20,13 @@ def counter(client : HTTPClient, origin : String, name : String) : Int64
 end
 
 args = Program.args
+if args.empty?
+  check(GoogleAuthBytes.base64url("hello?") == "aGVsbG8_", "offline base64url")
+  invalid = GoogleCredentials.service_account("{\"type\":\"authorized_user\"}")
+  check(invalid.is_a?(GoogleAuthError), "offline authorized_user refusal")
+  puts "offline Google Auth checks passed; fake-backed checks run through bench/std_google_auth_exercise.sh"
+  exit(0)
+end
 work = args[0]
 config = JSON.parse(File.read(work + "/config.json")).as_h
 origin = config["https"].as_s

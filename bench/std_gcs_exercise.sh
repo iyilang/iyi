@@ -42,6 +42,10 @@ run_exercise() {
   if ! "$IYI" build "$@" -o "$W/gcs-$label" "$ROOT/bench/std_gcs_exercise.iyi" >"$WORK/build-$label.log" 2>&1; then
     echo "FAIL: $label build"; tail -25 "$WORK/build-$label.log"; return 1
   fi
+  if ! "$WORK/gcs-$label" >"$WORK/offline-$label" 2>&1 || ! grep -qF "offline GCS checks passed" "$WORK/offline-$label"; then
+    echo "FAIL: $label no-argument run"; cat "$WORK/offline-$label"; return 1
+  fi
+  cat "$WORK/offline-$label"
   if ! "$WORK/gcs-$label" "$W" "$ROOT/bench/std_gcs_fixture" >"$WORK/out-$label" 2>&1; then
     echo "FAIL: $label run"; cat "$WORK/out-$label"; cat "$WORK/server.log"; return 1
   fi

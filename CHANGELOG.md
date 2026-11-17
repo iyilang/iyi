@@ -22,6 +22,8 @@
   limits. CI retains each gate's full log with its source and checkout
   revisions. The hosted LLVM backend remains the default, and this component
   does not establish a stage2/stage3 fixed point or LLVM-free PE/COFF output.
+  The Linux driver's dependency check includes libc's thread setup, which its
+  C `exit` call makes the collector use.
 - **The x86-64 encoder and ABI tables are written in iyi.**
   `compiler/native/amd64` encodes instruction forms and relocations and
   supplies the System V and Win64 argument and return conventions.

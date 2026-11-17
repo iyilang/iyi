@@ -133,8 +133,10 @@ case "$HOST_OS" in
         awk '{ print $NF }' | sed -e 's/^_//' -e 's/^_environ$/environ/' | grep -v '^$' | sort -u)"
       libraries="$(sed -n 's/.*Shared library: \[\(.*\)\]/\1/p' "$WORK/readelf.log" | sort -u)"
       extra_symbols=""
+      # LibC.exit makes program_calls_c? true, so the collector's helpers use
+      # IyiThread.start_by_libc rather than raw clone (src/iyi/thread.iyi).
       for symbol in $symbols; do
-        case " $FLOOR_BASE_LINUX environ exit " in
+        case " $FLOOR_BASE_LINUX environ exit pthread_attr_destroy pthread_attr_init pthread_attr_setstack pthread_create " in
           *" $symbol "*) ;;
           *) extra_symbols="$extra_symbols $symbol" ;;
         esac

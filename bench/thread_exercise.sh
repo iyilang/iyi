@@ -3027,23 +3027,22 @@ IYI
 esac
 
 # ── 7i. darwin: a spinner gives its core away ────────────────────────────
-# darwin's `IyiThread.yield_cpu` was the ARM `yield` hint, which gives the
-# scheduler nothing; it is Mach's `thread_switch` with the depress option
-# now (src/iyi/thread.iyi says what each try cost). Beside a busy process
-# per core, 7h's program made its threads at a tenth of the rate it made
-# them alone with the hint, and as fast or faster with the switch; the
-# check asks half, the best of three runs each way, and the proof puts
-# the hint back.
+# Darwin's spinner gives its core away with Mach's thread_switch. Keep the
+# throughput bound: beside a busy process per core, at least half the rate
+# alone. The old hint-beside/hint-alone control did not distinguish the
+# implementations on an 18-core Darwin host, including the pre-R1 runtime.
+# CPU per thread born did: across 24 loaded runs each, the runtime used
+# 150-241 us and the hint 1,022-3,538 us. Compare those loaded runs in turn,
+# then put the hint in both positions to prove that ordering cannot pass it.
 case "$(uname -s)" in
   Darwin)
-    cores="$(sysctl -n hw.ncpu)"
     # Threads a second, alone and beside a busy process per core: the
-    # best of three runs of the given program each way.
+    # best of three runs each way, with alone and beside in turn.
     rates() {
       alone=0; beside=0
-      for way in alone beside; do
-        run=1
-        while [ "$run" -le 3 ]; do
+      run=1
+      while [ "$run" -le 3 ]; do
+        for way in alone beside; do
           busy=""
           if [ "$way" = beside ]; then
             i=0
@@ -3059,8 +3058,41 @@ case "$(uname -s)" in
           ms="$(sed -n 's/^ok born=[0-9]* ms=\([0-9]*\) .*/\1/p' rates.txt)"
           rate=$((born * 1000 / (ms + 1)))
           if [ "$way" = alone ]; then [ "$rate" -gt "$alone" ] && alone=$rate; else [ "$rate" -gt "$beside" ] && beside=$rate; fi
-          run=$((run + 1))
         done
+        run=$((run + 1))
+      done
+    }
+
+    # Kernel-accounted CPU microseconds per thread born under the same load.
+    # Alternate the two programs and keep each one's lowest of three runs.
+    held() {
+      first=0; second=0
+      run=1
+      while [ "$run" -le 3 ]; do
+        for slot in 1 2; do
+          if [ "$slot" = 1 ]; then prog=$1; else prog=$2; fi
+          busy=""
+          i=0
+          while [ "$i" -lt "$cores" ]; do yes > /dev/null & busy="$busy $!"; i=$((i + 1)); done
+          ( timeout -k 5 60 /usr/bin/time -l "./$prog" 200 10 > rates.txt 2> held.txt; exit $? ) 2> /dev/null
+          code=$?
+          for b in $busy; do end_process "$b"; done; wait $busy 2> /dev/null
+          if [ "$code" -ne 0 ] || ! grep -q '^ok born=[0-9]* ms=[0-9]* ' rates.txt; then
+            echo "$prog, beside, run $run exited $code:"; tail -3 rates.txt; tail -3 held.txt; exit 1
+          fi
+          born="$(sed -n 's/^ok born=\([0-9]*\) .*/\1/p' rates.txt)"
+          [ "$born" -gt 0 ] || { echo "$prog started no threads"; exit 1; }
+          cpu="$(awk -v born="$born" '$2 == "real" && $4 == "user" && $6 == "sys" { printf "%d", ($3 + $5) * 1000000 / born }' held.txt)"
+          if [ -z "$cpu" ] || [ "$cpu" -le 0 ]; then
+            echo "$prog, beside, run $run: no positive CPU time from /usr/bin/time:"; cat held.txt; exit 1
+          fi
+          if [ "$slot" = 1 ]; then
+            if [ "$first" -eq 0 ] || [ "$cpu" -lt "$first" ]; then first=$cpu; fi
+          else
+            if [ "$second" -eq 0 ] || [ "$cpu" -lt "$second" ]; then second=$cpu; fi
+          fi
+        done
+        run=$((run + 1))
       done
     }
     if [ "$cores" -lt 6 ]; then
@@ -3073,7 +3105,6 @@ case "$(uname -s)" in
         echo "beside $cores busy processes the storm made $beside threads a second, under half of $alone alone"; exit 1
       fi
 
-      step "failure proof: yield_cpu as the ARM hint again, and beside the busy processes it falls under half"
       mkdir -p hinted/iyi
       cp "$REPO"/src/iyi/*.iyi hinted/iyi/
       awk '/^        LibC\.thread_switch\(0_u32, IYI_SWITCH_OPTION_DEPRESS, 1_u32\)$/ { print "        asm(\"yield\" :::: \"volatile\")"; found = 1; next }
@@ -3082,10 +3113,18 @@ case "$(uname -s)" in
       if ! IYI_PATH="$WORK/hinted${PSEP}$REPO/src" "$IYI" build asleep.iyi -o hinted-run > build-hinted.log 2>&1; then
         cat build-hinted.log; exit 1
       fi
-      rates hinted-run
-      echo "  with the hint: alone $alone threads a second, beside $cores busy processes $beside"
-      if [ $((beside * 2)) -ge "$alone" ]; then
-        echo "with the hint back, the storm beside the busy processes kept $beside threads a second of $alone alone"; exit 1
+      step "darwin: the storm holds at most half the CPU per thread born that the ARM hint holds beside the busy processes"
+      held asleep hinted-run
+      echo "  CPU per thread born beside $cores busy processes: $first us, with the hint $second us"
+      if [ $((first * 2)) -gt "$second" ]; then
+        echo "beside $cores busy processes the storm held $first us of CPU per thread born, over half of the hint's $second"; exit 1
+      fi
+
+      step "failure proof: the hint in the runtime's place, and the CPU check fails"
+      held hinted-run hinted-run
+      echo "  the hint against itself: $first us and $second us of CPU per thread born"
+      if [ $((first * 2)) -le "$second" ]; then
+        echo "with the hint in the runtime's place the CPU check still held ($first us against $second us)"; exit 1
       fi
     fi
     ;;

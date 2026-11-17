@@ -338,6 +338,13 @@
 
 ### Gates
 
+- **Darwin's thread-yield control measures CPU held under load.** The
+  hint's throughput ratio failed to distinguish it from the runtime on an
+  18-core host, including before the stack-size change. The gate keeps its
+  throughput bound and compares CPU per thread born against the hint, with
+  alternating runs and a hint-against-hint negative control. It reuses the
+  existing core count rather than relying on `sysctl` being on PATH.
+
 - **std/digest's `ValueBarrier` fallback is built and held.** The
   barrier is an empty inline asm on x86_64 and aarch64 and a volatile
   load on every other target, and nothing compiled the load.

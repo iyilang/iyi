@@ -11,6 +11,12 @@ case "$(uname -s)" in
   *) WINDOWS=0; PSEP=':' ;;
 esac
 
+# The bash running this script, as a path native programs can start. A bare
+# `bash` from Python or a nested call finds System32's WSL launcher first on
+# Windows runners.
+BASH_EXE="$BASH"
+[ "$WINDOWS" -eq 0 ] || BASH_EXE="$(cygpath -m "$BASH")"
+
 PY=""
 for candidate in python3 python; do
   if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys' >/dev/null 2>&1; then
@@ -371,7 +377,7 @@ print LibM.cos(0.0)
     local res
     res="$("$PY" -c "
 import subprocess
-out = subprocess.check_output(['bash', '$REPO/bench/stale_store_concurrency.sh', '--crystal', 'eval', '''
+out = subprocess.check_output(['$BASH_EXE', '$REPO/bench/stale_store_concurrency.sh', '--crystal', 'eval', '''
 require \"compiler/iyi/stale/link\"
 r = Iyi::Stale::Link.refusal(\"-L/opt/$ch/lib\", nil)
 puts r || \"nil\"
@@ -391,7 +397,7 @@ print(out)
   local fp_check
   fp_check="$("$PY" -c "
 import subprocess
-out = subprocess.check_output(['bash', '$REPO/bench/stale_store_concurrency.sh', '--crystal', 'eval', '''
+out = subprocess.check_output(['$BASH_EXE', '$REPO/bench/stale_store_concurrency.sh', '--crystal', 'eval', '''
 require \"compiler/iyi/stale/link\"
 require \"compiler/iyi/stale/encoding\"
 
@@ -819,7 +825,7 @@ PY
     dropped="$dropped.exe"
     cp -p "$(dirname "$IYI")/LLVM-C.dll" "$WORK/LLVM-C.dll"
   fi
-  bash "$REPO/bench/stale_store_concurrency.sh" --crystal build -D rg8_drop_def_body -o "$dropped" "$REPO/src/compiler/iyi.cr"
+  "$BASH" "$REPO/bench/stale_store_concurrency.sh" --crystal build -D rg8_drop_def_body -o "$dropped" "$REPO/src/compiler/iyi.cr"
   "$PY" "$REPO/bench/stale_rg8.py" --repo "$REPO" --compiler "$dropped" \
     --work "$WORK/rg8-drop-def-body" --program "$REPO/samples/iyi/calc.iyi" \
     --kind body --expect-failure-kind body

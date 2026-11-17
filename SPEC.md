@@ -63,8 +63,8 @@ own reference accepts.
 | warm full build, `hello` / 6,900-line pair | 0.07 s / 0.24 s, against `go build`'s 0.08 s / 0.09 s |
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
-| iyi's own prelude | 29,037 lines, of which 4,738 are the library held to the 4,738 ceiling (7,177 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 138,300 lines, none of it written in iyi |
+| iyi's own prelude | 29,101 lines, of which 4,802 are the library held to the 4,802 ceiling (7,241 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
+| compiler | 138,422 lines, none of it written in iyi |
 | artifact format | `.iyimod` v62, checksum per section |
 | samples | 28 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets on which Crystal's library is type-checked, eight whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -88,7 +88,7 @@ shape.
 > is a library and the rules are the language, so a program can keep one and
 > change the other: `--crystal` builds against Crystal's standard library, and
 > there `require` reaches the ecosystem while every rule stays where it was.
-> "No standard library worth the name" is still true of iyi's own 29,037 lines
+> "No standard library worth the name" is still true of iyi's own 29,101 lines
 > and no longer true of what a program can have. Part V item 12a is the
 > measurement, nine shards wide.
 
@@ -270,8 +270,8 @@ of binary. It is not made the default on that trade, and the middle needs the
 initialisers to run *later* rather than not at all, which is the `dlsym` table
 above, and a larger piece of work than the number it wins.
 
-**3. A deliberately tiny prelude, written in iyi. Done: 29,037 lines,
-primitives included, of which the library is 4,738.** Not a standard library:
+**3. A deliberately tiny prelude, written in iyi. Done: 29,101 lines,
+primitives included, of which the library is 4,802.** Not a standard library:
 integers, booleans, a string, one sequence, one dictionary, one range, `puts`,
 and an `enum`'s surface — the member's name, an order, the members, and the
 bits of a `@[Flags]` one. **Its scope is set by what the
@@ -301,11 +301,11 @@ the scheduler and the kernel thread (III.4, `concurrency.iyi` and
 seed under `-Diyi_chaos`, `chaos.iyi` and `chaos_points.iyi`, III.4.17),
 the shortest-round-trip float text (`float.iyi`) - and they
 are most of its lines. So the figure held to the ceiling is the library:
-**4,738 lines**, measured by `bench/doc_numbers.py` as
+**4,802 lines**, measured by `bench/doc_numbers.py` as
 everything under `src/iyi/` except those three and except every platform's
 floor of 2,439 lines, the arms behind `flag?(:win32)`, `flag?(:linux)`,
 `flag?(:darwin)` and `flag?(:wasm32)`, which the paragraph on the breach
-below settles and explains. Opening `src/iyi/` counts 7,177 with the floor
+below settles and explains. Opening `src/iyi/` counts 7,241 with the floor
 still in it, and the whole-prelude figure is stated beside both because a
 reader sees the whole file, and a "tiny prelude" claim that hid 9,000 lines
 of runtime would be a claim about the wrong number.
@@ -506,6 +506,14 @@ because only it knows its cases and its children. Behind an import they
 would be a framework a test asks for before it can be skipped, which is the
 one thing `iyi test` set out not to be. The owner chose the number, as
 measured with them in: 4,738.
+
+**And to 4,802, by the owner's decision.** The predefined `UInt64x2`
+primitive adds 64 lines, raising the ceiling from 4,738 by exactly that
+amount. It allows paired SIMD128 AES-GCM counter blocks in the browser;
+the measured speedup and remaining WebCrypto gap are in III.12.1. A
+primitive needs to be available to every program, so moving its declarations
+behind `std/` would change the language contract. The resulting library is
+1,068 lines above the original 3,734-line comparison.
 
 What the rule does *not* forgive: a `pub def` a program calls is API and
 counts wherever it is written, macro arm or not — the exclusion is for the
@@ -1072,8 +1080,8 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 138,300 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 29,037-line own prelude + 127,854 in std |
+| Compiler | 24,984 lines, **written in Crystal** | 138,422 lines, Crystal, forked |
+| Library | 8,161 lines (3,551 of it core) | 29,101-line own prelude + 128,220 in std |
 | Specs | 21,146 lines | 17,214 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
@@ -9076,6 +9084,66 @@ on this target until it has a scheduler. `bench/wasm_freestanding_exercise.sh`
 runs the contract in Node and isolated headless Chrome and compares the
 sample programs with native output.
 
+**AES-GCM in the browser, measured.** `bench/wasm_aead_speed.sh` builds
+scalar and SIMD modules and runs them through the freestanding loader and an
+isolated headless Chrome. `ctr` and `ghash` time those iyi components alone;
+WebCrypto exposes only the combined operation.
+
+Apple M5 Max, 128 GiB memory, HeadlessChrome/156.0.8078.4, Node
+v26.7.0, wasi-sdk 24. The programs target `wasm32-unknown-unknown` with
+`--release`; the second also uses `--mattr +simd128`. AES-256-GCM uses a
+12-byte nonce, 25 bytes of additional data and a 16-byte tag. Numbers are
+decimal MB/s: best of five followed by the full [minimum, maximum] range.
+Setup and output comparisons are outside the timed calls. Every timed result
+was compared byte by byte with WebCrypto, and all three refused a flipped tag.
+
+```sh
+PATH=/opt/homebrew/bin:/usr/bin:/bin \
+LIBRARY_PATH=/opt/homebrew/opt/bdw-gc/lib \
+WASI_SDK_PATH="$TMPDIR/iyi-spike/sdk" \
+IYI_CHROME="$HOME/Library/Caches/ms-playwright/chromium_headless_shell-1248/chrome-headless-shell-mac-arm64/chrome-headless-shell" \
+bash bench/wasm_aead_speed.sh
+```
+
+| MiB | Operation | iyi scalar | iyi SIMD128 | WebCrypto |
+|---:|---|---:|---:|---:|
+| 1 | open | 205.6 [184.0, 205.6] | 243.9 [238.3, 243.9] | 3495.3 [2621.4, 3495.3] |
+| 1 | seal | 197.8 [187.2, 197.8] | 243.9 [228.0, 243.9] | 3495.3 [2097.2, 3495.3] |
+| 1 | ctr | 243.9 [218.5, 243.9] | 374.5 [361.6, 374.5] | n/a |
+| 1 | ghash | 953.3 [806.6, 953.3] | 806.6 [699.1, 806.6] | n/a |
+| 16 | open | 189.4 [185.6, 189.4] | 243.9 [241.4, 243.9] | 2995.9 [2750.4, 2995.9] |
+| 16 | seal | 196.2 [183.8, 196.2] | 254.6 [237.6, 254.6] | 2843.6 [2750.4, 2843.6] |
+| 16 | ctr | 246.7 [227.3, 246.7] | 374.5 [367.1, 374.5] | n/a |
+| 16 | ghash | 998.6 [937.3, 998.6] | 773.1 [742.4, 773.1] | n/a |
+| 64 | open | 193.6 [185.6, 193.6] | 250.8 [243.4, 250.8] | 3106.9 [2784.6, 3106.9] |
+| 64 | seal | 190.1 [181.2, 190.1] | 251.9 [234.2, 251.9] | 2905.1 [2494.8, 2905.1] |
+| 64 | ctr | 239.0 [234.6, 239.0] | 382.8 [368.3, 382.8] | n/a |
+| 64 | ghash | 994.2 [933.4, 994.2] | 796.1 [748.1, 796.1] | n/a |
+
+At 16 MiB open, SIMD gains 54.5 MB/s against a largest within-run spread of
+3.8 MB/s; at 64 MiB it gains 57.2 MB/s against a spread of 8.0 MB/s. That
+is about 1.29x scalar, not parity: WebCrypto is about 12.3x and 12.4x the
+SIMD result at those sizes. The additional predefined primitive raises the
+prelude ceiling by 64 lines (I.4).
+
+A separate trial paired normal and bit-reversed GHASH products in SIMD lanes.
+At 16 MiB, scalar GHASH was 1,004.6 [958.7, 1,004.6] MB/s and the trial was
+621.4 [597.1, 621.4]; at 64 MiB they were 1,026.1 [1,013.7, 1,026.1] and
+642.8 [639.1, 642.8]. The trial was removed. The final SIMD build retains
+scalar GHASH source, although its compiled GHASH timing differs from the
+scalar build in the table.
+
+An earlier wasm32-wasi Chrome spike reported about 175 as MB/s, but its code
+computed MiB/s: that is about 183.5 decimal MB/s. It used best of three,
+no additional data, and timed key setup and input/output copies. This run
+uses best of five and excludes setup, so the two are not a matched benchmark.
+
+The release wasm disassembly and optimized LLVM IR of SIMD CTR show no branch
+or load address derived from key or message bytes. Its branches and variable
+indices come from message lengths, loop counters, round count and buffer
+addresses; its bit-transpose helper has no branch or variable offset. This is
+a check of the emitted wasm, not a claim about every host's native JIT.
+
 ### III.13 Unsafe code: **BUILT — a module that handles raw memory says so with `@[Unsafe("why")]` above its header, and the typed check refuses every unchecked operation anywhere else; held by `bench/unsafe.sh`**
 
 Before this, nothing decided who could use `Pointer`. A string's
@@ -9203,7 +9271,7 @@ it in pieces, allocating nothing.
 point; four of them (box, deque, static_array, weak_ref) are marked by
 hand outright, since only a program that instantiates their generic
 bodies types them and `iyi fix src/std` cannot see them. bench has
-86 marked programs of 176, and none of `samples/iyi`'s 28 programs
+88 marked programs of 178, and none of `samples/iyi`'s 28 programs
 needs one. The specs' snippets whose stand-in for the prelude or std (a
 `@[Primitive]`, a `lib`, a `Pointer` field, a `@[Share]` type,
 `uninitialized` storage) sits in the compiled module are marked as the
@@ -9230,8 +9298,8 @@ warning, which keeps the set honest, and splitting raw code into a small
 module of its own, the way Rust crates isolate theirs. Counted at
 2f070a01e by reading the sources, blocks (`unsafe { }`) would have
 wrapped 2,338 runs of lines in src/std, 900 in src/iyi and 607 in bench,
-and a mark per declaration 1,535, 469 and 258 defs, against 84, 13 and
-86 module marks.
+and a mark per declaration 1,535, 469 and 258 defs at that revision,
+against 84, 13 and 88 module marks in the current tree.
 
 ---
 
@@ -13438,7 +13506,7 @@ Named honestly, so nobody mistakes this draft for complete.
     shards exist and none of them is written to iyi's rules, so "run them
     directly" is not a compatibility problem, it is the four rules: `require`
     against R-1, inference against R-2, monkey patching against R-3, and
-    Crystal's 8,161-line standard library against iyi's own 29,037-line prelude.
+    Crystal's 8,161-line standard library against iyi's own 29,101-line prelude.
 
     What is measurable is narrower and better than that framing suggests, and
     it was measured on **Kemal 1.12.0**, which compiles under this compiler

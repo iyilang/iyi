@@ -67,6 +67,18 @@
 # against the 26-bit limbs' 3,800) and ChaCha20 four blocks at a time in
 # lanes the compiler was to vectorise (it did not; 720 MB/s sealed).
 #
+# On Apple M5 Max, wasm32-unknown-unknown --release in headless Chrome
+# 156.0.8078.4, AES-256-GCM open at 16/64 MiB measured 189/194 MB/s
+# scalar, 244/251 with SIMD128, and 2,996/3,107 with WebCrypto (best of
+# five). Run `IYI_CHROME=<headless-shell> bash bench/wasm_aead_speed.sh`
+# with wasi-sdk in WASI_SDK_PATH. SIMD narrows the gap; it does not close it.
+# The paired-integer-multiply GHASH trial was slower and was removed.
+# The release wasm disassembly and LLVM IR of SIMD CTR were inspected:
+# branches and memory indices follow public lengths, loop counters, round
+# count and buffer addresses, not key or message bytes. Its transpose
+# helper has no branch or variable offset. This does not establish what
+# every host's native JIT emits or the timing of its multiply instruction.
+#
 # What this is not: a key exchange, a signature or TLS; nor a way to keep
 # a key out of memory - keys, round keys and key streams live in the
 # collected heap and on the stack, and nothing wipes them.

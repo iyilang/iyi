@@ -1,0 +1,108 @@
+@[Unsafe("re-exports LLVM's bindings and asks LLVM for its version through a C function the compiler does not check")]
+module compiler/llvm/llvm
+
+pub import compiler/llvm/lib_llvm
+pub import compiler/llvm/memory_buffer
+pub import compiler/llvm/target
+pub import compiler/llvm/values
+pub import compiler/llvm/context
+pub import compiler/llvm/module
+pub import compiler/llvm/builder
+pub import compiler/llvm/pass_manager
+
+import compiler/llvm/lib_llvm::{string_from_c, string_and_dispose}
+import compiler/llvm/memory_buffer::{MemoryBuffer}
+import compiler/llvm/target::{Target, TargetData, TargetMachine}
+import compiler/llvm/values::{LLVMType, LLVMValue, LLVMFunction, LLVMBasicBlock, Type, Value, Function, BasicBlock}
+import compiler/llvm/context::{Context}
+import compiler/llvm/module::{Module}
+import compiler/llvm/builder::{Builder}
+import compiler/llvm/pass_manager::{PassBuilderOptions, ModulePassManager, run_passes}
+
+pub struct LLVM
+  def self.init_native_target : Nil
+    Target.init_native_target
+  end
+
+  def self.init_all_targets : Nil
+    Target.init_all_targets
+  end
+
+  def self.version : String
+    {% if LibLLVM::IS_LT_160 %}
+      LibLLVM::VERSION
+    {% else %}
+      major = 0
+      minor = 0
+      patch = 0
+      LibLLVM.get_version(pointerof(major), pointerof(minor), pointerof(patch))
+      "#{major}.#{minor}.#{patch}"
+    {% end %}
+  end
+
+  def self.default_target_triple : String
+    Target.default_target_triple
+  end
+
+  def self.normalize_triple(triple : String) : String
+    Target.normalize_triple(triple)
+  end
+
+  def self.host_cpu_name : String
+    Target.host_cpu_name
+  end
+
+  def self.verify_module(mod : Module) : Nil
+    mod.verify
+  end
+
+  def self.verify_function(fn : Function) : Bool
+    fn.verify
+  end
+
+  def self.run_passes(mod : Module,
+                      passes : String,
+                      target_machine : TargetMachine,
+                      options : PassBuilderOptions? = nil) : Nil
+    run_passes(mod, passes, target_machine, options)
+  end
+end
+
+pub def self.init_native_target : Nil
+  Target.init_native_target
+end
+
+pub def self.init_all_targets : Nil
+  Target.init_all_targets
+end
+
+pub def self.version : String
+  LLVM.version
+end
+
+pub def self.default_target_triple : String
+  Target.default_target_triple
+end
+
+pub def self.normalize_triple(triple : String) : String
+  Target.normalize_triple(triple)
+end
+
+pub def self.host_cpu_name : String
+  Target.host_cpu_name
+end
+
+pub def self.verify_module(mod : Module) : Nil
+  mod.verify
+end
+
+pub def self.verify_function(fn : Function) : Bool
+  fn.verify
+end
+
+pub def self.run_passes(mod : Module,
+                        passes : String,
+                        target_machine : TargetMachine,
+                        options : PassBuilderOptions? = nil) : Nil
+  run_passes(mod, passes, target_machine, options)
+end

@@ -4,6 +4,10 @@
 
 ### Added
 
+- Add the LLVM bindings and `iyi-ir` import, translation and round-trip tool in iyi.
+  Same-host gates cover fixtures, refusals and mutations; the full corpus round
+  trip remains unmeasured. Existing hosted commands are unchanged.
+
 - **`iyi doc --json [DIR]` prints a package's exported APIs as data.**
   The package path and compiler identity accompany its modules, ordered by
   path, each carrying the same API and doc comments as `iyi mod dump --json`.

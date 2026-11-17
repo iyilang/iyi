@@ -24,6 +24,7 @@ import compiler/platform/target
 import compiler/loader::{Loader, ModuleInfo, IyiPath}
 import compiler/syntax/token::{NumberKind}
 import compiler/macros/interpreter::{MacroInterpreter}
+import compiler/macros/engine::{MacroEngine}
 import compiler/macros/target_flags::{MacroTargetFlags}
 import compiler/macros/methods::{MacroMethods}
 import compiler/lower/program::{TypedProgram, declare_program, assemble_root, type_bodies, lower_program, native_objects, link_program, link_names, refusal_table, lowering_table}
@@ -102,6 +103,10 @@ pub class Compiler
 
   def compile(root_filename : String) : CompileResult
     return compile_typed(root_filename) if @config.typed_pipeline
+    # Resolve imports, declarations and bodies against one target. host_flag? remains host-bound.
+    triple = @config.target_triple || @backend.default_triple
+    flags = MacroTargetFlags.for_triple(triple, [] of String)
+    @loader.macro_engine = MacroEngine.new(flags)
     # 1. Resolve: discover all dependencies, detect cycles, produce topological order
     parsed = group do |g|
       task = g.spawn do
@@ -141,6 +146,7 @@ pub class Compiler
     # 4. Semantic: extract declarations in topological order and type-check
     prog = SemanticProgram.new
     prog.optional_alias_probe = @config.single_file
+    prog.normalizer.macro_flags = flags
     register_primitive_operators(prog)
 
     classes = [] of ClassDef
@@ -155,7 +161,7 @@ pub class Compiler
     module_tops = {} of String => Array(ASTNode)
     resolved_modules.each do |mod_info|
       mod_top = [] of ASTNode
-      Compiler.extract_declarations(mod_info.ast, classes, funs, defs, libs, mod_top, MacroTargetFlags.for_triple(@config.target_triple || @backend.default_triple, [] of String))
+      Compiler.extract_declarations(mod_info.ast, classes, funs, defs, libs, mod_top, flags)
       module_tops[mod_info.filename] = mod_top
     end
     Loader.initialiser_order(resolved_modules).each do |mod_info|
@@ -224,7 +230,6 @@ pub class Compiler
 
     # 5. Codegen: build the IR module for the target, then compile into it
     mod_name = Compiler.module_name_from_path(root_filename)
-    triple = @config.target_triple || @backend.default_triple
     built = Module.for_target(mod_name, PlatformTarget.new(triple))
     if built.is_a?(LayoutError)
       raise built.as(LayoutError).to_s
@@ -284,6 +289,8 @@ pub class Compiler
   # phase. A refusal writes no output and records its phase and reason in `refusal`. The output is written at the link.
   def compile_typed(root_filename : String) : CompileResult
     triple = @config.target_triple || @backend.default_triple
+    flags = MacroTargetFlags.for_triple(triple, [] of String)
+    @loader.macro_engine = MacroEngine.new(flags)
     typed_start("parse")
     parsed = group do |g|
       task = g.spawn do
@@ -314,7 +321,7 @@ pub class Compiler
     typed_start("declarations")
 
     declared = group do |g|
-      task = g.spawn { Compiler.typed_declare(resolved_modules, triple, @loader, @loader.load_prelude) }
+      task = g.spawn { Compiler.typed_declare(resolved_modules, flags, @loader, @loader.load_prelude) }
       task.value
     end
     if declared.is_a?(Panicked)
@@ -486,12 +493,14 @@ pub class Compiler
 
   # The declarations phase of the typed pipeline: each unit is normalised, its declarations are collected as the hosted
   # compiler collects them, and they are declared as one program. The builtin stand-ins apply only when no prelude is loaded.
-  pub def self.typed_declare(resolved : Array(ModuleInfo), triple : String, loader : Loader, prelude : Bool) : TypedProgram
+  # Its macros answer flag? from the same target flags used to resolve imports.
+  pub def self.typed_declare(resolved : Array(ModuleInfo), flags : Array(String), loader : Loader, prelude : Bool) : TypedProgram
     resolved.each do |mod_info|
       refuse_exception_handlers(mod_info.ast)
     end
     prog = SemanticProgram.new
     prog.iyi_prelude = prelude
+    prog.normalizer.macro_flags = flags
     links = [] of String
     resolved.each do |mod_info|
       mod_info.ast = prog.normalizer.normalize(mod_info.ast)
@@ -506,7 +515,6 @@ pub class Compiler
     defs = Hash(String, Def).new
     libs = [] of LibDef
     all_defs = [] of Def
-    flags = MacroTargetFlags.for_triple(triple, [] of String)
     top_level = [] of ASTNode
     # The program is read the way the declarations gate reads one (bench/selfhost_semantic_declarations_exercise.iyi):
     # the loader's search path, and the entry's project root (its header root, else its directory).

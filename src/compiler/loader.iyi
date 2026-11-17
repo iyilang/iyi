@@ -19,7 +19,13 @@ end
 
 # Resolves module import paths against search paths and relative directories.
 pub class IyiPath
-  CONFIG_PATH = {{ env("IYI_CONFIG_PATH") || "$ORIGIN/../share/iyi/src:$ORIGIN/../src" }}
+  {% if flag?(:win32) %}
+    PATH_DELIMITER = ';'
+    CONFIG_PATH = {{ env("IYI_CONFIG_PATH") || "$ORIGIN/../share/iyi/src;$ORIGIN/../src" }}
+  {% else %}
+    PATH_DELIMITER = ':'
+    CONFIG_PATH = {{ env("IYI_CONFIG_PATH") || "$ORIGIN/../share/iyi/src:$ORIGIN/../src" }}
+  {% end %}
 
   property entries : Array(String)
 
@@ -28,11 +34,11 @@ pub class IyiPath
     if supplied = entries
       @entries = supplied
     elsif env_path = Program.env("IYI_PATH") || Program.env("CRYSTAL_PATH")
-      env_path.split(':').each do |part|
+      env_path.split(PATH_DELIMITER).each do |part|
         @entries << part unless part.empty?
       end
     elsif origin
-      @entries = CONFIG_PATH.split(':')
+      @entries = CONFIG_PATH.split(PATH_DELIMITER)
       @entries.unshift("lib") unless @entries.includes?("lib")
     else
       @entries << "lib"
@@ -41,6 +47,9 @@ pub class IyiPath
     if base = origin
       expanded = [] of String
       @entries.each do |part|
+        {% if flag?(:win32) %}
+          part = part.gsub('\\', '/') if part.includes?('\\')
+        {% end %}
         if part == "$ORIGIN"
           expanded << Loader.clean_path(base)
         elsif part.starts_with?("$ORIGIN/")
@@ -407,6 +416,9 @@ pub class Loader
 
   def self.clean_path(path : String) : String
     s = path
+    {% if flag?(:win32) %}
+      s = s.gsub('\\', '/') if s.includes?('\\')
+    {% end %}
     while s.starts_with?("./")
       s = s[2, s.size - 2]
     end

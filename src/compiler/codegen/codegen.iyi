@@ -4682,6 +4682,7 @@ pub def compile_source_to_module(src : String, filename : String, mod : Module) 
   refuse_exception_handlers(node)
 
   prog = SemanticProgram.new
+  prog.normalizer.macro_flags = MacroTargetFlags.for_triple(mod.triple, [] of String)
   register_primitive_operators(prog)
 
   classes = [] of ClassDef

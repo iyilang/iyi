@@ -7,12 +7,15 @@ import std/digest
 
 pub class NormalizerProgram
   property iyi_prelude : Bool
+  # Target flags for macro expansion; nil uses the host. host_flag? stays host-bound.
+  property macro_flags : Array(String)?
   @temp_vars : Hash(String, Int32)
   @flags : Array(String)
 
   def initialize(@iyi_prelude : Bool = true)
     @temp_vars = Hash(String, Int32).new
     @flags = [] of String
+    @macro_flags = nil
   end
 
   # Flags the program was built with, read the way the hosted program's

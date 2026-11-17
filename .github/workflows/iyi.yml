@@ -1555,7 +1555,7 @@ jobs:
     # before then (job 124229745795). The numbers that name macos-14 in
     # these comments and the documents were measured there: a three-core
     # M1 virtual machine on macOS 14.8.9, building with Xcode 15.4.
-    runs-on: namespace-profile-macos-15
+    runs-on: macos-15
     # A runner builds for its own major version, which on macos-15 is 15.0:
     # the tarball's `iyi` would refuse every Mac on 14, where 0.19.1's,
     # built on macos-14, says `minos` 14.0. 14.4 is iyi's floor, the
@@ -1921,7 +1921,7 @@ jobs:
   darwin-std-siblings:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'darwin-std-siblings') }}
-    runs-on: namespace-profile-macos-15
+    runs-on: macos-15
     env:
       MACOSX_DEPLOYMENT_TARGET: "14.4"
     timeout-minutes: 105
@@ -1949,20 +1949,12 @@ jobs:
         run: bash scripts/build-static-llvm.sh "$HOME/llvm-static"
       - name: Build `iyi`
         run: make iyi LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config"
-      - name: Python 3.14 from Homebrew, as on Linux, for the oracles
-        run: |
-          brew list python@3.14 >/dev/null 2>&1 || brew install python@3.14
-          PY="$(brew --prefix python@3.14)/bin/python3.14"
-          [ -x "$PY" ] || { brew reinstall python@3.14; PY="$(brew --prefix python@3.14)/bin/python3.14"; }
-          SHIM="$RUNNER_TEMP/py314/bin"
-          mkdir -p "$SHIM"
-          ln -sf "$PY" "$SHIM/python3"
-          ln -sf "$PY" "$SHIM/python"
-          echo "$SHIM" >> "$GITHUB_PATH"
-          "$SHIM/python3" --version
-          "$SHIM/python3" -c "import sys, zoneinfo, importlib.util as u; print(sys.version); print('zoneinfo.TZPATH', zoneinfo.TZPATH); print('tzdata package', u.find_spec('tzdata'))"
+      # Python 3.14, as on Linux: the oracles' modules answer as 3.14's do.
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.14"
       - name: Python's cryptography and Pillow, for the oracles
-        run: python3 -m pip install -q --break-system-packages cryptography pillow
+        run: python3 -m pip install -q cryptography pillow
       - name: The module exercises of this shard, on darwin
         run: bash bench/std_siblings.sh ${{ matrix.shard }} 4
 
@@ -1998,7 +1990,7 @@ jobs:
   darwin-std:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'darwin-std') }}
-    runs-on: namespace-profile-macos-15
+    runs-on: macos-15
     env:
       MACOSX_DEPLOYMENT_TARGET: "14.4"
     timeout-minutes: 120
@@ -3945,7 +3937,7 @@ jobs:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'selfhost-darwin') }}
     # macos-15, pinned, as the darwin job is.
-    runs-on: namespace-profile-macos-15
+    runs-on: macos-15
     env:
       MACOSX_DEPLOYMENT_TARGET: "14.4"
       SELFHOST_HOST: darwin-arm64

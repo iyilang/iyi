@@ -78,12 +78,13 @@ export default async function run({ load, log }) {
   const output = [];
   const errors = [];
   let stdinCalls = 0;
+  let stdinChunk = null;
   const program = await instantiate(await load("contract.wasm"), {
     start: false,
     imports: { contract: { double: value => value * 2 } },
     stdout: bytes => output.push(bytes),
     stderr: bytes => errors.push(bytes),
-    stdin: () => { stdinCalls++; return encoder.encode("input"); },
+    stdin: () => { stdinCalls++; const chunk = stdinChunk; stdinChunk = null; return chunk; },
   });
   let refused = false;
   try { program.alloc(1); } catch { refused = true; }
@@ -92,6 +93,48 @@ export default async function run({ load, log }) {
   assert(decoder.decode(joined(output)) === "contract ready\n", "stdout bytes differ");
   assert(await program.call("contract_read_zero") === 0n && stdinCalls === 0, "zero-length read consumed stdin");
   log("environment and working directory: absent");
+
+  const inputSource = program.put("abcdef");
+  const inputTarget = program.alloc(6);
+  const wasmInput = new Uint8Array(program.memory.buffer, inputSource.ptr, inputSource.len);
+  stdinChunk = wasmInput;
+  assert(await program.call("contract_read", inputTarget, 2) === 2n, "wasm-backed stdin first read failed");
+  const growth = program.alloc(20000);
+  assert(wasmInput.byteLength === 0, "stdin regression did not grow memory");
+  assert(await program.call("contract_read", inputTarget + 2, 4) === 4n, "wasm-backed stdin lost unread bytes after memory growth");
+  assert(program.string(inputTarget, 6) === "abcdef", "wasm-backed stdin changed across memory growth");
+  program.free(growth);
+
+  const overlapSource = program.put("abcdef");
+  stdinChunk = new Uint8Array(program.memory.buffer, overlapSource.ptr, overlapSource.len);
+  assert(await program.call("contract_read", overlapSource.ptr + 2, 2) === 2n, "overlapping stdin first read failed");
+  assert(await program.call("contract_read", inputTarget, 4) === 4n, "overlapping stdin second read failed");
+  assert(program.string(inputTarget, 4) === "cdef", "overlapping stdin lost unread bytes");
+  stdinChunk = encoder.encode("ghijkl");
+  assert(await program.call("contract_read", inputTarget, 2) === 2n, "host-backed stdin first read failed");
+  const hostGrowth = program.alloc(20000);
+  assert(await program.call("contract_read", inputTarget + 2, 4) === 4n, "host-backed stdin second read failed");
+  assert(program.string(inputTarget, 6) === "ghijkl", "host-backed stdin changed across memory growth");
+
+  const otherMemory = new WebAssembly.Memory({ initial: 1 });
+  new Uint8Array(otherMemory.buffer, 0, 6).set(encoder.encode("mnopqr"));
+  stdinChunk = new Uint8Array(otherMemory.buffer, 0, 6);
+  assert(await program.call("contract_read", inputTarget, 2) === 2n, "foreign wasm stdin first read failed");
+  otherMemory.grow(1);
+  assert(await program.call("contract_read", inputTarget + 2, 4) === 4n, "foreign wasm stdin lost unread bytes after growth");
+  assert(program.string(inputTarget, 6) === "mnopqr", "foreign wasm stdin changed across memory growth");
+  new Uint8Array(otherMemory.buffer, 0, 6).set(encoder.encode("stuvwx"));
+  stdinChunk = new Uint8Array(otherMemory.buffer, 0, 6);
+  assert(await program.call("contract_read", inputTarget, 6) === 6n, "complete foreign wasm stdin read failed");
+  otherMemory.grow(1);
+  stdinChunk = encoder.encode("z");
+  assert(await program.call("contract_read", inputTarget, 1) === 1n, "consumed stdin retained a detached view");
+  assert(program.string(inputTarget, 1) === "z", "the next stdin chunk was not read");
+  program.free(hostGrowth);
+  program.free(overlapSource.ptr);
+  program.free(inputSource.ptr);
+  program.free(inputTarget);
+  log("stdin: guest, foreign wasm and host chunks survive growth; overlapping and consumed chunks hold");
 
   const message = program.put("hello, wasm");
   assert(message.ptr % 8 === 0, "allocated buffer is not 8-aligned");

@@ -92,6 +92,25 @@ grep -q 'hello differs from native stdout' "$WORK/broken.log" || { cat "$WORK/br
 mv "$WORK/hello.good" "$WORK/hello.wasm"
 echo 'write fd mutation: native output comparison failed as expected'
 
+# Remove only the guest-backed stdin snapshot from the loader used by the
+# exercise. The first partial read must then fail after memory grows.
+loader="$WORK/src/iyi/wasm/iyi.mjs"
+cp "$loader" "$WORK/loader.good"
+awk '{ if ($0 ~ /if \(input.length > \(len >>> 0\)\) input = new Uint8Array\(input\);/) { changed++; next } print } END { if (changed != 1) exit 1 }' \
+  "$WORK/loader.good" > "$loader"
+if cmp -s "$WORK/loader.good" "$loader"; then
+  echo 'stdin mutation did not change the loader' >&2; exit 1
+fi
+if (cd "$WORK" && node "$REPO/bench/wasm_node.mjs" "$WORK/bench/wasm_freestanding_exercise.mjs") >"$WORK/stdin-broken.log" 2>&1; then
+  echo 'stdin mutation was not caught' >&2; exit 1
+fi
+grep -q 'wasm-backed stdin lost unread bytes after memory growth' "$WORK/stdin-broken.log" || { cat "$WORK/stdin-broken.log"; exit 1; }
+cp "$WORK/loader.good" "$loader"
+cmp -s "$WORK/loader.good" "$loader" || { echo 'stdin mutation was not restored' >&2; exit 1; }
+(cd "$WORK" && node "$REPO/bench/wasm_node.mjs" "$WORK/bench/wasm_freestanding_exercise.mjs") >"$WORK/stdin-restored.log" 2>&1 || { cat "$WORK/stdin-restored.log"; exit 1; }
+grep -q '"ok":true' "$WORK/stdin-restored.log" || { cat "$WORK/stdin-restored.log"; exit 1; }
+echo 'stdin snapshot mutation: memory-growth regression caught as expected'
+
 printf 'export default async function () { throw new Error("page throw proof"); }\n' > "$WORK/throw.mjs"
 if node "$REPO/bench/wasm_browser.mjs" --chrome "$IYI_CHROME" --root "$WORK" --script throw.mjs >"$WORK/throw.log" 2>&1; then
   echo 'browser runner accepted a thrown exception' >&2; exit 1

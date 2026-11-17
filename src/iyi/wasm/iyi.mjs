@@ -36,7 +36,7 @@ export async function instantiate(source, options = {}) {
   const stderr = options.stderr ?? defaultStderr;
   const stdin = options.stdin ?? (() => null);
   let instance;
-  let input = new Uint8Array(0);
+  let input = null;
   let inputOffset = 0;
 
   function view(ptr, len) {
@@ -63,14 +63,23 @@ export async function instantiate(source, options = {}) {
       if (fd !== 0) return -1;
       if (len === 0) return 0;
       try {
-        if (inputOffset === input.length) {
-          input = stdin() ?? new Uint8Array(0);
-          if (!(input instanceof Uint8Array)) throw new TypeError("stdin must return Uint8Array or null");
+        if (input === null) {
+          const chunk = stdin() ?? null;
+          if (chunk === null) return 0;
+          if (!(chunk instanceof Uint8Array)) throw new TypeError("stdin must return Uint8Array or null");
+          input = chunk;
+          // Retained bytes can overlap this read or detach when any wasm
+          // memory grows. A fully consumed chunk needs no snapshot.
+          if (input.length > (len >>> 0)) input = new Uint8Array(input);
           inputOffset = 0;
         }
         const count = Math.min(len >>> 0, input.length - inputOffset);
         view(ptr, count).set(input.subarray(inputOffset, inputOffset + count));
         inputOffset += count;
+        if (inputOffset === input.length) {
+          input = null;
+          inputOffset = 0;
+        }
         return count;
       } catch {
         return -1;

@@ -33,7 +33,7 @@
 #      the runtime fails the exercise's doubles check by name, in the
 #      --release build that keeps doubles in those registers; and a copy
 #      whose stop keeps the volatile registers of a thread stopped inside
-#      a system call fails the rendezvous retention check by name.
+#      a system call fails 16f's retention check by name.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -698,9 +698,14 @@ esac
 # rendezvous string through a stale r8 (tssh: 5 runs of 5 at af4b87c91),
 # which the partitioned heap's v2 no longer provokes (0 of 19). The
 # exercise's 16f now sets it up on purpose: a thread takes a page fault
-# with every volatile register naming a 64 MB string, then waits in a
-# system call while the main thread collects. Only Windows answers a
-# context that way.
+# with every volatile register naming a 64 MB string, then calls
+# NtWaitForSingleObject with r9 and r11 still naming it, and the main
+# thread collects once the thread's own context, read first, shows the
+# string in a volatile register; 16f runs ahead of 16e's checks, which
+# the copy can fail first by chance. Its first setup cleared them all
+# before a WaitForSingleObject, and GitHub's Windows Server 2025 runners
+# passed the copy (2 runs of 2) where tssh caught it in 60 of 60. Only
+# Windows answers a context that way.
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
     step "failure proof: a stop that keeps a system call's volatile registers is caught"
@@ -722,6 +727,7 @@ case "$(uname -s)" in
     timeout 120 ./volatile-exercise > volatile.txt 2>&1
     if [ $? -ne 1 ] || ! grep -Eq 'FAIL: (a thread stopped in a system call kept|channel: 64 MB received through a rendezvous left)' volatile.txt; then
       echo "a stop that keeps a system call's volatile registers passed the exercise's checks, so they check nothing:"
+      grep -m1 '^a thread stopped in a system call' volatile.txt
       tail -5 volatile.txt
       exit 1
     fi

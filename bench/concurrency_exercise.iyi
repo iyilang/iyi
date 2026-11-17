@@ -1540,6 +1540,213 @@ puts "a parked sender's receipt survived the next sender's park"
     depth > 0 ? scrub_stack(depth - 1) + (a + b).to_i32 : 0
   end
 
+  mib = 1048576_u64
+
+  # ── 16f. A thread stopped in a system call keeps nothing through its
+  # volatile registers (Windows) ──
+  # A stop reads a suspended thread's registers with GetThreadContext, and
+  # for a thread inside a system call rax, rcx, rdx and r8-r11 are not the
+  # thread's: the context hands back its trap frame's slots, which the
+  # kernel's way in either leaves as the last trap wrote them or fills
+  # with what the registers held at the call. `capture_thread_registers`
+  # (prelude.iyi) drops them for a thread in a system service;
+  # bench/concurrency_exercise.sh's 5b keeps them, and this must then
+  # fail. 16e's rendezvous showed it first, by chance (an idle worker's
+  # stale r8, 5 runs of 5 at af4b87c91), and no longer does on the
+  # partitioned heap's v2 (0 of 19), so the wait is set up here on purpose.
+  #
+  # A thread takes a page fault with all seven naming a 64 MB string, and
+  # then calls NtWaitForSingleObject itself with r9 and r11 still naming
+  # it: the `syscall` way in leaves r8-r11 as the fault wrote them, and a
+  # way in that saves them saves r9's and r11's. The first setup cleared
+  # all seven after the fault and waited through WaitForSingleObject, so
+  # only slots the fault had written could name the string. tssh, whose
+  # system calls go by `syscall` and whose context left r8-r11 naming it,
+  # caught 5b's copy in 60 runs of 60; GitHub's Windows Server 2025
+  # runners passed it in 2 of 2 (jobs 133886256663 and 133974766903).
+  # The main thread holds the string until the thread is inside the
+  # wait, so no collection before then frees it, and reads the waiting
+  # thread's context itself before it collects: with the string in none
+  # of its volatile registers this step would check nothing, and fails
+  # instead. It runs ahead of 16e's checks, whose 64 MB values the copy
+  # can keep by chance through an idle worker's stale register first: "a
+  # cancelled 64 MB send left 61 MiB kept" in 1 of 19 runs on tssh, which
+  # 5b does not count as caught.
+  {% if flag?(:win32) && flag?(:x86_64) %}
+    lib LibC
+      fun GetProcAddress(module : Void*, name : UInt8*) : Void*
+      fun GetCurrentThreadId : Int32
+      fun OpenThread(access : Int32, inherit : Int32, thread_id : Int32) : Void*
+    end
+
+    IN_CALL_MASK = 0x5a5a5a5a5a5a5a5a_u64
+
+    class InCall
+      @@phase = Atomic(UInt64).new(0_u64)
+      @@thread_id = Atomic(UInt64).new(0_u64)
+      @@masked = Atomic(UInt64).new(0_u64)
+      @@event = Atomic(UInt64).new(0_u64)
+      # The string, from its making until the thread is inside the wait;
+      # the main thread's alone.
+      @@held : String? = nil
+
+      def self.phase : UInt64
+        @@phase.get
+      end
+
+      def self.thread_id : UInt64
+        @@thread_id.get
+      end
+
+      # The thread's id, then the phase that says it is on its way in.
+      def self.enter(thread_id : UInt64) : Nil
+        @@thread_id.set(thread_id)
+        @@phase.set(1_u64)
+      end
+
+      # The string's address, masked, so no frame names it.
+      def self.masked : UInt64
+        @@masked.get
+      end
+
+      def self.event : UInt64
+        @@event.get
+      end
+
+      def self.hold(value : String, event : UInt64) : Nil
+        @@held = value
+        @@masked.set(value.to_unsafe.address ^ IN_CALL_MASK)
+        @@event.set(event)
+      end
+
+      def self.drop : Nil
+        @@held = nil
+      end
+    end
+
+    # Out of line, so no frame of the main thread names the string after.
+    @[NoInline]
+    def in_call_hold(event : UInt64) : Nil
+      InCall.hold(big_value("w"), event)
+    end
+
+    def stopped_in_call : Nil
+      masked = InCall.masked
+      event = InCall.event
+      wait = LibC.GetProcAddress(LibC.GetModuleHandleA("ntdll.dll".to_unsafe), "NtWaitForSingleObject".to_unsafe).address
+      fail("ntdll answered no NtWaitForSingleObject") if wait == 0_u64
+      # A fresh committed page: the first write to it is a demand-zero
+      # fault, whose trap frame saves the volatile registers.
+      fresh = LibC.VirtualAlloc(Pointer(Void).new(0_u64), 4096_u64, 0x3000_i32, 4_i32).address
+      InCall.enter(LibC.GetCurrentThreadId.to_u64)
+      # The wait is on the main thread's event, with no timeout
+      # (rcx, rdx 0, r8 0); rsp aligned to 16 below its 32 bytes of shadow
+      # space for the call, and rbp, which the call keeps, put back after.
+      asm("movq $0, %rax
+           xorq $1, %rax
+           movq %rax, %rcx
+           movq %rax, %rdx
+           movq %rax, %r8
+           movq %rax, %r9
+           movq %rax, %r10
+           movq %rax, %r11
+           movb $$1, ($2)
+           movq $3, %rcx
+           movq $4, %rax
+           xorl %edx, %edx
+           xorl %r8d, %r8d
+           xorl %r10d, %r10d
+           pushq %rbp
+           movq %rsp, %rbp
+           andq $$-16, %rsp
+           subq $$32, %rsp
+           callq *%rax
+           movq %rbp, %rsp
+           popq %rbp
+           xorl %eax, %eax
+           xorl %ecx, %ecx
+           xorl %edx, %edx
+           xorl %r8d, %r8d
+           xorl %r9d, %r9d
+           xorl %r10d, %r10d
+           xorl %r11d, %r11d" :: "r"(masked), "r"(IN_CALL_MASK), "r"(fresh), "r"(event), "r"(wait)
+                             : "rax", "rcx", "rdx", "r8", "r9", "r10", "r11",
+                               "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory", "cc"
+                             : "volatile")
+    end
+
+    # Which of the waiting thread's volatile registers its context names
+    # the string in, a bit each in rax, rcx, rdx, r8-r11's order, with 128
+    # once the context says the thread is inside a system service: read
+    # every 10 ms until it does, for up to 5 s. The context goes to a page
+    # of its own, which no collection scans and which is gone before one:
+    # on a stack or in the heap its copy of the address keeps the string.
+    @[NoInline]
+    def in_call_seen : UInt64
+      # THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT
+      thread = LibC.OpenThread(0x000A_i32, 0_i32, InCall.thread_id.to_i32)
+      fail("the thread meant to wait in a system call could not be opened") if thread.address == 0_u64
+      page = LibC.VirtualAlloc(Pointer(Void).new(0_u64), 4096_u64, 0x3000_i32, 4_i32).address
+      seen = 0_u64
+      tries = 0
+      while seen == 0_u64 && tries < 500
+        sleep(10) if tries > 0
+        tries = tries + 1
+        # CONTEXT_AMD64 | CONTROL | INTEGER, and CONTEXT_EXCEPTION_REQUEST.
+        Pointer(UInt32).new(page + 48_u64).value = 0x40100003_u32
+        LibC.SuspendThread(thread)
+        read = LibC.GetThreadContext(thread, Pointer(Void).new(page))
+        LibC.ResumeThread(thread)
+        flags = Pointer(UInt64).new(page + 48_u64).value & 0xFFFFFFFF_u64
+        # CONTEXT_EXCEPTION_REPORTING and CONTEXT_SERVICE_ACTIVE.
+        if read != 0 && flags & 0x80000000_u64 != 0_u64 && flags & 0x10000000_u64 != 0_u64
+          seen = 128_u64
+          7.times do |i|
+            # Rax, Rcx, Rdx at 120-136, R8-R11 at 184-208.
+            at = i < 3 ? 120_u64 + 8_u64 * i.to_u64 : 160_u64 + 8_u64 * i.to_u64
+            seen = seen | 1_u64.unsafe_shl(i.to_u64) if Pointer(UInt64).new(page + at).value ^ IN_CALL_MASK == InCall.masked
+          end
+        end
+      end
+      LibC.VirtualFree(Pointer(Void).new(page), 0_u64, 0x8000_i32)
+      LibC.CloseHandle(thread)
+      seen
+    end
+
+    def in_call_names(seen : UInt64) : String
+      names = [] of String
+      ["rax", "rcx", "rdx", "r8", "r9", "r10", "r11"].each_with_index do |name, i|
+        names << name if seen & 1_u64.unsafe_shl(i.to_u64) != 0_u64
+      end
+      names.join(", ")
+    end
+
+    kept_before_call = kept_now
+    in_call_event = LibC.CreateEventW(Pointer(Void).new(0_u64), 1_i32, 0_i32, Pointer(UInt16).new(0_u64))
+    fail("the event the thread meant to wait in a system call waits on was not made") if in_call_event.address == 0_u64
+    in_call_hold(in_call_event.address)
+    in_call = IyiThread.start { stopped_in_call }
+    waited = 0
+    while InCall.phase != 1_u64 && waited < 500
+      sleep(10)
+      waited = waited + 1
+    end
+    fail("the thread meant to wait in a system call never set out for it") unless InCall.phase == 1_u64
+    in_call_bits = in_call_seen
+    fail("the thread meant to wait in a system call was not in one 5 s after it set out") if in_call_bits == 0_u64
+    in_call_named = in_call_names(in_call_bits)
+    fail("the thread waiting in a system call named the string in no volatile register of its context, so this step checks nothing") if in_call_named.empty?
+    InCall.drop
+    scrub_stack(50)
+    kept_in_call = kept_now
+    LibC.SetEvent(in_call_event)
+    in_call.join
+    LibC.CloseHandle(in_call_event)
+    grew = kept_in_call > kept_before_call ? kept_in_call - kept_before_call : 0_u64
+    fail("a thread stopped in a system call kept #{grew // mib} MiB through its volatile registers, of which #{in_call_named} named it") if grew > 16_u64 * mib
+    puts "a thread stopped in a system call kept nothing through its volatile registers, of which #{in_call_named} named 64 MB"
+  {% end %}
+
   holding = KeptChannels.new
   kept_before = kept_now
   through_buffered(holding.buffered)
@@ -1548,7 +1755,6 @@ puts "a parked sender's receipt survived the next sender's park"
   through_rendezvous(holding.rendezvous)
   scrub_stack(50)
   kept_rendezvous = kept_now
-  mib = 1048576_u64
   grew = kept_buffered > kept_before ? kept_buffered - kept_before : 0_u64
   fail("channel: 64 MB received through a buffered channel left #{grew // mib} MiB kept") if grew > 16_u64 * mib
   grew = kept_rendezvous > kept_before ? kept_rendezvous - kept_before : 0_u64
@@ -1570,91 +1776,6 @@ puts "a parked sender's receipt survived the next sender's park"
   fail("channel: a 64 MB send a close refused left #{grew // mib} MiB kept") if grew > 16_u64 * mib
   puts "a live channel kept under 16 MiB of the 64 MB it handed out, buffered or rendezvous, and of each 64 MB it never delivered"
   holding.buffered.close
-
-  # ── 16f. A thread stopped in a system call keeps nothing through its
-  # volatile registers (Windows) ──
-  # A stop reads a suspended thread's registers with GetThreadContext, and
-  # for a thread inside a system call rax, rcx, rdx and r8-r11 are not the
-  # thread's: the kernel did not save them on the way in, and the context
-  # hands back what its trap frame last held - here the page fault just
-  # before the wait, taken with all seven naming a 64 MB string nothing
-  # else holds. `capture_thread_registers` (prelude.iyi) drops them for a
-  # thread in a system service; bench/concurrency_exercise.sh's 5b keeps
-  # them, and this must then fail. 16e's rendezvous showed it first, by
-  # chance (an idle worker's stale r8, 5 runs of 5 at af4b87c91), and no
-  # longer does on the partitioned heap's v2 (0 of 19, with 5d or
-  # without, with pool workers' 1 s idle wake or without), so the fault and
-  # the wait are set up here on purpose.
-  {% if flag?(:win32) && flag?(:x86_64) %}
-    class InCall
-      @@phase = Atomic(UInt64).new(0_u64)
-
-      def self.phase : UInt64
-        @@phase.get
-      end
-
-      def self.reach(value : UInt64) : Nil
-        @@phase.set(value)
-      end
-    end
-
-    IN_CALL_MASK = 0x5a5a5a5a5a5a5a5a_u64
-
-    # The string's address, masked, so no frame of this thread names it;
-    # out of line: inlined, the release build kept the string up to the
-    # wait with the sound runtime too (tssh: 61 MiB).
-    @[NoInline]
-    def in_call_string : UInt64
-      big_value("w").to_unsafe.address ^ IN_CALL_MASK
-    end
-
-    def stopped_in_call : Nil
-      masked = in_call_string
-      scrub_stack(50)
-      # A fresh committed page: the first write to it is a demand-zero
-      # fault, whose trap frame saves the volatile registers.
-      fresh = LibC.VirtualAlloc(Pointer(Void).new(0_u64), 4096_u64, 0x3000_i32, 4_i32).address
-      InCall.reach(1_u64)
-      asm("movq $0, %rax
-           xorq $1, %rax
-           movq %rax, %rcx
-           movq %rax, %rdx
-           movq %rax, %r8
-           movq %rax, %r9
-           movq %rax, %r10
-           movq %rax, %r11
-           movb $$1, ($2)
-           xorl %eax, %eax
-           xorl %ecx, %ecx
-           xorl %edx, %edx
-           xorl %r8d, %r8d
-           xorl %r9d, %r9d
-           xorl %r10d, %r10d
-           xorl %r11d, %r11d" :: "r"(masked), "r"(IN_CALL_MASK), "r"(fresh)
-                             : "rax", "rcx", "rdx", "r8", "r9", "r10", "r11", "memory"
-                             : "volatile")
-      masked = 0_u64
-      InCall.reach(2_u64)
-      # The process's own handle never signals while it runs.
-      LibC.WaitForSingleObject(LibC.GetCurrentProcess, 1500_i32)
-    end
-
-    kept_before_call = kept_now
-    in_call = IyiThread.start { stopped_in_call }
-    waited = 0
-    while InCall.phase != 2_u64 && waited < 500
-      sleep(10)
-      waited = waited + 1
-    end
-    fail("the thread meant to wait in a system call never reached it") unless InCall.phase == 2_u64
-    sleep(200)
-    scrub_stack(50)
-    kept_in_call = kept_now
-    in_call.join
-    grew = kept_in_call > kept_before_call ? kept_in_call - kept_before_call : 0_u64
-    fail("a thread stopped in a system call kept #{grew // mib} MiB through its volatile registers") if grew > 16_u64 * mib
-    puts "a thread stopped in a system call kept nothing through its volatile registers"
-  {% end %}
 {% end %}
 
 # ── 17. The typed group — III.4.9 ────────────────────────────────────────

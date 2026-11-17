@@ -244,6 +244,7 @@ ALLOWED_LINES: list[tuple[str, str]] = [
     # ships a second binary called `crystal`. Naming that toolchain is not
     # leakage: it is the build saying which compiler compiles this one.
     (r"bin/crystal|\.build/crystal|make crystal|crystallang/crystal", "the bootstrap and compatibility binaries"),
+    (r"\\bin\\crystal\.bat\b", "the Windows compatibility wrapper running Crystal specs"),
     (r"crystal (spec|build|run|tool|env|deps|version)\b", "a command run against those binaries"),
     (r"CRYSTAL_(VERSION|PATH|HAS_WRAPPER|SPEC_|ONLY|BIN|ENV|FORMATTERS|WORKERS|BOOTSTRAP_)", "read by Crystal's runtime, bootstrap or wrapper"),
     # `Config.env` reads `IYI_<name>` and then the compatibility binary's

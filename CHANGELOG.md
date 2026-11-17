@@ -4,6 +4,14 @@
 
 ### Added
 
+- **Checksum database verification primitives.** The compiler source has
+  Ed25519 signed-note verification, checkpoint and record parsing,
+  height-8 Merkle tile proofs, and a persistent consistency-checked
+  checkpoint cache. Fixture bytes are kept unchanged across Git line-ending
+  settings, and cache writes replace an existing checkpoint through an
+  exclusive same-directory file. Package downloads do not use them yet.
+  Independent cryptographic review is required before anything depends on them.
+
 - **The inline-assembly inventory and driver are written in iyi.**
   The component accounts for assembly expressions per target and compares
   AArch64 bytes and relocations with hosted cross-compilation on Darwin and

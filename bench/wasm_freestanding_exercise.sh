@@ -12,6 +12,118 @@ mkdir -p "$WORK/build" "$WORK/bench" "$WORK/src/iyi/wasm"
 cp "$REPO/bench/wasm_freestanding_exercise.mjs" "$WORK/bench/"
 cp "$REPO/src/iyi/wasm/iyi.mjs" "$WORK/src/iyi/wasm/"
 
+echo '== headless browser ownership and version checks =='
+node --input-type=module - "$REPO/bench/wasm_browser.mjs" <<'JS'
+import { pathToFileURL } from "node:url";
+const { isOwnedHeadless } = await import(pathToFileURL(process.argv[2]).href);
+const profile = "/owned/profile";
+const owned = { pid: 123, exitCode: null, signalCode: null,
+  spawnargs: ["chrome", "--headless=new", "--remote-debugging-port=0", `--user-data-dir=${profile}`] };
+const shell = {
+  product: "HeadlessChrome/156.0.8078.4",
+  userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/156.0.8078.4 Safari/537.36",
+};
+// Browser.getVersion from CI job 134001438359, full Chrome in new-headless mode.
+const fullHeadless = {
+  product: "Chrome/157.0.8103.50",
+  userAgent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/157.0.0.0 Safari/537.36",
+};
+const headed = { product: fullHeadless.product,
+  userAgent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36" };
+const headedChild = { ...owned, spawnargs: ["chrome", "--remote-debugging-port=0", `--user-data-dir=${profile}`] };
+const deadChild = { ...owned, exitCode: 0 };
+const check = (condition, message) => { if (!condition) throw new Error(message); };
+check(isOwnedHeadless(shell, owned, profile), "owned headless shell was refused");
+check(isOwnedHeadless(fullHeadless, owned, profile), "owned Chrome with headless UA was refused");
+check(!isOwnedHeadless(headed, owned, profile), "Chrome without headless UA was accepted");
+check(!isOwnedHeadless(fullHeadless, null, profile), "unspawned Chrome was accepted");
+check(!isOwnedHeadless(fullHeadless, headedChild, profile), "headed Chrome was accepted");
+check(!isOwnedHeadless(shell, headedChild, profile), "headed shell was accepted");
+check(!isOwnedHeadless(fullHeadless, deadChild, profile), "exited child was accepted");
+check(!isOwnedHeadless(fullHeadless, owned, "/other/profile"), "unowned profile was accepted");
+check(!isOwnedHeadless({ ...fullHeadless, userAgent: "NotHeadlessChrome/157.0" }, owned, profile), "partial UA token was accepted");
+console.log("headless ownership: shell and Chrome headless UA accepted; headed and unowned cases refused");
+JS
+
+echo '== owned browser cleanup =='
+node --input-type=module - "$REPO/bench/wasm_browser.mjs" <<'JS'
+import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+const { cleanupOwnedBrowser } = await import(pathToFileURL(process.argv[2]).href);
+const check = (condition, message) => { if (!condition) throw new Error(message); };
+const writer = `
+  const fs = require("node:fs"), path = require("node:path");
+  const dir = process.argv[1], mode = process.argv[2];
+  let count = 0;
+  const timer = setInterval(() => fs.writeFileSync(path.join(dir, "active"), String(++count)), 5);
+  process.on("SIGTERM", () => {
+    if (mode === "graceful") setTimeout(() => { clearInterval(timer); process.exit(0); }, 150);
+  });
+  console.log("ready");
+`;
+
+async function exerciseWriter(mode) {
+  const profile = await mkdtemp(join(tmpdir(), "iyi-cleanup-test-"));
+  const child = spawn(process.execPath, ["-e", writer, profile, mode], { stdio: ["ignore", "pipe", "pipe"] });
+  try {
+    await new Promise((resolve, reject) => {
+      let ready = false;
+      const timeout = setTimeout(() => reject(new Error("writer did not start")), 5000);
+      child.stdout.on("data", data => {
+        if (!ready && data.toString().includes("ready")) {
+          ready = true;
+          clearTimeout(timeout);
+          resolve();
+        }
+      });
+      child.once("error", reject);
+      child.once("exit", () => {
+        if (!ready) {
+          clearTimeout(timeout);
+          reject(new Error("writer exited before ready"));
+        }
+      });
+    });
+    let options;
+    await cleanupOwnedBrowser(child, profile, async (path, supplied) => {
+      check(child.exitCode !== null || child.signalCode !== null, "profile removed while child was writing");
+      options = supplied;
+      await rm(path, supplied);
+    });
+    check(!existsSync(profile), "owned profile was not removed");
+    check(options?.recursive && options?.force && options?.maxRetries === 10 && options?.retryDelay === 200,
+      "profile removal did not use the bounded retry policy");
+    if (mode === "graceful") check(child.exitCode === 0, "graceful writer was killed before it exited");
+    else check(child.signalCode === "SIGKILL", "unresponsive writer did not receive SIGKILL");
+  } finally {
+    if (child.pid && child.exitCode === null && child.signalCode === null) {
+      const exited = new Promise(resolve => child.once("exit", resolve));
+      child.kill("SIGKILL");
+      await exited;
+    }
+    await rm(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+  }
+}
+
+await exerciseWriter("graceful");
+await exerciseWriter("ignore");
+const warnings = [];
+const originalWarn = console.warn;
+console.warn = message => warnings.push(message);
+try {
+  await cleanupOwnedBrowser(null, "unused", async () => { throw new Error("injected ENOTEMPTY"); });
+} finally {
+  console.warn = originalWarn;
+}
+check(warnings.length === 1 && warnings[0].includes("warning: unable to clean up owned browser profile") &&
+  warnings[0].includes("injected ENOTEMPTY"), "cleanup failure was not reported as a warning");
+console.log("cleanup: waited for writing child; SIGKILL fallback and nonfatal warning held");
+JS
+
 build_wasm() {
   local name="$1" source="$2" command
   command="$("$IYI" build --cross-compile --target wasm32-unknown-unknown -o "$WORK/build/$name" "$source")"

@@ -31,6 +31,9 @@
 
 ### Changed
 
+- Pass the selected static LLVM configuration to the macOS frontend comparisons,
+  including the semantic, inference and code-generation oracles.
+
 - **`iyi test` in a directory no longer runs other projects' tests.** It
   walks the tree as `fix` and `mod tidy` do: not into `lib` (the installed
   dependencies, whose failing test failed the run of the project that

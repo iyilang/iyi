@@ -313,6 +313,7 @@ jobs:
       - name: Compare the entire frontend corpus and generated programs
         shell: bash
         run: |
+          export LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config"
           test "$(uname -s)" = Darwin
           port=()
           while IFS= read -r file; do port[${#port[@]}]="$file"; done < <(find selfhost -name '*.iyi' | sort)

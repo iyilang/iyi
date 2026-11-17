@@ -841,15 +841,19 @@ PY
   # gc.lib or iconv.lib (`Cannot locate the .lib files for ... gc, iconv`), and
   # `make iyi` builds without the collector and without iconv for that reason.
   local build_flags=()
+  local library_path="$IYI_LIBRARY_PATH"
   if [ "$WINDOWS" -eq 1 ]; then
     dropped="$dropped.exe"
     cp -p "$(dirname "$IYI")/LLVM-C.dll" "$WORK/LLVM-C.dll"
     build_flags=(-D strict_multi_assign -D preview_overload_order -Dwithout_openssl -Dwithout_zlib -Dwithout_iconv -Dgc_none)
-    # The same library directory `make iyi` links against: the bootstrap
-    # package's `lib`, where the `.lib` files for llvm and the rest are.
-    [ -z "${CRYSTAL_LIBRARY_PATH:-}" ] || build_flags+=("--link-flags=/LIBPATH:$CRYSTAL_LIBRARY_PATH")
+    # This script exports IYI_LIBRARY_PATH=$REPO/lib for its own fixtures, and
+    # the compiler prefers IYI_LIBRARY_PATH to CRYSTAL_LIBRARY_PATH
+    # (config.cr: `IYI_*` wins). The `--crystal` build below is Crystal's
+    # bootstrap compiler, whose `.lib` files (llvm among them) are in
+    # CRYSTAL_LIBRARY_PATH, so that variable must not be shadowed for it.
+    library_path="${CRYSTAL_LIBRARY_PATH:-$library_path}"
   fi
-  if ! "$BASH" "$REPO/bench/stale_store_concurrency.sh" --crystal build ${build_flags[@]+"${build_flags[@]}"} -D rg8_drop_def_body -o "$dropped" "$REPO/src/compiler/iyi.cr"; then
+  if ! IYI_LIBRARY_PATH="$library_path" "$BASH" "$REPO/bench/stale_store_concurrency.sh" --crystal build ${build_flags[@]+"${build_flags[@]}"} -D rg8_drop_def_body -o "$dropped" "$REPO/src/compiler/iyi.cr"; then
     if [ "$WINDOWS" -eq 1 ]; then
       # `Cannot locate the .lib files for ...` names what is missing and not
       # where it looked: say what is on the two places the linker searches.

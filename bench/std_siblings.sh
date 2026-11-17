@@ -13,11 +13,11 @@
 #
 # The shards are dealt by weight: every sibling, heaviest first, goes to the
 # shard with the least weight so far (the first such shard on a tie, and
-# siblings of one weight by name, so the deal is the same everywhere). A
-# weight is the seconds the sibling took on the slowest of the three
-# platforms in run 43312036289 (jobs 131510772091 to 131511616524), read
-# from its shard logs by sibling_times.py, beside this script; a sibling
-# not in WEIGHTS weighs 30, about what the 71 left out took at their
+# siblings of one weight by name, so the deal is the same everywhere). Most
+# weights are seconds on the slowest of the three platforms in run 43312036289
+# (jobs 131510772091 to 131511616524), read from its shard logs by
+# sibling_times.py; exceptions are described below.
+# A sibling not in WEIGHTS weighs 30, about what the 71 left out took at their
 # slowest (median 26 s, mean 37 s). It was run 39840302846's until the
 # second security review grew std/tls's, std/x509's and std/big's gates
 # and added std/p256's. Shard K of N used to be every sibling
@@ -43,6 +43,14 @@
 # std/http took 29 to 45 minutes in four runs on Linux). Rerun
 # sibling_times.py on a green run's shard logs when a gate's weight changes
 # much; its `--predict 4` adds the logs up as above.
+#
+# Run 44048676820, head 1898c1d6f: CBOR took 18.029 s on Windows (job
+# 133925538447) and COSE 74.254 s (133925538425), rounded up to 19 and 75.
+# WebAuthn's Windows log is unavailable after its runner lost contact. Its
+# Linux job 133952372304 took 26.602 s; 65 is provisional, rounded up from
+# 26.602 times 2.419, the 90th-percentile Windows/Linux ratio among 85
+# siblings measured on both platforms in that run. Replace it when a
+# Windows WebAuthn duration is available.
 WEIGHTS="
   http 2576   tls 2322   big 871   websocket 692   autocert 649
   x509 458   acme 427   xz 407   cookie 319   xml 314
@@ -53,6 +61,7 @@ WEIGHTS="
   p384 156   yaml 156   term 148   dir 144   toml 138
   time 126   fileserver 122   otp 122   png 122   ocsp 121
   mlkem 112   password 112   log 104   digest 101   eiy 101
+  cose 75   webauthn 65   cbor 19
 "
 set -u
 

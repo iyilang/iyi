@@ -5,10 +5,7 @@
 #
 # Proves:
 #   * The exercise holds plain and --release.
-#   * With IYI_OBSERVE set, direct observer calls write expected bytes (hexdump
-#     assertion; on Windows, which records its paths in its own form and whose
-#     observation runtime nothing else here measures, the trace is only
-#     required to end with END(0)).
+#   * With IYI_OBSERVE set, direct observer calls write the complete golden trace.
 #   * Normal end writes END(0).
 #   * A panic writes END(1) and nothing else.
 #   * Observation boundaries: raw thread callback, panic defer drain, and
@@ -56,6 +53,10 @@ for candidate in python3 python; do
     break
   fi
 done
+if [ -z "$PY" ]; then
+  echo "FAIL: Python is required for the observer path and trace checks"
+  exit 1
+fi
 
 
 echo "== plain build and run"
@@ -74,7 +75,14 @@ rm -f "$TRACE_FILE"
 SCRATCH_DIR="$WORK/scratch"
 mkdir -p "$SCRATCH_DIR"
 SCRATCH_REAL="$(cd "$SCRATCH_DIR" && pwd -P)"
-WRITE_PATH="${SCRATCH_REAL}/out.txt"
+if [ "$WINDOWS" = 1 ]; then
+  SCRATCH_REAL="$(cygpath -m "$SCRATCH_REAL")"
+  CWD_REAL="$(cd / && "$PY" -c 'import os; print(os.path.realpath(os.getcwd()))')"
+  WRITE_PATH="$("$PY" -c 'import os,sys; print(os.path.realpath(os.path.join(sys.argv[1], "out.txt")))' "$SCRATCH_REAL")"
+else
+  CWD_REAL="/"
+  WRITE_PATH="${SCRATCH_REAL}/out.txt"
+fi
 (cd / && TMPDIR="$SCRATCH_REAL" IYI_OBSERVE="$TRACE_FILE" "$IYI" run -Diyi_observe "$REPO/bench/std_observe_exercise.iyi")
 
 if [ ! -f "$TRACE_FILE" ]; then
@@ -82,35 +90,25 @@ if [ ! -f "$TRACE_FILE" ]; then
   exit 1
 fi
 
-if [ "$WINDOWS" = 1 ]; then
-  echo "  hexdump assertion skipped on Windows; the trace ends with END(0) below"
-else
-  ACTUAL_HEX="$(od -An -v -tx1 "$TRACE_FILE" | tr -d ' \n')"
-  EXPECTED_HEX="1900000003000000000000000003000000464f4f01030000006261720009000000040000000000000000"
-  EXPECTED_HEX="${EXPECTED_HEX}0e00000005000000000000000001000000"'2f'"1600000006000000000000000009000000746573742d686f7374"
-  # Program.env("TMPDIR") reads TMPDIR from environment; observe runtime records value as "scratch"
-  EXPECTED_HEX="${EXPECTED_HEX}2000000003000000000000000006000000544d5044495201070000007363726174636800"
-  # Dynamic file_write record for WRITE_PATH under scratch
-  WRITE_PATH_HEX="$(printf '%s' "$WRITE_PATH" | od -An -v -tx1 | tr -d ' \n')"
-  WRITE_PATH_LEN=${#WRITE_PATH}
-  WRITE_REC_LEN=$(( 19 + WRITE_PATH_LEN ))
-  WRITE_REC_LEN_HEX="$(u32_le_hex $WRITE_REC_LEN)"
-  WRITE_PATH_LEN_HEX="$(u32_le_hex $WRITE_PATH_LEN)"
-  EXPECTED_HEX="${EXPECTED_HEX}${WRITE_REC_LEN_HEX}07000000000000000001${WRITE_PATH_LEN_HEX}${WRITE_PATH_HEX}0000000001"
-  # The first clock taint:
-  EXPECTED_HEX="${EXPECTED_HEX}1d000000080000000000000000200f0000007372633a746573742e6979693a3130"
-  # The second clock taint is dropped; the entropy taint is its kind's first.
-  EXPECTED_HEX="${EXPECTED_HEX}1d000000080000000000000000210f0000007372633a746573742e6979693a3132"
-  EXPECTED_HEX="${EXPECTED_HEX}0d0000007f000000000000000000000000"
-
-  if [ "$ACTUAL_HEX" != "$EXPECTED_HEX" ]; then
-    echo "FAIL: trace hex mismatch"
-    echo "  expected: $EXPECTED_HEX"
-    echo "  actual:   $ACTUAL_HEX"
-    exit 1
-  fi
-  echo "  hexdump assertion passed ($(( ${#EXPECTED_HEX} / 2 )) bytes matched exactly)"
+ACTUAL_HEX="$(od -An -v -tx1 "$TRACE_FILE" | tr -d ' \n')"
+EXPECTED_HEX="1900000003000000000000000003000000464f4f01030000006261720009000000040000000000000000"
+CWD_HEX="$(printf '%s' "$CWD_REAL" | od -An -v -tx1 | tr -d ' \n')"
+CWD_LEN="$(printf '%s' "$CWD_REAL" | LC_ALL=C wc -c | tr -d ' ')"
+EXPECTED_HEX="${EXPECTED_HEX}$(u32_le_hex $((13 + CWD_LEN)))050000000000000000$(u32_le_hex "$CWD_LEN")${CWD_HEX}1600000006000000000000000009000000746573742d686f7374"
+EXPECTED_HEX="${EXPECTED_HEX}2000000003000000000000000006000000544d5044495201070000007363726174636800"
+WRITE_PATH_HEX="$(printf '%s' "$WRITE_PATH" | od -An -v -tx1 | tr -d ' \n')"
+WRITE_PATH_LEN="$(printf '%s' "$WRITE_PATH" | LC_ALL=C wc -c | tr -d ' ')"
+EXPECTED_HEX="${EXPECTED_HEX}$(u32_le_hex $((19 + WRITE_PATH_LEN)))07000000000000000001$(u32_le_hex "$WRITE_PATH_LEN")${WRITE_PATH_HEX}0000000001"
+EXPECTED_HEX="${EXPECTED_HEX}1d000000080000000000000000200f0000007372633a746573742e6979693a3130"
+EXPECTED_HEX="${EXPECTED_HEX}1d000000080000000000000000210f0000007372633a746573742e6979693a3132"
+EXPECTED_HEX="${EXPECTED_HEX}0d0000007f000000000000000000000000"
+if [ "$ACTUAL_HEX" != "$EXPECTED_HEX" ]; then
+  echo "FAIL: trace hex mismatch"
+  echo "  expected: $EXPECTED_HEX"
+  echo "  actual:   $ACTUAL_HEX"
+  exit 1
 fi
+echo "  hexdump assertion passed ($(( ${#EXPECTED_HEX} / 2 )) bytes matched exactly)"
 
 echo "== normal end writes END(0)"
 # Last 17 bytes must be: 0d 00 00 00 7f 00 00 00 00 00 00 00 00 00 00 00 00
@@ -203,11 +201,26 @@ if [ "$REL_TAIL" != "0d0000007f000000000000000000000000" ]; then
   exit 1
 fi
 
+# A path that is not drive-absolute is resolved by Windows against a current
+# directory per drive, which the runtime does not yet prove for every spelling
+# (`__iyi_wide_full_unproven` in the prelude), so on Windows the observer's own
+# resolution of a relative path records a host-state taint at that helper
+# instead of a FILE record, and the program is not reusable. Elsewhere the path
+# is recorded as the FILE record it names.
+if [ "$WINDOWS" = 1 ]; then
+  REL_NEEDLE="746f6f6c636861696e3a6979692f7072656c7564652e6979693a" # toolchain:iyi/prelude.iyi:
+  REL_EXPECT="8,127"
+  REL_WHAT="refused as host state at the prelude's unproven path resolution"
+else
+  REL_NEEDLE="72656c61746976655f65786572636973655f7461726765742e747874" # relative_exercise_target.txt
+  REL_EXPECT="1,127"
+  REL_WHAT="recorded as a FILE record"
+fi
 REL_HEX="$(od -An -v -tx1 "$REL_TRACE" | tr -d ' \n')"
 case "$REL_HEX" in
-  *72656c61746976655f65786572636973655f7461726765742e747874*) ;;
+  *"$REL_NEEDLE"*) ;;
   *)
-    echo "FAIL: expected relative file target in trace, got $REL_HEX"
+    echo "FAIL: expected the relative file's $REL_WHAT in trace, got $REL_HEX"
     exit 1
     ;;
 esac
@@ -230,11 +243,12 @@ while pos < len(data):
     pos += payload_len
 if 0x05 in kinds:
     sys.exit("FAIL: unexpected CWD record (0x05) emitted during relative file observation")
-if kinds != [0x01, 0x7F]:
-    sys.exit(f"FAIL: expected records [0x01, 0x7f], got {[hex(k) for k in kinds]}")
-' "$REL_TRACE"
+expected = [int(k) for k in sys.argv[2].split(",")]
+if kinds != expected:
+    sys.exit(f"FAIL: expected records {[hex(k) for k in expected]}, got {[hex(k) for k in kinds]}")
+' "$REL_TRACE" "$REL_EXPECT"
 fi
-echo "  relative file observation wrote valid record and END(0)"
+echo "  relative file observation $REL_WHAT, with END(0)"
 
 echo "== panic writes END(1)"
 # A panic leaves through __iyi_exit(1), so the trace ends with END(1); only a
@@ -1472,9 +1486,6 @@ echo "== std/observe beside every std module, observed"
 # program imported std/bool or std/atomic, and neither module's exercise
 # built under -Diyi_observe. Every recorder entry point, beside every module,
 # typed and not run.
-if [ "$WINDOWS" = 1 ]; then
-  echo "  skipped on Windows, whose observation runtime nothing else here measures"
-else
   BESIDE_SRC="$WORK/beside_every_module.iyi"
   {
     for module in "$REPO"/src/std/*.iyi; do
@@ -1497,12 +1508,8 @@ EOF
     exit 1
   fi
   echo "  every recorder entry point builds beside all $(ls "$REPO"/src/std/*.iyi | wc -l | tr -d ' ') std modules"
-fi
 
 echo "== single-path writes: a missing relative name, and a second argument that is no path"
-if [ "$WINDOWS" = 1 ]; then
-  echo "  skipped on Windows, which records its paths in its own form"
-else
   SINGLE_OP_SRC="$WORK/single_op.iyi"
   cat << 'EOF' > "$SINGLE_OP_SRC"
 module test/single_op
@@ -1525,10 +1532,11 @@ EOF
 
   REL_DIR="$WORK/relative_fixture"
   mkdir -p "$REL_DIR"
-  REL_REAL="$(cd "$REL_DIR" && pwd -P)"
+  REL_REAL="$("$PY" -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$REL_DIR")"
   # Longer than the directory's own path: a name cut at the wrong offset is
   # then recorded wrong, not refused, which is the side RG2 cannot see.
   REL_NAME="$("$PY" -c 'import sys; print("iyi-observe-relative-" + "n" * len(sys.argv[1]))' "$REL_REAL")"
+  REL_TARGET_REAL="$("$PY" -c 'import os,sys; print(os.path.realpath(os.path.join(sys.argv[1], sys.argv[2])))' "$REL_DIR" "$REL_NAME")"
 
   # h: a relative name with no separator, gone once deleted, resolves under
   # the real current directory => 2, 0, real(cwd)/name
@@ -1536,19 +1544,18 @@ EOF
   TRACE_H="$WORK/trace_h.bin"
   rm -f "$TRACE_H"
   (cd "$REL_DIR" && TMPDIR="$SCRATCH_FIXTURE" IYI_OBSERVE="$TRACE_H" "$WORK/single_op" delete "$REL_NAME")
-  "$PY" "$WORK/decode_07.py" "$TRACE_H" 2 0 "$REL_REAL/$REL_NAME"
+  "$PY" "$WORK/decode_07.py" "$TRACE_H" 2 0 "$REL_TARGET_REAL"
   echo "  case h passed: delete of a missing relative name => 2, 0, real(cwd)/name"
   # i: Dir.mkdir's mode reaches the observer as the def's second argument and
   # is no path => 4, 1, real, empty target
   MADE_I="$SCRATCH_FIXTURE/made_by_mkdir"
   rm -rf "$MADE_I"
-  MADE_I_REAL="$(cd "$SCRATCH_FIXTURE" && pwd -P)/made_by_mkdir"
+  MADE_I_REAL="$("$PY" -c 'import os,sys; print(os.path.realpath(os.path.join(sys.argv[1], "made_by_mkdir")))' "$SCRATCH_FIXTURE")"
   TRACE_I="$WORK/trace_i.bin"
   rm -f "$TRACE_I"
   (cd "$REL_DIR" && TMPDIR="$SCRATCH_FIXTURE" IYI_OBSERVE="$TRACE_I" "$WORK/single_op" mkdir "$MADE_I")
   "$PY" "$WORK/decode_07.py" "$TRACE_I" 4 1 "$MADE_I_REAL" ""
   echo "  case i passed: mkdir's mode is no path => 4, 1, real, empty target"
-fi
 
 SUCCESS=1
 echo "OK: bench/std_observe_exercise.sh passed all checks"

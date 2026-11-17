@@ -159,19 +159,17 @@ private def initializer_def_key(element : Iyi::Stale::Element) : String
 end
 
 describe "Iyi::Stale S3e: Reach walk, cross-check, drop per EdgeKind (row 42)" do
-  {% unless flag?(:win32) %}
-    it "reaches Signal.wait class variable initializers without a mismatch" do
-      source = Iyi::Compiler::Source.new("reach_signal.iyi", <<-IYI
-        module spec/reach_signal
-        import std/signal::{Signal}
-        group do |g|
-          g.spawn { Signal.wait(Signal::INT); 0 }
-        end
-        IYI
-      )
-      compile_class_var_reach(source, "@@waiting", ["Std::Signal::SignalWaiter"])
-    end
-  {% end %}
+  it "reaches Signal.wait class variable initializers without a mismatch" do
+    source = Iyi::Compiler::Source.new("reach_signal.iyi", <<-IYI
+      module spec/reach_signal
+      import std/signal::{Signal}
+      group do |g|
+        g.spawn { Signal.wait(Signal::INT); 0 }
+      end
+      IYI
+    )
+    compile_class_var_reach(source, "@@waiting", ["Std::Signal::SignalWaiter"])
+  end
 
   it "reaches Atomic class variables with dependent initializers under distinct owners" do
     owners = ["Spec::ReachAtomic::FirstHolder", "Spec::ReachAtomic::SecondHolder"]

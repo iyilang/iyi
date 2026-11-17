@@ -728,11 +728,31 @@ describe "Iyi::Stale S6a: Store and Receipts" do
     end
   end
 
-  # Builds and runs a helper through `./bin/crystal`, a shell script that
-  # Windows does not execute; the file lock it exercises is the same code the
-  # other store examples reach there.
+  # On Windows the shared gate uses the native Crystal launcher and starts
+  # both helper processes from Python; POSIX can run them directly.
   {% if flag?(:win32) %}
-    pending "survives two concurrent processes each recording 1,000 receipts (row 21)"
+    it "survives two concurrent processes each recording 1,000 receipts (row 21)" do
+      # `bash` alone finds System32's WSL launcher or the store's alias first
+      # on a runner with no distribution installed (the alias even refuses a
+      # `stat`); the gate is written for the Git for Windows shell, so take
+      # the first real bash.exe on PATH, then where Git for Windows installs it.
+      directories = ENV["PATH"].split(';')
+      {"ProgramFiles", "ProgramW6432"}.each do |variable|
+        root = ENV[variable]?
+        next unless root
+        directories << File.join(root, "Git", "bin")
+        directories << File.join(root, "Git", "usr", "bin")
+      end
+      bash = directories.compact_map do |directory|
+        candidate = File.join(directory, "bash.exe")
+        lowered = candidate.downcase
+        next if lowered.includes?("\\system32\\") || lowered.includes?("\\windowsapps\\")
+        candidate if (File.file?(candidate) rescue false)
+      end.first?
+      bash.should_not be_nil
+      Process.run(bash.not_nil!, ["bench/stale_store_concurrency.sh"],
+        output: Process::Redirect::Inherit, error: Process::Redirect::Inherit).success?.should be_true
+    end
   {% else %}
     it "survives two concurrent processes each recording 1,000 receipts (row 21)" do
       with_tempfile("store_concurrency") do |cache_root|

@@ -269,14 +269,21 @@ pub struct Term
   def self.tty?(fd : Int64) : Bool
     return false if fd < 0_i64
     {% if flag?(:win32) %}
-      return __iyi_isatty(fd.to_i32) if fd <= 2_i64
-      mode = 0
-      ::LibC.GetConsoleMode(Pointer(Void).new(fd.to_u64), pointerof(mode)) != 0
+      tty_windows?(fd)
     {% else %}
       return false if fd > 2147483647_i64
       __iyi_isatty(fd.to_i32)
     {% end %}
   end
+
+  {% if flag?(:win32) %}
+    # Console state can change the answer a program reads.
+    @[Effect(:host_state)]; private def self.tty_windows?(fd : Int64) : Bool
+      return __iyi_isatty(fd.to_i32) if fd <= 2_i64
+      mode = 0
+      ::LibC.GetConsoleMode(Pointer(Void).new(fd.to_u64), pointerof(mode)) != 0
+    end
+  {% end %}
 
   # `{rows, columns}` of the terminal on standard output, standard error
   # or standard input, the first that is one; nil when none is, or when

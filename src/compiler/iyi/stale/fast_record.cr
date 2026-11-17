@@ -24,9 +24,10 @@ module Iyi::Stale
     getter workers : Int32
     getter compiler : Array(FastEntry)
     getter env : Hash(String, String)
+    getter refusal : String?
 
     def initialize(@cwd : String, @target : String, @workers : Int32,
-                   @compiler : Array(FastEntry), @env : Hash(String, String))
+                   @compiler : Array(FastEntry), @env : Hash(String, String), @refusal : String? = nil)
       @pkg_config = {} of {String, Bool} => String?
       @pkg_config_lock = Sync::Mutex.new
     end
@@ -34,8 +35,22 @@ module Iyi::Stale
     # The facts of this run. Reads the compiler's files and the environment,
     # and makes no other call.
     def self.current(cwd : String, target : String) : FastFacts
-      compiler = Toolchain.paths.map { |path| FastEntry.new(path, FileStamp.of(path)) }
-      new(cwd, target, FastRecord.default_workers, compiler, Profile.build_env)
+      refusal = Toolchain.running_image_refusal
+      compiler = [] of FastEntry
+      unless refusal
+        begin
+          compiler = Toolchain.paths.map do |path|
+            stamp = FileStamp.of(path)
+            if stamp.kind.file? && stamp.digest.nil? && BuildInputs.racy?(Math.max(stamp.mtime, stamp.ctime), BuildInputs.now)
+              stamp = stamp.copy_with(ctime: 0_i64)
+            end
+            FastEntry.new(path, stamp)
+          end
+        rescue ex : Toolchain::ImageChangedError
+          refusal = ex.message || "loaded LLVM-C.dll cannot be identified"
+        end
+      end
+      new(cwd, target, FastRecord.default_workers, compiler, Profile.build_env, refusal)
     end
 
     # The answer `pkg-config` gives for *mod*, asked once for the run. Tests
@@ -60,7 +75,7 @@ module Iyi::Stale
   # the reason, so the next check can say why it compiles, and never serves.
   class FastRecord
     FORMAT  = "iyi-stale-fast"
-    VERSION = 1
+    VERSION = 2
 
     getter test : TestId
     getter file : String
@@ -250,6 +265,7 @@ module Iyi::Stale
     # ignores (`IYI_STALE_FAST_DROP`): "ctime", "env" or "compiler".
     def unchanged_reason(source : String, facts : FastFacts, drop : Set(String)) : String?
       return refused if refused
+      return facts.refusal if facts.refusal
       return "the working directory changed" unless cwd == facts.cwd
       return "the build's file argument changed" unless file == source
 
@@ -259,6 +275,9 @@ module Iyi::Stale
         return "compiler changed: the set of compiler files changed" unless compiler.size == facts.compiler.size
         compiler.each_with_index do |entry, index|
           now = facts.compiler[index]
+          unless entry.stamp.kind.file? && entry.stamp.ctime > 0 && now.stamp.kind.file? && now.stamp.ctime > 0
+            return "compiler changed: #{File.basename(entry.path)} has no trusted change time"
+          end
           if now.path != entry.path || FastRecord.changed?(entry.stamp, now.stamp, now.path, drop)
             return "compiler changed: #{File.basename(entry.path)}"
           end
@@ -304,6 +323,7 @@ module Iyi::Stale
     # change time, device, inode and digest out.
     def self.changed?(recorded : BuildInputs::Stamp, now : BuildInputs::Stamp, path : String, drop : Set(String)) : Bool
       return true unless now.kind == recorded.kind
+      return true if recorded.kind.other?
       return false unless recorded.kind.file?
       return true unless now.size == recorded.size && now.mtime == recorded.mtime
       return false if drop.includes?("ctime")
@@ -322,8 +342,8 @@ module Iyi::Stale
         json.number stamp.size
         json.number stamp.mtime
         json.number stamp.ctime
-        json.number stamp.dev
-        json.number stamp.ino
+        json.string stamp.dev.to_s
+        json.string stamp.ino.to_s
         if digest = stamp.digest
           json.string digest
         else
@@ -342,7 +362,7 @@ module Iyi::Stale
              else                  raise ArgumentError.new("unknown stamp kind")
              end
       stamp = BuildInputs::Stamp.new(kind, parts[2].as_i64, parts[3].as_i64, parts[7].as_s?,
-        parts[4].as_i64, parts[5].as_i64.to_u64, parts[6].as_i64.to_u64)
+        parts[4].as_i64, parts[5].as_s.to_u64, parts[6].as_s.to_u64)
       FastEntry.new(parts[0].as_s, stamp)
     end
 

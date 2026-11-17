@@ -9,20 +9,32 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) WINDOWS=1; REPO="$(cygpath -m "$REPO")" ;;
+  *) WINDOWS=0 ;;
+esac
 NORMALIZER="$REPO/bench/stale_ir_normalize.py"
 PYTHON="${PYTHON:-python3}"
 
 # Locate the base compiler
-COMPILER="${IYI:-$REPO/bin/iyi}"
+if [ "$WINDOWS" -eq 1 ]; then
+  COMPILER="${IYI:-$REPO/.build/iyi.exe}"
+  COMPILER="$(cygpath -m "$COMPILER")"
+else
+  COMPILER="${IYI:-$REPO/bin/iyi}"
+fi
 
 if [ -z "$COMPILER" ] || [ ! -x "$COMPILER" ]; then
   echo "Error: no base compiler found. Set \$IYI or provide bin/iyi." >&2
   exit 1
 fi
 
-export LIBRARY_PATH="${LIBRARY_PATH:-/opt/homebrew/opt/bdw-gc/lib}"
+if [ "$(uname -s)" = Darwin ]; then
+  export LIBRARY_PATH="${LIBRARY_PATH:-/opt/homebrew/opt/bdw-gc/lib}"
+fi
 
 TMPDIR="$(mktemp -d /tmp/iyi-s3n-selftest.XXXXXX)"
+[ "$WINDOWS" -eq 0 ] || TMPDIR="$(cygpath -m "$TMPDIR")"
 trap 'rm -rf "$TMPDIR"' EXIT
 
 CACHE_DIR="$TMPDIR/cache"
@@ -46,6 +58,7 @@ echo "Sample:     $SAMPLE"
 echo
 
 SAMPLE_DIR="$(cd "$(dirname "$SAMPLE")" && pwd)"
+[ "$WINDOWS" -eq 0 ] || SAMPLE_DIR="$(cygpath -m "$SAMPLE_DIR")"
 SAMPLE_NAME="$(basename "$SAMPLE")"
 
 WORK_DIR="$TMPDIR/work"

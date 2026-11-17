@@ -16,6 +16,10 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) WINDOWS=1; REPO="$(cygpath -m "$REPO")" ;;
+  *) WINDOWS=0 ;;
+esac
 
 PY=""
 for candidate in python3 python; do
@@ -30,11 +34,12 @@ if [ -z "$PY" ]; then
   exit 1
 fi
 
-IYI="${IYI:-$REPO/bin/iyi}"
-if [ ! -x "$IYI" ]; then
-  if [ -x "$REPO/.build/iyi" ]; then
-    IYI="$REPO/.build/iyi"
-  fi
+if [ "$WINDOWS" -eq 1 ]; then
+  IYI="${IYI:-$REPO/.build/iyi.exe}"
+  IYI="$(cygpath -m "$IYI")"
+else
+  IYI="${IYI:-$REPO/bin/iyi}"
+  [ -x "$IYI" ] || IYI="$REPO/.build/iyi"
 fi
 
 # 1. assert-export-env: verifies the export step environment holds no secrets or token
@@ -552,6 +557,7 @@ test_planted_hidden_read() {
   local failed=1
   local work
   work="$(mktemp -d /tmp/planted-hidden.XXXXXX)"
+  [ "$WINDOWS" -eq 0 ] || work="$(cygpath -m "$work")"
   trap 'if [ "$failed" -eq 0 ]; then rm -rf "$work"; else echo "Preserving diagnostics workdir at $work" >&2; fi' RETURN
   local e2e_lib="$work/runtime"
   mkdir -p "$e2e_lib"
@@ -976,13 +982,13 @@ else:
         print('git-diff-check: no producer sha in snapshot; skipping.')
         sys.exit(0)
 
-    res = subprocess.run(['/usr/bin/git', '-C', repo, 'rev-parse', '--verify', f'{producer_sha}^{{commit}}'],
+    res = subprocess.run(['git', '-C', repo, 'rev-parse', '--verify', f'{producer_sha}^{{commit}}'],
                          capture_output=True, text=True)
     if res.returncode != 0:
         print(f'git-diff-check: producer commit {producer_sha} not in shallow clone; skipping.')
         sys.exit(0)
 
-    res_diff = subprocess.run(['/usr/bin/git', '-C', repo, 'diff', '--name-only', producer_sha, 'HEAD'],
+    res_diff = subprocess.run(['git', '-C', repo, 'diff', '--name-only', producer_sha, 'HEAD'],
                               capture_output=True, text=True)
     if res_diff.returncode != 0:
         print('git-diff-check: git diff failed; skipping.')
@@ -990,6 +996,7 @@ else:
 
     changed_files = set(line.strip() for line in res_diff.stdout.splitlines() if line.strip())
     print(f'git-diff-check: {len(changed_files)} changed files between {producer_sha[:8]} and HEAD')
+changed_files = {os.path.normcase(path).replace(chr(92), '/') for path in changed_files}
 
 def extract_test_id(obj):
     if not isinstance(obj, dict):
@@ -1035,10 +1042,12 @@ def map_obs_to_repo_path(obs, test_entry, repo_root):
     return os.path.normpath(obs_path)
 
 def changed_observation(obs, repo_path):
-    if repo_path in changed_files or obs.get('path') in changed_files:
+    repo_path = os.path.normcase(repo_path).replace(chr(92), '/')
+    obs_path = os.path.normcase(obs.get('path', '')).replace(chr(92), '/')
+    if repo_path in changed_files or obs_path in changed_files:
         return True
     if obs.get('kind') == 'path_binding':
-        return any(repo_path.startswith(changed + os.sep) for changed in changed_files)
+        return any(repo_path.startswith(changed + '/') for changed in changed_files)
     return False
 
 master_records = {}
@@ -1712,12 +1721,12 @@ print('test-comparator-negatives PASSED: all comparator negative and discriminat
 run_rg9() {
   echo "== Running RG9: CallPathFp determinism across processes and prelude preanalysis =="
   "$PY" -c "
-import glob, json, os, subprocess, sys
+import atexit, glob, json, os, shutil, subprocess, sys, tempfile
 
 repo = sys.argv[1]
 iyi = sys.argv[2]
-work = '/tmp/rg9_work'
-os.makedirs(work, exist_ok=True)
+work = tempfile.mkdtemp(prefix='iyi-rg9-')
+atexit.register(shutil.rmtree, work, ignore_errors=True)
 
 samples = sorted(glob.glob(os.path.join(repo, 'samples/iyi/*.iyi')))
 mismatches = 0
@@ -1725,6 +1734,7 @@ total = 0
 
 for p in samples:
     bname = os.path.basename(p)
+    total += 1
     k1 = os.path.join(work, f'k1_{bname}.json')
     k2 = os.path.join(work, f'k2_{bname}.json')
     o1 = os.path.join(work, f'o1_{bname}')
@@ -1739,9 +1749,13 @@ for p in samples:
             except: pass
 
     if res1.returncode != 0 or res2.returncode != 0:
+        print(f'RG9 FAILED: {bname} build exits {res1.returncode}, {res2.returncode}: {res1.stderr[-300:]} {res2.stderr[-300:]}', file=sys.stderr)
+        mismatches += 1
         continue
 
     if not (os.path.exists(k1) and os.path.exists(k2)):
+        print(f'RG9 FAILED: {bname} did not write both keys', file=sys.stderr)
+        mismatches += 1
         continue
 
     with open(k1) as f: d1 = json.load(f)
@@ -1754,12 +1768,11 @@ for p in samples:
     cp1 = d1.get('portable', {}).get('callpath')
     cp2 = d2.get('portable', {}).get('callpath')
 
-    if cp1 != cp2:
+    if not cp1 or cp1 != cp2:
         print(f'RG9 MISMATCH: {bname} CallPathFp: {cp1} != {cp2}', file=sys.stderr)
         mismatches += 1
-    total += 1
 
-if mismatches > 0:
+if mismatches > 0 or not total:
     print(f'RG9 FAILED: {mismatches} mismatches out of {total}', file=sys.stderr)
     sys.exit(1)
 
@@ -1838,6 +1851,7 @@ test_master_path() {
 
   local work
   work="$(mktemp -d /tmp/test-master-path.XXXXXX)"
+  [ "$WINDOWS" -eq 0 ] || work="$(cygpath -m "$work")"
   local clean_exit=0
   trap 'if [ "$clean_exit" -eq 1 ]; then rm -rf "$work"; else echo "Preserving test-master-path artifacts at $work" >&2; fi' RETURN
 
@@ -1854,9 +1868,9 @@ RUN_ID = 7777
 REPO = 'iyilang/iyi'
 WORKFLOW = '.github/workflows/iyi.yml'
 REF = 'refs/heads/master'
-LABEL = 'x86_64-linux-gnu'
+LABEL = {'win32': 'x86_64-windows-msvc', 'darwin': 'aarch64-darwin'}.get(sys.platform, 'x86_64-linux-gnu')
 
-sha_res = subprocess.run(['/usr/bin/git', '-C', repo, 'rev-parse', 'HEAD'], capture_output=True, text=True)
+sha_res = subprocess.run(['git', '-C', repo, 'rev-parse', 'HEAD'], capture_output=True, text=True)
 if sha_res.returncode != 0 or not sha_res.stdout.strip():
     print('test-master-path FAILED: could not determine git rev-parse HEAD', file=sys.stderr)
     sys.exit(1)

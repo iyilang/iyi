@@ -1057,7 +1057,7 @@
       # and four threads allocating never left the retry: somebody was
       # always inside. The request converges because `leave` runs on every
       # exit from the allocator and the lock's spin parks too.
-      private def self.resume_suspended(line : UInt64) : Nil
+      @[Effect(:threads)]; private def self.resume_suspended(line : UInt64) : Nil
         cursor = @@lines
         while cursor != 0
           if cursor != line
@@ -1081,7 +1081,7 @@
       # time made a stop the sum of those waits. Beside 48 threads computing
       # on twelve cores a stop took 85 to 275 ms that way, and 0 to 13 asked
       # all at once (bench/thread_exercise.sh).
-      private def self.suspend_others(line : UInt64) : Int64
+      @[Effect(:threads)]; private def self.suspend_others(line : UInt64) : Int64
         cursor = @@lines
         while cursor != 0
           LibC.SuspendThread(Pointer(Void).new(IyiHeap.read64(cursor + IYI_TL_HANDLE))) if cursor != line

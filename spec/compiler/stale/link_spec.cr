@@ -60,7 +60,7 @@ describe "Iyi::Stale S3d: LinkFp, refusal, link once" do
     it "matches golden Python hashlib test vector 1" do
       env = Hash(String, String?).new
       fp = Iyi::Stale::Link.fp("-lm", nil, false, env)
-      Iyi::Stale.hex(fp).should eq("e1b852311fb7111c07e4cc7f2f01ef2ced61b04531d07e26fda5df37ab6f325d")
+      Iyi::Stale.hex(fp).should eq("b22cae1488c42e25762a3a849e9b66fe6b45f10596b2627a52fca826bb4de0ef")
     end
 
     it "matches golden Python hashlib test vector 2" do
@@ -69,7 +69,7 @@ describe "Iyi::Stale S3d: LinkFp, refusal, link once" do
         "CC"           => "clang",
       }
       fp = Iyi::Stale::Link.fp("-lm -lpcre2-8", "-rdynamic", true, env)
-      Iyi::Stale.hex(fp).should eq("4f014e567e98a6315223ddeed04fbd71755d79fffc0dadd1ac99b8c09c29a364")
+      Iyi::Stale.hex(fp).should eq("ffb68a08af19519cde972a6d866351c326e5cee5a9db185f83fb9fc6a03c714f")
     end
 
     it "changes with LIBRARY_PATH" do

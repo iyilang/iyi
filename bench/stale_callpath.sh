@@ -7,9 +7,15 @@ set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 
 case "$(uname -s)" in
-  MINGW* | MSYS* | CYGWIN* | Windows_NT) PSEP=';' ;;
-  *) PSEP=':' ;;
+  MINGW* | MSYS* | CYGWIN*) WINDOWS=1; PSEP=';'; REPO="$(cygpath -m "$REPO")" ;;
+  *) WINDOWS=0; PSEP=':' ;;
 esac
+
+# The bash running this script, as a path native programs can start. A bare
+# `bash` from Python or a nested call finds System32's WSL launcher first on
+# Windows runners.
+BASH_EXE="$BASH"
+[ "$WINDOWS" -eq 0 ] || BASH_EXE="$(cygpath -m "$BASH")"
 
 PY=""
 for candidate in python3 python; do
@@ -24,22 +30,33 @@ if [ -z "$PY" ]; then
   exit 1
 fi
 
-IYI="${IYI:-$REPO/bin/iyi}"
+if [ "$WINDOWS" -eq 1 ]; then
+  IYI="${IYI:-$REPO/.build/iyi.exe}"
+  IYI="$(cygpath -m "$IYI")"
+else
+  IYI="${IYI:-$REPO/bin/iyi}"
+fi
 if [ ! -x "$IYI" ]; then
+  if [ "$WINDOWS" -eq 1 ]; then
+    echo "iyi compiler not found at $IYI; build .build/iyi.exe first" >&2
+    exit 1
+  fi
   echo "iyi compiler not found at $IYI. Building..." >&2
-  export LIBRARY_PATH="${LIBRARY_PATH:-/opt/homebrew/opt/bdw-gc/lib}"
-  export IYI_CACHE_DIR="${IYI_CACHE_DIR:-/tmp/iyi-stale-s3d-cache}"
+  if [ "$(uname -s)" = Darwin ]; then
+    export LIBRARY_PATH="${LIBRARY_PATH:-/opt/homebrew/opt/bdw-gc/lib}"
+  fi
   make -C "$REPO" -j8 iyi
 fi
 
 MODE="${1:-all}"
 
 export ZERO_AR_DATE=1
-export SOURCE_DATE_EPOCH="$(/usr/bin/git -C "$REPO" show -s --format=%ct HEAD 2>/dev/null || cat "$REPO/src/SOURCE_DATE_EPOCH" 2>/dev/null || echo 0)"
+export SOURCE_DATE_EPOCH="$(git -C "$REPO" show -s --format=%ct HEAD 2>/dev/null || cat "$REPO/src/SOURCE_DATE_EPOCH" 2>/dev/null || echo 0)"
 export IYI_PATH="$REPO/src${PSEP}$REPO/samples/iyi"
 export IYI_LIBRARY_PATH="$REPO/lib"
 
 WORK="$(mktemp -d /tmp/stale-callpath-work.XXXXXX)"
+[ "$WINDOWS" -eq 0 ] || WORK="$(cygpath -m "$WORK")"
 CACHE="$WORK/cache"
 mkdir -p "$CACHE"
 export IYI_CACHE_DIR="$CACHE"
@@ -57,6 +74,182 @@ C2_SAMPLES=(
   "$REPO/samples/iyi/format.iyi"
   "$REPO/samples/iyi/shapes.iyi"
 )
+
+write_link_fixture() {
+  local fixture="$1" quoted_dir="$2"
+  mkdir -p "$quoted_dir"
+  if [ "$WINDOWS" -eq 1 ]; then
+    cat > "$fixture" <<IYI
+@[Unsafe("quoted ldflags fixture declares a Windows API")]
+@[Link("kernel32", ldflags: "/LIBPATH:\"$quoted_dir\"")]
+lib LibTest
+  fun GetCurrentProcessId : UInt32
+end
+print LibTest.GetCurrentProcessId
+IYI
+  else
+    cat > "$fixture" <<IYI
+@[Unsafe("quoted ldflags fixture declares C math")]
+@[Link(ldflags: "-L'$quoted_dir' -lm")]
+lib LibTest
+  fun cos(x : Float64) : Float64
+end
+print LibTest.cos(0.0)
+IYI
+  fi
+}
+
+# On a mismatch, say whether the stale build differs from the normal one or
+# whether the linker's own output is not reproducible here: build the program
+# normally once more at the same -o and compare that with the first normal
+# build. Runs only after a mismatch, so a passing run is unchanged.
+explain_link_difference() {
+  local first="$1" second="$2" source="$3"
+  # Git's bash finds `prog_out` for `prog_out.exe`; native Python does not.
+  if [ "$WINDOWS" -eq 1 ]; then
+    [ -f "$first.exe" ] && first="$first.exe"
+    [ -f "$second.exe" ] && second="$second.exe"
+  fi
+  {
+    echo "    sizes: $(wc -c < "$first" | tr -d ' ') (normal) vs $(wc -c < "$second" | tr -d ' ') (stale)"
+    echo "    differing bytes: $(cmp -l "$first" "$second" 2>/dev/null | wc -l | tr -d ' ')"
+    echo "    first differing offsets (1-based): $(cmp -l "$first" "$second" 2>/dev/null | head -8 | awk '{printf "%s ", $1}')"
+  } >&2
+  "$PY" - "$first" "$second" >&2 <<'PYEOF' || true
+import struct, sys
+a = open(sys.argv[1], "rb").read()
+b = open(sys.argv[2], "rb").read()
+if a[:2] != b"MZ" or len(a) != len(b):
+    sys.exit(0)  # not a same-size PE image: the byte counts above are all there is
+e = struct.unpack_from("<I", a, 0x3C)[0]
+nsec, = struct.unpack_from("<H", a, e + 6)
+opt, = struct.unpack_from("<H", a, e + 20)
+magic, = struct.unpack_from("<H", a, e + 24)
+dirs = e + 24 + (112 if magic == 0x20B else 96)
+secs = []
+for i in range(nsec):
+    name, vsize, va, rsize, rptr = struct.unpack_from("<8sIII I", a, e + 24 + opt + 40 * i)
+    secs.append((name.rstrip(b"\0").decode(), va, vsize, rptr, rsize))
+def region(off):
+    if e + 8 <= off < e + 12:
+        return "PE TimeDateStamp"
+    if off < secs[0][3]:
+        return "headers"
+    for name, va, vsize, rptr, rsize in secs:
+        if rptr <= off < rptr + rsize:
+            return name
+    return "after the last section"
+counts = {}
+for off in range(len(a)):
+    if a[off] != b[off]:
+        counts[region(off)] = counts.get(region(off), 0) + 1
+print("    differing bytes by region: " + ", ".join(f"{k}: {v}" for k, v in sorted(counts.items())))
+rva, size = struct.unpack_from("<II", a, dirs + 6 * 8)
+types = []
+for name, va, vsize, rptr, rsize in secs:
+    if va <= rva < va + max(vsize, rsize):
+        base = rptr + (rva - va)
+        for k in range(size // 28):
+            types.append(struct.unpack_from("<I", a, base + 28 * k + 12)[0])
+print(f"    debug directory entry types: {types} (2 is CodeView, 16 is the reproducible-build entry /Brepro adds)")
+PYEOF
+  rm -rf "$CACHE"/*
+  "$IYI" build -o "$second" "$source" >/dev/null 2>&1 || true
+  if cmp -s "$first" "$second"; then
+    echo "    a second normal build is identical to the first: the stale build is what differs" >&2
+  else
+    echo "    a second normal build differs from the first too: this linker's output is not reproducible here" >&2
+  fi
+  if [ "${LINK_VARIATION_REPORTED:-0}" -eq 0 ]; then
+    LINK_VARIATION_REPORTED=1
+    link_variation_report "$source"
+  fi
+}
+
+# Where a linker's variation enters, said once: two normal builds at the same
+# -o with their debug databases kept, and two emitted object files. Equal
+# objects and different images put the variation in the link or its database;
+# different objects put it in codegen.
+link_variation_report() {
+  local source="$1" suffix="" objext="o"
+  if [ "$WINDOWS" -eq 1 ]; then suffix=".exe"; objext="obj"; fi
+  local dir="$WORK/variation" tag
+  rm -rf "$dir"; mkdir -p "$dir"
+  for tag in a b; do
+    rm -rf "$CACHE"/*
+    "$IYI" build -o "$dir/image$suffix" "$source" >/dev/null 2>&1 || true
+    cp "$dir/image$suffix" "$dir/image_$tag$suffix" 2>/dev/null || true
+    [ ! -f "$dir/image.pdb" ] || cp "$dir/image.pdb" "$dir/image_$tag.pdb"
+    rm -rf "$CACHE"/*
+    "$IYI" build --emit obj -o "$dir/emit" "$source" >/dev/null 2>&1 || true
+    cp "$dir/emit.$objext" "$dir/emit_$tag.$objext" 2>/dev/null || true
+  done
+  {
+    echo "    variation report, two normal builds of $(basename "$source") at one -o:"
+    if [ -f "$dir/image_a$suffix" ] && [ -f "$dir/image_b$suffix" ]; then
+      echo "      images differ in $(cmp -l "$dir/image_a$suffix" "$dir/image_b$suffix" 2>/dev/null | wc -l | tr -d ' ') bytes"
+    fi
+    if [ -f "$dir/image_a.pdb" ] && [ -f "$dir/image_b.pdb" ]; then
+      echo "      debug databases: $(wc -c < "$dir/image_a.pdb" | tr -d ' ') and $(wc -c < "$dir/image_b.pdb" | tr -d ' ') bytes, differing in $(cmp -l "$dir/image_a.pdb" "$dir/image_b.pdb" 2>/dev/null | wc -l | tr -d ' ') bytes"
+    else
+      echo "      no debug database was written beside the image"
+    fi
+    if [ -f "$dir/emit_a.$objext" ] && [ -f "$dir/emit_b.$objext" ]; then
+      echo "      emitted objects: $(wc -c < "$dir/emit_a.$objext" | tr -d ' ') bytes, differing in $(cmp -l "$dir/emit_a.$objext" "$dir/emit_b.$objext" 2>/dev/null | wc -l | tr -d ' ') bytes"
+    else
+      echo "      no object file was emitted ($(ls "$dir" | tr '\n' ' '))"
+    fi
+  } >&2
+}
+
+# Whether the stale build's image is the normal build's. Byte for byte, except
+# on Windows: there link.exe writes hash-derived fields that vary between two
+# normal builds of one program at one -o even with /Brepro (measured: 69 bytes,
+# the PE TimeDateStamp and the debug directory's payloads, with the reproducible-
+# build entry present). Windows links are not claimed reproducible; the claim
+# is that the stale build changes nothing else, so every byte outside the PE
+# TimeDateStamp and the debug directory (its entries' timestamps and payloads)
+# must be equal.
+link_images_match() {
+  local first="$1" second="$2" status=0
+  cmp "$first" "$second" >/dev/null 2>&1 && return 0
+  [ "$WINDOWS" -eq 1 ] || return 1
+  [ ! -f "$first.exe" ] || first="$first.exe"
+  [ ! -f "$second.exe" ] || second="$second.exe"
+  "$PY" - "$first" "$second" >&2 <<'PYEOF' || status=1
+import struct, sys
+a = open(sys.argv[1], "rb").read()
+b = open(sys.argv[2], "rb").read()
+if len(a) != len(b) or a[:2] != b"MZ":
+    sys.exit(1)
+e = struct.unpack_from("<I", a, 0x3C)[0]
+nsec, = struct.unpack_from("<H", a, e + 6)
+opt, = struct.unpack_from("<H", a, e + 20)
+magic, = struct.unpack_from("<H", a, e + 24)
+dirs = e + 24 + (112 if magic == 0x20B else 96)
+secs = []
+for i in range(nsec):
+    name, vsize, va, rsize, rptr = struct.unpack_from("<8sIII I", a, e + 24 + opt + 40 * i)
+    secs.append((name.rstrip(b"\0").decode(), va, vsize, rptr, rsize))
+allowed = set(range(e + 8, e + 12))
+rva, size = struct.unpack_from("<II", a, dirs + 6 * 8)
+for name, va, vsize, rptr, rsize in secs:
+    if va <= rva < va + max(vsize, rsize):
+        table = rptr + (rva - va)
+        for k in range(size // 28):
+            entry = table + 28 * k
+            allowed.update(range(entry + 4, entry + 8))
+            data_size, = struct.unpack_from("<I", a, entry + 16)
+            data_ptr, = struct.unpack_from("<I", a, entry + 24)
+            allowed.update(range(data_ptr, data_ptr + data_size))
+changed = [i for i in range(len(a)) if a[i] != b[i]]
+outside = [i for i in changed if i not in allowed]
+print(f"    differs in {len(changed)} bytes, {len(outside)} outside the PE timestamp and debug directory"
+      + (f", first at {outside[:6]}" if outside else ""))
+sys.exit(1 if outside else 0)
+PYEOF
+  return "$status"
+}
 
 run_link() {
   echo "== Running S3d: Link section (link-once, no-shell link, LinkFp, refusal) =="
@@ -79,10 +272,11 @@ run_link() {
     rm -rf "$CACHE"/*
     "$IYI" build --stale-key "$WORK/stale.key" -o "$out" "$prog"
 
-    if cmp "$saved" "$out" >/dev/null 2>&1; then
+    if link_images_match "$saved" "$out" "$prog"; then
       echo "  Link cmp OK: $name"
     else
       echo "  Link cmp MISMATCH: $name" >&2
+      explain_link_difference "$saved" "$out" "$prog"
       mismatches=$((mismatches + 1))
     fi
     total=$((total + 1))
@@ -90,20 +284,9 @@ run_link() {
 
   # 2. Compare normal vs stale on quoted ldflags fixture: @[Link(ldflags: "-L'/tmp/a b' -lm")]
   echo "  comparing normal vs stale build on quoted ldflags fixture..."
-  local quoted_dir="/tmp/a b"
-  mkdir -p "$quoted_dir"
+  local quoted_dir="$WORK/a b"
   local fixture="$WORK/quoted_ldflags.iyi"
-  "$PY" -c "
-with open('$fixture', 'w') as f:
-    f.write('''@[Unsafe(\"quoted ldflags fixture declares C math\")]
-@[Link(ldflags: \"-L\\'/tmp/a b\\' -lm\")]
-lib LibTest
-  fun cos(x : Float64) : Float64
-end
-
-print LibTest.cos(0.0)
-''')
-"
+  write_link_fixture "$fixture" "$quoted_dir"
   out="$WORK/prog_out"
   saved="$WORK/prog_saved"
 
@@ -114,10 +297,11 @@ print LibTest.cos(0.0)
   rm -rf "$CACHE"/*
   "$IYI" build --stale-key "$WORK/stale.key" -o "$out" "$fixture"
 
-  if cmp "$saved" "$out" >/dev/null 2>&1; then
+  if link_images_match "$saved" "$out" "$fixture"; then
     echo "  Link cmp OK: quoted ldflags fixture"
   else
     echo "  Link cmp MISMATCH: quoted ldflags fixture" >&2
+    explain_link_difference "$saved" "$out" "$fixture"
     mismatches=$((mismatches + 1))
   fi
   total=$((total + 1))
@@ -127,9 +311,17 @@ print LibTest.cos(0.0)
     echo "Link verification FAILED: $mismatches mismatches out of $total" >&2
     return 1
   fi
-  echo "Link cmp PASSED: all $total programs (5 C2 + quoted fixture) matched byte-for-byte at same -o"
+  if [ "$WINDOWS" -eq 1 ]; then
+    echo "Link cmp PASSED: all $total programs (5 C2 + quoted fixture): the stale build differs from a normal one only in the PE timestamp and debug directory, which link.exe varies between normal builds too"
+  else
+    echo "Link cmp PASSED: all $total programs (5 C2 + quoted fixture) matched byte-for-byte at same -o"
+  fi
 
   # 3. Pkg-config shim: verify exactly one invocation per stale build
+  if [ "$WINDOWS" -eq 1 ]; then
+    echo "SKIP row 41 pkg-config invocation: the MSVC linker does not invoke pkg-config (codegen/link.cr:157-179)"
+  else
+  local pkg_started=$SECONDS
   echo "  testing pkg-config shim invocation count..."
   local shim_dir="$WORK/pkg_shim"
   local shim_log="$WORK/pkg_shim.log"
@@ -168,12 +360,24 @@ print LibM.cos(0.0)
   if [ -f "$shim_log" ]; then
     count="$(wc -l < "$shim_log" | tr -d ' ')"
   fi
+  echo "  pkg-config subcheck: $((SECONDS - pkg_started)) seconds"
   if [ "$count" -eq 1 ]; then
     echo "  pkg-config shim OK: exactly 1 invocation logged (count=$count)"
   else
     echo "  pkg-config shim FAILED: expected 1 invocation, got $count" >&2
     [ -f "$shim_log" ] && cat "$shim_log" >&2
     return 1
+  fi
+  fi
+
+  if [ "$WINDOWS" -eq 1 ]; then
+    # `crystal eval` cannot link its program on the Windows runner ("Cannot
+    # locate the .lib files for the following libraries: gc, iconv"), where a
+    # `build` of the same entrypoint links. These two checks call pure functions,
+    # so the compiled spec that calls the same functions covers them natively.
+    echo "SKIP refusal for shell characters and LinkFp sensitivity: crystal eval does not link on Windows; spec/compiler/stale/link_spec.cr runs the same calls natively"
+    echo "Link section PASSED (link-once, no-shell link and key comparisons; refusal and LinkFp via link_spec)"
+    return 0
   fi
 
   # 4. Each refused character yields refusal
@@ -183,12 +387,13 @@ print LibM.cos(0.0)
     local res
     res="$("$PY" -c "
 import subprocess
-out = subprocess.check_output(['./bin/crystal', 'eval', '''
+out = subprocess.run(['$BASH_EXE', '$REPO/bench/stale_store_concurrency.sh', '--crystal', 'eval', '''
 require \"compiler/iyi/stale/link\"
 r = Iyi::Stale::Link.refusal(\"-L/opt/$ch/lib\", nil)
 puts r || \"nil\"
-'''], cwd='$REPO').decode().strip()
-print(out)
+'''], cwd='$REPO', stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+text = out.stdout.decode(errors='replace').strip()
+print(text if out.returncode == 0 else 'exit %d: %s %s' % (out.returncode, text, out.stderr.decode(errors='replace').strip()))
 ")"
     if [[ "$res" == *"refused link flag"* && "$res" == *"$ch"* ]]; then
       echo "  refused char '$ch' OK: '$res'"
@@ -203,7 +408,7 @@ print(out)
   local fp_check
   fp_check="$("$PY" -c "
 import subprocess
-out = subprocess.check_output(['./bin/crystal', 'eval', '''
+out = subprocess.run(['$BASH_EXE', '$REPO/bench/stale_store_concurrency.sh', '--crystal', 'eval', '''
 require \"compiler/iyi/stale/link\"
 require \"compiler/iyi/stale/encoding\"
 
@@ -218,8 +423,9 @@ fp4 = Iyi::Stale::Link.fp(\"-lbar\", nil, false, Hash(String, String?).new)
 raise \"shim answer did not change LinkFp\" if fp3 == fp4
 
 puts \"OK\"
-'''], cwd='$REPO').decode().strip()
-print(out)
+'''], cwd='$REPO', stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+text = out.stdout.decode(errors='replace').strip()
+print(text if out.returncode == 0 else 'exit %d: %s %s' % (out.returncode, text, out.stderr.decode(errors='replace').strip()))
 ")"
   if [ "$fp_check" = "OK" ]; then
     echo "  LinkFp sensitivity OK: changes with LIBRARY_PATH and shim answer"
@@ -270,20 +476,9 @@ else:
   local total=0
 
   # Quoted ldflags fixture
-  local quoted_dir="/tmp/a b"
-  mkdir -p "$quoted_dir"
+  local quoted_dir="$WORK/a b"
   local fixture="$WORK/rg4_fixture.iyi"
-  "$PY" -c "
-with open('$fixture', 'w') as f:
-    f.write('''@[Unsafe(\"RG4 fixture declares C math\")]
-@[Link(ldflags: \"-L\\'/tmp/a b\\' -lm\")]
-lib LibTest
-  fun cos(x : Float64) : Float64
-end
-
-print LibTest.cos(0.0)
-''')
-"
+  write_link_fixture "$fixture" "$quoted_dir"
   local all_test_progs=("${C2_SAMPLES[@]}" "$fixture")
 
   for prog in "${all_test_progs[@]}"; do
@@ -300,13 +495,13 @@ print LibTest.cos(0.0)
     # Stale link with randomized non-CHILD_ENV variables
     rm -rf "$CACHE"/*
     NON_CHILD_RANDOM_1="rand_val_${RANDOM}_${$}" \
-    NON_CHILD_RANDOM_2="seed_$(date +%s%N 2>/dev/null || echo 12345)" \
+    NON_CHILD_RANDOM_2="seed_${RANDOM}_${RANDOM}" \
     BUILD_EXTRA_TAG="build_tag_${RANDOM}" \
     TEST_NON_CHILD_ENV="arbitrary_value_${RANDOM}" \
     USER_NOTE="user_note_${$}" \
     "$IYI" build --stale-key "$WORK/stale.key" -o "$out" "$prog"
 
-    if cmp "$saved" "$out" >/dev/null 2>&1; then
+    if link_images_match "$saved" "$out"; then
       echo "  RG4 cmp OK: $name"
     else
       echo "  RG4 cmp MISMATCH: $name" >&2
@@ -322,7 +517,11 @@ print LibTest.cos(0.0)
     return 1
   fi
 
-  echo "RG4 PASSED: all $total programs linked byte-identical under randomized non-CHILD_ENV variables"
+  if [ "$WINDOWS" -eq 1 ]; then
+    echo "RG4 PASSED: all $total programs linked identically outside the PE timestamp and debug directory under randomized non-CHILD_ENV variables"
+  else
+    echo "RG4 PASSED: all $total programs linked byte-identical under randomized non-CHILD_ENV variables"
+  fi
 }
 
 run_reach() {
@@ -619,12 +818,30 @@ print('S3g check gate: ALL ACCEPTANCE TESTS PASSED')
 
 run_rg8() {
   echo "== Running RG8: normalized IR versus CallPathFp mutations =="
+  "$PY" - "$REPO" <<'PY'
+from pathlib import PureWindowsPath
+from unittest.mock import patch
+import os, sys
+sys.path.insert(0, os.path.join(sys.argv[1], "bench"))
+from stale_rg8 import artifact_stem, relative_name
+windows_label = str(PureWindowsPath("bench", "std_example_exercise.iyi"))
+with patch("os.path.relpath", return_value=windows_label):
+    name = relative_name("ignored", "ignored")
+assert name == "bench/std_example_exercise.iyi", name
+assert artifact_stem("baseline-" + windows_label) == "baseline-bench_std_example_exercise.iyi"
+assert sorted([name, "samples/iyi/hello.iyi"], key=lambda p: (p.startswith("bench/"), p))[0] == "samples/iyi/hello.iyi"
+print("RG8 Windows path-label check PASSED")
+PY
   "$PY" "$REPO/bench/stale_mutate.py" --selftest --compiler "$IYI" --repo "$REPO"
   "$PY" "$REPO/bench/stale_rg8.py" --repo "$REPO" --compiler "$IYI" --work "$WORK/rg8"
 
   echo "  proving the def-body encoder field is load-bearing..."
   local dropped="$WORK/iyi-rg8-drop-def-body"
-  "$REPO/bin/crystal" build -D rg8_drop_def_body -o "$dropped" "$REPO/src/compiler/iyi.cr"
+  if [ "$WINDOWS" -eq 1 ]; then
+    dropped="$dropped.exe"
+    cp -p "$(dirname "$IYI")/LLVM-C.dll" "$WORK/LLVM-C.dll"
+  fi
+  "$BASH" "$REPO/bench/stale_store_concurrency.sh" --crystal build -D rg8_drop_def_body -o "$dropped" "$REPO/src/compiler/iyi.cr"
   "$PY" "$REPO/bench/stale_rg8.py" --repo "$REPO" --compiler "$dropped" \
     --work "$WORK/rg8-drop-def-body" --program "$REPO/samples/iyi/calc.iyi" \
     --kind body --expect-failure-kind body

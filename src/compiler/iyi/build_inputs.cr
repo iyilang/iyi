@@ -48,7 +48,8 @@ module Iyi
     # variables those are documented to read are recorded whether or not this
     # build asked for them.
     CHILD_ENV = %w(PATH CC LIBRARY_PATH LD_LIBRARY_PATH LD_RUN_PATH COMPILER_PATH GCC_EXEC_PREFIX
-      SDKROOT MACOSX_DEPLOYMENT_TARGET LIB LIBPATH LINK _LINK_)
+      SDKROOT MACOSX_DEPLOYMENT_TARGET LIB LIBPATH LINK _LINK_ __COMPAT_LAYER
+      LD_PRELOAD GLIBC_TUNABLES DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH)
 
     # The compiler's own reads that happen only when it links: a warm build
     # links nothing (a cached macro `run` helper, an up-to-date program), so
@@ -222,6 +223,17 @@ module Iyi
       path
     end
 
+    # Whether the last component of *path* is a reserved DOS device name.
+    def self.dos_device?(path : String) : Bool
+      name = path
+      if cut = name.rindex('\\') || name.rindex('/')
+        name = name[(cut + 1)..]
+      end
+      stem = name.split('.', 2).first.rstrip(' ').downcase
+      return true if {"nul", "con", "prn", "aux", "conin$", "conout$"}.includes?(stem)
+      stem.size == 4 && (stem.starts_with?("com") || stem.starts_with?("lpt")) && stem[3] >= '1' && stem[3] <= '9'
+    end
+
     # Not an input: a build's own directory in the compiler cache (its
     # objects, its macro programs, the link templates), the output, and the
     # kernel's pseudo-files. A package checkout is in the cache too, under
@@ -232,6 +244,12 @@ module Iyi
       # and `key` expands it, which may ask the file system again.
       {% if flag?(:win32) %}
         return true if @ignored.includes?(path.downcase)
+        # A DOS device (`NUL`, `CON`, `COM1`, ...) is a name the kernel resolves
+        # in any directory, with or without an extension, so `<cwd>\NUL` is the
+        # null device and not a file the build read. The compiler's own process
+        # spawning opens `NUL` for a closed stream; as `/dev/null` is on POSIX,
+        # it is the kernel's, not an input.
+        return true if BuildInputs.dos_device?(path)
       {% else %}
         return true if @ignored.includes?(path)
       {% end %}
@@ -295,10 +313,13 @@ module Iyi
         true
       end
       return unless first
+      if stamp.kind.other?
+        cannot("#{path} is not a regular file or directory, so its contents cannot be vouched for")
+      end
       if stamp.kind.file? && stamp.ctime <= 0
         # Without a change time an edit that kept the size and the modification
         # time (`cp -p`, `touch -r`) is not seen, so no record can vouch for it.
-        cannot("#{path} has no change time on this file system, so an edit that kept its size and time could not be seen")
+        cannot("#{path} has no trusted change time on this file system, so an edit that kept its size and time could not be seen")
       end
       if stamp.kind.file? && stamp.digest.nil? && BuildInputs.racy?(Math.max(stamp.mtime, stamp.ctime), BuildInputs.now)
         cannot("#{path} could not be read to fingerprint it")

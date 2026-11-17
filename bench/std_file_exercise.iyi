@@ -29,9 +29,17 @@ end
 import std/file::{File}
 import std/dir::{Dir}
 import std/gc::{GC}
-# For TMPDIR, TEMP and TMP unset around `File.tempfile`'s GetTempPathW.
+# Temporary directory precedence and missing-variable handling.
 import std/env::{ENV}
 import std/time::{Time}
+
+def assert_temp_directory(expected : String, label : String) : Nil
+  assert_str File.real_path(expected), File.real_path(Dir.tempdir), "#{label}: Dir.tempdir"
+  path = File.tempfile("std_file_ex")
+  assert_str File.real_path(expected), File.real_path(File.dirname(path)), "#{label}: File.tempfile"
+  File.delete(path)
+end
+
 # The sandbox is the argument, then IYI_FILE_SANDBOX, then the platform's
 # own temporary directory. `bench/std_exercise.sh` sets IYI_FILE_SANDBOX to
 # an empty sandbox directory before each of the source and artifact runs
@@ -391,24 +399,45 @@ File.tempfile("std_file_ex") do |scratch|
 end
 assert_true File.read(kept_at) == "whole", "a tempfile renamed in its block is kept"
 File.delete(kept_at)
+
+# The two APIs agree when each variable wins, including a distinct TEMP
+# and TMP. Empty values are skipped.
+temp_names = ["TMPDIR", "TEMP", "TMP"]
+temp_saved = temp_names.map { |name| ENV[name]? }
+temp_dirs = [sandbox + "/tmpdir", sandbox + "/temp", sandbox + "/tmp"]
+temp_dirs.each { |dir| Dir.mkdir_p(dir) }
+temp_names.each_with_index { |name, index| ENV[name] = temp_dirs[index] }
+assert_temp_directory(temp_dirs[0], "TMPDIR takes precedence")
+ENV["TMPDIR"] = nil
+assert_temp_directory(temp_dirs[1], "TEMP takes precedence over TMP")
+ENV["TMPDIR"] = ""
+assert_temp_directory(temp_dirs[1], "empty TMPDIR is skipped")
+ENV["TMPDIR"] = nil
+ENV["TEMP"] = nil
+assert_temp_directory(temp_dirs[2], "TMP supplies the directory")
+ENV["TMP"] = nil
+{% if flag?(:win32) %}
+  # With TMPDIR, TEMP and TMP all unset, both ask Windows (GetTempPathW):
+  # `tempfile` alone kept the literal `C:\Windows\Temp`, beside a
+  # `Dir.tempdir` in the user's profile.
+  bare = File.tempfile("std_file_ex")
+  bare_dir = Dir.tempdir
+  File.delete(bare)
+  assert_str bare_dir, File.dirname(bare), "with no TMPDIR, TEMP or TMP, tempfile makes its file in Dir.tempdir"
+{% else %}
+  assert_temp_directory("/tmp", "no temporary variables uses /tmp")
+{% end %}
+temp_names.each_with_index { |name, index| ENV[name] = temp_saved[index] }
+temp_dirs.each { |dir| Dir.delete(dir) }
+puts "  temporary directory precedence and missing variables verified"
+
 {% if flag?(:win32) %}
   # A drive's root is its own real path, not `\\?\C:\`: the prefix came
   # off only past eight characters, and `Path` read what was left as a
   # share named `?`.
   drive_root = (Program.cwd || "C:\\")[0, 3]
   assert_true File.real_path(drive_root) == drive_root, "the real path of #{drive_root} is #{File.real_path(drive_root)}"
-  # With TMPDIR, TEMP and TMP all unset, both ask Windows (GetTempPathW):
-  # `tempfile` alone kept the literal `C:\Windows\Temp`, beside a
-  # `Dir.tempdir` in the user's profile.
-  unset = ["TMPDIR", "TEMP", "TMP"]
-  kept_values = unset.map { |name| ENV[name]? }
-  unset.each { |name| ENV[name] = nil }
-  bare = File.tempfile("std_file_ex")
-  bare_dir = Dir.tempdir
-  unset.each_with_index { |name, index| ENV[name] = kept_values[index] }
-  File.delete(bare)
-  assert_str bare_dir, File.dirname(bare), "with no TMPDIR, TEMP or TMP, tempfile makes its file in Dir.tempdir"
-  puts "  tempfile asks Windows where Dir.tempdir does"
+  puts "  temporary files use Dir.tempdir"
 {% end %}
 File.delete(ta)
 File.delete(tb)

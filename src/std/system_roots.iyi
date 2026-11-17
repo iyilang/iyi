@@ -390,7 +390,7 @@ end
     # ABI), asked for twice - once for its size, once for its bytes. No
     # property is every purpose; a property naming none is no purpose; and
     # a call that fails any other way is read as no.
-    private def self.serves?(context : Void*) : Bool
+    @[Effect(:host_state)]; private def self.serves?(context : Void*) : Bool
       size = 0_u32
       if LibCrypt32.CertGetEnhancedKeyUsage(context, PROPERTY_ONLY, Pointer(Void).new(0_u64), pointerof(size)) == 0
         return LibKernel32.GetLastError == NOT_FOUND
@@ -421,6 +421,18 @@ end
       text[i] == 0_u8
     end
 
+    @[Effect(:host_state)]; private def self.open_store(name : UInt16*) : Void*
+      LibCrypt32.CertOpenSystemStoreW(Pointer(Void).new(0_u64), name)
+    end
+
+    @[Effect(:host_state)]; private def self.next_context(store : Void*, previous : Void*) : Void*
+      LibCrypt32.CertEnumCertificatesInStore(store, previous)
+    end
+
+    @[Effect(:host_state)]; private def self.close_store(store : Void*) : Nil
+      LibCrypt32.CertCloseStore(store, 0_u32)
+    end
+
     # Every certificate in the system store *name*: its context, for the
     # properties the store keeps beside it, and its DER. A CERT_CONTEXT
     # is { DWORD encoding; BYTE* encoded; DWORD size; ... } on the 64-bit
@@ -433,16 +445,16 @@ end
         wide[i] = name.to_unsafe[i].to_u16
         i = i + 1
       end
-      store = LibCrypt32.CertOpenSystemStoreW(Pointer(Void).new(0_u64), wide.to_unsafe)
+      store = open_store(wide.to_unsafe)
       return if store.address == 0
-      context = LibCrypt32.CertEnumCertificatesInStore(store, Pointer(Void).new(0_u64))
+      context = next_context(store, Pointer(Void).new(0_u64))
       until context.address == 0
         start = (context.as(UInt8*) + 8_i64).as(Pointer(UInt8)*)[0]
         size = (context.as(UInt8*) + 16_i64).as(UInt32*)[0].to_i32
         yield context, Array(UInt8).new(size) { |k| start[k] }
-        context = LibCrypt32.CertEnumCertificatesInStore(store, context)
+        context = next_context(store, context)
       end
-      LibCrypt32.CertCloseStore(store, 0_u32)
+      close_store(store)
     end
   end
 {% end %}

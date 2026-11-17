@@ -4,6 +4,13 @@
 
 ### Added
 
+- **Checksum database verification primitives.** The compiler source has
+  Ed25519 signed-note verification, checkpoint and record parsing,
+  height-8 Merkle tile proofs, and a persistent consistency-checked
+  checkpoint cache. Fixture bytes are kept unchanged across Git line-ending
+  settings, and cache writes replace an existing checkpoint through an
+  exclusive same-directory file. Package downloads do not use them yet.
+  Independent cryptographic review is required before anything depends on them.
 - **`iyi doc --json [DIR]` prints a package's exported APIs as data.**
   The package path and compiler identity accompany its modules, ordered by
   path, each carrying the same API and doc comments as `iyi mod dump --json`.
@@ -28215,7 +28222,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 29,007-line library and nothing else. Every other
+  written against iyi's own 29,056-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

@@ -3062,7 +3062,7 @@ class IyiScheduler
     # The association, and the skip-on-success mode once the handle is on
     # the port: without it, 50 reads that answered at once left 50
     # completions that woke the next read.
-    def self.join_handle(handle : Void*) : Bool
+    @[Effect(:scheduler)]; def self.join_handle(handle : Void*) : Bool
       Pointer(Atomic(UInt64)).new(pointerof(@@port_joins).address).value.add(1_u64)
       return false if LibC.CreateIoCompletionPort(handle, Pointer(Void).new(pollfd.to_u64), 0_u64, 0_i32).address == 0_u64
       LibC.SetFileCompletionNotificationModes(handle, 1_u8)

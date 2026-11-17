@@ -111,6 +111,11 @@ import std/slice::{Slice, Bytes}
       id_high : UInt64
     end
 
+    struct FileAttributeTagInfo
+      attributes : UInt32
+      reparse_tag : UInt32
+    end
+
     fun GetFileInformationByHandleEx(handle : Void*, info_class : Int32, info : Void*, size : UInt32) : Int32
     fun GetComputerNameW(buf : UInt16*, size : UInt32*) : Int32
     fun GetFinalPathNameByHandleW(handle : Void*, path : UInt16*, count : Int32, flags : Int32) : Int32
@@ -1429,6 +1434,7 @@ private def dirname_of(path : String) : String
   end
 end
 
+@[Effect(:observation_channel)]
 private def normalize_path(path : String) : String
   {% if flag?(:win32) %}
     wide = __iyi_wide_path(path.to_unsafe)
@@ -1569,12 +1575,28 @@ private def stat_path(real : String) : {UInt8, UInt8, UInt64, Int64}
       fail_observation unless error == 2
       return {0_u8, 0_u8, 0_u64, 0_i64}
     end
+    file_type = LibC.GetFileType(handle)
+    if file_type == 2 || file_type == 3
+      LibC.CloseHandle(handle)
+      # Crystal's Windows File.info reports zero FILETIME and zero size for
+      # these handles. This sentinel represents that exact metadata only.
+      return {1_u8, file_type == 2 ? 4_u8 : 6_u8, 0_u64, -9223372036854775807_i64 - 1_i64}
+    elsif file_type != 1
+      LibC.CloseHandle(handle)
+      fail_observation
+      return {0_u8, 0_u8, 0_u64, 0_i64}
+    end
     basic = uninitialized LibKernel32::FileBasicInfo
     standard = uninitialized LibKernel32::FileStandardInfo
     basic_ok = LibKernel32.GetFileInformationByHandleEx(handle, 0, pointerof(basic).as(Void*), sizeof(LibKernel32::FileBasicInfo).to_u32)
     standard_ok = LibKernel32.GetFileInformationByHandleEx(handle, 1, pointerof(standard).as(Void*), sizeof(LibKernel32::FileStandardInfo).to_u32)
+    tag_info = uninitialized LibKernel32::FileAttributeTagInfo
+    tag_ok = 1
+    if basic_ok != 0 && (basic.attributes & 0x400_u32) != 0_u32
+      tag_ok = LibKernel32.GetFileInformationByHandleEx(handle, 9, pointerof(tag_info).as(Void*), sizeof(LibKernel32::FileAttributeTagInfo).to_u32)
+    end
     LibC.CloseHandle(handle)
-    if basic_ok == 0 || standard_ok == 0 || basic.write_time < 0_i64 || standard.delete_pending != 0_u8 || standard.end_of_file < 0_i64
+    if basic_ok == 0 || standard_ok == 0 || tag_ok == 0 || basic.write_time < 0_i64 || standard.delete_pending != 0_u8 || standard.end_of_file < 0_i64
       fail_observation
       return {0_u8, 0_u8, 0_u64, 0_i64}
     end
@@ -1583,7 +1605,19 @@ private def stat_path(real : String) : {UInt8, UInt8, UInt64, Int64}
       fail_observation
       return {0_u8, 0_u8, 0_u64, 0_i64}
     end
-    type = standard.directory == 0_u8 ? 1_u8 : 2_u8
+    type = if (basic.attributes & 0x400_u32) != 0_u32
+             case tag_info.reparse_tag
+             when 0xA000000C_u32, 0xA0000003_u32 then 3_u8
+             when 0x80000023_u32                 then 7_u8
+             else                                     0_u8
+             end
+           else
+             standard.directory == 0_u8 ? 1_u8 : 2_u8
+           end
+    if type == 0_u8
+      fail_observation
+      return {0_u8, 0_u8, 0_u64, 0_i64}
+    end
     {1_u8, type, standard.end_of_file.to_u64, ticks * 100_i64}
   {% else %}
     {0_u8, 0_u8, 0_u64, 0_i64}

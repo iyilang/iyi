@@ -180,9 +180,23 @@ module Iyi
 
     def self.format_site(program : Program, location : Location?) : String
       return "src:<unknown>:0" unless location
-      loc = location.expanded_location || location
-      raw_file = loc.read_from.as?(String) || loc.filename.as?(String)
+      loc = location
       line = loc.line_number
+      # Inline macro text retains its original line even when the expansion
+      # itself is attributed to the surrounding `{% if %}`.
+      while (virtual = loc.filename).is_a?(VirtualFile)
+        outer = virtual.expanded_location
+        origin = virtual.line_origins.try &.[line]?
+        if outer && origin
+          loc = outer
+          line = origin
+        else
+          loc = loc.expanded_location || loc
+          line = loc.line_number
+          break
+        end
+      end
+      raw_file = loc.read_from.as?(String) || loc.filename.as?(String)
 
       return "src:main.iyi:#{line}" if raw_file.nil? || raw_file.empty? || raw_file == "eval"
 
@@ -272,7 +286,8 @@ module Iyi
       def initialize(@program : Program,
                      @in_runtime_file : Bool,
                      @enclosing_def : Def? = nil,
-                     @is_enclosing_def_annotated : Bool = false)
+                     @is_enclosing_def_annotated : Bool = false,
+                     @in_proc_literal : Bool = false)
         @not_reusable = [] of NotReusableReason
         @rg3_sites = [] of RG3Site
         @visited_nodes = Set(UInt64).new
@@ -324,6 +339,11 @@ module Iyi
         if target_defs = node.target_defs
           target_defs.each do |target_def|
             if target_def.is_a?(External) || target_def.owner.is_a?(LibType)
+              # A proc wrapper can call a top-level runtime fun; External also
+              # represents those definitions, not only lib declarations.
+              next if @in_proc_literal && is_rt && target_def.is_a?(External) &&
+                      (fun_def = target_def.fun_def?) && fun_def.body &&
+                      Effects.in_runtime_library_file?(@program, fun_def)
               next if target_def.is_a?(External) && target_def.real_name.starts_with?("llvm.")
 
               is_global = target_def.is_a?(External) && target_def.external_var? ||
@@ -460,7 +480,7 @@ module Iyi
           elsif node.is_a?(ProcLiteral)
             next unless visited_elements.add?(node.object_id)
             in_runtime = in_runtime_library_file?(program, node)
-            visitor = ClosureVisitor.new(program, in_runtime_file: in_runtime, enclosing_def: nil, is_enclosing_def_annotated: false)
+            visitor = ClosureVisitor.new(program, in_runtime_file: in_runtime, enclosing_def: nil, is_enclosing_def_annotated: false, in_proc_literal: true)
             node.def.body.accept(visitor)
             not_reusable.concat(visitor.not_reusable)
             rg3_sites.concat(visitor.rg3_sites) if in_runtime

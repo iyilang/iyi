@@ -61,6 +61,81 @@ describe "Iyi::Stale S5a: Trace reader and wire format" do
     Dir.delete(root) if root && Dir.exists?(root)
   end
 
+  it "represents only the exact Windows device sentinel and refuses timestamp overflow" do
+    zero_filetime = -11644473600000000000_i128
+    Iyi::Stale::Trace.metadata_time_ns(zero_filetime, true).should eq(Int64::MIN)
+    Iyi::Stale::Trace.metadata_time_ns(zero_filetime + 100, true).should be_nil
+    Iyi::Stale::Trace.metadata_time_ns(Int64::MAX.to_i128 + 1, false).should be_nil
+    Iyi::Stale::Trace.metadata_time_ns(Int64::MIN.to_i128 - 1, false).should be_nil
+    Iyi::Stale::Trace.metadata_time_ns(42_i128, false).should eq(42_i64)
+  end
+
+  it "round trips device metadata on the trace wire without conflating types" do
+    path = File.join(Dir.tempdir, "iyi-device-sentinel-fixture")
+    local_roots = Iyi::Stale::Roots.new(src: Dir.current, toolchain: "", pkg: "", scratch: "")
+    trace = IO::Memory.new
+    trace.write(TraceSpecHelpers.encode_record(Iyi::Stale::Trace::TYPE_FILE, 0_u64) do |p|
+      p.write_byte(2_u8)
+      TraceSpecHelpers.write_str(p, path)
+      TraceSpecHelpers.write_str(p, path)
+      TraceSpecHelpers.write_str(p, Dir.current)
+      p.write_bytes(0_u32, IO::ByteFormat::LittleEndian)
+      p.write_byte(1_u8)
+      p.write_byte(4_u8)
+      p.write_bytes(0_u64, IO::ByteFormat::LittleEndian)
+      p.write_bytes(Int64::MIN, IO::ByteFormat::LittleEndian)
+    end)
+    trace.write(TraceSpecHelpers.encode_end(0))
+    keyer = Iyi::Stale::Keyer.portable
+    result = Iyi::Stale::Trace.parse(trace.rewind, local_roots, keyer, check_disk_after_exit: false)
+    result.complete.should be_true
+    observation = result.observations.find { |obs| obs.kind == "file_stat" }.not_nil!
+    answer = Iyi::Stale::Trace.compute_answer("file_stat", observation.root, keyer) do |enc|
+      enc.bool(true)
+      enc.uint(4_u64)
+      enc.uint(0_u64)
+      enc.int(Int64::MIN)
+    end
+    other_type = Iyi::Stale::Trace.compute_answer("file_stat", observation.root, keyer) do |enc|
+      enc.bool(true)
+      enc.uint(6_u64)
+      enc.uint(0_u64)
+      enc.int(Int64::MIN)
+    end
+    observation.answer.should eq(answer)
+    observation.answer.should_not eq(other_type)
+  end
+
+  {% if flag?(:win32) %}
+    it "recognizes NUL metadata or explicitly refuses an unresolvable device binding" do
+      path = "NUL"
+      info = File.info(path)
+      info.type.character_device?.should be_true
+      Iyi::Stale::Trace.metadata_time_ns(info.modification_time.to_unix_ns, true).should eq(Int64::MIN)
+      trace = IO::Memory.new
+      trace.write(TraceSpecHelpers.encode_record(Iyi::Stale::Trace::TYPE_FILE, 0_u64) do |p|
+        p.write_byte(2_u8)
+        TraceSpecHelpers.write_str(p, path)
+        TraceSpecHelpers.write_str(p, File.expand_path(path))
+        TraceSpecHelpers.write_str(p, Dir.current)
+        p.write_bytes(0_u32, IO::ByteFormat::LittleEndian)
+        p.write_byte(1_u8)
+        p.write_byte(4_u8)
+        p.write_bytes(info.size.to_u64, IO::ByteFormat::LittleEndian)
+        p.write_bytes(Int64::MIN, IO::ByteFormat::LittleEndian)
+      end)
+      trace.write(TraceSpecHelpers.encode_end(0))
+      result = Iyi::Stale::Trace.parse(trace.rewind, roots, Iyi::Stale::Keyer.portable)
+      if result.complete
+        result.a3_mismatches.should be_empty
+        Iyi::Stale::Trace.replay(result.observations, Iyi::Stale::Keyer.portable, roots).should be_nil
+      else
+        result.incomplete_reason.not_nil!.should contain("cannot resolve path binding")
+        puts "NUL binding remains unproven: #{result.incomplete_reason}"
+      end
+    end
+  {% end %}
+
   {% if flag?(:unix) %}
     it "recognizes character devices in post-exit metadata" do
       path = "/dev/null"

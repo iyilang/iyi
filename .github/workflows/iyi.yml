@@ -1596,8 +1596,10 @@ jobs:
     # these comments and the documents were measured there: a three-core
     # M1 virtual machine on macOS 14.8.9, building with Xcode 15.4.
     # On the project's own Mac since 2026-11-17 (labels self-hosted, macOS,
-    # ARM64): one machine, so the darwin jobs below run one at a time. The
-    # static LLVM's cache is keyed on its SDK and Xcode build, not an image.
+    # ARM64; three runners on one M2 Pro), with darwin-std and darwin-heap22:
+    # the three take the Mac in one wave, while the four darwin-std-siblings
+    # shards run on GitHub's macos-15 (their comment says why). The static
+    # LLVM there is keyed on its SDK and Xcode build, not an image.
     runs-on: [self-hosted, macOS, ARM64]
     # A runner builds for its own major version, which on macos-15 is 15.0:
     # the tarball's `iyi` would refuse every Mac on 14, where 0.19.1's,
@@ -1960,7 +1962,14 @@ jobs:
   darwin-std-siblings:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'darwin-std-siblings') }}
-    runs-on: [self-hosted, macOS, ARM64]
+    # GitHub's macos-15, four at a time, where the other three darwin jobs
+    # take the project's Mac (three runners, one wave): the shards are four
+    # of the seven, and they walk the module exercises that Linux's and
+    # Windows's shards walk too, so they are the darwin jobs a slower,
+    # shared machine costs least. On the Mac alone the seven queued behind
+    # each other: in run 44059866819 shard 1 waited 108 minutes for a runner
+    # while the Mac ran each job in 35 to 54 (macos-15: 47 to 85).
+    runs-on: macos-15
     env:
       MACOSX_DEPLOYMENT_TARGET: "14.4"
     timeout-minutes: 105
@@ -1974,44 +1983,35 @@ jobs:
         with:
           persist-credentials: false
       - name: Install the bootstrap toolchain
-        id: tools
         run: |
-          for f in crystal coreutils pkgconf; do brew list --versions "$f" >/dev/null || brew install "$f"; done
-          echo "sdk=sdk$(xcrun --show-sdk-version)-$(xcodebuild -version | awk '/Build version/ {print $3}')" >> "$GITHUB_OUTPUT"
-          echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
-          for v in LDFLAGS CPPFLAGS CFLAGS CXXFLAGS LIBRARY_PATH CPATH; do echo "$v=" >> "$GITHUB_ENV"; done
-          echo "LLVM_STATIC=$HOME/iyi-ci/llvm-static" >> "$GITHUB_ENV"
+          brew install crystal coreutils pkgconf
           echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
-      - name: The static LLVM, built once per recipe and SDK on this machine
-        run: |
-          stamp="${{ steps.tools.outputs.sdk }}-$MACOSX_DEPLOYMENT_TARGET-${{ hashFiles('scripts/build-static-llvm.sh') }}"
-          if [ "$(cat "$LLVM_STATIC/.stamp" 2>/dev/null)" != "$stamp" ]; then
-            rm -rf "$LLVM_STATIC"
-            bash scripts/build-static-llvm.sh "$LLVM_STATIC"
-            echo "$stamp" > "$LLVM_STATIC/.stamp"
-          fi
+      - name: Restore the static LLVM
+        id: llvm-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/llvm-static
+          key: llvm-static-${{ runner.os }}-${{ runner.arch }}-macos-15-${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
+      - name: Build the static LLVM (cache miss)
+        if: steps.llvm-cache.outputs.cache-hit != 'true'
+        run: bash scripts/build-static-llvm.sh "$HOME/llvm-static"
       - name: Build `iyi`
-        run: make iyi LLVM_CONFIG="$LLVM_STATIC/bin/llvm-config"
+        run: make iyi LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config"
       # Python 3.14, as on Linux: the oracles' modules answer as 3.14's do.
-      # brew's, in a virtual environment of the job's own: setup-python's
-      # macOS builds install under /Users/runner, which the self-hosted Mac
-      # has not, and brew's Python refuses a pip install outside a venv.
-      - name: Python 3.14, in the job's own virtual environment
-        run: |
-          brew list --versions python@3.14 >/dev/null || brew install python@3.14
-          "$(brew --prefix python@3.14)/bin/python3.14" -m venv "$RUNNER_TEMP/py"
-          echo "$RUNNER_TEMP/py/bin" >> "$GITHUB_PATH"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
       - name: Python's cryptography and Pillow, for the oracles
         run: python3 -m pip install -q cryptography pillow
       # Go, as on Linux: std/http's NO_PROXY table is held against Go's
       # net/http, std/user's reader against Go's os/user, and std/acme and
-      # std/autocert build Pebble with it. Without this step the job took the
-      # Go on the runner's PATH, the owner's /usr/local/go at go1.25.2, whose
-      # net/url refused an IPv4-mapped IPv6 literal in brackets
-      # (golang/go#75815, put right in 1.25.4): it said "unparsed" for
-      # http://[::ffff:127.0.0.1], where proxy_for and Linux's go1.27.4 say
-      # direct (job 133974766871). It installs into the runner's own tool
-      # cache; no `go.sum` here to key a cache on.
+      # std/autocert build Pebble with it. Pinned to setup-go's stable rather
+      # than whatever Go a machine carries: on the project's Mac the job took
+      # the owner's /usr/local/go at go1.25.2, whose net/url refused an
+      # IPv4-mapped IPv6 literal in brackets (golang/go#75815, put right in
+      # 1.25.4): it said "unparsed" for http://[::ffff:127.0.0.1], where
+      # proxy_for and Linux's go1.27.4 say direct (job 133974766871). No
+      # `go.sum` here to key a cache on.
       - uses: actions/setup-go@v5
         with:
           go-version: stable
@@ -2085,10 +2085,10 @@ jobs:
         run: bash bench/std_exercise.sh
 
   # heap22's gates on darwin arm64, as the `heap22` job runs them on Linux
-  # (its comment says why they are here). A job of its own, and a seventh
-  # on macOS, which waits for a runner while five of the other six run:
-  # the darwin job's 67 minutes of 120 in run 43610237136 leave no room
-  # for them, and darwin-std's runs reach 75.
+  # (its comment says why they are here). A job of its own, the third on the
+  # project's Mac beside darwin and darwin-std, one runner each: the darwin
+  # job's 67 minutes of 120 in run 43610237136 leave no room for them, and
+  # darwin-std's runs reach 75.
   darwin-heap22:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'darwin-heap22') }}

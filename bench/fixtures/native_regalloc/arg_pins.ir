@@ -1,0 +1,55 @@
+; iyi-ir 1
+module "arg_pins"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external i32 @printf(ptr, ...)
+@fmt = private constant [5 x i8] c"%ld\0A\00"
+
+define internal i64 @sum10(i64 %a, i64 %b, i64 %c, i64 %d, i64 %e, i64 %f, i64 %g, i64 %h, i64 %i, i64 %j) {
+entry:
+  %s1 = add i64 %a, %b
+  %s2 = add i64 %s1, %c
+  %s3 = add i64 %s2, %d
+  %s4 = add i64 %s3, %e
+  %s5 = add i64 %s4, %f
+  %s6 = add i64 %s5, %g
+  %s7 = add i64 %s6, %h
+  %s8 = add i64 %s7, %i
+  %s9 = add i64 %s8, %j
+  ret i64 %s9
+}
+
+define internal i64 @spread(i64 %x) {
+entry:
+  %a = mul i64 %x, 2
+  %b = mul i64 %x, 3
+  %c = mul i64 %x, 4
+  %d = mul i64 %x, 5
+  %e = mul i64 %x, 6
+  %f = mul i64 %x, 7
+  %g = mul i64 %x, 8
+  %h = mul i64 %x, 9
+  %i = mul i64 %x, 10
+  %j = mul i64 %x, 11
+  %t = call i64 (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) @sum10(i64 %a, i64 %b, i64 %c, i64 %d, i64 %e, i64 %f, i64 %g, i64 %h, i64 %i, i64 %j)
+  %k_a = add i64 %t, %a
+  %k_b = add i64 %k_a, %b
+  %k_c = add i64 %k_b, %c
+  %k_d = add i64 %k_c, %d
+  %k_e = add i64 %k_d, %e
+  %k_f = add i64 %k_e, %f
+  %k_g = add i64 %k_f, %g
+  %k_h = add i64 %k_g, %h
+  %k_i = add i64 %k_h, %i
+  %k_j = add i64 %k_i, %j
+  ret i64 %k_j
+}
+
+define i32 @main() {
+entry:
+  %r1 = call i64 (i64) @spread(i64 3)
+  %r2 = call i64 (i64) @spread(i64 10)
+  %p1 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %r1)
+  %p2 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %r2)
+  ret i32 0
+}

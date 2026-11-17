@@ -1,0 +1,6 @@
+module ovf
+
+# The hosted compiler's program with the same results as ovf.ir. Each pair is a value and its overflow flag:
+# sadd i8 100+100 wraps to -56; uadd i8 200+100 to 44; ssub i16 30000-(-10000) to -25536; usub i16 5-7 to -2;
+# smul i32 70000*70000 to 605032704; umul i64 2^32*2^32 to 0; sadd i32 5+7 to 12 without overflow.
+puts "-56 1 44 1 -25536 1 -2 1 605032704 1 0 1 12 0"

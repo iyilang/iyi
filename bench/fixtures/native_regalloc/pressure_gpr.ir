@@ -1,0 +1,67 @@
+; iyi-ir 1
+module "pressure_gpr"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external i32 @printf(ptr, ...)
+@fmt = private constant [5 x i8] c"%ld\0A\00"
+
+define internal i64 @work(i64 %x) {
+entry:
+  %a1 = add i64 %x, 1
+  %a2 = mul i64 %x, 3
+  %a3 = add i64 %x, 5
+  %a4 = mul i64 %x, 7
+  %a5 = add i64 %x, 11
+  %a6 = mul i64 %x, 13
+  %a7 = add i64 %x, 17
+  %a8 = mul i64 %x, 19
+  %a9 = add i64 %x, 23
+  %a10 = mul i64 %x, 29
+  %a11 = add i64 %x, 31
+  %a12 = mul i64 %x, 37
+  %a13 = add i64 %x, 41
+  %a14 = mul i64 %x, 43
+  %a15 = add i64 %x, 47
+  %a16 = mul i64 %x, 53
+  %a17 = add i64 %x, 59
+  %a18 = mul i64 %x, 61
+  %a19 = add i64 %x, 67
+  %a20 = mul i64 %x, 71
+  %a21 = add i64 %x, 2
+  %a22 = mul i64 %x, 4
+  %a23 = add i64 %x, 6
+  %a24 = mul i64 %x, 8
+  %s2 = add i64 %a1, %a2
+  %s3 = add i64 %s2, %a3
+  %s4 = add i64 %s3, %a4
+  %s5 = add i64 %s4, %a5
+  %s6 = add i64 %s5, %a6
+  %s7 = add i64 %s6, %a7
+  %s8 = add i64 %s7, %a8
+  %s9 = add i64 %s8, %a9
+  %s10 = add i64 %s9, %a10
+  %s11 = add i64 %s10, %a11
+  %s12 = add i64 %s11, %a12
+  %s13 = add i64 %s12, %a13
+  %s14 = add i64 %s13, %a14
+  %s15 = add i64 %s14, %a15
+  %s16 = add i64 %s15, %a16
+  %s17 = add i64 %s16, %a17
+  %s18 = add i64 %s17, %a18
+  %s19 = add i64 %s18, %a19
+  %s20 = add i64 %s19, %a20
+  %s21 = add i64 %s20, %a21
+  %s22 = add i64 %s21, %a22
+  %s23 = add i64 %s22, %a23
+  %s24 = add i64 %s23, %a24
+  ret i64 %s24
+}
+
+define i32 @main() {
+entry:
+  %r1 = call i64 (i64) @work(i64 7)
+  %r2 = call i64 (i64) @work(i64 -3)
+  %p_r1 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %r1)
+  %p_r2 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %r2)
+  ret i32 0
+}

@@ -1,0 +1,20 @@
+module jump_sparse
+
+def sparse(n : Int32) : Int32
+  case n
+  when     1 then 11
+  when   100 then 22
+  when 10000 then 33
+  when     7 then 44
+  else            -9
+  end
+end
+
+# No cases: the switch is the default's branch alone.
+def none(n : Int32) : Int32
+  n + 1
+end
+
+puts "#{sparse(1)} #{sparse(100)} #{sparse(7)} #{sparse(5)}"
+puts "#{sparse(10000)} 0 0 0"
+puts "#{none(41)}"

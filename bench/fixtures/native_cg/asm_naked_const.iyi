@@ -1,0 +1,16 @@
+@[Unsafe("the fixture holds an inline asm template in a naked function")]
+
+@[NoInline]
+@[Naked]
+fun const42 : Nil
+  asm("mov x0, #42\nret" :::: "volatile")
+end
+
+# The naked function is called through an asm branch, which leaves its x0 result in the output.
+def callconst : Int64
+  out = 0_i64
+  asm("bl _const42" : "={x0}"(out) :: "x30" : "volatile")
+  out
+end
+
+puts "#{callconst()}"

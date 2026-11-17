@@ -1,0 +1,24 @@
+module compiler/native/aarch64/abi
+
+# The aarch64 target description (SPEC 2.2, per-target ABI rules). It supplies the numbers the C-convention walk
+# in compiler/native/lower.iyi reads, for AAPCS64 on Linux and on darwin.
+#   - integer and pointer scalars: x0..x7; floating-point scalars: d0..d7
+#   - an aggregate of at most 16 bytes takes one register per leaf; a homogeneous floating-point aggregate of up
+#     to four elements takes d registers
+#   - arguments that do not fit the registers go to the stack in order, each leaf in an 8-byte slot. Darwin also
+#     sends every variadic argument to the stack; Linux passes variadic arguments like fixed ones.
+#   - an sret parameter travels in x8; a result over 16 bytes is returned through sret.
+# Refused by name, in lower.iyi: i128 until the i128 slice lands. byval is passed as a caller-made copy by isel.iyi.
+
+import compiler/native/target::{TargetDesc, TlsForm}
+import compiler/native/obj/object::{ObjFormat}
+import compiler/native/aarch64/regs::{integer_arg_regs, fp_arg_regs, indirect_result_reg, callee_saved_gprs, caller_saved_gprs, caller_saved_fprs, scratch_gprs, scratch_fprs, fp_reg, lr_reg}
+
+# The aarch64 description for one platform. Darwin uses Mach-O, the TLV descriptor form for thread-locals and the
+# variadic rule; Linux uses ELF, the thread pointer and local-exec.
+pub def aarch64_target(darwin : Bool) : TargetDesc
+  name = darwin ? "aarch64-apple-darwin" : "aarch64-unknown-linux-gnu"
+  format = darwin ? ObjFormat::MachO : ObjFormat::Elf
+  tls = darwin ? TlsForm::TlvDescriptor : TlsForm::LocalExec
+  TargetDesc.new(name, darwin, format, 64, 16_i64, integer_arg_regs, fp_arg_regs, indirect_result_reg, 16_i64, 4, darwin, callee_saved_gprs, caller_saved_gprs + caller_saved_fprs, scratch_gprs, scratch_fprs, fp_reg, lr_reg, tls)
+end

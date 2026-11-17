@@ -131,6 +131,7 @@ if [ "$PART" = all ] || [ "$PART" = cases ]; then
   run_case "no flag" noflag ""
   echo "== an idle keep-alive connection (bench/http_idle.iyi), on and off"
   run_http_idle "http idle" httpidle "--release -Dheap_partitions"
+  run_http_idle "http idle, plain" httpidleplain "-Dheap_partitions"
   run_http_idle "http idle, no flag" httpidleoff "--release"
 fi
 
@@ -260,16 +261,18 @@ prove_layout_refused() { # label dir build|run message awk-script
 }
 
 # A copy of std/http.iyi patched by *awk-script*, ahead of the tree's on
-# `IYI_PATH`, under bench/http_idle.iyi: it must fail at "FAIL: phrase".
-prove_http_idle_fails() { # label dir awk-script
-  local label="$1" dir="$2" script="$3" phrase="idle:"
+# `IYI_PATH`, under bench/http_idle.iyi built with *build-flags*: it must
+# fail at "FAIL: phrase".
+prove_http_idle_fails() { # label dir build-flags awk-script
+  local label="$1" dir="$2" flags="$3" script="$4" phrase="idle:"
   mkdir -p "$WORK/$dir/std"
   if ! awk "$script" "$REPO/src/std/http.iyi" > "$WORK/$dir/std/http.iyi"; then
     echo "  $label: what the copy changes is not in std/http.iyi any more"
     status=1
     return
   fi
-  if ! IYI_PATH="$WORK/$dir${PSEP}$REPO/src" env -u IYI_OPTS "$IYI" build --release -Dheap_partitions \
+  # shellcheck disable=SC2086
+  if ! IYI_PATH="$WORK/$dir${PSEP}$REPO/src" env -u IYI_OPTS "$IYI" build $flags \
        -o "$WORK/$dir/program" "$REPO/bench/http_idle.iyi" >"$WORK/$dir/build.log" 2>&1; then
     echo "  $label: the patched std/http did not build"
     sed -n '1,12p' "$WORK/$dir/build.log"
@@ -598,8 +601,14 @@ if [ "$PART" = all ] || [ "$PART" = broken ]; then
   # wait for the next, so the last request's objects stay in the parked
   # fiber's stack and its partition's idle collection keeps them. Both
   # halves go: the call alone frees most of it on Linux (the request; a
-  # 1 KiB buffer stays, IdleFix3's diag).
-  prove_http_idle_fails "a parked connection that keeps its last request" httpkeeps \
+  # 1 KiB buffer stays, IdleFix3's diag). Built plain, where the loop's
+  # locals keep their stack slots: since the master merge (with master's
+  # std/tls, std/rsa and std/x509 swapped into heap22's tree, and only then) a
+  # --release build of this copy on Linux left nothing of the request in
+  # the parked frames, and passed in 3 runs of 3, while the plain build
+  # fails with all 32 partitions holding their requests, and the fixed
+  # loop passes both ways (the "http idle, plain" row above).
+  prove_http_idle_fails "a parked connection that keeps its last request" httpkeeps "-Dheap_partitions" \
     '/^  \{% begin %\}/ { inside = 1 } inside { found = found + gsub(/flag\?\(:heap_partitions\)/, "false") } inside && /^  end\{% end %\}$/ { inside = 0 }
      /^# `Server\.serve_h1` under `-Dheap_partitions`/ { tail = 1 } tail { if (/IyiRoots\.clear_dead_stack if conn\.available == 0$/) found = found + 1; next }
      { print } END { if (found != 5) exit 3 }'

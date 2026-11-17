@@ -311,8 +311,9 @@ prove_layout_refused() {
   echo "  $label: stops with exit $(cat "$WORK/$dir/b/run1.code"): \"$(grep -h -m1 "$message" "$WORK/$dir/b/run1.out" "$WORK/$dir/b/run1.err" | head -1)\""
 }
 
-# heap_local.sh's interface for bench/http_idle.iyi: label dir awk-script
-# (src/std/http.iyi). Both trees copied, as prove_caught does. A parked
+# heap_local.sh's interface for bench/http_idle.iyi: label dir build-flags
+# awk-script (src/std/http.iyi); heap_local's build flags are its own, and
+# this script builds as below. Both trees copied, as prove_caught does. A parked
 # connection's partition that keeps its last request holds live objects
 # the program still names, which no heap word shows wrong: the program's
 # `idle:` check sees it (`VALUE_COPIES`), and the sound program, built
@@ -324,7 +325,7 @@ prove_layout_refused() {
 # requests", with the chaos or the stress alone; the release build passes
 # at seeds 1-3, TailHunt5).
 prove_http_idle_fails() {
-  local label="$1" dir="$2" script="$3"
+  local label="$1" dir="$2" script="$4"
   chosen "$dir" || return 0
   local FLAGS="--release $FLAGS"
   local sound_dir="$WORK/sound-http_idle"

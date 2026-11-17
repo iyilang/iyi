@@ -845,8 +845,31 @@ PY
     dropped="$dropped.exe"
     cp -p "$(dirname "$IYI")/LLVM-C.dll" "$WORK/LLVM-C.dll"
     build_flags=(-D strict_multi_assign -D preview_overload_order -Dwithout_openssl -Dwithout_zlib -Dwithout_iconv -Dgc_none)
+    # The same library directory `make iyi` links against: the bootstrap
+    # package's `lib`, where the `.lib` files for llvm and the rest are.
+    [ -z "${CRYSTAL_LIBRARY_PATH:-}" ] || build_flags+=("--link-flags=/LIBPATH:$CRYSTAL_LIBRARY_PATH")
   fi
-  "$BASH" "$REPO/bench/stale_store_concurrency.sh" --crystal build ${build_flags[@]+"${build_flags[@]}"} -D rg8_drop_def_body -o "$dropped" "$REPO/src/compiler/iyi.cr"
+  if ! "$BASH" "$REPO/bench/stale_store_concurrency.sh" --crystal build ${build_flags[@]+"${build_flags[@]}"} -D rg8_drop_def_body -o "$dropped" "$REPO/src/compiler/iyi.cr"; then
+    if [ "$WINDOWS" -eq 1 ]; then
+      # `Cannot locate the .lib files for ...` names what is missing and not
+      # where it looked: say what is on the two places the linker searches.
+      echo "  [diagnostic] CRYSTAL_LIBRARY_PATH=${CRYSTAL_LIBRARY_PATH:-}"
+      echo "  [diagnostic] LIB=${LIB:-}"
+      "$PY" - <<'PY' || true
+import os
+dirs = [os.environ.get("CRYSTAL_LIBRARY_PATH", "")] + os.environ.get("LIB", "").split(";")
+for directory in dict.fromkeys(d for d in dirs if d):
+    try:
+        names = sorted(n for n in os.listdir(directory) if n.lower().endswith((".lib", ".dll")))
+    except OSError as error:
+        print(f"  [diagnostic] {directory}: {error}")
+        continue
+    wanted = [n for n in names if any(k in n.lower() for k in ("llvm", "gc", "iconv", "pcre"))]
+    print(f"  [diagnostic] {directory}: {len(names)} libraries; llvm/gc/iconv/pcre: {wanted}")
+PY
+    fi
+    return 1
+  fi
   "$PY" "$REPO/bench/stale_rg8.py" --repo "$REPO" --compiler "$dropped" \
     --work "$WORK/rg8-drop-def-body" --program "$REPO/samples/iyi/calc.iyi" \
     --kind body --expect-failure-kind body

@@ -11,23 +11,22 @@ case "$(uname -s)" in
 esac
 PY=""
 for candidate in python3 python; do
-  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys' >/dev/null 2>&1; then PY="$candidate"; break; fi
+  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import cryptography' >/dev/null 2>&1; then PY="$candidate"; break; fi
 done
 export IYI_PATH="$REPO/src${PSEP}$REPO/samples/iyi"
 status=0
-oracle=""
+if [ -z "$PY" ]; then
+  echo 'FAIL: Python cryptography is required for the COSE oracle and mutation proofs'
+  exit 1
+fi
+oracle="$WORK/oracle.txt"
 echo '== independent cryptography oracle'
-if [ -n "$PY" ] && "$PY" -c 'import cryptography' >/dev/null 2>&1; then
-  if "$PY" "$REPO/bench/std_cose_oracle.py" "$WORK/oracle.txt"; then
-    oracle="$WORK/oracle.txt"
-  else
-    echo '  FAIL: cryptography oracle could not generate vectors'; status=1
-  fi
-else
-  echo '  SKIP: Python cryptography unavailable; the fixed RFC 8032 vector still runs'
+if ! "$PY" "$REPO/bench/std_cose_oracle.py" "$oracle"; then
+  echo 'FAIL: cryptography oracle could not generate vectors'
+  exit 1
 fi
 run_program() {
-  if [ -n "$oracle" ]; then "$1" "$oracle"; else "$1"; fi
+  "$1" "$oracle"
 }
 build_run() {
   local name="$1"; shift
@@ -47,10 +46,7 @@ build_run release --release
 
 echo '== broken-copy proofs'
 prove_broken() {
-  local label="$1" old="$2" new="$3" needs_oracle="$4"
-  if [ -z "$PY" ] || { [ "$needs_oracle" = yes ] && [ -z "$oracle" ]; }; then
-    echo "  SKIP $label: Python or cryptography unavailable"; return
-  fi
+  local label="$1" old="$2" new="$3"
   mkdir -p "$WORK/patched/std"
   if ! OLD="$old" NEW="$new" SRC="$REPO/src/std/cose.iyi" DST="$WORK/patched/std/cose.iyi" "$PY" - <<'PY'
 import os
@@ -70,10 +66,10 @@ PY
     echo "  caught $label"
   fi
 }
-prove_broken 'EdDSA verification bypass' 'return key.verify(message, signature) if @alg == CoseAlg::EdDSA' 'return true if @alg == CoseAlg::EdDSA' no
-prove_broken 'duplicate label accepted' 'if seen[label]?' 'if false' no
-prove_broken 'small-order Ed25519 key accepted' 'if CoseEd.small_order?(x)' 'if false' no
-prove_broken 'ECDSA COSE signature width' 'width = @alg == CoseAlg::ES256 ? 32 : 48' 'width = @alg == CoseAlg::ES256 ? 31 : 48' yes
-prove_broken 'RSA-PSS verified as PKCS1 v1.5' 'return key.verify_pss(RsaHash::SHA256, message, signature) if @alg == CoseAlg::PS256' 'return key.verify_pkcs1v15(RsaHash::SHA256, message, signature) if @alg == CoseAlg::PS256' yes
+prove_broken 'EdDSA verification bypass' 'return key.verify(message, signature) if @alg == CoseAlg::EdDSA' 'return true if @alg == CoseAlg::EdDSA'
+prove_broken 'duplicate label accepted' 'if seen[label]?' 'if false'
+prove_broken 'small-order Ed25519 key accepted' 'if CoseEd.small_order?(x)' 'if false'
+prove_broken 'ECDSA COSE signature width' 'width = @alg == CoseAlg::ES256 ? 32 : 48' 'width = @alg == CoseAlg::ES256 ? 31 : 48'
+prove_broken 'RSA-PSS verified as PKCS1 v1.5' 'return key.verify_pss(RsaHash::SHA256, message, signature) if @alg == CoseAlg::PS256' 'return key.verify_pkcs1v15(RsaHash::SHA256, message, signature) if @alg == CoseAlg::PS256'
 [ "$status" -eq 0 ] && echo 'the std/cose exercise holds' || echo 'the std/cose exercise failed'
 exit "$status"

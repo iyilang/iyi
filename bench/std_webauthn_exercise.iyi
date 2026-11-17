@@ -59,6 +59,10 @@ def verify_case(row : Any, label : String, is_w3c : Bool = false) : Bool
   require_error(reg_error, label)
   raise "ASSERTION FAILED: #{label}: registration ID not returned" unless credential.credential_id == registration.credential_id
   raise "ASSERTION FAILED: #{label}: key bytes lost" if credential.key_bytes.empty?
+  expected_registration_count = row["registration_count"].as_i64
+  unless credential.sign_count == expected_registration_count
+    raise "ASSERTION FAILED: #{label} registration count: #{credential.sign_count}, expected #{expected_registration_count}"
+  end
   if row["expect_extensions"]?
     raise "ASSERTION FAILED: #{label}: registration extensions missing" unless credential.extensions
   end
@@ -87,6 +91,22 @@ def verify_case(row : Any, label : String, is_w3c : Bool = false) : Bool
     return true
   end
   require_error(assert_error, label)
+  expected_assertion_count = row["assertion_count"].as_i64
+  unless result.sign_count == expected_assertion_count
+    raise "ASSERTION FAILED: #{label} assertion count: #{result.sign_count}, expected #{expected_assertion_count}"
+  end
+  if replay = row["check_replay"]?
+    if replay.as_bool
+      replay_expected = AssertionExpectation.new(assertion_challenge, [origin], rp, credential.credential_id,
+        credential.key, result.sign_count, handle, uv)
+      replay_result = assertion.verify(replay_expected)
+      unless replay_result.is_a?(WebAuthnError)
+        raise "ASSERTION FAILED: #{label} replay: signed assertion accepted twice"
+      end
+      check_error(replay_result, "verification/counter", "#{label} replay")
+      puts "  signed counter transition #{credential.sign_count} to #{result.sign_count}; replay refused"
+    end
+  end
   if row["expect_extensions"]?
     raise "ASSERTION FAILED: #{label}: assertion extensions missing" unless result.extensions
   end

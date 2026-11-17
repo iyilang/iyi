@@ -26,5 +26,7 @@
   "assertion_challenge": "__79_Pv6-fj39vX08_Lx8O_u7ezr6uno5-bl5OPi4eA",
   "origin": "http://localhost:49655",
   "rp_id": "localhost",
+  "registration_count": 1,
+  "assertion_count": 2,
   "chrome": "HeadlessChrome/156.0.8078.4"
 }

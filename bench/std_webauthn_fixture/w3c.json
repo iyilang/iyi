@@ -8,6 +8,8 @@
     "origin": "https://example.org",
     "policy": "verify",
     "refusal": "",
+    "registration_count": 0,
+    "assertion_count": 0,
     "registration": {
       "id": "-R85HbTJsv3g6nAYnLo_tj9Xm6YSKzOtlP8-wzAIS-Q",
       "rawId": "-R85HbTJsv3g6nAYnLo_tj9Xm6YSKzOtlP8-wzAIS-Q",
@@ -38,6 +40,8 @@
     "origin": "https://example.org",
     "policy": "verify",
     "refusal": "",
+    "registration_count": 0,
+    "assertion_count": 0,
     "registration": {
       "id": "RV7zTiBDqH2z1K_rObvLbMMt-TR8eJqGXs3KEpy-9Yw",
       "rawId": "RV7zTiBDqH2z1K_rObvLbMMt-TR8eJqGXs3KEpy-9Yw",
@@ -68,6 +72,8 @@
     "origin": "https://example.org",
     "policy": "verify",
     "refusal": "cross_origin",
+    "registration_count": 0,
+    "assertion_count": 0,
     "registration": {
       "id": "bhBQwNLKLwfHVcssZqdMZPpDBlwY-Tg1TZkV2yvVzlc",
       "rawId": "bhBQwNLKLwfHVcssZqdMZPpDBlwY-Tg1TZkV2yvVzlc",
@@ -98,6 +104,8 @@
     "origin": "https://example.org",
     "policy": "verify",
     "refusal": "cross_origin",
+    "registration_count": 0,
+    "assertion_count": 0,
     "registration": {
       "id": "uK1ZuZYEerGOLOtXIGw2LaV0WHk0gfSo6_EBx8p8wPE",
       "rawId": "uK1ZuZYEerGOLOtXIGw2LaV0WHk0gfSo6_EBx8p8wPE",
@@ -128,6 +136,8 @@
     "origin": "https://example.org",
     "policy": "verify",
     "refusal": "",
+    "registration_count": 0,
+    "assertion_count": 0,
     "registration": {
       "id": "OnYaThZ0rWxDBYaUNcDu6cKGFywim7kbSLStoUDAhjQXAxMFzOW0onqI1_5yil9aYn3ncbS0Dnfxh5gMEk-f6DLXE2AQQ2oFbM5xZoBYfSMYfPH8LGKuhvw-UI7pYX_8dPvBBIjsFuxekJYyhmmomHCbZV5UlzjGZsGuYoHcO19zPCUdPu-3bucKOAXKkbzBjknI3H9j68tIa6jD1qtSuI_3LGpbtHwy8-6Gg6PdyKv2CHBEjsiiG1vcsYPH3q2HAlVXWm35brG2oqEBl4DLqeSIexf_EWS7vMEOsNhu11mEzT-jQZEDAkUH39nOj5LFaveRTLC7ULh7qCoxK7fc2TAo29zWrbJml5ZnFYM1Fx42gtN3VXAe2_nYcoRqKR1J5X7wnaHsY39QUu0qp0B_fmGCdGjpS0YYRPTGe-X6nGBVpWb4_fwp1L94qf8nX1UsxoulQ_o5Yu6jb9HqhFN2RXfQIdChge_B9hAKsuQRADniHuFpcL2nQythNEkhVa_BJilbOi7M0Sxmpo40CWnplePoycR245XPwhIDQUEQd5R08cl5dAZjfb5BTxMlGdO_DOTwFzTvDhoSw61gT_FddmsWJNtqWnzL_3vDXJkI35Sronfgr0jwT_PRY4HEflo37TmIpno7HsqpJjNrMzkf_wQSj4aZkcn6vZBbb-PO71-LYw7BxdJjbVsZYa1cpQBBcPb15IJ5Kq2YmwKH_pHlxHlAM5cVLx-laqebFW60fmyOo-sXXDTPs4rY53KHRjmxAj1NATlclOVYMWccwCKqb6HgKgLC5KvHdvaWDlH4O3GowPIHtqNHVzl3gSyapUgLABGqc5vUt2wYwADMR1fM7MuSDwB8QMAON-WrIUds2fYFSo__tVoQj1xwbizqIEnYH9Mh_0fSpXYbCACVWrHU9IifVahOJgHGhPF6St50U-pJWR0LWcjZp2UFL2IhnPbvSl3ZU58GF9brvrznwABFVHXRhEniXEnvmh4-_hjAkILr4gWNfDR976qS8GZFU7gFx9drv85fMwrKIgrJCniTgPxHnqDYeTIFgTzKWQqRL2ma1S-ZGhvApQPD7EsqaWcZ48JlkahxJ_cwXMfnL0yOOTVeuwalsQQpkPOHEO56phLuQ3S7guh4WFpwqWwqa0fxAaT_FUvk_XajFnV3pcxU2RZ8FUxprDVIXkTMiYtxnhvjzJwPtWJLj4oNrhCUekG_hItsG7M9EAbsB31-KG4_KntIQ3FjkBGUSf4nIegaXtIzPTMccSB2XaWPra5zwZ2ajEUJz4rB6dmLeZpSdFCQaXObWCPz-0lmY4IAM0JpiO78pT5YDg-eDf4JkvwuU6l-BTY5-YV3BY-ZW9vUHO_b",
       "rawId": "OnYaThZ0rWxDBYaUNcDu6cKGFywim7kbSLStoUDAhjQXAxMFzOW0onqI1_5yil9aYn3ncbS0Dnfxh5gMEk-f6DLXE2AQQ2oFbM5xZoBYfSMYfPH8LGKuhvw-UI7pYX_8dPvBBIjsFuxekJYyhmmomHCbZV5UlzjGZsGuYoHcO19zPCUdPu-3bucKOAXKkbzBjknI3H9j68tIa6jD1qtSuI_3LGpbtHwy8-6Gg6PdyKv2CHBEjsiiG1vcsYPH3q2HAlVXWm35brG2oqEBl4DLqeSIexf_EWS7vMEOsNhu11mEzT-jQZEDAkUH39nOj5LFaveRTLC7ULh7qCoxK7fc2TAo29zWrbJml5ZnFYM1Fx42gtN3VXAe2_nYcoRqKR1J5X7wnaHsY39QUu0qp0B_fmGCdGjpS0YYRPTGe-X6nGBVpWb4_fwp1L94qf8nX1UsxoulQ_o5Yu6jb9HqhFN2RXfQIdChge_B9hAKsuQRADniHuFpcL2nQythNEkhVa_BJilbOi7M0Sxmpo40CWnplePoycR245XPwhIDQUEQd5R08cl5dAZjfb5BTxMlGdO_DOTwFzTvDhoSw61gT_FddmsWJNtqWnzL_3vDXJkI35Sronfgr0jwT_PRY4HEflo37TmIpno7HsqpJjNrMzkf_wQSj4aZkcn6vZBbb-PO71-LYw7BxdJjbVsZYa1cpQBBcPb15IJ5Kq2YmwKH_pHlxHlAM5cVLx-laqebFW60fmyOo-sXXDTPs4rY53KHRjmxAj1NATlclOVYMWccwCKqb6HgKgLC5KvHdvaWDlH4O3GowPIHtqNHVzl3gSyapUgLABGqc5vUt2wYwADMR1fM7MuSDwB8QMAON-WrIUds2fYFSo__tVoQj1xwbizqIEnYH9Mh_0fSpXYbCACVWrHU9IifVahOJgHGhPF6St50U-pJWR0LWcjZp2UFL2IhnPbvSl3ZU58GF9brvrznwABFVHXRhEniXEnvmh4-_hjAkILr4gWNfDR976qS8GZFU7gFx9drv85fMwrKIgrJCniTgPxHnqDYeTIFgTzKWQqRL2ma1S-ZGhvApQPD7EsqaWcZ48JlkahxJ_cwXMfnL0yOOTVeuwalsQQpkPOHEO56phLuQ3S7guh4WFpwqWwqa0fxAaT_FUvk_XajFnV3pcxU2RZ8FUxprDVIXkTMiYtxnhvjzJwPtWJLj4oNrhCUekG_hItsG7M9EAbsB31-KG4_KntIQ3FjkBGUSf4nIegaXtIzPTMccSB2XaWPra5zwZ2ajEUJz4rB6dmLeZpSdFCQaXObWCPz-0lmY4IAM0JpiO78pT5YDg-eDf4JkvwuU6l-BTY5-YV3BY-ZW9vUHO_b",
@@ -158,6 +168,8 @@
     "origin": "https://example.org",
     "policy": "verify",
     "refusal": "",
+    "registration_count": 0,
+    "assertion_count": 0,
     "registration": {
       "id": "yab1s0YtAoc_6gxWhiI0-Z8IFygITlEbt3YCAaiQVKU",
       "rawId": "yab1s0YtAoc_6gxWhiI0-Z8IFygITlEbt3YCAaiQVKU",
@@ -188,6 +200,8 @@
     "origin": "https://example.org",
     "policy": "verify",
     "refusal": "",
+    "registration_count": 0,
+    "assertion_count": 0,
     "registration": {
       "id": "lTri3Z8osaHVgCyD4fZYM7uXaaCN6C2BK8J8E_xvBqk",
       "rawId": "lTri3Z8osaHVgCyD4fZYM7uXaaCN6C2BK8J8E_xvBqk",
@@ -218,6 +232,8 @@
     "origin": "https://example.org",
     "policy": "verify",
     "refusal": "",
+    "registration_count": 0,
+    "assertion_count": 0,
     "registration": {
       "id": "mSoYrMg_Z1M2AMETiktMS9I23hNinPAl7RfLALALdN8",
       "rawId": "mSoYrMg_Z1M2AMETiktMS9I23hNinPAl7RfLALALdN8",
@@ -248,6 +264,8 @@
     "origin": "https://example.org",
     "policy": "verify",
     "refusal": "",
+    "registration_count": 0,
+    "assertion_count": 0,
     "registration": {
       "id": "zp-EDtllmVgM0UD7x7syMGM_UPYQQa_3Mwiuccqoor0",
       "rawId": "zp-EDtllmVgM0UD7x7syMGM_UPYQQa_3Mwiuccqoor0",
@@ -278,6 +296,8 @@
     "origin": "https://example.org",
     "policy": "ignore",
     "refusal": "",
+    "registration_count": 0,
+    "assertion_count": 0,
     "registration": {
       "id": "7Ce-x1IciUu7ghEF6jckyQ53DPH6NUFX7xjQ8Y94vqk",
       "rawId": "7Ce-x1IciUu7ghEF6jckyQ53DPH6NUFX7xjQ8Y94vqk",
@@ -308,6 +328,8 @@
     "origin": "https://example.org",
     "policy": "ignore",
     "refusal": "",
+    "registration_count": 0,
+    "assertion_count": 0,
     "registration": {
       "id": "CkcpUZeItu2KLXcrSU4YYkTYx5jAUpYNvIwQyRUXZ5U",
       "rawId": "CkcpUZeItu2KLXcrSU4YYkTYx5jAUpYNvIwQyRUXZ5U",
@@ -338,6 +360,8 @@
     "origin": "https://example.org",
     "policy": "ignore",
     "refusal": "",
+    "registration_count": 0,
+    "assertion_count": 0,
     "registration": {
       "id": "nEpYhq-Sg9m-Pp7FWXje39zi47NlyrGTroUMFiOPr7g",
       "rawId": "nEpYhq-Sg9m-Pp7FWXje39zi47NlyrGTroUMFiOPr7g",
@@ -368,6 +392,8 @@
     "origin": "https://example.org",
     "policy": "ignore",
     "refusal": "",
+    "registration_count": 0,
+    "assertion_count": 0,
     "registration": {
       "id": "pLpuLSz-xDZI19JcXtVlm8GPK3gVOFJ-vUkt4DJWvfQ",
       "rawId": "pLpuLSz-xDZI19JcXtVlm8GPK3gVOFJ-vUkt4DJWvfQ",

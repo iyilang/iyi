@@ -8,6 +8,8 @@
 # asked. Constructed values have no original encoding and answer [].
 # Byte strings and text are copied; the source must not be changed while a
 # decoded value's raw bytes are still in use.
+# Depth is bounded, but total input bytes and node count are not. Callers
+# must bound the input size before decoding untrusted data.
 #
 # Pure computation: no platform, clock, randomness, or network.
 

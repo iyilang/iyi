@@ -91,7 +91,7 @@ print('  %d transitive modules, all under std/' % len(seen))
 PY
 
 echo '== proving the checks fail on broken implementations'
-for mutation in rp_id uv counter signed_data origin; do
+for mutation in rp_id uv counter counter_parse assertion_result signed_data origin; do
   mkdir -p "$WORK/$mutation/std"
   "$PY" - "$REPO/src/std/webauthn.iyi" "$WORK/$mutation/std/webauthn.iyi" "$mutation" <<'PY' || exit 1
 from pathlib import Path
@@ -101,6 +101,8 @@ patches = {
  'rp_id': ('return verification("rp_id") unless diff == 0', 'return verification("rp_id") unless true'),
  'uv': ('return verification("user_verified") if uv && flags & 4 == 0', 'return verification("user_verified") if false'),
  'counter': ('count <= expected.sign_count', 'count < expected.sign_count'),
+ 'counter_parse': ('4.times { |i| count = count * 256_i64 + auth[33 + i].to_i64 }', '4.times { |i| count = 0_i64 }'),
+ 'assertion_result': ('AssertionResult.new(count, flags, user_handle, extensions)', 'AssertionResult.new(0_i64, flags, user_handle, extensions)'),
  'signed_data': ('signed = authenticator_data + SHA256.hash_bytes(client_data_json)', 'signed = SHA256.hash_bytes(client_data_json) + authenticator_data'),
  'origin': ('return verification("origin") unless origins.includes?(origin)', 'return verification("origin") unless true'),
 }
@@ -121,7 +123,9 @@ PY
   case "$mutation" in
     rp_id) expected='rpId hash' ;;
     uv) expected='user verified' ;;
-    counter) expected='assertion counter' ;;
+    counter) expected='0/-7/none replay' ;;
+    counter_parse) expected='0/-7/none registration count' ;;
+    assertion_result) expected='0/-7/none assertion count' ;;
     signed_data) expected='0/-7/none' ;;
     origin) expected='client origin' ;;
   esac

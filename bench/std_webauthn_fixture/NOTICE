@@ -18,7 +18,9 @@ https://www.w3.org/Consortium/Legal/copyright-software
 The original hexadecimal byte strings for clientDataJSON, attestationObject,
 authenticatorData, signature, challenge, and credential ID were converted to
 unpadded base64url and packaged as WebAuthn response JSON. Names, relying
-party, origin, verification policy and expected refusal annotations were added.
+party, origin, verification policy, expected refusal and counter values were
+added. The counter values are read from bytes 33 through 36 of authenticator
+data; all the W3C vectors here have zero for both ceremonies.
 Sections 16.2 through 16.16 with supported credential algorithms are included;
 16.9 uses ES512 and 16.12 uses Ed448, neither supported by std/cose. TPM,
 Android Key, Apple and FIDO U2F statements are retained to exercise Ignore,
@@ -39,7 +41,9 @@ user verification and automatic presence. Runtime.evaluate ran
 navigator.credentials.create with ES256, attestation none and required user
 verification, then navigator.credentials.get with the returned credential and
 a separate challenge. Both responses and the supplied challenges were
-serialized as WebAuthn JSON. The shell and profile were removed afterwards.
+serialized as WebAuthn JSON. Expected registration and assertion counts of 1
+and 2 were added from the authenticator data. The shell and profile were
+removed afterwards.
 No browser profile, real authenticator or real user credential was used.
 
 W3C Software and Document license - 2023 version

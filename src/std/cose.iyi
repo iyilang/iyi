@@ -11,6 +11,7 @@
 # An Ed25519 key of small order is refused: std/curve25519 deliberately
 # accepts those RFC 8032 points, including the identity, but they cannot
 # authenticate a message.
+# The key check does not establish full prime-subgroup membership.
 #
 # Verification is computation on the caller's bytes; no platform or network.
 

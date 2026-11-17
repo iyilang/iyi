@@ -113,7 +113,9 @@ def make_case(key, alg, fmt, serial):
     origin, rp, ident, handle = "https://example.org", "example.org", os.urandom(32), b"user-17"
     pub = cose_key(key, alg)
     reg_client = client("webauthn.create", challenge, origin)
-    auth = reg_auth(rp, ident, pub)
+    registration_count = 0x01020304 + serial
+    assertion_count = registration_count + 0x102
+    auth = reg_auth(rp, ident, pub, count=registration_count)
     statement = {}
     if fmt == "packed":
         statement = {"alg": alg, "sig": sign(key, alg, auth + hashlib.sha256(reg_client).digest())}
@@ -121,13 +123,14 @@ def make_case(key, alg, fmt, serial):
         statement = {"alg": alg, "sig": sign(key, alg, auth + hashlib.sha256(reg_client).digest()), "x5c": [certificate(key, alg)]}
     att = {"fmt": "packed" if fmt.startswith("packed") else fmt, "authData": auth, "attStmt": statement}
     assertion_client = client("webauthn.get", assertion_challenge, origin)
-    assertion_auth = hashlib.sha256(rp.encode()).digest() + b"\x05" + (1).to_bytes(4, "big")
+    assertion_auth = hashlib.sha256(rp.encode()).digest() + b"\x05" + assertion_count.to_bytes(4, "big")
     assertion_sig = sign(key, alg, assertion_auth + hashlib.sha256(assertion_client).digest())
     record = {"name": f"{serial}/{alg}/{fmt}", "challenge": challenge, "assertion_challenge": assertion_challenge,
               "rp_id": rp, "origin": origin, "policy": "verify", "user_verification": True,
               "registration": response(ident, {"clientDataJSON": b64(reg_client), "attestationObject": b64(cbor(att))}),
               "assertion": response(ident, {"clientDataJSON": b64(assertion_client), "authenticatorData": b64(assertion_auth), "signature": b64(assertion_sig), "userHandle": b64(handle)}),
-              "user_handle": b64(handle), "reg_error": "", "assert_error": ""}
+              "user_handle": b64(handle), "registration_count": registration_count, "assertion_count": assertion_count,
+              "reg_error": "", "assert_error": ""}
     return record, auth, att, pub, reg_client
 
 
@@ -202,7 +205,7 @@ def negatives(key, alg, baseline, auth, att, pub, reg_client):
     emit("assertion trailing byte", "assert", "malformed", "auth_data", lambda c: auth_set(c, auth_raw(c) + b"\x00"))
     emit("assertion UV", "assert", "verification", "user_verified", lambda c: assertion_flags(c, 0x01))
     emit("assertion extension trailing", "assert", "malformed", "auth_data", lambda c: assertion_flags(c, 0x85, cbor({}) + b"\x00"))
-    emit("assertion counter", "assert", "verification", "counter", lambda c: c.update(stored_count=1))
+    emit("assertion counter", "assert", "verification", "counter", lambda c: c.update(stored_count=baseline["assertion_count"]))
     emit("assertion signature", "assert", "verification", "signature", lambda c: c["assertion"]["response"].update(signature=b64(b"bad signature")))
     def packed(case, signature=None, cert=None):
         obj = copy.deepcopy(att)
@@ -222,6 +225,9 @@ def negatives(key, alg, baseline, auth, att, pub, reg_client):
     print(json.dumps(valid_aaguid, separators=(",", ":")))
     zero = copy.deepcopy(baseline)
     zero["name"] = "both counters zero"
+    reg_auth_set(zero, auth[:33] + bytes(4) + auth[37:])
+    zero["registration_count"] = 0
+    zero["assertion_count"] = 0
     zero_data = auth_raw(zero)[:33] + bytes(4)
     auth_set(zero, zero_data)
     encoded_client = zero["assertion"]["response"]["clientDataJSON"]
@@ -264,7 +270,10 @@ def main():
             key = key_new(alg)
             for fmt in ("none", "packed", "packed-x5c"):
                 record, auth, att, pub, reg_client = make_case(key, alg, fmt, number)
+                if number == 0 and alg == -7 and fmt == "none":
+                    record["check_replay"] = True
                 print(json.dumps(record, separators=(",", ":")))
+                record.pop("check_replay", None)
                 if number == 0 and alg == -7 and fmt == "none":
                     negatives(key, alg, record, auth, att, pub, reg_client)
 

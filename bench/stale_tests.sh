@@ -165,6 +165,10 @@ if [ "$WINDOWS" -eq 1 ]; then
   r1_drive="$(cygpath -m "$WORK/basic/other_test.iyi")"
   for spelling in "$r1_unix" "$r1_drive"; do
     r1_spelling="$(run_json "$WORK/basic" "$spelling")"
+    if [ "$(printf '%s' "$r1_spelling" | json_cached)" != 1 ]; then
+      printf 'row 1 path spelling %s details: %s\n' "$spelling" "$r1_spelling" >&2
+      (cd "$WORK/basic" && "$IYI" test --cached --explain "$spelling") >&2 || true
+    fi
     expect_eq "$(printf '%s' "$r1_spelling" | json_cached)" 1 "row 1 path spelling $spelling hits"
   done
 fi

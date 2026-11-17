@@ -30,11 +30,22 @@ if [[ "${1:-}" == --crystal ]]; then
   exec "$REPO_DIR/bin/crystal" "$@"
 fi
 
+# The interpreter that runs, not `python3` by name: on a runner without
+# setup-python that name can be the Store's stub, which answers nothing.
+PY=""
+for candidate in python3 python; do
+  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys' >/dev/null 2>&1; then
+    PY="$candidate"
+    break
+  fi
+done
+[[ -n "$PY" ]] || { echo "python3 required for the store concurrency gate" >&2; exit 1; }
+
 cd "$REPO_DIR"
 BIN="$REPO_DIR/.build/stale_store_concurrency"
 [[ "$WINDOWS" == 0 ]] || BIN="$BIN.exe"
 echo "Building $BIN from this checkout..."
-bash "$REPO_DIR/bench/stale_store_concurrency.sh" --crystal build \
+"$BASH" "$REPO_DIR/bench/stale_store_concurrency.sh" --crystal build \
   -o "$BIN" "$REPO_DIR/bench/stale_store_concurrency.cr"
 
 TMP_STORE="$(mktemp -d "${TMPDIR:-/tmp}/stale_store_concurrency.XXXXXX")"
@@ -42,7 +53,7 @@ TMP_STORE="$(mktemp -d "${TMPDIR:-/tmp}/stale_store_concurrency.XXXXXX")"
 trap 'rm -rf "$TMP_STORE"' EXIT
 
 echo "Starting 2 concurrent processes each recording 1000 receipts..."
-python3 - "$BIN" "$TMP_STORE" <<'PY'
+"$PY" - "$BIN" "$TMP_STORE" <<'PY'
 import subprocess, sys
 
 binary, store = sys.argv[1:]

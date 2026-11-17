@@ -99,6 +99,11 @@ IYI
 # build. Runs only after a mismatch, so a passing run is unchanged.
 explain_link_difference() {
   local first="$1" second="$2" source="$3"
+  # Git's bash finds `prog_out` for `prog_out.exe`; native Python does not.
+  if [ "$WINDOWS" -eq 1 ]; then
+    [ -f "$first.exe" ] && first="$first.exe"
+    [ -f "$second.exe" ] && second="$second.exe"
+  fi
   {
     echo "    sizes: $(wc -c < "$first" | tr -d ' ') (normal) vs $(wc -c < "$second" | tr -d ' ') (stale)"
     echo "    differing bytes: $(cmp -l "$first" "$second" 2>/dev/null | wc -l | tr -d ' ')"

@@ -226,6 +226,8 @@ module Iyi
           @compile_time_value = value.value
         when CharLiteral
           @compile_time_value = value.value
+        when NumberLiteral
+          @compile_time_value = (value.integer_value rescue nil)
         else
           case value.type?
           when IntegerType, EnumType

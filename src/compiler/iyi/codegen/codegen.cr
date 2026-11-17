@@ -173,45 +173,45 @@ module Iyi
       @llvm_typer ||= LLVMTyper.new(self, LLVM::Context.new)
     end
 
-    def size_of(type)
+    def size_of(type, typer : LLVMTyper = llvm_typer)
       if type.void?
         # We need `sizeof(Void)` to be 1 because doing
         # `Pointer(Void).malloc` must work like `Pointer(UInt8).malloc`,
         # that is, consider Void like the size of a byte.
         1_u64
       else
-        llvm_typer.size_of(llvm_typer.llvm_type(type))
+        typer.size_of(typer.llvm_type(type))
       end
     end
 
-    def instance_size_of(type)
-      llvm_typer.size_of(llvm_typer.llvm_struct_type(type))
+    def instance_size_of(type, typer : LLVMTyper = llvm_typer)
+      typer.size_of(typer.llvm_struct_type(type))
     end
 
-    def align_of(type)
+    def align_of(type, typer : LLVMTyper = llvm_typer)
       if type.void?
         # We need `alignof(Void)` to be 1 because it is effectively the smallest
         # possible alignment for any type.
         1_u32
       else
-        llvm_typer.align_of(llvm_typer.llvm_type(type))
+        typer.align_of(typer.llvm_type(type))
       end
     end
 
-    def instance_align_of(type)
-      llvm_typer.align_of(llvm_typer.llvm_struct_type(type))
+    def instance_align_of(type, typer : LLVMTyper = llvm_typer)
+      typer.align_of(typer.llvm_struct_type(type))
     end
 
-    def offset_of(type, element_index)
+    def offset_of(type, element_index, typer : LLVMTyper = llvm_typer)
       return 0_u64 if type.extern_union? || type.is_a?(StaticArrayInstanceType)
-      llvm_typer.offset_of(llvm_typer.llvm_type(type), element_index)
+      typer.offset_of(typer.llvm_type(type), element_index)
     end
 
-    def instance_offset_of(type, element_index)
+    def instance_offset_of(type, element_index, typer : LLVMTyper = llvm_typer)
       # extern unions and static arrays must be value types, which always use
       # the above `offset_of` instead. Under iyi's layout a class's fields
       # are its elements; under Crystal's the type id word comes first.
-      llvm_typer.offset_of(llvm_typer.llvm_struct_type(type), element_index + (iyi_object_layout? ? 0 : 1))
+      typer.offset_of(typer.llvm_struct_type(type), element_index + (iyi_object_layout? ? 0 : 1))
     end
   end
 
@@ -232,7 +232,7 @@ module Iyi
     property last : LLVM::Value
 
     delegate abi_prefix, abi_name, main_name, raise_name, raise_overflow_name,
-      raise_cast_failed_name, malloc_name, malloc_atomic_name, realloc_name,
+      raise_cast_failed_name, raise_closure_to_c_name, malloc_name, malloc_atomic_name, realloc_name,
       get_exception_name, once_init_name, once_name,
       type_id_to_class_name_map_name, to: @program
 
@@ -286,6 +286,7 @@ module Iyi
     @iyi_preempt_on : Bool?
     @raise_overflow_fun : LLVMTypedFunction?
     @raise_cast_failed_fun : LLVMTypedFunction?
+    @raise_closure_to_c_fun : LLVMTypedFunction?
     @c_malloc_fun : LLVMTypedFunction?
     @c_realloc_fun : LLVMTypedFunction?
 
@@ -706,7 +707,7 @@ module Iyi
         case node.name
         when @codegen.malloc_name, @codegen.malloc_atomic_name, @codegen.realloc_name, @codegen.raise_name,
              @codegen.personality_name, @codegen.get_exception_name, @codegen.raise_overflow_name,
-             @codegen.raise_cast_failed_name, @codegen.once_init_name, @codegen.once_name,
+             @codegen.raise_cast_failed_name, @codegen.raise_closure_to_c_name, @codegen.once_init_name, @codegen.once_name,
              WRITE_BARRIER_BEGIN_NAME, WRITE_BARRIER_NAME, PREEMPT_NAME
           @codegen.accept node
         end
@@ -755,6 +756,7 @@ module Iyi
         iyi_define_metaclass_fun
         iyi_define_all_artifact_const_reads
         iyi_define_msvc_catch_globals if @program.has_flag?("msvc")
+        iyi_define_type_id_to_class_name_map if @program.iyi_abi?
       end
 
       # iyi: the mark loop runs inside the built program, so the pointer
@@ -1041,6 +1043,7 @@ module Iyi
 
     def visit(node : ProcLiteral)
       fun_literal_name = fun_literal_name(node)
+      @program.stale_recorder.try &.record_proc_literal(node, fun_literal_name)
       is_closure = node.def.closure?
 
       # If we don't care about a proc literal's return type then we mark the associated
@@ -1069,14 +1072,22 @@ module Iyi
       # the same answer, and the same reason, as the callees the closure
       # already copies.
       host = @iyi_closure_host
-      the_fun = codegen_fun fun_literal_name, node.def, context.type,
+      linkage_name = @program.iyi_closure_linkage_name(fun_literal_name, host.try(&.mod.name),
+        host.nil? || host.mod == @main_mod)
+      if host && linkage_name != fun_literal_name && @llvm_mod != host.mod
+        node.raise "cannot reference a private carried closure from another LLVM module"
+      end
+      the_fun = codegen_fun linkage_name, node.def, context.type,
         fun_module_info: host || @main_module_info, is_fun_literal: true,
         is_closure: is_closure, iyi_internal: !host.nil?
+      if linkage_name != fun_literal_name && the_fun.func.name != linkage_name
+        node.raise "carried closure LLVM symbol collision: #{linkage_name}"
+      end
       the_fun =
         if host
-          check_mod_fun host.mod, fun_literal_name, the_fun
+          check_mod_fun host.mod, the_fun.func.name, the_fun
         else
-          check_main_fun fun_literal_name, the_fun
+          check_main_fun the_fun.func.name, the_fun
         end
 
       set_current_debug_location(node) if @debug.line_numbers?
@@ -2004,7 +2015,7 @@ module Iyi
       meta_vars = MetaVars.new
       meta_vars[var_name] = MetaVar.new(var_name, type: from_type)
       visitor = MainVisitor.new(@program, meta_vars)
-      @program.visit_main call, visitor: visitor
+      @program.codegen_visit_main call, visitor: visitor
       call
     end
 
@@ -2057,7 +2068,7 @@ module Iyi
     def cant_pass_closure_to_c_exception_call
       @cant_pass_closure_to_c_exception_call ||= begin
         call = Call.global("raise", StringLiteral.new("passing a closure to C is not allowed")).at(UNKNOWN_LOCATION)
-        @program.visit_main call
+        @program.codegen_visit_main call
         call.raise "::raise must be of NoReturn return type!" unless call.type.is_a?(NoReturnType)
         call
       end
@@ -2068,10 +2079,17 @@ module Iyi
       set_current_debug_location(location) if location && @debug.line_numbers?
 
       if func = crystal_raise_cast_failed_fun
+        loc_str = if location
+                    if @program.iyi_abi?
+                      "#{location.expanded_location}:#{location.line_number}"
+                    else
+                      location.expanded_location.to_s
+                    end
+                  end
         call_args = [
           cast_to_void_pointer(type_id_to_class_name(type_id)),
           cast_to_void_pointer(build_string_constant(to_type.to_s)),
-          location ? cast_to_void_pointer(build_string_constant(location.expanded_location.to_s)) : llvm_context.void_pointer.null,
+          loc_str ? cast_to_void_pointer(build_string_constant(loc_str)) : llvm_context.void_pointer.null,
         ] of LLVM::Value
 
         if (rescue_block = @rescue_block)
@@ -2092,7 +2110,7 @@ module Iyi
       end
     end
 
-    def type_id_to_class_name(type_id)
+    def iyi_define_type_id_to_class_name_map : LLVM::Value
       map_name = type_id_to_class_name_map_name
 
       global = @main_mod.globals[map_name]?
@@ -2102,7 +2120,13 @@ module Iyi
         global.initializer = create_type_id_to_class_name_map
         global.global_constant = true
       end
+      global
+    end
 
+    def type_id_to_class_name(type_id)
+      map_name = type_id_to_class_name_map_name
+
+      global = iyi_define_type_id_to_class_name_map
       if @llvm_mod != @main_mod
         global = @llvm_mod.globals[map_name]?
         unless global
@@ -2370,7 +2394,18 @@ module Iyi
           ret fun_ptr
 
           position_at_end ctx_is_not_null_block
-          accept cant_pass_closure_to_c_exception_call
+          if @program.iyi_abi? && (target_fun = crystal_raise_closure_to_c_fun)
+            if (rescue_block = @rescue_block)
+              invoke_out_block = new_block "invoke_out"
+              invoke target_fun, ([] of LLVM::Value), invoke_out_block, rescue_block
+              position_at_end invoke_out_block
+            else
+              call target_fun
+            end
+            unreachable
+          else
+            accept cant_pass_closure_to_c_exception_call
+          end
         end
       end
     end
@@ -3224,7 +3259,8 @@ module Iyi
       position_at_end join_block
       yield
       return if @builder.end
-      bytes = @program.size_of(target_type)
+      # The barrier sizes with this module's typer, whose layouts are final.
+      bytes = @program.size_of(target_type, @llvm_typer)
       words = size_t(((bytes + 7_u64) // 8_u64).clamp(1_u64..))
       after_block, done_block = new_blocks "barrier_shade", "barrier_done"
       cond active, after_block, done_block
@@ -3247,6 +3283,15 @@ module Iyi
       @raise_cast_failed_fun ||= typed_fun?(@main_mod, raise_cast_failed_name)
       if raise_cast_failed_fun = @raise_cast_failed_fun
         check_main_fun raise_cast_failed_name, raise_cast_failed_fun
+      else
+        nil
+      end
+    end
+
+    def crystal_raise_closure_to_c_fun
+      @raise_closure_to_c_fun ||= typed_fun?(@main_mod, raise_closure_to_c_name)
+      if raise_closure_to_c_fun = @raise_closure_to_c_fun
+        check_main_fun raise_closure_to_c_name, raise_closure_to_c_fun
       else
         nil
       end

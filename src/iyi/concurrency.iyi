@@ -336,7 +336,7 @@ end
 # thread floor, whose 2 µs stop came back as 2000 or 3000 on 6. A
 # deadline is a duration, so the slew 6 carries and 4 does not is
 # nothing the queue wants.
-def __iyi_monotonic_ns : Int64
+@[Effect(:clock)]; def __iyi_monotonic_ns : Int64
   {% if flag?(:win32) %}
     qpc = uninitialized Int64
     freq = uninitialized Int64
@@ -458,6 +458,7 @@ class IyiFiber
   # must leave that heap on the thread that owns it. Set under the locks
   # of the select's channels, which every waker there reads it under.
   property homebound : Bool
+  {% if flag?(:iyi_observe) %} property observe_depth : Int32 = 0 {% end %}
   # A cancel from another thread, waiting in its home's list until that
   # thread takes the fiber out of its own sleep heap or poller.
   property next_cancel : IyiFiber?
@@ -539,6 +540,10 @@ class IyiFiber
   property prev_fiber : IyiFiber?
   property prev_child : IyiFiber?
   property stack_top : UInt64
+  # The distance below stack_top searched by fiber_top_holding and
+  # fiber_guard_hit?: the settled mapping's size, or STACK_BYTES for a
+  # thread's own fiber.
+  getter stack_span : UInt64
 
   property deadline : Int64
   # An io wait with a deadline is in the sleep list as well, by `deadline`;
@@ -596,6 +601,8 @@ class IyiFiber
   # 256 KiB of stack and one guard page under it, so running off the end
   # is a fault at a page rather than a quiet corruption of a neighbour's
   # chunk: every frame probes its pages top down (`iyi_probe_stack`).
+  # This is the default; a program may ask for more before its first task
+  # with stack_bytes=.
   STACK_BYTES = 262144_u64
   PAGE        =   4096_u64
 
@@ -630,6 +637,31 @@ class IyiFiber
     # MiB, and at 40,000 the commit ran out and each new task panicked.
     INITIAL_COMMIT = 16384_u64
   {% end %}
+
+  # One size per process because stacks migrate between thread pools. Set
+  # it before the first task, pooled stack or second thread. Each live task
+  # holds this much address space and a pooled stack keeps its touched
+  # pages; thread and main stacks are unaffected.
+  @@stack_bytes : UInt64 = 262144_u64
+
+  def self.stack_bytes : UInt64
+    @@stack_bytes
+  end
+
+  def self.stack_bytes=(bytes : UInt64) : UInt64
+    if bytes == @@stack_bytes
+      bytes
+    else
+      if bytes < STACK_BYTES || (bytes & 0xFFFF_u64) != 0_u64
+        raise "IyiFiber.stack_bytes: a fiber stack is a whole number of 64 KiB and no smaller than 256 KiB"
+      end
+      if IyiScheduler.stack_size_fixed?
+        raise "IyiFiber.stack_bytes: the fiber stack size is fixed once a task is spawned, a stack is pooled or a second thread is started"
+      end
+      @@stack_bytes = bytes
+      bytes
+    end
+  end
 
   def initialize
     @state = IyiFiberState::Runnable
@@ -677,6 +709,7 @@ class IyiFiber
     @prev_fiber = nil
     @prev_child = nil
     @stack_top = 0_u64
+    @stack_span = STACK_BYTES
     @wait_handle = Pointer(Void).new(0_u64)
     @io_direction = 0
     # The OVERLAPPED is the kernel's 32 bytes; the word after it is the
@@ -778,7 +811,7 @@ class IyiFiber
     settle_stack(map_stack)
   end
 
-  def map_stack : UInt64
+  @[Effect(:scheduler)]; def map_stack : UInt64
     # The runtime's own mapping (PROT_READ|PROT_WRITE = 3 on both
     # platforms), so a fiber stack exists under every allocator, Boehm
     # included, and a guard page (PROT_NONE) under it, so running off
@@ -787,8 +820,9 @@ class IyiFiber
     # `{% if %}` dies at its `{% end %}` — the file's own top-level
     # constants comment says why.
     base = 0_u64
+    bytes = @@stack_bytes
     {% if flag?(:win32) %}
-      base_ptr = LibC.VirtualAlloc(nil, STACK_BYTES, 0x2000_i32, 1_i32)
+      base_ptr = LibC.VirtualAlloc(nil, bytes, 0x2000_i32, 1_i32)
       raise "VirtualAlloc reserve failed" if base_ptr.address == 0_u64
       base = base_ptr.address
       # A stack the way Windows makes a thread's, from the top down: the
@@ -798,7 +832,7 @@ class IyiFiber
       # guard page is the kernel's to answer as for any thread: it commits
       # that page, moves the guard one down, and lowers StackLimit. Only
       # the pages a fiber reaches are ever committed.
-      top = base + STACK_BYTES
+      top = base + bytes
       committed = LibC.VirtualAlloc(Pointer(Void).new(top - INITIAL_COMMIT - PAGE), INITIAL_COMMIT + PAGE, 0x1000_i32, 4_i32)
       raise "VirtualAlloc commit failed" if committed.address == 0_u64
       old = uninitialized Int32
@@ -818,12 +852,12 @@ class IyiFiber
       # libSystem's mmap: MAP_PRIVATE|MAP_ANON is 0x1002 here rather
       # than Linux's 0x22, and failure is MAP_FAILED (every bit set)
       # rather than -errno.
-      mapped = LibC.mmap(Pointer(Void).new(0_u64), STACK_BYTES, 3, 4098, -1, 0_i64)
+      mapped = LibC.mmap(Pointer(Void).new(0_u64), bytes, 3, 4098, -1, 0_i64)
       raise "fiber stack mmap failed" if mapped.address &+ 1_u64 == 0_u64
       base = mapped.address
       LibC.mprotect(Pointer(Void).new(base), PAGE, 0)
     {% else %}
-      mapped = __iyi_conc_syscall6(IYI_SYS_MMAP, 0_i64, STACK_BYTES.to_i64, 3_i64, 34_i64, -1_i64, 0_i64)
+      mapped = __iyi_conc_syscall6(IYI_SYS_MMAP, 0_i64, bytes.to_i64, 3_i64, 34_i64, -1_i64, 0_i64)
       raise "fiber stack mmap failed" if mapped < 0 && mapped >= -4095
       base = mapped.to_u64
       __iyi_conc_syscall3(IYI_SYS_MPROTECT, base.to_i64, PAGE.to_i64, 0_i64)
@@ -834,9 +868,11 @@ class IyiFiber
   # The first frame, on a stack that is either fresh from the kernel or
   # back from the pool: every word the resume reads is written here, so a
   # reused stack starts exactly as a new one does.
-  def settle_stack(base : UInt64) : Nil
-    top = base + STACK_BYTES
+  @[Effect(:scheduler)]; def settle_stack(base : UInt64) : Nil
+    bytes = @@stack_bytes
+    top = base + bytes
     @stack_top = top
+    @stack_span = bytes
     {% if flag?(:win32) && flag?(:x86_64) %}
       entry_sp = top - 40_u64
       ret_slot = entry_sp - 8_u64
@@ -923,7 +959,7 @@ class IyiFiber
     {% end %}
     @stack_top = 0_u64
     @sp = 0_u64
-    IyiScheduler.give_stack(top - STACK_BYTES)
+    IyiScheduler.give_stack(top - @stack_span)
   end
 
   def sp_slot : Pointer(UInt64)
@@ -1461,6 +1497,7 @@ class IyiSchedLock
   end
 
   # The spin a channel's lock spins (`IyiChanLock.acquire`).
+  @[Effect(:scheduler)]
   def self.lock : Nil
     return unless IyiScheduler.shared?
     IyiChanLock.acquire(word)
@@ -1556,12 +1593,14 @@ class IyiChanLock
   #     (the user's machine), of 7      Go 20.5/13.8/9.1/8.1
   CHANNEL_WAIT = {% if flag?(:x86_64) %}512{% else %}2048{% end %}
 
+  @[Effect(:scheduler)]
   def self.acquire(word : Pointer(Atomic(UInt64)), wait : Int32 = 1) : Nil
     seen = word.value.get
     return if seen & HELD == 0_u64 && word.value.compare_and_set(seen, seen | HELD)[1]
     contend(word, wait)
   end
 
+  @[Effect(:scheduler)]
   private def self.contend(word : Pointer(Atomic(UInt64)), wait : Int32) : Nil
     turns = 0
     spinner = false
@@ -1603,6 +1642,7 @@ class IyiChanLock
     end
   end
 
+  @[Effect(:scheduler)]
   def self.lock(word : Pointer(Atomic(UInt64)), wait : Int32 = 1) : Nil
     acquire(word, wait) if IyiScheduler.shared?
   end
@@ -1617,6 +1657,7 @@ class IyiChanLock
   # shared), made 13.6 million messages a second with the exchange,
   # 15.5 million with this, and 14.9 million on the scheduler's lock.
   # On aarch64 the two are the same `stlr`.
+  @[Effect(:scheduler)]
   def self.unlock(word : Pointer(Atomic(UInt64))) : Nil
     release(word) if IyiScheduler.shared?
   end
@@ -1836,6 +1877,9 @@ class IyiScheduler
       main.stack_top = top
     {% end %}
     state.current = main
+    {% if flag?(:iyi_observe) %}
+      Std::Observe.thread_became_fiber(main)
+    {% end %}
     state.root = main
     main.home = state
     register(main)
@@ -1895,14 +1939,21 @@ class IyiScheduler
     st = state
     base = st.stack_pool
     return 0_u64 if base == 0
-    st.stack_pool = Pointer(UInt64).new(base + IyiFiber::STACK_BYTES - 8_u64).value
+    st.stack_pool = Pointer(UInt64).new(base + IyiFiber.stack_bytes - 8_u64).value
     base
   end
 
   def self.give_stack(base : UInt64) : Nil
     st = state
-    Pointer(UInt64).new(base + IyiFiber::STACK_BYTES - 8_u64).value = st.stack_pool
+    Pointer(UInt64).new(base + IyiFiber.stack_bytes - 8_u64).value = st.stack_pool
     st.stack_pool = base
+  end
+
+  # Do not create a state just to decide whether the process size is fixed.
+  def self.stack_size_fixed? : Bool
+    state = @@state
+    pooled = state.is_a?(IyiSchedulerState) ? state.stack_pool != 0_u64 : false
+    pooled || shared? || makes_stacks?
   end
 
   # What a context does first once a switch has put it back on its own
@@ -1958,7 +2009,7 @@ class IyiScheduler
   # another, took the process from 60 handles to 2,061, and a thousand
   # that each ran four tasks kept 259 MiB of stacks committed after they
   # had all ended.
-  def self.retire_thread : Nil
+  @[Effect(:scheduler)]; def self.retire_thread : Nil
     state = @@state
     return if state.is_a?(Nil)
     main = state.current
@@ -1999,13 +2050,19 @@ class IyiScheduler
       __iyi_close(state.wake_fd) if state.wake_fd > 0_i64
       __iyi_close(state.deadline_timer) if state.deadline_timer > 0_i64
     {% end %}
+    bytes = IyiFiber.stack_bytes
     base = state.stack_pool
     while base != 0_u64
-      following = Pointer(UInt64).new(base + IyiFiber::STACK_BYTES - 8_u64).value
-      __iyi_munmap(base, IyiFiber::STACK_BYTES)
+      following = Pointer(UInt64).new(base + bytes - 8_u64).value
+      __iyi_munmap(base, bytes)
       base = following
     end
     state.stack_pool = 0_u64
+    {% if flag?(:iyi_observe) %}
+      if main.is_a?(IyiFiber)
+        Std::Observe.fiber_became_thread(main)
+      end
+    {% end %}
     @@state = nil
   end
 
@@ -2029,7 +2086,7 @@ class IyiScheduler
     fiber = @@all_head
     while fiber.is_a?(IyiFiber)
       top = fiber.stack_top
-      return top if top != 0 && address <= top && address > top - IyiFiber::STACK_BYTES
+      return top if top != 0 && address <= top && address > top - fiber.stack_span
       fiber = fiber.next_fiber
     end
     0_u64
@@ -2060,7 +2117,7 @@ class IyiScheduler
         if top != 0
           # Anywhere in the reservation: the pages the kernel had not grown
           # into yet as well as the wall and the slack at its bottom.
-          low = top - IyiFiber::STACK_BYTES
+          low = top - fiber.stack_span
           return true if address >= low && address < top
         end
         fiber = fiber.next_fiber
@@ -2238,7 +2295,7 @@ class IyiScheduler
   # The doorbell, for a thread waiting in its poller. A thread that is not
   # idle reads its mail before it waits, so it is never rung; one already
   # rung is not rung twice. Lock held.
-  def self.ring(target : IyiSchedulerState) : Nil
+  @[Effect(:scheduler)]; def self.ring(target : IyiSchedulerState) : Nil
     return unless target.idle
     return if target.notified
     target.notified = true
@@ -2261,7 +2318,7 @@ class IyiScheduler
   # auto-reset event of the thread's own. A packet posted to the port, as
   # it was, is the process's on Windows now: any thread waiting there may
   # take it, and the thread it was for slept on.
-  def self.ensure_doorbell(st : IyiSchedulerState) : Nil
+  @[Effect(:scheduler)]; def self.ensure_doorbell(st : IyiSchedulerState) : Nil
     {% if flag?(:win32) %}
       return if st.wake_fd != 0_i64
       event = LibC.CreateEventW(Pointer(Void).new(0_u64), 0_i32, 0_i32, Pointer(UInt16).new(0_u64))
@@ -2749,7 +2806,7 @@ class IyiScheduler
   # without waiting; nothing at all when nobody waits on either. On
   # Windows the port is the process's, so a fiber waiting on any thread
   # is reason to look (`io_waiting?`).
-  def self.poll_now(st : IyiSchedulerState) : Nil
+  @[Effect(:scheduler)]; def self.poll_now(st : IyiSchedulerState) : Nil
     io = false
     {% if flag?(:win32) %}
       io = io_waiting?
@@ -2821,7 +2878,7 @@ class IyiScheduler
   # request took 24 to 43 ms plain and 22 to 38 release with it left up,
   # 23 to 29 and 22 to 31 lowered. The lowering is a load, and a store
   # only when the word is up.
-  def self.switch_to(fiber : IyiFiber) : Nil
+  @[Effect(:scheduler)]; def self.switch_to(fiber : IyiFiber) : Nil
     st = state
     previous = current
     if fiber.sp_slot.address == previous.sp_slot.address
@@ -2890,7 +2947,7 @@ class IyiScheduler
 
   # ── Blocking, and what unblocks it ───────────────────────────────────
 
-  def self.sleep_current(ms : Int32) : Nil | Cancelled
+  @[Effect(:scheduler)]; def self.sleep_current(ms : Int32) : Nil | Cancelled
     fiber = current
     return Cancelled.new if fiber.cancelled
     if ms <= 0
@@ -2996,7 +3053,7 @@ class IyiScheduler
     # median of 7 other workers ran.
     @@port : UInt64 = 0_u64
 
-    def self.make_port : Int64
+    @[Effect(:scheduler)]; def self.make_port : Int64
       IyiRuntimeLock.lock
       port = @@port
       if port == 0_u64
@@ -3048,7 +3105,7 @@ class IyiScheduler
     # The association, and the skip-on-success mode once the handle is on
     # the port: without it, 50 reads that answered at once left 50
     # completions that woke the next read.
-    def self.join_handle(handle : Void*) : Bool
+    @[Effect(:scheduler)]; def self.join_handle(handle : Void*) : Bool
       Pointer(Atomic(UInt64)).new(pointerof(@@port_joins).address).value.add(1_u64)
       return false if LibC.CreateIoCompletionPort(handle, Pointer(Void).new(pollfd.to_u64), 0_u64, 0_i32).address == 0_u64
       LibC.SetFileCompletionNotificationModes(handle, 1_u8)
@@ -3147,7 +3204,7 @@ class IyiScheduler
     fiber.io_bytes_read
   end
 
-  def self.read_current(fd : Int32 | Int64, buffer : Void*, count : UInt64, ms : Int32 = -1) : Int64 | Cancelled
+  @[Effect(:scheduler)]; def self.read_current(fd : Int32 | Int64, buffer : Void*, count : UInt64, ms : Int32 = -1) : Int64 | Cancelled
     fiber = current
     return Cancelled.new if fiber.cancelled
 
@@ -3298,6 +3355,7 @@ class IyiScheduler
   # (`take_held`): a change made outside it could narrow the fd's
   # registration to the other direction after that worker's change
   # widened it, or the other way round.
+  @[Effect(:scheduler)]
   def self.wait_posix(fd : Int32, direction : Int32, ms : Int32) : Nil | Cancelled
     fiber = current
     return Cancelled.new if fiber.cancelled
@@ -3366,6 +3424,7 @@ class IyiScheduler
     # the raw call's result. The event is in this frame: it was a 16-byte
     # heap block at every io wait and every narrowing, and a lists lock
     # is held around both.
+    @[Effect(:scheduler)]
     def self.io_control(poller : Int64, op : Int64, fd : Int32, mask : Int32) : Int64
       event = uninitialized UInt64[2]
       words = pointerof(event).as(Pointer(UInt64))
@@ -3532,7 +3591,7 @@ class IyiScheduler
 
   # Entry *index*'s chunk of the table whose root word is *root*: the io
   # owners', and on Windows the port records (`port_word`).
-  private def self.io_chunk(root : Pointer(UInt64), index : Int32, make : Bool) : UInt64
+  @[Effect(:scheduler)]; private def self.io_chunk(root : Pointer(UInt64), index : Int32, make : Bool) : UInt64
     # A build with no collector of iyi's own (`-Dgc_none`, `-Dgc_boehm`)
     # has no `__iyi_mmap` and no pool for a descriptor to belong to a
     # worker of, so nothing is recorded and every waiter is this thread's:
@@ -3897,7 +3956,7 @@ class IyiScheduler
   end
 
   # A cancelled fiber's own wait ended, on the thread whose lists it is in.
-  def self.cancel_wait(fiber : IyiFiber) : Nil
+  @[Effect(:scheduler)]; def self.cancel_wait(fiber : IyiFiber) : Nil
     if fiber.state == IyiFiberState::Sleeping
       sleep_remove(fiber)
       enqueue(fiber)
@@ -4014,7 +4073,7 @@ class IyiScheduler
 
   # Waits for the next event when *blocking*, and otherwise takes what has
   # arrived already (`poll_now`).
-  def self.wait_for_events(blocking : Bool) : Nil
+  @[Effect(:scheduler)]; def self.wait_for_events(blocking : Bool) : Nil
     st = state
     # The heap's root and its deadline read together, under the lock: on
     # Windows another thread may take the root out of it meanwhile
@@ -4244,6 +4303,7 @@ class IyiScheduler
     # had waiters, and a deadlock's walk reads only what it said
     # (`all_quiet?`): with its lists emptied here it is rung, to look and
     # say again (`idle_worker`). True when a waiter was taken.
+    @[Effect(:scheduler)]
     def self.take_held(other : IyiSchedulerState) : Bool
       poller = other.pollfd
       return false if poller <= 0_i64
@@ -4315,6 +4375,7 @@ class IyiScheduler
     # *st*'s doorbell rung again, after a poll from another thread took
     # its `EVFILT_USER` off its kqueue (`take_held`, `IyiWorkers.held_io?`):
     # what it rang for is mail its own thread takes.
+    @[Effect(:scheduler)]
     def self.retrigger(st : IyiSchedulerState) : Nil
       change = __iyi_kevent_change(IYI_WAKE_IDENT, IYI_WAKE_TRIGGER)
       LibC.kevent(st.pollfd.to_i32, pointerof(change).as(Void*), 1,
@@ -4336,6 +4397,7 @@ class IyiScheduler
   # lock and the runtime's in any order; past 128 turns a spinner gives
   # its core away, as the scheduler's lock's does. With one scheduler
   # thread it is nothing.
+  @[Effect(:scheduler)]
   def self.lists_lock(st : IyiSchedulerState) : Nil
     return unless @@shared
     spins = 0
@@ -4353,6 +4415,7 @@ class IyiScheduler
     end
   end
 
+  @[Effect(:scheduler)]
   def self.lists_unlock(st : IyiSchedulerState) : Nil
     return unless @@shared
     st.free_lists
@@ -4643,7 +4706,7 @@ class IyiScheduler
     {% end %}
   end
 
-  def self.wake_expired_sleepers : Nil
+  @[Effect(:scheduler)]; def self.wake_expired_sleepers : Nil
     st = state
     return if st.sleep_head.is_a?(Nil)
     now = __iyi_monotonic_ns
@@ -4891,7 +4954,7 @@ class IyiScheduler
   {% if flag?(:darwin) %}
     # Whether *fd* is a regular file: S_IFREG in `st_mode`, the two bytes
     # at offset 4 of darwin's `struct stat64`, which is 144 bytes long.
-    def self.regular_file?(fd : Int32) : Bool
+    @[Effect(:scheduler)]; def self.regular_file?(fd : Int32) : Bool
       stat = uninitialized UInt64[24]
       bytes = pointerof(stat).as(Pointer(UInt8))
       return false if LibC.fstat(fd, bytes.as(Void*)) != 0
@@ -4934,6 +4997,7 @@ class IyiScheduler
   # not ours). On Linux the registration is the fd's, so it is narrowed
   # to what the other direction's waiter still wants (EPOLL_CTL_MOD, 3),
   # or removed when nobody does (DEL, 2).
+  @[Effect(:scheduler)]
   def self.io_forget(st : IyiSchedulerState, fiber : IyiFiber) : Nil
     untime_in(st, fiber)
     {% if flag?(:darwin) %}
@@ -4955,7 +5019,7 @@ class IyiScheduler
 
   # ── The poller's fd, lazily ──────────────────────────────────────────
 
-  def self.pollfd : Int64
+  @[Effect(:scheduler)]; def self.pollfd : Int64
     {% if flag?(:win32) %}
       port = Pointer(Atomic(UInt64)).new(pointerof(@@port).address).value.get
       return port.to_i64 if port != 0_u64
@@ -5008,7 +5072,7 @@ class IyiScheduler
     # A machine whose Windows does not know the flag (it arrived in
     # 10 1803) answers a null handle; that is remembered as -1 and the
     # poller keeps the millisecond timeout it had before.
-    def self.deadline_timer : Int64
+    @[Effect(:scheduler)]; def self.deadline_timer : Int64
       st = state
       handle = st.deadline_timer
       return handle if handle != 0_i64
@@ -5032,6 +5096,9 @@ class IyiScheduler
   # exits 1. Every registered cleanup on the path has run either way,
   # which is the promise `defer` makes.
   def self.panic_current(message : String) : NoReturn
+    {% if flag?(:iyi_observe) %}
+      Std::Observe.abandon_frames
+    {% end %}
     # A panic raised inside one of the scheduler's critical sections - the
     # runtime's own sanity checks raise there - lets the lock go first: the
     # boundary below takes it, and would wait on itself forever.
@@ -5098,6 +5165,9 @@ class IyiScheduler
   # nothing unbound, so a loop around it spun at a full core and its
   # group's join waited forever.
   def self.stop_current : NoReturn
+    {% if flag?(:iyi_observe) %}
+      Std::Observe.abandon_frames
+    {% end %}
     fiber = current
     while true
       node = fiber.defers
@@ -5314,7 +5384,7 @@ class IyiWorkers
   # the cores this process may run on - the count the parallel marker
   # sizes its helpers by, and GC_DESIGN.md's bound on the mutator's
   # threads.
-  def self.resolved : Int32
+  @[Effect(:process)]; def self.resolved : Int32
     return @@asked if @@asked > 0
     text = Program.env("IYI_WORKERS")
     if text.is_a?(String)
@@ -5334,6 +5404,7 @@ class IyiWorkers
   # with one worker: the rest start as the work asks for them (`grow`).
   # Each worker is an `IyiThread`, which is what makes the collector stop
   # and scan it as it stops and scans any thread (III.4.11).
+  @[Effect(:scheduler)]
   def self.start : Nil
     return if @@started > 0
     {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
@@ -5383,7 +5454,7 @@ class IyiWorkers
   # is, a wait in the poller here, on this stack - the one stack on this
   # thread no other worker can resume. A switch back here is how a fiber
   # that parked with nothing after it gives the worker back.
-  def self.work : Nil
+  @[Effect(:scheduler)]; def self.work : Nil
     {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
       st = IyiScheduler.state
       root = IyiScheduler.current
@@ -5952,6 +6023,7 @@ class IyiWorkers
   # the slot on every thread, and one at 64 or past it is in the
   # expansion table, not the TEB, so it is given back and the word stays
   # at `ArbitraryUserPointer`. Nothing elsewhere.
+  @[Effect(:scheduler)]
   def self.claim_preempt_slot : Nil
     {% if flag?(:win32) && flag?(:x86_64) %}
       index = LibC.TlsAlloc
@@ -5996,6 +6068,9 @@ class IyiWorkers
       # A fresh quantum from here: the monitor sees the count move.
       st.switches = st.switches &+ 1_u64
       return if IyiSchedLock.held_here? || IyiRuntimeLock.held?
+      {% if flag?(:iyi_observe) %}
+        return if Std::Observe.recording_here?
+      {% end %}
       fiber = IyiScheduler.current
       root = st.root
       return if root.is_a?(IyiFiber) && root.object_id == fiber.object_id
@@ -6099,7 +6174,7 @@ class IyiWorkers
   # ms, does the same from a thread of its own. It parks while every
   # worker is idle and nothing waits, so an idle pool costs no wakeups,
   # and the first worker to leave its wait wakes it (`idle_worker`).
-  def self.start_monitor : Nil
+  @[Effect(:scheduler)]; def self.start_monitor : Nil
     {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
       page = __iyi_mmap(4096_u64).address
       {% if flag?(:linux) || flag?(:darwin) %}
@@ -6145,7 +6220,7 @@ class IyiWorkers
   end
 
   # The monitor's whole life.
-  def self.monitor(page : UInt64) : Nil
+  @[Effect(:scheduler)]; def self.monitor(page : UInt64) : Nil
     while true
       Pointer(Atomic(UInt64)).new(pointerof(@@looks).address).value.add(1_u64)
       if look
@@ -6212,6 +6287,7 @@ class IyiWorkers
     # looks at its poller every `POLL_EVERY` parks, and a thread the
     # kernel has left in its ready queue switches nothing meanwhile either
     # way.
+    @[Effect(:scheduler)]
     private def self.held_io?(st : IyiSchedulerState) : Bool
       return false if word(pointerof(@@idle)).value.get <= 0_i64
       return false if st.io_head.is_a?(Nil) || st.pollfd <= 0_i64
@@ -6229,6 +6305,7 @@ class IyiWorkers
     # look takes off the kqueue, is rung again.
     PEEK = 4
 
+    @[Effect(:scheduler)]
     private def self.peek(st : IyiSchedulerState) : Bool
       page = @@monitor_page
       buffer = page &+ 256_u64
@@ -6264,6 +6341,7 @@ class IyiWorkers
     # The news the monitor found in running workers' pollers (`held_io?`),
     # taken by worker *me* (`IyiScheduler.take_held`), its own included:
     # true when a waiter came of it, into *me*'s queues.
+    @[Effect(:scheduler)]
     def self.take_held_io(me : IyiSchedulerState) : Bool
       return false if word(pointerof(@@held_io)).value.get <= 0_i64
       took = false
@@ -6317,7 +6395,7 @@ class IyiWorkers
   end
 
   # The monitor woken from its park, after `take_monitor_wake`.
-  def self.wake_monitor : Nil
+  @[Effect(:scheduler)]; def self.wake_monitor : Nil
     {% if flag?(:linux) %}
       __iyi_conc_syscall6(IYI_SYS_FUTEX, pointerof(@@monitor_parked).address.to_i64, IYI_FUTEX_WAKE, 1_i64, 0_i64, 0_i64, 0_i64)
     {% elsif flag?(:darwin) %}
@@ -6337,7 +6415,7 @@ class IyiWorkers
   # only to a parked monitor), and on the semaphore's millisecond timeout,
   # the system timer's tick, where there is no such timer or it could not
   # be set.
-  private def self.monitor_wait(parked : Bool) : Nil
+  @[Effect(:scheduler)]; private def self.monitor_wait(parked : Bool) : Nil
     {% if flag?(:linux) %}
       expected = parked ? 1_i64 : 0_i64
       timeout = parked ? 0_i64 : @@monitor_page.to_i64
@@ -6450,7 +6528,7 @@ end
     # Whether stdin's handle is one a read of could wait: a pipe (3) or a
     # character device (2), the console among them. A disk file (1)
     # answers at once, and is read where it is asked.
-    def self.waits?(handle : Void*) : Bool
+    @[Effect(:scheduler)]; def self.waits?(handle : Void*) : Bool
       kind = LibC.GetFileType(handle)
       kind == 2 || kind == 3
     end
@@ -6459,7 +6537,7 @@ end
     # are written, the thread made suspended (4) until then: two threads'
     # first reads would otherwise each make a reader, and one that saw the
     # page early would ring a doorbell not made yet.
-    def self.start(handle : Void*) : Nil
+    @[Effect(:scheduler)]; def self.start(handle : Void*) : Nil
       IyiRuntimeLock.lock
       if @@page == 0_u64
         # A build with no collector of iyi's own (`-Dgc_none`, `-Dgc_boehm`)
@@ -6497,7 +6575,7 @@ end
     # never took the post and the program hung; one polling took it and
     # switched onto the other thread's fiber, an access violation, 3 runs
     # in 3 each.
-    def self.read(handle : Void*, console : Bool, buffer : Void*, count : UInt64, ms : Int32) : Int64 | Cancelled
+    @[Effect(:scheduler)]; def self.read(handle : Void*, console : Bool, buffer : Void*, count : UInt64, ms : Int32) : Int64 | Cancelled
       fiber = IyiScheduler.current
       return Cancelled.new if fiber.cancelled
       start(handle) if @@page == 0_u64
@@ -6547,7 +6625,7 @@ end
     # answered "second". So a console's read runs to its line, which the
     # fiber answers - a sibling's failure waits for Enter, and loses
     # nothing.
-    def self.withdraw : Nil
+    @[Effect(:scheduler)]; def self.withdraw : Nil
       return if word(W_STATE).value.compare_and_set(ASKED, WITHDRAWN)[1]
       return if word(W_CONSOLE).value.get != 0_u64
       thread = Pointer(Void).new(word(W_THREAD).value.get)
@@ -6588,7 +6666,7 @@ end
     # The thread's whole life. It touches no heap: its words and its wide
     # buffer are this page, and what it writes into is the buffer the
     # fiber asked with.
-    def self.run(argument : UInt64) : Nil
+    @[Effect(:scheduler)]; def self.run(argument : UInt64) : Nil
       doorbell = Pointer(Void).new(word(W_DOORBELL).value.get)
       while true
         LibC.WaitForSingleObject(doorbell, -1_i32)
@@ -6607,7 +6685,7 @@ end
     end
 
     # 0 for the end of the input, a broken pipe, and a withdrawn read.
-    def self.read_file(handle : Void*, buffer : Void*, count : UInt64) : Int64
+    @[Effect(:scheduler)]; def self.read_file(handle : Void*, buffer : Void*, count : UInt64) : Int64
       read = 0_i32
       return 0_i64 if LibC.ReadFile(handle, buffer, count.to_i32, pointerof(read), nil) == 0
       read.to_i64
@@ -6702,7 +6780,7 @@ end
 # immediately if it already had, which is what lets `!` drain a cancelled
 # task through every later wait it would have done. Zero or less is a
 # yield: every task already runnable runs before this one goes on.
-def sleep(ms : Int32) : Nil | Cancelled
+@[Effect(:timer)]; def sleep(ms : Int32) : Nil | Cancelled
   IyiScheduler.sleep_current(ms)
 end
 
@@ -8063,7 +8141,7 @@ class IyiTimeoutSelect
   @deadline : Int64
   @fiber : IyiFiber?
 
-  def initialize(ms : Int32)
+  @[Effect(:scheduler)]; def initialize(ms : Int32)
     @deadline = __iyi_monotonic_ns + ms.to_i64 * 1000000_i64
     @fiber = nil
   end
@@ -8130,7 +8208,7 @@ class IyiTimeoutSelect
   end
 end
 
-def timeout_select_action(ms : Int32) : IyiTimeoutSelect
+@[Effect(:timer)]; def timeout_select_action(ms : Int32) : IyiTimeoutSelect
   IyiTimeoutSelect.new(ms)
 end
 
@@ -8214,7 +8292,7 @@ end
 
     # Per thread: an alternate stack for the handler to run on, because the
     # stack that overflowed cannot; the handler itself once per process.
-    def self.install : Nil
+    @[Effect(:scheduler)]; def self.install : Nil
       {% if flag?(:darwin) %}
         alt = LibC.mmap(Pointer(Void).new(0_u64), IYI_SG_ALT_BYTES, 3, 4098, -1, 0_i64)
         return if alt.address &+ 1_u64 == 0_u64
@@ -8259,7 +8337,7 @@ end
 
     # The fault's address and the stack pointer it interrupted, from the
     # kernel's own structs; nothing here allocates or takes a lock.
-    def self.faulted(signal : Int32, info : UInt64, context : UInt64) : Nil
+    @[Effect(:scheduler)]; def self.faulted(signal : Int32, info : UInt64, context : UInt64) : Nil
       {% if flag?(:darwin) %}
         # darwin arm64's structs: `si_addr` at 24, `uc_mcontext` at 48, and
         # in `__darwin_mcontext64` the `__ss.__sp` at 264 — past the 16-byte
@@ -8330,3 +8408,13 @@ end
 
   IyiStackGuard.install
 {% end %}
+
+# The two raises codegen calls by name rather than inlining (`__iyi_raise_cast_failed`,
+# `__iyi_raise_closure_to_c`): a call is one element of a build's call path where
+# the inlined raise carried the source location of the cast or the closure.
+fun __iyi_raise_cast_failed(from : Void*, to : Void*, at : Void*) : NoReturn
+  raise TypeCastError.new(at ? "Cast from #{from.as(String)} to #{to.as(String)} failed, at #{at.as(String)}" : "Cast from #{from.as(String)} to #{to.as(String)} failed")
+end
+fun __iyi_raise_closure_to_c : NoReturn
+  raise("passing a closure to C is not allowed", "??", 0)
+end

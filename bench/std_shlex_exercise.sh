@@ -126,7 +126,7 @@ build_and_run() {
     status=1
     return 1
   fi
-  "$WORK/$name" "$WORK/corpus" >"$WORK/$name.out" 2>&1
+  "$WORK/$name" "data" "$WORK/corpus" >"$WORK/$name.out" 2>&1
   local exit_code=$?
   sed 's/^/  /' "$WORK/$name.out"
   if [ "$exit_code" -ne 0 ]; then
@@ -276,7 +276,7 @@ PY
     echo "  the $1 copy did not compile"
     sed -n '1,6p' "$WORK/mut.out"
     status=1
-  elif "$WORK/mut-$mutations.bin" "$WORK/corpus" >"$WORK/mut.out" 2>&1; then
+  elif "$WORK/mut-$mutations.bin" "data" "$WORK/corpus" >"$WORK/mut.out" 2>&1; then
     echo "  the exercise PASSED on $1"
     status=1
   elif grep -qF "$2" "$WORK/mut.out"; then
@@ -352,8 +352,8 @@ fi
 mkdir -p "$WORK/r1/mods"
 if (cd "$WORK/r1" && "$IYI" build --emit-iyimod mods -o from-source "$REPO/bench/std_shlex_exercise.iyi" \
       && "$IYI" build --use-iyimod mods -o from-artifact "$REPO/bench/std_shlex_exercise.iyi") >"$WORK/r1/build.log" 2>&1; then
-  "$WORK/r1/from-source" "$WORK/corpus" >"$WORK/r1/source.out" 2>&1
-  "$WORK/r1/from-artifact" "$WORK/corpus" >"$WORK/r1/artifact.out" 2>&1
+  "$WORK/r1/from-source" "data" "$WORK/corpus" >"$WORK/r1/source.out" 2>&1
+  "$WORK/r1/from-artifact" "data" "$WORK/corpus" >"$WORK/r1/artifact.out" 2>&1
   if cmp -s "$WORK/r1/source.out" "$WORK/r1/artifact.out" && grep -q "ALL CHECKS PASSED" "$WORK/r1/artifact.out"; then
     echo "  built from its artifacts, the exercise prints what it prints from source"
   else

@@ -9,11 +9,11 @@ module samples/socket
 
 import std/socket::{IyiSocket}
 
-# Server listens on an ephemeral port. The number the kernel picks is different
+# Server listens on an ephemeral port on loopback. The number the kernel picks is different
 # on every run, so it is used rather than printed: `bench/arena_exercise.sh`
 # runs every sample twice and asks for identical output, and a sample that
 # prints its port is a sample that can never answer that.
-server = IyiSocket.listen(0)
+server = IyiSocket.listen("127.0.0.1", 0)
 port = server.local_port
 puts "server listening on an ephemeral port"
 

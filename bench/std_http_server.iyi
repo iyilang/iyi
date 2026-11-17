@@ -6,7 +6,8 @@ module bench/std_http_server
 import std/http::{Server, Response}
 import std/socket::{IyiSocket}
 
-listener = IyiSocket.listen(0)
+listener = IyiSocket.listen("127.0.0.1", 0)
+raise "std_http_server did not bind to 127.0.0.1: #{listener.local_address}" unless listener.local_address == "127.0.0.1"
 puts listener.local_port
 # One thread (`workers: 1`): `/stop` closes the listener, which is this
 # thread's, and the wrk figure SPEC.md III.4.11 quotes for this server is

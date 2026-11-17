@@ -239,6 +239,7 @@ class Iyi::Call
 
   def convert_numeric_argument(self_arg, unaliased_type, expected_type, actual_type, index)
     if self_arg.is_a?(NumberLiteral)
+      program.layout_fold_use(self_arg, Iyi::LayoutFoldUseKind::Typing, self_arg, adopted: true)
       # TODO: check that the number literal fits, error otherwise
 
       # If converting from a float to integer, we need to remove the dot

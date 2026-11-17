@@ -92,6 +92,13 @@
 
 ### Fixed
 
+- **Vector unions use the heap's eight-byte alignment.** A mixed union
+  represents its payload as wide integers, so treating only visible LLVM
+  vectors as eight-aligned left nil stores, closure captures and copies
+  promising sixteen-byte alignment on eight-aligned heap addresses.
+  `UInt64x2` is also shareable across threads, including in immutable
+  records and `@[Share]` generic values.
+
 - **std/big: every mask that picks by a secret goes through
   `ValueBarrier`.** `pow_mod_secret`'s table scan, Montgomery's final
   subtraction and each choice `inverse_mod_secret` and the reduction into

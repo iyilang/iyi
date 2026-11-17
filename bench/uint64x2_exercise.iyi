@@ -104,6 +104,177 @@ def check_field_alignment : Nil
   puts "fields: headed vector objects at both 0 and 8 modulo 16 work"
 end
 
+class AlignedMaybeVector < AlignedBase
+  @[NoInline]
+  def initialize(@value : UInt64x2?)
+  end
+
+  @[NoInline]
+  def value : UInt64x2?
+    @value
+  end
+
+  @[NoInline]
+  def value=(value : UInt64x2?) : Nil
+    @value = value
+  end
+
+  @[NoInline]
+  def slot_address : UInt64
+    pointerof(@value).address
+  end
+end
+
+class AlignedMixedVector < AlignedBase
+  @[NoInline]
+  def initialize(@value : UInt64x2 | Int32)
+  end
+
+  @[NoInline]
+  def value : UInt64x2 | Int32
+    @value
+  end
+
+  @[NoInline]
+  def slot_address : UInt64
+    pointerof(@value).address
+  end
+end
+
+class AlignedLargeUnion < AlignedBase
+  @[NoInline]
+  def initialize(@value : VectorBlock | Nil)
+  end
+
+  @[NoInline]
+  def value : VectorBlock | Nil
+    @value
+  end
+end
+
+class WidenedVectorUnion < AlignedBase
+  @[NoInline]
+  def initialize(@value : UInt64x2 | Int32 | Nil)
+  end
+
+  @[NoInline]
+  def replace(value : Int32 | Nil) : Nil
+    @value = value
+  end
+
+  @[NoInline]
+  def value : UInt64x2 | Int32 | Nil
+    @value
+  end
+end
+
+@[NoInline]
+def union_slot_address(value : AlignedBase) : UInt64
+  if value.is_a?(AlignedMaybeVector)
+    value.slot_address
+  elsif value.is_a?(AlignedMixedVector)
+    value.slot_address
+  else
+    99_u64
+  end
+end
+
+@[NoInline]
+def vector_union_closure(value : UInt64x2?) : Proc(UInt64)
+  -> {
+    actual = value
+    if actual.is_a?(UInt64x2)
+      raise "union closure: lane changed" unless actual.low == 42_u64 && actual.high == 17_u64
+    else
+      raise "union closure: expected nil" unless actual.nil?
+    end
+    pointerof(value).address
+  }
+end
+
+@[NoInline]
+def place_union_closure(original : Proc(UInt64), residue : UInt64) : Proc(UInt64)
+  # Proc is a function pointer and a context pointer. Copy its captured
+  # union into heap storage at each permitted alignment, then call the
+  # compiler-generated closure through the copied context.
+  result = original
+  words = pointerof(result).as(Pointer(Pointer(UInt8)))
+  source = words[1]
+  size = sizeof(UInt64x2 | Nil)
+  destination = IyiHeap.alloc_atomic((size + 16).to_u64).as(Pointer(UInt8))
+  destination = destination + 8_i64 unless destination.address & 15_u64 == residue
+  destination.copy_from(source, size)
+  words[1] = destination
+  result
+end
+
+@[NoInline]
+def check_union_alignment : Nil
+  maybe_zero = false
+  maybe_eight = false
+  mixed_zero = false
+  mixed_eight = false
+  closure_zero = false
+  closure_eight = false
+  i = 0
+  while i < 128
+    lane = UInt64x2.new(42_u64, 17_u64)
+    block = VectorBlock.new(lane, lane, lane, lane, lane, lane, lane, lane, lane)
+    big_input = i & 1 == 0 ? block : nil
+    big_result = AlignedLargeUnion.new(big_input).value
+    if i & 1 == 0
+      raise "union field: indirect copy changed" unless big_result.is_a?(VectorBlock) && big_result.ends == 59_u64
+    else
+      raise "union field: indirect nil changed" unless big_result.nil?
+    end
+    maybe = AlignedMaybeVector.new(lane)
+    at = union_slot_address(maybe) & 15_u64
+    maybe_zero = true if at == 0_u64
+    maybe_eight = true if at == 8_u64
+    another = AlignedMaybeVector.new(lane)
+    at = union_slot_address(another) & 15_u64
+    maybe_zero = true if at == 0_u64
+    maybe_eight = true if at == 8_u64
+    another.value = nil
+    raise "union field: second nil changed" unless another.value.nil?
+    value = maybe.value
+    raise "union field: vector changed" unless value.is_a?(UInt64x2) && value.low == 42_u64 && value.high == 17_u64
+    maybe.value = nil
+    raise "union field: nil changed" unless maybe.value.nil?
+    maybe.value = lane
+    mixed = AlignedMixedVector.new(lane)
+    at = union_slot_address(mixed) & 15_u64
+    mixed_zero = true if at == 0_u64
+    mixed_eight = true if at == 8_u64
+    mixed_again = AlignedMixedVector.new(lane)
+    at = union_slot_address(mixed_again) & 15_u64
+    mixed_zero = true if at == 0_u64
+    mixed_eight = true if at == 8_u64
+    other = mixed.value
+    raise "union field: mixed vector changed" unless other.is_a?(UInt64x2) && other.low == 42_u64 && other.high == 17_u64
+    small = i & 1 == 0 ? 123 : nil
+    widened = WidenedVectorUnion.new(lane)
+    widened.replace(small)
+    wide_value = widened.value
+    if i & 1 == 0
+      raise "union field: widening changed integer" unless wide_value.is_a?(Int32) && wide_value == 123
+    else
+      raise "union field: widening changed nil" unless wide_value.nil?
+    end
+    captured = i & 1 == 0 ? lane : nil
+    closure = vector_union_closure(captured)
+    at_zero = place_union_closure(closure, 0_u64).call & 15_u64
+    at_eight = place_union_closure(closure, 8_u64).call & 15_u64
+    closure_zero = true if at_zero == 0_u64
+    closure_eight = true if at_eight == 8_u64
+    i = i + 1
+  end
+  raise "union field: nilable needs both alignments" unless maybe_zero && maybe_eight
+  raise "union field: mixed needs both alignments" unless mixed_zero && mixed_eight
+  raise "union closure: needs both alignments" unless closure_zero && closure_eight
+  puts "union fields and closures: vector and nil preserved at 0 and 8 modulo 16"
+end
+
 class VectorRoots
   MASK = 0x5555555555555555_u64
   COUNT = 64
@@ -240,6 +411,7 @@ end
 
 IyiMark.auto = false
 check_field_alignment
+check_union_alignment
 buffer = Pointer(UInt64).malloc(5_u64)
 memory = buffer + 1_i64
 memory = memory + 1_i64 if memory.address & 15_u64 == 0_u64

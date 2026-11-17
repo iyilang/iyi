@@ -174,14 +174,14 @@ module Iyi
 
     def load(type : LLVM::Type, pointer : LLVM::Value, name = "")
       instruction = builder.load(type, pointer, name)
-      instruction.alignment = 8 if llvm_typer.uint64x2_storage?(type) && llvm_typer.align_of(type) > 8
+      instruction.alignment = 8 if llvm_typer.needs_heap_align8?(type) && llvm_typer.align_of(type) > 8
       instruction
     end
 
     def store(value, pointer)
       instruction = builder.store(value, pointer)
       type = value.type
-      instruction.alignment = 8 if llvm_typer.uint64x2_storage?(type) && llvm_typer.align_of(type) > 8
+      instruction.alignment = 8 if llvm_typer.needs_heap_align8?(type) && llvm_typer.align_of(type) > 8
       instruction
     end
 

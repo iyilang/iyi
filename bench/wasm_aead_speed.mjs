@@ -94,6 +94,6 @@ export default async function run({ load, log }) {
       programs[name].exports.aead_collect();
     }
   }
-  log("All timed outputs matched WebCrypto; both iyi builds and WebCrypto refused every flipped tag.");
+  log("Seal, open and CTR matched WebCrypto; GHASH matched between iyi builds; all three refused every flipped tag.");
   return { ok: true, userAgent: navigator.userAgent, samplesPerOperation: 5, unit: "decimal MB/s", rows };
 }

@@ -64,7 +64,7 @@ own reference accepts.
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
 | iyi's own prelude | 29,101 lines, of which 4,802 are the library held to the 4,802 ceiling (7,241 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 138,422 lines, none of it written in iyi |
+| compiler | 138,430 lines, none of it written in iyi |
 | artifact format | `.iyimod` v62, checksum per section |
 | samples | 28 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets on which Crystal's library is type-checked, eight whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -1080,8 +1080,8 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 138,422 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 29,101-line own prelude + 128,220 in std |
+| Compiler | 24,984 lines, **written in Crystal** | 138,430 lines, Crystal, forked |
+| Library | 8,161 lines (3,551 of it core) | 29,101-line own prelude + 128,219 in std |
 | Specs | 21,146 lines | 17,214 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
@@ -9094,8 +9094,9 @@ v26.7.0, wasi-sdk 24. The programs target `wasm32-unknown-unknown` with
 `--release`; the second also uses `--mattr +simd128`. AES-256-GCM uses a
 12-byte nonce, 25 bytes of additional data and a 16-byte tag. Numbers are
 decimal MB/s: best of five followed by the full [minimum, maximum] range.
-Setup and output comparisons are outside the timed calls. Every timed result
-was compared byte by byte with WebCrypto, and all three refused a flipped tag.
+Setup and output comparisons are outside the timed calls. Every timed seal,
+open and CTR result was compared byte by byte with WebCrypto; the two GHASH
+outputs matched each other. All three implementations refused a flipped tag.
 
 ```sh
 PATH=/opt/homebrew/bin:/usr/bin:/bin \

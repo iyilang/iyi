@@ -54,7 +54,7 @@ module Iyi::Share
 
   private def self.check(type : Type, visiting : Set(Type), from : String?) : String?
     case type
-    when NilType, BoolType, CharType, IntegerType, FloatType, SymbolType, VoidType, NoReturnType
+    when NilType, BoolType, CharType, IntegerType, UInt64x2Type, FloatType, SymbolType, VoidType, NoReturnType
       nil
     when EnumType
       nil

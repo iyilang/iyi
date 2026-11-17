@@ -126,12 +126,16 @@ module Iyi
         @llvm_typer.size_of(from_value_type),
         @llvm_typer.size_of(to_value_type),
       }.min
+      to_align = @llvm_typer.align_of(to_value_type)
+      from_align = @llvm_typer.align_of(from_value_type)
+      to_align = 8_u32 if @llvm_typer.needs_heap_align8?(to_value_type) && to_align > 8
+      from_align = 8_u32 if @llvm_typer.needs_heap_align8?(from_value_type) && from_align > 8
       memcpy(
         cast_to_void_pointer(union_value(to_llvm_type, union_pointer)),
         cast_to_void_pointer(union_value(from_llvm_type, value)),
         size_t(size),
-        align: @llvm_typer.align_of(to_value_type),
-        src_align: @llvm_typer.align_of(from_value_type),
+        align: to_align,
+        src_align: from_align,
         volatile: int1(0),
       )
     end

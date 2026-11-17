@@ -256,31 +256,31 @@ pub class AesGcm
         done = done + take
       end
     {% else %}
-    counters = uninitialized StaticArray(UInt8, 64)
-    blocks = pointerof(counters).as(Pointer(UInt8))
-    pad = uninitialized StaticArray(UInt8, 64)
-    stream = pointerof(pad).as(Pointer(UInt8))
-    b = 0
-    while b < 4
-      (blocks + (b * 16).to_i64).copy_from(nonce, 12)
-      b = b + 1
-    end
-    counter = 2_u32
-    done = 0
-    while done < size
-      left = size - done
-      take = left < 64 ? left : 64
-      count = (take + 15) // 16
+      counters = uninitialized StaticArray(UInt8, 64)
+      blocks = pointerof(counters).as(Pointer(UInt8))
+      pad = uninitialized StaticArray(UInt8, 64)
+      stream = pointerof(pad).as(Pointer(UInt8))
       b = 0
-      while b < count
-        AeadBytes.put_be32(blocks + (b * 16 + 12).to_i64, counter)
-        counter = counter &+ 1_u32
+      while b < 4
+        (blocks + (b * 16).to_i64).copy_from(nonce, 12)
         b = b + 1
       end
-      AesCore.encrypt(@keys, @rounds, blocks, stream, count)
-      AeadBytes.xor(src + done.to_i64, stream, dst + done.to_i64, take)
-      done = done + take
-    end
+      counter = 2_u32
+      done = 0
+      while done < size
+        left = size - done
+        take = left < 64 ? left : 64
+        count = (take + 15) // 16
+        b = 0
+        while b < count
+          AeadBytes.put_be32(blocks + (b * 16 + 12).to_i64, counter)
+          counter = counter &+ 1_u32
+          b = b + 1
+        end
+        AesCore.encrypt(@keys, @rounds, blocks, stream, count)
+        AeadBytes.xor(src + done.to_i64, stream, dst + done.to_i64, take)
+        done = done + take
+      end
     {% end %}
   end
 
@@ -691,7 +691,6 @@ struct AesCore
     add_round_key(q, k + (rounds * 8).to_i64)
     store(q, dst, count)
   end
-
 
   # The inverse cipher (FIPS 197 §5.3), the same round keys in reverse.
   def self.decrypt(keys : Pointer(UInt64), rounds : Int32, src : Pointer(UInt8), dst : Pointer(UInt8), count : Int32) : Nil
@@ -1117,6 +1116,7 @@ struct AesCore
   private def self.rotr32(x : UInt64) : UInt64
     x.unsafe_shl(32) | x.unsafe_shr(32)
   end
+
   {% if flag?(:wasm32) && flag?(:simd128) %}
     # Each lane runs the existing four-block circuit. Keys are the same in
     # both lanes; the last batch may use fewer than eight counter blocks.
@@ -1408,7 +1408,6 @@ struct AesCore
     private def self.simd_rotr32(x : UInt64x2) : UInt64x2
       x.unsafe_shl(32) | x.unsafe_shr(32)
     end
-
   {% end %}
 end
 

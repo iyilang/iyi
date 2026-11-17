@@ -113,8 +113,9 @@ v26.7.0, wasi-sdk 24. The programs target `wasm32-unknown-unknown` with
 `--release`; the second also uses `--mattr +simd128`. AES-256-GCM uses a
 12-byte nonce, 25 bytes of additional data and a 16-byte tag. Numbers are
 decimal MB/s: best of five followed by the full [minimum, maximum] range.
-Setup and output comparisons are outside the timed calls. Every timed result
-was compared byte by byte with WebCrypto, and all three refused a flipped tag.
+Setup and output comparisons are outside the timed calls. Every timed seal,
+open and CTR result was compared byte by byte with WebCrypto; the two GHASH
+outputs matched each other. All three implementations refused a flipped tag.
 
 ```sh
 PATH=/opt/homebrew/bin:/usr/bin:/bin \

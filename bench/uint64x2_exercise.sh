@@ -34,6 +34,77 @@ for mode in native native-release; do
   echo "$mode: $(tail -1 "$WORK/$mode.out")"
 done
 
+# The union payload is an integer array after lowering, so its vector
+# member must not be lost when heap loads, stores and indirect copies are
+# assigned an alignment. Each extract is from the relevant function.
+awk '/^define .*AlignedMaybeVector#value=<Nil>/ { inside=1 }
+     inside { print }
+     inside && /^}/ { exit }' "$WORK/native-release.ll" >"$WORK/union-nil.ir"
+awk '/^define .*vector_union_closure<[(]UInt64x2 [|] Nil[)]>/ { inside=1 }
+     inside { print }
+     inside && /^}/ { exit }' "$WORK/native-release.ll" >"$WORK/union-closure.ir"
+awk '/^define .*~procProc.*uint64x2_exercise/ { inside=1 }
+     inside { print }
+     inside && /^}/ { exit }' "$WORK/native-release.ll" >"$WORK/union-closure-body.ir"
+awk '/^define .*AlignedLargeUnion#initialize/ { inside=1 }
+     inside { print }
+     inside && /^}/ { exit }' "$WORK/native-release.ll" >"$WORK/union-large.ir"
+cat "$WORK/union-nil.ir" "$WORK/union-closure.ir" "$WORK/union-closure-body.ir" "$WORK/union-large.ir" >"$WORK/union.ir"
+union_alignment_ok() {
+  grep -Eq 'store i128 0, ptr .*align 8([,[:space:]]|$)' "$1" &&
+    grep -Eq 'store %.*UInt64x2.*Nil.*align 8([,[:space:]]|$)' "$1" &&
+    grep -Eq 'load %.*UInt64x2.*Nil.*align 8([,[:space:]]|$)' "$1" &&
+    grep -Eq 'llvm.mem(move|cpy).*align 8.*%self,.*align 8.*%value' "$1" &&
+    ! grep -Eq '(load|store) %.*UInt64x2.*Nil.*align (16|32|64)([,[:space:]]|$)' "$1"
+}
+if ! union_alignment_ok "$WORK/union.ir"; then
+  echo 'union alignment: nil, closure or indirect union copy has the wrong alignment' >&2
+  cat "$WORK/union.ir" >&2
+  exit 1
+fi
+for pattern in 'store i128 0' 'store %.*UInt64x2.*Nil' 'load %.*UInt64x2.*Nil' 'llvm.mem(move|cpy).*%self'; do
+  awk -v pattern="$pattern" '$0 ~ pattern { sub(/align 8/, "align 16") } { print }' "$WORK/union.ir" >"$WORK/union-broken.ir"
+  if union_alignment_ok "$WORK/union-broken.ir"; then
+    echo "union alignment: mutation escaped for $pattern" >&2; exit 1
+  fi
+done
+echo 'union alignment: nil store, closure load/store and indirect copy use align 8; each regression was caught'
+
+cat >"$WORK/share-vector.iyi" <<'IYI'
+@[Unsafe("Share is a trusted type annotation")]
+struct VectorRecord
+  def initialize(@value : UInt64x2)
+  end
+  getter value : UInt64x2
+end
+@[Share]
+struct TrustedVector(T)
+  def initialize(@value : T)
+  end
+  getter value : T
+end
+vector = UInt64x2.new(42_u64, 17_u64)
+record = VectorRecord.new(vector)
+trusted = TrustedVector(UInt64x2).new(vector)
+thread = IyiThread.start do
+  raise "thread vector changed" unless vector.low == 42_u64 && vector.high == 17_u64
+  raise "thread record changed" unless record.value.low == 42_u64 && record.value.high == 17_u64
+  raise "thread trusted vector changed" unless trusted.value.low == 42_u64 && trusted.value.high == 17_u64
+  nil
+end
+thread.join
+puts "thread vector and Share records passed"
+IYI
+"$IYI" build --release -o "$WORK/share-vector" "$WORK/share-vector.iyi"
+"$WORK/share-vector" >"$WORK/share-vector.out"
+grep -qx 'thread vector and Share records passed' "$WORK/share-vector.out"
+awk '{ sub(/getter value : UInt64x2/, "property value : UInt64x2"); print }' "$WORK/share-vector.iyi" >"$WORK/not-share-vector.iyi"
+if "$IYI" build --no-codegen "$WORK/not-share-vector.iyi" >"$WORK/not-share-vector.out" 2>&1; then
+  echo 'Share: a mutable vector record crossed a thread boundary' >&2; exit 1
+fi
+grep -q 'not Share' "$WORK/not-share-vector.out"
+echo 'Share: vector, immutable record and trusted generic crossed a thread; mutable record was refused'
+
 # The headed object has only eight-byte alignment. Check the exact store
 # in the emitted constructor, not an unrelated vector in the runtime.
 awk '/^define .*AlignedVector#initialize/ { inside=1 }

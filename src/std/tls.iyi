@@ -676,19 +676,21 @@ pub class TlsConfig
   private def self.load_system : SystemRoots | String
     store = SystemRoots.load
     return store.message if store.is_a?(X509Error)
-    store.certificates
+    store
   end
 
   # The certificates never to be trusted wherever they stand in a chain,
   # which `X509.verify` takes beside `trusted_roots`: the platform's
   # (`SystemRoots#distrusted` - the Windows Disallowed store, darwin's
-  # denials) when the roots are the platform's, read with them, and none
-  # when `roots` is set, as a caller that names its roots names all of
+  # denials) when the roots are the platform's, read with them (the kept
+  # store, or one read now if none is kept yet: a handshake whose roots
+  # came from a store it could not keep still has its distrusted list), and
+  # none when `roots` is set, as a caller that names its roots names all of
   # its trust.
   def distrusted : Array(Array(UInt8))?
     return nil if @roots
-    kept = @@system
-    kept ? kept.distrusted : nil
+    system = TlsConfig.system
+    system.is_a?(String) ? nil : system.distrusted.dup
   end
 end
 

@@ -107,19 +107,26 @@ fi
 echo
 echo "== each one imports and builds out of the package, then runs"
 enclave_refusal='std/secure_enclave requires macOS and its Secure Enclave; this target is not darwin'
+enclave_refusal_matches() {
+  grep -Fq -- "$enclave_refusal" "$1"
+}
+check_enclave_refusal_matcher() {
+  printf '%s\n' 'Error: a deliberately different failure' > "$WORK/wrong-enclave-refusal.log"
+  if enclave_refusal_matches "$WORK/wrong-enclave-refusal.log"; then
+    echo "  FAIL: the refusal check accepted a wrong diagnostic"
+    return 1
+  fi
+  echo "  a wrong refusal diagnostic is rejected"
+}
+check_enclave_refusal_matcher || status=1
 for source in "$REPO"/src/std/*.iyi; do
   [ -f "$source" ] || continue
   name="$(basename "$source" .iyi)"
   printf 'import std/%s\nputs "std/%s"\n' "$name" "$name" > "$WORK/probe_$name.iyi"
   if ! build "probe_$name" "$WORK/probe_$name.iyi"; then
     if [ "$name" = secure_enclave ] && [ "$(uname -s)" != Darwin ] &&
-       grep -Fq "$enclave_refusal" "$WORK/probe_$name.log"; then
+       enclave_refusal_matches "$WORK/probe_$name.log"; then
       echo "  std/secure_enclave refused on this host with the expected sentence"
-      if grep -Fq "$enclave_refusal (wrong)" "$WORK/probe_$name.log"; then
-        fail "the refusal check accepted a wrong sentence"
-      else
-        echo "  a wrong refusal sentence is rejected"
-      fi
     else
       fail "import std/$name does not build out of the package: $(first_error "probe_$name")"
     fi

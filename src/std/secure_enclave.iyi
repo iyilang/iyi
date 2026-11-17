@@ -8,15 +8,23 @@
 #     handle = key.handle
 #     restored = SecureEnclaveKey.restore(handle).or_panic
 #
-# Keys are ephemeral, not keychain-persistent. User-presence prompts are not
-# offered. A handle is an opaque capability to use the key on this device:
-# protect it accordingly. It is not the private key, nor a portable export.
-# Apple can make it unusable, for example if the enclave's wrapping key is
-# reset. Restore uses the Security.framework key attribute "toid", which is
-# not declared in the SDK headers; if Apple withholds or changes it, an error
-# is returned. No fixed length or internal layout is assumed. Restore signs
-# a fixed domain-separated message and verifies it under the reported public
-# key: Security can otherwise return a public point from a damaged handle.
+# Generated keys are ephemeral, not keychain-persistent, and use the
+# PrivateKeyUsage access-control flag without user-presence or biometric
+# requirements. A handle is an opaque capability to use a key on this
+# device: protect it accordingly. It is not a portable private-key export.
+#
+# `restore` accepts a token supplied by the caller and signs a challenge.
+# A foreign token requiring user presence may prompt or block: never pass an
+# untrusted handle. The challenge checks consistency, not provenance; when
+# identity matters, compare the restored public key with an independently
+# trusted public key.
+#
+# Apple can make a handle unusable, for example if the enclave's wrapping
+# key is reset. Restore uses the Security.framework key attribute "toid",
+# which is not declared in the SDK headers; if Apple withholds or changes it,
+# an error is returned. No fixed length or internal layout is assumed.
+# Security can return a public point from a damaged handle, so restore signs
+# a fixed domain-separated message and verifies it under that point.
 #
 # An iyi key retains only copied bytes and its public key, not a CF object.
 # Each operation opens and releases its own native key, so no finalizer or
@@ -114,6 +122,7 @@ pub struct SecureEnclaveKey
     private_key_attrs = SecureEnclaveNative.constant("kSecPrivateKeyAttrs")!
     null = SecureEnclaveNative.null
     error = null
+    # kSecAccessControlPrivateKeyUsage only: no presence or biometric flags.
     access = LibEnclaveSecurity.SecAccessControlCreateWithFlags(null, protection, 1073741824_u64, pointerof(error))
     return SecureEnclaveNative.failure("create private-key access control", error) if access.address == 0
     bits = 256_i32
@@ -147,6 +156,9 @@ pub struct SecureEnclaveKey
     from_native(key)
   end
 
+  # Restore trusted handles only: a foreign token can request user presence
+  # during the signing check and can prompt or block. Compare public_key to
+  # an independently trusted key when identity continuity matters.
   def self.restore(handle : Array(UInt8)) : SecureEnclaveKey | SecureEnclaveError
     key = SecureEnclaveNative.open(handle)
     return key if key.is_a?(SecureEnclaveError)

@@ -64,13 +64,17 @@ for mode in plain release; do
     tail -30 "$WORK/$mode.build.log"
     exit 1
   fi
-  if ! "$WORK/$mode" >"$WORK/$mode.out" 2>&1; then
+  if ! "$WORK/$mode" </dev/null >"$WORK/$mode.out" 2>&1; then
     echo "FAIL: $mode exercise"
     cat "$WORK/$mode.out"
     exit 1
   fi
   sed 's/^/  /' "$WORK/$mode.out"
   grep -Fq 'ALL CHECKS PASSED' "$WORK/$mode.out" || { echo "FAIL: $mode lacks success line"; exit 1; }
+  if ! grep -Fq 'enclave-dependent checks skipped' "$WORK/$mode.out" &&
+     ! grep -Fq 'generated-key handles: three unattended restore/sign checks passed' "$WORK/$mode.out"; then
+    echo "FAIL: $mode did not exercise unattended generated-key restoration"; exit 1
+  fi
 done
 
 echo '== the module through its .iyimod artifact'
@@ -81,7 +85,7 @@ fi
 if ! "$IYI" build --use-iyimod "$WORK/mods" -o "$WORK/from-artifact" "$REPO/bench/std_secure_enclave_exercise.iyi" >"$WORK/use.log" 2>&1; then
   echo 'FAIL: artifact consumer'; tail -30 "$WORK/use.log"; exit 1
 fi
-if ! "$WORK/from-artifact" >"$WORK/artifact.out" 2>&1; then
+if ! "$WORK/from-artifact" </dev/null >"$WORK/artifact.out" 2>&1; then
   echo 'FAIL: artifact exercise'; cat "$WORK/artifact.out"; exit 1
 fi
 if ! cmp -s "$WORK/plain.out" "$WORK/artifact.out"; then

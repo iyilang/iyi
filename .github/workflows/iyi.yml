@@ -1949,10 +1949,6 @@ jobs:
         run: bash scripts/build-static-llvm.sh "$HOME/llvm-static"
       - name: Build `iyi`
         run: make iyi LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config"
-      # Python 3.14, as on Linux: the oracles' modules answer as 3.14's do.
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
-        with:
-          python-version: "3.14"
       - name: Python's cryptography and Pillow, for the oracles
         run: python3 -m pip install -q cryptography pillow
       - name: The module exercises of this shard, on darwin

@@ -45,6 +45,14 @@ bench/fixtures/**/*.txt text eol=lf
 # tries to diff it.
 *.iyimod binary
 
+# The sumdb vectors and their generator are byte-for-byte inputs. Git must
+# not translate their line endings on a Windows checkout.
+spec/compiler/fixtures/sumdb/golden.json -text
+spec/compiler/fixtures/sumdb/wycheproof_ed25519.json -text
+spec/compiler/fixtures/sumdb/generator/go.mod -text
+spec/compiler/fixtures/sumdb/generator/go.sum -text
+spec/compiler/fixtures/sumdb/generator/main.go -text
+
 ## Sourced-in dependencies
 
 lib/** linguist-vendored

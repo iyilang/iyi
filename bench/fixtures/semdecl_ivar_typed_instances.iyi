@@ -1,0 +1,32 @@
+class Box(T)
+  @value : T
+  @items : Array(T)
+
+  def initialize(@value : T)
+    @items = [] of T
+  end
+end
+
+class Pair(A, B)
+  @first : A
+  @second : B?
+
+  def initialize(@first : A, @second : B? = nil)
+  end
+end
+
+class Nest(T)
+  @inner : Array(T)
+
+  def initialize(@inner : Array(T))
+  end
+end
+
+class Holder
+  @boxed : Box(Int32)
+  @pair : Pair(String, Int64)
+  @nest : Nest(UInt8)
+
+  def initialize(@boxed : Box(Int32), @pair : Pair(String, Int64), @nest : Nest(UInt8))
+  end
+end

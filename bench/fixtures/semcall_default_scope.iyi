@@ -1,0 +1,25 @@
+class DefaultScope
+  VALUE = 3
+
+  def self.read(value = VALUE) : Int32
+    value
+  end
+
+  def self.earlier(first : Int32, second = first) : Int32
+    second
+  end
+
+  def self.loc(file = __FILE__, line = __LINE__) : Int32
+    line
+  end
+end
+
+class DefaultBox
+  def initialize(@value : Int32 = 3)
+  end
+end
+
+# wrapper DefaultScope.read()
+# wrapper DefaultScope.earlier(1)
+# wrapper DefaultScope.loc()
+# wrapper DefaultBox.new()

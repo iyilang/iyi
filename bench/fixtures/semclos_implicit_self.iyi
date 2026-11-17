@@ -1,0 +1,48 @@
+@[Unsafe("declares the external process exit")]
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def run(&block : -> Int32) : Int32
+  block.call
+end
+
+def top(value : Int32) : Int32
+  value
+end
+
+class Box
+  def initialize(@v : Int32)
+  end
+
+  def twice(value : Int32) : Int32
+    value
+  end
+
+  def self.half(value : Int32) : Int32
+    value
+  end
+
+  def implicit(n : Int32) : Int32
+    run { twice(n) }
+  end
+
+  def literal(n : Int32) : Int32
+    p = -> { twice(n) }
+    p.call
+  end
+
+  def program_def(n : Int32) : Int32
+    run { top(n) }
+  end
+
+  def self.class_scope(n : Int32) : Int32
+    run { half(n) }
+  end
+end
+
+box = Box.new(7)
+box.implicit(3)
+box.literal(3)
+box.program_def(3)
+LibC.exit(Box.class_scope(4))

@@ -1,0 +1,23 @@
+class SuperValue
+end
+
+class SuperSpecific < SuperValue
+end
+
+class OverloadParent
+  def choose(value : SuperValue)
+    "broad"
+  end
+
+  def choose(value : SuperSpecific)
+    42
+  end
+end
+
+class OverloadChild < OverloadParent
+  def choose(value : SuperSpecific)
+    super(value)
+  end
+end
+
+OverloadChild.new.choose(SuperSpecific.new)

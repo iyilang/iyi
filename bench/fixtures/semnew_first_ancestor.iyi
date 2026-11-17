@@ -1,0 +1,14 @@
+class Grandparent
+  def initialize(number : Int32)
+  end
+end
+
+class Parent < Grandparent
+  def initialize(text : String)
+  end
+end
+
+class Child(T) < Parent
+end
+
+child = Child(Int32).new("hello")

@@ -1,0 +1,12 @@
+class InferBox(T)
+  def initialize(v : T)
+  end
+end
+
+class InferPair(A, B)
+  def initialize(a : A, b : B)
+  end
+end
+
+box = InferBox.new(1)
+pair = InferPair.new(1, "two")

@@ -1,0 +1,17 @@
+trait Greetable
+end
+
+class Person
+end
+
+impl Greetable for Person
+end
+
+class Robot
+end
+
+impl Greetable for Robot
+end
+
+alias AnyGreetable = Person | Robot
+alias OptionalGreetable = Person | Robot | Nil

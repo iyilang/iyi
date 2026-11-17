@@ -1,0 +1,5 @@
+class FilledPointerHolder
+  def initialize
+    @items = Pointer.malloc(2, 1_u8)
+  end
+end

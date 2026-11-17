@@ -1,0 +1,8 @@
+class SubtypeNode
+end
+
+class SubtypeLeaf < SubtypeNode
+end
+
+class SubtypeOther
+end

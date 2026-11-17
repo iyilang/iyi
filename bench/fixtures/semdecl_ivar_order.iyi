@@ -1,0 +1,19 @@
+class Holder
+  @doc : String?
+  @v : Visibility?
+  @n : Int32?
+  @m : Foo?
+  @w : (Foo | Bar)?
+  @x : (Foo | Bar)?
+  @y : (Visibility | Foo)?
+end
+
+class Foo
+end
+
+class Bar
+end
+
+enum Visibility
+  Public
+end

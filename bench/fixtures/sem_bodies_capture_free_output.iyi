@@ -1,0 +1,7 @@
+# A captured block's return type binds the callee's free variable.
+def captured_free_output(&block : -> T) : T forall T
+  block.call
+end
+
+a = captured_free_output { 1 }
+b = captured_free_output { "text" }

@@ -1,0 +1,25 @@
+# The three instance variables of the prelude's Array(T), declared the way src/iyi/array.iyi
+# declares them, instantiated at String, UInt8 and Array(UInt8). Each instance takes its own
+# type arguments into every variable: @size is Int32 on all three, @buffer is Pointer of the
+# instance's element type. A generic instance's declared variables are read through its
+# arguments in the typed dump, so the element type must reach @buffer and not the parameter.
+class Buffer(T)
+  @size : Int32
+  @capacity : Int32
+  @buffer : Pointer(T)
+
+  def initialize
+    @size = 0
+    @capacity = 0
+    @buffer = Pointer(T).new(0_u64)
+  end
+end
+
+class Holder
+  @strings : Buffer(String)
+  @bytes : Buffer(UInt8)
+  @rows : Buffer(Array(UInt8))
+
+  def initialize(@strings : Buffer(String), @bytes : Buffer(UInt8), @rows : Buffer(Array(UInt8)))
+  end
+end

@@ -1,0 +1,15 @@
+struct Slot
+  def self.pair(first : T, second : T) : T forall T
+    first
+  end
+
+  def self.unbound(x : Int32) : T forall T
+    x
+  end
+end
+
+# error Slot.pair(1, 2)
+# error Slot.pair("a", "b")
+# error Slot.pair(1)
+# error Slot.pair(1, 2, 3)
+# call Slot.unbound(1)

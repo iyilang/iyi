@@ -1,0 +1,16 @@
+import lib::{Box}
+
+class Mine(T)
+  @value : T
+
+  def initialize(@value : T)
+  end
+end
+
+class Holder
+  @imported : Box(Int32)
+  @own : Mine(Int32)
+
+  def initialize(@imported : Box(Int32), @own : Mine(Int32))
+  end
+end

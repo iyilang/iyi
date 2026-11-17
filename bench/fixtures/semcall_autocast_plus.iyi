@@ -1,0 +1,15 @@
+def byte_ptr : Pointer(UInt8)
+  nil
+end
+
+def wide(x : Int64)
+  nil
+end
+
+def wide(x : Int8)
+  nil
+end
+
+# call byte_ptr.+(1)
+# call byte_ptr.+(instance(Int32))
+# call wide(1)

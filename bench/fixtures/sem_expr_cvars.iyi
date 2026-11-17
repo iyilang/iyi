@@ -1,0 +1,15 @@
+class Config
+  @@count = 100
+  @@name : String = "app"
+
+  def self.get_count : Int32
+    @@count
+  end
+
+  def self.get_name : String
+    @@name
+  end
+end
+
+c1 = Config.get_count
+c2 = Config.get_name

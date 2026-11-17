@@ -1,0 +1,14 @@
+def check_or(node : ASTNode, other : ASTNode) : ASTNode
+  node.is_a?(Var) || other.is_a?(Var)
+  node.is_a?(IsA) && node.obj.is_a?(Var) || other.name == "it"
+  value = node.is_a?(Var) || other.is_a?(Var)
+  if (sum = node.size) || sum > 0
+    sum
+  end
+  !node.is_a?(Var) || other.is_a?(IsA) && other.obj.is_a?(Var)
+  !other.is_a?(Var) || node.size > 0
+  node.is_a?(Var) || node.name.size > 0 || other.is_a?(Var)
+  node.size > 0 || other.size > 0 || node.name == other.name
+  found = node.size > 0 || other.size > 0
+  found
+end

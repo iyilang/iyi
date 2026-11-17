@@ -1,0 +1,19 @@
+import bodies_union_gate::{Gate}
+
+class Box(T)
+  def set(value : T | Nil) : Int32
+    1
+  end
+end
+
+def use_gate
+  Gate.pass("out", 1)
+end
+
+def use_box
+  b = Box(Int32).new
+  b.set(nil)
+end
+
+use_gate
+use_box

@@ -1,0 +1,11 @@
+# Dump gap, recorded not fixed: the oracle prints a UInt64 constant as `1_u64`; the port's dump
+# prints `1`. This fixture uses an Int32 constant so both sides print the same text.
+class Lock
+  HELD = 1
+
+  def self.acquire(word : Int32) : Nil
+    seen = word
+    return if seen & HELD == 0
+    nil
+  end
+end

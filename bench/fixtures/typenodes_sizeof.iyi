@@ -1,0 +1,7 @@
+class Box
+end
+
+x = sizeof(Int32)
+y = alignof(Int64)
+z = instance_sizeof(Box)
+w = instance_alignof(Box)

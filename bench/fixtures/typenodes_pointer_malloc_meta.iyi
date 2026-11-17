@@ -1,0 +1,9 @@
+@[Unsafe("a pointer allocated through its metaclass")]
+struct Pointer(T)
+  def self.malloc(size : Int32)
+    p = uninitialized Pointer(T)
+    p
+  end
+end
+
+y = Pointer(Int32).malloc(1)

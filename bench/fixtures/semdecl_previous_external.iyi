@@ -1,0 +1,7 @@
+lib LibRepeat
+  fun wait(value : Int32) : Int32
+end
+
+lib LibRepeat
+  fun wait(value : Int32) : Int32
+end

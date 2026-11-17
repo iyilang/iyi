@@ -1,0 +1,208 @@
+module compiler/semantic/inline_macros
+
+import compiler/syntax/ast::{ASTNode, Assign, Block, ClassDef, Def, Expressions, FunDef, LibDef, MacroExpression, MacroFor, MacroIf, ModuleDef, MultiAssign, ProcLiteral, TypeDeclaration, UninitializedVar, Var}
+import compiler/syntax/parser::{Parser}
+import compiler/semantic/normalizer::{Normalizer, NormalizerProgram}
+import compiler/syntax/visitor::{Visitor}
+import compiler/macros/engine::{MacroEngine}
+import compiler/macros/interpreter::{MacroFreeBinding}
+import compiler/macros/type_facts::{MacroTypeFacts}
+
+# One inline macro site the declarations pass visited: the file it is written in,
+# its kind and place, and why the engine refused it (nil when it expanded, an empty
+# expansion included). The gate prints these, so a refused site is counted and
+# never dropped.
+pub class InlineMacroSite
+  property file : String
+  property kind : String
+  property line : Int32
+  property column : Int32
+  property reason : String?
+
+  def initialize(@file : String, @kind : String, @line : Int32, @column : Int32, @reason : String?)
+  end
+end
+
+# Every inline macro site the pass visited in this run, in visiting order, across
+# the files it loaded. A caller filters by file to measure one file.
+pub class InlineMacroLedger
+  @@sites = [] of InlineMacroSite
+
+  def self.sites : Array(InlineMacroSite)
+    @@sites
+  end
+
+  def self.record(site : InlineMacroSite) : Nil
+    @@sites << site
+    nil
+  end
+
+  def self.reset : Nil
+    @@sites = [] of InlineMacroSite
+    nil
+  end
+end
+
+# Expands one inline macro site (`{% if %}`, `{% for %}` or `{{ }}` at the top
+# level, in a type body or in a `lib` body) as the hosted pass expands it: with a
+# fresh interpreter that names `scope_name` for `@type` and `@top_level`, the output
+# is parsed in the site's file and normalised. A site in a `lib` body is parsed as a
+# lib body (`fun` declarations with no body). Returns the expansion for the caller
+# to visit in the same scope, or nil when the engine refuses the site or the
+# expansion is empty. Either way the site is recorded in the ledger.
+#
+# The expansion's nodes carry the lines of the expansion text, not of the site: the
+# declarations pass reads only the file a node was written in, which the site
+# shares. A line reported for a declaration a macro made is the expansion's line.
+#
+# `locals` are the names the body declares before the site, in the order its statements are read.
+# The expansion is parsed knowing them, as the hosted parser reads it in the body's own scope: a
+# later reference to such a local is a variable, not a call.
+#
+# `bindings` are the type parameters a site in a def body sees (macro_bindings.iyi): the receiver's
+# and the def's free variables. A site at the top level or in a type body has none.
+pub def expand_inline_macro(site : ASTNode, scope_name : String, filename : String, in_lib : Bool, normalizer : NormalizerProgram, locals : Array(String) = [] of String, bindings : Array(MacroFreeBinding)? = nil, facts : MacroTypeFacts? = nil) : ASTNode?
+  report = MacroEngine.new.site_report(site, scope_name, bindings, facts)
+  first = report.sites.first
+  kind = first.kind
+  line = first.line
+  column = first.column
+
+  if f = report.failure
+    InlineMacroLedger.record(InlineMacroSite.new(filename, kind, line, column, f.message))
+    return nil
+  end
+  if report.skipped
+    InlineMacroLedger.record(InlineMacroSite.new(filename, kind, line, column, "skip_file ends the file's expansion early, which the port does not expand"))
+    return nil
+  end
+
+  InlineMacroLedger.record(InlineMacroSite.new(filename, kind, line, column, nil))
+  text = report.output
+  return nil if text.bytesize == 0
+
+  scopes = [Set(String).new] of Set(String)
+  locals.each { |name| scopes[0].add(name) }
+  parser = Parser.new(text, filename, nil, scopes)
+  parsed = in_lib ? parser.parse_lib_body : parser.parse
+  Normalizer.new(normalizer).normalize(parsed)
+end
+
+# The local names a body declares, as the parser records them: an assignment to a plain
+# variable, a typed declaration, and a multiple assignment's targets. A block, def, class,
+# module, lib, fun or lambda has a scope of its own that the enclosing body does not see, so
+# the scan does not enter one.
+class InlineLocalNames < Visitor
+  def initialize(@names : Array(String))
+  end
+
+  def visit(node : Assign) : Bool
+    add_name(node.target)
+    true
+  end
+
+  def visit(node : TypeDeclaration) : Bool
+    add_name(node.var)
+    true
+  end
+
+  def visit(node : UninitializedVar) : Bool
+    add_name(node.var)
+    true
+  end
+
+  def visit(node : MultiAssign) : Bool
+    node.targets.each { |target| add_name(target) }
+    true
+  end
+
+  def visit(node : Block) : Bool
+    false
+  end
+
+  def visit(node : Def) : Bool
+    false
+  end
+
+  def visit(node : ClassDef) : Bool
+    false
+  end
+
+  def visit(node : ModuleDef) : Bool
+    false
+  end
+
+  def visit(node : LibDef) : Bool
+    false
+  end
+
+  def visit(node : FunDef) : Bool
+    false
+  end
+
+  def visit(node : ProcLiteral) : Bool
+    false
+  end
+
+  def add_name(target : ASTNode) : Nil
+    if target.is_a?(Var)
+      name = target.as(Var).name
+      @names << name unless @names.includes?(name)
+    end
+    nil
+  end
+end
+
+# Adds to `names` the locals `node` declares (see InlineLocalNames).
+pub def collect_local_names(node : ASTNode, names : Array(String)) : Nil
+  node.accept(InlineLocalNames.new(names))
+  nil
+end
+
+# Replaces every inline macro site among `nodes` (the children of one Expressions: a file's top
+# level, a type body, or the body of a def or fun) with its expansion, recursively, so the tree the
+# later passes read holds the expansion and not the macro node. A site the engine refuses stays in
+# the tree, so the pass that reads it refuses it too. An empty expansion is removed at the top
+# level. In a def body (`keep_empty`) it stays: hosted parse_macro_source still parses an empty
+# expansion (macros.cr 2128-2143) and expand_inline_macro binds that tree to the site
+# (semantic_visitor.cr 2221-2226), so a site that writes nothing is still an expression, typed Nil.
+# `locals` names what is declared before the first node, and grows with each node that declares one.
+pub def splice_inline_sites(nodes : Array(ASTNode), scope_name : String, filename : String, in_lib : Bool, normalizer : NormalizerProgram, locals : Array(String) = [] of String, bindings : Array(MacroFreeBinding)? = nil, facts : MacroTypeFacts? = nil, keep_empty : Bool = false) : Array(ASTNode)
+  out = [] of ASTNode
+  nodes.each do |n|
+    unless n.is_a?(MacroIf) || n.is_a?(MacroFor) || n.is_a?(MacroExpression)
+      collect_local_names(n, locals)
+      out << n
+      next
+    end
+    expanded = expand_inline_macro(n, scope_name, filename, in_lib, normalizer, locals, bindings, facts)
+    if expanded.nil?
+      sites = InlineMacroLedger.sites
+      last = sites[sites.size - 1]
+      if last.reason.nil?
+        out << n if keep_empty
+      else
+        out << n
+      end
+      next
+    end
+    inner = [expanded.as(ASTNode)] of ASTNode
+    if expanded.is_a?(Expressions)
+      inner = expanded.as(Expressions).expressions
+    end
+    if keep_empty && inner.empty?
+      out << n
+      next
+    end
+    out.concat(splice_inline_sites(inner, scope_name, filename, in_lib, normalizer, locals, bindings, facts, keep_empty))
+  end
+  out
+end
+
+# A body that is one inline macro node (a class, module or lib body) has no Expressions around it,
+# so splice_inline_sites is never asked about it. Wrap it in an Expressions and splice it as a body
+# of several nodes is spliced. A site the engine refuses stays. `keep_empty` is the def-body rule above.
+pub def splice_body_node(body : ASTNode, scope_name : String, filename : String, in_lib : Bool, normalizer : NormalizerProgram, locals : Array(String) = [] of String, bindings : Array(MacroFreeBinding)? = nil, facts : MacroTypeFacts? = nil, keep_empty : Bool = false) : ASTNode
+  return body unless body.is_a?(MacroIf) || body.is_a?(MacroFor) || body.is_a?(MacroExpression)
+  Expressions.new(splice_inline_sites([body] of ASTNode, scope_name, filename, in_lib, normalizer, locals, bindings, facts, keep_empty))
+end

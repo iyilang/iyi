@@ -1,0 +1,17 @@
+module sem_bodies_unit_scope_inferred
+
+def data_base : Int32
+  7
+end
+
+def sibling(value : Int32)
+  value + data_base
+end
+
+class Writer
+  def write
+    data_base
+  end
+end
+
+Writer.new.write

@@ -1,0 +1,11 @@
+class Holder
+  @a : Array(String)
+  @h : Hash(String, Int32)
+  @g : Array(Int32)?
+
+  def initialize
+    @a = [] of String
+    @h = Hash(String, Int32).new
+    @g = nil
+  end
+end

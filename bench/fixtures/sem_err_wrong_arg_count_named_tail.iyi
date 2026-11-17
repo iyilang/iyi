@@ -1,0 +1,5 @@
+def arity_named_tail(*, value : Int32) : Int32
+  value
+end
+
+arity_named_tail(1)

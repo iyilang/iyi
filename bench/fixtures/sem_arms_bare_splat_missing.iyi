@@ -1,0 +1,7 @@
+class Bare
+  def self.pick(size : Int32, *, flag : Bool) : Int32
+    size
+  end
+end
+
+puts Bare.pick(4)

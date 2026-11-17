@@ -1,0 +1,22 @@
+# A target type gives every literal its kind and range, as an enum value or a
+# StaticArray size does.
+# target: u8
+1 + 2
+255
+300
+200 + 100
+-1
+170141183460469231731687303715884105727_i128
+# target: i8
+-128
+127
+-129
+1.5
+# target: u128
+1 + 2
+# target: i128
+170141183460469231731687303715884105727_i128
+-170141183460469231731687303715884105728_i128
+# target: none
+1.5
+1 + 2

@@ -1,0 +1,9 @@
+struct AliasElement(T)
+end
+
+struct AliasContainer(T)
+end
+
+alias AliasBytes = AliasElement(Int32)
+
+# op lookup(program, AliasContainer(AliasBytes))

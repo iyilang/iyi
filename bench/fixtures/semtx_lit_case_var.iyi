@@ -1,0 +1,14 @@
+it = 1
+v = 1
+case v
+when 1
+  it + 1
+else
+  it
+end
+case @i
+when 2
+  c
+else
+  d
+end

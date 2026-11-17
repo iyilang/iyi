@@ -1,0 +1,6 @@
+def widen(x : Int64) : Int64
+  x
+end
+
+n : Int32 = 1
+a = widen(n)

@@ -1,0 +1,28 @@
+struct AliasDay
+  Monday = AliasDay.new(1)
+
+  def initialize(@value : Int32)
+  end
+
+  def value : Int32
+    @value
+  end
+end
+
+struct AliasClock
+  alias Day = AliasDay
+  alias AlsoDay = Day
+
+  def self.member : Int32
+    AlsoDay::Monday.value
+  end
+
+  def self.construct : Int32
+    Day.new(2).value
+  end
+end
+
+AliasClock.member
+AliasClock.construct
+AliasClock::AlsoDay::Monday.value
+AliasClock::Day.new(2).value

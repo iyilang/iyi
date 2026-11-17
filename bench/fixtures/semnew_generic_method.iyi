@@ -1,0 +1,11 @@
+class Box(T)
+  def initialize(v : T)
+  end
+
+  def take(v : T) : T
+    v
+  end
+end
+
+b = Box(Int32).new(1)
+b.take(2)

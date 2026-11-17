@@ -1,0 +1,6 @@
+class Box(T)
+  def initialize(v : T)
+  end
+end
+
+b = Box(Int32).new(1)

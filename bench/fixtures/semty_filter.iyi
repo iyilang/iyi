@@ -1,0 +1,36 @@
+class Animal
+end
+
+class Dog < Animal
+end
+
+class Cat < Animal
+end
+
+class Holder
+end
+
+struct Point
+  @x : Int32
+end
+
+# op filter(Dog, is_a, Animal)
+# op filter(Animal, is_a, Dog)
+# op filter(Animal, is_a, Cat)
+# op filter(Dog, is_a, Cat)
+# op filter(Holder, nil?)
+# op filter(Nil, nil?)
+# op filter(Holder, not_nil?)
+# op filter(Nil, not_nil?)
+# op filter(Holder, truthy)
+# op filter(Nil, truthy)
+# op filter(Bool, truthy)
+# op filter(Holder, not_truthy)
+# op filter(Nil, not_truthy)
+# op filter(Bool, not_truthy)
+# op filter(Animal, not_is_a, Dog)
+# op filter(Dog, not_is_a, Animal)
+# op filter(Holder, responds_to, bark)
+# op filter(Animal, or_is_a, Cat, Holder)
+# op filter(Animal, and_is_a, Dog, Cat)
+# op filter(Dog, and_is_a, Dog, Animal)

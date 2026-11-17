@@ -1,0 +1,16 @@
+# Splat generics as type arguments. Tuple(String, Int32, Bool) and a user class SplatBox(*T) take any number
+# of type arguments (including none); the declarations of ivars and parameters name them. The declarations pass
+# answers them through the type system's own lookup (the hook's resolve_node), as the hosted does.
+class SplatBox(*T)
+end
+
+class SplatHolder
+  @triple : Tuple(String, Int32, Bool)
+  @single : Tuple(Int32)
+  @box : SplatBox(Int32, String, Bool)
+  @empty : SplatBox()
+
+  def initialize(@triple : Tuple(String, Int32, Bool), @single : Tuple(Int32), @box : SplatBox(Int32, String, Bool))
+    @empty = SplatBox().new
+  end
+end

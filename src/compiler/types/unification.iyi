@@ -1,0 +1,180 @@
+module compiler/types/unification
+
+import compiler/foundation/location::{Location}
+import compiler/syntax/ast::{ASTNode}
+import compiler/syntax/token
+import compiler/semantic/top_level::{AliasType, ClassType, GenericClassType, GenericModuleType, MetaclassType, ModuleType, NamedType, NilType, NonGenericClassType, NoReturnType, SemanticProgram, Type, UnionType, VoidType}
+import compiler/types/types::{GenericClassInstanceMetaclassType, GenericClassInstanceType, GenericInstanceType, GenericModuleInstanceMetaclassType, GenericModuleInstanceType, MixedUnionType, NamedArgumentType, NamedTupleInstanceType, NilableProcType, NilableReferenceUnionType, NilableType, PointerInstanceType, ProcInstanceType, ReferenceUnionType, StaticArrayInstanceType, TupleInstanceType, VirtualMetaclassType, VirtualType}
+
+pub class TypeUnification
+  def self.virtual_type_of(program : SemanticProgram, type : Type) : Type
+    if type.is_a?(VirtualType)
+      return type
+    end
+    if type.is_a?(ClassType)
+      ct = type.as(ClassType)
+      if ct.subclasses.empty? && !ct.abstract?
+        return ct
+      end
+      return VirtualType.new(program, ct)
+    end
+    if type.is_a?(GenericClassInstanceType)
+      return VirtualType.new(program, type)
+    end
+    type
+  end
+
+  def self.metaclass_of(type : Type) : Type?
+    if type.is_a?(ModuleType)
+      return type.as(ModuleType).metaclass
+    end
+    if type.is_a?(VirtualType)
+      return type.as(VirtualType).metaclass
+    end
+    nil
+  end
+
+  def self.sort_types_by_name(types : Array(Type)) : Array(Type)
+    # Simple selection sort by full_name
+    sorted = [] of Type
+    types.each { |t| sorted << t }
+    i = 0
+    while i < sorted.size
+      min_idx = i
+      j = i + 1
+      while j < sorted.size
+        if sorted[j].full_name < sorted[min_idx].full_name
+          min_idx = j
+        end
+        j = j + 1
+      end
+      if min_idx != i
+        temp = sorted[i]
+        sorted[i] = sorted[min_idx]
+        sorted[min_idx] = temp
+      end
+      i = i + 1
+    end
+    sorted
+  end
+
+  def self.union_of(program : SemanticProgram, types : Array(Type)) : Type
+    # Deduplicate after combining
+    unique = [] of Type
+    i = 0
+    while i < types.size
+      t = types[i]
+      already = false
+      j = 0
+      while j < unique.size
+        if unique[j] == t || unique[j].full_name == t.full_name
+          already = true
+          break
+        end
+        j = j + 1
+      end
+      unless already
+        unique << t
+      end
+      i = i + 1
+    end
+
+    if unique.size == 1
+      return unique.first
+    end
+
+    if unique.empty?
+      return build_union_of(program, unique)
+    end
+
+    # The hosted program caches each union by the sorted object ids of its members
+    # (`program.unions`), so one set of members makes one union.
+    key = [] of UInt64
+    i = 0
+    while i < unique.size
+      key << unique[i].object_id
+      i = i + 1
+    end
+    key = key.sorted
+    if cached = program.unions[key]?
+      return cached
+    end
+    union = build_union_of(program, unique)
+    program.unions[key] = union
+    union
+  end
+
+  def self.build_union_of(program : SemanticProgram, unique : Array(Type)) : Type
+    non_nil = [] of Type
+    has_nil = false
+    i = 0
+    while i < unique.size
+      t = unique[i]
+      if t.full_name == "Nil" || t.is_a?(NilType)
+        has_nil = true
+      else
+        non_nil << t
+      end
+      i = i + 1
+    end
+
+    sorted_non_nil = sort_types_by_name(non_nil)
+
+    if has_nil
+      all_sorted = [] of Type
+      sorted_non_nil.each { |t| all_sorted << t }
+      all_sorted << program.nil_type
+
+      if all_sorted.size == 2
+        not_nil_t = sorted_non_nil.first
+        if not_nil_t.is_a?(ProcInstanceType)
+          return NilableProcType.new(program, not_nil_t.as(ProcInstanceType))
+        elsif not_nil_t.subtype_of?(program.reference_type) && !not_nil_t.is_a?(VirtualType)
+          if not_nil_t.is_a?(ClassType) && !not_nil_t.as(ClassType).subclasses.empty?
+            return NilableReferenceUnionType.new(program, all_sorted)
+          else
+            return NilableType.new(program, not_nil_t)
+          end
+        elsif not_nil_t.subtype_of?(program.reference_type) && not_nil_t.is_a?(VirtualType)
+          return NilableReferenceUnionType.new(program, all_sorted)
+        else
+          return MixedUnionType.new(program, all_sorted)
+        end
+      end
+
+      # Check if all non-nil are reference types
+      all_ref = true
+      i = 0
+      while i < sorted_non_nil.size
+        unless sorted_non_nil[i].subtype_of?(program.reference_type)
+          all_ref = false
+          break
+        end
+        i = i + 1
+      end
+
+      if all_ref
+        return NilableReferenceUnionType.new(program, all_sorted)
+      else
+        return MixedUnionType.new(program, all_sorted)
+      end
+    else
+      # Check if all are reference types
+      all_ref = true
+      i = 0
+      while i < sorted_non_nil.size
+        unless sorted_non_nil[i].subtype_of?(program.reference_type)
+          all_ref = false
+          break
+        end
+        i = i + 1
+      end
+
+      if all_ref
+        return ReferenceUnionType.new(program, sorted_non_nil)
+      else
+        return MixedUnionType.new(program, sorted_non_nil)
+      end
+    end
+  end
+end

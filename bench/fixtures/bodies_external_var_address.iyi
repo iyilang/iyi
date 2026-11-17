@@ -1,0 +1,8 @@
+@[Unsafe("This fixture declares external variables for pointer typing")]
+lib LibAddressFixture
+  $counter : Int32
+  $buffer : UInt8*
+end
+
+pointerof(LibAddressFixture.counter)
+pointerof(LibAddressFixture.buffer)

@@ -1,0 +1,41 @@
+# Instantiated argument types of a resolved call: a free variable bound once
+# across both arguments, a specialised overload beside a generic one, a union
+# parameter given a member, a nilable parameter given nil, and a splat expanded
+# in order. Read by bench/selfhost_semantic_calls_exercise.sh.
+
+def agree(a : T, b : T) : T forall T
+  a
+end
+
+def pick(x : Int32) : Int32
+  x
+end
+
+def pick(x : T) : T forall T
+  x
+end
+
+def member(x : Int32 | String) : Int32 | String
+  1
+end
+
+def nilable(x : Int32 | Nil) : Nil
+  nil
+end
+
+def spread(*xs : Int32) : Int32
+  1
+end
+
+def wide(x : Int64) : Int64
+  x
+end
+
+# instance agree(1, 2)
+# instance agree(1, "a")
+# instance pick(1)
+# instance pick("a")
+# instance member(1)
+# instance nilable(nil)
+# instance spread(1, 2)
+# instance wide(1)

@@ -1,0 +1,5 @@
+import bodies_cycle_helper::{Pair, hv}
+
+p0 = Pair.new(nil)
+p1 = Pair.new(p0)
+value = hv(p1)

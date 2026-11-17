@@ -1,0 +1,29 @@
+@[Unsafe("self written as a type node in instance, class, and generic owner scopes")]
+struct Pointer(T)
+  def self.malloc(size : Int32)
+    p = uninitialized Pointer(T)
+    p
+  end
+end
+
+class Foo
+  def ptr
+    Pointer(self).malloc(1)
+  end
+end
+
+class Bar
+  def self.make
+    Pointer(self).malloc(1)
+  end
+end
+
+class Box(T)
+  def ptr
+    Pointer(self).malloc(1)
+  end
+end
+
+Foo.new.ptr
+Bar.make
+Box(Int32).new.ptr

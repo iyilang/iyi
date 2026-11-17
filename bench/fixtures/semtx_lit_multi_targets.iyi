@@ -1,0 +1,7 @@
+# Targets that are calls: the value becomes the last argument of `name=` or `[]=`.
+obj = Box.new
+box = Box.new
+pair = {1, 2}
+obj.first, box[0] = 3, 4
+obj.first, box[0] = pair
+@left, @right = 1, 2

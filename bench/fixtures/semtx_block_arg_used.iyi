@@ -1,0 +1,23 @@
+def keeps(&block)
+  block.call
+end
+
+def drops(&block)
+  yield
+end
+
+def keeps_inside_a_block(&block)
+  3.times { block.call }
+end
+
+def keeps_restricted(&block : Int32 -> Int32)
+  block.call(1)
+end
+
+def yields_restricted(&block : Int32 -> Int32)
+  yield 1
+end
+
+def calls_another_block
+  block
+end

@@ -1,0 +1,36 @@
+@[Unsafe("declares the C functions the lib lookup is checked against")]
+lib LibTest
+  fun stop(status : Int32) : Void
+  fun get(p : Pointer(Int32)) : Int32
+  fun va(a : Int32, ...) : Int32
+  fun vstr(a : Int32, ...) : Int32
+  fun pair(a : Int32, b : Int32) : Int32
+  fun first(a : Int32) : Int32
+  fun nothing(a : Int32)
+  fun ptrs(p : Pointer(Void)) : Int32
+  fun dbl(x : Float64) : Int32
+  fun wide(x : Int64) : Int32
+  fun str_arg(p : Pointer(UInt8)) : Int32
+end
+
+# error LibTest.stop(1)
+# error LibTest.stop(nil)
+# error LibTest.get(nil)
+# error LibTest.get(1)
+# error LibTest.va(1, 2, 3)
+# error LibTest.va(1, nil)
+# error LibTest.vstr(1, "x")
+# error LibTest.va()
+# error LibTest.pair(1, 2)
+# error LibTest.pair(1)
+# error LibTest.pair(1, 2, 3)
+# error LibTest.pair(b: 2, a: 1)
+# error LibTest.pair(a: 1)
+# error LibTest.pair(c: 1)
+# error LibTest.pair(a: 1, a: 2)
+# error LibTest.nothing(1)
+# error LibTest.nothing()
+# error LibTest.dbl(1)
+# error LibTest.wide(1)
+# error LibTest.nope(1)
+# error LibTest.str_arg("x")

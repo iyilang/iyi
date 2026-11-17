@@ -1,0 +1,16 @@
+module compiler/semantic/call_nodes
+
+import compiler/syntax/ast::{ASTNode, Call}
+
+# Narrows an AST node to a call. The module exists because the module named
+# compiler/semantic/call cannot name the AST class Call itself (inside that module
+# `Call` is the module), so semantic/call.iyi reads a call's object, name and
+# arguments through this helper and never writes the type.
+pub class CallNodes
+  def self.as_call(node : ASTNode) : Call?
+    if node.is_a?(Call)
+      return node.as(Call)
+    end
+    nil
+  end
+end

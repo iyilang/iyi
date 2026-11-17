@@ -1,0 +1,11 @@
+def recursive_inferred_count(recurse : Bool, value : Bool)
+  if recurse
+    recursive_inferred_count(false, value)
+  elsif value
+    true
+  else
+    nil
+  end
+end
+
+recursive_inferred_count(true, true)

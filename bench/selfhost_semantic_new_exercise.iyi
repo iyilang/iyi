@@ -1,0 +1,184 @@
+import compiler/syntax/parser::{Parser}
+import compiler/syntax/ast::{ASTNode, Assign, Call, Def, DoubleSplat, Expressions, Generic, If, InstanceVar, Nop, Path, Primitive, RespondsTo, Splat, Var, Visibility}
+import compiler/syntax/visitor::{Visitor}
+import compiler/semantic/top_level::{ModuleType, SemanticProgram, TopLevelVisitor, Type}
+import compiler/semantic/main_visitor::{MainVisitor}
+import compiler/types/types::{GenericClassInstanceType}
+
+# Collects the `new` calls of the file, in tree order.
+class NewCallWalk < Visitor
+  getter calls : Array(Call)
+
+  def initialize
+    @calls = [] of Call
+  end
+
+  def visit_any(node : ASTNode) : Bool
+    if node.is_a?(Call)
+      c = node.as(Call)
+      @calls << c if c.name == "new"
+    end
+    true
+  end
+end
+
+# Driver for bench/selfhost_semantic_new_exercise.sh: the port's new methods for a
+# fixture, printed with the same lines as the hosted oracle
+# (bench/selfhost_semantic_new_oracle.cr). It runs the top-level pass, the main pass
+# (which completes the new methods) over the fixture bare, with no prelude.
+#
+# Prints, sorted, one line per generated or explicit `new` on a user class's
+# metaclass and one per explicit `initialize`, then one line per `new` call written
+# in the file, in tree order.
+module BenchSelfhostSemanticNewExercise
+  def self.type_text(t : Type?) : String
+    return "nil" if t.nil?
+    t.full_name
+  end
+
+  # The kinds of node a generated body is described by. Other nodes print as Other.
+  def self.kind_text(node : ASTNode) : String
+    return "Assign" if node.is_a?(Assign)
+    return "Call" if node.is_a?(Call)
+    return "If" if node.is_a?(If)
+    return "Var" if node.is_a?(Var)
+    return "Nop" if node.is_a?(Nop)
+    return "Expressions" if node.is_a?(Expressions)
+    return "Splat" if node.is_a?(Splat)
+    return "DoubleSplat" if node.is_a?(DoubleSplat)
+    return "RespondsTo" if node.is_a?(RespondsTo)
+    return "Path" if node.is_a?(Path)
+    return "Generic" if node.is_a?(Generic)
+    return "InstanceVar" if node.is_a?(InstanceVar)
+    return "Primitive" if node.is_a?(Primitive)
+    "Other"
+  end
+
+  def self.body_text(body : ASTNode) : String
+    if body.is_a?(Expressions)
+      kinds = body.as(Expressions).expressions.map { |e| kind_text(e) }
+      return "[" + kinds.join(",") + "]"
+    end
+    kind_text(body)
+  end
+
+  # One argument of an initialize call: a variable, or a splat of one.
+  def self.arg_text(node : ASTNode) : String
+    if node.is_a?(Var)
+      return node.as(Var).name
+    end
+    if node.is_a?(Splat)
+      return "*" + arg_text(node.as(Splat).exp)
+    end
+    if node.is_a?(DoubleSplat)
+      return "**" + arg_text(node.as(DoubleSplat).exp)
+    end
+    kind_text(node)
+  end
+
+  # The arguments of the initialize call a generated new makes (its second expression),
+  # positional first, then named, so the argument order is part of the record.
+  def self.init_text(body : ASTNode) : String
+    return "" unless body.is_a?(Expressions)
+    exps = body.as(Expressions).expressions
+    return "" if exps.size < 2
+    c = exps[1]
+    return "" unless c.is_a?(Call)
+    parts = c.as(Call).args.map { |a| arg_text(a) }
+    if named = c.as(Call).named_args
+      named.each do |na|
+        parts << "#{na.name}:#{arg_text(na.value)}"
+      end
+    end
+    " init(#{parts.join(",")})"
+  end
+
+  def self.vis_text(v : Visibility?) : String
+    return "none" if v.nil?
+    return "protected" if v == Visibility::Protected
+    return "private" if v == Visibility::Private
+    "public"
+  end
+
+  def self.run(src : String, filename : String) : String
+    parser = Parser.new(src, filename)
+    node = parser.parse
+    prog = SemanticProgram.new
+    tl = TopLevelVisitor.new(prog)
+    node.accept(tl)
+    tl.finish
+    mv = MainVisitor.new(prog)
+    node.accept(mv)
+
+    initial = prog.initial_type_names
+    def_lines = [] of String
+    prog.types.each do |name, t|
+      next if initial.includes?(name)
+      next unless t.is_a?(ModuleType)
+      mt = t.as(ModuleType)
+      news = mt.metaclass.defs["new"]?
+      if news
+        news.as(Array(Def)).each do |d|
+          arg_names = d.args.map { |a| a.name }.join(", ")
+          def_lines << "def #{type_text(t)}.new(#{arg_names}) vis #{vis_text(d.visibility)} body #{body_text(d.body)}#{init_text(d.body)}"
+        end
+      end
+      inits = mt.defs["initialize"]?
+      if inits
+        inits.as(Array(Def)).each do |d|
+          arg_names = d.args.map { |a| a.name }.join(", ")
+          def_lines << "init #{type_text(t)}#initialize(#{arg_names}) vis #{vis_text(d.visibility)}"
+        end
+      end
+    end
+
+    out = String::Builder.new
+    def_lines.sorted_by { |l| l }.each do |l|
+      out << l << "\n"
+    end
+
+    walk = NewCallWalk.new
+    node.accept(walk)
+    walk.calls.each do |c|
+      recv_text = "self"
+      if obj = c.obj
+        recv_text = obj.is_a?(Path) ? obj.as(Path).names.join("::") : kind_text(obj)
+      end
+      arg_types = c.args.map { |a| type_text(mv.type_of?(a)) }.join(", ")
+      result = type_text(mv.type_of?(c))
+      target_text = "target none"
+      if td = mv.target_def?(c)
+        target_text = "target #{td.name}(#{td.args.map { |a| a.name }.join(", ")}) targets 1"
+      end
+      line = 0
+      column = 0
+      if loc = c.location
+        line = loc.line_number
+        column = loc.column_number
+      end
+      out << "call #{line}:#{column} #{recv_text}.new(#{arg_types}) -> #{result} #{target_text}\n"
+      if result_type = mv.type_of?(c)
+        if result_type.is_a?(GenericClassInstanceType)
+          inst = result_type.as(GenericClassInstanceType)
+          if inst.type_vars["T"]?
+            resolved = mv.lookup_under(Path.new(["T"]), inst)
+            out << "lookup T on #{type_text(inst)} -> #{type_text(resolved)}\n"
+          end
+        end
+      end
+    end
+    out.to_s
+  end
+end
+
+if Program.args.size > 0
+  filename = Program.args[0]
+  print BenchSelfhostSemanticNewExercise.run(File.read(filename), filename)
+else
+  # Self-check: a class with an initialize gets one generated `new` that allocates,
+  # calls initialize with its argument and yields the object, and the call targets it.
+  out = BenchSelfhostSemanticNewExercise.run("class Box; def initialize(v : Int32); end; end; b = Box.new(3)", "selfcheck.iyi")
+  unless out.includes?("def Box.new(v) vis public body [Assign,Call,If,Var] init(v)") && out.includes?("target new(v) targets 1")
+    raise "new self-check failed: #{out}"
+  end
+end

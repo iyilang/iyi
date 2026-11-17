@@ -1,0 +1,18 @@
+class Holder
+end
+
+# op Nil.nil_type?
+# op Int32.nil_type?
+# op Nil.reference_like?
+# op Nil.struct?
+# op NoReturn.no_return?
+# op Int32.no_return?
+# op Void.void?
+# op Int32.void?
+# op Pointer.pointer?
+# op Array.reference_like?
+# op Array.splat_index
+# op Tuple.splat_index
+# op Tuple.reference_like?
+# op Proc.proc?
+# op Proc.struct?

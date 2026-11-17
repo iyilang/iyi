@@ -1,0 +1,14 @@
+INDEX = 1
+RANGE = 0..0
+i = 1
+
+# tuple {1, "x"}[0]
+# tuple {1, "x"}[-1]
+# tuple {1, "x"}[0..1]
+# tuple {1, "x"}[0..0]
+# tuple {1, "x"}[RANGE]
+# tuple {1, "x"}[1...1]
+# tuple {1, "x"}[5]?
+# tuple {1, "x"}[INDEX]
+# tuple {a: 1, b: "x"}[:b]
+# tuple {1, "x"}[i]

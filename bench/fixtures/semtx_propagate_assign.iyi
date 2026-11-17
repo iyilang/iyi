@@ -1,0 +1,13 @@
+def read_port(path : String) : Int32
+  8080
+end
+
+def read_twice(path : String) : Int32
+  first = read_port(path)!
+  second = read_port(path + "x")!
+  first + second
+end
+
+def read_return(path : String) : Int32
+  return read_port(path)!
+end

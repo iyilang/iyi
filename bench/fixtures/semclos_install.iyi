@@ -1,0 +1,15 @@
+@[Unsafe("declares the external process exit")]
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def install(&body : -> Int32) : Int32
+  body.call
+end
+
+def in_unit(n : Int32, &block : -> Int32) : Int32
+  task = n
+  install { block.call; task }
+end
+
+LibC.exit(in_unit(7) { 3 })

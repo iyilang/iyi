@@ -1,0 +1,17 @@
+class Counter
+  def initialize(count : Int32)
+  end
+end
+
+class Pair(T)
+  def initialize(first : T, second : T)
+  end
+end
+
+class Plain
+end
+
+struct Size
+  def initialize(width : Int32, height : Int32 = 1)
+  end
+end

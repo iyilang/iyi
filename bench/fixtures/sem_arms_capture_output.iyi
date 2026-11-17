@@ -1,0 +1,5 @@
+def capture(&block : -> U) : U forall U
+  block.call
+end
+
+puts capture { 7 }

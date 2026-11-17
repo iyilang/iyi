@@ -1,0 +1,10 @@
+class Outer
+  enum Flags
+    None
+  end
+
+  class Info
+    def initialize(@flags : Flags)
+    end
+  end
+end

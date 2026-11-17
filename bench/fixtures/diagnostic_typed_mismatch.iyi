@@ -1,0 +1,4 @@
+def consume(value : String)
+end
+
+consume(1)

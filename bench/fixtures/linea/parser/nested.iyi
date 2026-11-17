@@ -1,0 +1,11 @@
+module main
+
+pub def inc(n : Int32) : Int32
+  n + 1
+end
+
+pub def twice(n : Int32) : Int32
+  inc(inc(n))
+end
+
+puts twice(41)

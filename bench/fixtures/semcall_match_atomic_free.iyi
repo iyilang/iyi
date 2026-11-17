@@ -1,0 +1,24 @@
+# Atomic(T)#get calls IyiAtomic.load(pointerof(@value)) where load is
+# `def self.load(pointer : Pointer(T)) : T forall T`. The harness types the
+# pointer as instance(Pointer(UInt64)); the binding is the same.
+
+struct IyiAtomic
+  def self.load(pointer : Pointer(T)) : T forall T
+    pointer
+  end
+end
+
+struct AtomicBox(T)
+  @value : T
+
+  def initialize(@value : T)
+  end
+
+  def get : T
+    IyiAtomic.load(pointerof(@value))
+  end
+end
+
+# bound IyiAtomic.load(instance(Pointer(UInt64)))
+# bound IyiAtomic.load(instance(Pointer(Int64)))
+# bound IyiAtomic.load(instance(Int32))

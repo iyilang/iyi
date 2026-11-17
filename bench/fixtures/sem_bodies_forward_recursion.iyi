@@ -1,0 +1,24 @@
+# A captured block is forwarded through recursive calls, as in Dir.glob.
+def forward_walk(value, flag : Bool, &block : Bool -> Nil) : Nil
+  if flag
+    forward_walk(value, false, &block)
+  end
+  nil
+end
+
+# The recursive result contributes to the inferred return type.
+def forward_depth(flag : Bool, &block : Bool -> Nil)
+  if flag
+    forward_depth(false, &block) || 1
+  else
+    nil
+  end
+end
+
+def forward_entry(&block : Bool -> Nil)
+  forward_walk(1, true, &block)
+  forward_walk("s", true, &block)
+  forward_depth(true, &block)
+end
+
+forward_entry { |f| nil }

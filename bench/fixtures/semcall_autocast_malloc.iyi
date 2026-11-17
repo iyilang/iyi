@@ -1,0 +1,5 @@
+@[Unsafe("the fixture calls Pointer.malloc, which returns raw memory")]
+
+# call Pointer(UInt8).malloc(1)
+# call Pointer(UInt8).malloc(instance(Int32))
+# error Pointer(UInt8).malloc(1)

@@ -1,0 +1,10 @@
+def plain : Int32
+  4
+end
+
+def take(first : Int32, *rest : *T) : Int32 forall T
+  first
+end
+
+y = plain
+x = take(1, 2)

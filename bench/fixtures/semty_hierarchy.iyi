@@ -1,0 +1,38 @@
+class Animal
+end
+
+class Dog < Animal
+end
+
+class Cat < Animal
+end
+
+class Puppy < Dog
+end
+
+class Shape
+end
+
+class Circle < Shape
+end
+
+class Rectangle < Shape
+end
+
+# op Animal.subclasses
+# op Dog.subclasses
+# op Puppy.subclasses
+# op Animal.all_subclasses
+# op Dog.all_subclasses
+# op Shape.all_subclasses
+# op Puppy.leaf?
+# op Dog.leaf?
+# op Animal.leaf?
+# op Animal.virtual?
+# op Animal.virtual_type
+# op Dog.virtual_type
+# op Puppy.virtual_type
+# op Animal.instance_type
+# op Animal.reference_like?
+# op Animal.struct?
+# op Animal.metaclass?

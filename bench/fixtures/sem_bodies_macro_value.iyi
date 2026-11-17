@@ -1,0 +1,8 @@
+class MacroValueBox(T)
+  def value
+    x = {% if T == Int32 %} 41 {% else %} "wrong" {% end %}
+    x
+  end
+end
+
+answer = MacroValueBox(Int32).new.value

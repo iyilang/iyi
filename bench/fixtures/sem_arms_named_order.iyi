@@ -1,0 +1,13 @@
+def pick(*, value : Object) : String
+  "broad"
+end
+
+def pick(*, value : String) : String
+  "string"
+end
+
+def choose(flag : Bool) : String | Nil
+  flag ? "x" : nil
+end
+
+puts pick(value: choose(true))

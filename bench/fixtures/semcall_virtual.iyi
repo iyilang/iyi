@@ -1,0 +1,53 @@
+# Calls on receivers whose class has subclasses. `virtual(T)` is the value typed T+,
+# so the lookup reaches the subclasses' own defs (VirtualTypeLookup). A declared
+# return keeps its class, so `make_*` receivers are not virtual: they are the
+# controls. Read by bench/selfhost_semantic_calls_exercise.sh; `# call` lines only.
+
+class Base
+  def name(x : Int32) : String
+    "b"
+  end
+
+  def other(x : Bool) : Bool
+    x
+  end
+end
+
+class Derived < Base
+  def name(x : Int32) : String
+    "d"
+  end
+end
+
+class Leaf < Derived
+  def leafy(x : Int32) : Int32
+    x
+  end
+end
+
+class Solo
+  def solo(x : Int32) : Int32
+    x
+  end
+end
+
+def make_base(x : Int32) : Base
+  nil
+end
+
+def make_derived(x : Int32) : Derived
+  nil
+end
+
+# call virtual(Base).name(1)
+# call virtual(Base).other(true)
+# call virtual(Base).leafy(1)
+# call virtual(Derived).name(1)
+# call virtual(Base).other(false)
+# call virtual(Derived).other(true)
+# call virtual(Leaf).name(1)
+# call virtual(Leaf).leafy(1)
+# call virtual(Solo).solo(1)
+# call virtual(Solo).name(1)
+# call make_base(1).name(1)
+# call make_derived(1).name(1)

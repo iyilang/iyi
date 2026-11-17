@@ -501,7 +501,7 @@ else:
     USER_NOTE="user_note_${$}" \
     "$IYI" build --stale-key "$WORK/stale.key" -o "$out" "$prog"
 
-    if cmp "$saved" "$out" >/dev/null 2>&1; then
+    if link_images_match "$saved" "$out"; then
       echo "  RG4 cmp OK: $name"
     else
       echo "  RG4 cmp MISMATCH: $name" >&2
@@ -517,7 +517,11 @@ else:
     return 1
   fi
 
-  echo "RG4 PASSED: all $total programs linked byte-identical under randomized non-CHILD_ENV variables"
+  if [ "$WINDOWS" -eq 1 ]; then
+    echo "RG4 PASSED: all $total programs linked identically outside the PE timestamp and debug directory under randomized non-CHILD_ENV variables"
+  else
+    echo "RG4 PASSED: all $total programs linked byte-identical under randomized non-CHILD_ENV variables"
+  fi
 }
 
 run_reach() {

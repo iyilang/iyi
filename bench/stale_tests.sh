@@ -763,7 +763,9 @@ assert ({{ env("CRYSTAL_DAEMON_SOCKET") || "unset" }}) == "unset"
 IYI
 fi
 if [ "$WINDOWS" -eq 1 ]; then
-  r28_first=RunAsInvoker; r28_second="RunAsInvoker RunAsInvoker"; r28_name=__COMPAT_LAYER
+  # A repeated layer name may be folded by the Windows loader into the first, so
+  # the second value adds a different layer rather than repeating one.
+  r28_first=RunAsInvoker; r28_second="RunAsInvoker 256Color"; r28_name=__COMPAT_LAYER
 else
   r28_first=/tmp/r28_dir1; r28_second=/tmp/r28_dir2; r28_name=DYLD_LIBRARY_PATH
 fi
@@ -1435,6 +1437,11 @@ IYI
 rm -rf "$CACHE"
 run_json "$WORK/macro-run" run_test.iyi >/dev/null
 row50_hit="$(run_json "$WORK/macro-run" run_test.iyi)"
+if [ "$KEEP_GOING" = 1 ] && [ "$(printf '%s' "$row50_hit" | json_cached)" != 1 ]; then
+  echo "    [row 50 explain]" >&2
+  (cd "$WORK/macro-run" && "$IYI" test --cached --explain run_test.iyi) >&2 || true
+  (cd "$WORK/macro-run" && "$IYI" test --cached --explain run_test.iyi) >&2 || true
+fi
 expect_eq "$(printf '%s' "$row50_hit" | json_cached)" 1 "cold macro run helper hits"
 
 # Row 51 mutation proof: delete the fast records under tests-v1/fast. The next
@@ -1721,9 +1728,16 @@ with open(os.path.join(root, "interrupted.json"), "wb") as out, \
                 break
             if runner.poll() is not None:
                 out.flush(); err.flush()
-                for label, path in (("stdout", "interrupted.json"), ("stderr", "interrupted.err")):
-                    text = open(os.path.join(root, path), "rb").read().decode("utf-8", errors="replace")[-3000:]
-                    print(f"  runner {label}: {text}", file=sys.stderr)
+                raw = open(os.path.join(root, "interrupted.json"), "rb").read().decode("utf-8", errors="replace")
+                try:
+                    import json
+                    doc = json.loads(raw.strip().splitlines()[-1])
+                    for test in doc.get("tests", []):
+                        print("  runner test %s: %s" % (test.get("file"), {k: test[k] for k in ("status", "cached", "reuse", "reason", "check_reason", "output", "message", "error") if k in test}), file=sys.stderr)
+                    print("  runner summary: %s" % {k: v for k, v in doc.items() if k != "tests"}, file=sys.stderr)
+                except Exception as problem:
+                    print("  runner stdout (unparsed, %s): %s" % (problem, raw[-3000:]), file=sys.stderr)
+                print("  runner stderr: %s" % open(os.path.join(root, "interrupted.err"), "rb").read().decode("utf-8", errors="replace")[-3000:], file=sys.stderr)
                 raise RuntimeError(f"runner exited before interrupt: {runner.returncode}")
             time.sleep(.1)
         else:

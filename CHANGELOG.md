@@ -7,8 +7,8 @@
 - **Wasm SIMD128 speeds up AES-GCM.** `UInt64x2` processes two independent
   64-bit lanes, and `--mattr +simd128` uses them for eight AES counter
   blocks at a time. On Apple M5 Max, opening 16 and 64 MiB in headless
-  Chrome went from 189 and 194 MB/s scalar to 244 and 251 MB/s SIMD;
-  WebCrypto measured 2,996 and 3,107 MB/s. SPEC.md III.12.1 has the
+  Chrome went from 204 and 203 MB/s scalar to 257 and 266 MB/s SIMD;
+  WebCrypto measured 3,290 and 3,424 MB/s. SPEC.md III.12.1 has the
   spreads and the slower GHASH experiment.
 
 - **The prelude ceiling rises from 4,738 to 4,802 lines**, the 64 lines

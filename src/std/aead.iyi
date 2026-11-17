@@ -68,8 +68,8 @@
 # lanes the compiler was to vectorise (it did not; 720 MB/s sealed).
 #
 # On Apple M5 Max, wasm32-unknown-unknown --release in headless Chrome
-# 156.0.8078.4, AES-256-GCM open at 16/64 MiB measured 189/194 MB/s
-# scalar, 244/251 with SIMD128, and 2,996/3,107 with WebCrypto (best of
+# 156.0.8078.4, AES-256-GCM open at 16/64 MiB measured 204/203 MB/s
+# scalar, 257/266 with SIMD128, and 3,290/3,424 with WebCrypto (best of
 # five). Run `IYI_CHROME=<headless-shell> bash bench/wasm_aead_speed.sh`
 # with wasi-sdk in WASI_SDK_PATH. SIMD narrows the gap; it does not close it.
 # The paired-integer-multiply GHASH trial was slower and was removed.

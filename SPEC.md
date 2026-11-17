@@ -9108,24 +9108,23 @@ bash bench/wasm_aead_speed.sh
 
 | MiB | Operation | iyi scalar | iyi SIMD128 | WebCrypto |
 |---:|---|---:|---:|---:|
-| 1 | open | 205.6 [184.0, 205.6] | 243.9 [238.3, 243.9] | 3495.3 [2621.4, 3495.3] |
-| 1 | seal | 197.8 [187.2, 197.8] | 243.9 [228.0, 243.9] | 3495.3 [2097.2, 3495.3] |
-| 1 | ctr | 243.9 [218.5, 243.9] | 374.5 [361.6, 374.5] | n/a |
-| 1 | ghash | 953.3 [806.6, 953.3] | 806.6 [699.1, 806.6] | n/a |
-| 16 | open | 189.4 [185.6, 189.4] | 243.9 [241.4, 243.9] | 2995.9 [2750.4, 2995.9] |
-| 16 | seal | 196.2 [183.8, 196.2] | 254.6 [237.6, 254.6] | 2843.6 [2750.4, 2843.6] |
-| 16 | ctr | 246.7 [227.3, 246.7] | 374.5 [367.1, 374.5] | n/a |
-| 16 | ghash | 998.6 [937.3, 998.6] | 773.1 [742.4, 773.1] | n/a |
-| 64 | open | 193.6 [185.6, 193.6] | 250.8 [243.4, 250.8] | 3106.9 [2784.6, 3106.9] |
-| 64 | seal | 190.1 [181.2, 190.1] | 251.9 [234.2, 251.9] | 2905.1 [2494.8, 2905.1] |
-| 64 | ctr | 239.0 [234.6, 239.0] | 382.8 [368.3, 382.8] | n/a |
-| 64 | ghash | 994.2 [933.4, 994.2] | 796.1 [748.1, 796.1] | n/a |
+| 1 | open | 201.6 [197.8, 201.6] | 262.1 [243.9, 262.1] | 5242.9 [2621.4, 5242.9] |
+| 1 | seal | 205.6 [194.2, 205.6] | 262.1 [187.2, 262.1] | 3495.3 [2621.4, 3495.3] |
+| 1 | ctr | 262.1 [243.9, 262.1] | 419.4 [388.4, 419.4] | n/a |
+| 1 | ghash | 1165.1 [953.3, 1165.1] | 806.6 [749.0, 806.6] | n/a |
+| 16 | open | 204.4 [194.9, 204.4] | 256.9 [244.6, 256.9] | 3289.7 [2892.6, 3289.7] |
+| 16 | seal | 203.4 [198.8, 203.4] | 262.6 [246.7, 262.6] | 2943.4 [2621.4, 2943.4] |
+| 16 | ctr | 256.1 [245.3, 256.1] | 405.2 [388.4, 405.2] | n/a |
+| 16 | ghash | 1023.0 [981.1, 1023.0] | 795.1 [759.2, 795.1] | n/a |
+| 64 | open | 203.0 [190.8, 203.0] | 266.4 [256.6, 266.4] | 3423.9 [3036.6, 3423.9] |
+| 64 | seal | 201.5 [196.7, 201.5] | 267.9 [187.2, 267.9] | 3322.2 [2982.6, 3322.2] |
+| 64 | ctr | 259.5 [251.5, 259.5] | 402.8 [383.0, 402.8] | n/a |
+| 64 | ghash | 1032.4 [1027.7, 1032.4] | 803.7 [776.7, 803.7] | n/a |
 
-At 16 MiB open, SIMD gains 54.5 MB/s against a largest within-run spread of
-3.8 MB/s; at 64 MiB it gains 57.2 MB/s against a spread of 8.0 MB/s. That
-is about 1.29x scalar, not parity: WebCrypto is about 12.3x and 12.4x the
-SIMD result at those sizes. The additional predefined primitive raises the
-prelude ceiling by 64 lines (I.4).
+At 16 MiB open, SIMD gains 52.5 MB/s against a largest within-run spread of
+12.3 MB/s; at 64 MiB it gains 63.4 MB/s against a spread of 12.2 MB/s. That
+is 1.26x and 1.31x scalar; WebCrypto is 12.8x and 12.9x the SIMD result.
+The additional predefined primitive raises the prelude ceiling by 64 lines (I.4).
 
 A separate trial paired normal and bit-reversed GHASH products in SIMD lanes.
 At 16 MiB, scalar GHASH was 1,004.6 [958.7, 1,004.6] MB/s and the trial was

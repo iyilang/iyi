@@ -1,0 +1,58 @@
+module compiler/foundation/location
+
+pub struct Location
+  getter filename : String
+  getter line_number : Int32
+  getter column_number : Int32
+
+  def initialize(@filename : String = "", @line_number : Int32 = 0, @column_number : Int32 = 0)
+  end
+
+  def to_s : String
+    if @filename.empty?
+      "#{@line_number}:#{@column_number}"
+    else
+      "#{@filename}:#{@line_number}:#{@column_number}"
+    end
+  end
+
+  def inspect : String
+    "Location(#{to_s})"
+  end
+
+  def ==(other : Location) : Bool
+    @line_number == other.line_number &&
+      @column_number == other.column_number &&
+      @filename == other.filename
+  end
+
+  def !=(other : Location) : Bool
+    !self.==(other)
+  end
+
+  def <(other : Location) : Bool
+    if @filename != other.filename
+      return @filename < other.filename
+    end
+    if @line_number != other.line_number
+      return @line_number < other.line_number
+    end
+    @column_number < other.column_number
+  end
+
+  def <=(other : Location) : Bool
+    self.<(other) || self.==(other)
+  end
+
+  def >(other : Location) : Bool
+    other.<(self)
+  end
+
+  def >=(other : Location) : Bool
+    other.<=(self)
+  end
+
+  def between?(min : Location, max : Location) : Bool
+    self >= min && self <= max
+  end
+end

@@ -1,0 +1,39 @@
+trait Greet
+  abstract def message : String
+end
+
+trait Converter(From, To)
+  abstract def convert(value : From) : To
+end
+
+trait Ordered : Comparable
+  abstract def order : Int32
+end
+
+trait Iterator
+  type Item
+
+  abstract def next : Item?
+end
+
+impl Greet for User
+  def message : String
+    "hello"
+  end
+end
+
+impl Greet for Box forall T
+  def message : String
+    "box"
+  end
+end
+
+impl Printable for Box forall T : Printable
+end
+
+impl Converter(Int32, String) for User
+end
+
+impl Iterator for Sequence
+  type Item = Int32
+end

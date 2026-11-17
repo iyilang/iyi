@@ -1,0 +1,45 @@
+class Animal
+  def name : String
+    "animal"
+  end
+end
+
+class Dog < Animal
+  def name : String
+    "dog"
+  end
+end
+
+class Container(T)
+  def item : T
+    @item
+  end
+end
+
+class SubContainer(T) < Container(T)
+end
+
+class VarContainer(*T)
+end
+
+abstract class Shape
+  abstract def area : Float64
+end
+
+struct Point
+  def x : Int32
+    0
+  end
+end
+
+struct Pair(A, B)
+  def left : A
+    @left
+  end
+end
+
+abstract struct ValueObject
+end
+
+class Recursive < self
+end

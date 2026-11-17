@@ -352,7 +352,7 @@ echo "== the library is iyi all the way down"
 # only once a program reaches it and links libyaml, and a declaration nothing
 # reaches yet is exactly what this loop exists to name. So they are checked
 # too, against the libraries the platform supplies.
-PLATFORM_LIBS='LibC|LibSystem|LibKernel32|LibWasi|LibLLVMMath|LibAdvapi32|LibWs2_32|LibCrypt32|LibSecurity|LibCoreFoundation'
+PLATFORM_LIBS='LibC|LibSystem|LibKernel32|LibWasi|LibLLVMMath|LibAdvapi32|LibWs2_32|LibCrypt32'
 # The `@[Link]`s an exempt module may carry: the DLLs Windows itself ships,
 # named in SPEC.md III.10's inventory. `std/random` is here for `advapi32` —
 # the OS entropy `Random::Secure` reads is `RtlGenRandom`, and Windows has
@@ -370,7 +370,8 @@ PLATFORM_LIBS='LibC|LibSystem|LibKernel32|LibWasi|LibLLVMMath|LibAdvapi32|LibWs2
 # kernel32.
 # Everything else in this list reaches the platform through a `lib` block
 # alone.
-PLATFORM_LINKS='@\[Link\(("(kernel32|advapi32|ws2_32|crypt32)"|framework: "(Security|CoreFoundation)")\)\]'
+PLATFORM_LINKS='@\[Link\("(kernel32|advapi32|ws2_32|crypt32)"\)\]'
+APPLE_FRAMEWORK_LINKS='@\[Link\(framework: "(Security|CoreFoundation)"\)\]'
 reaching=""
 foreign=""
 for source in "$REPO"/src/std/*.iyi; do
@@ -379,13 +380,18 @@ for source in "$REPO"/src/std/*.iyi; do
     # `std/path` folds a Windows name's case the way NTFS does, which is
     # the platform's own table (LCMapStringEx); ASCII alone called `C:\Ä`
     # and `c:\ä` two names.
-    socket|time|debug|file|dir|udp|random|signal|process|path|system|term|user|system_roots|autocert)
-      # Named libraries only: a `lib` block of platform bindings is the
-      # exemption, an `@[Link]` to something the platform does not supply is
-      # not covered by it.
+    socket|time|debug|file|dir|udp|random|signal|process|path|system|term|user|system_roots|secure_enclave|autocert)
+      # Apple frameworks are allowed only for the two modules that use
+      # them. All other platform modules keep their existing DLL allowance.
+      libs="$PLATFORM_LIBS"
+      links="$PLATFORM_LINKS"
+      case "$name" in
+        system_roots) libs="$libs|LibSecurity|LibCoreFoundation"; links="$links|$APPLE_FRAMEWORK_LINKS" ;;
+        secure_enclave) libs="$libs|LibEnclaveSecurity|LibEnclaveCF"; links="$links|$APPLE_FRAMEWORK_LINKS" ;;
+      esac
       grep -nE '^\s*(lib [A-Z]|@\[Link)' "$source" \
-        | grep -vE "lib ($PLATFORM_LIBS)\b" \
-        | grep -vE "$PLATFORM_LINKS" > "$WORK/foreign.$name" || true
+        | grep -vE "lib ($libs)\b" \
+        | grep -vE "$links" > "$WORK/foreign.$name" || true
       if [ -s "$WORK/foreign.$name" ]; then
         foreign="$foreign $name"
         echo "  std/$name is exempt for the platform, and this is not the platform:"
@@ -414,6 +420,18 @@ for source in "$REPO"/src/std/*.iyi; do
     sed 's/^/    /' "$WORK/reach.$name"
   fi
 done
+# A different platform module must not acquire the enclave's frameworks.
+printf '%s\n' '@[Link(framework: "Security")]' 'lib LibSecurity' \
+  | grep -nE '^\s*(lib [A-Z]|@\[Link)' \
+  | grep -vE "lib ($PLATFORM_LIBS)\b" \
+  | grep -vE "$PLATFORM_LINKS" > "$WORK/foreign.negative" || true
+if ! grep -Fq 'framework: "Security"' "$WORK/foreign.negative" ||
+   ! grep -Fq 'lib LibSecurity' "$WORK/foreign.negative"; then
+  echo "  FAIL: a different module's Security binding did not move the floor"
+  status=1
+else
+  echo "  a different module's Security binding moves the floor"
+fi
 if [ -n "$reaching" ]; then
   echo "  FAIL: a std module other than socket and time binds something"
   status=1
@@ -453,9 +471,17 @@ echo "== every std module compiles alone and writes its artifact"
 # Fifteen modules could not be packaged, and nothing here noticed, because
 # every gate compiles its module from source inside a program.
 unpackaged=""
+enclave_refusal='std/secure_enclave requires macOS and its Secure Enclave; this target is not darwin'
 for source in "$REPO"/src/std/*.iyi; do
   name="$(basename "$source" .iyi)"
-  if ! "$IYI" doc "$source" > "$WORK/doc_$name.txt" 2>&1; then
+  if "$IYI" doc "$source" > "$WORK/doc_$name.txt" 2>&1; then
+    if [ "$name" = secure_enclave ] && [ "$(uname -s)" != Darwin ]; then
+      unpackaged="$unpackaged $name(accepted-on-unsupported-host)"
+    fi
+  elif [ "$name" = secure_enclave ] && [ "$(uname -s)" != Darwin ] &&
+       grep -Fq "$enclave_refusal" "$WORK/doc_$name.txt"; then
+    echo "  secure_enclave: unsupported host refused with the expected sentence"
+  else
     unpackaged="$unpackaged $name"
     echo "  $name: $(grep -m1 -E 'Error|BUG' "$WORK/doc_$name.txt" | cut -c1-140)"
   fi
@@ -640,7 +666,14 @@ together="$WORK/together"
 mkdir -p "$together"
 {
   for module in "$REPO"/src/std/*.iyi; do
-    echo "import std/$(basename "$module" .iyi)"
+    name="$(basename "$module" .iyi)"
+    if [ "$name" = secure_enclave ]; then
+      echo '{% if flag?(:darwin) %}'
+      echo "import std/$name"
+      echo '{% end %}'
+    else
+      echo "import std/$name"
+    fi
   done
   echo 'puts 1'
 } > "$together/all.iyi"

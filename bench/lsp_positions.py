@@ -58,6 +58,7 @@ from lsp_session import Client, file_uri, tree_mb  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 MODULES = sorted((REPO / "src/std").glob("*.iyi"))
+ENCLAVE_REFUSAL = "std/secure_enclave requires macOS and its Secure Enclave; this target is not darwin"
 
 # Asked at every position: the questions an editor sends on a cursor move,
 # a keystroke and a hover. Each takes a `TextDocumentPositionParams`.
@@ -234,10 +235,16 @@ def sweep(path: Path, stride: int) -> tuple[int, int]:
                     {"textDocument": {"uri": uri, "languageId": "iyi",
                                       "version": 1, "text": text}}, wait=False)
         published = client.diagnostics(uri)
-        if published["diagnostics"]:
-            first = published["diagnostics"][0]
+        diagnostics = published["diagnostics"]
+        if path.name == "secure_enclave.iyi" and sys.platform != "darwin":
+            # The module deliberately refuses this host. Check that exact
+            # refusal and nothing else, then still ask every cursor question.
+            if len(diagnostics) != 1 or ENCLAVE_REFUSAL not in diagnostics[0].get("message", ""):
+                FAILURES.append(f"{path.name}: expected only {ENCLAVE_REFUSAL!r}, got {diagnostics!r}")
+        elif diagnostics:
+            first = diagnostics[0]
             FAILURES.append(
-                f"{path.name} opened with {len(published['diagnostics'])} diagnostic(s), "
+                f"{path.name} opened with {len(diagnostics)} diagnostic(s), "
                 f"first: {first.get('message', '')[:100]}"
             )
         for number, (method, params, where) in enumerate(asks):

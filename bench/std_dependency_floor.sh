@@ -65,10 +65,9 @@ trap 'rm -rf "$WORK"' EXIT
 # Crystal's thirteen, plus the spellings a linker actually emits.
 ANCESTOR_LIBS="bdw-gc libgc libevent compiler-rt pcre pcre2 gmp iconv crypto ssl xml2 yaml zlib libz LLVM ffi"
 
-# The platform libc, and on darwin the trusted roots' two frameworks. Same
-# rule as ALLOWED_LIBS_PROGRAM in bench/dependency_floor.sh (its reasons in
-# bench/floor_base.sh), because a std module is a program's dependency and
-# inherits a program's floor.
+# Security and CoreFoundation can also arrive transitively through
+# std/system_roots. bench/std_exercise.sh restricts direct framework
+# bindings to system_roots and secure_enclave.
 ALLOWED_LIBS="libSystem libc.so ld-linux libgcc_s Security CoreFoundation"
 
 # Measured floor, on this branch's base. Both numbers matter: see failure
@@ -79,21 +78,17 @@ ALLOWED_LIBS="libSystem libc.so ld-linux libgcc_s Security CoreFoundation"
 FLOOR_MODULES=52
 FLOOR_BUILT=52
 
-# Known failures, each with the error on record. Empty, and measured that way
-# rather than assumed: all 52 modules on this base build alone.
-#
-# It is kept because four modules not yet on master need it. `oauth`, `oauth2`
-# and `websocket` reach `src/std/dns.iyi`, which used a bare `rescue`, and
-# `src/std/spec.iyi` declared `pub class SpecError < Exception` while
-# `Std::Exception` is a module. Under a compiler carrying the rule that
-# refuses `rescue` in an iyi file, those four did not build. Fixes exist and
-# land with the modules.
-#
-# The list stays empty on purpose. If one of those arrives still broken, it
-# fails as failure mode 2 and the gate names it, which is the right outcome:
-# a list of excuses written in advance would absorb exactly the regression
-# this is here to report.
+# This module intentionally cannot build on a host without Security.framework.
+# Its refusal is checked by sentence, and a build on such a host is a stale
+# known failure, not a pass. Every other module must still build.
 KNOWN_FAIL_MODULES=""
+case "$(uname -s)" in
+  Darwin) ;;
+  *)
+    KNOWN_FAIL_MODULES="secure_enclave"
+    KNOWN_FAIL_PATTERN_secure_enclave="std/secure_enclave requires macOS and its Secure Enclave; this target is not darwin"
+    ;;
+esac
 
 known_fail() {
   case " $KNOWN_FAIL_MODULES " in
@@ -205,7 +200,7 @@ for m in $modules; do
     failed=$((failed + 1))
     if known_fail "$name"; then
       pat="$(known_pattern "$name")"
-      if ! grep -q "$pat" "$err" 2>/dev/null; then
+      if ! grep -Fq "$pat" "$err" 2>/dev/null; then
         # Failure mode 3: recorded reason no longer describes the error.
         stale_known="$stale_known $name(reason-changed)"
       fi

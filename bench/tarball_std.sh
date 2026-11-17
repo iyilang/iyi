@@ -106,12 +106,27 @@ fi
 
 echo
 echo "== each one imports and builds out of the package, then runs"
+enclave_refusal='std/secure_enclave requires macOS and its Secure Enclave; this target is not darwin'
 for source in "$REPO"/src/std/*.iyi; do
   [ -f "$source" ] || continue
   name="$(basename "$source" .iyi)"
   printf 'import std/%s\nputs "std/%s"\n' "$name" "$name" > "$WORK/probe_$name.iyi"
   if ! build "probe_$name" "$WORK/probe_$name.iyi"; then
-    fail "import std/$name does not build out of the package: $(first_error "probe_$name")"
+    if [ "$name" = secure_enclave ] && [ "$(uname -s)" != Darwin ] &&
+       grep -Fq "$enclave_refusal" "$WORK/probe_$name.log"; then
+      echo "  std/secure_enclave refused on this host with the expected sentence"
+      if grep -Fq "$enclave_refusal (wrong)" "$WORK/probe_$name.log"; then
+        fail "the refusal check accepted a wrong sentence"
+      else
+        echo "  a wrong refusal sentence is rejected"
+      fi
+    else
+      fail "import std/$name does not build out of the package: $(first_error "probe_$name")"
+    fi
+    continue
+  fi
+  if [ "$name" = secure_enclave ] && [ "$(uname -s)" != Darwin ]; then
+    fail "std/secure_enclave built on an unsupported host"
     continue
   fi
   got="$("$WORK/probe_$name" 2>&1)"
@@ -120,7 +135,7 @@ for source in "$REPO"/src/std/*.iyi; do
   fi
 done
 if [ "$status" -eq 0 ]; then
-  echo "  all $count built with IYI_PATH and CRYSTAL_PATH unset, and ran"
+  echo "  all $count built and ran, or refused as specified for this host, with IYI_PATH and CRYSTAL_PATH unset"
 fi
 
 echo

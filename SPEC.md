@@ -1063,7 +1063,7 @@ Checking it moved two things and left the shape alone.
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
 | Compiler | 24,984 lines, **written in Crystal** | 138,295 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 28,880-line own prelude + 127,837 in std |
+| Library | 8,161 lines (3,551 of it core) | 28,880-line own prelude + 128,181 in std |
 | Specs | 21,146 lines | 17,214 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
@@ -9139,12 +9139,12 @@ the runtime's aside - are marked: the compiler writes the list into the
 binary (`Crystal::IYI_UNSAFE_MODULES`), and the Windows handler prints
 it in pieces, allocating nothing.
 
-**Where the repository stands.** `src/std` has 84 marked modules of
-121, every reason read and rewritten by hand from `iyi fix`'s starting
+**Where the repository stands.** `src/std` has 85 marked modules of
+122, every reason read and rewritten by hand from `iyi fix`'s starting
 point; four of them (box, deque, static_array, weak_ref) are marked by
 hand outright, since only a program that instantiates their generic
 bodies types them and `iyi fix src/std` cannot see them. bench has
-85 marked programs of 175, and none of `samples/iyi`'s 28 programs
+86 marked programs of 176, and none of `samples/iyi`'s 28 programs
 needs one. The specs' snippets whose stand-in for the prelude or std (a
 `@[Primitive]`, a `lib`, a `Pointer` field, a `@[Share]` type,
 `uninitialized` storage) sits in the compiled module are marked as the
@@ -9171,8 +9171,8 @@ warning, which keeps the set honest, and splitting raw code into a small
 module of its own, the way Rust crates isolate theirs. Counted at
 2f070a01e by reading the sources, blocks (`unsafe { }`) would have
 wrapped 2,338 runs of lines in src/std, 900 in src/iyi and 607 in bench,
-and a mark per declaration 1,535, 469 and 258 defs, against 84, 13 and
-85 module marks.
+and a mark per declaration 1,535, 469 and 258 defs, against 85, 13 and
+86 module marks.
 
 ---
 

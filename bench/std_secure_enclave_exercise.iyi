@@ -1,0 +1,187 @@
+# Exercises std/secure_enclave on a Mac. The native oracle imports the public
+# point into Security.framework independently of the module under test.
+
+@[Unsafe("the native verification oracle and resident-size reader call macOS C interfaces")]
+{% if flag?(:darwin) %}
+import std/secure_enclave::{SecureEnclave, SecureEnclaveKey, SecureEnclaveError}
+import std/ecdsa::{EcdsaHash}
+import std/gc::{GC}
+
+@[Link(framework: "Security")]
+lib ExerciseSecurity
+  $kSecAttrKeyType : Void*
+  $kSecAttrKeyTypeECSECPrimeRandom : Void*
+  $kSecAttrKeyClass : Void*
+  $kSecAttrKeyClassPublic : Void*
+  $kSecKeyAlgorithmECDSASignatureMessageX962SHA256 : Void*
+  fun SecKeyCreateWithData(data : Void*, attrs : Void*, error : Void**) : Void*
+  fun SecKeyVerifySignature(key : Void*, algorithm : Void*, message : Void*, signature : Void*, error : Void**) : UInt8
+end
+
+@[Link(framework: "CoreFoundation")]
+lib ExerciseCF
+  $kCFTypeDictionaryKeyCallBacks : UInt8
+  $kCFTypeDictionaryValueCallBacks : UInt8
+  fun CFDictionaryCreateMutable(allocator : Void*, capacity : Int64, keys : Void*, values : Void*) : Void*
+  fun CFDictionarySetValue(dictionary : Void*, key : Void*, value : Void*) : Void
+  fun CFDataCreate(allocator : Void*, bytes : UInt8*, length : Int64) : Void*
+  fun CFRelease(object : Void*) : Void
+end
+
+lib ExerciseProc
+  fun getpid : Int32
+  fun proc_pidinfo(pid : Int32, flavor : Int32, arg : UInt64, buffer : Void*, size : Int32) : Int32
+end
+
+def check(ok : Bool, message : String) : Nil
+  raise "ASSERTION FAILED: #{message}" unless ok
+end
+
+def null : Void*
+  Pointer(Void).new(0_u64)
+end
+
+def bytes(message : String) : Array(UInt8)
+  Array(UInt8).new(message.bytesize) { |i| message.to_unsafe[i] }
+end
+
+def data(bytes : Array(UInt8)) : Void*
+  answer = ExerciseCF.CFDataCreate(null, bytes.to_unsafe, bytes.size.to_i64)
+  check answer.address != 0_u64, "CFDataCreate"
+  answer
+end
+
+def native_public(point : Array(UInt8)) : Void*
+  attrs = ExerciseCF.CFDictionaryCreateMutable(null, 0_i64, pointerof(ExerciseCF.kCFTypeDictionaryKeyCallBacks).as(Void*), pointerof(ExerciseCF.kCFTypeDictionaryValueCallBacks).as(Void*))
+  check attrs.address != 0_u64, "native public-key attributes"
+  ExerciseCF.CFDictionarySetValue(attrs, ExerciseSecurity.kSecAttrKeyType, ExerciseSecurity.kSecAttrKeyTypeECSECPrimeRandom)
+  ExerciseCF.CFDictionarySetValue(attrs, ExerciseSecurity.kSecAttrKeyClass, ExerciseSecurity.kSecAttrKeyClassPublic)
+  encoded = data(point)
+  error = null
+  key = ExerciseSecurity.SecKeyCreateWithData(encoded, attrs, pointerof(error))
+  ExerciseCF.CFRelease(encoded)
+  ExerciseCF.CFRelease(attrs)
+  ExerciseCF.CFRelease(error) unless error.address == 0_u64
+  check key.address != 0_u64, "native public-key import"
+  key
+end
+
+def native_verify(key : Void*, message : Array(UInt8), signature : Array(UInt8)) : Bool
+  m = data(message)
+  s = data(signature)
+  error = null
+  ok = ExerciseSecurity.SecKeyVerifySignature(key, ExerciseSecurity.kSecKeyAlgorithmECDSASignatureMessageX962SHA256, m, s, pointerof(error))
+  ExerciseCF.CFRelease(m)
+  ExerciseCF.CFRelease(s)
+  ExerciseCF.CFRelease(error) unless error.address == 0_u64
+  ok != 0_u8
+end
+
+def invalid_handles : Nil
+  empty = SecureEnclaveKey.restore([] of UInt8)
+  raise "ASSERTION FAILED: empty handle must return SecureEnclaveError" unless empty.is_a?(SecureEnclaveError)
+  check empty.message.includes?("empty token handle"), "empty-handle error names its cause"
+  malformed = SecureEnclaveKey.restore(Array(UInt8).new(324, 0_u8))
+  check malformed.is_a?(SecureEnclaveError), "corrupted handle must return SecureEnclaveError"
+  puts "invalid handles: empty and corrupted refused without a crash"
+end
+
+# PROC_PIDTASKINFO is six uint64s and twelve int32s, 96 bytes. Its second
+# uint64 is resident bytes. A failed query is never treated as zero.
+def resident_bytes : UInt64
+  info = Pointer(UInt64).malloc(12_u64)
+  count = ExerciseProc.proc_pidinfo(ExerciseProc.getpid, 4, 0_u64, info.as(Void*), 96)
+  check count == 96, "proc_pidinfo resident-size query"
+  info[1]
+end
+
+def cycle : Nil
+  key = SecureEnclaveKey.generate.or_panic
+  signature = key.sign("resident memory cycle").or_panic
+  check signature.size > 0, "cycle signature"
+end
+
+def memory_cycles : Nil
+  100.times { cycle }
+  GC.collect
+  start = resident_bytes
+  samples = [] of UInt64
+  4.times do
+    250.times { cycle }
+    GC.collect
+    samples << resident_bytes
+  end
+  finish = samples[3]
+  growth = finish > start ? finish - start : 0_u64
+  puts "resident bytes after warmup and each 250 cycles: #{start}, #{samples.join(", ")} (growth #{growth})"
+  # Apple M5 Max, four paired runs: healthy growth 638,976 to 688,128
+  # bytes, omitted SecKey release 3,801,088 to 4,112,384. The 1,600,000
+  # bound is 2.32x above the largest healthy and 2.38x below the smallest
+  # broken reading. This host's measurement is not a bound for other Macs.
+  check growth <= 1600000_u64, "resident memory grew beyond 1600000 bytes"
+  puts "1000 generate, sign and native release cycles: PASS"
+end
+
+invalid_handles
+available = SecureEnclave.available?
+generated = SecureEnclaveKey.generate
+if !available
+  raise "ASSERTION FAILED: unavailable enclave must return an error" unless generated.is_a?(SecureEnclaveError)
+  check generated.message.includes?("Secure Enclave"), "unavailable-enclave error must name the cause"
+  puts "Secure Enclave unavailable: #{generated.message}"
+  puts "ALL CHECKS PASSED (enclave-dependent checks skipped)"
+  exit 0
+end
+check !generated.is_a?(SecureEnclaveError), "available enclave must generate a key"
+key = generated.as(SecureEnclaveKey)
+if Program.args.size > 0 && Program.args[0] == "memory"
+  memory_cycles
+  puts "ALL CHECKS PASSED"
+  exit 0
+end
+
+point = key.public_bytes
+check point.size == 65 && point[0] == 4_u8, "65-byte uncompressed P-256 public key"
+native_key = native_public(point)
+100.times do |i|
+  message = "secure enclave message #{i}"
+  signature = key.sign(message).or_panic
+  check key.public_key.verify(EcdsaHash::SHA256, message, signature), "pure iyi signature verification #{i}"
+  check native_verify(native_key, bytes(message), signature), "Security.framework signature verification #{i}"
+end
+puts "100 messages: pure iyi and SecKeyVerifySignature both verified"
+
+message = "unchanged message"
+signature = key.sign(bytes(message)).or_panic
+check !key.public_key.verify(EcdsaHash::SHA256, "changed message", signature), "pure iyi refuses tampered message"
+check !native_verify(native_key, bytes("changed message"), signature), "native refuses tampered message"
+changed = signature.dup
+changed[changed.size - 1] = changed[changed.size - 1] ^ 1_u8
+check !key.public_key.verify(EcdsaHash::SHA256, message, changed), "pure iyi refuses tampered signature"
+check !native_verify(native_key, bytes(message), changed), "native refuses tampered signature"
+puts "tampered message and signature: both verifiers refused"
+
+handle = key.handle
+check !handle.empty?, "token handle present"
+# Flipping a byte in the wrapped private portion can leave the public point
+# readable. Restore must still refuse it rather than return an unusable key.
+corrupted = handle.dup
+corrupted[corrupted.size - 1] = corrupted[corrupted.size - 1] ^ 1_u8
+bad_key = SecureEnclaveKey.restore(corrupted)
+check bad_key.is_a?(SecureEnclaveError), "corrupted real token handle must not restore"
+puts "corrupted real token handle: refused"
+restored = SecureEnclaveKey.restore(handle).or_panic
+check restored.public_bytes == point, "restored public point matches original"
+new_signature = restored.sign(message).or_panic
+check key.public_key.verify(EcdsaHash::SHA256, message, new_signature), "restored key signs under original public key"
+check native_verify(native_key, bytes(message), new_signature), "native verification of restored signature"
+handle[0] = handle[0] ^ 1_u8
+check key.handle != handle, "handle is copied before handing it to a caller"
+point[0] = 0_u8
+check key.public_bytes[0] == 4_u8, "public bytes are copied before handing them to a caller"
+puts "handle restored after original native key release: signatures verify under original public key"
+ExerciseCF.CFRelease(native_key)
+puts "ALL CHECKS PASSED"
+{% else %}
+puts "std/secure_enclave is darwin-only; its import refusal is tested by the driver"
+{% end %}

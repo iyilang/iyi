@@ -49,7 +49,7 @@ pub struct GcsSignedRequest
 end
 
 pub struct GcsV4
-  ALGORITHM = "GOOG4-RSA-SHA256"
+  ALGORITHM  = "GOOG4-RSA-SHA256"
   MAX_EXPIRY = 604800
 
   def self.encode(value : String) : String

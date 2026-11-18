@@ -168,7 +168,9 @@ def run_mutations(
         rel = relative_name(source, repo)
         baseline, _ = reports[rel]
         mutated_source = os.path.join(mutation_dir, f"{index}-{os.path.basename(source)}")
-        Path(mutated_source).write_text(mutation.mutated_source, encoding="utf-8")
+        # Newlines inside string literals are program bytes. Windows text
+        # translation would change those constants in every unrelated mutant.
+        Path(mutated_source).write_text(mutation.mutated_source, encoding="utf-8", newline="")
         try:
             changed, _ = compile_source(compiler, repo, work, mutated_source, f"mut-{index}-{mutation.kind}")
         except GateFailure as ex:

@@ -1,0 +1,2 @@
+module asm_collector_boundary
+puts "123"

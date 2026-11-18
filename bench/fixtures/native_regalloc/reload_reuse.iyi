@@ -1,5 +1,5 @@
 module reload_reuse
-import compiler/native/mir::{MFunction, MBlock, MInst, MOp, Operand, OperandKind, RegClass, Role}
+import compiler/native/mir::{MFunction, MBlock, MInst, MOp, Operand, OperandKind, RegClass, Role, AsmBody}
 import compiler/native/target::{is_role?}
 import compiler/native/regalloc_linear::{rewrite_spills}
 
@@ -88,30 +88,85 @@ float_body.insts.each do |m|
 end
 puts loads
 
-# A second cached copy must be invalidated when the vreg is redefined.
+# Redefining one spilled value must not invalidate an unrelated cached value.
 copies = MFunction.new("copies")
 block = MBlock.new(0, "entry")
 copies.blocks << block
 v = copies.new_vreg(RegClass::Gpr)
+w = copies.new_vreg(RegClass::Gpr)
 copies.vreg_home << -1
+copies.vreg_home << -1
+copies.vreg_slot << copies.frame.add_slot(8_i64, 8)
 copies.vreg_slot << copies.frame.add_slot(8_i64, 8)
 first = MInst.new(MOp::CmpImm.value.to_i32)
 first.uses << Operand.new(OperandKind::Virtual, v)
 block.insts << first
-second = MInst.new(MOp::Cmp.value.to_i32)
-second.uses << Operand.new(OperandKind::Physical, 9)
-second.uses << Operand.new(OperandKind::Virtual, v)
+second = MInst.new(MOp::CmpImm.value.to_i32)
+second.uses << Operand.new(OperandKind::Virtual, w)
 block.insts << second
 defn = MInst.new(MOp::MovImm.value.to_i32)
-defn.defs << Operand.new(OperandKind::Virtual, v)
+defn.defs << Operand.new(OperandKind::Virtual, w)
 block.insts << defn
-third = MInst.new(MOp::Cmp.value.to_i32)
-third.uses << Operand.new(OperandKind::Physical, 9)
+third = MInst.new(MOp::CmpImm.value.to_i32)
 third.uses << Operand.new(OperandKind::Virtual, v)
 block.insts << third
 rewrite_spills(copies)
 loads = 0
 block.insts.each do |m|
   loads = loads + 1 if is_role?(copies.isa, m, Role::SlotLoad)
+end
+puts loads
+
+# A cached value from one block cannot be assumed present on another edge.
+reset = MFunction.new("reset")
+entry = MBlock.new(0, "entry")
+body = MBlock.new(1, "body")
+reset.blocks << entry
+reset.blocks << body
+v = reset.new_vreg(RegClass::Gpr)
+reset.vreg_home << -1
+reset.vreg_slot << reset.frame.add_slot(8_i64, 8)
+defn = MInst.new(MOp::MovImm.value.to_i32)
+defn.defs << Operand.new(OperandKind::Virtual, v)
+entry.insts << defn
+use = MInst.new(MOp::CmpImm.value.to_i32)
+use.uses << Operand.new(OperandKind::Virtual, v)
+body.insts << use
+rewrite_spills(reset)
+loads = 0
+body.insts.each do |m|
+  loads = loads + 1 if is_role?(reset.isa, m, Role::SlotLoad)
+end
+puts loads
+
+# Raw inline asm can call without declaring scratch-register clobbers.
+raw = MFunction.new("raw_asm_cache")
+block = MBlock.new(0, "entry")
+raw.blocks << block
+g = raw.new_vreg(RegClass::Gpr)
+f = raw.new_vreg(RegClass::Fpr)
+raw.vreg_home << -1
+raw.vreg_home << -1
+raw.vreg_slot << raw.frame.add_slot(8_i64, 8)
+raw.vreg_slot << raw.frame.add_slot(8_i64, 8)
+first = MInst.new(MOp::CmpImm.value.to_i32)
+first.uses << Operand.new(OperandKind::Virtual, g)
+block.insts << first
+first_fp = MInst.new(MOp::FCmp.value.to_i32)
+first_fp.uses << Operand.new(OperandKind::Virtual, f)
+block.insts << first_fp
+assembly = MInst.new(MOp::InlineAsm.value.to_i32)
+assembly.asm = AsmBody.new("nop", 0, 0, Hash(String, Int32).new, true)
+block.insts << assembly
+second = MInst.new(MOp::CmpImm.value.to_i32)
+second.uses << Operand.new(OperandKind::Virtual, g)
+block.insts << second
+second_fp = MInst.new(MOp::FCmp.value.to_i32)
+second_fp.uses << Operand.new(OperandKind::Virtual, f)
+block.insts << second_fp
+rewrite_spills(raw)
+loads = 0
+block.insts.each do |m|
+  loads = loads + 1 if is_role?(raw.isa, m, Role::SlotLoad)
 end
 puts loads

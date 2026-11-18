@@ -23,7 +23,8 @@ entry:
 define internal i64 @probe(i64 %n) {
 entry:
   %base = sitofp i64 %n to double
-  %live = fmul double %base, 0x3ff8000000000000
+  %live = fadd double 0x0000000000000000, 0x0000000000000000
+  call void () asm sideeffect "nop", "~{d9}"()
   %early = icmp slt i64 %n, 0
   br i1 %early, label %negative, label %head
 negative:

@@ -32,7 +32,7 @@ module compiler/native/regalloc_linear
 # No hash table decides anything.
 
 import compiler/native/mir::{MFunction, MBlock, MInst, Operand, OperandKind, RegClass, Role}
-import compiler/native/target::{new_inst, is_role?, terminator?, leaves_block?, block_branch?, table_branch?, distinct_inputs_and_defs?}
+import compiler/native/target::{new_inst, is_role?, terminator?, leaves_block?, block_branch?, table_branch?, distinct_inputs_and_defs?, pure_fpr_value?, integer_zero?}
 import compiler/native/aarch64/regs::{callee_saved_gprs, callee_saved_fprs, caller_saved_gprs, caller_saved_fprs, scratch_gprs, scratch_fprs, probe_reg, fp_reg, lr_reg, integer_arg_regs, fp_arg_regs}
 
 # x17: the encoder's veneer scratch. regs.iyi names it in a comment and has no accessor for it.
@@ -190,21 +190,68 @@ def slot_access(isa : Int32, load : Bool, reg : Int32, slot : Int32, fp : Bool) 
   m
 end
 
+# Physical inputs may be staged several instructions before their use.
+# Keep their entire local live range unavailable to spill scratch allocation.
+def fixed_live_before(block : MBlock) : Array(UInt64)
+  live = 0_u64
+  before = [] of UInt64
+  i = 0
+  while i < block.insts.size
+    before << 0_u64
+    i = i + 1
+  end
+  i = block.insts.size - 1
+  while i >= 0
+    inst = block.insts[i]
+    inst.defs.each do |op|
+      if op.kind == OperandKind::Physical && op.reg >= 0 && op.reg < 64
+        live = live & ((1_u64 << op.reg) ^ 18446744073709551615_u64)
+      end
+    end
+    inst.clobbers.each do |r|
+      live = live & ((1_u64 << r) ^ 18446744073709551615_u64) if r >= 0 && r < 64
+    end
+    if inst.call
+      integer_arg_regs.each { |r| live = live | (1_u64 << r) }
+      fp_arg_regs.each { |r| live = live | (1_u64 << r) }
+    end
+    inst.uses.each do |op|
+      if op.kind == OperandKind::Physical && op.reg >= 0 && op.reg < 64
+        live = live | (1_u64 << op.reg)
+      end
+    end
+    before[i] = live
+    i = i - 1
+  end
+  before
+end
+
 # Rewrite virtual operands, retaining spilled values in scratch registers
 # within a block. Stack slots remain current after every definition.
 pub def rewrite_spills(fn : MFunction) : Nil
+  has_use = bool_row(fn.vreg_count)
   fn.blocks.each do |block|
-    rewrite_block(fn, block)
+    block.insts.each do |inst|
+      inst.uses.each do |op|
+        has_use[op.reg] = true if op.kind == OperandKind::Virtual
+      end
+    end
+  end
+  fn.blocks.each do |block|
+    rewrite_block(fn, block, has_use)
   end
 end
 
-def rewrite_block(fn : MFunction, block : MBlock) : Nil
+def rewrite_block(fn : MFunction, block : MBlock, has_use : Array(Bool)) : Nil
   acc = [] of MInst
   cache = int_row(64, -1)
   gprs = scratch_gprs
   fprs = scratch_fprs
+  fixed = fixed_live_before(block)
+  index = 0
   block.insts.each do |inst|
-    blocked = 0_u64
+    blocked = fixed[index] # protect-staged-physical
+    index = index + 1
     used = 0_u64
     inst.uses.each do |op|
       if op.kind == OperandKind::Physical && op.reg >= 0 && op.reg < 64
@@ -250,7 +297,7 @@ def rewrite_block(fn : MFunction, block : MBlock) : Nil
         end
         cache[reg] = v
         used = used | (1_u64 << reg)
-        stores << slot_access(fn.isa, false, reg, fn.vreg_slot[v], fp)
+        stores << slot_access(fn.isa, false, reg, fn.vreg_slot[v], fp) if has_use[v] # skip-unused-spill-store
         inst.defs[k] = Operand.new(OperandKind::Physical, reg)
       end
     end
@@ -263,6 +310,10 @@ def rewrite_block(fn : MFunction, block : MBlock) : Nil
     acc << inst unless identity
     inst.clobbers.each do |reg|
       cache[reg] = -1 if reg >= 0 && reg < 64 # call-clobber-invalidates-reload
+    end
+    unless inst.asm.nil?
+      gprs.each { |r| cache[r] = -1 } # asm-clears-scratch-cache
+      fprs.each { |r| cache[r] = -1 }
     end
     stores.each do |s|
       acc << s
@@ -658,7 +709,7 @@ class LinearScan
     p = 0
     @fn.blocks.each do |block|
       block.insts.each do |inst|
-        @call_prefix[p + 1] = @call_prefix[p] + (inst.call ? 1 : 0)
+        @call_prefix[p + 1] = @call_prefix[p] + (inst.call || !inst.asm.nil? ? 1 : 0) # collector-boundary
         @call_prefix[p + 2] = @call_prefix[p + 1]
         p = p + 2
       end
@@ -813,35 +864,135 @@ class LinearScan
     end
   end
 
-  # The floating-point vregs that are bit copies of a general-purpose value. A copy is `fmov` or `mov` into an
-  # fp vreg: the source's flag passes to the destination until nothing changes.
+  # A floating value is safe across a collector boundary only when every
+  # definition is proven to derive from safe floating inputs or literal zero.
+  # Physical registers, memory, conversions, and asm outputs are unknown.
   def pointer_fprs : Array(Bool)
     n = @vcount
-    flags = bool_row(n)
+    zero = bool_row(n)
+    defined = bool_row(n)
     @fn.blocks.each do |block|
       block.insts.each do |inst|
-        if is_role?(@fn.isa, inst, Role::GprToFpr) && inst.defs.size > 0 && inst.defs[0].kind == OperandKind::Virtual
-          flags[inst.defs[0].reg] = true
+        inst.defs.each do |op|
+          next unless op.kind == OperandKind::Virtual && @fn.vreg_classes[op.reg] == RegClass::Gpr
+          v = op.reg
+          zero[v] = true unless defined[v]
+          defined[v] = true
+          zero[v] = false unless integer_zero?(@fn.isa, inst) && !@fn.vreg_pointer[v]
         end
       end
     end
-    changed = true
-    while changed
-      changed = false
-      @fn.blocks.each do |block|
-        block.insts.each do |inst|
-          next unless is_role?(@fn.isa, inst, Role::Copy)
-          next unless inst.defs.size > 0 && inst.uses.size > 0
-          dst = inst.defs[0]
-          src = inst.uses[0]
-          next unless dst.kind == OperandKind::Virtual && src.kind == OperandKind::Virtual
-          next unless @fn.vreg_classes[dst.reg] == RegClass::Fpr
-          if flags[src.reg] && !flags[dst.reg]
-            flags[dst.reg] = true
-            changed = true
+    flags = bool_row(n)
+    has_def = bool_row(n)
+    dep_head = int_row(n, -1)
+    dep_next = [] of Int32
+    dep_dst = [] of Int32
+    queue = [] of Int32
+    safe_roots = [] of Int32
+    safe_root_seen = bool_row(n)
+    @fn.blocks.each do |block|
+      block.insts.each do |inst|
+        inst.defs.each do |dst|
+          next unless dst.kind == OperandKind::Virtual && @fn.vreg_classes[dst.reg] == RegClass::Fpr
+          v = dst.reg
+          has_def[v] = true
+          unknown = @fn.vreg_pointer[v] || !inst.asm.nil?
+          if !unknown && is_role?(@fn.isa, inst, Role::GprToFpr)
+            if inst.uses.size != 1
+              unknown = true
+            else
+              src = inst.uses[0]
+              unknown = src.kind != OperandKind::Virtual || !zero[src.reg]
+              if !unknown && !safe_root_seen[v]
+                safe_root_seen[v] = true
+                safe_roots << v
+              end
+            end
+          elsif !unknown && (is_role?(@fn.isa, inst, Role::Copy) || pure_fpr_value?(@fn.isa, inst))
+            unknown = true if inst.uses.empty?
+            inst.uses.each do |src|
+              if src.kind == OperandKind::Virtual && @fn.vreg_classes[src.reg] == RegClass::Fpr
+                dep_dst << v
+                dep_next << dep_head[src.reg]
+                dep_head[src.reg] = dep_dst.size - 1
+              elsif src.kind == OperandKind::Physical
+                unknown = true # fixed-fpr-provenance-unknown
+              else
+                unknown = true
+              end
+            end
+          else
+            unknown = true
+          end
+          if unknown && !flags[v]
+            flags[v] = true
+            queue << v
           end
         end
       end
+    end
+    v = 0
+    while v < n
+      if @fn.vreg_classes[v] == RegClass::Fpr && !has_def[v] && !flags[v]
+        flags[v] = true
+        queue << v
+      end
+      v = v + 1
+    end
+    i = 0
+    while i < queue.size
+      edge = dep_head[queue[i]]
+      while edge >= 0
+        dst = dep_dst[edge]
+        unless flags[dst]
+          flags[dst] = true
+          queue << dst
+        end
+        edge = dep_next[edge]
+      end
+      i = i + 1
+    end
+    # Cyclic copies with no proven origin are unknown, not evidence of safety.
+    reachable = bool_row(n)
+    i = 0
+    while i < safe_roots.size
+      root = safe_roots[i]
+      reachable[root] = true
+      i = i + 1
+    end
+    i = 0
+    while i < safe_roots.size
+      edge = dep_head[safe_roots[i]]
+      while edge >= 0
+        dst = dep_dst[edge]
+        unless reachable[dst]
+          reachable[dst] = true
+          safe_roots << dst
+        end
+        edge = dep_next[edge]
+      end
+      i = i + 1
+    end
+    v = 0
+    while v < n
+      if @fn.vreg_classes[v] == RegClass::Fpr && !reachable[v] && !flags[v]
+        flags[v] = true
+        queue << v
+      end
+      v = v + 1
+    end
+    i = 0
+    while i < queue.size
+      edge = dep_head[queue[i]]
+      while edge >= 0
+        dst = dep_dst[edge]
+        unless flags[dst]
+          flags[dst] = true
+          queue << dst
+        end
+        edge = dep_next[edge]
+      end
+      i = i + 1
     end
     flags
   end

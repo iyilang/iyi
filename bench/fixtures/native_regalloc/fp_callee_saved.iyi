@@ -13,7 +13,7 @@ end
 
 def probe(n : Int64) : Int64
   base = n.to_f64
-  live = base * 1.5
+  live = 0.0
   if n < 0_i64
     return (live + inner(base)).to_i64
   end

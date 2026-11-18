@@ -1,0 +1,50 @@
+module fpr_frame_probe
+import compiler/ir/parser::{parse, IrParseError}
+import compiler/ir/module::{Module}
+import compiler/ir/function::{Function}
+import compiler/native/mir::{MFunction, OperandKind, Role}
+import compiler/native/driver::{symbol_table, function_mir}
+import compiler/native/target::{is_role?}
+import compiler/native/obj/object::{ObjectFile, ObjFormat}
+
+parsed = parse(File.read(Program.args[0]))
+raise "invalid fixture" if parsed.is_a?(IrParseError)
+mod = parsed.as(Module)
+fn = mod.get_function?("probe")
+raise "missing probe" unless fn
+syms = symbol_table(mod, ObjectFile.new(ObjFormat::MachO, mod.target, "fpr-proof"))
+result = function_mir(mod, fn.as(Function), syms, mod.target.darwin?)
+raise "failed selection" if result.is_a?(String)
+mf = result.as(MFunction)
+expected = 0_u64
+saved = 0_u64
+restores = 0
+missing = 0_u64
+asm_d9 = false
+mf.blocks.each do |b|
+  b.insts.each do |inst|
+    next if is_role?(mf.isa, inst, Role::SaveReg) || is_role?(mf.isa, inst, Role::RestoreReg)
+    inst.defs.each do |op|
+      if op.kind == OperandKind::Physical && op.reg >= 40 && op.reg <= 47
+        expected = expected | (1_u64 << (op.reg - 40))
+        asm_d9 = true if !inst.asm.nil? && op.reg == 41
+      end
+    end
+  end
+end
+mf.blocks.each do |b|
+  restored = 0_u64
+  b.insts.each do |inst|
+    if is_role?(mf.isa, inst, Role::SaveReg) && inst.uses.size > 0
+      op = inst.uses[0]
+      saved = saved | (1_u64 << (op.reg - 40)) if op.kind == OperandKind::Physical && op.reg >= 40 && op.reg <= 47
+    elsif is_role?(mf.isa, inst, Role::RestoreReg) && inst.defs.size > 0
+      op = inst.defs[0]
+      restored = restored | (1_u64 << (op.reg - 40)) if op.kind == OperandKind::Physical && op.reg >= 40 && op.reg <= 47
+    elsif is_role?(mf.isa, inst, Role::Return)
+      missing = missing | (expected & (restored ^ 18446744073709551615_u64))
+      restores = restores + 1
+    end
+  end
+end
+puts "#{expected} #{saved} #{missing} #{restores} #{asm_d9 ? 1 : 0} #{mf.frame.frame_size}"

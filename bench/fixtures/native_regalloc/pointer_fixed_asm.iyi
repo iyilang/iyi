@@ -1,0 +1,2 @@
+module pointer_fixed_asm
+puts "123"

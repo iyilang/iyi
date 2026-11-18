@@ -611,42 +611,115 @@ PY
 }
 
 check_fpr_frame() {
-  local drv=$1 out="$WORK/fpr-frame.mir"
-  [ -x "$drv" ] || return 2
-  if ! "$drv" mir "$FIX_RA/fp_callee_saved.ir" probe >"$out" 2>&1; then
-    echo "could not emit the floating-point frame fixture"
+  local ignored=$1 exe="$WORK/fpr-frame-$RANDOM$EXE" values
+  if ! ./bin/iyi build -o "$(native_path "$exe")" "$(native_path "$FIX_RA/fpr_frame_probe.iyi")" >"$WORK/fpr-frame.log" 2>&1; then
+    cat "$WORK/fpr-frame.log"
     return 2
   fi
-  "$PY" - "$out" <<'PY'
-import re
+  if ! values=$("$exe" "$(native_path "$FIX_RA/fp_callee_saved.ir")"); then
+    echo "invalid FPR frame probe"
+    return 2
+  fi
+  "$PY" - "$values" <<'PY'
 import sys
-from pathlib import Path
-
-text = Path(sys.argv[1]).read_text()
-if not text.startswith("function probe\n"):
-    print("invalid floating-point frame MIR")
+try:
+    expected, saved, missing, returns, asm_d9, frame = map(int, sys.argv[1].split())
+except ValueError:
+    print("invalid FPR frame probe output")
     sys.exit(2)
-blocks = re.split(r"^block \d+ [^\n]+\n", text, flags=re.M)
-if len(blocks) < 4 or text.count("  Ret/64\n") < 2:
-    print("invalid floating-point return paths")
+if not expected & 2 or not asm_d9 or returns < 2 or frame % 16:
+    print("FPR fixture lacks an asm d9 definition, aligned frame, or two returns")
     sys.exit(2)
-saves = set(re.findall(r"^  SpStore/64f (d(?:8|9|1[0-5]))(?: #imm=(\d+))?$", text, re.M))
-if not saves:
-    print("no used callee-saved FPR was saved")
+if expected & ~saved or missing:
+    print("a physically defined callee-saved FPR is missing a save or restore")
     sys.exit(1)
-for block in blocks:
-    if "  Ret/64\n" not in block:
-        continue
-    restores = set(re.findall(r"^  SpLoad/64f (d(?:8|9|1[0-5]))(?: #imm=(\d+))?$", block, re.M))
-    if not saves <= restores:
-        print("a return does not restore every saved FPR")
-        sys.exit(1)
-print(f"floating-point frame: {len(saves)} registers saved on {text.count('  Ret/64') } return paths")
+print("FPR frame: all physical definitions saved and restored")
 PY
 }
 
 check_fpr_output() {
   check_fixture_output "$1" "$FIX_RA/fp_callee_saved.ir"
+}
+
+check_pointer_boundary() {
+  local drv=$1 name=$2 boundary=$3 out="$WORK/$2.boundary.mir"
+  if ! "$drv" mir "$FIX_RA/$name.ir" hold >"$out" 2>&1; then
+    echo "invalid pointer boundary MIR"
+    return 2
+  fi
+  "$PY" - "$out" "$boundary" <<'PY'
+import re
+import sys
+from pathlib import Path
+text = Path(sys.argv[1]).read_text()
+if not text.startswith("function hold\n"):
+    print("invalid pointer boundary function")
+    sys.exit(2)
+lines = text.splitlines()
+marker = "  Bl/" if sys.argv[2] == "call" else "  InlineAsm/"
+where = next((i for i, line in enumerate(lines) if line.startswith(marker)), None)
+if where is None:
+    print("missing collector boundary")
+    sys.exit(2)
+before, after = "\n".join(lines[:where]), "\n".join(lines[where + 1:])
+pattern = r"FMov/64f (d\d+), d0" if sys.argv[2] == "call" else r"FMovToFp/64 (d\d+),"
+source = re.search(pattern, before)
+store = re.search(r"StrFrame/64f (d\d+), (slot\d+\+0)", before)
+if (not source or not store or source.group(1) != store.group(1)
+        or not re.search(r"LdrFrame/64f \w+, " + re.escape(store.group(2)), after)
+        or source.group(1) in {f"d{x}" for x in range(8, 16)}):
+    print("possible pointer was not spilled across the collector boundary")
+    sys.exit(1)
+print("possible pointer spilled across collector boundary")
+PY
+}
+check_fixed_pointer() {
+  check_pointer_boundary "$1" pointer_fixed_asm call
+}
+check_asm_boundary() {
+  check_pointer_boundary "$1" asm_collector_boundary asm
+}
+
+check_fixed_staging() {
+  local drv=$1 prefix="$WORK/staged-pin" result
+  [ -f "$WORK/expect.native_regalloc.fixed_staging.out" ] || return 2
+  native_run "$drv" pin "$FIX_RA/fixed_staging.ir" "$prefix"
+  result=$?
+  [ "$result" -eq 0 ] || return 2
+  if ! cmp -s "$prefix.out" "$WORK/expect.native_regalloc.fixed_staging.out" ||
+     ! cmp -s "$prefix.status" "$WORK/expect.native_regalloc.fixed_staging.status"; then
+    echo "staged physical operands were clobbered"
+    return 1
+  fi
+  echo "staged physical operands retain both inputs"
+}
+
+check_dead_spills() {
+  local ignored=$1 exe="$WORK/dead-spills-$RANDOM$EXE" result
+  if ! ./bin/iyi build -o "$(native_path "$exe")" "$(native_path "$FIX_RA/dead_spills.iyi")" >"$WORK/dead-spills.log" 2>&1; then
+    cat "$WORK/dead-spills.log"
+    return 2
+  fi
+  result=$("$exe") || return 2
+  case "$result" in
+    0) echo "unused definitions have no spill stores"; return 0 ;;
+    *[!0-9]*|'') echo "invalid dead-spill count"; return 2 ;;
+    *) echo "unused definitions emitted $result spill stores"; return 1 ;;
+  esac
+}
+
+check_odd_fpr_frame() {
+  local ignored=$1 exe="$WORK/fpr-odd-$RANDOM$EXE" result
+  if ! ./bin/iyi build -o "$(native_path "$exe")" "$(native_path "$FIX_RA/fpr_odd_frame.iyi")" >"$WORK/fpr-odd.log" 2>&1; then
+    cat "$WORK/fpr-odd.log"
+    return 2
+  fi
+  result=$("$exe") || return 2
+  case "$result" in
+    "16 1 1") echo "one saved FPR retains a 16-byte aligned frame"; return 0 ;;
+    *[!0-9\ ]*|'') echo "invalid odd-FPR frame result"; return 2 ;;
+    *) echo "odd-FPR frame is unaligned or lacks save/restore"; return 1 ;;
+  esac
 }
 
 check_spill_weights() {
@@ -686,11 +759,11 @@ check_reload_reuse() {
   "$PY" - "$values" <<'PY'
 import sys
 try:
-    gpr_loads, defined, used, fpr_loads, copies_loads = map(int, sys.argv[1].split())
+    gpr_loads, defined, used, fpr_loads, copies_loads, reset_loads, asm_loads = map(int, sys.argv[1].split())
 except ValueError:
     print("invalid reload reuse fixture output")
     sys.exit(2)
-if (gpr_loads, fpr_loads, copies_loads) != (3, 3, 3) or defined != used:
+if (gpr_loads, fpr_loads, copies_loads, reset_loads, asm_loads) != (3, 3, 2, 1, 4) or defined != used:
     print("reload reuse or invalidation is incorrect")
     sys.exit(1)
 print("reload reuse: GPR and FPR caches respect redefinitions and clobbers")
@@ -698,6 +771,60 @@ PY
 }
 
 echo "== 6. mutation proofs"
+prove_mutation "reload reuse: retain GPR scratch across inline asm" \
+  src/compiler/native/regalloc_linear.iyi check_reload_reuse \
+  '      gprs.each { |r| cache[r] = -1 } # asm-clears-scratch-cache' \
+  '      gprs.each { |r| cache[r] = cache[r] } # asm-clears-scratch-cache'
+prove_mutation "reload reuse: retain FPR scratch across inline asm" \
+  src/compiler/native/regalloc_linear.iyi check_reload_reuse \
+  '      fprs.each { |r| cache[r] = -1 }' \
+  '      fprs.each { |r| cache[r] = cache[r] }'
+prove_mutation "collector: trust an unknown fixed FPR source" \
+  src/compiler/native/regalloc_linear.iyi check_fixed_pointer \
+  '                unknown = true # fixed-fpr-provenance-unknown' \
+  '                safe_roots << v # fixed-fpr-provenance-unknown'
+prove_mutation "collector: ignore inline asm as a collector boundary" \
+  src/compiler/native/regalloc_linear.iyi check_asm_boundary \
+  '        @call_prefix[p + 1] = @call_prefix[p] + (inst.call || !inst.asm.nil? ? 1 : 0) # collector-boundary' \
+  '        @call_prefix[p + 1] = @call_prefix[p] + (inst.call ? 1 : 0) # collector-boundary'
+prove_mutation "spill: store values with no virtual uses" \
+  src/compiler/native/regalloc_linear.iyi check_dead_spills \
+  '        stores << slot_access(fn.isa, false, reg, fn.vreg_slot[v], fp) if has_use[v] # skip-unused-spill-store' \
+  '        stores << slot_access(fn.isa, false, reg, fn.vreg_slot[v], fp) # skip-unused-spill-store'
+prove_mutation "reload reuse: retain scratch cache across blocks" \
+  src/compiler/native/regalloc_linear.iyi check_reload_reuse \
+  '  fn.blocks.each do |block|
+    rewrite_block(fn, block, has_use)' \
+  '  cache = int_row(64, -1)
+  fn.blocks.each do |block|
+    rewrite_block(fn, block, has_use, cache)' \
+  'def rewrite_block(fn : MFunction, block : MBlock, has_use : Array(Bool)) : Nil' \
+  'def rewrite_block(fn : MFunction, block : MBlock, has_use : Array(Bool), cache : Array(Int32)) : Nil' \
+  '  cache = int_row(64, -1)
+  gprs = scratch_gprs' \
+  '  gprs = scratch_gprs'
+prove_mutation "floating-point frame: remove one matched d9 save and restore" \
+  src/compiler/native/frame.iyi check_fpr_frame \
+  '    acc << m
+    i = i + 1' \
+  '    acc << m unless m.fp && f.callee_saved[i] == 41
+    i = i + 1' \
+  '        acc << m
+        i = i + 1' \
+  '        acc << m unless m.fp && f.callee_saved[i] == 41
+        i = i + 1'
+prove_mutation "floating-point frame: omit alignment for an odd save" \
+  src/compiler/native/frame.iyi check_odd_fpr_frame \
+  '  f.frame_size = round_up(offset, stack_align)' \
+  '  f.frame_size = offset'
+if [ "$HOST_ID" = darwin-arm64 ]; then
+  prove_mutation "spill reload: overwrite a staged physical operand" \
+    src/compiler/native/regalloc_linear.iyi check_fixed_staging \
+    '    blocked = fixed[index] # protect-staged-physical' \
+    '    blocked = 0_u64 # protect-staged-physical'
+else
+  host_limited "runtime mutation: staged physical operands (macOS arm64)"
+fi
 prove_mutation "reload reuse: reload each use instead of reusing a scratch register" \
   src/compiler/native/regalloc_linear.iyi check_reload_reuse \
   '    return r if cache[r] == v && (blocked & mask) == 0_u64' \
@@ -710,10 +837,10 @@ prove_mutation "reload reuse: ignore call clobbers" \
   src/compiler/native/regalloc_linear.iyi check_reload_reuse \
   '      cache[reg] = -1 if reg >= 0 && reg < 64 # call-clobber-invalidates-reload' \
   '      cache[reg] = cache[reg] if reg >= 0 && reg < 64 # call-clobber-invalidates-reload'
-prove_mutation "reload reuse: keep stale copies after a redefinition" \
+prove_mutation "reload reuse: discard unrelated cached values after a redefinition" \
   src/compiler/native/regalloc_linear.iyi check_reload_reuse \
   '          cache[r] = -1 if r != reg && cache[r] == v' \
-  '          cache[r] = cache[r] if r != reg && cache[r] == v'
+  '          cache[r] = -1 if r != reg'
 prove_mutation "spill weights: evict by furthest end instead of weight" \
   src/compiler/native/regalloc_linear.iyi check_spill_weights \
   '      cheaper = @weights[a] < @weights[iv] || (@weights[a] == @weights[iv] && @ends[a] > @ends[iv])' \

@@ -97,6 +97,11 @@ pub class CompilerOptions
   property arguments : Array(String)
   property single_file : Bool
   property force : Bool = false
+  property stale_key : String? = nil
+  property stale_accept : String? = nil
+  property stale_block : String? = nil
+  property stale_dump_elements : String? = nil
+  property stale_inputs : String? = nil
 
   def initialize
     @cross_compile = false
@@ -340,7 +345,10 @@ pub class CommandDriver
 
   def self.test_usage : String
     <<-USAGE
-    Usage: #{CommandDriver.program_name} test [--json] [-v] [--timeout SECONDS] [-p N] [--run TEXT] [--release] [-D FLAG]... [--affected FILE]... [--chaos[=SEED]] [--chaos-runs N] [paths]
+    Usage: #{CommandDriver.program_name} test [--json] [-v] [--timeout SECONDS] [-p N] [--run TEXT] [--release] [-D FLAG]...
+                                        [--affected FILE]... [--cached | --fresh] [--explain] [--shard K/N]
+                                        [--import-index NS=FILE]... [--export-index NS=FILE]...
+                                        [--chaos[=SEED]] [--chaos-runs N] [paths]
 
     Runs every `*_test.iyi` under the given paths (default: `.`), but not
     under `lib`, a dot directory or another module's directory. A test is
@@ -348,8 +356,8 @@ pub class CommandDriver
     prints its own evidence. `--json` reports the run as data, each named
     case (`test "name" { }`) with its verdict.
 
-    `-p N` (`--parallel N`) builds and runs N tests at once; half as many as
-    the machine has cores unless given. The report is in file order.
+    `-p N` (`--parallel N`) builds and runs N tests at once, receipts included;
+    half as many as the machine has cores unless given. The report is in file order.
 
     `-v` (`--verbose`) shows what a passing test printed too, which is
     otherwise shown only for a failure. `--release` and `-D FLAG` build
@@ -363,10 +371,19 @@ pub class CommandDriver
     run, and says `skip - name: why`.
 
     `--affected FILE` (repeatable) runs only the tests whose transitive
-    import closure contains a named file — name every file you changed.
+    import closure contains a named file: name every file you changed.
     The closure is read by parsing, so selection costs milliseconds; a
     deleted file turns the discount off, because nothing can prove the
     tests that imported it unaffected.
+
+    `--cached` reuses passing test results when code and observed inputs match.
+    `--fresh` forces execution and records new receipts.
+    `--explain` prints decision lines explaining hits and misses.
+    `--shard K/N` runs shard K of N shards dealt round-robin.
+    `--import-index NS=FILE` imports verified test receipts for namespace NS.
+    `--export-index NS=FILE` exports test receipts for namespace NS (requires --fresh).
+    These take the runner's own build of each test, every named case, so they
+    are not taken with `--run`, `-v`, `--release` or `-D`.
 
     `--chaos` builds each test for the chaos scheduler and runs it once per
     seed, `--chaos-runs N` seeds (100 unless given) from one drawn at
@@ -2517,6 +2534,21 @@ pub class CommandDriver
     if command == "build"
       parser.on("--force", "Build even when nothing the output was built from has changed") do
         opts.force = true
+      end
+      parser.on("--stale-key FILE", "iyi: write stale key output to FILE") do |file|
+        opts.stale_key = file
+      end
+      parser.on("--stale-accept FILE", "iyi: stale accept file") do |file|
+        opts.stale_accept = file
+      end
+      parser.on("--stale-block FILE", "iyi: stale block file") do |file|
+        opts.stale_block = file
+      end
+      parser.on("--stale-dump-elements FILE", "iyi: stale dump elements file") do |file|
+        opts.stale_dump_elements = file
+      end
+      parser.on("--stale-inputs FILE", "iyi: write the inputs this build read to FILE") do |file|
+        opts.stale_inputs = file
       end
     end
 

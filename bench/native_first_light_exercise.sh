@@ -65,10 +65,29 @@ fail() {
   failures=$((failures + 1))
 }
 
-# run_bounded EXE OUT ERR: runs EXE with no stdin for at most 30 seconds; prints its status.
+# Numeric output is a normal exit; signals, timeouts and launch errors stay distinct.
 run_bounded() {
-  perl -e 'alarm 30; exec @ARGV or exit 127' -- "$1" >"$2" 2>"$3" </dev/null
-  echo $?
+  "$PY" - "$(native_path "$1")" "$(native_path "$2")" "$(native_path "$3")" <<'PY'
+import os, signal, subprocess, sys
+exe, out, err = sys.argv[1:]
+try:
+    with open(out, "wb") as stdout, open(err, "wb") as stderr:
+        proc = subprocess.Popen([exe], stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
+                                start_new_session=(os.name != "nt"))
+        try:
+            rc = proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            if os.name == "nt":
+                proc.kill()
+            else:
+                os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+            print("timeout")
+        else:
+            print(rc if 0 <= rc <= 255 else "signal:%s" % (-rc) if rc < 0 else "invalid-exit:%s" % rc)
+except OSError as exc:
+    print("launch-error:%s" % exc)
+PY
 }
 
 echo "== 0. the runtime text the tool carries is generated from builtins.ir"
@@ -139,6 +158,9 @@ for ir in "$FIX"/*.ir "$FL"/*.ir; do
     continue
   fi
   hs=$(run_bounded "$work/hosted/$n$EXE" "$work/$n.h.out" "$work/$n.h.err")
+  case "$hs" in
+    ''|*[!0-9]*) printf '%-18s FAIL      hosted termination %s\n' "$n" "$hs" >>"$table"; failures=$((failures + 1)); continue ;;
+  esac
   if [ "$HOST_ID" != darwin-arm64 ]; then
     if "$cg" obj "$REPO_NATIVE/$ir" "$work_native/native/$n.o" >"$work/$n.obj.log" 2>&1 \
         && [ -s "$work/native/$n.o" ] \
@@ -175,6 +197,9 @@ for ir in "$FIX"/*.ir "$FL"/*.ir; do
     continue
   fi
   ns=$(run_bounded "$native" "$work/$n.n.out" "$work/$n.n.err")
+  case "$ns" in
+    ''|*[!0-9]*) printf '%-18s FAIL      native termination %s\n' "$n" "$ns" >>"$table"; cat "$work/$n.n.err"; failures=$((failures + 1)); continue ;;
+  esac
   if [ -n "$problems" ]; then
     printf '%-18s FAIL      %s\n' "$n" "$problems" >>"$table"
     failures=$((failures + 1))
@@ -317,17 +342,36 @@ check_drop_helpers() {
 }
 
 check_no_library() {
-  b="$work/mut-tool$EXE"
+  local b="$work/mut-tool$EXE" baseline="$work/native/arith" baseline_bind mutant_bind
+  if ! grep -Eq '^arith[[:space:]]+PASS[[:space:]]' "$table"; then
+    echo "INVALID: arith did not pass the unmutated native run"; return 2
+  fi
+  if ! dyld_info -no_validate -imports "$baseline" >"$work/arith.bind" 2>&1; then
+    cat "$work/arith.bind"; return 2
+  fi
+  baseline_bind="$(awk '$2 == "_printf" { line = $0; n++ } END { if (n == 1) print line; else exit 1 }' "$work/arith.bind")" || {
+    echo "INVALID: baseline does not have exactly one _printf binding"; cat "$work/arith.bind"; return 2
+  }
+  case "$baseline_bind" in
+    *"(from libSystem)") ;;
+    *) echo "INVALID: baseline _printf is not bound to libSystem: $baseline_bind"; return 2 ;;
+  esac
   "$iyi" build -o "$(native_path "$b")" "$REPO_NATIVE/$TOOL_SRC" >"$work/mut-build.log" 2>&1 || { cat "$work/mut-build.log"; return 2; }
   if ! "$b" "$REPO_NATIVE/$FIX/arith.ir" -o "$work_native/mut-arith" >"$work/mut-link.log" 2>&1; then
-    cat "$work/mut-link.log"
-    return 2
+    cat "$work/mut-link.log"; return 2
   fi
   native_signature_ok "$work/mut-arith" || return 2
-  ms=$(run_bounded "$work/mut-arith" "$work/mut-arith.out" "$work/mut-arith.err")
-  [ "$ms" -lt 128 ] || { cat "$work/mut-arith.err"; return 2; }
-  if [ "$ms" != "0" ] || ! cmp -s "$work/arith.h.out" "$work/mut-arith.out"; then return 1; fi
-  return 0
+  if ! dyld_info -no_validate -imports "$work/mut-arith" >"$work/mut-arith.bind" 2>&1; then
+    cat "$work/mut-arith.bind"; return 2
+  fi
+  mutant_bind="$(awk '$2 == "_printf" { line = $0; n++ } END { if (n == 1) print line; else exit 1 }' "$work/mut-arith.bind")" || {
+    echo "INVALID: mutant does not have exactly one _printf binding"; cat "$work/mut-arith.bind"; return 2
+  }
+  case "$mutant_bind" in
+    *"(from libSystem)") return 0 ;;
+    *"(from "*) echo "decisive: _printf binding changed: $mutant_bind"; return 1 ;;
+    *) echo "INVALID: unrecognized mutant _printf binding: $mutant_bind"; return 2 ;;
+  esac
 }
 
 # A C import libSystem does not export must stop the link, by name. Unmutated, the tool refuses the fixture (the
@@ -344,6 +388,9 @@ check_missing_import() {
 }
 
 check_helper_parity() {
+  if ! grep -Eq '^rt_helpers[[:space:]]+PASS[[:space:]]' "$table"; then
+    echo "INVALID: rt_helpers did not pass its unmutated run"; return 2
+  fi
   drv="$work/native_cg$EXE"
   "$iyi" build -o "$(native_path "$drv")" "$REPO_NATIVE/src/compiler/tools/native_cg.iyi" >"$work/mut-ncg.log" 2>&1 || { cat "$work/mut-ncg.log"; return 2; }
   "$drv" obj "$REPO_NATIVE/$FL/rt_helpers.ir" "$work_native/mut-rth.o" >"$work/mut-rth.log" 2>&1 || { cat "$work/mut-rth.log"; return 2; }
@@ -351,7 +398,8 @@ check_helper_parity() {
   cc "$work/mut-rth.o" "$work/mut-rt.o" -o "$work/mut-rth" >"$work/mut-link.log" 2>&1 || { cat "$work/mut-link.log"; return 2; }
   native_signature_ok "$work/mut-rth" || return 2
   ms=$(run_bounded "$work/mut-rth" "$work/mut-rth.out" "$work/mut-rth.err")
-  [ "$ms" -lt 128 ] || { cat "$work/mut-rth.err"; return 2; }
+  case "$ms" in ''|*[!0-9]*) echo "INVALID: helper fixture terminated with $ms"; cat "$work/mut-rth.err"; return 2 ;; esac
+  if [ -s "$work/mut-rth.err" ]; then echo "INVALID: helper fixture wrote to stderr"; cat "$work/mut-rth.err"; return 2; fi
   if [ "$ms" = "0" ] && cmp -s "$work/rt_helpers.h.out" "$work/mut-rth.out"; then return 0; fi
   return 1
 }

@@ -126,7 +126,10 @@ end
 
 pub def codegen_call_node(low : Lowerer, node : Compiler::Syntax::Ast::Call) : Nil
   ret_type = low.analysed.type_of?(node)
+  if ret_type.nil?
+    refuse_untyped_call_probe(low, node)
   raise "BUG: the analysed program has no type for the call to #{node.name} (hosted call.cr: visit(Call))" if ret_type.nil?
+  end
   ret = ret_type.as(Type)
 
   # A call on a lib takes its target from the lib call record, not from a def: the fun has no body to
@@ -1457,4 +1460,21 @@ pub def receiver_storage(low : Lowerer, node : Compiler::Syntax::Ast::Call, st :
   return nil if lv.already_loaded
   return nil if TypeIndirection.trait_value_type(lv.type).full_name != st.full_name
   lv.pointer
+end
+
+# This cold path is reached only after the ordinary call type lookup failed.
+# A total-mode probe may name a refusal recorded for this exact call; absence
+# of such a record remains the strict compiler BUG below the call site.
+def refuse_untyped_call_probe(low : Lowerer, node : Compiler::Syntax::Ast::Call) : Nil
+  return unless low.probe_untyped_refusals
+  low.analysed.refusals.each do |refusal|
+    next unless refusal.node.node_id == node.node_id
+    site = "no location"
+    if file = refusal.file
+      site = "#{file}:#{refusal.line}:#{refusal.column}"
+    end
+    reason = refusal.reason.split("\n")[0]
+    raise "body typing refused call #{node.name} at #{site}: #{reason}"
+  end
+  nil
 end

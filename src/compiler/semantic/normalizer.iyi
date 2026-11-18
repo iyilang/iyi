@@ -3,6 +3,7 @@ module compiler/semantic/normalizer
 import compiler/syntax/ast::{ASTNode, Alias, And, Arg, ArrayLiteral, Assign, Block, BoolLiteral, Break, Call, CharLiteral, ClassVar, Def, Defer, DoubleSplat, ExceptionHandler, Expressions, Generic, Global, If, InstanceVar, IsA, Macro, MultiAssign, NamedArgument, Next, NilLiteral, Nop, Not, NumberLiteral, OpAssign, Or, Path, ProcLiteral, ProcNotation, Propagate, Recover, Return, Splat, StringInterpolation, StringLiteral, SymbolLiteral, TupleLiteral, Underscore, Union, Unless, Until, Var, While}
 import compiler/syntax/transformer::{Transformer}
 import compiler/syntax/visitor::{Visitor}
+import compiler/macros/target_flags::{MacroTargetFlags}
 import std/digest
 
 pub class NormalizerProgram
@@ -11,11 +12,27 @@ pub class NormalizerProgram
   property macro_flags : Array(String)?
   @temp_vars : Hash(String, Int32)
   @flags : Array(String)
+  @host_flags : Array(String)? = nil
 
   def initialize(@iyi_prelude : Bool = true)
     @temp_vars = Hash(String, Int32).new
     @flags = [] of String
     @macro_flags = nil
+  end
+
+  # host_flag? is shared by expansions in this program, independently of target flags.
+  def host_flags : Array(String)
+    if flags = @host_flags
+      return flags
+    end
+    flags = MacroTargetFlags.host([] of String)
+    @host_flags = flags
+    flags
+  end
+
+  # A loader and its semantic program belong to the same compilation.
+  def host_flags=(flags : Array(String))
+    @host_flags = flags
   end
 
   # Flags the program was built with, read the way the hosted program's

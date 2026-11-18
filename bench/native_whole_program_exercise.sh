@@ -34,6 +34,7 @@ cd "$root" || exit 1
 REPO="$root"
 . "$REPO/bench/lib/host.sh" || exit 1
 require_test_host || exit 1
+if [ -z "$PY" ]; then echo "a working Python interpreter is required" >&2; exit 1; fi
 REPO_NATIVE="$(native_path "$REPO")" || exit 1
 export IYI_PATH="$REPO_NATIVE/src"
 if [ "$HOST_OS" = darwin ]; then
@@ -63,9 +64,29 @@ fail() {
   failures=$((failures + 1))
 }
 
+# Numeric output is a normal exit; signals, timeouts and launch errors stay distinct.
 run_bounded() {
-  perl -e 'alarm 30; exec @ARGV or exit 127' -- "$1" >"$2" 2>"$3" </dev/null
-  echo $?
+  "$PY" - "$(native_path "$1")" "$(native_path "$2")" "$(native_path "$3")" <<'PY'
+import os, signal, subprocess, sys
+exe, out, err = sys.argv[1:]
+try:
+    with open(out, "wb") as stdout, open(err, "wb") as stderr:
+        proc = subprocess.Popen([exe], stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
+                                start_new_session=(os.name != "nt"))
+        try:
+            rc = proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            if os.name == "nt":
+                proc.kill()
+            else:
+                os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+            print("timeout")
+        else:
+            print(rc if 0 <= rc <= 255 else "signal:%s" % (-rc) if rc < 0 else "invalid-exit:%s" % rc)
+except OSError as exc:
+    print("launch-error:%s" % exc)
+PY
 }
 
 rank_of() {
@@ -140,8 +161,9 @@ phase_of() {
   # The sidecar of bridged IR (SPEC 2.3): the libraries the program's lib blocks link, beside the IR.
   rm -f "$dir/p.ir.imports"
   [ -s "$dir/frameworks" ] && cp "$dir/frameworks" "$dir/p.ir.imports"
-  PATH="$TRIPWIRE_PATH:$PATH" "$tools/compile_native$EXE" "$(native_path "$dir/p.ir")" -o "$(native_path "$dir/native")" >"$dir/native.log" 2>&1
+  PATH="$TRIPWIRE_PATH:$PATH" "$tools/compile_native$EXE" "$(native_path "$dir/p.ir")" -o "$(native_path "$dir/native")" >"$dir/native.out" 2>"$dir/native.err"
   local native_rc=$?
+  cat "$dir/native.out" "$dir/native.err" >"$dir/native.log"
   printf '%s\n' "$native_rc" >"$dir/native.rc"
   if [ "$native_rc" -ne 0 ]; then
     printf 'native\t%s\n' "$(head -n 1 "$dir/native.log")"
@@ -164,6 +186,9 @@ phase_of() {
   fi
   ns=$(run_bounded "$dir/native" "$dir/n.out" "$dir/n.err")
   printf '%s\n' "$ns" >"$dir/n.status"
+  case "$ns:$(cat "$dir/h.status")" in
+    *[!0-9:]*|:*) printf 'invalid\tabnormal executable termination: native %s, hosted %s\n' "$ns" "$(cat "$dir/h.status")"; return ;;
+  esac
   if [ "$ns" = "$(cat "$dir/h.status")" ] && cmp -s "$dir/h.out" "$dir/n.out"; then
     printf 'run-equal\t\n'
   else
@@ -211,6 +236,10 @@ for src in samples/iyi/*.iyi "$FIX"/*.iyi src/compiler/tools/parse.iyi; do
   fi
   total=$((total + 1))
   result=$(phase_of "$tools" "$dir")
+  if [ "${result%%$'\t'*}" = run-equal ]; then
+    cp "$dir/n.err" "$dir/baseline-n.err"
+    cp "$dir/n.status" "$dir/baseline-n.status"
+  fi
   phase=${result%%$'\t'*}
   why=${result#*$'\t'}
   [ "$phase" = "run-equal" ] && equal=$((equal + 1))
@@ -403,6 +432,59 @@ prove_whole_mutation() {
   fi
   return 1
 }
+
+# A direct TLS operand, imported from LLVM IR, avoids writing through the
+# deliberately wrong address. The return code observes the loaded value.
+prepare_tls_operand() {
+  mkdir -p "$work/tls"
+  cat >"$work/tls/hosted.ll" <<'IR'
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+@probe = internal thread_local(localexec) global i64 42, align 8
+define i32 @main() {
+entry:
+  %value = load i64, ptr @probe, align 8
+  %wrong = icmp ne i64 %value, 42
+  %result = zext i1 %wrong to i32
+  ret i32 %result
+}
+IR
+  if ! "$tools/iyi-ir$EXE" import "$work_native/tls/hosted.ll" >"$work/tls/p.ir" 2>"$work/tls/import.err"; then
+    echo "INVALID: read-only TLS LLVM IR did not import"; cat "$work/tls/import.err"; return 2
+  fi
+  if ! PATH="$TRIPWIRE_PATH:$PATH" "$tools/compile_native$EXE" "$work_native/tls/p.ir" -o "$work_native/tls/baseline" >"$work/tls/build.out" 2>"$work/tls/build.err"; then
+    echo "INVALID: read-only TLS baseline did not build"; cat "$work/tls/build.out" "$work/tls/build.err"; return 2
+  fi
+  native_signature_ok "$work/tls/baseline" || return 2
+  local rc
+  rc="$(run_bounded "$work/tls/baseline" "$work/tls/baseline.out" "$work/tls/baseline.err")"
+  if [ "$rc" != 0 ] || [ -s "$work/tls/baseline.out" ] || [ -s "$work/tls/baseline.err" ]; then
+    echo "INVALID: read-only TLS baseline exited $rc"; cat "$work/tls/baseline.out" "$work/tls/baseline.err"; return 2
+  fi
+  : >"$work/tls/baseline.ok"
+}
+
+check_tls_operand() {
+  [ -f "$work/tls/baseline.ok" ] || { echo "INVALID: read-only TLS baseline did not pass"; return 2; }
+  if ! "$iyi" build -o "$work_native/tls/mut-tool$EXE" "$REPO_NATIVE/$TOOL_SRC" >"$work/tls/mut-build.log" 2>&1; then
+    echo "INVALID: TLS mutant compiler did not build"; cat "$work/tls/mut-build.log"; return 2
+  fi
+  if ! PATH="$TRIPWIRE_PATH:$PATH" "$work/tls/mut-tool$EXE" "$work_native/tls/p.ir" -o "$work_native/tls/mutant" >"$work/tls/mut.out" 2>"$work/tls/mut.err"; then
+    echo "INVALID: TLS mutant fixture did not build"; cat "$work/tls/mut.out" "$work/tls/mut.err"; return 2
+  fi
+  native_signature_ok "$work/tls/mutant" || return 2
+  local rc
+  rc="$(run_bounded "$work/tls/mutant" "$work/tls/run.out" "$work/tls/run.err")"
+  if [ -s "$work/tls/run.out" ] || [ -s "$work/tls/run.err" ]; then
+    echo "INVALID: TLS mutant produced unexpected output"; cat "$work/tls/run.out" "$work/tls/run.err"; return 2
+  fi
+  case "$rc" in
+    0) return 0 ;;
+    1) echo "decisive: the read-only TLS operand no longer reads 42"; return 1 ;;
+    *) echo "INVALID: TLS mutant terminated with $rc"; return 2 ;;
+  esac
+}
+
 # still_runs TOOL PROGRAM: rebuilds the one tool the mutated file belongs to (native: iyi-compile-native; bridge:
 # iyi-ir) from the tree as it is now, takes the other as step 1 built it, and requires PROGRAM to still run equal.
 # Each mutation names the program that exercises the mutated piece: hello (thread-locals, naked functions, constant
@@ -420,31 +502,86 @@ still_runs() {
     "$iyi" build -o "$(native_path "$t/compile_native$EXE")" "$REPO_NATIVE/$TOOL_SRC" >"$t/build.tool.log" 2>&1 || { cat "$t/build.tool.log"; return 2; }
   fi
   dir="$work/p/$(dirname "$src" | tr '/' '_')_$(basename "$src" .iyi)"
-  [ -f "$dir/hosted.ll" ] || return 2
+  [ -f "$dir/hosted.ll" ] || { echo "INVALID: no hosted IR for $src ($dir/hosted.ll)"; return 2; }
   result=$(phase_of "$t" "$dir")
   case "${result%%$'\t'*}" in
     run-equal) return 0 ;;
     run)
-      local rc
+      local rc baseline_panic
       rc=$(cat "$dir/n.status")
-      [ "$rc" -lt 126 ] || return 2
-      if grep -Eiq 'panic|segmentation|bus error|illegal instruction|abort' "$dir/n.err"; then cat "$dir/n.err"; return 2; fi
+      case "$rc" in ''|*[!0-9]*) echo "INVALID: abnormal fixture termination: $rc"; cat "$dir/n.err"; return 2 ;; esac
+      if grep -Eiq 'panic|segmentation|bus error|illegal instruction|abort' "$dir/n.err"; then
+        baseline_panic="$(head -n 1 "$dir/baseline-n.err")"
+        if [ "$src" != "$FIX/float_to_int.iyi" ] ||
+           [ "$baseline_panic" != 'iyi: panic: arithmetic overflow' ] ||
+           [ "$(head -n 1 "$dir/n.err")" != "$baseline_panic" ] ||
+           [ "$rc" != "$(cat "$dir/baseline-n.status")" ] ||
+           ! grep -Fq '*FloatToInt^FloatToInt::f64_i32<Float64>:Int32' "$dir/baseline-n.err" ||
+           ! grep -Fq '*FloatToInt^FloatToInt::f64_i32<Float64>:Int32' "$dir/n.err" ||
+           [ "$(awk 'END { print NR }' "$dir/h.out")" != "$(awk 'END { print NR }' "$dir/n.out")" ]; then
+          echo "INVALID: fixture did not reach its baseline terminal panic"; cat "$dir/n.err"; return 2
+        fi
+      elif ! cmp -s "$dir/baseline-n.err" "$dir/n.err"; then
+        echo "INVALID: fixture stderr differs from its passing baseline"; cat "$dir/n.err"; return 2
+      fi
       echo "decisive: $result"
       return 1
       ;;
     native)
-      if [ "$(cat "$dir/native.rc" 2>/dev/null)" = 1 ]; then
+      local prefix="iyi-compile-native: $(native_path "$dir/p.ir"): " message line text symbol
+      if [ "$(cat "$dir/native.rc" 2>/dev/null)" = 1 ] &&
+         ! grep -Eiq '^iyi: panic:|segmentation|bus error|illegal instruction|abort' "$dir/native.log"; then
         case "$label" in
+          "a def imported with the C convention")
+            if grep -Fxq "${prefix}in function *IyiRoots::each_register_root<Proc(UInt64, Nil)>:Nil: @*IyiRoots::each_register_root<Proc(UInt64, Nil)>:Nil uses the C convention but takes %\"->\"" "$dir/native.err" &&
+               grep -Fxq "${prefix}the IR is not well formed" "$dir/native.err" &&
+               grep -Fq '*IyiRoots::each_register_root<Proc(UInt64, Nil)>:Nil' "$dir/p.ir"; then
+              echo "decisive: hello's each_register_root rejects the C convention"; return 1
+            fi ;;
           "a ret after a naked function's template is refused")
-            if grep -Fq 'a ret is refused' "$dir/native.log"; then echo "decisive: expected naked return refusal"; return 1; fi ;;
+            if grep -Fq 'a ret is refused' "$dir/native.err"; then echo "decisive: expected naked return refusal"; return 1; fi ;;
           "wide unsigned division helper is absent")
-            if grep -Fq 'undefined symbol __iyi_native_udivti3' "$dir/native.log"; then echo "decisive: expected missing helper refusal"; return 1; fi ;;
+            if grep -Fxq "${prefix}*UInt128#//<UInt128>:UInt128: symbol __iyi_native_udivti3 is not in the module's symbol table" "$dir/native.err" &&
+               grep -Fq '*UInt128#//<UInt128>:UInt128' "$dir/p.ir"; then
+              echo "decisive: wide_division's UInt128 division lacks __iyi_native_udivti3"; return 1
+            fi ;;
+          "a wide internal result is never passed in memory")
+            if grep -Fxq "${prefix}__iyi_main: an internal result needs more than 8 integer registers" "$dir/native.err" &&
+               grep -Fq '__iyi_main' "$dir/p.ir"; then
+              echo "decisive: wide_result's __iyi_main needs more than 8 integer registers"; return 1
+            fi ;;
+          "a quote escaped in a name ends the name"|"a numbered parameter is taken as a name")
+            message="$(grep -F "${prefix}line " "$dir/native.err" | head -n 1)"
+            line="$(printf '%s\n' "$message" | awk 'match($0, /line [0-9]+:/) { s = substr($0, RSTART + 5, RLENGTH - 6); print s }')"
+            text="$(awk -v n="$line" 'NR == n { print; exit }' "$dir/p.ir")"
+            if [ "$label" = "a quote escaped in a name ends the name" ]; then
+              if [ "$message" = "${prefix}line $line: expected \`,\` but found the end of the line" ] &&
+                 printf '%s\n' "$text" | grep -Fq '@"' &&
+                 printf '%s\n' "$text" | grep -Fq '\"'; then
+                echo "decisive: quoted_name IR line $line contains the escaped global name"; return 1
+              fi
+            else
+              symbol="$(printf '%s\n' "$message" | awk -F 'no unnamed value | in this function' '{print $2}')"
+              case "$symbol" in
+                %[0-9]*) if [ "$message" = "${prefix}line $line: no unnamed value $symbol in this function" ] &&
+                             printf '%s\n' "$text" | grep -Fq -- "$symbol"; then
+                  echo "decisive: hello IR line $line uses $symbol"; return 1
+                fi ;;
+              esac
+            fi ;;
+          "a library named beside the IR is not loaded")
+            message="$(grep -F "${prefix}undefined symbol " "$dir/native.err" | head -n 1)"
+            symbol="$(printf '%s\n' "$message" | awk -F 'undefined symbol |: no object defines it' '{print $2}')"
+            if [ "$message" = "${prefix}undefined symbol $symbol: no object defines it, and this system's libSystem does not export it" ] &&
+               grep -Fq "$symbol" "$dir/p.ir" &&
+               { case "$symbol" in CF*|kCF*) grep -Fxq CoreFoundation "$dir/frameworks" ;; Sec*|kSec*) grep -Fxq Security "$dir/frameworks" ;; *) false ;; esac; }; then
+              echo "decisive: cores' framework symbol $symbol is unavailable without its sidecar"; return 1
+            fi ;;
         esac
       fi
-      cat "$dir/native.log"
-      return 2
+      echo "INVALID: unexpected native refusal for $src"; cat "$dir/native.log"; return 2
       ;;
-    *) echo "invalid mutation proof: $result"; cat "$dir/import.err"; return 2 ;;
+    *) echo "INVALID: unexpected mutation result for $src: $result"; cat "$dir/import.err"; return 2 ;;
   esac
 }
 unmutated=1
@@ -473,6 +610,7 @@ elif [ "$unmutated" -ne 1 ]; then
   fail "a program the mutation proofs read did not run equal on the unmutated tree, so no mutation was run"
 else
   status=0
+  prepare_tls_operand || status=1
   prove_whole_mutation "a def imported with the C convention" src/compiler/backend/llvm/import.iyi \
     'return CallConv::Iyi if name.starts_with?("*") || name.starts_with?("~")' \
     'return CallConv::C if name.starts_with?("*") || name.starts_with?("~")' -- still_runs bridge samples/iyi/hello.iyi || status=1
@@ -480,7 +618,7 @@ else
     'off = off + layout.offset_of(cur, n.to_i32)' 'off = off + 0_i64' -- still_runs native samples/iyi/hello.iyi || status=1
   prove_whole_mutation "a thread-local operand takes the plain symbol address" src/compiler/native/aarch64/isel.iyi \
     'return [thread_local_address(g)] if g.tls != TlsModel::None' \
-    'return [symbol_address(g.name, false, false)] if g.tls != TlsModel::None' -- still_runs native samples/iyi/hello.iyi || status=1
+    'return [symbol_address(g.name, false, false)] if g.tls != TlsModel::None' -- check_tls_operand || status=1
   prove_whole_mutation "a ret after a naked function's template is refused" src/compiler/native/aarch64/isel.iyi \
     '      if i.op == Op::Ret
         next
@@ -499,7 +637,7 @@ else
     'param_names << (written.numeric ? "" : written.text)' 'param_names << written.text' -- still_runs native samples/iyi/hello.iyi || status=1
   prove_whole_mutation "a library named beside the IR is not loaded" src/compiler/tools/compile_native.iyi \
     'names << name unless name.empty? || name.starts_with?("#")' \
-    'names << name if name.empty?' -- still_runs native samples/iyi/cores.iyi || status=1
+    'nil' -- still_runs native samples/iyi/cores.iyi || status=1
   prove_whole_mutation "an i8 saturating conversion uses the i16 clamp" src/compiler/native/aarch64/isel.iyi \
     '    d = clamp_narrow(d, bits, signed) if clamp' '    d = clamp_narrow(d, 16, signed) if clamp' -- still_runs native "$FIX/float_to_int.iyi" || status=1
   prove_whole_mutation "the unsigned 128-bit conversion calls the signed helper" src/compiler/native/aarch64/isel.iyi \

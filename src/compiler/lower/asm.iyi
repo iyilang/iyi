@@ -28,9 +28,10 @@ import compiler/lower/context::{BodyVisit, Lowerer}
 import compiler/lower/helpers::{llvm_nil, store_aligned}
 import compiler/lower/pending::{pending_visit_node}
 import compiler/semantic/top_level::{Type}
-# The AST node is `Compiler::Syntax::Ast::Asm` because this module is itself
-# `compiler/lower/asm`, and inside it the name `Asm` means this module.
-alias SyntaxAsm = Compiler::Syntax::Ast::Asm
+# The AST node is named by its full path because this module is itself
+# `compiler/lower/asm`: inside it the bare name `Asm` means this module, and an
+# import cannot bring another `Asm` in.
+alias SyntaxAsm = ::Compiler::Syntax::Ast::Asm
 
 # The hosted `visit(node : Asm)` (codegen/asm.cr 4-75).
 pub def codegen_asm(low : Lowerer, node : SyntaxAsm) : Nil

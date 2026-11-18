@@ -10,12 +10,11 @@ struct Proc
 end
 
 class StubExercise
-  def twice(value : Int32) : Int32
-    value &* 2
-  end
-
   def refused : Proc(Int32, Int32)
-    ->(value : Int32) { twice(value) }
+    ->(value : Int32) {
+      nested = ->(inner : Int32) { inner &* 2 }
+      nested.probe_call(value)
+    }
   end
 end
 

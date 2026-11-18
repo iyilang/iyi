@@ -84,6 +84,11 @@ pub class CommandExecutor
     return "--emit-bind belongs to tool bind, not build or run" if opts.emit_bind
     return "--emit-iyimod is not in the self-hosted compiler yet" if opts.emit_iyimod
     return "--use-iyimod is not in the self-hosted compiler yet" if opts.use_iyimod
+    return "--stale-key is not in the self-hosted compiler yet" if opts.stale_key
+    return "--stale-accept is not in the self-hosted compiler yet" if opts.stale_accept
+    return "--stale-block is not in the self-hosted compiler yet" if opts.stale_block
+    return "--stale-dump-elements is not in the self-hosted compiler yet" if opts.stale_dump_elements
+    return "--stale-inputs is not in the self-hosted compiler yet" if opts.stale_inputs
     absolute_source = File.expand_path(source)
     root = IyiPath.header_root_of(absolute_source, File.read(source)) || File.dirname(absolute_source)
     if Dir.exists?(File.join(root, "mods"))

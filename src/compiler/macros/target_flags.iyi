@@ -1,4 +1,4 @@
-@[Unsafe("the darwin kernel release is asked of the platform through uname, into a buffer this file allocates")]
+@[Unsafe("reads the host OS version and SDK settings through platform buffers")]
 module compiler/macros/target_flags
 
 import compiler/platform/target::{Target}
@@ -7,18 +7,253 @@ import compiler/platform/flags::{PlatformFlags}
 {% if flag?(:darwin) %}
   lib LibC
     fun uname(buffer : UInt8*) : Int32
+    fun sysctlbyname(name : UInt8*, old : Void*, old_size : UInt64*, new : Void*, new_size : UInt64) : Int32
   end
 {% end %}
 
-# The flag set a macro sees: the flags its target triple implies, then the `-D`
-# defines, as the hosted compiler builds `Program#flags` (`flags_for_target`
-# plus `program.flags << define`). `flag?(:name)` in a macro answers from this
-# set and nothing else.
+# Reads the top-level SDK Version while validating the JSON around it. Nested
+# Version keys are ignored. Only the selected value is decoded as ASCII.
+class MacroSDKSettings
+  @index : Int32 = 0
+  @version : String? = nil
+
+  def initialize(@text : String)
+  end
+
+  def peek : UInt8
+    return 0_u8 if @index >= @text.bytesize
+    @text.to_unsafe[@index]
+  end
+
+  def space : Nil
+    while peek == 32_u8 || peek == 9_u8 || peek == 10_u8 || peek == 13_u8
+      @index = @index + 1
+    end
+  end
+
+  def take(byte : UInt8) : Bool
+    return false unless peek == byte
+    @index = @index + 1
+    true
+  end
+
+  def hex(byte : UInt8) : Int32
+    return byte.to_i32 - 48 if byte >= 48_u8 && byte <= 57_u8
+    return byte.to_i32 - 55 if byte >= 65_u8 && byte <= 70_u8
+    return byte.to_i32 - 87 if byte >= 97_u8 && byte <= 102_u8
+    -1
+  end
+
+  # Returns the bounds of a valid JSON string's contents.
+  def string_bounds : Tuple(Int32, Int32)?
+    return nil unless take(34_u8)
+    start = @index
+    while @index < @text.bytesize
+      byte = peek
+      return nil if byte < 32_u8
+      if byte == 34_u8
+        length = @index - start
+        @index = @index + 1
+        return {start, length}
+      end
+      @index = @index + 1
+      if byte == 92_u8
+        escape = peek
+        return nil if escape == 0_u8
+        @index = @index + 1
+        if escape == 117_u8
+          code = 0
+          4.times do
+            digit = hex(peek)
+            return nil if digit < 0
+            code = code * 16 + digit
+            @index = @index + 1
+          end
+          if code >= 0xD800 && code <= 0xDBFF
+            return nil unless take(92_u8) && take(117_u8)
+            low = 0
+            4.times do
+              digit = hex(peek)
+              return nil if digit < 0
+              low = low * 16 + digit
+              @index = @index + 1
+            end
+            return nil unless low >= 0xDC00 && low <= 0xDFFF
+          elsif code >= 0xDC00 && code <= 0xDFFF
+            return nil
+          end
+        elsif escape != 34_u8 && escape != 92_u8 && escape != 47_u8 &&
+              escape != 98_u8 && escape != 102_u8 && escape != 110_u8 &&
+              escape != 114_u8 && escape != 116_u8
+          return nil
+        end
+      elsif byte >= 128_u8
+        width = if byte >= 0xC2_u8 && byte <= 0xDF_u8
+                  1
+                elsif byte >= 0xE0_u8 && byte <= 0xEF_u8
+                  2
+                elsif byte >= 0xF0_u8 && byte <= 0xF4_u8
+                  3
+                else
+                  return nil
+                end
+        first = peek
+        return nil if first < 0x80_u8 || first > 0xBF_u8
+        return nil if byte == 0xE0_u8 && first < 0xA0_u8
+        return nil if byte == 0xED_u8 && first >= 0xA0_u8
+        return nil if byte == 0xF0_u8 && first < 0x90_u8
+        return nil if byte == 0xF4_u8 && first > 0x8F_u8
+        width.times do
+          return nil if peek < 0x80_u8 || peek > 0xBF_u8
+          @index = @index + 1
+        end
+      end
+    end
+    nil
+  end
+
+  def ascii(bounds : Tuple(Int32, Int32)) : String?
+    start = bounds[0]
+    finish = start + bounds[1]
+    raw = @text[start, bounds[1]]
+    return raw unless raw.includes?("\\")
+    out = String::Builder.new
+    i = start
+    while i < finish
+      byte = @text.to_unsafe[i]
+      i = i + 1
+      if byte == 92_u8
+        escape = @text.to_unsafe[i]
+        i = i + 1
+        if escape == 117_u8
+          code = 0
+          4.times do
+            code = code * 16 + hex(@text.to_unsafe[i])
+            i = i + 1
+          end
+          return nil if code > 127
+          byte = code.to_u8
+        elsif escape == 34_u8 || escape == 92_u8 || escape == 47_u8
+          byte = escape
+        else
+          return nil
+        end
+      end
+      return nil if byte > 127_u8
+      out << byte.unsafe_chr
+    end
+    out.to_s
+  end
+
+  def digit? : Bool
+    peek >= 48_u8 && peek <= 57_u8
+  end
+
+  def number : Bool
+    take(45_u8)
+    if take(48_u8)
+      return false if digit?
+    else
+      return false unless peek >= 49_u8 && peek <= 57_u8
+      @index = @index + 1
+      while digit?
+        @index = @index + 1
+      end
+    end
+    if take(46_u8)
+      return false unless digit?
+      while digit?
+        @index = @index + 1
+      end
+    end
+    if peek == 101_u8 || peek == 69_u8
+      @index = @index + 1
+      @index = @index + 1 if peek == 43_u8 || peek == 45_u8
+      return false unless digit?
+      while digit?
+        @index = @index + 1
+      end
+    end
+    true
+  end
+
+  def literal(text : String) : Bool
+    return false if @index + text.bytesize > @text.bytesize
+    return false unless @text[@index, text.bytesize] == text
+    @index = @index + text.bytesize
+    true
+  end
+
+  def value(depth : Int32) : Bool
+    return false if depth > 256
+    space
+    case peek
+    when 123_u8 then object(depth + 1, false)
+    when 91_u8  then array(depth + 1)
+    when 34_u8  then !string_bounds.nil?
+    when 116_u8 then literal("true")
+    when 102_u8 then literal("false")
+    when 110_u8 then literal("null")
+    else             number
+    end
+  end
+
+  def object(depth : Int32, root : Bool) : Bool
+    return false if depth > 256 || !take(123_u8)
+    space
+    return true if take(125_u8)
+    loop do
+      space
+      bounds = string_bounds
+      return false if bounds.nil?
+      key = root ? ascii(bounds.as(Tuple(Int32, Int32))) : nil
+      space
+      return false unless take(58_u8)
+      space
+      if root && key == "Version" && peek == 34_u8
+        version = string_bounds
+        return false if version.nil?
+        @version = ascii(version.as(Tuple(Int32, Int32)))
+      else
+        start = @index
+        return false unless value(depth)
+        if root && key == "Version"
+          @version = @text[start, @index - start]
+        end
+      end
+      space
+      return true if take(125_u8)
+      return false unless take(44_u8)
+    end
+  end
+
+  def array(depth : Int32) : Bool
+    return false if depth > 256 || !take(91_u8)
+    space
+    return true if take(93_u8)
+    loop do
+      return false unless value(depth)
+      space
+      return true if take(93_u8)
+      return false unless take(44_u8)
+    end
+  end
+
+  def version : String?
+    space
+    return nil unless object(1, true)
+    space
+    return nil unless @index == @text.bytesize
+    @version
+  end
+end
+
+# The target flags implied by a triple and its explicit defines.
 pub class MacroTargetFlags
-  # The host's triple, as the hosted `Config.host_target` gives it at run time: LLVM's default triple, which names the
-  # darwin kernel release, with the macOS version taken from MACOSX_DEPLOYMENT_TARGET when that is set. The triple comes
-  # from this compiler's platform flags and, on darwin, the kernel's own uname, so the native tool links no LLVM. Not
-  # ported: the Linux C library the hosted compiler detects with ldd, and IYI_CONFIG_TARGET.
+  # A deployment target takes precedence. Otherwise an explicit SDK version
+  # is capped at the OS product version; without SDKROOT the OS version is
+  # used directly. The native linker has no clang driver or SDK link whose
+  # target needs the hosted compiler's implicit selected-SDK cap.
   # The triple this compiler was built for, from its own platform flags.
   pub def self.compile_time_triple : String
     {% if flag?(:darwin) %}
@@ -48,13 +283,78 @@ pub class MacroTargetFlags
     {% end %}
   end
 
+  def self.version_pair(text : String?) : Tuple(Int32, Int32)?
+    return nil unless text
+    parts = text.split('.')
+    return nil if parts.empty?
+    major = parts[0].to_i?
+    return nil if major.nil?
+    minor = 0
+    if parts.size > 1
+      part = parts[1].to_i?
+      return nil if part.nil?
+      minor = part.as(Int32)
+    end
+    {major.as(Int32), minor}
+  end
+
+  def self.macos_os_version : String?
+    {% if flag?(:darwin) %}
+      buffer = uninitialized UInt8[256]
+      size = 256_u64
+      raw = pointerof(buffer).as(UInt8*)
+      rc = LibC.sysctlbyname("kern.osproductversion".to_unsafe, raw.as(Void*), pointerof(size), Pointer(Void).new(0_u64), 0_u64)
+      return nil if rc != 0 || size <= 1_u64
+      length = 0
+      while length < 256 && raw[length] != 0_u8
+        length = length + 1
+      end
+      return nil if length == 0 || length == 256
+      String.new(length) { |target| target.copy_from(raw, length) }
+    {% else %}
+      nil
+    {% end %}
+  end
+
+  def self.macos_sdk_version(root : String) : String?
+    return nil if root.empty? || root.byte_index("\u0000")
+    path = "#{root}/SDKSettings.json\u0000"
+    fd = __iyi_open_read(path.to_unsafe)
+    return nil if fd < 0_i64
+    io = IyiIO.new(fd)
+    text = io.read_all
+    failed = io.read_failed?
+    io.close
+    return nil if failed
+    MacroSDKSettings.new(text).version
+  end
+
+  def self.macos_link_version : String?
+    os = version_pair(macos_os_version)
+    return nil if os.nil?
+    selected = os.as(Tuple(Int32, Int32))
+    if sdkroot = ENV["SDKROOT"]?
+      if sdk = version_pair(macos_sdk_version(sdkroot))
+        candidate = sdk.as(Tuple(Int32, Int32))
+        if candidate[0] < selected[0] || (candidate[0] == selected[0] && candidate[1] < selected[1])
+          selected = candidate
+        end
+      end
+    end
+    "#{selected[0]}.#{selected[1]}"
+  end
+
   pub def self.host_triple : String
     target = Target.new(compile_time_triple)
     if target.macos?
       if min_version = ENV["MACOSX_DEPLOYMENT_TARGET"]?
         target = Target.new("#{target.architecture}-#{target.vendor}-macosx#{min_version}")
       else
-        target = Target.new("#{target.architecture}-#{target.vendor}-darwin#{darwin_release}")
+        if version = macos_link_version
+          target = Target.new("#{target.architecture}-#{target.vendor}-macosx#{version}")
+        else
+          target = Target.new("#{target.architecture}-#{target.vendor}-darwin#{darwin_release}")
+        end
       end
     end
     target.to_s

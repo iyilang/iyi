@@ -52,11 +52,12 @@ pub class MacroInterpreter
   property skipped : Bool
   property free_bindings : Hash(String, MacroFreeBinding)
   property type_facts : MacroTypeFacts? = nil
+  property host_flags : Array(String)? = nil
 
   # `flags` is the flag set `flag?` answers from. Left out, it is the host's,
   # as the hosted interpreter's default is. `scope_name` is what `@type` and
   # `@top_level` name: the type the macro is expanded in.
-  def initialize(@block : Block? = nil, flags : Array(String)? = nil, scope_name : String = "<Program>")
+  def initialize(@block : Block? = nil, flags : Array(String)? = nil, scope_name : String = "<Program>", host_flags : Array(String)? = nil)
     @vars = Hash(String, ASTNode).new
     @str = StringBuilder.new
     @macro_vars = Hash(String, String).new
@@ -65,12 +66,22 @@ pub class MacroInterpreter
     @scope_name = scope_name
     @failure = nil
     @skipped = false
+    @host_flags = host_flags
     if f = flags
       @flags = f
     else
-      @flags = MacroTargetFlags.host([] of String)
+      @flags = host_flags_now
     end
     @free_bindings = Hash(String, MacroFreeBinding).new
+  end
+
+  def host_flags_now : Array(String)
+    if flags = @host_flags
+      return flags
+    end
+    flags = MacroTargetFlags.host([] of String)
+    @host_flags = flags
+    flags
   end
 
   # Binds the type parameters of the instantiated owner and def. A later path
@@ -392,7 +403,7 @@ pub class MacroInterpreter
     end
 
     if name == "host_flag?"
-      return BoolLiteral.new(MacroMethods.has_flag?(MacroTargetFlags.host([] of String), flag_name_of(node)))
+      return BoolLiteral.new(MacroMethods.has_flag?(host_flags_now, flag_name_of(node)))
     end
 
     if name == "compare_versions"

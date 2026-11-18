@@ -52,8 +52,8 @@ pub struct CompilerConfig
   property probe_verify : Bool
   # The typed pipeline (compile_typed): declarations, bodies and typed lowering, with no LLVM. Off unless asked for.
   property typed_pipeline : Bool
-  # Keep going past a refusal where the phase allows: the body typer records each refusal on its node in total
-  # mode and the probe's table reports them. The lowering still stops at its first refusal.
+  # Total body typing records refusals for the probe. Whole-program lowering
+  # refuses rather than entering any body left incomplete by that pass.
   property keep_going : Bool
   property stub_refused : Bool
   property stub_also : Array(String)
@@ -139,6 +139,7 @@ pub class Compiler
 
     # 3. Normalise: run normalizer over each resolved module's AST
     norm_prog = NormalizerProgram.new
+    norm_prog.host_flags = @loader.macro_engine.host_flags_now
     normalizer = Normalizer.new(norm_prog)
     resolved_modules.each do |mod_info|
       mod_info.ast = mod_info.ast.transform(normalizer)
@@ -147,6 +148,8 @@ pub class Compiler
     prog = SemanticProgram.new
     prog.optional_alias_probe = @config.single_file
     prog.normalizer.macro_flags = flags
+    prog.normalizer.host_flags = norm_prog.host_flags
+    host_flags = prog.normalizer.host_flags
     register_primitive_operators(prog)
 
     classes = [] of ClassDef
@@ -161,7 +164,7 @@ pub class Compiler
     module_tops = {} of String => Array(ASTNode)
     resolved_modules.each do |mod_info|
       mod_top = [] of ASTNode
-      Compiler.extract_declarations(mod_info.ast, classes, funs, defs, libs, mod_top, flags)
+      Compiler.extract_declarations(mod_info.ast, classes, funs, defs, libs, mod_top, flags, host_flags)
       module_tops[mod_info.filename] = mod_top
     end
     Loader.initialiser_order(resolved_modules).each do |mod_info|
@@ -368,6 +371,10 @@ pub class Compiler
       File.write(@config.output_filename + ".names", names.uniq.join("\n") + "\n")
       File.write(@config.output_filename + ".refusals", refused.join("\n") + "\n")
       STDOUT.flush
+      unless typed.visitor.refusals.empty?
+        count = typed.visitor.refusals.size
+        return typed_refuse("lower", reached, "body typing recorded #{count} refusal(s); whole-program lowering is unavailable")
+      end
     end
 
     stub_defs = Hash(String, String).new
@@ -501,6 +508,8 @@ pub class Compiler
     prog = SemanticProgram.new
     prog.iyi_prelude = prelude
     prog.normalizer.macro_flags = flags
+    prog.normalizer.host_flags = loader.macro_engine.host_flags_now
+    host_flags = prog.normalizer.host_flags
     links = [] of String
     resolved.each do |mod_info|
       mod_info.ast = prog.normalizer.normalize(mod_info.ast)
@@ -540,11 +549,11 @@ pub class Compiler
       Compiler.unit_tops(mod_info.ast, tops)
       tops.each do |top|
         if md = Compiler.top_module(top)
-          parts = Compiler.module_parts(md, flags)
+          parts = Compiler.module_parts(md, flags, host_flags)
           classes << ClassDef.new(md.name, Expressions.from(parts[0]), nil, md.type_vars, false, false)
           runtime << ModuleDef.new(md.name, Expressions.from(parts[1])) unless parts[1].empty?
         else
-          Compiler.extract_declarations(top, classes, funs, defs, libs, runtime, flags)
+          Compiler.extract_declarations(top, classes, funs, defs, libs, runtime, flags, host_flags)
           Compiler.typed_top_defs([top] of ASTNode, all_defs)
         end
       end
@@ -600,7 +609,7 @@ pub class Compiler
 
   # A file header is also a ModuleDef. Keep its declarations in the hoisted
   # class wrapper and its runtime nodes only in the source-position wrapper.
-  def self.module_parts(md : ModuleDef, flags : Array(String)) : {Array(ASTNode), Array(ASTNode)}
+  def self.module_parts(md : ModuleDef, flags : Array(String), host_flags : Array(String)) : {Array(ASTNode), Array(ASTNode)}
     declarations = [] of ASTNode
     runtime = [] of ASTNode
     annotations = [] of ASTNode
@@ -621,7 +630,7 @@ pub class Compiler
       defs.clear
       libs.clear
       found.clear
-      Compiler.extract_declarations(child, classes, funs, defs, libs, found, flags)
+      Compiler.extract_declarations(child, classes, funs, defs, libs, found, flags, host_flags)
       if found.empty?
         declarations.concat(annotations)
         declarations << child
@@ -698,11 +707,14 @@ pub class Compiler
     defs : Hash(String, Def),
     libs : Array(LibDef),
     top_level : Array(ASTNode) = [] of ASTNode,
-    flags : Array(String) = MacroTargetFlags.host([] of String),
+    flags : Array(String)? = nil,
+    host_flags : Array(String)? = nil,
   ) : Nil
+    shared_host = host_flags || MacroTargetFlags.host([] of String)
+    target_flags = flags || shared_host
     if node.is_a?(Expressions)
       node.as(Expressions).expressions.each do |e|
-        extract_declarations(e, classes, funs, defs, libs, top_level, flags)
+        extract_declarations(e, classes, funs, defs, libs, top_level, target_flags, shared_host)
       end
     elsif node.is_a?(ClassDef)
       classes << node.as(ClassDef)
@@ -740,13 +752,13 @@ pub class Compiler
       cdef.body = Expressions.new(body_nodes)
       classes << cdef
     elsif node.is_a?(VisibilityModifier)
-      extract_declarations(node.as(VisibilityModifier).exp, classes, funs, defs, libs, top_level, flags)
+      extract_declarations(node.as(VisibilityModifier).exp, classes, funs, defs, libs, top_level, target_flags, shared_host)
     elsif node.is_a?(MacroIf)
       mif = node.as(MacroIf)
-      interp = MacroInterpreter.new(nil, flags)
+      interp = MacroInterpreter.new(nil, target_flags, "<Program>", shared_host)
       cond_val = interp.evaluate(mif.cond)
       branch = MacroMethods.truthy?(cond_val) ? mif.then : mif.else
-      extract_declarations(branch, classes, funs, defs, libs, top_level, flags)
+      extract_declarations(branch, classes, funs, defs, libs, top_level, target_flags, shared_host)
     elsif node.is_a?(Alias) || node.is_a?(ImplDef) || node.is_a?(MacroFor) || node.is_a?(MacroExpression)
       # Declarations or compile-time constructs, not top-level runtime code
     elsif node.is_a?(ImportDecl) || node.is_a?(Require) || node.is_a?(ModuleHeader)

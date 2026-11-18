@@ -33,6 +33,31 @@ WORK_NATIVE="$(native_path "$WORK")" || exit 1
 export IYI_PATH="$REPO_NATIVE/src"
 exec 9>&1
 
+# Preserve normal fixture exits 0..255 while distinguishing signals and timeouts.
+run_fixture() {
+  "$PY" - "$(native_path "$1")" "$(native_path "$2")" "$(native_path "$3")" <<'PY'
+import os, signal, subprocess, sys
+exe, out, err = sys.argv[1:]
+try:
+    with open(out, "wb") as stdout, open(err, "wb") as stderr:
+        proc = subprocess.Popen([exe], stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
+                                start_new_session=(os.name != "nt"))
+        try:
+            rc = proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            if os.name == "nt":
+                proc.kill()
+            else:
+                os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+            print("timeout")
+        else:
+            print(rc if 0 <= rc <= 255 else "signal:%s" % (-rc) if rc < 0 else "invalid-exit:%s" % rc)
+except OSError as exc:
+    print("launch-error:%s" % exc)
+PY
+}
+
 # Refusal fixtures: iyi refuses these programs, so they have no IR to compare.
 # Each list names the oracle it is compared with, in sections 3b, 3b2 and 3c.
 #   REFUSAL_FIXTURES: the oracle under its default prelude. It refuses `rescue`
@@ -248,22 +273,26 @@ echo "  Parity summary: $((fixture_count - diverged))/$fixture_count codegen fix
 # the whole stderr text and the exit status are identical. $1 is the fixture and
 # $2 the oracle's extra flags. The oracle's text is kept for check_refusal_mutant.
 refusal_check() {
-  local name="$1" flags="$2" oracle_out oracle_status port_out port_status
-  local fixture="$REPO_NATIVE/bench/fixtures/$name"
-  oracle_out="$(cd "$REPO" && "$IYI" build $flags -o "$WORK_NATIVE/oracle_refusal_$name$EXE" "$fixture" 2>&1)"
+  local name="$1" flags="$2" oracle_status port_status
+  local fixture="bench/fixtures/$name"
+  (cd "$REPO" && "$IYI" build $flags -o "$WORK_NATIVE/oracle_refusal_$name$EXE" "$fixture") >"$WORK/oracle_refusal_$name.out" 2>"$WORK/oracle_refusal_$name.err"
   oracle_status=$?
-  printf '%s\n' "$oracle_out" > "$WORK/oracle_refusal_$name.txt"
+  cat "$WORK/oracle_refusal_$name.out" "$WORK/oracle_refusal_$name.err" >"$WORK/oracle_refusal_$name.txt"
   printf '%s\n' "$oracle_status" > "$WORK/oracle_refusal_$name.status"
-  port_out="$(cd "$REPO" && "$WORK/exercise$EXE" --dump-ir "$fixture" 2>&1)"
+  (cd "$REPO" && "$WORK/exercise$EXE" --dump-ir "$fixture") >"$WORK/port_refusal_$name.out" 2>"$WORK/port_refusal_$name.err"
   port_status=$?
-  if [ "$oracle_status" -ne 0 ] && [ "$oracle_status" -eq "$port_status" ] && [ "$oracle_out" = "$port_out" ]; then
+  if [ "$oracle_status" -eq 1 ] && [ "$port_status" -eq 1 ] &&
+     cmp -s "$WORK/oracle_refusal_$name.out" "$WORK/port_refusal_$name.out" &&
+     cmp -s "$WORK/oracle_refusal_$name.err" "$WORK/port_refusal_$name.err" &&
+     grep -Fq "In $fixture:" "$WORK/oracle_refusal_$name.err" &&
+     grep -q '^Error: ' "$WORK/oracle_refusal_$name.err"; then
     touch "$WORK/refusal_baseline_$name"
     echo "  $name: refused with the oracle's text and exit $port_status"
     return 0
   fi
   echo "  FAIL: $name: oracle exit $oracle_status, port exit $port_status"
-  echo "    oracle: $oracle_out"
-  echo "    port:   $port_out"
+  echo "    oracle:"; cat "$WORK/oracle_refusal_$name.out" "$WORK/oracle_refusal_$name.err"
+  echo "    port:"; cat "$WORK/port_refusal_$name.out" "$WORK/port_refusal_$name.err"
   return 1
 }
 
@@ -337,14 +366,12 @@ for base in $PROGRAM_FIXTURES; do
   hosted_rc="missing"
   port_rc="missing"
   if "$IYI" build -o "$WORK_NATIVE/prog_hosted_$stem$EXE" "$(native_path "$fixture")" > "$WORK/prog_hosted_$stem.log" 2>&1; then
-    "$WORK/prog_hosted_$stem$EXE" > /dev/null 2>&1
-    hosted_rc=$?
+    hosted_rc="$(run_fixture "$WORK/prog_hosted_$stem$EXE" "$WORK/prog_hosted_$stem.out" "$WORK/prog_hosted_$stem.err")"
   fi
   if [ "$port_built" = 1 ] && "$WORK/port$EXE" "$(native_path "$fixture")" -o "$WORK_NATIVE/prog_port_$stem$EXE" > "$WORK/prog_port_$stem.log" 2>&1; then
-    "$WORK/prog_port_$stem$EXE" > /dev/null 2>&1
-    port_rc=$?
+    port_rc="$(run_fixture "$WORK/prog_port_$stem$EXE" "$WORK/prog_port_$stem.out" "$WORK/prog_port_$stem.err")"
   fi
-  if [ "$hosted_rc" != "missing" ] && [ "$hosted_rc" -lt 128 ] && [ "$port_rc" = "$hosted_rc" ]; then
+  if [[ "$hosted_rc" =~ ^[0-9]+$ ]] && [ "$port_rc" = "$hosted_rc" ]; then
     echo "  $base: the port's exit $port_rc equals the hosted build's exit $hosted_rc"
     if [ "$base" = cg_call_on_call.iyi ] && [ "$hosted_rc" -eq 10 ]; then
       touch "$WORK/call_result.baseline.ok"
@@ -413,12 +440,19 @@ build_codegen_mutant() {
 }
 
 check_cg_mutant() {
-  local fixture="$1"
+  local fixture="$1" refusal="${2:-}"
   [ -f "$WORK/ir_baseline_$fixture" ] || { echo "INVALID PROOF: IR baseline did not agree" >&2; return 2; }
   build_codegen_mutant || return 2
-  if ! "$WORK/mut_exercise$EXE" --dump-ir "$REPO_NATIVE/bench/fixtures/$fixture" > "$WORK/mut_iyi.raw" 2>"$WORK/mut_iyi.err"; then
-    echo "INVALID MUTANT: IR generation failed" >&2
-    cat "$WORK/mut_iyi.err" >&2
+  local rc=0
+  "$WORK/mut_exercise$EXE" --dump-ir "$REPO_NATIVE/bench/fixtures/$fixture" > "$WORK/mut_iyi.raw" 2>"$WORK/mut_iyi.err" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    if [ "$fixture" = cg_nil_local.iyi ] && [ "$refusal" = first-assignment ] &&
+       expected_refusal "$rc" "$WORK/mut_iyi.err" refuse_port "^port limitation: the port cannot resolve the call 'found\\.val' in 'test_nil_first_local', so it refuses instead of leaving the call out of the IR \\(no IR is written\\)$"; then
+      echo "decisive: first-assignment-wins refuses found.val in test_nil_first_local"
+      return 1
+    fi
+    echo "INVALID MUTANT: IR generation failed (exit $rc)" >&2
+    cat "$WORK/mut_iyi.raw" "$WORK/mut_iyi.err" >&2
     return 2
   fi
   normalize_ir "$WORK/mut_iyi.raw" > "$WORK/mut_iyi.norm" || return 2
@@ -432,12 +466,16 @@ check_refusal_mutant() {
   local name="$1" got_status=0 changed baseline_error
   [ -f "$WORK/refusal_baseline_$name" ] || { echo "INVALID PROOF: refusal baseline did not agree" >&2; return 2; }
   build_codegen_mutant || return 2
-  "$WORK/mut_exercise$EXE" --dump-ir "$REPO_NATIVE/bench/fixtures/$name" > "$WORK/mut_refusal.log" 2>&1 || got_status=$?
+  (cd "$REPO" && "$WORK/mut_exercise$EXE" --dump-ir "bench/fixtures/$name") >"$WORK/mut_refusal.out" 2>"$WORK/mut_refusal.err" || got_status=$?
+  cat "$WORK/mut_refusal.out" "$WORK/mut_refusal.err" >"$WORK/mut_refusal.log"
   if [ "$got_status" = "$(cat "$WORK/oracle_refusal_$name.status")" ] &&
      cmp -s "$WORK/mut_refusal.log" "$WORK/oracle_refusal_$name.txt"; then
     return 0
   fi
-  [ "$got_status" -lt 128 ] || { cat "$WORK/mut_refusal.log" >&2; return 2; }
+  case "$got_status" in
+    0|1) ;;
+    *) echo "INVALID MUTANT: compiler exited $got_status" >&2; cat "$WORK/mut_refusal.log" >&2; return 2 ;;
+  esac
   baseline_error="$(grep '^Error: ' "$WORK/oracle_refusal_$name.txt" | tail -n 1)"
   case "$name" in
     cg_exceptions.iyi) changed="${baseline_error/exceptions to rescue/exceptions to catch}" ;;
@@ -606,14 +644,14 @@ MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
 prove_mutation "corrupt class field offset index shift" "$CG_SRC" \
   'idx = info.is_struct ? fidx : fidx + 1' \
-  'idx = info.is_struct ? fidx : fidx + 5' \
+  'idx = info.is_struct ? fidx : fidx' \
   -- check_cg_mutant cg_layouts.iyi || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
 prove_mutation "restore first-assignment-wins for local slot types" "$CG_SRC" \
   '      if t == "Nil"' \
   '      if t == "Nil!"' \
-  -- check_cg_mutant cg_nil_local.iyi || status=1
+  -- check_cg_mutant cg_nil_local.iyi first-assignment || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
 prove_mutation "unless lowering swaps its branches" "$CG_SRC" \
@@ -730,8 +768,11 @@ check_call_result_mutant() {
     cat "$WORK/mut_exe.log" >&2
     return 2
   fi
-  "$WORK/mut_exe$EXE" > "$WORK/mut_exe.run.log" 2>&1 || rc=$?
-  if [ "$rc" -ge 128 ]; then cat "$WORK/mut_exe.run.log" >&2; return 2; fi
+  rc="$(run_fixture "$WORK/mut_exe$EXE" "$WORK/mut_exe.out" "$WORK/mut_exe.err")"
+  case "$rc" in
+    ''|*[!0-9]*) echo "INVALID: call-result fixture terminated with $rc"; cat "$WORK/mut_exe.err" >&2; return 2 ;;
+  esac
+  if [ -s "$WORK/mut_exe.err" ]; then cat "$WORK/mut_exe.err" >&2; return 2; fi
   [ "$rc" -eq 10 ]
 }
 prove_mutation "a field of a call result is read from the type id slot" "$CG_SRC" \

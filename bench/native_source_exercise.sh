@@ -22,6 +22,7 @@ set -u
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$REPO/bench/lib/host.sh" || exit 1
 require_test_host || exit 1
+if [ -z "$PY" ]; then echo "a working Python interpreter is required" >&2; exit 1; fi
 REPO_NATIVE="$(native_path "$REPO")" || exit 1
 export IYI_PATH="$REPO_NATIVE/src"
 IYI="$REPO/bin/iyi"
@@ -95,20 +96,48 @@ else
   status=1
 fi
 
+# Prints a numeric status only for a normal exit; a signal or timeout is distinct.
+run_fixture() {
+  local out="$1" err="$2"
+  shift 2
+  "$PY" - "$(native_path "$out")" "$(native_path "$err")" "$@" <<'PY'
+import os, signal, subprocess, sys
+out, err, *command = sys.argv[1:]
+try:
+    with open(out, "wb") as stdout, open(err, "wb") as stderr:
+        proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
+                                start_new_session=(os.name != "nt"))
+        try:
+            rc = proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            if os.name == "nt":
+                proc.kill()
+            else:
+                os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+            print("timeout")
+        else:
+            print(rc if 0 <= rc <= 255 else "signal:%s" % (-rc) if rc < 0 else "invalid-exit:%s" % rc)
+except OSError as exc:
+    print("launch-error:%s" % exc)
+PY
+}
+
 # compare_run REF EXE LABEL NAME: runs both executables. Requires identical stdout and exit status, and for the built
 # executable a valid signature and libSystem alone. Prints one line naming what was compared. Returns 0 only on a match.
 compare_run() {
-  local ref="$1" exe="$2" label="$3" name="$4" ref_out exe_out ref_rc exe_rc problems libs
-  ref_out=$(perl -e 'alarm 30; exec @ARGV or exit 127' -- "$ref" </dev/null 2>/dev/null)
-  ref_rc=$?
+  local ref="$1" exe="$2" label="$3" name="$4" ref_rc exe_rc problems libs
+  ref_rc="$(run_fixture "$WORK/ref-run.out" "$WORK/ref-run.err" "$(native_path "$ref")")"
   if [ "$HOST_OS" = darwin ]; then native_signature_ok "${5:-$exe}" || return 1; fi
   if [ "$HOST_OS" = windows ] && { [ "$exe" = "$WORK/selfcheck_status" ] || [ "$exe" = "$WORK/selfcheck_stdout" ]; }; then
-    exe_out=$(perl -e 'alarm 30; exec @ARGV or exit 127' -- bash "$exe" </dev/null 2>/dev/null)
+    exe_rc="$(run_fixture "$WORK/exe-run.out" "$WORK/exe-run.err" bash "$(native_path "$exe")")"
   else
-    exe_out=$(perl -e 'alarm 30; exec @ARGV or exit 127' -- "$exe" </dev/null 2>/dev/null)
+    exe_rc="$(run_fixture "$WORK/exe-run.out" "$WORK/exe-run.err" "$(native_path "$exe")")"
   fi
-  exe_rc=$?
-  if [ "$ref_out" != "$exe_out" ] || [ "$ref_rc" != "$exe_rc" ]; then
+  case "$ref_rc:$exe_rc" in
+    *[!0-9:]*|:*|*:) echo "FAIL: $name: abnormal termination (hosted $ref_rc, $label $exe_rc)"; cat "$WORK/ref-run.err" "$WORK/exe-run.err"; return 1 ;;
+  esac
+  if ! cmp -s "$WORK/ref-run.out" "$WORK/exe-run.out" || [ "$ref_rc" != "$exe_rc" ]; then
     echo "FAIL: $name: $label run diverged from the hosted build (exit $exe_rc vs hosted $ref_rc)"
     return 1
   fi
@@ -286,8 +315,14 @@ mut_run=0
 mut_caught=0
 mut_limited=0
 ref_arith="$WORK/ref/compile_arith$EXE"
-ref_arith_out=$(perl -e 'alarm 30; exec @ARGV or exit 127' -- "$ref_arith" </dev/null 2>/dev/null)
-ref_arith_rc=$?
+ref_arith_rc="$(run_fixture "$WORK/ref-arith.out" "$WORK/ref-arith.err" "$(native_path "$ref_arith")")"
+if [ "$ref_arith_rc" = 26 ] && compare_run "$ref_arith" "$WORK/port/compile_arith$EXE" "port+LLVM" "compile_arith" >/dev/null; then
+  : >"$WORK/ref-arith.ok"
+else
+  echo "FAIL: subtraction mutation baseline did not match the hosted exit 26 (exit $ref_arith_rc)"
+  cat "$WORK/ref-arith.err"
+  status=1
+fi
 
 # (a) the native backend hands linking to cc: a real build must trip the wire.
 check_cc_in_native_build() {
@@ -331,24 +366,25 @@ fi
 # (b) the subtraction operands swapped where codegen emits integer subtraction. compile_arith exits with v1 &- v2 and
 # ops(5, 3) = (8) &* (5 &- 3), so the exit status moves from 26 to 58 under the swap: the status must change.
 check_subtraction_output() {
-  local src="$REPO_NATIVE/src/compiler/tools/compile_native.iyi" out rc
-  local result="$WORK/mut-b-exe"
-  if [ "$HOST_ID" != darwin-arm64 ]; then
-    src="$REPO_NATIVE/src/compiler/tools/compile.iyi"
-    result="$WORK/mut-b-exe$EXE"
-  fi
+  local src="$REPO_NATIVE/src/compiler/tools/compile.iyi" rc
+  local result="$WORK/mut-b-exe$EXE"
+  [ -f "$WORK/ref-arith.ok" ] || { echo "INVALID: subtraction baseline did not pass"; return 2; }
   if ! "$IYI" build -o "$WORK_NATIVE/mut-b-tool$EXE" "$src" >"$WORK/mut-b.build.log" 2>&1; then
     cat "$WORK/mut-b.build.log"; return 2
   fi
   if ! "$WORK/mut-b-tool$EXE" "$REPO_NATIVE/bench/fixtures/compile_arith.iyi" -o "$(native_path "$result")" >"$WORK/mut-b.run.log" 2>&1; then
     cat "$WORK/mut-b.run.log"; return 2
   fi
-  if [ "$HOST_ID" = darwin-arm64 ]; then native_signature_ok "$result" || return 2; fi
-  out=$(perl -e 'alarm 30; exec @ARGV or exit 127' -- "$result" </dev/null 2>/dev/null)
-  rc=$?
-  [ "$rc" -lt 128 ] || return 2
-  if [ "$out" = "$ref_arith_out" ] && [ "$rc" = "$ref_arith_rc" ]; then return 0; fi
-  if [ "$ref_arith_rc" = 26 ] && [ "$rc" = 58 ] && [ "$out" = "$ref_arith_out" ]; then
+  if [ "$HOST_OS" = darwin ]; then native_signature_ok "$result" || return 2; fi
+  rc="$(run_fixture "$WORK/mut-b.out" "$WORK/mut-b.err" "$(native_path "$result")")"
+  case "$rc" in
+    ''|*[!0-9]*) echo "INVALID: subtraction mutant terminated with $rc"; cat "$WORK/mut-b.err"; return 2 ;;
+  esac
+  if [ -s "$WORK/mut-b.err" ]; then
+    echo "INVALID: subtraction mutant wrote to stderr"; cat "$WORK/mut-b.err"; return 2
+  fi
+  if cmp -s "$WORK/mut-b.out" "$WORK/ref-arith.out" && [ "$rc" = "$ref_arith_rc" ]; then return 0; fi
+  if [ "$ref_arith_rc" = 26 ] && [ "$rc" = 58 ] && cmp -s "$WORK/mut-b.out" "$WORK/ref-arith.out"; then
     echo "decisive: subtraction exits 58 instead of 26"
     return 1
   fi

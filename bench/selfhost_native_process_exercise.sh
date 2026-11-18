@@ -101,7 +101,8 @@ for shape in early late; do
     if [ "$hosted_status" -ne 0 ] || [ "$(cat "$WORK/$shape-hosted.out")" != 'value=1,count=1' ]; then
       echo 'FAIL: hosted early initializer behavior changed'; cat "$WORK/$shape-hosted.out" "$WORK/$shape-hosted.err"; exit 1
     fi
-  elif [ "$hosted_status" -eq 0 ] || [ "$(cat "$WORK/$shape-hosted.out")" != 'value=2,count=2' ]; then
+  elif [ "$hosted_status" -ne 1 ] || [ "$(cat "$WORK/$shape-hosted.out")" != 'value=2,count=2' ] ||
+       ! grep -Fq 'initializer did not run once per allocation' "$WORK/$shape-hosted.err"; then
     echo 'FAIL: hosted late initializer discrepancy changed'; cat "$WORK/$shape-hosted.out" "$WORK/$shape-hosted.err"; exit 1
   fi
   if [ "$HOST_ID" = darwin-arm64 ]; then
@@ -247,7 +248,7 @@ check_cast_mutation() {
     >"$WORK/mutant.out" 2>"$WORK/mutant.err" || rc=$?
   site="$(grep -n 'g\.spawn.*\.as(String | Cancelled)' "$REPO/src/std/process.iyi" | cut -d: -f1)"
   if [ -n "$site" ] &&
-     expected_refusal "$rc" "$WORK/mutant.err" refuse_port "^lower: spawn classification of .*std/process\\.iyi:${site}:[0-9]+ is not ported"; then
+     expected_refusal "$rc" "$WORK/mutant.err" src/compiler/lower/pending.iyi "^lower: visit\\(spawn classification of .*std/process\\.iyi:${site}:[0-9]+ is not ported \\(hosted cleanup_transformer\\.cr classify_spawn\\)\\) \\(hosted codegen\\.cr\\) is not ported yet$"; then
     echo 'decisive: mutant compiler refused the exact cast spawn'
     return 1
   fi

@@ -83,7 +83,13 @@ verify_one() {
   elif grep -q '^Error: port limitation' "$WORK/verify.err"; then
     printf 'refused: %s\n' "$(grep '^Error: ' "$WORK/verify.err" | head -1 | sed 's/^Error: //')"
   else
-    echo "absent"
+    local diagnostic
+    diagnostic="$(awk '/^Error: / { print; exit }' "$WORK/verify.err" "$WORK/verify.out")"
+    if [ -n "$diagnostic" ]; then
+      printf 'absent (exit %s): %s\n' "$rc" "$diagnostic"
+    else
+      printf 'absent (exit %s, no verifier verdict)\n' "$rc"
+    fi
   fi
 }
 
@@ -222,8 +228,8 @@ prove_invalid() {
 prove_invalid "return a value from a void function" \
   "$CODEGEN_SRC" \
   "@builder.ret_void" \
-  "@builder.ret(@context.int32.const_int(0))" \
-  "$REPO/bench/fixtures/cg_int_arith.iyi"
+  "@builder.ret(@builder.const_int(@types.int32, 0))" \
+  "$REPO/bench/fixtures/cg_blocks.iyi"
 
 # Each mutation below was confirmed to be detected by the probe named with it.
 # Several plausible-looking alternatives (phi widening, pointer offset

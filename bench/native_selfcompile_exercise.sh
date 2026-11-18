@@ -65,8 +65,9 @@ probe_one() {
   local target="$1" name="$2" log="$WORK/probe/$2.log" rc fail_line
   local args=()
   if [ "$HOST_ID" != darwin-arm64 ]; then args=(--emit ir); fi
-  (cd "$WORK" && "$tool" "$(native_path "$target")" -o "$WORK_NATIVE/exe/$name$EXE" --probe-phase --prelude "${args[@]}" >"$log" 2>&1)
+  (cd "$WORK" && "$tool" "$(native_path "$target")" -o "$WORK_NATIVE/exe/$name$EXE" --probe-phase --prelude "${args[@]}" >"$log.out" 2>"$log.err")
   rc=$?
+  cat "$log.out" "$log.err" >"$log"
   PROBE_RC=$rc
   REACHED=$(awk '/^\[phase\] (parse|semantic|codegen|link): pass/ { r = $2; sub(":", "", r) } END { print (r == "" ? "none" : r) }' "$log")
   REFUSED_IN=""
@@ -242,7 +243,9 @@ else
   echo "  mutating $mut_rel (floor $mut_floor): $mut_line"
   mutant_check() {
     probe_one "$REPO/$mut_rel" mutant_probe
-    if [ "$PROBE_RC" -ne 0 ] || ! grep -E '^(semantic|codegen): fail: .*UndefinedMutantType12345' "$WORK/probe/mutant_probe.log" >/dev/null; then
+    if [ "$PROBE_RC" -ne 1 ] || [ "$REACHED" != parse ] || [ "$REFUSED_IN" != semantic ] ||
+       [ "$REFUSAL" != "Error: undefined constant UndefinedMutantType12345" ] ||
+       ! grep -Fxq "Error: undefined constant UndefinedMutantType12345" "$WORK/probe/mutant_probe.log.err"; then
       cat "$WORK/probe/mutant_probe.log"
       return 2
     fi

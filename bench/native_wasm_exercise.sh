@@ -61,6 +61,33 @@ passed_fixtures=0
 mutations_caught=0
 mutations_checked=0
 mutations_limited=0
+
+# A numeric status denotes a normal exit, including statuses 124 through 255.
+run_bounded() {
+  local out="$1" err="$2"
+  shift 2
+  "$PY" - "$(native_path "$out")" "$(native_path "$err")" "$@" <<'PY'
+import os, signal, subprocess, sys
+out, err, *command = sys.argv[1:]
+try:
+    with open(out, "wb") as stdout, open(err, "wb") as stderr:
+        proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
+                                start_new_session=(os.name != "nt"))
+        try:
+            rc = proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            if os.name == "nt":
+                proc.kill()
+            else:
+                os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+            print("timeout")
+        else:
+            print(rc if 0 <= rc <= 255 else "signal:%s" % (-rc) if rc < 0 else "invalid-exit:%s" % rc)
+except OSError as exc:
+    print("launch-error:%s" % exc)
+PY
+}
 native_cg_built=0
 native_cg_refused=0
 
@@ -126,8 +153,7 @@ for f in $FIXTURES; do
       echo "$f: emitted and inspected; runtime unavailable"
       continue
     fi
-    timeout 30 "$WASMTIME" run "$WORK_NATIVE/$f.wasm" >"$WORK/$f.out" 2>"$WORK/$f.err"
-    status=$?
+    status="$(run_bounded "$WORK/$f.out" "$WORK/$f.err" "$(native_path "$WASMTIME")" run "$WORK_NATIVE/$f.wasm")"
     want_status=$(cat "$FIX/$f.exit")
     if [ "$status" != "$want_status" ]; then
       cat "$WORK/$f.err"
@@ -150,9 +176,10 @@ for f in $FIXTURES; do
         fail "$f: invalid darwin oracle signature"
         continue
       fi
-      "$WORK/$f.bin" >"$WORK/$f.dout" 2>/dev/null
-      if ! cmp -s "$WORK/$f.dout" "$FIX/$f.expected"; then
-        fail "$f: $FIX/$f.expected is stale against the darwin oracle"
+      dstatus="$(run_bounded "$WORK/$f.dout" "$WORK/$f.derr" "$(native_path "$WORK/$f.bin")")"
+      if [ "$dstatus" != "$want_status" ] || ! cmp -s "$WORK/$f.dout" "$FIX/$f.expected"; then
+        cat "$WORK/$f.derr"
+        fail "$f: expected output or exit is stale against the darwin oracle (exit $dstatus)"
         continue
       fi
     fi
@@ -208,11 +235,12 @@ for f in "$WORK"/cg/*.ir; do
       cg_differ=$((cg_differ + 1))
       continue
     fi
-    timeout 30 "$WORK/cg/$name.bin" >"$WORK/cg/$name.dout" 2>/dev/null
-    dstatus=$?
-    timeout 30 "$WASMTIME" run "$WORK_NATIVE/cg/$name.wasm" >"$WORK/cg/$name.wout" 2>"$WORK/cg/$name.werr"
-    wstatus=$?
-    if [ "$dstatus" = "$wstatus" ] && cmp -s "$WORK/cg/$name.dout" "$WORK/cg/$name.wout"; then
+    dstatus="$(run_bounded "$WORK/cg/$name.dout" "$WORK/cg/$name.derr" "$(native_path "$WORK/cg/$name.bin")")"
+    wstatus="$(run_bounded "$WORK/cg/$name.wout" "$WORK/cg/$name.werr" "$(native_path "$WASMTIME")" run "$WORK_NATIVE/cg/$name.wasm")"
+    case "$dstatus:$wstatus" in
+      *[!0-9:]*|:*|*:) cg_differ=$((cg_differ + 1)); echo "$name	abnormal termination (darwin $dstatus, wasm $wstatus)" >>"$cg_table"; continue ;;
+    esac
+    if [ "$dstatus" = "$wstatus" ] && [ ! -s "$WORK/cg/$name.werr" ] && cmp -s "$WORK/cg/$name.dout" "$WORK/cg/$name.wout"; then
       cg_equal=$((cg_equal + 1))
       echo "$name	built, runs equal to the darwin build (exit $wstatus)" >>"$cg_table"
     else
@@ -283,9 +311,9 @@ else
         caught=invalid
         break
       fi
-      timeout 30 "$WASMTIME" run "$WORK_NATIVE/mut.wasm" >"$WORK/mut.out" 2>"$WORK/mut.err"
-      rc=$?
-      if [ "$rc" -ge 128 ] || [ -s "$WORK/mut.err" ]; then
+      rc="$(run_bounded "$WORK/mut.out" "$WORK/mut.err" "$(native_path "$WASMTIME")" run "$WORK_NATIVE/mut.wasm")"
+      case "$rc" in ''|*[!0-9]*) caught=invalid ;; esac
+      if [ "$caught" = invalid ] || [ -s "$WORK/mut.err" ]; then
         cat "$WORK/mut.err"
         fail "$label: mutated wasm crashed or was rejected; mutation is unproven"
         caught=invalid
@@ -309,7 +337,7 @@ else
   run_mutation "unsigned division emitted as signed" \
     "byte(wide ? 128_u8 : 110_u8)" "byte(wide ? 127_u8 : 109_u8)"
   run_mutation "a branch depth off by one" \
-    "uleb_i(@code, depth)" "uleb_i(@code, depth + 1)"
+    "uleb_i(@code, depth)" "uleb_i(@code, depth > 0 ? depth - 1 : depth)"
   run_mutation "a load and store with the wrong offset" \
     "uleb_i(@code, log2_of(a))
     uleb_i(@code, 0)" "uleb_i(@code, log2_of(a))

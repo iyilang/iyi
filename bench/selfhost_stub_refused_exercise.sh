@@ -8,6 +8,7 @@ REPO_NATIVE="$(native_path "$REPO")" || exit 1
 export IYI_PATH="$REPO_NATIVE/src"
 IYI="$REPO/bin/iyi"
 FIXTURE="$REPO_NATIVE/bench/fixtures/stub_refused.iyi"
+REFUSAL='proc literal: a nested proc, def or class inside a proc literal (hosted closure)'
 WORK="$(mktemp -d)"
 WORK_NATIVE="$(native_path "$WORK")" || exit 1
 trap 'rm -rf "$WORK"' EXIT
@@ -20,13 +21,16 @@ check_stub() {
     echo 'INVALID: stub compiler did not build'; cat "$WORK/build.log"; return 2
   fi
   if [ "$HOST_OS" = darwin ] && ! codesign -v --strict "$WORK/stage1$EXE"; then return 2; fi
-  "$WORK/stage1$EXE" "$FIXTURE" -o "$WORK_NATIVE/strict" --pipeline typed --emit ir >"$WORK/strict.log" 2>&1 || rc=$?
-  if [ "$rc" -ne 1 ] || ! grep -q 'proc literal calls twice' "$WORK/strict.log" || [ -e "$WORK/strict" ]; then
-    echo 'INVALID: strict compilation did not refuse the expected proc'; cat "$WORK/strict.log"; return 2
+  "$WORK/stage1$EXE" "$FIXTURE" -o "$WORK_NATIVE/strict" --pipeline typed --emit ir >"$WORK/strict.out" 2>"$WORK/strict.err" || rc=$?
+  if [ "$rc" -ne 1 ] || [ -s "$WORK/strict.out" ] || [ -e "$WORK/strict" ] ||
+     ! grep -Fxq "iyi-compile-native: lower: $REFUSAL" "$WORK/strict.err" ||
+     ! grep -Eq '^  in .*StubExercise#refused' "$WORK/strict.err"; then
+    echo "INVALID: strict compilation did not refuse StubExercise#refused (exit $rc, output exists: $([ -e "$WORK/strict" ] && echo yes || echo no))"
+    cat "$WORK/strict.out" "$WORK/strict.err"; return 2
   fi
   if ! "$WORK/stage1$EXE" "$FIXTURE" -o "$WORK_NATIVE/model.ir" --pipeline typed --stub-refused --emit ir >"$WORK/stub.log" 2>&1 ||
      ! grep -q 'DIAGNOSTIC BUILD' "$WORK/stub.log" ||
-     ! grep -q 'StubExercise#refused' "$WORK/model.ir.stubs"; then
+     ! grep -F 'StubExercise#refused' "$WORK/model.ir.stubs" | grep -Fq "$REFUSAL"; then
     echo 'INVALID: diagnostic IR or stub sidecar missing'; cat "$WORK/stub.log"; return 2
   fi
   awk '/^define .*StubExercise#refused/ {inside=1} inside {print} inside && /^}/ {inside=0}' "$WORK/model.ir" >"$WORK/stub-body.ir"
@@ -47,11 +51,13 @@ check_stub() {
     fi
     "$WORK/model" >"$WORK/normal.out" 2>"$WORK/normal.err"; local normal=$?
     "$WORK/hosted$EXE" >"$WORK/hosted.out" 2>"$WORK/hosted.err"; local hosted=$?
-    if [ "$normal" -ne "$hosted" ] || ! cmp -s "$WORK/normal.out" "$WORK/hosted.out" || ! cmp -s "$WORK/normal.err" "$WORK/hosted.err"; then
+    if [ "$normal" -ne 23 ] || [ "$hosted" -ne 23 ] || ! cmp -s "$WORK/normal.out" "$WORK/hosted.out" || ! cmp -s "$WORK/normal.err" "$WORK/hosted.err"; then
       echo 'INVALID: unmodified path differs from hosted'; return 2
     fi
     "$WORK/model" hit >"$WORK/hit.out" 2>"$WORK/hit.err"; local hit=$?
-    if [ "$hit" -ne "$expected_exit" ] || ! grep -q 'iyi: refused def hit at runtime: .*StubExercise#refused.*proc literal calls twice' "$WORK/hit.err"; then
+    if [ "$hit" -ne "$expected_exit" ] || [ "$(wc -l <"$WORK/hit.err" | tr -d ' ')" -ne 1 ] ||
+       ! grep -Fq 'iyi: refused def hit at runtime:' "$WORK/hit.err" ||
+       ! grep -Fq 'StubExercise#refused' "$WORK/hit.err" || ! grep -Fq "$REFUSAL" "$WORK/hit.err"; then
       echo 'INVALID: native stub did not produce the expected diagnostic and status'; cat "$WORK/hit.err"; return 2
     fi
   fi

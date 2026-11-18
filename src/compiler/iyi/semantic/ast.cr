@@ -138,6 +138,11 @@ module Iyi
 
     property! owner : Type
     property! original_owner : Type
+    # iyi: whether a call has typed this def, as written, at least once: a
+    # std module's stored proof leaves out a def that names claimed state
+    # and that the proving program never typed, and its claim holds in a
+    # program that has not typed it either (`ReachProof#module_proven?`).
+    property? iyi_instantiated = false
     property vars : MetaVars?
     property yield_vars : Array(Var)?
     property previous : DefWithMetadata?
@@ -471,6 +476,15 @@ module Iyi
     # it will also be bound to it.
     property? mutably_closured = false
 
+    # iyi heap22 C1: a struct (an `Atomic`, a record, a static array) a
+    # crossing block captures (`ProcLiteral#iyi_cross`). The scope changes
+    # it in place after the block is made, and the block must see that, so
+    # it is not copied into the block's context: it lives in a cell of its
+    # own, the scope's slot and the block's context both holding the
+    # cell's address. Publishing the block's context then publishes the
+    # cell and not the scope's context with its other slots.
+    property? iyi_boxed = false
+
     # Local variables associated with this meta variable.
     # Can be Var or MetaVar.
     property(local_vars) { [] of ASTNode }
@@ -676,6 +690,74 @@ module Iyi
     property? visited = false
 
     getter(:break) { Var.new("%break") }
+  end
+
+  class ProcLiteral
+    # iyi: the literal is a crossing block's - a parallel unit's, a
+    # thread's, a `@[Share]` def's - in a `-Dheap_partitions` build
+    # (heap22 C1): its closure gets a typed context of its own, holding
+    # only its captures, with no link to the scope's context, so that
+    # publishing it publishes nothing else (`CodeGenVisitor#iyi_c1_proc`).
+    getter? iyi_crossing = false
+
+    # Marks the literal a crossing block's, and boxes each variable of the
+    # scope it captures that a copy would part from the scope's
+    # (`MetaVar#iyi_boxed?`).
+    def iyi_cross : Nil
+      @iyi_crossing = true
+      vars = self.def.vars
+      return unless vars
+      iyi_capture_names.each do |name|
+        meta = vars[name]?
+        next unless meta && meta.closured? && !meta.belongs_to?(self.def) && (type = meta.type?)
+        meta.iyi_boxed = true unless ProcLiteral.iyi_copyable?(type)
+      end
+    end
+
+    # Every variable name the body uses, its blocks and procs included: the
+    # captures are the scope's closured variables among these.
+    def iyi_capture_names : Array(String)
+      names = IyiNames.new
+      self.def.body.accept names
+      names.names
+    end
+
+    # Whether a capture of *type* may be copied into a C1 context: a value
+    # nothing changes in place - a reference, a number, a bool, a char, a
+    # symbol, nil, a pointer, a proc, or a tuple or union of them. A struct
+    # is changed in place through the scope's variable after the block is
+    # made, and a copy would not see it: bench/heap_crossings' `ring` spun
+    # forever on a copied `Atomic(Int32)` the scope set (Linux, 2026-11-11).
+    # The rule refuses a capture assigned again after the crossing, so a
+    # value copied at the block is the one it reads.
+    def self.iyi_copyable?(type : Type) : Bool
+      case type
+      when UnionType
+        type.union_types.all? { |member| iyi_copyable?(member) }
+      when TupleInstanceType
+        type.tuple_types.all? { |member| iyi_copyable?(member) }
+      when NamedTupleInstanceType
+        type.entries.all? { |entry| iyi_copyable?(entry.type) }
+      when PrimitiveType, PointerInstanceType, ProcInstanceType
+        true
+      else
+        !type.struct?
+      end
+    end
+
+    class IyiNames < Visitor
+      getter names = [] of String
+      @seen = Set(String).new
+
+      def visit(node : Var) : Bool
+        @names << node.name if @seen.add?(node.name)
+        false
+      end
+
+      def visit(node : ASTNode) : Bool
+        true
+      end
+    end
   end
 
   class While

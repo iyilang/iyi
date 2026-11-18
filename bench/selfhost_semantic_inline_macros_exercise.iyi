@@ -4,6 +4,7 @@ import compiler/foundation/location::{Location}
 import compiler/semantic/top_level::{SemanticProgram, TopLevelVisitor, Type, ModuleType, NamedType, EnumType, dump_def, dump_program_declarations, dump_tree_declared, dir_of, normalize_path}
 import compiler/semantic/inline_macros::{InlineMacroLedger, splice_body_node, splice_inline_sites}
 import compiler/semantic/normalizer::{NormalizerProgram}
+import compiler/semantic/new::{define_new_methods}
 import compiler/macros/site_scan::{MacroSiteScan}
 import compiler/macros/methods::{MacroMethods}
 
@@ -81,6 +82,10 @@ module BenchSelfhostInlineMacrosExercise
       node.accept(visitor)
       visitor.finish
     end
+    # The oracle dumps after the hosted top_level_semantic, whose `new` stage gives a type with no
+    # initialize in its ancestry an argless `new` and `initialize`. The port makes them when its main
+    # visitor starts (main_visitor.iyi), so the dump runs that step here and stands at the same phase.
+    define_new_methods(prog)
     {prog, entry}
   end
 

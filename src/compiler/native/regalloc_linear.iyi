@@ -864,9 +864,9 @@ class LinearScan
     end
   end
 
-  # Propagate possible pointer bits only through bit-preserving copies and
-  # selects. Typed floating loads, constants, arithmetic, and numeric
-  # conversions start safe; untyped and fixed-register sources do not.
+  # Propagate possible pointer bits through bit-preserving copies and selects.
+  # Typed FPR parameters, call results, loads, literals and numeric operations
+  # are safe; asm-written and otherwise untyped physical sources are not.
   def pointer_fprs : Array(Bool)
     n = @vcount
     flags = bool_row(n)
@@ -877,7 +877,12 @@ class LinearScan
     queue = [] of Int32
     safe_roots = [] of Int32
     safe_root_seen = bool_row(n)
+    fp_args = 0_u64
+    fp_arg_regs.each { |r| fp_args = fp_args | (1_u64 << r) }
+    block_index = 0
     @fn.blocks.each do |block|
+      typed_fixed = block_index == 0 ? fp_args : 0_u64
+      block_index = block_index + 1
       block.insts.each do |inst|
         inst.defs.each do |dst|
           next unless dst.kind == OperandKind::Virtual
@@ -894,7 +899,14 @@ class LinearScan
                 dep_next << dep_head[src.reg]
                 dep_head[src.reg] = dep_dst.size - 1
               elsif src.kind == OperandKind::Physical
-                unknown = true # fixed-fpr-provenance-unknown
+                if @fn.vreg_classes[v] == RegClass::Fpr && is_role?(@fn.isa, inst, Role::Copy) && src.reg >= 32 && src.reg < 64 && (typed_fixed & (1_u64 << src.reg)) != 0_u64 # typed-fixed-fpr
+                  unless safe_root_seen[v]
+                    safe_root_seen[v] = true
+                    safe_roots << v
+                  end
+                else
+                  unknown = true # fixed-fpr-provenance-unknown
+                end
               else
                 unknown = true
               end
@@ -910,6 +922,19 @@ class LinearScan
           if unknown && !flags[v]
             flags[v] = true
             queue << v
+          end
+        end
+        inst.clobbers.each do |r|
+          typed_fixed = typed_fixed & ((1_u64 << r) ^ 18446744073709551615_u64) if r >= 32 && r < 64
+        end
+        if !inst.asm.nil?
+          typed_fixed = typed_fixed & (fp_args ^ 18446744073709551615_u64)
+        elsif inst.call
+          typed_fixed = typed_fixed | fp_args
+        end
+        inst.defs.each do |op|
+          if op.kind == OperandKind::Physical && op.reg >= 32 && op.reg < 64
+            typed_fixed = typed_fixed & ((1_u64 << op.reg) ^ 18446744073709551615_u64)
           end
         end
       end

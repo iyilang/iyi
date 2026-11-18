@@ -665,6 +665,35 @@ print("typed floating load stays in a callee-saved FPR across the call")
 PY
 }
 
+check_typed_abi_fprs() {
+  local drv=$1 param="$WORK/fp-param-call.mir" result="$WORK/fp-result-call.mir"
+  if ! "$drv" mir "$FIX_RA/fp_param_call.ir" parameter >"$param" 2>&1 ||
+     ! "$drv" mir "$FIX_RA/fp_result_call.ir" result >"$result" 2>&1; then
+    echo "invalid typed ABI FPR MIR"
+    return 2
+  fi
+  "$PY" - "$param" "$result" <<'PY'
+import re
+import sys
+from pathlib import Path
+for path, name, before_calls in ((sys.argv[1], "parameter", 0), (sys.argv[2], "result", 1)):
+    text = Path(path).read_text()
+    if not text.startswith("function " + name + "\n"):
+        print("invalid typed ABI FPR fixture")
+        sys.exit(2)
+    pieces = text.split("  Bl/")
+    if len(pieces) <= before_calls + 1:
+        print("missing required call")
+        sys.exit(2)
+    copy = re.search(r"^  FMov/64f (d(?:8|9|1[0-5])), d0$", pieces[before_calls], re.M)
+    if (not copy or re.search(r"^  (?:StrFrame|LdrFrame)/64f", text, re.M)
+            or not re.search(r"^  Fcvtzs/64f \w+, " + copy.group(1), pieces[before_calls + 1], re.M)):
+        print(name + " did not retain its typed FPR across the call")
+        sys.exit(1)
+print("typed FPR parameter and call result stay in callee-saved registers")
+PY
+}
+
 check_typed_fpr_provenance() {
   local ignored=$1 exe="$WORK/typed-provenance-$RANDOM$EXE" values
   if ! ./bin/iyi build -o "$(native_path "$exe")" "$(native_path "$FIX_RA/fpr_typed_provenance.iyi")" >"$WORK/typed-provenance.log" 2>&1; then
@@ -830,6 +859,10 @@ PY
 }
 
 echo "== 6. mutation proofs"
+prove_mutation "floating ABI: flag typed parameters and call results" \
+  src/compiler/native/regalloc_linear.iyi check_typed_abi_fprs \
+  '                if @fn.vreg_classes[v] == RegClass::Fpr && is_role?(@fn.isa, inst, Role::Copy) && src.reg >= 32 && src.reg < 64 && (typed_fixed & (1_u64 << src.reg)) != 0_u64 # typed-fixed-fpr' \
+  '                if false && @fn.vreg_classes[v] == RegClass::Fpr && is_role?(@fn.isa, inst, Role::Copy) && src.reg >= 32 && src.reg < 64 && (typed_fixed & (1_u64 << src.reg)) != 0_u64 # typed-fixed-fpr'
 prove_mutation "floating arithmetic: flag numeric results as possible pointers" \
   src/compiler/native/target.iyi check_typed_fpr_provenance \
   '    return op == MOp::FAdd || op == MOp::FSub || op == MOp::FMul || op == MOp::FDiv ||' \

@@ -249,6 +249,7 @@ echo "== 4. Mutation proofs: the gate must catch each patch to the ported code"
 # The check rebuilds the driver from the patched source and requires every primitive fixture
 # to match the hosted module exactly. It returns 0 only on the unmutated behaviour.
 lower_primitives_check() {
+  local refused_fixture="${1:-}" refused_message="${2:-}" result
   if ! "$IYI" build -o "$WORK_NATIVE/mut$EXE" "$REPO_NATIVE/bench/selfhost_lower_primitives_exercise.iyi" > "$WORK/mut.build.log" 2>&1; then
     echo 'INVALID: primitive mutant driver failed to build'
     cat "$WORK/mut.build.log"
@@ -259,9 +260,16 @@ lower_primitives_check() {
     # A fixture waiting by name cannot pass the check; the check covers the rest.
     [ -n "$(waiting_on "$name")" ] && continue
     [ -n "$(known_divergence "$name")" ] && continue
-    if ! "$WORK/mut$EXE" lower "$(native_path "$fixture")" "$WORK_NATIVE/$name.oracle.ll" > "$WORK/mut.out" 2>"$WORK/mut.err"; then
+    result=0
+    "$WORK/mut$EXE" lower "$(native_path "$fixture")" "$WORK_NATIVE/$name.oracle.ll" > "$WORK/mut.out" 2>"$WORK/mut.err" || result=$?
+    if [ "$result" -ne 0 ]; then
+      if [ -f "$WORK/primitives.baseline" ] && [ "$name" = "$refused_fixture" ] &&
+         expected_refusal "$result" "$WORK/mut.err" src/compiler/lower/pending.iyi "$refused_message"; then
+        echo "decisive: $name: $(refusal_note "$result" "$WORK/mut.err")"
+        return 1
+      fi
       echo "INVALID: primitive mutant could not compare $name"
-      cat "$WORK/mut.err"
+      cat "$WORK/mut.out" "$WORK/mut.err"
       return 2
     fi
     awk '/^SUMMARY identical=[0-9]+ total=[0-9]+ module=[01]$/ { split($2, a, "="); split($3, b, "="); if (a[2] != b[2] || b[2] == 0) bad = 1; n++ } END { exit (bad || n == 0) }' "$WORK/mut.out" || return 1
@@ -270,6 +278,7 @@ lower_primitives_check() {
   awk '/^generic_pointerful=1$/ { found = 1 } END { exit !found }' "$WORK/mut.pointerful" || return 1
   binary_union_check "$WORK/mut$EXE" || return 1
   convert_refusal_check "$WORK/mut$EXE" || return 1
+  : > "$WORK/primitives.baseline"
   return 0
 }
 pointer_check() {
@@ -327,10 +336,10 @@ prove_mutation "Pointer#malloc falls back to the other program allocator kind wh
 if [ ! -f "$WORK/alloc_mut_built" ]; then echo "  NOT PROVEN: fallback-to-other-kind mutant failed to build"; status=1; fi
 # The baseline: the unmutated port must pass the check, or every mutation below is caught for the wrong reason.
 lower_primitives_check || { echo "  baseline: the unmutated primitives do not pass the check"; status=1; }
-prove_mutation "a concrete metaclass type id is loaded twice" "$REPO/src/compiler/lower/primitives.iyi" \
+prove_mutation "a concrete metaclass type id is replaced by zero" "$REPO/src/compiler/lower/primitives.iyi" \
   '    if t1.is_a?(MetaclassType) || t1.is_a?(VirtualMetaclassType)
       low.last = recv' '    if t1.is_a?(MetaclassType) || t1.is_a?(VirtualMetaclassType)
-      low.last = type_id_value(low, t1)' -- lower_primitives_check || status=1
+      low.last = low.builder.const_zero(recv.type)' -- lower_primitives_check || status=1
 prove_mutation "binary union operand is not refused" "$REPO/src/compiler/lower/primitives.iyi" \
   '    if p1.type.key != low.typer.llvm_type(t1).key || p2.type.key != low.typer.llvm_type(t2).key' '    if false' -- lower_primitives_check || status=1
 prove_mutation "the wrapping add is a subtraction" "$REPO/src/compiler/lower/primitives.iyi" \
@@ -352,7 +361,7 @@ prove_mutation "a generic instance ignores its class variables" "$REPO/src/compi
 prove_mutation "a nilable reference union reads the nil id from the object" "$REPO/src/compiler/lower/cast.iyi" \
   "    phi.add(low, object_type_id(low, value), true)" "    phi.add(low, type_id_value(low, low.analysed.program.nil_type), true)" -- lower_primitives_check || status=1
 prove_mutation "an implicit-self primitive uses a constant instead of self" "$REPO/src/compiler/lower/primitives.iyi" \
-  "    recv = sv.as(LowerVar).pointer" "    recv = int1(low, 0_i64)" -- lower_primitives_check || status=1
+  "    recv = sv.as(LowerVar).pointer" "    recv = low.builder.const_zero(sv.as(LowerVar).pointer.type)" -- lower_primitives_check || status=1
 prove_mutation "a reference pointer_set stores the pointer slot" "$REPO/src/compiler/lower/primitives.iyi" \
   "      ref_stored = values[1]" "      ref_stored = values[0]" -- lower_primitives_check || status=1
 prove_mutation "a by-value pointer_set copies the destination" "$REPO/src/compiler/lower/primitives.iyi" \
@@ -382,7 +391,7 @@ if [ -n "$(waiting_on lowprim_enum)" ]; then
   echo "  NOT RUN: enum mutation waits for enum member typing"
 else
   prove_mutation "an enum value is not lowered" "$REPO/src/compiler/lower/primitives.iyi" \
-    '  if name == "enum_value"' '  if name == "wrong_enum_value"' -- lower_primitives_check || status=1
+    '  if name == "enum_value"' '  if name == "wrong_enum_value"' -- lower_primitives_check lowprim_enum '^lower: visit\(primitive enum_value \(hosted codegen_primitive, primitives\.cr\)\) \(hosted codegen\.cr\) is not ported yet$' || status=1
 fi
 prove_mutation "checked conversion omits its lower bound" "$REPO/src/compiler/lower/primitives.iyi" \
   '  low.builder.build_or(below, above)' '  above' -- lower_primitives_check || status=1
@@ -399,9 +408,9 @@ prove_mutation "proc call omits the closure context" "$REPO/src/compiler/lower/p
 prove_mutation "tuple metaclass indexing returns Nil's type id" "$REPO/src/compiler/lower/primitives.iyi" \
   '    low.last = type_id_value(low, result.as(Type))' '    low.last = type_id_value(low, low.analysed.program.nil_type)' -- lower_primitives_check || status=1
 prove_mutation "the Char less-than is less-or-equal" "$REPO/src/compiler/lower/primitives.iyi" \
-  "    if op == \"<\"" "    if op == \"<=\"" -- lower_primitives_check || status=1
+  $'    if op == "<"\n      return low.builder.icmp(IntPredicate::ULT, p1, p2)' $'    if op == "<"\n      return low.builder.icmp(IntPredicate::ULE, p1, p2)' -- lower_primitives_check || status=1
 prove_mutation "the Bool equality tests inequality" "$REPO/src/compiler/lower/primitives.iyi" \
-  "    if op == \"==\"" "    if op == \"!=\"" -- lower_primitives_check || status=1
+  $'  if kind == "bool" || kind == "symbol"\n    if op == "=="\n      return low.builder.icmp(IntPredicate::EQ, p1, p2)' $'  if kind == "bool" || kind == "symbol"\n    if op == "=="\n      return low.builder.icmp(IntPredicate::NE, p1, p2)' -- lower_primitives_check || status=1
 prove_mutation "the class type id is stored one struct over" "$REPO/src/compiler/lower/primitives.iyi" \
   "  zero = low.builder.const_int(low.module.types.int32, 0_i64)" "  zero = low.builder.const_int(low.module.types.int32, 1_i64)" -- lower_primitives_check || status=1
 prove_mutation "integer to Char uses the wrong signed width" "$REPO/src/compiler/lower/primitives.iyi" \

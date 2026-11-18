@@ -72,7 +72,10 @@ def run : Nil
       mangled_name("apply", nil, [int] of Type, int, nil, proc1),
     ]
     names.each do |name|
-      raise "the hosted module has no #{name}" if hosted_flag(oracle_text, name).nil?
+      if hosted_flag(oracle_text, name).nil?
+        puts "NAME-OWNER MISMATCH port=#{name} hosted=missing"
+        exit(1)
+      end
       puts "port #{name}"
     end
     puts "NAME-OWNER MATCH"
@@ -125,8 +128,14 @@ def run : Nil
   result_type = visitor.type_of?(inst.definition) || body
   name = mangled_name(inst.definition.name, inst.self_type, inst.arg_types, result_type.as(Type))
   puts "port #{name}"
-  raise "name differs: port #{name}, hosted #{hosted}" unless name == hosted.as(String)
-  raise "the module has no #{name}" if m.get_function?(name).nil?
+  unless name == hosted.as(String)
+    puts "NAME-OWNER MISMATCH port=#{name} hosted=#{hosted}"
+    exit(1)
+  end
+  if m.get_function?(name).nil?
+    puts "NAME-OWNER MISMATCH port=missing hosted=#{hosted}"
+    exit(1)
+  end
   puts "NAME-OWNER MATCH"
 end
 

@@ -418,6 +418,8 @@ cast_fixture=named_tuple_upcast
 new_cast_check || { echo "  baseline: named tuple widening differs"; status=1; }
 prove_mutation "named tuple widening is refused" "$REPO/src/compiler/lower/cast.iyi" \
   '  if target.is_a?(NamedTupleInstanceType) && value_type.is_a?(NamedTupleInstanceType)' '  if false' -- new_cast_check || status=1
+cast_fixture=tuple_upcast
+new_cast_check || { echo "  baseline: tuple widening differs"; status=1; }
 prove_mutation "tuple upcast is refused" "$REPO/src/compiler/lower/cast.iyi" \
   '  if (t.is_a?(TupleInstanceType) && f.is_a?(TupleInstanceType)) || (t.is_a?(NamedTupleInstanceType) && f.is_a?(NamedTupleInstanceType))' '  if false' -- new_cast_check || status=1
 cast_fixture=tuple_narrow

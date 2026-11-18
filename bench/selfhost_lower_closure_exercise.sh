@@ -14,6 +14,26 @@ trap 'rm -rf "$WORK"' EXIT INT TERM
 . "$REPO/bench/lib/lower_oracle.sh"
 export IYI_PATH="$REPO_NATIVE/src"
 
+run_fixture() {
+  [ -n "$PY" ] || { echo 'INVALID: Python is required to distinguish exits from signals'; return 2; }
+  "$PY" - "$(native_path "$1")" "$(native_path "$2")" "$(native_path "$3")" <<'PY'
+import subprocess
+import sys
+
+try:
+    with open(sys.argv[2], "wb") as output:
+        result = subprocess.run([sys.argv[1]], stdout=output, stderr=subprocess.STDOUT, timeout=30)
+except (OSError, subprocess.TimeoutExpired) as error:
+    print("INVALID: fixture did not complete:", error)
+    sys.exit(2)
+if result.returncode < 0 or result.returncode > 255:
+    print("INVALID: fixture terminated abnormally:", result.returncode)
+    sys.exit(2)
+with open(sys.argv[3], "w") as status:
+    status.write(str(result.returncode))
+PY
+}
+
 build_compiler() {
   "$IYI" build -o "$WORK_NATIVE/stage1$EXE" "$REPO_NATIVE/src/compiler/tools/compile_native.iyi" > "$WORK/build.log" 2>&1
 }
@@ -36,8 +56,9 @@ check_fixture() {
   fi
   if [ "$HOST_ID" != darwin-arm64 ]; then return 0; fi
   codesign -v --strict "$WORK/native" || return 2
-  "$WORK/native" > "$WORK/native.out" 2>&1
-  local result=$?
+  run_fixture "$WORK/native" "$WORK/native.out" "$WORK/native.status" || return 2
+  local result
+  result="$(< "$WORK/native.status")"
   [ "$result" -eq 0 ] && cmp -s "$WORK/host-$fixture.out" "$WORK/native.out"
 }
 check_mutant() {
@@ -58,6 +79,41 @@ check_mutant() {
   else
     check_fixture "$fixture"
   fi
+}
+
+check_pointerof_mutant() {
+  local result=0
+  check_mutant lower_pointerof_arg || result=$?
+  if [ "$result" -eq 0 ]; then return 0; fi
+  if [ "$result" -eq 1 ] && [ "$HOST_ID" != darwin-arm64 ]; then return 1; fi
+  if [ "$result" -eq 1 ] && [ -f "$WORK/native.status" ] && [ "$(< "$WORK/native.status")" = 221 ]; then
+    echo 'decisive: pointerof wrote a copy; fixture exited 221 instead of 0'
+    return 1
+  fi
+  echo 'INVALID: pointerof mutant did not produce the expected normal exit'
+  return 2
+}
+
+check_specific_refusal() {
+  local fixture="$1" site="$2" message="$3" result=0
+  if [ ! -s "$WORK/$fixture.port.ir" ]; then
+    echo "INVALID: $fixture has no passing baseline IR"
+    return 2
+  fi
+  if ! build_compiler; then
+    echo 'INVALID: mutated compiler failed to build'
+    cat "$WORK/build.log"
+    return 2
+  fi
+  "$WORK/stage1$EXE" "$REPO_NATIVE/bench/fixtures/$fixture.iyi" -o "$WORK_NATIVE/$fixture.refusal.ir" --pipeline typed --prelude --emit ir > "$WORK/$fixture.refusal.out" 2>"$WORK/$fixture.refusal.err" || result=$?
+  if [ "$result" -eq 0 ]; then return 0; fi
+  if expected_refusal "$result" "$WORK/$fixture.refusal.err" "$site" "$message"; then
+    echo "decisive: $fixture: $(refusal_note "$result" "$WORK/$fixture.refusal.err")"
+    return 1
+  fi
+  echo "INVALID: $fixture failed outside its expected refusal"
+  cat "$WORK/$fixture.refusal.out" "$WORK/$fixture.refusal.err"
+  return 2
 }
 
 # Self mutants must build both the compiler and a runnable native fixture.
@@ -352,14 +408,21 @@ echo 'unsupported primitive self and nested proc: refused without an output bina
 prove_mutation 'program closure facts omitted' "$REPO/src/compiler/lower/lower.iyi" \
   'low.current_context.closure_facts = facts' 'low.current_context.closure_facts = nil' -- check_mutant lower_closure_top_level || status=1
 prove_mutation 'yielded block loses closure context' "$REPO/src/compiler/lower/block.iyi" \
-  'body.copy_closure_from(caller)' 'nil' -- check_mutant lower_closure_nested_block || status=1
+  'body.copy_closure_from(caller)' 'nil' -- check_specific_refusal lower_closure_nested_block src/compiler/lower/pending.iyi '^proc literal reads outer, a local of the enclosing code without closure facts$' || status=1
 prove_mutation 'forwarded closure loses its captured environment' "$REPO/src/compiler/lower/proc.iyi" \
   '  ctx = closure ? source.closure_ptr.as(Value) : low.builder.const_null(low.module.types.ptr(0)).as(Value)' \
   '  ctx = low.builder.const_null(low.module.types.ptr(0)).as(Value)' -- check_self_behavior_mutant closure_forward_recursion || status=1
 prove_mutation 'macro proc loses call-site location' "$REPO/src/compiler/lower/proc.iyi" \
   'place = low.current_context.macro_origin || node.location' 'place = node.location' -- check_macro_mutant || status=1
-prove_mutation 'address-taken parameter is not spilled' "$REPO/src/compiler/lower/fun.iyi" \
-  '@names.add(t.as(Var).name) if t.is_a?(Var)' 'nil' -- check_mutant lower_pointerof_arg || status=1
+prove_mutation 'address-taken parameter points to a temporary copy' "$REPO/src/compiler/lower/lower.iyi" \
+  '      low.last = var.as(LowerVar).pointer' \
+  '      low.last = var.as(LowerVar).pointer
+      if low.current_context.fun.name == "*mutate<Int32>:Int32" && exp.as(Var).name == "value"
+        copy_type = low.typer.llvm_type(var.as(LowerVar).type)
+        copy = low.alloca(copy_type, "")
+        store_aligned(low, load_aligned(low, copy_type, var.as(LowerVar).pointer), copy)
+        low.last = copy
+      end' -- check_pointerof_mutant || status=1
 prove_mutation 'defer drops its personality' "$REPO/src/compiler/lower/ensure.iyi" \
   'low.current_context.fun.personality = personality' 'nil' -- check_defer_mutant || status=1
 prove_mutation 'Darwin personality is internal' "$REPO/src/compiler/lower/lower.iyi" \
@@ -388,7 +451,7 @@ prove_mutation 'typing-stack recursion answers NoReturn' "$REPO/src/compiler/sem
 prove_mutation 'abandoned instance keeps its provisional NoReturn' "$REPO/src/compiler/semantic/main_visitor.iyi" \
   '@def_instances.delete(abandoned)' 'nil' -- check_refusal_mutant noreturn_dead_instance_refuse "undefined method 'missing_method' for Int32" || status=1
 prove_mutation 'call on a NoReturn receiver is looked up' "$REPO/src/compiler/semantic/main_visitor.iyi" \
-  'return true if !node.obj.nil? && rec_type.is_a?(NoReturnType)' 'nil' -- check_mutant lowcall_noreturn_operand || status=1
+  'return true if !node.obj.nil? && rec_type.is_a?(NoReturnType)' 'nil' -- check_specific_refusal lowcall_noreturn_operand src/compiler/semantic/main_visitor.iyi "^undefined method '&\\+' for NoReturn$" || status=1
 prove_mutation 'never-made call lowered as a call' "$REPO/src/compiler/lower/call.iyi" \
   '    lower_never_made_call(low, node)' '    nil' -- check_mutant lowcall_noreturn_operand || status=1
 exit "$status"

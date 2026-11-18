@@ -288,6 +288,7 @@ echo "== 4. Mutation proofs: the gate must catch each patch to the ported code"
 # The check rebuilds the driver from the patched source and requires every fixture to match the
 # hosted module exactly. A build failure marks the gate invalid and cannot count as a caught mutation.
 lowglob_check() {
+  local refused_fixture="${1:-}" refused_message="${2:-}" rc
   if ! "$IYI" build -o "$WORK_NATIVE/port_m$EXE" "$REPO_NATIVE/bench/selfhost_lower_globals_exercise.iyi" > "$WORK/port_m.build.log" 2>&1; then
     echo "INVALID PROOF: global-lowering driver did not compile"
     cat "$WORK/port_m.build.log"
@@ -319,9 +320,16 @@ lowglob_check() {
         return 2
         ;;
     esac
-    if ! "$WORK/port_m$EXE" lower "$(native_path "$fixture")" "$WORK_NATIVE/$name.oracle.ll" > "$WORK/m.out" 2>&1; then
+    rc=0
+    "$WORK/port_m$EXE" lower "$(native_path "$fixture")" "$WORK_NATIVE/$name.oracle.ll" > "$WORK/m.out" 2>"$WORK/m.err" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      if [ "$name" = "$refused_fixture" ] &&
+         expected_refusal "$rc" "$WORK/m.err" src/compiler/lower/pending.iyi "$refused_message"; then
+        echo "decisive: $name: $(refusal_note "$rc" "$WORK/m.err")"
+        return 1
+      fi
       echo "INVALID: $name mutant did not produce a comparison"
-      cat "$WORK/m.out"
+      cat "$WORK/m.out" "$WORK/m.err"
       return 2
     fi
     summary="$(awk '/^SUMMARY/ { print }' "$WORK/m.out")"
@@ -343,13 +351,13 @@ prove_mutation "lazy initializer ignores the once flag" "$REPO/bench/fixtures/lo
 prove_mutation "a nilable Proc initializer is not discarded" "$REPO/src/compiler/lower/class_var.iyi" \
   "  node.is_a?(NilLiteral) && cvar.type.is_a?(NilableProcType)" "  false" -- lowglob_check || status=1
 prove_mutation "a pointer class variable is refused" "$REPO/src/compiler/lower/class_var.iyi" \
-  "  if !(ir.int? || ir.float? || ir.pointer?)" "  if !(ir.int? || ir.float?)" -- lowglob_check || status=1
+  "  if !(ir.int? || ir.float? || ir.pointer?)" "  if !(ir.int? || ir.float?)" -- lowglob_check lowglob_cvar_pointer '^lower: class variable @@ptr has an unsupported non-scalar type \(hosted class_var\.cr: initialize_class_var\)$' || status=1
 prove_mutation "a nil aggregate initializer is not discarded" "$REPO/src/compiler/lower/class_var.iyi" \
   "  if nilable_proc_initializer?(cvar, node) || nilable_aggregate_initializer?(cvar)" \
   "  if nilable_proc_initializer?(cvar, node)" -- lowglob_check || status=1
 prove_mutation "a generic aggregate class variable is refused" "$REPO/src/compiler/lower/class_var.iyi" \
   '  if passed_by_value?(cvar.type)'$'\n''    if low.typer.passed_indirectly?(cvar.type)' \
-  '  if cvar.type.is_a?(ClassType) && cvar.type.struct?'$'\n''    if low.typer.passed_indirectly?(cvar.type)' -- lowglob_check || status=1
+  '  if cvar.type.is_a?(ClassType) && cvar.type.struct?'$'\n''    if low.typer.passed_indirectly?(cvar.type)' -- lowglob_check lowglob_cvar_generic_struct '^lower: class variable @@zero has an unsupported non-scalar type \(hosted class_var\.cr: initialize_class_var\)$' || status=1
 prove_mutation "an aggregate class variable starts undefined instead of zero" "$REPO/src/compiler/lower/class_var.iyi" \
   '      global.initializer = low.builder.const_zero(ir)'$'\n''      value_type = low.analysed.type_of?(node).as(Type)' \
   '      global.initializer = low.builder.const_undef(ir)'$'\n''      value_type = low.analysed.type_of?(node).as(Type)' -- lowglob_check || status=1
@@ -367,7 +375,7 @@ prove_mutation "a by-value constant is loaded instead of read by address" "$REPO
   "      low.last = load_aligned(low, ir, g.as(Global))" -- lowglob_check || status=1
 prove_mutation "a module class variable is refused as non-class" "$REPO/src/compiler/lower/class_var.iyi" \
   "  if o.full_name.includes?(\"(\")" \
-  "  if !o.is_a?(ClassType) || o.full_name.includes?(\"(\")" -- lowglob_check || status=1
+  "  if !o.is_a?(ClassType) || o.full_name.includes?(\"(\")" -- lowglob_check lowglob_cvar_module '^lower: class variable @@value is declared in M, which is generic: its hosted llvm_name is not ported yet \(hosted class_var\.cr: class_var_global_name\)$' || status=1
 prove_mutation "a type path returns zero instead of its type id" "$REPO/src/compiler/lower/const.iyi" \
   "    low.last = type_id_value(low, typ.as(Type))" \
   "    low.last = low.builder.const_int(low.module.types.int32, 0_i64)" -- lowglob_check || status=1
@@ -439,7 +447,7 @@ prove_mutation "pointerof of a class variable is refused" "$REPO/src/compiler/lo
   "    if false" -- lowglob_check || status=1
 prove_mutation "a float class-variable literal is not stored" "$REPO/src/compiler/lower/const.iyi" \
   "    return low.builder.const_float(low.typer.llvm_type(typ), text.to_f)" \
-  "    return nil" -- lowglob_check || status=1
+  "    return nil" -- lowglob_check lowglob_cvar_float '^lower: class variable @@f has a literal initialiser that is not an integer, Bool or Char \(hosted class_var\.cr: initialize_class_var\)$' || status=1
 prove_mutation "a class variable initializer stores null instead of its value" "$REPO/src/compiler/lower/class_var.iyi" \
   $'      global.initializer = low.builder.const_null(ir)\n      value_type = low.analysed.type_of?(node).as(Type)\n      assign(low, global, cvar.type, value_type, val)' \
   $'      global.initializer = low.builder.const_null(ir)\n      value_type = low.analysed.type_of?(node).as(Type)\n      assign(low, global, cvar.type, value_type, low.builder.const_null(ir))' -- lowglob_check || status=1

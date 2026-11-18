@@ -76,10 +76,7 @@ def check_generic_pointerful : Nil
   args = [int32.as(Type)] of Type
   inst = GenericClassInstanceType.new(prog, generic, tv, args, generic.superclass)
   answer = class_pointerful?(inst)
-  unless answer
-    raise "Hold(Int32) is not pointerful"
-  end
-  puts "generic_pointerful=1"
+  puts "generic_pointerful=#{answer ? 1 : 0}"
 end
 
 # Reproduce the typed-flow mismatch at the primitive seam, before the verifier.

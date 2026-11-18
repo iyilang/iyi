@@ -34,6 +34,25 @@ IYI="${IYI_COMPILER:-$REPO/bin/iyi}"
 WORK="$(mktemp -d)"
 WORK_NATIVE="$(native_path "$WORK")" || exit 1
 
+summary_check() {
+  local rc=0
+  if [ ! -f "$1" ] || [ ! -r "$1" ]; then
+    echo "INVALID: missing or unreadable comparison: $1"
+    return 2
+  fi
+  awk '/^SUMMARY identical=[0-9]+ total=[0-9]+ module=[01]$/ {
+    split($2,a,"="); split($3,b,"="); split($4,c,"=")
+    if (b[2] == 0) invalid=1
+    if (a[2] != b[2] || c[2] != 1) bad=1
+    n++
+  } END { if (n != 1 || invalid) exit 43; if (bad) exit 42 }' "$1" || rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    42) echo "decisive: comparison differs in $1"; return 1 ;;
+    *) echo "INVALID: comparison summary unavailable (awk exit $rc): $1"; return 2 ;;
+  esac
+}
+
 normalize_switches() {
   awk '
     in_switch {
@@ -224,7 +243,7 @@ super_refusal_checks() {
   fi
   awk "$CALL_TYPES" "$WORK/super_default.ll" | normalize_switches > "$WORK/super_default.oracle.ll" || return 1
   "$driver" lower "$(native_path "$fixture")" "$WORK_NATIVE/super_default.oracle.ll" > "$WORK/super_default.out" 2> "$WORK/super_default.err" || return 1
-  awk '/^SUMMARY identical=[0-9]+ total=[0-9]+ module=[01]$/ { split($2,a,"="); split($3,b,"="); split($4,c,"="); if (a[2] != b[2] || b[2] == 0 || c[2] != 1) bad=1; n++ } END { exit (bad || n == 0) }' "$WORK/super_default.out" || return 1
+  summary_check "$WORK/super_default.out" || return $?
 
   fixture="$REPO/bench/fixtures/lowcallwait_previous_def_refused.iyi"
   if "$driver" emit "$(native_path "$fixture")" "$WORK_NATIVE/lowcall_super.oracle.ll" > "$WORK/previous_def.out" 2> "$WORK/previous_def.err"; then
@@ -647,9 +666,17 @@ generic_constructor_check() {
   fi
   for name in lowcallinfer_generic_new lowcallinfer_explicit_struct lowcallwait_generic_handwritten_new; do
     fixture="$REPO_NATIVE/bench/fixtures/$name.iyi"
-    if ! "$WORK/constructor.check.tool$EXE" "$fixture" -o "$WORK_NATIVE/constructor.check.ir" --pipeline typed --emit ir > "$WORK/constructor.check.log" 2>&1; then
+    result=0
+    "$WORK/constructor.check.tool$EXE" "$fixture" -o "$WORK_NATIVE/constructor.check.ir" --pipeline typed --emit ir > "$WORK/constructor.check.log" 2>"$WORK/constructor.check.err" || result=$?
+    if [ "$result" -ne 0 ]; then
+      if [ "${CONSTRUCTOR_REFUSAL:-}" = inferred ] && [ "$name" = lowcallinfer_generic_new ] &&
+         [ -f "$WORK/constructor.baseline" ] &&
+         expected_refusal "$result" "$WORK/constructor.check.err" src/compiler/lower/pending.iyi '^lower: visit\(the receiver of new is the uninstantiated generic Cell\(T\)\.class: typing has not instantiated the owner\) \(hosted codegen\.cr\) is not ported yet$'; then
+        echo "decisive: $name: $(refusal_note "$result" "$WORK/constructor.check.err")"
+        return 1
+      fi
       echo "INVALID MUTANT: constructor $name did not emit IR"
-      cat "$WORK/constructor.check.log"
+      cat "$WORK/constructor.check.log" "$WORK/constructor.check.err"
       return 2
     fi
     if ! "$WORK/constructor.check.tool$EXE" "$fixture" -o "$WORK_NATIVE/constructor.check.exe" --pipeline typed > "$WORK/constructor.check.log" 2>&1; then
@@ -697,11 +724,12 @@ constructor_prove() {
 rm -f "$WORK/constructor.invalid"
 if generic_constructor_check && [ ! -e "$WORK/constructor.invalid" ]; then
   echo "  constructor mutation baseline passed"
+  : > "$WORK/constructor.baseline"
   constructor_prove "non-constructor methods infer class variables" "$REPO/src/compiler/semantic/match.iyi" \
     '    return nil unless definition.name == "new"' '    nil' || status=1
   constructor_prove "omitted arguments infer class variables" "$REPO/src/compiler/semantic/match.iyi" \
     '    return nil unless given == definition.args.size' '    nil' || status=1
-  constructor_prove "lowering ignores the inferred receiver" "$REPO/src/compiler/lower/call.iyi" \
+  CONSTRUCTOR_REFUSAL=inferred constructor_prove "lowering ignores the inferred receiver" "$REPO/src/compiler/lower/call.iyi" \
     '  if recorded = low.analysed.call_receiver?(node)' \
     '  if recorded = (node.obj.nil? ? low.analysed.call_receiver?(node) : nil)' || status=1
   # Leaving a struct address is indistinguishable in the exercised callers:
@@ -718,7 +746,7 @@ echo "== 3b. A recursive call targets the instance still being typed"
 if [ -x "$WORK/compile_native$EXE" ]; then
   for fixture in "$REPO"/bench/fixtures/sem_bodies_recursion_mutual.iyi "$REPO"/bench/fixtures/sem_bodies_recursion_state.iyi "$REPO"/bench/fixtures/sem_bodies_recursive_helper.iyi; do
     name="$(basename "$fixture" .iyi)"
-    "$WORK/compile_native$EXE" "$(native_path "$fixture")" -o "$WORK_NATIVE/$name.probe" --pipeline typed --probe-phase --keep-going > "$WORK/$name.probe" 2>&1
+    "$WORK/compile_native$EXE" "$(native_path "$fixture")" -o "$WORK_NATIVE/$name.probe.exe$EXE" --pipeline typed --probe-phase --keep-going > "$WORK/$name.probe" 2>&1
     probe_status=$?
     if [ "$probe_status" -gt 1 ]; then
       echo "  $name: invalid probe exit $probe_status"
@@ -815,12 +843,17 @@ lower_calls_check() {
     "$WORK/mut$EXE" lower "$(native_path "$fixture")" "$WORK_NATIVE/$name.oracle.ll" > "$WORK/mut.out" 2>"$WORK/mut.err"
     result=$?
     if [ "$result" -ne 0 ]; then
-      if [ -n "$expected_mutant_refusal" ] && expected_refusal "$result" "$WORK/mut.err" src/compiler/lower/pending.iyi "$expected_mutant_refusal"; then return 1; fi
-      echo "INVALID: calls mutant failed outside its expected comparison"
+      if [ -n "$expected_mutant_refusal" ] &&
+         summary_check "$WORK/$name.port.out" >/dev/null &&
+         expected_refusal "$result" "$WORK/mut.err" src/compiler/lower/pending.iyi "$expected_mutant_refusal"; then
+        echo "decisive: $name: $(refusal_note "$result" "$WORK/mut.err")"
+        return 1
+      fi
+      echo "INVALID: calls mutant failed outside its expected comparison ($name)"
       cat "$WORK/mut.err"
       return 2
     fi
-    awk '/^SUMMARY identical=[0-9]+ total=[0-9]+ module=[01]$/ { split($2, a, "="); split($3, b, "="); split($4, c, "="); if (a[2] != b[2] || b[2] == 0 || c[2] != 1) bad = 1; n++ } END { exit (bad || n == 0) }' "$WORK/mut.out" || return 1
+    summary_check "$WORK/mut.out" || return $?
   done
   return 0
 }
@@ -888,7 +921,7 @@ recursive_inferred_check() {
     return $?
   fi
   "$WORK/recursive-mut$EXE" lower "$REPO_NATIVE/bench/fixtures/lowcall_recursive_inferred.iyi" "$WORK_NATIVE/lowcall_recursive_inferred.oracle.ll" > "$WORK/recursive-mut.out" 2>"$WORK/recursive-mut.err" || { cat "$WORK/recursive-mut.err"; return 2; }
-  awk '/^SUMMARY identical=[0-9]+ total=[0-9]+ module=[01]$/ { split($2,a,"="); split($3,b,"="); split($4,c,"="); if (a[2] != b[2] || b[2] == 0 || c[2] != 1) bad=1; n++ } END { exit (bad || n == 0) }' "$WORK/recursive-mut.out"
+  summary_check "$WORK/recursive-mut.out"
 }
 prove_mutation "an inferred recursive body is not retyped" "$REPO/src/compiler/semantic/main_visitor.iyi" \
   '    if recursive_frame.cyclic' '    if false && recursive_frame.cyclic' -- recursive_inferred_check || status=1
@@ -898,11 +931,27 @@ underscore_check() {
     invalid_mutation "$WORK/underscore-mut.build.log"
     return $?
   fi
-  "$WORK/underscore-mut$EXE" lower "$REPO_NATIVE/bench/fixtures/lowdecl_multi_assign_underscore.iyi" "$WORK_NATIVE/lowdecl_multi_assign_underscore.oracle.ll" > "$WORK/underscore-mut.out" 2>"$WORK/underscore-mut.err" || { cat "$WORK/underscore-mut.err"; return 2; }
-  awk '/^SUMMARY identical=[0-9]+ total=[0-9]+ module=[01]$/ { split($2,a,"="); split($3,b,"="); split($4,c,"="); if (a[2] != b[2] || b[2] == 0 || c[2] != 1) bad=1; n++ } END { exit (bad || n == 0) }' "$WORK/underscore-mut.out"
+  local result=0
+  "$WORK/underscore-mut$EXE" lower "$REPO_NATIVE/bench/fixtures/lowdecl_multi_assign_underscore.iyi" "$WORK_NATIVE/lowdecl_multi_assign_underscore.oracle.ll" > "$WORK/underscore-mut.out" 2>"$WORK/underscore-mut.err" || result=$?
+  if [ "$result" -ne 0 ]; then
+    if [ -f "$WORK/underscore.baseline" ] && expected_refusal "$result" "$WORK/underscore-mut.err" src/compiler/lower/pending.iyi '^lower: visit\(Assign to a target that is not a variable\) \(hosted codegen\.cr\) is not ported yet$'; then
+      echo "decisive: $(refusal_note "$result" "$WORK/underscore-mut.err")"
+      return 1
+    fi
+    echo 'INVALID: underscore fixture failed outside the expected refusal'
+    cat "$WORK/underscore-mut.out" "$WORK/underscore-mut.err"
+    return 2
+  fi
+  summary_check "$WORK/underscore-mut.out"
 }
-prove_mutation "underscore assignment is refused" "$REPO/src/compiler/lower/lower.iyi" \
-  '  if node.target.is_a?(Underscore)' '  if false && node.target.is_a?(Underscore)' -- underscore_check || status=1
+if underscore_check; then
+  : > "$WORK/underscore.baseline"
+  prove_mutation "underscore assignment is refused" "$REPO/src/compiler/lower/lower.iyi" \
+    '  if node.target.is_a?(Underscore)' '  if false && node.target.is_a?(Underscore)' -- underscore_check || status=1
+else
+  echo 'FAIL: underscore assignment baseline differs'
+  status=1
+fi
 
 block_decl_check() {
   if ! "$IYI" build -o "$WORK_NATIVE/block-decl-mut$EXE" "$REPO_NATIVE/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/block-decl-mut.build.log" 2>&1; then
@@ -911,7 +960,7 @@ block_decl_check() {
   fi
   for name in lowdecl_typedecl_block lowdecl_typedecl_block_widen lowdecl_typedecl_block_nested lowdecl_typedecl_block_later_nil lowdecl_typedecl_reference; do
     "$WORK/block-decl-mut$EXE" lower "$REPO_NATIVE/bench/fixtures/$name.iyi" "$WORK_NATIVE/$name.oracle.ll" > "$WORK/block-decl-mut.out" 2>"$WORK/block-decl-mut.err" || { cat "$WORK/block-decl-mut.err"; return 2; }
-    awk '/^SUMMARY identical=[0-9]+ total=[0-9]+ module=[01]$/ { split($2,a,"="); split($3,b,"="); split($4,c,"="); if (a[2] != b[2] || b[2] == 0 || c[2] != 1) bad=1; n++ } END { exit (bad || n == 0) }' "$WORK/block-decl-mut.out" || return 1
+    summary_check "$WORK/block-decl-mut.out" || return $?
   done
 }
 prove_mutation "a typed local keeps its initializer's storage type" "$REPO/src/compiler/semantic/main_visitor.iyi" \
@@ -924,7 +973,7 @@ block_storage_check() {
     return $?
   fi
   "$WORK/block-storage-mut$EXE" lower "$REPO_NATIVE/bench/fixtures/lowdecl_block_branch_storage.iyi" "$WORK_NATIVE/lowdecl_block_branch_storage.oracle.ll" > "$WORK/block-storage-mut.out" 2>"$WORK/block-storage-mut.err" || { cat "$WORK/block-storage-mut.err"; return 2; }
-  awk '/^SUMMARY identical=[0-9]+ total=[0-9]+ module=[01]$/ { split($2,a,"="); split($3,b,"="); split($4,c,"="); if (a[2] != b[2] || b[2] == 0 || c[2] != 1) bad=1; n++ } END { exit (bad || n == 0) }' "$WORK/block-storage-mut.out"
+  summary_check "$WORK/block-storage-mut.out"
 }
 prove_mutation "block locals retain only the first assignment type" "$REPO/src/compiler/semantic/main_visitor.iyi" \
   '      unions[name] = @program.type_merge(previous, type)' \
@@ -936,7 +985,7 @@ block_loop_rw_check() {
     return $?
   fi
   "$WORK/block-loop-rw-mut$EXE" lower "$REPO_NATIVE/bench/fixtures/lowcall_block_nilable_rw.iyi" "$WORK_NATIVE/lowcall_block_nilable_rw.oracle.ll" > "$WORK/block-loop-rw-mut.out" 2>"$WORK/block-loop-rw-mut.err" || { cat "$WORK/block-loop-rw-mut.err"; return 2; }
-  awk '/^SUMMARY identical=[0-9]+ total=[0-9]+ module=[01]$/ { split($2,a,"="); split($3,b,"="); split($4,c,"="); if (a[2] != b[2] || b[2] == 0 || c[2] != 1) bad=1; n++ } END { exit (bad || n == 0) }' "$WORK/block-loop-rw-mut.out"
+  summary_check "$WORK/block-loop-rw-mut.out"
 }
 prove_mutation "a loop yield sees only the first block invocation" "$REPO/src/compiler/semantic/main_visitor.iyi" \
   '      if @block_may_repeat' '      if false && @block_may_repeat' -- block_loop_rw_check || status=1
@@ -947,7 +996,7 @@ block_branch_rw_check() {
     return $?
   fi
   "$WORK/block-branch-rw-mut$EXE" lower "$REPO_NATIVE/bench/fixtures/lowcall_block_branch_nilable_rw.iyi" "$WORK_NATIVE/lowcall_block_branch_nilable_rw.oracle.ll" > "$WORK/block-branch-rw-mut.out" 2>"$WORK/block-branch-rw-mut.err" || { cat "$WORK/block-branch-rw-mut.err"; return 2; }
-  awk '/^SUMMARY identical=[0-9]+ total=[0-9]+ module=[01]$/ { split($2,a,"="); split($3,b,"="); split($4,c,"="); if (a[2] != b[2] || b[2] == 0 || c[2] != 1) bad=1; n++ } END { exit (bad || n == 0) }' "$WORK/block-branch-rw-mut.out"
+  summary_check "$WORK/block-branch-rw-mut.out"
 }
 prove_mutation "one yield overwrites another yield's entry flow" "$REPO/src/compiler/semantic/main_visitor.iyi" \
   '            ctx[k] = @program.type_merge(ctx[k], new_v)' '            ctx[k] = new_v' -- block_branch_rw_check || status=1
@@ -958,7 +1007,7 @@ block_lexical_locals_check() {
     return $?
   fi
   "$WORK/block-lexical-mut$EXE" lower "$REPO_NATIVE/bench/fixtures/lowcall_block_lexical_locals.iyi" "$WORK_NATIVE/lowcall_block_lexical_locals.oracle.ll" > "$WORK/block-lexical-mut.out" 2> "$WORK/block-lexical-mut.err" || { cat "$WORK/block-lexical-mut.err"; return 2; }
-  awk '/^SUMMARY identical=[0-9]+ total=[0-9]+ module=[01]$/ { split($2,a,"="); split($3,b,"="); split($4,c,"="); if (a[2] != b[2] || b[2] == 0 || c[2] != 1) bad=1; n++ } END { exit (bad || n == 0) }' "$WORK/block-lexical-mut.out"
+  summary_check "$WORK/block-lexical-mut.out"
 }
 prove_mutation "a block inherits later caller locals" "$REPO/src/compiler/lower/call.iyi" \
   '      block_vars[name] = var if name == "self" || writer_vars.has_key?(name)' \
@@ -973,7 +1022,7 @@ block_nested_storage_check() {
     return $?
   fi
   "$WORK/block-nested-mut$EXE" lower "$REPO_NATIVE/bench/fixtures/lowcall_block_nested_local_writes.iyi" "$WORK_NATIVE/lowcall_block_nested_local_writes.oracle.ll" > "$WORK/block-nested-mut.out" 2> "$WORK/block-nested-mut.err" || { cat "$WORK/block-nested-mut.err"; return 2; }
-  awk '/^SUMMARY identical=[0-9]+ total=[0-9]+ module=[01]$/ { split($2,a,"="); split($3,b,"="); split($4,c,"="); if (a[2] != b[2] || b[2] == 0 || c[2] != 1) bad=1; n++ } END { exit (bad || n == 0) }' "$WORK/block-nested-mut.out"
+  summary_check "$WORK/block-nested-mut.out"
 }
 prove_mutation "a block local misses its nested blocks' writes" "$REPO/src/compiler/lower/call.iyi" \
   '        storage = low.analysed.program.type_merge(storage, written)' \
@@ -989,7 +1038,7 @@ block_cache_check() {
     return $?
   fi
   "$WORK/block-cache-mut$EXE" lower "$REPO_NATIVE/bench/fixtures/$name.iyi" "$WORK_NATIVE/$name.oracle.ll" > "$WORK/block-cache-mut.out" 2> "$WORK/block-cache-mut.err" || { cat "$WORK/block-cache-mut.err"; return 2; }
-  awk '/^SUMMARY identical=[0-9]+ total=[0-9]+ module=[01]$/ { split($2,a,"="); split($3,b,"="); split($4,c,"="); if (a[2] != b[2] || b[2] == 0 || c[2] != 1) bad=1; n++ } END { exit (bad || n == 0) }' "$WORK/block-cache-mut.out"
+  summary_check "$WORK/block-cache-mut.out"
 }
 prove_mutation "a reused block instance drops its writes" "$REPO/src/compiler/semantic/main_visitor.iyi" \
   '          replay_block_flow(flow)' '          flow' -- block_cache_check lowcall_block_cached_writes || status=1
@@ -1045,7 +1094,7 @@ free_dispatch_check() {
     return 2
   fi
   "$WORK/free-mut$EXE" lower "$REPO_NATIVE/bench/fixtures/lowcall_dispatch_free_vars.iyi" "$WORK_NATIVE/lowcall_dispatch_free_vars.oracle.ll" > "$WORK/free-mut-$label.out" 2> "$WORK/free-mut-$label.err" || { cat "$WORK/free-mut-$label.err"; return 2; }
-  awk '/^SUMMARY identical=[0-9]+ total=[0-9]+ module=[01]$/ { split($2,a,"="); split($3,b,"="); split($4,c,"="); if (a[2] != b[2] || b[2] == 0 || c[2] != 1) bad=1; n++ } END { exit (bad || n == 0) }' "$WORK/free-mut-$label.out"
+  summary_check "$WORK/free-mut-$label.out"
 }
 if free_dispatch_check; then
   prove_mutation "dispatch arms share a cached definition" "$REPO/src/compiler/semantic/main_visitor.iyi" \
@@ -1070,7 +1119,7 @@ super_check() {
     return 2
   fi
   "$WORK/super_mut$EXE" lower "$REPO_NATIVE/bench/fixtures/lowcall_super.iyi" "$WORK_NATIVE/lowcall_super.oracle.ll" > "$WORK/super_mut.out" 2> "$WORK/super_mut.err" || { cat "$WORK/super_mut.err"; return 2; }
-  awk '/^SUMMARY identical=[0-9]+ total=[0-9]+ module=[01]$/ { split($2,a,"="); split($3,b,"="); split($4,c,"="); if (a[2] != b[2] || b[2] == 0 || c[2] != 1) bad=1; n++ } END { exit (bad || n == 0) }' "$WORK/super_mut.out" || return 1
+  summary_check "$WORK/super_mut.out" || return $?
   super_refusal_checks "$WORK/super_mut$EXE"
 }
 if ! super_check; then
@@ -1110,7 +1159,7 @@ block_nil_if_read_check() {
     return 2
   fi
   "$WORK/block-nil$EXE" lower "$REPO_NATIVE/bench/fixtures/lowcall_block_nil_if_read.iyi" "$WORK_NATIVE/lowcall_block_nil_if_read.oracle.ll" > "$WORK/block-nil.out" 2> "$WORK/block-nil.err" || { cat "$WORK/block-nil.err"; return 2; }
-  awk '/^SUMMARY identical=[0-9]+ total=[0-9]+ module=[01]$/ { split($2,a,"="); split($3,b,"="); split($4,c,"="); if (a[2] != b[2] || b[2] == 0 || c[2] != 1) bad=1; n++ } END { exit (bad || n == 0) }' "$WORK/block-nil.out"
+  summary_check "$WORK/block-nil.out"
 }
 if block_nil_if_read_check; then
   prove_mutation "a block read loses its writer's nil storage" "$REPO/src/compiler/semantic/main_visitor.iyi" \
@@ -1132,7 +1181,7 @@ lexical_owner_check() {
     return 2
   fi
   "$WORK/lexical-mut$EXE" lower "$REPO_NATIVE/bench/fixtures/lowcall_inherited_lexical_owner.iyi" "$WORK_NATIVE/lowcall_inherited_lexical_owner.oracle.ll" > "$WORK/lexical-mut.out" 2> "$WORK/lexical-mut.err" || { cat "$WORK/lexical-mut.err"; return 2; }
-  awk '/^SUMMARY identical=[0-9]+ total=[0-9]+ module=[01]$/ { split($2,a,"="); split($3,b,"="); split($4,c,"="); if (a[2] != b[2] || b[2] == 0 || c[2] != 1) bad=1; n++ } END { exit (bad || n == 0) }' "$WORK/lexical-mut.out"
+  summary_check "$WORK/lexical-mut.out"
 }
 if lexical_owner_check; then
   prove_mutation "an inherited body resolves names from its receiver instead of its owner" "$REPO/src/compiler/semantic/main_visitor.iyi" \
@@ -1149,7 +1198,7 @@ shadowed_const_check() {
     return 2
   fi
   "$WORK/shadow-mut$EXE" lower "$REPO_NATIVE/bench/fixtures/lowcall_inherited_shadowed_const.iyi" "$WORK_NATIVE/lowcall_inherited_shadowed_const.oracle.ll" > "$WORK/shadow-mut.out" 2> "$WORK/shadow-mut.err" || { cat "$WORK/shadow-mut.err"; return 2; }
-  awk '/^SUMMARY identical=[0-9]+ total=[0-9]+ module=[01]$/ { split($2,a,"="); split($3,b,"="); split($4,c,"="); if (a[2] != b[2] || b[2] == 0 || c[2] != 1) bad=1; n++ } END { exit (bad || n == 0) }' "$WORK/shadow-mut.out"
+  summary_check "$WORK/shadow-mut.out"
 }
 if shadowed_const_check; then
   prove_mutation "a constant read ignores the constant the analysis resolved" "$REPO/src/compiler/lower/const.iyi" \
@@ -1175,8 +1224,21 @@ generic_gap_check() {
   "$IYI" build -o "$WORK_NATIVE/mut$EXE" "$REPO_NATIVE/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/mut.build.log" 2>&1 || { invalid_mutation "$WORK/mut.build.log"; return 2; }
   "$WORK/mut$EXE" lower "$(native_path "$generic_fixture")" "$WORK_NATIVE/uninstantiated.oracle.ll" > "$WORK/generic.mut.out" 2> "$WORK/generic.mut.err"
   local result=$?
-  if [ "$result" -eq 0 ]; then return 1; fi
-  if expected_refusal "$result" "$WORK/generic.mut.err" src/compiler/lower/pending.iyi 'the receiver of probe is the uninstantiated generic Range\(B, E\).class: typing has not instantiated the owner'; then return 0; fi
+  if [ "$result" -eq 0 ]; then
+    if [ -f "$WORK/generic.baseline" ] && grep -Eq '^SUMMARY identical=[0-9]+ total=[0-9]+ module=[01]$' "$WORK/generic.mut.out"; then
+      echo 'decisive: uninstantiated generic was lowered'
+      return 1
+    fi
+    echo 'INVALID: uninstantiated generic was accepted without a baseline or comparison'
+    return 2
+  fi
+  if expected_refusal "$result" "$WORK/generic.mut.err" src/compiler/lower/pending.iyi '^lower: visit\(the receiver of probe is the uninstantiated generic Range\(B, E\)\.class: typing has not instantiated the owner\) \(hosted codegen\.cr\) is not ported yet$'; then return 0; fi
+  if [ -f "$WORK/generic.baseline" ] &&
+     expected_refusal "$result" "$WORK/generic.mut.err" src/compiler/lower/pending.iyi '^lower: visit\(a class method call on Range\(B, E\)\.class \(hosted call\.cr: prepare_call_args, a generic or builtin metaclass\)\) \(hosted codegen\.cr\) is not ported yet$' &&
+     ! grep -Fq 'typing has not instantiated the owner' "$WORK/generic.mut.err"; then
+    echo "decisive: the typing-gap diagnostic was replaced: $(refusal_note "$result" "$WORK/generic.mut.err")"
+    return 1
+  fi
   echo 'INVALID: uninstantiated generic did not reach its named refusal'
   cat "$WORK/generic.mut.err"
   return 2
@@ -1185,6 +1247,7 @@ if ! generic_gap_check; then
   echo "  baseline: uninstantiated generic diagnostic did not match"
   exit 1
 fi
+: > "$WORK/generic.baseline"
 prove_mutation "an uninstantiated generic loses its typing-gap diagnostic" "$REPO/src/compiler/lower/call.iyi" \
   '    if inst.is_a?(GenericClassType)' '    if false' -- generic_gap_check || status=1
 # The import of a lib fun (contract 6b): the port's own text declares SecRandomCopyBytes with its framework. The
@@ -1270,18 +1333,30 @@ intrinsic_check() {
     cat "$WORK/intrinsic_mut.build.log" | tee "$WORK/intrinsic.invalid"
     return 2
   fi
-  "$WORK/intrinsic_mut$EXE" lower "$REPO_NATIVE/bench/fixtures/lowcall_clib_intrinsics.iyi" "$WORK_NATIVE/lowcall_clib_intrinsics.oracle.ll" > "$WORK/intrinsic_mut.out" 2> "$WORK/intrinsic_mut.err" || { cat "$WORK/intrinsic_mut.err"; return 2; }
-  awk '/^SUMMARY identical=[0-9]+ total=[0-9]+ module=[01]$/ { split($2,a,"="); split($3,b,"="); split($4,c,"="); if (a[2] != b[2] || b[2] == 0 || c[2] != 1) bad=1; n++ } END { exit (bad || n == 0) }' "$WORK/intrinsic_mut.out" || return 1
+  local result=0
+  "$WORK/intrinsic_mut$EXE" lower "$REPO_NATIVE/bench/fixtures/lowcall_clib_intrinsics.iyi" "$WORK_NATIVE/lowcall_clib_intrinsics.oracle.ll" > "$WORK/intrinsic_mut.out" 2> "$WORK/intrinsic_mut.err" || result=$?
+  if [ "$result" -ne 0 ]; then
+    if [ "${1:-}" = ordinary ] && [ -f "$WORK/intrinsic.baseline" ] &&
+       expected_refusal "$result" "$WORK/intrinsic_mut.err" src/compiler/lower/pending.iyi '^lower: the lib fun exit binds exit, which is not an intrinsic the IR accepts \(ir/intrinsics\.iyi intrinsic_match; hosted codegen/ast\.cr llvm_intrinsic\?\)$'; then
+      echo "decisive: $(refusal_note "$result" "$WORK/intrinsic_mut.err")"
+      return 1
+    fi
+    echo 'INVALID: intrinsic fixture failed outside its expected refusal'
+    cat "$WORK/intrinsic_mut.out" "$WORK/intrinsic_mut.err"
+    return 2
+  fi
+  summary_check "$WORK/intrinsic_mut.out" || return $?
   intrinsic_refusal_checks "$WORK/intrinsic_mut$EXE" > /dev/null
 }
 if ! intrinsic_check; then
   echo "  LLVM intrinsic baseline failed; mutations cannot prove coverage"
   status=1
 else
+  : > "$WORK/intrinsic.baseline"
   prove_mutation "an LLVM-named lib fun is called as a C function" "$REPO/src/compiler/lower/call.iyi" \
     '  if real.starts_with?("llvm.")' '  if false' -- intrinsic_check || status=1
   prove_mutation "an ordinary C fun is taken for an LLVM intrinsic" "$REPO/src/compiler/lower/call.iyi" \
-    '  if real.starts_with?("llvm.")' '  if true' -- intrinsic_check || status=1
+    '  if real.starts_with?("llvm.")' '  if true' -- intrinsic_check ordinary || status=1
   prove_mutation "an LLVM binding's declared signature is not checked" "$REPO/src/compiler/lower/call.iyi" \
     '  unless params == signature[1] && result == signature[0]' '  unless true' -- intrinsic_check || status=1
   prove_mutation "a variadic LLVM binding is accepted" "$REPO/src/compiler/lower/call.iyi" \
@@ -1348,7 +1423,7 @@ prove_mutation "a yielded block loses its writer's narrowed-out locals" "$REPO/s
 prove_mutation "a repeated block loses its narrowed-out entry locals" "$REPO/src/compiler/semantic/main_visitor.iyi" \
   '@untyped_locals = entry_untyped_locals.dup' '@untyped_locals = Hash(String, String).new' -- lower_calls_check || status=1
 prove_mutation "a nil receiver is not accepted" "$REPO/src/compiler/lower/call.iyi" \
-  '  return owner if owner.is_a?(NilType)' '  pending_visit_node("nil receiver") if owner.is_a?(NilType)' -- lower_calls_check 'nil receiver' || status=1
+  '  return owner if owner.is_a?(NilType)' '  pending_visit_node("nil receiver") if owner.is_a?(NilType)' -- lower_calls_check '^lower: visit\(nil receiver\) \(hosted codegen\.cr\) is not ported yet$' || status=1
 prove_mutation "an aggregate dispatch argument remains a pointer" "$REPO/src/compiler/lower/call.iyi" \
   '      passed = to_rhs(low, passed, params[i]) if passed_by_value?(params[i]) && passed.type.pointer?' '      passed = values[i]' -- lower_calls_check || status=1
 nil_phi_check() {
@@ -1376,7 +1451,7 @@ prove_mutation "a typed block declaration is refused" "$REPO/src/compiler/lower/
   '  block.body.accept(collector)' '  block.body.accept(collector)
   if collector.declared
     pending_visit_node("typed block declaration")
-  end' -- lower_calls_check 'typed block declaration' || status=1
+  end' -- lower_calls_check '^lower: visit\(typed block declaration\) \(hosted codegen\.cr\) is not ported yet$' || status=1
 prove_mutation "primitive dispatch loses its receiver" "$REPO/src/compiler/lower/call.iyi" \
   '      prim_values = [self_value.as(Value)] of Value' '      prim_values = [] of Value' -- lower_calls_check || status=1
 prove_mutation "enum dispatch receivers are refused" "$REPO/src/compiler/lower/call.iyi" \
@@ -1441,7 +1516,7 @@ prove_mutation "an unqualified class-method call loses its class owner" "$REPO/s
 prove_mutation "a generic metaclass call passes no self type id" "$REPO/src/compiler/lower/call.iyi" \
   '      self_value = type_id_value(low, recv_type)' '      self_value = nil' -- lower_calls_check || status=1
 prove_mutation "a builtin metaclass receiver is refused" "$REPO/src/compiler/lower/call.iyi" \
-  '    unless (inst.is_a?(NonGenericClassType) || inst.is_a?(NonGenericModuleType) || inst.is_a?(EnumType)) && !inst.is_a?(NilType)' '    unless (inst.is_a?(NonGenericClassType) || inst.is_a?(NonGenericModuleType) || inst.is_a?(EnumType)) && !inst.is_a?(NilType) && primitive_kind(inst) == ""' -- lower_calls_check || status=1
+  '    unless (inst.is_a?(NonGenericClassType) || inst.is_a?(NonGenericModuleType) || inst.is_a?(EnumType)) && !inst.is_a?(NilType)' '    unless (inst.is_a?(NonGenericClassType) || inst.is_a?(NonGenericModuleType) || inst.is_a?(EnumType)) && !inst.is_a?(NilType) && primitive_kind(inst) == ""' -- lower_calls_check '^lower: visit\(a class method call on Int32\.class \(hosted call\.cr: prepare_call_args, a generic or builtin metaclass\)\) \(hosted codegen\.cr\) is not ported yet$' || status=1
 prove_mutation "an implicit builtin class call is refused" "$REPO/src/compiler/lower/call.iyi" \
   '      if (ct.is_a?(NonGenericClassType) || ct.is_a?(NonGenericModuleType) || ct.is_a?(EnumType)) && !ct.is_a?(NilType)' '      if (ct.is_a?(NonGenericClassType) || ct.is_a?(NonGenericModuleType) || ct.is_a?(EnumType)) && !ct.is_a?(NilType) && primitive_kind(ct) == ""' -- lower_calls_check || status=1
 prove_mutation "a computed metaclass receiver is not evaluated" "$REPO/src/compiler/lower/call.iyi" \
@@ -1454,14 +1529,22 @@ recursion_owner_check() {
     cat "$WORK/recursion_mut.build.log" >&2
     return 2
   fi
-  local fixture name
+  local fixture name result
   for fixture in "$REPO"/bench/fixtures/lowcall_recursion_*.iyi; do
     name="$(basename "$fixture" .iyi)"
-    if ! "$WORK/recursion_mut$EXE" lower "$(native_path "$fixture")" "$WORK_NATIVE/$name.oracle.ll" > "$WORK/recursion_mut.out" 2> "$WORK/recursion_mut.err"; then
-      cat "$WORK/recursion_mut.err"
+    result=0
+    "$WORK/recursion_mut$EXE" lower "$(native_path "$fixture")" "$WORK_NATIVE/$name.oracle.ll" > "$WORK/recursion_mut.out" 2> "$WORK/recursion_mut.err" || result=$?
+    if [ "$result" -ne 0 ]; then
+      if [ -f "$WORK/recursion.baseline" ] && [ "$name" = lowcall_recursion_mutual ] &&
+         expected_refusal "$result" "$WORK/recursion_mut.err" src/compiler/lower/pending.iyi '^lower: visit\(an untyped instantiated parameter 0 of a \(hosted call\.cr: prepare_call_args\)\) \(hosted codegen\.cr\) is not ported yet$'; then
+        echo "decisive: $name: $(refusal_note "$result" "$WORK/recursion_mut.err")"
+        return 1
+      fi
+      echo "INVALID: recursive fixture $name failed outside the expected refusal"
+      cat "$WORK/recursion_mut.out" "$WORK/recursion_mut.err"
       return 2
     fi
-    awk '/^SUMMARY identical=[0-9]+ total=[0-9]+ module=[01]$/ { split($2, a, "="); split($3, b, "="); split($4, c, "="); if (a[2] != b[2] || b[2] == 0 || c[2] != 1) bad = 1; n++ } END { exit (bad || n == 0) }' "$WORK/recursion_mut.out" || return 1
+    summary_check "$WORK/recursion_mut.out" || return $?
   done
   if ! "$IYI" build -o "$WORK_NATIVE/recursion_target_mut$EXE" "$REPO_NATIVE/bench/selfhost_recursion_target_probe.iyi" > "$WORK/recursion_target_mut.build.log" 2>&1; then
     echo "INVALID MUTANT: recursion target probe failed to build" >&2
@@ -1477,12 +1560,17 @@ recursion_owner_check() {
   return 0
 }
 # The clean comparison must succeed before its failure can count as a catch.
-recursion_owner_check || status=1
-prove_mutation "a recursive call targets a fresh clone" "$REPO/src/compiler/semantic/main_visitor.iyi" \
-  '      instantiated_def = hit.definition
+if recursion_owner_check; then
+  : > "$WORK/recursion.baseline"
+  prove_mutation "a recursive call targets a fresh clone" "$REPO/src/compiler/semantic/main_visitor.iyi" \
+    '      instantiated_def = hit.definition
       @call_target_defs[node] = instantiated_def' \
-  '      instantiated_def = target_def.clone
+    '      instantiated_def = target_def.clone
       @call_target_defs[node] = instantiated_def' -- recursion_owner_check || status=1
+else
+  echo 'FAIL: recursion owner baseline did not pass'
+  status=1
+fi
 
 generic_frame_owner_check() {
   if ! "$IYI" build -o "$WORK_NATIVE/frame_owner$EXE" "$REPO_NATIVE/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/frame_owner.build.log" 2>&1; then
@@ -1522,7 +1610,7 @@ generic_frame_check() {
     invalid_mutation "$WORK/frame_native.build.log"
     return $?
   fi
-  "$WORK/frame_native$EXE" "$REPO_NATIVE/bench/fixtures/lowcall_generic_self_new.iyi" -o "$WORK_NATIVE/frame.probe" --pipeline typed --probe-phase --keep-going > "$WORK/frame.probe" 2>&1
+  "$WORK/frame_native$EXE" "$REPO_NATIVE/bench/fixtures/lowcall_generic_self_new.iyi" -o "$WORK_NATIVE/frame.probe.exe$EXE" --pipeline typed --probe-phase --keep-going > "$WORK/frame.probe" 2>&1
   local result=$?
   if [ "$result" -gt 1 ]; then echo "INVALID: generic frame probe exited $result"; cat "$WORK/frame.probe"; return 2; fi
   if grep -E 'no receiver inside a generic or builtin class method|no receiver inside a class method' "$WORK/frame.probe"; then

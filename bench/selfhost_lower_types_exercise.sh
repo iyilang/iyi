@@ -352,9 +352,9 @@ prove_mutation "mixed union drops its type id word" "$UNIONS_FILE" \
   -- check_lowering_diverges || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
-prove_mutation "mixed union value area ignores its largest member" "$TYPER_FILE" \
+prove_mutation "mixed union value area undercounts its largest member" "$TYPER_FILE" \
   "      max_size = size if size > max_size" \
-  "      max_size = max_size if size > max_size" \
+  "      max_size = size - 1 if size > max_size" \
   -- check_lowering_diverges || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
@@ -431,9 +431,9 @@ prove_mutation "class instance variables stored as one i8 each" "$TYPER_FILE" \
   -- check_lowering_diverges || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
-prove_mutation "a generic instance's fields are its generic's own, not its arguments'" "$TYPER_FILE" \
-  "type.as(GenericClassInstanceType).all_instance_vars" \
-  "type.as(GenericClassInstanceType).generic_type.as(ModuleType).all_instance_vars" \
+prove_mutation "a generic instance's fields ignore their type arguments" "$TYPER_FILE" \
+  "      fields << llvm_embedded_type(var_type.as(Type), wants_size)" \
+  "      fields << (type.is_a?(GenericClassInstanceType) ? @table.int8 : llvm_embedded_type(var_type.as(Type), wants_size))" \
   -- check_lowering_diverges || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
@@ -513,8 +513,8 @@ prove_mutation_all "a metaclass id reuses its class's id" "$TYPE_ID_FILE" \
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
 prove_mutation "a generic instance's metaclass is not numbered" "$TYPE_ID_FILE" \
-  "    if type.is_a?(GenericClassInstanceType)" \
-  "    if type.is_a?(GenericClassInstanceType) && false" \
+  $'    if type.is_a?(GenericClassInstanceType)\n      meta = type.as(GenericClassInstanceType).metaclass' \
+  $'    if type.is_a?(GenericClassInstanceType) && false\n      meta = type.as(GenericClassInstanceType).metaclass' \
   -- check_ids_diverge || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
@@ -531,8 +531,8 @@ prove_mutation "scan cap ignores the last field" "$LAYOUTS_FILE" \
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
 prove_mutation "pointer map reads field offsets by the wrong index" "$LAYOUTS_FILE" \
-  "      index = index + 1" \
-  "      index = index + 2" \
+  "      gc_field_offsets(vt.as(Type), base + @typer.offset_of(struct_type, index), into)" \
+  "      gc_field_offsets(vt.as(Type), base + @typer.offset_of(struct_type, 0), into)" \
   -- check_lowering_diverges || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 

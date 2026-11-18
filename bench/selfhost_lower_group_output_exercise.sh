@@ -13,13 +13,27 @@ trap 'rm -rf "$WORK"' EXIT
 . "$REPO/bench/lib/mutation.sh"
 fixture="$REPO_NATIVE/bench/fixtures/lowpool_generic_group_forward.iyi"
 "$IYI" build -o "$WORK_NATIVE/hosted$EXE" "$fixture" > "$WORK/hosted.build.log" 2>&1 || { cat "$WORK/hosted.build.log"; exit 1; }
-"$WORK/hosted$EXE" > "$WORK/hosted.out" 2>&1
-hosted=$?
-if [ "$hosted" -ge 128 ]; then
-  echo 'FAIL: hosted fixture terminated by a signal'
-  cat "$WORK/hosted.out"
-  exit 1
-fi
+if [ -z "$PY" ]; then echo 'FAIL: Python is required to distinguish exits from signals'; exit 1; fi
+run_fixture() {
+  "$PY" - "$1" "$2" "$3" <<'PY'
+import subprocess
+import sys
+
+try:
+    with open(sys.argv[2], "wb") as output:
+        result = subprocess.run([sys.argv[1]], stdout=output, stderr=subprocess.STDOUT, timeout=30)
+except (OSError, subprocess.TimeoutExpired) as error:
+    print("INVALID: fixture did not complete:", error)
+    sys.exit(2)
+if result.returncode < 0 or result.returncode > 255:
+    print("INVALID: fixture terminated abnormally:", result.returncode)
+    sys.exit(2)
+with open(sys.argv[3], "w") as status:
+    status.write(str(result.returncode))
+PY
+}
+run_fixture "$WORK_NATIVE/hosted$EXE" "$WORK_NATIVE/hosted.out" "$WORK_NATIVE/hosted.status" || exit 1
+hosted="$(< "$WORK/hosted.status")"
 
 check_group_output() {
   if ! "$IYI" build -o "$WORK_NATIVE/stage$EXE" "$REPO_NATIVE/src/compiler/tools/compile_native.iyi" > "$WORK/build.log" 2>&1; then
@@ -49,9 +63,9 @@ check_group_output() {
   fi
   if [ "$HOST_ID" != darwin-arm64 ]; then return 0; fi
   codesign -v --strict "$WORK/native" || return 2
-  "$WORK/native" > "$WORK/native.out" 2>&1
-  local actual=$?
-  [ "$actual" -lt 128 ] || { echo 'INVALID: group-output fixture terminated by a signal'; cat "$WORK/native.out"; return 2; }
+  run_fixture "$WORK_NATIVE/native" "$WORK_NATIVE/native.out" "$WORK_NATIVE/native.status" || return 2
+  local actual
+  actual="$(< "$WORK/native.status")"
   [ "$actual" = "$hosted" ] && cmp -s "$WORK/hosted.out" "$WORK/native.out"
 }
 if [ "$HOST_ID" != darwin-arm64 ]; then

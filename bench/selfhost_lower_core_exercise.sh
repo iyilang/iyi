@@ -428,17 +428,21 @@ CORE_CHECK_FIXTURES="$CORE_CHECK_FIXTURES lower_trait_assoc lower_negated_is_a"
 # The mutation check: the driver rebuilt from the patched source must still lower each identical fixture to the hosted
 # module (known divergences are left out, so the unmutated check passes and a mutation is caught by a real difference).
 lower_core_check() {
+  local refused_fixture="${1:-}" refused_message="${2:-}" result
   if ! "$IYI" build -o "$WORK_NATIVE/port-m$EXE" "$REPO_NATIVE/bench/selfhost_lower_core_exercise.iyi" > "$WORK/m.build.log" 2>&1; then
     cat "$WORK/m.build.log" | tee "$WORK/m.invalid"
     return 2
   fi
-  "$WORK/port-m$EXE" context > "$WORK/m.ctx" 2>&1
-  local result=$?
+  result=0
+  "$WORK/port-m$EXE" context > "$WORK/m.ctx" 2>"$WORK/m.ctx.err" || result=$?
   if [ "$result" -ne 0 ]; then
-    if [ "$result" -eq 1 ] && grep -q '^iyi: panic: CONTEXT FAILED:' "$WORK/m.ctx" &&
-       tr '\\' '/' < "$WORK/m.ctx" | grep -Fq 'bench/selfhost_lower_core_exercise.iyi:'; then return 1; fi
-    echo 'INVALID: context probe failed outside a named assertion'
-    cat "$WORK/m.ctx"
+    if [ "$refused_fixture" = context ] && grep -Fxq 'CONTEXT OK' "$WORK/context.out" &&
+       expected_refusal "$result" "$WORK/m.ctx.err" src/compiler/lower/lower.iyi "$refused_message"; then
+      echo "decisive: $(refusal_note "$result" "$WORK/m.ctx.err")"
+      return 1
+    fi
+    echo 'INVALID: context probe failed outside its expected refusal'
+    cat "$WORK/m.ctx" "$WORK/m.ctx.err"
     return 2
   fi
   awk '/^CONTEXT OK$/ { ok = 1 } END { exit !ok }' "$WORK/m.ctx" || return 2
@@ -451,9 +455,17 @@ lower_core_check() {
     return 2
   fi
   for n in $CORE_CHECK_FIXTURES; do
-    if ! "$WORK/port-m$EXE" lower "$REPO_NATIVE/bench/fixtures/$n.iyi" "$WORK_NATIVE/$n.oracle.ll" > "$WORK/m.out" 2> "$WORK/m.err"; then
+    result=0
+    "$WORK/port-m$EXE" lower "$REPO_NATIVE/bench/fixtures/$n.iyi" "$WORK_NATIVE/$n.oracle.ll" > "$WORK/m.out" 2> "$WORK/m.err" || result=$?
+    if [ "$result" -ne 0 ]; then
+      if [ "$n" = "$refused_fixture" ] &&
+         awk '/^SUMMARY/ { split($2,a,"="); split($3,b,"="); if (a[2] == b[2] && b[2] > 0) ok=1 } END { exit !ok }' "$WORK/$n.port.out" &&
+         expected_refusal "$result" "$WORK/m.err" src/compiler/lower/pending.iyi "$refused_message"; then
+        echo "decisive: $n: $(refusal_note "$result" "$WORK/m.err")"
+        return 1
+      fi
       echo "INVALID: core mutant could not compare $n"
-      cat "$WORK/m.err"
+      cat "$WORK/m.out" "$WORK/m.err"
       return 2
     fi
     awk '/^SUMMARY/ { split($2, a, "="); split($3, b, "="); exit !(a[2] == b[2] && a[2] > 0) }' "$WORK/m.out" || return 1
@@ -528,11 +540,27 @@ constant_path_check() {
     cat "$WORK/const-path-mut.log" | tee "$WORK/m.invalid"
     return 2
   fi
-  "$WORK/const-path-mut$EXE" lower "$REPO_NATIVE/bench/fixtures/lowconst_path.iyi" "$WORK_NATIVE/lowconst_path.oracle.ll" > "$WORK/const-path-mut.out" 2>&1 || { cat "$WORK/const-path-mut.out"; return 2; }
+  local result=0
+  "$WORK/const-path-mut$EXE" lower "$REPO_NATIVE/bench/fixtures/lowconst_path.iyi" "$WORK_NATIVE/lowconst_path.oracle.ll" > "$WORK/const-path-mut.out" 2>"$WORK/const-path-mut.err" || result=$?
+  if [ "$result" -ne 0 ]; then
+    if [ -f "$WORK/const-path.baseline" ] && expected_refusal "$result" "$WORK/const-path-mut.err" src/compiler/lower/pending.iyi '^lower: constant Second::ALIAS is a path to another constant: the hosted MathInterpreter may inline it \(hosted const\.cr: compile_time_value\)$'; then
+      echo "decisive: $(refusal_note "$result" "$WORK/const-path-mut.err")"
+      return 1
+    fi
+    echo 'INVALID: constant-path probe failed outside its expected refusal'
+    cat "$WORK/const-path-mut.out" "$WORK/const-path-mut.err"
+    return 2
+  fi
   awk '/^SUMMARY/ { split($2,a,"="); split($3,b,"="); split($4,c,"="); if (a[2] != b[2] || b[2] == 0 || c[2] != 1) bad=1; n++ } END { exit (bad || n == 0) }' "$WORK/const-path-mut.out"
 }
-prove_mutation "a constant alias is not folded" "$REPO/src/compiler/lower/const.iyi" \
-  '    return literal_path_value(low, const)' '    return nil' -- constant_path_check || status=1
+if constant_path_check; then
+  : > "$WORK/const-path.baseline"
+  prove_mutation "a constant alias is not folded" "$REPO/src/compiler/lower/const.iyi" \
+    '    return literal_path_value(low, const)' '    return nil' -- constant_path_check || status=1
+else
+  echo "FAIL: constant alias baseline does not match"
+  status=1
+fi
 
 wide_constant_check() {
   if ! "$IYI" build -o "$WORK_NATIVE/const-wide-mut$EXE" "$REPO_NATIVE/bench/selfhost_lower_core_exercise.iyi" > "$WORK/const-wide-mut.log" 2>&1; then
@@ -599,12 +627,24 @@ prove_mutation "Bool union storage drops the widened value" "$REPO/src/compiler/
 
 # These fixtures must lower, rather than entering the general loop's named waiting set.
 nil_flow_check() {
+  local expected_assertion="" result=0
+  if [ "${1:-}" = "--assert" ]; then expected_assertion="$2"; shift 2; fi
   if ! "$IYI" build -o "$WORK_NATIVE/nil-flow$EXE" "$REPO_NATIVE/bench/selfhost_lower_core_exercise.iyi" > "$WORK/nil-flow.build.log" 2>&1; then
     cat "$WORK/nil-flow.build.log" | tee "$WORK/nil-flow.invalid"
     return 2
   fi
-  "$WORK/nil-flow$EXE" context > "$WORK/nil-flow.context" 2>&1 || { cat "$WORK/nil-flow.context"; return 2; }
-  grep -qx 'CONTEXT OK' "$WORK/nil-flow.context" || return 1
+  "$WORK/nil-flow$EXE" context > "$WORK/nil-flow.context" 2>"$WORK/nil-flow.context.err" || result=$?
+  if [ "$result" -ne 0 ]; then
+    if [ "$result" -eq 1 ] && [ -n "$expected_assertion" ] &&
+       [ ! -s "$WORK/nil-flow.context.err" ] && grep -Fxq "$expected_assertion" "$WORK/nil-flow.context"; then
+      echo "decisive: $expected_assertion"
+      return 1
+    fi
+    echo "INVALID: nil-flow context probe failed outside the expected assertion"
+    cat "$WORK/nil-flow.context" "$WORK/nil-flow.context.err"
+    return 2
+  fi
+  grep -qx 'CONTEXT OK' "$WORK/nil-flow.context" || { echo 'INVALID: nil-flow context marker missing'; return 2; }
   local name
   for name in "$@"; do
     "$WORK/nil-flow$EXE" lower "$REPO_NATIVE/bench/fixtures/$name.iyi" "$WORK_NATIVE/$name.oracle.ll" > "$WORK/nil-flow.out" 2> "$WORK/nil-flow.err" || { cat "$WORK/nil-flow.err"; return 2; }
@@ -616,9 +656,9 @@ if nil_flow_check lower_or_nil_left; then
     '    elsif else_type && (then_unreachable || then_dead || speculative)' \
     '    elsif else_type && (then_unreachable || speculative)' -- nil_flow_check lower_or_nil_left || status=1
   prove_mutation "a narrowed-out read records a loop refusal" "$REPO/src/compiler/semantic/main_visitor.iyi" \
-    '      if reason == narrowed_out_reason(node.name)' '      if false' -- nil_flow_check lower_or_nil_left || status=1
+    '      if reason == narrowed_out_reason(node.name)' '      if false' -- nil_flow_check --assert 'CONTEXT FAILED: narrowed variable recorded a refusal' lower_or_nil_left || status=1
   prove_mutation "hidden build-name collision shifts later string globals" "$REPO/bench/selfhost_lower_core_exercise.iyi" \
-    '  return lines if offset == 0' '  return lines' -- nil_flow_check lower_or_nil_left || status=1
+    '  return lines if offset == 0' '  return lines' -- nil_flow_check --assert 'CONTEXT FAILED: hidden global suffix offset' lower_or_nil_left || status=1
 else
   echo "FAIL: nil-left alternatives do not match the hosted module"
   status=1
@@ -645,11 +685,11 @@ fi
 if "$WORK/port$EXE" lower "$REPO_NATIVE/bench/fixtures/lower_trait.iyi" "$WORK_NATIVE/lower_trait.oracle.ll" > "$WORK/trait.out" 2>&1 &&
   awk '/^SUMMARY/ { split($2, a, "="); split($3, b, "="); exit !(a[2] == b[2] && a[2] > 0) }' "$WORK/trait.out"; then
   prove_mutation "trait declaration is not visited" "$REPO/src/compiler/lower/lower.iyi" \
-    'if node.is_a?(TraitDef)' 'if false && node.is_a?(TraitDef)' -- lower_core_check || status=1
+    'if node.is_a?(TraitDef)' 'if false && node.is_a?(TraitDef)' -- lower_core_check lower_trait '^lower: visit\(TraitDef\) \(hosted codegen\.cr\) is not ported yet$' || status=1
   prove_mutation "impl declaration is not visited" "$REPO/src/compiler/lower/lower.iyi" \
-    'if node.is_a?(ImplDef)' 'if false && node.is_a?(ImplDef)' -- lower_core_check || status=1
+    'if node.is_a?(ImplDef)' 'if false && node.is_a?(ImplDef)' -- lower_core_check lower_trait '^lower: visit\(ImplDef\) \(hosted codegen\.cr\) is not ported yet$' || status=1
   prove_mutation "associated type declaration is not visited" "$REPO/src/compiler/lower/lower.iyi" \
-    'if node.is_a?(AssocTypeDecl)' 'if false && node.is_a?(AssocTypeDecl)' -- lower_core_check || status=1
+    'if node.is_a?(AssocTypeDecl)' 'if false && node.is_a?(AssocTypeDecl)' -- lower_core_check lower_trait_assoc '^lower: visit\(AssocTypeDecl\) \(hosted codegen\.cr\) is not ported yet$' || status=1
   prove_mutation "logical temporary loses static truthiness" "$REPO/src/compiler/lower/lower.iyi" \
     'settled = static_condition(low, cond_node)' 'settled : Bool? = nil' -- lower_core_check || status=1
 else
@@ -724,12 +764,24 @@ fi
 
 pointer_malloc_check() {
   "$IYI" build -o "$WORK_NATIVE/port-n$EXE" "$REPO_NATIVE/bench/selfhost_lower_core_exercise.iyi" > "$WORK/n.build.log" 2>&1 || { cat "$WORK/n.build.log"; return 2; }
-  "$WORK/port-n$EXE" emit "$REPO_NATIVE/bench/fixtures/lower_pointer_malloc.iyi" "$WORK_NATIVE/lower_pointer_malloc.oracle.ll" > "$WORK/ptr_malloc.ir" 2>"$WORK/ptr_malloc.err" || { cat "$WORK/ptr_malloc.err"; return 2; }
+  local result=0
+  "$WORK/port-n$EXE" emit "$REPO_NATIVE/bench/fixtures/lower_pointer_malloc.iyi" "$WORK_NATIVE/lower_pointer_malloc.oracle.ll" > "$WORK/ptr_malloc.ir" 2>"$WORK/ptr_malloc.err" || result=$?
+  if [ "$result" -ne 0 ]; then
+    if [ -f "$WORK/ptr-malloc.baseline" ] &&
+       expected_refusal "$result" "$WORK/ptr_malloc.err" src/compiler/lower/pending.iyi '^lower: visit\(Pointer#malloc with a count that is not the size type \(hosted generic_array_malloc: builder\.mul of the size and the count\)\) \(hosted codegen\.cr\) is not ported yet$'; then
+      echo "decisive: $(refusal_note "$result" "$WORK/ptr_malloc.err")"
+      return 1
+    fi
+    echo 'INVALID: Pointer#malloc probe failed outside its expected refusal'
+    cat "$WORK/ptr_malloc.ir" "$WORK/ptr_malloc.err"
+    return 2
+  fi
   awk '/call ptr.*@malloc\(i64/ { m = 1 } /intrinsic llvm\.memset\.p0\.i64/ { s = 1 } END { exit !(m && s) }' "$WORK/ptr_malloc.ir"
 }
 echo "  Pointer(UInt8).malloc emits C malloc and memset:"
 if pointer_malloc_check; then
   echo "    yes"
+  : > "$WORK/ptr-malloc.baseline"
 else
   echo "    no"
   status=1
@@ -747,8 +799,8 @@ prove_mutation "a by-value block call joins by value, not by address" "$REPO/src
 prove_mutation "a by-value yield tail joins without its address" "$REPO/src/compiler/lower/block.iyi" \
   "      low.last = join_pointer(low, value.as(Value), body_type.as(Type), bt.as(Type))" \
   "      low.last = low.last" -- lower_core_check || status=1
-prove_mutation "a long string constant is named in full, not truncated" "$REPO/src/compiler/lower/helpers.iyi" \
-  'name_text = first_chars(name_text, 19) + "..."' 'name_text = name_text' -- long_name_check || status=1
+prove_mutation "a long string constant is truncated after twenty characters" "$REPO/src/compiler/lower/helpers.iyi" \
+  'name_text = first_chars(name_text, 19) + "..."' 'name_text = first_chars(name_text, 20) + "..."' -- long_name_check || status=1
 prove_mutation "a non-ASCII long string constant is cut in bytes, not characters" "$REPO/src/compiler/lower/helpers.iyi" \
   'name_text = first_chars(name_text, 19) + "..."' 'name_text = name_text[0, 19] + "..."' -- nonascii_name_check || status=1
 prove_mutation "a renamed global takes the number after the next" "$REPO/src/compiler/lower/helpers.iyi" \
@@ -780,7 +832,7 @@ prove_mutation "the then and else branches are swapped" "$REPO/src/compiler/lowe
 prove_mutation "the while body is the condition" "$REPO/src/compiler/lower/lower.iyi" \
   "codegen_node(low, node.body)" "codegen_node(low, node.cond)" -- lower_core_check || status=1
 prove_mutation "a typed break target is ignored" "$REPO/src/compiler/lower/lower.iyi" \
-  "when Break  then node.target" "when Break  then node" -- lower_core_check || status=1
+  "when Break  then node.target" "when Break  then node" -- lower_core_check context '^lower: typed jump target disagrees with lexical target \(hosted execute_ensures_until\)$' || status=1
 prove_mutation "mismatched jump targets are accepted" "$REPO/src/compiler/lower/lower.iyi" \
   'typed.object_id != lexical.object_id' 'typed.object_id == lexical.object_id' -- lower_core_check || status=1
 prove_mutation "a char is its code point plus one" "$REPO/src/compiler/lower/lower.iyi" \
@@ -799,8 +851,8 @@ prove_mutation "the oracle rewriter reads a quoted callee name to its first pare
   'if (substr(s, i, 1) == "\"") return i' 'if (substr(s, i, 1) == "\"") return index(s, "(") - 1' -- quoted_callee_check || status=1
 prove_mutation "an asm-referenced runtime fun is internal, not external" "$REPO/src/compiler/lower/lower.iyi" \
   'if asm_referenced_fun?(name) || name == "__iyi_new"' 'if name == "__iyi_new"' -- lower_core_check || status=1
-prove_mutation "a UInt64 literal past Int64 max is read with to_i64, not its bit pattern" "$REPO/src/compiler/lower/lower.iyi" \
-  "const_int(ir, uint64_bits(node.value.to_u64))" "const_int(ir, node.value.to_i64)" -- lower_core_check || status=1
+prove_mutation "a UInt64 literal past Int64 max loses its high bit" "$REPO/src/compiler/lower/lower.iyi" \
+  "const_int(ir, uint64_bits(node.value.to_u64))" "const_int(ir, uint64_bits(node.value.to_u64 & 9223372036854775807_u64))" -- lower_core_check || status=1
 prove_mutation "a proc literal's name uses the file as given, not relative to the working directory" "$REPO/src/compiler/lower/proc.iyi" \
   'symbol_text(relative_filename(loc.filename))' 'symbol_text(loc.filename)' -- lower_core_check || status=1
 prove_mutation "an uninitialized variable's value is the slot itself, not a load of it" "$REPO/src/compiler/lower/lower.iyi" \
@@ -1011,8 +1063,20 @@ fi
 
 probe_reuse_check() {
   "$IYI" build -o "$WORK_NATIVE/port-p$EXE" "$REPO_NATIVE/bench/selfhost_lower_core_exercise.iyi" > "$WORK/probe.build.log" 2>&1 || { cat "$WORK/probe.build.log"; return 2; }
-  "$WORK/port-p$EXE" probe-reuse "$REPO_NATIVE/bench/fixtures/lower_probe_reuse.iyi" > "$WORK/probe.out" 2>"$WORK/probe.err" || { cat "$WORK/probe.err"; return 2; }
-  awk '/^callee-clean=0$/ { ok = 1 } END { exit !ok }' "$WORK/probe.out"
+  local result=0
+  "$WORK/port-p$EXE" probe-reuse "$REPO_NATIVE/bench/fixtures/lower_probe_reuse.iyi" > "$WORK/probe.out" 2>"$WORK/probe.err" || result=$?
+  if [ "$result" -eq 0 ] && grep -Fxq 'callee-clean=0' "$WORK/probe.out"; then
+    : > "$WORK/probe.baseline"
+    return 0
+  fi
+  if [ "$result" -eq 1 ] && [ -f "$WORK/probe.baseline" ] && [ ! -s "$WORK/probe.err" ] &&
+     grep -Fxq 'callee-clean=1' "$WORK/probe.out"; then
+    echo 'decisive: callee-clean=1'
+    return 1
+  fi
+  echo 'INVALID: probe-reuse did not complete or report its expected marker'
+  cat "$WORK/probe.out" "$WORK/probe.err"
+  return 2
 }
 echo
 echo "== 2d. A failed probe does not leave a callee a later call records clean"
@@ -1105,12 +1169,28 @@ else
 fi
 generic_ivar_check() {
   "$IYI" build -o "$WORK_NATIVE/port-g$EXE" "$REPO_NATIVE/bench/selfhost_lower_core_exercise.iyi" > "$WORK/g.build.log" 2>&1 || { cat "$WORK/g.build.log"; return 2; }
-  "$WORK/port-g$EXE" lower "$REPO_NATIVE/bench/fixtures/lower_generic_ivar.iyi" "$WORK_NATIVE/lower_generic_ivar.oracle.ll" > "$WORK/g.out" 2> "$WORK/g.err" || { cat "$WORK/g.err"; return 2; }
+  local result=0
+  "$WORK/port-g$EXE" lower "$REPO_NATIVE/bench/fixtures/lower_generic_ivar.iyi" "$WORK_NATIVE/lower_generic_ivar.oracle.ll" > "$WORK/g.out" 2> "$WORK/g.err" || result=$?
+  if [ "$result" -ne 0 ]; then
+    if [ -f "$WORK/generic-ivar.baseline" ] && expected_refusal "$result" "$WORK/g.err" src/compiler/lower/pending.iyi '^lower: instance variable @value of Box\(Int32\): not a class or struct \(hosted instance_var_ptr, union or virtual owner\) \(slice S2a\)$'; then
+      echo "decisive: $(refusal_note "$result" "$WORK/g.err")"
+      return 1
+    fi
+    echo 'INVALID: generic ivar failed outside its expected refusal'
+    cat "$WORK/g.out" "$WORK/g.err"
+    return 2
+  fi
   awk '/^SUMMARY/ { split($2, a, "="); split($3, b, "="); exit !(a[2] == b[2] && a[2] > 0) }' "$WORK/g.out"
 }
-prove_mutation "a generic class instance has no instance variables" "$REPO/src/compiler/lower/instance_var.iyi" \
-  "  if owner.is_a?(GenericClassInstanceType)" \
-  "  if false" -- generic_ivar_check || status=1
+if generic_ivar_check; then
+  : > "$WORK/generic-ivar.baseline"
+  prove_mutation "a generic class instance has no instance variables" "$REPO/src/compiler/lower/instance_var.iyi" \
+    "  if owner.is_a?(GenericClassInstanceType)" \
+    "  if false" -- generic_ivar_check || status=1
+else
+  echo 'FAIL: generic instance-variable baseline differs'
+  status=1
+fi
 pointerof_ivar_check() {
   "$IYI" build -o "$WORK_NATIVE/port-pivar$EXE" "$REPO_NATIVE/bench/selfhost_lower_core_exercise.iyi" > "$WORK/pivar.build.log" 2>&1 || { cat "$WORK/pivar.build.log"; return 2; }
   "$WORK/port-pivar$EXE" lower "$REPO_NATIVE/bench/fixtures/lower_pointerof_ivar.iyi" "$WORK_NATIVE/lower_pointerof_ivar.oracle.ll" > "$WORK/pivar.out" 2> "$WORK/pivar.err" || { cat "$WORK/pivar.err"; return 2; }
@@ -1295,10 +1375,21 @@ else
 fi
 case_expansion_check() {
   "$IYI" build -o "$WORK_NATIVE/port-case$EXE" "$REPO_NATIVE/bench/selfhost_lower_core_exercise.iyi" > "$WORK/case.build.log" 2>&1 || { cat "$WORK/case.build.log"; return 2; }
-  "$WORK/port-case$EXE" lower "$REPO_NATIVE/bench/fixtures/lower_case.iyi" "$WORK_NATIVE/lower_case.oracle.ll" > "$WORK/case.out" 2> "$WORK/case.err" || { cat "$WORK/case.err"; return 2; }
+  local result=0
+  "$WORK/port-case$EXE" lower "$REPO_NATIVE/bench/fixtures/lower_case.iyi" "$WORK_NATIVE/lower_case.oracle.ll" > "$WORK/case.out" 2> "$WORK/case.err" || result=$?
+  if [ "$result" -ne 0 ]; then
+    if [ -f "$WORK/case.baseline" ] && expected_refusal "$result" "$WORK/case.err" src/compiler/lower/pending.iyi '^lower: visit\(Case\) \(hosted codegen\.cr\) is not ported yet$'; then
+      echo "decisive: $(refusal_note "$result" "$WORK/case.err")"
+      return 1
+    fi
+    echo 'INVALID: case fixture failed outside its expected refusal'
+    cat "$WORK/case.out" "$WORK/case.err"
+    return 2
+  fi
   awk '/^SUMMARY/ { split($2, a, "="); split($3, b, "="); split($4, c, "="); exit !(a[2] == b[2] && a[2] > 0 && c[2] == 1) }' "$WORK/case.out"
 }
 if case_expansion_check; then
+  : > "$WORK/case.baseline"
   prove_mutation "case expansion is not visited" "$REPO/src/compiler/lower/lower.iyi" \
     '  if node.is_a?(Case)' '  if false && node.is_a?(Case)' -- case_expansion_check || status=1
 else
@@ -1451,10 +1542,26 @@ fi
 # naming lane (mangled_name)
 # The program-level lower of lower_name_owner waits: call.iyi refuses a call inherited
 # from a superclass. The name itself is the hosted symbol, probed on the def alone.
+name_owner_result() {
+  local out="$1" err="$2" result="$3"
+  if [ "$result" -eq 0 ] && grep -Fxq 'NAME-OWNER MATCH' "$out"; then
+    : > "$out.baseline"
+    return 0
+  fi
+  if [ "$result" -eq 1 ] && [ -f "$out.baseline" ] && [ ! -s "$err" ] &&
+     grep -Eq '^NAME-OWNER MISMATCH port=.+ hosted=.+$' "$out"; then
+    grep '^NAME-OWNER MISMATCH ' "$out" | while IFS= read -r line; do echo "decisive: $line"; done
+    return 1
+  fi
+  echo 'INVALID: name-owner probe did not report its expected comparison'
+  cat "$out" "$err"
+  return 2
+}
 name_owner_check() {
   "$IYI" build -o "$WORK_NATIVE/name-port$EXE" "$REPO_NATIVE/bench/selfhost_lower_name_owner.iyi" > "$WORK/name.build.log" 2>&1 || { cat "$WORK/name.build.log"; return 2; }
-  "$WORK/name-port$EXE" "$REPO_NATIVE/bench/fixtures/lower_name_owner.iyi" "$WORK_NATIVE/lower_name_owner.oracle.ll" > "$WORK/name.out" 2> "$WORK/name.err" || { cat "$WORK/name.err"; return 2; }
-  awk '/^NAME-OWNER MATCH$/ { ok = 1 } END { exit !ok }' "$WORK/name.out"
+  local result=0
+  "$WORK/name-port$EXE" "$REPO_NATIVE/bench/fixtures/lower_name_owner.iyi" "$WORK_NATIVE/lower_name_owner.oracle.ll" > "$WORK/name.out" 2> "$WORK/name.err" || result=$?
+  name_owner_result "$WORK/name.out" "$WORK/name.err" "$result"
 }
 echo
 echo "== naming lane (mangled_name)"
@@ -1471,8 +1578,9 @@ prove_mutation "an inherited method drops its defining owner" "$REPO/src/compile
 
 name_metaclass_check() {
   "$IYI" build -o "$WORK_NATIVE/name-meta-port$EXE" "$REPO_NATIVE/bench/selfhost_lower_name_owner.iyi" > "$WORK/name-meta.build.log" 2>&1 || { cat "$WORK/name-meta.build.log"; return 2; }
-  "$WORK/name-meta-port$EXE" "$REPO_NATIVE/bench/fixtures/lower_name_metaclass.iyi" "$WORK_NATIVE/lower_name_metaclass.oracle.ll" metaclass > "$WORK/name-meta.out" 2> "$WORK/name-meta.err" || { cat "$WORK/name-meta.err"; return 2; }
-  awk '/^NAME-OWNER MATCH$/ { ok = 1 } END { exit !ok }' "$WORK/name-meta.out"
+  local result=0
+  "$WORK/name-meta-port$EXE" "$REPO_NATIVE/bench/fixtures/lower_name_metaclass.iyi" "$WORK_NATIVE/lower_name_metaclass.oracle.ll" metaclass > "$WORK/name-meta.out" 2> "$WORK/name-meta.err" || result=$?
+  name_owner_result "$WORK/name-meta.out" "$WORK/name-meta.err" "$result"
 }
 if name_metaclass_check; then
   echo "  lower_name_metaclass: *NameOwner::class_flag<Int32>:Int32"
@@ -1487,8 +1595,9 @@ prove_mutation "a metaclass is named as an instance" "$REPO/src/compiler/lower/f
 
 name_return_check() {
   "$IYI" build -o "$WORK_NATIVE/name-return-port$EXE" "$REPO_NATIVE/bench/selfhost_lower_name_owner.iyi" > "$WORK/name-return.build.log" 2>&1 || { cat "$WORK/name-return.build.log"; return 2; }
-  "$WORK/name-return-port$EXE" "$REPO_NATIVE/bench/fixtures/lower_name_return.iyi" "$WORK_NATIVE/lower_name_return.oracle.ll" return > "$WORK/name-return.out" 2> "$WORK/name-return.err" || { cat "$WORK/name-return.err"; return 2; }
-  awk '/^NAME-OWNER MATCH$/ { ok = 1 } END { exit !ok }' "$WORK/name-return.out"
+  local result=0
+  "$WORK/name-return-port$EXE" "$REPO_NATIVE/bench/fixtures/lower_name_return.iyi" "$WORK_NATIVE/lower_name_return.oracle.ll" return > "$WORK/name-return.out" 2> "$WORK/name-return.err" || result=$?
+  name_owner_result "$WORK/name-return.out" "$WORK/name-return.err" "$result"
 }
 if name_return_check; then
   echo "  lower_name_return: *NameReturn::write<UInt64>:Nil"
@@ -1503,8 +1612,9 @@ prove_mutation "the probe names the body type instead of the def type" "$REPO/sr
 
 name_generic_check() {
   "$IYI" build -o "$WORK_NATIVE/name-generic-port$EXE" "$REPO_NATIVE/bench/selfhost_lower_name_owner.iyi" > "$WORK/name-generic.build.log" 2>&1 || { cat "$WORK/name-generic.build.log"; return 2; }
-  "$WORK/name-generic-port$EXE" "$REPO_NATIVE/bench/fixtures/lower_name_generic.iyi" "$WORK_NATIVE/lower_name_generic.oracle.ll" generic > "$WORK/name-generic.out" 2> "$WORK/name-generic.err" || { cat "$WORK/name-generic.err"; return 2; }
-  awk '/^NAME-OWNER MATCH$/ { ok = 1 } END { exit !ok }' "$WORK/name-generic.out"
+  local result=0
+  "$WORK/name-generic-port$EXE" "$REPO_NATIVE/bench/fixtures/lower_name_generic.iyi" "$WORK_NATIVE/lower_name_generic.oracle.ll" generic > "$WORK/name-generic.out" 2> "$WORK/name-generic.err" || result=$?
+  name_owner_result "$WORK/name-generic.out" "$WORK/name-generic.err" "$result"
 }
 if name_generic_check; then
   echo "  lower_name_generic: *Box(Int32)^Box(T)#get<Int32>:Int32"
@@ -1519,8 +1629,9 @@ prove_mutation "a generic instance drops its defining generic owner" "$REPO/src/
 
 name_pointer_check() {
   "$IYI" build -o "$WORK_NATIVE/name-pointer-port$EXE" "$REPO_NATIVE/bench/selfhost_lower_name_owner.iyi" > "$WORK/name-pointer.build.log" 2>&1 || { cat "$WORK/name-pointer.build.log"; return 2; }
-  "$WORK/name-pointer-port$EXE" "$REPO_NATIVE/bench/fixtures/lower_name_pointer_union.iyi" "$WORK_NATIVE/lower_name_pointer_union.oracle.ll" pointer > "$WORK/name-pointer.out" 2> "$WORK/name-pointer.err" || { cat "$WORK/name-pointer.err"; return 2; }
-  awk '/^NAME-OWNER MATCH$/ { ok = 1 } END { exit !ok }' "$WORK/name-pointer.out"
+  local result=0
+  "$WORK/name-pointer-port$EXE" "$REPO_NATIVE/bench/fixtures/lower_name_pointer_union.iyi" "$WORK_NATIVE/lower_name_pointer_union.oracle.ll" pointer > "$WORK/name-pointer.out" 2> "$WORK/name-pointer.err" || result=$?
+  name_owner_result "$WORK/name-pointer.out" "$WORK/name-pointer.err" "$result"
 }
 if name_pointer_check; then
   echo "  lower_name_pointer_union: *pass_pointer<Pointer(Int32 | Nil)>:Pointer(Int32 | Nil)"
@@ -1538,8 +1649,9 @@ name_block_check() {
   if [ "$HOST_ID" != darwin-arm64 ]; then target=(--cross-compile --target aarch64-apple-darwin); output="$WORK_NATIVE/name-block-oracle.o"; fi
   "$IYI" build "${target[@]}" --prelude empty --emit llvm-ir --no-debug -o "$output" "$REPO_NATIVE/bench/fixtures/nameblock_capture.iyi" > "$WORK/name-block.oracle.log" 2>&1 || { cat "$WORK/name-block.oracle.log"; return 2; }
   "$IYI" build -o "$WORK_NATIVE/name-block-port$EXE" "$REPO_NATIVE/bench/selfhost_lower_name_owner.iyi" > "$WORK/name-block.build.log" 2>&1 || { cat "$WORK/name-block.build.log"; return 2; }
-  "$WORK/name-block-port$EXE" "$REPO_NATIVE/bench/fixtures/nameblock_capture.iyi" "$WORK_NATIVE/name-block-oracle.ll" block > "$WORK/name-block.out" 2> "$WORK/name-block.err" || { cat "$WORK/name-block.err"; return 2; }
-  awk '/^NAME-OWNER MATCH$/ { ok = 1 } END { exit !ok }' "$WORK/name-block.out"
+  local result=0
+  "$WORK/name-block-port$EXE" "$REPO_NATIVE/bench/fixtures/nameblock_capture.iyi" "$WORK_NATIVE/name-block-oracle.ll" block > "$WORK/name-block.out" 2> "$WORK/name-block.err" || result=$?
+  name_owner_result "$WORK/name-block.out" "$WORK/name-block.err" "$result"
 }
 if name_block_check; then
   echo "  nameblock_capture: captured block names match the hosted symbols"

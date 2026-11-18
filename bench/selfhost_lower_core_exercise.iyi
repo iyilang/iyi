@@ -257,7 +257,10 @@ def check_context : Nil
   reason = probe.narrowed_out_reason("narrowed")
   probe.untyped_locals["narrowed"] = reason
   narrowed.accept(probe)
-  raise "CONTEXT FAILED: narrowed variable recorded a refusal" unless probe.refusals.empty?
+  unless probe.refusals.empty?
+    puts "CONTEXT FAILED: narrowed variable recorded a refusal"
+    exit(1)
+  end
   raise "CONTEXT FAILED: narrowed variable lost its reason" unless probe.untyped_reasons[narrowed]? == reason
   ordinary = Var.new("ordinary")
   probe.untyped_locals["ordinary"] = "ordinary untyped value"
@@ -265,7 +268,10 @@ def check_context : Nil
   raise "CONTEXT FAILED: ordinary untyped variable lost its refusal" unless probe.refusals.size == 1
   named = ["@\"'a'.2\" = private constant i32 1", "@\"'b'.3\" = private constant i32 2", "use @\"'a'.2\", @\"'b'.3\", @other.2"] of String
   shifted = ["@\"'a'.1\" = private constant i32 1", "@\"'b'.2\" = private constant i32 2", "use @\"'a'.1\", @\"'b'.2\", @other.2"] of String
-  raise "CONTEXT FAILED: hidden global suffix offset" unless normalise_hidden_uniques(named, ["'build'.1"] of String) == shifted
+  unless normalise_hidden_uniques(named, ["'build'.1"] of String) == shifted
+    puts "CONTEXT FAILED: hidden global suffix offset"
+    exit(1)
+  end
   raise "CONTEXT FAILED: suffixes changed without hidden collisions" unless normalise_hidden_uniques(named, ["'build'"] of String) == named
   m = ir_module("aarch64-apple-darwin27.0.0")
   typer = LowerTyper.new(m.types, m.layout, analysis.iyi)
@@ -409,7 +415,7 @@ def run_probe_reuse(fixture : String) : Nil
   callee = probe_message(analysis, typer, m, "callee")
   if callee.nil?
     puts "callee-clean=1"
-    raise "the callee was recorded clean"
+    exit(1)
   end
   puts "callee-clean=0"
 end

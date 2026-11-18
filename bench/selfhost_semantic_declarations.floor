@@ -2,7 +2,7 @@
 # A count may only rise. Raise with: SEMDECL_RAISE=1 bash bench/selfhost_semantic_declarations_exercise.sh
 <initial> 75
 samples/iyi/basics.iyi 2
-samples/iyi/calc.iyi 3
+samples/iyi/calc.iyi 4
 samples/iyi/collections.iyi 0
 samples/iyi/config.iyi 10
 samples/iyi/cores.iyi 0
@@ -172,7 +172,7 @@ src/compiler/semantic/type_node_host.iyi 0
 src/compiler/semantic/type_nodes.iyi 0
 src/compiler/semantic/typed.iyi 197
 src/compiler/stage1.iyi 4
-src/compiler/syntax/ast.iyi 1292
+src/compiler/syntax/ast.iyi 1293
 src/compiler/syntax/lexer.iyi 104
 src/compiler/syntax/parser.iyi 0
 src/compiler/syntax/token.iyi 231
@@ -216,8 +216,10 @@ src/iyi/chaos_points.iyi 7
 src/iyi/concurrency.iyi 0
 src/iyi/enum.iyi 16
 src/iyi/file.iyi 9
-src/iyi/float.iyi 71
+src/iyi/float.iyi 74
 src/iyi/hash.iyi 82
+src/iyi/heap_partition.iyi 295
+src/iyi/heap_verify.iyi 87
 src/iyi/io.iyi 56
 src/iyi/macros.iyi 1
 src/iyi/number.iyi 35
@@ -226,7 +228,7 @@ src/iyi/prelude.iyi 55
 src/iyi/primitives.iyi 36
 src/iyi/range.iyi 18
 src/iyi/set.iyi 15
-src/iyi/string.iyi 80
+src/iyi/string.iyi 81
 src/iyi/testing.iyi 16
 src/iyi/thread.iyi 0
 src/std/acme.iyi 0
@@ -261,7 +263,7 @@ src/std/ecdsa.iyi 0
 src/std/eiy.iyi 68
 src/std/enum.iyi 19
 src/std/enumerable.iyi 0
-src/std/env.iyi 40
+src/std/env.iyi 41
 src/std/errno.iyi 38
 src/std/file.iyi 126
 src/std/file_utils.iyi 20
@@ -284,12 +286,13 @@ src/std/io.iyi 0
 src/std/iterator.iyi 229
 src/std/json.iyi 308
 src/std/kernel.iyi 10
+src/std/lazy.iyi 0
 src/std/levenshtein.iyi 0
 src/std/list.iyi 0
 src/std/log.iyi 0
 src/std/mail.iyi 0
-src/std/math.iyi 645
-src/std/mime.iyi 19
+src/std/math.iyi 646
+src/std/mime.iyi 20
 src/std/mlkem.iyi 0
 src/std/mutex.iyi 0
 src/std/named_tuple.iyi 22

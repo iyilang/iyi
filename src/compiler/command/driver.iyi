@@ -541,6 +541,10 @@ pub class CommandDriver
     X::{a}` is `import X::{a}`, folded into a bare `import X`. Exit 0 when the file ends clean. When
     the remaining error lives in another file of the program, the
     verb names it (`cause` in `--json`): that is the file to fix next.
+    One edit is made in that other file itself: the `@[SafeReach]`
+    claim above a constant or class variable a parallel unit reaches,
+    offered only where the compiler proves it (SPEC.md III.4.5), and
+    never under std's or the library path's directories.
 
     Several files, or a directory - every .iyi under it, hidden
     directories and lib/ aside - are one run: every `using` in all

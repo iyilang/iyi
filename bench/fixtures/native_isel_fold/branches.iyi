@@ -1,0 +1,46 @@
+@[Unsafe("compares null and stack pointers without dereferencing them")]
+module branches
+
+def compare(x : Int64) : Int64
+  x > 5_i64 ? 71_i64 : 19_i64
+end
+
+def zero_eq(x : Int64) : Int64
+  x == 0_i64 ? 21_i64 : 22_i64
+end
+
+def zero_ne(x : Int64) : Int64
+  x != 0_i64 ? 31_i64 : 32_i64
+end
+
+def bit_zero(x : Int64) : Int64
+  (x & 32_i64) == 0_i64 ? 41_i64 : 42_i64
+end
+
+def bit_one(x : Int64) : Int64
+  (x & 32_i64) != 0_i64 ? 51_i64 : 52_i64
+end
+
+def shared_cmp(x : Int64) : Int64
+  x > 5_i64 ? 1_i64 : 7_i64
+end
+def null_eq(p : Pointer(Int64)) : Int64
+  p.address == 0_u64 ? 61_i64 : 62_i64
+end
+
+
+puts "#{compare(6_i64)}"
+puts "#{compare(4_i64)}"
+puts "#{zero_eq(0_i64)}"
+puts "#{zero_eq(4_i64)}"
+puts "#{zero_ne(0_i64)}"
+puts "#{zero_ne(4_i64)}"
+puts "#{bit_zero(0_i64)}"
+puts "#{bit_zero(32_i64)}"
+puts "#{bit_one(0_i64)}"
+puts "#{bit_one(32_i64)}"
+puts "#{shared_cmp(6_i64)}"
+puts "#{shared_cmp(4_i64)}"
+cell = 1_i64
+puts "#{null_eq(Pointer(Int64).new(0_u64))}"
+puts "#{null_eq(pointerof(cell))}"

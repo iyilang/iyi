@@ -1,0 +1,61 @@
+; iyi-ir 1
+module "memory"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external i32 @printf(ptr, ...)
+@fmt = private constant [5 x i8] c"%ld\0A\00"
+
+define internal i64 @frame(i64 %x) {
+entry:
+  %slot = alloca [4 x i64], align 8
+  store i64 %x, ptr %slot, align 8
+  %p = getelementptr i64, ptr %slot, i64 2
+  %second = add i64 %x, 3
+  store i64 %second, ptr %p, align 8
+  %q = getelementptr i64, ptr %slot, i64 2
+  %a = load i64, ptr %slot, align 8
+  %b = load i64, ptr %q, align 8
+  %sum = add i64 %a, %b
+  ret i64 %sum
+}
+
+define internal i64 @read_next(ptr %p) {
+entry:
+  %q = getelementptr i64, ptr %p, i64 1
+  %v = load i64, ptr %q, align 8
+  ret i64 %v
+}
+
+define internal i64 @read_prev(ptr %p) {
+entry:
+  %q = getelementptr i64, ptr %p, i64 -1
+  %v = load i64, ptr %q, align 8
+  ret i64 %v
+}
+
+define internal i64 @big_frame(i64 %x) {
+entry:
+  %slot = alloca [70000 x i8], align 8
+  %p = getelementptr i8, ptr %slot, i64 65536
+  store i64 %x, ptr %p, align 8
+  %q = getelementptr i8, ptr %slot, i64 65536
+  %v = load i64, ptr %q, align 8
+  ret i64 %v
+}
+
+define i32 @main() {
+entry:
+  %slot = alloca [2 x i64], align 8
+  store i64 7, ptr %slot, align 8
+  %p = getelementptr i64, ptr %slot, i64 1
+  store i64 12, ptr %p, align 8
+  %a = call i64 (i64) @frame(i64 10)
+  %b = call i64 (ptr) @read_next(ptr %slot)
+  %c = call i64 (ptr) @read_prev(ptr %p)
+  %d = call i64 (i64) @big_frame(i64 77)
+  %p0 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %a)
+  %p1 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %b)
+  %p2 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %c)
+  %p3 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %d)
+  ret i32 0
+}

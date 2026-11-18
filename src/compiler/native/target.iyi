@@ -103,5 +103,20 @@ pub def invert_branch(isa : Int32, inst : MInst) : Bool
     inst.cond = cond_invert(inst.cond) # invert-branch
     return true
   end
+  if isa == isa_aarch64
+    if inst.opcode == MOp::Cbz.value.to_i32
+      inst.opcode = MOp::Cbnz.value.to_i32 # invert-zero-branch
+      return true
+    elsif inst.opcode == MOp::Cbnz.value.to_i32
+      inst.opcode = MOp::Cbz.value.to_i32
+      return true
+    elsif inst.opcode == MOp::Tbz.value.to_i32
+      inst.opcode = MOp::Tbnz.value.to_i32
+      return true
+    elsif inst.opcode == MOp::Tbnz.value.to_i32
+      inst.opcode = MOp::Tbz.value.to_i32
+      return true
+    end
+  end
   false
 end

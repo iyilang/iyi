@@ -96,6 +96,16 @@ pub def aarch64_op(v : Int32) : MOp
   return MOp::AddTprelHi if v == MOp::AddTprelHi.value.to_i32
   return MOp::AddTprelLo if v == MOp::AddTprelLo.value.to_i32
   return MOp::InlineAsm if v == MOp::InlineAsm.value.to_i32
+  return MOp::CmnImm if v == MOp::CmnImm.value.to_i32
+  return MOp::OrrImm if v == MOp::OrrImm.value.to_i32
+  return MOp::EorImm if v == MOp::EorImm.value.to_i32
+  return MOp::LslImm if v == MOp::LslImm.value.to_i32
+  return MOp::LsrImm if v == MOp::LsrImm.value.to_i32
+  return MOp::AsrImm if v == MOp::AsrImm.value.to_i32
+  return MOp::Cbz if v == MOp::Cbz.value.to_i32
+  return MOp::Cbnz if v == MOp::Cbnz.value.to_i32
+  return MOp::Tbz if v == MOp::Tbz.value.to_i32
+  return MOp::Tbnz if v == MOp::Tbnz.value.to_i32
   raise "aarch64: opcode #{v} is not an MOp member"
 end
 
@@ -104,7 +114,7 @@ pub def aarch64_role(op : MOp) : Role
   return Role::Copy if op == MOp::Mov || op == MOp::FMov
   return Role::GprToFpr if op == MOp::FMovToFp
   return Role::Branch if op == MOp::B
-  return Role::CondBranch if op == MOp::Bcond
+  return Role::CondBranch if op == MOp::Bcond || op == MOp::Cbz || op == MOp::Cbnz || op == MOp::Tbz || op == MOp::Tbnz
   return Role::IndirectBranch if op == MOp::Br
   return Role::TableBranch if op == MOp::BrTable
   return Role::Return if op == MOp::Ret

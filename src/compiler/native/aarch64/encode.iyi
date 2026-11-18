@@ -18,6 +18,7 @@ import compiler/native/obj/object::{Reloc, RelocKind}
 import compiler/native/aarch64/regs::{cond_invert, reg_name}
 import compiler/native/aarch64/asm::{AsmAssembler}
 import compiler/native/aarch64/opcodes::{aarch64_op}
+import compiler/native/aarch64/fold::{logical_immediate}
 
 pub class EncodeError
   getter message : String
@@ -43,9 +44,9 @@ end
 class BranchFixup
   getter word_at : Int64
   getter target : Int32
-  getter wide : Bool # true: imm26 (B); false: imm19 (B.cond)
+  getter bits : Int32 # signed displacement width in instruction words
 
-  def initialize(@word_at : Int64, @target : Int32, @wide : Bool)
+  def initialize(@word_at : Int64, @target : Int32, @bits : Int32)
   end
 end
 
@@ -292,6 +293,18 @@ pub class Encoder
       word(0x91000000_i64 | (inst.imm << 10) | (field(inst.uses[0].reg) << 5) | field(inst.defs[0].reg))
     elsif op == MOp::SubImm
       word(0xD1000000_i64 | (inst.imm << 10) | (field(inst.uses[0].reg) << 5) | field(inst.defs[0].reg))
+    elsif op == MOp::OrrImm || op == MOp::EorImm
+      mask = logical_immediate(inst.imm)
+      raise "the encoder cannot encode #{inst.imm} as a logical immediate" unless mask
+      base = op == MOp::OrrImm ? 0xB2000000_i64 : 0xD2000000_i64
+      word(base | mask.as(Int64) | (field(inst.uses[0].reg) << 5) | field(inst.defs[0].reg))
+    elsif op == MOp::LslImm || op == MOp::LsrImm || op == MOp::AsrImm
+      shift = inst.imm
+      raise "invalid immediate shift #{shift}" if shift < 0_i64 || shift >= 64_i64
+      base = op == MOp::AsrImm ? 0x93400000_i64 : 0xD3400000_i64
+      immr = op == MOp::LslImm ? (64_i64 - shift) % 64_i64 : shift
+      imms = op == MOp::LslImm ? 63_i64 - shift : 63_i64
+      word(base | (immr << 16) | (imms << 10) | (field(inst.uses[0].reg) << 5) | field(inst.defs[0].reg))
     elsif op == MOp::Sbfm
       word(0x93400000_i64 | ((inst.imm - 1) << 10) | (field(inst.uses[0].reg) << 5) | field(inst.defs[0].reg))
     elsif op == MOp::Ubfm
@@ -300,6 +313,8 @@ pub class Encoder
       word(0xEB00001F_i64 | (field(inst.uses[1].reg) << 16) | (field(inst.uses[0].reg) << 5))
     elsif op == MOp::CmpImm
       word(0xF100001F_i64 | (inst.imm << 10) | (field(inst.uses[0].reg) << 5))
+    elsif op == MOp::CmnImm
+      word(0xB100001F_i64 | (inst.imm << 10) | (field(inst.uses[0].reg) << 5))
     elsif op == MOp::Cset
       word(0x9A9F07E0_i64 | (cond_invert(inst.cond).to_i64 << 12) | field(inst.defs[0].reg))
     elsif op == MOp::Csel
@@ -342,11 +357,20 @@ pub class Encoder
     elsif op == MOp::Fcvtzu
       word(fcvt_int_word(inst, 0x1E390000_i64, 0x1E790000_i64, 0x9E390000_i64, 0x9E790000_i64) | (field(inst.uses[0].reg) << 5) | field(inst.defs[0].reg))
     elsif op == MOp::B
-      @fixups << BranchFixup.new(here, inst.target, true)
+      @fixups << BranchFixup.new(here, inst.target, 26)
       word(0x14000000_i64)
     elsif op == MOp::Bcond
-      @fixups << BranchFixup.new(here, inst.target, false)
+      @fixups << BranchFixup.new(here, inst.target, 19)
       word(0x54000000_i64 | inst.cond.to_i64)
+    elsif op == MOp::Cbz || op == MOp::Cbnz
+      @fixups << BranchFixup.new(here, inst.target, 19)
+      base = op == MOp::Cbz ? 0xB4000000_i64 : 0xB5000000_i64
+      word(base | field(inst.uses[0].reg))
+    elsif op == MOp::Tbz || op == MOp::Tbnz
+      @fixups << BranchFixup.new(here, inst.target, 14)
+      raise "invalid test bit #{inst.imm}" if inst.imm < 0_i64 || inst.imm >= 64_i64
+      base = op == MOp::Tbz ? 0x36000000_i64 : 0x37000000_i64
+      word(base | ((inst.imm & 32_i64) << 26) | ((inst.imm & 31_i64) << 19) | field(inst.uses[0].reg))
     elsif op == MOp::Bl
       reloc(RelocKind::A64Call26, inst.sym)
       word(0x94000000_i64)
@@ -478,27 +502,9 @@ pub class Encoder
   # 22, immr at 16, imms at 10). The value must be one run of ones, rotated within the 64 bits: zero and all-ones
   # are not encodable. The run starts at bit `start`; immr rotates the canonical run (ones from bit 0) to there.
   def logical_imm(value : Int64) : Int64
-    ones = 0
-    starts = 0
-    start = 0
-    i = 0
-    while i < 64
-      bit = (value.unsafe_shr(i.to_i64)) & 1_i64
-      if bit == 1_i64
-        ones = ones + 1
-        prev = (value.unsafe_shr(((i + 63) % 64).to_i64)) & 1_i64
-        if prev == 0_i64
-          starts = starts + 1
-          start = i
-        end
-      end
-      i = i + 1
-    end
-    if ones == 0 || ones == 64 || starts != 1
-      raise "the encoder cannot encode #{value} as a 64-bit logical immediate"
-    end
-    immr = (64 - start) % 64
-    (1_i64 << 22) | (immr.to_i64 << 16) | ((ones - 1).to_i64 << 10)
+    mask = logical_immediate(value)
+    raise "the encoder cannot encode #{value} as a logical immediate" unless mask
+    mask.as(Int64)
   end
 
   def fcvt_int_word(inst : MInst, w_single : Int64, w_double : Int64, x_single : Int64, x_double : Int64) : Int64
@@ -516,16 +522,23 @@ pub class Encoder
     @fixups.each do |f|
       target = block_offsets[f.target]
       delta = (target - f.word_at) // 4
+      limit = 1_i64 << (f.bits - 1)
+      if delta < -limit || delta >= limit
+        @failure = "branch displacement #{delta} is outside signed #{f.bits}-bit range"
+        return
+      end
       word_value = 0_i64
       i = 0
       while i < 4
         word_value = word_value | (@bytes[(f.word_at + i).to_i32].to_i64 << (i * 8))
         i = i + 1
       end
-      if f.wide
+      if f.bits == 26
         word_value = word_value | (delta & 0x3FFFFFF_i64)
-      else
+      elsif f.bits == 19
         word_value = word_value | ((delta & 0x7FFFF_i64) << 5)
+      else
+        word_value = word_value | ((delta & 0x3FFF_i64) << 5)
       end
       i = 0
       while i < 4

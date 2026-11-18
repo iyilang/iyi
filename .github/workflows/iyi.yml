@@ -1641,6 +1641,9 @@ jobs:
       - name: Build `iyi`, its daemon, and the tarball
         run: make iyi-tarball LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config"
 
+      - name: Manifest and tree checksum specs
+        run: LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config" ./bin/crystal spec spec/compiler/mod_sum_spec.cr
+
       - name: Samples
         run: |
           for sample in samples/iyi/*.iyi; do
@@ -2609,6 +2612,10 @@ jobs:
         run: |
           make -f Makefile.win crystal || exit /b 1
           make -f Makefile.win iyi
+
+      - name: Manifest and tree checksum specs
+        shell: cmd
+        run: .\bin\crystal spec --no-color spec\compiler\mod_sum_spec.cr
 
       # Every exercise under bench/, run by the compiler built above. The
       # exclusions are named one by one, because a list nobody has to

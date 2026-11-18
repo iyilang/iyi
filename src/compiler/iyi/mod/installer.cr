@@ -74,7 +74,8 @@ module Iyi::Mod
     # each of them.
     def self.resolve(dir : String, root : ModFile) : Array({Selection, String})
       replaced = replaced_directories(dir, root)
-      selections = self.selections(dir, root)
+      checks = Sum.checker(dir)
+      selections = self.selections(dir, root, checks)
 
       # Fact against policy, before anything is compiled: every selection's
       # checkout is hashed against `iyi.sum`, a mismatch is a refusal, and a
@@ -98,26 +99,31 @@ module Iyi::Mod
       end
 
       fetched = selections.reject { |selection| replaced.has_key?(selection.path) }
-      Sum.check(dir, fetched) do |selection|
+      checks.trees(fetched) do |selection|
         Fetcher.checkout(selection.path, selection.version)
       end
+      checks.write
 
       selections.map do |selection|
         {selection, replaced[selection.path]? || Fetcher.checkout(selection.path, selection.version)}
       end
     end
 
-    # What *root*'s graph selects, and nothing else: no checkout beyond the
-    # manifests the walk reads, and `iyi.sum` neither checked nor written.
-    # The question `mod tidy` asks of manifests it has not written yet.
-    def self.selections(dir : String, root : ModFile) : Array(Selection)
+    # What *root*'s graph selects, and nothing else. An exploratory walk
+    # verifies known manifest hashes but does not write, so `mod tidy
+    # --check` and trials of a manifest leave the project untouched.
+    def self.selections(dir : String, root : ModFile, sums : Sum::Checker? = nil) : Array(Selection)
       replaced = replaced_directories(dir, root)
       manifests = {} of String => ModFile
+      checks = sums || Sum.checker(dir)
       Resolver.resolve(root) do |path, version|
         if local = replaced[path]?
           manifests[path] ||= local_manifest(path, local, root.replacements[path])
         else
-          Fetcher.manifest(path, version)
+          file = File.join(Fetcher.checkout(path, version), MANIFEST)
+          text = File.read(file)
+          checks.manifest(Selection.new(path, version), text)
+          ModFile.parse(text, file)
         end
       end
     end

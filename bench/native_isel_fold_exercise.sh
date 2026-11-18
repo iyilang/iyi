@@ -255,6 +255,10 @@ for fn, arithmetic in [("sadd64", "Adds"), ("ssub64", "Subs"), ("uadd64", "Adds"
                        ("sadd8", "Add"), ("uadd8", "Add")]:
     expect("overflow", fn, [op(arithmetic), op("Bcond")], [op("Cset")])
 expect("overflow", "early_value", [op("Cset"), op("Cbz")])
+for fn in ("overflow_zero", "overflow_narrow_zero"):
+    expect("deferred", fn, [op("Bcond"), r"^  Cb(n)?z/"], [op("Tbz"), op("Tbnz"), op("Cset")])
+expect("deferred", "overflow_compare", [op("Adds"), op("CmnImm"), op("Bcond")], [op("Cset")])
+expect("deferred", "multi_bit", [op("AndImm"), r"^  Cb(n)?z/"], [op("Tbz"), op("Tbnz"), op("Cset")])
 for problem in errors:
     print("INVALID: " + problem)
 for problem in defects:
@@ -280,7 +284,7 @@ if [ "$HOST_ID" = darwin-arm64 ]; then
       exit 1
     fi
   done
-  for key in branches memory immediates overflow; do
+  for key in branches memory immediates overflow deferred; do
     if ! ./bin/iyi build -o "$(native_path "$WORK/$key.hosted$EXE")" "$(native_path "$FIX/$key.iyi")" >"$WORK/$key.hosted.log" 2>&1; then
       cat "$WORK/$key.hosted.log"
       fail "$key: hosted twin did not build"
@@ -315,6 +319,17 @@ check_mutant() {
     touch "$MUTATION_INVALID"
     return 2
   fi
+  if [ "$key" = deferred ]; then
+    if ! "$mutant" mir "$(native_path "$FIX/deferred.ir")" overflow_zero >"$WORK/mutant.deferred.log" 2>&1; then
+      if grep -q 'index 1 out of range for 1 elements' "$WORK/mutant.deferred.log"; then
+        echo "decisive: deferred overflow leaf was mistaken for a bit test"
+        return 1
+      fi
+      cat "$WORK/mutant.deferred.log"
+      touch "$MUTATION_INVALID"
+      return 2
+    fi
+  fi
   check_output "$mutant" 1 "$key"
   rc=$?
   if [ "$rc" -eq 2 ]; then
@@ -339,6 +354,7 @@ if [ "$HOST_ID" = darwin-arm64 ]; then
   prove_fold_mutation "frame: dropped slot offset" src/compiler/native/aarch64/isel.iyi '      return {Operand.new(OperandKind::FrameSlot, slot, offset), 0_i64} # fold-frame-offset' '      return {Operand.new(OperandKind::FrameSlot, slot, 0_i64), 0_i64} # fold-frame-offset' memory
   prove_fold_mutation "immediate: accept an out-of-range value" src/compiler/native/aarch64/fold.iyi '  value >= -4095_i64 && value <= 4095_i64 # fold-immediate-range' '  value >= -4095_i64 && value <= 4096_i64 # fold-immediate-range' immediates
   prove_fold_mutation "inversion: leave zero branch unchanged" src/compiler/native/target.iyi '      inst.opcode = MOp::Cbnz.value.to_i32 # invert-zero-branch' '      inst.opcode = inst.opcode # invert-zero-branch' branches
+  prove_fold_mutation "deferred: overflow leaf is not a bit test" src/compiler/native/aarch64/isel.iyi '          if other.is_a?(Inst) && @deferred[other]? == DeferredKind::BitTest && bit_test(other) >= 0 # deferred-bit-test' '          if other.is_a?(Inst) && @deferred.has_key?(other) # deferred-bit-test' deferred
 else
   host_limited "runtime selector mutation proofs (macOS arm64)"
 fi

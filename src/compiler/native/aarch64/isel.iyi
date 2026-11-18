@@ -84,6 +84,19 @@ def int_cond(ordinal : Int64) : Int32
   cond_le
 end
 
+# A skipped producer is only consumed by the fold that planned it. Overflow
+# value leaves are different: their register is defined at the flag branch and
+# may be used by later blocks.
+enum DeferredKind
+  Address
+  Compare
+  Hint
+  BitTest
+  Overflow
+  OverflowFlag
+  OverflowValue
+end
+
 class Isel
   getter mf : MFunction
   getter layout : DataLayout
@@ -110,7 +123,7 @@ class Isel
     @uses = Hash(Value, Int32).new
     @users = Hash(Value, Array(Inst)).new
     @inst_blocks = Hash(Value, Int32).new
-    @deferred = Hash(Value, Bool).new
+    @deferred = Hash(Value, DeferredKind).new
     @slots = Hash(Value, Int32).new
     @overflow_value = Hash(Value, Inst).new
     @block_index = Hash(String, Int32).new
@@ -303,10 +316,39 @@ class Isel
     if v.is_a?(Inst) && is_const_op?(v.as(Inst).op)
       return const_leaves(v.as(Inst))
     end
+    if v.is_a?(Inst)
+      inst = v.as(Inst)
+      kind = @deferred[v]?
+      if kind == DeferredKind::Address || kind == DeferredKind::Compare || kind == DeferredKind::Hint || kind == DeferredKind::BitTest
+        @deferred.delete(v)
+        lower_inst(inst)
+      elsif kind == DeferredKind::Overflow
+        materialize_overflow(inst)
+      elsif kind == DeferredKind::OverflowFlag
+        source = inst.args[0].as(Inst)
+        materialize_overflow(source)
+        @deferred.delete(v)
+        lower_extract(inst)
+      end
+      # OverflowValue is already bound at its defining overflow branch. Its
+      # preallocated register can be used even if blocks are selected out of order.
+    end
     found = lookup(v)
     return found if found
     fail("a value is used before it is defined (#{v.name})")
     return [gpr]
+  end
+
+  # Abandon an overflow fold if its aggregate or flag is needed normally.
+  # Define the separately deferred value leaf as well as the aggregate.
+  def materialize_overflow(i : Inst) : Nil
+    return unless @deferred[i]? == DeferredKind::Overflow
+    @deferred.delete(i)
+    lower_intrinsic(i)
+    if leaf = @overflow_value[i]?
+      @deferred.delete(leaf)
+      lower_extract(leaf)
+    end
   end
 
   def first_leaf(v : Value) : Int32
@@ -692,7 +734,7 @@ class Isel
     return unless gep.op == Op::Gep
     plan = plan_gep(@layout, gep.aux.as(GepAux).source_type, gep.args)
     return if plan.is_a?(String)
-    @deferred[gep] = true if plan.as(GepPlan).terms.empty?
+    @deferred[gep] = DeferredKind::Address if plan.as(GepPlan).terms.empty?
   end
 
   def bit_test(v : Value) : Int32
@@ -723,8 +765,8 @@ class Isel
     return unless value.is_a?(Inst) && single_local_use?(value, block)
     producer = value.as(Inst)
     if producer.op == Op::ICmp && !i128?(producer.args[0].type)
-      @deferred[producer] = true
-      @deferred[hint.as(Inst)] = true if hint
+      @deferred[producer] = DeferredKind::Compare
+      @deferred[hint.as(Inst)] = DeferredKind::Hint if hint
       if producer.aux_int == 0_i64 || producer.aux_int == 1_i64
         other = producer.args[0]
         if integer_constant(other) == 0_i64
@@ -733,12 +775,12 @@ class Isel
           return
         end
         if single_local_use?(other, block) && bit_test(other) >= 0
-          @deferred[other] = true
+          @deferred[other] = DeferredKind::BitTest
         end
       end
     elsif producer.op == Op::ExtractValue && producer.aux_int == 1_i64
       if plan_overflow(producer, block)
-        @deferred[hint.as(Inst)] = true if hint
+        @deferred[hint.as(Inst)] = DeferredKind::Hint if hint
       end
     end
   end
@@ -774,11 +816,11 @@ class Isel
       end
     end
     return false unless flag_count == 1
-    @deferred[op] = true
-    @deferred[flag] = true
+    @deferred[op] = DeferredKind::Overflow
+    @deferred[flag] = DeferredKind::OverflowFlag
     if value_leaf
       leaf = value_leaf.as(Inst)
-      @deferred[leaf] = true
+      @deferred[leaf] = DeferredKind::OverflowValue
       @overflow_value[op] = leaf
     end
     true
@@ -1101,7 +1143,7 @@ class Isel
   def memory_address(pointer : Value, leaf_offset : Int64) : {Operand, Int64}
     base = pointer
     offset = leaf_offset
-    if pointer.is_a?(Inst) && @deferred.has_key?(pointer)
+    if pointer.is_a?(Inst) && @deferred[pointer]? == DeferredKind::Address && pointer.as(Inst).op == Op::Gep
       gep = pointer.as(Inst)
       plan = plan_gep(@layout, gep.aux.as(GepAux).source_type, gep.args).as(GepPlan)
       offset = offset + plan.const_off
@@ -2023,13 +2065,13 @@ class Isel
     t_dest = edge_block(@cur_ir_name, i.targets[0].name, true)
     f_dest = edge_block(@cur_ir_name, i.targets[1].name, true)
     test = i.args[0]
-    if test.is_a?(Inst) && @deferred.has_key?(test)
+    if test.is_a?(Inst) && @deferred[test]? == DeferredKind::Hint
       hint = test.as(Inst)
-      test = hint.args[0] if hint.op == Op::Intrinsic
+      test = hint.args[0]
     end
     if test.is_a?(Inst) && @deferred.has_key?(test)
       cmp = test.as(Inst)
-      if cmp.op == Op::ICmp
+      if @deferred[test]? == DeferredKind::Compare && cmp.op == Op::ICmp
         other = cmp.args[0]
         zero = integer_constant(cmp.args[1]) == 0_i64
         if integer_constant(other) == 0_i64
@@ -2038,7 +2080,7 @@ class Isel
         end
         if zero && (cmp.aux_int == 0_i64 || cmp.aux_int == 1_i64)
           equal = cmp.aux_int == 0_i64
-          if other.is_a?(Inst) && @deferred.has_key?(other)
+          if other.is_a?(Inst) && @deferred[other]? == DeferredKind::BitTest && bit_test(other) >= 0 # deferred-bit-test
             mask = other.as(Inst)
             bc = mop(equal ? MOp::Tbz : MOp::Tbnz)
             bc.imm = bit_test(mask).to_i64
@@ -2059,7 +2101,7 @@ class Isel
         emit(bc)
         emit(branch(f_dest))
         return
-      elsif cmp.op == Op::ExtractValue
+      elsif @deferred[test]? == DeferredKind::OverflowFlag && cmp.op == Op::ExtractValue
         bc = mop(MOp::Bcond)
         bc.cond = fused_overflow(cmp.args[0].as(Inst))
         bc.target = t_dest

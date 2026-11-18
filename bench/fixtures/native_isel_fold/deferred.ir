@@ -1,0 +1,98 @@
+; iyi-ir 1
+module "deferred"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external i32 @printf(ptr, ...)
+@fmt = private constant [5 x i8] c"%ld\0A\00"
+
+; The checked-add, extract and expect sequence is the shape in hello.ir's __iyi_main.
+; The value leaf remains deferred when a successor tests it against zero.
+define internal i64 @overflow_zero(i64 %a, i64 %b) {
+entry:
+  %pair = intrinsic llvm.sadd.with.overflow.i64(i64 %a, i64 %b)
+  %value = extractvalue { i64, i1 } %pair, 0
+  %flag = extractvalue { i64, i1 } %pair, 1
+  %hint = intrinsic llvm.expect.i1(i1 %flag, i1 false)
+  br i1 %hint, label %overflow, label %normal
+overflow:
+  ret i64 -101
+normal:
+  %iszero = icmp eq i64 %value, 0
+  br i1 %iszero, label %zero, label %nonzero
+zero:
+  ret i64 101
+nonzero:
+  ret i64 102
+}
+
+; A deferred overflow leaf can also feed an ordinary immediate comparison.
+define internal i64 @overflow_compare(i64 %a, i64 %b) {
+entry:
+  %pair = intrinsic llvm.sadd.with.overflow.i64(i64 %a, i64 %b)
+  %value = extractvalue { i64, i1 } %pair, 0
+  %flag = extractvalue { i64, i1 } %pair, 1
+  br i1 %flag, label %overflow, label %normal
+overflow:
+  ret i64 -111
+normal:
+  %negative = icmp slt i64 %value, -1
+  br i1 %negative, label %yes, label %no
+yes:
+  ret i64 111
+no:
+  ret i64 112
+}
+
+define internal i64 @overflow_narrow_zero(i8 %a, i8 %b) {
+entry:
+  %pair = intrinsic llvm.sadd.with.overflow.i8(i8 %a, i8 %b)
+  %value = extractvalue { i8, i1 } %pair, 0
+  %flag = extractvalue { i8, i1 } %pair, 1
+  br i1 %flag, label %overflow, label %normal
+overflow:
+  ret i64 -121
+normal:
+  %iszero = icmp ne i8 %value, 0
+  br i1 %iszero, label %nonzero, label %zero
+nonzero:
+  ret i64 122
+zero:
+  ret i64 121
+}
+
+; Reduced from hello.ir's memcpy alignment check: mask 7 is not a single-bit test.
+define internal i64 @multi_bit(i64 %x) {
+entry:
+  %bits = and i64 %x, 7
+  %iszero = icmp eq i64 %bits, 0
+  br i1 %iszero, label %zero, label %nonzero
+zero:
+  ret i64 131
+nonzero:
+  ret i64 132
+}
+
+define i32 @main() {
+entry:
+  %a = call i64 (i64, i64) @overflow_zero(i64 -7, i64 7)
+  %b = call i64 (i64, i64) @overflow_zero(i64 1, i64 2)
+  %c = call i64 (i64, i64) @overflow_zero(i64 9223372036854775807, i64 1)
+  %d = call i64 (i64, i64) @overflow_compare(i64 -4, i64 1)
+  %e = call i64 (i64, i64) @overflow_compare(i64 3, i64 1)
+  %f = call i64 (i8, i8) @overflow_narrow_zero(i8 -7, i8 7)
+  %g = call i64 (i8, i8) @overflow_narrow_zero(i8 7, i8 1)
+  %h = call i64 (i8, i8) @overflow_narrow_zero(i8 127, i8 1)
+  %i = call i64 (i64) @multi_bit(i64 8)
+  %j = call i64 (i64) @multi_bit(i64 10)
+  %p0 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %a)
+  %p1 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %b)
+  %p2 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %c)
+  %p3 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %d)
+  %p4 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %e)
+  %p5 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %f)
+  %p6 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %g)
+  %p7 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %h)
+  %p8 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %i)
+  %p9 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %j)
+  ret i32 0
+}

@@ -536,43 +536,117 @@ import std/socket::{IyiSocket, SocketError}
   # PERIOD_FLOOR_US into its run; a give-up sooner is on the word left up
   # for the task before. In the server shape that word gave a fast
   # request's task up behind every preempted slow one
-  # (`IyiScheduler.switch_to`). FRESH_ROUNDS rounds, each failing by
-  # itself.
+  # (`IyiScheduler.switch_to`).
+  #
+  # The monitor's time is the wall clock's, and a kernel that holds the
+  # worker's thread off its core spends it: on Linux, 12 vCPUs at a load
+  # of 6 to 12, a round gave the worker up 508 us after the task's first
+  # statement, the word raised while the thread waited for a core. The
+  # switch is between the task before's last statement and this one's
+  # first, and the give-up is in the slice the preemption count moved
+  # in, so the run up to it is at least that slice's start less the
+  # task's first statement, and at most that slice's end less the task
+  # before's last. Under the floor at most is a give-up on the stale word
+  # whatever the kernel did. Under it at least, but not at most, it is
+  # one too where the thread's CPU time (`thread_cpu_ns`) says the kernel
+  # held it off its core across those two windows for less than the
+  # floor's remainder; a round where the kernel held it off longer cannot
+  # tell the word's time from the kernel's, and is run again, up to
+  # FRESH_TRIES rounds for FRESH_ROUNDS judged, each failing by itself.
+  # Windows, whose thread times move on the system timer's tick, too
+  # coarse for this, judges every round by its first statement.
   FRESH_ROUNDS  = 10
+  FRESH_TRIES   = 50
   FRESH_HOLD_MS = 30_i64
   FRESH_SLICES  = 20
+  {% if flag?(:linux) || flag?(:darwin) %}
+    THREAD_CLOCK = true
+  {% else %}
+    THREAD_CLOCK = false
+  {% end %}
+
+  # The CPU time of the thread this runs on, in nanoseconds, which stands
+  # still while the kernel holds it off its core; 0 where there is no
+  # clock for it fine enough (`THREAD_CLOCK`).
+  def thread_cpu_ns : Int64
+    {% if flag?(:linux) %}
+      IyiClock.read(3).to_i64
+    {% elsif flag?(:darwin) %}
+      LibC.clock_gettime_nsec_np(16).to_i64
+    {% else %}
+      0_i64
+    {% end %}
+  end
+
+  # One round: how far into its run the task switched in gave the worker
+  # up, at least and at most, and how long the kernel held its thread off
+  # its core in the two windows between those, in microseconds; -1 for
+  # each if it ran its millisecond through.
+  def fresh_round(per_ms : Int64) : Tuple(Int64, Int64, Int64)
+    held_wall = Atomic(Int64).new(0_i64)
+    held_cpu = Atomic(Int64).new(0_i64)
+    least = Atomic(Int64).new(-1_i64)
+    most = Atomic(Int64).new(-1_i64)
+    off = Atomic(Int64).new(-1_i64)
+    group do |g|
+      g.spawn(unit: :new) do
+        x = spin_np(FRESH_HOLD_MS * per_ms, 17_u64)
+        held_wall.set(__iyi_monotonic_ns)
+        held_cpu.set(thread_cpu_ns)
+        x == 0_u64 ? 1 : 0
+      end
+      g.spawn(unit: :new) do
+        start_cpu = thread_cpu_ns
+        start = __iyi_monotonic_ns
+        before = IyiWorkers.preempts
+        x = 19_u64
+        FRESH_SLICES.times do
+          at = __iyi_monotonic_ns
+          at_cpu = thread_cpu_ns
+          x = spin(per_ms // FRESH_SLICES.to_i64, x)
+          if least.get < 0_i64 && IyiWorkers.preempts != before
+            ended_cpu = thread_cpu_ns
+            ended = __iyi_monotonic_ns
+            least.set((at - start) // 1000_i64)
+            most.set((ended - held_wall.get) // 1000_i64)
+            off.set(((start - held_wall.get) - (start_cpu - held_cpu.get) + (ended - at) - (ended_cpu - at_cpu)) // 1000_i64)
+          end
+        end
+        x == 0_u64 ? 1 : 0
+      end
+      g.spawn(unit: :new) do
+        0
+      end
+    end
+    {least.get, most.get, off.get}
+  end
 
   def fresh(per_ms : Int64) : Nil
     fail("fresh: runs on a pool of one, and this one has #{IyiWorkers.count} workers") if IyiWorkers.count != 1
     preempts = IyiWorkers.preempts
-    FRESH_ROUNDS.times do |round|
-      gave_us = Atomic(Int64).new(-1_i64)
-      group do |g|
-        g.spawn(unit: :new) do
-          spin_np(FRESH_HOLD_MS * per_ms, 17_u64) == 0_u64 ? 1 : 0
-        end
-        g.spawn(unit: :new) do
-          start = __iyi_monotonic_ns
-          before = IyiWorkers.preempts
-          x = 19_u64
-          FRESH_SLICES.times do
-            at = __iyi_monotonic_ns
-            x = spin(per_ms // FRESH_SLICES.to_i64, x)
-            gave_us.set((at - start) // 1000_i64) if gave_us.get < 0_i64 && IyiWorkers.preempts != before
-          end
-          x == 0_u64 ? 1 : 0
-        end
-        g.spawn(unit: :new) do
-          0
-        end
+    judged = 0
+    set_aside = 0
+    round = 0
+    while judged < FRESH_ROUNDS
+      if round == FRESH_TRIES
+        fail("fresh: #{set_aside} of #{round} rounds gave the worker up only after the kernel held its thread off its core across the switch or the give-up, leaving #{judged} to judge")
       end
-      gave = gave_us.get
-      if gave >= 0_i64 && gave < PERIOD_FLOOR_US
-        fail("fresh: round #{round + 1}: a task switched in after one that held its worker #{FRESH_HOLD_MS} ms with no check gave the worker up #{gave} us into its run, under the monitor's #{PERIOD_FLOOR_US} us")
+      round += 1
+      gave, most, off = fresh_round(per_ms)
+      if gave < 0_i64 || gave >= PERIOD_FLOOR_US
+        judged += 1
+      elsif most < PERIOD_FLOOR_US
+        fail("fresh: round #{round}: a task switched in after one that held its worker #{FRESH_HOLD_MS} ms with no check gave the worker up within #{most} us of that task's end, under the monitor's #{PERIOD_FLOOR_US} us")
+      elsif THREAD_CLOCK && gave + off >= PERIOD_FLOOR_US
+        set_aside += 1
+      else
+        held = THREAD_CLOCK ? ", the kernel holding its thread off its core #{off} us of the #{most - gave} around the switch and the give-up" : ""
+        fail("fresh: round #{round}: a task switched in after one that held its worker #{FRESH_HOLD_MS} ms with no check gave the worker up #{gave} us into its run, under the monitor's #{PERIOD_FLOOR_US} us#{held}")
       end
     end
     given = IyiWorkers.preempts - preempts
-    say "fresh: a task switched in after one that held its worker #{FRESH_HOLD_MS} ms with no check ran its first ms through, #{FRESH_ROUNDS} rounds (#{given} preemptions)"
+    aside = set_aside > 0 ? "; #{set_aside} more set aside, the kernel holding the worker's thread off its core across the switch or the give-up" : ""
+    say "fresh: a task switched in after one that held its worker #{FRESH_HOLD_MS} ms with no check ran its first ms through, #{FRESH_ROUNDS} rounds (#{given} preemptions)#{aside}"
   end
 
   # ── period ───────────────────────────────────────────────────────────

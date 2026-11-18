@@ -304,13 +304,17 @@ fi
 # times the clear finds another adoption got there first
 # (`IyiHeap.widen_hits`, reported by trim_stress.iyi built with
 # -Dtrim_widen). The fix, widened, must read every block back whole with
-# the window met; the old counting, widened, must fail within three runs
-# of 10 s. At 20 microseconds the old counting was caught on the first run
-# in 20 runs of 20, within 0-6 s, on Windows 11, 12 logical processors and
-# on macOS 26.6, Apple M2 Pro, 10 cores (the user's machines), and the fix
-# read every block back whole in 5 runs of 5 and 3 of 3 with the window
-# met 4,706-5,750 and 9,483-15,972 times. With a run's miss rate under
-# 3/20 (95%), three misses in a row are under 0.4%.
+# the window met; the old counting, widened, must fail within twenty runs
+# of 10 s, stopping at the first that fails. At 20 microseconds the old
+# counting was caught on the first run in 20 runs of 20, within 0-6 s, on
+# Windows 11, 12 logical processors and on macOS 26.6, Apple M2 Pro, 10
+# cores (the user's machines), and the fix read every block back whole in
+# 5 runs of 5 and 3 of 3 with the window met 4,706-5,750 and 9,483-15,972
+# times. Four processors meet in the window far less: on Namespace's Linux
+# machine (4x16) the fix met it 1,136 and 2,271 times in 10 s, and the old
+# counting passed 4 of 5 runs (jwaldrip/iyi run 44368465397: three passed
+# in its first attempt, and its second caught it on run 2). At a miss rate
+# of 4/5 a run, twenty misses in a row are about 1%; at 3/4, 0.3%.
 WIDEN_NS=20000
 widen_prelude() {
   mkdir -p "$WORK/$1/iyi"
@@ -358,13 +362,15 @@ if ! widen_prelude doublecount; then
   echo "  the listed pages counted twice: the lines it edits are not in the prelude any more, or the copy did not build"; status=1
 else
   caught=0
-  for again in 1 2 3; do
+  again=1
+  while [ "$again" -le 20 ]; do
     stress_run doublecount "$WORK/doublecount/program" 10 || { caught=$again; break; }
+    again=$((again + 1))
   done
   if [ "$caught" -ne 0 ]; then
     echo "  the listed pages counted twice: caught on run $caught: $(grep -m1 'FAIL\|panic' "$WORK/doublecount.out" | cut -c1-200)"
   else
-    echo "  the listed pages counted twice: three runs passed, so the stress does not test it"; status=1
+    echo "  the listed pages counted twice: twenty runs passed, so the stress does not test it"; status=1
   fi
 fi
 

@@ -1120,7 +1120,12 @@ esac
 # it (3 runs each). On Linux the held thread is at SCHED_IDLE, which the
 # scheduler still runs within ticks: 34 to 47 ms before and 38 to 42
 # after on twelve vCPUs, so it is printed there; darwin has no placing
-# to hold it by. Asserted on Windows; printed everywhere.
+# to hold it by. Asserted on Windows; printed everywhere. The waiting copy
+# is held a whole run only at a stop that finds the thread inside the
+# allocator, and its five collections are averaged: on GitHub's Windows
+# runner, 4 cores, it read 411 ms in one run and 175 in another, beside
+# 76 ms for the release itself (jwaldrip/iyi run 44368465397), so it gets
+# five runs to go past 200 ms, stopping at the first.
 cat > release.iyi <<'IYI'
 @[Unsafe("the held thread pins and deprioritizes itself through C calls and raw sched syscalls whose arguments live in Pointer#malloc memory")]
 module release
@@ -1287,10 +1292,20 @@ case "$(uname -s)" in
     if ! IYI_PATH="$WORK/waiting${PSEP}$REPO/src" "$IYI" build --release release.iyi -o release-waiting > build-waiting.log 2>&1; then
       cat build-waiting.log; exit 1
     fi
-    timeout -k 5 120 ./release-waiting > waiting.txt 2>&1
-    code=$?
-    if [ "$code" -ne 1 ] || ! grep -q '^FAIL: release:' waiting.txt; then
-      echo "the release check did not fire (exit $code):"; tail -3 waiting.txt; exit 1
+    caught=0
+    try=1
+    while [ "$try" -le 5 ]; do
+      timeout -k 5 120 ./release-waiting > waiting.txt 2>&1
+      code=$?
+      if [ "$code" -eq 1 ] && grep -q '^FAIL: release:' waiting.txt; then
+        caught=$try
+        break
+      fi
+      echo "    run $try: exit $code, $(tail -1 waiting.txt)"
+      try=$((try + 1))
+    done
+    if [ "$caught" -eq 0 ]; then
+      echo "the release check did not fire in 5 runs"; exit 1
     fi
     printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: release:' waiting.txt)"
     ;;

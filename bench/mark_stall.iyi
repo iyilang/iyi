@@ -220,6 +220,29 @@ import std/socket::{IyiSocket, SocketError}
     socket.close
   end
 
+  # Under `-Dheap_partitions` a pool unit allocates in a partition of its
+  # own, and a partition's allocation never feeds the global trigger
+  # (heap22, design section 4.2): the clients' lists and garbage made no
+  # global collection at all, and the watchdog held the tasks and failed
+  # ("collections stood at 0 for 5124 ms - the tasks allocated 347 MiB",
+  # darwin arm64, 3 runs of 5). What this program proves is the global
+  # mark's, beside tasks parked on their sockets, so under the flag the
+  # client runs in the shared heap's bracket, where the global trigger
+  # counts what it allocates; the echo tasks stay in their partitions.
+  # Both halves of that are checked: a node the unit makes outside the
+  # bracket is its partition's, and one made inside is the shared heap's.
+  {% if flag?(:heap_partitions) %}
+    def client_shared(fd : Int32, family : Int32, c : Int32, until_ns : Int64, requests : Tally, bytes : Tally, hold : Tally) : Nil
+      outside = Node.new(0_i64, nil)
+      fail("client #{c}: a node a pool unit made is not its partition's") unless IyiHeap.local?(outside.object_id)
+      IyiCross.shared do
+        inside = Node.new(0_i64, nil)
+        fail("client #{c}: a node made in the shared heap's bracket is a partition's") unless IyiHeap.owner_of(inside.object_id) == 0_u64
+        client(fd, family, c, until_ns, requests, bytes, hold)
+      end
+    end
+  {% end %}
+
   # The connection's other end: every request answered with itself, until
   # the client closes.
   def echo(fd : Int32, family : Int32) : Nil
@@ -344,7 +367,11 @@ import std/socket::{IyiSocket, SocketError}
       far_fd = far_fds[c]
       far_family = far_families[c]
       g.spawn(unit: :new) do
-        client(near_fd, near_family, c, until_ns, requests, bytes, hold)
+        {% if flag?(:heap_partitions) %}
+          client_shared(near_fd, near_family, c, until_ns, requests, bytes, hold)
+        {% else %}
+          client(near_fd, near_family, c, until_ns, requests, bytes, hold)
+        {% end %}
         0
       end
       g.spawn(unit: :new) do

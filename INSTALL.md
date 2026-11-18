@@ -46,7 +46,7 @@ job recorded attestations has none, and `gh` says so. The installers check
 the checksum and not the attestation, which needs `gh`.
 
 The tarball is relocatable and carries every library a program can ask for:
-iyi's own 1,539 KB prelude, the 5,077 KB of `src/std` that `import std/...`
+iyi's own 1,544 KB prelude, the 5,078 KB of `src/std` that `import std/...`
 resolves to, and Crystal's standard library for `--crystal`. `bin/iyi` finds
 all three beside itself, so there is nothing to configure. LLVM is inside the
 binary — a static minimal build from `scripts/build-static-llvm.sh` — so `lib/`
@@ -113,18 +113,19 @@ with Crystal's own Windows package and the Visual C++ build tools.
 
 An iyi program produces code for `x86_64-linux-gnu`, `x86_64-linux-musl`,
 `aarch64-linux-gnu`, `arm-linux-gnueabihf`, `x86_64-darwin`, `aarch64-darwin`,
-`x86_64-w64-mingw32`, `x86_64-windows-msvc` and `wasm32-wasi`, and CI
-type-checks the library for all nine every build. Five are *run* every build,
-each checked against what the same program printed on the machine that
-compiled it: x86-64 glibc natively, x86-64 musl in an Alpine container,
-aarch64 under emulation, wasm32-wasi under wasmtime, and aarch64-darwin
-natively. CI also audits the emitted object for seven of the nine;
-`x86_64-linux-musl` and `arm-linux-gnueabihf` only type-check. Windows x86-64
-is not one of the five, but it is built and tested natively: eight CI jobs run
-on Windows, and a failure in any of them stops a release.
+`x86_64-w64-mingw32`, `x86_64-windows-msvc`, `wasm32-wasi`, and
+`wasm32-unknown-unknown`. CI type-checks Crystal's library on the first nine
+and audits iyi's own-prelude objects for eight targets, including the
+freestanding one. CI runs programs on x86-64 glibc, x86-64 musl, aarch64
+under emulation, wasm32-wasi under wasmtime, freestanding wasm in Node and
+headless Chrome, and aarch64-darwin natively. Windows x86-64 is also built
+and tested natively.
 
-A wasm32-wasi program is linked by a wasi toolchain's `cc` (CI uses wasi-sdk's
-clang), not by a bare linker, and has no concurrency runtime.
+A wasm32-wasi program links with a WASI toolchain's `cc` (CI uses wasi-sdk's
+clang). A `wasm32-unknown-unknown` build links directly with `wasm-ld` on
+`PATH`, without libc or WASI. Its ES-module loader is installed at
+`share/iyi/src/iyi/wasm/iyi.mjs`. The import and export contract is in
+SPEC.md III.12.1. Neither wasm target has a concurrency runtime.
 
 ## What a program depends on
 

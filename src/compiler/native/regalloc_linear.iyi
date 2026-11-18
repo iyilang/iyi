@@ -3,11 +3,9 @@ module compiler/native/regalloc_linear
 # Linear-scan register allocation (SPEC 2.2 step 4, SPEC 3.5). The second allocator behind
 # compiler/native/regalloc: linear is the default; IYI_NATIVE_REGALLOC=pin selects the reference.
 #
-# Positions. Each instruction has one position: its index in the blocks taken in order. A virtual
-# register's interval is the inclusive hull of the positions where it is defined, used, or live across a
-# block edge. Liveness is solved over the control-flow graph, so a value live around a loop back-edge
-# covers the whole loop. A definition and the uses of the same instruction share its position, so an
-# instruction's sources never share a register with its destination.
+# Positions. Each instruction has a use position 2i and a definition position
+# 2i+1. A dying input can share a register with an output unless the target
+# requires distinct operands. Liveness extends interval hulls across block edges.
 #
 # Fixed registers. A physical operand reserves its register from the last point that clobbered it up to
 # the point that reads it. An argument move reserves its register up to the call that reads it, a call
@@ -34,7 +32,7 @@ module compiler/native/regalloc_linear
 # No hash table decides anything.
 
 import compiler/native/mir::{MFunction, MBlock, MInst, Operand, OperandKind, RegClass, Role}
-import compiler/native/target::{new_inst, is_role?, terminator?, leaves_block?, block_branch?, table_branch?}
+import compiler/native/target::{new_inst, is_role?, terminator?, leaves_block?, block_branch?, table_branch?, distinct_inputs_and_defs?}
 import compiler/native/aarch64/regs::{callee_saved_gprs, caller_saved_gprs, caller_saved_fprs, scratch_gprs, scratch_fprs, probe_reg, fp_reg, lr_reg, integer_arg_regs, fp_arg_regs}
 
 # x17: the encoder's veneer scratch. regs.iyi names it in a comment and has no accessor for it.
@@ -236,7 +234,10 @@ def rewrite_block(fn : MFunction, block : MBlock) : Nil
     reloads.each do |r|
       acc << r
     end
-    acc << inst
+    identity = is_role?(fn.isa, inst, Role::Copy) && inst.size == 64 && inst.defs.size == 1 && inst.uses.size == 1 &&
+               inst.defs[0].kind == OperandKind::Physical && inst.uses[0].kind == OperandKind::Physical &&
+               inst.defs[0].reg == inst.uses[0].reg
+    acc << inst unless identity
     stores.each do |s|
       acc << s
     end
@@ -297,13 +298,14 @@ class LinearScan
   property has_interval : Array(Bool)
   property crossing : Array(Bool)
   property pointer : Array(Bool)
-  property res_reg : Array(Int32)
-  property res_start : Array(Int32)
-  property res_end : Array(Int32)
+  property res_start : Array(Array(Int32))
+  property res_end : Array(Array(Int32))
   property homes : Array(Int32)
   property active : Array(Int32)
   property caller_pool : Array(Int32)
   property callee_pool : Array(Int32)
+  property hint_vreg : Array(Int32)
+  property hint_reg : Array(Int32)
   property fpr_pool : Array(Int32)
 
   def initialize(@fn : MFunction)
@@ -320,13 +322,20 @@ class LinearScan
     @has_interval = [] of Bool
     @crossing = [] of Bool
     @pointer = [] of Bool
-    @res_reg = [] of Int32
-    @res_start = [] of Int32
-    @res_end = [] of Int32
+    @res_start = [] of Array(Int32)
+    @res_end = [] of Array(Int32)
+    r = 0
+    while r < 64
+      @res_start << ([] of Int32)
+      @res_end << ([] of Int32)
+      r = r + 1
+    end
     @homes = [] of Int32
     @active = [] of Int32
     @caller_pool = caller_gpr_pool
     @callee_pool = callee_saved_gprs
+    @hint_vreg = [] of Int32
+    @hint_reg = [] of Int32
     @fpr_pool = fp_allocatable_pool
   end
 
@@ -337,6 +346,7 @@ class LinearScan
     build_successors
     solve_liveness
     build_intervals
+    collect_hints
     record_reservations
     assign
     assert_assignment
@@ -347,7 +357,7 @@ class LinearScan
     pos = 0
     @fn.blocks.each do |block|
       @block_first << pos
-      pos = pos + block.insts.size
+      pos = pos + 2 * block.insts.size
       @block_last << (pos - 1)
     end
     @npos = pos
@@ -356,7 +366,8 @@ class LinearScan
     @fn.blocks.each do |block|
       block.insts.each do |inst|
         @call_prefix[p + 1] = @call_prefix[p] + (inst.call ? 1 : 0)
-        p = p + 1
+        @call_prefix[p + 2] = @call_prefix[p + 1]
+        p = p + 2
       end
     end
   end
@@ -445,13 +456,14 @@ class LinearScan
     pos = 0
     @fn.blocks.each do |block|
       block.insts.each do |inst|
+        use_end = distinct_inputs_and_defs?(@fn.isa, inst) ? pos + 1 : pos
         inst.uses.each do |op|
-          extend_at(op.reg, pos) if op.kind == OperandKind::Virtual
+          extend_at(op.reg, use_end) if op.kind == OperandKind::Virtual
         end
         inst.defs.each do |op|
-          extend_at(op.reg, pos) if op.kind == OperandKind::Virtual
+          extend_at(op.reg, pos + 1) if op.kind == OperandKind::Virtual
         end
-        pos = pos + 1
+        pos = pos + 2
       end
     end
     b = 0
@@ -479,6 +491,32 @@ class LinearScan
       @crossing << cross
       @pointer << (pointers[v] || @fn.vreg_pointer[v])
       v = v + 1
+    end
+  end
+
+  # A copy prefers the other operand's existing home. The earlier interval is
+  # allocated first; both ordinary and predecessor phi copies use this rule.
+  def collect_hints : Nil
+    @hint_vreg = int_row(@vcount, -1)
+    @hint_reg = int_row(@vcount, -1)
+    @fn.blocks.each do |block|
+      block.insts.each do |inst|
+        next unless is_role?(@fn.isa, inst, Role::Copy)
+        next unless inst.defs.size == 1 && inst.uses.size == 1
+        dst = inst.defs[0]
+        src = inst.uses[0]
+        if dst.kind == OperandKind::Virtual && src.kind == OperandKind::Virtual
+          if @starts[src.reg] < @starts[dst.reg] || (@starts[src.reg] == @starts[dst.reg] && src.reg < dst.reg)
+            @hint_vreg[dst.reg] = src.reg if @hint_vreg[dst.reg] < 0
+          else
+            @hint_vreg[src.reg] = dst.reg if @hint_vreg[src.reg] < 0
+          end
+        elsif dst.kind == OperandKind::Virtual && src.kind == OperandKind::Physical
+          @hint_reg[dst.reg] = src.reg if @hint_reg[dst.reg] < 0
+        elsif dst.kind == OperandKind::Physical && src.kind == OperandKind::Virtual
+          @hint_reg[src.reg] = dst.reg if @hint_reg[src.reg] < 0
+        end
+      end
     end
   end
 
@@ -517,9 +555,8 @@ class LinearScan
 
   # Physical occurrences. Each reservation is an inclusive span of positions over which the register is fixed.
   def reserve(r : Int32, s : Int32, e : Int32) : Nil
-    @res_reg << r
-    @res_start << s
-    @res_end << e
+    @res_start[r] << s
+    @res_end[r] << e
   end
 
   def terminator_reads(opened : Array(Bool), clob : Array(Int32), pos : Int32) : Nil
@@ -539,9 +576,10 @@ class LinearScan
     pos = 0
     @fn.blocks.each do |block|
       block.insts.each do |inst|
+        distinct = distinct_inputs_and_defs?(@fn.isa, inst)
         inst.uses.each do |op|
           next unless op.kind == OperandKind::Physical
-          reserve(op.reg, clob[op.reg], pos)
+          reserve(op.reg, clob[op.reg], distinct ? pos + 1 : pos)
           opened[op.reg] = false
         end
         terminator_reads(opened, clob, pos) if terminator?(@fn.isa, inst)
@@ -559,18 +597,18 @@ class LinearScan
             end
           end
           inst.clobbers.each do |r|
-            clob[r] = pos
+            clob[r] = pos + 1
             opened[r] = false
           end
         end
         inst.defs.each do |op|
           next unless op.kind == OperandKind::Physical
-          reserve(op.reg, clob[op.reg], pos) if opened[op.reg]
-          clob[op.reg] = pos
+          reserve(op.reg, clob[op.reg], pos + 1) if opened[op.reg]
+          clob[op.reg] = pos + 1
           opened[op.reg] = true
-          reserve(op.reg, pos, pos)
+          reserve(op.reg, distinct ? pos : pos + 1, pos + 1)
         end
-        pos = pos + 1
+        pos = pos + 2
       end
     end
     r = 0
@@ -582,14 +620,19 @@ class LinearScan
 
   # Whether register `reg` has a reservation overlapping the span [s, e].
   def reserved?(reg : Int32, s : Int32, e : Int32) : Bool
-    i = 0
-    while i < @res_reg.size
-      if @res_reg[i] == reg && @res_start[i] <= e && @res_end[i] >= s
-        return true
+    starts = @res_start[reg]
+    ends = @res_end[reg]
+    lo = 0
+    hi = ends.size
+    while lo < hi
+      mid = lo + (hi - lo) // 2
+      if ends[mid] < s
+        lo = mid + 1
+      else
+        hi = mid
       end
-      i = i + 1
     end
-    false
+    lo < ends.size && starts[lo] <= e
   end
 
   def held?(reg : Int32) : Bool
@@ -633,6 +676,12 @@ class LinearScan
   end
 
   def find_free(iv : Int32, pool : Array(Int32)) : Int32
+    preferred = @hint_reg[iv]
+    other = @hint_vreg[iv]
+    preferred = @homes[other] if other >= 0 && @homes[other] >= 0
+    if preferred >= 0 && member?(pool, preferred) && !held?(preferred) && !reserved?(preferred, @starts[iv], @ends[iv])
+      return preferred
+    end
     pool.each do |reg|
       return reg unless held?(reg) || reserved?(reg, @starts[iv], @ends[iv])
     end

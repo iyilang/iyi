@@ -550,7 +550,79 @@ check_pointer_flag_collector() {
   check_collector "$1" "$FIX_RA/pointer_flag_fp.ir" check_pointer_flag_output
 }
 
+# Require a dying arithmetic source to share its result, a predecessor's
+# phi copy to disappear, and no identity copies to reach the encoder.
+check_coalescing() {
+  local drv=$1 out="$WORK/coalescing.mir"
+  [ -x "$drv" ] || return 2
+  if ! "$drv" mir "$FIX_RA/diamond.ir" pick >"$out" 2>&1; then
+    echo "could not emit the coalescing fixture"
+    return 2
+  fi
+  "$PY" - "$out" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+text = Path(sys.argv[1]).read_text()
+if not text.startswith("function pick\n"):
+    print("invalid MIR for coalescing")
+    sys.exit(2)
+identity = re.search(r"^  (?:Mov|FMov)/64f? (x\d+|d\d+), \1$", text, re.M)
+shared = re.search(r"^  AddImm/64 (x\d+), \1 #imm=1$", text, re.M)
+then = re.search(r"^block 1 then\n(.*?)(?=^block )", text, re.M | re.S)
+join = re.search(r"^block 3 join\n(.*)", text, re.M | re.S)
+if then is None or join is None:
+    print("invalid diamond MIR blocks")
+    sys.exit(2)
+phi = re.search(r"^  Eor/64 (x\d+),[^\n]*\n  B/64", then.group(1), re.M)
+merged = re.search(r"^  Add/64 (x\d+), (x\d+),", join.group(1), re.M)
+if identity or not shared or not phi or not merged or phi.group(1) != merged.group(2):
+    print("coalescing or identity removal is missing")
+    sys.exit(1)
+print("coalescing: dying source and phi copy share a register; no identity moves")
+PY
+}
+
+# This direct MIR fixture has a lower-numbered free register at the copy. Only
+# the copy preference gives the result its source's register.
+check_copy_hint() {
+  local ignored=$1 exe="$WORK/copy-hint-$RANDOM$EXE" line
+  if ! ./bin/iyi build -o "$(native_path "$exe")" "$(native_path "$FIX_RA/copy_hint.iyi")" >"$WORK/copy-hint.log" 2>&1; then
+    cat "$WORK/copy-hint.log"
+    return 2
+  fi
+  if ! line=$("$exe"); then
+    echo "copy hint fixture could not run"
+    return 2
+  fi
+  "$PY" - "$line" <<'PY'
+import sys
+try:
+    source, dest, count = map(int, sys.argv[1].split())
+except ValueError:
+    print("invalid copy hint fixture output")
+    sys.exit(2)
+if source < 0 or source != dest or count != 4:
+    print("copy preference did not coalesce the source and destination")
+    sys.exit(1)
+print("copy preference: source and destination share a register")
+PY
+}
+
 echo "== 6. mutation proofs"
+prove_mutation "coalescing: ignore virtual-register copy hints" \
+  src/compiler/native/regalloc_linear.iyi check_copy_hint \
+  '    preferred = @homes[other] if other >= 0 && @homes[other] >= 0' \
+  '    preferred = -1 if other >= 0 && @homes[other] >= 0'
+prove_mutation "coalescing: keep uses live through every definition" \
+  src/compiler/native/regalloc_linear.iyi check_coalescing \
+  '        use_end = distinct_inputs_and_defs?(@fn.isa, inst) ? pos + 1 : pos' \
+  '        use_end = pos + 1'
+prove_mutation "coalescing: retain identity copies" \
+  src/compiler/native/regalloc_linear.iyi check_coalescing \
+  '    acc << inst unless identity' \
+  '    acc << inst'
 if [ "$HOST_ID" = darwin-arm64 ]; then
   prove_mutation "linear: a register is given to an interval that overlaps an active one" \
     src/compiler/native/regalloc_linear.iyi check_linear_outputs \

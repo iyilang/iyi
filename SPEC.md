@@ -1062,7 +1062,7 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 139,273 lines, Crystal, forked |
+| Compiler | 24,984 lines, **written in Crystal** | 139,309 lines, Crystal, forked |
 | Library | 8,161 lines (3,551 of it core) | 28,880-line own prelude + 127,837 in std |
 | Specs | 21,146 lines | 17,214 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
@@ -7376,9 +7376,26 @@ The decisions:
    find `github.com/user/lib.iyi`" would be technically true and useless.
 
 **Step 2 followed, and taught one rule.** `iyi.sum` is the fact half of the
-split above: one line per requirement the build used, a tree hash of its
-checkout (`h2:` — still not a signature, which III.7 reserves for
-distribution). The hash is taken in two steps so that no byte of one file
+split above: a tree hash for each selected checkout and a manifest hash
+for every version the resolver reads (`h2:`, still not a signature, which
+III.7 reserves for distribution). The manifest line is `<path>
+v<version>/iyi.mod h2:<hex>`. Its hash is SHA-256 of the single list line
+`<SHA-256 hex of the manifest bytes> f iyi.mod\n`, using the same bytes
+the parser reads. The resolver verifies the line before using those
+requirements, including a version that another minimum outbids; a missing
+line is recorded after the graph and its selected trees pass their checks.
+Local replacements are editable directories and are not pinned. `mod tidy`
+keeps the manifests read by the final graph as well as its selected trees,
+and `mod tidy --check` remains read-only.
+A sum written by an earlier compiler has no manifest lines. For fetched
+requirements outside the module cache, the first successful build records
+them; until then `iyi mod tidy --check` exits 1. Run `iyi mod tidy` and
+commit its resulting `iyi.sum` and any `iyi.mod` changes before enabling
+that check with the new compiler. A non-cache project whose sum cannot
+be created or written fails when a line is missing, so update it while
+writable before building from a read-only tree.
+
+The tree hash is taken in two steps so that no byte of one file
 can be read as part of another: each file is digested on its own, SHA-256
 of its bytes, and written as one line, `<hex digest> <kind> <relative
 path>\n` — `f` for a file, `l` for a symbolic link, whose bytes are its

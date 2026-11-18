@@ -18,7 +18,7 @@ name: iyi
 #
 # What each job is for:
 #
-#   iyi              the rules, the artifact, the import path: this fork's work
+#   iyi              the rules, artifact, import path, and stale receipt producer
 #   compiler-specs   Crystal's compiler suite. Every rule iyi adds is a change
 #                    to the parser, the semantic passes or the codegen
 #   stdlib-specs     Crystal's library suite. The compiler is still a Crystal
@@ -34,6 +34,11 @@ name: iyi
 #                    exercises read for other platforms in std-platforms (and
 #                    the windows- and darwin- shards and windows-std-platforms
 #                    beside their own jobs)
+#   stale-fresh      a fresh runner audits hits or profile refusals, then its own imports
+#   stale-callpath   the stale key's own gates: link once, RG4, the reach walk
+#                    against what codegen recorded, RG8 and RG9
+#   stale-equivalence  RG2, RG2a, RG2r and RG5: what observing a program
+#                    changes about it
 #
 # Every job carries a `timeout-minutes`. The default is six hours, and these
 # jobs start daemons, listen on sockets, serve HTTP, soak an LSP and run
@@ -200,9 +205,13 @@ jobs:
     needs: [plan, build]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'iyi') }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # The stale acceptance suite shares this job; the four-target effect
+    # census runs separately so its result remains a fast-tier gate.
+    timeout-minutes: 90
     container:
       image: crystallang/crystal:1.21.0-build
+    env:
+      STALE_TARGET: x86_64-linux-gnu
     name: "The rules, the artifact and the import path"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -263,8 +272,1048 @@ jobs:
       # `mod` refusing the prefixes every other command accepts.
       - name: The commands, and the daemon
         run: |
-          export IYI_PATH="lib:$(pwd)/src"
+          IYI_PATH="lib:$(pwd)/src"
+          export IYI_PATH
           make -o .build/crystal cli_spec
+      - name: Build the receipt producer compiler
+        run: |
+          make -o .build/crystal iyi
+          echo "IYI=$PWD/.build/iyi" >> "$GITHUB_ENV"
+
+      # Stale tests are a separate proof, not an assertion over YAML. The
+      # acceptance suite includes the local rows; stale-fresh below owns the
+      # cross-run audit rows.
+      - name: Stale test acceptance suite
+        env:
+          # Name every failing row in one run, and fail at the end: a row that
+          # fails on one platform should not hide the rows after it.
+          STALE_TESTS_KEEP_GOING: "1"
+        run: |
+          status=0
+          bash bench/stale_tests.sh || status=1
+          bash bench/stale_dir_exists.sh || status=1
+          bash bench/stale_win_paths.sh || status=1
+          bash bench/stale_chmod_failure.sh || status=1
+          exit "$status"
+
+
+      # The receipt digest and the RG8 oracle each answer to an outside
+      # reference: std/digest's SHA-256 to Python's hashlib, the IR
+      # normalizer to three cases it must tell apart.
+      - name: Stale receipt digest, RG8 oracle, and evidence self-tests
+        run: |
+          bash bench/stale_sha256.sh
+          bash bench/stale_ir_normalize_selftest.sh
+          bash bench/stale_evidence_test.sh
+
+      # Keep export credential-free. `assert-export-env` is intentionally in
+      # this same step: moving a token into this environment makes the step
+      # fail before the producer can write a portable receipt.
+      - name: Export fresh run receipts
+        env:
+          IYI_CI_PRODUCER: "1"
+        shell: bash
+        run: |
+          bash bench/stale_ci.sh assert-export-env
+          mkdir -p stale-index
+          args=(
+            --fresh
+            --export-index "run:${GITHUB_RUN_ID}=stale-index/run-${GITHUB_RUN_ID}-${STALE_TARGET}.json"
+          )
+          if [ "${GITHUB_REF}" = "refs/heads/master" ]; then
+            args+=(--export-index "master=stale-index/master-candidate-${STALE_TARGET}.json")
+          fi
+          mapfile -t tests < <(find samples/iyi -maxdepth 1 -type f -name '*.iyi' -print | sort)
+          "$IYI" test "${args[@]}" "${tests[@]}"
+
+      # archive: false leaves the uploaded JSON unhashed by an outer zip. The
+      # filename and artifact name must remain identical (upload-artifact#785).
+      - name: Upload producer compiler
+        uses: actions/upload-artifact@v7
+        with:
+          name: iyi
+          path: .build/iyi
+          archive: false
+          retention-days: 1
+
+      - name: Upload run receipt snapshot
+        uses: actions/upload-artifact@v7
+        with:
+          name: run-${{ github.run_id }}-x86_64-linux-gnu.json
+          path: stale-index/run-${{ github.run_id }}-x86_64-linux-gnu.json
+          archive: false
+          retention-days: 1
+
+      - name: Upload master candidate receipt snapshot
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        uses: actions/upload-artifact@v7
+        with:
+          name: master-candidate-x86_64-linux-gnu.json
+          path: stale-index/master-candidate-x86_64-linux-gnu.json
+          archive: false
+          retention-days: 1
+
+  # Each target and observation mode gets its own runner. The script prints
+  # why x86_64-darwin is excluded from the corpus.
+  stale-rg3:
+    needs: [plan, build]
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'stale-rg3') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    container:
+      image: crystallang/crystal:1.21.0-build
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-linux-gnu, aarch64-linux-gnu, aarch64-darwin, x86_64-windows-msvc]
+        observe: ["0", "1"]
+    name: "RG3 ${{ matrix.target }}, observe ${{ matrix.observe }}"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v5
+        with:
+          name: crystal
+          path: .build
+      - run: chmod +x .build/crystal
+      - name: Build `iyi`
+        run: make -o .build/crystal iyi
+      - name: Effect classification (RG3)
+        env:
+          IYI: ${{ github.workspace }}/.build/iyi
+          RG3_TARGET: ${{ matrix.target }}
+          RG3_OBSERVE: ${{ matrix.observe }}
+        run: bash bench/stale_effects.sh check
+
+  # The stale key's own gates, which no job ran: `bench/gates_reachable.py`
+  # named them when it arrived from upstream. They need the compiler that
+  # builds `iyi` as well as `iyi`: the link section asks it what the target
+  # links, and RG8 builds an `iyi` with the def body dropped from the walk's
+  # encoding to prove a mutation there is caught. That and RG9 over the
+  # 140-program corpus took 41 minutes in one run here and 69 in the next
+  # (43117744255, 43137318814; 17 on eighteen darwin arm64 cores), so this
+  # is a job of its own rather than more steps of `iyi`, with two hours.
+  stale-callpath:
+    needs: [plan, build]
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'stale-callpath') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    container:
+      image: crystallang/crystal:1.21.0-build
+    name: "The stale key: link, reach, RG4, RG8 and RG9"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v5
+        with:
+          name: crystal
+          path: .build
+      - run: chmod +x .build/crystal
+      - name: Build `iyi`
+        run: |
+          make -o .build/crystal iyi
+          echo "IYI=$PWD/.build/iyi" >> "$GITHUB_ENV"
+
+      - name: Link once, RG4, the reach walk, the key's phases, RG8 and RG9
+        run: bash bench/stale_callpath.sh all
+
+      # The suite's cached runs under the audit: every fast serve must agree with the compiler (RG10).
+      - name: Suite speed under the audit, 20 tests
+        run: python3 bench/stale_suite_speed.py --tests 20 --iterations 0,0 --audit
+
+      # Row 21: two processes record a thousand receipts each into one
+      # store, and every record parses with the sequence at two thousand.
+      - name: Two processes record into one store
+        run: bash bench/stale_store_concurrency.sh
+
+  # What observing a program changes about it, which has to be nothing.
+  # RG2 builds each of the 140 programs plain and observed and holds the
+  # observed run to the plain one's exit, stdout and stderr outside what
+  # two plain runs disagree on. RG2a runs each with one empty directory as
+  # its argument against the run with none, RG2r takes three probes through
+  # an artifact and back, and RG5 drops each observer in turn and wants the
+  # gate to notice. Of these the workflow reached RG2r alone, through
+  # `stale_evidence_test.sh`, which hands it a compiler made of shell.
+  #
+  # A job of its own because the one above ran out of its ninety minutes
+  # here, on the runner that took 69 over the key's gates: RG2 had passed
+  # in 9.6 minutes and RG2a in 6.4, 140 of 140 with none excluded both
+  # times, and RG2r was a minute in (run 43137318814).
+  stale-equivalence:
+    needs: [plan, build]
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'stale-equivalence') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    container:
+      image: crystallang/crystal:1.21.0-build
+    name: "What observing a program changes: RG2, RG2a, RG2r and RG5"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v5
+        with:
+          name: crystal
+          path: .build
+      - run: chmod +x .build/crystal
+      - name: Build `iyi`
+        run: |
+          make -o .build/crystal iyi
+          echo "IYI=$PWD/.build/iyi" >> "$GITHUB_ENV"
+
+      # RG2 and RG2a report a program they could not compare as excluded
+      # and pass; the rule is none excluded (STALE_TESTS_DESIGN, RG2), so
+      # an exclusion fails here.
+      - name: RG2, RG2a, RG2r and RG5, with no program excluded
+        shell: bash
+        run: |
+          bash bench/stale_equivalence.sh all | tee stale-equivalence.log
+          if grep -E '^RG2a?: .* [1-9][0-9]* still excluded' stale-equivalence.log; then
+            echo "RG2 or RG2a excluded a program" >&2
+            exit 1
+          fi
+
+  # A second runner gets only the producer's compiler and portable receipt
+  # snapshot. No cache crosses this boundary: a hit here is evidence that the
+  # receipt is complete, rather than an accidental local-store hit. Runs
+  # 43830236826 and 43811561723 used different AWS and Azure kernel releases.
+  # Differing profiles must refuse; cross-machine hits on those receipts remain
+  # unexercised even though both receipts are compared with fresh execution.
+  stale-fresh:
+    needs: [plan, iyi]
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'stale-fresh') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      actions: read
+    container:
+      image: crystallang/crystal:1.21.0-build
+    env:
+      STALE_TARGET: x86_64-linux-gnu
+    name: "Fresh runner receipt audit"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # v8: these two were uploaded with `archive: false`, which v5 cannot
+      # download (it reads every artifact as a zip and failed after 5 retries).
+      - name: Download producer compiler
+        uses: actions/download-artifact@v8
+        with:
+          name: iyi
+          path: .build
+      - name: Set producer compiler path
+        run: |
+          chmod +x .build/iyi
+          echo "IYI=$PWD/.build/iyi" >> "$GITHUB_ENV"
+
+      - name: Download producer receipt snapshot
+        uses: actions/download-artifact@v8
+        with:
+          name: run-${{ github.run_id }}-x86_64-linux-gnu.json
+          path: stale-index
+
+      - name: Download master candidate receipt snapshot
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        uses: actions/download-artifact@v8
+        with:
+          name: master-candidate-x86_64-linux-gnu.json
+          path: stale-index
+
+      - name: "Producer receipts on a fresh runner: hit on an equal profile, refused on another"
+        shell: bash
+        run: |
+          mapfile -t tests < <(find samples/iyi -maxdepth 1 -type f -name '*.iyi' -print | sort)
+          "$IYI" test --cached --json \
+            --import-index "run:${GITHUB_RUN_ID}=stale-index/run-${GITHUB_RUN_ID}-${STALE_TARGET}.json" \
+            "${tests[@]}" > stale-index/cached.json
+          bash bench/stale_ci.sh assert-hits --json stale-index/cached.json \
+            --snapshot "stale-index/run-${GITHUB_RUN_ID}-${STALE_TARGET}.json" \
+            --allow-profile-refusal
+
+      # This export step alone carries IYI_CI_PRODUCER in its workflow
+      # environment. Compare the producer receipt, including its profile,
+      # Build and ordered observations, with this runner's fresh execution.
+      - name: Shadow audit fresh execution and export
+        id: shadow_audit
+        env:
+          IYI_CI_PRODUCER: "1"
+        shell: bash
+        run: |
+          bash bench/stale_ci.sh assert-export-env
+          mapfile -t tests < <(find samples/iyi -maxdepth 1 -type f -name '*.iyi' -print | sort)
+          "$IYI" test --fresh --json \
+            --export-index "audit:${GITHUB_RUN_ID}=stale-index/audit-${GITHUB_RUN_ID}-${STALE_TARGET}.json" \
+            "${tests[@]}" > stale-index/fresh.json
+          bash bench/stale_ci.sh shadow-audit \
+            --cached-json stale-index/cached.json \
+            --fresh-json stale-index/fresh.json \
+            --cached-snapshot "stale-index/run-${GITHUB_RUN_ID}-${STALE_TARGET}.json" \
+            --fresh-snapshot "stale-index/audit-${GITHUB_RUN_ID}-${STALE_TARGET}.json"
+
+      - name: "The runner's own receipts hit on an emptied store"
+        shell: bash
+        run: |
+          cache_dir="$("$IYI" env IYI_CACHE_DIR | tr -d '\r')"
+          if [ -z "$cache_dir" ]; then
+            echo "iyi env IYI_CACHE_DIR returned an empty path" >&2
+            exit 1
+          fi
+          if [ "$RUNNER_OS" = "Windows" ]; then cache_dir="$(cygpath -u "$cache_dir")"; fi
+          rm -rf "$cache_dir/tests-v1"
+          mapfile -t tests < <(find samples/iyi -maxdepth 1 -type f -name '*.iyi' -print | sort)
+          "$IYI" test --cached --json \
+            --import-index "audit:${GITHUB_RUN_ID}=stale-index/audit-${GITHUB_RUN_ID}-${STALE_TARGET}.json" \
+            "${tests[@]}" > stale-index/audit-cached.json
+          bash bench/stale_ci.sh assert-hits --json stale-index/audit-cached.json \
+            --snapshot "stale-index/audit-${GITHUB_RUN_ID}-${STALE_TARGET}.json"
+
+      - name: Planted hidden-read shadow-audit proof
+        run: bash bench/stale_ci.sh test-planted-hidden-read
+      - name: Master snapshot path and Actions API proof
+        run: bash bench/stale_ci.sh test-master-path
+
+
+      - name: RG1 and RG7 with the producer compiler
+        run: bash bench/stale_reproducible.sh
+
+      - name: RG9 CallPathFp on the fresh runner
+        run: bash bench/stale_ci.sh rg9
+
+      # C3 gives the compiler a single credential-scoped route to master.
+      # A missing artifact is a normal condition: no master import happens.
+      - name: Download master snapshot for git-diff audit
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          bash bench/stale_ci.sh fetch-master \
+            --out "stale-index/master-${STALE_TARGET}.json" \
+            --target "$STALE_TARGET"
+
+      - name: Master snapshot git-diff self-check
+        run: |
+          bash bench/stale_ci.sh master-self-check \
+            --snapshot "stale-index/master-${STALE_TARGET}.json" \
+            --out-json stale-index/master-cached.json
+
+      - name: Census and overhead measurements
+        run: bash bench/stale_census.sh
+
+      # After required successful audits, publish canonical master snapshot once.
+      - name: Prepare audited master receipt snapshot
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        shell: bash
+        run: cp -f "stale-index/master-candidate-${STALE_TARGET}.json" "stale-index/master-${STALE_TARGET}.json"
+
+      - name: Publish audited master receipt snapshot
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        uses: actions/upload-artifact@v7
+        with:
+          name: master-x86_64-linux-gnu.json
+          path: stale-index/master-x86_64-linux-gnu.json
+          archive: false
+          retention-days: 7
+
+      # RG6: an audit disagreement makes the next master consumer see an empty
+      # snapshot. The artifact is emitted only on master, and `always()` keeps
+      # this containment action reachable after the failing audit.
+      - name: Prepare empty master snapshot after disagreement
+        id: empty_snapshot
+        if: always() && !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.shadow_audit.outcome == 'failure'
+        run: |
+          bash bench/stale_ci.sh empty-snapshot \
+            --from "stale-index/master-candidate-${STALE_TARGET}.json" \
+            --out "stale-index/master-${STALE_TARGET}.json"
+
+      - name: Publish empty master snapshot after disagreement
+        if: always() && !cancelled() && steps.empty_snapshot.outcome == 'success'
+        uses: actions/upload-artifact@v7
+        with:
+          name: master-x86_64-linux-gnu.json
+          path: stale-index/master-x86_64-linux-gnu.json
+          archive: false
+          retention-days: 7
+
+  stale-darwin:
+    needs: plan
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'stale-darwin') }}
+    runs-on: macos-15
+    timeout-minutes: 120
+    name: "Stale acceptance and receipt producer, on macOS"
+    defaults:
+      run:
+        shell: bash
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "14.4"
+      STALE_TARGET: aarch64-darwin
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install the bootstrap toolchain
+        run: |
+          brew install crystal coreutils pkgconf bash
+          echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
+      - name: Restore the static LLVM
+        id: llvm-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/llvm-static
+          key: llvm-static-${{ runner.os }}-${{ runner.arch }}-macos-15-${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
+      - name: Build the static LLVM (cache miss)
+        if: steps.llvm-cache.outputs.cache-hit != 'true'
+        run: bash scripts/build-static-llvm.sh "$HOME/llvm-static"
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.14"
+      - name: Build the compiler and `iyi`
+        run: |
+          echo "LLVM_CONFIG=$HOME/llvm-static/bin/llvm-config" >> "$GITHUB_ENV"
+          make crystal iyi LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config"
+          echo "IYI=$PWD/.build/iyi" >> "$GITHUB_ENV"
+      - name: Stale compiler specs
+        run: ./bin/crystal spec spec/compiler/stale
+      - name: Stale test acceptance suite
+        env:
+          # Name every failing row in one run, and fail at the end: a row that
+          # fails on one platform should not hide the rows after it.
+          STALE_TESTS_KEEP_GOING: "1"
+        run: |
+          status=0
+          bash bench/stale_tests.sh || status=1
+          bash bench/stale_dir_exists.sh || status=1
+          bash bench/stale_win_paths.sh || status=1
+          bash bench/stale_chmod_failure.sh || status=1
+          exit "$status"
+      - name: Stale receipt digest, RG8 oracle, and evidence self-tests
+        run: |
+          bash bench/stale_sha256.sh
+          bash bench/stale_ir_normalize_selftest.sh
+          bash bench/stale_evidence_test.sh
+      - name: Export fresh run receipts
+        env:
+          IYI_CI_PRODUCER: "1"
+        run: |
+          bash bench/stale_ci.sh assert-export-env
+          mkdir -p stale-index
+          args=(
+            --fresh
+            --export-index "run:${GITHUB_RUN_ID}=stale-index/run-${GITHUB_RUN_ID}-${STALE_TARGET}.json"
+          )
+          if [ "${GITHUB_REF}" = "refs/heads/master" ]; then
+            args+=(--export-index "master=stale-index/master-candidate-${STALE_TARGET}.json")
+          fi
+          mapfile -t tests < <(find samples/iyi -maxdepth 1 -type f -name '*.iyi' -print | sort)
+          "$IYI" test "${args[@]}" "${tests[@]}"
+      - name: Upload producer compiler
+        uses: actions/upload-artifact@v7
+        with:
+          name: iyi-aarch64-darwin
+          path: .build/iyi
+          archive: false
+          if-no-files-found: error
+          retention-days: 1
+      - name: Upload run receipt snapshot
+        uses: actions/upload-artifact@v7
+        with:
+          name: run-${{ github.run_id }}-aarch64-darwin.json
+          path: stale-index/run-${{ github.run_id }}-aarch64-darwin.json
+          archive: false
+          if-no-files-found: error
+          retention-days: 1
+      - name: Upload master candidate receipt snapshot
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        uses: actions/upload-artifact@v7
+        with:
+          name: master-candidate-aarch64-darwin.json
+          path: stale-index/master-candidate-aarch64-darwin.json
+          archive: false
+          if-no-files-found: error
+          retention-days: 1
+
+  stale-darwin-gates:
+    needs: plan
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'stale-darwin-gates') }}
+    runs-on: macos-15
+    timeout-minutes: 180
+    name: "Stale key and equivalence gates, on macOS"
+    defaults:
+      run:
+        shell: bash
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "14.4"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install the bootstrap toolchain
+        run: |
+          brew install crystal coreutils pkgconf bash
+          echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
+      - name: Restore the static LLVM
+        id: llvm-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/llvm-static
+          key: llvm-static-${{ runner.os }}-${{ runner.arch }}-macos-15-${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
+      - name: Build the static LLVM (cache miss)
+        if: steps.llvm-cache.outputs.cache-hit != 'true'
+        run: bash scripts/build-static-llvm.sh "$HOME/llvm-static"
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.14"
+      - name: Build the compiler and `iyi`
+        run: |
+          echo "LLVM_CONFIG=$HOME/llvm-static/bin/llvm-config" >> "$GITHUB_ENV"
+          make crystal iyi LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config"
+          echo "IYI=$PWD/.build/iyi" >> "$GITHUB_ENV"
+      - name: Link once, RG4, the reach walk, the key's phases, RG8 and RG9
+        run: bash bench/stale_callpath.sh all
+      - name: Suite speed under the audit, 20 tests
+        run: python3 bench/stale_suite_speed.py --tests 20 --iterations 0,0 --audit
+      - name: Two processes record into one store
+        run: bash bench/stale_store_concurrency.sh
+      - name: RG2, RG2a, RG2r and RG5, with no program excluded
+        run: |
+          bash bench/stale_equivalence.sh all | tee stale-equivalence.log
+          if grep -E '^RG2a?: .* [1-9][0-9]* still excluded' stale-equivalence.log; then
+            echo "RG2 or RG2a excluded a program" >&2
+            exit 1
+          fi
+
+  stale-darwin-fresh:
+    needs: [plan, stale-darwin]
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'stale-darwin-fresh') }}
+    runs-on: macos-15
+    timeout-minutes: 180
+    name: "Fresh runner receipt audit, on macOS"
+    permissions:
+      actions: read
+    defaults:
+      run:
+        shell: bash
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "14.4"
+      STALE_TARGET: aarch64-darwin
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install the bootstrap toolchain
+        run: |
+          brew install crystal coreutils pkgconf bash
+          echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
+      - name: Restore the static LLVM
+        id: llvm-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/llvm-static
+          key: llvm-static-${{ runner.os }}-${{ runner.arch }}-macos-15-${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
+      - name: Build the static LLVM (cache miss)
+        if: steps.llvm-cache.outputs.cache-hit != 'true'
+        run: bash scripts/build-static-llvm.sh "$HOME/llvm-static"
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.14"
+      - name: Build the fork's compiler
+        run: |
+          echo "LLVM_CONFIG=$HOME/llvm-static/bin/llvm-config" >> "$GITHUB_ENV"
+          make crystal LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config"
+      - name: Download producer compiler
+        uses: actions/download-artifact@v8
+        with:
+          name: iyi-aarch64-darwin
+          path: .build
+      - name: Set producer compiler path
+        run: |
+          chmod +x .build/iyi
+          echo "IYI=$PWD/.build/iyi" >> "$GITHUB_ENV"
+      - name: Download producer receipt snapshot
+        uses: actions/download-artifact@v8
+        with:
+          name: run-${{ github.run_id }}-aarch64-darwin.json
+          path: stale-index
+      - name: Download master candidate receipt snapshot
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        uses: actions/download-artifact@v8
+        with:
+          name: master-candidate-aarch64-darwin.json
+          path: stale-index
+      - name: "Producer receipts on a fresh runner: hit on an equal profile, refused on another"
+        run: |
+          mapfile -t tests < <(find samples/iyi -maxdepth 1 -type f -name '*.iyi' -print | sort)
+          "$IYI" test --cached --json \
+            --import-index "run:${GITHUB_RUN_ID}=stale-index/run-${GITHUB_RUN_ID}-${STALE_TARGET}.json" \
+            "${tests[@]}" > stale-index/cached.json
+          bash bench/stale_ci.sh assert-hits --json stale-index/cached.json \
+            --snapshot "stale-index/run-${GITHUB_RUN_ID}-${STALE_TARGET}.json" \
+            --allow-profile-refusal
+      - name: Shadow audit fresh execution and export
+        id: shadow_audit
+        env:
+          IYI_CI_PRODUCER: "1"
+        run: |
+          bash bench/stale_ci.sh assert-export-env
+          mapfile -t tests < <(find samples/iyi -maxdepth 1 -type f -name '*.iyi' -print | sort)
+          "$IYI" test --fresh --json \
+            --export-index "audit:${GITHUB_RUN_ID}=stale-index/audit-${GITHUB_RUN_ID}-${STALE_TARGET}.json" \
+            "${tests[@]}" > stale-index/fresh.json
+          bash bench/stale_ci.sh shadow-audit \
+            --cached-json stale-index/cached.json \
+            --fresh-json stale-index/fresh.json \
+            --cached-snapshot "stale-index/run-${GITHUB_RUN_ID}-${STALE_TARGET}.json" \
+            --fresh-snapshot "stale-index/audit-${GITHUB_RUN_ID}-${STALE_TARGET}.json"
+      - name: "The runner's own receipts hit on an emptied store"
+        run: |
+          cache_dir="$("$IYI" env IYI_CACHE_DIR | tr -d '\r')"
+          if [ -z "$cache_dir" ]; then
+            echo "iyi env IYI_CACHE_DIR returned an empty path" >&2
+            exit 1
+          fi
+          if [ "$RUNNER_OS" = "Windows" ]; then cache_dir="$(cygpath -u "$cache_dir")"; fi
+          rm -rf "$cache_dir/tests-v1"
+          mapfile -t tests < <(find samples/iyi -maxdepth 1 -type f -name '*.iyi' -print | sort)
+          "$IYI" test --cached --json \
+            --import-index "audit:${GITHUB_RUN_ID}=stale-index/audit-${GITHUB_RUN_ID}-${STALE_TARGET}.json" \
+            "${tests[@]}" > stale-index/audit-cached.json
+          bash bench/stale_ci.sh assert-hits --json stale-index/audit-cached.json \
+            --snapshot "stale-index/audit-${GITHUB_RUN_ID}-${STALE_TARGET}.json"
+      - name: Planted hidden-read shadow-audit proof
+        run: bash bench/stale_ci.sh test-planted-hidden-read
+      - name: Master snapshot path and Actions API proof
+        run: bash bench/stale_ci.sh test-master-path
+      - name: RG1 and RG7 with the producer compiler
+        run: bash bench/stale_reproducible.sh
+      - name: RG9 CallPathFp on the fresh runner
+        run: bash bench/stale_ci.sh rg9
+      - name: Download master snapshot for git-diff audit
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          bash bench/stale_ci.sh fetch-master \
+            --out "stale-index/master-${STALE_TARGET}.json" \
+            --target "$STALE_TARGET"
+      - name: Master snapshot git-diff self-check
+        run: |
+          bash bench/stale_ci.sh master-self-check \
+            --snapshot "stale-index/master-${STALE_TARGET}.json" \
+            --out-json stale-index/master-cached.json
+      - name: Census and overhead measurements
+        run: bash bench/stale_census.sh
+      - name: Prepare audited master receipt snapshot
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        run: cp -f "stale-index/master-candidate-${STALE_TARGET}.json" "stale-index/master-${STALE_TARGET}.json"
+      - name: Publish audited master receipt snapshot
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        uses: actions/upload-artifact@v7
+        with:
+          name: master-aarch64-darwin.json
+          path: stale-index/master-aarch64-darwin.json
+          archive: false
+          retention-days: 7
+      - name: Prepare empty master snapshot after disagreement
+        id: empty_snapshot
+        if: always() && !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.shadow_audit.outcome == 'failure'
+        run: |
+          bash bench/stale_ci.sh empty-snapshot \
+            --from "stale-index/master-candidate-${STALE_TARGET}.json" \
+            --out "stale-index/master-${STALE_TARGET}.json"
+      - name: Publish empty master snapshot after disagreement
+        if: always() && !cancelled() && steps.empty_snapshot.outcome == 'success'
+        uses: actions/upload-artifact@v7
+        with:
+          name: master-aarch64-darwin.json
+          path: stale-index/master-aarch64-darwin.json
+          archive: false
+          retention-days: 7
+
+  stale-windows:
+    needs: plan
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'stale-windows') }}
+    runs-on: windows-2025
+    timeout-minutes: 180
+    name: "Stale acceptance and receipt producer, on Windows"
+    defaults:
+      run:
+        shell: bash
+    env:
+      STALE_TARGET: x86_64-windows-msvc
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+      - uses: crystal-lang/install-crystal@36a22e9145188eec527c96e5a789ce4b832af587 # v1.9.5
+        with:
+          crystal: 1.21.0
+      - name: What this machine has
+        shell: pwsh
+        run: |
+          if (-not (Get-Command make -ErrorAction SilentlyContinue)) {
+            choco install make --version 4.4.1 --no-progress -y
+            if ($LASTEXITCODE -ne 0) { throw "choco could not install make 4.4.1" }
+            $make = Join-Path $env:ChocolateyInstall 'lib\make\tools\install\bin\make.exe'
+            $hash = (Get-FileHash -Algorithm SHA256 $make).Hash.ToLower()
+            if ($hash -ne 'cc6dc291113dcbcc7735835acbfc23c52ed037e4e124ff2d7a0aeae6df563a9f') {
+              throw "Chocolatey's make.exe is not the one pinned here: $hash"
+            }
+          }
+          $lib = (crystal env CRYSTAL_LIBRARY_PATH).Trim()
+          $llvm = (Get-Content "$lib\llvm_VERSION")[0].Trim()
+          "CRYSTAL_LIBRARY_PATH=$lib" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "LLVM_VERSION=$llvm" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.14"
+      - name: Build the compiler and `iyi`
+        shell: cmd
+        run: |
+          make -f Makefile.win crystal || exit /b 1
+          make -f Makefile.win iyi
+      - name: Set producer compiler path
+        run: echo "IYI=$(cygpath -m "$PWD/.build/iyi.exe")" >> "$GITHUB_ENV"
+      - name: Stale compiler specs, with zero pending
+        run: |
+          CRYSTAL_SPEC_COMPILER_BIN="$(cygpath -m "$PWD/.build/crystal.exe")"
+          export CRYSTAL_SPEC_COMPILER_BIN
+          pwsh -NoProfile -File ./bin/crystal.ps1 spec -Dstrict_multi_assign -Dpreview_overload_order \
+            -Dwithout_openssl -Dwithout_zlib spec/compiler/stale 2>&1 | tee stale-specs.log
+          grep -E '[1-9][0-9]* examples?, 0 failures, 0 errors, 0 pending' stale-specs.log
+      - name: Stale test acceptance suite
+        env:
+          # Name every failing row in one run, and fail at the end: a row that
+          # fails on one platform should not hide the rows after it.
+          STALE_TESTS_KEEP_GOING: "1"
+        run: |
+          status=0
+          bash bench/stale_tests.sh || status=1
+          bash bench/stale_dir_exists.sh || status=1
+          bash bench/stale_win_paths.sh || status=1
+          bash bench/stale_chmod_failure.sh || status=1
+          exit "$status"
+      - name: Stale receipt digest, RG8 oracle, and evidence self-tests
+        run: |
+          bash bench/stale_sha256.sh
+          bash bench/stale_ir_normalize_selftest.sh
+          bash bench/stale_evidence_test.sh
+      # Native runner proof: a FAT32 fixture cannot use the fast stamp.
+      - name: FAT32 refuses change-time reuse
+        shell: pwsh
+        run: |
+          $id = [guid]::NewGuid().ToString('N')
+          $vhd = Join-Path $env:RUNNER_TEMP "stale-fat32-$id.vhd"
+          $script = Join-Path $env:RUNNER_TEMP "stale-fat32-$id.txt"
+          $used = @((Get-CimInstance Win32_LogicalDisk | ForEach-Object { $_.DeviceID.TrimEnd(':') }) +
+                    (Get-PSDrive -PSProvider FileSystem | ForEach-Object { $_.Name }))
+          $drive = [char[]]'ZYXWVUTSRQPONMLKJIHGFED' | Where-Object { "$_" -notin $used } | Select-Object -First 1
+          if (-not $drive) { throw "No free drive letter for the FAT32 VHD" }
+          $pushed = $false
+          try {
+            $commands = @(
+              "create vdisk file=`"$vhd`" maximum=256 type=expandable",
+              "select vdisk file=`"$vhd`"",
+              "attach vdisk",
+              "create partition primary",
+              "format fs=fat32 quick label=STALE",
+              "assign letter=$drive"
+            )
+            [IO.File]::WriteAllLines($script, $commands, [Text.Encoding]::ASCII)
+            & diskpart.exe /s $script
+            if ($LASTEXITCODE -ne 0) { throw "diskpart failed to create the FAT32 VHD" }
+            $volume = Get-Volume -DriveLetter $drive
+            if ($volume.FileSystem -ne 'FAT32') { throw "The VHD volume is not FAT32" }
+            $root = "${drive}:\stale-fixture"
+            New-Item -ItemType Directory -Path $root | Out-Null
+            [IO.File]::WriteAllText((Join-Path $root 'fixture_test.iyi'), "assert 1 + 1 == 2`n")
+            $env:IYI_CACHE_DIR = Join-Path $env:RUNNER_TEMP "stale-fat32-cache-$id"
+            Push-Location $root
+            $pushed = $true
+            $first = (& $env:IYI test --cached --json fixture_test.iyi | Out-String)
+            if ($LASTEXITCODE -ne 0) { throw "FAT32 recording run failed: $first" }
+            $firstDoc = $first | ConvertFrom-Json
+            if ($firstDoc.builds -ne 1 -or $firstDoc.failed -ne 0) {
+              throw "FAT32 recording run did not build one passing test: $first"
+            }
+            $second = (& $env:IYI test --cached --json fixture_test.iyi | Out-String)
+            if ($LASTEXITCODE -ne 0) { throw "FAT32 second run failed: $second" }
+            $secondDoc = $second | ConvertFrom-Json
+            if ($secondDoc.builds -ne 1 -or $secondDoc.failed -ne 0 -or
+                $secondDoc.tests.Count -ne 1 -or
+                $secondDoc.tests[0].check_reason -notlike '*no trusted change time*') {
+              throw "FAT32 second run did not name the change-time refusal with one build: $second"
+            }
+            Write-Output "FAT32 second run: $second"
+          } finally {
+            if ($pushed) { Pop-Location }
+            if (Test-Path -LiteralPath $vhd) {
+              [IO.File]::WriteAllLines($script, @("select vdisk file=`"$vhd`"", "detach vdisk"), [Text.Encoding]::ASCII)
+              & diskpart.exe /s $script
+              if ($LASTEXITCODE -ne 0) { throw "Could not detach $vhd" }
+              Remove-Item -LiteralPath $vhd -Force
+            }
+            Remove-Item -LiteralPath $script -Force -ErrorAction SilentlyContinue
+          }
+      - name: Export fresh run receipts
+        env:
+          IYI_CI_PRODUCER: "1"
+        run: |
+          bash bench/stale_ci.sh assert-export-env
+          mkdir -p stale-index
+          args=(
+            --fresh
+            --export-index "run:${GITHUB_RUN_ID}=stale-index/run-${GITHUB_RUN_ID}-${STALE_TARGET}.json"
+          )
+          if [ "${GITHUB_REF}" = "refs/heads/master" ]; then
+            args+=(--export-index "master=stale-index/master-candidate-${STALE_TARGET}.json")
+          fi
+          mapfile -t tests < <(find samples/iyi -maxdepth 1 -type f -name '*.iyi' -print | sort)
+          "$IYI" test "${args[@]}" "${tests[@]}"
+      - name: Check the producer compiler and LLVM DLL
+        run: |
+          test -f .build/iyi.exe
+          test -f .build/LLVM-C.dll
+      - name: Upload producer compiler
+        uses: actions/upload-artifact@v7
+        with:
+          name: iyi-x86_64-windows-msvc
+          path: |
+            .build/iyi.exe
+            .build/LLVM-C.dll
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
+      - name: Upload run receipt snapshot
+        uses: actions/upload-artifact@v7
+        with:
+          name: run-${{ github.run_id }}-x86_64-windows-msvc.json
+          path: stale-index/run-${{ github.run_id }}-x86_64-windows-msvc.json
+          archive: false
+          if-no-files-found: error
+          retention-days: 1
+      - name: Upload master candidate receipt snapshot
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        uses: actions/upload-artifact@v7
+        with:
+          name: master-candidate-x86_64-windows-msvc.json
+          path: stale-index/master-candidate-x86_64-windows-msvc.json
+          archive: false
+          if-no-files-found: error
+          retention-days: 1
+
+  stale-windows-gates:
+    needs: plan
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'stale-windows-gates') }}
+    runs-on: windows-2025
+    timeout-minutes: 240
+    name: "Stale key and equivalence gates, on Windows"
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+      - uses: crystal-lang/install-crystal@36a22e9145188eec527c96e5a789ce4b832af587 # v1.9.5
+        with:
+          crystal: 1.21.0
+      - name: What this machine has
+        shell: pwsh
+        run: |
+          if (-not (Get-Command make -ErrorAction SilentlyContinue)) {
+            choco install make --version 4.4.1 --no-progress -y
+            if ($LASTEXITCODE -ne 0) { throw "choco could not install make 4.4.1" }
+            $make = Join-Path $env:ChocolateyInstall 'lib\make\tools\install\bin\make.exe'
+            $hash = (Get-FileHash -Algorithm SHA256 $make).Hash.ToLower()
+            if ($hash -ne 'cc6dc291113dcbcc7735835acbfc23c52ed037e4e124ff2d7a0aeae6df563a9f') {
+              throw "Chocolatey's make.exe is not the one pinned here: $hash"
+            }
+          }
+          $lib = (crystal env CRYSTAL_LIBRARY_PATH).Trim()
+          $llvm = (Get-Content "$lib\llvm_VERSION")[0].Trim()
+          "CRYSTAL_LIBRARY_PATH=$lib" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "LLVM_VERSION=$llvm" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.14"
+      - name: Build the compiler and `iyi`
+        shell: cmd
+        run: |
+          make -f Makefile.win crystal || exit /b 1
+          make -f Makefile.win iyi
+      - name: Set producer compiler path
+        run: echo "IYI=$(cygpath -m "$PWD/.build/iyi.exe")" >> "$GITHUB_ENV"
+      - name: Link once, RG4, the reach walk, the key's phases, RG8 and RG9
+        run: bash bench/stale_callpath.sh all
+      - name: Suite speed under the audit, 20 tests
+        run: python3 bench/stale_suite_speed.py --tests 20 --iterations 0,0 --audit
+      - name: Two processes record into one store
+        run: bash bench/stale_store_concurrency.sh
+      - name: RG2, RG2a, RG2r and RG5, with no program excluded
+        run: |
+          bash bench/stale_equivalence.sh all | tee stale-equivalence.log
+          if grep -E '^RG2a?: .* [1-9][0-9]* still excluded' stale-equivalence.log; then
+            echo "RG2 or RG2a excluded a program" >&2
+            exit 1
+          fi
+
+  stale-windows-fresh:
+    needs: [plan, stale-windows]
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'stale-windows-fresh') }}
+    runs-on: windows-2025
+    timeout-minutes: 240
+    name: "Fresh runner receipt audit, on Windows"
+    permissions:
+      actions: read
+    defaults:
+      run:
+        shell: bash
+    env:
+      STALE_TARGET: x86_64-windows-msvc
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+      - uses: crystal-lang/install-crystal@36a22e9145188eec527c96e5a789ce4b832af587 # v1.9.5
+        with:
+          crystal: 1.21.0
+      - name: What this machine has
+        shell: pwsh
+        run: |
+          if (-not (Get-Command make -ErrorAction SilentlyContinue)) {
+            choco install make --version 4.4.1 --no-progress -y
+            if ($LASTEXITCODE -ne 0) { throw "choco could not install make 4.4.1" }
+            $make = Join-Path $env:ChocolateyInstall 'lib\make\tools\install\bin\make.exe'
+            $hash = (Get-FileHash -Algorithm SHA256 $make).Hash.ToLower()
+            if ($hash -ne 'cc6dc291113dcbcc7735835acbfc23c52ed037e4e124ff2d7a0aeae6df563a9f') {
+              throw "Chocolatey's make.exe is not the one pinned here: $hash"
+            }
+          }
+          $lib = (crystal env CRYSTAL_LIBRARY_PATH).Trim()
+          $llvm = (Get-Content "$lib\llvm_VERSION")[0].Trim()
+          "CRYSTAL_LIBRARY_PATH=$lib" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "LLVM_VERSION=$llvm" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.14"
+      - name: Build the fork's compiler
+        shell: cmd
+        run: make -f Makefile.win crystal
+      - name: Download producer compiler
+        uses: actions/download-artifact@v8
+        with:
+          name: iyi-x86_64-windows-msvc
+          path: .build
+      - name: Set producer compiler path
+        run: echo "IYI=$(cygpath -m "$PWD/.build/iyi.exe")" >> "$GITHUB_ENV"
+      - name: Download producer receipt snapshot
+        uses: actions/download-artifact@v8
+        with:
+          name: run-${{ github.run_id }}-x86_64-windows-msvc.json
+          path: stale-index
+      - name: Download master candidate receipt snapshot
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        uses: actions/download-artifact@v8
+        with:
+          name: master-candidate-x86_64-windows-msvc.json
+          path: stale-index
+      - name: "Producer receipts on a fresh runner: hit on an equal profile, refused on another"
+        run: |
+          mapfile -t tests < <(find samples/iyi -maxdepth 1 -type f -name '*.iyi' -print | sort)
+          "$IYI" test --cached --json \
+            --import-index "run:${GITHUB_RUN_ID}=stale-index/run-${GITHUB_RUN_ID}-${STALE_TARGET}.json" \
+            "${tests[@]}" > stale-index/cached.json
+          bash bench/stale_ci.sh assert-hits --json stale-index/cached.json \
+            --snapshot "stale-index/run-${GITHUB_RUN_ID}-${STALE_TARGET}.json" \
+            --allow-profile-refusal
+      - name: Shadow audit fresh execution and export
+        id: shadow_audit
+        env:
+          IYI_CI_PRODUCER: "1"
+        run: |
+          bash bench/stale_ci.sh assert-export-env
+          mapfile -t tests < <(find samples/iyi -maxdepth 1 -type f -name '*.iyi' -print | sort)
+          "$IYI" test --fresh --json \
+            --export-index "audit:${GITHUB_RUN_ID}=stale-index/audit-${GITHUB_RUN_ID}-${STALE_TARGET}.json" \
+            "${tests[@]}" > stale-index/fresh.json
+          bash bench/stale_ci.sh shadow-audit \
+            --cached-json stale-index/cached.json \
+            --fresh-json stale-index/fresh.json \
+            --cached-snapshot "stale-index/run-${GITHUB_RUN_ID}-${STALE_TARGET}.json" \
+            --fresh-snapshot "stale-index/audit-${GITHUB_RUN_ID}-${STALE_TARGET}.json"
+      - name: "The runner's own receipts hit on an emptied store"
+        run: |
+          cache_dir="$("$IYI" env IYI_CACHE_DIR | tr -d '\r')"
+          if [ -z "$cache_dir" ]; then
+            echo "iyi env IYI_CACHE_DIR returned an empty path" >&2
+            exit 1
+          fi
+          if [ "$RUNNER_OS" = "Windows" ]; then cache_dir="$(cygpath -u "$cache_dir")"; fi
+          rm -rf "$cache_dir/tests-v1"
+          mapfile -t tests < <(find samples/iyi -maxdepth 1 -type f -name '*.iyi' -print | sort)
+          "$IYI" test --cached --json \
+            --import-index "audit:${GITHUB_RUN_ID}=stale-index/audit-${GITHUB_RUN_ID}-${STALE_TARGET}.json" \
+            "${tests[@]}" > stale-index/audit-cached.json
+          bash bench/stale_ci.sh assert-hits --json stale-index/audit-cached.json \
+            --snapshot "stale-index/audit-${GITHUB_RUN_ID}-${STALE_TARGET}.json"
+      - name: Planted hidden-read shadow-audit proof
+        run: bash bench/stale_ci.sh test-planted-hidden-read
+      - name: Master snapshot path and Actions API proof
+        run: bash bench/stale_ci.sh test-master-path
+      - name: RG1 and RG7 with the producer compiler
+        run: bash bench/stale_reproducible.sh
+      - name: RG9 CallPathFp on the fresh runner
+        run: bash bench/stale_ci.sh rg9
+      - name: Download master snapshot for git-diff audit
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          bash bench/stale_ci.sh fetch-master \
+            --out "stale-index/master-${STALE_TARGET}.json" \
+            --target "$STALE_TARGET"
+      - name: Master snapshot git-diff self-check
+        run: |
+          bash bench/stale_ci.sh master-self-check \
+            --snapshot "stale-index/master-${STALE_TARGET}.json" \
+            --out-json stale-index/master-cached.json
+      - name: Census and overhead measurements
+        run: bash bench/stale_census.sh
+      - name: Prepare audited master receipt snapshot
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        run: cp -f "stale-index/master-candidate-${STALE_TARGET}.json" "stale-index/master-${STALE_TARGET}.json"
+      - name: Publish audited master receipt snapshot
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        uses: actions/upload-artifact@v7
+        with:
+          name: master-x86_64-windows-msvc.json
+          path: stale-index/master-x86_64-windows-msvc.json
+          archive: false
+          retention-days: 7
+      - name: Prepare empty master snapshot after disagreement
+        id: empty_snapshot
+        if: always() && !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.shadow_audit.outcome == 'failure'
+        run: |
+          bash bench/stale_ci.sh empty-snapshot \
+            --from "stale-index/master-candidate-${STALE_TARGET}.json" \
+            --out "stale-index/master-${STALE_TARGET}.json"
+      - name: Publish empty master snapshot after disagreement
+        if: always() && !cancelled() && steps.empty_snapshot.outcome == 'success'
+        uses: actions/upload-artifact@v7
+        with:
+          name: master-x86_64-windows-msvc.json
+          path: stale-index/master-x86_64-windows-msvc.json
+          archive: false
+          retention-days: 7
 
   compiler-specs:
     needs: [plan, build]
@@ -805,6 +1854,11 @@ jobs:
       - name: The test verb tells its four verdicts apart
         run: bash bench/test_verb.sh
 
+      - name: Offline Pebble module mirror and dependency gate
+        run: bash bench/test_offline_pebble.sh
+
+      - name: Offline vector intake and fail-closed validation gate
+        run: bash bench/test_offline_vectors.sh
       # SPEC.md III.8 #2: the language server. One scripted session is a
       # person's first five minutes plus the agent's first question, and
       # every capability the release claims is a step: diagnostics with
@@ -1792,6 +2846,12 @@ jobs:
       - name: The test verb (III.8)
         run: bash bench/test_verb.sh
 
+      - name: Offline Pebble module mirror and dependency gate
+        run: bash bench/test_offline_pebble.sh
+
+      - name: Offline vector intake and fail-closed validation gate
+        run: bash bench/test_offline_vectors.sh
+
       # The refusals and the paths they name, on the volume that folds case
       # by default and the BSD tools under the script: it ran on Linux and
       # Windows only, and on a Mac `iyi run HDR/APP/MAIN.IYI` of a stored
@@ -1800,7 +2860,6 @@ jobs:
       # refused by BSD touch - three failures nothing here could see.
       - name: What the verbs say when they refuse, on darwin
         run: bash bench/verbs_exercise.sh
-
       # The same protocol edges on BSD sockets, where a peer that hangs
       # up mid-frame surfaces differently from Linux and the EPIPE path
       # that used to exit the daemon 0 is exactly the same code.
@@ -2396,6 +3455,7 @@ jobs:
         shell: bash
         run: bash bench/init_project.sh
 
+
       # The package a Windows person downloads, built and judged by the run
       # that builds the compiler. Kept inside this job rather than given its
       # own: a second job would check the tree out again and build
@@ -2717,6 +3777,8 @@ jobs:
         run: |
           bash bench/verbs_exercise.sh
           bash bench/test_verb.sh
+          bash bench/test_offline_pebble.sh
+          bash bench/test_offline_vectors.sh
           bash bench/packages_resolve.sh
           bash bench/packages_get.sh
           bash bench/migrate_gate.sh
@@ -3129,7 +4191,8 @@ jobs:
         env:
           PYTHONUNBUFFERED: "1"
         run: |
-          export IYI="$(cygpath -m "$PWD")/.build/iyi.exe"
+          IYI="$(cygpath -m "$PWD")/.build/iyi.exe"
+          export IYI
           python bench/debug_info.py
           python bench/measured_numbers.py
           python bench/lsp_latency.py
@@ -3762,7 +4825,8 @@ jobs:
       - name: install.sh installs the tarball, and refuses a wrong checksum
         run: |
           (cd dist && sha256sum *.tar.gz > SHA256SUMS)
-          tarball="$(basename dist/*.tar.gz)"
+          set -- dist/*.tar.gz
+          tarball="$(basename "$1")"
           version="${tarball#iyi-}"; version="${version%-linux-x86_64.tar.gz}"
           export IYI_RELEASE_URL="file://$PWD/dist" IYI_VERSION="$version"
           IYI_PREFIX="$PWD/installed" sh install.sh
@@ -3808,7 +4872,8 @@ jobs:
   # red would ship a claim nobody on that platform can reproduce.
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [binary, darwin, darwin-std, darwin-std-siblings, clean-room, iyi, compiler-specs, stdlib-specs,
+    needs: [binary, darwin, darwin-std, darwin-std-siblings, clean-room, iyi, stale-rg3, stale-callpath, stale-equivalence, stale-fresh,
+            stale-darwin, stale-darwin-gates, stale-darwin-fresh, stale-windows, stale-windows-gates, stale-windows-fresh, compiler-specs, stdlib-specs,
             samples, lsp-positions, std, std-siblings, std-platforms, targets, cross-objects, cross-run,
             wasi-run, windows-probe, windows-collector, windows-runtime, windows-native,
             windows-native-gates, windows-native-surfaces, windows-std,
@@ -3992,7 +5057,8 @@ jobs:
   # failed or cancelled one does not. `scripts/ci_plan.py` refuses a
   # workflow whose jobs this list does not name.
   result:
-    needs: [plan, docs, build, iyi, compiler-specs, stdlib-specs, lsp-positions, samples, std,
+    needs: [plan, docs, build, iyi, stale-rg3, stale-callpath, stale-equivalence, stale-fresh,
+            stale-darwin, stale-darwin-gates, stale-darwin-fresh, stale-windows, stale-windows-gates, stale-windows-fresh, compiler-specs, stdlib-specs, lsp-positions, samples, std,
             std-platforms, std-siblings, targets, cross-objects, cross-run, darwin,
             darwin-std-siblings, darwin-std, windows-probe, windows-collector, windows-runtime,
             windows-native, windows-native-gates, windows-native-surfaces, windows-std,

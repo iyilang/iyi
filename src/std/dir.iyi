@@ -31,11 +31,9 @@ import std/file::{File}
     fun FindFirstFileW(pattern : UInt16*, data : Void*) : Void*
     fun FindNextFileW(handle : Void*, data : Void*) : Int32
     fun FindClose(handle : Void*) : Int32
-    # Where Windows itself says a program may write scratch files. The
-    # last resort here was the literal `C:\Windows\Temp`, which a
-    # standard user may not write to; this call answers TMP, then TEMP,
-    # then the profile directory — measured with both variables cleared,
-    # `C:\Users\dogru\`, which the person running the program owns.
+    # Where Windows itself says a program may write scratch files, asked only
+    # when TMPDIR, TEMP and TMP name none: TMP, then TEMP, then the profile
+    # directory.
     fun GetTempPathW(buffer_count : Int32, buffer : UInt16*) : Int32
     # What a refused removal is asked about. A directory carrying
     # FILE_ATTRIBUTE_READONLY (0x1) refuses `RemoveDirectoryW` with
@@ -90,6 +88,7 @@ import std/file::{File}
       SYS_UNLINKAT   =  35_i64
     {% end %}
 
+    @[Effect(:primitive)]
     def self.sys(number : Int64, a : Int64, b : Int64, c : Int64) : Int64
       result = uninitialized Int64
       {% if flag?(:x86_64) %}
@@ -199,6 +198,7 @@ pub class Dir
     yield d
   end
 
+  @[Effect(:stdio)]
   private def open_dir(dir_path : String) : Void*
     {% if flag?(:darwin) || flag?(:linux) %}
       p = LibC.opendir(Dir.c_str(dir_path))
@@ -236,6 +236,7 @@ pub class Dir
     {% end %}
   end
 
+  @[Effect(:dir_stream)]
   def read : String?
     raise "Cannot read from closed Dir" if @closed
     {% if flag?(:darwin) || flag?(:linux) %}
@@ -292,6 +293,7 @@ pub class Dir
     {% end %}
   end
 
+  @[Effect(:stdio)]
   def rewind : self
     raise "Cannot rewind closed Dir" if @closed
     {% if flag?(:darwin) || flag?(:linux) %}
@@ -316,6 +318,7 @@ pub class Dir
     self
   end
 
+  @[Effect(:stdio)]
   def close : Nil
     return if @closed
     {% if flag?(:darwin) || flag?(:linux) %}
@@ -337,6 +340,7 @@ pub class Dir
     end
   end
 
+  @[Effect(:dir_list)]
   def entries : Array(String)
     res = [] of String
     rewind
@@ -355,6 +359,7 @@ pub class Dir
     end
   end
 
+  @[Effect(:dir_list)]
   def children : Array(String)
     res = [] of String
     each_child do |entry|
@@ -385,6 +390,7 @@ pub class Dir
     cd(path)
   end
 
+  @[Effect(:cwd)]
   def self.cd(path : String | Path) : String
     target = path.to_s
     {% if flag?(:darwin) || flag?(:linux) %}
@@ -423,6 +429,23 @@ pub class Dir
     yield
   end
 
+  {% if flag?(:win32) %}
+    # Windows' own answer, not a literal: `C:\Windows\Temp` is a directory a
+    # standard user may not write to, and the platform keeps the question.
+    # The environment answers first and is observed; this is the answer only
+    # when it names none, so it is a host-state read. The call always ends
+    # its answer with a separator, which no other branch here does.
+    @[Effect(:host_state)]; private def self.windows_temp_path : String
+      wide = Pointer(UInt16).malloc(4096_u64)
+      chars = LibKernel32.GetTempPathW(4096, wide)
+      return "C:\\Windows\\Temp" if chars <= 0 || chars > 4096
+      size = __iyi_utf8_size_from_wide(wide)
+      return "C:\\Windows\\Temp" if size <= 1
+      answer = String.new(size - 1) { |t| __iyi_utf8_bytes_from_wide(wide, t, size) }
+      answer.ends_with?("\\") ? answer[0, answer.bytesize - 1] : answer
+    end
+  {% end %}
+
   def self.tempdir : String
     tmp = Program.env("TMPDIR")
     return without_trailing_separator(tmp) if tmp && !tmp.empty?
@@ -431,17 +454,7 @@ pub class Dir
     tmp3 = Program.env("TMP")
     return without_trailing_separator(tmp3) if tmp3 && !tmp3.empty?
     {% if flag?(:win32) %}
-      # Windows' own answer, not a literal: `C:\Windows\Temp` is a
-      # directory a standard user may not write to, and the platform
-      # keeps the question. The call always ends its answer with a
-      # separator, which no other branch here does.
-      wide = Pointer(UInt16).malloc(4096_u64)
-      chars = LibKernel32.GetTempPathW(4096, wide)
-      return "C:\\Windows\\Temp" if chars <= 0 || chars > 4096
-      size = __iyi_utf8_size_from_wide(wide)
-      return "C:\\Windows\\Temp" if size <= 1
-      answer = String.new(size - 1) { |t| __iyi_utf8_bytes_from_wide(wide, t, size) }
-      answer.ends_with?("\\") ? answer[0, answer.bytesize - 1] : answer
+      windows_temp_path
     {% else %}
       "/tmp"
     {% end %}
@@ -473,6 +486,7 @@ pub class Dir
     end
   end
 
+  @[Effect(:dir_list)]
   def self.entries(dirname : String | Path) : Array(String)
     Dir.open(dirname) do |dir|
       return dir.entries
@@ -488,6 +502,7 @@ pub class Dir
     end
   end
 
+  @[Effect(:dir_list)]
   def self.children(dirname : String | Path) : Array(String)
     Dir.open(dirname) do |dir|
       return dir.children
@@ -495,24 +510,25 @@ pub class Dir
     [] of String
   end
 
-  def self.exists?(path : String | Path) : Bool
+  @[Effect(:file_stat)]; def self.exists?(path : String | Path) : Bool
     p = path.to_s
-    {% if flag?(:darwin) || flag?(:linux) %}
-      dirp = LibC.opendir(c_str(p))
-      if dirp.address != 0_u64
-        LibC.closedir(dirp)
-        true
-      else
-        false
-      end
+    {% if flag?(:darwin) %}
+      stat = uninitialized Std::File::LibC::Stat
+      return false if Std::File::LibC.stat(c_str(p), pointerof(stat).as(Void*)) != 0
+      (stat.st_mode_nlink & 0o170000) == 0o040000
+    {% elsif flag?(:linux) %}
+      stat = uninitialized Std::File::LibC::Stat
+      return false if Std::File::LibC.stat(c_str(p), pointerof(stat)) != 0
+      (stat.st_mode & 0o170000) == 0o040000
     {% elsif flag?(:win32) %}
-      # INVALID_FILE_ATTRIBUTES is 0xFFFFFFFF, which is what that DWORD
-      # spells as the Int32 the prelude's helper answers, and 0x10 is
-      # FILE_ATTRIBUTE_DIRECTORY. The helper is GetFileAttributesW with the
-      # wide conversion in front of it, so a long or non-ASCII directory
-      # answers here the same as a short ASCII one.
-      attrs = __iyi_path_attributes(c_str(p))
-      attrs != -1 && (attrs & 0x10) != 0
+      wide = __iyi_wide_path(c_str(p))
+      return false if wide.address == 0_u64
+      handle = Std::File::LibKernel32.CreateFileW(wide, 0, 7, Pointer(Void).new(0_u64), 3, 0x2000000, Pointer(Void).new(0_u64))
+      return false if handle.address == 0xFFFFFFFFFFFFFFFF_u64
+      info = uninitialized Std::File::LibKernel32::BY_HANDLE_FILE_INFORMATION
+      got = Std::File::LibKernel32.GetFileInformationByHandle(handle, pointerof(info))
+      Std::File::LibKernel32.CloseHandle(handle)
+      got != 0 && (info.dwFileAttributes & 0x10_u32) != 0_u32
     {% else %}
       false
     {% end %}
@@ -527,6 +543,7 @@ pub class Dir
     true
   end
 
+  @[Effect(:file_write, :mkdir)]
   def self.mkdir(path : String | Path, mode : Int32 = 0o777) : Nil
     p = path.to_s
     {% if flag?(:darwin) || flag?(:linux) %}
@@ -545,6 +562,7 @@ pub class Dir
     {% end %}
   end
 
+  @[Effect(:file_write, :mkdir)]
   def self.mkdir_p(path : String | Path, mode : Int32 = 0o777) : Nil
     p_str = path.to_s
     return if exists?(p_str)
@@ -593,6 +611,7 @@ pub class Dir
     raise "Cannot create directory: #{p_str}#{refusal}" unless exists?(p_str)
   end
 
+  @[Effect(:file_write, :delete)]
   def self.delete(path : String | Path) : Nil
     p = path.to_s
     {% if flag?(:darwin) || flag?(:linux) %}
@@ -608,6 +627,7 @@ pub class Dir
     {% end %}
   end
 
+  @[Effect(:file_write, :delete)]
   def self.delete?(path : String | Path) : Bool
     p = path.to_s
     {% if flag?(:darwin) || flag?(:linux) %}
@@ -630,6 +650,7 @@ pub class Dir
     # retry and goes back when the retry still refuses, so a directory
     # this could not remove is not a directory this left writable. It
     # is the same shape the prelude's `__iyi_unlink` has for a file.
+    @[Effect(:file_write, :delete)]
     private def self.remove_directory(wide : Pointer(UInt16)) : Bool
       return true if LibKernel32.RemoveDirectoryW(wide) != 0
       return false if LibKernel32.GetLastError != 5

@@ -109,15 +109,23 @@ if build_and_run "release" toml-release --release; then
     echo "  release: missing pass sentinel"
     status=1
   else
-    # Without darwin's frames under a task's panic (bench/darwin_frames.sh):
-    # a release build inlines, and its frames are fewer.
-    without_frames < "$WORK/toml-plain.out" > "$WORK/toml-plain.cmp"
-    without_frames < "$WORK/toml-release.out" > "$WORK/toml-release.cmp"
-    if cmp -s "$WORK/toml-plain.cmp" "$WORK/toml-release.cmp"; then
+    passed=0
+    if cmp -s "$WORK/toml-plain.out" "$WORK/toml-release.out"; then
+      passed=1
+    elif [ "$(uname -s)" = "Darwin" ] && [ -n "$PY" ]; then
+      if "$PY" "$REPO/bench/frames_equivalent.py" --across-optimisation "$WORK/toml-plain.out" "$WORK/toml-release.out" > "$WORK/toml-frames.out" 2>&1; then
+        passed=1
+      fi
+    fi
+    if [ "$passed" -eq 1 ]; then
       echo "  passes, and prints every line and record the plain build prints"
     else
       echo "  passes, but prints otherwise than the plain build:"
-      diff "$WORK/toml-plain.cmp" "$WORK/toml-release.cmp" | sed -n '1,6p' | sed 's/^/    /'
+      if [ -s "$WORK/toml-frames.out" ]; then
+        sed 's/^/    /' "$WORK/toml-frames.out"
+      else
+        diff "$WORK/toml-plain.out" "$WORK/toml-release.out" | sed -n '1,6p' | sed 's/^/    /'
+      fi
       status=1
     fi
   fi
@@ -476,19 +484,28 @@ if [ -n "$apart" ]; then
 else
   echo "  the exercise typechecks for x86_64-linux-gnu, aarch64-darwin, x86_64-windows-msvc, aarch64-linux-gnu, x86_64-linux-musl"
 fi
-mkdir -p "$WORK/r1/mods"
-if (cd "$WORK/r1" && "$IYI" build --emit-iyimod mods -o from-source "$EXERCISE" \
-  && "$IYI" build --use-iyimod mods -o from-artifact "$EXERCISE") >"$WORK/r1/build.log" 2>&1; then
-  "$WORK/r1/from-source" >"$WORK/r1/source.out" 2>&1
-  "$WORK/r1/from-artifact" >"$WORK/r1/artifact.out" 2>&1
-  # Without darwin's frames under a task's panic (bench/darwin_frames.sh).
-  without_frames < "$WORK/r1/source.out" > "$WORK/r1/source.cmp"
-  without_frames < "$WORK/r1/artifact.out" > "$WORK/r1/artifact.cmp"
-  if cmp -s "$WORK/r1/source.cmp" "$WORK/r1/artifact.cmp" && grep -q "ALL CHECKS PASSED" "$WORK/r1/artifact.out"; then
+mkdir -p "$WORK/r1/mods" "$WORK/r1/s" "$WORK/r1/a"
+if (cd "$WORK/r1" && "$IYI" build --emit-iyimod mods -o s/std_toml_exercise "$EXERCISE" \
+  && "$IYI" build --use-iyimod mods -o a/std_toml_exercise "$EXERCISE") >"$WORK/r1/build.log" 2>&1; then
+  "$WORK/r1/s/std_toml_exercise" >"$WORK/r1/source.out" 2>&1
+  "$WORK/r1/a/std_toml_exercise" >"$WORK/r1/artifact.out" 2>&1
+  passed=0
+  if cmp -s "$WORK/r1/source.out" "$WORK/r1/artifact.out"; then
+    passed=1
+  elif [ "$(uname -s)" = "Darwin" ] && [ -n "$PY" ]; then
+    if "$PY" "$REPO/bench/frames_equivalent.py" "$WORK/r1/source.out" "$WORK/r1/artifact.out" > "$WORK/r1/frames.out" 2>&1; then
+      passed=1
+    fi
+  fi
+  if [ "$passed" -eq 1 ] && grep -q "ALL CHECKS PASSED" "$WORK/r1/artifact.out"; then
     echo "  built from its artifacts, the exercise prints what it prints from source"
   else
     echo "  from its artifacts the exercise prints otherwise:"
-    diff "$WORK/r1/source.cmp" "$WORK/r1/artifact.cmp" | sed -n '1,6p' | sed 's/^/    /'
+    if [ -s "$WORK/r1/frames.out" ]; then
+      sed 's/^/    /' "$WORK/r1/frames.out"
+    else
+      diff "$WORK/r1/source.out" "$WORK/r1/artifact.out" | sed -n '1,6p' | sed 's/^/    /'
+    fi
     status=1
   fi
 else

@@ -63,6 +63,32 @@ for build in plain release; do
   done
 done
 
+step "argument handling: scratch directory accepted, files and extra directories rejected"
+mkdir -p "$WORK/empty_scratch" "$WORK/second_scratch"
+touch "$WORK/regular_file.txt"
+if ! ./unit-plain "$WORK/empty_scratch" > ran-scratch.txt 2>&1 || ! grep -q 'every property held' ran-scratch.txt; then
+  echo "the exercise with one empty scratch directory failed:"; cat ran-scratch.txt; exit 1
+fi
+if ./unit-plain "$WORK/regular_file.txt" > ran-file.txt 2>&1; then
+  echo "the exercise accepted a regular file as a scratch directory"; cat ran-file.txt; exit 1
+fi
+if ! grep -q 'no step named' ran-file.txt; then
+  echo "the exercise failed on a regular file, but not saying 'no step named':"; cat ran-file.txt; exit 1
+fi
+if ./unit-plain "$WORK/empty_scratch" "$WORK/second_scratch" > ran-twodirs.txt 2>&1; then
+  echo "the exercise accepted two scratch directories"; cat ran-twodirs.txt; exit 1
+fi
+if ! grep -q 'no step named' ran-twodirs.txt; then
+  echo "the exercise failed on a second directory, but not saying 'no step named':"; cat ran-twodirs.txt; exit 1
+fi
+if ./unit-plain "not_a_step" > ran-badstep.txt 2>&1; then
+  echo "the exercise accepted an unknown step"; cat ran-badstep.txt; exit 1
+fi
+if ! grep -q 'no step named not_a_step' ran-badstep.txt; then
+  echo "the exercise failed on unknown step, but not saying 'no step named not_a_step':"; cat ran-badstep.txt; exit 1
+fi
+echo "  empty scratch directory accepted; files, second directory, and unknown steps refused"
+
 # ── 2. What the compiler refuses ──────────────────────────────────────────
 step "what the compiler refuses"
 refused() { # name, expected text, body; answers 1 when it compiled or said otherwise

@@ -172,7 +172,7 @@ module Iyi
       interpret_check_args_toplevel do |arg|
         arg.accept self
         cmd = @last.to_macro_id
-        env_value = ENV[cmd]?
+        env_value = BuildInputs.pause_if_env_only { ENV[cmd]? }
         @last = env_value ? StringLiteral.new(env_value) : NilLiteral.new
       end
     end
@@ -284,7 +284,7 @@ module Iyi
       cmd = cmd.join " "
 
       begin
-        result = `#{cmd}`
+        result = BuildInputs.pause_if_env_only { `#{cmd}` }
       rescue exc : File::Error | IO::Error
         # Taking the os_error message to avoid duplicating the "error executing process: "
         # prefix of the error message and ensure uniqueness between all error messages.
@@ -315,7 +315,8 @@ module Iyi
         arg.accept self
         filename = @last.to_macro_id
 
-        @last = BoolLiteral.new(File.exists?(filename))
+        exists = BuildInputs.pause_if_env_only { File.exists?(filename) }
+        @last = BoolLiteral.new(exists)
       end
     end
 
@@ -325,7 +326,8 @@ module Iyi
         filename = @last.to_macro_id
 
         begin
-          @last = StringLiteral.new(File.read(filename))
+          content = BuildInputs.pause_if_env_only { File.read(filename) }
+          @last = StringLiteral.new(content)
         rescue ex
           node.raise ex.to_s unless nilable
           @last = NilLiteral.new
@@ -2231,7 +2233,7 @@ module Iyi
       when "constant"
         interpret_check_args do |arg|
           value = arg.to_string("argument to 'TypeNode#constant'")
-          TypeNode.constant(type, value)
+          TypeNode.constant(type, value, interpreter)
         end
       when "has_constant?"
         interpret_check_args do |arg|
@@ -2556,10 +2558,11 @@ module Iyi
       BoolLiteral.new(type.types.has_key?(name))
     end
 
-    def self.constant(type, name)
+    def self.constant(type, name, interpreter)
       type = type.types[name]?
       case type
       when Const
+        interpreter.program.layout_fold_constant_read(type, nil)
         type.value
       when Type
         TypeNode.new(type)

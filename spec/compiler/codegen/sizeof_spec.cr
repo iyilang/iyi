@@ -357,3 +357,179 @@ describe "Code gen: sizeof" do
     end
   end
 end
+
+describe "Code gen: sizeof settled folds" do
+  # Each program grows `M` after a fold, which makes the fold stale. A stale
+  # expression is settled to the built layout (Q1 b). A stale type argument
+  # cannot be corrected without changing its type, so it is refused (Q2 b).
+  it "corrects a folded sizeof of a tuple whose module grew after the fold" do
+    run(settled_fold_program(<<-CODE)).to_i.should eq(32)
+      a = G(Int8).new(1_i8).as(M)
+      s1 = sizeof({Int32, M})
+      b = G({Int64, Int64}).new({1_i64, 2_i64}).as(M)
+      s1
+      CODE
+  end
+
+  it "gives the corrected sizeof the codegen stride of the grown tuple" do
+    run(settled_fold_program(<<-CODE)).to_b.should be_true
+      a = G(Int8).new(1_i8).as(M)
+      s1 = sizeof({Int32, M})
+      b = G({Int64, Int64}).new({1_i64, 2_i64}).as(M)
+      (Pointer({Int32, M}).new(0_u64) + 1).address == s1
+      CODE
+  end
+
+  it "keeps a folded sizeof when the module never grows" do
+    run(settled_fold_program(<<-CODE)).to_i.should eq(8)
+      a = G(Int8).new(1_i8).as(M)
+      s1 = sizeof({Int32, M})
+      s1
+      CODE
+  end
+
+  it "refuses a type argument built from a layout that grows later" do
+    expect_raises(Iyi::TypeException, /when it was used as a type argument, but/) do
+      run(settled_fold_program(<<-CODE))
+        a = G(Int8).new(1_i8).as(M)
+        buf = StaticArray(UInt8, sizeof({Int32, M})).new
+        b = G({Int64, Int64}).new({1_i64, 2_i64}).as(M)
+        buf.size
+        CODE
+    end
+  end
+
+  it "keeps the value of a type argument when the module never grows" do
+    run(settled_fold_program(<<-CODE)).to_i.should eq(8)
+      a = G(Int8).new(1_i8).as(M)
+      buf = StaticArray(UInt8, sizeof({Int32, M})).new
+      buf.size
+      CODE
+  end
+
+  it "gives a type argument sized after the final growth its final value" do
+    run(settled_fold_program(<<-CODE)).to_i.should eq(32)
+      a = G(Int8).new(1_i8).as(M)
+      b = G({Int64, Int64}).new({1_i64, 2_i64}).as(M)
+      buf = StaticArray(UInt8, sizeof({Int32, M})).new
+      buf.size
+      CODE
+  end
+
+  it "refuses a type argument built from a recursive generic that grows" do
+    expect_raises(Iyi::TypeException, /when it was used as a type argument, but/) do
+      run(<<-CODE)
+        module M
+        end
+
+        struct G(N)
+          include M
+
+          def initialize
+            @buf = StaticArray(UInt8, N).new
+          end
+
+          def n
+            N
+          end
+        end
+
+        x = G(1).new.as(M)
+        y = G(2).new.as(M)
+        z = G(sizeof({M})).new
+        z.n
+        CODE
+    end
+  end
+
+  it "corrects an offsetof that precedes a grown module field" do
+    run(settled_fold_p4("off\n")).to_i.should eq(24)
+  end
+
+  it "reads the field back at the corrected offset" do
+    run(settled_fold_p4("(pointerof(s).as(UInt8*) + sizeof(typeof(s.@a))).as(Int32*).value\n")).to_i.should eq(7)
+  end
+
+  it "agrees the corrected offsetof with the size of the module field" do
+    run(settled_fold_p4("off == sizeof(typeof(s.@a))\n")).to_b.should be_true
+  end
+
+  it "corrects a macro-expanded sizeof of a class" do
+    run(<<-CODE).to_i.should eq(8)
+      class C
+        def initialize(@a : Int64, @b : Int64)
+        end
+      end
+
+      {% begin %}
+        X = {{ sizeof(C) }}
+      {% end %}
+      c = C.new(1, 2)
+      X
+      CODE
+  end
+
+  it "keeps the corrected instance_sizeof of the same class" do
+    run(<<-CODE).to_i.should eq(24)
+      class C
+        def initialize(@a : Int64, @b : Int64)
+        end
+      end
+
+      {% begin %}
+        X = {{ sizeof(C) }}
+      {% end %}
+      c = C.new(1, 2)
+      instance_sizeof(C)
+      CODE
+  end
+
+  it "corrects a constant sizeof of a class" do
+    run(<<-CODE).to_i.should eq(8)
+      class C
+        def initialize(@a : Int64, @b : Int64)
+        end
+      end
+
+      X = {{ sizeof(C) }}
+      c = C.new(1, 2)
+      X
+      CODE
+  end
+end
+
+private def settled_fold_program(body : String) : String
+  <<-CODE
+    module M
+    end
+
+    struct StaticArray(T, N)
+      def size
+        N
+      end
+    end
+
+    struct G(T)
+      include M
+
+      def initialize(@v : T)
+      end
+    end
+
+    #{body}
+    CODE
+end
+
+private def settled_fold_p4(last : String) : String
+  body = <<-CODE
+    struct S
+      def initialize(@a : M, @b : Int32)
+      end
+    end
+
+    x = G(Int8).new(1_i8).as(M)
+    off = offsetof(S, @b)
+    s = S.new(G({Int64, Int64}).new({1_i64, 2_i64}), 7)
+    CODE
+  settled_fold_program(body + "\n" + last)
+end

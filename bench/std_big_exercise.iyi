@@ -953,21 +953,26 @@ divisions.each do |pair|
 end
 
 # And in time: a value twice its divisor's 262,144 bits divides in under
-# four times the product that checks it, the best of three each. Long
-# division took seven times the product in a plain build, a ratio that
-# grows with the length; the recursion takes about two.
+# four times the product that checks it. Long division took seven times the
+# product in a plain build, a ratio that grows with the length; the
+# recursion takes about two. Each pass times the two back to back and the
+# pass with the smallest ratio is the one judged, of seven: the best of
+# three of each apart read 5.4 and 5.3 with a compile running beside it, 2
+# runs in 55, and the best of seven apart 4.1, once in 40.
 wide_b = exact_bits(262144, 14_u64)
 wide_a = exact_bits(524288, 15_u64)
-divide_ns = 9223372036854775807_i64
-product_ns = 9223372036854775807_i64
-3.times do
+divide_ns = 0_i64
+product_ns = 0_i64
+7.times do |pass|
   started = __iyi_monotonic_ns
   wide_q, wide_r = wide_a.divmod(wide_b)
   divided = __iyi_monotonic_ns
   raise "div: long a == q * b + r" unless wide_q * wide_b + wide_r == wide_a
   multiplied = __iyi_monotonic_ns
-  divide_ns = divided - started if divided - started < divide_ns
-  product_ns = multiplied - divided if multiplied - divided < product_ns
+  if pass == 0 || (divided - started) * product_ns < divide_ns * (multiplied - divided)
+    divide_ns = divided - started
+    product_ns = multiplied - divided
+  end
 end
 raise "div: a long division took #{divide_ns // 1000000} ms, the product #{product_ns // 1000000} ms" unless divide_ns < product_ns * 4
 puts "    long division: every sign either side of both switches, and a long divisor in under four products"

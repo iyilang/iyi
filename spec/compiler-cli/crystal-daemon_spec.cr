@@ -275,12 +275,9 @@ describe "`crystal daemon`" do
   end
 
   it "serves several builds at once, keeping each client's output its own" do
-    # The daemon waits on every in-flight build from one fiber, via `poll`.
-    # Getting this wrong does not merely serialise the builds — an earlier
-    # fiber-per-connection version had children inherit each other's live
-    # fibers and write into each other's pipes. So the property under test is
-    # not speed: it is that four concurrent builds, one of which must fail,
-    # each get their own result.
+    # Four concurrent builds, one failing, each get their own result.
+    # Each stream drains concurrently via IO::Memory so client output
+    # does not block the daemon relay while compiler.lock is held.
     with_daemon do |socket|
       with_tempfile("daemon-concurrent") do |dir|
         Dir.mkdir_p(dir)
@@ -289,23 +286,22 @@ describe "`crystal daemon`" do
         processes = good.map do |path|
           Process.new(crystal, ["daemon", "build", "--socket", socket, "-o", path,
                                 fixture_path("hello-world.cr")],
-            input: Process::Redirect::Close, output: Process::Redirect::Pipe, error: Process::Redirect::Pipe)
+            input: Process::Redirect::Close, output: IO::Memory.new, error: IO::Memory.new)
         end
 
+        failing_error = IO::Memory.new
         failing = Process.new(crystal, ["daemon", "build", "--socket", socket, "--no-codegen",
                                         fixture_path("semantic-error.cr")],
-          input: Process::Redirect::Close, output: Process::Redirect::Pipe, error: Process::Redirect::Pipe)
-        failing_error = failing.error.gets_to_end
+          input: Process::Redirect::Close, output: IO::Memory.new, error: failing_error)
         failing_status = failing.wait
 
         processes.each_with_index do |process, index|
-          process.error.gets_to_end
           process.wait.success?.should be_true
           Process.capture_result(good[index]).should(be_success).output.should(eq("hello world\n"))
         end
 
         failing_status.success?.should be_false
-        failing_error.should contain("undefined method 'frobulate' for Int32")
+        failing_error.to_s.should contain("undefined method 'frobulate' for Int32")
 
         # And the daemon is still there afterwards.
         with_temp_executable "daemon-after-concurrent" do |path|

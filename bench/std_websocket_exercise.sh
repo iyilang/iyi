@@ -25,6 +25,13 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 IYI="${IYI:-$REPO/bin/iyi}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
+# Clear ambient fixture variables to isolate execution from external callers.
+unset WS_URL NODE_EXTRA_CA_CERTS TLS_ROOTS TLS_CERT TLS_KEY HOST
+# Verify launch boundary sanitization: all ambient fixture variables are cleared
+if [ -n "${WS_URL:-}" ] || [ -n "${NODE_EXTRA_CA_CERTS:-}" ] || [ -n "${TLS_ROOTS:-}" ] || [ -n "${TLS_CERT:-}" ] || [ -n "${TLS_KEY:-}" ] || [ -n "${HOST:-}" ]; then
+  echo "  FAIL: script entry failed to strip ambient fixture variables"
+  exit 1
+fi
 
 # A native compiler cannot resolve this shell's own path mapping: a search
 # path built from the shell's `pwd` finds no prelude at all, and a scratch
@@ -196,8 +203,8 @@ import base64, hashlib, os, socket, ssl, struct, sys
 port = int(os.environ["PORT"])
 # Under TLS (wss://) when TLS_ROOTS names the root to trust: the socket
 # wrapped, the name checked as localhost.
-roots = os.environ.get("TLS_ROOTS")
-host = os.environ.get("HOST", "127.0.0.1")
+roots = os.environ.get("TLS_ROOTS") or None
+host = os.environ.get("HOST") or "127.0.0.1"
 GUID = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 bad = 0
 def check(cond, what):
@@ -323,7 +330,7 @@ PY
 then
   echo "  the Python client could not be written"
   status=1
-elif ! PORT="$port" timeout 120 "$PY" "$WORK/ws-client.py"; then
+elif ! PORT="$port" TLS_ROOTS="" HOST="127.0.0.1" timeout 120 "$PY" "$WORK/ws-client.py"; then
   echo "  Python's client and the server disagree"
   status=1
 fi
@@ -339,8 +346,18 @@ elif ! command -v node >/dev/null 2>&1 || [ "$(node -e 'process.stdout.write(typ
   echo "  skipped: no node with a WebSocket client (Node 22 and later have one)"
 elif ! cat >"$WORK/ws-node.js" <<'JS'
 const port = process.env.PORT;
-// wss://localhost under TLS, its root given by NODE_EXTRA_CA_CERTS.
-const ws = new WebSocket(process.env.WS_URL || `ws://127.0.0.1:${port}/chat`, ["superchat", "chat"]);
+// Derive URL strictly from owned fixture endpoint; reject ambient redirection.
+// Mode is selected explicitly via fixture argument or WS_MODE variable, never ambient certs.
+const isTls = process.argv[2] === "tls" || process.env.WS_MODE === "tls";
+const expectedUrl = isTls
+  ? `wss://localhost:${port}/chat`
+  : `ws://127.0.0.1:${port}/chat`;
+const targetUrl = process.env.WS_URL || expectedUrl;
+if (targetUrl !== expectedUrl) {
+  console.log("  FAIL: WS_URL does not match owned fixture endpoint:", targetUrl);
+  process.exit(1);
+}
+const ws = new WebSocket(targetUrl, ["superchat", "chat"]);
 ws.binaryType = "arraybuffer";
 const sent = new Uint8Array(100000).map((_, i) => (i * 7 + 3) & 255);
 const got = [];
@@ -369,8 +386,14 @@ JS
 then
   echo "  the Node client could not be written"
   status=1
-elif ! PORT="$port" timeout 60 node "$WORK/ws-node.js"; then
+elif ! PORT="$port" WS_MODE=plain NODE_EXTRA_CA_CERTS="" WS_URL="ws://127.0.0.1:$port/chat" timeout 60 node "$WORK/ws-node.js" plain; then
   echo "  Node's client and the server disagree"
+  status=1
+elif WS_URL="ws://127.0.0.1.ambient.invalid:9999/chat" PORT="$port" WS_MODE=plain NODE_EXTRA_CA_CERTS="" timeout 10 node "$WORK/ws-node.js" plain >"$WORK/ws-node-ambient.out" 2>&1; then
+  echo "  Node's client accepted ambient WS_URL mismatch"
+  status=1
+elif ! grep -q "FAIL: WS_URL does not match owned fixture endpoint" "$WORK/ws-node-ambient.out"; then
+  echo "  Node's client rejected ambient WS_URL with unexpected error"
   status=1
 fi
 
@@ -384,8 +407,8 @@ cat >"$WORK/ws-deflate-client.py" <<'PY'
 import base64, hashlib, os, random, socket, ssl, struct, sys, time, zlib
 port = int(os.environ["PORT"])
 # Under TLS (wss://) when TLS_ROOTS names the root to trust.
-roots = os.environ.get("TLS_ROOTS")
-host = os.environ.get("HOST", "127.0.0.1")
+roots = os.environ.get("TLS_ROOTS") or None
+host = os.environ.get("HOST") or "127.0.0.1"
 GUID = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 TAIL = b"\x00\x00\xff\xff"
 bad = 0
@@ -594,7 +617,7 @@ if [ -z "$port" ]; then
   echo "  skipped: no server"
 elif [ -z "$PY" ]; then
   echo "  skipped: no working python3"
-elif ! PORT="$port" timeout 120 "$PY" "$WORK/ws-deflate-client.py"; then
+elif ! PORT="$port" TLS_ROOTS="" HOST="127.0.0.1" timeout 120 "$PY" "$WORK/ws-deflate-client.py"; then
   echo "  Python's RFC 7692 client and the server disagree"
   status=1
 fi
@@ -604,8 +627,9 @@ fi
 cat >"$WORK/ws-stop.py" <<'PY'
 import base64, os, socket, ssl, struct
 s = socket.create_connection(("127.0.0.1", int(os.environ["PORT"])), timeout=10)
-if os.environ.get("TLS_ROOTS"):
-    s = ssl.create_default_context(cafile=os.environ["TLS_ROOTS"]).wrap_socket(s, server_hostname="localhost")
+roots = os.environ.get("TLS_ROOTS") or None
+if roots:
+    s = ssl.create_default_context(cafile=roots).wrap_socket(s, server_hostname="localhost")
 s.sendall(b"GET / HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: " + base64.b64encode(os.urandom(16)) + b"\r\n\r\n")
 buf = b""
 while b"\r\n\r\n" not in buf:
@@ -619,7 +643,7 @@ s.sendall(bytes([0x88, 0x82, 0, 0, 0, 0]) + struct.pack("!H", 1001))
 s.close()
 PY
 if [ -n "$port" ] && [ -n "$PY" ]; then
-  PORT="$port" timeout 60 "$PY" "$WORK/ws-stop.py" || { echo "  the server did not stop"; status=1; }
+  PORT="$port" TLS_ROOTS="" timeout 60 "$PY" "$WORK/ws-stop.py" || { echo "  the server did not stop"; status=1; }
 fi
 if [ -n "$port" ]; then
   waited=0
@@ -645,7 +669,7 @@ else
 import base64, hashlib, os, socket, ssl, struct, sys
 # Under TLS when TLS_CERT and TLS_KEY name its chain and key; the client
 # then names it localhost.
-host = os.environ.get("HOST", "127.0.0.1")
+host = os.environ.get("HOST") or "127.0.0.1"
 GUID = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 bad = 0
 def check(cond, what):
@@ -665,9 +689,11 @@ ls.listen(1)
 port = ls.getsockname()[1]
 print(port, flush=True)
 c, _ = ls.accept()
-if os.environ.get("TLS_CERT"):
+cert = os.environ.get("TLS_CERT") or None
+key = os.environ.get("TLS_KEY") or None
+if cert and key:
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    context.load_cert_chain(os.environ["TLS_CERT"], os.environ["TLS_KEY"])
+    context.load_cert_chain(cert, key)
     c = context.wrap_socket(c, server_side=True)
 c.settimeout(20)
 buf = b""
@@ -732,7 +758,7 @@ if not bad:
     print("  the request, five masked frames each with its own key, a pong, the close echoed", flush=True)
 sys.exit(1 if bad else 0)
 PY
-  timeout 120 "$PY" "$WORK/ws-server.py" > "$WORK/pyserver.out" 2>&1 &
+  TLS_CERT="" TLS_KEY="" HOST="127.0.0.1" timeout 120 "$PY" "$WORK/ws-server.py" > "$WORK/pyserver.out" 2>&1 &
   py_pid=$!
   pyport=$(await_port "$WORK/pyserver.out" "$py_pid")
   client_said=$(timeout 60 "$WORK/ws-plain" connect "$pyport" 2>&1)
@@ -774,7 +800,7 @@ mode = os.environ["MODE"]
 answer = {"takeover": "permessage-deflate",
           "fresh": "permessage-deflate; server_no_context_takeover; client_no_context_takeover",
           "window": "permessage-deflate; client_max_window_bits=9"}[mode]
-host = os.environ.get("HOST", "127.0.0.1")
+host = os.environ.get("HOST") or "127.0.0.1"
 GUID = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 TAIL = b"\x00\x00\xff\xff"
 bad = 0
@@ -807,9 +833,11 @@ ls.listen(1)
 port = ls.getsockname()[1]
 print(port, flush=True)
 c, _ = ls.accept()
-if os.environ.get("TLS_CERT"):
+cert = os.environ.get("TLS_CERT") or None
+key = os.environ.get("TLS_KEY") or None
+if cert and key:
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    context.load_cert_chain(os.environ["TLS_CERT"], os.environ["TLS_KEY"])
+    context.load_cert_chain(cert, key)
     c = context.wrap_socket(c, server_side=True)
 c.settimeout(20)
 buf = b""
@@ -874,7 +902,7 @@ if not bad:
 sys.exit(1 if bad else 0)
 PY
   for mode in takeover fresh window; do
-    MODE="$mode" timeout 120 "$PY" "$WORK/ws-deflate-server.py" > "$WORK/pydeflate-$mode.out" 2>&1 &
+    MODE="$mode" TLS_CERT="" TLS_KEY="" HOST="127.0.0.1" timeout 120 "$PY" "$WORK/ws-deflate-server.py" > "$WORK/pydeflate-$mode.out" 2>&1 &
     py_pid=$!
     pyport=$(await_port "$WORK/pydeflate-$mode.out" "$py_pid")
     client_said=$(timeout 60 "$WORK/ws-plain" connect "$pyport" 2>&1)
@@ -951,7 +979,7 @@ PY
       status=1
     fi
     if [ -s "$WORK/ws-node.js" ]; then
-      if ! PORT="$wport" WS_URL="wss://localhost:$wport/chat" NODE_EXTRA_CA_CERTS="$WORK/wss/roots.pem" timeout 60 node "$WORK/ws-node.js"; then
+      if ! PORT="$wport" WS_MODE=tls WS_URL="wss://localhost:$wport/chat" NODE_EXTRA_CA_CERTS="$WORK/wss/roots.pem" timeout 60 node "$WORK/ws-node.js" tls; then
         echo "  Node's client and the server disagree over wss://"
         status=1
       fi
@@ -1048,23 +1076,36 @@ fi
 echo
 echo "== the exercise's artifacts and other platforms"
 # Built from the modules' artifacts, the exercise must print what it
-# printed from source, darwin's frames under a task's panic left out
-# (bench/darwin_frames.sh); and it typechecks for the four other
-# platforms std is held to.
-mkdir -p "$WORK/r1/mods"
-if (cd "$WORK/r1" && "$IYI" build --emit-iyimod mods -o from-source "$REPO/bench/std_websocket_exercise.iyi" \
-      && "$IYI" build --use-iyimod mods -o from-artifact "$REPO/bench/std_websocket_exercise.iyi") > "$WORK/r1/build.log" 2>&1 \
-   && timeout -k 5 300 "$WORK/r1/from-source" > "$WORK/r1/source.out" 2>&1 \
-   && timeout -k 5 300 "$WORK/r1/from-artifact" > "$WORK/r1/artifact.out" 2>&1 \
-   && without_frames < "$WORK/r1/source.out" > "$WORK/r1/source.cmp" \
-   && without_frames < "$WORK/r1/artifact.out" > "$WORK/r1/artifact.cmp" \
-   && cmp -s "$WORK/r1/source.cmp" "$WORK/r1/artifact.cmp" \
-   && grep -q "ALL CHECKS PASSED" "$WORK/r1/artifact.out"; then
-  echo "  from source and from its artifacts alike, $(wc -l < "$WORK/r1/artifact.out" | tr -d ' ') lines"
+# printed from source; and it typechecks for the four other platforms std
+# is held to.
+mkdir -p "$WORK/r1/mods" "$WORK/r1/s" "$WORK/r1/a"
+if (cd "$WORK/r1" && "$IYI" build --emit-iyimod mods -o s/std_websocket_exercise "$REPO/bench/std_websocket_exercise.iyi" \
+      && "$IYI" build --use-iyimod mods -o a/std_websocket_exercise "$REPO/bench/std_websocket_exercise.iyi") > "$WORK/r1/build.log" 2>&1 \
+   && timeout -k 5 300 "$WORK/r1/s/std_websocket_exercise" > "$WORK/r1/source.out" 2>&1 \
+   && timeout -k 5 300 "$WORK/r1/a/std_websocket_exercise" > "$WORK/r1/artifact.out" 2>&1; then
+  passed=0
+  if cmp -s "$WORK/r1/source.out" "$WORK/r1/artifact.out"; then
+    passed=1
+  elif [ "$(uname -s)" = "Darwin" ] && [ -n "$PY" ]; then
+    if "$PY" "$REPO/bench/frames_equivalent.py" "$WORK/r1/source.out" "$WORK/r1/artifact.out" > "$WORK/r1/frames.out" 2>&1; then
+      passed=1
+    fi
+  fi
+  if [ "$passed" -eq 1 ] && grep -q "ALL CHECKS PASSED" "$WORK/r1/artifact.out"; then
+    echo "  from source and from its artifacts alike, $(wc -l < "$WORK/r1/artifact.out" | tr -d ' ') lines"
+  else
+    echo "  FAIL: the exercise does not run the same from its artifacts"
+    grep -m3 -E 'Error|panic: ASSERTION' "$WORK/r1/build.log" "$WORK/r1/source.out" "$WORK/r1/artifact.out" 2>/dev/null | sed 's/^/    /'
+    if [ -s "$WORK/r1/frames.out" ]; then
+      sed 's/^/    /' "$WORK/r1/frames.out"
+    else
+      diff "$WORK/r1/source.out" "$WORK/r1/artifact.out" 2>/dev/null | sed -n '1,6p' | sed 's/^/    /'
+    fi
+    status=1
+  fi
 else
   echo "  FAIL: the exercise does not run the same from its artifacts"
   grep -m3 -E 'Error|panic: ASSERTION' "$WORK/r1/build.log" "$WORK/r1/source.out" "$WORK/r1/artifact.out" 2>/dev/null | sed 's/^/    /'
-  diff "$WORK/r1/source.cmp" "$WORK/r1/artifact.cmp" 2>/dev/null | sed -n '1,6p' | sed 's/^/    /'
   status=1
 fi
 for target in x86_64-linux-gnu aarch64-darwin x86_64-windows-msvc aarch64-linux-gnu x86_64-linux-musl; do
@@ -1144,7 +1185,13 @@ prove_broken "a client that drops what came with the 101" "a frame that came wit
   'WebSocket.new(up.socket, up.leftover, true, agreed, max_message, terms)' 'WebSocket.new(up.socket, "", true, agreed, max_message, terms)'
 prove_broken "a server that drops what came after the handshake" "a frame in the leftover" \
   '    @in_stop = leftover.bytesize' '    @in_stop = 0'
-prove_broken "a client that does not mask" "a client's 1 bytes, unmasked by the reader" \
+# Caught at whichever length first reads back wrong, not at one byte alone.
+# The reader still unmasks with the key the frame carries, so a one-byte
+# payload sent unmasked reads back right whenever that key's first byte is
+# zero, one run in 256, and the check that fails is then the two-byte one:
+# 4 runs of 1,536 of this copy (darwin arm64), and the darwin shard of run
+# 43234088310, which named it "failed, but not where it should have".
+prove_broken "a client that does not mask" "bytes, unmasked by the reader" \
   '        WebSocket.mask(dst + head, n, key)' ''
 prove_broken "a server that takes unmasked frames" "an unmasked client frame" \
   '      return fail(1002, "a client'"'"'s frame is not masked") unless masked' ''

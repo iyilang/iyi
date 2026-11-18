@@ -1,10 +1,10 @@
 # typed parity floors: <repo-relative file> <matched nodes>.
 # A count may only rise. Raise with: TYPED_PARITY_RAISE=1 bash bench/selfhost_typed_parity_exercise.sh
-samples/iyi/basics.iyi 325
+samples/iyi/basics.iyi 327
 samples/iyi/calc.iyi 30
-samples/iyi/collections.iyi 510
+samples/iyi/collections.iyi 511
 samples/iyi/config.iyi 48
-samples/iyi/cores.iyi 282
+samples/iyi/cores.iyi 285
 samples/iyi/derive.iyi 26
 samples/iyi/enums.iyi 142
 samples/iyi/errors.iyi 98
@@ -151,7 +151,7 @@ src/compiler/semantic/closures.iyi 79
 src/compiler/semantic/cover.iyi 15
 src/compiler/semantic/default_arguments.iyi 24
 src/compiler/semantic/definition_typing.iyi 50
-src/compiler/semantic/inline_macros.iyi 55
+src/compiler/semantic/inline_macros.iyi 57
 src/compiler/semantic/instance_vars.iyi 76
 src/compiler/semantic/lib_call.iyi 54
 src/compiler/semantic/literal_expander.iyi 72
@@ -166,12 +166,12 @@ src/compiler/semantic/recursive_struct_checker.iyi 14
 src/compiler/semantic/restrictions.iyi 53
 src/compiler/semantic/share.iyi 45
 src/compiler/semantic/spawn_placement.iyi 128
-src/compiler/semantic/top_level.iyi 561
+src/compiler/semantic/top_level.iyi 563
 src/compiler/semantic/type_node_host.iyi 23
 src/compiler/semantic/type_nodes.iyi 42
 src/compiler/semantic/typed.iyi 4
 src/compiler/stage1.iyi 8
-src/compiler/syntax/ast.iyi 1264
+src/compiler/syntax/ast.iyi 1265
 src/compiler/syntax/lexer.iyi 173
 src/compiler/syntax/parser.iyi 318
 src/compiler/syntax/token.iyi 77
@@ -223,7 +223,7 @@ src/iyi/io.iyi 61
 src/iyi/macros.iyi 4
 src/iyi/number.iyi 39
 src/iyi/object.iyi 29
-src/iyi/prelude.iyi 128
+src/iyi/prelude.iyi 140
 src/iyi/primitives.iyi 44
 src/iyi/range.iyi 13
 src/iyi/set.iyi 12
@@ -235,7 +235,7 @@ src/std/aead.iyi 130
 src/std/annotations.iyi 8
 src/std/asn1.iyi 96
 src/std/atomic.iyi 26
-src/std/autocert.iyi 216
+src/std/autocert.iyi 217
 src/std/base32.iyi 34
 src/std/base64.iyi 41
 src/std/benchmark.iyi 74
@@ -289,7 +289,7 @@ src/std/lazy.iyi 17
 src/std/levenshtein.iyi 27
 src/std/list.iyi 35
 src/std/log.iyi 184
-src/std/mail.iyi 246
+src/std/mail.iyi 248
 src/std/math.iyi 1148
 src/std/mime.iyi 52
 src/std/mlkem.iyi 73
@@ -317,7 +317,7 @@ src/std/reference_storage.iyi 15
 src/std/regex.iyi 241
 src/std/router.iyi 84
 src/std/rsa.iyi 87
-src/std/secure_dns.iyi 75
+src/std/secure_dns.iyi 76
 src/std/semantic_version.iyi 50
 src/std/set.iyi 24
 src/std/shared_proc.iyi 9
@@ -338,7 +338,7 @@ src/std/tar.iyi 134
 src/std/term.iyi 34
 src/std/text.iyi 121
 src/std/time.iyi 434
-src/std/tls.iyi 886
+src/std/tls.iyi 903
 src/std/toml.iyi 261
 src/std/traits.iyi 56
 src/std/tuple.iyi 38

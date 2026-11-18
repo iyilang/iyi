@@ -206,8 +206,15 @@ fi
 echo '== 5. diamond-chain scaling'
 # One local belongs to one diamond: its stores and load do not span other
 # diamonds. A verified smaller copy checks the generator outside the timing.
+# Each size is run three times and the least figure is kept: the child's CPU
+# time where the host reports it, so other jobs on the machine do not stretch
+# it, and elapsed time elsewhere.
 if ! "$PY" - "$(native_path "$DRV")" "$(native_path "$WORK")" "${NATIVE_OPT_SCALE_K:-2048}" <<'PY'
 import os, subprocess, sys, time
+try:
+    import resource
+except ImportError:
+    resource = None
 binary, work, text_k = sys.argv[1:]
 try:
     k = int(text_k)
@@ -238,27 +245,38 @@ def generate(n, path):
                 f.write('  ret i64 %%sum%d\n' % i)
         f.write('}\n')
 
-def run(n, verified):
+def child_cpu():
+    usage = resource.getrusage(resource.RUSAGE_CHILDREN)
+    return usage.ru_utime + usage.ru_stime
+
+def run(n, verified, repeats=1):
     path = os.path.join(work, 'scale-%d.ir' % n)
     generate(n, path)
     cmd = [binary, 'run', '--verify-each' if verified else '--no-verify', 'default', path]
-    start = time.monotonic()
-    try:
-        completed = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                                   timeout=180)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise RuntimeError('scale run could not complete: %s' % exc)
-    elapsed = time.monotonic() - start
-    if completed.returncode != 0:
-        raise RuntimeError('scale run failed (%d): %s' %
-                           (completed.returncode, completed.stderr.decode('utf-8', 'replace')))
-    return elapsed
+    least = None
+    for _ in range(repeats):
+        before = child_cpu() if resource else 0.0
+        start = time.monotonic()
+        try:
+            completed = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                       timeout=180)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise RuntimeError('scale run could not complete: %s' % exc)
+        elapsed = time.monotonic() - start
+        if completed.returncode != 0:
+            raise RuntimeError('scale run failed (%d): %s' %
+                               (completed.returncode, completed.stderr.decode('utf-8', 'replace')))
+        spent = child_cpu() - before if resource else elapsed
+        if least is None or spent < least:
+            least = spent
+    return least
 try:
     run(max(8, k // 8), True)
-    small = run(k, False)
-    large = run(2 * k, False)
+    small = run(k, False, 3)
+    large = run(2 * k, False, 3)
     ratio = large / small if small > 0 else float('inf')
-    print('  K=%d %.3fs, 2K=%d %.3fs, ratio %.3f' % (k, small, 2 * k, large, ratio))
+    print('  K=%d %.3fs, 2K=%d %.3fs, ratio %.3f (%s, least of 3)' %
+          (k, small, 2 * k, large, ratio, 'cpu' if resource else 'elapsed'))
     if large < 0.5:
         raise RuntimeError('2K run is under 0.5s; increase NATIVE_OPT_SCALE_K')
     if ratio > 3.0:

@@ -712,15 +712,15 @@ broken leftserial '/^      return in_unit\(&block\) unless IyiWorkers.parallel\?
 caught leftserial 'eligible spawns waited 2000 ms for the others and left alone' together --workers=4
 
 step "failure proof: an ineligible spawn sent to the pool"
-broken madeparallel '/^  def spawn\(&block/ { inspawn = 1 } inspawn && /^    in_unit\(&block\)$/ { print "    on_pool(&block)"; inspawn = 0; next } { print }'
+broken madeparallel '/^  def spawn\(&block/ { inspawn = 1 } inspawn && /^    in_unit\(&block\)$/ { print "    on_pool(false, &block)"; inspawn = 0; next } { print }'
 caught madeparallel 'tasks of one unit were running at one instant' unit --workers=4
 
 step "failure proof: unit: :same sent to the pool"
-broken optoutignored '/^  def spawn\(\*, unit : Symbol, &block/ { inserial = 1 } inserial && /^    in_unit\(&block\)$/ { print "    on_pool(&block)"; inserial = 0; next } { print }'
+broken optoutignored '/^  def spawn\(\*, unit : Symbol, &block/ { inserial = 1 } inserial && /^    in_unit\(&block\)$/ { print "    on_pool(false, &block)"; inserial = 0; next } { print }'
 caught optoutignored 'spawn(unit: :same) tasks were running at one instant' serial --workers=4
 
 step "failure proof: unit: :new left in its unit"
-broken askedignored '/^    private def spawn_new\(&block/ { inasked = 1 } inasked && /^      on_pool\(&block\)$/ { print "      in_unit(&block)"; inasked = 0; next } { print }'
+broken askedignored '/^    private def spawn_new\(/ { inasked = 1 } inasked && /^      on_pool\(pinned, &block\)$/ { print "      in_unit(&block)"; inasked = 0; next } { print }'
 caught askedignored 'spawn(unit: :new) tasks waited 2000 ms for the others and left alone' asked --workers=4
 caught askedignored 'spawn(unit: :new) tasks ran on the spawner'"'"'s thread on a pool of one' askedone --workers=1
 
@@ -803,7 +803,7 @@ caught early 'grows: one eligible spawn started 2 of' grows --workers=4
 step "failure proof: spawn_parallel kept as an alias"
 mkdir -p alias/iyi
 cp "$REPO"/src/iyi/*.iyi alias/iyi/
-awk '/^    private def spawn_new\(&block/ { print "    def spawn_parallel(&block : -> T) : IyiTask(T) forall T"; print "      on_pool(&block)"; print "    end"; print "" } { print }' \
+awk '/^    private def spawn_new\(/ { print "    def spawn_parallel(&block : -> T) : IyiTask(T) forall T"; print "      on_pool(false, &block)"; print "    end"; print "" } { print }' \
   "$REPO/src/iyi/concurrency.iyi" > alias/iyi/concurrency.iyi
 if cmp -s alias/iyi/concurrency.iyi "$REPO/src/iyi/concurrency.iyi"; then
   echo "the awk for alias found nothing to change"; exit 1

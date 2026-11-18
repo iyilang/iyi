@@ -360,7 +360,15 @@ module Iyi::Share
         @unexpanded = true
         return
       end
-      source, pragmas = yield
+      # Its failure is caught below and read as "did not expand", so the
+      # error is raised without the hints its message would carry.
+      probing = program.iyi_probing_macros?
+      program.iyi_probing_macros = true
+      source, pragmas = begin
+        yield
+      ensure
+        program.iyi_probing_macros = probing
+      end
       locals = Set(String).new
       @def.args.each { |arg| locals << arg.name }
       expansion = program.parse_macro_source(source, pragmas, the_macro, node, locals, current_def: @def, inside_type: true)

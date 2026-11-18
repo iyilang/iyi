@@ -37,6 +37,7 @@ require_test_host || exit 1
 if [ -z "$PY" ]; then echo 'FAIL: a functional Python interpreter is required' >&2; exit 1; fi
 REPO_NATIVE="$(native_path "$REPO")" || exit 1
 export IYI_PATH="$REPO_NATIVE/src"
+if [ "$HOST_OS" = windows ]; then PROBE_IYI_PATH="$REPO_NATIVE;$REPO_NATIVE/src"; else PROBE_IYI_PATH="$REPO_NATIVE:$REPO_NATIVE/src"; fi
 IYI="${IYI_COMPILER:-$REPO/bin/iyi}"
 . "$REPO/bench/lib/mutation.sh"
 WORK="$(mktemp -d)"
@@ -47,6 +48,24 @@ trap 'rm -rf "$WORK"' EXIT
 # CALL_TYPES, the awk that writes the call types and the phi labels into the oracle, is
 # shared with the calls gate (bench/lib/lower_oracle.sh).
 . "$REPO/bench/lib/lower_oracle.sh"
+
+run_fixture_status() {
+  "$PY" - "$(native_path "$1")" "$(native_path "$2")" "$(native_path "$3")" <<'PY'
+import subprocess
+import sys
+try:
+    with open(sys.argv[2], "wb") as output:
+        result = subprocess.run([sys.argv[1]], stdout=output, stderr=subprocess.STDOUT, timeout=30)
+except (OSError, subprocess.TimeoutExpired) as error:
+    print("INVALID: fixture did not complete:", error)
+    sys.exit(2)
+if result.returncode < 0 or result.returncode > 255:
+    print("INVALID: fixture terminated abnormally:", result.returncode)
+    sys.exit(2)
+with open(sys.argv[3], "w") as status:
+    status.write(str(result.returncode))
+PY
+}
 
 core_expected_refusal() {
   local result="$1" err="$2" fixture="$3" site="$4" message="$5"
@@ -687,10 +706,88 @@ nil_flow_check() {
     awk '/^SUMMARY identical=[0-9]+ total=[0-9]+ module=[01]$/ { split($2,a,"="); split($3,b,"="); split($4,c,"="); if (a[2] != b[2] || b[2] == 0 || c[2] != 1) bad=1; n++ } END { exit (bad || n == 0) }' "$WORK/nil-flow.out" || return 1
   done
 }
+cat > "$WORK/nil-left-probe.iyi" <<'IYI'
+import compiler/syntax/parser::{Parser}
+import compiler/syntax/ast::{Or}
+import compiler/syntax/visitor::{Visitor}
+import compiler/semantic/normalizer::{Normalizer, NormalizerProgram}
+import compiler/semantic/top_level::{SemanticProgram, TopLevelVisitor}
+import compiler/semantic/main_visitor::{MainVisitor}
+import compiler/semantic/instance_vars::{declare_guessed_instance_vars}
+import compiler/types/type_system::{TypeSystem}
+import bench/lib/primitive_stand_in::{stand_in_primitive_types}
+
+class NilLeftWalk < Visitor
+  getter nodes : Array(Or)
+  def initialize
+    @nodes = [] of Or
+  end
+  def visit(node : Or) : Bool
+    @nodes << node
+    true
+  end
+end
+
+path = Program.args[0]
+root = Normalizer.new(NormalizerProgram.new(false)).normalize(Parser.new(File.read(path), path).parse)
+program = SemanticProgram.new
+program.total_mode = true
+TypeSystem.new(program)
+top = TopLevelVisitor.new(program, path)
+root.accept(top)
+top.finish
+program.resolve_declared_types
+declare_guessed_instance_vars(program)
+visitor = MainVisitor.new(program)
+visitor.total = true
+stand_in_primitive_types(root, program, visitor)
+root.accept(visitor)
+walk = NilLeftWalk.new
+visitor.typed_instances.each do |instance|
+  instance.definition.accept(walk) if instance.definition.name == "pick"
+end
+walk.nodes.each do |node|
+  if loc = node.location
+    next unless loc.line_number == 8
+    if type = visitor.type_of?(node)
+      puts "NIL-LEFT type=#{type.full_name}"
+    else
+      puts "NIL-LEFT type=missing"
+    end
+  end
+end
+IYI
+nil_left_type_check() {
+  if ! IYI_PATH="$PROBE_IYI_PATH" "$IYI" build -o "$WORK_NATIVE/nil-left-probe$EXE" "$WORK_NATIVE/nil-left-probe.iyi" > "$WORK/nil-left-probe.build.log" 2>&1; then
+    echo 'INVALID: nil-left semantic probe did not build'
+    cat "$WORK/nil-left-probe.build.log"
+    return 2
+  fi
+  if ! "$WORK/nil-left-probe$EXE" "$REPO_NATIVE/bench/fixtures/lower_or_nil_left.iyi" > "$WORK/nil-left-probe.out" 2>"$WORK/nil-left-probe.err"; then
+    echo 'INVALID: nil-left semantic probe failed'
+    cat "$WORK/nil-left-probe.out" "$WORK/nil-left-probe.err"
+    return 2
+  fi
+  if grep -Fxq 'NIL-LEFT type=Int32' "$WORK/nil-left-probe.out" &&
+     ! grep -Fxq 'NIL-LEFT type=missing' "$WORK/nil-left-probe.out"; then return 0; fi
+  if [ -f "$WORK/nil-left.baseline" ] && grep -Fxq 'NIL-LEFT type=missing' "$WORK/nil-left-probe.out"; then
+    echo 'decisive: pick line 8 lost the live Int32 branch type'
+    return 1
+  fi
+  echo 'INVALID: nil-left probe did not identify the expected expression type'
+  cat "$WORK/nil-left-probe.out"
+  return 2
+}
 if nil_flow_check lower_or_nil_left; then
-  prove_mutation "a nil-left alternative loses its live branch type" "$REPO/src/compiler/semantic/main_visitor.iyi" \
-    '    elsif else_type && (then_unreachable || then_dead || speculative)' \
-    '    elsif else_type && (then_unreachable || speculative)' -- nil_flow_check lower_or_nil_left || status=1
+  if nil_left_type_check; then
+    : > "$WORK/nil-left.baseline"
+    prove_mutation "a nil-left alternative loses its live branch type" "$REPO/src/compiler/semantic/main_visitor.iyi" \
+      '    elsif else_type && (then_unreachable || then_dead || speculative)' \
+      '    elsif else_type && (then_unreachable || speculative)' -- nil_left_type_check || status=1
+  else
+    echo 'FAIL: nil-left semantic baseline did not retain Int32'
+    status=1
+  fi
   prove_mutation "a narrowed-out read records a loop refusal" "$REPO/src/compiler/semantic/main_visitor.iyi" \
     '      if reason == narrowed_out_reason(node.name)' '      if false' -- nil_flow_check --assert 'CONTEXT FAILED: narrowed variable recorded a refusal' lower_or_nil_left || status=1
   prove_mutation "hidden build-name collision shifts later string globals" "$REPO/bench/selfhost_lower_core_exercise.iyi" \
@@ -1559,8 +1656,11 @@ tuple_entry_check() {
     return $?
   fi
   codesign -v --strict "$WORK/tuple-entry.native" > /dev/null 2>&1 || { echo "  lower_tuple: FAIL, native signature invalid"; return 2; }
-  timeout 30 "$WORK/tuple-entry.native" > "$WORK/tuple-entry.native.out" 2>&1; local ns=$?
-  timeout 30 "$WORK/lower_tuple$EXE" > "$WORK/tuple-entry.hosted.out" 2>&1; local hs=$?
+  run_fixture_status "$WORK/tuple-entry.native" "$WORK/tuple-entry.native.out" "$WORK/tuple-entry.native.status" || return 2
+  run_fixture_status "$WORK/lower_tuple$EXE" "$WORK/tuple-entry.hosted.out" "$WORK/tuple-entry.hosted.status" || return 2
+  local ns hs
+  ns="$(< "$WORK/tuple-entry.native.status")"
+  hs="$(< "$WORK/tuple-entry.hosted.status")"
   [ "$ns" = "$hs" ] && cmp -s "$WORK/tuple-entry.native.out" "$WORK/tuple-entry.hosted.out"
 }
 if tuple_entry_check; then

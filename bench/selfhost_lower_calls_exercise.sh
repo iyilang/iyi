@@ -28,11 +28,31 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 require_test_host || exit 1
 REPO_NATIVE="$(native_path "$REPO")" || exit 1
 export IYI_PATH="$REPO_NATIVE/src"
+if [ "$HOST_OS" = windows ]; then PROBE_IYI_PATH="$REPO_NATIVE;$REPO_NATIVE/src"; else PROBE_IYI_PATH="$REPO_NATIVE:$REPO_NATIVE/src"; fi
 IYI="${IYI_COMPILER:-$REPO/bin/iyi}"
 . "$REPO/bench/lib/mutation.sh"
 . "$REPO/bench/lib/lower_oracle.sh"
 WORK="$(mktemp -d)"
 WORK_NATIVE="$(native_path "$WORK")" || exit 1
+
+run_fixture_status() {
+  [ -n "$PY" ] || { echo 'INVALID: Python is required to distinguish exits from signals'; return 2; }
+  "$PY" - "$(native_path "$1")" "$(native_path "$2")" "$(native_path "$3")" <<'PY'
+import subprocess
+import sys
+try:
+    with open(sys.argv[2], "wb") as output:
+        result = subprocess.run([sys.argv[1]], stdout=output, stderr=subprocess.STDOUT, timeout=30)
+except (OSError, subprocess.TimeoutExpired) as error:
+    print("INVALID: fixture did not complete:", error)
+    sys.exit(2)
+if result.returncode < 0 or result.returncode > 255:
+    print("INVALID: fixture terminated abnormally:", result.returncode)
+    sys.exit(2)
+with open(sys.argv[3], "w") as status:
+    status.write(str(result.returncode))
+PY
+}
 
 summary_check() {
   local rc=0
@@ -709,7 +729,8 @@ generic_constructor_check() {
       cat "$WORK/constructor.check.log"
       return 2
     fi
-    timeout 30 "$WORK/constructor.check.exe" > "$WORK/constructor.check.out" 2>&1; result=$?
+    run_fixture_status "$WORK/constructor.check.exe" "$WORK/constructor.check.out" "$WORK/constructor.check.status" || return 2
+    result="$(< "$WORK/constructor.check.status")"
     [ "$result" -eq 7 ] && cmp -s "$WORK/constructor.check.out" "$WORK/$name.hosted.out" || return 1
   done
   for name in lowcallwait_generic_handwritten_make lowcallwait_generic_default_new; do
@@ -843,7 +864,7 @@ driver_assertion_result() {
 }
 
 lower_calls_check() {
-  local expected_mutant_refusal="${1:-}" expected_fixture="${2:-}" expected_site="${3:-src/compiler/lower/pending.iyi}" expected_source_line="${4:-}" result
+  local expected_mutant_refusal="${1:-}" expected_fixture="${2:-}" expected_site="${3:-src/compiler/lower/pending.iyi}" expected_source_line="${4:-}" expected_stack="${5:-}" result
   if ! "$IYI" build -o "$WORK_NATIVE/mut$EXE" "$REPO_NATIVE/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/mut.build.log" 2>&1; then
     invalid_mutation "$WORK/mut.build.log"
     return $?
@@ -870,6 +891,11 @@ lower_calls_check() {
             cat "$WORK/mut.err"
             return 2
           fi
+        fi
+        if [ -n "$expected_stack" ] && ! grep -Fq "$expected_stack" "$WORK/mut.err"; then
+          echo "INVALID: $name lacks the expected diagnostic provenance"
+          cat "$WORK/mut.err"
+          return 2
         fi
         echo "decisive: $name: $(refusal_note "$result" "$WORK/mut.err")"
         return 1
@@ -917,7 +943,8 @@ overload_dispatch_check() {
     return 2
   fi
   local result
-  timeout 30 "$WORK/overload.check.exe" > "$WORK/overload.check.out" 2>&1; result=$?
+  run_fixture_status "$WORK/overload.check.exe" "$WORK/overload.check.out" "$WORK/overload.check.status" || return 2
+  result="$(< "$WORK/overload.check.status")"
   [ "$result" -eq 3 ] && [ ! -s "$WORK/overload.check.out" ]
 }
 prove_mutation "constructor overload wrappers share a typing frame" "$REPO/src/compiler/semantic/new.iyi" \
@@ -947,16 +974,68 @@ else
   status=1
 fi
 
+cat > "$WORK/recursive-inferred-probe.iyi" <<'IYI'
+import bench/lib/lower_gate::{analyse}
+import compiler/syntax/ast::{Call}
+import compiler/syntax/visitor::{Visitor}
+
+class InferredCallWalk < Visitor
+  getter calls : Array(Call)
+  def initialize
+    @calls = [] of Call
+  end
+  def visit(node : Call) : Bool
+    @calls << node
+    true
+  end
+end
+
+fixture = Program.args[0]
+analysis = analyse(File.read(fixture), fixture, true)
+walk = InferredCallWalk.new
+analysis.visitor.typed_instances.each do |instance|
+  instance.definition.accept(walk) if instance.definition.name == "recursive_inferred_count"
+end
+walk.calls.each do |call|
+  next unless call.name == "&+"
+  if loc = call.location
+    next unless loc.line_number == 10
+    if type = analysis.visitor.type_of?(call)
+      puts "INFERRED-ADD type=#{type.full_name}"
+    else
+      puts "INFERRED-ADD type=missing"
+    end
+  end
+end
+IYI
 recursive_inferred_check() {
-  if ! "$IYI" build -o "$WORK_NATIVE/recursive-mut$EXE" "$REPO_NATIVE/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/recursive-mut.build.log" 2>&1; then
+  if ! IYI_PATH="$PROBE_IYI_PATH" "$IYI" build -o "$WORK_NATIVE/recursive-mut$EXE" "$WORK_NATIVE/recursive-inferred-probe.iyi" > "$WORK/recursive-mut.build.log" 2>&1; then
     invalid_mutation "$WORK/recursive-mut.build.log"
-    return $?
+    return 2
   fi
-  "$WORK/recursive-mut$EXE" lower "$REPO_NATIVE/bench/fixtures/lowcall_recursive_inferred.iyi" "$WORK_NATIVE/lowcall_recursive_inferred.oracle.ll" > "$WORK/recursive-mut.out" 2>"$WORK/recursive-mut.err" || { cat "$WORK/recursive-mut.err"; return 2; }
-  summary_check "$WORK/recursive-mut.out"
+  if ! "$WORK/recursive-mut$EXE" "$REPO_NATIVE/bench/fixtures/lowcall_recursive_inferred.iyi" > "$WORK/recursive-mut.out" 2>"$WORK/recursive-mut.err"; then
+    echo 'INVALID: recursive-inference semantic probe failed'
+    cat "$WORK/recursive-mut.out" "$WORK/recursive-mut.err"
+    return 2
+  fi
+  if grep -Fxq 'INFERRED-ADD type=Int32' "$WORK/recursive-mut.out" &&
+     ! grep -Fxq 'INFERRED-ADD type=missing' "$WORK/recursive-mut.out"; then return 0; fi
+  if [ -f "$WORK/recursive-inferred.baseline" ] && grep -Fxq 'INFERRED-ADD type=missing' "$WORK/recursive-mut.out"; then
+    echo 'decisive: recursive_inferred_count line 10 has no inferred addition type'
+    return 1
+  fi
+  echo 'INVALID: recursive-inference probe did not identify the expected addition'
+  cat "$WORK/recursive-mut.out"
+  return 2
 }
-prove_mutation "an inferred recursive body is not retyped" "$REPO/src/compiler/semantic/main_visitor.iyi" \
-  '    if recursive_frame.cyclic' '    if false && recursive_frame.cyclic' -- recursive_inferred_check || status=1
+if recursive_inferred_check; then
+  : > "$WORK/recursive-inferred.baseline"
+  prove_mutation "an inferred recursive body is not retyped" "$REPO/src/compiler/semantic/main_visitor.iyi" \
+    '    if recursive_frame.cyclic' '    if false && recursive_frame.cyclic' -- recursive_inferred_check || status=1
+else
+  echo 'FAIL: recursive-inference semantic baseline did not type the addition'
+  status=1
+fi
 
 underscore_check() {
   if ! "$IYI" build -o "$WORK_NATIVE/underscore-mut$EXE" "$REPO_NATIVE/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/underscore-mut.build.log" 2>&1; then
@@ -1073,7 +1152,7 @@ walk.blocks.each do |block|
 end
 IYI
 writer_owner_check() {
-  if ! "$IYI" build -o "$WORK_NATIVE/writer-owner$EXE" "$WORK_NATIVE/writer-owner-probe.iyi" > "$WORK/writer-owner.build.log" 2>&1; then
+  if ! IYI_PATH="$PROBE_IYI_PATH" "$IYI" build -o "$WORK_NATIVE/writer-owner$EXE" "$WORK_NATIVE/writer-owner-probe.iyi" > "$WORK/writer-owner.build.log" 2>&1; then
     echo 'INVALID: writer-owner semantic probe did not build'
     cat "$WORK/writer-owner.build.log"
     return 2
@@ -1218,7 +1297,7 @@ if ! super_check; then
   status=1
 else
   prove_mutation "virtual receivers skip subtype groups" "$REPO/src/compiler/semantic/main_visitor.iyi" \
-    '    if receiver.is_a?(VirtualType)' '    if false' -- lower_calls_check || status=1
+    '    if receiver.is_a?(VirtualType)' '    if false' -- lower_calls_check "^no overload matches 'Answer\\+#code' with type $" lowcall_block_cached_writes src/compiler/semantic/main_visitor.iyi || status=1
   prove_mutation "super uses dynamic scope instead of lexical owner" "$REPO/src/compiler/semantic/main_visitor.iyi" \
     '    super_ancestors(owner_module, parents)' '    super_ancestors(self_base.as(ModuleType), parents)' -- super_check || status=1
   prove_mutation "super recursion key loses defining owner" "$REPO/src/compiler/semantic/main_visitor.iyi" \
@@ -1480,7 +1559,7 @@ puts "BUILD-GLOBAL=#{lines.includes?(build) ? "present" : "filtered"}"
 puts "PROGRAM-GLOBAL=#{lines.includes?(program) ? "kept" : "missing"}"
 IYI
 build_filter_check() {
-  if ! "$IYI" build -o "$WORK_NATIVE/build-filter-probe$EXE" "$WORK_NATIVE/build-filter-probe.iyi" > "$WORK/build-filter.build.log" 2>&1; then
+  if ! IYI_PATH="$PROBE_IYI_PATH" "$IYI" build -o "$WORK_NATIVE/build-filter-probe$EXE" "$WORK_NATIVE/build-filter-probe.iyi" > "$WORK/build-filter.build.log" 2>&1; then
     echo 'INVALID: build-constant filter probe did not build'
     cat "$WORK/build-filter.build.log"
     return 2
@@ -1615,24 +1694,24 @@ prove_mutation "dispatched numeric arguments ignore their matched type" "$REPO/s
   '          passed = downcast(low, passed, params[i], arg_types[i], true)' -- lower_calls_check || status=1
 prove_mutation "typing mutates the written argument list" "$REPO/src/compiler/semantic/main_visitor.iyi" \
   '    CallExpansion.new(target, arguments)' '    node.args = arguments
-    CallExpansion.new(target, arguments)' -- lower_calls_check || status=1
+    CallExpansion.new(target, arguments)' -- lower_calls_check '^not ported: splat or unmatched default arguments$' lowcall_dispatch_named_arg src/compiler/semantic/main_visitor.iyi '' 'MainVisitor#call_expansion' || status=1
 prove_mutation "named argument match types are dropped" "$REPO/src/compiler/semantic/main_visitor.iyi" \
   '      result << arg.type' '      result << arg.type if false' -- lower_calls_check || status=1
 prove_mutation "magic arguments precede named arguments" "$REPO/src/compiler/semantic/main_visitor.iyi" \
   '      arguments << materialized_magic(node, value.as(MagicConstant))' \
   '      arguments.unshift(materialized_magic(node, value.as(MagicConstant)))' -- lower_calls_check || status=1
 prove_mutation "lowering ignores recorded argument order" "$REPO/src/compiler/lower/call.iyi" \
-  '  low.analysed.call_arguments[node]? || node.args' '  node.args' -- lower_calls_check || status=1
+  '  low.analysed.call_arguments[node]? || node.args' '  node.args' -- lower_calls_check '^lower: visit\(a call with default arguments or a splat \(hosted call\.cr\)\) \(hosted codegen\.cr\) is not ported yet$' lowcall_bare_splat_new || status=1
 prove_mutation "recursion keys omit the written overload signature" "$REPO/src/compiler/semantic/main_visitor.iyi" \
-  '    key = key + "|signature(" + restrictions.join(",") + ")"' '    key = key + ""' -- lower_calls_check '^lower: visit\(downcast B to A \(hosted cast\.cr downcast_distinct, not ported\)\) \(hosted codegen\.cr\) is not ported yet$' || status=1
+  '    key = key + "|signature(" + restrictions.join(",") + ")"' '    key = key + ""' -- lower_calls_check '^lower: visit\(downcast B to A \(hosted cast\.cr downcast_distinct, not ported\)\) \(hosted codegen\.cr\) is not ported yet$' lowcall_dispatch_nested_overload || status=1
 prove_mutation "virtual field reads lose their base scope" "$REPO/src/compiler/semantic/main_visitor.iyi" \
   '    target_type = target_type.as(VirtualType).base_type if target_type.is_a?(VirtualType)' \
-  '    target_type = target_type.as(VirtualType).base_type if false' -- lower_calls_check "^can't infer the type of instance variable '@value' of Base\\+$" '' src/compiler/semantic/main_visitor.iyi || status=1
+  '    target_type = target_type.as(VirtualType).base_type if false' -- lower_calls_check "^can't infer the type of instance variable '@value' of Base\\+$" lowcall_dispatch_virtual_self_fields src/compiler/semantic/main_visitor.iyi || status=1
 prove_mutation "virtual field writes lose their base scope" "$REPO/src/compiler/semantic/main_visitor.iyi" \
   '      target_type = target_type.as(VirtualType).base_type if target_type.is_a?(VirtualType)' \
-  '      target_type = target_type.as(VirtualType).base_type if false' -- lower_calls_check "^can't use instance variables in Base\\+$" '' src/compiler/semantic/main_visitor.iyi || status=1
+  '      target_type = target_type.as(VirtualType).base_type if false' -- lower_calls_check "^can't use instance variables in Base\\+$" lowcall_dispatch_virtual_self_fields src/compiler/semantic/main_visitor.iyi || status=1
 prove_mutation "virtual class primitive loses its metaclass" "$REPO/src/compiler/semantic/main_visitor.iyi" \
-  '        if sc.is_a?(VirtualType)' '        if false' -- lower_calls_check || status=1
+  '        if sc.is_a?(VirtualType)' '        if false' -- lower_calls_check '^primitive class without a declared return type$' lowcall_dispatch_virtual_class src/compiler/semantic/main_visitor.iyi || status=1
 prove_mutation "virtual methods lose priority over global functions" "$REPO/src/compiler/semantic/main_visitor.iyi" \
   '    if rec_type.is_a?(VirtualType)
       collect_candidate_defs(rec_type.as(VirtualType).base_type, name, result, visited)' \
@@ -1737,24 +1816,42 @@ generic_frame_check() {
     invalid_mutation "$WORK/frame_lower.signature.log"
     return $?
   fi
-  "$WORK/frame_lower$EXE" generic-frame-lower "$REPO_NATIVE/bench/fixtures/lowcall_generic_self_new.iyi" > "$WORK/frame_lower.out" 2>&1 || { cat "$WORK/frame_lower.out"; return 2; }
+  local result=0
+  "$WORK/frame_lower$EXE" generic-frame-lower "$REPO_NATIVE/bench/fixtures/lowcall_generic_self_new.iyi" > "$WORK/frame_lower.out" 2>"$WORK/frame_lower.err" || result=$?
+  if [ "$result" -ne 0 ]; then
+    if [ -f "$WORK/frame.baseline" ] &&
+       expected_refusal "$result" "$WORK/frame_lower.err" src/compiler/lower/pending.iyi '^lower: visit\(a call to new with no receiver inside a generic or builtin class method \(hosted call\.cr: prepare_call_args, the metaclass owner\)\) \(hosted codegen\.cr\) is not ported yet$'; then
+      echo "decisive: generic self new: $(refusal_note "$result" "$WORK/frame_lower.err")"
+      return 1
+    fi
+    echo 'INVALID: generic frame failed outside its expected refusal'
+    cat "$WORK/frame_lower.out" "$WORK/frame_lower.err"
+    return 2
+  fi
   if ! "$IYI" build -o "$WORK_NATIVE/frame_native$EXE" "$REPO_NATIVE/src/compiler/tools/compile_native.iyi" > "$WORK/frame_native.build.log" 2>&1; then
     invalid_mutation "$WORK/frame_native.build.log"
     return $?
   fi
   "$WORK/frame_native$EXE" "$REPO_NATIVE/bench/fixtures/lowcall_generic_self_new.iyi" -o "$WORK_NATIVE/frame.probe.exe$EXE" --pipeline typed --probe-phase --keep-going > "$WORK/frame.probe" 2>&1
-  local result=$?
+  result=$?
   if [ "$result" -gt 1 ]; then echo "INVALID: generic frame probe exited $result"; cat "$WORK/frame.probe"; return 2; fi
   if grep -E 'no receiver inside a generic or builtin class method|no receiver inside a class method' "$WORK/frame.probe"; then
-    echo "  generic frame: receiverless new was refused" >&2
-    return 1
+    echo 'INVALID: generic frame probe reported an unpinned refusal'
+    cat "$WORK/frame.probe"
+    return 2
   fi
-  awk '/^table: .* defs-lowered-clean=/ { found = 1 } END { exit !found }' "$WORK/frame.probe"
+  if ! awk '/^table: .* defs-lowered-clean=/ { found = 1 } END { exit !found }' "$WORK/frame.probe"; then
+    echo 'INVALID: generic frame probe did not produce a lowering table'
+    cat "$WORK/frame.probe"
+    return 2
+  fi
+  return 0
 }
 if ! generic_frame_check; then
   echo "  baseline: generic class-method context did not lower a receiverless new"
   exit 1
 fi
+: > "$WORK/frame.baseline"
 echo "  generic class-method context lowers a receiverless new"
 prove_mutation "a receiverless call in a generic class method is treated as builtin" "$REPO/src/compiler/lower/call.iyi" \
   '      elsif class_meta = receiverless_class_metaclass(ct)' \

@@ -13,6 +13,7 @@ trap 'rm -rf "$WORK"' EXIT INT TERM
 . "$REPO/bench/lib/mutation.sh"
 . "$REPO/bench/lib/lower_oracle.sh"
 export IYI_PATH="$REPO_NATIVE/src"
+if [ "$HOST_OS" = windows ]; then PROBE_IYI_PATH="$REPO_NATIVE;$REPO_NATIVE/src"; else PROBE_IYI_PATH="$REPO_NATIVE:$REPO_NATIVE/src"; fi
 
 run_fixture() {
   [ -n "$PY" ] || { echo 'INVALID: Python is required to distinguish exits from signals'; return 2; }
@@ -478,7 +479,7 @@ walk.calls.each do |call|
 end
 IYI
 recursive_estimate_check() {
-  if ! "$IYI" build -o "$WORK_NATIVE/recursive-estimate$EXE" "$WORK_NATIVE/recursive-estimate-probe.iyi" > "$WORK/recursive-estimate.build.log" 2>&1; then
+  if ! IYI_PATH="$PROBE_IYI_PATH" "$IYI" build -o "$WORK_NATIVE/recursive-estimate$EXE" "$WORK_NATIVE/recursive-estimate-probe.iyi" > "$WORK/recursive-estimate.build.log" 2>&1; then
     echo 'INVALID: recursion-estimate semantic probe did not build'
     cat "$WORK/recursive-estimate.build.log"
     return 2
@@ -513,7 +514,7 @@ analyse(File.read(fixture), fixture, true)
 puts "ABANDONED-CACHE ACCEPTED"
 IYI
 abandoned_semantic_check() {
-  if ! "$IYI" build -o "$WORK_NATIVE/abandoned-probe$EXE" "$WORK_NATIVE/abandoned-probe.iyi" > "$WORK/abandoned.build.log" 2>&1; then
+  if ! IYI_PATH="$PROBE_IYI_PATH" "$IYI" build -o "$WORK_NATIVE/abandoned-probe$EXE" "$WORK_NATIVE/abandoned-probe.iyi" > "$WORK/abandoned.build.log" 2>&1; then
     echo 'INVALID: abandoned-cache semantic probe did not build'
     cat "$WORK/abandoned.build.log"
     return 2

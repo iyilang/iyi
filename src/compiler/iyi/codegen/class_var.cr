@@ -278,9 +278,10 @@ class Iyi::CodeGenVisitor
   # IV.2), the third of the ways `IyiMod::ClassVarRef` records: the owner
   # spelled with its `+` (and `.class` for a class method's read), which is
   # what the consumer defines `~Owner+::name:read` for. `std/digest`'s
-  # `SHA256#round_constants` reads `@@k` through `SHA256+`, because
-  # `SHA224 < SHA256`, and a program that reached it only through
-  # `std/password`'s artifact ended on "undefined reference to
+  # `SHA256#compress` read `@@k` through `SHA256+`, because `SHA224 <
+  # SHA256` (the round constants have lived in `SHA256Rounds` since 0.22),
+  # and a program that reached it only through `std/password`'s artifact
+  # ended on "undefined reference to
   # `~Std::Digest::SHA256+::k:read`". The flag is false: the function reads
   # the variable on the ordinary path, lazy or not, in the consumer's main
   # module.

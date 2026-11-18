@@ -463,6 +463,29 @@ describe Iyi::IyiMod do
     end
   end
 
+  # heap22 (v63): a spawn's pin bit and a pinned `Unit.new` or
+  # `SharedProc.of`, beside the spawns, survive the trip and the dump.
+  it "round-trips the pin bits of spawns and the pinned calls beside them" do
+    with_temporary_file do |path|
+      artifact = sample_artifact
+      artifact.spawns = [Iyi::IyiMod::SpawnRecord.new("App.run", "d1", 3, 5, true, true, "", true),
+                         Iyi::IyiMod::SpawnRecord.new("App.run", "d2", 7, 5, true, false, "")]
+      artifact.pins = [Iyi::IyiMod::PinRecord.new("Unit.new", 9, 7, "it captures `pool`")]
+      Iyi::IyiMod.write artifact, path
+      read = Iyi::IyiMod.read(path)
+      read.spawns.map(&.pinned).should eq [true, false]
+      read.pins.should eq artifact.pins
+      io = IO::Memory.new
+      Iyi::IyiMod.dump read, io
+      io.to_s.should contain "App.run 3:5 parallel (asked) (pinned)"
+      io.to_s.should contain "pins\n  Unit.new 9:7 it captures `pool`"
+
+      artifact.spawns = [] of Iyi::IyiMod::SpawnRecord
+      Iyi::IyiMod.write artifact, path
+      Iyi::IyiMod.read(path).pins.should eq artifact.pins
+    end
+  end
+
   # Atomic replacement is the property IV.1 picks a single-file container for:
   # a half-written artifact that a later build reads as valid is the worst
   # failure a cache has, because it is wrong and nothing about it looks broken.
@@ -2338,6 +2361,166 @@ describe Iyi::IyiMod do
       consumer.use_iyimod = "mods"
       consumer.compile source, File.expand_path("from-artifact")
       `./from-artifact`.chomp.should eq expected
+    end
+  end
+
+  # The annotations above a constant travel with it, in a type body and at
+  # the top level. The initialiser carried `Random::PerThread::ONE =
+  # PerThread.new` bare, so a consumer of `std/random` from artifacts read
+  # the constant unclaimed, and a `spawn(unit: :new)` that reached it
+  # through a body that travels was refused by the reach rule the source
+  # build had let through on `@[UnsafeReach]` (SPEC.md III.4.4). A
+  # top-level `@[UnsafeReach]` constant was dropped the same way, and
+  # `@[SafeReach]` with them; a `@[Share]` type declared beside them keeps
+  # its own, which travels with the type.
+  #
+  # `draw` yields, so its body travels and the consumer's reach walk reads
+  # it; `Gen` holds an array, so it is not shareable without the claim.
+  it "carries the claims above a module's constants" do
+    with_tempdir("iyimod_constant_claims") do
+      Dir.mkdir_p "boot"
+      File.write "boot/gen.iyi", <<-IYI
+        @[Unsafe("claims the generator's instances by name")]
+        module boot/gen
+
+        pub class Gen
+          @[Share]
+          pub class Seal
+            pub def answer : Int32
+              7
+            end
+          end
+
+          @values : Array(Int32)
+
+          def initialize(value : Int32)
+            @values = [value]
+          end
+
+          @[UnsafeReach("made at the module's start and never written after")]
+          ONE = Gen.new(5)
+          @[SafeReach("made at the module's start, then only read")]
+          SEAL = Seal.new
+
+          pub def self.draw(& : Int32 -> Int32) : Int32
+            yield ONE.value + SEAL.answer + TOP.value
+          end
+
+          pub def value : Int32
+            @values[0]
+          end
+        end
+
+        @[UnsafeReach("made at the module's start and never written after")]
+        TOP = Gen.new(10)
+        IYI
+      File.write "main.iyi", <<-IYI
+        module main
+
+        import boot/gen
+
+        drawn = Atomic(Int32).new(0)
+        group do |g|
+          g.spawn(unit: :new) do
+            drawn.add(Boot::Gen::Gen.draw { |v| v + 1 })
+            0
+          end
+        end
+        puts drawn.get
+        IYI
+
+      source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
+
+      producer = create_spec_compiler
+      producer.prelude = "iyi/prelude"
+      producer.emit_iyimod = "mods"
+      producer.compile source, File.expand_path("from-source")
+      `./from-source`.chomp.should eq "23"
+
+      artifact = Iyi::IyiMod.read(File.join("mods", "boot", "gen.iyimod"))
+      artifact.initialiser.lines.should eq [
+        %(@[UnsafeReach("made at the module's start and never written after")]),
+        "Gen::ONE = Gen.new(5)",
+        %(@[SafeReach("made at the module's start, then only read")]),
+        "Gen::SEAL = Seal.new",
+        %(@[UnsafeReach("made at the module's start and never written after")]),
+        "TOP = Gen.new(10)",
+      ]
+
+      File.delete "boot/gen.iyi"
+
+      consumer = create_spec_compiler
+      consumer.prelude = "iyi/prelude"
+      consumer.use_iyimod = "mods"
+      consumer.compile source, File.expand_path("from-artifact")
+      `./from-artifact`.chomp.should eq "23"
+    end
+  end
+
+  # A claim that travels is proven again by the build reading it, and an
+  # artifact's initialiser is its module's top level there as in the build
+  # that wrote it: a statement of `dep/l0`'s sees only the parallel tasks
+  # its own module and the ones it imports may start before it. Read as the
+  # program's own, `S0 << 1` saw `dep/l1`'s `group`, which the program's
+  # imports ran first, and the build from artifacts refused the
+  # `@[SafeReach]` both source builds proved (`bench/spawn_fuzz.py`, seed
+  # 20).
+  it "proves a travelling claim against its own module's initialiser order" do
+    with_tempdir("iyimod_claim_initialiser_order") do
+      Dir.mkdir_p "dep"
+      File.write "dep/l0.iyi", <<-IYI
+        module dep/l0
+
+        @[SafeReach("written by this module's initialiser, then only read")]
+        pub S0 = [] of Int32
+
+        pub def read0 : Int32
+          S0.size
+        end
+
+        S0 << 1
+        S0 << 1
+        IYI
+      File.write "dep/l1.iyi", <<-IYI
+        module dep/l1
+
+        pub def ready1 : Int32
+          1
+        end
+
+        group do |g|
+          g.spawn { nil }
+        end
+        IYI
+      File.write "main.iyi", <<-IYI
+        module main
+
+        import dep/l0
+        import dep/l1
+
+        seen = Atomic(Int32).new(0)
+        group do |g|
+          g.spawn { seen.add(Dep::L0.read0 + Dep::L1.ready1); nil }
+        end
+        puts seen.get
+        IYI
+
+      source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
+
+      producer = create_spec_compiler
+      producer.prelude = "iyi/prelude"
+      producer.emit_iyimod = "mods"
+      producer.compile source, File.expand_path("from-source")
+      `./from-source`.chomp.should eq "3"
+
+      File.delete "dep/l0.iyi"
+      File.delete "dep/l1.iyi"
+
+      consumer = create_spec_compiler
+      consumer.prelude = "iyi/prelude"
+      consumer.use_iyimod = "mods"
+      consumer.compile source, File.expand_path("from-artifact")
+      `./from-artifact`.chomp.should eq "3"
     end
   end
 

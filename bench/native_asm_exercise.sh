@@ -94,6 +94,14 @@ build_driver() {
   fi
 }
 
+# restore_driver: puts the saved unmodified driver back at $tool as a new file.
+# A copy over the file a mutant just ran from keeps that file's identity: macOS
+# keeps the code signature it cached when the mutant ran, and kills the driver
+# on its next run (SIGKILL, Code Signature Invalid).
+restore_driver() {
+  rm -f "$tool" && cp "$good_tool" "$tool"
+}
+
 echo "== 1. build the driver and line B's parse tool from the source"
 if ! build_driver; then
   tail -n 20 "$work/build-driver.log"
@@ -374,7 +382,7 @@ prove_mutation() {
     fail "NOT RUN (MUTATION_SKIP=1): $label"
     return 1
   fi
-  if ! cp "$good_tool" "$tool"; then
+  if ! restore_driver; then
     fail "could not restore the driver before '$label'"
     return 1
   fi
@@ -485,7 +493,7 @@ expect_refused_patch "a patch that leaves the text unchanged" "$src_asm" \
   "reg.to_i64 * 32_i64" "reg.to_i64 * 32_i64"
 
 # The driver built from the unmutated source serves the rest of the run.
-if ! cp "$good_tool" "$tool"; then
+if ! restore_driver; then
   fail "could not restore the unmodified driver"
 fi
 

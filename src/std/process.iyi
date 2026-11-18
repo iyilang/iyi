@@ -1406,7 +1406,9 @@ class ProcessChild
       return Cancelled.new if fiber.cancelled
       # No handle: a cancellation's `CancelIoEx` has no operation to stop.
       ov = IyiScheduler.prepare_overlapped_current
-      words = Pointer(UInt64).malloc(2_u64)
+      # Read by a thread-pool thread outside every unit, so made in the
+      # shared heap under `-Dheap_partitions` (heap22 row 9).
+      words = IyiCross.shared { Pointer(UInt64).malloc(2_u64) }
       words[0] = IyiScheduler.pollfd.to_u64
       words[1] = ov.address
       proc = ->(context : Void*, fired : UInt8) { ProcessChild.ended(context) }

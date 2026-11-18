@@ -49,7 +49,7 @@ def generate_mutations_for_source(
     kinds: set[str] | None = None,
 ) -> list[Mutation]:
     """Generates mutations for a given .iyi source file."""
-    with open(source_path, "r", encoding="utf-8", errors="replace") as f:
+    with open(source_path, "r", encoding="utf-8", errors="replace", newline="") as f:
         src = f.read()
 
     lines = src.splitlines(keepends=True)
@@ -316,7 +316,7 @@ def generate_mutations_for_source(
 
 
 def selftest(compiler: str | None = None, repo: str | None = None) -> None:
-    """Targeted regression tests for link_annotation mutation Unsafe handling."""
+    """Regression tests for source literals and mutation Unsafe annotations."""
     import subprocess
     import tempfile
 
@@ -353,6 +353,21 @@ def selftest(compiler: str | None = None, repo: str | None = None) -> None:
             assert expected_err in res.stderr, f"{label}: expected '{expected_err}' in stderr, got:\n{res.stderr}"
         finally:
             os.remove(tpath)
+
+    # A comment mutation must preserve line endings inside a string literal.
+    # Universal-newline reads otherwise change CRLF literals before mutation.
+    with tempfile.TemporaryDirectory() as directory:
+        source_path = Path(directory) / "multiline.iyi"
+        for ending in ("\n", "\r\n"):
+            source = f'VALUE = "alpha{ending}beta"{ending}puts VALUE{ending}'
+            source_path.write_bytes(source.encode("utf-8"))
+            mutation, = generate_mutations_for_source(
+                str(source_path), [], kinds={"comment_no_loc"}
+            )
+            literal = re.search(r'VALUE = "(.*?)"', mutation.mutated_source, re.S)
+            assert literal and literal.group(1) == f"alpha{ending}beta", (
+                f"comment mutation changed the {ending!r} string literal"
+            )
 
     # 1. Positive test: leading comments & existing @[Unsafe]
     src_with_unsafe = (

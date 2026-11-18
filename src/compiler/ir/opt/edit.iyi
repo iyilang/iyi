@@ -207,9 +207,9 @@ pub class Editor
 
   # An insertion may itself be an anchor. Visiting its children before it
   # preserves each anchor's call order without recursive stack growth.
-  private def emit_tree(root : Inst, out : Array(Inst)) : Nil
+  private def emit_tree(root : Inst, result : Array(Inst)) : Nil
     unless @before.has_key?(root)
-      out << root unless @erased.has_key?(root)
+      result << root unless @erased.has_key?(root)
       return
     end
     nodes = [root] of Inst
@@ -224,22 +224,22 @@ pub class Editor
         nodes << children[at]
         next_child << 0
       else
-        out << i unless @erased.has_key?(i)
+        result << i unless @erased.has_key?(i)
         nodes.pop
         next_child.pop
       end
     end
   end
 
-  private def emit_phis(b : Block, out : Array(Inst)) : Nil
+  private def emit_phis(b : Block, result : Array(Inst)) : Nil
     if list = @phis[b]?
-      list.each { |i| emit_tree(i, out) }
+      list.each { |i| emit_tree(i, result) }
     end
   end
 
-  private def emit_appends(b : Block, out : Array(Inst)) : Nil
+  private def emit_appends(b : Block, result : Array(Inst)) : Nil
     if list = @appended[b]?
-      list.each { |i| emit_tree(i, out) }
+      list.each { |i| emit_tree(i, result) }
     end
   end
 

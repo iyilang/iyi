@@ -54,7 +54,18 @@ end
 
 class BlockMerger
   def initialize(@fn : Function)
-    @du = DefUse.new(@fn)
+    # Most blocks do not begin with a single-predecessor phi. Constructing a
+    # function-wide use table is necessary only if a merge can remove one.
+    @du = nil.as(DefUse?)
+    @fn.blocks.each do |block|
+      next if block.insts.empty? || block.insts[0].op != Op::Phi || block.preds.size != 1
+      pred = block.preds[0]
+      next if pred == block || !pred.terminated?
+      term = pred.terminator
+      next unless term.op == Op::Br && term.targets[0] == block
+      @du = DefUse.new(@fn)
+      break
+    end
     @removed = Hash(Block, Bool).new
     @queued = Hash(Block, Bool).new
     @work = [] of Block
@@ -68,16 +79,17 @@ class BlockMerger
   end
 
   def replace_phi(phi : Inst, value : Value) : Nil
-    uses = [] of Use
-    @du.uses(phi).each { |use| uses << use }
+    du = @du
+    raise "BUG: missing phi use table" unless du
+    uses = du.uses(phi)
     uses.each do |use|
-      @du.remove(use.user, use.index)
+      du.remove(use.user, use.index)
       use.user.args[use.index] = value
-      @du.add(use.user, use.index)
+      du.add(use.user, use.index)
     end
     k = 0
     while k < phi.args.size
-      @du.remove(phi, k)
+      du.remove(phi, k)
       k = k + 1
     end
   end

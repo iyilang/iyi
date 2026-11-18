@@ -206,7 +206,7 @@ fi
 echo '== 5. diamond-chain scaling'
 # One local belongs to one diamond: its stores and load do not span other
 # diamonds. A verified smaller copy checks the generator outside the timing.
-if ! "$PY" - "$(native_path "$DRV")" "$(native_path "$WORK")" "${NATIVE_OPT_SCALE_K:-512}" <<'PY'
+if ! "$PY" - "$(native_path "$DRV")" "$(native_path "$WORK")" "${NATIVE_OPT_SCALE_K:-2048}" <<'PY'
 import os, subprocess, sys, time
 binary, work, text_k = sys.argv[1:]
 try:

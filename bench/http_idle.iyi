@@ -1,0 +1,156 @@
+# heap22 S6: an idle keep-alive connection's partition holds nothing of
+# its last request once an idle worker has collected it. std/http's
+# HTTP/1.1 loop does a request's work in a call of its own and zeroes the
+# stack under it before the wait for the next request
+# (`Server.serve_h1`): done in the loop, the last request's objects
+# stayed in the frames the wait laid over them, and the conservative scan
+# of the parked fiber found them alive - on Windows the answer and its
+# body, on Linux the request and its headers (C10k diag, IdleFix3).
+#
+#   ./bin/iyi build --release -Dheap_partitions bench/http_idle.iyi
+#   ./http_idle
+#
+# CONNECTIONS keep-alive connections each send one request and read the
+# answer, then sit idle; once every connection's partition has had its
+# idle collection, no live partition may hold a `Request` or a `Response`
+# - the type ids the handler saw - and every connection answers again.
+
+@[Unsafe("reads the partitions' runs and chunk tables through IyiHeap")]
+module bench/http_idle
+
+import std/http::{Request, Response, Server}
+import std/socket::{IyiSocket}
+
+{% if flag?(:heap_partitions) %}
+  CONNECTIONS = 32
+
+  # The type ids of the request and the answer, as the handler saw them.
+  class Seen
+    @@request = 0_u64
+    @@response = 0_u64
+
+    def self.request : UInt64
+      @@request
+    end
+
+    def self.request=(id : UInt64) : UInt64
+      @@request = id
+    end
+
+    def self.response : UInt64
+      @@response
+    end
+
+    def self.response=(id : UInt64) : UInt64
+      @@response = id
+    end
+  end
+
+  def fail(message : String) : Nil
+    print "FAIL: #{message}\n"
+    __iyi_exit(1)
+  end
+
+  def answer(request : Request) : Response
+    body = String.build do |io|
+      16.times { |i| io << "line " << i << " of an idle connection's answer, " << request.path << "\n" }
+    end
+    response = Response.new(200, body, {"Content-Type" => "text/plain"})
+    Seen.request = IyiMark.type_id_of(request.object_id)
+    Seen.response = IyiMark.type_id_of(response.object_id)
+    response
+  end
+
+  # One request on *socket* and its whole answer: whether it came back
+  # 200 with its body.
+  def ask(socket : IyiSocket) : Bool
+    sent = socket.write("GET /idle HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n")
+    return false unless sent.is_a?(Int32)
+    text = ""
+    while true
+      got = socket.read(65536)
+      return false unless got.is_a?(String)
+      return false if got.empty?
+      text = text + got
+      split = text.index("\r\n\r\n")
+      next if split.nil?
+      length = 0
+      text[0, split].split("\r\n").each do |line|
+        length = line[15, line.size - 15].strip.to_i if line.downcase.starts_with?("content-length:")
+      end
+      return text.starts_with?("HTTP/1.1 200") if text.bytesize - split - 4 >= length
+    end
+    false
+  end
+
+  # Chunks of the request's and the answer's types on the runs of every
+  # live partition, and the partitions holding one.
+  def held_requests : Tuple(Int32, Int32)
+    chunks = 0
+    holders = 0
+    IyiHeap.each_record do |record|
+      found = 0
+      index = 0
+      while index < IyiHeap::CLASSES
+        run = IyiHeap.read64(record &+ (IyiHeap::FILL + index).to_u64 &* 8_u64)
+        while run != 0
+          arena = run & (0_u64 &- IyiHeap::MAP)
+          word = IyiHeap.run_word(arena, IyiHeap.granule_of(arena, run))
+          chunk = IyiHeap.read64(arena &+ IyiHeap::OFF_CHUNK)
+          stop = run &+ IyiHeap.run_n(word).unsafe_shl(IyiHeap::GRANULE_SHIFT)
+          head = IyiHeap.first_head(arena, run)
+          first = IyiHeap.arena_first(arena)
+          while head < stop
+            bits = IyiHeap.read8(arena &+ IyiHeap::META &+ (head &- first).unsafe_div(chunk) &* IyiHeap::META_ENTRY)
+            if bits & IyiHeap::CARVED_FLAG != 0 && bits & IyiHeap::FREE_FLAG == 0 && bits & IyiHeap::UNTYPED_FLAG == 0
+              id = IyiMark.type_id_of(bits & IyiHeap::HEADED_FLAG != 0 ? head &+ IyiHeap::HEADER : head)
+              found = found + 1 if id == Seen.request || id == Seen.response
+            end
+            head = head &+ chunk
+          end
+          run = word & IyiHeap::RUN_LINK
+        end
+        index = index + 1
+      end
+      chunks = chunks + found
+      holders = holders + 1 if found != 0
+    end
+    {chunks, holders}
+  end
+
+  # The clients: CONNECTIONS connections, their idle, their second request.
+  def drive(port : Int32) : Nil
+    sockets = [] of IyiSocket
+    CONNECTIONS.times do
+      socket = IyiSocket.connect("127.0.0.1", port)
+      fail("a connection to the server failed: #{socket}") unless socket.is_a?(IyiSocket)
+      fail("a connection's first request was not answered") unless ask(socket)
+      sockets << socket
+    end
+    fail("the handler saw no request") if Seen.request == 0 || Seen.response == 0
+    # Every connection parked dirty: two ticks of the idle clock, a walk, a
+    # collection each.
+    waited = 0
+    before = IyiHeap.local_collections
+    while IyiHeap.local_collections - before < CONNECTIONS.to_u64 && waited < 5000
+      sleep(10)
+      waited = waited + 10
+    end
+    sleep(300)
+    held = held_requests
+    sockets.each { |socket| fail("an idle connection did not answer again") unless ask(socket) }
+    fail("idle: #{held[1]} idle partitions hold #{held[0]} requests and answers of requests they finished") if held[1] != 0
+    puts "http idle: #{CONNECTIONS} idle connections hold nothing of their last request (#{IyiHeap.local_collections - before} local collections)"
+    __iyi_exit(0)
+  end
+
+  IyiWorkers.count = 4
+  listener = IyiSocket.listen("127.0.0.1", 0)
+  port = listener.local_port
+  group do |g|
+    g.spawn { Server.serve(listener, timeout_ms: 0, request_timeout_ms: 0, max_connections: 0) { |request| answer(request) } }
+    drive(port)
+  end
+{% else %}
+  puts "http idle: built without -Dheap_partitions, nothing to check"
+{% end %}

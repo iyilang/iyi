@@ -91,18 +91,18 @@
 # 5915), whose public key, when it carries one, must be d's.
 #
 # Pure computation: std/digest, std/crypto's HMAC, std/asn1, std/ecdsa
-# for the public key and its checking, and std/atomic for the word the
-# fixed-base table is published through.
+# for the public key and its checking, and std/lazy, which keeps the
+# fixed-base table.
 
 @[Unsafe("keys and points are read out of the bytes of strings through raw pointers")]
 module std/p256
 
 import std/int
-import std/atomic
 import std/digest::{SHA256, SHA384, SHA512, ValueBarrier}
 import std/crypto::{HMAC}
 import std/asn1::{Der, DerValue, DerTag, Asn1Error}
 import std/ecdsa::{EcdsaPublicKey, EcdsaCurve, EcdsaHash, EcdsaError}
+import std/lazy::{Lazy}
 
 # A P-256 private key, and the public key that goes with it.
 pub struct P256PrivateKey
@@ -692,7 +692,7 @@ struct P256Point
   # from its row by masks, all eight touched, its sign applied by a mask;
   # a zero digit adds the identity, as the complete formulas allow.
   def self.base_mult(k : P256Num) : P256Point
-    table = P256BaseTable.get
+    table = P256BaseTable.precomputed
     digits = uninitialized UInt64[64]
     e = pointerof(digits).as(Pointer(UInt64))
     # A nibble is 0 to 15 and the carry in 0 or 1, so nibble + 8 is never
@@ -803,27 +803,29 @@ end
 # (m + 1) 256^j G, and [2^256]G after them for the recoding's carry. It
 # holds multiples of G, which is public, so nothing in it is secret; only
 # which entry is read is, and that is chosen by masks. The table is worked
-# out once, the first time it is wanted, and kept: 224 additions and 256
-# doublings, the 257 Z inverted together by Montgomery's trick (one
-# inversion and three products a point). Two threads that reach it first
-# both work it out, and the later store stands, the tables being the
-# same. What a thread must never read is a table part written: a wrong
-# multiple of G gives a signature a wrong r under the right nonce, and
-# that signature beside the right one for the same message gives the key
-# away. So the table's address is kept in an atomic word, stored last, by
-# a release store, and read by an acquire load (std/atomic): a thread
-# that reads the address reads every entry written before it. A plain
-# store and load promise that on x86_64 and on no machine that orders its
-# stores more loosely.
+# out once, at the first call that reads it (std/lazy), and kept: 224
+# additions and 256 doublings, the 257 Z inverted together by
+# Montgomery's trick (one inversion and three products a point). What a
+# thread must never read is a table part written: a wrong multiple of G
+# gives a signature a wrong r under the right nonce, and that signature
+# beside the right one for the same message gives the key away. std/lazy
+# stores the table once and only then marks it kept, by a release store,
+# and a reader reads it only after an acquire load of the mark, which a
+# plain store and load promise on x86_64 and on no machine that orders its
+# stores more loosely. `base_mult` asks for it once and hands it to `pick`
+# and `top`, so that the mark's check stays out of the functions whose
+# assembly the gate reads.
 struct P256BaseTable
   ENTRIES = 257
 
-  # The table's address once it is whole, 0 until then.
-  @@table = ::Atomic(UInt64).new(0_u64)
+  @[UnsafeReach("built whole in the shared heap by its first reader (std/lazy), kept once and marked; read only after the mark; then only read")]
+  @@table = Lazy(Pointer(P256Num)).new
 
-  def self.get : Pointer(P256Num)
-    ready = @@table.get_acquire
-    return Pointer(P256Num).new(ready) if ready != 0_u64
+  def self.precomputed : Pointer(P256Num)
+    @@table.get { build }
+  end
+
+  private def self.build : Pointer(P256Num)
     f = P256Modulus.field
     points = Pointer(P256Point).malloc(ENTRIES.to_u64)
     p = P256Point.base
@@ -863,7 +865,6 @@ struct P256BaseTable
       table[2 * i + 1] = f.mul(point.y, zi)
       i = i - 1
     end
-    @@table.set_release(table.address)
     table
   end
 

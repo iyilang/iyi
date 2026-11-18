@@ -1,12 +1,12 @@
 module compiler/semantic/inline_macros
 
-import compiler/syntax/ast::{ASTNode, Assign, Block, ClassDef, Def, Expressions, FunDef, LibDef, MacroExpression, MacroFor, MacroIf, ModuleDef, MultiAssign, ProcLiteral, TypeDeclaration, UninitializedVar, Var}
+import compiler/syntax/ast::{ASTNode, Assign, Block, ClassDef, Def, Expressions, FunDef, LibDef, MacroExpression, MacroFor, MacroIf, ModuleDef, MultiAssign, NodeMap, Path, ProcLiteral, TypeDeclaration, UninitializedVar, Var}
 import compiler/syntax/parser::{Parser}
 import compiler/semantic/normalizer::{Normalizer, NormalizerProgram}
 import compiler/syntax/visitor::{Visitor}
 import compiler/macros/engine::{MacroEngine}
 import compiler/macros/interpreter::{MacroFreeBinding}
-import compiler/macros/type_facts::{MacroPathLookup, MacroTypeFacts}
+import compiler/macros/type_facts::{MacroTypeFacts}
 
 # One inline macro site the declarations pass visited: the file it is written in,
 # its kind and place, and why the engine refused it (nil when it expanded, an empty
@@ -23,22 +23,34 @@ pub class InlineMacroSite
   end
 end
 
-# Every inline macro site the pass visited in this run, in visiting order, across
-# the files it loaded. A caller filters by file to measure one file.
+# Every inline macro site, in visiting order. A declaration-time failure is
+# keyed by node so body typing cannot retry it with later declarations in scope.
 pub class InlineMacroLedger
   @@sites = [] of InlineMacroSite
+  @@no_sites = [] of InlineMacroSite
+  @@declaration_failures = NodeMap(InlineMacroSite).new
 
-  def self.sites : Array(InlineMacroSite)
+  def self.sites(node : ASTNode? = nil) : Array(InlineMacroSite)
+    if node
+      if failed = @@declaration_failures[node]?
+        return [failed] of InlineMacroSite
+      end
+      return @@no_sites
+    end
     @@sites
   end
 
-  def self.record(site : InlineMacroSite) : Nil
+  def self.record(site : InlineMacroSite, node : ASTNode? = nil) : Nil
     @@sites << site
+    if node && site.reason
+      @@declaration_failures[node] = site
+    end
     nil
   end
 
   def self.reset : Nil
     @@sites = [] of InlineMacroSite
+    @@declaration_failures = NodeMap(InlineMacroSite).new
     nil
   end
 end
@@ -62,7 +74,7 @@ end
 # `bindings` are the type parameters a site in a def body sees (macro_bindings.iyi): the receiver's
 # and the def's free variables. A site at the top level or in a type body has none.
 # `flag?` reads normalizer.macro_flags, or the host's flags when none were supplied.
-pub def expand_inline_macro(site : ASTNode, scope_name : String, filename : String, in_lib : Bool, normalizer : NormalizerProgram, locals : Array(String) = [] of String, bindings : Array(MacroFreeBinding)? = nil, facts : MacroTypeFacts? = nil, path_lookup : MacroPathLookup? = nil) : ASTNode?
+pub def expand_inline_macro(site : ASTNode, scope_name : String, filename : String, in_lib : Bool, normalizer : NormalizerProgram, locals : Array(String) = [] of String, bindings : Array(MacroFreeBinding)? = nil, facts : MacroTypeFacts? = nil, path_lookup : Proc(Path, ASTNode?)? = nil) : ASTNode?
   report = MacroEngine.new(normalizer.macro_flags, normalizer.host_flags).site_report(site, scope_name, bindings, facts, path_lookup)
   first = report.sites.first
   kind = first.kind
@@ -70,11 +82,11 @@ pub def expand_inline_macro(site : ASTNode, scope_name : String, filename : Stri
   column = first.column
 
   if f = report.failure
-    InlineMacroLedger.record(InlineMacroSite.new(filename, kind, line, column, f.message))
+    InlineMacroLedger.record(InlineMacroSite.new(filename, kind, line, column, f.message), path_lookup.nil? ? nil : site)
     return nil
   end
   if report.skipped
-    InlineMacroLedger.record(InlineMacroSite.new(filename, kind, line, column, "skip_file ends the file's expansion early, which the port does not expand"))
+    InlineMacroLedger.record(InlineMacroSite.new(filename, kind, line, column, "skip_file ends the file's expansion early, which the port does not expand"), path_lookup.nil? ? nil : site)
     return nil
   end
 
@@ -170,7 +182,7 @@ end
 # `locals` names what is declared before the first node, and grows with each node that declares one.
 # A declarations visitor, when supplied, visits each ordinary node before the next site is
 # expanded. The lookup then sees constants declared earlier, including in an expansion.
-pub def splice_inline_sites(nodes : Array(ASTNode), scope_name : String, filename : String, in_lib : Bool, normalizer : NormalizerProgram, locals : Array(String) = [] of String, bindings : Array(MacroFreeBinding)? = nil, facts : MacroTypeFacts? = nil, keep_empty : Bool = false, path_lookup : MacroPathLookup? = nil, declarations : Visitor? = nil) : Array(ASTNode)
+pub def splice_inline_sites(nodes : Array(ASTNode), scope_name : String, filename : String, in_lib : Bool, normalizer : NormalizerProgram, locals : Array(String) = [] of String, bindings : Array(MacroFreeBinding)? = nil, facts : MacroTypeFacts? = nil, keep_empty : Bool = false, path_lookup : Proc(Path, ASTNode?)? = nil, declarations : Visitor? = nil) : Array(ASTNode)
   out = [] of ASTNode
   nodes.each do |n|
     unless n.is_a?(MacroIf) || n.is_a?(MacroFor) || n.is_a?(MacroExpression)
@@ -208,7 +220,7 @@ end
 # A body that is one inline macro node (a class, module or lib body) has no Expressions around it,
 # so splice_inline_sites is never asked about it. Wrap it in an Expressions and splice it as a body
 # of several nodes is spliced. A site the engine refuses stays. `keep_empty` is the def-body rule above.
-pub def splice_body_node(body : ASTNode, scope_name : String, filename : String, in_lib : Bool, normalizer : NormalizerProgram, locals : Array(String) = [] of String, bindings : Array(MacroFreeBinding)? = nil, facts : MacroTypeFacts? = nil, keep_empty : Bool = false, path_lookup : MacroPathLookup? = nil) : ASTNode
+pub def splice_body_node(body : ASTNode, scope_name : String, filename : String, in_lib : Bool, normalizer : NormalizerProgram, locals : Array(String) = [] of String, bindings : Array(MacroFreeBinding)? = nil, facts : MacroTypeFacts? = nil, keep_empty : Bool = false, path_lookup : Proc(Path, ASTNode?)? = nil) : ASTNode
   return body unless body.is_a?(MacroIf) || body.is_a?(MacroFor) || body.is_a?(MacroExpression)
   Expressions.new(splice_inline_sites([body] of ASTNode, scope_name, filename, in_lib, normalizer, locals, bindings, facts, keep_empty, path_lookup))
 end

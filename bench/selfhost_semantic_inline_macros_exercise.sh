@@ -902,10 +902,11 @@ check_splice_probe() {
 # be rejected by both with its own message. The globals deliberately disagree
 # with the type's TAKEN so a lookup in the wrong namespace changes the branch.
 check_type_const_guards() {
-  local style good bad expected message host_rc port_rc
+  local style good bad forward expected message host_rc port_rc
   for style in direct escaped; do
     good="$REPO_NATIVE/bench/fixtures/seminl_reach/type_const_guard_${style}.iyi"
     bad="$REPO_NATIVE/bench/fixtures/seminl_reach/type_const_raise_${style}.iyi"
+    forward="$REPO_NATIVE/bench/fixtures/seminl_reach/type_const_forward_${style}.iyi"
     if [ "$style" = direct ]; then
       expected=A
     else
@@ -955,8 +956,23 @@ check_type_const_guards() {
       echo "INVALID: port $style raise did not report the hosted message (status $port_rc)"
       cat "$WORK/raise_${style}.out" "$WORK/raise_${style}.err"; return 2
     fi
+    host_rc=0
+    "$IYI" build --prelude empty -o "$WORK_NATIVE/forward_${style}_host$EXE" "$forward" > "$WORK/forward_${style}_host.log" 2>&1 || host_rc=$?
+    if [ "$host_rc" -ne 1 ] || ! grep -Fxq 'Error: undefined constant TAKEN' "$WORK/forward_${style}_host.log"; then
+      echo "INVALID: hosted $style forward reference did not report undefined TAKEN (status $host_rc)"
+      cat "$WORK/forward_${style}_host.log"; return 2
+    fi
+    port_rc=0
+    "$WORK/reach_tool$EXE" "$forward" -o "$WORK_NATIVE/forward_${style}.ir" \
+      --pipeline typed --probe-phase --emit ir > "$WORK/forward_${style}.out" 2> "$WORK/forward_${style}.err" || port_rc=$?
+    if ! expected_refusal "$port_rc" "$WORK/forward_${style}.err" src/compiler/semantic/main_visitor.iyi \
+         '^macro control expansion: undefined constant TAKEN$' ||
+       ! grep -Fxq 'bodies: fail: macro control expansion: undefined constant TAKEN' "$WORK/forward_${style}.out"; then
+      echo "INVALID: port $style forward reference did not report the hosted error (status $port_rc)"
+      cat "$WORK/forward_${style}.out" "$WORK/forward_${style}.err"; return 2
+    fi
     : > "$WORK/guard_${style}.ok"
-    echo "  $style type guard: false prints $expected, true raises '$message' on both compilers"
+    echo "  $style type guard: false prints $expected, true raises '$message', forward TAKEN is undefined on both compilers"
   done
 }
 
@@ -976,6 +992,8 @@ check_type_const_mutation() {
     if [ "$mutation" = lookup ]; then
       fixture="$REPO_NATIVE/bench/fixtures/seminl_reach/type_const_guard_${style}.iyi"
       message="$style guard must not raise"
+    elif [ "$mutation" = forward ]; then
+      fixture="$REPO_NATIVE/bench/fixtures/seminl_reach/type_const_forward_${style}.iyi"
     else
       fixture="$REPO_NATIVE/bench/fixtures/seminl_reach/type_const_raise_${style}.iyi"
     fi
@@ -996,8 +1014,13 @@ check_type_const_mutation() {
     elif [ "$rc" -eq 0 ] && [ -s "$WORK/mut_guard_${style}.ir" ] &&
          grep -Fxq '[phase] verify: pass' "$WORK/mut_guard_${style}.out"; then
       caught=$((caught + 1))
+    elif [ "$mutation" = forward ] &&
+         expected_refusal "$rc" "$WORK/mut_guard_${style}.err" src/compiler/lower/pending.iyi \
+           '^lower: visit\(an unexpanded MacroIf after body typing\)' &&
+         grep -Fxq 'reached: bodies' "$WORK/mut_guard_${style}.out"; then
+      caught=$((caught + 1))
     elif expected_refusal "$rc" "$WORK/mut_guard_${style}.err" src/compiler/semantic/main_visitor.iyi \
-           "^macro control expansion: $style type guard caught invalid layout$"; then
+           "^macro control expansion: $([ "$mutation" = forward ] && echo 'undefined constant TAKEN' || echo "$style type guard caught invalid layout")$"; then
       :
     else
       echo "INVALID MUTATION: $style dropped-raise probe failed differently (status $rc)"
@@ -1022,13 +1045,18 @@ else
 fi
 
 prove_mutation "type-body macro paths ignore the enclosing type's constants" "$MUT_TOP" \
-  "found = @program.lookup_type_path?(path, @scope)" \
+  "found = @program.lookup_type_path?(path, scope)" \
   "found = @program.lookup_type_path?(path, @program)" -- check_type_const_mutation lookup || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
 prove_mutation "a raise in a taken type-body macro branch is dropped" "$REPO/src/compiler/macros/interpreter.iyi" \
   "fail_at(node, raise_message(node.args))" \
   "nil" -- check_type_const_mutation raise || status=1
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+prove_mutation "a declaration-time failure is forgotten before a later constant is declared" "$MUT_INL" \
+  "@@declaration_failures[node] = site" \
+  "nil" -- check_type_const_mutation forward || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
 prove_mutation "a single macro node body is left unspliced" "$MUT_INL" \
@@ -1045,8 +1073,8 @@ MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
 # Wrapping the site in Expressions is equivalent: the def that reads the constant splices it again in the same namespace. Pass an empty scope so @type is not the declaring type.
 prove_mutation "a constant macro expands in the reader's scope instead of its declaration namespace" "$MUT_MAIN" \
-  "spliced = splice_body_node(value, scope_name, file, c.namespace.is_a?(LibType), @program.normalizer, [] of String, nil, nil, false, SemanticMacroPathLookup.new(@program, scope))" \
-  "spliced = splice_body_node(value, \"\", file, c.namespace.is_a?(LibType), @program.normalizer, [] of String, nil, nil, false, SemanticMacroPathLookup.new(@program, scope))" -- check_constant_scope || status=1
+  "spliced = splice_body_node(value, scope_name, file, c.namespace.is_a?(LibType), @program.normalizer)" \
+  "spliced = splice_body_node(value, \"\", file, c.namespace.is_a?(LibType), @program.normalizer)" -- check_constant_scope || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
 

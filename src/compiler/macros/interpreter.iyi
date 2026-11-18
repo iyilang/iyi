@@ -3,7 +3,7 @@ module compiler/macros/interpreter
 import compiler/syntax/ast::{ASTNode, And, Arg, ArrayLiteral, Assign, Block, BoolLiteral, Call, CharLiteral, ClassDef, ClassVar, Def, DoubleSplat, Expressions, Generic, Global, HashLiteral, If, ImplicitObj, InstanceVar, IsA, Macro, MacroExpression, MacroFor, MacroIf, MacroLiteral, MacroVar, MacroVerbatim, MultiAssign, NamedArgument, NamedTupleLiteral, Next, NilLiteral, Nop, Not, NumberLiteral, OpAssign, Or, Path, RangeLiteral, Return, Self, Splat, StringInterpolation, StringLiteral, SymbolLiteral, TupleLiteral, Underscore, Unless, Until, Var, While, Yield, StringBuilder}
 import compiler/syntax/token::{NumberKind}
 import compiler/macros/ast::{MacroId, TypeNode}
-import compiler/macros/type_facts::{MacroPathLookup, MacroTypeFacts}
+import compiler/macros/type_facts::{MacroTypeFacts}
 import compiler/macros/target_flags::{MacroTargetFlags}
 import compiler/macros/methods::{MacroMethods}
 import compiler/macros/answers::{MacroAnswers}
@@ -52,13 +52,13 @@ pub class MacroInterpreter
   property skipped : Bool
   property free_bindings : Hash(String, MacroFreeBinding)
   property type_facts : MacroTypeFacts? = nil
-  property path_lookup : MacroPathLookup? = nil
+  @path_lookup : Proc(Path, ASTNode?)?
   property host_flags : Array(String)? = nil
 
   # `flags` is the flag set `flag?` answers from. Left out, it is the host's,
   # as the hosted interpreter's default is. `scope_name` is what `@type` and
   # `@top_level` name: the type the macro is expanded in.
-  def initialize(@block : Block? = nil, flags : Array(String)? = nil, scope_name : String = "<Program>", host_flags : Array(String)? = nil)
+  def initialize(@block : Block? = nil, flags : Array(String)? = nil, scope_name : String = "<Program>", host_flags : Array(String)? = nil, @path_lookup : Proc(Path, ASTNode?)? = nil)
     @vars = Hash(String, ASTNode).new
     @str = StringBuilder.new
     @macro_vars = Hash(String, String).new
@@ -544,7 +544,7 @@ pub class MacroInterpreter
         end
       end
       if lookup = @path_lookup
-        if constant = lookup.resolve(path)
+        if constant = lookup.call(path)
           return constant
         end
       end

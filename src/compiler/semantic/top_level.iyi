@@ -8,7 +8,6 @@ import compiler/syntax/ast::{ASTNode, Alias, And, Annotation, Arg, Assign, Assoc
 import compiler/syntax/ast::{Splat, Underscore, Yield}
 import compiler/syntax/visitor::{Visitor}
 import compiler/macros/engine::{MacroEngine}
-import compiler/macros/type_facts::{MacroPathLookup}
 import compiler/macros/target_flags::{MacroTargetFlags}
 import compiler/semantic/inline_macros::{expand_inline_macro, splice_body_node, splice_inline_sites}
 import compiler/semantic/normalizer::{NormalizerProgram}
@@ -2787,19 +2786,6 @@ pub class DeclaredIvar
   def initialize(@owner : ModuleType, @name : String, @restriction : ASTNode, @initializer : ASTNode?, @virtual : Bool, @imports : Hash(String, Type))
   end
 end
-# The hosted interpreter uses the site's path lookup (semantic_visitor.cr:2175-2176)
-# and returns a constant's initializer AST (interpreter.cr:555-568).
-pub class SemanticMacroPathLookup < MacroPathLookup
-  def initialize(@program : SemanticProgram, @scope : ModuleType)
-  end
-
-  def resolve(path : Path) : ASTNode?
-    found = @program.lookup_type_path?(path, @scope)
-    return found.as(Const).value if found.is_a?(Const)
-    nil
-  end
-end
-
 
 # A `self.new` the declarations pass added for an instance `initialize` (the hosted
 # new_expansions table). `expanded` is the new on the metaclass, `original` the
@@ -2911,7 +2897,14 @@ pub class TopLevelVisitor < Visitor
     @exp_nest = @exp_nest + 1
     has_inline = node.expressions.any? { |exp| exp.is_a?(MacroIf) || exp.is_a?(MacroFor) || exp.is_a?(MacroExpression) }
     if has_inline
-      lookup = SemanticMacroPathLookup.new(@program, @current_type)
+      # The hosted path lookup is the site's lexical scope, and a constant
+      # answers its initializer AST (interpreter.cr:555-568). Capture the
+      # scope, not @current_type, which nested declarations temporarily change.
+      scope = @current_type
+      lookup = ->(path : Path) : ASTNode? do
+        found = @program.lookup_type_path?(path, scope)
+        found.is_a?(Const) ? found.as(Const).value : nil
+      end
       node.expressions = splice_inline_sites(node.expressions, @current_type.full_name, @file || "", @current_type.is_a?(LibType), @program.normalizer, [] of String, nil, nil, false, lookup, self)
     else
       i = 0
@@ -4151,23 +4144,17 @@ pub class TopLevelVisitor < Visitor
   end
 
   def visit(node : MacroIf) : Bool
-    if expanded = expand_inline_macro(node, @current_type.full_name, @file || "", @current_type.is_a?(LibType), @program.normalizer, [] of String, nil, nil, SemanticMacroPathLookup.new(@program, @current_type))
-      expanded.accept(self)
-    end
+    Expressions.new([node] of ASTNode).accept(self)
     false
   end
 
   def visit(node : MacroFor) : Bool
-    if expanded = expand_inline_macro(node, @current_type.full_name, @file || "", @current_type.is_a?(LibType), @program.normalizer, [] of String, nil, nil, SemanticMacroPathLookup.new(@program, @current_type))
-      expanded.accept(self)
-    end
+    Expressions.new([node] of ASTNode).accept(self)
     false
   end
 
   def visit(node : MacroExpression) : Bool
-    if expanded = expand_inline_macro(node, @current_type.full_name, @file || "", @current_type.is_a?(LibType), @program.normalizer, [] of String, nil, nil, SemanticMacroPathLookup.new(@program, @current_type))
-      expanded.accept(self)
-    end
+    Expressions.new([node] of ASTNode).accept(self)
     false
   end
 

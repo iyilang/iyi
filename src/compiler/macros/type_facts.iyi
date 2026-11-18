@@ -1,12 +1,6 @@
 module compiler/macros/type_facts
 
-import compiler/syntax/ast::{ASTNode, Annotation, Def, Path}
-
-# Semantic analysis supplies the path lookup for an inline site's lexical scope.
-# A constant resolves to its initializer AST, as in interpreter.cr:555-568.
-pub abstract class MacroPathLookup
-  abstract def resolve(path : Path) : ASTNode?
-end
+import compiler/syntax/ast::{Annotation, Def}
 
 pub class MacroInstanceVarFact
   getter name : String

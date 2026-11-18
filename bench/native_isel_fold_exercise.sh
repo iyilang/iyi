@@ -259,6 +259,9 @@ for fn in ("overflow_zero", "overflow_narrow_zero"):
     expect("deferred", fn, [op("Bcond"), r"^  Cb(n)?z/"], [op("Tbz"), op("Tbnz"), op("Cset")])
 expect("deferred", "overflow_compare", [op("Adds"), op("CmnImm"), op("Bcond")], [op("Cset")])
 expect("deferred", "multi_bit", [op("AndImm"), r"^  Cb(n)?z/"], [op("Tbz"), op("Tbnz"), op("Cset")])
+for fn in ("nested_compare", "hint_compare"):
+    expect("deferred", fn, [op("Cset"), r"^  Cb(n)?z/"], [op("Tbz"), op("Tbnz")])
+expect("deferred", "gep_other", [op("AddImm"), op("Ldr"), r"^  Cb(n)?z/"], [op("Tbz"), op("Tbnz")])
 for problem in errors:
     print("INVALID: " + problem)
 for problem in defects:

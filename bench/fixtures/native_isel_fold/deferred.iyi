@@ -1,6 +1,7 @@
 module deferred
 
 import std/int
+import std/static_array
 
 def overflow_zero(a : Int64, b : Int64) : Int64
   value = a.to_i128 + b.to_i128
@@ -24,6 +25,20 @@ def multi_bit(x : Int64) : Int64
   (x & 7_i64) == 0_i64 ? 131_i64 : 132_i64
 end
 
+def nested_compare(x : Int64) : Int64
+  x > 5_i64 ? 142_i64 : 141_i64
+end
+
+def hint_compare(x : Int64) : Int64
+  x > 5_i64 ? 151_i64 : 152_i64
+end
+
+def gep_other : Int64
+  values = StaticArray(Int64, 2).new
+  values[1] = 55_i64
+  values[1]
+end
+
 puts "#{overflow_zero(-7_i64, 7_i64)}"
 puts "#{overflow_zero(1_i64, 2_i64)}"
 puts "#{overflow_zero(9223372036854775807_i64, 1_i64)}"
@@ -34,3 +49,8 @@ puts "#{overflow_narrow_zero(7_i8, 1_i8)}"
 puts "#{overflow_narrow_zero(127_i8, 1_i8)}"
 puts "#{multi_bit(8_i64)}"
 puts "#{multi_bit(10_i64)}"
+puts "#{nested_compare(4_i64)}"
+puts "#{nested_compare(6_i64)}"
+puts "#{hint_compare(4_i64)}"
+puts "#{hint_compare(6_i64)}"
+puts "#{gep_other}"

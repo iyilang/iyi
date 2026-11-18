@@ -72,8 +72,49 @@ nonzero:
   ret i64 132
 }
 
+; A comparison consumed by another comparison is not a branch fold itself.
+define internal i64 @nested_compare(i64 %x) {
+entry:
+  %inner = icmp sgt i64 %x, 5
+  %iszero = icmp eq i1 %inner, false
+  br i1 %iszero, label %yes, label %no
+yes:
+  ret i64 141
+no:
+  ret i64 142
+}
+
+; An expect consumed by a comparison is materialized rather than skipped.
+define internal i64 @hint_compare(i64 %x) {
+entry:
+  %inner = icmp sgt i64 %x, 5
+  %hint = intrinsic llvm.expect.i1(i1 %inner, i1 true)
+  %iszero = icmp ne i1 %hint, false
+  br i1 %iszero, label %yes, label %no
+yes:
+  ret i64 151
+no:
+  ret i64 152
+}
+
+; A GEP used by both memory and a null test cannot be deferred into the load.
+define internal i64 @gep_other(ptr %base) {
+entry:
+  %address = getelementptr i64, ptr %base, i64 1
+  %value = load i64, ptr %address, align 8
+  %present = icmp ne ptr %address, null
+  br i1 %present, label %yes, label %no
+yes:
+  ret i64 %value
+no:
+  ret i64 0
+}
+
 define i32 @main() {
 entry:
+  %buffer = alloca [2 x i64], align 8
+  %place = getelementptr i64, ptr %buffer, i64 1
+  store i64 55, ptr %place, align 8
   %a = call i64 (i64, i64) @overflow_zero(i64 -7, i64 7)
   %b = call i64 (i64, i64) @overflow_zero(i64 1, i64 2)
   %c = call i64 (i64, i64) @overflow_zero(i64 9223372036854775807, i64 1)
@@ -84,6 +125,11 @@ entry:
   %h = call i64 (i8, i8) @overflow_narrow_zero(i8 127, i8 1)
   %i = call i64 (i64) @multi_bit(i64 8)
   %j = call i64 (i64) @multi_bit(i64 10)
+  %k = call i64 (i64) @nested_compare(i64 4)
+  %l = call i64 (i64) @nested_compare(i64 6)
+  %m = call i64 (i64) @hint_compare(i64 4)
+  %n = call i64 (i64) @hint_compare(i64 6)
+  %o = call i64 (ptr) @gep_other(ptr %buffer)
   %p0 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %a)
   %p1 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %b)
   %p2 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %c)
@@ -94,5 +140,10 @@ entry:
   %p7 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %h)
   %p8 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %i)
   %p9 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %j)
+  %p10 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %k)
+  %p11 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %l)
+  %p12 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %m)
+  %p13 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %n)
+  %p14 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %o)
   ret i32 0
 }

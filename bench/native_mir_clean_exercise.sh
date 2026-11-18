@@ -42,6 +42,43 @@ if ! build_driver "$DRV"; then
   exit 1
 fi
 
+# The copy-fold pass runs before allocation. Measure it there independently
+# of identity moves the allocator may later remove on its own.
+cat >"$WORK/prealloc_mir.iyi" <<'IYI'
+module prealloc_mir
+import compiler/ir/parser::{parse, IrParseError}
+import compiler/ir/module::{Module}
+import compiler/ir/function::{Function}
+import compiler/native/mir::{MFunction}
+import compiler/native/driver::{symbol_table, dump_mfunction}
+import compiler/native/mir_clean::{fold_result_copies}
+import compiler/native/aarch64/isel::{select_function, IselError}
+import compiler/native/obj/object::{ObjectFile, ObjFormat}
+
+parsed = parse(File.read(Program.args[0]))
+raise "invalid fixture" if parsed.is_a?(IrParseError)
+mod = parsed.as(Module)
+fn = mod.get_function?(Program.args[1])
+raise "missing function" unless fn
+syms = symbol_table(mod, ObjectFile.new(ObjFormat::MachO, mod.target, "iyi-native"))
+selected = select_function(mod, fn.as(Function), syms, mod.target.darwin?)
+raise "selection failed" if selected.is_a?(IselError)
+mf = selected.as(MFunction)
+fold_result_copies(mf)
+STDOUT.print(dump_mfunction(mf))
+IYI
+PRE_DRV="$WORK/prealloc_mir$EXE"
+build_prealloc() {
+  ./bin/iyi build -o "$(native_path "$1")" "$(native_path "$WORK/prealloc_mir.iyi")" \
+    >"$WORK/build.$(basename "$1").log" 2>&1
+}
+if ! build_prealloc "$PRE_DRV"; then
+  cat "$WORK/build.$(basename "$PRE_DRV").log"
+  fail "the pre-allocation MIR driver does not build"
+  echo "SOME NATIVE MIR CLEAN CHECKS FAILED"
+  exit 1
+fi
+
 echo "== 1b. exercise the MIR pass contracts"
 cat >"$WORK/mir_contract.iyi" <<'IYI'
 module mir_contract
@@ -369,6 +406,8 @@ defects = []
 functions = 0
 backedges = 0
 inversions = 0
+post_all = [0, 0, 0]
+post_codegen = [0, 0, 0]
 
 def dump(path, name, enabled):
     env = dict(os.environ, IYI_NATIVE_MIR_CLEAN=str(enabled))
@@ -429,7 +468,11 @@ for dirname in dirs:
                 continue
             old_count = sum(map(len, before.values()))
             new_count = sum(map(len, after.values()))
-            if new_count > old_count or (custom and new_count == old_count):
+            result = 0 if new_count < old_count else (1 if new_count == old_count else 2)
+            post_all[result] += 1
+            if directory.name == "native_cg":
+                post_codegen[result] += 1
+            if new_count > old_count:
                 defects.append(f"{path.name} {name}: instruction count {old_count} -> {new_count}")
             if not custom:
                 continue
@@ -464,6 +507,9 @@ for problem in errors:
 for problem in defects:
     print("decisive: " + problem)
 print(f"MIR functions: {functions}; backedges: {backedges}; inversions: {inversions}")
+print(f"post-allocation {mode}: smaller={post_all[0]} equal={post_all[1]} larger={post_all[2]}")
+if mode == "all":
+    print(f"post-allocation native_cg: smaller={post_codegen[0]} equal={post_codegen[1]} larger={post_codegen[2]}")
 if errors:
     sys.exit(2)
 if defects:
@@ -480,9 +526,61 @@ check_mir() {
   fi
 }
 
+# The former strict check applies to every custom function, but at the point
+# where result-copy folding runs rather than after register coalescing.
+cat >"$WORK/check_prealloc.py" <<'PY'
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+drv, directory = sys.argv[1:]
+errors = []
+defects = []
+checked = 0
+for path in sorted(Path(directory).glob("*.ir")):
+    names = re.findall(r"^define [^@\n]*@([^\s(]+)\(", path.read_text(encoding="utf-8"), re.M)
+    if not names:
+        errors.append(f"{path.name}: no functions")
+    for name in names:
+        counts = []
+        for enabled in (0, 1):
+            env = dict(os.environ, IYI_NATIVE_MIR_CLEAN=str(enabled))
+            try:
+                result = subprocess.run([drv, str(path), name], env=env, capture_output=True, text=True)
+            except OSError as exc:
+                errors.append(f"{path.name} {name}: {exc}")
+                break
+            if result.returncode or not result.stdout.startswith("function " + name + "\n"):
+                errors.append(f"{path.name} {name}: invalid pre-allocation MIR: {result.stderr.strip()}")
+                break
+            counts.append(len(re.findall(r"^  [A-Za-z0-9_]+/\d+f?(?: |$)", result.stdout, re.M)))
+        if len(counts) != 2:
+            continue
+        checked += 1
+        print(f"pre-allocation: {path.name} {name}: {counts[0]} -> {counts[1]}")
+        if counts[1] >= counts[0]:
+            defects.append(f"{path.name} {name}: pre-allocation instruction count {counts[0]} -> {counts[1]}")
+if not checked:
+    errors.append("no pre-allocation functions could be checked")
+for problem in errors:
+    print("INVALID: " + problem)
+for problem in defects:
+    print("decisive: " + problem)
+if errors:
+    sys.exit(2)
+if defects:
+    sys.exit(1)
+PY
+check_prealloc() {
+  "$PY" "$(native_path "$WORK/check_prealloc.py")" "$(native_path "$1")" "$(native_path "$FIX_CLEAN")"
+}
+
 echo "== 4. compare MIR instruction counts and fallthrough edges"
 check_mir "$DRV" all || fail "the per-function MIR comparison failed"
 check_mir "$DRV" custom || fail "the custom MIR edge predicate failed"
+check_prealloc "$PRE_DRV" || fail "the pre-allocation MIR comparison failed"
 
 # A fixture result is a detected regression only after object emission, linking and signing succeeded.
 check_fixture_output() {
@@ -524,6 +622,18 @@ mutation_invalid() {
 # because the older helper on this stack counts every nonzero exit as a catch.
 check_mutant() {
   local kind=$1 mutant="$WORK/mutant$EXE" result structure runtime ir
+  if [ "$kind" = prealloc ]; then
+    mutant="$WORK/mutant-prealloc$EXE"
+    if ! build_prealloc "$mutant"; then
+      cat "$WORK/build.$(basename "$mutant").log"
+      mutation_invalid "mutant pre-allocation driver did not build"
+      return 2
+    fi
+    check_prealloc "$mutant"
+    result=$?
+    [ "$result" -ne 2 ] || { mutation_invalid "pre-allocation predicate could not run"; return 2; }
+    return "$result"
+  fi
   if ! build_driver "$mutant"; then
     cat "$WORK/build.$(basename "$mutant").log"
     mutation_invalid "mutant driver did not build"
@@ -568,6 +678,12 @@ prove_clean_mutation() {
 }
 
 echo "== 5. mutation proofs"
+prove_clean_mutation "copy: disable pre-allocation result folding" \
+  src/compiler/native/mir_clean.iyi \
+  'pub def fold_result_copies(fn : MFunction) : Int32
+  return 0 unless mir_clean_enabled?' \
+  'pub def fold_result_copies(fn : MFunction) : Int32
+  return 0' prealloc
 if [ "$HOST_ID" = darwin-arm64 ]; then
   for ir in "$FIX_CLEAN"/*.ir; do
     [ -f "$ir" ] || continue

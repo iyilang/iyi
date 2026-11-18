@@ -324,9 +324,9 @@ body_assertion_probe() {
   "$@" > "$WORK/body_assertion.log" 2>&1 || rc=$?
   [ "$rc" -eq 0 ] && return 0
   if [ "$rc" -eq 1 ] &&
-     grep -Eq "^iyi: panic: ($message)$" "$WORK/body_assertion.log" &&
+     grep -E "^iyi: panic: ($message)$" "$WORK/body_assertion.log" > "$WORK/body_assertion.match" &&
      grep -Eq "$site" "$WORK/body_assertion.log"; then
-    echo "decisive: $(awk 'NR == 1 { sub(/^iyi: panic: /, ""); print; exit }' "$WORK/body_assertion.log")"
+    echo "decisive: $(awk 'NR == 1 { sub(/^iyi: panic: /, ""); print; exit }' "$WORK/body_assertion.match")"
     return 1
   fi
   echo "INVALID MUTANT: probe failed outside its assertion" >&9

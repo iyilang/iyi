@@ -102,12 +102,7 @@ held=0
 for src in "$REPO"/src/iyi/*.iyi; do
   name="$(basename "$src")"
   floor="$(expected_verify "$name")"
-  input="$src"
-  if [ "$name" = "concurrency.iyi" ]; then
-    input="$WORK/concurrency-with-atomic.iyi"
-    printf 'require "iyi/atomic"\nrequire "iyi/concurrency"\n' > "$input"
-  fi
-  got="$(verify_one "$input")"
+  got="$(verify_one "$src")"
   checked=$((checked + 1))
   note=""
   case "$floor" in

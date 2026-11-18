@@ -54,7 +54,10 @@
 #      each a parallel task parked on its socket for every request, ten
 #      seconds with the runtime's helpers and ten with one: every
 #      collection finishes, and no collection count stands still while
-#      the tasks allocate.
+#      the tasks allocate. Under `-Dheap_partitions` (IYI_OPTS) the
+#      clients allocate in the shared heap's bracket, since a partition
+#      feeds no global collection, and each checks that its own node is
+#      its partition's and the bracket's is not.
 #  12. Failure proof: the remainder round's store of the count of workers
 #      marking put back, every second stop retreating once, and a window
 #      before the store held open until an assist has counted itself in;
@@ -612,7 +615,7 @@ fi
 step "failure proof: a small live set given the thousand-object bound goes beside the program"
 mkdir -p thousand/iyi
 cp "$REPO"/src/iyi/*.iyi thousand/iyi/
-awk '{ if (sub(/drain_bounded\(w, @@kept < STW_MARK_SMALL \? STW_MARK_SMALL : STW_MARK_BOUND\)/, "drain_bounded(w, STW_MARK_BOUND)")) found = 1; print } END { if (!found) exit 3 }' \
+awk '{ if (sub(/drain_bounded\(w, IyiStat\.get\(IyiStat::KEPT\) < STW_MARK_SMALL \? STW_MARK_SMALL : STW_MARK_BOUND\)/, "drain_bounded(w, STW_MARK_BOUND)")) found = 1; print } END { if (!found) exit 3 }' \
   "$REPO/src/iyi/prelude.iyi" > thousand/iyi/prelude.iyi || { echo "the bound this proof replaces is not in the prelude any more"; exit 1; }
 if ! IYI_PATH="$WORK/thousand${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/concurrent_mark.iyi" -o thousand-run > build-thousand.log 2>&1; then
   cat build-thousand.log; exit 1

@@ -59,21 +59,14 @@ name: iyi
 # 2026-11-04 to 11-07). Every pull request paid that, a README edit as much
 # as a compiler change, and two at once queued behind each other for hours.
 # The Team plan runs up to sixty at once, and still five on macOS, which is
-# what a full run waits on longest.
+# what a full run waited on longest; every macOS job now runs on Namespace's
+# macOS 15 (namespace-profile-macos-15), a fresh VM per job.
 on:
   push:
     branches: [master, mt/next, mt/next-two]
     tags: ["v*", "editor-v*"]
   pull_request:
   workflow_dispatch:
-    inputs:
-      # The darwin jobs that run on the project's Mac (darwin, darwin-std,
-      # darwin-heap22) on GitHub's macos-15 instead: for a Mac that is off,
-      # and to exercise the path a fork's pull request takes.
-      darwin_github_hosted:
-        description: "darwin, darwin-std and darwin-heap22 on GitHub's macos-15, not the project's Mac"
-        type: boolean
-        default: false
   schedule:
     # 02:17 UTC: off the hour, when every other scheduled workflow starts.
     - cron: "17 2 * * *"
@@ -1638,19 +1631,12 @@ jobs:
     # before then (job 124229745795). The numbers that name macos-14 in
     # these comments and the documents were measured there: a three-core
     # M1 virtual machine on macOS 14.8.9, building with Xcode 15.4.
-    # On the project's own Mac since 2026-11-17 (labels self-hosted, macOS,
-    # ARM64; three runners on one M2 Pro), with darwin-std and darwin-heap22:
-    # the three take the Mac in one wave, while the four darwin-std-siblings
-    # shards run on GitHub's macos-15 (their comment says why). The static
-    # LLVM there is keyed on its SDK and Xcode build, not an image.
-    # A pull request from a fork runs here on Namespace's macOS 15 instead
-    # (namespace-profile-macos-15, a fresh VM per job, as GitHub's is): the
-    # Mac is the owner's own machine, and a fork's code does not run on it
-    # (the repository also holds every outside contributor's run for
-    # approval, so a fork cannot edit this line back unseen). A dispatch
-    # with darwin_github_hosted does the same. The steps that differ read
-    # runner.environment.
-    runs-on: ${{ ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) || inputs.darwin_github_hosted) && 'namespace-profile-macos-15' || fromJSON('["self-hosted","macOS","ARM64"]') }}
+    # The project's Mac (three runners on one M2 Pro) ran darwin, darwin-std
+    # and darwin-heap22 from 2026-11-17, and a fork's pull request went to
+    # GitHub's macos-15 instead. Every darwin job now runs on Namespace's
+    # macOS 15 (namespace-profile-macos-15), a fresh VM per job, a fork's
+    # included.
+    runs-on: namespace-profile-macos-15
     # A runner builds for its own major version, which on macos-15 is 15.0:
     # the tarball's `iyi` would refuse every Mac on 14, where 0.19.1's,
     # built on macos-14, says `minos` 14.0. 14.4 is iyi's floor, the
@@ -1688,24 +1674,18 @@ jobs:
       # What the runner is, in every log: the jobs' times and the gates'
       # numbers are this machine's.
       - name: Install the bootstrap toolchain
-        id: tools
         run: |
           sw_vers
           sysctl -n machdep.cpu.brand_string hw.ncpu hw.memsize
           xcodebuild -version
           python3 --version
-          # Only what is missing: on the self-hosted Mac, `brew install` of an
-          # installed formula would upgrade the machine's own copy.
+          # Only what is missing: a formula the image has is not upgraded.
           for f in crystal coreutils pkgconf; do brew list --versions "$f" >/dev/null || brew install "$f"; done
-          echo "sdk=sdk$(xcrun --show-sdk-version)-$(xcodebuild -version | awk '/Build version/ {print $3}')" >> "$GITHUB_OUTPUT"
-          # The self-hosted runner's service can inherit a TMPDIR that no
-          # longer exists (an installer's sandbox); every later step uses
-          # the job's own temporary directory instead.
+          # Every later step uses the job's own temporary directory.
           echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
-          # The service also carries its owner's shell flags: LDFLAGS naming
-          # brew's LLVM 23 put its static libraries ahead of the recipe's in
-          # the link. Every job starts with none, and the static LLVM lives
-          # in a directory of CI's own (below), never the machine's ~/llvm-static.
+          # And no compiler or linker flags of the machine's: LDFLAGS naming
+          # brew's LLVM 23 once put its static libraries ahead of the recipe's
+          # in the link.
           for v in LDFLAGS CPPFLAGS CFLAGS CXXFLAGS LIBRARY_PATH CPATH; do echo "$v=" >> "$GITHUB_ENV"; done
           echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
 
@@ -1722,36 +1702,23 @@ jobs:
       # Now it links a static minimal LLVM, and with the collector off the
       # binaries `lib/` is empty rather than libgc alone. Built
       # on this runner because a static archive is bound to the libc++ and
-      # SDK it was compiled against; built once per recipe hash, SDK and
-      # deployment target and kept on the machine, in a directory those name.
-      # The Mac has three runners: one job builds it while the others wait
-      # on the lock, and a run with another recipe gets a directory of its
-      # own instead of deleting the one a running job links against. A
-      # `.stamp` is written last, so a build cut short is built again.
-      - name: Restore the static LLVM (GitHub's runner)
-        if: runner.environment == 'github-hosted' || startsWith(runner.name, 'nsc-runner')
+      # SDK it was compiled against; cached on the recipe's hash, the
+      # platform, the image and the deployment target, so the build is paid
+      # once per recipe or image change (28 minutes on macos-14, job
+      # 115861374075; 25 to 37 in the six darwin jobs of macos-15's first
+      # run, 41131916587). `$HOME`
+      # rather than `/tmp`: darwin's `/tmp` is a symlink into `/private`,
+      # and a cache path should not depend on how a symlink is archived.
+      - name: Restore the static LLVM
         id: llvm-cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/llvm-static
           key: llvm-static-${{ runner.os }}-${{ runner.arch }}-macos-15-${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
-      - name: The static LLVM on GitHub's runner, built on a cache miss
-        if: runner.environment == 'github-hosted' || startsWith(runner.name, 'nsc-runner')
+      - name: The static LLVM, built on a cache miss
         run: |
           [ "${{ steps.llvm-cache.outputs.cache-hit }}" = true ] || bash scripts/build-static-llvm.sh "$HOME/llvm-static"
           echo "LLVM_STATIC=$HOME/llvm-static" >> "$GITHUB_ENV"
-      - name: The static LLVM, built once per recipe and SDK on this machine
-        if: runner.environment == 'self-hosted' && !startsWith(runner.name, 'nsc-runner')
-        run: |
-          stamp="${{ steps.tools.outputs.sdk }}-$MACOSX_DEPLOYMENT_TARGET-${{ hashFiles('scripts/build-static-llvm.sh') }}"
-          dir="$HOME/iyi-ci/llvm-static-$stamp"
-          mkdir -p "$HOME/iyi-ci"
-          lockf -k "$HOME/iyi-ci/llvm-static.lock" bash -ec '
-            [ -f "$1/.stamp" ] && exit 0
-            rm -rf "$1"
-            bash scripts/build-static-llvm.sh "$1"
-            echo "$2" > "$1/.stamp"' _ "$dir" "$stamp"
-          echo "LLVM_STATIC=$dir" >> "$GITHUB_ENV"
 
       # `iyi-tarball` builds `iyi` and its daemon in release mode, refuses an
       # unoptimised binary (`check_iyi_is_release`), and packages them — one
@@ -2050,13 +2017,8 @@ jobs:
   darwin-std-siblings:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'darwin-std-siblings') }}
-    # GitHub's macos-15, four at a time, where the other three darwin jobs
-    # take the project's Mac (three runners, one wave): the shards are four
-    # of the seven, and they walk the module exercises that Linux's and
-    # Windows's shards walk too, so they are the darwin jobs a slower,
-    # shared machine costs least. On the Mac alone the seven queued behind
-    # each other: in run 44059866819 shard 1 waited 108 minutes for a runner
-    # while the Mac ran each job in 35 to 54 (macos-15: 47 to 85).
+    # Namespace's macOS 15, as every darwin job (the darwin job's comment
+    # says why).
     runs-on: namespace-profile-macos-15
     env:
       MACOSX_DEPLOYMENT_TARGET: "14.4"
@@ -2170,9 +2132,9 @@ jobs:
   darwin-std:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'darwin-std') }}
-    # A fork's pull request, or darwin_github_hosted: Namespace's macOS 15
-    # (the darwin job's comment says why).
-    runs-on: ${{ ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) || inputs.darwin_github_hosted) && 'namespace-profile-macos-15' || fromJSON('["self-hosted","macOS","ARM64"]') }}
+    # Namespace's macOS 15, as every darwin job (the darwin job's comment
+    # says why).
+    runs-on: namespace-profile-macos-15
     env:
       MACOSX_DEPLOYMENT_TARGET: "14.4"
     timeout-minutes: 120
@@ -2182,37 +2144,21 @@ jobs:
         with:
           persist-credentials: false
       - name: Install the bootstrap toolchain
-        id: tools
         run: |
           for f in crystal coreutils pkgconf; do brew list --versions "$f" >/dev/null || brew install "$f"; done
-          echo "sdk=sdk$(xcrun --show-sdk-version)-$(xcodebuild -version | awk '/Build version/ {print $3}')" >> "$GITHUB_OUTPUT"
           echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
           for v in LDFLAGS CPPFLAGS CFLAGS CXXFLAGS LIBRARY_PATH CPATH; do echo "$v=" >> "$GITHUB_ENV"; done
           echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
-      - name: Restore the static LLVM (GitHub's runner)
-        if: runner.environment == 'github-hosted' || startsWith(runner.name, 'nsc-runner')
+      - name: Restore the static LLVM
         id: llvm-cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/llvm-static
           key: llvm-static-${{ runner.os }}-${{ runner.arch }}-macos-15-${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
-      - name: The static LLVM on GitHub's runner, built on a cache miss
-        if: runner.environment == 'github-hosted' || startsWith(runner.name, 'nsc-runner')
+      - name: The static LLVM, built on a cache miss
         run: |
           [ "${{ steps.llvm-cache.outputs.cache-hit }}" = true ] || bash scripts/build-static-llvm.sh "$HOME/llvm-static"
           echo "LLVM_STATIC=$HOME/llvm-static" >> "$GITHUB_ENV"
-      - name: The static LLVM, built once per recipe and SDK on this machine
-        if: runner.environment == 'self-hosted' && !startsWith(runner.name, 'nsc-runner')
-        run: |
-          stamp="${{ steps.tools.outputs.sdk }}-$MACOSX_DEPLOYMENT_TARGET-${{ hashFiles('scripts/build-static-llvm.sh') }}"
-          dir="$HOME/iyi-ci/llvm-static-$stamp"
-          mkdir -p "$HOME/iyi-ci"
-          lockf -k "$HOME/iyi-ci/llvm-static.lock" bash -ec '
-            [ -f "$1/.stamp" ] && exit 0
-            rm -rf "$1"
-            bash scripts/build-static-llvm.sh "$1"
-            echo "$2" > "$1/.stamp"' _ "$dir" "$stamp"
-          echo "LLVM_STATIC=$dir" >> "$GITHUB_ENV"
       - name: Build `iyi`
         run: make iyi LLVM_CONFIG="$LLVM_STATIC/bin/llvm-config"
       - name: The native standard library's foundation
@@ -2221,16 +2167,15 @@ jobs:
         run: bash bench/std_exercise.sh
 
   # heap22's gates on darwin arm64, as the `heap22` job runs them on Linux
-  # (its comment says why they are here). A job of its own, the third on the
-  # project's Mac beside darwin and darwin-std, one runner each: the darwin
-  # job's 67 minutes of 120 in run 43610237136 leave no room for them, and
-  # darwin-std's runs reach 75.
+  # (its comment says why they are here). A job of its own beside darwin and
+  # darwin-std: the darwin job's 67 minutes of 120 in run 43610237136 leave
+  # no room for them, and darwin-std's runs reach 75.
   darwin-heap22:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'darwin-heap22') }}
-    # A fork's pull request, or darwin_github_hosted: Namespace's macOS 15
-    # (the darwin job's comment says why).
-    runs-on: ${{ ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) || inputs.darwin_github_hosted) && 'namespace-profile-macos-15' || fromJSON('["self-hosted","macOS","ARM64"]') }}
+    # Namespace's macOS 15, as every darwin job (the darwin job's comment
+    # says why).
+    runs-on: namespace-profile-macos-15
     env:
       MACOSX_DEPLOYMENT_TARGET: "14.4"
     timeout-minutes: 105
@@ -2240,37 +2185,21 @@ jobs:
         with:
           persist-credentials: false
       - name: Install the bootstrap toolchain
-        id: tools
         run: |
           for f in crystal coreutils pkgconf; do brew list --versions "$f" >/dev/null || brew install "$f"; done
-          echo "sdk=sdk$(xcrun --show-sdk-version)-$(xcodebuild -version | awk '/Build version/ {print $3}')" >> "$GITHUB_OUTPUT"
           echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
           for v in LDFLAGS CPPFLAGS CFLAGS CXXFLAGS LIBRARY_PATH CPATH; do echo "$v=" >> "$GITHUB_ENV"; done
           echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
-      - name: Restore the static LLVM (GitHub's runner)
-        if: runner.environment == 'github-hosted' || startsWith(runner.name, 'nsc-runner')
+      - name: Restore the static LLVM
         id: llvm-cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/llvm-static
           key: llvm-static-${{ runner.os }}-${{ runner.arch }}-macos-15-${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
-      - name: The static LLVM on GitHub's runner, built on a cache miss
-        if: runner.environment == 'github-hosted' || startsWith(runner.name, 'nsc-runner')
+      - name: The static LLVM, built on a cache miss
         run: |
           [ "${{ steps.llvm-cache.outputs.cache-hit }}" = true ] || bash scripts/build-static-llvm.sh "$HOME/llvm-static"
           echo "LLVM_STATIC=$HOME/llvm-static" >> "$GITHUB_ENV"
-      - name: The static LLVM, built once per recipe and SDK on this machine
-        if: runner.environment == 'self-hosted' && !startsWith(runner.name, 'nsc-runner')
-        run: |
-          stamp="${{ steps.tools.outputs.sdk }}-$MACOSX_DEPLOYMENT_TARGET-${{ hashFiles('scripts/build-static-llvm.sh') }}"
-          dir="$HOME/iyi-ci/llvm-static-$stamp"
-          mkdir -p "$HOME/iyi-ci"
-          lockf -k "$HOME/iyi-ci/llvm-static.lock" bash -ec '
-            [ -f "$1/.stamp" ] && exit 0
-            rm -rf "$1"
-            bash scripts/build-static-llvm.sh "$1"
-            echo "$2" > "$1/.stamp"' _ "$dir" "$stamp"
-          echo "LLVM_STATIC=$dir" >> "$GITHUB_ENV"
       - name: Build `iyi`
         run: make iyi LLVM_CONFIG="$LLVM_STATIC/bin/llvm-config"
       - name: The partitions' plumbing, without the flag and with it

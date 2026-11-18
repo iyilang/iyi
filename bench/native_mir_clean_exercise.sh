@@ -629,9 +629,13 @@ check_mutant() {
       mutation_invalid "mutant pre-allocation driver did not build"
       return 2
     fi
-    check_prealloc "$mutant"
+    check_prealloc "$mutant" >"$WORK/prealloc-mutant.log" 2>&1
     result=$?
     [ "$result" -ne 2 ] || { mutation_invalid "pre-allocation predicate could not run"; return 2; }
+    if [ "$result" -eq 1 ] && ! grep -Fq 'decisive:' "$WORK/prealloc-mutant.log"; then
+      mutation_invalid "pre-allocation mutation had no decisive finding"
+      return 2
+    fi
     return "$result"
   fi
   if ! build_driver "$mutant"; then
@@ -684,6 +688,11 @@ prove_clean_mutation "copy: disable pre-allocation result folding" \
   return 0 unless mir_clean_enabled?' \
   'pub def fold_result_copies(fn : MFunction) : Int32
   return 0' prealloc
+if [ -f "$WORK/prealloc-mutant.log" ]; then
+  grep -F 'decisive:' "$WORK/prealloc-mutant.log" || fail "pre-allocation mutation had no decisive finding"
+else
+  fail "pre-allocation mutation did not produce a predicate log"
+fi
 if [ "$HOST_ID" = darwin-arm64 ]; then
   for ir in "$FIX_CLEAN"/*.ir; do
     [ -f "$ir" ] || continue

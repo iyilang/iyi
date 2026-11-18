@@ -363,8 +363,9 @@ else
   host_limited "native source: the cc tripwire mutation needs POSIX shell command lookup; native Windows uses cmd.exe"
 fi
 
-# (b) the subtraction operands swapped where codegen emits integer subtraction. compile_arith exits with v1 &- v2 and
-# ops(5, 3) = (8) &* (5 &- 3), so the exit status moves from 26 to 58 under the swap: the status must change.
+# (b) the subtraction operands swapped where codegen emits integer subtraction. Both subtractions in compile_arith go
+# through that site: ops(5, 3) becomes (8) &* (3 &- 5) = -16 and main returns -16 &- 42 = -58, so the exit status moves
+# from 26 to 198 (-58 as an unsigned byte): the status must change, and to exactly that.
 check_subtraction_output() {
   local src="$REPO_NATIVE/src/compiler/tools/compile.iyi" rc
   local result="$WORK/mut-b-exe$EXE"
@@ -384,8 +385,8 @@ check_subtraction_output() {
     echo "INVALID: subtraction mutant wrote to stderr"; cat "$WORK/mut-b.err"; return 2
   fi
   if cmp -s "$WORK/mut-b.out" "$WORK/ref-arith.out" && [ "$rc" = "$ref_arith_rc" ]; then return 0; fi
-  if [ "$ref_arith_rc" = 26 ] && [ "$rc" = 58 ] && cmp -s "$WORK/mut-b.out" "$WORK/ref-arith.out"; then
-    echo "decisive: subtraction exits 58 instead of 26"
+  if [ "$ref_arith_rc" = 26 ] && [ "$rc" = 198 ] && cmp -s "$WORK/mut-b.out" "$WORK/ref-arith.out"; then
+    echo "decisive: subtraction exits 198 instead of 26"
     return 1
   fi
   echo "unexpected subtraction mutation result: exit $rc"

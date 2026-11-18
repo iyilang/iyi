@@ -21,7 +21,7 @@ module compiler/lower/fun
 # The body is lowered through the dispatch the lowering installed (`BodyVisit`,
 # context.iyi), because iyi refuses an import cycle and the dispatch imports this file.
 
-import compiler/syntax/ast::{ASTNode, Arg, Assign, Call, ClassDef, Def, ModuleDef, PointerOf, ProcLiteral, Var}
+import compiler/syntax/ast::{ASTNode, Arg, Asm, Assign, Call, ClassDef, Def, ModuleDef, PointerOf, ProcLiteral, Var}
 import compiler/syntax/visitor::{Visitor}
 import compiler/ir/function::{Function, Linkage}
 import compiler/ir/inst::{Attribute, Block, CallConv}
@@ -598,6 +598,15 @@ private class AssignedVarCollector < Visitor
     elsif node.is_a?(PointerOf)
       t = node.as(PointerOf).exp
       @names.add(t.as(Var).name) if t.is_a?(Var)
+    elsif node.is_a?(Asm)
+      # An asm output is stored through a pointerof of its expression (lower/asm.iyi), so an output that names an
+      # argument needs its slot too: the hosted visit(Asm) makes that pointerof (main_visitor.cr:3633-3635).
+      if operands = node.as(Asm).outputs
+        operands.each do |operand|
+          target = operand.exp
+          @names.add(target.as(Var).name) if target.is_a?(Var)
+        end
+      end
     end
     true
   end

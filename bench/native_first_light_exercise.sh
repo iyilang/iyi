@@ -349,7 +349,7 @@ check_no_library() {
   if ! dyld_info -no_validate -imports "$baseline" >"$work/arith.bind" 2>&1; then
     cat "$work/arith.bind"; return 2
   fi
-  baseline_bind="$(awk '$2 == "_printf" { line = $0; n++ } END { if (n == 1) print line; else exit 1 }' "$work/arith.bind")" || {
+  baseline_bind="$(awk '{ for (i = 1; i <= NF; i++) if ($i == "_printf") { line = $0; n++; break } } END { if (n == 1) print line; else exit 1 }' "$work/arith.bind")" || {
     echo "INVALID: baseline does not have exactly one _printf binding"; cat "$work/arith.bind"; return 2
   }
   case "$baseline_bind" in
@@ -364,7 +364,7 @@ check_no_library() {
   if ! dyld_info -no_validate -imports "$work/mut-arith" >"$work/mut-arith.bind" 2>&1; then
     cat "$work/mut-arith.bind"; return 2
   fi
-  mutant_bind="$(awk '$2 == "_printf" { line = $0; n++ } END { if (n == 1) print line; else exit 1 }' "$work/mut-arith.bind")" || {
+  mutant_bind="$(awk '{ for (i = 1; i <= NF; i++) if ($i == "_printf") { line = $0; n++; break } } END { if (n == 1) print line; else exit 1 }' "$work/mut-arith.bind")" || {
     echo "INVALID: mutant does not have exactly one _printf binding"; cat "$work/mut-arith.bind"; return 2
   }
   case "$mutant_bind" in

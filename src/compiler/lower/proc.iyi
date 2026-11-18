@@ -52,6 +52,10 @@ end
 # The hosted `fun_literal_name` (codegen.cr:1094-1130) for a literal of this proc type, at its place. The name
 # is `~proc` and the type's text, `^`, the place's file and `:` and its line. The second literal of one name in
 # the module is `~proc2...`, the third `~proc3...`, as the hosted proc counts give them.
+#
+# The count is the lowerer's, and the pipeline table lowers one module with a lowerer per probed def
+# (program.iyi lowering_table). A name the module already defines is therefore skipped, so a literal two probes
+# both reach is not defined twice. With one lowerer per module no name is ever taken, and the counts are the hosted ones.
 pub def proc_literal_name(low : Lowerer, node : ProcLiteral, proc_type : Type) : String
   place = low.current_context.macro_origin || node.location
   if place.nil?
@@ -64,7 +68,16 @@ pub def proc_literal_name(low : Lowerer, node : ProcLiteral, proc_type : Type) :
   if p = previous
     count = p + 1
   end
+  name = proc_literal_symbol(count, rest)
+  while !low.module.get_function?(name).nil?
+    count = count + 1
+    name = proc_literal_symbol(count, rest)
+  end
   low.proc_counts[rest] = count
+  name
+end
+
+private def proc_literal_symbol(count : Int32, rest : String) : String
   if count > 1
     return "~proc" + count.to_s + rest
   end

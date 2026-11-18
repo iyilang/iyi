@@ -408,10 +408,14 @@ puts "a wait after a timed-out one found the bytes waiting"
 # answered at once" mode; the late read then woke on one of them.
 {% if flag?(:win32) %}
   class Handoff
-    @@outcome = Pointer(Atomic(UInt64)).malloc(1_u64)
+    @@outcome = Atomic(UInt64).new(0_u64)
 
-    def self.outcome : Pointer(Atomic(UInt64))
-      @@outcome
+    def self.outcome : UInt64
+      @@outcome.get
+    end
+
+    def self.answer(value : UInt64) : Nil
+      @@outcome.set(value)
     end
   end
 
@@ -425,7 +429,7 @@ puts "a wait after a timed-out one found the bytes waiting"
     end
     late = IyiScheduler.read_current(fd, buffer.as(Void*), 5_u64, 3000)
     whole = ones == 50 && late == 5_i64 && buffer[0] == 102_u8 && buffer[4] == 108_u8
-    Handoff.outcome.value.set(whole ? 1_u64 : 2_u64)
+    Handoff.answer(whole ? 1_u64 : 2_u64)
   end
 
   handoff = make_pipe
@@ -438,11 +442,11 @@ puts "a wait after a timed-out one found the bytes waiting"
   sleep(200)
   __iyi_write(handoff[1], "final".to_unsafe.as(Void*), 5_u64)
   waited = 0
-  while Handoff.outcome.value.get == 0_u64 && waited < 500
+  while Handoff.outcome == 0_u64 && waited < 500
     sleep(10)
     waited = waited + 1
   end
-  handoff_outcome = Handoff.outcome.value.get
+  handoff_outcome = Handoff.outcome
   fail("a pipe read on the main thread and then on a worker hung there for 5 s") if handoff_outcome == 0_u64
   fail("a pipe handed to a worker thread answered its reads wrongly") unless handoff_outcome == 1_u64
   receiver.join
@@ -1171,6 +1175,20 @@ end
 
 cancelled_select_beats
 
+# Under the stress (`IYI_HEAP_STRESS=N`, a `-Dheap_verify` build: a local
+# collection at every Nth chaos point, and at every park when N is 1, each
+# with the verifier's scan of every heap word) 16b's and 16d's loops cost
+# the square of their length: 16d's 400,000 selects would take about
+# 8,000 s at stress 1 on tmac, against bench/heap_verify_matrix.sh's
+# limit. 16b's counts are cut there alone, still long enough for each
+# broken copy to fail its check unchanged (the numbers are beside it), and
+# 16d checks a select made to park instead; unstressed runs keep theirs.
+{% if flag?(:heap_verify) %}
+  heap_stress = IyiHeapVerify.stress
+{% else %}
+  heap_stress = 0_u64
+{% end %}
+
 # ── 16b. A ring of tasks passing a value allocates nothing per message ──
 #
 # Every park took a node from the heap - a receiver's and, where the
@@ -1251,15 +1269,23 @@ cancelled_select_beats
 
   # What starting costs is the same for any number of messages, so the
   # difference between two lengths is what the messages cost.
+  # Under the stress 10,000 messages and round trips, not 100,000: the
+  # check is any byte a message, and the copies that take a node from the
+  # heap for every park still fail it there, 45 bytes a message and 104 a
+  # round trip at stress 1 and 64 (Linux, tmac; bench/concurrency_exercise.sh's
+  # fresh_sender and fresh_waiter, seed 2, false words). 16b then takes
+  # 0.03 s on Linux and 0.4 s on tmac at stress 1 (seeds 2 and 4, false
+  # words).
+  ring_messages = heap_stress != 0_u64 ? 10000 : 100000
   short_ring = ring_bytes(8, 1000)
-  long_ring = ring_bytes(8, 101000)
-  per_pass = long_ring > short_ring ? (long_ring - short_ring) // 100000_u64 : 0_u64
+  long_ring = ring_bytes(8, 1000 + ring_messages)
+  per_pass = long_ring > short_ring ? (long_ring - short_ring) // ring_messages.to_u64 : 0_u64
   fail("ring: #{per_pass} bytes a message around a ring, where a message allocates nothing") if per_pass > 0_u64
   short_pong = ping_pong_bytes(1000)
-  long_pong = ping_pong_bytes(101000)
-  per_round = long_pong > short_pong ? (long_pong - short_pong) // 100000_u64 : 0_u64
+  long_pong = ping_pong_bytes(1000 + ring_messages)
+  per_round = long_pong > short_pong ? (long_pong - short_pong) // ring_messages.to_u64 : 0_u64
   fail("ring: #{per_round} bytes a round trip between two tasks, where a round trip allocates nothing") if per_round > 0_u64
-  puts "100000 messages around a ring and 100000 round trips allocated nothing for them"
+  puts "#{ring_messages} messages around a ring and #{ring_messages} round trips allocated nothing for them"
 {% end %}
 
 # ── 16c. A send node is handed out again only once its sender has read it ─
@@ -1344,11 +1370,52 @@ puts "a parked sender's receipt survived the next sender's park"
     grown
   end
 
-  select_grown = select_kept_bytes(400000)
-  if select_grown > 256_u64 * 1024_u64
-    fail("select: 200000 selects beside an idle channel left #{select_grown // 1024_u64} KiB more kept")
+  # Under the stress each select is made to park. The loop above parks
+  # only when its select finds no sender waiting, which the schedule
+  # decides: on one worker seed 1's priorities never left it parked, and
+  # a select whose losing receive arm stays in its queue kept nothing
+  # there in 16,000 selects, 439 KiB on seed 3 (Linux, stress 1); and its
+  # 32,000 selects took 117-167 s of a one-worker run. Here a select waits
+  # on an idle channel and `timeout(1)`, neither of which can answer at
+  # once, so every one parks and the timeout wins: that copy leaves its
+  # node in the idle channel's queue each time, which the next park cannot
+  # take again, 55-56 bytes a select on one worker and four, at stress 1
+  # and 64 (652-656 KiB in 12,000, Linux), where the sound loop kept 0.
+  # About 1.1 ms a select; 16,000 against the same 256 KiB.
+  def parked_select_kept_bytes(rounds : Int32) : UInt64
+    idle = Channel(Int32).new
+    grown = 0_u64
+    GC.collect
+    before = GC.stats.bytes_kept_by_last_sweep
+    group do |g|
+      g.spawn do
+        rounds.times do
+          select
+          when v = idle.receive
+            fail("select: a channel nobody sends to answered a select")
+          when timeout(1)
+            nil
+          end
+        end
+        GC.collect
+        after = GC.stats.bytes_kept_by_last_sweep
+        grown = after > before ? after - before : 0_u64
+        0
+      end
+    end
+    grown
   end
-  puts "200000 selects beside an idle channel kept under 256 KiB more"
+
+  if heap_stress == 0_u64
+    select_grown = select_kept_bytes(400000)
+    fail("select: 200000 selects beside an idle channel left #{select_grown // 1024_u64} KiB more kept") if select_grown > 256_u64 * 1024_u64
+    puts "200000 selects beside an idle channel kept under 256 KiB more"
+  else
+    parked_selects = 16000
+    parked_grown = parked_select_kept_bytes(parked_selects)
+    fail("select: #{parked_selects} selects parked beside an idle channel left #{parked_grown // 1024_u64} KiB more kept") if parked_grown > 256_u64 * 1024_u64
+    puts "#{parked_selects} selects parked beside an idle channel kept under 256 KiB more"
+  end
 {% end %}
 
 # ── 16e. A channel keeps no value it has handed out ─────────────────────
@@ -1383,6 +1450,21 @@ puts "a parked sender's receipt survived the next sender's park"
     GC.stats.bytes_kept_by_last_sweep
   end
 
+  # A task's 64 MB value, copied 64 KB at a time. `"r" * 64000000` is a
+  # loop of 64 million back-edges, and on the simulated schedule (one
+  # worker) a back-edge may preempt the task even with nothing else to
+  # run: a park, at which `IYI_HEAP_STRESS=1` collects its partition.
+  # Seed 3's random strategy did so 485,000 times per value, 84 s each in
+  # this program (Linux), and 16e took 161 s of the 285 s a run took,
+  # against bench/heap_verify_matrix.sh's 240. In a program of its own
+  # the value took 7 s (4 MB 0.4 s, 16 MB 1.8 s), the same preemptions
+  # 0.6 s at stress 0, and seed 1's priorities preempt a task running
+  # alone not at all. As 1,000 copies of 64 KB the value is 65,000
+  # back-edges and 480 collections, and 16e takes 1.3 s.
+  def big_value(letter : String) : String
+    (letter * 64000) * 1000
+  end
+
   def through_buffered(ch : Channel(String)) : Nil
     16.times do |i|
       ch.send("#{i}" + ("v" * 4000000))
@@ -1393,7 +1475,7 @@ puts "a parked sender's receipt survived the next sender's park"
   def through_rendezvous(ch : Channel(String)) : Nil
     group do |g|
       g.spawn do
-        ch.send("r" * 64000000)
+        ch.send(big_value("r"))
         0
       end
       g.spawn do
@@ -1410,7 +1492,7 @@ puts "a parked sender's receipt survived the next sender's park"
     group do |g|
       g.spawn do
         select
-        when ch.send("t" * 64000000)
+        when ch.send(big_value("t"))
           fail("channel: a send nobody received was delivered")
         when timeout(5)
           nil
@@ -1423,7 +1505,7 @@ puts "a parked sender's receipt survived the next sender's park"
   def offer_cancelled(ch : Channel(String)) : Nil
     group do |g|
       g.spawn do
-        ch.send("c" * 64000000)
+        ch.send(big_value("c"))
         0
       end
       g.spawn do
@@ -1436,7 +1518,7 @@ puts "a parked sender's receipt survived the next sender's park"
   def offer_refused(ch : Channel(String)) : Nil
     group do |g|
       g.spawn do
-        ch.send("x" * 64000000)
+        ch.send(big_value("x"))
         0
       end
       g.spawn do
@@ -1458,6 +1540,213 @@ puts "a parked sender's receipt survived the next sender's park"
     depth > 0 ? scrub_stack(depth - 1) + (a + b).to_i32 : 0
   end
 
+  mib = 1048576_u64
+
+  # ── 16f. A thread stopped in a system call keeps nothing through its
+  # volatile registers (Windows) ──
+  # A stop reads a suspended thread's registers with GetThreadContext, and
+  # for a thread inside a system call rax, rcx, rdx and r8-r11 are not the
+  # thread's: the context hands back its trap frame's slots, which the
+  # kernel's way in either leaves as the last trap wrote them or fills
+  # with what the registers held at the call. `capture_thread_registers`
+  # (prelude.iyi) drops them for a thread in a system service;
+  # bench/concurrency_exercise.sh's 5b keeps them, and this must then
+  # fail. 16e's rendezvous showed it first, by chance (an idle worker's
+  # stale r8, 5 runs of 5 at af4b87c91), and no longer does on the
+  # partitioned heap's v2 (0 of 19), so the wait is set up here on purpose.
+  #
+  # A thread takes a page fault with all seven naming a 64 MB string, and
+  # then calls NtWaitForSingleObject itself with r9 and r11 still naming
+  # it: the `syscall` way in leaves r8-r11 as the fault wrote them, and a
+  # way in that saves them saves r9's and r11's. The first setup cleared
+  # all seven after the fault and waited through WaitForSingleObject, so
+  # only slots the fault had written could name the string. tssh, whose
+  # system calls go by `syscall` and whose context left r8-r11 naming it,
+  # caught 5b's copy in 60 runs of 60; GitHub's Windows Server 2025
+  # runners passed it in 2 of 2 (jobs 133886256663 and 133974766903).
+  # The main thread holds the string until the thread is inside the
+  # wait, so no collection before then frees it, and reads the waiting
+  # thread's context itself before it collects: with the string in none
+  # of its volatile registers this step would check nothing, and fails
+  # instead. It runs ahead of 16e's checks, whose 64 MB values the copy
+  # can keep by chance through an idle worker's stale register first: "a
+  # cancelled 64 MB send left 61 MiB kept" in 1 of 19 runs on tssh, which
+  # 5b does not count as caught.
+  {% if flag?(:win32) && flag?(:x86_64) %}
+    lib LibC
+      fun GetProcAddress(module : Void*, name : UInt8*) : Void*
+      fun GetCurrentThreadId : Int32
+      fun OpenThread(access : Int32, inherit : Int32, thread_id : Int32) : Void*
+    end
+
+    IN_CALL_MASK = 0x5a5a5a5a5a5a5a5a_u64
+
+    class InCall
+      @@phase = Atomic(UInt64).new(0_u64)
+      @@thread_id = Atomic(UInt64).new(0_u64)
+      @@masked = Atomic(UInt64).new(0_u64)
+      @@event = Atomic(UInt64).new(0_u64)
+      # The string, from its making until the thread is inside the wait;
+      # the main thread's alone.
+      @@held : String? = nil
+
+      def self.phase : UInt64
+        @@phase.get
+      end
+
+      def self.thread_id : UInt64
+        @@thread_id.get
+      end
+
+      # The thread's id, then the phase that says it is on its way in.
+      def self.enter(thread_id : UInt64) : Nil
+        @@thread_id.set(thread_id)
+        @@phase.set(1_u64)
+      end
+
+      # The string's address, masked, so no frame names it.
+      def self.masked : UInt64
+        @@masked.get
+      end
+
+      def self.event : UInt64
+        @@event.get
+      end
+
+      def self.hold(value : String, event : UInt64) : Nil
+        @@held = value
+        @@masked.set(value.to_unsafe.address ^ IN_CALL_MASK)
+        @@event.set(event)
+      end
+
+      def self.drop : Nil
+        @@held = nil
+      end
+    end
+
+    # Out of line, so no frame of the main thread names the string after.
+    @[NoInline]
+    def in_call_hold(event : UInt64) : Nil
+      InCall.hold(big_value("w"), event)
+    end
+
+    def stopped_in_call : Nil
+      masked = InCall.masked
+      event = InCall.event
+      wait = LibC.GetProcAddress(LibC.GetModuleHandleA("ntdll.dll".to_unsafe), "NtWaitForSingleObject".to_unsafe).address
+      fail("ntdll answered no NtWaitForSingleObject") if wait == 0_u64
+      # A fresh committed page: the first write to it is a demand-zero
+      # fault, whose trap frame saves the volatile registers.
+      fresh = LibC.VirtualAlloc(Pointer(Void).new(0_u64), 4096_u64, 0x3000_i32, 4_i32).address
+      InCall.enter(LibC.GetCurrentThreadId.to_u64)
+      # The wait is on the main thread's event, with no timeout
+      # (rcx, rdx 0, r8 0); rsp aligned to 16 below its 32 bytes of shadow
+      # space for the call, and rbp, which the call keeps, put back after.
+      asm("movq $0, %rax
+           xorq $1, %rax
+           movq %rax, %rcx
+           movq %rax, %rdx
+           movq %rax, %r8
+           movq %rax, %r9
+           movq %rax, %r10
+           movq %rax, %r11
+           movb $$1, ($2)
+           movq $3, %rcx
+           movq $4, %rax
+           xorl %edx, %edx
+           xorl %r8d, %r8d
+           xorl %r10d, %r10d
+           pushq %rbp
+           movq %rsp, %rbp
+           andq $$-16, %rsp
+           subq $$32, %rsp
+           callq *%rax
+           movq %rbp, %rsp
+           popq %rbp
+           xorl %eax, %eax
+           xorl %ecx, %ecx
+           xorl %edx, %edx
+           xorl %r8d, %r8d
+           xorl %r9d, %r9d
+           xorl %r10d, %r10d
+           xorl %r11d, %r11d" :: "r"(masked), "r"(IN_CALL_MASK), "r"(fresh), "r"(event), "r"(wait)
+                             : "rax", "rcx", "rdx", "r8", "r9", "r10", "r11",
+                               "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory", "cc"
+                             : "volatile")
+    end
+
+    # Which of the waiting thread's volatile registers its context names
+    # the string in, a bit each in rax, rcx, rdx, r8-r11's order, with 128
+    # once the context says the thread is inside a system service: read
+    # every 10 ms until it does, for up to 5 s. The context goes to a page
+    # of its own, which no collection scans and which is gone before one:
+    # on a stack or in the heap its copy of the address keeps the string.
+    @[NoInline]
+    def in_call_seen : UInt64
+      # THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT
+      thread = LibC.OpenThread(0x000A_i32, 0_i32, InCall.thread_id.to_i32)
+      fail("the thread meant to wait in a system call could not be opened") if thread.address == 0_u64
+      page = LibC.VirtualAlloc(Pointer(Void).new(0_u64), 4096_u64, 0x3000_i32, 4_i32).address
+      seen = 0_u64
+      tries = 0
+      while seen == 0_u64 && tries < 500
+        sleep(10) if tries > 0
+        tries = tries + 1
+        # CONTEXT_AMD64 | CONTROL | INTEGER, and CONTEXT_EXCEPTION_REQUEST.
+        Pointer(UInt32).new(page + 48_u64).value = 0x40100003_u32
+        LibC.SuspendThread(thread)
+        read = LibC.GetThreadContext(thread, Pointer(Void).new(page))
+        LibC.ResumeThread(thread)
+        flags = Pointer(UInt64).new(page + 48_u64).value & 0xFFFFFFFF_u64
+        # CONTEXT_EXCEPTION_REPORTING and CONTEXT_SERVICE_ACTIVE.
+        if read != 0 && flags & 0x80000000_u64 != 0_u64 && flags & 0x10000000_u64 != 0_u64
+          seen = 128_u64
+          7.times do |i|
+            # Rax, Rcx, Rdx at 120-136, R8-R11 at 184-208.
+            at = i < 3 ? 120_u64 + 8_u64 * i.to_u64 : 160_u64 + 8_u64 * i.to_u64
+            seen = seen | 1_u64.unsafe_shl(i.to_u64) if Pointer(UInt64).new(page + at).value ^ IN_CALL_MASK == InCall.masked
+          end
+        end
+      end
+      LibC.VirtualFree(Pointer(Void).new(page), 0_u64, 0x8000_i32)
+      LibC.CloseHandle(thread)
+      seen
+    end
+
+    def in_call_names(seen : UInt64) : String
+      names = [] of String
+      ["rax", "rcx", "rdx", "r8", "r9", "r10", "r11"].each_with_index do |name, i|
+        names << name if seen & 1_u64.unsafe_shl(i.to_u64) != 0_u64
+      end
+      names.join(", ")
+    end
+
+    kept_before_call = kept_now
+    in_call_event = LibC.CreateEventW(Pointer(Void).new(0_u64), 1_i32, 0_i32, Pointer(UInt16).new(0_u64))
+    fail("the event the thread meant to wait in a system call waits on was not made") if in_call_event.address == 0_u64
+    in_call_hold(in_call_event.address)
+    in_call = IyiThread.start { stopped_in_call }
+    waited = 0
+    while InCall.phase != 1_u64 && waited < 500
+      sleep(10)
+      waited = waited + 1
+    end
+    fail("the thread meant to wait in a system call never set out for it") unless InCall.phase == 1_u64
+    in_call_bits = in_call_seen
+    fail("the thread meant to wait in a system call was not in one 5 s after it set out") if in_call_bits == 0_u64
+    in_call_named = in_call_names(in_call_bits)
+    fail("the thread waiting in a system call named the string in no volatile register of its context, so this step checks nothing") if in_call_named.empty?
+    InCall.drop
+    scrub_stack(50)
+    kept_in_call = kept_now
+    LibC.SetEvent(in_call_event)
+    in_call.join
+    LibC.CloseHandle(in_call_event)
+    grew = kept_in_call > kept_before_call ? kept_in_call - kept_before_call : 0_u64
+    fail("a thread stopped in a system call kept #{grew // mib} MiB through its volatile registers, of which #{in_call_named} named it") if grew > 16_u64 * mib
+    puts "a thread stopped in a system call kept nothing through its volatile registers, of which #{in_call_named} named 64 MB"
+  {% end %}
+
   holding = KeptChannels.new
   kept_before = kept_now
   through_buffered(holding.buffered)
@@ -1466,7 +1755,6 @@ puts "a parked sender's receipt survived the next sender's park"
   through_rendezvous(holding.rendezvous)
   scrub_stack(50)
   kept_rendezvous = kept_now
-  mib = 1048576_u64
   grew = kept_buffered > kept_before ? kept_buffered - kept_before : 0_u64
   fail("channel: 64 MB received through a buffered channel left #{grew // mib} MiB kept") if grew > 16_u64 * mib
   grew = kept_rendezvous > kept_before ? kept_rendezvous - kept_before : 0_u64

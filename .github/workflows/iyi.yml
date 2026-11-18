@@ -1770,7 +1770,7 @@ jobs:
       - name: Package macro path boundaries (macOS)
         run: |
           set -o pipefail
-          LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config" ./bin/crystal spec spec/compiler/macro/iyi_package_security_spec.cr spec/compiler/macro/iyi_macro_provenance_spec.cr | tee macro-boundaries.txt
+          LLVM_CONFIG="$LLVM_STATIC/bin/llvm-config" ./bin/crystal spec spec/compiler/macro/iyi_package_security_spec.cr spec/compiler/macro/iyi_macro_provenance_spec.cr | tee macro-boundaries.txt
           grep -F "0 failures, 0 errors, 0 pending" macro-boundaries.txt
 
       - name: Samples
@@ -3424,6 +3424,12 @@ jobs:
         run: |
           make -f Makefile.win crystal || exit /b 1
           make -f Makefile.win iyi
+
+      - name: Package macro path boundaries (Windows)
+        shell: cmd
+        env:
+          CRYSTAL_SPEC_COMPILER_BIN: ${{ github.workspace }}\.build\crystal.exe
+        run: .\bin\crystal.bat spec spec\compiler\macro\iyi_package_security_spec.cr spec\compiler\macro\iyi_macro_provenance_spec.cr
 
       # The command surface, which the Linux job's `cli_spec` holds and no
       # Windows job ran. The daemon's examples are pending here (its server

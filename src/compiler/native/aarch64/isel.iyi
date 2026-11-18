@@ -105,6 +105,7 @@ class Isel
     @mf = MFunction.new(@fn.name)
     @values = [] of Value
     @leaves = [] of Array(Int32)
+    @index = Hash(Value, Int32).new
     @block_index = Hash(String, Int32).new
     @edge_count = 0
     @failure = nil
@@ -144,17 +145,14 @@ class Isel
   end
 
   def bind(value : Value, regs : Array(Int32)) : Nil
+    @index[value] = @values.size unless @index.has_key?(value)
     @values << value
     @leaves << regs
   end
 
   def lookup(value : Value) : Array(Int32)?
-    i = 0
-    while i < @values.size
-      if @values[i] == value
-        return @leaves[i]
-      end
-      i = i + 1
+    if k = @index[value]?
+      return @leaves[k]
     end
     nil
   end

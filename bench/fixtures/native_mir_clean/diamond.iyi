@@ -1,0 +1,12 @@
+module diamond
+
+def choose(x : Int64) : Int64
+  if x > 0_i64
+    x * 3_i64 + 5_i64
+  else
+    (7_i64 - x) * 2_i64
+  end
+end
+
+puts "#{choose(4_i64)}"
+puts "#{choose(-3_i64)}"

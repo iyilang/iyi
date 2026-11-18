@@ -63,7 +63,7 @@ end
 # and the def's free variables. A site at the top level or in a type body has none.
 # `flag?` reads normalizer.macro_flags, or the host's flags when none were supplied.
 pub def expand_inline_macro(site : ASTNode, scope_name : String, filename : String, in_lib : Bool, normalizer : NormalizerProgram, locals : Array(String) = [] of String, bindings : Array(MacroFreeBinding)? = nil, facts : MacroTypeFacts? = nil) : ASTNode?
-  report = MacroEngine.new(normalizer.macro_flags).site_report(site, scope_name, bindings, facts)
+  report = MacroEngine.new(normalizer.macro_flags, normalizer.host_flags).site_report(site, scope_name, bindings, facts)
   first = report.sites.first
   kind = first.kind
   line = first.line

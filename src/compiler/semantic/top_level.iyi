@@ -2686,7 +2686,14 @@ pub class SemanticProgram < NonGenericModuleType
   # are recorded untyped with the reason and the pass goes on.
   def refuse_constant(path : Path) : Type
     message = "undefined constant #{path.to_s}"
-    refuse_port(message) unless @total_mode
+    unless @total_mode
+      if loc = path.location
+        unless loc.filename.empty? || loc.line_number <= 0
+          message = "#{message}\n  source: #{loc.filename}:#{loc.line_number}:#{loc.column_number}"
+        end
+      end
+      refuse_port(message)
+    end
     UnresolvedType.new(self, path.to_s)
   end
 end

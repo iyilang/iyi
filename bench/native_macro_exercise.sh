@@ -36,10 +36,17 @@ build_port() {
   "$IYI" build -o "$(native_path "$1")" "$REPO_NATIVE/src/compiler/tools/compile.iyi" >"$1.build.log" 2>&1
 }
 
-# site_exit EXE: runs a program and prints its exit status.
+# site_exit EXE: retain normal exits 0..255 and distinguish signals and timeouts.
 site_exit() {
-  "$1" >/dev/null 2>&1 </dev/null
-  echo $?
+  python3 - "$1" <<'PY'
+import subprocess, sys
+try:
+    result = subprocess.run([sys.argv[1]], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL, timeout=30)
+    print(result.returncode if result.returncode >= 0 else "signal:" + str(-result.returncode))
+except (OSError, subprocess.TimeoutExpired) as error:
+    print("invalid:" + str(error))
+PY
 }
 
 echo "== 1. build the port with LLVM (tools/compile.iyi) and the native tool (compile_native.iyi), with ./bin/iyi"
@@ -65,6 +72,13 @@ else
   echo "FAIL: the hosted compiler could not build the fixture: $(awk '/^Error/ { print; exit }' "$WORK/site_hosted.log")"
   status=1
 fi
+case "$hosted_rc" in
+  ""|*[!0-9]*)
+    echo "FAIL: hosted macro-site fixture did not exit normally: $hosted_rc"
+    hosted_rc="missing"
+    status=1
+    ;;
+esac
 port_rc="missing"
 if "$WORK/bin/port$EXE" "$REPO_NATIVE/bench/fixtures/cg_macro_site.iyi" -o "$WORK_NATIVE/site_port$EXE" >"$WORK/site_port.log" 2>&1; then
   port_rc=$(site_exit "$WORK/site_port$EXE")
@@ -172,14 +186,25 @@ mut_caught=0
 mut_limited=0
 
 check_typed_macro_fixture() {
-  local name="$1"
+  local name="$1" rc=0
   if ! "$IYI" build -o "$WORK_NATIVE/bin/native_mut$EXE" "$REPO_NATIVE/src/compiler/tools/compile_native.iyi" >"$WORK/native_mut.build" 2>&1; then
     cat "$WORK/native_mut.build"
     return 2
   fi
   native_signature_ok "$WORK/bin/native_mut$EXE" || return 2
-  if ! "$WORK/bin/native_mut$EXE" "$REPO_NATIVE/bench/fixtures/$name.iyi" -o "$WORK_NATIVE/native_mut_result" --pipeline typed --prelude --probe-phase >"$WORK/native_mut_result.build" 2>&1; then
-    cat "$WORK/native_mut_result.build"
+  "$WORK/bin/native_mut$EXE" "$REPO_NATIVE/bench/fixtures/$name.iyi" -o "$WORK_NATIVE/native_mut_result" \
+    --pipeline typed --prelude --probe-phase >"$WORK/native_mut_result.out" 2>"$WORK/native_mut_result.err" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    if [ "$name" = macro_typeof_prelude ] &&
+       expected_refusal "$rc" "$WORK/native_mut_result.err" src/compiler/semantic/main_visitor.iyi \
+         "^undefined local variable or method 'items' for top-level$" &&
+       grep -Eq '^bodies: refused at .*/macro_typeof_prelude\.iyi:8:6$' "$WORK/native_mut_result.out" &&
+       grep -Fxq "bodies: fail: undefined local variable or method 'items' for top-level" "$WORK/native_mut_result.out" &&
+       grep -Fxq 'reached: declarations' "$WORK/native_mut_result.out"; then
+      echo "decisive: $name refused the fixture's local after the baseline passed"
+      return 1
+    fi
+    cat "$WORK/native_mut_result.out" "$WORK/native_mut_result.err"
     return 2
   fi
   native_signature_ok "$WORK/native_mut_result" || return 2
@@ -244,13 +269,22 @@ fi
 # The check fails (is caught) when the mutated port's run differs from the hosted build.
 check_site_scope() {
   if ! build_port "$WORK/bin/port_mut_site$EXE"; then cat "$WORK/bin/port_mut_site$EXE.build.log"; return 2; fi
-  if ! "$WORK/bin/port_mut_site$EXE" "$REPO_NATIVE/bench/fixtures/cg_macro_site.iyi" -o "$WORK_NATIVE/site_mut$EXE" >"$WORK/site_mut.build" 2>&1; then
-    cat "$WORK/site_mut.build"
+  local build_rc=0
+  "$WORK/bin/port_mut_site$EXE" "$REPO_NATIVE/bench/fixtures/cg_macro_site.iyi" \
+    -o "$WORK_NATIVE/site_mut$EXE" >"$WORK/site_mut.out" 2>"$WORK/site_mut.err" || build_rc=$?
+  if [ "$build_rc" -ne 0 ]; then
+    if [ "$hosted_rc" != "missing" ] && [ "$port_rc" = "$hosted_rc" ] &&
+       expected_refusal "$build_rc" "$WORK/site_mut.err" refuse_port \
+         "^port limitation: the macro site in 'Gadget#label' fails to expand: undefined macro method 'MacroId#name' \\(no IR is written\\)$"; then
+      echo "decisive: cg_macro_site refused Gadget#label after its baseline passed"
+      return 1
+    fi
+    cat "$WORK/site_mut.out" "$WORK/site_mut.err"
     return 2
   fi
   local rc
   rc=$(site_exit "$WORK/site_mut$EXE")
-  [ "$rc" -lt 128 ] || return 2
+  case "$rc" in ""|*[!0-9]*) echo "INVALID: macro-site fixture did not exit normally: $rc"; return 2 ;; esac
   if [ "$rc" = "$hosted_rc" ]; then return 0; fi
   echo "decisive: macro-site exit $rc differs from hosted exit $hosted_rc"
   return 1

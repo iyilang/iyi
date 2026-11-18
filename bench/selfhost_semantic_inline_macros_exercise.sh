@@ -51,6 +51,10 @@ CRYSTAL="${CRYSTAL:-$REPO/bin/crystal}"
 FLOOR_FILE="${SEMINL_FLOOR:-$REPO/bench/selfhost_semantic_inline_macros.floor}"
 RAISE="${SEMINL_RAISE:-0}"
 FILES_LIST="${SEMINL_FILES:-}"
+ARTIFACT_DIR="${SEMINL_ARTIFACT_DIR:-}"
+if [ -n "$ARTIFACT_DIR" ]; then
+  mkdir -p "$ARTIFACT_DIR" || exit 1
+fi
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT INT TERM
 WORK_NATIVE="$(native_path "$WORK")" || exit 1
@@ -144,6 +148,10 @@ measure() {
   corpus="$1"
   rel="$2"
   abs="$REPO_NATIVE/$2"
+  local artifact=""
+  if [ -n "$ARTIFACT_DIR" ]; then
+    artifact="$ARTIFACT_DIR/$(printf '%s' "$rel" | tr '/\\' '__')"
+  fi
   sites=0; expanded=0; refused=0; not_reached=0
   if "$PORT" --sites "$abs" > "$WORK/s.txt" 2> "$WORK/s.err"; then
     sites=$(awk '$1 == "site" && ($2 == "top" || $2 == "class") { n++ } END { print n + 0 }' "$WORK/s.txt")
@@ -157,16 +165,28 @@ measure() {
   [ "$not_reached" -lt 0 ] && not_reached=0
   if "$ORACLE" "$abs" > "$WORK/o.txt" 2> "$WORK/o.err"; then
     nodes=$(records "$WORK/o.txt" | wc -l | tr -d ' ')
+    if [ -n "$artifact" ]; then
+      cp "$WORK/o.txt" "$artifact.oracle"
+      records "$WORK/o.txt" | sort > "$artifact.oracle.records"
+    fi
     if "$PORT" "$abs" > "$WORK/p.txt" 2> "$WORK/p.err"; then
       matched=$(agreeing "$WORK/o.txt" "$WORK/p.txt")
+      if [ -n "$artifact" ]; then
+        cp "$WORK/p.txt" "$artifact.port"
+        records "$WORK/p.txt" | sort > "$artifact.port.records"
+        comm -23 "$artifact.oracle.records" "$artifact.port.records" > "$artifact.oracle-only.records"
+        comm -13 "$artifact.oracle.records" "$artifact.port.records" > "$artifact.port-only.records"
+      fi
       note="-"
     else
       matched=0
+      [ -z "$artifact" ] || cp "$WORK/p.err" "$artifact.port.err"
       note="PORT: $(head -n 1 "$WORK/p.err" | tr '\t' ' ')"
     fi
   else
     nodes=0
     matched=0
+    [ -z "$artifact" ] || cp "$WORK/o.err" "$artifact.oracle.err"
     note="ORACLE: $(head -n 1 "$WORK/o.err" | tr '\t' ' ')"
   fi
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$corpus" "$rel" "$nodes" "$matched" \
@@ -359,6 +379,82 @@ check_inline_fixtures_diverge() {
   return 0
 }
 
+# A bare two-file program keeps the required-file proof independent of prelude
+# ivars. The later type has a unique name, so its refusal identifies this fixture.
+mkdir -p "$WORK/pending_ivar"
+cat > "$WORK/pending_ivar/required.iyi" <<'IYI'
+class S3PendingOwner
+  @value : S3PendingFuture
+end
+class S3PendingExtra
+end
+IYI
+cat > "$WORK/pending_ivar/root.iyi" <<'IYI'
+require "./required"
+class S3PendingFuture
+end
+IYI
+check_pending_ivar() {
+  local probe="$WORK/mut_pending$EXE" rc=0
+  if ! "$PORT" --pending-ivar "$WORK_NATIVE/pending_ivar/root.iyi" > "$WORK/pending_base.out" 2>"$WORK/pending_base.err" ||
+     ! grep -Fxq 'S3PendingFuture' "$WORK/pending_base.out"; then
+    echo "INVALID: pending-ivar baseline did not resolve the later type"
+    cat "$WORK/pending_base.out" "$WORK/pending_base.err"
+    return 2
+  fi
+  if ! "$IYI" build -o "$WORK_NATIVE/mut_pending$EXE" "$REPO_NATIVE/bench/selfhost_semantic_inline_macros_exercise.iyi" > "$WORK/mut_pending.build" 2>&1; then
+    echo "INVALID: pending-ivar mutant driver failed to build"
+    cat "$WORK/mut_pending.build"
+    return 2
+  fi
+  "$probe" --pending-ivar "$WORK_NATIVE/pending_ivar/root.iyi" > "$WORK/pending_mut.out" 2>"$WORK/pending_mut.err" || rc=$?
+  if expected_refusal "$rc" "$WORK/pending_mut.err" refuse_port '^undefined constant S3PendingFuture$'; then
+    echo "decisive: the required file resolved S3PendingFuture before the root declared it"
+    return 1
+  fi
+  echo "INVALID: pending-ivar mutant did not produce its named refusal (status $rc)"
+  cat "$WORK/pending_mut.out" "$WORK/pending_mut.err"
+  return 2
+}
+
+# A C struct is valid in both parser modes but yields different AST nodes. This
+# catches the parser-mode mutation without relying on a syntax-error panic.
+cat > "$WORK/lib_parser_mode.iyi" <<'IYI'
+lib S3LibParser
+  {% if true %}
+    struct S3Fields
+      value : Int32
+    end
+  {% end %}
+end
+IYI
+check_lib_parser_mode() {
+  local probe="$WORK/mut_lib_parser$EXE" fixture="$WORK_NATIVE/lib_parser_mode.iyi" rc=0
+  if ! "$ORACLE" "$fixture" > "$WORK/lib_base.oracle" 2>"$WORK/lib_base.oracle.err" ||
+     ! "$PORT" "$fixture" > "$WORK/lib_base.port" 2>"$WORK/lib_base.port.err" ||
+     ! cmp -s "$WORK/lib_base.oracle" "$WORK/lib_base.port"; then
+    echo "INVALID: lib parser baseline does not match the oracle"
+    cat "$WORK/lib_base.oracle.err" "$WORK/lib_base.port.err"
+    return 2
+  fi
+  if ! "$IYI" build -o "$WORK_NATIVE/mut_lib_parser$EXE" "$REPO_NATIVE/bench/selfhost_semantic_inline_macros_exercise.iyi" > "$WORK/mut_lib_parser.build" 2>&1; then
+    echo "INVALID: lib parser mutant driver failed to build"
+    cat "$WORK/mut_lib_parser.build"
+    return 2
+  fi
+  "$probe" "$fixture" > "$WORK/lib_mut.port" 2>"$WORK/lib_mut.err" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "INVALID: lib parser mutant exited $rc"
+    cat "$WORK/lib_mut.err"
+    return 2
+  fi
+  if ! cmp -s "$WORK/lib_base.oracle" "$WORK/lib_mut.port"; then
+    echo "decisive: lib struct declarations differ when parsed as an ordinary body"
+    return 1
+  fi
+  return 0
+}
+
 echo
 echo "== 7. Mutation proofs: patches to the port's inline expansion the fixtures must catch"
 MUT_INL="$REPO/src/compiler/semantic/inline_macros.iyi"
@@ -392,14 +488,13 @@ MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 prove_mutation "a required file finishes its pending ivars at once, before a later file declares them" "$MUT_SEM" \
   "inner.exp_nest = 1" \
   "inner.exp_nest = 0" \
-  -- check_inline_fixtures_diverge || status=1
+  -- check_pending_ivar || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
 prove_mutation "a site inside a lib body is parsed as an ordinary body" "$MUT_INL" \
   "parsed = in_lib ? parser.parse_lib_body : parser.parse" \
   "parsed = parser.parse" \
-  -- check_inline_fixtures_diverge src/compiler/syntax/parser.iyi \
-  "^Syntax error in .*seminl_lib\\.iyi:[0-9]+:[0-9]+: expecting keyword 'end', not 'EOF'$" || status=1
+  -- check_lib_parser_mode || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
 echo
@@ -699,19 +794,78 @@ IYI
   fi
 }
 
-# The check the single-node mutations must fail: the refusal ceilings through a pipeline tool built from the tree as it is.
-check_body_fixture() {
-  local RAISE=0 probe="$WORK/mut_body_tool$EXE"
+# The fixture's constant chooses an Int32 only in its declaration namespace.
+check_constant_scope() {
+  local probe="$WORK/mut_body_tool$EXE" fixture="$REPO_NATIVE/bench/fixtures/seminl_reach/const_lower_if.iyi" rc=0
+  rm -f "$WORK/const_scope_base.ir" "$WORK/const_scope_mut.ir"
+  if ! "$WORK/reach_tool$EXE" "$fixture" -o "$WORK_NATIVE/const_scope_base.ir" \
+       --pipeline typed --probe-phase --emit ir > "$WORK/const_scope_base.out" 2>"$WORK/const_scope_base.err" ||
+     [ ! -s "$WORK/const_scope_base.ir" ] || ! grep -Fxq '[phase] verify: pass' "$WORK/const_scope_base.out"; then
+    echo "INVALID: constant-scope baseline did not produce verified IR"
+    cat "$WORK/const_scope_base.out" "$WORK/const_scope_base.err"
+    return 2
+  fi
   if ! "$IYI" build -o "$WORK_NATIVE/mut_body_tool$EXE" "$REPO_NATIVE/src/compiler/tools/compile_native.iyi" > "$WORK/mut_body_build.log" 2>&1; then
-    local saved
-    saved=$(mktemp "${SEMINL_ARTIFACT_DIR:-$WORK}/invalid-body-build.XXXXXX") || saved=""
-    if [ -n "$saved" ]; then cp "$WORK/mut_body_build.log" "$saved"; fi
-    echo "INVALID MUTATION: body tool build failed${saved:+; compiler output: $saved}"
+    echo "INVALID: constant-scope mutant compiler failed to build"
     cat "$WORK/mut_body_build.log"
     return 2
   fi
-  check_refusals "$probe" || return $?
-  check_body_lowering "$probe"
+  "$probe" "$fixture" -o "$WORK_NATIVE/const_scope_mut.ir" \
+    --pipeline typed --probe-phase --emit ir > "$WORK/const_scope_mut.out" 2>"$WORK/const_scope_mut.err" || rc=$?
+  if expected_refusal "$rc" "$WORK/const_scope_mut.err" src/compiler/lower/pending.iyi \
+       '^lower: visit\(upcast String to Int32 \(hosted cast.cr: upcast_distinct\)\) \(hosted codegen.cr\) is not ported yet$' &&
+     grep -Fxq '  in *MacroConstant::value:Int32' "$WORK/const_scope_mut.out" &&
+     grep -Fxq 'reached: bodies' "$WORK/const_scope_mut.out"; then
+    echo "decisive: MacroConstant::value chose the wrong namespace branch"
+    return 1
+  fi
+  if [ "$rc" -eq 0 ] && cmp -s "$WORK/const_scope_base.ir" "$WORK/const_scope_mut.ir"; then return 0; fi
+  echo "INVALID: constant-scope mutant did not produce the fixture's expected refusal (status $rc)"
+  cat "$WORK/const_scope_mut.out" "$WORK/const_scope_mut.err"
+  return 2
+}
+
+# Probe the splicer without the prelude, so a mutation is observed at its own
+# site rather than at an unrelated prelude constant while lowering.
+cat > "$WORK/splice_body.iyi" <<'IYI'
+{% if true %} 42 {% else %} 17 {% end %}
+IYI
+cat > "$WORK/splice_existing_local.iyi" <<'IYI'
+s3_local = 7
+{% if true %} s3_local {% end %}
+IYI
+cat > "$WORK/splice_expanded_local.iyi" <<'IYI'
+{% if true %} s3_local = 7 {% end %}
+{% if true %} s3_local {% end %}
+IYI
+check_splice_probe() {
+  local mode="$1" fixture="$2" baseline="$3" changed="$4" probe="$WORK/mut_splice$EXE" rc=0
+  if ! "$PORT" "$mode" "$WORK_NATIVE/$fixture" > "$WORK/splice_base.out" 2>"$WORK/splice_base.err" ||
+     ! grep -Fxq "$baseline" "$WORK/splice_base.out"; then
+    echo "INVALID: splicer baseline did not produce $baseline"
+    cat "$WORK/splice_base.out" "$WORK/splice_base.err"
+    return 2
+  fi
+  if ! "$IYI" build -o "$WORK_NATIVE/mut_splice$EXE" "$REPO_NATIVE/bench/selfhost_semantic_inline_macros_exercise.iyi" > "$WORK/mut_splice.build" 2>&1; then
+    echo "INVALID: splicer mutant driver failed to build"
+    cat "$WORK/mut_splice.build"
+    return 2
+  fi
+  "$probe" "$mode" "$WORK_NATIVE/$fixture" > "$WORK/splice_mut.out" 2>"$WORK/splice_mut.err" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "INVALID: splicer mutant exited $rc"
+    cat "$WORK/splice_mut.err"
+    return 2
+  fi
+  if grep -Fxq "$changed" "$WORK/splice_mut.out" &&
+     ! grep -Fxq "$baseline" "$WORK/splice_mut.out"; then
+    echo "decisive: $fixture produced $changed instead of $baseline"
+    return 1
+  fi
+  if cmp -s "$WORK/splice_base.out" "$WORK/splice_mut.out"; then return 0; fi
+  echo "INVALID: splicer mutant produced an unexpected result"
+  cat "$WORK/splice_mut.out" "$WORK/splice_mut.err"
+  return 2
 }
 
 if [ -x "$WORK/reach_tool$EXE" ]; then
@@ -722,38 +876,35 @@ else
   status=1
 fi
 
-prove_mutation "a single macro node body is left unspliced and cannot be lowered" "$MUT_INL" \
+prove_mutation "a single macro node body is left unspliced" "$MUT_INL" \
   "return body unless body.is_a?(MacroIf) || body.is_a?(MacroFor) || body.is_a?(MacroExpression)" \
-  "return body" -- check_body_fixture || status=1
+  "return body" -- check_splice_probe --spliced-body splice_body.iyi expanded:42 node:MacroIf || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
 # Not "wrapped but not spliced": visit(Expressions) splices the wrapper again, so that mutant is equivalent.
 prove_mutation "a single macro node body loses its expansion: the wrapper is empty" "$MUT_INL" \
   "Expressions.new(splice_inline_sites([body] of ASTNode, scope_name, filename, in_lib, normalizer, locals, bindings, facts, keep_empty))" \
-  "Expressions.new([] of ASTNode)" -- check_body_fixture || status=1
+  "Expressions.new([] of ASTNode)" -- check_splice_probe --spliced-body splice_body.iyi expanded:42 empty || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
 
 # Wrapping the site in Expressions is equivalent: the def that reads the constant splices it again in the same namespace. Pass an empty scope so @type is not the declaring type.
 prove_mutation "a constant macro expands in the reader's scope instead of its declaration namespace" "$MUT_MAIN" \
   "spliced = splice_body_node(value, scope_name, file, c.namespace.is_a?(LibType), @program.normalizer)" \
-  "spliced = splice_body_node(value, \"\", file, c.namespace.is_a?(LibType), @program.normalizer)" -- check_body_fixture || status=1
+  "spliced = splice_body_node(value, \"\", file, c.namespace.is_a?(LibType), @program.normalizer)" -- check_constant_scope || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
 
 # A site's expansion is parsed knowing the names the body declared before it (inline_macros.iyi, the parser's var scope).
 prove_mutation "a site's expansion is parsed with no names declared before it, so a later local reads as a call" "$MUT_INL" \
   "parser = Parser.new(text, filename, nil, scopes)" \
-  "parser = Parser.new(text, filename)" -- check_body_fixture || status=1
+  "parser = Parser.new(text, filename)" -- check_splice_probe --spliced-local splice_existing_local.iyi var:s3_local call:s3_local || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
-# The recursive splice receives the same locals array, so a name an earlier expansion
-# declares is visible to a later site (inline_macros.iyi splice_inline_sites). A copy
-# keeps the expansion and drops that write-back, so later_block_local.iyi pointerof
-# refuses the name and root-refusals rise above 5.
-prove_mutation "a recursive splice drops names an earlier expansion declared, so a later block's pointerof refuses them" "$MUT_INL" \
+# The recursive splice must return names an expansion declared to later sites.
+prove_mutation "a recursive splice drops names an earlier expansion declared" "$MUT_INL" \
   "out.concat(splice_inline_sites(inner, scope_name, filename, in_lib, normalizer, locals, bindings, facts, keep_empty))" \
-  "out.concat(splice_inline_sites(inner, scope_name, filename, in_lib, normalizer, locals.dup, bindings, facts, keep_empty))" -- check_body_fixture || status=1
+  "out.concat(splice_inline_sites(inner, scope_name, filename, in_lib, normalizer, locals.dup, bindings, facts, keep_empty))" -- check_splice_probe --spliced-local splice_expanded_local.iyi var:s3_local call:s3_local || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
 echo "  $MUTATIONS_RUN mutation proofs run"

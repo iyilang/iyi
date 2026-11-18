@@ -531,20 +531,28 @@ pub enum TlsEarlyData
 end
 
 # What a connection is checked against and offers.
+#
+# A configuration is set in place after it is shared - std/http's
+# `HTTP.tls_config` is - so with `-Dheap_partitions` each setter of a
+# field that holds pointers publishes what it is given (heap22 row 13):
+# a published configuration then never holds a unit's own chunk. What a
+# program pushes into one of its arrays in place is the compiler's to
+# hold to H1, as any write into a published graph is.
 pub class TlsConfig
   # The roots a server's chain must reach; the system's when nil, read
   # once for the whole process and kept, since reading them is most of a
   # handshake's own cost - with the certificates the system says never to
-  # trust, at which a chain to those roots is refused (`distrusted`).
-  property roots : Array(Certificate)? = nil
+  # trust, at which a chain to those roots is refused (`distrusted`). A
+  # store that cannot be read is read again at the next handshake.
+  getter roots : Array(Certificate)? = nil
   # Protocols offered by ALPN (RFC 7301), most wanted first: `["h2",
   # "http/1.1"]`. None offered when empty.
-  property alpn : Array(String) = [] of String
+  getter alpn : Array(String) = [] of String
   # The time certificates are checked at; now when nil.
-  property now : Time? = nil
+  getter now : Time? = nil
   # The certificate and key sent to a server that asks for one (mutual
   # TLS), when the request names its scheme; none sent when nil.
-  property identity : TlsIdentity? = nil
+  getter identity : TlsIdentity? = nil
   # The oldest version spoken. TLS 1.3 by default, and then a server that
   # answers in 1.2 is refused as one that does not speak 1.3; `TLS12`
   # offers 1.2 beside it (see the module's header for what it requires).
@@ -571,7 +579,7 @@ pub class TlsConfig
   # std/hpke has, and whose public_name is a host name, is taken; one list
   # holding none is refused before anything is sent, as is TLS 1.2 beside
   # it (`min_version`). A config is one server's: none when nil.
-  property ech_configs : Array(UInt8)? = nil
+  getter ech_configs : Array(UInt8)? = nil
   # Whether a ClientHello without `ech_configs` carries a GREASE
   # encrypted_client_hello (RFC 9849 section 6.2): random bytes of an
   # encrypted one's shape, so that one that is real does not stand out.
@@ -579,6 +587,31 @@ pub class TlsConfig
   property ech_grease : Bool = true
 
   def initialize
+  end
+
+  def roots=(roots : Array(Certificate)?) : Array(Certificate)?
+    IyiCross.publish(roots)
+    @roots = roots
+  end
+
+  def alpn=(alpn : Array(String)) : Array(String)
+    IyiCross.publish(alpn)
+    @alpn = alpn
+  end
+
+  def now=(now : Time?) : Time?
+    IyiCross.publish(now)
+    @now = now
+  end
+
+  def identity=(identity : TlsIdentity?) : TlsIdentity?
+    IyiCross.publish(identity)
+    @identity = identity
+  end
+
+  def ech_configs=(ech_configs : Array(UInt8)?) : Array(UInt8)?
+    IyiCross.publish(ech_configs)
+    @ech_configs = ech_configs
   end
 
   # A new configuration holding what this one holds - the same roots and
@@ -600,31 +633,64 @@ pub class TlsConfig
     made
   end
 
-  # The system's roots and what it distrusts, kept together: a thread
-  # that sees the one sees the other.
+  # The system's roots and what it distrusts, kept together as one
+  # `SystemRoots`, so a thread that sees the one sees the other: read at
+  # the first handshake that asks, not at the program's start. An
+  # initializer runs at its module's initialisation in every program that
+  # imports std/tls, and as one it took a program importing std/http from
+  # 0.50 to 5.30 ms to print one line (median of 40, Linux). Built in the
+  # shared heap and kept once: the build that claims `SYSTEM_STATE` stores
+  # it and then marks it stored, and a reader reads the store only after
+  # it sees the mark, which the `Atomic`'s one ordering puts after the
+  # store. A handshake asking while the first build runs builds its own
+  # and keeps nothing; a load that fails keeps nothing either, so a store
+  # that could not be read (a process out of file descriptors) is read
+  # again. Every caller is answered a copy of the lists, so nothing it
+  # pushes lands in the kept ones.
+  @[UnsafeReach("built whole in the shared heap by the first handshake that reads it, stored once by the build that claims SYSTEM_STATE and read only after its mark; then only read, and answered as copies")]
   @@system : SystemRoots? = nil
+  SYSTEM_STATE = Atomic(Int32).new(0)
 
   def trusted_roots : Array(Certificate) | TlsError
     held = @roots
     return held if held
-    kept = @@system
-    return kept.certificates if kept
+    system = TlsConfig.system
+    return TlsError.new(system) if system.is_a?(String)
+    system.certificates.dup
+  end
+
+  protected def self.system : SystemRoots | String
+    if SYSTEM_STATE.get == 2
+      if kept = @@system
+        return kept
+      end
+    end
+    built = IyiCross.shared { load_system }
+    if built.is_a?(SystemRoots) && SYSTEM_STATE.compare_and_set(0, 1)[1]
+      @@system = built
+      SYSTEM_STATE.set(2)
+    end
+    built
+  end
+
+  private def self.load_system : SystemRoots | String
     store = SystemRoots.load
-    return TlsError.new(store.message) if store.is_a?(X509Error)
-    @@system = store
-    store.certificates
+    return store.message if store.is_a?(X509Error)
+    store
   end
 
   # The certificates never to be trusted wherever they stand in a chain,
   # which `X509.verify` takes beside `trusted_roots`: the platform's
   # (`SystemRoots#distrusted` - the Windows Disallowed store, darwin's
-  # denials) when the roots are the platform's, read with them, and none
-  # when `roots` is set, as a caller that names its roots names all of
+  # denials) when the roots are the platform's, read with them (the kept
+  # store, or one read now if none is kept yet: a handshake whose roots
+  # came from a store it could not keep still has its distrusted list), and
+  # none when `roots` is set, as a caller that names its roots names all of
   # its trust.
   def distrusted : Array(Array(UInt8))?
     return nil if @roots
-    kept = @@system
-    kept ? kept.distrusted : nil
+    system = TlsConfig.system
+    system.is_a?(String) ? nil : system.distrusted.dup
   end
 end
 
@@ -894,6 +960,7 @@ struct TlsSuites
   ECDHE_ECDSA_CHACHA20    = 0xCCA9
   ECDHE_RSA_CHACHA20      = 0xCCA8
   # Offered in this order.
+  @[SafeReach("set before the first parallel task starts, then only read")]
   TLS12 = [ECDHE_ECDSA_AES_128_GCM, ECDHE_RSA_AES_128_GCM, ECDHE_ECDSA_AES_256_GCM, ECDHE_RSA_AES_256_GCM,
            ECDHE_ECDSA_CHACHA20, ECDHE_RSA_CHACHA20]
 
@@ -1066,8 +1133,10 @@ pub abstract class TlsConnection
   # first: TLS 1.2's groups, and TLS 1.3's after X25519MLKEM768, which a
   # TLS 1.3 server takes whenever it is listed. The draft defines no
   # ServerKeyExchange for the hybrid, so TLS 1.2 has the curves alone.
+  @[SafeReach("set before the first parallel task starts, then only read")]
   GROUPS12 = [GROUP_X25519, GROUP_SECP256R1, GROUP_SECP384R1]
-  GROUPS   = [GROUP_X25519MLKEM768] + GROUPS12
+  @[SafeReach("set before the first parallel task starts, then only read")]
+  GROUPS = [GROUP_X25519MLKEM768] + GROUPS12
   # X25519MLKEM768's shares (the draft's section 4): the client's is its
   # ML-KEM-768 encapsulation key, then its X25519 key; the server's is the
   # ML-KEM ciphertext, then its X25519 key.
@@ -1992,6 +2061,7 @@ pub class TlsClient < TlsConnection
   # What became of the early data given to `connect` or `over`.
   getter early_data : TlsEarlyData = TlsEarlyData::Unused
 
+  @[SafeReach("set before the first parallel task starts, then only read")]
   SIGNATURE_SCHEMES = [0x0403, 0x0503, 0x0603, 0x0807, 0x0804, 0x0805, 0x0806, 0x0401, 0x0501, 0x0601]
 
   def initialize(socket : IyiSocket, @host : String, @config : TlsConfig, @session : TlsSession? = nil)
@@ -3416,21 +3486,23 @@ end
 # constructor copies the arrays it is given, so a caller that keeps them
 # writes its own. The one part that changes while a server runs, the OCSP
 # response it staples, is behind a `Mutex` (`staple`), which every
-# worker reads through. The edge is the one `List` closes by never
-# lending its array and this cannot: `chain`, `schemes` and the leaf's
-# fields are lent as arrays, read by every method of std, and a program
-# that writes into one writes what other threads read.
+# worker reads through. `chain` and `schemes` answer copies, as `List`
+# never lends its array: an identity is read by every worker's unit at
+# once, and an array lent from it was one a program could write into -
+# a write every other thread read, and, under `-Dheap_partitions`, a
+# grown buffer in one unit's heap that the others then held (heap22 row
+# 16). The leaf's fields are std/x509's, and are lent as arrays still.
 @[Share]
 pub class TlsIdentity
   # The chain as sent, leaf first, each certificate's DER.
-  getter chain : Array(Array(UInt8))
+  @chain : Array(Array(UInt8))
   getter leaf : Certificate
   # The schemes CertificateVerify can be signed under, by the key's kind:
   # ed25519 (0x0807), ecdsa_secp256r1_sha256 (0x0403),
   # ecdsa_secp384r1_sha384 (0x0503), or for an RSA key rsa_pss_rsae_sha256,
   # -384 and -512 (0x0804 to 0x0806). PKCS #1 v1.5 is never one: RFC 8446
   # section 4.2.3 keeps it out of CertificateVerify.
-  getter schemes : Array(Int32)
+  @schemes : Array(Int32)
   @seed : Array(UInt8)?
   @p256 : P256PrivateKey?
   @p384 : P384PrivateKey?
@@ -3451,6 +3523,7 @@ pub class TlsIdentity
   # rsa_pkcs1_sha256, -384 and -512: never in `schemes`, and signed only in
   # a TLS 1.2 ServerKeyExchange, which RFC 5246 section 7.4.1.4.1 lets them
   # sign, for a client that takes no RSA-PSS (`scheme12_for`).
+  @[SafeReach("set before the first parallel task starts, then only read")]
   RSA_PKCS1 = [0x0401, 0x0501, 0x0601]
 
   def initialize(chain : Array(Array(UInt8)), @leaf : Certificate, schemes : Array(Int32), seed : Array(UInt8)?, @p256 : P256PrivateKey?, @p384 : P384PrivateKey?, @rsa : RsaPrivateKey?)
@@ -3458,6 +3531,16 @@ pub class TlsIdentity
     @schemes = schemes.dup
     @seed = seed ? seed.dup : nil
     @ocsp = Mutex.new { TlsStapleCell.new }
+  end
+
+  # The chain as sent, leaf first, each certificate's DER: a copy.
+  def chain : Array(Array(UInt8))
+    @chain.map(&.dup)
+  end
+
+  # The schemes CertificateVerify can be signed under: a copy.
+  def schemes : Array(Int32)
+    @schemes.dup
   end
 
   # *der* kept as this chain's OCSP response, to be stapled for a client
@@ -4025,7 +4108,10 @@ pub class TlsFrozenServerConfig
   end
 
   # The server's half of a connection on *socket* under this config, for
-  # `TlsServer.over` to run the handshake of.
+  # `TlsServer.over` to run the handshake of. The copy is handed over, not
+  # duplicated per connection: `TlsServer` only reads it and has no
+  # getter for it, so under `-Dheap_partitions` it stays the published
+  # graph every connection's unit reads, written by none (heap22 row 16).
   def server(socket : IyiSocket) : TlsServer
     TlsServer.new(socket, @settings, @source)
   end
@@ -4575,6 +4661,7 @@ pub class TlsServer < TlsConnection
   # the client's signature_algorithms the identity's key makes.
   @scheme : Int32 = 0
 
+  @[SafeReach("set before the first parallel task starts, then only read")]
   SUITES = [TlsSuites::AES_128_GCM, TlsSuites::AES_256_GCM, TlsSuites::CHACHA20_POLY1305]
   # The early data passed over when a client sends it unasked for: the
   # most a server that takes none need allow (section 4.2.10).
@@ -6139,6 +6226,7 @@ struct TlsEch
   EXTENSION        = 0xfe0d
   OUTER_EXTENSIONS = 0xfd00
   # The inner encrypted_client_hello: type inner, and nothing after it.
+  @[SafeReach("set before the first parallel task starts, then only read")]
   INNER = [1_u8]
   # What a ClientHelloInner leaves to its ClientHelloOuter (section 5.1):
   # supported_groups, signature_algorithms, status_request,
@@ -6146,6 +6234,7 @@ struct TlsEch
   # client's ClientHello; key_share's data is 1,258 bytes with
   # X25519MLKEM768's share in it (1,220 for that entry, 36 for X25519's,
   # 2 for the list's length), which the inner would otherwise carry again.
+  @[SafeReach("set before the first parallel task starts, then only read")]
   COMPRESSED = [10, 13, 5, 43, 51]
 
   # The HPKE info (section 6.1): "tls ech", a zero, the ECHConfig.

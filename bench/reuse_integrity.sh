@@ -114,10 +114,12 @@ echo
 echo "== the check fails when a released page takes a listed chunk's words"
 # The straddler's page released with the rest, as it was: the lowest chunk
 # of a cold run keeps its place on the list with its slot word zeroed.
-# Linux and Windows, which sweep with helper threads, show the break in
-# the exercise: on Windows the exercise failed 20 runs of 20 with the line
-# taken out once its helpers swept, and passed 20 of 20 while its lazy
-# sweep was the allocator's alone.
+# The chunk the pop then hands out under slot 0's entry is listed again
+# by the second sweep after it, over the key living in it, and the
+# exercise reads every key again two collections after its round: caught
+# in 40 runs of 40 on Linux, darwin and Windows, where the read at the
+# round's end alone caught it in 14 of 40, 16 of 40 and 5 of 20, and five
+# runs on a darwin runner all passed.
 prove_breaks straddler \
   '{ if ($0 ~ /^        cold_low = cold_low \+ IyiHeap::PAGE if straddler >= low && /) { print "        # removed"; found = 1; next } print }
    END { if (!found) exit 3 }' \

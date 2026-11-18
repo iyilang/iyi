@@ -72,6 +72,20 @@ EDITS = 40
 PAUSE_EVERY = 10
 PAUSE = 2.2
 
+# `Proxy::RETIRE_FOOTPRINT`, in resident megabytes, and the modules whose
+# one compile reaches it on their own, heaviest first (2026-11-18, Linux:
+# std/autocert 527, std/acme 514, std/websocket 500, std/http 495). The
+# first that reaches it is the one the step below asks questions in.
+RETIRE_FOOTPRINT = 512
+HEAVY = ["autocert", "acme", "websocket", "http", "tls"]
+# Questions in it, and the workers they may take: the first may be retired
+# once on the bound, before it has said what one compile cost, and one
+# question that compiles more may grow past what a successor costs. Before
+# the proxy learned that cost every question took one (230 workers for
+# the 379 of std/acme's cursor sweep).
+HEAVY_QUESTIONS = 40
+HEAVY_WORKERS = 4
+
 FAILURES = []
 
 
@@ -500,6 +514,77 @@ def workspace_pull(argv):
     return peak[0], len(items), whole
 
 
+def one_compile_mb(name):
+    """What one compile of std/*name* costs a worker alone: the last
+    `iyi/footprint` it says after opening it and answering a hover."""
+    path = REPO / "src/std" / f"{name}.iyi"
+    client = Client(("lsp", "--worker"))
+    said = []
+    read = client.read_message
+
+    def reading():
+        message = read()
+        if message.get("method") == "iyi/footprint":
+            said.append(message["params"]["megabytes"])
+        return message
+
+    client.read_message = reading
+    try:
+        uri = open_module(client, path, path.read_text())
+        hover(client, uri, 0, 0)
+        client.send("shutdown", {})
+        client.send("exit", {}, wait=False)
+        client.proc.wait(timeout=30)
+    finally:
+        if client.proc.poll() is None:
+            client.proc.kill()
+    return said[-1] if said else 0
+
+
+def heavy_module_questions():
+    """Questions in a module whose one compile reaches the bound by itself
+    keep their worker: a successor would cost the same, so retiring one
+    after every answer only made each question pay a whole compile (the
+    cursor sweep over std/acme took 486 s and 230 workers on a Linux
+    workstation, and 22 s once the proxy learned what a compile costs)."""
+    costs = {}
+    for name in HEAVY:
+        costs[name] = one_compile_mb(name)
+        if costs[name] >= RETIRE_FOOTPRINT:
+            break
+    name, cost = max(costs.items(), key=lambda kv: kv[1])
+    if cost < RETIRE_FOOTPRINT:
+        # Said, not passed: on a platform whose compile is smaller the case
+        # does not arise, and the step has nothing to watch.
+        print(f"memory ---- no module of {HEAVY} reaches {RETIRE_FOOTPRINT} MB in one "
+              f"compile here ({costs}); the heavy-module step is not asked", flush=True)
+        return
+    path = REPO / "src/std" / f"{name}.iyi"
+    text = path.read_text()
+    client = Client(("lsp",))
+    seen = set()
+    started = time.monotonic()
+    asked = 0
+    try:
+        uri = open_module(client, path, text)
+        for line, character in candidates(text):
+            if asked >= HEAVY_QUESTIONS:
+                break
+            hover(client, uri, line, character)
+            asked += 1
+            seen.update(children(client.proc.pid))
+        client.send("shutdown", {})
+        client.send("exit", {}, wait=False)
+        client.proc.wait(timeout=30)
+    finally:
+        if client.proc.poll() is None:
+            client.proc.kill()
+    step("questions in a module one compile of which reaches the bound keep their worker",
+         asked == HEAVY_QUESTIONS and len(seen) <= HEAVY_WORKERS,
+         f"std/{name} ({cost} MB in one compile): {asked} hovers took {len(seen)} worker(s) "
+         f"in {time.monotonic() - started:.1f} s, at most {HEAVY_WORKERS}")
+
+
 def main():
     # A step takes seconds; five minutes with none finished is a server
     # that stopped answering, named and killed rather than waited on.
@@ -570,6 +655,7 @@ def main():
               "respawn; there is none in this shape")
     else:
         binary_gone()
+        heavy_module_questions()
 
     with tempfile.TemporaryDirectory(prefix="iyi-lsp-memory") as work:
         client = killed_mid_compile(argv, direct, work)

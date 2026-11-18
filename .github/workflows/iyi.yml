@@ -100,7 +100,7 @@ jobs:
   # Which jobs this run answers for: scripts/ci_plan.py. Every other job
   # needs it and runs when its id is in the list; `result` reads them all.
   plan:
-    runs-on: ubuntu-24.04
+    runs-on: namespace-profile-default
     timeout-minutes: 5
     name: "Which jobs this run answers for"
     permissions:
@@ -126,7 +126,7 @@ jobs:
   docs:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'docs') }}
-    runs-on: ubuntu-24.04
+    runs-on: namespace-profile-default
     timeout-minutes: 10
     name: "The name, and the numbers the docs state"
     steps:
@@ -170,7 +170,7 @@ jobs:
   build:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'build') }}
-    runs-on: ubuntu-24.04
+    runs-on: namespace-profile-default
     timeout-minutes: 30
     container:
       image: crystallang/crystal:1.21.0-build
@@ -199,7 +199,7 @@ jobs:
   iyi:
     needs: [plan, build]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'iyi') }}
-    runs-on: ubuntu-24.04
+    runs-on: namespace-profile-default
     timeout-minutes: 30
     container:
       image: crystallang/crystal:1.21.0-build
@@ -269,7 +269,7 @@ jobs:
   compiler-specs:
     needs: [plan, build]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'compiler-specs') }}
-    runs-on: ubuntu-24.04
+    runs-on: namespace-profile-default
     timeout-minutes: 60
     container:
       image: crystallang/crystal:1.21.0-build
@@ -295,7 +295,7 @@ jobs:
   stdlib-specs:
     needs: [plan, build]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'stdlib-specs') }}
-    runs-on: ubuntu-24.04
+    runs-on: namespace-profile-default
     timeout-minutes: 60
     container:
       image: crystallang/crystal:1.21.0-build
@@ -359,7 +359,7 @@ jobs:
   lsp-positions:
     needs: [plan, build]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'lsp-positions') }}
-    runs-on: ubuntu-24.04
+    runs-on: namespace-profile-default
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -388,7 +388,7 @@ jobs:
   samples:
     needs: [plan, build]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'samples') }}
-    runs-on: ubuntu-24.04
+    runs-on: namespace-profile-default
     # Measured: 43 and 44 minutes on master's runs of 2026-09-29, 38 and a
     # cancellation at 45 on the next branch's - a budget the job had grown
     # into, so a slow runner ended it in whatever step it had reached. At 60
@@ -1066,7 +1066,7 @@ jobs:
   std:
     needs: [plan, build]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'std') }}
-    runs-on: ubuntu-24.04
+    runs-on: namespace-profile-default
     timeout-minutes: 90
     container:
       image: crystallang/crystal:1.21.0-build
@@ -1104,7 +1104,7 @@ jobs:
   std-platforms:
     needs: [plan, build]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'std-platforms') }}
-    runs-on: ubuntu-24.04
+    runs-on: namespace-profile-default
     timeout-minutes: 60
     container:
       image: crystallang/crystal:1.21.0-build
@@ -1144,7 +1144,7 @@ jobs:
   std-siblings:
     needs: [plan, build]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'std-siblings') }}
-    runs-on: ubuntu-24.04
+    runs-on: namespace-profile-default
     timeout-minutes: 90
     container:
       image: crystallang/crystal:1.21.0-build
@@ -1204,7 +1204,7 @@ jobs:
   targets:
     needs: [plan, build]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'targets') }}
-    runs-on: ubuntu-24.04
+    runs-on: namespace-profile-default
     timeout-minutes: 30
     container:
       image: crystallang/crystal:1.21.0-build
@@ -1297,7 +1297,7 @@ jobs:
   cross-objects:
     needs: [plan, build]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'cross-objects') }}
-    runs-on: ubuntu-24.04
+    runs-on: namespace-profile-default
     timeout-minutes: 45
     container:
       image: crystallang/crystal:1.21.0-build
@@ -1440,7 +1440,7 @@ jobs:
   cross-run:
     needs: [plan, cross-objects]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'cross-run') }}
-    runs-on: ubuntu-24.04
+    runs-on: namespace-profile-default
     timeout-minutes: 30
     name: "An iyi program, run on musl and on aarch64"
     steps:
@@ -2063,7 +2063,7 @@ jobs:
   windows-probe:
     needs: [plan, cross-objects]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'windows-probe') }}
-    runs-on: windows-2022
+    runs-on: namespace-profile-windows
     timeout-minutes: 30
     name: "What a Windows binary does, twenty times"
     steps:
@@ -2127,7 +2127,7 @@ jobs:
   windows-collector:
     needs: [plan, cross-objects]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'windows-collector') }}
-    runs-on: windows-2022
+    runs-on: namespace-profile-windows
     timeout-minutes: 30
     name: "The collector on Windows x86_64"
     steps:
@@ -2170,7 +2170,7 @@ jobs:
   windows-runtime:
     needs: [plan, cross-objects]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'windows-runtime') }}
-    runs-on: windows-2022
+    runs-on: namespace-profile-windows
     timeout-minutes: 30
     name: "The concurrency runtime on Windows x86_64"
     steps:
@@ -2246,7 +2246,7 @@ jobs:
   windows-native:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'windows-native') }}
-    runs-on: windows-2025
+    runs-on: namespace-profile-windows
     timeout-minutes: 150
     name: "iyi, built and run on Windows"
     steps:
@@ -2596,7 +2596,7 @@ jobs:
   windows-native-gates:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'windows-native-gates') }}
-    runs-on: windows-2025
+    runs-on: namespace-profile-windows
     timeout-minutes: 75
     name: "The runtime's exercises and the gates that carry Windows code, on Windows"
     steps:
@@ -2764,7 +2764,7 @@ jobs:
   windows-native-surfaces:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'windows-native-surfaces') }}
-    runs-on: windows-2025
+    runs-on: namespace-profile-windows
     timeout-minutes: 75
     name: "The editor and agent surfaces, on Windows"
     steps:
@@ -2838,7 +2838,7 @@ jobs:
   windows-std:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'windows-std') }}
-    runs-on: windows-2025
+    runs-on: namespace-profile-windows
     timeout-minutes: 150
     name: "The standard library foundation, gated on Windows"
     steps:
@@ -2895,7 +2895,7 @@ jobs:
   windows-std-platforms:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'windows-std-platforms') }}
-    runs-on: windows-2025
+    runs-on: namespace-profile-windows
     timeout-minutes: 90
     name: "Every std exercise from its artifacts, for the platforms this runner is not, on Windows"
     steps:
@@ -2978,7 +2978,7 @@ jobs:
   windows-std-siblings:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'windows-std-siblings') }}
-    runs-on: windows-2022
+    runs-on: namespace-profile-windows
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -3052,7 +3052,7 @@ jobs:
   windows-gates:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'windows-gates') }}
-    runs-on: windows-2025
+    runs-on: namespace-profile-windows
     timeout-minutes: 90
     name: "The language and collector gates, on Windows"
     steps:
@@ -3276,7 +3276,7 @@ jobs:
   windows-compiler-specs:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'windows-compiler-specs') }}
-    runs-on: windows-2025
+    runs-on: namespace-profile-windows
     timeout-minutes: 180
     name: "Crystal's compiler specs, on Windows"
     steps:
@@ -3326,7 +3326,7 @@ jobs:
   wasi-run:
     needs: [plan, cross-objects, binary]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'wasi-run') }}
-    runs-on: ubuntu-24.04
+    runs-on: namespace-profile-default
     timeout-minutes: 30
     name: "An iyi program, run on wasm32-wasi"
     steps:
@@ -3488,7 +3488,7 @@ jobs:
   wasm32-collector:
     needs: [plan, binary]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'wasm32-collector') }}
-    runs-on: ubuntu-24.04
+    runs-on: namespace-profile-default
     timeout-minutes: 30
     name: "The collector on wasm32-wasi"
     steps:
@@ -3545,7 +3545,7 @@ jobs:
   binary:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'binary') }}
-    runs-on: ubuntu-24.04
+    runs-on: namespace-profile-default
     timeout-minutes: 180
     container:
       image: ubuntu:20.04
@@ -3746,7 +3746,7 @@ jobs:
   clean-room:
     needs: [plan, binary]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'clean-room') }}
-    runs-on: ubuntu-24.04
+    runs-on: namespace-profile-default
     timeout-minutes: 20
     name: "The tarball, on a machine with nothing on it"
     steps:
@@ -3843,7 +3843,7 @@ jobs:
             windows-native-gates, windows-native-surfaces, windows-std,
             windows-std-siblings, windows-std-platforms, windows-gates, windows-compiler-specs,
             wasm32-collector, docs]
-    runs-on: ubuntu-24.04
+    runs-on: namespace-profile-default
     timeout-minutes: 15
     # `contents` to create the release; `id-token` and `attestations` for
     # the provenance attestation below, which this job alone writes.
@@ -3938,7 +3938,7 @@ jobs:
   vscode:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'vscode') }}
-    runs-on: ubuntu-24.04
+    runs-on: namespace-profile-default
     timeout-minutes: 10
     name: "The VS Code client packages, and a tag publishes it"
     # The two registry tokens are in no `env` the whole job reads: each is
@@ -4028,7 +4028,7 @@ jobs:
             windows-std-platforms, windows-std-siblings, windows-gates, windows-compiler-specs,
             wasi-run, wasm32-collector, binary, clean-room, vscode]
     if: ${{ always() }}
-    runs-on: ubuntu-24.04
+    runs-on: namespace-profile-default
     timeout-minutes: 5
     name: "Every selected job passed"
     steps:

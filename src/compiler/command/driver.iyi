@@ -475,7 +475,8 @@ pub class CommandDriver
     `require` for each package imported without one - at the version the
     build already selects, or the latest release - none for a package
     nothing imports, unless the line raises a version another module pulls
-    in, and no iyi.sum entry for a version nothing builds.
+    in, and no iyi.sum entry for a version neither selected nor read
+    during resolution.
 
     The source is every .iyi file under this directory, tests included,
     except hidden directories, lib/, and directories with an iyi.mod of

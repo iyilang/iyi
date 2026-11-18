@@ -45,8 +45,9 @@ class BranchFixup
   getter word_at : Int64
   getter target : Int32
   getter bits : Int32 # signed displacement width in instruction words
+  getter branch : MInst?
 
-  def initialize(@word_at : Int64, @target : Int32, @bits : Int32)
+  def initialize(@word_at : Int64, @target : Int32, @bits : Int32, @branch : MInst? = nil)
   end
 end
 
@@ -57,12 +58,16 @@ pub class Encoder
   property frame : FrameInfo
   property table_syms : Array(Int32) # the symbol of each jump table of the function, by table index
   property failure : String?
+  getter far_branches : Array(MInst)
+  property long_branches : Hash(MInst, Bool)?
 
   def initialize(@frame : FrameInfo)
     @bytes = [] of UInt8
     @relocs = [] of Reloc
     @fixups = [] of BranchFixup
     @table_syms = [] of Int32
+    @far_branches = [] of MInst
+    @long_branches = nil
     @failure = nil
   end
 
@@ -359,18 +364,8 @@ pub class Encoder
     elsif op == MOp::B
       @fixups << BranchFixup.new(here, inst.target, 26)
       word(0x14000000_i64)
-    elsif op == MOp::Bcond
-      @fixups << BranchFixup.new(here, inst.target, 19)
-      word(0x54000000_i64 | inst.cond.to_i64)
-    elsif op == MOp::Cbz || op == MOp::Cbnz
-      @fixups << BranchFixup.new(here, inst.target, 19)
-      base = op == MOp::Cbz ? 0xB4000000_i64 : 0xB5000000_i64
-      word(base | field(inst.uses[0].reg))
-    elsif op == MOp::Tbz || op == MOp::Tbnz
-      @fixups << BranchFixup.new(here, inst.target, 14)
-      raise "invalid test bit #{inst.imm}" if inst.imm < 0_i64 || inst.imm >= 64_i64
-      base = op == MOp::Tbz ? 0x36000000_i64 : 0x37000000_i64
-      word(base | ((inst.imm & 32_i64) << 26) | ((inst.imm & 31_i64) << 19) | field(inst.uses[0].reg))
+    elsif op == MOp::Bcond || op == MOp::Cbz || op == MOp::Cbnz || op == MOp::Tbz || op == MOp::Tbnz
+      conditional_branch(op, inst)
     elsif op == MOp::Bl
       reloc(RelocKind::A64Call26, inst.sym)
       word(0x94000000_i64)
@@ -407,6 +402,42 @@ pub class Encoder
       raise "the encoder has no form for #{op}"
     end
   end
+  # A far conditional branch uses its inverse to skip a full-range B. The
+  # short form remains one word, and the caller re-encodes after relaxation.
+  def conditional_branch(op : MOp, inst : MInst) : Nil
+    long = false
+    if branches = @long_branches
+      long = branches.has_key?(inst)
+    end
+    bits = op == MOp::Tbz || op == MOp::Tbnz ? 14 : 19
+    if long
+      if op == MOp::Bcond
+        word(0x54000000_i64 | (2_i64 << 5) | cond_invert(inst.cond).to_i64)
+      elsif op == MOp::Cbz || op == MOp::Cbnz
+        base = op == MOp::Cbz ? 0xB5000000_i64 : 0xB4000000_i64
+        word(base | (2_i64 << 5) | field(inst.uses[0].reg))
+      else
+        raise "invalid test bit #{inst.imm}" if inst.imm < 0_i64 || inst.imm >= 64_i64
+        base = op == MOp::Tbz ? 0x37000000_i64 : 0x36000000_i64
+        word(base | ((inst.imm & 32_i64) << 26) | ((inst.imm & 31_i64) << 19) | (2_i64 << 5) | field(inst.uses[0].reg))
+      end
+      @fixups << BranchFixup.new(here, inst.target, 26)
+      word(0x14000000_i64)
+      return
+    end
+    @fixups << BranchFixup.new(here, inst.target, bits, inst)
+    if op == MOp::Bcond
+      word(0x54000000_i64 | inst.cond.to_i64)
+    elsif op == MOp::Cbz || op == MOp::Cbnz
+      base = op == MOp::Cbz ? 0xB4000000_i64 : 0xB5000000_i64
+      word(base | field(inst.uses[0].reg))
+    else
+      raise "invalid test bit #{inst.imm}" if inst.imm < 0_i64 || inst.imm >= 64_i64
+      base = op == MOp::Tbz ? 0x36000000_i64 : 0x37000000_i64
+      word(base | ((inst.imm & 32_i64) << 26) | ((inst.imm & 31_i64) << 19) | field(inst.uses[0].reg))
+    end
+  end
+
 
   # An inline asm body: the template assembled over the registers regalloc gave its operands, outputs first and then
   # inputs, which is the order `$N` numbers them. A relocation's symbol is looked up in the body's table; a name the
@@ -525,6 +556,10 @@ pub class Encoder
       limit = 1_i64 << (f.bits - 1)
       if delta < -limit || delta >= limit
         @failure = "branch displacement #{delta} is outside signed #{f.bits}-bit range"
+        if branch = f.branch
+          @far_branches << branch
+          next
+        end
         return
       end
       word_value = 0_i64
@@ -551,22 +586,36 @@ end
 
 # Encodes a whole function. Each block is placed in order; branches are fixed up at the end.
 pub def encode_function(fn : MFunction) : EncodedFunction | EncodeError
-  enc = Encoder.new(fn.frame)
-  fn.jump_tables.each do |t|
-    enc.table_syms << t.sym
-  end
-  offsets = [] of Int64
-  fn.blocks.each do |b|
-    offsets << enc.here
-    b.insts.each do |inst|
-      enc.emit(inst)
+  long_branches = nil
+  while true
+    enc = Encoder.new(fn.frame)
+    enc.long_branches = long_branches
+    fn.jump_tables.each do |t|
+      enc.table_syms << t.sym
     end
+    offsets = [] of Int64
+    fn.blocks.each do |b|
+      offsets << enc.here
+      b.insts.each do |inst|
+        enc.emit(inst)
+      end
+    end
+    if msg = enc.failure
+      return EncodeError.new(msg)
+    end
+    enc.finish(offsets)
+    unless enc.far_branches.empty?
+      long_branches = Hash(MInst, Bool).new if long_branches.nil?
+      enc.far_branches.each do |branch|
+        long_branches.as(Hash(MInst, Bool))[branch] = true
+      end
+      next
+    end
+    if msg = enc.failure
+      return EncodeError.new(msg)
+    end
+    return EncodedFunction.new(enc.bytes, enc.relocs, offsets)
   end
-  enc.finish(offsets)
-  if msg = enc.failure
-    return EncodeError.new(msg)
-  end
-  EncodedFunction.new(enc.bytes, enc.relocs, offsets)
 end
 
 # The bytes of one instruction with no relocations and no block targets: the form the encode gate compares.

@@ -106,12 +106,12 @@ if ! build_driver "$DRV"; then
   exit 1
 fi
 
-echo "== 1b. reject out-of-range branch displacements"
+echo "== 1b. check branch bounds and far-branch relaxation"
 cat >"$WORK/branch_bounds.iyi" <<'IYI'
 module branch_bounds
 
-import compiler/native/mir::{MInst, MOp, Operand, OperandKind, FrameInfo}
-import compiler/native/aarch64/encode::{Encoder}
+import compiler/native/mir::{MFunction, MBlock, MInst, MOp, Operand, OperandKind, FrameInfo}
+import compiler/native/aarch64/encode::{Encoder, EncodedFunction, EncodeError, encode_function}
 
 def check(op : MOp, delta : Int64, accepted : Bool) : Nil
   enc = Encoder.new(FrameInfo.new)
@@ -122,6 +122,51 @@ def check(op : MOp, delta : Int64, accepted : Bool) : Nil
   enc.finish([0_i64, delta])
   raise "branch range #{op} #{delta}" unless enc.failure.nil? == accepted
 end
+def check_long(bytes : Array(UInt8), pos : Int32, middle : UInt8, high : UInt8, target : Int64) : Nil
+  raise "wrong inverse branch" unless bytes[pos] == 0x41_u8 && bytes[pos + 1] == 0_u8 && bytes[pos + 2] == middle && bytes[pos + 3] == high
+  word = bytes[pos + 4].to_i64 | (bytes[pos + 5].to_i64 << 8) | (bytes[pos + 6].to_i64 << 16) | (bytes[pos + 7].to_i64 << 24)
+  raise "missing long branch" unless (word & 0xFC000000_i64) == 0x14000000_i64
+  delta = word & 0x3FFFFFF_i64
+  delta = delta - 0x4000000_i64 if delta >= 0x2000000_i64
+  raise "wrong long-branch target" unless (pos + 4).to_i64 + delta * 4_i64 == target
+end
+
+def check_relaxation : Nil
+  fn = MFunction.new("relaxed")
+  first = MBlock.new(0, "first")
+  last = MBlock.new(1, "last")
+  fn.blocks << first
+  fn.blocks << last
+  [MOp::Bcond, MOp::Cbz, MOp::Cbnz, MOp::Tbz, MOp::Tbnz].each do |op|
+    branch = MInst.new(op.value.to_i32)
+    branch.target = 1
+    branch.imm = 5_i64
+    branch.uses << Operand.new(OperandKind::Physical, 1)
+    first.insts << branch
+  end
+  filler = MInst.new(MOp::Brk.value.to_i32)
+  n = 0
+  while n < 262144
+    first.insts << filler
+    n = n + 1
+  end
+  back = MInst.new(MOp::Tbz.value.to_i32)
+  back.target = 0
+  back.imm = 5_i64
+  back.uses << Operand.new(OperandKind::Physical, 1)
+  last.insts << back
+  result = encode_function(fn)
+  raise result.as(EncodeError).message if result.is_a?(EncodeError)
+  encoded = result.as(EncodedFunction)
+  target = encoded.block_offsets[1]
+  check_long(encoded.bytes, 0, 0_u8, 0x54_u8, target)
+  check_long(encoded.bytes, 8, 0_u8, 0xB5_u8, target)
+  check_long(encoded.bytes, 16, 0_u8, 0xB4_u8, target)
+  check_long(encoded.bytes, 24, 0x28_u8, 0x37_u8, target)
+  check_long(encoded.bytes, 32, 0x28_u8, 0x36_u8, target)
+  check_long(encoded.bytes, target.to_i32, 0x28_u8, 0x37_u8, 0_i64)
+end
+
 
 check(MOp::Cbz, 1048572_i64, true)
 check(MOp::Cbz, 1048576_i64, false)
@@ -133,6 +178,8 @@ check(MOp::Tbz, 32764_i64, true)
 check(MOp::Tbz, 32768_i64, false)
 check(MOp::Tbnz, -32768_i64, true)
 check(MOp::Tbnz, -32772_i64, false)
+check_relaxation
+puts "far branch relaxation: 5 forward forms and 1 backward form checked"
 puts "branch displacement bounds: 10 checked"
 IYI
 if ! ./bin/iyi build -o "$(native_path "$WORK/branch_bounds$EXE")" "$(native_path "$WORK/branch_bounds.iyi")" >"$WORK/branch_bounds.log" 2>&1; then

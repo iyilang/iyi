@@ -510,22 +510,27 @@ REACH_FLOOR="$REPO/bench/selfhost_inline_reach.floor"
 MUT_PROG="$REPO/src/compiler/lower/program.iyi"
 # Both reports use the compiler's existing aarch64-darwin target on every
 # host. IR emission runs the same typing and lowering without executing Mach-O.
+#
+# Returns 0 when the report is complete and lowering ended as expected, and 2 when the report cannot be used. Under a
+# mutation it returns 3 when body typing finished, so the table is complete, but lowering did not end as the baseline's
+# did. The caller reads the table first: a table that shows the mutation is decisive, and only an unchanged table makes
+# status 3 invalid. The reason is kept in $WORK/<kind>_<tag>.unsettled.
 run_typed_report() {
   local tool="$1" root="$2" kind="$3" tag="$4"
-  local log="$WORK/${kind}_${tag}.log" output="$WORK/${kind}_${tag}.ir" rc=0 failure=""
-  rm -f "$output"
+  local log="$WORK/${kind}_${tag}.log" output="$WORK/${kind}_${tag}.ir" rc=0 failure="" unsettled=""
+  rm -f "$output" "$WORK/${kind}_${tag}.unsettled"
   "$tool" "$REPO_NATIVE/$root" -o "$WORK_NATIVE/${kind}_${tag}.ir" \
     --pipeline typed --prelude --probe-phase --keep-going --emit ir > "$log" 2>&1 || rc=$?
-  if ! grep -Fxq '[phase] bodies: pass' "$log" || ! grep -Fxq '[phase] lower: start' "$log"; then
+  if ! grep -Fxq '[phase] bodies: pass' "$log"; then
     echo "INVALID: $kind report did not finish body typing for $root (status $rc)"
     cat "$log"
     return 2
   fi
-  if [ "$rc" -eq 0 ]; then
+  if ! grep -Fxq '[phase] lower: start' "$log"; then
+    unsettled="INVALID: $kind report did not start lowering for $root (status $rc)"
+  elif [ "$rc" -eq 0 ]; then
     if [ ! -s "$output" ] || ! grep -Fxq '[phase] verify: pass' "$log"; then
-      echo "INVALID: $kind report did not produce verified IR for $root"
-      cat "$log"
-      return 2
+      unsettled="INVALID: $kind report did not produce verified IR for $root"
     fi
   elif [ "$rc" -eq 1 ]; then
     if grep -Fxq 'reached: bodies' "$log"; then
@@ -534,19 +539,21 @@ run_typed_report() {
       failure=$(awk '/^verify: fail: / { print; exit }' "$log")
     fi
     if [ -z "$failure" ]; then
-      echo "INVALID: $kind report exited without a named lowering or verifier refusal for $root"
-      cat "$log"
-      return 2
-    fi
-    if [ "${_PM_ARMED:-0}" = 1 ] &&
-       { [ ! -f "$WORK/base_${kind}_${tag}.failure" ] ||
-         [ "$failure" != "$(cat "$WORK/base_${kind}_${tag}.failure")" ]; }; then
-      echo "INVALID MUTATION: $kind report changed its baseline compiler refusal for $root"
-      cat "$log"
-      return 2
+      unsettled="INVALID: $kind report exited without a named lowering or verifier refusal for $root"
+    elif [ "${_PM_ARMED:-0}" = 1 ] &&
+         { [ ! -f "$WORK/base_${kind}_${tag}.failure" ] ||
+           [ "$failure" != "$(cat "$WORK/base_${kind}_${tag}.failure")" ]; }; then
+      unsettled="INVALID MUTATION: $kind report changed its baseline compiler refusal for $root"
     fi
   else
-    echo "INVALID: $kind report exited $rc for $root"
+    unsettled="INVALID: $kind report exited $rc for $root"
+  fi
+  if [ -n "$unsettled" ]; then
+    if [ "${_PM_ARMED:-0}" = 1 ]; then
+      printf '%s\n' "$unsettled" > "$WORK/${kind}_${tag}.unsettled"
+      return 3
+    fi
+    echo "$unsettled"
     cat "$log"
     return 2
   fi
@@ -555,22 +562,30 @@ run_typed_report() {
   fi
 }
 
-# Prints "<defs-reached> <no-record rows>" for a repo-relative root and tool.
+# Prints why the report <kind> <tag> is unsettled under a mutation, with its log.
+unsettled_report() {
+  cat "$WORK/$1_$2.unsettled"
+  cat "$WORK/$1_$2.log"
+}
+
+# Prints "<defs-reached> <no-record rows> <report status>" for a repo-relative root and tool. The status is 0, or 3
+# when lowering did not end as the baseline's did (run_typed_report).
 reach_of() {
-  local root="$1" tool="$2" tag="$3" log="$WORK/reach_$3.log" reach missing
-  run_typed_report "$tool" "$root" reach "$tag" || return $?
+  local root="$1" tool="$2" tag="$3" log="$WORK/reach_$3.log" reach missing report_rc=0
+  run_typed_report "$tool" "$root" reach "$tag" || report_rc=$?
+  if [ "$report_rc" -ne 0 ] && [ "$report_rc" -ne 3 ]; then return "$report_rc"; fi
   reach=$(awk '/^table: .* defs-reached=/ { sub(/.*defs-reached=/, ""); print $1; exit }' "$log")
   case "$reach" in
     ""|*[!0-9]*) echo "INVALID: missing defs-reached for $root"; cat "$log"; return 2 ;;
   esac
   missing=$(awk '/no record from the declarations pass/ { n++ } END { print n + 0 }' "$log")
-  printf '%s %s\n' "$reach" "$missing"
+  printf '%s %s %s\n' "$reach" "$missing" "$report_rc"
 }
 
 # Checks each floor row (or only the root $2) against the pipeline tool $1. A root below its floor or with a fun that has
 # no record fails. A floor below the measured count fails too, unless SEMINL_RAISE=1 writes the count up (never down).
 check_reach() {
-  local tool="$1" only="${2:-}" fail=0 root floor reach missing tag values row_ok
+  local tool="$1" only="${2:-}" fail=0 root floor reach missing unsettled tag values row_ok
   while read -r root floor; do
     case "$root" in ""|\#*) continue ;; esac
     if [ -n "$only" ] && [ "$root" != "$only" ]; then continue; fi
@@ -583,12 +598,16 @@ check_reach() {
     set -- $values
     reach=$1
     missing=$2
+    unsettled=$3
     echo "  $root: defs-reached $reach (floor $floor), no-record rows $missing"
     row_ok=1
     if [ "$missing" -ne 0 ] || [ "$reach" -lt "$floor" ]; then
       echo "decisive: $root is below its reach floor or has missing declaration records"
       row_ok=0
       fail=1
+    elif [ "$unsettled" -ne 0 ]; then
+      unsettled_report reach "$tag"
+      return 2
     elif [ "$reach" -gt "$floor" ]; then
       if [ "$RAISE" = 1 ]; then
         awk -v r="$root" -v n="$reach" '$1 == r { $2 = n } { print }' "$REACH_FLOOR" > "$WORK/reach.floor.tmp" && mv "$WORK/reach.floor.tmp" "$REACH_FLOOR"
@@ -666,7 +685,7 @@ check_refusals() {
     fi
     report_rc=0
     run_typed_report "$tool" "$root" refusals "$tag" || report_rc=$?
-    if [ "$report_rc" -ne 0 ]; then
+    if [ "$report_rc" -ne 0 ] && [ "$report_rc" -ne 3 ]; then
       if [ "${_PM_ARMED:-0}" = 1 ]; then invalid=1; continue; fi
       return 2
     fi
@@ -681,6 +700,10 @@ check_refusals() {
       echo "decisive: $root exceeds its root-refusals ceiling"
       row_ok=0
       fail=1
+    elif [ "$report_rc" -eq 3 ]; then
+      unsettled_report refusals "$tag"
+      invalid=1
+      continue
     elif [ "$refusals" -lt "$ceiling" ]; then
       if [ "$RAISE" = 1 ]; then
         awk -v r="$root" -v n="$refusals" '$1 == r { $2 = n } { print }' "$REFUSAL_FLOOR" > "$WORK/refusal.floor.tmp" && mv "$WORK/refusal.floor.tmp" "$REFUSAL_FLOOR"
@@ -819,10 +842,10 @@ check_constant_scope() {
   fi
   "$probe" "$fixture" -o "$WORK_NATIVE/const_scope_mut.ir" \
     --pipeline typed --probe-phase --emit ir > "$WORK/const_scope_mut.out" 2>"$WORK/const_scope_mut.err" || rc=$?
-  if expected_refusal "$rc" "$WORK/const_scope_mut.err" src/compiler/lower/pending.iyi \
-       '^lower: visit\(upcast String to Int32 \(hosted cast.cr: upcast_distinct\)\) \(hosted codegen.cr\) is not ported yet$' &&
-     grep -Fxq '  in *MacroConstant::value:Int32' "$WORK/const_scope_mut.out" &&
-     grep -Fxq 'reached: bodies' "$WORK/const_scope_mut.out"; then
+  if expected_refusal "$rc" "$WORK/const_scope_mut.err" src/compiler/semantic/main_visitor.iyi \
+       '^type mismatch for return type: expected Int32, got String$' &&
+     grep -Eq '^bodies: refused at .*const_lower_if\.iyi:5:5$' "$WORK/const_scope_mut.out" &&
+     grep -Fxq 'reached: declarations' "$WORK/const_scope_mut.out"; then
     echo "decisive: MacroConstant::value chose the wrong namespace branch"
     return 1
   fi

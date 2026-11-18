@@ -163,6 +163,13 @@ module BenchSelfhostSemanticExercise
     end
     puts "ok (macro expansion in semantic traversal verified)"
 
+    print "testing lexical constants in inline macro guards... "
+    out15 = run_source("TAKEN = 1; class Guard; TAKEN = 2; {% if TAKEN == 2 %} class Found; end; {% else %} class Wrong; end; {% end %}; end")
+    unless out15.includes?("Type: Guard::Found (class)") && !out15.includes?("Type: Guard::Wrong (class)")
+      raise "inline macro did not resolve the enclosing type's constant"
+    end
+    puts "ok (lexical macro constant verified)"
+
     puts "==============================================================="
     puts "ALL SELFHOST SEMANTIC CHECKS PASSED SUCCESSFULLY!"
     puts "==============================================================="

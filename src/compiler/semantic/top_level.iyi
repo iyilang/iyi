@@ -2888,12 +2888,21 @@ pub class TopLevelVisitor < Visitor
 
   def visit(node : Expressions) : Bool
     @exp_nest = @exp_nest + 1
-    node.expressions = splice_inline_sites(node.expressions, @current_type.full_name, @file || "", @current_type.is_a?(LibType), @program.normalizer)
-    i = 0
-    while i < node.expressions.size
-      exp = node.expressions[i]
-      exp.accept(self)
-      i = i + 1
+    has_inline = node.expressions.any? { |exp| exp.is_a?(MacroIf) || exp.is_a?(MacroFor) || exp.is_a?(MacroExpression) }
+    if has_inline
+      # Resolve constants in the site's lexical scope, in declaration order.
+      scope = @current_type
+      lookup = ->(path : Path) : ASTNode? do
+        found = @program.lookup_type_path?(path, scope)
+        found.is_a?(Const) ? found.as(Const).value : nil
+      end
+      node.expressions = splice_inline_sites(node.expressions, @current_type.full_name, @file || "", @current_type.is_a?(LibType), @program.normalizer, [] of String, nil, nil, false, lookup, self)
+    else
+      i = 0
+      while i < node.expressions.size
+        node.expressions[i].accept(self)
+        i = i + 1
+      end
     end
     @exp_nest = @exp_nest - 1
     if @exp_nest == 0
@@ -4123,23 +4132,17 @@ pub class TopLevelVisitor < Visitor
   end
 
   def visit(node : MacroIf) : Bool
-    if expanded = expand_inline_macro(node, @current_type.full_name, @file || "", @current_type.is_a?(LibType), @program.normalizer)
-      expanded.accept(self)
-    end
+    Expressions.new([node] of ASTNode).accept(self)
     false
   end
 
   def visit(node : MacroFor) : Bool
-    if expanded = expand_inline_macro(node, @current_type.full_name, @file || "", @current_type.is_a?(LibType), @program.normalizer)
-      expanded.accept(self)
-    end
+    Expressions.new([node] of ASTNode).accept(self)
     false
   end
 
   def visit(node : MacroExpression) : Bool
-    if expanded = expand_inline_macro(node, @current_type.full_name, @file || "", @current_type.is_a?(LibType), @program.normalizer)
-      expanded.accept(self)
-    end
+    Expressions.new([node] of ASTNode).accept(self)
     false
   end
 

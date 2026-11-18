@@ -130,7 +130,11 @@ measure() {
     else
       set -- "$REPO_NATIVE/src"
     fi
-    if "$TYPED" "$REPO_NATIVE/$rel" "$@" > "$WORK/p.txt" 2> "$WORK/p.err"; then
+    port_flag=""
+    if [ "$BARE" != 1 ] && [ "$corpus" != prelude ]; then
+      port_flag="--with-prelude"
+    fi
+    if "$TYPED" $port_flag "$REPO_NATIVE/$rel" "$@" > "$WORK/p.txt" 2> "$WORK/p.err"; then
       sort "$WORK/p.txt" > "$WORK/p.sorted"
       matched=$(comm -12 "$WORK/o.sorted" "$WORK/p.sorted" | wc -l | tr -d ' ')
       note="-"

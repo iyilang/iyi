@@ -7,7 +7,7 @@ src/compiler/backend/llvm/import.iyi 0
 src/compiler/backend/llvm/llvm_backend.iyi 0
 src/compiler/backend/llvm/translate.iyi 2
 src/compiler/backend/native.iyi 2
-src/compiler/codegen/codegen.iyi 15
+src/compiler/codegen/codegen.iyi 16
 src/compiler/command/daemon.iyi 4
 src/compiler/command/driver.iyi 7
 src/compiler/command/execute.iyi 2
@@ -74,7 +74,7 @@ src/compiler/macros/interpreter.iyi 4
 src/compiler/macros/macro_parser.iyi 3
 src/compiler/macros/methods.iyi 2
 src/compiler/macros/site_scan.iyi 5
-src/compiler/macros/target_flags.iyi 3
+src/compiler/macros/target_flags.iyi 4
 src/compiler/macros/type_facts.iyi 5
 src/compiler/native/aarch64/abi.iyi 1
 src/compiler/native/aarch64/asm.iyi 6
@@ -124,11 +124,11 @@ src/compiler/semantic/cover.iyi 2
 src/compiler/semantic/default_arguments.iyi 2
 src/compiler/semantic/definition_typing.iyi 3
 src/compiler/semantic/inline_macros.iyi 4
-src/compiler/semantic/instance_vars.iyi 5
+src/compiler/semantic/instance_vars.iyi 6
 src/compiler/semantic/lib_call.iyi 4
 src/compiler/semantic/literal_expander.iyi 3
 src/compiler/semantic/macro_bindings.iyi 2
-src/compiler/semantic/main_visitor.iyi 15
+src/compiler/semantic/main_visitor.iyi 17
 src/compiler/semantic/match.iyi 7
 src/compiler/semantic/math_interpreter.iyi 7
 src/compiler/semantic/method_lookup.iyi 4
@@ -136,9 +136,9 @@ src/compiler/semantic/new.iyi 1
 src/compiler/semantic/normalizer.iyi 6
 src/compiler/semantic/recursive_struct_checker.iyi 2
 src/compiler/semantic/restrictions.iyi 4
-src/compiler/semantic/share.iyi 2
+src/compiler/semantic/share.iyi 4
 src/compiler/semantic/spawn_placement.iyi 8
-src/compiler/semantic/top_level.iyi 39
+src/compiler/semantic/top_level.iyi 42
 src/compiler/semantic/type_node_host.iyi 2
 src/compiler/semantic/type_nodes.iyi 1
 src/compiler/semantic/typed.iyi 4

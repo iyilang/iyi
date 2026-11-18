@@ -154,6 +154,20 @@
 
 ### Fixed
 
+- **`iyi.sum` now pins every manifest MVS reads.** A version outbid by
+  another minimum can still introduce requirements, but previously only
+  the selected checkout was checked. Manifest lines are recorded as
+  `<path> v<version>/iyi.mod h2:<hash>` and checked before the resolver
+  uses their requirements. `mod tidy` retains the manifests the final
+  graph reads, including outbid versions, and `--check` stays read-only.
+  Existing projects outside the module cache have no manifest lines for
+  fetched requirements: the first successful build records them. Until they
+  are recorded, `iyi mod tidy --check` exits 1; run `iyi mod tidy` and
+  commit its resulting `iyi.sum` and any `iyi.mod` changes before upgrading
+  a CI check. If `iyi.sum` cannot be created or written there, the build
+  fails instead of proceeding without the missing lines. Update the sum
+  while it is writable before building read-only.
+
 - **std/big: every mask that picks by a secret goes through
   `ValueBarrier`.** `pow_mod_secret`'s table scan, Montgomery's final
   subtraction and each choice `inverse_mod_secret` and the reduction into

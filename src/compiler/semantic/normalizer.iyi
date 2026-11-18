@@ -30,6 +30,11 @@ pub class NormalizerProgram
     flags
   end
 
+  # A loader and its semantic program belong to the same compilation.
+  def host_flags=(flags : Array(String))
+    @host_flags = flags
+  end
+
   # Flags the program was built with, read the way the hosted program's
   # `has_flag?` reads them. The port starts with none; a driver sets the ones
   # its fixtures need.

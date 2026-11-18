@@ -32,6 +32,12 @@ private def selection(path : String, version : String) : Iyi::Mod::Selection
   Iyi::Mod::Selection.new(path, SemanticVersion.parse(version))
 end
 
+private def check_trees(dir : String, selections : Array(Iyi::Mod::Selection), notices : IO = STDERR, &checkout : Iyi::Mod::Selection -> String) : Nil
+  checks = Iyi::Mod::Sum.checker(dir, notices)
+  checks.trees(selections, &checkout)
+  checks.write
+end
+
 describe Iyi::Mod::Sum do
   describe ".tree_hash" do
     it "is the SHA-256 of a list of each file's SHA-256, kind and path" do
@@ -111,19 +117,104 @@ describe Iyi::Mod::Sum do
     {% end %}
   end
 
-  describe ".check" do
+  describe "checking manifests" do
+    it "records the exact manifest bytes under a separate key" do
+      with_tempdir do
+        Dir.mkdir "app"
+        picked = selection("example.test/user/liba", "1.0.0")
+        text = "module example.test/user/liba\r\n"
+        expected = "h2:4a6850226dc7aa494309c54e2e34dfbe7fdfb0702fbdba441a0b4a9d387ca6ae"
+        checks = Iyi::Mod::Sum.checker("app")
+        checks.manifest(picked, text)
+        File.exists?("app/iyi.sum").should be_false
+        checks.write
+        File.read("app/iyi.sum").should eq "example.test/user/liba v1.0.0/iyi.mod #{expected}\n"
+
+        checks = Iyi::Mod::Sum.checker("app")
+        checks.manifest(picked, text)
+        checks.pending?.should be_false
+      end
+    end
+
+    it "refuses a changed manifest with both hashes and leaves the sum alone" do
+      with_tempdir do
+        Dir.mkdir "app"
+        picked = selection("example.test/user/liba", "1.0.0")
+        original = "module example.test/user/liba\n"
+        changed = "#{original}require example.test/user/libb v1.0.0\n"
+        checks = Iyi::Mod::Sum.checker("app")
+        checks.manifest(picked, original)
+        checks.write
+        written = File.read("app/iyi.sum")
+        expected = Iyi::Mod::Sum.manifest_hash(original)
+        actual = Iyi::Mod::Sum.manifest_hash(changed)
+
+        checks = Iyi::Mod::Sum.checker("app")
+        expect_raises(Iyi::Mod::ModError, /v1\.0\.0\/iyi\.mod is not what it was: .* says #{expected}, the manifest hashes to #{actual}/) do
+          checks.manifest(picked, changed)
+        end
+        File.read("app/iyi.sum").should eq written
+      end
+    end
+
+    it "fails when a missing manifest line cannot be written" do
+      with_tempdir do
+        Dir.mkdir "app"
+        written = "example.test/user/liba v1.0.0 h2:#{"0" * 64}\n"
+        File.write "app/iyi.sum", written
+        File.chmod "app/iyi.sum", 0o444
+        begin
+          pending! "this user writes a read-only file" if File::Info.writable?("app/iyi.sum")
+          checks = Iyi::Mod::Sum.checker("app")
+          checks.manifest(selection("example.test/user/liba", "1.0.0"), "module example.test/user/liba\n")
+          expect_raises(File::Error) { checks.write }
+          File.read("app/iyi.sum").should eq written
+        ensure
+          File.chmod "app/iyi.sum", 0o644
+        end
+      end
+    end
+
+    it "retains outbid manifest keys while pruning entries outside the graph" do
+      with_tempdir do
+        Dir.mkdir "app"
+        checkout = tree "liba", {"liba.iyi" => "x\n"}
+        lower = selection("example.test/user/liba", "1.0.0")
+        selected = selection("example.test/user/liba", "1.1.0")
+        unused = selection("example.test/user/unused", "1.0.0")
+        checks = Iyi::Mod::Sum.checker("app")
+        {lower, selected, unused}.each { |item| checks.manifest(item, "module #{item.path}\n") }
+        checks.trees([selected, unused]) { checkout }
+        checks.write
+
+        manifests = [lower, selected]
+        Iyi::Mod::Sum.stale("app", [selected], manifests).should eq [
+          "example.test/user/unused v1.0.0",
+          "example.test/user/unused v1.0.0/iyi.mod",
+        ]
+        Iyi::Mod::Sum.prune("app", [selected], manifests).should eq 2
+        kept = File.read("app/iyi.sum")
+        kept.should contain("example.test/user/liba v1.0.0/iyi.mod ")
+        kept.should contain("example.test/user/liba v1.1.0/iyi.mod ")
+        kept.should contain("example.test/user/liba v1.1.0 h2:")
+        kept.should_not contain("example.test/user/unused")
+      end
+    end
+  end
+
+  describe "checking trees" do
     it "records a requirement with no entry as `h2:`, and is silent when it matches" do
       with_tempdir do
         checkout = tree "liba", {"liba.iyi" => "x\n"}
         Dir.mkdir "app"
         picked = [selection("example.test/user/liba", "1.0.0")]
 
-        Iyi::Mod::Sum.check("app", picked) { checkout }
+        check_trees("app", picked) { checkout }
         written = File.read("app/iyi.sum")
         written.should eq "example.test/user/liba v1.0.0 #{Iyi::Mod::Sum.tree_hash(checkout)}\n"
         written.should match(/ h2:[0-9a-f]{64}\n\z/)
 
-        Iyi::Mod::Sum.check("app", picked) { checkout }
+        check_trees("app", picked) { checkout }
         File.read("app/iyi.sum").should eq written
       end
     end
@@ -133,12 +224,12 @@ describe Iyi::Mod::Sum do
         checkout = tree "liba", {"liba.iyi" => "x\n"}
         Dir.mkdir "app"
         picked = [selection("example.test/user/liba", "1.0.0")]
-        Iyi::Mod::Sum.check("app", picked) { checkout }
+        check_trees("app", picked) { checkout }
         written = File.read("app/iyi.sum")
 
         File.write "liba/liba.iyi", "y\n"
         expect_raises(Iyi::Mod::ModError, /is not what it was/) do
-          Iyi::Mod::Sum.check("app", picked) { checkout }
+          check_trees("app", picked) { checkout }
         end
         File.read("app/iyi.sum").should eq written
       end
@@ -155,7 +246,7 @@ describe Iyi::Mod::Sum do
         File.write "app/iyi.sum", written
 
         expect_raises(Iyi::Mod::ModError, /is not what it was: .* says s1:[0-9a-f]{40}, the checkout hashes to #{unframed({"sub/liba.iyi" => "x\n"})}\./) do
-          Iyi::Mod::Sum.check("app", [selection("example.test/user/liba", "1.0.0")]) { checkout }
+          check_trees("app", [selection("example.test/user/liba", "1.0.0")]) { checkout }
         end
         File.read("app/iyi.sum").should eq written
       end
@@ -171,7 +262,7 @@ describe Iyi::Mod::Sum do
 
           SUM
 
-        Iyi::Mod::Sum.check("app", [selection("example.test/user/liba", "1.0.0")]) { checkout }
+        check_trees("app", [selection("example.test/user/liba", "1.0.0")]) { checkout }
         # The line for a version this build did not use is not this build's
         # to restate: nothing was checked out to hash.
         File.read("app/iyi.sum").should eq <<-SUM
@@ -198,7 +289,7 @@ describe Iyi::Mod::Sum do
           pending! "this user writes a read-only file" if File::Info.writable?("app/iyi.sum")
 
           notices = IO::Memory.new
-          Iyi::Mod::Sum.check("app", [selection("example.test/user/liba", "1.0.0")], notices) { checkout }
+          check_trees("app", [selection("example.test/user/liba", "1.0.0")], notices) { checkout }
           said = notices.to_s
           said.should match(/iyi\.sum: 1 entry said `s1:`.* it matched its checkout and could not be recorded again as `h2:`: the file could not be written \(.+[^.]\)\. The build goes on under the `s1:` line\n\z/)
           said.should_not contain("is recorded again")
@@ -207,8 +298,8 @@ describe Iyi::Mod::Sum do
           # A requirement with no line is not a restatement: it has to be
           # recorded, and a file that cannot take it fails as it did.
           expect_raises(File::Error) do
-            Iyi::Mod::Sum.check("app", [selection("example.test/user/liba", "1.0.0"),
-                                        selection("example.test/user/libz", "2.0.0")], notices) { checkout }
+            check_trees("app", [selection("example.test/user/liba", "1.0.0"),
+                                selection("example.test/user/libz", "2.0.0")], notices) { checkout }
           end
           notices.to_s.should eq said
           File.read("app/iyi.sum").should eq written
@@ -218,7 +309,7 @@ describe Iyi::Mod::Sum do
 
         # Writable again, it is written and only then said.
         notices = IO::Memory.new
-        Iyi::Mod::Sum.check("app", [selection("example.test/user/liba", "1.0.0")], notices) { checkout }
+        check_trees("app", [selection("example.test/user/liba", "1.0.0")], notices) { checkout }
         notices.to_s.should match(/1 entry said `s1:`.* it matched its checkout and is recorded again as `h2:`\n\z/)
         File.read("app/iyi.sum").should eq "example.test/user/liba v1.0.0 #{Iyi::Mod::Sum.tree_hash(checkout)}\n"
       end
@@ -241,13 +332,13 @@ describe Iyi::Mod::Sum do
           wrong = "example.test/user/liba v1.0.0 s1:#{"0" * 40}\n"
           File.write sum, wrong
           expect_raises(Iyi::Mod::ModError, /is not what it was: .* says s1:0{40}, the checkout hashes to #{held}\./) do
-            Iyi::Mod::Sum.check(cached, picked) { checkout }
+            check_trees(cached, picked) { checkout }
           end
           File.read(sum).should eq wrong
 
           right = "example.test/user/liba v1.0.0 #{held}\n"
           File.write sum, right
-          Iyi::Mod::Sum.check(cached, picked) { checkout }
+          check_trees(cached, picked) { checkout }
           File.read(sum).should eq right
         ensure
           FileUtils.rm_rf cached
@@ -261,7 +352,7 @@ describe Iyi::Mod::Sum do
         Dir.mkdir "app"
         File.write "app/iyi.sum", "example.test/user/liba v1.0.0 md5:00\n"
         expect_raises(Iyi::Mod::ModError, /not a sum line.*h2:/) do
-          Iyi::Mod::Sum.check("app", [selection("example.test/user/liba", "1.0.0")]) { checkout }
+          check_trees("app", [selection("example.test/user/liba", "1.0.0")]) { checkout }
         end
       end
     end

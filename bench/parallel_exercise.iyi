@@ -24,9 +24,10 @@
 # never arrives is a named failure rather than a hung job.
 #
 # `speed W T N` runs T tasks of N rounds of integer arithmetic on W
-# workers and prints the wall time; bench/parallel_exercise.sh runs it at
-# one worker and at several and holds the ratio to a floor, and runs
-# broken copies of the runtime to prove each step above can fail.
+# workers and prints the wall time and how many threads held a task at
+# once on average; bench/parallel_exercise.sh runs it at one worker and at
+# several and holds both to a floor, and runs broken copies of the runtime
+# to prove each step above can fail.
 
 @[Unsafe("allocates raw blocks through Pointer.malloc in tasks, and Turns trusts @[Share] to hand its word's pointerof address to park_on and wake_on")]
 {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
@@ -165,22 +166,97 @@
   end
 
   # ── speed ────────────────────────────────────────────────────────────
+  # The rounds a timed task computes between two looks at its thread and
+  # the clock: about a tenth of a millisecond of the walk.
+  SPEED_LOOK_ROUNDS = 65536_i64
+
+  # `spin` in pieces, each followed by a look at the thread the task is on
+  # and the clock. Answers the walk's end and the task's stretches, three
+  # words each - the thread, the first look and the last look on it - a
+  # stretch ending where a look finds the task on another thread.
+  def spin_traced(rounds : Int64, seed : UInt64) : Tuple(UInt64, Array(UInt64))
+    stretches = [] of UInt64
+    x = seed
+    on = thread_here
+    from = __iyi_monotonic_ns
+    last = from
+    done = 0_i64
+    while done < rounds
+      piece = rounds - done
+      piece = SPEED_LOOK_ROUNDS if piece > SPEED_LOOK_ROUNDS
+      x = spin(piece, x)
+      done = done + piece
+      here = thread_here
+      now = __iyi_monotonic_ns
+      if here != on
+        stretches << on << from.to_u64 << last.to_u64
+        on = here
+        from = now
+      end
+      last = now
+    end
+    stretches << on << from.to_u64 << last.to_u64
+    {x, stretches}
+  end
+
+  # How many threads held a timed task at once, in hundredths, on average
+  # over the run from *started* to *ended*: each thread's stretches laid
+  # on a grid of 100 us cells, a cell held when a stretch covers it, the
+  # held cells of every thread summed over the run's cells. A thread
+  # holding a task holds it whether or not the kernel has it on a core,
+  # so a loaded host does not lower this; a pool that runs its tasks on
+  # one thread at a time cannot raise it past 100.
+  def held_at_once(stretches : Array(UInt64), started : Int64, ended : Int64) : Int64
+    cell = 100_000_i64
+    cells = (ended - started) // cell + 1_i64
+    threads = [] of UInt64
+    i = 0
+    while i < stretches.size
+      threads << stretches[i] unless threads.includes?(stretches[i])
+      i = i + 3
+    end
+    held = 0_i64
+    threads.each do |thread|
+      grid = Array(Bool).new(cells.to_i32, false)
+      j = 0
+      while j < stretches.size
+        if stretches[j] == thread
+          first = (stretches[j + 1].to_i64 - started) // cell
+          last = (stretches[j + 2].to_i64 - started) // cell
+          first = 0_i64 if first < 0_i64
+          last = cells - 1_i64 if last >= cells
+          c = first
+          while c <= last
+            grid[c.to_i32] = true
+            c = c + 1_i64
+          end
+        end
+        j = j + 3
+      end
+      grid.each { |covered| held = held + 1_i64 if covered }
+    end
+    held * 100_i64 // cells
+  end
+
   def speed(workers : Int32, tasks : Int32, rounds : Int64) : Nil
     IyiWorkers.count = workers
     started = __iyi_monotonic_ns
     total = 0_u64
+    stretches = [] of UInt64
     group do |g|
-      handles = [] of IyiTask(UInt64)
+      handles = [] of IyiTask(Tuple(UInt64, Array(UInt64)))
       tasks.times do |i|
-        handles << g.spawn(unit: :new) { spin(rounds, (i + 1).to_u64) }
+        handles << g.spawn(unit: :new) { spin_traced(rounds, (i + 1).to_u64) }
       end
       handles.each do |handle|
-        value = handle.value
-        fail("a timed task answered #{value}") unless value.is_a?(UInt64)
-        total = total ^ value
+        answer = handle.value
+        fail("a timed task answered #{answer}") unless answer.is_a?(Tuple(UInt64, Array(UInt64)))
+        total = total ^ answer[0]
+        stretches.concat(answer[1])
       end
     end
-    puts "workers=#{workers} tasks=#{tasks} rounds=#{rounds} wall_ms=#{elapsed_ms(started)} checksum=#{total}"
+    ended = __iyi_monotonic_ns
+    puts "workers=#{workers} tasks=#{tasks} rounds=#{rounds} wall_ms=#{(ended - started) // 1000000_i64} at_once=#{held_at_once(stretches, started, ended)} checksum=#{total}"
   end
 
   # ── the properties ───────────────────────────────────────────────────
@@ -450,26 +526,66 @@
     end
   end
 
+  # The failing task's wait for its cue: a spin with no back-edge check,
+  # so from its first statement to its failure the worker it is on runs
+  # nothing else and the sleeper cannot go to sleep there. Said started
+  # from inside it, where no check can give the worker up first.
+  @[NoInline]
+  @[NoPreempt]
+  def hold_for(begun : Tally, cue : Tally) : Nil
+    begun.add(1_i64)
+    while cue.count == 0_i64
+      IyiThread.spin_pause
+    end
+  end
+
   # A cancel reaches a task on another thread: asleep, parked on a
   # channel, and still waiting in the pool to start. The pool is filled
   # first: with it grown to the work instead, a copy that delivers no
   # cancel to another thread passed the step.
+  #
+  # The failure comes only once each task waits where the step says, and
+  # the main thread looks before it cues it: the sleeper listed in a
+  # worker's sleep heap (`IyiFiber#listed_on`), the waiter parked on its
+  # channel, and the local task asleep on this thread - `unit: :same`, as
+  # a plain spawn of a block that captures nothing is a parallel task now
+  # (SPEC.md III.4.15). The failing task holds its worker from before the
+  # sleeper is spawned (`hold_for`), so that heap is another thread's. Both
+  # sleeps are then ended only by a cancel posted to the thread that holds
+  # them (`post_cancel`). With a 100 ms sleep for the cue instead, a copy
+  # that posts nothing passed in 19 runs of 20 beside 12 busy loops on
+  # Linux's 12 vCPUs: the plain spawn ran on the pool, and in most runs the
+  # sleeper, it and the failing task were on one worker, whose cancel ends
+  # its own sleeps without a post.
   def cancel(watch : Int32) : Nil
     watched("cancel", watch) do
       fill_pool
       never = Channel(Int32).new
-      started = __iyi_monotonic_ns
+      begun = Tally.new
+      cue = Tally.new
+      failed = Tally.new
       slept = 0
       parked = 0
       pinned = 0
       group do |g|
-        sleeper = g.spawn(unit: :new) { sleep(10000).is_a?(Cancelled) ? 1 : 0 }
-        waiter = g.spawn(unit: :new) { never.receive.is_a?(Cancelled) ? 1 : 0 }
-        local = g.spawn { sleep(10000).is_a?(Cancelled) ? 1 : 0 }
         g.spawn(unit: :new) do
-          sleep(100)
+          hold_for(begun, cue)
+          if cue.sum.to_u64 == thread_here
+            fail("cancel: the sleeper went to sleep on the worker the failing task held")
+          end
+          failed.add(__iyi_monotonic_ns)
           Boom.new
         end
+        while begun.count == 0_i64
+          sleep(1)
+        end
+        sleeper = g.spawn(unit: :new) { sleep(10000).is_a?(Cancelled) ? 1 : 0 }
+        waiter = g.spawn(unit: :new) { never.receive.is_a?(Cancelled) ? 1 : 0 }
+        local = g.spawn(unit: :same) { sleep(10000).is_a?(Cancelled) ? 1 : 0 }
+        while sleeper.fiber.listed_on == 0_u64 || waiter.fiber.state != IyiFiberState::WaitingCh || local.fiber.state != IyiFiberState::Sleeping
+          sleep(1)
+        end
+        cue.add(sleeper.fiber.listed_on.to_i64)
         got = sleeper.value
         slept = got.is_a?(Int32) ? got : -1
         got = waiter.value
@@ -477,7 +593,7 @@
         got = local.value
         pinned = got.is_a?(Int32) ? got : -1
       end
-      took = elapsed_ms(started)
+      took = elapsed_ms(failed.sum)
       fail("cancel: a task asleep on another thread was not cancelled") unless slept == 1
       fail("cancel: a task parked on a channel on another thread was not cancelled") unless parked == 1
       fail("cancel: a task on the spawning thread was not cancelled by a parallel failure") unless pinned == 1
@@ -586,9 +702,24 @@
   # the budget is floored at MIN_BUDGET for every registered thread
   # (`IyiMark.next_budget`), and the lists' own 150,000 nodes each no
   # longer crossed a pool's floor - no stop at all on four workers.
+  #
+  # With partitions in the runtime (`-Dheap_partitions`) each task
+  # allocates in its unit's own partition, which never feeds the global
+  # trigger (heap22 design, section 4.2) and is collected by the unit
+  # itself, no thread stopped (section 4.1). There local collections must
+  # have run by the time all eight have built their lists, and the step
+  # then asks for a global collection itself, which stops the workers
+  # while the eight hold their lists parked, before they count them.
   def collector(watch : Int32) : Nil
     watched("collector", watch) do
       stops = IyiThread.stops
+      {% if flag?(:heap_partitions) %}
+        locals = IyiHeap.local_collections
+        built = Channel(Int64).new
+        go = Channel(Int64).new
+        own = 0_i64
+        held = 0_u64
+      {% end %}
       group do |g|
         handles = [] of IyiTask(Int64)
         8.times do |t|
@@ -609,6 +740,10 @@
               garbage = garbage + 64_u64
             end
             sleep(1)
+            {% if flag?(:heap_partitions) %}
+              built.send(IyiScheduler.current.alloc != 0_u64 ? 1_i64 : 0_i64)
+              go.receive
+            {% end %}
             have = 0_i64
             node = head
             while node.is_a?(Node)
@@ -619,13 +754,28 @@
           end
           handles << task
         end
+        {% if flag?(:heap_partitions) %}
+          8.times do
+            answer = built.receive
+            own = own &+ answer if answer.is_a?(Int64)
+          end
+          held = IyiHeap.local_collections - locals
+          fail("collector: #{own} of 8 parallel tasks built their lists in partitions of their own, and no local collection ran") if own != 0_i64 && held == 0_u64
+          IyiMark.collect
+          8.times { go.send(1_i64) }
+        {% end %}
         handles.each_with_index do |handle, t|
           lost = handle.value
           fail("collector: task #{t}'s list lost #{lost} by checksum") unless lost == 0_i64
         end
       end
-      fail("collector: no collection stopped a thread while 8 parallel tasks allocated, #{IyiThread.program_threads} threads registered under a #{IyiMark.budget}-byte budget") if IyiThread.stops == stops
-      puts "collector: 8 parallel tasks kept lists of 150000 nodes through #{IyiThread.stops - stops} stops, #{IyiThread.program_threads} threads registered under a #{IyiMark.budget}-byte budget"
+      {% if flag?(:heap_partitions) %}
+        fail("collector: no collection stopped a thread while 8 parallel tasks held their lists, #{IyiThread.program_threads} threads registered") if IyiThread.stops == stops
+        puts "collector: 8 parallel tasks kept lists of 150000 nodes, #{own} in partitions of their own, through #{held} local collections and #{IyiThread.stops - stops} stops, #{IyiThread.program_threads} threads registered"
+      {% else %}
+        fail("collector: no collection stopped a thread while 8 parallel tasks allocated, #{IyiThread.program_threads} threads registered under a #{IyiMark.budget}-byte budget") if IyiThread.stops == stops
+        puts "collector: 8 parallel tasks kept lists of 150000 nodes through #{IyiThread.stops - stops} stops, #{IyiThread.program_threads} threads registered under a #{IyiMark.budget}-byte budget"
+      {% end %}
     end
   end
 
@@ -774,31 +924,36 @@
   # `park_on` and `wake_on`: every turn is taken, which a wake between
   # the look at the word and the link in its list does only if the look
   # is under the list's lock. A lost wake is a hang the watchdogs name;
-  # bench/parallel_exercise.sh breaks each of the three.
-  def wakes(watch : Int32) : Nil
+  # bench/parallel_exercise.sh breaks each of the three, and runs each
+  # copy's own part alone (`--only=`): beside 12 busy loops at a load of
+  # 45 the cancels outran a 5000 ms watch in the copy that breaks the
+  # words, so the words were never reached.
+  def wakes(watch : Int32, parts : Array(String)) : Nil
     per = 20000_i64
     want = 0_i64
     got = Tally.new
-    watched("wakes, selects", watch) do
-      a = Channel(Int64).new
-      b = Channel(Int64).new
-      group do |g|
-        2.times { g.spawn(unit: :new) { select_both(a, b, got) } }
-        senders = [] of IyiTask(Int32)
-        4.times do |k|
-          channel = k % 2 == 0 ? a : b
-          first = k.to_i64 * per
-          senders << g.spawn(unit: :new) { send_run(channel, first, per) }
+    if parts.includes?("selects")
+      watched("wakes, selects", watch) do
+        a = Channel(Int64).new
+        b = Channel(Int64).new
+        group do |g|
+          2.times { g.spawn(unit: :new) { select_both(a, b, got) } }
+          senders = [] of IyiTask(Int32)
+          4.times do |k|
+            channel = k % 2 == 0 ? a : b
+            first = k.to_i64 * per
+            senders << g.spawn(unit: :new) { send_run(channel, first, per) }
+          end
+          senders.each do |sender|
+            answer = sender.value
+            fail("wakes: a sender answered #{answer.is_a?(Panicked) ? answer.text : answer}") unless answer == 0
+          end
+          a.close
+          b.close
         end
-        senders.each do |sender|
-          answer = sender.value
-          fail("wakes: a sender answered #{answer.is_a?(Panicked) ? answer.text : answer}") unless answer == 0
-        end
-        a.close
-        b.close
+        want = 4_i64 * per * (4_i64 * per - 1_i64) // 2_i64
+        fail("wakes: selects over two channels received #{got.count} of #{4_i64 * per} values sent, summing #{got.sum} for #{want}") unless got.count == 4_i64 * per && got.sum == want
       end
-      want = 4_i64 * per * (4_i64 * per - 1_i64) // 2_i64
-      fail("wakes: selects over two channels received #{got.count} of #{4_i64 * per} values sent, summing #{got.sum} for #{want}") unless got.count == 4_i64 * per && got.sum == want
     end
 
     # Half the workers spin waiting for their child to start, so the
@@ -807,31 +962,35 @@
     tasks = IyiWorkers.count // 2 < 1 ? 1 : IyiWorkers.count // 2
     rounds = 2000
     ended = Tally.new
-    watched("wakes, cancels", watch) do
-      group do |g|
-        tasks.times do
-          g.spawn(unit: :new) do
-            round = 0
-            while round < rounds
-              cancel_as_parked(ended)
-              round = round + 1
+    if parts.includes?("cancels")
+      watched("wakes, cancels", watch) do
+        group do |g|
+          tasks.times do
+            g.spawn(unit: :new) do
+              round = 0
+              while round < rounds
+                cancel_as_parked(ended)
+                round = round + 1
+              end
+              0
             end
-            0
           end
         end
+        fail("wakes: #{ended.count} of #{tasks * rounds} tasks cancelled as they parked answered Cancelled") unless ended.count == tasks.to_i64 * rounds
       end
-      fail("wakes: #{ended.count} of #{tasks * rounds} tasks cancelled as they parked answered Cancelled") unless ended.count == tasks.to_i64 * rounds
     end
 
     turns_each = 20000_i64
-    turns = Turns.new
-    group do |g|
-      parker = g.spawn(unit: :new) { parked_turns(turns, turns_each) }
-      spun_turns(turns, turns_each, watch)
-      answer = parker.value
-      fail("wakes: the parked side answered #{answer.is_a?(Panicked) ? answer.text : answer}") unless answer == 0
+    if parts.includes?("words")
+      turns = Turns.new
+      group do |g|
+        parker = g.spawn(unit: :new) { parked_turns(turns, turns_each) }
+        spun_turns(turns, turns_each, watch)
+        answer = parker.value
+        fail("wakes: the parked side answered #{answer.is_a?(Panicked) ? answer.text : answer}") unless answer == 0
+      end
     end
-    puts "wakes: #{got.count} values through selects over two channels and a deadline, each once; #{ended.count} tasks cancelled as they parked; #{turns_each * 2_i64} turns handed through park_on and wake_on"
+    puts "wakes: #{got.count} values through selects over two channels and a deadline, each once; #{ended.count} tasks cancelled as they parked; #{parts.includes?("words") ? turns_each * 2_i64 : 0_i64} turns handed through park_on and wake_on"
   end
 
   STEPS = ["placement", "exactly_once", "race", "channels", "now", "cancel", "panics", "steal", "collector", "typed", "wakes"]
@@ -841,10 +1000,14 @@
     speed(arguments[1].to_i, arguments[2].to_i, arguments[3].to_i.to_i64)
   else
     watch = 60000
+    parts = ["selects", "cancels", "words"]
     chosen = [] of String
     arguments.each do |argument|
       if argument.starts_with?("--watch=")
         watch = argument[8, argument.size - 8].to_i
+      elsif argument.starts_with?("--only=")
+        parts = [argument[7, argument.size - 7]]
+        fail("wakes has no part named #{parts[0]}") unless ["selects", "cancels", "words"].includes?(parts[0])
       else
         fail("no step named #{argument}") unless STEPS.includes?(argument)
         chosen << argument
@@ -864,7 +1027,7 @@
       when "steal"        then steal(watch)
       when "collector"    then collector(watch)
       when "typed"        then typed_step(watch)
-      when "wakes"        then wakes(watch)
+      when "wakes"        then wakes(watch, parts)
       end
     end
     puts "parallel exercise: every property held on #{IyiWorkers.count} workers"

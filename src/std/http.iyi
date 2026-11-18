@@ -6271,9 +6271,21 @@ end
 # they were.
 {% if flag?(:heap_partitions) %}
   pub struct Server
+    # How far under the loop's stack pointer the zeroing reaches: the wait
+    # for the next request parks that deep and its frames leave unwritten
+    # slots on the way. Measured from the loop's sp to the parked fiber's
+    # saved sp (bench/http_idle.iyi, 32 idle connections, merged tree of
+    # 4fa41885b): Linux 1,632 bytes --release and 4,136 plain; Windows
+    # 3,232 --release and 5,072 plain. `clear_dead_stack`'s 2 KiB default
+    # left a plain Windows build's stack words naming the last request and
+    # answer at 2,152 to 2,976 bytes down, and all 32 idle partitions held
+    # both (CI job 134256483173). 8 KiB is the deepest park and half again;
+    # on Windows the committed limit still bounds it.
+    WAIT_STACK = 8192_u64
+
     private def self.serve_h1(conn : Conn, handler : Proc(Request, Response), stream_bodies : Bool, compress : Bool, remote : String?, peer : Array(Certificate), timeout_ms : Int32, request_timeout_ms : Int32) : Bool
       while true
-        IyiRoots.clear_dead_stack if conn.available == 0
+        IyiRoots.clear_dead_stack(WAIT_STACK) if conn.available == 0
         ended = serve_h1_request(conn, handler, stream_bodies, compress, remote, peer, timeout_ms, request_timeout_ms)
         return ended unless ended.nil?
       end

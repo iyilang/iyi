@@ -79,7 +79,11 @@ VALUE_COPIES="TlsIdentity chain copy,a death that keeps its emptied runs,spare r
 # catches it outside stress. `rereadunit` (the runtime before the
 # takendeath fix, two files patched) dies of the memory fault it brings
 # back, which is no report: heap_local.sh catches it by that fault.
-NOT_RUN="nobusy,rereadunit"
+# `httpwindow` (std/http's loop zeroing only 2 KiB) is a plain build's
+# defect, where the wait parks 4 to 5 KiB down; this script builds the
+# http copies --release, and on Linux a --release wait parks 1,632 bytes
+# down, inside 2 KiB: heap_local.sh catches it, built plain.
+NOT_RUN="nobusy,rereadunit,httpwindow"
 
 # heap_crossings.sh's copies, sourced below, skip what Windows lacks.
 WINDOWS=0
@@ -327,6 +331,7 @@ prove_layout_refused() {
 prove_http_idle_fails() {
   local label="$1" dir="$2" script="$4" extra="${5:-}"
   chosen "$dir" || return 0
+  [[ ",$NOT_RUN," == *",$dir,"* ]] && return 0
   local FLAGS="--release $FLAGS"
   local sound_dir="$WORK/sound-http_idle"
   if [ ! -f "$sound_dir/plain.code" ]; then

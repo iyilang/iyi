@@ -5039,12 +5039,12 @@ require "./file"
       # `IyiMark.collect` under --release still marked all of it, reached
       # from a word 184 bytes under the caller's stack pointer. Called from
       # the caller's frame (`IyiMark.collect` is always inlined), so every
-      # frame the collection lays down goes over zeroes. Two KiB is
-      # several times the deepest collector stack measured (448 bytes, a
-      # debug build). On Windows the committed limit bounds it, because a
-      # touch below the guard page faults. A debug build inlines nothing,
-      # and its own `collect` frame is above the cleared stretch and can
-      # still hold such a word.
+      # frame the collection lays down goes over zeroes. Two KiB, *bytes*'s
+      # default, is several times the deepest collector stack measured (448
+      # bytes, a debug build); std/http asks more (`Server::WAIT_STACK`).
+      # On Windows the committed limit bounds it, because a touch below the
+      # guard page faults. A debug build inlines nothing, and its own
+      # `collect` frame is above the cleared stretch and can still hold one.
       # The loop calls nothing: a store through `IyiHeap.write64`, not
       # inlined in a `--release --emit-iyimod` build, pushed its return
       # address into the stretch it was clearing and returned to 0. Nor
@@ -5056,12 +5056,12 @@ require "./file"
       # red zone a leaf like this one may keep its locals in, so they are
       # left alone.
       @[NoInline]
-      def self.clear_dead_stack : Nil
+      def self.clear_dead_stack(bytes : UInt64 = 2048_u64) : Nil
         high = stack_pointer
         {% unless flag?(:win32) %}
           high = high &- 128_u64
         {% end %}
-        low = high &- 2048_u64
+        low = high &- bytes
         {% if flag?(:win32) %}
           low = stack_limit if low < stack_limit
         {% end %}

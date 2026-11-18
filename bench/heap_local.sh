@@ -161,6 +161,7 @@ if [ "$PART" = all ] || [ "$PART" = cases ]; then
   run_http_idle "http idle" httpidle "--release -Dheap_partitions"
   run_http_idle "http idle, plain" httpidleplain "-Dheap_partitions"
   run_http_idle_residue "http idle, a request's address left under the wait" httpidleres "--release -Dheap_partitions"
+  run_http_idle_residue "http idle, a request's address left under the wait, plain" httpidleresplain "-Dheap_partitions"
   run_http_idle "http idle, no flag" httpidleoff "--release"
 fi
 
@@ -652,12 +653,23 @@ if [ "$PART" = all ] || [ "$PART" = broken ]; then
   # where the loop's locals keep their slots.
   prove_http_idle_fails "a parked connection that keeps its last request" httpkeeps "--release -Dheap_partitions" \
     '/^  \{% begin %\}/ { inside = 1 } inside { found = found + gsub(/flag\?\(:heap_partitions\)/, "false") } inside && /^  end\{% end %\}$/ { inside = 0 }
-     /^# `Server\.serve_h1` under `-Dheap_partitions`/ { tail = 1 } tail { if (/IyiRoots\.clear_dead_stack if conn\.available == 0$/) found = found + 1; next }
+     /^# `Server\.serve_h1` under `-Dheap_partitions`/ { tail = 1 } tail { if (/IyiRoots\.clear_dead_stack\(WAIT_STACK\) if conn\.available == 0$/) found = found + 1; next }
      { print } END { if (found != 5) exit 3 }' "$REPO/bench/http_idle_residue.awk"
   prove_http_idle_fails "a parked connection that keeps its last request (plain)" httpkeepsplain "-Dheap_partitions" \
     '/^  \{% begin %\}/ { inside = 1 } inside { found = found + gsub(/flag\?\(:heap_partitions\)/, "false") } inside && /^  end\{% end %\}$/ { inside = 0 }
-     /^# `Server\.serve_h1` under `-Dheap_partitions`/ { tail = 1 } tail { if (/IyiRoots\.clear_dead_stack if conn\.available == 0$/) found = found + 1; next }
+     /^# `Server\.serve_h1` under `-Dheap_partitions`/ { tail = 1 } tail { if (/IyiRoots\.clear_dead_stack\(WAIT_STACK\) if conn\.available == 0$/) found = found + 1; next }
      { print } END { if (found != 5) exit 3 }'
+  # The loop's zeroing back to `clear_dead_stack`'s 2 KiB default, with the
+  # request's address left 4 KiB deep: the wait parks deeper than 2 KiB in
+  # a plain build (4,136 bytes on Linux, 5,072 on Windows, where this
+  # window let all 32 idle partitions keep their request and answer: CI job
+  # 134256483173), so the words past it name the request when the
+  # connection's partition is collected. Built plain: a --release build on
+  # Linux parks 1,632 bytes down, inside 2 KiB, where the default window is
+  # no defect.
+  prove_http_idle_fails "a parked connection zeroed only 2 KiB down (plain)" httpwindow "-Dheap_partitions" \
+    '{ found = found + sub(/IyiRoots\.clear_dead_stack\(WAIT_STACK\) if conn\.available == 0$/, "IyiRoots.clear_dead_stack if conn.available == 0"); print } END { if (found != 1) exit 3 }' \
+    "$REPO/bench/http_idle_residue.awk"
 fi
 
 # The nine targets, each to an object (`--cross-compile` links nothing),

@@ -625,6 +625,8 @@ pub class CodeGenVisitor < Visitor
   property mod : Module
   property builder : Builder
   property program : SemanticProgram
+  getter macro_flags : Array(String)
+  getter host_flags : Array(String)
   property main_visitor : MainVisitor
   property fn_types : Hash(String, IrType)
   property current_fn : Function?
@@ -666,6 +668,7 @@ pub class CodeGenVisitor < Visitor
   def initialize(@mod : Module, @program : SemanticProgram, @main_visitor : MainVisitor)
     @types = @mod.types
     @macro_flags = MacroTargetFlags.for_triple(@mod.triple, [] of String)
+    @host_flags = @program.normalizer.host_flags
     @builder = Builder.new(@mod)
     @fn_types = Hash(String, IrType).new
     @current_fn = nil
@@ -2684,11 +2687,11 @@ pub class CodeGenVisitor < Visitor
   # target does not set.
   def visit(node : MacroIf) : Bool
     scope = macro_scope_name
-    cond_val = MacroInterpreter.new(nil, @macro_flags, scope).evaluate(node.cond)
+    cond_val = MacroInterpreter.new(nil, @macro_flags, scope, @host_flags).evaluate(node.cond)
     branch = MacroMethods.truthy?(cond_val) ? node.then : node.else
     if chosen = branch
       # Raw macro text in the branch is rendered, then parsed and emitted in place, as a site is.
-      renderer = MacroInterpreter.new(nil, @macro_flags, scope)
+      renderer = MacroInterpreter.new(nil, @macro_flags, scope, @host_flags)
       renderer.interpret(chosen)
       text = renderer.to_s
       unless text.strip.empty?
@@ -2703,7 +2706,7 @@ pub class CodeGenVisitor < Visitor
   # does. The expansion is parsed, normalised and emitted in place of the site. A site that fails to expand is refused.
   def visit(node : MacroExpression) : Bool
     scope = macro_scope_name
-    report = MacroEngine.new(@macro_flags).site_report(node, scope)
+    report = MacroEngine.new(@macro_flags, @host_flags).site_report(node, scope)
     if failure = report.failure
       refuse_port("port limitation: the macro site in #{scope_name} fails to expand: #{failure.message} (no IR is written)")
     end
@@ -4748,10 +4751,10 @@ pub def compile_source_to_module(src : String, filename : String, mod : Module) 
   compile_declarations_to_module(classes, funs, defs, libs, filename, mod, prog, mv, [node] of ASTNode)
 end
 
-def collect_constants_from(node : ASTNode, into : Hash(String, ASTNode), flags : Array(String)) : Nil
+def collect_constants_from(node : ASTNode, into : Hash(String, ASTNode), flags : Array(String), host_flags : Array(String)) : Nil
   if node.is_a?(Expressions)
     node.as(Expressions).expressions.each do |e|
-      collect_constants_from(e, into, flags)
+      collect_constants_from(e, into, flags, host_flags)
     end
   elsif node.is_a?(Assign)
     assign = node.as(Assign)
@@ -4762,11 +4765,11 @@ def collect_constants_from(node : ASTNode, into : Hash(String, ASTNode), flags :
     end
   elsif node.is_a?(MacroIf)
     mif = node.as(MacroIf)
-    interp = MacroInterpreter.new(nil, flags)
+    interp = MacroInterpreter.new(nil, flags, "<Program>", host_flags)
     cond_val = interp.evaluate(mif.cond)
     is_t = MacroMethods.truthy?(cond_val)
     branch = is_t ? mif.then : mif.else
-    collect_constants_from(branch, into, flags)
+    collect_constants_from(branch, into, flags, host_flags)
   elsif node.is_a?(MacroLiteral)
     ml = node.as(MacroLiteral)
     ml.value.split('\n').each do |line|
@@ -4786,22 +4789,22 @@ def collect_constants_from(node : ASTNode, into : Hash(String, ASTNode), flags :
   end
 end
 
-def expand_body_nodes(node : ASTNode, flags : Array(String)) : Array(ASTNode)
+def expand_body_nodes(node : ASTNode, flags : Array(String), host_flags : Array(String)) : Array(ASTNode)
   res = [] of ASTNode
   if node.is_a?(Expressions)
     node.as(Expressions).expressions.each do |e|
-      res.concat(expand_body_nodes(e, flags))
+      res.concat(expand_body_nodes(e, flags, host_flags))
     end
   elsif node.is_a?(MacroIf)
     mif = node.as(MacroIf)
-    interp = MacroInterpreter.new(nil, flags)
+    interp = MacroInterpreter.new(nil, flags, "<Program>", host_flags)
     cond_val = interp.evaluate(mif.cond)
     branch = MacroMethods.truthy?(cond_val) ? mif.then : mif.else
-    res.concat(expand_body_nodes(branch, flags))
+    res.concat(expand_body_nodes(branch, flags, host_flags))
   elsif node.is_a?(VisibilityModifier)
     # `private def f` is a def under a visibility modifier; the method table
     # registers the def, as the oracle's does.
-    res.concat(expand_body_nodes(node.as(VisibilityModifier).exp, flags))
+    res.concat(expand_body_nodes(node.as(VisibilityModifier).exp, flags, host_flags))
   else
     res << node
   end
@@ -4820,6 +4823,8 @@ pub def compile_declarations_to_module(
   roots : Array(ASTNode) = [] of ASTNode,
 ) : CodeGenVisitor
   cg = CodeGenVisitor.new(mod, prog, mv)
+  target_flags = cg.macro_flags
+  host_flags = cg.host_flags
   cg.filename = filename
   cg.block_methods = defs
   # Only the classes some code constructs with Type.new get a default constructor, as the
@@ -4854,7 +4859,7 @@ pub def compile_declarations_to_module(
 
   # Collect top-level constants
   roots.each do |r|
-    collect_constants_from(r, cg.constants, MacroTargetFlags.for_triple(mod.triple, [] of String))
+    collect_constants_from(r, cg.constants, target_flags, host_flags)
   end
 
   # Process custom types (structs and classes)
@@ -4878,7 +4883,7 @@ pub def compile_declarations_to_module(
 
     # Process body
     if b = cd.body
-      exps = expand_body_nodes(b, MacroTargetFlags.for_triple(mod.triple, [] of String))
+      exps = expand_body_nodes(b, target_flags, host_flags)
       exps.each do |exp|
         if exp.is_a?(TypeDeclaration)
           td = exp.as(TypeDeclaration)
@@ -4952,7 +4957,7 @@ pub def compile_declarations_to_module(
         end
 
         if b = template.body
-          exps = expand_body_nodes(b, MacroTargetFlags.for_triple(mod.triple, [] of String))
+          exps = expand_body_nodes(b, target_flags, host_flags)
           exps.each do |exp|
             if exp.is_a?(TypeDeclaration)
               td = exp.as(TypeDeclaration)

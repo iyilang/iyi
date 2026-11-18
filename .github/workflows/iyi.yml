@@ -1967,11 +1967,19 @@ jobs:
           cat /usr/share/zoneinfo/+VERSION 2>/dev/null || echo 'no +VERSION in /usr/share/zoneinfo'
           ls -l /usr/share/zoneinfo | head -3
           tail -c 60 /usr/share/zoneinfo/Africa/Casablanca | od -c | tail -4
-      - name: Node 22, for the HTTP/2 oracle
+      # GitHub's macOS image runs the oracles on the official Node 22.23.4 build, whose nghttp2 is bundled and
+      # which fails the broken peer-window server ('caught by Node's client: FAIL: Protocol error'). Homebrew's
+      # node links the Homebrew nghttp2 and does not, on any of 22, 24 or 25 (exit 0), so the official build is used.
+      - name: Node 22.23.4, the official build, for the HTTP/2 oracle
         run: |
-          brew list node@22 >/dev/null 2>&1 || brew install node@22
-          echo "$(brew --prefix node@22)/bin" >> "$GITHUB_PATH"
-          "$(brew --prefix node@22)/bin/node" --version
+          NODE_TGZ=node-v22.23.4-darwin-arm64.tar.gz
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/$NODE_TGZ" "https://nodejs.org/dist/v22.23.4/$NODE_TGZ"
+          echo "c9e1dbc748b33ed2d14f42445191ecaf14c56259c7a9a26d0042c49ec2b66428  $RUNNER_TEMP/$NODE_TGZ" | shasum -a 256 -c -
+          mkdir -p "$RUNNER_TEMP/node22"
+          tar -xzf "$RUNNER_TEMP/$NODE_TGZ" -C "$RUNNER_TEMP/node22" --strip-components=1
+          echo "$RUNNER_TEMP/node22/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/node22/bin/node" --version
+          "$RUNNER_TEMP/node22/bin/node" -p "process.versions.nghttp2"
       - name: Python's cryptography and Pillow, for the oracles
         run: python3 -m pip install -q --break-system-packages cryptography pillow tzdata
       # The image's database is tzdata 2024a, whose Morocco rule (XXX-2<+01>-1,0/0,J365/23) std/time and
